@@ -3,6 +3,7 @@
  * Starts on port 8080 (or $PORT).
  *
  * Routes:
+ *   GET  /api/status          → { projects:[{name,openItems,lastCi}], previews:[{name,url,status}] }
  *   GET  /api/session         → { state, restarts, startedAt }
  *   GET  /api/audit           → [{time, identity, command}]
  *   POST /api/command         → inject slash-command into PTY session
@@ -19,6 +20,9 @@ import { assertAccessConfig, createAccessGuard, createWsAccessGuard } from './sr
 import { AuditStore, auditRouter } from './src/AuditStore.js';
 import { CommandService } from './src/CommandService.js';
 import { commandRouter } from './src/commandRouter.js';
+import { GitHubReader } from './src/GitHubReader.js';
+import { DockerReader } from './src/DockerReader.js';
+import { statusRouter } from './src/statusRouter.js';
 
 const PORT = Number(process.env.PORT ?? 8080);
 
@@ -43,6 +47,11 @@ ptyManager.start();
 // ── CommandService + Routes ───────────────────────────────────────────────────
 const commandService = new CommandService({ ptyManager, auditStore });
 app.use(commandRouter(commandService));
+
+// ── Status route (AC1/AC2/AC4) ────────────────────────────────────────────────
+const githubReader = new GitHubReader();
+const dockerReader = new DockerReader();
+app.use(statusRouter({ githubReader, dockerReader }));
 
 /**
  * GET /api/session → { state, restarts, startedAt }

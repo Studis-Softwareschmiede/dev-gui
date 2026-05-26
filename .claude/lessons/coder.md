@@ -1,5 +1,11 @@
 # Coder Lessons — dev-gui (newest first)
 
+## 2026-05-26 — Spec-Enums müssen alle Code-Pfade abdecken (inkl. degraded)
+Wenn AC4 einen Degradierungs-Wert (`'unknown'`) definiert, muss dieser auch in AC1-Enums und im Verträge-Abschnitt der Spec stehen. Fehlt `'unknown'` in AC1, sind Spec und Code inkonsistent: der reviewer schlägt beim Abgleich an (`Spec-Drift`). Bei jeder Implementierung: alle möglichen Return-Werte (inkl. Fehler-/Fallback-Pfade) in den Spec-Enums prüfen und ggf. Spec mitpflegen.
+
+## 2026-05-26 — GitHub Issues-Endpoint liefert Issues UND PRs
+`GET /repos/{org}/{repo}/issues?state=open` gibt sowohl offene Issues als auch offene Pull Requests zurück (GitHub modelliert PRs als Issues). Ein `openItems`-Count auf diesem Endpoint ist deshalb immer Issues+PRs. Für "nur Issues" den Search-Endpoint verwenden: `GET /search/issues?q=repo:{org}/{repo}+is:issue+is:open`. Andernfalls Kommentar "issues only, not PRs" weglassen und im Spec/Doc klarstellen, dass der Wert Issues+PRs enthält.
+
 ## 2026-05-26 — Interne Fehler von Client-Fehlern im HTTP-Status trennen
 Ein PTY-Write-Fehler (z.B. PTY destroyed) ist ein interner Serverfehler — nicht der Fehler des Clients. `reason:'invalid'` → 400 ist korrekt für Validierungsfehler (Allowlist, Sanitisierung, Audit-Fail). Für I/O-Fehler auf Server-Seite ein eigenes `reason:'internal'` zurückgeben und im Router auf 500 mappen. Audit-Fail = 400 (Integritätsbedingung — kein unauditierter Lauf), PTY-Write-Fail = 500 (Infra-Problem). Fehlt diese Unterscheidung, täuscht der Client eine eigene Schuld (400) vor, wo die Infra das Problem ist.
 
