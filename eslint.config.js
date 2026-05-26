@@ -25,8 +25,35 @@ export default [
     },
   },
   {
+    // React JSX files (client/)
+    files: ['client/**/*.jsx'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'module',
+      parserOptions: {
+        ecmaFeatures: { jsx: true },
+      },
+      globals: {
+        window: 'readonly',
+        document: 'readonly',
+        ResizeObserver: 'readonly',
+        globalThis: 'readonly',
+        console: 'readonly',
+        setTimeout: 'readonly',
+        clearTimeout: 'readonly',
+      },
+    },
+    rules: {
+      // JSX usage of imported components/values isn't tracked without eslint-plugin-react.
+      // Suppress false positives for PascalCase names (React components) and
+      // lowercase names used in JSX expressions.
+      'no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^[A-Z]' }],
+      'no-console': 'off',
+    },
+  },
+  {
     // Test files may use Jest globals
-    files: ['test/**/*.js'],
+    files: ['test/**/*.js', 'client/src/__tests__/**/*.jsx'],
     languageOptions: {
       globals: {
         describe: 'readonly',
@@ -36,10 +63,11 @@ export default [
         afterEach: 'readonly',
         beforeAll: 'readonly',
         afterAll: 'readonly',
+        jest: 'readonly',
       },
     },
   },
   {
-    ignores: ['node_modules/', 'dist/', 'build/', 'coverage/'],
+    ignores: ['node_modules/', 'dist/', 'build/', 'coverage/', 'client/dist/'],
   },
 ];
