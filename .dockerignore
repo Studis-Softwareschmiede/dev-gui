@@ -1,0 +1,21 @@
+# Exclude local node_modules — Docker build installs its own via npm ci
+node_modules
+
+# Exclude local vite build output — Docker build rebuilds from source
+client/dist
+
+# Secrets — never bake into any build layer
+.env
+.env.*
+*.pass
+*.key
+*.pem
+
+# Test / dev artefacts
+test
+docs
+*.md
+.github
+.claude
+eslint.config.js
+jest.config.js
