@@ -1,0 +1,26 @@
+{
+  "name": "dev-gui",
+  "version": "0.1.0",
+  "description": "GUI for the Softwareschmiede factory — bridges PTY to WebSocket",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --experimental-vm-modules node_modules/.bin/jest --forceExit",
+    "lint": "eslint .",
+    "postinstall": "node scripts/fix-pty-perms.mjs"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "node-pty": "^1.0.0",
+    "ws": "^8.17.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.5.0",
+    "eslint": "^9.5.0",
+    "jest": "^29.7.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
