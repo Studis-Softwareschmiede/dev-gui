@@ -3,16 +3,28 @@
 > **Schicht 1 von 3** (Konzept → Detailkonzept → Spezifikation). Das **WARUM & WAS**, sprach-/paradigma-unabhängig. Ändert selten. Source of Truth — der Code ist nachgelagert.
 
 ## Problem
-<Welches Problem löst die App? 1–3 Sätze.>
+Die agent-flow-**Fabrik** wird heute ausschließlich per CLI/Slash-Commands bedient. Der Status ist über mehrere Oberflächen verstreut (GitHub Projects/Actions/Packages + lokales Docker), und einen Flow zu starten heißt, im Terminal Befehle zu tippen. Es fehlt eine **zentrale Web-Oberfläche**, die den Fabrik-Status zeigt **und** Flows auf Knopfdruck auslöst — **ohne** pro-Token-API-Kosten (das Claude-Abo ist bezahlt und soll die Engine sein).
 
 ## Nutzer & Kontext
-<Wer benutzt sie, in welchem Kontext / auf welchem Gerät?>
+Einzel-Betreiber (Alex) + optional ein Outside-Collaborator. Desktop-Browser. Erreichbar über `devgui.<domain>` via Cloudflare-Tunnel, **hinter Cloudflare Access** (private Admin-Konsole, kein öffentliches SaaS).
 
 ## Ziele
-- <messbares/überprüfbares Ziel>
+- **Status in einer Ansicht:** Projekte der Org, offene Board-Items, letzter CI-Lauf, laufende Preview-Container — **live** aus GitHub-API + Docker (kein eigener Store).
+- **Flows auf Knopfdruck:** `/flow`, `/adopt`, `/preview …`, `/requirement`, `/train` per Panel auslösbar; **Live-Log** des Laufs im Browser.
+- **Engine = Abo, nicht API:** jeder Lauf zählt gegen das interaktive Claude-Abo (ferngesteuerte interaktive Session) — **null** Anthropic-API-/`claude -p`-Kosten.
+- **Geschützter Zugang:** kein Request ohne gültigen Cloudflare-Access-Nachweis; der Dienst geht ohne Access-Konfig gar nicht erst online.
 
 ## Nicht-Ziele
-- <bewusst ausgeschlossen — schützt vor Scope-Creep>
+- **Kein** Anthropic-API-Key und **kein** `claude -p` (beide kosten extra / ziehen aus separatem Kontingent).
+- **Keine** eigene Datenbank / Persistenz von Fabrik-State — GitHub + Docker sind Source of Truth.
+- **Kein** Multi-Tenant / öffentliches SaaS (privates Werkzeug für 1–2 erlaubte Identitäten).
+- **Keine** Mensch-im-Loop-Genehmigung pro Aktion (bewusst *pre-granted*) — der Schutz liegt bei Cloudflare Access + den Sicherheits-Leitplanken (1-Job-Limit, Kill-Switch, Audit-Log).
 
 ## Scope
-<Welche Capabilities/Module umfasst die App grob? Die Details je Capability stehen in `docs/specs/<feature>.md`.>
+Sechs Capabilities (Details je Capability in `docs/specs/<feature>.md`):
+1. **Terminal-Bridge** (`terminal-bridge`) — Backend hält **eine** interaktive Claude-Code-Session (Abo-OAuth) in einem PTY und streamt sie über WebSocket.
+2. **Terminal-Frontend** (`terminal-frontend`) — xterm.js-Live-Konsole im Browser.
+3. **Fabrik-Status** (`factory-status`) — Dashboard live aus GitHub-API + Docker.
+4. **Flow-Trigger** (`flow-trigger`) — Panels injizieren erlaubte Slash-Befehle in die Session.
+5. **Access & Leitplanken** (`access-and-guardrails`) — Access-Gate, 1-Job-Limit, Kill-Switch, Audit-Log (security-kritisch).
+6. **Deployment** (`deployment`) — Docker-Image, Cloudflare-`devgui`-Route, Bootstrap (claude-Install + Abo-OAuth + node-pty + Docker-Socket).
