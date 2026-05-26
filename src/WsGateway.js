@@ -1,5 +1,9 @@
 /**
- * WsGateway — WebSocket /ws/terminal bridge (AC2).
+ * WsGateway — WebSocket /ws/terminal bridge.
+ *
+ * Accepts a pre-created WebSocketServer (noServer mode) so that the HTTP
+ * upgrade interceptor in server.js can apply AccessGuard before the handshake
+ * is handed off to the WS server.
  *
  * Client → Server: { type: "input", data: string }
  * Server → Client: { type: "output", data: string }
@@ -8,7 +12,7 @@
  * Security: input data validated (string only); no secret logged.
  */
 
-import { WebSocket, WebSocketServer } from 'ws';
+import { WebSocket } from 'ws';
 import { SESSION_STATES } from './PtyManager.js';
 
 export class WsGateway {
@@ -18,19 +22,12 @@ export class WsGateway {
   #pty;
 
   /**
-   * @param {import('http').Server} httpServer
+   * @param {import('ws').WebSocketServer} wss   Pre-created WebSocketServer instance
    * @param {import('./PtyManager.js').PtyManager} ptyManager
    */
-  constructor(httpServer, ptyManager) {
+  constructor(wss, ptyManager) {
     this.#pty = ptyManager;
-
-    this.#wss = new WebSocketServer({
-      server: httpServer,
-      path: '/ws/terminal',
-      // DoS hygiene: reject messages larger than 64 KiB (js/R02 suggestion).
-      // claude terminal input is keystroke-sized; 64 KiB is already generous.
-      maxPayload: 64 * 1024,
-    });
+    this.#wss = wss;
 
     // Server-level error handler — prevents unhandled 'error' from crashing the process.
     // Log only code/name; never stream content (js/R02).
@@ -40,12 +37,12 @@ export class WsGateway {
 
     this.#wss.on('connection', (ws) => this.#onConnection(ws));
 
-    // Broadcast PTY output to all connected clients (AC2)
+    // Broadcast PTY output to all connected clients
     ptyManager.on('output', (data) => {
       this.#broadcast({ type: 'output', data });
     });
 
-    // Broadcast state changes (AC2)
+    // Broadcast state changes
     ptyManager.on('state', (state) => {
       this.#broadcast({ type: 'state', state });
     });
@@ -83,7 +80,7 @@ export class WsGateway {
         return;
       }
 
-      // Edge-case (spec): not ready → drop input rather than crash (AC2 + spec edge-cases)
+      // Edge-case (spec): not ready → drop input rather than crash
       if (
         this.#pty.state === SESSION_STATES.FAILED ||
         this.#pty.state === SESSION_STATES.STOPPED

@@ -1,5 +1,11 @@
 # Coder Lessons — dev-gui (newest first)
 
+## 2026-05-26 — jwtVerify immer mit explizitem `algorithms: ['RS256']` aufrufen
+`jwtVerify(token, keySet, { audience: aud })` ohne `algorithms`-Option erlaubt `none`-Algorithmus und symmetrische Algorithmen (HS256 etc.) falls das Key-Material es hergibt. Bei Cloudflare Access immer `algorithms: ['RS256']` übergeben — einmal pro `jwtVerify`-Aufruf, auch wenn man zwei separate Guards (HTTP + WS) hat. Fehlender `algorithms`-Constraint ist ein security/R06-Befund.
+
+## 2026-05-26 — WebSocketServer-Refactor: maxPayload beim Server mitnehmen
+Wenn `WebSocketServer` aus einer Klasse (hier: WsGateway) in den Entrypoint (`server.js`) verschoben wird, um eine Upgrade-Guard vorschalten zu können, muss `maxPayload` **am neuen Konstruktor-Aufruf** gesetzt werden — nicht nur im alten Code. `new WebSocketServer({ noServer: true })` ohne `maxPayload` entfernt den DoS-Schutz lautlos. Immer: `new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 })`.
+
 ## 2026-05-26 — Number() ohne Validierung bricht numerische Guards still
 `restartMax = Number(process.env.RESTART_MAX ?? 5)` — wenn `RESTART_MAX=abc` gesetzt ist, ergibt `Number('abc') === NaN`. Alle Vergleiche mit `NaN` (z.B. `length >= NaN`) ergeben `false`, was Limit-Checks (AC4-Restart-Cap) lautlos deaktiviert. Immer `Number.isFinite()` + Fallback einsetzen: `const n = Number(raw); restartMax = Number.isFinite(n) && n >= 0 ? n : 5;`.
 

@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "express": "^4.19.2",
+    "jose": "^6.2.3",
     "node-pty": "^1.0.0",
     "ws": "^8.17.1"
   },

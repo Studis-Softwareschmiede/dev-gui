@@ -23,8 +23,8 @@ Den öffentlichen Endpunkt absichern und die Risiko-Konzentration aus ADR-003 ei
 ## Acceptance-Kriterien
 - **AC1** — Jede `/api/*`- und WS-Anfrage **ohne** gültigen Access-JWT → `403` (bzw. WS-Abweisung). Gültiger JWT (korrekte Signatur, AUD, Ablauf) → durchgelassen, Identität (E-Mail) extrahiert.
 - **AC2** — Startet der Dienst mit `NODE_ENV=production` **ohne** gesetzte Access-Konfig (Team-Domain + AUD), bricht er mit Fehler ab (Exit ≠ 0) und nimmt **keine** Requests an. (Fail-Fast.)
-- **AC3** — `GET /api/audit` liefert eine append-only Liste `{time, identity, command}`; jeder über [[flow-trigger]] akzeptierte Command erzeugt **genau einen** Eintrag mit der Access-Identität des Auslösers.
-- **AC4** — Der 1-Job-Lock gilt **global** (prozessweit), nicht pro Client/Verbindung: ein zweiter Trigger während eines laufenden Jobs wird abgelehnt (verifiziert über zwei Clients).
+- **AC3** — Audit-**Mechanismus**: ein append-only `AuditStore` mit `record({identity, command})` (validiert: `command` non-empty) und `GET /api/audit` → append-only `[{time, identity, command}]`, **hinter dem Access-Gate**. *(Die command-getriebene Integration — „jeder über [[flow-trigger]] akzeptierte Command erzeugt **genau einen** Eintrag mit der Access-Identität des Auslösers; Audit-Schreiben schlägt fehl → Command läuft nicht" — wird in [[flow-trigger]] (#8) verifiziert, das `record()` im Command-Pfad verdrahtet.)*
+- **AC4** — Der 1-Job-Lock ist ein **prozess-globales Primitiv** (`tryAcquire`/`release`/`isHeld`, genau **eine** Instanz, nicht pro Client/Verbindung). *(Die command-getriebene Durchsetzung — zweiter Trigger während eines laufenden Jobs → `409`, verifiziert über zwei Clients — wird in [[flow-trigger]] (#8) gezeigt, das den Lock im Command-Pfad nutzt.)*
 - **AC5** — **Keine Secrets** (Anthropic-/API-Keys, GPG-Passphrase, GitHub-/Cloudflare-Tokens) erscheinen im ausgelieferten Frontend-Bundle, in Logs, im Audit oder im WS-Stream. (Floor — über alle Endpunkte geprüft.)
 
 ## Verträge
