@@ -1,5 +1,11 @@
 # Coder Lessons — dev-gui (newest first)
 
+## 2026-05-26 — Stub-Methoden müssen alle Component-Calls abdecken — attachCustomKeyEventHandler nachrüsten
+Wird in `Terminal.jsx` eine neue xterm-Methode aufgerufen (hier: `attachCustomKeyEventHandler`), muss die Stub-Datei diese Methode sofort mitbekommen, sonst schlägt der Test mit "not a function" fehl. Pattern: neue Methode im Stub als `jest.fn((fn) => { Terminal._lastXyz = fn; })` anlegen und in `_reset()` auf `null` zurücksetzen — so können Tests den registrierten Handler direkt aufrufen und assertieren.
+
+## 2026-05-26 — xterm.js Tab+Escape sind echte Focus-Trap-Kandidaten — immer attachCustomKeyEventHandler setzen
+xterm.js setzt für Tab (keyCode 9) und Escape (keyCode 27) intern `result.cancel = true`, was `preventDefault()` auf dem KeyboardEvent aufruft. Damit funktioniert weder Browser-Tab-Navigation noch Escape-Blur aus dem Terminal heraus — WCAG 2.1 SC 2.1.2 (No Keyboard Trap) ist verletzt. Fix: `xterm.attachCustomKeyEventHandler(ev => { if (ev.type === 'keydown' && ev.key === 'Tab') return false; return true; })` direkt nach `xterm.open()` einfügen (gibt `false` zurück → xterm überspringt die Eingabe → Browser-Tab-Navigation läuft normal). Optional analog für Escape, falls gewünscht. `allowProposedApi: false` hat keinen Einfluss auf dieses Verhalten.
+
 ## 2026-05-26 — Spec-Enums müssen alle Code-Pfade abdecken (inkl. degraded)
 Wenn AC4 einen Degradierungs-Wert (`'unknown'`) definiert, muss dieser auch in AC1-Enums und im Verträge-Abschnitt der Spec stehen. Fehlt `'unknown'` in AC1, sind Spec und Code inkonsistent: der reviewer schlägt beim Abgleich an (`Spec-Drift`). Bei jeder Implementierung: alle möglichen Return-Werte (inkl. Fehler-/Fallback-Pfade) in den Spec-Enums prüfen und ggf. Spec mitpflegen.
 
