@@ -43,3 +43,5 @@ Das Backend hält **genau eine** interaktive Claude-Code-Session in einem PTY (A
 
 ## Abhängigkeiten
 - Cloudflare-Access-Gate aus [[access-and-guardrails]] schützt `/ws/terminal` + `/api/session`.
+
+> *Out of scope für dieses Item:* die Bridge wird **ungated** ausgeliefert; serverseitige Authz (Cloudflare-Access-JWT-Validierung) + Prod-Fail-Fast liefert [[access-and-guardrails]] (#7), ein **Pflicht-Vorgänger von [[deployment]] (#13)**. Die Bridge ist nie öffentlich erreichbar, bevor #7 gelandet ist.
