@@ -2,7 +2,7 @@
 id: flow-trigger
 title: Flow-Trigger (Slash-Befehl in die Session injizieren)
 status: draft
-version: 1
+version: 2
 ---
 
 # Spec: Flow-Trigger (`flow-trigger`)
@@ -10,33 +10,44 @@ version: 1
 > **Schicht 3 von 3.** Testbares Verhalten + Verträge.
 
 ## Zweck
-Fabrik-Flows auf Knopfdruck: ein GUI-Trigger injiziert einen **erlaubten** Slash-Befehl in die interaktive Session; der Lauf erscheint live im Terminal. Mit Concurrency-Schutz und Kill-Switch.
+Fabrik-Flows auf Knopfdruck: ein GUI-Trigger injiziert einen **erlaubten** Slash-Befehl in die interaktive Session; der Lauf erscheint live im Terminal. Mit Concurrency-Schutz, Kill-Switch und vollständigem Audit-Eintrag.
 
 ## Verhalten
 1. `POST /api/command {command}` injiziert den Befehl in die Session (schreibt `command\n` in den PTY) und markiert den Command als `running`.
-2. Es gibt eine **Allowlist** erlaubter Befehls-Präfixe (`/flow`, `/adopt`, `/preview`, `/requirement`, `/train`, …). Nicht-gelistete Befehle werden abgewiesen.
+2. Es gibt eine **Allowlist** erlaubter Befehls-Präfixe (`/flow`, `/adopt`, `/preview`, `/requirement`, `/train`). Nicht-gelistete Befehle werden abgewiesen.
 3. **Concurrency-Lock = 1:** ist bereits ein Command `running` (Session `busy`), wird ein weiterer Trigger abgelehnt.
 4. **Kill-Switch:** `POST /api/command/cancel` sendet einen Interrupt (Ctrl-C) an die Session und gibt den Lock frei.
 5. Frontend-Panels (Projekt/Item wählen → Aktions-Button) rufen diese Endpunkte; der Verlauf erscheint im Terminal-Pane aus [[terminal-frontend]].
 
+## Completion-Modell (Command → done, Lock frei)
+Ein laufender Command gilt als **abgeschlossen**, sobald der PTY für eine konfigurierbare **Quiet-Period** (`COMMAND_IDLE_MS`, default `8000` ms) keine Ausgabe mehr produziert. Dann: `status → done`, Lock freigegeben.
+
+- Der Timer wird bei jeder PTY-Ausgabe zurückgesetzt.
+- `COMMAND_IDLE_MS` ist per Env-Var injizierbar (Tests nutzen einen kurzen Wert, z.B. 200 ms).
+- Vorzeitiges Ende via `POST /api/command/cancel`: Ctrl-C wird gesendet, `status → cancelled`, Lock sofort freigegeben (kein Warten auf Idle).
+- **Bekanntes Risiko:** Produziert ein laufender Command eine längere Pause ohne Ausgabe (z.B. während eines interaktiven Prompts oder I/O-Wartezeit), kann der Idle-Timer den Lock vorzeitig freigeben — Aufrufer sollten den tatsächlichen Session-State via `/api/session` konsultieren, bevor sie einen neuen Command senden.
+
 ## Acceptance-Kriterien
 - **AC1** — `POST /api/command {command}` mit erlaubtem Befehl schreibt `command\n` in den PTY und antwortet `202 {commandId, status:"running"}`; der Output erscheint im `/ws/terminal`-Stream.
-- **AC2** — Befehle werden gegen eine **Allowlist** geprüft; ein nicht-gelisteter oder leerer Befehl → `400` und **nichts** wird in den PTY geschrieben.
+- **AC2** — Befehle werden gegen eine **Allowlist** geprüft; ein nicht-gelisteter oder leerer Befehl → `400` und **nichts** wird in den PTY geschrieben; kein Audit-Eintrag. **Sanitisierung:** Befehle mit Newline/CR oder sonstigen Steuerzeichen (U+0000–U+001F, U+007F) werden ebenfalls mit `400` abgewiesen (verhindert Mehrfach-Zeilen-Injektion); **nichts** wird in den PTY geschrieben.
 - **AC3** — Ist bereits ein Command `running`, liefert `POST /api/command` `409` (kein zweiter paralleler Job) — der Lock gilt **global**, nicht pro Client.
 - **AC4** — Das Frontend zeigt Trigger-Panels (Projekt/Item → Button); bei aktivem Job sind Trigger deaktiviert und der Kill-Button aktiv. Ein Klick löst den passenden `/api/command` aus.
 - **AC5** — `POST /api/command/cancel` sendet Interrupt an die Session, setzt den laufenden Command auf `cancelled` und gibt den Lock frei (`/api/session` wird wieder `ready`).
+- **AC6** — Jeder **akzeptierte** Command erzeugt **genau einen** Audit-Eintrag (`AuditStore.record({identity, command})`) mit der Access-Identität des Auslösers (`req.identity.email`, oder `null` bei Dev-Bypass). Das Audit-Schreiben erfolgt **vor** dem PTY-Write. Schlägt `record()` fehl, wird der Command **nicht** ausgeführt und der Lock sofort freigegeben — kein nicht-auditierter Lauf. *(Schließt [[access-and-guardrails]] AC3 end-to-end ab.)*
 
 ## Verträge
-- `POST /api/command` `{command:string}` → `202 {commandId, status}` | `400` (Allowlist) | `409` (Lock).
+- `POST /api/command` `{command:string}` → `202 {commandId, status}` | `400` (Allowlist / Sanitisierung / Audit-Fehler) | `409` (Lock) | `500` (interner/PTY-Write-Fehler).
 - `POST /api/command/cancel` → `200 {cancelled:bool}`.
 - Allowlist als Konfiguration (Liste erlaubter Präfixe), nicht hartkodiert verstreut.
+- `COMMAND_IDLE_MS` (Env, integer > 0, default 8000) — konfiguriert die Quiet-Period; testbar mit kurzem Wert.
 
 ## Edge-Cases & Fehlerverhalten
-- Session nicht `ready` (z.B. `starting`/`failed`) → `409`/`503`, kein Schreiben in den PTY.
-- Befehl mit Steuerzeichen/Newline-Injection → wird sanitisiert/abgewiesen (kein Mehrfach-Befehl schmuggeln).
+- Session nicht `ready` (z.B. `starting`/`failed`) → der PTY-Write wird von `PtyManager.write()` verworfen; der Command-Lifecycle läuft trotzdem durch (AC1 schreibt in PTY, Ausgabe folgt sobald Session ready ist). Bewusste Designentscheidung: CommandService kennt den Session-State nicht direkt.
+- Befehl mit Steuerzeichen/Newline-Injection → wird mit `400` abgewiesen (kein Mehrfach-Befehl schmuggeln), AC2.
+- `cancel()` ohne laufenden Command → `{ cancelled: false }` (idempotent, kein Fehler).
 
 ## NFRs
-- **Sicherheit (Floor):** Allowlist + Sanitisierung verhindern beliebige Befehls-Injektion; jeder akzeptierte Command wird auditiert (siehe [[access-and-guardrails]] AC3). Befehls-String wird nie unsanitisiert in eine Shell, nur in den PTY der Session geschrieben.
+- **Sicherheit (Floor):** Allowlist + Sanitisierung verhindern beliebige Befehls-Injektion; jeder akzeptierte Command wird auditiert (AC6). Befehls-String wird nie unsanitisiert in eine Shell, nur in den PTY der Session geschrieben. Keine Secrets in Logs oder Audit.
 
 ## Nicht-Ziele
 - Freitext-Befehle außerhalb der Allowlist (bewusst eng).

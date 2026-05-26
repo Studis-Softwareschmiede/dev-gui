@@ -3,9 +3,11 @@
  * Starts on port 8080 (or $PORT).
  *
  * Routes:
- *   GET /api/session  → { state, restarts, startedAt }
- *   GET /api/audit    → [{time, identity, command}]
- *   WS  /ws/terminal  → PtyManager bridge (guarded by AccessGuard)
+ *   GET  /api/session         → { state, restarts, startedAt }
+ *   GET  /api/audit           → [{time, identity, command}]
+ *   POST /api/command         → inject slash-command into PTY session
+ *   POST /api/command/cancel  → send Ctrl-C, cancel running command
+ *   WS   /ws/terminal         → PtyManager bridge (guarded by AccessGuard)
  */
 
 import { createServer } from 'node:http';
@@ -15,6 +17,8 @@ import { PtyManager } from './src/PtyManager.js';
 import { WsGateway } from './src/WsGateway.js';
 import { assertAccessConfig, createAccessGuard, createWsAccessGuard } from './src/AccessGuard.js';
 import { AuditStore, auditRouter } from './src/AuditStore.js';
+import { CommandService } from './src/CommandService.js';
+import { commandRouter } from './src/commandRouter.js';
 
 const PORT = Number(process.env.PORT ?? 8080);
 
@@ -36,7 +40,9 @@ app.use(auditRouter(auditStore));
 const ptyManager = new PtyManager();
 ptyManager.start();
 
-// ── Routes ────────────────────────────────────────────────────────────────────
+// ── CommandService + Routes ───────────────────────────────────────────────────
+const commandService = new CommandService({ ptyManager, auditStore });
+app.use(commandRouter(commandService));
 
 /**
  * GET /api/session → { state, restarts, startedAt }
