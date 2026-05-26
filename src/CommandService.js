@@ -1,0 +1,308 @@
+/**
+ * CommandService — the sole write-path into the PTY from outside (AC1–AC3, AC5, AC6).
+ *
+ * Responsibilities:
+ *   1. Allowlist validation: only commands whose first token is in ALLOWED_COMMANDS.
+ *   2. Sanitization: reject any command containing control characters (including \n/\r).
+ *   3. Concurrency guard: integrate jobLock — max 1 running command (process-global).
+ *   4. Audit: every accepted command produces exactly one AuditStore entry.
+ *      If record() throws the command is NOT executed and the lock is released.
+ *   5. PTY injection: write sanitized `command\n` to the PTY via PtyManager.
+ *   6. Completion detection: idle-timer approach — when the PTY produces no output
+ *      for COMMAND_IDLE_MS (default 8000 ms), the command is considered done and the
+ *      lock is released. Cancel route short-circuits by sending Ctrl-C and releasing.
+ *
+ * Completion model (precisified — see also docs/specs/flow-trigger.md AC6):
+ *   After a command is accepted, CommandService listens to PtyManager's 'output' events.
+ *   Each output chunk resets the idle timer (COMMAND_IDLE_MS). When the quiet period
+ *   elapses with no new output, the command transitions to 'done' and the lock is
+ *   released. Cancel (AC5) short-circuits this: it sends Ctrl-C, sets status to
+ *   'cancelled', and releases the lock immediately regardless of the idle timer.
+ *
+ * Security (Floor):
+ *   - security/R02: untrusted command string validated (allowlist + control-char check)
+ *     before any write to the PTY sink. Nothing raw is ever passed to a shell.
+ *   - security/R04: all routes are behind AccessGuard (applied in server.js); this
+ *     service trusts req.identity is already set by the guard.
+ *   - No secrets are stored, logged, or returned.
+ *
+ * Config (env):
+ *   COMMAND_IDLE_MS  — quiet-period in ms after which a running command is considered
+ *                      done and the lock released (default: 8000). Override in tests
+ *                      with a short value (e.g. 200).
+ */
+
+import { jobLock } from './JobLock.js';
+
+/**
+ * Default allowlist of permitted command first-tokens (AC2).
+ * Configurable at construction time.
+ */
+export const DEFAULT_ALLOWED_COMMANDS = [
+  '/flow',
+  '/adopt',
+  '/preview',
+  '/requirement',
+  '/train',
+];
+
+/** Default idle period (ms) — see module doc above. */
+const DEFAULT_IDLE_MS = 8_000;
+
+/**
+ * Sanitize a command string (AC2 / security/R02).
+ *
+ * Returns `null` when the command must be rejected; returns the trimmed command
+ * otherwise. Callers MUST check the return value.
+ *
+ * Reject conditions:
+ *   - Not a string, or empty / whitespace-only string.
+ *   - Contains any control character (U+0000–U+001F, U+007F), including
+ *     \n (0x0a) and \r (0x0d). This prevents injecting a second line into
+ *     the PTY regardless of how the string is constructed.
+ *
+ * @param {unknown} raw
+ * @returns {string|null}
+ */
+export function sanitizeCommand(raw) {
+  if (typeof raw !== 'string') return null;
+  // Reject control characters on the RAW string BEFORE trimming.
+  // This ensures that a trailing \r (e.g. "/flow\r") is caught even though
+  // String.prototype.trim() would silently strip it. Prevents newline/CR injection.
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1F\x7F]/.test(raw)) return null;
+  const trimmed = raw.trim();
+  if (trimmed === '') return null;
+  return trimmed;
+}
+
+/**
+ * Check whether the first token of `command` is in the allowlist (AC2).
+ *
+ * @param {string} command  Already sanitized (non-empty, no control chars).
+ * @param {string[]} allowlist
+ * @returns {boolean}
+ */
+export function isAllowed(command, allowlist) {
+  const firstToken = command.split(/\s+/)[0];
+  return allowlist.includes(firstToken);
+}
+
+/**
+ * CommandService — stateful single-instance service.
+ *
+ * Expected lifecycle: one shared instance per process, shared across routes.
+ */
+export class CommandService {
+  /** @type {import('./PtyManager.js').PtyManager} */
+  #pty;
+  /** @type {import('./AuditStore.js').AuditStore} */
+  #audit;
+  /** @type {import('./JobLock.js').JobLock} */
+  #lock;
+  /** @type {string[]} */
+  #allowlist;
+  /** @type {number} */
+  #idleMs;
+
+  // ── Running command state ────────────────────────────────────────────────
+  /** @type {string|null} commandId of the currently running command */
+  #currentId = null;
+  /** @type {'running'|'done'|'cancelled'|null} */
+  #currentStatus = null;
+  /** @type {NodeJS.Timeout|null} */
+  #idleTimer = null;
+  /** @type {((data: string) => void)|null} active output listener for idle reset */
+  #outputListener = null;
+
+  /**
+   * @param {object} params
+   * @param {import('./PtyManager.js').PtyManager} params.ptyManager
+   * @param {import('./AuditStore.js').AuditStore} params.auditStore
+   * @param {import('./JobLock.js').JobLock} [params.lock]     injectable for tests
+   * @param {string[]} [params.allowlist]
+   * @param {number} [params.idleMs]  quiet-period ms (default: env COMMAND_IDLE_MS || 8000)
+   */
+  constructor({ ptyManager, auditStore, lock = jobLock, allowlist = DEFAULT_ALLOWED_COMMANDS, idleMs } = {}) {
+    this.#pty = ptyManager;
+    this.#audit = auditStore;
+    this.#lock = lock;
+    this.#allowlist = allowlist;
+    this.#idleMs = idleMs ?? parsePositiveInt(process.env.COMMAND_IDLE_MS, DEFAULT_IDLE_MS);
+  }
+
+  // ── Public API ─────────────────────────────────────────────────────────────
+
+  /**
+   * Attempt to run a command in the PTY session.
+   *
+   * @param {object} params
+   * @param {unknown} params.command   - Raw command string from the request body.
+   * @param {string|null|object} params.identity - Identity from AccessGuard.
+   *
+   * @returns {{ ok: true, commandId: string, status: 'running' }}
+   *        | { ok: false, reason: 'invalid'|'locked' }
+   */
+  tryRun({ command, identity }) {
+    // Step 1: Sanitize (security/R02, AC2)
+    const sanitized = sanitizeCommand(command);
+    if (sanitized === null) {
+      return { ok: false, reason: 'invalid' };
+    }
+
+    // Step 2: Allowlist check (AC2)
+    if (!isAllowed(sanitized, this.#allowlist)) {
+      return { ok: false, reason: 'invalid' };
+    }
+
+    // Step 3: Concurrency lock (AC3)
+    if (!this.#lock.tryAcquire()) {
+      return { ok: false, reason: 'locked' };
+    }
+
+    // Step 4: Audit — must succeed before PTY write (AC6)
+    // AccessGuard sets req.identity = { email } object; dev-bypass may produce
+    // { email: 'dev@local' }; null-safe extraction.
+    const identityStr = resolveIdentity(identity);
+    try {
+      this.#audit.record({ identity: identityStr, command: sanitized });
+    } catch {
+      // Audit failed → do NOT execute, release lock immediately (AC6 failure path)
+      this.#lock.release();
+      return { ok: false, reason: 'invalid' };
+    }
+
+    // Step 5: Write to PTY — exactly one line (AC1, security/R02)
+    // `sanitized` has no control chars; we append exactly one \n.
+    // Guard: if pty.write() throws (PTY destroyed/closed), release the lock
+    // immediately so future commands are not permanently blocked.
+    try {
+      this.#pty.write(sanitized + '\n');
+    } catch {
+      this.#lock.release();
+      return { ok: false, reason: 'internal' };
+    }
+
+    // Step 6: Track running state + arm idle timer for completion detection
+    const commandId = generateId();
+    this.#currentId = commandId;
+    this.#currentStatus = 'running';
+    this.#armIdleTimer();
+
+    return { ok: true, commandId, status: 'running' };
+  }
+
+  /**
+   * Cancel the running command: send Ctrl-C to the PTY, transition to
+   * 'cancelled', and release the lock (AC5).
+   *
+   * @returns {{ cancelled: boolean }}
+   */
+  cancel() {
+    if (this.#currentStatus !== 'running') {
+      return { cancelled: false };
+    }
+    // Disarm timer before sending Ctrl-C to avoid a race where the interrupt
+    // output triggers the timer path concurrently.
+    this.#disarmIdleTimer();
+    // Send interrupt (Ctrl-C = 0x03) to the PTY (AC5)
+    this.#pty.write('\x03');
+    this.#currentStatus = 'cancelled';
+    this.#lock.release();
+    return { cancelled: true };
+  }
+
+  /**
+   * Returns the current command status (for /api/session consumers).
+   * @returns {{ commandId: string|null, status: 'running'|'done'|'cancelled'|null }}
+   */
+  getStatus() {
+    return { commandId: this.#currentId, status: this.#currentStatus };
+  }
+
+  // ── Private ────────────────────────────────────────────────────────────────
+
+  /**
+   * Arm the idle timer and attach an output listener that resets it on each
+   * PTY output chunk while a command is running.
+   */
+  #armIdleTimer() {
+    // Safety: disarm any previously lingering timer (shouldn't happen, but be safe)
+    this.#disarmIdleTimer();
+
+    const onOutput = () => {
+      if (this.#currentStatus === 'running') {
+        // Reset the countdown on every output chunk
+        clearTimeout(this.#idleTimer);
+        this.#idleTimer = setTimeout(() => this.#onIdleExpired(onOutput), this.#idleMs);
+      }
+    };
+    this.#outputListener = onOutput;
+    this.#pty.on('output', onOutput);
+
+    // Arm initial timer
+    this.#idleTimer = setTimeout(() => this.#onIdleExpired(onOutput), this.#idleMs);
+  }
+
+  /** Called when the idle period elapses without any PTY output. */
+  #onIdleExpired(onOutput) {
+    this.#pty.off('output', onOutput);
+    this.#outputListener = null;
+    this.#idleTimer = null;
+    if (this.#currentStatus === 'running') {
+      this.#currentStatus = 'done';
+      this.#lock.release();
+    }
+  }
+
+  /** Disarm the idle timer and detach the output listener. */
+  #disarmIdleTimer() {
+    if (this.#idleTimer !== null) {
+      clearTimeout(this.#idleTimer);
+      this.#idleTimer = null;
+    }
+    if (this.#outputListener !== null) {
+      this.#pty.off('output', this.#outputListener);
+      this.#outputListener = null;
+    }
+  }
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+/** Generate a simple sequential commandId (process-scoped). */
+let _idCounter = 0;
+function generateId() {
+  _idCounter += 1;
+  return `cmd-${_idCounter}`;
+}
+
+/**
+ * Resolve an identity value from AccessGuard to a string or null.
+ * AccessGuard sets req.identity = { email: string|null }.
+ * Dev bypass sets { email: 'dev@local' }.
+ *
+ * @param {unknown} identity
+ * @returns {string|null}
+ */
+function resolveIdentity(identity) {
+  if (identity === null || identity === undefined) return null;
+  if (typeof identity === 'string') return identity;
+  if (typeof identity === 'object' && 'email' in identity) {
+    const email = identity.email;
+    return typeof email === 'string' ? email : null;
+  }
+  return null;
+}
+
+/**
+ * Parse an env var as a positive integer with a fallback.
+ * @param {string|undefined} raw
+ * @param {number} defaultVal
+ * @returns {number}
+ */
+function parsePositiveInt(raw, defaultVal) {
+  if (raw === undefined || raw === null) return defaultVal;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : defaultVal;
+}
