@@ -1,5 +1,14 @@
 # Coder Lessons — dev-gui (newest first)
 
+## 2026-05-27 — `build-essential` enthält bereits `make` und `g++` — keine Duplikate in apt
+In einem Debian/Ubuntu-Dockerfile ist `build-essential` ein Metapaket, das `g++`, `make`,
+`gcc` und weitere Build-Tools enthält. Das explizite Auflisten von `make g++ build-essential`
+installiert dieselben Pakete doppelt und erzeugt unnötige Cache-Invalidierungen. Kanonisches
+Muster: `build-essential python3` — das deckt node-gyp-Abhängigkeiten vollständig ab.
+
+## 2026-05-27 — `.dockerignore` muss `.env` und `.env.*` explizit ausschließen
+`COPY . .` im Builder-Stage kopiert alles, was nicht in `.dockerignore` steht — auch ein lokales `.env`. Selbst wenn das `.env` nicht in den Runtime-Layer kopiert wird, landet es im Builder-Layer (intermediate image, abrufbar mit `docker history --no-trunc` / `docker save`). Immer `.env` und `.env.*` in `.dockerignore` eintragen: zwei Zeilen `.env` und `.env.*` genügen. Gilt für jedes Multi-Stage-Dockerfile mit `COPY . .`.
+
 ## 2026-05-27 — `outline: 'none'` auf Inline-Styles entfernt den Browser-Fokus-Ring (WCAG SC 2.4.7)
 `outline: 'none'` in einem React-Inline-Style entfernt den nativen Browser-Fokus-Ring, ohne ihn zu ersetzen — Inline-Styles können `:focus-visible` nicht nutzen. Fix: `outline: 'none'` weglassen (Browser-Standard reicht) ODER in `client/index.html` eine CSS-Regel `#trigger-arg:focus { outline: 2px solid #3b82f6; outline-offset: 1px; }` ergänzen. design.md schreibt „sichtbarer Fokus" vor.
 

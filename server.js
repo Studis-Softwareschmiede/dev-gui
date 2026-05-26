@@ -3,6 +3,7 @@
  * Starts on port 8080 (or $PORT).
  *
  * Routes:
+ *   GET  /                    → React SPA (client/dist) — public, no Access required
  *   GET  /api/status          → { projects:[{name,openItems,lastCi}], previews:[{name,url,status}] }
  *   GET  /api/session         → { state, restarts, startedAt }
  *   GET  /api/audit           → [{time, identity, command}]
@@ -12,6 +13,8 @@
  */
 
 import { createServer } from 'node:http';
+import { fileURLToPath } from 'node:url';
+import { join, dirname } from 'node:path';
 import express from 'express';
 import { WebSocketServer } from 'ws';
 import { PtyManager } from './src/PtyManager.js';
@@ -26,11 +29,21 @@ import { statusRouter } from './src/statusRouter.js';
 
 const PORT = Number(process.env.PORT ?? 8080);
 
+// Resolve client/dist relative to this file (works from any cwd)
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const CLIENT_DIST = join(__dirname, 'client', 'dist');
+
 // ── AC2: Fail-Fast — abort before binding if Access config is missing in prod ──
 assertAccessConfig();
 
 const app = express();
 app.use(express.json());
+
+// ── Static frontend (AC1 / deployment spec) ───────────────────────────────────
+// Serve the built React app at /. All /api/* and /ws/terminal are handled
+// below and remain behind the AccessGuard. The SPA fallback (catch-all) is
+// registered AFTER all API routes so it never masks an API 404.
+app.use(express.static(CLIENT_DIST));
 
 // ── AC1: Apply AccessGuard to every /api/* route ──────────────────────────────
 const accessGuard = createAccessGuard();
@@ -62,6 +75,13 @@ app.get('/api/session', (_req, res) => {
     restarts: ptyManager.restarts,
     startedAt: ptyManager.startedAt,
   });
+});
+
+// ── SPA fallback: serve index.html for any non-API route ─────────────────────
+// Registered after all /api/* routes so API 404s are not masked.
+// /ws/terminal is handled via the upgrade event, not Express routing.
+app.get('*', (_req, res) => {
+  res.sendFile(join(CLIENT_DIST, 'index.html'));
 });
 
 // ── HTTP server ───────────────────────────────────────────────────────────────
