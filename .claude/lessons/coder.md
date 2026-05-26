@@ -1,5 +1,14 @@
 # Coder Lessons — dev-gui (newest first)
 
+## 2026-05-26 — "does not crash" Tests müssen async + waitFor/cleanup nutzen — kein synchrones render() mit Promise-fetchFn
+Ein synchrones `expect(() => render(...)).not.toThrow()` mit einer Promise-basierten `fetchFn` erzeugt React-`act()`-Warnungen: Die Komponente startet einen `async doFetch`, dessen State-Updates (setData, setLoadState, setRefreshing) nach dem synchronen Test-Ende auflösen — außerhalb von `act()`. Fix: Test `async` machen und entweder `await waitFor(...)` auf das Ende der Fetch-Kette warten oder nach dem render `await act(async () => {})` flushten. Alternativ: den "kein Crash"-Assert durch einen `waitFor`-basierten inhaltlichen Assert ersetzen (ist aussagekräftiger).
+
+## 2026-05-26 — Inline-Animation `spin` braucht @keyframes in globalem CSS
+`animation: 'spin 1s linear infinite'` in einem React-Inline-Style referenziert einen `@keyframes spin`, der in `index.html` / einer globalen CSS-Datei definiert sein muss. Fehlt die Definition, rotiert das Element nicht (kein Fehler, aber Feature kaputt). Entweder den `@keyframes spin`-Block in `client/index.html` `<style>` ergänzen oder die Animation über ein CSS-Modul steuern.
+
+## 2026-05-26 — Sekundärfarbe #6b7280 auf dunklem Hintergrund (#111) unterschreitet WCAG-AA
+`#6b7280` auf `#111` ergibt Kontrast 3.91:1 — unter dem 4.5:1-Schwellwert für Fließtext (WCAG 2.1 AA). Gilt für Labels/Beschriftungen bei 11–12px. Fix: auf `#8a929e` (≥ 4.5:1) oder heller anheben, oder Schriftgröße auf ≥ 14px Bold anheben (dann gilt 3:1-Schwellwert für große Texte). design.md schreibt ≥ 4.5:1 vor.
+
 ## 2026-05-26 — Stub-Methoden müssen alle Component-Calls abdecken — attachCustomKeyEventHandler nachrüsten
 Wird in `Terminal.jsx` eine neue xterm-Methode aufgerufen (hier: `attachCustomKeyEventHandler`), muss die Stub-Datei diese Methode sofort mitbekommen, sonst schlägt der Test mit "not a function" fehl. Pattern: neue Methode im Stub als `jest.fn((fn) => { Terminal._lastXyz = fn; })` anlegen und in `_reset()` auf `null` zurücksetzen — so können Tests den registrierten Handler direkt aufrufen und assertieren.
 
