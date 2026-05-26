@@ -1,27 +1,34 @@
 /**
  * App.jsx — Root application shell.
  *
- * Composes Terminal (dominant, left/main) + Dashboard (sidebar, right).
- * Layout: side-by-side on desktop (≥ 768 px); stacked (Dashboard above Terminal)
+ * Composes Terminal (dominant, left/main) + TriggerPanel + Dashboard (sidebars, right).
+ * Layout: side-by-side on desktop (≥ 768 px); stacked (panels above Terminal)
  * on narrow viewports (< 768 px) per docs/design.md.
  *
  * Terminal pane is dominant — takes available space.
- * Dashboard panel is fixed-width sidebar.
+ * TriggerPanel and Dashboard panels are fixed-width sidebars.
  */
 
 import { Terminal } from './Terminal.jsx';
 import { Dashboard } from './Dashboard.jsx';
+import { TriggerPanel } from './TriggerPanel.jsx';
 
 export function App() {
   return (
     <div style={styles.shell}>
-      {/* Dashboard sidebar — project status cards */}
-      <Dashboard />
-
       {/* Terminal pane — dominant, scrollable xterm.js */}
       <main style={styles.terminalPane} aria-label="Terminal">
         <Terminal />
       </main>
+
+      {/* Right sidebar — TriggerPanel + Dashboard stacked */}
+      <div style={styles.sidebar}>
+        {/* Flow-Trigger-Panel — fire slash-commands */}
+        <TriggerPanel />
+
+        {/* Dashboard — project status cards */}
+        <Dashboard />
+      </div>
     </div>
   );
 }
@@ -44,5 +51,14 @@ const styles = {
     display: 'flex',
     flexDirection: 'column',
     overflow: 'hidden',
+    // On narrow viewports this wraps below the sidebar panels
+    order: 1,
+  },
+  sidebar: {
+    display: 'flex',
+    flexDirection: 'column',
+    overflowY: 'auto',
+    flex: '0 0 auto',
+    order: 2,
   },
 };

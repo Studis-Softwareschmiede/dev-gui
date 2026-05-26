@@ -16,6 +16,11 @@
         from { transform: rotate(0deg); }
         to   { transform: rotate(360deg); }
       }
+      /* WCAG 2.4.7 — visible focus ring for argument input */
+      #trigger-arg:focus-visible {
+        outline: 2px solid #3b82f6;
+        outline-offset: 1px;
+      }
     </style>
   </head>
   <body>

@@ -1,5 +1,11 @@
 # Coder Lessons — dev-gui (newest first)
 
+## 2026-05-27 — `outline: 'none'` auf Inline-Styles entfernt den Browser-Fokus-Ring (WCAG SC 2.4.7)
+`outline: 'none'` in einem React-Inline-Style entfernt den nativen Browser-Fokus-Ring, ohne ihn zu ersetzen — Inline-Styles können `:focus-visible` nicht nutzen. Fix: `outline: 'none'` weglassen (Browser-Standard reicht) ODER in `client/index.html` eine CSS-Regel `#trigger-arg:focus { outline: 2px solid #3b82f6; outline-offset: 1px; }` ergänzen. design.md schreibt „sichtbarer Fokus" vor.
+
+## 2026-05-27 — Button-Text-Kontrast bei 13 px / 600 weight braucht ≥ 4.5:1, nicht 3:1
+`#ffffff` auf `#3b82f6` ergibt 3.68:1; `#ffffff` auf `#d97706` ergibt 3.19:1. Beide Werte liegen unter WCAG 1.4.3 (4.5:1 für Text < 18 pt normal / < 14 pt bold). 13 px / 600 weight sind 9.75 pt — kein „large text". design.md schreibt ≥ 4.5:1 für Text vor. Fix: Primary-Button auf `#1d4ed8` (≥ 4.5:1) anheben; Kill-Button auf `#b45309` (≥ 4.5:1) abdunkeln. Gilt für alle Aktions-Buttons in dev-gui. (Fürs 3.1:1-Kriterium gelten nur Icon-/Nicht-Text-Kontrast-Regeln SC 1.4.11 — nicht Textinhalt in Buttons.)
+
 ## 2026-05-26 — "does not crash" Tests müssen async + waitFor/cleanup nutzen — kein synchrones render() mit Promise-fetchFn
 Ein synchrones `expect(() => render(...)).not.toThrow()` mit einer Promise-basierten `fetchFn` erzeugt React-`act()`-Warnungen: Die Komponente startet einen `async doFetch`, dessen State-Updates (setData, setLoadState, setRefreshing) nach dem synchronen Test-Ende auflösen — außerhalb von `act()`. Fix: Test `async` machen und entweder `await waitFor(...)` auf das Ende der Fetch-Kette warten oder nach dem render `await act(async () => {})` flushten. Alternativ: den "kein Crash"-Assert durch einen `waitFor`-basierten inhaltlichen Assert ersetzen (ist aussagekräftiger).
 
