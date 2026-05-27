@@ -23,8 +23,9 @@ On the **host VPS** you only need:
 | `ACCESS_TEAM_DOMAIN`| yes              | Cloudflare Access team domain, e.g. `myteam.cloudflareaccess.com` |
 | `ACCESS_AUD`        | yes              | Cloudflare Access Application Audience tag (AUD)        |
 | `GH_TOKEN`          | recommended      | GitHub PAT (read:org + repo) for GitHubReader **and** agent-flow plugin clone (private repo) |
-| `GPG_PASSPHRASE`    | for agent-flow skills | GPG passphrase to decrypt `.env.gpg` shipped with the plugin repo (alternative: mount a file, see below) |
+| `GPG_PASSPHRASE`    | for agent-flow skills | GPG passphrase to decrypt `.env.gpg` shipped with the plugin repo (simplest option under non-root — see caveat below) |
 | `SESSION_CMD`       | no               | Command the PTY spawns; defaults to `claude`            |
+| `SESSION_ARGS`      | yes in prod      | JSON array of extra args for `claude`; set to `["--dangerously-skip-permissions"]` for unattended VPS operation (requires non-root container, see section 8) |
 | `DEV_NO_ACCESS`     | **never in prod**| Set to `1` only for local dev (bypasses Access JWT check) |
 | `NODE_ENV`          | yes in prod      | Set to `production` in prod (activates fail-fast Access check) |
 
@@ -40,7 +41,8 @@ The image ships the `claude` CLI installed globally via
 
 ### 3a. Persist credentials with a named volume
 
-Claude Code stores OAuth credentials in `~/.claude/` (root user inside the container).
+Claude Code stores OAuth credentials in `~/.claude/` (the `node` user's home,
+`/home/node/.claude`, inside the container).
 Mount a named Docker volume so credentials survive container restarts/updates:
 
 ```sh
@@ -54,13 +56,13 @@ OAuth flow ("Log in with Claude.ai" — subscription login, **not** an API key):
 
 ```sh
 docker run --rm -it \
-  -v dev-gui-claude:/root/.claude \
+  -v dev-gui-claude:/home/node/.claude \
   ghcr.io/studis-softwareschmiede/dev-gui:latest \
   claude login
 ```
 
 Follow the URL printed by `claude login`, authenticate in the browser, and confirm.
-Credentials are saved to `/root/.claude/` (inside the volume). This step is **one-time**
+Credentials are saved to `/home/node/.claude/` (inside the volume). This step is **one-time**
 until the session expires.
 
 ### 3c. Re-login if session expires
@@ -80,9 +82,10 @@ docker run -d \
   -e ACCESS_TEAM_DOMAIN=myteam.cloudflareaccess.com \
   -e ACCESS_AUD=<your-aud-tag> \
   -e GH_TOKEN=<your-gh-token> \
-  -v dev-gui-claude:/root/.claude \
+  -e SESSION_ARGS='["--dangerously-skip-permissions"]' \
+  -v dev-gui-claude:/home/node/.claude \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
-  -v ~/.config/softwareschmiede/gpg.pass:/root/.config/softwareschmiede/gpg.pass:ro \
+  -v ~/.config/softwareschmiede/gpg.pass:/home/node/.config/softwareschmiede/gpg.pass:ro \
   ghcr.io/studis-softwareschmiede/dev-gui:latest
 ```
 
@@ -91,19 +94,37 @@ Notes:
   container via `localhost:8080`, so no direct internet exposure.
 - `-v /var/run/docker.sock:/var/run/docker.sock:ro` — **read-only** mount; DockerReader
   uses the socket to list running containers. Write access is not needed and not granted.
-- `-v ~/.config/softwareschmiede/gpg.pass:/root/.config/softwareschmiede/gpg.pass:ro` —
+- `-v ~/.config/softwareschmiede/gpg.pass:/home/node/.config/softwareschmiede/gpg.pass:ro` —
   GPG passphrase file (read-only mount) for the agent-flow Fabrik-Skills to decrypt
-  `.env.gpg` (ships with the plugin repo). Alternative: pass `-e GPG_PASSPHRASE=<pass>`
-  (environment variable). **Never bake the passphrase into the image.**
-- `-v dev-gui-claude:/root/.claude` — persists Claude OAuth credentials **and** the
+  `.env.gpg` (ships with the plugin repo). **Non-root caveat:** the container runs as
+  uid 1000 (`node`). A typical `gpg.pass` created by root is `0600 root:root` and is
+  **not readable by uid 1000** — the skills will silently fall back to prompting.
+  Fix with either (a) `-e GPG_PASSPHRASE=<pass>` (environment variable, simplest) or
+  (b) `sudo chown 1000 ~/.config/softwareschmiede/gpg.pass` (or mode `0644` on a
+  dedicated copy). **Never bake the passphrase into the image.**
+- `-v dev-gui-claude:/home/node/.claude` — persists Claude OAuth credentials **and** the
   installed agent-flow plugin across restarts. The entrypoint installs the plugin on
-  first boot (see section 3e below) and skips it on subsequent starts.
+  first boot (see section 3e below) and skips it on subsequent starts. The mounted volume
+  must be owned by uid 1000 (`node`) — see note below.
+- `-e SESSION_ARGS='["--dangerously-skip-permissions"]'` — enables **unattended operation**
+  (ADR-003). Allowed because the container runs as **non-root** (uid 1000); Claude Code's
+  root guard no longer blocks the flag. The primary access control remains Cloudflare
+  Access (ADR-004). Do **not** set this flag when running the container as root.
 - No secrets are baked into the image layers.
+
+**Volume ownership (important):** The container runs as uid 1000 (`node`). Named Docker
+volumes created with `docker volume create` are owned by root by default. The `node` user
+can write into them because Docker initialises the volume contents from the container's
+image layer (where `/home/node` is owned by `node`). If you use a **bind mount** (host
+directory), ensure the host path is owned by uid 1000:
+```sh
+sudo chown -R 1000:1000 /path/to/host/dir
+```
 
 ### 3e. agent-flow plugin auto-provision (first boot)
 
 The container entrypoint (`docker-entrypoint.sh`) automatically installs the
-agent-flow plugin on first boot if it is not already present in `/root/.claude`:
+agent-flow plugin on first boot if it is not already present in `/home/node/.claude`:
 
 1. If `GH_TOKEN` is set, `git` is configured to use it as a credential for
    cloning the **private** `Studis-Softwareschmiede/agent-flow` repo. The token
@@ -111,7 +132,7 @@ agent-flow plugin on first boot if it is not already present in `/root/.claude`:
 2. `claude plugin marketplace add Studis-Softwareschmiede/agent-flow` downloads
    the plugin metadata.
 3. `claude plugin install agent-flow@agent-flow` installs the plugin into
-   `/root/.claude` (persisted via the volume).
+   `/home/node/.claude` (persisted via the volume).
 4. On success, `node server.js` starts normally. On failure the install warning
    is logged to stderr and the server still starts — `/agent-flow:*` slash-commands
    won't resolve until the plugin is installed, but the GUI and status panel work.
@@ -140,6 +161,14 @@ follow the principle of least privilege:
 
 Without this mount DockerReader returns an empty previews list; the rest of the app
 continues to function normally.
+
+**Non-root caveat:** `/var/run/docker.sock` is owned by `root:docker` (typically mode
+`0660`). As uid 1000 (`node`) the container process **cannot access the raw socket**
+unless it also belongs to the `docker` group — granting group membership to an
+untrusted container is not recommended. The supported path under non-root is the
+**docker-socket-proxy** (hardening item #29 / AC4–AC6): run a
+`tecnativa/docker-socket-proxy` sidecar and set
+`DOCKER_HOST=tcp://socket-proxy:2375` in dev-gui. See section 8 (Härtung) for details.
 
 ---
 
@@ -205,19 +234,64 @@ push secret required.
 
 ## 8. Härtung / bekannte Trade-offs
 
-### Container läuft als root
+### Container läuft als Non-Root (uid 1000, `node`)
 
-Der Runtime-Container läuft als root (kein `USER`-Direktive im Dockerfile). Das ist ein
-bewusster Trade-off:
+Der Runtime-Container läuft als `node`-User (uid 1000, `USER node` im Dockerfile).
+`HOME` ist `/home/node`. Alle Laufzeit-Pfade liegen unter dem Non-Root-Home:
 
-- **node-pty** benötigt Zugriff auf `/dev/ptmx` und PTY-Slave-Devices; ein Non-root-User
-  würde zusätzliche Capabilities oder Volume-Anpassungen erfordern.
-- **`~/.claude/`-OAuth-Volume** ist auf `/root/.claude` gemountet; ein Non-root-User würde
-  einen anderen Home-Pfad benötigen und die `claude login`-Anweisungen ändern.
-- **Docker-Socket-Mount** ist **read-only** (`:ro`): DockerReader kann nur Metadaten lesen,
-  keine Container starten/stoppen/löschen. Das read-only-Mount begrenzt die Angriffsfläche
-  des root-Prozesses erheblich — ein kompromittierter Container kann den Docker-Daemon
-  nicht steuern.
+| Pfad | Zweck |
+|------|-------|
+| `/home/node/.claude` | Claude OAuth-Credentials + Plugin-Cache (Volume) |
+| `/home/node/.config/softwareschmiede/gpg.pass` | GPG-Passphrase (bind-mount, read-only) |
 
-Ein zukünftiger Non-root-Pass ist möglich (z.B. `USER node` + Capability `CAP_SYS_PTRACE`
-oder ein dedizierteres PTY-Proxy-Setup), ist aber ausserhalb des aktuellen Deployment-Scopes.
+**Warum Non-Root wichtig ist:**
+- Claude Code's `--dangerously-skip-permissions`-Flag ist für Root-Container gesperrt
+  (Root-Guard: „cannot be used with root/sudo"). Non-root ist Voraussetzung für den
+  unbeaufsichtigten Betrieb (ADR-003), in dem GUI-Trigger ohne Bash-Prompt laufen.
+- Geringere Container-Privilegien: ein kompromittierter Prozess hat keine Host-Root-Rechte.
+
+**node-pty als Non-Root:** `/dev/ptmx` ist world-accessible (mode 0666 auf Linux); PTY
+funktioniert ohne zusätzliche Capabilities.
+
+**Docker-Socket-Mount** ist **read-only** (`:ro`): DockerReader kann nur Metadaten lesen,
+keine Container starten/stoppen/löschen.
+
+**`SESSION_ARGS=["--dangerously-skip-permissions"]`** — nur setzen wenn der Container als
+Non-Root läuft (uid ≠ 0). Die primäre Zugangskontrolle ist Cloudflare Access (ADR-004);
+das Flag aktiviert lediglich den unbeaufsichtigten Modus des Claude-Clients.
+
+### Non-Root Deploy Caveats
+
+#### GPG-Passphrase unter Non-Root
+
+`gpg.pass` wird typischerweise von root erstellt und hat `0600 root:root`. Der Container
+läuft als uid 1000 (`node`) und kann diese Datei **nicht lesen** — die agent-flow-Skills
+fallen stumm auf einen interaktiven Passphrase-Prompt zurück.
+
+Empfohlene Lösung (einfachste): Passphrase als Umgebungsvariable übergeben:
+```sh
+-e GPG_PASSPHRASE=<passphrase>
+```
+
+Alternative: Datei dem Node-User lesbar machen (dedizierte Kopie empfohlen):
+```sh
+sudo chown 1000 ~/.config/softwareschmiede/gpg.pass   # oder: chmod 0644
+```
+
+**Niemals die Passphrase ins Image baken.**
+
+#### Docker-Socket unter Non-Root (socket-proxy erforderlich)
+
+`/var/run/docker.sock` gehört `root:docker` (mode `0660`). Als uid 1000 hat der
+Container-Prozess **keinen Zugriff** auf den rohen Socket — `docker ps` schlägt fehl,
+DockerReader/Previews degradieren auf leere Listen.
+
+Unterstützter Pfad unter Non-Root: **docker-socket-proxy** (Hardening AC4–AC6):
+- Sidecar `tecnativa/docker-socket-proxy` mit `CONTAINERS=1`, `IMAGES=1`, `POST=1`,
+  `EXEC=0` — nur dieser Sidecar bekommt den rohen Socket (als root-Service auf dem Host).
+- dev-gui erhält `DOCKER_HOST=tcp://socket-proxy:2375`; das `docker`-CLI und DockerReader
+  sprechen automatisch gegen den Proxy.
+- Ein roher Socket-Mount + docker-group-Mitgliedschaft für uid 1000 ist **nicht empfohlen**
+  (erhöht Privileges unkontrolliert).
+
+Dieser Sidecar wird in Item #29 implementiert; bis dahin sind Previews unter Non-Root leer.
