@@ -90,6 +90,13 @@ COPY --chown=node:node --from=builder /build/package.json ./package.json
 COPY --chown=node:node docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh
 
+# AC2 — pre-create node-owned dirs so that a named volume mounted at
+# /home/node/.claude is initialised with node ownership (Docker copies the
+# image directory's ownership when seeding an empty named volume; without this
+# the mountpoint is created root-owned → EACCES on plugin auto-provision).
+RUN mkdir -p /home/node/.claude /home/node/.config \
+  && chown -R node:node /home/node/.claude /home/node/.config
+
 # AC1 — run as non-root: switch to the node user (uid 1000, present in
 # node:20-slim). Global tools (claude, docker, gh) are in /usr/local/bin —
 # readable+executable by all users. /home/node is the node user's home dir
