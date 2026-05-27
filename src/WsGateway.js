@@ -5,11 +5,16 @@
  * upgrade interceptor in server.js can apply AccessGuard before the handshake
  * is handed off to the WS server.
  *
- * Client → Server: { type: "input", data: string }
+ * Client → Server: { type: "input",  data: string }
+ *                  { type: "resize", cols: int>0, rows: int>0 }
  * Server → Client: { type: "output", data: string }
  *                  { type: "state",  state: SessionState }
  *
- * Security: input data validated (string only); no secret logged.
+ * On new connection: scrollback replay is sent as { type: "output" } before
+ * live streaming begins (AC6).
+ *
+ * Security: input data validated (string only); resize dims validated (positive
+ * int delegated to PtyManager.resize); no secret logged.
  */
 
 import { WebSocket } from 'ws';
@@ -58,6 +63,12 @@ export class WsGateway {
       console.error('[WsGateway] socket error:', err.code ?? err.name);
     });
 
+    // AC6: replay buffered scrollback to the newly connected client before live streaming.
+    const buffered = this.#pty.scrollback;
+    if (buffered.length > 0) {
+      ws.send(JSON.stringify({ type: 'output', data: buffered }));
+    }
+
     // Send current state immediately on connect
     ws.send(JSON.stringify({ type: 'state', state: this.#pty.state }));
 
@@ -70,13 +81,17 @@ export class WsGateway {
         return;
       }
 
+      if (msg === null || typeof msg !== 'object') return;
+
+      // AC5: handle resize messages
+      if (msg.type === 'resize') {
+        // Validation delegated to PtyManager.resize (ignores invalid values — no crash)
+        this.#pty.resize(msg.cols, msg.rows);
+        return;
+      }
+
       // Validate: only accept input messages with string data (security/R02)
-      if (
-        msg === null ||
-        typeof msg !== 'object' ||
-        msg.type !== 'input' ||
-        typeof msg.data !== 'string'
-      ) {
+      if (msg.type !== 'input' || typeof msg.data !== 'string') {
         return;
       }
 

@@ -2,7 +2,7 @@
 id: terminal-bridge
 title: Terminal-Bridge (PTY ↔ interaktive Claude-Session)
 status: draft
-version: 1
+version: 2
 ---
 
 # Spec: Terminal-Bridge (`terminal-bridge`)
@@ -18,16 +18,20 @@ Das Backend hält **genau eine** interaktive Claude-Code-Session in einem PTY (A
 2. Es existiert zu jedem Zeitpunkt **höchstens eine** Session.
 3. Über WebSocket `/ws/terminal` fließen Client-Eingaben in den PTY und PTY-Ausgaben (byteweise, ANSI erhalten) an **alle** verbundenen Clients.
 4. Stürzt die Session ab/endet sie, startet der PtyManager sie neu — bis *N* Restarts in *M* s, danach Zustand `failed`.
+5. Der Client meldet die Terminalgröße (`{type:"resize",cols,rows}`); das Backend passt die PTY-Größe an (`pty.resize`), damit das Voll-TUI von `claude` in der **tatsächlichen** Client-Größe rendert (sonst verschobene/unlesbare Darstellung). Die PTY startet mit einer sinnvollen Initialgröße.
+6. Das Backend hält einen **begrenzten Ring-Puffer** der jüngsten PTY-Ausgabe und **spielt ihn einem neu verbundenen WS-Client sofort vor** (Scrollback-Replay) — ein spät verbundener Browser sieht den aktuellen Bildschirm statt eines leeren Terminals.
 
 ## Acceptance-Kriterien
 - **AC1** — `GET /api/session` liefert den aktuellen Session-Zustand (`starting|ready|busy|stopped|failed`). Nach dem Boot erreicht er ohne Eingabe `ready`.
 - **AC2** — WebSocket `/ws/terminal`: eine vom Client gesendete Eingabe wird in den PTY geschrieben; PTY-Ausgabe wird an alle verbundenen Clients gestreamt (ANSI-Sequenzen bleiben erhalten).
 - **AC3** — Die Session läuft **ohne** `-p`/`--print` und **ohne** gesetzten `ANTHROPIC_API_KEY` (Auth = Abo-OAuth). Testbar: die gestartete Befehlszeile enthält kein `-p`/`--print`; die Prozess-Umgebung enthält keinen `ANTHROPIC_API_KEY`.
 - **AC4** — Beendet sich die Session unerwartet, wird sie automatisch neu gestartet; nach Überschreiten von *N* Restarts in *M* s bleibt der Zustand `failed` (kein Endlos-Restart).
+- **AC5** — Sendet der Client `{type:"resize", cols, rows}` (cols/rows positive Integer), ruft das Backend `pty.resize(cols, rows)` auf; die PTY wird mit einer sinnvollen Initialgröße gestartet. Testbar: nach einem resize-Event hat die PTY die gemeldeten Maße; ungültige (nicht-positive/nicht-numerische) Werte werden ignoriert (kein Absturz).
+- **AC6** — Ein neu verbundener `/ws/terminal`-Client erhält **sofort beim Connect** den gepufferten jüngsten PTY-Output (begrenzter Ring-Puffer) als `{type:"output"}`, bevor neuer Live-Output folgt — ein spät verbundener Client sieht den aktuellen Bildschirm, nicht ein leeres Terminal.
 
 ## Verträge
 - `GET /api/session` → `200 {state, restarts, startedAt}`.
-- `WS /ws/terminal` — Nachrichten: Client→Server `{type:"input", data:string}`; Server→Client `{type:"output", data:string}` + `{type:"state", state}`.
+- `WS /ws/terminal` — Nachrichten: Client→Server `{type:"input", data:string}` · `{type:"resize", cols:int>0, rows:int>0}`; Server→Client `{type:"output", data:string}` + `{type:"state", state}`. **Bei Connect:** Replay des gepufferten Scrollbacks als `{type:"output"}` (AC6).
 
 ## Edge-Cases & Fehlerverhalten
 - Noch nicht `ready` → eingehende Inputs werden gepuffert oder mit `{type:"state"}` quittiert (kein Absturz).

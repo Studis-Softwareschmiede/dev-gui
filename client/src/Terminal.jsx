@@ -106,7 +106,14 @@ export function Terminal({ wsUrl }) {
 
     setStatusDisplay(WS_STATUS.CONNECTING);
 
-    conn.onStatus((s) => setStatusDisplay(s));
+    conn.onStatus((s) => {
+      setStatusDisplay(s);
+      // AC5: send initial resize when connection first becomes open, so the
+      // PTY is immediately sized to the real xterm dimensions.
+      if (s === WS_STATUS.CONNECTED) {
+        conn.sendResize(xterm.cols, xterm.rows);
+      }
+    });
 
     conn.onMessage((msg) => {
       if (msg.type === 'output' && typeof msg.data === 'string') {
@@ -122,11 +129,15 @@ export function Terminal({ wsUrl }) {
     xterm.onData((data) => conn.send(data));
 
     // ── Resize handling ────────────────────────────────────────────────
-    // ResizeObserver may be unavailable in test environments
+    // AC5: propagate container-size changes to PTY via resize messages.
+    // ResizeObserver may be unavailable in test environments.
     let ro = null;
     if (typeof ResizeObserver !== 'undefined' && containerRef.current) {
       ro = new ResizeObserver(() => {
-        try { fit.fit(); } catch { /* container may not be ready */ }
+        try {
+          fit.fit();
+          conn.sendResize(xterm.cols, xterm.rows);
+        } catch { /* container may not be ready */ }
       });
       ro.observe(containerRef.current);
     }

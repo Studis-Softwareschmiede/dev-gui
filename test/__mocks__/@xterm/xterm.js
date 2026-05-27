@@ -15,6 +15,9 @@ export class Terminal {
       // Store the handler so tests can invoke it directly
       Terminal._lastKeyEventHandler = fn;
     });
+    // Expose cols/rows so Terminal.jsx can read them for sendResize (AC5)
+    this.cols = 80;
+    this.rows = 24;
     // Store the latest instance for test access
     Terminal._lastInstance = this;
     Terminal._instances.push(this);

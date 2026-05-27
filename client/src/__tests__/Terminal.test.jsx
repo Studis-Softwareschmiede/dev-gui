@@ -16,8 +16,9 @@ import { describe, it, expect, jest, beforeEach } from '@jest/globals';
 // Variables named "mock*" are allowed inside unstable_mockModule factories.
 let mockOnStatusFn  = null;
 let mockOnMessageFn = null;
-const mockConnectFn = jest.fn();
-const mockDestroyFn = jest.fn();
+const mockConnectFn    = jest.fn();
+const mockDestroyFn    = jest.fn();
+const mockSendResizeFn = jest.fn();
 
 jest.unstable_mockModule('../wsClient.js', () => ({
   WS_STATUS: {
@@ -26,11 +27,12 @@ jest.unstable_mockModule('../wsClient.js', () => ({
     DISCONNECTED: 'disconnected',
   },
   TerminalConnection: jest.fn().mockImplementation(() => ({
-    onStatus:  (fn) => { mockOnStatusFn  = fn; return () => {}; },
-    onMessage: (fn) => { mockOnMessageFn = fn; return () => {}; },
-    connect:   mockConnectFn,
-    send:      jest.fn(),
-    destroy:   mockDestroyFn,
+    onStatus:   (fn) => { mockOnStatusFn  = fn; return () => {}; },
+    onMessage:  (fn) => { mockOnMessageFn = fn; return () => {}; },
+    connect:    mockConnectFn,
+    send:       jest.fn(),
+    sendResize: mockSendResizeFn,
+    destroy:    mockDestroyFn,
   })),
 }));
 
@@ -47,6 +49,7 @@ beforeEach(() => {
   mockOnMessageFn = null;
   mockConnectFn.mockClear();
   mockDestroyFn.mockClear();
+  mockSendResizeFn.mockClear();
   XTermStub._reset();
 });
 
@@ -138,5 +141,25 @@ describe('Terminal component — cleanup on unmount', () => {
 
     expect(mockDestroyFn).toHaveBeenCalled();
     expect(xterm.dispose).toHaveBeenCalled();
+  });
+});
+
+describe('Terminal component — AC5 resize propagation', () => {
+  it('calls sendResize with xterm cols/rows when WS status becomes connected', () => {
+    render(React.createElement(Terminal, { wsUrl: 'ws://localhost:8080/ws/terminal' }));
+    const xterm = XTermStub._lastInstance;
+
+    act(() => { mockOnStatusFn('connected'); });
+
+    expect(mockSendResizeFn).toHaveBeenCalledWith(xterm.cols, xterm.rows);
+  });
+
+  it('does not call sendResize when WS status is connecting or disconnected', () => {
+    render(React.createElement(Terminal, { wsUrl: 'ws://localhost:8080/ws/terminal' }));
+
+    act(() => { mockOnStatusFn('connecting'); });
+    act(() => { mockOnStatusFn('disconnected'); });
+
+    expect(mockSendResizeFn).not.toHaveBeenCalled();
   });
 });

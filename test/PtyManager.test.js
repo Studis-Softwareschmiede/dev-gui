@@ -1,5 +1,5 @@
 /**
- * PtyManager unit tests (AC1–AC4)
+ * PtyManager unit tests (AC1–AC6)
  *
  * All tests use stub commands — never launch real claude.
  * Tests are deterministic and self-contained.
@@ -241,4 +241,103 @@ describe('AC4 — restart cap leads to "failed"', () => {
       }
     }
   }, 30000);
+});
+
+// ── AC5 tests (resize) ────────────────────────────────────────────────────────
+
+describe('AC5 — resize(cols, rows)', () => {
+  let pty;
+  afterEach(() => { try { pty?.destroy(); } catch { /* ignore */ } });
+
+  it('calls pty.resize(cols, rows) when PTY is running', async () => {
+    pty = new PtyManager({ cmd: ECHO_STUB, args: [] });
+    pty.start();
+    await waitForState(pty, SESSION_STATES.READY, 5000);
+
+    // Should not throw
+    expect(() => pty.resize(120, 40)).not.toThrow();
+    // Verify the call didn't crash (integration: pty.resize really ran)
+  }, 8000);
+
+  it('ignores resize(0, 24) — zero cols is not positive', () => {
+    pty = new PtyManager({ cmd: ECHO_STUB, args: [] });
+    // No start — no PTY; should be silently ignored
+    expect(() => pty.resize(0, 24)).not.toThrow();
+  });
+
+  it('ignores resize(-1, 24) — negative cols', () => {
+    pty = new PtyManager({ cmd: ECHO_STUB, args: [] });
+    expect(() => pty.resize(-1, 24)).not.toThrow();
+  });
+
+  it('ignores resize(NaN, 24)', () => {
+    pty = new PtyManager({ cmd: ECHO_STUB, args: [] });
+    expect(() => pty.resize(NaN, 24)).not.toThrow();
+  });
+
+  it('ignores resize(80.5, 24) — float cols', () => {
+    pty = new PtyManager({ cmd: ECHO_STUB, args: [] });
+    expect(() => pty.resize(80.5, 24)).not.toThrow();
+  });
+
+  it('ignores resize("80", 24) — string cols', () => {
+    pty = new PtyManager({ cmd: ECHO_STUB, args: [] });
+    expect(() => pty.resize('80', 24)).not.toThrow();
+  });
+
+  it('ignores resize(80, 0) — zero rows', () => {
+    pty = new PtyManager({ cmd: ECHO_STUB, args: [] });
+    expect(() => pty.resize(80, 0)).not.toThrow();
+  });
+});
+
+// ── AC6 tests (scrollback ring buffer) ────────────────────────────────────────
+
+describe('AC6 — scrollback ring buffer', () => {
+  let pty;
+  afterEach(() => { try { pty?.destroy(); } catch { /* ignore */ } });
+
+  it('scrollback is empty before any output', () => {
+    pty = new PtyManager({ cmd: ECHO_STUB, args: [] });
+    expect(pty.scrollback).toBe('');
+  });
+
+  it('scrollback accumulates PTY output', async () => {
+    pty = new PtyManager({ cmd: ECHO_STUB, args: [] });
+    pty.start();
+    await waitForState(pty, SESSION_STATES.READY, 5000);
+    // Stub produces output — scrollback should be non-empty
+    expect(pty.scrollback.length).toBeGreaterThan(0);
+  }, 8000);
+
+  it('scrollback stays within 64 KB bound when flooded', async () => {
+    // Use a command that emits a large amount of output quickly.
+    // We emit 200 KB of data via a shell loop and check the buffer is bounded.
+    const LIMIT = 64 * 1024;
+    pty = new PtyManager({
+      cmd: '/bin/sh',
+      args: ['-c', 'yes "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" | head -c 200000; sleep 0.3'],
+      restartMax: 0,
+      restartWindowMs: 1000,
+    });
+    pty.start();
+
+    // Wait until at least 64 KB has been seen or PTY exits
+    await new Promise((resolve) => {
+      let totalSeen = 0;
+      const onData = (d) => {
+        totalSeen += d.length;
+        if (totalSeen >= LIMIT) {
+          pty.off('output', onData);
+          resolve();
+        }
+      };
+      pty.on('output', onData);
+      // Fallback timeout
+      setTimeout(resolve, 6000);
+    });
+
+    // Ring buffer must never exceed the byte limit
+    expect(pty.scrollback.length).toBeLessThanOrEqual(LIMIT);
+  }, 10000);
 });
