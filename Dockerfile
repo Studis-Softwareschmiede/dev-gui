@@ -73,22 +73,29 @@ WORKDIR /app
 
 # Copy production node_modules (contains compiled node-pty binary built
 # against glibc in the builder stage — same libc, works at runtime).
-COPY --from=builder /build/node_modules ./node_modules
+COPY --chown=node:node --from=builder /build/node_modules ./node_modules
 
 # Copy application code
-COPY --from=builder /build/server.js ./server.js
-COPY --from=builder /build/src ./src
-COPY --from=builder /build/scripts ./scripts
+COPY --chown=node:node --from=builder /build/server.js ./server.js
+COPY --chown=node:node --from=builder /build/src ./src
+COPY --chown=node:node --from=builder /build/scripts ./scripts
 
 # Copy built frontend (vite output)
-COPY --from=builder /build/client/dist ./client/dist
+COPY --chown=node:node --from=builder /build/client/dist ./client/dist
 
 # Copy package.json (needed for "type":"module" ESM resolution)
-COPY --from=builder /build/package.json ./package.json
+COPY --chown=node:node --from=builder /build/package.json ./package.json
 
 # AC6 — entrypoint: auto-provisions agent-flow plugin, then starts server.
-COPY docker-entrypoint.sh /docker-entrypoint.sh
+COPY --chown=node:node docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh
+
+# AC1 — run as non-root: switch to the node user (uid 1000, present in
+# node:20-slim). Global tools (claude, docker, gh) are in /usr/local/bin —
+# readable+executable by all users. /home/node is the node user's home dir
+# (created by the base image); claude stores OAuth credentials in ~/.claude.
+ENV HOME=/home/node
+USER node
 
 EXPOSE 8080
 
