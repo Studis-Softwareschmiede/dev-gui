@@ -1,0 +1,141 @@
+# docker-compose.yml — dev-gui production deploy artifact
+#
+# Two services on a shared internal network:
+#   socket-proxy  — tecnativa/docker-socket-proxy (AC4/AC6)
+#                   mounts /var/run/docker.sock read-only; exposes a restricted
+#                   Docker API over TCP (port 2375) to dev-gui only.
+#   dev-gui       — the GUI container; talks to Docker via DOCKER_HOST, no raw
+#                   socket mount.
+#
+# Security tradeoff (NFR — hardening spec):
+#   POST=1 allows container-create (needed for /agent-flow:preview up/down →
+#   docker run/rm). With bind-mounts that is theoretically powerful — this proxy
+#   is NOT a full sandbox. Primary controls: Cloudflare Access (only permitted
+#   identities reach the app) + non-root container (uid 1000) + EXEC=0 (no
+#   exec into running containers). The raw host-root Docker socket is eliminated.
+#
+# Usage:
+#   docker compose up -d
+#   docker compose down
+
+networks:
+  # Internal bridge — isolates the socket-proxy from the internet.
+  # Only dev-gui (on the same network) can reach socket-proxy:2375.
+  # socket-proxy has NO outbound internet access (internal: true).
+  docker-proxy-net:
+    driver: bridge
+    internal: true
+
+  # Normal bridge — gives dev-gui outbound internet access for:
+  #   • GitHubReader (/api/status GitHub API calls)
+  #   • agent-flow plugin clone on first boot (private GitHub repo)
+  #   • claude OAuth / token-mint
+  #   • ghcr.io image pulls (at runtime, e.g. preview containers)
+  egress-net:
+    driver: bridge
+
+volumes:
+  # Named volume for Claude OAuth credentials + agent-flow plugin cache.
+  # Must be owned by uid 1000 (node). Docker initialises volume contents from
+  # the image layer (where /home/node is owned by node) on first run.
+  dev-gui-claude:
+
+services:
+  # ── socket-proxy ──────────────────────────────────────────────────────────────
+  # Restricts raw Docker socket access to only the endpoints dev-gui needs.
+  # Allowed:
+  #   CONTAINERS=1  → GET /containers/* (docker ps, inspect)
+  #   IMAGES=1      → GET /images/*     (docker images)
+  #   POST=1        → POST endpoints    (docker run / docker rm — required by
+  #                                      /agent-flow:preview up/down)
+  # Blocked:
+  #   EXEC=0        → POST /exec/*      (no exec into containers)
+  #   (all other categories default to 0 — deny)
+  socket-proxy:
+    image: tecnativa/docker-socket-proxy:0.3.0
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      CONTAINERS: "1"
+      IMAGES: "1"
+      POST: "1"
+      EXEC: "0"
+      # Explicit deny for other sensitive categories (already default 0):
+      NETWORKS: "0"
+      VOLUMES: "0"
+      BUILD: "0"
+      COMMIT: "0"
+      CONFIGS: "0"
+      DISTRIBUTION: "0"
+      NODES: "0"
+      PLUGINS: "0"
+      SECRETS: "0"
+      SERVICES: "0"
+      SESSION: "0"
+      SWARM: "0"
+      SYSTEM: "0"
+      TASKS: "0"
+    networks:
+      - docker-proxy-net
+    # No published ports — only accessible on the internal docker-proxy-net.
+
+  # ── dev-gui ───────────────────────────────────────────────────────────────────
+  # The GUI container. Talks to Docker via the socket-proxy, not the raw socket.
+  dev-gui:
+    # Production image from GHCR.
+    image: ghcr.io/studis-softwareschmiede/dev-gui:latest
+    # Local build alternative (uncomment for development):
+    # build: .
+    restart: unless-stopped
+    depends_on:
+      - socket-proxy
+    ports:
+      # Bind only to loopback — Cloudflare Tunnel reaches the container via
+      # localhost:8080; no direct internet exposure.
+      - "127.0.0.1:8080:8080"
+    environment:
+      NODE_ENV: production
+
+      # ── Docker proxy (AC4/AC5) ───────────────────────────────────────────────
+      # docker CLI and DockerReader honour DOCKER_HOST automatically.
+      # No /var/run/docker.sock mount — the proxy exposes the API over TCP.
+      DOCKER_HOST: tcp://socket-proxy:2375
+
+      # ── Cloudflare Access (required in production) ───────────────────────────
+      # Cloudflare Zero Trust → Applications → your app → Application Audience
+      ACCESS_TEAM_DOMAIN: ${ACCESS_TEAM_DOMAIN}   # e.g. myteam.cloudflareaccess.com
+      ACCESS_AUD: ${ACCESS_AUD}                   # AUD tag from the Access app
+
+      # ── Claude Code session ──────────────────────────────────────────────────
+      # Enables unattended operation (ADR-003); allowed because container is
+      # non-root (uid 1000). Primary access control = Cloudflare Access (ADR-004).
+      SESSION_ARGS: '["--dangerously-skip-permissions"]'
+
+      # ── GitHub PAT ───────────────────────────────────────────────────────────
+      # Required for GitHubReader (/api/status projects) and agent-flow plugin
+      # auto-provision (clone private repo on first boot).
+      GH_TOKEN: ${GH_TOKEN}
+
+      # ── GPG passphrase (choose one option) ──────────────────────────────────
+      # Option A — environment variable (simplest):
+      #   GPG_PASSPHRASE: ${GPG_PASSPHRASE}
+      # Option B — node-readable file via volume (see volumes section):
+      #   mount host path → /home/node/.config/softwareschmiede/gpg.pass:ro
+      #   ensure file is chown 1000 or chmod 0644 on the host.
+      GPG_PASSPHRASE: ${GPG_PASSPHRASE}
+
+    volumes:
+      # Claude OAuth credentials + agent-flow plugin cache (persisted across
+      # restarts/image updates). Must be owned by uid 1000 (node).
+      - dev-gui-claude:/home/node/.claude
+
+      # GPG passphrase file (Option B — alternative to the env var above).
+      # Uncomment and ensure the host file is readable by uid 1000:
+      # - ${GPG_PASS_FILE:-~/.config/softwareschmiede/gpg.pass}:/home/node/.config/softwareschmiede/gpg.pass:ro
+
+    networks:
+      # internal net — reach socket-proxy:2375
+      - docker-proxy-net
+      # egress net — outbound internet (GitHub, claude OAuth, ghcr)
+      - egress-net

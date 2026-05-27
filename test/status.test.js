@@ -591,6 +591,38 @@ describe('AC2 — DockerReader only returns containers with agent-flow.preview l
   });
 });
 
+// ── AC5 — DockerReader via DOCKER_HOST (socket-proxy) ────────────────────────
+//
+// DockerReader shells out to `docker` CLI without hardcoding a socket path or
+// -H flag. The docker CLI automatically honours the DOCKER_HOST environment
+// variable, so pointing DOCKER_HOST=tcp://socket-proxy:2375 (set in
+// docker-compose.yml) routes all docker calls through the socket proxy with
+// zero code changes. These tests document and verify that contract.
+
+describe('AC5 — DockerReader does not hardcode socket path or -H flag (DOCKER_HOST honours)', () => {
+  it('execFn cmd is "docker" (no hard-coded host flag)', async () => {
+    const calls = [];
+    const execFn = async (cmd, args) => { calls.push({ cmd, args }); return ''; };
+    const reader = new DockerReader({ execFn });
+    await reader.getPreviews();
+    expect(calls[0].cmd).toBe('docker');
+    // Must NOT contain -H or --host in the args (those would override DOCKER_HOST)
+    expect(calls[0].args).not.toContain('-H');
+    expect(calls[0].args).not.toContain('--host');
+  });
+
+  it('execFn args contain no socket path (no /var/run/docker.sock hardcode)', async () => {
+    const calls = [];
+    const execFn = async (cmd, args) => { calls.push({ cmd, args }); return ''; };
+    const reader = new DockerReader({ execFn });
+    await reader.getPreviews();
+    const argsStr = calls[0].args.join(' ');
+    expect(argsStr).not.toContain('/var/run/docker.sock');
+    expect(argsStr).not.toContain('unix://');
+    expect(argsStr).not.toContain('tcp://');
+  });
+});
+
 describe('AC2 — openItems uses Search API (is:issue) so PRs are excluded', () => {
   it('fetches /search/issues with is:issue in query — not the issues list endpoint', async () => {
     const calls = [];
