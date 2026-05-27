@@ -73,6 +73,16 @@ subscription accounts; re-login is rarely needed.
 
 ### 3d. Normal production start
 
+**Recommended:** use `docker compose` (see section 9 — deploys socket-proxy + dev-gui
+together, replaces the raw socket mount):
+
+```sh
+docker compose up -d
+```
+
+**Legacy / single-container alternative** (requires raw socket access — not recommended
+under non-root; use the compose deploy instead):
+
 ```sh
 docker run -d \
   --name dev-gui \
@@ -149,26 +159,53 @@ docker exec dev-gui claude plugin list
 
 ---
 
-## 4. Docker socket mount (read-only)
+## 4. Docker access — socket-proxy (recommended) vs. raw socket
 
 DockerReader communicates with the Docker daemon to enumerate containers for the
-`/api/status` previews panel. The socket mount MUST be **read-only** (`:ro`) to
-follow the principle of least privilege:
+`/api/status` previews panel, and the `/agent-flow:preview up/down` skill issues
+`docker run`/`docker rm` commands.
+
+### 4a. Recommended: docker-socket-proxy (compose deploy, AC4–AC6)
+
+The **`docker-compose.yml`** in the repo root defines the full production stack:
+a `socket-proxy` sidecar (`tecnativa/docker-socket-proxy`) that mounts the raw
+Docker socket read-only and exposes a restricted API over TCP, and a `dev-gui`
+service that talks to Docker via `DOCKER_HOST=tcp://socket-proxy:2375`.
+
+**Why the proxy:** `/var/run/docker.sock` is owned by `root:docker` (mode `0660`).
+The container runs as uid 1000 (`node`) and **cannot access the raw socket** without
+joining the `docker` group — which is not recommended (group membership grants
+unrestricted daemon access). The socket-proxy solves both the permission problem and
+the privilege-surface problem at once.
+
+**`docker` CLI and DockerReader honour `DOCKER_HOST` automatically** — no code
+changes in DockerReader or the `/agent-flow:preview` skill are needed; all `docker`
+invocations inherit `DOCKER_HOST` from the process environment.
+
+Start the stack:
+
+```sh
+# First-time: create Claude credentials volume
+docker volume create dev-gui-claude
+
+# Copy .env.example to .env and fill in your values (never commit .env)
+cp .env.example .env   # see section 9
+
+# Start (detached)
+docker compose up -d
+```
+
+### 4b. Raw socket (legacy / dev-only)
+
+A raw socket mount works when the container runs in the `docker` group or as root,
+but is **not recommended for production** under non-root (uid 1000):
 
 ```
 -v /var/run/docker.sock:/var/run/docker.sock:ro
 ```
 
-Without this mount DockerReader returns an empty previews list; the rest of the app
-continues to function normally.
-
-**Non-root caveat:** `/var/run/docker.sock` is owned by `root:docker` (typically mode
-`0660`). As uid 1000 (`node`) the container process **cannot access the raw socket**
-unless it also belongs to the `docker` group — granting group membership to an
-untrusted container is not recommended. The supported path under non-root is the
-**docker-socket-proxy** (hardening item #29 / AC4–AC6): run a
-`tecnativa/docker-socket-proxy` sidecar and set
-`DOCKER_HOST=tcp://socket-proxy:2375` in dev-gui. See section 8 (Härtung) for details.
+Without any Docker access, DockerReader returns an empty previews list; the rest of
+the app continues to function normally.
 
 ---
 
@@ -280,18 +317,120 @@ sudo chown 1000 ~/.config/softwareschmiede/gpg.pass   # oder: chmod 0644
 
 **Niemals die Passphrase ins Image baken.**
 
-#### Docker-Socket unter Non-Root (socket-proxy erforderlich)
+#### Docker-Socket unter Non-Root — socket-proxy (AC4–AC6)
 
 `/var/run/docker.sock` gehört `root:docker` (mode `0660`). Als uid 1000 hat der
 Container-Prozess **keinen Zugriff** auf den rohen Socket — `docker ps` schlägt fehl,
 DockerReader/Previews degradieren auf leere Listen.
 
-Unterstützter Pfad unter Non-Root: **docker-socket-proxy** (Hardening AC4–AC6):
-- Sidecar `tecnativa/docker-socket-proxy` mit `CONTAINERS=1`, `IMAGES=1`, `POST=1`,
-  `EXEC=0` — nur dieser Sidecar bekommt den rohen Socket (als root-Service auf dem Host).
-- dev-gui erhält `DOCKER_HOST=tcp://socket-proxy:2375`; das `docker`-CLI und DockerReader
-  sprechen automatisch gegen den Proxy.
-- Ein roher Socket-Mount + docker-group-Mitgliedschaft für uid 1000 ist **nicht empfohlen**
-  (erhöht Privileges unkontrolliert).
+Implementierter Pfad: **docker-socket-proxy** — deployed via `docker-compose.yml`:
+- Sidecar `tecnativa/docker-socket-proxy:0.3.0` mit `CONTAINERS=1`, `IMAGES=1`,
+  `POST=1`, `EXEC=0` — nur dieser Sidecar bekommt den rohen Socket.
+- dev-gui erhält `DOCKER_HOST=tcp://socket-proxy:2375`; das `docker`-CLI und
+  DockerReader sprechen automatisch gegen den Proxy (kein Code-Change nötig).
+- Kein `POST /exec/*` (EXEC=0): keine Remote-Shell in laufende Container.
+- Ein roher Socket-Mount + docker-group-Mitgliedschaft für uid 1000 ist **nicht
+  empfohlen** (erhöht Privileges unkontrolliert).
 
-Dieser Sidecar wird in Item #29 implementiert; bis dahin sind Previews unter Non-Root leer.
+**Security-Tradeoff (NFR):** `POST=1` erlaubt Container-Create — mit Bind-Mounts
+theoretisch mächtig. Der Proxy ist **kein vollständiger Sandbox-Ersatz.** Primäre
+Kontrolle: **Cloudflare Access** (nur erlaubte Identitäten) + **Non-Root** (uid 1000)
++ **`EXEC=0`** (kein Exec in Container). Der rohe Host-Root-Socket ist eliminiert.
+
+Siehe Section 9 für den Compose-Deploy-Workflow.
+
+---
+
+## 9. Compose-basierter Deploy (socket-proxy + dev-gui)
+
+The `docker-compose.yml` at the repo root is the **canonical production deploy
+artifact** (AC6). It replaces the raw-socket `docker run` command from section 3d.
+
+### Services
+
+| Service | Image | Role |
+|---------|-------|------|
+| `socket-proxy` | `tecnativa/docker-socket-proxy:0.3.0` | Restricted Docker API proxy; holds the raw socket |
+| `dev-gui` | `ghcr.io/studis-softwareschmiede/dev-gui:latest` | GUI; talks to Docker via `DOCKER_HOST` |
+
+Both services share an `internal: true` bridge network (`docker-proxy-net`). The
+`socket-proxy` has **no published ports** — it is only reachable from `dev-gui`
+inside the bridge.
+
+### Environment variables (.env file)
+
+Create a `.env` file in the same directory as `docker-compose.yml` (never commit it):
+
+```sh
+# .env — runtime secrets for docker compose
+ACCESS_TEAM_DOMAIN=myteam.cloudflareaccess.com
+ACCESS_AUD=<your-aud-tag-from-cloudflare>
+GH_TOKEN=<github-pat-read-org-repo>
+GPG_PASSPHRASE=<gpg-passphrase>
+```
+
+`docker compose` loads `.env` automatically. Variables are referenced in
+`docker-compose.yml` as `${VAR}` — never as literal values.
+
+### First-time setup
+
+```sh
+# 1. Create the Claude credentials volume (once per VPS)
+docker volume create dev-gui-claude
+
+# 2. Interactive Claude login (once per OAuth session)
+docker run --rm -it \
+  -v dev-gui-claude:/home/node/.claude \
+  ghcr.io/studis-softwareschmiede/dev-gui:latest \
+  claude login
+
+# 3. Create .env (fill in your values, never commit)
+cp .env.example .env   # or create manually
+
+# 4. Start the stack
+docker compose up -d
+```
+
+### Day-to-day operations
+
+```sh
+# Start
+docker compose up -d
+
+# Stop
+docker compose down
+
+# View logs
+docker compose logs -f dev-gui
+docker compose logs -f socket-proxy
+
+# Validate compose syntax
+docker compose config
+
+# Update to latest image (Watchtower handles this automatically in prod)
+docker compose pull && docker compose up -d
+```
+
+### Why this replaces the raw socket mount
+
+Under non-root (uid 1000), the container process cannot access
+`/var/run/docker.sock` (owned by `root:docker`, mode `0660`) without joining the
+`docker` group — which grants unrestricted daemon access. The socket-proxy solves
+both: the proxy (running as root on the host) holds the socket and exposes only
+the needed endpoints over a TCP port on the internal network.
+
+**DOCKER_HOST and DockerReader:** DockerReader shells out to the `docker` CLI
+with `execFile('docker', [...])` — no socket path or `-H` flag is hardcoded.
+The `docker` CLI automatically reads `DOCKER_HOST` from its environment, so
+setting `DOCKER_HOST=tcp://socket-proxy:2375` routes all docker calls through
+the proxy with zero code changes. The `/agent-flow:preview up/down` skill's
+`docker run`/`docker rm` calls likewise inherit `DOCKER_HOST` from the process
+environment.
+
+**Security tradeoff (NFR):** `POST=1` allows container-create. With arbitrary
+bind-mounts that is theoretically powerful — the proxy is **not a full sandbox**.
+Primary controls:
+1. **Cloudflare Access** — only permitted identities reach the app (ADR-004)
+2. **Non-root container** — uid 1000, no host-root capabilities
+3. **`EXEC=0`** — no `POST /exec/*`; no remote shell into running containers
+4. Raw host-root socket eliminated — the attack surface is reduced, not zero
