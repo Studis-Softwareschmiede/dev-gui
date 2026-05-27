@@ -36,14 +36,16 @@ import { jobLock } from './JobLock.js';
 
 /**
  * Default allowlist of permitted command first-tokens (AC2).
+ * Only plugin-namespaced `/agent-flow:<skill>` prefixes are accepted.
+ * Un-namespaced commands like `/flow` or `/preview` → rejected with 400.
  * Configurable at construction time.
  */
 export const DEFAULT_ALLOWED_COMMANDS = [
-  '/flow',
-  '/adopt',
-  '/preview',
-  '/requirement',
-  '/train',
+  '/agent-flow:flow',
+  '/agent-flow:adopt',
+  '/agent-flow:preview',
+  '/agent-flow:requirement',
+  '/agent-flow:train',
 ];
 
 /** Default idle period (ms) — see module doc above. */
