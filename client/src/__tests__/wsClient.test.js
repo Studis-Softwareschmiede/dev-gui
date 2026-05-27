@@ -302,3 +302,61 @@ describe('TerminalConnection — onMessage unsubscribe', () => {
     expect(received).toHaveLength(0);
   });
 });
+
+describe('TerminalConnection — sendResize() (AC5)', () => {
+  it('sends {type:"resize",cols,rows} when connected', () => {
+    const conn = makeConn();
+    conn.connect();
+    FakeWebSocket.last.simulateOpen();
+
+    conn.sendResize(120, 40);
+
+    expect(FakeWebSocket.last.sent).toHaveLength(1);
+    expect(JSON.parse(FakeWebSocket.last.sent[0])).toEqual({ type: 'resize', cols: 120, rows: 40 });
+  });
+
+  it('does nothing when not yet connected', () => {
+    const conn = makeConn();
+    conn.connect();
+    // socket still CONNECTING — no simulateOpen
+
+    conn.sendResize(120, 40);
+    expect(FakeWebSocket.last.sent).toHaveLength(0);
+  });
+
+  it('does not send for non-positive cols (0)', () => {
+    const conn = makeConn();
+    conn.connect();
+    FakeWebSocket.last.simulateOpen();
+
+    conn.sendResize(0, 24);
+    expect(FakeWebSocket.last.sent).toHaveLength(0);
+  });
+
+  it('does not send for negative rows', () => {
+    const conn = makeConn();
+    conn.connect();
+    FakeWebSocket.last.simulateOpen();
+
+    conn.sendResize(80, -1);
+    expect(FakeWebSocket.last.sent).toHaveLength(0);
+  });
+
+  it('does not send for NaN dims', () => {
+    const conn = makeConn();
+    conn.connect();
+    FakeWebSocket.last.simulateOpen();
+
+    conn.sendResize(NaN, 24);
+    expect(FakeWebSocket.last.sent).toHaveLength(0);
+  });
+
+  it('does not send for float dims', () => {
+    const conn = makeConn();
+    conn.connect();
+    FakeWebSocket.last.simulateOpen();
+
+    conn.sendResize(80.5, 24);
+    expect(FakeWebSocket.last.sent).toHaveLength(0);
+  });
+});

@@ -7,6 +7,7 @@
  *   - Expose connection status ('connecting' | 'connected' | 'disconnected')
  *   - Dispatch incoming server messages to registered listeners
  *   - Send input messages: { type: "input", data: string }
+ *   - Send resize messages: { type: "resize", cols: int>0, rows: int>0 } (AC5)
  *
  * Server message protocol (consumed):
  *   { type: "output", data: string }
@@ -102,6 +103,21 @@ export class TerminalConnection {
     this.#ws.send(JSON.stringify({ type: 'input', data }));
   }
 
+  /**
+   * Send a resize event to the server (AC5).
+   * Only sent when the connection is open; cols/rows must be positive integers.
+   * @param {number} cols
+   * @param {number} rows
+   */
+  sendResize(cols, rows) {
+    if (
+      this.#ws === null ||
+      this.#ws.readyState !== this._WS.OPEN
+    ) return;
+    if (!isPositiveInt(cols) || !isPositiveInt(rows)) return;
+    this.#ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+  }
+
   /** Permanently close this connection (no more reconnects). */
   destroy() {
     this.#destroyed = true;
@@ -188,4 +204,15 @@ export class TerminalConnection {
       this.#retryTimer = null;
     }
   }
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
+
+/**
+ * Returns true iff v is a finite positive integer (AC5 client-side guard).
+ * @param {unknown} v
+ * @returns {boolean}
+ */
+function isPositiveInt(v) {
+  return typeof v === 'number' && Number.isFinite(v) && Number.isInteger(v) && v > 0;
 }

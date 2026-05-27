@@ -14,6 +14,9 @@
 import { EventEmitter } from 'node:events';
 import { spawn } from 'node-pty';
 
+// Ring-buffer capacity in bytes (AC6)
+const SCROLLBACK_BYTE_LIMIT = 64 * 1024;
+
 // Session states (spec: starting → ready ⇄ busy, stopped, failed)
 export const SESSION_STATES = /** @type {const} */ ({
   STARTING: 'starting',
@@ -47,6 +50,13 @@ export class PtyManager extends EventEmitter {
   #restartMax;
   #restartWindowMs;
 
+  // AC6: bounded ring buffer of recent PTY output
+  // Stored as an array of strings; total byte length tracked separately.
+  /** @type {string[]} */
+  #scrollback = [];
+  /** @type {number} */
+  #scrollbackBytes = 0;
+
   constructor({
     cmd = process.env.SESSION_CMD ?? 'claude',
     args = parseArgs(process.env.SESSION_ARGS),
@@ -69,6 +79,28 @@ export class PtyManager extends EventEmitter {
   /** Expose spawn config for testing (AC3). Read-only view. */
   get spawnConfig() {
     return { cmd: this.#cmd, args: [...this.#args] };
+  }
+
+  /**
+   * Return a snapshot of the current scrollback buffer as a single string (AC6).
+   * Safe to call from WsGateway on new-connection replay.
+   * @returns {string}
+   */
+  get scrollback() {
+    return this.#scrollback.join('');
+  }
+
+  /**
+   * Resize the PTY to the given dimensions (AC5).
+   * Validates that cols and rows are positive integers; silently ignores invalid values.
+   * @param {number} cols
+   * @param {number} rows
+   */
+  resize(cols, rows) {
+    if (!isPositiveInt(cols) || !isPositiveInt(rows)) return;
+    if (this.#pty) {
+      this.#pty.resize(cols, rows);
+    }
   }
 
   start() {
@@ -123,8 +155,8 @@ export class PtyManager extends EventEmitter {
     try {
       pty = spawn(this.#cmd, this.#args, {
         name: 'xterm-color',
-        cols: 220,
-        rows: 50,
+        cols: 80,
+        rows: 24,
         env: childEnv,
         // cwd defaults to process.cwd() — fine for claude
       });
@@ -139,6 +171,9 @@ export class PtyManager extends EventEmitter {
     pty.onData((data) => {
       // AC2: broadcast raw output (ANSI preserved) — never logged as secret
       this.emit('output', data);
+
+      // AC6: accumulate into bounded ring buffer
+      this.#appendScrollback(data);
 
       // Heuristic: detect claude prompt → transition to ready
       // We transition to ready once we see output (stub/real alike).
@@ -194,6 +229,22 @@ export class PtyManager extends EventEmitter {
     }
     this.#pty = null;
   }
+
+  /**
+   * Append a chunk to the scrollback ring buffer (AC6).
+   * Drops oldest chunks until total size stays within SCROLLBACK_BYTE_LIMIT.
+   * @param {string} chunk
+   */
+  #appendScrollback(chunk) {
+    this.#scrollback.push(chunk);
+    this.#scrollbackBytes += chunk.length;
+
+    // Evict oldest chunks until we are within the limit
+    while (this.#scrollbackBytes > SCROLLBACK_BYTE_LIMIT && this.#scrollback.length > 0) {
+      const evicted = this.#scrollback.shift();
+      this.#scrollbackBytes -= evicted.length;
+    }
+  }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -229,4 +280,14 @@ function parseArgs(raw) {
     // invalid JSON — ignore
   }
   return [];
+}
+
+/**
+ * Returns true iff v is a finite integer > 0 (AC5 resize validation).
+ * Rejects 0, negatives, floats, NaN, Infinity, non-numbers.
+ * @param {unknown} v
+ * @returns {boolean}
+ */
+function isPositiveInt(v) {
+  return typeof v === 'number' && Number.isFinite(v) && Number.isInteger(v) && v > 0;
 }
