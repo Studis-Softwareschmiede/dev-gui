@@ -1,11 +1,11 @@
 /**
- * CommandService + commandRouter tests (#8)
+ * CommandService + commandRouter tests (#8, updated for #23 namespace)
  *
  * Covers:
  *   AC1  — POST /api/command with allowed command → 202 + line written to PTY
  *          + exactly one audit entry with identity
  *   AC2  — disallowed/empty/newline-injection command → 400 + nothing written to PTY
- *          + no audit entry
+ *          + no audit entry; un-namespaced commands (/preview, /flow) → 400
  *   AC3  — second concurrent command while one running → 409
  *   AC5  — cancel → interrupt sent + status cancelled + lock released → next cmd accepted
  *   AC6  — audit record() throws → command not run + lock released (failure path)
@@ -184,22 +184,30 @@ describe('sanitizeCommand()', () => {
   });
 
   it('returns trimmed string for valid command', () => {
-    expect(sanitizeCommand('/flow #8')).toBe('/flow #8');
-    expect(sanitizeCommand('  /flow #8  ')).toBe('/flow #8');
+    expect(sanitizeCommand('/agent-flow:flow')).toBe('/agent-flow:flow');
+    expect(sanitizeCommand('  /agent-flow:preview up sandbox-2  ')).toBe('/agent-flow:preview up sandbox-2');
   });
 });
 
 // ── Unit tests: isAllowed ─────────────────────────────────────────────────────
 
 describe('isAllowed()', () => {
-  it('returns true for commands in the allowlist', () => {
+  it('returns true for namespaced commands in the allowlist', () => {
     for (const cmd of DEFAULT_ALLOWED_COMMANDS) {
       expect(isAllowed(cmd, DEFAULT_ALLOWED_COMMANDS)).toBe(true);
-      expect(isAllowed(`${cmd} #12`, DEFAULT_ALLOWED_COMMANDS)).toBe(true);
+      expect(isAllowed(`${cmd} up sandbox-2`, DEFAULT_ALLOWED_COMMANDS)).toBe(true);
     }
   });
 
-  it('returns false for commands not in the allowlist', () => {
+  it('returns false for un-namespaced commands that were previously allowed', () => {
+    expect(isAllowed('/flow', DEFAULT_ALLOWED_COMMANDS)).toBe(false);
+    expect(isAllowed('/preview', DEFAULT_ALLOWED_COMMANDS)).toBe(false);
+    expect(isAllowed('/adopt', DEFAULT_ALLOWED_COMMANDS)).toBe(false);
+    expect(isAllowed('/requirement', DEFAULT_ALLOWED_COMMANDS)).toBe(false);
+    expect(isAllowed('/train', DEFAULT_ALLOWED_COMMANDS)).toBe(false);
+  });
+
+  it('returns false for other disallowed commands', () => {
     expect(isAllowed('/hack', DEFAULT_ALLOWED_COMMANDS)).toBe(false);
     expect(isAllowed('bash', DEFAULT_ALLOWED_COMMANDS)).toBe(false);
     expect(isAllowed('', DEFAULT_ALLOWED_COMMANDS)).toBe(false);
@@ -223,34 +231,50 @@ describe('CommandService.tryRun() — unit (no HTTP)', () => {
     lock.release();
   });
 
-  it('AC1 — accepted command: returns { ok, commandId, status:"running" }', () => {
-    const res = svc.tryRun({ command: '/flow #8', identity: { email: 'alice@test.com' } });
+  it('AC1 — accepted namespaced command: returns { ok, commandId, status:"running" }', () => {
+    const res = svc.tryRun({ command: '/agent-flow:flow', identity: { email: 'alice@test.com' } });
     expect(res.ok).toBe(true);
     expect(typeof res.commandId).toBe('string');
     expect(res.status).toBe('running');
   });
 
-  it('AC1 — accepted command: writes exactly "command\\n" to PTY', () => {
-    svc.tryRun({ command: '/flow #8', identity: null });
+  it('AC1 — accepted command with sub-command: writes full line to PTY', () => {
+    svc.tryRun({ command: '/agent-flow:preview up sandbox-2', identity: null });
     expect(pty.written).toHaveLength(1);
-    expect(pty.written[0]).toBe('/flow #8\n');
+    expect(pty.written[0]).toBe('/agent-flow:preview up sandbox-2\n');
   });
 
   it('AC1 — accepted command: produces exactly one audit entry', () => {
-    svc.tryRun({ command: '/flow #8', identity: { email: 'alice@test.com' } });
+    svc.tryRun({ command: '/agent-flow:flow', identity: { email: 'alice@test.com' } });
     const entries = audit.getAll();
     expect(entries).toHaveLength(1);
-    expect(entries[0].command).toBe('/flow #8');
+    expect(entries[0].command).toBe('/agent-flow:flow');
     expect(entries[0].identity).toBe('alice@test.com');
   });
 
   it('AC1/AC6 — audit entry records identity from req.identity.email', () => {
-    svc.tryRun({ command: '/flow #8', identity: { email: 'bob@test.com' } });
+    svc.tryRun({ command: '/agent-flow:flow', identity: { email: 'bob@test.com' } });
     expect(audit.getAll()[0].identity).toBe('bob@test.com');
   });
 
   it('AC2 — disallowed command: returns invalid, nothing written to PTY, no audit', () => {
     const res = svc.tryRun({ command: '/hack', identity: null });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe('invalid');
+    expect(pty.written).toHaveLength(0);
+    expect(audit.getAll()).toHaveLength(0);
+  });
+
+  it('AC2 — un-namespaced /flow → rejected (400 path)', () => {
+    const res = svc.tryRun({ command: '/flow', identity: null });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe('invalid');
+    expect(pty.written).toHaveLength(0);
+    expect(audit.getAll()).toHaveLength(0);
+  });
+
+  it('AC2 — un-namespaced /preview → rejected (400 path)', () => {
+    const res = svc.tryRun({ command: '/preview', identity: null });
     expect(res.ok).toBe(false);
     expect(res.reason).toBe('invalid');
     expect(pty.written).toHaveLength(0);
@@ -266,7 +290,7 @@ describe('CommandService.tryRun() — unit (no HTTP)', () => {
   });
 
   it('AC2 — newline injection: returns invalid, nothing written, no audit', () => {
-    const res = svc.tryRun({ command: '/flow\nsecond', identity: null });
+    const res = svc.tryRun({ command: '/agent-flow:flow\nsecond', identity: null });
     expect(res.ok).toBe(false);
     expect(res.reason).toBe('invalid');
     expect(pty.written).toHaveLength(0);
@@ -274,10 +298,10 @@ describe('CommandService.tryRun() — unit (no HTTP)', () => {
   });
 
   it('AC3 — second tryRun while lock held: returns locked, nothing written', () => {
-    svc.tryRun({ command: '/flow #1', identity: null });
+    svc.tryRun({ command: '/agent-flow:flow', identity: null });
     expect(lock.isHeld()).toBe(true);
 
-    const res2 = svc.tryRun({ command: '/flow #2', identity: null });
+    const res2 = svc.tryRun({ command: '/agent-flow:flow', identity: null });
     expect(res2.ok).toBe(false);
     expect(res2.reason).toBe('locked');
     // Only the first write should have occurred
@@ -285,7 +309,7 @@ describe('CommandService.tryRun() — unit (no HTTP)', () => {
   });
 
   it('AC5 — cancel(): sends \\x03 to PTY, status becomes cancelled, lock released', () => {
-    svc.tryRun({ command: '/flow #8', identity: null });
+    svc.tryRun({ command: '/agent-flow:flow', identity: null });
     expect(lock.isHeld()).toBe(true);
 
     const result = svc.cancel();
@@ -297,10 +321,10 @@ describe('CommandService.tryRun() — unit (no HTTP)', () => {
   });
 
   it('AC5 — after cancel, next tryRun is accepted', () => {
-    svc.tryRun({ command: '/flow #1', identity: null });
+    svc.tryRun({ command: '/agent-flow:flow', identity: null });
     svc.cancel();
 
-    const res = svc.tryRun({ command: '/flow #2', identity: null });
+    const res = svc.tryRun({ command: '/agent-flow:flow', identity: null });
     expect(res.ok).toBe(true);
     lock.release(); // cleanup
   });
@@ -319,7 +343,7 @@ describe('CommandService.tryRun() — unit (no HTTP)', () => {
       idleMs: 200,
     });
 
-    const res = svc2.tryRun({ command: '/flow #8', identity: null });
+    const res = svc2.tryRun({ command: '/agent-flow:flow', identity: null });
     expect(res.ok).toBe(false);
     // PTY must NOT have been written
     expect(pty.written).toHaveLength(0);
@@ -342,7 +366,7 @@ describe('CommandService.tryRun() — PTY write throws (unit)', () => {
       idleMs: 200,
     });
 
-    const res = svc.tryRun({ command: '/flow #8', identity: null });
+    const res = svc.tryRun({ command: '/agent-flow:flow', identity: null });
 
     expect(res.ok).toBe(false);
     expect(res.reason).toBe('internal');
@@ -385,7 +409,7 @@ describe('POST /api/command — PTY write error → 500 (HTTP integration)', () 
   });
 
   it('PTY write throws → 500, lock released (next command would get 202 not 409)', async () => {
-    const res = await post(port, '/api/command', { command: '/flow #8' });
+    const res = await post(port, '/api/command', { command: '/agent-flow:flow' });
     expect(res.status).toBe(500);
     expect(lock.isHeld()).toBe(false);
   });
@@ -400,7 +424,7 @@ describe('CommandService — idle-based lock release', () => {
     const lock = new JobLock();
     const svc = new CommandService({ ptyManager: pty, auditStore: audit, lock, idleMs: 150 });
 
-    svc.tryRun({ command: '/flow #8', identity: null });
+    svc.tryRun({ command: '/agent-flow:flow', identity: null });
     expect(lock.isHeld()).toBe(true);
 
     // Wait longer than idleMs
@@ -416,7 +440,7 @@ describe('CommandService — idle-based lock release', () => {
     // idleMs = 150ms; emit output at 80ms → should extend to 80+150=230ms
     const svc = new CommandService({ ptyManager: pty, auditStore: audit, lock, idleMs: 150 });
 
-    svc.tryRun({ command: '/flow #8', identity: null });
+    svc.tryRun({ command: '/agent-flow:flow', identity: null });
     expect(lock.isHeld()).toBe(true);
 
     // Emit output at ~80ms — resets the timer
@@ -453,30 +477,50 @@ describe('POST /api/command — HTTP integration', () => {
     delete process.env.DEV_NO_ACCESS;
   });
 
-  it('AC1 — allowed command → 202 with commandId and status:running', async () => {
-    const res = await post(port, '/api/command', { command: '/flow #8' });
+  it('AC1 — namespaced command → 202 with commandId and status:running', async () => {
+    const res = await post(port, '/api/command', { command: '/agent-flow:flow' });
     expect(res.status).toBe(202);
     expect(typeof res.body.commandId).toBe('string');
     expect(res.body.status).toBe('running');
   });
 
+  it('AC1 — namespaced command with sub-cmd → 202 and line written to PTY', async () => {
+    const res = await post(port, '/api/command', { command: '/agent-flow:preview up sandbox-2' });
+    expect(res.status).toBe(202);
+    expect(ptyStub.written[0]).toBe('/agent-flow:preview up sandbox-2\n');
+  });
+
   it('AC1 — allowed command → exactly one audit entry with identity', async () => {
-    await post(port, '/api/command', { command: '/flow #8' });
+    await post(port, '/api/command', { command: '/agent-flow:flow' });
     const entries = auditStore.getAll();
     expect(entries).toHaveLength(1);
-    expect(entries[0].command).toBe('/flow #8');
+    expect(entries[0].command).toBe('/agent-flow:flow');
     // DEV_NO_ACCESS sets email = 'dev@local'
     expect(entries[0].identity).toBe('dev@local');
   });
 
   it('AC1 — allowed command → line written to PTY stub', async () => {
-    await post(port, '/api/command', { command: '/flow #8' });
+    await post(port, '/api/command', { command: '/agent-flow:flow' });
     expect(ptyStub.written).toHaveLength(1);
-    expect(ptyStub.written[0]).toBe('/flow #8\n');
+    expect(ptyStub.written[0]).toBe('/agent-flow:flow\n');
   });
 
   it('AC2 — disallowed command → 400, nothing written to PTY, no audit', async () => {
     const res = await post(port, '/api/command', { command: '/hack me' });
+    expect(res.status).toBe(400);
+    expect(ptyStub.written).toHaveLength(0);
+    expect(auditStore.getAll()).toHaveLength(0);
+  });
+
+  it('AC2 — un-namespaced /preview → 400, nothing written, no audit', async () => {
+    const res = await post(port, '/api/command', { command: '/preview up sandbox-2' });
+    expect(res.status).toBe(400);
+    expect(ptyStub.written).toHaveLength(0);
+    expect(auditStore.getAll()).toHaveLength(0);
+  });
+
+  it('AC2 — un-namespaced /flow → 400, nothing written, no audit', async () => {
+    const res = await post(port, '/api/command', { command: '/flow' });
     expect(res.status).toBe(400);
     expect(ptyStub.written).toHaveLength(0);
     expect(auditStore.getAll()).toHaveLength(0);
@@ -490,7 +534,7 @@ describe('POST /api/command — HTTP integration', () => {
   });
 
   it('AC2 — newline injection → 400, nothing written, no audit', async () => {
-    const res = await post(port, '/api/command', { command: '/flow\nsecret' });
+    const res = await post(port, '/api/command', { command: '/agent-flow:flow\nsecret' });
     expect(res.status).toBe(400);
     expect(ptyStub.written).toHaveLength(0);
     expect(auditStore.getAll()).toHaveLength(0);
@@ -498,12 +542,12 @@ describe('POST /api/command — HTTP integration', () => {
 
   it('AC3 — second command while first running → 409', async () => {
     // First command — should succeed
-    const res1 = await post(port, '/api/command', { command: '/flow #1' });
+    const res1 = await post(port, '/api/command', { command: '/agent-flow:flow' });
     expect(res1.status).toBe(202);
     expect(lock.isHeld()).toBe(true);
 
     // Second command — should be rejected with 409
-    const res2 = await post(port, '/api/command', { command: '/flow #2' });
+    const res2 = await post(port, '/api/command', { command: '/agent-flow:flow' });
     expect(res2.status).toBe(409);
     // Only one write should have happened
     expect(ptyStub.written).toHaveLength(1);
@@ -531,7 +575,7 @@ describe('POST /api/command/cancel — HTTP integration', () => {
 
   it('AC5 — cancel while running → 200 { cancelled: true }, interrupt sent, lock released', async () => {
     // Start a command first
-    const cmdRes = await post(port, '/api/command', { command: '/flow #8' });
+    const cmdRes = await post(port, '/api/command', { command: '/agent-flow:flow' });
     expect(cmdRes.status).toBe(202);
     expect(lock.isHeld()).toBe(true);
 
@@ -547,10 +591,10 @@ describe('POST /api/command/cancel — HTTP integration', () => {
   });
 
   it('AC5 — after cancel, next command is accepted (lock free)', async () => {
-    await post(port, '/api/command', { command: '/flow #1' });
+    await post(port, '/api/command', { command: '/agent-flow:flow' });
     await post(port, '/api/command/cancel', {});
 
-    const res = await post(port, '/api/command', { command: '/flow #2' });
+    const res = await post(port, '/api/command', { command: '/agent-flow:flow' });
     expect(res.status).toBe(202);
   });
 
@@ -581,7 +625,7 @@ describe('AC6 — audit failure path (HTTP integration)', () => {
 
   it('AC6 — audit throws → command not run (PTY not written), lock released → next command accepted', async () => {
     // With throwing audit store, tryRun() returns invalid
-    const res = await post(port, '/api/command', { command: '/flow #8' });
+    const res = await post(port, '/api/command', { command: '/agent-flow:flow' });
     // Returns 400 (reason: 'invalid' from audit failure path)
     expect(res.status).toBe(400);
 

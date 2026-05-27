@@ -1,5 +1,11 @@
 # Coder Lessons — dev-gui (newest first)
 
+## 2026-05-27 — AC7-Guard-Pfade brauchen symmetrische Abdeckung: alle required-Felder, alle Commands
+AC7 schreibt vor, dass fehlende Pflichtfelder keinen Request auslösen. Wenn `adopt` mit leerem Repo getestet wird, muss auch `preview up` mit leerem Repo getestet werden — beide nutzen dieselbe `composeCommand → null`-Logik, aber der reviewer erwartet expliziten Nachweis pro Pfad. Gleiches gilt für optionale Commands: `requirement`/`train` brauchen je einen Test mit und einen ohne Argument, um zu beweisen, dass kein doppelter Leeraum entsteht. Faustregel: jede Bedingung in `composeCommand` bekommt genau einen Test.
+
+## 2026-05-27 — Test-Header-Claim muss alle beworbenen Fälle abdecken
+Wenn der Datei-JSDoc-Header (`@file` oder erstes Block-Kommentar) Abdeckungen auflistet (z.B. „requirement/train free-text"), müssen dafür auch echte `it(…)`-Blöcke existieren. Ein Claim ohne zugehörigen Test-Body ist eine falsche Abdeckungsaussage — der reviewer wird es beim nächsten Diff melden. Fix: für jede im Header genannte Kategorie mindestens einen `it`-Block ergänzen, BEVOR der Header den Claim enthält.
+
 ## 2026-05-27 — `build-essential` enthält bereits `make` und `g++` — keine Duplikate in apt
 In einem Debian/Ubuntu-Dockerfile ist `build-essential` ein Metapaket, das `g++`, `make`,
 `gcc` und weitere Build-Tools enthält. Das explizite Auflisten von `make g++ build-essential`
