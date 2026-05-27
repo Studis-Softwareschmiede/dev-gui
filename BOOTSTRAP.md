@@ -22,7 +22,8 @@ On the **host VPS** you only need:
 |---------------------|------------------|---------------------------------------------------------|
 | `ACCESS_TEAM_DOMAIN`| yes              | Cloudflare Access team domain, e.g. `myteam.cloudflareaccess.com` |
 | `ACCESS_AUD`        | yes              | Cloudflare Access Application Audience tag (AUD)        |
-| `GH_TOKEN`          | recommended      | GitHub personal access token for GitHubReader (read:org, repo scope) |
+| `GH_TOKEN`          | recommended      | GitHub PAT (read:org + repo) for GitHubReader **and** agent-flow plugin clone (private repo) |
+| `GPG_PASSPHRASE`    | for agent-flow skills | GPG passphrase to decrypt `.env.gpg` shipped with the plugin repo (alternative: mount a file, see below) |
 | `SESSION_CMD`       | no               | Command the PTY spawns; defaults to `claude`            |
 | `DEV_NO_ACCESS`     | **never in prod**| Set to `1` only for local dev (bypasses Access JWT check) |
 | `NODE_ENV`          | yes in prod      | Set to `production` in prod (activates fail-fast Access check) |
@@ -81,6 +82,7 @@ docker run -d \
   -e GH_TOKEN=<your-gh-token> \
   -v dev-gui-claude:/root/.claude \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
+  -v ~/.config/softwareschmiede/gpg.pass:/root/.config/softwareschmiede/gpg.pass:ro \
   ghcr.io/studis-softwareschmiede/dev-gui:latest
 ```
 
@@ -89,7 +91,40 @@ Notes:
   container via `localhost:8080`, so no direct internet exposure.
 - `-v /var/run/docker.sock:/var/run/docker.sock:ro` — **read-only** mount; DockerReader
   uses the socket to list running containers. Write access is not needed and not granted.
+- `-v ~/.config/softwareschmiede/gpg.pass:/root/.config/softwareschmiede/gpg.pass:ro` —
+  GPG passphrase file (read-only mount) for the agent-flow Fabrik-Skills to decrypt
+  `.env.gpg` (ships with the plugin repo). Alternative: pass `-e GPG_PASSPHRASE=<pass>`
+  (environment variable). **Never bake the passphrase into the image.**
+- `-v dev-gui-claude:/root/.claude` — persists Claude OAuth credentials **and** the
+  installed agent-flow plugin across restarts. The entrypoint installs the plugin on
+  first boot (see section 3e below) and skips it on subsequent starts.
 - No secrets are baked into the image layers.
+
+### 3e. agent-flow plugin auto-provision (first boot)
+
+The container entrypoint (`docker-entrypoint.sh`) automatically installs the
+agent-flow plugin on first boot if it is not already present in `/root/.claude`:
+
+1. If `GH_TOKEN` is set, `git` is configured to use it as a credential for
+   cloning the **private** `Studis-Softwareschmiede/agent-flow` repo. The token
+   is never echoed or logged.
+2. `claude plugin marketplace add Studis-Softwareschmiede/agent-flow` downloads
+   the plugin metadata.
+3. `claude plugin install agent-flow@agent-flow` installs the plugin into
+   `/root/.claude` (persisted via the volume).
+4. On success, `node server.js` starts normally. On failure the install warning
+   is logged to stderr and the server still starts — `/agent-flow:*` slash-commands
+   won't resolve until the plugin is installed, but the GUI and status panel work.
+
+On subsequent restarts the plugin is already present in the volume and the
+install step is skipped.
+
+**Verify after first boot:**
+
+```sh
+docker exec dev-gui claude plugin list
+# should include: agent-flow
+```
 
 ---
 
