@@ -134,9 +134,30 @@ export class PtyManager extends EventEmitter {
 
     // Build a clean child env from an explicit allowlist (security/R01 — AC3).
     // Never spread process.env: parent secrets must not leak into the child PTY.
+    //
+    // Two categories are on the list:
+    //   (a) Pure shell/locale plumbing — needed by any interactive process.
+    //   (b) Skill-Bridge vars — explicitly required by /agent-flow:* skills that
+    //       run inside the claude session:
+    //       • DOCKER_HOST      — points the `docker` CLI at the socket-proxy
+    //                            (not a secret, just an address); without it the
+    //                            CLI defaults to /var/run/docker.sock which is
+    //                            not mounted (by design, see hardening AC4).
+    //       • GPG_PASSPHRASE   — used by ensure-gh-auth.sh / load-env.sh to
+    //                            decrypt the plugin's `.env.gpg` and mint a
+    //                            fresh GitHub-App token mid-session (token TTL
+    //                            ~1h). Yes, a secret — but skills already read
+    //                            the contents of `.env.gpg`, so the passphrase
+    //                            is not "more secret" than what it unlocks.
+    //
+    // Explicitly NOT on the list (server-only, must not leak to the agent):
+    //   ACCESS_TEAM_DOMAIN, ACCESS_AUD, ANTHROPIC_API_KEY, OPENAI_API_KEY,
+    //   NODE_ENV, DEV_NO_ACCESS, GH_TOKEN, GITHUB_TOKEN (cleared at boot anyway).
     const ALLOWED_ENV_KEYS = [
       'PATH', 'HOME', 'TERM', 'LANG', 'LC_ALL', 'LC_CTYPE',
       'USER', 'LOGNAME', 'SHELL', 'TZ',
+      // Skill-Bridge:
+      'DOCKER_HOST', 'GPG_PASSPHRASE',
     ];
     const childEnv = {};
     for (const key of ALLOWED_ENV_KEYS) {
