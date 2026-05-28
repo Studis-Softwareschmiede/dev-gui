@@ -10,6 +10,27 @@
 
 set -euo pipefail
 
+# ── Login-Persistenz: .claude.json aufs Volume umlenken ──────────────────────
+# Claude CLI (v2.x) legt OAuth-Credentials in $HOME/.claude.json ab — eine
+# Datei DIREKT im HOME, nicht unter $HOME/.claude/. Unser persistentes Volume
+# mountet aber nur das Verzeichnis $HOME/.claude/. Ohne diesen Schritt liegt
+# .claude.json auf der Overlay-FS und wird mit dem Container weggeworfen ⇒
+# der User muss sich nach jedem Restart neu einloggen.
+#
+# Strategie (idempotent):
+#   1) falls eine REGULÄRE Datei .claude.json existiert (frischer Container,
+#      Claude-Bootstrap hat schon geschrieben) ⇒ aufs Volume verschieben.
+#   2) state.json garantiert existieren lassen (sonst zeigt Symlink ins Leere
+#      und Claude-Reader scheitern beim ENOENT).
+#   3) Symlink $HOME/.claude.json → $HOME/.claude/state.json immer (re-)setzen.
+#      Falls Claude atomar (rename) schreibt und den Symlink durch eine Datei
+#      ersetzt, fängt der nächste Container-Start das wieder ein (Schritt 1).
+if [ -f "$HOME/.claude.json" ] && [ ! -L "$HOME/.claude.json" ]; then
+  mv "$HOME/.claude.json" "$HOME/.claude/state.json"
+fi
+[ -e "$HOME/.claude/state.json" ] || echo "{}" > "$HOME/.claude/state.json"
+ln -sf "$HOME/.claude/state.json" "$HOME/.claude.json"
+
 # ── AC6: git credential helper for private repo clone ────────────────────────
 # If GH_TOKEN is set, configure git so the private agent-flow repo can be cloned.
 # The resolved URL contains the token — do NOT log it.
@@ -30,6 +51,32 @@ if ! claude plugin list 2>/dev/null | grep -q agent-flow; then
   fi
 else
   echo "[entrypoint] agent-flow plugin already installed."
+fi
+
+# ── gh-Auth-Bootstrap: frischen GitHub-App-Token minten ──────────────────────
+# Source of Truth = `.env.gpg` im agent-flow Plugin-Tree (vom claude-plugin-Install
+# mit ausgeliefert) + GPG_PASSPHRASE als Container-Env. ensure-gh-auth.sh
+# entschlüsselt, mintet einen ~1h-gültigen Installation-Token und loggt `gh`
+# persistent in $HOME/.config/gh/hosts.yml ein.
+#
+# Best-effort: schlägt der Bootstrap fehl, startet der Server trotzdem; nur
+# die /agent-flow:*-Skills, die `gh` brauchen, schlagen dann auf.
+#
+# Wichtig: nach erfolgreichem Bootstrap die `GH_TOKEN`/`GITHUB_TOKEN`-Env-Vars
+# UNSETZEN, weil `gh` eine aktive Env-Var IMMER über die persistente Datei-Auth
+# stellt. Eine stale GH_TOKEN-Var (z.B. abgelaufener `ghs_…` vom docker-run)
+# würde sonst die frische, persistente Auth überschatten.
+PLUGIN_ROOT="$(find "$HOME/.claude/plugins/cache/agent-flow" -mindepth 2 -maxdepth 2 -type d -print -quit 2>/dev/null || true)"
+if [ -n "${PLUGIN_ROOT:-}" ] && [ -x "$PLUGIN_ROOT/scripts/ensure-gh-auth.sh" ]; then
+  echo "[entrypoint] minting fresh GitHub-App token via $PLUGIN_ROOT/scripts/ensure-gh-auth.sh ..."
+  if "$PLUGIN_ROOT/scripts/ensure-gh-auth.sh"; then
+    echo "[entrypoint] gh authenticated — clearing stale GH_TOKEN/GITHUB_TOKEN env-vars."
+    unset GH_TOKEN GITHUB_TOKEN
+  else
+    echo "[entrypoint] WARNING: gh-auth bootstrap failed — /agent-flow:* skills using gh may not work." >&2
+  fi
+else
+  echo "[entrypoint] no ensure-gh-auth.sh found (plugin missing or path changed) — skipping gh-auth bootstrap." >&2
 fi
 
 # ── Start the server ──────────────────────────────────────────────────────────
