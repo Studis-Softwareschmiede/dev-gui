@@ -1,5 +1,5 @@
 /**
- * GitHubView.jsx — GitHub-Ansicht mit Formular zum Anlegen eines Repositories.
+ * GitHubView.jsx — GitHub-Ansicht mit Repo-Liste und Formular zum Anlegen eines Repositories.
  *
  * github-repo-create:
  *   AC1  — Formular zum Anlegen eines Repos (Name Pflicht, Sichtbarkeit, Beschreibung,
@@ -7,21 +7,45 @@
  *   AC5  — Fehler-Antworten (403, 409, 422, 500, 502) werden klar dargestellt.
  *   AC6  — Leerer Name → Fehlermeldung, kein Request.
  *
+ * github-repos-overview (AC3, AC4, AC6 — Frontend-Anteil):
+ *   AC3  — Rendert Repo-Liste aus GET /api/github/repos: Name, Sichtbarkeit, offene Issues,
+ *           letzter CI-Status, klickbarer GitHub-Link (htmlUrl) pro Zeile.
+ *   AC4  — Über der Liste Andockpunkt „Neues Repo" (togglet RepoCreateForm);
+ *           pro Zeile Andockpunkt „Klonen" (disabled placeholder für #62).
+ *   AC6  — Graceful degradation bei Nichterreichbarkeit (Felder „unbekannt",
+ *           leere Liste mit Hinweis, kein Crash/Whitescreen).
+ *
  * A11y (NFR):
  *   - Alle Felder mit <label> beschriftet.
  *   - Fehler programmatisch zugeordnet (aria-describedby).
  *   - Erfolgs-URL fokussierbar (tabIndex, Fokusführung nach Submit).
  *   - Touch-Target ≥ 44 px für Buttons.
  *   - Kontrast ≥ 4.5:1 für alle sichtbaren Textelemente.
+ *   - Repo-Liste als semantische Tabelle; Links + Aktionen tastaturerreichbar.
  *
  * Security (Floor):
  *   - Keine Secrets in Request/Response.
  *   - API-Fehler werden verkürzt angezeigt; kein Stack-Trace-Leak.
+ *   - htmlUrl wird nur als href eingesetzt (kein eval / dangerouslySetInnerHTML).
  *
- * @param {{ onNavigate: (view: string) => void }} props
+ * @param {{ onNavigate: (view: string) => void, fetchFn?: typeof fetch }} props
  */
 
 import { useState, useRef, useCallback, useEffect } from 'react';
+
+// ── CI-Status-Metadaten (analog Dashboard.jsx) ───────────────────────────────
+
+/**
+ * CI status metadata: label + icon (a11y) + color (supplemental only).
+ * Color is never the sole indicator — label+icon carry the primary meaning.
+ */
+const CI_META = {
+  success:     { label: 'Erfolg',        icon: '✓', color: '#4ade80' },
+  failure:     { label: 'Fehlgeschlagen', icon: '✕', color: '#f87171' },
+  in_progress: { label: 'Läuft',         icon: '↻', color: '#fbbf24' },
+  none:        { label: 'Kein CI',       icon: '—', color: '#9ca3af' },
+  unknown:     { label: 'Unbekannt',     icon: '?', color: '#9ca3af' },
+};
 
 // ── API-Helfer ────────────────────────────────────────────────────────────────
 
@@ -44,6 +68,215 @@ async function createRepo(body) {
     throw err;
   }
   return data;
+}
+
+/**
+ * GET /api/github/repos
+ * @param {typeof fetch} fetchImpl
+ * @returns {Promise<{ repos: Array<{ name, fullName, visibility, openIssues, lastCi, htmlUrl }> }>}
+ */
+async function listRepos(fetchImpl) {
+  const fn = fetchImpl ?? globalThis.fetch.bind(globalThis);
+  const res = await fn('/api/github/repos');
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+// ── CiBadge ──────────────────────────────────────────────────────────────────
+
+/**
+ * Renders a CI status badge: icon + label (+ supplemental color).
+ * @param {{ status: string }} props
+ */
+function CiBadge({ status }) {
+  const meta = CI_META[status] ?? CI_META.unknown;
+  return (
+    <span style={{ ...styles.ciBadge, color: meta.color }} aria-label={`CI-Status: ${meta.label}`}>
+      <span aria-hidden="true">{meta.icon}</span>
+      {' '}
+      {meta.label}
+    </span>
+  );
+}
+
+// ── RepoRow ───────────────────────────────────────────────────────────────────
+
+/**
+ * Single repo row inside the repo list table.
+ * The "Klonen" button is an AC4 anchor point; disabled until #62 wires it up.
+ *
+ * @param {{ repo: { name, fullName, visibility, openIssues, lastCi, htmlUrl } }} props
+ */
+function RepoRow({ repo }) {
+  const { name, visibility, openIssues, lastCi, htmlUrl } = repo;
+
+  // Guard: only render <a href> for http(s) URLs (security/R02)
+  const safeUrl = /^https?:\/\//i.test(htmlUrl ?? '') ? htmlUrl : null;
+
+  const openIssuesDisplay =
+    openIssues === 'unknown' || openIssues == null ? 'unbekannt' : String(openIssues);
+
+  const visibilityLabel = visibility === 'public' ? 'Öffentlich' : 'Privat';
+
+  return (
+    <tr style={styles.tableRow}>
+      <td style={styles.td}>
+        <span style={styles.repoName}>{name ?? 'unbekannt'}</span>
+      </td>
+      <td style={styles.td}>
+        <span
+          style={{
+            ...styles.visibilityPill,
+            background: visibility === 'public' ? '#052e16' : '#0f172a',
+            color: visibility === 'public' ? '#86efac' : '#94a3b8',
+            border: visibility === 'public' ? '1px solid #166534' : '1px solid #334155',
+          }}
+        >
+          {visibilityLabel}
+        </span>
+      </td>
+      <td style={styles.td}>{openIssuesDisplay}</td>
+      <td style={styles.td}>
+        <CiBadge status={lastCi ?? 'unknown'} />
+      </td>
+      <td style={styles.td}>
+        {safeUrl ? (
+          <a
+            href={safeUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={styles.ghLink}
+            aria-label={`${name} auf GitHub öffnen`}
+          >
+            GitHub ↗
+          </a>
+        ) : (
+          <span style={styles.unknownText}>—</span>
+        )}
+      </td>
+      <td style={styles.td}>
+        {/* AC4 anchor point — Klonen wird in #62 verdrahtet */}
+        <button
+          type="button"
+          disabled
+          style={styles.btnClone}
+          aria-label={`${name} klonen (folgt)`}
+        >
+          Klonen
+        </button>
+      </td>
+    </tr>
+  );
+}
+
+// ── RepoList ─────────────────────────────────────────────────────────────────
+
+/**
+ * Fetches and renders the org repo list from GET /api/github/repos.
+ * AC4 anchor: "Neues Repo"-Button togglet das RepoCreateForm über der Liste.
+ * AC6: graceful degradation bei Nichterreichbarkeit.
+ *
+ * @param {{ fetchFn?: typeof fetch }} props
+ */
+function RepoList({ fetchFn }) {
+  const [repos, setRepos]           = useState(null);     // null = nicht geladen
+  const [loadState, setLoadState]   = useState('loading'); // 'loading'|'ok'|'error'
+  const [showCreateForm, setShowCreateForm] = useState(false);
+
+  const fetchFnRef = useRef(fetchFn ?? null);
+  useEffect(() => {
+    fetchFnRef.current = fetchFn ?? null;
+  }, [fetchFn]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function doFetch() {
+      try {
+        const data = await listRepos(fetchFnRef.current);
+        if (!cancelled) {
+          setRepos(data.repos ?? []);
+          setLoadState('ok');
+        }
+      } catch {
+        if (!cancelled) {
+          setRepos([]);
+          setLoadState('error');
+        }
+      }
+    }
+    doFetch();
+    return () => { cancelled = true; };
+  }, []);
+
+  return (
+    <section style={styles.section} aria-labelledby="repo-list-heading">
+      {/* AC4 anchor: Neues Repo — über der Liste */}
+      <div style={styles.listHeader}>
+        <h2 id="repo-list-heading" style={styles.sectionHeading}>
+          Repositories
+        </h2>
+        <button
+          type="button"
+          style={styles.btnNewRepo}
+          onClick={() => setShowCreateForm((v) => !v)}
+          aria-expanded={showCreateForm}
+          aria-controls="repo-create-section"
+        >
+          {showCreateForm ? 'Formular schließen' : '+ Neues Repo'}
+        </button>
+      </div>
+
+      {/* AC4 anchor: RepoCreateForm ein-/ausblendbar (immer im DOM; aria-controls braucht existierendes Element) */}
+      <div id="repo-create-section" hidden={!showCreateForm}>
+        {showCreateForm && <RepoCreateForm fetchFn={fetchFn} />}
+      </div>
+
+      {/* AC6: Lade-Indikator */}
+      {loadState === 'loading' && (
+        <div role="status" aria-live="polite" style={styles.notice}>
+          Lade Repositories…
+        </div>
+      )}
+
+      {/* AC6: Fehler-Hinweis */}
+      {loadState === 'error' && (
+        <div role="alert" style={styles.errorNotice}>
+          Repositories konnten nicht geladen werden — GitHub-Quelle nicht erreichbar.
+        </div>
+      )}
+
+      {/* AC3: Tabelle */}
+      {loadState !== 'loading' && (
+        <div style={styles.tableWrapper}>
+          {repos && repos.length === 0 ? (
+            <p style={styles.emptyHint}>
+              {loadState === 'error'
+                ? 'Keine Daten verfügbar.'
+                : 'Keine Repositories in der Org gefunden.'}
+            </p>
+          ) : repos && repos.length > 0 ? (
+            <table style={styles.table} aria-label="Org-Repositories">
+              <thead>
+                <tr>
+                  <th scope="col" style={styles.th}>Name</th>
+                  <th scope="col" style={styles.th}>Sichtbarkeit</th>
+                  <th scope="col" style={styles.th}>Offene Issues</th>
+                  <th scope="col" style={styles.th}>Letzter CI</th>
+                  <th scope="col" style={styles.th}>GitHub</th>
+                  <th scope="col" style={styles.th}>Aktionen</th>
+                </tr>
+              </thead>
+              <tbody>
+                {repos.map((repo) => (
+                  <RepoRow key={repo.name} repo={repo} />
+                ))}
+              </tbody>
+            </table>
+          ) : null}
+        </div>
+      )}
+    </section>
+  );
 }
 
 // ── RepoCreateForm ────────────────────────────────────────────────────────────
@@ -318,7 +551,8 @@ export function GitHubView({ onNavigate, fetchFn }) {
       <div style={styles.inner}>
         <h1 style={styles.title}>GitHub</h1>
 
-        <RepoCreateForm fetchFn={fetchFn} />
+        {/* AC3, AC4, AC6 — Repo-Liste mit Andockpunkten */}
+        <RepoList fetchFn={fetchFn} />
 
         <button
           type="button"
@@ -520,6 +754,108 @@ const styles = {
     borderRadius: 6,
     fontSize: 14,
     cursor: 'pointer',
+    minHeight: 44,
+  },
+  // ── RepoList styles ──────────────────────────────────────────────────────
+  listHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    marginBottom: 16,
+    flexWrap: 'wrap',
+  },
+  btnNewRepo: {
+    padding: '8px 16px',
+    background: '#1d4ed8',    // Kontrast #fff/#1d4ed8 ≥ 4.5:1
+    color: '#ffffff',
+    border: 'none',
+    borderRadius: 4,
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: 'pointer',
+    minHeight: 44,
+  },
+  notice: {
+    padding: '12px 0',
+    fontSize: 13,
+    color: '#9ca3af',
+  },
+  errorNotice: {
+    margin: '0 0 12px',
+    padding: '10px 14px',
+    background: '#2d0f0f',
+    border: '1px solid #7f1d1d',
+    borderRadius: 4,
+    fontSize: 13,
+    color: '#fca5a5',
+  },
+  emptyHint: {
+    margin: 0,
+    padding: '12px 0',
+    fontSize: 13,
+    color: '#9ca3af',
+  },
+  tableWrapper: {
+    overflowX: 'auto',
+  },
+  table: {
+    width: '100%',
+    borderCollapse: 'collapse',
+    fontSize: 13,
+  },
+  th: {
+    padding: '8px 12px',
+    textAlign: 'left',
+    fontWeight: 600,
+    color: '#9ca3af',
+    borderBottom: '1px solid #2a2a2a',
+    whiteSpace: 'nowrap',
+  },
+  tableRow: {
+    borderBottom: '1px solid #1e1e1e',
+  },
+  td: {
+    padding: '10px 12px',
+    verticalAlign: 'middle',
+    color: '#d4d4d4',
+  },
+  repoName: {
+    fontWeight: 600,
+    color: '#e5e7eb',
+  },
+  visibilityPill: {
+    display: 'inline-block',
+    padding: '2px 8px',
+    borderRadius: 4,
+    fontSize: 12,
+    fontWeight: 600,
+  },
+  ciBadge: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 4,
+    fontSize: 12,
+    fontWeight: 600,
+  },
+  ghLink: {
+    color: '#93c5fd',           // Kontrast auf #111 ≥ 4.5:1
+    textDecoration: 'underline',
+    fontSize: 13,
+    whiteSpace: 'nowrap',
+  },
+  unknownText: {
+    color: '#9ca3af',           // Kontrast auf #111 ≥ 4.5:1 (7.44:1)
+  },
+  btnClone: {
+    padding: '5px 12px',
+    background: '#1e293b',
+    color: '#9ca3af',
+    border: '1px solid #334155',
+    borderRadius: 4,
+    fontSize: 12,
+    cursor: 'not-allowed',
+    opacity: 0.6,
     minHeight: 44,
   },
 };
