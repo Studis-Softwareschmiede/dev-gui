@@ -12,6 +12,7 @@
  *   GET/PUT/DELETE /api/settings/credentials*     → Credential-Verwaltung (settings-credentials)
  *   GET/PUT/DELETE /api/settings/ssh-keys*        → SSH-Key-Verwaltung (settings-ssh-keys Stufe A)
  *   POST /api/settings/ssh-keys/:user/provision   → 501 (Stufe B, folgt in #47)
+ *   POST /api/github/repos                        → Org-Repo anlegen (github-repo-create #59)
  *   WS   /ws/terminal                             → PtyManager bridge (guarded by AccessGuard)
  */
 
@@ -33,6 +34,8 @@ import { githubReposListRouter } from './src/githubReposListRouter.js';
 import { CredentialStore } from './src/CredentialStore.js';
 import { credentialsRouter } from './src/credentialsRouter.js';
 import { sshKeysRouter } from './src/sshKeysRouter.js';
+import { githubReposRouter } from './src/githubReposRouter.js';
+import { GitHubWriter } from './src/GitHubWriter.js';
 
 const PORT = Number(process.env.PORT ?? 8080);
 
@@ -89,6 +92,10 @@ app.use(credentialsRouter(credentialStore, auditStore));
 
 // ── SSH-Keys route (settings-ssh-keys Stufe A) ────────────────────────────────
 app.use(sshKeysRouter(credentialStore, auditStore));
+
+// ── GitHub Repos write route (github-repo-create #59) ────────────────────────
+const githubWriter = new GitHubWriter({ credentialStore });
+app.use(githubReposRouter(auditStore, githubWriter));
 
 /**
  * GET /api/session → { state, restarts, startedAt }

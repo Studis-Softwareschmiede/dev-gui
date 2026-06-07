@@ -1,5 +1,17 @@
 # Coder Lessons — dev-gui (newest first)
 
+## 2026-06-07 — Neue Route immer in den server.js-Datei-Header-Kommentar eintragen
+Der JSDoc-Block am Anfang von `server.js` ist das kanonische Routen-Inventar des Projekts. Jede neue Route (GET, POST, WS) muss dort als Zeile nachgepflegt werden — auch wenn die Route in einem eigenen Router-Modul liegt. Fehlt der Eintrag, führt das zu einem Important-Befund beim nächsten Review. Muster: `GET  /api/github/repos  → { repos:[...] } (github-repos-overview)`.
+
+## 2026-06-07 — per_page=100-Limit bei GitHub-Paginierung dokumentieren oder Follow implementieren
+`per_page=100` ist das GitHub-API-Maximum für paginierte Listen. Wird kein Link-Header-Following implementiert, liefert der Endpoint bei Orgs mit >100 Repos eine stille Teilliste. Das muss entweder dokumentiert werden (`// max 100 Repos; kein Paginierungs-Follow — ausreichend für aktuelle Org-Größe`) oder durch einen echten Paginierungs-Loop abgelöst werden. Undokumentiertes Limit = Important-Befund.
+
+## 2026-06-07 — AC mit Frontend-Anteil: Formular + klickbare URL sind Teil des AC, nicht optional
+Wenn ein AC die Formulierung „das Frontend zeigt … an" oder „der Nutzer kann … anlegen" enthält (z.B. AC1 github-repo-create), ist das kein separater Nice-to-have-Schritt — es ist AC-Bestandteil. Fehlt das Frontend-Formular, gilt der AC als unerfüllt, auch wenn das Backend vollständig ist. Coder-Summary „AC-Abdeckung vollständig" ohne Frontend-Code ist ein False-Positive, das den Review-Gate blockiert. Lösung: entweder Frontend im selben Diff mitliefern ODER im Summary explizit als SPEC-LÜCKE melden, dass das Frontend in einer Folge-Iteration kommt (dann klärt der Reviewer ob das Item den Gate offen lassen darf).
+
+## 2026-06-07 — Audit-First + Ergebnis: pre-audit = Intent, post-audit = Outcome; beide Einträge nötig
+Wenn eine Spec das Audit-Feld „Ergebnis" auflistet (z.B. „Identität, Aktion, Repo-Name, Ergebnis, Zeit") UND gleichzeitig Audit-First fordert, sind ZWEI Audit-Einträge nötig: (a) vor der Mutation: Intent — Aktion + Name + geplante Sichtbarkeit; (b) nach der Mutation: Outcome — „success" oder „failed:errorClass". Das gleiche Muster gilt für sshKeysRouter Provision (TOFU-Lesson). Fehlender Post-Mutation-Eintrag = Important-Befund wenn die Spec „Ergebnis" und/oder „(Erfolg wie Fehlschlag)" nennt.
+
 ## 2026-06-07 — TOFU-Audit: Hash muss post-provision in den Audit-Store, nicht nur in die HTTP-Response
 Wenn eine Spec/OA-Beschreibung sagt „Hash im Audit-Eintrag geloggt" (z.B. TOFU-Host-Key-Fingerprint), genügt es NICHT, den Hash nur in der HTTP-Response zurückzugeben. Das Audit-First-Muster protokolliert den Audit-Eintrag vor der SSH-Verbindung — zu diesem Zeitpunkt ist der Hash noch nicht verfügbar. Lösung: nach dem SSH-Connect einen zweiten Audit-Eintrag (oder denselben ergänzen) mit dem tatsächlichen `hostKeyHash` schreiben, z.B. `auditStore.record({ identity, command: ssh-key:provision:tofu-hash:${hash} })`. Alternativ: Spec-OA-Text korrigieren, wenn Hash-im-Audit nicht gewünscht ist — dann aber klar dokumentieren, dass der Hash nur via HTTP-Response sichtbar ist.
 
