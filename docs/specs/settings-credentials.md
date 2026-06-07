@@ -60,10 +60,10 @@ In den Sektionen der Settings-Ansicht ([[settings-shell]]) lassen sich die **Cre
 - SSH-Key-spezifische Behandlung und VPS-Provisionierung (→ [[settings-ssh-keys]]).
 - Verifikation der Credentials gegen den jeweiligen Provider (kann Folge-Anforderung sein; hier nur Speicher-Lebenszyklus + Status).
 
-## Offene Architektur-Punkte (bindend zu klären — `architekt`, ggf. `dba`)
-- **OA1** — **Wo/wie werden Geheimnisse persistiert?** Kollidiert mit dem bestehenden Nicht-Ziel „keine eigene DB / kein State-Store" (CONCEPT + ADR-005). ADR-005 deckt nur **Lese**-Fabrik-Status; ein **verschlüsselter Credential-Store** ist eine bewusste neue Architektur-Erweiterung. Optionen u.a.: verschlüsselte Datei auf dem persistenten Volume (analog zu `.env.gpg`/bestehender GPG-Mechanik), Container-Secret, externer Secret-Manager. **Entscheidung + ADR durch `architekt`; Datenmodell ggf. `dba`.**
-- **OA2** — Schlüsselverwaltung/Master-Key-Herkunft (woher kommt der Verschlüsselungsschlüssel beim Boot, ohne ihn ins Image/Log zu legen).
-- **OA3** — Rollentrennung: genügt „gültiger Access" zum Mutieren, oder braucht es eine separate Berechtigungs-/Identitäts-Allowlist (analog Command-Allowlist)? (AC7 ist so formuliert, dass beide Auslegungen abnehmbar bleiben.)
+## Architektur-Punkte (ENTSCHIEDEN — siehe `docs/architecture.md` ADR-007)
+- **OA1 → ENTSCHIEDEN:** verschlüsselte JSON-Datei `secrets.enc.json` auf dem persistenten Volume (`/home/node/.claude/dev-gui/`); kein RDBMS. Einziger Boundary `CredentialStore` (`src/CredentialStore.js`). ADR-005 bleibt für Fabrik-Read-Models gültig (Re-Scoping in ADR-007).
+- **OA2 → ENTSCHIEDEN:** **AES-256-GCM** (Node-`crypto`); Master-Key aus Env `CRED_MASTER_KEY` (optional `CRED_MASTER_KEY_FILE`), per **scrypt** abgeleitet; nie im Image/Log. Fehlt der Key in Prod bei vorhandenem Store → Fail-Fast.
+- **OA3 → ENTSCHIEDEN:** gültige Access-Identität genügt zum Mutieren **+ Pflicht-Audit**; optionale Env `CRED_ADMIN_EMAILS` (Komma-Liste) schaltet eine engere Admin-Allowlist scharf (AC7 in beiden Auslegungen erfüllbar).
 
 ## Abhängigkeiten
 - [[settings-shell]] (Sektions-Gerüst + Route).

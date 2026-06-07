@@ -72,10 +72,10 @@ In der SSH-Keys-Sektion der Settings-Ansicht ([[settings-shell]]) lassen sich **
 - Entfernen von Keys aus `authorized_keys` auf dem VPS (De-Provisionierung) — Folge-Anforderung, falls gewünscht.
 - Festlegung des VPS-/SSH-Boundary, des Secret-Speichers und des VPS-Ziel-Schemas (Architektur-Entscheidung, ausstehend).
 
-## Offene Architektur-Punkte (bindend zu klären — `architekt`, ggf. `dba`)
-- **OA1** — Private-Key-Persistenz teilt das offene Secret-Store-/Verschlüsselungsthema mit [[settings-credentials]] (dortige OA1/OA2). Eine gemeinsame Lösung ist erwünscht.
-- **OA2** — **VPS-/SSH-Provisionierungs-Boundary** (Stufe B): wie erreicht der Dienst das VPS (SSH-Client vom Backend? Provider-API für Cloud-Init/Keys?), und woher kommt das VPS-Ziel-Schema? Hängt an der noch offenen [[view-vps]]-Detail-Architektur. **Entscheidung `architekt`.**
-- **OA3** — Rollentrennung für mutierende Aktionen (wie [[settings-credentials]] OA3).
+## Architektur-Punkte (ENTSCHIEDEN — siehe `docs/architecture.md` ADR-007/008)
+- **OA1 → ENTSCHIEDEN:** Private-Keys liegen im gemeinsamen `CredentialStore` (ADR-007), Key-Schema `ssh/<user>/private_key` (verschlüsselt) + Public-Key als Klartext-Metadatum. **Kein** separater SSH-Key-Store, **kein** Schreiben ins echte `~/.ssh/` des Containers (Stufe A).
+- **OA2 → ENTSCHIEDEN (Boundary, ADR-008):** Stufe B = **SSH-from-Backend** über die neue `VpsProvisioner`-Boundary (`src/VpsProvisioner.js`), Private-Key store-intern aus dem `CredentialStore`; Ziel-Schema `{ host, port?, targetUser }`. **Stufe A (#46) führt KEINEN SSH-/Provider-Code ein**; die `/provision`-Route bleibt bis #47 unimplementiert (501/„not yet"). SSH-Lib + Host-Key-Verifikation = Detail der #47-Spec.
+- **OA3 → ENTSCHIEDEN:** wie [[settings-credentials]] — Access-Identität + Pflicht-Audit, optionale `CRED_ADMIN_EMAILS`-Allowlist.
 
 ## Abhängigkeiten
 - [[settings-shell]] (Sektions-Gerüst + Route).
