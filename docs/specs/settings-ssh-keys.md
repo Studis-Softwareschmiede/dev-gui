@@ -54,13 +54,15 @@ In der SSH-Keys-Sektion der Settings-Ansicht ([[settings-shell]]) lassen sich **
 - **DELETE `/api/settings/ssh-keys/{user}`** (optional Query/Body: nur Public oder nur Private) → entfernt; Response mit aktualisiertem Status.
 
 **Stufe B:**
-- **POST `/api/settings/ssh-keys/{user}/provision`** — Body verweist auf ein VPS-Ziel (Ziel-Referenz aus dem künftigen VPS-Boundary; Format vom `architekt`) + Ziel-Benutzer auf dem VPS → trägt Public-Key idempotent in `authorized_keys` ein; Response `{ result: "ok"|"failed", reason? }`. Hinter Access + Identitäts-/Rollencheck; auditiert.
+- **POST `/api/settings/ssh-keys/{user}/provision`** — Body `{ host: string, port?: number, targetUser: string, hostFingerprint?: string }` → trägt Public-Key idempotent in `authorized_keys` des Ziel-Benutzers ein; Response `{ result: "added"|"already-present"|"error", reason? }`. Hinter Access + Identitäts-/Rollencheck (CRED_ADMIN_EMAILS); Audit-First. HTTP-Statuscodes: 200 bei Erfolg, 422 bei fehlendem Key, 502 bei VPS-Fehler (unreachable/auth-failed/host-key-mismatch), 500 bei internem Fehler.
 
 ## Edge-Cases & Fehlerverhalten
-- Provisionierung ohne hinterlegten Public-Key für den Benutzer → 422 („kein Public-Key gesetzt").
-- VPS-Ziel nicht erreichbar / Auth fehlgeschlagen → `result: "failed"` mit Grund, kein Teil-Eintrag, auditiert.
-- Bereits vorhandener identischer `authorized_keys`-Eintrag → kein Duplikat (idempotent), Ergebnis „ok".
-- Private-Key-Backend nicht erreichbar/konfiguriert → 5xx ohne Klartext-Leak; Bestehendes unverändert.
+- Provisionierung ohne hinterlegten Public-Key für den Benutzer → 422, `result:"error"`, `errorClass:"no-public-key"`.
+- Provisionierung ohne hinterlegten Private-Key → 422, `result:"error"`, `errorClass:"no-private-key"`.
+- VPS-Ziel nicht erreichbar / Auth fehlgeschlagen → 502, `result:"error"` mit Grund, kein Teil-Eintrag, auditiert.
+- Bereits vorhandener identischer `authorized_keys`-Eintrag → kein Duplikat (idempotent), `result:"already-present"` (200).
+- Host-Key-Fingerprint-Mismatch → 502, `result:"error"`, `errorClass:"host-key-mismatch"`.
+- Private-Key-Backend nicht erreichbar/konfiguriert → 500/502 ohne Klartext-Leak; Bestehendes unverändert.
 
 ## NFRs
 - **Sicherheit (Floor, hart):** Private-Keys at rest verschlüsselt (wie [[settings-credentials]], OA1/OA2 dort), niemals im Frontend-Bundle/Log/Audit/WS-Stream. Public-Keys dürfen im Klartext angezeigt werden.
@@ -74,7 +76,7 @@ In der SSH-Keys-Sektion der Settings-Ansicht ([[settings-shell]]) lassen sich **
 
 ## Architektur-Punkte (ENTSCHIEDEN — siehe `docs/architecture.md` ADR-007/008)
 - **OA1 → ENTSCHIEDEN:** Private-Keys liegen im gemeinsamen `CredentialStore` (ADR-007), Key-Schema `ssh/<user>/private_key` (verschlüsselt) + Public-Key als Klartext-Metadatum. **Kein** separater SSH-Key-Store, **kein** Schreiben ins echte `~/.ssh/` des Containers (Stufe A).
-- **OA2 → ENTSCHIEDEN (Boundary, ADR-008):** Stufe B = **SSH-from-Backend** über die neue `VpsProvisioner`-Boundary (`src/VpsProvisioner.js`), Private-Key store-intern aus dem `CredentialStore`; Ziel-Schema `{ host, port?, targetUser }`. **Stufe A (#46) führt KEINEN SSH-/Provider-Code ein**; die `/provision`-Route bleibt bis #47 unimplementiert (501/„not yet"). SSH-Lib + Host-Key-Verifikation = Detail der #47-Spec.
+- **OA2 → ENTSCHIEDEN (Boundary, ADR-008, #47 umgesetzt):** Stufe B = **SSH-from-Backend** über `VpsProvisioner`-Boundary (`src/VpsProvisioner.js`) mit `ssh2` Node-Lib (kein Shell-Out). Ziel-Schema `{ host, port?, targetUser }` + optional `hostFingerprint`. Host-Key-Policy: TOFU-accept wenn kein Fingerprint angegeben (Hash im Audit-Eintrag geloggt), strenge Prüfung wenn `hostFingerprint` übergeben. Authorisierung: CRED_ADMIN_EMAILS (identisch ADR-007).
 - **OA3 → ENTSCHIEDEN:** wie [[settings-credentials]] — Access-Identität + Pflicht-Audit, optionale `CRED_ADMIN_EMAILS`-Allowlist.
 
 ## Abhängigkeiten

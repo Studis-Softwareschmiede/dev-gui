@@ -1,5 +1,5 @@
 /**
- * SshKeysRouter.test.js — Unit- und Integrations-Tests für SSH-Key-Verwaltung (settings-ssh-keys AC1–AC6).
+ * SshKeysRouter.test.js — Unit- und Integrations-Tests für SSH-Key-Verwaltung (settings-ssh-keys AC1–AC10).
  *
  * Covers (settings-ssh-keys Stufe A):
  *   AC1  — GET /api/settings/ssh-keys liefert Liste mit Public-Key (Klartext) + Private-Key-Status
@@ -8,11 +8,17 @@
  *   AC4  — Ungültiges Public-Key-Format → 422, bestehender Wert bleibt
  *   AC5  — Mutationen auditiert ohne Private-Key-Klartext
  *   AC6  — Endpunkte hinter AccessGuard (403 ohne Token); mutierende durch CRED_ADMIN_EMAILS geschützt
- *   Extra — POST /provision → 501
+ *
+ * Covers (settings-ssh-keys Stufe B):
+ *   AC7  — POST /provision mit gemocktem VpsProvisioner → result:added
+ *   AC8  — POST /provision idempotent → result:already-present
+ *   AC9  — Provision auditiert ohne Geheim-Leak; Fehlerklassen (no-public-key, unreachable, auth-failed)
+ *   AC10 — POST /provision hinter CRED_ADMIN_EMAILS (403 wenn nicht berechtigt)
  *
  * Strategie:
  *   - CredentialStore mit tmpdir + injiziertem masterKey
  *   - sshKeysRouter mit Express-Testserver + DEV_NO_ACCESS=1
+ *   - VpsProvisioner für Stufe-B-Tests gemockt (kein echter SSH-Verkehr)
  */
 
 import { describe, it, beforeEach, afterEach, expect } from '@jest/globals';
@@ -52,8 +58,11 @@ async function makeTmpStore(masterKey = TEST_MASTER_KEY) {
 
 /**
  * Erstellt einen Express-Testserver mit sshKeysRouter.
+ * @param {object} store - CredentialStore
+ * @param {object} [auditStoreOverride] - AuditStore (optional)
+ * @param {object} [mockProvisioner] - VpsProvisioner-Mock (optional, für Stufe-B-Tests)
  */
-async function makeTestServer(store, auditStoreOverride) {
+async function makeTestServer(store, auditStoreOverride, mockProvisioner) {
   const app = express();
   app.use(express.json());
 
@@ -61,7 +70,7 @@ async function makeTestServer(store, auditStoreOverride) {
   app.use('/api', guard);
 
   const audit = auditStoreOverride ?? new AuditStore();
-  app.use(sshKeysRouter(store, audit));
+  app.use(sshKeysRouter(store, audit, mockProvisioner));
 
   const server = createServer(app);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -481,28 +490,486 @@ describe('sshKeysRouter — AC6: CRED_ADMIN_EMAILS Mutations-Autorisierung', () 
   });
 });
 
-// ── Provision-Route — 501 ──────────────────────────────────────────────────────
+// ── AC7 — POST /provision: added ──────────────────────────────────────────────
 
-describe('sshKeysRouter — POST /provision → 501', () => {
+describe('sshKeysRouter — AC7: POST /provision → result:added', () => {
   let dir, store, testServer;
 
   beforeEach(async () => {
     process.env.DEV_NO_ACCESS = '1';
     ({ store, dir } = await makeTmpStore());
-    testServer = await makeTestServer(store);
   });
 
   afterEach(async () => {
     delete process.env.DEV_NO_ACCESS;
-    await testServer.close();
+    if (testServer) await testServer.close();
     await rm(dir, { recursive: true, force: true });
   });
 
-  it('POST /api/settings/ssh-keys/root/provision → 501 (nicht implementiert)', async () => {
-    const res = await testServer.req('POST', '/api/settings/ssh-keys/root/provision', {});
-    expect(res.status).toBe(501);
+  it('AC7 — POST /provision mit result:added → 200 { result:"added" }', async () => {
+    const mockProv = {
+      provision: async () => ({ result: 'added' }),
+    };
+    testServer = await makeTestServer(store, undefined, mockProv);
+
+    const res = await testServer.req('POST', '/api/settings/ssh-keys/root/provision', {
+      host: '1.2.3.4',
+      targetUser: 'root',
+    });
+    expect(res.status).toBe(200);
     const data = JSON.parse(res.body);
-    expect(data.error).toMatch(/nicht implementiert|not yet/i);
+    expect(data.result).toBe('added');
+  });
+
+  it('AC7 — Validierung: fehlendes host-Feld → 400', async () => {
+    const mockProv = { provision: async () => ({ result: 'added' }) };
+    testServer = await makeTestServer(store, undefined, mockProv);
+
+    const res = await testServer.req('POST', '/api/settings/ssh-keys/root/provision', {
+      targetUser: 'root',
+    });
+    expect(res.status).toBe(400);
+    const data = JSON.parse(res.body);
+    expect(data.error).toMatch(/host/i);
+  });
+
+  it('AC7 — Validierung: fehlendes targetUser-Feld → 400', async () => {
+    const mockProv = { provision: async () => ({ result: 'added' }) };
+    testServer = await makeTestServer(store, undefined, mockProv);
+
+    const res = await testServer.req('POST', '/api/settings/ssh-keys/root/provision', {
+      host: '1.2.3.4',
+    });
+    expect(res.status).toBe(400);
+    const data = JSON.parse(res.body);
+    expect(data.error).toMatch(/targetUser/i);
+  });
+
+  it('AC7 — Validierung: ungültiger Port (0) → 400', async () => {
+    const mockProv = { provision: async () => ({ result: 'added' }) };
+    testServer = await makeTestServer(store, undefined, mockProv);
+
+    const res = await testServer.req('POST', '/api/settings/ssh-keys/root/provision', {
+      host: '1.2.3.4',
+      port: 0,
+      targetUser: 'root',
+    });
+    expect(res.status).toBe(400);
+    const data = JSON.parse(res.body);
+    expect(data.error).toMatch(/port/i);
+  });
+
+  it('AC7 — Validierung: Port 65535 ist erlaubt', async () => {
+    const mockProv = { provision: async () => ({ result: 'added' }) };
+    testServer = await makeTestServer(store, undefined, mockProv);
+
+    const res = await testServer.req('POST', '/api/settings/ssh-keys/root/provision', {
+      host: '1.2.3.4',
+      port: 65535,
+      targetUser: 'root',
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it('AC7 — Validierung: ungültiger Benutzer-Label im URL → 400', async () => {
+    const mockProv = { provision: async () => ({ result: 'added' }) };
+    testServer = await makeTestServer(store, undefined, mockProv);
+
+    const res = await testServer.req('POST', '/api/settings/ssh-keys/invalid%20user/provision', {
+      host: '1.2.3.4',
+      targetUser: 'root',
+    });
+    expect(res.status).toBe(400);
+  });
+});
+
+// ── AC8 — POST /provision: already-present (Idempotenz) ───────────────────────
+
+describe('sshKeysRouter — AC8: POST /provision → result:already-present', () => {
+  let dir, store, testServer;
+
+  beforeEach(async () => {
+    process.env.DEV_NO_ACCESS = '1';
+    ({ store, dir } = await makeTmpStore());
+  });
+
+  afterEach(async () => {
+    delete process.env.DEV_NO_ACCESS;
+    if (testServer) await testServer.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('AC8 — POST /provision mit result:already-present → 200 { result:"already-present" }', async () => {
+    const mockProv = {
+      provision: async () => ({ result: 'already-present' }),
+    };
+    testServer = await makeTestServer(store, undefined, mockProv);
+
+    const res = await testServer.req('POST', '/api/settings/ssh-keys/root/provision', {
+      host: '1.2.3.4',
+      targetUser: 'root',
+    });
+    expect(res.status).toBe(200);
+    const data = JSON.parse(res.body);
+    expect(data.result).toBe('already-present');
+  });
+});
+
+// ── AC9 — POST /provision: Audit + Fehlerklassen ──────────────────────────────
+
+describe('sshKeysRouter — AC9: Audit + Fehlerklassen', () => {
+  let dir, store, testServer, auditStore;
+
+  beforeEach(async () => {
+    process.env.DEV_NO_ACCESS = '1';
+    ({ store, dir } = await makeTmpStore());
+    auditStore = new AuditStore();
+  });
+
+  afterEach(async () => {
+    delete process.env.DEV_NO_ACCESS;
+    if (testServer) await testServer.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('AC9 — POST /provision schreibt Audit-Eintrag (Audit-First)', async () => {
+    const mockProv = { provision: async () => ({ result: 'added' }) };
+    testServer = await makeTestServer(store, auditStore, mockProv);
+
+    await testServer.req('POST', '/api/settings/ssh-keys/root/provision', {
+      host: '1.2.3.4',
+      targetUser: 'root',
+    });
+
+    const entries = auditStore.getAll();
+    expect(entries.length).toBeGreaterThan(0);
+    const last = entries[entries.length - 1];
+    expect(last.command).toMatch(/ssh-key:provision:root/);
+  });
+
+  it('AC9 — Audit-Eintrag enthält kein Private-Key-Klartext', async () => {
+    const secretKey = 'ULTRA_SECRET_PRIVATE_KEY_PROVISION';
+    await store.set('ssh/root/private_key', secretKey);
+    const mockProv = { provision: async () => ({ result: 'added' }) };
+    testServer = await makeTestServer(store, auditStore, mockProv);
+
+    await testServer.req('POST', '/api/settings/ssh-keys/root/provision', {
+      host: '1.2.3.4',
+      targetUser: 'root',
+    });
+
+    const entries = auditStore.getAll();
+    const allEntriesStr = JSON.stringify(entries);
+    expect(allEntriesStr).not.toContain(secretKey);
+  });
+
+  it('AC9 — errorClass:no-public-key → 422', async () => {
+    const mockProv = {
+      provision: async () => ({ result: 'error', errorClass: 'no-public-key', reason: 'Kein Public-Key' }),
+    };
+    testServer = await makeTestServer(store, auditStore, mockProv);
+
+    const res = await testServer.req('POST', '/api/settings/ssh-keys/root/provision', {
+      host: '1.2.3.4',
+      targetUser: 'root',
+    });
+    expect(res.status).toBe(422);
+    const data = JSON.parse(res.body);
+    expect(data.result).toBe('error');
+  });
+
+  it('AC9 — errorClass:no-private-key → 422', async () => {
+    const mockProv = {
+      provision: async () => ({ result: 'error', errorClass: 'no-private-key', reason: 'Kein Private-Key' }),
+    };
+    testServer = await makeTestServer(store, auditStore, mockProv);
+
+    const res = await testServer.req('POST', '/api/settings/ssh-keys/root/provision', {
+      host: '1.2.3.4',
+      targetUser: 'root',
+    });
+    expect(res.status).toBe(422);
+  });
+
+  it('AC9 — errorClass:unreachable → 502', async () => {
+    const mockProv = {
+      provision: async () => ({ result: 'error', errorClass: 'unreachable', reason: 'Nicht erreichbar' }),
+    };
+    testServer = await makeTestServer(store, auditStore, mockProv);
+
+    const res = await testServer.req('POST', '/api/settings/ssh-keys/root/provision', {
+      host: '1.2.3.4',
+      targetUser: 'root',
+    });
+    expect(res.status).toBe(502);
+    const data = JSON.parse(res.body);
+    expect(data.result).toBe('error');
+    // Kein Geheim-Leak in Response
+    expect(res.body).not.toContain('FAKEPRIVATE');
+    expect(res.body).not.toContain('ULTRA_SECRET');
+  });
+
+  it('AC9 — errorClass:auth-failed → 502', async () => {
+    const mockProv = {
+      provision: async () => ({ result: 'error', errorClass: 'auth-failed', reason: 'Auth fehlgeschlagen' }),
+    };
+    testServer = await makeTestServer(store, auditStore, mockProv);
+
+    const res = await testServer.req('POST', '/api/settings/ssh-keys/root/provision', {
+      host: '1.2.3.4',
+      targetUser: 'root',
+    });
+    expect(res.status).toBe(502);
+  });
+
+  it('AC9 — Response enthält keinen Private-Key-Klartext (kein Geheim-Leak)', async () => {
+    const secretKey = 'MY_SECRET_PROVISION_PRIVATE_KEY';
+    await store.set('ssh/root/private_key', secretKey);
+    const mockProv = { provision: async () => ({ result: 'added' }) };
+    testServer = await makeTestServer(store, auditStore, mockProv);
+
+    const res = await testServer.req('POST', '/api/settings/ssh-keys/root/provision', {
+      host: '1.2.3.4',
+      targetUser: 'root',
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body).not.toContain(secretKey);
+    expect(res.body).not.toContain('MY_SECRET_PROVISION');
+  });
+});
+
+// ── I1 — TOFU-Hash im zweiten Audit-Eintrag ───────────────────────────────────
+
+describe('sshKeysRouter — I1: TOFU-Hash-Audit-Eintrag', () => {
+  let dir, store, testServer, auditStore;
+
+  beforeEach(async () => {
+    process.env.DEV_NO_ACCESS = '1';
+    ({ store, dir } = await makeTmpStore());
+    auditStore = new AuditStore();
+  });
+
+  afterEach(async () => {
+    delete process.env.DEV_NO_ACCESS;
+    if (testServer) await testServer.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('I1 — provision() mit hostKeyHash → zweiter Audit-Eintrag mit Hash (tofu-accepted)', async () => {
+    const fakeHash = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
+    const mockProv = {
+      provision: async () => ({ result: 'added', hostKeyHash: fakeHash }),
+    };
+    testServer = await makeTestServer(store, auditStore, mockProv);
+
+    await testServer.req('POST', '/api/settings/ssh-keys/root/provision', {
+      host: '1.2.3.4',
+      targetUser: 'root',
+    });
+
+    const entries = auditStore.getAll();
+    // Zwei Einträge: Audit-First (provision) + TOFU-Hash-Eintrag
+    expect(entries.length).toBeGreaterThanOrEqual(2);
+    const tofuEntry = entries.find((e) => e.command.includes('tofu-accepted'));
+    expect(tofuEntry).toBeTruthy();
+    expect(tofuEntry.command).toContain(fakeHash);
+    // Kein Klartext-Private-Key im TOFU-Eintrag
+    expect(tofuEntry.command).not.toContain('SECRET');
+    expect(tofuEntry.command).not.toContain('PRIVATE');
+  });
+
+  it('I1 — provision() ohne hostKeyHash → kein zweiter tofu-accepted-Eintrag', async () => {
+    const mockProv = {
+      provision: async () => ({ result: 'added' }), // kein hostKeyHash
+    };
+    testServer = await makeTestServer(store, auditStore, mockProv);
+
+    await testServer.req('POST', '/api/settings/ssh-keys/root/provision', {
+      host: '1.2.3.4',
+      targetUser: 'root',
+    });
+
+    const entries = auditStore.getAll();
+    const tofuEntry = entries.find((e) => e.command.includes('tofu-accepted'));
+    expect(tofuEntry).toBeUndefined();
+  });
+
+  it('I1 — TOFU-Audit-Eintrag enthält keinen Private-Key-Klartext', async () => {
+    const secretKey = 'ULTRA_SECRET_TOFU_PRIVATE_KEY';
+    await store.set('ssh/root/private_key', secretKey);
+    const fakeHash = 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBQ=';
+    const mockProv = {
+      provision: async () => ({ result: 'already-present', hostKeyHash: fakeHash }),
+    };
+    testServer = await makeTestServer(store, auditStore, mockProv);
+
+    await testServer.req('POST', '/api/settings/ssh-keys/root/provision', {
+      host: '1.2.3.4',
+      targetUser: 'root',
+    });
+
+    const entries = auditStore.getAll();
+    const allStr = JSON.stringify(entries);
+    expect(allStr).not.toContain(secretKey);
+    expect(allStr).not.toContain('ULTRA_SECRET');
+  });
+});
+
+// ── S2 — hostFingerprint-Format-Validierung ───────────────────────────────────
+
+describe('sshKeysRouter — S2: hostFingerprint-Format-Validierung', () => {
+  let dir, store, testServer;
+
+  beforeEach(async () => {
+    process.env.DEV_NO_ACCESS = '1';
+    ({ store, dir } = await makeTmpStore());
+  });
+
+  afterEach(async () => {
+    delete process.env.DEV_NO_ACCESS;
+    if (testServer) await testServer.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('S2 — gültiger SHA256-Base64-Fingerprint (44 Zeichen) → 200', async () => {
+    const mockProv = { provision: async () => ({ result: 'added' }) };
+    testServer = await makeTestServer(store, undefined, mockProv);
+
+    // SHA256 → 32 Bytes → Base64 → 44 Zeichen (mit '='-Padding)
+    const validFp = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
+    const res = await testServer.req('POST', '/api/settings/ssh-keys/root/provision', {
+      host: '1.2.3.4',
+      targetUser: 'root',
+      hostFingerprint: validFp,
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it('S2 — gültiger SHA256-Base64-Fingerprint (43 Zeichen, ohne Padding) → 200', async () => {
+    const mockProv = { provision: async () => ({ result: 'added' }) };
+    testServer = await makeTestServer(store, undefined, mockProv);
+
+    // 43 Zeichen ohne '='-Padding (ebenfalls gültig)
+    const validFp43 = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'.slice(0, 43);
+    const res = await testServer.req('POST', '/api/settings/ssh-keys/root/provision', {
+      host: '1.2.3.4',
+      targetUser: 'root',
+      hostFingerprint: validFp43,
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it('S2 — zu kurzer Fingerprint → 422 mit klarer Meldung', async () => {
+    const mockProv = { provision: async () => ({ result: 'added' }) };
+    testServer = await makeTestServer(store, undefined, mockProv);
+
+    const res = await testServer.req('POST', '/api/settings/ssh-keys/root/provision', {
+      host: '1.2.3.4',
+      targetUser: 'root',
+      hostFingerprint: 'tooshort',
+    });
+    expect(res.status).toBe(422);
+    const data = JSON.parse(res.body);
+    expect(data.error).toMatch(/länge|length/i);
+  });
+
+  it('S2 — zu langer Fingerprint (45+ Zeichen) → 422', async () => {
+    const mockProv = { provision: async () => ({ result: 'added' }) };
+    testServer = await makeTestServer(store, undefined, mockProv);
+
+    const res = await testServer.req('POST', '/api/settings/ssh-keys/root/provision', {
+      host: '1.2.3.4',
+      targetUser: 'root',
+      hostFingerprint: 'A'.repeat(45),
+    });
+    expect(res.status).toBe(422);
+    const data = JSON.parse(res.body);
+    expect(data.error).toMatch(/länge|length/i);
+  });
+
+  it('S2 — Fingerprint mit ungültigem Zeichen (!) → 422', async () => {
+    const mockProv = { provision: async () => ({ result: 'added' }) };
+    testServer = await makeTestServer(store, undefined, mockProv);
+
+    // 43 Zeichen lang, aber enthält '!' statt Base64-Zeichen
+    const invalidFp = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA!';
+    const res = await testServer.req('POST', '/api/settings/ssh-keys/root/provision', {
+      host: '1.2.3.4',
+      targetUser: 'root',
+      hostFingerprint: invalidFp,
+    });
+    expect(res.status).toBe(422);
+    const data = JSON.parse(res.body);
+    expect(data.error).toMatch(/zeichen|character/i);
+  });
+
+  it('S2 — hostFingerprint weggelassen → kein Fehler (optional)', async () => {
+    const mockProv = { provision: async () => ({ result: 'added' }) };
+    testServer = await makeTestServer(store, undefined, mockProv);
+
+    const res = await testServer.req('POST', '/api/settings/ssh-keys/root/provision', {
+      host: '1.2.3.4',
+      targetUser: 'root',
+      // kein hostFingerprint
+    });
+    expect(res.status).toBe(200);
+  });
+});
+
+// ── AC10 — POST /provision: Identitäts-/Rollenschutz ─────────────────────────
+
+describe('sshKeysRouter — AC10: Provision-AuthZ (CRED_ADMIN_EMAILS)', () => {
+  let dir, store, testServer;
+
+  beforeEach(async () => {
+    process.env.DEV_NO_ACCESS = '1';
+    ({ store, dir } = await makeTmpStore());
+  });
+
+  afterEach(async () => {
+    delete process.env.DEV_NO_ACCESS;
+    delete process.env.CRED_ADMIN_EMAILS;
+    if (testServer) await testServer.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('AC10 — ohne CRED_ADMIN_EMAILS: dev@local darf provisionieren', async () => {
+    delete process.env.CRED_ADMIN_EMAILS;
+    const mockProv = { provision: async () => ({ result: 'added' }) };
+    testServer = await makeTestServer(store, undefined, mockProv);
+
+    const res = await testServer.req('POST', '/api/settings/ssh-keys/root/provision', {
+      host: '1.2.3.4',
+      targetUser: 'root',
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it('AC10 — CRED_ADMIN_EMAILS gesetzt, Identität nicht in Liste → 403', async () => {
+    process.env.CRED_ADMIN_EMAILS = 'admin@example.com,other@example.com';
+    const mockProv = { provision: async () => ({ result: 'added' }) };
+    testServer = await makeTestServer(store, undefined, mockProv);
+
+    const res = await testServer.req('POST', '/api/settings/ssh-keys/root/provision', {
+      host: '1.2.3.4',
+      targetUser: 'root',
+    });
+    expect(res.status).toBe(403);
+    const data = JSON.parse(res.body);
+    expect(data.error).toMatch(/berechtigung/i);
+  });
+
+  it('AC10 — CRED_ADMIN_EMAILS gesetzt, Identität in Liste → 200', async () => {
+    process.env.CRED_ADMIN_EMAILS = 'dev@local,other@example.com';
+    const mockProv = { provision: async () => ({ result: 'added' }) };
+    testServer = await makeTestServer(store, undefined, mockProv);
+
+    const res = await testServer.req('POST', '/api/settings/ssh-keys/root/provision', {
+      host: '1.2.3.4',
+      targetUser: 'root',
+    });
+    expect(res.status).toBe(200);
   });
 });
 

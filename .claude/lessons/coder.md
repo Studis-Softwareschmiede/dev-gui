@@ -1,5 +1,8 @@
 # Coder Lessons — dev-gui (newest first)
 
+## 2026-06-07 — TOFU-Audit: Hash muss post-provision in den Audit-Store, nicht nur in die HTTP-Response
+Wenn eine Spec/OA-Beschreibung sagt „Hash im Audit-Eintrag geloggt" (z.B. TOFU-Host-Key-Fingerprint), genügt es NICHT, den Hash nur in der HTTP-Response zurückzugeben. Das Audit-First-Muster protokolliert den Audit-Eintrag vor der SSH-Verbindung — zu diesem Zeitpunkt ist der Hash noch nicht verfügbar. Lösung: nach dem SSH-Connect einen zweiten Audit-Eintrag (oder denselben ergänzen) mit dem tatsächlichen `hostKeyHash` schreiben, z.B. `auditStore.record({ identity, command: ssh-key:provision:tofu-hash:${hash} })`. Alternativ: Spec-OA-Text korrigieren, wenn Hash-im-Audit nicht gewünscht ist — dann aber klar dokumentieren, dass der Hash nur via HTTP-Response sichtbar ist.
+
 ## 2026-06-07 — Promise.allSettled-Refactor: loadState('error') muss bei Teil-Fehlern explizit gesetzt werden
 Wenn ein `load()`-Hook von einem einzelnen `await fetchX()` auf `Promise.allSettled([fetchA(), fetchB()])` umgebaut wird, MUSS der `loadState`-Wert bei jedem rejected-Branch explizit auf `'error'` gesetzt werden (oder eine eigene `loadError`-Flag genutzt werden), weil `allSettled` niemals wirft und den `catch`-Zweig unerreichbar macht. Typischer Fehler: `setLoadError(...)` wird zwar gesetzt, aber `{loadState === 'error' && ...}` feuert nie, weil danach bedingungslos `setLoadState('ok')` folgt — die Fehlermeldung bleibt unsichtbar. Fix: `if (credsData.status !== 'fulfilled') setLoadState('error');` ODER die Anzeige auf `{loadError && ...}` umstellen und `loadState` nur noch für den Lade-Spinner nutzen.
 
