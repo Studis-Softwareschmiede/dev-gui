@@ -11,13 +11,17 @@
  *   AC6  — Rückkehr zum Panel möglich.
  *   AC8  — Eingabe-Validierung im Frontend (Pflichtfeld, Längenlimit) + klare Fehlermeldung.
  *
- * SSH-Keys (settings-ssh-keys Stufe A):
- *   SSH-AC1 — Je Benutzer-Label: Public-Key hinterlegen/anzeigen/ändern (vollständig sichtbar).
- *   SSH-AC2 — Private-Key setzen/überschreiben: write-only/maskiert, niemals im Klartext angezeigt.
- *   SSH-AC3 — Public- und/oder Private-Key löschen; danach Status „nicht gesetzt".
- *   SSH-AC4 — Public-Key-Format-Validierung im Frontend (OpenSSH); klare Fehlermeldung.
- *   SSH-AC5 — Aktionen auditiert; Private-Key-Klartext nie im Frontend-Bundle/Log.
- *   SSH-AC6 — Endpunkte hinter Access-Mauer; mutierende identitäts-/rollengeschützt.
+ * SSH-Keys (settings-ssh-keys Stufe A + B):
+ *   SSH-AC1  — Je Benutzer-Label: Public-Key hinterlegen/anzeigen/ändern (vollständig sichtbar).
+ *   SSH-AC2  — Private-Key setzen/überschreiben: write-only/maskiert, niemals im Klartext angezeigt.
+ *   SSH-AC3  — Public- und/oder Private-Key löschen; danach Status „nicht gesetzt".
+ *   SSH-AC4  — Public-Key-Format-Validierung im Frontend (OpenSSH); klare Fehlermeldung.
+ *   SSH-AC5  — Aktionen auditiert; Private-Key-Klartext nie im Frontend-Bundle/Log.
+ *   SSH-AC6  — Endpunkte hinter Access-Mauer; mutierende identitäts-/rollengeschützt.
+ *   SSH-AC7  — Provision-Button je Benutzer: Public-Key idempotent in authorized_keys eintragen.
+ *   SSH-AC8  — Wiederholte Provisionierung idempotent (Backend-Garantie, UI zeigt 'already-present').
+ *   SSH-AC9  — Provision-Ergebnis (added/already-present/error) ohne Geheim-Leak angezeigt.
+ *   SSH-AC10 — Provision-Aktion nur berechtigter Identität zugänglich (403 sonst).
  *
  * A11y: WCAG 2.1 AA — Überschriften-Struktur, sichtbarer Fokus, Touch-Target ≥ 44 px,
  *       Kontrast ≥ 4.5:1, Fehler programmatisch zugeordnet (aria-describedby).
@@ -149,6 +153,27 @@ async function deleteSshKey(user, target = 'both') {
   const data = await res.json();
   if (!res.ok) throw new Error(data.error ?? `Löschen fehlgeschlagen (${res.status})`);
   return data;
+}
+
+/**
+ * Provisioniert den Public-Key eines Benutzers auf einem VPS-Ziel (AC7–AC9).
+ * Body: { host, port?, targetUser, hostFingerprint? }
+ *
+ * @returns {Promise<{ result: 'added'|'already-present'|'error', reason?: string, hostKeyHash?: string }>}
+ */
+async function provisionSshKey(user, { host, port, targetUser, hostFingerprint }) {
+  const body = { host, targetUser };
+  if (port !== undefined && port !== '') body.port = Number(port);
+  if (hostFingerprint && hostFingerprint.trim()) body.hostFingerprint = hostFingerprint.trim();
+
+  const res = await fetch(`/api/settings/ssh-keys/${encodeURIComponent(user)}/provision`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  // Für Provision: HTTP-Fehler geben result:'error' + reason zurück — immer JSON
+  return { ...data, httpStatus: res.status };
 }
 
 // ── CredentialField ───────────────────────────────────────────────────────────
@@ -453,6 +478,216 @@ function MiscSection({ miscItems, onSaved }) {
   );
 }
 
+// ── ProvisionForm ─────────────────────────────────────────────────────────────
+
+/**
+ * Formular zum Auslösen einer VPS-Provisionierung (AC7–AC9).
+ * Felder: host (Pflicht), port (optional), targetUser (Pflicht), hostFingerprint (optional).
+ * Ergebnis wird angezeigt ohne Geheim-Leak.
+ *
+ * @param {{
+ *   user: string,
+ *   onClose: () => void,
+ * }} props
+ */
+function ProvisionForm({ user, onClose }) {
+  const [host, setHost] = useState('');
+  const [port, setPort] = useState('');
+  const [targetUser, setTargetUser] = useState('');
+  const [hostFingerprint, setHostFingerprint] = useState('');
+  const [provisioning, setProvisioning] = useState(false);
+  const [result, setResult] = useState(null); // { result, reason?, hostKeyHash? }
+  const [error, setError] = useState(null);
+  const hostInputRef = useRef(null);
+  const errorId = `provision-err-${user}`;
+  const resultId = `provision-result-${user}`;
+
+  useEffect(() => {
+    if (hostInputRef.current) hostInputRef.current.focus();
+  }, []);
+
+  const handleProvision = useCallback(async () => {
+    setError(null);
+    setResult(null);
+
+    // Frontend-Validierung
+    const trimHost = host.trim();
+    const trimTargetUser = targetUser.trim();
+    const trimPort = port.trim();
+
+    if (!trimHost) {
+      setError('Host ist ein Pflichtfeld.');
+      hostInputRef.current?.focus();
+      return;
+    }
+    if (!trimTargetUser) {
+      setError('Ziel-Benutzer ist ein Pflichtfeld.');
+      return;
+    }
+    if (trimPort !== '') {
+      const p = Number(trimPort);
+      if (!Number.isInteger(p) || p < 1 || p > 65535) {
+        setError('Port muss eine ganze Zahl zwischen 1 und 65535 sein.');
+        return;
+      }
+    }
+
+    setProvisioning(true);
+    try {
+      const res = await provisionSshKey(user, {
+        host: trimHost,
+        port: trimPort !== '' ? trimPort : undefined,
+        targetUser: trimTargetUser,
+        hostFingerprint: hostFingerprint.trim() || undefined,
+      });
+      setResult(res);
+    } catch (err) {
+      // Netzwerkfehler (fetch selbst gescheitert)
+      setError(err.message ?? 'Provisionierung fehlgeschlagen');
+    } finally {
+      setProvisioning(false);
+    }
+  }, [user, host, port, targetUser, hostFingerprint]);
+
+  const isSuccess = result?.result === 'added' || result?.result === 'already-present';
+  const isAlreadyPresent = result?.result === 'already-present';
+  const isFailed = result?.result === 'error';
+
+  return (
+    <div style={provisionStyles.form} role="region" aria-label={`VPS-Provisionierung für ${user}`}>
+      <h4 style={provisionStyles.heading}>VPS-Provisionierung für <code>{user}</code></h4>
+      <p style={provisionStyles.hint}>
+        Trägt den hinterlegten Public-Key in <code>authorized_keys</code> des Ziel-Benutzers ein.
+      </p>
+
+      <div style={provisionStyles.fieldRow}>
+        <label htmlFor={`prov-host-${user}`} style={provisionStyles.label}>
+          Host <span aria-hidden="true" style={provisionStyles.required}>*</span>
+        </label>
+        <input
+          id={`prov-host-${user}`}
+          ref={hostInputRef}
+          type="text"
+          value={host}
+          onChange={(e) => setHost(e.target.value)}
+          placeholder="z.B. 1.2.3.4 oder vps.example.com"
+          style={fieldStyles.input}
+          aria-required="true"
+          aria-describedby={error ? errorId : undefined}
+          autoComplete="off"
+          disabled={provisioning}
+        />
+      </div>
+
+      <div style={provisionStyles.fieldRow}>
+        <label htmlFor={`prov-port-${user}`} style={provisionStyles.label}>
+          Port <span style={provisionStyles.optional}>(optional, Default: 22)</span>
+        </label>
+        <input
+          id={`prov-port-${user}`}
+          type="number"
+          value={port}
+          onChange={(e) => setPort(e.target.value)}
+          placeholder="22"
+          style={{ ...fieldStyles.input, width: 120 }}
+          min="1"
+          max="65535"
+          aria-describedby={error ? errorId : undefined}
+          disabled={provisioning}
+        />
+      </div>
+
+      <div style={provisionStyles.fieldRow}>
+        <label htmlFor={`prov-user-${user}`} style={provisionStyles.label}>
+          Ziel-Benutzer <span aria-hidden="true" style={provisionStyles.required}>*</span>
+        </label>
+        <input
+          id={`prov-user-${user}`}
+          type="text"
+          value={targetUser}
+          onChange={(e) => setTargetUser(e.target.value)}
+          placeholder="z.B. root oder alex"
+          style={fieldStyles.input}
+          aria-required="true"
+          aria-describedby={error ? errorId : undefined}
+          autoComplete="off"
+          disabled={provisioning}
+        />
+      </div>
+
+      <div style={provisionStyles.fieldRow}>
+        <label htmlFor={`prov-fp-${user}`} style={provisionStyles.label}>
+          Host-Key-Fingerprint <span style={provisionStyles.optional}>(optional, SHA256-Base64)</span>
+        </label>
+        <input
+          id={`prov-fp-${user}`}
+          type="text"
+          value={hostFingerprint}
+          onChange={(e) => setHostFingerprint(e.target.value)}
+          placeholder="Ohne 'SHA256:' Prefix — leer lassen für TOFU"
+          style={fieldStyles.input}
+          aria-describedby={error ? errorId : undefined}
+          autoComplete="off"
+          disabled={provisioning}
+        />
+      </div>
+
+      {error && (
+        <p id={errorId} style={fieldStyles.error} role="alert" aria-live="polite">
+          {error}
+        </p>
+      )}
+
+      {result && (
+        <div
+          id={resultId}
+          style={isSuccess ? provisionStyles.resultSuccess : provisionStyles.resultError}
+          role="status"
+          aria-live="polite"
+        >
+          {isSuccess && (
+            <span>
+              {isAlreadyPresent
+                ? 'Key war bereits vorhanden (idempotent).'
+                : 'Key erfolgreich eingetragen.'}
+              {result.hostKeyHash && (
+                <span style={provisionStyles.hostKeyNote}>
+                  {' '}Host-Key-Fingerprint: <code>{result.hostKeyHash}</code>
+                </span>
+              )}
+            </span>
+          )}
+          {isFailed && (
+            <span>
+              Fehlgeschlagen: {result.reason ?? result.error ?? 'unbekannter Fehler'}
+            </span>
+          )}
+        </div>
+      )}
+
+      <div style={{ ...fieldStyles.actionRow, marginTop: 12 }}>
+        <button
+          type="button"
+          onClick={handleProvision}
+          disabled={provisioning}
+          style={fieldStyles.btnPrimary}
+          aria-busy={provisioning}
+        >
+          {provisioning ? 'Provisioniere…' : 'Jetzt provisionieren'}
+        </button>
+        <button
+          type="button"
+          onClick={onClose}
+          disabled={provisioning}
+          style={fieldStyles.btnSecondary}
+        >
+          Schliessen
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ── SshKeyEntry ───────────────────────────────────────────────────────────────
 
 /**
@@ -469,6 +704,7 @@ function SshKeyEntry({ entry, onSaved }) {
   const { user } = entry;
   const [editingPub, setEditingPub] = useState(false);
   const [editingPriv, setEditingPriv] = useState(false);
+  const [showProvision, setShowProvision] = useState(false);
   const [pubInput, setPubInput] = useState('');
   const [privInput, setPrivInput] = useState('');
   const [saving, setSaving] = useState(false);
@@ -580,16 +816,30 @@ function SshKeyEntry({ entry, onSaved }) {
       {/* Benutzer-Label */}
       <div style={sshStyles.userHeader}>
         <span style={sshStyles.userLabel}>{user}</span>
-        <button
-          type="button"
-          onClick={handleDeleteAll}
-          disabled={deleting || (!hasPubKey && !hasPrivKey)}
-          style={fieldStyles.btnDanger}
-          aria-label={`Alle SSH-Schlüssel für ${user} löschen`}
-          aria-busy={deleting}
-        >
-          {deleting ? 'Löschen…' : 'Alle löschen'}
-        </button>
+        <div style={fieldStyles.actionRow}>
+          {/* AC7: Provision-Button — nur aktiv wenn Public-Key vorhanden */}
+          <button
+            type="button"
+            onClick={() => setShowProvision((v) => !v)}
+            disabled={!hasPubKey || deleting}
+            style={hasPubKey ? fieldStyles.btnSmall : { ...fieldStyles.btnSmall, opacity: 0.45, cursor: 'not-allowed' }}
+            aria-label={`Public-Key von ${user} auf VPS provisionieren`}
+            aria-expanded={showProvision}
+            title={hasPubKey ? 'Public-Key auf VPS eintragen' : 'Kein Public-Key hinterlegt'}
+          >
+            {showProvision ? 'Provision schliessen' : 'Provisionieren'}
+          </button>
+          <button
+            type="button"
+            onClick={handleDeleteAll}
+            disabled={deleting || (!hasPubKey && !hasPrivKey)}
+            style={fieldStyles.btnDanger}
+            aria-label={`Alle SSH-Schlüssel für ${user} löschen`}
+            aria-busy={deleting}
+          >
+            {deleting ? 'Löschen…' : 'Alle löschen'}
+          </button>
+        </div>
       </div>
 
       {/* Fehler-Anzeige */}
@@ -597,6 +847,14 @@ function SshKeyEntry({ entry, onSaved }) {
         <p id={errorId} style={fieldStyles.error} role="alert" aria-live="polite">
           {error}
         </p>
+      )}
+
+      {/* AC7–AC9: VPS-Provision-Formular (ausgeklappt) */}
+      {showProvision && hasPubKey && (
+        <ProvisionForm
+          user={user}
+          onClose={() => setShowProvision(false)}
+        />
       )}
 
       {/* Public-Key */}
@@ -1181,6 +1439,75 @@ const fieldStyles = {
     clip: 'rect(0,0,0,0)',
     whiteSpace: 'nowrap',
     borderWidth: 0,
+  },
+};
+
+const provisionStyles = {
+  form: {
+    margin: '12px 0',
+    padding: '16px',
+    background: '#0d1117',
+    border: '1px solid #334155',
+    borderRadius: 6,
+  },
+  heading: {
+    margin: '0 0 6px',
+    fontSize: 14,
+    fontWeight: 700,
+    color: '#e5e7eb',
+  },
+  hint: {
+    margin: '0 0 14px',
+    fontSize: 12,
+    color: '#9ca3af',
+    lineHeight: 1.4,
+  },
+  fieldRow: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 4,
+    marginBottom: 10,
+  },
+  label: {
+    fontSize: 12,
+    fontWeight: 600,
+    color: '#d4d4d4',
+  },
+  required: {
+    color: '#fca5a5',
+    marginLeft: 2,
+  },
+  optional: {
+    fontWeight: 400,
+    color: '#9ca3af',
+    fontSize: 11,
+    marginLeft: 4,
+  },
+  resultSuccess: {
+    marginTop: 10,
+    padding: '8px 12px',
+    background: '#052e16',
+    border: '1px solid #166534',
+    borderRadius: 4,
+    color: '#86efac',
+    fontSize: 13,
+  },
+  resultError: {
+    marginTop: 10,
+    padding: '8px 12px',
+    background: '#2d0f0f',
+    border: '1px solid #7f1d1d',
+    borderRadius: 4,
+    color: '#fca5a5',
+    fontSize: 13,
+  },
+  hostKeyNote: {
+    display: 'block',
+    fontSize: 11,
+    color: '#9ca3af',
+    marginTop: 4,
+    fontFamily: 'monospace',
+    wordBreak: 'break-all',
   },
 };
 
