@@ -11,3 +11,4 @@ deploy: docker
 image: ghcr.io/studis-softwareschmiede/dev-gui
 registry: ghcr
 container_port: 8080
+preview_port: 8080
