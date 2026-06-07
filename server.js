@@ -26,6 +26,8 @@ import { commandRouter } from './src/commandRouter.js';
 import { GitHubReader } from './src/GitHubReader.js';
 import { DockerReader } from './src/DockerReader.js';
 import { statusRouter } from './src/statusRouter.js';
+import { CredentialStore } from './src/CredentialStore.js';
+import { credentialsRouter } from './src/credentialsRouter.js';
 
 const PORT = Number(process.env.PORT ?? 8080);
 
@@ -36,8 +38,16 @@ const CLIENT_DIST = join(__dirname, 'client', 'dist');
 // ── AC2: Fail-Fast — abort before binding if Access config is missing in prod ──
 assertAccessConfig();
 
+// ── Credential Store (ADR-007) — Fail-Fast wenn Store vorhanden aber Key fehlt ──
+const credentialStore = new CredentialStore();
+// assertCredentialConfig() is async; run it and exit on error before listen()
+await credentialStore.assertCredentialConfig().catch((err) => {
+  console.error(err.message);
+  process.exit(1);
+});
+
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '100kb' }));
 
 // ── Static frontend (AC1 / deployment spec) ───────────────────────────────────
 // Serve the built React app at /. All /api/* and /ws/terminal are handled
@@ -65,6 +75,9 @@ app.use(commandRouter(commandService));
 const githubReader = new GitHubReader();
 const dockerReader = new DockerReader();
 app.use(statusRouter({ githubReader, dockerReader }));
+
+// ── Credentials route (settings-credentials) ─────────────────────────────────
+app.use(credentialsRouter(credentialStore, auditStore));
 
 /**
  * GET /api/session → { state, restarts, startedAt }

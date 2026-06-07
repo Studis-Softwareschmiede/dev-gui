@@ -1,5 +1,10 @@
 # Coder Lessons — dev-gui (newest first)
 
+## 2026-06-07 — MiscSection-Formulare: error-`<p>` braucht `id` + beide Inputs `aria-describedby`
+Wenn ein gemeinsamer Fehler-Paragraph mehrere Inputs (Schlüsselname + Wert) abdeckt, muss die `<p>` eine eindeutige `id` tragen und **jeder** Input, dem der Fehler zugeordnet ist, ein `aria-describedby={errorId}` erhalten — andernfalls ist die programmatische Zuordnung (WCAG 2.1 SC 3.3.1 / Spec-JSDoc-Header-Claim "aria-describedby") unvollständig. `role="alert"` allein genügt für die Ankündigung, ersetzt aber nicht die statische Input-Fehler-Verbindung. Muster aus `CredentialField` übernehmen: `const errorId = 'misc-error'; <p id={errorId}>...<input aria-describedby={error ? errorId : undefined}>`.
+
+
+
 ## 2026-06-07 — Placeholder-Text-Farbe `#6b7280` unterschreitet WCAG AA auf dunklem Hintergrund
 `color: '#6b7280'` auf `background: '#1a1a1a'` ergibt Kontrast ≈ 3.36:1 — deutlich unter dem 4.5:1-Schwellwert für Fließtext ≤ 13 px / normal (WCAG 2.1 SC 1.4.3). Auch "folgt"-Platzhalter sind sichtbarer Text und fallen unter dieselbe Regel. Fix: mindestens `#8a929e` oder `#9ca3af` verwenden. Allgemeine Regel: `#6b7280` und ähnliche mittlere Grautöne sind auf hintergrundfarben wie `#111`, `#1a1a1a` oder `#0d0d0d` grundsätzlich AA-non-compliant für kleinen Text.
 

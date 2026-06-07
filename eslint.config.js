@@ -66,6 +66,7 @@ export default [
         setInterval: 'readonly',
         clearInterval: 'readonly',
         AbortController: 'readonly',
+        fetch: 'readonly',
       },
     },
     rules: {
