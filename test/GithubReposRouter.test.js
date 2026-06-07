@@ -472,4 +472,18 @@ describe('GithubReposRouter — AC7: Error status codes', () => {
     expect(res.body).not.toContain('Bearer');
     expect(res.body).not.toContain('ghs_');
   });
+
+  it('Regression-I1 — unexpected (non-GitHubWriterError) exception from writer → 502 (not 500)', async () => {
+    // GitHubWriter.#mintInstallationToken fallback: before fix, re-wrapped unexpected errors
+    // as 'credential-store-missing' → HTTP 500. After fix, re-throws so router default → 502.
+    const unexpectedErr = new TypeError('Unexpected internal error');
+    const writer = makeMockWriter(null, unexpectedErr);
+    testServer = await makeTestServer({ writer });
+
+    const res = await testServer.req('POST', '/api/github/repos', { name: 'my-repo' });
+    expect(res.status).toBe(502);
+    // Response must not contain secret-like strings
+    expect(res.body).not.toContain(MOCK_TOKEN);
+    expect(res.body).not.toContain('ghs_');
+  });
 });

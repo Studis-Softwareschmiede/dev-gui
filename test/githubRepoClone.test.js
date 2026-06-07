@@ -747,6 +747,20 @@ describe('githubRepoCloneRouter — AC7: Error status codes', () => {
     expect(res.body).not.toContain('Bearer');
     expect(res.body).not.toContain('ghs_');
   });
+
+  it('Regression-I1 — unexpected (non-GitHubClonerError) exception from cloner → 502 (not 500)', async () => {
+    // GitHubCloner.#mintInstallationToken fallback: before fix, re-wrapped unexpected errors
+    // as 'credential-store-missing' → HTTP 500. After fix, re-throws so router default → 502.
+    const unexpectedErr = new TypeError('Unexpected internal error from cloner');
+    const cloner = makeMockCloner({ shouldThrow: unexpectedErr });
+    testServer = await makeTestServer({ cloner });
+
+    const res = await testServer.req('POST', '/api/github/repos/clone', { repo: 'my-repo' });
+    expect(res.status).toBe(502);
+    // Response must not contain secret-like strings
+    expect(res.body).not.toContain(MOCK_TOKEN);
+    expect(res.body).not.toContain('ghs_');
+  });
 });
 
 // ── AC3: Token never in response/audit — comprehensive ────────────────────────

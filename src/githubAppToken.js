@@ -4,6 +4,7 @@
  * Single canonical implementation consumed by:
  *   - GitHubWriter  (createRepo)
  *   - workspaceReposRouter / WorkspaceMutator  (git pull)
+ *   - GitHubCloner  (git clone)
  *
  * Security (AC3 / NFR):
  *   - Token is returned as a plain string; it is the CALLER's responsibility
@@ -11,6 +12,10 @@
  *   - No secret value ever appears in thrown error messages.
  *   - writeAskpassScript() writes the token into the child environment via a
  *     randomly-named env var (never into argv or the script file itself).
+ *
+ * Typed errors:
+ *   - All failures throw GitHubAppTokenError with a `.code` property.
+ *   - Consumers branch on `err.code` (not on message strings) for robustness.
  *
  * @module githubAppToken
  */
@@ -23,6 +28,34 @@ const GITHUB_API = 'https://api.github.com';
 
 /** Fetch timeout for token minting (ms). */
 const MINT_TIMEOUT_MS = 15000;
+
+// ── GitHubAppTokenError ───────────────────────────────────────────────────────
+
+/**
+ * Typed error thrown by githubAppToken helpers.
+ *
+ * Consumers MUST branch on `.code` (not on message strings) so internal
+ * wording changes never silently break error-handling logic.
+ *
+ * Codes:
+ *   'credentials-incomplete' — one or more required CredentialStore fields missing
+ *   'jwt-sign-failed'        — RS256 JWT could not be created (bad key material)
+ *   'network-error'          — GitHub API unreachable (timeout / connection refused)
+ *   'invalid-response'       — GitHub returned a non-parseable or token-less body
+ *
+ * Token and secrets MUST NOT appear in `message`.
+ */
+export class GitHubAppTokenError extends Error {
+  /**
+   * @param {string} message  Human-readable message (NO secrets)
+   * @param {string} code     Machine-readable code (see above)
+   */
+  constructor(message, code) {
+    super(message);
+    this.name = 'GitHubAppTokenError';
+    this.code = code;
+  }
+}
 
 /**
  * Mint a fresh GitHub App Installation Token from the CredentialStore.
@@ -45,8 +78,9 @@ const MINT_TIMEOUT_MS = 15000;
  */
 export async function mintInstallationToken(credentialStore, { fetchFn = fetch } = {}) {
   if (!credentialStore) {
-    throw new Error(
+    throw new GitHubAppTokenError(
       'CredentialStore nicht konfiguriert — GitHub-App-Credentials nicht verfügbar',
+      'credentials-incomplete',
     );
   }
 
@@ -63,8 +97,9 @@ export async function mintInstallationToken(credentialStore, { fetchFn = fetch }
 
   if (missing.length > 0) {
     // Do NOT include values — only field names
-    throw new Error(
+    throw new GitHubAppTokenError(
       `GitHub-App-Credentials unvollständig: ${missing.join(', ')} fehlen im CredentialStore`,
+      'credentials-incomplete',
     );
   }
 
@@ -81,7 +116,10 @@ export async function mintInstallationToken(credentialStore, { fetchFn = fetch }
       .sign(privateKey);
   } catch {
     // Do NOT log privateKeyPem or appJwt
-    throw new Error('GitHub-App-JWT konnte nicht erstellt werden');
+    throw new GitHubAppTokenError(
+      'GitHub-App-JWT konnte nicht erstellt werden',
+      'jwt-sign-failed',
+    );
   }
 
   // Exchange JWT for Installation Access Token
@@ -104,13 +142,17 @@ export async function mintInstallationToken(credentialStore, { fetchFn = fetch }
       clearTimeout(timer);
     }
   } catch {
-    throw new Error('GitHub-API nicht erreichbar (Token-Minting)');
+    throw new GitHubAppTokenError(
+      'GitHub-API nicht erreichbar (Token-Minting)',
+      'network-error',
+    );
   }
 
   if (!res.ok) {
     try { await res.text(); } catch { /* ignore */ }
-    throw new Error(
+    throw new GitHubAppTokenError(
       `GitHub-App-Authentication fehlgeschlagen (HTTP ${res.status}) beim Token-Minting`,
+      'network-error',
     );
   }
 
@@ -118,12 +160,18 @@ export async function mintInstallationToken(credentialStore, { fetchFn = fetch }
   try {
     data = await res.json();
   } catch {
-    throw new Error('GitHub-API lieferte ungültige Antwort beim Token-Minting');
+    throw new GitHubAppTokenError(
+      'GitHub-API lieferte ungültige Antwort beim Token-Minting',
+      'invalid-response',
+    );
   }
 
   const token = data?.token;
   if (typeof token !== 'string' || !token) {
-    throw new Error('GitHub-API lieferte keinen Token in der Token-Minting-Antwort');
+    throw new GitHubAppTokenError(
+      'GitHub-API lieferte keinen Token in der Token-Minting-Antwort',
+      'invalid-response',
+    );
   }
 
   // appJwt and token are transient — caller uses immediately and discards
@@ -174,6 +222,11 @@ export async function writeAskpassScript(scriptPath, envVarName, writeFileFn = w
  *
  * Allowlist: HOME, PATH, USER, LANG, TMP, TMPDIR + GIT_ASKPASS,
  *            GIT_TERMINAL_PROMPT, and the randomly-named token var.
+ *
+ * USER / LANG / TMP / TMPDIR are intentionally included: they are non-sensitive
+ * (locale + temp-dir configuration) and git relies on them for correct behaviour
+ * on some platforms. This is the canonical, deliberately unified allowlist —
+ * not an accidental leak of process environment.
  *
  * @param {object} extra  Additional env vars to include (e.g. GIT_ASKPASS, token var).
  * @returns {object}  Minimal child environment object.
