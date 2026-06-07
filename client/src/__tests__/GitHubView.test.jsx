@@ -28,6 +28,18 @@
  *   AC6  — Fehlerpfade (403/404/422/500/502/Netzwerk) werden klar dargestellt;
  *           während Klonens: Button disabled (Loading-State, Mehrfachklick-Schutz).
  *
+ * Covers (workspace-repos AC6, AC9 — Frontend-Anteil, #68):
+ *   AC9  — Workspace-Übersicht rendert pro Klon: Name, Branch, clean/dirty, letzter Commit,
+ *           credential-freie origin-URL, Aktionen Pull + Löschen; semantische Tabelle;
+ *           leerer Workspace → Hinweis; Endpunkt down → graceful (keine Tabelle, kein Crash).
+ *   AC9  — Pull-Erfolg (role=status, aria-busy, kein Mehrfachklick), Pull-Fehler (role=alert),
+ *           List-Refresh nach Pull + Löschen.
+ *   AC6  — Lösch-Dialog: öffnen → Klon-Name im Dialog; bestätigen → POST delete; abbrechen →
+ *           kein POST; Escape schließt Dialog; Fokus bei Öffnen im Dialog; Fokus zurück zum
+ *           Auslöser bei Abbruch (activeElement-Assertions).
+ *   AC6  — Touch-Targets ≥ 44 px für Pull/Löschen/Dialog-Buttons.
+ *   AC6  — Pull-Fehler + Delete-Fehler (role=alert, Backend-error-Text).
+ *
  * NFR A11y (Clone-Teil):
  *   - Erfolg: role=status, aria-live=polite, Fokusführung auf Status-Region.
  *   - Fehler/already-present: role=alert, aria-live=assertive, Fokusführung.
@@ -113,30 +125,70 @@ const WORKSPACE_REPOS_RESPONSE = {
 /** Leere Workspace-Repos-Antwort (kein Repo lokal vorhanden). */
 const WORKSPACE_REPOS_EMPTY = { repos: [] };
 
+/**
+ * Workspace-Repos für die WorkspaceOverview-Tests (#68 AC9):
+ * Zwei Klone mit allen Feldern (name, branch, dirty, lastCommit, originUrl).
+ */
+const WORKSPACE_REPOS_FULL = {
+  repos: [
+    {
+      name: 'alpha-repo',
+      branch: 'main',
+      dirty: false,
+      lastCommit: { hash: 'abc1234', subject: 'Initial commit', date: '2026-06-07' },
+      originUrl: 'https://github.com/org/alpha-repo',
+    },
+    {
+      name: 'beta-repo',
+      branch: 'feature-x',
+      dirty: true,
+      lastCommit: { hash: 'def5678', subject: 'WIP changes', date: '2026-06-06' },
+      originUrl: 'https://github.com/org/beta-repo',
+    },
+  ],
+};
+
+/** Pull-Erfolgs-Antwort */
+const PULL_SUCCESS = { name: 'alpha-repo', status: 'pulled' };
+/** Lösch-Erfolgs-Antwort */
+const DELETE_SUCCESS = { name: 'alpha-repo', status: 'deleted' };
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /**
  * Erstellt einen fetchFn der GET /api/github/repos, GET /api/workspace/repos,
- * POST /api/github/repos und POST /api/github/repos/clone separat bedient.
+ * POST /api/github/repos, POST /api/github/repos/clone,
+ * POST /api/workspace/repos/pull und POST /api/workspace/repos/delete separat bedient.
  *
  * AC5: getWorkspaceRepos steuert die Antwort für GET /api/workspace/repos.
  * Default: leere Workspace-Repos-Liste (kein Badge sichtbar).
+ * #68 AC9: postWsPull / postWsDelete steuern Antworten für Pull/Delete-Endpunkte.
  *
  * @param {{
  *   getRepos?: { ok?: boolean, status?: number, data?: object },
  *   getWorkspaceRepos?: { ok?: boolean, status?: number, data?: object } | 'reject',
  *   postCreate?: { ok?: boolean, status?: number, data?: object },
  *   postClone?: { ok?: boolean, status?: number, data?: object },
+ *   postWsPull?: { ok?: boolean, status?: number, data?: object },
+ *   postWsDelete?: { ok?: boolean, status?: number, data?: object },
  * }} opts
  */
 function makeRoutedFetchFn({
-  getRepos          = { ok: true, status: 200, data: REPOS_RESPONSE     },
+  getRepos          = { ok: true, status: 200, data: REPOS_RESPONSE      },
   getWorkspaceRepos = { ok: true, status: 200, data: WORKSPACE_REPOS_EMPTY },
-  postCreate        = { ok: true, status: 201, data: CREATE_SUCCESS       },
-  postClone         = { ok: true, status: 201, data: CLONE_SUCCESS        },
+  postCreate        = { ok: true, status: 201, data: CREATE_SUCCESS        },
+  postClone         = { ok: true, status: 201, data: CLONE_SUCCESS         },
+  postWsPull        = { ok: true, status: 200, data: PULL_SUCCESS          },
+  postWsDelete      = { ok: true, status: 200, data: DELETE_SUCCESS        },
 } = {}) {
   return jest.fn(async (url, opts = {}) => {
     if ((opts.method ?? 'GET') === 'POST') {
+      if (url === '/api/workspace/repos/pull') {
+        return { ok: postWsPull.ok, status: postWsPull.status, json: async () => postWsPull.data };
+      }
+      if (url === '/api/workspace/repos/delete') {
+        return { ok: postWsDelete.ok, status: postWsDelete.status, json: async () => postWsDelete.data };
+      }
       if (url === '/api/github/repos/clone') {
         return { ok: postClone.ok, status: postClone.status, json: async () => postClone.data };
       }
@@ -1800,6 +1852,745 @@ describe('GitHubView — AC5: Badge „lokal vorhanden"', () => {
     const { queryAllByText } = renderView(fetchFn);
     await waitFor(() => {
       expect(queryAllByText(/lokal vorhanden/i)).toHaveLength(0);
+    });
+  });
+});
+
+// ── #68 AC9 — Workspace-Übersicht: Struktur und Felder ───────────────────────
+
+describe('GitHubView — #68 AC9: Workspace-Übersicht Struktur und Felder', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('rendert h2 "Workspace-Klone"', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: { ok: true, status: 200, data: WORKSPACE_REPOS_FULL },
+    });
+    const { getByRole } = renderView(fetchFn);
+    await waitFor(() => {
+      expect(getByRole('heading', { name: /workspace-klone/i })).toBeTruthy();
+    });
+  });
+
+  it('rendert Tabelle "Workspace-Klone" mit allen Spaltenköpfen', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: { ok: true, status: 200, data: WORKSPACE_REPOS_FULL },
+    });
+    const { getByRole } = renderView(fetchFn);
+    await waitFor(() => {
+      const table = getByRole('table', { name: /workspace-klone/i });
+      expect(table).toBeTruthy();
+      const ths = table.querySelectorAll('th[scope="col"]');
+      // Name, Branch, Status, Letzter Commit, Origin-URL, Aktionen
+      expect(ths.length).toBeGreaterThanOrEqual(5);
+    });
+  });
+
+  it('rendert eine Zeile pro Klon (AC9)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: { ok: true, status: 200, data: WORKSPACE_REPOS_FULL },
+    });
+    const { getByRole } = renderView(fetchFn);
+    await waitFor(() => {
+      const table = getByRole('table', { name: /workspace-klone/i });
+      const rows = table.querySelectorAll('tbody tr');
+      expect(rows).toHaveLength(WORKSPACE_REPOS_FULL.repos.length);
+    });
+  });
+
+  it('rendert Name jedes Klons in der Tabelle (AC9)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: { ok: true, status: 200, data: WORKSPACE_REPOS_FULL },
+    });
+    const { getAllByText } = renderView(fetchFn);
+    await waitFor(() => {
+      // alpha-repo und beta-repo müssen beide erscheinen
+      expect(getAllByText('alpha-repo').length).toBeGreaterThan(0);
+      expect(getAllByText('beta-repo').length).toBeGreaterThan(0);
+    });
+  });
+
+  it('rendert Branch-Wert pro Klon (AC9)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: { ok: true, status: 200, data: WORKSPACE_REPOS_FULL },
+    });
+    const { getByText } = renderView(fetchFn);
+    await waitFor(() => {
+      expect(getByText('main')).toBeTruthy();
+      expect(getByText('feature-x')).toBeTruthy();
+    });
+  });
+
+  it('rendert "clean"-Badge für dirty=false (AC9)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: { ok: true, status: 200, data: WORKSPACE_REPOS_FULL },
+    });
+    const { getByText } = renderView(fetchFn);
+    await waitFor(() => {
+      expect(getByText('clean')).toBeTruthy();
+    });
+  });
+
+  it('rendert "dirty"-Badge für dirty=true (AC9)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: { ok: true, status: 200, data: WORKSPACE_REPOS_FULL },
+    });
+    const { getByText } = renderView(fetchFn);
+    await waitFor(() => {
+      expect(getByText('dirty')).toBeTruthy();
+    });
+  });
+
+  it('rendert letzten Commit (subject) in der Tabelle (AC9)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: { ok: true, status: 200, data: WORKSPACE_REPOS_FULL },
+    });
+    const { getByText } = renderView(fetchFn);
+    await waitFor(() => {
+      expect(getByText(/initial commit/i)).toBeTruthy();
+    });
+  });
+
+  it('rendert credential-freie origin-URL in der Tabelle (AC9)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: { ok: true, status: 200, data: WORKSPACE_REPOS_FULL },
+    });
+    const { getByText } = renderView(fetchFn);
+    await waitFor(() => {
+      expect(getByText('https://github.com/org/alpha-repo')).toBeTruthy();
+    });
+  });
+
+  it('originUrl=null → zeigt "—" (keine URL vorhanden)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: {
+        ok: true,
+        status: 200,
+        data: {
+          repos: [{
+            name: 'no-remote-repo',
+            branch: 'main',
+            dirty: false,
+            lastCommit: null,
+            originUrl: null,
+          }],
+        },
+      },
+    });
+    const { getAllByText } = renderView(fetchFn);
+    await waitFor(() => {
+      // "—" als Fallback für fehlende URL und lastCommit
+      expect(getAllByText('—').length).toBeGreaterThan(0);
+    });
+  });
+
+  it('rendert Pull-Button pro Klon (AC9)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: { ok: true, status: 200, data: WORKSPACE_REPOS_FULL },
+    });
+    const { getAllByRole } = renderView(fetchFn);
+    await waitFor(() => {
+      const pullBtns = getAllByRole('button', { name: /pullen/i });
+      expect(pullBtns.length).toBeGreaterThanOrEqual(WORKSPACE_REPOS_FULL.repos.length);
+    });
+  });
+
+  it('rendert Löschen-Button pro Klon (AC9)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: { ok: true, status: 200, data: WORKSPACE_REPOS_FULL },
+    });
+    const { getAllByRole } = renderView(fetchFn);
+    await waitFor(() => {
+      const deleteBtns = getAllByRole('button', { name: /löschen/i });
+      expect(deleteBtns.length).toBeGreaterThanOrEqual(WORKSPACE_REPOS_FULL.repos.length);
+    });
+  });
+
+  it('Pull-Button hat Touch-Target ≥ 44 px (A11y)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: { ok: true, status: 200, data: WORKSPACE_REPOS_FULL },
+    });
+    const { getAllByRole } = renderView(fetchFn);
+    await waitFor(() => {
+      const pullBtns = getAllByRole('button', { name: /pullen/i });
+      expect(pullBtns.length).toBeGreaterThan(0);
+      for (const btn of pullBtns) {
+        expect(parseInt(btn.style.minHeight, 10)).toBeGreaterThanOrEqual(44);
+      }
+    });
+  });
+
+  it('Löschen-Button hat Touch-Target ≥ 44 px (A11y)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: { ok: true, status: 200, data: WORKSPACE_REPOS_FULL },
+    });
+    const { getAllByRole } = renderView(fetchFn);
+    await waitFor(() => {
+      const deleteBtns = getAllByRole('button', { name: /löschen/i });
+      expect(deleteBtns.length).toBeGreaterThan(0);
+      for (const btn of deleteBtns) {
+        expect(parseInt(btn.style.minHeight, 10)).toBeGreaterThanOrEqual(44);
+      }
+    });
+  });
+
+  it('leerer Workspace → zeigt Leerzustand-Hinweis (AC9)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: { ok: true, status: 200, data: WORKSPACE_REPOS_EMPTY },
+    });
+    const { getByText } = renderView(fetchFn);
+    await waitFor(() => {
+      expect(getByText(/keine lokalen klone/i)).toBeTruthy();
+    });
+  });
+
+  it('Workspace-Endpunkt down → kein Crash, kein Workspace-Fehler-Banner, Hinweis vorhanden', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: 'reject',
+    });
+    const { getByText } = renderView(fetchFn);
+    await waitFor(() => {
+      // Leerzustand-Hinweis für Workspace-Übersicht
+      expect(getByText(/keine lokalen klone/i)).toBeTruthy();
+    });
+    // Kein separates Fehler-Banner für Workspace-Übersicht allein
+    // (alert kommt nur bei github/repos-Fehler)
+    const alerts = document.querySelectorAll('[role="alert"]');
+    // Wenn ein alert da ist, dann nur wegen github/repos (nicht wegen workspace)
+    // In diesem Test gelingt github/repos → kein alert erwartet
+    expect(alerts.length).toBe(0);
+  });
+});
+
+// ── #68 AC9 — Pull-Aktion ─────────────────────────────────────────────────────
+
+describe('GitHubView — #68 AC9: Pull-Aktion', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('Klick auf Pull-Button sendet POST /api/workspace/repos/pull mit { name }', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: { ok: true, status: 200, data: WORKSPACE_REPOS_FULL },
+    });
+    const { getAllByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo pullen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo pullen/i })[0]);
+    });
+
+    await waitFor(() => {
+      const pullCalls = fetchFn.mock.calls.filter(
+        ([url, opts]) => url === '/api/workspace/repos/pull' && opts?.method === 'POST',
+      );
+      expect(pullCalls).toHaveLength(1);
+      const body = JSON.parse(pullCalls[0][1].body);
+      expect(body.name).toBe('alpha-repo');
+    });
+  });
+
+  it('Pull-Erfolg: zeigt „Gepullt" mit role=status (AC9)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: { ok: true, status: 200, data: WORKSPACE_REPOS_FULL },
+      postWsPull: { ok: true, status: 200, data: PULL_SUCCESS },
+    });
+    const { getAllByRole, getByText } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo pullen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo pullen/i })[0]);
+    });
+
+    await waitFor(() => {
+      expect(getByText(/gepullt/i)).toBeTruthy();
+    });
+  });
+
+  it('Pull-Erfolg: role=status und aria-live=polite (A11y)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: { ok: true, status: 200, data: WORKSPACE_REPOS_FULL },
+      postWsPull: { ok: true, status: 200, data: PULL_SUCCESS },
+    });
+    const { getAllByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo pullen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo pullen/i })[0]);
+    });
+
+    await waitFor(() => {
+      const statusEl = document.querySelector('[role="status"][aria-live="polite"]');
+      expect(statusEl).toBeTruthy();
+    });
+  });
+
+  it('Pull-Erfolg: Fokus wird auf Status-Bereich gesetzt (activeElement, A11y)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: { ok: true, status: 200, data: WORKSPACE_REPOS_FULL },
+      postWsPull: { ok: true, status: 200, data: PULL_SUCCESS },
+    });
+    const { getAllByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo pullen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo pullen/i })[0]);
+    });
+
+    await waitFor(() => {
+      const statusEl = document.querySelector('[role="status"][aria-live="polite"]');
+      expect(statusEl).toBeTruthy();
+      expect(document.activeElement).toBe(statusEl);
+    });
+  });
+
+  it('während Pullens: Button disabled + aria-busy (Loading-State / Mehrfachklick-Schutz)', async () => {
+    let resolvePull;
+    const fetchFn = jest.fn(async (url, opts = {}) => {
+      if (url === '/api/workspace/repos/pull' && opts?.method === 'POST') {
+        return new Promise((resolve) => { resolvePull = resolve; });
+      }
+      if (url === '/api/workspace/repos') {
+        return { ok: true, status: 200, json: async () => WORKSPACE_REPOS_FULL };
+      }
+      return { ok: true, status: 200, json: async () => REPOS_RESPONSE };
+    });
+    const { getAllByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo pullen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo pullen/i })[0]);
+    });
+
+    await waitFor(() => {
+      const busyBtn = document.querySelector('[aria-busy="true"]');
+      expect(busyBtn).toBeTruthy();
+      expect(busyBtn.disabled).toBe(true);
+    });
+
+    // Aufräumen
+    await act(async () => {
+      resolvePull({ ok: true, status: 200, json: async () => PULL_SUCCESS });
+    });
+  });
+
+  it('Pull-Fehler (4xx/5xx): zeigt Backend-error als role=alert (AC9)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: { ok: true, status: 200, data: WORKSPACE_REPOS_FULL },
+      postWsPull: { ok: false, status: 502, data: { error: 'git pull fehlgeschlagen' } },
+    });
+    const { getAllByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo pullen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo pullen/i })[0]);
+    });
+
+    await waitFor(() => {
+      const alertEl = document.querySelector('[role="alert"]');
+      expect(alertEl).toBeTruthy();
+      expect(alertEl.textContent).toMatch(/git pull fehlgeschlagen/i);
+    });
+  });
+
+  it('Pull-Fehler: Fokus auf alert-Element gesetzt (activeElement, A11y)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: { ok: true, status: 200, data: WORKSPACE_REPOS_FULL },
+      postWsPull: { ok: false, status: 409, data: { error: 'Uncommitted changes vorhanden' } },
+    });
+    const { getAllByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo pullen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo pullen/i })[0]);
+    });
+
+    await waitFor(() => {
+      const alertEl = document.querySelector('[role="alert"]');
+      expect(alertEl).toBeTruthy();
+      expect(document.activeElement).toBe(alertEl);
+    });
+  });
+
+  it('nach Pull-Erfolg: fetchWorkspaceRepos wird erneut aufgerufen (List-Refresh)', async () => {
+    let wsCallCount = 0;
+    const fetchFn = jest.fn(async (url, opts = {}) => {
+      if (url === '/api/workspace/repos/pull' && opts?.method === 'POST') {
+        return { ok: true, status: 200, json: async () => PULL_SUCCESS };
+      }
+      if (url === '/api/workspace/repos') {
+        wsCallCount++;
+        return { ok: true, status: 200, json: async () => WORKSPACE_REPOS_FULL };
+      }
+      return { ok: true, status: 200, json: async () => REPOS_RESPONSE };
+    });
+    const { getAllByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo pullen/i }).length).toBeGreaterThan(0);
+    });
+
+    const callsBeforePull = wsCallCount;
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo pullen/i })[0]);
+    });
+
+    await waitFor(() => {
+      // workspace/repos muss nach Pull erneut abgerufen worden sein
+      expect(wsCallCount).toBeGreaterThan(callsBeforePull);
+    });
+  });
+});
+
+// ── #68 AC6 — Lösch-Dialog: Bestätigung, Abbruch, Fokus, Escape ──────────────
+
+describe('GitHubView — #68 AC6: Lösch-Dialog', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('Klick auf Löschen-Button öffnet Dialog (AC6)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: { ok: true, status: 200, data: WORKSPACE_REPOS_FULL },
+    });
+    const { getAllByRole, getByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo löschen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo löschen/i })[0]);
+    });
+
+    await waitFor(() => {
+      expect(getByRole('dialog')).toBeTruthy();
+    });
+  });
+
+  it('Dialog nennt den Klon-Namen (AC6)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: { ok: true, status: 200, data: WORKSPACE_REPOS_FULL },
+    });
+    const { getAllByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo löschen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo löschen/i })[0]);
+    });
+
+    await waitFor(() => {
+      const dialog = document.querySelector('[role="dialog"]');
+      expect(dialog).toBeTruthy();
+      expect(dialog.textContent).toContain('alpha-repo');
+    });
+  });
+
+  it('Dialog: Fokus beim Öffnen auf Abbrechen-Button gesetzt (activeElement, A11y)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: { ok: true, status: 200, data: WORKSPACE_REPOS_FULL },
+    });
+    const { getAllByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo löschen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo löschen/i })[0]);
+    });
+
+    await waitFor(() => {
+      const dialog = document.querySelector('[role="dialog"]');
+      expect(dialog).toBeTruthy();
+      // Fokus liegt auf Abbrechen-Button im Dialog
+      expect(document.activeElement?.textContent).toMatch(/abbrechen/i);
+    });
+  });
+
+  it('Dialog: Abbrechen schließt Dialog, kein POST (AC6)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: { ok: true, status: 200, data: WORKSPACE_REPOS_FULL },
+    });
+    const { getAllByRole, queryByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo löschen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo löschen/i })[0]);
+    });
+
+    await waitFor(() => {
+      expect(document.querySelector('[role="dialog"]')).toBeTruthy();
+    });
+
+    // Abbrechen klicken
+    await act(async () => {
+      const cancelBtn = document.querySelector('[role="dialog"] button[aria-label*="abbrechen"]') ??
+        document.querySelector('[role="dialog"] button');
+      cancelBtn.click();
+    });
+
+    await waitFor(() => {
+      expect(queryByRole('dialog')).toBeFalsy();
+    });
+
+    // Kein DELETE-POST ausgelöst
+    const deleteCalls = fetchFn.mock.calls.filter(
+      ([url, opts]) => url === '/api/workspace/repos/delete' && opts?.method === 'POST',
+    );
+    expect(deleteCalls).toHaveLength(0);
+  });
+
+  it('Dialog: Abbrechen → Fokus zurück zum Löschen-Button (activeElement, A11y)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: { ok: true, status: 200, data: WORKSPACE_REPOS_FULL },
+    });
+    const { getAllByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo löschen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo löschen/i })[0]);
+    });
+
+    await waitFor(() => {
+      expect(document.querySelector('[role="dialog"]')).toBeTruthy();
+    });
+
+    // Abbrechen
+    await act(async () => {
+      const cancelBtn = document.querySelector('[role="dialog"] button[aria-label*="abbrechen"]') ??
+        document.querySelector('[role="dialog"] button');
+      cancelBtn.click();
+    });
+
+    await waitFor(() => {
+      // Dialog geschlossen
+      expect(document.querySelector('[role="dialog"]')).toBeFalsy();
+      // Fokus zurück auf Löschen-Button — re-query nach Re-Mount des Buttons
+      const freshDeleteBtn = getAllByRole('button', { name: /alpha-repo löschen/i })[0];
+      expect(document.activeElement).toBe(freshDeleteBtn);
+    });
+  });
+
+  it('Dialog: Escape schließt Dialog, kein POST (A11y / AC6)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: { ok: true, status: 200, data: WORKSPACE_REPOS_FULL },
+    });
+    const { getAllByRole, queryByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo löschen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo löschen/i })[0]);
+    });
+
+    await waitFor(() => {
+      expect(document.querySelector('[role="dialog"]')).toBeTruthy();
+    });
+
+    // Escape-Taste drücken
+    await act(async () => {
+      fireEvent.keyDown(document, { key: 'Escape' });
+    });
+
+    await waitFor(() => {
+      expect(queryByRole('dialog')).toBeFalsy();
+    });
+
+    // Kein DELETE-POST
+    const deleteCalls = fetchFn.mock.calls.filter(
+      ([url, opts]) => url === '/api/workspace/repos/delete' && opts?.method === 'POST',
+    );
+    expect(deleteCalls).toHaveLength(0);
+  });
+
+  it('Dialog: Bestätigen → sendet POST /api/workspace/repos/delete mit { name } (AC6)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: { ok: true, status: 200, data: WORKSPACE_REPOS_FULL },
+      postWsDelete: { ok: true, status: 200, data: DELETE_SUCCESS },
+    });
+    const { getAllByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo löschen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo löschen/i })[0]);
+    });
+
+    await waitFor(() => {
+      expect(document.querySelector('[role="dialog"]')).toBeTruthy();
+    });
+
+    // Bestätigen klicken
+    await act(async () => {
+      const confirmBtn = document.querySelector('[role="dialog"] button[aria-label*="endgültig löschen"]') ??
+        Array.from(document.querySelectorAll('[role="dialog"] button')).pop();
+      confirmBtn.click();
+    });
+
+    await waitFor(() => {
+      const deleteCalls = fetchFn.mock.calls.filter(
+        ([url, opts]) => url === '/api/workspace/repos/delete' && opts?.method === 'POST',
+      );
+      expect(deleteCalls).toHaveLength(1);
+      const body = JSON.parse(deleteCalls[0][1].body);
+      expect(body.name).toBe('alpha-repo');
+    });
+  });
+
+  it('nach erfolgreichem Löschen: fetchWorkspaceRepos wird aufgerufen (List-Refresh)', async () => {
+    let wsCallCount = 0;
+    const fetchFn = jest.fn(async (url, opts = {}) => {
+      if (url === '/api/workspace/repos/delete' && opts?.method === 'POST') {
+        return { ok: true, status: 200, json: async () => DELETE_SUCCESS };
+      }
+      if (url === '/api/workspace/repos') {
+        wsCallCount++;
+        return { ok: true, status: 200, json: async () => WORKSPACE_REPOS_FULL };
+      }
+      return { ok: true, status: 200, json: async () => REPOS_RESPONSE };
+    });
+    const { getAllByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo löschen/i }).length).toBeGreaterThan(0);
+    });
+
+    const wsCallsBeforeDelete = wsCallCount;
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo löschen/i })[0]);
+    });
+
+    await waitFor(() => {
+      expect(document.querySelector('[role="dialog"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      const confirmBtn = document.querySelector('[role="dialog"] button[aria-label*="endgültig löschen"]') ??
+        Array.from(document.querySelectorAll('[role="dialog"] button')).pop();
+      confirmBtn.click();
+    });
+
+    await waitFor(() => {
+      expect(wsCallCount).toBeGreaterThan(wsCallsBeforeDelete);
+    });
+  });
+
+  it('Löschen schlägt fehl (5xx): Fehler-Alert angezeigt, Dialog geschlossen (AC9)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: { ok: true, status: 200, data: WORKSPACE_REPOS_FULL },
+      postWsDelete: { ok: false, status: 500, data: { error: 'Löschen fehlgeschlagen intern' } },
+    });
+    const { getAllByRole, queryByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo löschen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo löschen/i })[0]);
+    });
+
+    await waitFor(() => {
+      expect(document.querySelector('[role="dialog"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      const confirmBtn = document.querySelector('[role="dialog"] button[aria-label*="endgültig löschen"]') ??
+        Array.from(document.querySelectorAll('[role="dialog"] button')).pop();
+      confirmBtn.click();
+    });
+
+    await waitFor(() => {
+      // Dialog ist geschlossen
+      expect(queryByRole('dialog')).toBeFalsy();
+      // Fehler-Alert vorhanden
+      const alerts = document.querySelectorAll('[role="alert"]');
+      const deleteAlert = Array.from(alerts).find((el) =>
+        el.textContent.match(/löschen fehlgeschlagen intern/i),
+      );
+      expect(deleteAlert).toBeTruthy();
+    });
+  });
+
+  it('Dialog-Buttons haben Touch-Target ≥ 44 px (A11y)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: { ok: true, status: 200, data: WORKSPACE_REPOS_FULL },
+    });
+    const { getAllByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo löschen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo löschen/i })[0]);
+    });
+
+    await waitFor(() => {
+      const dialogBtns = document.querySelectorAll('[role="dialog"] button');
+      expect(dialogBtns.length).toBeGreaterThan(0);
+      for (const btn of dialogBtns) {
+        expect(parseInt(btn.style.minHeight, 10)).toBeGreaterThanOrEqual(44);
+      }
+    });
+  });
+
+  it('Dialog hat role=dialog und aria-modal=true (A11y)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: { ok: true, status: 200, data: WORKSPACE_REPOS_FULL },
+    });
+    const { getAllByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo löschen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo löschen/i })[0]);
+    });
+
+    await waitFor(() => {
+      const dialog = document.querySelector('[role="dialog"]');
+      expect(dialog).toBeTruthy();
+      expect(dialog.getAttribute('aria-modal')).toBe('true');
     });
   });
 });
