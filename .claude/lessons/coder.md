@@ -1,5 +1,8 @@
 # Coder Lessons — dev-gui (newest first)
 
+## 2026-06-07 — Kein Entfernen von bereits abgelieferten Features in einem Folge-Item
+Wenn ein Item (z.B. #61 github-repo-clone) als „Backend-only" beschrieben ist, darf es weder die Frontend-Implementierung eines früher abgelieferten Items (z.B. github-repo-create RepoCreateForm) noch bereits committete Backend-Endpunkte eines *anderen* Spec-Items (z.B. workspace-repos AC5 DELETE) entfernen. Solche Entfernungen erzeugen zwingend einen Critical „Spec-Drift"-Befund, weil die betroffenen Specs (github-repo-create.md, workspace-repos.md) nicht im selben Diff aktualisiert wurden. Regel: Scope des Items strikt einhalten — keine Kollateralentfernungen an vorherigen Deliverables. (Hinweis Orchestrator: Bei parallelen Worktrees kann ein scheinbares „Entfernen" auch ein Stale-Base-Artefakt sein — der Worktree-Diff gegen `main` zeigt dann später gelandete Items als „gelöscht"; vor einem Critical-Urteil den Diff gegen die Worktree-BASIS prüfen.)
+
 ## 2026-06-07 — Audit-Pflichtfelder vollständig aus Spec abschreiben (Ziel-Pfad, Zeit etc.)
 Wenn die Spec für einen Audit-Eintrag explizit Felder nennt (z.B. „Identität, Aktion, Repo-Referenz, Ziel-Pfad, Ergebnis, Zeit"), müssen ALLE diese Felder im tatsächlichen `auditStore.record()`-Aufruf enthalten sein. AuditStore stampt `time` automatisch — aber kontextabhängige Felder wie `Ziel-Pfad` müssen explizit übergeben werden (z.B. als Teil des `command`-Strings oder als separates Feld). Fehlt ein Pflichtfeld: Important-Befund. Vor Commit: Spec-Feldliste gegen Code-Felder abhaken.
 
@@ -11,7 +14,6 @@ Beim Schutz gegen Path-Traversal für Unterordner von WORKSPACE_DIR den validier
 
 ## 2026-06-07 — Test-Header-Claim "fokussiert" braucht activeElement-Assertion, nicht nur tabIndex-Check
 Wenn ein Test-Header den Claim enthält, dass ein Element nach einer Aktion tatsächlich den Fokus erhält (z.B. "bei 201-Antwort wird URL fokussiert"), reicht ein tabIndex-Check nicht — der prüft nur, ob das Element fokussierbar IST, nicht ob es tatsächlich fokussiert WURDE. Für den stärkeren Claim braucht es `expect(document.activeElement).toBe(element)` oder einen `spy` auf `element.focus`. jsdom unterstützt `document.activeElement` in `act()`-Blöcken. Gilt analog für alle Fokus-Management-Claims (Fehler-Fokus auf nameInputRef, Erfolgs-Fokus auf successUrlRef).
-
 ## 2026-06-07 — Neue Route immer in den server.js-Datei-Header-Kommentar eintragen
 Der JSDoc-Block am Anfang von `server.js` ist das kanonische Routen-Inventar des Projekts. Jede neue Route (GET, POST, WS) muss dort als Zeile nachgepflegt werden — auch wenn die Route in einem eigenen Router-Modul liegt. Fehlt der Eintrag, führt das zu einem Important-Befund beim nächsten Review. Muster: `GET  /api/github/repos  → { repos:[...] } (github-repos-overview)`.
 

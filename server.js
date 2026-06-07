@@ -15,6 +15,7 @@
  *   POST /api/github/repos                        → Org-Repo anlegen (github-repo-create #59)
  *   GET  /api/workspace/repos                     → { repos: [...] } — live WORKSPACE_DIR scan (workspace-repos AC1, AC2)
  *   POST /api/workspace/repos/delete              → { name, status: "deleted" } — delete clone (workspace-repos AC5, AC7, AC8)
+ *   POST /api/github/repos/clone                  → { repo, status: "cloned", path } — lokalen Klon anlegen (github-repo-clone #61)
  *   WS   /ws/terminal                             → PtyManager bridge (guarded by AccessGuard)
  */
 
@@ -41,6 +42,8 @@ import { GitHubWriter } from './src/GitHubWriter.js';
 import { WorkspaceScanner } from './src/WorkspaceScanner.js';
 import { WorkspaceMutator } from './src/WorkspaceMutator.js';
 import { workspaceReposRouter } from './src/workspaceReposRouter.js';
+import { GitHubCloner } from './src/GitHubCloner.js';
+import { githubRepoCloneRouter } from './src/githubRepoCloneRouter.js';
 
 const PORT = Number(process.env.PORT ?? 8080);
 
@@ -106,6 +109,10 @@ app.use(githubReposRouter(auditStore, githubWriter));
 const workspaceScanner = new WorkspaceScanner();
 const workspaceMutator = new WorkspaceMutator();
 app.use(workspaceReposRouter(workspaceScanner, auditStore, workspaceMutator));
+
+// ── GitHub Repo Clone route (github-repo-clone #61) ───────────────────────────
+const githubCloner = new GitHubCloner({ credentialStore });
+app.use(githubRepoCloneRouter(auditStore, githubCloner));
 
 /**
  * GET /api/session → { state, restarts, startedAt }
