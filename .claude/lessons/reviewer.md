@@ -1,5 +1,8 @@
 # Reviewer Lessons — dev-gui (newest first)
 
+## 2026-06-07 — Refactoring-Review: Unexpected-Error-Fallback-Pfad immer explizit tracen
+Bei Refactorings die einen Catch-Block von `msg.includes()`-Branching auf `err.code`-Branching umstellen, immer den Fallback-Zweig (nicht-typisierter Fehler) explizit tracen: Was wurde im alten Code mit einem unerwarteten Fehler gemacht, und was passiert jetzt? Alte Code-Paths (Cloner: unhandled → 502 via Router-Default; Writer: 'invalid-response' → 502) können sich zu 500 ändern, wenn der Fallback auf 'credential-store-missing' mappt. Das ist ein Verhaltens-Diff auf dem Unexpected-Error-Pfad. Suchstrategie: grep nach dem `// Non-GitHubAppTokenError`-Kommentar, dann Router-Mapping für die gewählte errorClass nachschlagen.
+
 ## 2026-06-07 — aria-modal auf role="presentation" ist ein falsch-positiver A11y-Befund
 `aria-modal="true"` auf dem Overlay-Wrapper mit `role="presentation"` ist semantisch inkorrekt (aria-modal ist nur für role=dialog/alertdialog definiert), aber harmlos — Screen-Reader ignorieren aria-modal auf presentational Elementen und nutzen das innere `role="dialog" aria-modal="true"`. Vor einem Important-Befund prüfen: hat das innere Dialog-Element selbst korrekt `role="dialog" aria-modal="true"`? Wenn ja: Suggestion, nicht Important. Kein Gate-Blocker.
 

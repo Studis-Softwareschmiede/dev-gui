@@ -17,28 +17,31 @@
  *   - Untrusted `repo` input is validated before any filesystem or git call.
  *   - Resolved clone path checked to be strictly inside WORKSPACE_DIR (realpath guard).
  *
- * Token-Minting: same mechanism as GitHubWriter (JWT RS256 → Installation Token).
+ * Token-Minting: delegates to shared githubAppToken helper (same as GitHubWriter,
+ * WorkspaceMutator/workspaceReposRouter). No private mint implementation.
  *
  * @module GitHubCloner
  */
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, access, realpath, rm, writeFile, chmod } from 'node:fs/promises';
+import { mkdir, access, realpath, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
-import { SignJWT, importPKCS8 } from 'jose';
+import {
+  mintInstallationToken,
+  writeAskpassScript,
+  minimalGitEnv,
+  GitHubAppTokenError,
+} from './githubAppToken.js';
 
 const execFileAsync = promisify(execFile);
 
 /** Org for clone URLs. Matches GitHubReader/GitHubWriter. */
 const ORG = 'Studis-Softwareschmiede';
 
-/** GitHub API base URL. */
-const GITHUB_API = 'https://api.github.com';
-
-/** Fetch timeout in ms (for token minting). */
+/** Fetch timeout in ms (for the fetchWithTimeout wrapper used by #mintInstallationToken). */
 const FETCH_TIMEOUT_MS = 15000;
 
 /** Git clone timeout in ms. */
@@ -125,7 +128,7 @@ export function validateRepoRef(repo) {
  * @param {object} [options]
  * @param {import('./CredentialStore.js').CredentialStore} [options.credentialStore]
  * @param {string} [options.workspaceDir]  Override for WORKSPACE_DIR (default: env)
- * @param {typeof fetch} [options.fetchFn] Injectable fetch for tests
+ * @param {typeof fetch} [options.fetchFn] Injectable fetch for tests (passed to mintInstallationToken)
  * @param {Function} [options.execFn]      Injectable exec for tests
  * @param {object} [options.fsDeps]        Injectable fs helpers for tests
  */
@@ -139,122 +142,77 @@ export class GitHubCloner {
   constructor({ credentialStore, workspaceDir, fetchFn, execFn, fsDeps } = {}) {
     this.#credentialStore = credentialStore ?? null;
     this.#workspaceDir = workspaceDir ?? process.env.WORKSPACE_DIR ?? '';
+    // fetchFn is passed to the shared mintInstallationToken helper.
+    // The helper calls fetchFn(url, init) — standard 2-arg form with signal in init.
+    // If not injected, we provide a wrapper that adds an AbortController timeout.
     this.#fetch = fetchFn ?? ((...args) => fetchWithTimeout(...args));
     this.#execFn = execFn ?? defaultExec;
-    this.#fsDeps = fsDeps ?? { mkdir, access, realpath, rm, writeFile, chmod };
+    // writeFile stays in fsDeps for the shared writeAskpassScript helper.
+    // chmod is accepted for backward compatibility (no longer called directly).
+    this.#fsDeps = fsDeps ?? { mkdir, access, realpath, rm, writeFile };
   }
 
-  // ── Token Minting (same pattern as GitHubWriter) ──────────────────────────────
+  // ── Token Minting — delegates to shared githubAppToken helper ────────────────
 
   /**
-   * Reads GitHub App credentials from CredentialStore.
-   * @returns {Promise<{ appId: string, installationId: string, privateKeyPem: string }>}
+   * Mints a fresh GitHub App Installation Token via the shared helper (transient).
+   * Wraps GitHubAppTokenError into GitHubClonerError to preserve the cloner's
+   * error taxonomy for callers (errorClass instead of code).
+   *
+   * @returns {Promise<string>} Installation token
+   * @throws {GitHubClonerError}
    */
-  async #loadCredentials() {
+  async #mintInstallationToken() {
+    // Preserve external taxonomy: null credentialStore → 'credential-store-missing'
     if (!this.#credentialStore) {
       throw new GitHubClonerError(
         'CredentialStore nicht konfiguriert — GitHub-App-Credentials nicht verfügbar',
         'credential-store-missing',
       );
     }
-    const [appId, installationId, privateKeyPem] = await Promise.all([
-      this.#credentialStore.getPlaintext('credentials/github/app_id'),
-      this.#credentialStore.getPlaintext('credentials/github/installation_id'),
-      this.#credentialStore.getPlaintext('credentials/github/private_key'),
-    ]);
 
-    const missing = [];
-    if (!appId) missing.push('github/app_id');
-    if (!installationId) missing.push('github/installation_id');
-    if (!privateKeyPem) missing.push('github/private_key');
-
-    if (missing.length > 0) {
-      throw new GitHubClonerError(
-        `GitHub-App-Credentials unvollständig: ${missing.join(', ')} fehlen im CredentialStore`,
-        'credentials-incomplete',
-      );
-    }
-    return { appId, installationId, privateKeyPem };
-  }
-
-  /**
-   * Mints a fresh GitHub App Installation Token (transient — never cached).
-   * @returns {Promise<string>} Installation token
-   */
-  async #mintInstallationToken() {
-    const { appId, installationId, privateKeyPem } = await this.#loadCredentials();
-
-    // Step 1: Build App JWT (RS256, 10-minute exp)
-    let appJwt;
     try {
-      const privateKey = await importPKCS8(privateKeyPem, 'RS256');
-      const now = Math.floor(Date.now() / 1000);
-      appJwt = await new SignJWT({})
-        .setProtectedHeader({ alg: 'RS256' })
-        .setIssuedAt(now - 60) // 60s clock skew buffer
-        .setExpirationTime(now + 600) // 10 minutes
-        .setIssuer(String(appId))
-        .sign(privateKey);
+      // Pass this.#fetch so injected fetchFn in tests intercepts the token-mint call.
+      // The shared helper calls fetchFn(url, init) — the wrapper handles timeout.
+      return await mintInstallationToken(this.#credentialStore, {
+        fetchFn: this.#fetch,
+      });
     } catch (err) {
-      throw new GitHubClonerError(
-        `GitHub-App-JWT konnte nicht erstellt werden: ${sanitizeErrorMessage(err.message)}`,
-        'jwt-sign-failed',
-      );
+      // Branch on err.code (typed GitHubAppTokenError) — not on message strings
+      if (err instanceof GitHubAppTokenError) {
+        if (err.code === 'credentials-incomplete') {
+          throw new GitHubClonerError(err.message, 'credentials-incomplete');
+        }
+        if (err.code === 'jwt-sign-failed') {
+          throw new GitHubClonerError(
+            `GitHub-App-JWT konnte nicht erstellt werden: ${sanitizeErrorMessage(err.message)}`,
+            'jwt-sign-failed',
+          );
+        }
+        if (err.code === 'network-error') {
+          // Covers both "unreachable" and "auth-failed (HTTP NNN)" cases
+          const statusMatch = err.message.match(/HTTP (\d+)/);
+          if (statusMatch) {
+            const status = Number(statusMatch[1]);
+            throw new GitHubClonerError(
+              `GitHub-App-Authentication fehlgeschlagen (HTTP ${status}). ` +
+                'Prüfe App-ID, Installation-ID und Private-Key im CredentialStore.',
+              'auth-failed',
+              status,
+            );
+          }
+          throw new GitHubClonerError(
+            `GitHub-API nicht erreichbar (Token-Minting): ${sanitizeErrorMessage(err.message)}`,
+            'network-error',
+          );
+        }
+        // invalid-response or any other GitHubAppTokenError code
+        throw new GitHubClonerError(err.message, 'invalid-response');
+      }
+      // Non-GitHubAppTokenError (unexpected) — re-throw so the router's default
+      // case handles it (returns HTTP 502), preserving the pre-refactor behaviour.
+      throw err;
     }
-
-    // Step 2: Exchange JWT for Installation Access Token
-    const tokenUrl = `${GITHUB_API}/app/installations/${encodeURIComponent(installationId)}/access_tokens`;
-    let res;
-    try {
-      res = await this.#fetch(
-        tokenUrl,
-        {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${appJwt}`,
-            Accept: 'application/vnd.github+json',
-            'X-GitHub-Api-Version': '2022-11-28',
-          },
-        },
-        FETCH_TIMEOUT_MS,
-      );
-    } catch (err) {
-      throw new GitHubClonerError(
-        `GitHub-API nicht erreichbar (Token-Minting): ${sanitizeErrorMessage(err.message)}`,
-        'network-error',
-      );
-    }
-
-    if (!res.ok) {
-      try { await res.text(); } catch { /* ignore */ }
-      throw new GitHubClonerError(
-        `GitHub-App-Authentication fehlgeschlagen (HTTP ${res.status}). ` +
-          'Prüfe App-ID, Installation-ID und Private-Key im CredentialStore.',
-        'auth-failed',
-        res.status,
-      );
-    }
-
-    let data;
-    try {
-      data = await res.json();
-    } catch {
-      throw new GitHubClonerError(
-        'GitHub-API lieferte ungültige Antwort beim Token-Minting',
-        'invalid-response',
-      );
-    }
-
-    const token = data?.token;
-    if (typeof token !== 'string' || !token) {
-      throw new GitHubClonerError(
-        'GitHub-API lieferte keinen Token in der Token-Minting-Antwort',
-        'invalid-response',
-      );
-    }
-
-    // token is NOT logged — transient
-    return token;
   }
 
   // ── Path-Traversal Guard ──────────────────────────────────────────────────────
@@ -359,7 +317,11 @@ export class GitHubCloner {
     // We write a temp script that echoes the token from a specific env var.
     // The env var name contains a random suffix to prevent collision.
     const envVarName = `_GIT_CLONE_TOKEN_${randomBytes(8).toString('hex').toUpperCase()}`;
-    const askpassScript = await this.#writeAskpassScript(envVarName);
+    const askpassScript = join(
+      tmpdir(),
+      `git-askpass-${randomBytes(8).toString('hex')}.sh`,
+    );
+    await writeAskpassScript(askpassScript, envVarName, this.#fsDeps.writeFile);
 
     try {
       // git clone with credential helper via GIT_ASKPASS (token in env, not argv)
@@ -455,36 +417,6 @@ export class GitHubCloner {
     }
   }
 
-  /**
-   * Writes a GIT_ASKPASS helper script to a temp file.
-   * The script echoes the token from the given env var (token never in script content).
-   *
-   * @param {string} envVarName  Environment variable name that holds the token
-   * @returns {Promise<string>} Absolute path to the script
-   */
-  async #writeAskpassScript(envVarName) {
-    const scriptPath = join(
-      tmpdir(),
-      `git-askpass-${randomBytes(8).toString('hex')}.sh`,
-    );
-    // The script outputs:
-    //   For "Username" prompts → x-access-token  (GitHub token auth username)
-    //   For "Password" prompts → <token from env> (the actual Installation Token)
-    // git calls the script with the prompt string as $1; we branch on it for semantic correctness.
-    // Use printenv so there's no shell variable substitution that might interpolate ${}.
-    const scriptContent = [
-      '#!/bin/sh',
-      '# git-askpass helper — outputs GitHub token credentials from env var',
-      'case "$1" in',
-      '  *Username*) echo x-access-token ;;',
-      '  *) printenv ' + envVarName + ' ;;',
-      'esac',
-    ].join('\n') + '\n';
-
-    await this.#fsDeps.writeFile(scriptPath, scriptContent, { mode: 0o700 });
-    await this.#fsDeps.chmod(scriptPath, 0o700);
-    return scriptPath;
-  }
 }
 
 // ── GitHubClonerError ─────────────────────────────────────────────────────────
@@ -540,22 +472,6 @@ async function defaultExec(cmd, args, opts = {}) {
     env,
   });
   return { stdout, stderr };
-}
-
-/**
- * Returns a minimal environment for git subprocess calls.
- * Inherits HOME, PATH, GIT_CONFIG so git can find system config,
- * but does NOT forward secrets from the parent process env.
- *
- * @returns {NodeJS.ProcessEnv}
- */
-function minimalGitEnv() {
-  return {
-    HOME: process.env.HOME ?? '/root',
-    PATH: process.env.PATH ?? '/usr/bin:/bin',
-    GIT_CONFIG_NOSYSTEM: '0',
-    // Do NOT forward: CRED_MASTER_KEY, GPG_PASSPHRASE, etc.
-  };
 }
 
 /**

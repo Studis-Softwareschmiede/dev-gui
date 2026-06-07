@@ -24,7 +24,7 @@
  * @module GitHubWriter
  */
 
-import { mintInstallationToken as sharedMintInstallationToken } from './githubAppToken.js';
+import { mintInstallationToken as sharedMintInstallationToken, GitHubAppTokenError } from './githubAppToken.js';
 
 /** Org to create repos in. Matches GitHubReader. */
 const ORG = 'Studis-Softwareschmiede';
@@ -151,47 +151,57 @@ export class GitHubWriter {
     // Pass this.#fetch so injected fetchFn in tests intercepts both the token-mint
     // call AND the repo-creation call (same mock for both).
     // The shared helper calls fetchFn(url, init) — standard 2-arg form.
+    // Preserve external taxonomy: null credentialStore → 'credential-store-missing'
+    if (!this.#credentialStore) {
+      throw new GitHubWriterError(
+        'CredentialStore nicht konfiguriert — GitHub-App-Credentials nicht verfügbar',
+        'credential-store-missing',
+      );
+    }
+
     try {
       return await sharedMintInstallationToken(this.#credentialStore, {
         fetchFn: this.#fetch,
       });
     } catch (err) {
       const msg = String(err?.message ?? '');
-      // Map shared error messages to GitHubWriterError taxonomy
-      if (msg.includes('CredentialStore nicht konfiguriert')) {
-        throw new GitHubWriterError(msg, 'credential-store-missing');
-      }
-      if (msg.includes('unvollständig')) {
-        throw new GitHubWriterError(msg, 'credentials-incomplete');
-      }
-      if (msg.includes('JWT konnte nicht')) {
+      // Branch on err.code (typed GitHubAppTokenError) — robust, not message-string matching
+      if (err instanceof GitHubAppTokenError) {
+        if (err.code === 'credentials-incomplete') {
+          throw new GitHubWriterError(msg, 'credentials-incomplete');
+        }
+        if (err.code === 'jwt-sign-failed') {
+          throw new GitHubWriterError(
+            `GitHub-App-JWT konnte nicht erstellt werden: ${sanitizeErrorMessage(msg)}`,
+            'jwt-sign-failed',
+          );
+        }
+        if (err.code === 'network-error') {
+          // Extract HTTP status from message if present (auth-failed case emits HTTP code)
+          const statusMatch = msg.match(/HTTP (\d+)/);
+          if (statusMatch) {
+            const status = Number(statusMatch[1]);
+            throw new GitHubWriterError(
+              `GitHub-App-Authentication fehlgeschlagen (HTTP ${status}). ` +
+                'Prüfe App-ID, Installation-ID und Private-Key im CredentialStore.',
+              'auth-failed',
+              status,
+            );
+          }
+          throw new GitHubWriterError(
+            `GitHub-API nicht erreichbar (Token-Minting): ${sanitizeErrorMessage(msg)}`,
+            'network-error',
+          );
+        }
+        // invalid-response or any other GitHubAppTokenError code
         throw new GitHubWriterError(
-          `GitHub-App-JWT konnte nicht erstellt werden: ${sanitizeErrorMessage(msg)}`,
-          'jwt-sign-failed',
+          `Token-Minting fehlgeschlagen: ${sanitizeErrorMessage(msg)}`,
+          'invalid-response',
         );
       }
-      if (msg.includes('nicht erreichbar')) {
-        throw new GitHubWriterError(
-          `GitHub-API nicht erreichbar (Token-Minting): ${sanitizeErrorMessage(msg)}`,
-          'network-error',
-        );
-      }
-      if (msg.includes('fehlgeschlagen (HTTP')) {
-        // Extract status code from message if present
-        const statusMatch = msg.match(/HTTP (\d+)/);
-        const status = statusMatch ? Number(statusMatch[1]) : undefined;
-        throw new GitHubWriterError(
-          `GitHub-App-Authentication fehlgeschlagen (HTTP ${status ?? '?'}). ` +
-            'Prüfe App-ID, Installation-ID und Private-Key im CredentialStore.',
-          'auth-failed',
-          status,
-        );
-      }
-      // Fallback: wrap as invalid-response
-      throw new GitHubWriterError(
-        `Token-Minting fehlgeschlagen: ${sanitizeErrorMessage(msg)}`,
-        'invalid-response',
-      );
+      // Non-GitHubAppTokenError (unexpected) — re-throw so the router's default
+      // case handles it (returns HTTP 502), preserving the pre-refactor behaviour.
+      throw err;
     }
   }
 
