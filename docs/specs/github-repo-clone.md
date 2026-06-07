@@ -61,7 +61,7 @@ version: 1
 
 ## Nicht-Ziele
 - **Fabrik-Onboarding** (Profil, Board-Verknüpfung, Konventionen) — bleibt bei `/agent-flow:adopt` (siehe Abgrenzung oben).
-- **Listing/Verwaltung lokaler Klone** in der GUI (welche Repos liegen im Workspace, Pull/Status/Löschen) — **nicht im Scope**. *Folge-Idee:* eine Workspace-Übersicht (geklonte Repos auflisten + Pull/entfernen) kann eine spätere Anforderung sein.
+- **Listing/Verwaltung lokaler Klone** in der GUI (welche Repos liegen im Workspace, Pull/Status/Löschen) — **nicht im Scope dieser Spec**, sondern in der eigenen Spec [[workspace-repos]] spezifiziert (Workspace-Scan + Pull + Löschen, gleiche `WORKSPACE_DIR`-/Path-Schutz-/Token-Mint-Linie wie hier).
 - Schreiben/Pushen aus dem geklonten Repo über die GUI — nur klonen (lokal verfügbar machen).
 - Klonen außerhalb der konfigurierten Org.
 
