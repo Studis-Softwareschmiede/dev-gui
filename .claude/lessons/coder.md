@@ -1,5 +1,12 @@
 # Coder Lessons — dev-gui (newest first)
 
+## 2026-06-07 — NavBar-Touch-Targets auf minHeight: 44px setzen — nicht 36px
+Spec NFR (WCAG 2.1 AA, SC 2.5.5) schreibt Touch-Targets ≥ 44 px vor. NavBar-Links (`<a>`) sind interaktive Elemente und fallen unter dieselbe Regel wie Buttons und Kacheln. `minHeight: 36` reicht nicht. Fix: `navHome` und `navLink` auf `minHeight: 44` anheben. Tiles (120px) und Placeholder-Home-Buttons (44px) sind korrekt — NavBar ist der einzige blinde Fleck.
+
+## 2026-06-07 — AC6-Tests müssen BEIDE Teilbedingungen abdecken: Unknown-Route UND Browser-Back/Forward
+AC6 hat zwei unabhängige Bedingungen: (a) unbekannte Route → Panel-Fallback und (b) Browser-Zurück/Vor navigiert entlang des Verlaufs. In jsdom lässt sich (b) simulieren: Hash auf Route A setzen, rendern, via `navigate()` zu Route B wechseln, dann Hash manuell zurück auf Route A setzen und `hashchange` dispatchen — danach soll Route A angezeigt werden. Fehlt dieser Test, ist der Routing-Mechanismus für den Browser-History-Pfad unbewiesen. Test-Header-Claim muss beide Teile benennen oder den Browser-Back-Teil explizit als "nicht per Unit-Test abdeckbar — E2E" kennzeichnen.
+
+
 ## 2026-05-27 — AC7-Guard-Pfade brauchen symmetrische Abdeckung: alle required-Felder, alle Commands
 AC7 schreibt vor, dass fehlende Pflichtfelder keinen Request auslösen. Wenn `adopt` mit leerem Repo getestet wird, muss auch `preview up` mit leerem Repo getestet werden — beide nutzen dieselbe `composeCommand → null`-Logik, aber der reviewer erwartet expliziten Nachweis pro Pfad. Gleiches gilt für optionale Commands: `requirement`/`train` brauchen je einen Test mit und einen ohne Argument, um zu beweisen, dass kein doppelter Leeraum entsteht. Faustregel: jede Bedingung in `composeCommand` bekommt genau einen Test.
 
