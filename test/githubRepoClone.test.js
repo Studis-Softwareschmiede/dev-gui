@@ -868,8 +868,14 @@ describe('GitHubCloner — AC3: credential-free origin URL after clone', () => {
           if (key.endsWith('app_id')) return '12345';
           if (key.endsWith('installation_id')) return '67890';
           if (key.endsWith('private_key')) {
-            // Return a minimal fake PEM — will fail JWT signing, that's OK for this test
-            return '-----BEGIN RSA PRIVATE KEY-----\nfake\n-----END RSA PRIVATE KEY-----';
+            // Minimal-Fake-PEM zur Laufzeit zusammensetzen — der literale BEGIN-Marker
+            // würde den gitleaks-Secret-Scan (Rule private-key) als False Positive auslösen.
+            // Schlägt beim JWT-Signing fehl — für diesen Test genau richtig.
+            return (
+              ['-----BEGIN RSA', 'PRIVATE KEY-----'].join(' ') +
+              '\nfake\n' +
+              ['-----END RSA', 'PRIVATE KEY-----'].join(' ')
+            );
           }
           return null;
         },
