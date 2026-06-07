@@ -51,13 +51,19 @@ const { parseHash, viewToHash, VIEWS } = await import('../useHashRouter.js');
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/** Reset hash to root before each test. */
+let _origFetch;
+
+/** Reset hash to root before each test; mock fetch to avoid act() warnings from SettingsView. */
 beforeEach(() => {
   window.location.hash = '';
+  // SettingsView now calls fetch on mount. Mock it globally so act() warnings are suppressed.
+  _origFetch = globalThis.fetch;
+  globalThis.fetch = jest.fn(() => Promise.resolve({ ok: true, json: async () => [] }));
 });
 
 afterEach(() => {
   window.location.hash = '';
+  globalThis.fetch = _origFetch;
 });
 
 // ── parseHash unit tests ──────────────────────────────────────────────────────
@@ -575,49 +581,73 @@ describe('settings-shell — AC3: Deep-link and unknown-route fallback', () => {
 // ── settings-shell AC4 — Exactly four sections in Settings view ───────────────
 
 describe('settings-shell — AC4: Settings view sections', () => {
-  it('Settings view shows exactly four section headings', () => {
+  it('Settings view shows at least four section headings', async () => {
     window.location.hash = '#/settings';
+    globalThis.fetch = jest.fn(() => Promise.resolve({ ok: true, json: async () => [] }));
     const { getByRole } = render(React.createElement(AppShell));
-    // h2 section headings
-    const main = getByRole('main', { name: /einstellungen-ansicht/i });
-    const h2s = main.querySelectorAll('h2');
-    expect(h2s).toHaveLength(4);
+    // h2 section headings — settings-credentials adds sections; expect ≥4
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      const h2s = main.querySelectorAll('h2');
+      expect(h2s.length).toBeGreaterThanOrEqual(4);
+    });
+    delete globalThis.fetch;
   });
 
-  it('Settings view shows GitHub section', () => {
+  it('Settings view shows GitHub section', async () => {
     window.location.hash = '#/settings';
+    globalThis.fetch = jest.fn(() => Promise.resolve({ ok: true, json: async () => [] }));
     const { getByRole } = render(React.createElement(AppShell));
-    const main = getByRole('main', { name: /einstellungen-ansicht/i });
-    expect(main.textContent).toMatch(/github/i);
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      expect(main.textContent).toMatch(/github/i);
+    });
+    delete globalThis.fetch;
   });
 
-  it('Settings view shows Cloudflare section', () => {
+  it('Settings view shows Cloudflare section', async () => {
     window.location.hash = '#/settings';
+    globalThis.fetch = jest.fn(() => Promise.resolve({ ok: true, json: async () => [] }));
     const { getByRole } = render(React.createElement(AppShell));
-    const main = getByRole('main', { name: /einstellungen-ansicht/i });
-    expect(main.textContent).toMatch(/cloudflare/i);
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      expect(main.textContent).toMatch(/cloudflare/i);
+    });
+    delete globalThis.fetch;
   });
 
-  it('Settings view shows Hetzner / VPS section', () => {
+  it('Settings view shows Hetzner / VPS section', async () => {
     window.location.hash = '#/settings';
+    globalThis.fetch = jest.fn(() => Promise.resolve({ ok: true, json: async () => [] }));
     const { getByRole } = render(React.createElement(AppShell));
-    const main = getByRole('main', { name: /einstellungen-ansicht/i });
-    expect(main.textContent).toMatch(/hetzner/i);
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      expect(main.textContent).toMatch(/hetzner/i);
+    });
+    delete globalThis.fetch;
   });
 
-  it('Settings view shows SSH-Keys section', () => {
+  it('Settings view shows SSH-Keys section', async () => {
     window.location.hash = '#/settings';
+    globalThis.fetch = jest.fn(() => Promise.resolve({ ok: true, json: async () => [] }));
     const { getByRole } = render(React.createElement(AppShell));
-    const main = getByRole('main', { name: /einstellungen-ansicht/i });
-    expect(main.textContent).toMatch(/ssh-keys/i);
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      expect(main.textContent).toMatch(/ssh-keys/i);
+    });
+    delete globalThis.fetch;
   });
 
-  it('each section contains a "folgt" placeholder (no backend call)', () => {
+  it('SSH-Keys section contains a "folgt" placeholder', async () => {
     window.location.hash = '#/settings';
+    globalThis.fetch = jest.fn(() => Promise.resolve({ ok: true, json: async () => [] }));
     const { getByRole } = render(React.createElement(AppShell));
-    const main = getByRole('main', { name: /einstellungen-ansicht/i });
-    const count = (main.textContent.match(/folgt/gi) || []).length;
-    expect(count).toBeGreaterThanOrEqual(4);
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      // SSH-Keys section retains "folgt" placeholder (#46 not yet implemented)
+      expect(main.textContent).toMatch(/folgt/i);
+    });
+    delete globalThis.fetch;
   });
 });
 

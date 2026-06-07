@@ -125,6 +125,20 @@ services:
       #   ensure file is chown 1000 or chmod 0644 on the host.
       GPG_PASSPHRASE: ${GPG_PASSPHRASE}
 
+      # ── Credential Store Master-Key (ADR-007) ────────────────────────────────
+      # Required in production when secrets.enc.json exists on the volume.
+      # Fail-Fast on startup if store exists but key is missing.
+      # Option A — environment variable (set in .env or host environment):
+      CRED_MASTER_KEY: ${CRED_MASTER_KEY}
+      # Option B — node-readable file (used only if CRED_MASTER_KEY unset):
+      #   CRED_MASTER_KEY_FILE: /run/secrets/cred_master_key
+      #   Add to volumes: - ${CRED_KEY_FILE}:/run/secrets/cred_master_key:ro
+
+      # ── Credential Mutation Allowlist (optional, ADR-007 OA3) ───────────────
+      # Comma-separated Cloudflare Access emails that may mutate credentials.
+      # Unset or empty = every valid Access identity may mutate (default).
+      #   CRED_ADMIN_EMAILS: admin@example.com,ops@example.com
+
     volumes:
       # Claude OAuth credentials + agent-flow plugin cache (persisted across
       # restarts/image updates). Must be owned by uid 1000 (node).
