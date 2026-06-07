@@ -8,11 +8,15 @@
  *           Secret-Leak dargestellt.
  *   AC6  — Leerer Name → Fehlermeldung, kein Fetch-Request.
  *
- * Covers (github-repos-overview AC3, AC4, AC6 — Frontend-Anteil):
+ * Covers (github-repos-overview AC3, AC4, AC5, AC6 — Frontend-Anteil):
  *   AC3  — Repo-Liste rendert Name, Sichtbarkeit, offene Issues, CI-Status,
  *           klickbaren GitHub-Link pro Zeile (semantische Tabelle).
  *   AC4  — „Neues Repo"-Button über der Liste (togglet Formular);
  *           „Klonen"-Button pro Zeile (disabled placeholder für #62).
+ *   AC5  — Badge „lokal vorhanden" bei Repos, die in GET /api/workspace/repos auftauchen;
+ *           kein Badge bei Repos ohne lokalen Klon; Klonen-Button entfällt bei isLocal=true;
+ *           Workspace-Endpunkt down → Liste normal, kein Badge, kein Fehler-Banner;
+ *           nach erfolgreichem Klon → Badge erscheint (workspace/repos re-fetch).
  *   AC6  — Graceful degradation: Fehler-Hinweis bei Nichterreichbarkeit,
  *           leere Liste mit Hinweis, kein Crash/Whitescreen.
  *
@@ -36,6 +40,7 @@
  *   - <h1> für Haupt-Titel, <h2> für Sektion-Überschriften.
  *   - Touch-Target ≥ 44 px für Submit-Button.
  *   - Repo-Tabelle mit scope="col" Spaltenköpfen; Links + Aktionen tastaturerreichbar.
+ *   - Badge „lokal vorhanden": Text-Content (kein reines Farb-Signal), Kontrast ≥ 4.5:1.
  *
  * @jest-environment jsdom
  */
@@ -89,22 +94,46 @@ const REPOS_RESPONSE = {
 /** Leere Repo-Liste. */
 const REPOS_EMPTY = { repos: [] };
 
+/**
+ * Workspace-Repos-Antwort: alpha-repo ist lokal vorhanden, beta-repo nicht.
+ * AC5: { repos: [{ name, branch, dirty, lastCommit, originUrl }] }
+ */
+const WORKSPACE_REPOS_RESPONSE = {
+  repos: [
+    {
+      name: 'alpha-repo',
+      branch: 'main',
+      dirty: false,
+      lastCommit: 'abc1234',
+      originUrl: 'https://github.com/org/alpha-repo',
+    },
+  ],
+};
+
+/** Leere Workspace-Repos-Antwort (kein Repo lokal vorhanden). */
+const WORKSPACE_REPOS_EMPTY = { repos: [] };
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /**
- * Erstellt einen fetchFn der GET /api/github/repos, POST /api/github/repos
- * und POST /api/github/repos/clone separat bedient.
+ * Erstellt einen fetchFn der GET /api/github/repos, GET /api/workspace/repos,
+ * POST /api/github/repos und POST /api/github/repos/clone separat bedient.
+ *
+ * AC5: getWorkspaceRepos steuert die Antwort für GET /api/workspace/repos.
+ * Default: leere Workspace-Repos-Liste (kein Badge sichtbar).
  *
  * @param {{
  *   getRepos?: { ok?: boolean, status?: number, data?: object },
+ *   getWorkspaceRepos?: { ok?: boolean, status?: number, data?: object } | 'reject',
  *   postCreate?: { ok?: boolean, status?: number, data?: object },
  *   postClone?: { ok?: boolean, status?: number, data?: object },
  * }} opts
  */
 function makeRoutedFetchFn({
-  getRepos   = { ok: true, status: 200, data: REPOS_RESPONSE },
-  postCreate = { ok: true, status: 201, data: CREATE_SUCCESS  },
-  postClone  = { ok: true, status: 201, data: CLONE_SUCCESS   },
+  getRepos          = { ok: true, status: 200, data: REPOS_RESPONSE     },
+  getWorkspaceRepos = { ok: true, status: 200, data: WORKSPACE_REPOS_EMPTY },
+  postCreate        = { ok: true, status: 201, data: CREATE_SUCCESS       },
+  postClone         = { ok: true, status: 201, data: CLONE_SUCCESS        },
 } = {}) {
   return jest.fn(async (url, opts = {}) => {
     if ((opts.method ?? 'GET') === 'POST') {
@@ -113,6 +142,16 @@ function makeRoutedFetchFn({
       }
       // POST /api/github/repos (create)
       return { ok: postCreate.ok, status: postCreate.status, json: async () => postCreate.data };
+    }
+    // GET routes
+    if (url === '/api/workspace/repos') {
+      // 'reject' simuliert Netzwerkfehler (AC5: Workspace-Endpunkt nicht erreichbar)
+      if (getWorkspaceRepos === 'reject') throw new Error('workspace endpoint unreachable');
+      return {
+        ok: getWorkspaceRepos.ok,
+        status: getWorkspaceRepos.status,
+        json: async () => getWorkspaceRepos.data,
+      };
     }
     // GET /api/github/repos
     return { ok: getRepos.ok, status: getRepos.status, json: async () => getRepos.data };
@@ -1132,6 +1171,9 @@ describe('GitHubView — #62 AC6: Loading-State (Mehrfachklick-Schutz)', () => {
       if (url === '/api/github/repos/clone') {
         return new Promise((resolve) => { resolveClone = resolve; });
       }
+      if (url === '/api/workspace/repos') {
+        return { ok: true, status: 200, json: async () => WORKSPACE_REPOS_EMPTY };
+      }
       return { ok: true, status: 200, json: async () => REPOS_RESPONSE };
     });
     const { getAllByRole } = renderView(fetchFn);
@@ -1218,6 +1260,9 @@ describe('GitHubView — #62 AC4: 409 already-present + force-Re-Clone', () => {
         // Zweiter Aufruf (force): Erfolg
         return { ok: true, status: 201, json: async () => CLONE_SUCCESS };
       }
+      if (url === '/api/workspace/repos') {
+        return { ok: true, status: 200, json: async () => WORKSPACE_REPOS_EMPTY };
+      }
       return { ok: true, status: 200, json: async () => REPOS_RESPONSE };
     });
     const { getAllByRole, getByRole } = renderView(fetchFn);
@@ -1260,6 +1305,9 @@ describe('GitHubView — #62 AC4: 409 already-present + force-Re-Clone', () => {
           return { ok: false, status: 409, json: async () => ({ status: 'already-present', path: 'alpha-repo' }) };
         }
         return { ok: true, status: 201, json: async () => CLONE_SUCCESS };
+      }
+      if (url === '/api/workspace/repos') {
+        return { ok: true, status: 200, json: async () => WORKSPACE_REPOS_EMPTY };
       }
       return { ok: true, status: 200, json: async () => REPOS_RESPONSE };
     });
@@ -1468,6 +1516,9 @@ describe('GitHubView — #62 AC6: Fehlerpfade beim Klonen', () => {
       if (url === '/api/github/repos/clone') {
         throw new Error('Network failure during clone');
       }
+      if (url === '/api/workspace/repos') {
+        return { ok: true, status: 200, json: async () => WORKSPACE_REPOS_EMPTY };
+      }
       return { ok: true, status: 200, json: async () => REPOS_RESPONSE };
     });
     const { getAllByRole } = renderView(fetchFn);
@@ -1584,6 +1635,171 @@ describe('GitHubView — #62 A11y: Touch-Targets Klonen-Buttons', () => {
     await waitFor(() => {
       const btn = getByRole('button', { name: /erneut klonen/i });
       expect(parseInt(btn.style.minHeight, 10)).toBeGreaterThanOrEqual(44);
+    });
+  });
+});
+
+// ── AC5 (github-repos-overview) — Badge „lokal vorhanden" ────────────────────
+
+describe('GitHubView — AC5: Badge „lokal vorhanden"', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('Badge erscheint bei Repo, das in workspace/repos auftaucht', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: { ok: true, status: 200, data: WORKSPACE_REPOS_RESPONSE },
+    });
+    const { getByText } = renderView(fetchFn);
+    await waitFor(() => {
+      // alpha-repo ist lokal vorhanden → Badge sichtbar
+      expect(getByText(/lokal vorhanden/i)).toBeTruthy();
+    });
+  });
+
+  it('Badge enthält Text (nicht nur Farbe) — A11y SC 1.4.1', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: { ok: true, status: 200, data: WORKSPACE_REPOS_RESPONSE },
+    });
+    const { getByText } = renderView(fetchFn);
+    await waitFor(() => {
+      const badge = getByText(/lokal vorhanden/i);
+      // Muss Text-Content haben (kein leeres Element mit nur Farbe)
+      expect(badge.textContent.trim()).toMatch(/lokal vorhanden/i);
+    });
+  });
+
+  it('Badge hat aria-label "lokal vorhanden" (programmatische Beschriftung)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: { ok: true, status: 200, data: WORKSPACE_REPOS_RESPONSE },
+    });
+    const { getByText } = renderView(fetchFn);
+    await waitFor(() => {
+      const badge = getByText(/lokal vorhanden/i);
+      expect(badge.getAttribute('aria-label')).toMatch(/lokal vorhanden/i);
+    });
+  });
+
+  it('kein Badge bei Repo, das NICHT in workspace/repos auftaucht', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: { ok: true, status: 200, data: WORKSPACE_REPOS_RESPONSE },
+    });
+    const { getByText, queryAllByText } = renderView(fetchFn);
+    await waitFor(() => {
+      // beta-repo ist nicht lokal → kein zweites Badge
+      // alpha-repo hat Badge, beta-repo nicht → genau 1 Badge insgesamt
+      const badges = queryAllByText(/lokal vorhanden/i);
+      expect(badges).toHaveLength(1);
+      // beta-repo muss in der Liste stehen
+      expect(getByText('beta-repo')).toBeTruthy();
+    });
+  });
+
+  it('Klonen-Button entfällt für Repo mit Badge „lokal vorhanden"', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: { ok: true, status: 200, data: WORKSPACE_REPOS_RESPONSE },
+    });
+    const { queryAllByRole } = renderView(fetchFn);
+    await waitFor(() => {
+      // alpha-repo ist lokal → kein Klonen-Button für alpha-repo
+      const alphaCloneBtn = queryAllByRole('button', { name: /alpha-repo klonen/i });
+      expect(alphaCloneBtn).toHaveLength(0);
+      // beta-repo ist nicht lokal → Klonen-Button für beta-repo vorhanden
+      const betaCloneBtns = queryAllByRole('button', { name: /beta-repo klonen/i });
+      expect(betaCloneBtns.length).toBeGreaterThan(0);
+    });
+  });
+
+  it('Workspace-Endpunkt nicht erreichbar (Netzwerkfehler) → kein Badge, Liste bleibt nutzbar', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: 'reject',
+    });
+    const { queryAllByText, getAllByRole } = renderView(fetchFn);
+    await waitFor(() => {
+      // Keine Badges
+      expect(queryAllByText(/lokal vorhanden/i)).toHaveLength(0);
+      // Liste ist trotzdem voll nutzbar — beide Klonen-Buttons vorhanden
+      const cloneBtns = getAllByRole('button', { name: /klonen/i });
+      expect(cloneBtns.length).toBe(REPOS_RESPONSE.repos.length);
+    });
+  });
+
+  it('Workspace-Endpunkt liefert HTTP 5xx → kein Badge, kein Fehler-Banner für Repo-Liste', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: { ok: false, status: 503, data: {} },
+    });
+    const { queryAllByText, getByRole } = renderView(fetchFn);
+    await waitFor(() => {
+      // Keine Badges wegen workspace-Fehler
+      expect(queryAllByText(/lokal vorhanden/i)).toHaveLength(0);
+      // Kein workspace-spezifisches Fehler-Banner
+      // (der einzige role=alert käme von github/repos-Fehler — hier kein Fehler)
+      // Tabelle ist vorhanden
+      expect(getByRole('table', { name: /org-repositories/i })).toBeTruthy();
+    });
+  });
+
+  it('Workspace-Endpunkt down → kein Fehler-Banner zusätzlich zur Repo-Liste', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: 'reject',
+    });
+    const { getByRole, queryByRole } = renderView(fetchFn);
+    await waitFor(() => {
+      // Tabelle ist da
+      expect(getByRole('table', { name: /org-repositories/i })).toBeTruthy();
+      // Kein alert-Banner wegen workspace-Fehler allein
+      // (Hinweis: queryByRole('alert') kann null sein oder von Clone-Zustand kommen;
+      //  hier ist noch kein Clone ausgeführt worden → kein alert)
+      const alert = queryByRole('alert');
+      expect(alert).toBeFalsy();
+    });
+  });
+
+  it('nach erfolgreichem Klon: Badge erscheint (workspace/repos wird neu abgerufen)', async () => {
+    // Workspace-Repos: zuerst leer, nach Clone-Erfolg enthält alpha-repo
+    let workspaceCallCount = 0;
+    const fetchFn = jest.fn(async (url, opts = {}) => {
+      if ((opts.method ?? 'GET') === 'POST' && url === '/api/github/repos/clone') {
+        return { ok: true, status: 201, json: async () => CLONE_SUCCESS };
+      }
+      if (url === '/api/workspace/repos') {
+        workspaceCallCount++;
+        // Erster Aufruf (beim Mount): leer; zweiter Aufruf (nach Clone): alpha-repo vorhanden
+        const data = workspaceCallCount >= 2 ? WORKSPACE_REPOS_RESPONSE : WORKSPACE_REPOS_EMPTY;
+        return { ok: true, status: 200, json: async () => data };
+      }
+      // GET /api/github/repos
+      return { ok: true, status: 200, json: async () => REPOS_RESPONSE };
+    });
+
+    const { getAllByRole, queryAllByText } = renderView(fetchFn);
+
+    // Warte bis Liste geladen
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo klonen/i }).length).toBeGreaterThan(0);
+    });
+
+    // Noch kein Badge
+    expect(queryAllByText(/lokal vorhanden/i)).toHaveLength(0);
+
+    // Klonen ausführen
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo klonen/i })[0]);
+    });
+
+    // Nach Clone-Erfolg: workspace/repos wird neu abgerufen → Badge erscheint
+    await waitFor(() => {
+      expect(queryAllByText(/lokal vorhanden/i).length).toBeGreaterThan(0);
+    });
+  });
+
+  it('kein Badge wenn workspace/repos leere Liste liefert', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspaceRepos: { ok: true, status: 200, data: WORKSPACE_REPOS_EMPTY },
+    });
+    const { queryAllByText } = renderView(fetchFn);
+    await waitFor(() => {
+      expect(queryAllByText(/lokal vorhanden/i)).toHaveLength(0);
     });
   });
 });
