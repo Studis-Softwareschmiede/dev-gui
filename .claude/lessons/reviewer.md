@@ -1,5 +1,11 @@
 # Reviewer Lessons — dev-gui (newest first)
 
+## 2026-06-07 — useCallback-Deps: fehlende stabile Prop nicht als Befund wenn kein react-hooks-Lint konfiguriert und Prop nachweislich stabil
+Wenn ein `useCallback` eine Prop-Funktion verwendet (z.B. `onCloneSuccess`), diese aber nicht in der Deps-Array steht (`[name, fetchFn]`), ist das nur dann ein Befund wenn (a) eslint-plugin-react-hooks aktiv ist UND (b) ein echtes Runtime-Risiko besteht (d.h. die Prop kann sich ändern und würde dann stale sein). Wenn die Prop nachweislich stabil ist (z.B. `fetchWorkspaceRepos = useCallback([], [])`) und kein react-hooks-Plugin im Projekt konfiguriert ist: Suggestion, kein Important.
+
+## 2026-06-07 — Workspace-Fetch ohne cancelled-Guard: in React 18+ kein Befund, da setState auf unmounted component gesilenced ist
+`fetchWorkspaceRepos()` in einem `useEffect` ohne eigene `cancelled`-Prüfung setzt nach dem Await `setLocalRepoNames()`. In React 18+ ist das setState nach Unmount gesilenced (kein Crash, keine Warning). Das ist kein Important-Befund. Nur wenn das Projekt explizit React 16/17 unterstützt oder ein unmount-sensitive Side-Effect (z.B. externe Mutation) stattfindet, wäre ein cancelled-Guard nötig.
+
 ## 2026-06-07 — Clone-State-Machine: Mehrfachklick-Schutz ist hinreichend belegt wenn der busy-Button disabled+aria-busy ist
 Der Mehrfachklick-Schutz beim Klonen ist vollständig implementiert wenn (a) der Idle-Button im cloning-State nicht gerendert wird und (b) der Lade-Button disabled+aria-busy=true ist. Der Test muss nur das aria-busy-Element + disabled prüfen — die Abwesenheit des Idle-Buttons ist eine Stärkung, kein Pflichtassert für den Header-Claim "Mehrfachklick-Schutz". Kein Befund (nicht mal Suggestion) wenn die Implementierung korrekt ist und der Claim belegt ist.
 

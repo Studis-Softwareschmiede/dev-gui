@@ -7,11 +7,15 @@
  *   AC5  — Fehler-Antworten (403, 409, 422, 500, 502) werden klar dargestellt.
  *   AC6  — Leerer Name → Fehlermeldung, kein Request.
  *
- * github-repos-overview (AC3, AC4, AC6 — Frontend-Anteil):
+ * github-repos-overview (AC3, AC4, AC5, AC6 — Frontend-Anteil):
  *   AC3  — Rendert Repo-Liste aus GET /api/github/repos: Name, Sichtbarkeit, offene Issues,
  *           letzter CI-Status, klickbarer GitHub-Link (htmlUrl) pro Zeile.
  *   AC4  — Über der Liste Andockpunkt „Neues Repo" (togglet RepoCreateForm);
  *           pro Zeile Andockpunkt „Klonen" (disabled placeholder für #62).
+ *   AC5  — Badge „lokal vorhanden" auf Repos, die laut GET /api/workspace/repos bereits
+ *           im Workspace liegen; Klonen-Button entfällt/ist deaktiviert für diese Repos.
+ *           Workspace-Endpunkt nicht erreichbar → Badge entfällt still, Liste bleibt nutzbar.
+ *           Nach erfolgreichem Klonen: workspace/repos wird neu abgerufen → Badge erscheint.
  *   AC6  — Graceful degradation bei Nichterreichbarkeit (Felder „unbekannt",
  *           leere Liste mit Hinweis, kein Crash/Whitescreen).
  *
@@ -31,6 +35,7 @@
  *   - Kontrast ≥ 4.5:1 für alle sichtbaren Textelemente (Sekundärfarbe #9ca3af, nie #6b7280).
  *   - Repo-Liste als semantische Tabelle; Links + Aktionen tastaturerreichbar.
  *   - Clone-Status/Fehler mit role=status/alert, programmatische Zuordnung, Fokusführung.
+ *   - Badge „lokal vorhanden": Text + aria-label (kein reines Farb-Signal).
  *
  * Security (Floor):
  *   - Keine Secrets in Request/Response.
@@ -92,6 +97,28 @@ async function listRepos(fetchImpl) {
 }
 
 /**
+ * GET /api/workspace/repos
+ * Returns a Set of repo names that are already cloned locally.
+ * Silently returns an empty Set on any error (AC5: graceful degradation).
+ *
+ * @param {typeof fetch} fetchImpl
+ * @returns {Promise<Set<string>>}
+ */
+async function listWorkspaceRepoNames(fetchImpl) {
+  try {
+    const fn = fetchImpl ?? globalThis.fetch.bind(globalThis);
+    const res = await fn('/api/workspace/repos');
+    if (!res.ok) return new Set();
+    const data = await res.json();
+    const repos = data?.repos ?? [];
+    return new Set(repos.map((r) => r.name));
+  } catch {
+    // Workspace endpoint unreachable → badge simply absent (AC5)
+    return new Set();
+  }
+}
+
+/**
  * POST /api/github/repos/clone
  * @param {{ repo: string, force?: boolean }} body
  * @param {typeof fetch} [fetchImpl]
@@ -147,12 +174,17 @@ function CiBadge({ status }) {
  * Clone states: idle → cloning → cloned | alreadyPresent | error
  * alreadyPresent: zeigt explizite force-Bestätigung (AC4).
  *
+ * AC5: wenn isLocal=true, zeigt Badge „lokal vorhanden" und blendet den Klonen-Button aus.
+ * Nach erfolgreichem Klon ruft onCloneSuccess() den Parent auf, der workspace/repos neu abruft.
+ *
  * @param {{
  *   repo: { name, fullName, visibility, openIssues, lastCi, htmlUrl },
- *   fetchFn?: typeof fetch
+ *   fetchFn?: typeof fetch,
+ *   isLocal?: boolean,
+ *   onCloneSuccess?: () => void,
  * }} props
  */
-function RepoRow({ repo, fetchFn }) {
+function RepoRow({ repo, fetchFn, isLocal = false, onCloneSuccess }) {
   const { name, visibility, openIssues, lastCi, htmlUrl } = repo;
 
   // Clone state machine
@@ -192,6 +224,8 @@ function RepoRow({ repo, fetchFn }) {
       const data = await cloneRepo({ repo: name, ...(force ? { force: true } : {}) }, fetchFn);
       setClonePath(data.path ?? null);
       setCloneState('cloned');
+      // AC5: nach Klon-Erfolg workspace/repos neu abrufen → Badge erscheint
+      onCloneSuccess?.();
     } catch (err) {
       if (err.alreadyPresent) {
         // AC4: 409 — zeige explizite force-Bestätigung, kein stilles Überschreiben
@@ -226,6 +260,16 @@ function RepoRow({ repo, fetchFn }) {
     <tr style={styles.tableRow}>
       <td style={styles.td}>
         <span style={styles.repoName}>{name ?? 'unbekannt'}</span>
+        {/* AC5: Badge „lokal vorhanden" — Text + aria-label (kein reines Farb-Signal) */}
+        {isLocal && (
+          <span
+            style={styles.localBadge}
+            aria-label="lokal vorhanden"
+            title="Dieses Repo ist bereits lokal im Workspace geklont"
+          >
+            lokal vorhanden
+          </span>
+        )}
       </td>
       <td style={styles.td}>
         <span
@@ -261,8 +305,8 @@ function RepoRow({ repo, fetchFn }) {
       <td style={styles.td}>
         {/* AC1/#62: Clone-Button + Statusanzeige */}
         <div style={styles.cloneCell}>
-          {/* Primärer Klon-Button — nur im idle/error-Zustand aktiv */}
-          {(cloneState === 'idle' || cloneState === 'error') && (
+          {/* Primärer Klon-Button — nur im idle/error-Zustand aktiv; AC5: entfällt wenn lokal vorhanden */}
+          {(cloneState === 'idle' || cloneState === 'error') && !isLocal && (
             <button
               type="button"
               disabled={isCloning}
@@ -372,6 +416,9 @@ function RepoRow({ repo, fetchFn }) {
 /**
  * Fetches and renders the org repo list from GET /api/github/repos.
  * AC4 anchor: "Neues Repo"-Button togglet das RepoCreateForm über der Liste.
+ * AC5: fetches GET /api/workspace/repos to determine which repos are locally present;
+ *      workspace fetch failures are silent (no error banner; list remains fully usable).
+ *      After a successful clone, re-fetches workspace repos to show the badge immediately.
  * AC6: graceful degradation bei Nichterreichbarkeit.
  *
  * @param {{ fetchFn?: typeof fetch }} props
@@ -380,11 +427,19 @@ function RepoList({ fetchFn }) {
   const [repos, setRepos]           = useState(null);     // null = nicht geladen
   const [loadState, setLoadState]   = useState('loading'); // 'loading'|'ok'|'error'
   const [showCreateForm, setShowCreateForm] = useState(false);
+  // AC5: Set of repo names that are already cloned locally
+  const [localRepoNames, setLocalRepoNames] = useState(/** @type {Set<string>} */ (new Set()));
 
   const fetchFnRef = useRef(fetchFn ?? null);
   useEffect(() => {
     fetchFnRef.current = fetchFn ?? null;
   }, [fetchFn]);
+
+  /** Fetches workspace repos and updates localRepoNames. Silent on failure (AC5). */
+  const fetchWorkspaceRepos = useCallback(async () => {
+    const names = await listWorkspaceRepoNames(fetchFnRef.current);
+    setLocalRepoNames(names);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -403,8 +458,10 @@ function RepoList({ fetchFn }) {
       }
     }
     doFetch();
+    // AC5: fetch workspace repos in parallel — failure is silent
+    fetchWorkspaceRepos();
     return () => { cancelled = true; };
-  }, []);
+  }, [fetchWorkspaceRepos]);
 
   return (
     <section style={styles.section} aria-labelledby="repo-list-heading">
@@ -466,7 +523,13 @@ function RepoList({ fetchFn }) {
               </thead>
               <tbody>
                 {repos.map((repo) => (
-                  <RepoRow key={repo.name} repo={repo} fetchFn={fetchFn} />
+                  <RepoRow
+                    key={repo.name}
+                    repo={repo}
+                    fetchFn={fetchFn}
+                    isLocal={localRepoNames.has(repo.name)}
+                    onCloneSuccess={fetchWorkspaceRepos}
+                  />
                 ))}
               </tbody>
             </table>
@@ -1021,6 +1084,21 @@ const styles = {
   repoName: {
     fontWeight: 600,
     color: '#e5e7eb',
+  },
+  // AC5: Badge „lokal vorhanden"
+  // Text-Badge: nicht nur farblich — Kontrast #86efac auf #052e16 ≥ 4.5:1
+  localBadge: {
+    display: 'inline-block',
+    marginLeft: 8,
+    padding: '1px 7px',
+    background: '#052e16',
+    color: '#86efac',          // Kontrast auf #052e16 ≥ 4.5:1
+    border: '1px solid #166534',
+    borderRadius: 4,
+    fontSize: 11,
+    fontWeight: 600,
+    verticalAlign: 'middle',
+    whiteSpace: 'nowrap',
   },
   visibilityPill: {
     display: 'inline-block',
