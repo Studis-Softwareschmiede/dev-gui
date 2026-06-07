@@ -276,8 +276,8 @@ describe('AppShell — AC3: Placeholder views', () => {
     });
   }
 
-  // GitHub: kein Platzhalter — zeigt Repo-Anlege-Formular (github-repo-create AC1)
-  it('clicking #/github tile renders GitHub view with repo-create form', async () => {
+  // GitHub: kein Platzhalter — zeigt Repo-Liste + Andockpunkt „Neues Repo" (github-repos-overview AC4)
+  it('clicking #/github tile renders GitHub view with repo list and new-repo anchor', async () => {
     window.location.hash = '';
     const { getByRole } = render(React.createElement(AppShell));
 
@@ -288,7 +288,8 @@ describe('AppShell — AC3: Placeholder views', () => {
     await waitFor(() => {
       expect(window.location.hash).toBe('#/github');
       expect(getByRole('main', { name: /github-ansicht/i })).toBeTruthy();
-      expect(getByRole('heading', { name: /neues repository anlegen/i })).toBeTruthy();
+      // AC4: „+ Neues Repo"-Button über der Liste ist sichtbar
+      expect(getByRole('button', { name: /\+ neues repo/i })).toBeTruthy();
     });
   });
 });
