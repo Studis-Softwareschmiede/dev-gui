@@ -24,7 +24,7 @@
  * @module GitHubWriter
  */
 
-import { SignJWT, importPKCS8 } from 'jose';
+import { mintInstallationToken as sharedMintInstallationToken } from './githubAppToken.js';
 
 /** Org to create repos in. Matches GitHubReader. */
 const ORG = 'Studis-Softwareschmiede';
@@ -136,124 +136,63 @@ export class GitHubWriter {
   // ── Token Minting ─────────────────────────────────────────────────────────────
 
   /**
-   * Reads GitHub App credentials from the CredentialStore.
-   * Throws a clear error (no secret leak) if any field is missing.
+   * Mints a fresh GitHub App Installation Token via the shared helper.
    *
-   * @returns {Promise<{ appId: string, installationId: string, privateKeyPem: string }>}
-   */
-  async #loadCredentials() {
-    if (!this.#credentialStore) {
-      throw new GitHubWriterError(
-        'CredentialStore nicht konfiguriert — GitHub-App-Credentials nicht verfügbar',
-        'credential-store-missing',
-      );
-    }
-
-    const [appId, installationId, privateKeyPem] = await Promise.all([
-      this.#credentialStore.getPlaintext('credentials/github/app_id'),
-      this.#credentialStore.getPlaintext('credentials/github/installation_id'),
-      this.#credentialStore.getPlaintext('credentials/github/private_key'),
-    ]);
-
-    const missing = [];
-    if (!appId) missing.push('github/app_id');
-    if (!installationId) missing.push('github/installation_id');
-    if (!privateKeyPem) missing.push('github/private_key');
-
-    if (missing.length > 0) {
-      // Do NOT include values in this message — just field names
-      throw new GitHubWriterError(
-        `GitHub-App-Credentials unvollständig: ${missing.join(', ')} fehlen im CredentialStore`,
-        'credentials-incomplete',
-      );
-    }
-
-    return { appId, installationId, privateKeyPem };
-  }
-
-  /**
-   * Mints a fresh GitHub App Installation Token.
+   * Delegates to sharedMintInstallationToken (githubAppToken.js) — single
+   * canonical implementation used by GitHubWriter, WorkspaceMutator/workspaceReposRouter.
    * Token is transient — caller uses it immediately and discards it.
    *
+   * Wraps shared errors into GitHubWriterError to preserve error taxonomy for callers.
+   *
    * @returns {Promise<string>} Installation token (never logged)
+   * @throws {GitHubWriterError}
    */
   async #mintInstallationToken() {
-    const { appId, installationId, privateKeyPem } = await this.#loadCredentials();
-
-    // Step 1: Build and sign the App JWT (RS256, 10-minute expiry)
-    let appJwt;
+    // Pass this.#fetch so injected fetchFn in tests intercepts both the token-mint
+    // call AND the repo-creation call (same mock for both).
+    // The shared helper calls fetchFn(url, init) — standard 2-arg form.
     try {
-      const privateKey = await importPKCS8(privateKeyPem, 'RS256');
-      const now = Math.floor(Date.now() / 1000);
-      appJwt = await new SignJWT({})
-        .setProtectedHeader({ alg: 'RS256' })
-        .setIssuedAt(now - 60) // 60s clock skew buffer
-        .setExpirationTime(now + 600) // 10 minutes
-        .setIssuer(String(appId))
-        .sign(privateKey);
+      return await sharedMintInstallationToken(this.#credentialStore, {
+        fetchFn: this.#fetch,
+      });
     } catch (err) {
-      // Do NOT include privateKeyPem or appId in error details
+      const msg = String(err?.message ?? '');
+      // Map shared error messages to GitHubWriterError taxonomy
+      if (msg.includes('CredentialStore nicht konfiguriert')) {
+        throw new GitHubWriterError(msg, 'credential-store-missing');
+      }
+      if (msg.includes('unvollständig')) {
+        throw new GitHubWriterError(msg, 'credentials-incomplete');
+      }
+      if (msg.includes('JWT konnte nicht')) {
+        throw new GitHubWriterError(
+          `GitHub-App-JWT konnte nicht erstellt werden: ${sanitizeErrorMessage(msg)}`,
+          'jwt-sign-failed',
+        );
+      }
+      if (msg.includes('nicht erreichbar')) {
+        throw new GitHubWriterError(
+          `GitHub-API nicht erreichbar (Token-Minting): ${sanitizeErrorMessage(msg)}`,
+          'network-error',
+        );
+      }
+      if (msg.includes('fehlgeschlagen (HTTP')) {
+        // Extract status code from message if present
+        const statusMatch = msg.match(/HTTP (\d+)/);
+        const status = statusMatch ? Number(statusMatch[1]) : undefined;
+        throw new GitHubWriterError(
+          `GitHub-App-Authentication fehlgeschlagen (HTTP ${status ?? '?'}). ` +
+            'Prüfe App-ID, Installation-ID und Private-Key im CredentialStore.',
+          'auth-failed',
+          status,
+        );
+      }
+      // Fallback: wrap as invalid-response
       throw new GitHubWriterError(
-        `GitHub-App-JWT konnte nicht erstellt werden: ${sanitizeErrorMessage(err.message)}`,
-        'jwt-sign-failed',
-      );
-    }
-
-    // Step 2: Exchange JWT for an Installation Access Token
-    const tokenUrl = `${GITHUB_API}/app/installations/${encodeURIComponent(installationId)}/access_tokens`;
-    let res;
-    try {
-      // Token only in Authorization header — never in URL, log, or argv
-      res = await this.#fetch(
-        tokenUrl,
-        {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${appJwt}`,
-            Accept: 'application/vnd.github+json',
-            'X-GitHub-Api-Version': '2022-11-28',
-          },
-        },
-        FETCH_TIMEOUT_MS,
-      );
-    } catch (err) {
-      throw new GitHubWriterError(
-        `GitHub-API nicht erreichbar (Token-Minting): ${sanitizeErrorMessage(err.message)}`,
-        'network-error',
-      );
-    }
-
-    if (!res.ok) {
-      // Consume body to release connection; do NOT log it (may contain sensitive info)
-      try { await res.text(); } catch { /* ignore */ }
-      throw new GitHubWriterError(
-        `GitHub-App-Authentication fehlgeschlagen (HTTP ${res.status}). ` +
-          'Prüfe App-ID, Installation-ID und Private-Key im CredentialStore.',
-        'auth-failed',
-        res.status,
-      );
-    }
-
-    let data;
-    try {
-      data = await res.json();
-    } catch {
-      throw new GitHubWriterError(
-        'GitHub-API lieferte ungültige Antwort beim Token-Minting',
+        `Token-Minting fehlgeschlagen: ${sanitizeErrorMessage(msg)}`,
         'invalid-response',
       );
     }
-
-    const token = data?.token;
-    if (typeof token !== 'string' || !token) {
-      throw new GitHubWriterError(
-        'GitHub-API lieferte keinen Token in der Token-Minting-Antwort',
-        'invalid-response',
-      );
-    }
-
-    // appJwt and token are NOT logged — transient
-    return token;
   }
 
   // ── Public API ────────────────────────────────────────────────────────────────

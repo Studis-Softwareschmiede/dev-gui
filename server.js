@@ -14,6 +14,7 @@
  *   POST /api/settings/ssh-keys/:user/provision   → 501 (Stufe B, folgt in #47)
  *   POST /api/github/repos                        → Org-Repo anlegen (github-repo-create #59)
  *   GET  /api/workspace/repos                     → { repos: [...] } — live WORKSPACE_DIR scan (workspace-repos AC1, AC2)
+ *   POST /api/workspace/repos/pull                → { name, status: "pulled" } — pull clone (workspace-repos AC3, AC4, AC7, AC8)
  *   POST /api/workspace/repos/delete              → { name, status: "deleted" } — delete clone (workspace-repos AC5, AC7, AC8)
  *   POST /api/github/repos/clone                  → { repo, status: "cloned", path } — lokalen Klon anlegen (github-repo-clone #61)
  *   WS   /ws/terminal                             → PtyManager bridge (guarded by AccessGuard)
@@ -105,10 +106,10 @@ app.use(sshKeysRouter(credentialStore, auditStore));
 const githubWriter = new GitHubWriter({ credentialStore });
 app.use(githubReposRouter(auditStore, githubWriter));
 
-// ── Workspace Repos route (workspace-repos AC1, AC2, AC5, AC7, AC8) ─────────
+// ── Workspace Repos route (workspace-repos AC1, AC2, AC3, AC4, AC5, AC7, AC8) ──
 const workspaceScanner = new WorkspaceScanner();
 const workspaceMutator = new WorkspaceMutator();
-app.use(workspaceReposRouter(workspaceScanner, auditStore, workspaceMutator));
+app.use(workspaceReposRouter(workspaceScanner, auditStore, workspaceMutator, credentialStore));
 
 // ── GitHub Repo Clone route (github-repo-clone #61) ───────────────────────────
 const githubCloner = new GitHubCloner({ credentialStore });
