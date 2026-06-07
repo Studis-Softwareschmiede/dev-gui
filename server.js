@@ -14,6 +14,7 @@
  *   POST /api/settings/ssh-keys/:user/provision   → 501 (Stufe B, folgt in #47)
  *   POST /api/github/repos                        → Org-Repo anlegen (github-repo-create #59)
  *   GET  /api/workspace/repos                     → { repos: [...] } — live WORKSPACE_DIR scan (workspace-repos AC1, AC2)
+ *   POST /api/workspace/repos/delete              → { name, status: "deleted" } — delete clone (workspace-repos AC5, AC7, AC8)
  *   WS   /ws/terminal                             → PtyManager bridge (guarded by AccessGuard)
  */
 
@@ -38,6 +39,7 @@ import { sshKeysRouter } from './src/sshKeysRouter.js';
 import { githubReposRouter } from './src/githubReposRouter.js';
 import { GitHubWriter } from './src/GitHubWriter.js';
 import { WorkspaceScanner } from './src/WorkspaceScanner.js';
+import { WorkspaceMutator } from './src/WorkspaceMutator.js';
 import { workspaceReposRouter } from './src/workspaceReposRouter.js';
 
 const PORT = Number(process.env.PORT ?? 8080);
@@ -100,9 +102,10 @@ app.use(sshKeysRouter(credentialStore, auditStore));
 const githubWriter = new GitHubWriter({ credentialStore });
 app.use(githubReposRouter(auditStore, githubWriter));
 
-// ── Workspace Repos route (workspace-repos AC1, AC2) ─────────────────────────
+// ── Workspace Repos route (workspace-repos AC1, AC2, AC5, AC7, AC8) ─────────
 const workspaceScanner = new WorkspaceScanner();
-app.use(workspaceReposRouter(workspaceScanner));
+const workspaceMutator = new WorkspaceMutator();
+app.use(workspaceReposRouter(workspaceScanner, auditStore, workspaceMutator));
 
 /**
  * GET /api/session → { state, restarts, startedAt }
