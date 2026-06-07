@@ -19,9 +19,14 @@
 - **Static server** — liefert das gebaute React-Frontend.
 
 **Frontend (React):**
-- **App-Shell** — Einstiegs-Panel (vier Kacheln: GitHub · VPS · Cloudflare · Fabrik) + client-seitige Navigation (deep-linkbare Routen, Browser-Verlauf, Fallback auf Panel). Rendert je nach Route eine der vier Ansichten. *Boundary:* einziger Ort, der View-Routing kennt.
+- **App-Shell** — Einstiegs-Panel (vier Kacheln: GitHub · VPS · Cloudflare · Fabrik) + client-seitige Navigation (deep-linkbare Routen, Browser-Verlauf, Fallback auf Panel) + ein **Zahnrad** in der Navigation, das die **Settings-Ansicht** öffnet (Route `settings`, NICHT als fünfte Kachel). Rendert je nach Route eine der Ansichten. *Boundary:* einziger Ort, der View-Routing kennt.
+- **Settings-Ansicht** — zentrale Einstellmaske mit Sektionen je Integration (GitHub · Cloudflare · Hetzner/VPS · SSH-Keys); Credential-Felder write-only/maskiert (nur Status „gesetzt/nicht gesetzt"). Konsumiert die Settings-/Credential-/SSH-Endpunkte (siehe unten).
 - **Fabrik-Ansicht** — Terminal-Pane (xterm.js) · Status-Dashboard · Flow-Trigger-Panels · Job-/Kill-Steuerung (= bisheriges Frontend, jetzt als eine Ansicht eingebettet).
 - **GitHub- / VPS- / Cloudflare-Ansicht** — derzeit Platzhalter-Views (Grundgerüst); Detail-Funktionen + zugehörige Backend-Boundaries folgen als eigene Anforderungen. *Geplante neue Boundaries (noch nicht entschieden):* erweiterter `GitHubReader`/Schreibpfad, ein **VPS-Provider-Boundary** (z.B. Hetzner-API) und ein **Cloudflare-API-Boundary** — jeweils mit Secret-Handling, Audit + Identitäts-/Rollenschutz (Entscheidung: `architekt`).
+
+**Backend — geplant (Settings/Credentials, Boundary + Store offen):**
+- **CredentialStore** *(neu, Architektur-Entscheidung ausstehend)* — einziger Schreib-/Lese-Boundary für Geheimnisse (Credentials je Integration + SSH-Private-Keys). **Write-only nach außen:** Lese-Antworten liefern nur Metadaten (Status „set/unset", Maske, `updatedAt`), **nie** Klartext. Endpunkte `GET/PUT/DELETE /api/settings/credentials*`, `GET/PUT/DELETE /api/settings/ssh-keys*`; mutierende Aktionen auditiert + identitäts-/rollengeschützt. **At rest verschlüsselt** — Speicherort + Verfahren + Master-Key-Herkunft sind offen (siehe ADR-007-Platzhalter).
+- **VPS-/SSH-Provisioner** *(neu, Folge-Capability, Boundary offen)* — trägt einen hinterlegten Public-Key idempotent in `authorized_keys` eines VPS-Ziels ein (`POST /api/settings/ssh-keys/{user}/provision`); hängt am noch offenen VPS-Provider-/SSH-Boundary (vgl. VPS-Ansicht).
 
 **Davor (Infra, nicht im Image):** Cloudflare **Access** (Identitäts-Gate) + Tunnel-Route `devgui.<domain>`.
 
@@ -55,3 +60,4 @@
 - **ADR-004 · 2026-05-26 · Auth = Cloudflare Access** (kein App-Login). *Grund:* Zero-Trust ohne App-Code; einzige Mauer vor der pre-granted Engine. *Verworfen:* Supabase-JWT (mehr Code, weiterer Dienst).
 - **ADR-005 · 2026-05-26 · Kein eigener State-Store.** GitHub + Docker sind Source of Truth; jede Statusantwort wird live ermittelt.
 - **ADR-006 · 2026-05-26 · Stack = Node-Vollstack** (React + Express + ws + `node-pty` + xterm.js). *Grund:* ein Dienst, SDK-frei, passt zur PTY-Bridge.
+- **ADR-007 · OFFEN · Verschlüsselter Credential-Store.** Das Hinterlegen von Credentials/Private-Keys (Settings-Ansicht) erfordert **persistente, at-rest-verschlüsselte** Geheimnis-Ablage — eine bewusste Erweiterung gegenüber ADR-005 (das nur den **Lese**-Fabrik-Status abdeckt, kein Geheimnis-Store). *Zu entscheiden (`architekt`, ggf. `dba`):* Speicherort (verschlüsselte Datei auf persistentem Volume analog `.env.gpg` · Container-Secret · externer Secret-Manager), Verschlüsselungsverfahren, **Master-Key-Herkunft beim Boot** (ohne Schlüssel in Image/Log), Rollentrennung für mutierende Aktionen. Specs `settings-credentials` / `settings-ssh-keys` sind bis dahin speicher-agnostisch formuliert.

@@ -37,3 +37,11 @@ Die GUI wächst von einer reinen Fabrik-Oberfläche zu einer **Admin-Konsole mit
 10. **Cloudflare-Ansicht** (`view-cloudflare`) — Domäne + Tunnel verwalten. *Heute nur Platzhalter-Gerüst; benötigt später einen neuen Cloudflare-API-Boundary.*
 
 > **Hinweis zu Nicht-Ziel „kein eigener State-Store":** die VPS- und Cloudflare-Detail-Funktionen führen neue **schreibende** externe Integrationen (Provider-/Cloudflare-API) samt Secret-Handling ein. Das ist eine bewusste künftige Architektur-Erweiterung (eigene Anforderungen, Entscheidung beim `architekt`); ADR-005 (live statt Store) bleibt für den **Lese**-Status gültig.
+
+### Scope-Erweiterung: Zentrale Einstellungen & Credentials (ab 2026-06)
+Eine **zentrale Einstellmaske**, über ein **Zahnrad in der App-Shell-Navigation** (nicht als fünfte Einstiegs-Kachel) erreichbar, bündelt die Konfiguration aller Integrationen:
+11. **Settings-Ansicht** (`settings-shell`) — Zahnrad-Einstieg + deep-linkbare Settings-View mit Sektionen je Integration (GitHub, Cloudflare, Hetzner/VPS, SSH-Keys). **Grundgerüst zuerst.**
+12. **Credential-Verwaltung** (`settings-credentials`) — Credentials je Integration anlegen/ändern/löschen; **write-only** (Geheimwerte werden NIE im Klartext ans Frontend zurückgegeben), nur Status „gesetzt/nicht gesetzt" + maskierte Anzeige; auditiert, identitäts-/rollengeschützt. *Security-kritisch.*
+13. **SSH-Key-Verwaltung + VPS-Provisionierung** (`settings-ssh-keys`) — Public/Private-Keys je VPS-Benutzer (z.B. `root`, `alex`) hinterlegen (Stufe A); Public-Key automatisch idempotent in `authorized_keys` eines VPS provisionieren (Stufe B, Folge-Capability am VPS-Boundary). *Security-kritisch.*
+
+> **Bindend offene Architektur-Frage (Credential-Store):** Das Speichern von Credentials/Private-Keys kollidiert mit dem Nicht-Ziel „keine eigene DB / kein State-Store". ADR-005 deckt nur den **Lese**-Fabrik-Status; ein **verschlüsselter Credential-Store** (wohin? womit verschlüsselt? Master-Key-Herkunft?) ist eine bewusste neue Architektur-Erweiterung und muss vom `architekt` per ADR entschieden werden (ggf. Datenmodell beim `dba`). Die Specs legen das Verhalten provider-/speicher-agnostisch fest.
