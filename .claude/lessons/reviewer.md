@@ -1,5 +1,20 @@
 # Reviewer Lessons — dev-gui (newest first)
 
+## 2026-06-07 — Clone-State-Machine: Mehrfachklick-Schutz ist hinreichend belegt wenn der busy-Button disabled+aria-busy ist
+Der Mehrfachklick-Schutz beim Klonen ist vollständig implementiert wenn (a) der Idle-Button im cloning-State nicht gerendert wird und (b) der Lade-Button disabled+aria-busy=true ist. Der Test muss nur das aria-busy-Element + disabled prüfen — die Abwesenheit des Idle-Buttons ist eine Stärkung, kein Pflichtassert für den Header-Claim "Mehrfachklick-Schutz". Kein Befund (nicht mal Suggestion) wenn die Implementierung korrekt ist und der Claim belegt ist.
+
+## 2026-06-07 — role=alert ohne explizites aria-live="assertive" ist per WAI-ARIA konform (kein Header-Overclaim-Befund)
+WAI-ARIA 1.2 definiert role=alert mit implizitem aria-live=assertive. Wenn der Test-Header "role=alert, aria-live=assertive" behauptet und das Element role=alert ohne explizites aria-live-Attribut hat, ist das per Spec korrekt (impliziter Wert). Kein Overclaim-Befund. Reviewer soll nicht auf explizites aria-live pochen wenn role=alert vorhanden ist.
+
+## 2026-06-07 — Shared-Helper-Migration: erster Konsument (Referenz-Impl.) ist nicht automatisch gate-blockierend
+Wenn ein shared helper extrahiert wird (z.B. githubAppToken.js) und der ERSTE Konsument (Referenz-Impl., z.B. GitHubCloner) NICHT im selben Diff migriert wird: kein Important/Critical, wenn (a) die Referenz-Impl. nachweislich korrekt ist (sie war das Vorbild), (b) die Neuimplementierung im Diff korrekt ist (identisches Skript-Format), und (c) die Nicht-Migration explizit als Folge-Item dokumentiert ist. Die coder.md-Lesson "sofort extrahieren" greift, wenn ein NEUER dritter Konsument hinzugefügt wird, aber ohne die bestehenden umzuhängen — hier wurde der neue (WorkspaceMutator) via shared helper implementiert; der alte (GitHubCloner) ist bereits korrekt und wartet auf ein Folge-Item. → Suggestion, nicht Important.
+
+## 2026-06-07 — GIT_ASKPASS-Protokoll: immer gegen bestehende korrekte Implementierung vergleichen
+Bei einer neuen GIT_ASKPASS-Implementierung im Diff immer gegen die bestehende korrekte Version (GitHubCloner.#writeAskpassScript) vergleichen — nicht nur prüfen ob der Token im argv auftaucht. Das ASKPASS-Protokoll erfordert prompt-sensitives Branching (Username vs. Password); ein Skript das denselben Wert für alle Prompts ausgibt, ist falsch und führt zu Produktions-Fehlern, auch wenn alle Tests grün sind (weil Tests execFn mocken und git nie wirklich aufgerufen wird).
+
+## 2026-06-07 — Symlink-Flucht bei git-Subprozessen: cwd-Resolution prüfen, nicht nur Eingabe-Traversal
+Wenn ein git-Kommando mit user-kontrolliertem cwd ausgeführt wird, muss explizit geprüft werden: (a) verhindert der Code Symlinks im cwd, die aus dem Workspace zeigen? und (b) wird realpath() verwendet oder nur lstat() + syntaktische Prüfung? lstat() prüft die Existenz des Symlinks selbst, resolvert ihn aber nicht. git pull FOLGT dem Symlink als cwd. Für delete (rm) reicht lstat — für git-Subprozess-cwd ist realpath zwingend. Reviewer-Test: suche nach `cwd: targetPath` im Diff → prüfe immer ob danach ein realpath-Check folgt.
+
 ## 2026-06-07 — Worktree-Diff gegen main: später gelandete Items erscheinen als „entfernt" (Stale-Base-Artefakt)
 Bei parallelen Worktree-Builds vergleicht `git diff main` im Worktree gegen das WEITERGEZOGENE main — Items, die nach der Worktree-Erstellung gelandet sind (z.B. #60-Frontend, #67-Delete), erscheinen dann fälschlich als „gelöscht". Vor einem Critical „Spec-Drift / Feature entfernt"-Befund: `git merge-base HEAD main` prüfen und den Diff gegen die Worktree-BASIS bewerten. Echte Kollateralentfernungen bleiben Critical (siehe coder.md-Lesson); Stale-Base-Artefakte löst der Orchestrator beim Rebase.
 ## 2026-06-07 — Toggle-Refactor: A11y-Struktur-Tests für versteckte Formulare systematisch prüfen

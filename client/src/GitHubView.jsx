@@ -15,13 +15,22 @@
  *   AC6  — Graceful degradation bei Nichterreichbarkeit (Felder „unbekannt",
  *           leere Liste mit Hinweis, kein Crash/Whitescreen).
  *
+ * github-repo-clone (AC1, AC4, AC6 — Frontend-Anteil, #62):
+ *   AC1  — „Klonen"-Button in RepoRow löst POST /api/github/repos/clone aus;
+ *           bei Erfolg (201) wird Status „geklont" inkl. Ziel-Pfad angezeigt.
+ *   AC4  — 409 already-present: klar dargestellt + explizite Bestätigungsoption für
+ *           force-Re-Clone (kein stilles Überschreiben).
+ *   AC6  — Fehlerpfade (403/404/422/500/502/Netzwerk) klar dargestellt ohne Secret;
+ *           während Klonens: Button disabled/Loading-State (Mehrfachklick-Schutz).
+ *
  * A11y (NFR):
  *   - Alle Felder mit <label> beschriftet.
  *   - Fehler programmatisch zugeordnet (aria-describedby).
  *   - Erfolgs-URL fokussierbar (tabIndex, Fokusführung nach Submit).
  *   - Touch-Target ≥ 44 px für Buttons.
- *   - Kontrast ≥ 4.5:1 für alle sichtbaren Textelemente.
+ *   - Kontrast ≥ 4.5:1 für alle sichtbaren Textelemente (Sekundärfarbe #9ca3af, nie #6b7280).
  *   - Repo-Liste als semantische Tabelle; Links + Aktionen tastaturerreichbar.
+ *   - Clone-Status/Fehler mit role=status/alert, programmatische Zuordnung, Fokusführung.
  *
  * Security (Floor):
  *   - Keine Secrets in Request/Response.
@@ -82,6 +91,37 @@ async function listRepos(fetchImpl) {
   return res.json();
 }
 
+/**
+ * POST /api/github/repos/clone
+ * @param {{ repo: string, force?: boolean }} body
+ * @param {typeof fetch} [fetchImpl]
+ * @returns {Promise<{ repo: string, status: string, path: string }>}
+ * @throws {Error} mit `.status` (HTTP-Statuscode), `.message` und optional `.alreadyPresent` + `.path`
+ */
+async function cloneRepo(body, fetchImpl) {
+  const fn = fetchImpl ?? globalThis.fetch.bind(globalThis);
+  const res = await fn('/api/github/repos/clone', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  if (res.status === 409) {
+    // AC4: already-present — eigener Fehlertyp damit der Aufrufer force anbieten kann
+    const err = new Error(data.error ?? `Zielverzeichnis bereits vorhanden`);
+    err.status = 409;
+    err.alreadyPresent = true;
+    err.path = data.path ?? null;
+    throw err;
+  }
+  if (!res.ok) {
+    const err = new Error(data.error ?? `Klonen fehlgeschlagen (${res.status})`);
+    err.status = res.status;
+    throw err;
+  }
+  return data;
+}
+
 // ── CiBadge ──────────────────────────────────────────────────────────────────
 
 /**
@@ -103,12 +143,33 @@ function CiBadge({ status }) {
 
 /**
  * Single repo row inside the repo list table.
- * The "Klonen" button is an AC4 anchor point; disabled until #62 wires it up.
+ * Wired in #62: "Klonen"-Button löst POST /api/github/repos/clone aus.
+ * Clone states: idle → cloning → cloned | alreadyPresent | error
+ * alreadyPresent: zeigt explizite force-Bestätigung (AC4).
  *
- * @param {{ repo: { name, fullName, visibility, openIssues, lastCi, htmlUrl } }} props
+ * @param {{
+ *   repo: { name, fullName, visibility, openIssues, lastCi, htmlUrl },
+ *   fetchFn?: typeof fetch
+ * }} props
  */
-function RepoRow({ repo }) {
+function RepoRow({ repo, fetchFn }) {
   const { name, visibility, openIssues, lastCi, htmlUrl } = repo;
+
+  // Clone state machine
+  // cloneState: 'idle' | 'cloning' | 'cloned' | 'alreadyPresent' | 'error'
+  const [cloneState, setCloneState]   = useState('idle');
+  const [clonePath, setClonePath]     = useState(null);   // path on success / alreadyPresent
+  const [cloneError, setCloneError]   = useState(null);   // error message string
+
+  // Ref to the status/alert region for focus management (lessons: activeElement assertion)
+  const statusRef = useRef(null);
+
+  // Focus the status region after clone completes or errors (A11y Fokusführung)
+  useEffect(() => {
+    if ((cloneState === 'cloned' || cloneState === 'error' || cloneState === 'alreadyPresent') && statusRef.current) {
+      statusRef.current.focus();
+    }
+  }, [cloneState]);
 
   // Guard: only render <a href> for http(s) URLs (security/R02)
   const safeUrl = /^https?:\/\//i.test(htmlUrl ?? '') ? htmlUrl : null;
@@ -117,6 +178,49 @@ function RepoRow({ repo }) {
     openIssues === 'unknown' || openIssues == null ? 'unbekannt' : String(openIssues);
 
   const visibilityLabel = visibility === 'public' ? 'Öffentlich' : 'Privat';
+
+  /**
+   * Triggers a clone (or force re-clone).
+   * @param {boolean} force - true = force-Re-Clone (AC4)
+   */
+  const handleClone = useCallback(async (force = false) => {
+    setCloneState('cloning');
+    setCloneError(null);
+    setClonePath(null);
+
+    try {
+      const data = await cloneRepo({ repo: name, ...(force ? { force: true } : {}) }, fetchFn);
+      setClonePath(data.path ?? null);
+      setCloneState('cloned');
+    } catch (err) {
+      if (err.alreadyPresent) {
+        // AC4: 409 — zeige explizite force-Bestätigung, kein stilles Überschreiben
+        setClonePath(err.path ?? null);
+        setCloneState('alreadyPresent');
+      } else {
+        // AC6: alle anderen Fehler klar darstellen (error-Text vom Backend, kein Secret)
+        setCloneError(err.message ?? 'Klonen fehlgeschlagen');
+        setCloneState('error');
+      }
+    }
+  }, [name, fetchFn]);
+
+  const handleForceConfirm = useCallback(() => {
+    handleClone(true);
+  }, [handleClone]);
+
+  const handleReset = useCallback(() => {
+    setCloneState('idle');
+    setCloneError(null);
+    setClonePath(null);
+  }, []);
+
+  const isCloning = cloneState === 'cloning';
+
+  // Unique IDs for aria-describedby (per-row, use repo name slug)
+  const safeId = name ? name.replace(/[^a-z0-9]/gi, '-') : 'repo';
+  const cloneStatusId = `clone-status-${safeId}`;
+  const cloneErrorId  = `clone-error-${safeId}`;
 
   return (
     <tr style={styles.tableRow}>
@@ -155,15 +259,109 @@ function RepoRow({ repo }) {
         )}
       </td>
       <td style={styles.td}>
-        {/* AC4 anchor point — Klonen wird in #62 verdrahtet */}
-        <button
-          type="button"
-          disabled
-          style={styles.btnClone}
-          aria-label={`${name} klonen (folgt)`}
-        >
-          Klonen
-        </button>
+        {/* AC1/#62: Clone-Button + Statusanzeige */}
+        <div style={styles.cloneCell}>
+          {/* Primärer Klon-Button — nur im idle/error-Zustand aktiv */}
+          {(cloneState === 'idle' || cloneState === 'error') && (
+            <button
+              type="button"
+              disabled={isCloning}
+              style={styles.btnClone}
+              onClick={() => handleClone(false)}
+              aria-label={`${name} klonen`}
+              aria-describedby={cloneState === 'error' ? cloneErrorId : undefined}
+            >
+              Klonen
+            </button>
+          )}
+
+          {/* Lade-Zustand (Mehrfachklick-Schutz, AC6) */}
+          {cloneState === 'cloning' && (
+            <button
+              type="button"
+              disabled
+              style={{ ...styles.btnClone, cursor: 'wait' }}
+              aria-label={`${name} wird geklont…`}
+              aria-busy="true"
+            >
+              Klont…
+            </button>
+          )}
+
+          {/* Erfolg (AC1) — role=status für A11y-Ankündigung */}
+          {cloneState === 'cloned' && (
+            <div
+              ref={statusRef}
+              id={cloneStatusId}
+              role="status"
+              aria-live="polite"
+              aria-atomic="true"
+              tabIndex={-1}
+              style={styles.cloneSuccess}
+            >
+              <span>Geklont</span>
+              {clonePath && (
+                <span style={styles.clonePath} title={clonePath}>
+                  {' '}→ {clonePath}
+                </span>
+              )}
+              <button
+                type="button"
+                style={styles.btnCloneSmall}
+                onClick={handleReset}
+                aria-label={`${name} erneut klonen`}
+              >
+                Erneut klonen
+              </button>
+            </div>
+          )}
+
+          {/* AC4: 409 already-present — explizite Bestätigung vor force-Re-Clone */}
+          {cloneState === 'alreadyPresent' && (
+            <div
+              ref={statusRef}
+              id={cloneStatusId}
+              role="alert"
+              aria-live="assertive"
+              aria-atomic="true"
+              tabIndex={-1}
+              style={styles.cloneAlreadyPresent}
+            >
+              <span>Bereits vorhanden{clonePath ? ` (${clonePath})` : ''}</span>
+              <div style={styles.cloneForceRow}>
+                <button
+                  type="button"
+                  style={styles.btnCloneForce}
+                  onClick={handleForceConfirm}
+                  aria-label={`${name} erneut klonen und vorhandenes Verzeichnis überschreiben`}
+                >
+                  Überschreiben
+                </button>
+                <button
+                  type="button"
+                  style={styles.btnCloneSmall}
+                  onClick={handleReset}
+                  aria-label={`Klonen von ${name} abbrechen`}
+                >
+                  Abbrechen
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Fehler (AC6) — role=alert für sofortige A11y-Ankündigung */}
+          {cloneState === 'error' && (
+            <p
+              ref={statusRef}
+              id={cloneErrorId}
+              role="alert"
+              tabIndex={-1}
+              style={styles.cloneError}
+            >
+              {cloneError}
+            </p>
+          )}
+        </div>
       </td>
     </tr>
   );
@@ -268,7 +466,7 @@ function RepoList({ fetchFn }) {
               </thead>
               <tbody>
                 {repos.map((repo) => (
-                  <RepoRow key={repo.name} repo={repo} />
+                  <RepoRow key={repo.name} repo={repo} fetchFn={fetchFn} />
                 ))}
               </tbody>
             </table>
@@ -850,12 +1048,78 @@ const styles = {
   btnClone: {
     padding: '5px 12px',
     background: '#1e293b',
-    color: '#9ca3af',
+    color: '#9ca3af',           // Kontrast auf #1e293b ≥ 4.5:1
     border: '1px solid #334155',
     borderRadius: 4,
     fontSize: 12,
-    cursor: 'not-allowed',
-    opacity: 0.6,
+    cursor: 'pointer',
+    minHeight: 44,
+  },
+  cloneCell: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 4,
+    minWidth: 0,
+  },
+  cloneSuccess: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 4,
+    padding: '4px 8px',
+    background: '#052e16',
+    border: '1px solid #166534',
+    borderRadius: 4,
+    fontSize: 12,
+    color: '#86efac',           // Kontrast auf #052e16 ≥ 4.5:1
+  },
+  clonePath: {
+    fontSize: 11,
+    color: '#9ca3af',           // Kontrast auf #052e16 ≥ 4.5:1
+    wordBreak: 'break-all',
+  },
+  cloneAlreadyPresent: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 6,
+    padding: '4px 8px',
+    background: '#1c1407',
+    border: '1px solid #78350f',
+    borderRadius: 4,
+    fontSize: 12,
+    color: '#fcd34d',           // Kontrast auf #1c1407 ≥ 4.5:1
+  },
+  cloneForceRow: {
+    display: 'flex',
+    gap: 6,
+    flexWrap: 'wrap',
+  },
+  cloneError: {
+    margin: 0,
+    padding: '4px 8px',
+    background: '#2d0f0f',
+    border: '1px solid #7f1d1d',
+    borderRadius: 4,
+    fontSize: 12,
+    color: '#fca5a5',           // Kontrast auf #2d0f0f ≥ 4.5:1
+  },
+  btnCloneSmall: {
+    padding: '4px 10px',
+    background: '#1e293b',
+    color: '#9ca3af',           // Kontrast auf #1e293b ≥ 4.5:1
+    border: '1px solid #334155',
+    borderRadius: 4,
+    fontSize: 11,
+    cursor: 'pointer',
+    minHeight: 44,
+  },
+  btnCloneForce: {
+    padding: '4px 10px',
+    background: '#451a03',
+    color: '#fcd34d',           // Kontrast auf #451a03 ≥ 4.5:1
+    border: '1px solid #78350f',
+    borderRadius: 4,
+    fontSize: 11,
+    cursor: 'pointer',
     minHeight: 44,
   },
 };

@@ -99,6 +99,6 @@ export default [
     },
   },
   {
-    ignores: ['node_modules/', 'dist/', 'build/', 'coverage/', 'client/dist/'],
+    ignores: ['node_modules/', 'dist/', 'build/', 'coverage/', 'client/dist/', '.claude/worktrees/'],
   },
 ];
