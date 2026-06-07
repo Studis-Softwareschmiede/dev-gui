@@ -16,7 +16,20 @@
  *   AC6  — Graceful degradation: Fehler-Hinweis bei Nichterreichbarkeit,
  *           leere Liste mit Hinweis, kein Crash/Whitescreen.
  *
- * NFR A11y:
+ * Covers (github-repo-clone AC1, AC4, AC6 — Frontend-Anteil, #62):
+ *   AC1  — „Klonen"-Button löst POST /api/github/repos/clone aus;
+ *           bei 201 wird „Geklont" + Ziel-Pfad angezeigt (role=status).
+ *   AC4  — 409 already-present: Hinweis + expliziter Bestätigungs-Button für
+ *           force-Re-Clone (kein stilles Überschreiben); Abbrechen möglich.
+ *   AC6  — Fehlerpfade (403/404/422/500/502/Netzwerk) werden klar dargestellt;
+ *           während Klonens: Button disabled (Loading-State, Mehrfachklick-Schutz).
+ *
+ * NFR A11y (Clone-Teil):
+ *   - Erfolg: role=status, aria-live=polite, Fokusführung auf Status-Region.
+ *   - Fehler/already-present: role=alert, aria-live=assertive, Fokusführung.
+ *   - Clone-Button: Touch-Target ≥ 44 px, aria-label, aria-busy während Laden.
+ *
+ * NFR A11y (allgemein):
  *   - Alle Felder mit <label> beschriftet (htmlFor).
  *   - Fehler programmatisch zugeordnet (aria-describedby).
  *   - Erfolgs-URL: tabIndex, <a>-Link (klickbar und fokussierbar).
@@ -36,12 +49,19 @@ const { GitHubView }   = await import('../GitHubView.jsx');
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
-/** Standardmässige Erfolgs-Antwort des Backends für POST (201). */
+/** Standardmässige Erfolgs-Antwort des Backends für POST /api/github/repos (201). */
 const CREATE_SUCCESS = {
   name: 'mein-repo',
   fullName: 'softwareschmiede/mein-repo',
   htmlUrl: 'https://github.com/softwareschmiede/mein-repo',
   visibility: 'private',
+};
+
+/** Standardmässige Erfolgs-Antwort für POST /api/github/repos/clone (201). */
+const CLONE_SUCCESS = {
+  repo: 'alpha-repo',
+  status: 'cloned',
+  path: 'alpha-repo',
 };
 
 /** Beispiel-Repo-Liste für GET /api/github/repos. */
@@ -72,19 +92,26 @@ const REPOS_EMPTY = { repos: [] };
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /**
- * Erstellt einen fetchFn der GET und POST /api/github/repos separat bedient.
+ * Erstellt einen fetchFn der GET /api/github/repos, POST /api/github/repos
+ * und POST /api/github/repos/clone separat bedient.
  *
  * @param {{
  *   getRepos?: { ok?: boolean, status?: number, data?: object },
  *   postCreate?: { ok?: boolean, status?: number, data?: object },
+ *   postClone?: { ok?: boolean, status?: number, data?: object },
  * }} opts
  */
 function makeRoutedFetchFn({
-  getRepos  = { ok: true,  status: 200, data: REPOS_RESPONSE  },
-  postCreate = { ok: true, status: 201, data: CREATE_SUCCESS   },
+  getRepos   = { ok: true, status: 200, data: REPOS_RESPONSE },
+  postCreate = { ok: true, status: 201, data: CREATE_SUCCESS  },
+  postClone  = { ok: true, status: 201, data: CLONE_SUCCESS   },
 } = {}) {
   return jest.fn(async (url, opts = {}) => {
     if ((opts.method ?? 'GET') === 'POST') {
+      if (url === '/api/github/repos/clone') {
+        return { ok: postClone.ok, status: postClone.status, json: async () => postClone.data };
+      }
+      // POST /api/github/repos (create)
       return { ok: postCreate.ok, status: postCreate.status, json: async () => postCreate.data };
     }
     // GET /api/github/repos
@@ -400,14 +427,15 @@ describe('GitHubView — AC4: Andockpunkte', () => {
     });
   });
 
-  it('rendert pro Repo-Zeile einen „Klonen"-Button (disabled)', async () => {
+  it('rendert pro Repo-Zeile einen „Klonen"-Button (aktiv nach #62)', async () => {
     const fetchFn = makeRoutedFetchFn();
     const { getAllByRole } = renderView(fetchFn);
     await waitFor(() => {
       const cloneBtns = getAllByRole('button', { name: /klonen/i });
       expect(cloneBtns).toHaveLength(REPOS_RESPONSE.repos.length);
+      // Nach #62 sind die Buttons aktiv (nicht mehr disabled)
       for (const btn of cloneBtns) {
-        expect(btn.disabled).toBe(true);
+        expect(btn.disabled).toBe(false);
       }
     });
   });
@@ -981,6 +1009,581 @@ describe('GitHubView — A11y: aria-describedby für API-Fehler', () => {
       const formError = document.querySelector('#repo-form-error');
       expect(formError).toBeTruthy();
       expect(formError.textContent).toMatch(/422|ungültig/i);
+    });
+  });
+});
+
+// ── #62 AC1 — Klonen: Erfolgspfad ────────────────────────────────────────────
+
+describe('GitHubView — #62 AC1: Klonen Erfolgspfad', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('Klick auf „Klonen" sendet POST /api/github/repos/clone mit { repo: name }', async () => {
+    const fetchFn = makeRoutedFetchFn();
+    const { getAllByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /klonen/i }).length).toBeGreaterThan(0);
+    });
+
+    const cloneBtn = getAllByRole('button', { name: /alpha-repo klonen/i })[0];
+    await act(async () => {
+      fireEvent.click(cloneBtn);
+    });
+
+    await waitFor(() => {
+      const postCalls = fetchFn.mock.calls.filter(
+        ([url, opts]) => url === '/api/github/repos/clone' && opts?.method === 'POST',
+      );
+      expect(postCalls).toHaveLength(1);
+      const body = JSON.parse(postCalls[0][1].body);
+      expect(body.repo).toBe('alpha-repo');
+    });
+  });
+
+  it('bei 201: zeigt „Geklont" inkl. Ziel-Pfad (AC1)', async () => {
+    const fetchFn = makeRoutedFetchFn();
+    const { getAllByRole, getByText } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo klonen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo klonen/i })[0]);
+    });
+
+    await waitFor(() => {
+      expect(getByText(/geklont/i)).toBeTruthy();
+      expect(document.body.textContent).toContain('alpha-repo');
+    });
+  });
+
+  it('bei 201: Erfolgs-Bereich hat role="status" und aria-live="polite" (A11y)', async () => {
+    const fetchFn = makeRoutedFetchFn();
+    const { getAllByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo klonen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo klonen/i })[0]);
+    });
+
+    await waitFor(() => {
+      const statusEls = document.querySelectorAll('[role="status"][aria-live="polite"]');
+      expect(statusEls.length).toBeGreaterThan(0);
+    });
+  });
+
+  it('bei 201: Fokus wird auf Status-Bereich gesetzt (Fokusführung A11y)', async () => {
+    const fetchFn = makeRoutedFetchFn();
+    const { getAllByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo klonen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo klonen/i })[0]);
+    });
+
+    await waitFor(() => {
+      const statusEl = document.querySelector('[role="status"][aria-live="polite"]');
+      expect(statusEl).toBeTruthy();
+      expect(document.activeElement).toBe(statusEl);
+    });
+  });
+
+  it('bei 201: Ziel-Pfad aus der Response wird angezeigt', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      postClone: { ok: true, status: 201, data: { repo: 'alpha-repo', status: 'cloned', path: 'alpha-repo' } },
+    });
+    const { getAllByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo klonen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo klonen/i })[0]);
+    });
+
+    await waitFor(() => {
+      expect(document.body.textContent).toContain('alpha-repo');
+    });
+  });
+});
+
+// ── #62 AC6 — Klonen: Loading-State (Mehrfachklick-Schutz) ───────────────────
+
+describe('GitHubView — #62 AC6: Loading-State (Mehrfachklick-Schutz)', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('während Klonens: Klonen-Button ist disabled / zeigt Lade-Label (aria-busy)', async () => {
+    // fetchFn der niemals resolved — simuliert langes Klonen
+    let resolveClone;
+    const fetchFn = jest.fn(async (url) => {
+      if (url === '/api/github/repos/clone') {
+        return new Promise((resolve) => { resolveClone = resolve; });
+      }
+      return { ok: true, status: 200, json: async () => REPOS_RESPONSE };
+    });
+    const { getAllByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo klonen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo klonen/i })[0]);
+    });
+
+    // Während Klonens: loading-Button mit aria-busy vorhanden
+    await waitFor(() => {
+      const busyBtn = document.querySelector('[aria-busy="true"]');
+      expect(busyBtn).toBeTruthy();
+      expect(busyBtn.disabled).toBe(true);
+    });
+
+    // Aufräumen: clone-Promise auflösen
+    await act(async () => {
+      resolveClone({ ok: true, status: 201, json: async () => CLONE_SUCCESS });
+    });
+  });
+});
+
+// ── #62 AC4 — Klonen: 409 already-present + force-Bestätigung ────────────────
+
+describe('GitHubView — #62 AC4: 409 already-present + force-Re-Clone', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('409 → zeigt „Bereits vorhanden"-Meldung (role=alert)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      postClone: { ok: false, status: 409, data: { status: 'already-present', path: 'alpha-repo' } },
+    });
+    const { getAllByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo klonen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo klonen/i })[0]);
+    });
+
+    await waitFor(() => {
+      const alertEl = document.querySelector('[role="alert"]');
+      expect(alertEl).toBeTruthy();
+      expect(alertEl.textContent).toMatch(/bereits vorhanden/i);
+    });
+  });
+
+  it('409 → zeigt „Überschreiben"-Button für explizite force-Bestätigung (AC4)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      postClone: { ok: false, status: 409, data: { status: 'already-present', path: 'alpha-repo' } },
+    });
+    const { getAllByRole, getByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo klonen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo klonen/i })[0]);
+    });
+
+    await waitFor(() => {
+      // Expliziter Bestätigungs-Button muss sichtbar sein
+      expect(getByRole('button', { name: /überschreiben/i })).toBeTruthy();
+    });
+  });
+
+  it('409 → force-Re-Clone sendet { repo, force: true } nach Bestätigung', async () => {
+    let callCount = 0;
+    const fetchFn = jest.fn(async (url, opts = {}) => {
+      if (url === '/api/github/repos/clone' && (opts.method ?? '') === 'POST') {
+        callCount++;
+        if (callCount === 1) {
+          // Erster Aufruf: 409
+          return { ok: false, status: 409, json: async () => ({ status: 'already-present', path: 'alpha-repo' }) };
+        }
+        // Zweiter Aufruf (force): Erfolg
+        return { ok: true, status: 201, json: async () => CLONE_SUCCESS };
+      }
+      return { ok: true, status: 200, json: async () => REPOS_RESPONSE };
+    });
+    const { getAllByRole, getByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo klonen/i }).length).toBeGreaterThan(0);
+    });
+
+    // Erster Klick → 409
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo klonen/i })[0]);
+    });
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /überschreiben/i })).toBeTruthy();
+    });
+
+    // Klick auf „Überschreiben" → force-Request
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /überschreiben/i }));
+    });
+
+    await waitFor(() => {
+      const cloneCalls = fetchFn.mock.calls.filter(
+        ([url]) => url === '/api/github/repos/clone',
+      );
+      expect(cloneCalls).toHaveLength(2);
+      const forceBody = JSON.parse(cloneCalls[1][1].body);
+      expect(forceBody.force).toBe(true);
+      expect(forceBody.repo).toBe('alpha-repo');
+    });
+  });
+
+  it('409 → nach erfolgreicher force-Re-Clone wird „Geklont" angezeigt', async () => {
+    let callCount = 0;
+    const fetchFn = jest.fn(async (url, opts = {}) => {
+      if (url === '/api/github/repos/clone' && (opts.method ?? '') === 'POST') {
+        callCount++;
+        if (callCount === 1) {
+          return { ok: false, status: 409, json: async () => ({ status: 'already-present', path: 'alpha-repo' }) };
+        }
+        return { ok: true, status: 201, json: async () => CLONE_SUCCESS };
+      }
+      return { ok: true, status: 200, json: async () => REPOS_RESPONSE };
+    });
+    const { getAllByRole, getByRole, getByText } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo klonen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo klonen/i })[0]);
+    });
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /überschreiben/i })).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /überschreiben/i }));
+    });
+
+    await waitFor(() => {
+      expect(getByText(/geklont/i)).toBeTruthy();
+    });
+  });
+
+  it('409 → „Abbrechen"-Button setzt Zustand zurück auf idle (Klonen-Button wieder sichtbar)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      postClone: { ok: false, status: 409, data: { status: 'already-present', path: 'alpha-repo' } },
+    });
+    const { getAllByRole, getByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo klonen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo klonen/i })[0]);
+    });
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /abbrechen/i })).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /abbrechen/i }));
+    });
+
+    await waitFor(() => {
+      // Klonen-Button ist wieder sichtbar
+      expect(getAllByRole('button', { name: /alpha-repo klonen/i }).length).toBeGreaterThan(0);
+    });
+  });
+
+  it('409 → Fokus wird auf alert-Bereich gesetzt (Fokusführung A11y)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      postClone: { ok: false, status: 409, data: { status: 'already-present', path: 'alpha-repo' } },
+    });
+    const { getAllByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo klonen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo klonen/i })[0]);
+    });
+
+    await waitFor(() => {
+      const alertEl = document.querySelector('[role="alert"][aria-live="assertive"]');
+      expect(alertEl).toBeTruthy();
+      expect(document.activeElement).toBe(alertEl);
+    });
+  });
+
+  it('Touch-Targets für Überschreiben/Abbrechen-Buttons ≥ 44 px (minHeight)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      postClone: { ok: false, status: 409, data: { status: 'already-present', path: 'alpha-repo' } },
+    });
+    const { getAllByRole, getByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo klonen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo klonen/i })[0]);
+    });
+
+    await waitFor(() => {
+      const overwriteBtn = getByRole('button', { name: /überschreiben/i });
+      const cancelBtn    = getByRole('button', { name: /abbrechen/i });
+      expect(parseInt(overwriteBtn.style.minHeight, 10)).toBeGreaterThanOrEqual(44);
+      expect(parseInt(cancelBtn.style.minHeight, 10)).toBeGreaterThanOrEqual(44);
+    });
+  });
+});
+
+// ── #62 AC6 — Klonen: Fehlerpfade ────────────────────────────────────────────
+
+describe('GitHubView — #62 AC6: Fehlerpfade beim Klonen', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('403 → Fehlermeldung wird angezeigt (role=alert)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      postClone: { ok: false, status: 403, data: { error: 'Keine Berechtigung für diese Aktion' } },
+    });
+    const { getAllByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo klonen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo klonen/i })[0]);
+    });
+
+    await waitFor(() => {
+      const alertEl = document.querySelector('[role="alert"]');
+      expect(alertEl).toBeTruthy();
+      expect(alertEl.textContent).toMatch(/berechtigung|403/i);
+    });
+  });
+
+  it('404 → Fehlermeldung wird angezeigt', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      postClone: { ok: false, status: 404, data: { error: 'Repository nicht gefunden' } },
+    });
+    const { getAllByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo klonen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo klonen/i })[0]);
+    });
+
+    await waitFor(() => {
+      const text = document.body.textContent;
+      expect(text).toMatch(/repository nicht gefunden|404/i);
+    });
+  });
+
+  it('422 → Fehlermeldung wird angezeigt', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      postClone: { ok: false, status: 422, data: { error: 'Ungültige Repo-Referenz' } },
+    });
+    const { getAllByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo klonen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo klonen/i })[0]);
+    });
+
+    await waitFor(() => {
+      expect(document.body.textContent).toMatch(/ungültige|422/i);
+    });
+  });
+
+  it('500 → Fehlermeldung wird angezeigt', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      postClone: { ok: false, status: 500, data: { error: 'Interner Fehler' } },
+    });
+    const { getAllByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo klonen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo klonen/i })[0]);
+    });
+
+    await waitFor(() => {
+      expect(document.body.textContent).toMatch(/interner fehler|500/i);
+    });
+  });
+
+  it('502 → Fehlermeldung wird angezeigt', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      postClone: { ok: false, status: 502, data: { error: 'GitHub-API-Fehler beim Klonen' } },
+    });
+    const { getAllByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo klonen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo klonen/i })[0]);
+    });
+
+    await waitFor(() => {
+      expect(document.body.textContent).toMatch(/github|502/i);
+    });
+  });
+
+  it('Netzwerkfehler (clone-POST wirft) → Fehlermeldung angezeigt', async () => {
+    const fetchFn = jest.fn(async (url) => {
+      if (url === '/api/github/repos/clone') {
+        throw new Error('Network failure during clone');
+      }
+      return { ok: true, status: 200, json: async () => REPOS_RESPONSE };
+    });
+    const { getAllByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo klonen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo klonen/i })[0]);
+    });
+
+    await waitFor(() => {
+      expect(document.body.textContent).toMatch(/network failure|fehler/i);
+    });
+  });
+
+  it('Fehler: kein Token/Secret in der Fehlermeldung (Security AC6/AC3)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      postClone: { ok: false, status: 403, data: { error: 'Keine Berechtigung für diese Aktion' } },
+    });
+    const { getAllByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo klonen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo klonen/i })[0]);
+    });
+
+    await waitFor(() => {
+      const text = document.body.textContent;
+      expect(text).not.toMatch(/eyJ[A-Za-z0-9]/); // JWT
+      expect(text).not.toMatch(/ghp_/);            // GitHub PAT
+      expect(text).not.toMatch(/ghs_/);            // GitHub App token
+    });
+  });
+
+  it('Fehler: Fokus wird auf alert-Element gesetzt (Fokusführung A11y)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      postClone: { ok: false, status: 422, data: { error: 'Ungültige Referenz' } },
+    });
+    const { getAllByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo klonen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo klonen/i })[0]);
+    });
+
+    await waitFor(() => {
+      const alertEl = document.querySelector('[role="alert"]');
+      expect(alertEl).toBeTruthy();
+      expect(document.activeElement).toBe(alertEl);
+    });
+  });
+
+  it('nach Fehler: „Klonen"-Button bleibt sichtbar für erneuten Versuch', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      postClone: { ok: false, status: 502, data: { error: 'Clone fehlgeschlagen' } },
+    });
+    const { getAllByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo klonen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo klonen/i })[0]);
+    });
+
+    await waitFor(() => {
+      // Klonen-Button bleibt im idle/error-Zustand sichtbar
+      expect(getAllByRole('button', { name: /alpha-repo klonen/i }).length).toBeGreaterThan(0);
+    });
+  });
+});
+
+// ── #62 A11y — Touch-Targets für Klonen-Buttons ──────────────────────────────
+
+describe('GitHubView — #62 A11y: Touch-Targets Klonen-Buttons', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('„Klonen"-Button pro Zeile hat Touch-Target ≥ 44 px (minHeight)', async () => {
+    const fetchFn = makeRoutedFetchFn();
+    const { getAllByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      const cloneBtns = getAllByRole('button', { name: /klonen/i });
+      expect(cloneBtns.length).toBeGreaterThan(0);
+      for (const btn of cloneBtns) {
+        expect(parseInt(btn.style.minHeight, 10)).toBeGreaterThanOrEqual(44);
+      }
+    });
+  });
+
+  it('„Erneut klonen"-Button nach Erfolg hat Touch-Target ≥ 44 px', async () => {
+    const fetchFn = makeRoutedFetchFn();
+    const { getAllByRole, getByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getAllByRole('button', { name: /alpha-repo klonen/i }).length).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      fireEvent.click(getAllByRole('button', { name: /alpha-repo klonen/i })[0]);
+    });
+
+    await waitFor(() => {
+      const btn = getByRole('button', { name: /erneut klonen/i });
+      expect(parseInt(btn.style.minHeight, 10)).toBeGreaterThanOrEqual(44);
     });
   });
 });
