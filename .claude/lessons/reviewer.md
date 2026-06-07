@@ -1,5 +1,13 @@
 # Reviewer Lessons — dev-gui (newest first)
 
+## 2026-06-07 — startsWith-Prefix-Check mit Trailing-Slash ist sicher (kein false-positive aus alter Lesson)
+Die coder.md-Lesson „Traversal-Guard: immer per parent-dir-Vergleich" wurde in einem früheren Review aus einem anderen Kontext destilliert. Im GitHub-Cloner-Code wird `wsPrefix = resolvedWs + '/'` (mit Trailing-Slash) gebildet und dann `absPath.startsWith(wsPrefix)` geprüft. Das verhindert das beschriebene False-Positive (`/workspace-evil/x` startet NICHT mit `/workspace/`). Vor einem Traversal-Guard-Befund: immer prüfen, ob der Code schon Trailing-Slash hinzufügt. Kein Befund bei korrekter Trailing-Slash-Verwendung.
+
+
+
+## 2026-06-07 — Test-Header „fokussiert" vs „fokussierbar": Spec-Wort genau lesen bevor Befund gesetzt wird
+Wenn eine Spec „fokussierbar" (can receive focus) schreibt und der Test-Header „fokussiert" (is focused) behauptet, ist der Test-Header-Claim stärker als die Spec. Vor dem Important-Befund prüfen: (a) erfüllt der Code die Spec-Anforderung? (b) overclaimed der Header? Wenn Spec = fokussierbar und Test = tabIndex-Check → Spec erfüllt, Header overclaims. Befund ist Important auf Ebene „Test-Header-Claim", nicht auf Ebene „Spec-Verletzung".
+
 ## 2026-06-07 — AC mit „Frontend zeigt … an"-Klausel: immer client/-Verzeichnis auf zugehöriges Formular prüfen
 Bei ACs die explizit frontend-seitiges Verhalten fordern (klickbare URL, Formular, Fokusführung), immer client/src prüfen ob die zugehörige View-Komponente das Formular enthält — Placeholder-Component ohne Formular = Critical-AC-Gap. Nicht darauf verlassen, dass die Coder-Summary „AC vollständig" korrekt ist.
 
