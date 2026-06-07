@@ -10,12 +10,22 @@
  *   - `getPlaintext(key)` ist ausschließlich für interne Konsumenten (z.B. VpsProvisioner).
  *   - Klartext verlässt den Store NICHT Richtung HTTP/Log/Audit.
  *
+ * SSH-Key-Unterstützung (ADR-007 / ADR-008):
+ *   - Public-Keys: Klartext-Metadatum im `meta`-Block (nicht verschlüsselt, nicht geheim).
+ *   - Private-Keys: verschlüsselt in `entries` unter Schema `ssh/<user>/private_key`.
+ *   - API: getPublicKey(user), setPublicKey(user, key), deletePublicKey(user),
+ *           listSshKeys() → [{ user, publicKey?, privateKeyStatus }]
+ *
  * Datei-Schema (ADR-007):
  * {
  *   "version": 1,
  *   "kdf": { "algo": "scrypt", "salt": "<b64>", "N": 16384, "r": 8, "p": 1 },
  *   "entries": {
- *     "credentials/<integration>/<name>": { "iv": "<b64>", "tag": "<b64>", "ct": "<b64>", "updatedAt": "<iso>" }
+ *     "credentials/<integration>/<name>": { "iv": "<b64>", "tag": "<b64>", "ct": "<b64>", "updatedAt": "<iso>" },
+ *     "ssh/<user>/private_key":          { "iv": "<b64>", "tag": "<b64>", "ct": "<b64>", "updatedAt": "<iso>" }
+ *   },
+ *   "meta": {
+ *     "ssh/<user>/public_key": { "value": "<openssh-pubkey>", "updatedAt": "<iso>" }
  *   }
  * }
  *
@@ -51,6 +61,12 @@ const MISC_NAME_RE = /^[a-zA-Z0-9_\-.:@]+$/;
 
 /** Maximale Länge eines misc-Schlüsselnamens. */
 const MAX_MISC_NAME_LEN = 128;
+
+/** Erlaubte Zeichen für SSH-Benutzer-Labels (sync mit sshKeysRouter). */
+const USER_LABEL_RE = /^[a-zA-Z0-9_\-.:@]+$/;
+
+/** Maximale Länge eines SSH-Benutzer-Labels. */
+const MAX_USER_LABEL_LEN = 64;
 
 /** scrypt-Parameter (ADR-007). */
 const SCRYPT_N = 16384;
@@ -147,18 +163,26 @@ export class CredentialStore {
       return;
     }
 
-    // Prüfen ob Store-Datei existiert
-    let storeExists;
+    // Prüfen ob Store-Datei existiert und verschlüsselte Einträge enthält
+    let hasEncryptedEntries = false;
     try {
       await stat(this.#filePath);
-      storeExists = true;
+      // Datei existiert — prüfen ob verschlüsselte entries vorhanden sind
+      try {
+        const raw = await readFile(this.#filePath, 'utf8');
+        const parsed = JSON.parse(raw);
+        hasEncryptedEntries = parsed?.kdf != null && Object.keys(parsed?.entries ?? {}).length > 0;
+      } catch {
+        // Unlesbarer Store → ebenfalls Fail-Fast (ADR-007: kein stilles Fallback)
+        hasEncryptedEntries = true;
+      }
     } catch {
-      storeExists = false;
+      // ENOENT: kein Store → kein Problem
     }
 
-    if (storeExists && !this.#masterKeyRaw) {
+    if (hasEncryptedEntries && !this.#masterKeyRaw) {
       throw new Error(
-        '[CredentialStore] secrets.enc.json existiert, aber CRED_MASTER_KEY fehlt. ' +
+        '[CredentialStore] secrets.enc.json enthält verschlüsselte Einträge, aber CRED_MASTER_KEY fehlt. ' +
         'Prozess wird abgebrochen (Fail-Fast). Env-Var CRED_MASTER_KEY setzen.',
       );
     }
@@ -354,6 +378,7 @@ export class CredentialStore {
       }
     }
 
+    // ssh/-Einträge bewusst ausgelassen (→ listSshKeys())
     // misc-Einträge aus dem Store
     for (const key of Object.keys(entries)) {
       if (key.startsWith('credentials/misc/')) {
@@ -428,20 +453,22 @@ export class CredentialStore {
       let storeData = await this.#readStore();
 
       let salt;
-      if (!storeData) {
-        // Neuer Store: Salt generieren
+      if (!storeData || !storeData.kdf) {
+        // Neuer Store (oder nur Meta-Datei ohne kdf): Salt generieren
         salt = randomBytes(32);
-        storeData = {
-          version: 1,
-          kdf: {
-            algo: 'scrypt',
-            salt: salt.toString('base64'),
-            N: SCRYPT_N,
-            r: SCRYPT_R,
-            p: SCRYPT_P,
-          },
-          entries: {},
+        const kdf = {
+          algo: 'scrypt',
+          salt: salt.toString('base64'),
+          N: SCRYPT_N,
+          r: SCRYPT_R,
+          p: SCRYPT_P,
         };
+        if (!storeData) {
+          storeData = { version: 1, kdf, entries: {} };
+        } else {
+          storeData.kdf = kdf;
+          if (!storeData.entries) storeData.entries = {};
+        }
       } else {
         salt = Buffer.from(storeData.kdf.salt, 'base64');
       }
@@ -475,5 +502,121 @@ export class CredentialStore {
       await this.#writeStore(storeData);
       return { status: 'unset' };
     });
+  }
+
+  // ── SSH-Key-spezifische API (ADR-007 / ADR-008) ──────────────────────────────
+
+  /**
+   * Gibt den Public-Key eines SSH-Benutzers zurück (Klartext — nicht geheim).
+   * Gibt null zurück wenn nicht gesetzt.
+   *
+   * @param {string} user  - Benutzer-Label (z.B. "root", "alex")
+   * @returns {Promise<string|null>}
+   */
+  async getPublicKey(user) {
+    const storeData = await this.#readStore();
+    const metaKey = `ssh/${user}/public_key`;
+    return storeData?.meta?.[metaKey]?.value ?? null;
+  }
+
+  /**
+   * Setzt oder überschreibt den Public-Key eines SSH-Benutzers (Klartext-Metadatum).
+   * Gibt Metadaten zurück.
+   *
+   * @param {string} user      - Benutzer-Label
+   * @param {string} publicKey - OpenSSH-Public-Key-String
+   * @returns {Promise<{ updatedAt: string }>}
+   */
+  async setPublicKey(user, publicKey) {
+    // I2: Defense-in-Depth — Benutzer-Label intern validieren
+    if (typeof user !== 'string' || user.length === 0 || user.length > MAX_USER_LABEL_LEN) {
+      throw new Error(`[CredentialStore] Ungültiges Benutzer-Label (Länge 1–${MAX_USER_LABEL_LEN})`);
+    }
+    if (!USER_LABEL_RE.test(user)) {
+      throw new Error('[CredentialStore] Benutzer-Label enthält unerlaubte Zeichen (erlaubt: a-z A-Z 0-9 _ - . : @)');
+    }
+    const metaKey = `ssh/${user}/public_key`;
+    const updatedAt = new Date().toISOString();
+
+    return this.#withWriteLock(async () => {
+      let storeData = await this.#readStore();
+      if (!storeData) {
+        // Initialen Store-Rahmen anlegen (ohne kdf/entries — kein Key nötig für reine Meta-Operationen)
+        storeData = { version: 1, entries: {}, meta: {} };
+      }
+      if (!storeData.meta) storeData.meta = {};
+      storeData.meta[metaKey] = { value: publicKey, updatedAt };
+      await this.#writeStore(storeData);
+      return { updatedAt };
+    });
+  }
+
+  /**
+   * Löscht den Public-Key eines SSH-Benutzers. Idempotent.
+   *
+   * @param {string} user
+   * @returns {Promise<void>}
+   */
+  async deletePublicKey(user) {
+    // I2: Defense-in-Depth — Benutzer-Label intern validieren
+    if (typeof user !== 'string' || user.length === 0 || user.length > MAX_USER_LABEL_LEN) {
+      throw new Error(`[CredentialStore] Ungültiges Benutzer-Label (Länge 1–${MAX_USER_LABEL_LEN})`);
+    }
+    if (!USER_LABEL_RE.test(user)) {
+      throw new Error('[CredentialStore] Benutzer-Label enthält unerlaubte Zeichen (erlaubt: a-z A-Z 0-9 _ - . : @)');
+    }
+    const metaKey = `ssh/${user}/public_key`;
+    return this.#withWriteLock(async () => {
+      const storeData = await this.#readStore();
+      if (!storeData?.meta?.[metaKey]) return;
+      delete storeData.meta[metaKey];
+      await this.#writeStore(storeData);
+    });
+  }
+
+  /**
+   * Listet alle SSH-Benutzer (union aus Public-Key-Einträgen + Private-Key-Einträgen).
+   * Gibt je Benutzer { user, publicKey?, privateKeyStatus, privateKeyUpdatedAt? } zurück.
+   * Private-Key-Klartext wird NIEMALS zurückgegeben.
+   *
+   * @returns {Promise<Array<{ user: string, publicKey?: string, publicKeyUpdatedAt?: string, privateKeyStatus: 'set'|'unset', privateKeyUpdatedAt?: string }>>}
+   */
+  async listSshKeys() {
+    const storeData = await this.#readStore();
+    const entries = storeData?.entries ?? {};
+    const meta = storeData?.meta ?? {};
+
+    const users = new Set();
+
+    // Benutzer aus Public-Key-Meta
+    for (const key of Object.keys(meta)) {
+      if (key.startsWith('ssh/') && key.endsWith('/public_key')) {
+        users.add(key.slice('ssh/'.length, -'/public_key'.length));
+      }
+    }
+
+    // Benutzer aus Private-Key-Entries
+    for (const key of Object.keys(entries)) {
+      if (key.startsWith('ssh/') && key.endsWith('/private_key')) {
+        users.add(key.slice('ssh/'.length, -'/private_key'.length));
+      }
+    }
+
+    const result = [];
+    for (const user of [...users].sort()) {
+      const pubMetaKey = `ssh/${user}/public_key`;
+      const privEntryKey = `ssh/${user}/private_key`;
+      const pubMeta = meta[pubMetaKey];
+      const privEntry = entries[privEntryKey];
+
+      result.push({
+        user,
+        ...(pubMeta ? { publicKey: pubMeta.value, publicKeyUpdatedAt: pubMeta.updatedAt } : {}),
+        privateKeyStatus: privEntry ? 'set' : 'unset',
+        ...(privEntry ? { privateKeyUpdatedAt: privEntry.updatedAt } : {}),
+      });
+    }
+
+    return result;
   }
 }

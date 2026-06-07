@@ -1,21 +1,30 @@
 /**
- * SettingsView.jsx — Settings-Ansicht mit Credential-Formularen.
+ * SettingsView.jsx — Settings-Ansicht mit Credential- und SSH-Key-Formularen.
  *
- * AC1  — Je Integrations-Sektion: Credential-Felder mit Status (gesetzt/nicht gesetzt),
- *         maskierte Anzeige; kein Klartext.
- * AC2  — Setzen/Überschreiben eines Credentials via PUT; nach Speichern kein Klartext angezeigt.
- * AC3  — Löschen eines gesetzten Credentials via DELETE; Status wechselt auf „nicht gesetzt".
- * AC4  — Kein API-Endpunkt liefert Klartext; Frontend zeigt Klartext nach Speichern nicht erneut.
- * AC5  — „Weitere Credentials" (misc) als benannte Schlüssel/Wert-Einträge.
- * AC6  — Rückkehr zum Panel möglich.
- * AC8  — Eingabe-Validierung im Frontend (Pflichtfeld, Längenlimit) + klare Fehlermeldung.
+ * Credentials (settings-credentials):
+ *   AC1  — Je Integrations-Sektion: Credential-Felder mit Status (gesetzt/nicht gesetzt),
+ *           maskierte Anzeige; kein Klartext.
+ *   AC2  — Setzen/Überschreiben eines Credentials via PUT; nach Speichern kein Klartext angezeigt.
+ *   AC3  — Löschen eines gesetzten Credentials via DELETE; Status wechselt auf „nicht gesetzt".
+ *   AC4  — Kein API-Endpunkt liefert Klartext; Frontend zeigt Klartext nach Speichern nicht erneut.
+ *   AC5  — „Weitere Credentials" (misc) als benannte Schlüssel/Wert-Einträge.
+ *   AC6  — Rückkehr zum Panel möglich.
+ *   AC8  — Eingabe-Validierung im Frontend (Pflichtfeld, Längenlimit) + klare Fehlermeldung.
+ *
+ * SSH-Keys (settings-ssh-keys Stufe A):
+ *   SSH-AC1 — Je Benutzer-Label: Public-Key hinterlegen/anzeigen/ändern (vollständig sichtbar).
+ *   SSH-AC2 — Private-Key setzen/überschreiben: write-only/maskiert, niemals im Klartext angezeigt.
+ *   SSH-AC3 — Public- und/oder Private-Key löschen; danach Status „nicht gesetzt".
+ *   SSH-AC4 — Public-Key-Format-Validierung im Frontend (OpenSSH); klare Fehlermeldung.
+ *   SSH-AC5 — Aktionen auditiert; Private-Key-Klartext nie im Frontend-Bundle/Log.
+ *   SSH-AC6 — Endpunkte hinter Access-Mauer; mutierende identitäts-/rollengeschützt.
  *
  * A11y: WCAG 2.1 AA — Überschriften-Struktur, sichtbarer Fokus, Touch-Target ≥ 44 px,
  *       Kontrast ≥ 4.5:1, Fehler programmatisch zugeordnet (aria-describedby).
  *
  * Security (Floor):
  *   - Kein Secret im Frontend-Bundle.
- *   - Klartext-Werte werden nach erfolgreichem Speichern sofort verworfen (nur State).
+ *   - Private-Key-Klartext wird nach erfolgreichem Speichern sofort verworfen (nur State).
  *   - Kein Klartext-Wert in irgendwelchen Logs oder Konsolen-Ausgaben.
  *
  * @param {{ onNavigate: (view: string) => void }} props
@@ -47,6 +56,44 @@ const KNOWN_FIELDS = {
   ],
 };
 
+/**
+ * Gültige OpenSSH-Public-Key-Typen (Frontend-Validierung, sync mit Backend).
+ * AC4: verhindert das Absenden offensichtlich ungültiger Formate.
+ */
+const SSH_PUBKEY_PREFIXES = [
+  'ssh-rsa ',
+  'ssh-dss ',
+  'ssh-ed25519 ',
+  'ecdsa-sha2-nistp256 ',
+  'ecdsa-sha2-nistp384 ',
+  'ecdsa-sha2-nistp521 ',
+  'sk-ssh-ed25519@openssh.com ',
+  'sk-ecdsa-sha2-nistp256@openssh.com ',
+];
+
+/**
+ * Prüft ob ein String ein erkennbares OpenSSH-Public-Key-Format hat (AC4).
+ * @param {string} key
+ * @returns {{ ok: boolean, error?: string }}
+ */
+function validatePublicKeyFormat(key) {
+  const trimmed = (key ?? '').trim();
+  if (!trimmed) return { ok: false, error: 'Public-Key darf nicht leer sein.' };
+  // I1: Newline-Injection-Vorsorge (authorized_keys)
+  if (/[\r\n]/.test(trimmed)) {
+    return { ok: false, error: 'Public-Key darf keine Zeilenumbrüche enthalten.' };
+  }
+  const isKnown = SSH_PUBKEY_PREFIXES.some((p) => trimmed.startsWith(p));
+  if (!isKnown) {
+    return { ok: false, error: 'Unbekanntes Public-Key-Format. Erwartet: OpenSSH-Format (z.B. ssh-ed25519 …).' };
+  }
+  const parts = trimmed.split(/\s+/);
+  if (parts.length < 2 || parts[1].length < 20) {
+    return { ok: false, error: 'Public-Key unvollständig (fehlender Base64-Teil).' };
+  }
+  return { ok: true };
+}
+
 // ── API-Helfer ────────────────────────────────────────────────────────────────
 
 async function fetchCredentials() {
@@ -70,6 +117,35 @@ async function deleteCredential(integration, name) {
   const res = await fetch(`/api/settings/credentials/${encodeURIComponent(integration)}/${encodeURIComponent(name)}`, {
     method: 'DELETE',
   });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error ?? `Löschen fehlgeschlagen (${res.status})`);
+  return data;
+}
+
+// ── SSH-Key-API-Helfer ────────────────────────────────────────────────────────
+
+async function fetchSshKeys() {
+  const res = await fetch('/api/settings/ssh-keys');
+  if (!res.ok) throw new Error(`SSH-Keys laden fehlgeschlagen (${res.status})`);
+  return res.json();
+}
+
+async function putSshKey(user, body) {
+  const res = await fetch(`/api/settings/ssh-keys/${encodeURIComponent(user)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error ?? `Speichern fehlgeschlagen (${res.status})`);
+  return data;
+}
+
+async function deleteSshKey(user, target = 'both') {
+  const res = await fetch(
+    `/api/settings/ssh-keys/${encodeURIComponent(user)}?target=${encodeURIComponent(target)}`,
+    { method: 'DELETE' },
+  );
   const data = await res.json();
   if (!res.ok) throw new Error(data.error ?? `Löschen fehlgeschlagen (${res.status})`);
   return data;
@@ -377,23 +453,447 @@ function MiscSection({ miscItems, onSaved }) {
   );
 }
 
+// ── SshKeyEntry ───────────────────────────────────────────────────────────────
+
+/**
+ * Zeile für einen einzelnen SSH-Benutzer (Public-Key + Private-Key).
+ * Public-Key darf vollständig angezeigt werden (nicht geheim).
+ * Private-Key ist write-only/maskiert — niemals im Klartext.
+ *
+ * @param {{
+ *   entry: { user: string, publicKey?: string, privateKeyStatus: 'set'|'unset' },
+ *   onSaved: () => void,
+ * }} props
+ */
+function SshKeyEntry({ entry, onSaved }) {
+  const { user } = entry;
+  const [editingPub, setEditingPub] = useState(false);
+  const [editingPriv, setEditingPriv] = useState(false);
+  const [pubInput, setPubInput] = useState('');
+  const [privInput, setPrivInput] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [error, setError] = useState(null);
+  const pubInputRef = useRef(null);
+  const privInputRef = useRef(null);
+  const errorId = `ssh-err-${user}`;
+
+  const hasPubKey = !!entry.publicKey;
+  const hasPrivKey = entry.privateKeyStatus === 'set';
+
+  useEffect(() => {
+    if (editingPub && pubInputRef.current) pubInputRef.current.focus();
+  }, [editingPub]);
+
+  useEffect(() => {
+    if (editingPriv && privInputRef.current) privInputRef.current.focus();
+  }, [editingPriv]);
+
+  const handleSavePub = useCallback(async () => {
+    setError(null);
+    // AC4: Frontend-Validierung Public-Key-Format
+    const trimmed = pubInput.trim();
+    const validation = validatePublicKeyFormat(trimmed);
+    if (!validation.ok) {
+      setError(validation.error);
+      pubInputRef.current?.focus();
+      return;
+    }
+    setSaving(true);
+    try {
+      await putSshKey(user, { publicKey: trimmed });
+      setPubInput('');
+      setEditingPub(false);
+      onSaved();
+    } catch (err) {
+      setError(err.message);
+      pubInputRef.current?.focus();
+    } finally {
+      setSaving(false);
+    }
+  }, [user, pubInput, onSaved]);
+
+  const handleSavePriv = useCallback(async () => {
+    setError(null);
+    const trimmed = privInput.trim();
+    if (!trimmed) {
+      setError('Private-Key darf nicht leer sein.');
+      privInputRef.current?.focus();
+      return;
+    }
+    setSaving(true);
+    try {
+      await putSshKey(user, { privateKey: trimmed });
+      // AC2: Private-Key-Klartext sofort verwerfen nach Speichern
+      setPrivInput('');
+      setEditingPriv(false);
+      onSaved();
+    } catch (err) {
+      setError(err.message);
+      privInputRef.current?.focus();
+    } finally {
+      setSaving(false);
+    }
+  }, [user, privInput, onSaved]);
+
+  const handleDeletePub = useCallback(async () => {
+    setError(null);
+    setDeleting(true);
+    try {
+      await deleteSshKey(user, 'public');
+      onSaved();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setDeleting(false);
+    }
+  }, [user, onSaved]);
+
+  const handleDeletePriv = useCallback(async () => {
+    setError(null);
+    setDeleting(true);
+    try {
+      await deleteSshKey(user, 'private');
+      onSaved();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setDeleting(false);
+    }
+  }, [user, onSaved]);
+
+  const handleDeleteAll = useCallback(async () => {
+    setError(null);
+    setDeleting(true);
+    try {
+      await deleteSshKey(user, 'both');
+      onSaved();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setDeleting(false);
+    }
+  }, [user, onSaved]);
+
+  return (
+    <div style={fieldStyles.row} role="group" aria-label={`SSH-Schlüssel für ${user}`}>
+      {/* Benutzer-Label */}
+      <div style={sshStyles.userHeader}>
+        <span style={sshStyles.userLabel}>{user}</span>
+        <button
+          type="button"
+          onClick={handleDeleteAll}
+          disabled={deleting || (!hasPubKey && !hasPrivKey)}
+          style={fieldStyles.btnDanger}
+          aria-label={`Alle SSH-Schlüssel für ${user} löschen`}
+          aria-busy={deleting}
+        >
+          {deleting ? 'Löschen…' : 'Alle löschen'}
+        </button>
+      </div>
+
+      {/* Fehler-Anzeige */}
+      {error && (
+        <p id={errorId} style={fieldStyles.error} role="alert" aria-live="polite">
+          {error}
+        </p>
+      )}
+
+      {/* Public-Key */}
+      <div style={sshStyles.keyRow}>
+        <div style={sshStyles.keyLabel}>
+          <span style={fieldStyles.fieldLabel}>Public-Key</span>
+          {hasPubKey ? (
+            <span style={fieldStyles.statusSet} aria-label="Public-Key gesetzt">gesetzt</span>
+          ) : (
+            <span style={fieldStyles.statusUnset} aria-label="Public-Key nicht gesetzt">nicht gesetzt</span>
+          )}
+        </div>
+
+        {/* Public-Key-Anzeige (darf vollständig angezeigt werden) */}
+        {hasPubKey && !editingPub && (
+          <pre style={sshStyles.pubKeyDisplay} aria-label={`Public-Key von ${user}`}>
+            {entry.publicKey}
+          </pre>
+        )}
+
+        {editingPub ? (
+          <div style={fieldStyles.editArea}>
+            <label htmlFor={`ssh-pub-${user}`} style={fieldStyles.srOnly}>
+              Public-Key für {user} (OpenSSH-Format)
+            </label>
+            <textarea
+              id={`ssh-pub-${user}`}
+              ref={pubInputRef}
+              value={pubInput}
+              onChange={(e) => setPubInput(e.target.value)}
+              placeholder="ssh-ed25519 AAAA… oder ssh-rsa AAAA…"
+              style={sshStyles.textarea}
+              aria-describedby={error ? errorId : undefined}
+              autoComplete="off"
+              rows={3}
+            />
+            <div style={fieldStyles.actionRow}>
+              <button
+                type="button"
+                onClick={handleSavePub}
+                disabled={saving}
+                style={fieldStyles.btnPrimary}
+                aria-busy={saving}
+              >
+                {saving ? 'Speichern…' : 'Speichern'}
+              </button>
+              <button
+                type="button"
+                onClick={() => { setPubInput(''); setError(null); setEditingPub(false); }}
+                disabled={saving}
+                style={fieldStyles.btnSecondary}
+              >
+                Abbrechen
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div style={fieldStyles.actionRow}>
+            <button
+              type="button"
+              onClick={() => setEditingPub(true)}
+              style={fieldStyles.btnSmall}
+              aria-label={hasPubKey ? `Public-Key von ${user} ändern` : `Public-Key für ${user} setzen`}
+            >
+              {hasPubKey ? 'Ändern' : 'Setzen'}
+            </button>
+            {hasPubKey && (
+              <button
+                type="button"
+                onClick={handleDeletePub}
+                disabled={deleting}
+                style={fieldStyles.btnDanger}
+                aria-label={`Public-Key von ${user} löschen`}
+                aria-busy={deleting}
+              >
+                {deleting ? 'Löschen…' : 'Löschen'}
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Private-Key (write-only / maskiert) */}
+      <div style={sshStyles.keyRow}>
+        <div style={sshStyles.keyLabel}>
+          <span style={fieldStyles.fieldLabel}>Private-Key</span>
+          {hasPrivKey ? (
+            <span style={fieldStyles.statusSet} aria-label="Private-Key gesetzt">•••• gesetzt</span>
+          ) : (
+            <span style={fieldStyles.statusUnset} aria-label="Private-Key nicht gesetzt">nicht gesetzt</span>
+          )}
+        </div>
+
+        {editingPriv ? (
+          <div style={fieldStyles.editArea}>
+            <label htmlFor={`ssh-priv-${user}`} style={fieldStyles.srOnly}>
+              Private-Key für {user} (PEM-Format)
+            </label>
+            <textarea
+              id={`ssh-priv-${user}`}
+              ref={privInputRef}
+              value={privInput}
+              onChange={(e) => setPrivInput(e.target.value)}
+              placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+              style={sshStyles.textareaSecret}
+              aria-describedby={error ? errorId : undefined}
+              autoComplete="off"
+              data-lpignore="true"
+              rows={5}
+            />
+            <div style={fieldStyles.actionRow}>
+              <button
+                type="button"
+                onClick={handleSavePriv}
+                disabled={saving}
+                style={fieldStyles.btnPrimary}
+                aria-busy={saving}
+              >
+                {saving ? 'Speichern…' : 'Speichern'}
+              </button>
+              <button
+                type="button"
+                onClick={() => { setPrivInput(''); setError(null); setEditingPriv(false); }}
+                disabled={saving}
+                style={fieldStyles.btnSecondary}
+              >
+                Abbrechen
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div style={fieldStyles.actionRow}>
+            <button
+              type="button"
+              onClick={() => setEditingPriv(true)}
+              style={fieldStyles.btnSmall}
+              aria-label={hasPrivKey ? `Private-Key von ${user} ändern` : `Private-Key für ${user} setzen`}
+            >
+              {hasPrivKey ? 'Ändern' : 'Setzen'}
+            </button>
+            {hasPrivKey && (
+              <button
+                type="button"
+                onClick={handleDeletePriv}
+                disabled={deleting}
+                style={fieldStyles.btnDanger}
+                aria-label={`Private-Key von ${user} löschen`}
+                aria-busy={deleting}
+              >
+                {deleting ? 'Löschen…' : 'Löschen'}
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── SshKeysSection ────────────────────────────────────────────────────────────
+
+/** Erlaubte Zeichen für Benutzer-Labels (sync mit Backend). */
+const USER_LABEL_RE_FRONTEND = /^[a-zA-Z0-9_\-.:@]+$/;
+
+/**
+ * Sektion für SSH-Key-Verwaltung je Benutzer-Label.
+ * Zeigt alle vorhandenen SSH-Benutzer und ermöglicht das Hinzufügen neuer.
+ *
+ * @param {{ sshKeys: Array, setSshKeys: Function, onSaved: () => void }} props
+ */
+function SshKeysSection({ sshKeys, setSshKeys, onSaved }) {
+  const [addingUser, setAddingUser] = useState(false);
+  const [newUser, setNewUser] = useState('');
+  const [error, setError] = useState(null);
+  const userInputRef = useRef(null);
+
+  useEffect(() => {
+    if (addingUser && userInputRef.current) userInputRef.current.focus();
+  }, [addingUser]);
+
+  const handleAddUser = useCallback(() => {
+    setError(null);
+    const trimUser = newUser.trim();
+    if (!trimUser) {
+      setError('Benutzer-Label ist ein Pflichtfeld.');
+      userInputRef.current?.focus();
+      return;
+    }
+    if (!USER_LABEL_RE_FRONTEND.test(trimUser)) {
+      setError('Benutzer-Label enthält unerlaubte Zeichen (erlaubt: a-z A-Z 0-9 _ - . : @).');
+      userInputRef.current?.focus();
+      return;
+    }
+    // Prüfen ob Benutzer bereits existiert
+    if (sshKeys.some((k) => k.user === trimUser)) {
+      setError(`Benutzer-Label "${trimUser}" ist bereits vorhanden.`);
+      userInputRef.current?.focus();
+      return;
+    }
+    // C1: In-Memory-Stub einfügen — kein Server-Roundtrip hier.
+    // Der Benutzer wird erst beim ersten Key-PUT im Backend angelegt;
+    // bis dahin zeigt das Frontend den leeren Stub an (AC1).
+    setSshKeys((prev) => [...prev, { user: trimUser, privateKeyStatus: 'unset' }]);
+    setNewUser('');
+    setAddingUser(false);
+  }, [newUser, sshKeys, setSshKeys]);
+
+  return (
+    <div>
+      {sshKeys.length === 0 && !addingUser && (
+        <p style={sshStyles.emptyState}>Keine SSH-Schlüssel hinterlegt.</p>
+      )}
+
+      {sshKeys.map((entry) => (
+        <SshKeyEntry
+          key={entry.user}
+          entry={entry}
+          onSaved={onSaved}
+        />
+      ))}
+
+      {addingUser ? (
+        <div style={fieldStyles.editArea}>
+          <label htmlFor="ssh-new-user" style={fieldStyles.fieldLabel}>
+            Benutzer-Label
+          </label>
+          <input
+            id="ssh-new-user"
+            ref={userInputRef}
+            type="text"
+            value={newUser}
+            onChange={(e) => setNewUser(e.target.value)}
+            placeholder="z.B. root oder alex"
+            style={fieldStyles.input}
+            autoComplete="off"
+            aria-describedby={error ? 'ssh-add-error' : undefined}
+          />
+          {error && (
+            <p id="ssh-add-error" style={fieldStyles.error} role="alert" aria-live="polite">
+              {error}
+            </p>
+          )}
+          <div style={fieldStyles.actionRow}>
+            <button
+              type="button"
+              onClick={handleAddUser}
+              style={fieldStyles.btnPrimary}
+            >
+              Hinzufügen
+            </button>
+            <button
+              type="button"
+              onClick={() => { setAddingUser(false); setNewUser(''); setError(null); }}
+              style={fieldStyles.btnSecondary}
+            >
+              Abbrechen
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={() => setAddingUser(true)}
+          style={fieldStyles.btnSmall}
+          aria-label="SSH-Benutzer hinzufügen"
+        >
+          + SSH-Benutzer hinzufügen
+        </button>
+      )}
+    </div>
+  );
+}
+
 // ── SettingsView ──────────────────────────────────────────────────────────────
 
 export function SettingsView({ onNavigate }) {
   const [credentials, setCredentials] = useState([]);
-  const [loadState, setLoadState] = useState('loading'); // 'loading' | 'ok' | 'error'
   const [loadError, setLoadError] = useState(null);
+  const [sshKeys, setSshKeys] = useState([]);
+  const [sshLoadError, setSshLoadError] = useState(null);
 
   const load = useCallback(async () => {
-    setLoadState('loading');
     setLoadError(null);
-    try {
-      const data = await fetchCredentials();
-      setCredentials(data);
-      setLoadState('ok');
-    } catch (err) {
-      setLoadError(err.message);
-      setLoadState('error');
+    setSshLoadError(null);
+    const [credsData, sshData] = await Promise.allSettled([
+      fetchCredentials(),
+      fetchSshKeys(),
+    ]);
+    if (credsData.status === 'fulfilled') {
+      setCredentials(credsData.value);
+    } else {
+      setLoadError(credsData.reason?.message ?? 'Unbekannter Fehler');
+    }
+    if (sshData.status === 'fulfilled') {
+      setSshKeys(sshData.value);
+    } else {
+      setSshLoadError(sshData.reason?.message ?? 'Unbekannter Fehler');
     }
   }, []);
 
@@ -413,7 +913,7 @@ export function SettingsView({ onNavigate }) {
       <div style={styles.inner}>
         <h1 style={styles.title}>Einstellungen</h1>
 
-        {loadState === 'error' && (
+        {loadError && (
           <p style={styles.loadError} role="alert" aria-live="polite">
             Credentials konnten nicht geladen werden: {loadError}
           </p>
@@ -474,13 +974,19 @@ export function SettingsView({ onNavigate }) {
           <MiscSection miscItems={miscItems} onSaved={load} />
         </section>
 
-        {/* SSH-Keys — Platzhalter (folgt in #46) */}
+        {/* SSH-Keys */}
         <section aria-labelledby="settings-section-ssh-keys" style={styles.section}>
           <h2 id="settings-section-ssh-keys" style={styles.sectionHeading}>SSH-Keys</h2>
-          <p style={styles.sectionDesc}>Öffentliche und private SSH-Schlüssel für VPS-Zugang.</p>
-          <div style={styles.placeholder} aria-label="SSH-Keys — folgt">
-            <span style={styles.placeholderText}>folgt</span>
-          </div>
+          <p style={styles.sectionDesc}>
+            Öffentliche und private SSH-Schlüssel je Benutzer-Label (z.B. root, alex).
+            Public-Keys dürfen vollständig angezeigt werden. Private-Keys sind write-only.
+          </p>
+          {sshLoadError && (
+            <p style={styles.loadError} role="alert" aria-live="polite">
+              SSH-Keys konnten nicht geladen werden: {sshLoadError}
+            </p>
+          )}
+          <SshKeysSection sshKeys={sshKeys} setSshKeys={setSshKeys} onSaved={load} />
         </section>
 
         <button
@@ -675,5 +1181,78 @@ const fieldStyles = {
     clip: 'rect(0,0,0,0)',
     whiteSpace: 'nowrap',
     borderWidth: 0,
+  },
+};
+
+const sshStyles = {
+  userHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+    paddingBottom: 8,
+    borderBottom: '1px solid #2a2a2a',
+  },
+  userLabel: {
+    fontSize: 15,
+    fontWeight: 700,
+    color: '#e5e7eb',
+    fontFamily: 'monospace',
+  },
+  keyRow: {
+    padding: '8px 0 8px 12px',
+    borderBottom: '1px solid #1e1e1e',
+  },
+  keyLabel: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 6,
+  },
+  pubKeyDisplay: {
+    margin: '0 0 8px',
+    padding: '8px 12px',
+    background: '#0d1117',
+    border: '1px solid #2a2a2a',
+    borderRadius: 4,
+    fontSize: 11,
+    color: '#86efac',        // Kontrast auf #0d1117 ≥ 4.5:1
+    fontFamily: 'monospace',
+    overflowX: 'auto',
+    whiteSpace: 'pre-wrap',
+    wordBreak: 'break-all',
+    maxHeight: 80,
+    overflowY: 'auto',
+  },
+  textarea: {
+    width: '100%',
+    padding: '8px 12px',
+    background: '#1e293b',
+    color: '#e5e7eb',
+    border: '1px solid #334155',
+    borderRadius: 4,
+    fontSize: 13,
+    fontFamily: 'monospace',
+    boxSizing: 'border-box',
+    resize: 'vertical',
+  },
+  textareaSecret: {
+    width: '100%',
+    padding: '8px 12px',
+    background: '#1e293b',
+    color: '#e5e7eb',
+    border: '1px solid #334155',
+    borderRadius: 4,
+    fontSize: 13,
+    fontFamily: 'monospace',
+    boxSizing: 'border-box',
+    resize: 'vertical',
+    // keine spezielle Maskierung im Browser-Text — der User tippt PEM-Text
+  },
+  emptyState: {
+    margin: '0 0 12px',
+    fontSize: 13,
+    color: '#9ca3af',
+    fontStyle: 'italic',
   },
 };
