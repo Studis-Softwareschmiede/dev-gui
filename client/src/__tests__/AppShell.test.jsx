@@ -1,9 +1,10 @@
 /**
  * AppShell.test.jsx — Unit tests for AppShell, EntryPanel and hash routing.
  *
- * Covers:
+ * Covers (app-shell-navigation):
  *   - AC1: Entry panel renders exactly four tiles with correct labels; each tile
- *          activatable via click and keyboard (Enter, Space).
+ *          activatable via click and keyboard (Enter, Space). NavBar present on panel
+ *          (settings-shell requirement: gear always visible).
  *   - AC2: Activating "Fabrik (dev-gui)" tile renders the factory view.
  *   - AC3: Activating GitHub/VPS/Cloudflare tiles renders placeholder views
  *          (no backend calls).
@@ -13,6 +14,15 @@
  *   - AC6 (a): Unknown route falls back to entry panel (no dead screen).
  *   - AC6 (b): Browser Back/Forward navigates between panel and views via hashchange.
  *   - parseHash / viewToHash unit tests.
+ *
+ * Covers (settings-shell):
+ *   - AC1: Gear/settings button visible on entry panel and all views; activatable
+ *          via Maus and keyboard.
+ *   - AC2: Activating gear opens Settings view (hash #/settings, title "Einstellungen").
+ *   - AC3: Deep-link #/settings opens Settings view; unknown route → panel fallback.
+ *   - AC4: Settings view shows exactly four sections (GitHub, Cloudflare, Hetzner/VPS, SSH-Keys).
+ *   - AC5: Entry panel unchanged — exactly four tiles, Settings is not a tile.
+ *   - AC6: From Settings view navigation back to panel and gear remains visible.
  *
  * Terminal, TriggerPanel and Dashboard are mocked to avoid WS/DOM complexity.
  *
@@ -89,6 +99,10 @@ describe('parseHash', () => {
     expect(parseHash('#/FACTORY')).toBe('factory');
     expect(parseHash('#/GitHub')).toBe('github');
   });
+
+  it('returns "settings" for "#/settings"', () => {
+    expect(parseHash('#/settings')).toBe('settings');
+  });
 });
 
 describe('viewToHash', () => {
@@ -110,19 +124,20 @@ describe('viewToHash', () => {
 // ── AC1 — Entry panel with exactly four tiles ─────────────────────────────────
 
 describe('AppShell — AC1: Entry panel tiles', () => {
-  it('shows the entry panel (no NavBar) on the root route', () => {
+  it('shows the entry panel on the root route (NavBar present for gear)', () => {
     window.location.hash = '';
-    const { queryByRole } = render(React.createElement(AppShell));
-    // Entry panel — no persistent nav (NavBar only shown on views)
-    expect(queryByRole('navigation', { name: /haupt-navigation/i })).toBeNull();
-    expect(queryByRole('main', { name: /einstiegs-panel/i })).toBeTruthy();
+    const { getByRole } = render(React.createElement(AppShell));
+    // NavBar is now always present (gear visible from entry panel — settings-shell AC1)
+    expect(getByRole('navigation', { name: /haupt-navigation/i })).toBeTruthy();
+    expect(getByRole('main', { name: /einstiegs-panel/i })).toBeTruthy();
   });
 
-  it('renders exactly four tiles', () => {
+  it('renders exactly four tile buttons (gear is a separate nav button, not a tile)', () => {
     window.location.hash = '';
-    const { getAllByRole } = render(React.createElement(AppShell));
-    // Each tile is a <button>
-    const tiles = getAllByRole('button');
+    const { getByRole } = render(React.createElement(AppShell));
+    // Tile buttons are inside the entry panel main landmark
+    const panel = getByRole('main', { name: /einstiegs-panel/i });
+    const tiles = panel.querySelectorAll('button[data-view]');
     expect(tiles).toHaveLength(4);
   });
 
@@ -147,8 +162,9 @@ describe('AppShell — AC1: Entry panel tiles', () => {
   });
 
   it('each tile is focusable (not disabled)', () => {
-    const { getAllByRole } = render(React.createElement(AppShell));
-    const tiles = getAllByRole('button');
+    const { getByRole } = render(React.createElement(AppShell));
+    const panel = getByRole('main', { name: /einstiegs-panel/i });
+    const tiles = panel.querySelectorAll('button[data-view]');
     for (const tile of tiles) {
       expect(tile.disabled).toBe(false);
     }
@@ -301,8 +317,8 @@ describe('AppShell — AC4: Navigation', () => {
     });
 
     await waitFor(() => {
-      // Panel is shown, NavBar gone
-      expect(queryByRole('navigation', { name: /haupt-navigation/i })).toBeNull();
+      // Panel is shown; NavBar still present (gear always visible — settings-shell AC1)
+      expect(queryByRole('navigation', { name: /haupt-navigation/i })).toBeTruthy();
       expect(queryByRole('main', { name: /einstiegs-panel/i })).toBeTruthy();
     });
   });
@@ -424,7 +440,8 @@ describe('AppShell — AC6 (b): Browser Back/Forward', () => {
     });
 
     await waitFor(() => {
-      expect(queryByRole('navigation', { name: /haupt-navigation/i })).toBeNull();
+      // NavBar remains (gear always visible — settings-shell AC1); entry panel shown
+      expect(queryByRole('navigation', { name: /haupt-navigation/i })).toBeTruthy();
       expect(getByRole('main', { name: /einstiegs-panel/i })).toBeTruthy();
     });
   });
@@ -448,5 +465,209 @@ describe('AppShell — AC6 (b): Browser Back/Forward', () => {
       expect(queryByRole('main', { name: /einstiegs-panel/i })).toBeNull();
       expect(getByRole('navigation', { name: /haupt-navigation/i })).toBeTruthy();
     });
+  });
+});
+
+// ── settings-shell AC1 — Gear visible on entry panel ─────────────────────────
+
+describe('settings-shell — AC1: Gear button visible on entry panel', () => {
+  it('gear/settings button is present on the entry panel', () => {
+    window.location.hash = '';
+    const { getByRole } = render(React.createElement(AppShell));
+    expect(getByRole('button', { name: /einstellungen/i })).toBeTruthy();
+  });
+
+  it('gear button is a <button> (Tab-focusable, keyboard-activatable)', () => {
+    window.location.hash = '';
+    const { getByRole } = render(React.createElement(AppShell));
+    const gear = getByRole('button', { name: /einstellungen/i });
+    expect(gear.tagName).toBe('BUTTON');
+    expect(gear.disabled).toBe(false);
+  });
+
+  it('gear button has touch-target minHeight >= 44px', () => {
+    window.location.hash = '';
+    const { getByRole } = render(React.createElement(AppShell));
+    const gear = getByRole('button', { name: /einstellungen/i });
+    const minH = parseInt(gear.style.minHeight, 10);
+    expect(minH).toBeGreaterThanOrEqual(44);
+  });
+
+  it('gear button is present on a non-panel view (factory)', async () => {
+    window.location.hash = '#/factory';
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+    const { getByRole } = render(React.createElement(AppShell));
+    await waitFor(() => {
+      expect(getByRole('button', { name: /einstellungen/i })).toBeTruthy();
+    });
+  });
+});
+
+// ── settings-shell AC2 — Gear opens Settings view ────────────────────────────
+
+describe('settings-shell — AC2: Gear opens Settings view', () => {
+  it('clicking gear from entry panel navigates to #/settings', async () => {
+    window.location.hash = '';
+    const { getByRole } = render(React.createElement(AppShell));
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /einstellungen/i }));
+    });
+
+    await waitFor(() => {
+      expect(window.location.hash).toBe('#/settings');
+    });
+  });
+
+  it('Settings view shows title "Einstellungen"', async () => {
+    window.location.hash = '#/settings';
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+
+    const { getByRole } = render(React.createElement(AppShell));
+
+    await waitFor(() => {
+      const heading = getByRole('heading', { name: /^einstellungen$/i });
+      expect(heading).toBeTruthy();
+    });
+  });
+
+  it('gear button has aria-current="page" on settings view', async () => {
+    window.location.hash = '#/settings';
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+
+    const { getByRole } = render(React.createElement(AppShell));
+
+    await waitFor(() => {
+      const gear = getByRole('button', { name: /einstellungen/i });
+      expect(gear.getAttribute('aria-current')).toBe('page');
+    });
+  });
+});
+
+// ── settings-shell AC3 — Deep-link #/settings ────────────────────────────────
+
+describe('settings-shell — AC3: Deep-link and unknown-route fallback', () => {
+  it('direct load with #/settings opens Settings view', () => {
+    window.location.hash = '#/settings';
+    const { getByRole } = render(React.createElement(AppShell));
+    expect(getByRole('main', { name: /einstellungen-ansicht/i })).toBeTruthy();
+  });
+
+  it('browser Back from #/settings to #/ shows entry panel', async () => {
+    window.location.hash = '#/settings';
+    const { getByRole } = render(React.createElement(AppShell));
+
+    await waitFor(() => {
+      expect(getByRole('main', { name: /einstellungen-ansicht/i })).toBeTruthy();
+    });
+
+    await act(async () => {
+      window.location.hash = '#/';
+      window.dispatchEvent(new HashChangeEvent('hashchange'));
+    });
+
+    await waitFor(() => {
+      expect(getByRole('main', { name: /einstiegs-panel/i })).toBeTruthy();
+    });
+  });
+});
+
+// ── settings-shell AC4 — Exactly four sections in Settings view ───────────────
+
+describe('settings-shell — AC4: Settings view sections', () => {
+  it('Settings view shows exactly four section headings', () => {
+    window.location.hash = '#/settings';
+    const { getByRole } = render(React.createElement(AppShell));
+    // h2 section headings
+    const main = getByRole('main', { name: /einstellungen-ansicht/i });
+    const h2s = main.querySelectorAll('h2');
+    expect(h2s).toHaveLength(4);
+  });
+
+  it('Settings view shows GitHub section', () => {
+    window.location.hash = '#/settings';
+    const { getByRole } = render(React.createElement(AppShell));
+    const main = getByRole('main', { name: /einstellungen-ansicht/i });
+    expect(main.textContent).toMatch(/github/i);
+  });
+
+  it('Settings view shows Cloudflare section', () => {
+    window.location.hash = '#/settings';
+    const { getByRole } = render(React.createElement(AppShell));
+    const main = getByRole('main', { name: /einstellungen-ansicht/i });
+    expect(main.textContent).toMatch(/cloudflare/i);
+  });
+
+  it('Settings view shows Hetzner / VPS section', () => {
+    window.location.hash = '#/settings';
+    const { getByRole } = render(React.createElement(AppShell));
+    const main = getByRole('main', { name: /einstellungen-ansicht/i });
+    expect(main.textContent).toMatch(/hetzner/i);
+  });
+
+  it('Settings view shows SSH-Keys section', () => {
+    window.location.hash = '#/settings';
+    const { getByRole } = render(React.createElement(AppShell));
+    const main = getByRole('main', { name: /einstellungen-ansicht/i });
+    expect(main.textContent).toMatch(/ssh-keys/i);
+  });
+
+  it('each section contains a "folgt" placeholder (no backend call)', () => {
+    window.location.hash = '#/settings';
+    const { getByRole } = render(React.createElement(AppShell));
+    const main = getByRole('main', { name: /einstellungen-ansicht/i });
+    const count = (main.textContent.match(/folgt/gi) || []).length;
+    expect(count).toBeGreaterThanOrEqual(4);
+  });
+});
+
+// ── settings-shell AC5 — Entry panel still exactly four tiles ────────────────
+
+describe('settings-shell — AC5: Entry panel unchanged (four tiles)', () => {
+  it('entry panel shows exactly four tiles after settings feature', () => {
+    window.location.hash = '';
+    const { getByRole } = render(React.createElement(AppShell));
+    const panel = getByRole('main', { name: /einstiegs-panel/i });
+    const tiles = panel.querySelectorAll('button[data-view]');
+    expect(tiles).toHaveLength(4);
+  });
+
+  it('Settings is NOT a tile in the entry panel', () => {
+    window.location.hash = '';
+    const { getByRole } = render(React.createElement(AppShell));
+    const panel = getByRole('main', { name: /einstiegs-panel/i });
+    const tileLabels = Array.from(panel.querySelectorAll('button[data-view]')).map(
+      (b) => b.getAttribute('data-view')
+    );
+    expect(tileLabels).not.toContain('settings');
+  });
+});
+
+// ── settings-shell AC6 — Navigation back from Settings view ──────────────────
+
+describe('settings-shell — AC6: Navigation from Settings view', () => {
+  it('Home button in Settings view returns to entry panel', async () => {
+    window.location.hash = '#/settings';
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+
+    const { getByRole, queryByRole } = render(React.createElement(AppShell));
+    await waitFor(() => {
+      expect(getByRole('main', { name: /einstellungen-ansicht/i })).toBeTruthy();
+    });
+
+    const homeBtn = getByRole('button', { name: /zurück zum einstiegs-panel/i });
+    await act(async () => {
+      fireEvent.click(homeBtn);
+    });
+
+    await waitFor(() => {
+      expect(queryByRole('main', { name: /einstiegs-panel/i })).toBeTruthy();
+    });
+  });
+
+  it('gear button remains visible in Settings view', () => {
+    window.location.hash = '#/settings';
+    const { getByRole } = render(React.createElement(AppShell));
+    expect(getByRole('button', { name: /einstellungen/i })).toBeTruthy();
   });
 });

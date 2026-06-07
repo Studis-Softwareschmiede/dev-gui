@@ -1,5 +1,8 @@
 # Coder Lessons — dev-gui (newest first)
 
+## 2026-06-07 — Placeholder-Text-Farbe `#6b7280` unterschreitet WCAG AA auf dunklem Hintergrund
+`color: '#6b7280'` auf `background: '#1a1a1a'` ergibt Kontrast ≈ 3.36:1 — deutlich unter dem 4.5:1-Schwellwert für Fließtext ≤ 13 px / normal (WCAG 2.1 SC 1.4.3). Auch "folgt"-Platzhalter sind sichtbarer Text und fallen unter dieselbe Regel. Fix: mindestens `#8a929e` oder `#9ca3af` verwenden. Allgemeine Regel: `#6b7280` und ähnliche mittlere Grautöne sind auf hintergrundfarben wie `#111`, `#1a1a1a` oder `#0d0d0d` grundsätzlich AA-non-compliant für kleinen Text.
+
 ## 2026-06-07 — NavBar-Touch-Targets auf minHeight: 44px setzen — nicht 36px
 Spec NFR (WCAG 2.1 AA, SC 2.5.5) schreibt Touch-Targets ≥ 44 px vor. NavBar-Links (`<a>`) sind interaktive Elemente und fallen unter dieselbe Regel wie Buttons und Kacheln. `minHeight: 36` reicht nicht. Fix: `navHome` und `navLink` auf `minHeight: 44` anheben. Tiles (120px) und Placeholder-Home-Buttons (44px) sind korrekt — NavBar ist der einzige blinde Fleck.
 

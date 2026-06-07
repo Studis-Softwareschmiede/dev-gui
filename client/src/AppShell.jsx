@@ -1,6 +1,7 @@
 /**
  * AppShell.jsx — App-Shell: Einstiegs-Panel + client-seitige Navigation.
  *
+ * app-shell-navigation:
  * AC1 — Einstiegs-Panel mit genau vier Kacheln (GitHub, VPS, Cloudflare, Fabrik (dev-gui)).
  *        Jede Kachel per Maus und Tastatur (Tab + Enter/Space) aktivierbar.
  * AC2 — Kachel "Fabrik (dev-gui)" öffnet die Fabrik-Ansicht (kein Funktionsverlust).
@@ -10,6 +11,15 @@
  *        Wurzel-Route #/ zeigt das Einstiegs-Panel.
  * AC6 — Browser-Zurück/Vor navigiert entlang des Verlaufs; unbekannte Route → Panel.
  * AC7 — Keine neuen Secrets; keine view-spezifische Autorisierung.
+ *
+ * settings-shell:
+ * AC1 — Zahnrad-Bedienelement (Settings) in der NavBar aus jeder Ansicht und vom
+ *        Einstiegs-Panel aus sichtbar und per Maus und Tastatur aktivierbar.
+ * AC2 — Aktivieren des Zahnrads öffnet die Settings-Ansicht (Route #/settings).
+ * AC3 — Deep-Link #/settings; Browser-Back/Forward konsistent; unbekannte Route → Panel.
+ * AC5 — Einstiegs-Panel zeigt weiterhin genau vier Kacheln (Settings ist keine Kachel).
+ * AC6 — Aus der Settings-Ansicht Navigation zurück zum Panel und zu anderen Ansichten.
+ * AC7 — Keine neuen Secrets; keine view-spezifische Autorisierung; kein Backend-Endpunkt.
  *
  * A11y: WCAG 2.1 AA — sichtbarer Fokus, aria-current auf aktiver Nav-Position,
  *        Touch-Targets ≥ 44 px, Bedeutung nicht allein über Farbe.
@@ -27,6 +37,7 @@ import { FactoryView } from './FactoryView.jsx';
 import { GitHubView } from './GitHubView.jsx';
 import { VpsView } from './VpsView.jsx';
 import { CloudflareView } from './CloudflareView.jsx';
+import { SettingsView } from './SettingsView.jsx';
 
 // ── Entry-Panel tile definitions ──────────────────────────────────────────────
 
@@ -57,29 +68,36 @@ const TILES = [
 // ── NavBar ────────────────────────────────────────────────────────────────────
 
 /**
- * Persistent navigation bar shown on all views (not the panel itself).
+ * Persistent navigation bar shown on all views including the entry panel.
+ * Contains Home link (hidden on panel), per-view links (hidden on panel),
+ * and the gear/settings button (always visible — settings-shell AC1).
  *
  * @param {{ currentView: string, onNavigate: (view: string) => void }} props
  */
 function NavBar({ currentView, onNavigate }) {
+  const onPanel = currentView === 'panel';
+
   return (
     <nav style={styles.nav} aria-label="Haupt-Navigation">
-      {/* Home / Zurück zum Panel (AC4) */}
-      <a
-        href="#/"
-        style={styles.navHome}
-        aria-label="Zurück zum Einstiegs-Panel"
-        aria-current={currentView === 'panel' ? 'page' : undefined}
-        onClick={(e) => {
-          e.preventDefault();
-          onNavigate('panel');
-        }}
-      >
-        ⌂ Panel
-      </a>
+      {/* Home / Zurück zum Panel — hidden when already on panel */}
+      {!onPanel && (
+        <a
+          href="#/"
+          style={styles.navHome}
+          aria-label="Zurück zum Einstiegs-Panel"
+          // never aria-current="page": link hidden when on panel
+          aria-current={undefined}
+          onClick={(e) => {
+            e.preventDefault();
+            onNavigate('panel');
+          }}
+        >
+          ⌂ Panel
+        </a>
+      )}
 
-      {/* Per-view nav links */}
-      {TILES.map(({ id, label }) => (
+      {/* Per-view nav links — hidden on panel */}
+      {!onPanel && TILES.map(({ id, label }) => (
         <a
           key={id}
           href={`#/${id}`}
@@ -96,6 +114,23 @@ function NavBar({ currentView, onNavigate }) {
           {label}
         </a>
       ))}
+
+      {/* Spacer pushes gear to the right */}
+      <span style={styles.navSpacer} aria-hidden="true" />
+
+      {/* Gear / Settings button — always visible (settings-shell AC1) */}
+      <button
+        type="button"
+        style={{
+          ...styles.navGear,
+          ...(currentView === 'settings' ? styles.navGearActive : {}),
+        }}
+        aria-label="Einstellungen"
+        aria-current={currentView === 'settings' ? 'page' : undefined}
+        onClick={() => onNavigate('settings')}
+      >
+        ⚙
+      </button>
     </nav>
   );
 }
@@ -180,37 +215,37 @@ function Tile({ id, label, description, onNavigate }) {
 
 /**
  * AppShell — root component. Owns the hash-router and renders:
+ *   - NavBar (always — gear visible from every view including entry panel)
  *   - EntryPanel when view === 'panel'
- *   - NavBar + matching view component otherwise
+ *   - matching view component otherwise
  */
 export function AppShell() {
   const { view, navigate } = useHashRouter();
 
-  // EntryPanel — no NavBar, full-screen (AC1)
-  if (view === 'panel') {
-    return (
-      <div style={styles.shell}>
-        <EntryPanel onNavigate={navigate} />
-      </div>
-    );
-  }
-
   return (
     <div style={styles.shell}>
-      {/* Persistent navigation (AC4) */}
+      {/* NavBar always present — gear/settings visible from entry panel too (settings-shell AC1) */}
       <NavBar currentView={view} onNavigate={navigate} />
 
-      {/* Active view
+      {/* EntryPanel */}
+      {view === 'panel' && (
+        <EntryPanel onNavigate={navigate} />
+      )}
+
+      {/* Active view — only rendered while not on panel
           NOTE (Terminal lifecycle): FactoryView is only rendered while view === 'factory'.
           When the user navigates away, FactoryView unmounts and the Terminal component
           (and its underlying node-pty PTY session) is cleaned up via its useEffect
           teardown. Re-entering the factory view starts a fresh session. */}
-      <div style={styles.viewPort}>
-        {view === 'factory'    && <FactoryView    onNavigate={navigate} />}
-        {view === 'github'     && <GitHubView     onNavigate={navigate} />}
-        {view === 'vps'        && <VpsView        onNavigate={navigate} />}
-        {view === 'cloudflare' && <CloudflareView onNavigate={navigate} />}
-      </div>
+      {view !== 'panel' && (
+        <div style={styles.viewPort}>
+          {view === 'factory'    && <FactoryView    onNavigate={navigate} />}
+          {view === 'github'     && <GitHubView     onNavigate={navigate} />}
+          {view === 'vps'        && <VpsView        onNavigate={navigate} />}
+          {view === 'cloudflare' && <CloudflareView onNavigate={navigate} />}
+          {view === 'settings'   && <SettingsView   onNavigate={navigate} />}
+        </div>
+      )}
     </div>
   );
 }
@@ -270,6 +305,28 @@ const styles = {
     alignItems: 'center',
   },
   navLinkActive: {
+    color: '#e5e7eb',
+    background: '#1e293b',
+  },
+  navSpacer: {
+    flex: 1,
+  },
+  // Gear / Settings button (settings-shell AC1)
+  navGear: {
+    padding: '6px 12px',
+    background: 'transparent',
+    border: 'none',
+    color: '#9ca3af',
+    fontSize: 18,
+    cursor: 'pointer',
+    borderRadius: 4,
+    minHeight: 44,
+    minWidth: 44,
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  navGearActive: {
     color: '#e5e7eb',
     background: '#1e293b',
   },
