@@ -80,7 +80,9 @@ app.get('/api/session', (_req, res) => {
 // ── SPA fallback: serve index.html for any non-API route ─────────────────────
 // Registered after all /api/* routes so API 404s are not masked.
 // /ws/terminal is handled via the upgrade event, not Express routing.
-app.get('*', (_req, res) => {
+// express 5 (path-to-regexp 8): Wildcards müssen benannt sein — '*' → '/*splat'.
+// '/*splat' matcht NICHT die Root '/', die liefert express.static (index.html) aus.
+app.get('/*splat', (_req, res) => {
   res.sendFile(join(CLIENT_DIST, 'index.html'));
 });
 
