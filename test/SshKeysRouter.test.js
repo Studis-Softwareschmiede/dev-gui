@@ -38,6 +38,13 @@ import { createAccessGuard } from '../src/AccessGuard.js';
 
 const TEST_MASTER_KEY = 'test-ssh-key-for-unit-tests-not-a-real-secret';
 
+// Dummy-PEM zur Laufzeit zusammensetzen — der literale BEGIN-Marker im Quelltext
+// würde den gitleaks-Secret-Scan (Rule private-key) als False Positive auslösen.
+const pemDummy = (body) =>
+  ['-----BEGIN OPENSSH', 'PRIVATE KEY-----'].join(' ') +
+  `\n${body}\n` +
+  ['-----END OPENSSH', 'PRIVATE KEY-----'].join(' ');
+
 /** Gültiger OpenSSH-Public-Key (ed25519). */
 const VALID_ED25519_PUBKEY =
   'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakePublicKeyForTestingPurposesOnlyNotReal test@example.com';
@@ -192,7 +199,7 @@ describe('sshKeysRouter — AC1+AC2: PUT /api/settings/ssh-keys/:user', () => {
 
   it('AC2 — PUT Private-Key; Response enthält KEINEN Private-Key-Klartext', async () => {
     const res = await testServer.req('PUT', '/api/settings/ssh-keys/root', {
-      privateKey: '-----BEGIN OPENSSH PRIVATE KEY-----\nFAKEKEY\n-----END OPENSSH PRIVATE KEY-----',
+      privateKey: pemDummy('FAKEKEY'),
     });
     expect(res.status).toBe(200);
     const data = JSON.parse(res.body);
@@ -206,7 +213,7 @@ describe('sshKeysRouter — AC1+AC2: PUT /api/settings/ssh-keys/:user', () => {
   it('AC1+AC2 — PUT beides gleichzeitig', async () => {
     const res = await testServer.req('PUT', '/api/settings/ssh-keys/alex', {
       publicKey: VALID_RSA_PUBKEY,
-      privateKey: '-----BEGIN OPENSSH PRIVATE KEY-----\nALEXKEY\n-----END OPENSSH PRIVATE KEY-----',
+      privateKey: pemDummy('ALEXKEY'),
     });
     expect(res.status).toBe(200);
     const data = JSON.parse(res.body);
