@@ -128,8 +128,15 @@ services:
       # ── Credential Store Master-Key (ADR-007) ────────────────────────────────
       # Required in production when secrets.enc.json exists on the volume.
       # Fail-Fast on startup if store exists but key is missing.
-      # Option A — environment variable (set in .env or host environment):
-      CRED_MASTER_KEY: ${CRED_MASTER_KEY}
+      #
+      # Betreiber-Default: WENN weder CRED_MASTER_KEY noch CRED_MASTER_KEY_FILE
+      # gesetzt sind, fällt der Entrypoint automatisch auf GPG_PASSPHRASE (bzw.
+      # die gemountete gpg.pass) zurück — dasselbe Bitwarden-Secret
+      # (studis-softwareschmiede-gpg-passphrase), das der Bootstrap verteilt.
+      # Es ist also KEIN zusätzliches Secret nötig.
+      #
+      # Option A — eigenes Secret als Env-Var (überstimmt den Fallback):
+      CRED_MASTER_KEY: ${CRED_MASTER_KEY:-}
       # Option B — node-readable file (used only if CRED_MASTER_KEY unset):
       #   CRED_MASTER_KEY_FILE: /run/secrets/cred_master_key
       #   Add to volumes: - ${CRED_KEY_FILE}:/run/secrets/cred_master_key:ro
