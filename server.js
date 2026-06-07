@@ -29,6 +29,7 @@ import { commandRouter } from './src/commandRouter.js';
 import { GitHubReader } from './src/GitHubReader.js';
 import { DockerReader } from './src/DockerReader.js';
 import { statusRouter } from './src/statusRouter.js';
+import { githubReposListRouter } from './src/githubReposListRouter.js';
 import { CredentialStore } from './src/CredentialStore.js';
 import { credentialsRouter } from './src/credentialsRouter.js';
 import { sshKeysRouter } from './src/sshKeysRouter.js';
@@ -79,6 +80,9 @@ app.use(commandRouter(commandService));
 const githubReader = new GitHubReader();
 const dockerReader = new DockerReader();
 app.use(statusRouter({ githubReader, dockerReader }));
+
+// ── GitHub repos list (github-repos-overview AC1/AC2/AC6) ─────────────────────
+app.use(githubReposListRouter({ githubReader }));
 
 // ── Credentials route (settings-credentials) ─────────────────────────────────
 app.use(credentialsRouter(credentialStore, auditStore));

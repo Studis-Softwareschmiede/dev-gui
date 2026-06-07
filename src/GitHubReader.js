@@ -108,13 +108,13 @@ export class GitHubReader {
   }
 
   /**
-   * List all repos in the org, excluding agent-flow and dev-gui.
+   * Fetch the raw org repos list from GitHub API.
    * Returns an empty array on error (AC4 graceful degradation).
    *
    * @param {string|undefined} token
-   * @returns {Promise<string[]>} repo names
+   * @returns {Promise<Array<{name:string, full_name:string, visibility:string, html_url:string}>>}
    */
-  async #listRepos(token) {
+  async #fetchOrgRepos(token) {
     const url = `https://api.github.com/orgs/${encodeURIComponent(ORG)}/repos?per_page=100&sort=full_name`;
     let res;
     try {
@@ -130,9 +130,21 @@ export class GitHubReader {
       return [];
     }
     if (!Array.isArray(data)) return [];
-    return data
+    return data.filter((r) => r && typeof r.name === 'string');
+  }
+
+  /**
+   * List all repos in the org, excluding agent-flow and dev-gui.
+   * Returns an empty array on error (AC4 graceful degradation).
+   *
+   * @param {string|undefined} token
+   * @returns {Promise<string[]>} repo names
+   */
+  async #listRepos(token) {
+    const raw = await this.#fetchOrgRepos(token);
+    return raw
       .map((r) => r.name)
-      .filter((name) => typeof name === 'string' && !EXCLUDED_REPOS.has(name));
+      .filter((name) => !EXCLUDED_REPOS.has(name));
   }
 
   /**
@@ -226,6 +238,58 @@ export class GitHubReader {
           this.#lastCi(name, token),
         ]);
         return { name, openItems, lastCi };
+      }),
+    );
+    return results;
+  }
+
+  /**
+   * List all org repos for the GitHub-Repos overview (AC1, AC2 — github-repos-overview spec).
+   *
+   * Unlike `getProjects()`, this method:
+   *   - Includes ALL repos (no exclusions — not agent-flow, not dev-gui).
+   *   - Returns the full Repo-Overview shape: `{ name, fullName, visibility, openIssues, lastCi, htmlUrl }`.
+   *
+   * Graceful degradation (AC6):
+   *   - If repo list is unreachable → returns `[]` (no crash).
+   *   - Per-repo `openIssues` or `lastCi` failure → field degrades to `'unknown'`.
+   *
+   * Token is NEVER included in any returned field (security/R01).
+   *
+   * @returns {Promise<Array<{
+   *   name: string,
+   *   fullName: string,
+   *   visibility: 'private'|'public',
+   *   openIssues: number|'unknown',
+   *   lastCi: 'success'|'failure'|'in_progress'|'none'|'unknown',
+   *   htmlUrl: string
+   * }>>}
+   */
+  async listRepos() {
+    const token = await this.#resolveToken();
+
+    // Fetch raw org repos (includes all repos — no exclusions for this endpoint)
+    const rawRepos = await this.#fetchOrgRepos(token);
+    if (rawRepos.length === 0) {
+      // Auth issue or empty org — return empty array (AC6: no crash)
+      return [];
+    }
+
+    // Fetch openIssues + lastCi in parallel per repo (AC6: each independently degrades)
+    const results = await Promise.all(
+      rawRepos.map(async (r) => {
+        const name = r.name;
+        const fullName = typeof r.full_name === 'string' ? r.full_name : `${ORG}/${name}`;
+        // GitHub API returns 'public' or 'private' in visibility field
+        const visibility = r.visibility === 'public' ? 'public' : 'private';
+        const htmlUrl = typeof r.html_url === 'string' ? r.html_url : `https://github.com/${fullName}`;
+
+        const [openIssues, lastCi] = await Promise.all([
+          this.#openItems(name, token),
+          this.#lastCi(name, token),
+        ]);
+
+        return { name, fullName, visibility, openIssues, lastCi, htmlUrl };
       }),
     );
     return results;
