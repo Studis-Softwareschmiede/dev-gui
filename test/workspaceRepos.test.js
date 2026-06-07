@@ -19,8 +19,13 @@ import { describe, it, beforeEach, afterEach, expect } from '@jest/globals';
 import express from 'express';
 import { createServer } from 'node:http';
 import { request as httpRequest } from 'node:http';
+import { mkdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { createAccessGuard } from '../src/AccessGuard.js';
 import { WorkspaceScanner, stripCredentials } from '../src/WorkspaceScanner.js';
+import { WorkspaceMutator, WorkspaceMutatorError } from '../src/WorkspaceMutator.js';
+import { AuditStore } from '../src/AuditStore.js';
 import { workspaceReposRouter } from '../src/workspaceReposRouter.js';
 
 // ── HTTP helpers (same pattern as status.test.js) ─────────────────────────────
@@ -59,14 +64,46 @@ function get(port, path) {
   });
 }
 
+// ── HTTP POST helper ──────────────────────────────────────────────────────────
+
+function post(port, path, body) {
+  return new Promise((resolve, reject) => {
+    const bodyStr = JSON.stringify(body);
+    const headers = {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(bodyStr),
+    };
+    const req = httpRequest(
+      { hostname: '127.0.0.1', port, path, method: 'POST', headers },
+      (res) => {
+        let raw = '';
+        res.on('data', (c) => { raw += c; });
+        res.on('end', () => {
+          try {
+            resolve({ status: res.statusCode, body: JSON.parse(raw) });
+          } catch {
+            resolve({ status: res.statusCode, body: raw });
+          }
+        });
+      },
+    );
+    req.on('error', reject);
+    req.write(bodyStr);
+    req.end();
+  });
+}
+
 // ── App builder ───────────────────────────────────────────────────────────────
 
-function makeApp(workspaceScanner) {
+function makeApp(workspaceScanner, auditStore, workspaceMutator) {
   const app = express();
   app.use(express.json());
   const guard = createAccessGuard();
   app.use('/api', guard);
-  app.use(workspaceReposRouter(workspaceScanner));
+  // Provide no-op stubs when not needed by calling test
+  const audit = auditStore ?? new AuditStore();
+  const mutator = workspaceMutator ?? new WorkspaceMutator({ workspaceDir: '/workspace' });
+  app.use(workspaceReposRouter(workspaceScanner, audit, mutator));
   return app;
 }
 
@@ -628,5 +665,443 @@ describe('WorkspaceScanner — AC1: live from FS (no cache)', () => {
     await scanner.listClones();
     await scanner.listClones();
     expect(readdirCallCount).toBe(2);
+  });
+});
+
+// ── AC5: WorkspaceMutator — path traversal + symlink-flucht protection ────────
+
+describe('WorkspaceMutator — AC5: path traversal prevention (unit, injected lstat)', () => {
+  /**
+   * Build a mutator with injected fsDeps and execFn for isolation.
+   *
+   * @param {object} opts
+   * @param {string} opts.workspaceDir
+   * @param {boolean} [opts.lstatExists]  If true, lstat resolves; else throws ENOENT.
+   * @param {Function} [opts.rmFn]        Custom execFn for rm; defaults to no-op.
+   */
+  function buildMutator({ workspaceDir, lstatExists = true, rmFn = async () => {} } = {}) {
+    return new WorkspaceMutator({
+      workspaceDir,
+      fsDeps: {
+        lstat: async (p) => {
+          if (!lstatExists) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+          return { path: p };
+        },
+      },
+      execFn: rmFn,
+    });
+  }
+
+  it('AC5 — simple valid name → resolves to direct child, no error', async () => {
+    let rmCalledWith = null;
+    const mutator = buildMutator({
+      workspaceDir: '/workspace',
+      lstatExists: true,
+      rmFn: async (_cmd, args) => { rmCalledWith = args; },
+    });
+    await mutator.deleteClone('my-repo');
+    expect(rmCalledWith).toEqual(['-rf', '--', '/workspace/my-repo']);
+  });
+
+  it('AC5 — traversal: name=".." → 400-class traversal error, rm NOT called', async () => {
+    let rmCalled = false;
+    const mutator = buildMutator({
+      workspaceDir: '/workspace',
+      rmFn: async () => { rmCalled = true; },
+    });
+    await expect(mutator.deleteClone('..')).rejects.toMatchObject({
+      errorClass: 'traversal',
+    });
+    expect(rmCalled).toBe(false);
+  });
+
+  it('AC5 — traversal: name="../../../etc" → traversal error, rm NOT called', async () => {
+    let rmCalled = false;
+    const mutator = buildMutator({
+      workspaceDir: '/workspace',
+      rmFn: async () => { rmCalled = true; },
+    });
+    await expect(mutator.deleteClone('../../../etc')).rejects.toMatchObject({
+      errorClass: 'traversal',
+    });
+    expect(rmCalled).toBe(false);
+  });
+
+  it('AC5 — absolute path as name → traversal error, rm NOT called', async () => {
+    let rmCalled = false;
+    const mutator = buildMutator({
+      workspaceDir: '/workspace',
+      rmFn: async () => { rmCalled = true; },
+    });
+    await expect(mutator.deleteClone('/etc/passwd')).rejects.toMatchObject({
+      errorClass: 'traversal',
+    });
+    expect(rmCalled).toBe(false);
+  });
+
+  it('AC5 — nested path "a/b" → traversal error (not a direct child)', async () => {
+    let rmCalled = false;
+    const mutator = buildMutator({
+      workspaceDir: '/workspace',
+      rmFn: async () => { rmCalled = true; },
+    });
+    await expect(mutator.deleteClone('a/b')).rejects.toMatchObject({
+      errorClass: 'traversal',
+    });
+    expect(rmCalled).toBe(false);
+  });
+
+  it('AC5 — empty name → traversal error', async () => {
+    const mutator = buildMutator({ workspaceDir: '/workspace' });
+    await expect(mutator.deleteClone('')).rejects.toMatchObject({ errorClass: 'traversal' });
+  });
+
+  it('AC5 — not-found: lstat throws → not-found error class, rm NOT called', async () => {
+    let rmCalled = false;
+    const mutator = buildMutator({
+      workspaceDir: '/workspace',
+      lstatExists: false,
+      rmFn: async () => { rmCalled = true; },
+    });
+    await expect(mutator.deleteClone('my-repo')).rejects.toMatchObject({
+      errorClass: 'not-found',
+    });
+    expect(rmCalled).toBe(false);
+  });
+
+  it('AC5 — WORKSPACE_DIR unset → workspace-unset error class, rm NOT called', async () => {
+    let rmCalled = false;
+    const mutator = new WorkspaceMutator({
+      workspaceDir: '',
+      fsDeps: { lstat: async () => {} },
+      execFn: async () => { rmCalled = true; },
+    });
+    await expect(mutator.deleteClone('my-repo')).rejects.toMatchObject({
+      errorClass: 'workspace-unset',
+    });
+    expect(rmCalled).toBe(false);
+  });
+
+  it('AC5 — rm failure → rm-failed error class propagated', async () => {
+    const mutator = buildMutator({
+      workspaceDir: '/workspace',
+      lstatExists: true,
+      rmFn: async () => { throw new Error('Permission denied'); },
+    });
+    await expect(mutator.deleteClone('my-repo')).rejects.toMatchObject({
+      errorClass: 'rm-failed',
+    });
+  });
+});
+
+// ── AC5: WorkspaceMutator — real filesystem: Symlink-Flucht (integration) ─────
+
+describe('WorkspaceMutator — AC5: symlink-flucht (real tmp filesystem)', () => {
+  let tmpWorkspace; // real tmp dir used as WORKSPACE_DIR
+  let tmpOutside;   // real tmp dir OUTSIDE WORKSPACE_DIR
+
+  beforeEach(async () => {
+    // Create isolated tmp dirs for this test
+    tmpWorkspace = join(tmpdir(), `workspace-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    tmpOutside = join(tmpdir(), `outside-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(tmpWorkspace, { recursive: true });
+    await mkdir(tmpOutside, { recursive: true });
+  });
+
+  afterEach(async () => {
+    // Clean up both dirs (ignore errors if already removed by test)
+    await rm(tmpWorkspace, { recursive: true, force: true });
+    await rm(tmpOutside, { recursive: true, force: true });
+  });
+
+  it('AC5 — symlink inside workspace pointing outside: deletes only the symlink, not the target', async () => {
+    // Create a real file OUTSIDE workspace
+    const outsideFile = join(tmpOutside, 'secret.txt');
+    await writeFile(outsideFile, 'outside content');
+
+    // Create a symlink INSIDE workspace pointing to the outside dir
+    const symlinkName = 'evil-link';
+    const symlinkPath = join(tmpWorkspace, symlinkName);
+    await symlink(tmpOutside, symlinkPath);
+
+    // Confirm the symlink exists
+    const { lstat: realLstat } = await import('node:fs/promises');
+    const stat = await realLstat(symlinkPath);
+    expect(stat.isSymbolicLink()).toBe(true);
+
+    // Use real WorkspaceMutator (no injection)
+    const mutator = new WorkspaceMutator({ workspaceDir: tmpWorkspace });
+    await mutator.deleteClone(symlinkName);
+
+    // Symlink itself must be gone
+    await expect(realLstat(symlinkPath)).rejects.toMatchObject({ code: 'ENOENT' });
+
+    // The target OUTSIDE workspace must still exist (not followed by rm -rf)
+    const outsideStat = await realLstat(tmpOutside);
+    expect(outsideStat.isDirectory()).toBe(true);
+    const outsideFileStat = await realLstat(outsideFile);
+    expect(outsideFileStat.isFile()).toBe(true);
+  });
+
+  it('AC5 — regular clone dir: deleted entirely from workspace', async () => {
+    // Create a real clone-like dir inside workspace
+    const cloneName = 'my-real-clone';
+    const clonePath = join(tmpWorkspace, cloneName);
+    await mkdir(clonePath, { recursive: true });
+    await writeFile(join(clonePath, 'README.md'), '# test');
+
+    const mutator = new WorkspaceMutator({ workspaceDir: tmpWorkspace });
+    await mutator.deleteClone(cloneName);
+
+    const { lstat: realLstat } = await import('node:fs/promises');
+    await expect(realLstat(clonePath)).rejects.toMatchObject({ code: 'ENOENT' });
+    // Workspace itself intact
+    const wsStat = await realLstat(tmpWorkspace);
+    expect(wsStat.isDirectory()).toBe(true);
+  });
+
+  it('AC5 — traversal attempt with real fs: nothing outside workspace deleted', async () => {
+    // Create a file outside workspace
+    const outsideFile = join(tmpOutside, 'important.txt');
+    await writeFile(outsideFile, 'do not delete me');
+
+    const mutator = new WorkspaceMutator({ workspaceDir: tmpWorkspace });
+
+    // Attempt traversal via name
+    await expect(mutator.deleteClone('../' + tmpOutside.split('/').pop())).rejects.toMatchObject({
+      errorClass: 'traversal',
+    });
+
+    // Outside file must still exist
+    const { lstat: realLstat } = await import('node:fs/promises');
+    const stat = await realLstat(outsideFile);
+    expect(stat.isFile()).toBe(true);
+  });
+
+  it('AC5 — not-found: clone does not exist → 404-class error (lstat throws)', async () => {
+    const mutator = new WorkspaceMutator({ workspaceDir: tmpWorkspace });
+    await expect(mutator.deleteClone('nonexistent-repo')).rejects.toMatchObject({
+      errorClass: 'not-found',
+    });
+  });
+});
+
+// ── AC5 + AC7 + AC8: POST /api/workspace/repos/delete (HTTP integration) ──────
+
+describe('POST /api/workspace/repos/delete — AC5, AC7, AC8 (HTTP)', () => {
+  let server, port, audit;
+
+  /**
+   * Build and start the test app with an injected (mock) WorkspaceMutator.
+   *
+   * @param {object} mutatorMock - object with deleteClone method
+   * @param {object} [opts]
+   * @param {boolean} [opts.noDevAccess] - if true, skip setting DEV_NO_ACCESS
+   */
+  async function startTestApp(mutatorMock, opts = {}) {
+    if (!opts.noDevAccess) process.env.DEV_NO_ACCESS = '1';
+    audit = new AuditStore();
+    const scanner = new WorkspaceScanner({ workspaceDir: '' }); // read endpoint not tested here
+    const app = makeApp(scanner, audit, mutatorMock);
+    const started = await startServer(app);
+    server = started.server;
+    port = started.port;
+  }
+
+  afterEach(async () => {
+    if (server) await closeServer(server);
+    server = null;
+    delete process.env.DEV_NO_ACCESS;
+    delete process.env.CRED_ADMIN_EMAILS;
+  });
+
+  // ── AC5: success path ─────────────────────────────────────────────────────
+
+  it('AC5 — valid name → 200 { name, status: "deleted" }', async () => {
+    const mutator = { deleteClone: async () => {} };
+    await startTestApp(mutator);
+    const res = await post(port, '/api/workspace/repos/delete', { name: 'my-repo' });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ name: 'my-repo', status: 'deleted' });
+  });
+
+  it('AC5 — traversal name → 400', async () => {
+    const mutator = {
+      deleteClone: async () => {
+        throw new WorkspaceMutatorError('Pfad-Traversal', 'traversal');
+      },
+    };
+    await startTestApp(mutator);
+    const res = await post(port, '/api/workspace/repos/delete', { name: '../etc' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBeTruthy();
+  });
+
+  it('AC5 — not-found → 404', async () => {
+    const mutator = {
+      deleteClone: async () => {
+        throw new WorkspaceMutatorError('Klon nicht gefunden', 'not-found');
+      },
+    };
+    await startTestApp(mutator);
+    const res = await post(port, '/api/workspace/repos/delete', { name: 'missing-repo' });
+    expect(res.status).toBe(404);
+  });
+
+  it('AC5 — missing name → 400', async () => {
+    const mutator = { deleteClone: async () => {} };
+    await startTestApp(mutator);
+    const res = await post(port, '/api/workspace/repos/delete', {});
+    expect(res.status).toBe(400);
+  });
+
+  it('AC5 — empty name → 400', async () => {
+    const mutator = { deleteClone: async () => {} };
+    await startTestApp(mutator);
+    const res = await post(port, '/api/workspace/repos/delete', { name: '' });
+    expect(res.status).toBe(400);
+  });
+
+  it('AC5 — workspace-unset → 400', async () => {
+    const mutator = {
+      deleteClone: async () => {
+        throw new WorkspaceMutatorError('WORKSPACE_DIR nicht konfiguriert', 'workspace-unset');
+      },
+    };
+    await startTestApp(mutator);
+    const res = await post(port, '/api/workspace/repos/delete', { name: 'some-repo' });
+    expect(res.status).toBe(400);
+  });
+
+  // ── AC7: Audit-First ──────────────────────────────────────────────────────
+
+  it('AC7 — successful delete: intent entry recorded BEFORE outcome (two entries)', async () => {
+    const callOrder = [];
+    const mutator = {
+      deleteClone: async () => {
+        callOrder.push('delete');
+      },
+    };
+    // Spy audit to track call order
+    const spyAudit = {
+      record(entry) {
+        callOrder.push(entry.command);
+        audit.record(entry); // also record in real audit for assertions
+      },
+    };
+    if (process.env.DEV_NO_ACCESS !== '1') process.env.DEV_NO_ACCESS = '1';
+    const scanner = new WorkspaceScanner({ workspaceDir: '' });
+    const app = makeApp(scanner, spyAudit, mutator);
+    const started = await startServer(app);
+    server = started.server;
+    port = started.port;
+
+    await post(port, '/api/workspace/repos/delete', { name: 'audited-repo' });
+
+    // Intent must appear before delete, outcome after
+    const intentIdx = callOrder.indexOf('workspace:repo:delete:audited-repo');
+    const deleteIdx = callOrder.indexOf('delete');
+    const outcomeIdx = callOrder.indexOf('workspace:repo:delete:audited-repo:success');
+
+    expect(intentIdx).toBeGreaterThanOrEqual(0);
+    expect(deleteIdx).toBeGreaterThan(intentIdx);
+    expect(outcomeIdx).toBeGreaterThan(deleteIdx);
+  });
+
+  it('AC7 — delete failure: intent + failed outcome entries recorded', async () => {
+    const mutator = {
+      deleteClone: async () => {
+        throw new WorkspaceMutatorError('Not found', 'not-found');
+      },
+    };
+    await startTestApp(mutator);
+    await post(port, '/api/workspace/repos/delete', { name: 'gone-repo' });
+
+    const entries = audit.getAll();
+    const intent = entries.find((e) => e.command === 'workspace:repo:delete:gone-repo');
+    const outcome = entries.find((e) => e.command.includes('gone-repo') && e.command.includes('failed:not-found'));
+    expect(intent).toBeTruthy();
+    expect(outcome).toBeTruthy();
+  });
+
+  it('AC7 — audit-write failure blocks mutation (Audit-First)', async () => {
+    let deleteCalled = false;
+    const mutator = { deleteClone: async () => { deleteCalled = true; } };
+    const brokenAudit = {
+      record() { throw new Error('Audit store down'); },
+    };
+    process.env.DEV_NO_ACCESS = '1';
+    const scanner = new WorkspaceScanner({ workspaceDir: '' });
+    const app = makeApp(scanner, brokenAudit, mutator);
+    const started = await startServer(app);
+    server = started.server;
+    port = started.port;
+
+    const res = await post(port, '/api/workspace/repos/delete', { name: 'my-repo' });
+    expect(res.status).toBe(500);
+    expect(res.body.error).toMatch(/audit/i);
+    expect(deleteCalled).toBe(false); // mutation must NOT proceed
+  });
+
+  it('AC7 — audit entries do not contain tokens or secrets', async () => {
+    const mutator = { deleteClone: async () => {} };
+    await startTestApp(mutator);
+    await post(port, '/api/workspace/repos/delete', { name: 'safe-repo' });
+    const allEntries = JSON.stringify(audit.getAll());
+    expect(allEntries).not.toContain('Bearer');
+    expect(allEntries).not.toContain('ghs_');
+    expect(allEntries).not.toContain('token');
+  });
+
+  // ── AC8: CRED_ADMIN_EMAILS ────────────────────────────────────────────────
+
+  it('AC8 — CRED_ADMIN_EMAILS set, dev@local not in list → 403', async () => {
+    process.env.CRED_ADMIN_EMAILS = 'admin@example.com,other@example.com';
+    const mutator = { deleteClone: async () => {} };
+    await startTestApp(mutator);
+    // DEV_NO_ACCESS sets identity email to 'dev@local'
+    const res = await post(port, '/api/workspace/repos/delete', { name: 'my-repo' });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toMatch(/berechtigung/i);
+  });
+
+  it('AC8 — CRED_ADMIN_EMAILS set, dev@local in list → 200', async () => {
+    process.env.CRED_ADMIN_EMAILS = 'dev@local,admin@example.com';
+    const mutator = { deleteClone: async () => {} };
+    await startTestApp(mutator);
+    const res = await post(port, '/api/workspace/repos/delete', { name: 'my-repo' });
+    expect(res.status).toBe(200);
+  });
+
+  it('AC8 — CRED_ADMIN_EMAILS not set → any valid identity allowed', async () => {
+    delete process.env.CRED_ADMIN_EMAILS;
+    const mutator = { deleteClone: async () => {} };
+    await startTestApp(mutator);
+    const res = await post(port, '/api/workspace/repos/delete', { name: 'my-repo' });
+    expect(res.status).toBe(200);
+  });
+
+  it('AC8 — no AccessGuard token (production mode) → 403', async () => {
+    delete process.env.DEV_NO_ACCESS;
+    const savedDomain = process.env.ACCESS_TEAM_DOMAIN;
+    const savedAud = process.env.ACCESS_AUD;
+    delete process.env.ACCESS_TEAM_DOMAIN;
+    delete process.env.ACCESS_AUD;
+
+    const mutator = { deleteClone: async () => {} };
+    audit = new AuditStore();
+    const scanner = new WorkspaceScanner({ workspaceDir: '' });
+    const app = makeApp(scanner, audit, mutator);
+    const started = await startServer(app);
+    server = started.server;
+    port = started.port;
+
+    try {
+      const res = await post(port, '/api/workspace/repos/delete', { name: 'my-repo' });
+      expect(res.status).toBe(403);
+    } finally {
+      if (savedDomain !== undefined) process.env.ACCESS_TEAM_DOMAIN = savedDomain;
+      if (savedAud !== undefined) process.env.ACCESS_AUD = savedAud;
+    }
   });
 });
