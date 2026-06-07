@@ -1,5 +1,11 @@
 # Reviewer Lessons — dev-gui (newest first)
 
+## 2026-06-07 — aria-modal auf role="presentation" ist ein falsch-positiver A11y-Befund
+`aria-modal="true"` auf dem Overlay-Wrapper mit `role="presentation"` ist semantisch inkorrekt (aria-modal ist nur für role=dialog/alertdialog definiert), aber harmlos — Screen-Reader ignorieren aria-modal auf presentational Elementen und nutzen das innere `role="dialog" aria-modal="true"`. Vor einem Important-Befund prüfen: hat das innere Dialog-Element selbst korrekt `role="dialog" aria-modal="true"`? Wenn ja: Suggestion, nicht Important. Kein Gate-Blocker.
+
+## 2026-06-07 — Doppelter focus()-Aufruf (useEffect + setTimeout) nach State-Änderung: redundant aber harmlos
+Wenn eine Komponente sowohl einen `useEffect([state])` mit `ref.current.focus()` als auch einen `setTimeout(() => ref.current?.focus(), 0)` im gleichen Handler hat, sind beide Pfade funktional korrekt (focus() ist idempotent), aber der setTimeout ist redundant — der useEffect feuert nach dem DOM-Commit und sieht den gemounteten DOM-Knoten bereits. Kein Important-Befund; als Suggestion empfehlen, den setTimeout zu entfernen.
+
 ## 2026-06-07 — useCallback-Deps: fehlende stabile Prop nicht als Befund wenn kein react-hooks-Lint konfiguriert und Prop nachweislich stabil
 Wenn ein `useCallback` eine Prop-Funktion verwendet (z.B. `onCloneSuccess`), diese aber nicht in der Deps-Array steht (`[name, fetchFn]`), ist das nur dann ein Befund wenn (a) eslint-plugin-react-hooks aktiv ist UND (b) ein echtes Runtime-Risiko besteht (d.h. die Prop kann sich ändern und würde dann stale sein). Wenn die Prop nachweislich stabil ist (z.B. `fetchWorkspaceRepos = useCallback([], [])`) und kein react-hooks-Plugin im Projekt konfiguriert ist: Suggestion, kein Important.
 
