@@ -1,5 +1,17 @@
 # Coder Lessons — dev-gui (newest first)
 
+## 2026-06-07 — Audit-Pflichtfelder vollständig aus Spec abschreiben (Ziel-Pfad, Zeit etc.)
+Wenn die Spec für einen Audit-Eintrag explizit Felder nennt (z.B. „Identität, Aktion, Repo-Referenz, Ziel-Pfad, Ergebnis, Zeit"), müssen ALLE diese Felder im tatsächlichen `auditStore.record()`-Aufruf enthalten sein. AuditStore stampt `time` automatisch — aber kontextabhängige Felder wie `Ziel-Pfad` müssen explizit übergeben werden (z.B. als Teil des `command`-Strings oder als separates Feld). Fehlt ein Pflichtfeld: Important-Befund. Vor Commit: Spec-Feldliste gegen Code-Felder abhaken.
+
+## 2026-06-07 — 409-Response-Shape vollständig aus Spec abschreiben (inkl. `path`)
+Wenn die Spec eine 409-Response als `{ status: "already-present", path }` beschreibt, muss das `path`-Feld tatsächlich in der Response enthalten sein — auch wenn `path` zur Fehlerzeit (vor dem Clone) nur aus dem validierten `repoName` ableitbar ist. `mapClonerErrorToResponse` oder die entsprechende Fehler-Handler-Funktion muss den Kontext (repoName) als Parameter erhalten. Fehlt `path` in 409: AC4-Verletzung, Important-Befund.
+
+## 2026-06-07 — Traversal-Guard: immer per parent-dir-Vergleich statt Prefix-Check
+Beim Schutz gegen Path-Traversal für Unterordner von WORKSPACE_DIR den validierten Pfad immer via `resolve(targetPath, '..')` mit dem normalisierten `workspaceDir` vergleichen — nicht via `startsWith()`-Prefix-Check. Prefix-Checks schlagen bei ähnlichen Verzeichnisnamen fehl (z.B. `/workspace-evil/x` startet mit `/workspace`). Der Parent-Dir-Vergleich ist mathematisch korrekt, deckt `..`, absolute Pfade, `a/b`-Nesting und `.` (den Workspace-Dir selbst) in einer einzigen Prüfung ab. Zusätzlich: `lstat()` statt `stat()`/`realpath()` verwenden, damit Symlinks nicht dereferenziert werden — Löschung trifft immer den Link selbst.
+
+## 2026-06-07 — Test-Header-Claim "fokussiert" braucht activeElement-Assertion, nicht nur tabIndex-Check
+Wenn ein Test-Header den Claim enthält, dass ein Element nach einer Aktion tatsächlich den Fokus erhält (z.B. "bei 201-Antwort wird URL fokussiert"), reicht ein tabIndex-Check nicht — der prüft nur, ob das Element fokussierbar IST, nicht ob es tatsächlich fokussiert WURDE. Für den stärkeren Claim braucht es `expect(document.activeElement).toBe(element)` oder einen `spy` auf `element.focus`. jsdom unterstützt `document.activeElement` in `act()`-Blöcken. Gilt analog für alle Fokus-Management-Claims (Fehler-Fokus auf nameInputRef, Erfolgs-Fokus auf successUrlRef).
+
 ## 2026-06-07 — Neue Route immer in den server.js-Datei-Header-Kommentar eintragen
 Der JSDoc-Block am Anfang von `server.js` ist das kanonische Routen-Inventar des Projekts. Jede neue Route (GET, POST, WS) muss dort als Zeile nachgepflegt werden — auch wenn die Route in einem eigenen Router-Modul liegt. Fehlt der Eintrag, führt das zu einem Important-Befund beim nächsten Review. Muster: `GET  /api/github/repos  → { repos:[...] } (github-repos-overview)`.
 

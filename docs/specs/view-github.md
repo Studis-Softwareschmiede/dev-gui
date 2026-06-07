@@ -19,7 +19,7 @@ Eine eigenständige Ansicht zum **Verwalten von GitHub** der Org (Repos, Boards/
 
 ## Acceptance-Kriterien
 - **AC1** — Die GitHub-Ansicht ist über die *GitHub*-Kachel und per Deep-Link (Route `github`) erreichbar und zeigt einen erkennbaren Titel „GitHub".
-- **AC2** — Das Grundgerüst rendert einen Platzhalter (Hinweis „folgt / in Arbeit") und löst **keinen** Backend-Aufruf und **keine** externe API-Anfrage aus.
+- **AC2** — Das Grundgerüst rendert einen Platzhalter (Hinweis „folgt / in Arbeit") und löst **keinen** Backend-Aufruf und **keine** externe API-Anfrage aus. *(Hinweis: durch [[github-repo-create]] überholt — die Ansicht zeigt jetzt das Repo-Anlege-Formular statt eines Platzhalters; AC2 gilt damit nur noch für VPS/Cloudflare-Pendants, nicht mehr für die GitHub-Ansicht selbst.)*
 - **AC3** — Aus der Ansicht ist die Rückkehr zum Einstiegs-Panel und der Wechsel zu jeder anderen Ansicht möglich.
 
 ## Verträge

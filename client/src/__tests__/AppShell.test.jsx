@@ -242,8 +242,8 @@ describe('AppShell — AC2: Factory view', () => {
 // ── AC3 — Placeholder views (no backend calls) ───────────────────────────────
 
 describe('AppShell — AC3: Placeholder views', () => {
+  // GitHub-Ansicht ist kein Platzhalter mehr — es enthält ein Anlege-Formular (github-repo-create).
   const placeholders = [
-    { tile: /^github/i, view: '#/github', label: /github-ansicht/i },
     { tile: /^vps/i,    view: '#/vps',    label: /vps-ansicht/i },
     { tile: /^cloudflare/i, view: '#/cloudflare', label: /cloudflare-ansicht/i },
   ];
@@ -275,6 +275,22 @@ describe('AppShell — AC3: Placeholder views', () => {
       });
     });
   }
+
+  // GitHub: kein Platzhalter — zeigt Repo-Anlege-Formular (github-repo-create AC1)
+  it('clicking #/github tile renders GitHub view with repo-create form', async () => {
+    window.location.hash = '';
+    const { getByRole } = render(React.createElement(AppShell));
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /^github/i }));
+    });
+
+    await waitFor(() => {
+      expect(window.location.hash).toBe('#/github');
+      expect(getByRole('main', { name: /github-ansicht/i })).toBeTruthy();
+      expect(getByRole('heading', { name: /neues repository anlegen/i })).toBeTruthy();
+    });
+  });
 });
 
 // ── AC4 — NavBar on all views; Home returns to panel ─────────────────────────
