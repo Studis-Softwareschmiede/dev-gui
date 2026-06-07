@@ -146,6 +146,12 @@ services:
       # Unset or empty = every valid Access identity may mutate (default).
       #   CRED_ADMIN_EMAILS: admin@example.com,ops@example.com
 
+      # ── Workspace (workspace-repos / github-repo-clone) ─────────────────────
+      # Container-Pfad, den GET /api/workspace/repos scannt und in den
+      # POST /api/github/repos/clone klont. Der Host-Ordner wird unten als
+      # Volume gemountet (WORKSPACE_HOST_DIR) — muss uid-1000-schreibbar sein.
+      WORKSPACE_DIR: /workspace
+
     volumes:
       # Claude OAuth credentials + agent-flow plugin cache (persisted across
       # restarts/image updates). Must be owned by uid 1000 (node).
@@ -154,6 +160,11 @@ services:
       # GPG passphrase file (Option B — alternative to the env var above).
       # Uncomment and ensure the host file is readable by uid 1000:
       # - ${GPG_PASS_FILE:-~/.config/softwareschmiede/gpg.pass}:/home/node/.config/softwareschmiede/gpg.pass:ro
+
+      # Lokaler Klon-Workspace (workspace-repos spec). Host-Pfad per
+      # WORKSPACE_HOST_DIR überschreibbar; Default = Org-Checkout dieser
+      # Installation (Mac, alex).
+      - ${WORKSPACE_HOST_DIR:-/Users/alex/Git/Studis-Softwareschmiede}:/workspace
 
     networks:
       # internal net — reach socket-proxy:2375
