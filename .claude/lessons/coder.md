@@ -1,5 +1,14 @@
 # Coder Lessons — dev-gui (newest first)
 
+## 2026-06-07 — Promise.allSettled-Refactor: loadState('error') muss bei Teil-Fehlern explizit gesetzt werden
+Wenn ein `load()`-Hook von einem einzelnen `await fetchX()` auf `Promise.allSettled([fetchA(), fetchB()])` umgebaut wird, MUSS der `loadState`-Wert bei jedem rejected-Branch explizit auf `'error'` gesetzt werden (oder eine eigene `loadError`-Flag genutzt werden), weil `allSettled` niemals wirft und den `catch`-Zweig unerreichbar macht. Typischer Fehler: `setLoadError(...)` wird zwar gesetzt, aber `{loadState === 'error' && ...}` feuert nie, weil danach bedingungslos `setLoadState('ok')` folgt — die Fehlermeldung bleibt unsichtbar. Fix: `if (credsData.status !== 'fulfilled') setLoadState('error');` ODER die Anzeige auf `{loadError && ...}` umstellen und `loadState` nur noch für den Lade-Spinner nutzen.
+
+## 2026-06-07 — handleAddUser: In-Memory-Stub muss in setSshKeys eingefügt werden, nicht nur geplant
+Wenn ein "Add-User"-Formular keinen API-Endpunkt hat (der Benutzer entsteht erst beim ersten Key-PUT), MUSS das Frontend den neuen Eintrag sofort als In-Memory-Stub in den lokalen State einfügen, BEVOR onSaved()/reload() aufgerufen wird. Nur so erscheint der neue Benutzer in der Liste, bevor ein Key gesetzt wurde. Ohne Stub: Formular schließt sich, reload lädt die leere Liste vom Server, der neue Benutzer verschwindet — AC1 ist verletzt. Muster: `setSshKeys(prev => [...prev, { user: trimUser, privateKeyStatus: 'unset' }]); setNewUser(''); setAddingUser(false);` (KEIN onSaved()-Reload davor nötig).
+
+## 2026-06-07 — assertCredentialConfig-Änderungen brauchen ADR-Update in docs/architecture.md
+Wenn die Fail-Fast-Logik des CredentialStore geändert wird (z.B. von „Datei existiert → Fail" auf „Datei hat verschlüsselte Einträge → Fail"), MUSS ADR-007 in `docs/architecture.md` entsprechend aktualisiert werden. Der ADR ist die bindende Spec; Code-Kommentare im CredentialStore sind keine ausreichende Doku. Auch minimale Verhaltensänderungen beim Serverstart (Fail-Fast-Bedingung) sind „beobachtbares Verhalten" und fallen unter den Spec-Drift-Gate.
+
 ## 2026-06-07 — MiscSection-Formulare: error-`<p>` braucht `id` + beide Inputs `aria-describedby`
 Wenn ein gemeinsamer Fehler-Paragraph mehrere Inputs (Schlüsselname + Wert) abdeckt, muss die `<p>` eine eindeutige `id` tragen und **jeder** Input, dem der Fehler zugeordnet ist, ein `aria-describedby={errorId}` erhalten — andernfalls ist die programmatische Zuordnung (WCAG 2.1 SC 3.3.1 / Spec-JSDoc-Header-Claim "aria-describedby") unvollständig. `role="alert"` allein genügt für die Ankündigung, ersetzt aber nicht die statische Input-Fehler-Verbindung. Muster aus `CredentialField` übernehmen: `const errorId = 'misc-error'; <p id={errorId}>...<input aria-describedby={error ? errorId : undefined}>`.
 

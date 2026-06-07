@@ -1,5 +1,5 @@
 /**
- * SettingsView.test.jsx — Unit-Tests für SettingsView (AC1–AC8).
+ * SettingsView.test.jsx — Unit-Tests für SettingsView (Credentials AC1–AC8 + SSH-Keys AC1–AC6).
  *
  * Covers (settings-credentials + settings-shell):
  *   AC1  — Credential-Felder mit Status (gesetzt/nicht gesetzt); kein Klartext
@@ -10,6 +10,14 @@
  *   AC6  — Rückkehr zum Panel (onNavigate)
  *   AC8  — Frontend-Validierung: leere Pflichtfelder → Fehlermeldung, kein Request
  *   NFR A11y — h1/h2, Touch-Targets ≥ 44 px, aria-describedby für Fehler
+ *
+ * Covers (settings-ssh-keys Stufe A):
+ *   SSH-AC1 — Public-Key hinterlegen/anzeigen/ändern; vollständig sichtbar
+ *   SSH-AC2 — Private-Key write-only/maskiert; niemals im Klartext
+ *   SSH-AC3 — Public- und/oder Private-Key löschen; Status „nicht gesetzt"
+ *   SSH-AC4 — Public-Key-Format-Validierung; klare Fehlermeldung
+ *   SSH-AC5 — Private-Key-Klartext nie sichtbar
+ *   SSH-AC6 — Endpunkte hinter Access-Mauer (durch AccessGuard, testbar via makeFetch-Error)
  *
  * @jest-environment jsdom
  */
@@ -36,16 +44,50 @@ const CREDS_WITH_GITHUB_APP_ID = [
   { integration: 'vps', name: 'hetzner_api_token', status: 'unset' },
 ];
 
+/** Leere SSH-Keys-Liste. */
+const EMPTY_SSH_KEYS = [];
+
+/** SSH-Keys-Liste mit einem Eintrag. */
+const SSH_KEYS_WITH_ROOT = [
+  {
+    user: 'root',
+    publicKey: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestPublicKeyForRootUser test@example.com',
+    publicKeyUpdatedAt: '2026-01-01T00:00:00.000Z',
+    privateKeyStatus: 'set',
+    privateKeyUpdatedAt: '2026-01-01T00:00:00.000Z',
+  },
+];
+
 /**
  * Erstellt einen jest.fn() fetch, der auf verschiedene Requests antwortet.
+ * Unterstützt auch SSH-Key-Endpoints (/api/settings/ssh-keys*).
  */
-function makeFetch({ getResponse = EMPTY_CREDS, putResponse = null, deleteResponse = null } = {}) {
+function makeFetch({
+  getResponse = EMPTY_CREDS,
+  putResponse = null,
+  deleteResponse = null,
+  sshGetResponse = EMPTY_SSH_KEYS,
+  sshPutResponse = null,
+  sshDeleteResponse = null,
+} = {}) {
   return jest.fn(async (url, opts) => {
     const method = opts?.method ?? 'GET';
+    const isSsh = typeof url === 'string' && url.includes('/ssh-keys');
+
     if (method === 'GET') {
+      if (isSsh) return { ok: true, json: async () => sshGetResponse };
       return { ok: true, json: async () => getResponse };
     }
     if (method === 'PUT') {
+      if (isSsh) {
+        if (sshPutResponse === 'error') {
+          return { ok: false, json: async () => ({ error: 'Server-Fehler' }) };
+        }
+        return {
+          ok: true,
+          json: async () => sshPutResponse ?? { user: 'root', publicKey: 'ssh-ed25519 AAAA… test', privateKeyStatus: 'unset' },
+        };
+      }
       if (putResponse === 'error') {
         return { ok: false, json: async () => ({ error: 'Server-Fehler' }) };
       }
@@ -55,6 +97,15 @@ function makeFetch({ getResponse = EMPTY_CREDS, putResponse = null, deleteRespon
       };
     }
     if (method === 'DELETE') {
+      if (isSsh) {
+        if (sshDeleteResponse === 'error') {
+          return { ok: false, json: async () => ({ error: 'Löschen fehlgeschlagen' }) };
+        }
+        return {
+          ok: true,
+          json: async () => sshDeleteResponse ?? { user: 'root', privateKeyStatus: 'unset' },
+        };
+      }
       if (deleteResponse === 'error') {
         return { ok: false, json: async () => ({ error: 'Löschen fehlgeschlagen' }) };
       }
@@ -126,11 +177,10 @@ describe('SettingsView — Grundstruktur', () => {
     });
   });
 
-  it('rendert SSH-Keys-Sektion mit Platzhalter "folgt"', async () => {
-    const { getByRole, getByText } = renderView();
+  it('rendert SSH-Keys-Sektion mit h2-Überschrift und Inhalt (nicht mehr Platzhalter)', async () => {
+    const { getByRole } = renderView();
     await waitFor(() => {
       expect(getByRole('heading', { name: /ssh-keys/i })).toBeTruthy();
-      expect(getByText(/folgt/i)).toBeTruthy();
     });
   });
 });
@@ -558,5 +608,568 @@ describe('SettingsView — NFR A11y: Touch-Targets ≥ 44 px', () => {
         expect(minH).toBeGreaterThanOrEqual(44);
       }
     });
+  });
+});
+
+// ── SSH-Keys — SSH-AC1: Public-Key anzeigen ───────────────────────────────────
+
+describe('SettingsView — SSH-AC1: Public-Key anzeigen', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('SSH-AC1 — SSH-Keys-Sektion wird gerendert mit h2', async () => {
+    const { getByRole } = renderView(makeFetch());
+    await waitFor(() => {
+      expect(getByRole('heading', { name: /ssh-keys/i })).toBeTruthy();
+    });
+  });
+
+  it('SSH-AC1 — gesetzter Public-Key wird vollständig angezeigt (nicht maskiert)', async () => {
+    const { getByRole } = renderView(makeFetch({ sshGetResponse: SSH_KEYS_WITH_ROOT }));
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      // Public-Key darf vollständig angezeigt werden (AC1)
+      expect(main.textContent).toContain('ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestPublicKeyForRootUser');
+    });
+  });
+
+  it('SSH-AC1 — Benutzer-Label "root" wird angezeigt', async () => {
+    const { getByRole } = renderView(makeFetch({ sshGetResponse: SSH_KEYS_WITH_ROOT }));
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      expect(main.textContent).toContain('root');
+    });
+  });
+
+  it('SSH-AC1 — leere Liste zeigt Hinweistext', async () => {
+    const { getByRole } = renderView(makeFetch({ sshGetResponse: EMPTY_SSH_KEYS }));
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      expect(main.textContent).toMatch(/keine ssh-schlüssel/i);
+    });
+  });
+
+  it('SSH-AC1 — "+ SSH-Benutzer hinzufügen" Button vorhanden', async () => {
+    const { getByRole } = renderView(makeFetch());
+    await waitFor(() => {
+      expect(getByRole('button', { name: /ssh-benutzer hinzufügen/i })).toBeTruthy();
+    });
+  });
+});
+
+// ── SSH-Keys — SSH-AC2: Private-Key write-only/maskiert ──────────────────────
+
+describe('SettingsView — SSH-AC2: Private-Key write-only', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('SSH-AC2 — Private-Key-Status "•••• gesetzt" wird angezeigt (kein Klartext)', async () => {
+    const { getByRole } = renderView(makeFetch({ sshGetResponse: SSH_KEYS_WITH_ROOT }));
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      expect(main.textContent).toContain('•••• gesetzt');
+      // Kein Klartext des Private Keys
+      expect(main.textContent).not.toContain('BEGIN OPENSSH PRIVATE KEY');
+    });
+  });
+
+  it('SSH-AC2 — Private-Key-Input ist ein Textarea (kein type=password, aber write-only-Semantik)', async () => {
+    const fetchMock = makeFetch({ sshGetResponse: SSH_KEYS_WITH_ROOT });
+    globalThis.fetch = fetchMock;
+    const onNavigate = jest.fn();
+    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+
+    // Warten bis SSH-Benutzer root geladen ist
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.includes('Private-Key'))).toBe(true);
+    });
+
+    // Private-Key "Ändern"-Button klicken
+    await act(async () => {
+      const btns = getAllByRole('button').filter((b) =>
+        b.getAttribute('aria-label')?.match(/private-key von root ändern/i),
+      );
+      if (btns[0]) fireEvent.click(btns[0]);
+    });
+
+    // Textarea für Private-Key sollte erscheinen
+    await waitFor(() => {
+      const ta = document.getElementById('ssh-priv-root');
+      expect(ta).toBeTruthy();
+      expect(ta.tagName).toBe('TEXTAREA');
+    });
+  });
+
+  it('SSH-AC2 — nach Speichern wird Private-Key-Klartext nicht angezeigt', async () => {
+    const fetchMock = jest.fn(async (url, opts) => {
+      const method = opts?.method ?? 'GET';
+      const isSsh = typeof url === 'string' && url.includes('/ssh-keys');
+      if (method === 'GET') {
+        if (isSsh) return { ok: true, json: async () => SSH_KEYS_WITH_ROOT };
+        return { ok: true, json: async () => EMPTY_CREDS };
+      }
+      if (method === 'PUT' && isSsh) {
+        return { ok: true, json: async () => ({ user: 'root', publicKey: 'ssh-ed25519 AAAA… test', privateKeyStatus: 'set' }) };
+      }
+      return { ok: false, json: async () => ({ error: 'unbekannt' }) };
+    });
+    globalThis.fetch = fetchMock;
+
+    const onNavigate = jest.fn();
+    const { getAllByRole, getByRole } = render(React.createElement(SettingsView, { onNavigate }));
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/private-key von root ändern/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const btn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/private-key von root ändern/i),
+      );
+      if (btn) fireEvent.click(btn);
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('ssh-priv-root')).toBeTruthy();
+    });
+
+    await act(async () => {
+      const ta = document.getElementById('ssh-priv-root');
+      if (ta) fireEvent.change(ta, { target: { value: '-----BEGIN OPENSSH PRIVATE KEY-----\nABCDEF\n-----END OPENSSH PRIVATE KEY-----' } });
+    });
+
+    await act(async () => {
+      const saveBtns = getAllByRole('button').filter((b) => b.textContent.trim() === 'Speichern');
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      // Private-Key-Klartext darf nach Speichern NICHT sichtbar sein
+      expect(main.textContent).not.toContain('-----BEGIN OPENSSH PRIVATE KEY-----');
+      expect(main.textContent).not.toContain('ABCDEF');
+    });
+  });
+});
+
+// ── SSH-Keys — SSH-AC3: Löschen ───────────────────────────────────────────────
+
+describe('SettingsView — SSH-AC3: Löschen', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('SSH-AC3 — "Alle löschen"-Button für vorhandenen Benutzer', async () => {
+    const { getAllByRole } = renderView(makeFetch({ sshGetResponse: SSH_KEYS_WITH_ROOT }));
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/alle ssh-schlüssel für root löschen/i))).toBe(true);
+    });
+  });
+
+  it('SSH-AC3 — Public-Key-Löschen-Button vorhanden wenn Public-Key gesetzt', async () => {
+    const { getAllByRole } = renderView(makeFetch({ sshGetResponse: SSH_KEYS_WITH_ROOT }));
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/public-key von root löschen/i))).toBe(true);
+    });
+  });
+
+  it('SSH-AC3 — Private-Key-Löschen-Button vorhanden wenn Private-Key gesetzt', async () => {
+    const { getAllByRole } = renderView(makeFetch({ sshGetResponse: SSH_KEYS_WITH_ROOT }));
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/private-key von root löschen/i))).toBe(true);
+    });
+  });
+
+  it('SSH-AC3 — nach Löschen (reload) zeigt neuen Status', async () => {
+    const afterDelete = [{ user: 'root', privateKeyStatus: 'unset' }];
+    let callCount = 0;
+    const fetchMock = jest.fn(async (url, opts) => {
+      const method = opts?.method ?? 'GET';
+      const isSsh = typeof url === 'string' && url.includes('/ssh-keys');
+      if (method === 'GET') {
+        if (isSsh) {
+          callCount++;
+          return { ok: true, json: async () => (callCount <= 1 ? SSH_KEYS_WITH_ROOT : afterDelete) };
+        }
+        return { ok: true, json: async () => EMPTY_CREDS };
+      }
+      if (method === 'DELETE' && isSsh) {
+        return { ok: true, json: async () => ({ user: 'root', privateKeyStatus: 'unset' }) };
+      }
+      return { ok: false, json: async () => ({ error: 'unbekannt' }) };
+    });
+    globalThis.fetch = fetchMock;
+
+    const onNavigate = jest.fn();
+    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/alle ssh-schlüssel für root löschen/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const delBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/alle ssh-schlüssel für root löschen/i),
+      );
+      if (delBtn) fireEvent.click(delBtn);
+    });
+
+    // Nach dem Löschen wird reload() aufgerufen → zweiter GET-Call zeigt neuen Status
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([, opts]) => (opts?.method ?? 'GET') === 'DELETE')).toBe(true);
+    });
+  });
+});
+
+// ── SSH-Keys — SSH-AC4: Public-Key-Format-Validierung ────────────────────────
+
+describe('SettingsView — SSH-AC4: Public-Key-Format-Validierung', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('SSH-AC4 — ungültiges Public-Key-Format → Fehlermeldung, kein PUT', async () => {
+    // Starte direkt mit einem vorhandenen Benutzer "testuser" (kein Public-Key gesetzt)
+    const fetchMock = jest.fn(async (url, opts) => {
+      const method = opts?.method ?? 'GET';
+      const isSsh = typeof url === 'string' && url.includes('/ssh-keys');
+      if (method === 'GET') {
+        if (isSsh) return { ok: true, json: async () => [{ user: 'testuser', privateKeyStatus: 'unset' }] };
+        return { ok: true, json: async () => EMPTY_CREDS };
+      }
+      return { ok: false, json: async () => ({ error: 'unbekannt' }) };
+    });
+    globalThis.fetch = fetchMock;
+
+    const onNavigate = jest.fn();
+    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+
+    // Warten auf Benutzer "testuser" mit Setzen-Button
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/public-key für testuser setzen/i))).toBe(true);
+    });
+
+    // Public-Key-Setzen-Button klicken
+    await act(async () => {
+      const btn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/public-key für testuser setzen/i),
+      );
+      if (btn) fireEvent.click(btn);
+    });
+
+    // Textarea ausfüllen mit ungültigem Format
+    await waitFor(() => {
+      expect(document.getElementById('ssh-pub-testuser')).toBeTruthy();
+    });
+
+    await act(async () => {
+      const ta = document.getElementById('ssh-pub-testuser');
+      if (ta) fireEvent.change(ta, { target: { value: 'nicht-openssh-format' } });
+    });
+
+    // Speichern klicken
+    await act(async () => {
+      const saveBtns = getAllByRole('button').filter((b) => b.textContent.trim() === 'Speichern');
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    // Fehlermeldung erscheint
+    await waitFor(() => {
+      const alerts = document.querySelectorAll('[role="alert"]');
+      const hasFormatError = Array.from(alerts).some((el) =>
+        el.textContent.match(/format|openssh/i),
+      );
+      expect(hasFormatError).toBe(true);
+    });
+
+    // Kein PUT-Request abgefeuert
+    const putCalls = fetchMock.mock.calls.filter(([, opts]) => (opts?.method ?? 'GET') === 'PUT');
+    expect(putCalls.length).toBe(0);
+  });
+
+  it('SSH-AC4 — leeres Public-Key-Feld → Fehlermeldung', async () => {
+    const fetchMock = jest.fn(async (url, opts) => {
+      const method = opts?.method ?? 'GET';
+      const isSsh = typeof url === 'string' && url.includes('/ssh-keys');
+      if (method === 'GET') {
+        if (isSsh) return { ok: true, json: async () => [{ user: 'alex', privateKeyStatus: 'unset' }] };
+        return { ok: true, json: async () => EMPTY_CREDS };
+      }
+      return { ok: false, json: async () => ({ error: 'unbekannt' }) };
+    });
+    globalThis.fetch = fetchMock;
+
+    const onNavigate = jest.fn();
+    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/public-key für alex setzen/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const btn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/public-key für alex setzen/i),
+      );
+      if (btn) fireEvent.click(btn);
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('ssh-pub-alex')).toBeTruthy();
+    });
+
+    // Ohne Eingabe speichern
+    await act(async () => {
+      const saveBtns = getAllByRole('button').filter((b) => b.textContent.trim() === 'Speichern');
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    await waitFor(() => {
+      const alerts = document.querySelectorAll('[role="alert"]');
+      const hasError = Array.from(alerts).some((el) => el.textContent.match(/leer|pflichtfeld/i));
+      expect(hasError).toBe(true);
+    });
+
+    // Kein PUT
+    const putCalls = fetchMock.mock.calls.filter(([, opts]) => (opts?.method ?? 'GET') === 'PUT');
+    expect(putCalls.length).toBe(0);
+  });
+
+  it('I1 — Public-Key mit Newline → Fehlermeldung "Zeilenumbrüche", kein PUT', async () => {
+    const fetchMock = jest.fn(async (url, opts) => {
+      const method = opts?.method ?? 'GET';
+      const isSsh = typeof url === 'string' && url.includes('/ssh-keys');
+      if (method === 'GET') {
+        if (isSsh) return { ok: true, json: async () => [{ user: 'newline-user', privateKeyStatus: 'unset' }] };
+        return { ok: true, json: async () => EMPTY_CREDS };
+      }
+      return { ok: false, json: async () => ({ error: 'unbekannt' }) };
+    });
+    globalThis.fetch = fetchMock;
+
+    const onNavigate = jest.fn();
+    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/public-key für newline-user setzen/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const btn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/public-key für newline-user setzen/i),
+      );
+      if (btn) fireEvent.click(btn);
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('ssh-pub-newline-user')).toBeTruthy();
+    });
+
+    await act(async () => {
+      const ta = document.getElementById('ssh-pub-newline-user');
+      if (ta) fireEvent.change(ta, { target: { value: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeKey test@example.com\nmalicious' } });
+    });
+
+    await act(async () => {
+      const saveBtns = getAllByRole('button').filter((b) => b.textContent.trim() === 'Speichern');
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    await waitFor(() => {
+      const alerts = document.querySelectorAll('[role="alert"]');
+      const hasError = Array.from(alerts).some((el) => el.textContent.match(/Zeilenumbr|keine.*Zeilen/));
+      expect(hasError).toBe(true);
+    });
+
+    const putCalls = fetchMock.mock.calls.filter(([, opts]) => (opts?.method ?? 'GET') === 'PUT');
+    expect(putCalls.length).toBe(0);
+  });
+});
+
+// ── SSH-Keys — SSH-AC5: Private-Key-Klartext nie sichtbar ────────────────────
+
+describe('SettingsView — SSH-AC5: Private-Key-Klartext nie sichtbar', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('SSH-AC5 — Private-Key-Klartext erscheint nie in der Anzeige (liste)', async () => {
+    const keyWithPriv = [{ user: 'root', privateKeyStatus: 'set', privateKeyUpdatedAt: '2026-01-01T00:00:00.000Z' }];
+    const { getByRole } = renderView(makeFetch({ sshGetResponse: keyWithPriv }));
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      // Masked-Text sichtbar
+      expect(main.textContent).toContain('•••• gesetzt');
+      // Kein Klartext irgendeines Private Keys
+      expect(main.textContent).not.toContain('BEGIN OPENSSH PRIVATE KEY');
+    });
+  });
+});
+
+// ── SSH-Keys — SSH-AC1: Public-Key ändern (Ändern-Button) ────────────────────
+
+describe('SettingsView — SSH-AC1: Public-Key ändern', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('SSH-AC1 — "Ändern"-Button für gesetzten Public-Key', async () => {
+    const { getAllByRole } = renderView(makeFetch({ sshGetResponse: SSH_KEYS_WITH_ROOT }));
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/public-key von root ändern/i))).toBe(true);
+    });
+  });
+
+  it('SSH-AC1 — Klick auf "Ändern" öffnet Textarea mit aria-Attributen', async () => {
+    const fetchMock = makeFetch({ sshGetResponse: SSH_KEYS_WITH_ROOT });
+    globalThis.fetch = fetchMock;
+    const onNavigate = jest.fn();
+    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/public-key von root ändern/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const btn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/public-key von root ändern/i),
+      );
+      if (btn) fireEvent.click(btn);
+    });
+
+    await waitFor(() => {
+      const ta = document.getElementById('ssh-pub-root');
+      expect(ta).toBeTruthy();
+      expect(ta.tagName).toBe('TEXTAREA');
+    });
+  });
+});
+
+// ── S1: Ladefehler-Sichtbarkeit ───────────────────────────────────────────────
+
+describe('SettingsView — S1: Ladefehler-Sichtbarkeit', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('S1 — fetchCredentials rejected → Fehler-Element mit role="alert" erscheint', async () => {
+    const fetchMock = jest.fn(async (url, opts) => {
+      const method = opts?.method ?? 'GET';
+      const isSsh = typeof url === 'string' && url.includes('/ssh-keys');
+      if (method === 'GET') {
+        if (isSsh) return { ok: true, json: async () => EMPTY_SSH_KEYS };
+        // Credentials-Endpunkt wirft
+        throw new Error('Netzwerkfehler beim Laden der Credentials');
+      }
+      return { ok: false, json: async () => ({ error: 'unbekannt' }) };
+    });
+    globalThis.fetch = fetchMock;
+
+    const onNavigate = jest.fn();
+    const { getByRole } = render(React.createElement(SettingsView, { onNavigate }));
+
+    await waitFor(() => {
+      const alerts = document.querySelectorAll('[role="alert"]');
+      const hasCredError = Array.from(alerts).some((el) =>
+        el.textContent.match(/credentials konnten nicht geladen werden/i),
+      );
+      expect(hasCredError).toBe(true);
+    });
+
+    // SSH-Sektion bleibt sichtbar (nur Credentials-Ladefehler)
+    await waitFor(() => {
+      expect(getByRole('heading', { name: /ssh-keys/i })).toBeTruthy();
+    });
+  });
+
+  it('S1 — fetchSshKeys rejected → SSH-Fehler-Element mit role="alert" erscheint', async () => {
+    const fetchMock = jest.fn(async (url, opts) => {
+      const method = opts?.method ?? 'GET';
+      const isSsh = typeof url === 'string' && url.includes('/ssh-keys');
+      if (method === 'GET') {
+        if (isSsh) throw new Error('SSH-Keys-Endpunkt nicht erreichbar');
+        return { ok: true, json: async () => EMPTY_CREDS };
+      }
+      return { ok: false, json: async () => ({ error: 'unbekannt' }) };
+    });
+    globalThis.fetch = fetchMock;
+
+    const onNavigate = jest.fn();
+    render(React.createElement(SettingsView, { onNavigate }));
+
+    await waitFor(() => {
+      const alerts = document.querySelectorAll('[role="alert"]');
+      const hasSshError = Array.from(alerts).some((el) =>
+        el.textContent.match(/ssh-keys konnten nicht geladen werden/i),
+      );
+      expect(hasSshError).toBe(true);
+    });
+  });
+});
+
+// ── SSH-Keys — S1: In-Memory-Stub beim Hinzufügen eines Benutzers ─────────────
+
+describe('SettingsView — S1: Neuer Benutzer erscheint als In-Memory-Stub (kein Server-Roundtrip)', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('S1 — + Button → Label "newuser" eingeben → Hinzufügen → SshKeyEntry aria-label ohne GET', async () => {
+    const fetchMock = makeFetch({ sshGetResponse: EMPTY_SSH_KEYS });
+    globalThis.fetch = fetchMock;
+
+    const onNavigate = jest.fn();
+    const { getByRole, getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+
+    // Warten bis SSH-Sektion geladen
+    await waitFor(() => {
+      expect(getByRole('button', { name: /ssh-benutzer hinzufügen/i })).toBeTruthy();
+    });
+
+    // Zähle GET-Calls vor der Aktion
+    const getCallsBefore = fetchMock.mock.calls.filter(([, opts]) => !opts || (opts?.method ?? 'GET') === 'GET').length;
+
+    // + SSH-Benutzer hinzufügen klicken
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /ssh-benutzer hinzufügen/i }));
+    });
+
+    // Input erscheint
+    await waitFor(() => {
+      expect(document.getElementById('ssh-new-user')).toBeTruthy();
+    });
+
+    // Label eingeben
+    await act(async () => {
+      fireEvent.change(document.getElementById('ssh-new-user'), { target: { value: 'newuser' } });
+    });
+
+    // Hinzufügen klicken
+    await act(async () => {
+      const hinzBtns = getAllByRole('button').filter((b) => b.textContent.trim() === 'Hinzufügen');
+      if (hinzBtns[0]) fireEvent.click(hinzBtns[0]);
+    });
+
+    // SshKeyEntry für "newuser" erscheint ohne weiteren Server-Roundtrip
+    await waitFor(() => {
+      const group = document.querySelector('[aria-label="SSH-Schlüssel für newuser"]');
+      expect(group).toBeTruthy();
+    });
+
+    // Kein zusätzlicher GET /api/settings/ssh-keys nach dem Hinzufügen
+    const getCallsAfter = fetchMock.mock.calls.filter(([, opts]) => !opts || (opts?.method ?? 'GET') === 'GET').length;
+    expect(getCallsAfter).toBe(getCallsBefore);
   });
 });

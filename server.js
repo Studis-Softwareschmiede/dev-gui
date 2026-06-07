@@ -4,12 +4,15 @@
  *
  * Routes:
  *   GET  /                    → React SPA (client/dist) — public, no Access required
- *   GET  /api/status          → { projects:[{name,openItems,lastCi}], previews:[{name,url,status}] }
- *   GET  /api/session         → { state, restarts, startedAt }
- *   GET  /api/audit           → [{time, identity, command}]
- *   POST /api/command         → inject slash-command into PTY session
- *   POST /api/command/cancel  → send Ctrl-C, cancel running command
- *   WS   /ws/terminal         → PtyManager bridge (guarded by AccessGuard)
+ *   GET  /api/status                              → { projects:[...], previews:[...] }
+ *   GET  /api/session                             → { state, restarts, startedAt }
+ *   GET  /api/audit                               → [{time, identity, command}]
+ *   POST /api/command                             → inject slash-command into PTY session
+ *   POST /api/command/cancel                      → send Ctrl-C, cancel running command
+ *   GET/PUT/DELETE /api/settings/credentials*     → Credential-Verwaltung (settings-credentials)
+ *   GET/PUT/DELETE /api/settings/ssh-keys*        → SSH-Key-Verwaltung (settings-ssh-keys Stufe A)
+ *   POST /api/settings/ssh-keys/:user/provision   → 501 (Stufe B, folgt in #47)
+ *   WS   /ws/terminal                             → PtyManager bridge (guarded by AccessGuard)
  */
 
 import { createServer } from 'node:http';
@@ -28,6 +31,7 @@ import { DockerReader } from './src/DockerReader.js';
 import { statusRouter } from './src/statusRouter.js';
 import { CredentialStore } from './src/CredentialStore.js';
 import { credentialsRouter } from './src/credentialsRouter.js';
+import { sshKeysRouter } from './src/sshKeysRouter.js';
 
 const PORT = Number(process.env.PORT ?? 8080);
 
@@ -78,6 +82,9 @@ app.use(statusRouter({ githubReader, dockerReader }));
 
 // ── Credentials route (settings-credentials) ─────────────────────────────────
 app.use(credentialsRouter(credentialStore, auditStore));
+
+// ── SSH-Keys route (settings-ssh-keys Stufe A) ────────────────────────────────
+app.use(sshKeysRouter(credentialStore, auditStore));
 
 /**
  * GET /api/session → { state, restarts, startedAt }

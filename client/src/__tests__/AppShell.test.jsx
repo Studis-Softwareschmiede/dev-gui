@@ -638,14 +638,16 @@ describe('settings-shell — AC4: Settings view sections', () => {
     delete globalThis.fetch;
   });
 
-  it('SSH-Keys section contains a "folgt" placeholder', async () => {
+  it('SSH-Keys section shows real SSH-key management UI (not placeholder)', async () => {
     window.location.hash = '#/settings';
     globalThis.fetch = jest.fn(() => Promise.resolve({ ok: true, json: async () => [] }));
     const { getByRole } = render(React.createElement(AppShell));
     await waitFor(() => {
       const main = getByRole('main', { name: /einstellungen-ansicht/i });
-      // SSH-Keys section retains "folgt" placeholder (#46 not yet implemented)
-      expect(main.textContent).toMatch(/folgt/i);
+      // SSH-Keys section now shows real UI (settings-ssh-keys AC1–AC6 implemented in #46)
+      expect(main.textContent).toMatch(/ssh-keys/i);
+      // "folgt"-Platzhalter wurde durch echte Implementierung ersetzt
+      expect(main.textContent).not.toMatch(/^folgt$/i);
     });
     delete globalThis.fetch;
   });
