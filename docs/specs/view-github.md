@@ -24,7 +24,10 @@ Eine eigenständige Ansicht zum **Verwalten von GitHub** der Org (Repos, Boards/
 
 ## Verträge
 - Konsumiert das Container-Gerüst aus [[app-shell-navigation]] (Route `github`, Navigation, Home).
-- Keine neuen Backend-Endpunkte in diesem Paket. **Geplant (Folge-Anforderung):** Lese-Zugriff über den bestehenden `GitHubReader`-Boundary (App-Token, read-only) für Repos/Boards/PRs; mutierende Aktionen (Repo/Board/PR ändern) sind ein neuer Schreibpfad, der gesondert spezifiziert und autorisiert wird.
+- Keine neuen Backend-Endpunkte in **diesem** Paket. **Geplant (Folge-Anforderung):** Lese-Zugriff über den bestehenden `GitHubReader`-Boundary (App-Token, read-only) für Repos/Boards/PRs.
+- **Schreib-Capabilities (eigene Specs, spezifiziert):** Mutierende GitHub-Aktionen laufen **nicht** über den read-only `GitHubReader`, sondern über getrennte, auditierte + identitäts-/rollengeschützte Schreibpfade:
+  - [[github-repo-create]] — neues Org-Repository anlegen (`POST /api/github/repos`, neuer `GitHubWriter`-Boundary).
+  - [[github-repo-clone]] — bestehendes Repo lokal in den Workspace klonen (`POST /api/github/repos/clone`, `WORKSPACE_DIR`).
 
 ## Edge-Cases & Fehlerverhalten
 - Aufruf ohne Access-Cookie → die bestehende Access-Mauer greift davor (kein view-eigenes Auth-Handling).
@@ -34,9 +37,10 @@ Eine eigenständige Ansicht zum **Verwalten von GitHub** der Org (Repos, Boards/
 - **Sicherheit (Floor, für Folge-Items vorgemerkt):** GitHub-Schreibaktionen sind ein neuer Schreibpfad — sie MÜSSEN auditiert (append-only) und identitäts-/rollengeschützt werden; keine GitHub-Tokens/Secrets ins Frontend-Bundle, in Logs oder den WS-Stream.
 
 ## Nicht-Ziele
-- Tatsächliche Repo-/Board-/PR-Verwaltung (Folge-Anforderung).
 - Eigene Datenhaltung (State bleibt live aus GitHub-API gemäß ADR-005).
+- Board-/PR-Verwaltung (weiterhin Folge-Anforderung; Repo-Anlegen/-Klonen sind in [[github-repo-create]] / [[github-repo-clone]] spezifiziert).
 
 ## Abhängigkeiten
 - [[app-shell-navigation]] (Container/Routing).
-- [[access-and-guardrails]] (Access-Mauer; künftiger Audit-/Lock-Pfad für Schreibaktionen).
+- [[access-and-guardrails]] (Access-Mauer; Audit-/Identitätspfad für Schreibaktionen).
+- [[github-repo-create]] · [[github-repo-clone]] (Schreib-Capabilities, die in dieser Ansicht sitzen).

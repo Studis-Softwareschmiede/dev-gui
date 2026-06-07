@@ -13,7 +13,8 @@
 - **PtyManager** — startet/hält/restartet **genau eine** `claude`-Session in einem PTY (`node-pty`); schreibt Input, broadcastet Output; kennt den Session-Zustand. *Boundary:* einziger Ort, der den PTY berührt.
 - **WS-Gateway** — WebSocket `/ws/terminal`: Client-Eingaben → PtyManager; PTY-Output → alle Clients. Reicht auch Status-Pushes durch.
 - **CommandService** — nimmt Trigger entgegen, prüft **Allowlist** + **Concurrency-Lock (1)**, injiziert den Befehl in die Session, schreibt den **AuditEntry**. *Boundary:* einziger Schreibpfad in die Session von außen.
-- **GitHubReader** — liest Projekte/Board/CI über den GitHub-App-Token. *Boundary:* einziger GitHub-Zugriff.
+- **GitHubReader** — liest Projekte/Board/CI über den GitHub-App-Token. *Boundary:* einziger **read-only** GitHub-Zugriff (kein POST/PATCH/PUT/DELETE).
+- **GitHubWriter** *(neu — `src/GitHubWriter.js`; einziger **mutierender** GitHub-Boundary, getrennt vom read-only `GitHubReader`)* — führt schreibende GitHub-Aktionen aus: Org-Repository anlegen (`POST /orgs/{org}/repos`, [[github-repo-create]]) und bestehendes Repo lokal in `WORKSPACE_DIR` klonen ([[github-repo-clone]]). Mintet den Installation-Token **transient unmittelbar vor** dem Aufruf (App-ID/Installation-ID/Private-Key store-intern aus dem `CredentialStore`-Schema `github`); Token nie in Response/Log/Audit/WS/URL/Argv/persistierter Remote-URL. Mutierende Aktionen auditiert (Audit-First) + identitäts-/rollengeschützt (gleiche `CRED_ADMIN_EMAILS`-Logik wie ADR-007). **Betriebs-Vorbedingung Repo-Create:** GitHub-App braucht **Administration: Read & Write**. **Klon-Ziel** strikt innerhalb `WORKSPACE_DIR` (Path-Traversal-/Symlink-Schutz), Re-Clone nicht stillschweigend überschreibend. Detail-Architektur (SSH-/Git-Ausführungsweg, Token-Injektion ohne Persistenz) = `architekt`.
 - **DockerReader** — liest Preview-Container über die Docker-Engine. *Boundary:* einziger Docker-Zugriff.
 - **AccessGuard** — Middleware: validiert den Cloudflare-Access-JWT (`Cf-Access-Jwt-Assertion`) vor jeder `/api/*`- und WS-Anfrage; Fail-Fast beim Boot ohne Access-Konfig.
 - **Static server** — liefert das gebaute React-Frontend.
@@ -42,7 +43,8 @@
 
 ## Externe Schnittstellen
 - **Claude Code CLI** — interaktiv via PTY (`node-pty`). **Vertrag:** Start **ohne** `-p`/`--print`, **ohne** `ANTHROPIC_API_KEY`; Auth = Abo-OAuth (persistierte Credentials). Pre-granted Tool-Permissions (dokumentiert).
-- **GitHub** — REST/GraphQL via App-Token (read-only Nutzung hier).
+- **GitHub** — REST/GraphQL via App-Token: read-only über `GitHubReader`; **schreibend** über `GitHubWriter` (Repo anlegen via REST, Repo klonen via `git clone` in `WORKSPACE_DIR`). Installation-Token (~1h TTL) transient pro Aufruf gemintet.
+- **Workspace (Dateisystem)** — konfigurierbarer `WORKSPACE_DIR` (Env) auf dem persistenten Volume, uid-1000-schreibbar, beim Boot idempotent angelegt: Ziel lokaler Repo-Klone ([[github-repo-clone]]). Klon-Ziele strikt innerhalb `WORKSPACE_DIR`.
 - **Docker Engine** — Socket, read-only Nutzung (`ps`/`inspect`).
 - **Cloudflare Access** — JWT im Header `Cf-Access-Jwt-Assertion`; validiert gegen Team-Domain + AUD (Public Keys von `/cdn-cgi/access/certs`).
 
