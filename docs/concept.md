@@ -21,10 +21,19 @@ Einzel-Betreiber (Alex) + optional ein Outside-Collaborator. Desktop-Browser. Er
 - **Keine** Mensch-im-Loop-Genehmigung pro Aktion (bewusst *pre-granted*) — der Schutz liegt bei Cloudflare Access + den Sicherheits-Leitplanken (1-Job-Limit, Kill-Switch, Audit-Log).
 
 ## Scope
-Sechs Capabilities (Details je Capability in `docs/specs/<feature>.md`):
+Kern-Capabilities (Details je Capability in `docs/specs/<feature>.md`):
 1. **Terminal-Bridge** (`terminal-bridge`) — Backend hält **eine** interaktive Claude-Code-Session (Abo-OAuth) in einem PTY und streamt sie über WebSocket.
 2. **Terminal-Frontend** (`terminal-frontend`) — xterm.js-Live-Konsole im Browser.
 3. **Fabrik-Status** (`factory-status`) — Dashboard live aus GitHub-API + Docker.
 4. **Flow-Trigger** (`flow-trigger`) — Panels injizieren erlaubte Slash-Befehle in die Session.
 5. **Access & Leitplanken** (`access-and-guardrails`) — Access-Gate, 1-Job-Limit, Kill-Switch, Audit-Log (security-kritisch).
 6. **Deployment** (`deployment`) — Docker-Image, Cloudflare-`devgui`-Route, Bootstrap (claude-Install + Abo-OAuth + node-pty + Docker-Socket).
+
+### Scope-Erweiterung: Multi-View-Konsole (ab 2026-06)
+Die GUI wächst von einer reinen Fabrik-Oberfläche zu einer **Admin-Konsole mit vier Ansichten**, erreichbar über ein **Einstiegs-Panel mit vier Kacheln**:
+7. **App-Shell & Navigation** (`app-shell-navigation`) — Einstiegs-Panel (vier Kacheln) + deep-linkbare Navigation; bindet die bestehende Fabrik-Ansicht (Capabilities 2–4) als vierte Kachel ein. **Grundgerüst zuerst.**
+8. **GitHub-Ansicht** (`view-github`) — Repos/Boards/PRs der Org verwalten. *Heute nur Platzhalter-Gerüst; Detail-Funktionen folgen.*
+9. **VPS-Ansicht** (`view-vps`) — Server (z.B. Hetzner) anlegen/herunterfahren/erneuern. *Heute nur Platzhalter-Gerüst; benötigt später einen neuen externen Provider-Boundary.*
+10. **Cloudflare-Ansicht** (`view-cloudflare`) — Domäne + Tunnel verwalten. *Heute nur Platzhalter-Gerüst; benötigt später einen neuen Cloudflare-API-Boundary.*
+
+> **Hinweis zu Nicht-Ziel „kein eigener State-Store":** die VPS- und Cloudflare-Detail-Funktionen führen neue **schreibende** externe Integrationen (Provider-/Cloudflare-API) samt Secret-Handling ein. Das ist eine bewusste künftige Architektur-Erweiterung (eigene Anforderungen, Entscheidung beim `architekt`); ADR-005 (live statt Store) bleibt für den **Lese**-Status gültig.

@@ -18,7 +18,10 @@
 - **AccessGuard** — Middleware: validiert den Cloudflare-Access-JWT (`Cf-Access-Jwt-Assertion`) vor jeder `/api/*`- und WS-Anfrage; Fail-Fast beim Boot ohne Access-Konfig.
 - **Static server** — liefert das gebaute React-Frontend.
 
-**Frontend (React):** Terminal-Pane (xterm.js) · Status-Dashboard · Flow-Trigger-Panels · Job-/Kill-Steuerung.
+**Frontend (React):**
+- **App-Shell** — Einstiegs-Panel (vier Kacheln: GitHub · VPS · Cloudflare · Fabrik) + client-seitige Navigation (deep-linkbare Routen, Browser-Verlauf, Fallback auf Panel). Rendert je nach Route eine der vier Ansichten. *Boundary:* einziger Ort, der View-Routing kennt.
+- **Fabrik-Ansicht** — Terminal-Pane (xterm.js) · Status-Dashboard · Flow-Trigger-Panels · Job-/Kill-Steuerung (= bisheriges Frontend, jetzt als eine Ansicht eingebettet).
+- **GitHub- / VPS- / Cloudflare-Ansicht** — derzeit Platzhalter-Views (Grundgerüst); Detail-Funktionen + zugehörige Backend-Boundaries folgen als eigene Anforderungen. *Geplante neue Boundaries (noch nicht entschieden):* erweiterter `GitHubReader`/Schreibpfad, ein **VPS-Provider-Boundary** (z.B. Hetzner-API) und ein **Cloudflare-API-Boundary** — jeweils mit Secret-Handling, Audit + Identitäts-/Rollenschutz (Entscheidung: `architekt`).
 
 **Davor (Infra, nicht im Image):** Cloudflare **Access** (Identitäts-Gate) + Tunnel-Route `devgui.<domain>`.
 
