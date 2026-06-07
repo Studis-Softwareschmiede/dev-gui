@@ -79,5 +79,25 @@ else
   echo "[entrypoint] no ensure-gh-auth.sh found (plugin missing or path changed) — skipping gh-auth bootstrap." >&2
 fi
 
+# ── CRED_MASTER_KEY-Fallback: gleiches Bitwarden-Secret wie die GPG-Passphrase ─
+# Betreiber-Entscheid: der Master-Key für den Credential-Store (ADR-007) ist
+# DIESELBE Passphrase, die der Bootstrap aus Bitwarden
+# (Item: studis-softwareschmiede-gpg-passphrase) holt und die hier schon als
+# GPG_PASSPHRASE (Env) bzw. gemountete gpg.pass ankommt. Ein explizit gesetztes
+# CRED_MASTER_KEY/CRED_MASTER_KEY_FILE gewinnt immer (kein Überschreiben).
+# Der Wert wird NIE geloggt. scrypt+Salt im CredentialStore leiten daraus einen
+# eigenen AES-Key ab — GPG- und Store-Schlüssel bleiben kryptographisch getrennt.
+if [ -z "${CRED_MASTER_KEY:-}" ] && [ -z "${CRED_MASTER_KEY_FILE:-}" ]; then
+  if [ -n "${GPG_PASSPHRASE:-}" ]; then
+    export CRED_MASTER_KEY="$GPG_PASSPHRASE"
+    echo "[entrypoint] CRED_MASTER_KEY: Fallback auf GPG_PASSPHRASE (Bitwarden-Secret) aktiv."
+  elif [ -f "$HOME/.config/softwareschmiede/gpg.pass" ]; then
+    export CRED_MASTER_KEY_FILE="$HOME/.config/softwareschmiede/gpg.pass"
+    echo "[entrypoint] CRED_MASTER_KEY_FILE: Fallback auf gemountete gpg.pass aktiv."
+  else
+    echo "[entrypoint] Hinweis: kein CRED_MASTER_KEY(_FILE) und keine GPG_PASSPHRASE/gpg.pass — Credential-Store startet ohne Master-Key (Fail-Fast greift erst bei vorhandenen verschlüsselten Einträgen)."
+  fi
+fi
+
 # ── Start the server ──────────────────────────────────────────────────────────
 exec node server.js

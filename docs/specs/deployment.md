@@ -28,7 +28,7 @@ dev-gui als Container auf den VPS bringen, über Cloudflare als Dienst `devgui.<
 
 ## Verträge
 - Image: `ghcr.io/studis-softwareschmiede/dev-gui:latest`. Port: `8080`.
-- Env (Laufzeit): `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD` (Pflicht in prod), `GH_TOKEN` (oder App-Key-Quelle) für Status + Plugin-Clone, GPG-Passphrase (gemountete `gpg.pass` **oder** `GPG_PASSPHRASE`) für die Skill-Auth, Docker-Socket-Pfad (read-only).
+- Env (Laufzeit): `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD` (Pflicht in prod), `GH_TOKEN` (oder App-Key-Quelle) für Status + Plugin-Clone, GPG-Passphrase (gemountete `gpg.pass` **oder** `GPG_PASSPHRASE`) für die Skill-Auth, Docker-Socket-Pfad (read-only). **Credential-Store (ADR-007):** `CRED_MASTER_KEY`/`CRED_MASTER_KEY_FILE` — sind beide ungesetzt, fällt der Entrypoint automatisch auf `GPG_PASSPHRASE` bzw. die gemountete `gpg.pass` zurück (Betreiber-Entscheid: dasselbe Bitwarden-Secret `studis-softwareschmiede-gpg-passphrase`; scrypt+Salt leiten daraus einen eigenen AES-Key ab, GPG- und Store-Schlüssel bleiben kryptographisch getrennt).
 - Cloudflare: Tunnel-Ingress + Access-Policy für `devgui.<domain>`.
 
 ## Edge-Cases & Fehlerverhalten
