@@ -13,8 +13,10 @@ version: 1
 ## Zweck
 Der lokale Workspace-Pfad, in den GitHub-Repos geklont und unter dem sie gelistet/gepullt/gelöscht
 werden, ist heute die feste Env-Variable `WORKSPACE_DIR`. Diese Spec macht **einen** Workspace-Root
-über die **GitHub-Ansicht** ([[view-github]]) **konfigurierbar** (bei der Workspace-Übersicht, wo die
-lokalen Klone liegen): der Nutzer gibt **genau einen
+über die **Einstellungen-Ansicht** ([[settings-credentials]]) **konfigurierbar** — als zusätzlicher
+Wert in der **GitHub-Sektion** (unter den GitHub-App-Credentials App-ID/Installation-ID/Private Key),
+weil der Workspace-Pfad GitHub-Konfiguration ist (wohin die Repos geklont werden): der Nutzer gibt
+**genau einen
 Pfad** an; alle Repos werden — wie heute — als **direkte Unterordner** (Repo-Name) darunter geklont
 und gelistet. Der konfigurierte Wert wird **persistiert** und ist der **Effektivwert** für alle
 Workspace-Operationen ([[github-repo-clone]] · [[workspace-repos]]); ist nichts konfiguriert, gilt
@@ -45,12 +47,12 @@ Container **nicht sichtbar**, wenn er nicht gemountet ist. Daher gilt **Modell (
 > sicher). Modell (b/c) (freier Host-Pfad) ist ausgeschlossen.
 
 ## Verhalten
-1. In der **GitHub-Ansicht** gibt es — bei der Workspace-Übersicht (über den lokalen Klonen) — eine
-   **Sektion „Workspace"** mit **einem** Feld „Workspace-Pfad":
-   sie zeigt den **aktuell wirksamen** Workspace-Root (konfiguriert **oder** Env-Fallback, inkl.
+1. In der **Einstellungen-Ansicht** gibt es — in der **GitHub-Sektion**, unter den GitHub-App-Credentials
+   (App-ID/Installation-ID/Private Key) — den Eintrag „Workspace-Pfad":
+   er zeigt den **aktuell wirksamen** Workspace-Root (konfiguriert **oder** Env-Fallback, inkl.
    Quelle „konfiguriert" / „Default aus Env") und erlaubt, ihn zu **setzen/ändern** und auf den
-   Env-Default **zurückzusetzen** (Löschen der Konfiguration). *(Backend-Endpunkt bleibt
-   `/api/settings/workspace-path` — nur die UI-Sektion lebt in der GitHub-Ansicht statt in Settings.)*
+   Env-Default **zurückzusetzen** (Löschen der Konfiguration). *(Eigenes UI mit Pfad-Validierung/Quelle —
+   kein verschlüsseltes Credential-Feld; Backend-Endpunkt `/api/settings/workspace-path`.)*
 2. Beim **Setzen** wird der Pfad validiert: (a) liegt **innerhalb** der gemounteten Schranke
    `WORKSPACE_DIR` (Modell a, Path-Traversal-/Symlink-sicher), (b) **existiert** und ist ein
    **Verzeichnis**, (c) ist **schreibbar** (uid-1000). Schlägt eine Prüfung fehl, wird der Wert
@@ -78,7 +80,8 @@ Container **nicht sichtbar**, wenn er nicht gemountet ist. Daher gilt **Modell (
 > Listing.
 
 ## Acceptance-Kriterien
-- **AC1** — Eine Sektion „Workspace" **in der GitHub-Ansicht** (bei der Workspace-Übersicht) zeigt den
+- **AC1** — Ein Eintrag „Workspace-Pfad" **in der GitHub-Sektion der Einstellungen-Ansicht** (unter den
+  GitHub-App-Credentials) zeigt den
   **aktuell wirksamen** Workspace-Root inkl.
   Quelle (konfiguriert vs. Env-Default) und erlaubt, **einen** Pfad zu setzen, zu ändern und auf den
   Env-Default zurückzusetzen. (Read-Endpunkt liefert wirksamen Pfad + Quelle.)
@@ -169,7 +172,7 @@ Container **nicht sichtbar**, wenn er nicht gemountet ist. Daher gilt **Modell (
   die GUI — das ist Deploy-Zeit-Konfiguration, nicht Laufzeit.
 
 ## Abhängigkeiten
-- [[view-github]] (die Sektion „Workspace" lebt in der GitHub-Ansicht, bei der Workspace-Übersicht).
+- [[settings-credentials]] (der Eintrag „Workspace-Pfad" lebt in der GitHub-Sektion der Einstellungen, unter den GitHub-App-Credentials).
 - [[github-repo-clone]] (Klon nutzt künftig den Effektivwert statt direkt Env; Traversal-Schutzlinie).
 - [[workspace-repos]] (Listing/Pull/Löschen nutzen den Effektivwert).
 - [[access-and-guardrails]] (Access-Mauer + Audit + Identitätsauswertung).
