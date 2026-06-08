@@ -49,7 +49,7 @@ Eine einzige Backend-Boundary, über die dev-gui Server bei **mehreren Cloud-Pro
 ## Verträge
 > Pfade/Felder kanonisch; konkrete Provider-SDK-/REST-Endpunkte, Image-/Plan-Slugs und Auth-Header sind **Provider-Recherche-Touchpoints** für `architekt`/`coder` (jede Provider-API hat eigene Auth, Produktlinien und Lifecycle-Semantik — IONOS/Hostinger ggf. neuere/abweichende APIs).
 
-- **`VpsMachine` (Read-Model, provider-agnostisch):** `{ provider, serverId, name, status, ipv4?, ipv6?, region?, serverType?, createdAt? }`. `status` normalisiert auf `running | stopped | provisioning | error | unknown`.
+- **`VpsMachine` (Read-Model, provider-agnostisch):** `{ provider, serverId, name, status, ipv4?, ipv6?, region?, serverType?, createdAt? }`. `status` normalisiert auf `running | stopped | provisioning | error | unknown`. **Kanonisches Schema + Normalisierungsregeln: [[data-model]]** (fehlende Felder → `null`/`unknown`, nie Fehler; fixiert in `docs/architecture.md` ADR-009).
 - **`VpsProvider`-Vertrag (intern, je Adapter):** `listMachines()` → `VpsMachine[]`; `start(serverId)` / `stop(serverId)` → `{ result, reason? }`; `create({ name, region, serverType, image, userData, sshPublicKeys })` → `VpsMachine`; `capabilities()` → `{ list, start, stop, create }`.
 - **GET `/api/vps/providers`** → `[{ id, configured, capabilities }]`.
 - **GET `/api/vps/machines`** → `{ machines: VpsMachine[], providerErrors?: [{ provider, errorClass }] }`.
@@ -84,4 +84,5 @@ Eine einzige Backend-Boundary, über die dev-gui Server bei **mehreren Cloud-Pro
 - [[vps-ssh-key-assignment]] (SSH-Public-Keys für Create).
 - [[view-vps]] (UI-Konsument).
 - [[access-and-guardrails]] (Access-Mauer + Audit + Identität).
-- `docs/architecture.md` — **neuer `VpsProviderRegistry`/`VpsProvider`-Boundary ist vom `architekt` als ADR zu fixieren** (Provider-SDK-Wahl, Token-Injektion ohne Persistenz, Adapter-Struktur). Datenmodell `VpsMachine` ggf. `dba`-Touchpoint.
+- `docs/architecture.md` — **`VpsProviderRegistry`/`VpsProvider`-Boundary in ADR-009 fixiert** (SDK-frei via eingebautes `fetch` je Provider; Adapter-Layout `src/vps/`; Token-Injektion transient store-intern ohne Persistenz; cloud-init-Owner = `CloudInitBuilder`; Normalisierung `VpsMachine`).
+- [[data-model]] — kanonisches `VpsMachine`-Schema + Normalisierungsregeln.
