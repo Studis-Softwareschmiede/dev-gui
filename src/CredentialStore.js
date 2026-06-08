@@ -50,7 +50,7 @@ const scryptAsync = promisify(scrypt);
 export const CREDENTIAL_CATALOG = {
   github: ['app_id', 'installation_id', 'private_key'],
   cloudflare: ['api_token', 'account_id'],
-  vps: ['hetzner_api_token'],
+  vps: ['hetzner_api_token', 'ionos_api_token', 'hostinger_api_token'],
 };
 
 /** Maximale Länge eines Credential-Werts (Bytes). */

@@ -1,5 +1,11 @@
 # Coder Lessons — dev-gui (newest first)
 
+## 2026-06-08 — Katalog-Erweiterung: alle drei Schichten gleichzeitig nachpflegen (Backend-Katalog + Frontend-Konstante + Architektur-Doku)
+Wenn ein Credential-Katalog (CREDENTIAL_CATALOG im Backend) um neue Felder erweitert wird, sind immer drei Stellen atomisch nachzupflegen: (1) `src/CredentialStore.js` CREDENTIAL_CATALOG, (2) `client/src/SettingsView.jsx` KNOWN_FIELDS, (3) `docs/architecture.md` Komponenten-Beschreibung (z.B. Sektion-Name in der Settings-Ansicht-Aufzählung). Fehlt die Doku-Pflege in (3), weicht die bindende Schicht-2-Referenz vom beobachtbaren Verhalten ab und erzeugt einen Important-Befund im Review. Prüfliste: nach jeder Katalog-Änderung grep nach dem alten Feldnamen/Sektionsnamen in `docs/architecture.md` und `docs/specs/`.
+
+## 2026-06-08 — AC9 (und jede neue Spec-AC): Covers-Block in ALLEN betroffenen Testdateien nachpflegen
+Wenn eine neue Spec-AC (z.B. AC9) durch neue `describe`/`it`-Blöcke abgedeckt wird, muss der `Covers`-Block im Datei-Header JEDER betroffenen Testdatei (Backend- UND Frontend-Tests) um einen AC9-Eintrag erweitert werden. Fehlende Einträge erzeugen Important-Befunde — auch wenn die Tests korrekt und vollständig sind. Checkliste: nach dem Schreiben neuer `describe`-Blöcke, grep nach dem Header (`Covers`) in der Datei und prüfen ob die neue AC-Nummer erscheint.
+
 ## 2026-06-08 — Test-Header-Claim nach UI-Verschiebung: Covers-Block im Ziel-Test nachpflegen
 Wenn eine UI-Sektion (z.B. WorkspacePathSection) von einer View (Settings) in eine andere (GitHub) verschoben wird und die zugehörigen Tests mitgezogen werden, muss der `@file`-Header der Ziel-Testdatei einen neuen `Covers (workspace-path-config ...)` Abschnitt erhalten — die bloße Kommentarzeile am Anfang des neuen Testblocks (z.B. `// Workspace-Path — verschoben von SettingsView #89`) genügt nicht. Ohne den `Covers`-Eintrag im Datei-Header fehlt die Inventar-Aussage, die der Reviewer gegen die Spec-Claim-Regel prüft.
 

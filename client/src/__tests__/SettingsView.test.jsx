@@ -10,6 +10,7 @@
  *   AC5  — Misc-Sektion: benannte Schlüssel/Wert-Einträge
  *   AC6  — Rückkehr zum Panel (onNavigate)
  *   AC8  — Frontend-Validierung: leere Pflichtfelder → Fehlermeldung, kein Request
+ *   AC9  — VPS-Provider-Token (hetzner, ionos, hostinger): je Provider set/getMeta/delete write-only; Audit ohne Klartext
  *   NFR A11y — h1/h2, Touch-Targets ≥ 44 px, aria-describedby für Fehler
  *
  * Covers (settings-ssh-keys Stufe A):
@@ -58,6 +59,8 @@ const CREDS_WITH_GITHUB_APP_ID = [
   { integration: 'cloudflare', name: 'api_token', status: 'unset' },
   { integration: 'cloudflare', name: 'account_id', status: 'unset' },
   { integration: 'vps', name: 'hetzner_api_token', status: 'unset' },
+  { integration: 'vps', name: 'ionos_api_token', status: 'unset' },
+  { integration: 'vps', name: 'hostinger_api_token', status: 'unset' },
 ];
 
 /** Leere SSH-Keys-Liste. */
@@ -220,10 +223,10 @@ describe('SettingsView — Grundstruktur', () => {
     });
   });
 
-  it('rendert Hetzner / VPS-Sektion als h2', async () => {
+  it('rendert VPS-Provider-Sektion als h2', async () => {
     const { getByRole } = renderView();
     await waitFor(() => {
-      expect(getByRole('heading', { name: /hetzner/i })).toBeTruthy();
+      expect(getByRole('heading', { name: /vps-provider/i })).toBeTruthy();
     });
   });
 
@@ -1872,6 +1875,112 @@ describe('SettingsView — WS-A11y: Touch-Target + Fokusführung', () => {
         el.textContent.match(/workspace-pfad konnte nicht geladen werden/i),
       );
       expect(hasWsError).toBe(true);
+    });
+  });
+});
+
+// ── AC9 — VPS-Provider: je Provider ein eigener API-Token ────────────────────
+
+describe('SettingsView — AC9: VPS-Provider-Sektion mit drei Token-Feldern', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('AC9 — VPS-Sektion enthält Felder für alle drei Provider', async () => {
+    const { getByRole } = renderView(makeFetch({ getResponse: EMPTY_CREDS }));
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      expect(main.textContent).toMatch(/hetzner api-token/i);
+      expect(main.textContent).toMatch(/ionos api-token/i);
+      expect(main.textContent).toMatch(/hostinger api-token/i);
+    });
+  });
+
+  it('AC9 — alle drei VPS-Token-Felder zeigen "nicht gesetzt" bei leerem Store', async () => {
+    renderView(makeFetch({ getResponse: EMPTY_CREDS }));
+    await waitFor(() => {
+      const section = document.querySelector('[aria-labelledby="settings-section-vps"]');
+      expect(section).toBeTruthy();
+      const groups = section.querySelectorAll('[role="group"]');
+      expect(groups.length).toBe(3);
+      for (const g of groups) {
+        expect(g.textContent).toMatch(/nicht gesetzt/i);
+      }
+    });
+  });
+
+  it('AC9 — gesetzter IONOS-Token zeigt maskierten Status, kein Klartext', async () => {
+    const credsWithIonos = [
+      ...EMPTY_CREDS,
+      { integration: 'vps', name: 'ionos_api_token', status: 'set', masked: '•••• gesetzt', updatedAt: '2026-01-01T00:00:00.000Z' },
+    ];
+    const { getByRole } = renderView(makeFetch({ getResponse: credsWithIonos }));
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      expect(main.textContent).toContain('•••• gesetzt');
+      expect(main.textContent).not.toContain('my-ionos-secret');
+    });
+  });
+
+  it('AC9 — gesetzter Hostinger-Token zeigt "Ändern"- und "Löschen"-Button', async () => {
+    const credsWithHostinger = [
+      ...EMPTY_CREDS,
+      { integration: 'vps', name: 'hostinger_api_token', status: 'set', masked: '•••• gesetzt', updatedAt: '2026-01-01T00:00:00.000Z' },
+    ];
+    const { getAllByRole } = renderView(makeFetch({ getResponse: credsWithHostinger }));
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/hostinger api-token ändern/i))).toBe(true);
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/hostinger api-token löschen/i))).toBe(true);
+    });
+  });
+
+  it('AC9 — PUT für ionos_api_token feuert korrekten Endpunkt', async () => {
+    const fetchMock = makeFetch({ getResponse: EMPTY_CREDS });
+    globalThis.fetch = fetchMock;
+    const onNavigate = jest.fn();
+    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/ionos api-token setzen/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const setzenBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/ionos api-token setzen/i),
+      );
+      fireEvent.click(setzenBtn);
+    });
+
+    await waitFor(() => {
+      const pwdInputs = document.querySelectorAll('input[type="password"]');
+      expect(pwdInputs.length).toBeGreaterThan(0);
+    });
+
+    const pwdInputs = document.querySelectorAll('input[type="password"]');
+    await act(async () => {
+      if (pwdInputs[0]) {
+        fireEvent.change(pwdInputs[0], { target: { value: 'ionos-secret-token' } });
+      }
+    });
+
+    await act(async () => {
+      const saveBtns = getAllByRole('button').filter((b) => b.textContent.trim() === 'Speichern');
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    await waitFor(() => {
+      const putCalls = fetchMock.mock.calls.filter(
+        ([url, opts]) => (opts?.method ?? 'GET') === 'PUT' && url.includes('/vps/ionos_api_token'),
+      );
+      expect(putCalls.length).toBeGreaterThan(0);
+    });
+
+    // Klartext nicht im DOM (AC4)
+    await waitFor(() => {
+      const main = document.querySelector('[aria-label="Einstellungen-Ansicht"]');
+      if (main) expect(main.textContent).not.toContain('ionos-secret-token');
     });
   });
 });

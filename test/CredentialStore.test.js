@@ -10,6 +10,7 @@
  *   AC6  — Audit-Einträge enthalten keinen Klartext-Wert
  *   AC7  — Mutierende Endpunkte prüfen CRED_ADMIN_EMAILS (403 wenn nicht berechtigt)
  *   AC8  — Leere/ungültige Eingaben → 4xx, bestehender Wert bleibt erhalten
+ *   AC9  — VPS-Provider-Token (hetzner, ionos, hostinger): je Provider set/getMeta/delete write-only; Audit ohne Klartext
  *
  * Strategie:
  *   - CredentialStore mit tmpdir + injiziertem masterKey (kein Env nötig)
@@ -533,6 +534,181 @@ describe('credentialsRouter — AC7: AccessGuard (403 ohne Token)', () => {
     expect(res.status).toBe(403);
 
     await new Promise((r) => server.close(r));
+  });
+});
+
+// ── AC9 — VPS-Provider: drei eigene API-Token-Felder ─────────────────────────
+
+describe('CredentialStore — AC9: VPS-Provider-Token (hetzner, ionos, hostinger)', () => {
+  let dir, store;
+
+  beforeEach(async () => {
+    ({ store, dir } = await makeTmpStore());
+    process.env.DEV_NO_ACCESS = '1';
+  });
+
+  afterEach(async () => {
+    delete process.env.DEV_NO_ACCESS;
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('AC9 — CREDENTIAL_CATALOG.vps enthält alle drei Provider-Token', () => {
+    expect(CREDENTIAL_CATALOG.vps).toContain('hetzner_api_token');
+    expect(CREDENTIAL_CATALOG.vps).toContain('ionos_api_token');
+    expect(CREDENTIAL_CATALOG.vps).toContain('hostinger_api_token');
+    expect(CREDENTIAL_CATALOG.vps.length).toBe(3);
+  });
+
+  it('AC9 — resolveKey akzeptiert ionos_api_token', () => {
+    const r = resolveKey('vps', 'ionos_api_token');
+    expect(r.ok).toBe(true);
+    expect(r.storeKey).toBe('credentials/vps/ionos_api_token');
+  });
+
+  it('AC9 — resolveKey akzeptiert hostinger_api_token', () => {
+    const r = resolveKey('vps', 'hostinger_api_token');
+    expect(r.ok).toBe(true);
+    expect(r.storeKey).toBe('credentials/vps/hostinger_api_token');
+  });
+
+  it('AC9 — list() listet alle drei VPS-Felder (unset bei leerem Store)', async () => {
+    const items = await store.list();
+    const vpsItems = items.filter((i) => i.integration === 'vps');
+    expect(vpsItems.length).toBe(3);
+    const names = vpsItems.map((i) => i.name);
+    expect(names).toContain('hetzner_api_token');
+    expect(names).toContain('ionos_api_token');
+    expect(names).toContain('hostinger_api_token');
+    for (const item of vpsItems) {
+      expect(item.status).toBe('unset');
+    }
+  });
+
+  it('AC9 — set/getMeta/delete für ionos_api_token: write-only-Verhalten', async () => {
+    const meta = await store.set('credentials/vps/ionos_api_token', 'ionos-secret');
+    expect(meta.status).toBe('set');
+    expect(JSON.stringify(meta)).not.toContain('ionos-secret');
+
+    const getMeta = await store.getMeta('credentials/vps/ionos_api_token');
+    expect(getMeta.status).toBe('set');
+    expect(getMeta.masked).toBe('•••• gesetzt');
+    expect(JSON.stringify(getMeta)).not.toContain('ionos-secret');
+
+    await store.delete('credentials/vps/ionos_api_token');
+    const afterDelete = await store.getMeta('credentials/vps/ionos_api_token');
+    expect(afterDelete.status).toBe('unset');
+  });
+
+  it('AC9 — set/getMeta/delete für hostinger_api_token: write-only-Verhalten', async () => {
+    const meta = await store.set('credentials/vps/hostinger_api_token', 'hostinger-secret');
+    expect(meta.status).toBe('set');
+    expect(JSON.stringify(meta)).not.toContain('hostinger-secret');
+
+    const getMeta = await store.getMeta('credentials/vps/hostinger_api_token');
+    expect(getMeta.status).toBe('set');
+    expect(getMeta.masked).toBe('•••• gesetzt');
+    expect(JSON.stringify(getMeta)).not.toContain('hostinger-secret');
+
+    await store.delete('credentials/vps/hostinger_api_token');
+    const afterDelete = await store.getMeta('credentials/vps/hostinger_api_token');
+    expect(afterDelete.status).toBe('unset');
+  });
+
+  it('AC9 — alle drei VPS-Token unabhängig setzbar (keine gegenseitige Überschreibung)', async () => {
+    await store.set('credentials/vps/hetzner_api_token', 'hetzner-val');
+    await store.set('credentials/vps/ionos_api_token', 'ionos-val');
+    await store.set('credentials/vps/hostinger_api_token', 'hostinger-val');
+
+    expect(await store.getPlaintext('credentials/vps/hetzner_api_token')).toBe('hetzner-val');
+    expect(await store.getPlaintext('credentials/vps/ionos_api_token')).toBe('ionos-val');
+    expect(await store.getPlaintext('credentials/vps/hostinger_api_token')).toBe('hostinger-val');
+
+    // list() zeigt alle drei als 'set', ohne Klartext
+    const items = await store.list();
+    const vpsItems = items.filter((i) => i.integration === 'vps');
+    for (const item of vpsItems) {
+      expect(item.status).toBe('set');
+    }
+    expect(JSON.stringify(items)).not.toContain('hetzner-val');
+    expect(JSON.stringify(items)).not.toContain('ionos-val');
+    expect(JSON.stringify(items)).not.toContain('hostinger-val');
+  });
+
+  it('AC9 — at-rest verschlüsselt: kein Provider-Token-Klartext in der Store-Datei', async () => {
+    await store.set('credentials/vps/ionos_api_token', 'ionos-cleartext-secret');
+    await store.set('credentials/vps/hostinger_api_token', 'hostinger-cleartext-secret');
+    const { readFile: rf } = await import('node:fs/promises');
+    const { join: pjoin } = await import('node:path');
+    const raw = await rf(pjoin(dir, 'secrets.enc.json'), 'utf8');
+    expect(raw).not.toContain('ionos-cleartext-secret');
+    expect(raw).not.toContain('hostinger-cleartext-secret');
+  });
+});
+
+describe('credentialsRouter — AC9: VPS-Provider-Token über HTTP', () => {
+  let dir, store, testServer;
+
+  beforeEach(async () => {
+    process.env.DEV_NO_ACCESS = '1';
+    ({ store, dir } = await makeTmpStore());
+    testServer = await makeTestServer(store);
+  });
+
+  afterEach(async () => {
+    delete process.env.DEV_NO_ACCESS;
+    await testServer.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('AC9 — PUT ionos_api_token → 200, Response kein Klartext', async () => {
+    const res = await testServer.req('PUT', '/api/settings/credentials/vps/ionos_api_token', { value: 'ionos-api-secret' });
+    expect(res.status).toBe(200);
+    const data = JSON.parse(res.body);
+    expect(data.status).toBe('set');
+    expect(data.updatedAt).toBeTruthy();
+    expect(res.body).not.toContain('ionos-api-secret');
+  });
+
+  it('AC9 — PUT hostinger_api_token → 200, Response kein Klartext', async () => {
+    const res = await testServer.req('PUT', '/api/settings/credentials/vps/hostinger_api_token', { value: 'hostinger-api-secret' });
+    expect(res.status).toBe(200);
+    const data = JSON.parse(res.body);
+    expect(data.status).toBe('set');
+    expect(res.body).not.toContain('hostinger-api-secret');
+  });
+
+  it('AC9 — GET nach PUT ionos zeigt status:set für ionos, unset für andere VPS', async () => {
+    await testServer.req('PUT', '/api/settings/credentials/vps/ionos_api_token', { value: 'ionos-val' });
+    const res = await testServer.req('GET', '/api/settings/credentials');
+    expect(res.status).toBe(200);
+    const data = JSON.parse(res.body);
+    const ionos = data.find((i) => i.integration === 'vps' && i.name === 'ionos_api_token');
+    expect(ionos.status).toBe('set');
+    const hostinger = data.find((i) => i.integration === 'vps' && i.name === 'hostinger_api_token');
+    expect(hostinger.status).toBe('unset');
+    expect(res.body).not.toContain('ionos-val');
+  });
+
+  it('AC9 — DELETE ionos_api_token → 200, status:unset', async () => {
+    await store.set('credentials/vps/ionos_api_token', 'ionos-to-delete');
+    const res = await testServer.req('DELETE', '/api/settings/credentials/vps/ionos_api_token');
+    expect(res.status).toBe(200);
+    const data = JSON.parse(res.body);
+    expect(data.status).toBe('unset');
+  });
+
+  it('AC9 — DELETE hostinger_api_token → 200, idempotent', async () => {
+    const res = await testServer.req('DELETE', '/api/settings/credentials/vps/hostinger_api_token');
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body).status).toBe('unset');
+  });
+
+  it('AC9 — Audit-Eintrag für ionos_api_token ohne Klartext', async () => {
+    await testServer.req('PUT', '/api/settings/credentials/vps/ionos_api_token', { value: 'ionos-audit-test' });
+    const entries = testServer.audit.getAll();
+    const entry = entries[entries.length - 1];
+    expect(entry.command).toMatch(/credential:set:credentials\/vps\/ionos_api_token/);
+    expect(JSON.stringify(entry)).not.toContain('ionos-audit-test');
   });
 });
 
