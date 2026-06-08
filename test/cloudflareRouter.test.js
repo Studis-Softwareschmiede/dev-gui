@@ -4,13 +4,17 @@
  * Covers:
  *   AC4  — GET /api/cloudflare/zones → zones list
  *   AC4  — GET /api/cloudflare/zones/:zoneId/tunnels → tunnels + routes
+ *   AC5  — protected Route: DELETE → 422 protected-resource (ohne Mutation)
+ *   AC6  — type-to-confirm: fehlender/falscher confirm → 422 confirmation-required
  *   AC8  — Token nie in HTTP-Response
+ *   AC9  — CRED_ADMIN_EMAILS-Rolle → 403; Audit-First; Happy-Path; protected-resource
  *   Degradation — zones-Fehler → errors[] in Response, kein 500
  *   Nicht-konfiguriert → { configured: false }
- *   Invalid zoneId → 422
+ *   Invalid zoneId/tunnelId/hostname → 422
  *
  * Strategy:
  *   - CloudflareApi wird als Stub injiziert
+ *   - AuditStore wird als Stub injiziert
  *   - Express-Router direkt instantiiert und mit supertest getestet
  */
 
@@ -21,11 +25,24 @@ import { CloudflareApiError } from '../src/cloudflare/CloudflareApi.js';
 
 // ── Helper ─────────────────────────────────────────────────────────────────────
 
-function makeApp(apiStub) {
+function makeApp(apiStub, auditStub, identity = { email: 'admin@example.com' }) {
   const app = express();
   app.use(express.json());
-  app.use(cloudflareRouter(apiStub));
+  // Simulate AccessGuard — inject identity
+  app.use((req, _res, next) => {
+    req.identity = identity;
+    next();
+  });
+  app.use(cloudflareRouter(apiStub, auditStub));
   return app;
+}
+
+function makeAuditStub() {
+  const records = [];
+  return {
+    record: (entry) => { records.push(entry); },
+    getRecords: () => records,
+  };
 }
 
 async function request(app, method, path, body) {
@@ -34,12 +51,15 @@ async function request(app, method, path, body) {
     const server = http.createServer(app);
     server.listen(0, () => {
       const port = server.address().port;
+      const bodyStr = body !== undefined ? JSON.stringify(body) : '';
+      const headers = { 'Content-Type': 'application/json' };
+      if (bodyStr) headers['Content-Length'] = Buffer.byteLength(bodyStr).toString();
       const options = {
         hostname: 'localhost',
         port,
         path,
         method: method.toUpperCase(),
-        headers: { 'Content-Type': 'application/json' },
+        headers,
       };
       const req = http.request(options, (res) => {
         let data = '';
@@ -52,7 +72,7 @@ async function request(app, method, path, body) {
         });
       });
       req.on('error', reject);
-      if (body) req.write(JSON.stringify(body));
+      if (bodyStr) req.write(bodyStr);
       req.end();
     });
   });
@@ -230,5 +250,242 @@ describe('GET /api/cloudflare/zones/:zoneId/tunnels', () => {
     expect(res.body.routes).toHaveLength(1);  // only ok-tunnel routes
     expect(res.body.errors).toHaveLength(1);  // error for tun-err
     expect(res.body.errors[0].scope).toBe('tunnel:tun-err');
+  });
+});
+
+// ── Constants for DELETE tests ─────────────────────────────────────────────────
+
+const TUNNEL_ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+const HOSTNAME = 'app.example.com';
+
+// ── Tests: DELETE /api/cloudflare/tunnels/:tunnelId/routes/:hostname ──────────
+
+describe('DELETE /api/cloudflare/tunnels/:tunnelId/routes/:hostname', () => {
+
+  it('422 bei ungültiger tunnelId', async () => {
+    const apiStub = { isProtected: () => false, removeRoute: async () => ({ result: 'ok' }) };
+    const app = makeApp(apiStub);
+    const res = await request(app, 'DELETE', '/api/cloudflare/tunnels/not-a-uuid/routes/app.example.com', { confirm: 'app.example.com' });
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe('invalid-tunnel-id');
+  });
+
+  it('422 bei ungültigem hostname (Sonderzeichen)', async () => {
+    const apiStub = { isProtected: () => false, removeRoute: async () => ({ result: 'ok' }) };
+    const app = makeApp(apiStub);
+    const res = await request(app, 'DELETE', `/api/cloudflare/tunnels/${TUNNEL_ID}/routes/../../etc/passwd`, { confirm: '../../etc/passwd' });
+    expect([404, 422]).toContain(res.status);
+  });
+
+  it('ADR-011 Schritt 1: 422 protected-resource vor confirm/Rolle/Audit (keine Mutation)', async () => {
+    let removeCalled = false;
+    const audit = makeAuditStub();
+    const apiStub = {
+      isProtected: (h) => h === HOSTNAME,
+      removeRoute: async () => { removeCalled = true; return { result: 'ok' }; },
+    };
+    const app = makeApp(apiStub, audit);
+
+    const res = await request(app, 'DELETE', `/api/cloudflare/tunnels/${TUNNEL_ID}/routes/${HOSTNAME}`, { confirm: HOSTNAME });
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe('protected-resource');
+    expect(removeCalled).toBe(false);          // keine Mutation
+    expect(audit.getRecords()).toHaveLength(0); // kein Audit (protected geht VOR Audit)
+  });
+
+  it('ADR-011 Schritt 2: 422 confirmation-required bei fehlendem confirm (keine Mutation)', async () => {
+    let removeCalled = false;
+    const apiStub = {
+      isProtected: () => false,
+      removeRoute: async () => { removeCalled = true; return { result: 'ok' }; },
+    };
+    const app = makeApp(apiStub);
+
+    const res = await request(app, 'DELETE', `/api/cloudflare/tunnels/${TUNNEL_ID}/routes/${HOSTNAME}`, {});
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe('confirmation-required');
+    expect(removeCalled).toBe(false);
+  });
+
+  it('ADR-011 Schritt 2: 422 confirmation-required bei falschem confirm', async () => {
+    let removeCalled = false;
+    const apiStub = {
+      isProtected: () => false,
+      removeRoute: async () => { removeCalled = true; return { result: 'ok' }; },
+    };
+    const app = makeApp(apiStub);
+
+    const res = await request(app, 'DELETE', `/api/cloudflare/tunnels/${TUNNEL_ID}/routes/${HOSTNAME}`, { confirm: 'wrong.host.com' });
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe('confirmation-required');
+    expect(removeCalled).toBe(false);
+  });
+
+  it('ADR-011 Schritt 3: 403 bei fehlender Admin-Rolle wenn CRED_ADMIN_EMAILS gesetzt', async () => {
+    const originalEnv = process.env.CRED_ADMIN_EMAILS;
+    process.env.CRED_ADMIN_EMAILS = 'other@example.com';
+    let removeCalled = false;
+    const apiStub = {
+      isProtected: () => false,
+      removeRoute: async () => { removeCalled = true; return { result: 'ok' }; },
+    };
+    // identity is admin@example.com (not in CRED_ADMIN_EMAILS)
+    const app = makeApp(apiStub, makeAuditStub(), { email: 'admin@example.com' });
+
+    const res = await request(app, 'DELETE', `/api/cloudflare/tunnels/${TUNNEL_ID}/routes/${HOSTNAME}`, { confirm: HOSTNAME });
+    expect(res.status).toBe(403);
+    expect(removeCalled).toBe(false);
+
+    process.env.CRED_ADMIN_EMAILS = originalEnv ?? '';
+    if (originalEnv === undefined) delete process.env.CRED_ADMIN_EMAILS;
+  });
+
+  it('ADR-011 Schritt 4: Audit-First — Audit-Eintrag vor Mutation geschrieben', async () => {
+    const auditOrder = [];
+    const audit = {
+      record: (_entry) => { auditOrder.push('audit'); },
+    };
+    let mutationCalled = false;
+    const apiStub = {
+      isProtected: () => false,
+      removeRoute: async () => { auditOrder.push('mutation'); mutationCalled = true; return { result: 'ok' }; },
+    };
+    const app = makeApp(apiStub, audit);
+
+    const res = await request(app, 'DELETE', `/api/cloudflare/tunnels/${TUNNEL_ID}/routes/${HOSTNAME}`, { confirm: HOSTNAME });
+    expect(res.status).toBe(200);
+    expect(auditOrder).toEqual(['audit', 'mutation']);
+    expect(mutationCalled).toBe(true);
+  });
+
+  it('Audit-Write-Fehler → 500 ohne Mutation', async () => {
+    const failAudit = { record: () => { throw new Error('audit write failed'); } };
+    let removeCalled = false;
+    const apiStub = {
+      isProtected: () => false,
+      removeRoute: async () => { removeCalled = true; return { result: 'ok' }; },
+    };
+    const app = makeApp(apiStub, failAudit);
+
+    const res = await request(app, 'DELETE', `/api/cloudflare/tunnels/${TUNNEL_ID}/routes/${HOSTNAME}`, { confirm: HOSTNAME });
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('audit-failed');
+    expect(removeCalled).toBe(false);
+  });
+
+  it('Happy-Path: 200 { result: "ok" } nach erfolgreicher Löschung', async () => {
+    const audit = makeAuditStub();
+    const apiStub = {
+      isProtected: () => false,
+      removeRoute: async () => ({ result: 'ok' }),
+    };
+    const app = makeApp(apiStub, audit);
+
+    const res = await request(app, 'DELETE', `/api/cloudflare/tunnels/${TUNNEL_ID}/routes/${HOSTNAME}`, { confirm: HOSTNAME });
+    expect(res.status).toBe(200);
+    expect(res.body.result).toBe('ok');
+  });
+
+  it('Token erscheint nicht in DELETE-Response', async () => {
+    const TOKEN = 'super-secret-token-12345';
+    const apiStub = {
+      isProtected: () => false,
+      removeRoute: async () => ({ result: 'ok' }),
+    };
+    const app = makeApp(apiStub);
+    const res = await request(app, 'DELETE', `/api/cloudflare/tunnels/${TUNNEL_ID}/routes/${HOSTNAME}`, { confirm: HOSTNAME });
+    const bodyStr = JSON.stringify(res.body);
+    expect(bodyStr).not.toContain('Bearer');
+    expect(bodyStr).not.toContain(TOKEN);
+  });
+
+  it('Cloudflare-API-Fehler → passendes HTTP-Status zurückgegeben', async () => {
+    const apiStub = {
+      isProtected: () => false,
+      removeRoute: async () => {
+        throw new CloudflareApiError('auth failed', 'cloudflare-auth-failed', 502);
+      },
+    };
+    const app = makeApp(apiStub);
+
+    const res = await request(app, 'DELETE', `/api/cloudflare/tunnels/${TUNNEL_ID}/routes/${HOSTNAME}`, { confirm: HOSTNAME });
+    expect(res.status).toBe(502);
+    expect(res.body.error).toBe('cloudflare-auth-failed');
+  });
+});
+
+// ── Tests: DELETE /api/cloudflare/tunnels/:tunnelId ───────────────────────────
+
+describe('DELETE /api/cloudflare/tunnels/:tunnelId', () => {
+
+  it('422 bei ungültiger tunnelId', async () => {
+    const apiStub = { isProtected: () => false, deleteTunnel: async () => ({ result: 'ok' }) };
+    const app = makeApp(apiStub);
+    const res = await request(app, 'DELETE', '/api/cloudflare/tunnels/not-a-uuid', { confirm: 'my-tunnel' });
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe('invalid-tunnel-id');
+  });
+
+  it('422 confirmation-required bei fehlendem confirm', async () => {
+    const apiStub = { isProtected: () => false, deleteTunnel: async () => ({ result: 'ok' }) };
+    const app = makeApp(apiStub);
+    const res = await request(app, 'DELETE', `/api/cloudflare/tunnels/${TUNNEL_ID}`, {});
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe('confirmation-required');
+  });
+
+  it('ADR-011 Schranken-Reihenfolge: protected-resource VOR confirmation-required (isProtected=true, confirm fehlt)', async () => {
+    // Regression-Test: geschützter Tunnel + fehlender confirm → protected-resource (NICHT confirmation-required).
+    // Sichert, dass der LockoutGuard (Step 1) IMMER vor dem confirm-Pflicht-Check (Step 2) greift.
+    let deleteCalled = false;
+    const apiStub = {
+      isProtected: () => true,
+      deleteTunnel: async () => { deleteCalled = true; return { result: 'ok' }; },
+    };
+    const app = makeApp(apiStub);
+
+    const res = await request(app, 'DELETE', `/api/cloudflare/tunnels/${TUNNEL_ID}`, {});
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe('protected-resource');
+    expect(deleteCalled).toBe(false);
+  });
+
+  it('422 protected-resource wenn confirm ein protected hostname ist', async () => {
+    let deleteCalled = false;
+    const apiStub = {
+      isProtected: (t) => t === 'devgui.example.com',
+      deleteTunnel: async () => { deleteCalled = true; return { result: 'ok' }; },
+    };
+    const app = makeApp(apiStub);
+
+    const res = await request(app, 'DELETE', `/api/cloudflare/tunnels/${TUNNEL_ID}`, { confirm: 'devgui.example.com' });
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe('protected-resource');
+    expect(deleteCalled).toBe(false);
+  });
+
+  it('Audit-First: Audit-Eintrag vor deleteTunnel', async () => {
+    const order = [];
+    const audit = { record: () => order.push('audit') };
+    const apiStub = {
+      isProtected: () => false,
+      deleteTunnel: async () => { order.push('mutation'); return { result: 'ok' }; },
+    };
+    const app = makeApp(apiStub, audit);
+
+    await request(app, 'DELETE', `/api/cloudflare/tunnels/${TUNNEL_ID}`, { confirm: 'my-tunnel' });
+    expect(order).toEqual(['audit', 'mutation']);
+  });
+
+  it('Happy-Path: 200 { result: "ok" }', async () => {
+    const apiStub = {
+      isProtected: () => false,
+      deleteTunnel: async () => ({ result: 'ok' }),
+    };
+    const app = makeApp(apiStub, makeAuditStub());
+
+    const res = await request(app, 'DELETE', `/api/cloudflare/tunnels/${TUNNEL_ID}`, { confirm: 'my-tunnel' });
+    expect(res.status).toBe(200);
+    expect(res.body.result).toBe('ok');
   });
 });

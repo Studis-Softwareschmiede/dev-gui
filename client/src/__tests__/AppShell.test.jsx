@@ -243,9 +243,9 @@ describe('AppShell — AC2: Factory view', () => {
 
 describe('AppShell — AC3: Placeholder views', () => {
   // GitHub-Ansicht ist kein Platzhalter mehr — es enthält ein Anlege-Formular (github-repo-create).
+  // Cloudflare-Ansicht ist kein Platzhalter mehr — view-cloudflare #108 implementiert.
   const placeholders = [
-    { tile: /^vps/i,    view: '#/vps',    label: /vps-ansicht/i },
-    { tile: /^cloudflare/i, view: '#/cloudflare', label: /cloudflare-ansicht/i },
+    { tile: /^vps/i, view: '#/vps', label: /vps-ansicht/i },
   ];
 
   for (const { tile, view, label } of placeholders) {
@@ -275,6 +275,21 @@ describe('AppShell — AC3: Placeholder views', () => {
       });
     });
   }
+
+  // Cloudflare: kein Platzhalter mehr — zeigt Inventar-UI (view-cloudflare #108, AC5–AC9)
+  it('clicking #/cloudflare tile renders Cloudflare inventory view', async () => {
+    window.location.hash = '';
+    const { getByRole } = render(React.createElement(AppShell));
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /^cloudflare/i }));
+    });
+
+    await waitFor(() => {
+      expect(window.location.hash).toBe('#/cloudflare');
+      expect(getByRole('main', { name: /cloudflare-ansicht/i })).toBeTruthy();
+    });
+  });
 
   // GitHub: kein Platzhalter — zeigt Repo-Liste + Andockpunkt „Neues Repo" (github-repos-overview AC4)
   it('clicking #/github tile renders GitHub view with repo list and new-repo anchor', async () => {
