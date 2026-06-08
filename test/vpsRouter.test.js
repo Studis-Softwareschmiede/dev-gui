@@ -352,12 +352,95 @@ describe('vpsRouter — AC5/AC6: start/stop', () => {
     expect(res.status).toBe(422);
   });
 
-  it('ungültige serverId (Sonderzeichen) → 422', async () => {
+  it('ungültige serverId (Path-Traversal ".." via *splat) → 422', async () => {
     ts = await makeTestServer();
     const res = await ts.req('POST', '/api/vps/machines/hetzner/../../etc/passwd/start');
-    // Express parst den Pfad, aber serverId enthält keinen "/" — wird als 404 interpretiert
-    // Wir prüfen nur, dass kein 200 zurückkommt
-    expect(res.status).not.toBe(200);
+    // *splat captures "../../etc/passwd"; validateServerId rejects ".." → 422
+    expect(res.status).toBe(422);
+  });
+});
+
+// ── AC5/Finding 1: IONOS composite serverId mit "/" durch HTTP-Schicht ───────
+
+describe('vpsRouter — AC5/Finding-1: IONOS composite serverId routing', () => {
+  let ts;
+  let capturedStartServerId;
+  let capturedStopServerId;
+
+  beforeEach(() => {
+    process.env.DEV_NO_ACCESS = '1';
+    capturedStartServerId = null;
+    capturedStopServerId = null;
+  });
+
+  afterEach(async () => {
+    delete process.env.DEV_NO_ACCESS;
+    if (ts) await ts.close();
+    ts = null;
+  });
+
+  it('start mit IONOS composite serverId (dc-uuid/srv-uuid) → 200 { result: "ok" }', async () => {
+    const registry = {
+      async listProviders() { return []; },
+      async listAllMachines() { return { machines: [] }; },
+      async start(_provider, serverId) {
+        capturedStartServerId = serverId;
+        return { result: 'ok' };
+      },
+      async stop(_provider, serverId) {
+        capturedStopServerId = serverId;
+        return { result: 'ok' };
+      },
+      async create() { return {}; },
+    };
+    ts = await makeTestServer({ registry });
+
+    // Composite ID with literal "/" in URL path — no URL encoding needed (Express 5 *splat)
+    const res = await ts.req('POST', '/api/vps/machines/ionos/dc-aaa-111/srv-bbb-222/start');
+    expect(res.status).toBe(200);
+    const data = JSON.parse(res.body);
+    expect(data.result).toBe('ok');
+    // Registry must receive the reconstructed composite ID
+    expect(capturedStartServerId).toBe('dc-aaa-111/srv-bbb-222');
+  });
+
+  it('stop mit IONOS composite serverId (dc-uuid/srv-uuid) → 200 { result: "ok" }', async () => {
+    const registry = {
+      async listProviders() { return []; },
+      async listAllMachines() { return { machines: [] }; },
+      async start() { return { result: 'ok' }; },
+      async stop(_provider, serverId) {
+        capturedStopServerId = serverId;
+        return { result: 'ok' };
+      },
+      async create() { return {}; },
+    };
+    ts = await makeTestServer({ registry });
+
+    const res = await ts.req('POST', '/api/vps/machines/ionos/dc-aaa-111/srv-bbb-222/stop');
+    expect(res.status).toBe(200);
+    const data = JSON.parse(res.body);
+    expect(data.result).toBe('ok');
+    expect(capturedStopServerId).toBe('dc-aaa-111/srv-bbb-222');
+  });
+
+  it('start mit einfacher (Hetzner) serverId ohne Slash → 200 { result: "ok" }', async () => {
+    // Regression: plain serverIds (no slash) still work after the *splat routing change
+    const registry = {
+      async listProviders() { return []; },
+      async listAllMachines() { return { machines: [] }; },
+      async start(_provider, serverId) {
+        capturedStartServerId = serverId;
+        return { result: 'ok' };
+      },
+      async stop() { return { result: 'ok' }; },
+      async create() { return {}; },
+    };
+    ts = await makeTestServer({ registry });
+
+    const res = await ts.req('POST', '/api/vps/machines/hetzner/12345/start');
+    expect(res.status).toBe(200);
+    expect(capturedStartServerId).toBe('12345');
   });
 });
 
