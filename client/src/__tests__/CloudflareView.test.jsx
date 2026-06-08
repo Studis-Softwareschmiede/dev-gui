@@ -1,7 +1,7 @@
 /**
  * CloudflareView.test.jsx — Unit tests for the CloudflareView component (v2, Capability A).
  *
- * Covers (view-cloudflare spec AC1–AC9):
+ * Covers (view-cloudflare spec AC1–AC11):
  *   AC1  — Title "Cloudflare" as semantic <h1>; main landmark present.
  *   AC2  — Back-to-panel navigation (onNavigate).
  *   AC3  — Onboarding hint when not configured; no API call when configured=false.
@@ -15,6 +15,8 @@
  *   AC9  — 403 → „keine Berechtigung"; protected-resource → „geschützt";
  *          confirmation-required → „Bestätigung".
  *   A11y — <h1>; aria-label; Buttons mit aria-label ≥44px; Fehler role=alert.
+ *   AC10 — ReconciliationSection: Reconcile-Statusmeldungen + letzter Report read-only angezeigt.
+ *   AC11 — „Jetzt abgleichen"-Trigger löst manuellen Reconcile-Lauf aus + Re-Fetch.
  *
  * @jest-environment jsdom
  */

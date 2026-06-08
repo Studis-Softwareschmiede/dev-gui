@@ -9,13 +9,13 @@
  *   - Scheduler: node-internal midnight timer (UTC) in the always-on dev-gui process (ADR-002).
  *     No external cron, no new dependency. Skip-if-running lock prevents overlapping runs.
  *   - Per-VPS reconciliation:
- *     1. VpsDockerControl.ps() → managed containers (with cloudflare.tunnel-hostname label)
+ *     1. VpsDockerControl.psAll() → managed containers (with cloudflare.tunnel-hostname label)
  *        and unmanaged containers (without the label, only reported).
  *     2. CloudflareApi.listRoutes(tunnelId) → current routes.
  *     3. Orphaned routes (no managed container, not protected) → remove via CloudflareApi (Audit-First).
  *     4. Managed containers without route (not protected) → add route via DeployOrchestrator
  *        addRouteOnly() (Audit-First; reuses shared path, no new Cloudflare mutation code here).
- *   - Fail-closed: if ps() fails → skip that VPS entirely (neither delete nor heal).
+ *   - Fail-closed: if psAll() fails → skip that VPS entirely (neither delete nor heal).
  *   - Ambiguous binding (two managed containers → same hostname) → not healed, flagged ambiguous.
  *   - Degradation per VPS/provider: errors don't abort the overall run.
  *   - ReconcileReport + ReconcileNotice: persisted via AuditStore (kein neuer Store, ADR-005-Linie).
@@ -34,7 +34,7 @@
  * AC5b — protected hostname on managed container → protectedSkipped, not healed.
  * AC5c — unmanaged container → only reportedUnmanaged, never healed.
  * AC6  — VPS/provider failures degrade, don't abort.
- * AC7  — ps() failure → fail-closed; ambiguous binding → ambiguous, not healed.
+ * AC7  — psAll() failure → fail-closed; ambiguous binding → ambiguous, not healed.
  * AC8  — ReconcileReport per run; GET endpoints; Audit-First.
  * AC8b — ReconcileNotice per action; GET endpoint.
  * AC9  — LockoutGuard-Hard-Block + Audit-First via shared ADR-012 path.
@@ -248,7 +248,7 @@ export class ReconciliationJob {
   // ── Per-VPS reconciliation ─────────────────────────────────────────────────
 
   /**
-   * Reconcile a single VPS: ps() + listRoutes() → diff → heal/delete.
+   * Reconcile a single VPS: psAll() + listRoutes() → diff → heal/delete.
    *
    * @param {{ vpsId: string, vps: object, tunnelId: string }} config
    * @returns {Promise<VpsReconcileResult>}
