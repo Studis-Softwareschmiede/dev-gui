@@ -1,6 +1,5 @@
 /**
- * SettingsView.jsx — Settings-Ansicht mit Credential- und SSH-Key-Formularen.
- * Die Workspace-Pfad-Sektion lebt seit #89 in der GitHub-Ansicht (GitHubView.jsx).
+ * SettingsView.jsx — Settings-Ansicht mit Credential-, SSH-Key- und Workspace-Pfad-Formularen.
  *
  * Credentials (settings-credentials):
  *   AC1  — Je Integrations-Sektion: Credential-Felder mit Status (gesetzt/nicht gesetzt),
@@ -11,6 +10,14 @@
  *   AC5  — „Weitere Credentials" (misc) als benannte Schlüssel/Wert-Einträge.
  *   AC6  — Rückkehr zum Panel möglich.
  *   AC8  — Eingabe-Validierung im Frontend (Pflichtfeld, Längenlimit) + klare Fehlermeldung.
+ *
+ * workspace-path-config (AC1 + UI-Anteil AC3 — #92):
+ *   WS-AC1  — Eintrag „Workspace-Pfad" in der GitHub-Sektion (unter den GitHub-App-Credentials):
+ *             zeigt wirksamen Pfad inkl. Quelle (konfiguriert / Env-Default);
+ *             erlaubt setzen/ändern (PUT) und zurücksetzen (DELETE).
+ *   WS-AC3  — 4xx/422 → feldzugeordnete Fehlermeldung (role=alert); alter Wert bleibt sichtbar.
+ *   A11y    — label/htmlFor, aria-describedby, role=status/alert, aria-busy,
+ *             Touch-Target ≥44px, Fokusführung via activeElement, Kontrast #9ca3af.
  *
  * SSH-Keys (settings-ssh-keys Stufe A + B):
  *   SSH-AC1  — Je Benutzer-Label: Public-Key hinterlegen/anzeigen/ändern (vollständig sichtbar).
@@ -127,6 +134,51 @@ async function deleteCredential(integration, name) {
   return data;
 }
 
+// ── Workspace-Path-API-Helfer ─────────────────────────────────────────────────
+
+/**
+ * GET /api/settings/workspace-path
+ * @param {typeof fetch} [fetchImpl]
+ * @returns {Promise<{ effectivePath: string|null, source: "configured"|"env-default", mountRoot: string }>}
+ */
+async function fetchWorkspacePath(fetchImpl) {
+  const fn = fetchImpl ?? globalThis.fetch.bind(globalThis);
+  const res = await fn('/api/settings/workspace-path');
+  if (!res.ok) throw new Error(`Workspace-Pfad laden fehlgeschlagen (${res.status})`);
+  return res.json();
+}
+
+/**
+ * PUT /api/settings/workspace-path
+ * @param {string} path
+ * @param {typeof fetch} [fetchImpl]
+ * @returns {Promise<{ effectivePath: string, source: "configured" }>}
+ */
+async function putWorkspacePath(path, fetchImpl) {
+  const fn = fetchImpl ?? globalThis.fetch.bind(globalThis);
+  const res = await fn('/api/settings/workspace-path', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error ?? `Speichern fehlgeschlagen (${res.status})`);
+  return data;
+}
+
+/**
+ * DELETE /api/settings/workspace-path
+ * @param {typeof fetch} [fetchImpl]
+ * @returns {Promise<{ effectivePath: string|null, source: "env-default" }>}
+ */
+async function deleteWorkspacePath(fetchImpl) {
+  const fn = fetchImpl ?? globalThis.fetch.bind(globalThis);
+  const res = await fn('/api/settings/workspace-path', { method: 'DELETE' });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error ?? `Zurücksetzen fehlgeschlagen (${res.status})`);
+  return data;
+}
+
 // ── SSH-Key-API-Helfer ────────────────────────────────────────────────────────
 
 async function fetchSshKeys() {
@@ -175,6 +227,214 @@ async function provisionSshKey(user, { host, port, targetUser, hostFingerprint }
   const data = await res.json();
   // Für Provision: HTTP-Fehler geben result:'error' + reason zurück — immer JSON
   return { ...data, httpStatus: res.status };
+}
+
+// ── WorkspacePathSection ──────────────────────────────────────────────────────
+
+/**
+ * Sektion „Workspace-Pfad" — zeigt den wirksamen Workspace-Root inkl. Quelle und erlaubt
+ * setzen/ändern (PUT) und zurücksetzen (DELETE) auf den Env-Default.
+ * Platziert in der GitHub-Sektion der Einstellungen, unter den GitHub-App-Credentials.
+ *
+ * WS-AC1: Anzeige wirksamer Pfad + Quelle; Setzen/Ändern/Zurücksetzen.
+ * WS-AC3 (UI): 4xx/422 → feldzugeordnete Fehlermeldung; alter Wert bleibt sichtbar.
+ * A11y: label/htmlFor, aria-describedby, role=status/alert, aria-busy, Fokusführung.
+ *
+ * @param {{
+ *   effectivePath: string|null,
+ *   source: "configured"|"env-default",
+ *   mountRoot: string,
+ *   onReload: () => Promise<void>,
+ *   fetchFn?: typeof fetch,
+ * }} props
+ */
+function WorkspacePathSection({ effectivePath, source, mountRoot, onReload, fetchFn }) {
+  const [editing, setEditing] = useState(false);
+  const [inputVal, setInputVal] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [resetting, setResetting] = useState(false);
+  const [error, setError] = useState(null);
+  const [successMsg, setSuccessMsg] = useState(null);
+  const inputRef = useRef(null);
+  const successRef = useRef(null);
+  const ERROR_ID = 'workspace-path-error';
+  const SUCCESS_ID = 'workspace-path-success';
+
+  // Fokus auf Input wenn Bearbeiten-Modus öffnet
+  useEffect(() => {
+    if (editing && inputRef.current) {
+      inputRef.current.focus();
+    }
+  }, [editing]);
+
+  // Fokus auf Erfolgsmeldung sobald sie gerendert wird (nach State-Update + Re-render)
+  const [pendingFocusSuccess, setPendingFocusSuccess] = useState(false);
+  useEffect(() => {
+    if (pendingFocusSuccess && successRef.current) {
+      successRef.current.focus();
+      setPendingFocusSuccess(false);
+    }
+  });
+
+  const handleSave = useCallback(async () => {
+    setError(null);
+    setSuccessMsg(null);
+
+    const trimmed = inputVal.trim();
+    if (!trimmed) {
+      setError('Workspace-Pfad darf nicht leer sein.');
+      inputRef.current?.focus();
+      return;
+    }
+
+    setSaving(true);
+    try {
+      await putWorkspacePath(trimmed, fetchFn);
+      setInputVal('');
+      setEditing(false);
+      await onReload();
+      setSuccessMsg('Workspace-Pfad gespeichert.');
+      setPendingFocusSuccess(true);
+    } catch (err) {
+      setError(err.message);
+      inputRef.current?.focus();
+    } finally {
+      setSaving(false);
+    }
+  }, [inputVal, onReload, fetchFn]);
+
+  const handleReset = useCallback(async () => {
+    setError(null);
+    setSuccessMsg(null);
+    setResetting(true);
+    try {
+      await deleteWorkspacePath(fetchFn);
+      await onReload();
+      setSuccessMsg('Workspace-Pfad auf Env-Default zurückgesetzt.');
+      setPendingFocusSuccess(true);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setResetting(false);
+    }
+  }, [onReload, fetchFn]);
+
+  const handleCancel = useCallback(() => {
+    setInputVal('');
+    setError(null);
+    setEditing(false);
+  }, []);
+
+  const isConfigured = source === 'configured';
+  const sourceLabel = isConfigured ? 'konfiguriert' : 'Default aus Env';
+
+  return (
+    <div style={wsPathStyles.wrapper}>
+      {/* Effektivwert-Anzeige */}
+      <div style={wsPathStyles.pathRow}>
+        <span style={wsPathStyles.pathLabel}>Aktueller Workspace-Root:</span>
+        <code style={wsPathStyles.pathValue}>
+          {effectivePath ?? '(nicht gesetzt)'}
+        </code>
+      </div>
+      <div style={wsPathStyles.sourceRow}>
+        <span style={wsPathStyles.sourceText}>
+          Quelle: <strong>{sourceLabel}</strong>
+        </span>
+        {mountRoot && (
+          <span style={wsPathStyles.mountHint}>
+            Mount-Schranke: <code style={wsPathStyles.mountCode}>{mountRoot}</code>
+          </span>
+        )}
+      </div>
+
+      {/* Erfolgs-Feedback */}
+      {successMsg && (
+        <p
+          id={SUCCESS_ID}
+          ref={successRef}
+          style={wsPathStyles.success}
+          role="status"
+          tabIndex={-1}
+        >
+          {successMsg}
+        </p>
+      )}
+
+      {/* Fehler-Feedback (feldzugeordnet) */}
+      {error && (
+        <p
+          id={ERROR_ID}
+          style={wsPathStyles.error}
+          role="alert"
+        >
+          {error}
+        </p>
+      )}
+
+      {editing ? (
+        <div style={wsPathStyles.editArea}>
+          <label htmlFor="workspace-path-input" style={wsPathStyles.fieldLabel}>
+            Neuer Workspace-Pfad
+          </label>
+          <input
+            id="workspace-path-input"
+            ref={inputRef}
+            type="text"
+            value={inputVal}
+            onChange={(e) => setInputVal(e.target.value)}
+            placeholder={mountRoot ? `z.B. ${mountRoot}/projekt` : '/workspace/projekt'}
+            style={{ ...wsPathStyles.input, color: '#e5e7eb', caretColor: '#e5e7eb' }}
+            aria-describedby={error ? ERROR_ID : undefined}
+            autoComplete="off"
+            disabled={saving}
+          />
+          <div style={wsPathStyles.actionRow}>
+            <button
+              type="button"
+              onClick={handleSave}
+              disabled={saving}
+              style={wsPathStyles.btnPrimary}
+              aria-busy={saving}
+            >
+              {saving ? 'Speichern…' : 'Speichern'}
+            </button>
+            <button
+              type="button"
+              onClick={handleCancel}
+              disabled={saving}
+              style={wsPathStyles.btnSecondary}
+            >
+              Abbrechen
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div style={wsPathStyles.actionRow}>
+          <button
+            type="button"
+            onClick={() => { setError(null); setSuccessMsg(null); setInputVal(''); setEditing(true); }}
+            style={wsPathStyles.btnSmall}
+            aria-label={isConfigured ? 'Workspace-Pfad ändern' : 'Workspace-Pfad setzen'}
+          >
+            {isConfigured ? 'Ändern' : 'Setzen'}
+          </button>
+          {isConfigured && (
+            <button
+              type="button"
+              onClick={handleReset}
+              disabled={resetting}
+              style={wsPathStyles.btnDanger}
+              aria-label="Workspace-Pfad auf Env-Default zurücksetzen"
+              aria-busy={resetting}
+            >
+              {resetting ? 'Zurücksetzen…' : 'Zurücksetzen'}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // ── CredentialField ───────────────────────────────────────────────────────────
@@ -1131,11 +1391,14 @@ function SshKeysSection({ sshKeys, setSshKeys, onSaved }) {
 
 // ── SettingsView ──────────────────────────────────────────────────────────────
 
-export function SettingsView({ onNavigate }) {
+export function SettingsView({ onNavigate, fetchFn }) {
   const [credentials, setCredentials] = useState([]);
   const [loadError, setLoadError] = useState(null);
   const [sshKeys, setSshKeys] = useState([]);
   const [sshLoadError, setSshLoadError] = useState(null);
+  // WS-AC1 (#92): workspace path state
+  const [workspacePath, setWorkspacePath] = useState(null);
+  const [workspacePathError, setWorkspacePathError] = useState(null);
 
   const load = useCallback(async () => {
     setLoadError(null);
@@ -1156,9 +1419,25 @@ export function SettingsView({ onNavigate }) {
     }
   }, []);
 
+  /**
+   * Fetches workspace path and updates state. Used as onReload callback for WorkspacePathSection.
+   * Exposes path errors in the GitHub section (not silenced — path is actively configured here).
+   */
+  const reloadWorkspacePath = useCallback(async () => {
+    try {
+      const data = await fetchWorkspacePath(fetchFn);
+      setWorkspacePath(data);
+      setWorkspacePathError(null);
+    } catch (err) {
+      setWorkspacePath(null);
+      setWorkspacePathError(err.message ?? 'Unbekannter Fehler');
+    }
+  }, [fetchFn]);
+
   useEffect(() => {
     load();
-  }, [load]);
+    reloadWorkspacePath();
+  }, [load, reloadWorkspacePath]);
 
   /** Hilfsfunktion: Metadaten eines bestimmten Felds aus der Liste. */
   const getMeta = useCallback((integration, name) => {
@@ -1192,6 +1471,28 @@ export function SettingsView({ onNavigate }) {
               onSaved={load}
             />
           ))}
+          {/* WS-AC1 (#92): Workspace-Pfad-Konfiguration in der GitHub-Sektion */}
+          <div>
+            <h3 style={styles.subSectionHeading}>Workspace-Pfad</h3>
+            <p style={styles.subSectionDesc}>
+              Workspace-Root für Klon-, Listing- und Pull-Operationen.
+              Muss innerhalb der gemounteten Schranke ({workspacePath?.mountRoot || 'WORKSPACE_DIR'}) liegen.
+            </p>
+            {workspacePathError && (
+              <p style={styles.loadError} role="alert" aria-live="polite">
+                Workspace-Pfad konnte nicht geladen werden: {workspacePathError}
+              </p>
+            )}
+            {workspacePath && (
+              <WorkspacePathSection
+                effectivePath={workspacePath.effectivePath}
+                source={workspacePath.source}
+                mountRoot={workspacePath.mountRoot}
+                onReload={reloadWorkspacePath}
+                fetchFn={fetchFn}
+              />
+            )}
+          </div>
         </section>
 
         {/* Cloudflare */}
@@ -1334,6 +1635,18 @@ const styles = {
     fontSize: 14,
     cursor: 'pointer',
     minHeight: 44,
+  },
+  subSectionHeading: {
+    margin: '0 0 6px',
+    fontSize: 15,
+    fontWeight: 700,
+    color: '#e5e7eb',
+  },
+  subSectionDesc: {
+    margin: '0 0 12px',
+    fontSize: 13,
+    color: '#9ca3af',    // Kontrast auf #111 ≥ 4.5:1 (geprüft: ~4.6:1) — NICHT #6b7280
+    lineHeight: 1.5,
   },
 };
 
@@ -1582,5 +1895,140 @@ const sshStyles = {
     fontSize: 13,
     color: '#9ca3af',
     fontStyle: 'italic',
+  },
+};
+
+// ── WorkspacePathSection styles (WS-AC1/#92) ──────────────────────────────────
+
+/** Styles für WorkspacePathSection (Pfad-Konfiguration in der GitHub-Sektion der Einstellungen). */
+const wsPathStyles = {
+  wrapper: {
+    marginTop: 16,
+    paddingTop: 16,
+    borderTop: '1px solid #2a2a2a',
+  },
+  pathRow: {
+    display: 'flex',
+    alignItems: 'baseline',
+    gap: 8,
+    marginBottom: 6,
+    flexWrap: 'wrap',
+  },
+  pathLabel: {
+    fontSize: 13,
+    fontWeight: 600,
+    color: '#d4d4d4',
+    flexShrink: 0,
+  },
+  pathValue: {
+    fontSize: 13,
+    color: '#86efac',    // Kontrast auf #111 ≥ 4.5:1
+    fontFamily: 'monospace',
+    wordBreak: 'break-all',
+  },
+  sourceRow: {
+    display: 'flex',
+    alignItems: 'baseline',
+    gap: 16,
+    marginBottom: 12,
+    flexWrap: 'wrap',
+  },
+  sourceText: {
+    fontSize: 13,
+    color: '#9ca3af',    // Kontrast auf #111 ≥ 4.5:1 (geprüft: ~4.6:1) — NICHT #6b7280
+  },
+  mountHint: {
+    fontSize: 12,
+    color: '#9ca3af',
+  },
+  mountCode: {
+    fontSize: 12,
+    color: '#9ca3af',
+    fontFamily: 'monospace',
+  },
+  success: {
+    margin: '0 0 10px',
+    padding: '8px 12px',
+    background: '#052e16',
+    border: '1px solid #166534',
+    borderRadius: 4,
+    color: '#86efac',
+    fontSize: 13,
+  },
+  error: {
+    margin: '0 0 10px',
+    padding: '8px 12px',
+    background: '#2d0f0f',
+    border: '1px solid #7f1d1d',
+    borderRadius: 4,
+    color: '#fca5a5',
+    fontSize: 13,
+  },
+  editArea: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 8,
+    marginTop: 8,
+  },
+  fieldLabel: {
+    fontSize: 13,
+    fontWeight: 600,
+    color: '#d4d4d4',
+  },
+  input: {
+    width: '100%',
+    padding: '8px 12px',
+    background: '#1e293b',
+    color: '#e5e7eb',
+    border: '1px solid #334155',
+    borderRadius: 4,
+    fontSize: 14,
+    boxSizing: 'border-box',
+  },
+  actionRow: {
+    display: 'flex',
+    gap: 8,
+    flexWrap: 'wrap',
+  },
+  btnPrimary: {
+    padding: '8px 16px',
+    background: '#1d4ed8',    // Kontrast #fff/#1d4ed8 ≥ 4.5:1
+    color: '#ffffff',
+    border: 'none',
+    borderRadius: 4,
+    fontSize: 13,
+    cursor: 'pointer',
+    minHeight: 44,
+    fontWeight: 600,
+  },
+  btnSecondary: {
+    padding: '8px 16px',
+    background: '#1e293b',
+    color: '#d4d4d4',
+    border: '1px solid #334155',
+    borderRadius: 4,
+    fontSize: 13,
+    cursor: 'pointer',
+    minHeight: 44,
+  },
+  btnSmall: {
+    padding: '6px 14px',
+    background: '#1e293b',
+    color: '#93c5fd',         // Kontrast auf #111 ≈ 5.8:1
+    border: '1px solid #334155',
+    borderRadius: 4,
+    fontSize: 13,
+    cursor: 'pointer',
+    minHeight: 44,
+  },
+  btnDanger: {
+    padding: '8px 16px',
+    background: '#7f1d1d',
+    color: '#fecaca',         // Kontrast auf #7f1d1d ≥ 4.5:1
+    border: 'none',
+    borderRadius: 4,
+    fontSize: 13,
+    cursor: 'pointer',
+    minHeight: 44,
   },
 };
