@@ -1,5 +1,8 @@
 # Reviewer Lessons — dev-gui (newest first)
 
+## 2026-06-08 — Test-Header-Claim-Lücke bei UI-Verschiebung: Important, kein Critical
+Wenn Testblöcke von Datei A nach Datei B verschoben werden und die Ziel-Datei keinen `Covers`-Eintrag im Datei-Header für die neue Sektion hat, ist das ein Important-Befund (Test-Header-Claim-Vollständigkeit), kein Critical. Die Tests existieren und belegen das Verhalten korrekt — es fehlt nur die deklarative Inventar-Zeile. Critical wäre, wenn der Header einen Claim enthält, der kein zugehöriges `it`-Block hat.
+
 ## 2026-06-08 — useEffect ohne Deps-Array (run-every-render) für pendingFocus-Pattern: Suggestion, kein Befund
 Ein `useEffect(() => { if (pending && ref.current) { ref.current.focus(); setPending(false); } })` ohne Deps-Array ist korrekt und kein Gate-Blocker. Es läuft nach jedem Render, aber (a) der Body ist ein No-op wenn pending=false und (b) das setPending(false) löst keinen Endlosloop aus (React bailout). Nicht als Important markieren — bestenfalls Suggestion „Deps [pendingFocus] ergänzen für Klarheit".
 

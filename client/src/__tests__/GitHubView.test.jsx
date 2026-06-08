@@ -40,6 +40,12 @@
  *   AC6  — Touch-Targets ≥ 44 px für Pull/Löschen/Dialog-Buttons.
  *   AC6  — Pull-Fehler + Delete-Fehler (role=alert, Backend-error-Text).
  *
+ * Covers (workspace-path-config AC1 + UI-Anteil AC3 — #89):
+ *   AC1  — Sektion „Workspace" in der GitHub-Ansicht zeigt wirksamen Pfad + Quelle
+ *           (configured / env-default); Buttons Setzen/Ändern/Zurücksetzen vorhanden.
+ *   AC3  — 422-Fehler (role=alert, Backend-Meldung), alter Pfad bleibt sichtbar;
+ *           leeres Feld → Frontend-Fehlermeldung, kein PUT; aria-describedby gesetzt.
+ *
  * NFR A11y (Clone-Teil):
  *   - Erfolg: role=status, aria-live=polite, Fokusführung auf Status-Region.
  *   - Fehler/already-present: role=alert, aria-live=assertive, Fokusführung.
@@ -155,34 +161,65 @@ const DELETE_SUCCESS = { name: 'alpha-repo', status: 'deleted' };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+/** Standard-Workspace-Path-Antwort (env-default). */
+const DEFAULT_WORKSPACE_PATH = {
+  effectivePath: '/workspace',
+  source: 'env-default',
+  mountRoot: '/workspace',
+};
+
+/** Workspace-Path-Antwort mit konfiguriertem Pfad. */
+const CONFIGURED_WORKSPACE_PATH = {
+  effectivePath: '/workspace/projekt',
+  source: 'configured',
+  mountRoot: '/workspace',
+};
+
 /**
  * Erstellt einen fetchFn der GET /api/github/repos, GET /api/workspace/repos,
- * POST /api/github/repos, POST /api/github/repos/clone,
- * POST /api/workspace/repos/pull und POST /api/workspace/repos/delete separat bedient.
+ * GET /api/settings/workspace-path, POST /api/github/repos, POST /api/github/repos/clone,
+ * POST /api/workspace/repos/pull, POST /api/workspace/repos/delete,
+ * PUT /api/settings/workspace-path und DELETE /api/settings/workspace-path separat bedient.
  *
  * AC5: getWorkspaceRepos steuert die Antwort für GET /api/workspace/repos.
  * Default: leere Workspace-Repos-Liste (kein Badge sichtbar).
  * #68 AC9: postWsPull / postWsDelete steuern Antworten für Pull/Delete-Endpunkte.
+ * #89 WS-AC1/WS-AC3: getWorkspacePath / putWorkspacePath / deleteWorkspacePath
+ *   steuern Antworten für die workspace-path Endpunkte.
  *
  * @param {{
  *   getRepos?: { ok?: boolean, status?: number, data?: object },
  *   getWorkspaceRepos?: { ok?: boolean, status?: number, data?: object } | 'reject',
+ *   getWorkspacePath?: { ok?: boolean, status?: number, data?: object } | 'reject',
  *   postCreate?: { ok?: boolean, status?: number, data?: object },
  *   postClone?: { ok?: boolean, status?: number, data?: object },
  *   postWsPull?: { ok?: boolean, status?: number, data?: object },
  *   postWsDelete?: { ok?: boolean, status?: number, data?: object },
+ *   putWorkspacePath?: { ok?: boolean, status?: number, data?: object },
+ *   deleteWorkspacePath?: { ok?: boolean, status?: number, data?: object },
  * }} opts
  */
 function makeRoutedFetchFn({
-  getRepos          = { ok: true, status: 200, data: REPOS_RESPONSE      },
-  getWorkspaceRepos = { ok: true, status: 200, data: WORKSPACE_REPOS_EMPTY },
-  postCreate        = { ok: true, status: 201, data: CREATE_SUCCESS        },
-  postClone         = { ok: true, status: 201, data: CLONE_SUCCESS         },
-  postWsPull        = { ok: true, status: 200, data: PULL_SUCCESS          },
-  postWsDelete      = { ok: true, status: 200, data: DELETE_SUCCESS        },
+  getRepos           = { ok: true, status: 200, data: REPOS_RESPONSE          },
+  getWorkspaceRepos  = { ok: true, status: 200, data: WORKSPACE_REPOS_EMPTY   },
+  getWorkspacePath   = { ok: true, status: 200, data: DEFAULT_WORKSPACE_PATH  },
+  postCreate         = { ok: true, status: 201, data: CREATE_SUCCESS           },
+  postClone          = { ok: true, status: 201, data: CLONE_SUCCESS            },
+  postWsPull         = { ok: true, status: 200, data: PULL_SUCCESS             },
+  postWsDelete       = { ok: true, status: 200, data: DELETE_SUCCESS           },
+  putWorkspacePath   = { ok: true, status: 200, data: { effectivePath: '/workspace/projekt', source: 'configured' } },
+  deleteWorkspacePath = { ok: true, status: 200, data: { effectivePath: '/workspace', source: 'env-default' } },
 } = {}) {
   return jest.fn(async (url, opts = {}) => {
-    if ((opts.method ?? 'GET') === 'POST') {
+    const method = opts.method ?? 'GET';
+
+    if (method === 'PUT' && url === '/api/settings/workspace-path') {
+      return { ok: putWorkspacePath.ok, status: putWorkspacePath.status, json: async () => putWorkspacePath.data };
+    }
+    if (method === 'DELETE' && url === '/api/settings/workspace-path') {
+      return { ok: deleteWorkspacePath.ok, status: deleteWorkspacePath.status, json: async () => deleteWorkspacePath.data };
+    }
+    if (method === 'POST') {
       if (url === '/api/workspace/repos/pull') {
         return { ok: postWsPull.ok, status: postWsPull.status, json: async () => postWsPull.data };
       }
@@ -196,6 +233,10 @@ function makeRoutedFetchFn({
       return { ok: postCreate.ok, status: postCreate.status, json: async () => postCreate.data };
     }
     // GET routes
+    if (url === '/api/settings/workspace-path') {
+      if (getWorkspacePath === 'reject') throw new Error('workspace-path endpoint unreachable');
+      return { ok: getWorkspacePath.ok, status: getWorkspacePath.status, json: async () => getWorkspacePath.data };
+    }
     if (url === '/api/workspace/repos') {
       // 'reject' simuliert Netzwerkfehler (AC5: Workspace-Endpunkt nicht erreichbar)
       if (getWorkspaceRepos === 'reject') throw new Error('workspace endpoint unreachable');
@@ -576,10 +617,15 @@ describe('GitHubView — AC6: Graceful degradation (Repo-Liste)', () => {
 
   it('zeigt Fehler-Hinweis bei Netzwerkfehler (kein Crash/Whitescreen)', async () => {
     const fetchFn = jest.fn(() => Promise.reject(new Error('network error')));
-    const { getByRole } = renderView(fetchFn);
+    const { getAllByRole } = renderView(fetchFn);
     await waitFor(() => {
-      expect(getByRole('alert')).toBeTruthy();
-      expect(getByRole('alert').textContent).toMatch(/nicht erreichbar|nicht geladen/i);
+      const alerts = getAllByRole('alert');
+      expect(alerts.length).toBeGreaterThan(0);
+      // Mindestens ein Alert passt zum Repo-Ladefehler oder Workspace-Pfad-Fehler
+      const hasRelevantAlert = alerts.some((el) =>
+        el.textContent.match(/nicht erreichbar|nicht geladen/i),
+      );
+      expect(hasRelevantAlert).toBe(true);
     });
   });
 
@@ -2591,6 +2637,640 @@ describe('GitHubView — #68 AC6: Lösch-Dialog', () => {
       const dialog = document.querySelector('[role="dialog"]');
       expect(dialog).toBeTruthy();
       expect(dialog.getAttribute('aria-modal')).toBe('true');
+    });
+  });
+});
+
+// ── Workspace-Path (WS-AC1 + UI-Anteil WS-AC3) — verschoben von SettingsView #89 ──
+
+describe('GitHubView — WS-AC1: Workspace-Sektion Grundstruktur', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  it('WS-AC1 — rendert h3 "Workspace" in der Workspace-Klone-Sektion', async () => {
+    const fetchFn = makeRoutedFetchFn();
+    const { getByRole } = renderView(fetchFn);
+    await waitFor(() => {
+      expect(getByRole('heading', { name: /^workspace$/i })).toBeTruthy();
+    });
+  });
+
+  it('WS-AC1 — zeigt wirksamen Pfad (env-default)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspacePath: { ok: true, status: 200, data: DEFAULT_WORKSPACE_PATH },
+    });
+    const { getByRole } = renderView(fetchFn);
+    await waitFor(() => {
+      const section = getByRole('region', { name: /workspace-klone/i });
+      expect(section.textContent).toContain('/workspace');
+    });
+  });
+
+  it('WS-AC1 — zeigt Quelle "Default aus Env" wenn source=env-default', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspacePath: { ok: true, status: 200, data: DEFAULT_WORKSPACE_PATH },
+    });
+    const { getByRole } = renderView(fetchFn);
+    await waitFor(() => {
+      const section = getByRole('region', { name: /workspace-klone/i });
+      expect(section.textContent).toMatch(/default aus env/i);
+    });
+  });
+
+  it('WS-AC1 — zeigt Quelle "konfiguriert" wenn source=configured', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspacePath: { ok: true, status: 200, data: CONFIGURED_WORKSPACE_PATH },
+    });
+    const { getByRole } = renderView(fetchFn);
+    await waitFor(() => {
+      const section = getByRole('region', { name: /workspace-klone/i });
+      expect(section.textContent).toMatch(/konfiguriert/i);
+    });
+  });
+
+  it('WS-AC1 — zeigt Effektivwert /workspace/projekt wenn source=configured', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspacePath: { ok: true, status: 200, data: CONFIGURED_WORKSPACE_PATH },
+    });
+    const { getByRole } = renderView(fetchFn);
+    await waitFor(() => {
+      const section = getByRole('region', { name: /workspace-klone/i });
+      expect(section.textContent).toContain('/workspace/projekt');
+    });
+  });
+
+  it('WS-AC1 — zeigt "Setzen"-Button wenn source=env-default', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspacePath: { ok: true, status: 200, data: DEFAULT_WORKSPACE_PATH },
+    });
+    const { getByRole } = renderView(fetchFn);
+    await waitFor(() => {
+      expect(getByRole('button', { name: /workspace-pfad setzen/i })).toBeTruthy();
+    });
+  });
+
+  it('WS-AC1 — zeigt "Ändern"- und "Zurücksetzen"-Button wenn source=configured', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspacePath: { ok: true, status: 200, data: CONFIGURED_WORKSPACE_PATH },
+    });
+    const { getAllByRole } = renderView(fetchFn);
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/workspace-pfad ändern/i))).toBe(true);
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/workspace-pfad auf env-default zurücksetzen/i))).toBe(true);
+    });
+  });
+});
+
+describe('GitHubView — WS-AC1: Setzen (PUT)', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  it('WS-AC1 — Klick auf "Setzen" öffnet Eingabefeld mit label/htmlFor', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspacePath: { ok: true, status: 200, data: DEFAULT_WORKSPACE_PATH },
+    });
+    const { getByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /workspace-pfad setzen/i })).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /workspace-pfad setzen/i }));
+    });
+
+    await waitFor(() => {
+      const input = document.getElementById('workspace-path-input');
+      expect(input).toBeTruthy();
+      const label = document.querySelector('label[for="workspace-path-input"]');
+      expect(label).toBeTruthy();
+    });
+  });
+
+  it('WS-AC1 — erfolgreiches Setzen: PUT abgefeuert, Quelle wechselt auf "konfiguriert"', async () => {
+    let wsPathCallCount = 0;
+    const fetchFn = jest.fn(async (url, opts = {}) => {
+      const method = opts.method ?? 'GET';
+      if (method === 'PUT' && url === '/api/settings/workspace-path') {
+        return { ok: true, status: 200, json: async () => ({ effectivePath: '/workspace/projekt', source: 'configured' }) };
+      }
+      if (method === 'GET' && url === '/api/settings/workspace-path') {
+        wsPathCallCount++;
+        return {
+          ok: true, status: 200,
+          json: async () => (wsPathCallCount <= 1 ? DEFAULT_WORKSPACE_PATH : CONFIGURED_WORKSPACE_PATH),
+        };
+      }
+      if (url === '/api/workspace/repos') return { ok: true, status: 200, json: async () => WORKSPACE_REPOS_EMPTY };
+      return { ok: true, status: 200, json: async () => REPOS_RESPONSE };
+    });
+    const { getByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /workspace-pfad setzen/i })).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /workspace-pfad setzen/i }));
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('workspace-path-input')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.change(document.getElementById('workspace-path-input'), {
+        target: { value: '/workspace/projekt' },
+      });
+    });
+
+    await act(async () => {
+      const saveBtns = Array.from(document.querySelectorAll('button')).filter(
+        (b) => b.textContent.trim() === 'Speichern',
+      );
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    // PUT wurde abgefeuert
+    await waitFor(() => {
+      const putCalls = fetchFn.mock.calls.filter(([u, o]) =>
+        (o?.method ?? 'GET') === 'PUT' && u === '/api/settings/workspace-path',
+      );
+      expect(putCalls.length).toBe(1);
+    });
+
+    // Nach Reload: Quelle wechselt auf "konfiguriert"
+    await waitFor(() => {
+      const section = getByRole('region', { name: /workspace-klone/i });
+      expect(section.textContent).toMatch(/konfiguriert/i);
+    });
+  });
+
+  it('WS-AC1 — Erfolg zeigt role=status Meldung', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspacePath: { ok: true, status: 200, data: DEFAULT_WORKSPACE_PATH },
+    });
+    const { getByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /workspace-pfad setzen/i })).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /workspace-pfad setzen/i }));
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('workspace-path-input')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.change(document.getElementById('workspace-path-input'), {
+        target: { value: '/workspace/projekt' },
+      });
+    });
+
+    await act(async () => {
+      const saveBtns = Array.from(document.querySelectorAll('button')).filter(
+        (b) => b.textContent.trim() === 'Speichern',
+      );
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    await waitFor(() => {
+      const statusEl = document.querySelector('[role="status"]');
+      expect(statusEl).toBeTruthy();
+      expect(statusEl.textContent).toMatch(/gespeichert/i);
+    });
+  });
+});
+
+describe('GitHubView — WS-AC1: Zurücksetzen (DELETE)', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  it('WS-AC1 — Zurücksetzen: DELETE abgefeuert, Quelle wechselt auf "Default aus Env"', async () => {
+    let wsPathCallCount = 0;
+    const fetchFn = jest.fn(async (url, opts = {}) => {
+      const method = opts.method ?? 'GET';
+      if (method === 'DELETE' && url === '/api/settings/workspace-path') {
+        return { ok: true, status: 200, json: async () => ({ effectivePath: '/workspace', source: 'env-default' }) };
+      }
+      if (method === 'GET' && url === '/api/settings/workspace-path') {
+        wsPathCallCount++;
+        return {
+          ok: true, status: 200,
+          json: async () => (wsPathCallCount <= 1 ? CONFIGURED_WORKSPACE_PATH : DEFAULT_WORKSPACE_PATH),
+        };
+      }
+      if (url === '/api/workspace/repos') return { ok: true, status: 200, json: async () => WORKSPACE_REPOS_EMPTY };
+      return { ok: true, status: 200, json: async () => REPOS_RESPONSE };
+    });
+    const { getByRole, getAllByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/workspace-pfad auf env-default zurücksetzen/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const resetBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/workspace-pfad auf env-default zurücksetzen/i),
+      );
+      if (resetBtn) fireEvent.click(resetBtn);
+    });
+
+    // DELETE wurde abgefeuert
+    await waitFor(() => {
+      const deleteCalls = fetchFn.mock.calls.filter(([u, o]) =>
+        (o?.method ?? 'GET') === 'DELETE' && u === '/api/settings/workspace-path',
+      );
+      expect(deleteCalls.length).toBe(1);
+    });
+
+    // Nach Reload: Quelle wechselt auf "Default aus Env"
+    await waitFor(() => {
+      const section = getByRole('region', { name: /workspace-klone/i });
+      expect(section.textContent).toMatch(/default aus env/i);
+    });
+  });
+});
+
+describe('GitHubView — WS-AC3 (UI): Validierungsfehler', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  it('WS-AC3 — 422-Fehler: role=alert erscheint mit Backend-Fehlermeldung', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspacePath: { ok: true, status: 200, data: DEFAULT_WORKSPACE_PATH },
+      putWorkspacePath: { ok: false, status: 422, data: { error: 'Pfad existiert nicht oder ist kein Verzeichnis' } },
+    });
+    const { getByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /workspace-pfad setzen/i })).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /workspace-pfad setzen/i }));
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('workspace-path-input')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.change(document.getElementById('workspace-path-input'), {
+        target: { value: '/etc/shadow' },
+      });
+    });
+
+    await act(async () => {
+      const saveBtns = Array.from(document.querySelectorAll('button')).filter(
+        (b) => b.textContent.trim() === 'Speichern',
+      );
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    await waitFor(() => {
+      const alertEl = document.querySelector('[role="alert"]');
+      expect(alertEl).toBeTruthy();
+      expect(alertEl.textContent).toMatch(/pfad existiert nicht|verzeichnis/i);
+    });
+  });
+
+  it('WS-AC3 — 422-Fehler: alter wirksamer Pfad bleibt sichtbar (unverändert)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspacePath: { ok: true, status: 200, data: DEFAULT_WORKSPACE_PATH },
+      putWorkspacePath: { ok: false, status: 422, data: { error: 'Pfad existiert nicht oder ist kein Verzeichnis' } },
+    });
+    const { getByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      const section = getByRole('region', { name: /workspace-klone/i });
+      expect(section.textContent).toContain('/workspace');
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /workspace-pfad setzen/i }));
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('workspace-path-input')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.change(document.getElementById('workspace-path-input'), {
+        target: { value: '/etc/shadow' },
+      });
+    });
+
+    await act(async () => {
+      const saveBtns = Array.from(document.querySelectorAll('button')).filter(
+        (b) => b.textContent.trim() === 'Speichern',
+      );
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    // Fehler erscheint + alter Wert /workspace noch sichtbar
+    await waitFor(() => {
+      expect(document.querySelector('[role="alert"]')).toBeTruthy();
+      const section = getByRole('region', { name: /workspace-klone/i });
+      expect(section.textContent).toContain('/workspace');
+    });
+  });
+
+  it('WS-AC3 — leeres Feld: Frontend-Fehlermeldung, kein PUT abgefeuert', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspacePath: { ok: true, status: 200, data: DEFAULT_WORKSPACE_PATH },
+    });
+    const { getByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /workspace-pfad setzen/i })).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /workspace-pfad setzen/i }));
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('workspace-path-input')).toBeTruthy();
+    });
+
+    // Kein Wert eingeben — direkt Speichern
+    await act(async () => {
+      const saveBtns = Array.from(document.querySelectorAll('button')).filter(
+        (b) => b.textContent.trim() === 'Speichern',
+      );
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    await waitFor(() => {
+      const alertEl = document.querySelector('[role="alert"]');
+      expect(alertEl).toBeTruthy();
+      expect(alertEl.textContent).toMatch(/leer/i);
+    });
+
+    // Kein PUT abgefeuert
+    const putCalls = fetchFn.mock.calls.filter(([u, o]) =>
+      (o?.method ?? 'GET') === 'PUT' && u === '/api/settings/workspace-path',
+    );
+    expect(putCalls.length).toBe(0);
+  });
+
+  it('WS-AC3 — aria-describedby verbindet Input mit Fehler-Element', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspacePath: { ok: true, status: 200, data: DEFAULT_WORKSPACE_PATH },
+      putWorkspacePath: { ok: false, status: 422, data: { error: 'Pfad existiert nicht oder ist kein Verzeichnis' } },
+    });
+    const { getByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /workspace-pfad setzen/i })).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /workspace-pfad setzen/i }));
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('workspace-path-input')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.change(document.getElementById('workspace-path-input'), {
+        target: { value: '/outside' },
+      });
+    });
+
+    await act(async () => {
+      const saveBtns = Array.from(document.querySelectorAll('button')).filter(
+        (b) => b.textContent.trim() === 'Speichern',
+      );
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    await waitFor(() => {
+      const input = document.getElementById('workspace-path-input');
+      expect(input.getAttribute('aria-describedby')).toBe('workspace-path-error');
+      const errorEl = document.getElementById('workspace-path-error');
+      expect(errorEl).toBeTruthy();
+    });
+  });
+
+  it('WS-AC3 — ohne Fehler hat Input kein aria-describedby', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspacePath: { ok: true, status: 200, data: DEFAULT_WORKSPACE_PATH },
+    });
+    const { getByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /workspace-pfad setzen/i })).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /workspace-pfad setzen/i }));
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('workspace-path-input')).toBeTruthy();
+    });
+
+    const input = document.getElementById('workspace-path-input');
+    expect(input.getAttribute('aria-describedby')).toBeNull();
+  });
+});
+
+describe('GitHubView — WS-Loading: aria-busy + Mehrfachklick-Schutz', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  it('WS-Loading — Speichern-Button hat aria-busy=true während in-flight', async () => {
+    let resolvePut;
+    const putPromise = new Promise((res) => { resolvePut = res; });
+
+    const fetchFn = jest.fn(async (url, opts = {}) => {
+      const method = opts.method ?? 'GET';
+      if (method === 'PUT' && url === '/api/settings/workspace-path') {
+        await putPromise;
+        return { ok: true, status: 200, json: async () => ({ effectivePath: '/workspace/x', source: 'configured' }) };
+      }
+      if (method === 'GET' && url === '/api/settings/workspace-path') {
+        return { ok: true, status: 200, json: async () => DEFAULT_WORKSPACE_PATH };
+      }
+      if (url === '/api/workspace/repos') return { ok: true, status: 200, json: async () => WORKSPACE_REPOS_EMPTY };
+      return { ok: true, status: 200, json: async () => REPOS_RESPONSE };
+    });
+    const { getByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /workspace-pfad setzen/i })).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /workspace-pfad setzen/i }));
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('workspace-path-input')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.change(document.getElementById('workspace-path-input'), {
+        target: { value: '/workspace/x' },
+      });
+    });
+
+    // Klick ohne await-Abschluss — Button sollte in-flight disabled sein
+    act(() => {
+      const saveBtns = Array.from(document.querySelectorAll('button')).filter(
+        (b) => b.textContent.trim() === 'Speichern' || b.textContent.trim() === 'Speichern…',
+      );
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    await waitFor(() => {
+      const btn = Array.from(document.querySelectorAll('button')).find(
+        (b) => b.textContent.trim() === 'Speichern…' || b.getAttribute('aria-busy') === 'true',
+      );
+      expect(btn).toBeTruthy();
+    });
+
+    // PUT freigeben
+    resolvePut();
+    await act(async () => {});
+  });
+});
+
+describe('GitHubView — WS-A11y: Touch-Target + Fokusführung', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  it('WS-A11y — Workspace-Buttons (Setzen/Ändern/Zurücksetzen + Speichern/Abbrechen) haben minHeight ≥ 44 px', async () => {
+    // Teste Display-Modus-Buttons (Ändern + Zurücksetzen) bei configured
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspacePath: { ok: true, status: 200, data: CONFIGURED_WORKSPACE_PATH },
+    });
+    const { getAllByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      const workspaceBtns = btns.filter((b) => {
+        const label = b.getAttribute('aria-label') ?? '';
+        return label.match(/workspace-pfad/i);
+      });
+      expect(workspaceBtns.length).toBeGreaterThan(0);
+      for (const btn of workspaceBtns) {
+        expect(parseInt(btn.style.minHeight ?? '0', 10)).toBeGreaterThanOrEqual(44);
+      }
+    });
+
+    // Teste Editier-Modus-Buttons (Speichern + Abbrechen)
+    await act(async () => {
+      const changeBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/workspace-pfad ändern/i),
+      );
+      if (changeBtn) fireEvent.click(changeBtn);
+    });
+
+    await waitFor(() => {
+      const editBtns = Array.from(document.querySelectorAll('button')).filter((b) =>
+        b.textContent.trim() === 'Speichern' || b.textContent.trim() === 'Abbrechen',
+      );
+      expect(editBtns.length).toBeGreaterThan(0);
+      for (const btn of editBtns) {
+        expect(parseInt(btn.style.minHeight ?? '0', 10)).toBeGreaterThanOrEqual(44);
+      }
+    });
+  });
+
+  it('WS-A11y — Fokus landet nach 422-Fehler auf dem Input (activeElement)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspacePath: { ok: true, status: 200, data: DEFAULT_WORKSPACE_PATH },
+      putWorkspacePath: { ok: false, status: 422, data: { error: 'Pfad existiert nicht oder ist kein Verzeichnis' } },
+    });
+    const { getByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /workspace-pfad setzen/i })).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /workspace-pfad setzen/i }));
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('workspace-path-input')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.change(document.getElementById('workspace-path-input'), {
+        target: { value: '/etc/shadow' },
+      });
+    });
+
+    await act(async () => {
+      const saveBtns = Array.from(document.querySelectorAll('button')).filter(
+        (b) => b.textContent.trim() === 'Speichern',
+      );
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    // Nach Fehler: activeElement muss der Input sein
+    await waitFor(() => {
+      expect(document.querySelector('[role="alert"]')).toBeTruthy();
+      expect(document.activeElement).toBe(document.getElementById('workspace-path-input'));
+    });
+  });
+
+  it('WS-A11y — Fokus landet nach Erfolg auf der Erfolgsmeldung (activeElement)', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspacePath: { ok: true, status: 200, data: DEFAULT_WORKSPACE_PATH },
+    });
+    const { getByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /workspace-pfad setzen/i })).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /workspace-pfad setzen/i }));
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('workspace-path-input')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.change(document.getElementById('workspace-path-input'), {
+        target: { value: '/workspace/projekt' },
+      });
+    });
+
+    await act(async () => {
+      const saveBtns = Array.from(document.querySelectorAll('button')).filter(
+        (b) => b.textContent.trim() === 'Speichern',
+      );
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    // Nach Erfolg: activeElement muss die Erfolgsmeldung (role=status) sein
+    await waitFor(() => {
+      const statusEl = document.querySelector('[role="status"]');
+      expect(statusEl).toBeTruthy();
+      expect(document.activeElement).toBe(statusEl);
+    });
+  });
+
+  it('WS-A11y — Workspace-Pfad-Ladefehler zeigt role=alert', async () => {
+    const fetchFn = makeRoutedFetchFn({
+      getWorkspacePath: 'reject',
+    });
+    const { getByRole } = renderView(fetchFn);
+
+    await waitFor(() => {
+      const section = getByRole('region', { name: /workspace-klone/i });
+      const alerts = section.querySelectorAll('[role="alert"]');
+      const hasWsError = Array.from(alerts).some((el) =>
+        el.textContent.match(/workspace-pfad konnte nicht geladen werden/i),
+      );
+      expect(hasWsError).toBe(true);
     });
   });
 });
