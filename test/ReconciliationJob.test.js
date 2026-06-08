@@ -42,7 +42,7 @@ function makeStubs({
   isProtected = false,
 } = {}) {
   const dockerControl = {
-    ps: jest.fn().mockResolvedValue(psResult),
+    psAll: jest.fn().mockResolvedValue(psResult),
   };
 
   const cloudflareApi = {
@@ -107,9 +107,9 @@ describe('ReconciliationJob', () => {
         },
       });
 
-      // Make ps() hang to keep the first run in progress
+      // Make psAll() hang to keep the first run in progress
       let resolvePs;
-      stubs.dockerControl.ps.mockReturnValueOnce(
+      stubs.dockerControl.psAll.mockReturnValueOnce(
         new Promise((resolve) => { resolvePs = resolve; }),
       );
 
@@ -289,35 +289,80 @@ describe('ReconciliationJob', () => {
   // ── AC5c: Unmanaged containers only reported ───────────────────────────────
 
   describe('AC5c — unmanaged containers only reportedUnmanaged', () => {
-    it('does not heal or rm an unmanaged container (no label returned by ps)', async () => {
-      // VpsDockerControl.ps() only returns managed (labelled) containers.
-      // Unmanaged ones don't appear. The reportedUnmanaged list reflects containers
-      // that were explicitly tagged as unmanaged by the ps() result extension.
-      // For this test, ps() returns empty → no managed containers to heal.
+    it('reports unmanaged container (hostname: null) in reportedUnmanaged — no heal, no rm', async () => {
+      // psAll() returns the unmanaged container with hostname: null.
+      // ReconciliationJob must: report it in reportedUnmanaged, NOT call addRouteOnly, NOT call rm.
       const { job, stubs } = makeJob({
         stubs: {
-          psResult: { result: 'ok', containers: [] },
+          psResult: {
+            result: 'ok',
+            containers: [
+              // Unmanaged container — no cloudflare.tunnel-hostname label → hostname: null
+              { containerId: 'unmanaged1', image: 'nginx:latest', hostname: null, status: 'Up 3 hours', hostPort: 9090 },
+            ],
+          },
           listRoutesResult: [],
         },
       });
 
       const report = await job.reconcile('manual');
-      // No addRouteOnly or removeRoute calls
+
+      // AC5c: unmanaged container reported
+      expect(report.perVps[0].reportedUnmanaged).toHaveLength(1);
+      expect(report.perVps[0].reportedUnmanaged[0]).toContain('unmanaged1');
+
+      // No healing (no addRouteOnly) — unmanaged containers are never healed
       expect(stubs.orchestrator.addRouteOnly).not.toHaveBeenCalled();
+      // No route removal either
       expect(stubs.cloudflareApi.removeRoute).not.toHaveBeenCalled();
-      // No docker rm (ReconciliationJob never kills containers per spec not-goal)
+      // checkedContainers counts only managed ones
+      expect(report.perVps[0].checkedContainers).toBe(0);
       expect(report.perVps[0].createdRoutes).toHaveLength(0);
       expect(report.perVps[0].removedRoutes).toHaveLength(0);
+    });
+
+    it('handles mix of managed and unmanaged containers correctly', async () => {
+      // One managed (with label) + one unmanaged (hostname: null)
+      const { job, stubs } = makeJob({
+        stubs: {
+          psResult: {
+            result: 'ok',
+            containers: [
+              { containerId: 'managed1', image: 'app:v1', hostname: 'app.example.com', status: 'Up', hostPort: 8080 },
+              { containerId: 'unmanaged2', image: 'redis:7', hostname: null, status: 'Up 1 hour', hostPort: 6379 },
+            ],
+          },
+          listRoutesResult: [
+            { hostname: 'app.example.com', service: 'http://localhost:8080', tunnelId: 'tunnel-1', protected: false },
+          ],
+        },
+      });
+
+      const report = await job.reconcile('manual');
+      const vps = report.perVps[0];
+
+      // The managed container has a route → no healing needed
+      expect(vps.createdRoutes).toHaveLength(0);
+      // The unmanaged container is reported
+      expect(vps.reportedUnmanaged).toHaveLength(1);
+      expect(vps.reportedUnmanaged[0]).toContain('unmanaged2');
+      // Only managed containers counted
+      expect(vps.checkedContainers).toBe(1);
+      // No mutations
+      expect(stubs.orchestrator.addRouteOnly).not.toHaveBeenCalled();
+      expect(stubs.cloudflareApi.removeRoute).not.toHaveBeenCalled();
+      // No secrets in reportedUnmanaged entries
+      expect(JSON.stringify(vps.reportedUnmanaged)).not.toMatch(/Bearer|PRIVATE KEY/);
     });
   });
 
   // ── AC6: Degradation — VPS failure doesn't abort other VPS ────────────────
 
   describe('AC6 — VPS failure degrades, other VPS continue', () => {
-    it('continues reconciliation of second VPS when first VPS ps() throws', async () => {
+    it('continues reconciliation of second VPS when first VPS psAll() throws', async () => {
       const auditStore = new AuditStore();
       const dockerControl = {
-        ps: jest.fn()
+        psAll: jest.fn()
           .mockRejectedValueOnce(new Error('SSH timeout')) // vps-1 fails
           .mockResolvedValueOnce({ result: 'ok', containers: [] }), // vps-2 succeeds
       };
@@ -346,10 +391,10 @@ describe('ReconciliationJob', () => {
       const vps1 = report.perVps.find((v) => v.vps === 'vps-1');
       const vps2 = report.perVps.find((v) => v.vps === 'vps-2');
 
-      // VPS-1 has an error (ps failed)
+      // VPS-1 has an error (psAll failed)
       expect(vps1.errors.length).toBeGreaterThan(0);
-      // VPS-2 was reconciled (ps called for vps-2)
-      expect(dockerControl.ps).toHaveBeenCalledTimes(2);
+      // VPS-2 was reconciled (psAll called for vps-2)
+      expect(dockerControl.psAll).toHaveBeenCalledTimes(2);
       expect(vps2.errors).toHaveLength(0);
     });
   });
@@ -373,9 +418,9 @@ describe('ReconciliationJob', () => {
       expect(report.perVps[0].errors.length).toBeGreaterThan(0);
     });
 
-    it('does not call removeRoute or addRouteOnly when ps() throws', async () => {
+    it('does not call removeRoute or addRouteOnly when psAll() throws', async () => {
       const auditStore = new AuditStore();
-      const dockerControl = { ps: jest.fn().mockRejectedValue(new Error('Network error')) };
+      const dockerControl = { psAll: jest.fn().mockRejectedValue(new Error('Network error')) };
       const cloudflareApi = {
         listRoutes: jest.fn().mockResolvedValue([{ hostname: 'x.example.com', tunnelId: 'tunnel-1', protected: false }]),
         removeRoute: jest.fn(),
@@ -546,7 +591,7 @@ describe('ReconciliationJob', () => {
         return originalRecord({ identity, command });
       };
 
-      const dockerControl = { ps: jest.fn().mockResolvedValue({ result: 'ok', containers: [] }) };
+      const dockerControl = { psAll: jest.fn().mockResolvedValue({ result: 'ok', containers: [] }) };
       const cloudflareApi = {
         listRoutes: jest.fn().mockResolvedValue([
           { hostname: 'orphan.example.com', tunnelId: 'tunnel-1', protected: false },
@@ -586,7 +631,7 @@ describe('ReconciliationJob', () => {
       });
       failNextAudit = true;
 
-      const dockerControl = { ps: jest.fn().mockResolvedValue({ result: 'ok', containers: [] }) };
+      const dockerControl = { psAll: jest.fn().mockResolvedValue({ result: 'ok', containers: [] }) };
       const cloudflareApi = {
         listRoutes: jest.fn().mockResolvedValue([
           { hostname: 'orphan.example.com', tunnelId: 'tunnel-1', protected: false },

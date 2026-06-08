@@ -123,8 +123,8 @@ export class ReconciliationJob {
    * @param {Array<{ vpsId: string, vps: object, tunnelId: string }>} opts.vpsConfigs
    */
   constructor({ dockerControl, cloudflareApi, lockoutGuard, orchestrator, auditStore, vpsConfigs }) {
-    if (!dockerControl || typeof dockerControl.ps !== 'function') {
-      throw new Error('[ReconciliationJob] dockerControl with ps() ist Pflicht');
+    if (!dockerControl || typeof dockerControl.psAll !== 'function') {
+      throw new Error('[ReconciliationJob] dockerControl with psAll() ist Pflicht');
     }
     if (!cloudflareApi || typeof cloudflareApi.listRoutes !== 'function') {
       throw new Error('[ReconciliationJob] cloudflareApi mit listRoutes() ist Pflicht');
@@ -265,9 +265,11 @@ export class ReconciliationJob {
     };
 
     // ── Step 1: Read container state (fail-closed on error, AC7) ──────────────
+    // psAll() returns managed (hostname set) AND unmanaged (hostname: null) containers.
+    // Unmanaged containers are only reported (AC5c), never healed or removed.
     let psResult;
     try {
-      psResult = await this.#dockerControl.ps(vps);
+      psResult = await this.#dockerControl.psAll(vps);
     } catch (err) {
       result.errors.push({
         scope: `vps:${vpsId}:ps`,
@@ -288,13 +290,15 @@ export class ReconciliationJob {
 
     const allContainers = psResult.containers ?? [];
 
-    // Separate managed (with label) from unmanaged (without label)
-    // VpsDockerControl.ps() already filters to labelled containers for managed entries
-    // But we also need to note: ps() only returns containers WITH the label (managed).
-    // Unmanaged containers aren't returned by ps() (it filters on the label).
-    // Per spec, unmanaged = containers WITHOUT cloudflare.tunnel-hostname label.
-    // Since ps() only returns managed ones, we report the returned ones as managed.
-    const managedContainers = allContainers;
+    // Separate managed (hostname set via label) from unmanaged (hostname: null, AC5c)
+    const managedContainers = allContainers.filter((c) => c.hostname !== null && c.hostname !== '');
+    const unmanagedContainers = allContainers.filter((c) => c.hostname === null || c.hostname === '');
+
+    // AC5c: report unmanaged containers — never heal, never rm
+    for (const c of unmanagedContainers) {
+      result.reportedUnmanaged.push(sanitizeString(`${c.containerId}:${c.image}:${c.status}`));
+    }
+
     result.checkedContainers = managedContainers.length;
 
     // Detect ambiguous bindings: two managed containers on same VPS → same hostname (AC7)
@@ -512,7 +516,8 @@ export class ReconciliationJob {
       kind,
       vps,
       hostname,
-      ...(detail ? { detail } : {}),
+      // S4: sanitizeString auf detail (Tiefenverteidigung — kein Secret im Notice-Log)
+      ...(detail ? { detail: sanitizeString(detail) } : {}),
     };
 
     try {

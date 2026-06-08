@@ -1398,7 +1398,7 @@ const reconcileStyles = {
   },
   time: {
     fontFamily: 'monospace',
-    color: '#9ca3af',
+    color: '#b0b7c3',
     fontSize: 11,
   },
 };

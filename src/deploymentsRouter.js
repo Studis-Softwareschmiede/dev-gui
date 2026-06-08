@@ -435,10 +435,10 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconcil
   });
 
   // ── POST /api/deployments/reconcile ──────────────────────────────────────
-  // NOTE: This route MUST be registered before DELETE /api/deployments/:vps/:hostname
-  // to avoid Express matching "reconcile" as a :vps param.
-  // (It is registered here, after the above, relying on specificity — express 4/5 matches
-  //  exact paths before parameterised ones when the path is registered first.)
+  // NOTE: Die GET /api/deployments/reconcile/*-Routen (reconcile/last, reconcile/reports,
+  // reconcile/notices) sowie POST /api/deployments/reconcile müssen vor einem etwaigen
+  // künftigen GET /:vps/:hostname registriert werden, damit Express "reconcile" nicht als
+  // :vps-Parameter matcht. POST und DELETE konkurrieren NICHT (verschiedene HTTP-Methoden).
 
   /**
    * POST /api/deployments/reconcile
