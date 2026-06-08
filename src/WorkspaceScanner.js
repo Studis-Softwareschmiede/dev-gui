@@ -13,6 +13,9 @@
  *   - Injectable execFn and fsDeps for unit testing without real git/FS.
  *   - Graceful degradation: WORKSPACE_DIR missing/unset → empty repos list.
  *   - Per-clone git errors → that clone reports safe fallback values.
+ *   - workspaceRootResolver: optional async fn () => { path, source }; wenn gesetzt
+ *     wird der Effektivwert pro Operation aufgelöst (workspace-path-config AC5, AC9).
+ *     Wenn nicht gesetzt → Fallback auf process.env.WORKSPACE_DIR (AC9-Verhaltensneutralität).
  *
  * Security:
  *   - Credentials (tokens/passwords in git remote URLs) are stripped (AC2).
@@ -75,6 +78,11 @@ export function stripCredentials(url) {
  * @param {object} [options]
  * @param {string} [options.workspaceDir]
  *   Override for the workspace directory (default: process.env.WORKSPACE_DIR).
+ *   Wird ignoriert wenn workspaceRootResolver gesetzt ist.
+ * @param {Function} [options.workspaceRootResolver]
+ *   Optionaler async Resolver `() => Promise<{ path: string, source: string }>`.
+ *   Wenn gesetzt: wird pro Operation aufgerufen (AC5 — Effektivwert pro Operation).
+ *   Wenn nicht gesetzt: workspaceDir-Parameter oder env-Fallback (AC9 — Verhaltensneutralität).
  * @param {Function} [options.execFn]
  *   Injectable exec function for tests: `(cmd, args, options) => Promise<{stdout}>`.
  *   Defaults to promisified execFile.
@@ -84,11 +92,13 @@ export function stripCredentials(url) {
  */
 export class WorkspaceScanner {
   #workspaceDir;
+  #workspaceRootResolver;
   #execFn;
   #fsDeps;
 
-  constructor({ workspaceDir, execFn, fsDeps } = {}) {
+  constructor({ workspaceDir, workspaceRootResolver, execFn, fsDeps } = {}) {
     this.#workspaceDir = workspaceDir ?? process.env.WORKSPACE_DIR ?? '';
+    this.#workspaceRootResolver = workspaceRootResolver ?? null;
     this.#execFn = execFn ?? this.#defaultExec.bind(this);
     this.#fsDeps = fsDeps ?? { stat, readdir };
   }
@@ -201,7 +211,19 @@ export class WorkspaceScanner {
    * }>>}
    */
   async listClones() {
-    const workspaceDir = this.#workspaceDir;
+    // AC5: Effektivwert pro Operation aufgelöst (nicht beim Boot eingefroren)
+    // AC9: ohne Resolver → env-Fallback (Verhaltensneutralität)
+    let workspaceDir;
+    if (this.#workspaceRootResolver) {
+      try {
+        const resolved = await this.#workspaceRootResolver();
+        workspaceDir = resolved.path ?? '';
+      } catch {
+        workspaceDir = this.#workspaceDir;
+      }
+    } else {
+      workspaceDir = this.#workspaceDir;
+    }
 
     // Edge-case: WORKSPACE_DIR not set / not a directory → empty list, no crash
     if (!workspaceDir) return [];

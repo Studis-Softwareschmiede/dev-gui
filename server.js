@@ -12,6 +12,7 @@
  *   GET/PUT/DELETE /api/settings/credentials*     → Credential-Verwaltung (settings-credentials)
  *   GET/PUT/DELETE /api/settings/ssh-keys*        → SSH-Key-Verwaltung (settings-ssh-keys Stufe A)
  *   POST /api/settings/ssh-keys/:user/provision   → 501 (Stufe B, folgt in #47)
+ *   GET/PUT/DELETE /api/settings/workspace-path   → Workspace-Pfad-Konfiguration (workspace-path-config #85)
  *   POST /api/github/repos                        → Org-Repo anlegen (github-repo-create #59)
  *   GET  /api/workspace/repos                     → { repos: [...] } — live WORKSPACE_DIR scan (workspace-repos AC1, AC2)
  *   POST /api/workspace/repos/pull                → { name, status: "pulled" } — pull clone (workspace-repos AC3, AC4, AC7, AC8)
@@ -45,6 +46,8 @@ import { WorkspaceMutator } from './src/WorkspaceMutator.js';
 import { workspaceReposRouter } from './src/workspaceReposRouter.js';
 import { GitHubCloner } from './src/GitHubCloner.js';
 import { githubRepoCloneRouter } from './src/githubRepoCloneRouter.js';
+import { workspacePathRouter } from './src/workspacePathRouter.js';
+import { buildWorkspaceRootResolver } from './src/workspacePath.js';
 
 const PORT = Number(process.env.PORT ?? 8080);
 
@@ -106,13 +109,20 @@ app.use(sshKeysRouter(credentialStore, auditStore));
 const githubWriter = new GitHubWriter({ credentialStore });
 app.use(githubReposRouter(auditStore, githubWriter));
 
+// ── Workspace-Pfad-Konfiguration (workspace-path-config AC2–AC9) ──────────────
+app.use(workspacePathRouter(credentialStore, auditStore));
+
+// ── Workspace-Root-Resolver (gemeinsame Quelle der Wahrheit — AC5, AC9) ───────
+// Pro Operation aufgelöst (nicht beim Boot eingefroren).
+const resolveWorkspaceRoot = buildWorkspaceRootResolver(credentialStore);
+
 // ── Workspace Repos route (workspace-repos AC1, AC2, AC3, AC4, AC5, AC7, AC8) ──
-const workspaceScanner = new WorkspaceScanner();
-const workspaceMutator = new WorkspaceMutator();
+const workspaceScanner = new WorkspaceScanner({ workspaceRootResolver: resolveWorkspaceRoot });
+const workspaceMutator = new WorkspaceMutator({ workspaceRootResolver: resolveWorkspaceRoot });
 app.use(workspaceReposRouter(workspaceScanner, auditStore, workspaceMutator, credentialStore));
 
 // ── GitHub Repo Clone route (github-repo-clone #61) ───────────────────────────
-const githubCloner = new GitHubCloner({ credentialStore });
+const githubCloner = new GitHubCloner({ credentialStore, workspaceRootResolver: resolveWorkspaceRoot });
 app.use(githubRepoCloneRouter(auditStore, githubCloner));
 
 /**

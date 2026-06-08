@@ -127,7 +127,12 @@ export function validateRepoRef(repo) {
  *
  * @param {object} [options]
  * @param {import('./CredentialStore.js').CredentialStore} [options.credentialStore]
- * @param {string} [options.workspaceDir]  Override for WORKSPACE_DIR (default: env)
+ * @param {string} [options.workspaceDir]  Override for WORKSPACE_DIR (default: env).
+ *   Wird ignoriert wenn workspaceRootResolver gesetzt ist.
+ * @param {Function} [options.workspaceRootResolver]
+ *   Optionaler async Resolver `() => Promise<{ path: string, source: string }>`.
+ *   Wenn gesetzt: wird pro Operation aufgerufen (AC5 — Effektivwert pro Operation).
+ *   Wenn nicht gesetzt: workspaceDir-Parameter oder env-Fallback (AC9 — Verhaltensneutralität).
  * @param {typeof fetch} [options.fetchFn] Injectable fetch for tests (passed to mintInstallationToken)
  * @param {Function} [options.execFn]      Injectable exec for tests
  * @param {object} [options.fsDeps]        Injectable fs helpers for tests
@@ -135,13 +140,15 @@ export function validateRepoRef(repo) {
 export class GitHubCloner {
   #credentialStore;
   #workspaceDir;
+  #workspaceRootResolver;
   #fetch;
   #execFn;
   #fsDeps;
 
-  constructor({ credentialStore, workspaceDir, fetchFn, execFn, fsDeps } = {}) {
+  constructor({ credentialStore, workspaceDir, workspaceRootResolver, fetchFn, execFn, fsDeps } = {}) {
     this.#credentialStore = credentialStore ?? null;
     this.#workspaceDir = workspaceDir ?? process.env.WORKSPACE_DIR ?? '';
+    this.#workspaceRootResolver = workspaceRootResolver ?? null;
     // fetchFn is passed to the shared mintInstallationToken helper.
     // The helper calls fetchFn(url, init) — standard 2-arg form with signal in init.
     // If not injected, we provide a wrapper that adds an AbortController timeout.
@@ -150,6 +157,26 @@ export class GitHubCloner {
     // writeFile stays in fsDeps for the shared writeAskpassScript helper.
     // chmod is accepted for backward compatibility (no longer called directly).
     this.#fsDeps = fsDeps ?? { mkdir, access, realpath, rm, writeFile };
+  }
+
+  // ── Workspace-Root-Auflösung (AC5/AC9) ───────────────────────────────────────
+
+  /**
+   * Löst den effektiven Workspace-Root auf (AC5: pro Operation, nicht beim Boot eingefroren).
+   * AC9: ohne Resolver → Fallback auf #workspaceDir (Verhaltensneutralität).
+   *
+   * @returns {Promise<string>}
+   */
+  async #resolveWorkspaceDir() {
+    if (this.#workspaceRootResolver) {
+      try {
+        const resolved = await this.#workspaceRootResolver();
+        return resolved.path ?? this.#workspaceDir;
+      } catch {
+        return this.#workspaceDir;
+      }
+    }
+    return this.#workspaceDir;
   }
 
   // ── Token Minting — delegates to shared githubAppToken helper ────────────────
@@ -233,10 +260,10 @@ export class GitHubCloner {
    * verify the prefix.
    *
    * @param {string} repoName  Validated repo name (no slashes, no ..)
+   * @param {string} wsDir     Effective workspace directory (resolved by caller).
    * @returns {Promise<{ absPath: string, relPath: string }>}
    */
-  async #resolveClonePath(repoName) {
-    const wsDir = this.#workspaceDir;
+  async #resolveClonePath(repoName, wsDir) {
     if (!wsDir) {
       throw new GitHubClonerError(
         'WORKSPACE_DIR ist nicht konfiguriert',
@@ -287,11 +314,14 @@ export class GitHubCloner {
    * @throws {GitHubClonerError}
    */
   async cloneRepo({ repoName, force = false }) {
+    // AC5: Effektivwert pro Operation aufgelöst (nicht beim Boot eingefroren)
+    const wsDir = await this.#resolveWorkspaceDir();
+
     // Ensure WORKSPACE_DIR exists (create idempotently)
-    await this.#ensureWorkspaceDir();
+    await this.#ensureWorkspaceDir(wsDir);
 
     // Resolve + guard clone target path (AC2)
-    const { absPath, relPath } = await this.#resolveClonePath(repoName);
+    const { absPath, relPath } = await this.#resolveClonePath(repoName, wsDir);
 
     // AC4: Already-present check (before minting token)
     const exists = await this.#pathExists(absPath);
@@ -383,9 +413,10 @@ export class GitHubCloner {
 
   /**
    * Ensures WORKSPACE_DIR exists (idempotent, uid-1000-writable assumed by infra).
+   *
+   * @param {string} wsDir  Effective workspace directory (resolved by caller).
    */
-  async #ensureWorkspaceDir() {
-    const wsDir = this.#workspaceDir;
+  async #ensureWorkspaceDir(wsDir) {
     if (!wsDir) {
       throw new GitHubClonerError(
         'WORKSPACE_DIR ist nicht konfiguriert',

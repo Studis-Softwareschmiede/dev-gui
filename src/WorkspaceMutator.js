@@ -15,6 +15,8 @@
  *   - Only direct children of WORKSPACE_DIR can be deleted or pulled (no nesting).
  *   - Injectable fsDeps for unit testing without real FS calls.
  *   - Graceful degradation on invalid input → throws with a typed error class.
+ *   - workspaceRootResolver: optional async fn () => { path, source }; wenn gesetzt
+ *     wird der Effektivwert pro Operation aufgelöst (workspace-path-config AC5, AC9).
  *
  * Pull / Token Injection (AC3):
  *   - The Installation Token is minted IMMEDIATELY BEFORE `git pull` (transient).
@@ -80,6 +82,11 @@ export class WorkspaceMutatorError extends Error {
  * @param {object} [options]
  * @param {string} [options.workspaceDir]
  *   Override for the workspace directory (default: process.env.WORKSPACE_DIR).
+ *   Wird ignoriert wenn workspaceRootResolver gesetzt ist.
+ * @param {Function} [options.workspaceRootResolver]
+ *   Optionaler async Resolver `() => Promise<{ path: string, source: string }>`.
+ *   Wenn gesetzt: wird pro Operation aufgerufen (AC5 — Effektivwert pro Operation).
+ *   Wenn nicht gesetzt: workspaceDir-Parameter oder env-Fallback (AC9 — Verhaltensneutralität).
  * @param {Function} [options.execFn]
  *   Injectable exec function for tests: `(cmd, args, options) => Promise<void|{stdout}>`.
  *   Defaults to promisified execFile.
@@ -89,13 +96,33 @@ export class WorkspaceMutatorError extends Error {
  */
 export class WorkspaceMutator {
   #workspaceDir;
+  #workspaceRootResolver;
   #execFn;
   #fsDeps;
 
-  constructor({ workspaceDir, execFn, fsDeps } = {}) {
+  constructor({ workspaceDir, workspaceRootResolver, execFn, fsDeps } = {}) {
     this.#workspaceDir = workspaceDir ?? process.env.WORKSPACE_DIR ?? '';
+    this.#workspaceRootResolver = workspaceRootResolver ?? null;
     this.#execFn = execFn ?? this.#defaultExec.bind(this);
     this.#fsDeps = fsDeps ?? { lstat, writeFile, unlink, realpath };
+  }
+
+  /**
+   * Löst den effektiven Workspace-Root auf (AC5: pro Operation, nicht beim Boot eingefroren).
+   * AC9: ohne Resolver → Fallback auf #workspaceDir (Verhaltensneutralität).
+   *
+   * @returns {Promise<string>}
+   */
+  async #resolveWorkspaceDir() {
+    if (this.#workspaceRootResolver) {
+      try {
+        const resolved = await this.#workspaceRootResolver();
+        return resolved.path ?? this.#workspaceDir;
+      } catch {
+        return this.#workspaceDir;
+      }
+    }
+    return this.#workspaceDir;
   }
 
   /**
@@ -138,12 +165,18 @@ export class WorkspaceMutator {
    * is never touched. This is the correct behaviour per AC5 ("nichts außerhalb
    * gelöscht").
    *
+   * AC5/AC9: Der workspaceDir-Wert wird per resolvedWorkspaceDir gesetzt, der
+   * vom Resolver (wenn konfiguriert) oder direkt aus #workspaceDir kommt.
+   * Der Resolver-Aufruf ist async — daher rufen pullClone/deleteClone ihn auf
+   * und übergeben den Pfad; #validateTarget selbst bleibt synchron.
+   *
    * @param {string} name  The clone folder name from user input.
+   * @param {string} [resolvedWorkspaceDir]  Pre-resolved workspace dir (from resolver or #workspaceDir).
    * @returns {{ workspaceDir: string, targetPath: string }}
    * @throws {WorkspaceMutatorError}
    */
-  #validateTarget(name) {
-    const workspaceDir = this.#workspaceDir;
+  #validateTarget(name, resolvedWorkspaceDir) {
+    const workspaceDir = resolvedWorkspaceDir ?? this.#workspaceDir;
 
     if (!workspaceDir) {
       throw new WorkspaceMutatorError(
@@ -217,7 +250,8 @@ export class WorkspaceMutator {
    * @throws {WorkspaceMutatorError} on traversal, not-found, credentials-missing, or pull failure.
    */
   async pullClone(name, mintTokenFn) {
-    const { workspaceDir, targetPath } = this.#validateTarget(name);
+    const wsDir = await this.#resolveWorkspaceDir();
+    const { workspaceDir, targetPath } = this.#validateTarget(name, wsDir);
 
     // Check target exists — lstat does NOT follow symlinks (AC4).
     try {
@@ -368,7 +402,8 @@ export class WorkspaceMutator {
    * @throws {WorkspaceMutatorError} on traversal, not-found, or rm failure.
    */
   async deleteClone(name) {
-    const { targetPath } = this.#validateTarget(name);
+    const wsDir = await this.#resolveWorkspaceDir();
+    const { targetPath } = this.#validateTarget(name, wsDir);
 
     // Check target exists — lstat does NOT follow symlinks.
     // If name is a symlink pointing outside, lstat still succeeds for the symlink itself.
