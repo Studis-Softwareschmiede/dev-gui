@@ -34,23 +34,14 @@
  *           (Escape schließt, Fokus in Dialog beim Öffnen, zurück zum Auslöser bei Abbruch).
  *
  * workspace-path-config (AC1 + UI-Anteil AC3):
- *   WS-AC1  — Sektion „Workspace" (bei der Workspace-Übersicht, ÜBER der Klon-Liste):
- *             zeigt wirksamen Pfad inkl. Quelle (konfiguriert / Env-Default);
- *             erlaubt setzen/ändern (PUT) und zurücksetzen (DELETE).
- *   WS-AC3  — 4xx/422 → feldzugeordnete Fehlermeldung (role=alert); alter Wert bleibt sichtbar.
- *   A11y    — label/htmlFor, aria-describedby, role=status/alert, aria-busy,
- *             Touch-Target ≥44px, Fokusführung via activeElement, Kontrast #9ca3af.
+ *   — WorkspacePathSection lebt seit #92 in SettingsView.jsx (GitHub-Sektion der Einstellungen).
  *
- * State-Design-Entscheidung (#68 + #89):
+ * State-Design-Entscheidung (#68):
  *   workspaceRepos wird zentral in RepoList gehalten (volle Array-Form statt nur Set<string>).
  *   Das Set<string> für Badge-Vergleiche wird daraus abgeleitet (localRepoNames).
  *   WorkspaceOverview erhält dieselben workspaceRepos + fetchWorkspaceRepos-Callback.
- *   WorkspacePathSection erhält ebenfalls fetchWorkspaceRepos als onReload-Callback:
- *   nach erfolgreichem Setzen/Zurücksetzen des Pfads wird fetchWorkspaceRepos() ausgelöst,
- *   damit Klon-Liste UND Badge den neuen Effektivwert widerspiegeln.
- *   Vorteil: ein einziger Fetch/Refetch, kein doppeltes fetchen; nach Pull/Löschen im
- *   WorkspaceOverview wird fetchWorkspaceRepos() aufgerufen → Badge in der Org-Liste
- *   verschwindet/erscheint automatisch.
+ *   Nach Pull/Löschen im WorkspaceOverview wird fetchWorkspaceRepos() aufgerufen →
+ *   Badge in der Org-Liste verschwindet/erscheint automatisch.
  *
  * A11y (NFR):
  *   - Alle Felder mit <label> beschriftet.
@@ -193,49 +184,6 @@ async function deleteWorkspaceRepo(body, fetchImpl) {
 }
 
 /**
- * GET /api/settings/workspace-path
- * @param {typeof fetch} [fetchImpl]
- * @returns {Promise<{ effectivePath: string|null, source: "configured"|"env-default", mountRoot: string }>}
- */
-async function fetchWorkspacePath(fetchImpl) {
-  const fn = fetchImpl ?? globalThis.fetch.bind(globalThis);
-  const res = await fn('/api/settings/workspace-path');
-  if (!res.ok) throw new Error(`Workspace-Pfad laden fehlgeschlagen (${res.status})`);
-  return res.json();
-}
-
-/**
- * PUT /api/settings/workspace-path
- * @param {string} path
- * @param {typeof fetch} [fetchImpl]
- * @returns {Promise<{ effectivePath: string, source: "configured" }>}
- */
-async function putWorkspacePath(path, fetchImpl) {
-  const fn = fetchImpl ?? globalThis.fetch.bind(globalThis);
-  const res = await fn('/api/settings/workspace-path', {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path }),
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error ?? `Speichern fehlgeschlagen (${res.status})`);
-  return data;
-}
-
-/**
- * DELETE /api/settings/workspace-path
- * @param {typeof fetch} [fetchImpl]
- * @returns {Promise<{ effectivePath: string|null, source: "env-default" }>}
- */
-async function deleteWorkspacePath(fetchImpl) {
-  const fn = fetchImpl ?? globalThis.fetch.bind(globalThis);
-  const res = await fn('/api/settings/workspace-path', { method: 'DELETE' });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error ?? `Zurücksetzen fehlgeschlagen (${res.status})`);
-  return data;
-}
-
-/**
  * POST /api/github/repos/clone
  * @param {{ repo: string, force?: boolean }} body
  * @param {typeof fetch} [fetchImpl]
@@ -264,218 +212,6 @@ async function cloneRepo(body, fetchImpl) {
     throw err;
   }
   return data;
-}
-
-// ── WorkspacePathSection ──────────────────────────────────────────────────────
-
-/**
- * Sektion „Workspace" — zeigt den wirksamen Workspace-Root inkl. Quelle und erlaubt
- * setzen/ändern (PUT) und zurücksetzen (DELETE) auf den Env-Default.
- * Wird ÜBER der Workspace-Klon-Liste in der GitHub-Ansicht platziert.
- *
- * WS-AC1: Anzeige wirksamer Pfad + Quelle; Setzen/Ändern/Zurücksetzen.
- * WS-AC3 (UI): 4xx/422 → feldzugeordnete Fehlermeldung; alter Wert bleibt sichtbar.
- * A11y: label/htmlFor, aria-describedby, role=status/alert, aria-busy, Fokusführung.
- *
- * State-Verdrahtung (#89): onReload = fetchWorkspaceRepos aus RepoList.
- * Nach erfolgreichem Setzen/Zurücksetzen wird fetchWorkspaceRepos() ausgelöst,
- * damit Klon-Liste UND Badge den neuen Effektivwert widerspiegeln (ein Refetch).
- *
- * @param {{
- *   effectivePath: string|null,
- *   source: "configured"|"env-default",
- *   mountRoot: string,
- *   onReload: () => Promise<void>,
- *   fetchFn?: typeof fetch,
- * }} props
- */
-function WorkspacePathSection({ effectivePath, source, mountRoot, onReload, fetchFn }) {
-  const [editing, setEditing] = useState(false);
-  const [inputVal, setInputVal] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [resetting, setResetting] = useState(false);
-  const [error, setError] = useState(null);
-  const [successMsg, setSuccessMsg] = useState(null);
-  const inputRef = useRef(null);
-  const successRef = useRef(null);
-  const ERROR_ID = 'workspace-path-error';
-  const SUCCESS_ID = 'workspace-path-success';
-
-  // Fokus auf Input wenn Bearbeiten-Modus öffnet
-  useEffect(() => {
-    if (editing && inputRef.current) {
-      inputRef.current.focus();
-    }
-  }, [editing]);
-
-  // Fokus auf Erfolgsmeldung sobald sie gerendert wird (nach State-Update + Re-render)
-  const [pendingFocusSuccess, setPendingFocusSuccess] = useState(false);
-  useEffect(() => {
-    if (pendingFocusSuccess && successRef.current) {
-      successRef.current.focus();
-      setPendingFocusSuccess(false);
-    }
-  });
-
-  const handleSave = useCallback(async () => {
-    setError(null);
-    setSuccessMsg(null);
-
-    const trimmed = inputVal.trim();
-    if (!trimmed) {
-      setError('Workspace-Pfad darf nicht leer sein.');
-      inputRef.current?.focus();
-      return;
-    }
-
-    setSaving(true);
-    try {
-      await putWorkspacePath(trimmed, fetchFn);
-      setInputVal('');
-      setEditing(false);
-      await onReload();
-      setSuccessMsg('Workspace-Pfad gespeichert.');
-      setPendingFocusSuccess(true);
-    } catch (err) {
-      setError(err.message);
-      inputRef.current?.focus();
-    } finally {
-      setSaving(false);
-    }
-  }, [inputVal, onReload, fetchFn]);
-
-  const handleReset = useCallback(async () => {
-    setError(null);
-    setSuccessMsg(null);
-    setResetting(true);
-    try {
-      await deleteWorkspacePath(fetchFn);
-      await onReload();
-      setSuccessMsg('Workspace-Pfad auf Env-Default zurückgesetzt.');
-      setPendingFocusSuccess(true);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setResetting(false);
-    }
-  }, [onReload, fetchFn]);
-
-  const handleCancel = useCallback(() => {
-    setInputVal('');
-    setError(null);
-    setEditing(false);
-  }, []);
-
-  const isConfigured = source === 'configured';
-  const sourceLabel = isConfigured ? 'konfiguriert' : 'Default aus Env';
-
-  return (
-    <div>
-      {/* Effektivwert-Anzeige */}
-      <div style={wsPathStyles.pathRow}>
-        <span style={wsPathStyles.pathLabel}>Aktueller Workspace-Root:</span>
-        <code style={wsPathStyles.pathValue}>
-          {effectivePath ?? '(nicht gesetzt)'}
-        </code>
-      </div>
-      <div style={wsPathStyles.sourceRow}>
-        <span style={wsPathStyles.sourceText}>
-          Quelle: <strong>{sourceLabel}</strong>
-        </span>
-        {mountRoot && (
-          <span style={wsPathStyles.mountHint}>
-            Mount-Schranke: <code style={wsPathStyles.mountCode}>{mountRoot}</code>
-          </span>
-        )}
-      </div>
-
-      {/* Erfolgs-Feedback */}
-      {successMsg && (
-        <p
-          id={SUCCESS_ID}
-          ref={successRef}
-          style={wsPathStyles.success}
-          role="status"
-          tabIndex={-1}
-        >
-          {successMsg}
-        </p>
-      )}
-
-      {/* Fehler-Feedback (feldzugeordnet) */}
-      {error && (
-        <p
-          id={ERROR_ID}
-          style={wsPathStyles.error}
-          role="alert"
-        >
-          {error}
-        </p>
-      )}
-
-      {editing ? (
-        <div style={wsPathStyles.editArea}>
-          <label htmlFor="workspace-path-input" style={wsPathStyles.fieldLabel}>
-            Neuer Workspace-Pfad
-          </label>
-          <input
-            id="workspace-path-input"
-            ref={inputRef}
-            type="text"
-            value={inputVal}
-            onChange={(e) => setInputVal(e.target.value)}
-            placeholder={mountRoot ? `z.B. ${mountRoot}/projekt` : '/workspace/projekt'}
-            style={{ ...wsPathStyles.input, color: '#e5e7eb', caretColor: '#e5e7eb' }}
-            aria-describedby={error ? ERROR_ID : undefined}
-            autoComplete="off"
-            disabled={saving}
-          />
-          <div style={wsPathStyles.actionRow}>
-            <button
-              type="button"
-              onClick={handleSave}
-              disabled={saving}
-              style={wsPathStyles.btnPrimary}
-              aria-busy={saving}
-            >
-              {saving ? 'Speichern…' : 'Speichern'}
-            </button>
-            <button
-              type="button"
-              onClick={handleCancel}
-              disabled={saving}
-              style={wsPathStyles.btnSecondary}
-            >
-              Abbrechen
-            </button>
-          </div>
-        </div>
-      ) : (
-        <div style={wsPathStyles.actionRow}>
-          <button
-            type="button"
-            onClick={() => { setError(null); setSuccessMsg(null); setInputVal(''); setEditing(true); }}
-            style={wsPathStyles.btnSmall}
-            aria-label={isConfigured ? 'Workspace-Pfad ändern' : 'Workspace-Pfad setzen'}
-          >
-            {isConfigured ? 'Ändern' : 'Setzen'}
-          </button>
-          {isConfigured && (
-            <button
-              type="button"
-              onClick={handleReset}
-              disabled={resetting}
-              style={wsPathStyles.btnDanger}
-              aria-label="Workspace-Pfad auf Env-Default zurücksetzen"
-              aria-busy={resetting}
-            >
-              {resetting ? 'Zurücksetzen…' : 'Zurücksetzen'}
-            </button>
-          )}
-        </div>
-      )}
-    </div>
-  );
 }
 
 // ── CiBadge ──────────────────────────────────────────────────────────────────
@@ -1113,24 +849,22 @@ function WorkspaceCloneRow({ clone, fetchFn, onDeleted, onPulled }) {
 // ── WorkspaceOverview ─────────────────────────────────────────────────────────
 
 /**
- * Workspace-Übersicht: enthält die Sektion „Workspace" (Pfad-Konfiguration, WS-AC1/WS-AC3)
- * ÜBER der Klon-Tabelle, dann alle lokalen Klone aus GET /api/workspace/repos.
+ * Workspace-Übersicht: listet alle lokalen Klone aus GET /api/workspace/repos.
  * Pro Klon: Name, Branch, clean/dirty, letzter Commit, credential-freie origin-URL,
  * Aktionen Pull + Löschen (AC9).
  *
- * State-Design (#68 + #89): workspaceRepos, workspacePath und onRefresh kommen von
- * RepoList (zentraler State). Nach Pull/Löschen oder Workspace-Pfad-Änderung:
- * onRefresh() wird aufgerufen → Badge in der Org-Liste und Klon-Liste bleiben synchron.
+ * State-Design (#68): workspaceRepos und onRefresh kommen von RepoList (zentraler State).
+ * Nach Pull/Löschen: onRefresh() wird aufgerufen → Badge in der Org-Liste bleibt synchron.
+ *
+ * Die Workspace-Pfad-Konfiguration (WS-AC1/WS-AC3) lebt seit #92 in SettingsView.jsx.
  *
  * @param {{
  *   workspaceRepos: Array<{ name, branch, dirty, lastCommit, originUrl }>,
- *   workspacePath: { effectivePath: string|null, source: string, mountRoot: string } | null,
- *   workspacePathError: string|null,
  *   onRefresh: () => Promise<void>,
  *   fetchFn?: typeof fetch,
  * }} props
  */
-function WorkspaceOverview({ workspaceRepos, workspacePath, workspacePathError, onRefresh, fetchFn }) {
+function WorkspaceOverview({ workspaceRepos, onRefresh, fetchFn }) {
   const handleDeleted = useCallback(async (_name) => {
     await onRefresh();
   }, [onRefresh]);
@@ -1147,32 +881,6 @@ function WorkspaceOverview({ workspaceRepos, workspacePath, workspacePathError, 
       <p style={styles.sectionDesc}>
         Lokale Klone im Workspace. Pull aktualisiert den Stand vom Remote; Löschen entfernt den Klon dauerhaft.
       </p>
-
-      {/* WS-AC1: Workspace-Pfad-Konfiguration ÜBER der Klon-Liste */}
-      <div style={wsPathStyles.sectionWrapper}>
-        <h3 style={wsPathStyles.subHeading}>Workspace</h3>
-        <p style={wsPathStyles.subDesc}>
-          Workspace-Root für Klon-, Listing- und Pull-Operationen. Muss innerhalb der
-          gemounteten Schranke ({workspacePath?.mountRoot || 'WORKSPACE_DIR'}) liegen.
-        </p>
-        {workspacePathError && (
-          <p style={wsPathStyles.loadError} role="alert">
-            Workspace-Pfad konnte nicht geladen werden: {workspacePathError}
-          </p>
-        )}
-        {workspacePath && (
-          <WorkspacePathSection
-            effectivePath={workspacePath.effectivePath}
-            source={workspacePath.source}
-            mountRoot={workspacePath.mountRoot}
-            onReload={onRefresh}
-            fetchFn={fetchFn}
-          />
-        )}
-      </div>
-
-      {/* Trennlinie zwischen Pfad-Sektion und Klon-Liste */}
-      <hr style={wsPathStyles.divider} />
 
       {workspaceRepos.length === 0 ? (
         <p style={styles.emptyHint}>
@@ -1221,10 +929,6 @@ function WorkspaceOverview({ workspaceRepos, workspacePath, workspacePathError, 
  * AC9 (#68): workspaceRepos (full array) is held here centrally and passed to
  *      WorkspaceOverview — single fetch/refetch, no double fetching; Badge and overview
  *      stay in sync after pull/delete via fetchWorkspaceRepos callback.
- * WS-AC1 (#89): workspacePath state is fetched here and passed to WorkspaceOverview.
- *      fetchWorkspaceRepos is reused as the onReload callback for WorkspacePathSection:
- *      after path set/reset, fetchWorkspaceRepos() re-fetches both workspace/repos AND
- *      workspace-path, keeping the clone list, badge AND path display in sync.
  *
  * @param {{ fetchFn?: typeof fetch }} props
  */
@@ -1234,9 +938,6 @@ function RepoList({ fetchFn }) {
   const [showCreateForm, setShowCreateForm] = useState(false);
   // AC5/AC9: full workspace repos array (authoritative state shared with WorkspaceOverview)
   const [workspaceRepos, setWorkspaceRepos] = useState(/** @type {Array} */ ([]));
-  // WS-AC1 (#89): workspace path state
-  const [workspacePath, setWorkspacePath] = useState(null);
-  const [workspacePathError, setWorkspacePathError] = useState(null);
 
   const fetchFnRef = useRef(fetchFn ?? null);
   useEffect(() => {
@@ -1244,28 +945,13 @@ function RepoList({ fetchFn }) {
   }, [fetchFn]);
 
   /**
-   * Fetches workspace repos AND workspace path and updates both states.
-   * Serves as single onReload/onRefresh callback for WorkspaceOverview + WorkspacePathSection.
-   * Silent on workspace repos failure (AC5). Reports workspace path errors to state.
+   * Fetches workspace repos and updates state.
+   * Serves as single onRefresh callback for WorkspaceOverview.
+   * Silent on failure (AC5).
    */
   const fetchWorkspaceRepos = useCallback(async () => {
-    // Fetch both in parallel — repos failure is silent, path error is surfaced
-    const [reposResult, pathResult] = await Promise.allSettled([
-      listWorkspaceRepos(fetchFnRef.current),
-      fetchWorkspacePath(fetchFnRef.current),
-    ]);
-    if (reposResult.status === 'fulfilled') {
-      setWorkspaceRepos(reposResult.value);
-    }
-    // repos rejection: silent (AC5)
-    if (pathResult.status === 'fulfilled') {
-      setWorkspacePath(pathResult.value);
-      setWorkspacePathError(null);
-    } else {
-      // GET-Fehler: alten Wert nicht stehenlassen — Sektion ausblenden + Fehler anzeigen
-      setWorkspacePath(null);
-      setWorkspacePathError(pathResult.reason?.message ?? 'Unbekannter Fehler');
-    }
+    const repos = await listWorkspaceRepos(fetchFnRef.current);
+    setWorkspaceRepos(repos);
   }, []);
 
   // Derive localRepoNames Set from workspaceRepos (no extra state needed)
@@ -1288,7 +974,7 @@ function RepoList({ fetchFn }) {
       }
     }
     doFetch();
-    // AC5 + WS-AC1: fetch workspace repos + path in parallel — repos failure is silent
+    // AC5: fetch workspace repos — failure is silent (graceful degradation)
     fetchWorkspaceRepos();
     return () => { cancelled = true; };
   }, [fetchWorkspaceRepos]);
@@ -1369,11 +1055,9 @@ function RepoList({ fetchFn }) {
         )}
       </section>
 
-      {/* AC9 (#68) + WS-AC1 (#89): Workspace-Übersicht unterhalb der Org-Repo-Liste */}
+      {/* AC9 (#68): Workspace-Übersicht unterhalb der Org-Repo-Liste */}
       <WorkspaceOverview
         workspaceRepos={workspaceRepos}
-        workspacePath={workspacePath}
-        workspacePathError={workspacePathError}
         onRefresh={fetchWorkspaceRepos}
         fetchFn={fetchFn}
       />
@@ -2186,161 +1870,3 @@ const styles = {
   },
 };
 
-// ── WorkspacePathSection styles (WS-AC1/#89) ──────────────────────────────────
-
-/** Styles für WorkspacePathSection (Pfad-Konfiguration in der GitHub-Ansicht). */
-const wsPathStyles = {
-  sectionWrapper: {
-    marginBottom: 16,
-  },
-  subHeading: {
-    margin: '0 0 6px',
-    fontSize: 15,
-    fontWeight: 700,
-    color: '#e5e7eb',
-  },
-  subDesc: {
-    margin: '0 0 12px',
-    fontSize: 13,
-    color: '#9ca3af',    // Kontrast auf #111 ≥ 4.5:1 (geprüft: ~4.6:1) — NICHT #6b7280
-    lineHeight: 1.5,
-  },
-  loadError: {
-    padding: '8px 12px',
-    marginBottom: 12,
-    background: '#2d0f0f',
-    border: '1px solid #7f1d1d',
-    borderRadius: 4,
-    color: '#fca5a5',
-    fontSize: 13,
-  },
-  divider: {
-    margin: '16px 0',
-    border: 'none',
-    borderTop: '1px solid #2a2a2a',
-  },
-  pathRow: {
-    display: 'flex',
-    alignItems: 'baseline',
-    gap: 8,
-    marginBottom: 6,
-    flexWrap: 'wrap',
-  },
-  pathLabel: {
-    fontSize: 13,
-    fontWeight: 600,
-    color: '#d4d4d4',
-    flexShrink: 0,
-  },
-  pathValue: {
-    fontSize: 13,
-    color: '#86efac',    // Kontrast auf #111 ≥ 4.5:1
-    fontFamily: 'monospace',
-    wordBreak: 'break-all',
-  },
-  sourceRow: {
-    display: 'flex',
-    alignItems: 'baseline',
-    gap: 16,
-    marginBottom: 12,
-    flexWrap: 'wrap',
-  },
-  sourceText: {
-    fontSize: 13,
-    color: '#9ca3af',    // Kontrast auf #111 ≥ 4.5:1 (geprüft: ~4.6:1) — NICHT #6b7280
-  },
-  mountHint: {
-    fontSize: 12,
-    color: '#9ca3af',
-  },
-  mountCode: {
-    fontSize: 12,
-    color: '#9ca3af',
-    fontFamily: 'monospace',
-  },
-  success: {
-    margin: '0 0 10px',
-    padding: '8px 12px',
-    background: '#052e16',
-    border: '1px solid #166534',
-    borderRadius: 4,
-    color: '#86efac',
-    fontSize: 13,
-  },
-  error: {
-    margin: '0 0 10px',
-    padding: '8px 12px',
-    background: '#2d0f0f',
-    border: '1px solid #7f1d1d',
-    borderRadius: 4,
-    color: '#fca5a5',
-    fontSize: 13,
-  },
-  editArea: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 8,
-    marginTop: 8,
-  },
-  fieldLabel: {
-    fontSize: 13,
-    fontWeight: 600,
-    color: '#d4d4d4',
-  },
-  input: {
-    width: '100%',
-    padding: '8px 12px',
-    background: '#1e293b',
-    color: '#e5e7eb',
-    border: '1px solid #334155',
-    borderRadius: 4,
-    fontSize: 14,
-    boxSizing: 'border-box',
-  },
-  actionRow: {
-    display: 'flex',
-    gap: 8,
-    flexWrap: 'wrap',
-  },
-  btnPrimary: {
-    padding: '8px 16px',
-    background: '#1d4ed8',    // Kontrast #fff/#1d4ed8 ≥ 4.5:1
-    color: '#ffffff',
-    border: 'none',
-    borderRadius: 4,
-    fontSize: 13,
-    cursor: 'pointer',
-    minHeight: 44,
-    fontWeight: 600,
-  },
-  btnSecondary: {
-    padding: '8px 16px',
-    background: '#1e293b',
-    color: '#d4d4d4',
-    border: '1px solid #334155',
-    borderRadius: 4,
-    fontSize: 13,
-    cursor: 'pointer',
-    minHeight: 44,
-  },
-  btnSmall: {
-    padding: '6px 14px',
-    background: '#1e293b',
-    color: '#93c5fd',         // Kontrast auf #111 ≈ 5.8:1
-    border: '1px solid #334155',
-    borderRadius: 4,
-    fontSize: 13,
-    cursor: 'pointer',
-    minHeight: 44,
-  },
-  btnDanger: {
-    padding: '8px 16px',
-    background: '#7f1d1d',
-    color: '#fecaca',         // Kontrast auf #7f1d1d ≥ 4.5:1
-    border: 'none',
-    borderRadius: 4,
-    fontSize: 13,
-    cursor: 'pointer',
-    minHeight: 44,
-  },
-};
