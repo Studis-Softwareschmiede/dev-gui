@@ -434,6 +434,22 @@ describe('DELETE /api/cloudflare/tunnels/:tunnelId', () => {
     expect(res.body.error).toBe('confirmation-required');
   });
 
+  it('ADR-011 Schranken-Reihenfolge: protected-resource VOR confirmation-required (isProtected=true, confirm fehlt)', async () => {
+    // Regression-Test: geschützter Tunnel + fehlender confirm → protected-resource (NICHT confirmation-required).
+    // Sichert, dass der LockoutGuard (Step 1) IMMER vor dem confirm-Pflicht-Check (Step 2) greift.
+    let deleteCalled = false;
+    const apiStub = {
+      isProtected: () => true,
+      deleteTunnel: async () => { deleteCalled = true; return { result: 'ok' }; },
+    };
+    const app = makeApp(apiStub);
+
+    const res = await request(app, 'DELETE', `/api/cloudflare/tunnels/${TUNNEL_ID}`, {});
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe('protected-resource');
+    expect(deleteCalled).toBe(false);
+  });
+
   it('422 protected-resource wenn confirm ein protected hostname ist', async () => {
     let deleteCalled = false;
     const apiStub = {

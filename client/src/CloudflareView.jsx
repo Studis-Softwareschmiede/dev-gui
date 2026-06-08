@@ -150,12 +150,23 @@ function TypeToConfirmDialog({ hostname, onConfirm, onCancel, deleting, deleteEr
 
   const matched = inputVal === hostname;
 
+  // WCAG 2.1.1 — Tastatur: Escape schließt/bricht den Dialog ab
+  const handleKeyDown = useCallback(
+    (e) => {
+      if (e.key === 'Escape' && !deleting) {
+        onCancel();
+      }
+    },
+    [deleting, onCancel],
+  );
+
   return (
     <div
       role="dialog"
       aria-modal="true"
       aria-labelledby="confirm-dialog-title"
       style={dialogStyles.overlay}
+      onKeyDown={handleKeyDown}
     >
       <div style={dialogStyles.box}>
         <h2 id="confirm-dialog-title" style={dialogStyles.title}>Route löschen</h2>

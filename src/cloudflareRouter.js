@@ -207,16 +207,18 @@ export function cloudflareRouter(cloudflareApi, auditStore) {
       return res.status(422).json({ error: 'invalid-tunnel-id' });
     }
 
-    // ADR-011 Step 2: type-to-confirm — confirm must be present and non-empty
     const { confirm } = req.body ?? {};
-    if (!confirm || typeof confirm !== 'string' || confirm.trim() === '') {
-      return res.status(422).json({ error: 'confirmation-required', reason: 'confirm-Feld ist Pflicht' });
+
+    // ADR-011 Step 1: LockoutGuard FIRST — hart, vor allem anderen (nicht überschreibbar,
+    // egal welcher confirm-Token oder ob confirm fehlt).
+    // Check tunnelId (always present from URL) plus confirm value if provided.
+    if (cloudflareApi.isProtected(tunnelId) || (confirm && cloudflareApi.isProtected(confirm))) {
+      return res.status(422).json({ error: 'protected-resource', reason: 'geschützt: eigene Erreichbarkeit' });
     }
 
-    // ADR-011 Step 1: LockoutGuard on the confirm value (tunnel name or hostname)
-    // The confirm value is what the user typed — it represents the tunnel being deleted
-    if (cloudflareApi.isProtected(confirm)) {
-      return res.status(422).json({ error: 'protected-resource', reason: 'geschützt: eigene Erreichbarkeit' });
+    // ADR-011 Step 2: type-to-confirm Pflicht — confirm must be present and non-empty
+    if (!confirm || typeof confirm !== 'string' || confirm.trim() === '') {
+      return res.status(422).json({ error: 'confirmation-required', reason: 'confirm-Feld ist Pflicht' });
     }
 
     // ADR-011 Step 3: CRED_ADMIN_EMAILS role check (security/R04)
