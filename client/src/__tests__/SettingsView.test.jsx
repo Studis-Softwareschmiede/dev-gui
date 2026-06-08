@@ -1,5 +1,6 @@
 /**
- * SettingsView.test.jsx — Unit-Tests für SettingsView (Credentials AC1–AC8 + SSH-Keys AC1–AC6).
+ * SettingsView.test.jsx — Unit-Tests für SettingsView (Credentials AC1–AC8 + SSH-Keys AC1–AC6
+ *   + Workspace AC1 / UI-Anteil AC3).
  *
  * Covers (settings-credentials + settings-shell):
  *   AC1  — Credential-Felder mit Status (gesetzt/nicht gesetzt); kein Klartext
@@ -18,6 +19,13 @@
  *   SSH-AC4 — Public-Key-Format-Validierung; klare Fehlermeldung
  *   SSH-AC5 — Private-Key-Klartext nie sichtbar
  *   SSH-AC6 — Endpunkte hinter Access-Mauer (durch AccessGuard, testbar via makeFetch-Error)
+ *
+ * Covers (workspace-path-config AC1 + UI-Anteil AC3):
+ *   WS-AC1  — Sektion „Workspace" zeigt wirksamen Pfad inkl. Quelle; Setzen/Ändern/Zurücksetzen
+ *   WS-AC3  — 422 → role=alert, alter Wert bleibt sichtbar; Validierungsfehler feldzugeordnet
+ *   WS-Loading — aria-busy + Mehrfachklick-Schutz während in-flight
+ *   WS-A11y   — label/htmlFor, aria-describedby, role=status/alert, Touch-Target ≥44px,
+ *               Fokusführung bei Erfolg/Fehler (activeElement)
  *
  * @jest-environment jsdom
  */
@@ -65,9 +73,24 @@ const SSH_KEYS_WITH_ROOT = [
   },
 ];
 
+/** Standard-Workspace-Antwort (env-default). */
+const DEFAULT_WORKSPACE = {
+  effectivePath: '/workspace',
+  source: 'env-default',
+  mountRoot: '/workspace',
+};
+
+/** Workspace-Antwort mit konfiguriertem Pfad. */
+const CONFIGURED_WORKSPACE = {
+  effectivePath: '/workspace/projekt',
+  source: 'configured',
+  mountRoot: '/workspace',
+};
+
 /**
  * Erstellt einen jest.fn() fetch, der auf verschiedene Requests antwortet.
- * Unterstützt auch SSH-Key-Endpoints (/api/settings/ssh-keys*).
+ * Unterstützt SSH-Key-Endpoints (/api/settings/ssh-keys*) und
+ * Workspace-Path-Endpoints (/api/settings/workspace-path).
  */
 function makeFetch({
   getResponse = EMPTY_CREDS,
@@ -76,13 +99,18 @@ function makeFetch({
   sshGetResponse = EMPTY_SSH_KEYS,
   sshPutResponse = null,
   sshDeleteResponse = null,
+  workspaceGetResponse = DEFAULT_WORKSPACE,
+  workspacePutResponse = null,
+  workspaceDeleteResponse = null,
 } = {}) {
   return jest.fn(async (url, opts) => {
     const method = opts?.method ?? 'GET';
     const isSsh = typeof url === 'string' && url.includes('/ssh-keys');
+    const isWorkspace = typeof url === 'string' && url.includes('/workspace-path');
 
     if (method === 'GET') {
       if (isSsh) return { ok: true, json: async () => sshGetResponse };
+      if (isWorkspace) return { ok: true, json: async () => workspaceGetResponse };
       return { ok: true, json: async () => getResponse };
     }
     if (method === 'PUT') {
@@ -93,6 +121,15 @@ function makeFetch({
         return {
           ok: true,
           json: async () => sshPutResponse ?? { user: 'root', publicKey: 'ssh-ed25519 AAAA… test', privateKeyStatus: 'unset' },
+        };
+      }
+      if (isWorkspace) {
+        if (workspacePutResponse === 'error') {
+          return { ok: false, status: 422, json: async () => ({ error: 'Pfad existiert nicht oder ist kein Verzeichnis' }) };
+        }
+        return {
+          ok: true,
+          json: async () => workspacePutResponse ?? { effectivePath: '/workspace/projekt', source: 'configured' },
         };
       }
       if (putResponse === 'error') {
@@ -111,6 +148,15 @@ function makeFetch({
         return {
           ok: true,
           json: async () => sshDeleteResponse ?? { user: 'root', privateKeyStatus: 'unset' },
+        };
+      }
+      if (isWorkspace) {
+        if (workspaceDeleteResponse === 'error') {
+          return { ok: false, json: async () => ({ error: 'Zurücksetzen fehlgeschlagen' }) };
+        }
+        return {
+          ok: true,
+          json: async () => workspaceDeleteResponse ?? { effectivePath: '/workspace', source: 'env-default' },
         };
       }
       if (deleteResponse === 'error') {
@@ -154,12 +200,12 @@ describe('SettingsView — Grundstruktur', () => {
     });
   });
 
-  it('rendert mindestens 5 h2-Sektions-Überschriften (GitHub, Cloudflare, Hetzner, Weitere, SSH-Keys)', async () => {
+  it('rendert mindestens 6 h2-Sektions-Überschriften (GitHub, Cloudflare, Hetzner, Weitere, Workspace, SSH-Keys)', async () => {
     const { getByRole } = renderView();
     await waitFor(() => {
       const main = getByRole('main', { name: /einstellungen-ansicht/i });
       const h2s = main.querySelectorAll('h2');
-      expect(h2s.length).toBeGreaterThanOrEqual(5);
+      expect(h2s.length).toBeGreaterThanOrEqual(6);
     });
   });
 
@@ -1178,5 +1224,661 @@ describe('SettingsView — S1: Neuer Benutzer erscheint als In-Memory-Stub (kein
     // Kein zusätzlicher GET /api/settings/ssh-keys nach dem Hinzufügen
     const getCallsAfter = fetchMock.mock.calls.filter(([, opts]) => !opts || (opts?.method ?? 'GET') === 'GET').length;
     expect(getCallsAfter).toBe(getCallsBefore);
+  });
+});
+
+// ── Workspace — WS-AC1: Sektion + Anzeige ────────────────────────────────────
+
+describe('SettingsView — WS-AC1: Workspace-Sektion Grundstruktur', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('WS-AC1 — rendert h2 "Workspace"', async () => {
+    const { getByRole } = renderView();
+    await waitFor(() => {
+      expect(getByRole('heading', { name: /^workspace$/i })).toBeTruthy();
+    });
+  });
+
+  it('WS-AC1 — zeigt wirksamen Pfad (env-default)', async () => {
+    const { getByRole } = renderView(
+      makeFetch({ workspaceGetResponse: DEFAULT_WORKSPACE }),
+    );
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      expect(main.textContent).toContain('/workspace');
+    });
+  });
+
+  it('WS-AC1 — zeigt Quelle "Default aus Env" wenn source=env-default', async () => {
+    const { getByRole } = renderView(
+      makeFetch({ workspaceGetResponse: { effectivePath: '/workspace', source: 'env-default', mountRoot: '/workspace' } }),
+    );
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      expect(main.textContent).toMatch(/default aus env/i);
+    });
+  });
+
+  it('WS-AC1 — zeigt Quelle "konfiguriert" wenn source=configured', async () => {
+    const { getByRole } = renderView(
+      makeFetch({ workspaceGetResponse: CONFIGURED_WORKSPACE }),
+    );
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      expect(main.textContent).toMatch(/konfiguriert/i);
+    });
+  });
+
+  it('WS-AC1 — zeigt Effektivwert /workspace/projekt wenn source=configured', async () => {
+    const { getByRole } = renderView(
+      makeFetch({ workspaceGetResponse: CONFIGURED_WORKSPACE }),
+    );
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      expect(main.textContent).toContain('/workspace/projekt');
+    });
+  });
+
+  it('WS-AC1 — zeigt "Setzen"-Button wenn source=env-default', async () => {
+    const { getByRole } = renderView(
+      makeFetch({ workspaceGetResponse: DEFAULT_WORKSPACE }),
+    );
+    await waitFor(() => {
+      expect(getByRole('button', { name: /workspace-pfad setzen/i })).toBeTruthy();
+    });
+  });
+
+  it('WS-AC1 — zeigt "Ändern"-Button und "Zurücksetzen"-Button wenn source=configured', async () => {
+    const { getAllByRole } = renderView(
+      makeFetch({ workspaceGetResponse: CONFIGURED_WORKSPACE }),
+    );
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/workspace-pfad ändern/i))).toBe(true);
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/workspace-pfad auf env-default zurücksetzen/i))).toBe(true);
+    });
+  });
+});
+
+// ── Workspace — WS-AC1: Setzen (PUT) ─────────────────────────────────────────
+
+describe('SettingsView — WS-AC1: Setzen (PUT)', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('WS-AC1 — Klick auf "Setzen" öffnet Eingabefeld mit label', async () => {
+    const { getByRole } = renderView(
+      makeFetch({ workspaceGetResponse: DEFAULT_WORKSPACE }),
+    );
+    await waitFor(() => {
+      expect(getByRole('button', { name: /workspace-pfad setzen/i })).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /workspace-pfad setzen/i }));
+    });
+
+    await waitFor(() => {
+      const input = document.getElementById('workspace-path-input');
+      expect(input).toBeTruthy();
+      // label/htmlFor verdrahtet
+      const label = document.querySelector('label[for="workspace-path-input"]');
+      expect(label).toBeTruthy();
+    });
+  });
+
+  it('WS-AC1 — erfolgreiches Setzen: PUT abgefeuert, Quelle wechselt auf "konfiguriert"', async () => {
+    // Nach erfolgreichem PUT liefert GET den neuen konfigurierten Wert
+    let getCallCount = 0;
+    const fetchMock = jest.fn(async (url, opts) => {
+      const method = opts?.method ?? 'GET';
+      const isWorkspace = typeof url === 'string' && url.includes('/workspace-path');
+      const isSsh = typeof url === 'string' && url.includes('/ssh-keys');
+      if (method === 'GET') {
+        if (isSsh) return { ok: true, json: async () => EMPTY_SSH_KEYS };
+        if (isWorkspace) {
+          getCallCount++;
+          return {
+            ok: true,
+            json: async () => (getCallCount <= 1 ? DEFAULT_WORKSPACE : CONFIGURED_WORKSPACE),
+          };
+        }
+        return { ok: true, json: async () => EMPTY_CREDS };
+      }
+      if (method === 'PUT' && isWorkspace) {
+        return { ok: true, json: async () => ({ effectivePath: '/workspace/projekt', source: 'configured' }) };
+      }
+      return { ok: false, json: async () => ({ error: 'unbekannt' }) };
+    });
+    globalThis.fetch = fetchMock;
+    const onNavigate = jest.fn();
+    const { getByRole } = render(React.createElement(SettingsView, { onNavigate }));
+
+    // Warten auf "Setzen"-Button
+    await waitFor(() => {
+      expect(getByRole('button', { name: /workspace-pfad setzen/i })).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /workspace-pfad setzen/i }));
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('workspace-path-input')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.change(document.getElementById('workspace-path-input'), {
+        target: { value: '/workspace/projekt' },
+      });
+    });
+
+    await act(async () => {
+      const saveBtns = Array.from(document.querySelectorAll('button')).filter(
+        (b) => b.textContent.trim() === 'Speichern',
+      );
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    // PUT wurde abgefeuert
+    await waitFor(() => {
+      const putCalls = fetchMock.mock.calls.filter(([url, opts]) => {
+        return (opts?.method ?? 'GET') === 'PUT' && url.includes('/workspace-path');
+      });
+      expect(putCalls.length).toBe(1);
+    });
+
+    // Nach Reload: Quelle wechselt auf "konfiguriert"
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      expect(main.textContent).toMatch(/konfiguriert/i);
+    });
+  });
+
+  it('WS-AC1 — Erfolg zeigt role=status Meldung', async () => {
+    const { getByRole } = renderView(
+      makeFetch({ workspaceGetResponse: DEFAULT_WORKSPACE }),
+    );
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /workspace-pfad setzen/i })).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /workspace-pfad setzen/i }));
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('workspace-path-input')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.change(document.getElementById('workspace-path-input'), {
+        target: { value: '/workspace/projekt' },
+      });
+    });
+
+    await act(async () => {
+      const saveBtns = Array.from(document.querySelectorAll('button')).filter(
+        (b) => b.textContent.trim() === 'Speichern',
+      );
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    await waitFor(() => {
+      const statusEl = document.querySelector('[role="status"]');
+      expect(statusEl).toBeTruthy();
+      expect(statusEl.textContent).toMatch(/gespeichert/i);
+    });
+  });
+});
+
+// ── Workspace — WS-AC1: Zurücksetzen (DELETE) ────────────────────────────────
+
+describe('SettingsView — WS-AC1: Zurücksetzen (DELETE)', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('WS-AC1 — Zurücksetzen: DELETE abgefeuert, Quelle wechselt auf "Default aus Env"', async () => {
+    let getCallCount = 0;
+    const fetchMock = jest.fn(async (url, opts) => {
+      const method = opts?.method ?? 'GET';
+      const isWorkspace = typeof url === 'string' && url.includes('/workspace-path');
+      const isSsh = typeof url === 'string' && url.includes('/ssh-keys');
+      if (method === 'GET') {
+        if (isSsh) return { ok: true, json: async () => EMPTY_SSH_KEYS };
+        if (isWorkspace) {
+          getCallCount++;
+          return {
+            ok: true,
+            json: async () => (getCallCount <= 1 ? CONFIGURED_WORKSPACE : DEFAULT_WORKSPACE),
+          };
+        }
+        return { ok: true, json: async () => EMPTY_CREDS };
+      }
+      if (method === 'DELETE' && isWorkspace) {
+        return { ok: true, json: async () => ({ effectivePath: '/workspace', source: 'env-default' }) };
+      }
+      return { ok: false, json: async () => ({ error: 'unbekannt' }) };
+    });
+    globalThis.fetch = fetchMock;
+    const onNavigate = jest.fn();
+    const { getByRole, getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+
+    // Warten auf "Zurücksetzen"-Button (nur sichtbar wenn source=configured)
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/workspace-pfad auf env-default zurücksetzen/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const resetBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/workspace-pfad auf env-default zurücksetzen/i),
+      );
+      if (resetBtn) fireEvent.click(resetBtn);
+    });
+
+    // DELETE wurde abgefeuert
+    await waitFor(() => {
+      const deleteCalls = fetchMock.mock.calls.filter(([url, opts]) => {
+        return (opts?.method ?? 'GET') === 'DELETE' && url.includes('/workspace-path');
+      });
+      expect(deleteCalls.length).toBe(1);
+    });
+
+    // Nach Reload: Quelle wechselt auf "Default aus Env"
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      expect(main.textContent).toMatch(/default aus env/i);
+    });
+  });
+});
+
+// ── Workspace — WS-AC3 (UI): Validierungsfehler ──────────────────────────────
+
+describe('SettingsView — WS-AC3 (UI): Validierungsfehler', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('WS-AC3 — 422-Fehler: role=alert erscheint mit Backend-Fehlermeldung', async () => {
+    const { getByRole } = renderView(
+      makeFetch({ workspaceGetResponse: DEFAULT_WORKSPACE, workspacePutResponse: 'error' }),
+    );
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /workspace-pfad setzen/i })).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /workspace-pfad setzen/i }));
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('workspace-path-input')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.change(document.getElementById('workspace-path-input'), {
+        target: { value: '/etc/shadow' },
+      });
+    });
+
+    await act(async () => {
+      const saveBtns = Array.from(document.querySelectorAll('button')).filter(
+        (b) => b.textContent.trim() === 'Speichern',
+      );
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    await waitFor(() => {
+      const alertEl = document.querySelector('[role="alert"]');
+      expect(alertEl).toBeTruthy();
+      expect(alertEl.textContent).toMatch(/pfad existiert nicht|verzeichnis/i);
+    });
+  });
+
+  it('WS-AC3 — 422-Fehler: alter wirksamer Pfad bleibt sichtbar (unverändert)', async () => {
+    const { getByRole } = renderView(
+      makeFetch({
+        workspaceGetResponse: DEFAULT_WORKSPACE,
+        workspacePutResponse: 'error',
+      }),
+    );
+
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      // Der alte Wert (/workspace) ist initial sichtbar
+      expect(main.textContent).toContain('/workspace');
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /workspace-pfad setzen/i }));
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('workspace-path-input')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.change(document.getElementById('workspace-path-input'), {
+        target: { value: '/etc/shadow' },
+      });
+    });
+
+    await act(async () => {
+      const saveBtns = Array.from(document.querySelectorAll('button')).filter(
+        (b) => b.textContent.trim() === 'Speichern',
+      );
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    // Fehler erscheint + alter Wert /workspace noch sichtbar (die Anzeige oben bleibt)
+    await waitFor(() => {
+      expect(document.querySelector('[role="alert"]')).toBeTruthy();
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      expect(main.textContent).toContain('/workspace');
+    });
+  });
+
+  it('WS-AC3 — leeres Feld: Frontend-Fehlermeldung, kein PUT abgefeuert', async () => {
+    const fetchMock = makeFetch({ workspaceGetResponse: DEFAULT_WORKSPACE });
+    globalThis.fetch = fetchMock;
+    const onNavigate = jest.fn();
+    const { getByRole } = render(React.createElement(SettingsView, { onNavigate }));
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /workspace-pfad setzen/i })).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /workspace-pfad setzen/i }));
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('workspace-path-input')).toBeTruthy();
+    });
+
+    // Kein Wert eingeben — direkt Speichern
+    await act(async () => {
+      const saveBtns = Array.from(document.querySelectorAll('button')).filter(
+        (b) => b.textContent.trim() === 'Speichern',
+      );
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    await waitFor(() => {
+      const alertEl = document.querySelector('[role="alert"]');
+      expect(alertEl).toBeTruthy();
+      expect(alertEl.textContent).toMatch(/leer/i);
+    });
+
+    // Kein PUT abgefeuert
+    const putCalls = fetchMock.mock.calls.filter(([url, opts]) => {
+      return (opts?.method ?? 'GET') === 'PUT' && url.includes('/workspace-path');
+    });
+    expect(putCalls.length).toBe(0);
+  });
+
+  it('WS-AC3 — aria-describedby verbindet Input mit Fehler-Element', async () => {
+    const { getByRole } = renderView(
+      makeFetch({ workspaceGetResponse: DEFAULT_WORKSPACE, workspacePutResponse: 'error' }),
+    );
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /workspace-pfad setzen/i })).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /workspace-pfad setzen/i }));
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('workspace-path-input')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.change(document.getElementById('workspace-path-input'), {
+        target: { value: '/outside' },
+      });
+    });
+
+    await act(async () => {
+      const saveBtns = Array.from(document.querySelectorAll('button')).filter(
+        (b) => b.textContent.trim() === 'Speichern',
+      );
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    await waitFor(() => {
+      const input = document.getElementById('workspace-path-input');
+      expect(input.getAttribute('aria-describedby')).toBe('workspace-path-error');
+      const errorEl = document.getElementById('workspace-path-error');
+      expect(errorEl).toBeTruthy();
+    });
+  });
+
+  it('WS-AC3 — ohne Fehler hat Input kein aria-describedby', async () => {
+    const { getByRole } = renderView(
+      makeFetch({ workspaceGetResponse: DEFAULT_WORKSPACE }),
+    );
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /workspace-pfad setzen/i })).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /workspace-pfad setzen/i }));
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('workspace-path-input')).toBeTruthy();
+    });
+
+    const input = document.getElementById('workspace-path-input');
+    expect(input.getAttribute('aria-describedby')).toBeNull();
+  });
+});
+
+// ── Workspace — WS-Loading: Loading-State ────────────────────────────────────
+
+describe('SettingsView — WS-Loading: aria-busy + Mehrfachklick-Schutz', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('WS-Loading — Speichern-Button hat aria-busy=true während in-flight', async () => {
+    // Fetch löst nicht sofort auf — prüfe aria-busy während des Awaits
+    let resolvePut;
+    const putPromise = new Promise((res) => { resolvePut = res; });
+
+    const fetchMock = jest.fn(async (url, opts) => {
+      const method = opts?.method ?? 'GET';
+      const isWorkspace = typeof url === 'string' && url.includes('/workspace-path');
+      const isSsh = typeof url === 'string' && url.includes('/ssh-keys');
+      if (method === 'GET') {
+        if (isSsh) return { ok: true, json: async () => EMPTY_SSH_KEYS };
+        if (isWorkspace) return { ok: true, json: async () => DEFAULT_WORKSPACE };
+        return { ok: true, json: async () => EMPTY_CREDS };
+      }
+      if (method === 'PUT' && isWorkspace) {
+        await putPromise;
+        return { ok: true, json: async () => ({ effectivePath: '/workspace/x', source: 'configured' }) };
+      }
+      return { ok: false, json: async () => ({ error: 'unbekannt' }) };
+    });
+    globalThis.fetch = fetchMock;
+    const onNavigate = jest.fn();
+    const { getByRole } = render(React.createElement(SettingsView, { onNavigate }));
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /workspace-pfad setzen/i })).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /workspace-pfad setzen/i }));
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('workspace-path-input')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.change(document.getElementById('workspace-path-input'), {
+        target: { value: '/workspace/x' },
+      });
+    });
+
+    // Klick ohne await-Abschluss — Button sollte in-flight disabled sein
+    act(() => {
+      const saveBtns = Array.from(document.querySelectorAll('button')).filter(
+        (b) => b.textContent.trim() === 'Speichern' || b.textContent.trim() === 'Speichern…',
+      );
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    // Kurzfristig prüfen: disabled oder aria-busy
+    await waitFor(() => {
+      const btn = Array.from(document.querySelectorAll('button')).find(
+        (b) => b.textContent.trim() === 'Speichern…' || b.getAttribute('aria-busy') === 'true',
+      );
+      expect(btn).toBeTruthy();
+    });
+
+    // PUT freigeben
+    resolvePut();
+    await act(async () => {});
+  });
+});
+
+// ── Workspace — WS-A11y: Touch-Target + Fokusführung ─────────────────────────
+
+describe('SettingsView — WS-A11y: Touch-Target + Fokusführung', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('WS-A11y — Workspace-Buttons haben minHeight ≥ 44 px', async () => {
+    const { getAllByRole } = renderView(
+      makeFetch({ workspaceGetResponse: CONFIGURED_WORKSPACE }),
+    );
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      // Finde Workspace-spezifische Buttons
+      const workspaceBtns = btns.filter((b) => {
+        const label = b.getAttribute('aria-label') ?? '';
+        return label.match(/workspace-pfad/i);
+      });
+      expect(workspaceBtns.length).toBeGreaterThan(0);
+      for (const btn of workspaceBtns) {
+        const minH = parseInt(btn.style.minHeight ?? '0', 10);
+        expect(minH).toBeGreaterThanOrEqual(44);
+      }
+    });
+  });
+
+  it('WS-A11y — Fokus landet nach 422-Fehler auf dem Input (activeElement)', async () => {
+    const { getByRole } = renderView(
+      makeFetch({ workspaceGetResponse: DEFAULT_WORKSPACE, workspacePutResponse: 'error' }),
+    );
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /workspace-pfad setzen/i })).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /workspace-pfad setzen/i }));
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('workspace-path-input')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.change(document.getElementById('workspace-path-input'), {
+        target: { value: '/etc/shadow' },
+      });
+    });
+
+    await act(async () => {
+      const saveBtns = Array.from(document.querySelectorAll('button')).filter(
+        (b) => b.textContent.trim() === 'Speichern',
+      );
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    // Nach Fehler: activeElement muss der Input sein
+    await waitFor(() => {
+      expect(document.querySelector('[role="alert"]')).toBeTruthy();
+      expect(document.activeElement).toBe(document.getElementById('workspace-path-input'));
+    });
+  });
+
+  it('WS-A11y — Fokus landet nach Erfolg auf der Erfolgsmeldung (activeElement)', async () => {
+    const { getByRole } = renderView(
+      makeFetch({ workspaceGetResponse: DEFAULT_WORKSPACE }),
+    );
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /workspace-pfad setzen/i })).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /workspace-pfad setzen/i }));
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('workspace-path-input')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.change(document.getElementById('workspace-path-input'), {
+        target: { value: '/workspace/projekt' },
+      });
+    });
+
+    await act(async () => {
+      const saveBtns = Array.from(document.querySelectorAll('button')).filter(
+        (b) => b.textContent.trim() === 'Speichern',
+      );
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    // Nach Erfolg: activeElement muss die Erfolgsmeldung (role=status) sein
+    await waitFor(() => {
+      const statusEl = document.querySelector('[role="status"]');
+      expect(statusEl).toBeTruthy();
+      expect(document.activeElement).toBe(statusEl);
+    });
+  });
+
+  it('WS-A11y — Workspace-Ladefehler zeigt role=alert', async () => {
+    const fetchMock = jest.fn(async (url, opts) => {
+      const method = opts?.method ?? 'GET';
+      const isWorkspace = typeof url === 'string' && url.includes('/workspace-path');
+      const isSsh = typeof url === 'string' && url.includes('/ssh-keys');
+      if (method === 'GET') {
+        if (isSsh) return { ok: true, json: async () => EMPTY_SSH_KEYS };
+        if (isWorkspace) throw new Error('Workspace-Endpunkt nicht erreichbar');
+        return { ok: true, json: async () => EMPTY_CREDS };
+      }
+      return { ok: false, json: async () => ({ error: 'unbekannt' }) };
+    });
+    globalThis.fetch = fetchMock;
+    const onNavigate = jest.fn();
+    render(React.createElement(SettingsView, { onNavigate }));
+
+    await waitFor(() => {
+      const alerts = document.querySelectorAll('[role="alert"]');
+      const hasWsError = Array.from(alerts).some((el) =>
+        el.textContent.match(/workspace-pfad konnte nicht geladen werden/i),
+      );
+      expect(hasWsError).toBe(true);
+    });
   });
 });

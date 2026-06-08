@@ -1,5 +1,5 @@
 /**
- * SettingsView.jsx — Settings-Ansicht mit Credential- und SSH-Key-Formularen.
+ * SettingsView.jsx — Settings-Ansicht mit Credential-, SSH-Key- und Workspace-Formularen.
  *
  * Credentials (settings-credentials):
  *   AC1  — Je Integrations-Sektion: Credential-Felder mit Status (gesetzt/nicht gesetzt),
@@ -22,6 +22,12 @@
  *   SSH-AC8  — Wiederholte Provisionierung idempotent (Backend-Garantie, UI zeigt 'already-present').
  *   SSH-AC9  — Provision-Ergebnis (added/already-present/error) ohne Geheim-Leak angezeigt.
  *   SSH-AC10 — Provision-Aktion nur berechtigter Identität zugänglich (403 sonst).
+ *
+ * Workspace (workspace-path-config):
+ *   WS-AC1  — Sektion „Workspace": zeigt aktuell wirksamen Workspace-Root inkl. Quelle
+ *             (konfiguriert / Env-Default); erlaubt setzen, ändern und zurücksetzen.
+ *   WS-AC3  — Validierungsfehler (4xx/422) werden als feldzugeordnete Fehlermeldung angezeigt;
+ *             bisher wirksamer Wert bleibt sichtbar unverändert bei Fehler.
  *
  * A11y: WCAG 2.1 AA — Überschriften-Struktur, sichtbarer Fokus, Touch-Target ≥ 44 px,
  *       Kontrast ≥ 4.5:1, Fehler programmatisch zugeordnet (aria-describedby).
@@ -1014,6 +1020,251 @@ function SshKeyEntry({ entry, onSaved }) {
   );
 }
 
+// ── Workspace-API-Helfer ──────────────────────────────────────────────────────
+
+/**
+ * Lädt den aktuell wirksamen Workspace-Root inkl. Quelle.
+ * @returns {Promise<{ effectivePath: string|null, source: "configured"|"env-default", mountRoot: string }>}
+ */
+async function fetchWorkspacePath() {
+  const res = await fetch('/api/settings/workspace-path');
+  if (!res.ok) throw new Error(`Workspace-Pfad laden fehlgeschlagen (${res.status})`);
+  return res.json();
+}
+
+/**
+ * Setzt den Workspace-Root-Pfad.
+ * @param {string} path
+ * @returns {Promise<{ effectivePath: string, source: "configured" }>}
+ */
+async function putWorkspacePath(path) {
+  const res = await fetch('/api/settings/workspace-path', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error ?? `Speichern fehlgeschlagen (${res.status})`);
+  return data;
+}
+
+/**
+ * Setzt den Workspace-Root-Pfad auf den Env-Default zurück (löscht Konfiguration).
+ * @returns {Promise<{ effectivePath: string|null, source: "env-default" }>}
+ */
+async function deleteWorkspacePath() {
+  const res = await fetch('/api/settings/workspace-path', { method: 'DELETE' });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error ?? `Zurücksetzen fehlgeschlagen (${res.status})`);
+  return data;
+}
+
+// ── WorkspaceSection ──────────────────────────────────────────────────────────
+
+/**
+ * Sektion „Workspace" — zeigt den wirksamen Workspace-Root inkl. Quelle und erlaubt
+ * setzen/ändern (PUT) und zurücksetzen (DELETE) auf den Env-Default.
+ *
+ * AC1: Anzeige wirksamer Pfad + Quelle; Setzen/Ändern/Zurücksetzen.
+ * AC3 (UI): 4xx/422 → feldzugeordnete Fehlermeldung; alter Wert bleibt sichtbar.
+ * A11y: label/htmlFor, aria-describedby, role=status/alert, aria-busy, Fokusführung.
+ *
+ * @param {{
+ *   effectivePath: string|null,
+ *   source: "configured"|"env-default",
+ *   mountRoot: string,
+ *   onReload: () => void,
+ * }} props
+ */
+function WorkspaceSection({ effectivePath, source, mountRoot, onReload }) {
+  const [editing, setEditing] = useState(false);
+  const [inputVal, setInputVal] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [resetting, setResetting] = useState(false);
+  const [error, setError] = useState(null);
+  const [successMsg, setSuccessMsg] = useState(null);
+  const inputRef = useRef(null);
+  const successRef = useRef(null);
+  const ERROR_ID = 'workspace-path-error';
+  const SUCCESS_ID = 'workspace-path-success';
+
+  // Fokus auf Input wenn Bearbeiten-Modus öffnet
+  useEffect(() => {
+    if (editing && inputRef.current) {
+      inputRef.current.focus();
+    }
+  }, [editing]);
+
+  // Fokus auf Erfolgsmeldung sobald sie gerendert wird (nach State-Update + Re-render)
+  const [pendingFocusSuccess, setPendingFocusSuccess] = useState(false);
+  useEffect(() => {
+    if (pendingFocusSuccess && successRef.current) {
+      successRef.current.focus();
+      setPendingFocusSuccess(false);
+    }
+  });
+
+  const handleSave = useCallback(async () => {
+    setError(null);
+    setSuccessMsg(null);
+
+    const trimmed = inputVal.trim();
+    if (!trimmed) {
+      setError('Workspace-Pfad darf nicht leer sein.');
+      inputRef.current?.focus();
+      return;
+    }
+
+    setSaving(true);
+    try {
+      await putWorkspacePath(trimmed);
+      setInputVal('');
+      setEditing(false);
+      await onReload();
+      setSuccessMsg('Workspace-Pfad gespeichert.');
+      setPendingFocusSuccess(true);
+    } catch (err) {
+      setError(err.message);
+      inputRef.current?.focus();
+    } finally {
+      setSaving(false);
+    }
+  }, [inputVal, onReload]);
+
+  const handleReset = useCallback(async () => {
+    setError(null);
+    setSuccessMsg(null);
+    setResetting(true);
+    try {
+      await deleteWorkspacePath();
+      await onReload();
+      setSuccessMsg('Workspace-Pfad auf Env-Default zurückgesetzt.');
+      setPendingFocusSuccess(true);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setResetting(false);
+    }
+  }, [onReload]);
+
+  const handleCancel = useCallback(() => {
+    setInputVal('');
+    setError(null);
+    setEditing(false);
+  }, []);
+
+  const isConfigured = source === 'configured';
+  const sourceLabel = isConfigured ? 'konfiguriert' : 'Default aus Env';
+
+  return (
+    <div>
+      {/* Effektivwert-Anzeige */}
+      <div style={workspaceStyles.pathRow}>
+        <span style={workspaceStyles.pathLabel}>Aktueller Workspace-Root:</span>
+        <code style={workspaceStyles.pathValue}>
+          {effectivePath ?? '(nicht gesetzt)'}
+        </code>
+      </div>
+      <div style={workspaceStyles.sourceRow}>
+        <span style={workspaceStyles.sourceText}>
+          Quelle: <strong>{sourceLabel}</strong>
+        </span>
+        {mountRoot && (
+          <span style={workspaceStyles.mountHint}>
+            Mount-Schranke: <code style={workspaceStyles.mountCode}>{mountRoot}</code>
+          </span>
+        )}
+      </div>
+
+      {/* Erfolgs-Feedback */}
+      {successMsg && (
+        <p
+          id={SUCCESS_ID}
+          ref={successRef}
+          style={workspaceStyles.success}
+          role="status"
+          tabIndex={-1}
+        >
+          {successMsg}
+        </p>
+      )}
+
+      {/* Fehler-Feedback (feldzugeordnet) */}
+      {error && (
+        <p
+          id={ERROR_ID}
+          style={workspaceStyles.error}
+          role="alert"
+        >
+          {error}
+        </p>
+      )}
+
+      {editing ? (
+        <div style={fieldStyles.editArea}>
+          <label htmlFor="workspace-path-input" style={fieldStyles.fieldLabel}>
+            Neuer Workspace-Pfad
+          </label>
+          <input
+            id="workspace-path-input"
+            ref={inputRef}
+            type="text"
+            value={inputVal}
+            onChange={(e) => setInputVal(e.target.value)}
+            placeholder={mountRoot ? `z.B. ${mountRoot}/projekt` : '/workspace/projekt'}
+            style={{ ...fieldStyles.input, color: '#e5e7eb', caretColor: '#e5e7eb' }}
+            aria-describedby={error ? ERROR_ID : undefined}
+            autoComplete="off"
+            disabled={saving}
+          />
+          <div style={fieldStyles.actionRow}>
+            <button
+              type="button"
+              onClick={handleSave}
+              disabled={saving}
+              style={fieldStyles.btnPrimary}
+              aria-busy={saving}
+            >
+              {saving ? 'Speichern…' : 'Speichern'}
+            </button>
+            <button
+              type="button"
+              onClick={handleCancel}
+              disabled={saving}
+              style={fieldStyles.btnSecondary}
+            >
+              Abbrechen
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div style={fieldStyles.actionRow}>
+          <button
+            type="button"
+            onClick={() => { setError(null); setSuccessMsg(null); setInputVal(''); setEditing(true); }}
+            style={fieldStyles.btnSmall}
+            aria-label={isConfigured ? 'Workspace-Pfad ändern' : 'Workspace-Pfad setzen'}
+          >
+            {isConfigured ? 'Ändern' : 'Setzen'}
+          </button>
+          {isConfigured && (
+            <button
+              type="button"
+              onClick={handleReset}
+              disabled={resetting}
+              style={fieldStyles.btnDanger}
+              aria-label="Workspace-Pfad auf Env-Default zurücksetzen"
+              aria-busy={resetting}
+            >
+              {resetting ? 'Zurücksetzen…' : 'Zurücksetzen'}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── SshKeysSection ────────────────────────────────────────────────────────────
 
 /** Erlaubte Zeichen für Benutzer-Labels (sync mit Backend). */
@@ -1135,6 +1386,18 @@ export function SettingsView({ onNavigate }) {
   const [loadError, setLoadError] = useState(null);
   const [sshKeys, setSshKeys] = useState([]);
   const [sshLoadError, setSshLoadError] = useState(null);
+  const [workspacePath, setWorkspacePath] = useState(null);
+  const [workspaceLoadError, setWorkspaceLoadError] = useState(null);
+
+  const loadWorkspace = useCallback(async () => {
+    setWorkspaceLoadError(null);
+    try {
+      const data = await fetchWorkspacePath();
+      setWorkspacePath(data);
+    } catch (err) {
+      setWorkspaceLoadError(err.message ?? 'Unbekannter Fehler');
+    }
+  }, []);
 
   const load = useCallback(async () => {
     setLoadError(null);
@@ -1157,7 +1420,8 @@ export function SettingsView({ onNavigate }) {
 
   useEffect(() => {
     load();
-  }, [load]);
+    loadWorkspace();
+  }, [load, loadWorkspace]);
 
   /** Hilfsfunktion: Metadaten eines bestimmten Felds aus der Liste. */
   const getMeta = useCallback((integration, name) => {
@@ -1230,6 +1494,28 @@ export function SettingsView({ onNavigate }) {
           <h2 id="settings-section-misc" style={styles.sectionHeading}>Weitere Credentials</h2>
           <p style={styles.sectionDesc}>Generische Schlüssel/Wert-Einträge für weitere Integrationen.</p>
           <MiscSection miscItems={miscItems} onSaved={load} />
+        </section>
+
+        {/* Workspace */}
+        <section aria-labelledby="settings-section-workspace" style={styles.section}>
+          <h2 id="settings-section-workspace" style={styles.sectionHeading}>Workspace</h2>
+          <p style={styles.sectionDesc}>
+            Workspace-Root für Klon-, Listing- und Pull-Operationen. Muss innerhalb der
+            gemounteten Schranke ({workspacePath?.mountRoot || 'WORKSPACE_DIR'}) liegen.
+          </p>
+          {workspaceLoadError && (
+            <p style={styles.loadError} role="alert" aria-live="polite">
+              Workspace-Pfad konnte nicht geladen werden: {workspaceLoadError}
+            </p>
+          )}
+          {workspacePath && (
+            <WorkspaceSection
+              effectivePath={workspacePath.effectivePath}
+              source={workspacePath.source}
+              mountRoot={workspacePath.mountRoot}
+              onReload={loadWorkspace}
+            />
+          )}
         </section>
 
         {/* SSH-Keys */}
@@ -1508,6 +1794,66 @@ const provisionStyles = {
     marginTop: 4,
     fontFamily: 'monospace',
     wordBreak: 'break-all',
+  },
+};
+
+const workspaceStyles = {
+  pathRow: {
+    display: 'flex',
+    alignItems: 'baseline',
+    gap: 8,
+    marginBottom: 6,
+    flexWrap: 'wrap',
+  },
+  pathLabel: {
+    fontSize: 13,
+    fontWeight: 600,
+    color: '#d4d4d4',
+    flexShrink: 0,
+  },
+  pathValue: {
+    fontSize: 13,
+    color: '#86efac',    // Kontrast auf #111 ≥ 4.5:1
+    fontFamily: 'monospace',
+    wordBreak: 'break-all',
+  },
+  sourceRow: {
+    display: 'flex',
+    alignItems: 'baseline',
+    gap: 16,
+    marginBottom: 12,
+    flexWrap: 'wrap',
+  },
+  sourceText: {
+    fontSize: 13,
+    color: '#9ca3af',    // Kontrast auf #111 ≥ 4.5:1 (geprüft: ~4.6:1) — NICHT #6b7280
+  },
+  mountHint: {
+    fontSize: 12,
+    color: '#9ca3af',
+  },
+  mountCode: {
+    fontSize: 12,
+    color: '#9ca3af',
+    fontFamily: 'monospace',
+  },
+  success: {
+    margin: '0 0 10px',
+    padding: '8px 12px',
+    background: '#052e16',
+    border: '1px solid #166534',
+    borderRadius: 4,
+    color: '#86efac',
+    fontSize: 13,
+  },
+  error: {
+    margin: '0 0 10px',
+    padding: '8px 12px',
+    background: '#2d0f0f',
+    border: '1px solid #7f1d1d',
+    borderRadius: 4,
+    color: '#fca5a5',
+    fontSize: 13,
   },
 };
 
