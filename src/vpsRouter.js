@@ -2,11 +2,19 @@
  * vpsRouter — Express-Router für VPS-Provider-Boundary (AC1–AC10, ADR-009).
  *
  * Routes (alle hinter AccessGuard in server.js):
- *   GET  /api/vps/providers                           → [{ id, configured, capabilities }]
- *   GET  /api/vps/machines                            → { machines, providerErrors? }
- *   POST /api/vps/machines/:provider/:serverId/start  → { result, reason? }   [MUTATION — Rollenschutz]
- *   POST /api/vps/machines/:provider/:serverId/stop   → { result, reason? }   [MUTATION — Rollenschutz]
- *   POST /api/vps/machines/:provider                  → { result, machine?, reason? } [MUTATION — Rollenschutz]
+ *   GET  /api/vps/providers                              → [{ id, configured, capabilities }]
+ *   GET  /api/vps/machines                               → { machines, providerErrors? }
+ *   POST /api/vps/machines/:provider/*splat/start        → { result, reason? }   [MUTATION — Rollenschutz]
+ *   POST /api/vps/machines/:provider/*splat/stop         → { result, reason? }   [MUTATION — Rollenschutz]
+ *   POST /api/vps/machines/:provider                     → { result, machine?, reason? } [MUTATION — Rollenschutz]
+ *
+ * ServerId-Routing (IONOS composite IDs):
+ *   IONOS serverIds have the format "<datacenterId>/<serverId>" (a literal slash).
+ *   Express 5 *splat captures everything between :provider and /start|/stop,
+ *   including slashes, as an array of path segments. The segments are joined
+ *   with "/" to reconstruct the composite ID (e.g. ["dc-uuid","srv-uuid"] → "dc-uuid/srv-uuid").
+ *   This requires no client-side URL-encoding discipline (#100 note: send the literal
+ *   composite ID as path segments, e.g. POST /api/vps/machines/ionos/dc-uuid/srv-uuid/start).
  *
  * Security (AC9/AC10 / ADR-009):
  *   - Alle /api/vps/* hinter AccessGuard (server.js — alle /api/* sind geschützt).
@@ -73,7 +81,11 @@ function validateProvider(provider) {
 
 /**
  * Validiert eine serverId (security/R02).
- * Verhindert Injection durch reine alphanumerische + Bindestriche/Unterstriche.
+ * Slashes sind für IONOS composite IDs ("<datacenterId>/<serverId>") erlaubt.
+ * Path-Traversal-Sicherheit: Der Adapter (ionos.js parseCompositeId) splittet am
+ * ersten '/' und übergibt beide Teile getrennt an encodeURIComponent() — sie werden
+ * nicht zu Dateipfaden zusammengesetzt. Whitespace, ".." und andere
+ * Injektions-Vektoren bleiben ausgeschlossen.
  *
  * @param {unknown} serverId
  * @returns {{ ok: boolean, error?: string }}
@@ -86,8 +98,15 @@ function validateServerId(serverId) {
   if (s.length > 128) {
     return { ok: false, error: 'serverId überschreitet Längenlimit (max. 128 Zeichen)' };
   }
-  // Allow alphanumerics, hyphens, underscores, dots — reject anything path-injection-like
-  if (!/^[a-zA-Z0-9._-]+$/.test(s)) {
+  // Allow alphanumerics, hyphens, underscores, dots, forward-slash (IONOS composite IDs).
+  // Excludes whitespace and other injection vectors.
+  if (!/^[a-zA-Z0-9._/-]+$/.test(s)) {
+    return { ok: false, error: 'serverId enthält ungültige Zeichen' };
+  }
+  // Reject ".." sequences — path-traversal guard (security/R03).
+  // Even though composite IDs are only passed to encodeURIComponent() in the adapter,
+  // we reject ".." defensively to prevent future misuse.
+  if (/\.\./.test(s)) {
     return { ok: false, error: 'serverId enthält ungültige Zeichen' };
   }
   return { ok: true };
@@ -284,12 +303,16 @@ export function vpsRouter(registry, auditStore) {
     return res.status(201).json({ result: 'ok', machine });
   });
 
-  // ── POST /api/vps/machines/:provider/:serverId/start ──────────────────────
+  // ── POST /api/vps/machines/:provider/*splat/start ────────────────────────
 
   /**
-   * POST /api/vps/machines/:provider/:serverId/start
+   * POST /api/vps/machines/:provider/*splat/start
    * Startet einen Server (power-on).
    * MUTATION: Audit-First + Identitäts-/Rollenschutz (AC9/AC10).
+   *
+   * *splat captures the serverId portion, which may contain "/" for IONOS
+   * composite IDs ("<datacenterId>/<serverId>"). Express 5 delivers the
+   * segments as an array; they are joined with "/" to reconstruct the ID.
    *
    * Responses:
    *   200 { result: "ok"|"unsupported"|"error", reason? }
@@ -298,20 +321,22 @@ export function vpsRouter(registry, auditStore) {
    *   500 { error }  — Audit-Write fehlgeschlagen
    *   502 { error }  — Provider-API-Fehler
    */
-  router.post('/api/vps/machines/:provider/:serverId/start', async (req, res) => {
+  router.post('/api/vps/machines/:provider/*splat/start', async (req, res) => {
     return handlePowerAction(req, res, 'start', identity =>
       checkMutationAuthz(identity),
     );
   });
 
-  // ── POST /api/vps/machines/:provider/:serverId/stop ───────────────────────
+  // ── POST /api/vps/machines/:provider/*splat/stop ─────────────────────────
 
   /**
-   * POST /api/vps/machines/:provider/:serverId/stop
+   * POST /api/vps/machines/:provider/*splat/stop
    * Stoppt einen Server (power-off).
    * MUTATION: Audit-First + Identitäts-/Rollenschutz (AC9/AC10).
+   *
+   * *splat captures composite serverIds (see /start above for details).
    */
-  router.post('/api/vps/machines/:provider/:serverId/stop', async (req, res) => {
+  router.post('/api/vps/machines/:provider/*splat/stop', async (req, res) => {
     return handlePowerAction(req, res, 'stop', identity =>
       checkMutationAuthz(identity),
     );
@@ -343,12 +368,18 @@ export function vpsRouter(registry, auditStore) {
     }
     const provider = req.params.provider;
 
+    // ServerId aus *splat rekonstruieren (Express 5 liefert Array bei mehreren Segmenten).
+    // IONOS composite IDs ("<datacenterId>/<serverId>") kommen so korrekt an ohne
+    // Client-seitige URL-Encodierung zu erzwingen.
+    const splatRaw = req.params.splat;
+    const rawServerId = Array.isArray(splatRaw) ? splatRaw.join('/') : String(splatRaw ?? '');
+
     // ServerId validieren (security/R02/R03)
-    const serverIdVal = validateServerId(req.params.serverId);
+    const serverIdVal = validateServerId(rawServerId);
     if (!serverIdVal.ok) {
       return res.status(422).json({ error: serverIdVal.error });
     }
-    const serverId = req.params.serverId.trim();
+    const serverId = rawServerId.trim();
 
     // AC10: Audit-First — Token NICHT im Audit
     const auditAction = `vps:${action}:${provider}:${serverId}`;

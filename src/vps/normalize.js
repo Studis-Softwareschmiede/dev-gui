@@ -59,7 +59,7 @@ export function normalizeHetzner(raw) {
 /**
  * Normalisiert einen IONOS-Server-Roh-Eintrag auf VpsMachine.
  *
- * IONOS Cloud API v6 (GET /cloudapi/v6/servers):
+ * IONOS Cloud API v6 (GET /cloudapi/v6/datacenters/{dcId}/servers?depth=1):
  *   id, properties.name, metadata.state,
  *   entities.nics.items[*].entities.ips.items[*].properties.ip,
  *   properties.availabilityZone, properties.vmState, properties.name,
@@ -69,14 +69,21 @@ export function normalizeHetzner(raw) {
  *   RUNNING, SHUTOFF, SUSPENDED, CRASHED, PAUSED
  *   (metadata.state kann auch BUSY, AVAILABLE sein für provisioning)
  *
- * @param {object} raw - IONOS API server object
+ * ServerId-Kodierung (ionos.js):
+ *   IONOS-Server sind unter Datacenters genestet und können nicht über ihre eigene
+ *   ID allein adressiert werden. Der Adapter übergibt das vorberechnete composite
+ *   serverId "<datacenterId>/<serverId>" (optionaler zweiter Parameter). Fehlt der
+ *   Parameter, wird nur raw.id verwendet (Fallback für direkte Normalisierungsaufrufe).
+ *
+ * @param {object} raw            - IONOS API server object
+ * @param {string} [compositeId]  - Optional composite "<dcId>/<srvId>" (from IonosAdapter)
  * @returns {import('./VpsProviderRegistry.js').VpsMachine}
  */
-export function normalizeIonos(raw) {
+export function normalizeIonos(raw, compositeId) {
   if (!raw || typeof raw !== 'object') {
     return {
       provider: 'ionos',
-      serverId: String(raw?.id ?? 'unknown'),
+      serverId: compositeId ?? String(raw?.id ?? 'unknown'),
       name: raw?.properties?.name ?? 'unknown',
       status: 'unknown',
       ipv4: null,
@@ -103,7 +110,7 @@ export function normalizeIonos(raw) {
 
   return {
     provider: 'ionos',
-    serverId: String(raw.id ?? 'unknown'),
+    serverId: compositeId ?? String(raw.id ?? 'unknown'),
     name: raw.properties?.name ?? 'unknown',
     status: mapIonosStatus(raw.properties?.vmState, raw.metadata?.state),
     ipv4,
