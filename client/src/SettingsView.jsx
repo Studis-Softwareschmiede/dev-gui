@@ -65,6 +65,8 @@ const KNOWN_FIELDS = {
   ],
   vps: [
     { name: 'hetzner_api_token', label: 'Hetzner API-Token' },
+    { name: 'ionos_api_token', label: 'IONOS API-Token' },
+    { name: 'hostinger_api_token', label: 'Hostinger API-Token' },
   ],
 };
 
@@ -1511,10 +1513,10 @@ export function SettingsView({ onNavigate, fetchFn }) {
           ))}
         </section>
 
-        {/* Hetzner / VPS */}
-        <section aria-labelledby="settings-section-hetzner" style={styles.section}>
-          <h2 id="settings-section-hetzner" style={styles.sectionHeading}>Hetzner / VPS</h2>
-          <p style={styles.sectionDesc}>Hetzner-API-Key und VPS-Konfiguration für Provisionierung.</p>
+        {/* VPS-Provider */}
+        <section aria-labelledby="settings-section-vps" style={styles.section}>
+          <h2 id="settings-section-vps" style={styles.sectionHeading}>VPS-Provider</h2>
+          <p style={styles.sectionDesc}>API-Token je Provider (Hetzner, IONOS, Hostinger) für Provisionierung und Verwaltung.</p>
           {KNOWN_FIELDS.vps.map(({ name, label }) => (
             <CredentialField
               key={name}

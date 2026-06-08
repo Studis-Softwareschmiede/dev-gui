@@ -22,7 +22,7 @@
 
 **Frontend (React):**
 - **App-Shell** — Einstiegs-Panel (vier Kacheln: GitHub · VPS · Cloudflare · Fabrik) + client-seitige Navigation (deep-linkbare Routen, Browser-Verlauf, Fallback auf Panel) + ein **Zahnrad** in der Navigation, das die **Settings-Ansicht** öffnet (Route `settings`, NICHT als fünfte Kachel). Rendert je nach Route eine der Ansichten. *Boundary:* einziger Ort, der View-Routing kennt.
-- **Settings-Ansicht** — zentrale Einstellmaske mit Sektionen je Integration (GitHub · Cloudflare · Hetzner/VPS · SSH-Keys); Credential-Felder write-only/maskiert (nur Status „gesetzt/nicht gesetzt"). Konsumiert die Settings-/Credential-/SSH-Endpunkte (siehe unten).
+- **Settings-Ansicht** — zentrale Einstellmaske mit Sektionen je Integration (GitHub · Cloudflare · VPS-Provider · SSH-Keys); Credential-Felder write-only/maskiert (nur Status „gesetzt/nicht gesetzt"). Konsumiert die Settings-/Credential-/SSH-Endpunkte (siehe unten).
 - **Fabrik-Ansicht** — Terminal-Pane (xterm.js) · Status-Dashboard · Flow-Trigger-Panels · Job-/Kill-Steuerung (= bisheriges Frontend, jetzt als eine Ansicht eingebettet).
 - **GitHub- / VPS- / Cloudflare-Ansicht** — derzeit Platzhalter-Views (Grundgerüst); Detail-Funktionen + zugehörige Backend-Boundaries folgen als eigene Anforderungen. *Geplante neue Boundaries (noch nicht entschieden):* erweiterter `GitHubReader`/Schreibpfad, ein **VPS-Provider-Boundary** (z.B. Hetzner-API) und ein **Cloudflare-API-Boundary** — jeweils mit Secret-Handling, Audit + Identitäts-/Rollenschutz (Entscheidung: `architekt`).
 
