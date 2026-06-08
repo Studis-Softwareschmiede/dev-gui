@@ -634,7 +634,7 @@ describe('CloudflareApi — removeRoute()', () => {
     expect(hostnames).toContain(''); // catch-all preserved
   });
 
-  it('wirft not-found wenn hostname nicht in der Tunnel-Konfiguration', async () => {
+  it('ist idempotent wenn hostname nicht in der Tunnel-Konfiguration (kein Fehler)', async () => {
     const api = new CloudflareApi({
       credentialStore: makeConfiguredStore(),
       fetchFn: async (_url, init) => {
@@ -644,9 +644,10 @@ describe('CloudflareApi — removeRoute()', () => {
       lockoutGuard: { isProtected: () => false },
     });
 
-    await expect(api.removeRoute(TUNNEL_ID, 'nonexistent.example.com')).rejects.toMatchObject({
-      errorClass: 'not-found',
-    });
+    // #110-Semantik: Route entfernen ist idempotent — fehlt der Hostname,
+    // ist das Ziel bereits erreicht (wichtig für die Reconciliation, ADR-013).
+    const result = await api.removeRoute(TUNNEL_ID, 'nonexistent.example.com');
+    expect(result.result).toBe('ok');
   });
 
   it('wirft cloudflare-not-configured wenn keine Credentials', async () => {
@@ -691,19 +692,23 @@ describe('CloudflareApi — removeRoute()', () => {
 // ── Tests: deleteTunnel() (ADR-011) ───────────────────────────────────────────
 
 describe('CloudflareApi — deleteTunnel()', () => {
-  it('wirft protected-resource wenn LockoutGuard isProtected=true (keine fetch-Call)', async () => {
-    const fetchCalls = [];
+  it('führt keinen eigenen LockoutGuard-Check durch (Schutz liegt im Router, ADR-011/#110)', async () => {
+    // #110-Semantik: deleteTunnel(tunnelId) hat nur einen Parameter und keinen
+    // eigenen isProtected-Check mehr — die LockoutGuard-Hard-Schranke wird im
+    // cloudflareRouter VOR dem Boundary-Aufruf erzwungen (dort getestet).
+    let deleteCalled = false;
     const api = new CloudflareApi({
       credentialStore: makeConfiguredStore(),
-      fetchFn: async (url) => { fetchCalls.push(url); return makeFetchResponse(200, {}); },
+      fetchFn: async (_url, init) => {
+        if (init?.method === 'DELETE') { deleteCalled = true; return makeFetchResponse(200, { success: true, result: {} }); }
+        return makeFetchResponse(200, {});
+      },
       lockoutGuard: { isProtected: () => true },
     });
 
-    await expect(api.deleteTunnel(TUNNEL_ID, 'devgui.example.com')).rejects.toMatchObject({
-      errorClass: 'protected-resource',
-      httpStatus: 422,
-    });
-    expect(fetchCalls).toHaveLength(0);
+    const result = await api.deleteTunnel(TUNNEL_ID);
+    expect(result.result).toBe('ok');
+    expect(deleteCalled).toBe(true);
   });
 
   it('macht DELETE-Call mit korrekter Tunnel-URL bei nicht-geschütztem Tunnel', async () => {
@@ -749,15 +754,15 @@ describe('CloudflareApi — deleteTunnel()', () => {
     });
   });
 
-  it('wirft not-found bei 404', async () => {
+  it('ist idempotent bei 404 (Tunnel bereits gelöscht, kein Fehler)', async () => {
     const api = new CloudflareApi({
       credentialStore: makeConfiguredStore(),
       fetchFn: makeFetch(404, {}),
       lockoutGuard: { isProtected: () => false },
     });
 
-    await expect(api.deleteTunnel(TUNNEL_ID, 'my-tunnel')).rejects.toMatchObject({
-      errorClass: 'not-found',
-    });
+    // #110-Semantik: 404 = Ziel bereits erreicht (idempotent, wichtig für Reconciliation).
+    const result = await api.deleteTunnel(TUNNEL_ID);
+    expect(result.result).toBe('ok');
   });
 });
