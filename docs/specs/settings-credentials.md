@@ -14,7 +14,7 @@ version: 1
 In den Sektionen der Settings-Ansicht ([[settings-shell]]) lassen sich die **Credentials je Integration** anlegen, ändern und löschen — für die GitHub-App, Cloudflare, Hetzner/VPS sowie generische „weitere" Credentials. Geheime Werte werden **niemals im Klartext** ans Frontend zurückgegeben (write-only): die Oberfläche zeigt nur **Status** („gesetzt" / „nicht gesetzt") und ggf. eine **maskierte** Kurzform. Diese Spec legt das **fachliche** Verhalten + die Backend-Verträge **provider-agnostisch** fest; **wo** und **wie** verschlüsselt persistiert wird, entscheidet der `architekt` (siehe Offene Architektur-Punkte) — die Acceptance-Kriterien gelten unabhängig vom gewählten Speicher.
 
 ## Verhalten
-1. Jede Integrations-Sektion listet die für sie definierten **Credential-Felder** (z.B. GitHub: App-ID, Installation-ID, Private Key; Cloudflare: API-Token, Account-ID; Hetzner/VPS: API-Token) mit ihrem **Status** (gesetzt / nicht gesetzt) und — falls gesetzt und sinnvoll — einer **maskierten** Darstellung (z.B. nur letzte 4 Zeichen oder ausschließlich „••••• gesetzt").
+1. Jede Integrations-Sektion listet die für sie definierten **Credential-Felder** (z.B. GitHub: App-ID, Installation-ID, Private Key; Cloudflare: API-Token, Account-ID; **VPS: je Provider — Hetzner, IONOS, Hostinger — ein eigener API-Token**) mit ihrem **Status** (gesetzt / nicht gesetzt) und — falls gesetzt und sinnvoll — einer **maskierten** Darstellung (z.B. nur letzte 4 Zeichen oder ausschließlich „••••• gesetzt").
 2. Der Nutzer kann einen Credential-Wert **setzen** (anlegen) oder **überschreiben** (ändern): er gibt den Klartext ein und speichert; nach dem Speichern wird der eingegebene Klartext **nicht** wieder angezeigt, der Status wechselt auf „gesetzt".
 3. Der Nutzer kann ein gesetztes Credential **löschen**; der Status wechselt auf „nicht gesetzt".
 4. Generische „weitere Credentials" können als benannte **Schlüssel/Wert-Einträge** in einer dedizierten Sektion (oder Unter-Bereich „Weitere") angelegt, geändert und gelöscht werden — gleiche write-only-Regeln.
@@ -32,6 +32,7 @@ In den Sektionen der Settings-Ansicht ([[settings-shell]]) lassen sich die **Cre
 - **AC6** — Jede schreibende/löschende Credential-Aktion erzeugt einen Audit-Eintrag (Identität, Feld/Schlüssel, Aktion, Zeit) **ohne** den Klartext-Wert; der Geheimwert erscheint nicht in Logs, Audit, WS-Stream oder Frontend-Bundle.
 - **AC7** — Mutierende Endpunkte sind nur einer berechtigten Access-Identität zugänglich; eine Anfrage ohne gültigen Access-Nachweis wird mit 403 abgewiesen (geerbt aus [[access-and-guardrails]]); fehlende Berechtigung bei vorhandenem Access wird mit 403 abgewiesen.
 - **AC8** — Ungültige/leere Pflichteingaben werden mit klarer Fehlermeldung (4xx) abgelehnt, ohne einen bestehenden gesetzten Wert zu verändern.
+- **AC9** — Die **VPS**-Sektion führt **je Provider** (`hetzner`, `ionos`, `hostinger`) ein eigenes API-Token-Feld (`integration = "vps"`, `name ∈ {hetzner_api_token, ionos_api_token, hostinger_api_token}`); jedes folgt denselben write-only-/Masken-/Audit-/Schutz-Regeln (AC1–AC8). Ein gesetzter Provider-Token gilt nachgelagert als „Provider konfiguriert" (konsumiert store-intern von [[vps-provider-boundary]], nie im Klartext zurückgegeben).
 
 ## Verträge
 > Pfade/Felder sind kanonisch; das genaue Schema des Persistenz-Backends ist Implementierungsdetail (Architekt).
@@ -41,7 +42,7 @@ In den Sektionen der Settings-Ansicht ([[settings-shell]]) lassen sich die **Cre
 - **DELETE `/api/settings/credentials/{integration}/{name}`** → entfernt den Wert; Response Status „unset".
 - **„Weitere" Credentials:** `integration = "misc"` mit frei wählbarem `name` (validiert: erlaubte Zeichen, Längenlimit); gleiche PUT/DELETE-Semantik.
 - Alle Endpunkte hinter AccessGuard; mutierende zusätzlich identitäts-/rollengeprüft. Jede Mutation schreibt einen AuditEntry (vgl. [[access-and-guardrails]]).
-- **Felder-Katalog (Default-Vorschlag, vom Architekt/`dba` bestätigbar):** GitHub = `app_id`, `installation_id`, `private_key`; Cloudflare = `api_token`, `account_id`; VPS = `hetzner_api_token`. (SSH-Keys NICHT hier — siehe [[settings-ssh-keys]].)
+- **Felder-Katalog (Default-Vorschlag, vom Architekt/`dba` bestätigbar):** GitHub = `app_id`, `installation_id`, `private_key`; Cloudflare = `api_token`, `account_id`; **VPS = `hetzner_api_token`, `ionos_api_token`, `hostinger_api_token`** (ein Token je Provider; konsumiert von [[vps-provider-boundary]]). (SSH-Keys NICHT hier — siehe [[settings-ssh-keys]].)
 
 ## Edge-Cases & Fehlerverhalten
 - Speichern eines bereits gesetzten Felds = Überschreiben (kein Konflikt); alter Wert wird ersetzt.
@@ -68,5 +69,6 @@ In den Sektionen der Settings-Ansicht ([[settings-shell]]) lassen sich die **Cre
 ## Abhängigkeiten
 - [[settings-shell]] (Sektions-Gerüst + Route).
 - [[access-and-guardrails]] (Access-Mauer + Audit-Log + Identitätsauswertung).
+- [[vps-provider-boundary]] (konsumiert die Provider-API-Tokens `vps/<provider>_api_token` store-intern).
 - Offen: verschlüsselter Credential-Store (Architektur-Entscheidung, OA1).
 </content>
