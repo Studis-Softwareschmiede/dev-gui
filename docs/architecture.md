@@ -131,6 +131,8 @@
 - Jede Mutation erzeugt vor Ausführung einen `AuditStore`-Eintrag (Identität, Feld-Key, Aktion) **ohne** Klartext; schlägt der Audit-Write fehl → Mutation unterbleibt (bestehende AuditStore-Vertragslogik).
 - Neue Env-Vars für `coder`/Deployment: `CRED_MASTER_KEY` (Pflicht in Prod), optional `CRED_MASTER_KEY_FILE`, optional `CRED_ADMIN_EMAILS`. In `docker-compose.yml` als `environment`-Einträge zu ergänzen (auskommentierter Block analog `GPG_PASSPHRASE`).
 
+**Tradeoff / Ausnahme (ssh-key-generation #115).** Das write-only-Prinzip „Klartext verlässt den Store nie in HTTP-Response/Log/Audit/WS" wird **bewusst und dauerhaft** für VPS-SSH-Private-Keys gebrochen: der Export-Endpunkt `GET /api/settings/ssh-keys/{user}/private-key/export` liefert den Private-Key-Klartext als HTTP-Response. Dies ist die **einzige** Ausnahme; alle anderen Pfade (normale Lese-Antworten, Logs, Audit, WS-Stream, Frontend-Bundle) liefern weiterhin **nie** Private-Key-Klartext. Begründung und Einhegungen sind in `docs/specs/ssh-key-generation.md` (Abschnitt „Sicherheits-Tradeoff") vollständig beschrieben; zusammengefasst gelten drei Einhegungen: (1) **Access-Mauer** (Cloudflare Access vor dem Endpunkt), (2) zusätzlicher **`CRED_ADMIN_EMAILS`-Rollencheck** (gleiche Logik wie ADR-007 OA3) und (3) **Audit-First bei jedem Export** — vor der Auslieferung wird ein Audit-Eintrag (Identität, Rollen-Label, Aktion `ssh-key-export`, Zeit) **ohne** Key-Klartext geschrieben; schlägt der Audit-Write fehl, unterbleibt der Export.
+
 ---
 
 ### ADR-008 (Skizze) · VPS-/SSH-Provisionierungs-Boundary

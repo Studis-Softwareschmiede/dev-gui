@@ -1,5 +1,11 @@
 # Reviewer Lessons — dev-gui (newest first)
 
+## 2026-06-08 — comment-Feld in Keypair-Generierung: immer auf Newline-Injection prüfen
+Wenn ein benutzerkontrollierter String in einen kryptografischen Keygen-Aufruf fließt (z.B. comment → ssh2.generateKeyPair), immer prüfen: (a) wird `.trim()` allein verwendet (unsicher — strippt keine eingebetteten Newlines)? (b) wird der generierte Public-Key durch die vollständige Validierungsfunktion (inkl. Newline-Check) geleitet, oder nur durch einen schwächeren Format-Check (`startsWith`)? Wenn (a) und nicht (b): Important-Befund (Injection-Pfad in authorized_keys). Die Kombination „admin-priviligierter Endpunkt + Injection in authorized_keys" ist auch hinter Auth-Wall eine relevante Bedrohung: ein kompromittiertes Admin-Konto oder ein XSS/CSRF-Angriff könnte den Backdoor-Key einschmuggeln.
+
+## 2026-06-08 — Audit-Aktionsnamen aus der Spec mit `===`-Vergleich prüfen, nicht nur `.includes()`
+Wenn Tests `.includes('ssh-key:generate:root')` verwenden um Audit-Einträge zu finden, maskieren sie Abweichungen vom Spec-Aktionsnamen (`ssh-key-generate`). Beim Review: Spec-Aktionsnamen (exakter Wert) direkt mit dem Code-`command`-String vergleichen — nicht nur auf semantische Ähnlichkeit prüfen. Ein Test-`.includes()` ist kein Beweis für Spec-Konformität.
+
 ## 2026-06-08 — Composite serverId mit Slash: immer beide Ebenen prüfen (Routing + Regex)
 Wenn ein Adapter eine zusammengesetzte serverId mit `/` als Trennzeichen kodiert, immer BEIDE Ebenen im vpsRouter prüfen: (a) Express-Route — matched `:serverId` nur bis zum nächsten `/`; `<dcId>/<srvId>` ohne URL-Encoding ergibt einen Routing-Mismatch; (b) `validateServerId`-Regex — auch bei korrektem URL-Encoding (`%2F`) würde ein Regex `^[a-zA-Z0-9._-]+$` den dekodierten Slash blockieren. Beide Probleme kombiniert bedeuten: der Adapter ist korrekt, aber die HTTP-Route ist für diesen Provider faktisch tot. Critical (AC5-Verletzung).
 ## 2026-06-08 — Neuer Builder-Fehler-Typ: immer Router-Mapper und HTTP-Ebenen-Test auf denselben Diff prüfen

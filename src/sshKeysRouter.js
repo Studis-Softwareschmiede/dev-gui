@@ -1,31 +1,70 @@
 /**
- * sshKeysRouter — Express-Router für SSH-Key-Verwaltung (settings-ssh-keys AC1–AC10).
+ * sshKeysRouter — Express-Router für SSH-Key-Verwaltung (settings-ssh-keys AC1–AC10,
+ *                 ssh-key-generation AC1–AC8).
  *
  * Routes (alle hinter AccessGuard in server.js):
- *   GET    /api/settings/ssh-keys                → Liste aller SSH-Benutzer (kein Private-Key-Klartext)
- *   PUT    /api/settings/ssh-keys/:user          → Public- und/oder Private-Key setzen/überschreiben
- *   DELETE /api/settings/ssh-keys/:user          → Public- und/oder Private-Key löschen
- *   POST   /api/settings/ssh-keys/:user/provision → Stufe B: Public-Key idempotent in authorized_keys (AC7–AC10)
+ *   GET    /api/settings/ssh-keys                         → Liste aller SSH-Benutzer (kein Private-Key-Klartext)
+ *   PUT    /api/settings/ssh-keys/:user                   → Public- und/oder Private-Key setzen/überschreiben
+ *   DELETE /api/settings/ssh-keys/:user                   → Public- und/oder Private-Key löschen
+ *   POST   /api/settings/ssh-keys/:user/provision         → Stufe B: Public-Key idempotent in authorized_keys (AC7–AC10)
+ *   POST   /api/settings/ssh-keys/:user/generate          → ed25519-Keypair erzeugen (ssh-key-generation AC1–AC7)
+ *   GET    /api/settings/ssh-keys/:user/private-key/export → Private-Key-Export (ssh-key-generation AC4/AC5/AC6)
  *
- * Security (ADR-007/008):
- *   - Private-Key-Klartext verlässt den Store NIE Richtung HTTP/Log/Audit/WS-Stream.
+ * Security (ADR-007/008, ssh-key-generation Sicherheits-Tradeoff):
+ *   - Private-Key-Klartext verlässt den Store NIE Richtung HTTP/Log/Audit/WS-Stream —
+ *     AUSNAHME: der explizite Export-Endpunkt (bewusster ADR-007-Bruch, dauerhaft, eng eingehegt).
  *   - Public-Keys sind nicht geheim und dürfen vollständig angezeigt werden.
  *   - Jede Mutation → AuditStore-Eintrag (Identität, Benutzer-Label, Aktion) OHNE Klartext.
  *   - Optionale Admin-Allowlist via CRED_ADMIN_EMAILS (analog credentialsRouter).
  *   - Eingabe-Validierung: Benutzer-Label + Public-Key-Format (OpenSSH) + VPS-Ziel-Parameter.
  *   - Provisionierung: hoch-privilegiert → Identitäts-/Rollencheck + Audit-First.
+ *   - Generate + Export: hoch-privilegiert → Identitäts-/Rollencheck + Audit-First.
  *
  * @module sshKeysRouter
  */
 
+import { createRequire } from 'node:module';
 import { Router } from 'express';
 import { VpsProvisioner } from './VpsProvisioner.js';
+
+// ssh2.utils.generateKeyPair liefert ed25519-Keypairs direkt im OpenSSH-Format.
+// CJS-Import über createRequire (ssh2 ist CommonJS).
+const _require = createRequire(import.meta.url);
+const { utils: { generateKeyPair: _ssh2GenerateKeyPair } } = _require('ssh2');
+
+/**
+ * Erzeugt ein ed25519-Keypair im OpenSSH-Format.
+ * Gibt { publicKey, privateKey } zurück (beide Strings).
+ * Injizierbar für Tests via sshKeygenFn-Parameter.
+ *
+ * @param {string} comment  - Kommentar-Feld im Public-Key (z.B. "dev-gui/root")
+ * @param {Function} [keygenFn]  - Optionale Überschreibung (für Tests)
+ * @returns {Promise<{ publicKey: string, privateKey: string }>}
+ */
+function generateEd25519Keypair(comment, keygenFn) {
+  const fn = keygenFn ?? _ssh2GenerateKeyPair;
+  return new Promise((resolve, reject) => {
+    fn('ed25519', { comment: comment ?? '' }, (err, keys) => {
+      if (err) return reject(err);
+      resolve({
+        publicKey: keys.public.toString().trim(),
+        privateKey: keys.private.toString(),
+      });
+    });
+  });
+}
 
 // Erlaubte Zeichen für Benutzer-Labels (z.B. "root", "alex", "deploy-user")
 const USER_LABEL_RE = /^[a-zA-Z0-9_\-.:@]+$/;
 
 /** Maximale Länge eines Benutzer-Labels. */
 const MAX_USER_LABEL_LEN = 64;
+
+/**
+ * Erlaubte Rollen-Labels für die Keypair-Generierung (ssh-key-generation AC1).
+ * Spezifikation: genau "root" | "alex" — kein anderes Label.
+ */
+const ALLOWED_GENERATE_USERS = ['root', 'alex'];
 
 /** Maximale Länge eines Key-Werts (Bytes) — sync mit CredentialStore. */
 const MAX_VALUE_BYTES = 65536;
@@ -197,9 +236,10 @@ function checkMutationAuthz(identity) {
  * @param {import('./CredentialStore.js').CredentialStore} credentialStore
  * @param {import('./AuditStore.js').AuditStore} auditStore
  * @param {import('./VpsProvisioner.js').VpsProvisioner} [vpsProvisioner] - optional injizierbar (für Tests)
+ * @param {Function} [keygenFn] - optional: ed25519-Keygen-Funktion injizierbar (für Tests)
  * @returns {import('express').Router}
  */
-export function sshKeysRouter(credentialStore, auditStore, vpsProvisioner) {
+export function sshKeysRouter(credentialStore, auditStore, vpsProvisioner, keygenFn) {
   // Wenn kein externer Provisioner injiziert wird, eigenen erstellen (Production-Default)
   const provisioner = vpsProvisioner ?? new VpsProvisioner(credentialStore);
   const router = Router();
@@ -530,6 +570,212 @@ export function sshKeysRouter(credentialStore, auditStore, vpsProvisioner) {
       error: result.reason ?? 'Provisionierung fehlgeschlagen (unerwarteter Fehler)',
       reason: result.reason,
     });
+  });
+
+  // ── ssh-key-generation AC1–AC7 ───────────────────────────────────────────────
+
+  /**
+   * POST /api/settings/ssh-keys/:user/generate
+   * Erzeugt ein neues ed25519-Keypair für das Rollen-Label {user} (root|alex).
+   * Private-Key wird verschlüsselt im CredentialStore abgelegt;
+   * Public-Key als Klartext-Metadatum. Response enthält NIE den Private-Key-Klartext.
+   *
+   * Body: { overwrite?: boolean, comment?: string }
+   *
+   * Response: 200 { user, publicKey, privateKeyStatus: "set", generatedAt }
+   * Response: 400 { error } — ungültiger User oder Body
+   * Response: 403 { error } — keine Berechtigung
+   * Response: 404 { error } — unbekanntes Rollen-Label (nicht root|alex)
+   * Response: 409 { error, errorClass: "key-exists" } — bereits gesetzt, kein overwrite
+   * Response: 500 { error } — Store-Fehler oder Audit-Fehler
+   *
+   * Security: Access-Mauer (AccessGuard in server.js) + CRED_ADMIN_EMAILS + Audit-First (AC5/AC6).
+   * Private-Key-Klartext erscheint NIEMALS in Response, Logs, Audit oder WS (AC3).
+   */
+  router.post('/api/settings/ssh-keys/:user/generate', async (req, res) => {
+    const identity = req.identity ?? null;
+
+    // AC6: Mutations-Autorisierung
+    const authz = checkMutationAuthz(identity);
+    if (!authz.allowed) {
+      return res.status(403).json({ error: 'Keine Berechtigung für diese Aktion' });
+    }
+
+    const { user } = req.params;
+
+    // AC1/Edge-Case: Nur root|alex erlaubt (ssh-key-generation Spec)
+    if (!ALLOWED_GENERATE_USERS.includes(user)) {
+      return res.status(404).json({ error: `Unbekanntes Rollen-Label: ${user}. Erlaubt: ${ALLOWED_GENERATE_USERS.join(', ')}` });
+    }
+
+    // Body-Parameter: overwrite (optional, boolean), comment (optional, string)
+    const body = req.body ?? {};
+    const overwrite = body.overwrite === true;
+    const rawComment = typeof body.comment === 'string' ? body.comment : `dev-gui/${user}`;
+
+    // S2: Kommentar-Länge begrenzen (max. 256 Zeichen)
+    if (rawComment.length > 256) {
+      return res.status(400).json({ error: 'comment überschreitet Maximallänge (256 Zeichen)' });
+    }
+
+    // IMPORTANT 1 (Layer 1): Newline-Injection-Vorsorge im comment-Input (authorized_keys-Injection)
+    if (/[\r\n]/.test(rawComment)) {
+      return res.status(400).json({ error: 'comment darf keine Zeilenumbrüche enthalten' });
+    }
+
+    const comment = rawComment.trim();
+
+    // AC5: Audit-First — BEVOR irgendeine Aktion ausgeführt wird
+    const auditAction = 'ssh-key-generate';
+    try {
+      auditStore.record({ identity: identity?.email ?? null, command: auditAction });
+    } catch (auditErr) {
+      console.error('[sshKeysRouter] generate: Audit-Write fehlgeschlagen:', auditErr.message);
+      return res.status(500).json({ error: 'Audit-Write fehlgeschlagen — Aktion abgebrochen' });
+    }
+
+    // AC7: Overwrite-Schutz — belegtes Label nur mit explizitem overwrite: true überschreiben
+    if (!overwrite) {
+      try {
+        const existingPrivMeta = await credentialStore.getMeta(`ssh/${user}/private_key`);
+        if (existingPrivMeta.status === 'set') {
+          return res.status(409).json({
+            error: `Für Rollen-Label "${user}" ist bereits ein Key gesetzt. Sende { overwrite: true } um zu überschreiben.`,
+            errorClass: 'key-exists',
+          });
+        }
+      } catch (err) {
+        console.error('[sshKeysRouter] generate: Store-Lesefehler bei Overwrite-Check:', err.message);
+        return res.status(500).json({ error: 'SSH-Key-Store nicht erreichbar' });
+      }
+    }
+
+    // Keypair erzeugen (ed25519, OpenSSH-Format)
+    let publicKey, privateKey;
+    try {
+      ({ publicKey, privateKey } = await generateEd25519Keypair(comment, keygenFn));
+    } catch (genErr) {
+      console.error('[sshKeysRouter] generate: Keypair-Erzeugung fehlgeschlagen:', genErr.message);
+      return res.status(500).json({ error: 'Keypair-Erzeugung fehlgeschlagen' });
+    }
+
+    // AC2: Sicherstellen dass Public-Key mit "ssh-ed25519 " beginnt
+    if (!publicKey.startsWith('ssh-ed25519 ')) {
+      console.error('[sshKeysRouter] generate: Erzeugter Public-Key ist kein ed25519-Key');
+      return res.status(500).json({ error: 'Interner Fehler: Keypair-Format ungültig' });
+    }
+
+    // IMPORTANT 1 (Layer 2): Den resultierenden Public-Key durch validatePublicKey() leiten —
+    // schützt gegen Newline-Injection durch erzeugte Keypair-Daten (z.B. comment mit \r\n).
+    const pubKeyValid = validatePublicKey(publicKey);
+    if (!pubKeyValid.ok) {
+      console.error('[sshKeysRouter] generate: Erzeugter Public-Key ungültig:', pubKeyValid.error);
+      return res.status(500).json({ error: 'Interner Fehler: Erzeugter Public-Key ungültig' });
+    }
+
+    // Private-Key verschlüsselt im Store ablegen + Public-Key als Metadatum
+    // AC3: privateKey verlässt den Store NICHT Richtung HTTP/Log/Audit
+    // S1: Partial-Write-Rollback — wenn setPublicKey fehlschlägt, Private-Key-Eintrag wieder löschen
+    try {
+      await credentialStore.set(`ssh/${user}/private_key`, privateKey);
+      try {
+        await credentialStore.setPublicKey(user, publicKey);
+      } catch (pubKeyErr) {
+        // Rollback: verwaisten Private-Key-Eintrag best-effort wieder entfernen
+        try {
+          await credentialStore.delete(`ssh/${user}/private_key`);
+        } catch (rollbackErr) {
+          console.error('[sshKeysRouter] generate: Rollback des Private-Key fehlgeschlagen:', rollbackErr.message);
+        }
+        throw pubKeyErr;
+      }
+    } catch (storeErr) {
+      if (storeErr.message.includes('Master-Key') || storeErr.message.includes('CRED_MASTER_KEY')) {
+        return res.status(500).json({ error: 'Credential-Store nicht konfiguriert' });
+      }
+      console.error('[sshKeysRouter] generate: Store-Schreibfehler:', storeErr.message);
+      return res.status(500).json({ error: 'SSH-Key-Store nicht erreichbar' });
+    }
+
+    const generatedAt = new Date().toISOString();
+
+    // AC3: Response enthält KEINEN Private-Key-Klartext
+    return res.json({
+      user,
+      publicKey,
+      privateKeyStatus: 'set',
+      generatedAt,
+    });
+  });
+
+  /**
+   * GET /api/settings/ssh-keys/:user/private-key/export
+   * Liefert den Private-Key-Klartext für das Rollen-Label {user} (DAUERHAFT wiederholbar).
+   * Dies ist der EINZIGE Pfad, über den der Private-Key-Klartext das Backend verlässt
+   * (bewusster ADR-007-Tradeoff, dauerhaft — s. Spec Abschnitt "Sicherheits-Tradeoff").
+   *
+   * Response: 200 text/plain — OpenSSH-Private-Key (-----BEGIN OPENSSH PRIVATE KEY-----)
+   * Response: 403 { error } — keine Berechtigung
+   * Response: 404 { error, errorClass: "no-private-key" } — kein Private-Key gesetzt
+   * Response: 500 { error } — Store-Fehler oder Audit-Fehler
+   *
+   * Security: Access-Mauer + CRED_ADMIN_EMAILS + Audit-First (AC5/AC6).
+   * Private-Key-Klartext erscheint NUR in dieser Response — nie in Logs, Audit, WS (AC4).
+   */
+  router.get('/api/settings/ssh-keys/:user/private-key/export', async (req, res) => {
+    const identity = req.identity ?? null;
+
+    // AC6: Mutations-/Privileged-Autorisierung
+    const authz = checkMutationAuthz(identity);
+    if (!authz.allowed) {
+      return res.status(403).json({ error: 'Keine Berechtigung für diese Aktion' });
+    }
+
+    const { user } = req.params;
+
+    // Nur root|alex erlaubt
+    if (!ALLOWED_GENERATE_USERS.includes(user)) {
+      return res.status(404).json({ error: `Unbekanntes Rollen-Label: ${user}. Erlaubt: ${ALLOWED_GENERATE_USERS.join(', ')}` });
+    }
+
+    // AC5: Audit-First — BEVOR der Private-Key ausgeliefert wird
+    // Audit-Eintrag OHNE Key-Klartext (Identität + Rollen-Label + Aktion + Zeit)
+    const auditAction = 'ssh-key-export';
+    try {
+      auditStore.record({ identity: identity?.email ?? null, command: auditAction });
+    } catch (auditErr) {
+      console.error('[sshKeysRouter] export: Audit-Write fehlgeschlagen:', auditErr.message);
+      // AC5: schlägt der Audit-Write fehl → unterbleibt der Export (keine nicht-auditierte Key-Preisgabe)
+      return res.status(500).json({ error: 'Audit-Write fehlgeschlagen — Export abgebrochen' });
+    }
+
+    // Private-Key aus Store lesen (getPlaintext → Klartext store-intern)
+    let privateKeyPlaintext;
+    try {
+      privateKeyPlaintext = await credentialStore.getPlaintext(`ssh/${user}/private_key`);
+    } catch (storeErr) {
+      if (storeErr.message.includes('Master-Key') || storeErr.message.includes('CRED_MASTER_KEY')) {
+        return res.status(500).json({ error: 'Credential-Store nicht konfiguriert' });
+      }
+      // AC5/Security: kein Klartext-Leak im Fehlerfall
+      console.error('[sshKeysRouter] export: Store-Lesefehler (kein Klartext geloggt)');
+      return res.status(500).json({ error: 'SSH-Key-Store nicht erreichbar' });
+    }
+
+    // AC4/Edge-Case: kein Private-Key gesetzt → 404 errorClass: "no-private-key"
+    if (!privateKeyPlaintext) {
+      return res.status(404).json({
+        error: `Kein Private-Key für Rollen-Label "${user}" gesetzt.`,
+        errorClass: 'no-private-key',
+      });
+    }
+
+    // AC4: Export-Response liefert den OpenSSH-Private-Key-Klartext als text/plain
+    // Dies ist der EINZIGE Pfad, über den der Private-Key-Klartext das Backend verlässt.
+    return res
+      .setHeader('Content-Type', 'text/plain; charset=utf-8')
+      .setHeader('Content-Disposition', `attachment; filename="${user}_ed25519"`)
+      .send(privateKeyPlaintext);
   });
 
   return router;

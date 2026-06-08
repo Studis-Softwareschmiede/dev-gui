@@ -10,8 +10,10 @@
  *   POST /api/command                             → inject slash-command into PTY session
  *   POST /api/command/cancel                      → send Ctrl-C, cancel running command
  *   GET/PUT/DELETE /api/settings/credentials*     → Credential-Verwaltung (settings-credentials)
- *   GET/PUT/DELETE /api/settings/ssh-keys*        → SSH-Key-Verwaltung (settings-ssh-keys Stufe A)
- *   POST /api/settings/ssh-keys/:user/provision   → 501 (Stufe B, folgt in #47)
+ *   GET/PUT/DELETE /api/settings/ssh-keys*             → SSH-Key-Verwaltung (settings-ssh-keys Stufe A)
+ *   POST /api/settings/ssh-keys/:user/provision        → VPS-Provisionierung (settings-ssh-keys Stufe B, #47)
+ *   POST /api/settings/ssh-keys/:user/generate         → ed25519-Keypair erzeugen (ssh-key-generation AC1–AC7, #115)
+ *   GET  /api/settings/ssh-keys/:user/private-key/export → Private-Key-Export (ssh-key-generation AC4, #115)
  *   GET/PUT/DELETE /api/settings/workspace-path   → Workspace-Pfad-Konfiguration (workspace-path-config #85)
  *   POST /api/github/repos                        → Org-Repo anlegen (github-repo-create #59)
  *   GET  /api/workspace/repos                     → { repos: [...] } — live WORKSPACE_DIR scan (workspace-repos AC1, AC2)
