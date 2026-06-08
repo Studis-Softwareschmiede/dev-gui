@@ -113,14 +113,23 @@ function validateServerId(serverId) {
   return { ok: true };
 }
 
+/** Erlaubte Zeichen für SSH-Key-Labels (sync mit CredentialStore/sshKeysRouter). */
+const SSH_LABEL_RE = /^[a-zA-Z0-9_\-.:@]+$/;
+
+/** Maximale Länge eines SSH-Key-Labels. */
+const MAX_LABEL_LEN = 64;
+
 /**
  * Validiert und sanitisiert das Create-Body.
  * Gibt { ok: true, params } oder { ok: false, error } zurück.
  *
  * ADR-009: Der Client liefert NUR fachliche Create-Parameter (name, region,
- * serverType, image). userData und sshPublicKeys werden NICHT vom Client
- * akzeptiert — sie werden server-intern durch CloudInitBuilder bzw. den
- * SSH-Key-Resolver (SSHKEYS_STUB_99, folgt in #99) erzeugt.
+ * serverType, image) sowie SSH-Key-Label-Referenzen (sshKeyAssignment).
+ * userData und rohe sshPublicKeys werden NICHT vom Client akzeptiert —
+ * sie werden server-intern durch CloudInitBuilder / SSH-Key-Resolver erzeugt.
+ *
+ * AC3 (vps-ssh-key-assignment): sshKeyAssignment: { root: <label>, alex: <label> }
+ *   — nur Label-Referenzen, nie Key-Material vom Client (security/R01/NFR).
  *
  * @param {unknown} body
  * @returns {{ ok: boolean, params?: object, error?: string }}
@@ -130,7 +139,7 @@ function validateCreateBody(body) {
     return { ok: false, error: 'Request-Body ist Pflicht' };
   }
 
-  const { name, region, serverType, image } = body;
+  const { name, region, serverType, image, sshKeyAssignment } = body;
 
   if (typeof name !== 'string' || !name.trim()) {
     return { ok: false, error: 'name ist ein Pflichtfeld' };
@@ -156,6 +165,33 @@ function validateCreateBody(body) {
   // image ist optional — Default wird im Adapter gesetzt
   const resolvedImage = (typeof image === 'string' && image.trim()) ? image.trim() : undefined;
 
+  // sshKeyAssignment (AC3): { root: <label>, alex: <label> } — optional im Body,
+  // aber fehlende/ungültige Labels führen zu 422 (missing-ssh-key) im Registry-Pfad.
+  // Hier: nur Label-Referenz-Validierung (security/R02 — keine rohen Keys akzeptieren).
+  let resolvedSshKeyAssignment = undefined;
+  if (sshKeyAssignment !== undefined) {
+    if (typeof sshKeyAssignment !== 'object' || sshKeyAssignment === null || Array.isArray(sshKeyAssignment)) {
+      return { ok: false, error: 'sshKeyAssignment muss ein Objekt mit root- und alex-Label sein' };
+    }
+    const assignment = {};
+    for (const role of ['root', 'alex']) {
+      const label = sshKeyAssignment[role];
+      if (label === undefined || label === null) continue;
+      if (typeof label !== 'string' || !label.trim()) {
+        return { ok: false, error: `sshKeyAssignment.${role} muss ein nicht-leerer Label-String sein` };
+      }
+      const trimmed = label.trim();
+      if (trimmed.length > MAX_LABEL_LEN) {
+        return { ok: false, error: `sshKeyAssignment.${role} überschreitet Label-Länge (max. ${MAX_LABEL_LEN})` };
+      }
+      if (!SSH_LABEL_RE.test(trimmed)) {
+        return { ok: false, error: `sshKeyAssignment.${role} enthält unerlaubte Zeichen` };
+      }
+      assignment[role] = trimmed;
+    }
+    resolvedSshKeyAssignment = assignment;
+  }
+
   return {
     ok: true,
     params: {
@@ -163,6 +199,7 @@ function validateCreateBody(body) {
       region: region.trim(),
       serverType: serverType.trim(),
       image: resolvedImage,
+      sshKeyAssignment: resolvedSshKeyAssignment,
     },
   };
 }
@@ -228,10 +265,10 @@ export function vpsRouter(registry, auditStore) {
    * Erstellt einen neuen Server beim angegebenen Provider.
    * MUTATION: Audit-First + Identitäts-/Rollenschutz (AC9/AC10).
    *
-   * Body: { name, region, serverType, image? }
+   * Body: { name, region, serverType, image?, sshKeyAssignment?: { root: <label>, alex: <label> } }
    * userData und sshPublicKeys werden NICHT vom Client akzeptiert —
    * sie werden server-intern durch CloudInitBuilder / SSH-Key-Resolver erzeugt
-   * (ADR-009; SSHKEYS_STUB_99 folgt in #99).
+   * (ADR-009; vps-ssh-key-assignment #99 implementiert).
    *
    * Responses:
    *   201 { result: "ok", machine: VpsMachine }
@@ -264,8 +301,12 @@ export function vpsRouter(registry, auditStore) {
     }
     const params = bodyVal.params;
 
-    // AC10: Audit-First — Eintrag VOR der Mutation; Token NICHT im Audit
-    const auditAction = `vps:create:${provider}:${params.name}`;
+    // AC6/AC10: Audit-First — Label-Zuordnung auditieren, KEIN Key-Material im Audit
+    // (security/R01: nur Label-Namen, nie Public/Private-Key-Werte)
+    const sshAssignmentAudit = params.sshKeyAssignment
+      ? `:ssh[root=${params.sshKeyAssignment.root ?? ''},alex=${params.sshKeyAssignment.alex ?? ''}]`
+      : '';
+    const auditAction = `vps:create:${provider}:${params.name}${sshAssignmentAudit}`;
     try {
       auditStore.record({ identity: identity?.email ?? null, command: auditAction });
     } catch (auditErr) {

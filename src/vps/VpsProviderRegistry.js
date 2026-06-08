@@ -188,36 +188,38 @@ export class VpsProviderRegistry {
    *
    * ADR-009: userData wird IMMER server-intern über CloudInitBuilder erzeugt —
    * niemals aus dem Client-Body übernommen. Der Client liefert nur fachliche
-   * Create-Parameter (name, region, serverType, image).
+   * Create-Parameter (name, region, serverType, image) sowie die SSH-Key-Zuordnung
+   * als Label-Referenzen (sshKeyAssignment: { root: <label>, alex: <label> }).
    *
-   * SSHKEYS_STUB_99: SSH-Public-Key-Auflösung (root/alex aus settings-ssh-keys-Labels)
-   * folgt in Item #99 (vps-ssh-key-assignment). Bis dahin wird sshPublicKeys als
-   * leeres Objekt übergeben. Der 422-"missing-ssh-key"-Guard kommt vollständig
-   * mit #99 — hier noch nicht erzwingen, solange die Auflösung nicht existiert.
+   * SSH-Key-Auflösung (AC3, vps-ssh-key-assignment):
+   *   Die Label-Referenzen werden store-intern über den CredentialStore in Public-Keys
+   *   aufgelöst (getPublicKey). Fehlt ein Public-Key → CloudInitError(missing-ssh-key, 422)
+   *   via CloudInitBuilder.build(). Nur Public-Keys verlassen den Store (security/R01).
    *
    * @param {string} provider
-   * @param {object} params - { name, region, serverType, image? }
+   * @param {object} params
+   *   { name, region, serverType, image?,
+   *     sshKeyAssignment?: { root: <label>, alex: <label> } }
    *   userData und sshPublicKeys werden NICHT aus params übernommen — sie werden
    *   server-intern erzeugt/aufgelöst.
    * @returns {Promise<VpsMachine>}
    * @throws {VpsRegistryError}
+   * @throws {CloudInitError} wenn ein Public-Key fehlt (AC5, missing-ssh-key 422)
    */
   async create(provider, params) {
     const { token, adapter } = await this.#resolveProviderOrThrow(provider);
 
-    // ADR-009: cloud-init server-intern erzeugen — NIE vom Client übernehmen.
-    const userData = this.#cloudInitBuilder.build({
-      provider,
-      name: params.name,
-      region: params.region,
-      serverType: params.serverType,
-      image: params.image,
-    });
+    // AC3/AC4: SSH-Key-Auflösung: Label → Public-Key store-intern.
+    // Nur Public-Keys verlassen den Store (security/R01 / NFR AC4).
+    const sshPublicKeys = await this.#resolveSshPublicKeys(params.sshKeyAssignment);
 
-    // SSHKEYS_STUB_99: SSH-Key-Auflösung (root/alex aus CredentialStore-Labels) folgt in #99.
-    // build() wird ohne sshPublicKeys aufgerufen → AC7-Guard (missing-ssh-key 422) feuert zwingend
-    // bis #99 die Key-Auflösung liefert.
-    const sshPublicKeys = {};
+    // ADR-009: cloud-init server-intern erzeugen — NIE vom Client übernehmen.
+    // CloudInitBuilder.build() wirft CloudInitError(missing-ssh-key, 422) wenn
+    // ein Public-Key fehlt — vor jedem Provider-Call (AC5/AC7).
+    const userData = this.#cloudInitBuilder.build({
+      name: params.name,
+      sshPublicKeys,
+    });
 
     const adapterParams = {
       name: params.name,
@@ -232,6 +234,55 @@ export class VpsProviderRegistry {
   }
 
   // ── Private Helpers ──────────────────────────────────────────────────────────
+
+  /**
+   * Löst die SSH-Key-Label-Zuordnung in Public-Keys auf (AC3, vps-ssh-key-assignment).
+   *
+   * Für jede Rolle (root, alex) wird das zugeordnete Label über
+   * `CredentialStore.getPublicKey(label)` aufgelöst. Das Ergebnis-Objekt
+   * `{ root, alex }` wird an CloudInitBuilder.build() übergeben.
+   *
+   * Security-Floor (security/R01 / AC4):
+   *   - Nur Public-Keys werden zurückgegeben; Private-Keys verlassen den Store
+   *     über diesen Pfad niemals.
+   *   - Labels werden gegen die USER_LABEL_RE-Regex validiert (security/R02).
+   *   - Fehlt ein Public-Key für root oder alex, gibt build() CloudInitError(missing-ssh-key)
+   *     zurück — vor jedem Provider-Call.
+   *
+   * @param {{ root?: string, alex?: string }} [assignment] - Label-Referenzen je Rolle
+   * @returns {Promise<{ root?: string, alex?: string }>} Public-Keys je Rolle
+   */
+  async #resolveSshPublicKeys(assignment) {
+    if (!assignment || !this.#credentialStore) {
+      return {};
+    }
+
+    // security/R02: Labels validieren (gleiche Regex wie CredentialStore/sshKeysRouter)
+    const USER_LABEL_RE = /^[a-zA-Z0-9_\-.:@]+$/;
+    const MAX_LABEL_LEN = 64;
+
+    const resolved = {};
+
+    for (const role of ['root', 'alex']) {
+      const label = assignment[role];
+      if (!label || typeof label !== 'string') {
+        continue; // fehlendes Label → build() wirft missing-ssh-key
+      }
+      // Input-Validierung: Label darf nur sichere Zeichen enthalten (security/R02)
+      const trimmed = label.trim();
+      if (!trimmed || trimmed.length > MAX_LABEL_LEN || !USER_LABEL_RE.test(trimmed)) {
+        continue; // ungültiges Label → kein Store-Zugriff → build() wirft missing-ssh-key
+      }
+      // Public-Key ist Klartext-Metadatum im Store — nicht verschlüsselt, nicht geheim
+      const publicKey = await this.#credentialStore.getPublicKey(trimmed);
+      if (publicKey) {
+        resolved[role] = publicKey;
+      }
+      // fehlendes publicKey → resolved[role] bleibt undefined → build() wirft missing-ssh-key
+    }
+
+    return resolved;
+  }
 
   /**
    * Prüft ob ein Provider konfiguriert ist (Token gesetzt).

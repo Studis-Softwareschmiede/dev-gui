@@ -1,5 +1,8 @@
 # Coder Lessons — dev-gui (newest first)
 
+## 2026-06-08 — Covers-Block in Testdateien muss neue Spec-ACs aus einem anderen Spec-Dokument namentlich listen
+Wenn neue Tests für ACs aus einem anderen Spec-Dokument (z.B. `vps-ssh-key-assignment` AC3/AC4/AC5/AC6) in eine bestehende Testdatei (z.B. `test/VpsProviderRegistry.test.js`, `test/vpsRouter.test.js`) eingefügt werden, muss der `Covers`-Block im Datei-Header die neuen AC-Nummern UND den Spec-Namen nennen — z.B. `AC3 (vps-ssh-key-assignment) — ...`. Nur den describe-Block-Kommentar mit der Spec zu benennen reicht nicht; der Datei-Header-Inventory ist das bindende Dokument. Gilt auch wenn die Tests in einem separaten describe-Block am Ende der Datei stehen. Prüfliste: nach dem Schreiben neuer describe-Blöcke für eine andere Spec immer den Datei-Header-Covers-Block ergänzen.
+
 ## 2026-06-08 — #apiPost-2xx-Bedingung: res.ok deckt bereits 201 und 204 ab — explizite Checks sind redundant
 `if (res.ok || res.status === 201 || res.status === 204)` in einem API-POST-Helper ist kein Bug, aber `res.ok` gilt für alle 200–299-Statuscodes und schließt 201 und 204 bereits ein. Die expliziten `|| res.status === 201 || res.status === 204`-Zweige sind überflüssig. Das 204-Body-Guard `if (res.status === 204) return {}` innerhalb des Blocks bleibt aber nötig, da `res.json()` bei leerem Body fehlschlägt. Saubereres Muster: `if (res.ok) { if (res.status === 204) return {}; return res.json(); }`.
 
