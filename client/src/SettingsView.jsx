@@ -31,13 +31,25 @@
  *   SSH-AC9  — Provision-Ergebnis (added/already-present/error) ohne Geheim-Leak angezeigt.
  *   SSH-AC10 — Provision-Aktion nur berechtigter Identität zugänglich (403 sonst).
  *
+ * SSH-Keypair-Generierung + Export (ssh-key-generation AC1/AC3/AC4/AC6/AC7/AC8 — #116):
+ *   GEN-AC1  — „Keypair erzeugen" je Rollen-Label (root|alex): POST .../generate, ed25519.
+ *   GEN-AC3  — Public-Key in Antwort angezeigt + kopierbar; Private-Key NIE in normaler Anzeige.
+ *   GEN-AC4  — „Private-Key herunterladen"-Button ruft Export-Endpunkt (dauerhaft wiederholbar).
+ *   GEN-AC6  — Generate/Export hinter Access-Mauer + CRED_ADMIN_EMAILS (403 → Fehlermeldung).
+ *   GEN-AC7  — 409 key-exists: Overwrite-Bestätigung zeigen; mit { overwrite:true } wiederholen.
+ *   GEN-AC8  — Nach Generierung Label-Liste neu laden (Refetch) für VPS-Create-Zuordnung.
+ *
  * A11y: WCAG 2.1 AA — Überschriften-Struktur, sichtbarer Fokus, Touch-Target ≥ 44 px,
  *       Kontrast ≥ 4.5:1, Fehler programmatisch zugeordnet (aria-describedby).
+ *       Overwrite-Bestätigung programmatisch zugeordnet (role=alertdialog, aria-labelledby,
+ *       aria-describedby).
  *
  * Security (Floor):
  *   - Kein Secret im Frontend-Bundle.
  *   - Private-Key-Klartext wird nach erfolgreichem Speichern sofort verworfen (nur State).
  *   - Kein Klartext-Wert in irgendwelchen Logs oder Konsolen-Ausgaben.
+ *   - Private-Key-Klartext wird NUR über den expliziten Export-Endpunkt bezogen (nie in normaler
+ *     Sektion-Anzeige, nicht im State der Sektion-Komponente).
  *
  * @param {{ onNavigate: (view: string) => void }} props
  */
@@ -229,6 +241,55 @@ async function provisionSshKey(user, { host, port, targetUser, hostFingerprint }
   const data = await res.json();
   // Für Provision: HTTP-Fehler geben result:'error' + reason zurück — immer JSON
   return { ...data, httpStatus: res.status };
+}
+
+/**
+ * Generiert ein neues ed25519-Keypair für das Rollen-Label {user} (GEN-AC1).
+ * Body: { overwrite?: boolean, comment?: string }
+ *
+ * @returns {Promise<{ user, publicKey, privateKeyStatus, generatedAt } | { error, errorClass? }>}
+ */
+async function generateSshKeypair(user, { overwrite = false } = {}) {
+  const body = {};
+  if (overwrite) body.overwrite = true;
+  const res = await fetch(`/api/settings/ssh-keys/${encodeURIComponent(user)}/generate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  // Fehler-Shape: { error, errorClass? }; Erfolg-Shape: { user, publicKey, privateKeyStatus, generatedAt }
+  return { ...data, httpStatus: res.status };
+}
+
+/**
+ * Exportiert den Private-Key für {user} als Blob und löst einen Browser-Download aus (GEN-AC4).
+ * DAUERHAFT wiederholbar — solange ein Private-Key für das Label gesetzt ist.
+ *
+ * @returns {Promise<{ ok: boolean, error?: string }>}
+ */
+async function exportAndDownloadPrivateKey(user) {
+  const res = await fetch(`/api/settings/ssh-keys/${encodeURIComponent(user)}/private-key/export`);
+  if (!res.ok) {
+    let errMsg = `Export fehlgeschlagen (${res.status})`;
+    try {
+      const data = await res.json();
+      errMsg = data.error ?? errMsg;
+    } catch { /* ignore */ }
+    return { ok: false, error: errMsg };
+  }
+  // Private-Key als text/plain → Download ohne in State zu laden (Security-Floor: kein Klartext im State)
+  const text = await res.text();
+  const blob = new globalThis.Blob([text], { type: 'text/plain' });
+  const url = globalThis.URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${user}_ed25519`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  globalThis.URL.revokeObjectURL(url);
+  return { ok: true };
 }
 
 // ── WorkspacePathSection ──────────────────────────────────────────────────────
@@ -951,6 +1012,236 @@ function ProvisionForm({ user, onClose }) {
   );
 }
 
+// ── KeygenPanel ───────────────────────────────────────────────────────────────
+
+/**
+ * Panel zum Erzeugen eines neuen ed25519-Keypairs (ssh-key-generation GEN-AC1/AC3/AC4/AC7).
+ * Nur sichtbar für Rollen-Labels root|alex (die einzigen, die generate unterstützen).
+ *
+ * Zeigt nach erfolgreicher Generierung:
+ *   - Public-Key vollständig (kopierbar) (GEN-AC3)
+ *   - „Private-Key herunterladen"-Button (dauerhaft wiederholbar) (GEN-AC4)
+ *
+ * Private-Key-Klartext erscheint NIEMALS in der normalen Sektion-Anzeige (GEN-AC3).
+ *
+ * GEN-AC7: 409 key-exists → Overwrite-Bestätigung (role=alertdialog, aria-labelledby/describedby).
+ * GEN-AC8: Nach Generierung ruft onSaved() → Reload der Label-Liste für VPS-Create.
+ *
+ * @param {{
+ *   user: string,
+ *   hasPrivKey: boolean,
+ *   onSaved: () => void,
+ * }} props
+ */
+function KeygenPanel({ user, hasPrivKey, onSaved }) {
+  const [generating, setGenerating] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [error, setError] = useState(null);
+  const [successPubKey, setSuccessPubKey] = useState(null); // null = kein letztes Ergebnis
+  const [copied, setCopied] = useState(false);
+  // Overwrite-Bestätigung (GEN-AC7)
+  const [showOverwriteConfirm, setShowOverwriteConfirm] = useState(false);
+
+  const errorId = `keygen-err-${user}`;
+  const overwriteDialogId = `keygen-overwrite-${user}`;
+  const overwriteDescId = `keygen-overwrite-desc-${user}`;
+  const confirmBtnRef = useRef(null);
+
+  // Fokus auf Bestätigungs-Button wenn Dialog öffnet (A11y: Fokus-Management)
+  useEffect(() => {
+    if (showOverwriteConfirm && confirmBtnRef.current) {
+      confirmBtnRef.current.focus();
+    }
+  }, [showOverwriteConfirm]);
+
+  const doGenerate = useCallback(async (overwrite) => {
+    setError(null);
+    setGenerating(true);
+    try {
+      const result = await generateSshKeypair(user, { overwrite });
+      if (result.httpStatus === 409 && result.errorClass === 'key-exists') {
+        // GEN-AC7: belegtes Label → Overwrite-Bestätigung zeigen
+        setShowOverwriteConfirm(true);
+        return;
+      }
+      if (result.httpStatus !== 200) {
+        setError(result.error ?? `Generierung fehlgeschlagen (${result.httpStatus})`);
+        return;
+      }
+      // Erfolg: Public-Key anzeigen (GEN-AC3); Private-Key NIE im State
+      setSuccessPubKey(result.publicKey ?? null);
+      setShowOverwriteConfirm(false);
+      // GEN-AC8: Label-Liste neu laden
+      onSaved();
+    } catch (err) {
+      setError(err.message ?? 'Generierung fehlgeschlagen');
+    } finally {
+      setGenerating(false);
+    }
+  }, [user, onSaved]);
+
+  const handleGenerate = useCallback(() => {
+    doGenerate(false);
+  }, [doGenerate]);
+
+  const handleOverwriteConfirm = useCallback(() => {
+    setShowOverwriteConfirm(false);
+    doGenerate(true);
+  }, [doGenerate]);
+
+  const handleOverwriteCancel = useCallback(() => {
+    setShowOverwriteConfirm(false);
+  }, []);
+
+  const handleCopyPubKey = useCallback(async () => {
+    if (!successPubKey) return;
+    try {
+      await globalThis.navigator.clipboard.writeText(successPubKey);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setError('Kopieren fehlgeschlagen — bitte manuell markieren und kopieren.');
+    }
+  }, [successPubKey]);
+
+  const handleExport = useCallback(async () => {
+    setExporting(true);
+    setError(null);
+    try {
+      const result = await exportAndDownloadPrivateKey(user);
+      if (!result.ok) {
+        setError(result.error ?? 'Export fehlgeschlagen');
+      }
+    } catch (err) {
+      setError(err.message ?? 'Export fehlgeschlagen');
+    } finally {
+      setExporting(false);
+    }
+  }, [user]);
+
+  return (
+    <div style={keygenStyles.wrapper}>
+      {/* Generieren-Button */}
+      {!showOverwriteConfirm && (
+        <div style={fieldStyles.actionRow}>
+          <button
+            type="button"
+            onClick={handleGenerate}
+            disabled={generating}
+            style={keygenStyles.btnGenerate}
+            aria-busy={generating}
+            aria-label={`Neues ed25519-Keypair für ${user} erzeugen`}
+            aria-describedby={error ? errorId : undefined}
+          >
+            {generating ? 'Erzeugen…' : 'Keypair erzeugen'}
+          </button>
+          {/* Private-Key-Export: dauerhaft sichtbar wenn Private-Key gesetzt (GEN-AC4) */}
+          {hasPrivKey && (
+            <button
+              type="button"
+              onClick={handleExport}
+              disabled={exporting}
+              style={keygenStyles.btnExport}
+              aria-busy={exporting}
+              aria-label={`Private-Key für ${user} herunterladen`}
+            >
+              {exporting ? 'Exportiere…' : 'Private-Key herunterladen'}
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Overwrite-Bestätigung (GEN-AC7) — programmatisch zugeordnet (role=alertdialog) */}
+      {showOverwriteConfirm && (
+        <div
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby={overwriteDialogId}
+          aria-describedby={overwriteDescId}
+          style={keygenStyles.overwriteBox}
+        >
+          <p id={overwriteDialogId} style={keygenStyles.overwriteTitle}>
+            Vorhandenen Key überschreiben?
+          </p>
+          <p id={overwriteDescId} style={keygenStyles.overwriteDesc}>
+            Für Rollen-Label <strong>{user}</strong> ist bereits ein Key gesetzt.
+            Das Überschreiben entfernt den bisherigen Private-Key unwiderruflich —
+            Server, die diesen Key noch nutzen, verlieren den Zugang.
+          </p>
+          <div style={fieldStyles.actionRow}>
+            <button
+              type="button"
+              ref={confirmBtnRef}
+              onClick={handleOverwriteConfirm}
+              disabled={generating}
+              style={keygenStyles.btnOverwriteConfirm}
+              aria-label={`Bestätigen: Keypair für ${user} überschreiben`}
+            >
+              {generating ? 'Erzeugen…' : 'Ja, überschreiben'}
+            </button>
+            <button
+              type="button"
+              onClick={handleOverwriteCancel}
+              disabled={generating}
+              style={fieldStyles.btnSecondary}
+              aria-label="Abbrechen — bestehenden Key behalten"
+            >
+              Abbrechen
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Fehler-Anzeige */}
+      {error && (
+        <p id={errorId} style={fieldStyles.error} role="alert" aria-live="polite">
+          {error}
+        </p>
+      )}
+
+      {/* Public-Key-Anzeige nach Generierung (GEN-AC3) */}
+      {successPubKey && (
+        <div style={keygenStyles.pubKeyResult} aria-live="polite">
+          <div style={keygenStyles.pubKeyResultHeader}>
+            <span style={keygenStyles.pubKeyResultLabel}>Erzeugter Public-Key:</span>
+            <button
+              type="button"
+              onClick={handleCopyPubKey}
+              style={keygenStyles.btnCopy}
+              aria-label={`Public-Key für ${user} in Zwischenablage kopieren`}
+            >
+              {copied ? 'Kopiert!' : 'Kopieren'}
+            </button>
+          </div>
+          <pre
+            style={sshStyles.pubKeyDisplay}
+            aria-label={`Erzeugter Public-Key für ${user}`}
+          >
+            {successPubKey}
+          </pre>
+          {/* Private-Key-Export-Button erscheint nach Generierung immer (GEN-AC4) */}
+          <div style={{ marginTop: 8 }}>
+            <button
+              type="button"
+              onClick={handleExport}
+              disabled={exporting}
+              style={keygenStyles.btnExport}
+              aria-busy={exporting}
+              aria-label={`Private-Key für ${user} herunterladen`}
+            >
+              {exporting ? 'Exportiere…' : 'Private-Key herunterladen'}
+            </button>
+          </div>
+          <p style={keygenStyles.exportHint}>
+            Der Private-Key ist dauerhaft über den Export-Button abrufbar — solange er im Store liegt.
+            Jeder Export wird auditiert.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── SshKeyEntry ───────────────────────────────────────────────────────────────
 
 /**
@@ -1074,6 +1365,9 @@ function SshKeyEntry({ entry, onSaved }) {
     }
   }, [user, onSaved]);
 
+  // GEN-AC1: nur root|alex unterstützen die Keypair-Generierung
+  const isGenerateSupported = user === 'root' || user === 'alex';
+
   return (
     <div style={fieldStyles.row} role="group" aria-label={`SSH-Schlüssel für ${user}`}>
       {/* Benutzer-Label */}
@@ -1118,6 +1412,18 @@ function SshKeyEntry({ entry, onSaved }) {
           user={user}
           onClose={() => setShowProvision(false)}
         />
+      )}
+
+      {/* GEN-AC1/AC3/AC4/AC7/AC8: Keypair-Generierung + Export (nur root|alex) */}
+      {isGenerateSupported && (
+        <div style={keygenStyles.sectionWrapper}>
+          <h4 style={keygenStyles.sectionHeading}>Keypair erzeugen</h4>
+          <KeygenPanel
+            user={user}
+            hasPrivKey={hasPrivKey}
+            onSaved={onSaved}
+          />
+        </div>
       )}
 
       {/* Public-Key */}
@@ -2032,5 +2338,111 @@ const wsPathStyles = {
     fontSize: 13,
     cursor: 'pointer',
     minHeight: 44,
+  },
+};
+
+// ── KeygenPanel styles (ssh-key-generation #116) ──────────────────────────────
+
+const keygenStyles = {
+  wrapper: {
+    marginTop: 4,
+  },
+  sectionWrapper: {
+    marginTop: 12,
+    padding: '10px 12px',
+    background: '#0d1117',
+    border: '1px solid #2a2a2a',
+    borderRadius: 6,
+  },
+  sectionHeading: {
+    margin: '0 0 8px',
+    fontSize: 13,
+    fontWeight: 700,
+    color: '#e5e7eb',
+  },
+  btnGenerate: {
+    padding: '8px 16px',
+    background: '#065f46',    // Kontrast #d1fae5/#065f46 — grün für Erzeuge-Aktion
+    color: '#d1fae5',
+    border: '1px solid #047857',
+    borderRadius: 4,
+    fontSize: 13,
+    cursor: 'pointer',
+    minHeight: 44,
+    fontWeight: 600,
+  },
+  btnExport: {
+    padding: '8px 16px',
+    background: '#1e293b',
+    color: '#93c5fd',         // Kontrast auf #1e293b ≈ 5.8:1
+    border: '1px solid #334155',
+    borderRadius: 4,
+    fontSize: 13,
+    cursor: 'pointer',
+    minHeight: 44,
+  },
+  btnCopy: {
+    padding: '4px 10px',
+    background: '#1e293b',
+    color: '#93c5fd',
+    border: '1px solid #334155',
+    borderRadius: 4,
+    fontSize: 12,
+    cursor: 'pointer',
+    minHeight: 44,
+  },
+  btnOverwriteConfirm: {
+    padding: '8px 16px',
+    background: '#7f1d1d',    // Rot: Warnung/Destruktiv
+    color: '#fecaca',
+    border: 'none',
+    borderRadius: 4,
+    fontSize: 13,
+    cursor: 'pointer',
+    minHeight: 44,
+    fontWeight: 600,
+  },
+  overwriteBox: {
+    padding: '12px 16px',
+    background: '#1c0a0a',
+    border: '1px solid #7f1d1d',
+    borderRadius: 6,
+    marginBottom: 8,
+  },
+  overwriteTitle: {
+    margin: '0 0 6px',
+    fontSize: 14,
+    fontWeight: 700,
+    color: '#fca5a5',         // Kontrast auf #1c0a0a ≥ 4.5:1
+  },
+  overwriteDesc: {
+    margin: '0 0 12px',
+    fontSize: 13,
+    color: '#fca5a5',
+    lineHeight: 1.5,
+  },
+  pubKeyResult: {
+    marginTop: 12,
+    padding: '10px 12px',
+    background: '#052e16',
+    border: '1px solid #166534',
+    borderRadius: 6,
+  },
+  pubKeyResultHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+  },
+  pubKeyResultLabel: {
+    fontSize: 12,
+    fontWeight: 600,
+    color: '#86efac',
+  },
+  exportHint: {
+    margin: '8px 0 0',
+    fontSize: 11,
+    color: '#9ca3af',         // Kontrast auf #052e16 ≥ 4.5:1
+    lineHeight: 1.4,
   },
 };
