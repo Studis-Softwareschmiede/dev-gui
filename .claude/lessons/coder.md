@@ -1,5 +1,8 @@
 # Coder Lessons — dev-gui (newest first)
 
+## 2026-06-08 — Test-Header-Claim nach UI-Verschiebung: Covers-Block im Ziel-Test nachpflegen
+Wenn eine UI-Sektion (z.B. WorkspacePathSection) von einer View (Settings) in eine andere (GitHub) verschoben wird und die zugehörigen Tests mitgezogen werden, muss der `@file`-Header der Ziel-Testdatei einen neuen `Covers (workspace-path-config ...)` Abschnitt erhalten — die bloße Kommentarzeile am Anfang des neuen Testblocks (z.B. `// Workspace-Path — verschoben von SettingsView #89`) genügt nicht. Ohne den `Covers`-Eintrag im Datei-Header fehlt die Inventar-Aussage, die der Reviewer gegen die Spec-Claim-Regel prüft.
+
 ## 2026-06-08 — Touch-Target-Test: Editier-Modus-Buttons (Speichern/Abbrechen) explizit prüfen
 Wenn der Test-Header „Touch-Target ≥ 44 px" für eine neue Sektion beansprucht, muss die Prüfung auch die Buttons im Bearbeiten-Modus erfassen (z.B. Speichern/Abbrechen im Workspace-Edit-Formular) — nicht nur die Buttons im Anzeige-Modus. Muster: Bearbeiten-Modus öffnen (z.B. Klick auf „Setzen"/„Ändern"), dann alle Buttons querySelectorAll + minHeight-Assertion. Ohne diesen Schritt ist der Header-Claim unvollständig belegt (auch wenn die Implementierung korrekt ist). Ein partieller Touch-Target-Test genügt nicht als Gesamt-Abdeckungsbeleg.
 
