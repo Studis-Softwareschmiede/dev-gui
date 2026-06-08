@@ -29,6 +29,7 @@
 
 import { Router } from 'express';
 import { VpsRegistryError } from './vps/VpsProviderRegistry.js';
+import { CloudInitError } from './vps/CloudInitBuilder.js';
 
 /** Erlaubte Provider-IDs (security/R02: Input-Validation vor API-Aufruf). */
 const KNOWN_PROVIDERS = ['hetzner', 'ionos', 'hostinger'];
@@ -443,6 +444,11 @@ export function vpsRouter(registry, auditStore) {
  * @param {string} action - Kontext für Logging
  */
 function mapRegistryErrorToResponse(res, err, action) {
+  // CloudInitError (AC7): fehlende SSH-Keys → 422 mit errorClass vor Provider-Call
+  if (err instanceof CloudInitError) {
+    return res.status(err.httpStatus ?? 422).json({ result: 'error', errorClass: err.errorClass, reason: err.message });
+  }
+
   if (err instanceof VpsRegistryError) {
     switch (err.errorClass) {
       case 'unknown-provider':

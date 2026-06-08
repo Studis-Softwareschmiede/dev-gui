@@ -205,8 +205,7 @@ export class VpsProviderRegistry {
   async create(provider, params) {
     const { token, adapter } = await this.#resolveProviderOrThrow(provider);
 
-    // ADR-009: cloud-init server-intern erzeugen — NIEMALS vom Client übernehmen.
-    // CLOUDINIT_STUB_98: vollständige Vorlage folgt in #98.
+    // ADR-009: cloud-init server-intern erzeugen — NIE vom Client übernehmen.
     const userData = this.#cloudInitBuilder.build({
       provider,
       name: params.name,
@@ -215,8 +214,9 @@ export class VpsProviderRegistry {
       image: params.image,
     });
 
-    // SSHKEYS_STUB_99: SSH-Key-Auflösung (root/alex aus CredentialStore-Labels)
-    // folgt in Item #99. Bis dahin: leeres Objekt (kein Client-Key akzeptiert).
+    // SSHKEYS_STUB_99: SSH-Key-Auflösung (root/alex aus CredentialStore-Labels) folgt in #99.
+    // build() wird ohne sshPublicKeys aufgerufen → AC7-Guard (missing-ssh-key 422) feuert zwingend
+    // bis #99 die Key-Auflösung liefert.
     const sshPublicKeys = {};
 
     const adapterParams = {
