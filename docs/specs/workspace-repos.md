@@ -57,7 +57,7 @@ Die GitHub-Ansicht ([[view-github]]) zeigt neben der Org-Repo-Übersicht ([[gith
   - **200** `{ name, status: "deleted" }` bei Erfolg.
   - **4xx** bei Validierungs-/Traversal-/Symlink-Fehler (AC5) bzw. unbekanntem Klon (`404`).
   - **403** ohne Access bzw. ohne Berechtigung (AC8).
-- **Konfiguration:** `WORKSPACE_DIR` (Env) — derselbe feste Workspace-Pfad wie in [[github-repo-clone]]; direkte Unterordner = potenzielle Klone.
+- **Konfiguration:** Workspace-Root = **Effektivwert** (konfiguriert ?? Env `WORKSPACE_DIR`, siehe [[workspace-path-config]]) — derselbe Workspace-Root wie in [[github-repo-clone]]; direkte Unterordner = potenzielle Klone. Ist nichts konfiguriert, gilt unverändert die Env `WORKSPACE_DIR`.
 - **Boundary:** das Workspace-Scannen + Git-Ausführen (`git pull`, Status/Branch/Commit lesen) + Löschen erfolgt in einem klaren Boundary; das Token-Minting für den Pull nutzt **dieselbe** Mechanik/Quelle wie [[github-repo-clone]] (`CredentialStore`-Schema `github`). Welche konkrete Komponente die Git-/FS-Operationen kapselt (eigener `WorkspaceManager` vs. Erweiterung des Klon-Boundary) entscheidet der `architekt`; bindend ist: **ein** Boundary für Workspace-FS/Git, Token nie persistiert.
 - Mutierende Endpunkte zusätzlich identitäts-/rollengeprüft; jede Mutation schreibt einen AuditEntry (vgl. [[access-and-guardrails]]).
 
@@ -84,7 +84,8 @@ Die GitHub-Ansicht ([[view-github]]) zeigt neben der Org-Repo-Übersicht ([[gith
 
 ## Abhängigkeiten
 - [[view-github]] (Ansicht, in der die Workspace-Übersicht sitzt).
-- [[github-repo-clone]] (definiert `WORKSPACE_DIR`, die Path-Traversal-/Symlink-Schutzlinie und die Token-Mint-Mechanik für den Pull; Workspace-Klone sind das Eingabematerial dieser Spec).
+- [[github-repo-clone]] (definiert den Workspace-Root, die Path-Traversal-/Symlink-Schutzlinie und die Token-Mint-Mechanik für den Pull; Workspace-Klone sind das Eingabematerial dieser Spec).
+- [[workspace-path-config]] (der Workspace-Root ist konfigurierbar; Listing/Pull/Löschen nutzen den Effektivwert statt direkt Env `WORKSPACE_DIR`).
 - [[github-repos-overview]] (Verzahnung: Badge „lokal vorhanden" in der Org-Repo-Liste).
 - [[settings-credentials]] / `CredentialStore` (Schema `github`: Token-Minting für den Pull).
 - [[access-and-guardrails]] (Access-Mauer + Audit + Identitätsauswertung).

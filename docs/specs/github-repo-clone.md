@@ -42,7 +42,7 @@ version: 1
   - **4xx** bei Validierungs-/Traversal-Fehler (AC2).
   - **404/502** wenn das Repo nicht erreichbar ist bzw. `git clone` fehlschlägt (AC7).
   - **403** ohne Access bzw. ohne Berechtigung (AC6).
-- **Konfiguration:** `WORKSPACE_DIR` (Env) — fester Workspace-Pfad auf dem persistenten Volume, uid-1000-schreibbar; beim Boot idempotent angelegt. Ziel = `WORKSPACE_DIR/<safe-repo-name>`.
+- **Konfiguration:** Workspace-Root = **Effektivwert** (konfiguriert ?? Env `WORKSPACE_DIR`, siehe [[workspace-path-config]]) auf dem persistenten Volume, uid-1000-schreibbar; beim Boot idempotent angelegt. Ziel = `<effektiver-Workspace-Root>/<safe-repo-name>`. Ist nichts konfiguriert, gilt unverändert die Env `WORKSPACE_DIR`.
 - **Git-Aufruf (boundary-intern):** nacktes `git clone` der HTTPS-URL mit transient injiziertem Installation-Token; Token darf **nicht** in der persistierten `origin`-Remote-URL verbleiben.
 - Alle Endpunkte hinter AccessGuard; mutierende zusätzlich identitäts-/rollengeprüft; jede Mutation schreibt einen AuditEntry (vgl. [[access-and-guardrails]]).
 
@@ -68,5 +68,6 @@ version: 1
 ## Abhängigkeiten
 - [[view-github]] (Ansicht, in der das Klon-Formular sitzt).
 - [[settings-credentials]] / `CredentialStore` (Schema `github`: Token-Minting für den Klon-Zugriff).
+- [[workspace-path-config]] (der Workspace-Root ist konfigurierbar; Klon nutzt den Effektivwert statt direkt Env `WORKSPACE_DIR`).
 - [[access-and-guardrails]] (Access-Mauer + Audit + Identitätsauswertung).
-- **Architektur:** `WORKSPACE_DIR` auf dem persistenten Volume (siehe `docs/architecture.md`); Boundary für die Git-Ausführung; tiefe Architektur-Festlegung beim `architekt`.
+- **Architektur:** Workspace-Root (Effektivwert, [[workspace-path-config]]) auf dem persistenten Volume (siehe `docs/architecture.md`); Boundary für die Git-Ausführung; tiefe Architektur-Festlegung beim `architekt`.
