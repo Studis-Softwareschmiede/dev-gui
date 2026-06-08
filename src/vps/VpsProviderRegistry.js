@@ -1,0 +1,343 @@
+/**
+ * VpsProviderRegistry — einziger Ort, der Provider-APIs anspricht (AC1, ADR-009).
+ *
+ * Aufgaben:
+ *   1. Adapter pro Provider auflösen (hetzner / ionos / hostinger).
+ *   2. Provider-API-Token per Aufruf store-intern aus dem CredentialStore ziehen
+ *      (credentials/vps/<provider>_api_token) — transient, nie gecacht.
+ *   3. Read-Aggregation über alle konfigurierten Provider live + degradierend (AC3/AC4).
+ *   4. Mutierende Aktionen (start/stop/create) für einen adressierten Provider ausführen.
+ *
+ * Token-Injektion (ADR-009):
+ *   - Token wird pro Aufruf aus dem CredentialStore gelesen.
+ *   - Token wird als Funktionsargument transient an den Adapter übergeben.
+ *   - Token landet NUR im Authorization-Header — NIEMALS in URL, Log, Audit, Response, Argv.
+ *
+ * Degradierung (AC4):
+ *   - listMachines() über alle Provider: ein Provider-Fehler kippt nicht die Gesamt-Antwort.
+ *   - Fehlerhafte Provider erscheinen als { provider, errorClass } in providerErrors.
+ *   - Mutierende Einzel-Aktionen degradieren NICHT — sie melden Fehler klar als { result: "error" }.
+ *
+ * @module VpsProviderRegistry
+ *
+ * @typedef {object} VpsMachine
+ * @property {"hetzner"|"ionos"|"hostinger"} provider
+ * @property {string} serverId
+ * @property {string} name
+ * @property {"running"|"stopped"|"provisioning"|"error"|"unknown"} status
+ * @property {string|null} ipv4
+ * @property {string|null} ipv6
+ * @property {string|null} region
+ * @property {string|null} serverType
+ * @property {string|null} createdAt
+ *
+ * @typedef {object} ProviderInfo
+ * @property {"hetzner"|"ionos"|"hostinger"} id
+ * @property {boolean} configured
+ * @property {{ list: boolean, start: boolean, stop: boolean, create: boolean }} capabilities
+ *
+ * @typedef {object} ListResult
+ * @property {VpsMachine[]} machines
+ * @property {Array<{ provider: string, errorClass: string }>} [providerErrors]
+ */
+
+import { HetznerAdapter } from './providers/hetzner.js';
+import { IonosAdapter } from './providers/ionos.js';
+import { HostingerAdapter } from './providers/hostinger.js';
+import { CloudInitBuilder } from './CloudInitBuilder.js';
+
+/** Alle bekannten Provider-IDs. */
+const KNOWN_PROVIDERS = ['hetzner', 'ionos', 'hostinger'];
+
+/** CredentialStore-Schlüssel-Schema für Provider-Tokens. */
+const TOKEN_KEY = (provider) => `credentials/vps/${provider}_api_token`;
+
+/** Per-Provider-Timeout für listMachines (ms) — ADR-009. */
+const LIST_TIMEOUT_MS = 10000;
+
+// ── VpsProviderRegistry ────────────────────────────────────────────────────────
+
+export class VpsProviderRegistry {
+  /** @type {import('../CredentialStore.js').CredentialStore} */
+  #credentialStore;
+
+  /** @type {Map<string, object>} Provider-Adapter-Instanzen */
+  #adapters;
+
+  /** @type {CloudInitBuilder} Server-interner cloud-init-Erzeuger (ADR-009) */
+  #cloudInitBuilder;
+
+  /**
+   * @param {object} options
+   * @param {import('../CredentialStore.js').CredentialStore} options.credentialStore
+   * @param {object} [options.adapters] - Injectable adapters for tests: { hetzner, ionos, hostinger }
+   * @param {CloudInitBuilder} [options.cloudInitBuilder] - Injectable for tests
+   */
+  constructor({ credentialStore, adapters, cloudInitBuilder } = {}) {
+    this.#credentialStore = credentialStore;
+
+    // Adapter-Instanzen aufbauen (injectable für Tests)
+    const inj = adapters ?? {};
+    this.#adapters = new Map([
+      ['hetzner',   inj.hetzner   ?? new HetznerAdapter()],
+      ['ionos',     inj.ionos     ?? new IonosAdapter()],
+      ['hostinger', inj.hostinger ?? new HostingerAdapter()],
+    ]);
+
+    // CloudInitBuilder: server-intern, nie client-controlled (ADR-009)
+    this.#cloudInitBuilder = cloudInitBuilder ?? new CloudInitBuilder();
+  }
+
+  // ── Öffentliche API ──────────────────────────────────────────────────────────
+
+  /**
+   * Listet alle Provider mit Konfigurations-Status und Capability-Flags.
+   * Kein Provider-API-Aufruf (nur CredentialStore-Metadaten-Check).
+   *
+   * @returns {Promise<ProviderInfo[]>}
+   */
+  async listProviders() {
+    const result = [];
+    for (const id of KNOWN_PROVIDERS) {
+      const configured = await this.#isConfigured(id);
+      const adapter = this.#adapters.get(id);
+      result.push({
+        id,
+        configured,
+        capabilities: adapter.capabilities(),
+      });
+    }
+    return result;
+  }
+
+  /**
+   * Aggregiert VpsMachine-Listen über alle konfigurierten Provider live.
+   * Degradierend: ein fehlerhafter Provider erzeugt keinen 500 (AC4).
+   *
+   * @returns {Promise<ListResult>}
+   */
+  async listAllMachines() {
+    const machines = [];
+    const providerErrors = [];
+
+    // Nur konfigurierte Provider anfragen (AC2)
+    const promises = KNOWN_PROVIDERS.map(async (id) => {
+      const token = await this.#getToken(id);
+      if (!token) {
+        // Nicht konfiguriert — kein API-Call, kein Eintrag in providerErrors
+        return;
+      }
+
+      try {
+        // Per-Provider-Timeout via Promise.race (AC4 Degradation)
+        let timeoutHandle;
+        const timeoutPromise = new Promise((_, reject) => {
+          timeoutHandle = setTimeout(() => reject(new Error('timeout')), LIST_TIMEOUT_MS);
+        });
+        const adapter = this.#adapters.get(id);
+        const result = await Promise.race([
+          adapter.listMachines(token),
+          timeoutPromise,
+        ]);
+        clearTimeout(timeoutHandle); // S1: dangling Timer aufräumen (analog #apiGet-Muster)
+        machines.push(...result);
+      } catch (err) {
+        const errorClass = classifyProviderError(err);
+        providerErrors.push({ provider: id, errorClass });
+        // Kein Re-Throw — Degradation: die übrigen Provider werden weiter verarbeitet
+      }
+    });
+
+    await Promise.allSettled(promises);
+
+    const response = { machines };
+    if (providerErrors.length > 0) {
+      response.providerErrors = providerErrors;
+    }
+    return response;
+  }
+
+  /**
+   * Startet einen Server (power-on) beim adressierten Provider.
+   *
+   * @param {string} provider - "hetzner" | "ionos" | "hostinger"
+   * @param {string} serverId
+   * @returns {Promise<{ result: "ok"|"unsupported"|"error", reason?: string }>}
+   * @throws {VpsRegistryError} bei provider-not-configured oder unbekanntem Provider
+   */
+  async start(provider, serverId) {
+    const { token, adapter } = await this.#resolveProviderOrThrow(provider);
+    return adapter.start(serverId, token);
+  }
+
+  /**
+   * Stoppt einen Server (power-off) beim adressierten Provider.
+   *
+   * @param {string} provider - "hetzner" | "ionos" | "hostinger"
+   * @param {string} serverId
+   * @returns {Promise<{ result: "ok"|"unsupported"|"error", reason?: string }>}
+   * @throws {VpsRegistryError}
+   */
+  async stop(provider, serverId) {
+    const { token, adapter } = await this.#resolveProviderOrThrow(provider);
+    return adapter.stop(serverId, token);
+  }
+
+  /**
+   * Erstellt einen neuen Server beim adressierten Provider.
+   *
+   * ADR-009: userData wird IMMER server-intern über CloudInitBuilder erzeugt —
+   * niemals aus dem Client-Body übernommen. Der Client liefert nur fachliche
+   * Create-Parameter (name, region, serverType, image).
+   *
+   * SSHKEYS_STUB_99: SSH-Public-Key-Auflösung (root/alex aus settings-ssh-keys-Labels)
+   * folgt in Item #99 (vps-ssh-key-assignment). Bis dahin wird sshPublicKeys als
+   * leeres Objekt übergeben. Der 422-"missing-ssh-key"-Guard kommt vollständig
+   * mit #99 — hier noch nicht erzwingen, solange die Auflösung nicht existiert.
+   *
+   * @param {string} provider
+   * @param {object} params - { name, region, serverType, image? }
+   *   userData und sshPublicKeys werden NICHT aus params übernommen — sie werden
+   *   server-intern erzeugt/aufgelöst.
+   * @returns {Promise<VpsMachine>}
+   * @throws {VpsRegistryError}
+   */
+  async create(provider, params) {
+    const { token, adapter } = await this.#resolveProviderOrThrow(provider);
+
+    // ADR-009: cloud-init server-intern erzeugen — NIEMALS vom Client übernehmen.
+    // CLOUDINIT_STUB_98: vollständige Vorlage folgt in #98.
+    const userData = this.#cloudInitBuilder.build({
+      provider,
+      name: params.name,
+      region: params.region,
+      serverType: params.serverType,
+      image: params.image,
+    });
+
+    // SSHKEYS_STUB_99: SSH-Key-Auflösung (root/alex aus CredentialStore-Labels)
+    // folgt in Item #99. Bis dahin: leeres Objekt (kein Client-Key akzeptiert).
+    const sshPublicKeys = {};
+
+    const adapterParams = {
+      name: params.name,
+      region: params.region,
+      serverType: params.serverType,
+      image: params.image,
+      userData,
+      sshPublicKeys,
+    };
+
+    return adapter.create(adapterParams, token);
+  }
+
+  // ── Private Helpers ──────────────────────────────────────────────────────────
+
+  /**
+   * Prüft ob ein Provider konfiguriert ist (Token gesetzt).
+   * @param {string} provider
+   * @returns {Promise<boolean>}
+   */
+  async #isConfigured(provider) {
+    if (!this.#credentialStore) return false;
+    try {
+      const meta = await this.#credentialStore.getMeta(TOKEN_KEY(provider));
+      return meta.status === 'set';
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Liest das Provider-Token transient aus dem CredentialStore.
+   * Gibt null zurück wenn nicht gesetzt (kein Fehler — nicht konfiguriert).
+   * Token NIEMALS gecacht oder geloggt (ADR-009 / security/R01).
+   *
+   * @param {string} provider
+   * @returns {Promise<string|null>}
+   */
+  async #getToken(provider) {
+    if (!this.#credentialStore) return null;
+    try {
+      return await this.#credentialStore.getPlaintext(TOKEN_KEY(provider));
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Löst Provider-ID → { token, adapter } auf.
+   * Wirft VpsRegistryError bei unbekanntem Provider oder fehlendem Token.
+   *
+   * @param {string} provider
+   * @returns {Promise<{ token: string, adapter: object }>}
+   * @throws {VpsRegistryError}
+   */
+  async #resolveProviderOrThrow(provider) {
+    if (!KNOWN_PROVIDERS.includes(provider)) {
+      throw new VpsRegistryError(
+        `Unbekannter Provider: ${provider}`,
+        'unknown-provider',
+        404,
+      );
+    }
+
+    const token = await this.#getToken(provider);
+    if (!token) {
+      throw new VpsRegistryError(
+        `Provider '${provider}' nicht konfiguriert (kein API-Token gesetzt)`,
+        'provider-not-configured',
+        422,
+      );
+    }
+
+    const adapter = this.#adapters.get(provider);
+    return { token, adapter };
+  }
+}
+
+// ── VpsRegistryError ───────────────────────────────────────────────────────────
+
+/**
+ * Typed error thrown by VpsProviderRegistry.
+ * Message MUST NOT contain tokens or secrets.
+ */
+export class VpsRegistryError extends Error {
+  /**
+   * @param {string} message    - Human-readable (NO secrets)
+   * @param {string} errorClass - Machine-readable classification
+   * @param {number} [httpStatus] - Suggested HTTP status for router
+   */
+  constructor(message, errorClass, httpStatus) {
+    super(message);
+    this.name = 'VpsRegistryError';
+    this.errorClass = errorClass;
+    this.httpStatus = httpStatus ?? 500;
+  }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/**
+ * Klassifiziert einen Provider-Fehler für den providerErrors-Array.
+ * Tokens / Secrets DÜRFEN NICHT in der Klassifikation erscheinen.
+ *
+ * @param {Error} err
+ * @returns {string} errorClass
+ */
+function classifyProviderError(err) {
+  if (!err) return 'provider-unavailable';
+  if (err.message === 'timeout') return 'provider-unavailable';
+
+  const cls = err.errorClass;
+  if (cls) return cls;
+
+  const msg = String(err.message ?? '').toLowerCase();
+  if (msg.includes('auth') || msg.includes('401') || msg.includes('403')) {
+    return 'provider-auth-failed';
+  }
+  if (msg.includes('timeout') || msg.includes('unavailable') || msg.includes('econnrefused')) {
+    return 'provider-unavailable';
+  }
+  return 'provider-unavailable';
+}

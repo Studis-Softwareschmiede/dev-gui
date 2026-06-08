@@ -18,6 +18,11 @@
  *   POST /api/workspace/repos/pull                → { name, status: "pulled" } — pull clone (workspace-repos AC3, AC4, AC7, AC8)
  *   POST /api/workspace/repos/delete              → { name, status: "deleted" } — delete clone (workspace-repos AC5, AC7, AC8)
  *   POST /api/github/repos/clone                  → { repo, status: "cloned", path } — lokalen Klon anlegen (github-repo-clone #61)
+ *   GET  /api/vps/providers                       → [{ id, configured, capabilities }] (vps-provider-boundary AC2)
+ *   GET  /api/vps/machines                        → { machines, providerErrors? } (vps-provider-boundary AC3/AC4)
+ *   POST /api/vps/machines/:provider              → { result, machine? } — Create-from-scratch (vps-provider-boundary AC7/AC8)
+ *   POST /api/vps/machines/:provider/:serverId/start → { result, reason? } (vps-provider-boundary AC5/AC6)
+ *   POST /api/vps/machines/:provider/:serverId/stop  → { result, reason? } (vps-provider-boundary AC5/AC6)
  *   WS   /ws/terminal                             → PtyManager bridge (guarded by AccessGuard)
  */
 
@@ -48,6 +53,8 @@ import { GitHubCloner } from './src/GitHubCloner.js';
 import { githubRepoCloneRouter } from './src/githubRepoCloneRouter.js';
 import { workspacePathRouter } from './src/workspacePathRouter.js';
 import { buildWorkspaceRootResolver } from './src/workspacePath.js';
+import { VpsProviderRegistry } from './src/vps/VpsProviderRegistry.js';
+import { vpsRouter } from './src/vpsRouter.js';
 
 const PORT = Number(process.env.PORT ?? 8080);
 
@@ -124,6 +131,10 @@ app.use(workspaceReposRouter(workspaceScanner, auditStore, workspaceMutator, cre
 // ── GitHub Repo Clone route (github-repo-clone #61) ───────────────────────────
 const githubCloner = new GitHubCloner({ credentialStore, workspaceRootResolver: resolveWorkspaceRoot });
 app.use(githubRepoCloneRouter(auditStore, githubCloner));
+
+// ── VPS Provider Boundary (vps-provider-boundary #95) ─────────────────────────
+const vpsRegistry = new VpsProviderRegistry({ credentialStore });
+app.use(vpsRouter(vpsRegistry, auditStore));
 
 /**
  * GET /api/session → { state, restarts, startedAt }
