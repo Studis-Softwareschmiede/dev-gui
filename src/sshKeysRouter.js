@@ -9,6 +9,7 @@
  *   POST   /api/settings/ssh-keys/:user/provision         → Stufe B: Public-Key idempotent in authorized_keys (AC7–AC10)
  *   POST   /api/settings/ssh-keys/:user/generate          → ed25519-Keypair erzeugen (ssh-key-generation AC1–AC7)
  *   GET    /api/settings/ssh-keys/:user/private-key/export → Private-Key-Export (ssh-key-generation AC4/AC5/AC6)
+ *   POST   /api/settings/ssh-keys/:user/rotate            → vollautomatische additive Rotation (ssh-key-rotation AC1–AC8)
  *
  * Security (ADR-007/008, ssh-key-generation Sicherheits-Tradeoff):
  *   - Private-Key-Klartext verlässt den Store NIE Richtung HTTP/Log/Audit/WS-Stream —
@@ -53,6 +54,12 @@ function generateEd25519Keypair(comment, keygenFn) {
     });
   });
 }
+
+/**
+ * Erlaubte Rollen-Labels für die Rotation (AC1 — subset von root|alex).
+ * Spiegelung von ALLOWED_GENERATE_USERS — Rotation setzt einen vorhandenen Ausgangs-Key voraus.
+ */
+const ALLOWED_ROTATE_USERS = ['root', 'alex'];
 
 // Erlaubte Zeichen für Benutzer-Labels (z.B. "root", "alex", "deploy-user")
 const USER_LABEL_RE = /^[a-zA-Z0-9_\-.:@]+$/;
@@ -778,5 +785,300 @@ export function sshKeysRouter(credentialStore, auditStore, vpsProvisioner, keyge
       .send(privateKeyPlaintext);
   });
 
+  // ── ssh-key-rotation AC1–AC8 ────────────────────────────────────────────────
+
+  /**
+   * POST /api/settings/ssh-keys/:user/rotate
+   * Vollautomatische, additive SSH-Key-Rotation auf einem laufenden VPS.
+   * Ablauf: gen → additiv einspielen → Verbindungstest → bei Erfolg alten Key entfernen.
+   * Body: { host: string, port?: number, targetUser: string, hostFingerprint?: string }
+   *
+   * Response: 200 { result: "rotated", oldKeyRemoved: boolean, newPublicKey, reason? }
+   * Response: 400 { error } — Validierungsfehler
+   * Response: 403 { error } — keine Berechtigung
+   * Response: 404 { error } — unbekanntes Rollen-Label
+   * Response: 422 { error, errorClass } — kein Ausgangs-Key vorhanden / VPS-Ziel fehlt
+   * Response: 502 { result: "error", errorClass, reason } — VPS-/Verify-Fehler
+   * Response: 500 { error } — interner Fehler oder Audit-Fehler
+   *
+   * Security: Access-Mauer (AccessGuard in server.js) + CRED_ADMIN_EMAILS + Audit-First (AC7/AC8).
+   * Private-Key-Klartext erscheint NIEMALS in Response, Logs, Audit oder WS (AC8).
+   */
+  router.post('/api/settings/ssh-keys/:user/rotate', async (req, res) => {
+    const identity = req.identity ?? null;
+
+    // AC7: Mutations-Autorisierung (CRED_ADMIN_EMAILS, analog den anderen mutierten Endpunkten)
+    const authz = checkMutationAuthz(identity);
+    if (!authz.allowed) {
+      return res.status(403).json({ error: 'Keine Berechtigung für diese Aktion' });
+    }
+
+    const { user } = req.params;
+
+    // AC1/Edge-Case: Nur root|alex erlaubt
+    if (!ALLOWED_ROTATE_USERS.includes(user)) {
+      return res.status(404).json({ error: `Unbekanntes Rollen-Label: ${user}. Erlaubt: ${ALLOWED_ROTATE_USERS.join(', ')}` });
+    }
+
+    // Body: VPS-Ziel-Parameter
+    const { host, port, targetUser, hostFingerprint } = req.body ?? {};
+
+    // host: Pflicht
+    const hostValid = validateHost(host);
+    if (!hostValid.ok) {
+      return res.status(400).json({ error: hostValid.error });
+    }
+
+    // port: optional (1–65535)
+    const portValid = validatePort(port);
+    if (!portValid.ok) {
+      return res.status(400).json({ error: portValid.error });
+    }
+
+    // targetUser: Pflicht
+    const targetUserValid = validateUserLabel(targetUser);
+    if (!targetUserValid.ok) {
+      return res.status(400).json({ error: `targetUser ungültig: ${targetUserValid.error}` });
+    }
+
+    // hostFingerprint: optional — wenn angegeben muss es ein gültiges SHA256-Base64-Format sein
+    if (hostFingerprint !== undefined) {
+      const fpValid = validateHostFingerprint(hostFingerprint);
+      if (!fpValid.ok) {
+        return res.status(422).json({ error: fpValid.error });
+      }
+    }
+
+    const vpsTarget = {
+      host: host.trim(),
+      port: port !== undefined ? Number(port) : undefined,
+      targetUser: targetUser.trim(),
+    };
+    const fpOpt = hostFingerprint ? hostFingerprint.trim() : undefined;
+
+    // AC7: Audit-First — Rotation-Start auditieren BEVOR irgendeine Aktion ausgeführt wird
+    // Ohne Private-Key oder Public-Key-Material im Audit-Eintrag (AC8)
+    const auditStart = `ssh-key-rotate:start:${user}:${vpsTarget.host}:${vpsTarget.targetUser}`;
+    try {
+      auditStore.record({ identity: identity?.email ?? null, command: auditStart });
+    } catch (auditErr) {
+      console.error('[sshKeysRouter] rotate: Audit-Write fehlgeschlagen:', auditErr.message);
+      return res.status(500).json({ error: 'Audit-Write fehlgeschlagen — Aktion abgebrochen' });
+    }
+
+    // Schritt 0: Prüfen ob alter Key vorhanden ist (Rotation setzt Ausgangs-Key voraus)
+    let oldPrivateKey, oldPublicKey;
+    try {
+      oldPrivateKey = await credentialStore.getPlaintext(`ssh/${user}/private_key`);
+      oldPublicKey = await credentialStore.getPublicKey(user);
+    } catch {
+      console.error('[sshKeysRouter] rotate: Store-Lesefehler (kein Klartext geloggt)');
+      return res.status(500).json({ error: 'SSH-Key-Store nicht erreichbar' });
+    }
+
+    if (!oldPrivateKey || !oldPublicKey) {
+      return res.status(422).json({
+        error: `Kein bestehender Key für Rollen-Label "${user}" — Rotation setzt einen Ausgangs-Key voraus. Erst ein Keypair erzeugen.`,
+        errorClass: 'no-existing-key',
+      });
+    }
+
+    // Schritt 1: Neues ed25519-Keypair erzeugen (Keygen-Logik aus #115 wiederverwenden)
+    // Noch NICHT den aktiven Store-Key ersetzen.
+    let newPublicKey, newPrivateKey;
+    try {
+      const comment = `dev-gui/${user}`;
+      ({ publicKey: newPublicKey, privateKey: newPrivateKey } = await generateEd25519Keypair(comment, keygenFn));
+    } catch (genErr) {
+      console.error('[sshKeysRouter] rotate: Keypair-Erzeugung fehlgeschlagen:', genErr.message);
+      return res.status(500).json({ error: 'Keypair-Erzeugung fehlgeschlagen' });
+    }
+
+    // Sicherstellen dass der erzeugte Key ein ed25519-Key ist (analog generate)
+    const newPubKeyValid = validatePublicKey(newPublicKey);
+    if (!newPubKeyValid.ok || !newPublicKey.startsWith('ssh-ed25519 ')) {
+      console.error('[sshKeysRouter] rotate: Erzeugter Public-Key ungültig oder kein ed25519');
+      return res.status(500).json({ error: 'Interner Fehler: Keypair-Format ungültig' });
+    }
+
+    // Schritt 2: Neuen Public-Key ADDITIV einspielen (AC2 — alter Key bleibt gültig)
+    let addResult;
+    try {
+      addResult = await provisioner.addAuthorizedKey({
+        host: vpsTarget.host,
+        port: vpsTarget.port,
+        targetUser: vpsTarget.targetUser,
+        publicKey: newPublicKey,
+        privateKey: oldPrivateKey,  // Mit altem Private-Key einloggen um neuen Public-Key einzutragen
+        hostFingerprint: fpOpt,
+      });
+    } catch {
+      console.error('[sshKeysRouter] rotate: addAuthorizedKey fehlgeschlagen (kein Key-Material geloggt)');
+      return res.status(502).json({
+        result: 'error',
+        errorClass: 'error',
+        error: 'Additives Einspielen des neuen Keys fehlgeschlagen',
+      });
+    }
+
+    if (addResult.result === 'error') {
+      // Einspielen gescheitert → abbrechen, alter Key unangetastet, kein Store-Wechsel
+      const ec = addResult.errorClass ?? 'error';
+      return res.status(502).json({
+        result: 'error',
+        errorClass: ec,
+        error: addResult.reason ?? 'Additives Einspielen des neuen Public-Keys fehlgeschlagen',
+        reason: addResult.reason,
+      });
+    }
+
+    // Schritt 3: Verbindungstest mit dem NEUEN Private-Key (AC3 — Aussperr-Schutz)
+    let testResult;
+    try {
+      testResult = await provisioner.testConnection({
+        host: vpsTarget.host,
+        port: vpsTarget.port,
+        targetUser: vpsTarget.targetUser,
+        privateKey: newPrivateKey,  // AC8: neuer Private-Key verlässt Store nur intern, nie in Response/Log
+        hostFingerprint: fpOpt,
+      });
+    } catch {
+      console.error('[sshKeysRouter] rotate: testConnection fehlgeschlagen (kein Key-Material geloggt)');
+      // Verbindungstest ausgefallen — best-effort Rollback des additiv eingespielen neuen Keys
+      // Rollback nutzt den alten Private-Key, da dieser nachweislich funktioniert (Schritt 2 war ok).
+      await _rollbackNewKey({ provisioner, vpsTarget, newPublicKey, connectPrivateKey: oldPrivateKey, fpOpt });
+      // AC7: Audit-Fehlschlag
+      try {
+        auditStore.record({
+          identity: identity?.email ?? null,
+          command: `ssh-key-rotate:failed:${user}:${vpsTarget.host}:${vpsTarget.targetUser}:rotation-verify-failed`,
+        });
+      } catch { /* Audit-Fehler im Fehlerfall — nicht blockierend */ }
+      return res.status(502).json({
+        result: 'error',
+        errorClass: 'rotation-verify-failed',
+        error: 'Verbindungstest mit neuem Key fehlgeschlagen — alter Key bleibt aktiv',
+        reason: 'Verbindungstest fehlgeschlagen (unerwarteter Fehler)',
+      });
+    }
+
+    if (!testResult.ok) {
+      // AC5: Roter Test → alter Key NICHT entfernen, neuen additiven Key best-effort zurückrollen
+      // Rollback nutzt den alten Private-Key, da dieser nachweislich funktioniert (Schritt 2 war ok).
+      await _rollbackNewKey({ provisioner, vpsTarget, newPublicKey, connectPrivateKey: oldPrivateKey, fpOpt });
+
+      // AC7: Audit-Fehlschlag ohne Key-Material
+      try {
+        auditStore.record({
+          identity: identity?.email ?? null,
+          command: `ssh-key-rotate:failed:${user}:${vpsTarget.host}:${vpsTarget.targetUser}:rotation-verify-failed`,
+        });
+      } catch { /* Audit-Fehler im Fehlerfall — nicht blockierend */ }
+
+      return res.status(502).json({
+        result: 'error',
+        errorClass: 'rotation-verify-failed',
+        error: 'Verbindungstest mit neuem Key fehlgeschlagen — alter Key bleibt aktiv (Aussperr-Schutz)',
+        reason: testResult.reason ?? 'SSH-Verbindungstest mit neuem Key fehlgeschlagen',
+      });
+    }
+
+    // Schritt 4: Grüner Test — alten Public-Key entfernen + neuen Key im Store aktivieren (AC4)
+    // Neuen Private-Key + Public-Key im Store aktivieren (ersetzt den alten Eintrag)
+    // Store-Aktivierung vor Remove — selbst wenn Remove fehlschlägt, ist Login mit neuem Key gesichert.
+    try {
+      await credentialStore.set(`ssh/${user}/private_key`, newPrivateKey);
+      await credentialStore.setPublicKey(user, newPublicKey);
+    } catch {
+      // Store-Schreibfehler nach grünem Test — kritischer Zustand:
+      // neuer Key eingetragen aber nicht im Store aktiviert.
+      // Logging ohne Klartext — nur Fehlermeldung.
+      console.error('[sshKeysRouter] rotate: Store-Aktivierung fehlgeschlagen (kein Key-Material geloggt)');
+      // Rollback des neuen Keys (best-effort), damit kein verwaister Key bleibt.
+      // Test war grün → neuer Key kann sich einloggen → newPrivateKey als connectPrivateKey.
+      await _rollbackNewKey({ provisioner, vpsTarget, newPublicKey, connectPrivateKey: newPrivateKey, fpOpt });
+      try {
+        auditStore.record({
+          identity: identity?.email ?? null,
+          command: `ssh-key-rotate:failed:${user}:${vpsTarget.host}:${vpsTarget.targetUser}:store-activation-failed`,
+        });
+      } catch { /* Audit-Fehler — nicht blockierend */ }
+      return res.status(500).json({ error: 'Store-Aktivierung fehlgeschlagen — Rotation abgebrochen' });
+    }
+
+    // Alten Public-Key aus authorized_keys entfernen (AC4 — best-effort nach grünem Test)
+    let oldKeyRemoved = false;
+    let oldKeyRemoveReason;
+    try {
+      const removeResult = await provisioner.removeAuthorizedKey({
+        host: vpsTarget.host,
+        port: vpsTarget.port,
+        targetUser: vpsTarget.targetUser,
+        publicKey: oldPublicKey,
+        privateKey: newPrivateKey,  // Mit neuem (bereits aktivierten) Private-Key
+        hostFingerprint: fpOpt,
+      });
+      // "removed" oder "already-absent" beide sind als Erfolg zu werten
+      oldKeyRemoved = removeResult.result === 'removed' || removeResult.result === 'already-absent';
+      if (!oldKeyRemoved) {
+        // result: 'error' — alten Key nicht entfernt, aber neuer Key ist aktiv (kein Lockout)
+        oldKeyRemoveReason = removeResult.reason ?? 'Alter Key konnte nicht entfernt werden';
+      }
+    } catch {
+      // Entfernen gescheitert — neuer Key aktiv, Login gesichert, aber alter Key noch vorhanden
+      console.error('[sshKeysRouter] rotate: removeAuthorizedKey fehlgeschlagen (kein Key-Material geloggt)');
+      oldKeyRemoveReason = 'Alter Key konnte nicht aus authorized_keys entfernt werden (interner Fehler)';
+    }
+
+    // AC7: Audit-Erfolg (ohne Key-Material)
+    const auditResultCmd = oldKeyRemoved
+      ? `ssh-key-rotate:success:${user}:${vpsTarget.host}:${vpsTarget.targetUser}`
+      : `ssh-key-rotate:partial:${user}:${vpsTarget.host}:${vpsTarget.targetUser}:old-key-not-removed`;
+    try {
+      auditStore.record({ identity: identity?.email ?? null, command: auditResultCmd });
+    } catch { /* Audit-Fehler nach erfolgreicher Rotation — nicht blockierend */ }
+
+    // AC4: GET /api/settings/ssh-keys zeigt den neuen Public-Key (Store ist schon aktiviert)
+    // AC8: newPrivateKey erscheint NIEMALS in Response
+    return res.json({
+      result: 'rotated',
+      oldKeyRemoved,
+      newPublicKey,
+      ...(oldKeyRemoveReason ? { reason: oldKeyRemoveReason } : {}),
+    });
+  });
+
   return router;
+}
+
+// ── Interne Hilfsfunktion: best-effort Rollback des neuen additiven Keys ────────
+
+/**
+ * Versucht den additiv eingetragenen neuen Public-Key best-effort zu entfernen.
+ * AC5: bei fehlgeschlagenem Test — neuer additiver Key soll nicht dauerhaft verwaist bleiben.
+ * Fehler werden geloggt aber nicht propagiert (best-effort).
+ *
+ * @param {object}   params
+ * @param {object}   params.provisioner          - VpsProvisioner-Instanz
+ * @param {object}   params.vpsTarget            - { host, port?, targetUser }
+ * @param {string}   params.newPublicKey          - Neuer (noch nicht aktivierter) Public-Key (zum Entfernen)
+ * @param {string}   params.connectPrivateKey     - Private-Key für die SSH-Verbindung beim Rollback
+ *                                                  (store-intern, nie loggen); typischerweise der alte
+ *                                                  Private-Key, der nachweislich funktioniert.
+ * @param {string|undefined} params.fpOpt        - hostFingerprint oder undefined
+ */
+async function _rollbackNewKey({ provisioner, vpsTarget, newPublicKey, connectPrivateKey, fpOpt }) {
+  try {
+    await provisioner.removeAuthorizedKey({
+      host: vpsTarget.host,
+      port: vpsTarget.port,
+      targetUser: vpsTarget.targetUser,
+      publicKey: newPublicKey,
+      privateKey: connectPrivateKey,
+      hostFingerprint: fpOpt,
+    });
+  } catch {
+    // Best-effort — Fehler im Rollback werden ignoriert (alter Key bleibt aktiv, kein Lockout)
+    console.error('[sshKeysRouter] rotate: Rollback des neuen Keys fehlgeschlagen (best-effort — kein Lockout)');
+  }
 }
