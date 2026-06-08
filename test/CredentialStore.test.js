@@ -11,6 +11,7 @@
  *   AC7  — Mutierende Endpunkte prüfen CRED_ADMIN_EMAILS (403 wenn nicht berechtigt)
  *   AC8  — Leere/ungültige Eingaben → 4xx, bestehender Wert bleibt erhalten
  *   AC9  — VPS-Provider-Token (hetzner, ionos, hostinger): je Provider set/getMeta/delete write-only; Audit ohne Klartext
+ *   AC10 — Cloudflare-Credentials (api_token, account_id): CATALOG, resolveKey, set/getMeta/delete write-only, at-rest-Verschlüsselung, HTTP PUT/GET/DELETE, Audit ohne Klartext, CRED_ADMIN_EMAILS-Schutz
  *
  * Strategie:
  *   - CredentialStore mit tmpdir + injiziertem masterKey (kein Env nötig)
@@ -898,9 +899,25 @@ describe('credentialsRouter — AC10: Cloudflare-Credentials über HTTP', () => 
     expect(JSON.stringify(entry)).not.toContain('cf-account-audit-test');
   });
 
+  it('AC10/AC6 — DELETE cloudflare/api_token schreibt Audit-Eintrag', async () => {
+    await store.set('credentials/cloudflare/api_token', 'cf-to-delete-audit');
+    await testServer.req('DELETE', '/api/settings/credentials/cloudflare/api_token');
+    const entries = testServer.audit.getAll();
+    const entry = entries[entries.length - 1];
+    expect(entry.command).toMatch(/credential:delete/);
+    expect(JSON.stringify(entry)).not.toContain('cf-to-delete-audit');
+  });
+
   it('AC10/AC7 — PUT cloudflare/api_token mit CRED_ADMIN_EMAILS und nicht berechtigter Identität → 403', async () => {
     process.env.CRED_ADMIN_EMAILS = 'admin@example.com';
     const res = await testServer.req('PUT', '/api/settings/credentials/cloudflare/api_token', { value: 'blocked-cf-token' });
+    expect(res.status).toBe(403);
+    delete process.env.CRED_ADMIN_EMAILS;
+  });
+
+  it('AC10/AC7 — PUT cloudflare/account_id mit CRED_ADMIN_EMAILS und nicht berechtigter Identität → 403', async () => {
+    process.env.CRED_ADMIN_EMAILS = 'admin@example.com';
+    const res = await testServer.req('PUT', '/api/settings/credentials/cloudflare/account_id', { value: 'blocked-cf-account' });
     expect(res.status).toBe(403);
     delete process.env.CRED_ADMIN_EMAILS;
   });
