@@ -1,10 +1,15 @@
 /**
- * deploymentsRouter — Express-Router für Deploy-Lifecycle (AC3–AC9, ADR-012).
+ * deploymentsRouter — Express-Router für Deploy-Lifecycle (AC3–AC9, ADR-012)
+ *                     + Reconciliation-Endpunkte (AC2/AC8/AC8b, ADR-013).
  *
  * Routes (alle hinter AccessGuard in server.js):
- *   GET    /api/deployments                    → { deployments: Deployment[], errors? }
- *   POST   /api/deployments                    → { result, deployment?, reason? }   [MUTATION]
- *   DELETE /api/deployments/:vps/:hostname     → { result, reason? }               [MUTATION]
+ *   GET    /api/deployments                          → { deployments: Deployment[], errors? }
+ *   POST   /api/deployments                          → { result, deployment?, reason? }   [MUTATION]
+ *   DELETE /api/deployments/:vps/:hostname           → { result, reason? }               [MUTATION]
+ *   POST   /api/deployments/reconcile                → { result, report? }               [MUTATION]
+ *   GET    /api/deployments/reconcile/last           → ReconcileReport | {}
+ *   GET    /api/deployments/reconcile/reports        → ReconcileReport[]
+ *   GET    /api/deployments/reconcile/notices        → ReconcileNotice[]
  *
  * Security (AC7–AC9 / ADR-012):
  *   - Alle /api/deployments/* hinter AccessGuard (server.js — alle /api/* sind geschützt).
@@ -161,9 +166,10 @@ function validateUndeployParams(params, body) {
  * @param {import('./deploy/DeployOrchestrator.js').DeployOrchestrator} orchestrator
  * @param {import('./AuditStore.js').AuditStore} auditStore
  * @param {Map<string, object>} vpsTargets - map of vpsId → VpsTarget { host, port?, targetUser }
+ * @param {import('./deploy/ReconciliationJob.js').ReconciliationJob} [reconciliationJob]
  * @returns {import('express').Router}
  */
-export function deploymentsRouter(orchestrator, auditStore, vpsTargets) {
+export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconciliationJob) {
   const router = Router();
 
   // ── GET /api/deployments ──────────────────────────────────────────────────
@@ -426,6 +432,109 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets) {
     } catch { /* ignore */ }
 
     return res.status(200).json(result);
+  });
+
+  // ── POST /api/deployments/reconcile ──────────────────────────────────────
+  // NOTE: Die GET /api/deployments/reconcile/*-Routen (reconcile/last, reconcile/reports,
+  // reconcile/notices) sowie POST /api/deployments/reconcile müssen vor einem etwaigen
+  // künftigen GET /:vps/:hostname registriert werden, damit Express "reconcile" nicht als
+  // :vps-Parameter matcht. POST und DELETE konkurrieren NICHT (verschiedene HTTP-Methoden).
+
+  /**
+   * POST /api/deployments/reconcile
+   * Manual reconcile trigger. Same logic as cron. Produces a ReconcileReport (AC2).
+   * MUTATION: Audit-First + Identitäts-/Rollenschutz (AC2/AC8/AC9).
+   *
+   * Response: { result: "ok"|"error", report? }
+   */
+  router.post('/api/deployments/reconcile', async (req, res) => {
+    if (!reconciliationJob) {
+      return res.status(503).json({ result: 'error', reason: 'ReconciliationJob nicht konfiguriert' });
+    }
+
+    const identity = req.identity ?? null;
+
+    // AC2: Identitäts-/Rollenschutz (same as deploy mutations)
+    const authz = checkMutationAuthz(identity);
+    if (!authz.allowed) {
+      return res.status(403).json({ error: 'Keine Berechtigung für diese Aktion' });
+    }
+
+    // Audit-First (AC9)
+    try {
+      auditStore.record({
+        identity: identity?.email ?? null,
+        command: 'reconcile:manual-trigger',
+      });
+    } catch (auditErr) {
+      console.error('[deploymentsRouter] Audit-Write fehlgeschlagen:', sanitizeMsg(auditErr?.message));
+      return res.status(500).json({ error: 'Audit-Write fehlgeschlagen — Aktion abgebrochen' });
+    }
+
+    try {
+      const report = await reconciliationJob.reconcile('manual');
+      if (report === null) {
+        // Skip-if-running
+        return res.status(200).json({ result: 'ok', reason: 'already-running' });
+      }
+      return res.status(200).json({ result: 'ok', report });
+    } catch (err) {
+      console.error('[deploymentsRouter] POST /api/deployments/reconcile Fehler:', sanitizeMsg(err?.message));
+      return res.status(502).json({ result: 'error', reason: 'Reconciliation fehlgeschlagen' });
+    }
+  });
+
+  // ── GET /api/deployments/reconcile/last ───────────────────────────────────
+
+  /**
+   * GET /api/deployments/reconcile/last
+   * Returns the last ReconcileReport, or {} if none (AC8).
+   * Hinter Access.
+   */
+  router.get('/api/deployments/reconcile/last', (_req, res) => {
+    if (!reconciliationJob) {
+      return res.json({});
+    }
+    const report = reconciliationJob.getLastReport();
+    return res.json(report ?? {});
+  });
+
+  // ── GET /api/deployments/reconcile/reports ────────────────────────────────
+
+  /**
+   * GET /api/deployments/reconcile/reports?limit=N
+   * Returns the last N ReconcileReports (AC8).
+   * Hinter Access.
+   */
+  router.get('/api/deployments/reconcile/reports', (req, res) => {
+    if (!reconciliationJob) {
+      return res.json([]);
+    }
+    const limitRaw = req.query.limit;
+    const limit = Number.isFinite(Number(limitRaw)) && Number(limitRaw) > 0
+      ? Math.min(Number(limitRaw), 100)
+      : 20;
+    const reports = reconciliationJob.getReports(limit);
+    return res.json(reports);
+  });
+
+  // ── GET /api/deployments/reconcile/notices ────────────────────────────────
+
+  /**
+   * GET /api/deployments/reconcile/notices?limit=N
+   * Returns the last N ReconcileNotices (AC8b).
+   * Hinter Access.
+   */
+  router.get('/api/deployments/reconcile/notices', (req, res) => {
+    if (!reconciliationJob) {
+      return res.json([]);
+    }
+    const limitRaw = req.query.limit;
+    const limit = Number.isFinite(Number(limitRaw)) && Number(limitRaw) > 0
+      ? Math.min(Number(limitRaw), 200)
+      : 50;
+    const notices = reconciliationJob.getNotices(limit);
+    return res.json(notices);
   });
 
   return router;

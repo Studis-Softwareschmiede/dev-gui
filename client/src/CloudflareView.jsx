@@ -1,5 +1,6 @@
 /**
- * CloudflareView.jsx — Cloudflare-Inventar + Lösch-Werkzeug (view-cloudflare v2, Capability A).
+ * CloudflareView.jsx — Cloudflare-Inventar + Lösch-Werkzeug (view-cloudflare v2, Capability A)
+ *                    + Reconciliation-Statusmeldungen + Report (AC10/AC11, Capability C read-only).
  *
  * AC4  — Zones/Domänen auflisten; Zone anwählen → Tunnel + Routen laden.
  * AC5  — Hostname, Ziel-Service, protected-Flag anzeigen; protected Routen ohne Lösch-Affordance.
@@ -8,6 +9,11 @@
  * AC8  — Kein Cloudflare-Token im Frontend; nur Status/Meldungen aus Backend-Antworten.
  * AC9  — 403 → „keine Berechtigung"; 422 protected-resource → „geschützt"; 422 confirm → „Bestätigung".
  * AC3  — Nicht konfiguriert → Onboarding-Hinweis; kein API-Call.
+ * AC10 — Reconciliation-Statusmeldungen (GET /api/deployments/reconcile/notices) read-only,
+ *         kind/hostname/vps/Zeit anzeigen; kein Secret; Leer-Zustand neutral.
+ * AC11 — Letzter ReconcileReport (GET /api/deployments/reconcile/last) read-only;
+ *         manueller „jetzt abgleichen"-Trigger (POST /api/deployments/reconcile);
+ *         nach Abschluss Re-Fetch; 403 → „keine Berechtigung"; kein Secret-Leak.
  * A11y — Titel als <h1>; Listen/Tabellen mit Header; Buttons beschriftet; Fehler aria-zugeordnet;
  *         sichtbarer Fokus; Touch-Target ≥ 44px.
  * Security (Floor) — Kein Token im Frontend; Error-Messages ohne Secret-Leak.
@@ -87,6 +93,57 @@ async function deleteTunnel(tunnelId, confirm) {
   if (!res.ok) {
     const err = new Error(data.error ?? `Tunnel löschen fehlgeschlagen (${res.status})`);
     err.errorClass = data.error;
+    err.httpStatus = res.status;
+    throw err;
+  }
+  return data;
+}
+
+/**
+ * GET /api/deployments/reconcile/notices?limit=N
+ * @returns {Promise<ReconcileNotice[]>}
+ */
+async function fetchReconcileNotices(limit = 20) {
+  const res = await fetch(`/api/deployments/reconcile/notices?limit=${limit}`);
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    const err = new Error(data.error ?? `Notices laden fehlgeschlagen (${res.status})`);
+    err.httpStatus = res.status;
+    throw err;
+  }
+  const data = await res.json().catch(() => []);
+  return Array.isArray(data) ? data : [];
+}
+
+/**
+ * GET /api/deployments/reconcile/last
+ * @returns {Promise<object>}
+ */
+async function fetchReconcileLastReport() {
+  const res = await fetch('/api/deployments/reconcile/last');
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    const err = new Error(data.error ?? `Report laden fehlgeschlagen (${res.status})`);
+    err.httpStatus = res.status;
+    throw err;
+  }
+  return res.json();
+}
+
+/**
+ * POST /api/deployments/reconcile
+ * Manual trigger. AC11.
+ * @returns {Promise<{ result: string, report?: object, reason?: string }>}
+ */
+async function triggerReconcile() {
+  const res = await fetch('/api/deployments/reconcile', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(data.error ?? data.reason ?? `Reconcile fehlgeschlagen (${res.status})`);
     err.httpStatus = res.status;
     throw err;
   }
@@ -442,6 +499,267 @@ function TunnelSection({ tunnel, routes, tunnelError, onRouteDeleted, onTunnelDe
   );
 }
 
+// ── ReconciliationSection ─────────────────────────────────────────────────────
+
+/**
+ * Read-only Reconciliation section: last notices + last report + manual trigger (AC10/AC11).
+ * No Cloudflare token or other secret appears here (AC9 / AC11 security).
+ */
+function ReconciliationSection() {
+  const [notices, setNotices] = useState(null);
+  const [report, setReport] = useState(null);
+  const [loadError, setLoadError] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [triggering, setTriggering] = useState(false);
+  const [triggerError, setTriggerError] = useState(null);
+  const [triggerSuccess, setTriggerSuccess] = useState(false);
+
+  const loadReconcileData = useCallback(async () => {
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const [noticesData, reportData] = await Promise.all([
+        fetchReconcileNotices(20),
+        fetchReconcileLastReport(),
+      ]);
+      setNotices(noticesData);
+      setReport(reportData && Object.keys(reportData).length > 0 ? reportData : null);
+    } catch (err) {
+      if (err?.httpStatus === 403) {
+        setLoadError('Keine Berechtigung zum Laden der Reconciliation-Daten.');
+      } else {
+        setLoadError('Reconciliation-Daten konnten nicht geladen werden.');
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadReconcileData();
+  }, [loadReconcileData]);
+
+  const handleTrigger = useCallback(async () => {
+    setTriggering(true);
+    setTriggerError(null);
+    setTriggerSuccess(false);
+    try {
+      await triggerReconcile();
+      setTriggerSuccess(true);
+      // Re-fetch after successful trigger (AC11)
+      await loadReconcileData();
+    } catch (err) {
+      if (err?.httpStatus === 403) {
+        setTriggerError('Keine Berechtigung für diese Aktion.');
+      } else {
+        setTriggerError('Reconciliation-Trigger fehlgeschlagen. Bitte erneut versuchen.');
+      }
+    } finally {
+      setTriggering(false);
+    }
+  }, [loadReconcileData]);
+
+  return (
+    <section
+      aria-labelledby="reconcile-heading"
+      style={styles.section}
+    >
+      <div style={reconcileStyles.headerRow}>
+        <h2 id="reconcile-heading" style={styles.sectionHeading}>
+          Reconciliation
+        </h2>
+        <button
+          type="button"
+          onClick={handleTrigger}
+          disabled={triggering || loading}
+          style={triggering ? reconcileStyles.btnTriggerBusy : reconcileStyles.btnTrigger}
+          aria-busy={triggering}
+          aria-label="Reconciliation jetzt manuell auslösen"
+        >
+          {triggering ? 'Läuft…' : 'Jetzt abgleichen'}
+        </button>
+      </div>
+
+      {triggerSuccess && !triggering && (
+        <p style={reconcileStyles.successMsg} role="status" aria-live="polite">
+          Reconciliation erfolgreich ausgeführt.
+        </p>
+      )}
+
+      {triggerError && (
+        <p style={styles.error} role="alert">
+          {triggerError}
+        </p>
+      )}
+
+      {loading && (
+        <p style={styles.loading} aria-live="polite" aria-busy="true">
+          Lade Reconciliation-Daten…
+        </p>
+      )}
+
+      {loadError && !loading && (
+        <p style={styles.error} role="alert">
+          {loadError}
+        </p>
+      )}
+
+      {!loading && !loadError && (
+        <>
+          {/* AC11: Last ReconcileReport */}
+          <div style={reconcileStyles.reportBlock}>
+            <h3 style={reconcileStyles.subHeading}>Letzter Bericht</h3>
+            {!report ? (
+              <p style={styles.emptyState}>Noch kein Reconciliation-Lauf durchgeführt.</p>
+            ) : (
+              <div style={reconcileStyles.reportCard}>
+                <p style={reconcileStyles.reportMeta}>
+                  <span style={reconcileStyles.label}>Zeitpunkt:</span>{' '}
+                  {report.ranAt}
+                  {' '}
+                  <span style={reconcileStyles.label}>Trigger:</span>{' '}
+                  <span style={reconcileStyles.badge}>{report.trigger}</span>
+                </p>
+                {(report.perVps ?? []).map((v) => (
+                  <div key={v.vps} style={reconcileStyles.vpsBlock}>
+                    <p style={reconcileStyles.vpsName}>{v.vps}</p>
+                    <dl style={reconcileStyles.dl}>
+                      <dt style={reconcileStyles.dt}>Geprüfte Container</dt>
+                      <dd style={reconcileStyles.dd}>{v.checkedContainers}</dd>
+                      {(v.createdRoutes ?? []).length > 0 && (
+                        <>
+                          <dt style={reconcileStyles.dt}>Routen angelegt</dt>
+                          <dd style={reconcileStyles.dd}>
+                            {v.createdRoutes.map((h) => (
+                              <span key={h} style={reconcileStyles.hostname}>{h}</span>
+                            ))}
+                          </dd>
+                        </>
+                      )}
+                      {(v.removedRoutes ?? []).length > 0 && (
+                        <>
+                          <dt style={reconcileStyles.dt}>Verwaiste Routen entfernt</dt>
+                          <dd style={reconcileStyles.dd}>
+                            {v.removedRoutes.map((h) => (
+                              <span key={h} style={reconcileStyles.hostname}>{h}</span>
+                            ))}
+                          </dd>
+                        </>
+                      )}
+                      {(v.protectedSkipped ?? []).length > 0 && (
+                        <>
+                          <dt style={reconcileStyles.dt}>Protected übersprungen</dt>
+                          <dd style={reconcileStyles.dd}>
+                            {v.protectedSkipped.map((h) => (
+                              <span key={h} style={reconcileStyles.hostname}>{h}</span>
+                            ))}
+                          </dd>
+                        </>
+                      )}
+                      {(v.reportedUnmanaged ?? []).length > 0 && (
+                        <>
+                          <dt style={reconcileStyles.dt}>Unmanaged gemeldet</dt>
+                          <dd style={reconcileStyles.dd}>
+                            {v.reportedUnmanaged.map((h) => (
+                              <span key={h} style={reconcileStyles.hostname}>{h}</span>
+                            ))}
+                          </dd>
+                        </>
+                      )}
+                      {(v.errors ?? []).length > 0 && (
+                        <>
+                          <dt style={reconcileStyles.dt}>Fehler</dt>
+                          <dd style={reconcileStyles.dd}>
+                            {v.errors.map((e, i) => (
+                              <span key={i} style={reconcileStyles.errorBadge}>
+                                {e.scope}: {e.errorClass}
+                              </span>
+                            ))}
+                          </dd>
+                        </>
+                      )}
+                    </dl>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* AC10: ReconcileNotices */}
+          <div style={reconcileStyles.noticesBlock}>
+            <h3 style={reconcileStyles.subHeading}>Letzte Statusmeldungen</h3>
+            {!notices || notices.length === 0 ? (
+              <p style={styles.emptyState}>Keine Statusmeldungen vorhanden.</p>
+            ) : (
+              <table
+                style={reconcileStyles.table}
+                aria-label="Reconciliation-Statusmeldungen"
+              >
+                <thead>
+                  <tr>
+                    <th scope="col" style={reconcileStyles.th}>Zeitpunkt</th>
+                    <th scope="col" style={reconcileStyles.th}>Art</th>
+                    <th scope="col" style={reconcileStyles.th}>VPS</th>
+                    <th scope="col" style={reconcileStyles.th}>Hostname</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {notices.map((n, i) => (
+                    <tr key={i} style={reconcileStyles.row}>
+                      <td style={reconcileStyles.td}>
+                        <time dateTime={n.at} style={reconcileStyles.time}>
+                          {n.at}
+                        </time>
+                      </td>
+                      <td style={reconcileStyles.td}>
+                        <span style={noticeKindStyle(n.kind)}>
+                          {n.kind}
+                        </span>
+                      </td>
+                      <td style={reconcileStyles.td}>{n.vps}</td>
+                      <td style={reconcileStyles.td}>
+                        <span style={reconcileStyles.hostname}>{n.hostname}</span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+/**
+ * Returns inline style for a notice kind badge (AC10).
+ * @param {string} kind
+ * @returns {object}
+ */
+function noticeKindStyle(kind) {
+  const base = {
+    display: 'inline-block',
+    padding: '2px 8px',
+    borderRadius: 10,
+    fontSize: 11,
+    fontWeight: 600,
+    fontFamily: 'monospace',
+  };
+  switch (kind) {
+    case 'route-created':
+      return { ...base, background: '#064e3b', color: '#6ee7b7', border: '1px solid #059669' };
+    case 'route-removed':
+      return { ...base, background: '#78350f', color: '#fcd34d', border: '1px solid #b45309' };
+    case 'protected-skipped':
+      return { ...base, background: '#1e293b', color: '#94a3b8', border: '1px solid #334155' };
+    case 'error':
+      return { ...base, background: '#7f1d1d', color: '#fca5a5', border: '1px solid #991b1b' };
+    default:
+      return { ...base, background: '#1e293b', color: '#9ca3af', border: '1px solid #334155' };
+  }
+}
+
 // ── CloudflareView ────────────────────────────────────────────────────────────
 
 /**
@@ -655,6 +973,9 @@ export function CloudflareView({ onNavigate }) {
             )}
           </section>
         )}
+
+        {/* Reconciliation section (AC10/AC11 — read-only + manual trigger) */}
+        <ReconciliationSection />
       </div>
     </main>
   );
@@ -922,6 +1243,163 @@ const tableStyles = {
     cursor: 'not-allowed',
     minHeight: 44,
     minWidth: 72,
+  },
+};
+
+const reconcileStyles = {
+  headerRow: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 16,
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  btnTrigger: {
+    padding: '10px 18px',
+    background: '#1d4ed8',
+    color: '#ffffff',
+    border: '1px solid #2563eb',
+    borderRadius: 6,
+    fontSize: 13,
+    cursor: 'pointer',
+    minHeight: 44,
+    fontWeight: 600,
+  },
+  btnTriggerBusy: {
+    padding: '10px 18px',
+    background: '#1e293b',
+    color: '#475569',
+    border: '1px solid #334155',
+    borderRadius: 6,
+    fontSize: 13,
+    cursor: 'not-allowed',
+    minHeight: 44,
+    fontWeight: 600,
+  },
+  successMsg: {
+    color: '#6ee7b7',
+    fontSize: 13,
+    padding: '6px 10px',
+    background: '#064e3b',
+    borderRadius: 4,
+    marginBottom: 12,
+  },
+  subHeading: {
+    margin: '0 0 12px',
+    fontSize: 15,
+    fontWeight: 700,
+    color: '#e5e7eb',
+  },
+  reportBlock: {
+    marginBottom: 24,
+  },
+  reportCard: {
+    padding: '12px 16px',
+    background: '#0d1117',
+    border: '1px solid #2a2a2a',
+    borderRadius: 6,
+    fontSize: 13,
+  },
+  reportMeta: {
+    margin: '0 0 10px',
+    color: '#9ca3af',
+    fontSize: 12,
+  },
+  label: {
+    fontWeight: 600,
+    color: '#d4d4d4',
+    marginRight: 4,
+  },
+  badge: {
+    display: 'inline-block',
+    padding: '1px 8px',
+    background: '#1e293b',
+    color: '#94a3b8',
+    border: '1px solid #334155',
+    borderRadius: 10,
+    fontSize: 11,
+    fontWeight: 600,
+  },
+  vpsBlock: {
+    marginTop: 10,
+    paddingTop: 8,
+    borderTop: '1px solid #1a1a1a',
+  },
+  vpsName: {
+    margin: '0 0 6px',
+    fontWeight: 700,
+    color: '#d4d4d4',
+    fontFamily: 'monospace',
+    fontSize: 13,
+  },
+  dl: {
+    display: 'grid',
+    gridTemplateColumns: 'max-content 1fr',
+    gap: '4px 16px',
+    margin: 0,
+  },
+  dt: {
+    color: '#9ca3af',
+    fontSize: 12,
+    fontWeight: 600,
+    padding: '2px 0',
+  },
+  dd: {
+    margin: 0,
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: 4,
+    alignItems: 'center',
+    padding: '2px 0',
+  },
+  hostname: {
+    fontFamily: 'monospace',
+    fontSize: 12,
+    color: '#e5e7eb',
+    background: '#1a1a1a',
+    padding: '1px 6px',
+    borderRadius: 4,
+    border: '1px solid #2a2a2a',
+  },
+  errorBadge: {
+    fontFamily: 'monospace',
+    fontSize: 11,
+    color: '#fca5a5',
+    background: '#3b0f0f',
+    padding: '1px 6px',
+    borderRadius: 4,
+    border: '1px solid #7f1d1d',
+  },
+  noticesBlock: {
+    marginTop: 8,
+  },
+  table: {
+    width: '100%',
+    borderCollapse: 'collapse',
+    fontSize: 12,
+  },
+  th: {
+    textAlign: 'left',
+    padding: '6px 10px',
+    borderBottom: '1px solid #2a2a2a',
+    color: '#9ca3af',
+    fontWeight: 600,
+    fontSize: 11,
+  },
+  td: {
+    padding: '6px 10px',
+    borderBottom: '1px solid #1a1a1a',
+    verticalAlign: 'middle',
+    color: '#d4d4d4',
+  },
+  row: {
+    background: 'transparent',
+  },
+  time: {
+    fontFamily: 'monospace',
+    color: '#b0b7c3',
+    fontSize: 11,
   },
 };
 

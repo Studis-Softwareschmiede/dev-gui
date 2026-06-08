@@ -12,6 +12,7 @@
  *   - run(vps, image, hostname, opts?) — docker run mit Bindungs-Label + --restart unless-stopped
  *   - rm(vps, containerId)     — docker rm -f auf dem VPS
  *   - ps(vps)                  — laufende Container mit cloudflare.tunnel-hostname-Label
+ *   - psAll(vps)               — alle laufenden Container; managed (mit Label) + unmanaged (ohne Label, hostname: null)
  *
  * SSH-Transport: ssh2 (analog VpsProvisioner — kein System-ssh binary nötig).
  *
@@ -71,11 +72,11 @@ const DEFAULT_HOST_PORT_START = 8080;
 
 /**
  * @typedef {object} PsEntry
- * @property {string}  containerId     - Container-ID (kurz)
- * @property {string}  image           - Image-Name
- * @property {string}  hostname        - cloudflare.tunnel-hostname-Label-Wert
- * @property {string}  status          - Container-Status (z.B. "Up 2 hours")
- * @property {number|null} hostPort    - gemappter Host-Port (aus Port-Mapping)
+ * @property {string}      containerId  - Container-ID (kurz)
+ * @property {string}      image        - Image-Name
+ * @property {string|null} hostname     - cloudflare.tunnel-hostname-Label-Wert; null für unmanaged Container
+ * @property {string}      status       - Container-Status (z.B. "Up 2 hours")
+ * @property {number|null} hostPort     - gemappter Host-Port (aus Port-Mapping)
  */
 
 /**
@@ -305,6 +306,58 @@ export class VpsDockerControl {
     }
   }
 
+  /**
+   * Listet ALLE laufenden Container auf dem VPS — managed (mit cloudflare.tunnel-hostname-Label)
+   * und unmanaged (ohne das Label).
+   *
+   * Managed Container haben `hostname` gesetzt (aus dem Label).
+   * Unmanaged Container haben `hostname: null`.
+   *
+   * Additiv zu ps() — bestehende ps()-Aufrufer sind nicht betroffen.
+   *
+   * @param {VpsTarget} vps
+   * @param {object}    [opts]
+   * @param {string}    [opts.hostFingerprint]    - SHA-256-Fingerprint für Host-Key-Verifikation
+   * @param {Function}  [opts._sshClientFactory]
+   * @returns {Promise<PsResult>}
+   */
+  async psAll(vps, opts = {}) {
+    const privateKey = await this.#loadPrivateKey(vps.targetUser);
+    if (!privateKey.ok) return { result: 'error', ...privateKey.error };
+
+    // docker ps ohne --filter gibt alle laufenden Container zurück.
+    // Format: ID, Image, Ports, Status, Label cloudflare.tunnel-hostname
+    // Der Label-Wert ist leer ("") für Container ohne das Label (unmanaged).
+    const formatStr = shellEscape('{{.ID}}\t{{.Image}}\t{{.Ports}}\t{{.Status}}\t{{.Label "cloudflare.tunnel-hostname"}}');
+    const cmd = [
+      'docker', 'ps',
+      '--format', formatStr,
+    ].join(' ');
+
+    try {
+      const stdout = await runSshCommand({
+        privateKey: privateKey.value,
+        host: vps.host,
+        port: vps.port ?? 22,
+        targetUser: vps.targetUser,
+        command: cmd,
+        timeoutMs: EXEC_TIMEOUT_MS,
+        hostFingerprint: opts.hostFingerprint ?? null,
+        sshClientFactory: opts._sshClientFactory,
+      });
+      // parsePsAllOutput markiert Container ohne Label mit hostname: null (unmanaged)
+      const containers = parsePsAllOutput(stdout);
+      return { result: 'ok', containers };
+    } catch (err) {
+      const errorClass = classifyError(err);
+      return {
+        result: 'error',
+        reason: sanitizeErrorReason(errorClass),
+        errorClass,
+      };
+    }
+  }
+
   // ── Private Hilfsmethoden ──────────────────────────────────────────────────────
 
   /**
@@ -517,6 +570,41 @@ function parsePsOutput(output) {
     // Ersten Host-Port aus Port-Mapping extrahieren (z.B. "0.0.0.0:8080->8080/tcp")
     const portMatch = ports.match(/(?:0\.0\.0\.0|:::?)?:?(\d+)->/);
     const hostPort = portMatch ? parseInt(portMatch[1], 10) : null;
+
+    containers.push({ containerId, image, hostname, status, hostPort });
+  }
+
+  return containers;
+}
+
+/**
+ * Parst die Ausgabe von `docker ps --format '...'` für ALLE Container (kein Label-Filter).
+ * Container mit cloudflare.tunnel-hostname-Label → hostname = Label-Wert (managed).
+ * Container OHNE das Label → hostname = null (unmanaged).
+ *
+ * @param {string} output
+ * @returns {PsEntry[]}
+ */
+function parsePsAllOutput(output) {
+  const lines = output.split('\n').filter((l) => l.trim() !== '');
+  const containers = [];
+
+  for (const line of lines) {
+    const parts = line.split('\t');
+    const containerId = (parts[0] ?? '').trim();
+    const image = (parts[1] ?? '').trim();
+    const ports = (parts[2] ?? '').trim();
+    const status = (parts[3] ?? '').trim();
+    const labelValue = (parts[4] ?? '').trim();
+
+    if (!containerId) continue;
+
+    // Ersten Host-Port aus Port-Mapping extrahieren
+    const portMatch = ports.match(/(?:0\.0\.0\.0|:::?)?:?(\d+)->/);
+    const hostPort = portMatch ? parseInt(portMatch[1], 10) : null;
+
+    // hostname: null markiert unmanaged Container (kein cloudflare.tunnel-hostname-Label)
+    const hostname = labelValue || null;
 
     containers.push({ containerId, image, hostname, status, hostPort });
   }

@@ -33,6 +33,10 @@
  *   GET    /api/deployments                                    → { deployments:[...], errors? } (deploy-lifecycle AC3)
  *   POST   /api/deployments                                    → { result, deployment?, reason? } (deploy-lifecycle AC3/AC4)
  *   DELETE /api/deployments/:vps/:hostname                     → { result, reason? } (deploy-lifecycle AC5/AC6)
+ *   POST   /api/deployments/reconcile                          → { result, report? } (cloudflare-reconciliation AC2)
+ *   GET    /api/deployments/reconcile/last                     → ReconcileReport|{} (cloudflare-reconciliation AC8)
+ *   GET    /api/deployments/reconcile/reports?limit=N          → ReconcileReport[] (cloudflare-reconciliation AC8)
+ *   GET    /api/deployments/reconcile/notices?limit=N          → ReconcileNotice[] (cloudflare-reconciliation AC8b)
  *   WS   /ws/terminal                             → PtyManager bridge (guarded by AccessGuard)
  */
 
@@ -70,6 +74,7 @@ import { LockoutGuard } from './src/cloudflare/LockoutGuard.js';
 import { cloudflareRouter } from './src/cloudflareRouter.js';
 import { VpsDockerControl } from './src/deploy/VpsDockerControl.js';
 import { DeployOrchestrator } from './src/deploy/DeployOrchestrator.js';
+import { ReconciliationJob } from './src/deploy/ReconciliationJob.js';
 import { deploymentsRouter } from './src/deploymentsRouter.js';
 
 const PORT = Number(process.env.PORT ?? 8080);
@@ -168,7 +173,24 @@ const deployOrchestrator = new DeployOrchestrator({
 // Format: VPS_TARGETS="id1=host:user,id2=host:user" or empty (start with empty map).
 // The map keys are the vpsId strings sent by the frontend.
 const vpsTargets = buildVpsTargetsFromEnv(process.env.VPS_TARGETS);
-app.use(deploymentsRouter(deployOrchestrator, auditStore, vpsTargets));
+
+// ── ReconciliationJob (Capability C, ADR-013) ─────────────────────────────
+// Midnight UTC scheduler (node-internal, no external cron; AC1).
+// VPS configs: combine vpsTargets map with RECONCILE_TUNNEL_ID from env.
+// Format: RECONCILE_TUNNEL_IDS="vps-id1=tunnelId1,vps-id2=tunnelId2"
+const reconcileVpsConfigs = buildReconcileVpsConfigs(vpsTargets, process.env.RECONCILE_TUNNEL_IDS);
+const reconciliationJob = new ReconciliationJob({
+  dockerControl: vpsDockerControl,
+  cloudflareApi,
+  lockoutGuard,
+  orchestrator: deployOrchestrator,
+  auditStore,
+  vpsConfigs: reconcileVpsConfigs,
+});
+// Start the midnight scheduler in the always-on process (ADR-002, AC1)
+reconciliationJob.startScheduler();
+
+app.use(deploymentsRouter(deployOrchestrator, auditStore, vpsTargets, reconciliationJob));
 
 /**
  * Build the VPS-Target map from an environment variable.
@@ -257,8 +279,40 @@ server.listen(PORT, () => {
   console.log(`dev-gui listening on :${PORT}`);
 });
 
+/**
+ * Build the ReconciliationJob VPS config list from the existing vpsTargets map
+ * and the RECONCILE_TUNNEL_IDS environment variable.
+ *
+ * Format: "vps-id1=tunnelId1,vps-id2=tunnelId2"
+ * Only VPS IDs that appear in BOTH vpsTargets AND RECONCILE_TUNNEL_IDS are included.
+ * Returns empty array if RECONCILE_TUNNEL_IDS is unset (reconcile skips all VPS).
+ *
+ * @param {Map<string, object>} targets
+ * @param {string|undefined} envValue
+ * @returns {Array<{ vpsId: string, vps: object, tunnelId: string }>}
+ */
+function buildReconcileVpsConfigs(targets, envValue) {
+  if (!envValue || !envValue.trim()) return [];
+  const configs = [];
+  for (const entry of envValue.split(',')) {
+    const trimmed = entry.trim();
+    if (!trimmed) continue;
+    const eqIdx = trimmed.indexOf('=');
+    if (eqIdx < 1) continue;
+    const vpsId = trimmed.slice(0, eqIdx).trim();
+    const tunnelId = trimmed.slice(eqIdx + 1).trim();
+    if (!vpsId || !tunnelId) continue;
+    const vps = targets.get(vpsId);
+    if (vps) {
+      configs.push({ vpsId, vps, tunnelId });
+    }
+  }
+  return configs;
+}
+
 // Graceful shutdown
 function shutdown() {
+  reconciliationJob.stopScheduler();
   ptyManager.destroy();
   server.close(() => process.exit(0));
 }

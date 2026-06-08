@@ -299,6 +299,66 @@ export class DeployOrchestrator {
     return { result: 'ok' };
   }
 
+  // ── addRouteOnly ───────────────────────────────────────────────────────────
+
+  /**
+   * Adds a tunnel route for an already-running container (Route-healing path, AC5).
+   * This is the shared ADR-012 atomic route-add path — called by ReconciliationJob
+   * for self-healing (managed container without route). Does NOT docker pull/run.
+   *
+   * LockoutGuard-Hard-Block is checked first (AC5b, AC9).
+   * Audit-First is the responsibility of the caller (ReconciliationJob).
+   *
+   * @param {object} params
+   * @param {object} params.vps       - VpsTarget { host, port?, targetUser }
+   * @param {string} params.tunnelId  - Cloudflare tunnel ID
+   * @param {string} params.hostname  - target hostname (cloudflare tunnel route)
+   * @param {number} [params.hostPort] - host port the container is listening on (default 8080)
+   * @returns {Promise<{ result: 'ok'|'error', reason?: string, errorClass?: string }>}
+   */
+  async addRouteOnly({ tunnelId, hostname, hostPort = 8080 }) {
+    // AC5b / AC9: LockoutGuard-Hard-Block — before any step
+    if (this.#lockoutGuard.isProtected(hostname)) {
+      return {
+        result: 'error',
+        reason: 'protected-resource',
+        errorClass: 'protected-resource',
+      };
+    }
+
+    // Validate hostname (security: untrusted input before Cloudflare API sink)
+    if (!isValidHostname(hostname)) {
+      return {
+        result: 'error',
+        reason: 'Ungültiger Hostname',
+        errorClass: 'validation-error',
+      };
+    }
+
+    // Add tunnel route (same as deploy step 3, ADR-012)
+    try {
+      await this.#cloudflareApi.addRoute(tunnelId, hostname, `http://localhost:${hostPort}`);
+    } catch (routeErr) {
+      return {
+        result: 'error',
+        reason: sanitizeReason(routeErr?.message ?? 'Tunnel-Route-Anlage fehlgeschlagen'),
+        errorClass: routeErr?.errorClass ?? 'error',
+      };
+    }
+
+    // DNS CNAME is best-effort (zone may not be resolvable, non-critical)
+    try {
+      const zoneId = await this.#cloudflareApi.resolveZoneForHostname(hostname);
+      if (zoneId) {
+        await this.#cloudflareApi.createDnsRecord(zoneId, hostname, tunnelId);
+      }
+    } catch {
+      // Best-effort DNS — route is already added; don't abort healing
+    }
+
+    return { result: 'ok' };
+  }
+
   // ── listDeployments ────────────────────────────────────────────────────────
 
   /**
