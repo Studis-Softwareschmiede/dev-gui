@@ -1,5 +1,11 @@
 # Reviewer Lessons — dev-gui (newest first)
 
+## 2026-06-08 — useEffect ohne Deps-Array (run-every-render) für pendingFocus-Pattern: Suggestion, kein Befund
+Ein `useEffect(() => { if (pending && ref.current) { ref.current.focus(); setPending(false); } })` ohne Deps-Array ist korrekt und kein Gate-Blocker. Es läuft nach jedem Render, aber (a) der Body ist ein No-op wenn pending=false und (b) das setPending(false) löst keinen Endlosloop aus (React bailout). Nicht als Important markieren — bestenfalls Suggestion „Deps [pendingFocus] ergänzen für Klarheit".
+
+## 2026-06-08 — Touch-Target-Test-Claim: partieller Test (nur Anzeige-Modus-Buttons) ist ein Suggestion-Befund, kein Important
+Wenn der Test-Header „Touch-Target ≥ 44 px" für eine neue UI-Sektion beansprucht und der Test nur die Buttons im Anzeige-Modus (Setzen/Ändern/Zurücksetzen) prüft, aber nicht die Buttons im Bearbeiten-Modus (Speichern/Abbrechen), ist das eine Suggestion-Lücke, kein Important. Voraussetzung: die Implementierung ist tatsächlich korrekt (alle minHeight:44 in den Style-Objekten vorhanden). Kein Gate-Block wenn Code korrekt; Suggestion auf Test-Vollständigkeit.
+
 ## 2026-06-08 — Traversal-Schutz-Review: Symlink-Test separat von Boundary-Logik-Test bewerten
 Wenn `validateWorkspacePath` (oder analoge Validierungsfunktionen) mit gemocktem `realpath` getestet werden, sorgfältig unterscheiden: (a) Tests mit Identity-Mock (`async p => p`) beweisen NUR die Boundary-Logik mit absoluten Pfaden, NICHT das Symlink-Escape-Szenario. (b) Ein Symlink-Escape-Test braucht einen Mock, bei dem `realpath('/workspace/link')` einen Außerhalb-Pfad zurückgibt. Bevor „Symlink" im Test-Header als unbelegter Claim markiert wird: prüfen ob die Tests vielleicht realpath-Override-Szenarien in anderen Test-Gruppen (z.B. `realpathInputFails`) abdecken — aber `realpathInputFails` = ENOENT testet fehlende Pfade, nicht Symlinks nach außen. Diese beiden Szenarien sind unterschiedliche Codepfade.
 

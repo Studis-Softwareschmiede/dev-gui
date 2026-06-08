@@ -1,5 +1,8 @@
 # Coder Lessons — dev-gui (newest first)
 
+## 2026-06-08 — Touch-Target-Test: Editier-Modus-Buttons (Speichern/Abbrechen) explizit prüfen
+Wenn der Test-Header „Touch-Target ≥ 44 px" für eine neue Sektion beansprucht, muss die Prüfung auch die Buttons im Bearbeiten-Modus erfassen (z.B. Speichern/Abbrechen im Workspace-Edit-Formular) — nicht nur die Buttons im Anzeige-Modus. Muster: Bearbeiten-Modus öffnen (z.B. Klick auf „Setzen"/„Ändern"), dann alle Buttons querySelectorAll + minHeight-Assertion. Ohne diesen Schritt ist der Header-Claim unvollständig belegt (auch wenn die Implementierung korrekt ist). Ein partieller Touch-Target-Test genügt nicht als Gesamt-Abdeckungsbeleg.
+
 ## 2026-06-08 — Test-Header „Symlink" bei Traversal-Schutz braucht realpath-Mock der ein externes Ziel zurückgibt
 Wenn ein Test-Datei-Header für eine Validierungsfunktion (z.B. `validateWorkspacePath`) den Claim „Symlink" oder „Symlink-Flucht" enthält, muss mindestens ein Test existieren, in dem der `realpath`-Mock einen Pfad **außerhalb der Schranke** für einen Eingabe-Pfad zurückgibt, der syntaktisch innerhalb der Schranke liegt (z.B. `realpath('/workspace/link') -> '/etc'`). Nur so ist bewiesen, dass die Boundary-Prüfung die realpath-Auflösung tatsächlich nutzt und nicht bloß die syntaktisch bereinigten Pfade vergleicht. Ein Identity-Mock (`async (p) => p`) testet nur die Boundary-Logik mit absoluten Pfaden — er beweist nicht den Symlink-Escape-Pfad. (Hintergrund: Die Implementierung ist korrekt, aber der Test-Claim ist nicht erfüllt.)
 
