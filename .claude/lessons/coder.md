@@ -1,5 +1,8 @@
 # Coder Lessons — dev-gui (newest first)
 
+## 2026-06-08 — #apiPost-2xx-Bedingung: res.ok deckt bereits 201 und 204 ab — explizite Checks sind redundant
+`if (res.ok || res.status === 201 || res.status === 204)` in einem API-POST-Helper ist kein Bug, aber `res.ok` gilt für alle 200–299-Statuscodes und schließt 201 und 204 bereits ein. Die expliziten `|| res.status === 201 || res.status === 204`-Zweige sind überflüssig. Das 204-Body-Guard `if (res.status === 204) return {}` innerhalb des Blocks bleibt aber nötig, da `res.json()` bei leerem Body fehlschlägt. Saubereres Muster: `if (res.ok) { if (res.status === 204) return {}; return res.json(); }`.
+
 ## 2026-06-08 — Router-JSDoc-Routen-Inventar muss EXAKT mit registrierten router.X()-Aufrufen übereinstimmen
 Der JSDoc-Block am Anfang eines Router-Moduls ist das kanonische Routen-Inventar dieses Routers. Jede dort aufgelistete Route muss einen echten `router.post()`/`router.get()`-Aufruf haben; phantom-Routen (im Kommentar gelistet, aber nicht registriert) erzeugen einen Important-Befund. Muster: nach dem Schreiben aller `router.X()`-Aufrufe den Header-Kommentar gegen die tatsächlich registrierten Routen abgleichen. Gilt analog für `server.js`-Header-Kommentar.
 
