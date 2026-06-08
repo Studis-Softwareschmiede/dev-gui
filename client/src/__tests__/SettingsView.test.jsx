@@ -1,6 +1,6 @@
 /**
  * SettingsView.test.jsx — Unit-Tests für SettingsView (Credentials AC1–AC8, SSH-Keys AC1–AC6,
- * Workspace-Pfad AC1 + UI-Anteil AC3).
+ * Workspace-Pfad AC1 + UI-Anteil AC3, SSH-Keypair-Generierung + Export AC1/AC3/AC4/AC6/AC7/AC8).
  *
  * Covers (settings-credentials + settings-shell):
  *   AC1  — Credential-Felder mit Status (gesetzt/nicht gesetzt); kein Klartext
@@ -28,6 +28,18 @@
  *           leeres Feld → Frontend-Fehlermeldung, kein PUT; aria-describedby gesetzt.
  *   A11y — Touch-Targets ≥ 44 px (Display- + Editier-Modus); Fokusführung via activeElement;
  *           role=status bei Erfolg, role=alert bei Fehler; Kontrast #9ca3af.
+ *
+ * Covers (ssh-key-generation AC1/AC3/AC4/AC6/AC7/AC8 — #116):
+ *   GEN-AC1 — „Keypair erzeugen"-Button je Rollen-Label root|alex vorhanden und auslösbar.
+ *   GEN-AC3 — Public-Key nach Generierung vollständig angezeigt + kopierbar;
+ *             Private-Key-Klartext NIE in normaler Sektion-Anzeige sichtbar.
+ *   GEN-AC4 — „Private-Key herunterladen"-Button löst Export-Request aus (dauerhaft wiederholbar).
+ *   GEN-AC6 — 403-Fehler vom Backend → Fehlermeldung ohne Klartext-Leak.
+ *   GEN-AC7 — 409 key-exists → Overwrite-Bestätigung (role=alertdialog); Bestätigen → overwrite:true;
+ *             Abbrechen → kein overwrite.
+ *   GEN-AC8 — Nach erfolgreicher Generierung wird onSaved() aufgerufen (Label-Liste-Reload).
+ *   GEN-A11y — Overwrite-Dialog hat role=alertdialog + aria-labelledby + aria-describedby;
+ *              Touch-Targets ≥ 44 px; Fokus auf Bestätigungs-Button beim Öffnen des Dialogs.
  *
  * @jest-environment jsdom
  */
@@ -96,6 +108,8 @@ const CONFIGURED_WORKSPACE_PATH = {
  * Unterstützt SSH-Key-Endpoints (/api/settings/ssh-keys*),
  * Credential-Endpoints (/api/settings/credentials*) und
  * Workspace-Path-Endpoints (/api/settings/workspace-path).
+ * Unterstützt Generate-Endpunkt (/api/settings/ssh-keys/{user}/generate) und
+ * Export-Endpunkt (/api/settings/ssh-keys/{user}/private-key/export).
  */
 function makeFetch({
   getResponse = EMPTY_CREDS,
@@ -104,10 +118,19 @@ function makeFetch({
   sshGetResponse = EMPTY_SSH_KEYS,
   sshPutResponse = null,
   sshDeleteResponse = null,
+  sshGenerateResponse = null, // null = Standard-Erfolg; 'key-exists' = 409; 'forbidden' = 403
+  sshExportResponse = null,   // null = Erfolg (text/plain); 'error' = 404
   getWorkspacePath   = { ok: true, status: 200, data: DEFAULT_WORKSPACE_PATH },
   putWorkspacePath   = { ok: true, status: 200, data: { effectivePath: '/workspace/projekt', source: 'configured' } },
   deleteWorkspacePath = { ok: true, status: 200, data: { effectivePath: '/workspace', source: 'env-default' } },
 } = {}) {
+  const DEFAULT_GENERATE_SUCCESS = {
+    user: 'root',
+    publicKey: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGeneratedPublicKey dev-gui/root',
+    privateKeyStatus: 'set',
+    generatedAt: '2026-01-01T00:00:00.000Z',
+  };
+
   return jest.fn(async (url, opts) => {
     const method = opts?.method ?? 'GET';
     const isSsh = typeof url === 'string' && url.includes('/ssh-keys');
@@ -124,6 +147,39 @@ function makeFetch({
       if (method === 'DELETE') {
         return { ok: deleteWorkspacePath.ok, status: deleteWorkspacePath.status, json: async () => deleteWorkspacePath.data };
       }
+    }
+
+    // SSH-Generate-Endpunkt: POST /api/settings/ssh-keys/:user/generate
+    if (method === 'POST' && typeof url === 'string' && url.match(/\/api\/settings\/ssh-keys\/[^/]+\/generate$/)) {
+      if (sshGenerateResponse === 'key-exists') {
+        return { ok: false, status: 409, json: async () => ({ error: 'Key bereits vorhanden', errorClass: 'key-exists' }) };
+      }
+      if (sshGenerateResponse === 'forbidden') {
+        return { ok: false, status: 403, json: async () => ({ error: 'Keine Berechtigung' }) };
+      }
+      if (sshGenerateResponse === 'error') {
+        return { ok: false, status: 500, json: async () => ({ error: 'Interner Fehler' }) };
+      }
+      // Standard: Erfolg
+      const data = sshGenerateResponse ?? DEFAULT_GENERATE_SUCCESS;
+      return { ok: true, status: 200, json: async () => data };
+    }
+
+    // SSH-Export-Endpunkt: GET /api/settings/ssh-keys/:user/private-key/export
+    if (method === 'GET' && typeof url === 'string' && url.match(/\/api\/settings\/ssh-keys\/[^/]+\/private-key\/export$/)) {
+      if (sshExportResponse === 'error') {
+        return { ok: false, status: 404, json: async () => ({ error: 'Kein Private-Key', errorClass: 'no-private-key' }) };
+      }
+      if (sshExportResponse === 'forbidden') {
+        return { ok: false, status: 403, json: async () => ({ error: 'Keine Berechtigung' }) };
+      }
+      // Erfolg: text/plain (kein json())
+      return {
+        ok: true,
+        status: 200,
+        text: async () => '-----BEGIN OPENSSH PRIVATE KEY-----\nMock\n-----END OPENSSH PRIVATE KEY-----\n',
+        json: async () => { throw new Error('not json'); },
+      };
     }
 
     if (method === 'GET') {
@@ -1981,6 +2037,680 @@ describe('SettingsView — AC9: VPS-Provider-Sektion mit drei Token-Feldern', ()
     await waitFor(() => {
       const main = document.querySelector('[aria-label="Einstellungen-Ansicht"]');
       if (main) expect(main.textContent).not.toContain('ionos-secret-token');
+    });
+  });
+});
+
+// ── ssh-key-generation — GEN-AC1: „Keypair erzeugen"-Button vorhanden ────────
+
+describe('SettingsView — GEN-AC1: Keypair-Generieren-Button vorhanden', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('GEN-AC1 — „Keypair erzeugen"-Button für root vorhanden', async () => {
+    const { getAllByRole } = renderView(makeFetch({ sshGetResponse: SSH_KEYS_WITH_ROOT }));
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(
+        btns.some((b) => b.getAttribute('aria-label')?.match(/neues.*ed25519.*keypair.*root|keypair.*root.*erzeugen|ed25519.*root.*erzeugen/i)),
+      ).toBe(true);
+    });
+  });
+
+  it('GEN-AC1 — „Keypair erzeugen"-Button für alex vorhanden', async () => {
+    const sshWithAlex = [{ user: 'alex', privateKeyStatus: 'unset' }];
+    const { getAllByRole } = renderView(makeFetch({ sshGetResponse: sshWithAlex }));
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(
+        btns.some((b) => b.getAttribute('aria-label')?.match(/ed25519.*keypair.*alex|keypair.*alex.*erzeugen|ed25519.*alex.*erzeugen/i)),
+      ).toBe(true);
+    });
+  });
+
+  it('GEN-AC1 — Kein Keypair-Erzeugen-Button für Nicht-root/alex-Label', async () => {
+    // "deploy" ist nicht root|alex — kein Generate-Button
+    const sshWithDeploy = [{ user: 'deploy', privateKeyStatus: 'unset' }];
+    const { getAllByRole } = renderView(makeFetch({ sshGetResponse: sshWithDeploy }));
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      const hasGenBtn = btns.some((b) =>
+        b.getAttribute('aria-label')?.match(/ed25519.*keypair.*deploy|keypair.*deploy.*erzeugen|ed25519.*deploy.*erzeugen/i),
+      );
+      expect(hasGenBtn).toBe(false);
+    });
+  });
+
+  it('GEN-AC1 — Erfolgreicher Generate-Request: POST .../generate wird abgefeuert', async () => {
+    const fetchMock = makeFetch({ sshGetResponse: SSH_KEYS_WITH_ROOT });
+    globalThis.fetch = fetchMock;
+    const onNavigate = jest.fn();
+    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/ed25519.*keypair.*root|keypair.*root.*erzeugen|ed25519.*root.*erzeugen/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const genBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/ed25519.*keypair.*root|keypair.*root.*erzeugen|ed25519.*root.*erzeugen/i),
+      );
+      if (genBtn) fireEvent.click(genBtn);
+    });
+
+    await waitFor(() => {
+      const postCalls = fetchMock.mock.calls.filter(([url, opts]) =>
+        (opts?.method ?? 'GET') === 'POST' && url.includes('/generate'),
+      );
+      expect(postCalls.length).toBeGreaterThan(0);
+    });
+  });
+});
+
+// ── ssh-key-generation — GEN-AC3: Public-Key anzeigen + kopieren; Private-Key NIE ──
+
+describe('SettingsView — GEN-AC3: Public-Key nach Generierung anzeigen; Private-Key nie sichtbar', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('GEN-AC3 — nach erfolgreicher Generierung: erzeugter Public-Key vollständig sichtbar', async () => {
+    const fetchMock = makeFetch({ sshGetResponse: [{ user: 'root', privateKeyStatus: 'unset' }] });
+    globalThis.fetch = fetchMock;
+    const onNavigate = jest.fn();
+    const { getAllByRole, getByRole } = render(React.createElement(SettingsView, { onNavigate }));
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/ed25519.*keypair.*root|keypair.*root.*erzeugen|ed25519.*root.*erzeugen/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const genBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/ed25519.*keypair.*root|keypair.*root.*erzeugen|ed25519.*root.*erzeugen/i),
+      );
+      if (genBtn) fireEvent.click(genBtn);
+    });
+
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      // Der erzeugte Public-Key aus DEFAULT_GENERATE_SUCCESS muss sichtbar sein
+      expect(main.textContent).toContain('AAAAC3NzaC1lZDI1NTE5AAAAIGeneratedPublicKey');
+    });
+  });
+
+  it('GEN-AC3 — nach Generierung: Private-Key-Klartext NIEMALS sichtbar', async () => {
+    const fetchMock = makeFetch({ sshGetResponse: [{ user: 'root', privateKeyStatus: 'unset' }] });
+    globalThis.fetch = fetchMock;
+    const onNavigate = jest.fn();
+    const { getAllByRole, getByRole } = render(React.createElement(SettingsView, { onNavigate }));
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/ed25519.*keypair.*root|keypair.*root.*erzeugen|ed25519.*root.*erzeugen/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const genBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/ed25519.*keypair.*root|keypair.*root.*erzeugen|ed25519.*root.*erzeugen/i),
+      );
+      if (genBtn) fireEvent.click(genBtn);
+    });
+
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      // Public-Key sichtbar, kein Private-Key-Klartext
+      expect(main.textContent).toContain('AAAAC3NzaC1lZDI1NTE5AAAAIGeneratedPublicKey');
+      expect(main.textContent).not.toContain('BEGIN OPENSSH PRIVATE KEY');
+    });
+  });
+
+  it('GEN-AC3 — Kopieren-Button vorhanden nach Generierung', async () => {
+    const fetchMock = makeFetch({ sshGetResponse: [{ user: 'root', privateKeyStatus: 'unset' }] });
+    globalThis.fetch = fetchMock;
+    const onNavigate = jest.fn();
+    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/ed25519.*keypair.*root|keypair.*root.*erzeugen|ed25519.*root.*erzeugen/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const genBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/ed25519.*keypair.*root|keypair.*root.*erzeugen|ed25519.*root.*erzeugen/i),
+      );
+      if (genBtn) fireEvent.click(genBtn);
+    });
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(
+        btns.some((b) => b.getAttribute('aria-label')?.match(/public-key.*kopieren|kopieren.*public-key/i)),
+      ).toBe(true);
+    });
+  });
+});
+
+// ── ssh-key-generation — GEN-AC4: Private-Key-Export (dauerhaft wiederholbar) ─
+
+describe('SettingsView — GEN-AC4: Private-Key-Export-Button', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+    delete globalThis.URL.createObjectURL;
+    delete globalThis.URL.revokeObjectURL;
+  });
+
+  function mockDownloadAPIs() {
+    // jsdom hat kein URL.createObjectURL / revokeObjectURL
+    globalThis.URL.createObjectURL = jest.fn(() => 'blob:mock-url');
+    globalThis.URL.revokeObjectURL = jest.fn();
+  }
+
+  it('GEN-AC4 — Private-Key-Export-Button erscheint nach erfolgreicher Generierung', async () => {
+    const fetchMock = makeFetch({ sshGetResponse: [{ user: 'root', privateKeyStatus: 'unset' }] });
+    globalThis.fetch = fetchMock;
+    const onNavigate = jest.fn();
+    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/ed25519.*keypair.*root|keypair.*root.*erzeugen|ed25519.*root.*erzeugen/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const genBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/ed25519.*keypair.*root|keypair.*root.*erzeugen|ed25519.*root.*erzeugen/i),
+      );
+      if (genBtn) fireEvent.click(genBtn);
+    });
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(
+        btns.some((b) => b.getAttribute('aria-label')?.match(/private-key.*root.*herunterladen|private-key.*herunterladen/i)),
+      ).toBe(true);
+    });
+  });
+
+  it('GEN-AC4 — wenn Private-Key bereits gesetzt: Export-Button schon vor Generierung vorhanden', async () => {
+    // hasPrivKey = true → Export-Button direkt sichtbar (dauerhaft wiederholbar)
+    const sshWithPrivKey = [{ user: 'root', privateKeyStatus: 'set', publicKey: 'ssh-ed25519 AAAA… test' }];
+    const { getAllByRole } = renderView(makeFetch({ sshGetResponse: sshWithPrivKey }));
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(
+        btns.some((b) => b.getAttribute('aria-label')?.match(/private-key.*root.*herunterladen|private-key.*herunterladen/i)),
+      ).toBe(true);
+    });
+  });
+
+  it('GEN-AC4 — Klick auf Export-Button feuert GET .../private-key/export', async () => {
+    mockDownloadAPIs();
+    const sshWithPrivKey = [{ user: 'root', privateKeyStatus: 'set', publicKey: 'ssh-ed25519 AAAA… test' }];
+    const fetchMock = makeFetch({ sshGetResponse: sshWithPrivKey });
+    globalThis.fetch = fetchMock;
+    const onNavigate = jest.fn();
+    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/private-key.*root.*herunterladen|private-key.*herunterladen/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const exportBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/private-key.*root.*herunterladen|private-key.*herunterladen/i),
+      );
+      if (exportBtn) fireEvent.click(exportBtn);
+    });
+
+    await waitFor(() => {
+      const exportCalls = fetchMock.mock.calls.filter(([url, opts]) =>
+        (!opts || (opts?.method ?? 'GET') === 'GET') && url.includes('/private-key/export'),
+      );
+      expect(exportCalls.length).toBeGreaterThan(0);
+    });
+  });
+
+  it('GEN-AC4 — Export wiederholbar: zweiter Klick feuert erneut Export-Request', async () => {
+    mockDownloadAPIs();
+    const sshWithPrivKey = [{ user: 'root', privateKeyStatus: 'set', publicKey: 'ssh-ed25519 AAAA… test' }];
+    const fetchMock = makeFetch({ sshGetResponse: sshWithPrivKey });
+    globalThis.fetch = fetchMock;
+    const onNavigate = jest.fn();
+    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+
+    await waitFor(() => {
+      expect(getAllByRole('button').some((b) => b.getAttribute('aria-label')?.match(/private-key.*root.*herunterladen|private-key.*herunterladen/i))).toBe(true);
+    });
+
+    // Erster Export
+    await act(async () => {
+      const exportBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/private-key.*root.*herunterladen|private-key.*herunterladen/i),
+      );
+      if (exportBtn) fireEvent.click(exportBtn);
+    });
+
+    await waitFor(() => {
+      const exportCalls = fetchMock.mock.calls.filter(([url, opts]) =>
+        (!opts || (opts?.method ?? 'GET') === 'GET') && url.includes('/private-key/export'),
+      );
+      expect(exportCalls.length).toBe(1);
+    });
+
+    // Zweiter Export (wiederholbar)
+    await act(async () => {
+      const exportBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/private-key.*root.*herunterladen|private-key.*herunterladen/i),
+      );
+      if (exportBtn) fireEvent.click(exportBtn);
+    });
+
+    await waitFor(() => {
+      const exportCalls = fetchMock.mock.calls.filter(([url, opts]) =>
+        (!opts || (opts?.method ?? 'GET') === 'GET') && url.includes('/private-key/export'),
+      );
+      expect(exportCalls.length).toBe(2);
+    });
+  });
+
+  it('GEN-AC4 — Export-Fehler: Fehlermeldung wird angezeigt', async () => {
+    mockDownloadAPIs();
+    const sshWithPrivKey = [{ user: 'root', privateKeyStatus: 'set', publicKey: 'ssh-ed25519 AAAA… test' }];
+    const fetchMock = makeFetch({ sshGetResponse: sshWithPrivKey, sshExportResponse: 'error' });
+    globalThis.fetch = fetchMock;
+    const onNavigate = jest.fn();
+    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+
+    await waitFor(() => {
+      expect(getAllByRole('button').some((b) => b.getAttribute('aria-label')?.match(/private-key.*root.*herunterladen|private-key.*herunterladen/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const exportBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/private-key.*root.*herunterladen|private-key.*herunterladen/i),
+      );
+      if (exportBtn) fireEvent.click(exportBtn);
+    });
+
+    await waitFor(() => {
+      const alerts = document.querySelectorAll('[role="alert"]');
+      const hasExportError = Array.from(alerts).some((el) => el.textContent.match(/export|kein private-key/i));
+      expect(hasExportError).toBe(true);
+    });
+  });
+});
+
+// ── ssh-key-generation — GEN-AC6: 403-Fehler korrekt behandeln ───────────────
+
+describe('SettingsView — GEN-AC6: 403-Fehler beim Generieren', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('GEN-AC6 — 403-Fehler vom Backend zeigt Fehlermeldung, kein Klartext-Leak', async () => {
+    const fetchMock = makeFetch({
+      sshGetResponse: [{ user: 'root', privateKeyStatus: 'unset' }],
+      sshGenerateResponse: 'forbidden',
+    });
+    globalThis.fetch = fetchMock;
+    const onNavigate = jest.fn();
+    const { getAllByRole, getByRole } = render(React.createElement(SettingsView, { onNavigate }));
+
+    await waitFor(() => {
+      expect(getAllByRole('button').some((b) => b.getAttribute('aria-label')?.match(/ed25519.*keypair.*root|keypair.*root.*erzeugen|ed25519.*root.*erzeugen/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const genBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/ed25519.*keypair.*root|keypair.*root.*erzeugen|ed25519.*root.*erzeugen/i),
+      );
+      if (genBtn) fireEvent.click(genBtn);
+    });
+
+    await waitFor(() => {
+      const alerts = document.querySelectorAll('[role="alert"]');
+      const hasError = Array.from(alerts).some((el) => el.textContent.match(/berechtigung|forbidden|fehlgeschlagen/i));
+      expect(hasError).toBe(true);
+    });
+
+    // Kein Private-Key-Klartext sichtbar
+    const main = getByRole('main', { name: /einstellungen-ansicht/i });
+    expect(main.textContent).not.toContain('BEGIN OPENSSH PRIVATE KEY');
+  });
+});
+
+// ── ssh-key-generation — GEN-AC7: Overwrite-Bestätigung bei 409 ──────────────
+
+describe('SettingsView — GEN-AC7: Overwrite-Bestätigung bei belegtem Label', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('GEN-AC7 — 409 key-exists: Overwrite-Dialog erscheint (role=alertdialog)', async () => {
+    const fetchMock = makeFetch({
+      sshGetResponse: SSH_KEYS_WITH_ROOT,
+      sshGenerateResponse: 'key-exists',
+    });
+    globalThis.fetch = fetchMock;
+    const onNavigate = jest.fn();
+    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+
+    await waitFor(() => {
+      expect(getAllByRole('button').some((b) => b.getAttribute('aria-label')?.match(/ed25519.*keypair.*root|keypair.*root.*erzeugen|ed25519.*root.*erzeugen/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const genBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/ed25519.*keypair.*root|keypair.*root.*erzeugen|ed25519.*root.*erzeugen/i),
+      );
+      if (genBtn) fireEvent.click(genBtn);
+    });
+
+    await waitFor(() => {
+      const dialog = document.querySelector('[role="alertdialog"]');
+      expect(dialog).toBeTruthy();
+    });
+  });
+
+  it('GEN-AC7 — Overwrite-Dialog hat aria-labelledby und aria-describedby', async () => {
+    const fetchMock = makeFetch({
+      sshGetResponse: SSH_KEYS_WITH_ROOT,
+      sshGenerateResponse: 'key-exists',
+    });
+    globalThis.fetch = fetchMock;
+    const onNavigate = jest.fn();
+    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+
+    await waitFor(() => {
+      expect(getAllByRole('button').some((b) => b.getAttribute('aria-label')?.match(/ed25519.*keypair.*root|keypair.*root.*erzeugen|ed25519.*root.*erzeugen/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const genBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/ed25519.*keypair.*root|keypair.*root.*erzeugen|ed25519.*root.*erzeugen/i),
+      );
+      if (genBtn) fireEvent.click(genBtn);
+    });
+
+    await waitFor(() => {
+      const dialog = document.querySelector('[role="alertdialog"]');
+      expect(dialog).toBeTruthy();
+      expect(dialog.getAttribute('aria-labelledby')).toBeTruthy();
+      expect(dialog.getAttribute('aria-describedby')).toBeTruthy();
+    });
+  });
+
+  it('GEN-AC7 — Abbrechen schliesst Dialog ohne Generate-Request', async () => {
+    // Erster Klick → 409; zweiter Klick auf Abbrechen → Dialog weg, kein zweiter POST
+    let generateCallCount = 0;
+    const fetchMock = jest.fn(async (url, opts) => {
+      const method = opts?.method ?? 'GET';
+      if (method === 'POST' && url.includes('/generate')) {
+        generateCallCount++;
+        return { ok: false, status: 409, json: async () => ({ error: 'Key vorhanden', errorClass: 'key-exists' }) };
+      }
+      if (method === 'GET' && url.includes('/ssh-keys') && !url.includes('/export')) {
+        return { ok: true, json: async () => SSH_KEYS_WITH_ROOT };
+      }
+      return { ok: true, json: async () => EMPTY_CREDS };
+    });
+    globalThis.fetch = fetchMock;
+    const onNavigate = jest.fn();
+    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+
+    await waitFor(() => {
+      expect(getAllByRole('button').some((b) => b.getAttribute('aria-label')?.match(/ed25519.*keypair.*root|keypair.*root.*erzeugen|ed25519.*root.*erzeugen/i))).toBe(true);
+    });
+
+    // Klick → 409 → Dialog öffnet
+    await act(async () => {
+      const genBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/ed25519.*keypair.*root|keypair.*root.*erzeugen|ed25519.*root.*erzeugen/i),
+      );
+      if (genBtn) fireEvent.click(genBtn);
+    });
+
+    await waitFor(() => {
+      expect(document.querySelector('[role="alertdialog"]')).toBeTruthy();
+    });
+
+    // Abbrechen klicken
+    await act(async () => {
+      const cancelBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/abbrechen.*bestehenden|abbrechen/i) && b.textContent.trim() === 'Abbrechen',
+      );
+      if (cancelBtn) fireEvent.click(cancelBtn);
+    });
+
+    await waitFor(() => {
+      expect(document.querySelector('[role="alertdialog"]')).toBeNull();
+    });
+
+    // Kein weiterer Generate-POST
+    expect(generateCallCount).toBe(1);
+  });
+
+  it('GEN-AC7 — Bestätigen sendet overwrite:true und schliesst Dialog', async () => {
+    // Sequenz: erster POST → 409; nach Bestätigung zweiter POST → Erfolg
+    let callCount = 0;
+    const fetchMock = jest.fn(async (url, opts) => {
+      const method = opts?.method ?? 'GET';
+      if (method === 'POST' && url.includes('/generate')) {
+        callCount++;
+        if (callCount === 1) {
+          // Erster Aufruf: ohne overwrite → 409
+          return { ok: false, status: 409, json: async () => ({ error: 'Key vorhanden', errorClass: 'key-exists' }) };
+        }
+        // Zweiter Aufruf: mit overwrite → Erfolg
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            user: 'root',
+            publicKey: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINewKey dev-gui/root',
+            privateKeyStatus: 'set',
+            generatedAt: '2026-01-02T00:00:00.000Z',
+          }),
+        };
+      }
+      if (method === 'GET' && url.includes('/ssh-keys') && !url.includes('/export')) {
+        return { ok: true, json: async () => SSH_KEYS_WITH_ROOT };
+      }
+      return { ok: true, json: async () => EMPTY_CREDS };
+    });
+    globalThis.fetch = fetchMock;
+    const onNavigate = jest.fn();
+    const { getAllByRole, getByRole } = render(React.createElement(SettingsView, { onNavigate }));
+
+    await waitFor(() => {
+      expect(getAllByRole('button').some((b) => b.getAttribute('aria-label')?.match(/ed25519.*keypair.*root|keypair.*root.*erzeugen|ed25519.*root.*erzeugen/i))).toBe(true);
+    });
+
+    // Erster Klick → 409
+    await act(async () => {
+      const genBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/ed25519.*keypair.*root|keypair.*root.*erzeugen|ed25519.*root.*erzeugen/i),
+      );
+      if (genBtn) fireEvent.click(genBtn);
+    });
+
+    await waitFor(() => {
+      expect(document.querySelector('[role="alertdialog"]')).toBeTruthy();
+    });
+
+    // Bestätigen klicken
+    await act(async () => {
+      const confirmBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/bestätigen.*überschreiben|überschreiben/i),
+      );
+      if (confirmBtn) fireEvent.click(confirmBtn);
+    });
+
+    // Dialog weg, neuer Public-Key sichtbar
+    await waitFor(() => {
+      expect(document.querySelector('[role="alertdialog"]')).toBeNull();
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      expect(main.textContent).toContain('AAAAINewKey');
+    });
+
+    // Zweiter POST hat overwrite:true
+    expect(callCount).toBe(2);
+    const generatePostCalls = fetchMock.mock.calls.filter(([url, opts]) =>
+      (opts?.method ?? 'GET') === 'POST' && url.includes('/generate'),
+    );
+    expect(generatePostCalls.length).toBe(2);
+    const secondPostBody = JSON.parse(generatePostCalls[1]?.[1]?.body ?? '{}');
+    expect(secondPostBody.overwrite).toBe(true);
+  });
+});
+
+// ── ssh-key-generation — GEN-AC8: Label-Liste nach Generierung neu laden ─────
+
+describe('SettingsView — GEN-AC8: Label-Reload nach Generierung', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('GEN-AC8 — nach erfolgreicher Generierung: SSH-Keys-Liste neu geladen', async () => {
+    let sshGetCallCount = 0;
+    const fetchMock = jest.fn(async (url, opts) => {
+      const method = opts?.method ?? 'GET';
+      if (method === 'POST' && url.includes('/generate')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            user: 'root',
+            publicKey: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINewKey dev-gui/root',
+            privateKeyStatus: 'set',
+            generatedAt: '2026-01-01T00:00:00.000Z',
+          }),
+        };
+      }
+      if (method === 'GET' && url === '/api/settings/ssh-keys') {
+        sshGetCallCount++;
+        return { ok: true, json: async () => [{ user: 'root', privateKeyStatus: 'unset' }] };
+      }
+      return { ok: true, json: async () => EMPTY_CREDS };
+    });
+    globalThis.fetch = fetchMock;
+    const onNavigate = jest.fn();
+    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+
+    // Warten bis initial geladen
+    await waitFor(() => {
+      expect(sshGetCallCount).toBeGreaterThanOrEqual(1);
+      expect(getAllByRole('button').some((b) => b.getAttribute('aria-label')?.match(/ed25519.*keypair.*root|keypair.*root.*erzeugen|ed25519.*root.*erzeugen/i))).toBe(true);
+    });
+
+    const callsBefore = sshGetCallCount;
+
+    await act(async () => {
+      const genBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/ed25519.*keypair.*root|keypair.*root.*erzeugen|ed25519.*root.*erzeugen/i),
+      );
+      if (genBtn) fireEvent.click(genBtn);
+    });
+
+    await waitFor(() => {
+      // Nach Generierung muss ein weiterer SSH-Keys-GET abgefeuert worden sein
+      expect(sshGetCallCount).toBeGreaterThan(callsBefore);
+    });
+  });
+});
+
+// ── ssh-key-generation — GEN-A11y: Overwrite-Dialog-Barrierefreiheit ─────────
+
+describe('SettingsView — GEN-A11y: Overwrite-Dialog A11y', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('GEN-A11y — Overwrite-Dialog: Bestätigungs- und Abbrechen-Buttons haben Touch-Target ≥ 44 px', async () => {
+    const fetchMock = makeFetch({
+      sshGetResponse: SSH_KEYS_WITH_ROOT,
+      sshGenerateResponse: 'key-exists',
+    });
+    globalThis.fetch = fetchMock;
+    const onNavigate = jest.fn();
+    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+
+    await waitFor(() => {
+      expect(getAllByRole('button').some((b) => b.getAttribute('aria-label')?.match(/ed25519.*keypair.*root|keypair.*root.*erzeugen|ed25519.*root.*erzeugen/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const genBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/ed25519.*keypair.*root|keypair.*root.*erzeugen|ed25519.*root.*erzeugen/i),
+      );
+      if (genBtn) fireEvent.click(genBtn);
+    });
+
+    await waitFor(() => {
+      expect(document.querySelector('[role="alertdialog"]')).toBeTruthy();
+    });
+
+    // Alle Buttons im Dialog müssen Touch-Target ≥ 44 px haben
+    const dialog = document.querySelector('[role="alertdialog"]');
+    const dialogBtns = dialog.querySelectorAll('button');
+    expect(dialogBtns.length).toBeGreaterThan(0);
+    for (const btn of dialogBtns) {
+      expect(parseInt(btn.style.minHeight ?? '0', 10)).toBeGreaterThanOrEqual(44);
+    }
+  });
+
+  it('GEN-A11y — Fokus landet auf Bestätigungs-Button wenn Overwrite-Dialog über 409 key-exists öffnet', async () => {
+    const fetchMock = makeFetch({
+      sshGetResponse: SSH_KEYS_WITH_ROOT,
+      sshGenerateResponse: 'key-exists',
+    });
+    globalThis.fetch = fetchMock;
+    const onNavigate = jest.fn();
+    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+
+    await waitFor(() => {
+      expect(getAllByRole('button').some((b) => b.getAttribute('aria-label')?.match(/ed25519.*keypair.*root|keypair.*root.*erzeugen|ed25519.*root.*erzeugen/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const genBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/ed25519.*keypair.*root|keypair.*root.*erzeugen|ed25519.*root.*erzeugen/i),
+      );
+      if (genBtn) fireEvent.click(genBtn);
+    });
+
+    await waitFor(() => {
+      expect(document.querySelector('[role="alertdialog"]')).toBeTruthy();
+    });
+
+    // Fokus muss auf dem Bestätigungs-Button landen (useEffect + confirmBtnRef.current.focus())
+    await waitFor(() => {
+      const confirmBtn = document.querySelector('[aria-label*="überschreiben"]');
+      expect(confirmBtn).toBeTruthy();
+      expect(document.activeElement).toBe(confirmBtn);
+    });
+  });
+
+  it('GEN-A11y — „Keypair erzeugen"- und Export-Buttons haben Touch-Target ≥ 44 px', async () => {
+    const sshWithPrivKey = [{ user: 'root', privateKeyStatus: 'set', publicKey: 'ssh-ed25519 AAAA… test' }];
+    const { getAllByRole } = renderView(makeFetch({ sshGetResponse: sshWithPrivKey }));
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      // Generieren-Button
+      const genBtns = btns.filter((b) => b.getAttribute('aria-label')?.match(/ed25519.*keypair.*root|keypair.*root.*erzeugen|ed25519.*root.*erzeugen/i));
+      for (const btn of genBtns) {
+        expect(parseInt(btn.style.minHeight ?? '0', 10)).toBeGreaterThanOrEqual(44);
+      }
+      // Export-Button
+      const expBtns = btns.filter((b) => b.getAttribute('aria-label')?.match(/private-key.*root.*herunterladen|private-key.*herunterladen/i));
+      for (const btn of expBtns) {
+        expect(parseInt(btn.style.minHeight ?? '0', 10)).toBeGreaterThanOrEqual(44);
+      }
     });
   });
 });
