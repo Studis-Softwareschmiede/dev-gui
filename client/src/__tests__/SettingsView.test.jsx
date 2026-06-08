@@ -1,6 +1,7 @@
 /**
  * SettingsView.test.jsx — Unit-Tests für SettingsView (Credentials AC1–AC8, SSH-Keys AC1–AC6,
- * Workspace-Pfad AC1 + UI-Anteil AC3, SSH-Keypair-Generierung + Export AC1/AC3/AC4/AC6/AC7/AC8).
+ * Workspace-Pfad AC1 + UI-Anteil AC3, SSH-Keypair-Generierung + Export AC1/AC3/AC4/AC6/AC7/AC8,
+ * SSH-Key-Rotation AC1/AC5/AC7 — #119).
  *
  * Covers (settings-credentials + settings-shell):
  *   AC1  — Credential-Felder mit Status (gesetzt/nicht gesetzt); kein Klartext
@@ -40,6 +41,15 @@
  *   GEN-AC8 — Nach erfolgreicher Generierung wird onSaved() aufgerufen (Label-Liste-Reload).
  *   GEN-A11y — Overwrite-Dialog hat role=alertdialog + aria-labelledby + aria-describedby;
  *              Touch-Targets ≥ 44 px; Fokus auf Bestätigungs-Button beim Öffnen des Dialogs.
+ *
+ * Covers (ssh-key-rotation AC1/AC5/AC7 — #119):
+ *   ROT-AC1 — „Rotieren"-Button je Rollen-Label root|alex; Formular mit host/port/targetUser/
+ *             hostFingerprint-Feldern (labels programmatisch zugeordnet); POST .../rotate ausgelöst.
+ *             Loading-State (aria-busy) während Rotation.
+ *   ROT-AC5 — Erfolg → „rotiert" + newPublicKey-Anzeige (role=status); rotation-verify-failed →
+ *             klare Meldung „alter Key erhalten" (role=alert); 403 → Fehlermeldung (role=alert).
+ *   ROT-AC7 — Kein Private-Key in Rotation-Anzeige; nur Public-Key/Status sichtbar.
+ *             Labels programmatisch zugeordnet; Touch-Targets ≥ 44 px.
  *
  * @jest-environment jsdom
  */
@@ -108,8 +118,9 @@ const CONFIGURED_WORKSPACE_PATH = {
  * Unterstützt SSH-Key-Endpoints (/api/settings/ssh-keys*),
  * Credential-Endpoints (/api/settings/credentials*) und
  * Workspace-Path-Endpoints (/api/settings/workspace-path).
- * Unterstützt Generate-Endpunkt (/api/settings/ssh-keys/{user}/generate) und
- * Export-Endpunkt (/api/settings/ssh-keys/{user}/private-key/export).
+ * Unterstützt Generate-Endpunkt (/api/settings/ssh-keys/{user}/generate),
+ * Export-Endpunkt (/api/settings/ssh-keys/{user}/private-key/export) und
+ * Rotate-Endpunkt (/api/settings/ssh-keys/{user}/rotate).
  */
 function makeFetch({
   getResponse = EMPTY_CREDS,
@@ -120,6 +131,7 @@ function makeFetch({
   sshDeleteResponse = null,
   sshGenerateResponse = null, // null = Standard-Erfolg; 'key-exists' = 409; 'forbidden' = 403
   sshExportResponse = null,   // null = Erfolg (text/plain); 'error' = 404
+  sshRotateResponse = null,   // null = Standard-Erfolg; 'verify-failed' = 502 rotation-verify-failed; 'forbidden' = 403
   getWorkspacePath   = { ok: true, status: 200, data: DEFAULT_WORKSPACE_PATH },
   putWorkspacePath   = { ok: true, status: 200, data: { effectivePath: '/workspace/projekt', source: 'configured' } },
   deleteWorkspacePath = { ok: true, status: 200, data: { effectivePath: '/workspace', source: 'env-default' } },
@@ -129,6 +141,12 @@ function makeFetch({
     publicKey: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGeneratedPublicKey dev-gui/root',
     privateKeyStatus: 'set',
     generatedAt: '2026-01-01T00:00:00.000Z',
+  };
+
+  const DEFAULT_ROTATE_SUCCESS = {
+    result: 'rotated',
+    oldKeyRemoved: true,
+    newPublicKey: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIRotatedPublicKey dev-gui/root',
   };
 
   return jest.fn(async (url, opts) => {
@@ -147,6 +165,40 @@ function makeFetch({
       if (method === 'DELETE') {
         return { ok: deleteWorkspacePath.ok, status: deleteWorkspacePath.status, json: async () => deleteWorkspacePath.data };
       }
+    }
+
+    // SSH-Rotate-Endpunkt: POST /api/settings/ssh-keys/:user/rotate
+    if (method === 'POST' && typeof url === 'string' && url.match(/\/api\/settings\/ssh-keys\/[^/]+\/rotate$/)) {
+      if (sshRotateResponse === 'verify-failed') {
+        return {
+          ok: false,
+          status: 502,
+          json: async () => ({
+            result: 'error',
+            errorClass: 'rotation-verify-failed',
+            error: 'Verbindungstest mit neuem Key fehlgeschlagen — alter Key bleibt aktiv (Aussperr-Schutz)',
+            reason: 'SSH-Verbindungstest mit neuem Key fehlgeschlagen',
+          }),
+        };
+      }
+      if (sshRotateResponse === 'forbidden') {
+        return { ok: false, status: 403, json: async () => ({ result: 'error', error: 'Keine Berechtigung', httpStatus: 403 }) };
+      }
+      if (sshRotateResponse === 'no-existing-key') {
+        return {
+          ok: false,
+          status: 422,
+          json: async () => ({
+            error: 'Kein bestehender Key für Rollen-Label "root"',
+            errorClass: 'no-existing-key',
+          }),
+        };
+      }
+      if (typeof sshRotateResponse === 'object' && sshRotateResponse !== null) {
+        return { ok: true, status: 200, json: async () => sshRotateResponse };
+      }
+      // Standard: Erfolg
+      return { ok: true, status: 200, json: async () => DEFAULT_ROTATE_SUCCESS };
     }
 
     // SSH-Generate-Endpunkt: POST /api/settings/ssh-keys/:user/generate
@@ -2711,6 +2763,447 @@ describe('SettingsView — GEN-A11y: Overwrite-Dialog A11y', () => {
       for (const btn of expBtns) {
         expect(parseInt(btn.style.minHeight ?? '0', 10)).toBeGreaterThanOrEqual(44);
       }
+    });
+  });
+});
+
+// ── ssh-key-rotation — ROT-AC1: Rotations-Button + Formular vorhanden ────────
+
+describe('SettingsView — ROT-AC1: Rotation auslösen (Formular + POST)', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  /** Öffnet das RotationForm für root durch Klick auf den Rotieren-Button. */
+  async function openRotationForm(getAllByRole) {
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/ssh-key für root rotieren/i))).toBe(true);
+    });
+    await act(async () => {
+      const rotBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/ssh-key für root rotieren/i),
+      );
+      if (rotBtn) fireEvent.click(rotBtn);
+    });
+    // Warten bis Formular-Felder erscheinen
+    await waitFor(() => {
+      expect(document.getElementById('rot-host-root')).toBeTruthy();
+    });
+  }
+
+  it('ROT-AC1 — „Rotieren"-Button für root vorhanden wenn Private-Key gesetzt', async () => {
+    const { getAllByRole } = renderView(makeFetch({ sshGetResponse: SSH_KEYS_WITH_ROOT }));
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/ssh-key für root rotieren/i))).toBe(true);
+    });
+  });
+
+  it('ROT-AC1 — „Rotieren"-Button für alex vorhanden wenn Private-Key gesetzt', async () => {
+    const sshWithAlex = [{ user: 'alex', publicKey: 'ssh-ed25519 AAAA… alex', privateKeyStatus: 'set' }];
+    const { getAllByRole } = renderView(makeFetch({ sshGetResponse: sshWithAlex }));
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/ssh-key für alex rotieren/i))).toBe(true);
+    });
+  });
+
+  it('ROT-AC1 — Kein Rotieren-Button wenn Private-Key nicht gesetzt', async () => {
+    // root ohne Private-Key → kein Rotieren-Button (oder disabled, aber nicht auslösbar)
+    const sshNoPrivKey = [{ user: 'root', publicKey: 'ssh-ed25519 AAAA…', privateKeyStatus: 'unset' }];
+    const { getAllByRole } = renderView(makeFetch({ sshGetResponse: sshNoPrivKey }));
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      // Button kann vorhanden aber disabled sein — wichtig: kein auslösbarer Rotation-Aufruf
+      const rotBtn = btns.find((b) => b.getAttribute('aria-label')?.match(/ssh-key für root rotieren/i));
+      if (rotBtn) {
+        expect(rotBtn.disabled).toBe(true);
+      }
+    });
+  });
+
+  it('ROT-AC1 — Formular zeigt Felder host/port/targetUser/hostFingerprint mit labels', async () => {
+    const fetchMock = makeFetch({ sshGetResponse: SSH_KEYS_WITH_ROOT });
+    globalThis.fetch = fetchMock;
+    const onNavigate = jest.fn();
+    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    await openRotationForm(getAllByRole);
+
+    // Host-Feld mit label
+    const hostInput = document.getElementById('rot-host-root');
+    expect(hostInput).toBeTruthy();
+    expect(document.querySelector('label[for="rot-host-root"]')).toBeTruthy();
+
+    // Port-Feld mit label
+    expect(document.getElementById('rot-port-root')).toBeTruthy();
+    expect(document.querySelector('label[for="rot-port-root"]')).toBeTruthy();
+
+    // targetUser-Feld mit label
+    expect(document.getElementById('rot-user-root')).toBeTruthy();
+    expect(document.querySelector('label[for="rot-user-root"]')).toBeTruthy();
+
+    // hostFingerprint-Feld mit label
+    expect(document.getElementById('rot-fp-root')).toBeTruthy();
+    expect(document.querySelector('label[for="rot-fp-root"]')).toBeTruthy();
+  });
+
+  it('ROT-AC1 — POST .../rotate wird beim Klick auf „Jetzt rotieren" abgefeuert', async () => {
+    const fetchMock = makeFetch({ sshGetResponse: SSH_KEYS_WITH_ROOT });
+    globalThis.fetch = fetchMock;
+    const onNavigate = jest.fn();
+    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    await openRotationForm(getAllByRole);
+
+    // Host + targetUser ausfüllen
+    await act(async () => {
+      fireEvent.change(document.getElementById('rot-host-root'), { target: { value: '1.2.3.4' } });
+      fireEvent.change(document.getElementById('rot-user-root'), { target: { value: 'root' } });
+    });
+
+    // Rotieren-Button klicken
+    await act(async () => {
+      const rotateBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/ssh-key für root rotieren/i) && b.textContent.trim().includes('rotieren'),
+      );
+      if (rotateBtn) fireEvent.click(rotateBtn);
+    });
+
+    await waitFor(() => {
+      const postCalls = fetchMock.mock.calls.filter(([url, opts]) =>
+        (opts?.method ?? 'GET') === 'POST' && url.includes('/rotate'),
+      );
+      expect(postCalls.length).toBeGreaterThan(0);
+    });
+  });
+
+  it('ROT-AC1 — leerer Host → Frontend-Fehlermeldung, kein POST', async () => {
+    const fetchMock = makeFetch({ sshGetResponse: SSH_KEYS_WITH_ROOT });
+    globalThis.fetch = fetchMock;
+    const onNavigate = jest.fn();
+    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    await openRotationForm(getAllByRole);
+
+    // Ohne Host: auf „Jetzt rotieren" klicken
+    await act(async () => {
+      // Finde den „Jetzt rotieren"-Button im RotationForm (aria-label enthält „rotieren")
+      const allBtns = getAllByRole('button');
+      // Der Submit-Button in RotationForm hat aria-label="SSH-Key für root rotieren"
+      // und textContent "Jetzt rotieren" (nicht der Toggle-Button der aria-expanded hat)
+      const submitBtn = allBtns.find((b) =>
+        b.getAttribute('aria-label')?.match(/ssh-key für root rotieren/i) &&
+        !b.hasAttribute('aria-expanded'),
+      );
+      if (submitBtn) fireEvent.click(submitBtn);
+    });
+
+    await waitFor(() => {
+      const alerts = document.querySelectorAll('[role="alert"]');
+      const hasError = Array.from(alerts).some((el) => el.textContent.match(/host.*pflichtfeld|pflichtfeld/i));
+      expect(hasError).toBe(true);
+    });
+
+    // Kein POST abgefeuert
+    const postCalls = fetchMock.mock.calls.filter(([url, opts]) =>
+      (opts?.method ?? 'GET') === 'POST' && url.includes('/rotate'),
+    );
+    expect(postCalls.length).toBe(0);
+  });
+
+  it('ROT-AC1 — Loading-State: aria-busy=true während Rotation in-flight', async () => {
+    let resolveRotate;
+    const rotatePromise = new Promise((res) => { resolveRotate = res; });
+
+    const fetchMock = jest.fn(async (url, opts) => {
+      const method = opts?.method ?? 'GET';
+      if (method === 'POST' && url.includes('/rotate')) {
+        await rotatePromise;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            result: 'rotated',
+            oldKeyRemoved: true,
+            newPublicKey: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIRotatedPublicKey dev-gui/root',
+          }),
+        };
+      }
+      if (method === 'GET' && url.includes('/ssh-keys') && !url.includes('/export')) {
+        return { ok: true, json: async () => SSH_KEYS_WITH_ROOT };
+      }
+      return { ok: true, json: async () => EMPTY_CREDS };
+    });
+    globalThis.fetch = fetchMock;
+    const onNavigate = jest.fn();
+    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    await openRotationForm(getAllByRole);
+
+    await act(async () => {
+      fireEvent.change(document.getElementById('rot-host-root'), { target: { value: '1.2.3.4' } });
+      fireEvent.change(document.getElementById('rot-user-root'), { target: { value: 'root' } });
+    });
+
+    // Klick ohne await-Abschluss — Button sollte in-flight aria-busy=true haben
+    act(() => {
+      const submitBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/ssh-key für root rotieren/i) &&
+        !b.hasAttribute('aria-expanded'),
+      );
+      if (submitBtn) fireEvent.click(submitBtn);
+    });
+
+    await waitFor(() => {
+      const btn = Array.from(document.querySelectorAll('button')).find(
+        (b) => b.textContent.trim() === 'Rotation läuft…' || b.getAttribute('aria-busy') === 'true',
+      );
+      expect(btn).toBeTruthy();
+    });
+
+    // Auflösen
+    resolveRotate();
+    await act(async () => {});
+  });
+});
+
+// ── ssh-key-rotation — ROT-AC5: Ergebnis anzeigen ────────────────────────────
+
+describe('SettingsView — ROT-AC5: Ergebnis-Anzeige (Erfolg + Fehler)', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  /** Öffnet RotationForm und sendet das Formular mit host + targetUser. */
+  async function submitRotationForm(fetchMock, host = '1.2.3.4', tu = 'root') {
+    const onNavigate = jest.fn();
+    const { getAllByRole, getByRole } = render(React.createElement(SettingsView, { onNavigate }));
+
+    await waitFor(() => {
+      expect(getAllByRole('button').some((b) => b.getAttribute('aria-label')?.match(/ssh-key für root rotieren/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const rotBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/ssh-key für root rotieren/i),
+      );
+      if (rotBtn) fireEvent.click(rotBtn);
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('rot-host-root')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.change(document.getElementById('rot-host-root'), { target: { value: host } });
+      fireEvent.change(document.getElementById('rot-user-root'), { target: { value: tu } });
+    });
+
+    await act(async () => {
+      const submitBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/ssh-key für root rotieren/i) &&
+        !b.hasAttribute('aria-expanded'),
+      );
+      if (submitBtn) fireEvent.click(submitBtn);
+    });
+
+    return { getAllByRole, getByRole };
+  }
+
+  it('ROT-AC5 — Erfolg: role=status erscheint mit „rotiert" / neuer Public-Key', async () => {
+    const fetchMock = makeFetch({ sshGetResponse: SSH_KEYS_WITH_ROOT });
+    globalThis.fetch = fetchMock;
+    await submitRotationForm(fetchMock);
+
+    await waitFor(() => {
+      const statusEl = document.querySelector('[role="status"]');
+      expect(statusEl).toBeTruthy();
+      expect(statusEl.textContent).toMatch(/rotiert|neuer public-key aktiv/i);
+    });
+  });
+
+  it('ROT-AC5 — Erfolg: neuer Public-Key wird in der Ergebnis-Anzeige sichtbar', async () => {
+    const fetchMock = makeFetch({ sshGetResponse: SSH_KEYS_WITH_ROOT });
+    globalThis.fetch = fetchMock;
+    const { getByRole } = await submitRotationForm(fetchMock);
+
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      expect(main.textContent).toContain('AAAAIRotatedPublicKey');
+    });
+  });
+
+  it('ROT-AC5 — Erfolg (oldKeyRemoved=false): Warnung über nicht entfernten alten Key sichtbar', async () => {
+    const fetchMock = makeFetch({
+      sshGetResponse: SSH_KEYS_WITH_ROOT,
+      sshRotateResponse: {
+        result: 'rotated',
+        oldKeyRemoved: false,
+        newPublicKey: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIRotatedPublicKey dev-gui/root',
+        reason: 'Alter Key konnte nicht entfernt werden',
+      },
+    });
+    globalThis.fetch = fetchMock;
+    await submitRotationForm(fetchMock);
+
+    await waitFor(() => {
+      const statusEl = document.querySelector('[role="status"]');
+      expect(statusEl).toBeTruthy();
+      expect(statusEl.textContent).toMatch(/alter key konnte nicht entfernt werden|kein.*entfernt/i);
+    });
+  });
+
+  it('ROT-AC5 — rotation-verify-failed: role=alert mit „alter Key erhalten"-Meldung', async () => {
+    const fetchMock = makeFetch({
+      sshGetResponse: SSH_KEYS_WITH_ROOT,
+      sshRotateResponse: 'verify-failed',
+    });
+    globalThis.fetch = fetchMock;
+    await submitRotationForm(fetchMock);
+
+    await waitFor(() => {
+      const alertEl = document.querySelector('[role="alert"]');
+      expect(alertEl).toBeTruthy();
+      // Klare Aussage: alter Key bleibt erhalten — kein Aussperren
+      expect(alertEl.textContent).toMatch(/alter key.*erhalten|kein zugang verloren|verbindungstest fehlgeschlagen/i);
+    });
+  });
+
+  it('ROT-AC5 — 403: Fehlermeldung „keine Berechtigung" wird angezeigt (role=alert)', async () => {
+    const fetchMock = makeFetch({
+      sshGetResponse: SSH_KEYS_WITH_ROOT,
+      sshRotateResponse: 'forbidden',
+    });
+    globalThis.fetch = fetchMock;
+    await submitRotationForm(fetchMock);
+
+    await waitFor(() => {
+      const alertEl = document.querySelector('[role="alert"]');
+      expect(alertEl).toBeTruthy();
+      expect(alertEl.textContent).toMatch(/berechtigung|403/i);
+    });
+  });
+});
+
+// ── ssh-key-rotation — ROT-AC7: kein Private-Key in Anzeige + A11y ───────────
+
+describe('SettingsView — ROT-AC7: Kein Private-Key in Rotation-Anzeige; A11y', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('ROT-AC7 — Rotation-Ergebnis zeigt niemals Private-Key-Klartext', async () => {
+    const fetchMock = makeFetch({ sshGetResponse: SSH_KEYS_WITH_ROOT });
+    globalThis.fetch = fetchMock;
+    const onNavigate = jest.fn();
+    const { getAllByRole, getByRole } = render(React.createElement(SettingsView, { onNavigate }));
+
+    await waitFor(() => {
+      expect(getAllByRole('button').some((b) => b.getAttribute('aria-label')?.match(/ssh-key für root rotieren/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const rotBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/ssh-key für root rotieren/i),
+      );
+      if (rotBtn) fireEvent.click(rotBtn);
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('rot-host-root')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.change(document.getElementById('rot-host-root'), { target: { value: '1.2.3.4' } });
+      fireEvent.change(document.getElementById('rot-user-root'), { target: { value: 'root' } });
+    });
+
+    await act(async () => {
+      const submitBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/ssh-key für root rotieren/i) &&
+        !b.hasAttribute('aria-expanded'),
+      );
+      if (submitBtn) fireEvent.click(submitBtn);
+    });
+
+    // Nach Erfolg: Private-Key niemals im DOM
+    await waitFor(() => {
+      expect(document.querySelector('[role="status"]')).toBeTruthy();
+    });
+
+    const main = getByRole('main', { name: /einstellungen-ansicht/i });
+    expect(main.textContent).not.toContain('BEGIN OPENSSH PRIVATE KEY');
+    expect(main.textContent).not.toContain('PRIVATE KEY');
+    // Neuer Public-Key ist sichtbar (nicht geheim)
+    expect(main.textContent).toContain('AAAAIRotatedPublicKey');
+  });
+
+  it('ROT-AC7 — Rotations-Formular hat programmatisch zugeordnete Labels (label[for])', async () => {
+    const fetchMock = makeFetch({ sshGetResponse: SSH_KEYS_WITH_ROOT });
+    globalThis.fetch = fetchMock;
+    const onNavigate = jest.fn();
+    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+
+    await waitFor(() => {
+      expect(getAllByRole('button').some((b) => b.getAttribute('aria-label')?.match(/ssh-key für root rotieren/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const rotBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/ssh-key für root rotieren/i),
+      );
+      if (rotBtn) fireEvent.click(rotBtn);
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('rot-host-root')).toBeTruthy();
+    });
+
+    // Alle Formular-Inputs haben ein zugeordnetes label
+    for (const id of ['rot-host-root', 'rot-port-root', 'rot-user-root', 'rot-fp-root']) {
+      const input = document.getElementById(id);
+      expect(input).toBeTruthy();
+      const label = document.querySelector(`label[for="${id}"]`);
+      expect(label).toBeTruthy();
+    }
+  });
+
+  it('ROT-AC7 — Rotieren-Button hat Touch-Target ≥ 44 px', async () => {
+    const fetchMock = makeFetch({ sshGetResponse: SSH_KEYS_WITH_ROOT });
+    globalThis.fetch = fetchMock;
+    const onNavigate = jest.fn();
+    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+
+    await waitFor(() => {
+      expect(getAllByRole('button').some((b) => b.getAttribute('aria-label')?.match(/ssh-key für root rotieren/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const rotBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/ssh-key für root rotieren/i),
+      );
+      if (rotBtn) fireEvent.click(rotBtn);
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('rot-host-root')).toBeTruthy();
+    });
+
+    // „Jetzt rotieren"-Button im Formular muss minHeight ≥ 44 px haben
+    await waitFor(() => {
+      const submitBtn = Array.from(document.querySelectorAll('button')).find(
+        (b) => b.getAttribute('aria-label')?.match(/ssh-key für root rotieren/i) && !b.hasAttribute('aria-expanded'),
+      );
+      expect(submitBtn).toBeTruthy();
+      expect(parseInt(submitBtn.style.minHeight ?? '0', 10)).toBeGreaterThanOrEqual(44);
+    });
+  });
+
+  it('ROT-AC7 — Toggle-Rotieren-Button (in userHeader) hat Touch-Target ≥ 44 px', async () => {
+    const { getAllByRole } = renderView(makeFetch({ sshGetResponse: SSH_KEYS_WITH_ROOT }));
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      const rotBtn = btns.find((b) => b.getAttribute('aria-label')?.match(/ssh-key für root rotieren/i));
+      expect(rotBtn).toBeTruthy();
+      expect(parseInt(rotBtn.style.minHeight ?? '0', 10)).toBeGreaterThanOrEqual(44);
     });
   });
 });

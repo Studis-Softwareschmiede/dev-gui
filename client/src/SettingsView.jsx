@@ -39,6 +39,15 @@
  *   GEN-AC7  — 409 key-exists: Overwrite-Bestätigung zeigen; mit { overwrite:true } wiederholen.
  *   GEN-AC8  — Nach Generierung Label-Liste neu laden (Refetch) für VPS-Create-Zuordnung.
  *
+ * SSH-Key-Rotation (ssh-key-rotation AC1/AC5/AC7 — #119):
+ *   ROT-AC1  — „Rotation auslösen" je Rollen-Label (root|alex): POST .../rotate mit Zielfeldern
+ *              {host, port?, targetUser, hostFingerprint?}. Vollautomatischer Ablauf ohne Halt.
+ *   ROT-AC5  — Ergebnis anzeigen: „rotiert" (Erfolg, neuer Public-Key aktiv, oldKeyRemoved-Status)
+ *              oder Fehlergrund (rotation-verify-failed → klare Aussage „alter Key erhalten",
+ *              403 → keine Berechtigung). Ergebnis programmatisch zugeordnet (role=status/alert).
+ *   ROT-AC7  — Kein Private-Key in Rotation-Anzeige; nur Public-Key/Status sichtbar.
+ *              Loading-State während der Rotation. Labels + Ergebnis programmatisch zugeordnet.
+ *
  * A11y: WCAG 2.1 AA — Überschriften-Struktur, sichtbarer Fokus, Touch-Target ≥ 44 px,
  *       Kontrast ≥ 4.5:1, Fehler programmatisch zugeordnet (aria-describedby).
  *       Overwrite-Bestätigung programmatisch zugeordnet (role=alertdialog, aria-labelledby,
@@ -50,6 +59,7 @@
  *   - Kein Klartext-Wert in irgendwelchen Logs oder Konsolen-Ausgaben.
  *   - Private-Key-Klartext wird NUR über den expliziten Export-Endpunkt bezogen (nie in normaler
  *     Sektion-Anzeige, nicht im State der Sektion-Komponente).
+ *   - Rotation-Response enthält NUR newPublicKey + Status; nie den neuen oder alten Private-Key.
  *
  * @param {{ onNavigate: (view: string) => void }} props
  */
@@ -259,6 +269,29 @@ async function generateSshKeypair(user, { overwrite = false } = {}) {
   });
   const data = await res.json();
   // Fehler-Shape: { error, errorClass? }; Erfolg-Shape: { user, publicKey, privateKeyStatus, generatedAt }
+  return { ...data, httpStatus: res.status };
+}
+
+/**
+ * Löst eine vollautomatische SSH-Key-Rotation für {user} aus (ROT-AC1).
+ * Body: { host, port?, targetUser, hostFingerprint? }
+ *
+ * Erfolg-Shape:  { result: 'rotated', oldKeyRemoved: boolean, newPublicKey: string, reason? }
+ * Fehler-Shape:  { result: 'error', errorClass: string, error: string, reason? }
+ *
+ * @returns {Promise<object>} — immer JSON; httpStatus für Fehler-Behandlung
+ */
+async function rotateSshKey(user, { host, port, targetUser, hostFingerprint }) {
+  const body = { host, targetUser };
+  if (port !== undefined && port !== '') body.port = Number(port);
+  if (hostFingerprint && hostFingerprint.trim()) body.hostFingerprint = hostFingerprint.trim();
+
+  const res = await fetch(`/api/settings/ssh-keys/${encodeURIComponent(user)}/rotate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
   return { ...data, httpStatus: res.status };
 }
 
@@ -1012,6 +1045,241 @@ function ProvisionForm({ user, onClose }) {
   );
 }
 
+// ── RotationForm ──────────────────────────────────────────────────────────────
+
+/**
+ * Formular zum Auslösen einer vollautomatischen SSH-Key-Rotation (ssh-key-rotation AC1/AC5/AC7).
+ * Felder: host (Pflicht), port (optional), targetUser (Pflicht), hostFingerprint (optional).
+ *
+ * Zeigt nach Abschluss:
+ *   - Erfolg (result:'rotated'): neuer Public-Key aktiv + oldKeyRemoved-Status (role=status).
+ *   - Fehler rotation-verify-failed: klare Aussage „alter Key erhalten" (role=alert).
+ *   - 403: keine Berechtigung (role=alert).
+ *   - Andere Fehler: Grund anzeigen (role=alert).
+ *
+ * AC7: Kein Private-Key in der Anzeige — nur newPublicKey + oldKeyRemoved-Status.
+ * A11y: alle Felder mit label/htmlFor; Ergebnis-Region programmatisch zugeordnet;
+ *       Touch-Targets ≥ 44 px; Loading-State (aria-busy).
+ *
+ * @param {{
+ *   user: string,
+ *   onClose: () => void,
+ * }} props
+ */
+function RotationForm({ user, onClose }) {
+  const [host, setHost] = useState('');
+  const [port, setPort] = useState('');
+  const [targetUser, setTargetUser] = useState('');
+  const [hostFingerprint, setHostFingerprint] = useState('');
+  const [rotating, setRotating] = useState(false);
+  const [result, setResult] = useState(null); // null = kein Ergebnis; Erfolg- oder Fehler-Shape
+  const [error, setError] = useState(null);   // Validierungsfehler (Frontend)
+  const hostInputRef = useRef(null);
+  const errorId = `rotation-err-${user}`;
+  const resultId = `rotation-result-${user}`;
+
+  useEffect(() => {
+    if (hostInputRef.current) hostInputRef.current.focus();
+  }, []);
+
+  const handleRotate = useCallback(async () => {
+    setError(null);
+    setResult(null);
+
+    const trimHost = host.trim();
+    const trimTargetUser = targetUser.trim();
+    const trimPort = port.trim();
+
+    if (!trimHost) {
+      setError('Host ist ein Pflichtfeld.');
+      hostInputRef.current?.focus();
+      return;
+    }
+    if (!trimTargetUser) {
+      setError('Ziel-Benutzer ist ein Pflichtfeld.');
+      return;
+    }
+    if (trimPort !== '') {
+      const p = Number(trimPort);
+      if (!Number.isInteger(p) || p < 1 || p > 65535) {
+        setError('Port muss eine ganze Zahl zwischen 1 und 65535 sein.');
+        return;
+      }
+    }
+
+    setRotating(true);
+    try {
+      const res = await rotateSshKey(user, {
+        host: trimHost,
+        port: trimPort !== '' ? trimPort : undefined,
+        targetUser: trimTargetUser,
+        hostFingerprint: hostFingerprint.trim() || undefined,
+      });
+      setResult(res);
+    } catch (err) {
+      // Netzwerkfehler (fetch selbst gescheitert)
+      setError(err.message ?? 'Rotation fehlgeschlagen');
+    } finally {
+      setRotating(false);
+    }
+  }, [user, host, port, targetUser, hostFingerprint]);
+
+  const isSuccess = result?.result === 'rotated';
+  const isVerifyFailed = result?.errorClass === 'rotation-verify-failed';
+  const isForbidden = result?.httpStatus === 403;
+  const isFailed = result?.result === 'error';
+
+  return (
+    <div style={rotationStyles.form} role="region" aria-label={`SSH-Key-Rotation für ${user}`}>
+      <h4 style={rotationStyles.heading}>SSH-Key-Rotation für <code>{user}</code></h4>
+      <p style={rotationStyles.hint}>
+        Rotiert den SSH-Key vollautomatisch: neues Keypair erzeugen → additiv einspielen →
+        Verbindungstest → bei Erfolg alten Key entfernen. Kein Bestätigungs-Halt.
+      </p>
+
+      <div style={provisionStyles.fieldRow}>
+        <label htmlFor={`rot-host-${user}`} style={provisionStyles.label}>
+          Host <span aria-hidden="true" style={provisionStyles.required}>*</span>
+        </label>
+        <input
+          id={`rot-host-${user}`}
+          ref={hostInputRef}
+          type="text"
+          value={host}
+          onChange={(e) => setHost(e.target.value)}
+          placeholder="z.B. 1.2.3.4 oder vps.example.com"
+          style={fieldStyles.input}
+          aria-required="true"
+          aria-describedby={error ? errorId : undefined}
+          autoComplete="off"
+          disabled={rotating}
+        />
+      </div>
+
+      <div style={provisionStyles.fieldRow}>
+        <label htmlFor={`rot-port-${user}`} style={provisionStyles.label}>
+          Port <span style={provisionStyles.optional}>(optional, Default: 22)</span>
+        </label>
+        <input
+          id={`rot-port-${user}`}
+          type="number"
+          value={port}
+          onChange={(e) => setPort(e.target.value)}
+          placeholder="22"
+          style={{ ...fieldStyles.input, width: 120 }}
+          min="1"
+          max="65535"
+          aria-describedby={error ? errorId : undefined}
+          disabled={rotating}
+        />
+      </div>
+
+      <div style={provisionStyles.fieldRow}>
+        <label htmlFor={`rot-user-${user}`} style={provisionStyles.label}>
+          Ziel-Benutzer <span aria-hidden="true" style={provisionStyles.required}>*</span>
+        </label>
+        <input
+          id={`rot-user-${user}`}
+          type="text"
+          value={targetUser}
+          onChange={(e) => setTargetUser(e.target.value)}
+          placeholder="z.B. root oder alex"
+          style={fieldStyles.input}
+          aria-required="true"
+          aria-describedby={error ? errorId : undefined}
+          autoComplete="off"
+          disabled={rotating}
+        />
+      </div>
+
+      <div style={provisionStyles.fieldRow}>
+        <label htmlFor={`rot-fp-${user}`} style={provisionStyles.label}>
+          Host-Key-Fingerprint <span style={provisionStyles.optional}>(optional, SHA256-Base64)</span>
+        </label>
+        <input
+          id={`rot-fp-${user}`}
+          type="text"
+          value={hostFingerprint}
+          onChange={(e) => setHostFingerprint(e.target.value)}
+          placeholder="Ohne 'SHA256:' Prefix — leer lassen für TOFU"
+          style={fieldStyles.input}
+          aria-describedby={error ? errorId : undefined}
+          autoComplete="off"
+          disabled={rotating}
+        />
+      </div>
+
+      {/* Frontend-Validierungsfehler */}
+      {error && (
+        <p id={errorId} style={fieldStyles.error} role="alert" aria-live="polite">
+          {error}
+        </p>
+      )}
+
+      {/* Ergebnis-Anzeige — AC5 */}
+      {result && (
+        <div
+          id={resultId}
+          style={isSuccess ? rotationStyles.resultSuccess : rotationStyles.resultError}
+          role={isSuccess ? 'status' : 'alert'}
+          aria-live={isSuccess ? 'polite' : 'assertive'}
+        >
+          {isSuccess && (
+            <span>
+              Key erfolgreich rotiert — neuer Public-Key aktiv.
+              {result.oldKeyRemoved
+                ? ' Alter Key entfernt.'
+                : ' Alter Key konnte nicht entfernt werden (neuer Key ist aktiv).'}
+              {result.newPublicKey && (
+                <pre style={rotationStyles.newPubKey} aria-label={`Neuer Public-Key für ${user}`}>
+                  {result.newPublicKey}
+                </pre>
+              )}
+            </span>
+          )}
+          {isFailed && isVerifyFailed && (
+            <span>
+              Verbindungstest fehlgeschlagen — alter Key blieb erhalten, kein Zugang verloren.
+              {result.reason && (
+                <span style={rotationStyles.reason}> ({result.reason})</span>
+              )}
+            </span>
+          )}
+          {isFailed && isForbidden && (
+            <span>Keine Berechtigung für diese Aktion (403).</span>
+          )}
+          {isFailed && !isVerifyFailed && !isForbidden && (
+            <span>
+              Rotation fehlgeschlagen: {result.error ?? result.reason ?? 'unbekannter Fehler'}
+            </span>
+          )}
+        </div>
+      )}
+
+      <div style={{ ...fieldStyles.actionRow, marginTop: 12 }}>
+        <button
+          type="button"
+          onClick={handleRotate}
+          disabled={rotating}
+          style={rotationStyles.btnRotate}
+          aria-busy={rotating}
+          aria-label={`SSH-Key für ${user} rotieren`}
+        >
+          {rotating ? 'Rotation läuft…' : 'Jetzt rotieren'}
+        </button>
+        <button
+          type="button"
+          onClick={onClose}
+          disabled={rotating}
+          style={fieldStyles.btnSecondary}
+        >
+          Schliessen
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ── KeygenPanel ───────────────────────────────────────────────────────────────
 
 /**
@@ -1259,6 +1527,7 @@ function SshKeyEntry({ entry, onSaved }) {
   const [editingPub, setEditingPub] = useState(false);
   const [editingPriv, setEditingPriv] = useState(false);
   const [showProvision, setShowProvision] = useState(false);
+  const [showRotation, setShowRotation] = useState(false);
   const [pubInput, setPubInput] = useState('');
   const [privInput, setPrivInput] = useState('');
   const [saving, setSaving] = useState(false);
@@ -1365,8 +1634,9 @@ function SshKeyEntry({ entry, onSaved }) {
     }
   }, [user, onSaved]);
 
-  // GEN-AC1: nur root|alex unterstützen die Keypair-Generierung
+  // GEN-AC1 / ROT-AC1: nur root|alex unterstützen Keypair-Generierung und Rotation
   const isGenerateSupported = user === 'root' || user === 'alex';
+  const isRotationSupported = user === 'root' || user === 'alex';
 
   return (
     <div style={fieldStyles.row} role="group" aria-label={`SSH-Schlüssel für ${user}`}>
@@ -1386,6 +1656,20 @@ function SshKeyEntry({ entry, onSaved }) {
           >
             {showProvision ? 'Provision schliessen' : 'Provisionieren'}
           </button>
+          {/* ROT-AC1: Rotation-Button — nur root|alex, nur wenn Private-Key vorhanden */}
+          {isRotationSupported && (
+            <button
+              type="button"
+              onClick={() => setShowRotation((v) => !v)}
+              disabled={!hasPrivKey || deleting}
+              style={hasPrivKey ? fieldStyles.btnSmall : { ...fieldStyles.btnSmall, opacity: 0.45, cursor: 'not-allowed' }}
+              aria-label={`SSH-Key für ${user} rotieren`}
+              aria-expanded={showRotation}
+              title={hasPrivKey ? 'SSH-Key vollautomatisch rotieren' : 'Kein Private-Key hinterlegt — zuerst ein Keypair erzeugen'}
+            >
+              {showRotation ? 'Rotation schliessen' : 'Rotieren'}
+            </button>
+          )}
           <button
             type="button"
             onClick={handleDeleteAll}
@@ -1411,6 +1695,14 @@ function SshKeyEntry({ entry, onSaved }) {
         <ProvisionForm
           user={user}
           onClose={() => setShowProvision(false)}
+        />
+      )}
+
+      {/* ROT-AC1/AC5/AC7: Rotations-Formular (ausgeklappt) — nur root|alex mit Private-Key */}
+      {showRotation && isRotationSupported && hasPrivKey && (
+        <RotationForm
+          user={user}
+          onClose={() => setShowRotation(false)}
         />
       )}
 
@@ -2338,6 +2630,82 @@ const wsPathStyles = {
     fontSize: 13,
     cursor: 'pointer',
     minHeight: 44,
+  },
+};
+
+// ── RotationForm styles (ssh-key-rotation #119) ───────────────────────────────
+
+const rotationStyles = {
+  form: {
+    margin: '12px 0',
+    padding: '16px',
+    background: '#0d1117',
+    border: '1px solid #334155',
+    borderRadius: 6,
+  },
+  heading: {
+    margin: '0 0 6px',
+    fontSize: 14,
+    fontWeight: 700,
+    color: '#e5e7eb',
+  },
+  hint: {
+    margin: '0 0 14px',
+    fontSize: 12,
+    color: '#9ca3af',    // Kontrast ≥ 4.5:1 auf #0d1117
+    lineHeight: 1.4,
+  },
+  resultSuccess: {
+    marginTop: 10,
+    padding: '8px 12px',
+    background: '#052e16',
+    border: '1px solid #166534',
+    borderRadius: 4,
+    color: '#86efac',
+    fontSize: 13,
+  },
+  resultError: {
+    marginTop: 10,
+    padding: '8px 12px',
+    background: '#2d0f0f',
+    border: '1px solid #7f1d1d',
+    borderRadius: 4,
+    color: '#fca5a5',
+    fontSize: 13,
+  },
+  newPubKey: {
+    display: 'block',
+    marginTop: 8,
+    padding: '6px 10px',
+    background: '#0a1a0a',
+    border: '1px solid #166534',
+    borderRadius: 4,
+    fontSize: 11,
+    color: '#86efac',
+    fontFamily: 'monospace',
+    overflowX: 'auto',
+    whiteSpace: 'pre-wrap',
+    wordBreak: 'break-all',
+    maxHeight: 80,
+    overflowY: 'auto',
+  },
+  reason: {
+    display: 'block',
+    marginTop: 4,
+    fontSize: 12,
+    color: '#fca5a5',
+    fontStyle: 'italic',
+  },
+  btnRotate: {
+    padding: '8px 16px',
+    background: '#1e3a5f',    // dunkles Blau — Rotation ist privilegiert, aber nicht destruktiv
+    color: '#93c5fd',          // Kontrast auf #1e3a5f ≈ 5.5:1
+    border: '1px solid #2563eb',
+    borderRadius: 4,
+    fontSize: 13,
+    cursor: 'pointer',
+    minHeight: 44,
+    fontWeight: 600,
   },
 };
 
