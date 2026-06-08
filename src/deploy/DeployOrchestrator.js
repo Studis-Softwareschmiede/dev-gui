@@ -76,16 +76,19 @@ export class DeployOrchestrator {
    * AC4: route-step fails → container rolled back → { result: "error", reason }
    * AC7: protected hostname → { result: "error", reason: "protected-resource" }, no step
    *
+   * zoneId is NOT a parameter — it is resolved server-side from the hostname via
+   * CloudflareApi.resolveZoneForHostname() (longest-suffix match). No zone-not-found
+   * is leaked to the caller (400/422 zone-not-found reason only).
+   *
    * @param {object} params
    * @param {string} params.image    - ghcr image reference (e.g. "ghcr.io/org/app:v1")
    * @param {object} params.vps      - VpsTarget { host, port?, targetUser }
    * @param {string} params.hostname - target hostname (cloudflare tunnel route)
    * @param {string} params.tunnelId - Cloudflare tunnel ID to add the route to
-   * @param {string} params.zoneId   - Cloudflare zone ID for DNS record
    * @param {object} [params.dockerOpts] - additional VpsDockerControl options
    * @returns {Promise<DeployResult>}
    */
-  async deploy({ image, vps, hostname, tunnelId, zoneId, dockerOpts = {} }) {
+  async deploy({ image, vps, hostname, tunnelId, dockerOpts = {} }) {
     // AC7: LockoutGuard-Hard-Block — before any step
     if (this.#lockoutGuard.isProtected(hostname)) {
       return {
@@ -101,6 +104,25 @@ export class DeployOrchestrator {
         result: 'error',
         reason: 'Ungültiger Hostname',
         errorClass: 'validation-error',
+      };
+    }
+
+    // Resolve zoneId server-side via longest-suffix match (Spec-Gap-Resolution, O3 analogy)
+    let zoneId;
+    try {
+      zoneId = await this.#cloudflareApi.resolveZoneForHostname(hostname);
+    } catch (err) {
+      return {
+        result: 'error',
+        reason: 'Cloudflare nicht erreichbar — Zone konnte nicht aufgelöst werden',
+        errorClass: err?.errorClass ?? 'cloudflare-unavailable',
+      };
+    }
+    if (!zoneId) {
+      return {
+        result: 'error',
+        reason: 'zone-not-found',
+        errorClass: 'zone-not-found',
       };
     }
 
@@ -138,27 +160,34 @@ export class DeployOrchestrator {
       try {
         await this.#cloudflareApi.createDnsRecord(zoneId, hostname, tunnelId);
       } catch (dnsErr) {
-        // DNS record creation failure: rollback container and route
-        await this.#rollbackContainer(vps, containerId, dockerOpts);
+        // DNS record creation failure: rollback container and route (AC4)
+        const containerRollbackOk = await this.#rollbackContainer(vps, containerId, dockerOpts);
+        let routeRollbackOk = true;
         try {
           await this.#cloudflareApi.removeRoute(tunnelId, hostname);
         } catch {
-          // Best-effort route rollback — log internally but don't mask the original error
+          routeRollbackOk = false;
         }
+        const rollbackDetail = (!containerRollbackOk || !routeRollbackOk)
+          ? ' — Rollback fehlgeschlagen, Drift erwartet, Reconciliation greift'
+          : ' — Container und Route zurückgerollt';
         return {
           result: 'error',
-          reason: 'DNS-CNAME-Anlage fehlgeschlagen — Container und Route zurückgerollt',
+          reason: `DNS-CNAME-Anlage fehlgeschlagen${rollbackDetail}`,
           errorClass: dnsErr?.errorClass ?? 'error',
         };
       }
     } catch (routeErr) {
       // Route-step failed → rollback container (AC4)
-      await this.#rollbackContainer(vps, containerId, dockerOpts);
+      const containerRollbackOk = await this.#rollbackContainer(vps, containerId, dockerOpts);
+      const rollbackDetail = containerRollbackOk
+        ? ' — Container zurückgerollt'
+        : ' — Container-Rollback fehlgeschlagen, Drift erwartet, Reconciliation greift';
       return {
         result: 'error',
         reason: routeErr?.message
-          ? sanitizeReason(routeErr.message)
-          : 'Tunnel-Route-Anlage fehlgeschlagen — Container zurückgerollt',
+          ? `${sanitizeReason(routeErr.message)}${rollbackDetail}`
+          : `Tunnel-Route-Anlage fehlgeschlagen${rollbackDetail}`,
         errorClass: routeErr?.errorClass ?? 'error',
       };
     }
@@ -187,16 +216,18 @@ export class DeployOrchestrator {
    * AC6: missing/wrong confirm → { result: "error", reason: "confirmation-required" }
    * AC7: protected hostname → { result: "error", reason: "protected-resource" }
    *
+   * zoneId is resolved server-side via CloudflareApi.resolveZoneForHostname()
+   * (longest-suffix match). Not a caller parameter.
+   *
    * @param {object} params
    * @param {object} params.vps       - VpsTarget { host, port?, targetUser }
    * @param {string} params.hostname  - hostname to undeploy
    * @param {string} params.confirm   - must equal hostname (type-to-confirm)
    * @param {string} params.tunnelId  - Cloudflare tunnel ID
-   * @param {string} params.zoneId    - Cloudflare zone ID for DNS cleanup
    * @param {object} [params.dockerOpts]
    * @returns {Promise<UndeployResult>}
    */
-  async undeploy({ vps, hostname, confirm, tunnelId, zoneId, dockerOpts = {} }) {
+  async undeploy({ vps, hostname, confirm, tunnelId, dockerOpts = {} }) {
     // AC7: LockoutGuard-Hard-Block — before any step
     if (this.#lockoutGuard.isProtected(hostname)) {
       return {
@@ -215,6 +246,14 @@ export class DeployOrchestrator {
       };
     }
 
+    // Resolve zoneId server-side (best-effort — DNS cleanup is non-critical)
+    let zoneId = null;
+    try {
+      zoneId = await this.#cloudflareApi.resolveZoneForHostname(hostname);
+    } catch {
+      // DNS cleanup is best-effort — continue without zone
+    }
+
     // Step 1: Remove route (route-first, AC5)
     try {
       await this.#cloudflareApi.removeRoute(tunnelId, hostname);
@@ -226,11 +265,13 @@ export class DeployOrchestrator {
       };
     }
 
-    // Step 2: Remove DNS CNAME
-    try {
-      await this.#cloudflareApi.deleteDnsRecord(zoneId, hostname);
-    } catch {
-      // Best-effort DNS cleanup — continue to container removal
+    // Step 2: Remove DNS CNAME (best-effort — requires resolved zoneId)
+    if (zoneId) {
+      try {
+        await this.#cloudflareApi.deleteDnsRecord(zoneId, hostname);
+      } catch {
+        // Best-effort DNS cleanup — continue to container removal
+      }
     }
 
     // Step 3: Find container by label and rm it
@@ -345,17 +386,21 @@ export class DeployOrchestrator {
 
   /**
    * Best-effort container rollback (AC4).
-   * Errors are swallowed — rollback should not mask the original error.
+   * Returns true if rollback succeeded, false if rm itself failed.
+   * Errors are NOT re-thrown — rollback should not mask the original error,
+   * but the caller may use the return value to compose an honest reason (S1).
    *
    * @param {object} vps
    * @param {string} containerId
    * @param {object} dockerOpts
+   * @returns {Promise<boolean>} true on success, false on rollback failure
    */
   async #rollbackContainer(vps, containerId, dockerOpts) {
     try {
-      await this.#dockerControl.rm(vps, containerId, dockerOpts);
+      const result = await this.#dockerControl.rm(vps, containerId, dockerOpts);
+      return result.result === 'ok';
     } catch {
-      // Best-effort — ignore rollback errors
+      return false;
     }
   }
 }

@@ -77,20 +77,18 @@ async function request(app, method, path, body) {
   });
 }
 
-/** Standard deploy body */
+/** Standard deploy body — zoneId NOT included (resolved server-side) */
 const DEPLOY_BODY = {
   image: 'ghcr.io/org/app:v1',
   vps: 'vps-1',
   hostname: 'app.example.com',
   tunnelId: 'tunnel-abc-123',
-  zoneId: 'zone-def-456',
 };
 
-/** Standard undeploy body */
+/** Standard undeploy body — zoneId NOT included (resolved server-side) */
 const UNDEPLOY_BODY = {
   confirm: 'app.example.com',
   tunnelId: 'tunnel-abc-123',
-  zoneId: 'zone-def-456',
 };
 
 function makeOrchestratorStub({
@@ -373,6 +371,50 @@ describe('DELETE /api/deployments/:vps/:hostname', () => {
     expect(orch.undeploy).not.toHaveBeenCalled();
   });
 
+  it('AC9: Undeploy-Audit enthält image aus Container-Lookup', async () => {
+    const capturedAuditCommands = [];
+    const orch = makeOrchestratorStub({
+      listResult: {
+        deployments: [
+          { hostname: 'app.example.com', vps: '1.2.3.4', image: 'ghcr.io/org/app:v2', routePresent: true, containerPresent: true },
+        ],
+      },
+    });
+    const auditStore = new AuditStore();
+    const origRecord = auditStore.record.bind(auditStore);
+    auditStore.record = ({ command, ...rest }) => {
+      capturedAuditCommands.push(command);
+      return origRecord({ command, ...rest });
+    };
+
+    const app = makeApp({ orchestratorStub: orch, auditStore });
+    await request(app, 'DELETE', '/api/deployments/vps-1/app.example.com', UNDEPLOY_BODY);
+
+    // The first audit entry (Audit-First) must contain the image
+    const firstAudit = capturedAuditCommands[0];
+    expect(firstAudit).toContain('deploy:remove:');
+    expect(firstAudit).toContain('ghcr.io/org/app:v2');
+  });
+
+  it('AC9: Undeploy-Audit mit image:unknown wenn Container nicht auffindbar', async () => {
+    const capturedAuditCommands = [];
+    const orch = makeOrchestratorStub({
+      listResult: { deployments: [] }, // no container found
+    });
+    const auditStore = new AuditStore();
+    const origRecord = auditStore.record.bind(auditStore);
+    auditStore.record = ({ command, ...rest }) => {
+      capturedAuditCommands.push(command);
+      return origRecord({ command, ...rest });
+    };
+
+    const app = makeApp({ orchestratorStub: orch, auditStore });
+    await request(app, 'DELETE', '/api/deployments/vps-1/app.example.com', UNDEPLOY_BODY);
+
+    const firstAudit = capturedAuditCommands[0];
+    expect(firstAudit).toContain('image:unknown');
+  });
+
   it('400 bei fehlendem tunnelId im Body', async () => {
     const orch = makeOrchestratorStub();
     const app = makeApp({ orchestratorStub: orch, auditStore: new AuditStore() });
@@ -415,13 +457,40 @@ describe('DELETE /api/deployments/:vps/:hostname', () => {
 // ── Security: No secret in Response ──────────────────────────────────────────
 
 describe('deploymentsRouter — AC9: Kein Secret in Response', () => {
-  it('Cloudflare-Token erscheint nicht in GET-Response', async () => {
-    const cfToken = 'cf-secret-api-token-never-in-response-12345';
-    const deployments = [{ hostname: 'app.example.com', routePresent: true, containerPresent: true }];
-    const orch = makeOrchestratorStub({ listResult: { deployments } });
+  it('Cloudflare-Token erscheint nicht in GET-Response (token embedded in error reason via orchestrator)', async () => {
+    // Token injected into a simulated error reason from the orchestrator.
+    // The router must sanitize it before returning — token must NOT appear in any response property.
+    const cfToken = 'Bearer cf-secret-live-token-deadbeef12345678';
+    const orch = {
+      deploy: jest.fn(),
+      undeploy: jest.fn(),
+      // listDeployments throws an error whose message contains the token
+      listDeployments: jest.fn(async () => {
+        throw Object.assign(
+          new Error(`Cloudflare call failed: ${cfToken}`),
+          { errorClass: 'cloudflare-auth-failed' },
+        );
+      }),
+    };
     const app = makeApp({ orchestratorStub: orch, auditStore: new AuditStore() });
 
     const res = await request(app, 'GET', '/api/deployments?vps=vps-1&tunnelId=tun-abc');
-    expect(JSON.stringify(res.body)).not.toContain(cfToken);
+    // The router catches the throw and returns a generic 502 — token must not leak
+    const bodyStr = JSON.stringify(res.body);
+    expect(bodyStr).not.toContain('cf-secret-live-token-deadbeef12345678');
+    expect(bodyStr).not.toContain('Bearer cf-secret');
+  });
+
+  it('SSH-Private-Key erscheint nicht in POST-Response (key embedded in deploy error reason)', async () => {
+    const pemDummy = '-----BEGIN OPENSSH PRIVATE KEY-----\nSECRET_KEY_DATA\n-----END OPENSSH PRIVATE KEY-----';
+    const orch = makeOrchestratorStub({
+      deployResult: { result: 'error', reason: `deploy failed: ${pemDummy}`, errorClass: 'error' },
+    });
+    const app = makeApp({ orchestratorStub: orch, auditStore: new AuditStore() });
+
+    const res = await request(app, 'POST', '/api/deployments', DEPLOY_BODY);
+    const bodyStr = JSON.stringify(res.body);
+    expect(bodyStr).not.toContain('SECRET_KEY_DATA');
+    expect(bodyStr).not.toContain('PRIVATE KEY');
   });
 });

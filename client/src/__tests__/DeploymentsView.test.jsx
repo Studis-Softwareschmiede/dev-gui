@@ -55,6 +55,7 @@ function makeFetchError(status, body) {
 }
 
 // Fill and submit the deploy form
+// zoneId is no longer in the form (resolved server-side from hostname)
 async function fillAndSubmitDeployForm(getByLabelText, getByRole) {
   await act(async () => {
     fireEvent.change(getByLabelText(/Docker-Image/i), { target: { value: 'ghcr.io/org/app:v1' } });
@@ -62,7 +63,6 @@ async function fillAndSubmitDeployForm(getByLabelText, getByRole) {
     fireEvent.change(getByLabelText(/VPS-ID/i, { selector: '#deploy-vps' }), { target: { value: 'vps-1' } });
     fireEvent.change(getByLabelText(/Ziel-Hostname/i), { target: { value: 'app.example.com' } });
     fireEvent.change(getByLabelText(/Cloudflare Tunnel-ID/i), { target: { value: 'tunnel-123' } });
-    fireEvent.change(getByLabelText(/Cloudflare Zone-ID/i), { target: { value: 'zone-456' } });
   });
   await act(async () => {
     fireEvent.submit(getByRole('form', { name: /Deploy-Formular/i }));
@@ -91,7 +91,7 @@ describe('DeploymentsView — A11y: Landmarks & Heading', () => {
     expect(container.querySelector('#deploy-vps')).toBeTruthy();
     expect(getByLabelText(/Ziel-Hostname/i)).toBeTruthy();
     expect(getByLabelText(/Cloudflare Tunnel-ID/i)).toBeTruthy();
-    expect(getByLabelText(/Cloudflare Zone-ID/i)).toBeTruthy();
+    // Zone-ID is resolved server-side — no Zone-ID input in the deploy form
   });
 
   it('Deploy-starten button has minHeight >= 44px (touch target)', () => {
@@ -148,7 +148,7 @@ describe('DeploymentsView — Deploy form: initial state', () => {
       fireEvent.change(getByLabelText(/VPS-ID/i, { selector: '#deploy-vps' }), { target: { value: 'vps-1' } });
       fireEvent.change(getByLabelText(/Ziel-Hostname/i), { target: { value: 'app.example.com' } });
       fireEvent.change(getByLabelText(/Cloudflare Tunnel-ID/i), { target: { value: 'tunnel-123' } });
-      fireEvent.change(getByLabelText(/Cloudflare Zone-ID/i), { target: { value: 'zone-456' } });
+      // Zone-ID no longer in form — resolved server-side
     });
     const btn = getByRole('button', { name: /Deploy starten/i });
     expect(btn.disabled).toBe(false);
@@ -191,7 +191,7 @@ describe('DeploymentsView — AC3: Deploy happy path', () => {
     });
   });
 
-  it('sends correct JSON body (image, vps, hostname, tunnelId, zoneId)', async () => {
+  it('sends correct JSON body (image, vps, hostname, tunnelId) — no zoneId (resolved server-side)', async () => {
     let capturedBody;
     globalThis.fetch = jest.fn(async (url, init) => {
       if (init?.method === 'POST') capturedBody = JSON.parse(init.body);
@@ -206,8 +206,9 @@ describe('DeploymentsView — AC3: Deploy happy path', () => {
       vps: 'vps-1',
       hostname: 'app.example.com',
       tunnelId: 'tunnel-123',
-      zoneId: 'zone-456',
     });
+    // zoneId must NOT be in the POST body
+    expect(capturedBody).not.toHaveProperty('zoneId');
   });
 });
 
@@ -381,7 +382,7 @@ describe('DeploymentsView — AC5/AC6: Undeploy type-to-confirm', () => {
     expect(submitBtn.disabled).toBe(true);
   });
 
-  it('AC6: submit enabled when confirm === hostname AND zoneId filled', async () => {
+  it('AC6: submit enabled when confirm === hostname (zoneId no longer required — server-side)', async () => {
     const utils = renderWithDeployments();
     await loadDeployments(utils);
 
@@ -390,9 +391,6 @@ describe('DeploymentsView — AC5/AC6: Undeploy type-to-confirm', () => {
     });
 
     await act(async () => {
-      fireEvent.change(utils.getByLabelText(/Zone-ID für Undeploy/i), {
-        target: { value: 'zone-abc' },
-      });
       fireEvent.change(utils.getByLabelText(/Hostname myapp\.example\.com bestätigen/i), {
         target: { value: 'myapp.example.com' },
       });
@@ -454,9 +452,8 @@ describe('DeploymentsView — AC5/AC6: Undeploy type-to-confirm', () => {
       fireEvent.click(utils.getByRole('button', { name: /Deployment myapp\.example\.com entfernen/i }));
     });
 
-    // Fill zone and confirm
+    // Fill confirm — Zone-ID no longer in undeploy form (server-side resolved)
     await act(async () => {
-      fireEvent.change(utils.getByLabelText(/Zone-ID für Undeploy/i), { target: { value: 'zone-xyz' } });
       fireEvent.change(utils.getByLabelText(/Hostname myapp\.example\.com bestätigen/i), {
         target: { value: 'myapp.example.com' },
       });
@@ -476,8 +473,9 @@ describe('DeploymentsView — AC5/AC6: Undeploy type-to-confirm', () => {
     expect(deleteCall.body).toMatchObject({
       confirm: 'myapp.example.com',
       tunnelId: 'tunnel-abc',
-      zoneId: 'zone-xyz',
     });
+    // zoneId must NOT be in the DELETE body
+    expect(deleteCall.body).not.toHaveProperty('zoneId');
   });
 });
 

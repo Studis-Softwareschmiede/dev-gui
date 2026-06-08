@@ -223,6 +223,42 @@ export class CloudflareApi {
     return routes;
   }
 
+  // ── Zone resolution ─────────────────────────────────────────────────────────
+
+  /**
+   * Resolve the Cloudflare Zone ID for a given hostname by longest-suffix match.
+   *
+   * Algorithm: list all accessible zones, find the zone whose name is the longest
+   * suffix of the hostname (e.g. "app.example.com" → zone "example.com").
+   * Returns null if no zone matches (caller should surface a 400/422 zone-not-found).
+   *
+   * The zone ID is never cached (ADR-010 — per-request credential resolution).
+   * No zone-name or zone-id is leaked into error messages (security/R01).
+   *
+   * @param {string} hostname - Full hostname (e.g. "app.example.com")
+   * @returns {Promise<string|null>} The matching zone ID, or null if no zone matches.
+   * @throws {CloudflareApiError} on auth failure or Cloudflare API error.
+   */
+  async resolveZoneForHostname(hostname) {
+    const { zones } = await this.listZones();
+
+    // Find the zone whose name is the longest suffix of the hostname
+    let bestZone = null;
+    let bestLen = 0;
+
+    for (const zone of zones) {
+      const zoneName = zone.name ?? '';
+      // Accept exact match or suffix match (.zoneName)
+      const isSuffix = hostname === zoneName || hostname.endsWith(`.${zoneName}`);
+      if (isSuffix && zoneName.length > bestLen) {
+        bestZone = zone;
+        bestLen = zoneName.length;
+      }
+    }
+
+    return bestZone ? bestZone.id : null;
+  }
+
   // ── Mutate API (ADR-010/011, #108/#110) ─────────────────────────────────────
 
   /**

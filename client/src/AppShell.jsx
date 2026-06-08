@@ -146,6 +146,9 @@ function NavBar({ currentView, onNavigate }) {
 /**
  * EntryPanel — the landing/home screen with four tiles (AC1).
  *
+ * Deployments and other extra-nav views are listed as text links below the tiles
+ * so they are reachable from the panel without adding a fifth tile (app-shell-navigation AC1).
+ *
  * @param {{ onNavigate: (view: string) => void }} props
  */
 function EntryPanel({ onNavigate }) {
@@ -166,6 +169,23 @@ function EntryPanel({ onNavigate }) {
           />
         ))}
       </div>
+
+      {/* Extra views: text links below the four tiles (not a fifth tile — app-shell-navigation AC1) */}
+      <nav style={styles.extraNav} aria-label="Weitere Ansichten">
+        {EXTRA_NAV.map(({ id, label }) => (
+          <a
+            key={id}
+            href={`#/${id}`}
+            style={styles.extraNavLink}
+            onClick={(e) => {
+              e.preventDefault();
+              onNavigate(id);
+            }}
+          >
+            {label}
+          </a>
+        ))}
+      </nav>
     </main>
   );
 }
@@ -401,5 +421,26 @@ const styles = {
     fontSize: 13,
     color: '#9ca3af',
     lineHeight: 1.5,
+  },
+
+  // ── Extra nav links (below tiles on panel)
+  extraNav: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 24,
+    justifyContent: 'center',
+  },
+  extraNavLink: {
+    padding: '8px 16px',
+    color: '#9ca3af',
+    textDecoration: 'none',
+    fontSize: 13,
+    borderRadius: 4,
+    border: '1px solid #2a2a2a',
+    background: '#111',
+    minHeight: 36,
+    display: 'inline-flex',
+    alignItems: 'center',
   },
 };

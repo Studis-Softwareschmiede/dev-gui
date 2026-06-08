@@ -61,6 +61,7 @@ function checkMutationAuthz(identity) {
 
 /**
  * Validates the POST /api/deployments request body.
+ * zoneId is NOT in the body — resolved server-side from hostname (Spec-Gap-Resolution).
  *
  * @param {unknown} body
  * @returns {{ ok: boolean, params?: object, error?: string }}
@@ -70,7 +71,7 @@ function validateDeployBody(body) {
     return { ok: false, error: 'Request-Body ist Pflicht' };
   }
 
-  const { image, vps, hostname, tunnelId, zoneId } = body;
+  const { image, vps, hostname, tunnelId } = body;
 
   if (typeof image !== 'string' || !image.trim()) {
     return { ok: false, error: 'image ist ein Pflichtfeld' };
@@ -100,13 +101,6 @@ function validateDeployBody(body) {
     return { ok: false, error: `tunnelId überschreitet Längenlimit` };
   }
 
-  if (typeof zoneId !== 'string' || !zoneId.trim()) {
-    return { ok: false, error: 'zoneId ist ein Pflichtfeld' };
-  }
-  if (zoneId.trim().length > MAX_FIELD_LEN) {
-    return { ok: false, error: `zoneId überschreitet Längenlimit` };
-  }
-
   return {
     ok: true,
     params: {
@@ -114,13 +108,13 @@ function validateDeployBody(body) {
       vps: vps.trim(),
       hostname: hostname.trim(),
       tunnelId: tunnelId.trim(),
-      zoneId: zoneId.trim(),
     },
   };
 }
 
 /**
  * Validates the DELETE /api/deployments/:vps/:hostname request params and body.
+ * zoneId is NOT required in the body — resolved server-side from hostname.
  *
  * @param {object} params - Express route params
  * @param {unknown} body  - Request body
@@ -143,13 +137,9 @@ function validateUndeployParams(params, body) {
 
   const confirm = body?.confirm;
   const tunnelId = body?.tunnelId;
-  const zoneId = body?.zoneId;
 
   if (typeof tunnelId !== 'string' || !tunnelId.trim()) {
     return { ok: false, error: 'tunnelId ist ein Pflichtfeld im Body' };
-  }
-  if (typeof zoneId !== 'string' || !zoneId.trim()) {
-    return { ok: false, error: 'zoneId ist ein Pflichtfeld im Body' };
   }
 
   return {
@@ -159,7 +149,6 @@ function validateUndeployParams(params, body) {
       hostname: hostnameParam.trim(),
       confirm: typeof confirm === 'string' ? confirm : '',
       tunnelId: tunnelId.trim(),
-      zoneId: zoneId.trim(),
     },
   };
 }
@@ -222,14 +211,15 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets) {
    * Deploy: ghcr-Image → Container + Tunnel-Route + DNS-CNAME (atomare Saga).
    * MUTATION: Audit-First + Identitäts-/Rollenschutz (AC8/AC9).
    *
-   * Body: { image, vps, hostname, tunnelId, zoneId }
+   * Body: { image, vps, hostname, tunnelId }
+   *   — zoneId is resolved server-side from hostname (Spec-Gap-Resolution)
    *
    * Responses:
    *   200 { result: "ok", deployment }
    *   400 { error }           — Validierungsfehler
    *   403 { error }           — nicht in CRED_ADMIN_EMAILS
    *   422 { result: "error", reason: "protected-resource" }  — LockoutGuard (AC7)
-   *   422 { result: "error", reason: "confirmation-required" }
+   *   422 { result: "error", reason: "zone-not-found" }      — kein Zone-Match
    *   500 { error }           — Audit-Write fehlgeschlagen
    *   502 { result: "error", reason }  — SSH/Cloudflare-Fehler
    */
@@ -247,7 +237,7 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets) {
     if (!bodyVal.ok) {
       return res.status(400).json({ error: bodyVal.error });
     }
-    const { image, vps: vpsId, hostname, tunnelId, zoneId } = bodyVal.params;
+    const { image, vps: vpsId, hostname, tunnelId } = bodyVal.params;
 
     // Resolve VPS target
     const vpsTarget = vpsTargets.get(vpsId);
@@ -264,7 +254,7 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets) {
       return res.status(500).json({ error: 'Audit-Write fehlgeschlagen — Aktion abgebrochen' });
     }
 
-    // Execute deploy saga
+    // Execute deploy saga (zoneId resolved server-side in DeployOrchestrator)
     let result;
     try {
       result = await orchestrator.deploy({
@@ -272,7 +262,6 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets) {
         vps: vpsTarget,
         hostname,
         tunnelId,
-        zoneId,
       });
     } catch (err) {
       const errorClass = err?.errorClass ?? 'error';
@@ -303,6 +292,9 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets) {
       if (errorClass === 'confirmation-required') {
         return res.status(422).json({ result: 'error', reason: 'confirmation-required' });
       }
+      if (errorClass === 'zone-not-found') {
+        return res.status(422).json({ result: 'error', reason: 'zone-not-found' });
+      }
       if (errorClass === 'validation-error') {
         return res.status(400).json({ result: 'error', reason });
       }
@@ -327,7 +319,8 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets) {
    * Undeploy: remove Route+DNS → Container rm.
    * MUTATION: Audit-First + Identitäts-/Rollenschutz + type-to-confirm (AC5/AC6/AC8/AC9).
    *
-   * Body: { confirm: "<hostname>", tunnelId, zoneId }
+   * Body: { confirm: "<hostname>", tunnelId }
+   *   — zoneId is resolved server-side from hostname (Spec-Gap-Resolution)
    *
    * Responses:
    *   200 { result: "ok" }
@@ -352,7 +345,7 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets) {
     if (!paramsVal.ok) {
       return res.status(400).json({ error: paramsVal.error });
     }
-    const { vps: vpsId, hostname, confirm, tunnelId, zoneId } = paramsVal.params;
+    const { vps: vpsId, hostname, confirm, tunnelId } = paramsVal.params;
 
     // Resolve VPS target
     const vpsTarget = vpsTargets.get(vpsId);
@@ -360,8 +353,23 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets) {
       return res.status(422).json({ error: `Unbekannter VPS: ${vpsId}` });
     }
 
+    // AC9: Audit-First — look up container image BEFORE audit to embed in audit string (AC9).
+    // If container not found → use 'image:unknown'. Audit stays before mutation.
+    let imageForAudit = 'image:unknown';
+    try {
+      const listResult = await orchestrator.listDeployments({ vps: vpsTarget, tunnelId });
+      if (listResult.deployments) {
+        const found = listResult.deployments.find((d) => d.hostname === hostname);
+        if (found?.image) {
+          imageForAudit = found.image;
+        }
+      }
+    } catch {
+      // Best-effort image lookup — audit proceeds with 'image:unknown'
+    }
+
     // AC9: Audit-First — VOR der Mutation; Token/Key NICHT im Audit
-    const auditAction = `deploy:remove:${vpsId}:${hostname}`;
+    const auditAction = `deploy:remove:${vpsId}:${hostname}:${imageForAudit}`;
     try {
       auditStore.record({ identity: identity?.email ?? null, command: auditAction });
     } catch (auditErr) {
@@ -369,7 +377,7 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets) {
       return res.status(500).json({ error: 'Audit-Write fehlgeschlagen — Aktion abgebrochen' });
     }
 
-    // Execute undeploy
+    // Execute undeploy (zoneId resolved server-side in DeployOrchestrator)
     let result;
     try {
       result = await orchestrator.undeploy({
@@ -377,7 +385,6 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets) {
         hostname,
         confirm,
         tunnelId,
-        zoneId,
       });
     } catch (err) {
       const errorClass = err?.errorClass ?? 'error';
@@ -414,7 +421,7 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets) {
     try {
       auditStore.record({
         identity: identity?.email ?? null,
-        command: `deploy:remove:${vpsId}:${hostname}:success`,
+        command: `deploy:remove:${vpsId}:${hostname}:${imageForAudit}:success`,
       });
     } catch { /* ignore */ }
 

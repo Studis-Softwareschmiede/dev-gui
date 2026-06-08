@@ -5,8 +5,10 @@
  *
  * Responsibilities:
  *   - List live deployments (Container↔Route as unit) — GET /api/deployments
- *   - Deploy form: image + vps + hostname + tunnelId + zoneId → POST /api/deployments
+ *   - Deploy form: image + vps + hostname + tunnelId → POST /api/deployments
+ *     (zoneId resolved server-side from hostname — not in the form)
  *   - Undeploy with type-to-confirm → DELETE /api/deployments/:vps/:hostname (AC5/AC6)
+ *     (zoneId resolved server-side — not in the undeploy form)
  *   - Show 422/protected-resource / 422/confirmation-required clearly (no secrets) (AC7)
  *   - No Cloudflare token or SSH key in frontend bundle (AC9)
  *
@@ -33,14 +35,14 @@ const INITIAL_DEPLOY_FORM = {
   vps: '',
   hostname: '',
   tunnelId: '',
-  zoneId: '',
+  // zoneId is NOT in the form — resolved server-side from hostname (Spec-Gap-Resolution)
 };
 
 const INITIAL_UNDEPLOY_STATE = {
   hostname: '',
   vps: '',
   tunnelId: '',
-  zoneId: '',
+  // zoneId is NOT in the undeploy form — resolved server-side from hostname
   confirm: '',
 };
 
@@ -134,14 +136,15 @@ export function DeploymentsView({ onNavigate }) {
     if (!undeployState) return;
     setUndeploying(true);
     setUndeployResult(null);
-    const { vps, hostname, tunnelId, zoneId, confirm } = undeployState;
+    const { vps, hostname, tunnelId, confirm } = undeployState;
+    // zoneId is resolved server-side — not sent from the client
     try {
       const res = await fetch(
         `/api/deployments/${encodeURIComponent(vps)}/${encodeURIComponent(hostname)}`,
         {
           method: 'DELETE',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ confirm, tunnelId, zoneId }),
+          body: JSON.stringify({ confirm, tunnelId }),
         },
       );
       const data = await res.json();
@@ -255,7 +258,7 @@ export function DeploymentsView({ onNavigate }) {
                             hostname: d.hostname,
                             vps: d.vps ?? listVps,
                             tunnelId: listTunnelId,
-                            zoneId: deployForm.zoneId || '',
+                            // zoneId not needed — resolved server-side
                             confirm: '',
                           });
                           setUndeployResult(null);
@@ -279,19 +282,7 @@ export function DeploymentsView({ onNavigate }) {
               Hostname zum Bestätigen eintippen (AC6 — type-to-confirm):
             </p>
             <form onSubmit={handleUndeploy} noValidate>
-              <div style={styles.row}>
-                <label style={styles.label} htmlFor="undeploy-zone">Zone-ID</label>
-                <input
-                  id="undeploy-zone"
-                  type="text"
-                  style={styles.input}
-                  value={undeployState.zoneId}
-                  onChange={(e) => setUndeployState((s) => ({ ...s, zoneId: e.target.value }))}
-                  placeholder="Cloudflare Zone-ID"
-                  required
-                  aria-label="Zone-ID für Undeploy"
-                />
-              </div>
+              {/* Zone-ID is resolved server-side from hostname — not required here */}
               <div style={styles.row}>
                 <label style={styles.label} htmlFor="undeploy-confirm">Hostname bestätigen</label>
                 <input
@@ -327,8 +318,7 @@ export function DeploymentsView({ onNavigate }) {
                   style={styles.btnDanger}
                   disabled={
                     undeploying ||
-                    undeployState.confirm !== undeployState.hostname ||
-                    !undeployState.zoneId.trim()
+                    undeployState.confirm !== undeployState.hostname
                   }
                   aria-busy={undeploying}
                 >
@@ -402,19 +392,7 @@ export function DeploymentsView({ onNavigate }) {
                 aria-label="Cloudflare Tunnel-ID"
               />
             </div>
-            <div style={styles.row}>
-              <label style={styles.label} htmlFor="deploy-zone">Zone-ID</label>
-              <input
-                id="deploy-zone"
-                type="text"
-                style={styles.input}
-                value={deployForm.zoneId}
-                onChange={(e) => setDeployForm((f) => ({ ...f, zoneId: e.target.value }))}
-                placeholder="Cloudflare Zone-ID"
-                required
-                aria-label="Cloudflare Zone-ID"
-              />
-            </div>
+            {/* Zone-ID is resolved server-side from hostname — not in the form */}
 
             {deployResult && (
               <div
@@ -436,8 +414,8 @@ export function DeploymentsView({ onNavigate }) {
                 !deployForm.image.trim() ||
                 !deployForm.vps.trim() ||
                 !deployForm.hostname.trim() ||
-                !deployForm.tunnelId.trim() ||
-                !deployForm.zoneId.trim()
+                !deployForm.tunnelId.trim()
+                // zoneId not required — resolved server-side
               }
               aria-busy={deploying}
             >

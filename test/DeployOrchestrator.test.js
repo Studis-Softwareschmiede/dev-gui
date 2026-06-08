@@ -51,6 +51,8 @@ function makeCloudflareApi({
   listRoutesResult = [],
   listRoutesError = null,
   isProtectedFn = () => false,
+  resolvedZoneId = 'zone-resolved-abc',  // default resolved zone
+  resolveZoneError = null,
 } = {}) {
   return {
     addRoute: jest.fn(async () => {
@@ -74,6 +76,10 @@ function makeCloudflareApi({
       return listRoutesResult;
     }),
     isProtected: jest.fn(isProtectedFn),
+    resolveZoneForHostname: jest.fn(async () => {
+      if (resolveZoneError) throw resolveZoneError;
+      return resolvedZoneId;
+    }),
   };
 }
 
@@ -86,13 +92,12 @@ function makeLockoutGuard(isProtectedResult = false) {
   };
 }
 
-/** Standard deploy params (safe, not protected). */
+/** Standard deploy params (safe, not protected) — zoneId NOT included (resolved server-side). */
 const DEPLOY_PARAMS = {
   image: 'ghcr.io/org/app:v1',
   vps: { host: '1.2.3.4', port: 22, targetUser: 'root' },
   hostname: 'app.example.com',
   tunnelId: 'tunnel-abc-123',
-  zoneId: 'zone-abc-def-456',
 };
 
 const UNDEPLOY_PARAMS = {
@@ -100,7 +105,6 @@ const UNDEPLOY_PARAMS = {
   hostname: 'app.example.com',
   confirm: 'app.example.com',
   tunnelId: 'tunnel-abc-123',
-  zoneId: 'zone-abc-def-456',
 };
 
 // ── Constructor ────────────────────────────────────────────────────────────────
@@ -290,6 +294,22 @@ describe('DeployOrchestrator — deploy() — AC4: Rollback', () => {
     // removeRoute should be attempted as rollback
     expect(cf.removeRoute).toHaveBeenCalled();
   });
+
+  it('S1: Route-Schritt schlägt fehl, Rollback-rm schlägt fehl → reason nennt Drift ehrlich', async () => {
+    const docker = makeDockerControl({
+      psResult: { result: 'ok', containers: [] },
+      rmResult: { result: 'error', reason: 'SSH timeout', errorClass: 'unreachable' },
+    });
+    const routeError = Object.assign(new Error('Cloudflare down'), { errorClass: 'cloudflare-unavailable' });
+    const cf = makeCloudflareApi({ addRouteError: routeError });
+
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.result).toBe('error');
+    // reason must mention Drift/Reconciliation (honest rollback failure)
+    expect(result.reason).toMatch(/rollback fehlgeschlagen|reconciliation/i);
+  });
 });
 
 // ── deploy() — AC7: LockoutGuard ──────────────────────────────────────────────
@@ -309,6 +329,52 @@ describe('DeployOrchestrator — deploy() — AC7: LockoutGuard', () => {
     expect(docker.pull).not.toHaveBeenCalled();
     expect(docker.run).not.toHaveBeenCalled();
     expect(cf.addRoute).not.toHaveBeenCalled();
+  });
+});
+
+// ── deploy() — zoneId server-side resolution ──────────────────────────────────
+
+describe('DeployOrchestrator — deploy() — zoneId Server-Auflösung', () => {
+  it('zone-not-found: resolveZoneForHostname gibt null zurück → result:error, reason:zone-not-found', async () => {
+    const docker = makeDockerControl({ psResult: { result: 'ok', containers: [] } });
+    const cf = makeCloudflareApi({ resolvedZoneId: null });
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('zone-not-found');
+    // No docker or Cloudflare mutation steps called
+    expect(docker.pull).not.toHaveBeenCalled();
+    expect(cf.addRoute).not.toHaveBeenCalled();
+  });
+
+  it('zone-not-found: resolveZoneForHostname wirft → result:error, kein Secret-Leak', async () => {
+    const docker = makeDockerControl({ psResult: { result: 'ok', containers: [] } });
+    const cfErr = Object.assign(new Error('Cloudflare auth failed'), { errorClass: 'cloudflare-auth-failed' });
+    const cf = makeCloudflareApi({ resolveZoneError: cfErr });
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.result).toBe('error');
+    expect(docker.pull).not.toHaveBeenCalled();
+  });
+
+  it('zone aufgelöst → createDnsRecord wird mit aufgelöster zoneId aufgerufen', async () => {
+    const resolvedZone = 'resolved-zone-id-xyz';
+    const docker = makeDockerControl({ psResult: { result: 'ok', containers: [] } });
+    const cf = makeCloudflareApi({ resolvedZoneId: resolvedZone });
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    await orch.deploy(DEPLOY_PARAMS);
+
+    // createDnsRecord must have been called with the resolved zone ID
+    expect(cf.createDnsRecord).toHaveBeenCalledWith(
+      resolvedZone,
+      DEPLOY_PARAMS.hostname,
+      DEPLOY_PARAMS.tunnelId,
+    );
   });
 });
 
