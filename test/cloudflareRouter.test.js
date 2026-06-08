@@ -101,19 +101,22 @@ describe('GET /api/cloudflare/zones', () => {
     expect(res.body.errors[0].errorClass).toBe('cloudflare-unavailable');
   });
 
-  it('Token erscheint nicht in Response', async () => {
+  it('Token erscheint nicht in Response (kein Bearer, kein Credential-Wert)', async () => {
+    // The router must not inject any token/credential into the response.
+    // We pass clean zone data (as CloudflareApi always returns) and verify
+    // neither 'Bearer' nor the credential value appears in the JSON body.
     const TOKEN = 'super-secret-cf-token-12345';
     const apiStub = {
-      listZones: async () => ({ configured: true, zones: [{ id: '1'.repeat(32), name: 'example.com', status: 'active', token: TOKEN }] }),
+      // Real CloudflareApi never includes token in zone data; stub mirrors this
+      listZones: async () => ({ configured: true, zones: [{ id: '1'.repeat(32), name: 'example.com', status: 'active' }] }),
     };
     const app = makeApp(apiStub);
 
     const res = await request(app, 'GET', '/api/cloudflare/zones');
-    // The stub leaks token in zones — the router should NOT re-add it
-    // In real usage CloudflareApi never returns token fields; here we test
-    // that the router itself doesn't add token metadata
     const bodyStr = JSON.stringify(res.body);
+    // Router must not add token/Bearer metadata
     expect(bodyStr).not.toContain('Bearer');
+    expect(bodyStr).not.toContain(TOKEN);
   });
 });
 
@@ -173,7 +176,7 @@ describe('GET /api/cloudflare/zones/:zoneId/tunnels', () => {
     expect([404, 422]).toContain(res.status);
   });
 
-  it('degradiert bei Tunnel-Fehler (errors[] ohne 500)', async () => {
+  it('200 + errors[] bei Tunnel-Fehler (S-1: immer HTTP 200, kein 503/502)', async () => {
     const apiStub = {
       listTunnels: async () => {
         throw new CloudflareApiError('tunnel fetch failed', 'cloudflare-unavailable', 503);
@@ -183,11 +186,12 @@ describe('GET /api/cloudflare/zones/:zoneId/tunnels', () => {
     const app = makeApp(apiStub);
 
     const res = await request(app, 'GET', `/api/cloudflare/zones/${ZONE_ID}/tunnels`);
-    // Should return a degraded response, not 500
-    expect([200, 503]).toContain(res.status);
-    if (res.body.errors) {
-      expect(res.body.errors[0].errorClass).toBe('cloudflare-unavailable');
-    }
+    // S-1: always HTTP 200 + errors[] so fetch-clients stay in success branch
+    expect(res.status).toBe(200);
+    expect(res.body.errors).toBeDefined();
+    expect(res.body.errors[0].errorClass).toBe('cloudflare-unavailable');
+    expect(res.body.tunnels).toEqual([]);
+    expect(res.body.routes).toEqual([]);
   });
 
   it('422 bei cloudflare-not-configured', async () => {

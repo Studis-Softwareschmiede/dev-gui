@@ -412,6 +412,131 @@ describe('CloudflareApi — AbortController-Timeout', () => {
   });
 });
 
+// ── Tests: Pagination (I-1) ───────────────────────────────────────────────────
+
+describe('CloudflareApi — Pagination (I-1)', () => {
+  it('listZones() aggregiert alle Seiten bei mehrseitiger Antwort', async () => {
+    const zone1 = { id: 'aaa' + '0'.repeat(29), name: 'page1.com', status: 'active' };
+    const zone2 = { id: 'bbb' + '0'.repeat(29), name: 'page2.com', status: 'active' };
+
+    let callCount = 0;
+    const api = new CloudflareApi({
+      credentialStore: makeConfiguredStore(),
+      fetchFn: async (_url, _init) => {
+        callCount++;
+        if (callCount === 1) {
+          return makeFetchResponse(200, {
+            success: true,
+            result: [zone1],
+            result_info: { page: 1, per_page: 50, total_pages: 2, count: 1, total_count: 2 },
+          });
+        }
+        return makeFetchResponse(200, {
+          success: true,
+          result: [zone2],
+          result_info: { page: 2, per_page: 50, total_pages: 2, count: 1, total_count: 2 },
+        });
+      },
+    });
+
+    const result = await api.listZones();
+    expect(result.configured).toBe(true);
+    expect(result.zones).toHaveLength(2);
+    expect(result.zones[0].name).toBe('page1.com');
+    expect(result.zones[1].name).toBe('page2.com');
+    expect(callCount).toBe(2);
+  });
+
+  it('listZones() hält bei total_pages=1 nach einer Seite an', async () => {
+    let callCount = 0;
+    const api = new CloudflareApi({
+      credentialStore: makeConfiguredStore(),
+      fetchFn: async (_url, _init) => {
+        callCount++;
+        return makeFetchResponse(200, {
+          success: true,
+          result: [RAW_ZONE],
+          result_info: { page: 1, per_page: 50, total_pages: 1, count: 1, total_count: 1 },
+        });
+      },
+    });
+
+    const result = await api.listZones();
+    expect(result.zones).toHaveLength(1);
+    expect(callCount).toBe(1);
+  });
+
+  it('listZones() respektiert Safety-Cap (max 20 Seiten)', async () => {
+    let callCount = 0;
+    const api = new CloudflareApi({
+      credentialStore: makeConfiguredStore(),
+      fetchFn: async (_url, _init) => {
+        callCount++;
+        return makeFetchResponse(200, {
+          success: true,
+          result: [RAW_ZONE],
+          result_info: { page: callCount, per_page: 50, total_pages: 9999, count: 1, total_count: 9999 },
+        });
+      },
+    });
+
+    const result = await api.listZones();
+    // Must not exceed 20 pages (PAGINATION_MAX_PAGES)
+    expect(callCount).toBeLessThanOrEqual(20);
+    expect(result.zones).toHaveLength(callCount); // one zone per page
+  });
+
+  it('listTunnels() aggregiert alle Seiten bei mehrseitiger Antwort', async () => {
+    const tunnel1 = { id: 'tun-page1', name: 'tunnel-1', status: 'active' };
+    const tunnel2 = { id: 'tun-page2', name: 'tunnel-2', status: 'active' };
+
+    let callCount = 0;
+    const api = new CloudflareApi({
+      credentialStore: makeConfiguredStore(),
+      fetchFn: async (_url, _init) => {
+        callCount++;
+        if (callCount === 1) {
+          return makeFetchResponse(200, {
+            success: true,
+            result: [tunnel1],
+            result_info: { page: 1, per_page: 50, total_pages: 2, count: 1, total_count: 2 },
+          });
+        }
+        return makeFetchResponse(200, {
+          success: true,
+          result: [tunnel2],
+          result_info: { page: 2, per_page: 50, total_pages: 2, count: 1, total_count: 2 },
+        });
+      },
+    });
+
+    const tunnels = await api.listTunnels('zone-test-id');
+    expect(tunnels).toHaveLength(2);
+    expect(tunnels[0].id).toBe('tun-page1');
+    expect(tunnels[1].id).toBe('tun-page2');
+    expect(callCount).toBe(2);
+  });
+
+  it('listTunnels() respektiert Safety-Cap (max 20 Seiten)', async () => {
+    let callCount = 0;
+    const api = new CloudflareApi({
+      credentialStore: makeConfiguredStore(),
+      fetchFn: async (_url, _init) => {
+        callCount++;
+        return makeFetchResponse(200, {
+          success: true,
+          result: [RAW_TUNNEL],
+          result_info: { page: callCount, per_page: 50, total_pages: 9999, count: 1, total_count: 9999 },
+        });
+      },
+    });
+
+    const tunnels = await api.listTunnels('zone-test-id');
+    expect(callCount).toBeLessThanOrEqual(20);
+    expect(tunnels).toHaveLength(callCount);
+  });
+});
+
 // ── Tests: CloudflareApiError ──────────────────────────────────────────────────
 
 describe('CloudflareApiError', () => {

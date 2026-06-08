@@ -85,17 +85,16 @@ export function cloudflareRouter(cloudflareApi) {
 
       await Promise.allSettled(routePromises);
     } catch (err) {
-      const { errorClass, httpStatus } = classifyError(err);
+      const { errorClass } = classifyError(err);
       // Not-configured is a 422 with a specific body
       if (errorClass === 'cloudflare-not-configured') {
         return res.status(422).json({ error: errorClass });
       }
-      // Other errors on the tunnel-list level → degraded response with errors[]
+      // Other errors on the tunnel-list level → HTTP 200 + errors[]
+      // (analog VPS providerErrors-pattern; fetch-clients stay in success-branch)
       errors.push({ scope: `zone:${zoneId}`, errorClass });
-      // Return partial result even on top-level tunnel-list failure
-      const result = { tunnels, routes };
-      if (errors.length > 0) result.errors = errors;
-      return res.status(httpStatus).json(result);
+      const result = { tunnels, routes, errors };
+      return res.json(result);
     }
 
     const result = { tunnels, routes };

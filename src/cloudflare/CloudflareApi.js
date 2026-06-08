@@ -39,6 +39,9 @@ const ACCOUNT_ID_KEY = 'credentials/cloudflare/account_id';
 /** Per-request fetch timeout in ms (ADR-010) */
 const FETCH_TIMEOUT_MS = 10000;
 
+/** Safety cap: maximum pages to fetch in a pagination loop (prevents infinite loops) */
+const PAGINATION_MAX_PAGES = 20;
+
 // ── CloudflareApi ─────────────────────────────────────────────────────────────
 
 export class CloudflareApi {
@@ -96,10 +99,27 @@ export class CloudflareApi {
     const { token } = creds;
 
     try {
-      const data = await this.#apiGet(`${CF_BASE}/zones?per_page=50&status=active`, token);
-      const rawZones = Array.isArray(data?.result) ? data.result : [];
-      const zones = rawZones.map((z) => normalizeZone(z));
-      return { configured: true, zones };
+      const allZones = [];
+      let page = 1;
+      let totalPages = 1;
+
+      while (page <= totalPages && page <= PAGINATION_MAX_PAGES) {
+        const data = await this.#apiGet(
+          `${CF_BASE}/zones?per_page=50&status=active&page=${page}`,
+          token,
+        );
+        const rawZones = Array.isArray(data?.result) ? data.result : [];
+        allZones.push(...rawZones.map((z) => normalizeZone(z)));
+
+        // Update totalPages from result_info (Cloudflare standard pagination)
+        const resultInfo = data?.result_info;
+        if (resultInfo && typeof resultInfo.total_pages === 'number') {
+          totalPages = resultInfo.total_pages;
+        }
+        page += 1;
+      }
+
+      return { configured: true, zones: allZones };
     } catch (err) {
       const errorClass = classifyApiError(err);
       return {
@@ -135,13 +155,28 @@ export class CloudflareApi {
     }
 
     const { token, accountId } = creds;
-    const data = await this.#apiGet(
-      `${CF_BASE}/accounts/${encodeURIComponent(accountId)}/cfd_tunnel?per_page=100&is_deleted=false`,
-      token,
-    );
+    const allTunnels = [];
+    let page = 1;
+    let totalPages = 1;
 
-    const rawTunnels = Array.isArray(data?.result) ? data.result : [];
-    return rawTunnels.map((t) => normalizeTunnel(t, zoneId));
+    while (page <= totalPages && page <= PAGINATION_MAX_PAGES) {
+      const data = await this.#apiGet(
+        `${CF_BASE}/accounts/${encodeURIComponent(accountId)}/cfd_tunnel?per_page=50&is_deleted=false&page=${page}`,
+        token,
+      );
+
+      const rawTunnels = Array.isArray(data?.result) ? data.result : [];
+      allTunnels.push(...rawTunnels.map((t) => normalizeTunnel(t, zoneId)));
+
+      // Update totalPages from result_info (Cloudflare standard pagination)
+      const resultInfo = data?.result_info;
+      if (resultInfo && typeof resultInfo.total_pages === 'number') {
+        totalPages = resultInfo.total_pages;
+      }
+      page += 1;
+    }
+
+    return allTunnels;
   }
 
   /**
