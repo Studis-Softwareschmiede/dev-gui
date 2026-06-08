@@ -1,5 +1,11 @@
 # Reviewer Lessons — dev-gui (newest first)
 
+## 2026-06-08 — ADR-409-Create-Pfad: Fehlen von CloudInitBuilder ist Important, nicht Critical, wenn Dependency-Specs ausstehen
+Wenn ADR-009 `CloudInitBuilder.js` und store-interne SSH-Key-Auflösung als Create-Pfad-Bestandteile fixiert, der Coder aber stattdessen userData/sshPublicKeys vom Request-Body akzeptiert, ist das ein Important-Befund (ADR-Konformität) und kein Critical — weil (a) keine Security-Regression (Public-Keys sind öffentlich), (b) der Create-Pfad funktionsfähig ist, (c) die Cloud-Init- und SSH-Key-Assignment-Specs als ausstehende Dependency-Items dokumentiert sind. Wäre jedoch ein Private-Key-Leak oder Token-Leak im Spiel: Critical.
+
+## 2026-06-08 — IONOS/Hostinger Stubs: "voll funktionsfähig" im Spec vs. Hetzner-only im Task-Titel — auf Spec gaten, nicht Task-Titel
+Wenn der Task-Titel nur "Hetzner-Adapter" nennt, aber die Spec "drei voll funktionsfähige Provider-Adapter" fordert, ist die Spec das bindende Gate-Dokument. IONOS/Hostinger als dokumentierte Stubs mit Folge-Item-Referenz (#96, #97) sind ein Important-Befund (Spec-Drift auf AC1 "voll funktionsfähig"), kein Critical, solange (a) die Stubs den Vertrags-Interface korrekt implementieren, (b) keine destructive Ersatzaktion ausgeführt wird, (c) kein Security-Hole entstanden ist.
+
 ## 2026-06-08 — Test-Header-Claim-Lücke bei UI-Verschiebung: Important, kein Critical
 Wenn Testblöcke von Datei A nach Datei B verschoben werden und die Ziel-Datei keinen `Covers`-Eintrag im Datei-Header für die neue Sektion hat, ist das ein Important-Befund (Test-Header-Claim-Vollständigkeit), kein Critical. Die Tests existieren und belegen das Verhalten korrekt — es fehlt nur die deklarative Inventar-Zeile. Critical wäre, wenn der Header einen Claim enthält, der kein zugehöriges `it`-Block hat.
 

@@ -1,5 +1,11 @@
 # Coder Lessons — dev-gui (newest first)
 
+## 2026-06-08 — Router-JSDoc-Routen-Inventar muss EXAKT mit registrierten router.X()-Aufrufen übereinstimmen
+Der JSDoc-Block am Anfang eines Router-Moduls ist das kanonische Routen-Inventar dieses Routers. Jede dort aufgelistete Route muss einen echten `router.post()`/`router.get()`-Aufruf haben; phantom-Routen (im Kommentar gelistet, aber nicht registriert) erzeugen einen Important-Befund. Muster: nach dem Schreiben aller `router.X()`-Aufrufe den Header-Kommentar gegen die tatsächlich registrierten Routen abgleichen. Gilt analog für `server.js`-Header-Kommentar.
+
+## 2026-06-08 — ADR-fixierter Create-Pfad: CloudInitBuilder + store-interne SSH-Key-Auflösung liefern wenn ADR-009 aktiv ist
+Wenn ADR-009 explizit `CloudInitBuilder.js` (`src/vps/CloudInitBuilder.js`) und store-interne SSH-Key-Auflösung als Bestandteile des Create-Pfads nennt, müssen beide im selben Item geliefert werden — auch wenn die abhängigen Specs (vps-cloud-init-setup, vps-ssh-key-assignment) noch ausstehen. Alternative: den Create-Pfad explizit als SPEC-LÜCKE melden (mit Wort "SPEC-LÜCKE" im Summary), sodass der Orchestrator klären kann, ob CloudInitBuilder in diesem Item oder einem Folge-Item landet. Statt sshPublicKeys und userData aus dem Request-Body zu akzeptieren (was der ADR-009-Boundary widerspricht), entweder (a) server-seitig aus dem CredentialStore auflösen oder (b) den Create-Endpunkt als 501/not-yet markieren bis die Dependency-Specs existieren.
+
 ## 2026-06-08 — Katalog-Erweiterung: alle drei Schichten gleichzeitig nachpflegen (Backend-Katalog + Frontend-Konstante + Architektur-Doku)
 Wenn ein Credential-Katalog (CREDENTIAL_CATALOG im Backend) um neue Felder erweitert wird, sind immer drei Stellen atomisch nachzupflegen: (1) `src/CredentialStore.js` CREDENTIAL_CATALOG, (2) `client/src/SettingsView.jsx` KNOWN_FIELDS, (3) `docs/architecture.md` Komponenten-Beschreibung (z.B. Sektion-Name in der Settings-Ansicht-Aufzählung). Fehlt die Doku-Pflege in (3), weicht die bindende Schicht-2-Referenz vom beobachtbaren Verhalten ab und erzeugt einen Important-Befund im Review. Prüfliste: nach jeder Katalog-Änderung grep nach dem alten Feldnamen/Sektionsnamen in `docs/architecture.md` und `docs/specs/`.
 
