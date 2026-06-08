@@ -38,8 +38,12 @@ dev-gui als Container auf den VPS bringen, über Cloudflare als Dienst `devgui.<
 ## NFRs
 - **Sicherheit:** keine Secrets im Image-Layer/Repo (Credentials zur Laufzeit gemountet/persistiert, nicht eingebacken). Docker-Socket möglichst read-only.
 
+## Tunnel-Modell (Zielmodell ab ADR-010)
+Diese Spec beschreibt das **heutige** Tunnel-Setup für die `devgui`-Route: ein **locally-managed** named Tunnel mit Ingress in der lokalen `config.yml` auf dem VPS (§5, `systemctl restart cloudflared`). Mit der Cloudflare-API-Boundary (ADR-010) wird **remote-managed** das **Zielmodell**: dev-gui verwaltet Tunnel-Ingress/Public-Hostname-Routen ausschließlich über die Cloudflare-API (`cfd_tunnel`-`configurations`), `cloudflared` läuft token-basiert. **Migration** der Bestands-Tunnel (inkl. der `devgui`-Route) auf remote-managed ist eine **operative Betreiber-Entscheidung** (ADR-010, OFFENE ENTSCHIEDUNG O1) — bis dahin koexistieren beide Modelle. Die **`devgui`-Route + Access-Mauer** sind im `LockoutGuard` (ADR-011) als **protected** hart vor jeder dev-gui-Mutation geschützt.
+
 ## Nicht-Ziele
 - Voll-automatischer VPS-Bootstrap in diesem Item (die VPS-seitige Cloudflare-Detailimplementierung folgt dem allgemeinen Infra-Bootstrap der Fabrik).
+- **Migration** der Bestands-Tunnel auf remote-managed (operativ; ADR-010 / O1) — diese Spec dokumentiert das Ist-Setup, nicht den Umstell-Zeitplan.
 
 ## Abhängigkeiten
 - Alle vorherigen Specs. Korrespondiert mit der `/preview`-`vps`-Route-Mechanik der Fabrik.

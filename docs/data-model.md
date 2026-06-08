@@ -33,3 +33,33 @@ Vereinheitlichtes Maschinen-Modell der Multi-Provider-VPS-Boundary ([[vps-provid
 - `VpsProvider.listMachines()` → `VpsMachine[]`; `VpsProvider.create(...)` → `VpsMachine`.
 
 > **Kein persistenter Maschinen-Store** (ADR-005-Linie): `VpsMachine` wird bei jeder Anfrage live aus der Provider-API ermittelt, nicht abgelegt.
+
+## Cloudflare-Read-Models (CfZone / CfTunnel / CfRoute)
+
+Read-Models der Cloudflare-API-Boundary ([[view-cloudflare]], fixiert in **ADR-010**; `protected`-Flag aus `LockoutGuard`, ADR-011). `CloudflareApi` mappt die Cloudflare-Roh-Antwort auf diese Schemata (`src/cloudflare/normalize.js`); die Cloudflare-View sieht **nur** diese Modelle, nie den API-Token. **Grundregel** wie bei `VpsMachine`: fehlende Felder → `null`, **nie** Fehler.
+
+| Modell | Felder |
+|---|---|
+| `CfZone` | `{ id: string, name: string, status: string\|null }` |
+| `CfTunnel` | `{ id: string, name: string, status: string\|null, zoneId: string }` |
+| `CfRoute` | `{ hostname: string, service: string\|null, tunnelId: string, protected: boolean }` |
+
+- `protected = true` ⇔ `LockoutGuard.isProtected(route)` (eigene `devgui`-Route / Access-Mauer; fail-closed bei Mehrdeutigkeit). Mutation auf ein protected Ziel → 422 `protected-resource` (ADR-011), nicht überschreibbar.
+- Live aus der Cloudflare-API (kein Tunnel-Store, ADR-005-Linie); Aggregation pro Zone degradierend (`errors: [{ scope, errorClass }]`).
+- `errorClass`-Werte (kanonisch, ADR-010): `cloudflare-not-configured` | `cloudflare-auth-failed` | `not-found` | `cloudflare-unavailable` | `protected-resource` | `confirmation-required`.
+
+## Deployment (Read-Model, live) + ReconcileReport
+
+Read-Model der Deploy-Lifecycle-Boundary ([[deploy-lifecycle]], **ADR-012**) und des Reconciliation-Crons ([[cloudflare-reconciliation]], **ADR-013**). **Kein** Deploy-State-Store: der Bestand wird live aus dem Container-Label `cloudflare.tunnel-hostname` ⊕ der Cloudflare-Route ermittelt.
+
+| Modell | Felder |
+|---|---|
+| `Deployment` | `{ vps: string, hostname: string, image: string, containerId: string\|null, status: string, routePresent: boolean, containerPresent: boolean }` |
+| `ReconcileReport` | `{ ranAt: string (ISO-8601), trigger: "cron"\|"manual", perVps: [{ vps: string, provider?: string, checkedContainers: number, createdRoutes: string[], removedRoutes: string[], protectedSkipped: string[], reportedUnmanaged: string[], errors: [{ scope, errorClass }] }] }` |
+| `ReconcileNotice` | `{ at: string (ISO-8601), kind: "route-created"\|"route-removed"\|"protected-skipped"\|"error", vps: string, hostname: string, detail?: string }` |
+
+- Container↔Route-Bindung = Label `cloudflare.tunnel-hostname=<hostname>` (ADR-012; Container-Label ist beim Reconcile der **autoritative Desired-State**).
+- **Beidseitige Konvergenz (ADR-013, Betreiber-Korrektur):** verwaiste Route (kein managed Container, nicht protected) → `removedRoutes`; **managed** Container ohne Route → Route angelegt → `createdRoutes` (über den atomaren ADR-012-Anlege-Pfad, nicht dupliziert); protected Hostname → nie angelegt/gelöscht → `protectedSkipped`; **unmanaged** Container (ohne Deployment-Label) → nicht geheilt → `reportedUnmanaged`.
+- `ReconcileReport` wird **nach jedem Lauf** (Cron **und** manuell) erzeugt und über die bestehende append-only **`AuditStore`**-Mechanik persistiert (eine Report-Zeile pro Lauf; **kein** neuer Store, ADR-005-Linie — O4 entschieden: JA). Abrufbar über `GET /api/deployments/reconcile/last` + `GET /api/deployments/reconcile/reports?limit=N`.
+- `ReconcileNotice` ist das Read-Model der im Cloudflare-Panel sichtbaren internen Reconciliation-Statusmeldungen ([[view-cloudflare]]); ebenfalls AuditStore-getragen (kein zweiter Persistenz-Pfad), abrufbar über `GET /api/deployments/reconcile/notices` (letzte N).
+- Drift sichtbar über `routePresent`/`containerPresent`; `ReconcileReport` und `ReconcileNotice` enthalten **keine** Secrets (weder SSH-Key noch Cloudflare-Token).

@@ -33,6 +33,7 @@ In den Sektionen der Settings-Ansicht ([[settings-shell]]) lassen sich die **Cre
 - **AC7** — Mutierende Endpunkte sind nur einer berechtigten Access-Identität zugänglich; eine Anfrage ohne gültigen Access-Nachweis wird mit 403 abgewiesen (geerbt aus [[access-and-guardrails]]); fehlende Berechtigung bei vorhandenem Access wird mit 403 abgewiesen.
 - **AC8** — Ungültige/leere Pflichteingaben werden mit klarer Fehlermeldung (4xx) abgelehnt, ohne einen bestehenden gesetzten Wert zu verändern.
 - **AC9** — Die **VPS**-Sektion führt **je Provider** (`hetzner`, `ionos`, `hostinger`) ein eigenes API-Token-Feld (`integration = "vps"`, `name ∈ {hetzner_api_token, ionos_api_token, hostinger_api_token}`); jedes folgt denselben write-only-/Masken-/Audit-/Schutz-Regeln (AC1–AC8). Ein gesetzter Provider-Token gilt nachgelagert als „Provider konfiguriert" (konsumiert store-intern von [[vps-provider-boundary]], nie im Klartext zurückgegeben).
+- **AC10** — Die **Cloudflare**-Sektion führt `integration = "cloudflare"` mit `name ∈ {api_token, account_id}`; beide folgen denselben write-only-/Masken-/Audit-/Schutz-Regeln (AC1–AC8). Ein gesetzter `api_token` (+ `account_id`) gilt nachgelagert als „Cloudflare konfiguriert" (konsumiert store-intern von [[view-cloudflare]]/`CloudflareApi`, ADR-010, nie im Klartext zurückgegeben). Die Zone-Id ist **kein** Credential-Feld (live aus der Zones-API).
 
 ## Verträge
 > Pfade/Felder sind kanonisch; das genaue Schema des Persistenz-Backends ist Implementierungsdetail (Architekt).
@@ -42,7 +43,7 @@ In den Sektionen der Settings-Ansicht ([[settings-shell]]) lassen sich die **Cre
 - **DELETE `/api/settings/credentials/{integration}/{name}`** → entfernt den Wert; Response Status „unset".
 - **„Weitere" Credentials:** `integration = "misc"` mit frei wählbarem `name` (validiert: erlaubte Zeichen, Längenlimit); gleiche PUT/DELETE-Semantik.
 - Alle Endpunkte hinter AccessGuard; mutierende zusätzlich identitäts-/rollengeprüft. Jede Mutation schreibt einen AuditEntry (vgl. [[access-and-guardrails]]).
-- **Felder-Katalog (Default-Vorschlag, vom Architekt/`dba` bestätigbar):** GitHub = `app_id`, `installation_id`, `private_key`; Cloudflare = `api_token`, `account_id`; **VPS = `hetzner_api_token`, `ionos_api_token`, `hostinger_api_token`** (ein Token je Provider; konsumiert von [[vps-provider-boundary]]). (SSH-Keys NICHT hier — siehe [[settings-ssh-keys]].)
+- **Felder-Katalog (Default-Vorschlag, vom Architekt/`dba` bestätigbar):** GitHub = `app_id`, `installation_id`, `private_key`; **Cloudflare = `api_token`, `account_id`** (store-intern konsumiert von `CloudflareApi`, ADR-010 — die Zone-Id wird **live** aus der Zones-API aufgelöst, **nicht** als Credential gepflegt); **VPS = `hetzner_api_token`, `ionos_api_token`, `hostinger_api_token`** (ein Token je Provider; konsumiert von [[vps-provider-boundary]]). (SSH-Keys NICHT hier — siehe [[settings-ssh-keys]].)
 
 ## Edge-Cases & Fehlerverhalten
 - Speichern eines bereits gesetzten Felds = Überschreiben (kein Konflikt); alter Wert wird ersetzt.
@@ -70,5 +71,6 @@ In den Sektionen der Settings-Ansicht ([[settings-shell]]) lassen sich die **Cre
 - [[settings-shell]] (Sektions-Gerüst + Route).
 - [[access-and-guardrails]] (Access-Mauer + Audit-Log + Identitätsauswertung).
 - [[vps-provider-boundary]] (konsumiert die Provider-API-Tokens `vps/<provider>_api_token` store-intern).
+- [[view-cloudflare]] (konsumiert `cloudflare/api_token` + `cloudflare/account_id` store-intern via `CloudflareApi`, ADR-010).
 - Offen: verschlüsselter Credential-Store (Architektur-Entscheidung, OA1).
 </content>
