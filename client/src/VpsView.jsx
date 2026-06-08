@@ -1,6 +1,16 @@
 /**
  * VpsView.jsx — VPS-Ansicht mit Machine-Listing und Create-from-scratch-Formular.
  *
+ * Implements: view-vps AC3–AC10 (Maschinen-Übersicht + Lifecycle-UI)
+ *   AC3  — GET /api/vps/machines; liste Provider, Name, Status, IPv4; Leer-Zustand.
+ *   AC4  — Provider ohne Token → „nicht konfiguriert"-Hinweis; kein Lifecycle-Aufruf.
+ *   AC5  — providerErrors → degradierende Anzeige; gestörter Provider markiert.
+ *   AC6  — Start/Stop pro Maschine; Capability-Flag disabled; 403 klar gemeldet.
+ *   AC7  — Create-Formular: Provider/Name/Region/Servertyp/Image + SSH-Key-Zuordnung.
+ *   AC8  — Create gesperrt wenn root/alex kein gesetzter Public-Key zuordenbar.
+ *   AC9  — Lade-/Erfolg-/Fehlerzustände für Mutationen; kein Token im Frontend.
+ *   AC10 — 403 → „keine Berechtigung"-Meldung; kein UI-Crash.
+ *
  * Implements: vps-ssh-key-assignment AC1/AC2 (UI-Auswahl)
  *   AC1 — Create-Formular bietet je Rolle (root, alex) eine Auswahl der SSH-Labels
  *          mit gesetztem Public-Key; Labels ohne Public-Key werden nicht angeboten.
@@ -13,6 +23,7 @@
  *   - Nur Label-Referenzen werden an das Backend gesendet (sshKeyAssignment),
  *     niemals rohe Key-Material-Strings vom Client.
  *   - Public-Keys dürfen angezeigt werden (nicht geheim).
+ *   - 403-Antworten werden als „keine Berechtigung" dargestellt; kein Token-Leak.
  *
  * A11y: WCAG 2.1 AA — Beschriftete select/input-Elemente, aria-required,
  *   aria-describedby für Fehlermeldungen, role=alert, Touch-Target ≥ 44 px.
@@ -43,6 +54,28 @@ async function fetchVpsProviders() {
   const res = await fetch('/api/vps/providers');
   if (!res.ok) throw new Error(`Provider laden fehlgeschlagen (${res.status})`);
   return res.json();
+}
+
+/**
+ * Sendet eine Start/Stop-Aktion an POST /api/vps/machines/:provider/:serverId/start|stop.
+ * Gibt { result, reason? } zurück; wirft bei HTTP-Fehler.
+ *
+ * @param {{ provider: string, serverId: string, action: 'start'|'stop' }} params
+ */
+async function postPowerAction({ provider, serverId, action }) {
+  // ServerId kann Slashes enthalten (IONOS composite IDs) — direkt als Pfadsegmente
+  const url = `/api/vps/machines/${encodeURIComponent(provider)}/${serverId}/${action}`;
+  const res = await fetch(url, { method: 'POST' });
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 403) {
+    const err = new Error(data.error ?? 'Keine Berechtigung für diese Aktion');
+    err.is403 = true;
+    throw err;
+  }
+  if (!res.ok) {
+    throw new Error(data.reason ?? data.error ?? `${action} fehlgeschlagen (${res.status})`);
+  }
+  return data;
 }
 
 /**
@@ -350,39 +383,185 @@ function VpsCreateForm({ providers, sshLabels, onCreated, onCancel }) {
   );
 }
 
+// ── VpsMachineRow ─────────────────────────────────────────────────────────────
+
+/**
+ * Eine einzelne Maschinen-Zeile mit Start/Stop-Buttons (AC6).
+ *
+ * @param {{
+ *   machine: object,
+ *   providerCapabilities: { start: boolean, stop: boolean } | null,
+ *   onAction: (provider: string, serverId: string, action: 'start'|'stop') => Promise<void>,
+ * }} props
+ */
+function VpsMachineRow({ machine: m, providerCapabilities, onAction }) {
+  const [actionState, setActionState] = useState(null); // null | 'pending' | 'ok' | 'error' | 'unsupported' | 'forbidden'
+  const [actionMsg, setActionMsg] = useState(null);
+
+  const caps = providerCapabilities ?? { start: true, stop: true };
+
+  const startDisabled = !caps.start || actionState === 'pending';
+  const stopDisabled = !caps.stop || actionState === 'pending';
+
+  const handleAction = useCallback(async (action) => {
+    setActionState('pending');
+    setActionMsg(null);
+    try {
+      const result = await onAction(m.provider, m.serverId, action);
+      if (result?.result === 'unsupported') {
+        setActionState('unsupported');
+        setActionMsg(result.reason ?? 'Aktion nicht unterstützt');
+      } else {
+        setActionState('ok');
+        setActionMsg(null);
+      }
+    } catch (err) {
+      if (err.is403) {
+        setActionState('forbidden');
+        setActionMsg('Keine Berechtigung für diese Aktion');
+      } else {
+        setActionState('error');
+        setActionMsg(err.message ?? 'Aktion fehlgeschlagen');
+      }
+    }
+  }, [m.provider, m.serverId, onAction]);
+
+  const ACTION_MSG_ID = `vps-action-msg-${m.provider}-${m.serverId}`.replace(/[^a-zA-Z0-9-]/g, '-');
+
+  return (
+    <li style={listStyles.item}>
+      <span style={listStyles.name}>{m.name}</span>
+      <span style={listStyles.provider}>{m.provider}</span>
+      <span
+        style={listStyles.status(m.status)}
+        aria-label={`Status: ${m.status}`}
+      >
+        {m.status}
+      </span>
+      {m.ipv4 && <span style={listStyles.ip}>{m.ipv4}</span>}
+
+      {/* Start/Stop-Buttons (AC6) */}
+      <div style={listStyles.actions}>
+        <button
+          type="button"
+          style={startDisabled
+            ? { ...listStyles.actionBtn, opacity: 0.45, cursor: 'not-allowed' }
+            : listStyles.actionBtn}
+          disabled={startDisabled}
+          aria-label={`${m.name} starten`}
+          aria-describedby={actionMsg ? ACTION_MSG_ID : undefined}
+          title={!caps.start ? 'Start wird von diesem Provider nicht unterstützt' : undefined}
+          onClick={() => handleAction('start')}
+        >
+          {actionState === 'pending' ? '…' : 'Start'}
+        </button>
+        <button
+          type="button"
+          style={stopDisabled
+            ? { ...listStyles.actionBtn, ...listStyles.actionBtnStop, opacity: 0.45, cursor: 'not-allowed' }
+            : { ...listStyles.actionBtn, ...listStyles.actionBtnStop }}
+          disabled={stopDisabled}
+          aria-label={`${m.name} stoppen`}
+          aria-describedby={actionMsg ? ACTION_MSG_ID : undefined}
+          title={!caps.stop ? 'Stop wird von diesem Provider nicht unterstützt' : undefined}
+          onClick={() => handleAction('stop')}
+        >
+          {actionState === 'pending' ? '…' : 'Stop'}
+        </button>
+      </div>
+
+      {/* Aktions-Feedback (AC9/AC10) */}
+      {actionMsg && (
+        <span
+          id={ACTION_MSG_ID}
+          style={actionState === 'ok' ? listStyles.actionSuccess
+            : actionState === 'forbidden' ? listStyles.actionForbidden
+              : actionState === 'unsupported' ? listStyles.actionUnsupported
+                : listStyles.actionError}
+          role={actionState === 'forbidden' || actionState === 'error' ? 'alert' : 'status'}
+        >
+          {actionMsg}
+        </span>
+      )}
+      {actionState === 'ok' && (
+        <span style={listStyles.actionSuccess} role="status">
+          OK
+        </span>
+      )}
+    </li>
+  );
+}
+
 // ── VpsMachineList ────────────────────────────────────────────────────────────
 
 /**
- * Listet alle bekannten VPS-Maschinen auf.
+ * Listet alle bekannten VPS-Maschinen auf inkl. Provider-Fehler (AC5) und
+ * „nicht konfiguriert"-Hinweise (AC4). Start/Stop-Buttons (AC6).
  *
- * @param {{ machines: Array, providerErrors?: Array }} props
+ * @param {{
+ *   machines: Array,
+ *   providers: Array<{ id: string, configured: boolean, capabilities: object }>,
+ *   providerErrors?: Array,
+ *   onAction: (provider: string, serverId: string, action: 'start'|'stop') => Promise<void>,
+ * }} props
  */
-function VpsMachineList({ machines, providerErrors }) {
-  if (machines.length === 0 && (!providerErrors || providerErrors.length === 0)) {
+function VpsMachineList({ machines, providers, providerErrors, onAction }) {
+  const unconfiguredProviders = (providers ?? []).filter((p) => !p.configured);
+
+  const hasContent = machines.length > 0
+    || (providerErrors && providerErrors.length > 0)
+    || unconfiguredProviders.length > 0;
+
+  if (!hasContent) {
     return <p style={listStyles.empty}>Keine Maschinen vorhanden.</p>;
+  }
+
+  // Capabilities per Provider (für Buttons in Zeilen)
+  // S2: unkonfigurierte Provider erhalten start/stop=false (kein Lifecycle-Aufruf — AC4)
+  const capsMap = {};
+  for (const p of (providers ?? [])) {
+    capsMap[p.id] = !p.configured ? { start: false, stop: false } : (p.capabilities ?? { start: true, stop: true });
   }
 
   return (
     <div>
-      {providerErrors && providerErrors.length > 0 && (
-        <div style={listStyles.providerErrors} role="status">
-          {providerErrors.map((e) => (
-            <span key={e.provider} style={listStyles.providerError}>
-              {e.provider}: {e.errorClass}
+      {/* Nicht konfigurierte Provider (AC4) */}
+      {unconfiguredProviders.length > 0 && (
+        <div style={listStyles.unconfiguredHint} role="note" aria-label="Nicht konfigurierte Provider">
+          {unconfiguredProviders.map((p) => (
+            <span key={p.id} style={listStyles.unconfiguredItem}>
+              <strong>{p.id}</strong>: nicht konfiguriert —{' '}
+              API-Token in <strong>Einstellungen › Credentials</strong> hinterlegen.
             </span>
           ))}
         </div>
       )}
-      <ul style={listStyles.list} aria-label="VPS-Maschinen">
-        {machines.map((m) => (
-          <li key={`${m.provider}:${m.serverId}`} style={listStyles.item}>
-            <span style={listStyles.name}>{m.name}</span>
-            <span style={listStyles.provider}>{m.provider}</span>
-            <span style={listStyles.status(m.status)}>{m.status}</span>
-            {m.ipv4 && <span style={listStyles.ip}>{m.ipv4}</span>}
-          </li>
-        ))}
-      </ul>
+
+      {/* Gestörte Provider (AC5) */}
+      {providerErrors && providerErrors.length > 0 && (
+        <div style={listStyles.providerErrors} role="status" aria-label="Gestörte Provider">
+          {providerErrors.map((e) => (
+            <span key={e.provider} style={listStyles.providerError}>
+              {e.provider}: gestört ({e.errorClass})
+            </span>
+          ))}
+        </div>
+      )}
+
+      {machines.length === 0 ? (
+        <p style={listStyles.empty}>Keine Maschinen vorhanden.</p>
+      ) : (
+        <ul style={listStyles.list} aria-label="VPS-Maschinen">
+          {machines.map((m) => (
+            <VpsMachineRow
+              key={`${m.provider}:${m.serverId}`}
+              machine={m}
+              providerCapabilities={capsMap[m.provider] ?? null}
+              onAction={onAction}
+            />
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
@@ -428,6 +607,29 @@ export function VpsView({ onNavigate }) {
     await load();
   }, [load]);
 
+  /**
+   * Start/Stop-Aktion pro Maschine (AC6/AC9/AC10).
+   * Gibt das Backend-Ergebnis zurück; Fehler (inkl. 403) propagieren als Exception.
+   * Nach Erfolg: Re-Fetch der Maschinenliste (AC9).
+   *
+   * @param {string} provider
+   * @param {string} serverId
+   * @param {'start'|'stop'} action
+   * @returns {Promise<{ result: string, reason?: string }>}
+   */
+  const handlePowerAction = useCallback(async (provider, serverId, action) => {
+    const result = await postPowerAction({ provider, serverId, action });
+    // Re-Fetch nach Aktion (AC9) — auch bei "unsupported" aktualisieren wir nicht zwingend,
+    // aber bei Erfolg soll die Übersicht aktuell sein.
+    if (result?.result === 'ok') {
+      await load();
+    }
+    return result;
+  }, [load]);
+
+  // Kein konfigurierter Provider → Onboarding-Hinweis
+  const allUnconfigured = providers.length > 0 && providers.every((p) => !p.configured);
+
   return (
     <main style={styles.view} aria-label="VPS-Ansicht">
       <div style={styles.inner}>
@@ -437,6 +639,14 @@ export function VpsView({ onNavigate }) {
           <p style={styles.loadError} role="alert" aria-live="polite">
             {loadError}
           </p>
+        )}
+
+        {/* Onboarding-Hinweis wenn kein Provider konfiguriert (AC4 Edge-Case) */}
+        {allUnconfigured && !loadError && (
+          <div style={styles.onboarding} role="note">
+            Kein Provider konfiguriert. Bitte API-Token in{' '}
+            <strong>Einstellungen › Credentials</strong> hinterlegen.
+          </div>
         )}
 
         {showCreate ? (
@@ -467,7 +677,12 @@ export function VpsView({ onNavigate }) {
               </button>
             </div>
 
-            <VpsMachineList machines={machines} providerErrors={providerErrors} />
+            <VpsMachineList
+              machines={machines}
+              providers={providers}
+              providerErrors={providerErrors}
+              onAction={handlePowerAction}
+            />
           </>
         )}
 
@@ -552,6 +767,15 @@ const styles = {
     fontSize: 14,
     cursor: 'pointer',
     minHeight: 44,
+  },
+  onboarding: {
+    padding: '12px 16px',
+    background: '#1a1400',
+    border: '1px solid #78350f',
+    borderRadius: 6,
+    color: '#fcd34d',
+    fontSize: 14,
+    marginBottom: 16,
   },
 };
 
@@ -719,6 +943,47 @@ const listStyles = {
     fontSize: 12,
     color: '#94a3b8',
   },
+  actions: {
+    display: 'flex',
+    gap: 6,
+    marginLeft: 'auto',
+  },
+  actionBtn: {
+    padding: '6px 12px',
+    background: '#1e3a5f',
+    color: '#93c5fd',
+    border: '1px solid #1e40af',
+    borderRadius: 4,
+    fontSize: 12,
+    cursor: 'pointer',
+    minHeight: 44,
+    minWidth: 56,
+  },
+  actionBtnStop: {
+    background: '#2c1a00',
+    color: '#fbbf24',
+    border: '1px solid #92400e',
+  },
+  actionError: {
+    fontSize: 11,
+    color: '#fca5a5',
+    marginLeft: 4,
+  },
+  actionSuccess: {
+    fontSize: 11,
+    color: '#86efac',
+    marginLeft: 4,
+  },
+  actionForbidden: {
+    fontSize: 11,
+    color: '#fbbf24',
+    marginLeft: 4,
+  },
+  actionUnsupported: {
+    fontSize: 11,
+    color: '#fbbf24',
+    marginLeft: 4,
+  },
   providerErrors: {
     display: 'flex',
     gap: 8,
@@ -732,5 +997,19 @@ const listStyles = {
     border: '1px solid #92400e',
     borderRadius: 4,
     padding: '2px 8px',
+  },
+  unconfiguredHint: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 6,
+    marginBottom: 12,
+    padding: '10px 14px',
+    background: '#1a1400',
+    border: '1px solid #78350f',
+    borderRadius: 6,
+  },
+  unconfiguredItem: {
+    fontSize: 13,
+    color: '#fcd34d',
   },
 };
