@@ -244,8 +244,16 @@ describe('VpsProviderRegistry — AC7: create()', () => {
   it('AC7 — routet create() an den richtigen Adapter mit Parametern', async () => {
     let capturedParams = null;
     const store = makeCredentialStore({ hetzner: MOCK_TOKEN });
+
+    // CloudInitBuilder als Stub injizieren: gibt direkt ein gültiges #cloud-config zurück.
+    // Die vollständige Validierung der CloudInitBuilder-Vorlage (AC1–AC8) liegt in
+    // CloudInitBuilder.test.js. Hier wird nur geprüft, dass die Registry den Builder
+    // aufruft und userData server-intern weitergibt (ADR-009).
+    const cloudInitBuilderStub = { build: (_params) => '#cloud-config\n# stub\n' };
+
     const registry = new VpsProviderRegistry({
       credentialStore: store,
+      cloudInitBuilder: cloudInitBuilderStub,
       adapters: {
         hetzner: {
           capabilities: () => ({ list: true, start: true, stop: true, create: true }),
@@ -270,7 +278,7 @@ describe('VpsProviderRegistry — AC7: create()', () => {
       serverType: 'cx11',
     });
     expect(capturedParams.name).toBe('new-srv');
-    // userData wird server-intern erzeugt (CloudInitBuilder-Stub, CLOUDINIT_STUB_98)
+    // userData wird server-intern erzeugt (CloudInitBuilder, ADR-009)
     expect(typeof capturedParams.userData).toBe('string');
     expect(capturedParams.userData).toMatch(/^#cloud-config/);
     // sshPublicKeys wird server-intern aufgelöst (SSHKEYS_STUB_99 — derzeit leer)

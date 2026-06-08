@@ -28,6 +28,7 @@ import { request as httpRequest } from 'node:http';
 import { vpsRouter } from '../src/vpsRouter.js';
 import { AuditStore } from '../src/AuditStore.js';
 import { VpsRegistryError } from '../src/vps/VpsProviderRegistry.js';
+import { CloudInitError } from '../src/vps/CloudInitBuilder.js';
 import { createAccessGuard } from '../src/AccessGuard.js';
 
 const MOCK_TOKEN = 'should-never-appear-in-response-or-audit';
@@ -505,6 +506,23 @@ describe('vpsRouter — AC7/AC8: Create-from-scratch', () => {
     expect(res.status).not.toBe(201);
     // Token darf nicht in der Antwort erscheinen
     expect(res.body).not.toContain(MOCK_TOKEN);
+  });
+
+  it('AC7 — CloudInitError(missing-ssh-key) → 422 mit errorClass "missing-ssh-key"', async () => {
+    ts = await makeTestServer({
+      registry: makeMockRegistry({
+        throwOn: 'create',
+        createResult: new CloudInitError('Fehlender SSH-Public-Key für User root', 'missing-ssh-key', 422),
+      }),
+    });
+    const res = await ts.req('POST', '/api/vps/machines/hetzner', {
+      name: 'srv',
+      region: 'nbg1',
+      serverType: 'cx11',
+    });
+    expect(res.status).toBe(422);
+    const data = JSON.parse(res.body);
+    expect(data.errorClass).toBe('missing-ssh-key');
   });
 
   it('AC10 — Token erscheint NICHT in Create-Response', async () => {
