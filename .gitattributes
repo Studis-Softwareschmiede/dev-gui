@@ -1,0 +1,2 @@
+# Append-only lesson logs: union-merge to avoid trivial conflicts during parallel worktree landing
+.claude/lessons/*.md merge=union

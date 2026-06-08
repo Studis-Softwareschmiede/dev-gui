@@ -19,6 +19,11 @@ const config = {
   // Per-file environment override via @jest-environment docblock
   // Frontend test files declare: @jest-environment jsdom
 
+  // Ignore parallel agent worktrees: they live under .claude/worktrees/ and would
+  // otherwise be scanned by the global test run, pulling in foreign (possibly red)
+  // tests from other branches and corrupting the test gate.
+  testPathIgnorePatterns: ['/node_modules/', '/\\.claude/worktrees/'],
+
   // Module name mapper: silence CSS imports; redirect xterm to manual stubs
   moduleNameMapper: {
     '\\.css$':             '<rootDir>/test/__mocks__/styleMock.js',
