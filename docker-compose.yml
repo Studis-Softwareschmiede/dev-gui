@@ -162,9 +162,10 @@ services:
       # - ${GPG_PASS_FILE:-~/.config/softwareschmiede/gpg.pass}:/home/node/.config/softwareschmiede/gpg.pass:ro
 
       # Lokaler Klon-Workspace (workspace-repos spec). Host-Pfad per
-      # WORKSPACE_HOST_DIR überschreibbar; Default = Org-Checkout dieser
-      # Installation (Mac, alex).
-      - ${WORKSPACE_HOST_DIR:-/Users/alex/Git/Studis-Softwareschmiede}:/workspace
+      # WORKSPACE_HOST_DIR überschreibbar; Default = ~/Git dieser Installation
+      # (Mac, alex) — die äußere, gemountete Schranke. WORKSPACE_DIR (Effektiv-
+      # wert) wird per Settings innerhalb dieser Schranke gewählt (workspace-path-config).
+      - ${WORKSPACE_HOST_DIR:-/Users/alex/Git}:/workspace
 
     networks:
       # internal net — reach socket-proxy:2375
