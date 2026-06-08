@@ -1,5 +1,8 @@
 # Reviewer Lessons — dev-gui (newest first)
 
+## 2026-06-08 — `unsupported`-State via 4xx testen = falsch-positiver Test: immer HTTP-Status vs. Codepfad prüfen
+Wenn ein Test einen `unsupported`-State via `powerStatus: 422` simuliert und der assert `/nicht unterstützt|unsupported/i` grün ist, prüfen ob der grüne Assert aus dem UNSUPPORTED- oder dem ERROR-Pfad kommt. 422 ist `!res.ok` → `postPowerAction` wirft → `catch`-Branch in `handleAction` → `actionState='error'`, nicht `'unsupported'`. Der Test beweist nur, dass `data.reason` im Error-Text erscheint — nicht dass der `unsupported`-State-Zweig erreichbar ist. Für einen korrekten `unsupported`-Test muss `powerStatus: 200` + `powerResult: { result: 'unsupported' }` verwendet werden, und der Assert muss `actionState` (nicht nur body-Text) prüfen.
+
 ## 2026-06-08 — awk-Exit-Code-Signal: vier Faelle manuell durchspielen vor PASS
 Wenn ein Shell-Skript den awk-Exit-Code als Entscheidungssignal nutzt (statt wc-c/wc-l Vergleich), alle vier Kombinationen (Key vorhanden/nicht vorhanden) x (Datei mit/ohne trailing newline) manuell mit dem echten awk-Programm verifizieren. Die Iterationen 1+2 zeigten, dass jede Aenderung am Byte-Vergleichs-Mechanismus einen neuen Off-by-One in einer der vier Ecken produzieren kann. Robuste Pruefung: `printf 'CONTENT'` (ohne trailing \n) und `printf 'CONTENT\n'` (mit) als Eingabe fuer beide Key-Faelle, exit-Code und stdout pruefen. Nur wenn alle vier Faelle exit-Code-korrekt sind: kein Befund.
 

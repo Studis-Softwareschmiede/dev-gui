@@ -1,5 +1,11 @@
 # Coder Lessons — dev-gui (newest first)
 
+## 2026-06-08 — `unsupported`-Pfad bei Power-Aktionen: Backend muss HTTP 200 zurückgeben, nicht 4xx
+Wenn ein Backend eine Start/Stop-Aktion mit `{ result: 'unsupported' }` signalisiert (AC6), darf es NICHT HTTP 4xx zurückgeben — dann wirft `postPowerAction` (wegen `!res.ok`) und der `result?.result === 'unsupported'`-Branch in `handleAction` ist unerreichbar. Der korrekte Produk­tions­pfad für `unsupported` ist HTTP 200 + `{ result: 'unsupported', reason: '...' }`. Tests, die den `unsupported`-State mit einem 4xx-Status simulieren, testen tatsächlich den ERROR-Pfad — nicht den UNSUPPORTED-Pfad. Fix: `powerStatus: 200, powerResult: { result: 'unsupported', reason: '...' }` verwenden und prüfen, dass `actionState === 'unsupported'` (nicht `'error'`) gesetzt wird.
+
+## 2026-06-08 — AC4 „kein Lifecycle-Aufruf für unkonfigurierte Provider": Test-Header-Claim braucht expliziten Nachweis
+Wenn der Test-Header für AC4 „kein Lifecycle-Aufruf" beansprucht, muss ein `it`-Block existieren, der einen fetch-Spy aufbaut, einen `start`/`stop`-Button für einen unkonfigurierten Provider anklickt (oder zu klicken versucht) und dann prüft, dass kein POST-Aufruf an `.../start` oder `.../stop` abgesetzt wurde. Das reine Vorhandensein des Hinweis-Texts belegt die negative Aussage nicht. Muster: `expect(fetchMock).not.toHaveBeenCalledWith(expect.stringMatching(/\/start|\/stop/), expect.any(Object))`.
+
 ## 2026-06-08 — Covers-Block in Testdateien muss neue Spec-ACs aus einem anderen Spec-Dokument namentlich listen
 Wenn neue Tests für ACs aus einem anderen Spec-Dokument (z.B. `vps-ssh-key-assignment` AC3/AC4/AC5/AC6) in eine bestehende Testdatei (z.B. `test/VpsProviderRegistry.test.js`, `test/vpsRouter.test.js`) eingefügt werden, muss der `Covers`-Block im Datei-Header die neuen AC-Nummern UND den Spec-Namen nennen — z.B. `AC3 (vps-ssh-key-assignment) — ...`. Nur den describe-Block-Kommentar mit der Spec zu benennen reicht nicht; der Datei-Header-Inventory ist das bindende Dokument. Gilt auch wenn die Tests in einem separaten describe-Block am Ende der Datei stehen. Prüfliste: nach dem Schreiben neuer describe-Blöcke für eine andere Spec immer den Datei-Header-Covers-Block ergänzen.
 ## 2026-06-08 — comment-Feld in SSH-Keypair-Generierung: Newline-Injection vor ssh2-Aufruf filtern
