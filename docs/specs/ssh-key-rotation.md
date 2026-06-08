@@ -48,7 +48,7 @@ Beides bleibt **innerhalb** des `VpsProvisioner` (einziger SSH-from-Backend-Ort,
 - **POST `/api/settings/ssh-keys/{user}/rotate`** — Body `{ host: string, port?: number, targetUser: string, hostFingerprint?: string }` (`{user}` ∈ {`root`, `alex`}) → Response `{ result: "rotated"|"error", oldKeyRemoved?: boolean, newPublicKey?: string, errorClass?: string, reason? }`. Statuscodes: 200 bei Erfolg, 422 bei fehlendem Ausgangs-Key/Ziel, 502 bei VPS-/Verify-Fehler, 500 bei internem Fehler. Hinter Access + `CRED_ADMIN_EMAILS` + Audit-First.
 - **`VpsProvisioner`-Erweiterung (intern, ADR-008-Touchpoint):**
   - `addAuthorizedKey({ host, port, targetUser, publicKey, hostFingerprint? })` → idempotentes additives Eintragen (bereits #47).
-  - **`removeAuthorizedKey({ host, port, targetUser, publicKey, hostFingerprint? })`** → idempotentes Entfernen eines bestimmten Public-Keys (**neu**).
+  - **`removeAuthorizedKey({ host, port, targetUser, publicKey, privateKey, hostFingerprint? })`** → idempotentes Entfernen eines bestimmten Public-Keys (**neu**); `privateKey` für die SSH-Verbindung (üblicherweise der neue, bereits geprüfte Private-Key der Rotation).
   - **`testConnection({ host, port, targetUser, privateKey, hostFingerprint? })`** → `{ ok: boolean, reason? }`; verifiziert Login mit dem gegebenen Private-Key (**neu**).
 - **Key-Quelle:** neuer Private-Key store-intern aus `CredentialStore` (ADR-007); Public-Keys als Metadatum. Nur Public-Keys werden Richtung Server geschrieben; Private-Keys nie über HTTP/Log/Audit.
 
