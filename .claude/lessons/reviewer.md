@@ -1,5 +1,8 @@
 # Reviewer Lessons — dev-gui (newest first)
 
+## 2026-06-08 — Traversal-Schutz-Review: Symlink-Test separat von Boundary-Logik-Test bewerten
+Wenn `validateWorkspacePath` (oder analoge Validierungsfunktionen) mit gemocktem `realpath` getestet werden, sorgfältig unterscheiden: (a) Tests mit Identity-Mock (`async p => p`) beweisen NUR die Boundary-Logik mit absoluten Pfaden, NICHT das Symlink-Escape-Szenario. (b) Ein Symlink-Escape-Test braucht einen Mock, bei dem `realpath('/workspace/link')` einen Außerhalb-Pfad zurückgibt. Bevor „Symlink" im Test-Header als unbelegter Claim markiert wird: prüfen ob die Tests vielleicht realpath-Override-Szenarien in anderen Test-Gruppen (z.B. `realpathInputFails`) abdecken — aber `realpathInputFails` = ENOENT testet fehlende Pfade, nicht Symlinks nach außen. Diese beiden Szenarien sind unterschiedliche Codepfade.
+
 ## 2026-06-07 — Refactoring-Review: Unexpected-Error-Fallback-Pfad immer explizit tracen
 Bei Refactorings die einen Catch-Block von `msg.includes()`-Branching auf `err.code`-Branching umstellen, immer den Fallback-Zweig (nicht-typisierter Fehler) explizit tracen: Was wurde im alten Code mit einem unerwarteten Fehler gemacht, und was passiert jetzt? Alte Code-Paths (Cloner: unhandled → 502 via Router-Default; Writer: 'invalid-response' → 502) können sich zu 500 ändern, wenn der Fallback auf 'credential-store-missing' mappt. Das ist ein Verhaltens-Diff auf dem Unexpected-Error-Pfad. Suchstrategie: grep nach dem `// Non-GitHubAppTokenError`-Kommentar, dann Router-Mapping für die gewählte errorClass nachschlagen.
 

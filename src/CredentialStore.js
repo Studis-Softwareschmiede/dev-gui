@@ -56,6 +56,9 @@ export const CREDENTIAL_CATALOG = {
 /** Maximale Länge eines Credential-Werts (Bytes). */
 const MAX_VALUE_BYTES = 65536; // 64 KiB
 
+/** meta-Block-Schlüssel für den konfigurierten Workspace-Root (workspace-path-config, AC4/AC6). */
+const WORKSPACE_PATH_META_KEY = 'settings/workspace-path';
+
 /** Erlaubte Zeichen für misc-Schlüsselnamen. */
 const MISC_NAME_RE = /^[a-zA-Z0-9_\-.:@]+$/;
 
@@ -570,6 +573,56 @@ export class CredentialStore {
       const storeData = await this.#readStore();
       if (!storeData?.meta?.[metaKey]) return;
       delete storeData.meta[metaKey];
+      await this.#writeStore(storeData);
+    });
+  }
+
+  // ── Workspace-Pfad-API (workspace-path-config — nicht-geheime Betreiber-Konfiguration) ─
+
+  /**
+   * Gibt den konfigurierten Workspace-Root-Pfad zurück (Klartext-Metadatum).
+   * Gibt null zurück wenn nicht konfiguriert.
+   *
+   * @returns {Promise<string|null>}
+   */
+  async readWorkspacePath() {
+    const storeData = await this.#readStore();
+    return storeData?.meta?.[WORKSPACE_PATH_META_KEY]?.value ?? null;
+  }
+
+  /**
+   * Persistiert den konfigurierten Workspace-Root-Pfad (Klartext-Metadatum, nicht geheim).
+   *
+   * @param {string} absPath  Bereits validierter absoluter Pfad.
+   * @returns {Promise<{ updatedAt: string }>}
+   */
+  async writeWorkspacePath(absPath) {
+    if (typeof absPath !== 'string' || absPath.trim() === '') {
+      throw new Error('[CredentialStore] writeWorkspacePath: absPath darf nicht leer sein');
+    }
+    const updatedAt = new Date().toISOString();
+    return this.#withWriteLock(async () => {
+      let storeData = await this.#readStore();
+      if (!storeData) {
+        storeData = { version: 1, entries: {}, meta: {} };
+      }
+      if (!storeData.meta) storeData.meta = {};
+      storeData.meta[WORKSPACE_PATH_META_KEY] = { value: absPath.trim(), updatedAt };
+      await this.#writeStore(storeData);
+      return { updatedAt };
+    });
+  }
+
+  /**
+   * Löscht den konfigurierten Workspace-Root-Pfad. Idempotent.
+   *
+   * @returns {Promise<void>}
+   */
+  async deleteWorkspacePath() {
+    return this.#withWriteLock(async () => {
+      const storeData = await this.#readStore();
+      if (!storeData?.meta?.[WORKSPACE_PATH_META_KEY]) return;
+      delete storeData.meta[WORKSPACE_PATH_META_KEY];
       await this.#writeStore(storeData);
     });
   }
