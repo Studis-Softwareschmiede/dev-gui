@@ -563,3 +563,201 @@ describe('CloudflareApi — isProtected()', () => {
     expect(checked).toBe('devgui.example.com');
   });
 });
+
+// ── Tests: removeRoute() (ADR-011) ────────────────────────────────────────────
+
+const TUNNEL_ID = 'tunnel-id-0000000000000001';
+const TUNNEL_CONFIG_WITH_ROUTES = {
+  success: true,
+  result: {
+    config: {
+      ingress: [
+        { hostname: 'app.example.com', service: 'http://localhost:3000' },
+        { hostname: 'api.example.com', service: 'http://localhost:8080' },
+        { hostname: '', service: 'http_status:404' }, // catch-all
+      ],
+    },
+  },
+};
+
+describe('CloudflareApi — removeRoute()', () => {
+  it('wirft protected-resource wenn LockoutGuard isProtected=true (keine fetch-Call)', async () => {
+    const fetchCalls = [];
+    const api = new CloudflareApi({
+      credentialStore: makeConfiguredStore(),
+      fetchFn: async (url, init) => { fetchCalls.push({ url, method: init?.method }); return makeFetchResponse(200, {}); },
+      lockoutGuard: { isProtected: () => true },
+    });
+
+    await expect(api.removeRoute(TUNNEL_ID, 'devgui.example.com')).rejects.toMatchObject({
+      errorClass: 'protected-resource',
+      httpStatus: 422,
+    });
+    // No API call must have been made (LockoutGuard fires FIRST)
+    expect(fetchCalls).toHaveLength(0);
+  });
+
+  it('LockoutGuard-Block ist nicht überschreibbar (auch mit validem Confirm)', async () => {
+    const api = new CloudflareApi({
+      credentialStore: makeConfiguredStore(),
+      fetchFn: async () => makeFetchResponse(200, {}),
+      lockoutGuard: { isProtected: () => true },
+    });
+
+    await expect(api.removeRoute(TUNNEL_ID, 'devgui.example.com')).rejects.toMatchObject({
+      errorClass: 'protected-resource',
+    });
+  });
+
+  it('entfernt die korrekte Route und behält die anderen (inkl. catch-all)', async () => {
+    let putBody = null;
+    const api = new CloudflareApi({
+      credentialStore: makeConfiguredStore(),
+      fetchFn: async (url, init) => {
+        if (init?.method === 'PUT') {
+          putBody = JSON.parse(init.body);
+          return makeFetchResponse(200, { success: true, result: {} });
+        }
+        return makeFetchResponse(200, TUNNEL_CONFIG_WITH_ROUTES);
+      },
+      lockoutGuard: { isProtected: () => false },
+    });
+
+    const result = await api.removeRoute(TUNNEL_ID, 'app.example.com');
+    expect(result.result).toBe('ok');
+
+    // PUT body should not contain 'app.example.com' but should keep 'api.example.com' + catch-all
+    const remainingIngress = putBody?.config?.ingress ?? [];
+    const hostnames = remainingIngress.map((r) => r.hostname);
+    expect(hostnames).not.toContain('app.example.com');
+    expect(hostnames).toContain('api.example.com');
+    expect(hostnames).toContain(''); // catch-all preserved
+  });
+
+  it('wirft not-found wenn hostname nicht in der Tunnel-Konfiguration', async () => {
+    const api = new CloudflareApi({
+      credentialStore: makeConfiguredStore(),
+      fetchFn: async (_url, init) => {
+        if (init?.method === 'PUT') return makeFetchResponse(200, { success: true, result: {} });
+        return makeFetchResponse(200, TUNNEL_CONFIG_WITH_ROUTES);
+      },
+      lockoutGuard: { isProtected: () => false },
+    });
+
+    await expect(api.removeRoute(TUNNEL_ID, 'nonexistent.example.com')).rejects.toMatchObject({
+      errorClass: 'not-found',
+    });
+  });
+
+  it('wirft cloudflare-not-configured wenn keine Credentials', async () => {
+    const api = new CloudflareApi({
+      credentialStore: makeCredentialStore({}),
+      lockoutGuard: { isProtected: () => false },
+    });
+
+    await expect(api.removeRoute(TUNNEL_ID, 'app.example.com')).rejects.toMatchObject({
+      errorClass: 'cloudflare-not-configured',
+    });
+  });
+
+  it('wirft cloudflare-auth-failed bei 401 auf GET-Config-Call', async () => {
+    const api = new CloudflareApi({
+      credentialStore: makeConfiguredStore(),
+      fetchFn: makeFetch(401, {}),
+      lockoutGuard: { isProtected: () => false },
+    });
+
+    await expect(api.removeRoute(TUNNEL_ID, 'app.example.com')).rejects.toMatchObject({
+      errorClass: 'cloudflare-auth-failed',
+    });
+  });
+
+  it('Token erscheint nicht in Fehler-Message bei Auth-Fehler', async () => {
+    const api = new CloudflareApi({
+      credentialStore: makeConfiguredStore(),
+      fetchFn: makeFetch(401, {}),
+      lockoutGuard: { isProtected: () => false },
+    });
+
+    try {
+      await api.removeRoute(TUNNEL_ID, 'app.example.com');
+      expect.fail('should have thrown');
+    } catch (err) {
+      expect(err.message).not.toContain(MOCK_TOKEN);
+    }
+  });
+});
+
+// ── Tests: deleteTunnel() (ADR-011) ───────────────────────────────────────────
+
+describe('CloudflareApi — deleteTunnel()', () => {
+  it('wirft protected-resource wenn LockoutGuard isProtected=true (keine fetch-Call)', async () => {
+    const fetchCalls = [];
+    const api = new CloudflareApi({
+      credentialStore: makeConfiguredStore(),
+      fetchFn: async (url) => { fetchCalls.push(url); return makeFetchResponse(200, {}); },
+      lockoutGuard: { isProtected: () => true },
+    });
+
+    await expect(api.deleteTunnel(TUNNEL_ID, 'devgui.example.com')).rejects.toMatchObject({
+      errorClass: 'protected-resource',
+      httpStatus: 422,
+    });
+    expect(fetchCalls).toHaveLength(0);
+  });
+
+  it('macht DELETE-Call mit korrekter Tunnel-URL bei nicht-geschütztem Tunnel', async () => {
+    let deletedUrl = null;
+    const api = new CloudflareApi({
+      credentialStore: makeConfiguredStore(),
+      fetchFn: async (url, init) => {
+        if (init?.method === 'DELETE') {
+          deletedUrl = url;
+          return makeFetchResponse(200, { success: true, result: {} });
+        }
+        return makeFetchResponse(200, {});
+      },
+      lockoutGuard: { isProtected: () => false },
+    });
+
+    const result = await api.deleteTunnel(TUNNEL_ID, 'my-tunnel');
+    expect(result.result).toBe('ok');
+    expect(deletedUrl).toContain(TUNNEL_ID);
+    expect(deletedUrl).toContain('cfd_tunnel');
+  });
+
+  it('wirft cloudflare-not-configured wenn keine Credentials', async () => {
+    const api = new CloudflareApi({
+      credentialStore: makeCredentialStore({}),
+      lockoutGuard: { isProtected: () => false },
+    });
+
+    await expect(api.deleteTunnel(TUNNEL_ID, 'my-tunnel')).rejects.toMatchObject({
+      errorClass: 'cloudflare-not-configured',
+    });
+  });
+
+  it('wirft cloudflare-auth-failed bei 401', async () => {
+    const api = new CloudflareApi({
+      credentialStore: makeConfiguredStore(),
+      fetchFn: makeFetch(401, {}),
+      lockoutGuard: { isProtected: () => false },
+    });
+
+    await expect(api.deleteTunnel(TUNNEL_ID, 'my-tunnel')).rejects.toMatchObject({
+      errorClass: 'cloudflare-auth-failed',
+    });
+  });
+
+  it('wirft not-found bei 404', async () => {
+    const api = new CloudflareApi({
+      credentialStore: makeConfiguredStore(),
+      fetchFn: makeFetch(404, {}),
+      lockoutGuard: { isProtected: () => false },
+    });
+
+    await expect(api.deleteTunnel(TUNNEL_ID, 'my-tunnel')).rejects.toMatchObject({
+      errorClass: 'not-found',
+    });
+  });
+});
