@@ -37,6 +37,7 @@ import { FactoryView } from './FactoryView.jsx';
 import { GitHubView } from './GitHubView.jsx';
 import { VpsView } from './VpsView.jsx';
 import { CloudflareView } from './CloudflareView.jsx';
+import { DeploymentsView } from './DeploymentsView.jsx';
 import { SettingsView } from './SettingsView.jsx';
 
 // ── Entry-Panel tile definitions ──────────────────────────────────────────────
@@ -63,6 +64,11 @@ const TILES = [
     label: 'Fabrik (dev-gui)',
     description: 'Interaktive Claude-Code-Session, Flow-Trigger und Status.',
   },
+];
+
+/** Additional nav routes (not tiles — available in NavBar only). */
+const EXTRA_NAV = [
+  { id: 'deployments', label: 'Deployments' },
 ];
 
 // ── NavBar ────────────────────────────────────────────────────────────────────
@@ -97,7 +103,7 @@ function NavBar({ currentView, onNavigate }) {
       )}
 
       {/* Per-view nav links — hidden on panel */}
-      {!onPanel && TILES.map(({ id, label }) => (
+      {!onPanel && [...TILES, ...EXTRA_NAV].map(({ id, label }) => (
         <a
           key={id}
           href={`#/${id}`}
@@ -239,11 +245,12 @@ export function AppShell() {
           teardown. Re-entering the factory view starts a fresh session. */}
       {view !== 'panel' && (
         <div style={styles.viewPort}>
-          {view === 'factory'    && <FactoryView    onNavigate={navigate} />}
-          {view === 'github'     && <GitHubView     onNavigate={navigate} />}
-          {view === 'vps'        && <VpsView        onNavigate={navigate} />}
-          {view === 'cloudflare' && <CloudflareView onNavigate={navigate} />}
-          {view === 'settings'   && <SettingsView   onNavigate={navigate} />}
+          {view === 'factory'     && <FactoryView      onNavigate={navigate} />}
+          {view === 'github'      && <GitHubView      onNavigate={navigate} />}
+          {view === 'vps'         && <VpsView         onNavigate={navigate} />}
+          {view === 'cloudflare'  && <CloudflareView  onNavigate={navigate} />}
+          {view === 'deployments' && <DeploymentsView onNavigate={navigate} />}
+          {view === 'settings'    && <SettingsView    onNavigate={navigate} />}
         </div>
       )}
     </div>

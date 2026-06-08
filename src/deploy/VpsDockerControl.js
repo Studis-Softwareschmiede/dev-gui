@@ -36,6 +36,7 @@
 
 import { Client } from 'ssh2';
 import { createHash } from 'node:crypto';
+import { isValidHostname } from './hostnameSanitizer.js';
 
 /** SSH-Verbindungs-Timeout in ms. */
 const CONNECT_TIMEOUT_MS = 15_000;
@@ -552,17 +553,6 @@ function shellEscape(value) {
  */
 function isValidContainerId(id) {
   return typeof id === 'string' && id.length > 0 && /^[a-zA-Z0-9_-]+$/.test(id);
-}
-
-/**
- * Validiert einen Hostname auf den DNS-Zeichensatz.
- * Erlaubt: a-z A-Z 0-9 . - _ (RFC 1123 + Unterstriche für lokale Namen).
- *
- * @param {string} hostname
- * @returns {boolean}
- */
-function isValidHostname(hostname) {
-  return typeof hostname === 'string' && hostname.length > 0 && /^[a-zA-Z0-9._-]+$/.test(hostname);
 }
 
 // ── Fehlerklassifizierung ──────────────────────────────────────────────────────
