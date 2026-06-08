@@ -35,6 +35,7 @@
  */
 
 import { Client } from 'ssh2';
+import { createHash } from 'node:crypto';
 
 /** SSH-Verbindungs-Timeout in ms. */
 const CONNECT_TIMEOUT_MS = 15_000;
@@ -104,6 +105,7 @@ export class VpsDockerControl {
    * @param {VpsTarget} vps
    * @param {string}    image
    * @param {object}    [opts]
+   * @param {string}    [opts.hostFingerprint]    - SHA-256-Fingerprint für Host-Key-Verifikation
    * @param {Function}  [opts._sshClientFactory] - Testbare SSH-Client-Fabrik (für Unit-Tests)
    * @returns {Promise<{ result: 'ok'|'error', reason?: string, errorClass?: string }>}
    */
@@ -123,6 +125,7 @@ export class VpsDockerControl {
         targetUser: vps.targetUser,
         command: cmd,
         timeoutMs: PULL_TIMEOUT_MS,
+        hostFingerprint: opts.hostFingerprint ?? null,
         sshClientFactory: opts._sshClientFactory,
       });
       return { result: 'ok' };
@@ -145,12 +148,22 @@ export class VpsDockerControl {
    * @param {string}    image
    * @param {string}    hostname    - Wert für Label cloudflare.tunnel-hostname (z.B. "app.example.com")
    * @param {object}    [opts]
-   * @param {number}    [opts.hostPort]       - Host-Port (Default: 8080)
-   * @param {number}    [opts.containerPort]  - Container-Port (Default: 8080)
+   * @param {number}    [opts.hostPort]           - Host-Port (Default: 8080)
+   * @param {number}    [opts.containerPort]      - Container-Port (Default: 8080)
+   * @param {string}    [opts.hostFingerprint]    - SHA-256-Fingerprint für Host-Key-Verifikation
    * @param {Function}  [opts._sshClientFactory]
    * @returns {Promise<RunResult>}
    */
   async run(vps, image, hostname, opts = {}) {
+    // Security: hostname auf DNS-Zeichensatz validieren bevor er in Shell-Kommandos eingebettet wird
+    if (!isValidHostname(hostname)) {
+      return {
+        result: 'error',
+        reason: 'Ungültiger Hostname (nur DNS-Zeichen erlaubt: a-z A-Z 0-9 . - _)',
+        errorClass: 'error',
+      };
+    }
+
     const privateKey = await this.#loadPrivateKey(vps.targetUser);
     if (!privateKey.ok) return privateKey.error;
 
@@ -159,13 +172,16 @@ export class VpsDockerControl {
 
     // Security: alle Werte via Shell-Escaping absichern, bevor sie in den Befehl eingebettet werden
     const escapedImage = shellEscape(image);
-    const escapedHostname = shellEscape(hostname);
+    // Den gesamten KEY=VALUE-Block als eine Shell-Einheit quoten, damit Sonderzeichen im Hostname
+    // (z.B. Punkte, Bindestriche) nicht als Shell-Metazeichen interpretiert werden.
+    // kein Shell-Command-Injection möglich (Single-Quote-Escaping schützt vor Injection).
+    const escapedLabel = shellEscape(`cloudflare.tunnel-hostname=${hostname}`);
 
     // docker run -d --label cloudflare.tunnel-hostname=<hostname> --restart unless-stopped
     //            -p <hostPort>:<containerPort> <image>
     const cmd = [
       'docker', 'run', '-d',
-      '--label', `cloudflare.tunnel-hostname=${escapedHostname}`,
+      '--label', escapedLabel,
       '--restart', 'unless-stopped',
       '-p', `${hostPort}:${containerPort}`,
       escapedImage,
@@ -179,6 +195,7 @@ export class VpsDockerControl {
         targetUser: vps.targetUser,
         command: cmd,
         timeoutMs: EXEC_TIMEOUT_MS,
+        hostFingerprint: opts.hostFingerprint ?? null,
         sshClientFactory: opts._sshClientFactory,
       });
       const containerId = stdout.trim();
@@ -199,6 +216,7 @@ export class VpsDockerControl {
    * @param {VpsTarget} vps
    * @param {string}    containerId
    * @param {object}    [opts]
+   * @param {string}    [opts.hostFingerprint]    - SHA-256-Fingerprint für Host-Key-Verifikation
    * @param {Function}  [opts._sshClientFactory]
    * @returns {Promise<{ result: 'ok'|'error', reason?: string, errorClass?: string }>}
    */
@@ -225,6 +243,7 @@ export class VpsDockerControl {
         targetUser: vps.targetUser,
         command: cmd,
         timeoutMs: EXEC_TIMEOUT_MS,
+        hostFingerprint: opts.hostFingerprint ?? null,
         sshClientFactory: opts._sshClientFactory,
       });
       return { result: 'ok' };
@@ -243,6 +262,7 @@ export class VpsDockerControl {
    *
    * @param {VpsTarget} vps
    * @param {object}    [opts]
+   * @param {string}    [opts.hostFingerprint]    - SHA-256-Fingerprint für Host-Key-Verifikation
    * @param {Function}  [opts._sshClientFactory]
    * @returns {Promise<PsResult>}
    */
@@ -266,6 +286,7 @@ export class VpsDockerControl {
         targetUser: vps.targetUser,
         command: cmd,
         timeoutMs: EXEC_TIMEOUT_MS,
+        hostFingerprint: opts.hostFingerprint ?? null,
         sshClientFactory: opts._sshClientFactory,
       });
       const containers = parsePsOutput(stdout);
@@ -325,6 +346,12 @@ export class VpsDockerControl {
  * Baut eine SSH-Verbindung auf und führt ein einzelnes Kommando aus.
  * Gibt stdout als String zurück; wirft bei Fehler.
  *
+ * Host-Key-Verifikation analog VpsProvisioner (ADR-008-Linie):
+ *   - Bei gesetztem `hostFingerprint`: SHA-256-Fingerprint berechnen + vergleichen;
+ *     Mismatch → HOST_KEY_MISMATCH-Fehler.
+ *   - Ohne `hostFingerprint`: TOFU — Host-Key wird akzeptiert (erster Connect).
+ *   Der Fingerprint wird NICHT in Response/Argv/Log exponiert.
+ *
  * @param {object} params
  * @param {string}   params.privateKey
  * @param {string}   params.host
@@ -332,6 +359,7 @@ export class VpsDockerControl {
  * @param {string}   params.targetUser
  * @param {string}   params.command
  * @param {number}   params.timeoutMs
+ * @param {string}   [params.hostFingerprint] - SHA-256-Fingerprint (Base64, ohne "SHA256:" Prefix)
  * @param {Function} [params.sshClientFactory]
  * @returns {Promise<string>} stdout
  */
@@ -339,6 +367,7 @@ function runSshCommand(params) {
   const {
     privateKey, host, port, targetUser,
     command, timeoutMs,
+    hostFingerprint = null,
     sshClientFactory,
   } = params;
 
@@ -387,22 +416,27 @@ function runSshCommand(params) {
         }
 
         let stdout = '';
-        let stderr = '';
+        let stderrBuf = '';
 
         stream.on('data', (data) => { stdout += data.toString(); });
-        stream.stderr.on('data', (data) => { stderr += data.toString(); });
+        stream.stderr.on('data', (data) => {
+          // S1: ersten ~200 Zeichen intern puffern für WARN-Log (nie in HTTP/Audit/WS-Sink)
+          if (stderrBuf.length < 200) {
+            stderrBuf += data.toString();
+          }
+        });
 
         stream.on('close', (code) => {
           clearTimeout(execTimeout);
           if (resolved) return;
 
           if (code !== 0) {
-            // stderr wird NICHT weitergeleitet (könnte Secrets enthalten oder lange sein),
-            // nur die Fehlerkategorie wird gemeldet
+            // stderr wird NICHT in Response/Log weitergeleitet (könnte Secrets enthalten);
+            // nur die ersten Zeichen landen intern im Error-Objekt für Prozess-internes Debugging
             const err = new Error(`docker-Kommando fehlgeschlagen (exit ${code})`);
             err.code = 'DOCKER_FAILED';
-            // Interne Referenz für Debugging (nur im Prozess, nie in Response/Log):
-            err._stderrLen = stderr.length;
+            // Interne Referenz für Debugging (nur im Prozess, nie in Response/Audit/WS):
+            err._stderrHint = stderrBuf.slice(0, 200);
             safeReject(err);
           } else {
             safeResolve(stdout);
@@ -416,15 +450,40 @@ function runSshCommand(params) {
       safeReject(err);
     });
 
+    // Host-Key-Verifikation analog VpsProvisioner (ADR-008-Linie):
+    // SHA-256-Fingerprint berechnen (synchron — ssh2 erwartet sync return);
+    // Fingerprint wird NICHT in Response/Argv/Log exponiert.
+    const hostVerifier = (key) => {
+      let hash = null;
+      try {
+        hash = createHash('sha256').update(key).digest('base64');
+      } catch {
+        // Fingerprint-Berechnung nicht kritisch — Verifikation weiterführen
+      }
+
+      if (hostFingerprint) {
+        if (hash === hostFingerprint) {
+          return true;
+        }
+        // Fingerprint-Mismatch → Verbindung ablehnen
+        const fpErr = new Error('SSH-Host-Key-Fingerprint stimmt nicht überein (möglicher MITM)');
+        fpErr.code = 'HOST_KEY_MISMATCH';
+        // setTimeout nötig, da ssh2 hostVerifier keine async-Fehler propagiert
+        setTimeout(() => safeReject(fpErr), 0);
+        return false;
+      }
+
+      // TOFU: kein Fingerprint konfiguriert → akzeptieren
+      return true;
+    };
+
     conn.connect({
       host,
       port,
       username: targetUser,
       privateKey,
       readyTimeout: CONNECT_TIMEOUT_MS,
-      // TOFU: kein hostFingerprint für Docker-Operationen (VpsProvisioner-Linie)
-      // Ein Operator, der strikte Host-Key-Verifikation will, kann VpsProvisioner
-      // für einen vorangehenden Provision-Schritt verwenden.
+      hostVerifier,
     });
   });
 }
@@ -467,8 +526,9 @@ function parsePsOutput(output) {
  * Bettet einen Wert sicher in einen Shell-Befehl ein (Single-Quote-Escaping).
  * Genau das Muster wie in VpsProvisioner (Single-Quotes: ' → '\'').
  *
- * Sicherheits-Annahme: kein Newline-Injection möglich, da die Werte aus
- * validierten Quellen (CredentialStore, API-Requests) stammen.
+ * Sicherheits-Annahme: kein Shell-Command-Injection möglich — Single-Quote-Escaping
+ * verhindert das Ausbrechen aus dem quotierten Wert. (Hinweis: Newlines sind in
+ * Single-Quotes syntaktisch legal; der Schutz betrifft Command-Injection, nicht Newlines.)
  *
  * @param {string} value
  * @returns {string} - in Single-Quotes eingebetteter, escaped Wert
@@ -489,6 +549,17 @@ function shellEscape(value) {
  */
 function isValidContainerId(id) {
   return typeof id === 'string' && id.length > 0 && /^[a-zA-Z0-9_-]+$/.test(id);
+}
+
+/**
+ * Validiert einen Hostname auf den DNS-Zeichensatz.
+ * Erlaubt: a-z A-Z 0-9 . - _ (RFC 1123 + Unterstriche für lokale Namen).
+ *
+ * @param {string} hostname
+ * @returns {boolean}
+ */
+function isValidHostname(hostname) {
+  return typeof hostname === 'string' && hostname.length > 0 && /^[a-zA-Z0-9._-]+$/.test(hostname);
 }
 
 // ── Fehlerklassifizierung ──────────────────────────────────────────────────────

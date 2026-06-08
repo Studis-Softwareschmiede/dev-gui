@@ -44,26 +44,36 @@ const TEST_VPS = { host: '1.2.3.4', port: 22, targetUser: 'root' };
  * ein exec-Kommando mit dem angegebenen stdout und exitCode ausführt.
  *
  * @param {object} opts
- * @param {string}  [opts.stdout]       - stdout des Remote-Kommandos
- * @param {number}  [opts.exitCode]     - exit code (Default: 0)
- * @param {Error}   [opts.connectError] - wenn gesetzt: emit('error') statt 'ready'
+ * @param {string}  [opts.stdout]         - stdout des Remote-Kommandos
+ * @param {number}  [opts.exitCode]       - exit code (Default: 0)
+ * @param {Error}   [opts.connectError]   - wenn gesetzt: emit('error') statt 'ready'
+ * @param {Buffer}  [opts.fakeHostKey]    - wenn gesetzt: hostVerifier wird mit diesem Key aufgerufen
  * @param {(cmd: string) => void} [opts.onCommand] - Callback zum Abfangen des Kommandos
  */
 function makeMockSshClient({
   stdout = '',
   exitCode = 0,
   connectError = null,
+  fakeHostKey = null,
   onCommand = null,
 } = {}) {
   return () => {
     const client = new EventEmitter();
 
-    client.connect = (_config) => {
+    client.connect = (config) => {
       if (connectError) {
         setTimeout(() => client.emit('error', connectError), 0);
-      } else {
-        setTimeout(() => client.emit('ready'), 0);
+        return;
       }
+      // hostVerifier aufrufen (analog ssh2 — synchron vor ready)
+      if (fakeHostKey && typeof config.hostVerifier === 'function') {
+        const accepted = config.hostVerifier(fakeHostKey);
+        if (!accepted) {
+          // hostVerifier hat reject ausgelöst (via setTimeout intern) — kein ready
+          return;
+        }
+      }
+      setTimeout(() => client.emit('ready'), 0);
     };
 
     client.exec = (cmd, _opts, callback) => {
@@ -71,7 +81,6 @@ function makeMockSshClient({
 
       const stream = new EventEmitter();
       stream.stderr = new EventEmitter();
-      stream.stderr.on = () => {};
 
       setTimeout(() => callback(null, stream), 0);
 
@@ -341,29 +350,26 @@ describe('VpsDockerControl — run() — AC2: Label-Konvention', () => {
     expect(result.reason).not.toContain(FAKE_PRIVATE_KEY);
   });
 
-  it('Hostname mit Single-Quote wird sicher escaped (kein Shell-Injection)', async () => {
+  it('Hostname mit Single-Quote wird durch Validierung abgelehnt (kein Shell-Injection)', async () => {
     await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
     const ctrl = new VpsDockerControl(store);
 
-    // Hostname mit Single-Quote: wird über Shell-Escaping (' → '\'') entschärft
+    // Hostname mit Single-Quote: wird durch Hostname-Validierung (DNS-Zeichensatz) abgelehnt
+    // bevor er in Shell-Kommandos eingebettet wird — kein Shell-Command-Injection möglich
     const hostnameWithQuote = "app.example.com'test";
-    let capturedCmd = null;
+    let sshCalled = false;
 
-    await ctrl.run(TEST_VPS, 'ghcr.io/org/app:latest', hostnameWithQuote, {
+    const result = await ctrl.run(TEST_VPS, 'ghcr.io/org/app:latest', hostnameWithQuote, {
       _sshClientFactory: makeMockSshClient({
         stdout: 'cid123',
         exitCode: 0,
-        onCommand: (cmd) => { capturedCmd = cmd; },
+        onCommand: () => { sshCalled = true; },
       }),
     });
 
-    // Single-Quote-Escaping muss aktiv sein (' → '\'')
-    expect(capturedCmd).toContain("'\\''");
-    // Der rohe, unescaped Single-Quote darf nicht im Befehl erscheinen
-    // (d.h. es darf kein einzelnes ' im Label-Wert stehen — nur als Teil von '\'')
-    const labelPart = capturedCmd.split('--restart')[0];
-    // Im Kommando muss die Escape-Sequenz stehen
-    expect(labelPart).toContain("'\\''");
+    // Hostname mit ' wird als ungültig erkannt — kein SSH-Call, kein Shell-Injection
+    expect(result.result).toBe('error');
+    expect(sshCalled).toBe(false);
   });
 });
 
@@ -626,5 +632,175 @@ describe('VpsDockerControl — Fehlerklassen-Mapping', () => {
 
     expect(result.result).toBe('error');
     expect(result.errorClass).toBe('unreachable');
+  });
+});
+
+// ── hostVerifier — TOFU + Mismatch ────────────────────────────────────────────
+
+describe('VpsDockerControl — hostVerifier (ADR-008-Linie)', () => {
+  let dir, store;
+
+  beforeEach(async () => {
+    ({ store, dir } = await makeTmpStore());
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('TOFU: kein hostFingerprint → Verbindung wird akzeptiert (result:ok)', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    // fakeHostKey simuliert den Host-Key-Buffer, den ssh2 an hostVerifier übergibt
+    const fakeHostKey = Buffer.from('fake-host-key-bytes');
+
+    const result = await ctrl.pull(TEST_VPS, 'ghcr.io/org/image:latest', {
+      _sshClientFactory: makeMockSshClient({
+        stdout: '',
+        exitCode: 0,
+        fakeHostKey,
+      }),
+      // kein hostFingerprint → TOFU
+    });
+
+    expect(result.result).toBe('ok');
+  });
+
+  it('Fingerprint-Match: korrekte hostFingerprint → Verbindung wird akzeptiert (result:ok)', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    const fakeHostKey = Buffer.from('fake-host-key-for-match');
+    // SHA-256 des fakeHostKey berechnen (Base64 ohne Prefix — wie VpsProvisioner)
+    const { createHash } = await import('node:crypto');
+    const expectedFingerprint = createHash('sha256').update(fakeHostKey).digest('base64');
+
+    const result = await ctrl.pull(TEST_VPS, 'ghcr.io/org/image:latest', {
+      _sshClientFactory: makeMockSshClient({
+        stdout: '',
+        exitCode: 0,
+        fakeHostKey,
+      }),
+      hostFingerprint: expectedFingerprint,
+    });
+
+    expect(result.result).toBe('ok');
+  });
+
+  it('Fingerprint-Mismatch: falscher hostFingerprint → errorClass:host-key-mismatch', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    const fakeHostKey = Buffer.from('fake-host-key-for-mismatch');
+
+    const result = await ctrl.pull(TEST_VPS, 'ghcr.io/org/image:latest', {
+      _sshClientFactory: makeMockSshClient({
+        stdout: '',
+        exitCode: 0,
+        fakeHostKey,
+      }),
+      hostFingerprint: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==', // falscher Fingerprint
+    });
+
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('host-key-mismatch');
+    // Kein Geheim-Leak im reason
+    expect(result.reason).not.toContain(FAKE_PRIVATE_KEY);
+    expect(result.reason).not.toContain('FAKEPRIVATE');
+  });
+
+  it('Fingerprint-Mismatch: reason enthält keinen Host-Key-Hash (kein Geheim-Leak)', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    const fakeHostKey = Buffer.from('sensitive-host-key-data');
+
+    const result = await ctrl.pull(TEST_VPS, 'ghcr.io/org/image:latest', {
+      _sshClientFactory: makeMockSshClient({
+        stdout: '',
+        exitCode: 0,
+        fakeHostKey,
+      }),
+      hostFingerprint: 'wrongfingerprint==',
+    });
+
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('host-key-mismatch');
+    // Fingerprint darf NICHT im reason erscheinen
+    expect(result.reason).not.toContain('wrongfingerprint');
+    expect(result.reason).not.toContain('sensitive-host-key');
+  });
+});
+
+// ── run() — Hostname-Validierung ──────────────────────────────────────────────
+
+describe('VpsDockerControl — run() — Hostname-Validierung (I2)', () => {
+  let dir, store;
+
+  beforeEach(async () => {
+    ({ store, dir } = await makeTmpStore());
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('ungültiger Hostname (Semikolon) → result:error ohne SSH-Call', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    let sshCalled = false;
+    const result = await ctrl.run(TEST_VPS, 'ghcr.io/org/app:latest', 'app.example.com; rm -rf /', {
+      _sshClientFactory: makeMockSshClient({
+        onCommand: () => { sshCalled = true; },
+      }),
+    });
+
+    expect(result.result).toBe('error');
+    expect(sshCalled).toBe(false);
+  });
+
+  it('ungültiger Hostname (Leerzeichen) → result:error ohne SSH-Call', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    let sshCalled = false;
+    const result = await ctrl.run(TEST_VPS, 'ghcr.io/org/app:latest', 'bad hostname', {
+      _sshClientFactory: makeMockSshClient({
+        onCommand: () => { sshCalled = true; },
+      }),
+    });
+
+    expect(result.result).toBe('error');
+    expect(sshCalled).toBe(false);
+  });
+
+  it('gültiger Hostname (DNS-Zeichen) → Verbindung wird aufgebaut', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    const result = await ctrl.run(TEST_VPS, 'ghcr.io/org/app:latest', 'app.example.com', {
+      _sshClientFactory: makeMockSshClient({ stdout: 'cid123', exitCode: 0 }),
+    });
+
+    expect(result.result).toBe('ok');
+  });
+
+  it('Label KEY=VALUE-Block ist als eine Shell-Einheit gequotet', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    let capturedCmd = null;
+    await ctrl.run(TEST_VPS, 'ghcr.io/org/app:latest', 'app.example.com', {
+      _sshClientFactory: makeMockSshClient({
+        stdout: 'cid123',
+        exitCode: 0,
+        onCommand: (cmd) => { capturedCmd = cmd; },
+      }),
+    });
+
+    // Der gesamte KEY=VALUE-Block muss als Single-Quote-Einheit erscheinen
+    expect(capturedCmd).toContain("'cloudflare.tunnel-hostname=app.example.com'");
   });
 });
