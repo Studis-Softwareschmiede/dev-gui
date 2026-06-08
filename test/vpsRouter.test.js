@@ -14,6 +14,11 @@
  *   AC10 — Audit-First: Audit-Eintrag vor Mutation; Audit-Fail blockiert Mutation;
  *           Token nie in Response/Audit
  *
+ * vps-ssh-key-assignment:
+ *   AC3  — sshKeyAssignment-Labels im Body → 201; ungültige Labels → 400
+ *   AC5  — CloudInitError(missing-ssh-key) → 422 errorClass
+ *   AC6  — Label-Zuordnung im Audit, kein Key-Material
+ *
  * Strategy:
  *   - VpsProviderRegistry wird als Mock injiziert (keine echten Adapter/Fetch-Calls)
  *   - AuditStore ist real (in-memory) — prüft Einträge
@@ -490,6 +495,48 @@ describe('vpsRouter — AC7/AC8: Create-from-scratch', () => {
     expect(res.status).toBe(400);
   });
 
+  it('AC3 (vps-ssh-key-assignment) — sshKeyAssignment mit Labels im Body → 201', async () => {
+    ts = await makeTestServer();
+    const res = await ts.req('POST', '/api/vps/machines/hetzner', {
+      name: 'new-srv',
+      region: 'nbg1',
+      serverType: 'cx11',
+      sshKeyAssignment: { root: 'root', alex: 'alex' },
+    });
+    expect(res.status).toBe(201);
+    const data = JSON.parse(res.body);
+    expect(data.result).toBe('ok');
+  });
+
+  it('AC3 — ungültiges sshKeyAssignment-Label (Sonderzeichen) → 400', async () => {
+    ts = await makeTestServer();
+    const res = await ts.req('POST', '/api/vps/machines/hetzner', {
+      name: 'new-srv',
+      region: 'nbg1',
+      serverType: 'cx11',
+      sshKeyAssignment: { root: '../../../etc/passwd', alex: 'alex' },
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('AC5 (vps-ssh-key-assignment) — CloudInitError(missing-ssh-key) → 422 errorClass', async () => {
+    ts = await makeTestServer({
+      registry: makeMockRegistry({
+        throwOn: 'create',
+        createResult: new CloudInitError('Fehlender SSH-Public-Key für User root', 'missing-ssh-key', 422),
+      }),
+    });
+    const res = await ts.req('POST', '/api/vps/machines/hetzner', {
+      name: 'srv',
+      region: 'nbg1',
+      serverType: 'cx11',
+      sshKeyAssignment: { root: 'root', alex: 'alex' },
+    });
+    expect(res.status).toBe(422);
+    const data = JSON.parse(res.body);
+    expect(data.errorClass).toBe('missing-ssh-key');
+  });
+
   it('AC8 — Create-Fehler → result:"error", kein Token-Leak', async () => {
     ts = await makeTestServer({
       registry: makeMockRegistry({
@@ -582,6 +629,26 @@ describe('vpsRouter — AC10: Audit-First', () => {
     const entries = audit.getAll();
     const intent = entries.find((e) => e.command.includes('vps:create:hetzner:my-server'));
     expect(intent).toBeDefined();
+  });
+
+  it('AC6 (vps-ssh-key-assignment) — Label-Zuordnung im Audit ohne Key-Material', async () => {
+    ts = await makeTestServer({ audit });
+    await ts.req('POST', '/api/vps/machines/hetzner', {
+      name: 'srv',
+      region: 'nbg1',
+      serverType: 'cx11',
+      sshKeyAssignment: { root: 'root', alex: 'alex' },
+    });
+    const entries = audit.getAll();
+    // Label-Namen müssen im Audit erscheinen
+    const intent = entries.find((e) => e.command.includes('ssh[root=root,alex=alex]'));
+    expect(intent).toBeDefined();
+    // Kein Key-Material im Audit
+    for (const entry of entries) {
+      expect(JSON.stringify(entry)).not.toContain(MOCK_TOKEN);
+      // keine ssh-ed25519 Key-Strings (Public-Keys) im Audit
+      expect(JSON.stringify(entry)).not.toMatch(/ssh-ed25519/);
+    }
   });
 
   it('AC10 — Token erscheint NICHT in Audit-Einträgen', async () => {

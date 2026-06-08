@@ -12,6 +12,12 @@
  *   AC7  — create routen an den richtigen Adapter
  *   AC10 — Token erscheint NICHT in VpsRegistryError-Messages
  *
+ * vps-ssh-key-assignment:
+ *   AC3  — Label→PublicKey-Auflösung; Public-Keys als { root, alex } an build() übergeben
+ *   AC4  — nur getPublicKey, kein getPlaintext für ssh/-Pfade
+ *   AC5  — fehlendes Public-Key → CloudInitError(missing-ssh-key), kein Provider-Call
+ *   AC6  — Audit ohne Key-Material
+ *
  * Strategy:
  *   - CredentialStore wird als Stub injiziert
  *   - Adapter werden als Stubs injiziert (kein echter Fetch)
@@ -24,7 +30,7 @@ const MOCK_TOKEN = 'registry-test-token-never-in-output';
 
 // ── Mock-Bausteine ─────────────────────────────────────────────────────────────
 
-function makeCredentialStore(tokensByProvider = {}) {
+function makeCredentialStore(tokensByProvider = {}, publicKeysByLabel = {}) {
   return {
     async getMeta(key) {
       // Gibt "set" wenn ein Token für den Provider gesetzt ist
@@ -34,6 +40,9 @@ function makeCredentialStore(tokensByProvider = {}) {
     async getPlaintext(key) {
       const provider = key.replace('credentials/vps/', '').replace('_api_token', '');
       return tokensByProvider[provider] ?? null;
+    },
+    async getPublicKey(label) {
+      return publicKeysByLabel[label] ?? null;
     },
   };
 }
@@ -238,12 +247,21 @@ describe('VpsProviderRegistry — AC1/AC5/AC6: start() / stop()', () => {
   });
 });
 
+// ── Konstanten für SSH-Test-Keys ───────────────────────────────────────────────
+
+const ROOT_PUB_KEY = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIRootKeyTestOnlyNotReal root@test';
+const ALEX_PUB_KEY = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAlexKeyTestOnlyNotReal alex@test';
+
 // ── AC7/AC8: create() ─────────────────────────────────────────────────────────
 
 describe('VpsProviderRegistry — AC7: create()', () => {
   it('AC7 — routet create() an den richtigen Adapter mit Parametern', async () => {
     let capturedParams = null;
-    const store = makeCredentialStore({ hetzner: MOCK_TOKEN });
+    // Store mit Token und Public-Keys für beide Labels
+    const store = makeCredentialStore(
+      { hetzner: MOCK_TOKEN },
+      { root: ROOT_PUB_KEY, alex: ALEX_PUB_KEY },
+    );
 
     // CloudInitBuilder als Stub injizieren: gibt direkt ein gültiges #cloud-config zurück.
     // Die vollständige Validierung der CloudInitBuilder-Vorlage (AC1–AC8) liegt in
@@ -270,18 +288,19 @@ describe('VpsProviderRegistry — AC7: create()', () => {
         hostinger: makeAdapter(),
       },
     });
-    // ADR-009: Client übergibt NUR fachliche Parameter (keine userData/sshPublicKeys).
-    // Die Registry erzeugt userData server-intern via CloudInitBuilder.
+    // ADR-009: Client übergibt NUR fachliche Parameter + Label-Referenzen (sshKeyAssignment).
+    // Die Registry löst Labels store-intern auf und erzeugt userData via CloudInitBuilder.
     const machine = await registry.create('hetzner', {
       name: 'new-srv',
       region: 'nbg1',
       serverType: 'cx11',
+      sshKeyAssignment: { root: 'root', alex: 'alex' },
     });
     expect(capturedParams.name).toBe('new-srv');
     // userData wird server-intern erzeugt (CloudInitBuilder, ADR-009)
     expect(typeof capturedParams.userData).toBe('string');
     expect(capturedParams.userData).toMatch(/^#cloud-config/);
-    // sshPublicKeys wird server-intern aufgelöst (SSHKEYS_STUB_99 — derzeit leer)
+    // sshPublicKeys wird server-intern aufgelöst
     expect(capturedParams.sshPublicKeys).toBeDefined();
     expect(machine.serverId).toBe('42');
   });
@@ -292,5 +311,227 @@ describe('VpsProviderRegistry — AC7: create()', () => {
     await expect(
       registry.create('ionos', { name: 'x', region: 'de', serverType: 'small' }),
     ).rejects.toThrow(VpsRegistryError);
+  });
+});
+
+// ── AC3/AC4/AC5: SSH-Key-Auflösung (vps-ssh-key-assignment) ──────────────────
+
+import { CloudInitError } from '../src/vps/CloudInitBuilder.js';
+
+describe('VpsProviderRegistry — SSH-Key-Auflösung (vps-ssh-key-assignment)', () => {
+  /** Baut einen Adapter-Stub, der die übergebenen sshPublicKeys aufzeichnet. */
+  function makeCaptureAdapter() {
+    let captured = null;
+    return {
+      getCapture: () => captured,
+      adapter: {
+        capabilities: () => ({ list: true, start: true, stop: true, create: true }),
+        listMachines: async () => [],
+        start: async () => ({ result: 'ok' }),
+        stop: async () => ({ result: 'ok' }),
+        create: async (params, _token) => {
+          captured = params;
+          return { provider: 'hetzner', serverId: '99', name: params.name, status: 'provisioning',
+            ipv4: null, ipv6: null, region: null, serverType: null, createdAt: null };
+        },
+      },
+    };
+  }
+
+  it('AC3 — löst Label-Referenzen zu Public-Keys auf und übergibt { root, alex } an build()', async () => {
+    let buildArgs = null;
+    const cloudInitBuilderStub = {
+      build: (params) => { buildArgs = params; return '#cloud-config\n# stub\n'; },
+    };
+    const store = makeCredentialStore(
+      { hetzner: MOCK_TOKEN },
+      { root: ROOT_PUB_KEY, alex: ALEX_PUB_KEY },
+    );
+    const { adapter } = makeCaptureAdapter();
+    const registry = new VpsProviderRegistry({
+      credentialStore: store,
+      cloudInitBuilder: cloudInitBuilderStub,
+      adapters: { hetzner: adapter, ionos: makeAdapter(), hostinger: makeAdapter() },
+    });
+
+    await registry.create('hetzner', {
+      name: 'srv',
+      region: 'nbg1',
+      serverType: 'cx11',
+      sshKeyAssignment: { root: 'root', alex: 'alex' },
+    });
+
+    // build() muss die aufgelösten Public-Keys erhalten
+    expect(buildArgs).not.toBeNull();
+    expect(buildArgs.sshPublicKeys.root).toBe(ROOT_PUB_KEY);
+    expect(buildArgs.sshPublicKeys.alex).toBe(ALEX_PUB_KEY);
+  });
+
+  it('AC4 — nur Public-Keys verlassen den Store (kein Private-Key-Pfad)', async () => {
+    let buildArgs = null;
+    const cloudInitBuilderStub = {
+      build: (params) => { buildArgs = params; return '#cloud-config\n# stub\n'; },
+    };
+    // Store mit Public-Key; kein Zugriff auf getPlaintext für ssh-Pfade
+    const store = makeCredentialStore(
+      { hetzner: MOCK_TOKEN },
+      { root: ROOT_PUB_KEY, alex: ALEX_PUB_KEY },
+    );
+    // getPlaintext-Aufrufe für SSH-Pfade überwachen — dürfen NICHT vorkommen
+    let plaintextCalledForSsh = false;
+    const origGetPlaintext = store.getPlaintext.bind(store);
+    store.getPlaintext = async (key) => {
+      if (key.startsWith('ssh/')) plaintextCalledForSsh = true;
+      return origGetPlaintext(key);
+    };
+
+    const { adapter } = makeCaptureAdapter();
+    const registry = new VpsProviderRegistry({
+      credentialStore: store,
+      cloudInitBuilder: cloudInitBuilderStub,
+      adapters: { hetzner: adapter, ionos: makeAdapter(), hostinger: makeAdapter() },
+    });
+
+    await registry.create('hetzner', {
+      name: 'srv',
+      region: 'nbg1',
+      serverType: 'cx11',
+      sshKeyAssignment: { root: 'root', alex: 'alex' },
+    });
+
+    // Private-Key-Klartext-Pfad darf für SSH-Schlüssel NICHT aufgerufen werden
+    expect(plaintextCalledForSsh).toBe(false);
+    // build() erhält nur Public-Keys (kein Private-Key-Material)
+    expect(buildArgs.sshPublicKeys.root).toBe(ROOT_PUB_KEY);
+    expect(buildArgs.sshPublicKeys.alex).toBe(ALEX_PUB_KEY);
+  });
+
+  it('AC5 — fehlendes Public-Key für root → CloudInitError(missing-ssh-key)', async () => {
+    const store = makeCredentialStore(
+      { hetzner: MOCK_TOKEN },
+      { alex: ALEX_PUB_KEY }, // kein root-Key
+    );
+    // Echter CloudInitBuilder — wirft bei fehlendem Key
+    const registry = new VpsProviderRegistry({
+      credentialStore: store,
+      adapters: { hetzner: makeAdapter(), ionos: makeAdapter(), hostinger: makeAdapter() },
+    });
+
+    await expect(
+      registry.create('hetzner', {
+        name: 'srv',
+        region: 'nbg1',
+        serverType: 'cx11',
+        sshKeyAssignment: { root: 'root', alex: 'alex' },
+      }),
+    ).rejects.toBeInstanceOf(CloudInitError);
+
+    try {
+      await registry.create('hetzner', {
+        name: 'srv',
+        region: 'nbg1',
+        serverType: 'cx11',
+        sshKeyAssignment: { root: 'root', alex: 'alex' },
+      });
+    } catch (err) {
+      expect(err.errorClass).toBe('missing-ssh-key');
+      expect(err.httpStatus).toBe(422);
+    }
+  });
+
+  it('AC5 — fehlendes Public-Key für alex → CloudInitError(missing-ssh-key)', async () => {
+    const store = makeCredentialStore(
+      { hetzner: MOCK_TOKEN },
+      { root: ROOT_PUB_KEY }, // kein alex-Key
+    );
+    const registry = new VpsProviderRegistry({
+      credentialStore: store,
+      adapters: { hetzner: makeAdapter(), ionos: makeAdapter(), hostinger: makeAdapter() },
+    });
+
+    await expect(
+      registry.create('hetzner', {
+        name: 'srv',
+        region: 'nbg1',
+        serverType: 'cx11',
+        sshKeyAssignment: { root: 'root', alex: 'alex' },
+      }),
+    ).rejects.toBeInstanceOf(CloudInitError);
+  });
+
+  it('AC5 — kein sshKeyAssignment übergeben → CloudInitError(missing-ssh-key) (kein Provider-Call)', async () => {
+    let adapterCalled = false;
+    const store = makeCredentialStore({ hetzner: MOCK_TOKEN }, {});
+    const registry = new VpsProviderRegistry({
+      credentialStore: store,
+      adapters: {
+        hetzner: {
+          capabilities: () => ({ list: true, start: true, stop: true, create: true }),
+          listMachines: async () => [],
+          start: async () => ({ result: 'ok' }),
+          stop: async () => ({ result: 'ok' }),
+          create: async () => { adapterCalled = true; return {}; },
+        },
+        ionos: makeAdapter(),
+        hostinger: makeAdapter(),
+      },
+    });
+
+    await expect(
+      registry.create('hetzner', { name: 'srv', region: 'nbg1', serverType: 'cx11' }),
+    ).rejects.toBeInstanceOf(CloudInitError);
+
+    // kein Provider-Call bei fehlendem Key
+    expect(adapterCalled).toBe(false);
+  });
+
+  it('AC3 — Default-Vorbelegung: gleichnamiges Label "root"/"alex" wird korrekt aufgelöst', async () => {
+    let buildArgs = null;
+    const cloudInitBuilderStub = {
+      build: (params) => { buildArgs = params; return '#cloud-config\n# stub\n'; },
+    };
+    const store = makeCredentialStore(
+      { hetzner: MOCK_TOKEN },
+      { root: ROOT_PUB_KEY, alex: ALEX_PUB_KEY },
+    );
+    const { adapter } = makeCaptureAdapter();
+    const registry = new VpsProviderRegistry({
+      credentialStore: store,
+      cloudInitBuilder: cloudInitBuilderStub,
+      adapters: { hetzner: adapter, ionos: makeAdapter(), hostinger: makeAdapter() },
+    });
+
+    // Labels entsprechen den Rollen-Namen (gleichnamige Default-Zuordnung)
+    await registry.create('hetzner', {
+      name: 'srv',
+      region: 'nbg1',
+      serverType: 'cx11',
+      sshKeyAssignment: { root: 'root', alex: 'alex' },
+    });
+
+    expect(buildArgs.sshPublicKeys.root).toBe(ROOT_PUB_KEY);
+    expect(buildArgs.sshPublicKeys.alex).toBe(ALEX_PUB_KEY);
+  });
+
+  it('AC6 — Audit ohne Key-Material: sshPublicKeys erscheint nicht in VpsRegistryError-Messages', async () => {
+    const store = makeCredentialStore({ hetzner: MOCK_TOKEN }, {});
+    const registry = new VpsProviderRegistry({
+      credentialStore: store,
+      adapters: { hetzner: makeAdapter(), ionos: makeAdapter(), hostinger: makeAdapter() },
+    });
+
+    try {
+      await registry.create('hetzner', {
+        name: 'srv',
+        region: 'nbg1',
+        serverType: 'cx11',
+        sshKeyAssignment: { root: 'root', alex: 'alex' },
+      });
+    } catch (err) {
+      // Fehlermeldung darf keine Public-Key-Werte enthalten
+      expect(err.message).not.toContain(ROOT_PUB_KEY);
+      expect(err.message).not.toContain(ALEX_PUB_KEY);
+      expect(err.message).not.toContain(MOCK_TOKEN);
+    }
   });
 });

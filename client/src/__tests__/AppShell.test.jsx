@@ -244,8 +244,8 @@ describe('AppShell — AC2: Factory view', () => {
 describe('AppShell — AC3: Placeholder views', () => {
   // GitHub-Ansicht ist kein Platzhalter mehr — es enthält ein Anlege-Formular (github-repo-create).
   // Cloudflare-Ansicht ist kein Platzhalter mehr — view-cloudflare #108 implementiert.
+  // VPS-Ansicht ist kein Platzhalter mehr — sie enthält Machine-Listing + Create-Formular (#99).
   const placeholders = [
-    { tile: /^vps/i, view: '#/vps', label: /vps-ansicht/i },
   ];
 
   for (const { tile, view, label } of placeholders) {
@@ -288,6 +288,23 @@ describe('AppShell — AC3: Placeholder views', () => {
     await waitFor(() => {
       expect(window.location.hash).toBe('#/cloudflare');
       expect(getByRole('main', { name: /cloudflare-ansicht/i })).toBeTruthy();
+    });
+  });
+
+  // VPS-Ansicht (#99): kein Platzhalter mehr — zeigt Machine-Listing + Create-Button
+  it('clicking #/vps tile renders VPS view with h1 heading "VPS"', async () => {
+    window.location.hash = '';
+    const { getByRole } = render(React.createElement(AppShell));
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /^vps/i }));
+    });
+
+    await waitFor(() => {
+      expect(window.location.hash).toBe('#/vps');
+      expect(getByRole('main', { name: /vps-ansicht/i })).toBeTruthy();
+      // h1-Heading "VPS" vorhanden
+      expect(getByRole('heading', { name: /^vps$/i })).toBeTruthy();
     });
   });
 
