@@ -46,14 +46,16 @@ version: 1
 ## Verträge
 > Pfade/Felder kanonisch; Boundary-Detail in **ADR-012** (`DeployOrchestrator`, `VpsDockerControl`), **ADR-010** (`CloudflareApi`), **ADR-008** (SSH/`VpsProvisioner`-Linie).
 
-- **`Deployment` (Read-Model, live):** `{ vps, hostname, image, containerId?, status, routePresent: boolean, containerPresent: boolean }`. Drift sichtbar über `routePresent`/`containerPresent`.
-- **GET `/api/deployments`** → `{ deployments: Deployment[], errors?: [{ scope, errorClass }] }` (degradiert pro VPS/Zone).
-- **POST `/api/deployments`** — Body `{ image, vps, hostname }` → `{ result: "ok"|"error", deployment?, reason? }`.
-- **DELETE `/api/deployments/{vps}/{hostname}`** — Body `{ confirm: "<hostname>" }` → `{ result: "ok"|"error", reason? }`.
+> **Vertrags-Präzisierung (Spec-Gap-Resolution, analog O3):** `zoneId` wird server-seitig per Suffix-Match aus dem `hostname` aufgelöst (via `CloudflareApi.resolveZoneForHostname()` — längster Suffix-Match); der Client übergibt **keine** `zoneId`. `tunnelId` bleibt expliziter Parameter (pro Account können mehrere Tunnel existieren; eine eindeutige VPS→Tunnel-Bindung ist noch nicht spezifiziert — Frontend wählt per Dropdown/Auswahl aus den vorhandenen Tunneln). Kein Zone-Match → 422 `zone-not-found` (ohne Leak).
+
+- **`Deployment` (Read-Model, live):** `{ vps, hostname, image, containerId?, hostPort?, status, routePresent: boolean, containerPresent: boolean }`. `hostPort` ist der gemappte Host-Port (additiv, kann null sein). Drift sichtbar über `routePresent`/`containerPresent`.
+- **GET `/api/deployments?vps=<vpsId>&tunnelId=<tunnelId>`** → `{ deployments: Deployment[], errors?: [{ scope, errorClass }] }` (degradiert pro VPS/Zone). Query-Parameter `vps` und `tunnelId` sind Pflicht.
+- **POST `/api/deployments`** — Body `{ image, vps, hostname, tunnelId }` → `{ result: "ok"|"error", deployment?, reason? }`. (`zoneId` server-seitig aufgelöst.)
+- **DELETE `/api/deployments/{vps}/{hostname}`** — Body `{ confirm: "<hostname>", tunnelId }` → `{ result: "ok"|"error", reason? }`. (`zoneId` server-seitig aufgelöst.)
 - **Container-Label-Konvention:** `cloudflare.tunnel-hostname=<hostname>` (maßgeblich). Koexistenz mit `agent-flow.preview` / `agent-flow.compose-project` erlaubt (Wiederverwendung des `preview`-Mechanismus), aber `cloudflare.tunnel-hostname` ist die Reconcile-Bindung.
-- **VPS-Referenz:** ein konfigurierter VPS (Ziel-Schema analog ADR-008 `{ host, port?, targetUser }`; SSH-Private-Key store-intern). **OFFENE ENTSCHIEDUNG O3** (ADR-012): Host-Port-Wahl (fixe Konvention vs. erste freie ab 8080) + ob `VpsDockerControl` `VpsProvisioner` direkt wiederverwendet — Detail für `coder`.
+- **VPS-Referenz:** ein konfigurierter VPS (Ziel-Schema analog ADR-008 `{ host, port?, targetUser }`; SSH-Private-Key store-intern). **O3-Resolution:** Host-Port = erste freie ab 8080 (ermittelt via `ps()`). `VpsDockerControl` nutzt die SSH-Infrastruktur analog `VpsProvisioner`.
 - **Token-/Key-Quelle:** Cloudflare-Token + Account-Id aus `credentials/cloudflare/*`; SSH-Private-Key aus `ssh/<user>/private_key` (ADR-007/008). Store-intern, transient, nie geleakt.
-- Alle Endpunkte hinter AccessGuard; mutierende zusätzlich identitäts-/rollengeprüft + AuditEntry + LockoutGuard (ADR-011).
+- Alle Endpunkte hinter AccessGuard; mutierende zusätzlich identitäts-/rollengeprüft + AuditEntry (mit `image`-Feld) + LockoutGuard (ADR-011).
 
 ## Edge-Cases & Fehlerverhalten
 - Deploy/Undeploy auf protected Hostname → 422 `protected-resource` (ADR-011), kein Schritt.

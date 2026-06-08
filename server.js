@@ -30,6 +30,9 @@
  *   GET    /api/cloudflare/zones/:zoneId/tunnels               → { tunnels:[...], routes:[...], errors? } (view-cloudflare AC4)
  *   DELETE /api/cloudflare/tunnels/:tunnelId/routes/:hostname  → { result, reason? } (view-cloudflare AC5/AC6/AC9)
  *   DELETE /api/cloudflare/tunnels/:tunnelId                   → { result, reason? } (view-cloudflare AC5/AC6/AC9)
+ *   GET    /api/deployments                                    → { deployments:[...], errors? } (deploy-lifecycle AC3)
+ *   POST   /api/deployments                                    → { result, deployment?, reason? } (deploy-lifecycle AC3/AC4)
+ *   DELETE /api/deployments/:vps/:hostname                     → { result, reason? } (deploy-lifecycle AC5/AC6)
  *   WS   /ws/terminal                             → PtyManager bridge (guarded by AccessGuard)
  */
 
@@ -63,7 +66,11 @@ import { buildWorkspaceRootResolver } from './src/workspacePath.js';
 import { VpsProviderRegistry } from './src/vps/VpsProviderRegistry.js';
 import { vpsRouter } from './src/vpsRouter.js';
 import { CloudflareApi } from './src/cloudflare/CloudflareApi.js';
+import { LockoutGuard } from './src/cloudflare/LockoutGuard.js';
 import { cloudflareRouter } from './src/cloudflareRouter.js';
+import { VpsDockerControl } from './src/deploy/VpsDockerControl.js';
+import { DeployOrchestrator } from './src/deploy/DeployOrchestrator.js';
+import { deploymentsRouter } from './src/deploymentsRouter.js';
 
 const PORT = Number(process.env.PORT ?? 8080);
 
@@ -148,6 +155,65 @@ app.use(vpsRouter(vpsRegistry, auditStore));
 // ── Cloudflare API Boundary (view-cloudflare #107/#108, ADR-010/011) ─────────
 const cloudflareApi = new CloudflareApi({ credentialStore });
 app.use(cloudflareRouter(cloudflareApi, auditStore));
+
+// ── Deploy Boundary (deploy-lifecycle #110, ADR-012) ─────────────────────────
+const lockoutGuard = new LockoutGuard();
+const vpsDockerControl = new VpsDockerControl(credentialStore);
+const deployOrchestrator = new DeployOrchestrator({
+  dockerControl: vpsDockerControl,
+  cloudflareApi,
+  lockoutGuard,
+});
+// VPS-Target-Map: configured VPS targets from environment (comma-separated).
+// Format: VPS_TARGETS="id1=host:user,id2=host:user" or empty (start with empty map).
+// The map keys are the vpsId strings sent by the frontend.
+const vpsTargets = buildVpsTargetsFromEnv(process.env.VPS_TARGETS);
+app.use(deploymentsRouter(deployOrchestrator, auditStore, vpsTargets));
+
+/**
+ * Build the VPS-Target map from an environment variable.
+ *
+ * Format: "id1=user@host:22,id2=user@host" (comma-separated; port is optional, defaults to 22)
+ * Example: "vps-1=root@1.2.3.4:22,vps-2=root@5.6.7.8"
+ *
+ * Returns an empty Map if the env var is unset or empty (all deploy calls will 422).
+ * Secrets (SSH private keys) are stored in the CredentialStore, NOT here.
+ *
+ * @param {string|undefined} envValue
+ * @returns {Map<string, { host: string, port: number, targetUser: string }>}
+ */
+function buildVpsTargetsFromEnv(envValue) {
+  const map = new Map();
+  if (!envValue || !envValue.trim()) return map;
+
+  for (const entry of envValue.split(',')) {
+    const trimmed = entry.trim();
+    if (!trimmed) continue;
+    const eqIdx = trimmed.indexOf('=');
+    if (eqIdx < 1) continue;
+    const id = trimmed.slice(0, eqIdx).trim();
+    const target = trimmed.slice(eqIdx + 1).trim();
+    // target format: user@host or user@host:port
+    const atIdx = target.indexOf('@');
+    if (atIdx < 1) continue;
+    const targetUser = target.slice(0, atIdx);
+    const hostPort = target.slice(atIdx + 1);
+    const colonIdx = hostPort.lastIndexOf(':');
+    let host, port;
+    if (colonIdx > 0) {
+      host = hostPort.slice(0, colonIdx);
+      const p = parseInt(hostPort.slice(colonIdx + 1), 10);
+      port = Number.isFinite(p) ? p : 22;
+    } else {
+      host = hostPort;
+      port = 22;
+    }
+    if (id && host && targetUser) {
+      map.set(id, { host, port, targetUser });
+    }
+  }
+  return map;
+}
 
 /**
  * GET /api/session → { state, restarts, startedAt }

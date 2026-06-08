@@ -223,7 +223,43 @@ export class CloudflareApi {
     return routes;
   }
 
-  // ── Mutate methods (ADR-010/011, #108) ──────────────────────────────────────
+  // ── Zone resolution ─────────────────────────────────────────────────────────
+
+  /**
+   * Resolve the Cloudflare Zone ID for a given hostname by longest-suffix match.
+   *
+   * Algorithm: list all accessible zones, find the zone whose name is the longest
+   * suffix of the hostname (e.g. "app.example.com" → zone "example.com").
+   * Returns null if no zone matches (caller should surface a 400/422 zone-not-found).
+   *
+   * The zone ID is never cached (ADR-010 — per-request credential resolution).
+   * No zone-name or zone-id is leaked into error messages (security/R01).
+   *
+   * @param {string} hostname - Full hostname (e.g. "app.example.com")
+   * @returns {Promise<string|null>} The matching zone ID, or null if no zone matches.
+   * @throws {CloudflareApiError} on auth failure or Cloudflare API error.
+   */
+  async resolveZoneForHostname(hostname) {
+    const { zones } = await this.listZones();
+
+    // Find the zone whose name is the longest suffix of the hostname
+    let bestZone = null;
+    let bestLen = 0;
+
+    for (const zone of zones) {
+      const zoneName = zone.name ?? '';
+      // Accept exact match or suffix match (.zoneName)
+      const isSuffix = hostname === zoneName || hostname.endsWith(`.${zoneName}`);
+      if (isSuffix && zoneName.length > bestLen) {
+        bestZone = zone;
+        bestLen = zoneName.length;
+      }
+    }
+
+    return bestZone ? bestZone.id : null;
+  }
+
+  // ── Mutate API (ADR-010/011, #108/#110) ─────────────────────────────────────
 
   /**
    * Check if a target hostname is protected before any mutation.
@@ -237,26 +273,25 @@ export class CloudflareApi {
   }
 
   /**
-   * Remove a Public Hostname route from a tunnel's ingress configuration.
+   * Add (or update) a single Public-Hostname route to a tunnel's ingress config.
+   * Uses PUT .../configurations — the full ingress list is replaced, so we:
+   *   1. Fetch existing ingress rules
+   *   2. Remove any existing rule for this hostname
+   *   3. Prepend the new rule
+   *   4. PUT the updated list back
    *
-   * ADR-011 canonical order (HARD, enforced here):
-   *   1. LockoutGuard.isProtected(hostname) → 422 protected-resource if true
-   *   2. Caller MUST have already validated confirm === hostname (confirmed at router layer)
-   *   3. Mutation: PUT updated ingress config without the removed hostname
-   *
-   * The caller (cloudflareRouter) is responsible for confirm-match and CRED_ADMIN_EMAILS
-   * role checks BEFORE calling this method. Audit-First must also be done by the caller.
+   * LockoutGuard is checked BEFORE any API call (ADR-011).
    *
    * @param {string} tunnelId
-   * @param {string} hostname - The hostname to remove
-   * @returns {Promise<{ result: "ok"|"error", reason?: string }>}
-   * @throws {CloudflareApiError} on protected resource, auth failure, network error
+   * @param {string} hostname  - e.g. "app.example.com"
+   * @param {string} service   - e.g. "http://localhost:8080"
+   * @returns {Promise<void>}
+   * @throws {CloudflareApiError}
    */
-  async removeRoute(tunnelId, hostname) {
-    // ADR-011: LockoutGuard FIRST — before any mutation
+  async addRoute(tunnelId, hostname, service) {
     if (this.#lockoutGuard.isProtected(hostname)) {
       throw new CloudflareApiError(
-        `Hostname "${hostname}" is protected and cannot be mutated`,
+        `Target "${hostname}" is protected — mutation not allowed (ADR-011)`,
         'protected-resource',
         422,
       );
@@ -272,67 +307,98 @@ export class CloudflareApi {
     }
 
     const { token, accountId } = creds;
+    const configUrl = `${CF_BASE}/accounts/${encodeURIComponent(accountId)}/cfd_tunnel/${encodeURIComponent(tunnelId)}/configurations`;
 
-    // Fetch current tunnel configuration
-    const configData = await this.#apiGet(
-      `${CF_BASE}/accounts/${encodeURIComponent(accountId)}/cfd_tunnel/${encodeURIComponent(tunnelId)}/configurations`,
-      token,
+    // 1. Fetch current ingress rules
+    const current = await this.#apiGet(configUrl, token);
+    const existingIngress = Array.isArray(current?.result?.config?.ingress)
+      ? current.result.config.ingress
+      : [];
+
+    // 2. Remove existing rule for this hostname (idempotent replace)
+    const filtered = existingIngress.filter(
+      (r) => typeof r.hostname === 'string' && r.hostname !== hostname,
     );
 
-    const ingress = configData?.result?.config?.ingress;
-    if (!Array.isArray(ingress)) {
+    // 3. Prepend the new rule (before the catch-all)
+    const newRule = { hostname, service };
+    // Preserve the catch-all (hostname === '') at the end
+    const catchAll = filtered.find((r) => !r.hostname || r.hostname === '');
+    const named = filtered.filter((r) => r.hostname && r.hostname !== '');
+    const newIngress = [newRule, ...named, ...(catchAll ? [catchAll] : [{ service: 'http_status:404' }])];
+
+    // 4. PUT the updated configuration
+    await this.#apiPut(configUrl, token, { config: { ingress: newIngress } });
+  }
+
+  /**
+   * Remove a single Public-Hostname route from a tunnel's ingress config.
+   * Uses PUT .../configurations to replace the full ingress list.
+   *
+   * LockoutGuard is checked BEFORE any API call (ADR-011).
+   *
+   * @param {string} tunnelId
+   * @param {string} hostname - hostname to remove
+   * @returns {Promise<void>}
+   * @throws {CloudflareApiError}
+   */
+  async removeRoute(tunnelId, hostname) {
+    if (this.#lockoutGuard.isProtected(hostname)) {
       throw new CloudflareApiError(
-        'Tunnel configuration ingress not found',
-        'not-found',
-        404,
+        `Target "${hostname}" is protected — mutation not allowed (ADR-011)`,
+        'protected-resource',
+        422,
       );
     }
 
-    // Remove the route with matching hostname (keep catch-all and all others)
-    const updatedIngress = ingress.filter(
-      (rule) => rule?.hostname !== hostname,
-    );
-
-    if (updatedIngress.length === ingress.length) {
+    const creds = await this.#resolveCredentials();
+    if (!creds) {
       throw new CloudflareApiError(
-        `Route for hostname "${hostname}" not found in tunnel`,
-        'not-found',
-        404,
+        'Cloudflare not configured (no token/account-id)',
+        'cloudflare-not-configured',
+        422,
       );
     }
 
-    // PUT updated configuration
-    await this.#apiPut(
-      `${CF_BASE}/accounts/${encodeURIComponent(accountId)}/cfd_tunnel/${encodeURIComponent(tunnelId)}/configurations`,
-      token,
-      { config: { ingress: updatedIngress } },
+    const { token, accountId } = creds;
+    const configUrl = `${CF_BASE}/accounts/${encodeURIComponent(accountId)}/cfd_tunnel/${encodeURIComponent(tunnelId)}/configurations`;
+
+    // Fetch current ingress rules
+    const current = await this.#apiGet(configUrl, token);
+    const existingIngress = Array.isArray(current?.result?.config?.ingress)
+      ? current.result.config.ingress
+      : [];
+
+    // Remove the named rule; keep everything else including catch-all
+    const newIngress = existingIngress.filter(
+      (r) => !(typeof r.hostname === 'string' && r.hostname === hostname),
     );
 
+    // Ensure there is always a catch-all entry
+    const hasCatchAll = newIngress.some((r) => !r.hostname || r.hostname === '');
+    if (!hasCatchAll) {
+      newIngress.push({ service: 'http_status:404' });
+    }
+
+    await this.#apiPut(configUrl, token, { config: { ingress: newIngress } });
     return { result: 'ok' };
   }
 
   /**
-   * Delete an entire Cloudflare tunnel (cfd_tunnel DELETE).
+   * Create a DNS CNAME record pointing hostname → <tunnelId>.cfargotunnel.com.
    *
-   * ADR-011 canonical order (HARD, enforced here):
-   *   1. LockoutGuard: if any route in the tunnel is protected → 422 protected-resource
-   *   2. Caller MUST have already validated confirm and CRED_ADMIN_EMAILS role
-   *   3. Mutation: DELETE the tunnel via the Cloudflare API
+   * LockoutGuard is checked BEFORE any API call.
    *
-   * Protected check uses the tunnelName (or a representative hostname). Since a tunnel
-   * can have multiple routes, we check the tunnelId/tunnelName itself against LockoutGuard
-   * and rely on the router having listed routes to check for protected hostnames.
-   *
-   * @param {string} tunnelId
-   * @param {string} tunnelNameOrHostname - Used for LockoutGuard check (name of tunnel or representative hostname)
-   * @returns {Promise<{ result: "ok"|"error", reason?: string }>}
+   * @param {string} zoneId
+   * @param {string} hostname  - full hostname (e.g. "app.example.com")
+   * @param {string} tunnelId  - Cloudflare tunnel ID (CNAME target base)
+   * @returns {Promise<void>}
    * @throws {CloudflareApiError}
    */
-  async deleteTunnel(tunnelId, tunnelNameOrHostname) {
-    // ADR-011: LockoutGuard FIRST
-    if (this.#lockoutGuard.isProtected(tunnelNameOrHostname)) {
+  async createDnsRecord(zoneId, hostname, tunnelId) {
+    if (this.#lockoutGuard.isProtected(hostname)) {
       throw new CloudflareApiError(
-        `Tunnel "${tunnelNameOrHostname}" is protected and cannot be deleted`,
+        `Target "${hostname}" is protected — mutation not allowed (ADR-011)`,
         'protected-resource',
         422,
       );
@@ -347,13 +413,89 @@ export class CloudflareApi {
       );
     }
 
-    const { token, accountId } = creds;
+    const { token } = creds;
+    const url = `${CF_BASE}/zones/${encodeURIComponent(zoneId)}/dns_records`;
 
+    await this.#apiPost(url, token, {
+      type: 'CNAME',
+      name: hostname,
+      content: `${tunnelId}.cfargotunnel.com`,
+      proxied: true,
+      ttl: 1,
+    });
+  }
+
+  /**
+   * Delete a DNS record by hostname within a zone.
+   * Looks up the record ID first, then deletes it.
+   *
+   * LockoutGuard is checked BEFORE any API call.
+   *
+   * @param {string} zoneId
+   * @param {string} hostname
+   * @returns {Promise<void>}
+   * @throws {CloudflareApiError}
+   */
+  async deleteDnsRecord(zoneId, hostname) {
+    if (this.#lockoutGuard.isProtected(hostname)) {
+      throw new CloudflareApiError(
+        `Target "${hostname}" is protected — mutation not allowed (ADR-011)`,
+        'protected-resource',
+        422,
+      );
+    }
+
+    const creds = await this.#resolveCredentials();
+    if (!creds) {
+      throw new CloudflareApiError(
+        'Cloudflare not configured (no token/account-id)',
+        'cloudflare-not-configured',
+        422,
+      );
+    }
+
+    const { token } = creds;
+
+    // Look up the record ID by name
+    const listUrl = `${CF_BASE}/zones/${encodeURIComponent(zoneId)}/dns_records?name=${encodeURIComponent(hostname)}&type=CNAME`;
+    const listData = await this.#apiGet(listUrl, token);
+    const records = Array.isArray(listData?.result) ? listData.result : [];
+
+    // Delete all matching records (idempotent)
+    for (const record of records) {
+      if (record?.id) {
+        await this.#apiDelete(
+          `${CF_BASE}/zones/${encodeURIComponent(zoneId)}/dns_records/${encodeURIComponent(record.id)}`,
+          token,
+        );
+      }
+    }
+  }
+
+  /**
+   * Delete a Cloudflare tunnel by ID.
+   *
+   * LockoutGuard check is done by the router caller (ADR-011) before invoking this method.
+   *
+   * @param {string} tunnelId
+   * @returns {Promise<void>}
+   * @throws {CloudflareApiError}
+   */
+  async deleteTunnel(tunnelId) {
+    const creds = await this.#resolveCredentials();
+    if (!creds) {
+      throw new CloudflareApiError(
+        'Cloudflare not configured (no token/account-id)',
+        'cloudflare-not-configured',
+        422,
+      );
+    }
+
+    const { token, accountId } = creds;
     await this.#apiDelete(
       `${CF_BASE}/accounts/${encodeURIComponent(accountId)}/cfd_tunnel/${encodeURIComponent(tunnelId)}`,
       token,
     );
-
     return { result: 'ok' };
   }
 
@@ -478,13 +620,14 @@ export class CloudflareApi {
 
     return body;
   }
+
   /**
    * Execute a PUT request against the Cloudflare API.
    * Token goes in Authorization: Bearer header — never in URL/log/response.
    *
    * @param {string} url
    * @param {string} token - Bearer token (NEVER logged)
-   * @param {object} body - Request body (will be JSON-serialized)
+   * @param {object} body  - JSON request body
    * @returns {Promise<object>} Parsed JSON response body
    * @throws {CloudflareApiError}
    */
@@ -519,6 +662,18 @@ export class CloudflareApi {
       );
     }
 
+    if (res.status === 404) {
+      throw new CloudflareApiError('Cloudflare resource not found', 'not-found', 404);
+    }
+
+    if (res.status === 429) {
+      throw new CloudflareApiError(
+        'Cloudflare API rate limit exceeded',
+        'cloudflare-unavailable',
+        503,
+      );
+    }
+
     if (!res.ok) {
       throw new CloudflareApiError(
         `Cloudflare API error (HTTP ${res.status})`,
@@ -527,16 +682,19 @@ export class CloudflareApi {
       );
     }
 
-    let responseBody;
+    let parsed;
     try {
-      responseBody = await res.json();
+      parsed = await res.json();
     } catch {
-      // Some PUT responses may have empty bodies — treat as success
-      return {};
+      throw new CloudflareApiError(
+        'Cloudflare API returned invalid JSON',
+        'cloudflare-unavailable',
+        502,
+      );
     }
 
-    if (responseBody?.success === false) {
-      const firstError = Array.isArray(responseBody.errors) ? responseBody.errors[0] : null;
+    if (parsed?.success === false) {
+      const firstError = Array.isArray(parsed.errors) ? parsed.errors[0] : null;
       const code = firstError?.code;
       if (code === 10000 || code === 9109) {
         throw new CloudflareApiError(
@@ -552,7 +710,104 @@ export class CloudflareApi {
       );
     }
 
-    return responseBody;
+    return parsed;
+  }
+
+  /**
+   * Execute a POST request against the Cloudflare API.
+   * Token goes in Authorization: Bearer header — never in URL/log/response.
+   *
+   * @param {string} url
+   * @param {string} token - Bearer token (NEVER logged)
+   * @param {object} body  - JSON request body
+   * @returns {Promise<object>} Parsed JSON response body
+   * @throws {CloudflareApiError}
+   */
+  async #apiPost(url, token, body) {
+    let res;
+    try {
+      res = await this.#fetch(url, {
+        method: 'POST',
+        headers: buildHeaders(token),
+        body: JSON.stringify(body),
+      });
+    } catch (err) {
+      if (err?.name === 'AbortError' || err?.message === 'timeout') {
+        throw new CloudflareApiError(
+          'Cloudflare API request timed out',
+          'cloudflare-unavailable',
+          503,
+        );
+      }
+      throw new CloudflareApiError(
+        'Cloudflare API unreachable',
+        'cloudflare-unavailable',
+        503,
+      );
+    }
+
+    if (res.status === 401 || res.status === 403) {
+      throw new CloudflareApiError(
+        'Cloudflare authentication failed (check token/account-id)',
+        'cloudflare-auth-failed',
+        502,
+      );
+    }
+
+    if (res.status === 404) {
+      throw new CloudflareApiError('Cloudflare resource not found', 'not-found', 404);
+    }
+
+    if (res.status === 409) {
+      // Conflict — e.g. DNS record already exists; treat as non-fatal for idempotent creates
+      throw new CloudflareApiError('Cloudflare resource already exists', 'conflict', 409);
+    }
+
+    if (res.status === 429) {
+      throw new CloudflareApiError(
+        'Cloudflare API rate limit exceeded',
+        'cloudflare-unavailable',
+        503,
+      );
+    }
+
+    if (!res.ok) {
+      throw new CloudflareApiError(
+        `Cloudflare API error (HTTP ${res.status})`,
+        'cloudflare-unavailable',
+        502,
+      );
+    }
+
+    let parsed;
+    try {
+      parsed = await res.json();
+    } catch {
+      throw new CloudflareApiError(
+        'Cloudflare API returned invalid JSON',
+        'cloudflare-unavailable',
+        502,
+      );
+    }
+
+    if (parsed?.success === false) {
+      const firstError = Array.isArray(parsed.errors) ? parsed.errors[0] : null;
+      const code = firstError?.code;
+      if (code === 10000 || code === 9109) {
+        throw new CloudflareApiError(
+          'Cloudflare authentication failed',
+          'cloudflare-auth-failed',
+          502,
+        );
+      }
+      throw new CloudflareApiError(
+        'Cloudflare API returned an error',
+        'cloudflare-unavailable',
+        502,
+      );
+    }
+
+    return parsed;
   }
 
   /**
@@ -561,7 +816,7 @@ export class CloudflareApi {
    *
    * @param {string} url
    * @param {string} token - Bearer token (NEVER logged)
-   * @returns {Promise<object>} Parsed JSON response body (may be empty)
+   * @returns {Promise<void>}
    * @throws {CloudflareApiError}
    */
   async #apiDelete(url, token) {
@@ -595,10 +850,15 @@ export class CloudflareApi {
     }
 
     if (res.status === 404) {
+      // Idempotent: resource already gone is fine
+      return;
+    }
+
+    if (res.status === 429) {
       throw new CloudflareApiError(
-        'Cloudflare resource not found',
-        'not-found',
-        404,
+        'Cloudflare API rate limit exceeded',
+        'cloudflare-unavailable',
+        503,
       );
     }
 
@@ -610,11 +870,31 @@ export class CloudflareApi {
       );
     }
 
+    // Guard: Cloudflare can return HTTP 200 with { success: false } — treat as error
+    // (finding from #108-Review: #apiDelete lacked this guard, present in #apiGet/#apiPut)
+    let parsed;
     try {
-      return await res.json();
+      parsed = await res.json();
     } catch {
-      // DELETE responses may have empty bodies
-      return {};
+      // DELETE responses may have no body (204-style) — that is fine
+      return;
+    }
+
+    if (parsed?.success === false) {
+      const firstError = Array.isArray(parsed.errors) ? parsed.errors[0] : null;
+      const code = firstError?.code;
+      if (code === 10000 || code === 9109) {
+        throw new CloudflareApiError(
+          'Cloudflare authentication failed',
+          'cloudflare-auth-failed',
+          502,
+        );
+      }
+      throw new CloudflareApiError(
+        'Cloudflare API returned an error on DELETE',
+        'cloudflare-unavailable',
+        502,
+      );
     }
   }
 }

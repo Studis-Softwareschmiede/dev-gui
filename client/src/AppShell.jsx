@@ -37,6 +37,7 @@ import { FactoryView } from './FactoryView.jsx';
 import { GitHubView } from './GitHubView.jsx';
 import { VpsView } from './VpsView.jsx';
 import { CloudflareView } from './CloudflareView.jsx';
+import { DeploymentsView } from './DeploymentsView.jsx';
 import { SettingsView } from './SettingsView.jsx';
 
 // ── Entry-Panel tile definitions ──────────────────────────────────────────────
@@ -63,6 +64,11 @@ const TILES = [
     label: 'Fabrik (dev-gui)',
     description: 'Interaktive Claude-Code-Session, Flow-Trigger und Status.',
   },
+];
+
+/** Additional nav routes (not tiles — available in NavBar only). */
+const EXTRA_NAV = [
+  { id: 'deployments', label: 'Deployments' },
 ];
 
 // ── NavBar ────────────────────────────────────────────────────────────────────
@@ -97,7 +103,7 @@ function NavBar({ currentView, onNavigate }) {
       )}
 
       {/* Per-view nav links — hidden on panel */}
-      {!onPanel && TILES.map(({ id, label }) => (
+      {!onPanel && [...TILES, ...EXTRA_NAV].map(({ id, label }) => (
         <a
           key={id}
           href={`#/${id}`}
@@ -140,6 +146,9 @@ function NavBar({ currentView, onNavigate }) {
 /**
  * EntryPanel — the landing/home screen with four tiles (AC1).
  *
+ * Deployments and other extra-nav views are listed as text links below the tiles
+ * so they are reachable from the panel without adding a fifth tile (app-shell-navigation AC1).
+ *
  * @param {{ onNavigate: (view: string) => void }} props
  */
 function EntryPanel({ onNavigate }) {
@@ -160,6 +169,23 @@ function EntryPanel({ onNavigate }) {
           />
         ))}
       </div>
+
+      {/* Extra views: text links below the four tiles (not a fifth tile — app-shell-navigation AC1) */}
+      <nav style={styles.extraNav} aria-label="Weitere Ansichten">
+        {EXTRA_NAV.map(({ id, label }) => (
+          <a
+            key={id}
+            href={`#/${id}`}
+            style={styles.extraNavLink}
+            onClick={(e) => {
+              e.preventDefault();
+              onNavigate(id);
+            }}
+          >
+            {label}
+          </a>
+        ))}
+      </nav>
     </main>
   );
 }
@@ -239,11 +265,12 @@ export function AppShell() {
           teardown. Re-entering the factory view starts a fresh session. */}
       {view !== 'panel' && (
         <div style={styles.viewPort}>
-          {view === 'factory'    && <FactoryView    onNavigate={navigate} />}
-          {view === 'github'     && <GitHubView     onNavigate={navigate} />}
-          {view === 'vps'        && <VpsView        onNavigate={navigate} />}
-          {view === 'cloudflare' && <CloudflareView onNavigate={navigate} />}
-          {view === 'settings'   && <SettingsView   onNavigate={navigate} />}
+          {view === 'factory'     && <FactoryView      onNavigate={navigate} />}
+          {view === 'github'      && <GitHubView      onNavigate={navigate} />}
+          {view === 'vps'         && <VpsView         onNavigate={navigate} />}
+          {view === 'cloudflare'  && <CloudflareView  onNavigate={navigate} />}
+          {view === 'deployments' && <DeploymentsView onNavigate={navigate} />}
+          {view === 'settings'    && <SettingsView    onNavigate={navigate} />}
         </div>
       )}
     </div>
@@ -394,5 +421,26 @@ const styles = {
     fontSize: 13,
     color: '#9ca3af',
     lineHeight: 1.5,
+  },
+
+  // ── Extra nav links (below tiles on panel)
+  extraNav: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 24,
+    justifyContent: 'center',
+  },
+  extraNavLink: {
+    padding: '8px 16px',
+    color: '#9ca3af',
+    textDecoration: 'none',
+    fontSize: 13,
+    borderRadius: 4,
+    border: '1px solid #2a2a2a',
+    background: '#111',
+    minHeight: 44,
+    display: 'inline-flex',
+    alignItems: 'center',
   },
 };
