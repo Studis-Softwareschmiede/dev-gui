@@ -23,6 +23,8 @@
  *   POST /api/vps/machines/:provider              → { result, machine? } — Create-from-scratch (vps-provider-boundary AC7/AC8)
  *   POST /api/vps/machines/:provider/:serverId/start → { result, reason? } (vps-provider-boundary AC5/AC6)
  *   POST /api/vps/machines/:provider/:serverId/stop  → { result, reason? } (vps-provider-boundary AC5/AC6)
+ *   GET  /api/cloudflare/zones                       → { configured, zones:[...], errors? } (view-cloudflare AC4)
+ *   GET  /api/cloudflare/zones/:zoneId/tunnels        → { tunnels:[...], routes:[...], errors? } (view-cloudflare AC4)
  *   WS   /ws/terminal                             → PtyManager bridge (guarded by AccessGuard)
  */
 
@@ -55,6 +57,8 @@ import { workspacePathRouter } from './src/workspacePathRouter.js';
 import { buildWorkspaceRootResolver } from './src/workspacePath.js';
 import { VpsProviderRegistry } from './src/vps/VpsProviderRegistry.js';
 import { vpsRouter } from './src/vpsRouter.js';
+import { CloudflareApi } from './src/cloudflare/CloudflareApi.js';
+import { cloudflareRouter } from './src/cloudflareRouter.js';
 
 const PORT = Number(process.env.PORT ?? 8080);
 
@@ -135,6 +139,10 @@ app.use(githubRepoCloneRouter(auditStore, githubCloner));
 // ── VPS Provider Boundary (vps-provider-boundary #95) ─────────────────────────
 const vpsRegistry = new VpsProviderRegistry({ credentialStore });
 app.use(vpsRouter(vpsRegistry, auditStore));
+
+// ── Cloudflare API Boundary (view-cloudflare #107, ADR-010/011) ───────────────
+const cloudflareApi = new CloudflareApi({ credentialStore });
+app.use(cloudflareRouter(cloudflareApi));
 
 /**
  * GET /api/session → { state, restarts, startedAt }

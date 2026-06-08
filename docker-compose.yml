@@ -141,6 +141,13 @@ services:
       #   CRED_MASTER_KEY_FILE: /run/secrets/cred_master_key
       #   Add to volumes: - ${CRED_KEY_FILE}:/run/secrets/cred_master_key:ro
 
+      # ── Self-Lockout-Schutz (ADR-011) ───────────────────────────────────────
+      # Hostname der devgui selbst (z.B. devgui.example.com). Wird von
+      # LockoutGuard verwendet, um eigene Routen vor versehentlichem Löschen
+      # zu schützen. Fail-closed wenn nicht gesetzt: alle Ziele gelten als
+      # potenziell geschützt.
+      DEVGUI_HOSTNAME: ${DEVGUI_HOSTNAME:-}
+
       # ── Credential Mutation Allowlist (optional, ADR-007 OA3) ───────────────
       # Comma-separated Cloudflare Access emails that may mutate credentials.
       # Unset or empty = every valid Access identity may mutate (default).
