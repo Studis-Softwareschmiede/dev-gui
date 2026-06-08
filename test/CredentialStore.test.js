@@ -712,6 +712,210 @@ describe('credentialsRouter — AC9: VPS-Provider-Token über HTTP', () => {
   });
 });
 
+// ── AC10 — Cloudflare: api_token + account_id ─────────────────────────────────
+
+describe('CredentialStore — AC10: Cloudflare-Credentials (api_token + account_id)', () => {
+  let dir, store;
+
+  beforeEach(async () => {
+    ({ store, dir } = await makeTmpStore());
+    process.env.DEV_NO_ACCESS = '1';
+  });
+
+  afterEach(async () => {
+    delete process.env.DEV_NO_ACCESS;
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('AC10 — CREDENTIAL_CATALOG.cloudflare enthält api_token und account_id', () => {
+    expect(CREDENTIAL_CATALOG.cloudflare).toContain('api_token');
+    expect(CREDENTIAL_CATALOG.cloudflare).toContain('account_id');
+    expect(CREDENTIAL_CATALOG.cloudflare.length).toBe(2);
+  });
+
+  it('AC10 — resolveKey akzeptiert api_token', () => {
+    const r = resolveKey('cloudflare', 'api_token');
+    expect(r.ok).toBe(true);
+    expect(r.storeKey).toBe('credentials/cloudflare/api_token');
+  });
+
+  it('AC10 — resolveKey akzeptiert account_id', () => {
+    const r = resolveKey('cloudflare', 'account_id');
+    expect(r.ok).toBe(true);
+    expect(r.storeKey).toBe('credentials/cloudflare/account_id');
+  });
+
+  it('AC10 — list() listet beide Cloudflare-Felder (unset bei leerem Store)', async () => {
+    const items = await store.list();
+    const cfItems = items.filter((i) => i.integration === 'cloudflare');
+    expect(cfItems.length).toBe(2);
+    const names = cfItems.map((i) => i.name);
+    expect(names).toContain('api_token');
+    expect(names).toContain('account_id');
+    for (const item of cfItems) {
+      expect(item.status).toBe('unset');
+    }
+  });
+
+  it('AC10 — set/getMeta/delete für api_token: write-only-Verhalten', async () => {
+    const meta = await store.set('credentials/cloudflare/api_token', 'cf-api-secret');
+    expect(meta.status).toBe('set');
+    expect(JSON.stringify(meta)).not.toContain('cf-api-secret');
+
+    const getMeta = await store.getMeta('credentials/cloudflare/api_token');
+    expect(getMeta.status).toBe('set');
+    expect(getMeta.masked).toBe('•••• gesetzt');
+    expect(JSON.stringify(getMeta)).not.toContain('cf-api-secret');
+
+    await store.delete('credentials/cloudflare/api_token');
+    const afterDelete = await store.getMeta('credentials/cloudflare/api_token');
+    expect(afterDelete.status).toBe('unset');
+  });
+
+  it('AC10 — set/getMeta/delete für account_id: write-only-Verhalten', async () => {
+    const meta = await store.set('credentials/cloudflare/account_id', 'cf-account-secret');
+    expect(meta.status).toBe('set');
+    expect(JSON.stringify(meta)).not.toContain('cf-account-secret');
+
+    const getMeta = await store.getMeta('credentials/cloudflare/account_id');
+    expect(getMeta.status).toBe('set');
+    expect(getMeta.masked).toBe('•••• gesetzt');
+    expect(JSON.stringify(getMeta)).not.toContain('cf-account-secret');
+
+    await store.delete('credentials/cloudflare/account_id');
+    const afterDelete = await store.getMeta('credentials/cloudflare/account_id');
+    expect(afterDelete.status).toBe('unset');
+  });
+
+  it('AC10 — api_token und account_id unabhängig setzbar (keine gegenseitige Überschreibung)', async () => {
+    await store.set('credentials/cloudflare/api_token', 'cf-token-val');
+    await store.set('credentials/cloudflare/account_id', 'cf-account-val');
+
+    expect(await store.getPlaintext('credentials/cloudflare/api_token')).toBe('cf-token-val');
+    expect(await store.getPlaintext('credentials/cloudflare/account_id')).toBe('cf-account-val');
+
+    // list() zeigt beide als 'set', ohne Klartext
+    const items = await store.list();
+    const cfItems = items.filter((i) => i.integration === 'cloudflare');
+    for (const item of cfItems) {
+      expect(item.status).toBe('set');
+    }
+    expect(JSON.stringify(items)).not.toContain('cf-token-val');
+    expect(JSON.stringify(items)).not.toContain('cf-account-val');
+  });
+
+  it('AC10 — at-rest verschlüsselt: kein Cloudflare-Klartext in der Store-Datei', async () => {
+    await store.set('credentials/cloudflare/api_token', 'cf-token-cleartext');
+    await store.set('credentials/cloudflare/account_id', 'cf-account-cleartext');
+    const { readFile: rf } = await import('node:fs/promises');
+    const { join: pjoin } = await import('node:path');
+    const raw = await rf(pjoin(dir, 'secrets.enc.json'), 'utf8');
+    expect(raw).not.toContain('cf-token-cleartext');
+    expect(raw).not.toContain('cf-account-cleartext');
+  });
+});
+
+describe('credentialsRouter — AC10: Cloudflare-Credentials über HTTP', () => {
+  let dir, store, testServer;
+
+  beforeEach(async () => {
+    process.env.DEV_NO_ACCESS = '1';
+    ({ store, dir } = await makeTmpStore());
+    testServer = await makeTestServer(store);
+  });
+
+  afterEach(async () => {
+    delete process.env.DEV_NO_ACCESS;
+    await testServer.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('AC10 — PUT api_token → 200, Response kein Klartext', async () => {
+    const res = await testServer.req('PUT', '/api/settings/credentials/cloudflare/api_token', { value: 'cf-api-secret-http' });
+    expect(res.status).toBe(200);
+    const data = JSON.parse(res.body);
+    expect(data.status).toBe('set');
+    expect(data.updatedAt).toBeTruthy();
+    expect(res.body).not.toContain('cf-api-secret-http');
+  });
+
+  it('AC10 — PUT account_id → 200, Response kein Klartext', async () => {
+    const res = await testServer.req('PUT', '/api/settings/credentials/cloudflare/account_id', { value: 'cf-account-secret-http' });
+    expect(res.status).toBe(200);
+    const data = JSON.parse(res.body);
+    expect(data.status).toBe('set');
+    expect(res.body).not.toContain('cf-account-secret-http');
+  });
+
+  it('AC10 — GET nach PUT api_token zeigt status:set für api_token, unset für account_id', async () => {
+    await testServer.req('PUT', '/api/settings/credentials/cloudflare/api_token', { value: 'cf-token-only' });
+    const res = await testServer.req('GET', '/api/settings/credentials');
+    expect(res.status).toBe(200);
+    const data = JSON.parse(res.body);
+    const token = data.find((i) => i.integration === 'cloudflare' && i.name === 'api_token');
+    expect(token.status).toBe('set');
+    const acctId = data.find((i) => i.integration === 'cloudflare' && i.name === 'account_id');
+    expect(acctId.status).toBe('unset');
+    expect(res.body).not.toContain('cf-token-only');
+  });
+
+  it('AC10/AC4 — GET Response enthält keinen Cloudflare-Klartext', async () => {
+    await store.set('credentials/cloudflare/api_token', 'cf-secret-never-in-response');
+    await store.set('credentials/cloudflare/account_id', 'cf-account-never-in-response');
+    const res = await testServer.req('GET', '/api/settings/credentials');
+    expect(res.status).toBe(200);
+    expect(res.body).not.toContain('cf-secret-never-in-response');
+    expect(res.body).not.toContain('cf-account-never-in-response');
+  });
+
+  it('AC10 — DELETE api_token → 200, status:unset', async () => {
+    await store.set('credentials/cloudflare/api_token', 'cf-to-delete');
+    const res = await testServer.req('DELETE', '/api/settings/credentials/cloudflare/api_token');
+    expect(res.status).toBe(200);
+    const data = JSON.parse(res.body);
+    expect(data.status).toBe('unset');
+  });
+
+  it('AC10 — DELETE account_id → 200, idempotent', async () => {
+    const res = await testServer.req('DELETE', '/api/settings/credentials/cloudflare/account_id');
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body).status).toBe('unset');
+  });
+
+  it('AC10/AC6 — Audit-Eintrag für api_token ohne Klartext', async () => {
+    await testServer.req('PUT', '/api/settings/credentials/cloudflare/api_token', { value: 'cf-audit-test-value' });
+    const entries = testServer.audit.getAll();
+    const entry = entries[entries.length - 1];
+    expect(entry.command).toMatch(/credential:set:credentials\/cloudflare\/api_token/);
+    expect(JSON.stringify(entry)).not.toContain('cf-audit-test-value');
+  });
+
+  it('AC10/AC6 — Audit-Eintrag für account_id ohne Klartext', async () => {
+    await testServer.req('PUT', '/api/settings/credentials/cloudflare/account_id', { value: 'cf-account-audit-test' });
+    const entries = testServer.audit.getAll();
+    const entry = entries[entries.length - 1];
+    expect(entry.command).toMatch(/credential:set:credentials\/cloudflare\/account_id/);
+    expect(JSON.stringify(entry)).not.toContain('cf-account-audit-test');
+  });
+
+  it('AC10/AC7 — PUT cloudflare/api_token mit CRED_ADMIN_EMAILS und nicht berechtigter Identität → 403', async () => {
+    process.env.CRED_ADMIN_EMAILS = 'admin@example.com';
+    const res = await testServer.req('PUT', '/api/settings/credentials/cloudflare/api_token', { value: 'blocked-cf-token' });
+    expect(res.status).toBe(403);
+    delete process.env.CRED_ADMIN_EMAILS;
+  });
+
+  it('AC10/AC8 — PUT cloudflare mit leerem Wert → 400', async () => {
+    const res = await testServer.req('PUT', '/api/settings/credentials/cloudflare/api_token', { value: '' });
+    expect(res.status).toBe(400);
+  });
+
+  it('AC10/AC8 — PUT cloudflare mit unbekanntem Feldnamen → 404', async () => {
+    const res = await testServer.req('PUT', '/api/settings/credentials/cloudflare/zone_id', { value: 'some-zone-id' });
+    expect(res.status).toBe(404);
+  });
+});
+
 describe('CredentialStore — assertCredentialConfig()', () => {
   let dir;
 
