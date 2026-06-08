@@ -521,6 +521,31 @@ describe('VpsDockerControl — ps()', () => {
     expect(capturedCmd).toContain('label=cloudflare.tunnel-hostname');
   });
 
+  it('ps() Format-String ist shell-escaped (Single-Quotes, Tabs+Quotes geschützt)', async () => {
+    // Regression-Guard: Format-String muss shellEscape()-gequotet sein — nackter String mit
+    // echten Tabs würde per IFS-Split in der Remote-POSIX-Shell zerfallen; nacktes " bricht
+    // striktes Quoting. Audit-First liegt beim Orchestrator (DeployOrchestrator), nicht hier.
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    let capturedCmd = null;
+    await ctrl.ps(TEST_VPS, {
+      _sshClientFactory: makeMockSshClient({
+        stdout: '',
+        exitCode: 0,
+        onCommand: (cmd) => { capturedCmd = cmd; },
+      }),
+    });
+
+    // Das --format-Argument muss in Single-Quotes eingebettet sein, damit Tabs (\t)
+    // nicht als IFS-Trennzeichen und " nicht als Quote-Begrenzer wirken.
+    expect(capturedCmd).toContain("--format '{{.ID}}");
+    // Die Tabs müssen innerhalb der Single-Quotes liegen (kein IFS-Split durch POSIX-Shell)
+    expect(capturedCmd).toMatch(/--format '.*\t.*'/);
+    // Das Double-Quote um cloudflare.tunnel-hostname muss ebenfalls innerhalb Single-Quotes liegen
+    expect(capturedCmd).toMatch(/--format '.*"cloudflare\.tunnel-hostname".*'/);
+  });
+
   it('kein Private-Key → result:error, errorClass:no-private-key', async () => {
     const ctrl = new VpsDockerControl(store);
     const result = await ctrl.ps(TEST_VPS);

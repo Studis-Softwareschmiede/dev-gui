@@ -272,10 +272,13 @@ export class VpsDockerControl {
 
     // docker ps filtert auf Label cloudflare.tunnel-hostname (Existenz des Labels),
     // gibt Tab-getrennte Felder aus: ID, Image, Ports, Status, Labels
+    // Security: Format-String enthält Tabs und Double-Quotes — shellEscape() schützt vor
+    // IFS-Split (Tabs) und Quote-Bruch in strikten Shells (analog escapedImage/escapedLabel).
+    const formatStr = shellEscape('{{.ID}}\t{{.Image}}\t{{.Ports}}\t{{.Status}}\t{{.Label "cloudflare.tunnel-hostname"}}');
     const cmd = [
       'docker', 'ps',
       '--filter', 'label=cloudflare.tunnel-hostname',
-      '--format', '{{.ID}}\t{{.Image}}\t{{.Ports}}\t{{.Status}}\t{{.Label "cloudflare.tunnel-hostname"}}',
+      '--format', formatStr,
     ].join(' ');
 
     try {
