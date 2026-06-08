@@ -565,6 +565,31 @@ describe('DeployOrchestrator — listDeployments()', () => {
     // Container should still appear (route unknown)
     expect(result.deployments).toHaveLength(1);
   });
+
+  it('hostPort im Deployment-Read-Model aus ps()-Container übernommen', async () => {
+    const containers = [
+      { containerId: 'cid-1', hostname: 'app.example.com', image: 'img:v1', status: 'Up 3h', hostPort: 8083 },
+    ];
+    const docker = makeDockerControl({ psResult: { result: 'ok', containers } });
+    const cf = makeCloudflareApi({ listRoutesResult: [{ hostname: 'app.example.com', service: 'http://localhost:8083' }] });
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.listDeployments(LIST_PARAMS);
+
+    const d = result.deployments.find((dep) => dep.hostname === 'app.example.com');
+    expect(d.hostPort).toBe(8083);
+  });
+
+  it('hostPort ist null für Deployments ohne Container (Route-Drift)', async () => {
+    const docker = makeDockerControl({ psResult: { result: 'ok', containers: [] } });
+    const cf = makeCloudflareApi({ listRoutesResult: [{ hostname: 'orphan.example.com', service: 'http://localhost:8090' }] });
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.listDeployments(LIST_PARAMS);
+
+    const d = result.deployments.find((dep) => dep.hostname === 'orphan.example.com');
+    expect(d.hostPort).toBeNull();
+  });
 });
 
 // ── AC9: No secret leak ────────────────────────────────────────────────────────

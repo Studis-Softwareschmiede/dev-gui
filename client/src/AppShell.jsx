@@ -439,7 +439,7 @@ const styles = {
     borderRadius: 4,
     border: '1px solid #2a2a2a',
     background: '#111',
-    minHeight: 36,
+    minHeight: 44,
     display: 'inline-flex',
     alignItems: 'center',
   },

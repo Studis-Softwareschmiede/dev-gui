@@ -346,6 +346,7 @@ export class DeployOrchestrator {
         hostname,
         image: container?.image ?? null,
         containerId: container?.containerId ?? null,
+        hostPort: container?.hostPort ?? null,
         status: container?.status ?? null,
         routePresent: !!route,
         containerPresent: !!container,
