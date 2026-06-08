@@ -34,6 +34,24 @@ Vereinheitlichtes Maschinen-Modell der Multi-Provider-VPS-Boundary ([[vps-provid
 
 > **Kein persistenter Maschinen-Store** (ADR-005-Linie): `VpsMachine` wird bei jeder Anfrage live aus der Provider-API ermittelt, nicht abgelegt.
 
+## SshPublicKey — Identität & Matching (für `removeAuthorizedKey`)
+
+Kanonisches Identitäts-/Matching-Modell für das gezielte Entfernen **eines** Public-Keys aus `authorized_keys` der Ziel-Rolle (`VpsProvisioner.removeAuthorizedKey`, **ADR-008-Erweiterung Key-Rotation**, [[ssh-key-rotation]]). Bindend für `coder`/`tester`.
+
+Ein OpenSSH-`authorized_keys`-Eintrag hat die Form `[options] <type> <base64-blob> [comment]` (z.B. `ssh-ed25519 AAAAC3Nz… alex@host` oder mit Options-Prefix `restrict,from="…" ssh-ed25519 AAAAC3Nz… cloud-init`).
+
+| Bestandteil | Rolle beim Matching |
+|---|---|
+| `options` (optionaler Prefix) | **ignoriert** — frei veränderbar, kein Identitätsbestandteil. |
+| `type` (`ssh-ed25519` / `ssh-rsa` / `ecdsa-…` / …) | **Teil der Identität** (zusammen mit dem Blob). |
+| `base64-blob` (der Key selbst) | **maßgebliche Identität.** |
+| `comment` (optionaler Suffix) | **ignoriert** — nicht eindeutig, frei wählbar, darf das Matching nie bestimmen. |
+
+- **Key-Identität = das normalisierte Paar `(type, base64-blob)`** (Whitespace-normalisiert). Zwei Einträge sind „derselbe Key" ⇔ ihre `(type, blob)` sind gleich — **unabhängig** von Options-Prefix, Kommentar und sonstigem Whitespace.
+- `removeAuthorizedKey({ …, publicKey })` extrahiert je `authorized_keys`-Zeile die `(type, blob)`-Identität, vergleicht sie mit der des übergebenen `publicKey` und entfernt **alle** Zeilen mit gleicher Identität (Duplikat-tolerant); jede andere Zeile bleibt **bytegenau** erhalten. Datei wird **atomar** neu geschrieben (Tempfile + `chmod 600` + `mv`). Idempotent: Identität nicht vorhanden → Datei unverändert (`result: "already-absent"`).
+- **Nie** über die ganze Zeile oder den Kommentar matchen (Aussperr-/Restmüll-Risiko, s. ADR-008-Erweiterung, verworfene Alternativen 2/3).
+- Optionaler `hostKeyHash` (SHA256-Fingerprint des SSH-Host-Keys, Base64) ist **nicht** Teil der Key-Identität, sondern reines Audit-Metadatum (nicht geheim), konsistent mit der #47-Provision-Antwort.
+
 ## Cloudflare-Read-Models (CfZone / CfTunnel / CfRoute)
 
 Read-Models der Cloudflare-API-Boundary ([[view-cloudflare]], fixiert in **ADR-010**; `protected`-Flag aus `LockoutGuard`, ADR-011). `CloudflareApi` mappt die Cloudflare-Roh-Antwort auf diese Schemata (`src/cloudflare/normalize.js`); die Cloudflare-View sieht **nur** diese Modelle, nie den API-Token. **Grundregel** wie bei `VpsMachine`: fehlende Felder → `null`, **nie** Fehler.
