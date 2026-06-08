@@ -2,7 +2,7 @@
 id: vps-ssh-key-assignment
 title: SSH-Key-Zuordnung root/alex für VPS-Create (aus settings-ssh-keys)
 status: draft
-version: 1
+version: 2
 ---
 
 # Spec: SSH-Key-Zuordnung root/alex für VPS-Create (`vps-ssh-key-assignment`)
@@ -15,8 +15,10 @@ Beim **Create-from-scratch** ([[vps-provider-boundary]]) bekommen die zwei Defau
 
 > **Distinkte Keys je User (Q3 verbindlich):** `root` und `alex` erhalten jeweils einen **eigenen** Public-Key aus **separaten** `settings-ssh-keys`-Labels; kein gemeinsamer Key.
 
+> **Querverweis (Key-Herkunft):** Ein Rollen-Label-Key kann **entweder** vom Nutzer hinterlegt **oder** direkt im Panel **erzeugt** werden ([[ssh-key-generation]]) — ein dort generierter ed25519-Public-Key ist sofort ein wählbares Label mit gesetztem Public-Key für diese Zuordnung. Diese Spec bleibt davon im Scope unberührt: sie ordnet nur **vorhandene** Labels den Rollen `root`/`alex` zu, unabhängig davon, ob das Label hinterlegt oder generiert wurde.
+
 ## Verhalten
-1. Die SSH-Public-Keys stammen aus der bestehenden Key-Verwaltung ([[settings-ssh-keys]] Stufe A): je **Benutzer-Label** (z.B. `root`, `alex`) ist dort ein Public-Key hinterlegt.
+1. Die SSH-Public-Keys stammen aus der bestehenden Key-Verwaltung ([[settings-ssh-keys]] Stufe A) — hinterlegt **oder** im Panel erzeugt ([[ssh-key-generation]]): je **Benutzer-Label** (z.B. `root`, `alex`) ist dort ein Public-Key vorhanden.
 2. Im VPS-Create-Formular ([[view-vps]]) ordnet der Nutzer **pro Ziel-User-Rolle** (`root`, `alex`) ein hinterlegtes `settings-ssh-keys`-Label zu — über eine Auswahl, die die verfügbaren Labels mit gesetztem Public-Key anbietet.
 3. Sind die `settings-ssh-keys`-Labels für `root` und `alex` bereits eindeutig (gleichnamig), ist eine **Default-Zuordnung** zulässig (Label `root` → Ziel-User `root`, Label `alex` → Ziel-User `alex`), die der Nutzer übersteuern kann.
 4. Beim Create löst das Backend die ausgewählten Labels in die zugehörigen **Public-Keys** auf (store-intern aus dem `CredentialStore`-Public-Key-Metadatum, ADR-007) und übergibt sie als `{ root, alex }` an die cloud-init-Pipeline ([[vps-cloud-init-setup]]).
@@ -54,6 +56,7 @@ Beim **Create-from-scratch** ([[vps-provider-boundary]]) bekommen die zwei Defau
 
 ## Abhängigkeiten
 - [[settings-ssh-keys]] (Quelle der Public-Keys je Label, Format-Validierung, CredentialStore-Ablage).
+- [[ssh-key-generation]] (alternative Key-Herkunft: ein wählbares Label kann direkt im Panel generiert werden — Scope dieser Spec unberührt).
 - [[vps-cloud-init-setup]] (Konsument der aufgelösten root-/alex-Public-Keys).
 - [[vps-provider-boundary]] (Create-Request trägt die Label-Zuordnung).
 - [[view-vps]] (UI der Zuordnung im Create-Formular).
