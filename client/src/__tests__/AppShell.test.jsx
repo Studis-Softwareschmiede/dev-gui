@@ -2,9 +2,9 @@
  * AppShell.test.jsx — Unit tests for AppShell, EntryPanel and hash routing.
  *
  * Covers (app-shell-navigation):
- *   - AC1: Entry panel renders exactly five tiles with correct labels; each tile
- *          activatable via click and keyboard (Enter, Space). NavBar present on panel
- *          (settings-shell requirement: gear always visible).
+ *   - AC1: Entry panel renders exactly five tiles (GitHub, VPS, Cloudflare, Fabrik, Team)
+ *          and Deployments as an extra-nav text-link; each tile activatable via click and
+ *          keyboard (Enter, Space). NavBar present on panel (settings-shell: gear always visible).
  *   - AC2: Activating "Fabrik (dev-gui)" tile renders the factory view.
  *   - AC3: Activating GitHub/VPS/Cloudflare tiles renders placeholder views
  *          (no backend calls).
@@ -24,6 +24,10 @@
  *   - AC5: Entry panel unchanged — exactly five tiles, Settings is not a tile.
  *   - AC6: From Settings view navigation back to panel and gear remains visible.
  *
+ * Covers (team-view-frontend):
+ *   - AC1: Team tile present in entry panel; activatable via mouse and keyboard.
+ *   - AC2: Route #/team opens TeamView; AppShell renders <TeamView> when view === 'team'.
+ *
  * Terminal, TriggerPanel and Dashboard are mocked to avoid WS/DOM complexity.
  *
  * @jest-environment jsdom
@@ -42,6 +46,13 @@ jest.unstable_mockModule('../Dashboard.jsx', () => ({
 jest.unstable_mockModule('../TriggerPanel.jsx', () => ({
   TriggerPanel: () => null,
 }));
+// TeamView mocked to avoid /api/team fetch in AppShell tests (TeamView tests are separate)
+jest.unstable_mockModule('../TeamView.jsx', async () => {
+  const R = (await import('react')).default;
+  return {
+    TeamView: () => R.createElement('main', { 'aria-label': 'Team-Ansicht' }, 'Team (Mock)'),
+  };
+});
 
 // Dynamic imports AFTER mock declarations (ESM VM-modules requirement)
 const { render }              = await import('@testing-library/react');
@@ -127,7 +138,7 @@ describe('viewToHash', () => {
   }
 });
 
-// ── AC1 — Entry panel with exactly five tiles ─────────────────────────────────
+// ── AC1 — Entry panel with exactly five tiles + Deployments extra-nav ─────────
 
 describe('AppShell — AC1: Entry panel tiles', () => {
   it('shows the entry panel on the root route (NavBar present for gear)', () => {
@@ -167,9 +178,37 @@ describe('AppShell — AC1: Entry panel tiles', () => {
     expect(getByRole('button', { name: /fabrik.*dev-gui/i })).toBeTruthy();
   });
 
-  it('renders tile labelled "Deployments"', () => {
+  it('renders tile labelled "Team"', () => {
     const { getByRole } = render(React.createElement(AppShell));
-    expect(getByRole('button', { name: /^deployments/i })).toBeTruthy();
+    expect(getByRole('button', { name: /^team/i })).toBeTruthy();
+  });
+
+  it('Deployments is NOT a tile but is reachable as an extra-nav link in the panel', () => {
+    window.location.hash = '';
+    const { getByRole } = render(React.createElement(AppShell));
+    const panel = getByRole('main', { name: /einstiegs-panel/i });
+    // Deployments must NOT appear as a tile button
+    const deploymentsTile = panel.querySelector('button[data-view="deployments"]');
+    expect(deploymentsTile).toBeNull();
+    // Deployments MUST appear as a text-link in the panel
+    const deploymentLinks = panel.querySelectorAll('a[href="#/deployments"]');
+    expect(deploymentLinks.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('Deployments extra-nav link in the panel navigates to #/deployments', async () => {
+    window.location.hash = '';
+    const { getByRole } = render(React.createElement(AppShell));
+    const panel = getByRole('main', { name: /einstiegs-panel/i });
+    const deploymentLink = panel.querySelector('a[href="#/deployments"]');
+    expect(deploymentLink).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.click(deploymentLink);
+    });
+
+    await waitFor(() => {
+      expect(window.location.hash).toBe('#/deployments');
+    });
   });
 
   it('each tile is focusable (not disabled)', () => {
@@ -347,7 +386,7 @@ describe('AppShell — AC4: Navigation', () => {
       });
     });
 
-    it(`NavBar on ${v} contains all five view links`, async () => {
+    it(`NavBar on ${v} contains all tile + extra-nav links`, async () => {
       window.location.hash = `#/${v}`;
       window.dispatchEvent(new HashChangeEvent('hashchange'));
 
@@ -359,6 +398,7 @@ describe('AppShell — AC4: Navigation', () => {
         expect(nav.textContent).toMatch(/cloudflare/i);
         expect(nav.textContent).toMatch(/fabrik/i);
         expect(nav.textContent).toMatch(/deployments/i);
+        expect(nav.textContent).toMatch(/team/i);
       });
     });
   }
@@ -844,5 +884,108 @@ describe('build-version — VersionBadge: shows fetched version', () => {
     await waitFor(() => {
       expect(getByText(/version:\s*260609063500 cest/i)).toBeTruthy();
     });
+  });
+});
+
+// ── team-view-frontend AC1 — Team tile in entry panel ────────────────────────
+
+describe('team-view-frontend — AC1: Team tile in entry panel', () => {
+  it('renders tile labelled "Team" in the entry panel', () => {
+    window.location.hash = '';
+    const { getByRole } = render(React.createElement(AppShell));
+    const panel = getByRole('main', { name: /einstiegs-panel/i });
+    const teamTile = panel.querySelector('button[data-view="team"]');
+    expect(teamTile).toBeTruthy();
+  });
+
+  it('Team tile is focusable (not disabled)', () => {
+    window.location.hash = '';
+    const { getByRole } = render(React.createElement(AppShell));
+    const panel = getByRole('main', { name: /einstiegs-panel/i });
+    const teamTile = panel.querySelector('button[data-view="team"]');
+    expect(teamTile.disabled).toBe(false);
+  });
+
+  it('Team tile activates on click and navigates to #/team', async () => {
+    window.location.hash = '';
+    const { getByRole } = render(React.createElement(AppShell));
+    const panel = getByRole('main', { name: /einstiegs-panel/i });
+    const teamTile = panel.querySelector('button[data-view="team"]');
+
+    await act(async () => {
+      fireEvent.click(teamTile);
+    });
+
+    await waitFor(() => {
+      expect(window.location.hash).toBe('#/team');
+    });
+  });
+
+  it('Team tile activates on Enter key', async () => {
+    window.location.hash = '';
+    const { getByRole } = render(React.createElement(AppShell));
+    const panel = getByRole('main', { name: /einstiegs-panel/i });
+    const teamTile = panel.querySelector('button[data-view="team"]');
+
+    await act(async () => {
+      fireEvent.keyDown(teamTile, { key: 'Enter' });
+    });
+
+    await waitFor(() => {
+      expect(window.location.hash).toBe('#/team');
+    });
+  });
+
+  it('Team tile activates on Space key', async () => {
+    window.location.hash = '';
+    const { getByRole } = render(React.createElement(AppShell));
+    const panel = getByRole('main', { name: /einstiegs-panel/i });
+    const teamTile = panel.querySelector('button[data-view="team"]');
+
+    await act(async () => {
+      fireEvent.keyDown(teamTile, { key: ' ' });
+    });
+
+    await waitFor(() => {
+      expect(window.location.hash).toBe('#/team');
+    });
+  });
+});
+
+// ── team-view-frontend AC2 — Route #/team opens TeamView ─────────────────────
+
+describe('team-view-frontend — AC2: Route #/team opens TeamView', () => {
+  it('direct load with #/team opens Team view', async () => {
+    window.location.hash = '#/team';
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+
+    const { getByRole } = render(React.createElement(AppShell));
+
+    await waitFor(() => {
+      expect(getByRole('main', { name: /team-ansicht/i })).toBeTruthy();
+    });
+  });
+
+  it('clicking Team tile renders Team view landmark', async () => {
+    window.location.hash = '';
+    const { getByRole } = render(React.createElement(AppShell));
+    const panel = getByRole('main', { name: /einstiegs-panel/i });
+    const teamTile = panel.querySelector('button[data-view="team"]');
+
+    await act(async () => {
+      fireEvent.click(teamTile);
+    });
+
+    await waitFor(() => {
+      expect(getByRole('main', { name: /team-ansicht/i })).toBeTruthy();
+    });
+  });
+
+  it('parseHash returns "team" for "#/team"', () => {
+    expect(parseHash('#/team')).toBe('team');
+  });
+
+  it('VIEWS array includes "team"', () => {
+    expect(VIEWS).toContain('team');
   });
 });
