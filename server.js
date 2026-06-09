@@ -37,6 +37,7 @@
  *   GET    /api/deployments/reconcile/last                     → ReconcileReport|{} (cloudflare-reconciliation AC8)
  *   GET    /api/deployments/reconcile/reports?limit=N          → ReconcileReport[] (cloudflare-reconciliation AC8)
  *   GET    /api/deployments/reconcile/notices?limit=N          → ReconcileNotice[] (cloudflare-reconciliation AC8b)
+ *   GET    /api/version                                        → { version } — image build timestamp (build-version)
  *   WS   /ws/terminal                             → PtyManager bridge (guarded by AccessGuard)
  */
 
@@ -76,6 +77,7 @@ import { VpsDockerControl } from './src/deploy/VpsDockerControl.js';
 import { DeployOrchestrator } from './src/deploy/DeployOrchestrator.js';
 import { ReconciliationJob } from './src/deploy/ReconciliationJob.js';
 import { deploymentsRouter } from './src/deploymentsRouter.js';
+import { versionRouter } from './src/versionRouter.js';
 
 const PORT = Number(process.env.PORT ?? 8080);
 
@@ -191,6 +193,9 @@ const reconciliationJob = new ReconciliationJob({
 reconciliationJob.startScheduler();
 
 app.use(deploymentsRouter(deployOrchestrator, auditStore, vpsTargets, reconciliationJob));
+
+// ── Build-Version endpoint (build-version) ────────────────────────────────────
+app.use(versionRouter());
 
 /**
  * Build the VPS-Target map from an environment variable.

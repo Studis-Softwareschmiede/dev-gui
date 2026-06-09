@@ -97,6 +97,12 @@ RUN chmod +x /docker-entrypoint.sh
 RUN mkdir -p /home/node/.claude /home/node/.config \
   && chown -R node:node /home/node/.claude /home/node/.config
 
+# Build-Version — baked in at image build time (yymmddhhmmss TZ, Europe/Zurich).
+# Produced by CI and passed via --build-arg BUILD_VERSION=... .
+# Fallback "dev" is used when building locally without the arg.
+ARG BUILD_VERSION=dev
+ENV APP_VERSION="${BUILD_VERSION}"
+
 # AC1 — run as non-root: switch to the node user (uid 1000, present in
 # node:20-slim). Global tools (claude, docker, gh) are in /usr/local/bin —
 # readable+executable by all users. /home/node is the node user's home dir

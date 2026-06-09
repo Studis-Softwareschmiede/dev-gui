@@ -33,10 +33,14 @@ jobs:
           tags: |
             type=raw,value=latest
             type=sha
+      - id: build_version
+        run: echo "build_version=$(TZ=Europe/Zurich date +'%y%m%d%H%M%S %Z')" >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@v7
         with:
           context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            BUILD_VERSION=${{ steps.build_version.outputs.build_version }}
 # Härtung später (train/teamLeader): Actions auf SHA pinnen.
