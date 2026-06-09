@@ -48,6 +48,13 @@ export const DEFAULT_ALLOWED_COMMANDS = [
   '/agent-flow:train',
 ];
 
+/**
+ * Valid cost-mode values for the `--cost <mode>` flag (AC8).
+ * Mirrors agent-flow `knowledge/model-tiers.md`. Configuration, not scattered.
+ * @type {string[]}
+ */
+export const COST_MODES = ['low-cost', 'balanced', 'max-quality'];
+
 /** Default idle period (ms) — see module doc above. */
 const DEFAULT_IDLE_MS = 8_000;
 
@@ -91,6 +98,29 @@ export function isAllowed(command, allowlist) {
 }
 
 /**
+ * Validate any `--cost <mode>` flag embedded in the command (AC8).
+ *
+ * Command-agnostic: scans all tokens. When a `--cost` token appears, the
+ * immediately following token MUST be one of COST_MODES; otherwise the
+ * command is rejected. A trailing `--cost` with no value is rejected too.
+ * Commands without a `--cost` flag always pass (backwards-compat).
+ *
+ * @param {string} command  Already sanitized (non-empty, no control chars).
+ * @param {string[]} [modes=COST_MODES]
+ * @returns {boolean} true when there is no invalid cost flag.
+ */
+export function hasValidCostFlag(command, modes = COST_MODES) {
+  const tokens = command.split(/\s+/);
+  for (let i = 0; i < tokens.length; i += 1) {
+    if (tokens[i] === '--cost') {
+      const value = tokens[i + 1];
+      if (value === undefined || !modes.includes(value)) return false;
+    }
+  }
+  return true;
+}
+
+/**
  * CommandService — stateful single-instance service.
  *
  * Expected lifecycle: one shared instance per process, shared across routes.
@@ -104,6 +134,8 @@ export class CommandService {
   #lock;
   /** @type {string[]} */
   #allowlist;
+  /** @type {string[]} */
+  #costModes;
   /** @type {number} */
   #idleMs;
 
@@ -123,13 +155,15 @@ export class CommandService {
    * @param {import('./AuditStore.js').AuditStore} params.auditStore
    * @param {import('./JobLock.js').JobLock} [params.lock]     injectable for tests
    * @param {string[]} [params.allowlist]
+   * @param {string[]} [params.costModes]  valid --cost values (default: COST_MODES)
    * @param {number} [params.idleMs]  quiet-period ms (default: env COMMAND_IDLE_MS || 8000)
    */
-  constructor({ ptyManager, auditStore, lock = jobLock, allowlist = DEFAULT_ALLOWED_COMMANDS, idleMs } = {}) {
+  constructor({ ptyManager, auditStore, lock = jobLock, allowlist = DEFAULT_ALLOWED_COMMANDS, costModes = COST_MODES, idleMs } = {}) {
     this.#pty = ptyManager;
     this.#audit = auditStore;
     this.#lock = lock;
     this.#allowlist = allowlist;
+    this.#costModes = costModes;
     this.#idleMs = idleMs ?? parsePositiveInt(process.env.COMMAND_IDLE_MS, DEFAULT_IDLE_MS);
   }
 
@@ -154,6 +188,11 @@ export class CommandService {
 
     // Step 2: Allowlist check (AC2)
     if (!isAllowed(sanitized, this.#allowlist)) {
+      return { ok: false, reason: 'invalid' };
+    }
+
+    // Step 2b: Cost-mode flag validation (AC8) — reject malformed --cost <mode>
+    if (!hasValidCostFlag(sanitized, this.#costModes)) {
       return { ok: false, reason: 'invalid' };
     }
 

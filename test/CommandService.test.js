@@ -25,7 +25,7 @@ import express from 'express';
 import { createServer } from 'node:http';
 import { request as httpRequest } from 'node:http';
 
-import { CommandService, sanitizeCommand, isAllowed, DEFAULT_ALLOWED_COMMANDS } from '../src/CommandService.js';
+import { CommandService, sanitizeCommand, isAllowed, hasValidCostFlag, DEFAULT_ALLOWED_COMMANDS, COST_MODES } from '../src/CommandService.js';
 import { commandRouter } from '../src/commandRouter.js';
 import { AuditStore } from '../src/AuditStore.js';
 import { JobLock } from '../src/JobLock.js';
@@ -214,6 +214,35 @@ describe('isAllowed()', () => {
   });
 });
 
+// ── Unit tests: hasValidCostFlag (AC8) ───────────────────────────────────────
+
+describe('hasValidCostFlag()', () => {
+  it('returns true for commands without a --cost flag (backwards-compat)', () => {
+    expect(hasValidCostFlag('/agent-flow:flow')).toBe(true);
+    expect(hasValidCostFlag('/agent-flow:preview up sandbox-2')).toBe(true);
+    expect(hasValidCostFlag('/agent-flow:requirement Dark-Mode-Toggle')).toBe(true);
+  });
+
+  it('returns true when --cost is followed by a valid mode', () => {
+    for (const mode of COST_MODES) {
+      expect(hasValidCostFlag(`/agent-flow:flow --cost ${mode}`)).toBe(true);
+    }
+    expect(hasValidCostFlag('/agent-flow:requirement --cost low-cost Dark-Mode-Toggle')).toBe(true);
+    expect(hasValidCostFlag('/agent-flow:train --cost max-quality security')).toBe(true);
+  });
+
+  it('returns false when --cost is followed by an unknown mode', () => {
+    expect(hasValidCostFlag('/agent-flow:flow --cost bogus')).toBe(false);
+    expect(hasValidCostFlag('/agent-flow:flow --cost cheap')).toBe(false);
+    expect(hasValidCostFlag('/agent-flow:flow --cost LOW-COST')).toBe(false); // case-sensitive enum
+  });
+
+  it('returns false when --cost is the trailing token with no value', () => {
+    expect(hasValidCostFlag('/agent-flow:flow --cost')).toBe(false);
+    expect(hasValidCostFlag('/agent-flow:requirement Dark-Mode --cost')).toBe(false);
+  });
+});
+
 // ── Unit tests: CommandService.tryRun ────────────────────────────────────────
 
 describe('CommandService.tryRun() — unit (no HTTP)', () => {
@@ -291,6 +320,28 @@ describe('CommandService.tryRun() — unit (no HTTP)', () => {
 
   it('AC2 — newline injection: returns invalid, nothing written, no audit', () => {
     const res = svc.tryRun({ command: '/agent-flow:flow\nsecond', identity: null });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe('invalid');
+    expect(pty.written).toHaveLength(0);
+    expect(audit.getAll()).toHaveLength(0);
+  });
+
+  it('AC8 — valid --cost flag: accepted and full line written to PTY', () => {
+    const res = svc.tryRun({ command: '/agent-flow:flow --cost max-quality', identity: null });
+    expect(res.ok).toBe(true);
+    expect(pty.written[0]).toBe('/agent-flow:flow --cost max-quality\n');
+  });
+
+  it('AC8 — invalid --cost mode: returns invalid, nothing written, no audit', () => {
+    const res = svc.tryRun({ command: '/agent-flow:flow --cost bogus', identity: null });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe('invalid');
+    expect(pty.written).toHaveLength(0);
+    expect(audit.getAll()).toHaveLength(0);
+  });
+
+  it('AC8 — --cost without value: returns invalid, nothing written, no audit', () => {
+    const res = svc.tryRun({ command: '/agent-flow:flow --cost', identity: null });
     expect(res.ok).toBe(false);
     expect(res.reason).toBe('invalid');
     expect(pty.written).toHaveLength(0);
@@ -535,6 +586,19 @@ describe('POST /api/command — HTTP integration', () => {
 
   it('AC2 — newline injection → 400, nothing written, no audit', async () => {
     const res = await post(port, '/api/command', { command: '/agent-flow:flow\nsecret' });
+    expect(res.status).toBe(400);
+    expect(ptyStub.written).toHaveLength(0);
+    expect(auditStore.getAll()).toHaveLength(0);
+  });
+
+  it('AC8 — valid --cost flag → 202 and full line written to PTY', async () => {
+    const res = await post(port, '/api/command', { command: '/agent-flow:flow --cost max-quality' });
+    expect(res.status).toBe(202);
+    expect(ptyStub.written[0]).toBe('/agent-flow:flow --cost max-quality\n');
+  });
+
+  it('AC8 — invalid --cost mode → 400, nothing written, no audit', async () => {
+    const res = await post(port, '/api/command', { command: '/agent-flow:flow --cost bogus' });
     expect(res.status).toBe(400);
     expect(ptyStub.written).toHaveLength(0);
     expect(auditStore.getAll()).toHaveLength(0);

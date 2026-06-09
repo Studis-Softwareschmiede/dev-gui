@@ -492,6 +492,132 @@ describe('TriggerPanel — AC7 command composition', () => {
   });
 });
 
+// ── AC9 — cost-mode switch ─────────────────────────────────────────────────────
+
+describe('TriggerPanel — AC9 cost-mode switch', () => {
+  it('shows the cost-mode selector for /agent-flow:flow (default command)', async () => {
+    const fetchFn = makeFetchFn({
+      '/api/session': () => Promise.resolve(sessionResp('ready')),
+    });
+    const { getByLabelText, getByRole } = renderPanel(fetchFn);
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
+    });
+    expect(getByLabelText(/cost-mode/i)).toBeTruthy();
+  });
+
+  it('hides the cost-mode selector for preview and adopt', async () => {
+    const fetchFn = makeFetchFn({
+      '/api/session': () => Promise.resolve(sessionResp('ready')),
+      '/api/status':  () => Promise.resolve(statusResp(['sandbox-1'])),
+    });
+    const { getByRole, queryByLabelText } = renderPanel(fetchFn);
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
+    });
+
+    await act(async () => {
+      fireEvent.change(getByRole('combobox', { name: /^befehl$/i }), {
+        target: { value: '/agent-flow:preview' },
+      });
+    });
+    expect(queryByLabelText(/cost-mode/i)).toBeNull();
+
+    await act(async () => {
+      fireEvent.change(getByRole('combobox', { name: /^befehl$/i }), {
+        target: { value: '/agent-flow:adopt' },
+      });
+    });
+    expect(queryByLabelText(/cost-mode/i)).toBeNull();
+  });
+
+  it('flow + balanced (default) → posts bare /agent-flow:flow (no --cost flag)', async () => {
+    const fetchFn = makeFetchFn({
+      '/api/session': () => Promise.resolve(sessionResp('ready')),
+      '/api/command': () => Promise.resolve(cmdResp(202, { commandId: 'cm1', status: 'running' })),
+    });
+    const { getByRole } = renderPanel(fetchFn);
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /senden/i }));
+    });
+
+    const commandCall = fetchFn.mock.calls.find(([url]) => url === '/api/command');
+    const body = JSON.parse(commandCall[1].body);
+    expect(body.command).toBe('/agent-flow:flow');
+  });
+
+  it('flow + max-quality → posts /agent-flow:flow --cost max-quality', async () => {
+    const fetchFn = makeFetchFn({
+      '/api/session': () => Promise.resolve(sessionResp('ready')),
+      '/api/command': () => Promise.resolve(cmdResp(202, { commandId: 'cm2', status: 'running' })),
+    });
+    const { getByRole, getByLabelText } = renderPanel(fetchFn);
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
+    });
+
+    await act(async () => {
+      fireEvent.change(getByLabelText(/cost-mode/i), {
+        target: { value: 'max-quality' },
+      });
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /senden/i }));
+    });
+
+    const commandCall = fetchFn.mock.calls.find(([url]) => url === '/api/command');
+    const body = JSON.parse(commandCall[1].body);
+    expect(body.command).toBe('/agent-flow:flow --cost max-quality');
+  });
+
+  it('requirement + low-cost + text → /agent-flow:requirement --cost low-cost <text> (flag before free-text)', async () => {
+    const fetchFn = makeFetchFn({
+      '/api/session': () => Promise.resolve(sessionResp('ready')),
+      '/api/command': () => Promise.resolve(cmdResp(202, { commandId: 'cm3', status: 'running' })),
+    });
+    const { getByRole, getByLabelText } = renderPanel(fetchFn);
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
+    });
+
+    await act(async () => {
+      fireEvent.change(getByRole('combobox', { name: /befehl/i }), {
+        target: { value: '/agent-flow:requirement' },
+      });
+    });
+
+    await act(async () => {
+      fireEvent.change(getByLabelText(/kontext/i), {
+        target: { value: 'Dark-Mode-Toggle' },
+      });
+    });
+
+    await act(async () => {
+      fireEvent.change(getByLabelText(/cost-mode/i), {
+        target: { value: 'low-cost' },
+      });
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /senden/i }));
+    });
+
+    const commandCall = fetchFn.mock.calls.find(([url]) => url === '/api/command');
+    const body = JSON.parse(commandCall[1].body);
+    expect(body.command).toBe('/agent-flow:requirement --cost low-cost Dark-Mode-Toggle');
+  });
+});
+
 // ── Existing behavior tests (updated for namespaced commands) ─────────────────
 
 describe('TriggerPanel — fire command → 202 → running state', () => {

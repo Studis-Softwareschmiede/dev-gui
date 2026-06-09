@@ -2,7 +2,7 @@
 id: flow-trigger
 title: Flow-Trigger (Slash-Befehl in die Session injizieren)
 status: draft
-version: 3
+version: 4
 ---
 
 # Spec: Flow-Trigger (`flow-trigger`)
@@ -18,6 +18,7 @@ Fabrik-Flows auf Knopfdruck: ein GUI-Trigger injiziert einen **erlaubten** Slash
 3. **Concurrency-Lock = 1:** ist bereits ein Command `running` (Session `busy`), wird ein weiterer Trigger abgelehnt.
 4. **Kill-Switch:** `POST /api/command/cancel` sendet einen Interrupt (Ctrl-C) an die Session und gibt den Lock frei.
 5. Frontend-Panels (Projekt/Item wählen → Aktions-Button) rufen diese Endpunkte; der Verlauf erscheint im Terminal-Pane aus [[terminal-frontend]].
+6. **Cost-Mode (Token-Hebel):** Für die Agent-dispatchenden Befehle (`flow`, `requirement`, `train`) kann das Panel einen Modus-Schalter mitschicken — als **`--cost <mode>`-Flag** direkt nach dem Befehls-Präfix. Gültige Modi: `low-cost | balanced | max-quality` (Enum). `balanced` ist der Default und wird **nicht** als Flag gesendet (der Projekt-Default `profile.cost_mode` in agent-flow greift). Der agent-flow-Skill liest das Flag und wählt je Agent ein günstigeres/teureres Modell — schont Token bei Prototypen, dreht für kritische Reviews/Tests/Retros auf. *(Vertrag mit agent-flow `knowledge/model-tiers.md` — dev-gui injiziert nur das Flag, die Modell-Auflösung liegt in agent-flow.)*
 
 ## Completion-Modell (Command → done, Lock frei)
 Ein laufender Command gilt als **abgeschlossen**, sobald der PTY für eine konfigurierbare **Quiet-Period** (`COMMAND_IDLE_MS`, default `8000` ms) keine Ausgabe mehr produziert. Dann: `status → done`, Lock freigegeben.
@@ -30,16 +31,17 @@ Ein laufender Command gilt als **abgeschlossen**, sobald der PTY für eine konfi
 ## Befehls-Katalog (was das Panel anbietet)
 Das Frontend ist **befehls-bewusst**: je gewähltem Befehl bietet es die gültigen Sub-Befehle/Argumente an und komponiert daraus die vollständige Befehlszeile.
 
-| Befehl | Sub-Befehl / Argument | Beispiel-Zeile |
-|---|---|---|
-| `/agent-flow:flow` | — (arbeitet das Board ab) | `/agent-flow:flow` |
-| `/agent-flow:adopt` | `<owner/repo>` (Pflicht) | `/agent-flow:adopt octocat/Hello-World` |
-| `/agent-flow:preview` | `up <repo>` · `down <repo>` · `list` · `available` | `/agent-flow:preview up sandbox-2` |
-| `/agent-flow:requirement` | optionaler Kontext/Feature-Text | `/agent-flow:requirement Dark-Mode-Toggle` |
-| `/agent-flow:train` | optional `<lang\|domain>` | `/agent-flow:train security` |
+| Befehl | Sub-Befehl / Argument | Cost-Mode | Beispiel-Zeile |
+|---|---|---|---|
+| `/agent-flow:flow` | — (arbeitet das Board ab) | ✓ | `/agent-flow:flow --cost max-quality` |
+| `/agent-flow:adopt` | `<owner/repo>` (Pflicht) | — | `/agent-flow:adopt octocat/Hello-World` |
+| `/agent-flow:preview` | `up <repo>` · `down <repo>` · `list` · `available` | — | `/agent-flow:preview up sandbox-2` |
+| `/agent-flow:requirement` | optionaler Kontext/Feature-Text | ✓ | `/agent-flow:requirement --cost low-cost Dark-Mode-Toggle` |
+| `/agent-flow:train` | optional `<lang\|domain>` | ✓ | `/agent-flow:train --cost max-quality security` |
 
 - Bei `preview up`/`preview down` und `adopt` stammt die `<repo>`-Auswahl aus der **Projektliste** (`/api/status`), damit kein Tippfehler nötig ist.
-- Die komponierte Zeile wird unverändert (sanitisiert, **eine** Zeile) als `command` an `POST /api/command` geschickt; die Allowlist prüft das **Präfix** (`/agent-flow:<skill>`).
+- **Cost-Mode (Spalte ✓):** nur die Agent-dispatchenden Befehle (`flow`/`requirement`/`train`) bieten den Schalter. Das `--cost <mode>`-Flag steht **direkt nach dem Präfix**, vor sub/arg/Freitext. `balanced` → Flag weggelassen. `preview` (kein Agent) und `adopt` (eigener Flow) bieten keinen Cost-Mode.
+- Die komponierte Zeile wird unverändert (sanitisiert, **eine** Zeile) als `command` an `POST /api/command` geschickt; die Allowlist prüft das **Präfix** (`/agent-flow:<skill>`), und ein etwaiges `--cost`-Flag wird gegen das Modus-Enum validiert (AC8).
 
 ## Acceptance-Kriterien
 - **AC1** — `POST /api/command {command}` mit erlaubtem Befehl schreibt `command\n` in den PTY und antwortet `202 {commandId, status:"running"}`; der Output erscheint im `/ws/terminal`-Stream.
@@ -49,11 +51,14 @@ Das Frontend ist **befehls-bewusst**: je gewähltem Befehl bietet es die gültig
 - **AC5** — `POST /api/command/cancel` sendet Interrupt an die Session, setzt den laufenden Command auf `cancelled` und gibt den Lock frei (`/api/session` wird wieder `ready`).
 - **AC6** — Jeder **akzeptierte** Command erzeugt **genau einen** Audit-Eintrag (`AuditStore.record({identity, command})`) mit der Access-Identität des Auslösers (`req.identity.email`, oder `null` bei Dev-Bypass). Das Audit-Schreiben erfolgt **vor** dem PTY-Write. Schlägt `record()` fehl, wird der Command **nicht** ausgeführt und der Lock sofort freigegeben — kein nicht-auditierter Lauf. *(Schließt [[access-and-guardrails]] AC3 end-to-end ab.)*
 - **AC7** — Die vom Panel komponierte Befehlszeile trägt das `/agent-flow:`-Präfix und (wo zutreffend) Sub-Befehl + Argument in **einer** Zeile (z.B. `/agent-flow:preview up sandbox-2`). `list`/`available` werden ohne Argument gesendet; `up`/`down`/`adopt` **ohne** gewähltes `<repo>`/`<owner/repo>` lösen keinen Request aus (Frontend-Validierung, kein `400`-Roundtrip nötig).
+- **AC8** (Cost-Mode-Validierung, Backend) — Enthält ein akzeptierter Befehl ein `--cost`-Flag, MUSS der **unmittelbar folgende** Token ∈ `{low-cost, balanced, max-quality}` sein; andernfalls → `400` und **nichts** wird in den PTY geschrieben (kein Audit-Eintrag). Ein `--cost` als **letzter** Token (ohne Wert) → ebenfalls `400`. Die Prüfung ist **command-agnostisch** (greift für jeden Befehl, der das Flag trägt) und liegt als Konfiguration neben der Allowlist (nicht verstreut). Befehle **ohne** `--cost` sind von AC8 unberührt (Backwards-Compat: `/agent-flow:flow` bleibt gültig).
+- **AC9** (Cost-Mode-Schalter, Frontend) — Für `flow`/`requirement`/`train` zeigt das Panel einen **3-Wege-Schalter** (`low-cost | balanced | max-quality`, Default `balanced`). Bei `balanced` wird **kein** `--cost`-Flag in die Zeile komponiert (`/agent-flow:flow` bleibt bare); bei `low-cost`/`max-quality` steht `--cost <mode>` direkt nach dem Präfix, vor sub/arg/Freitext (z.B. `/agent-flow:requirement --cost low-cost Dark-Mode-Toggle`). Für `preview`/`adopt` ist der Schalter **nicht** sichtbar.
 
 ## Verträge
-- `POST /api/command` `{command:string}` → `202 {commandId, status}` | `400` (Allowlist / Sanitisierung / Audit-Fehler) | `409` (Lock) | `500` (interner/PTY-Write-Fehler).
+- `POST /api/command` `{command:string}` → `202 {commandId, status}` | `400` (Allowlist / Sanitisierung / **Cost-Mode-Enum (AC8)** / Audit-Fehler) | `409` (Lock) | `500` (interner/PTY-Write-Fehler).
 - `POST /api/command/cancel` → `200 {cancelled:bool}`.
 - Allowlist als Konfiguration (Liste erlaubter Präfixe), nicht hartkodiert verstreut.
+- Cost-Mode-Enum (`low-cost|balanced|max-quality`) als Konfiguration (exportierte Konstante), nicht verstreut; `--cost`-Validierung command-agnostisch (AC8).
 - `COMMAND_IDLE_MS` (Env, integer > 0, default 8000) — konfiguriert die Quiet-Period; testbar mit kurzem Wert.
 
 ## Edge-Cases & Fehlerverhalten
