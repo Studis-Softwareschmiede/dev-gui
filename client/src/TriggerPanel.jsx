@@ -72,10 +72,35 @@ const PREVIEW_REPO_SUBS = ['up', 'down'];
 /** All valid preview sub-commands. */
 const PREVIEW_SUBS = ['up', 'down', 'list', 'available'];
 
+/**
+ * Cost-mode values (AC9) — mirrors agent-flow knowledge/model-tiers.md and the
+ * server enum COST_MODES. 'balanced' is the default and is NOT emitted as a flag
+ * (the project default profile.cost_mode applies).
+ * @type {string[]}
+ */
+const COST_MODES = ['low-cost', 'balanced', 'max-quality'];
+/** Commands that dispatch agents and therefore support the cost-mode switch (AC9). */
+const COST_AWARE_COMMANDS = ['/agent-flow:flow', '/agent-flow:requirement', '/agent-flow:train'];
+
 /** Session poll interval in ms */
 const SESSION_POLL_MS = 3_000;
 
 // ── Compose the command line (AC7) ────────────────────────────────────────────
+
+/**
+ * Cost-mode flag fragment for cost-aware commands (AC9).
+ * Returns ' --cost <mode>' positioned right after the prefix, or '' when the
+ * command is not cost-aware or the mode is 'balanced' (default → no flag).
+ *
+ * @param {string} cmd
+ * @param {string} costMode
+ * @returns {string}
+ */
+function costFlag(cmd, costMode) {
+  if (!COST_AWARE_COMMANDS.includes(cmd)) return '';
+  if (!costMode || costMode === 'balanced') return '';
+  return ` --cost ${costMode}`;
+}
 
 /**
  * Build the full command string from the current UI selections.
@@ -85,12 +110,16 @@ const SESSION_POLL_MS = 3_000;
  * @param {string}      subCmd    Selected sub-command (preview only)
  * @param {string}      repoArg   Selected/typed repo (preview up/down or adopt)
  * @param {string}      freeArg   Free-text argument (requirement/train)
+ * @param {string}      costMode  Selected cost-mode (flow/requirement/train)
  * @returns {string|null}
  */
-function composeCommand(cmd, subCmd, repoArg, freeArg) {
+function composeCommand(cmd, subCmd, repoArg, freeArg, costMode) {
+  // Cost flag sits directly after the prefix, before any sub/arg/free-text (AC9).
+  const cost = costFlag(cmd, costMode);
+
   switch (cmd) {
     case '/agent-flow:flow':
-      return cmd;
+      return `${cmd}${cost}`;
 
     case '/agent-flow:adopt': {
       const repo = repoArg.trim();
@@ -111,12 +140,12 @@ function composeCommand(cmd, subCmd, repoArg, freeArg) {
 
     case '/agent-flow:requirement': {
       const text = freeArg.trim();
-      return text ? `${cmd} ${text}` : cmd;
+      return text ? `${cmd}${cost} ${text}` : `${cmd}${cost}`;
     }
 
     case '/agent-flow:train': {
       const text = freeArg.trim();
-      return text ? `${cmd} ${text}` : cmd;
+      return text ? `${cmd}${cost} ${text}` : `${cmd}${cost}`;
     }
 
     default:
@@ -147,6 +176,8 @@ export function TriggerPanel({ pollInterval = SESSION_POLL_MS, fetchFn }) {
   const [repoArg, setRepoArg]       = useState('');
   /** Free-text argument (requirement / train) */
   const [freeArg, setFreeArg]       = useState('');
+  /** Cost-mode for agent-dispatching commands (flow/requirement/train) — AC9 */
+  const [costMode, setCostMode]     = useState('balanced');
   /** Project list from /api/status for repo selects */
   const [projects, setProjects]     = useState(null); // null = loading / unavailable
   /** UI message for validation errors or status */
@@ -214,13 +245,16 @@ export function TriggerPanel({ pollInterval = SESSION_POLL_MS, fetchFn }) {
     (cmd === '/agent-flow:preview' && PREVIEW_REPO_SUBS.includes(previewSub)) ||
     cmd === '/agent-flow:adopt';
 
+  // Whether the current command supports the cost-mode switch (AC9)
+  const isCostAware = COST_AWARE_COMMANDS.includes(cmd);
+
   // Composed command line — null means "required field missing → Senden disabled"
-  const composed = composeCommand(cmd, previewSub, repoArg, freeArg);
+  const composed = composeCommand(cmd, previewSub, repoArg, freeArg, costMode);
   const canFire  = !isRunning && composed !== null;
 
   // ── Fire command ─────────────────────────────────────────────────────────
   const handleFire = useCallback(async () => {
-    const command = composeCommand(cmd, previewSub, repoArg, freeArg);
+    const command = composeCommand(cmd, previewSub, repoArg, freeArg, costMode);
     if (!command) return; // AC7: guard — required field missing
     setMessage(null);
     setMsgType(null);
@@ -267,7 +301,7 @@ export function TriggerPanel({ pollInterval = SESSION_POLL_MS, fetchFn }) {
     // 500 or unexpected
     setMessage('Serverfehler. Bitte erneut versuchen.');
     setMsgType('error');
-  }, [cmd, previewSub, repoArg, freeArg]);
+  }, [cmd, previewSub, repoArg, freeArg, costMode]);
 
   // ── Kill ─────────────────────────────────────────────────────────────────
   const handleKill = useCallback(async () => {
@@ -335,6 +369,27 @@ export function TriggerPanel({ pollInterval = SESSION_POLL_MS, fetchFn }) {
             <option key={c} value={c}>{c}</option>
           ))}
         </select>
+
+        {/* Cost-mode switch — only for agent-dispatching commands (AC9) */}
+        {isCostAware && (
+          <>
+            <label style={styles.label} htmlFor="trigger-cost">
+              Cost-Mode <span style={styles.optional}>(Token-Hebel)</span>
+            </label>
+            <select
+              id="trigger-cost"
+              style={styles.select}
+              value={costMode}
+              disabled={isRunning}
+              aria-disabled={isRunning}
+              onChange={(e) => setCostMode(e.target.value)}
+            >
+              {COST_MODES.map((m) => (
+                <option key={m} value={m}>{m}</option>
+              ))}
+            </select>
+          </>
+        )}
 
         {/* ── Command-aware controls (AC4) ─────────────────────────────── */}
 
