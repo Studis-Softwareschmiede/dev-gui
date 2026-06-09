@@ -129,20 +129,26 @@ describe('GET /api/version — APP_VERSION not set (fallback "dev")', () => {
 });
 
 describe('GET /api/version — behind AccessGuard', () => {
-  let server, port;
+  let server, port, savedAud, savedTeam;
 
   beforeEach(async () => {
-    // No DEV_NO_ACCESS — guard is active (but without a real JWT it will 401/403)
+    // No DEV_NO_ACCESS — guard is active. Without a cf-access-jwt-assertion
+    // header the guard rejects at the missing-header check (403), before JWKS.
     delete process.env.DEV_NO_ACCESS;
-    // Also clear CF Access config so guard rejects without a valid token
-    delete process.env.CF_AUD;
-    delete process.env.CF_TEAM_DOMAIN;
+    // Save + clear the real Access config vars (ACCESS_AUD / ACCESS_TEAM_DOMAIN)
+    // so the guard environment is deterministic; restored in afterEach.
+    savedAud = process.env.ACCESS_AUD;
+    savedTeam = process.env.ACCESS_TEAM_DOMAIN;
+    delete process.env.ACCESS_AUD;
+    delete process.env.ACCESS_TEAM_DOMAIN;
     const app = makeApp();
     ({ server, port } = await startServer(app));
   });
 
   afterEach(async () => {
     await closeServer(server);
+    if (savedAud !== undefined) process.env.ACCESS_AUD = savedAud;
+    if (savedTeam !== undefined) process.env.ACCESS_TEAM_DOMAIN = savedTeam;
   });
 
   it('rejects unauthenticated requests (no DEV_NO_ACCESS, no token)', async () => {

@@ -256,7 +256,7 @@ function VersionBadge() {
   }, []);
 
   return (
-    <div style={styles.versionBadge} aria-label={`Version: ${version}`}>
+    <div style={styles.versionBadge} role="status">
       Version: {version}
     </div>
   );
