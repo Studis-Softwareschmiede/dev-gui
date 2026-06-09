@@ -2,8 +2,8 @@
  * AppShell.jsx — App-Shell: Einstiegs-Panel + client-seitige Navigation.
  *
  * app-shell-navigation:
- * AC1 — Einstiegs-Panel mit genau vier Kacheln (GitHub, VPS, Cloudflare, Fabrik (dev-gui)).
- *        Jede Kachel per Maus und Tastatur (Tab + Enter/Space) aktivierbar.
+ * AC1 — Einstiegs-Panel mit genau fünf Kacheln (GitHub, VPS, Cloudflare, Fabrik (dev-gui),
+ *        Deployments). Jede Kachel per Maus und Tastatur (Tab + Enter/Space) aktivierbar.
  * AC2 — Kachel "Fabrik (dev-gui)" öffnet die Fabrik-Ansicht (kein Funktionsverlust).
  * AC3 — Kacheln GitHub/VPS/Cloudflare öffnen Platzhalter-Views (kein Backend-Aufruf).
  * AC4 — Persistente NavBar aus jeder Ansicht; Home-Link zurück zum Panel.
@@ -17,7 +17,7 @@
  *        Einstiegs-Panel aus sichtbar und per Maus und Tastatur aktivierbar.
  * AC2 — Aktivieren des Zahnrads öffnet die Settings-Ansicht (Route #/settings).
  * AC3 — Deep-Link #/settings; Browser-Back/Forward konsistent; unbekannte Route → Panel.
- * AC5 — Einstiegs-Panel zeigt weiterhin genau vier Kacheln (Settings ist keine Kachel).
+ * AC5 — Einstiegs-Panel zeigt weiterhin genau fünf Kacheln (Settings ist keine Kachel).
  * AC6 — Aus der Settings-Ansicht Navigation zurück zum Panel und zu anderen Ansichten.
  * AC7 — Keine neuen Secrets; keine view-spezifische Autorisierung; kein Backend-Endpunkt.
  *
@@ -65,11 +65,11 @@ const TILES = [
     label: 'Fabrik (dev-gui)',
     description: 'Interaktive Claude-Code-Session, Flow-Trigger und Status.',
   },
-];
-
-/** Additional nav routes (not tiles — available in NavBar only). */
-const EXTRA_NAV = [
-  { id: 'deployments', label: 'Deployments' },
+  {
+    id: 'deployments',
+    label: 'Deployments',
+    description: 'Live-Deployments, Deploy und Undeploy von Containern.',
+  },
 ];
 
 // ── NavBar ────────────────────────────────────────────────────────────────────
@@ -104,7 +104,7 @@ function NavBar({ currentView, onNavigate }) {
       )}
 
       {/* Per-view nav links — hidden on panel */}
-      {!onPanel && [...TILES, ...EXTRA_NAV].map(({ id, label }) => (
+      {!onPanel && TILES.map(({ id, label }) => (
         <a
           key={id}
           href={`#/${id}`}
@@ -145,10 +145,7 @@ function NavBar({ currentView, onNavigate }) {
 // ── Entry Panel ───────────────────────────────────────────────────────────────
 
 /**
- * EntryPanel — the landing/home screen with four tiles (AC1).
- *
- * Deployments and other extra-nav views are listed as text links below the tiles
- * so they are reachable from the panel without adding a fifth tile (app-shell-navigation AC1).
+ * EntryPanel — the landing/home screen with five tiles (AC1).
  *
  * @param {{ onNavigate: (view: string) => void }} props
  */
@@ -158,7 +155,7 @@ function EntryPanel({ onNavigate }) {
       <h1 style={styles.panelTitle}>dev-gui</h1>
       <p style={styles.panelSubtitle}>Softwareschmiede-Fabrik — wähle eine Ansicht</p>
 
-      {/* Four tiles (AC1) — grid on desktop, stacked on narrow */}
+      {/* Five tiles (AC1) — grid on desktop, stacked on narrow */}
       <div style={styles.tileGrid} role="list">
         {TILES.map(({ id, label, description }) => (
           <Tile
@@ -170,23 +167,6 @@ function EntryPanel({ onNavigate }) {
           />
         ))}
       </div>
-
-      {/* Extra views: text links below the four tiles (not a fifth tile — app-shell-navigation AC1) */}
-      <nav style={styles.extraNav} aria-label="Weitere Ansichten">
-        {EXTRA_NAV.map(({ id, label }) => (
-          <a
-            key={id}
-            href={`#/${id}`}
-            style={styles.extraNavLink}
-            onClick={(e) => {
-              e.preventDefault();
-              onNavigate(id);
-            }}
-          >
-            {label}
-          </a>
-        ))}
-      </nav>
     </main>
   );
 }
@@ -468,26 +448,5 @@ const styles = {
     borderRadius: '4px 0 0 0',
     zIndex: 1000,
     userSelect: 'none',
-  },
-
-  // ── Extra nav links (below tiles on panel)
-  extraNav: {
-    display: 'flex',
-    flexWrap: 'wrap',
-    gap: 8,
-    marginTop: 24,
-    justifyContent: 'center',
-  },
-  extraNavLink: {
-    padding: '8px 16px',
-    color: '#9ca3af',
-    textDecoration: 'none',
-    fontSize: 13,
-    borderRadius: 4,
-    border: '1px solid #2a2a2a',
-    background: '#111',
-    minHeight: 44,
-    display: 'inline-flex',
-    alignItems: 'center',
   },
 };

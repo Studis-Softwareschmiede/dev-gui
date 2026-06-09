@@ -20,14 +20,14 @@ Eine **zentrale Einstellmaske** für die Admin-Konsole, bequem über ein **Zahnr
 4. Die Settings-Ansicht trägt einen erkennbaren Titel („Einstellungen") und zeigt **genau vier** klar beschriftete Sektionen: *GitHub*, *Cloudflare*, *Hetzner / VPS*, *SSH-Keys*.
 5. Jede Sektion trägt eine kurze Beschreibung, welche Credentials/Daten sie aufnimmt; im Grundgerüst sind die Sektionen **leere Container** (Platzhalter „folgt"), ohne Backend-Aufruf.
 6. Aus der Settings-Ansicht führt die Navigation (Home / andere Ansichten) wie aus jeder anderen Ansicht zurück; das Zahnrad bleibt sichtbar.
-7. Die Settings-Ansicht ist **kein** Bestandteil des Vier-Kachel-Einstiegs-Panels; das Panel zeigt weiterhin genau vier Kacheln (kein Funktionsverlust gegenüber [[app-shell-navigation]]).
+7. Die Settings-Ansicht ist **kein** Bestandteil der Einstiegs-Panel-Kacheln; das Panel zeigt weiterhin genau fünf Kacheln (kein Funktionsverlust gegenüber [[app-shell-navigation]]).
 
 ## Acceptance-Kriterien
 - **AC1** — Ein Zahnrad-Bedienelement (Settings) ist in der Navigation aus jeder Ansicht **und** vom Einstiegs-Panel aus sichtbar und per Maus **und** Tastatur (Tab + Enter/Space) aktivierbar.
 - **AC2** — Aktivieren des Zahnrads öffnet die Settings-Ansicht und setzt die Settings-Route; die Settings-Ansicht zeigt einen erkennbaren Titel „Einstellungen".
 - **AC3** — Die Settings-Ansicht ist per Deep-Link (Settings-Route) direkt erreichbar; Browser-Zurück/Vor navigiert konsistent zur übrigen Shell, eine unbekannte Route fällt weiterhin auf das Einstiegs-Panel zurück.
 - **AC4** — Die Settings-Ansicht zeigt **genau vier** beschriftete Sektionen: *GitHub*, *Cloudflare*, *Hetzner / VPS*, *SSH-Keys*; im Grundgerüst löst keine Sektion einen Backend-Aufruf aus.
-- **AC5** — Das Einstiegs-Panel zeigt unverändert **genau vier** Kacheln (Settings ist NICHT als Kachel hinzugefügt); die Fabrik-Ansicht und die übrigen Ansichten bleiben unverändert erreichbar.
+- **AC5** — Das Einstiegs-Panel zeigt **genau fünf** Kacheln (Settings ist NICHT als Kachel hinzugefügt); die Fabrik-Ansicht und die übrigen Ansichten bleiben unverändert erreichbar.
 - **AC6** — Aus der Settings-Ansicht ist die Rückkehr zum Einstiegs-Panel und der Wechsel zu jeder anderen Ansicht möglich; das Zahnrad bleibt sichtbar.
 - **AC7** — Die Settings-Ansicht ist hinter der bestehenden Cloudflare-Access-Mauer erreichbar; das Grundgerüst führt **keine** view-spezifische Autorisierung und **keine** neuen Secrets/Backend-Endpunkte ein.
 

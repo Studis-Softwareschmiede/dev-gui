@@ -2,7 +2,7 @@
  * AppShell.test.jsx — Unit tests for AppShell, EntryPanel and hash routing.
  *
  * Covers (app-shell-navigation):
- *   - AC1: Entry panel renders exactly four tiles with correct labels; each tile
+ *   - AC1: Entry panel renders exactly five tiles with correct labels; each tile
  *          activatable via click and keyboard (Enter, Space). NavBar present on panel
  *          (settings-shell requirement: gear always visible).
  *   - AC2: Activating "Fabrik (dev-gui)" tile renders the factory view.
@@ -21,7 +21,7 @@
  *   - AC2: Activating gear opens Settings view (hash #/settings, title "Einstellungen").
  *   - AC3: Deep-link #/settings opens Settings view; unknown route → panel fallback.
  *   - AC4: Settings view shows exactly four sections (GitHub, Cloudflare, Hetzner/VPS, SSH-Keys).
- *   - AC5: Entry panel unchanged — exactly four tiles, Settings is not a tile.
+ *   - AC5: Entry panel unchanged — exactly five tiles, Settings is not a tile.
  *   - AC6: From Settings view navigation back to panel and gear remains visible.
  *
  * Terminal, TriggerPanel and Dashboard are mocked to avoid WS/DOM complexity.
@@ -127,7 +127,7 @@ describe('viewToHash', () => {
   }
 });
 
-// ── AC1 — Entry panel with exactly four tiles ─────────────────────────────────
+// ── AC1 — Entry panel with exactly five tiles ─────────────────────────────────
 
 describe('AppShell — AC1: Entry panel tiles', () => {
   it('shows the entry panel on the root route (NavBar present for gear)', () => {
@@ -138,13 +138,13 @@ describe('AppShell — AC1: Entry panel tiles', () => {
     expect(getByRole('main', { name: /einstiegs-panel/i })).toBeTruthy();
   });
 
-  it('renders exactly four tile buttons (gear is a separate nav button, not a tile)', () => {
+  it('renders exactly five tile buttons (gear is a separate nav button, not a tile)', () => {
     window.location.hash = '';
     const { getByRole } = render(React.createElement(AppShell));
     // Tile buttons are inside the entry panel main landmark
     const panel = getByRole('main', { name: /einstiegs-panel/i });
     const tiles = panel.querySelectorAll('button[data-view]');
-    expect(tiles).toHaveLength(4);
+    expect(tiles).toHaveLength(5);
   });
 
   it('renders tile labelled "GitHub"', () => {
@@ -165,6 +165,11 @@ describe('AppShell — AC1: Entry panel tiles', () => {
   it('renders tile labelled "Fabrik (dev-gui)"', () => {
     const { getByRole } = render(React.createElement(AppShell));
     expect(getByRole('button', { name: /fabrik.*dev-gui/i })).toBeTruthy();
+  });
+
+  it('renders tile labelled "Deployments"', () => {
+    const { getByRole } = render(React.createElement(AppShell));
+    expect(getByRole('button', { name: /^deployments/i })).toBeTruthy();
   });
 
   it('each tile is focusable (not disabled)', () => {
@@ -342,7 +347,7 @@ describe('AppShell — AC4: Navigation', () => {
       });
     });
 
-    it(`NavBar on ${v} contains all four view links`, async () => {
+    it(`NavBar on ${v} contains all five view links`, async () => {
       window.location.hash = `#/${v}`;
       window.dispatchEvent(new HashChangeEvent('hashchange'));
 
@@ -353,6 +358,7 @@ describe('AppShell — AC4: Navigation', () => {
         expect(nav.textContent).toMatch(/vps/i);
         expect(nav.textContent).toMatch(/cloudflare/i);
         expect(nav.textContent).toMatch(/fabrik/i);
+        expect(nav.textContent).toMatch(/deployments/i);
       });
     });
   }
@@ -470,7 +476,7 @@ describe('AppShell — AC6 (a): Unknown route fallback', () => {
   it('navigating back to panel after unknown route shows entry panel', async () => {
     window.location.hash = '#/unknown';
     const { getByRole } = render(React.createElement(AppShell));
-    // Already on panel (fallback) — four tiles visible
+    // Already on panel (fallback) — five tiles visible
     const tiles = getByRole('main', { name: /einstiegs-panel/i });
     expect(tiles).toBeTruthy();
   });
@@ -702,15 +708,15 @@ describe('settings-shell — AC4: Settings view sections', () => {
   });
 });
 
-// ── settings-shell AC5 — Entry panel still exactly four tiles ────────────────
+// ── settings-shell AC5 — Entry panel still exactly five tiles ────────────────
 
-describe('settings-shell — AC5: Entry panel unchanged (four tiles)', () => {
-  it('entry panel shows exactly four tiles after settings feature', () => {
+describe('settings-shell — AC5: Entry panel unchanged (five tiles)', () => {
+  it('entry panel shows exactly five tiles after settings feature', () => {
     window.location.hash = '';
     const { getByRole } = render(React.createElement(AppShell));
     const panel = getByRole('main', { name: /einstiegs-panel/i });
     const tiles = panel.querySelectorAll('button[data-view]');
-    expect(tiles).toHaveLength(4);
+    expect(tiles).toHaveLength(5);
   });
 
   it('Settings is NOT a tile in the entry panel', () => {
