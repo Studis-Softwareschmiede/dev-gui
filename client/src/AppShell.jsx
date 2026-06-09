@@ -32,6 +32,7 @@
  *   - Keine neuen Backend-Endpunkte in diesem Paket.
  */
 
+import { useState, useEffect } from 'react';
 import { useHashRouter } from './useHashRouter.js';
 import { FactoryView } from './FactoryView.jsx';
 import { GitHubView } from './GitHubView.jsx';
@@ -237,6 +238,30 @@ function Tile({ id, label, description, onNavigate }) {
   );
 }
 
+// ── VersionBadge ──────────────────────────────────────────────────────────────
+
+/**
+ * VersionBadge — fetches /api/version once on mount and displays it globally.
+ * Shown on every view including the entry panel (always visible).
+ * A11y: contrast ≥ 4.5:1 (#9ca3af on #0d0d0d ≈ 5.5:1), font-size ≥ 12px.
+ */
+function VersionBadge() {
+  const [version, setVersion] = useState('dev');
+
+  useEffect(() => {
+    fetch('/api/version')
+      .then((res) => (res.ok ? res.json() : Promise.reject(res)))
+      .then((data) => setVersion(data.version || 'dev'))
+      .catch(() => setVersion('dev'));
+  }, []);
+
+  return (
+    <div style={styles.versionBadge} role="status">
+      Version: {version}
+    </div>
+  );
+}
+
 // ── AppShell ──────────────────────────────────────────────────────────────────
 
 /**
@@ -244,6 +269,7 @@ function Tile({ id, label, description, onNavigate }) {
  *   - NavBar (always — gear visible from every view including entry panel)
  *   - EntryPanel when view === 'panel'
  *   - matching view component otherwise
+ *   - VersionBadge (always — fixed footer, every view)
  */
 export function AppShell() {
   const { view, navigate } = useHashRouter();
@@ -273,6 +299,9 @@ export function AppShell() {
           {view === 'settings'    && <SettingsView    onNavigate={navigate} />}
         </div>
       )}
+
+      {/* Version badge — always visible on every view (build-version) */}
+      <VersionBadge />
     </div>
   );
 }
@@ -421,6 +450,24 @@ const styles = {
     fontSize: 13,
     color: '#9ca3af',
     lineHeight: 1.5,
+  },
+
+  // ── Version badge (fixed footer, always visible — build-version)
+  // font-size: 12px; color #9ca3af on #0d0d0d → contrast ≈ 5.5:1 (WCAG AA ≥ 4.5:1)
+  versionBadge: {
+    position: 'fixed',
+    bottom: 0,
+    right: 0,
+    padding: '2px 8px',
+    background: '#0d0d0d',
+    color: '#9ca3af',
+    fontSize: 12,
+    fontFamily: 'monospace',
+    borderTop: '1px solid #2a2a2a',
+    borderLeft: '1px solid #2a2a2a',
+    borderRadius: '4px 0 0 0',
+    zIndex: 1000,
+    userSelect: 'none',
   },
 
   // ── Extra nav links (below tiles on panel)

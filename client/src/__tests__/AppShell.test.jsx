@@ -752,3 +752,91 @@ describe('settings-shell — AC6: Navigation from Settings view', () => {
     expect(getByRole('button', { name: /einstellungen/i })).toBeTruthy();
   });
 });
+
+// ── build-version — VersionBadge ──────────────────────────────────────────────
+
+describe('build-version — VersionBadge: shows fetched version', () => {
+  it('displays "Version: <value>" after fetch resolves with version', async () => {
+    window.location.hash = '';
+    globalThis.fetch = jest.fn((url) => {
+      if (url === '/api/version') {
+        return Promise.resolve({ ok: true, json: async () => ({ version: '260609063500 CEST' }) });
+      }
+      return Promise.resolve({ ok: true, json: async () => [] });
+    });
+
+    const { getByText } = render(React.createElement(AppShell));
+
+    await waitFor(() => {
+      expect(getByText(/version:\s*260609063500 cest/i)).toBeTruthy();
+    });
+  });
+
+  it('displays "Version: dev" when fetch fails', async () => {
+    window.location.hash = '';
+    globalThis.fetch = jest.fn((url) => {
+      if (url === '/api/version') {
+        return Promise.reject(new Error('Network error'));
+      }
+      return Promise.resolve({ ok: true, json: async () => [] });
+    });
+
+    const { getByText } = render(React.createElement(AppShell));
+
+    await waitFor(() => {
+      expect(getByText(/version:\s*dev/i)).toBeTruthy();
+    });
+  });
+
+  it('displays "Version: dev" when fetch returns non-ok response', async () => {
+    window.location.hash = '';
+    globalThis.fetch = jest.fn((url) => {
+      if (url === '/api/version') {
+        return Promise.resolve({ ok: false, status: 503, json: async () => ({}) });
+      }
+      return Promise.resolve({ ok: true, json: async () => [] });
+    });
+
+    const { getByText } = render(React.createElement(AppShell));
+
+    await waitFor(() => {
+      expect(getByText(/version:\s*dev/i)).toBeTruthy();
+    });
+  });
+
+  it('version badge is visible on the entry panel (panel view)', async () => {
+    window.location.hash = '';
+    globalThis.fetch = jest.fn((url) => {
+      if (url === '/api/version') {
+        return Promise.resolve({ ok: true, json: async () => ({ version: '260609063500 CEST' }) });
+      }
+      return Promise.resolve({ ok: true, json: async () => [] });
+    });
+
+    const { getByRole, getByText } = render(React.createElement(AppShell));
+
+    // Panel is shown
+    expect(getByRole('main', { name: /einstiegs-panel/i })).toBeTruthy();
+
+    // Version badge is also rendered
+    await waitFor(() => {
+      expect(getByText(/version:\s*260609063500 cest/i)).toBeTruthy();
+    });
+  });
+
+  it('version badge is visible on a non-panel view (factory)', async () => {
+    window.location.hash = '#/factory';
+    globalThis.fetch = jest.fn((url) => {
+      if (url === '/api/version') {
+        return Promise.resolve({ ok: true, json: async () => ({ version: '260609063500 CEST' }) });
+      }
+      return Promise.resolve({ ok: true, json: async () => [] });
+    });
+
+    const { getByText } = render(React.createElement(AppShell));
+
+    await waitFor(() => {
+      expect(getByText(/version:\s*260609063500 cest/i)).toBeTruthy();
+    });
+  });
+});
