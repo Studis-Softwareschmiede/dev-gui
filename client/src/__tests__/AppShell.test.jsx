@@ -2,9 +2,9 @@
  * AppShell.test.jsx — Unit tests for AppShell, EntryPanel and hash routing.
  *
  * Covers (app-shell-navigation):
- *   - AC1: Entry panel renders exactly five tiles (GitHub, VPS, Cloudflare, Fabrik, Team)
- *          and Deployments as an extra-nav text-link; each tile activatable via click and
- *          keyboard (Enter, Space). NavBar present on panel (settings-shell: gear always visible).
+ *   - AC1: Entry panel renders exactly six tiles (GitHub, VPS, Cloudflare, Fabrik, Team,
+ *          Deployments); each tile activatable via click and keyboard (Enter, Space).
+ *          NavBar present on panel (settings-shell: gear always visible).
  *   - AC2: Activating "Fabrik (dev-gui)" tile renders the factory view.
  *   - AC3: Activating GitHub/VPS/Cloudflare tiles renders placeholder views
  *          (no backend calls).
@@ -21,8 +21,17 @@
  *   - AC2: Activating gear opens Settings view (hash #/settings, title "Einstellungen").
  *   - AC3: Deep-link #/settings opens Settings view; unknown route → panel fallback.
  *   - AC4: Settings view shows exactly four sections (GitHub, Cloudflare, Hetzner/VPS, SSH-Keys).
- *   - AC5: Entry panel unchanged — exactly five tiles, Settings is not a tile.
+ *   - AC5: Entry panel has six tiles (after dashboard-deployment-tile), Settings is not a tile.
  *   - AC6: From Settings view navigation back to panel and gear remains visible.
+ *
+ * Covers (dashboard-deployment-tile):
+ *   - AC1: Deployments tile present in entry panel; activatable via click and keyboard.
+ *   - AC2: No separate Deployments extra-nav text-link in panel; exactly one Deployments element.
+ *   - AC3: Activating Deployments tile navigates to #/deployments (DeploymentsView).
+ *   - AC4: Panel shows exactly six tiles in order: GitHub, VPS, Cloudflare, Fabrik, Team,
+ *          Deployments.
+ *   - AC5: Deployments tile uses same button[data-view] markup as other tiles.
+ *   - AC6: NavBar includes Deployments link; deep-link #/deployments works.
  *
  * Covers (team-view-frontend):
  *   - AC1: Team tile present in entry panel; activatable via mouse and keyboard.
@@ -138,7 +147,7 @@ describe('viewToHash', () => {
   }
 });
 
-// ── AC1 — Entry panel with exactly five tiles + Deployments extra-nav ─────────
+// ── AC1 — Entry panel with exactly six tiles (incl. Deployments) ─────────────
 
 describe('AppShell — AC1: Entry panel tiles', () => {
   it('shows the entry panel on the root route (NavBar present for gear)', () => {
@@ -149,13 +158,13 @@ describe('AppShell — AC1: Entry panel tiles', () => {
     expect(getByRole('main', { name: /einstiegs-panel/i })).toBeTruthy();
   });
 
-  it('renders exactly five tile buttons (gear is a separate nav button, not a tile)', () => {
+  it('renders exactly six tile buttons (gear is a separate nav button, not a tile)', () => {
     window.location.hash = '';
     const { getByRole } = render(React.createElement(AppShell));
     // Tile buttons are inside the entry panel main landmark
     const panel = getByRole('main', { name: /einstiegs-panel/i });
     const tiles = panel.querySelectorAll('button[data-view]');
-    expect(tiles).toHaveLength(5);
+    expect(tiles).toHaveLength(6);
   });
 
   it('renders tile labelled "GitHub"', () => {
@@ -183,27 +192,70 @@ describe('AppShell — AC1: Entry panel tiles', () => {
     expect(getByRole('button', { name: /^team/i })).toBeTruthy();
   });
 
-  it('Deployments is NOT a tile but is reachable as an extra-nav link in the panel', () => {
-    window.location.hash = '';
+  it('renders tile labelled "Deployments" (AC1)', () => {
     const { getByRole } = render(React.createElement(AppShell));
-    const panel = getByRole('main', { name: /einstiegs-panel/i });
-    // Deployments must NOT appear as a tile button
-    const deploymentsTile = panel.querySelector('button[data-view="deployments"]');
-    expect(deploymentsTile).toBeNull();
-    // Deployments MUST appear as a text-link in the panel
-    const deploymentLinks = panel.querySelectorAll('a[href="#/deployments"]');
-    expect(deploymentLinks.length).toBeGreaterThanOrEqual(1);
+    expect(getByRole('button', { name: /^deployments/i })).toBeTruthy();
   });
 
-  it('Deployments extra-nav link in the panel navigates to #/deployments', async () => {
+  it('Deployments tile is the last (sixth) tile in order (AC4)', () => {
     window.location.hash = '';
     const { getByRole } = render(React.createElement(AppShell));
     const panel = getByRole('main', { name: /einstiegs-panel/i });
-    const deploymentLink = panel.querySelector('a[href="#/deployments"]');
-    expect(deploymentLink).toBeTruthy();
+    const tiles = Array.from(panel.querySelectorAll('button[data-view]'));
+    expect(tiles).toHaveLength(6);
+    const ids = tiles.map((t) => t.getAttribute('data-view'));
+    expect(ids).toEqual(['github', 'vps', 'cloudflare', 'factory', 'team', 'deployments']);
+  });
+
+  it('Deployments IS a tile (button[data-view="deployments"]) in the panel (AC1/AC2)', () => {
+    window.location.hash = '';
+    const { getByRole } = render(React.createElement(AppShell));
+    const panel = getByRole('main', { name: /einstiegs-panel/i });
+    // Deployments MUST appear as a tile button
+    const deploymentsTile = panel.querySelector('button[data-view="deployments"]');
+    expect(deploymentsTile).toBeTruthy();
+    // Deployments must NOT appear as a text-link in the panel (AC2)
+    const deploymentLinks = panel.querySelectorAll('a[href="#/deployments"]');
+    expect(deploymentLinks.length).toBe(0);
+  });
+
+  it('Deployments tile in the panel navigates to #/deployments on click (AC3)', async () => {
+    window.location.hash = '';
+    const { getByRole } = render(React.createElement(AppShell));
+    const panel = getByRole('main', { name: /einstiegs-panel/i });
+    const deploymentsTile = panel.querySelector('button[data-view="deployments"]');
+    expect(deploymentsTile).toBeTruthy();
 
     await act(async () => {
-      fireEvent.click(deploymentLink);
+      fireEvent.click(deploymentsTile);
+    });
+
+    await waitFor(() => {
+      expect(window.location.hash).toBe('#/deployments');
+    });
+  });
+
+  it('Deployments tile navigates to #/deployments on Enter key (AC1)', async () => {
+    window.location.hash = '';
+    const { getByRole } = render(React.createElement(AppShell));
+    const deploymentsTile = getByRole('button', { name: /^deployments/i });
+
+    await act(async () => {
+      fireEvent.keyDown(deploymentsTile, { key: 'Enter' });
+    });
+
+    await waitFor(() => {
+      expect(window.location.hash).toBe('#/deployments');
+    });
+  });
+
+  it('Deployments tile navigates to #/deployments on Space key (AC1)', async () => {
+    window.location.hash = '';
+    const { getByRole } = render(React.createElement(AppShell));
+    const deploymentsTile = getByRole('button', { name: /^deployments/i });
+
+    await act(async () => {
+      fireEvent.keyDown(deploymentsTile, { key: ' ' });
     });
 
     await waitFor(() => {
@@ -516,7 +568,7 @@ describe('AppShell — AC6 (a): Unknown route fallback', () => {
   it('navigating back to panel after unknown route shows entry panel', async () => {
     window.location.hash = '#/unknown';
     const { getByRole } = render(React.createElement(AppShell));
-    // Already on panel (fallback) — five tiles visible
+    // Already on panel (fallback) — six tiles visible
     const tiles = getByRole('main', { name: /einstiegs-panel/i });
     expect(tiles).toBeTruthy();
   });
@@ -748,15 +800,15 @@ describe('settings-shell — AC4: Settings view sections', () => {
   });
 });
 
-// ── settings-shell AC5 — Entry panel still exactly five tiles ────────────────
+// ── settings-shell AC5 — Entry panel: six tiles, Settings is not a tile ──────
 
-describe('settings-shell — AC5: Entry panel unchanged (five tiles)', () => {
-  it('entry panel shows exactly five tiles after settings feature', () => {
+describe('settings-shell — AC5: Entry panel (six tiles, Settings not a tile)', () => {
+  it('entry panel shows exactly six tiles (after dashboard-deployment-tile)', () => {
     window.location.hash = '';
     const { getByRole } = render(React.createElement(AppShell));
     const panel = getByRole('main', { name: /einstiegs-panel/i });
     const tiles = panel.querySelectorAll('button[data-view]');
-    expect(tiles).toHaveLength(5);
+    expect(tiles).toHaveLength(6);
   });
 
   it('Settings is NOT a tile in the entry panel', () => {
@@ -949,6 +1001,54 @@ describe('team-view-frontend — AC1: Team tile in entry panel', () => {
     await waitFor(() => {
       expect(window.location.hash).toBe('#/team');
     });
+  });
+});
+
+// ── dashboard-deployment-tile AC6 — NavBar + deep-link #/deployments ─────────
+
+describe('dashboard-deployment-tile — AC6: NavBar + deep-link', () => {
+  it('NavBar contains a Deployments link on a non-panel view', async () => {
+    window.location.hash = '#/factory';
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+
+    const { getByRole } = render(React.createElement(AppShell));
+    await waitFor(() => {
+      const nav = getByRole('navigation', { name: /haupt-navigation/i });
+      expect(nav.textContent).toMatch(/deployments/i);
+    });
+  });
+
+  it('NavBar contains exactly one Deployments link (no duplicate) (AC6)', async () => {
+    window.location.hash = '#/github';
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+
+    const { getByRole } = render(React.createElement(AppShell));
+    await waitFor(() => {
+      const nav = getByRole('navigation', { name: /haupt-navigation/i });
+      const deploymentLinks = nav.querySelectorAll('a[href="#/deployments"]');
+      expect(deploymentLinks).toHaveLength(1);
+    });
+  });
+
+  it('direct load with #/deployments opens DeploymentsView (deep-link AC6)', async () => {
+    window.location.hash = '#/deployments';
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+
+    const { queryByRole } = render(React.createElement(AppShell));
+    await waitFor(() => {
+      // Entry panel is not shown
+      expect(queryByRole('main', { name: /einstiegs-panel/i })).toBeNull();
+    });
+    // Hash must remain #/deployments
+    expect(window.location.hash).toBe('#/deployments');
+  });
+
+  it('parseHash returns "deployments" for "#/deployments"', () => {
+    expect(parseHash('#/deployments')).toBe('deployments');
+  });
+
+  it('VIEWS array includes "deployments"', () => {
+    expect(VIEWS).toContain('deployments');
   });
 });
 

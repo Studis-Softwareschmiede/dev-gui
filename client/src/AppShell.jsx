@@ -2,9 +2,9 @@
  * AppShell.jsx — App-Shell: Einstiegs-Panel + client-seitige Navigation.
  *
  * app-shell-navigation:
- * AC1 — Einstiegs-Panel mit genau fünf Kacheln (GitHub, VPS, Cloudflare, Fabrik (dev-gui),
- *        Team). Jede Kachel per Maus und Tastatur (Tab + Enter/Space) aktivierbar.
- *        Deployments wird als Extra-Nav-Textlink (kein Kachel) unter den Kacheln geführt.
+ * AC1 — Einstiegs-Panel mit genau sechs Kacheln (GitHub, VPS, Cloudflare, Fabrik (dev-gui),
+ *        Team, Deployments). Jede Kachel per Maus und Tastatur (Tab + Enter/Space) aktivierbar.
+ *        Deployments ist die sechste, letzte Kachel (kein separater Extra-Nav-Textlink mehr).
  * AC2 — Kachel "Fabrik (dev-gui)" öffnet die Fabrik-Ansicht (kein Funktionsverlust).
  * AC3 — Kacheln GitHub/VPS/Cloudflare öffnen Platzhalter-Views (kein Backend-Aufruf).
  * AC4 — Persistente NavBar aus jeder Ansicht; Home-Link zurück zum Panel.
@@ -18,13 +18,25 @@
  *        Einstiegs-Panel aus sichtbar und per Maus und Tastatur aktivierbar.
  * AC2 — Aktivieren des Zahnrads öffnet die Settings-Ansicht (Route #/settings).
  * AC3 — Deep-Link #/settings; Browser-Back/Forward konsistent; unbekannte Route → Panel.
- * AC5 — Einstiegs-Panel zeigt weiterhin fünf Kacheln (Settings ist keine Kachel).
+ * AC5 — Einstiegs-Panel zeigt weiterhin sechs Kacheln (Settings ist keine Kachel).
  * AC6 — Aus der Settings-Ansicht Navigation zurück zum Panel und zu anderen Ansichten.
  * AC7 — Keine neuen Secrets; keine view-spezifische Autorisierung; kein Backend-Endpunkt.
  *
  * team-view-frontend:
  * AC1 — Kachel „Team" (id `team`) im Einstiegs-Panel; per Maus und Tastatur aktivierbar.
  * AC2 — Route #/team öffnet TeamView; App-Shell rendert <TeamView /> bei view === 'team'.
+ *
+ * dashboard-deployment-tile:
+ * AC1 — Deployments ist als Kachel im Kachel-Raster (tileGrid) enthalten; gleiche Tile-Komponente
+ *        wie die übrigen Kacheln; per Maus und Tastatur aktivierbar.
+ * AC2 — Kein separater Extra-Nav-Textlink für Deployments unter dem Raster (extraNavRow entfernt).
+ * AC3 — Aktivieren der Deployments-Kachel navigiert auf Route #/deployments (DeploymentsView).
+ * AC4 — Panel zeigt genau sechs Kacheln: GitHub, VPS, Cloudflare, Fabrik (dev-gui), Team,
+ *        Deployments — in dieser Reihenfolge.
+ * AC5 — Deployments-Kachel visuell und semantisch identisch zu den übrigen Kacheln.
+ * AC6 — NavBar führt Deployments weiterhin als Nav-Link auf; Deep-Link #/deployments funktioniert.
+ * AC8 — Keine neuen Secrets, Endpunkte oder Autorisierungslogik; rein präsentationsschicht-interne
+ *        Änderung.
  *
  * A11y: WCAG 2.1 AA — sichtbarer Fokus, aria-current auf aktiver Nav-Position,
  *        Touch-Targets ≥ 44 px, Bedeutung nicht allein über Farbe.
@@ -76,18 +88,11 @@ const TILES = [
     label: 'Team',
     description: 'Agenten, Skills und Knowledge der Fabrik einsehen.',
   },
-];
-
-/**
- * Extra navigation links shown as text-links below the tiles in the EntryPanel
- * and in the NavBar. These are NOT tiles — they are secondary links for views
- * that don't need the prominent tile treatment.
- * (Deployments is a full view but intentionally kept as a text-link, not a tile.)
- *
- * @type {Array<{ id: string, label: string }>}
- */
-const EXTRA_NAV = [
-  { id: 'deployments', label: 'Deployments' },
+  {
+    id: 'deployments',
+    label: 'Deployments',
+    description: 'Deployments, Container und Cloudflare-Routen im Blick.',
+  },
 ];
 
 // ── NavBar ────────────────────────────────────────────────────────────────────
@@ -121,8 +126,8 @@ function NavBar({ currentView, onNavigate }) {
         </a>
       )}
 
-      {/* Per-view nav links — hidden on panel (tiles + extra-nav) */}
-      {!onPanel && [...TILES, ...EXTRA_NAV].map(({ id, label }) => (
+      {/* Per-view nav links — hidden on panel (all views from TILES) */}
+      {!onPanel && TILES.map(({ id, label }) => (
         <a
           key={id}
           href={`#/${id}`}
@@ -163,8 +168,8 @@ function NavBar({ currentView, onNavigate }) {
 // ── Entry Panel ───────────────────────────────────────────────────────────────
 
 /**
- * EntryPanel — the landing/home screen with five tiles (AC1).
- * Deployments is shown as an extra text-link below the tiles (not a tile).
+ * EntryPanel — the landing/home screen with six tiles (AC1).
+ * All views including Deployments are shown as equal tiles in the grid.
  *
  * @param {{ onNavigate: (view: string) => void }} props
  */
@@ -174,7 +179,7 @@ function EntryPanel({ onNavigate }) {
       <h1 style={styles.panelTitle}>dev-gui</h1>
       <p style={styles.panelSubtitle}>Softwareschmiede-Fabrik — wähle eine Ansicht</p>
 
-      {/* Five tiles (AC1) — grid on desktop, stacked on narrow */}
+      {/* Six tiles (AC1) — grid on desktop, stacked on narrow */}
       <div style={styles.tileGrid} role="list">
         {TILES.map(({ id, label, description }) => (
           <Tile
@@ -186,26 +191,6 @@ function EntryPanel({ onNavigate }) {
           />
         ))}
       </div>
-
-      {/* Extra-Nav text-links — Deployments is a full view but shown as a text-link,
-          not a tile, to keep the tile grid focused on primary navigation. */}
-      {EXTRA_NAV.length > 0 && (
-        <div style={styles.extraNavRow}>
-          {EXTRA_NAV.map(({ id, label }) => (
-            <a
-              key={id}
-              href={`#/${id}`}
-              style={styles.extraNavLink}
-              onClick={(e) => {
-                e.preventDefault();
-                onNavigate(id);
-              }}
-            >
-              {label}
-            </a>
-          ))}
-        </div>
-      )}
     </main>
   );
 }
@@ -471,25 +456,6 @@ const styles = {
     fontSize: 13,
     color: '#9ca3af',
     lineHeight: 1.5,
-  },
-
-  // ── Extra-nav text-links (below tile grid in EntryPanel)
-  extraNavRow: {
-    display: 'flex',
-    flexWrap: 'wrap',
-    gap: '8px 16px',
-    marginTop: 24,
-    justifyContent: 'center',
-  },
-  extraNavLink: {
-    color: '#9ca3af',
-    textDecoration: 'none',
-    fontSize: 13,
-    padding: '6px 12px',
-    borderRadius: 4,
-    minHeight: 44,
-    display: 'inline-flex',
-    alignItems: 'center',
   },
 
   // ── Version badge (fixed footer, always visible — build-version)
