@@ -16,10 +16,21 @@
  *   AC9  — 2 Spalten Desktop / gestapelt auf schmal; Dark-Theme konsistent.
  *   AC10 — Keine Secrets im Bundle; kein dangerouslySetInnerHTML; nur /api/team* aufgerufen.
  *
+ * team-detail-related-refs:
+ *   AC7  — Agent-DetailPane: Sektionen „Zugehörige Skills" + „Zugehöriges Knowledge" als Chips;
+ *           leere Liste → keine Sektion.
+ *   AC8  — Chip-Klick (Maus + Tastatur Enter/Space) ruft loadDetail(kind, id); kein Voll-Reload.
+ *   AC9  — Skill-/Knowledge-DetailPane: Sektion „Verwendet von" mit Agent-Chips;
+ *           Chip-Klick ruft loadDetail('agent', id); leere Liste → keine Sektion.
+ *   AC10 — Chips: fokussierbar, sichtbarer Fokusring, Tastatur Enter/Space, Bedeutung nicht
+ *           nur über Farbe; kein dangerouslySetInnerHTML/innerHTML; keine externe Lib;
+ *           keine Secrets; nur /api/team* aufgerufen.
+ *
  * A11y (WCAG 2.1 AA):
  *   - Semantische Navigationsliste mit aria-label.
  *   - Sichtbarer Fokusring — KEIN outline:none (Coder-Lesson 2026-05-27).
  *   - Touch-Targets ≥ 44 px für Listeneinträge.
+ *   - Chips: Buttons, fokussierbar, sichtbarer Fokusring, Tastatur aktivierbar.
  *   - aria-busy / aria-live Ladezustand.
  *   - aria-current auf aktivem Eintrag.
  *   - Bedeutung nicht allein über Farbe.
@@ -232,9 +243,9 @@ export function TeamView({ onNavigate: _onNavigate }) {
               </div>
             )}
 
-            {/* Detail content (AC4) */}
+            {/* Detail content (AC4, AC7–AC10) */}
             {detailState === 'ok' && detail && (
-              <DetailPane detail={detail} kind={selected?.kind} />
+              <DetailPane detail={detail} kind={selected?.kind} loadDetail={loadDetail} />
             )}
           </div>
         </div>
@@ -291,12 +302,18 @@ function NavItem({ kind, item, isActive, onSelect }) {
 // ── DetailPane ────────────────────────────────────────────────────────────────
 
 /**
- * Detail pane: shows metadata badges and rendered Markdown body.
+ * Detail pane: shows metadata badges, rendered Markdown body, and reference chip sections.
  *
- * @param {{ detail: object, kind: string }} props
+ * team-detail-related-refs AC7–AC10:
+ *   - Agent detail: "Zugehörige Skills" + "Zugehöriges Knowledge" chip sections.
+ *   - Skill/Knowledge detail: "Verwendet von" chip section.
+ *   - Chip click (mouse + keyboard) calls loadDetail(kind, id).
+ *   - Empty list → section not rendered.
+ *
+ * @param {{ detail: object, kind: string, loadDetail: (kind: string, id: string) => void }} props
  */
-function DetailPane({ detail, kind }) {
-  const { name, description, model, tools, group, body } = detail;
+function DetailPane({ detail, kind, loadDetail }) {
+  const { name, description, model, tools, group, body, relatedSkills, relatedKnowledge, usedByAgents } = detail;
 
   return (
     <article style={styles.article}>
@@ -341,6 +358,36 @@ function DetailPane({ detail, kind }) {
         )}
       </div>
 
+      {/* Related Skills chips — agent detail (AC7, AC8, AC10) */}
+      {Array.isArray(relatedSkills) && relatedSkills.length > 0 && (
+        <RefChips
+          heading="Zugehörige Skills"
+          items={relatedSkills}
+          targetKind="skill"
+          onSelect={loadDetail}
+        />
+      )}
+
+      {/* Related Knowledge chips — agent detail (AC7, AC8, AC10) */}
+      {Array.isArray(relatedKnowledge) && relatedKnowledge.length > 0 && (
+        <RefChips
+          heading="Zugehöriges Knowledge"
+          items={relatedKnowledge}
+          targetKind="knowledge"
+          onSelect={loadDetail}
+        />
+      )}
+
+      {/* Used-by agents chips — skill/knowledge detail (AC9, AC10) */}
+      {Array.isArray(usedByAgents) && usedByAgents.length > 0 && (
+        <RefChips
+          heading="Verwendet von"
+          items={usedByAgents}
+          targetKind="agent"
+          onSelect={loadDetail}
+        />
+      )}
+
       {/* Rendered Markdown body (AC5 — via MarkdownLite, no dangerouslySetInnerHTML) */}
       {body && (
         <div style={styles.bodySection}>
@@ -348,6 +395,57 @@ function DetailPane({ detail, kind }) {
         </div>
       )}
     </article>
+  );
+}
+
+// ── RefChips ──────────────────────────────────────────────────────────────────
+
+/**
+ * A labelled section of clickable reference chips.
+ * Each chip is a focusable button; activatable by mouse, Enter, or Space (AC8, AC10).
+ * No section rendered when items list is empty — callers guard with length > 0 (AC7/AC9/AC10).
+ *
+ * A11y (WCAG 2.1 AA, AC10):
+ *   - Native <button> → focusable, keyboard-activatable (Enter/Space built-in).
+ *   - No outline:none — browser focus ring preserved.
+ *   - Touch target: minHeight 32px + padding; chips are inline; gap + padding give ≥ 24px height
+ *     with sufficient spacing (spec: "mindestens 24 px Höhe mit ausreichendem Padding/Abstand").
+ *   - Meaning not solely through colour — visible text label always present.
+ *   - No dangerouslySetInnerHTML / innerHTML.
+ *
+ * @param {{
+ *   heading: string,
+ *   items: Array<{ id: string, name?: string }>,
+ *   targetKind: string,
+ *   onSelect: (kind: string, id: string) => void
+ * }} props
+ */
+function RefChips({ heading, items, targetKind, onSelect }) {
+  return (
+    <div style={styles.refSection} aria-label={heading}>
+      <h3 style={styles.refHeading}>{heading}</h3>
+      <div style={styles.chipRow} role="list">
+        {items.map((item) => (
+          <div key={item.id} role="listitem" style={styles.chipItem}>
+            <button
+              type="button"
+              style={styles.chip}
+              onClick={() => onSelect(targetKind, item.id)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  onSelect(targetKind, item.id);
+                }
+              }}
+              data-kind={targetKind}
+              data-id={item.id}
+            >
+              {item.name || item.id}
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -546,6 +644,47 @@ const styles = {
     fontSize: 12,
     borderRadius: 12,
     border: '1px solid #14532d',
+  },
+
+  // ── Reference chip sections (team-detail-related-refs AC7–AC10)
+  refSection: {
+    borderTop: '1px solid #2a2a2a',
+    paddingTop: 12,
+    marginBottom: 12,
+  },
+
+  refHeading: {
+    fontSize: 11,
+    fontWeight: 700,
+    letterSpacing: '0.08em',
+    color: '#9ca3af',
+    margin: '0 0 8px',
+    textTransform: 'uppercase',
+  },
+
+  chipRow: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+
+  chipItem: {
+    display: 'inline-flex',
+  },
+
+  // Chip button — A11y: focus ring visible (no outline:none), Tastatur Enter/Space (native button)
+  // Touch target: minHeight 32px + horizontal padding; spec allows ≥ 24 px with sufficient spacing.
+  chip: {
+    display: 'inline-block',
+    minHeight: 32,
+    padding: '5px 12px',
+    background: '#1e293b',
+    color: '#93c5fd',
+    fontSize: 12,
+    borderRadius: 12,
+    border: '1px solid #334155',
+    cursor: 'pointer',
+    // Focus ring preserved — no outline:none (AC10, Coder-Lesson 2026-05-27)
   },
 
   // ── Markdown body (AC5)

@@ -1,5 +1,8 @@
 # Coder Lessons — dev-gui (newest first)
 
+## 2026-06-10 — AC8-Navigationsziel: aria-current-Update nach Chip-Klick im Test belegen
+Wenn eine AC beschreibt "Chip-Klick wechselt Selektion UND markiert den zugehörigen Nav-Eintrag als aktiv (aria-current)", reicht es nicht, nur den fetch-URL-Aufruf zu assertieren. Der Test muss auch prüfen: (a) der Nav-Button im Master-Panel für das Ziel-Kind/Id trägt nach dem Chip-Klick `aria-current="page"`, (b) der vorher aktive Eintrag hat kein aria-current mehr. Muster: nach Chip-Klick `await waitFor(() => { const navBtn = container.querySelector('button[data-kind="skill"][data-id="deploy"]'); expect(navBtn.getAttribute('aria-current')).toBe('page'); })`. Fehlt dieser Assert: Important-Befund (AC-Teilbedingung unbelegt).
+
 ## 2026-06-10 — usedByAgents sort-Assertion: Skill-Detail-Sort-Test deckt nicht automatisch Knowledge-Detail ab
 Wenn AC4 für *skill* **und** *knowledge* detail "dedupliziert + stabil sortiert" für `usedByAgents` verlangt, muss die Test-Suite einen Multi-Agenten-Sort-Test für **beide** Detail-Arten haben — auch wenn beide denselben internen Code-Pfad (`#usedByAgents`) nutzen. Ein einziger Sort-Test auf `skill` deckt den Knowledge-Detail-Pfad laut coder.md-Lesson 2026-06-09 nicht ab. Checkliste nach dem Schreiben: für jede Detail-Art (`skill`, `knowledge`) je einen Test mit zwei Agenten in umgekehrter Dateisystem-Reihenfolge schreiben und `toEqual(['alpha', 'zebra'])` assertieren.
 

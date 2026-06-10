@@ -23,6 +23,16 @@
  *          keyboard) remain unaffected by the layout fix — verified by the existing
  *          team-view-frontend AC8 tests above.
  *
+ * Covers (team-detail-related-refs):
+ *   - AC7: Agent-DetailPane renders "Zugehörige Skills" and "Zugehöriges Knowledge" chip
+ *          sections from relatedSkills/relatedKnowledge; empty list → no section rendered.
+ *   - AC8: Chip click (mouse + keyboard Enter/Space) calls loadDetail with correct kind/id;
+ *          no full reload.
+ *   - AC9: Skill-/Knowledge-DetailPane renders "Verwendet von" chip section from usedByAgents;
+ *          click calls loadDetail('agent', id); empty list → no section rendered.
+ *   - AC10: Chips are focusable buttons without outline:none; no dangerouslySetInnerHTML;
+ *           no external library.
+ *
  * @jest-environment jsdom
  */
 
@@ -39,6 +49,69 @@ const AGENTS = [
   { id: 'coder', name: 'Coder', description: 'Implementiert Features', model: 'claude-opus-4', tools: ['Read', 'Write'] },
   { id: 'reviewer', name: 'Reviewer', description: 'Prüft Code', model: 'claude-sonnet-4', tools: ['Read'] },
 ];
+
+// Agent detail with relatedSkills + relatedKnowledge (AC7/AC8)
+const AGENT_DETAIL_WITH_REFS = {
+  id: 'coder',
+  name: 'Coder',
+  description: 'Implementiert Features',
+  model: 'claude-opus-4',
+  tools: ['Read', 'Write'],
+  body: '# Coder\n\nMacht Code.',
+  relatedSkills: [
+    { id: 'deploy', name: 'Deploy' },
+    { id: 'test', name: 'Test' },
+  ],
+  relatedKnowledge: [
+    { id: 'security', name: 'Security', group: 'core' },
+    { id: 'frameworks/react-18', name: 'React 18', group: 'frameworks' },
+  ],
+};
+
+// Agent detail without any refs → chip sections must not render (AC10 empty state)
+const AGENT_DETAIL_NO_REFS = {
+  id: 'reviewer',
+  name: 'Reviewer',
+  description: 'Prüft Code',
+  model: 'claude-sonnet-4',
+  tools: ['Read'],
+  body: '## Reviewer\n\nPrüft Pull Requests.',
+  relatedSkills: [],
+  relatedKnowledge: [],
+};
+
+// Skill detail with usedByAgents (AC9)
+const SKILL_DETAIL_WITH_AGENTS = {
+  id: 'deploy',
+  name: 'Deploy',
+  description: 'Deploy-Skill',
+  body: '## Deploy\n\nDeploys the app.',
+  usedByAgents: [
+    { id: 'coder', name: 'Coder' },
+    { id: 'reviewer', name: 'Reviewer' },
+  ],
+};
+
+// Knowledge detail with usedByAgents (AC9)
+const KNOWLEDGE_DETAIL_WITH_AGENTS = {
+  id: 'security',
+  name: 'Security',
+  description: 'Security-Wissen',
+  group: 'core',
+  body: '## Security\n\nSicherheit.',
+  usedByAgents: [
+    { id: 'coder', name: 'Coder' },
+  ],
+};
+
+// Skill detail with empty usedByAgents → no section (AC9 empty state)
+const SKILL_DETAIL_NO_AGENTS = {
+  id: 'test',
+  name: 'Test',
+  description: 'Test-Skill',
+  body: '## Test',
+  usedByAgents: [],
+};
 
 const SKILLS = [
   { id: 'deploy', name: 'Deploy', description: 'Deploy-Skill' },
@@ -685,5 +758,496 @@ describe('TeamView — team-detail-scroll AC1/AC2/AC3: detail pane scroll layout
     expect(layoutDiv.style.overflow).toBe('hidden');
     // jsdom normalises numeric 0 → '0' (not '0px')
     expect(layoutDiv.style.minHeight).toBe('0');
+  });
+});
+
+// ── team-detail-related-refs: AC7 — Agent chip sections ──────────────────────
+
+describe('TeamView — team-detail-related-refs AC7: Agent chip sections render', () => {
+  it('renders "Zugehörige Skills" section when relatedSkills is non-empty', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE, detailBody: AGENT_DETAIL_WITH_REFS });
+
+    const { container, getByText } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="agent"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('button[data-kind="agent"][data-id="coder"]'));
+    });
+
+    await waitFor(() => {
+      expect(getByText('Zugehörige Skills')).toBeTruthy();
+    });
+  });
+
+  it('renders "Zugehöriges Knowledge" section when relatedKnowledge is non-empty', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE, detailBody: AGENT_DETAIL_WITH_REFS });
+
+    const { container, getByText } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="agent"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('button[data-kind="agent"][data-id="coder"]'));
+    });
+
+    await waitFor(() => {
+      expect(getByText('Zugehöriges Knowledge')).toBeTruthy();
+    });
+  });
+
+  it('renders a chip per relatedSkills entry with the entry name', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE, detailBody: AGENT_DETAIL_WITH_REFS });
+
+    const { container } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="agent"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('button[data-kind="agent"][data-id="coder"]'));
+    });
+
+    await waitFor(() => {
+      const skillChips = container.querySelectorAll('button[data-kind="skill"]');
+      const names = Array.from(skillChips).map((b) => b.textContent.trim());
+      expect(names).toContain('Deploy');
+      expect(names).toContain('Test');
+    });
+  });
+
+  it('renders a chip per relatedKnowledge entry with the entry name', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE, detailBody: AGENT_DETAIL_WITH_REFS });
+
+    const { container } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="agent"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('button[data-kind="agent"][data-id="coder"]'));
+    });
+
+    await waitFor(() => {
+      const knChips = container.querySelectorAll('button[data-kind="knowledge"]');
+      const names = Array.from(knChips).map((b) => b.textContent.trim());
+      expect(names).toContain('Security');
+      expect(names).toContain('React 18');
+    });
+  });
+
+  it('does NOT render "Zugehörige Skills" section when relatedSkills is empty', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE, detailBody: AGENT_DETAIL_NO_REFS });
+
+    const { container, queryByText } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="agent"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('button[data-kind="agent"][data-id="reviewer"]'));
+    });
+
+    await waitFor(() => {
+      // detail loaded
+      expect(container.querySelector('article')).toBeTruthy();
+    });
+
+    expect(queryByText('Zugehörige Skills')).toBeNull();
+  });
+
+  it('does NOT render "Zugehöriges Knowledge" section when relatedKnowledge is empty', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE, detailBody: AGENT_DETAIL_NO_REFS });
+
+    const { container, queryByText } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="agent"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('button[data-kind="agent"][data-id="reviewer"]'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('article')).toBeTruthy();
+    });
+
+    expect(queryByText('Zugehöriges Knowledge')).toBeNull();
+  });
+});
+
+// ── team-detail-related-refs: AC8 — Chip click/keyboard calls loadDetail ─────
+
+describe('TeamView — team-detail-related-refs AC8: Chip navigation', () => {
+  it('clicking a Skill chip calls loadDetail("skill", id)', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE, detailBody: AGENT_DETAIL_WITH_REFS });
+
+    const { container } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="agent"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('button[data-kind="agent"][data-id="coder"]'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="skill"]')).toBeTruthy();
+    });
+
+    // Reset fetch mock to track next call
+    const initialCalls = globalThis.fetch.mock.calls.length;
+
+    await act(async () => {
+      // Click the skill chip inside the detail pane (article)
+      fireEvent.click(container.querySelector('article button[data-kind="skill"][data-id="deploy"]'));
+    });
+
+    await waitFor(() => {
+      const newCalls = globalThis.fetch.mock.calls.slice(initialCalls);
+      const skillCall = newCalls.find((c) => c[0] === '/api/team/skill/deploy');
+      expect(skillCall).toBeTruthy();
+    });
+
+    // AC8: the corresponding nav button must now carry aria-current="page" (no full reload)
+    await waitFor(() => {
+      const navBtn = container.querySelector('nav button[data-kind="skill"][data-id="deploy"]');
+      expect(navBtn).toBeTruthy();
+      expect(navBtn.getAttribute('aria-current')).toBe('page');
+    });
+  });
+
+  it('clicking a Knowledge chip calls loadDetail("knowledge", id)', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE, detailBody: AGENT_DETAIL_WITH_REFS });
+
+    const { container } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="agent"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('button[data-kind="agent"][data-id="coder"]'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="knowledge"]')).toBeTruthy();
+    });
+
+    const initialCalls = globalThis.fetch.mock.calls.length;
+
+    await act(async () => {
+      // Click the knowledge chip inside the detail pane (article)
+      fireEvent.click(container.querySelector('article button[data-kind="knowledge"][data-id="security"]'));
+    });
+
+    await waitFor(() => {
+      const newCalls = globalThis.fetch.mock.calls.slice(initialCalls);
+      const knCall = newCalls.find((c) => c[0] === '/api/team/knowledge/security');
+      expect(knCall).toBeTruthy();
+    });
+
+    // AC8: the corresponding nav button must now carry aria-current="page" (no full reload)
+    await waitFor(() => {
+      const navBtn = container.querySelector('nav button[data-kind="knowledge"][data-id="security"]');
+      expect(navBtn).toBeTruthy();
+      expect(navBtn.getAttribute('aria-current')).toBe('page');
+    });
+  });
+
+  it('Enter key on a Skill chip calls loadDetail("skill", id)', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE, detailBody: AGENT_DETAIL_WITH_REFS });
+
+    const { container } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="agent"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('button[data-kind="agent"][data-id="coder"]'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="skill"]')).toBeTruthy();
+    });
+
+    const initialCalls = globalThis.fetch.mock.calls.length;
+
+    await act(async () => {
+      fireEvent.keyDown(
+        container.querySelector('button[data-kind="skill"][data-id="deploy"]'),
+        { key: 'Enter' },
+      );
+    });
+
+    await waitFor(() => {
+      const newCalls = globalThis.fetch.mock.calls.slice(initialCalls);
+      const skillCall = newCalls.find((c) => c[0] === '/api/team/skill/deploy');
+      expect(skillCall).toBeTruthy();
+    });
+  });
+
+  it('Space key on a Knowledge chip calls loadDetail("knowledge", id)', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE, detailBody: AGENT_DETAIL_WITH_REFS });
+
+    const { container } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="agent"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('button[data-kind="agent"][data-id="coder"]'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="knowledge"]')).toBeTruthy();
+    });
+
+    const initialCalls = globalThis.fetch.mock.calls.length;
+
+    await act(async () => {
+      fireEvent.keyDown(
+        container.querySelector('button[data-kind="knowledge"][data-id="security"]'),
+        { key: ' ' },
+      );
+    });
+
+    await waitFor(() => {
+      const newCalls = globalThis.fetch.mock.calls.slice(initialCalls);
+      const knCall = newCalls.find((c) => c[0] === '/api/team/knowledge/security');
+      expect(knCall).toBeTruthy();
+    });
+  });
+
+  it('Chip navigation does not cause a full page reload (no location.href change)', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE, detailBody: AGENT_DETAIL_WITH_REFS });
+
+    const { container } = renderTeam();
+    const locationBefore = window.location.href;
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="agent"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('button[data-kind="agent"][data-id="coder"]'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="skill"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('button[data-kind="skill"][data-id="deploy"]'));
+    });
+
+    // location must not have changed (no full reload)
+    expect(window.location.href).toBe(locationBefore);
+  });
+});
+
+// ── team-detail-related-refs: AC9 — "Verwendet von" chips ────────────────────
+
+describe('TeamView — team-detail-related-refs AC9: "Verwendet von" chips in Skill/Knowledge detail', () => {
+  it('renders "Verwendet von" section when usedByAgents is non-empty (skill detail)', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE, detailBody: SKILL_DETAIL_WITH_AGENTS });
+
+    const { container, getByText } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="skill"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('button[data-kind="skill"][data-id="deploy"]'));
+    });
+
+    await waitFor(() => {
+      expect(getByText('Verwendet von')).toBeTruthy();
+    });
+  });
+
+  it('renders "Verwendet von" section when usedByAgents is non-empty (knowledge detail)', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE, detailBody: KNOWLEDGE_DETAIL_WITH_AGENTS });
+
+    const { container, getByText } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="knowledge"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('button[data-kind="knowledge"][data-id="security"]'));
+    });
+
+    await waitFor(() => {
+      expect(getByText('Verwendet von')).toBeTruthy();
+    });
+  });
+
+  it('renders agent chips inside "Verwendet von" section', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE, detailBody: SKILL_DETAIL_WITH_AGENTS });
+
+    const { container } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="skill"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('button[data-kind="skill"][data-id="deploy"]'));
+    });
+
+    await waitFor(() => {
+      // usedByAgents chips rendered as agent kind buttons inside the detail pane article
+      const articleAgentChips = container.querySelectorAll('article button[data-kind="agent"]');
+      const names = Array.from(articleAgentChips).map((b) => b.textContent.trim());
+      expect(names).toContain('Coder');
+      expect(names).toContain('Reviewer');
+    });
+  });
+
+  it('clicking an agent chip in "Verwendet von" calls loadDetail("agent", id)', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE, detailBody: SKILL_DETAIL_WITH_AGENTS });
+
+    const { container } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="skill"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('button[data-kind="skill"][data-id="deploy"]'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('article button[data-kind="agent"]')).toBeTruthy();
+    });
+
+    const initialCalls = globalThis.fetch.mock.calls.length;
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('article button[data-kind="agent"][data-id="coder"]'));
+    });
+
+    await waitFor(() => {
+      const newCalls = globalThis.fetch.mock.calls.slice(initialCalls);
+      const agentCall = newCalls.find((c) => c[0] === '/api/team/agent/coder');
+      expect(agentCall).toBeTruthy();
+    });
+
+    // AC8: the corresponding nav button must now carry aria-current="page" (no full reload)
+    await waitFor(() => {
+      const navBtn = container.querySelector('nav button[data-kind="agent"][data-id="coder"]');
+      expect(navBtn).toBeTruthy();
+      expect(navBtn.getAttribute('aria-current')).toBe('page');
+    });
+  });
+
+  it('does NOT render "Verwendet von" section when usedByAgents is empty', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE, detailBody: SKILL_DETAIL_NO_AGENTS });
+
+    const { container, queryByText } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="skill"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('button[data-kind="skill"][data-id="test"]'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('article')).toBeTruthy();
+    });
+
+    expect(queryByText('Verwendet von')).toBeNull();
+  });
+});
+
+// ── team-detail-related-refs: AC10 — A11y for chips ──────────────────────────
+
+describe('TeamView — team-detail-related-refs AC10: Chip A11y', () => {
+  it('chip buttons do not have outline:none (focus ring visible)', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE, detailBody: AGENT_DETAIL_WITH_REFS });
+
+    const { container } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="agent"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('button[data-kind="agent"][data-id="coder"]'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="skill"]')).toBeTruthy();
+    });
+
+    const chipButtons = container.querySelectorAll('article button[data-kind]');
+    expect(chipButtons.length).toBeGreaterThan(0);
+    for (const btn of chipButtons) {
+      expect(btn.style.outline).not.toBe('none');
+      expect(btn.style.outline).not.toBe('0');
+    }
+  });
+
+  it('chip buttons have a visible label (name or id, not empty)', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE, detailBody: AGENT_DETAIL_WITH_REFS });
+
+    const { container } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="agent"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('button[data-kind="agent"][data-id="coder"]'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="skill"]')).toBeTruthy();
+    });
+
+    const chipButtons = container.querySelectorAll('article button[data-kind]');
+    for (const btn of chipButtons) {
+      expect(btn.textContent.trim().length).toBeGreaterThan(0);
+    }
+  });
+
+  it('chip buttons are native button elements (keyboard-activatable by default)', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE, detailBody: AGENT_DETAIL_WITH_REFS });
+
+    const { container } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="agent"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('button[data-kind="agent"][data-id="coder"]'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('article button[data-kind="skill"]')).toBeTruthy();
+    });
+
+    const chipButtons = container.querySelectorAll('article button[data-kind]');
+    for (const btn of chipButtons) {
+      expect(btn.tagName.toLowerCase()).toBe('button');
+      expect(btn.getAttribute('type')).toBe('button');
+    }
   });
 });
