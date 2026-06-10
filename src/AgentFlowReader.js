@@ -1,5 +1,6 @@
 /**
- * AgentFlowReader — agent-flow Plugin Boundary (read-only, AC1–AC7).
+ * AgentFlowReader — agent-flow Plugin Boundary (read-only, AC1–AC9 team-view-backend;
+ *                   AC1–AC6 team-detail-related-refs).
  *
  * Resolves the installed agent-flow plugin root and reads three kinds:
  *   - agents/[star].md           (Frontmatter: name, description, tools, model + body)
@@ -100,6 +101,118 @@ function extractFirstH1(content) {
   // Match lines like: # Some Heading
   const match = content.match(/^#\s+(.+)$/m);
   return match ? match[1].trim() : null;
+}
+
+/**
+ * Normalise a raw knowledge reference string to a knowledge id.
+ *
+ * Accepted forms:
+ *   knowledge/foo.md                    → "foo"
+ *   knowledge/bar/baz.md                → "bar/baz"
+ *   ${CLAUDE_PLUGIN_ROOT}/knowledge/x.md → "x"
+ *
+ * Returns null if the string cannot be normalised.
+ *
+ * @param {string} raw
+ * @returns {string|null}
+ */
+function normaliseKnowledgeRef(raw) {
+  if (typeof raw !== 'string') return null;
+  // Strip optional ${CLAUDE_PLUGIN_ROOT}/ prefix (literal string in agent bodies)
+  let s = raw.replace(/^\$\{CLAUDE_PLUGIN_ROOT\}\//, '');
+  // Must start with "knowledge/"
+  if (!s.startsWith('knowledge/')) return null;
+  // Strip leading "knowledge/"
+  s = s.slice('knowledge/'.length);
+  // Must end with ".md"
+  if (!s.endsWith('.md')) return null;
+  // Strip trailing ".md"
+  s = s.slice(0, -3);
+  // Must not be empty
+  if (!s) return null;
+  return s;
+}
+
+/**
+ * Resolve the skill and knowledge references for an agent.
+ *
+ * Frontmatter-first, body-fallback per AC2:
+ *   - If frontmatter has `skills` field (array), use it; otherwise scan body for
+ *     existing skill ids mentioned as bare words/tokens.
+ *   - If frontmatter has `knowledge` field (array), use it (normalised); otherwise
+ *     scan body for `knowledge/<path>.md` patterns (with or without ${CLAUDE_PLUGIN_ROOT}/).
+ *
+ * All resolved refs are validated against the id-whitelist (existingSkillIds /
+ * existingKnowledgeIds); dead links are dropped (AC3). Result is deduplicated and
+ * stably sorted (AC1).
+ *
+ * @param {{skills?: string[], knowledge?: string[]}} frontmatter
+ * @param {string} body
+ * @param {Set<string>} existingSkillIds
+ * @param {Set<string>} existingKnowledgeIds
+ * @returns {{ skillIds: string[], knowledgeIds: string[] }}
+ */
+export function resolveAgentRefs(frontmatter, body, existingSkillIds, existingKnowledgeIds) {
+  // ── Skills ──────────────────────────────────────────────────────────────────
+  let skillIds;
+  if (Array.isArray(frontmatter.skills)) {
+    // Frontmatter path: use the list as-is, filter to existing ids
+    skillIds = frontmatter.skills
+      .map((s) => (typeof s === 'string' ? s.trim() : ''))
+      .filter((s) => s && existingSkillIds.has(s));
+  } else {
+    // Body-fallback: find every existing skill id that is mentioned in the body
+    skillIds = [];
+    for (const id of existingSkillIds) {
+      // Word-boundary check: the id must appear as a standalone token
+      // Use a simple word-boundary regex (id chars are [a-zA-Z0-9._-])
+      const re = new RegExp(`(?<![\\w.-])${escapeRegExp(id)}(?![\\w.-])`);
+      if (re.test(body)) {
+        skillIds.push(id);
+      }
+    }
+  }
+
+  // ── Knowledge ───────────────────────────────────────────────────────────────
+  let knowledgeIds;
+  if (Array.isArray(frontmatter.knowledge)) {
+    // Frontmatter path: normalise each entry (may already be an id or a path)
+    knowledgeIds = frontmatter.knowledge
+      .map((raw) => {
+        if (typeof raw !== 'string') return null;
+        raw = raw.trim();
+        // Accept bare id (no "knowledge/" prefix, no ".md") if it exists
+        if (existingKnowledgeIds.has(raw)) return raw;
+        // Try normalising as a path
+        return normaliseKnowledgeRef(raw);
+      })
+      .filter((id) => id !== null && existingKnowledgeIds.has(id));
+  } else {
+    // Body-fallback: extract knowledge/<path>.md patterns
+    // Pattern: optional ${CLAUDE_PLUGIN_ROOT}/ + "knowledge/" + <path> + ".md"
+    const KNOWLEDGE_RE = /(?:\$\{CLAUDE_PLUGIN_ROOT\}\/)?knowledge\/([a-zA-Z0-9._/-]+\.md)/g;
+    const seen = new Set();
+    knowledgeIds = [];
+    let m;
+    while ((m = KNOWLEDGE_RE.exec(body)) !== null) {
+      const normalised = normaliseKnowledgeRef(m[0]);
+      if (normalised && !seen.has(normalised) && existingKnowledgeIds.has(normalised)) {
+        seen.add(normalised);
+        knowledgeIds.push(normalised);
+      }
+    }
+  }
+
+  // Deduplicate and sort stably
+  skillIds    = [...new Set(skillIds)].sort((a, b) => a.localeCompare(b));
+  knowledgeIds = [...new Set(knowledgeIds)].sort((a, b) => a.localeCompare(b));
+
+  return { skillIds, knowledgeIds };
+}
+
+/** Escape special regex chars in a string. */
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 /**
@@ -364,11 +477,54 @@ export class AgentFlowReader {
   }
 
   /**
-   * Return meta + body for a single agent.
+   * Build a map of all agents' resolved skill/knowledge references.
+   * Used for both forward (agent-detail) and reverse (skill/knowledge usedByAgents) lookups.
+   *
+   * @param {string} pluginRoot
+   * @param {Set<string>} existingSkillIds
+   * @param {Set<string>} existingKnowledgeIds
+   * @returns {Promise<Map<string, { agentId: string, agentName: string, skillIds: string[], knowledgeIds: string[] }>>}
+   */
+  async #buildAgentRefsMap(pluginRoot, existingSkillIds, existingKnowledgeIds) {
+    const agentsDir = join(pluginRoot, 'agents');
+    let entries;
+    try {
+      entries = await this.#fsDeps.readdir(agentsDir, { withFileTypes: true });
+    } catch {
+      return new Map();
+    }
+
+    const result = new Map();
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith('.md')) continue;
+      const agentId = entry.name.replace(/\.md$/, '');
+      const filePath = join(agentsDir, entry.name);
+      let content;
+      try {
+        content = await this.#fsDeps.readFile(filePath, 'utf8');
+      } catch {
+        continue;
+      }
+      const { frontmatter, body } = parseFrontmatter(content);
+      const { skillIds, knowledgeIds } = resolveAgentRefs(
+        frontmatter, body, existingSkillIds, existingKnowledgeIds,
+      );
+      result.set(agentId, {
+        agentId,
+        agentName: frontmatter.name ?? '',
+        skillIds,
+        knowledgeIds,
+      });
+    }
+    return result;
+  }
+
+  /**
+   * Return meta + body for a single agent, including relatedSkills and relatedKnowledge.
    *
    * @param {string} pluginRoot
    * @param {string} id  Validated agent id (filename without .md).
-   * @returns {Promise<{ id, name, description, model, tools, body }|null>}
+   * @returns {Promise<{ id, name, description, model, tools, body, relatedSkills, relatedKnowledge }|null>}
    */
   async #getAgent(pluginRoot, id) {
     const agentsDir = join(pluginRoot, 'agents');
@@ -384,6 +540,33 @@ export class AgentFlowReader {
       return null;
     }
     const { frontmatter, body } = parseFrontmatter(content);
+
+    // Resolve related skills + knowledge
+    const [allSkills, allKnowledge] = await Promise.all([
+      this.#listSkills(pluginRoot),
+      this.#listKnowledge(pluginRoot),
+    ]);
+    const existingSkillIds    = new Set(allSkills.map((s) => s.id));
+    const existingKnowledgeIds = new Set(allKnowledge.map((k) => k.id));
+
+    const { skillIds, knowledgeIds } = resolveAgentRefs(
+      frontmatter, body, existingSkillIds, existingKnowledgeIds,
+    );
+
+    // Build { id, name } for skills
+    const skillById     = new Map(allSkills.map((s) => [s.id, s]));
+    const knowledgeById  = new Map(allKnowledge.map((k) => [k.id, k]));
+
+    const relatedSkills = skillIds.map((sid) => {
+      const s = skillById.get(sid);
+      return { id: sid, name: s?.name ?? sid };
+    });
+
+    const relatedKnowledge = knowledgeIds.map((kid) => {
+      const k = knowledgeById.get(kid);
+      return { id: kid, name: k?.name ?? kid, group: k?.group ?? 'core' };
+    });
+
     return {
       id,
       name: frontmatter.name ?? '',
@@ -391,15 +574,47 @@ export class AgentFlowReader {
       model: frontmatter.model ?? '',
       tools: frontmatter.tools ?? [],
       body,
+      relatedSkills,
+      relatedKnowledge,
     };
   }
 
   /**
-   * Return meta + body for a single skill.
+   * Compute usedByAgents for a skill or knowledge target id.
+   * Returns [{ id, name }] sorted by id — all agents whose resolved refs include targetId.
+   *
+   * @param {string} pluginRoot
+   * @param {'skillIds'|'knowledgeIds'} refKey
+   * @param {string} targetId
+   * @returns {Promise<Array<{ id: string, name: string }>>}
+   */
+  async #usedByAgents(pluginRoot, refKey, targetId) {
+    // We need all skill and knowledge ids to run resolveAgentRefs per agent
+    const [allSkills, allKnowledge] = await Promise.all([
+      this.#listSkills(pluginRoot),
+      this.#listKnowledge(pluginRoot),
+    ]);
+    const existingSkillIds    = new Set(allSkills.map((s) => s.id));
+    const existingKnowledgeIds = new Set(allKnowledge.map((k) => k.id));
+
+    const refsMap = await this.#buildAgentRefsMap(pluginRoot, existingSkillIds, existingKnowledgeIds);
+
+    const users = [];
+    for (const { agentId, agentName, [refKey]: ids } of refsMap.values()) {
+      if (ids.includes(targetId)) {
+        users.push({ id: agentId, name: agentName });
+      }
+    }
+    users.sort((a, b) => a.id.localeCompare(b.id));
+    return users;
+  }
+
+  /**
+   * Return meta + body for a single skill, including usedByAgents.
    *
    * @param {string} pluginRoot
    * @param {string} id  Validated skill id (dirname).
-   * @returns {Promise<{ id, name, description, body }|null>}
+   * @returns {Promise<{ id, name, description, body, usedByAgents }|null>}
    */
   async #getSkill(pluginRoot, id) {
     const skillsDir = join(pluginRoot, 'skills');
@@ -415,21 +630,23 @@ export class AgentFlowReader {
       return null;
     }
     const { frontmatter, body } = parseFrontmatter(content);
+    const usedByAgents = await this.#usedByAgents(pluginRoot, 'skillIds', id);
     return {
       id,
       name: frontmatter.name ?? '',
       description: frontmatter.description ?? '',
       body,
+      usedByAgents,
     };
   }
 
   /**
-   * Return meta + body for a single knowledge pack.
+   * Return meta + body for a single knowledge pack, including usedByAgents.
    * id is the relative path without .md (e.g. "js" or "frameworks/spring-boot-3").
    *
    * @param {string} pluginRoot
    * @param {string} id  Validated knowledge id.
-   * @returns {Promise<{ id, name, group, body }|null>}
+   * @returns {Promise<{ id, name, group, body, usedByAgents }|null>}
    */
   async #getKnowledge(pluginRoot, id) {
     const knowledgeDir = join(pluginRoot, 'knowledge');
@@ -452,7 +669,9 @@ export class AgentFlowReader {
     const h1 = extractFirstH1(content);
     const name = h1 ?? basename(id);
 
-    return { id, name, group, body: content };
+    const usedByAgents = await this.#usedByAgents(pluginRoot, 'knowledgeIds', id);
+
+    return { id, name, group, body: content, usedByAgents };
   }
 
   /**

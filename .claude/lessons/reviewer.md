@@ -1,5 +1,8 @@
 # Reviewer Lessons — dev-gui (newest first)
 
+## 2026-06-10 — Template-Literal-Regex-Escaping immer im laufenden Node-Prozess verifizieren, nicht per Shell-Bash
+Bei der Prüfung ob eine Regex in einem JS-Template-Literal korrekt ist (z. B. `new RegExp(\`(?<![\\w.-])\${...}\`)`), kann Shell-Interaktion (heredoc, `-e`-Escaping, Quoting) dazu führen, dass das Regex-Pattern im Test-Snippet von der tatsächlichen Datei abweicht. Der einzig zuverlässige Weg: das tatsächliche Modul per `node --input-type=module <<'EOF' import { fn } from './src/X.js'; ... EOF` direkt laden und das `re.source` ausgeben lassen — nicht per Bash-String-Escaping nachbauen. Falsch-positive Critical-Befunde auf Basis von Shell-Quoting-Artefakten brennen eine Iteration und beschädigen das Coder-Vertrauen. *[seen-in: #148 — reviewer schloss fälschlich auf [\w.-] → [w.-], tatsächliches Regex war korrekt; promoted: 2026-06-10]*
+
 ## 2026-06-09 — aria-current Wert-Typ bei Nav-Buttons: 'true' vs 'page' ist Suggestion, kein Important
 `aria-current="true"` ist per WAI-ARIA-Spec ein gültiger Token-Wert (neben `page`, `step`, `location`, `date`, `time`). Für reine Navigations-Schaltflächen (kein <a>-Element, kein Seitenkontext) ist `'true'` funktionell korrekt — Screen-Reader verkünden "current". `'page'` wäre semantisch präziser für Navigations-Elemente, ist aber kein Pflicht-Wert. Kein Important-Befund; höchstens Suggestion „aria-current='page' für nav-context semantisch präziser".
 

@@ -1,5 +1,11 @@
 # Coder Lessons — dev-gui (newest first)
 
+## 2026-06-10 — usedByAgents sort-Assertion: Skill-Detail-Sort-Test deckt nicht automatisch Knowledge-Detail ab
+Wenn AC4 für *skill* **und** *knowledge* detail "dedupliziert + stabil sortiert" für `usedByAgents` verlangt, muss die Test-Suite einen Multi-Agenten-Sort-Test für **beide** Detail-Arten haben — auch wenn beide denselben internen Code-Pfad (`#usedByAgents`) nutzen. Ein einziger Sort-Test auf `skill` deckt den Knowledge-Detail-Pfad laut coder.md-Lesson 2026-06-09 nicht ab. Checkliste nach dem Schreiben: für jede Detail-Art (`skill`, `knowledge`) je einen Test mit zwei Agenten in umgekehrter Dateisystem-Reihenfolge schreiben und `toEqual(['alpha', 'zebra'])` assertieren.
+
+## 2026-06-10 — Frontmatter path-form für knowledge-Refs testen (knowledge/foo.md in `knowledge:`-Feld)
+Wenn die `resolveAgentRefs`-Implementierung im Frontmatter-Pfad sowohl bare ids (`'js'`) als auch Pfad-Formen (`'knowledge/js.md'`) akzeptiert, sollte ein Unit-Test für den Pfad-Form-Fall existieren — auch wenn die Spec nur bare ids als erwartetes Frontmatter-Format nennt. Fehlt der Test: die Bonus-Normalisierung (via `normaliseKnowledgeRef`) ist unbelegt und kann bei einem Refactor still brechen. Muster: `resolveAgentRefs({ knowledge: ['knowledge/js.md'] }, '', skillSet, knowledgeSet)` → erwartet `['js']`.
+
 ## 2026-06-09 — Stale Inline-Kommentare bei Kachelzahl-Änderungen nachziehen
 Wenn die Kachelzahl im TILES-Array ändert und alle formalen Doc-Kommentare (Datei-Header, JSDoc, describe-Titel) aktualisiert werden, zusätzlich nach informellen Inline-Kommentaren im Rumpf von it()-Blöcken suchen (z.B. `// Already on panel (fallback) — five tiles visible`). Diese werden oft übersehen weil sie keine semantische Bedeutung haben, erzeugen aber leicht einen Suggestion-Befund. Checkliste: `grep -n "five\|fünf\|four\|vier" client/src/__tests__/AppShell.test.jsx` nach jeder Kachelzahl-Änderung.
 

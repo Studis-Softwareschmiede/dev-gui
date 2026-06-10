@@ -1,12 +1,20 @@
 /**
- * agentFlowReader.test.js — Tests for AgentFlowReader (team-view-backend)
+ * agentFlowReader.test.js — Tests for AgentFlowReader
  *
- * Covers:
+ * Covers (team-view-backend):
  *   AC1 — Overview field shapes: id/name/description/model/tools (agents), id/name/description (skills), id/name/group (knowledge); no body field
  *   AC2 — Frontmatter parsing: agents (name, description, tools, model) + skills (name, description)
  *   AC3 — Knowledge: recursive scan, H1 name extraction, filename fallback, group detection incl. subdirs
  *   AC7 — Degradation: no plugin root → empty lists, no crash
  *   AC8 — No secrets in response (overview and detail contain only Markdown content/metadata)
+ *
+ * Covers (team-detail-related-refs):
+ *   AC1 (refs) — Agent detail includes relatedSkills [{id,name}] and relatedKnowledge [{id,name,group}]; deduplicated + stably sorted; empty arrays when none
+ *   AC2 (refs) — Frontmatter-first (skills/knowledge field), body-fallback when field absent
+ *   AC3 (refs) — Dead-link pruning: non-existent skill/knowledge ids discarded
+ *   AC4 (refs) — Skill + knowledge detail include usedByAgents [{id,name}]; deduplicated + stably sorted; empty array when none
+ *   AC5 (refs) — Consistency: forward ↔ reverse references agree
+ *   AC6 (refs) — Security/Floor: no new paths read outside agents/skills/knowledge; degradation without plugin (empty lists); no crash
  *
  * Strategy:
  *   - Inject fake fsDeps (readFile, readdir, stat) so no real filesystem is touched.
@@ -14,7 +22,7 @@
  */
 
 import { describe, it, expect } from '@jest/globals';
-import { AgentFlowReader, parseFrontmatter } from '../src/AgentFlowReader.js';
+import { AgentFlowReader, parseFrontmatter, resolveAgentRefs } from '../src/AgentFlowReader.js';
 
 // ── parseFrontmatter unit tests ───────────────────────────────────────────────
 
@@ -488,6 +496,644 @@ describe('Stable alphabetical sort', () => {
   it('skills are sorted alphabetically by id', async () => {
     const { skills } = await reader.getOverview();
     expect(skills.map((s) => s.id)).toEqual(['a-skill', 'z-skill']);
+  });
+});
+
+// ── resolveAgentRefs unit tests ───────────────────────────────────────────────
+
+describe('resolveAgentRefs — unit tests', () => {
+  const skillSet     = new Set(['flow', 'train', 'deploy']);
+  const knowledgeSet = new Set(['js', 'security', 'frameworks/spring-boot-3']);
+
+  it('body-fallback: detects a skill id that appears as a standalone token', () => {
+    const { skillIds } = resolveAgentRefs({}, 'Uses the flow skill.', skillSet, knowledgeSet);
+    expect(skillIds).toContain('flow');
+  });
+
+  it('body-fallback: does not detect a skill id that appears inside a larger word', () => {
+    // "workflow" contains "flow" but must not match because it is not a standalone token
+    const { skillIds } = resolveAgentRefs({}, 'This is a workflow tool.', skillSet, knowledgeSet);
+    expect(skillIds).not.toContain('flow');
+  });
+
+  it('body-fallback: detects knowledge/<path>.md pattern', () => {
+    const { knowledgeIds } = resolveAgentRefs(
+      {},
+      'Load knowledge/js.md for this task.',
+      skillSet, knowledgeSet,
+    );
+    expect(knowledgeIds).toContain('js');
+  });
+
+  it('body-fallback: detects knowledge path with ${CLAUDE_PLUGIN_ROOT}/ prefix', () => {
+    const { knowledgeIds } = resolveAgentRefs(
+      {},
+      'Uses ${CLAUDE_PLUGIN_ROOT}/knowledge/security.md',
+      skillSet, knowledgeSet,
+    );
+    expect(knowledgeIds).toContain('security');
+  });
+
+  it('body-fallback: detects nested knowledge path', () => {
+    const { knowledgeIds } = resolveAgentRefs(
+      {},
+      'See knowledge/frameworks/spring-boot-3.md for details.',
+      skillSet, knowledgeSet,
+    );
+    expect(knowledgeIds).toContain('frameworks/spring-boot-3');
+  });
+
+  it('body-fallback: ignores knowledge path that does not exist in the knowledge set', () => {
+    const { knowledgeIds } = resolveAgentRefs(
+      {},
+      'See knowledge/nonexistent.md for details.',
+      skillSet, knowledgeSet,
+    );
+    expect(knowledgeIds).not.toContain('nonexistent');
+  });
+
+  it('frontmatter takes precedence over body for skills', () => {
+    // Frontmatter lists "deploy"; body mentions "flow"
+    // → only "deploy" should be in skillIds (frontmatter wins)
+    const { skillIds } = resolveAgentRefs(
+      { skills: ['deploy'] },
+      'Mentions flow in the body.',
+      skillSet, knowledgeSet,
+    );
+    expect(skillIds).toEqual(['deploy']);
+    expect(skillIds).not.toContain('flow');
+  });
+
+  it('frontmatter takes precedence over body for knowledge', () => {
+    // Frontmatter lists "security"; body mentions knowledge/js.md
+    // → only "security" should be in knowledgeIds (frontmatter wins)
+    const { knowledgeIds } = resolveAgentRefs(
+      { knowledge: ['security'] },
+      'Load knowledge/js.md for this task.',
+      skillSet, knowledgeSet,
+    );
+    expect(knowledgeIds).toEqual(['security']);
+    expect(knowledgeIds).not.toContain('js');
+  });
+
+  it('frontmatter: non-existent skill is dropped (AC3)', () => {
+    const { skillIds } = resolveAgentRefs(
+      { skills: ['flow', 'ghost-skill'] },
+      '',
+      skillSet, knowledgeSet,
+    );
+    expect(skillIds).toContain('flow');
+    expect(skillIds).not.toContain('ghost-skill');
+  });
+
+  it('frontmatter: non-existent knowledge id is dropped (AC3)', () => {
+    const { knowledgeIds } = resolveAgentRefs(
+      { knowledge: ['js', 'ghost-knowledge'] },
+      '',
+      skillSet, knowledgeSet,
+    );
+    expect(knowledgeIds).toContain('js');
+    expect(knowledgeIds).not.toContain('ghost-knowledge');
+  });
+
+  it('result is deduplicated even if body mentions a path twice', () => {
+    const body = 'Load knowledge/js.md and also knowledge/js.md again.';
+    const { knowledgeIds } = resolveAgentRefs({}, body, skillSet, knowledgeSet);
+    expect(knowledgeIds.filter((id) => id === 'js')).toHaveLength(1);
+  });
+
+  it('result is stably sorted alphabetically', () => {
+    const body = 'Uses train skill and also flow skill. Loads knowledge/security.md and knowledge/js.md.';
+    const { skillIds, knowledgeIds } = resolveAgentRefs({}, body, skillSet, knowledgeSet);
+    expect(skillIds).toEqual([...skillIds].sort((a, b) => a.localeCompare(b)));
+    expect(knowledgeIds).toEqual([...knowledgeIds].sort((a, b) => a.localeCompare(b)));
+  });
+
+  it('returns empty arrays when body has no matches', () => {
+    const { skillIds, knowledgeIds } = resolveAgentRefs({}, 'No references here.', skillSet, knowledgeSet);
+    expect(skillIds).toEqual([]);
+    expect(knowledgeIds).toEqual([]);
+  });
+
+  it('frontmatter: accepts bare knowledge id (no path form)', () => {
+    const { knowledgeIds } = resolveAgentRefs(
+      { knowledge: ['js'] },
+      '',
+      skillSet, knowledgeSet,
+    );
+    expect(knowledgeIds).toContain('js');
+  });
+});
+
+// ── AC1 (refs) — Agent detail relatedSkills/relatedKnowledge ─────────────────
+
+describe('AC1 (refs) — Agent detail: relatedSkills + relatedKnowledge', () => {
+  // Agent body mentions "flow" skill and knowledge/js.md
+  const agentContent = `---
+name: Coder
+description: Writes code
+model: claude-3
+tools: [Read]
+---
+Uses the flow skill and loads knowledge/js.md for guidance.
+`;
+  const skillContent   = '---\nname: Flow Skill\ndescription: Flow\n---\nSkill body.';
+  const knowledgeContent = '# JavaScript\n\nContent.';
+
+  const reader = makeReader(
+    {
+      [`${PLUGIN_ROOT}/agents/coder.md`]: agentContent,
+      [`${PLUGIN_ROOT}/skills/flow/SKILL.md`]: skillContent,
+      [`${PLUGIN_ROOT}/knowledge/js.md`]: knowledgeContent,
+    },
+    {
+      [`${PLUGIN_ROOT}/agents`]: [fileEntry('coder.md')],
+      [`${PLUGIN_ROOT}/skills`]: [dirEntry('flow')],
+      [`${PLUGIN_ROOT}/knowledge`]: [fileEntry('js.md')],
+    },
+  );
+
+  it('agent detail includes relatedSkills array', async () => {
+    const detail = await reader.getDetail('agent', 'coder');
+    expect(detail).not.toBeNull();
+    expect(Array.isArray(detail.relatedSkills)).toBe(true);
+  });
+
+  it('agent detail includes relatedKnowledge array', async () => {
+    const detail = await reader.getDetail('agent', 'coder');
+    expect(Array.isArray(detail.relatedKnowledge)).toBe(true);
+  });
+
+  it('relatedSkills contains the resolved skill with id and name', async () => {
+    const detail = await reader.getDetail('agent', 'coder');
+    expect(detail.relatedSkills).toEqual([{ id: 'flow', name: 'Flow Skill' }]);
+  });
+
+  it('relatedKnowledge contains the resolved knowledge with id, name, group', async () => {
+    const detail = await reader.getDetail('agent', 'coder');
+    expect(detail.relatedKnowledge).toEqual([{ id: 'js', name: 'JavaScript', group: 'core' }]);
+  });
+
+  it('relatedSkills is stably sorted when multiple refs exist', async () => {
+    const agentBody = `---
+name: Multi Agent
+description: Many refs
+model: m
+tools: []
+---
+Uses train and also flow skills here.
+`;
+    const r = makeReader(
+      {
+        [`${PLUGIN_ROOT}/agents/multi.md`]: agentBody,
+        [`${PLUGIN_ROOT}/skills/flow/SKILL.md`]: '---\nname: Flow\ndescription: x\n---\n',
+        [`${PLUGIN_ROOT}/skills/train/SKILL.md`]: '---\nname: Train\ndescription: y\n---\n',
+        [`${PLUGIN_ROOT}/knowledge/js.md`]: '# JS',
+      },
+      {
+        [`${PLUGIN_ROOT}/agents`]: [fileEntry('multi.md')],
+        [`${PLUGIN_ROOT}/skills`]: [dirEntry('flow'), dirEntry('train')],
+        [`${PLUGIN_ROOT}/knowledge`]: [fileEntry('js.md')],
+      },
+    );
+    const detail = await r.getDetail('agent', 'multi');
+    // Sorted by id: "flow" < "train"
+    expect(detail.relatedSkills.map((s) => s.id)).toEqual(['flow', 'train']);
+  });
+
+  it('relatedSkills and relatedKnowledge are empty arrays when agent has no matching refs', async () => {
+    const r = makeReader(
+      {
+        [`${PLUGIN_ROOT}/agents/empty.md`]: '---\nname: Empty\ndescription: x\nmodel: m\ntools: []\n---\nNo refs here.',
+        [`${PLUGIN_ROOT}/skills/flow/SKILL.md`]: '---\nname: Flow\ndescription: x\n---\n',
+        [`${PLUGIN_ROOT}/knowledge/js.md`]: '# JS',
+      },
+      {
+        [`${PLUGIN_ROOT}/agents`]: [fileEntry('empty.md')],
+        [`${PLUGIN_ROOT}/skills`]: [dirEntry('flow')],
+        [`${PLUGIN_ROOT}/knowledge`]: [fileEntry('js.md')],
+      },
+    );
+    const detail = await r.getDetail('agent', 'empty');
+    expect(detail.relatedSkills).toEqual([]);
+    expect(detail.relatedKnowledge).toEqual([]);
+  });
+});
+
+// ── AC2 (refs) — Frontmatter priority vs. body fallback ──────────────────────
+
+describe('AC2 (refs) — Frontmatter-first, body-fallback', () => {
+  // Frontmatter lists "deploy" skill; body mentions "flow" skill
+  // → only "deploy" in relatedSkills (frontmatter wins)
+  const agentFrontmatterSkills = `---
+name: FA
+description: x
+model: m
+tools: []
+skills: [deploy]
+---
+Mentions flow skill in body.
+`;
+  // Frontmatter lists "security" knowledge; body mentions knowledge/js.md
+  // → only "security" in relatedKnowledge (frontmatter wins)
+  const agentFrontmatterKnowledge = `---
+name: FK
+description: x
+model: m
+tools: []
+knowledge: [security]
+---
+Load knowledge/js.md here.
+`;
+
+  const skillFiles = {
+    [`${PLUGIN_ROOT}/skills/deploy/SKILL.md`]: '---\nname: Deploy\ndescription: d\n---\n',
+    [`${PLUGIN_ROOT}/skills/flow/SKILL.md`]:   '---\nname: Flow\ndescription: f\n---\n',
+  };
+  const skillDirs = [dirEntry('deploy'), dirEntry('flow')];
+  const knowledgeFiles = {
+    [`${PLUGIN_ROOT}/knowledge/js.md`]:       '# JS',
+    [`${PLUGIN_ROOT}/knowledge/security.md`]: '# Security',
+  };
+
+  it('when frontmatter.skills present, uses it and ignores body skill mentions', async () => {
+    const r = makeReader(
+      {
+        ...skillFiles,
+        ...knowledgeFiles,
+        [`${PLUGIN_ROOT}/agents/fa.md`]: agentFrontmatterSkills,
+      },
+      {
+        [`${PLUGIN_ROOT}/agents`]: [fileEntry('fa.md')],
+        [`${PLUGIN_ROOT}/skills`]: skillDirs,
+        [`${PLUGIN_ROOT}/knowledge`]: [fileEntry('js.md'), fileEntry('security.md')],
+      },
+    );
+    const detail = await r.getDetail('agent', 'fa');
+    const ids = detail.relatedSkills.map((s) => s.id);
+    expect(ids).toContain('deploy');
+    expect(ids).not.toContain('flow');
+  });
+
+  it('when frontmatter.knowledge present, uses it and ignores body knowledge paths', async () => {
+    const r = makeReader(
+      {
+        ...skillFiles,
+        ...knowledgeFiles,
+        [`${PLUGIN_ROOT}/agents/fk.md`]: agentFrontmatterKnowledge,
+      },
+      {
+        [`${PLUGIN_ROOT}/agents`]: [fileEntry('fk.md')],
+        [`${PLUGIN_ROOT}/skills`]: skillDirs,
+        [`${PLUGIN_ROOT}/knowledge`]: [fileEntry('js.md'), fileEntry('security.md')],
+      },
+    );
+    const detail = await r.getDetail('agent', 'fk');
+    const ids = detail.relatedKnowledge.map((k) => k.id);
+    expect(ids).toContain('security');
+    expect(ids).not.toContain('js');
+  });
+
+  it('when no frontmatter.skills, falls back to body scan', async () => {
+    const bodyOnly = `---
+name: BO
+description: x
+model: m
+tools: []
+---
+Uses the deploy skill.
+`;
+    const r = makeReader(
+      {
+        ...skillFiles,
+        ...knowledgeFiles,
+        [`${PLUGIN_ROOT}/agents/bo.md`]: bodyOnly,
+      },
+      {
+        [`${PLUGIN_ROOT}/agents`]: [fileEntry('bo.md')],
+        [`${PLUGIN_ROOT}/skills`]: skillDirs,
+        [`${PLUGIN_ROOT}/knowledge`]: [fileEntry('js.md'), fileEntry('security.md')],
+      },
+    );
+    const detail = await r.getDetail('agent', 'bo');
+    expect(detail.relatedSkills.map((s) => s.id)).toContain('deploy');
+  });
+
+  it('when no frontmatter.knowledge, falls back to body scan', async () => {
+    const bodyOnly = `---
+name: BO2
+description: x
+model: m
+tools: []
+---
+Loads knowledge/js.md here.
+`;
+    const r = makeReader(
+      {
+        ...skillFiles,
+        ...knowledgeFiles,
+        [`${PLUGIN_ROOT}/agents/bo2.md`]: bodyOnly,
+      },
+      {
+        [`${PLUGIN_ROOT}/agents`]: [fileEntry('bo2.md')],
+        [`${PLUGIN_ROOT}/skills`]: skillDirs,
+        [`${PLUGIN_ROOT}/knowledge`]: [fileEntry('js.md'), fileEntry('security.md')],
+      },
+    );
+    const detail = await r.getDetail('agent', 'bo2');
+    expect(detail.relatedKnowledge.map((k) => k.id)).toContain('js');
+  });
+});
+
+// ── AC3 (refs) — Dead-link pruning ───────────────────────────────────────────
+
+describe('AC3 (refs) — Dead-link pruning: non-existent targets are dropped', () => {
+  // Agent frontmatter references "ghost-skill" (does not exist) + "flow" (exists)
+  const agentContent = `---
+name: Pruner
+description: x
+model: m
+tools: []
+skills: [flow, ghost-skill]
+knowledge: [js, ghost-knowledge]
+---
+Body.
+`;
+
+  const r = makeReader(
+    {
+      [`${PLUGIN_ROOT}/agents/pruner.md`]: agentContent,
+      [`${PLUGIN_ROOT}/skills/flow/SKILL.md`]:   '---\nname: Flow\ndescription: f\n---\n',
+      [`${PLUGIN_ROOT}/knowledge/js.md`]: '# JS',
+    },
+    {
+      [`${PLUGIN_ROOT}/agents`]: [fileEntry('pruner.md')],
+      [`${PLUGIN_ROOT}/skills`]: [dirEntry('flow')],
+      [`${PLUGIN_ROOT}/knowledge`]: [fileEntry('js.md')],
+    },
+  );
+
+  it('relatedSkills does not contain the non-existent skill id', async () => {
+    const detail = await r.getDetail('agent', 'pruner');
+    const ids = detail.relatedSkills.map((s) => s.id);
+    expect(ids).not.toContain('ghost-skill');
+  });
+
+  it('relatedSkills still contains the valid skill', async () => {
+    const detail = await r.getDetail('agent', 'pruner');
+    expect(detail.relatedSkills.map((s) => s.id)).toContain('flow');
+  });
+
+  it('relatedKnowledge does not contain the non-existent knowledge id', async () => {
+    const detail = await r.getDetail('agent', 'pruner');
+    const ids = detail.relatedKnowledge.map((k) => k.id);
+    expect(ids).not.toContain('ghost-knowledge');
+  });
+
+  it('relatedKnowledge still contains the valid knowledge id', async () => {
+    const detail = await r.getDetail('agent', 'pruner');
+    expect(detail.relatedKnowledge.map((k) => k.id)).toContain('js');
+  });
+
+  it('body-fallback: word that looks like a skill id but only appears inside a larger word is not matched', async () => {
+    // Body only contains "workflow" — "flow" appears embedded, not standalone.
+    // The word-boundary regex must NOT match "flow" inside "workflow".
+    const bodyFallback = `---
+name: WF
+description: x
+model: m
+tools: []
+---
+This is a workflow tool.
+`;
+    const r2 = makeReader(
+      {
+        [`${PLUGIN_ROOT}/agents/wf.md`]: bodyFallback,
+        [`${PLUGIN_ROOT}/skills/flow/SKILL.md`]: '---\nname: Flow\ndescription: f\n---\n',
+        [`${PLUGIN_ROOT}/knowledge/js.md`]: '# JS',
+      },
+      {
+        [`${PLUGIN_ROOT}/agents`]: [fileEntry('wf.md')],
+        [`${PLUGIN_ROOT}/skills`]: [dirEntry('flow')],
+        [`${PLUGIN_ROOT}/knowledge`]: [fileEntry('js.md')],
+      },
+    );
+    const detail = await r2.getDetail('agent', 'wf');
+    // "flow" must NOT appear because it only occurs inside "workflow" (no standalone occurrence)
+    expect(detail.relatedSkills.map((s) => s.id)).not.toContain('flow');
+  });
+});
+
+// ── AC4 (refs) — usedByAgents on skill/knowledge detail ──────────────────────
+
+describe('AC4 (refs) — Skill/Knowledge detail includes usedByAgents', () => {
+  // Agent mentions "flow" skill + knowledge/js.md
+  const agentContent = `---
+name: Coder
+description: Writes code
+model: m
+tools: []
+---
+Uses the flow skill and loads knowledge/js.md.
+`;
+
+  const r = makeReader(
+    {
+      [`${PLUGIN_ROOT}/agents/coder.md`]: agentContent,
+      [`${PLUGIN_ROOT}/skills/flow/SKILL.md`]: '---\nname: Flow\ndescription: f\n---\n',
+      [`${PLUGIN_ROOT}/knowledge/js.md`]: '# JS',
+    },
+    {
+      [`${PLUGIN_ROOT}/agents`]: [fileEntry('coder.md')],
+      [`${PLUGIN_ROOT}/skills`]: [dirEntry('flow')],
+      [`${PLUGIN_ROOT}/knowledge`]: [fileEntry('js.md')],
+    },
+  );
+
+  it('skill detail includes usedByAgents array', async () => {
+    const detail = await r.getDetail('skill', 'flow');
+    expect(detail).not.toBeNull();
+    expect(Array.isArray(detail.usedByAgents)).toBe(true);
+  });
+
+  it('skill detail usedByAgents contains the agent that references it', async () => {
+    const detail = await r.getDetail('skill', 'flow');
+    expect(detail.usedByAgents).toEqual([{ id: 'coder', name: 'Coder' }]);
+  });
+
+  it('knowledge detail includes usedByAgents array', async () => {
+    const detail = await r.getDetail('knowledge', 'js');
+    expect(detail).not.toBeNull();
+    expect(Array.isArray(detail.usedByAgents)).toBe(true);
+  });
+
+  it('knowledge detail usedByAgents contains the agent that references it', async () => {
+    const detail = await r.getDetail('knowledge', 'js');
+    expect(detail.usedByAgents).toEqual([{ id: 'coder', name: 'Coder' }]);
+  });
+
+  it('skill usedByAgents is empty when no agent references it', async () => {
+    // Only 'coder' references 'flow' — already tested above; test a skill not referenced by anyone
+    const r2 = makeReader(
+      {
+        [`${PLUGIN_ROOT}/agents/empty.md`]: '---\nname: E\ndescription: x\nmodel: m\ntools: []\n---\nNo skills.',
+        [`${PLUGIN_ROOT}/skills/unused/SKILL.md`]: '---\nname: Unused\ndescription: u\n---\n',
+        [`${PLUGIN_ROOT}/knowledge/js.md`]: '# JS',
+      },
+      {
+        [`${PLUGIN_ROOT}/agents`]: [fileEntry('empty.md')],
+        [`${PLUGIN_ROOT}/skills`]: [dirEntry('unused')],
+        [`${PLUGIN_ROOT}/knowledge`]: [fileEntry('js.md')],
+      },
+    );
+    const sd = await r2.getDetail('skill', 'unused');
+    expect(sd.usedByAgents).toEqual([]);
+  });
+
+  it('usedByAgents is deduplicated even if an agent appears twice (defensive)', async () => {
+    // This shouldn't happen in practice (each agent file is read once), but
+    // the sort+dedup logic in #usedByAgents ensures clean output regardless.
+    const detail = await r.getDetail('skill', 'flow');
+    const ids = detail.usedByAgents.map((a) => a.id);
+    expect(ids).toEqual([...new Set(ids)]);
+  });
+
+  it('usedByAgents is stably sorted by id', async () => {
+    // Two agents both reference "flow": zebra + alpha → sorted alpha, zebra
+    const r3 = makeReader(
+      {
+        [`${PLUGIN_ROOT}/agents/zebra.md`]: '---\nname: Zebra\ndescription: x\nmodel: m\ntools: []\nskills: [flow]\n---\n',
+        [`${PLUGIN_ROOT}/agents/alpha.md`]: '---\nname: Alpha\ndescription: x\nmodel: m\ntools: []\nskills: [flow]\n---\n',
+        [`${PLUGIN_ROOT}/skills/flow/SKILL.md`]: '---\nname: Flow\ndescription: f\n---\n',
+        [`${PLUGIN_ROOT}/knowledge/js.md`]: '# JS',
+      },
+      {
+        [`${PLUGIN_ROOT}/agents`]: [fileEntry('zebra.md'), fileEntry('alpha.md')],
+        [`${PLUGIN_ROOT}/skills`]: [dirEntry('flow')],
+        [`${PLUGIN_ROOT}/knowledge`]: [fileEntry('js.md')],
+      },
+    );
+    const detail = await r3.getDetail('skill', 'flow');
+    expect(detail.usedByAgents.map((a) => a.id)).toEqual(['alpha', 'zebra']);
+  });
+});
+
+// ── AC5 (refs) — Consistency: forward ↔ reverse ──────────────────────────────
+
+describe('AC5 (refs) — Consistency: forward and reverse references agree', () => {
+  // Agent "coder" uses "flow" skill and "js" knowledge
+  const r = makeReader(
+    {
+      [`${PLUGIN_ROOT}/agents/coder.md`]: '---\nname: Coder\ndescription: x\nmodel: m\ntools: []\nskills: [flow]\nknowledge: [js]\n---\nBody.',
+      [`${PLUGIN_ROOT}/skills/flow/SKILL.md`]: '---\nname: Flow\ndescription: f\n---\n',
+      [`${PLUGIN_ROOT}/knowledge/js.md`]: '# JS',
+    },
+    {
+      [`${PLUGIN_ROOT}/agents`]: [fileEntry('coder.md')],
+      [`${PLUGIN_ROOT}/skills`]: [dirEntry('flow')],
+      [`${PLUGIN_ROOT}/knowledge`]: [fileEntry('js.md')],
+    },
+  );
+
+  it('if agent relatedSkills contains X, then skill X.usedByAgents contains the agent', async () => {
+    const agentDetail  = await r.getDetail('agent', 'coder');
+    const skillDetail  = await r.getDetail('skill', 'flow');
+    const agentHasSkill  = agentDetail.relatedSkills.some((s) => s.id === 'flow');
+    const skillHasAgent  = skillDetail.usedByAgents.some((a) => a.id === 'coder');
+    expect(agentHasSkill).toBe(true);
+    expect(skillHasAgent).toBe(true);
+  });
+
+  it('if agent relatedKnowledge contains X, then knowledge X.usedByAgents contains the agent', async () => {
+    const agentDetail    = await r.getDetail('agent', 'coder');
+    const knowledgeDetail = await r.getDetail('knowledge', 'js');
+    const agentHasK      = agentDetail.relatedKnowledge.some((k) => k.id === 'js');
+    const knowledgeHasA  = knowledgeDetail.usedByAgents.some((a) => a.id === 'coder');
+    expect(agentHasK).toBe(true);
+    expect(knowledgeHasA).toBe(true);
+  });
+
+  it('if skill is not in agent relatedSkills, agent is not in skill usedByAgents', async () => {
+    // Agent uses "flow"; "unused" skill should not be in agent.relatedSkills and agent not in its usedByAgents
+    const r2 = makeReader(
+      {
+        [`${PLUGIN_ROOT}/agents/coder.md`]: '---\nname: Coder\ndescription: x\nmodel: m\ntools: []\nskills: [flow]\n---\nBody.',
+        [`${PLUGIN_ROOT}/skills/flow/SKILL.md`]:   '---\nname: Flow\ndescription: f\n---\n',
+        [`${PLUGIN_ROOT}/skills/unused/SKILL.md`]: '---\nname: Unused\ndescription: u\n---\n',
+        [`${PLUGIN_ROOT}/knowledge/js.md`]: '# JS',
+      },
+      {
+        [`${PLUGIN_ROOT}/agents`]: [fileEntry('coder.md')],
+        [`${PLUGIN_ROOT}/skills`]: [dirEntry('flow'), dirEntry('unused')],
+        [`${PLUGIN_ROOT}/knowledge`]: [fileEntry('js.md')],
+      },
+    );
+    const agentDetail = await r2.getDetail('agent', 'coder');
+    const unusedDetail = await r2.getDetail('skill', 'unused');
+    expect(agentDetail.relatedSkills.some((s) => s.id === 'unused')).toBe(false);
+    expect(unusedDetail.usedByAgents.some((a) => a.id === 'coder')).toBe(false);
+  });
+});
+
+// ── AC6 (refs) — Security/Floor: degradation without plugin ──────────────────
+
+describe('AC6 (refs) — Security/Floor: degradation without plugin, no crash', () => {
+  it('agent detail returns null (404-ready) when plugin root is missing', async () => {
+    const noPluginReader = new AgentFlowReader({
+      pluginRootResolver: async () => null,
+    });
+    const detail = await noPluginReader.getDetail('agent', 'coder');
+    expect(detail).toBeNull();
+  });
+
+  it('skill detail returns null when plugin root is missing', async () => {
+    const noPluginReader = new AgentFlowReader({
+      pluginRootResolver: async () => null,
+    });
+    const detail = await noPluginReader.getDetail('skill', 'flow');
+    expect(detail).toBeNull();
+  });
+
+  it('knowledge detail returns null when plugin root is missing', async () => {
+    const noPluginReader = new AgentFlowReader({
+      pluginRootResolver: async () => null,
+    });
+    const detail = await noPluginReader.getDetail('knowledge', 'js');
+    expect(detail).toBeNull();
+  });
+
+  it('agent detail with empty skills/knowledge dirs returns empty ref lists, no crash', async () => {
+    const r = makeReader(
+      {
+        [`${PLUGIN_ROOT}/agents/coder.md`]: '---\nname: Coder\ndescription: x\nmodel: m\ntools: []\n---\nBody.',
+      },
+      {
+        [`${PLUGIN_ROOT}/agents`]:    [fileEntry('coder.md')],
+        [`${PLUGIN_ROOT}/skills`]:    [],
+        [`${PLUGIN_ROOT}/knowledge`]: [],
+      },
+    );
+    const detail = await r.getDetail('agent', 'coder');
+    expect(detail).not.toBeNull();
+    expect(detail.relatedSkills).toEqual([]);
+    expect(detail.relatedKnowledge).toEqual([]);
+  });
+
+  it('skill detail with no agents returns empty usedByAgents, no crash', async () => {
+    const r = makeReader(
+      {
+        [`${PLUGIN_ROOT}/skills/flow/SKILL.md`]: '---\nname: Flow\ndescription: f\n---\n',
+        [`${PLUGIN_ROOT}/knowledge/js.md`]: '# JS',
+      },
+      {
+        [`${PLUGIN_ROOT}/agents`]:    [],
+        [`${PLUGIN_ROOT}/skills`]:    [dirEntry('flow')],
+        [`${PLUGIN_ROOT}/knowledge`]: [fileEntry('js.md')],
+      },
+    );
+    const detail = await r.getDetail('skill', 'flow');
+    expect(detail).not.toBeNull();
+    expect(detail.usedByAgents).toEqual([]);
   });
 });
 
