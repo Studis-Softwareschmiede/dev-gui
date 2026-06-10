@@ -25,7 +25,7 @@ Aus der heute einzelnen Terminal/Fabrik-Oberfläche wird eine Multi-View-Konsole
 9. Eine unbekannte Route fällt auf das Einstiegs-Panel zurück (kein toter Bildschirm).
 
 ## Acceptance-Kriterien
-- **AC1** — Auf der Wurzel-Route zeigt die App ein Einstiegs-Panel mit **genau fünf** Kacheln, beschriftet *GitHub*, *VPS*, *Cloudflare*, *Fabrik (dev-gui)*, *Deployments*; jede Kachel ist per Maus **und** per Tastatur (Tab + Enter/Space) aktivierbar.
+- **AC1** — Auf der Wurzel-Route zeigt die App ein Einstiegs-Panel mit Kacheln für die Hauptansichten *GitHub*, *VPS*, *Cloudflare*, *Fabrik (dev-gui)*, *Team* und *Deployments*; jede Kachel ist per Maus **und** per Tastatur (Tab + Enter/Space) aktivierbar. *(Fortschreibung: Ursprünglich „genau fünf Kacheln, Deployments als Extra-Nav-Textlink"; die Team-Kachel wurde über [[team-view-frontend]] und die gleichwertige Deployments-Kachel über [[dashboard-deployment-tile]] ergänzt — *Deployments* ist nun eine Kachel im Raster, **kein** Extra-Nav-Textlink mehr. Maßgeblich für die Kachelzahl/-führung ist [[dashboard-deployment-tile]].)*
 - **AC2** — Aktivieren der Kachel *Fabrik (dev-gui)* öffnet die Fabrik-Ansicht, die Terminal-Pane, Flow-Trigger-Panel und Status-Dashboard so wie heute zeigt (kein Funktionsverlust).
 - **AC3** — Aktivieren einer der Kacheln *GitHub*, *VPS* oder *Cloudflare* öffnet die jeweilige Ansicht mit einem klar gekennzeichneten Platzhalter (Titel + „folgt"-Hinweis), **ohne** dass ein Backend-Endpunkt für diese Ansicht aufgerufen wird.
 - **AC4** — Aus jeder Ansicht führt ein erreichbares Bedienelement zurück zum Einstiegs-Panel; von jeder Ansicht ist jede andere Ansicht erreichbar.

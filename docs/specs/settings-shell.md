@@ -27,7 +27,7 @@ Eine **zentrale Einstellmaske** für die Admin-Konsole, bequem über ein **Zahnr
 - **AC2** — Aktivieren des Zahnrads öffnet die Settings-Ansicht und setzt die Settings-Route; die Settings-Ansicht zeigt einen erkennbaren Titel „Einstellungen".
 - **AC3** — Die Settings-Ansicht ist per Deep-Link (Settings-Route) direkt erreichbar; Browser-Zurück/Vor navigiert konsistent zur übrigen Shell, eine unbekannte Route fällt weiterhin auf das Einstiegs-Panel zurück.
 - **AC4** — Die Settings-Ansicht zeigt **genau vier** beschriftete Sektionen: *GitHub*, *Cloudflare*, *Hetzner / VPS*, *SSH-Keys*; im Grundgerüst löst keine Sektion einen Backend-Aufruf aus.
-- **AC5** — Das Einstiegs-Panel zeigt **genau fünf** Kacheln (Settings ist NICHT als Kachel hinzugefügt); die Fabrik-Ansicht und die übrigen Ansichten bleiben unverändert erreichbar.
+- **AC5** — *Settings ist NICHT als Kachel* im Einstiegs-Panel (Zahnrad in der Navigation); die Fabrik-Ansicht und die übrigen Ansichten bleiben unverändert erreichbar. *(Fortschreibung: die ursprüngliche „genau fünf Kacheln"-Aussage bezog sich auf den damaligen Stand; die Panel-Kachelzahl wird nun durch [[team-view-frontend]] (Team-Kachel) und [[dashboard-deployment-tile]] (Deployments-Kachel) bestimmt — maßgeblich ist dort. Unverändert gilt: das Zahnrad/Settings ist **keine** Kachel.)*
 - **AC6** — Aus der Settings-Ansicht ist die Rückkehr zum Einstiegs-Panel und der Wechsel zu jeder anderen Ansicht möglich; das Zahnrad bleibt sichtbar.
 - **AC7** — Die Settings-Ansicht ist hinter der bestehenden Cloudflare-Access-Mauer erreichbar; das Grundgerüst führt **keine** view-spezifische Autorisierung und **keine** neuen Secrets/Backend-Endpunkte ein.
 
