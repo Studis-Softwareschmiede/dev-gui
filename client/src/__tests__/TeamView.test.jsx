@@ -14,14 +14,22 @@
  *
  * Covers (team-detail-scroll):
  *   - AC1: Detail pane has overflowY:'auto' so long content is scrollable (not clipped).
- *   - AC2: Scroll layout properties apply in both desktop and stacked layouts (same element).
- *   - AC3: The flex height chain is closed — minHeight:0 is set on both nav and detail flex
- *          items, completing the chain so overflowY:'auto' is effective.
+ *   - AC2: The layout is a CSS grid (NOT flex-wrap). A flex-wrap row sizes its line to
+ *          content height, so the detail pane grew past the viewport and overflow:hidden
+ *          clipped it — overflowY:'auto' never engaged. A grid track is bounded by the
+ *          container, giving each column a real height limit so it scrolls.
+ *   - AC3: The height chain is closed — minHeight:0 on the layout grid + nav + detail.
  *   - AC4 (no regression): Nav list remains visible/usable; its own overflowY:'auto' +
  *          minHeight:0 preserved.
  *   - AC5 (no regression): A11y properties (touch-targets, focus ring, aria-current,
  *          keyboard) remain unaffected by the layout fix — verified by the existing
  *          team-view-frontend AC8 tests above.
+ *
+ *   NOTE: jsdom has no layout engine, so these assert the *style properties* that make
+ *   scrolling possible — not the scroll behaviour itself. Actual scrollability
+ *   (scrollHeight > clientHeight, end-of-content reachable) was verified in a real
+ *   browser (headless Chrome) against the built app; see the fix commit for the
+ *   measured before/after (flex-wrap canScroll=false → grid canScroll=true).
  *
  * Covers (team-detail-related-refs):
  *   - AC7: Agent-DetailPane renders "Zugehörige Skills" and "Zugehöriges Knowledge" chip
@@ -723,7 +731,8 @@ describe('TeamView — team-detail-scroll AC1/AC2/AC3: detail pane scroll layout
 
     const detailPane = container.querySelector('[aria-label="Detail-Pane"]');
     expect(detailPane).toBeTruthy();
-    // minHeight:0 is required for overflowY:'auto' to work in a flex layout
+    // Grid items default to min-height:auto (content-based); minHeight:0 lets the pane
+    // shrink below content height so overflowY:'auto' actually scrolls.
     // jsdom normalises numeric 0 → '0' (not '0px')
     expect(detailPane.style.minHeight).toBe('0');
   });
@@ -743,7 +752,7 @@ describe('TeamView — team-detail-scroll AC1/AC2/AC3: detail pane scroll layout
     expect(navPane.style.minHeight).toBe('0');
   });
 
-  it('AC4 — layout container has overflow:hidden + minHeight:0 (height constraint passes through chain)', async () => {
+  it('AC2/AC4 — layout is a CSS grid (NOT flex-wrap) with bounded height (overflow:hidden + minHeight:0)', async () => {
     globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE });
 
     const { container } = renderTeam();
@@ -752,9 +761,16 @@ describe('TeamView — team-detail-scroll AC1/AC2/AC3: detail pane scroll layout
       expect(container.querySelector('[aria-busy="true"]')).toBeNull();
     });
 
-    // The layout div wraps nav + detail; it must constrain height for the chain to work
+    // The layout div wraps nav + detail; it must constrain height for the chain to work.
     const detailPane = container.querySelector('[aria-label="Detail-Pane"]');
     const layoutDiv = detailPane.parentElement;
+
+    // Regression guard: must be a grid, NOT flex-wrap. A flex-wrap row sizes its line to
+    // content height, which defeats overflow scrolling (the original team-detail-scroll bug).
+    expect(layoutDiv.style.display).toBe('grid');
+    expect(layoutDiv.style.flexWrap).toBe('');
+    expect(layoutDiv.style.gridTemplateColumns).toContain('minmax');
+
     expect(layoutDiv.style.overflow).toBe('hidden');
     // jsdom normalises numeric 0 → '0' (not '0px')
     expect(layoutDiv.style.minHeight).toBe('0');

@@ -477,6 +477,7 @@ const styles = {
     display: 'flex',
     flexDirection: 'column',
     flex: 1,
+    minHeight: 0, // height-chain: lets the layout grid shrink below content height so detail can scroll (team-detail-scroll AC3)
     overflow: 'hidden',
     padding: '20px 24px',
     background: '#1a1a1a',
@@ -513,10 +514,14 @@ const styles = {
   },
 
   // ── Master-Detail layout (AC9)
-  // 2 columns on desktop; stacked on narrow via flex-wrap + minWidth trick
+  // CSS grid (NOT flex-wrap): a wrap-row sizes its line to content height, so the
+  // detail pane grew past the viewport and overflow:hidden clipped it instead of
+  // letting overflowY:'auto' scroll (team-detail-scroll AC1–AC3). A grid track is
+  // bounded by the container, so each column (nav/detail) gets a real height limit
+  // and scrolls independently. minmax(0,…) prevents column blow-out from long content.
   layout: {
-    display: 'flex',
-    flexWrap: 'wrap',
+    display: 'grid',
+    gridTemplateColumns: 'minmax(180px, 240px) minmax(0, 1fr)',
     gap: 16,
     flex: 1,
     overflow: 'hidden',
@@ -525,10 +530,8 @@ const styles = {
 
   // ── Navigation (master / left column)
   nav: {
-    flex: '0 0 240px',
-    minWidth: 200,
-    maxWidth: '100%',
-    minHeight: 0, // closes the flex height chain so overflowY:'auto' is effective (team-detail-scroll AC3)
+    minWidth: 0, // grid item: width comes from the column track; minWidth:0 lets it shrink cleanly
+    minHeight: 0, // grid item height is bounded by the track, so overflowY:'auto' actually scrolls (team-detail-scroll AC3)
     overflowY: 'auto',
     background: '#111',
     borderRadius: 8,
@@ -593,9 +596,8 @@ const styles = {
 
   // ── Detail pane (right column)
   detail: {
-    flex: 1,
-    minWidth: 240,
-    minHeight: 0, // closes the flex height chain so overflowY:'auto' is effective (team-detail-scroll AC3)
+    minWidth: 0, // grid item: width comes from the minmax(0,1fr) track; minWidth:0 prevents long content from blowing out the column
+    minHeight: 0, // grid item height is bounded by the track, so overflowY:'auto' actually scrolls (team-detail-scroll AC1–AC3)
     overflowY: 'auto',
     background: '#111',
     borderRadius: 8,

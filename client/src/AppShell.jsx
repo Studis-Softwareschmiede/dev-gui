@@ -342,6 +342,7 @@ const styles = {
   // ── View port (below NavBar)
   viewPort: {
     flex: 1,
+    minHeight: 0, // height-chain: lets child views (e.g. TeamView) bound their own scroll regions instead of overflowing the shell
     overflow: 'hidden',
     display: 'flex',
     flexDirection: 'column',
