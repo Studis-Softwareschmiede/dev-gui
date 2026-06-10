@@ -12,6 +12,17 @@
  *   - AC7: Fetch failure → error message displayed; view remains usable.
  *   - AC8: Touch-targets ≥ 44 px; aria-current on active item; semantic list/landmark.
  *
+ * Covers (team-detail-scroll):
+ *   - AC1: Detail pane has overflowY:'auto' so long content is scrollable (not clipped).
+ *   - AC2: Scroll layout properties apply in both desktop and stacked layouts (same element).
+ *   - AC3: The flex height chain is closed — minHeight:0 is set on both nav and detail flex
+ *          items, completing the chain so overflowY:'auto' is effective.
+ *   - AC4 (no regression): Nav list remains visible/usable; its own overflowY:'auto' +
+ *          minHeight:0 preserved.
+ *   - AC5 (no regression): A11y properties (touch-targets, focus ring, aria-current,
+ *          keyboard) remain unaffected by the layout fix — verified by the existing
+ *          team-view-frontend AC8 tests above.
+ *
  * @jest-environment jsdom
  */
 
@@ -608,5 +619,71 @@ describe('TeamView — AC8: A11y', () => {
     await waitFor(() => {
       expect(getByRole('navigation', { name: /team-navigation/i })).toBeTruthy();
     });
+  });
+});
+
+// ── team-detail-scroll: AC1–AC4 — Scroll layout properties ───────────────────
+
+describe('TeamView — team-detail-scroll AC1/AC2/AC3: detail pane scroll layout', () => {
+  it('AC1/AC2 — detail pane has overflowY:"auto" (scrollable on overflow)', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE });
+
+    const { container } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('[aria-busy="true"]')).toBeNull();
+    });
+
+    const detailPane = container.querySelector('[aria-label="Detail-Pane"]');
+    expect(detailPane).toBeTruthy();
+    expect(detailPane.style.overflowY).toBe('auto');
+  });
+
+  it('AC3 — detail pane has minHeight:0 (closes flex height chain)', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE });
+
+    const { container } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('[aria-busy="true"]')).toBeNull();
+    });
+
+    const detailPane = container.querySelector('[aria-label="Detail-Pane"]');
+    expect(detailPane).toBeTruthy();
+    // minHeight:0 is required for overflowY:'auto' to work in a flex layout
+    // jsdom normalises numeric 0 → '0' (not '0px')
+    expect(detailPane.style.minHeight).toBe('0');
+  });
+
+  it('AC3/AC4 — nav pane has overflowY:"auto" + minHeight:0 (chain complete, no regression)', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE });
+
+    const { container } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('[aria-label="Team-Navigation"]')).toBeTruthy();
+    });
+
+    const navPane = container.querySelector('[aria-label="Team-Navigation"]');
+    expect(navPane.style.overflowY).toBe('auto');
+    // jsdom normalises numeric 0 → '0' (not '0px')
+    expect(navPane.style.minHeight).toBe('0');
+  });
+
+  it('AC4 — layout container has overflow:hidden + minHeight:0 (height constraint passes through chain)', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE });
+
+    const { container } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('[aria-busy="true"]')).toBeNull();
+    });
+
+    // The layout div wraps nav + detail; it must constrain height for the chain to work
+    const detailPane = container.querySelector('[aria-label="Detail-Pane"]');
+    const layoutDiv = detailPane.parentElement;
+    expect(layoutDiv.style.overflow).toBe('hidden');
+    // jsdom normalises numeric 0 → '0' (not '0px')
+    expect(layoutDiv.style.minHeight).toBe('0');
   });
 });
