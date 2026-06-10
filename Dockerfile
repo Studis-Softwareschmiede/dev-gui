@@ -102,6 +102,9 @@ RUN mkdir -p /home/node/.claude /home/node/.config \
 # Fallback "dev" is used when building locally without the arg.
 ARG BUILD_VERSION=dev
 ENV APP_VERSION="${BUILD_VERSION}"
+# Same value as an image label so `docker inspect` surfaces the build version
+# without having to query the running app's /api/version endpoint.
+LABEL build.version="${BUILD_VERSION}"
 
 # AC1 — run as non-root: switch to the node user (uid 1000, present in
 # node:20-slim). Global tools (claude, docker, gh) are in /usr/local/bin —
