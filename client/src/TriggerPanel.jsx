@@ -78,7 +78,23 @@ const PREVIEW_SUBS = ['up', 'down', 'list', 'available'];
  * (the project default profile.cost_mode applies).
  * @type {string[]}
  */
-const COST_MODES = ['low-cost', 'balanced', 'max-quality'];
+const COST_MODES = ['low-cost', 'balanced', 'max-quality', 'frontier'];
+
+/**
+ * Grobe, GUI-lokale Tier-/Kosten-Charakterisierung je Modus (User-Wunsch: $/MTok).
+ * BEWUSST grob: die maßgebliche Rolle×Modus→Modell-Matrix lebt in agent-flow
+ * (knowledge/model-tiers.md) — die GUI kennt sie nicht (architecture.md §7) und
+ * zeigt hier nur eine Tier-Schwere-Orientierung. Preise aus der Anthropic-Pricing-
+ * Quelle (Input/Output je MTok). ADR-001: Abo-Betrieb → KEINE Direktkosten pro
+ * Token; die Werte sind nur relative Schwere, kein Dollar-Zielwert.
+ * @type {Record<string,{models:string,price:string}>}
+ */
+const COST_MODE_INFO = {
+  'low-cost':    { models: 'haiku/sonnet', price: '$1–3 / $5–15' },
+  'balanced':    { models: 'sonnet/opus',  price: '$3–5 / $15–25' },
+  'max-quality': { models: 'opus',         price: '$5 / $25' },
+  'frontier':    { models: 'fable (neueste Klasse)', price: '$10 / $50' },
+};
 /** Commands that dispatch agents and therefore support the cost-mode switch (AC9). */
 const COST_AWARE_COMMANDS = ['/agent-flow:flow', '/agent-flow:requirement', '/agent-flow:train'];
 
@@ -388,6 +404,12 @@ export function TriggerPanel({ pollInterval = SESSION_POLL_MS, fetchFn }) {
                 <option key={m} value={m}>{m}</option>
               ))}
             </select>
+            <div style={styles.costInfo} aria-live="polite" data-testid="cost-info">
+              <span>{COST_MODE_INFO[costMode].models} · {COST_MODE_INFO[costMode].price} /MTok</span>
+              <span style={styles.costDisclaimer}>
+                ⚠ Abo-Betrieb — keine Direktkosten pro Token; Werte nur relative Tier-Schwere.
+              </span>
+            </div>
           </>
         )}
 
@@ -617,6 +639,20 @@ const styles = {
   required: {
     fontSize: 11,
     color: '#f87171',
+  },
+  costInfo: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 1,
+    marginTop: 4,
+    marginBottom: 2,
+    fontSize: 11,
+    color: '#9ca3af',
+  },
+  costDisclaimer: {
+    fontSize: 10,
+    color: '#6b7280',
+    fontStyle: 'italic',
   },
   select: {
     background: '#1e1e1e',

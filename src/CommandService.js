@@ -53,7 +53,7 @@ export const DEFAULT_ALLOWED_COMMANDS = [
  * Mirrors agent-flow `knowledge/model-tiers.md`. Configuration, not scattered.
  * @type {string[]}
  */
-export const COST_MODES = ['low-cost', 'balanced', 'max-quality'];
+export const COST_MODES = ['low-cost', 'balanced', 'max-quality', 'frontier'];
 
 /** Default idle period (ms) — see module doc above. */
 const DEFAULT_IDLE_MS = 8_000;

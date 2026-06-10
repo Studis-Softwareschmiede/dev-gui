@@ -229,6 +229,12 @@ describe('hasValidCostFlag()', () => {
     }
     expect(hasValidCostFlag('/agent-flow:requirement --cost low-cost Dark-Mode-Toggle')).toBe(true);
     expect(hasValidCostFlag('/agent-flow:train --cost max-quality security')).toBe(true);
+    expect(hasValidCostFlag('/agent-flow:flow --cost frontier')).toBe(true);
+  });
+
+  it('includes the frontier mode in the COST_MODES enum (mirrors model-tiers.md)', () => {
+    expect(COST_MODES).toContain('frontier');
+    expect(COST_MODES).toEqual(['low-cost', 'balanced', 'max-quality', 'frontier']);
   });
 
   it('returns false when --cost is followed by an unknown mode', () => {
