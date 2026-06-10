@@ -1,5 +1,17 @@
 # Coder Lessons — dev-gui (newest first)
 
+## 2026-06-09 — Stale Inline-Kommentare bei Kachelzahl-Änderungen nachziehen
+Wenn die Kachelzahl im TILES-Array ändert und alle formalen Doc-Kommentare (Datei-Header, JSDoc, describe-Titel) aktualisiert werden, zusätzlich nach informellen Inline-Kommentaren im Rumpf von it()-Blöcken suchen (z.B. `// Already on panel (fallback) — five tiles visible`). Diese werden oft übersehen weil sie keine semantische Bedeutung haben, erzeugen aber leicht einen Suggestion-Befund. Checkliste: `grep -n "five\|fünf\|four\|vier" client/src/__tests__/AppShell.test.jsx` nach jeder Kachelzahl-Änderung.
+
+## 2026-06-09 — Covers-Block in Test-Datei-Header muss ALLE tatsächlich abgedeckten ACs listen (keine Lücken, kein falsches Scope-Claim)
+Wenn der erste Satz im Datei-JSDoc-Header eine AC-Spanne nennt (z.B. „AC1–AC7"), muss der `Covers`-Block darunter jede einzelne AC explizit aufführen. Fehlt eine AC (z.B. AC1 wird in einem describe-Block abgedeckt, aber nicht im Covers-Block gelistet), ist das ein Test-Header-Claim-Verstoß (Important-Befund). Umgekehrt gilt: jede im Covers-Block genannte AC muss einen zugehörigen `describe`/`it`-Block haben. Checkliste nach dem Schreiben: (a) alle `describe`-Block-Überschriften mit ACs gegen den Covers-Block abgleichen; (b) Satz wie „AC1–AC7" im Header entfernen oder durch die explizite Liste ersetzen.
+
+## 2026-06-09 — AC9 (und jede Verdrahtungs-AC): Covers-Block in Test-Datei ergänzen + Note wenn Test bewusst nicht auf AccessGuard prüft
+Wenn ein Router hinter dem AccessGuard verdrahtet ist (AC9-Muster) und die Router-Test-Datei die AccessGuard bewusst nicht testet (fokussiert auf Router-Logik), muss AC9 trotzdem im Covers-Block aufgeführt werden — mit einem Hinweis: `AC9 — AccessGuard-Verdrahtung: per server.js-Inspektion, kein separater Middleware-Test`. Fehlt der Eintrag: Important-Befund (coder.md-Lesson 2026-06-08 gilt analog).
+
+## 2026-06-09 — Stabile Sortierung: Tests müssen das Sort-Ergebnis explizit assertieren (nicht nur die Existenz der Einträge)
+Wenn eine Spec eine stabile Sort-Reihenfolge vorschreibt (z.B. „alphabetisch je Kind; Knowledge zusätzlich nach group"), muss die Test-Suite die exakte Reihenfolge via Array-Vergleich (`.toEqual([...])`) assertieren — nicht nur die Existenz einzelner Einträge (`.toContain()`). Für Knowledge mindestens ein Test: zwei Einträge in verschiedenen Gruppen + zwei Einträge in derselben Gruppe → prüfen, dass group-Sort vor name-Sort greift. Fehlt dieser Test: der Sort-Claim aus AC1 gilt als unbelegt.
+
 ## 2026-06-08 — `unsupported`-Pfad bei Power-Aktionen: Backend muss HTTP 200 zurückgeben, nicht 4xx
 Wenn ein Backend eine Start/Stop-Aktion mit `{ result: 'unsupported' }` signalisiert (AC6), darf es NICHT HTTP 4xx zurückgeben — dann wirft `postPowerAction` (wegen `!res.ok`) und der `result?.result === 'unsupported'`-Branch in `handleAction` ist unerreichbar. Der korrekte Produk­tions­pfad für `unsupported` ist HTTP 200 + `{ result: 'unsupported', reason: '...' }`. Tests, die den `unsupported`-State mit einem 4xx-Status simulieren, testen tatsächlich den ERROR-Pfad — nicht den UNSUPPORTED-Pfad. Fix: `powerStatus: 200, powerResult: { result: 'unsupported', reason: '...' }` verwenden und prüfen, dass `actionState === 'unsupported'` (nicht `'error'`) gesetzt wird.
 

@@ -1,5 +1,17 @@
 # Reviewer Lessons — dev-gui (newest first)
 
+## 2026-06-09 — aria-current Wert-Typ bei Nav-Buttons: 'true' vs 'page' ist Suggestion, kein Important
+`aria-current="true"` ist per WAI-ARIA-Spec ein gültiger Token-Wert (neben `page`, `step`, `location`, `date`, `time`). Für reine Navigations-Schaltflächen (kein <a>-Element, kein Seitenkontext) ist `'true'` funktionell korrekt — Screen-Reader verkünden "current". `'page'` wäre semantisch präziser für Navigations-Elemente, ist aber kein Pflicht-Wert. Kein Important-Befund; höchstens Suggestion „aria-current='page' für nav-context semantisch präziser".
+
+## 2026-06-09 — Item-Brief-Kachelzahl nicht blind übernehmen: immer tatsächliche TILES-Länge im Code prüfen
+Wenn ein Item-Brief behauptet „TILES-Array hat N Einträge", immer `node -e "..."` oder Quelldatei-Inspektion gegen die tatsächliche Länge verifizieren. Im Item #143 sagte das Brief „5 Einträge (github, vps, cloudflare, factory, team)", aber `deployments` war bereits vor dem Diff als vollwertiger TILE vorhanden (6 Einträge gesamt). Vor einem „falsche Kachelzahl im Doc-Kommentar"-Befund: tatsächliche TILES-Länge per Code ermitteln, DANN Kommentar dagegen prüfen. Falsch-positive Befunde auf Basis der Brief-Angabe verschwenden eine Iteration.
+
+## 2026-06-09 — path.join() mit untrusted Slash-Segment ist SICHER (kein false-positive Path-Traversal-Befund)
+`path.join('/base/dir', '/etc/passwd')` ergibt `/base/dir/etc/passwd` — Node.js `path.join()` behandelt einen zweiten absoluten Pfad NICHT als Root-Override. Nur `path.resolve()` würde escapen. Vor einem Critical-Befund „join() erlaubt absolute Pfad-Injektion" immer in Node.js verifizieren: `join(a, b)` wo `b` mit `/` beginnt, bleibt innerhalb `a`. Kein Befund wenn Code `join()` und nicht `resolve()` verwendet.
+
+## 2026-06-09 — Express 5 / path-to-regexp 8: `..` und `%2e%2e` werden NICHT normaliert — kommen literal als Splat-Segment an
+In Express 5 (path-to-regexp 8.x) mit `/*splat`-Route: `%2e%2e` wird zu `..` dekodiert und als literales Segment in `req.params.splat` übergeben — NICHT weg-normalisiert. Verifiziert mit Express 5.2.1 / path-to-regexp 8.4.2. Test-Kommentare wie „Express will normalize /api/.../.. → /api/..." sind falsch. Vor Traversal-Bewertung immer das tatsächliche Express-Verhalten mit einem Live-Check (wie in dieser Review-Session) bestätigen — nicht auf Annahmen aus Express 4 verlassen.
+
 ## 2026-06-08 — `unsupported`-State via 4xx testen = falsch-positiver Test: immer HTTP-Status vs. Codepfad prüfen
 Wenn ein Test einen `unsupported`-State via `powerStatus: 422` simuliert und der assert `/nicht unterstützt|unsupported/i` grün ist, prüfen ob der grüne Assert aus dem UNSUPPORTED- oder dem ERROR-Pfad kommt. 422 ist `!res.ok` → `postPowerAction` wirft → `catch`-Branch in `handleAction` → `actionState='error'`, nicht `'unsupported'`. Der Test beweist nur, dass `data.reason` im Error-Text erscheint — nicht dass der `unsupported`-State-Zweig erreichbar ist. Für einen korrekten `unsupported`-Test muss `powerStatus: 200` + `powerResult: { result: 'unsupported' }` verwendet werden, und der Assert muss `actionState` (nicht nur body-Text) prüfen.
 ## 2026-06-08 — Frontend-Only-Diff: Backend-Audit-Feld-Mismatch nur melden wenn Backend im Diff

@@ -430,6 +430,7 @@ const styles = {
     flex: '0 0 240px',
     minWidth: 200,
     maxWidth: '100%',
+    minHeight: 0, // closes the flex height chain so overflowY:'auto' is effective (team-detail-scroll AC3)
     overflowY: 'auto',
     background: '#111',
     borderRadius: 8,
@@ -496,6 +497,7 @@ const styles = {
   detail: {
     flex: 1,
     minWidth: 240,
+    minHeight: 0, // closes the flex height chain so overflowY:'auto' is effective (team-detail-scroll AC3)
     overflowY: 'auto',
     background: '#111',
     borderRadius: 8,
