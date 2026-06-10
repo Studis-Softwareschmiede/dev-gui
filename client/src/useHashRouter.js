@@ -8,8 +8,9 @@
  *   #/vps       → 'vps'
  *   #/cloudflare → 'cloudflare'
  *   #/factory   → 'factory'
- *   #/settings  → 'settings'
- *   #/team      → 'team'
+ *   #/settings     → 'settings'
+ *   #/team         → 'team'
+ *   #/deployments  → 'deployments'
  *
  * Unknown hashes fall back to 'panel'.
  * Browser Back/Forward navigate the history (pushState-style via hash changes).
@@ -28,6 +29,7 @@ export const VIEWS = /** @type {const} */ ([
   'factory',
   'settings',
   'team',
+  'deployments',
 ]);
 
 /**
