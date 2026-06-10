@@ -4,7 +4,7 @@
 
 ## Domänenmodell
 - **Session** — die *eine* interaktive Claude-Code-Session, die die GUI fernsteuert. Lebenszyklus: `starting → ready → busy → ready` (bzw. `stopped`/`failed`). Genau eine pro Dienst.
-- **Command** — ein ausgelöster Slash-Befehl (z.B. `/flow #12`) + Status (`queued → running → done|cancelled`) + Auslöser-Identität + Zeit. Für die agent-dispatchenden Befehle (`flow`/`requirement`/`train`) trägt die komponierte Zeile optional ein **`--cost <mode>`-Flag** (`low-cost|balanced|max-quality`, Token-Hebel; `balanced` → kein Flag). dev-gui injiziert das Flag nur — die Modell-Auflösung liegt in agent-flow ([[flow-trigger]] AC8/AC9; agent-flow `docs/architecture/model-tier-subsystem.md`).
+- **Command** — ein ausgelöster Slash-Befehl (z.B. `/flow #12`) + Status (`queued → running → done|cancelled`) + Auslöser-Identität + Zeit. Für die agent-dispatchenden Befehle (`flow`/`requirement`/`train`) trägt die komponierte Zeile optional ein **`--cost <mode>`-Flag** (`low-cost|balanced|max-quality|frontier`, Token-Hebel; `balanced` → kein Flag; `frontier` = opt-in, neueste Klasse `fable`). dev-gui injiziert das Flag nur — die Modell-Auflösung liegt in agent-flow ([[flow-trigger]] AC8/AC9; agent-flow `docs/architecture/model-tier-subsystem.md`).
 - **Read-Models** (nur gelesen, nie persistiert): **Project** (Org-Repo ≠ agent-flow), **BoardItem**, **CIRun**, **PreviewContainer**.
 - **AuditEntry** — append-only: Zeit, Access-Identität, Befehl.
 

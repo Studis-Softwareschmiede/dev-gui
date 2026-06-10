@@ -616,6 +616,52 @@ describe('TriggerPanel — AC9 cost-mode switch', () => {
     const body = JSON.parse(commandCall[1].body);
     expect(body.command).toBe('/agent-flow:requirement --cost low-cost Dark-Mode-Toggle');
   });
+
+  it('flow + frontier → posts /agent-flow:flow --cost frontier', async () => {
+    const fetchFn = makeFetchFn({
+      '/api/session': () => Promise.resolve(sessionResp('ready')),
+      '/api/command': () => Promise.resolve(cmdResp(202, { commandId: 'cm4', status: 'running' })),
+    });
+    const { getByRole, getByLabelText } = renderPanel(fetchFn);
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
+    });
+
+    await act(async () => {
+      fireEvent.change(getByLabelText(/cost-mode/i), {
+        target: { value: 'frontier' },
+      });
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /senden/i }));
+    });
+
+    const commandCall = fetchFn.mock.calls.find(([url]) => url === '/api/command');
+    const body = JSON.parse(commandCall[1].body);
+    expect(body.command).toBe('/agent-flow:flow --cost frontier');
+  });
+
+  it('zeigt Kosten-Info + Abo-Disclaimer; frontier → fable / $10 / $50', async () => {
+    const fetchFn = makeFetchFn({
+      '/api/session': () => Promise.resolve(sessionResp('ready')),
+    });
+    const { getByLabelText, getByTestId } = renderPanel(fetchFn);
+
+    await waitFor(() => {
+      expect(getByLabelText(/cost-mode/i)).toBeTruthy();
+    });
+
+    // Default 'balanced' — Disclaimer immer sichtbar
+    expect(getByTestId('cost-info').textContent).toMatch(/Abo-Betrieb/);
+
+    await act(async () => {
+      fireEvent.change(getByLabelText(/cost-mode/i), { target: { value: 'frontier' } });
+    });
+    expect(getByTestId('cost-info').textContent).toMatch(/fable/);
+    expect(getByTestId('cost-info').textContent).toMatch(/\$10 \/ \$50/);
+  });
 });
 
 // ── Existing behavior tests (updated for namespaced commands) ─────────────────
