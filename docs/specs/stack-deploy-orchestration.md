@@ -117,11 +117,13 @@ aus Repo" in die bestehende Deployments-Kachel.
 - **AC7** — Schlägt ein Route-Schritt fehl, werden die in **diesem** Lauf bereits angelegten Routen
   best-effort zurückgerollt; verbleibender Drift wird der Reconciliation überlassen; Ergebnis
   `{ result: "error", reason }` ohne Teil-/Geheim-Leak. Schlägt `composeUp` fehl → kein Route-Schritt.
-- **AC8** — `DELETE /api/deployments/stacks/{stackName}` (Body `{ confirm: "<stackName>" }`) entfernt
-  **alle** Stack-Routen + DNS-CNAMEs und fährt den Stack via `composeDown` (Volumes behalten) herunter;
-  Reihenfolge Routen-zuerst. Ohne/falschem `confirm` → 422 `confirmation-required`, keine Mutation.
-- **AC9** — `GET /api/deployments/stacks/{stackName}` liefert den Live-Status (composePs ⊕ Routen je
-  öffentlichem Hostname) mit Drift-Flags; `GET /api/deployments/stacks` listet die registrierten Stacks.
+- **AC8** — `DELETE /api/deployments/stacks/{stackName}/undeploy` (Body `{ confirm: "<stackName>" }`)
+  entfernt **alle** Stack-Routen + DNS-CNAMEs und fährt den Stack via `composeDown` (Volumes behalten)
+  herunter; Reihenfolge Routen-zuerst. Ohne/falschem `confirm` → 422 `confirmation-required`, keine
+  Mutation. Sub-Pfad `/undeploy` trennt trennscharf vom Registry-DELETE (AC1/AC2, Item A).
+- **AC9** — `GET /api/deployments/stacks/{stackName}/status` liefert den Live-Status (composePs ⊕
+  Routen je öffentlichem Hostname) mit Drift-Flags; `GET /api/deployments/stacks` listet die
+  registrierten Stacks (StackDefinition[] aus der Registry, unverändert).
 
 ### Sicherheit & Audit (Floor, Item C)
 - **AC10** — Stack-Deploy/Undeploy auf einen **protected** öffentlichen Hostname (eigene `devgui`/
@@ -159,8 +161,10 @@ aus Repo" in die bestehende Deployments-Kachel.
 - **GET `/api/deployments/stacks`** → `{ stacks: StackDefinition[] }` (hinter Access).
 - **POST `/api/deployments/stacks`** / **PUT `/api/deployments/stacks/{stackName}`** / **DELETE …** — Registry-CRUD (Mutation: Access + Rolle + Audit).
 - **POST `/api/deployments/stacks/{stackName}/deploy`** → `{ result, stack?, reason? }` (Mutation).
-- **DELETE `/api/deployments/stacks/{stackName}`** — Body `{ confirm: "<stackName>" }` → `{ result, reason? }` (Mutation; trennscharf vom Registry-DELETE über Pfad/Operation; `coder` finalisiert ob eigener Sub-Pfad z.B. `/undeploy`).
-- **GET `/api/deployments/stacks/{stackName}`** → `StackStatus` (hinter Access).
+- **DELETE `/api/deployments/stacks/{stackName}/undeploy`** — Body `{ confirm: "<stackName>" }` → `{ result, reason? }` (Mutation; trennscharf vom Registry-DELETE; Entscheidung Item C: Sub-Pfad `/undeploy`).
+  - **DELETE `/api/deployments/stacks/{stackName}`** (ohne `/undeploy`) bleibt rein Registry-DELETE (AC1/AC2, Item A).
+- **GET `/api/deployments/stacks/{stackName}/status`** → `StackStatus` (hinter Access; Live-Status via composePs ⊕ Routen).
+  - **GET `/api/deployments/stacks/{stackName}`** (ohne `/status`) liefert `StackDefinition` aus der Registry (AC1, Item A).
 - **Route-Anlage je öffentlichem Service:** über `DeployOrchestrator.addRouteOnly`/Deploy-Anlege-Pfad (ADR-012); kein duplizierter Cloudflare-Code.
 - **Generierung auf VPS:** über [[vps-compose-control]]-SSH-Ausführung des mitwandernden Generierskripts; Werte verlassen den VPS nie.
 - Token/Key/App-Secret store-intern bzw. VPS-lokal, transient, nie geleakt.
