@@ -157,7 +157,7 @@ aus Repo" in die bestehende Deployments-Kachel.
 > = `architekt` (neuer ADR, gemeinsam mit [[vps-compose-control]]).
 
 - **`StackDefinition`** = `{ stackName, repoUrl, branch, composeFile, overrideFile?, vps, publicServices: [{ service, hostname }], tunnelId, secretsSpec?: { generate: string[], required: string[] } }`. Nicht-geheim. `secretsSpec.generate` = auf dem VPS zu generierende Schlüsselnamen; `secretsSpec.required` = Schlüsselnamen, die in der VPS-`.env` vorhanden sein müssen (nur Existenzprüfung, nie Wert).
-- **`StackStatus` (live)** = `{ stackName, project, services: [{ service, status, hostname?, routePresent?, containerPresent? }], errors?: [{ scope, errorClass }] }`.
+- **`StackStatus` (live)** = `{ stackName, project, services: [{ service, status, hostname?, routePresent?, containerPresent?, drift? }], errors?: [{ scope, errorClass }] }`. `drift?` (boolean) zeigt an, ob für diesen Service ein Zustandsunterschied zwischen Container-Präsenz und Route-Präsenz besteht (§8, AC9).
 - **GET `/api/deployments/stacks`** → `{ stacks: StackDefinition[] }` (hinter Access).
 - **POST `/api/deployments/stacks`** / **PUT `/api/deployments/stacks/{stackName}`** / **DELETE …** — Registry-CRUD (Mutation: Access + Rolle + Audit).
 - **POST `/api/deployments/stacks/{stackName}/deploy`** → `{ result, stack?, reason? }` (Mutation).
