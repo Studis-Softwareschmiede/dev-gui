@@ -104,6 +104,18 @@ const STACKS_BASE_DIR = '~/stacks';
  * @property {string}  [errorClass]    - maschinenlesbare Fehlerklasse
  */
 
+/**
+ * @typedef {object} EnsureEnvResult
+ * @property {'generated'|'exists'|'error'} result
+ *   - 'generated' — Erst-Deploy: .env war nicht vorhanden, Generier-Skript erfolgreich ausgeführt
+ *   - 'exists'    — Re-Deploy: .env existiert bereits und bleibt unverändert (AC4)
+ *   - 'error'     — Fehler (Skript fehlt/schlägt fehl, SSH-Fehler, fehlende required-Keys)
+ * @property {string}   [generatedKeys]    - CSV-Liste der Schlüsselnamen die generiert wurden (kein Wert, AC3)
+ * @property {string[]} [missingKeys]      - Fehlende required-Key-Namen (AC5); leer wenn alle vorhanden
+ * @property {string}   [reason]           - Fehlergrund ohne Geheim-Leak
+ * @property {string}   [errorClass]       - maschinenlesbare Fehlerklasse
+ */
+
 export class VpsComposeControl {
   /** @type {import('../CredentialStore.js').CredentialStore} */
   #credentialStore;
@@ -539,7 +551,260 @@ export class VpsComposeControl {
     }
   }
 
+  /**
+   * Stellt die App-`.env` auf dem VPS sicher (E3-Kernschutz, AC3/AC4/AC5).
+   *
+   * **Erst-Deploy (AC3):** Existiert die `.env` auf dem VPS noch nicht, führt diese Methode
+   * das Stack-Generier-Skript auf dem VPS aus. Die generierten Werte verlassen den VPS **nie** —
+   * kein SSH-Kommando liest `.env`-Werte zurück; nur Schlüssel-NAMEN werden geprüft (grep -oE).
+   *
+   * **Re-Deploy (AC4):** Existiert die `.env` bereits, wird sie **nicht** überschrieben und
+   * **nicht** neu generiert. Rückgabe { result: 'exists' } — der Aufrufer (Item C) kann direkt
+   * weiter zu git pull + compose up.
+   *
+   * **Required-Key-Prüfung (AC5):** Nach Generierung oder bei existierender `.env` werden
+   * die in `secretsSpec.required` genannten Schlüssel auf **Vorhandensein** geprüft (NUR NAME,
+   * NIE WERT via `grep -oE '^[A-Z_][A-Z0-9_]+='`). Fehlt ein required Key → Fehler mit
+   * Schlüsselname, ohne Wert.
+   *
+   * Sicherheitsgarantien:
+   * - Kein SSH-Kommando, das `.env`-Werte nach stdout zieht (kein `cat`, kein `echo`).
+   * - Generierte Werte erscheinen NICHT in Response, Audit-Eintrag, Log, WS-Stream oder Frontend.
+   * - Der Audit-Eintrag (zu erstellen durch den Aufrufer) nennt nur „env generated" + Schlüsselnamen.
+   * - `stderr` des Generier-Skripts wird nicht weitergeleitet (könnte Secrets enthalten).
+   * - Alle Pfade (envFile, generateScript) werden vor der Einbettung auf Path-Traversal geprüft.
+   *
+   * @param {object}   opts
+   * @param {VpsTarget} opts.vps
+   * @param {string}    opts.stackName         - Stack-Name (validiert)
+   * @param {string}    [opts.envFile]         - Relativer Pfad zur .env-Datei (Default: '.env')
+   * @param {string}    [opts.generateScript]  - Relativer Pfad zum Generier-Skript (Default: 'generate-supabase-secrets.sh')
+   * @param {string[]}  [opts.generateKeys]    - Secret-Namen die generiert werden (nur für Audit-Logging — keine Werte)
+   * @param {string[]}  [opts.requiredKeys]    - Secret-Namen die in der .env vorhanden sein müssen (AC5)
+   * @param {string}    [opts.hostFingerprint] - SHA-256-Fingerprint für Host-Key-Verifikation
+   * @param {Function}  [opts._sshClientFactory]
+   * @returns {Promise<EnsureEnvResult>}
+   */
+  async ensureEnv({
+    vps,
+    stackName,
+    envFile = '.env',
+    generateScript = 'generate-supabase-secrets.sh',
+    generateKeys = [],
+    requiredKeys = [],
+    hostFingerprint,
+    _sshClientFactory,
+  } = {}) {
+    // Eingabe-Validierung (Path-Traversal, Shell-Metazeichen)
+    if (!isValidStackName(stackName)) {
+      return {
+        result: 'error',
+        reason: 'Ungültiger Stack-Name (nur alphanumerische Zeichen, Bindestriche und Unterstriche erlaubt)',
+        errorClass: 'error',
+      };
+    }
+    if (!isValidRelativePath(envFile)) {
+      return {
+        result: 'error',
+        reason: 'Ungültiger envFile-Pfad (kein absoluter Pfad, keine ..-Segmente erlaubt)',
+        errorClass: 'error',
+      };
+    }
+    if (!isValidRelativePath(generateScript)) {
+      return {
+        result: 'error',
+        reason: 'Ungültiger generateScript-Pfad (kein absoluter Pfad, keine ..-Segmente erlaubt)',
+        errorClass: 'error',
+      };
+    }
+
+    const privateKey = await this.#loadPrivateKey(vps.targetUser);
+    if (!privateKey.ok) return privateKey.error;
+
+    const stackDir = `${STACKS_BASE_DIR}/${shellEscape(stackName)}`;
+    const escapedEnvFile = shellEscape(envFile);
+    const escapedGenerateScript = shellEscape(generateScript);
+
+    // ── Schritt 1: Existenz der .env prüfen (AC3/AC4) ────────────────────────
+    // AC3/AC4: `test -f` prüft nur Existenz — liest KEINEN Wert.
+    // Exit 0 = existiert, Exit 1 = existiert nicht.
+    const checkCmd = `test -f ${stackDir}/${escapedEnvFile} && echo EXISTS || echo MISSING`;
+
+    let existsOutput;
+    try {
+      existsOutput = await runSshCommand({
+        privateKey: privateKey.value,
+        host: vps.host,
+        port: vps.port ?? 22,
+        targetUser: vps.targetUser,
+        command: checkCmd,
+        timeoutMs: EXEC_TIMEOUT_MS,
+        hostFingerprint: hostFingerprint ?? null,
+        sshClientFactory: _sshClientFactory,
+      });
+    } catch (err) {
+      const errorClass = classifyError(err);
+      return {
+        result: 'error',
+        reason: sanitizeErrorReason(errorClass),
+        errorClass,
+      };
+    }
+
+    const envExists = existsOutput.trim() === 'EXISTS';
+
+    if (!envExists) {
+      // ── AC3: Erst-Deploy — Generier-Skript auf VPS ausführen ─────────────
+      // KRITISCH: Das Skript schreibt Werte in die .env auf dem VPS.
+      // dev-gui liest diese Werte NIE zurück. Kein cat, kein echo von Werten.
+      // stderr des Skripts wird NICHT weitergeleitet (könnte Secrets enthalten).
+      const generateCmd = `bash ${stackDir}/${escapedGenerateScript}`;
+
+      try {
+        await runSshCommand({
+          privateKey: privateKey.value,
+          host: vps.host,
+          port: vps.port ?? 22,
+          targetUser: vps.targetUser,
+          command: generateCmd,
+          timeoutMs: COMPOSE_EXEC_TIMEOUT_MS,
+          hostFingerprint: hostFingerprint ?? null,
+          sshClientFactory: _sshClientFactory,
+        });
+      } catch (err) {
+        const errorClass = classifyError(err);
+        return {
+          result: 'error',
+          reason: `Generier-Skript auf VPS fehlgeschlagen: ${sanitizeErrorReason(errorClass)}`,
+          errorClass,
+        };
+      }
+
+      // AC3: Audit-Eintrag nennt nur Schlüsselnamen, niemals Werte.
+      // generateKeys enthält nur Namen (aus secretsSpec.generate) — niemals Werte.
+      // Required-Key-Prüfung nach Generierung (AC5)
+      if (requiredKeys.length > 0) {
+        const missingCheck = await this.#checkRequiredKeys({
+          privateKey: privateKey.value,
+          vps,
+          stackDir,
+          escapedEnvFile,
+          requiredKeys,
+          hostFingerprint,
+          _sshClientFactory,
+        });
+        if (missingCheck.result === 'error') return missingCheck;
+        if (missingCheck.missingKeys.length > 0) {
+          return {
+            result: 'error',
+            reason: `Schlüssel \`${missingCheck.missingKeys[0]}\` fehlt in der VPS-.env`,
+            errorClass: 'missing-required-key',
+            missingKeys: missingCheck.missingKeys,
+          };
+        }
+      }
+
+      return {
+        result: 'generated',
+        // Schlüsselnamen (keine Werte) für den Audit-Eintrag des Aufrufers
+        generatedKeys: generateKeys.join(','),
+      };
+    }
+
+    // ── AC4: Re-Deploy — .env existiert, bleibt byte-identisch ──────────────
+    // Keine Überschreibung, keine Re-Generierung — nur zurückgeben dass .env existiert.
+    // Der Aufrufer (Item C) fährt fort mit git pull + compose up.
+
+    // AC5: Required-Key-Prüfung auch beim Re-Deploy (falls Keys manuell fehlen)
+    if (requiredKeys.length > 0) {
+      const missingCheck = await this.#checkRequiredKeys({
+        privateKey: privateKey.value,
+        vps,
+        stackDir,
+        escapedEnvFile,
+        requiredKeys,
+        hostFingerprint,
+        _sshClientFactory,
+      });
+      if (missingCheck.result === 'error') return missingCheck;
+      if (missingCheck.missingKeys.length > 0) {
+        return {
+          result: 'error',
+          reason: `Schlüssel \`${missingCheck.missingKeys[0]}\` fehlt in der VPS-.env`,
+          errorClass: 'missing-required-key',
+          missingKeys: missingCheck.missingKeys,
+        };
+      }
+    }
+
+    return { result: 'exists' };
+  }
+
   // ── Private Hilfsmethoden ──────────────────────────────────────────────────────
+
+  /**
+   * Prüft welche required-Keys in der .env vorhanden sind (NUR Schlüsselnamen, NIE Werte).
+   *
+   * Technik (AC5): `grep -oE '^[A-Z_][A-Z0-9_]+=' .env` gibt NUR die KEY=-Muster aus
+   * (ohne den Wert dahinter). Kein `cat`, kein `echo`-Wert — nur Schlüssel-NAMEN.
+   *
+   * @param {object}   p
+   * @param {string}   p.privateKey
+   * @param {VpsTarget} p.vps
+   * @param {string}   p.stackDir         - expandierter Stack-Verzeichnis-Pfad (mit Tilde)
+   * @param {string}   p.escapedEnvFile   - shell-escaped envFile-Pfad
+   * @param {string[]} p.requiredKeys     - zu prüfende Schlüsselnamen
+   * @param {string}   [p.hostFingerprint]
+   * @param {Function} [p._sshClientFactory]
+   * @returns {Promise<{ result: 'ok'|'error', missingKeys?: string[], reason?: string, errorClass?: string }>}
+   */
+  async #checkRequiredKeys({
+    privateKey,
+    vps,
+    stackDir,
+    escapedEnvFile,
+    requiredKeys,
+    hostFingerprint,
+    _sshClientFactory,
+  }) {
+    // AC5: ONLY key names — grep -oE '^[A-Z_][A-Z0-9_]+=' extracts only KEY= patterns.
+    // The = suffix is included to ensure we match actual assignments (not comments).
+    // Values after = are never captured. This is the secret-safe existence check.
+    const grepCmd = `grep -oE '^[A-Z_][A-Z0-9_]+=' ${stackDir}/${escapedEnvFile} 2>/dev/null || true`;
+
+    let grepOutput;
+    try {
+      grepOutput = await runSshCommand({
+        privateKey,
+        host: vps.host,
+        port: vps.port ?? 22,
+        targetUser: vps.targetUser,
+        command: grepCmd,
+        timeoutMs: EXEC_TIMEOUT_MS,
+        hostFingerprint: hostFingerprint ?? null,
+        sshClientFactory: _sshClientFactory,
+      });
+    } catch (err) {
+      const errorClass = classifyError(err);
+      return {
+        result: 'error',
+        reason: sanitizeErrorReason(errorClass),
+        errorClass,
+      };
+    }
+
+    // Parse nur Schlüsselnamen aus grep-Ausgabe (KEY= → KEY)
+    // AC5: Werte werden NICHT gelesen — nur die KEY=-Muster werden extrahiert
+    const presentKeys = new Set(
+      grepOutput
+        .split('\n')
+        .map((line) => line.trim().replace(/=$/, ''))
+        .filter((k) => k.length > 0),
+    );
+
+    const missingKeys = requiredKeys.filter((k) => !presentKeys.has(k));
+    return { result: 'ok', missingKeys };
+  }
 
   /**
    * Lädt den SSH-Private-Key aus dem CredentialStore.
