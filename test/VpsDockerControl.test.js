@@ -5,6 +5,8 @@
  *   AC1  — VpsDockerControl ist die einzige schreibende Docker-on-VPS-Boundary
  *   AC2  — run() setzt Label cloudflare.tunnel-hostname=<hostname> im docker run Kommando
  *   AC9  — Kein SSH-Private-Key in Argv/Log/Result; Fehlerpfade ohne Geheim-Leak
+ *   AC13 (stack-deploy-orchestration) — psAll() liest com.docker.compose.project-Label;
+ *         composeProject-Feld in PsEntry; interne Stack-Container haben hostname:null
  *
  * Strategie:
  *   - CredentialStore mit tmpdir + injiziertem masterKey (echter Store für Boundary-Test)
@@ -612,6 +614,161 @@ describe('VpsDockerControl — ps()', () => {
 
     expect(result.result).toBe('ok');
     expect(result.containers[0].hostPort).toBeNull();
+  });
+
+  it('ps() gibt composeProject:null für jeden Container (PsEntry-Typedef-Konformität)', async () => {
+    // Typ-Contract: PsEntry.composeProject ist string|null (nie undefined).
+    // ps() fragt das com.docker.compose.project-Label nicht ab — Feld muss explizit null sein.
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    const mockOutput = 'abc123def456\tghcr.io/org/app:latest\t0.0.0.0:8080->8080/tcp\tUp 2 hours\tapp.example.com';
+
+    const result = await ctrl.ps(TEST_VPS, {
+      _sshClientFactory: makeMockSshClient({ stdout: mockOutput, exitCode: 0 }),
+    });
+
+    expect(result.result).toBe('ok');
+    expect(result.containers).toHaveLength(1);
+    // composeProject muss null sein (nicht undefined) — Typedef string|null ist eingehalten
+    expect(result.containers[0].composeProject).toBeNull();
+    expect('composeProject' in result.containers[0]).toBe(true);
+  });
+});
+
+// ── psAll() — stack-aware (AC13) ─────────────────────────────────────────────
+// psAll() reads ALL containers including com.docker.compose.project label.
+// Public stack containers (with cloudflare.tunnel-hostname) get hostname set.
+// Internal stack containers (no cloudflare.tunnel-hostname) get hostname: null.
+
+describe('VpsDockerControl — psAll() — stack-aware (AC13)', () => {
+  let dir, store;
+
+  beforeEach(async () => {
+    ({ store, dir } = await makeTmpStore());
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('AC13 — psAll() Format-String enthält com.docker.compose.project-Label', async () => {
+    // The psAll() command must include the com.docker.compose.project label in its format string
+    // so that ReconciliationJob can use it for stack-aware reconciliation.
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    let capturedCmd = null;
+    await ctrl.psAll(TEST_VPS, {
+      _sshClientFactory: makeMockSshClient({
+        stdout: '',
+        exitCode: 0,
+        onCommand: (cmd) => { capturedCmd = cmd; },
+      }),
+    });
+
+    expect(capturedCmd).toContain('com.docker.compose.project');
+  });
+
+  it('AC13 — psAll() gibt composeProject-Feld für Stack-Container zurück', async () => {
+    // A public stack container: both cloudflare.tunnel-hostname and com.docker.compose.project set.
+    // Format: ID\tImage\tPorts\tStatus\tcloudflare.tunnel-hostname\tcom.docker.compose.project
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    const mockOutput = 'abc123def\tmyapp/web:latest\t0.0.0.0:8080->8080/tcp\tUp 2h\tweb.example.com\tmyapp';
+
+    const result = await ctrl.psAll(TEST_VPS, {
+      _sshClientFactory: makeMockSshClient({ stdout: mockOutput, exitCode: 0 }),
+    });
+
+    expect(result.result).toBe('ok');
+    expect(result.containers).toHaveLength(1);
+    const c = result.containers[0];
+    expect(c.containerId).toBe('abc123def');
+    expect(c.hostname).toBe('web.example.com'); // public container → hostname set
+    expect(c.composeProject).toBe('myapp');      // stack container → composeProject set
+    expect(c.hostPort).toBe(8080);
+  });
+
+  it('AC13 — psAll() gibt hostname:null und composeProject für interne Stack-Container', async () => {
+    // Internal stack container: NO cloudflare.tunnel-hostname, but has com.docker.compose.project.
+    // hostname must be null (→ reportedUnmanaged in ReconciliationJob, never routed).
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    // Format: ID\tImage\tPorts\tStatus\t(empty cf label)\tcom.docker.compose.project
+    const mockOutput = 'db-xyz-001\tpostgres:15\t\tUp 5h\t\tmyapp';
+
+    const result = await ctrl.psAll(TEST_VPS, {
+      _sshClientFactory: makeMockSshClient({ stdout: mockOutput, exitCode: 0 }),
+    });
+
+    expect(result.result).toBe('ok');
+    expect(result.containers).toHaveLength(1);
+    const c = result.containers[0];
+    expect(c.containerId).toBe('db-xyz-001');
+    expect(c.hostname).toBeNull();         // no cloudflare.tunnel-hostname → internal
+    expect(c.composeProject).toBe('myapp'); // stack container
+  });
+
+  it('AC13 — psAll() gibt composeProject:null für Non-Stack-Container (Single-Image)', async () => {
+    // Single-image (non-compose) container: has cloudflare.tunnel-hostname but no compose project.
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    // Format: ID\tImage\tPorts\tStatus\tcloudflare.tunnel-hostname\t(empty compose label)
+    const mockOutput = 'single-abc\tghcr.io/org/app:v1\t0.0.0.0:8080->8080/tcp\tUp 3h\tapp.example.com\t';
+
+    const result = await ctrl.psAll(TEST_VPS, {
+      _sshClientFactory: makeMockSshClient({ stdout: mockOutput, exitCode: 0 }),
+    });
+
+    expect(result.result).toBe('ok');
+    const c = result.containers[0];
+    expect(c.hostname).toBe('app.example.com'); // managed (single-image)
+    expect(c.composeProject).toBeNull();         // not a stack container
+  });
+
+  it('AC13 — psAll() verarbeitet Mix aus Single-Image und Stack-Containern korrekt', async () => {
+    // Mixed output: one single-image (managed), one stack-public, one stack-internal.
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    const mockOutput = [
+      // Single-image: hostname set, no compose project
+      'single-abc\tghcr.io/org/app:v1\t0.0.0.0:8080->8080/tcp\tUp 3h\tapp.example.com\t',
+      // Stack-public: hostname set, compose project set
+      'web-def\tmyapp/web:latest\t0.0.0.0:8081->8080/tcp\tUp 2h\tweb.example.com\tmyapp',
+      // Stack-internal: no hostname, compose project set
+      'db-ghi\tpostgres:15\t\tUp 5h\t\tmyapp',
+    ].join('\n');
+
+    const result = await ctrl.psAll(TEST_VPS, {
+      _sshClientFactory: makeMockSshClient({ stdout: mockOutput, exitCode: 0 }),
+    });
+
+    expect(result.result).toBe('ok');
+    expect(result.containers).toHaveLength(3);
+
+    const singleImg = result.containers.find((c) => c.containerId === 'single-abc');
+    expect(singleImg.hostname).toBe('app.example.com');
+    expect(singleImg.composeProject).toBeNull();
+
+    const stackPublic = result.containers.find((c) => c.containerId === 'web-def');
+    expect(stackPublic.hostname).toBe('web.example.com');
+    expect(stackPublic.composeProject).toBe('myapp');
+
+    const stackInternal = result.containers.find((c) => c.containerId === 'db-ghi');
+    expect(stackInternal.hostname).toBeNull();
+    expect(stackInternal.composeProject).toBe('myapp');
+  });
+
+  it('AC13 — psAll() kein Private-Key → result:error, errorClass:no-private-key', async () => {
+    const ctrl = new VpsDockerControl(store);
+    const result = await ctrl.psAll(TEST_VPS);
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('no-private-key');
   });
 });
 

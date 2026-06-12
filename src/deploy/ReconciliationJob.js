@@ -11,10 +11,16 @@
  *   - Per-VPS reconciliation:
  *     1. VpsDockerControl.psAll() → managed containers (with cloudflare.tunnel-hostname label)
  *        and unmanaged containers (without the label, only reported).
+ *        Stack-aware (AC13): psAll() also returns com.docker.compose.project label; internal
+ *        stack containers (no cloudflare.tunnel-hostname) get hostname: null → reportedUnmanaged.
  *     2. CloudflareApi.listRoutes(tunnelId) → current routes.
  *     3. Orphaned routes (no managed container, not protected) → remove via CloudflareApi (Audit-First).
  *     4. Managed containers without route (not protected) → add route via DeployOrchestrator
  *        addRouteOnly() (Audit-First; reuses shared path, no new Cloudflare mutation code here).
+ *   - Stack-aware (AC13): public stack containers (with cloudflare.tunnel-hostname) are reconciled
+ *     like single-image containers. Internal stack containers (without cloudflare.tunnel-hostname)
+ *     always have hostname: null → they land in reportedUnmanaged, never routed, never orphaned.
+ *     Multiple public hostnames per stack are each handled individually (one per container entry).
  *   - Fail-closed: if psAll() fails → skip that VPS entirely (neither delete nor heal).
  *   - Ambiguous binding (two managed containers → same hostname) → not healed, flagged ambiguous.
  *   - Degradation per VPS/provider: errors don't abort the overall run.
@@ -38,6 +44,12 @@
  * AC8  — ReconcileReport per run; GET endpoints; Audit-First.
  * AC8b — ReconcileNotice per action; GET endpoint.
  * AC9  — LockoutGuard-Hard-Block + Audit-First via shared ADR-012 path.
+ * AC13 — stack-aware: public stack containers (cloudflare.tunnel-hostname set) healed/deleted
+ *         like single-image containers; internal stack containers (no cloudflare.tunnel-hostname)
+ *         never routed, never orphaned (hostname: null → reportedUnmanaged); multiple public
+ *         hostnames per stack each handled individually.
+ * AC14 — all existing ADR-013 behaviors (AC3–AC9) remain unchanged; healing path remains the
+ *         shared ADR-012 addRouteOnly path (no new Cloudflare mutation code, grep-verifiable).
  *
  * @module deploy/ReconciliationJob
  */

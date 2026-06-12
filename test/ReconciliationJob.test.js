@@ -16,6 +16,13 @@
  *   AC9  — LockoutGuard-Hard-Block via DeployOrchestrator.addRouteOnly (protected → error).
  *   AC9  — Audit-First: AuditStore.record() called before any mutation.
  *
+ * Covers (stack-deploy-orchestration AC13/AC14 — stack-aware Reconciliation):
+ *   AC13 — public stack container (cloudflare.tunnel-hostname set) healed like single-image.
+ *   AC13 — internal stack container (no cloudflare.tunnel-hostname) never routed/treated as orphaned.
+ *   AC13 — multiple public hostnames per stack each handled individually.
+ *   AC14 — all existing ADR-013 behaviors (AC3–AC9) remain valid (covered by AC3–AC9 tests above).
+ *   AC14 — healing path is addRouteOnly (no new Cloudflare mutation code in ReconciliationJob).
+ *
  * Covers (deploymentsRouter — reconcile endpoints):
  *   POST /api/deployments/reconcile — AC2: 200 { result: "ok", report }; 403 without auth.
  *   GET  /api/deployments/reconcile/last — returns last report.
@@ -690,6 +697,266 @@ describe('ReconciliationJob', () => {
       });
       // cloudflareApi has no addRoute method in our stub — if ReconciliationJob called it,
       // the test would throw "not a function"
+      expect(stubs.cloudflareApi.addRoute).toBeUndefined();
+    });
+  });
+
+  // ── AC13: Stack-aware Reconciliation ─────────────────────────────────────────
+
+  describe('AC13 — stack-aware: public stack containers healed/deleted like single-image', () => {
+    it('AC13 — public stack container (with cloudflare.tunnel-hostname + composeProject) healed via addRouteOnly()', async () => {
+      // A stack container that IS public (has cloudflare.tunnel-hostname label).
+      // psAll() returns it with hostname set + composeProject set.
+      // ReconciliationJob must heal it (add missing route) exactly like a single-image container.
+      const { job, stubs } = makeJob({
+        stubs: {
+          psResult: {
+            result: 'ok',
+            containers: [
+              {
+                containerId: 'stack-web-abc',
+                image: 'myapp/web:latest',
+                hostname: 'web.example.com',
+                status: 'Up',
+                hostPort: 8080,
+                composeProject: 'myapp', // stack container, but public
+              },
+            ],
+          },
+          listRoutesResult: [], // no route yet → must be healed
+        },
+      });
+
+      const report = await job.reconcile('manual');
+      // Public stack container must trigger addRouteOnly (healing)
+      expect(stubs.orchestrator.addRouteOnly).toHaveBeenCalledWith(
+        expect.objectContaining({ hostname: 'web.example.com', tunnelId: 'tunnel-1' }),
+      );
+      expect(report.perVps[0].createdRoutes).toContain('web.example.com');
+    });
+
+    it('AC13 — orphaned route for a public stack container removed (same as single-image)', async () => {
+      // Route exists but the stack public container is gone → orphaned route must be deleted.
+      const { job, stubs } = makeJob({
+        stubs: {
+          psResult: {
+            result: 'ok',
+            containers: [], // no containers running
+          },
+          listRoutesResult: [
+            { hostname: 'web.example.com', service: 'http://localhost:8080', tunnelId: 'tunnel-1', protected: false },
+          ],
+        },
+      });
+
+      const report = await job.reconcile('manual');
+      expect(stubs.cloudflareApi.removeRoute).toHaveBeenCalledWith('tunnel-1', 'web.example.com');
+      expect(report.perVps[0].removedRoutes).toContain('web.example.com');
+    });
+
+    it('AC13 — internal stack container (no cloudflare.tunnel-hostname) never routed, never treated as orphaned', async () => {
+      // Internal stack container: has composeProject but NO cloudflare.tunnel-hostname.
+      // psAll() returns it with hostname: null.
+      // ReconciliationJob must NOT heal it, NOT call addRouteOnly, NOT call removeRoute.
+      // It must appear only in reportedUnmanaged.
+      const { job, stubs } = makeJob({
+        stubs: {
+          psResult: {
+            result: 'ok',
+            containers: [
+              {
+                containerId: 'stack-db-xyz',
+                image: 'postgres:15',
+                hostname: null, // no cloudflare.tunnel-hostname label → internal
+                status: 'Up 5 hours',
+                hostPort: null,
+                composeProject: 'myapp', // stack container, but internal
+              },
+            ],
+          },
+          listRoutesResult: [],
+        },
+      });
+
+      const report = await job.reconcile('manual');
+
+      // Must never call addRouteOnly (internal container must not be routed)
+      expect(stubs.orchestrator.addRouteOnly).not.toHaveBeenCalled();
+      // Must never call removeRoute (internal container is not managed → not orphaned)
+      expect(stubs.cloudflareApi.removeRoute).not.toHaveBeenCalled();
+      // Must appear in reportedUnmanaged (same treatment as non-stack unmanaged containers)
+      expect(report.perVps[0].reportedUnmanaged).toHaveLength(1);
+      expect(report.perVps[0].reportedUnmanaged[0]).toContain('stack-db-xyz');
+      // checkedContainers must be 0 (internal container is not managed)
+      expect(report.perVps[0].checkedContainers).toBe(0);
+    });
+
+    it('AC13 — mix: public + internal stack containers, only public affects route operations', async () => {
+      // Stack with two containers: one public (web), one internal (db).
+      // Route for web is present → in-sync, no action needed.
+      // Internal db has no route (correct — it must never have one).
+      // No mutations expected.
+      const { job, stubs } = makeJob({
+        stubs: {
+          psResult: {
+            result: 'ok',
+            containers: [
+              {
+                containerId: 'web-abc',
+                image: 'myapp/web:latest',
+                hostname: 'web.example.com', // public → managed
+                status: 'Up',
+                hostPort: 8080,
+                composeProject: 'myapp',
+              },
+              {
+                containerId: 'db-xyz',
+                image: 'postgres:15',
+                hostname: null, // internal → unmanaged
+                status: 'Up',
+                hostPort: null,
+                composeProject: 'myapp',
+              },
+            ],
+          },
+          listRoutesResult: [
+            { hostname: 'web.example.com', service: 'http://localhost:8080', tunnelId: 'tunnel-1', protected: false },
+          ],
+        },
+      });
+
+      const report = await job.reconcile('manual');
+
+      // No healing or deletion needed (web route exists, db is internal)
+      expect(stubs.orchestrator.addRouteOnly).not.toHaveBeenCalled();
+      expect(stubs.cloudflareApi.removeRoute).not.toHaveBeenCalled();
+      // Only the public container counts as checked
+      expect(report.perVps[0].checkedContainers).toBe(1);
+      // The internal db container is in reportedUnmanaged
+      expect(report.perVps[0].reportedUnmanaged).toHaveLength(1);
+      expect(report.perVps[0].reportedUnmanaged[0]).toContain('db-xyz');
+    });
+
+    it('AC13 — multiple public hostnames per stack: both healed individually when routes missing', async () => {
+      // Stack with two public containers: web_main + kong.
+      // Both are missing routes → both must be healed individually.
+      const { job, stubs } = makeJob({
+        stubs: {
+          psResult: {
+            result: 'ok',
+            containers: [
+              {
+                containerId: 'web-abc',
+                image: 'myapp/web:latest',
+                hostname: 'app.example.com',
+                status: 'Up',
+                hostPort: 8080,
+                composeProject: 'myapp',
+              },
+              {
+                containerId: 'kong-def',
+                image: 'myapp/kong:latest',
+                hostname: 'db-app.example.com',
+                status: 'Up',
+                hostPort: 8000,
+                composeProject: 'myapp',
+              },
+            ],
+          },
+          listRoutesResult: [], // no routes yet
+        },
+      });
+
+      const report = await job.reconcile('manual');
+
+      // Both public containers must trigger healing individually
+      expect(stubs.orchestrator.addRouteOnly).toHaveBeenCalledTimes(2);
+      expect(stubs.orchestrator.addRouteOnly).toHaveBeenCalledWith(
+        expect.objectContaining({ hostname: 'app.example.com' }),
+      );
+      expect(stubs.orchestrator.addRouteOnly).toHaveBeenCalledWith(
+        expect.objectContaining({ hostname: 'db-app.example.com' }),
+      );
+      expect(report.perVps[0].createdRoutes).toContain('app.example.com');
+      expect(report.perVps[0].createdRoutes).toContain('db-app.example.com');
+    });
+
+    it('AC13 — multiple public hostnames per stack: in-sync → idempotent (no mutations)', async () => {
+      // Stack with two public containers, both have matching routes → no-op.
+      const { job, stubs } = makeJob({
+        stubs: {
+          psResult: {
+            result: 'ok',
+            containers: [
+              {
+                containerId: 'web-abc',
+                image: 'myapp/web:latest',
+                hostname: 'app.example.com',
+                status: 'Up',
+                hostPort: 8080,
+                composeProject: 'myapp',
+              },
+              {
+                containerId: 'kong-def',
+                image: 'myapp/kong:latest',
+                hostname: 'db-app.example.com',
+                status: 'Up',
+                hostPort: 8000,
+                composeProject: 'myapp',
+              },
+            ],
+          },
+          listRoutesResult: [
+            { hostname: 'app.example.com', service: 'http://localhost:8080', tunnelId: 'tunnel-1', protected: false },
+            { hostname: 'db-app.example.com', service: 'http://localhost:8000', tunnelId: 'tunnel-1', protected: false },
+          ],
+        },
+      });
+
+      const report = await job.reconcile('manual');
+
+      expect(stubs.orchestrator.addRouteOnly).not.toHaveBeenCalled();
+      expect(stubs.cloudflareApi.removeRoute).not.toHaveBeenCalled();
+      expect(report.perVps[0].createdRoutes).toHaveLength(0);
+      expect(report.perVps[0].removedRoutes).toHaveLength(0);
+    });
+
+    it('AC14 — healing of public stack container uses addRouteOnly (shared ADR-012 path, no new CF mutation code)', async () => {
+      // AC14: the healing path for stack containers must go through orchestrator.addRouteOnly,
+      // not direct Cloudflare mutation (cloudflareApi.addRoute).
+      // Setup: public stack container present, no route yet → ReconciliationJob must heal.
+      // The cloudflareApi stub intentionally has NO addRoute method — if ReconciliationJob
+      // called cloudflareApi.addRoute directly, it would throw "not a function".
+      const { job, stubs } = makeJob({
+        stubs: {
+          psResult: {
+            result: 'ok',
+            containers: [
+              {
+                containerId: 'web-abc',
+                image: 'myapp/web:latest',
+                hostname: 'app.example.com',
+                status: 'Up',
+                hostPort: 8080,
+                composeProject: 'myapp',
+              },
+            ],
+          },
+          listRoutesResult: [],
+        },
+      });
+
+      // cloudflareApi must have no addRoute — verifies no new CF mutation code in the job
+      expect(stubs.cloudflareApi.addRoute).toBeUndefined();
+
+      // Run reconcile — if the job calls cloudflareApi.addRoute, it throws; addRouteOnly must be used
+      await job.reconcile('manual');
+
+      // Healing path: addRouteOnly called for the stack container that has no route
+      expect(stubs.orchestrator.addRouteOnly).toHaveBeenCalledWith(
+        expect.objectContaining({ hostname: 'app.example.com' }),
+      );
+      // Direct CF mutation must not have been called
       expect(stubs.cloudflareApi.addRoute).toBeUndefined();
     });
   });

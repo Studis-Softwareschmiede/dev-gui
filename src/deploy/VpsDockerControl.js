@@ -72,11 +72,15 @@ const DEFAULT_HOST_PORT_START = 8080;
 
 /**
  * @typedef {object} PsEntry
- * @property {string}      containerId  - Container-ID (kurz)
- * @property {string}      image        - Image-Name
- * @property {string|null} hostname     - cloudflare.tunnel-hostname-Label-Wert; null für unmanaged Container
- * @property {string}      status       - Container-Status (z.B. "Up 2 hours")
- * @property {number|null} hostPort     - gemappter Host-Port (aus Port-Mapping)
+ * @property {string}      containerId   - Container-ID (kurz)
+ * @property {string}      image         - Image-Name
+ * @property {string|null} hostname      - cloudflare.tunnel-hostname-Label-Wert; null für unmanaged Container
+ * @property {string}      status        - Container-Status (z.B. "Up 2 hours")
+ * @property {number|null} hostPort      - gemappter Host-Port (aus Port-Mapping)
+ * @property {string|null} composeProject - com.docker.compose.project-Label-Wert; null für Non-Stack-Container.
+ *   Nur in psAll() ausgefüllt (für stack-aware Reconciliation, AC13).
+ *   Interne Stack-Container (hostname: null, composeProject: <name>) werden nie geroutet
+ *   und nie als verwaist gewertet — sie landen in reportedUnmanaged.
  */
 
 /**
@@ -313,6 +317,12 @@ export class VpsDockerControl {
    * Managed Container haben `hostname` gesetzt (aus dem Label).
    * Unmanaged Container haben `hostname: null`.
    *
+   * Stack-aware (AC13): gibt zusätzlich das `com.docker.compose.project`-Label aus
+   * (`composeProject`-Feld in PsEntry). Interne Stack-Container (kein
+   * cloudflare.tunnel-hostname, aber com.docker.compose.project gesetzt) erhalten
+   * `hostname: null` und landen in `reportedUnmanaged` — sie werden nie geroutet und
+   * nie als verwaist gewertet.
+   *
    * Additiv zu ps() — bestehende ps()-Aufrufer sind nicht betroffen.
    *
    * @param {VpsTarget} vps
@@ -326,9 +336,10 @@ export class VpsDockerControl {
     if (!privateKey.ok) return { result: 'error', ...privateKey.error };
 
     // docker ps ohne --filter gibt alle laufenden Container zurück.
-    // Format: ID, Image, Ports, Status, Label cloudflare.tunnel-hostname
-    // Der Label-Wert ist leer ("") für Container ohne das Label (unmanaged).
-    const formatStr = shellEscape('{{.ID}}\t{{.Image}}\t{{.Ports}}\t{{.Status}}\t{{.Label "cloudflare.tunnel-hostname"}}');
+    // Format: ID, Image, Ports, Status, Label cloudflare.tunnel-hostname, Label com.docker.compose.project
+    // Der Label-Wert ist leer ("") für Container ohne das jeweilige Label.
+    // AC13: com.docker.compose.project-Label für stack-aware Reconciliation mitgelesen.
+    const formatStr = shellEscape('{{.ID}}\t{{.Image}}\t{{.Ports}}\t{{.Status}}\t{{.Label "cloudflare.tunnel-hostname"}}\t{{.Label "com.docker.compose.project"}}');
     const cmd = [
       'docker', 'ps',
       '--format', formatStr,
@@ -571,7 +582,10 @@ function parsePsOutput(output) {
     const portMatch = ports.match(/(?:0\.0\.0\.0|:::?)?:?(\d+)->/);
     const hostPort = portMatch ? parseInt(portMatch[1], 10) : null;
 
-    containers.push({ containerId, image, hostname, status, hostPort });
+    // composeProject: null — ps() filtert auf managed Container (cloudflare.tunnel-hostname-Label);
+    // das com.docker.compose.project-Label ist im ps()-Format-String nicht enthalten.
+    // Feld wird explizit auf null gesetzt, damit PsEntry-Typedef (string|null) immer erfüllt ist.
+    containers.push({ containerId, image, hostname, status, hostPort, composeProject: null });
   }
 
   return containers;
@@ -581,6 +595,10 @@ function parsePsOutput(output) {
  * Parst die Ausgabe von `docker ps --format '...'` für ALLE Container (kein Label-Filter).
  * Container mit cloudflare.tunnel-hostname-Label → hostname = Label-Wert (managed).
  * Container OHNE das Label → hostname = null (unmanaged).
+ *
+ * AC13 (stack-aware): parst zusätzlich das com.docker.compose.project-Label.
+ * Interne Stack-Container haben hostname: null (kein cloudflare.tunnel-hostname) aber
+ * composeProject gesetzt — sie werden von ReconciliationJob nie geroutet/als verwaist gewertet.
  *
  * @param {string} output
  * @returns {PsEntry[]}
@@ -595,7 +613,8 @@ function parsePsAllOutput(output) {
     const image = (parts[1] ?? '').trim();
     const ports = (parts[2] ?? '').trim();
     const status = (parts[3] ?? '').trim();
-    const labelValue = (parts[4] ?? '').trim();
+    const cfLabelValue = (parts[4] ?? '').trim();
+    const composeProjValue = (parts[5] ?? '').trim();
 
     if (!containerId) continue;
 
@@ -604,9 +623,13 @@ function parsePsAllOutput(output) {
     const hostPort = portMatch ? parseInt(portMatch[1], 10) : null;
 
     // hostname: null markiert unmanaged Container (kein cloudflare.tunnel-hostname-Label)
-    const hostname = labelValue || null;
+    const hostname = cfLabelValue || null;
 
-    containers.push({ containerId, image, hostname, status, hostPort });
+    // composeProject: null für Non-Stack-Container (kein com.docker.compose.project-Label)
+    // AC13: interne Stack-Container haben composeProject gesetzt, aber hostname: null
+    const composeProject = composeProjValue || null;
+
+    containers.push({ containerId, image, hostname, status, hostPort, composeProject });
   }
 
   return containers;
