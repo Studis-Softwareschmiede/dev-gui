@@ -627,6 +627,76 @@ export class CredentialStore {
     });
   }
 
+  // ── Stack-Registry-API (stack-deploy-orchestration — nicht-geheime Betreiber-Konfiguration) ─
+
+  /**
+   * Listet alle Stack-Definitionen aus dem meta-Block.
+   * Gibt [{ value, updatedAt }]-Einträge zurück (Klartext-JSON-Strings, nicht geheim).
+   *
+   * @returns {Promise<Array<{ value: string, updatedAt: string }>>}
+   */
+  async listStackMeta() {
+    const storeData = await this.#readStore();
+    const meta = storeData?.meta ?? {};
+    const result = [];
+    for (const [key, entry] of Object.entries(meta)) {
+      if (key.startsWith('stacks/')) {
+        result.push({ value: entry.value, updatedAt: entry.updatedAt });
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Liest den JSON-String einer Stack-Definition aus dem meta-Block.
+   * Gibt null zurück wenn nicht vorhanden.
+   *
+   * @param {string} stackName - Stack-Name (bereits validiert)
+   * @returns {Promise<string|null>}
+   */
+  async getStackMeta(stackName) {
+    const storeData = await this.#readStore();
+    const metaKey = `stacks/${stackName}`;
+    return storeData?.meta?.[metaKey]?.value ?? null;
+  }
+
+  /**
+   * Setzt oder überschreibt eine Stack-Definition im meta-Block (Klartext, nicht geheim).
+   *
+   * @param {string} stackName  - Stack-Name (bereits validiert)
+   * @param {string} jsonValue  - JSON-serialisierte StackDefinition
+   * @param {string} updatedAt  - ISO-Timestamp
+   * @returns {Promise<void>}
+   */
+  async setStackMeta(stackName, jsonValue, updatedAt) {
+    const metaKey = `stacks/${stackName}`;
+    return this.#withWriteLock(async () => {
+      let storeData = await this.#readStore();
+      if (!storeData) {
+        storeData = { version: 1, entries: {}, meta: {} };
+      }
+      if (!storeData.meta) storeData.meta = {};
+      storeData.meta[metaKey] = { value: jsonValue, updatedAt };
+      await this.#writeStore(storeData);
+    });
+  }
+
+  /**
+   * Löscht eine Stack-Definition aus dem meta-Block. Idempotent.
+   *
+   * @param {string} stackName - Stack-Name (bereits validiert)
+   * @returns {Promise<void>}
+   */
+  async deleteStackMeta(stackName) {
+    const metaKey = `stacks/${stackName}`;
+    return this.#withWriteLock(async () => {
+      const storeData = await this.#readStore();
+      if (!storeData?.meta?.[metaKey]) return;
+      delete storeData.meta[metaKey];
+      await this.#writeStore(storeData);
+    });
+  }
+
   /**
    * Listet alle SSH-Benutzer (union aus Public-Key-Einträgen + Private-Key-Einträgen).
    * Gibt je Benutzer { user, publicKey?, privateKeyStatus, privateKeyUpdatedAt? } zurück.

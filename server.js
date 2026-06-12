@@ -37,6 +37,11 @@
  *   GET    /api/deployments/reconcile/last                     → ReconcileReport|{} (cloudflare-reconciliation AC8)
  *   GET    /api/deployments/reconcile/reports?limit=N          → ReconcileReport[] (cloudflare-reconciliation AC8)
  *   GET    /api/deployments/reconcile/notices?limit=N          → ReconcileNotice[] (cloudflare-reconciliation AC8b)
+ *   GET    /api/deployments/stacks                            → { stacks: StackDefinition[] } (stack-deploy-orchestration AC1)
+ *   GET    /api/deployments/stacks/:stackName                 → StackDefinition | 404 (stack-deploy-orchestration AC1)
+ *   POST   /api/deployments/stacks                            → { stackName, updatedAt } (stack-deploy-orchestration AC1/AC2)
+ *   PUT    /api/deployments/stacks/:stackName                 → { stackName, updatedAt } (stack-deploy-orchestration AC1/AC2)
+ *   DELETE /api/deployments/stacks/:stackName                 → { stackName, status } (stack-deploy-orchestration AC1/AC2)
  *   GET    /api/version                                        → { version } — image build timestamp (build-version)
  *   GET    /api/team                                           → { agents:[...], skills:[...], knowledge:[...] } (team-view-backend AC1)
  *   GET    /api/team/:kind/:id                                 → { ...meta, body } (team-view-backend AC4)
@@ -82,6 +87,8 @@ import { deploymentsRouter } from './src/deploymentsRouter.js';
 import { versionRouter } from './src/versionRouter.js';
 import { AgentFlowReader } from './src/AgentFlowReader.js';
 import { teamRouter } from './src/teamRouter.js';
+import { StackRegistry } from './src/StackRegistry.js';
+import { stacksRouter } from './src/stacksRouter.js';
 
 const PORT = Number(process.env.PORT ?? 8080);
 
@@ -197,6 +204,10 @@ const reconciliationJob = new ReconciliationJob({
 reconciliationJob.startScheduler();
 
 app.use(deploymentsRouter(deployOrchestrator, auditStore, vpsTargets, reconciliationJob));
+
+// ── Stack-Registry (stack-deploy-orchestration #160, AC1/AC2) ─────────────────
+const stackRegistry = new StackRegistry(credentialStore);
+app.use(stacksRouter(stackRegistry, auditStore));
 
 // ── Build-Version endpoint (build-version) ────────────────────────────────────
 app.use(versionRouter());

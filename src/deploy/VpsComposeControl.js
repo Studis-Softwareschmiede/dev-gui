@@ -32,6 +32,7 @@
 
 import { Client } from 'ssh2';
 import { createHash } from 'node:crypto';
+import { isValidStackName, isValidRelativePath } from '../validation/stackValidation.js';
 
 /** SSH-Verbindungs-Timeout in ms. */
 const CONNECT_TIMEOUT_MS = 15_000;
@@ -788,19 +789,9 @@ function parsePsStackOutput(output) {
 }
 
 // ── Validierung ────────────────────────────────────────────────────────────────
-
-/**
- * Validiert einen Stack-Namen: nur alphanumerische Zeichen, Bindestriche und Unterstriche.
- * Schützt gegen Path-Traversal (`..`) und Shell-Metazeichen.
- *
- * AC4: `stackName`/Pfad ist gegen Path-Traversal validiert (keine `..`, keine Shell-Metazeichen).
- *
- * @param {string} name
- * @returns {boolean}
- */
-function isValidStackName(name) {
-  return typeof name === 'string' && name.length > 0 && /^[a-zA-Z0-9_-]+$/.test(name);
-}
+// isValidStackName und isValidRelativePath kommen aus ../validation/stackValidation.js
+// (Single Source of Truth — I1, stack-deploy-orchestration Iteration 2).
+// isValidStackName prüft nun auch das einheitliche Längenlimit (max. 64 Zeichen).
 
 /**
  * Validiert einen Compose-Projektnamen: nur alphanumerische Zeichen, Bindestriche und Unterstriche.
@@ -810,25 +801,6 @@ function isValidStackName(name) {
  */
 function isValidProjectName(name) {
   return typeof name === 'string' && name.length > 0 && /^[a-zA-Z0-9_-]+$/.test(name);
-}
-
-/**
- * Validiert einen relativen Dateipfad: kein absoluter Pfad, keine `..`-Segmente.
- * Schützt gegen Path-Traversal für composeFile / overrideFile / envFilePath.
- *
- * AC4/AC5: Defense-in-Depth — verhindert, dass ein Aufrufer via ../../../etc/passwd
- * auf beliebige VPS-Dateien zugreifen kann.
- *
- * @param {string} p
- * @returns {boolean}
- */
-function isValidRelativePath(p) {
-  if (typeof p !== 'string' || p.length === 0) return false;
-  // Kein absoluter Pfad
-  if (p.startsWith('/') || p.startsWith('~')) return false;
-  // Keine `..`-Segmente (auch nicht als erste/letzte Komponente)
-  const segments = p.split('/');
-  return segments.every((seg) => seg !== '..');
 }
 
 // ── Shell-Escaping ─────────────────────────────────────────────────────────────

@@ -472,6 +472,25 @@ describe('VpsComposeControl — AC4: Token-Sicherheit + stackName-Validierung', 
     expect(sshCalled).toBe(false);
   });
 
+  it('I1 — stackName > 64 Zeichen → result:error ohne SSH-Call (einheitliches Längenlimit)', async () => {
+    // Nach I1 (Extraktion in stackValidation.js) gilt das 64-Zeichen-Limit auch in VpsComposeControl.
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsComposeControl(store);
+
+    const longName = 'a'.repeat(65);
+    let sshCalled = false;
+    const result = await ctrl.syncRepo({
+      vps: TEST_VPS,
+      repoUrl: 'https://github.com/org/app.git',
+      branch: 'main',
+      stackName: longName,
+      _sshClientFactory: makeMockSshClient({ onCommand: () => { sshCalled = true; } }),
+    });
+
+    expect(result.result).toBe('error');
+    expect(sshCalled).toBe(false);
+  });
+
   it('AC4/AC8 — git-Token erscheint NICHT im Kommando-String', async () => {
     await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
     await store.set('git/token', FAKE_GIT_TOKEN);
