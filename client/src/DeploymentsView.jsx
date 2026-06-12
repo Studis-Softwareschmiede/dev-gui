@@ -2,15 +2,21 @@
  * DeploymentsView.jsx — Deployments-Panel (Capability B, ADR-012).
  *
  * Spec: deploy-lifecycle.md AC3–AC9 (Frontend-Seite)
+ *       stack-deploy-orchestration.md AC12 (Modus-Umschalter)
  *
  * Responsibilities:
- *   - List live deployments (Container↔Route as unit) — GET /api/deployments
- *   - Deploy form: image + vps + hostname + tunnelId → POST /api/deployments
- *     (zoneId resolved server-side from hostname — not in the form)
- *   - Undeploy with type-to-confirm → DELETE /api/deployments/:vps/:hostname (AC5/AC6)
- *     (zoneId resolved server-side — not in the undeploy form)
- *   - Show 422/protected-resource / 422/confirmation-required clearly (no secrets) (AC7)
- *   - No Cloudflare token or SSH key in frontend bundle (AC9)
+ *   - Mode toggle: "Single-Image" | "Compose-Stack aus Repo" (AC12)
+ *   - Single-Image mode (unchanged, deploy-lifecycle.md):
+ *       List live deployments (Container↔Route as unit) — GET /api/deployments
+ *       Deploy form: image + vps + hostname + tunnelId → POST /api/deployments
+ *       Undeploy with type-to-confirm → DELETE /api/deployments/:vps/:hostname (AC5/AC6)
+ *       Show 422/protected-resource / 422/confirmation-required clearly (no secrets) (AC7)
+ *   - Compose-Stack mode (AC12):
+ *       List stacks from registry — GET /api/deployments/stacks
+ *       Deploy stack — POST /api/deployments/stacks/{stackName}/deploy
+ *       Undeploy stack with type-to-confirm — DELETE /api/deployments/stacks/{stackName}/undeploy
+ *       Stack status with drift flags — GET /api/deployments/stacks/{stackName}/status
+ *   - No Cloudflare token or SSH key in frontend bundle (AC9/AC11/security)
  *
  * A11y (WCAG 2.1 AA):
  *   - Semantic headings, landmarks (main, section, form)
@@ -20,6 +26,7 @@
  *   - aria-live region for status/error messages
  *   - aria-busy during loading
  *   - Meaning not conveyed by colour alone (text labels)
+ *   - Mode toggle: role="group" + aria-label, keyboard-navigable buttons
  *
  * Security:
  *   - No token/key displayed or bundled
@@ -46,13 +53,20 @@ const INITIAL_UNDEPLOY_STATE = {
   confirm: '',
 };
 
+// Modes for the toggle (AC12)
+const MODE_SINGLE = 'single';
+const MODE_STACK  = 'stack';
+
 // ── DeploymentsView ───────────────────────────────────────────────────────────
 
 /**
  * @param {{ onNavigate: (view: string) => void }} props
  */
 export function DeploymentsView({ onNavigate }) {
-  // ── State
+  // ── Mode toggle (AC12)
+  const [mode, setMode] = useState(MODE_SINGLE); // 'single' | 'stack'
+
+  // ── Single-Image state (unchanged)
   const [deployments, setDeployments] = useState([]);
   const [loadErrors, setLoadErrors] = useState([]);
   const [loadState, setLoadState] = useState('idle'); // 'idle' | 'loading' | 'ok' | 'error'
@@ -70,6 +84,25 @@ export function DeploymentsView({ onNavigate }) {
   const [undeployState, setUndeployState] = useState(null); // null | INITIAL_UNDEPLOY_STATE
   const [undeploying, setUndeploying] = useState(false);
   const [undeployResult, setUndeployResult] = useState(null); // { ok, message }
+
+  // ── Stack-Modus state (AC12)
+  const [stacks, setStacks] = useState([]);
+  const [stacksLoadState, setStacksLoadState] = useState('idle'); // 'idle'|'loading'|'ok'|'error'
+  const [stacksLoadError, setStacksLoadError] = useState(null);
+
+  const [selectedStack, setSelectedStack] = useState(''); // stackName
+  const [stackDeploying, setStackDeploying] = useState(false);
+  const [stackDeployResult, setStackDeployResult] = useState(null); // { ok, message }
+
+  // Stack undeploy (type-to-confirm)
+  const [stackUndeployConfirm, setStackUndeployConfirm] = useState('');
+  const [stackUndeploying, setStackUndeploying] = useState(false);
+  const [stackUndeployResult, setStackUndeployResult] = useState(null); // { ok, message }
+
+  // Stack status
+  const [stackStatus, setStackStatus] = useState(null); // StackStatus | null
+  const [stackStatusLoading, setStackStatusLoading] = useState(false);
+  const [stackStatusError, setStackStatusError] = useState(null);
 
   // ── Load deployments
   const loadDeployments = useCallback(async () => {
@@ -163,11 +196,151 @@ export function DeploymentsView({ onNavigate }) {
     }
   }
 
+  // ── Stack-Modus: Stacks laden (AC12)
+  const loadStacks = useCallback(async () => {
+    setStacksLoadState('loading');
+    setStacksLoadError(null);
+    try {
+      const res = await fetch('/api/deployments/stacks');
+      const data = await res.json();
+      if (!res.ok) {
+        setStacksLoadState('error');
+        setStacksLoadError(data?.error ?? 'Laden fehlgeschlagen');
+        return;
+      }
+      setStacks(data.stacks ?? []);
+      setStacksLoadState('ok');
+    } catch {
+      setStacksLoadState('error');
+      setStacksLoadError('Netzwerkfehler beim Laden der Stacks');
+    }
+  }, []);
+
+  // Load stacks when switching to stack mode.
+  // Cache-Guard: only load on first switch (stacksLoadState === 'idle').
+  // Subsequent mode-switches reuse the cached list; manual refresh via the
+  // "Stacks laden" button resets the state and re-triggers this effect.
+  useEffect(() => {
+    if (mode === MODE_STACK && stacksLoadState === 'idle') {
+      loadStacks();
+    }
+  }, [mode, stacksLoadState, loadStacks]);
+
+  // ── Stack-Deploy (AC12)
+  async function handleStackDeploy(e) {
+    e.preventDefault();
+    if (!selectedStack) return;
+    setStackDeploying(true);
+    setStackDeployResult(null);
+    try {
+      const res = await fetch(
+        `/api/deployments/stacks/${encodeURIComponent(selectedStack)}/deploy`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' } },
+      );
+      const data = await res.json();
+      if (res.ok && data.result === 'ok') {
+        setStackDeployResult({ ok: true, message: `Stack deployt: ${selectedStack}` });
+        // Refresh status
+        loadStackStatus(selectedStack);
+      } else {
+        const reason = data?.reason ?? data?.error ?? 'Deploy fehlgeschlagen';
+        setStackDeployResult({ ok: false, message: formatReason(reason) });
+      }
+    } catch {
+      setStackDeployResult({ ok: false, message: 'Netzwerkfehler beim Stack-Deploy' });
+    } finally {
+      setStackDeploying(false);
+    }
+  }
+
+  // ── Stack-Undeploy (type-to-confirm, AC12)
+  async function handleStackUndeploy(e) {
+    e.preventDefault();
+    if (!selectedStack) return;
+    setStackUndeploying(true);
+    setStackUndeployResult(null);
+    try {
+      const res = await fetch(
+        `/api/deployments/stacks/${encodeURIComponent(selectedStack)}/undeploy`,
+        {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ confirm: stackUndeployConfirm }),
+        },
+      );
+      const data = await res.json();
+      if (res.ok && data.result === 'ok') {
+        setStackUndeployResult({ ok: true, message: `Stack entfernt: ${selectedStack}` });
+        setStackUndeployConfirm('');
+        setStackStatus(null);
+      } else {
+        const reason = data?.reason ?? data?.error ?? 'Undeploy fehlgeschlagen';
+        setStackUndeployResult({ ok: false, message: formatReason(reason, 'stack') });
+      }
+    } catch {
+      setStackUndeployResult({ ok: false, message: 'Netzwerkfehler beim Stack-Undeploy' });
+    } finally {
+      setStackUndeploying(false);
+    }
+  }
+
+  // ── Stack-Status (AC12)
+  const loadStackStatus = useCallback(async (stackName) => {
+    if (!stackName) return;
+    setStackStatusLoading(true);
+    setStackStatusError(null);
+    try {
+      const res = await fetch(
+        `/api/deployments/stacks/${encodeURIComponent(stackName)}/status`,
+      );
+      const data = await res.json();
+      if (!res.ok) {
+        setStackStatusError(data?.error ?? 'Status-Abruf fehlgeschlagen');
+        setStackStatus(null);
+        return;
+      }
+      setStackStatus(data);
+    } catch {
+      setStackStatusError('Netzwerkfehler beim Status-Abruf');
+      setStackStatus(null);
+    } finally {
+      setStackStatusLoading(false);
+    }
+  }, []);
+
   // ── Render
   return (
     <main style={styles.view} aria-label="Deployments-Ansicht">
       <div style={styles.inner}>
         <h1 style={styles.title}>Deployments</h1>
+
+        {/* ── Mode toggle (AC12) ────────────────────────────────────────── */}
+        <div
+          role="group"
+          aria-label="Deployment-Modus wählen"
+          style={styles.modeToggle}
+        >
+          <button
+            type="button"
+            style={mode === MODE_SINGLE ? styles.modeActive : styles.modeInactive}
+            aria-pressed={mode === MODE_SINGLE}
+            onClick={() => setMode(MODE_SINGLE)}
+          >
+            Single-Image
+          </button>
+          <button
+            type="button"
+            style={mode === MODE_STACK ? styles.modeActive : styles.modeInactive}
+            aria-pressed={mode === MODE_STACK}
+            onClick={() => setMode(MODE_STACK)}
+          >
+            Compose-Stack aus Repo
+          </button>
+        </div>
+
+        {/* ── Single-Image mode ─────────────────────────────────────────── */}
+        {mode === MODE_SINGLE && (
+          <>
 
         {/* ── Query panel ──────────────────────────────────────────────── */}
         <section style={styles.section} aria-label="Bestand laden">
@@ -424,6 +597,206 @@ export function DeploymentsView({ onNavigate }) {
           </form>
         </section>
 
+          </>
+        )} {/* end Single-Image mode */}
+
+        {/* ── Compose-Stack mode (AC12) ─────────────────────────────────── */}
+        {mode === MODE_STACK && (
+          <>
+
+        {/* ── Stack list ───────────────────────────────────────────────── */}
+        <section style={styles.section} aria-label="Stack-Auswahl">
+          <h2 style={styles.sectionTitle}>Stack auswählen</h2>
+          {stacksLoadState === 'loading' && (
+            <p style={styles.hint} aria-live="polite" aria-busy="true">Lade Stacks…</p>
+          )}
+          {stacksLoadState === 'error' && (
+            <div role="alert" style={styles.errorBox} aria-live="polite">
+              <p style={styles.errorText}>{stacksLoadError}</p>
+            </div>
+          )}
+          {stacksLoadState === 'ok' && stacks.length === 0 && (
+            <p style={styles.hint}>Keine Stacks in der Registry.</p>
+          )}
+          {stacksLoadState === 'ok' && stacks.length > 0 && (
+            <div style={styles.row}>
+              <label style={styles.label} htmlFor="stack-select">Stack</label>
+              <select
+                id="stack-select"
+                style={styles.input}
+                value={selectedStack}
+                onChange={(e) => {
+                  setSelectedStack(e.target.value);
+                  setStackDeployResult(null);
+                  setStackUndeployResult(null);
+                  setStackUndeployConfirm('');
+                  setStackStatus(null);
+                  setStackStatusError(null);
+                }}
+                aria-label="Compose-Stack auswählen"
+              >
+                <option value="">— Stack wählen —</option>
+                {stacks.map((s) => (
+                  <option key={s.stackName} value={s.stackName}>
+                    {s.stackName}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+          <button
+            type="button"
+            style={styles.btnSecondary}
+            onClick={loadStacks}
+            disabled={stacksLoadState === 'loading'}
+            aria-busy={stacksLoadState === 'loading'}
+          >
+            {stacksLoadState === 'loading' ? 'Lade…' : 'Aktualisieren'}
+          </button>
+        </section>
+
+        {/* ── Stack-Deploy ─────────────────────────────────────────────── */}
+        {selectedStack && (
+          <section style={styles.section} aria-label="Stack deployen">
+            <h2 style={styles.sectionTitle}>Stack deployen: {selectedStack}</h2>
+            <form onSubmit={handleStackDeploy} noValidate aria-label="Stack-Deploy-Formular">
+              {stackDeployResult && (
+                <div
+                  role="alert"
+                  aria-live="polite"
+                  style={stackDeployResult.ok ? styles.successBox : styles.errorBox}
+                >
+                  <p style={stackDeployResult.ok ? styles.successText : styles.errorText}>
+                    {stackDeployResult.message}
+                  </p>
+                </div>
+              )}
+              <button
+                type="submit"
+                style={styles.btnPrimary}
+                disabled={stackDeploying || !selectedStack}
+                aria-busy={stackDeploying}
+              >
+                {stackDeploying ? 'Deploye…' : 'Stack deployen'}
+              </button>
+            </form>
+          </section>
+        )}
+
+        {/* ── Stack-Status ─────────────────────────────────────────────── */}
+        {selectedStack && (
+          <section style={styles.section} aria-label="Stack-Status">
+            <h2 style={styles.sectionTitle}>Status: {selectedStack}</h2>
+            <button
+              type="button"
+              style={styles.btnSecondary}
+              onClick={() => loadStackStatus(selectedStack)}
+              disabled={stackStatusLoading || !selectedStack}
+              aria-busy={stackStatusLoading}
+            >
+              {stackStatusLoading ? 'Lade Status…' : 'Status abrufen'}
+            </button>
+            {stackStatusError && (
+              <div role="alert" style={styles.errorBox} aria-live="polite">
+                <p style={styles.errorText}>{stackStatusError}</p>
+              </div>
+            )}
+            {stackStatus && (
+              <div style={styles.tableWrapper} role="table" aria-label="Stack-Service-Status">
+                <div role="rowgroup">
+                  <div role="row" style={styles.tableHeader}>
+                    <span role="columnheader" style={styles.cell}>Service</span>
+                    <span role="columnheader" style={styles.cell}>Hostname</span>
+                    <span role="columnheader" style={styles.cell}>Status</span>
+                    <span role="columnheader" style={styles.cell}>Container</span>
+                    <span role="columnheader" style={styles.cell}>Route</span>
+                    <span role="columnheader" style={styles.cell}>Drift</span>
+                  </div>
+                </div>
+                <div role="rowgroup">
+                  {(stackStatus.services ?? []).map((svc) => (
+                    <div key={`${svc.service}:${svc.hostname}`} role="row" style={styles.tableRow}>
+                      <span role="cell" style={styles.cell}>{svc.service}</span>
+                      <span role="cell" style={styles.cell}>{svc.hostname ?? '—'}</span>
+                      <span role="cell" style={styles.cell}>{svc.status ?? '—'}</span>
+                      <span role="cell" style={styles.cell}>{svc.containerPresent ? 'ja' : 'nein'}</span>
+                      <span role="cell" style={styles.cell}>{svc.routePresent ? 'ja' : 'nein'}</span>
+                      <span
+                        role="cell"
+                        style={{ ...styles.cell, color: svc.drift ? '#fca5a5' : '#86efac' }}
+                        aria-label={svc.drift ? `Drift erkannt für ${svc.service}` : `Kein Drift für ${svc.service}`}
+                      >
+                        {svc.drift ? 'Drift' : 'OK'}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {stackStatus && (stackStatus.errors ?? []).length > 0 && (
+              <div role="alert" style={styles.errorBox} aria-live="polite">
+                {stackStatus.errors.map((err, i) => (
+                  <p key={i} style={styles.errorText}>
+                    {`Fehler bei ${err.scope}: ${err.errorClass}`}
+                  </p>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* ── Stack-Undeploy (type-to-confirm) ─────────────────────────── */}
+        {selectedStack && (
+          <section style={styles.section} aria-label="Stack entfernen">
+            <h2 style={styles.sectionTitle}>Stack entfernen: {selectedStack}</h2>
+            <p style={styles.hint}>
+              Stack-Name zum Bestätigen eintippen (type-to-confirm):
+            </p>
+            <form onSubmit={handleStackUndeploy} noValidate>
+              <div style={styles.row}>
+                <label style={styles.label} htmlFor="stack-undeploy-confirm">Stack-Name bestätigen</label>
+                <input
+                  id="stack-undeploy-confirm"
+                  type="text"
+                  style={styles.input}
+                  value={stackUndeployConfirm}
+                  onChange={(e) => setStackUndeployConfirm(e.target.value)}
+                  placeholder={selectedStack}
+                  required
+                  autoComplete="off"
+                  aria-label={`Stack-Name ${selectedStack} bestätigen`}
+                  aria-describedby="stack-undeploy-confirm-hint"
+                />
+                <span id="stack-undeploy-confirm-hint" style={styles.inputHint}>
+                  Tippe exakt: {selectedStack}
+                </span>
+              </div>
+              {stackUndeployResult && (
+                <div
+                  role="alert"
+                  aria-live="polite"
+                  style={stackUndeployResult.ok ? styles.successBox : styles.errorBox}
+                >
+                  <p style={stackUndeployResult.ok ? styles.successText : styles.errorText}>
+                    {stackUndeployResult.message}
+                  </p>
+                </div>
+              )}
+              <button
+                type="submit"
+                style={styles.btnDanger}
+                disabled={stackUndeploying || stackUndeployConfirm !== selectedStack}
+                aria-busy={stackUndeploying}
+              >
+                {stackUndeploying ? 'Entferne…' : 'Stack entfernen bestätigen'}
+              </button>
+            </form>
+          </section>
+        )}
+
+          </>
+        )} {/* end Compose-Stack mode */}
+
         {/* ── Back button ──────────────────────────────────────────────── */}
         <button
           type="button"
@@ -445,13 +818,17 @@ export function DeploymentsView({ onNavigate }) {
  * Never display raw secret-like values.
  *
  * @param {string} reason
+ * @param {'single'|'stack'} [context='single'] - determines context-specific messages
  * @returns {string}
  */
-function formatReason(reason) {
+function formatReason(reason, context = 'single') {
   switch (reason) {
     case 'protected-resource':
       return 'Dieser Hostname ist geschuetzt und kann nicht veraendert werden.';
     case 'confirmation-required':
+      if (context === 'stack') {
+        return 'Bitte den Stack-Namen exakt eintippen, um das Entfernen zu bestaetigen.';
+      }
       return 'Bitte den Hostname exakt eintippen, um das Entfernen zu bestaetigen.';
     default:
       // Strip anything that looks like a secret from the displayed message
@@ -635,5 +1012,35 @@ const styles = {
   cellAction: {
     width: 110,
     flexShrink: 0,
+  },
+  // Mode toggle (AC12)
+  modeToggle: {
+    display: 'flex',
+    gap: 8,
+    marginBottom: 24,
+    flexWrap: 'wrap',
+  },
+  modeActive: {
+    padding: '10px 20px',
+    background: '#1d4ed8',
+    color: '#fff',
+    border: '2px solid #3b82f6',
+    borderRadius: 6,
+    fontSize: 14,
+    fontWeight: 600,
+    cursor: 'pointer',
+    minHeight: 44,
+    minWidth: 120,
+  },
+  modeInactive: {
+    padding: '10px 20px',
+    background: '#1e293b',
+    color: '#d4d4d4',
+    border: '1px solid #334155',
+    borderRadius: 6,
+    fontSize: 14,
+    cursor: 'pointer',
+    minHeight: 44,
+    minWidth: 120,
   },
 };
