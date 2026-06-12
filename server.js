@@ -41,7 +41,10 @@
  *   GET    /api/deployments/stacks/:stackName                 → StackDefinition | 404 (stack-deploy-orchestration AC1)
  *   POST   /api/deployments/stacks                            → { stackName, updatedAt } (stack-deploy-orchestration AC1/AC2)
  *   PUT    /api/deployments/stacks/:stackName                 → { stackName, updatedAt } (stack-deploy-orchestration AC1/AC2)
- *   DELETE /api/deployments/stacks/:stackName                 → { stackName, status } (stack-deploy-orchestration AC1/AC2)
+ *   DELETE /api/deployments/stacks/:stackName                 → { stackName, status } (stack-deploy-orchestration AC1/AC2, Registry-only)
+ *   POST   /api/deployments/stacks/:stackName/deploy          → { result, stack? } (stack-deploy-orchestration AC6/AC7/AC10/AC11)
+ *   DELETE /api/deployments/stacks/:stackName/undeploy        → { result, reason? } (stack-deploy-orchestration AC8/AC10/AC11)
+ *   GET    /api/deployments/stacks/:stackName/status          → StackStatus (stack-deploy-orchestration AC9)
  *   GET    /api/version                                        → { version } — image build timestamp (build-version)
  *   GET    /api/team                                           → { agents:[...], skills:[...], knowledge:[...] } (team-view-backend AC1)
  *   GET    /api/team/:kind/:id                                 → { ...meta, body } (team-view-backend AC4)
@@ -89,6 +92,8 @@ import { AgentFlowReader } from './src/AgentFlowReader.js';
 import { teamRouter } from './src/teamRouter.js';
 import { StackRegistry } from './src/StackRegistry.js';
 import { stacksRouter } from './src/stacksRouter.js';
+import { VpsComposeControl } from './src/deploy/VpsComposeControl.js';
+import { StackDeployOrchestrator } from './src/deploy/StackDeployOrchestrator.js';
 
 const PORT = Number(process.env.PORT ?? 8080);
 
@@ -205,9 +210,19 @@ reconciliationJob.startScheduler();
 
 app.use(deploymentsRouter(deployOrchestrator, auditStore, vpsTargets, reconciliationJob));
 
-// ── Stack-Registry (stack-deploy-orchestration #160, AC1/AC2) ─────────────────
+// ── Stack-Registry + Stack-Deploy (stack-deploy-orchestration #160/#162) ──────
 const stackRegistry = new StackRegistry(credentialStore);
-app.use(stacksRouter(stackRegistry, auditStore));
+// VpsComposeControl: gleicher CredentialStore wie VpsDockerControl (kein zweiter SSH-Pfad).
+const vpsComposeControl = new VpsComposeControl(credentialStore);
+// StackDeployOrchestrator: Deploy-Saga (AC6/AC7/AC8/AC9/AC10).
+// Verwendet deployOrchestrator.addRouteOnly (geteilter ADR-012-Anlege-Pfad, kein Duplikat).
+const stackDeployOrchestrator = new StackDeployOrchestrator({
+  composeControl: vpsComposeControl,
+  orchestrator: deployOrchestrator,
+  cloudflareApi,
+  lockoutGuard,
+});
+app.use(stacksRouter(stackRegistry, auditStore, { stackDeployOrchestrator, vpsTargets }));
 
 // ── Build-Version endpoint (build-version) ────────────────────────────────────
 app.use(versionRouter());

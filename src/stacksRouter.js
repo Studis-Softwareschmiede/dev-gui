@@ -1,33 +1,33 @@
 /**
- * stacksRouter — Express-Router für Stack-Registry CRUD (AC1/AC2, stack-deploy-orchestration).
+ * stacksRouter — Express-Router für Stack-Registry CRUD (AC1/AC2) +
+ *               Stack-Deploy/Undeploy/Status (AC6–AC11, stack-deploy-orchestration).
+ *
+ * Pfad-Kollisions-Auflösung (AC8, Item C):
+ *   `DELETE /api/deployments/stacks/:stackName` bleibt der Registry-DELETE
+ *   (löscht nur den Registry-Eintrag, KEIN composeDown, KEINE Route-Entfernung).
+ *   Stack-Undeploy (Compose-Down + Routen-Entfernung) liegt auf einem eigenen Sub-Pfad:
+ *     DELETE /api/deployments/stacks/:stackName/undeploy  (AC8, Body: { confirm: "<stackName>" })
+ *   Diese Trennung ist trennscharf, rückwärtskompatibel mit den #160-Tests und folgt
+ *   Spec-Option (a): "coder finalisiert ob eigener Sub-Pfad z.B. /undeploy".
  *
  * Routes (alle hinter AccessGuard in server.js):
- *   GET    /api/deployments/stacks                  → { stacks: StackDefinition[] }
- *   GET    /api/deployments/stacks/:stackName       → StackDefinition | 404
- *   POST   /api/deployments/stacks                  → { stackName, updatedAt }   [MUTATION]
- *   PUT    /api/deployments/stacks/:stackName        → { stackName, updatedAt }   [MUTATION]
- *   DELETE /api/deployments/stacks/:stackName        → { stackName, status: "deleted" }  [MUTATION]
+ *   GET    /api/deployments/stacks                         → { stacks: StackDefinition[] }
+ *   GET    /api/deployments/stacks/:stackName              → StackDefinition | 404
+ *   POST   /api/deployments/stacks                         → { stackName, updatedAt }   [MUTATION]
+ *   PUT    /api/deployments/stacks/:stackName              → { stackName, updatedAt }   [MUTATION]
+ *   DELETE /api/deployments/stacks/:stackName              → { stackName, status: "deleted" }  [MUTATION/Registry]
+ *   POST   /api/deployments/stacks/:stackName/deploy       → { result, stack? }         [MUTATION/AC6]
+ *   DELETE /api/deployments/stacks/:stackName/undeploy     → { result, reason? }        [MUTATION/AC8]
+ *   GET    /api/deployments/stacks/:stackName/status       → StackStatus               [AC9]
  *
- * KOLLISIONSHINWEIS für Item C (#162, AC8):
- *   `DELETE /api/deployments/stacks/:stackName` ist hier als Registry-DELETE implementiert
- *   (löscht nur den Registry-Eintrag, KEIN composeDown, KEINE Route-Entfernung).
- *   Item C implementiert Stack-Undeploy mit Body `{ confirm: "<stackName>" }` (AC8).
- *   Der #162-Coder MUSS diesen Endpunkt entweder:
- *     (a) durch einen eigenen Sub-Pfad trennen (z.B. DELETE /api/deployments/stacks/:stackName/undeploy),
- *         ODER
- *     (b) den bestehenden DELETE erweitern: Body `{ confirm }` vorhanden → Undeploy-Pfad,
- *         fehlender Body → Registry-DELETE (trennscharf per spec-deploy-orchestration.md Vertrag).
- *   Entscheidung liegt beim #162-Coder; dieses Item (A) lässt den Endpunkt offen
- *   (spec-deploy-orchestration.md: "coder finalisiert ob eigener Sub-Pfad z.B. /undeploy").
- *
- * Security (AC2 — stack-deploy-orchestration.md):
+ * Security (AC2/AC11 — stack-deploy-orchestration.md):
  *   - Alle /api/deployments/stacks/* hinter AccessGuard (server.js — alle /api/* sind geschützt).
  *   - Mutierende Aktionen (POST, PUT, DELETE) zusätzlich identitäts-/rollengeschützt
  *     (gleiche CRED_ADMIN_EMAILS-Logik wie credentialsRouter/deploymentsRouter/vpsRouter).
  *   - Audit-First: Audit-Eintrag VOR jeder Mutation; schlägt Audit fehl → Aktion unterbleibt.
- *   - Eingaben (stackName, repoUrl, branch, Pfade, hostnames) validiert (AC2).
+ *   - Eingaben (stackName, repoUrl, branch, Pfade, hostnames) validiert (AC2/AC11).
  *   - secretsSpec enthält nur Secret-NAMEN, keine Werte — niemals in Response/Audit (AC1).
- *   - Keine Secrets in Response, Log, Audit, WS (AC1/AC2).
+ *   - Keine App-Boot-Secrets, SSH-Key oder CF-Token in Response, Log, Audit, WS (AC11).
  *
  * @module stacksRouter
  */
@@ -62,13 +62,18 @@ function checkMutationAuthz(identity) {
 // ── Router Factory ─────────────────────────────────────────────────────────────
 
 /**
- * Erstellt den Stack-Registry-Router.
+ * Erstellt den Stack-Registry-Router inkl. Deploy/Undeploy/Status (AC6–AC11).
  *
  * @param {import('./StackRegistry.js').StackRegistry} stackRegistry
  * @param {import('./AuditStore.js').AuditStore} auditStore
+ * @param {object} [opts]
+ * @param {import('./deploy/StackDeployOrchestrator.js').StackDeployOrchestrator} [opts.stackDeployOrchestrator]
+ *   Orchestrator für Deploy/Undeploy/Status; optional — fehlt er, liefern diese Endpoints 503.
+ * @param {Map<string, object>} [opts.vpsTargets]
+ *   VPS-Target-Map (vpsId → VpsTarget); wird für VPS-Auflösung aus stackDef.vps verwendet.
  * @returns {import('express').Router}
  */
-export function stacksRouter(stackRegistry, auditStore) {
+export function stacksRouter(stackRegistry, auditStore, { stackDeployOrchestrator, vpsTargets } = {}) {
   const router = Router();
 
   // ── GET /api/deployments/stacks ──────────────────────────────────────────────
@@ -308,6 +313,246 @@ export function stacksRouter(stackRegistry, auditStore) {
     } catch (err) {
       console.error('[stacksRouter] DELETE Stack-Registry-Schreib-Fehler:', sanitizeMsg(err?.message));
       return res.status(500).json({ error: 'Stack-Registry nicht schreibbar' });
+    }
+  });
+
+  // ── POST /api/deployments/stacks/:stackName/deploy ────────────────────────────
+
+  /**
+   * POST /api/deployments/stacks/:stackName/deploy
+   * Stack-Deploy-Saga: syncRepo → ensureEnv → composeUp → Route je öffentlichem Service.
+   * MUTATION: Audit-First + Identitäts-/Rollenschutz (AC6, AC11).
+   *
+   * Responses:
+   *   200 { result: "ok", stack }
+   *   422 { result: "error", reason: "protected-resource" }   — LockoutGuard (AC10)
+   *   422 { error }  — ungültiger stackName
+   *   404 { error }  — Stack nicht in Registry
+   *   403 { error }  — keine Berechtigung
+   *   500 { error }  — Audit-Write fehlgeschlagen
+   *   503 { error }  — Orchestrator nicht konfiguriert
+   *   502 { result: "error", reason }  — SSH/Cloudflare-Fehler
+   */
+  router.post('/api/deployments/stacks/:stackName/deploy', async (req, res) => {
+    if (!stackDeployOrchestrator) {
+      return res.status(503).json({ error: 'StackDeployOrchestrator nicht konfiguriert' });
+    }
+
+    const identity = req.identity ?? null;
+
+    // AC11: Identitäts-/Rollenschutz
+    const authz = checkMutationAuthz(identity);
+    if (!authz.allowed) {
+      return res.status(403).json({ error: 'Keine Berechtigung für diese Aktion' });
+    }
+
+    // URL-Parameter validieren
+    const nameVal = validateStackName(req.params.stackName);
+    if (!nameVal.ok) {
+      return res.status(422).json({ error: nameVal.error });
+    }
+    const { stackName } = req.params;
+
+    // Stack aus Registry laden
+    let stackDef;
+    try {
+      stackDef = await stackRegistry.get(stackName);
+    } catch (err) {
+      console.error('[stacksRouter] POST deploy — Registry-Lese-Fehler:', sanitizeMsg(err?.message));
+      return res.status(500).json({ error: 'Stack-Registry nicht erreichbar' });
+    }
+    if (!stackDef) {
+      return res.status(404).json({ error: `Stack '${stackName}' nicht in der Registry` });
+    }
+
+    // VPS-Auflösung: stackDef.vps ist ein vpsId-String → VpsTarget via vpsTargets-Map
+    const vpsTarget = vpsTargets ? vpsTargets.get(stackDef.vps) : undefined;
+    if (!vpsTarget) {
+      return res.status(422).json({ error: `Unbekannter oder nicht konfigurierter VPS: ${stackDef.vps}` });
+    }
+
+    // AC11: Audit-First — Eintrag VOR der Mutation; kein Secret im Audit
+    const auditAction = `stack:deploy:${stackName}`;
+    try {
+      auditStore.record({ identity: identity?.email ?? null, command: auditAction });
+    } catch (auditErr) {
+      console.error('[stacksRouter] Audit-Write fehlgeschlagen:', sanitizeMsg(auditErr?.message));
+      return res.status(500).json({ error: 'Audit-Write fehlgeschlagen — Aktion abgebrochen' });
+    }
+
+    // Deploy-Saga ausführen
+    let result;
+    try {
+      result = await stackDeployOrchestrator.deploy({ vps: vpsTarget, stackDef });
+    } catch (err) {
+      console.error('[stacksRouter] POST deploy — Fehler:', sanitizeMsg(err?.message));
+      return res.status(502).json({ result: 'error', reason: 'Deploy fehlgeschlagen' });
+    }
+
+    if (result.result !== 'ok') {
+      const { errorClass } = result;
+      if (errorClass === 'protected-resource') {
+        return res.status(422).json({ result: 'error', reason: 'protected-resource' });
+      }
+      if (errorClass === 'validation-error') {
+        return res.status(400).json({ result: 'error', reason: sanitizeMsg(result.reason) });
+      }
+      return res.status(502).json({ result: 'error', reason: sanitizeMsg(result.reason ?? 'Deploy fehlgeschlagen') });
+    }
+
+    return res.status(200).json(result);
+  });
+
+  // ── DELETE /api/deployments/stacks/:stackName/undeploy ───────────────────────
+
+  /**
+   * DELETE /api/deployments/stacks/:stackName/undeploy
+   * Stack-Undeploy: Alle Routen entfernen → composeDown (Volumes behalten).
+   * MUTATION: Audit-First + Identitäts-/Rollenschutz + type-to-confirm (AC8, AC10, AC11).
+   *
+   * Body: { confirm: "<stackName>" }  — muss dem stackName entsprechen (AC8)
+   *
+   * Responses:
+   *   200 { result: "ok" }
+   *   422 { result: "error", reason: "confirmation-required" }  — kein/falsches confirm (AC8)
+   *   422 { result: "error", reason: "protected-resource" }     — LockoutGuard (AC10)
+   *   422 { error }  — ungültiger stackName
+   *   404 { error }  — Stack nicht in Registry
+   *   403 { error }  — keine Berechtigung
+   *   500 { error }  — Audit-Write fehlgeschlagen
+   *   503 { error }  — Orchestrator nicht konfiguriert
+   *   502 { result: "error", reason }  — SSH/Cloudflare-Fehler
+   */
+  router.delete('/api/deployments/stacks/:stackName/undeploy', async (req, res) => {
+    if (!stackDeployOrchestrator) {
+      return res.status(503).json({ error: 'StackDeployOrchestrator nicht konfiguriert' });
+    }
+
+    const identity = req.identity ?? null;
+
+    // AC11: Identitäts-/Rollenschutz
+    const authz = checkMutationAuthz(identity);
+    if (!authz.allowed) {
+      return res.status(403).json({ error: 'Keine Berechtigung für diese Aktion' });
+    }
+
+    // URL-Parameter validieren
+    const nameVal = validateStackName(req.params.stackName);
+    if (!nameVal.ok) {
+      return res.status(422).json({ error: nameVal.error });
+    }
+    const { stackName } = req.params;
+
+    // AC8: confirm aus Body
+    const confirm = req.body?.confirm;
+
+    // Stack aus Registry laden
+    let stackDef;
+    try {
+      stackDef = await stackRegistry.get(stackName);
+    } catch (err) {
+      console.error('[stacksRouter] DELETE undeploy — Registry-Lese-Fehler:', sanitizeMsg(err?.message));
+      return res.status(500).json({ error: 'Stack-Registry nicht erreichbar' });
+    }
+    if (!stackDef) {
+      return res.status(404).json({ error: `Stack '${stackName}' nicht in der Registry` });
+    }
+
+    // VPS-Auflösung
+    const vpsTarget = vpsTargets ? vpsTargets.get(stackDef.vps) : undefined;
+    if (!vpsTarget) {
+      return res.status(422).json({ error: `Unbekannter oder nicht konfigurierter VPS: ${stackDef.vps}` });
+    }
+
+    // AC8: type-to-confirm — confirm muss stackName entsprechen (VOR Audit-First, denn
+    // ungültige Anfragen bekommen keinen Audit-Eintrag)
+    if (!confirm || confirm !== stackName) {
+      return res.status(422).json({ result: 'error', reason: 'confirmation-required' });
+    }
+
+    // AC11: Audit-First — Eintrag VOR der Mutation; kein Secret im Audit
+    const auditAction = `stack:undeploy:${stackName}`;
+    try {
+      auditStore.record({ identity: identity?.email ?? null, command: auditAction });
+    } catch (auditErr) {
+      console.error('[stacksRouter] Audit-Write fehlgeschlagen:', sanitizeMsg(auditErr?.message));
+      return res.status(500).json({ error: 'Audit-Write fehlgeschlagen — Aktion abgebrochen' });
+    }
+
+    // Undeploy ausführen (bestätigter confirm wird an Orchestrator weitergegeben)
+    let result;
+    try {
+      result = await stackDeployOrchestrator.undeploy({ vps: vpsTarget, stackDef, confirm });
+    } catch (err) {
+      console.error('[stacksRouter] DELETE undeploy — Fehler:', sanitizeMsg(err?.message));
+      return res.status(502).json({ result: 'error', reason: 'Undeploy fehlgeschlagen' });
+    }
+
+    if (result.result !== 'ok') {
+      const { errorClass } = result;
+      if (errorClass === 'protected-resource') {
+        return res.status(422).json({ result: 'error', reason: 'protected-resource' });
+      }
+      if (errorClass === 'confirmation-required') {
+        return res.status(422).json({ result: 'error', reason: 'confirmation-required' });
+      }
+      return res.status(502).json({ result: 'error', reason: sanitizeMsg(result.reason ?? 'Undeploy fehlgeschlagen') });
+    }
+
+    return res.status(200).json(result);
+  });
+
+  // ── GET /api/deployments/stacks/:stackName/status ─────────────────────────────
+
+  /**
+   * GET /api/deployments/stacks/:stackName/status
+   * Live-Status: composePs ⊕ Routen je öffentlichem Hostname; Drift-Flags (AC9).
+   * Hinter Access (kein Rollen-Check für Status-Lesen).
+   *
+   * Responses:
+   *   200 StackStatus
+   *   422 { error }  — ungültiger stackName
+   *   404 { error }  — Stack nicht in Registry
+   *   422 { error }  — VPS nicht konfiguriert
+   *   503 { error }  — Orchestrator nicht konfiguriert
+   *   502 { error }  — SSH/Cloudflare-Fehler
+   */
+  router.get('/api/deployments/stacks/:stackName/status', async (req, res) => {
+    if (!stackDeployOrchestrator) {
+      return res.status(503).json({ error: 'StackDeployOrchestrator nicht konfiguriert' });
+    }
+
+    // URL-Parameter validieren
+    const nameVal = validateStackName(req.params.stackName);
+    if (!nameVal.ok) {
+      return res.status(422).json({ error: nameVal.error });
+    }
+    const { stackName } = req.params;
+
+    // Stack aus Registry laden
+    let stackDef;
+    try {
+      stackDef = await stackRegistry.get(stackName);
+    } catch (err) {
+      console.error('[stacksRouter] GET status — Registry-Lese-Fehler:', sanitizeMsg(err?.message));
+      return res.status(500).json({ error: 'Stack-Registry nicht erreichbar' });
+    }
+    if (!stackDef) {
+      return res.status(404).json({ error: `Stack '${stackName}' nicht in der Registry` });
+    }
+
+    // VPS-Auflösung
+    const vpsTarget = vpsTargets ? vpsTargets.get(stackDef.vps) : undefined;
+    if (!vpsTarget) {
+      return res.status(422).json({ error: `Unbekannter oder nicht konfigurierter VPS: ${stackDef.vps}` });
+    }
+
+    try {
+      const statusObj = await stackDeployOrchestrator.status({ vps: vpsTarget, stackDef });
+      return res.status(200).json(statusObj);
+    } catch (err) {
+      console.error('[stacksRouter] GET status — Fehler:', sanitizeMsg(err?.message));
+      return res.status(502).json({ error: 'Stack-Status konnte nicht abgerufen werden' });
     }
   });
 
