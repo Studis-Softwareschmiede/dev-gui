@@ -48,6 +48,8 @@
  *   GET    /api/version                                        → { version } — image build timestamp (build-version)
  *   GET    /api/team                                           → { agents:[...], skills:[...], knowledge:[...] } (team-view-backend AC1)
  *   GET    /api/team/:kind/:id                                 → { ...meta, body } (team-view-backend AC4)
+ *   GET    /api/retro/runs                                     → { runs:[...] } (retro-view-backend AC1)
+ *   GET    /api/retro/runs/:slug                               → { slug, date, source, statusMix, agents:[…], skills:[…], knowledge:[…] } (retro-view-backend AC5)
  *   WS   /ws/terminal                             → PtyManager bridge (guarded by AccessGuard)
  */
 
@@ -90,6 +92,8 @@ import { deploymentsRouter } from './src/deploymentsRouter.js';
 import { versionRouter } from './src/versionRouter.js';
 import { AgentFlowReader } from './src/AgentFlowReader.js';
 import { teamRouter } from './src/teamRouter.js';
+import { RetroReader } from './src/RetroReader.js';
+import { retroRouter } from './src/retroRouter.js';
 import { StackRegistry } from './src/StackRegistry.js';
 import { stacksRouter } from './src/stacksRouter.js';
 import { VpsComposeControl } from './src/deploy/VpsComposeControl.js';
@@ -230,6 +234,12 @@ app.use(versionRouter());
 // ── Team-Ansicht (team-view-backend AC1, AC4, AC9) ────────────────────────────
 const agentFlowReader = new AgentFlowReader();
 app.use(teamRouter({ agentFlowReader }));
+
+// ── Retro-Ansicht (retro-view-backend AC1–AC10) ───────────────────────────────
+const retroReader = new RetroReader({
+  pluginRootResolver: () => agentFlowReader.resolvePluginRoot(),
+});
+app.use(retroRouter({ retroReader }));
 
 /**
  * Build the VPS-Target map from an environment variable.
