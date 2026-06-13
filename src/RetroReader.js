@@ -42,8 +42,15 @@ export function deriveSource(slug) {
 
 /**
  * Categorise an entry based on the Pack/Skill column value.
- * A single value may contain multiple paths separated by whitespace or '+'.
- * Each path-token is matched against agents/, skills/, knowledge/ prefix.
+ *
+ * Searches the entire cell string for occurrences of the path segments
+ * `agents/`, `skills/`, or `knowledge/` using a regex that requires each
+ * segment to begin after a non-word boundary (prevents false matches like
+ * "useragents/"). Works correctly with:
+ *   - Backtick-wrapped paths:  `agents/cicd.md` + `knowledge/cicd.md`
+ *   - Brace-expansion:         agents/{coder,reviewer}.md
+ *   - Prose/parentheses:       (Wartezimmer → Ziel: agents/tester.md)
+ *   - Plain paths (no backticks): agents/coder.md
  *
  * Returns a Set of zero or more of: 'agents', 'skills', 'knowledge'.
  *
@@ -54,13 +61,12 @@ export function categoriseEntry(packSkill) {
   const cats = new Set();
   if (!packSkill || typeof packSkill !== 'string') return cats;
 
-  // Split on '+', whitespace, or comma to extract individual path tokens
-  const tokens = packSkill.split(/[\s+,]+/).map((t) => t.trim()).filter(Boolean);
-  for (const token of tokens) {
-    const lower = token.toLowerCase();
-    if (lower.startsWith('agents/')) cats.add('agents');
-    else if (lower.startsWith('skills/')) cats.add('skills');
-    else if (lower.startsWith('knowledge/')) cats.add('knowledge');
+  // Match category path-segments that are NOT preceded by an alphanumeric character
+  // (prevents "useragents/" from matching as "agents/").
+  const CATEGORY_RE = /(?:^|[^A-Za-z0-9])(agents|skills|knowledge)\//gi;
+  let match;
+  while ((match = CATEGORY_RE.exec(packSkill)) !== null) {
+    cats.add(match[1].toLowerCase());
   }
   return cats;
 }
