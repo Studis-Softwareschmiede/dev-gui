@@ -57,7 +57,7 @@ function makeRetroReader({ fileMap = {}, root = PLUGIN_ROOT } = {}) {
   });
 }
 
-// Typical LEARNINGS.md fixture
+// Typical LEARNINGS.md fixture (plain paths, no backticks — kept for parser structure tests)
 const LEARNINGS_CONTENT = `# LEARNINGS
 
 | ID | Datum | Pack/Skill | Regel | Quelle | PR | Status |
@@ -66,6 +66,24 @@ const LEARNINGS_CONTENT = `# LEARNINGS
 | R02 | 2025-01-15 | knowledge/js.md | JS knowledge rule | knowledge/js.md | retro/PR-Q001 | Merged |
 | R03 | 2025-02-10 | skills/deploy/SKILL.md | Deploy skill rule | skills/deploy/SKILL.md | train/PR-Q002 | Proposed |
 | R04 | 2025-03-01 | agents/orchestrator.md + knowledge/cicd.md | Multi-path rule | agents/orchestrator.md | teamLeader/PR-Q003 | Merged |
+`;
+
+/**
+ * Real-format LEARNINGS.md fixture: backtick-wrapped paths, ` + `-separated,
+ * brace-expansion, parenthesised prose. Mirrors the actual LEARNINGS.md format.
+ */
+const LEARNINGS_CONTENT_REAL = `# LEARNINGS
+
+| ID | Datum | Pack/Skill | Regel | Quelle | PR | Status |
+|---|---|---|---|---|---|---|
+| R10 | 2025-05-01 | \`agents/cicd.md\` + \`knowledge/cicd.md\` + \`skills/cicd/SKILL.md\` + \`AGENTS.md\` + \`CONCEPT.md\` + \`skills/flow/SKILL.md\` | Multi-path all three cats | agents/cicd.md | retro/PR-R001 | Merged |
+| R11 | 2025-05-01 | \`knowledge/java.md\` | Single knowledge | knowledge/java.md | retro/PR-R001 | Merged |
+| R12 | 2025-05-02 | \`knowledge/frameworks/angular-21.md\` | Nested knowledge | knowledge/angular.md | train/PR-R002 | Proposed |
+| R13 | 2025-05-03 | agents/{coder,reviewer}.md | Brace-expansion agents | agents/coder.md | train/PR-R002 | Proposed |
+| R14 | 2025-05-04 | skills/{adopt,new-project}/SKILL.md | Brace-expansion skills | skills/adopt/SKILL.md | train/PR-R003 | Merged |
+| R15 | 2025-05-05 | (Wartezimmer → Ziel bei 2. Beleg: agents/tester.md + agents/reviewer.md + knowledge/css.md) | Prose with paths | agents/tester.md | teamLeader/PR-R004 | Proposed |
+| R16 | 2025-05-06 | (Wartezimmer) | Pure waiting room — no paths | — | teamLeader/PR-R004 | Proposed |
+| R17 | 2025-05-07 | AGENTS.md + CONCEPT.md | No category prefixes | AGENTS.md | retro/PR-R005 | Merged |
 `;
 
 const BASELINE_CONTENT = JSON.stringify({
@@ -175,6 +193,160 @@ describe('AC4 — categoriseEntry: Pack/Skill path → categories', () => {
 
   it('null → empty Set', () => {
     expect(categoriseEntry(null).size).toBe(0);
+  });
+});
+
+// ── AC4 — categoriseEntry: REAL FORMAT (backtick-wrapped, brace, prose) ──────
+
+describe('AC4 — categoriseEntry: real LEARNINGS.md format', () => {
+  it('backtick-wrapped agents path → {agents}', () => {
+    const cats = categoriseEntry('`agents/cicd.md`');
+    expect(cats.has('agents')).toBe(true);
+    expect(cats.has('skills')).toBe(false);
+    expect(cats.has('knowledge')).toBe(false);
+  });
+
+  it('backtick-wrapped knowledge path → {knowledge}', () => {
+    const cats = categoriseEntry('`knowledge/java.md`');
+    expect(cats.has('knowledge')).toBe(true);
+    expect(cats.has('agents')).toBe(false);
+    expect(cats.has('skills')).toBe(false);
+  });
+
+  it('backtick-wrapped nested knowledge path → {knowledge}', () => {
+    const cats = categoriseEntry('`knowledge/frameworks/angular-21.md`');
+    expect(cats.has('knowledge')).toBe(true);
+  });
+
+  it('multi-path backtick ` + ` separated with all three cats → {agents, skills, knowledge}', () => {
+    const cell = '`agents/cicd.md` + `knowledge/cicd.md` + `skills/cicd/SKILL.md` + `AGENTS.md` + `CONCEPT.md` + `skills/flow/SKILL.md`';
+    const cats = categoriseEntry(cell);
+    expect(cats.has('agents')).toBe(true);
+    expect(cats.has('knowledge')).toBe(true);
+    expect(cats.has('skills')).toBe(true);
+  });
+
+  it('brace-expansion agents/{coder,reviewer}.md → {agents}', () => {
+    const cats = categoriseEntry('agents/{coder,reviewer}.md');
+    expect(cats.has('agents')).toBe(true);
+    expect(cats.has('skills')).toBe(false);
+    expect(cats.has('knowledge')).toBe(false);
+  });
+
+  it('brace-expansion skills/{adopt,new-project}/SKILL.md → {skills}', () => {
+    const cats = categoriseEntry('skills/{adopt,new-project}/SKILL.md');
+    expect(cats.has('skills')).toBe(true);
+    expect(cats.has('agents')).toBe(false);
+    expect(cats.has('knowledge')).toBe(false);
+  });
+
+  it('prose with paths in parens → {agents, knowledge}', () => {
+    const cell = '(Wartezimmer → Ziel bei 2. Beleg: agents/tester.md + agents/reviewer.md + knowledge/css.md)';
+    const cats = categoriseEntry(cell);
+    expect(cats.has('agents')).toBe(true);
+    expect(cats.has('knowledge')).toBe(true);
+    expect(cats.has('skills')).toBe(false);
+  });
+
+  it('pure (Wartezimmer) — no paths → empty Set (nothing invented)', () => {
+    const cats = categoriseEntry('(Wartezimmer)');
+    expect(cats.size).toBe(0);
+  });
+
+  it('(Wartezimmer → Ziel: ...) without category paths → empty Set', () => {
+    const cats = categoriseEntry('(Wartezimmer → Ziel bei 2. Beleg: AGENTS.md + CONCEPT.md)');
+    expect(cats.size).toBe(0);
+  });
+
+  it('AGENTS.md + CONCEPT.md (no category prefix) → empty Set', () => {
+    // AGENTS.md does not have a leading category segment like agents/…
+    const cats = categoriseEntry('AGENTS.md + CONCEPT.md');
+    expect(cats.size).toBe(0);
+  });
+
+  it('does not match "useragents/" as agents (guard against false prefix match)', () => {
+    const cats = categoriseEntry('useragents/foo.md');
+    expect(cats.has('agents')).toBe(false);
+  });
+
+  it('counts > 0 for real fixture row R10 (all three categories)', () => {
+    const rows = parseLearningsTable(LEARNINGS_CONTENT_REAL);
+    const r10 = rows.find((r) => r.id === 'R10');
+    const cats = categoriseEntry(r10.packSkill);
+    expect(cats.has('agents')).toBe(true);
+    expect(cats.has('knowledge')).toBe(true);
+    expect(cats.has('skills')).toBe(true);
+  });
+
+  it('counts > 0 for real fixture row R11 (knowledge only)', () => {
+    const rows = parseLearningsTable(LEARNINGS_CONTENT_REAL);
+    const r11 = rows.find((r) => r.id === 'R11');
+    const cats = categoriseEntry(r11.packSkill);
+    expect(cats.has('knowledge')).toBe(true);
+    expect(cats.has('agents')).toBe(false);
+    expect(cats.has('skills')).toBe(false);
+  });
+
+  it('R16 (Wartezimmer) → empty Set — no category invented', () => {
+    const rows = parseLearningsTable(LEARNINGS_CONTENT_REAL);
+    const r16 = rows.find((r) => r.id === 'R16');
+    expect(categoriseEntry(r16.packSkill).size).toBe(0);
+  });
+});
+
+// ── AC4 — counts with real-format fixture ────────────────────────────────────
+
+describe('AC4 — groupIntoRuns + buildRunReport: real-format fixture counts > 0', () => {
+  it('retro/PR-R001 has agents=1, knowledge=2, skills=1 (backtick multi-path + single)', () => {
+    const rows = parseLearningsTable(LEARNINGS_CONTENT_REAL);
+    const runs = groupIntoRuns(rows);
+    const run = runs.find((r) => r.slug === 'retro/PR-R001');
+    // R10: agents + knowledge + skills; R11: knowledge
+    expect(run.counts.agents).toBe(1);
+    expect(run.counts.knowledge).toBe(2);
+    expect(run.counts.skills).toBe(1);
+  });
+
+  it('train/PR-R002 has knowledge=1, agents=1 (nested knowledge + brace agents)', () => {
+    const rows = parseLearningsTable(LEARNINGS_CONTENT_REAL);
+    const runs = groupIntoRuns(rows);
+    const run = runs.find((r) => r.slug === 'train/PR-R002');
+    // R12: knowledge; R13: agents
+    expect(run.counts.knowledge).toBe(1);
+    expect(run.counts.agents).toBe(1);
+    expect(run.counts.skills).toBe(0);
+  });
+
+  it('teamLeader/PR-R004 has agents=1, knowledge=1, skills=0, zero for Wartezimmer row', () => {
+    const rows = parseLearningsTable(LEARNINGS_CONTENT_REAL);
+    const runs = groupIntoRuns(rows);
+    const run = runs.find((r) => r.slug === 'teamLeader/PR-R004');
+    // R15: agents + knowledge (prose); R16: Wartezimmer → nothing
+    expect(run.counts.agents).toBe(1);
+    expect(run.counts.knowledge).toBe(1);
+    expect(run.counts.skills).toBe(0);
+  });
+
+  it('retro/PR-R005 has all zeros (no category paths in AGENTS.md+CONCEPT.md)', () => {
+    const rows = parseLearningsTable(LEARNINGS_CONTENT_REAL);
+    const runs = groupIntoRuns(rows);
+    const run = runs.find((r) => r.slug === 'retro/PR-R005');
+    expect(run.counts.agents).toBe(0);
+    expect(run.counts.skills).toBe(0);
+    expect(run.counts.knowledge).toBe(0);
+  });
+
+  it('buildRunReport for real fixture run R10 places entry in agents + knowledge + skills', () => {
+    const rows = parseLearningsTable(LEARNINGS_CONTENT_REAL);
+    const r10rows = rows.filter((r) => r.pr === 'retro/PR-R001');
+    const { agents, skills, knowledge } = buildRunReport(r10rows, null);
+    // R10 must appear in all three
+    expect(agents.some((e) => e.id === 'R10')).toBe(true);
+    expect(skills.some((e) => e.id === 'R10')).toBe(true);
+    expect(knowledge.some((e) => e.id === 'R10')).toBe(true);
+    // R11 must appear only in knowledge
+    expect(knowledge.some((e) => e.id === 'R11')).toBe(true);
+    expect(agents.some((e) => e.id === 'R11')).toBe(false);
   });
 });
 
