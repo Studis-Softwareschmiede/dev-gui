@@ -3,6 +3,8 @@
  *
  * team-view-frontend:
  *   AC1  — Kachel „Team" im Einstiegs-Panel (durch AppShell bereitgestellt).
+ *          Markanter „Retro"-Link im Kopfbereich (beim <h1>Team</h1>), aktiviert
+ *          onNavigate('retro') per Maus und Tastatur (Tab + Enter/Space).
  *   AC2  — Route `team` → diese Komponente (durch AppShell + useHashRouter bereitgestellt).
  *   AC3  — Lädt GET /api/team einmalig beim Mount; gruppierte Liste AGENTEN/SKILLS/KNOWLEDGE;
  *           Knowledge zusätzlich nach `group` sortiert/gruppiert; aria-busy/aria-live Ladezustand.
@@ -51,7 +53,7 @@ import { MarkdownLite } from './markdownLite.jsx';
 /**
  * @param {{ onNavigate: (view: string) => void }} props
  */
-export function TeamView({ onNavigate: _onNavigate }) {
+export function TeamView({ onNavigate }) {
   // ── State
   const [loadState, setLoadState] = useState('idle'); // 'idle' | 'loading' | 'ok' | 'error'
   const [loadError, setLoadError] = useState('');
@@ -128,7 +130,25 @@ export function TeamView({ onNavigate: _onNavigate }) {
   // ── Render
   return (
     <main style={styles.main} aria-label="Team-Ansicht">
-      <h1 style={styles.h1}>Team</h1>
+      <div style={styles.headerRow}>
+        <h1 style={styles.h1}>Team</h1>
+        {/* Retro-Link im Kopfbereich — team-view-frontend AC1 */}
+        <button
+          type="button"
+          style={styles.retroLink}
+          onClick={() => onNavigate('retro')}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              onNavigate('retro');
+            }
+          }}
+          aria-label="Retro — Self-Improvement-Historie"
+          data-nav="retro"
+        >
+          Retro
+        </button>
+      </div>
 
       {/* Loading state — accessible (AC3, AC8) */}
       {loadState === 'loading' && (
@@ -484,12 +504,34 @@ const styles = {
     color: '#e5e7eb',
   },
 
+  // ── Header row: h1 + Retro-Link side-by-side (team-view-frontend AC1)
+  headerRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 16,
+    marginBottom: 16,
+    flexShrink: 0,
+  },
+
   h1: {
-    margin: '0 0 16px',
+    margin: 0,
     fontSize: 24,
     fontWeight: 700,
     color: '#e5e7eb',
-    flexShrink: 0,
+  },
+
+  // Retro-Link button — markant, Touch-Target ≥ 44px, sichtbarer Fokusring (kein outline:none)
+  retroLink: {
+    minHeight: 44,
+    padding: '10px 16px',
+    background: '#1e293b',
+    border: '1px solid #334155',
+    borderRadius: 6,
+    color: '#93c5fd',
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: 'pointer',
+    // Focus ring preserved — no outline:none (A11y, WCAG 2.1 AA, team-view-frontend AC1, AC9)
   },
 
   // ── Status / hint messages

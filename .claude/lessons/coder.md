@@ -1,5 +1,8 @@
 # Coder Lessons — dev-gui (newest first)
 
+## 2026-06-13 — Covers-Block muss ALLE ACs listen — auch nicht-testbare mit Begründungsnotiz
+Wenn ein Test-File ACs abdeckt, müssen ALLE ACs der zugehörigen Spec im Covers-Block erscheinen — einschließlich solcher, die per Unit-Test nicht verifizierbar sind. Nicht-testbare ACs (z.B. AC10 responsiv/Theme wegen jsdom-Layout-Limitation, oder AC3 Browser-Back/Forward das geerbt ist) müssen mit einer kurzen Note erscheinen: „AC3 — geerbt aus app-shell-navigation, kein separater Unit-Test" oder „AC10 — responsiv/Theme, jsdom nicht testbar — visuell verifiziert". Fehlen solche Einträge komplett, ist es ein Important-Befund (coder.md Lesson 2026-06-09 gilt analog). Checkliste: nach dem Schreiben aller describe-Blöcke die Spec-AC-Liste von oben nach unten durchgehen und für jede AC entweder einen describe-Block oder eine Notiz im Covers-Block eintragen. *[seen-in: #176 RetroView.test.jsx — AC3 und AC10 fehlten im Covers-Block; promoted: 2026-06-13]*
+
 ## 2026-06-13 — retroRouter-Muster: Covers-Block in retroRouter.test.js braucht explizite AccessGuard-Note
 Der Covers-Block in `retroRouter.test.js` enthält `AC10 — Router is read-only; routes behind existing AccessGuard (documented, not re-tested here)` — das ist das korrekte Muster (coder.md Lesson 2026-06-09). Als Referenz für künftige reine Read-Only-Router: kein eigener Middleware-Test nötig, wenn der AccessGuard durch `app.use('/api', accessGuard)` global auf `/api/*` wirkt — stattdessen per-server.js-Inspektion dokumentieren. *[seen-in: #175 retroRouter.test.js; promoted: 2026-06-13]*
 
