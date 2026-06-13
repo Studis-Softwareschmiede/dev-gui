@@ -1,0 +1,107 @@
+/**
+ * retroRouter — GET /api/retro/runs, GET /api/retro/runs/:slug
+ *
+ * Exposes the retro/train/teamLeader run history as read-only JSON endpoints.
+ * Both routes are behind the existing /api AccessGuard (AC10).
+ *
+ * Routes:
+ *   GET /api/retro/runs               → { runs: [{ slug, date, source, counts, statusMix }] }
+ *   GET /api/retro/runs/:slug         → { slug, date, source, statusMix, agents:[…], skills:[…], knowledge:[…] }
+ *
+ * Security:
+ *   - :slug validated against strict whitelist regex BEFORE any file/reader access (AC8).
+ *   - No traversal: kein '..', kein '\', kein Null-Byte.
+ *   - Read-only; no new secrets; no new authorization.
+ *   - Behind existing /api AccessGuard via server.js registration.
+ *
+ * @module retroRouter
+ */
+
+import { Router } from 'express';
+
+/**
+ * Whitelist for :slug in /api/retro/runs/:slug.
+ * Allows alphanumerics, dots, underscores, hyphens, and forward slashes
+ * (for multi-segment slugs like retro/PR-Q1234-coder-R01).
+ * Explicitly rejects '..', '\', null bytes.
+ *
+ * Spec AC8: ^[a-zA-Z0-9._/-]+$, no '..', no '\', no null byte.
+ */
+const VALID_SLUG_RE = /^[a-zA-Z0-9._/-]+$/;
+
+/**
+ * Validate a slug against the whitelist (AC8).
+ *
+ * @param {string} slug
+ * @returns {boolean}
+ */
+function isValidSlug(slug) {
+  if (!slug || typeof slug !== 'string') return false;
+  if (!VALID_SLUG_RE.test(slug)) return false;
+  if (slug.includes('..')) return false;
+  if (slug.includes('\\')) return false;
+  if (slug.includes('\0')) return false;
+  return true;
+}
+
+/**
+ * Create the retro router.
+ *
+ * @param {object} options
+ * @param {import('./RetroReader.js').RetroReader} options.retroReader
+ * @returns {import('express').Router}
+ */
+export function retroRouter({ retroReader }) {
+  const router = Router();
+
+  /**
+   * GET /api/retro/runs
+   *
+   * Returns the overview of all retro/train/teamLeader runs.
+   * No individual rule texts are included (AC1).
+   * Degrades to empty list (200) when LEARNINGS.md is missing (AC9).
+   */
+  router.get('/api/retro/runs', async (_req, res) => {
+    const result = await retroReader.getRuns();
+    res.json(result);
+  });
+
+  /**
+   * GET /api/retro/runs/:slug
+   *
+   * Returns the full report for one run (entries grouped by category).
+   *
+   * :slug must match VALID_SLUG_RE (whitelist — no '..', no backslash, no null byte).
+   * Validated BEFORE any file/reader access (AC8).
+   *
+   * Note: Express 5 (path-to-regexp 8) uses /*splat for multi-segment wildcards.
+   * The splat param is an array of path segments; we join them to reconstruct
+   * the full slug (e.g. ["retro", "PR-Q1234-coder-R01"] → "retro/PR-Q1234-coder-R01").
+   *
+   * Responds 404 for:
+   *   - Invalid slug (traversal attempt, disallowed chars)
+   *   - Unknown (valid but non-existent) slug
+   * Responds 200 with metric: null throughout when baseline.json is missing/empty (AC7).
+   */
+  router.get('/api/retro/runs/*splat', async (req, res) => {
+    // Reconstruct full slug from splat segments (Express 5 splat is an array)
+    const splatParts = Array.isArray(req.params.splat)
+      ? req.params.splat
+      : [req.params.splat];
+    const slug = splatParts.join('/');
+
+    // AC8: validate slug BEFORE any access
+    if (!isValidSlug(slug)) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+
+    const report = await retroReader.getRunReport(slug);
+    if (!report) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+
+    return res.json(report);
+  });
+
+  return router;
+}

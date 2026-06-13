@@ -1,5 +1,11 @@
 # Coder Lessons — dev-gui (newest first)
 
+## 2026-06-13 — retroRouter-Muster: Covers-Block in retroRouter.test.js braucht explizite AccessGuard-Note
+Der Covers-Block in `retroRouter.test.js` enthält `AC10 — Router is read-only; routes behind existing AccessGuard (documented, not re-tested here)` — das ist das korrekte Muster (coder.md Lesson 2026-06-09). Als Referenz für künftige reine Read-Only-Router: kein eigener Middleware-Test nötig, wenn der AccessGuard durch `app.use('/api', accessGuard)` global auf `/api/*` wirkt — stattdessen per-server.js-Inspektion dokumentieren. *[seen-in: #175 retroRouter.test.js; promoted: 2026-06-13]*
+
+## 2026-06-13 — Slug-Regex-Charakterklasse [a-zA-Z0-9._/-] erlaubt Slugs mit führendem Slash
+`/^[a-zA-Z0-9._/-]+$/` lässt Slugs wie `/etc/passwd` durch (regex-konform, kein `..`). Das ist kein ausnutzbarer Traversal-Bug, wenn der Slug ausschließlich als Vergleichswert (`r.pr === slug`) verwendet wird und niemals in Pfadkonstruktion (`join()`, `readFile()`) einfließt. Wenn ein Slug jedoch zukünftig in Pfadkonstruktion eingesetzt werden soll, muss `slug.startsWith('/')` explizit geprüft werden. Empfehlenswert: Regex um negative Lookahead für führenden Slash ergänzen: `/^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/`. *[seen-in: #175 retroRouter.js isValidSlug; promoted: 2026-06-13]*
+
 ## 2026-06-12 — PsEntry-Typedef bei mehreren Parse-Pfaden: alle optionalen Felder als `?` oder explizit `null` markieren
 Wenn ein `@typedef {object} PsEntry` ein neues Feld (`composeProject`) trägt, das NUR im `psAll()`-Parse-Pfad (`parsePsAllOutput`) befüllt wird, aber NICHT im `ps()`-Parse-Pfad (`parsePsOutput`), muss das Feld in der Typedef als optional oder mit `undefined`-Hinweis dokumentiert sein — z.B. `@property {string|null|undefined} composeProject`. Ohne diesen Hinweis behauptet die Typedef, alle PsEntry-Objekte hätten das Feld, aber `parsePsOutput` liefert Objekte ohne das Feld (JavaScript: `undefined`, nicht `null`). Konsumenten, die `entry.composeProject === null` prüfen, erhalten `undefined` und können sich fälschlich verhalten. Checkliste: nach Hinzufügen eines Felds zu einem Typedef `grep -n "parsePsOutput\|parsePsAllOutput"` ausführen und prüfen, ob alle Parse-Pfade das Feld setzen. *[seen-in: #164 VpsDockerControl PsEntry.composeProject fehlt in parsePsOutput; promoted: 2026-06-12]*
 
