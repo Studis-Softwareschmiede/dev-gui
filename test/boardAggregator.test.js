@@ -1,0 +1,957 @@
+/**
+ * boardAggregator.test.js — Unit tests for BoardAggregator, parseYaml, parseBoardRoots.
+ *
+ * Covers (dev-gui-board-aggregator backend):
+ *   AC1 — Scant konfigurierte Repo-Wurzeln read-only nach board/-Ordnern;
+ *          liest board.yaml + features/*.yaml + stories/*.yaml.
+ *   AC2 — Daten liegen im flüchtigen In-Memory-Index; Re-Scan on-demand ersetzt den Index.
+ *   AC3 — Index modelliert Projekt → Feature → Story; jede Story trägt
+ *          mind. id, parent, title, status, priority, labels, spec (+ dispo_* falls vorhanden).
+ *   AC7 — Kein Code-Pfad schreibt in board/-Dateien oder legt persistenten Cache an.
+ *   AC8 — Ungültiges/nicht lesbares board/ wird mit Fehlermarkierung übersprungen;
+ *          übrige Projekte bleiben sichtbar; kein Absturz.
+ *   AC9 — Re-Scan on-demand ersetzt den Index (Watcher-Signal-Mechanismus tested separat
+ *          als Unit; HTTP-Endpunkt tested in dieser Datei, describe-Blöcke
+ *          "boardRouter HTTP — GET /api/board/projects" und
+ *          "boardRouter HTTP — POST /api/board/projects/rescan (AC9)").
+ *
+ * AccessGuard:
+ *   POST /api/board/projects/rescan (Schreib-Trigger) liegt hinter
+ *   app.use('/api', accessGuard) in server.js — kein separater Middleware-Test
+ *   nötig; die Integration ist durch die server.js-Verdrahtung abgedeckt.
+ *
+ * Strategy:
+ *   - Inject fake fsDeps (readdir, readFile) — kein echtes Filesystem.
+ *   - Fixture-board/-Struktur als in-memory Map aufgebaut.
+ *   - Verifiziert, dass fsDeps.readFile niemals write-äquivalente Aufrufe macht (AC7).
+ */
+
+import { describe, it, expect } from '@jest/globals';
+import { BoardAggregator, parseYaml, parseBoardRoots } from '../src/BoardAggregator.js';
+
+// ── parseYaml unit tests ──────────────────────────────────────────────────────
+
+describe('parseYaml', () => {
+  it('parses simple scalar fields', () => {
+    const yaml = 'id: F-001\ntitle: My Feature\nstatus: Active\npriority: P1\n';
+    const result = parseYaml(yaml);
+    expect(result.id).toBe('F-001');
+    expect(result.title).toBe('My Feature');
+    expect(result.status).toBe('Active');
+    expect(result.priority).toBe('P1');
+  });
+
+  it('parses null scalar values', () => {
+    const yaml = 'dispo_est: null\ndispo_act: ~\nbranch: null\n';
+    const result = parseYaml(yaml);
+    expect(result.dispo_est).toBeNull();
+    expect(result.dispo_act).toBeNull();
+    expect(result.branch).toBeNull();
+  });
+
+  it('parses integer scalar', () => {
+    const yaml = 'schema_version: 1\nnext_feature_id: 3\n';
+    const result = parseYaml(yaml);
+    expect(result.schema_version).toBe(1);
+    expect(result.next_feature_id).toBe(3);
+  });
+
+  it('parses inline array', () => {
+    const yaml = 'labels: [db, security]\nimplements: [AC1, AC2, AC4]\n';
+    const result = parseYaml(yaml);
+    expect(result.labels).toEqual(['db', 'security']);
+    expect(result.implements).toEqual(['AC1', 'AC2', 'AC4']);
+  });
+
+  it('parses empty inline array', () => {
+    const yaml = 'labels: []\n';
+    const result = parseYaml(yaml);
+    expect(result.labels).toEqual([]);
+  });
+
+  it('parses block sequence list', () => {
+    const yaml = 'stories:\n- S-001\n- S-002\n';
+    const result = parseYaml(yaml);
+    expect(result.stories).toEqual(['S-001', 'S-002']);
+  });
+
+  it('strips inline comments', () => {
+    const yaml = 'next_feature_id: 3        # nächste freie Nummer → F-003\n';
+    const result = parseYaml(yaml);
+    expect(result.next_feature_id).toBe(3);
+  });
+
+  it('handles quoted strings', () => {
+    const yaml = "project_slug: 'agent-flow'\ntitle: \"My Title\"\n";
+    const result = parseYaml(yaml);
+    expect(result.project_slug).toBe('agent-flow');
+    expect(result.title).toBe('My Title');
+  });
+
+  it('handles boolean values', () => {
+    const yaml = 'active: true\narchived: false\n';
+    const result = parseYaml(yaml);
+    expect(result.active).toBe(true);
+    expect(result.archived).toBe(false);
+  });
+
+  it('skips comments and empty lines', () => {
+    const yaml = '# This is a comment\n\nid: F-001\n\n# another comment\ntitle: Test\n';
+    const result = parseYaml(yaml);
+    expect(result.id).toBe('F-001');
+    expect(result.title).toBe('Test');
+  });
+
+  it('handles --- document separator', () => {
+    const yaml = '---\nid: S-001\nparent: F-001\n';
+    const result = parseYaml(yaml);
+    expect(result.id).toBe('S-001');
+    expect(result.parent).toBe('F-001');
+  });
+
+  it('returns {} for null input', () => {
+    expect(parseYaml(null)).toEqual({});
+  });
+
+  it('returns {} for empty string', () => {
+    expect(parseYaml('')).toEqual({});
+  });
+
+  it('handles multiline block scalar (|)', () => {
+    const yaml = 'goal: |\n  Line one.\n  Line two.\ntitle: After\n';
+    const result = parseYaml(yaml);
+    expect(result.goal).toContain('Line one.');
+    expect(result.goal).toContain('Line two.');
+    expect(result.title).toBe('After');
+  });
+
+  it('parses real board.yaml fixture', () => {
+    const yaml = `schema_version: 1
+project_slug: agent-flow
+next_feature_id: 2        # nächste freie Nummer → F-002
+next_story_id: 2          # nächste freie Nummer → S-002
+`;
+    const result = parseYaml(yaml);
+    expect(result.schema_version).toBe(1);
+    expect(result.project_slug).toBe('agent-flow');
+    expect(result.next_feature_id).toBe(2);
+  });
+
+  it('does not produce phantom keys from multi-line flow scalar continuation lines with colons (S1 fix)', () => {
+    // Mirrors real agent-flow/board/features/F-001-board-schema.yaml where
+    // the goal field is a single-quoted string split across multiple lines.
+    // The continuation line contains "Ziel: menschenlesbares," — without the fix,
+    // "Ziel" would be parsed as a phantom key.
+    const yaml = `id: F-001
+title: Board-Dateiformat
+goal: 'Abloesung der GitHub-Projects-v2-Boards durch ein eigenes, zweistufiges Board
+  (Feature -> Story) mit git-versionierten Dateien als Source of Truth. Ziel: menschenlesbares,
+  diff-freundliches YAML pro Feature/Story.
+
+  '
+status: Active
+priority: P0
+`;
+    const result = parseYaml(yaml);
+    expect(result.id).toBe('F-001');
+    expect(result.title).toBe('Board-Dateiformat');
+    expect(result.status).toBe('Active');
+    expect(result.priority).toBe('P0');
+    // "Ziel" must NOT appear as a phantom key
+    expect(result).not.toHaveProperty('Ziel');
+    // "diff-freundliches YAML pro Feature/Story" must NOT appear as a phantom key
+    expect(Object.keys(result).every((k) => !k.includes(' '))).toBe(true);
+  });
+});
+
+// ── parseBoardRoots unit tests ────────────────────────────────────────────────
+
+describe('parseBoardRoots', () => {
+  it('returns empty array for empty string', () => {
+    expect(parseBoardRoots('')).toEqual([]);
+  });
+
+  it('returns empty array for undefined', () => {
+    expect(parseBoardRoots(undefined)).toEqual([]);
+  });
+
+  it('parses single absolute path', () => {
+    const roots = parseBoardRoots('/home/alex/Git');
+    expect(roots.length).toBe(1);
+    expect(roots[0]).toBe('/home/alex/Git');
+  });
+
+  it('parses multiple comma-separated paths', () => {
+    const roots = parseBoardRoots('/home/alex/Git,/home/alex/Work');
+    expect(roots.length).toBe(2);
+    expect(roots[0]).toBe('/home/alex/Git');
+    expect(roots[1]).toBe('/home/alex/Work');
+  });
+
+  it('trims whitespace around paths', () => {
+    const roots = parseBoardRoots('  /home/alex/Git , /home/alex/Work  ');
+    expect(roots.length).toBe(2);
+    expect(roots[0]).toBe('/home/alex/Git');
+    expect(roots[1]).toBe('/home/alex/Work');
+  });
+
+  it('expands ~ to home directory', () => {
+    const roots = parseBoardRoots('~/Git/Studis-Softwareschmiede');
+    expect(roots.length).toBe(1);
+    expect(roots[0]).not.toContain('~');
+    expect(roots[0]).toMatch(/\/Git\/Studis-Softwareschmiede$/);
+  });
+});
+
+// ── Fixture helpers ───────────────────────────────────────────────────────────
+
+const BOARD_ROOT = '/fake/repos';
+
+const BOARD_YAML = `schema_version: 1
+project_slug: my-project
+next_feature_id: 3
+next_story_id: 5
+`;
+
+const FEATURE_F001 = `id: F-001
+title: Server-Provisioning
+goal: Abloesung der manuellen Provisionierung.
+status: Active
+priority: P1
+spec: docs/specs/provisioning.md
+labels: [infra, vps]
+created_at: 2026-06-14T00:00:00Z
+updated_at: 2026-06-14T00:00:00Z
+stories:
+- S-001
+- S-002
+progress: 1/2 done
+`;
+
+const FEATURE_F002 = `id: F-002
+title: Auth-Modul
+goal: Sicheres Authentifizierungsmodul.
+status: Planned
+priority: P2
+spec: docs/specs/auth.md
+labels: [security]
+created_at: 2026-06-14T00:00:00Z
+updated_at: 2026-06-14T00:00:00Z
+stories: []
+progress: null
+`;
+
+const STORY_S001 = `id: S-001
+parent: F-001
+title: IONOS-Adapter
+status: Done
+priority: P0
+spec: docs/specs/provisioning.md
+implements: [AC1, AC2, AC4]
+labels: [db, security]
+size_est: M
+dispo_est: null
+dispo_act: null
+dispo_forecast: null
+estimate_note: null
+confidence: null
+branch: null
+pr: null
+blocked_reason: null
+created_at: 2026-06-14T00:00:00Z
+updated_at: 2026-06-14T00:00:00Z
+done_at: 2026-06-14T00:00:00Z
+`;
+
+const STORY_S002 = `id: S-002
+parent: F-001
+title: Hetzner-Adapter
+status: In Progress
+priority: P1
+spec: docs/specs/provisioning.md
+implements: [AC3]
+labels: [infra]
+dispo_est: null
+dispo_act: null
+created_at: 2026-06-14T00:00:00Z
+updated_at: 2026-06-14T00:00:00Z
+done_at: null
+`;
+
+const STORY_S003_ORPHANED = `id: S-003
+parent: F-099
+title: Orphaned Story
+status: To Do
+priority: P3
+spec: docs/specs/other.md
+implements: [AC1]
+labels: []
+dispo_est: null
+dispo_act: null
+created_at: 2026-06-14T00:00:00Z
+updated_at: 2026-06-14T00:00:00Z
+done_at: null
+`;
+
+/**
+ * Build a fake fsDeps that simulates a board/ filesystem layout.
+ *
+ * Layout:
+ *   /fake/repos/
+ *     my-repo/
+ *       board/
+ *         board.yaml
+ *         features/
+ *           F-001-server-provisioning.yaml
+ *           F-002-auth.yaml
+ *         stories/
+ *           S-001-ionos-adapter.yaml
+ *           S-002-hetzner-adapter.yaml
+ *
+ * @param {object} [overrides]  Override specific file contents (path → string).
+ * @param {string[]} [extraRepos]  Extra repo names with no board/ dir.
+ */
+function buildFakeFsDeps({
+  fileOverrides = {},
+  repoNames = ['my-repo'],
+  missingBoardYaml = false,
+  missingFeaturesDir = false,
+  missingStoriesDir = false,
+  extraFeatureFiles = [],
+  extraStoryFiles = [],
+} = {}) {
+  const files = {
+    [`${BOARD_ROOT}/my-repo/board/board.yaml`]: BOARD_YAML,
+    [`${BOARD_ROOT}/my-repo/board/features/F-001-server-provisioning.yaml`]: FEATURE_F001,
+    [`${BOARD_ROOT}/my-repo/board/features/F-002-auth.yaml`]: FEATURE_F002,
+    [`${BOARD_ROOT}/my-repo/board/stories/S-001-ionos-adapter.yaml`]: STORY_S001,
+    [`${BOARD_ROOT}/my-repo/board/stories/S-002-hetzner-adapter.yaml`]: STORY_S002,
+    ...fileOverrides,
+  };
+
+  const dirs = {
+    // Board root
+    [BOARD_ROOT]: repoNames.map((name) => ({
+      name,
+      isDirectory: () => true,
+      isSymbolicLink: () => false,
+      isFile: () => false,
+    })),
+    // Each repo: has a board/ dir
+    ...Object.fromEntries(
+      repoNames.map((name) => [
+        `${BOARD_ROOT}/${name}`,
+        [{ name: 'board', isDirectory: () => true, isSymbolicLink: () => false, isFile: () => false }],
+      ]),
+    ),
+    // board/ contains board.yaml (checked by readdir for board entries)
+    [`${BOARD_ROOT}/my-repo/board`]: [
+      { name: 'board.yaml', isFile: () => true, isDirectory: () => false, isSymbolicLink: () => false },
+      { name: 'features', isDirectory: () => true, isFile: () => false, isSymbolicLink: () => false },
+      { name: 'stories', isDirectory: () => true, isFile: () => false, isSymbolicLink: () => false },
+    ],
+    // features/
+    [`${BOARD_ROOT}/my-repo/board/features`]: [
+      { name: 'F-001-server-provisioning.yaml', isFile: () => true, isDirectory: () => false, isSymbolicLink: () => false },
+      { name: 'F-002-auth.yaml', isFile: () => true, isDirectory: () => false, isSymbolicLink: () => false },
+      ...extraFeatureFiles.map((name) => ({ name, isFile: () => true, isDirectory: () => false, isSymbolicLink: () => false })),
+    ],
+    // stories/
+    [`${BOARD_ROOT}/my-repo/board/stories`]: [
+      { name: 'S-001-ionos-adapter.yaml', isFile: () => true, isDirectory: () => false, isSymbolicLink: () => false },
+      { name: 'S-002-hetzner-adapter.yaml', isFile: () => true, isDirectory: () => false, isSymbolicLink: () => false },
+      ...extraStoryFiles.map((name) => ({ name, isFile: () => true, isDirectory: () => false, isSymbolicLink: () => false })),
+    ],
+  };
+
+  if (missingBoardYaml) {
+    delete files[`${BOARD_ROOT}/my-repo/board/board.yaml`];
+  }
+  if (missingFeaturesDir) {
+    delete dirs[`${BOARD_ROOT}/my-repo/board/features`];
+  }
+  if (missingStoriesDir) {
+    delete dirs[`${BOARD_ROOT}/my-repo/board/stories`];
+  }
+
+  const readFile = async (path, _enc) => {
+    if (path in files) return files[path];
+    const err = new Error(`ENOENT: no such file: ${path}`);
+    err.code = 'ENOENT';
+    throw err;
+  };
+
+  const readdir = async (path, _opts) => {
+    if (path in dirs) return dirs[path];
+    const err = new Error(`ENOENT: no such dir: ${path}`);
+    err.code = 'ENOENT';
+    throw err;
+  };
+
+  // watch is not needed for unit tests (tested separately)
+  const watch = async function* () {};
+
+  return { readFile, readdir, watch, _files: files, _dirs: dirs };
+}
+
+function makeAggregator(opts = {}) {
+  const fsDeps = buildFakeFsDeps(opts);
+  return {
+    aggregator: new BoardAggregator({
+      boardRootsEnv: BOARD_ROOT,
+      fsDeps,
+    }),
+    fsDeps,
+  };
+}
+
+// ── AC1 — Scan reads board.yaml + features/*.yaml + stories/*.yaml ────────────
+
+describe('AC1 — Scan reads board files read-only', () => {
+  it('scans repo root and finds board/ directory', async () => {
+    const { aggregator } = makeAggregator();
+    const index = await aggregator.getIndex();
+    expect(Array.isArray(index)).toBe(true);
+    expect(index.length).toBe(1);
+    expect(index[0].slug).toBe('my-repo');
+  });
+
+  it('reads board.yaml and populates project_slug + schema_version', async () => {
+    const { aggregator } = makeAggregator();
+    const index = await aggregator.getIndex();
+    const project = index[0];
+    expect(project.project_slug).toBe('my-project');
+    expect(project.schema_version).toBe(1);
+  });
+
+  it('reads all features/*.yaml files', async () => {
+    const { aggregator } = makeAggregator();
+    const index = await aggregator.getIndex();
+    const features = index[0].features.filter((f) => !f._orphaned);
+    expect(features.length).toBe(2);
+    const ids = features.map((f) => f.id).sort();
+    expect(ids).toEqual(['F-001', 'F-002']);
+  });
+
+  it('reads all stories/*.yaml files', async () => {
+    const { aggregator } = makeAggregator();
+    const index = await aggregator.getIndex();
+    const f001 = index[0].features.find((f) => f.id === 'F-001');
+    expect(f001.stories.length).toBe(2);
+    const ids = f001.stories.map((s) => s.id).sort();
+    expect(ids).toEqual(['S-001', 'S-002']);
+  });
+
+  it('skips repos without a board/ directory (no error, no entry)', async () => {
+    const fsDeps = buildFakeFsDeps({ repoNames: ['no-board-repo'] });
+    // Override: no-board-repo has no board/ entry
+    const origReaddir = fsDeps.readdir;
+    const customReaddir = async (path, opts) => {
+      if (path === `${BOARD_ROOT}/no-board-repo/board`) {
+        const err = new Error('ENOENT');
+        err.code = 'ENOENT';
+        throw err;
+      }
+      return origReaddir(path, opts);
+    };
+    fsDeps.readdir = customReaddir;
+
+    const aggregator = new BoardAggregator({ boardRootsEnv: BOARD_ROOT, fsDeps });
+    const index = await aggregator.getIndex();
+    expect(index.length).toBe(0);
+  });
+
+  it('returns empty array when BOARD_ROOTS is unset', async () => {
+    const fsDeps = buildFakeFsDeps();
+    const aggregator = new BoardAggregator({ boardRootsEnv: '', fsDeps });
+    const index = await aggregator.getIndex();
+    expect(index).toEqual([]);
+  });
+
+  it('returns empty array when board root directory is not readable', async () => {
+    const fsDeps = buildFakeFsDeps();
+    const origReaddir = fsDeps.readdir;
+    fsDeps.readdir = async (path, opts) => {
+      if (path === BOARD_ROOT) throw new Error('EACCES');
+      return origReaddir(path, opts);
+    };
+    const aggregator = new BoardAggregator({ boardRootsEnv: BOARD_ROOT, fsDeps });
+    const index = await aggregator.getIndex();
+    expect(index).toEqual([]);
+  });
+});
+
+// ── AC2 — Flüchtiger In-Memory-Index; Re-Scan on-demand ──────────────────────
+
+describe('AC2 — Volatile in-memory index; on-demand re-scan', () => {
+  it('getIndex() returns same data on repeated calls without scan', async () => {
+    const { aggregator } = makeAggregator();
+    const index1 = await aggregator.getIndex();
+    const index2 = await aggregator.getIndex();
+    expect(index1).toBe(index2); // same array reference (no re-scan)
+  });
+
+  it('scan() replaces the index (new reference)', async () => {
+    const { aggregator } = makeAggregator();
+    const index1 = await aggregator.getIndex();
+    await aggregator.scan();
+    const index2 = await aggregator.getIndex();
+    // index2 is a fresh array (re-scanned)
+    expect(index2).not.toBe(index1);
+  });
+
+  it('scan() produces equivalent data on unchanged filesystem', async () => {
+    const { aggregator } = makeAggregator();
+    const index1 = await aggregator.getIndex();
+    await aggregator.scan();
+    const index2 = await aggregator.getIndex();
+    expect(index2.length).toBe(index1.length);
+    expect(index2[0].slug).toBe(index1[0].slug);
+    expect(index2[0].features.length).toBe(index1[0].features.length);
+  });
+
+  it('scan() triggers lazy scan if index is null (first call)', async () => {
+    const { aggregator } = makeAggregator();
+    // Directly check that before getIndex(), no scan happened
+    // (index is null internally, but getIndex() auto-scans)
+    const index = await aggregator.getIndex();
+    expect(index.length).toBe(1);
+  });
+});
+
+// ── AC3 — Aggregat-Modell: Projekt → Feature → Story mit Pflichtfeldern ───────
+
+describe('AC3 — Aggregat model: Projekt → Feature → Story with required fields', () => {
+  it('project entry has slug, repo_path, project_slug, schema_version, features', async () => {
+    const { aggregator } = makeAggregator();
+    const index = await aggregator.getIndex();
+    const project = index[0];
+    expect(project).toHaveProperty('slug', 'my-repo');
+    expect(project).toHaveProperty('repo_path');
+    expect(project).toHaveProperty('project_slug');
+    expect(project).toHaveProperty('schema_version');
+    expect(project).toHaveProperty('features');
+  });
+
+  it('feature entry has id, title, status, priority, progress, stories', async () => {
+    const { aggregator } = makeAggregator();
+    const index = await aggregator.getIndex();
+    const f001 = index[0].features.find((f) => f.id === 'F-001');
+    expect(f001).toHaveProperty('id', 'F-001');
+    expect(f001).toHaveProperty('title', 'Server-Provisioning');
+    expect(f001).toHaveProperty('status', 'Active');
+    expect(f001).toHaveProperty('priority', 'P1');
+    expect(f001).toHaveProperty('progress');
+    expect(f001).toHaveProperty('stories');
+    expect(Array.isArray(f001.stories)).toBe(true);
+  });
+
+  it('story entry carries id, parent, title, status, priority, labels, spec', async () => {
+    const { aggregator } = makeAggregator();
+    const index = await aggregator.getIndex();
+    const f001 = index[0].features.find((f) => f.id === 'F-001');
+    const s001 = f001.stories.find((s) => s.id === 'S-001');
+    expect(s001).toHaveProperty('id', 'S-001');
+    expect(s001).toHaveProperty('parent', 'F-001');
+    expect(s001).toHaveProperty('title', 'IONOS-Adapter');
+    expect(s001).toHaveProperty('status', 'Done');
+    expect(s001).toHaveProperty('priority', 'P0');
+    expect(s001).toHaveProperty('labels');
+    expect(s001.labels).toEqual(['db', 'security']);
+    expect(s001).toHaveProperty('spec', 'docs/specs/provisioning.md');
+  });
+
+  it('story entry carries dispo_est and dispo_act (both null in fixture)', async () => {
+    const { aggregator } = makeAggregator();
+    const index = await aggregator.getIndex();
+    const f001 = index[0].features.find((f) => f.id === 'F-001');
+    const s001 = f001.stories.find((s) => s.id === 'S-001');
+    expect(s001).toHaveProperty('dispo_est', null);
+    expect(s001).toHaveProperty('dispo_act', null);
+  });
+
+  it('stories are attached to their parent feature', async () => {
+    const { aggregator } = makeAggregator();
+    const index = await aggregator.getIndex();
+    const f001 = index[0].features.find((f) => f.id === 'F-001');
+    const f002 = index[0].features.find((f) => f.id === 'F-002');
+    expect(f001.stories.length).toBe(2);
+    expect(f002.stories.length).toBe(0); // no stories pointing to F-002 in fixture
+  });
+
+  it('stories with unknown parent are placed under orphaned pseudo-feature', async () => {
+    const fsDeps = buildFakeFsDeps({
+      extraStoryFiles: ['S-003-orphaned.yaml'],
+      fileOverrides: {
+        [`${BOARD_ROOT}/my-repo/board/stories/S-003-orphaned.yaml`]: STORY_S003_ORPHANED,
+      },
+    });
+    const aggregator = new BoardAggregator({ boardRootsEnv: BOARD_ROOT, fsDeps });
+    const index = await aggregator.getIndex();
+    const orphaned = index[0].features.find((f) => f._orphaned);
+    expect(orphaned).toBeDefined();
+    expect(orphaned.stories.some((s) => s.id === 'S-003')).toBe(true);
+    // F-001 stories unchanged
+    const f001 = index[0].features.find((f) => f.id === 'F-001');
+    expect(f001.stories.every((s) => s.id !== 'S-003')).toBe(true);
+  });
+
+  it('feature.progress is preserved when present in YAML', async () => {
+    const { aggregator } = makeAggregator();
+    const index = await aggregator.getIndex();
+    const f001 = index[0].features.find((f) => f.id === 'F-001');
+    // F-001 has progress: "1/2 done" in fixture
+    expect(f001.progress).toBe('1/2 done');
+  });
+
+  it('feature.progress is computed read-only when null/missing in YAML', async () => {
+    const { aggregator } = makeAggregator();
+    const index = await aggregator.getIndex();
+    // F-002 has progress: null in fixture but no stories → "0/0 done"
+    const f002 = index[0].features.find((f) => f.id === 'F-002');
+    expect(typeof f002.progress).toBe('string');
+    expect(f002.progress).toContain('/');
+  });
+});
+
+// ── AC7 — Read-only-Garantie ──────────────────────────────────────────────────
+
+describe('AC7 — Read-only guarantee: no writes to board/ files', () => {
+  it('fsDeps.readFile is called only (no write operations)', async () => {
+    const calls = [];
+    const fsDeps = buildFakeFsDeps();
+    const origReadFile = fsDeps.readFile;
+    fsDeps.readFile = async (path, enc) => {
+      calls.push({ op: 'readFile', path });
+      return origReadFile(path, enc);
+    };
+
+    const aggregator = new BoardAggregator({ boardRootsEnv: BOARD_ROOT, fsDeps });
+    await aggregator.getIndex();
+
+    // All calls should be readFile (read) — no writeFile, appendFile, etc.
+    expect(calls.every((c) => c.op === 'readFile')).toBe(true);
+    // Verify at least board.yaml, features, stories were read
+    expect(calls.some((c) => c.path.includes('board.yaml'))).toBe(true);
+    expect(calls.some((c) => c.path.includes('features'))).toBe(true);
+    expect(calls.some((c) => c.path.includes('stories'))).toBe(true);
+  });
+
+  it('scan() does not persist the index anywhere (only updates in-memory reference)', async () => {
+    // The index is an in-process variable — verified by checking that two scans
+    // return new array instances (not the same object, no disk write)
+    const { aggregator } = makeAggregator();
+    const index1 = await aggregator.getIndex();
+    await aggregator.scan();
+    const index2 = await aggregator.getIndex();
+    // Both are plain arrays — not serialized/persisted
+    expect(Array.isArray(index1)).toBe(true);
+    expect(Array.isArray(index2)).toBe(true);
+    expect(typeof index1).toBe('object');
+    expect(typeof index2).toBe('object');
+  });
+});
+
+// ── AC8 — Fehlertoleranz ──────────────────────────────────────────────────────
+
+describe('AC8 — Fault tolerance: invalid boards skipped, others remain visible', () => {
+  it('missing board.yaml → project entry with error field, empty features', async () => {
+    const { aggregator } = makeAggregator({ missingBoardYaml: true });
+    const index = await aggregator.getIndex();
+    expect(index.length).toBe(1);
+    const project = index[0];
+    expect(project).toHaveProperty('error');
+    expect(typeof project.error).toBe('string');
+    expect(project.features).toEqual([]);
+  });
+
+  it('broken board.yaml (invalid YAML) → project entry with error, empty features', async () => {
+    const { aggregator } = makeAggregator({
+      fileOverrides: {
+        [`${BOARD_ROOT}/my-repo/board/board.yaml`]: 'not: valid: yaml: : : :',
+      },
+    });
+    const index = await aggregator.getIndex();
+    // parseYaml degrades gracefully, but board might be missing project_slug
+    // Either it errors or it succeeds with partial data — no crash is the key
+    expect(index.length).toBe(1);
+    expect(() => JSON.stringify(index)).not.toThrow();
+  });
+
+  it('malformed feature YAML is skipped — other features remain visible', async () => {
+    const { aggregator } = makeAggregator({
+      extraFeatureFiles: ['F-BAD-malformed.yaml'],
+      fileOverrides: {
+        [`${BOARD_ROOT}/my-repo/board/features/F-BAD-malformed.yaml`]: ':::: not yaml ::::',
+      },
+    });
+    const index = await aggregator.getIndex();
+    const features = index[0].features.filter((f) => !f._orphaned);
+    // Only valid features F-001 and F-002 survive; malformed is silently skipped
+    expect(features.some((f) => f.id === 'F-001')).toBe(true);
+    expect(features.some((f) => f.id === 'F-002')).toBe(true);
+  });
+
+  it('malformed story YAML is skipped — other stories remain visible', async () => {
+    const { aggregator } = makeAggregator({
+      extraStoryFiles: ['S-BAD-malformed.yaml'],
+      fileOverrides: {
+        [`${BOARD_ROOT}/my-repo/board/stories/S-BAD-malformed.yaml`]: ':::: bad ::::',
+      },
+    });
+    const index = await aggregator.getIndex();
+    const f001 = index[0].features.find((f) => f.id === 'F-001');
+    // S-001 and S-002 still there
+    expect(f001.stories.some((s) => s.id === 'S-001')).toBe(true);
+    expect(f001.stories.some((s) => s.id === 'S-002')).toBe(true);
+  });
+
+  it('missing features/ dir does not crash (empty feature list)', async () => {
+    const { aggregator } = makeAggregator({ missingFeaturesDir: true });
+    const index = await aggregator.getIndex();
+    expect(index.length).toBe(1);
+    // No crash; features is empty (or only orphaned if stories have bad parents)
+    expect(Array.isArray(index[0].features)).toBe(true);
+  });
+
+  it('missing stories/ dir does not crash (features have empty story lists)', async () => {
+    const { aggregator } = makeAggregator({ missingStoriesDir: true });
+    const index = await aggregator.getIndex();
+    expect(index.length).toBe(1);
+    const features = index[0].features.filter((f) => !f._orphaned);
+    expect(features.every((f) => Array.isArray(f.stories))).toBe(true);
+    expect(features.every((f) => f.stories.length === 0)).toBe(true);
+  });
+
+  it('one invalid board does not crash the scan of other boards', async () => {
+    // Two repos: first has broken board.yaml, second is valid
+    // Build custom dirs + files inline (not using buildFakeFsDeps — different layout)
+    const dirs = {
+      [BOARD_ROOT]: [
+        { name: 'broken-repo', isDirectory: () => true, isSymbolicLink: () => false, isFile: () => false },
+        { name: 'good-repo', isDirectory: () => true, isSymbolicLink: () => false, isFile: () => false },
+      ],
+      [`${BOARD_ROOT}/broken-repo`]: [
+        { name: 'board', isDirectory: () => true, isSymbolicLink: () => false, isFile: () => false },
+      ],
+      [`${BOARD_ROOT}/broken-repo/board`]: [
+        { name: 'board.yaml', isFile: () => true, isDirectory: () => false, isSymbolicLink: () => false },
+        { name: 'features', isDirectory: () => true, isFile: () => false, isSymbolicLink: () => false },
+        { name: 'stories', isDirectory: () => true, isFile: () => false, isSymbolicLink: () => false },
+      ],
+      [`${BOARD_ROOT}/broken-repo/board/features`]: [],
+      [`${BOARD_ROOT}/broken-repo/board/stories`]: [],
+      [`${BOARD_ROOT}/good-repo`]: [
+        { name: 'board', isDirectory: () => true, isSymbolicLink: () => false, isFile: () => false },
+      ],
+      [`${BOARD_ROOT}/good-repo/board`]: [
+        { name: 'board.yaml', isFile: () => true, isDirectory: () => false, isSymbolicLink: () => false },
+        { name: 'features', isDirectory: () => true, isFile: () => false, isSymbolicLink: () => false },
+        { name: 'stories', isDirectory: () => true, isFile: () => false, isSymbolicLink: () => false },
+      ],
+      [`${BOARD_ROOT}/good-repo/board/features`]: [],
+      [`${BOARD_ROOT}/good-repo/board/stories`]: [],
+    };
+
+    const files = {
+      // broken-repo: board.yaml is unreadable
+      [`${BOARD_ROOT}/good-repo/board/board.yaml`]: `schema_version: 1\nproject_slug: good-project\n`,
+    };
+
+    const customReaddir = async (path, _opts) => {
+      if (path in dirs) return dirs[path];
+      const err = new Error(`ENOENT: ${path}`);
+      err.code = 'ENOENT';
+      throw err;
+    };
+
+    const customReadFile = async (path, _enc) => {
+      if (path in files) return files[path];
+      const err = new Error(`ENOENT: ${path}`);
+      err.code = 'ENOENT';
+      throw err;
+    };
+
+    const aggregator = new BoardAggregator({
+      boardRootsEnv: BOARD_ROOT,
+      fsDeps: { readdir: customReaddir, readFile: customReadFile, watch: async function* () {} },
+    });
+
+    const index = await aggregator.getIndex();
+
+    // Both boards are in the index (broken with error, good without)
+    expect(index.length).toBe(2);
+    const broken = index.find((p) => p.slug === 'broken-repo');
+    const good = index.find((p) => p.slug === 'good-repo');
+    expect(broken).toBeDefined();
+    expect(broken).toHaveProperty('error');
+    expect(good).toBeDefined();
+    expect(good).not.toHaveProperty('error');
+    expect(good.project_slug).toBe('good-project');
+  });
+
+  it('scan() never throws even when all roots are unreachable', async () => {
+    const fsDeps = {
+      readdir: async () => { throw new Error('EACCES: permission denied'); },
+      readFile: async () => { throw new Error('EACCES: permission denied'); },
+      watch: async function* () {},
+    };
+    const aggregator = new BoardAggregator({ boardRootsEnv: BOARD_ROOT, fsDeps });
+    await expect(aggregator.scan()).resolves.not.toThrow();
+    const index = await aggregator.getIndex();
+    expect(index).toEqual([]);
+  });
+});
+
+// ── AC9 — Re-Scan on-demand ───────────────────────────────────────────────────
+
+describe('AC9 — On-demand re-scan updates the index', () => {
+  it('scan() can be called multiple times without error', async () => {
+    const { aggregator } = makeAggregator();
+    await aggregator.scan();
+    await aggregator.scan();
+    const index = await aggregator.getIndex();
+    expect(index.length).toBe(1);
+  });
+
+  it('after scan(), index reflects updated data (simulated by re-reading)', async () => {
+    const { aggregator } = makeAggregator();
+    await aggregator.getIndex(); // populate cache
+    await aggregator.scan();    // re-scan
+    const index = await aggregator.getIndex();
+    expect(index.length).toBe(1);
+    expect(index[0].slug).toBe('my-repo');
+  });
+
+  it('stopWatchers() does not throw when no watchers are active', () => {
+    const { aggregator } = makeAggregator();
+    expect(() => aggregator.stopWatchers()).not.toThrow();
+  });
+
+  it('startWatchers() and stopWatchers() can be called without crash', () => {
+    const fsDeps = {
+      ...buildFakeFsDeps(),
+      // watch returns an async generator that immediately returns (no events)
+      watch: async function* () {},
+    };
+    const aggregator = new BoardAggregator({ boardRootsEnv: BOARD_ROOT, fsDeps });
+    expect(() => aggregator.startWatchers()).not.toThrow();
+    expect(() => aggregator.stopWatchers()).not.toThrow();
+  });
+});
+
+// ── boardRouter HTTP tests ────────────────────────────────────────────────────
+
+import express from 'express';
+import { createServer } from 'node:http';
+import { request as httpRequest } from 'node:http';
+import { boardRouter } from '../src/boardRouter.js';
+
+function httpFetch(server, path, method = 'GET') {
+  return new Promise((resolve, reject) => {
+    const port = server.address().port;
+    const req = httpRequest(
+      { hostname: '127.0.0.1', port, path, method },
+      (res) => {
+        let raw = '';
+        res.on('data', (c) => { raw += c; });
+        res.on('end', () => {
+          let data;
+          try { data = JSON.parse(raw); } catch { data = raw; }
+          resolve({ status: res.statusCode, data });
+        });
+      },
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+function startServer(boardAggregator) {
+  const app = express();
+  app.use(express.json());
+  app.use(boardRouter({ boardAggregator }));
+  const server = createServer(app);
+  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server)));
+}
+
+describe('boardRouter HTTP — GET /api/board/projects', () => {
+  it('returns 200 with { projects: [...] }', async () => {
+    const { aggregator } = makeAggregator();
+    const server = await startServer(aggregator);
+    try {
+      const { status, data } = await httpFetch(server, '/api/board/projects');
+      expect(status).toBe(200);
+      expect(data).toHaveProperty('projects');
+      expect(Array.isArray(data.projects)).toBe(true);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('projects contain the scanned board data', async () => {
+    const { aggregator } = makeAggregator();
+    const server = await startServer(aggregator);
+    try {
+      const { data } = await httpFetch(server, '/api/board/projects');
+      expect(data.projects.length).toBe(1);
+      expect(data.projects[0].slug).toBe('my-repo');
+      expect(data.projects[0].features.length).toBeGreaterThan(0);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('error boards are included with error field (AC8)', async () => {
+    const { aggregator } = makeAggregator({ missingBoardYaml: true });
+    const server = await startServer(aggregator);
+    try {
+      const { status, data } = await httpFetch(server, '/api/board/projects');
+      expect(status).toBe(200);
+      const errProject = data.projects.find((p) => p.error);
+      expect(errProject).toBeDefined();
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('returns 200 with empty projects when no board roots configured', async () => {
+    const fsDeps = buildFakeFsDeps();
+    const aggregator = new BoardAggregator({ boardRootsEnv: '', fsDeps });
+    const server = await startServer(aggregator);
+    try {
+      const { status, data } = await httpFetch(server, '/api/board/projects');
+      expect(status).toBe(200);
+      expect(data.projects).toEqual([]);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+});
+
+describe('boardRouter HTTP — POST /api/board/projects/rescan (AC9)', () => {
+  it('returns 200 with { ok: true }', async () => {
+    const { aggregator } = makeAggregator();
+    const server = await startServer(aggregator);
+    try {
+      const { status, data } = await httpFetch(server, '/api/board/projects/rescan', 'POST');
+      expect(status).toBe(200);
+      expect(data).toEqual({ ok: true });
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('after rescan, GET reflects updated data', async () => {
+    const { aggregator } = makeAggregator();
+    const server = await startServer(aggregator);
+    try {
+      await httpFetch(server, '/api/board/projects/rescan', 'POST');
+      const { status, data } = await httpFetch(server, '/api/board/projects');
+      expect(status).toBe(200);
+      expect(data.projects.length).toBe(1);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+});

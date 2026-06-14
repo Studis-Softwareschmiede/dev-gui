@@ -164,6 +164,13 @@ services:
       # Nur setzen, wenn der Default 'dev-gui-master-key' nicht passt.
       # BW_ITEM_NAME: dev-gui-master-key
 
+      # ── Board-Aggregator (#127) ──────────────────────────────────────────────
+      # Komma-getrennte Wurzeln für BoardAggregator (AC1 dev-gui-board-aggregator).
+      # Tilde (~) wird zu $HOME des Containers expandiert.
+      # Beispiel: BOARD_ROOTS=~/Git/Studis-Softwareschmiede
+      # (Host-Pfad muss als Volume gemountet sein — analog WORKSPACE_DIR.)
+      # BOARD_ROOTS=~/Git/Studis-Softwareschmiede  # Komma-getrennte Wurzeln für Board-Aggregator (#127)
+
       # ── Workspace (workspace-repos / github-repo-clone) ─────────────────────
       # Container-Pfad, den GET /api/workspace/repos scannt und in den
       # POST /api/github/repos/clone klont. Der Host-Ordner wird unten als
