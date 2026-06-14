@@ -157,6 +157,11 @@ services:
       # Unset or empty = every valid Access identity may mutate (default).
       #   CRED_ADMIN_EMAILS: admin@example.com,ops@example.com
 
+      # ── Bitwarden Master-Key-Beschaffung (bitwarden-master-key-unlock) ──────
+      # Name des Bitwarden-Items, das den CRED_MASTER_KEY enthält.
+      # Nur setzen, wenn der Default 'dev-gui-master-key' nicht passt.
+      # BW_ITEM_NAME: dev-gui-master-key
+
       # ── Workspace (workspace-repos / github-repo-clone) ─────────────────────
       # Container-Pfad, den GET /api/workspace/repos scannt und in den
       # POST /api/github/repos/clone klont. Der Host-Ordner wird unten als

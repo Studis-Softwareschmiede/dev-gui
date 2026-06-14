@@ -64,6 +64,11 @@ RUN curl -fsSL https://github.com/cli/cli/releases/download/v2.62.0/gh_2.62.0_li
 RUN curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-27.3.1.tgz \
     | tar -xz -C /usr/local/bin --strip-components=1 docker/docker
 
+# bitwarden-master-key-unlock — Bitwarden CLI (bw) für serverseitige Master-Key-Beschaffung.
+# AC6: Passwort/Session-Token werden via env übergeben, NICHT als CLI-Arg (kein Argv-Leak).
+# Pinned version für reproduzierbare Builds; statisches npm-global-Binary.
+RUN npm install -g @bitwarden/cli@2026.5.0
+
 # Install claude CLI (Anthropic's official Claude Code CLI).
 # Installed globally so `claude` is on $PATH for PtyManager (SESSION_CMD).
 # No secrets baked in — credentials are mounted at runtime via a volume.
