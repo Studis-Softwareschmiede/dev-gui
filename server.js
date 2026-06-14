@@ -64,46 +64,29 @@ import { WebSocketServer } from 'ws';
 import { PtyManager } from './src/PtyManager.js';
 import { WsGateway } from './src/WsGateway.js';
 import { assertAccessConfig, createAccessGuard, createWsAccessGuard } from './src/AccessGuard.js';
-import { AuditStore, auditRouter } from './src/AuditStore.js';
+import { AuditStore } from './src/AuditStore.js';
 import { CommandService } from './src/CommandService.js';
-import { commandRouter } from './src/commandRouter.js';
 import { GitHubReader } from './src/GitHubReader.js';
 import { DockerReader } from './src/DockerReader.js';
-import { statusRouter } from './src/statusRouter.js';
-import { githubReposListRouter } from './src/githubReposListRouter.js';
 import { CredentialStore } from './src/CredentialStore.js';
-import { credentialsRouter } from './src/credentialsRouter.js';
-import { credentialStatusRouter } from './src/credentialStatusRouter.js';
-import { sshKeysRouter } from './src/sshKeysRouter.js';
-import { githubReposRouter } from './src/githubReposRouter.js';
 import { GitHubWriter } from './src/GitHubWriter.js';
 import { WorkspaceScanner } from './src/WorkspaceScanner.js';
 import { WorkspaceMutator } from './src/WorkspaceMutator.js';
-import { workspaceReposRouter } from './src/workspaceReposRouter.js';
 import { GitHubCloner } from './src/GitHubCloner.js';
-import { githubRepoCloneRouter } from './src/githubRepoCloneRouter.js';
-import { workspacePathRouter } from './src/workspacePathRouter.js';
 import { buildWorkspaceRootResolver } from './src/workspacePath.js';
 import { VpsProviderRegistry } from './src/vps/VpsProviderRegistry.js';
-import { vpsRouter } from './src/vpsRouter.js';
 import { CloudflareApi } from './src/cloudflare/CloudflareApi.js';
 import { LockoutGuard } from './src/cloudflare/LockoutGuard.js';
-import { cloudflareRouter } from './src/cloudflareRouter.js';
 import { VpsDockerControl } from './src/deploy/VpsDockerControl.js';
 import { DeployOrchestrator } from './src/deploy/DeployOrchestrator.js';
 import { ReconciliationJob } from './src/deploy/ReconciliationJob.js';
-import { deploymentsRouter } from './src/deploymentsRouter.js';
-import { versionRouter } from './src/versionRouter.js';
 import { AgentFlowReader } from './src/AgentFlowReader.js';
-import { teamRouter } from './src/teamRouter.js';
 import { RetroReader } from './src/RetroReader.js';
-import { retroRouter } from './src/retroRouter.js';
 import { StackRegistry } from './src/StackRegistry.js';
-import { stacksRouter } from './src/stacksRouter.js';
 import { VpsComposeControl } from './src/deploy/VpsComposeControl.js';
 import { StackDeployOrchestrator } from './src/deploy/StackDeployOrchestrator.js';
 import { BitwardenMasterKeyService } from './src/BitwardenMasterKeyService.js';
-import { credentialUnlockRouter } from './src/credentialUnlockRouter.js';
+import { mountRouters } from './src/routerLoader.js';
 
 const PORT = Number(process.env.PORT ?? 8080);
 
@@ -131,79 +114,42 @@ app.use(express.json({ limit: '100kb' }));
 // registered AFTER all API routes so it never masks an API 404.
 app.use(express.static(CLIENT_DIST));
 
-// ── AC1: Apply AccessGuard to every /api/* route ──────────────────────────────
+// ── AC1/AC5: Apply AccessGuard to every /api/* route ─────────────────────────
+// MUSS vor mountRouters() stehen — Reihenfolge-Invariante (AC5).
 const accessGuard = createAccessGuard();
 app.use('/api', accessGuard);
 
-// ── AC3: Audit store + endpoint ───────────────────────────────────────────────
+// ── Boundary-/Dependency-Konstruktion (Composition-Root) ─────────────────────
+// server.js bleibt Composition-Root: baut alle Boundaries und übergibt sie
+// via deps an den Auto-Loader. Kein globaler Service-Locator.
+
 export const auditStore = new AuditStore();
-app.use(auditRouter(auditStore));
 
 // ── PtyManager ────────────────────────────────────────────────────────────────
 const ptyManager = new PtyManager();
 ptyManager.start();
 
-// ── CommandService + Routes ───────────────────────────────────────────────────
+// ── CommandService ────────────────────────────────────────────────────────────
 const commandService = new CommandService({ ptyManager, auditStore });
-app.use(commandRouter(commandService));
 
-// ── Status route (AC1/AC2/AC4) ────────────────────────────────────────────────
+// ── GitHub / Docker Reader ────────────────────────────────────────────────────
 const githubReader = new GitHubReader();
 const dockerReader = new DockerReader();
-app.use(statusRouter({ githubReader, dockerReader }));
 
-// ── GitHub repos list (github-repos-overview AC1/AC2/AC6) ─────────────────────
-app.use(githubReposListRouter({ githubReader }));
-
-// ── Credentials route (settings-credentials) ─────────────────────────────────
-app.use(credentialsRouter(credentialStore, auditStore));
-
-// ── Credential-Bootstrap-Status (credential-bootstrap-status #184) ────────────
-// Lesender Endpunkt; kein Audit nötig (kein Mutations-/Geheimnis-Pfad).
-// Im gesperrten Zustand erreichbar — KEIN Master-Key-Voraussetzungs-Gate (AC6).
-app.use(credentialStatusRouter(credentialStore));
-
-// ── Bitwarden-Unlock-Endpunkt (credential-unlock-dialog #185) ─────────────────
-// Hoch-privilegiert: Access-Mauer (server.js) + CRED_ADMIN_EMAILS-Rollencheck + Audit-First.
-// Im gesperrten Zustand erreichbar — löst den Bootstrap aus.
-const bitwardenMasterKeyService = new BitwardenMasterKeyService({
-  credentialStore,
-  auditStore,
-});
-app.use(credentialUnlockRouter(credentialStore, auditStore, bitwardenMasterKeyService));
-
-// ── SSH-Keys route (settings-ssh-keys Stufe A) ────────────────────────────────
-app.use(sshKeysRouter(credentialStore, auditStore));
-
-// ── GitHub Repos write route (github-repo-create #59) ────────────────────────
+// ── Workspace ─────────────────────────────────────────────────────────────────
 const githubWriter = new GitHubWriter({ credentialStore });
-app.use(githubReposRouter(auditStore, githubWriter));
-
-// ── Workspace-Pfad-Konfiguration (workspace-path-config AC2–AC9) ──────────────
-app.use(workspacePathRouter(credentialStore, auditStore));
-
-// ── Workspace-Root-Resolver (gemeinsame Quelle der Wahrheit — AC5, AC9) ───────
-// Pro Operation aufgelöst (nicht beim Boot eingefroren).
 const resolveWorkspaceRoot = buildWorkspaceRootResolver(credentialStore);
-
-// ── Workspace Repos route (workspace-repos AC1, AC2, AC3, AC4, AC5, AC7, AC8) ──
 const workspaceScanner = new WorkspaceScanner({ workspaceRootResolver: resolveWorkspaceRoot });
 const workspaceMutator = new WorkspaceMutator({ workspaceRootResolver: resolveWorkspaceRoot });
-app.use(workspaceReposRouter(workspaceScanner, auditStore, workspaceMutator, credentialStore));
-
-// ── GitHub Repo Clone route (github-repo-clone #61) ───────────────────────────
 const githubCloner = new GitHubCloner({ credentialStore, workspaceRootResolver: resolveWorkspaceRoot });
-app.use(githubRepoCloneRouter(auditStore, githubCloner));
 
-// ── VPS Provider Boundary (vps-provider-boundary #95) ─────────────────────────
+// ── VPS ───────────────────────────────────────────────────────────────────────
 const vpsRegistry = new VpsProviderRegistry({ credentialStore });
-app.use(vpsRouter(vpsRegistry, auditStore));
 
-// ── Cloudflare API Boundary (view-cloudflare #107/#108, ADR-010/011) ─────────
+// ── Cloudflare ────────────────────────────────────────────────────────────────
 const cloudflareApi = new CloudflareApi({ credentialStore });
-app.use(cloudflareRouter(cloudflareApi, auditStore));
 
-// ── Deploy Boundary (deploy-lifecycle #110, ADR-012) ─────────────────────────
+// ── Deploy ────────────────────────────────────────────────────────────────────
 const lockoutGuard = new LockoutGuard();
 const vpsDockerControl = new VpsDockerControl(credentialStore);
 const deployOrchestrator = new DeployOrchestrator({
@@ -211,15 +157,9 @@ const deployOrchestrator = new DeployOrchestrator({
   cloudflareApi,
   lockoutGuard,
 });
-// VPS-Target-Map: configured VPS targets from environment (comma-separated).
-// Format: VPS_TARGETS="id1=host:user,id2=host:user" or empty (start with empty map).
-// The map keys are the vpsId strings sent by the frontend.
 const vpsTargets = buildVpsTargetsFromEnv(process.env.VPS_TARGETS);
 
 // ── ReconciliationJob (Capability C, ADR-013) ─────────────────────────────
-// Midnight UTC scheduler (node-internal, no external cron; AC1).
-// VPS configs: combine vpsTargets map with RECONCILE_TUNNEL_ID from env.
-// Format: RECONCILE_TUNNEL_IDS="vps-id1=tunnelId1,vps-id2=tunnelId2"
 const reconcileVpsConfigs = buildReconcileVpsConfigs(vpsTargets, process.env.RECONCILE_TUNNEL_IDS);
 const reconciliationJob = new ReconciliationJob({
   dockerControl: vpsDockerControl,
@@ -229,37 +169,89 @@ const reconciliationJob = new ReconciliationJob({
   auditStore,
   vpsConfigs: reconcileVpsConfigs,
 });
-// Start the midnight scheduler in the always-on process (ADR-002, AC1)
 reconciliationJob.startScheduler();
 
-app.use(deploymentsRouter(deployOrchestrator, auditStore, vpsTargets, reconciliationJob));
-
-// ── Stack-Registry + Stack-Deploy (stack-deploy-orchestration #160/#162) ──────
+// ── Stack ─────────────────────────────────────────────────────────────────────
 const stackRegistry = new StackRegistry(credentialStore);
-// VpsComposeControl: gleicher CredentialStore wie VpsDockerControl (kein zweiter SSH-Pfad).
 const vpsComposeControl = new VpsComposeControl(credentialStore);
-// StackDeployOrchestrator: Deploy-Saga (AC6/AC7/AC8/AC9/AC10).
-// Verwendet deployOrchestrator.addRouteOnly (geteilter ADR-012-Anlege-Pfad, kein Duplikat).
 const stackDeployOrchestrator = new StackDeployOrchestrator({
   composeControl: vpsComposeControl,
   orchestrator: deployOrchestrator,
   cloudflareApi,
   lockoutGuard,
 });
-app.use(stacksRouter(stackRegistry, auditStore, { stackDeployOrchestrator, vpsTargets }));
 
-// ── Build-Version endpoint (build-version) ────────────────────────────────────
-app.use(versionRouter());
+// ── Bitwarden Unlock ──────────────────────────────────────────────────────────
+const bitwardenMasterKeyService = new BitwardenMasterKeyService({
+  credentialStore,
+  auditStore,
+});
 
-// ── Team-Ansicht (team-view-backend AC1, AC4, AC9) ────────────────────────────
+// ── Team / Retro ──────────────────────────────────────────────────────────────
 const agentFlowReader = new AgentFlowReader();
-app.use(teamRouter({ agentFlowReader }));
-
-// ── Retro-Ansicht (retro-view-backend AC1–AC10) ───────────────────────────────
 const retroReader = new RetroReader({
   pluginRootResolver: () => agentFlowReader.resolvePluginRoot(),
 });
-app.use(retroRouter({ retroReader }));
+
+// ── deps-Objekt: alle Boundaries für den Auto-Loader ─────────────────────────
+const deps = {
+  auditStore,
+  ptyManager,
+  commandService,
+  githubReader,
+  dockerReader,
+  credentialStore,
+  bitwardenMasterKeyService,
+  githubWriter,
+  workspaceScanner,
+  workspaceMutator,
+  resolveWorkspaceRoot,
+  githubCloner,
+  vpsRegistry,
+  cloudflareApi,
+  deployOrchestrator,
+  vpsTargets,
+  reconciliationJob,
+  stackRegistry,
+  stackDeployOrchestrator,
+  agentFlowReader,
+  retroReader,
+};
+
+// ── AC1/AC2: Auto-Discovery + Mount aller API-Router ─────────────────────────
+// AccessGuard (oben) greift bereits; mountRouters() montiert alphabetisch-nach-order.
+// Kein manuelles pro-Router import/app.use() nötig — neuer Endpunkt = neue Datei.
+await mountRouters(app, deps);
+
+// ── AC5: SPA-Catch-All NACH allen API-Routern ─────────────────────────────────
+// Reihenfolge-Invariante: API-404 wird NICHT maskiert (AC5).
+// express 5 (path-to-regexp 8): Wildcards müssen benannt sein — '*' → '/*splat'.
+// '/*splat' matcht NICHT die Root '/', die liefert express.static (index.html) aus.
+app.get('/*splat', (_req, res) => {
+  res.sendFile(join(CLIENT_DIST, 'index.html'));
+});
+
+// ── HTTP server ───────────────────────────────────────────────────────────────
+const server = createServer(app);
+
+// ── AC1: WS upgrade interceptor (guards /ws/terminal before handshake) ────────
+const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
+new WsGateway(wss, ptyManager);
+
+const wsGuard = createWsAccessGuard(wss);
+
+server.on('upgrade', (req, socket, head) => {
+  if (req.url === '/ws/terminal') {
+    wsGuard(req, socket, head);
+  } else {
+    socket.destroy();
+  }
+});
+
+server.listen(PORT, () => {
+  // No secrets logged — only port
+  console.log(`dev-gui listening on :${PORT}`);
+});
 
 /**
  * Build the VPS-Target map from an environment variable.
@@ -305,48 +297,6 @@ function buildVpsTargetsFromEnv(envValue) {
   }
   return map;
 }
-
-/**
- * GET /api/session → { state, restarts, startedAt }
- */
-app.get('/api/session', (_req, res) => {
-  res.json({
-    state: ptyManager.state,
-    restarts: ptyManager.restarts,
-    startedAt: ptyManager.startedAt,
-  });
-});
-
-// ── SPA fallback: serve index.html for any non-API route ─────────────────────
-// Registered after all /api/* routes so API 404s are not masked.
-// /ws/terminal is handled via the upgrade event, not Express routing.
-// express 5 (path-to-regexp 8): Wildcards müssen benannt sein — '*' → '/*splat'.
-// '/*splat' matcht NICHT die Root '/', die liefert express.static (index.html) aus.
-app.get('/*splat', (_req, res) => {
-  res.sendFile(join(CLIENT_DIST, 'index.html'));
-});
-
-// ── HTTP server ───────────────────────────────────────────────────────────────
-const server = createServer(app);
-
-// ── AC1: WS upgrade interceptor (guards /ws/terminal before handshake) ────────
-const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
-new WsGateway(wss, ptyManager);
-
-const wsGuard = createWsAccessGuard(wss);
-
-server.on('upgrade', (req, socket, head) => {
-  if (req.url === '/ws/terminal') {
-    wsGuard(req, socket, head);
-  } else {
-    socket.destroy();
-  }
-});
-
-server.listen(PORT, () => {
-  // No secrets logged — only port
-  console.log(`dev-gui listening on :${PORT}`);
-});
 
 /**
  * Build the ReconciliationJob VPS config list from the existing vpsTargets map

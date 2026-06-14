@@ -22,13 +22,13 @@ const config = {
   // Ignore parallel agent worktrees: they live under .claude/worktrees/ and would
   // otherwise be scanned by the global test run, pulling in foreign (possibly red)
   // tests from other branches and corrupting the test gate.
-  testPathIgnorePatterns: ['/node_modules/', '/\\.claude/worktrees/'],
+  testPathIgnorePatterns: ['/node_modules/', '/\\.claude/worktrees/', '/test/\\.tmp-'],
 
   // Keep worktree module copies out of the haste map entirely: duplicate src/ copies
   // under .claude/worktrees/ pollute module resolution (duplicate manual mocks) and can
   // poison the shared transform cache (e.g. a file cached as CJS in one worktree, ESM in
   // main → "Cannot use import statement outside a module"). Pairs with testPathIgnorePatterns.
-  modulePathIgnorePatterns: ['/\\.claude/worktrees/'],
+  modulePathIgnorePatterns: ['/\\.claude/worktrees/', '/test/\\.tmp-'],
 
   // Module name mapper: silence CSS imports; redirect xterm to manual stubs
   moduleNameMapper: {

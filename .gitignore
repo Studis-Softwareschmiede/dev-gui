@@ -4,3 +4,4 @@ dist/
 build/
 client/dist/
 .claude/worktrees/
+test/.tmp-*/

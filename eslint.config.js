@@ -106,6 +106,6 @@ export default [
     },
   },
   {
-    ignores: ['node_modules/', 'dist/', 'build/', 'coverage/', 'client/dist/', '.claude/worktrees/'],
+    ignores: ['node_modules/', 'dist/', 'build/', 'coverage/', 'client/dist/', '.claude/worktrees/', 'test/.tmp-*/'],
   },
 ];
