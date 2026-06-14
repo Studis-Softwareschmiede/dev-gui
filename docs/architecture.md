@@ -499,7 +499,7 @@
 
 **Status:** ENTSCHIEDEN · 2026-06-14 · Entscheider: `architekt` (Betreiber-Entscheidungen bindend vorgegeben) · betrifft [[credential-runtime-unlock]], [[bitwarden-master-key-unlock]], [[credential-unlock-dialog]], [[credential-bootstrap-status]]. Baut auf ADR-007 (`CredentialStore`, AES-256-GCM/scrypt, `secrets.enc.json`, Fail-Fast, `CRED_ADMIN_EMAILS`), ADR-004 (Cloudflare Access als Mauer), `access-and-guardrails` (Audit/Floor). **Ändert ADR-007 nicht** — ergänzt nur einen Laufzeit-Lebenszyklus um den bisher rein boot-zeitlichen Master-Key.
 
-**Kontext.** Heute lädt der `CredentialStore` den Master-Key **nur beim Start** aus Env (`#loadMasterKeyFromEnv`/`#ensureKey`); fehlt er bei vorhandenem verschlüsseltem Store → Fail-Fast. Der Betreiber will einen **bequemen, sicheren** Weg, den `CRED_MASTER_KEY` über einen GUI-Dialog bereitzustellen, ohne den Key manuell auf den Server zu kopieren: dev-gui darf **gesperrt** starten und zur Laufzeit über einen **Bitwarden-Login** entsperrt werden; der Key wird in `.env` persistiert → Reboots sind danach autonom. Das bestehende **Zwei-Dateien-Modell** (`.env` Klartext mit Master-Key + Basis-Konfig; `secrets.enc.json` verschlüsselter Laufzeit-Store) bleibt **unverändert**; Bitwarden hütet **genau ein** Geheimnis: den Master-Key. Es gibt **keine** zweite GPG-/Passphrase-Ebene und **keine** Abschaffung des Stores.
+**Kontext.** Heute lädt der `CredentialStore` den Master-Key **nur beim Start** aus Env (`#loadMasterKeyFromEnv`/`#ensureKey`); fehlt er bei vorhandenem verschlüsseltem Store → Fail-Fast. Der Betreiber will einen **bequemen, sicheren** Weg, den `DEVGUI_CRED_MASTER_KEY` über einen GUI-Dialog bereitzustellen, ohne den Key manuell auf den Server zu kopieren: dev-gui darf **gesperrt** starten und zur Laufzeit über einen **Bitwarden-Login** entsperrt werden; der Key wird in `.env` persistiert → Reboots sind danach autonom. Das bestehende **Zwei-Dateien-Modell** (`.env` Klartext mit Master-Key + Basis-Konfig; `secrets.enc.json` verschlüsselter Laufzeit-Store) bleibt **unverändert**; Bitwarden hütet **genau ein** Geheimnis: den Master-Key. Es gibt **keine** zweite GPG-/Passphrase-Ebene und **keine** Abschaffung des Stores.
 
 **Entscheidung (bindend).**
 - **Locked/Unlocked-Lebenszyklus im `CredentialStore`.** Der Store bekommt einen expliziten Zustand: `locked` (kein Key im Prozess) | `unlocked` (Key geladen). Boot **ohne** Key **und** ohne verschlüsselte Einträge ⇒ `locked` **ohne** Abbruch (der Dienst nimmt Requests an, Credential-Features inaktiv). Der bestehende **Fail-Fast** (verschlüsselte `entries` UND kein Key) **bleibt** — er ist von „locked, leeres Store" zu unterscheiden.
@@ -523,3 +523,25 @@
 - Login-Daten + Master-Key in **keinem** Log/Audit/Response/WS/Argv/Bundle (testbar: Argv/Logs/Audit/Response enthalten die Werte nicht).
 - Unlock-Endpunkte: kein Access → 403; `CRED_ADMIN_EMAILS` gesetzt → nur gelistete; Audit-First (Audit-Write-Fehler → Aktion unterbleibt).
 - `GET /api/settings/credential-status` leak-frei, im `locked`-Zustand erreichbar, spiegelt Laufzeit-Unlock ohne Neustart.
+
+**Ergänzung: Zwei Bezugs-Modi, Entkopplung und Benennung** ([[credential-master-key-decoupling]], [[credential-key-status-transparency]], [[credential-key-flow]])
+
+*Entschieden mit Item #191/#192/#193; Datum: 2026-06-14.*
+
+- **Zwei Modi (explizit).**
+  - **(a) AUTONOM (Default):** Entrypoint/Bootstrap stellt den Store-Master-Key als Env (`DEVGUI_CRED_MASTER_KEY`) oder via `.env` bereit → Container startet `unlocked`, `keySource: "auto"` → Nacht-Jobs (ReconciliationJob, ADR-013) laufen ohne Interaktion.
+  - **(b) INTERAKTIV / Dialog-Recovery:** Ist kein autonomer Key vorhanden → Store startet `locked`, `keySource: "none"` → Bitwarden-Unlock-Dialog ([[credential-unlock-dialog]]) → `unlock(key, { persist: true })` setzt `keySource: "manual"` + persistiert `DEVGUI_CRED_MASTER_KEY=<wert>` in `.env` → nächster Reboot autonom (Modus a).
+
+- **Entkopplung `GPG_PASSPHRASE` vs. `DEVGUI_CRED_MASTER_KEY` (hart).**
+  - `GPG_PASSPHRASE` öffnet **ausschliesslich** `.env.gpg` (GitHub-Auth-Bootstrap via `ensure-gh-auth.sh`). Es fließt **unter keinen Umständen** in den Credential-Store.
+  - `DEVGUI_CRED_MASTER_KEY` öffnet **ausschliesslich** `secrets.enc.json` (via scrypt + AES-256-GCM). Es hat **keinen Bezug** zur GPG-Passphrase.
+  - Der frühere Entrypoint-Fallback `GPG_PASSPHRASE → CRED_MASTER_KEY` ist **entfernt** (AC4 von [[credential-master-key-decoupling]]). Ist kein dedizierter Store-Key vorhanden, bleibt der Store `locked` — kein impliziter Unlock über die GPG-Passphrase.
+
+- **Benennung (kanonisch).**
+  - Env-Var: **`DEVGUI_CRED_MASTER_KEY`** (primär), **`DEVGUI_CRED_MASTER_KEY_FILE`** (Datei-Fallback). Deprecated: `CRED_MASTER_KEY` / `CRED_MASTER_KEY_FILE` (Übergangs-Fallback, Warn-Log ohne Wert).
+  - Bitwarden-Item: **`dev-gui-cred-master-key`** (getrennt von `studis-softwareschmiede-gpg-passphrase`).
+  - `.env`-Persistenz-Schlüsselname: **`DEVGUI_CRED_MASTER_KEY`**.
+
+- **`keySource`-Enum** (neu, [[credential-key-status-transparency]]): `"auto"` (Boot-Env/`.env`) | `"manual"` (Runtime-Dialog) | `"none"` (locked). Wird von `GET /api/settings/credential-status` als `{ state, hasEncryptedEntries, keySource }` zurückgegeben; enthält **nie** den Key oder einen Wert.
+
+- **Detail-Referenz:** `docs/architecture/credential-key-flow.md` — Tabellen (Geheimnisse / Dateien / Ablauf), Mermaid-Diagramm beider Geheimnis-Ketten inkl. Dialog-Recovery-Pfad, vollständige Prioritätskette und Entkopplungs-Erklärung.
