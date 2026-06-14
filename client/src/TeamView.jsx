@@ -28,6 +28,15 @@
  *           nur über Farbe; kein dangerouslySetInnerHTML/innerHTML; keine externe Lib;
  *           keine Secrets; nur /api/team* aufgerufen.
  *
+ * team-entity-icons:
+ *   AC8  — NavItem rendert <EntityIcon> (aria-hidden) vor dem Namen; Name, aria-current und
+ *           Fokus-/Tastaturverhalten bleiben unverändert.
+ *   AC9  — DetailPane zeigt großes Kopf-Icon neben Titel (name/id) in Typ-Akzentfarbe.
+ *   AC10 — Chips (relatedSkills/relatedKnowledge/usedByAgents) zeigen Mini-<EntityIcon>
+ *           (aria-hidden) vor dem Label; Fokus/Tastatur/loadDetail-Verhalten unberührt.
+ *   AC11 — Alle Icons aria-hidden; keine neuen API-Aufrufe/Endpunkte/Datenfelder;
+ *           Icons leiten sich allein aus vorhandenem kind/id/group ab.
+ *
  * A11y (WCAG 2.1 AA):
  *   - Semantische Navigationsliste mit aria-label.
  *   - Sichtbarer Fokusring — KEIN outline:none (Coder-Lesson 2026-05-27).
@@ -47,6 +56,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { MarkdownLite } from './markdownLite.jsx';
+import { EntityIcon } from './icons/EntityIcon.jsx';
 
 // ── TeamView ──────────────────────────────────────────────────────────────────
 
@@ -329,6 +339,8 @@ function NavItem({ kind, item, isActive, onSelect }) {
         data-kind={kind}
         data-id={item.id}
       >
+        {/* AC8 — entity icon before name, decorative (aria-hidden on EntityIcon) */}
+        <EntityIcon kind={kind} id={item.id} group={item.group} size={16} />
         {item.name || item.id}
       </button>
     </li>
@@ -353,8 +365,11 @@ function DetailPane({ detail, kind, loadDetail }) {
 
   return (
     <article style={styles.article}>
-      {/* Title */}
-      <h2 style={styles.detailTitle}>{name || detail.id}</h2>
+      {/* Title — AC9: large head-icon beside the title, accent-colored per type */}
+      <div style={styles.detailTitleRow}>
+        <EntityIcon kind={kind} id={detail.id} group={group} size={28} />
+        <h2 style={styles.detailTitle}>{name || detail.id}</h2>
+      </div>
 
       {/* Metadata badges (AC4) */}
       <div style={styles.badgeRow} aria-label="Metadaten">
@@ -476,6 +491,8 @@ function RefChips({ heading, items, targetKind, onSelect }) {
               data-kind={targetKind}
               data-id={item.id}
             >
+              {/* AC10 — mini-icon before label, decorative (aria-hidden on EntityIcon) */}
+              <EntityIcon kind={targetKind} id={item.id} group={item.group} size={12} />
               {item.name || item.id}
             </button>
           </div>
@@ -632,9 +649,11 @@ const styles = {
     margin: '2px 0',
   },
 
-  // Nav button — Touch-Target ≥ 44px (AC8)
+  // Nav button — Touch-Target ≥ 44px (AC8); flex row for icon + name (AC8, team-entity-icons)
   navButton: {
-    display: 'block',
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
     width: '100%',
     minHeight: 44,
     padding: '10px 12px',
@@ -667,8 +686,16 @@ const styles = {
     color: '#e5e7eb',
   },
 
+  // AC9 — flex row: large head-icon + title, vertically centered, gap between
+  detailTitleRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 12,
+  },
+
   detailTitle: {
-    margin: '0 0 12px',
+    margin: 0,
     fontSize: 20,
     fontWeight: 700,
     color: '#e5e7eb',
@@ -734,8 +761,11 @@ const styles = {
 
   // Chip button — A11y: focus ring visible (no outline:none), Tastatur Enter/Space (native button)
   // Touch target: minHeight 32px + horizontal padding; spec allows ≥ 24 px with sufficient spacing.
+  // flex row for mini-icon + label (AC10, team-entity-icons).
   chip: {
-    display: 'inline-block',
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
     minHeight: 32,
     padding: '5px 12px',
     background: '#1e293b',
