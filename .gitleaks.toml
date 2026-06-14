@@ -1,0 +1,20 @@
+# .gitleaks.toml — Gitleaks-Konfiguration für dev-gui
+#
+# Warum test/ vom Secret-Scan ausgenommen ist:
+#   Test-Fixtures verwenden per Konvention ausschliesslich Dummy-Credentials
+#   (FAKE_*/TEST_*-Präfixe). Diese Werte sind hochentropische Base64-Strings,
+#   die gitleaks als false positive meldet, weil sie strukturell wie echte
+#   API-Keys aussehen — aber keinerlei Zugang zu Systemen gewähren.
+#
+#   WICHTIG: Echte Secrets gehören NIE in Testdateien. Diese Ausnahme gilt
+#   ausschliesslich für Dummy-Fixtures. Code-Review stellt sicher, dass keine
+#   echten Secrets unter dem Deckmantel "Test-Fixture" eingeschleust werden.
+#   Produktivcode (src/, Dockerfile, server.js, scripts/ usw.) bleibt
+#   vollständig gescannt — keine weiteren Pfadausnahmen.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Test-Fixtures: Dummy-Credentials mit FAKE_*/TEST_*-Praefixen"
+paths = ['''test/''']
