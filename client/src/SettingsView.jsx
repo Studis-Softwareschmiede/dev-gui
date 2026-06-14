@@ -60,6 +60,15 @@
  *   - Private-Key-Klartext wird NUR über den expliziten Export-Endpunkt bezogen (nie in normaler
  *     Sektion-Anzeige, nicht im State der Sektion-Komponente).
  *   - Rotation-Response enthält NUR newPublicKey + Status; nie den neuen oder alten Private-Key.
+ *   - E-Mail-OTP-Code (bitwarden-new-device-otp #204) wird nach Submit aus React-State verworfen;
+ *     kein console.log; autoComplete=one-time-code; nur via Request-Body an Backend.
+ *
+ * Bitwarden New-Device-Verification (bitwarden-new-device-otp #204 — AC5/AC6/AC7/AC9):
+ *   AC5  — email-otp-required/email-otp-invalid → EIGENES E-Mail-OTP-Feld (showEmailOtp-State),
+ *           textlich UNTERSCHIEDLICH vom TOTP-2FA-Fall; Fokusführung beim Erscheinen (AC9).
+ *   AC6  — email-otp-invalid → feldzugeordnete Fehlermeldung (aria-describedby/role=alert).
+ *   AC7  — OTP-Code nach Submit verworfen; autoComplete=one-time-code; kein Argv/Log/Audit-Leak.
+ *   AC9  — label/htmlFor, Fokusführung, type=text, autoComplete=one-time-code, Touch-Target ≥ 44 px.
  *
  * @param {{ onNavigate: (view: string) => void }} props
  */
@@ -149,19 +158,22 @@ async function fetchCredentialStatus(fetchImpl) {
 
 /**
  * POST /api/settings/credential-unlock
- * Body: { email, password, twofa?, create? }
- * AC3/AC4/AC5: Beschaffung / Erstellung / 2FA-Flow.
- * AC9: Login-Daten + Key erscheinen NICHT in Logs/Bundle.
+ * Body: { email, password, twofa?, emailOtp?, create? }
+ * AC3/AC4/AC5/AC5a: Beschaffung / Erstellung / 2FA-Flow / E-Mail-OTP-Flow.
+ * AC9 (credential-unlock-dialog) + AC7 (bitwarden-new-device-otp):
+ *   Login-Daten + Key + E-Mail-OTP erscheinen NICHT in Logs/Bundle/URL.
  *
- * @param {{ email: string, password: string, twofa?: string, create?: boolean }} params
+ * @param {{ email: string, password: string, twofa?: string, emailOtp?: string, create?: boolean }} params
  * @param {typeof fetch} [fetchImpl]
  * @returns {Promise<{ ok: boolean, state?: string, status?: string, errorClass?: string, error?: string, httpStatus: number }>}
  */
-async function postCredentialUnlock({ email, password, twofa, create }, fetchImpl) {
+async function postCredentialUnlock({ email, password, twofa, emailOtp, create }, fetchImpl) {
   const fn = fetchImpl ?? globalThis.fetch.bind(globalThis);
   // AC9: Credentials nur im Request-Body (nie in URL/Query)
   const body = { email, password };
   if (twofa && twofa.trim()) body.twofa = twofa.trim();
+  // AC7 (new-device-otp): emailOtp nur im Body, nie in URL/Query/Logs
+  if (emailOtp && emailOtp.trim()) body.emailOtp = emailOtp.trim();
   if (create === true) body.create = true;
   const res = await fn('/api/settings/credential-unlock', {
     method: 'POST',
@@ -2037,12 +2049,14 @@ function SshKeysSection({ sshKeys, setSshKeys, onSaved }) {
 /**
  * Modaler Unlock-Dialog für Bitwarden-Login + Store-Entsperrung.
  *
- * AC2  — E-Mail-, Master-Passwort- (type=password) und optionales 2FA-Feld;
- *         A11y: label/htmlFor, aria-describedby, role=alert, Fokus beim Öffnen.
- * AC3  — Submit ruft POST /api/settings/credential-unlock; Erfolg → onSuccess().
- * AC4  — not-found → explizites Erstellungs-Angebot; erst bei Bestätigung create:true.
- * AC5  — twofa-required/twofa-invalid → Fehlermeldung + 2FA-Feld erzwungen.
- * AC9  — Klartext nach Submit verworfen; kein console.log.
+ * AC2   — E-Mail-, Master-Passwort- (type=password) und optionales 2FA-Feld;
+ *          A11y: label/htmlFor, aria-describedby, role=alert, Fokus beim Öffnen.
+ * AC3   — Submit ruft POST /api/settings/credential-unlock; Erfolg → onSuccess().
+ * AC4   — not-found → explizites Erstellungs-Angebot; erst bei Bestätigung create:true.
+ * AC5   — twofa-required/twofa-invalid → Fehlermeldung + 2FA-Feld erzwungen (TOTP-Flow).
+ * AC5a  — email-otp-required/email-otp-invalid → EIGENES E-Mail-OTP-Feld mit eigener Meldung
+ *          (bitwarden-new-device-otp); textlich UNTERSCHIEDLICH von 2FA-Fall.
+ * AC9   — Klartext nach Submit verworfen; kein console.log.
  *
  * @param {{
  *   onSuccess: () => void,
@@ -2055,9 +2069,12 @@ function BitwardenUnlockDialog({ onSuccess, onClose, fetchFn }) {
   const [password, setPassword] = useState('');
   const [twofa, setTwofa] = useState('');
   const [showTwofa, setShowTwofa] = useState(false);
+  // AC5a (bitwarden-new-device-otp): eigener State für E-Mail-OTP — GETRENNT von TOTP-2FA
+  const [emailOtp, setEmailOtp] = useState('');
+  const [showEmailOtp, setShowEmailOtp] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
-  const [fieldError, setFieldError] = useState(null); // { field: 'email'|'password'|'twofa', msg }
+  const [fieldError, setFieldError] = useState(null); // { field: 'email'|'password'|'twofa'|'emailOtp', msg }
   // AC4: not-found → Erstellungs-Angebot; create-Mode bei Bestätigung
   const [showCreateOffer, setShowCreateOffer] = useState(false);
 
@@ -2065,6 +2082,7 @@ function BitwardenUnlockDialog({ onSuccess, onClose, fetchFn }) {
   const dialogBoxRef = useRef(null);    // inner dialog box (fokussierbarer Container)
   const emailRef = useRef(null);
   const twofaRef = useRef(null);
+  const emailOtpRef = useRef(null);     // AC9 (bitwarden-new-device-otp): Fokus auf OTP-Feld
   const errorRef = useRef(null);
 
   const DIALOG_TITLE_ID = 'bw-unlock-dialog-title';
@@ -2072,6 +2090,7 @@ function BitwardenUnlockDialog({ onSuccess, onClose, fetchFn }) {
   const EMAIL_ERROR_ID = 'bw-unlock-email-error';
   const PASSWORD_ERROR_ID = 'bw-unlock-password-error';
   const TWOFA_ERROR_ID = 'bw-unlock-twofa-error';
+  const EMAIL_OTP_ERROR_ID = 'bw-unlock-email-otp-error';
 
   // AC2: Fokus auf E-Mail-Feld beim Öffnen des Dialogs
   useEffect(() => {
@@ -2086,6 +2105,13 @@ function BitwardenUnlockDialog({ onSuccess, onClose, fetchFn }) {
       twofaRef.current.focus();
     }
   }, [showTwofa]);
+
+  // AC9 (bitwarden-new-device-otp): Fokus auf E-Mail-OTP-Feld wenn es erscheint
+  useEffect(() => {
+    if (showEmailOtp && emailOtpRef.current) {
+      emailOtpRef.current.focus();
+    }
+  }, [showEmailOtp]);
 
   // Fokus auf Fehlermeldung nach Submit-Fehler (A11y)
   const [pendingFocusError, setPendingFocusError] = useState(false);
@@ -2121,6 +2147,8 @@ function BitwardenUnlockDialog({ onSuccess, onClose, fetchFn }) {
           email: trimEmail,
           password: trimPassword,
           twofa: twofa.trim() || undefined,
+          // AC5a (bitwarden-new-device-otp): E-Mail-OTP-Code — NICHT geloggt (AC7)
+          emailOtp: emailOtp.trim() || undefined,
           create: opts.create === true ? true : undefined,
         },
         fetchFn,
@@ -2131,6 +2159,7 @@ function BitwardenUnlockDialog({ onSuccess, onClose, fetchFn }) {
       // AC9: Klartext nach Submit verwerfen
       setPassword('');
       setTwofa('');
+      setEmailOtp('');
       return;
     } finally {
       // Bedingungslos zurücksetzen — deckt Erfolg, Fehler und unerwarteten Throw ab
@@ -2142,6 +2171,7 @@ function BitwardenUnlockDialog({ onSuccess, onClose, fetchFn }) {
       // AC9: Klartext nach terminalem Submit verwerfen (Security-Floor)
       setPassword('');
       setTwofa('');
+      setEmailOtp('');
       // Kein console.log (AC9)
       onSuccess();
       return;
@@ -2155,16 +2185,29 @@ function BitwardenUnlockDialog({ onSuccess, onClose, fetchFn }) {
     }
 
     // AC9: Klartext nach terminalem Submit verwerfen (Security-Floor)
+    // E-Mail-OTP-Code wird nach Submit verworfen — nächster Versuch braucht neuen Code (AC7)
     setPassword('');
     setTwofa('');
+    setEmailOtp('');
 
-    // AC5: 2FA-Fehler → 2FA-Feld erzwingen + Fehlermeldung
+    // AC5: 2FA-Fehler → 2FA-Feld erzwingen + Fehlermeldung (TOTP-Flow — UNVERÄNDERT, AC4)
     if (!result.ok && (result.errorClass === 'twofa-required' || result.errorClass === 'twofa-invalid')) {
       setShowTwofa(true);
       const msg = result.errorClass === 'twofa-invalid'
         ? '2FA-Code ungültig oder abgelaufen. Bitte erneut eingeben.'
         : '2FA-Authentifizierung erforderlich. Bitte 2FA-Code eingeben.';
       setFieldError({ field: 'twofa', msg });
+      return;
+    }
+
+    // AC5a (bitwarden-new-device-otp): E-Mail-OTP-Fehler → EIGENES Feld einblenden
+    // Meldung textlich UNTERSCHIEDLICH vom 2FA-Fall (AC5 spec)
+    if (!result.ok && (result.errorClass === 'email-otp-required' || result.errorClass === 'email-otp-invalid')) {
+      setShowEmailOtp(true);
+      const msg = result.errorClass === 'email-otp-invalid'
+        ? 'Der eingegebene Code ist ungültig oder abgelaufen. Bitte erneut eingeben.'
+        : 'Bitwarden hat dir einen Einmalcode per E-Mail geschickt — bitte eingeben.';
+      setFieldError({ field: 'emailOtp', msg });
       return;
     }
 
@@ -2179,7 +2222,7 @@ function BitwardenUnlockDialog({ onSuccess, onClose, fetchFn }) {
     const msg = errorMessages[result.errorClass] ?? 'Unbekannter Fehler beim Entsperren.';
     setError(msg);
     setPendingFocusError(true);
-  }, [email, password, twofa, onSuccess, fetchFn]);
+  }, [email, password, twofa, emailOtp, onSuccess, fetchFn]);
 
   const handleSubmit = useCallback(() => {
     doSubmit({});
@@ -2197,6 +2240,8 @@ function BitwardenUnlockDialog({ onSuccess, onClose, fetchFn }) {
   const emailErrorId = fieldError?.field === 'email' ? EMAIL_ERROR_ID : undefined;
   const passwordErrorId = fieldError?.field === 'password' ? PASSWORD_ERROR_ID : undefined;
   const twofaErrorId = fieldError?.field === 'twofa' ? TWOFA_ERROR_ID : undefined;
+  // AC5a (bitwarden-new-device-otp): eigene Error-ID für E-Mail-OTP-Feld
+  const emailOtpErrorId = fieldError?.field === 'emailOtp' ? EMAIL_OTP_ERROR_ID : undefined;
 
   /**
    * S2/AC2: Fokus-Trap — hält Tab/Shift+Tab innerhalb der fokussierbaren Dialog-Elemente.
@@ -2398,6 +2443,37 @@ function BitwardenUnlockDialog({ onSuccess, onClose, fetchFn }) {
               >
                 2FA-Code eingeben
               </button>
+            )}
+
+            {/* AC5a (bitwarden-new-device-otp): EIGENES E-Mail-OTP-Feld —
+                Erscheint NUR bei email-otp-required/email-otp-invalid; getrennt vom TOTP-2FA-Feld.
+                Meldung ist textlich UNTERSCHIEDLICH vom 2FA-Fall (Spec AC5).
+                AC9 (new-device-otp): type=text, autoComplete=one-time-code (kein Passwort-Mgr);
+                code wird nach Submit verworfen (AC7). Touch-Target ≥ 44 px (AC9). */}
+            {showEmailOtp && (
+              <div style={unlockDialogStyles.fieldRow}>
+                <label htmlFor="bw-unlock-email-otp" style={unlockDialogStyles.label}>
+                  Einmalcode (E-Mail) <span style={unlockDialogStyles.optional}>(New Device Verification)</span>
+                </label>
+                <input
+                  id="bw-unlock-email-otp"
+                  ref={emailOtpRef}
+                  type="text"
+                  inputMode="numeric"
+                  value={emailOtp}
+                  onChange={(e) => setEmailOtp(e.target.value)}
+                  placeholder="Code aus der E-Mail eingeben"
+                  style={unlockDialogStyles.input}
+                  aria-describedby={emailOtpErrorId ?? (error ? ERROR_ID : undefined)}
+                  autoComplete="one-time-code"
+                  disabled={submitting}
+                />
+                {fieldError?.field === 'emailOtp' && (
+                  <p id={EMAIL_OTP_ERROR_ID} style={unlockDialogStyles.fieldError} role="alert">
+                    {fieldError.msg}
+                  </p>
+                )}
+              </div>
             )}
 
             {/* Submit-Button — aria-busy bei Ladezustand (AC2, Edge-Cases) */}

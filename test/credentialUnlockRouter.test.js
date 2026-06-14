@@ -1,9 +1,9 @@
 /**
- * credentialUnlockRouter.test.js — Tests für credential-unlock-dialog Backend (Item #185, AC3–AC9)
+ * credentialUnlockRouter.test.js — Tests für credential-unlock-dialog Backend (Item #185 + #204, AC3–AC9)
  *
  * Spec: docs/specs/credential-unlock-dialog.md
  *
- * Covers:
+ * Covers (credential-unlock-dialog #185):
  *   AC3  — POST mit gültigen Daten → 200 { ok: true, state: "unlocked" }; KEIN Key in Response
  *   AC4  — not-found → 200 { ok: false, status: "not-found" }; create:true → createMasterKey
  *   AC5  — twofa-required/twofa-invalid → 401 { ok: false, errorClass }
@@ -11,6 +11,13 @@
  *   AC7  — kein gültiger Access → 403; nicht in CRED_ADMIN_EMAILS → 403
  *   AC8  — Audit-First: Eintrag VOR Aktion; Audit-Fehler → Aktion unterbleibt (500)
  *   AC9  — Kein Key/Login-Daten in Response, kein Secret-Leak
+ *
+ * Covers (bitwarden-new-device-otp #204):
+ *   AC1  — email-otp-required → 401 { errorClass: "email-otp-required" }, unterscheidbar von twofa-required;
+ *           emailOtp aus Body wird an acquireMasterKey/createMasterKey weitergeleitet
+ *   AC3  — email-otp-invalid → 401 { errorClass: "email-otp-invalid" }, unterscheidbar von twofa-invalid
+ *   AC4  — twofa-required/twofa-invalid bleiben unverändert (Regression); emailOtp-Body wird korrekt weitergeleitet
+ *   AC7  — emailOtp erscheint nicht in Response, Audit-Einträgen oder Fehler-Response
  *
  * Strategie:
  *   - HTTP-Integration via Express + AccessGuard-Dev-Bypass (DEV_NO_ACCESS=1)
@@ -669,5 +676,285 @@ describe('POST /api/settings/credential-unlock — AC9: kein Secret-Leak in Resp
     expect(res.status).toBe(400);
     const bodyStr = JSON.stringify(res.body);
     expect(bodyStr).not.toContain('secret-pw');
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// bitwarden-new-device-otp — AC1–AC3, AC4, AC7 (Router-Ebene)
+// ══════════════════════════════════════════════════════════════════════════════
+
+describe('POST /api/settings/credential-unlock — bitwarden-new-device-otp AC1: email-otp-required', () => {
+  let server, port;
+
+  beforeEach(async () => {
+    process.env.DEV_NO_ACCESS = '1';
+  });
+
+  afterEach(async () => {
+    if (server) await closeServer(server);
+    server = null;
+    delete process.env.DEV_NO_ACCESS;
+  });
+
+  it('OTP-AC1 — email-otp-required → 401 { ok: false, errorClass: "email-otp-required" }', async () => {
+    const credStore = makeFakeCredStore({ state: 'locked', hasEncryptedEntries: false });
+    const auditStore = makeFakeAuditStore();
+    const bwService = makeFakeBwService({
+      acquireResult: { status: 'error', errorClass: 'email-otp-required', reason: 'Neues Gerät' },
+    });
+    const app = makeApp(credStore, auditStore, bwService);
+    ({ server, port } = await startServer(app));
+
+    const res = await httpPost(port, '/api/settings/credential-unlock', VALID_BODY);
+    expect(res.status).toBe(401);
+    expect(res.body.ok).toBe(false);
+    expect(res.body.errorClass).toBe('email-otp-required');
+  });
+
+  it('OTP-AC1 — email-otp-required ist UNTERSCHEIDBAR von twofa-required (unterschiedliche errorClass)', async () => {
+    const credStore = makeFakeCredStore({ state: 'locked', hasEncryptedEntries: false });
+    const auditStore = makeFakeAuditStore();
+    const bwServiceEmailOtp = makeFakeBwService({
+      acquireResult: { status: 'error', errorClass: 'email-otp-required', reason: 'Neues Gerät' },
+    });
+    const bwServiceTwofa = makeFakeBwService({
+      acquireResult: { status: 'error', errorClass: 'twofa-required', reason: '2FA nötig' },
+    });
+
+    const appEmailOtp = makeApp(credStore, makeFakeAuditStore(), bwServiceEmailOtp);
+    const appTwofa = makeApp(credStore, auditStore, bwServiceTwofa);
+
+    const { server: s1, port: p1 } = await startServer(appEmailOtp);
+    const { server: s2, port: p2 } = await startServer(appTwofa);
+
+    try {
+      const [resEmailOtp, resTwofa] = await Promise.all([
+        httpPost(p1, '/api/settings/credential-unlock', VALID_BODY),
+        httpPost(p2, '/api/settings/credential-unlock', VALID_BODY),
+      ]);
+
+      expect(resEmailOtp.body.errorClass).toBe('email-otp-required');
+      expect(resTwofa.body.errorClass).toBe('twofa-required');
+      expect(resEmailOtp.body.errorClass).not.toBe(resTwofa.body.errorClass);
+    } finally {
+      await closeServer(s1);
+      await closeServer(s2);
+    }
+  });
+
+  it('OTP-AC1 — emailOtp aus Body wird an acquireMasterKey weitergeleitet', async () => {
+    const credStore = makeFakeCredStore({ state: 'unlocked', hasEncryptedEntries: false });
+    const auditStore = makeFakeAuditStore();
+    const bwService = makeFakeBwService({ acquireResult: { status: 'found' } });
+    const app = makeApp(credStore, auditStore, bwService);
+    ({ server, port } = await startServer(app));
+
+    await httpPost(port, '/api/settings/credential-unlock', { ...VALID_BODY, emailOtp: '847291' });
+    expect(bwService._calls.acquire).toHaveLength(1);
+    expect(bwService._calls.acquire[0].emailOtp).toBe('847291');
+  });
+
+  it('OTP-AC1 — emailOtp wird auch an createMasterKey weitergeleitet (create:true)', async () => {
+    const credStore = makeFakeCredStore({ state: 'unlocked', hasEncryptedEntries: false });
+    const auditStore = makeFakeAuditStore();
+    const bwService = makeFakeBwService({ createResult: { status: 'created' } });
+    const app = makeApp(credStore, auditStore, bwService);
+    ({ server, port } = await startServer(app));
+
+    await httpPost(port, '/api/settings/credential-unlock', { ...VALID_BODY, emailOtp: '123456', create: true });
+    expect(bwService._calls.create).toHaveLength(1);
+    expect(bwService._calls.create[0].emailOtp).toBe('123456');
+  });
+});
+
+describe('POST /api/settings/credential-unlock — bitwarden-new-device-otp AC3: email-otp-invalid', () => {
+  let server, port;
+
+  beforeEach(async () => {
+    process.env.DEV_NO_ACCESS = '1';
+  });
+
+  afterEach(async () => {
+    if (server) await closeServer(server);
+    server = null;
+    delete process.env.DEV_NO_ACCESS;
+  });
+
+  it('OTP-AC3 — email-otp-invalid → 401 { ok: false, errorClass: "email-otp-invalid" }', async () => {
+    const credStore = makeFakeCredStore({ state: 'locked', hasEncryptedEntries: false });
+    const auditStore = makeFakeAuditStore();
+    const bwService = makeFakeBwService({
+      acquireResult: { status: 'error', errorClass: 'email-otp-invalid', reason: 'OTP falsch' },
+    });
+    const app = makeApp(credStore, auditStore, bwService);
+    ({ server, port } = await startServer(app));
+
+    const res = await httpPost(port, '/api/settings/credential-unlock', { ...VALID_BODY, emailOtp: 'wrong' });
+    expect(res.status).toBe(401);
+    expect(res.body.ok).toBe(false);
+    expect(res.body.errorClass).toBe('email-otp-invalid');
+  });
+
+  it('OTP-AC3 — email-otp-invalid ist UNTERSCHEIDBAR von twofa-invalid', async () => {
+    const credStore = makeFakeCredStore({ state: 'locked', hasEncryptedEntries: false });
+    const bwServiceEmailOtp = makeFakeBwService({
+      acquireResult: { status: 'error', errorClass: 'email-otp-invalid', reason: 'OTP falsch' },
+    });
+    const bwServiceTwofa = makeFakeBwService({
+      acquireResult: { status: 'error', errorClass: 'twofa-invalid', reason: '2FA falsch' },
+    });
+
+    const { server: s1, port: p1 } = await startServer(makeApp(credStore, makeFakeAuditStore(), bwServiceEmailOtp));
+    const { server: s2, port: p2 } = await startServer(makeApp(credStore, makeFakeAuditStore(), bwServiceTwofa));
+
+    try {
+      const [resEmailOtp, resTwofa] = await Promise.all([
+        httpPost(p1, '/api/settings/credential-unlock', { ...VALID_BODY, emailOtp: 'wrong' }),
+        httpPost(p2, '/api/settings/credential-unlock', { ...VALID_BODY, twofa: '000000' }),
+      ]);
+
+      expect(resEmailOtp.body.errorClass).toBe('email-otp-invalid');
+      expect(resTwofa.body.errorClass).toBe('twofa-invalid');
+      expect(resEmailOtp.body.errorClass).not.toBe(resTwofa.body.errorClass);
+    } finally {
+      await closeServer(s1);
+      await closeServer(s2);
+    }
+  });
+});
+
+describe('POST /api/settings/credential-unlock — bitwarden-new-device-otp AC4: TOTP-Regression', () => {
+  let server, port;
+
+  beforeEach(async () => {
+    process.env.DEV_NO_ACCESS = '1';
+  });
+
+  afterEach(async () => {
+    if (server) await closeServer(server);
+    server = null;
+    delete process.env.DEV_NO_ACCESS;
+  });
+
+  it('OTP-AC4 — twofa-required bleibt 401/twofa-required (unverändert)', async () => {
+    const credStore = makeFakeCredStore({ state: 'locked', hasEncryptedEntries: false });
+    const auditStore = makeFakeAuditStore();
+    const bwService = makeFakeBwService({
+      acquireResult: { status: 'error', errorClass: 'twofa-required', reason: '2FA nötig' },
+    });
+    const app = makeApp(credStore, auditStore, bwService);
+    ({ server, port } = await startServer(app));
+
+    const res = await httpPost(port, '/api/settings/credential-unlock', VALID_BODY);
+    expect(res.status).toBe(401);
+    expect(res.body.errorClass).toBe('twofa-required');
+    expect(res.body.errorClass).not.toBe('email-otp-required');
+  });
+
+  it('OTP-AC4 — twofa-invalid bleibt 401/twofa-invalid (unverändert)', async () => {
+    const credStore = makeFakeCredStore({ state: 'locked', hasEncryptedEntries: false });
+    const auditStore = makeFakeAuditStore();
+    const bwService = makeFakeBwService({
+      acquireResult: { status: 'error', errorClass: 'twofa-invalid', reason: '2FA falsch' },
+    });
+    const app = makeApp(credStore, auditStore, bwService);
+    ({ server, port } = await startServer(app));
+
+    const res = await httpPost(port, '/api/settings/credential-unlock', { ...VALID_BODY, twofa: '123456' });
+    expect(res.status).toBe(401);
+    expect(res.body.errorClass).toBe('twofa-invalid');
+    expect(res.body.errorClass).not.toBe('email-otp-invalid');
+  });
+});
+
+describe('POST /api/settings/credential-unlock — bitwarden-new-device-otp AC7: kein OTP-Leak', () => {
+  let server, port;
+
+  beforeEach(async () => {
+    process.env.DEV_NO_ACCESS = '1';
+  });
+
+  afterEach(async () => {
+    if (server) await closeServer(server);
+    server = null;
+    delete process.env.DEV_NO_ACCESS;
+  });
+
+  it('OTP-AC7 — emailOtp erscheint NICHT in der Response (keine Reflexion)', async () => {
+    const FAKE_OTP = '847291';
+    const credStore = makeFakeCredStore({ state: 'unlocked', hasEncryptedEntries: false });
+    const auditStore = makeFakeAuditStore();
+    const bwService = makeFakeBwService({ acquireResult: { status: 'found' } });
+    const app = makeApp(credStore, auditStore, bwService);
+    ({ server, port } = await startServer(app));
+
+    const res = await httpPost(port, '/api/settings/credential-unlock', { ...VALID_BODY, emailOtp: FAKE_OTP });
+    const bodyStr = JSON.stringify(res.body);
+    expect(bodyStr).not.toContain(FAKE_OTP);
+  });
+
+  it('OTP-AC7 — emailOtp erscheint NICHT in Audit-Einträgen', async () => {
+    const FAKE_OTP = '847291';
+    const credStore = makeFakeCredStore({ state: 'unlocked', hasEncryptedEntries: false });
+    const auditStore = makeFakeAuditStore();
+    const bwService = makeFakeBwService({ acquireResult: { status: 'found' } });
+    const app = makeApp(credStore, auditStore, bwService);
+    ({ server, port } = await startServer(app));
+
+    await httpPost(port, '/api/settings/credential-unlock', { ...VALID_BODY, emailOtp: FAKE_OTP });
+    const auditJson = JSON.stringify(auditStore._records);
+    expect(auditJson).not.toContain(FAKE_OTP);
+  });
+
+  it('OTP-AC7 — email-otp-required Fehler-Response enthält keine Geheimnis-Daten', async () => {
+    const credStore = makeFakeCredStore({ state: 'locked', hasEncryptedEntries: false });
+    const auditStore = makeFakeAuditStore();
+    const bwService = makeFakeBwService({
+      acquireResult: { status: 'error', errorClass: 'email-otp-required', reason: 'geheimer-otp-grund' },
+    });
+    const app = makeApp(credStore, auditStore, bwService);
+    ({ server, port } = await startServer(app));
+
+    const res = await httpPost(port, '/api/settings/credential-unlock', VALID_BODY);
+    const bodyStr = JSON.stringify(res.body);
+    // 'reason' darf NICHT in der Response erscheinen
+    expect(bodyStr).not.toContain('geheimer-otp-grund');
+    expect(bodyStr).not.toContain('master-password');
+    // Nur ok + errorClass
+    expect(res.body.ok).toBe(false);
+    expect(res.body.errorClass).toBe('email-otp-required');
+  });
+
+  it('OTP-AC7 — email-otp-invalid Fehler-Response enthält keine Geheimnis-Daten', async () => {
+    const FAKE_OTP = '847291';
+    const credStore = makeFakeCredStore({ state: 'locked', hasEncryptedEntries: false });
+    const auditStore = makeFakeAuditStore();
+    const bwService = makeFakeBwService({
+      acquireResult: { status: 'error', errorClass: 'email-otp-invalid', reason: 'geheimer-invalid-grund' },
+    });
+    const app = makeApp(credStore, auditStore, bwService);
+    ({ server, port } = await startServer(app));
+
+    const res = await httpPost(port, '/api/settings/credential-unlock', { ...VALID_BODY, emailOtp: FAKE_OTP });
+    const bodyStr = JSON.stringify(res.body);
+    expect(bodyStr).not.toContain(FAKE_OTP);
+    expect(bodyStr).not.toContain('geheimer-invalid-grund');
+    expect(res.body.ok).toBe(false);
+    expect(res.body.errorClass).toBe('email-otp-invalid');
+  });
+
+  it('OTP-AC7 — Passwort erscheint NICHT in Response bei email-otp-* Fehler', async () => {
+    const credStore = makeFakeCredStore({ state: 'locked', hasEncryptedEntries: false });
+    const auditStore = makeFakeAuditStore();
+    const bwService = makeFakeBwService({
+      acquireResult: { status: 'error', errorClass: 'email-otp-required', reason: 'nötig' },
+    });
+    const app = makeApp(credStore, auditStore, bwService);
+    ({ server, port } = await startServer(app));
+
+    const res = await httpPost(port, '/api/settings/credential-unlock', VALID_BODY);
+    const bodyStr = JSON.stringify(res.body);
+    expect(bodyStr).not.toContain('master-password');
+    expect(bodyStr).not.toContain('user@example.com');
   });
 });

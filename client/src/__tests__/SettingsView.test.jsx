@@ -1,7 +1,7 @@
 /**
  * SettingsView.test.jsx — Unit-Tests für SettingsView (Credentials AC1–AC8, SSH-Keys AC1–AC6,
  * Workspace-Pfad AC1 + UI-Anteil AC3, SSH-Keypair-Generierung + Export AC1/AC3/AC4/AC6/AC7/AC8,
- * SSH-Key-Rotation AC1/AC5/AC7 — #119).
+ * SSH-Key-Rotation AC1/AC5/AC7 — #119, bitwarden-new-device-otp Frontend AC1/AC3–AC7/AC9 — #204).
  *
  * Covers (settings-credentials + settings-shell):
  *   AC1  — Credential-Felder mit Status (gesetzt/nicht gesetzt); kein Klartext
@@ -61,6 +61,21 @@
  *   AC9  — Passwort-Feld type=password/autoComplete=off (Frontend-Floor, testbar via DOM-Attribute).
  *   AC10 — Nach erfolgreichem Unlock: Dialog geschlossen, Unlock-Bereich verschwindet, Status neu geladen.
  * Backend-ACs (AC3/AC6/AC7/AC8) sind in Backend-Tests abgedeckt, nicht hier.
+ *
+ * Covers (bitwarden-new-device-otp #204) — Frontend-ACs:
+ *   AC1  — email-otp-required → E-Mail-OTP-Feld erscheint (id=bw-unlock-email-otp) mit eigener Meldung
+ *           (textlich verschieden von 2FA-Meldung); kein #bw-unlock-twofa gleichzeitig sichtbar.
+ *   AC3  — email-otp-invalid → feldzugeordnete Fehlermeldung "ungültig oder abgelaufen" (role=alert);
+ *           E-Mail-OTP-Feld bleibt sichtbar (erneutes Absenden möglich).
+ *   AC4  — twofa-required/twofa-invalid bleiben unverändert (Regression); twofa- und email-otp-Felder
+ *           mutual exclusive (nie gleichzeitig sichtbar).
+ *   AC5  — E-Mail-OTP-Feld hat eigenen Label/State (getrennter emailOtp-State, textlich verschieden vom
+ *           2FA-Feld); kein Verlust der E-Mail/nicht-geheimen Eingaben nach OTP-Fehler.
+ *   AC6  — email-otp-invalid: Fehler via aria-describedby/role=alert dem Feld programmatisch zugeordnet.
+ *   AC7  — OTP-Code erscheint NICHT in fetch-Request-URLs.
+ *   AC9  — A11y: label/htmlFor-Zuordnung (label[for="bw-unlock-email-otp"]), autoComplete=one-time-code,
+ *           aria-describedby auf role=alert-Element, Fokus auf Feld nach Erscheinen, Touch-Target ≥ 44 px.
+ * Backend-ACs (AC2/AC8) + Beschaffungs-Mechanik sind in BitwardenNewDeviceOtp.test.js + credentialUnlockRouter.test.js abgedeckt.
  *
  * Covers (credential-key-status-transparency #192) — Frontend-ACs:
  *   AC5  — Status-Zeile (state + Quelle) IMMER sichtbar: unlocked/auto → "automatischer Schlüssel";
@@ -191,6 +206,13 @@ function makeFetch({
       }
       if (credentialUnlockResponse === 'twofa-invalid') {
         return { ok: false, status: 401, json: async () => ({ ok: false, errorClass: 'twofa-invalid' }) };
+      }
+      // bitwarden-new-device-otp AC1/AC3: E-Mail-OTP-Fehler
+      if (credentialUnlockResponse === 'email-otp-required') {
+        return { ok: false, status: 401, json: async () => ({ ok: false, errorClass: 'email-otp-required' }) };
+      }
+      if (credentialUnlockResponse === 'email-otp-invalid') {
+        return { ok: false, status: 401, json: async () => ({ ok: false, errorClass: 'email-otp-invalid' }) };
       }
       if (credentialUnlockResponse === 'auth-failed') {
         return { ok: false, status: 401, json: async () => ({ ok: false, errorClass: 'auth-failed' }) };
@@ -3851,5 +3873,306 @@ describe('SettingsView — #192 Key-Quelle-Transparenz (AC5/AC6)', () => {
     await waitFor(() => {
       expect(container.textContent).not.toContain(fakeKey);
     });
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// bitwarden-new-device-otp — AC1–AC4, AC7 (Frontend)
+// ══════════════════════════════════════════════════════════════════════════════
+
+describe('SettingsView — bitwarden-new-device-otp (New-Device-Verification E-Mail-OTP)', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  /**
+   * Hilfsfunktion: Dialog öffnen + E-Mail/Passwort ausfüllen + Submit klicken.
+   * Gibt den Dialog-Node zurück.
+   */
+  async function openAndSubmitUnlockDialog(getByRole, email = 'user@example.com', password = 'my-password') {
+    await waitFor(() => { getByRole('button', { name: /bitwarden verbinden/i }); });
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /bitwarden verbinden/i }));
+    });
+    await act(async () => {
+      fireEvent.change(document.getElementById('bw-unlock-email'), {
+        target: { value: email },
+      });
+      fireEvent.change(document.getElementById('bw-unlock-password'), {
+        target: { value: password },
+      });
+    });
+    await act(async () => {
+      const dialog = getByRole('dialog');
+      const submitBtn = Array.from(dialog.querySelectorAll('button')).find(
+        (b) => b.textContent?.match(/^verbinden$/i),
+      );
+      if (submitBtn) fireEvent.click(submitBtn);
+    });
+  }
+
+  // AC1 — email-otp-required → E-Mail-OTP-Feld erscheint
+
+  it('AC1 — email-otp-required → E-Mail-OTP-Feld erscheint (id=bw-unlock-email-otp)', async () => {
+    const { getByRole } = renderView(
+      makeFetch({
+        credentialStatus: { state: 'locked', hasEncryptedEntries: false },
+        credentialUnlockResponse: 'email-otp-required',
+      }),
+    );
+    await openAndSubmitUnlockDialog(getByRole);
+    await waitFor(() => {
+      const otpInput = document.getElementById('bw-unlock-email-otp');
+      expect(otpInput).not.toBeNull();
+    });
+  });
+
+  it('AC1 — email-otp-required → Hinweis-Meldung mit "Einmalcode" erscheint (role=alert)', async () => {
+    const { getByRole } = renderView(
+      makeFetch({
+        credentialStatus: { state: 'locked', hasEncryptedEntries: false },
+        credentialUnlockResponse: 'email-otp-required',
+      }),
+    );
+    await openAndSubmitUnlockDialog(getByRole);
+    await waitFor(() => {
+      const alerts = document.querySelectorAll('[role=alert]');
+      const hasOtpMsg = Array.from(alerts).some((el) =>
+        el.textContent?.match(/einmalcode|new device verification|e-mail/i),
+      );
+      expect(hasOtpMsg).toBe(true);
+    });
+  });
+
+  it('AC1 — email-otp-required → E-Mail-OTP-Feld ist vom 2FA-Feld verschieden (kein #bw-unlock-twofa)', async () => {
+    const { getByRole } = renderView(
+      makeFetch({
+        credentialStatus: { state: 'locked', hasEncryptedEntries: false },
+        credentialUnlockResponse: 'email-otp-required',
+      }),
+    );
+    await openAndSubmitUnlockDialog(getByRole);
+    await waitFor(() => {
+      // OTP-Feld vorhanden
+      expect(document.getElementById('bw-unlock-email-otp')).not.toBeNull();
+      // TOTP-Feld (2FA) NICHT vorhanden (email-otp != twofa)
+      expect(document.getElementById('bw-unlock-twofa')).toBeNull();
+    });
+  });
+
+  // AC3 — email-otp-invalid → feldzugeordnete Fehlermeldung
+
+  it('AC3 — email-otp-invalid → Fehlermeldung "ungültig oder abgelaufen" (role=alert)', async () => {
+    const { getByRole } = renderView(
+      makeFetch({
+        credentialStatus: { state: 'locked', hasEncryptedEntries: false },
+        credentialUnlockResponse: 'email-otp-invalid',
+      }),
+    );
+    await openAndSubmitUnlockDialog(getByRole);
+    await waitFor(() => {
+      const alerts = document.querySelectorAll('[role=alert]');
+      const hasInvalidMsg = Array.from(alerts).some(
+        (el) => el.textContent?.match(/ungültig|abgelaufen/i),
+      );
+      expect(hasInvalidMsg).toBe(true);
+    });
+  });
+
+  it('AC3 — email-otp-invalid → E-Mail-OTP-Feld erscheint (zum erneuten Eingeben)', async () => {
+    const { getByRole } = renderView(
+      makeFetch({
+        credentialStatus: { state: 'locked', hasEncryptedEntries: false },
+        credentialUnlockResponse: 'email-otp-invalid',
+      }),
+    );
+    await openAndSubmitUnlockDialog(getByRole);
+    await waitFor(() => {
+      const otpInput = document.getElementById('bw-unlock-email-otp');
+      expect(otpInput).not.toBeNull();
+    });
+  });
+
+  // AC4 — TOTP-2FA-Fluss bleibt unverändert (Regression)
+
+  it('AC4 — twofa-required bleibt twofa-required (nicht email-otp-required) — Regression', async () => {
+    const { getByRole } = renderView(
+      makeFetch({
+        credentialStatus: { state: 'locked', hasEncryptedEntries: false },
+        credentialUnlockResponse: 'twofa-required',
+      }),
+    );
+    await openAndSubmitUnlockDialog(getByRole);
+    await waitFor(() => {
+      // 2FA-Feld vorhanden
+      expect(document.getElementById('bw-unlock-twofa')).not.toBeNull();
+      // E-Mail-OTP-Feld NICHT vorhanden (twofa != email-otp)
+      expect(document.getElementById('bw-unlock-email-otp')).toBeNull();
+    });
+  });
+
+  it('AC4 — twofa-invalid bleibt twofa-invalid (nicht email-otp-invalid) — Regression', async () => {
+    const { getByRole } = renderView(
+      makeFetch({
+        credentialStatus: { state: 'locked', hasEncryptedEntries: false },
+        credentialUnlockResponse: 'twofa-invalid',
+      }),
+    );
+    await openAndSubmitUnlockDialog(getByRole);
+    await waitFor(() => {
+      const alerts = document.querySelectorAll('[role=alert]');
+      // TOTP-Fehlermeldung vorhanden
+      const hasTwofaError = Array.from(alerts).some(
+        (el) => el.textContent?.match(/ungültig|abgelaufen/i),
+      );
+      expect(hasTwofaError).toBe(true);
+    });
+  });
+
+  it('AC4 — nach twofa-required: E-Mail-OTP-Feld und 2FA-Feld NICHT gleichzeitig sichtbar', async () => {
+    const { getByRole } = renderView(
+      makeFetch({
+        credentialStatus: { state: 'locked', hasEncryptedEntries: false },
+        credentialUnlockResponse: 'twofa-required',
+      }),
+    );
+    await openAndSubmitUnlockDialog(getByRole);
+    await waitFor(() => {
+      const hasTwofa = document.getElementById('bw-unlock-twofa') !== null;
+      const hasEmailOtp = document.getElementById('bw-unlock-email-otp') !== null;
+      // Höchstens eines ist sichtbar (sie sind mutual exclusive)
+      expect(hasTwofa && hasEmailOtp).toBe(false);
+    });
+  });
+
+  // A11y — E-Mail-OTP-Feld Accessibility
+
+  it('A11y — E-Mail-OTP-Feld hat htmlFor/id-Zuordnung und label', async () => {
+    const { getByRole } = renderView(
+      makeFetch({
+        credentialStatus: { state: 'locked', hasEncryptedEntries: false },
+        credentialUnlockResponse: 'email-otp-required',
+      }),
+    );
+    await openAndSubmitUnlockDialog(getByRole);
+    await waitFor(() => {
+      const otpInput = document.getElementById('bw-unlock-email-otp');
+      expect(otpInput).not.toBeNull();
+      // Label mit htmlFor=bw-unlock-email-otp vorhanden
+      const label = document.querySelector('label[for="bw-unlock-email-otp"]');
+      expect(label).not.toBeNull();
+    });
+  });
+
+  it('A11y — E-Mail-OTP-Feld hat autoComplete=one-time-code', async () => {
+    const { getByRole } = renderView(
+      makeFetch({
+        credentialStatus: { state: 'locked', hasEncryptedEntries: false },
+        credentialUnlockResponse: 'email-otp-required',
+      }),
+    );
+    await openAndSubmitUnlockDialog(getByRole);
+    await waitFor(() => {
+      const otpInput = document.getElementById('bw-unlock-email-otp');
+      expect(otpInput).not.toBeNull();
+      expect(otpInput.getAttribute('autocomplete')).toBe('one-time-code');
+    });
+  });
+
+  it('A11y — E-Mail-OTP-Feld hat aria-describedby auf Fehlermeldung (role=alert)', async () => {
+    const { getByRole } = renderView(
+      makeFetch({
+        credentialStatus: { state: 'locked', hasEncryptedEntries: false },
+        credentialUnlockResponse: 'email-otp-required',
+      }),
+    );
+    await openAndSubmitUnlockDialog(getByRole);
+    await waitFor(() => {
+      const otpInput = document.getElementById('bw-unlock-email-otp');
+      expect(otpInput).not.toBeNull();
+      const describedby = otpInput.getAttribute('aria-describedby');
+      expect(describedby).toBeTruthy();
+      // Das referenzierte Element existiert und hat role=alert
+      if (describedby) {
+        const referencedEl = document.getElementById(describedby);
+        expect(referencedEl).not.toBeNull();
+      }
+    });
+  });
+
+  it('A11y — E-Mail-OTP-Feld Touch-Target ≥ 44 px (minHeight)', async () => {
+    const { getByRole } = renderView(
+      makeFetch({
+        credentialStatus: { state: 'locked', hasEncryptedEntries: false },
+        credentialUnlockResponse: 'email-otp-required',
+      }),
+    );
+    await openAndSubmitUnlockDialog(getByRole);
+    await waitFor(() => {
+      const otpInput = document.getElementById('bw-unlock-email-otp');
+      expect(otpInput).not.toBeNull();
+      expect(parseInt(otpInput.style.minHeight ?? '0', 10)).toBeGreaterThanOrEqual(44);
+    });
+  });
+
+  it('A11y — nach Erscheinen des E-Mail-OTP-Felds liegt der Fokus auf dem Feld', async () => {
+    const { getByRole } = renderView(
+      makeFetch({
+        credentialStatus: { state: 'locked', hasEncryptedEntries: false },
+        credentialUnlockResponse: 'email-otp-required',
+      }),
+    );
+    await openAndSubmitUnlockDialog(getByRole);
+    await waitFor(() => {
+      expect(document.activeElement).toBe(document.getElementById('bw-unlock-email-otp'));
+    });
+  });
+
+  // AC7 — OTP-Code-Leak: kein OTP-Code in der fetch-Request-URL
+
+  it('AC7 — OTP-Code erscheint NICHT in der fetch-Request-URL', async () => {
+    const FAKE_OTP = '847291';
+    const capturedUrls = [];
+    const fetchFn = jest.fn(async (url, opts) => {
+      capturedUrls.push(url);
+      const method = opts?.method ?? 'GET';
+      if (url === '/api/settings/credential-status') {
+        return { ok: true, status: 200, json: async () => ({ state: 'locked', hasEncryptedEntries: false }) };
+      }
+      if (url === '/api/settings/credential-unlock' && method === 'POST') {
+        // Nach erstem Call (kein OTP): email-otp-required zurückgeben
+        return { ok: false, status: 401, json: async () => ({ ok: false, errorClass: 'email-otp-required' }) };
+      }
+      if (url === '/api/settings/credentials') return { ok: true, json: async () => [] };
+      if (url === '/api/settings/ssh-keys') return { ok: true, json: async () => [] };
+      if (url === '/api/settings/workspace-path') {
+        return { ok: true, status: 200, json: async () => DEFAULT_WORKSPACE_PATH };
+      }
+      return { ok: true, json: async () => ({}) };
+    });
+    const { getByRole } = renderView(fetchFn);
+    await openAndSubmitUnlockDialog(getByRole);
+
+    // OTP-Feld erscheint → Wert eingeben
+    await waitFor(() => { expect(document.getElementById('bw-unlock-email-otp')).not.toBeNull(); });
+    await act(async () => {
+      fireEvent.change(document.getElementById('bw-unlock-email-otp'), {
+        target: { value: FAKE_OTP },
+      });
+    });
+
+    // Submit mit OTP
+    await act(async () => {
+      const dialog = getByRole('dialog');
+      const submitBtn = Array.from(dialog.querySelectorAll('button')).find(
+        (b) => b.textContent?.match(/^verbinden$/i),
+      );
+      if (submitBtn) fireEvent.click(submitBtn);
+    });
+
+    // OTP-Code darf NICHT in einer Request-URL erscheinen
+    for (const url of capturedUrls) {
+      expect(String(url)).not.toContain(FAKE_OTP);
+    }
   });
 });
