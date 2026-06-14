@@ -1,7 +1,7 @@
 /**
  * BitwardenMasterKeyService — einzige Komponente, die mit Bitwarden spricht (ADR-014).
  *
- * Beschafft den `CRED_MASTER_KEY` aus Bitwarden:
+ * Beschafft den `DEVGUI_CRED_MASTER_KEY` aus Bitwarden:
  *   - Login mit E-Mail + Master-Passwort (+ 2FA falls nötig) via Bitwarden-CLI `bw`
  *   - Liest ein vorhandenes Master-Key-Item aus (→ AC2)
  *   - Erstellt — nach explizitem Bestätigungs-Flag — ein neues Item mit Zufalls-Key (→ AC4)

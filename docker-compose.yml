@@ -125,25 +125,27 @@ services:
       #   ensure file is chown 1000 or chmod 0644 on the host.
       GPG_PASSPHRASE: ${GPG_PASSPHRASE}
 
-      # ── Credential Store Master-Key (ADR-007) ────────────────────────────────
-      # Required in production when secrets.enc.json exists on the volume.
-      # Fail-Fast on startup if store exists but key is missing.
+      # ── Credential Store Master-Key (ADR-007 / credential-master-key-decoupling) ─
+      # Required in production when secrets.enc.json has encrypted entries.
+      # Fail-Fast on startup if store has encrypted entries but no key is available.
       #
-      # Betreiber-Default: WENN weder CRED_MASTER_KEY noch CRED_MASTER_KEY_FILE
-      # gesetzt sind, fällt der Entrypoint automatisch auf GPG_PASSPHRASE (bzw.
-      # die gemountete gpg.pass) zurück — dasselbe Bitwarden-Secret
-      # (studis-softwareschmiede-gpg-passphrase), das der Bootstrap verteilt.
-      # Es ist also KEIN zusätzliches Secret nötig.
+      # Bitwarden-Item: dev-gui-cred-master-key (getrennt von studis-softwareschmiede-gpg-passphrase).
+      # Der Bootstrap befüllt DEVGUI_CRED_MASTER_KEY aus diesem Item.
       #
-      # Option A — eigenes Secret als Env-Var (überstimmt den Fallback):
-      CRED_MASTER_KEY: ${CRED_MASTER_KEY:-}
-      # Option B — node-readable file (used only if CRED_MASTER_KEY unset):
-      #   CRED_MASTER_KEY_FILE: /run/secrets/cred_master_key
-      #   Add to volumes: - ${CRED_KEY_FILE}:/run/secrets/cred_master_key:ro
-      # Option C — alternativer .env-Schreibpfad für CRED_MASTER_KEY-Persistenz
-      # (Runtime-Unlock schreibt CRED_MASTER_KEY standardmäßig in die Projekt-.env).
+      # Option A — eigenes Secret als Env-Var (höchste Priorität):
+      DEVGUI_CRED_MASTER_KEY: ${DEVGUI_CRED_MASTER_KEY:-}
+      # Option B — node-readable file (used only if DEVGUI_CRED_MASTER_KEY unset):
+      #   DEVGUI_CRED_MASTER_KEY_FILE: /run/secrets/devgui_cred_master_key
+      #   Add to volumes: - ${DEVGUI_CRED_KEY_FILE}:/run/secrets/devgui_cred_master_key:ro
+      # Option C — alternativer .env-Schreibpfad für DEVGUI_CRED_MASTER_KEY-Persistenz
+      # (Runtime-Unlock schreibt DEVGUI_CRED_MASTER_KEY standardmäßig in die Projekt-.env).
       # Nur setzen, wenn der Container-Pfad von /app/.env abweichen soll:
       #   CRED_ENV_PATH: /custom/path/.env
+      #
+      # DEPRECATED — altes CRED_MASTER_KEY (übergangsweise Fallback, Warn-Log):
+      # Bitte auf DEVGUI_CRED_MASTER_KEY umstellen. Wird in einem späteren Cleanup-Item entfernt.
+      #   CRED_MASTER_KEY: ${CRED_MASTER_KEY:-}
+      #   CRED_MASTER_KEY_FILE: /run/secrets/cred_master_key
 
       # ── Self-Lockout-Schutz (ADR-011) ───────────────────────────────────────
       # Hostname der devgui selbst (z.B. devgui.example.com). Wird von
@@ -158,7 +160,7 @@ services:
       #   CRED_ADMIN_EMAILS: admin@example.com,ops@example.com
 
       # ── Bitwarden Master-Key-Beschaffung (bitwarden-master-key-unlock) ──────
-      # Name des Bitwarden-Items, das den CRED_MASTER_KEY enthält.
+      # Name des Bitwarden-Items, das den DEVGUI_CRED_MASTER_KEY enthält.
       # Nur setzen, wenn der Default 'dev-gui-master-key' nicht passt.
       # BW_ITEM_NAME: dev-gui-master-key
 
