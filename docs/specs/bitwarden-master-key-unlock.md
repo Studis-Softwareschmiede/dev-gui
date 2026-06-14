@@ -28,7 +28,7 @@ Eine **serverseitige** Komponente beschafft den `CRED_MASTER_KEY` aus **Bitwarde
 - **AC2** — Existiert das Master-Key-Item, liefert die Beschaffung dessen geheimen Wert **store-intern** an [[credential-runtime-unlock]]; der Wert erscheint **nicht** in der HTTP-Response (die Response meldet nur Erfolg/Status, keinen Key).
 - **AC3** — Existiert **kein** Master-Key-Item, meldet die Beschaffung Status `not-found` (kein automatisches Erstellen).
 - **AC4** — Nur bei **explizitem** Bestätigungs-Flag erzeugt dev-gui einen kryptographisch sicheren Zufalls-Key (ausreichende Entropie, z.B. ≥ 32 Byte randomBytes) und legt ihn als neues Bitwarden-Item an; ohne Flag wird **nichts** erstellt.
-- **AC5** — Falsche Zugangsdaten / fehlende oder falsche 2FA / nicht erreichbares Bitwarden werden als **klassifizierte** Fehler zurückgemeldet (`auth-failed` | `twofa-required` | `twofa-invalid` | `bw-unreachable` | `error`) — **ohne** Klartext-Geheimnis in Fehlermeldung/Log.
+- **AC5** — Falsche Zugangsdaten / fehlende oder falsche 2FA / erforderliche oder falsche New-Device-E-Mail-Verifikation / nicht erreichbares Bitwarden werden als **klassifizierte** Fehler zurückgemeldet (`auth-failed` | `twofa-required` | `twofa-invalid` | `email-otp-required` | `email-otp-invalid` | `bw-unreachable` | `error`) — **ohne** Klartext-Geheimnis in Fehlermeldung/Log. Der E-Mail-OTP-Fluss ist in [[bitwarden-new-device-otp]] spezifiziert (eigene Klassen, getrennt vom TOTP-2FA-Fluss).
 - **AC6** — Bitwarden-Login-Daten und der Master-Key erscheinen in **keinem** Log, **keinem** Audit-Eintrag, **keiner** HTTP-Response, **keinem** WS-Frame, **nicht** im Frontend-Bundle und **nicht** in Prozess-Argv (Geheimnisse nicht als CLI-Argumente). (Testbar: Argv/Logs/Audit/Response enthalten die Werte nicht.) **Begründete Ausnahme — TOTP-2FA-Code via `--code`-Argument:** Der kurzlebige TOTP-Code (30 s gültig, einmalig, replay-geschützt, nach dem Login verbraucht) darf als `bw`-Argument übergeben werden, weil die Bitwarden-CLI für diesen Parameter keine Env/stdin-Alternative anbietet. Master-Passwort und Session-Token bleiben strikt Env-only; diese Ausnahme gilt ausschließlich für den TOTP-2FA-Code.
 - **AC7** — Der beschaffte/erzeugte Key wird über `CredentialStore.unlock(...)` übergeben; bei vorhandenem Store mit verschlüsselten Einträgen führt ein **falscher** Key (z.B. manuell manipuliertes Bitwarden-Item) zu Ablehnung ohne `.env`-Persistenz (geerbt aus [[credential-runtime-unlock]] AC4).
 - **AC8** — Jede Beschaffungs-Aktion erzeugt vor Ausführung einen Audit-Eintrag (Identität, Aktion, Zeit) **ohne** Werte; schlägt der Audit-Write fehl, unterbleibt die Aktion.
@@ -40,13 +40,14 @@ Eine **serverseitige** Komponente beschafft den `CRED_MASTER_KEY` aus **Bitwarde
 - **Beschaffungs-Komponente (intern, neuer Boundary — einziger Ort, der mit Bitwarden spricht):**
   - `acquireMasterKey({ email, password, twofa? }): Promise<{ status: "found" } | { status: "not-found" } | { status: "error", errorClass, reason }>` — `key` verlässt die Komponente **nur** store-intern an [[credential-runtime-unlock]], nie nach außen. Im Error-Fall enthält `reason` eine sanitisierte, geheimnisfreie Fehlerbeschreibung (kein Klartext-Credential, kein stderr-Rohtext).
   - `createMasterKey({ email, password, twofa? }): Promise<{ status: "created" } | { status: "error", errorClass, reason }>` — erzeugt Zufalls-Key + legt Item an; nur nach explizitem Aufruf (Bestätigung). `reason` wie oben.
-  - `errorClass ∈ { auth-failed, twofa-required, twofa-invalid, bw-unreachable, item-create-failed, error }`.
+  - `errorClass ∈ { auth-failed, twofa-required, twofa-invalid, email-otp-required, email-otp-invalid, bw-unreachable, item-create-failed, error }`. Die E-Mail-OTP-Klassen + die `emailOtp?`-Durchreichung sind in [[bitwarden-new-device-otp]] spezifiziert.
   - `reason`: stets sanitisiert (via `sanitizeErrorReason`) — enthält **niemals** Passwort, Session-Token, Key-Wert oder stderr-Rohtext.
 - **Konfiguration (Env/Settings, nicht-geheim):** Bitwarden-Item-Bezeichner (Default-Name) für den Master-Key; optional Bitwarden-Server-URL (self-hosted). Keine Bitwarden-Zugangsdaten in der Konfiguration.
 - **Technik-Default:** Bitwarden-CLI `bw` im Image gebündelt; Subprozess-Aufruf ohne Geheimnis in Argv. REST-API zulässige Alternative.
 
 ## Edge-Cases & Fehlerverhalten
 - 2FA erforderlich, aber kein Code übergeben ⇒ `twofa-required` (UI fordert Code nach), keine weiteren Effekte.
+- New-Device-Verification (E-Mail-OTP) erforderlich bei non-2FA-Account ⇒ `email-otp-required` (UI fordert E-Mail-Code nach) — siehe [[bitwarden-new-device-otp]], getrennt vom TOTP-Fluss.
 - Bitwarden nicht erreichbar / CLI fehlt ⇒ `bw-unreachable`/`error`, klare Meldung ohne Geheimnis.
 - Item existiert, aber Wert leer/unbrauchbar ⇒ behandelt wie `not-found` bzw. klarer Fehler (kein leerer Key an den Store).
 - Key-Erstellung schlägt beim Anlegen in Bitwarden fehl ⇒ `item-create-failed`; **kein** Teil-Zustand (kein lokal persistierter Key ohne Bitwarden-Item — Bitwarden bleibt Source of Truth des Keys).
@@ -72,5 +73,6 @@ Eine **serverseitige** Komponente beschafft den `CRED_MASTER_KEY` aus **Bitwarde
 - [[credential-runtime-unlock]] (Key-Übergabe + `.env`-Persistenz + Validierung).
 - [[access-and-guardrails]] (Access-Mauer; Audit; Floor „keine Secret-Leaks").
 - [[settings-credentials]] / ADR-007 (`CredentialStore`, `CRED_ADMIN_EMAILS`-Rollencheck).
+- [[bitwarden-new-device-otp]] (erweitert diese Spec um E-Mail-OTP-Klassen + `emailOtp?`-Durchreichung).
 - Konsumiert von [[credential-unlock-dialog]].
 </content>
