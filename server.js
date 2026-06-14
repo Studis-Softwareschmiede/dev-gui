@@ -53,6 +53,8 @@
  *   GET    /api/retro/runs                                     → { runs:[...] } (retro-view-backend AC1)
  *   GET    /api/retro/runs/:slug                               → { slug, date, source, statusMix, agents:[…], skills:[…], knowledge:[…] } (retro-view-backend AC5)
  *   GET    /api/retro/trend?category=<knowledge|agents|skills> → { category, lanes:[…], runs:[…], empty?, placeholder? } (retro-trend-backend AC1)
+ *   GET    /api/board/projects                                → { projects:[…] } (dev-gui-board-aggregator AC1-3,AC7-9)
+ *   POST   /api/board/projects/rescan                         → { ok: true } (dev-gui-board-aggregator AC9)
  *   WS   /ws/terminal                             → PtyManager bridge (guarded by AccessGuard)
  */
 
@@ -86,6 +88,7 @@ import { StackRegistry } from './src/StackRegistry.js';
 import { VpsComposeControl } from './src/deploy/VpsComposeControl.js';
 import { StackDeployOrchestrator } from './src/deploy/StackDeployOrchestrator.js';
 import { BitwardenMasterKeyService } from './src/BitwardenMasterKeyService.js';
+import { BoardAggregator } from './src/BoardAggregator.js';
 import { mountRouters } from './src/routerLoader.js';
 
 const PORT = Number(process.env.PORT ?? 8080);
@@ -193,6 +196,10 @@ const retroReader = new RetroReader({
   pluginRootResolver: () => agentFlowReader.resolvePluginRoot(),
 });
 
+// ── Board-Aggregator (read-only Multi-Repo-Scan, AC1-3 + AC7-9) ──────────────
+const boardAggregator = new BoardAggregator();
+boardAggregator.startWatchers();
+
 // ── deps-Objekt: alle Boundaries für den Auto-Loader ─────────────────────────
 const deps = {
   auditStore,
@@ -216,6 +223,7 @@ const deps = {
   stackDeployOrchestrator,
   agentFlowReader,
   retroReader,
+  boardAggregator,
 };
 
 // ── AC1/AC2: Auto-Discovery + Mount aller API-Router ─────────────────────────
@@ -332,6 +340,7 @@ function buildReconcileVpsConfigs(targets, envValue) {
 // Graceful shutdown
 function shutdown() {
   reconciliationJob.stopScheduler();
+  boardAggregator.stopWatchers();
   ptyManager.destroy();
   server.close(() => process.exit(0));
 }
