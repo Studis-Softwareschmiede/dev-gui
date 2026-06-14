@@ -12,6 +12,7 @@
  *   #/team         → 'team'
  *   #/deployments  → 'deployments'
  *   #/retro        → 'retro'
+ *   #/retro-trend  → 'retro-trend'
  *
  * Unknown hashes fall back to 'panel'.
  * Browser Back/Forward navigate the history (pushState-style via hash changes).
@@ -32,6 +33,7 @@ export const VIEWS = /** @type {const} */ ([
   'team',
   'deployments',
   'retro',
+  'retro-trend',
 ]);
 
 /**

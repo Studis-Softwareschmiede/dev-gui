@@ -238,7 +238,7 @@ describe('retro-view-frontend — AC1: Retro-Link im TeamView-Kopfbereich', () =
       expect(globalThis.fetch.mock.calls.some((c) => c[0] === '/api/team')).toBe(true);
     });
 
-    const retroBtn = getByRole('button', { name: /retro/i });
+    const retroBtn = getByRole('button', { name: /^retro — self-improvement-historie$/i });
     expect(retroBtn).toBeTruthy();
   });
 
@@ -255,7 +255,7 @@ describe('retro-view-frontend — AC1: Retro-Link im TeamView-Kopfbereich', () =
       expect(globalThis.fetch.mock.calls.some((c) => c[0] === '/api/team')).toBe(true);
     });
 
-    const retroBtn = getByRole('button', { name: /retro/i });
+    const retroBtn = getByRole('button', { name: /^retro — self-improvement-historie$/i });
 
     await act(async () => {
       fireEvent.click(retroBtn);
@@ -277,7 +277,7 @@ describe('retro-view-frontend — AC1: Retro-Link im TeamView-Kopfbereich', () =
       expect(globalThis.fetch.mock.calls.some((c) => c[0] === '/api/team')).toBe(true);
     });
 
-    const retroBtn = getByRole('button', { name: /retro/i });
+    const retroBtn = getByRole('button', { name: /^retro — self-improvement-historie$/i });
 
     await act(async () => {
       fireEvent.keyDown(retroBtn, { key: 'Enter' });
@@ -299,7 +299,7 @@ describe('retro-view-frontend — AC1: Retro-Link im TeamView-Kopfbereich', () =
       expect(globalThis.fetch.mock.calls.some((c) => c[0] === '/api/team')).toBe(true);
     });
 
-    const retroBtn = getByRole('button', { name: /retro/i });
+    const retroBtn = getByRole('button', { name: /^retro — self-improvement-historie$/i });
 
     await act(async () => {
       fireEvent.keyDown(retroBtn, { key: ' ' });
@@ -321,7 +321,7 @@ describe('retro-view-frontend — AC1: Retro-Link im TeamView-Kopfbereich', () =
       expect(globalThis.fetch.mock.calls.some((c) => c[0] === '/api/team')).toBe(true);
     });
 
-    const retroBtn = getByRole('button', { name: /retro/i });
+    const retroBtn = getByRole('button', { name: /^retro — self-improvement-historie$/i });
     const minH = parseInt(retroBtn.style.minHeight, 10);
     expect(minH).toBeGreaterThanOrEqual(44);
   });
@@ -339,7 +339,7 @@ describe('retro-view-frontend — AC1: Retro-Link im TeamView-Kopfbereich', () =
       expect(globalThis.fetch.mock.calls.some((c) => c[0] === '/api/team')).toBe(true);
     });
 
-    const retroBtn = getByRole('button', { name: /retro/i });
+    const retroBtn = getByRole('button', { name: /^retro — self-improvement-historie$/i });
     expect(retroBtn.style.outline).not.toBe('none');
     expect(retroBtn.style.outline).not.toBe('0');
   });
