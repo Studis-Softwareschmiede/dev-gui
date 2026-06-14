@@ -41,8 +41,8 @@
 
 import { createCipheriv, createDecipheriv, randomBytes, scrypt } from 'node:crypto';
 import { promisify } from 'node:util';
-import { readFile, rename, mkdir, open, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { readFile, rename, mkdir, open, stat, chmod } from 'node:fs/promises';
+import { join, dirname } from 'node:path';
 
 const scryptAsync = promisify(scrypt);
 
@@ -127,20 +127,40 @@ export class CredentialStore {
   /** @type {string} Pfad zur secrets.enc.json */
   #filePath;
 
-  /** @type {string|null} Master-Key-Rohwert (aus Env) */
+  /** @type {string|null} Master-Key-Rohwert (aus Env oder Runtime-unlock) */
   #masterKeyRaw = null;
 
   /** @type {Promise<void>|null} Schreib-Mutex */
   #writeLock = null;
 
   /**
+   * Pfad zur .env-Datei für CRED_MASTER_KEY-Persistenz (AC5/AC6).
+   * Default: Projekt-Root/.env (Verzeichnis neben server.js).
+   * Überschreibbar via opts.envPath (für Tests) oder CRED_ENV_PATH (Env).
+   * @type {string}
+   */
+  #envPath;
+
+  /**
    * @param {object} [opts]
    * @param {string} [opts.dir]         - Verzeichnis (default: /home/node/.claude/dev-gui)
    * @param {string} [opts.masterKey]   - Master-Key (für Tests injizierbar; sonst aus Env)
+   * @param {string} [opts.envPath]     - Pfad zur .env-Datei (default: Projekt-Root/.env)
    */
   constructor(opts = {}) {
     const dir = opts.dir ?? '/home/node/.claude/dev-gui';
     this.#filePath = join(dir, 'secrets.enc.json');
+
+    // .env-Pfad: opts.envPath > CRED_ENV_PATH > Projekt-Root/.env (neben server.js)
+    if (opts.envPath !== undefined) {
+      this.#envPath = opts.envPath;
+    } else if (process.env.CRED_ENV_PATH && process.env.CRED_ENV_PATH.trim()) {
+      this.#envPath = process.env.CRED_ENV_PATH.trim();
+    } else {
+      // Projekt-Root = zwei Verzeichnisse über dieser Datei (src/ → /)
+      const srcDir = dirname(new URL(import.meta.url).pathname);
+      this.#envPath = join(srcDir, '..', '.env');
+    }
 
     if (opts.masterKey !== undefined) {
       this.#masterKeyRaw = opts.masterKey;
@@ -348,7 +368,170 @@ export class CredentialStore {
     }
   }
 
+  // ── .env-Persistenz (AC5/AC6) ───────────────────────────────────────────────
+
+  /**
+   * Schreibt `CRED_MASTER_KEY=<value>` atomar in die .env-Datei (AC5/AC6).
+   * - Bestehende Zeilen bleiben erhalten.
+   * - Ein vorhandener CRED_MASTER_KEY-Eintrag wird ersetzt (kein Duplikat).
+   * - Schreibt in tmp-Datei + rename (atomar, AC6).
+   * - Setzt Dateirechte 0600 (AC5).
+   * - Der Key-Wert wird NICHT geloggt (AC7).
+   *
+   * @param {string} key  - Der Master-Key-Rohwert (wird NICHT geloggt)
+   * @returns {Promise<void>}
+   */
+  async #persistKeyToEnv(key) {
+    const envPath = this.#envPath;
+    const tmpPath = `${envPath}.cred-tmp`;
+
+    // Bestehenden Inhalt lesen (tolerant wenn Datei noch nicht existiert)
+    let existing = '';
+    try {
+      existing = await readFile(envPath, 'utf8');
+    } catch (err) {
+      if (err.code !== 'ENOENT') {
+        throw new Error(`[CredentialStore] .env konnte nicht gelesen werden: ${err.message}`, { cause: err });
+      }
+      // ENOENT → leerer Inhalt, wird neu angelegt
+    }
+
+    // Zeilen filtern: bestehende CRED_MASTER_KEY-Zeilen entfernen.
+    // split('\n') auf 'a\nb\n' ergibt ['a','b',''] — das trailing '' nicht mitnehmen.
+    const lines = existing.split('\n').filter((line) => !line.startsWith('CRED_MASTER_KEY='));
+
+    // Trailing-Leerzeile (von split auf trailing-newline) entfernen, damit kein Doppel-Newline entsteht
+    if (lines.length > 0 && lines[lines.length - 1] === '') {
+      lines.pop();
+    }
+
+    // Neue Zeile hinzufügen (Key-Wert nicht geloggt — AC7)
+    lines.push(`CRED_MASTER_KEY=${key}`);
+
+    // Datei endet mit \n (Unix-Konvention)
+    const newContent = lines.join('\n') + '\n';
+
+    // Atomar schreiben (tmp + rename, AC6) + 0600 (AC5)
+    const envDir = dirname(envPath);
+    try {
+      await mkdir(envDir, { recursive: true });
+    } catch {
+      // Ignorieren wenn Verzeichnis schon existiert
+    }
+
+    let fd;
+    try {
+      fd = await open(tmpPath, 'w', 0o600);
+      await fd.writeFile(newContent, 'utf8');
+      await fd.sync();
+    } finally {
+      if (fd) await fd.close();
+    }
+
+    // rename: atomar (AC6)
+    await rename(tmpPath, envPath);
+    // Sicherstellen dass mode korrekt ist auch nach rename (AC5)
+    await chmod(envPath, 0o600);
+  }
+
   // ── Öffentliche API ──────────────────────────────────────────────────────────
+
+  // ── Lock-State API (AC1/AC3/AC4/AC8) ────────────────────────────────────────
+
+  /**
+   * Gibt zurück ob der Store aktuell entsperrt ist.
+   * @returns {boolean}
+   */
+  isUnlocked() {
+    return this.#masterKeyRaw !== null;
+  }
+
+  /**
+   * Gibt den Lock-Zustand zurück — ohne Schlüssel/Klartext (AC8).
+   *
+   * @returns {Promise<{ state: "locked"|"unlocked", hasEncryptedEntries: boolean }>}
+   */
+  async getLockState() {
+    const state = this.#masterKeyRaw !== null ? 'unlocked' : 'locked';
+    const storeData = await this.#readStore();
+    const hasEncryptedEntries =
+      storeData?.kdf != null && Object.keys(storeData?.entries ?? {}).length > 0;
+    return { state, hasEncryptedEntries };
+  }
+
+  /**
+   * Entsperrt den Store zur Laufzeit (AC3/AC4).
+   *
+   * Ablauf:
+   *   1. Validiert den Key gegen vorhandene verschlüsselte Einträge (AC4).
+   *   2. Persistiert den Key in `.env` (AC5/AC6) — wenn `persist=true` (default).
+   *   3. Lädt den Key in den laufenden Prozess (AC3).
+   *
+   * Der Key-Wert erscheint NIE in einem Log, Response oder Fehlertext (AC7).
+   *
+   * @param {string} key  - Der Master-Key-Rohwert (wird NICHT geloggt)
+   * @param {object} [opts]
+   * @param {boolean} [opts.persist=true]  - Key in .env persistieren. Wenn false: kein
+   *   Reboot-Überleben — nach Prozess-Neustart ist der Store wieder gesperrt.
+   * @returns {Promise<{ ok: true } | { ok: false, reason: "invalid-key"|"invalid-key-format"|"persist-failed"|"empty-key" }>}
+   */
+  async unlock(key, { persist = true } = {}) {
+    // Leerer/whitespace Key
+    if (!key || typeof key !== 'string' || !key.trim()) {
+      return { ok: false, reason: 'empty-key' };
+    }
+
+    // Eingebettetes Newline/CR im Key korrumpiert .env (I1 — ein solcher Key erzeugt
+    // zwei .env-Zeilen → späterer Boot liest nur Prefix → silent Key-Mismatch).
+    if (/[\r\n]/.test(key)) {
+      return { ok: false, reason: 'invalid-key-format' };
+    }
+
+    const trimmedKey = key.trim();
+
+    // Validierung gegen vorhandene Einträge (AC4)
+    const storeData = await this.#readStore();
+    const hasEncryptedEntries =
+      storeData?.kdf != null && Object.keys(storeData?.entries ?? {}).length > 0;
+
+    if (hasEncryptedEntries) {
+      // Probe-Entschlüsselung: ersten Eintrag versuchen
+      const firstEntryKey = Object.keys(storeData.entries)[0];
+      const firstEntry = storeData.entries[firstEntryKey];
+      const salt = Buffer.from(storeData.kdf.salt, 'base64');
+      let aesKey;
+      try {
+        aesKey = await this.#deriveKey(trimmedKey, salt);
+      } catch {
+        return { ok: false, reason: 'invalid-key' };
+      }
+      try {
+        this.#decrypt(aesKey, firstEntry);
+      } catch {
+        // GCM-Tag-Fehler → falscher Key (AC4)
+        return { ok: false, reason: 'invalid-key' };
+      }
+    }
+    // Kein verschlüsselter Eintrag → jeder nicht-leere Key akzeptierbar (frischer Store)
+
+    // Persistenz (AC5/AC6) — im Write-Lock (S1: konsistent mit secrets.enc.json-Schreibpfad)
+    if (persist) {
+      try {
+        await this.#withWriteLock(() => this.#persistKeyToEnv(trimmedKey));
+      } catch {
+        // Persistenz fehlgeschlagen → in-memory trotzdem entsperren,
+        // aber Aufrufer über fehlende Persistenz informieren (kein Key-Leak im Fehler)
+        this.#masterKeyRaw = trimmedKey;
+        return { ok: false, reason: 'persist-failed' };
+      }
+    }
+
+    // Key in den laufenden Prozess laden (AC3)
+    this.#masterKeyRaw = trimmedKey;
+    return { ok: true };
+  }
+
+  // ── Öffentliche API (Credentials) ───────────────────────────────────────────
 
   /**
    * Listet alle bekannten Credential-Felder (Katalog + misc-Einträge im Store)

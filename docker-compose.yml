@@ -140,6 +140,10 @@ services:
       # Option B — node-readable file (used only if CRED_MASTER_KEY unset):
       #   CRED_MASTER_KEY_FILE: /run/secrets/cred_master_key
       #   Add to volumes: - ${CRED_KEY_FILE}:/run/secrets/cred_master_key:ro
+      # Option C — alternativer .env-Schreibpfad für CRED_MASTER_KEY-Persistenz
+      # (Runtime-Unlock schreibt CRED_MASTER_KEY standardmäßig in die Projekt-.env).
+      # Nur setzen, wenn der Container-Pfad von /app/.env abweichen soll:
+      #   CRED_ENV_PATH: /custom/path/.env
 
       # ── Self-Lockout-Schutz (ADR-011) ───────────────────────────────────────
       # Hostname der devgui selbst (z.B. devgui.example.com). Wird von

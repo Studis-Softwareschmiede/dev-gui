@@ -13,14 +13,24 @@
  *   AC9  — VPS-Provider-Token (hetzner, ionos, hostinger): je Provider set/getMeta/delete write-only; Audit ohne Klartext
  *   AC10 — Cloudflare-Credentials (api_token, account_id): CATALOG, resolveKey, set/getMeta/delete write-only, at-rest-Verschlüsselung, HTTP PUT/GET/DELETE, Audit ohne Klartext, CRED_ADMIN_EMAILS-Schutz
  *
+ * Covers (credential-runtime-unlock):
+ *   AC1  — Start ohne Master-Key und ohne verschlüsselte Einträge → locked, kein Abbruch
+ *   AC2  — Fail-Fast-Regression: Store mit verschlüsselten Einträgen + kein Key → assertCredentialConfig wirft
+ *   AC3  — Runtime-unlock(key): Key wird geladen, Klartext-Ops funktionieren danach; locked→unlocked
+ *   AC4  — Falscher Key bei vorhandenen Einträgen → Ablehnung, .env unverändert, bleibt locked
+ *   AC5  — Nach erfolgreichem unlock: .env enthält CRED_MASTER_KEY=<key>; andere Zeilen unverändert; kein Duplikat; 0600
+ *   AC6  — .env-Schreiben atomar (tmp + rename)
+ *   AC7  — Master-Key erscheint in keinem Log/Response/unlock-Ergebnis
+ *   AC8  — getLockState() → {state, hasEncryptedEntries} ohne Key/Klartext
+ *
  * Strategie:
  *   - CredentialStore mit tmpdir + injiziertem masterKey (kein Env nötig)
  *   - credentialsRouter mit Express-Testserver + DEV_NO_ACCESS=1
  *   - Server wird einmal pro Describe-Block gestartet (beforeEach), danach closeServer
  */
 
-import { describe, it, beforeEach, afterEach, expect } from '@jest/globals';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { describe, it, beforeEach, afterEach, expect, jest } from '@jest/globals';
+import { mkdtemp, rm, stat as fsStat, readFile as fsReadFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import express from 'express';
@@ -970,5 +980,520 @@ describe('CredentialStore — assertCredentialConfig()', () => {
     // Neuer Store mit gleichem Key → assertCredentialConfig ok
     const s2 = new CredentialStore({ dir, masterKey: 'some-key' });
     await expect(s2.assertCredentialConfig()).resolves.toBeUndefined();
+  });
+});
+
+// ── Runtime-Unlock-Zustandsmodell (credential-runtime-unlock AC1–AC8) ─────────
+
+describe('AC1 (credential-runtime-unlock) — locked-Start: kein Key, kein Store → kein Abbruch', () => {
+  let dir, envFile;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'credstore-ru-ac1-'));
+    envFile = join(dir, '.env');
+    delete process.env.DEV_NO_ACCESS;
+    delete process.env.NODE_ENV;
+    delete process.env.CRED_MASTER_KEY;
+  });
+
+  afterEach(async () => {
+    delete process.env.DEV_NO_ACCESS;
+    delete process.env.NODE_ENV;
+    delete process.env.CRED_MASTER_KEY;
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('AC1 — Store ohne Key und ohne verschlüsselte Einträge: assertCredentialConfig wirft NICHT', async () => {
+    // Kein Key, kein Store
+    const store = new CredentialStore({ dir, envPath: envFile });
+    // kein masterKey gesetzt → #masterKeyRaw=null
+    // assertCredentialConfig darf nicht werfen (leerer Store → locked, OK)
+    await expect(store.assertCredentialConfig()).resolves.toBeUndefined();
+  });
+
+  it('AC1 — isUnlocked() ist false ohne Key', () => {
+    const store = new CredentialStore({ dir, envPath: envFile });
+    expect(store.isUnlocked()).toBe(false);
+  });
+
+  it('AC1 — getLockState() → state: locked, hasEncryptedEntries: false bei leerem Store', async () => {
+    const store = new CredentialStore({ dir, envPath: envFile });
+    const state = await store.getLockState();
+    expect(state.state).toBe('locked');
+    expect(state.hasEncryptedEntries).toBe(false);
+    // Kein Schlüssel/Klartext im Ergebnis
+    expect(JSON.stringify(state)).not.toContain('key');
+  });
+
+  it('AC1 — Store mit nur meta-Block (Public-Keys) aber keinen verschlüsselten entries: kein Fail-Fast', async () => {
+    // Einen Store anlegen der nur meta hat (kein kdf, keine entries)
+    const storeWithMeta = new CredentialStore({ dir, masterKey: 'any-key', envPath: envFile });
+    await storeWithMeta.setPublicKey('root', 'ssh-ed25519 AAAAC3Nz test');
+    // Neuer Store ohne Key → soll NICHT fehlschlagen (nur meta, keine verschlüsselten entries)
+    const noKeyStore = new CredentialStore({ dir, envPath: envFile });
+    await expect(noKeyStore.assertCredentialConfig()).resolves.toBeUndefined();
+  });
+});
+
+describe('AC2 (credential-runtime-unlock) — Fail-Fast-Regression: verschlüsselte entries + kein Key → Abbruch', () => {
+  let dir, envFile;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'credstore-ru-ac2-'));
+    envFile = join(dir, '.env');
+    delete process.env.DEV_NO_ACCESS;
+    delete process.env.NODE_ENV;
+    delete process.env.CRED_MASTER_KEY;
+  });
+
+  afterEach(async () => {
+    delete process.env.DEV_NO_ACCESS;
+    delete process.env.NODE_ENV;
+    delete process.env.CRED_MASTER_KEY;
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('AC2 — kdf vorhanden + entries nicht leer + kein Key → assertCredentialConfig wirft (Fail-Fast bleibt)', async () => {
+    // Store mit echtem Key anlegen → verschlüsselte entries entstehen
+    const withKey = new CredentialStore({ dir, masterKey: 'real-key', envPath: envFile });
+    await withKey.set('credentials/github/app_id', 'secret-value');
+
+    // Store ohne Key: muss Fail-Fast auslösen
+    const noKey = new CredentialStore({ dir, envPath: envFile });
+    await expect(noKey.assertCredentialConfig()).rejects.toThrow(/CRED_MASTER_KEY/);
+  });
+
+  it('AC2 — Fail-Fast Exit-Pfad: assertCredentialConfig wirft auch ohne Dev-Bypass', async () => {
+    const withKey = new CredentialStore({ dir, masterKey: 'real-key-2', envPath: envFile });
+    await withKey.set('credentials/cloudflare/api_token', 'cf-token');
+
+    delete process.env.DEV_NO_ACCESS;
+    const noKey = new CredentialStore({ dir, envPath: envFile });
+    await expect(noKey.assertCredentialConfig()).rejects.toThrow(/CRED_MASTER_KEY/);
+  });
+});
+
+describe('AC3 (credential-runtime-unlock) — Runtime-unlock: locked→unlocked, Klartext-Ops danach möglich', () => {
+  let dir, envFile;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'credstore-ru-ac3-'));
+    envFile = join(dir, '.env');
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('AC3 — unlock mit leerem Store: Zustand wechselt locked → unlocked', async () => {
+    const store = new CredentialStore({ dir, envPath: envFile });
+    expect(store.isUnlocked()).toBe(false);
+
+    const result = await store.unlock('test-master-key-runtime', { persist: false });
+    expect(result.ok).toBe(true);
+    expect(store.isUnlocked()).toBe(true);
+
+    const lockState = await store.getLockState();
+    expect(lockState.state).toBe('unlocked');
+  });
+
+  it('AC3 — nach unlock: set() + getPlaintext() funktionieren (ohne Neustart)', async () => {
+    // Store mit Einträgen vorbereiten
+    const setup = new CredentialStore({ dir, masterKey: 'my-runtime-key', envPath: envFile });
+    await setup.set('credentials/github/app_id', 'my-github-app-id');
+
+    // Neuer Store ohne Key (simuliert gesperrten Start)
+    const store = new CredentialStore({ dir, envPath: envFile });
+    expect(store.isUnlocked()).toBe(false);
+
+    // Runtime-unlock
+    const result = await store.unlock('my-runtime-key', { persist: false });
+    expect(result.ok).toBe(true);
+    expect(store.isUnlocked()).toBe(true);
+
+    // Klartext-Op funktioniert jetzt
+    const pt = await store.getPlaintext('credentials/github/app_id');
+    expect(pt).toBe('my-github-app-id');
+  });
+
+  it('AC3 — nach unlock: set() auf einem zunächst gesperrten Store schreibt korrekt', async () => {
+    const store = new CredentialStore({ dir, envPath: envFile });
+    await store.unlock('fresh-key', { persist: false });
+
+    await store.set('credentials/github/installation_id', 'install-123');
+    const pt = await store.getPlaintext('credentials/github/installation_id');
+    expect(pt).toBe('install-123');
+  });
+});
+
+describe('AC4 (credential-runtime-unlock) — Falscher Key bei vorhandenen Einträgen → Ablehnung', () => {
+  let dir, envFile;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'credstore-ru-ac4-'));
+    envFile = join(dir, '.env');
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('AC4 — falscher Key → ok:false, reason:invalid-key', async () => {
+    // Store mit echtem Key anlegen
+    const setup = new CredentialStore({ dir, masterKey: 'correct-key', envPath: envFile });
+    await setup.set('credentials/github/app_id', 'top-secret');
+
+    // Store ohne Key + falscher Key beim unlock
+    const store = new CredentialStore({ dir, envPath: envFile });
+    const result = await store.unlock('wrong-key', { persist: false });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('invalid-key');
+  });
+
+  it('AC4 — nach Ablehnung: Zustand bleibt locked', async () => {
+    const setup = new CredentialStore({ dir, masterKey: 'correct-key-2', envPath: envFile });
+    await setup.set('credentials/cloudflare/api_token', 'cf-secret');
+
+    const store = new CredentialStore({ dir, envPath: envFile });
+    await store.unlock('completely-wrong-key', { persist: false });
+
+    expect(store.isUnlocked()).toBe(false);
+    const lockState = await store.getLockState();
+    expect(lockState.state).toBe('locked');
+  });
+
+  it('AC4 — nach Ablehnung: .env nicht verändert (persist:true, falscher Key)', async () => {
+    // .env mit bestehender Zeile anlegen
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(envFile, 'OTHER_VAR=other-value\nCRED_MASTER_KEY=old-key\n', { mode: 0o600 });
+
+    const setup = new CredentialStore({ dir, masterKey: 'correct-key-3', envPath: envFile });
+    await setup.set('credentials/github/private_key', 'priv-secret');
+
+    const store = new CredentialStore({ dir, envPath: envFile });
+    const result = await store.unlock('wrong-key-persist', { persist: true });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('invalid-key');
+
+    // .env muss unverändert sein
+    const envContent = await fsReadFile(envFile, 'utf8');
+    expect(envContent).toContain('OTHER_VAR=other-value');
+    expect(envContent).toContain('CRED_MASTER_KEY=old-key');
+    expect(envContent).not.toContain('wrong-key-persist');
+  });
+
+  it('AC4 — leerer Key → ok:false, reason:empty-key (keine Validierung, keine .env-Mutation)', async () => {
+    const setup = new CredentialStore({ dir, masterKey: 'correct-key-4', envPath: envFile });
+    await setup.set('credentials/github/app_id', 'val');
+
+    const store = new CredentialStore({ dir, envPath: envFile });
+    const result = await store.unlock('', { persist: true });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('empty-key');
+    expect(store.isUnlocked()).toBe(false);
+  });
+
+  it('AC4 — whitespace-only Key → ok:false, reason:empty-key', async () => {
+    const store = new CredentialStore({ dir, envPath: envFile });
+    const result = await store.unlock('   ', { persist: false });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('empty-key');
+  });
+
+  it('AC4 — Key mit eingebettetem Newline → ok:false, reason:invalid-key-format, .env unverändert', async () => {
+    // Embedded \n korrumpiert .env: "abc\ndef" erzeugt zwei Zeilen → späterer Boot liest nur "abc"
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(envFile, 'OTHER=preserved\nCRED_MASTER_KEY=old-key\n', { mode: 0o600 });
+
+    const store = new CredentialStore({ dir, envPath: envFile });
+    const result = await store.unlock('abc\ndef', { persist: true });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('invalid-key-format');
+
+    // .env darf nicht verändert worden sein
+    const envContent = await fsReadFile(envFile, 'utf8');
+    expect(envContent).toContain('OTHER=preserved');
+    expect(envContent).toContain('CRED_MASTER_KEY=old-key');
+    expect(envContent).not.toContain('abc');
+
+    // Store bleibt locked
+    expect(store.isUnlocked()).toBe(false);
+  });
+
+  it('AC4 — Key mit eingebettetem \\r → ok:false, reason:invalid-key-format', async () => {
+    const store = new CredentialStore({ dir, envPath: envFile });
+    const result = await store.unlock('key\rwith-cr', { persist: false });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('invalid-key-format');
+    expect(store.isUnlocked()).toBe(false);
+  });
+});
+
+describe('AC5/AC6 (credential-runtime-unlock) — .env-Persistenz: atomar, 0600, kein Duplikat, andere Zeilen erhalten', () => {
+  let dir, envFile;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'credstore-ru-ac5-'));
+    envFile = join(dir, '.env');
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('AC5 — nach unlock: .env enthält CRED_MASTER_KEY=<key>', async () => {
+    const store = new CredentialStore({ dir, envPath: envFile });
+    const result = await store.unlock('my-persist-key', { persist: true });
+    expect(result.ok).toBe(true);
+
+    const envContent = await fsReadFile(envFile, 'utf8');
+    expect(envContent).toContain('CRED_MASTER_KEY=my-persist-key');
+  });
+
+  it('AC5 — nach unlock: andere .env-Variablen bleiben erhalten', async () => {
+    // .env mit bestehenden Zeilen anlegen
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(envFile, 'ACCESS_TEAM_DOMAIN=example.com\nGH_TOKEN=ghp_123\n', { mode: 0o600 });
+
+    const store = new CredentialStore({ dir, envPath: envFile });
+    await store.unlock('persist-key-no-overwrite', { persist: true });
+
+    const envContent = await fsReadFile(envFile, 'utf8');
+    expect(envContent).toContain('ACCESS_TEAM_DOMAIN=example.com');
+    expect(envContent).toContain('GH_TOKEN=ghp_123');
+    expect(envContent).toContain('CRED_MASTER_KEY=persist-key-no-overwrite');
+  });
+
+  it('AC5 — vorhandener CRED_MASTER_KEY wird ersetzt (kein Duplikat)', async () => {
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(envFile, 'OTHER=val\nCRED_MASTER_KEY=old-key\n', { mode: 0o600 });
+
+    const store = new CredentialStore({ dir, envPath: envFile });
+    await store.unlock('new-key-replacing-old', { persist: true });
+
+    const envContent = await fsReadFile(envFile, 'utf8');
+    expect(envContent).toContain('CRED_MASTER_KEY=new-key-replacing-old');
+    expect(envContent).toContain('OTHER=val');
+    // Kein Duplikat: genau eine CRED_MASTER_KEY-Zeile
+    const lines = envContent.split('\n').filter((l) => l.startsWith('CRED_MASTER_KEY='));
+    expect(lines.length).toBe(1);
+    // Alter Key nicht mehr vorhanden
+    expect(envContent).not.toContain('CRED_MASTER_KEY=old-key');
+  });
+
+  it('AC5 — Dateirechte 0600 nach unlock', async () => {
+    const store = new CredentialStore({ dir, envPath: envFile });
+    await store.unlock('key-for-chmod-test', { persist: true });
+
+    const stats = await fsStat(envFile);
+    // Nur Owner-Bits prüfen (0o600 = 0o100600, Typ-Bits ausblenden)
+    const mode = stats.mode & 0o777;
+    expect(mode).toBe(0o600);
+  });
+
+  it('AC6 — atomares Schreiben: kein tmp-File nach erfolgreichem unlock', async () => {
+    const store = new CredentialStore({ dir, envPath: envFile });
+    await store.unlock('atomic-write-key', { persist: true });
+
+    // Temp-Datei darf nicht übrig bleiben
+    let tmpExists = false;
+    try {
+      await fsStat(`${envFile}.cred-tmp`);
+      tmpExists = true;
+    } catch {
+      // ENOENT erwartet
+    }
+    expect(tmpExists).toBe(false);
+
+    // .env muss vorhanden und korrekt sein
+    const envContent = await fsReadFile(envFile, 'utf8');
+    expect(envContent).toContain('CRED_MASTER_KEY=atomic-write-key');
+  });
+});
+
+describe('AC7 (credential-runtime-unlock) — Master-Key darf NICHT in unlock-Ergebnis, Logs oder Fehlern erscheinen', () => {
+  let dir, envFile;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'credstore-ru-ac7-'));
+    envFile = join(dir, '.env');
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('AC7 — unlock-Ergebnis bei Erfolg enthält keinen Key-Wert', async () => {
+    const store = new CredentialStore({ dir, envPath: envFile });
+    const secret = 'super-secret-key-must-not-leak-0xdeadbeef';
+    const result = await store.unlock(secret, { persist: false });
+
+    expect(result.ok).toBe(true);
+    // Ergebnis-Objekt darf den Key nicht enthalten
+    expect(JSON.stringify(result)).not.toContain(secret);
+  });
+
+  it('AC7 — unlock-Ergebnis bei Fehler (falscher Key) enthält keinen Key-Wert', async () => {
+    const setup = new CredentialStore({ dir, masterKey: 'correct-secret', envPath: envFile });
+    await setup.set('credentials/github/app_id', 'val');
+
+    const store = new CredentialStore({ dir, envPath: envFile });
+    const wrongKey = 'wrong-key-must-not-leak-0xcafebabe';
+    const result = await store.unlock(wrongKey, { persist: false });
+
+    expect(result.ok).toBe(false);
+    expect(JSON.stringify(result)).not.toContain(wrongKey);
+  });
+
+  it('AC7 — unlock-Ergebnis bei empty-key enthält keinen Key-Wert', async () => {
+    // S3: konkreter Wert statt aussagelosem Whitespace-String — der gesamte .
+    // Ergebnis-String des whitespace-only-Aufrufs darf keine gesonderten Schlüssel-Fragmente
+    // enthalten. Wir prüfen reason und dass result kein Payload mit Schlüsselwert trägt.
+    const store = new CredentialStore({ dir, envPath: envFile });
+    const result = await store.unlock('  ', { persist: false });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('empty-key');
+    // Das Ergebnis-Objekt darf nur {ok, reason} enthalten — kein Schlüssel-Wert
+    const serialized = JSON.stringify(result);
+    expect(serialized).toContain('"ok":false');
+    expect(serialized).toContain('"reason":"empty-key"');
+    expect(Object.keys(result)).toHaveLength(2);
+  });
+
+  it('AC7 — getLockState() enthält weder Key noch Klartext-Werte', async () => {
+    const store = new CredentialStore({ dir, masterKey: 'secret-key-in-mem', envPath: envFile });
+    await store.set('credentials/github/app_id', 'plaintext-cred');
+    const lockState = await store.getLockState();
+
+    expect(JSON.stringify(lockState)).not.toContain('secret-key-in-mem');
+    expect(JSON.stringify(lockState)).not.toContain('plaintext-cred');
+    // Nur erlaubte Felder: state, hasEncryptedEntries
+    expect(Object.keys(lockState)).toEqual(expect.arrayContaining(['state', 'hasEncryptedEntries']));
+    expect(Object.keys(lockState).length).toBe(2);
+  });
+
+  it('AC7 — persist-failed-Fehler enthält keinen Key-Wert', async () => {
+    // persist auf nicht-schreibbaren Pfad setzen → persist-failed
+    const store = new CredentialStore({ dir, envPath: '/nonexistent-dir/cannot-write/.env' });
+    const secretKey = 'secret-key-persist-fail-test-0xfeed';
+    const result = await store.unlock(secretKey, { persist: true });
+
+    // Ergebnis: persist-failed, aber kein Key-Leak
+    expect(result.reason).toBe('persist-failed');
+    expect(JSON.stringify(result)).not.toContain(secretKey);
+  });
+
+  it('AC7 — Log-Kanal (console.warn/error): Key erscheint in keinem console-Aufruf (Erfolg + persist-failed)', async () => {
+    // Erfolg-Pfad: unlock mit nicht-schreibbarem Pfad provoziert persist-failed
+    // → assertiert dass der Secret-String NICHT in console.warn oder console.error landet
+    const secretKey = 'ultra-secret-log-leak-check-0xdeadcafe';
+
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      // persist-failed: der Catch-Zweig in #persistKeyToEnv und unlock darf den Key nicht loggen
+      const store = new CredentialStore({ dir, envPath: '/nonexistent-path-for-spy-test/.env' });
+      const result = await store.unlock(secretKey, { persist: true });
+      expect(result.reason).toBe('persist-failed');
+
+      // Alle console.warn/error-Aufrufe prüfen: kein Argument darf den Secret-String enthalten
+      for (const call of warnSpy.mock.calls) {
+        const callStr = call.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
+        expect(callStr).not.toContain(secretKey);
+      }
+      for (const call of errorSpy.mock.calls) {
+        const callStr = call.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
+        expect(callStr).not.toContain(secretKey);
+      }
+    } finally {
+      warnSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('AC7 — Log-Kanal: Key erscheint nicht in console bei erfolgreichem unlock', async () => {
+    const secretKey = 'success-unlock-no-log-leak-0xcafed00d';
+
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      const store = new CredentialStore({ dir, envPath: envFile });
+      const result = await store.unlock(secretKey, { persist: true });
+      expect(result.ok).toBe(true);
+
+      for (const call of warnSpy.mock.calls) {
+        const callStr = call.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
+        expect(callStr).not.toContain(secretKey);
+      }
+      for (const call of errorSpy.mock.calls) {
+        const callStr = call.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
+        expect(callStr).not.toContain(secretKey);
+      }
+    } finally {
+      warnSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
+  });
+});
+
+describe('AC8 (credential-runtime-unlock) — getLockState(): zustandslos, leak-frei', () => {
+  let dir, envFile;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'credstore-ru-ac8-'));
+    envFile = join(dir, '.env');
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('AC8 — gesperrter Store: {state:"locked", hasEncryptedEntries:false}', async () => {
+    const store = new CredentialStore({ dir, envPath: envFile });
+    const lockState = await store.getLockState();
+    expect(lockState).toEqual({ state: 'locked', hasEncryptedEntries: false });
+  });
+
+  it('AC8 — entsperrter Store ohne Einträge: {state:"unlocked", hasEncryptedEntries:false}', async () => {
+    const store = new CredentialStore({ dir, masterKey: 'some-key', envPath: envFile });
+    const lockState = await store.getLockState();
+    expect(lockState).toEqual({ state: 'unlocked', hasEncryptedEntries: false });
+  });
+
+  it('AC8 — entsperrter Store mit Einträgen: {state:"unlocked", hasEncryptedEntries:true}', async () => {
+    const store = new CredentialStore({ dir, masterKey: 'some-key-2', envPath: envFile });
+    await store.set('credentials/github/app_id', 'some-value');
+    const lockState = await store.getLockState();
+    expect(lockState).toEqual({ state: 'unlocked', hasEncryptedEntries: true });
+  });
+
+  it('AC8 — gesperrter Store mit vorhandenen Einträgen (kein Key): {state:"locked", hasEncryptedEntries:true}', async () => {
+    // Einträge anlegen (mit Key)
+    const setup = new CredentialStore({ dir, masterKey: 'setup-key', envPath: envFile });
+    await setup.set('credentials/github/private_key', 'priv-key-val');
+
+    // Store ohne Key: locked aber hasEncryptedEntries=true
+    const store = new CredentialStore({ dir, envPath: envFile });
+    const lockState = await store.getLockState();
+    expect(lockState).toEqual({ state: 'locked', hasEncryptedEntries: true });
+  });
+
+  it('AC8 — getLockState() hat exakt zwei Felder (state + hasEncryptedEntries)', async () => {
+    const store = new CredentialStore({ dir, masterKey: 'k', envPath: envFile });
+    const lockState = await store.getLockState();
+    const keys = Object.keys(lockState);
+    expect(keys).toHaveLength(2);
+    expect(keys).toContain('state');
+    expect(keys).toContain('hasEncryptedEntries');
+  });
+
+  it('AC8 — Doppeltes unlock (gleicher Key) ist idempotent → state bleibt unlocked', async () => {
+    const store = new CredentialStore({ dir, envPath: envFile });
+    await store.unlock('idempotent-key', { persist: false });
+    const result2 = await store.unlock('idempotent-key', { persist: false });
+    expect(result2.ok).toBe(true);
+    expect(store.isUnlocked()).toBe(true);
   });
 });
