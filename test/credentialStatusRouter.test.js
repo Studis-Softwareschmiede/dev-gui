@@ -1,7 +1,8 @@
 /**
  * credentialStatusRouter.test.js — Tests für credential-bootstrap-status (Item #184, AC1–AC7)
+ *                                   + credential-key-status-transparency (Item #192, AC1–AC8)
  *
- * Covers:
+ * Covers (credential-bootstrap-status #184):
  *   AC1 — GET /api/settings/credential-status → 200 { state, hasEncryptedEntries }; niemals Schlüssel/Klartext
  *   AC2 — kein Key + keine verschlüsselten Entries → state "locked", hasEncryptedEntries false
  *   AC3 — Key geladen → state "unlocked"
@@ -11,6 +12,14 @@
  *          (AccessGuard-Verdrahtung: per server.js-Inspektion, kein separater Middleware-Test;
  *           locked-erreichbar via DEV_NO_ACCESS-Bypass, da der Endpoint KEIN Master-Key-Gate hat)
  *   AC7 — kein Geheimnis-Leak in Response/Log/Audit
+ *
+ * Covers (credential-key-status-transparency #192):
+ *   AC1 — Response enthält zusätzlich keySource ∈ {"auto","manual","none"}; niemals Key/Wert
+ *   AC2 — Boot-Key (Env/.env) → keySource "auto"
+ *   AC3 — Runtime-unlock → keySource "manual" (ohne Neustart)
+ *   AC4 — locked → keySource "none" (Konsistenz-Invariante)
+ *   AC7 — keySource ist reines Enum, kein Key/Wert enthalten
+ *   AC8 — Endpunkt hinter AccessGuard; im locked-Zustand erreichbar (kein Master-Key-Gate)
  *
  * Strategy:
  *   - credentialStatusRouter: HTTP-Integration via Express + AccessGuard-Dev-Bypass.
@@ -79,17 +88,24 @@ function makeApp(credentialStore) {
 
 /**
  * Erstellt einen kontrollierbaren Fake-CredentialStore mit steuerbarem getLockState().
- * @param {{ state: "locked"|"unlocked", hasEncryptedEntries: boolean }} initial
+ * Unterstützt jetzt keySource (credential-key-status-transparency AC1–AC4).
+ * @param {{ state: "locked"|"unlocked", hasEncryptedEntries: boolean, keySource?: "auto"|"manual"|"none" }} initial
  */
 function makeFakeCredStore(initial) {
-  let currentState = { ...initial };
+  // keySource-Default: konsistent mit state (AC4: locked → "none"; unlocked → "auto")
+  const defaultKeySource = initial.state === 'locked' ? 'none' : (initial.keySource ?? 'auto');
+  let currentState = { ...initial, keySource: initial.keySource ?? defaultKeySource };
   return {
     async getLockState() {
       return { ...currentState };
     },
-    // Simuliert einen Laufzeit-Unlock (AC5)
+    // Simuliert einen Laufzeit-Unlock (AC5 / AC3-Transparenz)
     _simulateUnlock() {
-      currentState = { state: 'unlocked', hasEncryptedEntries: currentState.hasEncryptedEntries };
+      currentState = {
+        state: 'unlocked',
+        hasEncryptedEntries: currentState.hasEncryptedEntries,
+        keySource: 'manual',  // AC3: Runtime-unlock → keySource "manual"
+      };
     },
     // Erlaubt das Setzen beliebiger Zustände für Tests
     _setState(s) {
@@ -121,18 +137,22 @@ describe('GET /api/settings/credential-status — AC1: Response-Shape + kein Geh
     expect(res.status).toBe(200);
   });
 
-  it('AC1 — Response enthält genau die Felder state und hasEncryptedEntries', async () => {
+  it('AC1 — Response enthält die Felder state, hasEncryptedEntries und keySource', async () => {
     const res = await httpGet(port, '/api/settings/credential-status');
     expect(res.body).toHaveProperty('state');
     expect(res.body).toHaveProperty('hasEncryptedEntries');
+    // AC1 (credential-key-status-transparency): keySource-Feld vorhanden
+    expect(res.body).toHaveProperty('keySource');
   });
 
-  it('AC1/AC7 — Response enthält KEINE weiteren Felder (kein Schlüssel/Klartext-Leak)', async () => {
+  it('AC1/AC7 — Response enthält KEINE Schlüssel/Klartext-Felder (kein Geheimnis-Leak)', async () => {
     const res = await httpGet(port, '/api/settings/credential-status');
     const keys = Object.keys(res.body);
-    expect(keys).toHaveLength(2);
+    // Genau drei erlaubte Felder (state, hasEncryptedEntries, keySource)
+    expect(keys).toHaveLength(3);
     expect(keys).toContain('state');
     expect(keys).toContain('hasEncryptedEntries');
+    expect(keys).toContain('keySource');
     // Explizit: keine Felder wie key, masterKey, secret, token, password, plaintext
     expect(keys).not.toContain('key');
     expect(keys).not.toContain('masterKey');
@@ -383,7 +403,7 @@ describe('GET /api/settings/credential-status — AC7: kein Geheimnis-Leak in Re
   });
 
   it('AC7 — Response enthält keine Felder mit schlüssel-artigen Namen', async () => {
-    const credStore = makeFakeCredStore({ state: 'unlocked', hasEncryptedEntries: true });
+    const credStore = makeFakeCredStore({ state: 'unlocked', hasEncryptedEntries: true, keySource: 'auto' });
     const app = makeApp(credStore);
     ({ server, port } = await startServer(app));
 
@@ -393,9 +413,11 @@ describe('GET /api/settings/credential-status — AC7: kein Geheimnis-Leak in Re
     for (const f of forbidden) {
       expect(body).not.toHaveProperty(f);
     }
+    // keySource-Wert darf kein Key/Klartext enthalten (AC7: reines Enum)
+    expect(['auto', 'manual', 'none']).toContain(body.keySource);
   });
 
-  it('AC7 — Response-Werte sind ausschliesslich state-String und boolean (kein Schlüssel)', async () => {
+  it('AC7 — Response-Werte: state-String, boolean, keySource-Enum (kein Schlüssel)', async () => {
     const credStore = makeFakeCredStore({ state: 'locked', hasEncryptedEntries: false });
     const app = makeApp(credStore);
     ({ server, port } = await startServer(app));
@@ -405,8 +427,10 @@ describe('GET /api/settings/credential-status — AC7: kein Geheimnis-Leak in Re
     expect(res.body.state).toMatch(/^(locked|unlocked)$/);
     // hasEncryptedEntries muss boolean sein
     expect(typeof res.body.hasEncryptedEntries).toBe('boolean');
-    // Keine weiteren Felder
-    expect(Object.keys(res.body)).toHaveLength(2);
+    // keySource muss "auto"|"manual"|"none" sein (reines Enum, kein Key/Wert — AC7)
+    expect(['auto', 'manual', 'none']).toContain(res.body.keySource);
+    // Genau drei Felder (state, hasEncryptedEntries, keySource)
+    expect(Object.keys(res.body)).toHaveLength(3);
   });
 
   it('AC7 — Store-Fehler → 500 ohne Secret-Leak (generische Fehlermeldung + kein Secret im Log)', async () => {
@@ -445,6 +469,226 @@ describe('GET /api/settings/credential-status — AC7: kein Geheimnis-Leak in Re
       await closeServer(server);
       errorSpy.mockRestore();
       warnSpy.mockRestore();
+    }
+  });
+});
+
+// ── credential-key-status-transparency #192 — neue AC1–AC8-Tests ──────────────
+
+describe('GET /api/settings/credential-status — #192 AC1: keySource im Response', () => {
+  let server, port;
+
+  beforeEach(async () => {
+    process.env.DEV_NO_ACCESS = '1';
+  });
+
+  afterEach(async () => {
+    if (server) await closeServer(server);
+    server = null;
+    delete process.env.DEV_NO_ACCESS;
+  });
+
+  it('#192/AC1 — Response enthält keySource ∈ {"auto","manual","none"}', async () => {
+    const credStore = makeFakeCredStore({ state: 'locked', hasEncryptedEntries: false });
+    const app = makeApp(credStore);
+    ({ server, port } = await startServer(app));
+
+    const res = await httpGet(port, '/api/settings/credential-status');
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('keySource');
+    expect(['auto', 'manual', 'none']).toContain(res.body.keySource);
+  });
+
+  it('#192/AC1 — keySource-Wert enthält NIEMALS den Key/Klartext (nur Enum)', async () => {
+    // Fake-Store mit einem Wert, der wie ein Key aussieht — darf NICHT in keySource erscheinen
+    const store = {
+      async getLockState() {
+        return { state: 'unlocked', hasEncryptedEntries: false, keySource: 'auto' };
+      },
+    };
+    const app = makeApp(store);
+    ({ server, port } = await startServer(app));
+
+    const res = await httpGet(port, '/api/settings/credential-status');
+    expect(res.status).toBe(200);
+    // keySource ist "auto" — kein Rohwert
+    expect(res.body.keySource).toBe('auto');
+    // Kein Feld namens "key", "masterKey", etc.
+    expect(res.body).not.toHaveProperty('key');
+    expect(res.body).not.toHaveProperty('masterKey');
+  });
+});
+
+describe('GET /api/settings/credential-status — #192 AC2: Boot-Key → keySource "auto"', () => {
+  let server, port;
+
+  beforeEach(async () => {
+    process.env.DEV_NO_ACCESS = '1';
+  });
+
+  afterEach(async () => {
+    if (server) await closeServer(server);
+    server = null;
+    delete process.env.DEV_NO_ACCESS;
+  });
+
+  it('#192/AC2 — Key aus Env/Boot → state "unlocked", keySource "auto"', async () => {
+    const credStore = makeFakeCredStore({ state: 'unlocked', hasEncryptedEntries: false, keySource: 'auto' });
+    const app = makeApp(credStore);
+    ({ server, port } = await startServer(app));
+
+    const res = await httpGet(port, '/api/settings/credential-status');
+    expect(res.status).toBe(200);
+    expect(res.body.state).toBe('unlocked');
+    expect(res.body.keySource).toBe('auto');
+  });
+});
+
+describe('GET /api/settings/credential-status — #192 AC3: Runtime-unlock → keySource "manual"', () => {
+  let server, port;
+
+  beforeEach(async () => {
+    process.env.DEV_NO_ACCESS = '1';
+  });
+
+  afterEach(async () => {
+    if (server) await closeServer(server);
+    server = null;
+    delete process.env.DEV_NO_ACCESS;
+  });
+
+  it('#192/AC3 — nach Runtime-unlock → state "unlocked", keySource "manual" (ohne Neustart)', async () => {
+    const credStore = makeFakeCredStore({ state: 'locked', hasEncryptedEntries: false });
+    const app = makeApp(credStore);
+    ({ server, port } = await startServer(app));
+
+    // Vor Unlock: locked + keySource "none"
+    const res1 = await httpGet(port, '/api/settings/credential-status');
+    expect(res1.body.state).toBe('locked');
+    expect(res1.body.keySource).toBe('none');
+
+    // Runtime-Unlock simulieren → keySource wechselt auf "manual"
+    credStore._simulateUnlock();
+
+    // Nach Unlock: unlocked + keySource "manual"
+    const res2 = await httpGet(port, '/api/settings/credential-status');
+    expect(res2.status).toBe(200);
+    expect(res2.body.state).toBe('unlocked');
+    expect(res2.body.keySource).toBe('manual');
+  });
+});
+
+describe('GET /api/settings/credential-status — #192 AC4: locked → keySource "none"', () => {
+  let server, port;
+
+  beforeEach(async () => {
+    process.env.DEV_NO_ACCESS = '1';
+  });
+
+  afterEach(async () => {
+    if (server) await closeServer(server);
+    server = null;
+    delete process.env.DEV_NO_ACCESS;
+  });
+
+  it('#192/AC4 — state "locked" ⇒ keySource "none" (Konsistenz-Invariante)', async () => {
+    const credStore = makeFakeCredStore({ state: 'locked', hasEncryptedEntries: false });
+    const app = makeApp(credStore);
+    ({ server, port } = await startServer(app));
+
+    const res = await httpGet(port, '/api/settings/credential-status');
+    expect(res.status).toBe(200);
+    expect(res.body.state).toBe('locked');
+    expect(res.body.keySource).toBe('none');
+  });
+
+  it('#192/AC4 — locked + verschlüsselte Entries → keySource trotzdem "none"', async () => {
+    const credStore = makeFakeCredStore({ state: 'locked', hasEncryptedEntries: true });
+    const app = makeApp(credStore);
+    ({ server, port } = await startServer(app));
+
+    const res = await httpGet(port, '/api/settings/credential-status');
+    expect(res.status).toBe(200);
+    expect(res.body.state).toBe('locked');
+    expect(res.body.keySource).toBe('none');
+  });
+});
+
+describe('GET /api/settings/credential-status — #192 AC7: keySource ist reines Enum, kein Key-Leak', () => {
+  let server, port;
+
+  beforeEach(async () => {
+    process.env.DEV_NO_ACCESS = '1';
+  });
+
+  afterEach(async () => {
+    if (server) await closeServer(server);
+    server = null;
+    delete process.env.DEV_NO_ACCESS;
+  });
+
+  it('#192/AC7 — keySource-Wert für "auto" ist exakt "auto" (kein Rohwert)', async () => {
+    const credStore = makeFakeCredStore({ state: 'unlocked', hasEncryptedEntries: false, keySource: 'auto' });
+    const app = makeApp(credStore);
+    ({ server, port } = await startServer(app));
+
+    const res = await httpGet(port, '/api/settings/credential-status');
+    expect(res.body.keySource).toBe('auto');
+  });
+
+  it('#192/AC7 — keySource-Wert für "manual" ist exakt "manual" (kein Rohwert)', async () => {
+    const credStore = makeFakeCredStore({ state: 'unlocked', hasEncryptedEntries: false, keySource: 'manual' });
+    const app = makeApp(credStore);
+    ({ server, port } = await startServer(app));
+
+    const res = await httpGet(port, '/api/settings/credential-status');
+    expect(res.body.keySource).toBe('manual');
+  });
+
+  it('#192/AC7 — keySource-Wert für "none" ist exakt "none" (locked)', async () => {
+    const credStore = makeFakeCredStore({ state: 'locked', hasEncryptedEntries: false });
+    const app = makeApp(credStore);
+    ({ server, port } = await startServer(app));
+
+    const res = await httpGet(port, '/api/settings/credential-status');
+    expect(res.body.keySource).toBe('none');
+  });
+});
+
+describe('GET /api/settings/credential-status — #192 AC8: AccessGuard + locked erreichbar', () => {
+  it('#192/AC8 — kein Access → 403 (kein Bypass)', async () => {
+    delete process.env.DEV_NO_ACCESS;
+    const savedDomain = process.env.ACCESS_TEAM_DOMAIN;
+    const savedAud = process.env.ACCESS_AUD;
+    delete process.env.ACCESS_TEAM_DOMAIN;
+    delete process.env.ACCESS_AUD;
+
+    const credStore = makeFakeCredStore({ state: 'locked', hasEncryptedEntries: false });
+    const app = makeApp(credStore);
+    const { server, port } = await startServer(app);
+    try {
+      const res = await httpGet(port, '/api/settings/credential-status');
+      expect(res.status).toBe(403);
+    } finally {
+      await closeServer(server);
+      if (savedDomain !== undefined) process.env.ACCESS_TEAM_DOMAIN = savedDomain;
+      if (savedAud !== undefined) process.env.ACCESS_AUD = savedAud;
+    }
+  });
+
+  it('#192/AC8 — locked-Zustand ist erreichbar (kein Master-Key-Gate)', async () => {
+    process.env.DEV_NO_ACCESS = '1';
+    const credStore = makeFakeCredStore({ state: 'locked', hasEncryptedEntries: false });
+    const app = makeApp(credStore);
+    const { server, port } = await startServer(app);
+    try {
+      const res = await httpGet(port, '/api/settings/credential-status');
+      expect(res.status).toBe(200);
+      expect(res.body.state).toBe('locked');
+      expect(res.body.keySource).toBe('none');
+    } finally {
+      await closeServer(server);
+      delete process.env.DEV_NO_ACCESS;
     }
   });
 });

@@ -21,7 +21,13 @@
  *   AC5  — Nach erfolgreichem unlock: .env enthält DEVGUI_CRED_MASTER_KEY=<key>; andere Zeilen unverändert; kein Duplikat; 0600
  *   AC6  — .env-Schreiben atomar (tmp + rename)
  *   AC7  — Master-Key erscheint in keinem Log/Response/unlock-Ergebnis
- *   AC8  — getLockState() → {state, hasEncryptedEntries} ohne Key/Klartext
+ *   AC8  — getLockState() → {state, hasEncryptedEntries, keySource} ohne Key/Klartext
+ *
+ * Covers (credential-key-status-transparency #192):
+ *   AC2  — getLockState() liefert keySource:"auto" wenn Key aus Env/Boot-Injection (kein Bitwarden-Unlock)
+ *   AC3  — getLockState() liefert keySource:"manual" nach Runtime-Unlock via Bitwarden
+ *   AC4  — getLockState() bei locked → keySource IMMER "none" (Invariante)
+ *   AC7  — keySource-Wert im getLockState()-Ergebnis ist reines Enum ("auto"|"manual"|"none"), NIE der Rohschlüssel
  *
  * Covers (credential-master-key-decoupling):
  *   AC1  — CredentialStore liest primär DEVGUI_CRED_MASTER_KEY (unlocked wenn gesetzt)
@@ -1032,8 +1038,10 @@ describe('AC1 (credential-runtime-unlock) — locked-Start: kein Key, kein Store
     const state = await store.getLockState();
     expect(state.state).toBe('locked');
     expect(state.hasEncryptedEntries).toBe(false);
-    // Kein Schlüssel/Klartext im Ergebnis
-    expect(JSON.stringify(state)).not.toContain('key');
+    // Kein Master-Key-Wert/Klartext im Ergebnis (keySource ist erlaubtes Enum-Feld, kein Rohwert)
+    expect(state.keySource).toBe('none'); // reines Enum — kein Rohwert
+    expect(state.state).toMatch(/^(locked|unlocked)$/);
+    expect(typeof state.hasEncryptedEntries).toBe('boolean');
   });
 
   it('AC1 — Store mit nur meta-Block (Public-Keys) aber keinen verschlüsselten entries: kein Fail-Fast', async () => {
@@ -1383,9 +1391,11 @@ describe('AC7 (credential-runtime-unlock) — Master-Key darf NICHT in unlock-Er
 
     expect(JSON.stringify(lockState)).not.toContain('secret-key-in-mem');
     expect(JSON.stringify(lockState)).not.toContain('plaintext-cred');
-    // Nur erlaubte Felder: state, hasEncryptedEntries
-    expect(Object.keys(lockState)).toEqual(expect.arrayContaining(['state', 'hasEncryptedEntries']));
-    expect(Object.keys(lockState).length).toBe(2);
+    // Erlaubte Felder: state, hasEncryptedEntries, keySource (credential-key-status-transparency #192)
+    expect(Object.keys(lockState)).toEqual(expect.arrayContaining(['state', 'hasEncryptedEntries', 'keySource']));
+    // keySource ist reines Enum — nie der Rohwert (AC7 #192)
+    expect(['auto', 'manual', 'none']).toContain(lockState.keySource);
+    expect(Object.keys(lockState).length).toBe(3);
   });
 
   it('AC7 — persist-failed-Fehler enthält keinen Key-Wert', async () => {
@@ -1466,26 +1476,35 @@ describe('AC8 (credential-runtime-unlock) — getLockState(): zustandslos, leak-
     await rm(dir, { recursive: true, force: true });
   });
 
-  it('AC8 — gesperrter Store: {state:"locked", hasEncryptedEntries:false}', async () => {
+  it('AC8 — gesperrter Store: state:"locked", hasEncryptedEntries:false', async () => {
     const store = new CredentialStore({ dir, envPath: envFile });
     const lockState = await store.getLockState();
-    expect(lockState).toEqual({ state: 'locked', hasEncryptedEntries: false });
+    expect(lockState.state).toBe('locked');
+    expect(lockState.hasEncryptedEntries).toBe(false);
+    // #192 AC4: locked → keySource "none"
+    expect(lockState.keySource).toBe('none');
   });
 
-  it('AC8 — entsperrter Store ohne Einträge: {state:"unlocked", hasEncryptedEntries:false}', async () => {
+  it('AC8 — entsperrter Store ohne Einträge: state:"unlocked", hasEncryptedEntries:false', async () => {
     const store = new CredentialStore({ dir, masterKey: 'some-key', envPath: envFile });
     const lockState = await store.getLockState();
-    expect(lockState).toEqual({ state: 'unlocked', hasEncryptedEntries: false });
+    expect(lockState.state).toBe('unlocked');
+    expect(lockState.hasEncryptedEntries).toBe(false);
+    // #192 AC2: injizierter Key (Boot-Analogie) → keySource "auto"
+    expect(lockState.keySource).toBe('auto');
   });
 
-  it('AC8 — entsperrter Store mit Einträgen: {state:"unlocked", hasEncryptedEntries:true}', async () => {
+  it('AC8 — entsperrter Store mit Einträgen: state:"unlocked", hasEncryptedEntries:true', async () => {
     const store = new CredentialStore({ dir, masterKey: 'some-key-2', envPath: envFile });
     await store.set('credentials/github/app_id', 'some-value');
     const lockState = await store.getLockState();
-    expect(lockState).toEqual({ state: 'unlocked', hasEncryptedEntries: true });
+    expect(lockState.state).toBe('unlocked');
+    expect(lockState.hasEncryptedEntries).toBe(true);
+    // #192 AC2: injizierter Key → keySource "auto"
+    expect(lockState.keySource).toBe('auto');
   });
 
-  it('AC8 — gesperrter Store mit vorhandenen Einträgen (kein Key): {state:"locked", hasEncryptedEntries:true}', async () => {
+  it('AC8 — gesperrter Store mit vorhandenen Einträgen (kein Key): state:"locked", hasEncryptedEntries:true', async () => {
     // Einträge anlegen (mit Key)
     const setup = new CredentialStore({ dir, masterKey: 'setup-key', envPath: envFile });
     await setup.set('credentials/github/private_key', 'priv-key-val');
@@ -1493,16 +1512,21 @@ describe('AC8 (credential-runtime-unlock) — getLockState(): zustandslos, leak-
     // Store ohne Key: locked aber hasEncryptedEntries=true
     const store = new CredentialStore({ dir, envPath: envFile });
     const lockState = await store.getLockState();
-    expect(lockState).toEqual({ state: 'locked', hasEncryptedEntries: true });
+    expect(lockState.state).toBe('locked');
+    expect(lockState.hasEncryptedEntries).toBe(true);
+    // #192 AC4: locked → keySource "none"
+    expect(lockState.keySource).toBe('none');
   });
 
-  it('AC8 — getLockState() hat exakt zwei Felder (state + hasEncryptedEntries)', async () => {
+  it('AC8 — getLockState() hat exakt drei Felder (state + hasEncryptedEntries + keySource)', async () => {
     const store = new CredentialStore({ dir, masterKey: 'k', envPath: envFile });
     const lockState = await store.getLockState();
     const keys = Object.keys(lockState);
-    expect(keys).toHaveLength(2);
+    expect(keys).toHaveLength(3);
     expect(keys).toContain('state');
     expect(keys).toContain('hasEncryptedEntries');
+    // #192 AC1: keySource-Feld vorhanden
+    expect(keys).toContain('keySource');
   });
 
   it('AC8 — Doppeltes unlock (gleicher Key) ist idempotent → state bleibt unlocked', async () => {
@@ -1511,6 +1535,94 @@ describe('AC8 (credential-runtime-unlock) — getLockState(): zustandslos, leak-
     const result2 = await store.unlock('idempotent-key', { persist: false });
     expect(result2.ok).toBe(true);
     expect(store.isUnlocked()).toBe(true);
+  });
+});
+
+// ── credential-key-status-transparency #192 — CredentialStore.getLockState() keySource ──
+
+describe('CredentialStore — #192 keySource in getLockState()', () => {
+  let dir, envFile;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'credstore-192-'));
+    envFile = join(dir, '.env');
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  // AC2: Boot-Key (injizierter Key im Konstruktor, entspricht Env-Pfad) → keySource "auto"
+  it('#192/AC2 — Key aus Boot (Env/opts.masterKey) → keySource "auto"', async () => {
+    const store = new CredentialStore({ dir, masterKey: 'boot-key', envPath: envFile });
+    const lockState = await store.getLockState();
+    expect(lockState.state).toBe('unlocked');
+    expect(lockState.keySource).toBe('auto');
+  });
+
+  // AC3: Runtime-unlock → keySource "manual" (ohne Neustart)
+  it('#192/AC3 — Runtime-unlock() → keySource wechselt auf "manual"', async () => {
+    const store = new CredentialStore({ dir, envPath: envFile });
+    expect((await store.getLockState()).keySource).toBe('none');
+
+    const result = await store.unlock('runtime-key', { persist: false });
+    expect(result.ok).toBe(true);
+
+    const lockState = await store.getLockState();
+    expect(lockState.state).toBe('unlocked');
+    expect(lockState.keySource).toBe('manual');
+  });
+
+  // AC4: locked → keySource "none" (Konsistenz-Invariante)
+  it('#192/AC4 — locked → keySource "none"', async () => {
+    const store = new CredentialStore({ dir, envPath: envFile });
+    const lockState = await store.getLockState();
+    expect(lockState.state).toBe('locked');
+    expect(lockState.keySource).toBe('none');
+  });
+
+  // AC3: Nach Runtime-unlock bleibt keySource "manual" bei erneutem getLockState()-Aufruf
+  it('#192/AC3 — nach unlock bleibt keySource "manual" bei erneutem getLockState()-Aufruf', async () => {
+    const store = new CredentialStore({ dir, envPath: envFile });
+    await store.unlock('key-for-manual', { persist: false });
+
+    // Zweiter Aufruf: keySource bleibt "manual" (nicht "auto")
+    const lockState2 = await store.getLockState();
+    expect(lockState2.keySource).toBe('manual');
+  });
+
+  // AC4: locked + vorhandene Einträge → keySource trotzdem "none"
+  it('#192/AC4 — locked + verschlüsselte Entries → keySource "none"', async () => {
+    const setup = new CredentialStore({ dir, masterKey: 'setup', envPath: envFile });
+    await setup.set('credentials/github/app_id', 'v');
+
+    const store = new CredentialStore({ dir, envPath: envFile });
+    const lockState = await store.getLockState();
+    expect(lockState.state).toBe('locked');
+    expect(lockState.keySource).toBe('none');
+  });
+
+  // AC7: keySource enthält niemals den Key-Rohwert
+  it('#192/AC7 — keySource ist reines Enum, kein Key-Rohwert enthalten', async () => {
+    const secretKey = 'ultra-secret-raw-key-192-check';
+    const store = new CredentialStore({ dir, masterKey: secretKey, envPath: envFile });
+    const lockState = await store.getLockState();
+
+    // keySource darf den Rohwert nicht enthalten
+    expect(lockState.keySource).not.toContain(secretKey);
+    expect(['auto', 'manual', 'none']).toContain(lockState.keySource);
+    expect(JSON.stringify(lockState)).not.toContain(secretKey);
+  });
+
+  // AC7: keySource nach Runtime-unlock enthält niemals den Key-Rohwert
+  it('#192/AC7 — keySource nach Runtime-unlock: reines Enum "manual", kein Key-Rohwert', async () => {
+    const secretKey = 'runtime-secret-raw-key-192-check';
+    const store = new CredentialStore({ dir, envPath: envFile });
+    await store.unlock(secretKey, { persist: false });
+    const lockState = await store.getLockState();
+
+    expect(lockState.keySource).toBe('manual');
+    expect(JSON.stringify(lockState)).not.toContain(secretKey);
   });
 });
 

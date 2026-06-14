@@ -134,11 +134,11 @@ function validatePublicKeyFormat(key) {
 
 /**
  * GET /api/settings/credential-status
- * Liefert { state: "locked"|"unlocked", hasEncryptedEntries: boolean }.
- * AC1: Sichtbarkeits-Quelle für den Unlock-Bereich.
+ * Liefert { state: "locked"|"unlocked", hasEncryptedEntries: boolean, keySource: "auto"|"manual"|"none" }.
+ * AC1: Sichtbarkeits- und Quellen-Quelle für den Store-Status-Bereich.
  *
  * @param {typeof fetch} [fetchImpl]
- * @returns {Promise<{ state: "locked"|"unlocked", hasEncryptedEntries: boolean }>}
+ * @returns {Promise<{ state: "locked"|"unlocked", hasEncryptedEntries: boolean, keySource: "auto"|"manual"|"none" }>}
  */
 async function fetchCredentialStatus(fetchImpl) {
   const fn = fetchImpl ?? globalThis.fetch.bind(globalThis);
@@ -2511,23 +2511,37 @@ export function SettingsView({ onNavigate, fetchFn }) {
       <div style={styles.inner}>
         <h1 style={styles.title}>Einstellungen</h1>
 
-        {/* AC1/AC10: Unlock-Bereich — NUR bei state:"locked" anzeigen */}
-        {credentialStatus?.state === 'locked' && (
+        {/* AC5/AC6 (credential-key-status-transparency): Store-Status immer anzeigen — auch bei unlocked */}
+        {credentialStatus !== null && (
           <section aria-labelledby="settings-section-unlock" style={unlockStyles.section}>
             <h2 id="settings-section-unlock" style={unlockStyles.heading}>
               Bitwarden-Verbindung
             </h2>
-            <p style={unlockStyles.desc}>
-              Der Credential-Store ist gesperrt. Verbinde Bitwarden, um Credentials zu nutzen.
-            </p>
-            <button
-              type="button"
-              onClick={() => setShowUnlockDialog(true)}
-              style={unlockStyles.btnConnect}
-              aria-label="Bitwarden verbinden und Store entsperren"
-            >
-              Bitwarden verbinden
-            </button>
+            {credentialStatus.state === 'unlocked' ? (
+              /* AC5: unlocked → "entsperrt" + quellenabhängiger Hinweis; KEIN Verbinden-Button (AC6) */
+              <p style={unlockStyles.desc} aria-live="polite">
+                {'🔓 entsperrt'}
+                {credentialStatus.keySource === 'manual'
+                  ? ' (Quelle: via Bitwarden entsperrt)'
+                  : ' (Quelle: automatischer Schlüssel)'}
+              </p>
+            ) : (
+              /* AC5: locked → "gesperrt" + Verbinden-Button (AC6) */
+              <>
+                <p style={unlockStyles.desc} aria-live="polite">
+                  {'🔒 gesperrt'}{' — '}
+                  {'Der Credential-Store ist gesperrt. Verbinde Bitwarden, um Credentials zu nutzen.'}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setShowUnlockDialog(true)}
+                  style={unlockStyles.btnConnect}
+                  aria-label="Bitwarden verbinden und Store entsperren"
+                >
+                  Bitwarden verbinden
+                </button>
+              </>
+            )}
           </section>
         )}
 

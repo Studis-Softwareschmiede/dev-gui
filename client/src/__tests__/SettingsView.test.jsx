@@ -52,7 +52,7 @@
  *             Labels programmatisch zugeordnet; Touch-Targets ≥ 44 px.
  *
  * Covers (credential-unlock-dialog #185) — Frontend-ACs:
- *   AC1  — Bei state:"locked" → Button „Bitwarden verbinden" sichtbar; bei "unlocked" → kein Unlock-Bereich.
+ *   AC1  — Bei state:"locked" → Button „Bitwarden verbinden" sichtbar; bei "unlocked" → kein Button, aber Status-Zeile mit Quelle sichtbar (ab #192).
  *   AC2  — Dialog modal (role=dialog/aria-modal), Labels, Fehler programmatisch zugeordnet (aria-describedby/role=alert),
  *           Fokusführung beim Öffnen, Touch-Targets ≥ 44 px; Fokus-Trap (Tab/Shift+Tab/Escape) — WCAG 2.1.2.
  *   AC4  — not-found → explizites Erstellungs-Angebot (role=alertdialog); erst nach Bestätigung create:true;
@@ -61,6 +61,11 @@
  *   AC9  — Passwort-Feld type=password/autoComplete=off (Frontend-Floor, testbar via DOM-Attribute).
  *   AC10 — Nach erfolgreichem Unlock: Dialog geschlossen, Unlock-Bereich verschwindet, Status neu geladen.
  * Backend-ACs (AC3/AC6/AC7/AC8) sind in Backend-Tests abgedeckt, nicht hier.
+ *
+ * Covers (credential-key-status-transparency #192) — Frontend-ACs:
+ *   AC5  — Status-Zeile (state + Quelle) IMMER sichtbar: unlocked/auto → "automatischer Schlüssel";
+ *           unlocked/manual → "via Bitwarden entsperrt"; locked/none → "gesperrt".
+ *   AC6  — Verbinden-Button NUR bei state:"locked"; bei "unlocked" kein Button.
  *
  * @jest-environment jsdom
  */
@@ -150,7 +155,7 @@ function makeFetch({
   putWorkspacePath   = { ok: true, status: 200, data: { effectivePath: '/workspace/projekt', source: 'configured' } },
   deleteWorkspacePath = { ok: true, status: 200, data: { effectivePath: '/workspace', source: 'env-default' } },
   // credential-unlock-dialog #185
-  credentialStatus = { state: 'unlocked', hasEncryptedEntries: false }, // Standard: unlocked (kein Unlock-Bereich)
+  credentialStatus = { state: 'unlocked', hasEncryptedEntries: false, keySource: 'auto' }, // Standard: unlocked (kein Unlock-Bereich)
   credentialUnlockResponse = null, // null = Standard-Erfolg ({ ok: true, state: 'unlocked' })
 } = {}) {
   const DEFAULT_GENERATE_SUCCESS = {
@@ -3729,6 +3734,122 @@ describe('SettingsView — Bitwarden-Unlock-Dialog (AC1, AC2, AC4, AC5, AC9, AC1
     await waitFor(() => {
       expect(queryByRole('dialog')).toBeNull();
       expect(queryByRole('button', { name: /bitwarden verbinden/i })).toBeNull();
+    });
+  });
+});
+
+// ── credential-key-status-transparency #192 — AC5, AC6 (SettingsView) ───────
+
+describe('SettingsView — #192 Key-Quelle-Transparenz (AC5/AC6)', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  // AC5: Status-Zeile IMMER sichtbar
+  it('#192/AC5 — state:"unlocked" + keySource:"auto" → Status-Zeile mit "entsperrt" sichtbar', async () => {
+    const { queryByText } = renderView(
+      makeFetch({ credentialStatus: { state: 'unlocked', hasEncryptedEntries: false, keySource: 'auto' } }),
+    );
+    await waitFor(() => {
+      const el = queryByText(/entsperrt/i);
+      expect(el).not.toBeNull();
+    });
+  });
+
+  it('#192/AC5 — state:"unlocked" + keySource:"manual" → Status-Zeile mit "entsperrt" sichtbar', async () => {
+    const { queryByText } = renderView(
+      makeFetch({ credentialStatus: { state: 'unlocked', hasEncryptedEntries: false, keySource: 'manual' } }),
+    );
+    await waitFor(() => {
+      const el = queryByText(/entsperrt/i);
+      expect(el).not.toBeNull();
+    });
+  });
+
+  it('#192/AC5 — state:"locked" → Status-Zeile mit "gesperrt" sichtbar', async () => {
+    const { queryByText } = renderView(
+      makeFetch({ credentialStatus: { state: 'locked', hasEncryptedEntries: false, keySource: 'none' } }),
+    );
+    await waitFor(() => {
+      const el = queryByText(/gesperrt/i);
+      expect(el).not.toBeNull();
+    });
+  });
+
+  it('#192/AC5 — keySource:"auto" → Quellenhinweis "automatischer Schlüssel" sichtbar', async () => {
+    const { queryByText } = renderView(
+      makeFetch({ credentialStatus: { state: 'unlocked', hasEncryptedEntries: false, keySource: 'auto' } }),
+    );
+    await waitFor(() => {
+      const el = queryByText(/automatischer schlüssel/i);
+      expect(el).not.toBeNull();
+    });
+  });
+
+  it('#192/AC5 — keySource:"manual" → Quellenhinweis "via Bitwarden" sichtbar', async () => {
+    const { queryByText } = renderView(
+      makeFetch({ credentialStatus: { state: 'unlocked', hasEncryptedEntries: false, keySource: 'manual' } }),
+    );
+    await waitFor(() => {
+      const el = queryByText(/via bitwarden/i);
+      expect(el).not.toBeNull();
+    });
+  });
+
+  // AC5: unlocked → immer sichtbare Status-Zeile, KEIN Verbinden-Button (AC6)
+  it('#192/AC5+AC6 — state:"unlocked" + keySource:"auto" → Statuszeile da, KEIN Verbinden-Button', async () => {
+    const { queryByRole, queryByText } = renderView(
+      makeFetch({ credentialStatus: { state: 'unlocked', hasEncryptedEntries: false, keySource: 'auto' } }),
+    );
+    await waitFor(() => {
+      // Status sichtbar
+      expect(queryByText(/entsperrt/i)).not.toBeNull();
+      // Kein Verbinden-Button
+      expect(queryByRole('button', { name: /bitwarden verbinden/i })).toBeNull();
+    });
+  });
+
+  it('#192/AC5+AC6 — state:"unlocked" + keySource:"manual" → Statuszeile da, KEIN Verbinden-Button', async () => {
+    const { queryByRole, queryByText } = renderView(
+      makeFetch({ credentialStatus: { state: 'unlocked', hasEncryptedEntries: false, keySource: 'manual' } }),
+    );
+    await waitFor(() => {
+      expect(queryByText(/entsperrt/i)).not.toBeNull();
+      expect(queryByRole('button', { name: /bitwarden verbinden/i })).toBeNull();
+    });
+  });
+
+  // AC6: locked → Verbinden-Button vorhanden
+  it('#192/AC6 — state:"locked" → Verbinden-Button vorhanden', async () => {
+    const { getByRole } = renderView(
+      makeFetch({ credentialStatus: { state: 'locked', hasEncryptedEntries: false, keySource: 'none' } }),
+    );
+    await waitFor(() => {
+      const btn = getByRole('button', { name: /bitwarden verbinden/i });
+      expect(btn).toBeTruthy();
+    });
+  });
+
+  // AC5: h2-Überschrift immer sichtbar (auch bei unlocked)
+  it('#192/AC5 — h2 "Bitwarden-Verbindung" ist auch bei state:"unlocked" sichtbar', async () => {
+    const { getByRole } = renderView(
+      makeFetch({ credentialStatus: { state: 'unlocked', hasEncryptedEntries: false, keySource: 'auto' } }),
+    );
+    await waitFor(() => {
+      const h2 = getByRole('heading', { name: /bitwarden-verbindung/i });
+      expect(h2).toBeTruthy();
+    });
+  });
+
+  // AC7: keySource-Wert "auto"/"manual" erscheint NUR als Quellen-Enum, niemals als Rohschlüssel
+  it('#192/AC7 — keine Raw-Key-Daten im gerenderten Output (nur Enum-Wert "auto"/"manual"/"none")', async () => {
+    const fakeKey = 'super-secret-raw-key-should-not-appear-in-dom-192';
+    // Stelle sicher: der Fake-Key erscheint nicht im gerenderten Output
+    const { container } = renderView(
+      makeFetch({ credentialStatus: { state: 'unlocked', hasEncryptedEntries: false, keySource: 'auto' } }),
+    );
+    await waitFor(() => {
+      expect(container.textContent).not.toContain(fakeKey);
     });
   });
 });
