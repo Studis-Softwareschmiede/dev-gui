@@ -1,5 +1,6 @@
 /**
- * RetroReader — Retro-Sichtbarkeit Backend-Boundary (read-only, AC1–AC10 retro-view-backend).
+ * RetroReader — Retro-Sichtbarkeit + Trend Backend-Boundary
+ *              (read-only, AC1–AC10 retro-view-backend; AC1–AC11 retro-trend-backend).
  *
  * Reads two files from the resolved agent-flow Plugin-Root:
  *   - LEARNINGS.md         — Markdown table: ID | Datum | Pack/Skill | Regel | Quelle | PR | Status
@@ -13,6 +14,7 @@
  * Security:
  *   - Reads ONLY LEARNINGS.md and .claude/metrics/baseline.json of the resolved plugin root.
  *   - Slug parameters are validated by retroRouter before being passed here.
+ *   - category is validated by retroRouter BEFORE any data/file access (AC9 retro-trend-backend).
  *   - No secrets in output; no writes; no executions.
  *
  * @module RetroReader
@@ -69,6 +71,184 @@ export function categoriseEntry(packSkill) {
     cats.add(match[1].toLowerCase());
   }
   return cats;
+}
+
+// ── retro-trend-backend helpers (AC1–AC11) ────────────────────────────────────
+
+/**
+ * Bindende Konstante: bekannte Agent-Namen, deren Regel-ID-Präfix die Kategorie "agents" ergibt.
+ * Alle anderen Präfixe (z.B. "spring-boot-3", "maven", "java") ergeben "knowledge".
+ *
+ * Spec retro-trend-backend §4 / AC3.
+ */
+export const AGENT_PREFIXES = new Set([
+  'coder', 'reviewer', 'tester', 'dba', 'cicd',
+  'architekt', 'designer', 'requirement', 'teamLeader',
+]);
+
+/**
+ * Derive the lane prefix from a rule_id (part before the first '/').
+ *
+ * Returns null for rule_ids without a '/' or with an empty prefix — these produce no lane (AC3).
+ *
+ * @param {string} ruleId
+ * @returns {string|null}
+ */
+export function derivePrefix(ruleId) {
+  if (!ruleId || typeof ruleId !== 'string') return null;
+  const slashIdx = ruleId.indexOf('/');
+  if (slashIdx <= 0) return null; // no slash, or slash at index 0 (empty prefix)
+  return ruleId.slice(0, slashIdx);
+}
+
+/**
+ * Map a lane prefix to its trend category.
+ *
+ * @param {string} prefix
+ * @returns {'agents'|'knowledge'}
+ */
+export function prefixCategory(prefix) {
+  return AGENT_PREFIXES.has(prefix) ? 'agents' : 'knowledge';
+}
+
+/**
+ * Compute the momentum lanes from baseline.json for the given category.
+ *
+ * Returns { lanes, runs } where:
+ *   - lanes: Array<{ id, label, points: [{ run, date, momentum, contributingRules }] }>
+ *     Sorted by lane id; points sorted ascending by date/run; contributingRules sorted by rule_id.
+ *   - runs: Array<{ run, date }> — ascending X-axis (oldest first), union across all lanes.
+ *
+ * Spec retro-trend-backend §3–§8 / AC2–AC6 / AC10.
+ *
+ * @param {string} category — 'knowledge' | 'agents' | 'skills'
+ * @param {object|null} baseline — parsed baseline.json (or null for Phase 0)
+ * @returns {{ lanes: Array, runs: Array }}
+ */
+export function computeMomentumLanes(category, baseline) {
+  // skills has no rule-bearing IDs — structural asymmetry (AC7)
+  if (category === 'skills') {
+    return { lanes: [], runs: [] };
+  }
+
+  const learningsRules = baseline?.learnings_rules;
+  const defectRates = baseline?.defect_rates ?? {};
+
+  // Phase 0 / empty source: return empty (AC8)
+  if (
+    !baseline
+    || !learningsRules
+    || !Array.isArray(learningsRules)
+    || learningsRules.length === 0
+  ) {
+    return { lanes: [], runs: [] };
+  }
+
+  // ── Step 1: Group rules by prefix, filter by category ────────────────────
+  // Map: prefix → Array<learnings_rules entry>
+  const byPrefix = new Map();
+
+  for (const entry of learningsRules) {
+    const ruleId = entry?.rule_id;
+    const prefix = derivePrefix(ruleId);
+    if (!prefix) continue; // AC3: no lane for IDs without valid prefix
+
+    if (prefixCategory(prefix) !== category) continue; // filter by requested category
+
+    if (!byPrefix.has(prefix)) byPrefix.set(prefix, []);
+    byPrefix.get(prefix).push(entry);
+  }
+
+  if (byPrefix.size === 0) {
+    return { lanes: [], runs: [] };
+  }
+
+  // ── Step 2: Determine global X-axis (Trend-Schritte) ─────────────────────
+  // A "step" is identified by promoted_after_item (sort key) → derive a stable run/date label.
+  // Collect all unique promoted_after_item values across all lanes, sort ascending.
+  const allStepKeys = new Set();
+  for (const entries of byPrefix.values()) {
+    for (const e of entries) {
+      const key = e.promoted_after_item ?? '';
+      if (key !== '') allStepKeys.add(key);
+    }
+  }
+
+  // Sort ascending (oldest first — spec §5: "aufsteigend nach Datum")
+  const sortedStepKeys = [...allStepKeys].sort((a, b) => a.localeCompare(b));
+
+  // Map step key → { run, date }: use promoted_after_item as run slug;
+  // derive date from it if it looks like YYYY-MM-DD or contains one, else use the key itself.
+  const DATE_RE = /(\d{4}-\d{2}-\d{2})/;
+  function stepToRunDate(key) {
+    const m = DATE_RE.exec(String(key));
+    return { run: String(key), date: m ? m[1] : String(key) };
+  }
+
+  const runs = sortedStepKeys.map(stepToRunDate);
+
+  // ── Step 3: Build lanes ────────────────────────────────────────────────────
+  const sortedPrefixes = [...byPrefix.keys()].sort((a, b) => a.localeCompare(b));
+  const lanes = [];
+
+  for (const prefix of sortedPrefixes) {
+    const entries = byPrefix.get(prefix);
+
+    // Group entries by step key (promoted_after_item)
+    const byStep = new Map();
+    for (const e of entries) {
+      const key = e.promoted_after_item ?? '';
+      if (key === '') continue; // no step key → skip (can't place on axis)
+      if (!byStep.has(key)) byStep.set(key, []);
+      byStep.get(key).push(e);
+    }
+
+    // Build points for each global step — including first (momentum=0, AC5)
+    const points = [];
+    let isFirst = true;
+    for (const stepKey of sortedStepKeys) {
+      const { run, date } = stepToRunDate(stepKey);
+      const stepEntries = byStep.get(stepKey) ?? [];
+
+      if (isFirst) {
+        // AC5: first point is always 0 (Mittellinie), even if there are rules in this step
+        points.push({ run, date, momentum: 0, contributingRules: [] });
+        isFirst = false;
+      } else {
+        // AC4: momentum = Σ (baseline_rate − measured_rate) × n_items / 100
+        let momentum = 0;
+        const contributing = [];
+        for (const e of stepEntries) {
+          const ruleId = e.rule_id;
+          const baselineRate = e.baseline_rate ?? null;
+          const measuredRate = e.measured_rate ?? null;
+
+          // n_items: measured_n ?? baseline_n ?? defect_rates[rule_id].n_items ?? 0
+          let nItems = e.measured_n ?? e.baseline_n ?? null;
+          if (nItems === null && ruleId && defectRates[ruleId] != null) {
+            nItems = defectRates[ruleId].n_items ?? 0;
+          }
+          if (nItems === null) nItems = 0;
+
+          // If any required field is missing/null → contribution is 0, no crash (AC4)
+          if (baselineRate !== null && measuredRate !== null) {
+            momentum += (baselineRate - measuredRate) * nItems / 100;
+            contributing.push(ruleId);
+          }
+        }
+        // contributingRules sorted by rule_id (AC10 determinism)
+        contributing.sort((a, b) => a.localeCompare(b));
+        points.push({ run, date, momentum, contributingRules: contributing });
+      }
+    }
+
+    // Only include lanes that have at least one point
+    if (points.length === 0) continue;
+
+    lanes.push({ id: prefix, label: prefix, points });
+  }
+
+  return { lanes, runs };
 }
 
 /**
@@ -339,5 +519,87 @@ export class RetroReader {
     const { agents, skills, knowledge } = buildRunReport(runRows, defectRates);
 
     return { slug, date, source, statusMix, agents, skills, knowledge };
+  }
+
+  /**
+   * GET /api/retro/trend?category=<knowledge|agents|skills>
+   *
+   * Returns the momentum-aggregated trend view from baseline.json.
+   * category has been validated by the router BEFORE this method is called (AC9).
+   *
+   * - category=skills → 200 { category, lanes:[], placeholder } (AC7).
+   * - Phase 0 / missing baseline.json → 200 { category, lanes:[], runs:[], empty:true } (AC8).
+   * - Otherwise → 200 { category, lanes:[...], runs:[...] } (AC1–AC6, AC10, AC11).
+   *
+   * @param {string} category  Pre-validated: 'knowledge' | 'agents' | 'skills'.
+   * @returns {Promise<object>}
+   */
+  async getTrend(category) {
+    // AC7: skills category always returns placeholder, no data access needed
+    if (category === 'skills') {
+      return {
+        category: 'skills',
+        lanes: [],
+        runs: [],
+        placeholder: '— noch keine Messmethode für Skill-Güte',
+      };
+    }
+
+    const root = await this.#pluginRootResolver().catch(() => null);
+
+    if (!root) {
+      return { category, lanes: [], runs: [], empty: true };
+    }
+
+    // Read baseline.json — the sole data source for trend (AC11)
+    const baseline = await this.#readBaselineFull(root);
+
+    // Phase 0 / empty source: return empty marker (AC8)
+    // n_items:0 is an explicit Phase-0 signal (Spec AC8/§10), even if learnings_rules is non-empty.
+    const lrs = baseline?.learnings_rules;
+    const isPhase0 = (
+      !baseline
+      || baseline.n_items === 0
+      || !lrs
+      || !Array.isArray(lrs)
+      || lrs.length === 0
+    );
+
+    if (isPhase0) {
+      return { category, lanes: [], runs: [], empty: true };
+    }
+
+    const { lanes, runs } = computeMomentumLanes(category, baseline);
+
+    return { category, lanes, runs };
+  }
+
+  /**
+   * Read and parse baseline.json returning the full object (not filtered for Phase 0).
+   * Used by getTrend — we need access to learnings_rules even when defect_rates is empty.
+   * Returns null on any read/parse error.
+   *
+   * @param {string} root
+   * @returns {Promise<object|null>}
+   */
+  async #readBaselineFull(root) {
+    const filePath = join(root, '.claude', 'metrics', 'baseline.json');
+    let raw;
+    try {
+      raw = await this.#fsDeps.readFile(filePath, 'utf8');
+    } catch {
+      return null;
+    }
+    if (!raw || !raw.trim()) return null;
+
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+
+    if (!parsed || typeof parsed !== 'object') return null;
+    return parsed;
   }
 }

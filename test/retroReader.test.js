@@ -1,6 +1,7 @@
 /**
  * retroReader.test.js — Unit tests for RetroReader, parseLearningsTable,
- *                        groupIntoRuns, buildRunReport, deriveSource, categoriseEntry.
+ *                        groupIntoRuns, buildRunReport, deriveSource, categoriseEntry,
+ *                        derivePrefix, prefixCategory, computeMomentumLanes, getTrend().
  *
  * Covers (retro-view-backend):
  *   AC1 — getRuns() returns { runs: [...] } with correct shape; sorted descending by date.
@@ -12,6 +13,18 @@
  *   AC7 — Phase 0: missing baseline.json / empty / n_items:0 / no defect_rates → 200 with metric:null.
  *   AC8 — (tested in retroRouter.test.js for HTTP level; here: slug validation helper).
  *   AC9 — Missing LEARNINGS.md → getRuns() returns { runs: [] }; getRunReport() returns null.
+ *
+ * Covers (retro-trend-backend):
+ *   AC1  — getTrend() without category → knowledge; all three categories respond 200-equivalent.
+ *   AC2  — Response shape { category, lanes:[{id,label,points}], runs:[{run,date}] }.
+ *   AC3  — Prefix grouping: agent-allowlist → agents; others → knowledge; no lane for IDs without '/'.
+ *   AC4  — Momentum formula: Σ (baseline_rate − measured_rate) × n_items / 100; missing fields → 0.
+ *   AC5  — First point momentum=0; single-step lane has exactly one zero-point.
+ *   AC6  — Reverted/rising rate → negative momentum.
+ *   AC7  — category=skills → { lanes:[], placeholder } (no 500, no invented value).
+ *   AC8  — Phase 0 / empty baseline → { lanes:[], runs:[], empty:true }.
+ *   AC10 — Determinism: stable sort of lanes (by id), points (by run), contributingRules (by rule_id).
+ *   AC11 — Read-only; no writes; no extra files read (injected fsDeps verifies single file access).
  *
  * Strategy:
  *   - Inject fake fsDeps (readFile) to avoid any real filesystem access.
@@ -27,6 +40,10 @@ import {
   groupIntoRuns,
   buildRunReport,
   RetroReader,
+  derivePrefix,
+  prefixCategory,
+  computeMomentumLanes,
+  AGENT_PREFIXES,
 } from '../src/RetroReader.js';
 
 // ── Fixture helpers ────────────────────────────────────────────────────────────
@@ -794,5 +811,622 @@ describe('RetroReader.getRunReport()', () => {
     const reader = new RetroReader({ pluginRootResolver: async () => null });
     const report = await reader.getRunReport('retro/PR-Q001');
     expect(report).toBeNull();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// retro-trend-backend (AC1–AC11)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── Trend fixture: baseline.json with learnings_rules ─────────────────────────
+
+/**
+ * Baseline fixture with three promotion events across two steps.
+ *
+ * Step 1 (promoted_after_item: "item-100"): coder/R01 + maven/B01
+ * Step 2 (promoted_after_item: "item-200"): coder/R02 (Reverted) + spring-boot-3/B02
+ *
+ * Expected lane results for category=knowledge:
+ *   Lane "maven":
+ *     point 0 → momentum=0 (first)
+ *     point 1 → n/a (maven only has 1 step)
+ *   Lane "spring-boot-3":
+ *     point 0 → momentum=0 (first, step item-100 has no spring-boot-3 entries)
+ *     point 1 → (10 - 4) * 50 / 100 = 3.0
+ *
+ * Expected lane results for category=agents:
+ *   Lane "coder":
+ *     point 0 (step item-100) → momentum=0 (first point)
+ *     point 1 (step item-200) → (3 - 8) * 20 / 100 = -1.0  (R02 reverted: rate rose)
+ */
+const BASELINE_TREND = JSON.stringify({
+  n_items: 50,
+  retro_effectiveness: 0.7,
+  defect_rates: {
+    'coder/R01': { rate_per_100ep: 1.5, n_items: 30 },
+    'coder/R02': { rate_per_100ep: 8.0, n_items: 20 },
+    'maven/B01': { rate_per_100ep: 2.0, n_items: 40 },
+    'spring-boot-3/B02': { rate_per_100ep: 4.0, n_items: 50 },
+  },
+  learnings_rules: [
+    // Step 1
+    {
+      rule_id: 'coder/R01',
+      status: 'Validated',
+      baseline_rate: 5.0,
+      measured_rate: 1.5,
+      measured_n: 30,
+      baseline_n: 25,
+      promoted_after_item: 'item-100',
+    },
+    {
+      rule_id: 'maven/B01',
+      status: 'Validated',
+      baseline_rate: 6.0,
+      measured_rate: 2.0,
+      measured_n: 40,
+      baseline_n: 35,
+      promoted_after_item: 'item-100',
+    },
+    // Step 2
+    {
+      rule_id: 'coder/R02',
+      status: 'Reverted',
+      baseline_rate: 3.0,
+      measured_rate: 8.0,
+      measured_n: 20,
+      baseline_n: 18,
+      promoted_after_item: 'item-200',
+    },
+    {
+      rule_id: 'spring-boot-3/B02',
+      status: 'Validated',
+      baseline_rate: 10.0,
+      measured_rate: 4.0,
+      measured_n: 50,
+      baseline_n: 45,
+      promoted_after_item: 'item-200',
+    },
+  ],
+});
+
+const BASELINE_TREND_PATH = `${PLUGIN_ROOT}/.claude/metrics/baseline.json`;
+
+function makeTrendReader({ baselineContent = BASELINE_TREND } = {}) {
+  return makeRetroReader({
+    fileMap: {
+      [BASELINE_TREND_PATH]: baselineContent,
+    },
+  });
+}
+
+// ── AC3 — derivePrefix ────────────────────────────────────────────────────────
+
+describe('retro-trend AC3 — derivePrefix', () => {
+  it('coder/R01 → "coder"', () => {
+    expect(derivePrefix('coder/R01')).toBe('coder');
+  });
+
+  it('spring-boot-3/B04 → "spring-boot-3"', () => {
+    expect(derivePrefix('spring-boot-3/B04')).toBe('spring-boot-3');
+  });
+
+  it('reviewer/R03 → "reviewer"', () => {
+    expect(derivePrefix('reviewer/R03')).toBe('reviewer');
+  });
+
+  it('maven/B02 → "maven"', () => {
+    expect(derivePrefix('maven/B02')).toBe('maven');
+  });
+
+  it('rule_id without slash → null (no lane — AC3)', () => {
+    expect(derivePrefix('R01')).toBeNull();
+  });
+
+  it('slash at index 0 → null (empty prefix — AC3)', () => {
+    expect(derivePrefix('/R01')).toBeNull();
+  });
+
+  it('null → null', () => {
+    expect(derivePrefix(null)).toBeNull();
+  });
+
+  it('empty string → null', () => {
+    expect(derivePrefix('')).toBeNull();
+  });
+});
+
+// ── AC3 — prefixCategory ─────────────────────────────────────────────────────
+
+describe('retro-trend AC3 — prefixCategory', () => {
+  it('coder → agents', () => { expect(prefixCategory('coder')).toBe('agents'); });
+  it('reviewer → agents', () => { expect(prefixCategory('reviewer')).toBe('agents'); });
+  it('tester → agents', () => { expect(prefixCategory('tester')).toBe('agents'); });
+  it('dba → agents', () => { expect(prefixCategory('dba')).toBe('agents'); });
+  it('cicd → agents', () => { expect(prefixCategory('cicd')).toBe('agents'); });
+  it('architekt → agents', () => { expect(prefixCategory('architekt')).toBe('agents'); });
+  it('designer → agents', () => { expect(prefixCategory('designer')).toBe('agents'); });
+  it('requirement → agents', () => { expect(prefixCategory('requirement')).toBe('agents'); });
+  it('teamLeader → agents', () => { expect(prefixCategory('teamLeader')).toBe('agents'); });
+
+  it('spring-boot-3 → knowledge', () => { expect(prefixCategory('spring-boot-3')).toBe('knowledge'); });
+  it('maven → knowledge', () => { expect(prefixCategory('maven')).toBe('knowledge'); });
+  it('java → knowledge', () => { expect(prefixCategory('java')).toBe('knowledge'); });
+  it('any-unknown-prefix → knowledge', () => { expect(prefixCategory('anything')).toBe('knowledge'); });
+});
+
+// ── AC3 — AGENT_PREFIXES constant ─────────────────────────────────────────────
+
+describe('retro-trend AC3 — AGENT_PREFIXES constant completeness', () => {
+  const EXPECTED = ['coder', 'reviewer', 'tester', 'dba', 'cicd', 'architekt', 'designer', 'requirement', 'teamLeader'];
+  for (const name of EXPECTED) {
+    it(`AGENT_PREFIXES contains "${name}"`, () => {
+      expect(AGENT_PREFIXES.has(name)).toBe(true);
+    });
+  }
+});
+
+// ── AC4 — computeMomentumLanes: Momentum formula ──────────────────────────────
+
+describe('retro-trend AC4 — computeMomentumLanes: momentum formula', () => {
+  const baseline = JSON.parse(BASELINE_TREND);
+
+  it('knowledge lanes do not include agent-prefix rules', () => {
+    const { lanes } = computeMomentumLanes('knowledge', baseline);
+    const ids = lanes.map((l) => l.id);
+    expect(ids).not.toContain('coder');
+  });
+
+  it('agents lanes do not include knowledge-prefix rules', () => {
+    const { lanes } = computeMomentumLanes('agents', baseline);
+    const ids = lanes.map((l) => l.id);
+    expect(ids).not.toContain('maven');
+    expect(ids).not.toContain('spring-boot-3');
+  });
+
+  it('coder lane: second point momentum = (3-8)*20/100 = -1.0 (Reverted)', () => {
+    const { lanes } = computeMomentumLanes('agents', baseline);
+    const coder = lanes.find((l) => l.id === 'coder');
+    expect(coder).toBeDefined();
+    expect(coder.points.length).toBe(2);
+    expect(coder.points[0].momentum).toBe(0);
+    expect(coder.points[1].momentum).toBeCloseTo(-1.0, 5);
+  });
+
+  it('spring-boot-3 lane: second point momentum = (10-4)*50/100 = 3.0', () => {
+    const { lanes } = computeMomentumLanes('knowledge', baseline);
+    const sb = lanes.find((l) => l.id === 'spring-boot-3');
+    expect(sb).toBeDefined();
+    const nonZeroPoints = sb.points.filter((p) => p.run === 'item-200');
+    expect(nonZeroPoints[0].momentum).toBeCloseTo(3.0, 5);
+  });
+
+  it('contributingRules lists contributing rule_ids (sorted)', () => {
+    const { lanes } = computeMomentumLanes('agents', baseline);
+    const coder = lanes.find((l) => l.id === 'coder');
+    const secondPoint = coder.points[1];
+    expect(secondPoint.contributingRules).toEqual(['coder/R02']);
+  });
+
+  it('first point always has contributingRules: []', () => {
+    const { lanes } = computeMomentumLanes('agents', baseline);
+    for (const lane of lanes) {
+      expect(lane.points[0].contributingRules).toEqual([]);
+    }
+  });
+
+  it('missing measured_rate → contribution 0, no crash (AC4 robustness)', () => {
+    const b = {
+      n_items: 1,
+      learnings_rules: [
+        { rule_id: 'coder/R01', baseline_rate: 5, measured_rate: null, measured_n: 10, promoted_after_item: 'item-1' },
+        { rule_id: 'coder/R02', baseline_rate: 5, measured_rate: null, measured_n: 10, promoted_after_item: 'item-2' },
+      ],
+      defect_rates: {},
+    };
+    const { lanes } = computeMomentumLanes('agents', b);
+    const lane = lanes.find((l) => l.id === 'coder');
+    // second point: measured_rate null → contribution 0
+    expect(lane.points[1].momentum).toBe(0);
+  });
+
+  it('missing baseline_rate → contribution 0, no crash (AC4 robustness)', () => {
+    const b = {
+      n_items: 1,
+      learnings_rules: [
+        { rule_id: 'java/B01', baseline_rate: null, measured_rate: 2, measured_n: 10, promoted_after_item: 'item-1' },
+        { rule_id: 'java/B02', baseline_rate: null, measured_rate: 2, measured_n: 10, promoted_after_item: 'item-2' },
+      ],
+      defect_rates: {},
+    };
+    const { lanes } = computeMomentumLanes('knowledge', b);
+    const lane = lanes.find((l) => l.id === 'java');
+    expect(lane.points[1].momentum).toBe(0);
+  });
+
+  it('n_items fallback chain: measured_n ?? baseline_n ?? defect_rates[].n_items ?? 0', () => {
+    const b = {
+      n_items: 1,
+      learnings_rules: [
+        // Step 1: anchor
+        { rule_id: 'java/B00', baseline_rate: 5, measured_rate: 3, measured_n: 10, promoted_after_item: 'step-0' },
+        // Step 2: no measured_n, no baseline_n — falls back to defect_rates
+        { rule_id: 'java/B01', baseline_rate: 5, measured_rate: 2, promoted_after_item: 'step-1' },
+      ],
+      defect_rates: { 'java/B01': { n_items: 25 } },
+    };
+    const { lanes } = computeMomentumLanes('knowledge', b);
+    const lane = lanes.find((l) => l.id === 'java');
+    // step-1: (5-2)*25/100 = 0.75
+    const step1Point = lane.points.find((p) => p.run === 'step-1');
+    expect(step1Point.momentum).toBeCloseTo(0.75, 5);
+  });
+
+  it('n_items ultimate fallback is 0 (no crash, contribution 0)', () => {
+    const b = {
+      n_items: 1,
+      learnings_rules: [
+        { rule_id: 'java/B00', baseline_rate: 5, measured_rate: 3, measured_n: 10, promoted_after_item: 'step-0' },
+        { rule_id: 'java/B01', baseline_rate: 5, measured_rate: 2, promoted_after_item: 'step-1' },
+      ],
+      defect_rates: {},
+    };
+    const { lanes } = computeMomentumLanes('knowledge', b);
+    const lane = lanes.find((l) => l.id === 'java');
+    const step1Point = lane.points.find((p) => p.run === 'step-1');
+    expect(step1Point.momentum).toBe(0);
+  });
+});
+
+// ── AC5 — Mittellinie / ≥2-Punkte-Regel ──────────────────────────────────────
+
+describe('retro-trend AC5 — first point momentum=0; single-step lane has one zero-point', () => {
+  it('all lanes have first point with momentum=0', () => {
+    const baseline = JSON.parse(BASELINE_TREND);
+    const { lanes } = computeMomentumLanes('knowledge', baseline);
+    expect(lanes.length).toBeGreaterThan(0);
+    for (const lane of lanes) {
+      expect(lane.points[0].momentum).toBe(0);
+    }
+  });
+
+  it('lane with only one global step has exactly one point (momentum=0)', () => {
+    const b = {
+      n_items: 1,
+      learnings_rules: [
+        { rule_id: 'java/B01', baseline_rate: 5, measured_rate: 2, measured_n: 20, promoted_after_item: 'step-1' },
+      ],
+      defect_rates: {},
+    };
+    const { lanes } = computeMomentumLanes('knowledge', b);
+    const lane = lanes.find((l) => l.id === 'java');
+    expect(lane.points.length).toBe(1);
+    expect(lane.points[0].momentum).toBe(0);
+  });
+
+  it('real delta only appears from second point onward', () => {
+    const baseline = JSON.parse(BASELINE_TREND);
+    const { lanes } = computeMomentumLanes('agents', baseline);
+    const coder = lanes.find((l) => l.id === 'coder');
+    // first point zero, second has actual delta
+    expect(coder.points[0].momentum).toBe(0);
+    expect(coder.points[1].momentum).not.toBe(0);
+  });
+});
+
+// ── AC6 — Reverted = negative momentum ───────────────────────────────────────
+
+describe('retro-trend AC6 — Reverted/rising rate → negative momentum', () => {
+  it('coder/R02 (Reverted, rate rose 3→8): second point negative', () => {
+    const baseline = JSON.parse(BASELINE_TREND);
+    const { lanes } = computeMomentumLanes('agents', baseline);
+    const coder = lanes.find((l) => l.id === 'coder');
+    expect(coder.points[1].momentum).toBeLessThan(0);
+  });
+
+  it('negative momentum = (baseline_rate < measured_rate) × n', () => {
+    const b = {
+      n_items: 1,
+      learnings_rules: [
+        { rule_id: 'coder/R00', baseline_rate: 1, measured_rate: 1, measured_n: 10, promoted_after_item: 'step-0' },
+        { rule_id: 'coder/R01', baseline_rate: 2, measured_rate: 10, measured_n: 50, promoted_after_item: 'step-1' },
+      ],
+      defect_rates: {},
+    };
+    const { lanes } = computeMomentumLanes('agents', b);
+    const lane = lanes.find((l) => l.id === 'coder');
+    // (2-10)*50/100 = -4.0
+    expect(lane.points[1].momentum).toBeCloseTo(-4.0, 5);
+  });
+});
+
+// ── AC7 — Skills asymmetry ────────────────────────────────────────────────────
+
+describe('retro-trend AC7 — computeMomentumLanes(skills) → empty + no crash', () => {
+  it('returns { lanes: [], runs: [] } for skills regardless of baseline content', () => {
+    const baseline = JSON.parse(BASELINE_TREND);
+    const result = computeMomentumLanes('skills', baseline);
+    expect(result.lanes).toEqual([]);
+    expect(result.runs).toEqual([]);
+  });
+
+  it('no crash for skills with null baseline', () => {
+    const result = computeMomentumLanes('skills', null);
+    expect(result.lanes).toEqual([]);
+  });
+});
+
+// ── AC8 — Phase 0 / empty source ─────────────────────────────────────────────
+
+describe('retro-trend AC8 — computeMomentumLanes: Phase 0 / empty source', () => {
+  it('null baseline → { lanes:[], runs:[] }', () => {
+    const r = computeMomentumLanes('knowledge', null);
+    expect(r.lanes).toEqual([]);
+    expect(r.runs).toEqual([]);
+  });
+
+  it('empty learnings_rules → { lanes:[], runs:[] }', () => {
+    const b = { n_items: 5, learnings_rules: [], defect_rates: {} };
+    const r = computeMomentumLanes('knowledge', b);
+    expect(r.lanes).toEqual([]);
+    expect(r.runs).toEqual([]);
+  });
+
+  it('missing learnings_rules key → { lanes:[], runs:[] }', () => {
+    const b = { n_items: 5, defect_rates: {} };
+    const r = computeMomentumLanes('knowledge', b);
+    expect(r.lanes).toEqual([]);
+    expect(r.runs).toEqual([]);
+  });
+
+  it('no crash; does not throw on empty baseline', () => {
+    expect(() => computeMomentumLanes('agents', null)).not.toThrow();
+    expect(() => computeMomentumLanes('knowledge', {})).not.toThrow();
+  });
+});
+
+// ── AC10 — Determinism ────────────────────────────────────────────────────────
+
+describe('retro-trend AC10 — determinism: stable sort', () => {
+  const baseline = JSON.parse(BASELINE_TREND);
+
+  it('lanes are sorted by id ascending', () => {
+    const { lanes } = computeMomentumLanes('knowledge', baseline);
+    const ids = lanes.map((l) => l.id);
+    expect(ids).toEqual([...ids].sort((a, b) => a.localeCompare(b)));
+  });
+
+  it('points are sorted ascending by run (promoted_after_item)', () => {
+    const { lanes } = computeMomentumLanes('agents', baseline);
+    for (const lane of lanes) {
+      const runs = lane.points.map((p) => p.run);
+      expect(runs).toEqual([...runs].sort((a, b) => a.localeCompare(b)));
+    }
+  });
+
+  it('contributingRules are sorted by rule_id ascending', () => {
+    const b = {
+      n_items: 1,
+      learnings_rules: [
+        { rule_id: 'coder/R01', baseline_rate: 5, measured_rate: 3, measured_n: 10, promoted_after_item: 'step-0' },
+        { rule_id: 'coder/R03', baseline_rate: 5, measured_rate: 3, measured_n: 10, promoted_after_item: 'step-1' },
+        { rule_id: 'coder/R02', baseline_rate: 5, measured_rate: 3, measured_n: 10, promoted_after_item: 'step-1' },
+      ],
+      defect_rates: {},
+    };
+    const { lanes } = computeMomentumLanes('agents', b);
+    const lane = lanes.find((l) => l.id === 'coder');
+    const secondPoint = lane.points[1];
+    expect(secondPoint.contributingRules).toEqual(['coder/R02', 'coder/R03']);
+  });
+
+  it('runs list sorted ascending', () => {
+    const { runs } = computeMomentumLanes('knowledge', baseline);
+    const runKeys = runs.map((r) => r.run);
+    expect(runKeys).toEqual([...runKeys].sort((a, b) => a.localeCompare(b)));
+  });
+
+  it('lane id === label', () => {
+    const { lanes } = computeMomentumLanes('knowledge', baseline);
+    for (const lane of lanes) {
+      expect(lane.label).toBe(lane.id);
+    }
+  });
+});
+
+// ── AC3 — rule_id without '/' creates no lane ────────────────────────────────
+
+describe('retro-trend AC3 — rule_id without / or empty prefix → no lane', () => {
+  it('rule_id with no slash → no lane created', () => {
+    const b = {
+      n_items: 1,
+      learnings_rules: [
+        { rule_id: 'NORULE', baseline_rate: 5, measured_rate: 2, measured_n: 10, promoted_after_item: 'step-1' },
+      ],
+      defect_rates: {},
+    };
+    const { lanes } = computeMomentumLanes('knowledge', b);
+    expect(lanes).toEqual([]);
+  });
+
+  it('rule_id with leading slash (empty prefix) → no lane created', () => {
+    const b = {
+      n_items: 1,
+      learnings_rules: [
+        { rule_id: '/B01', baseline_rate: 5, measured_rate: 2, measured_n: 10, promoted_after_item: 'step-1' },
+      ],
+      defect_rates: {},
+    };
+    const { lanes } = computeMomentumLanes('knowledge', b);
+    expect(lanes).toEqual([]);
+  });
+
+  it('null rule_id entry → no lane, no crash', () => {
+    const b = {
+      n_items: 1,
+      learnings_rules: [
+        { rule_id: null, baseline_rate: 5, measured_rate: 2, measured_n: 10, promoted_after_item: 'step-1' },
+      ],
+      defect_rates: {},
+    };
+    expect(() => computeMomentumLanes('knowledge', b)).not.toThrow();
+    const { lanes } = computeMomentumLanes('knowledge', b);
+    expect(lanes).toEqual([]);
+  });
+});
+
+// ── RetroReader.getTrend() — integration ─────────────────────────────────────
+
+describe('retro-trend — RetroReader.getTrend() integration', () => {
+  it('AC1/AC2 — default (no category) returns knowledge-shaped response', async () => {
+    // getTrend() is called with 'knowledge' when router omits category
+    const reader = makeTrendReader();
+    const result = await reader.getTrend('knowledge');
+    expect(result.category).toBe('knowledge');
+    expect(Array.isArray(result.lanes)).toBe(true);
+    expect(Array.isArray(result.runs)).toBe(true);
+    // Should contain knowledge lanes (maven, spring-boot-3)
+    const ids = result.lanes.map((l) => l.id);
+    expect(ids).toContain('maven');
+    expect(ids).toContain('spring-boot-3');
+  });
+
+  it('AC2 — response shape: category, lanes, runs; lane has id/label/points', async () => {
+    const reader = makeTrendReader();
+    const result = await reader.getTrend('agents');
+    expect(result).toHaveProperty('category', 'agents');
+    expect(Array.isArray(result.lanes)).toBe(true);
+    expect(Array.isArray(result.runs)).toBe(true);
+    for (const lane of result.lanes) {
+      expect(lane).toHaveProperty('id');
+      expect(lane).toHaveProperty('label');
+      expect(Array.isArray(lane.points)).toBe(true);
+    }
+  });
+
+  it('AC2 — point shape: run, date, momentum (number), contributingRules (array)', async () => {
+    const reader = makeTrendReader();
+    const result = await reader.getTrend('agents');
+    for (const lane of result.lanes) {
+      for (const pt of lane.points) {
+        expect(pt).toHaveProperty('run');
+        expect(pt).toHaveProperty('date');
+        expect(typeof pt.momentum).toBe('number');
+        expect(Array.isArray(pt.contributingRules)).toBe(true);
+      }
+    }
+  });
+
+  it('AC7 — getTrend("skills") → 200-shape with lanes:[], placeholder string', async () => {
+    const reader = makeTrendReader();
+    const result = await reader.getTrend('skills');
+    expect(result.category).toBe('skills');
+    expect(result.lanes).toEqual([]);
+    expect(typeof result.placeholder).toBe('string');
+    expect(result.placeholder.length).toBeGreaterThan(0);
+    expect(result).not.toHaveProperty('error');
+  });
+
+  it('AC7 — placeholder is non-empty string even with no baseline', async () => {
+    const reader = makeRetroReader({ fileMap: {} });
+    const result = await reader.getTrend('skills');
+    expect(typeof result.placeholder).toBe('string');
+    expect(result.placeholder.length).toBeGreaterThan(0);
+  });
+
+  it('AC8 — missing baseline.json → { lanes:[], runs:[], empty:true }', async () => {
+    const reader = makeRetroReader({ fileMap: {} });
+    const result = await reader.getTrend('knowledge');
+    expect(result.category).toBe('knowledge');
+    expect(result.lanes).toEqual([]);
+    expect(result.runs).toEqual([]);
+    expect(result.empty).toBe(true);
+  });
+
+  it('AC8 — empty baseline.json → { lanes:[], runs:[], empty:true }', async () => {
+    const reader = makeRetroReader({
+      fileMap: { [BASELINE_TREND_PATH]: '' },
+    });
+    const result = await reader.getTrend('knowledge');
+    expect(result.empty).toBe(true);
+    expect(result.lanes).toEqual([]);
+  });
+
+  it('AC8 — baseline with n_items:0 but empty learnings_rules → empty:true', async () => {
+    const reader = makeRetroReader({
+      fileMap: { [BASELINE_TREND_PATH]: JSON.stringify({ n_items: 0, learnings_rules: [], defect_rates: {} }) },
+    });
+    const result = await reader.getTrend('knowledge');
+    expect(result.empty).toBe(true);
+  });
+
+  it('AC8 — n_items:0 with non-empty learnings_rules → empty:true, lanes:[] (I3 fix)', async () => {
+    // Spec AC8/§10: n_items:0 is a Phase-0 signal regardless of learnings_rules content.
+    // Previously this case fälschlich passed the Phase-0 gate and returned lanes instead of empty:true.
+    const reader = makeRetroReader({
+      fileMap: {
+        [BASELINE_TREND_PATH]: JSON.stringify({
+          n_items: 0,
+          learnings_rules: [
+            { rule_id: 'coder/R01', status: 'Validated', baseline_rate: 5, measured_rate: 2, measured_n: 10, baseline_n: 8, promoted_after_item: 'item-1' },
+          ],
+          defect_rates: { 'coder/R01': { rate_per_100ep: 2.0, n_items: 10 } },
+        }),
+      },
+    });
+    const result = await reader.getTrend('knowledge');
+    expect(result.empty).toBe(true);
+    expect(result.lanes).toEqual([]);
+    expect(result.runs).toEqual([]);
+  });
+
+  it('AC8 — baseline with n_items > 0 but no learnings_rules key → empty:true', async () => {
+    const reader = makeRetroReader({
+      fileMap: { [BASELINE_TREND_PATH]: JSON.stringify({ n_items: 5, defect_rates: {} }) },
+    });
+    const result = await reader.getTrend('agents');
+    expect(result.empty).toBe(true);
+  });
+
+  it('AC8 — pluginRootResolver returns null → { lanes:[], runs:[], empty:true }', async () => {
+    const reader = new RetroReader({ pluginRootResolver: async () => null });
+    const result = await reader.getTrend('knowledge');
+    expect(result.empty).toBe(true);
+    expect(result.lanes).toEqual([]);
+  });
+
+  it('AC8 — pluginRootResolver throws → { lanes:[], runs:[], empty:true }', async () => {
+    const reader = new RetroReader({ pluginRootResolver: async () => { throw new Error('no root'); } });
+    const result = await reader.getTrend('knowledge');
+    expect(result.empty).toBe(true);
+    expect(result.lanes).toEqual([]);
+  });
+
+  it('AC8 — no crash; does not throw or 500', async () => {
+    const reader = makeRetroReader({ fileMap: {} });
+    await expect(reader.getTrend('knowledge')).resolves.not.toThrow();
+  });
+
+  it('AC11 — getTrend does not read LEARNINGS.md (only baseline.json)', async () => {
+    const accessed = [];
+    const fsDeps = {
+      readFile: async (path) => {
+        accessed.push(path);
+        if (path === BASELINE_TREND_PATH) return BASELINE_TREND;
+        const err = new Error(`ENOENT: ${path}`);
+        err.code = 'ENOENT';
+        throw err;
+      },
+    };
+    const reader = new RetroReader({
+      fsDeps,
+      pluginRootResolver: async () => PLUGIN_ROOT,
+    });
+    await reader.getTrend('knowledge');
+    // Must only have accessed baseline.json, not LEARNINGS.md
+    const learnAccess = accessed.filter((p) => p.endsWith('LEARNINGS.md'));
+    expect(learnAccess).toEqual([]);
+    const baselineAccess = accessed.filter((p) => p.endsWith('baseline.json'));
+    expect(baselineAccess.length).toBeGreaterThan(0);
   });
 });
