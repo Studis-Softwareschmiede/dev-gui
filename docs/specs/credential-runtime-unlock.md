@@ -39,12 +39,13 @@ dev-gui darf **„gesperrt"** starten — ohne `CRED_MASTER_KEY`, mit inaktiven 
 - **`CredentialStore`-Erweiterung (intern):**
   - `isUnlocked(): boolean` — `true`, wenn ein Master-Key im Prozess geladen ist.
   - `getLockState(): { state: "locked"|"unlocked", hasEncryptedEntries: boolean }` — niemals Schlüssel/Klartext.
-  - `unlock(key, { persist?: boolean }): Promise<{ ok: true } | { ok: false, reason: "invalid-key"|"persist-failed"|"empty-key" }>` — validiert (s. AC4), persistiert (default `persist=true`) und lädt den Key in den Prozess. Wirft/liefert **nie** den Schlüssel zurück.
+  - `unlock(key, { persist?: boolean }): Promise<{ ok: true } | { ok: false, reason: "invalid-key"|"invalid-key-format"|"persist-failed"|"empty-key" }>` — validiert (s. AC4), persistiert (default `persist=true`) und lädt den Key in den Prozess. Wirft/liefert **nie** den Schlüssel zurück. `persist=false`: kein Reboot-Überleben — nach Prozess-Neustart ist der Store wieder gesperrt.
 - **`.env`-Persistenz (intern, eigener kleiner Schreib-Boundary erlaubt):** `CRED_MASTER_KEY=<wert>` als Zeile; übrige Zeilen unverändert; atomar; mode `0600`. Pfad per Konfiguration/Env überschreibbar (Default = Projekt-`.env`).
 - Der Roh-Key wird wie bisher per **scrypt** (Salt aus `secrets.enc.json`) zum AES-Key abgeleitet — der Roh-Wert wird nie direkt als AES-Key verwendet (ADR-007 unverändert).
 
 ## Edge-Cases & Fehlerverhalten
 - `unlock` mit leerem/whitespace-Key ⇒ `{ ok:false, reason:"empty-key" }`, keine `.env`-Mutation.
+- `unlock` mit Key, der eingebettetes `\r`/`\n` enthält ⇒ `{ ok:false, reason:"invalid-key-format" }`, keine `.env`-Mutation (ein solcher Key würde zwei .env-Zeilen erzeugen und den Eintrag korrumpieren).
 - `unlock` mit falschem Key bei vorhandenen Einträgen ⇒ `{ ok:false, reason:"invalid-key" }` (GCM-Verifikation schlägt fehl), keine `.env`-Mutation, Zustand bleibt `locked`.
 - `.env` nicht schreibbar (Rechte/Pfad) ⇒ `{ ok:false, reason:"persist-failed" }`; falls der Key gegen das Store gültig war, darf der Prozess optional **in-memory entsperrt** bleiben, aber der Aufrufer wird über die fehlende Persistenz informiert (kein stiller Verlust nach Reboot). Kein Key-Leak in der Fehlermeldung.
 - Doppeltes `unlock` bei bereits entsperrtem Store ⇒ idempotent (gleicher gültiger Key) bzw. klare Ablehnung (anderer Key) — kein Datenverlust, keine Re-Verschlüsselung.
