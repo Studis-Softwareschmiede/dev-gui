@@ -1,22 +1,29 @@
 /**
  * credentialUnlockRouter — Express-Router für den Bitwarden-Unlock-Endpunkt
- * (credential-unlock-dialog AC1–AC10).
+ * (credential-unlock-dialog AC1–AC10, bitwarden-new-device-otp AC1–AC9).
  *
  * Routes (alle hinter AccessGuard in server.js):
  *   POST /api/settings/credential-unlock
- *     Body: { email, password, twofa?, create? }
+ *     Body: { email, password, twofa?, emailOtp?, create? }
  *     → 200 { ok: true, state: "unlocked" }          — Erfolg
  *     → 200 { ok: false, status: "not-found" }        — Item nicht vorhanden (→ create-Angebot)
- *     → 401 { ok: false, errorClass }                 — 2FA-Fehler
+ *     → 401 { ok: false, errorClass }                 — 2FA- oder E-Mail-OTP-Fehler
  *     → 4xx/5xx { ok: false, errorClass }             — andere Fehler
  *
- * Security (ADR-007 / credential-unlock-dialog):
+ * Security (ADR-007 / credential-unlock-dialog / bitwarden-new-device-otp):
  *   AC7  — Hinter Access-Mauer + CRED_ADMIN_EMAILS-Rollencheck (kein Access → 403; nicht gelistet → 403).
  *   AC8  — Audit-First: vor Aktion ein Eintrag ohne Werte; Audit-Fehler → Aktion unterbleibt.
- *   AC9  — Login-Daten + Master-Key erscheinen NIEMALS in Response, Log, Audit oder URL.
+ *   AC9  — Login-Daten + Master-Key + E-Mail-OTP erscheinen NIEMALS in Response, Log, Audit oder URL.
  *   AC3  — Response meldet nur { ok, state } — NIEMALS den Key.
- *   AC5  — Fehlerklassen klassifiziert: auth-failed/twofa-required/twofa-invalid/bw-unreachable/error.
+ *   AC5  — Fehlerklassen klassifiziert: auth-failed/twofa-required/twofa-invalid/
+ *           email-otp-required/email-otp-invalid/bw-unreachable/error.
  *   AC6  — Falscher Key → unlock lehnt ab, Store bleibt locked, .env unverändert.
+ *
+ * bitwarden-new-device-otp (New-Device-Verification):
+ *   email-otp-required → 401 { ok: false, errorClass: "email-otp-required" }
+ *   email-otp-invalid  → 401 { ok: false, errorClass: "email-otp-invalid" }
+ *   emailOtp wird aus dem Body gelesen und AUSSCHLIESSLICH an BitwardenMasterKeyService übergeben.
+ *   emailOtp erscheint NIE in Logs, Audit-Einträgen, Response oder URL (AC7 new-device-otp).
  *
  * @module credentialUnlockRouter
  */
@@ -62,6 +69,10 @@ function mapErrorClassToResponse(errorClass) {
     case 'twofa-required':
     case 'twofa-invalid':
       return { status: 401, body: { ok: false, errorClass } };
+    // bitwarden-new-device-otp: E-Mail-OTP-Fehler analog 2FA → 401 (unterscheidbare errorClass)
+    case 'email-otp-required':
+    case 'email-otp-invalid':
+      return { status: 401, body: { ok: false, errorClass } };
     case 'auth-failed':
       return { status: 401, body: { ok: false, errorClass } };
     case 'bw-unreachable':
@@ -106,7 +117,9 @@ export function credentialUnlockRouter(credentialStore, auditStore, bitwardenSer
     }
 
     // AC9: Eingabe-Validierung — Pflichtfelder prüfen (ohne Werte zu loggen)
-    const { email, password, twofa, create } = req.body ?? {};
+    // emailOtp: optional, für New-Device-Verification (bitwarden-new-device-otp)
+    // AC7 (new-device-otp): emailOtp erscheint NICHT in Logs/Audit/Response
+    const { email, password, twofa, emailOtp, create } = req.body ?? {};
     if (typeof email !== 'string' || !email.trim()) {
       return res.status(400).json({ ok: false, errorClass: 'error', error: 'E-Mail ist ein Pflichtfeld' });
     }
@@ -135,18 +148,22 @@ export function credentialUnlockRouter(credentialStore, auditStore, bitwardenSer
     try {
       if (create === true) {
         // AC4: explizites Erstellen (nur nach Bestätigung)
+        // AC7 (new-device-otp): emailOtp wird übergeben aber NICHT geloggt/auditiert
         serviceResult = await bitwardenService.createMasterKey({
           email: email.trim(),
           password: password.trim(),
           twofa: twofa ?? undefined,
+          emailOtp: emailOtp ?? undefined,
           identity: identity?.email ?? null,
         });
       } else {
         // AC3: Beschaffung (kein automatisches Erstellen)
+        // AC7 (new-device-otp): emailOtp wird übergeben aber NICHT geloggt/auditiert
         serviceResult = await bitwardenService.acquireMasterKey({
           email: email.trim(),
           password: password.trim(),
           twofa: twofa ?? undefined,
+          emailOtp: emailOtp ?? undefined,
           identity: identity?.email ?? null,
         });
       }

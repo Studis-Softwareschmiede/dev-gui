@@ -2,7 +2,7 @@
  * BitwardenMasterKeyService — einzige Komponente, die mit Bitwarden spricht (ADR-014).
  *
  * Beschafft den `DEVGUI_CRED_MASTER_KEY` aus Bitwarden:
- *   - Login mit E-Mail + Master-Passwort (+ 2FA falls nötig) via Bitwarden-CLI `bw`
+ *   - Login mit E-Mail + Master-Passwort (+ 2FA falls nötig + E-Mail-OTP falls nötig) via Bitwarden-CLI `bw`
  *   - Liest ein vorhandenes Master-Key-Item aus (→ AC2)
  *   - Erstellt — nach explizitem Bestätigungs-Flag — ein neues Item mit Zufalls-Key (→ AC4)
  *   - Übergibt den Key store-intern an CredentialStore.unlock() (→ AC2/AC7)
@@ -10,10 +10,19 @@
  *
  * Security-Anforderungen (AC6 — KRITISCH):
  *   - Bitwarden-Login-Daten erscheinen NIEMALS in Prozess-Argv (kein bw --password=...)
- *   - Passwort wird via stdin (pipe) an `bw` übergeben
+ *   - Passwort wird via BW_PASSWORD Env-Var an `bw` übergeben
  *   - BW_SESSION-Token wird als Env-Var weitergereicht (nie als Arg)
+ *   - E-Mail-OTP-Code wird via stdin (pipe) übergeben — NICHT als Arg (AC7 bitwarden-new-device-otp)
  *   - Master-Key erscheint NIEMALS in Log/Audit/Response/WS/Frontend
  *   - stderr von `bw` wird NICHT in Response/Log weitergeleitet (könnte Secrets enthalten)
+ *
+ * New-Device-Verification (bitwarden-new-device-otp):
+ *   - bw CLI 2026.5.0 unterstützt New-Device-Verification (PR #13568)
+ *   - Wenn `requiresDeviceVerification`, liest `bw` den OTP-Code von stdin (via inquirer)
+ *   - Erster Login-Versuch ohne emailOtp: stdin geschlossen → bw erkennt "new device verification required"
+ *     in stderr → classifyBwError → 'email-otp-required'
+ *   - Zweiter Versuch mit emailOtp: Code wird via stdin als Zeilenende-terminierter String übergeben
+ *   - OTP-Code erscheint NIEMALS in Argv (sicherer als TOTP-Code-Ausnahme)
  *
  * Audit-First (AC8):
  *   - Vor jeder Beschaffungs-Aktion ein Audit-Eintrag (Identität, Aktion, Zeit) OHNE Werte
@@ -49,6 +58,10 @@ function sanitizeErrorReason(errorClass) {
       return 'Bitwarden: Zwei-Faktor-Authentifizierung erforderlich';
     case 'twofa-invalid':
       return 'Bitwarden: Zwei-Faktor-Code ungültig oder abgelaufen';
+    case 'email-otp-required':
+      return 'Bitwarden: New-Device-Verification erforderlich — Einmalcode per E-Mail eingeben';
+    case 'email-otp-invalid':
+      return 'Bitwarden: E-Mail-OTP-Code ungültig oder abgelaufen';
     case 'bw-unreachable':
       return 'Bitwarden-Dienst nicht erreichbar oder CLI nicht gefunden';
     case 'item-create-failed':
@@ -70,7 +83,7 @@ function classifyBwError(stderr, exitCode) {
   const s = (stderr ?? '').toLowerCase();
 
   // Exit 127 = Binary nicht gefunden
-  if (exitCode === 127 || s.includes('command not found') || s.includes('not found')) {
+  if (exitCode === 127 || s.includes('command not found')) {
     return 'bw-unreachable';
   }
 
@@ -85,6 +98,25 @@ function classifyBwError(stderr, exitCode) {
     s.includes('getaddrinfo')
   ) {
     return 'bw-unreachable';
+  }
+
+  // New-Device-Verification (E-Mail-OTP): ZUERST prüfen (vor TOTP-2FA und auth-failed).
+  // bw CLI 2026.5.0 schreibt den inquirer-Prompt-Text an stderr, bevor es den Code liest.
+  // Wenn kein Code übergeben (stdin geschlossen), schlägt bw mit diesem Muster fehl.
+  // Unterscheidbar von TOTP-2FA durch "new device", "device verification", "check your email".
+  if (
+    s.includes('new device verification') ||
+    s.includes('device verification required') ||
+    s.includes('device-verification') ||
+    s.includes('check your email') ||
+    (s.includes('verification') && s.includes('otp sent to login email'))
+  ) {
+    // Wenn der Code übergeben wurde aber abgelaufen/falsch → 'email-otp-invalid'.
+    // Tritt auf wenn bw nach dem Einreichen des Codes mit Fehler antwortet.
+    if (s.includes('invalid') || s.includes('incorrect') || s.includes('expired') || s.includes('wrong')) {
+      return 'email-otp-invalid';
+    }
+    return 'email-otp-required';
   }
 
   // 2FA-Fehler: ERST prüfen (bevor allgemeines auth-failed greift)
@@ -177,13 +209,14 @@ export class BitwardenMasterKeyService {
    * AC6: Bitwarden-Daten erscheinen NICHT in Argv/Log/Audit/Response
    *
    * @param {object} params
-   * @param {string} params.email     - Bitwarden E-Mail (wird NICHT geloggt)
-   * @param {string} params.password  - Bitwarden Master-Passwort (wird NICHT geloggt)
-   * @param {string} [params.twofa]   - Optionaler 2FA-Code (wird NICHT geloggt)
+   * @param {string} params.email        - Bitwarden E-Mail (wird NICHT geloggt)
+   * @param {string} params.password     - Bitwarden Master-Passwort (wird NICHT geloggt)
+   * @param {string} [params.twofa]      - Optionaler 2FA-Code (wird NICHT geloggt, AC6-Ausnahme: als --code-Arg)
+   * @param {string} [params.emailOtp]   - Optionaler E-Mail-OTP-Code für New-Device-Verification (via stdin, NICHT als Arg)
    * @param {string|null} params.identity - Access-Identität für Audit
    * @returns {Promise<{ status: 'found' } | { status: 'not-found' } | { status: 'error', errorClass: string, reason: string }>}
    */
-  async acquireMasterKey({ email, password, twofa, identity } = {}) {
+  async acquireMasterKey({ email, password, twofa, emailOtp, identity } = {}) {
     // ── AC8: Audit-First (login-attempt) — OHNE Credentials ─────────────────
     try {
       this.#auditStore.record({
@@ -202,7 +235,7 @@ export class BitwardenMasterKeyService {
     // ── AC1: Bitwarden-Login (Credentials via stdin/env, NICHT via Argv) ────
     let sessionToken;
     try {
-      sessionToken = await this.#bwLogin({ email, password, twofa });
+      sessionToken = await this.#bwLogin({ email, password, twofa, emailOtp });
     } catch (err) {
       const errorClass = err.bwErrorClass ?? 'error';
       return {
@@ -275,13 +308,14 @@ export class BitwardenMasterKeyService {
    * AC9: Sitzung wird danach verworfen.
    *
    * @param {object} params
-   * @param {string} params.email     - Bitwarden E-Mail
-   * @param {string} params.password  - Bitwarden Master-Passwort
-   * @param {string} [params.twofa]   - Optionaler 2FA-Code
+   * @param {string} params.email        - Bitwarden E-Mail
+   * @param {string} params.password     - Bitwarden Master-Passwort
+   * @param {string} [params.twofa]      - Optionaler 2FA-Code
+   * @param {string} [params.emailOtp]   - Optionaler E-Mail-OTP-Code für New-Device-Verification (via stdin, NICHT als Arg)
    * @param {string|null} params.identity - Access-Identität für Audit
    * @returns {Promise<{ status: 'created' } | { status: 'error', errorClass: string, reason: string }>}
    */
-  async createMasterKey({ email, password, twofa, identity } = {}) {
+  async createMasterKey({ email, password, twofa, emailOtp, identity } = {}) {
     // ── AC8: Audit-First (key-create) — OHNE Werte ──────────────────────────
     try {
       this.#auditStore.record({
@@ -299,7 +333,7 @@ export class BitwardenMasterKeyService {
     // ── AC1: Bitwarden-Login ─────────────────────────────────────────────────
     let sessionToken;
     try {
-      sessionToken = await this.#bwLogin({ email, password, twofa });
+      sessionToken = await this.#bwLogin({ email, password, twofa, emailOtp });
     } catch (err) {
       const errorClass = err.bwErrorClass ?? 'error';
       return {
@@ -348,27 +382,35 @@ export class BitwardenMasterKeyService {
    * Führt `bw login` aus und gibt den Session-Token zurück.
    *
    * AC6-KRITISCH: Passwort wird via Env übergeben — NICHT via Argv.
-   * Der Login-Befehl für E-Mail+Passwort+optional 2FA:
+   * Der Login-Befehl für E-Mail+Passwort+optional 2FA+optional E-Mail-OTP:
    *   bw login <email> --passwordenv BW_PASSWORD [--code <2fa>]
    * Das Passwort kommt aus der Env-Var BW_PASSWORD des Subprozesses (nie als Arg).
    *
-   * AC6-AUSNAHME (dokumentiert in Spec AC6): Der kurzlebige TOTP-2FA-Code darf als
+   * AC6-AUSNAHME (dokumentiert in Spec #183 AC6): Der kurzlebige TOTP-2FA-Code darf als
    * `--code`-Argument übergeben werden, weil `bw login` keine Env/stdin-Alternative
    * für diesen Parameter bietet. Der Code ist einmalig (30s gültig), replay-geschützt
    * und nach dem Login verbraucht — kein dauerhaftes Geheimnis.
    * Master-Passwort und Session-Token bleiben strikt Env-only.
    *
+   * E-Mail-OTP (bitwarden-new-device-otp — KEIN Argv-Leak):
+   * Der E-Mail-OTP-Code für New-Device-Verification wird via stdin übergeben.
+   * bw CLI 2026.5.0 (PR #13568) liest den Code interaktiv via inquirer von stdin.
+   * Da stdin in unserem Subprozess immer piped ist, schreiben wir den Code als
+   * newline-terminierte Zeile in stdin — inquirer liest sie und gibt sie als token zurück.
+   * Kein Arg-Leak, keine Env-Var nötig → sicherer als der TOTP-Ausnahme-Pfad.
+   *
    * @param {object} params
    * @param {string} params.email
    * @param {string} params.password
    * @param {string} [params.twofa]
+   * @param {string} [params.emailOtp]  - E-Mail-OTP für New-Device-Verification (via stdin, AC7)
    * @returns {Promise<string>} BW_SESSION-Token
    */
-  async #bwLogin({ email, password, twofa }) {
+  async #bwLogin({ email, password, twofa, emailOtp }) {
     // AC6: Args enthalten KEIN Passwort — Passwort via env (BW_PASSWORD)
     const args = ['login', email, '--passwordenv', 'BW_PASSWORD', '--raw'];
 
-    // AC6-Ausnahme (Spec AC6): TOTP-Code als --code-Arg — bw bietet keine Env/stdin-Alternative.
+    // AC6-Ausnahme (Spec #183 AC6): TOTP-Code als --code-Arg — bw bietet keine Env/stdin-Alternative.
     // Einmalig (30s), replay-geschützt, nach Login verbraucht → kein dauerhaftes Geheimnis.
     if (twofa) {
       args.push('--code', twofa);
@@ -382,7 +424,16 @@ export class BitwardenMasterKeyService {
       PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin',
     };
 
-    const { stdout, stderr, exitCode } = await this.#spawnBw(args, { env });
+    // AC7 (bitwarden-new-device-otp): E-Mail-OTP via stdin — NICHT als Arg.
+    // bw CLI 2026.5.0 fragt den Code interaktiv via inquirer (output: process.stderr).
+    // Wenn wir stdin mit dem OTP-Code füttern, liest inquirer ihn und setzt ihn als
+    // newDeviceToken → Login läuft mit New-Device-Verification weiter.
+    // Ohne emailOtp: stdin wird sofort geschlossen (EOF) → inquirer gibt '' zurück →
+    // bw schreibt "New device verification required. Enter OTP sent to login email:"
+    // an stderr → classifyBwError erkennt das Muster → 'email-otp-required'.
+    const stdinInput = emailOtp ? (emailOtp + '\n') : undefined;
+
+    const { stdout, stderr, exitCode } = await this.#spawnBw(args, { env, input: stdinInput });
 
     if (exitCode !== 0) {
       const errorClass = classifyBwError(stderr, exitCode);
