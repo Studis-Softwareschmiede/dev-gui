@@ -131,6 +131,16 @@ export class CredentialStore {
   /** @type {string|null} Master-Key-Rohwert (aus Env oder Runtime-unlock) */
   #masterKeyRaw = null;
 
+  /**
+   * Quelle des aktuell geladenen Master-Keys (credential-key-status-transparency AC2–AC4).
+   * "auto"   — beim Boot aus Env/`.env` geladen.
+   * "manual" — zur Laufzeit per unlock() gesetzt.
+   * "none"   — kein Key geladen (Store locked).
+   * Wird NIEMALS nach außen als Wert weitergegeben — nur als Enum.
+   * @type {"auto"|"manual"|"none"}
+   */
+  #keySource = 'none';
+
   /** @type {Promise<void>|null} Schreib-Mutex */
   #writeLock = null;
 
@@ -179,9 +189,13 @@ export class CredentialStore {
     }
 
     if (opts.masterKey !== undefined) {
+      // Injizierter Key (Tests): gilt als "auto" (Boot-Pfad-Analogie)
       this.#masterKeyRaw = opts.masterKey;
+      this.#keySource = opts.masterKey ? 'auto' : 'none';
     } else {
       this.#masterKeyRaw = this.#loadMasterKeyFromEnv();
+      // AC2: Key aus Env/Boot → keySource "auto"; kein Key → "none"
+      this.#keySource = this.#masterKeyRaw ? 'auto' : 'none';
     }
   }
 
@@ -535,14 +549,36 @@ export class CredentialStore {
   /**
    * Gibt den Lock-Zustand zurück — ohne Schlüssel/Klartext (AC8).
    *
-   * @returns {Promise<{ state: "locked"|"unlocked", hasEncryptedEntries: boolean }>}
+   * Erweitert um keySource (credential-key-status-transparency AC1–AC4):
+   *   "auto"   — Key beim Boot aus Env/`.env` geladen.
+   *   "manual" — Key zur Laufzeit per unlock() gesetzt.
+   *   "none"   — kein Key geladen (state: "locked").
+   *
+   * Konsistenz-Garantie: state:"locked" ⇒ keySource:"none" (AC4).
+   * keySource enthält NIEMALS den Schlüssel-/Klartext-Wert (AC7).
+   *
+   * @returns {Promise<{ state: "locked"|"unlocked", hasEncryptedEntries: boolean, keySource: "auto"|"manual"|"none" }>}
    */
   async getLockState() {
     const state = this.#masterKeyRaw !== null ? 'unlocked' : 'locked';
     const storeData = await this.#readStore();
     const hasEncryptedEntries =
       storeData?.kdf != null && Object.keys(storeData?.entries ?? {}).length > 0;
-    return { state, hasEncryptedEntries };
+
+    // AC4: locked ⇒ keySource muss "none" sein (Konsistenz-Invariante)
+    // AC7: keySource ist reines Enum — kein Wert enthalten
+    // Edge-case: unbekannter/leerer interner Marker bei geladenem Key → defensiv "auto" (Spec § Edge-Cases)
+    let keySource;
+    if (state === 'locked') {
+      keySource = 'none';
+    } else if (this.#keySource === 'manual') {
+      keySource = 'manual';
+    } else {
+      // "auto" oder unbekannter Marker bei geladenem Key → defensiv "auto"
+      keySource = 'auto';
+    }
+
+    return { state, hasEncryptedEntries, keySource };
   }
 
   /**
@@ -608,12 +644,16 @@ export class CredentialStore {
         // Persistenz fehlgeschlagen → in-memory trotzdem entsperren,
         // aber Aufrufer über fehlende Persistenz informieren (kein Key-Leak im Fehler)
         this.#masterKeyRaw = trimmedKey;
+        // AC3 (credential-key-status-transparency): Runtime-unlock → keySource "manual"
+        this.#keySource = 'manual';
         return { ok: false, reason: 'persist-failed' };
       }
     }
 
     // Key in den laufenden Prozess laden (AC3)
     this.#masterKeyRaw = trimmedKey;
+    // AC3 (credential-key-status-transparency): Runtime-unlock → keySource "manual" (ohne Neustart)
+    this.#keySource = 'manual';
     return { ok: true };
   }
 

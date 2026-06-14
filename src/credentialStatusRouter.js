@@ -1,17 +1,18 @@
 /**
  * credentialStatusRouter — Express-Router für den Credential-Bootstrap-Status-Endpunkt
- * (credential-bootstrap-status AC1–AC7).
+ * (credential-bootstrap-status AC1–AC7; credential-key-status-transparency AC1–AC8).
  *
  * Routes (hinter AccessGuard in server.js):
  *   GET /api/settings/credential-status
- *     → 200 { state: "locked"|"unlocked", hasEncryptedEntries: boolean }
+ *     → 200 { state: "locked"|"unlocked", hasEncryptedEntries: boolean, keySource: "auto"|"manual"|"none" }
  *
- * Security (ADR-007 / credential-bootstrap-status):
+ * Security (ADR-007 / credential-bootstrap-status / credential-key-status-transparency):
  *   - Keine Schlüssel/Klartext in Response, Log oder Audit (AC1/AC7).
- *   - Hinter AccessGuard (AC6); im gesperrten Zustand erreichbar — KEIN Credential-/Master-Key-
- *     Voraussetzung, die den Bootstrap blockieren würde (AC6 Anti-Henne-Ei).
+ *   - keySource ist reines Quellen-Enum — enthält NIEMALS den Key/Wert (AC7).
+ *   - Hinter AccessGuard (AC8); im gesperrten Zustand erreichbar — KEIN Credential-/Master-Key-
+ *     Voraussetzung, die den Bootstrap blockieren würde (AC8 Anti-Henne-Ei).
  *   - Read-only; kein Audit nötig (kein Mutations-/Geheimnis-Pfad, Spec Verträge).
- *   - Liefert den aktuellen Laufzeit-Zustand des CredentialStore (AC5: live, kein Neustart nötig).
+ *   - Liefert den aktuellen Laufzeit-Zustand des CredentialStore (live, kein Neustart nötig).
  *
  * @module credentialStatusRouter
  */
@@ -31,20 +32,22 @@ export function credentialStatusRouter(credentialStore) {
    * Liefert den aktuellen Lock-Zustand des CredentialStore.
    *
    * Responses:
-   *   200 { state: "locked"|"unlocked", hasEncryptedEntries: boolean }
+   *   200 { state: "locked"|"unlocked", hasEncryptedEntries: boolean, keySource: "auto"|"manual"|"none" }
    *   500 { error: string }  — Store nicht lesbar
    *
    * Security: KEIN Schlüssel/Klartext in der Response (AC1/AC7).
+   *   keySource ist reines Quellen-Enum (AC7) — niemals der Key selbst.
    * Read-only, kein Audit nötig (Spec: „kein Mutations-/Geheimnis-Pfad").
-   * Im gesperrten Zustand erreichbar — kein Master-Key-Voraussetzungs-Gate (AC6).
+   * Im gesperrten Zustand erreichbar — kein Master-Key-Voraussetzungs-Gate (AC8).
    */
   router.get('/api/settings/credential-status', async (_req, res) => {
     try {
       const lockState = await credentialStore.getLockState();
-      // Nur state + hasEncryptedEntries — niemals Schlüssel/Klartext (AC1/AC7)
+      // Nur state + hasEncryptedEntries + keySource — niemals Schlüssel/Klartext (AC1/AC7)
       return res.json({
         state: lockState.state,
         hasEncryptedEntries: lockState.hasEncryptedEntries,
+        keySource: lockState.keySource,
       });
     } catch (err) {
       // Interner Fehler — err.message NICHT loggen (kann Secrets enthalten, AC7)
