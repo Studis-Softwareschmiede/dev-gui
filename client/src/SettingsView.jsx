@@ -130,6 +130,49 @@ function validatePublicKeyFormat(key) {
   return { ok: true };
 }
 
+// ── Bitwarden-Unlock-API-Helfer (credential-unlock-dialog #185) ───────────────
+
+/**
+ * GET /api/settings/credential-status
+ * Liefert { state: "locked"|"unlocked", hasEncryptedEntries: boolean }.
+ * AC1: Sichtbarkeits-Quelle für den Unlock-Bereich.
+ *
+ * @param {typeof fetch} [fetchImpl]
+ * @returns {Promise<{ state: "locked"|"unlocked", hasEncryptedEntries: boolean }>}
+ */
+async function fetchCredentialStatus(fetchImpl) {
+  const fn = fetchImpl ?? globalThis.fetch.bind(globalThis);
+  const res = await fn('/api/settings/credential-status');
+  if (!res.ok) throw new Error(`Credential-Status laden fehlgeschlagen (${res.status})`);
+  return res.json();
+}
+
+/**
+ * POST /api/settings/credential-unlock
+ * Body: { email, password, twofa?, create? }
+ * AC3/AC4/AC5: Beschaffung / Erstellung / 2FA-Flow.
+ * AC9: Login-Daten + Key erscheinen NICHT in Logs/Bundle.
+ *
+ * @param {{ email: string, password: string, twofa?: string, create?: boolean }} params
+ * @param {typeof fetch} [fetchImpl]
+ * @returns {Promise<{ ok: boolean, state?: string, status?: string, errorClass?: string, error?: string, httpStatus: number }>}
+ */
+async function postCredentialUnlock({ email, password, twofa, create }, fetchImpl) {
+  const fn = fetchImpl ?? globalThis.fetch.bind(globalThis);
+  // AC9: Credentials nur im Request-Body (nie in URL/Query)
+  const body = { email, password };
+  if (twofa && twofa.trim()) body.twofa = twofa.trim();
+  if (create === true) body.create = true;
+  const res = await fn('/api/settings/credential-unlock', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  // AC9: httpStatus für Frontend-Logik; Credentials werden NICHT zurückgegeben
+  return { ...data, httpStatus: res.status };
+}
+
 // ── API-Helfer ────────────────────────────────────────────────────────────────
 
 async function fetchCredentials() {
@@ -1989,6 +2032,401 @@ function SshKeysSection({ sshKeys, setSshKeys, onSaved }) {
   );
 }
 
+// ── BitwardenUnlockDialog (credential-unlock-dialog #185) ─────────────────────
+
+/**
+ * Modaler Unlock-Dialog für Bitwarden-Login + Store-Entsperrung.
+ *
+ * AC2  — E-Mail-, Master-Passwort- (type=password) und optionales 2FA-Feld;
+ *         A11y: label/htmlFor, aria-describedby, role=alert, Fokus beim Öffnen.
+ * AC3  — Submit ruft POST /api/settings/credential-unlock; Erfolg → onSuccess().
+ * AC4  — not-found → explizites Erstellungs-Angebot; erst bei Bestätigung create:true.
+ * AC5  — twofa-required/twofa-invalid → Fehlermeldung + 2FA-Feld erzwungen.
+ * AC9  — Klartext nach Submit verworfen; kein console.log.
+ *
+ * @param {{
+ *   onSuccess: () => void,
+ *   onClose: () => void,
+ *   fetchFn?: typeof fetch,
+ * }} props
+ */
+function BitwardenUnlockDialog({ onSuccess, onClose, fetchFn }) {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [twofa, setTwofa] = useState('');
+  const [showTwofa, setShowTwofa] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState(null);
+  const [fieldError, setFieldError] = useState(null); // { field: 'email'|'password'|'twofa', msg }
+  // AC4: not-found → Erstellungs-Angebot; create-Mode bei Bestätigung
+  const [showCreateOffer, setShowCreateOffer] = useState(false);
+
+  const dialogRef = useRef(null);       // outer overlay
+  const dialogBoxRef = useRef(null);    // inner dialog box (fokussierbarer Container)
+  const emailRef = useRef(null);
+  const twofaRef = useRef(null);
+  const errorRef = useRef(null);
+
+  const DIALOG_TITLE_ID = 'bw-unlock-dialog-title';
+  const ERROR_ID = 'bw-unlock-error';
+  const EMAIL_ERROR_ID = 'bw-unlock-email-error';
+  const PASSWORD_ERROR_ID = 'bw-unlock-password-error';
+  const TWOFA_ERROR_ID = 'bw-unlock-twofa-error';
+
+  // AC2: Fokus auf E-Mail-Feld beim Öffnen des Dialogs
+  useEffect(() => {
+    if (emailRef.current) {
+      emailRef.current.focus();
+    }
+  }, []);
+
+  // AC5: Fokus auf 2FA-Feld wenn 2FA erzwungen wird
+  useEffect(() => {
+    if (showTwofa && twofaRef.current) {
+      twofaRef.current.focus();
+    }
+  }, [showTwofa]);
+
+  // Fokus auf Fehlermeldung nach Submit-Fehler (A11y)
+  const [pendingFocusError, setPendingFocusError] = useState(false);
+  useEffect(() => {
+    if (pendingFocusError && errorRef.current) {
+      errorRef.current.focus();
+      setPendingFocusError(false);
+    }
+  });
+
+  const doSubmit = useCallback(async (opts = {}) => {
+    setError(null);
+    setFieldError(null);
+
+    // Frontend-Validierung — Pflichtfelder (AC2)
+    const trimEmail = email.trim();
+    const trimPassword = password.trim();
+    if (!trimEmail) {
+      setFieldError({ field: 'email', msg: 'E-Mail ist ein Pflichtfeld.' });
+      emailRef.current?.focus();
+      return;
+    }
+    if (!trimPassword) {
+      setFieldError({ field: 'password', msg: 'Master-Passwort ist ein Pflichtfeld.' });
+      return;
+    }
+
+    setSubmitting(true);
+    let result;
+    try {
+      result = await postCredentialUnlock(
+        {
+          email: trimEmail,
+          password: trimPassword,
+          twofa: twofa.trim() || undefined,
+          create: opts.create === true ? true : undefined,
+        },
+        fetchFn,
+      );
+    } catch {
+      setError('Netzwerkfehler — Verbindung zum Server fehlgeschlagen.');
+      setPendingFocusError(true);
+      // AC9: Klartext nach Submit verwerfen
+      setPassword('');
+      setTwofa('');
+      return;
+    } finally {
+      // Bedingungslos zurücksetzen — deckt Erfolg, Fehler und unerwarteten Throw ab
+      setSubmitting(false);
+    }
+
+    // AC3: Erfolg
+    if (result.ok && result.state === 'unlocked') {
+      // AC9: Klartext nach terminalem Submit verwerfen (Security-Floor)
+      setPassword('');
+      setTwofa('');
+      // Kein console.log (AC9)
+      onSuccess();
+      return;
+    }
+
+    // AC4: not-found → Erstellungs-Angebot anzeigen
+    // AC9-Ausnahme: Klartext NICHT verwerfen — Nutzer muss mit denselben Credentials create:true senden
+    if (!result.ok && result.status === 'not-found') {
+      setShowCreateOffer(true);
+      return;
+    }
+
+    // AC9: Klartext nach terminalem Submit verwerfen (Security-Floor)
+    setPassword('');
+    setTwofa('');
+
+    // AC5: 2FA-Fehler → 2FA-Feld erzwingen + Fehlermeldung
+    if (!result.ok && (result.errorClass === 'twofa-required' || result.errorClass === 'twofa-invalid')) {
+      setShowTwofa(true);
+      const msg = result.errorClass === 'twofa-invalid'
+        ? '2FA-Code ungültig oder abgelaufen. Bitte erneut eingeben.'
+        : '2FA-Authentifizierung erforderlich. Bitte 2FA-Code eingeben.';
+      setFieldError({ field: 'twofa', msg });
+      return;
+    }
+
+    // AC6: Fehlerklassen → klare Meldung ohne Geheimnis-Leak
+    const errorMessages = {
+      'auth-failed': 'Bitwarden-Authentifizierung fehlgeschlagen (E-Mail oder Passwort falsch).',
+      'bw-unreachable': 'Bitwarden nicht erreichbar. Bitte Verbindung prüfen.',
+      'invalid-key': 'Master-Key passt nicht zum bestehenden Store. Store bleibt gesperrt.',
+      'persist-failed': 'Key konnte nicht persistiert werden (.env nicht schreibbar). Status prüfen.',
+      'forbidden': 'Keine Berechtigung für diese Aktion.',
+    };
+    const msg = errorMessages[result.errorClass] ?? 'Unbekannter Fehler beim Entsperren.';
+    setError(msg);
+    setPendingFocusError(true);
+  }, [email, password, twofa, onSuccess, fetchFn]);
+
+  const handleSubmit = useCallback(() => {
+    doSubmit({});
+  }, [doSubmit]);
+
+  const handleCreateConfirm = useCallback(() => {
+    setShowCreateOffer(false);
+    doSubmit({ create: true });
+  }, [doSubmit]);
+
+  const handleCreateCancel = useCallback(() => {
+    setShowCreateOffer(false);
+  }, []);
+
+  const emailErrorId = fieldError?.field === 'email' ? EMAIL_ERROR_ID : undefined;
+  const passwordErrorId = fieldError?.field === 'password' ? PASSWORD_ERROR_ID : undefined;
+  const twofaErrorId = fieldError?.field === 'twofa' ? TWOFA_ERROR_ID : undefined;
+
+  /**
+   * S2/AC2: Fokus-Trap — hält Tab/Shift+Tab innerhalb der fokussierbaren Dialog-Elemente.
+   * Escape schließt den Dialog (wie Abbrechen).
+   * WCAG 2.1.2 (No Keyboard Trap: modale Dialoge müssen den Fokus halten).
+   */
+  const handleKeyDown = useCallback((e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      onClose();
+      return;
+    }
+    if (e.key !== 'Tab') return;
+    const box = dialogBoxRef.current;
+    if (!box) return;
+    const focusable = Array.from(
+      box.querySelectorAll(
+        'button:not([disabled]), input:not([disabled]), [tabindex="0"], [tabindex]:not([tabindex="-1"])',
+      ),
+    ).filter((el) => !el.hasAttribute('disabled'));
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (e.shiftKey) {
+      if (document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      }
+    } else {
+      if (document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    }
+  }, [onClose]);
+
+  return (
+    /* S1: Overlay-Wrapper ohne ARIA-Dialog-Rolle — semantisch korrekt ist der innere Container */
+    <div
+      role="presentation"
+      style={unlockDialogStyles.overlay}
+      ref={dialogRef}
+    >
+      {/* S1: role=dialog/aria-modal/aria-labelledby auf dem inneren sichtbaren Dialog-Container */}
+      {/* S2: onKeyDown-Fokus-Trap (Tab/Shift+Tab + Escape) — WCAG 2.1.2 */}
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={DIALOG_TITLE_ID}
+        style={unlockDialogStyles.dialog}
+        ref={dialogBoxRef}
+        onKeyDown={handleKeyDown}
+      >
+        <h2 id={DIALOG_TITLE_ID} style={unlockDialogStyles.title}>
+          Bitwarden verbinden
+        </h2>
+        <p style={unlockDialogStyles.desc}>
+          Mit Bitwarden anmelden, um den Master-Key zu laden und den Store zu entsperren.
+        </p>
+
+        {/* Allgemeine Fehlermeldung (AC5/AC6) — role=alert, aria-describedby */}
+        {error && (
+          <p
+            id={ERROR_ID}
+            ref={errorRef}
+            style={unlockDialogStyles.errorMsg}
+            role="alert"
+            tabIndex={-1}
+          >
+            {error}
+          </p>
+        )}
+
+        {/* AC4: Erstellungs-Angebot (not-found) */}
+        {showCreateOffer && (
+          <div
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="bw-create-offer-title"
+            aria-describedby="bw-create-offer-desc"
+            style={unlockDialogStyles.createOffer}
+          >
+            <p id="bw-create-offer-title" style={unlockDialogStyles.createOfferTitle}>
+              Master-Key in Bitwarden erstellen?
+            </p>
+            <p id="bw-create-offer-desc" style={unlockDialogStyles.createOfferDesc}>
+              Es wurde kein Master-Key in Bitwarden gefunden. Soll ein neuer Zufalls-Key erzeugt
+              und in Bitwarden gespeichert werden?
+            </p>
+            <div style={unlockDialogStyles.actionRow}>
+              <button
+                type="button"
+                onClick={handleCreateConfirm}
+                disabled={submitting}
+                style={unlockDialogStyles.btnPrimary}
+                aria-busy={submitting}
+              >
+                {submitting ? 'Erstellen…' : 'Ja, Key erstellen'}
+              </button>
+              <button
+                type="button"
+                onClick={handleCreateCancel}
+                disabled={submitting}
+                style={unlockDialogStyles.btnSecondary}
+              >
+                Abbrechen
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Eingabe-Felder (nur wenn kein Erstellungs-Angebot aktiv) */}
+        {!showCreateOffer && (
+          <div style={unlockDialogStyles.form}>
+            {/* E-Mail-Feld */}
+            <div style={unlockDialogStyles.fieldRow}>
+              <label htmlFor="bw-unlock-email" style={unlockDialogStyles.label}>
+                E-Mail <span aria-hidden="true" style={unlockDialogStyles.required}>*</span>
+              </label>
+              <input
+                id="bw-unlock-email"
+                ref={emailRef}
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="bitwarden@example.com"
+                style={unlockDialogStyles.input}
+                aria-required="true"
+                aria-describedby={emailErrorId ?? (error ? ERROR_ID : undefined)}
+                autoComplete="off"
+                disabled={submitting}
+              />
+              {fieldError?.field === 'email' && (
+                <p id={EMAIL_ERROR_ID} style={unlockDialogStyles.fieldError} role="alert">
+                  {fieldError.msg}
+                </p>
+              )}
+            </div>
+
+            {/* Master-Passwort-Feld — AC2: type=password, autoComplete=off */}
+            <div style={unlockDialogStyles.fieldRow}>
+              <label htmlFor="bw-unlock-password" style={unlockDialogStyles.label}>
+                Master-Passwort <span aria-hidden="true" style={unlockDialogStyles.required}>*</span>
+              </label>
+              <input
+                id="bw-unlock-password"
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Bitwarden Master-Passwort"
+                style={unlockDialogStyles.input}
+                aria-required="true"
+                aria-describedby={passwordErrorId ?? (error ? ERROR_ID : undefined)}
+                autoComplete="off"
+                data-lpignore="true"
+                disabled={submitting}
+              />
+              {fieldError?.field === 'password' && (
+                <p id={PASSWORD_ERROR_ID} style={unlockDialogStyles.fieldError} role="alert">
+                  {fieldError.msg}
+                </p>
+              )}
+            </div>
+
+            {/* 2FA-Feld — optional (AC2); erzwungen bei twofa-required/invalid (AC5) */}
+            {showTwofa && (
+              <div style={unlockDialogStyles.fieldRow}>
+                <label htmlFor="bw-unlock-twofa" style={unlockDialogStyles.label}>
+                  2FA-Code <span style={unlockDialogStyles.optional}>(Authenticator-App)</span>
+                </label>
+                <input
+                  id="bw-unlock-twofa"
+                  ref={twofaRef}
+                  type="text"
+                  inputMode="numeric"
+                  value={twofa}
+                  onChange={(e) => setTwofa(e.target.value)}
+                  placeholder="6-stelliger Code"
+                  style={unlockDialogStyles.input}
+                  aria-describedby={twofaErrorId ?? (error ? ERROR_ID : undefined)}
+                  autoComplete="one-time-code"
+                  disabled={submitting}
+                />
+                {fieldError?.field === 'twofa' && (
+                  <p id={TWOFA_ERROR_ID} style={unlockDialogStyles.fieldError} role="alert">
+                    {fieldError.msg}
+                  </p>
+                )}
+              </div>
+            )}
+
+            {/* Button: 2FA-Feld einblenden (bevor erzwungen) */}
+            {!showTwofa && (
+              <button
+                type="button"
+                onClick={() => setShowTwofa(true)}
+                style={unlockDialogStyles.btnLink}
+                aria-label="2FA-Code-Feld einblenden"
+              >
+                2FA-Code eingeben
+              </button>
+            )}
+
+            {/* Submit-Button — aria-busy bei Ladezustand (AC2, Edge-Cases) */}
+            <div style={unlockDialogStyles.actionRow}>
+              <button
+                type="button"
+                onClick={handleSubmit}
+                disabled={submitting}
+                style={unlockDialogStyles.btnPrimary}
+                aria-busy={submitting}
+              >
+                {submitting ? 'Verbinden…' : 'Verbinden'}
+              </button>
+              <button
+                type="button"
+                onClick={onClose}
+                disabled={submitting}
+                style={unlockDialogStyles.btnSecondary}
+              >
+                Abbrechen
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── SettingsView ──────────────────────────────────────────────────────────────
 
 export function SettingsView({ onNavigate, fetchFn }) {
@@ -1999,6 +2437,19 @@ export function SettingsView({ onNavigate, fetchFn }) {
   // WS-AC1 (#92): workspace path state
   const [workspacePath, setWorkspacePath] = useState(null);
   const [workspacePathError, setWorkspacePathError] = useState(null);
+  // credential-unlock-dialog #185: Bitwarden-Unlock-Status + Dialog
+  const [credentialStatus, setCredentialStatus] = useState(null); // null = noch nicht geladen
+  const [showUnlockDialog, setShowUnlockDialog] = useState(false);
+
+  // AC1/AC10: Credential-Status laden (Sichtbarkeits-Steuerung für Unlock-Bereich)
+  const reloadCredentialStatus = useCallback(async () => {
+    try {
+      const status = await fetchCredentialStatus(fetchFn);
+      setCredentialStatus(status);
+    } catch {
+      // Fehler beim Status-Laden: status bleibt null (Unlock-Bereich wird nicht angezeigt)
+    }
+  }, [fetchFn]);
 
   const load = useCallback(async () => {
     setLoadError(null);
@@ -2037,7 +2488,8 @@ export function SettingsView({ onNavigate, fetchFn }) {
   useEffect(() => {
     load();
     reloadWorkspacePath();
-  }, [load, reloadWorkspacePath]);
+    reloadCredentialStatus();
+  }, [load, reloadWorkspacePath, reloadCredentialStatus]);
 
   /** Hilfsfunktion: Metadaten eines bestimmten Felds aus der Liste. */
   const getMeta = useCallback((integration, name) => {
@@ -2046,10 +2498,47 @@ export function SettingsView({ onNavigate, fetchFn }) {
 
   const miscItems = credentials.filter((c) => c.integration === 'misc');
 
+  // AC10: Nach Erfolg Status neu laden; Dialog schließen; Unlock-Bereich verschwindet
+  const handleUnlockSuccess = useCallback(async () => {
+    setShowUnlockDialog(false);
+    await reloadCredentialStatus();
+    // Credentials + SSH-Keys neu laden (jetzt entsperrt)
+    await load();
+  }, [reloadCredentialStatus, load]);
+
   return (
     <main style={styles.view} aria-label="Einstellungen-Ansicht">
       <div style={styles.inner}>
         <h1 style={styles.title}>Einstellungen</h1>
+
+        {/* AC1/AC10: Unlock-Bereich — NUR bei state:"locked" anzeigen */}
+        {credentialStatus?.state === 'locked' && (
+          <section aria-labelledby="settings-section-unlock" style={unlockStyles.section}>
+            <h2 id="settings-section-unlock" style={unlockStyles.heading}>
+              Bitwarden-Verbindung
+            </h2>
+            <p style={unlockStyles.desc}>
+              Der Credential-Store ist gesperrt. Verbinde Bitwarden, um Credentials zu nutzen.
+            </p>
+            <button
+              type="button"
+              onClick={() => setShowUnlockDialog(true)}
+              style={unlockStyles.btnConnect}
+              aria-label="Bitwarden verbinden und Store entsperren"
+            >
+              Bitwarden verbinden
+            </button>
+          </section>
+        )}
+
+        {/* AC2: Modaler Dialog (role=dialog/aria-modal) */}
+        {showUnlockDialog && (
+          <BitwardenUnlockDialog
+            onSuccess={handleUnlockSuccess}
+            onClose={() => setShowUnlockDialog(false)}
+            fetchFn={fetchFn}
+          />
+        )}
 
         {loadError && (
           <p style={styles.loadError} role="alert" aria-live="polite">
@@ -2706,6 +3195,186 @@ const rotationStyles = {
     cursor: 'pointer',
     minHeight: 44,
     fontWeight: 600,
+  },
+};
+
+// ── BitwardenUnlockDialog styles (credential-unlock-dialog #185) ──────────────
+
+/** Styles für den Unlock-Button/-Bereich im gesperrten Zustand (AC1). */
+const unlockStyles = {
+  section: {
+    marginBottom: 24,
+    padding: '20px 24px',
+    background: '#0d1a0d',
+    border: '1px solid #166534',
+    borderRadius: 8,
+  },
+  heading: {
+    margin: '0 0 8px',
+    fontSize: 18,
+    fontWeight: 700,
+    color: '#86efac',   // Kontrast auf #0d1a0d ≥ 4.5:1
+  },
+  desc: {
+    margin: '0 0 16px',
+    fontSize: 13,
+    color: '#9ca3af',   // Kontrast ≥ 4.5:1 auf #0d1a0d
+    lineHeight: 1.5,
+  },
+  btnConnect: {
+    padding: '10px 20px',
+    background: '#065f46',    // Grün — Verbindungs-Aktion
+    color: '#d1fae5',         // Kontrast auf #065f46 ≥ 4.5:1
+    border: '1px solid #047857',
+    borderRadius: 6,
+    fontSize: 14,
+    cursor: 'pointer',
+    fontWeight: 700,
+    minHeight: 44,
+  },
+};
+
+/** Styles für den BitwardenUnlockDialog (AC2: modal, A11y). */
+const unlockDialogStyles = {
+  overlay: {
+    position: 'fixed',
+    inset: 0,
+    background: 'rgba(0,0,0,0.75)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 1000,
+  },
+  dialog: {
+    width: '100%',
+    maxWidth: 480,
+    margin: '0 16px',
+    padding: '24px 28px',
+    background: '#111',
+    border: '1px solid #2a2a2a',
+    borderRadius: 10,
+    color: '#d4d4d4',
+    boxSizing: 'border-box',
+  },
+  title: {
+    margin: '0 0 8px',
+    fontSize: 20,
+    fontWeight: 700,
+    color: '#e5e7eb',
+  },
+  desc: {
+    margin: '0 0 20px',
+    fontSize: 13,
+    color: '#9ca3af',   // Kontrast ≥ 4.5:1 auf #111
+    lineHeight: 1.5,
+  },
+  form: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 14,
+  },
+  fieldRow: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 4,
+  },
+  label: {
+    fontSize: 13,
+    fontWeight: 600,
+    color: '#d4d4d4',
+  },
+  required: {
+    color: '#fca5a5',
+    marginLeft: 2,
+  },
+  optional: {
+    fontWeight: 400,
+    color: '#9ca3af',
+    fontSize: 11,
+    marginLeft: 4,
+  },
+  input: {
+    width: '100%',
+    padding: '9px 12px',
+    background: '#1e293b',
+    color: '#e5e7eb',
+    border: '1px solid #334155',
+    borderRadius: 4,
+    fontSize: 14,
+    boxSizing: 'border-box',
+    minHeight: 44,
+  },
+  fieldError: {
+    margin: '2px 0 0',
+    fontSize: 12,
+    color: '#fca5a5',   // Kontrast auf #111 ≥ 4.5:1
+  },
+  errorMsg: {
+    marginBottom: 16,
+    padding: '10px 14px',
+    background: '#2d0f0f',
+    border: '1px solid #7f1d1d',
+    borderRadius: 4,
+    color: '#fca5a5',   // Kontrast ≥ 4.5:1
+    fontSize: 13,
+    outline: 'none',
+  },
+  actionRow: {
+    display: 'flex',
+    gap: 8,
+    flexWrap: 'wrap',
+    marginTop: 4,
+  },
+  btnPrimary: {
+    padding: '10px 20px',
+    background: '#1d4ed8',    // Kontrast #fff/#1d4ed8 ≥ 4.5:1
+    color: '#ffffff',
+    border: 'none',
+    borderRadius: 4,
+    fontSize: 14,
+    cursor: 'pointer',
+    fontWeight: 700,
+    minHeight: 44,
+  },
+  btnSecondary: {
+    padding: '10px 20px',
+    background: '#1e293b',
+    color: '#d4d4d4',
+    border: '1px solid #334155',
+    borderRadius: 4,
+    fontSize: 14,
+    cursor: 'pointer',
+    minHeight: 44,
+  },
+  btnLink: {
+    padding: '6px 0',
+    background: 'transparent',
+    color: '#93c5fd',       // Kontrast auf #111 ≈ 5.8:1
+    border: 'none',
+    fontSize: 12,
+    cursor: 'pointer',
+    textAlign: 'left',
+    textDecoration: 'underline',
+    minHeight: 44,
+  },
+  createOffer: {
+    marginBottom: 16,
+    padding: '14px 16px',
+    background: '#1a1a0a',
+    border: '1px solid #854d0e',
+    borderRadius: 6,
+  },
+  createOfferTitle: {
+    margin: '0 0 6px',
+    fontSize: 15,
+    fontWeight: 700,
+    color: '#fde68a',   // Kontrast auf #1a1a0a ≥ 4.5:1 (gelb-orange Warnung)
+  },
+  createOfferDesc: {
+    margin: '0 0 14px',
+    fontSize: 13,
+    color: '#d4d4d4',
+    lineHeight: 1.5,
   },
 };
 
