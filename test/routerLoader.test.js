@@ -107,8 +107,13 @@ describe('routerLoader — Basis-Funktionalität', () => {
   });
 
   it('wirft Fehler bei Import-Fehler (Fail-Fast, kein stilles Überspringen)', async () => {
-    // Eine Datei die syntaktisch kaputt ist (kein valides Modul)
-    const brokenRouter = `this is not valid javascript !!!@#$`;
+    // Modul, dessen Top-Level-Auswertung wirft (Evaluations-Fehler statt Parse-Fehler):
+    // `await import()` lehnt diesen Fall in jeder Node-Version fangbar ab. Ein reiner
+    // SYNTAX-Fehler wird vom jest-ESM-Transform-Layer je nach Node-Version teils
+    // außerhalb des try/catch geworfen (Node 20 vs 26) → flaky; Evaluations-Throw nicht.
+    const brokenRouter = `throw new Error('Modul-Auswertung fehlgeschlagen');
+export function create(deps) { return (req, res, next) => next(); }
+`;
     await expect(
       buildWithTempRouters({ 'broken.js': brokenRouter })
     ).rejects.toThrow(/Fehler beim Import/);
