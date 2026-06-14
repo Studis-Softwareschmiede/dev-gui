@@ -492,3 +492,34 @@
 - **Jeder Lauf (Cron und manuell) erzeugt genau einen `ReconcileReport`**, persistiert als append-only `AuditStore`-Zeile; abrufbar über `/api/deployments/reconcile/last` + `/reports`. **(O4 entschieden: JA — AuditStore, kein neuer Store.)** *(architecture/R13-3)*
 - **Jede Aktion erzeugt eine `ReconcileNotice`** (AuditStore-getragen), abrufbar über `/api/deployments/reconcile/notices`; im Cloudflare-Panel sichtbar. *(architecture/R13-4)*
 - Manueller Trigger + beide Heilungs-Pfade: Audit-First, kein Token-/Key-Leak in Audit/Report/Panel-Meldung.
+
+---
+
+### ADR-014 (Vollfassung) · Runtime-Unlock-Zustandsmodell + Bitwarden-Beschaffung des Master-Keys
+
+**Status:** ENTSCHIEDEN · 2026-06-14 · Entscheider: `architekt` (Betreiber-Entscheidungen bindend vorgegeben) · betrifft [[credential-runtime-unlock]], [[bitwarden-master-key-unlock]], [[credential-unlock-dialog]], [[credential-bootstrap-status]]. Baut auf ADR-007 (`CredentialStore`, AES-256-GCM/scrypt, `secrets.enc.json`, Fail-Fast, `CRED_ADMIN_EMAILS`), ADR-004 (Cloudflare Access als Mauer), `access-and-guardrails` (Audit/Floor). **Ändert ADR-007 nicht** — ergänzt nur einen Laufzeit-Lebenszyklus um den bisher rein boot-zeitlichen Master-Key.
+
+**Kontext.** Heute lädt der `CredentialStore` den Master-Key **nur beim Start** aus Env (`#loadMasterKeyFromEnv`/`#ensureKey`); fehlt er bei vorhandenem verschlüsseltem Store → Fail-Fast. Der Betreiber will einen **bequemen, sicheren** Weg, den `CRED_MASTER_KEY` über einen GUI-Dialog bereitzustellen, ohne den Key manuell auf den Server zu kopieren: dev-gui darf **gesperrt** starten und zur Laufzeit über einen **Bitwarden-Login** entsperrt werden; der Key wird in `.env` persistiert → Reboots sind danach autonom. Das bestehende **Zwei-Dateien-Modell** (`.env` Klartext mit Master-Key + Basis-Konfig; `secrets.enc.json` verschlüsselter Laufzeit-Store) bleibt **unverändert**; Bitwarden hütet **genau ein** Geheimnis: den Master-Key. Es gibt **keine** zweite GPG-/Passphrase-Ebene und **keine** Abschaffung des Stores.
+
+**Entscheidung (bindend).**
+- **Locked/Unlocked-Lebenszyklus im `CredentialStore`.** Der Store bekommt einen expliziten Zustand: `locked` (kein Key im Prozess) | `unlocked` (Key geladen). Boot **ohne** Key **und** ohne verschlüsselte Einträge ⇒ `locked` **ohne** Abbruch (der Dienst nimmt Requests an, Credential-Features inaktiv). Der bestehende **Fail-Fast** (verschlüsselte `entries` UND kein Key) **bleibt** — er ist von „locked, leeres Store" zu unterscheiden.
+- **`unlock(key, { persist })` ohne Neustart.** Eine neue Store-Operation validiert den Key (bei vorhandenen Einträgen: GCM-Verifikation eines Eintrags; falscher Key → Ablehnung, **kein** `.env`-Write), persistiert ihn in `.env` (`CRED_MASTER_KEY=<wert>`, atomar tmp+rename, mode `0600`, übrige `.env`-Zeilen unverändert) und lädt ihn in den laufenden Prozess. Reboot danach autonom entsperrt (Entrypoint liest `.env`/Env) → autonome Jobs (ReconciliationJob, ADR-013) laufen weiter.
+- **Bitwarden-Beschaffungs-Boundary (genau eine Komponente).** Eine neue serverseitige Komponente ist der **einzige** Ort, der mit Bitwarden spricht: interaktiver Login (E-Mail + Master-Passwort + optional 2FA), Master-Key-Item **lesen**, und — **nur nach expliziter Bestätigung** — ein neues Item mit kryptographisch sicherem Zufalls-Key (`crypto.randomBytes`, base64, ≥ 32 Byte) **erstellen**. Der Key verlässt diese Komponente nur **store-intern** an `unlock(...)`, **nie** nach außen. **Technik-Default: Bitwarden-CLI `bw`** im Image gebündelt, via Subprozess (E-Mail/Passwort/2FA-Login + Item lesen/erstellen); REST/Vault-API ist zulässige Alternative. **Geheimnisse nie über Prozess-Argv** (stdin/Env ohne Argv-Exposition); transiente Sitzung nach Gebrauch verworfen.
+- **Auslöser eng.** Der Setup-/Unlock-Dialog erscheint **nur** im `locked`-Zustand. Ein leak-freier Status-Endpunkt `GET /api/settings/credential-status` (`{ state, hasEncryptedEntries }`, hinter Access, kein Geheimnis) steuert die Sichtbarkeit. Normalbetrieb/Reboot mit Key in `.env` ⇒ kein Dialog.
+- **Schutz (Floor, hart).** Unlock-/Create-Endpunkte (`POST /api/settings/credential-unlock`) hinter Access-Mauer **+** `CRED_ADMIN_EMAILS`-Rollencheck (gleiche Logik wie ADR-007) **+** Audit-First (Audit nennt nur die Aktion, nie Werte). Bitwarden-Login-Daten + Master-Key erscheinen **nie** in Log/Audit/Response/WS/Argv/Frontend-Bundle; das Master-Passwort-Feld ist `type=password`/`autoComplete=off`; Klartext wird nach Submit verworfen. `.env` mit `0600`.
+
+**Bedrohungsmodell (dokumentiert, bewusster Trade-off).** **Schützt** gegen Repo-/Backup-/Disk-Leak (Master-Key liegt in Bitwarden, nicht im Image/Repo; `secrets.enc.json` ohne Key wertlos). **Schützt NICHT** gegen einen Angreifer mit **Root auf dem laufenden Server** (kann `.env`, Prozessspeicher und transiente Login-Daten lesen) — bewusst akzeptiert, gleiche Linie wie ADR-003/ADR-007.
+
+**Zusammenhang Backup/Restore (NICHT in Scope).** Master-Key aus Bitwarden **+** ein Backup von `secrets.enc.json` ergeben zusammen eine vollständige Wiederherstellung. Das Backup/Restore von `secrets.enc.json` selbst ist **nicht** Scope dieses Features — mögliches Folge-Item.
+
+**Verhältnis zu ADR-005/006/007.** ADR-005 gewahrt (kein neuer State-Store; `.env` ist Betreiber-Konfig, kein Domänen-State). ADR-006 gewahrt (kein neuer Dienst; `bw` ist ein gebündeltes CLI-Tool, kein zweiter Daemon). ADR-007 unverändert gültig — der Master-Key-Lebenszyklus wird nur von „boot-only" auf „boot **oder** runtime-unlock" erweitert; Krypto/Schema/Fail-Fast bleiben.
+
+**Konsequenzen (prüfbar — Review-Kriterien).**
+- Boot ohne Key + leeres/meta-only Store → `locked`, **kein** Abbruch; Boot mit verschlüsselten Einträgen ohne Key → **weiterhin** Fail-Fast (Regression-Test ADR-007).
+- `unlock(key)` lädt den Key ohne Neustart; falscher Key bei vorhandenen Einträgen → Ablehnung, **keine** `.env`-Mutation.
+- `.env` nach Unlock: `CRED_MASTER_KEY=<key>` gesetzt, übrige Zeilen unverändert, mode `0600`, atomar geschrieben.
+- **Genau eine** Komponente spricht mit Bitwarden; der Key verlässt sie nur store-intern (Grep: kein anderer `bw`-Aufruf/Bitwarden-Client).
+- Key-Erstellung **nur** bei explizitem Bestätigungs-Flag; ohne Flag wird **nichts** erstellt.
+- Login-Daten + Master-Key in **keinem** Log/Audit/Response/WS/Argv/Bundle (testbar: Argv/Logs/Audit/Response enthalten die Werte nicht).
+- Unlock-Endpunkte: kein Access → 403; `CRED_ADMIN_EMAILS` gesetzt → nur gelistete; Audit-First (Audit-Write-Fehler → Aktion unterbleibt).
+- `GET /api/settings/credential-status` leak-frei, im `locked`-Zustand erreichbar, spiegelt Laufzeit-Unlock ohne Neustart.
