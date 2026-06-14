@@ -1,4 +1,5 @@
 import js from '@eslint/js';
+import reactHooks from 'eslint-plugin-react-hooks';
 
 /** @type {import('eslint').Linter.Config[]} */
 export default [
@@ -49,6 +50,9 @@ export default [
   {
     // React JSX files (client/)
     files: ['client/**/*.jsx'],
+    plugins: {
+      'react-hooks': reactHooks,
+    },
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'module',
@@ -75,6 +79,8 @@ export default [
       // lowercase names used in JSX expressions.
       'no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^[A-Z]' }],
       'no-console': 'off',
+      // Register react-hooks/exhaustive-deps as warn so disable-comments in JSX files are valid.
+      'react-hooks/exhaustive-deps': 'warn',
     },
   },
   {
@@ -95,6 +101,7 @@ export default [
         document: 'readonly',
         HashChangeEvent: 'readonly',
         Event: 'readonly',
+        URL: 'readonly',
       },
     },
   },
