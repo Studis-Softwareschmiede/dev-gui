@@ -10,6 +10,7 @@
  *   POST /api/command                             → inject slash-command into PTY session
  *   POST /api/command/cancel                      → send Ctrl-C, cancel running command
  *   GET/PUT/DELETE /api/settings/credentials*     → Credential-Verwaltung (settings-credentials)
+ *   GET  /api/settings/credential-status          → { state, hasEncryptedEntries } (credential-bootstrap-status #184)
  *   GET/PUT/DELETE /api/settings/ssh-keys*             → SSH-Key-Verwaltung (settings-ssh-keys Stufe A)
  *   POST /api/settings/ssh-keys/:user/provision        → VPS-Provisionierung (settings-ssh-keys Stufe B, #47)
  *   POST /api/settings/ssh-keys/:user/generate         → ed25519-Keypair erzeugen (ssh-key-generation AC1–AC7, #115)
@@ -70,6 +71,7 @@ import { statusRouter } from './src/statusRouter.js';
 import { githubReposListRouter } from './src/githubReposListRouter.js';
 import { CredentialStore } from './src/CredentialStore.js';
 import { credentialsRouter } from './src/credentialsRouter.js';
+import { credentialStatusRouter } from './src/credentialStatusRouter.js';
 import { sshKeysRouter } from './src/sshKeysRouter.js';
 import { githubReposRouter } from './src/githubReposRouter.js';
 import { GitHubWriter } from './src/GitHubWriter.js';
@@ -151,6 +153,11 @@ app.use(githubReposListRouter({ githubReader }));
 
 // ── Credentials route (settings-credentials) ─────────────────────────────────
 app.use(credentialsRouter(credentialStore, auditStore));
+
+// ── Credential-Bootstrap-Status (credential-bootstrap-status #184) ────────────
+// Lesender Endpunkt; kein Audit nötig (kein Mutations-/Geheimnis-Pfad).
+// Im gesperrten Zustand erreichbar — KEIN Master-Key-Voraussetzungs-Gate (AC6).
+app.use(credentialStatusRouter(credentialStore));
 
 // ── SSH-Keys route (settings-ssh-keys Stufe A) ────────────────────────────────
 app.use(sshKeysRouter(credentialStore, auditStore));
