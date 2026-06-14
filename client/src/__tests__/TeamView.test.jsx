@@ -41,6 +41,15 @@
  *   - AC10: Chips are focusable buttons without outline:none; no dangerouslySetInnerHTML;
  *           no external library.
  *
+ * Covers (team-entity-icons — Etappe 2, Item #217):
+ *   - AC8: NavItem renders an EntityIcon (svg or monogram) before the entity name;
+ *          aria-current and keyboard behaviour unchanged.
+ *   - AC9: DetailPane head shows a large EntityIcon beside the title (svg present in article header).
+ *   - AC10: RefChips render a mini EntityIcon before each chip label; chips remain focusable
+ *           buttons with visible focus ring and loadDetail(kind,id) click behaviour.
+ *   - AC11: All EntityIcons are aria-hidden; no new fetch calls; no new data fields consumed;
+ *           existing tests stay green.
+ *
  * @jest-environment jsdom
  */
 
@@ -1265,5 +1274,449 @@ describe('TeamView — team-detail-related-refs AC10: Chip A11y', () => {
       expect(btn.tagName.toLowerCase()).toBe('button');
       expect(btn.getAttribute('type')).toBe('button');
     }
+  });
+});
+
+// ── team-entity-icons Etappe 2: AC8 — NavItem renders EntityIcon ──────────────
+
+describe('TeamView — team-entity-icons AC8: NavItem renders EntityIcon before name', () => {
+  it('each nav button contains an SVG (entity icon) before the name', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE });
+
+    const { container } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="agent"]')).toBeTruthy();
+    });
+
+    // Every nav button (agents, skills, knowledge) must contain an svg (lucide icon)
+    // or a monogram span — both aria-hidden. Lucide icons render as SVG for known types.
+    const navButtons = container.querySelectorAll('nav button[data-kind]');
+    expect(navButtons.length).toBeGreaterThan(0);
+    for (const btn of navButtons) {
+      const icon = btn.querySelector('svg[aria-hidden="true"], span[aria-hidden="true"]');
+      expect(icon).toBeTruthy();
+    }
+  });
+
+  it('agent nav buttons have an aria-hidden icon (SVG for known ids)', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE });
+
+    const { container } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="agent"][data-id="coder"]')).toBeTruthy();
+    });
+
+    // 'coder' maps to Code icon via ROLE_MAP → SVG
+    const coderBtn = container.querySelector('button[data-kind="agent"][data-id="coder"]');
+    const svg = coderBtn.querySelector('svg[aria-hidden="true"]');
+    expect(svg).toBeTruthy();
+  });
+
+  it('skill nav buttons have an aria-hidden icon', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE });
+
+    const { container } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="skill"][data-id="deploy"]')).toBeTruthy();
+    });
+
+    const deployBtn = container.querySelector('button[data-kind="skill"][data-id="deploy"]');
+    const svg = deployBtn.querySelector('svg[aria-hidden="true"]');
+    expect(svg).toBeTruthy();
+  });
+
+  it('knowledge nav buttons have an aria-hidden icon', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE });
+
+    const { container } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="knowledge"][data-id="security"]')).toBeTruthy();
+    });
+
+    const secBtn = container.querySelector('button[data-kind="knowledge"][data-id="security"]');
+    const svg = secBtn.querySelector('svg[aria-hidden="true"]');
+    expect(svg).toBeTruthy();
+  });
+
+  it('icon appears before the name text node (DOM order)', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE });
+
+    const { container } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="agent"][data-id="coder"]')).toBeTruthy();
+    });
+
+    const btn = container.querySelector('button[data-kind="agent"][data-id="coder"]');
+    // The first child of the button should be the SVG icon, not a text node with the name.
+    const firstChild = btn.firstElementChild;
+    expect(firstChild).toBeTruthy();
+    // The SVG tag or span (monogram) should precede the name text.
+    expect(['svg', 'span'].includes(firstChild.tagName.toLowerCase())).toBe(true);
+  });
+
+  it('aria-current and keyboard behaviour unchanged after icon addition', async () => {
+    const agentDetail = {
+      id: 'coder', name: 'Coder', description: 'x',
+      model: 'claude-opus-4', tools: [], body: '',
+    };
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE, detailBody: agentDetail });
+
+    const { container } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="agent"][data-id="coder"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('button[data-kind="agent"][data-id="coder"]'));
+    });
+
+    await waitFor(() => {
+      const btn = container.querySelector('button[data-kind="agent"][data-id="coder"]');
+      expect(btn.getAttribute('aria-current')).toBe('page');
+    });
+  });
+});
+
+// ── team-entity-icons Etappe 2: AC9 — DetailPane head icon ───────────────────
+
+describe('TeamView — team-entity-icons AC9: DetailPane shows large head icon', () => {
+  it('DetailPane article head contains an aria-hidden SVG icon beside the title', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE, detailBody: AGENT_DETAIL_WITH_REFS });
+
+    const { container } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="agent"][data-id="coder"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('button[data-kind="agent"][data-id="coder"]'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('article')).toBeTruthy();
+    });
+
+    // The article must contain an aria-hidden SVG (the head icon) at the top
+    const article = container.querySelector('article');
+    const headIcon = article.querySelector('svg[aria-hidden="true"], span[aria-hidden="true"]');
+    expect(headIcon).toBeTruthy();
+  });
+
+  it('head icon SVG is inside the title row, not somewhere else in the article', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE, detailBody: AGENT_DETAIL_WITH_REFS });
+
+    const { container } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="agent"][data-id="coder"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('button[data-kind="agent"][data-id="coder"]'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('article h2')).toBeTruthy();
+    });
+
+    const article = container.querySelector('article');
+    const h2 = article.querySelector('h2');
+    // The h2 title row's parent should also contain the head icon SVG
+    const titleRow = h2.parentElement;
+    const headSvg = titleRow.querySelector('svg[aria-hidden="true"], span[aria-hidden="true"]');
+    expect(headSvg).toBeTruthy();
+  });
+
+  it('head icon also appears for skill detail', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE, detailBody: SKILL_DETAIL_WITH_AGENTS });
+
+    const { container } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="skill"][data-id="deploy"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('button[data-kind="skill"][data-id="deploy"]'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('article')).toBeTruthy();
+    });
+
+    const article = container.querySelector('article');
+    const headIcon = article.querySelector('svg[aria-hidden="true"], span[aria-hidden="true"]');
+    expect(headIcon).toBeTruthy();
+  });
+
+  it('head icon also appears for knowledge detail', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE, detailBody: KNOWLEDGE_DETAIL_WITH_AGENTS });
+
+    const { container } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="knowledge"][data-id="security"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('button[data-kind="knowledge"][data-id="security"]'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('article')).toBeTruthy();
+    });
+
+    const article = container.querySelector('article');
+    const headIcon = article.querySelector('svg[aria-hidden="true"], span[aria-hidden="true"]');
+    expect(headIcon).toBeTruthy();
+  });
+});
+
+// ── team-entity-icons Etappe 2: AC10 — RefChips mini-icon ────────────────────
+
+describe('TeamView — team-entity-icons AC10: RefChips show mini EntityIcon before label', () => {
+  it('relatedSkills chip buttons each contain an aria-hidden icon', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE, detailBody: AGENT_DETAIL_WITH_REFS });
+
+    const { container } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="agent"][data-id="coder"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('button[data-kind="agent"][data-id="coder"]'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('article button[data-kind="skill"]')).toBeTruthy();
+    });
+
+    const skillChips = container.querySelectorAll('article button[data-kind="skill"]');
+    expect(skillChips.length).toBeGreaterThan(0);
+    for (const chip of skillChips) {
+      const icon = chip.querySelector('svg[aria-hidden="true"], span[aria-hidden="true"]');
+      expect(icon).toBeTruthy();
+    }
+  });
+
+  it('relatedKnowledge chip buttons each contain an aria-hidden icon', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE, detailBody: AGENT_DETAIL_WITH_REFS });
+
+    const { container } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="agent"][data-id="coder"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('button[data-kind="agent"][data-id="coder"]'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('article button[data-kind="knowledge"]')).toBeTruthy();
+    });
+
+    const knChips = container.querySelectorAll('article button[data-kind="knowledge"]');
+    expect(knChips.length).toBeGreaterThan(0);
+    for (const chip of knChips) {
+      const icon = chip.querySelector('svg[aria-hidden="true"], span[aria-hidden="true"]');
+      expect(icon).toBeTruthy();
+    }
+  });
+
+  it('usedByAgents chip buttons each contain an aria-hidden icon', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE, detailBody: SKILL_DETAIL_WITH_AGENTS });
+
+    const { container } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="skill"][data-id="deploy"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('button[data-kind="skill"][data-id="deploy"]'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('article button[data-kind="agent"]')).toBeTruthy();
+    });
+
+    const agentChips = container.querySelectorAll('article button[data-kind="agent"]');
+    expect(agentChips.length).toBeGreaterThan(0);
+    for (const chip of agentChips) {
+      const icon = chip.querySelector('svg[aria-hidden="true"], span[aria-hidden="true"]');
+      expect(icon).toBeTruthy();
+    }
+  });
+
+  it('chips still have visible text label after icon addition (AC11 no-drift)', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE, detailBody: AGENT_DETAIL_WITH_REFS });
+
+    const { container } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="agent"][data-id="coder"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('button[data-kind="agent"][data-id="coder"]'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('article button[data-kind="skill"]')).toBeTruthy();
+    });
+
+    // Each chip must still contain its visible text label in addition to the icon.
+    // AGENT_DETAIL_WITH_REFS.relatedSkills = [{ id:'deploy', name:'Deploy' }, { id:'test', name:'Test' }]
+    const deployChip = container.querySelector('article button[data-kind="skill"][data-id="deploy"]');
+    const testChip = container.querySelector('article button[data-kind="skill"][data-id="test"]');
+    expect(deployChip.textContent).toContain('Deploy');
+    expect(testChip.textContent).toContain('Test');
+  });
+
+  it('chip click still calls loadDetail after icon addition (AC10 no-drift)', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE, detailBody: AGENT_DETAIL_WITH_REFS });
+
+    const { container } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="agent"][data-id="coder"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('button[data-kind="agent"][data-id="coder"]'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('article button[data-kind="skill"]')).toBeTruthy();
+    });
+
+    const initialCalls = globalThis.fetch.mock.calls.length;
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('article button[data-kind="skill"][data-id="deploy"]'));
+    });
+
+    await waitFor(() => {
+      const newCalls = globalThis.fetch.mock.calls.slice(initialCalls);
+      const skillCall = newCalls.find((c) => c[0] === '/api/team/skill/deploy');
+      expect(skillCall).toBeTruthy();
+    });
+  });
+});
+
+// ── team-entity-icons Etappe 2: AC11 — Floor ─────────────────────────────────
+
+describe('TeamView — team-entity-icons AC11: Floor — aria-hidden, no extra fetch, no new data fields', () => {
+  it('all EntityIcons in NavItems carry aria-hidden="true"', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE });
+
+    const { container } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('nav button[data-kind]')).toBeTruthy();
+    });
+
+    const navButtons = container.querySelectorAll('nav button[data-kind]');
+    for (const btn of navButtons) {
+      // Every icon inside a nav button must be aria-hidden
+      const icons = btn.querySelectorAll('svg, span[aria-hidden]');
+      for (const icon of icons) {
+        expect(icon.getAttribute('aria-hidden')).toBe('true');
+      }
+    }
+  });
+
+  it('EntityIcon in DetailPane head carries aria-hidden="true"', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE, detailBody: AGENT_DETAIL_WITH_REFS });
+
+    const { container } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="agent"][data-id="coder"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('button[data-kind="agent"][data-id="coder"]'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('article h2')).toBeTruthy();
+    });
+
+    const titleRow = container.querySelector('article h2').parentElement;
+    const icon = titleRow.querySelector('svg, span[aria-hidden]');
+    expect(icon).toBeTruthy();
+    expect(icon.getAttribute('aria-hidden')).toBe('true');
+  });
+
+  it('all chip EntityIcons carry aria-hidden="true"', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE, detailBody: AGENT_DETAIL_WITH_REFS });
+
+    const { container } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="agent"][data-id="coder"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('button[data-kind="agent"][data-id="coder"]'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('article button[data-kind="skill"]')).toBeTruthy();
+    });
+
+    const chipIcons = container.querySelectorAll('article button[data-kind] svg, article button[data-kind] span[aria-hidden]');
+    expect(chipIcons.length).toBeGreaterThan(0);
+    for (const icon of chipIcons) {
+      expect(icon.getAttribute('aria-hidden')).toBe('true');
+    }
+  });
+
+  it('overview fetch is called exactly once — no extra fetches from icon rendering', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE });
+
+    renderTeam();
+
+    await waitFor(() => {
+      const calls = globalThis.fetch.mock.calls.filter((c) => c[0] === '/api/team');
+      expect(calls).toHaveLength(1);
+    });
+
+    // Total calls: exactly 1 (only the overview, no icon-related calls)
+    expect(globalThis.fetch.mock.calls).toHaveLength(1);
+  });
+
+  it('detail fetch count unchanged after icon addition — icons derive from existing kind/id/group', async () => {
+    globalThis.fetch = makeFetch({ overviewBody: OVERVIEW_RESPONSE, detailBody: AGENT_DETAIL_WITH_REFS });
+
+    const { container } = renderTeam();
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-kind="agent"][data-id="coder"]')).toBeTruthy();
+    });
+
+    const callsBeforeDetail = globalThis.fetch.mock.calls.length;
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('button[data-kind="agent"][data-id="coder"]'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('article')).toBeTruthy();
+    });
+
+    // Only 1 additional call (the detail fetch); icons must not add more
+    const additionalCalls = globalThis.fetch.mock.calls.length - callsBeforeDetail;
+    expect(additionalCalls).toBe(1);
   });
 });
