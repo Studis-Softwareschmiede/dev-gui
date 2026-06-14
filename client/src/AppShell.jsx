@@ -46,6 +46,18 @@
  * AC8 — Keine neuen Secrets, Endpunkte oder Autorisierungslogik; rein präsentationsschicht-interne
  *        Änderung.
  *
+ * parallel-agent-workflow (Hot-Spot-Entkopplung):
+ * AC7 — Views über Manifest/Konventions-Verfahren registriert; AppShell enthält keine
+ *        pro-View {view === 'x' && <XView/>}-Kette und keinen pro-View import.
+ * AC8 — Neue View = nur neue View-Datei + Manifest-Eintrag in viewRegistry.js; keine
+ *        AppShell.jsx-Änderung nötig.
+ * AC9 — Alle bestehenden Routen erhalten.
+ * AC10 — Sechs Kacheln in Reihenfolge (GitHub, VPS, Cloudflare, Fabrik, Team, Deployments);
+ *        Settings/Retro/Retro-Trend keine Kacheln.
+ * AC11 — Terminal-Lifecycle erhalten: FactoryView nur bei aktiver Factory-Route gemountet.
+ *        Datengetriebenes Rendering verwendet conditional mount (nur aktive View).
+ * AC12 — UX-/A11y-neutral: sichtbarer Fokus, aria-current, Touch-Targets ≥ 44 px erhalten.
+ *
  * A11y: WCAG 2.1 AA — sichtbarer Fokus, aria-current auf aktiver Nav-Position,
  *        Touch-Targets ≥ 44 px, Bedeutung nicht allein über Farbe.
  *
@@ -59,57 +71,13 @@
 
 import { useState, useEffect } from 'react';
 import { useHashRouter } from './useHashRouter.js';
-import { FactoryView } from './FactoryView.jsx';
-import { GitHubView } from './GitHubView.jsx';
-import { VpsView } from './VpsView.jsx';
-import { CloudflareView } from './CloudflareView.jsx';
-import { DeploymentsView } from './DeploymentsView.jsx';
-import { SettingsView } from './SettingsView.jsx';
-import { TeamView } from './TeamView.jsx';
-import { RetroView } from './RetroView.jsx';
-import { RetroTrendView } from './RetroTrendView.jsx';
-
-// ── Entry-Panel tile definitions ──────────────────────────────────────────────
-
-/** @type {Array<{ id: string, label: string, description: string }>} */
-const TILES = [
-  {
-    id: 'github',
-    label: 'GitHub',
-    description: 'Repositories, Board-Items und CI-Runs im Blick.',
-  },
-  {
-    id: 'vps',
-    label: 'VPS',
-    description: 'Server-Verwaltung und SSH-Provisionierung.',
-  },
-  {
-    id: 'cloudflare',
-    label: 'Cloudflare',
-    description: 'Tunnel, Access und DNS — Konfiguration auf einen Blick.',
-  },
-  {
-    id: 'factory',
-    label: 'Fabrik (dev-gui)',
-    description: 'Interaktive Claude-Code-Session, Flow-Trigger und Status.',
-  },
-  {
-    id: 'team',
-    label: 'Team',
-    description: 'Agenten, Skills und Knowledge der Fabrik einsehen.',
-  },
-  {
-    id: 'deployments',
-    label: 'Deployments',
-    description: 'Deployments, Container und Cloudflare-Routen im Blick.',
-  },
-];
+import { VIEW_REGISTRY, TILE_VIEWS } from './viewRegistry.js';
 
 // ── NavBar ────────────────────────────────────────────────────────────────────
 
 /**
  * Persistent navigation bar shown on all views including the entry panel.
- * Contains Home link (hidden on panel), per-view links (hidden on panel),
+ * Contains Home link (hidden on panel), per-tile-view links (hidden on panel),
  * and the gear/settings button (always visible — settings-shell AC1).
  *
  * @param {{ currentView: string, onNavigate: (view: string) => void }} props
@@ -136,8 +104,8 @@ function NavBar({ currentView, onNavigate }) {
         </a>
       )}
 
-      {/* Per-view nav links — hidden on panel (all views from TILES) */}
-      {!onPanel && TILES.map(({ id, label }) => (
+      {/* Per-tile-view nav links — hidden on panel (tile views only) */}
+      {!onPanel && TILE_VIEWS.map(({ id, tile }) => (
         <a
           key={id}
           href={`#/${id}`}
@@ -151,7 +119,7 @@ function NavBar({ currentView, onNavigate }) {
             onNavigate(id);
           }}
         >
-          {label}
+          {tile.label}
         </a>
       ))}
 
@@ -179,7 +147,7 @@ function NavBar({ currentView, onNavigate }) {
 
 /**
  * EntryPanel — the landing/home screen with six tiles (AC1).
- * All views including Deployments are shown as equal tiles in the grid.
+ * All tile views (from TILE_VIEWS) are shown as equal tiles in the grid.
  *
  * @param {{ onNavigate: (view: string) => void }} props
  */
@@ -191,12 +159,12 @@ function EntryPanel({ onNavigate }) {
 
       {/* Six tiles (AC1) — grid on desktop, stacked on narrow */}
       <div style={styles.tileGrid} role="list">
-        {TILES.map(({ id, label, description }) => (
+        {TILE_VIEWS.map(({ id, tile }) => (
           <Tile
             key={id}
             id={id}
-            label={label}
-            description={description}
+            label={tile.label}
+            description={tile.description}
             onNavigate={onNavigate}
           />
         ))}
@@ -282,11 +250,21 @@ function VersionBadge() {
  * AppShell — root component. Owns the hash-router and renders:
  *   - NavBar (always — gear visible from every view including entry panel)
  *   - EntryPanel when view === 'panel'
- *   - matching view component otherwise
+ *   - matching view component otherwise (data-driven from VIEW_REGISTRY, AC7)
  *   - VersionBadge (always — fixed footer, every view)
+ *
+ * AC11 (Terminal lifecycle): only the active view is mounted at a time — the
+ *   view switch is conditional, not concurrent. FactoryView (containing the
+ *   Terminal/PTY) is only rendered while view === 'factory'. When the user
+ *   navigates away, FactoryView unmounts and the Terminal's useEffect teardown
+ *   cleans up the PTY session. Re-entering factory starts a fresh session.
  */
 export function AppShell() {
   const { view, navigate } = useHashRouter();
+
+  // Look up the active view entry from the registry (AC7 — data-driven).
+  // Returns undefined for 'panel' (handled separately below).
+  const activeEntry = VIEW_REGISTRY.find((entry) => entry.id === view);
 
   return (
     <div style={styles.shell}>
@@ -298,22 +276,13 @@ export function AppShell() {
         <EntryPanel onNavigate={navigate} />
       )}
 
-      {/* Active view — only rendered while not on panel
-          NOTE (Terminal lifecycle): FactoryView is only rendered while view === 'factory'.
-          When the user navigates away, FactoryView unmounts and the Terminal component
-          (and its underlying node-pty PTY session) is cleaned up via its useEffect
-          teardown. Re-entering the factory view starts a fresh session. */}
-      {view !== 'panel' && (
+      {/* Active view — only rendered while not on panel (AC11: conditional mount, not concurrent).
+          Data-driven from VIEW_REGISTRY (AC7): no per-view switch chain here.
+          FactoryView is only mounted when view === 'factory'; navigating away unmounts it,
+          cleaning up the Terminal/PTY session via its useEffect teardown. */}
+      {view !== 'panel' && activeEntry && (
         <div style={styles.viewPort}>
-          {view === 'factory'     && <FactoryView      onNavigate={navigate} />}
-          {view === 'github'      && <GitHubView      onNavigate={navigate} />}
-          {view === 'vps'         && <VpsView         onNavigate={navigate} />}
-          {view === 'cloudflare'  && <CloudflareView  onNavigate={navigate} />}
-          {view === 'deployments' && <DeploymentsView onNavigate={navigate} />}
-          {view === 'settings'    && <SettingsView    onNavigate={navigate} />}
-          {view === 'team'        && <TeamView        onNavigate={navigate} />}
-          {view === 'retro'       && <RetroView       onNavigate={navigate} />}
-          {view === 'retro-trend' && <RetroTrendView  onNavigate={navigate} />}
+          <activeEntry.Component onNavigate={navigate} />
         </div>
       )}
 

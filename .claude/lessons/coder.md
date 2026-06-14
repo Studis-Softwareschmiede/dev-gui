@@ -1,5 +1,8 @@
 # Coder Lessons — dev-gui (newest first)
 
+## 2026-06-14 — View-Registry / Manifest-Refactor: Covers-Block im Test-Header MUSS die neue Spec (parallel-agent-workflow AC7–AC12) auflisten
+Wenn eine bestehende Testdatei (z.B. AppShell.test.jsx) um neue describe-Blöcke für eine andere Spec (z.B. `view-registry — AC7`, `AC10`, `AC11`) erweitert wird, muss der Datei-Header-Covers-Block einen neuen Eintrag für die neue Spec erhalten — z.B. `Covers (parallel-agent-workflow / view-registry): AC7, AC8, AC9, AC10, AC11, AC12`. Fehlt dieser Eintrag, ist der Datei-Header kein vollständiges Inventar mehr (coder.md Lesson 2026-06-09 gilt analog). Checkliste: nach dem Schreiben neuer describe-Blöcke für eine andere Spec immer den Datei-Header auf Vollständigkeit prüfen. *[seen-in: #208 AppShell.test.jsx — view-registry describe-Blöcke für AC7/AC10/AC11 ohne Covers-Block-Eintrag für parallel-agent-workflow; promoted: 2026-06-14]*
+
 ## 2026-06-14 — Router-Auto-Registry: zwei verwandte Routers in einem Wrapper bündeln nur wenn sie denselben order-Slot verdienen
 Wenn zwei ursprünglich separate `app.use()`-Registrierungen eng zusammengehören (z.B. `deploymentsRouter` + `stacksRouter` unter demselben `/api/deployments`-Namespace), darf ein einzelner Wrapper beide über einen `combined = Router()` zusammenführen. `app.use(router)` ohne Pfad-Präfix lässt absolute Pfade im Sub-Router unverändert durch — kein Path-Stripping. Voraussetzung: der kombinierte Wrapper darf keinen Pfad-Präfix in `app.use('/prefix', combined)` verwenden. Kein Critical/Important, wenn diese Bedingung erfüllt ist. *[seen-in: #207 src/routers/deployments.js kombiniert deploymentsRouter + stacksRouter; promoted: 2026-06-14]*
 
