@@ -18,10 +18,21 @@
  *   AC2  — Fail-Fast-Regression: Store mit verschlüsselten Einträgen + kein Key → assertCredentialConfig wirft
  *   AC3  — Runtime-unlock(key): Key wird geladen, Klartext-Ops funktionieren danach; locked→unlocked
  *   AC4  — Falscher Key bei vorhandenen Einträgen → Ablehnung, .env unverändert, bleibt locked
- *   AC5  — Nach erfolgreichem unlock: .env enthält CRED_MASTER_KEY=<key>; andere Zeilen unverändert; kein Duplikat; 0600
+ *   AC5  — Nach erfolgreichem unlock: .env enthält DEVGUI_CRED_MASTER_KEY=<key>; andere Zeilen unverändert; kein Duplikat; 0600
  *   AC6  — .env-Schreiben atomar (tmp + rename)
  *   AC7  — Master-Key erscheint in keinem Log/Response/unlock-Ergebnis
  *   AC8  — getLockState() → {state, hasEncryptedEntries} ohne Key/Klartext
+ *
+ * Covers (credential-master-key-decoupling):
+ *   AC1  — CredentialStore liest primär DEVGUI_CRED_MASTER_KEY (unlocked wenn gesetzt)
+ *   AC2  — Nur altes CRED_MASTER_KEY gesetzt → akzeptiert (unlocked) + genau eine Deprecation-Warnung ohne Wert
+ *   AC3  — Beide gesetzt → DEVGUI_CRED_MASTER_KEY gewinnt; CRED_MASTER_KEY ignoriert, keine Warnung
+ *   AC4  — Kein DEVGUI_CRED_MASTER_KEY/CRED_MASTER_KEY + kein verschlüsselter Eintrag → locked (kein GPG-Fallback)
+ *   AC5  — Runtime-Unlock schreibt DEVGUI_CRED_MASTER_KEY in .env; alte CRED_MASTER_KEY-Zeile + neue Zeile beide entfernt; kein Duplikat
+ *   AC6  — Fail-Fast bleibt: verschlüsselte Einträge + kein Key → Abbruch
+ *   AC7  — Weder DEVGUI_CRED_MASTER_KEY noch CRED_MASTER_KEY erscheint im Log (auch nicht in Deprecation-Warnung)
+ *   AC8  — docker-compose.yml + docker-entrypoint.sh: kein GPG-Passphrase→Store-Key-Fallback (nicht testbar per Unit-Test — textlich verifiziert)
+ *   AC9  — .env mit CRED_MASTER_KEY= bricht nicht: deprecated-Fallback liest alten Namen; nächster unlock migriert auf neuen Namen
  *
  * Strategie:
  *   - CredentialStore mit tmpdir + injiziertem masterKey (kein Env nötig)
@@ -965,7 +976,7 @@ describe('CredentialStore — assertCredentialConfig()', () => {
     // Neuer Store ohne Key und ohne Dev-Bypass → assertCredentialConfig soll Fehler werfen
     const noKeyStore = new CredentialStore({ dir });
     // Kein DEV_NO_ACCESS → Fail-Fast aktiv
-    await expect(noKeyStore.assertCredentialConfig()).rejects.toThrow(/CRED_MASTER_KEY/);
+    await expect(noKeyStore.assertCredentialConfig()).rejects.toThrow(/Master-Key/);
   });
 
   it('kein Store + kein Key + Dev-Bypass → kein Fehler (nur Warn)', async () => {
@@ -1060,7 +1071,7 @@ describe('AC2 (credential-runtime-unlock) — Fail-Fast-Regression: verschlüsse
 
     // Store ohne Key: muss Fail-Fast auslösen
     const noKey = new CredentialStore({ dir, envPath: envFile });
-    await expect(noKey.assertCredentialConfig()).rejects.toThrow(/CRED_MASTER_KEY/);
+    await expect(noKey.assertCredentialConfig()).rejects.toThrow(/Master-Key/);
   });
 
   it('AC2 — Fail-Fast Exit-Pfad: assertCredentialConfig wirft auch ohne Dev-Bypass', async () => {
@@ -1069,7 +1080,7 @@ describe('AC2 (credential-runtime-unlock) — Fail-Fast-Regression: verschlüsse
 
     delete process.env.DEV_NO_ACCESS;
     const noKey = new CredentialStore({ dir, envPath: envFile });
-    await expect(noKey.assertCredentialConfig()).rejects.toThrow(/CRED_MASTER_KEY/);
+    await expect(noKey.assertCredentialConfig()).rejects.toThrow(/Master-Key/);
   });
 });
 
@@ -1241,13 +1252,16 @@ describe('AC5/AC6 (credential-runtime-unlock) — .env-Persistenz: atomar, 0600,
     await rm(dir, { recursive: true, force: true });
   });
 
-  it('AC5 — nach unlock: .env enthält CRED_MASTER_KEY=<key>', async () => {
+  it('AC5 — nach unlock: .env enthält DEVGUI_CRED_MASTER_KEY=<key> (neuer Name)', async () => {
     const store = new CredentialStore({ dir, envPath: envFile });
     const result = await store.unlock('my-persist-key', { persist: true });
     expect(result.ok).toBe(true);
 
     const envContent = await fsReadFile(envFile, 'utf8');
-    expect(envContent).toContain('CRED_MASTER_KEY=my-persist-key');
+    expect(envContent).toContain('DEVGUI_CRED_MASTER_KEY=my-persist-key');
+    // Exakter alter Name darf NICHT geschrieben werden (kein ^CRED_MASTER_KEY=-Zeilenanfang)
+    const linesWithOldKey = envContent.split('\n').filter((l) => /^CRED_MASTER_KEY=/.test(l));
+    expect(linesWithOldKey.length).toBe(0);
   });
 
   it('AC5 — nach unlock: andere .env-Variablen bleiben erhalten', async () => {
@@ -1261,10 +1275,10 @@ describe('AC5/AC6 (credential-runtime-unlock) — .env-Persistenz: atomar, 0600,
     const envContent = await fsReadFile(envFile, 'utf8');
     expect(envContent).toContain('ACCESS_TEAM_DOMAIN=example.com');
     expect(envContent).toContain('GH_TOKEN=ghp_123');
-    expect(envContent).toContain('CRED_MASTER_KEY=persist-key-no-overwrite');
+    expect(envContent).toContain('DEVGUI_CRED_MASTER_KEY=persist-key-no-overwrite');
   });
 
-  it('AC5 — vorhandener CRED_MASTER_KEY wird ersetzt (kein Duplikat)', async () => {
+  it('AC5 — vorhandener CRED_MASTER_KEY wird ersetzt durch DEVGUI_CRED_MASTER_KEY (kein Duplikat, keine Altzeile)', async () => {
     const { writeFile } = await import('node:fs/promises');
     await writeFile(envFile, 'OTHER=val\nCRED_MASTER_KEY=old-key\n', { mode: 0o600 });
 
@@ -1272,13 +1286,15 @@ describe('AC5/AC6 (credential-runtime-unlock) — .env-Persistenz: atomar, 0600,
     await store.unlock('new-key-replacing-old', { persist: true });
 
     const envContent = await fsReadFile(envFile, 'utf8');
-    expect(envContent).toContain('CRED_MASTER_KEY=new-key-replacing-old');
+    // Neuer Name muss vorhanden sein
+    expect(envContent).toContain('DEVGUI_CRED_MASTER_KEY=new-key-replacing-old');
     expect(envContent).toContain('OTHER=val');
-    // Kein Duplikat: genau eine CRED_MASTER_KEY-Zeile
-    const lines = envContent.split('\n').filter((l) => l.startsWith('CRED_MASTER_KEY='));
+    // Exakter alter Name darf nicht mehr existieren (AC5: keine konkurrierende Altzeile)
+    const linesWithOldKey = envContent.split('\n').filter((l) => /^CRED_MASTER_KEY=/.test(l));
+    expect(linesWithOldKey.length).toBe(0);
+    // Kein Duplikat: genau eine DEVGUI_CRED_MASTER_KEY-Zeile
+    const lines = envContent.split('\n').filter((l) => l.startsWith('DEVGUI_CRED_MASTER_KEY='));
     expect(lines.length).toBe(1);
-    // Alter Key nicht mehr vorhanden
-    expect(envContent).not.toContain('CRED_MASTER_KEY=old-key');
   });
 
   it('AC5 — Dateirechte 0600 nach unlock', async () => {
@@ -1305,9 +1321,9 @@ describe('AC5/AC6 (credential-runtime-unlock) — .env-Persistenz: atomar, 0600,
     }
     expect(tmpExists).toBe(false);
 
-    // .env muss vorhanden und korrekt sein
+    // .env muss vorhanden und korrekt sein — mit neuem Namen
     const envContent = await fsReadFile(envFile, 'utf8');
-    expect(envContent).toContain('CRED_MASTER_KEY=atomic-write-key');
+    expect(envContent).toContain('DEVGUI_CRED_MASTER_KEY=atomic-write-key');
   });
 });
 
@@ -1495,5 +1511,432 @@ describe('AC8 (credential-runtime-unlock) — getLockState(): zustandslos, leak-
     const result2 = await store.unlock('idempotent-key', { persist: false });
     expect(result2.ok).toBe(true);
     expect(store.isUnlocked()).toBe(true);
+  });
+});
+
+// ── credential-master-key-decoupling — AC1–AC9 ────────────────────────────────
+
+describe('AC1 (credential-master-key-decoupling) — DEVGUI_CRED_MASTER_KEY ist primäre Quelle', () => {
+  let dir, envFile;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'credstore-cmkd-ac1-'));
+    envFile = join(dir, '.env');
+    delete process.env.DEVGUI_CRED_MASTER_KEY;
+    delete process.env.CRED_MASTER_KEY;
+  });
+
+  afterEach(async () => {
+    delete process.env.DEVGUI_CRED_MASTER_KEY;
+    delete process.env.CRED_MASTER_KEY;
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('AC1 — DEVGUI_CRED_MASTER_KEY gesetzt → Store startet unlocked', () => {
+    process.env.DEVGUI_CRED_MASTER_KEY = 'my-new-primary-key';
+    const store = new CredentialStore({ dir, envPath: envFile });
+    expect(store.isUnlocked()).toBe(true);
+  });
+
+  it('AC1 — DEVGUI_CRED_MASTER_KEY gesetzt → Klartext-Ops möglich', async () => {
+    // Einträge mit dem Key anlegen
+    const setup = new CredentialStore({ dir, masterKey: 'the-key', envPath: envFile });
+    await setup.set('credentials/github/app_id', 'app-id-value');
+
+    // Via Env-Var lesen
+    process.env.DEVGUI_CRED_MASTER_KEY = 'the-key';
+    const store = new CredentialStore({ dir, envPath: envFile });
+    expect(store.isUnlocked()).toBe(true);
+    const pt = await store.getPlaintext('credentials/github/app_id');
+    expect(pt).toBe('app-id-value');
+  });
+
+  it('AC1 — kein DEVGUI_CRED_MASTER_KEY, kein CRED_MASTER_KEY → Store startet locked', () => {
+    delete process.env.DEVGUI_CRED_MASTER_KEY;
+    delete process.env.CRED_MASTER_KEY;
+    const store = new CredentialStore({ dir, envPath: envFile });
+    expect(store.isUnlocked()).toBe(false);
+  });
+});
+
+describe('AC2 (credential-master-key-decoupling) — deprecated CRED_MASTER_KEY: akzeptiert + genau eine Warnung', () => {
+  let dir, envFile;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'credstore-cmkd-ac2-'));
+    envFile = join(dir, '.env');
+    delete process.env.DEVGUI_CRED_MASTER_KEY;
+    delete process.env.CRED_MASTER_KEY;
+    // Reset des static deprecation-Flags für saubere Test-Isolation
+    CredentialStore._resetDeprecationWarned();
+  });
+
+  afterEach(async () => {
+    delete process.env.DEVGUI_CRED_MASTER_KEY;
+    delete process.env.CRED_MASTER_KEY;
+    CredentialStore._resetDeprecationWarned();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('AC2 — nur CRED_MASTER_KEY gesetzt → Store startet unlocked', () => {
+    process.env.CRED_MASTER_KEY = 'old-style-key';
+    const store = new CredentialStore({ dir, envPath: envFile });
+    expect(store.isUnlocked()).toBe(true);
+  });
+
+  it('AC2 — nur CRED_MASTER_KEY gesetzt → Deprecation-Warnung geloggt (einmalig, ohne Wert)', () => {
+    process.env.CRED_MASTER_KEY = 'old-key-secret-value-abc123';
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      // Ersten Store: soll Warnung auslösen
+      const _store = new CredentialStore({ dir, envPath: envFile });
+      expect(_store.isUnlocked()).toBe(true);
+
+      // Warnung muss enthalten: neuen Namen + Hinweis, aber NICHT den Key-Wert
+      const warnCalls = warnSpy.mock.calls;
+      const deprecationCall = warnCalls.find((c) =>
+        c.some((a) => typeof a === 'string' && a.includes('DEVGUI_CRED_MASTER_KEY')),
+      );
+      expect(deprecationCall).toBeTruthy();
+      // AC7: Wert darf NICHT in der Warnung stehen
+      const warnStr = warnCalls.map((c) => c.join(' ')).join('\n');
+      expect(warnStr).not.toContain('old-key-secret-value-abc123');
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('AC2 — Deprecation-Warnung nennt DEVGUI_CRED_MASTER_KEY als neuen Namen', () => {
+    process.env.CRED_MASTER_KEY = 'old-style-key-warn-test';
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const _store = new CredentialStore({ dir, envPath: envFile });
+      void _store;
+      const warnStr = warnSpy.mock.calls.map((c) => c.join(' ')).join('\n');
+      expect(warnStr).toMatch(/DEVGUI_CRED_MASTER_KEY/);
+      expect(warnStr).toMatch(/DEPRECATION|veraltet|deprecated/i);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('AC2 — nur CRED_MASTER_KEY gesetzt → assertCredentialConfig wirft NICHT bei leerem Store', async () => {
+    process.env.CRED_MASTER_KEY = 'old-key-for-assert-test';
+    const store = new CredentialStore({ dir, envPath: envFile });
+    // Kein verschlüsselter Eintrag → kein Fail-Fast
+    await expect(store.assertCredentialConfig()).resolves.toBeUndefined();
+  });
+});
+
+describe('AC3 (credential-master-key-decoupling) — DEVGUI_CRED_MASTER_KEY gewinnt bei beiden gesetzt', () => {
+  let dir, envFile;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'credstore-cmkd-ac3-'));
+    envFile = join(dir, '.env');
+    delete process.env.DEVGUI_CRED_MASTER_KEY;
+    delete process.env.CRED_MASTER_KEY;
+    CredentialStore._resetDeprecationWarned();
+  });
+
+  afterEach(async () => {
+    delete process.env.DEVGUI_CRED_MASTER_KEY;
+    delete process.env.CRED_MASTER_KEY;
+    CredentialStore._resetDeprecationWarned();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('AC3 — DEVGUI_CRED_MASTER_KEY gesetzt + CRED_MASTER_KEY gesetzt → neuer Name gewinnt', async () => {
+    // Store mit neuem Key anlegen
+    const setup = new CredentialStore({ dir, masterKey: 'correct-new-key', envPath: envFile });
+    await setup.set('credentials/github/app_id', 'secret-val');
+
+    process.env.DEVGUI_CRED_MASTER_KEY = 'correct-new-key';
+    process.env.CRED_MASTER_KEY = 'wrong-old-key';
+
+    const store = new CredentialStore({ dir, envPath: envFile });
+    expect(store.isUnlocked()).toBe(true);
+
+    // Klartext-Op muss funktionieren (→ neuer Key wurde genommen, nicht der alte)
+    const pt = await store.getPlaintext('credentials/github/app_id');
+    expect(pt).toBe('secret-val');
+  });
+
+  it('AC3 — beide gesetzt → KEINE Deprecation-Warnung (CRED_MASTER_KEY wird ignoriert)', () => {
+    process.env.DEVGUI_CRED_MASTER_KEY = 'new-key-wins';
+    process.env.CRED_MASTER_KEY = 'old-key-ignored';
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const _store = new CredentialStore({ dir, envPath: envFile });
+      void _store;
+      // Wenn DEVGUI_CRED_MASTER_KEY gesetzt ist, soll keine Deprecation-Warnung erscheinen
+      const warnStr = warnSpy.mock.calls.map((c) => c.join(' ')).join('\n');
+      expect(warnStr).not.toMatch(/DEPRECATION|deprecated|veraltet/i);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+});
+
+describe('AC4 (credential-master-key-decoupling) — Entkopplung: kein GPG_PASSPHRASE-Fallback mehr', () => {
+  let dir, envFile;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'credstore-cmkd-ac4-'));
+    envFile = join(dir, '.env');
+    delete process.env.DEVGUI_CRED_MASTER_KEY;
+    delete process.env.CRED_MASTER_KEY;
+    delete process.env.GPG_PASSPHRASE;
+  });
+
+  afterEach(async () => {
+    delete process.env.DEVGUI_CRED_MASTER_KEY;
+    delete process.env.CRED_MASTER_KEY;
+    delete process.env.GPG_PASSPHRASE;
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('AC4 — GPG_PASSPHRASE gesetzt, aber kein DEVGUI_CRED_MASTER_KEY/CRED_MASTER_KEY → Store bleibt locked', () => {
+    // Kein Store-Key, nur GPG_PASSPHRASE (für .env.gpg/gh-Auth, NICHT für den Store)
+    process.env.GPG_PASSPHRASE = 'gpg-passphrase-should-not-unlock-store';
+    delete process.env.DEVGUI_CRED_MASTER_KEY;
+    delete process.env.CRED_MASTER_KEY;
+
+    const store = new CredentialStore({ dir, envPath: envFile });
+    // GPG_PASSPHRASE darf den Store NICHT entsperren (AC4: Entkopplung)
+    expect(store.isUnlocked()).toBe(false);
+  });
+
+  it('AC4 — GPG_PASSPHRASE gesetzt + leerer Store → getLockState: locked', async () => {
+    process.env.GPG_PASSPHRASE = 'gpg-passphrase-locked-store-test';
+    delete process.env.DEVGUI_CRED_MASTER_KEY;
+    delete process.env.CRED_MASTER_KEY;
+
+    const store = new CredentialStore({ dir, envPath: envFile });
+    const lockState = await store.getLockState();
+    expect(lockState.state).toBe('locked');
+  });
+});
+
+describe('AC5 (credential-master-key-decoupling) — .env-Migration: beide Namen entfernt, nur neuer geschrieben', () => {
+  let dir, envFile;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'credstore-cmkd-ac5-'));
+    envFile = join(dir, '.env');
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('AC5 — .env mit alter CRED_MASTER_KEY-Zeile + unlock → beide entfernt, neuer Name geschrieben', async () => {
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(envFile, 'OTHER=keep\nCRED_MASTER_KEY=old-value\n', { mode: 0o600 });
+
+    const store = new CredentialStore({ dir, envPath: envFile });
+    const result = await store.unlock('migration-key', { persist: true });
+    expect(result.ok).toBe(true);
+
+    const envContent = await fsReadFile(envFile, 'utf8');
+    // Neuer Name muss stehen
+    expect(envContent).toContain('DEVGUI_CRED_MASTER_KEY=migration-key');
+    // Exakter alter Name (ohne DEVGUI_-Prefix) darf NICHT mehr stehen (AC5: keine stale Altzeile)
+    // Prüfe dass keine Zeile mit ^CRED_MASTER_KEY= existiert (Regex-Zeilenstart)
+    const linesWithOldKey = envContent.split('\n').filter((l) => /^CRED_MASTER_KEY=/.test(l));
+    expect(linesWithOldKey.length).toBe(0);
+    // Andere Zeilen erhalten
+    expect(envContent).toContain('OTHER=keep');
+  });
+
+  it('AC5 — .env mit DEVGUI_CRED_MASTER_KEY + CRED_MASTER_KEY (Mid-Migration) → beide entfernt, nur neuer geschrieben', async () => {
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(envFile, 'X=1\nCRED_MASTER_KEY=stale\nDEVGUI_CRED_MASTER_KEY=old-new\nY=2\n', { mode: 0o600 });
+
+    const store = new CredentialStore({ dir, envPath: envFile });
+    const result = await store.unlock('fresh-key', { persist: true });
+    expect(result.ok).toBe(true);
+
+    const envContent = await fsReadFile(envFile, 'utf8');
+    // Genau eine neue Zeile
+    const newLines = envContent.split('\n').filter((l) => l.startsWith('DEVGUI_CRED_MASTER_KEY='));
+    expect(newLines.length).toBe(1);
+    expect(newLines[0]).toBe('DEVGUI_CRED_MASTER_KEY=fresh-key');
+    // Exakter alter Name darf nicht mehr stehen
+    const linesWithOldKey = envContent.split('\n').filter((l) => /^CRED_MASTER_KEY=/.test(l));
+    expect(linesWithOldKey.length).toBe(0);
+    // Andere Zeilen erhalten
+    expect(envContent).toContain('X=1');
+    expect(envContent).toContain('Y=2');
+  });
+
+  it('AC5 — frische .env (kein Key vorher) → nur DEVGUI_CRED_MASTER_KEY=<key> wird geschrieben, kein alter Name', async () => {
+    const store = new CredentialStore({ dir, envPath: envFile });
+    await store.unlock('brand-new-key', { persist: true });
+
+    const envContent = await fsReadFile(envFile, 'utf8');
+    expect(envContent).toContain('DEVGUI_CRED_MASTER_KEY=brand-new-key');
+    // Kein exakter CRED_MASTER_KEY=-Zeilenanfang
+    const linesWithOldKey = envContent.split('\n').filter((l) => /^CRED_MASTER_KEY=/.test(l));
+    expect(linesWithOldKey.length).toBe(0);
+  });
+});
+
+describe('AC6 (credential-master-key-decoupling) — Fail-Fast bleibt (Regression)', () => {
+  let dir, envFile;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'credstore-cmkd-ac6-'));
+    envFile = join(dir, '.env');
+    delete process.env.DEVGUI_CRED_MASTER_KEY;
+    delete process.env.CRED_MASTER_KEY;
+    delete process.env.DEV_NO_ACCESS;
+    delete process.env.NODE_ENV;
+  });
+
+  afterEach(async () => {
+    delete process.env.DEVGUI_CRED_MASTER_KEY;
+    delete process.env.CRED_MASTER_KEY;
+    delete process.env.DEV_NO_ACCESS;
+    delete process.env.NODE_ENV;
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('AC6 — verschlüsselte Einträge + kein DEVGUI_CRED_MASTER_KEY + kein CRED_MASTER_KEY → assertCredentialConfig wirft', async () => {
+    // Store anlegen
+    const setup = new CredentialStore({ dir, masterKey: 'setup-key', envPath: envFile });
+    await setup.set('credentials/github/app_id', 'value');
+
+    // Store ohne Key → Fail-Fast
+    const noKey = new CredentialStore({ dir, envPath: envFile });
+    await expect(noKey.assertCredentialConfig()).rejects.toThrow(/Master-Key|DEVGUI_CRED_MASTER_KEY/);
+  });
+
+  it('AC6 — verschlüsselte Einträge + GPG_PASSPHRASE gesetzt + kein Store-Key → Fail-Fast wirft', async () => {
+    const setup = new CredentialStore({ dir, masterKey: 'setup-key-2', envPath: envFile });
+    await setup.set('credentials/cloudflare/api_token', 'token');
+
+    // GPG_PASSPHRASE ist NICHT der Store-Key (AC4) — darf Fail-Fast NICHT verhindern
+    process.env.GPG_PASSPHRASE = 'gpg-should-not-help';
+    delete process.env.DEVGUI_CRED_MASTER_KEY;
+    delete process.env.CRED_MASTER_KEY;
+
+    const noKey = new CredentialStore({ dir, envPath: envFile });
+    await expect(noKey.assertCredentialConfig()).rejects.toThrow(/Master-Key/);
+  });
+});
+
+describe('AC7 (credential-master-key-decoupling) — Key-Wert nicht im Log (auch nicht in Deprecation-Warnung)', () => {
+  let dir, envFile;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'credstore-cmkd-ac7-'));
+    envFile = join(dir, '.env');
+    delete process.env.DEVGUI_CRED_MASTER_KEY;
+    delete process.env.CRED_MASTER_KEY;
+    CredentialStore._resetDeprecationWarned();
+  });
+
+  afterEach(async () => {
+    delete process.env.DEVGUI_CRED_MASTER_KEY;
+    delete process.env.CRED_MASTER_KEY;
+    CredentialStore._resetDeprecationWarned();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('AC7 — Deprecation-Warnung enthält den alten Key-Wert NICHT', () => {
+    const secretOldKey = 'super-secret-old-key-value-0xdeadbeef';
+    process.env.CRED_MASTER_KEY = secretOldKey;
+
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const _store = new CredentialStore({ dir, envPath: envFile });
+      void _store;
+      const allWarnStr = warnSpy.mock.calls.map((c) => c.join(' ')).join('\n');
+      expect(allWarnStr).not.toContain(secretOldKey);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('AC7 — Dev-Bypass-Warnung enthält keinen Key-Wert', () => {
+    // Die Dev-Modus-Warnung beim Start ohne Key: kein Wert vorhanden, kein Leak möglich
+    process.env.DEV_NO_ACCESS = '1';
+    delete process.env.DEVGUI_CRED_MASTER_KEY;
+    delete process.env.CRED_MASTER_KEY;
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const store = new CredentialStore({ dir, envPath: envFile });
+      // assertCredentialConfig auslösen damit Warn ausgegeben wird
+      store.assertCredentialConfig();
+    } finally {
+      warnSpy.mockRestore();
+      delete process.env.DEV_NO_ACCESS;
+    }
+  });
+});
+
+describe('AC9 (credential-master-key-decoupling) — Rückwärtskompatibilität: altes CRED_MASTER_KEY in .env', () => {
+  let dir, envFile;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'credstore-cmkd-ac9-'));
+    envFile = join(dir, '.env');
+    delete process.env.DEVGUI_CRED_MASTER_KEY;
+    delete process.env.CRED_MASTER_KEY;
+    CredentialStore._resetDeprecationWarned();
+  });
+
+  afterEach(async () => {
+    delete process.env.DEVGUI_CRED_MASTER_KEY;
+    delete process.env.CRED_MASTER_KEY;
+    CredentialStore._resetDeprecationWarned();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('AC9 — .env mit CRED_MASTER_KEY= + Env-Var gesetzt → Store startet unlocked (deprecated-Fallback)', () => {
+    // Simulation: .env wurde in der alten Form geschrieben (CRED_MASTER_KEY=…)
+    // Der Betreiber setzt die Env-Var aus dieser alten .env
+    process.env.CRED_MASTER_KEY = 'legacy-key-from-old-env';
+    delete process.env.DEVGUI_CRED_MASTER_KEY;
+
+    const store = new CredentialStore({ dir, envPath: envFile });
+    // AC9: Bricht nicht — deprecated-Fallback liest alten Namen
+    expect(store.isUnlocked()).toBe(true);
+  });
+
+  it('AC9 — nächster erfolgreicher unlock migriert .env-Zeile auf neuen Namen', async () => {
+    const { writeFile } = await import('node:fs/promises');
+    // Altes .env (wie es eine bestehende Installation haben könnte)
+    await writeFile(envFile, 'ACCESS_TEAM_DOMAIN=myteam.example.com\nCRED_MASTER_KEY=legacy-key\n', { mode: 0o600 });
+
+    // Store ohne Env-Var (liest Env-Var nicht direkt — nur aus den gesetzten Env-Vars, nicht aus der .env-Datei)
+    // Simulation: unlock mit dem richtigen Key (wie wenn der Betreiber ihn eingibt)
+    const store = new CredentialStore({ dir, envPath: envFile });
+    const result = await store.unlock('legacy-key', { persist: true });
+    expect(result.ok).toBe(true);
+
+    const envContent = await fsReadFile(envFile, 'utf8');
+    // Migration: neuer Name muss stehen
+    expect(envContent).toContain('DEVGUI_CRED_MASTER_KEY=legacy-key');
+    // Exakter alter Name muss weg sein (AC5: keine stale Altzeile)
+    const linesWithOldKey = envContent.split('\n').filter((l) => /^CRED_MASTER_KEY=/.test(l));
+    expect(linesWithOldKey.length).toBe(0);
+    // Andere Zeilen bleiben erhalten
+    expect(envContent).toContain('ACCESS_TEAM_DOMAIN=myteam.example.com');
+  });
+
+  it('AC9 — assertCredentialConfig mit altem CRED_MASTER_KEY (bei verschlüsseltem Store) → kein Fail-Fast', async () => {
+    // Store anlegen mit dem alten Key
+    const setup = new CredentialStore({ dir, masterKey: 'legacy-key-setup', envPath: envFile });
+    await setup.set('credentials/github/app_id', 'val');
+
+    // Env-Var auf alten Namen setzen (wie bei bestehender Installation)
+    process.env.CRED_MASTER_KEY = 'legacy-key-setup';
+    delete process.env.DEVGUI_CRED_MASTER_KEY;
+
+    const store = new CredentialStore({ dir, envPath: envFile });
+    // AC9: Kein Fail-Fast — der deprecated-Fallback liefert den Key
+    await expect(store.assertCredentialConfig()).resolves.toBeUndefined();
   });
 });

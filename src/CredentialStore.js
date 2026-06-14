@@ -2,8 +2,9 @@
  * CredentialStore — einziger Lese-/Schreibpfad zu `secrets.enc.json`.
  *
  * Persistiert Credentials at rest via AES-256-GCM (Node `crypto`).
- * Master-Key aus Env `CRED_MASTER_KEY` (optional `CRED_MASTER_KEY_FILE`),
+ * Master-Key aus Env `DEVGUI_CRED_MASTER_KEY` (bzw. `DEVGUI_CRED_MASTER_KEY_FILE`),
  * per scrypt zu 32-Byte-AES-Schlüssel abgeleitet.
+ * Deprecated-Fallback: `CRED_MASTER_KEY` / `CRED_MASTER_KEY_FILE` (Warn-Log, kein Wert).
  *
  * Boundary-Vertrag (write-only nach außen):
  *   - `list()` / `getMeta(key)` liefern nur Metadaten (status, masked, updatedAt).
@@ -134,12 +135,27 @@ export class CredentialStore {
   #writeLock = null;
 
   /**
-   * Pfad zur .env-Datei für CRED_MASTER_KEY-Persistenz (AC5/AC6).
+   * Pfad zur .env-Datei für DEVGUI_CRED_MASTER_KEY-Persistenz (AC5/AC6).
    * Default: Projekt-Root/.env (Verzeichnis neben server.js).
    * Überschreibbar via opts.envPath (für Tests) oder CRED_ENV_PATH (Env).
    * @type {string}
    */
   #envPath;
+
+  /**
+   * Flag: Deprecation-Warnung für alten Key-Namen wurde bereits geloggt (einmalig pro Prozessstart).
+   * @type {boolean}
+   */
+  static #deprecationWarned = false;
+
+  /**
+   * Setzt das Deprecation-Warn-Flag zurück.
+   * ONLY FOR TESTING — erlaubt saubere Test-Isolation.
+   * @internal
+   */
+  static _resetDeprecationWarned() {
+    CredentialStore.#deprecationWarned = false;
+  }
 
   /**
    * @param {object} [opts]
@@ -182,7 +198,7 @@ export class CredentialStore {
 
     if (devBypass && !this.#masterKeyRaw) {
       // Dev-Fallback: kein Key gesetzt, kein Store erwartet — OK, warn
-      console.warn('[CredentialStore] Kein CRED_MASTER_KEY gesetzt (Dev-Modus) — Credential-Store inaktiv');
+      console.warn('[CredentialStore] Kein DEVGUI_CRED_MASTER_KEY gesetzt (Dev-Modus) — Credential-Store inaktiv');
       return;
     }
 
@@ -205,50 +221,116 @@ export class CredentialStore {
 
     if (hasEncryptedEntries && !this.#masterKeyRaw) {
       throw new Error(
-        '[CredentialStore] secrets.enc.json enthält verschlüsselte Einträge, aber CRED_MASTER_KEY fehlt. ' +
-        'Prozess wird abgebrochen (Fail-Fast). Env-Var CRED_MASTER_KEY setzen.',
+        '[CredentialStore] secrets.enc.json enthält verschlüsselte Einträge, aber kein Master-Key gefunden. ' +
+        'Prozess wird abgebrochen (Fail-Fast). Env-Var DEVGUI_CRED_MASTER_KEY setzen.',
       );
     }
   }
 
   /**
-   * Liest den Master-Key aus Env-Vars.
-   * Vorrang: CRED_MASTER_KEY > CRED_MASTER_KEY_FILE
+   * Liest den Master-Key synchron aus Env-Vars (nur direkter Wert, nicht FILE).
+   *
+   * Prioritätskette (AC1–AC3):
+   *   1. DEVGUI_CRED_MASTER_KEY  (neuer Name, höchste Priorität)
+   *   2. [DEVGUI_CRED_MASTER_KEY_FILE — lazy in #ensureKey()]
+   *   3. CRED_MASTER_KEY          (deprecated, Warn-Log ohne Wert)
+   *   4. [CRED_MASTER_KEY_FILE    — lazy in #ensureKey()]
+   *
+   * AC7: Der Key-Wert erscheint NICHT im Log — nur der Env-Var-Name.
+   * AC3: Ist DEVGUI_CRED_MASTER_KEY gesetzt, wird das alte CRED_MASTER_KEY ignoriert.
+   *
    * @returns {string|null}
    */
   #loadMasterKeyFromEnv() {
-    const direct = process.env.CRED_MASTER_KEY;
-    if (direct && direct.trim()) {
-      return direct.trim();
+    // AC1: Neuer primärer Name
+    const newDirect = process.env.DEVGUI_CRED_MASTER_KEY;
+    if (newDirect && newDirect.trim()) {
+      return newDirect.trim();
     }
-    // CRED_MASTER_KEY_FILE: Datei-Inhalt wird lazy gelesen (synchron im Konstruktor nicht möglich)
-    // — wird in #ensureKey() nachgeladen
+
+    // DEVGUI_CRED_MASTER_KEY_FILE — lazy in #ensureKey()
+
+    // AC2/AC3: Deprecated Fallback — nur wenn KEIN neuer Key gesetzt ist
+    const oldDirect = process.env.CRED_MASTER_KEY;
+    if (oldDirect && oldDirect.trim()) {
+      // AC2: Genau eine Warnung pro Prozessstart (kein Log-Spam pro Request)
+      if (!CredentialStore.#deprecationWarned) {
+        CredentialStore.#deprecationWarned = true;
+        // AC7: Wert wird NICHT geloggt — nur der Name der veralteten Variable
+        console.warn(
+          '[CredentialStore] DEPRECATION: CRED_MASTER_KEY ist veraltet. ' +
+          'Bitte auf DEVGUI_CRED_MASTER_KEY umstellen. ' +
+          'Der Store-Key wird übergangsweise akzeptiert.',
+        );
+      }
+      return oldDirect.trim();
+    }
+
+    // CRED_MASTER_KEY_FILE — lazy in #ensureKey()
     return null;
   }
 
   /**
-   * Liefert den Master-Key-Rohwert (lädt CRED_MASTER_KEY_FILE falls nötig).
+   * Liefert den Master-Key-Rohwert (lädt *_FILE-Varianten falls nötig).
+   *
+   * Prioritätskette (lazy Teil — nach #loadMasterKeyFromEnv):
+   *   2. DEVGUI_CRED_MASTER_KEY_FILE
+   *   4. CRED_MASTER_KEY_FILE (deprecated, Warn-Log ohne Wert)
+   *
+   * AC7: Key-Wert erscheint NICHT im Fehlertext.
+   * AC4 (Spec): DEVGUI_CRED_MASTER_KEY_FILE-Fehler → harter Fehler, kein stilles Fallback auf alten Namen.
+   *
    * @returns {Promise<string>}
    */
   async #ensureKey() {
     if (this.#masterKeyRaw) return this.#masterKeyRaw;
 
-    // Versuche CRED_MASTER_KEY_FILE
-    const keyFile = process.env.CRED_MASTER_KEY_FILE;
-    if (keyFile && keyFile.trim()) {
+    // AC1: DEVGUI_CRED_MASTER_KEY_FILE (zweite Priorität nach dem direkten Wert)
+    const newKeyFile = process.env.DEVGUI_CRED_MASTER_KEY_FILE;
+    if (newKeyFile && newKeyFile.trim()) {
       try {
-        const content = await readFile(keyFile.trim(), 'utf8');
+        const content = await readFile(newKeyFile.trim(), 'utf8');
         const key = content.trim();
         if (key) {
           this.#masterKeyRaw = key;
           return key;
         }
       } catch (err) {
-        throw new Error(`[CredentialStore] CRED_MASTER_KEY_FILE konnte nicht gelesen werden: ${err.message}`, { cause: err });
+        // AC4 (Spec): Datei gesetzt aber nicht lesbar → harter Fehler, kein Fallback auf alten Namen
+        // AC7: Datei-Inhalt / Key-Wert erscheint NICHT im Fehlertext
+        throw new Error(`[CredentialStore] DEVGUI_CRED_MASTER_KEY_FILE konnte nicht gelesen werden: ${err.message}`, { cause: err });
       }
     }
 
-    throw new Error('[CredentialStore] Kein Master-Key konfiguriert (CRED_MASTER_KEY / CRED_MASTER_KEY_FILE)');
+    // AC2: Deprecated CRED_MASTER_KEY_FILE — nur wenn kein neuer FILE-Key gesetzt
+    if (!newKeyFile || !newKeyFile.trim()) {
+      const oldKeyFile = process.env.CRED_MASTER_KEY_FILE;
+      if (oldKeyFile && oldKeyFile.trim()) {
+        // AC2: Einmalige Deprecation-Warnung (kein Log-Spam)
+        if (!CredentialStore.#deprecationWarned) {
+          CredentialStore.#deprecationWarned = true;
+          // AC7: Wert wird NICHT geloggt — nur der Name der veralteten Variable
+          console.warn(
+            '[CredentialStore] DEPRECATION: CRED_MASTER_KEY_FILE ist veraltet. ' +
+            'Bitte auf DEVGUI_CRED_MASTER_KEY_FILE umstellen. ' +
+            'Der Store-Key wird übergangsweise akzeptiert.',
+          );
+        }
+        try {
+          const content = await readFile(oldKeyFile.trim(), 'utf8');
+          const key = content.trim();
+          if (key) {
+            this.#masterKeyRaw = key;
+            return key;
+          }
+        } catch (err) {
+          // AC7: Key-Wert erscheint NICHT im Fehlertext
+          throw new Error(`[CredentialStore] CRED_MASTER_KEY_FILE konnte nicht gelesen werden: ${err.message}`, { cause: err });
+        }
+      }
+    }
+
+    throw new Error('[CredentialStore] Kein Master-Key konfiguriert (DEVGUI_CRED_MASTER_KEY / DEVGUI_CRED_MASTER_KEY_FILE)');
   }
 
   /**
@@ -371,9 +453,10 @@ export class CredentialStore {
   // ── .env-Persistenz (AC5/AC6) ───────────────────────────────────────────────
 
   /**
-   * Schreibt `CRED_MASTER_KEY=<value>` atomar in die .env-Datei (AC5/AC6).
+   * Schreibt `DEVGUI_CRED_MASTER_KEY=<value>` atomar in die .env-Datei (AC5/AC6).
    * - Bestehende Zeilen bleiben erhalten.
-   * - Ein vorhandener CRED_MASTER_KEY-Eintrag wird ersetzt (kein Duplikat).
+   * - Vorhandene `CRED_MASTER_KEY=`-Zeilen (alt) UND `DEVGUI_CRED_MASTER_KEY=`-Zeilen (neu)
+   *   werden BEIDE entfernt, dann nur der neue Name geschrieben (AC5: kein Duplikat, keine stale Altzeile).
    * - Schreibt in tmp-Datei + rename (atomar, AC6).
    * - Setzt Dateirechte 0600 (AC5).
    * - Der Key-Wert wird NICHT geloggt (AC7).
@@ -396,17 +479,20 @@ export class CredentialStore {
       // ENOENT → leerer Inhalt, wird neu angelegt
     }
 
-    // Zeilen filtern: bestehende CRED_MASTER_KEY-Zeilen entfernen.
+    // AC5: Zeilen filtern — BEIDE Schlüsselnamen (alt + neu) entfernen, damit kein Duplikat
+    // und keine konkurrierende Altzeile beim nächsten Boot entsteht.
     // split('\n') auf 'a\nb\n' ergibt ['a','b',''] — das trailing '' nicht mitnehmen.
-    const lines = existing.split('\n').filter((line) => !line.startsWith('CRED_MASTER_KEY='));
+    const lines = existing.split('\n').filter(
+      (line) => !line.startsWith('CRED_MASTER_KEY=') && !line.startsWith('DEVGUI_CRED_MASTER_KEY='),
+    );
 
     // Trailing-Leerzeile (von split auf trailing-newline) entfernen, damit kein Doppel-Newline entsteht
     if (lines.length > 0 && lines[lines.length - 1] === '') {
       lines.pop();
     }
 
-    // Neue Zeile hinzufügen (Key-Wert nicht geloggt — AC7)
-    lines.push(`CRED_MASTER_KEY=${key}`);
+    // AC5: Neue Zeile mit neuem Namen hinzufügen (Key-Wert nicht geloggt — AC7)
+    lines.push(`DEVGUI_CRED_MASTER_KEY=${key}`);
 
     // Datei endet mit \n (Unix-Konvention)
     const newContent = lines.join('\n') + '\n';
