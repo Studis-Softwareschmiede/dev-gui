@@ -11,6 +11,7 @@
  *   POST /api/command/cancel                      → send Ctrl-C, cancel running command
  *   GET/PUT/DELETE /api/settings/credentials*     → Credential-Verwaltung (settings-credentials)
  *   GET  /api/settings/credential-status          → { state, hasEncryptedEntries } (credential-bootstrap-status #184)
+ *   POST /api/settings/credential-unlock          → { ok, state? } (credential-unlock-dialog #185)
  *   GET/PUT/DELETE /api/settings/ssh-keys*             → SSH-Key-Verwaltung (settings-ssh-keys Stufe A)
  *   POST /api/settings/ssh-keys/:user/provision        → VPS-Provisionierung (settings-ssh-keys Stufe B, #47)
  *   POST /api/settings/ssh-keys/:user/generate         → ed25519-Keypair erzeugen (ssh-key-generation AC1–AC7, #115)
@@ -100,6 +101,8 @@ import { StackRegistry } from './src/StackRegistry.js';
 import { stacksRouter } from './src/stacksRouter.js';
 import { VpsComposeControl } from './src/deploy/VpsComposeControl.js';
 import { StackDeployOrchestrator } from './src/deploy/StackDeployOrchestrator.js';
+import { BitwardenMasterKeyService } from './src/BitwardenMasterKeyService.js';
+import { credentialUnlockRouter } from './src/credentialUnlockRouter.js';
 
 const PORT = Number(process.env.PORT ?? 8080);
 
@@ -158,6 +161,15 @@ app.use(credentialsRouter(credentialStore, auditStore));
 // Lesender Endpunkt; kein Audit nötig (kein Mutations-/Geheimnis-Pfad).
 // Im gesperrten Zustand erreichbar — KEIN Master-Key-Voraussetzungs-Gate (AC6).
 app.use(credentialStatusRouter(credentialStore));
+
+// ── Bitwarden-Unlock-Endpunkt (credential-unlock-dialog #185) ─────────────────
+// Hoch-privilegiert: Access-Mauer (server.js) + CRED_ADMIN_EMAILS-Rollencheck + Audit-First.
+// Im gesperrten Zustand erreichbar — löst den Bootstrap aus.
+const bitwardenMasterKeyService = new BitwardenMasterKeyService({
+  credentialStore,
+  auditStore,
+});
+app.use(credentialUnlockRouter(credentialStore, auditStore, bitwardenMasterKeyService));
 
 // ── SSH-Keys route (settings-ssh-keys Stufe A) ────────────────────────────────
 app.use(sshKeysRouter(credentialStore, auditStore));
