@@ -148,6 +148,22 @@ export function TeamView({ onNavigate }) {
         >
           Retro
         </button>
+        {/* Retro-Trend-Link im Kopfbereich — retro-trend-frontend AC1 */}
+        <button
+          type="button"
+          style={styles.retroLink}
+          onClick={() => onNavigate('retro-trend')}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              onNavigate('retro-trend');
+            }
+          }}
+          aria-label="Retro-Trend — Momentum-Board"
+          data-nav="retro-trend"
+        >
+          Retro-Trend
+        </button>
       </div>
 
       {/* Loading state — accessible (AC3, AC8) */}

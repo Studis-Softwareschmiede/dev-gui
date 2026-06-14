@@ -17,6 +17,10 @@
  * AC2 — Route #/retro öffnet RetroView; App-Shell rendert <RetroView /> bei view === 'retro'.
  *        RetroView ist KEIN TILES-Eintrag (sechs Kacheln bleiben unverändert).
  *
+ * retro-trend-frontend:
+ * AC2 — Route #/retro-trend öffnet RetroTrendView; App-Shell rendert <RetroTrendView /> bei view === 'retro-trend'.
+ *        RetroTrendView ist KEIN TILES-Eintrag (sechs Kacheln bleiben unverändert).
+ *
  * settings-shell:
  * AC1 — Zahnrad-Bedienelement (Settings) in der NavBar aus jeder Ansicht und vom
  *        Einstiegs-Panel aus sichtbar und per Maus und Tastatur aktivierbar.
@@ -63,6 +67,7 @@ import { DeploymentsView } from './DeploymentsView.jsx';
 import { SettingsView } from './SettingsView.jsx';
 import { TeamView } from './TeamView.jsx';
 import { RetroView } from './RetroView.jsx';
+import { RetroTrendView } from './RetroTrendView.jsx';
 
 // ── Entry-Panel tile definitions ──────────────────────────────────────────────
 
@@ -308,6 +313,7 @@ export function AppShell() {
           {view === 'settings'    && <SettingsView    onNavigate={navigate} />}
           {view === 'team'        && <TeamView        onNavigate={navigate} />}
           {view === 'retro'       && <RetroView       onNavigate={navigate} />}
+          {view === 'retro-trend' && <RetroTrendView  onNavigate={navigate} />}
         </div>
       )}
 
