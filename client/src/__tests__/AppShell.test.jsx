@@ -35,7 +35,15 @@
  *
  * Covers (team-view-frontend):
  *   - AC1: Team tile present in entry panel; activatable via mouse and keyboard.
- *   - AC2: Route #/team opens TeamView; AppShell renders <TeamView> when view === 'team'.
+ *   - AC2: Route #/team opens TeamView; AppShell renders TeamView via viewRegistry.
+ *
+ * Covers (parallel-agent-workflow — view-registry):
+ *   - AC7: AppShell ohne pro-View switch-Kette/import; datengetrieben via VIEW_REGISTRY.
+ *   - AC8: implizit — neue View nur via viewRegistry.js-Eintrag, kein AppShell-Edit.
+ *   - AC9: alle Routen via Registry (github/vps/cloudflare/deployments/settings; retro + retro-trend in RetroView.test.jsx/RetroTrendView.test.jsx abgedeckt).
+ *   - AC10: 6 Kacheln Reihenfolge github→vps→cloudflare→factory→team→deployments; Settings/Retro/Retro-Trend keine Kacheln.
+ *   - AC11: FactoryView (Terminal) nur bei #/factory gemountet; Unmount bei Navigation weg.
+ *   - AC12: A11y-neutral (aria-current/Fokus/Touch≥44px); keine neuen Secrets/Endpunkte.
  *
  * Terminal, TriggerPanel and Dashboard are mocked to avoid WS/DOM complexity.
  *
@@ -1087,5 +1095,155 @@ describe('team-view-frontend — AC2: Route #/team opens TeamView', () => {
 
   it('VIEWS array includes "team"', () => {
     expect(VIEWS).toContain('team');
+  });
+});
+
+// ── view-registry (AC7–AC12) — View-Registry / Manifest ──────────────────────
+
+describe('view-registry — AC7: AppShell uses manifest (no per-view switch)', () => {
+  it('AppShell renders github view from registry on #/github', async () => {
+    window.location.hash = '#/github';
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+    const { getByRole } = render(React.createElement(AppShell));
+    await waitFor(() => {
+      expect(getByRole('main', { name: /github-ansicht/i })).toBeTruthy();
+    });
+  });
+
+  it('AppShell renders vps view from registry on #/vps', async () => {
+    window.location.hash = '#/vps';
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+    const { getByRole } = render(React.createElement(AppShell));
+    await waitFor(() => {
+      expect(getByRole('main', { name: /vps-ansicht/i })).toBeTruthy();
+    });
+  });
+
+  it('AppShell renders cloudflare view from registry on #/cloudflare', async () => {
+    window.location.hash = '#/cloudflare';
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+    const { getByRole } = render(React.createElement(AppShell));
+    await waitFor(() => {
+      expect(getByRole('main', { name: /cloudflare-ansicht/i })).toBeTruthy();
+    });
+  });
+
+  it('AppShell renders deployments view from registry on #/deployments', async () => {
+    window.location.hash = '#/deployments';
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+    const { queryByRole } = render(React.createElement(AppShell));
+    await waitFor(() => {
+      // DeploymentsView is rendered (entry panel is gone)
+      expect(queryByRole('main', { name: /einstiegs-panel/i })).toBeNull();
+    });
+    expect(window.location.hash).toBe('#/deployments');
+  });
+
+  it('AppShell renders settings view from registry on #/settings', async () => {
+    window.location.hash = '#/settings';
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+    const { getByRole } = render(React.createElement(AppShell));
+    await waitFor(() => {
+      expect(getByRole('main', { name: /einstellungen-ansicht/i })).toBeTruthy();
+    });
+  });
+});
+
+// ── view-registry (AC10) — Settings/Retro/Retro-Trend sind keine Kacheln ─────
+
+describe('view-registry — AC10: non-tile views absent from panel', () => {
+  it('Settings is NOT a panel tile (data-view)', () => {
+    window.location.hash = '';
+    const { getByRole } = render(React.createElement(AppShell));
+    const panel = getByRole('main', { name: /einstiegs-panel/i });
+    expect(panel.querySelector('button[data-view="settings"]')).toBeNull();
+  });
+
+  it('Retro is NOT a panel tile (data-view)', () => {
+    window.location.hash = '';
+    const { getByRole } = render(React.createElement(AppShell));
+    const panel = getByRole('main', { name: /einstiegs-panel/i });
+    expect(panel.querySelector('button[data-view="retro"]')).toBeNull();
+  });
+
+  it('Retro-Trend is NOT a panel tile (data-view)', () => {
+    window.location.hash = '';
+    const { getByRole } = render(React.createElement(AppShell));
+    const panel = getByRole('main', { name: /einstiegs-panel/i });
+    expect(panel.querySelector('button[data-view="retro-trend"]')).toBeNull();
+  });
+
+  it('tile order is github→vps→cloudflare→factory→team→deployments (AC10)', () => {
+    window.location.hash = '';
+    const { getByRole } = render(React.createElement(AppShell));
+    const panel = getByRole('main', { name: /einstiegs-panel/i });
+    const ids = Array.from(panel.querySelectorAll('button[data-view]')).map(
+      (b) => b.getAttribute('data-view')
+    );
+    expect(ids).toEqual(['github', 'vps', 'cloudflare', 'factory', 'team', 'deployments']);
+  });
+});
+
+// ── view-registry (AC11) — FactoryView conditional mount (Terminal lifecycle) ─
+
+describe('view-registry — AC11: FactoryView only mounted on factory route', () => {
+  it('FactoryView (Terminal main) NOT present on panel route', () => {
+    window.location.hash = '';
+    const { queryByRole } = render(React.createElement(AppShell));
+    // FactoryView renders <main aria-label="Terminal">
+    expect(queryByRole('main', { name: /^terminal$/i })).toBeNull();
+  });
+
+  it('FactoryView (Terminal main) NOT present on github route', async () => {
+    window.location.hash = '#/github';
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+    const { queryByRole } = render(React.createElement(AppShell));
+    await waitFor(() => {
+      expect(queryByRole('main', { name: /github-ansicht/i })).toBeTruthy();
+    });
+    expect(queryByRole('main', { name: /^terminal$/i })).toBeNull();
+  });
+
+  it('FactoryView (Terminal main) IS present on factory route', async () => {
+    window.location.hash = '#/factory';
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+    const { queryByRole } = render(React.createElement(AppShell));
+    await waitFor(() => {
+      // FactoryView mounts its main[aria-label="Terminal"] landmark
+      expect(queryByRole('main', { name: /^terminal$/i })).toBeTruthy();
+    });
+  });
+
+  it('FactoryView unmounts when navigating away from factory route', async () => {
+    window.location.hash = '#/factory';
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+    const { queryByRole } = render(React.createElement(AppShell));
+
+    await waitFor(() => {
+      expect(queryByRole('main', { name: /^terminal$/i })).toBeTruthy();
+    });
+
+    // Navigate away (simulate browser hash change to github)
+    await act(async () => {
+      window.location.hash = '#/github';
+      window.dispatchEvent(new HashChangeEvent('hashchange'));
+    });
+
+    await waitFor(() => {
+      // FactoryView must be gone (unmounted)
+      expect(queryByRole('main', { name: /^terminal$/i })).toBeNull();
+      // GitHub view is now shown
+      expect(queryByRole('main', { name: /github-ansicht/i })).toBeTruthy();
+    });
+  });
+
+  it('FactoryView NOT present on settings route (AC11 — non-tile route)', async () => {
+    window.location.hash = '#/settings';
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+    const { queryByRole } = render(React.createElement(AppShell));
+    await waitFor(() => {
+      expect(queryByRole('main', { name: /einstellungen-ansicht/i })).toBeTruthy();
+    });
+    expect(queryByRole('main', { name: /^terminal$/i })).toBeNull();
   });
 });
