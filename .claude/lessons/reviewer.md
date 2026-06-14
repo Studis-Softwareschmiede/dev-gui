@@ -1,5 +1,8 @@
 # Reviewer Lessons — dev-gui (newest first)
 
+## 2026-06-14 — GitHub Actions Check-Namen in Branch-Protection: "<workflow> / <job>" — Verbatim-Pflicht wegen reviewer/R01
+Wenn ein Diff einen `gh api`-Branch-Protection-Befehl mit `contexts`-Array enthält, muss der Reviewer prüfen ob die Check-Namen das korrekte Format `"<workflow-name> / <job-id>"` verwenden. Bare job-Namen ohne Workflow-Präfix erzeugen nie matchende required-checks. Da diese Taxonomie-Behauptung über GitHub's internes Verhalten fällt (reviewer/R01), muss ein Important-Befund (nicht Critical) mit "bitte verifizieren"-Wording gesetzt werden, wenn kein Verbatim-Zitat der GitHub-Docs mit Anchor-Link beschaffbar ist. Prüfschema: (1) workflow `name:` lesen, (2) job-ids lesen, (3) contexts-Strings im `gh api`-Befehl gegen `"<workflow> / <job>"` vergleichen. *[seen-in: #210 docs/ci-branch-protection.md; promoted: 2026-06-14]*
+
 ## 2026-06-14 — Verhaltens-neutrales Refactor mit Inline-Handler-Migration: session-Endpunkt-Extraktion als Prüfmuster
 Bei einem Router-Auto-Registry-Refactor muss der Reviewer nicht nur die per `app.use()` montierten Router-Wrappers zählen, sondern auch nach INLINE-Handlern in server.js suchen (`app.get`, `app.post` direkt). Im Diff `git show main:server.js | grep "app.get\|app.post"` zeigt alle direkten Handler — jeder davon ohne entsprechenden Wrapper-File wäre ein entfallener Endpunkt (AC4 Critical). Im #207-Fall war `GET /api/session` ein Inline-Handler auf main; er wurde korrekt nach `src/routers/session.js` migriert. Prüfmuster: `app.use`-Zählung (alt) + Inline-Handler-Zählung (alt) = Wrapper-File-Zählung (neu) + kombinierte-Wrapper (adjusted). *[seen-in: #207 — session Inline-Handler korrekt migriert; promoted: 2026-06-14]*
 
