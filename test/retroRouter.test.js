@@ -1,5 +1,6 @@
 /**
- * retroRouter.test.js — HTTP-level tests for GET /api/retro/runs and GET /api/retro/runs/:slug
+ * retroRouter.test.js — HTTP-level tests for GET /api/retro/runs, GET /api/retro/runs/:slug,
+ *                       GET /api/retro/trend
  *
  * Covers (retro-view-backend):
  *   AC1 — GET /api/retro/runs → 200, { runs: [...] }, no detail fields in overview.
@@ -10,6 +11,19 @@
  *   AC8 — Slug traversal → 404; backslash → 404; null byte → 404; valid unknown slug → 404.
  *   AC9 — Degradation: runs endpoint returns empty list; report → 404.
  *   AC10 — Router is read-only; routes behind existing AccessGuard (documented, not re-tested here).
+ *
+ * Covers (retro-trend-backend):
+ *   AC1  — GET /api/retro/trend → 200 (default knowledge); ?category=agents → 200; ?category=skills → 200.
+ *   AC2  — Response shape: { category, lanes:[…], runs:[…] }.
+ *   AC3  — Prefix grouping / agent-allowlist filtering (not tested at HTTP level → unit-tested in retroReader.test.js).
+ *   AC4  — Momentum formula Σ (baseline_rate − measured_rate) × n_items / 100 (not tested at HTTP level → unit-tested in retroReader.test.js).
+ *   AC5  — First point momentum=0; single-step lane has one zero-point (not tested at HTTP level → unit-tested in retroReader.test.js).
+ *   AC6  — Reverted/rising rate → negative momentum (not tested at HTTP level → unit-tested in retroReader.test.js).
+ *   AC7  — ?category=skills → 200 with placeholder, lanes:[].
+ *   AC8  — Phase 0: getTrend returns { empty:true, lanes:[], runs:[] } → 200.
+ *   AC9  — Invalid category → 400 { error: "invalid category" }; getTrend NOT called.
+ *   AC10 — Determinism: stable lane/point/contributingRules sort (not tested at HTTP level → unit-tested in retroReader.test.js).
+ *   AC11 — Router is read-only; no new secrets/auth; validated before access.
  *
  * Pattern: express + node:http createServer on port 0 (127.0.0.1), no supertest.
  * Stub RetroReader injected via retroRouter({ retroReader }) — no real filesystem.
@@ -57,7 +71,7 @@ function startServer(app) {
 
 // ── Stub builder ──────────────────────────────────────────────────────────────
 
-function makeStubRetroReader({ runs = [], reports = {} } = {}) {
+function makeStubRetroReader({ runs = [], reports = {}, trendResult = null } = {}) {
   return {
     async getRuns() {
       return { runs };
@@ -65,6 +79,14 @@ function makeStubRetroReader({ runs = [], reports = {} } = {}) {
     async getRunReport(slug) {
       if (slug in reports) return reports[slug];
       return null;
+    },
+    async getTrend(category) {
+      if (trendResult !== null) return trendResult;
+      // default stub: return minimal valid result per category
+      if (category === 'skills') {
+        return { category: 'skills', lanes: [], runs: [], placeholder: '— stub placeholder' };
+      }
+      return { category, lanes: [], runs: [] };
     },
   };
 }
@@ -369,6 +391,279 @@ describe('AC9 — Degradation: no LEARNINGS data', () => {
     try {
       const res = await httpGet(server, '/api/retro/runs');
       expect(res.status).toBe(200);
+    } finally {
+      await close();
+    }
+  });
+});
+
+// ── retro-trend-backend HTTP tests (AC1, AC2, AC7, AC8, AC9, AC11; AC3/AC4/AC5/AC6/AC10 → retroReader.test.js) ──
+
+// Fixture trend response for knowledge category
+const FIXTURE_TREND_KNOWLEDGE = {
+  category: 'knowledge',
+  lanes: [
+    {
+      id: 'maven',
+      label: 'maven',
+      points: [
+        { run: 'item-100', date: '2025-01-10', momentum: 0, contributingRules: [] },
+      ],
+    },
+    {
+      id: 'spring-boot-3',
+      label: 'spring-boot-3',
+      points: [
+        { run: 'item-100', date: '2025-01-10', momentum: 0, contributingRules: [] },
+        { run: 'item-200', date: '2025-02-15', momentum: 3.0, contributingRules: ['spring-boot-3/B02'] },
+      ],
+    },
+  ],
+  runs: [
+    { run: 'item-100', date: '2025-01-10' },
+    { run: 'item-200', date: '2025-02-15' },
+  ],
+};
+
+const FIXTURE_TREND_SKILLS = {
+  category: 'skills',
+  lanes: [],
+  runs: [],
+  placeholder: '— noch keine Messmethode für Skill-Güte',
+};
+
+const FIXTURE_TREND_EMPTY = {
+  category: 'knowledge',
+  lanes: [],
+  runs: [],
+  empty: true,
+};
+
+describe('retro-trend AC1 — GET /api/retro/trend → 200 for all valid categories', () => {
+  it('no category param → 200 (treated as knowledge)', async () => {
+    const app = makeRetroApp(makeStubRetroReader({ trendResult: FIXTURE_TREND_KNOWLEDGE }));
+    const { server, close } = await startServer(app);
+    try {
+      const res = await httpGet(server, '/api/retro/trend');
+      expect(res.status).toBe(200);
+    } finally {
+      await close();
+    }
+  });
+
+  it('?category=knowledge → 200', async () => {
+    const app = makeRetroApp(makeStubRetroReader({ trendResult: FIXTURE_TREND_KNOWLEDGE }));
+    const { server, close } = await startServer(app);
+    try {
+      const res = await httpGet(server, '/api/retro/trend?category=knowledge');
+      expect(res.status).toBe(200);
+      expect(res.data.category).toBe('knowledge');
+    } finally {
+      await close();
+    }
+  });
+
+  it('?category=agents → 200', async () => {
+    const agentsTrend = { category: 'agents', lanes: [], runs: [] };
+    const app = makeRetroApp(makeStubRetroReader({ trendResult: agentsTrend }));
+    const { server, close } = await startServer(app);
+    try {
+      const res = await httpGet(server, '/api/retro/trend?category=agents');
+      expect(res.status).toBe(200);
+    } finally {
+      await close();
+    }
+  });
+
+  it('?category=skills → 200', async () => {
+    const app = makeRetroApp(makeStubRetroReader({ trendResult: FIXTURE_TREND_SKILLS }));
+    const { server, close } = await startServer(app);
+    try {
+      const res = await httpGet(server, '/api/retro/trend?category=skills');
+      expect(res.status).toBe(200);
+    } finally {
+      await close();
+    }
+  });
+});
+
+describe('retro-trend AC2 — response shape', () => {
+  it('has category, lanes (array), runs (array)', async () => {
+    const app = makeRetroApp(makeStubRetroReader({ trendResult: FIXTURE_TREND_KNOWLEDGE }));
+    const { server, close } = await startServer(app);
+    try {
+      const res = await httpGet(server, '/api/retro/trend?category=knowledge');
+      expect(res.data).toHaveProperty('category', 'knowledge');
+      expect(Array.isArray(res.data.lanes)).toBe(true);
+      expect(Array.isArray(res.data.runs)).toBe(true);
+    } finally {
+      await close();
+    }
+  });
+
+  it('lane has id, label, points array', async () => {
+    const app = makeRetroApp(makeStubRetroReader({ trendResult: FIXTURE_TREND_KNOWLEDGE }));
+    const { server, close } = await startServer(app);
+    try {
+      const res = await httpGet(server, '/api/retro/trend?category=knowledge');
+      const lane = res.data.lanes[0];
+      expect(lane).toHaveProperty('id');
+      expect(lane).toHaveProperty('label');
+      expect(Array.isArray(lane.points)).toBe(true);
+    } finally {
+      await close();
+    }
+  });
+
+  it('point has run, date, momentum (number), contributingRules (array)', async () => {
+    const app = makeRetroApp(makeStubRetroReader({ trendResult: FIXTURE_TREND_KNOWLEDGE }));
+    const { server, close } = await startServer(app);
+    try {
+      const res = await httpGet(server, '/api/retro/trend?category=knowledge');
+      const pt = res.data.lanes[0].points[0];
+      expect(pt).toHaveProperty('run');
+      expect(pt).toHaveProperty('date');
+      expect(typeof pt.momentum).toBe('number');
+      expect(Array.isArray(pt.contributingRules)).toBe(true);
+    } finally {
+      await close();
+    }
+  });
+
+  it('runs entry has run and date fields', async () => {
+    const app = makeRetroApp(makeStubRetroReader({ trendResult: FIXTURE_TREND_KNOWLEDGE }));
+    const { server, close } = await startServer(app);
+    try {
+      const res = await httpGet(server, '/api/retro/trend?category=knowledge');
+      const run = res.data.runs[0];
+      expect(run).toHaveProperty('run');
+      expect(run).toHaveProperty('date');
+    } finally {
+      await close();
+    }
+  });
+});
+
+describe('retro-trend AC7 — ?category=skills → 200 with placeholder, no 500', () => {
+  it('responds 200 with lanes:[] and placeholder string', async () => {
+    const app = makeRetroApp(makeStubRetroReader({ trendResult: FIXTURE_TREND_SKILLS }));
+    const { server, close } = await startServer(app);
+    try {
+      const res = await httpGet(server, '/api/retro/trend?category=skills');
+      expect(res.status).toBe(200);
+      expect(res.data.lanes).toEqual([]);
+      expect(typeof res.data.placeholder).toBe('string');
+      expect(res.data.placeholder.length).toBeGreaterThan(0);
+    } finally {
+      await close();
+    }
+  });
+
+  it('does not return 500 for skills', async () => {
+    const app = makeRetroApp(makeStubRetroReader({ trendResult: FIXTURE_TREND_SKILLS }));
+    const { server, close } = await startServer(app);
+    try {
+      const res = await httpGet(server, '/api/retro/trend?category=skills');
+      expect(res.status).not.toBe(500);
+    } finally {
+      await close();
+    }
+  });
+});
+
+describe('retro-trend AC8 — Phase 0 / empty source → 200 with empty:true', () => {
+  it('responds 200 with empty:true, lanes:[], runs:[]', async () => {
+    const app = makeRetroApp(makeStubRetroReader({ trendResult: FIXTURE_TREND_EMPTY }));
+    const { server, close } = await startServer(app);
+    try {
+      const res = await httpGet(server, '/api/retro/trend?category=knowledge');
+      expect(res.status).toBe(200);
+      expect(res.data.empty).toBe(true);
+      expect(res.data.lanes).toEqual([]);
+      expect(res.data.runs).toEqual([]);
+    } finally {
+      await close();
+    }
+  });
+
+  it('does not return 500 for Phase 0', async () => {
+    const app = makeRetroApp(makeStubRetroReader({ trendResult: FIXTURE_TREND_EMPTY }));
+    const { server, close } = await startServer(app);
+    try {
+      const res = await httpGet(server, '/api/retro/trend');
+      expect(res.status).not.toBe(500);
+    } finally {
+      await close();
+    }
+  });
+});
+
+describe('retro-trend AC9 — invalid category → 400, getTrend NOT called', () => {
+  let getTrendCalled = false;
+  const spyReader = {
+    async getRuns() { return { runs: [] }; },
+    async getRunReport() { return null; },
+    async getTrend() {
+      getTrendCalled = true;
+      return { category: 'knowledge', lanes: [], runs: [] };
+    },
+  };
+
+  it('unknown category "foo" → 400', async () => {
+    getTrendCalled = false;
+    const app = makeRetroApp(spyReader);
+    const { server, close } = await startServer(app);
+    try {
+      const res = await httpGet(server, '/api/retro/trend?category=foo');
+      expect(res.status).toBe(400);
+    } finally {
+      await close();
+    }
+  });
+
+  it('unknown category → getTrend NOT called (validated before access)', async () => {
+    getTrendCalled = false;
+    const app = makeRetroApp(spyReader);
+    const { server, close } = await startServer(app);
+    try {
+      await httpGet(server, '/api/retro/trend?category=foo');
+      expect(getTrendCalled).toBe(false);
+    } finally {
+      await close();
+    }
+  });
+
+  it('path-traversal-like category "../../etc/passwd" → 400', async () => {
+    getTrendCalled = false;
+    const app = makeRetroApp(spyReader);
+    const { server, close } = await startServer(app);
+    try {
+      const res = await httpGet(server, '/api/retro/trend?category=..%2F..%2Fetc%2Fpasswd');
+      expect(res.status).toBe(400);
+      expect(getTrendCalled).toBe(false);
+    } finally {
+      await close();
+    }
+  });
+
+  it('invalid category → response body has error field', async () => {
+    const app = makeRetroApp(spyReader);
+    const { server, close } = await startServer(app);
+    try {
+      const res = await httpGet(server, '/api/retro/trend?category=invalid');
+      expect(res.status).toBe(400);
+      expect(res.data).toHaveProperty('error');
+    } finally {
+      await close();
+    }
+  });
+
+  it('does not return 500 for invalid category', async () => {
+    const app = makeRetroApp(spyReader);
+    const { server, close } = await startServer(app);
+    try {
+      const res = await httpGet(server, '/api/retro/trend?category=bad');
+      expect(res.status).not.toBe(500);
     } finally {
       await close();
     }

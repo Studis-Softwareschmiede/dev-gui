@@ -1,15 +1,18 @@
 /**
- * retroRouter — GET /api/retro/runs, GET /api/retro/runs/:slug
+ * retroRouter — GET /api/retro/runs, GET /api/retro/runs/:slug, GET /api/retro/trend
  *
- * Exposes the retro/train/teamLeader run history as read-only JSON endpoints.
- * Both routes are behind the existing /api AccessGuard (AC10).
+ * Exposes the retro/train/teamLeader run history and momentum trend view as read-only JSON endpoints.
+ * All routes are behind the existing /api AccessGuard.
  *
  * Routes:
  *   GET /api/retro/runs               → { runs: [{ slug, date, source, counts, statusMix }] }
  *   GET /api/retro/runs/:slug         → { slug, date, source, statusMix, agents:[…], skills:[…], knowledge:[…] }
+ *   GET /api/retro/trend?category=<knowledge|agents|skills>
+ *                                     → { category, lanes:[…], runs:[…], empty?, placeholder? }
  *
  * Security:
- *   - :slug validated against strict whitelist regex BEFORE any file/reader access (AC8).
+ *   - :slug validated against strict whitelist regex BEFORE any file/reader access (retro-view AC8).
+ *   - category validated against explicit whitelist BEFORE any data access (retro-trend AC9).
  *   - No traversal: kein '..', kein '\', kein Null-Byte.
  *   - Read-only; no new secrets; no new authorization.
  *   - Behind existing /api AccessGuard via server.js registration.
@@ -18,6 +21,12 @@
  */
 
 import { Router } from 'express';
+
+/**
+ * Valid category values for GET /api/retro/trend (AC9 retro-trend-backend).
+ * Validated BEFORE any data/file access.
+ */
+const VALID_TREND_CATEGORIES = new Set(['knowledge', 'agents', 'skills']);
 
 /**
  * Whitelist for :slug in /api/retro/runs/:slug.
@@ -64,6 +73,33 @@ export function retroRouter({ retroReader }) {
   router.get('/api/retro/runs', async (_req, res) => {
     const result = await retroReader.getRuns();
     res.json(result);
+  });
+
+  /**
+   * GET /api/retro/trend
+   *
+   * Returns the momentum-aggregated trend view for the requested category.
+   *
+   * Query param: category=knowledge|agents|skills (default: knowledge — AC1).
+   * category is validated against VALID_TREND_CATEGORIES BEFORE any data access (AC9).
+   *
+   * Responds 400 for unknown category values (no 500, no guessing).
+   * Responds 200 for valid category (including skills placeholder and Phase-0 empty — AC7/AC8).
+   */
+  router.get('/api/retro/trend', async (req, res) => {
+    // AC1: default to 'knowledge' when category is absent
+    const rawCategory = req.query.category;
+    const category = (rawCategory === undefined || rawCategory === '')
+      ? 'knowledge'
+      : rawCategory;
+
+    // AC9: validate category BEFORE any data/file access
+    if (!VALID_TREND_CATEGORIES.has(category)) {
+      return res.status(400).json({ error: 'invalid category' });
+    }
+
+    const result = await retroReader.getTrend(category);
+    return res.json(result);
   });
 
   /**
