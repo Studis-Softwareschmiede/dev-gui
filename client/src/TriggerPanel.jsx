@@ -177,11 +177,15 @@ function composeCommand(cmd, subCmd, repoArg, freeArg, costMode) {
  * @param {{
  *   pollInterval?: number,
  *   fetchFn?: Function,
+ *   projectPath?: string,
  * }} props
  *   pollInterval — override for tests (default: SESSION_POLL_MS)
  *   fetchFn      — override for tests (default: global fetch)
+ *   projectPath  — when set (from Cockpit activeRepo), sent as projectPath in POST /api/command
+ *                  so the command runs in the correct project session (AC5/S-111).
+ *                  When absent or empty, the global session is used (backward compat).
  */
-export function TriggerPanel({ pollInterval = SESSION_POLL_MS, fetchFn }) {
+export function TriggerPanel({ pollInterval = SESSION_POLL_MS, fetchFn, projectPath }) {
   /** 'idle' | 'running' */
   const [runState, setRunState]     = useState('idle');
   /** Currently selected command */
@@ -275,12 +279,19 @@ export function TriggerPanel({ pollInterval = SESSION_POLL_MS, fetchFn }) {
     setMessage(null);
     setMsgType(null);
 
+    // Build request body: include projectPath when set (AC5/S-111 multi-session routing).
+    // Backward compat: omit projectPath when absent/empty → global session.
+    const body = { command };
+    if (projectPath && typeof projectPath === 'string' && projectPath.trim()) {
+      body.projectPath = projectPath.trim();
+    }
+
     let res;
     try {
       res = await fetchWithTimeout(fetchFnRef.current, '/api/command', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command }),
+        body: JSON.stringify(body),
       });
     } catch {
       setMessage('Netzwerkfehler beim Senden des Befehls.');
@@ -317,7 +328,7 @@ export function TriggerPanel({ pollInterval = SESSION_POLL_MS, fetchFn }) {
     // 500 or unexpected
     setMessage('Serverfehler. Bitte erneut versuchen.');
     setMsgType('error');
-  }, [cmd, previewSub, repoArg, freeArg, costMode]);
+  }, [cmd, previewSub, repoArg, freeArg, costMode, projectPath]);
 
   // ── Kill ─────────────────────────────────────────────────────────────────
   const handleKill = useCallback(async () => {

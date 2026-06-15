@@ -31,6 +31,7 @@ import { useState } from 'react';
 import { Terminal } from './Terminal.jsx';
 import { Dashboard } from './Dashboard.jsx';
 import { TriggerPanel } from './TriggerPanel.jsx';
+import { BoardView } from './BoardView.jsx';
 
 /** @type {Array<{ id: string, label: string }>} */
 const TABS = [
@@ -46,7 +47,7 @@ const TABS = [
  *   onNavigate: (view: string) => void,
  * }} props
  */
-export function CockpitView({ activeRepo, navigateFactory, onNavigate }) {
+export function CockpitView({ activeRepo, navigateFactory, onNavigate: _onNavigate }) {
   const [activeTab, setActiveTab] = useState('arbeiten');
 
   return (
@@ -101,23 +102,23 @@ export function CockpitView({ activeRepo, navigateFactory, onNavigate }) {
           aria-labelledby="cockpit-tab-arbeiten"
           style={styles.tabPanel}
         >
-          <FactoryWorkspace onNavigate={onNavigate} />
+          <FactoryWorkspace activeRepo={activeRepo} />
         </div>
       )}
 
-      {/* Board: Platzhalter (Folge-Story) */}
+      {/* Board: BoardView gefiltert auf das aktive Projekt (AC6 / S-113) */}
       {activeTab === 'board' && (
         <div
           role="tabpanel"
           id="cockpit-panel-board"
           aria-labelledby="cockpit-tab-board"
-          style={styles.placeholderPanel}
+          style={styles.tabPanel}
         >
-          <p style={styles.placeholderText}>Board — folgt</p>
+          <BoardView lockedProject={activeRepo} />
         </div>
       )}
 
-      {/* Spezifikation: Platzhalter (Folge-Story) */}
+      {/* Spezifikation: Platzhalter — folgt mit F-004 (DocsReader nicht vorhanden) */}
       {activeTab === 'spec' && (
         <div
           role="tabpanel"
@@ -125,7 +126,7 @@ export function CockpitView({ activeRepo, navigateFactory, onNavigate }) {
           aria-labelledby="cockpit-tab-spec"
           style={styles.placeholderPanel}
         >
-          <p style={styles.placeholderText}>Spezifikation — folgt</p>
+          <p style={styles.placeholderText}>Spezifikation — folgt mit F-004</p>
         </div>
       )}
     </div>
@@ -136,43 +137,56 @@ export function CockpitView({ activeRepo, navigateFactory, onNavigate }) {
 
 /**
  * FactoryWorkspace — the original FactoryView inner content:
- * Terminal + TriggerPanel + Dashboard, unchanged (AC3).
+ * Terminal + TriggerPanel + Dashboard.
  *
- * This is the same layout as the former FactoryView component body,
- * now embedded in the "Arbeiten" tab of CockpitView.
+ * Extended for AC4/S-111: passes project-scoped wsUrl to Terminal and
+ * projectPath to TriggerPanel so commands run in the active project session.
  *
- * @param {{ onNavigate: (view: string) => void }} props
+ * @param {{ activeRepo: string }} props
  */
-function FactoryWorkspace({ onNavigate }) {
+function FactoryWorkspace({ activeRepo }) {
+  // Build project-scoped WS URL: /ws/terminal?project=<encoded-path>
+  // Terminal already resolves the protocol (ws/wss) from window.location —
+  // we pass a full URL here so it is testable without DOM.
+  const wsUrl = buildTerminalWsUrl(activeRepo);
+
   return (
     <div style={styles.factory}>
       {/* Terminal pane — dominant, scrollable xterm.js */}
       <main style={styles.terminalPane} aria-label="Terminal">
-        <Terminal />
+        <Terminal wsUrl={wsUrl} />
       </main>
 
       {/* Right sidebar — TriggerPanel + Dashboard stacked */}
       <div style={styles.sidebar}>
-        {/* Board navigation link */}
-        <div style={styles.boardLinkBar}>
-          <button
-            type="button"
-            style={styles.boardLinkBtn}
-            onClick={() => onNavigate('board')}
-            aria-label="Zum Aufgaben-Board navigieren"
-          >
-            → Aufgaben-Board
-          </button>
-        </div>
-
-        {/* Flow-Trigger-Panel — fire slash-commands */}
-        <TriggerPanel />
+        {/* Flow-Trigger-Panel — fire slash-commands in the active project session */}
+        <TriggerPanel projectPath={activeRepo} />
 
         {/* Dashboard — project status cards */}
         <Dashboard />
       </div>
     </div>
   );
+}
+
+/**
+ * Build a project-scoped WS URL for the terminal.
+ * When activeRepo is provided, appends ?project=<encoded-path>.
+ * Falls back to undefined (Terminal uses its default global session) when no
+ * project is active or when running outside a browser context.
+ *
+ * Returns a full absolute WS URL:
+ *   ws://host/ws/terminal?project=<encoded>   (http origin)
+ *   wss://host/ws/terminal?project=<encoded>  (https origin)
+ *
+ * @param {string|null|undefined} activeRepo  Absolute project path or name
+ * @returns {string|undefined}  Full absolute WS URL, or undefined (Terminal uses its default)
+ */
+function buildTerminalWsUrl(activeRepo) {
+  if (!activeRepo || typeof window === 'undefined') return undefined; // SSR-safe no-op
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const base = `${proto}//${window.location.host}/ws/terminal`;
+  return `${base}?project=${encodeURIComponent(activeRepo)}`;
 }
 
 // ── Styles ────────────────────────────────────────────────────────────────────
@@ -303,20 +317,4 @@ const styles = {
     order: 2,
   },
 
-  boardLinkBar: {
-    padding: '10px 12px 6px',
-    borderBottom: '1px solid #2a2a2a',
-  },
-
-  boardLinkBtn: {
-    background: 'transparent',
-    border: '1px solid #334155',
-    color: '#93c5fd',
-    borderRadius: 4,
-    padding: '6px 12px',
-    fontSize: 13,
-    cursor: 'pointer',
-    minHeight: 36,
-    // Focus ring preserved (no outline:none)
-  },
 };

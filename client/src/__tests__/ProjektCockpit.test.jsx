@@ -12,6 +12,11 @@
  *          „Arbeiten" zeigt Terminal (FactoryWorkspace);
  *          „Board" und „Spezifikation" sind Platzhalter mit „folgt";
  *          Reiter-Umschaltung wechselt Panel.
+ *   AC4 — Terminal-WS-URL enthält ?project=<encoded-activeRepo> (S-111);
+ *          buildTerminalWsUrl gibt absolute WS-URL zurück.
+ *   AC5 — TriggerPanel erhält projectPath=activeRepo via FactoryWorkspace-Prop.
+ *   AC6 — Board-Reiter bettet BoardView mit lockedProject=activeRepo ein;
+ *          kein eigener Projekt-Selektor im Cockpit (S-113).
  *
  * Terminal, Dashboard, TriggerPanel gemockt (WS/DOM-Komplexität vermeiden).
  *
@@ -23,8 +28,13 @@ import { act, fireEvent, waitFor } from '@testing-library/react';
 
 // ── Mock heavy sub-components ─────────────────────────────────────────────────
 
+// Terminal mock records the wsUrl prop so WS-URL tests can inspect it.
+let _terminalLastWsUrl = null;
 jest.unstable_mockModule('../Terminal.jsx', () => ({
-  Terminal: () => null,
+  Terminal: ({ wsUrl }) => {
+    _terminalLastWsUrl = wsUrl ?? null;
+    return null;
+  },
 }));
 jest.unstable_mockModule('../Dashboard.jsx', () => ({
   Dashboard: () => null,
@@ -32,6 +42,21 @@ jest.unstable_mockModule('../Dashboard.jsx', () => ({
 jest.unstable_mockModule('../TriggerPanel.jsx', () => ({
   TriggerPanel: () => null,
 }));
+
+// Mock BoardView — AC6/S-113: board tab embeds BoardView.
+// Rendered as a recognizable stub (main[aria-label="Board-Übersicht"]) without
+// triggering real fetch calls, matching the real component's landmark.
+jest.unstable_mockModule('../BoardView.jsx', async () => {
+  const R = (await import('react')).default;
+  return {
+    BoardView: ({ lockedProject }) =>
+      R.createElement(
+        'main',
+        { 'aria-label': 'Board-Übersicht', 'data-locked-project': lockedProject ?? '' },
+        `Board für Projekt: ${lockedProject ?? '—'}`,
+      ),
+  };
+});
 
 // Mock TeamView to avoid /api/team fetch in any AppShell-level renders
 jest.unstable_mockModule('../TeamView.jsx', async () => {
@@ -78,6 +103,7 @@ function mockFetchError() {
 
 beforeEach(() => {
   window.location.hash = '';
+  _terminalLastWsUrl = null;
   _origFetch = globalThis.fetch;
   // Default: empty repos
   globalThis.fetch = jest.fn(() => Promise.resolve({ ok: true, json: async () => [] }));
@@ -452,7 +478,7 @@ describe('CockpitView — AC3: Reiter-Leiste und Reiter-Umschaltung', () => {
     });
   });
 
-  it('Board-Platzhalter enthält "folgt"-Hinweis', async () => {
+  it('Board-Reiter zeigt BoardView mit Projekt-Kontext (AC6/S-113)', async () => {
     const { getByRole } = render(
       React.createElement(CockpitView, {
         activeRepo: 'dev-gui',
@@ -466,8 +492,14 @@ describe('CockpitView — AC3: Reiter-Leiste und Reiter-Umschaltung', () => {
     });
 
     await waitFor(() => {
+      // Board tabpanel must be present
       const panel = getByRole('tabpanel', { name: /board/i });
-      expect(panel.textContent).toMatch(/folgt/i);
+      expect(panel).toBeTruthy();
+      // BoardView is embedded: the landmark main[aria-label="Board-Übersicht"] is in the panel
+      const boardMain = panel.querySelector('main[aria-label="Board-Übersicht"]');
+      expect(boardMain).toBeTruthy();
+      // Projekt-Kontext (activeRepo) is passed as lockedProject (no own selector, AC6)
+      expect(boardMain.dataset.lockedProject).toBe('dev-gui');
     });
   });
 
@@ -563,6 +595,66 @@ describe('CockpitView — AC3: Reiter-Leiste und Reiter-Umschaltung', () => {
       const minH = parseInt(btn.style.minHeight, 10);
       expect(minH).toBeGreaterThanOrEqual(44);
     }
+  });
+});
+
+// ── AC6/S-113 — Board-Reiter Projekt-Kontext ─────────────────────────────────
+
+describe('CockpitView — AC6/S-113: Board-Reiter zeigt aktives Projekt (kein eigener Selektor)', () => {
+  it('BoardView erhält lockedProject=activeRepo (kein eigener Projekt-Selektor)', async () => {
+    const { getByRole } = render(
+      React.createElement(CockpitView, {
+        activeRepo: 'agent-flow',
+        navigateFactory: jest.fn(),
+        onNavigate: jest.fn(),
+      })
+    );
+
+    await act(async () => {
+      fireEvent.click(getByRole('tab', { name: /^board$/i }));
+    });
+
+    await waitFor(() => {
+      const boardMain = document.querySelector('main[aria-label="Board-Übersicht"]');
+      expect(boardMain).toBeTruthy();
+      expect(boardMain.dataset.lockedProject).toBe('agent-flow');
+    });
+  });
+
+  it('Terminal-WS-URL trägt ?project=<activeRepo> (AC4/S-111 client-side)', () => {
+    // Terminal mock records the wsUrl prop; in jsdom window.location.protocol is 'about:',
+    // so we can't rely on ws/wss — just check the project param is encoded in the URL.
+    render(
+      React.createElement(CockpitView, {
+        activeRepo: '/home/user/agent-flow',
+        navigateFactory: jest.fn(),
+        onNavigate: jest.fn(),
+      })
+    );
+
+    // Arbeiten tab is active by default — Terminal is mounted
+    expect(_terminalLastWsUrl).toBeTruthy();
+    expect(_terminalLastWsUrl).toContain('project=');
+    expect(_terminalLastWsUrl).toContain(encodeURIComponent('/home/user/agent-flow'));
+  });
+
+  it('Spezifikation-Reiter zeigt "folgt mit F-004"-Hinweis', async () => {
+    const { getByRole } = render(
+      React.createElement(CockpitView, {
+        activeRepo: 'dev-gui',
+        navigateFactory: jest.fn(),
+        onNavigate: jest.fn(),
+      })
+    );
+
+    await act(async () => {
+      fireEvent.click(getByRole('tab', { name: /spezifikation/i }));
+    });
+
+    await waitFor(() => {
+      const panel = getByRole('tabpanel', { name: /spezifikation/i });
+      expect(panel.textContent).toMatch(/folgt mit F-004/i);
+    });
   });
 });
 
