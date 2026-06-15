@@ -170,11 +170,14 @@ services:
       # BW_ITEM_NAME: dev-gui-master-key
 
       # ── Board-Aggregator (#127) ──────────────────────────────────────────────
-      # Komma-getrennte Wurzeln für BoardAggregator (AC1 dev-gui-board-aggregator).
-      # Tilde (~) wird zu $HOME des Containers expandiert.
-      # Beispiel: BOARD_ROOTS=~/Git/Studis-Softwareschmiede
-      # (Host-Pfad muss als Volume gemountet sein — analog WORKSPACE_DIR.)
-      # BOARD_ROOTS=~/Git/Studis-Softwareschmiede  # Komma-getrennte Wurzeln für Board-Aggregator (#127)
+      # Komma-getrennte Container-Wurzeln, die der BoardAggregator nach Repos mit
+      # board/-Ordner scannt (AC1 dev-gui-board-aggregator). Default = /workspace,
+      # also dieselbe Ebene wie WORKSPACE_DIR (Variante B: enger Mount = Workspace).
+      # Per .env überschreibbar, falls die Boards tiefer liegen
+      # (z.B. BOARD_ROOTS=/workspace/Studis-Softwareschmiede bei breitem Mount).
+      # WICHTIG VPS: die docker-compose.override.yml gilt dort NICHT — dieser
+      # Default sorgt dafür, dass das Board auch ohne explizites Setzen funktioniert.
+      BOARD_ROOTS: ${BOARD_ROOTS:-/workspace}
 
       # ── Workspace (workspace-repos / github-repo-clone) ─────────────────────
       # Container-Pfad, den GET /api/workspace/repos scannt und in den
