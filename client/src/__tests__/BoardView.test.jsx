@@ -8,9 +8,14 @@
  *   AC5 — Rollup-Anzeige je Feature: vorhandenes progress-Feld → direkt anzeigen;
  *          fehlendes/stale progress → read-only aus Kind-Story-Status berechnet;
  *          progressbar-Role mit aria-valuenow.
- *   AC6 — Filter nach Projekt (Dropdown), Status (Dropdown), Label (Dropdown);
- *          unabhängig kombinierbar; Zurücksetzen-Button; kein Backend-Aufruf beim Filtern.
+ *   AC6 — Filter nach Projekt (Dropdown), Status (Checkbox-Gruppe, leere Auswahl = alle),
+ *          Label (Dropdown); unabhängig kombinierbar; Zurücksetzen-Button (löscht Auswahl
+ *          vollständig); kein Backend-Aufruf beim Filtern.
  *          Filter-Leerzustand: role=status-Hinweis wenn Status- oder Label-Filter alle Stories eliminieren.
+ *   Feature detail panel — expand/collapse je Feature-Titel (aria-expanded/aria-controls);
+ *          goal, DoD, priority, depends, labels; null-Felder ausgeblendet.
+ *   Multi-Status-Filter — leere Auswahl = alle; Mehrfach-Check; Uncheck;
+ *          Reset löscht Auswahl vollständig (filterStatus → new Set()).
  *   AC4/A11y — <main> aria-label "Board-Übersicht"; Status-Badges mit Text-Label
  *               (Bedeutung nicht allein über Farbe); aria-current-Muster nicht benötigt
  *               (Übersicht, kein Master-Detail); WCAG-Kontrast in Quellcode-Kommentaren
@@ -522,20 +527,23 @@ describe('dev-gui-board-aggregator — AC6: Filter', () => {
     });
   });
 
-  it('renders status filter dropdown with all five status lifecycle values', async () => {
+  it('renders status filter as checkbox group with all five status lifecycle values', async () => {
     globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A] });
 
     const { container } = renderBoard();
 
     await waitFor(() => {
-      const select = container.querySelector('#board-filter-status');
-      expect(select).toBeTruthy();
-      const options = Array.from(select.options).map((o) => o.value);
-      expect(options).toContain('To Do');
-      expect(options).toContain('In Progress');
-      expect(options).toContain('Blocked');
-      expect(options).toContain('In Review');
-      expect(options).toContain('Done');
+      // Status filter is a fieldset/legend group (semantic), not a select
+      const group = container.querySelector('fieldset[aria-label*="Status"]');
+      expect(group).toBeTruthy();
+      // Five checkboxes — one per lifecycle status
+      const checkboxes = Array.from(group.querySelectorAll('input[type="checkbox"]'));
+      const values = checkboxes.map((cb) => cb.id);
+      expect(values.some((id) => /to-do/i.test(id))).toBe(true);
+      expect(values.some((id) => /in-progress/i.test(id))).toBe(true);
+      expect(values.some((id) => /blocked/i.test(id))).toBe(true);
+      expect(values.some((id) => /in-review/i.test(id))).toBe(true);
+      expect(values.some((id) => /done/i.test(id))).toBe(true);
     });
   });
 
@@ -588,11 +596,11 @@ describe('dev-gui-board-aggregator — AC6: Filter', () => {
       expect(container.querySelector('[data-story="S-003"]')).toBeTruthy();
     });
 
-    // Filter: only 'Done'
+    // Filter: only 'Done' — click the "Done" checkbox
     await act(async () => {
-      fireEvent.change(container.querySelector('#board-filter-status'), {
-        target: { value: 'Done' },
-      });
+      const doneCheckbox = container.querySelector('#board-filter-status-done');
+      expect(doneCheckbox).toBeTruthy();
+      fireEvent.click(doneCheckbox);
     });
 
     await waitFor(() => {
@@ -636,14 +644,14 @@ describe('dev-gui-board-aggregator — AC6: Filter', () => {
       expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
     });
 
-    // Combine: project=alpha AND status=Done
+    // Combine: project=alpha AND status=Done (checkbox)
     await act(async () => {
       fireEvent.change(container.querySelector('#board-filter-project'), {
         target: { value: 'project-alpha' },
       });
-      fireEvent.change(container.querySelector('#board-filter-status'), {
-        target: { value: 'Done' },
-      });
+      const doneCheckbox = container.querySelector('#board-filter-status-done');
+      expect(doneCheckbox).toBeTruthy();
+      fireEvent.click(doneCheckbox);
     });
 
     await waitFor(() => {
@@ -722,10 +730,11 @@ describe('dev-gui-board-aggregator — AC6: Filter', () => {
     });
 
     // Apply a status filter that has no match in PROJECT_B (empty feature, zero stories)
+    // Click the "Done" checkbox
     await act(async () => {
-      fireEvent.change(container.querySelector('#board-filter-status'), {
-        target: { value: 'Done' },
-      });
+      const doneCheckbox = container.querySelector('#board-filter-status-done');
+      expect(doneCheckbox).toBeTruthy();
+      fireEvent.click(doneCheckbox);
     });
 
     await waitFor(() => {
@@ -829,28 +838,32 @@ describe('dev-gui-board-aggregator — AC6: Filter', () => {
 
     const callsBefore = globalThis.fetch.mock.calls.length;
 
+    // Click the "Done" checkbox — triggers filter change without backend call
     await act(async () => {
-      fireEvent.change(container.querySelector('#board-filter-status'), {
-        target: { value: 'Done' },
-      });
+      const doneCheckbox = container.querySelector('#board-filter-status-done');
+      expect(doneCheckbox).toBeTruthy();
+      fireEvent.click(doneCheckbox);
     });
 
     // No additional fetch calls after filter change
     expect(globalThis.fetch.mock.calls.length).toBe(callsBefore);
   });
 
-  it('filter dropdowns have aria-labels (A11y)', async () => {
+  it('filter controls have aria-labels (A11y)', async () => {
     globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A] });
 
     const { container } = renderBoard();
 
     await waitFor(() => {
       const projectSelect = container.querySelector('#board-filter-project');
-      const statusSelect = container.querySelector('#board-filter-status');
-      const labelSelect = container.querySelector('#board-filter-label');
-
       expect(projectSelect.getAttribute('aria-label')).toMatch(/projekt/i);
-      expect(statusSelect.getAttribute('aria-label')).toMatch(/status/i);
+
+      // Status filter is a fieldset/legend group — check fieldset has aria-label
+      const statusGroup = container.querySelector('fieldset[aria-label*="Status"]');
+      expect(statusGroup).toBeTruthy();
+      expect(statusGroup.getAttribute('aria-label')).toMatch(/status/i);
+
+      const labelSelect = container.querySelector('#board-filter-label');
       expect(labelSelect.getAttribute('aria-label')).toMatch(/label/i);
     });
   });
@@ -925,5 +938,349 @@ describe('dev-gui-board-aggregator — Security floor', () => {
     for (const call of globalThis.fetch.mock.calls) {
       expect(call[0]).toMatch(/^\/api\/board\//);
     }
+  });
+});
+
+// ── Feature detail panel ──────────────────────────────────────────────────────
+
+const FEATURE_WITH_DETAIL = {
+  id: 'F-detail',
+  title: 'Detail-Feature',
+  status: 'Active',
+  priority: 'P1',
+  goal: 'Abloesung der manuellen Provisionierung.',
+  definition_of_done: 'Alle Adapter gruen, Review bestanden.',
+  depends: ['F-000'],
+  labels: ['infra', 'vps'],
+  stories: [],
+};
+
+const FEATURE_NO_OPTIONAL = {
+  id: 'F-plain',
+  title: 'Plain Feature',
+  status: 'Backlog',
+  priority: 'P2',
+  goal: null,
+  definition_of_done: null,
+  depends: null,
+  labels: null,
+  stories: [],
+};
+
+const PROJECT_WITH_DETAIL = {
+  slug: 'project-detail',
+  repo_path: '/home/user/Git/detail',
+  features: [FEATURE_WITH_DETAIL, FEATURE_NO_OPTIONAL],
+};
+
+describe('dev-gui-board-aggregator — Feature detail panel', () => {
+  it('feature title is a button that toggles the detail panel', async () => {
+    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_WITH_DETAIL] });
+
+    const { container } = renderBoard();
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-feature="F-detail"]')).toBeTruthy();
+    });
+
+    // Detail panel not visible yet
+    expect(container.querySelector('[data-testid="feature-detail-F-detail"]')).toBeNull();
+
+    // Click the title button to open
+    await act(async () => {
+      const btn = container.querySelector('[data-testid="feature-title-btn-F-detail"]');
+      expect(btn).toBeTruthy();
+      fireEvent.click(btn);
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="feature-detail-F-detail"]')).toBeTruthy();
+    });
+  });
+
+  it('detail panel shows goal when present', async () => {
+    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_WITH_DETAIL] });
+
+    const { container } = renderBoard();
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-feature="F-detail"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="feature-title-btn-F-detail"]'));
+    });
+
+    await waitFor(() => {
+      const goal = container.querySelector('[data-testid="feature-detail-goal"]');
+      expect(goal).toBeTruthy();
+      expect(goal.textContent).toMatch(/Abloesung/);
+    });
+  });
+
+  it('detail panel shows definition_of_done when present', async () => {
+    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_WITH_DETAIL] });
+
+    const { container } = renderBoard();
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-feature="F-detail"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="feature-title-btn-F-detail"]'));
+    });
+
+    await waitFor(() => {
+      const dod = container.querySelector('[data-testid="feature-detail-dod"]');
+      expect(dod).toBeTruthy();
+      expect(dod.textContent).toMatch(/Alle Adapter/);
+    });
+  });
+
+  it('detail panel shows priority', async () => {
+    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_WITH_DETAIL] });
+
+    const { container } = renderBoard();
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-feature="F-detail"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="feature-title-btn-F-detail"]'));
+    });
+
+    await waitFor(() => {
+      const prio = container.querySelector('[data-testid="feature-detail-priority"]');
+      expect(prio).toBeTruthy();
+      expect(prio.textContent).toMatch(/P1/);
+    });
+  });
+
+  it('detail panel shows depends when present', async () => {
+    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_WITH_DETAIL] });
+
+    const { container } = renderBoard();
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-feature="F-detail"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="feature-title-btn-F-detail"]'));
+    });
+
+    await waitFor(() => {
+      const dep = container.querySelector('[data-testid="feature-detail-depends"]');
+      expect(dep).toBeTruthy();
+      expect(dep.textContent).toContain('F-000');
+    });
+  });
+
+  it('detail panel shows labels when present', async () => {
+    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_WITH_DETAIL] });
+
+    const { container } = renderBoard();
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-feature="F-detail"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="feature-title-btn-F-detail"]'));
+    });
+
+    await waitFor(() => {
+      const labels = container.querySelector('[data-testid="feature-detail-labels"]');
+      expect(labels).toBeTruthy();
+      expect(labels.textContent).toContain('infra');
+      expect(labels.textContent).toContain('vps');
+    });
+  });
+
+  it('clicking title again closes the detail panel', async () => {
+    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_WITH_DETAIL] });
+
+    const { container } = renderBoard();
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-feature="F-detail"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="feature-title-btn-F-detail"]'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="feature-detail-F-detail"]')).toBeTruthy();
+    });
+
+    // Click again to close
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="feature-title-btn-F-detail"]'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="feature-detail-F-detail"]')).toBeNull();
+    });
+  });
+
+  it('detail panel omits null fields (goal/dod/depends/labels absent for plain feature)', async () => {
+    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_WITH_DETAIL] });
+
+    const { container } = renderBoard();
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-feature="F-plain"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="feature-title-btn-F-plain"]'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="feature-detail-F-plain"]')).toBeTruthy();
+    });
+
+    // Null fields must not be rendered
+    expect(container.querySelector('[data-testid="feature-detail-goal"]')).toBeNull();
+    expect(container.querySelector('[data-testid="feature-detail-dod"]')).toBeNull();
+    expect(container.querySelector('[data-testid="feature-detail-depends"]')).toBeNull();
+    expect(container.querySelector('[data-testid="feature-detail-labels"]')).toBeNull();
+  });
+
+  it('title button has aria-expanded false initially and true when open', async () => {
+    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_WITH_DETAIL] });
+
+    const { container } = renderBoard();
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-feature="F-detail"]')).toBeTruthy();
+    });
+
+    const btn = container.querySelector('[data-testid="feature-title-btn-F-detail"]');
+    expect(btn.getAttribute('aria-expanded')).toBe('false');
+
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+
+    await waitFor(() => {
+      expect(btn.getAttribute('aria-expanded')).toBe('true');
+    });
+  });
+});
+
+// ── Multi-Status-Filter (Erweiterung 3) ──────────────────────────────────────
+
+describe('dev-gui-board-aggregator — Multi-Status-Filter (Checkbox-Mehrfachauswahl)', () => {
+  it('empty status selection shows all stories', async () => {
+    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A] });
+
+    const { container } = renderBoard();
+
+    await waitFor(() => {
+      // All stories visible when no status checkbox is checked
+      expect(container.querySelector('[data-story="S-001"]')).toBeTruthy();
+      expect(container.querySelector('[data-story="S-002"]')).toBeTruthy();
+      expect(container.querySelector('[data-story="S-003"]')).toBeTruthy();
+    });
+  });
+
+  it('two status checkboxes checked → only stories with those statuses visible', async () => {
+    // S-001 is "To Do", S-002 is "In Progress", S-003 is "Done"
+    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A] });
+
+    const { container } = renderBoard();
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-story="S-001"]')).toBeTruthy();
+    });
+
+    // Check "To Do" and "In Progress"
+    await act(async () => {
+      const todoCheckbox = container.querySelector('#board-filter-status-to-do');
+      expect(todoCheckbox).toBeTruthy();
+      fireEvent.click(todoCheckbox);
+    });
+
+    await act(async () => {
+      const inProgressCheckbox = container.querySelector('#board-filter-status-in-progress');
+      expect(inProgressCheckbox).toBeTruthy();
+      fireEvent.click(inProgressCheckbox);
+    });
+
+    await waitFor(() => {
+      // S-001 (To Do) and S-002 (In Progress) visible
+      expect(container.querySelector('[data-story="S-001"]')).toBeTruthy();
+      expect(container.querySelector('[data-story="S-002"]')).toBeTruthy();
+      // S-003 (Done) filtered out
+      expect(container.querySelector('[data-story="S-003"]')).toBeNull();
+    });
+  });
+
+  it('unchecking a status checkbox removes that filter', async () => {
+    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A] });
+
+    const { container } = renderBoard();
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-story="S-001"]')).toBeTruthy();
+    });
+
+    // Check "Done"
+    await act(async () => {
+      fireEvent.click(container.querySelector('#board-filter-status-done'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-story="S-001"]')).toBeNull();
+      expect(container.querySelector('[data-story="S-003"]')).toBeTruthy();
+    });
+
+    // Uncheck "Done" — all stories visible again
+    await act(async () => {
+      fireEvent.click(container.querySelector('#board-filter-status-done'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-story="S-001"]')).toBeTruthy();
+      expect(container.querySelector('[data-story="S-002"]')).toBeTruthy();
+      expect(container.querySelector('[data-story="S-003"]')).toBeTruthy();
+    });
+  });
+
+  it('reset button clears status checkboxes and restores all stories', async () => {
+    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A] });
+
+    const { container } = renderBoard();
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-story="S-001"]')).toBeTruthy();
+    });
+
+    // Activate a status filter
+    await act(async () => {
+      fireEvent.click(container.querySelector('#board-filter-status-done'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[aria-label="Filter zurücksetzen"]')).toBeTruthy();
+    });
+
+    // Click reset
+    await act(async () => {
+      fireEvent.click(container.querySelector('[aria-label="Filter zurücksetzen"]'));
+    });
+
+    await waitFor(() => {
+      // All stories restored
+      expect(container.querySelector('[data-story="S-001"]')).toBeTruthy();
+      expect(container.querySelector('[data-story="S-002"]')).toBeTruthy();
+      expect(container.querySelector('[data-story="S-003"]')).toBeTruthy();
+      // No reset button visible
+      expect(container.querySelector('[aria-label="Filter zurücksetzen"]')).toBeNull();
+    });
   });
 });

@@ -7,6 +7,8 @@
  *   AC2 — Daten liegen im flüchtigen In-Memory-Index; Re-Scan on-demand ersetzt den Index.
  *   AC3 — Index modelliert Projekt → Feature → Story; jede Story trägt
  *          mind. id, parent, title, status, priority, labels, spec (+ dispo_* falls vorhanden).
+ *          Features tragen zusätzlich optionale Felder goal, definition_of_done, depends,
+ *          labels — Wert ist null wenn das YAML-Feld fehlt oder nicht gesetzt ist.
  *   AC7 — Kein Code-Pfad schreibt in board/-Dateien oder legt persistenten Cache an.
  *   AC8 — Ungültiges/nicht lesbares board/ wird mit Fehlermarkierung übersprungen;
  *          übrige Projekte bleiben sichtbar; kein Absturz.
@@ -837,6 +839,107 @@ describe('AC9 — On-demand re-scan updates the index', () => {
     const aggregator = new BoardAggregator({ boardRootsEnv: BOARD_ROOT, fsDeps });
     expect(() => aggregator.startWatchers()).not.toThrow();
     expect(() => aggregator.stopWatchers()).not.toThrow();
+  });
+});
+
+// ── Feature extended fields: goal, definition_of_done, depends, labels ────────
+
+const FEATURE_F003_FULL = `id: F-003
+title: Vollstaendiges Feature
+goal: Ziel des Features in einem oder zwei Saetzen.
+status: Active
+priority: P0
+definition_of_done: Alle Tests gruen, Review bestanden.
+labels: [infra, security]
+depends: [F-001, F-002]
+created_at: 2026-06-14T00:00:00Z
+updated_at: 2026-06-14T00:00:00Z
+stories: []
+progress: null
+`;
+
+const FEATURE_F004_MINIMAL = `id: F-004
+title: Minimales Feature
+status: Backlog
+priority: P3
+created_at: 2026-06-14T00:00:00Z
+updated_at: 2026-06-14T00:00:00Z
+stories: []
+progress: null
+`;
+
+describe('Feature extended fields — goal, definition_of_done, depends, labels', () => {
+  function makeAggregatorWithFeature(featureYaml, fileName) {
+    const fsDeps = buildFakeFsDeps({
+      extraFeatureFiles: [fileName],
+      fileOverrides: {
+        [`${BOARD_ROOT}/my-repo/board/features/${fileName}`]: featureYaml,
+      },
+    });
+    return new BoardAggregator({ boardRootsEnv: BOARD_ROOT, fsDeps });
+  }
+
+  it('feature entry has goal field from YAML', async () => {
+    const aggregator = makeAggregatorWithFeature(FEATURE_F003_FULL, 'F-003-full.yaml');
+    const index = await aggregator.getIndex();
+    const f003 = index[0].features.find((f) => f.id === 'F-003');
+    expect(f003).toBeDefined();
+    expect(f003.goal).toBe('Ziel des Features in einem oder zwei Saetzen.');
+  });
+
+  it('feature entry has definition_of_done field from YAML', async () => {
+    const aggregator = makeAggregatorWithFeature(FEATURE_F003_FULL, 'F-003-full.yaml');
+    const index = await aggregator.getIndex();
+    const f003 = index[0].features.find((f) => f.id === 'F-003');
+    expect(f003).toBeDefined();
+    expect(f003.definition_of_done).toBe('Alle Tests gruen, Review bestanden.');
+  });
+
+  it('feature entry has labels array from YAML', async () => {
+    const aggregator = makeAggregatorWithFeature(FEATURE_F003_FULL, 'F-003-full.yaml');
+    const index = await aggregator.getIndex();
+    const f003 = index[0].features.find((f) => f.id === 'F-003');
+    expect(f003).toBeDefined();
+    expect(Array.isArray(f003.labels)).toBe(true);
+    expect(f003.labels).toEqual(['infra', 'security']);
+  });
+
+  it('feature entry has depends array from YAML', async () => {
+    const aggregator = makeAggregatorWithFeature(FEATURE_F003_FULL, 'F-003-full.yaml');
+    const index = await aggregator.getIndex();
+    const f003 = index[0].features.find((f) => f.id === 'F-003');
+    expect(f003).toBeDefined();
+    expect(Array.isArray(f003.depends)).toBe(true);
+    expect(f003.depends).toEqual(['F-001', 'F-002']);
+  });
+
+  it('feature with missing goal/dod/depends/labels → all null', async () => {
+    const aggregator = makeAggregatorWithFeature(FEATURE_F004_MINIMAL, 'F-004-minimal.yaml');
+    const index = await aggregator.getIndex();
+    const f004 = index[0].features.find((f) => f.id === 'F-004');
+    expect(f004).toBeDefined();
+    expect(f004.goal).toBeNull();
+    expect(f004.definition_of_done).toBeNull();
+    expect(f004.depends).toBeNull();
+    expect(f004.labels).toBeNull();
+  });
+
+  it('existing feature F-001 fixture has goal (already in YAML)', async () => {
+    const { aggregator } = makeAggregator();
+    const index = await aggregator.getIndex();
+    const f001 = index[0].features.find((f) => f.id === 'F-001');
+    // FEATURE_F001 fixture has goal: Abloesung der manuellen Provisionierung.
+    expect(f001.goal).toBe('Abloesung der manuellen Provisionierung.');
+  });
+
+  it('existing feature F-001 fixture has labels array', async () => {
+    const { aggregator } = makeAggregator();
+    const index = await aggregator.getIndex();
+    const f001 = index[0].features.find((f) => f.id === 'F-001');
+    // FEATURE_F001 fixture has labels: [infra, vps]
+    expect(Array.isArray(f001.labels)).toBe(true);
+    expect(f001.labels).toContain('infra');
+    expect(f001.labels).toContain('vps');
   });
 });
 
