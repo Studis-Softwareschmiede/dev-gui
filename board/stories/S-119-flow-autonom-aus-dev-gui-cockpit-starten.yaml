@@ -1,0 +1,23 @@
+id: S-119
+parent: F-008
+title: /flow autonom aus dev-gui-Cockpit starten
+status: To Do
+priority: P3
+spec: docs/specs/autonome-board-abarbeitung.md
+implements:
+- AC2
+- AC3
+depends: null
+labels: null
+size_est: null
+dispo_est: null
+dispo_act: null
+dispo_forecast: null
+estimate_note: null
+confidence: null
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-06-15T10:30:27Z'
+updated_at: '2026-06-15T10:30:27Z'
+done_at: null
