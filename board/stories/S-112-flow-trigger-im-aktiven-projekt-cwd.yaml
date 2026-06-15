@@ -1,0 +1,22 @@
+id: S-112
+parent: F-005
+title: Flow-Trigger im aktiven Projekt-cwd
+status: To Do
+priority: P2
+spec: docs/specs/projekt-cockpit-navigation.md
+implements:
+- AC5
+depends: null
+labels: null
+size_est: null
+dispo_est: null
+dispo_act: null
+dispo_forecast: null
+estimate_note: null
+confidence: null
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-06-15T09:08:55Z'
+updated_at: '2026-06-15T09:08:55Z'
+done_at: null

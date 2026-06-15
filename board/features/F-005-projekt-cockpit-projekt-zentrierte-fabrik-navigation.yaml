@@ -1,0 +1,15 @@
+id: F-005
+title: Projekt-Cockpit (projekt-zentrierte Fabrik-Navigation)
+goal: 'Fabrik: erst Repo-Uebersicht, dann Projekt waehlen, dann Aktion (Arbeiten/Board/Spezifikation);
+  Terminal eine Session pro Projekt'
+status: Backlog
+priority: P1
+spec: null
+definition_of_done: null
+labels: null
+depends: null
+owner: null
+stories: null
+progress: null
+created_at: '2026-06-15T09:08:55Z'
+updated_at: '2026-06-15T09:08:55Z'
