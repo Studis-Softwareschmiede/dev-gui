@@ -14,7 +14,7 @@
  */
 
 import { describe, it, expect, jest, beforeEach, afterEach } from '@jest/globals';
-import { act, waitFor } from '@testing-library/react';
+import { waitFor } from '@testing-library/react';
 
 // Mock AppShell dependencies not used here
 jest.unstable_mockModule('../Terminal.jsx', () => ({ Terminal: () => null }));
