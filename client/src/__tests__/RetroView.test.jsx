@@ -22,6 +22,15 @@
  *          (Styles konsistent zu TeamView).
  *   AC11 — Kein dangerouslySetInnerHTML/innerHTML; nur /api/retro/* aufgerufen.
  *
+ * Covers (retro-train-board-local):
+ *   AC3  — Reiter-Umschalter „Läufe | Verbesserungs-Board" vorhanden; Läufe-Reiter bleibt
+ *          unverändert erreichbar; Board-Reiter aktivierbar; Kanban-Spalten je Status.
+ *   AC4  — Board-Reiter: je Karte Regel-ID, Ziel, Art-Badge, Status-Badge, PR-Link;
+ *          Kennzahlen aus baseline.json eingeblendet wo vorhanden.
+ *   AC5  — Filter nach Kategorie + Art (Mehrfachauswahl); aktive Filter als aria-pressed.
+ *
+ * NOTE (Touch-Target): Touch-Target ≥44px (tabBtn, filterChip) — jsdom nicht testbar, visuell verifiziert.
+ *
  * NOTE (jsdom-Limitation): jsdom hat keine Layout-Engine — Style-Property-Asserts beweisen kein
  * Scroll-/Layout-Verhalten; getestet werden Verhalten, Struktur, Rollen und aria, nicht Pixel.
  *
@@ -137,13 +146,27 @@ afterEach(() => {
   window.location.hash = '';
 });
 
-function makeRetroFetch({ runsBody, reportBody, runsOk = true, reportOk = true }) {
+function makeRetroFetch({
+  runsBody,
+  reportBody,
+  cardsBody,
+  runsOk = true,
+  reportOk = true,
+  cardsOk = true,
+}) {
   return jest.fn(async (url) => {
     if (url === '/api/retro/runs') {
       return {
         ok: runsOk,
         status: runsOk ? 200 : 500,
         json: async () => runsBody,
+      };
+    }
+    if (url === '/api/retro/cards') {
+      return {
+        ok: cardsOk,
+        status: cardsOk ? 200 : 500,
+        json: async () => cardsBody ?? { cards: {} },
       };
     }
     if (url.startsWith('/api/retro/runs/')) {
@@ -1024,5 +1047,456 @@ describe('retro-view-frontend — AC11: Security floor', () => {
     for (const call of globalThis.fetch.mock.calls) {
       expect(call[0]).toMatch(/^\/api\/retro\//);
     }
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// retro-train-board-local — AC3, AC4, AC5
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── Board fixtures ─────────────────────────────────────────────────────────────
+
+const CARDS_FIXTURE = {
+  Proposed: [
+    {
+      id: 'R01',
+      datum: '2025-01-15',
+      ziel: 'agents/coder.md',
+      regel: 'Kein Gold-Plating über die Spec hinaus.',
+      quelle: 'agents/coder.md',
+      pr: 'retro/PR-Q001',
+      status: 'Proposed',
+      art: 'retro',
+      kategorie: ['agents'],
+      metric: { rate_per_100ep: 1.5, baseline: 2.0, neu: 1.5, status: 'improved' },
+    },
+  ],
+  Merged: [
+    {
+      id: 'R02',
+      datum: '2025-02-10',
+      ziel: 'knowledge/js.md',
+      regel: 'JS knowledge rule.',
+      quelle: 'knowledge/js.md',
+      pr: 'train/PR-Q002',
+      status: 'Merged',
+      art: 'train',
+      kategorie: ['knowledge'],
+      metric: null,
+    },
+  ],
+  Measuring: [],
+  Validated: [],
+  Reverted: [],
+  Expired: [],
+};
+
+const CARDS_MULTI = {
+  Proposed: [
+    {
+      id: 'R01',
+      datum: '2025-01-15',
+      ziel: 'agents/coder.md',
+      regel: 'Rule agents.',
+      quelle: 'agents/coder.md',
+      pr: 'retro/PR-A',
+      status: 'Proposed',
+      art: 'retro',
+      kategorie: ['agents'],
+      metric: null,
+    },
+    {
+      id: 'R02',
+      datum: '2025-02-10',
+      ziel: 'skills/deploy/SKILL.md',
+      regel: 'Rule skills.',
+      quelle: 'skills/deploy.md',
+      pr: 'train/PR-B',
+      status: 'Proposed',
+      art: 'train',
+      kategorie: ['skills'],
+      metric: null,
+    },
+    {
+      id: 'R03',
+      datum: '2025-03-01',
+      ziel: 'knowledge/js.md',
+      regel: 'Rule knowledge.',
+      quelle: 'knowledge/js.md',
+      pr: 'retro/PR-C',
+      status: 'Proposed',
+      art: 'retro',
+      kategorie: ['knowledge'],
+      metric: null,
+    },
+  ],
+};
+
+function renderRetroWithCards(cardsBody = { cards: CARDS_FIXTURE }) {
+  globalThis.fetch = makeRetroFetch({
+    runsBody: { runs: [] },
+    cardsBody,
+  });
+  const onNavigate = jest.fn();
+  const utils = render(React.createElement(RetroView, { onNavigate }));
+  return utils;
+}
+
+async function switchToBoard(container) {
+  const boardTab = container.querySelector('button[data-tab="board"]');
+  await act(async () => {
+    fireEvent.click(boardTab);
+    // Allow the fetch to start and resolve within this act
+    await new Promise((r) => setTimeout(r, 0));
+  });
+  // Wait for board to finish loading and render Kanban
+  await waitFor(() => {
+    expect(container.querySelector('[aria-label="Kanban-Board"]')).toBeTruthy();
+  }, { timeout: 3000 });
+}
+
+// ── AC3 — Tab switcher ────────────────────────────────────────────────────────
+
+describe('retro-train-board-local — AC3: Reiter-Umschalter', () => {
+  it('renders a "Läufe" tab button', async () => {
+    const { container } = renderRetroWithCards();
+    await waitFor(() => {
+      expect(container.querySelector('[aria-busy="true"]')).toBeNull();
+    });
+    expect(container.querySelector('button[data-tab="runs"]')).toBeTruthy();
+    expect(container.querySelector('button[data-tab="runs"]').textContent).toMatch(/Läufe/i);
+  });
+
+  it('renders a "Verbesserungs-Board" tab button', async () => {
+    const { container } = renderRetroWithCards();
+    await waitFor(() => {
+      expect(container.querySelector('[aria-busy="true"]')).toBeNull();
+    });
+    expect(container.querySelector('button[data-tab="board"]')).toBeTruthy();
+    expect(container.querySelector('button[data-tab="board"]').textContent).toMatch(/Verbesserungs-Board/i);
+  });
+
+  it('tab buttons are inside a tablist', async () => {
+    const { container } = renderRetroWithCards();
+    await waitFor(() => {
+      expect(container.querySelector('[aria-busy="true"]')).toBeNull();
+    });
+    const tablist = container.querySelector('[role="tablist"]');
+    expect(tablist).toBeTruthy();
+    const tabs = tablist.querySelectorAll('[role="tab"]');
+    expect(tabs.length).toBe(2);
+  });
+
+  it('Läufe tab is selected by default (aria-selected=true)', async () => {
+    const { container } = renderRetroWithCards();
+    await waitFor(() => {
+      expect(container.querySelector('[aria-busy="true"]')).toBeNull();
+    });
+    const runsTab = container.querySelector('button[data-tab="runs"]');
+    expect(runsTab.getAttribute('aria-selected')).toBe('true');
+    const boardTab = container.querySelector('button[data-tab="board"]');
+    expect(boardTab.getAttribute('aria-selected')).toBe('false');
+  });
+
+  it('clicking Board tab activates board panel (aria-selected switches)', async () => {
+    const { container } = renderRetroWithCards();
+
+    const boardTab = container.querySelector('button[data-tab="board"]');
+    await act(async () => {
+      fireEvent.click(boardTab);
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('button[data-tab="board"]').getAttribute('aria-selected')).toBe('true');
+      expect(container.querySelector('button[data-tab="runs"]').getAttribute('aria-selected')).toBe('false');
+    });
+  });
+
+  it('Läufe tab panel still shows run content (existing view unaffected)', async () => {
+    globalThis.fetch = makeRetroFetch({
+      runsBody: { runs: RUNS },
+      cardsBody: CARDS_FIXTURE,
+    });
+    const { container } = render(React.createElement(RetroView, { onNavigate: jest.fn() }));
+
+    // Läufe tab is default
+    await waitFor(() => {
+      expect(container.querySelector('[role="tabpanel"][aria-label="Läufe"]')).toBeTruthy();
+    });
+  });
+
+  it('Board tab panel contains Kanban-Board landmark', async () => {
+    const { container } = renderRetroWithCards();
+    await switchToBoard(container);
+    expect(container.querySelector('[aria-label="Kanban-Board"]')).toBeTruthy();
+  });
+
+  it('fetches /api/retro/cards when Board tab is activated', async () => {
+    const fetchMock = makeRetroFetch({ runsBody: { runs: [] }, cardsBody: CARDS_FIXTURE });
+    globalThis.fetch = fetchMock;
+    const { container } = render(React.createElement(RetroView, { onNavigate: jest.fn() }));
+
+    await waitFor(() => {
+      expect(container.querySelector('[aria-busy="true"]')).toBeNull();
+    });
+
+    // Switch to board
+    await act(async () => {
+      fireEvent.click(container.querySelector('button[data-tab="board"]'));
+    });
+
+    await waitFor(() => {
+      const cardsCalls = fetchMock.mock.calls.filter((c) => c[0] === '/api/retro/cards');
+      expect(cardsCalls.length).toBeGreaterThan(0);
+    });
+  });
+
+  it('Kanban has columns for all 6 standard status values', async () => {
+    const { container } = renderRetroWithCards();
+    await switchToBoard(container);
+
+    const expectedStatuses = ['Proposed', 'Merged', 'Measuring', 'Validated', 'Reverted', 'Expired'];
+    for (const status of expectedStatuses) {
+      expect(container.querySelector(`[aria-label="Spalte: ${status}"]`)).toBeTruthy();
+    }
+  });
+});
+
+// ── AC4 — Card display ────────────────────────────────────────────────────────
+
+describe('retro-train-board-local — AC4: Card display (Regel-ID, Ziel, Art-Badge, Status-Badge, PR-Link)', () => {
+  it('shows Regel-ID on card', async () => {
+    const { container } = renderRetroWithCards();
+    await switchToBoard(container);
+
+    // R01 is in Proposed column
+    const col = container.querySelector('[aria-label="Spalte: Proposed"]');
+    expect(col.textContent).toMatch(/R01/);
+  });
+
+  it('shows Ziel (packSkill) on card', async () => {
+    const { container } = renderRetroWithCards();
+    await switchToBoard(container);
+
+    const col = container.querySelector('[aria-label="Spalte: Proposed"]');
+    expect(col.textContent).toMatch(/agents\/coder\.md/);
+  });
+
+  it('shows Art-Badge with text label (AC4, AC9)', async () => {
+    const { container } = renderRetroWithCards();
+    await switchToBoard(container);
+
+    // Art badge for R01 → 'retro'
+    const artBadges = container.querySelectorAll('[aria-label^="Art:"]');
+    expect(artBadges.length).toBeGreaterThan(0);
+    expect(artBadges[0].textContent.trim().length).toBeGreaterThan(0);
+  });
+
+  it('retro card shows "retro" art badge', async () => {
+    const { container } = renderRetroWithCards();
+    await switchToBoard(container);
+
+    const retroBadge = Array.from(container.querySelectorAll('[aria-label^="Art:"]'))
+      .find((el) => el.getAttribute('aria-label') === 'Art: retro');
+    expect(retroBadge).toBeTruthy();
+  });
+
+  it('train card shows "train" art badge', async () => {
+    const { container } = renderRetroWithCards();
+    await switchToBoard(container);
+
+    const trainBadge = Array.from(container.querySelectorAll('[aria-label^="Art:"]'))
+      .find((el) => el.getAttribute('aria-label') === 'Art: train');
+    expect(trainBadge).toBeTruthy();
+  });
+
+  it('shows Status-Badge with text label per card (AC4, AC9)', async () => {
+    const { container } = renderRetroWithCards();
+    await switchToBoard(container);
+
+    const statusBadges = container.querySelectorAll('[aria-label^="Status:"]');
+    expect(statusBadges.length).toBeGreaterThan(0);
+    for (const badge of statusBadges) {
+      expect(badge.textContent.trim().length).toBeGreaterThan(0);
+    }
+  });
+
+  it('shows PR-Link as anchor with href containing the pr value', async () => {
+    const { container } = renderRetroWithCards();
+    await switchToBoard(container);
+
+    // R01 has pr: 'retro/PR-Q001'
+    const links = container.querySelectorAll('a[aria-label^="PR:"]');
+    expect(links.length).toBeGreaterThan(0);
+    expect(links[0].getAttribute('href')).toContain('PR-Q001');
+  });
+
+  it('PR-Link opens externally (target=_blank + rel=noopener)', async () => {
+    const { container } = renderRetroWithCards();
+    await switchToBoard(container);
+
+    const links = container.querySelectorAll('a[aria-label^="PR:"]');
+    for (const link of links) {
+      expect(link.getAttribute('target')).toBe('_blank');
+      expect(link.getAttribute('rel')).toContain('noopener');
+    }
+  });
+
+  it('shows metric (rate_per_100ep) when metric is not null', async () => {
+    const { container } = renderRetroWithCards();
+    await switchToBoard(container);
+
+    // R01 has metric.rate_per_100ep = 1.5
+    const metricAreas = container.querySelectorAll('[aria-label="Metrik"]');
+    expect(metricAreas.length).toBeGreaterThan(0);
+    expect(metricAreas[0].textContent).toMatch(/1\.5/);
+  });
+
+  it('does not show metric area when metric is null', async () => {
+    // R02 has metric: null — no metric area should appear in Merged column
+    const { container } = renderRetroWithCards();
+    await switchToBoard(container);
+
+    const mergedCol = container.querySelector('[aria-label="Spalte: Merged"]');
+    const metricAreas = mergedCol.querySelectorAll('[aria-label="Metrik"]');
+    expect(metricAreas.length).toBe(0);
+  });
+
+  it('regel text is shown as plain text (no dangerouslySetInnerHTML — AC11 floor)', async () => {
+    const { container } = renderRetroWithCards();
+    await switchToBoard(container);
+
+    const rulesWithText = Array.from(container.querySelectorAll('p')).filter(
+      (p) => p.textContent.includes('Gold-Plating'),
+    );
+    expect(rulesWithText.length).toBeGreaterThan(0);
+    // No inner HTML elements (plain text node)
+    for (const el of rulesWithText) {
+      expect(el.children).toHaveLength(0);
+    }
+  });
+});
+
+// ── AC5 — Filter ──────────────────────────────────────────────────────────────
+
+describe('retro-train-board-local — AC5: Filter nach Kategorie + Art (Mehrfachauswahl)', () => {
+  it('renders filter bar with Kategorie + Art buttons', async () => {
+    const { container } = renderRetroWithCards({ cards: CARDS_MULTI });
+    await switchToBoard(container);
+
+    expect(container.querySelector('[aria-label="Board-Filter"]')).toBeTruthy();
+    expect(container.querySelector('[data-filter-kategorie="agents"]')).toBeTruthy();
+    expect(container.querySelector('[data-filter-kategorie="skills"]')).toBeTruthy();
+    expect(container.querySelector('[data-filter-kategorie="knowledge"]')).toBeTruthy();
+    expect(container.querySelector('[data-filter-art="retro"]')).toBeTruthy();
+    expect(container.querySelector('[data-filter-art="train"]')).toBeTruthy();
+  });
+
+  it('filter chips start as not pressed (all cards visible)', async () => {
+    const { container } = renderRetroWithCards({ cards: CARDS_MULTI });
+    await switchToBoard(container);
+
+    const chips = container.querySelectorAll('[data-filter-kategorie], [data-filter-art]');
+    for (const chip of chips) {
+      expect(chip.getAttribute('aria-pressed')).toBe('false');
+    }
+  });
+
+  it('clicking Kategorie chip toggles aria-pressed to true', async () => {
+    const { container } = renderRetroWithCards({ cards: CARDS_MULTI });
+    await switchToBoard(container);
+
+    const agentsChip = container.querySelector('[data-filter-kategorie="agents"]');
+    await act(async () => {
+      fireEvent.click(agentsChip);
+    });
+
+    expect(container.querySelector('[data-filter-kategorie="agents"]').getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('clicking same chip again deactivates it (toggle off)', async () => {
+    const { container } = renderRetroWithCards({ cards: CARDS_MULTI });
+    await switchToBoard(container);
+
+    const agentsChip = container.querySelector('[data-filter-kategorie="agents"]');
+    await act(async () => {
+      fireEvent.click(agentsChip);
+    });
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-filter-kategorie="agents"]'));
+    });
+
+    expect(container.querySelector('[data-filter-kategorie="agents"]').getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('multiple filter chips can be active simultaneously (Mehrfachauswahl)', async () => {
+    const { container } = renderRetroWithCards({ cards: CARDS_MULTI });
+    await switchToBoard(container);
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-filter-kategorie="agents"]'));
+    });
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-filter-kategorie="knowledge"]'));
+    });
+
+    expect(container.querySelector('[data-filter-kategorie="agents"]').getAttribute('aria-pressed')).toBe('true');
+    expect(container.querySelector('[data-filter-kategorie="knowledge"]').getAttribute('aria-pressed')).toBe('true');
+    expect(container.querySelector('[data-filter-kategorie="skills"]').getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('filtering by art=retro shows only retro cards (R01 visible, R02 train hidden)', async () => {
+    const { container } = renderRetroWithCards({ cards: CARDS_MULTI });
+    await switchToBoard(container);
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-filter-art="retro"]'));
+    });
+
+    // After retro filter: R01 (retro) and R03 (retro) should be visible; R02 (train) hidden
+    const proposedCol = container.querySelector('[aria-label="Spalte: Proposed"]');
+    // R01 is retro → visible; R02 is train → filtered out; R03 is retro → visible
+    expect(proposedCol.textContent).toContain('R01');
+    expect(proposedCol.textContent).not.toContain('R02');
+    expect(proposedCol.textContent).toContain('R03');
+  });
+
+  it('filtering by kategorie=skills shows only skills cards (R02 visible, R01/R03 hidden)', async () => {
+    const { container } = renderRetroWithCards({ cards: CARDS_MULTI });
+    await switchToBoard(container);
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-filter-kategorie="skills"]'));
+    });
+
+    // After skills filter: only R02 (skills) should remain; R01 (agents), R03 (knowledge) hidden
+    const proposedCol = container.querySelector('[aria-label="Spalte: Proposed"]');
+    expect(proposedCol.textContent).toContain('R02');
+    expect(proposedCol.textContent).not.toContain('R01');
+    expect(proposedCol.textContent).not.toContain('R03');
+  });
+
+  it('shows filtered count when any filter is active', async () => {
+    const { container } = renderRetroWithCards({ cards: CARDS_MULTI });
+    await switchToBoard(container);
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-filter-art="retro"]'));
+    });
+
+    // Count indicator appears
+    await waitFor(() => {
+      const filterBar = container.querySelector('[aria-label="Board-Filter"]');
+      expect(filterBar.textContent).toMatch(/\d+\/\d+ Karten/);
+    });
+  });
+
+  it('count not shown when no filter is active', async () => {
+    const { container } = renderRetroWithCards({ cards: CARDS_MULTI });
+    await switchToBoard(container);
+
+    // No filter active — count should not be shown
+    const filterBar = container.querySelector('[aria-label="Board-Filter"]');
+    expect(filterBar.textContent).not.toMatch(/\d+\/\d+ Karten/);
   });
 });
