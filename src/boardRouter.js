@@ -1,19 +1,22 @@
 /**
- * boardRouter — board API routes (read-only, AC1-3, AC5, AC7-9 studis-kanban-board-ux)
+ * boardRouter — board API routes (read-only, AC1-3, AC5, AC7-9 studis-kanban-board-ux;
+ *               AC1-AC2 story-detail-ansicht)
  *
  * Exposes the in-memory Board-Aggregat as read-only JSON.
  *
  * Routes:
- *   GET /api/board/projects           → { projects: [...] }  (full aggregat, legacy)
- *   GET /api/board/projects/list      → { projects: [{slug,feature_count,story_count}] }
- *                                       (leicht, KEIN Story-Scan — AC5)
- *   GET /api/board/projects/:slug     → { project: {...} }  (ein Projekt voll, on-demand — AC5)
- *   POST /api/board/projects/rescan   → { ok: true }  (on-demand re-scan, AC9)
+ *   GET /api/board/projects                          → { projects: [...] }  (full aggregat, legacy)
+ *   GET /api/board/projects/list                     → { projects: [{slug,feature_count,story_count}] }
+ *                                                      (leicht, KEIN Story-Scan — AC5)
+ *   GET /api/board/projects/:slug                    → { project: {...} }  (ein Projekt voll, on-demand — AC5)
+ *   POST /api/board/projects/rescan                  → { ok: true }  (on-demand re-scan, AC9)
+ *   GET /api/board/projects/:slug/stories/:id/detail → { detail: StoryDetail }  (read-only, lazy — AC2)
  *
  * Security:
  *   - Read-only: no writes to board/ files (AC7).
- *   - :slug parameter validated against slug regex before use as index lookup
- *     (slug is compared to in-memory index values only — never used as a filesystem path).
+ *   - :slug and :id parameters validated against regex before use as index lookup.
+ *     slug is compared to in-memory index only (never used as filesystem path).
+ *     id is compared as value only (never used as filesystem path — no traversal).
  *   - Behind existing /api AccessGuard via server.js registration.
  *   - No secrets in output; no new authentication surface.
  *
@@ -26,13 +29,20 @@ import { Router } from 'express';
 const SLUG_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
 
 /**
+ * Valid story ID characters: alphanumeric, dash, underscore, dot.
+ * Must start with alphanumeric. No path traversal possible.
+ */
+const STORY_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
+
+/**
  * Create the board router.
  *
  * @param {object} options
  * @param {import('./BoardAggregator.js').BoardAggregator} options.boardAggregator
+ * @param {import('./StoryMetricReader.js').StoryMetricReader} options.storyMetricReader
  * @returns {import('express').Router}
  */
-export function boardRouter({ boardAggregator }) {
+export function boardRouter({ boardAggregator, storyMetricReader }) {
   const router = Router();
 
   /**
@@ -137,6 +147,53 @@ export function boardRouter({ boardAggregator }) {
   router.post('/api/board/projects/rescan', async (_req, res) => {
     await boardAggregator.scan();
     return res.json({ ok: true });
+  });
+
+  /**
+   * GET /api/board/projects/:slug/stories/:id/detail
+   *
+   * Returns story detail metrics (AC2 story-detail-ansicht): Start/Ende/Dauer,
+   * Agenten-Flow (seq-geordnet), Soll-Ist (ep_est/ep_act/tok/size_est + Abweichungen).
+   *
+   * Read-only, lazy (no scan triggered — StoryMetricReader reads on-demand).
+   * Behind existing /api AccessGuard.
+   *
+   * Security:
+   *   - :slug validated against SLUG_RE; matched against in-memory index (never used as path).
+   *   - :id validated against STORY_ID_RE; used ONLY as a value to compare (never as path).
+   *   - No path traversal possible: repo_path comes from trusted Board-Index.
+   *
+   * Response: { detail: StoryDetail }
+   * 404 if slug unknown/invalid or id format invalid.
+   * 200 with all-null fields if metrics files are missing (AC1 — no crash).
+   */
+  router.get('/api/board/projects/:slug/stories/:id/detail', async (req, res) => {
+    const { slug, id } = req.params;
+
+    // Validate slug format
+    if (!slug || !SLUG_RE.test(slug)) {
+      return res.status(404).json({ error: 'Projekt nicht gefunden.' });
+    }
+
+    // Validate story id format (no traversal — pure value comparison downstream)
+    if (!id || !STORY_ID_RE.test(id)) {
+      return res.status(404).json({ error: 'Story nicht gefunden.' });
+    }
+
+    // Resolve repo_path from trusted in-memory index (slug never used as filesystem path)
+    const projects = await boardAggregator.getIndex();
+    const project = projects.find((p) => p.slug === slug);
+
+    if (!project || project.error) {
+      return res.status(404).json({ error: 'Projekt nicht gefunden.' });
+    }
+
+    const repoPath = project.repo_path;
+
+    // Read metrics (lazy, read-only); missing files → null fields, no crash (AC1)
+    const detail = await storyMetricReader.getDetail(repoPath, id);
+
+    return res.json({ detail });
   });
 
   return router;

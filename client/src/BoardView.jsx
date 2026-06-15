@@ -22,6 +22,15 @@
  *   AC6  — Standalone: öffnet mit Projektliste, Klick lädt ein Projekt (lazy).
  *           Cockpit-Modus (lockedProject): direktes Anzeigen, keine Liste.
  *
+ * story-detail-ansicht:
+ *   AC3  — Klick auf Story-Karte öffnet Detail-Ansicht mit drei Blöcken:
+ *           (1) Zeiten (Start/Ende/Dauer), (2) Agenten-Flow (chronologisch,
+ *           je Schritt Agent/Iteration/Gate/Dauer), (3) Soll-Ist
+ *           (ep_est↔ep_act, tok geschätzt↔tatsächlich, Abweichung %).
+ *           Rückweg zum Board. Touch-Targets ≥ 44 px.
+ *   AC4  — Soll-Ist zeigt ep_est↔ep_act + tok_est↔tok_total mit Abweichung %;
+ *           fehlende Schätzung sauber dargestellt als „keine Schätzung".
+ *
  * Story-Status-Lebenszyklus (board-subsystem §9.3):
  *   To Do | In Progress | Blocked | In Review | Done
  *
@@ -99,6 +108,14 @@ function computeRollup(feature) {
 export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }) {
   // ─── Mode: standalone (lazy) vs cockpit (lockedProject set) ─────────────────
   const isStandalone = !lockedProject;
+
+  // ─── Story Detail (AC3/AC4 story-detail-ansicht) ─────────────────────────────
+  // selectedStory: { slug, storyId, storyTitle } | null
+  const [selectedStory, setSelectedStory] = useState(null);
+  // detailState: 'idle'|'loading'|'ok'|'error'
+  const [detailState, setDetailState] = useState('idle');
+  const [detailData, setDetailData]   = useState(null);
+  const [detailError, setDetailError] = useState('');
 
   // ─── Standalone: project list state (AC6) ───────────────────────────────────
   // listState: 'idle'|'loading'|'ok'|'error'
@@ -233,6 +250,41 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
     setFilterLabel('');
   }, []);
 
+  // ─── Story click → Detail-Ansicht (AC3 story-detail-ansicht) ─────────────────
+  // slug: the current project slug (from standalone selectedSlug or lockedProject)
+  const handleStoryClick = useCallback((slug, story) => {
+    setSelectedStory({ slug, storyId: story.id, storyTitle: story.title || story.id });
+    setDetailState('loading');
+    setDetailData(null);
+    setDetailError('');
+
+    fetch(`/api/board/projects/${encodeURIComponent(slug)}/stories/${encodeURIComponent(story.id)}/detail`)
+      .then((res) => {
+        if (!res.ok) return Promise.reject(new Error(`HTTP ${res.status}`));
+        return res.json();
+      })
+      .then((data) => {
+        setDetailData(data.detail ?? null);
+        setDetailState('ok');
+      })
+      .catch((err) => {
+        setDetailError(err.message || 'Netzwerkfehler');
+        setDetailState('error');
+      });
+  }, []);
+
+  // ─── Back from story detail → board ─────────────────────────────────────────
+  const handleDetailBack = useCallback(() => {
+    setSelectedStory(null);
+    setDetailState('idle');
+    setDetailData(null);
+    setDetailError('');
+  }, []);
+
+  // ─── Current project slug (for story detail API calls) ───────────────────────
+  // In standalone: selectedSlug; in cockpit: lockedProject
+  const currentProjectSlug = isStandalone ? selectedSlug : (lockedProject ?? null);
+
   // ─── Derived: project options for filter dropdown (only in cockpit mode) ─────
   const projectOptions = useMemo(() => {
     return projects
@@ -297,6 +349,19 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
   const hasProjects = loadState === 'ok' && projects.length > 0;
 
   // ─── Render ───────────────────────────────────────────────────────────────────
+
+  // ─── Story Detail View (AC3 story-detail-ansicht) — overlay ─────────────────
+  if (selectedStory !== null) {
+    return (
+      <StoryDetailView
+        story={selectedStory}
+        detailState={detailState}
+        detailData={detailData}
+        detailError={detailError}
+        onBack={handleDetailBack}
+      />
+    );
+  }
 
   return (
     <main style={styles.main} aria-label="Studis-Kanban-Board">
@@ -396,6 +461,9 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
                   key={project.slug ?? project.repo_path ?? project.project_slug}
                   project={project}
                   onOpenSpec={onOpenSpec}
+                  onStoryClick={currentProjectSlug
+                    ? (story) => handleStoryClick(currentProjectSlug, story)
+                    : null}
                 />
               ))}
               {filteredProjects.length === 0 && (filterProject || filterStatus.size > 0 || filterLabel) && (
@@ -468,6 +536,9 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
                   key={project.slug ?? project.repo_path ?? project.project_slug}
                   project={project}
                   onOpenSpec={onOpenSpec}
+                  onStoryClick={currentProjectSlug
+                    ? (story) => handleStoryClick(currentProjectSlug, story)
+                    : null}
                 />
               ))}
               {filteredProjects.length === 0 && (filterProject || filterStatus.size > 0 || filterLabel) && (
@@ -748,9 +819,13 @@ function ProjectListItem({ item, onSelect }) {
  * One project block: header + list of features (AC4).
  * If the project has an error, renders an error badge (AC8).
  *
- * @param {{ project: object, onOpenSpec?: (relPath: string) => void }} props
+ * @param {{
+ *   project: object,
+ *   onOpenSpec?: (relPath: string) => void,
+ *   onStoryClick?: (story: object) => void,
+ * }} props
  */
-function ProjectSection({ project, onOpenSpec }) {
+function ProjectSection({ project, onOpenSpec, onStoryClick }) {
   const slug = project.slug || project.project_slug || project.repo_path || '?';
 
   return (
@@ -785,6 +860,7 @@ function ProjectSection({ project, onOpenSpec }) {
           key={feature.id}
           feature={feature}
           onOpenSpec={onOpenSpec}
+          onStoryClick={onStoryClick}
         />
       ))}
     </section>
@@ -797,9 +873,13 @@ function ProjectSection({ project, onOpenSpec }) {
  * One feature row: title, rollup bar (AC5), then stories in status columns (AC4).
  * Klick auf den Feature-Titel öffnet/schliesst das Detail-Panel (goal, DoD, …).
  *
- * @param {{ feature: object, onOpenSpec?: (relPath: string) => void }} props
+ * @param {{
+ *   feature: object,
+ *   onOpenSpec?: (relPath: string) => void,
+ *   onStoryClick?: (story: object) => void,
+ * }} props
  */
-function FeatureRow({ feature, onOpenSpec }) {
+function FeatureRow({ feature, onOpenSpec, onStoryClick }) {
   const [detailOpen, setDetailOpen] = useState(false);
   const rollup = computeRollup(feature);
   const stories = Array.isArray(feature.stories) ? feature.stories : [];
@@ -875,6 +955,7 @@ function FeatureRow({ feature, onOpenSpec }) {
               status={status}
               stories={byStatus[status]}
               onOpenSpec={onOpenSpec}
+              onStoryClick={onStoryClick}
             />
           ))}
         </div>
@@ -991,9 +1072,14 @@ function RollupBar({ done, total }) {
  * One status column with a header label and list of StoryCards.
  * Always rendered (even when empty) so the grid is consistent (AC4).
  *
- * @param {{ status: string, stories: object[], onOpenSpec?: (relPath: string) => void }} props
+ * @param {{
+ *   status: string,
+ *   stories: object[],
+ *   onOpenSpec?: (relPath: string) => void,
+ *   onStoryClick?: (story: object) => void,
+ * }} props
  */
-function StatusColumn({ status, stories, onOpenSpec }) {
+function StatusColumn({ status, stories, onOpenSpec, onStoryClick }) {
   return (
     <div
       role="listitem"
@@ -1011,7 +1097,12 @@ function StatusColumn({ status, stories, onOpenSpec }) {
       </div>
 
       {stories.map((story) => (
-        <StoryCard key={story.id} story={story} onOpenSpec={onOpenSpec} />
+        <StoryCard
+          key={story.id}
+          story={story}
+          onOpenSpec={onOpenSpec}
+          onStoryClick={onStoryClick}
+        />
       ))}
     </div>
   );
@@ -1023,16 +1114,17 @@ function StatusColumn({ status, stories, onOpenSpec }) {
  * Story card: id, title, priority, labels, spec link (AC3 model fields).
  * AC5 — Spec-Bezug ist klickbar (wenn onOpenSpec vorhanden): öffnet Spec im
  *        Spezifikation-Reiter. story.spec enthält den relativen Pfad (z.B. docs/specs/foo.md).
+ * AC3 (story-detail-ansicht) — Karte als Button klickbar wenn onStoryClick vorhanden.
  *
- * @param {{ story: object, onOpenSpec?: (relPath: string) => void }} props
+ * @param {{
+ *   story: object,
+ *   onOpenSpec?: (relPath: string) => void,
+ *   onStoryClick?: (story: object) => void,
+ * }} props
  */
-function StoryCard({ story, onOpenSpec }) {
-  return (
-    <article
-      style={styles.storyCard}
-      aria-label={`Story: ${story.title || story.id}`}
-      data-story={story.id}
-    >
+function StoryCard({ story, onOpenSpec, onStoryClick }) {
+  const cardContent = (
+    <>
       <div style={styles.storyHeader}>
         <span style={styles.storyId} aria-label="Story-ID">{story.id}</span>
         {story.priority && (
@@ -1065,7 +1157,7 @@ function StoryCard({ story, onOpenSpec }) {
             <button
               type="button"
               style={styles.specLink}
-              onClick={() => onOpenSpec(story.spec)}
+              onClick={(e) => { e.stopPropagation(); onOpenSpec(story.spec); }}
               aria-label={`Spec öffnen: ${story.spec}`}
               data-testid={`spec-link-${story.id}`}
             >
@@ -1076,8 +1168,263 @@ function StoryCard({ story, onOpenSpec }) {
           )}
         </div>
       )}
+    </>
+  );
+
+  // AC3 (story-detail-ansicht): when onStoryClick is provided, wrap the card in a button
+  if (onStoryClick) {
+    return (
+      <button
+        type="button"
+        style={{ ...styles.storyCard, ...styles.storyCardBtn }}
+        aria-label={`Story: ${story.title || story.id}`}
+        data-story={story.id}
+        onClick={() => onStoryClick(story)}
+        data-testid={`story-card-btn-${story.id}`}
+      >
+        {cardContent}
+      </button>
+    );
+  }
+
+  return (
+    <article
+      style={styles.storyCard}
+      aria-label={`Story: ${story.title || story.id}`}
+      data-story={story.id}
+    >
+      {cardContent}
     </article>
   );
+}
+
+// ── StoryDetailView ───────────────────────────────────────────────────────────
+
+/**
+ * Story-Detail-Ansicht (AC3/AC4 story-detail-ansicht).
+ *
+ * Drei Blöcke:
+ *   (1) Zeiten       — Start / Ende / Dauer
+ *   (2) Agenten-Flow — chronologisch: Agent / Iteration / Gate / Dauer
+ *   (3) Soll-Ist     — ep_est↔ep_act, tok_est↔tok_total, Abweichung %;
+ *                      fehlende Schätzung → „keine Schätzung"
+ *
+ * Rückweg zum Board per onBack (AC3 Rückweg vorhanden).
+ * Touch-Targets ≥ 44 px (WCAG 2.1 AA).
+ *
+ * @param {{
+ *   story: { slug: string, storyId: string, storyTitle: string },
+ *   detailState: 'idle'|'loading'|'ok'|'error',
+ *   detailData: object|null,
+ *   detailError: string,
+ *   onBack: () => void,
+ * }} props
+ */
+function StoryDetailView({ story, detailState, detailData, detailError, onBack }) {
+  /**
+   * Format ISO timestamp to readable locale string (no dangerouslySetInnerHTML).
+   * Returns '—' when ts is null/invalid.
+   */
+  function fmtTs(ts) {
+    if (!ts) return '—';
+    try {
+      return new Date(ts).toLocaleString();
+    } catch {
+      return String(ts);
+    }
+  }
+
+  /**
+   * Format duration (seconds) to readable string.
+   */
+  function fmtDuration(secs) {
+    if (secs == null) return '—';
+    const s = Math.round(secs);
+    if (s < 60) return `${s} s`;
+    const m = Math.floor(s / 60);
+    const rem = s % 60;
+    return rem > 0 ? `${m} min ${rem} s` : `${m} min`;
+  }
+
+  /**
+   * Format a numeric value with a fallback.
+   */
+  function fmtNum(v, fallback = '—') {
+    return v != null ? String(v) : fallback;
+  }
+
+  /**
+   * Format deviation percentage with sign.
+   */
+  function fmtDevPct(pct) {
+    if (pct == null) return '—';
+    const sign = pct > 0 ? '+' : '';
+    return `${sign}${pct}%`;
+  }
+
+  return (
+    <main style={styles.main} aria-label={`Story-Detail: ${story.storyTitle}`}>
+      {/* ── Back button (AC3 — Rückweg vorhanden) ──────────────────────────── */}
+      <button
+        type="button"
+        style={styles.backBtn}
+        onClick={onBack}
+        aria-label="Zurück zum Board"
+        data-testid="detail-back-btn"
+      >
+        ← Board
+      </button>
+
+      <h1 style={styles.h1}>{story.storyId}: {story.storyTitle}</h1>
+
+      {/* Loading */}
+      {detailState === 'loading' && (
+        <div aria-busy="true" aria-live="polite" style={styles.statusMsg}
+          data-testid="detail-loading">
+          Lade Story-Details…
+        </div>
+      )}
+
+      {/* Error */}
+      {detailState === 'error' && (
+        <div role="alert" style={styles.errorMsg} data-testid="detail-error">
+          Fehler beim Laden der Story-Details: {detailError}
+        </div>
+      )}
+
+      {/* Detail blocks (AC3/AC4) */}
+      {detailState === 'ok' && detailData != null && (
+        <div style={styles.detailBlocks} data-testid="detail-blocks">
+
+          {/* ── Block 1: Zeiten (AC3) ──────────────────────────────────────── */}
+          <section style={styles.detailBlock} aria-label="Zeiten" data-testid="block-zeiten">
+            <h2 style={styles.detailBlockTitle}>Zeiten</h2>
+            <dl style={styles.detailDl}>
+              <dt style={styles.detailTerm}>Start</dt>
+              <dd style={styles.detailDesc} data-testid="detail-started-at">
+                {fmtTs(detailData.started_at)}
+              </dd>
+              <dt style={styles.detailTerm}>Ende</dt>
+              <dd style={styles.detailDesc} data-testid="detail-ended-at">
+                {fmtTs(detailData.ended_at)}
+              </dd>
+              <dt style={styles.detailTerm}>Dauer</dt>
+              <dd style={styles.detailDesc} data-testid="detail-duration">
+                {fmtDuration(detailData.duration)}
+              </dd>
+            </dl>
+          </section>
+
+          {/* ── Block 2: Agenten-Flow (AC3) ────────────────────────────────── */}
+          <section style={styles.detailBlock} aria-label="Agenten-Flow" data-testid="block-flow">
+            <h2 style={styles.detailBlockTitle}>Agenten-Flow</h2>
+            {(!detailData.flow || detailData.flow.length === 0) ? (
+              <p style={styles.hintMsg} data-testid="flow-empty">Keine Flow-Daten vorhanden.</p>
+            ) : (
+              <table style={styles.flowTable} aria-label="Agenten-Flow-Schritte">
+                <thead>
+                  <tr>
+                    <th style={styles.flowTh}>Seq</th>
+                    <th style={styles.flowTh}>Agent</th>
+                    <th style={styles.flowTh}>Iter.</th>
+                    <th style={styles.flowTh}>Gate</th>
+                    <th style={styles.flowTh}>Dauer</th>
+                    <th style={styles.flowTh}>Tokens</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {detailData.flow.map((step, idx) => (
+                    <tr key={idx} data-testid={`flow-step-${idx}`}>
+                      <td style={styles.flowTd}>{fmtNum(step.seq)}</td>
+                      <td style={styles.flowTd}>{step.agent ?? '—'}</td>
+                      <td style={styles.flowTd}>{fmtNum(step.iter)}</td>
+                      <td style={styles.flowTd}>{step.gate ?? '—'}</td>
+                      <td style={styles.flowTd}>
+                        {step.secs != null ? fmtDuration(step.secs) : '—'}
+                      </td>
+                      <td style={styles.flowTd}>{fmtNum(step.tok)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </section>
+
+          {/* ── Block 3: Soll-Ist (AC3/AC4) ────────────────────────────────── */}
+          <section style={styles.detailBlock} aria-label="Soll-Ist" data-testid="block-soll-ist">
+            <h2 style={styles.detailBlockTitle}>Soll-Ist</h2>
+            <table style={styles.flowTable} aria-label="Soll-Ist-Vergleich">
+              <thead>
+                <tr>
+                  <th style={styles.flowTh}>Metrik</th>
+                  <th style={styles.flowTh}>Schätzung</th>
+                  <th style={styles.flowTh}>Ist</th>
+                  <th style={styles.flowTh}>Abweichung</th>
+                </tr>
+              </thead>
+              <tbody>
+                {/* Effort Points */}
+                <tr data-testid="soll-ist-ep">
+                  <td style={styles.flowTd}>Effort Points</td>
+                  <td style={styles.flowTd} data-testid="ep-est">
+                    {detailData.ep_est != null ? detailData.ep_est : (
+                      <span style={styles.noEstimate}>keine Schätzung</span>
+                    )}
+                  </td>
+                  <td style={styles.flowTd} data-testid="ep-act">
+                    {fmtNum(detailData.ep_act)}
+                  </td>
+                  <td style={{
+                    ...styles.flowTd,
+                    color: devColor(detailData.ep_dev_pct),
+                  }} data-testid="ep-dev">
+                    {fmtDevPct(detailData.ep_dev_pct)}
+                  </td>
+                </tr>
+                {/* Tokens */}
+                <tr data-testid="soll-ist-tok">
+                  <td style={styles.flowTd}>Tokens</td>
+                  <td style={styles.flowTd} data-testid="tok-est">
+                    {detailData.tok_est != null ? detailData.tok_est : (
+                      <span style={styles.noEstimate}>keine Schätzung</span>
+                    )}
+                  </td>
+                  <td style={styles.flowTd} data-testid="tok-total">
+                    {fmtNum(detailData.tok_total)}
+                  </td>
+                  <td style={{
+                    ...styles.flowTd,
+                    color: devColor(detailData.tok_dev_pct),
+                  }} data-testid="tok-dev">
+                    {fmtDevPct(detailData.tok_dev_pct)}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </section>
+        </div>
+      )}
+
+      {/* Loaded but no data (metrics missing) */}
+      {detailState === 'ok' && detailData == null && (
+        <div role="status" style={styles.statusMsg} data-testid="detail-no-data">
+          Keine Metrik-Daten für diese Story vorhanden.
+        </div>
+      )}
+    </main>
+  );
+}
+
+/**
+ * Color for deviation (positive = over-estimate → red, negative = under → green).
+ * @param {number|null} pct
+ * @returns {string}
+ */
+function devColor(pct) {
+  if (pct == null) return '#9ca3af';
+  if (pct > 0) return '#f87171'; // red: exceeded estimate
+  if (pct < 0) return '#86efac'; // green: under estimate
+  return '#9ca3af';
 }
 
 // ── StatusBadge ───────────────────────────────────────────────────────────────
@@ -1600,5 +1947,70 @@ const styles = {
     borderRadius: 10,
     border: '1px solid',
     flexShrink: 0,
+  },
+
+  // ── Story card as clickable button (AC3 story-detail-ansicht)
+  storyCardBtn: {
+    display: 'block',
+    width: '100%',
+    textAlign: 'left',
+    cursor: 'pointer',
+    minHeight: 44, // Touch-Target ≥ 44 px (WCAG 2.1 AA)
+    // Focus ring preserved (no outline:none)
+  },
+
+  // ── Story Detail View (AC3/AC4 story-detail-ansicht)
+  detailBlocks: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 20,
+  },
+
+  detailBlock: {
+    background: '#111',
+    border: '1px solid #2a2a2a',
+    borderRadius: 8,
+    padding: '16px 20px',
+  },
+
+  detailBlockTitle: {
+    margin: '0 0 12px',
+    fontSize: 15,
+    fontWeight: 700,
+    color: '#e5e7eb',
+    borderBottom: '1px solid #2a2a2a',
+    paddingBottom: 8,
+  },
+
+  // ── Flow / Soll-Ist table
+  flowTable: {
+    width: '100%',
+    borderCollapse: 'collapse',
+    fontSize: 12,
+    color: '#d1d5db',
+  },
+
+  flowTh: {
+    textAlign: 'left',
+    padding: '4px 8px',
+    fontSize: 11,
+    fontWeight: 600,
+    color: '#6b7280',
+    borderBottom: '1px solid #2a2a2a',
+    letterSpacing: '0.04em',
+  },
+
+  flowTd: {
+    padding: '5px 8px',
+    fontSize: 12,
+    color: '#d1d5db',
+    borderBottom: '1px solid #1e1e1e',
+    fontFamily: 'monospace',
+  },
+
+  noEstimate: {
+    color: '#6b7280',
+    fontStyle: 'italic',
+    fontFamily: 'inherit',
   },
 };

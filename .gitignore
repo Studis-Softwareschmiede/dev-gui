@@ -5,3 +5,10 @@ build/
 client/dist/
 .claude/worktrees/
 test/.tmp-*/
+
+# lokale, host-spezifische Compose-Overrides (BOARD_ROOTS etc.) — nicht ins Repo
+docker-compose.override.yml
+
+# Metrik-Ledger (lokal, append-only; baseline.json wird separat gepflegt)
+.claude/metrics/dispatches.jsonl
+.claude/metrics/items.jsonl

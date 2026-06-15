@@ -1751,3 +1751,417 @@ describe('BoardView — projekt-spezifikation-anzeige AC5: Spec-Link in StoryCar
     expect(specLink.style.minHeight).toBe('44px');
   });
 });
+
+// ── story-detail-ansicht: AC3/AC4 — Story-Klick öffnet Detail-Ansicht ─────────
+
+/**
+ * Fixture: detail data returned by GET .../stories/:id/detail
+ */
+const STORY_DETAIL_FULL = {
+  started_at:  '2025-01-10T10:00:00.000Z',
+  ended_at:    '2025-01-10T10:05:00.000Z',
+  duration:    300,
+  flow: [
+    { seq: 1, agent: 'coder',    iter: 1, gate: null,   secs: 120, tok: 800 },
+    { seq: 2, agent: 'reviewer', iter: 1, gate: 'PASS', secs:  60, tok: 400 },
+  ],
+  ep_est:      3,
+  ep_act:      4,
+  tok_est:     1200,
+  tok_total:   1500,
+  size_est:    'M',
+  ep_dev:      1,
+  ep_dev_pct:  33.3,
+  tok_dev:     300,
+  tok_dev_pct: 25,
+};
+
+const STORY_DETAIL_MISSING = {
+  started_at:  null,
+  ended_at:    null,
+  duration:    null,
+  flow:        [],
+  ep_est:      null,
+  ep_act:      null,
+  tok_est:     null,
+  tok_total:   null,
+  size_est:    null,
+  ep_dev:      null,
+  ep_dev_pct:  null,
+  tok_dev:     null,
+  tok_dev_pct: null,
+};
+
+/**
+ * Build a fetch mock that handles board API + story detail endpoint.
+ */
+function makeBoardFetchWithDetail({ fullProjects = [], detailData = STORY_DETAIL_FULL } = {}) {
+  const boardMock = makeBoardFetch({ fullProjects });
+  return jest.fn(async (url) => {
+    // Detail endpoint: /api/board/projects/:slug/stories/:id/detail
+    if (/\/stories\/[^/]+\/detail$/.test(url)) {
+      return { ok: true, status: 200, json: async () => ({ detail: detailData }) };
+    }
+    return boardMock(url);
+  });
+}
+
+describe('story-detail-ansicht — AC3: Story-Klick öffnet Detail-Ansicht', () => {
+  it('story card is rendered as a clickable button when project is loaded (cockpit)', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-story="S-001"]')).toBeTruthy();
+    });
+
+    // The story card should be a button
+    const storyBtn = container.querySelector('[data-testid="story-card-btn-S-001"]');
+    expect(storyBtn).toBeTruthy();
+    expect(storyBtn.tagName).toBe('BUTTON');
+  });
+
+  it('clicking story card opens detail view with story title in heading', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="story-card-btn-S-001"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="story-card-btn-S-001"]'));
+    });
+
+    await waitFor(() => {
+      const h1 = container.querySelector('h1');
+      expect(h1?.textContent).toMatch(/S-001/);
+    });
+  });
+
+  it('detail view shows loading state while fetching', async () => {
+    let resolveDetail;
+    globalThis.fetch = jest.fn(async (url) => {
+      if (/\/stories\/[^/]+\/detail$/.test(url)) {
+        await new Promise((r) => { resolveDetail = r; });
+        return { ok: true, json: async () => ({ detail: STORY_DETAIL_FULL }) };
+      }
+      return makeBoardFetch({ fullProjects: [PROJECT_A] })(url);
+    });
+
+    const { container } = renderCockpit('project-alpha');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="story-card-btn-S-001"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="story-card-btn-S-001"]'));
+    });
+
+    // Loading indicator must appear
+    expect(container.querySelector('[data-testid="detail-loading"]')).toBeTruthy();
+
+    await act(async () => { resolveDetail(); });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="detail-blocks"]')).toBeTruthy();
+    });
+  });
+
+  it('detail view shows back button', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="story-card-btn-S-001"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="story-card-btn-S-001"]'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="detail-back-btn"]')).toBeTruthy();
+    });
+  });
+
+  it('back button returns to board view', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="story-card-btn-S-001"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="story-card-btn-S-001"]'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="detail-back-btn"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="detail-back-btn"]'));
+    });
+
+    await waitFor(() => {
+      // Back to board — story cards visible again
+      expect(container.querySelector('[data-story="S-001"]')).toBeTruthy();
+      expect(container.querySelector('[data-testid="detail-blocks"]')).toBeNull();
+    });
+  });
+
+  it('detail view has aria-label with story title (A11y)', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="story-card-btn-S-001"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="story-card-btn-S-001"]'));
+    });
+
+    await waitFor(() => {
+      const main = container.querySelector('main');
+      expect(main?.getAttribute('aria-label')).toMatch(/S-001|Erstelle Login-Seite/);
+    });
+  });
+
+  it('detail view calls GET .../stories/:id/detail endpoint', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="story-card-btn-S-001"]')).toBeTruthy();
+    });
+
+    const callsBefore = globalThis.fetch.mock.calls.length;
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="story-card-btn-S-001"]'));
+    });
+
+    await waitFor(() => {
+      const detailCalls = globalThis.fetch.mock.calls.filter((c) =>
+        /\/stories\/S-001\/detail$/.test(c[0])
+      );
+      expect(detailCalls).toHaveLength(1);
+      expect(globalThis.fetch.mock.calls.length).toBe(callsBefore + 1);
+    });
+  });
+
+  it('detail view shows error when fetch fails', async () => {
+    globalThis.fetch = jest.fn(async (url) => {
+      if (/\/stories\/[^/]+\/detail$/.test(url)) {
+        return { ok: false, status: 500, json: async () => ({}) };
+      }
+      return makeBoardFetch({ fullProjects: [PROJECT_A] })(url);
+    });
+
+    const { container } = renderCockpit('project-alpha');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="story-card-btn-S-001"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="story-card-btn-S-001"]'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="detail-error"]')).toBeTruthy();
+    });
+  });
+
+  it('story card button has minHeight 44px (Touch-Target ≥ 44 px, AC3)', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="story-card-btn-S-001"]')).toBeTruthy();
+    });
+
+    const btn = container.querySelector('[data-testid="story-card-btn-S-001"]');
+    // jsdom exposes inline styles via element.style — check minHeight from storyCardBtn style
+    expect(btn.style.minHeight).toBe('44px');
+  });
+});
+
+describe('story-detail-ansicht — AC3: Drei Blöcke in Detail-Ansicht', () => {
+  async function openStoryDetail(container) {
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="story-card-btn-S-001"]')).toBeTruthy();
+    });
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="story-card-btn-S-001"]'));
+    });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="detail-blocks"]')).toBeTruthy();
+    });
+  }
+
+  it('block Zeiten is present', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+    await openStoryDetail(container);
+    expect(container.querySelector('[data-testid="block-zeiten"]')).toBeTruthy();
+  });
+
+  it('block Agenten-Flow is present', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+    await openStoryDetail(container);
+    expect(container.querySelector('[data-testid="block-flow"]')).toBeTruthy();
+  });
+
+  it('block Soll-Ist is present', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+    await openStoryDetail(container);
+    expect(container.querySelector('[data-testid="block-soll-ist"]')).toBeTruthy();
+  });
+
+  it('Zeiten block shows started_at, ended_at, duration', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+    await openStoryDetail(container);
+
+    const startEl = container.querySelector('[data-testid="detail-started-at"]');
+    const endEl   = container.querySelector('[data-testid="detail-ended-at"]');
+    const durEl   = container.querySelector('[data-testid="detail-duration"]');
+
+    expect(startEl).toBeTruthy();
+    expect(startEl.textContent).not.toBe('');
+    expect(endEl).toBeTruthy();
+    expect(durEl).toBeTruthy();
+    expect(durEl.textContent).toMatch(/5 min|300/);
+  });
+
+  it('Agenten-Flow block shows flow steps with agent names', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+    await openStoryDetail(container);
+
+    const flowBlock = container.querySelector('[data-testid="block-flow"]');
+    expect(flowBlock.textContent).toMatch(/coder/);
+    expect(flowBlock.textContent).toMatch(/reviewer/);
+  });
+
+  it('Agenten-Flow shows all seq-ordered steps', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+    await openStoryDetail(container);
+
+    expect(container.querySelector('[data-testid="flow-step-0"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="flow-step-1"]')).toBeTruthy();
+  });
+
+  it('Soll-Ist block shows ep_est and ep_act', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+    await openStoryDetail(container);
+
+    const epEst = container.querySelector('[data-testid="ep-est"]');
+    const epAct = container.querySelector('[data-testid="ep-act"]');
+    expect(epEst.textContent).toContain('3');
+    expect(epAct.textContent).toContain('4');
+  });
+
+  it('Soll-Ist block shows tok_est and tok_total', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+    await openStoryDetail(container);
+
+    const tokEst   = container.querySelector('[data-testid="tok-est"]');
+    const tokTotal = container.querySelector('[data-testid="tok-total"]');
+    expect(tokEst.textContent).toContain('1200');
+    expect(tokTotal.textContent).toContain('1500');
+  });
+
+  it('Soll-Ist block shows ep deviation percentage', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+    await openStoryDetail(container);
+
+    const epDev = container.querySelector('[data-testid="ep-dev"]');
+    expect(epDev.textContent).toMatch(/33/);
+  });
+});
+
+describe('story-detail-ansicht — AC4: fehlende Schätzung sauber dargestellt', () => {
+  async function openDetailMissing(container) {
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="story-card-btn-S-001"]')).toBeTruthy();
+    });
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="story-card-btn-S-001"]'));
+    });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="detail-blocks"]')).toBeTruthy();
+    });
+  }
+
+  it('shows "keine Schätzung" for ep_est when null (AC4)', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({
+      fullProjects: [PROJECT_A],
+      detailData: STORY_DETAIL_MISSING,
+    });
+    const { container } = renderCockpit('project-alpha');
+    await openDetailMissing(container);
+
+    const epEst = container.querySelector('[data-testid="ep-est"]');
+    expect(epEst.textContent).toMatch(/keine Schätzung/i);
+  });
+
+  it('shows "keine Schätzung" for tok_est when null (AC4)', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({
+      fullProjects: [PROJECT_A],
+      detailData: STORY_DETAIL_MISSING,
+    });
+    const { container } = renderCockpit('project-alpha');
+    await openDetailMissing(container);
+
+    const tokEst = container.querySelector('[data-testid="tok-est"]');
+    expect(tokEst.textContent).toMatch(/keine Schätzung/i);
+  });
+
+  it('shows "Keine Flow-Daten vorhanden" when flow is empty (AC4)', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({
+      fullProjects: [PROJECT_A],
+      detailData: STORY_DETAIL_MISSING,
+    });
+    const { container } = renderCockpit('project-alpha');
+    await openDetailMissing(container);
+
+    const flowEmpty = container.querySelector('[data-testid="flow-empty"]');
+    expect(flowEmpty).toBeTruthy();
+    expect(flowEmpty.textContent).toMatch(/keine flow-daten/i);
+  });
+
+  it('shows "—" for started_at when null (no crash)', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({
+      fullProjects: [PROJECT_A],
+      detailData: STORY_DETAIL_MISSING,
+    });
+    const { container } = renderCockpit('project-alpha');
+    await openDetailMissing(container);
+
+    const startEl = container.querySelector('[data-testid="detail-started-at"]');
+    expect(startEl.textContent).toBe('—');
+  });
+
+  it('shows "—" for deviation when null', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({
+      fullProjects: [PROJECT_A],
+      detailData: STORY_DETAIL_MISSING,
+    });
+    const { container } = renderCockpit('project-alpha');
+    await openDetailMissing(container);
+
+    const epDev = container.querySelector('[data-testid="ep-dev"]');
+    expect(epDev.textContent).toBe('—');
+  });
+});
