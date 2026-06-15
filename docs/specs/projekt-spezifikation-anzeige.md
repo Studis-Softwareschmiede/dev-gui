@@ -1,7 +1,7 @@
 ---
 id: projekt-spezifikation-anzeige
 title: Projekt-Spezifikation — Repo-Doku (README/Konzept/Architektur/Specs) im Studis-Kanban-Board
-status: draft
+status: active
 version: 1
 ---
 

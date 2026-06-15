@@ -1,7 +1,7 @@
 ---
 id: projekt-cockpit-navigation
 title: Projekt-Cockpit — projekt-zentrierte Fabrik-Navigation (Repo-Übersicht → Projekt → Aktion)
-status: draft
+status: active
 version: 1
 ---
 
