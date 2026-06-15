@@ -1,5 +1,5 @@
 /**
- * BoardView.jsx — Board-Aggregator Übersichts-View: Projekt → Feature → Story.
+ * BoardView.jsx — Studis-Kanban-Board: Projekt → Feature → Story.
  *
  * dev-gui-board-aggregator:
  *   AC4  — Dreistufige Übersicht Projekt → Feature → Story mit Status-Spalten
@@ -11,11 +11,22 @@
  *   AC6  — Filter nach Projekt, Story-Status und Label (alle unabhängig kombinierbar).
  *          Status-Filter: Mehrfachauswahl per Checkbox-Gruppe (leere Auswahl = alle sichtbar).
  *
+ * studis-kanban-board-ux:
+ *   AC1  — Umbenennung: View-Titel + aria-label = „Studis-Kanban-Board". Route-id bleibt `board`.
+ *   AC2  — Status-Filter-Default: alle 5 Status vorausgewählt (alles sichtbar);
+ *           Deselektieren blendet aus.
+ *   AC3  — Alle Status deselektiert → keine Stories + role=status „Kein Status gewählt".
+ *   AC4  — Status-Filter als Popover: Button „Status (n/5) ▾", Klick-Toggle,
+ *           schließt bei Außenklick + Esc; aria-expanded/-controls.
+ *   AC5  — GET /api/board/projects/list (leicht) + GET /api/board/projects/:slug (voll).
+ *   AC6  — Standalone: öffnet mit Projektliste, Klick lädt ein Projekt (lazy).
+ *           Cockpit-Modus (lockedProject): direktes Anzeigen, keine Liste.
+ *
  * Story-Status-Lebenszyklus (board-subsystem §9.3):
  *   To Do | In Progress | Blocked | In Review | Done
  *
  * A11y (WCAG 2.1 AA):
- *   - <main> mit aria-label.
+ *   - <main> mit aria-label „Studis-Kanban-Board".
  *   - aria-busy / aria-live für Ladezustand.
  *   - Sichtbarer Fokusring — KEIN outline:none (coder lesson 2026-05-27).
  *   - Touch-Targets ≥ 44 px für interaktive Elemente.
@@ -26,10 +37,10 @@
  *   - Nur /api/board/* Endpunkte (hinter AccessGuard).
  *   - Keine Secrets im Bundle.
  *
- * @param {{ onNavigate: (view: string) => void }} props
+ * @param {{ onNavigate: (view: string) => void, lockedProject?: string }} props
  */
 
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 
 // ── Status-Lebensyklus (board-subsystem §9.3) ─────────────────────────────────
 
@@ -77,48 +88,148 @@ function computeRollup(feature) {
  *   onNavigate: (view: string) => void,
  *   lockedProject?: string,
  * }} props
- *   lockedProject — when set, the board is pre-filtered to this project slug/repo_path
- *   and the project-filter dropdown is hidden (AC6 Cockpit-Kontext, S-113).
+ *   lockedProject — when set (Cockpit-Modus / F-005), shows that project directly
+ *   without project list; project-filter dropdown is hidden (AC6/studis-kanban-board-ux).
+ *   When absent (STANDALONE #/board), shows project list first — lazy-load mode (AC6).
  */
 export function BoardView({ onNavigate: _onNavigate, lockedProject }) {
-  // ── Data state
+  // ─── Mode: standalone (lazy) vs cockpit (lockedProject set) ─────────────────
+  const isStandalone = !lockedProject;
+
+  // ─── Standalone: project list state (AC6) ───────────────────────────────────
+  // listState: 'idle'|'loading'|'ok'|'error'
+  const [listState, setListState]   = useState('idle');
+  const [listError, setListError]   = useState('');
+  /** @type {[Array<{slug:string,feature_count?:number,story_count?:number,error?:string}>, Function]} */
+  const [projectList, setProjectList] = useState([]);
+  // selectedSlug: the project the user clicked on (null = showing project list)
+  const [selectedSlug, setSelectedSlug] = useState(null);
+
+  // ─── Data state: full project loaded on-demand (AC6 standalone) or on mount (cockpit) ─
   const [loadState, setLoadState] = useState('idle'); // 'idle'|'loading'|'ok'|'error'
   const [loadError, setLoadError] = useState('');
+  // In cockpit mode: projects = [ lockedProject full data ]
+  // In standalone mode: projects = [ selectedProject full data ]
   const [projects, setProjects] = useState([]);
 
-  // ── Filter state (AC6)
-  // When lockedProject is set, filterProject is initialised to it and cannot be changed
-  // by the user (the project-filter dropdown is hidden — no own selector, AC6/S-113).
+  // ─── Filter state (AC2, AC3, AC4) ───────────────────────────────────────────
+  // AC2: default = all 5 status selected (new Set(STATUS_LIFECYCLE))
   const [filterProject, setFilterProject] = useState(lockedProject ?? '');
-  const [filterStatus, setFilterStatus]   = useState(new Set()); // empty Set = alle sichtbar
-  const [filterLabel, setFilterLabel]     = useState('');    // '' = alle (free-text)
+  const [filterStatus, setFilterStatus]   = useState(() => new Set(STATUS_LIFECYCLE)); // AC2: alle vorausgewählt
+  const [filterLabel, setFilterLabel]     = useState('');
 
-  // ── Load once on mount (AC4)
+  // ─── STANDALONE: load project list on mount (AC6) ───────────────────────────
   useEffect(() => {
-    let cancelled = false;
-    setLoadState('loading');
-    setLoadError('');
+    if (!isStandalone) return;
 
-    fetch('/api/board/projects')
+    let cancelled = false;
+    setListState('loading');
+    setListError('');
+
+    fetch('/api/board/projects/list')
       .then((res) => {
         if (!res.ok) return Promise.reject(new Error(`HTTP ${res.status}`));
         return res.json();
       })
       .then((data) => {
         if (cancelled) return;
-        setProjects(data.projects ?? []);
+        setProjectList(data.projects ?? []);
+        setListState('ok');
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setListError(err.message || 'Netzwerkfehler');
+        setListState('error');
+      });
+
+    return () => { cancelled = true; };
+  }, [isStandalone]);
+
+  // ─── COCKPIT: load the locked project on mount (AC6 cockpit mode) ────────────
+  useEffect(() => {
+    if (isStandalone) return;
+    if (!lockedProject) return;
+
+    let cancelled = false;
+    setLoadState('loading');
+    setLoadError('');
+
+    fetch(`/api/board/projects/${encodeURIComponent(lockedProject)}`)
+      .then((res) => {
+        if (!res.ok) return Promise.reject(new Error(`HTTP ${res.status}`));
+        return res.json();
+      })
+      .then((data) => {
+        if (cancelled) return;
+        const proj = data.project ?? null;
+        setProjects(proj ? [proj] : []);
         setLoadState('ok');
       })
       .catch((err) => {
         if (cancelled) return;
-        setLoadError(err.message || 'Netzwerkfehler');
-        setLoadState('error');
+        // Fallback: try the full list endpoint so Cockpit doesn't break
+        // if the slug doesn't match (e.g. lockedProject = repo path not slug)
+        fetch('/api/board/projects')
+          .then((r) => {
+            if (!r.ok) return Promise.reject(new Error(`HTTP ${r.status}`));
+            return r.json();
+          })
+          .then((data) => {
+            if (cancelled) return;
+            const all = data.projects ?? [];
+            const filtered = all.filter((p) => {
+              const slug = p.slug || p.project_slug || p.repo_path || '';
+              return slug === lockedProject;
+            });
+            setProjects(filtered.length > 0 ? filtered : all);
+            setLoadState('ok');
+          })
+          .catch((err2) => {
+            if (cancelled) return;
+            setLoadError(err2.message || err.message || 'Netzwerkfehler');
+            setLoadState('error');
+          });
       });
 
     return () => { cancelled = true; };
-  }, []); // mount once
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lockedProject]); // re-run if locked project changes
 
-  // ── Derived: project options for filter dropdown (AC6)
+  // ─── STANDALONE: load single project when user clicks (AC6) ─────────────────
+  const handleProjectSelect = useCallback((slug) => {
+    setSelectedSlug(slug);
+    setLoadState('loading');
+    setLoadError('');
+    setProjects([]);
+
+    fetch(`/api/board/projects/${encodeURIComponent(slug)}`)
+      .then((res) => {
+        if (!res.ok) return Promise.reject(new Error(`HTTP ${res.status}`));
+        return res.json();
+      })
+      .then((data) => {
+        const proj = data.project ?? null;
+        setProjects(proj ? [proj] : []);
+        setLoadState('ok');
+      })
+      .catch((err) => {
+        setLoadError(err.message || 'Netzwerkfehler');
+        setLoadState('error');
+      });
+  }, []);
+
+  // ─── STANDALONE: back to project list ────────────────────────────────────────
+  const handleBackToList = useCallback(() => {
+    setSelectedSlug(null);
+    setProjects([]);
+    setLoadState('idle');
+    setLoadError('');
+    // Reset filters when returning to list
+    setFilterStatus(new Set(STATUS_LIFECYCLE));
+    setFilterLabel('');
+  }, []);
+
+  // ─── Derived: project options for filter dropdown (only in cockpit mode) ─────
   const projectOptions = useMemo(() => {
     return projects
       .filter((p) => !p.error)
@@ -126,7 +237,7 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject }) {
       .filter(Boolean);
   }, [projects]);
 
-  // ── Derived: all label options for filter dropdown (AC6)
+  // ─── Derived: all label options for filter dropdown ──────────────────────────
   const labelOptions = useMemo(() => {
     const labels = new Set();
     for (const project of projects) {
@@ -142,7 +253,7 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject }) {
     return Array.from(labels).sort();
   }, [projects]);
 
-  // ── Derived: filtered view (AC6)
+  // ─── Derived: filtered view ───────────────────────────────────────────────────
   const filteredProjects = useMemo(() => {
     return projects
       .filter((p) => {
@@ -152,11 +263,11 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject }) {
       })
       .map((p) => {
         if (p.error) return p;
-        // Filter features whose stories pass the status/label filter
         const filteredFeatures = (p.features ?? []).map((f) => {
           const filteredStories = (f.stories ?? []).filter((s) => {
-            // Multi-select status: empty Set = alle; non-empty = status must be in Set
-            if (filterStatus.size > 0 && !filterStatus.has(s.status)) return false;
+            // AC2/AC3: filterStatus is always a non-empty Set (all 5 by default);
+            // empty Set = AC3 scenario → no stories shown
+            if (!filterStatus.has(s.status)) return false;
             if (filterLabel && !(s.labels ?? []).includes(filterLabel)) return false;
             return true;
           });
@@ -166,81 +277,206 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject }) {
       });
   }, [projects, filterProject, filterStatus, filterLabel]);
 
-  // Total stories after status/label filtering — used to detect "filter eliminates all stories"
+  // Total stories after filtering — used to detect "filter eliminates all" or AC3 empty-set
   const totalFilteredStories = useMemo(() => {
     return filteredProjects.reduce(
       (acc, p) =>
-        acc +
-        (p.features ?? []).reduce((a, f) => a + (f.stories ?? []).length, 0),
+        acc + (p.features ?? []).reduce((a, f) => a + (f.stories ?? []).length, 0),
       0,
     );
   }, [filteredProjects]);
 
+  // AC3: all statuses deselected
+  const allStatusDeselected = filterStatus.size === 0;
+
   const isEmpty = loadState === 'ok' && projects.length === 0;
   const hasProjects = loadState === 'ok' && projects.length > 0;
 
+  // ─── Render ───────────────────────────────────────────────────────────────────
+
   return (
-    <main style={styles.main} aria-label="Board-Übersicht">
-      <h1 style={styles.h1}>Board</h1>
+    <main style={styles.main} aria-label="Studis-Kanban-Board">
+      <h1 style={styles.h1}>Studis-Kanban-Board</h1>
 
-      {/* ── Filter bar (AC6) — only shown when data is loaded */}
-      {hasProjects && (
-        <FilterBar
-          projects={projectOptions}
-          statusOptions={STATUS_LIFECYCLE}
-          labelOptions={labelOptions}
-          filterProject={filterProject}
-          filterStatus={filterStatus}
-          filterLabel={filterLabel}
-          onProjectChange={setFilterProject}
-          onStatusChange={setFilterStatus}
-          onLabelChange={setFilterLabel}
-          hideProjectFilter={Boolean(lockedProject)}
-        />
+      {/* ── STANDALONE: Project list (AC6) ─────────────────────────── */}
+      {isStandalone && selectedSlug === null && (
+        <>
+          {listState === 'loading' && (
+            <div aria-busy="true" aria-live="polite" style={styles.statusMsg}>
+              Lade Projektliste…
+            </div>
+          )}
+          {listState === 'error' && (
+            <div role="alert" style={styles.errorMsg}>
+              Fehler beim Laden der Projektliste: {listError}
+            </div>
+          )}
+          {listState === 'ok' && projectList.length === 0 && (
+            <div role="status" style={styles.statusMsg}>
+              Keine Projekte gefunden. Board-Roots konfigurieren oder Scan auslösen.
+            </div>
+          )}
+          {listState === 'ok' && projectList.length > 0 && (
+            <div style={styles.projectList} role="list" aria-label="Projekte">
+              {projectList.map((item) => (
+                <ProjectListItem
+                  key={item.slug}
+                  item={item}
+                  onSelect={handleProjectSelect}
+                />
+              ))}
+            </div>
+          )}
+        </>
       )}
 
+      {/* ── STANDALONE: Single project loaded (AC6) ────────────────── */}
+      {isStandalone && selectedSlug !== null && (
+        <>
+          {/* Back to list */}
+          <button
+            type="button"
+            style={styles.backBtn}
+            onClick={handleBackToList}
+            aria-label="Zurück zur Projektliste"
+            data-testid="board-back-btn"
+          >
+            ← Projektliste
+          </button>
 
-      {/* ── Loading */}
-      {loadState === 'loading' && (
-        <div aria-busy="true" aria-live="polite" style={styles.statusMsg}>
-          Lade Board-Daten…
-        </div>
-      )}
-
-      {/* ── Error */}
-      {loadState === 'error' && (
-        <div role="alert" style={styles.errorMsg}>
-          Fehler beim Laden der Board-Daten: {loadError}
-        </div>
-      )}
-
-      {/* ── Empty */}
-      {isEmpty && (
-        <div role="status" style={styles.statusMsg}>
-          Keine Projekte gefunden. Board-Roots konfigurieren oder Scan auslösen.
-        </div>
-      )}
-
-      {/* ── Project list (AC4) */}
-      {hasProjects && (
-        <div style={styles.projectList} role="list" aria-label="Projekte">
-          {filteredProjects.map((project) => (
-            <ProjectSection
-              key={project.slug ?? project.repo_path ?? project.project_slug}
-              project={project}
+          {/* Filter bar — shown when data is loaded (standalone project view) */}
+          {hasProjects && (
+            <FilterBar
+              projects={projectOptions}
+              statusOptions={STATUS_LIFECYCLE}
+              labelOptions={labelOptions}
+              filterProject={filterProject}
+              filterStatus={filterStatus}
+              filterLabel={filterLabel}
+              onProjectChange={setFilterProject}
+              onStatusChange={setFilterStatus}
+              onLabelChange={setFilterLabel}
+              hideProjectFilter={true}
             />
-          ))}
-          {filteredProjects.length === 0 && (filterProject || filterStatus.size > 0 || filterLabel) && (
-            <div role="status" style={styles.statusMsg}>
-              Keine Projekte / Stories passen zum aktuellen Filter.
+          )}
+
+          {/* Loading */}
+          {loadState === 'loading' && (
+            <div aria-busy="true" aria-live="polite" style={styles.statusMsg}>
+              Lade Projekt-Daten…
             </div>
           )}
-          {filteredProjects.length > 0 && totalFilteredStories === 0 && (filterStatus.size > 0 || filterLabel) && (
-            <div role="status" style={styles.statusMsg}>
-              Keine Stories passen zum aktiven Filter.
+          {/* Error */}
+          {loadState === 'error' && (
+            <div role="alert" style={styles.errorMsg}>
+              Fehler beim Laden der Board-Daten: {loadError}
             </div>
           )}
-        </div>
+          {/* Empty */}
+          {isEmpty && (
+            <div role="status" style={styles.statusMsg}>
+              Keine Projekte gefunden. Board-Roots konfigurieren oder Scan auslösen.
+            </div>
+          )}
+          {/* AC3: all statuses deselected */}
+          {hasProjects && allStatusDeselected && (
+            <div role="status" style={styles.statusMsg} data-testid="no-status-hint">
+              Kein Status gewählt — bitte mindestens einen wählen.
+            </div>
+          )}
+          {/* Project content */}
+          {hasProjects && !allStatusDeselected && (
+            <div style={styles.projectList} role="list" aria-label="Projekte">
+              {filteredProjects.map((project) => (
+                <ProjectSection
+                  key={project.slug ?? project.repo_path ?? project.project_slug}
+                  project={project}
+                />
+              ))}
+              {filteredProjects.length === 0 && (filterProject || filterStatus.size > 0 || filterLabel) && (
+                <div role="status" style={styles.statusMsg}>
+                  Keine Projekte / Stories passen zum aktuellen Filter.
+                </div>
+              )}
+              {filteredProjects.length > 0 && totalFilteredStories === 0 && filterLabel && (
+                <div role="status" style={styles.statusMsg}>
+                  Keine Stories passen zum aktiven Filter.
+                </div>
+              )}
+            </div>
+          )}
+        </>
+      )}
+
+      {/* ── COCKPIT (lockedProject set — F-005): direct project view ── */}
+      {!isStandalone && (
+        <>
+          {/* Filter bar — shown when data is loaded */}
+          {hasProjects && (
+            <FilterBar
+              projects={projectOptions}
+              statusOptions={STATUS_LIFECYCLE}
+              labelOptions={labelOptions}
+              filterProject={filterProject}
+              filterStatus={filterStatus}
+              filterLabel={filterLabel}
+              onProjectChange={setFilterProject}
+              onStatusChange={setFilterStatus}
+              onLabelChange={setFilterLabel}
+              hideProjectFilter={true}
+            />
+          )}
+
+          {/* Loading */}
+          {loadState === 'loading' && (
+            <div aria-busy="true" aria-live="polite" style={styles.statusMsg}>
+              Lade Board-Daten…
+            </div>
+          )}
+
+          {/* Error */}
+          {loadState === 'error' && (
+            <div role="alert" style={styles.errorMsg}>
+              Fehler beim Laden der Board-Daten: {loadError}
+            </div>
+          )}
+
+          {/* Empty */}
+          {isEmpty && (
+            <div role="status" style={styles.statusMsg}>
+              Keine Projekte gefunden. Board-Roots konfigurieren oder Scan auslösen.
+            </div>
+          )}
+
+          {/* AC3: all statuses deselected */}
+          {hasProjects && allStatusDeselected && (
+            <div role="status" style={styles.statusMsg} data-testid="no-status-hint">
+              Kein Status gewählt — bitte mindestens einen wählen.
+            </div>
+          )}
+
+          {/* Project list (AC4) */}
+          {hasProjects && !allStatusDeselected && (
+            <div style={styles.projectList} role="list" aria-label="Projekte">
+              {filteredProjects.map((project) => (
+                <ProjectSection
+                  key={project.slug ?? project.repo_path ?? project.project_slug}
+                  project={project}
+                />
+              ))}
+              {filteredProjects.length === 0 && (filterProject || filterStatus.size > 0 || filterLabel) && (
+                <div role="status" style={styles.statusMsg}>
+                  Keine Projekte / Stories passen zum aktuellen Filter.
+                </div>
+              )}
+              {filteredProjects.length > 0 && totalFilteredStories === 0 && filterLabel && (
+                <div role="status" style={styles.statusMsg}>
+                  Keine Stories passen zum aktiven Filter.
+                </div>
+              )}
+            </div>
+          )}
+        </>
       )}
     </main>
   );
@@ -249,7 +485,13 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject }) {
 // ── FilterBar ─────────────────────────────────────────────────────────────────
 
 /**
- * Filter controls for Projekt, Story-Status (multi-select checkboxes) and Label (AC6).
+ * Filter controls for Projekt, Story-Status (popover, AC4) and Label.
+ *
+ * AC4 (studis-kanban-board-ux): Status-Filter as click-toggle popover.
+ *   Button "Status (n/5) ▾" opens a floating panel with checkboxes.
+ *   Closes on outside click and Esc. Button carries aria-expanded/aria-controls.
+ *
+ * AC2 (studis-kanban-board-ux): default = all 5 selected (passed in from parent).
  *
  * @param {{
  *   projects: string[],
@@ -276,6 +518,40 @@ function FilterBar({
   onLabelChange,
   hideProjectFilter = false,
 }) {
+  // AC4: popover open/close state
+  const [popoverOpen, setPopoverOpen] = useState(false);
+  const popoverRef = useRef(null);
+  const triggerRef = useRef(null);
+  const POPOVER_ID = 'board-status-popover';
+
+  // Close on outside click (AC4)
+  useEffect(() => {
+    if (!popoverOpen) return;
+    function handleMouseDown(e) {
+      if (
+        popoverRef.current && !popoverRef.current.contains(e.target) &&
+        triggerRef.current && !triggerRef.current.contains(e.target)
+      ) {
+        setPopoverOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleMouseDown);
+    return () => document.removeEventListener('mousedown', handleMouseDown);
+  }, [popoverOpen]);
+
+  // Close on Esc (AC4)
+  useEffect(() => {
+    if (!popoverOpen) return;
+    function handleKeyDown(e) {
+      if (e.key === 'Escape') {
+        setPopoverOpen(false);
+        triggerRef.current?.focus();
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [popoverOpen]);
+
   /** Toggle a status value in the Set. */
   function handleStatusToggle(status) {
     const next = new Set(filterStatus);
@@ -287,13 +563,22 @@ function FilterBar({
     onStatusChange(next);
   }
 
-  // When lockedProject is active, only status/label filters count toward "any filter active"
-  // (project filter is locked, not something the user can reset).
-  const anyFilterActive = (!hideProjectFilter && filterProject) || filterStatus.size > 0 || filterLabel;
+  // AC4: button label "Status (n/5) ▾"
+  const checkedCount = filterStatus.size;
+  const totalCount   = statusOptions.length;
+  const statusLabel  = `Status (${checkedCount}/${totalCount}) ▾`;
+
+  // "Any filter active" determines whether reset button appears.
+  // AC2: all 5 selected is NOT a "filter active" state; fewer than 5 OR label/project IS active.
+  const allSelected = checkedCount === totalCount;
+  const anyFilterActive =
+    (!hideProjectFilter && filterProject) ||
+    !allSelected ||
+    filterLabel;
 
   return (
     <div style={styles.filterBar} role="search" aria-label="Board-Filter">
-      {/* Projekt filter — hidden when board is embedded in Cockpit with locked project (AC6/S-113) */}
+      {/* Projekt filter — hidden in Cockpit or standalone single-project view */}
       {!hideProjectFilter && (
         <>
           <label style={styles.filterLabel} htmlFor="board-filter-project">
@@ -314,29 +599,61 @@ function FilterBar({
         </>
       )}
 
-      {/* Status filter — Mehrfachauswahl per Checkbox-Gruppe (AC6) */}
-      <fieldset style={styles.filterFieldset} id="board-filter-status-group" aria-label="Nach Status filtern">
-        <legend style={styles.filterLabel}>Status</legend>
-        <div style={styles.statusCheckboxRow}>
-          {statusOptions.map((s) => {
-            const checked = filterStatus.has(s);
-            const inputId = `board-filter-status-${s.replace(/\s+/g, '-').toLowerCase()}`;
-            return (
-              <label key={s} style={styles.statusCheckboxLabel} htmlFor={inputId}>
-                <input
-                  id={inputId}
-                  type="checkbox"
-                  style={styles.statusCheckbox}
-                  checked={checked}
-                  onChange={() => handleStatusToggle(s)}
-                  aria-label={`Status ${s} ${checked ? 'aktiv' : 'inaktiv'}`}
-                />
-                {s}
-              </label>
-            );
-          })}
-        </div>
-      </fieldset>
+      {/* AC4: Status popover trigger button */}
+      <div style={styles.popoverContainer}>
+        <button
+          ref={triggerRef}
+          type="button"
+          id="board-status-filter-btn"
+          style={styles.statusPopoverBtn}
+          aria-expanded={popoverOpen}
+          aria-controls={POPOVER_ID}
+          aria-label={`Status-Filter öffnen: ${checkedCount} von ${totalCount} ausgewählt`}
+          onClick={() => setPopoverOpen((prev) => !prev)}
+          data-testid="status-filter-btn"
+        >
+          {statusLabel}
+        </button>
+
+        {/* AC4: Popover panel */}
+        {popoverOpen && (
+          <div
+            ref={popoverRef}
+            id={POPOVER_ID}
+            role="dialog"
+            aria-label="Status-Filter"
+            style={styles.statusPopover}
+            data-testid="status-popover"
+          >
+            <fieldset
+              style={styles.filterFieldset}
+              id="board-filter-status-group"
+              aria-label="Nach Status filtern"
+            >
+              <legend style={{ ...styles.filterLabel, marginBottom: 6 }}>Status</legend>
+              <div style={styles.statusCheckboxCol}>
+                {statusOptions.map((s) => {
+                  const checked = filterStatus.has(s);
+                  const inputId = `board-filter-status-${s.replace(/\s+/g, '-').toLowerCase()}`;
+                  return (
+                    <label key={s} style={styles.statusCheckboxLabel} htmlFor={inputId}>
+                      <input
+                        id={inputId}
+                        type="checkbox"
+                        style={styles.statusCheckbox}
+                        checked={checked}
+                        onChange={() => handleStatusToggle(s)}
+                        aria-label={`Status ${s} ${checked ? 'aktiv' : 'inaktiv'}`}
+                      />
+                      {s}
+                    </label>
+                  );
+                })}
+              </div>
+            </fieldset>
+          </div>
+        )}
+      </div>
 
       {/* Label filter */}
       <label style={styles.filterLabel} htmlFor="board-filter-label">
@@ -355,20 +672,65 @@ function FilterBar({
         ))}
       </select>
 
-      {/* Reset */}
+      {/* Reset — shown when any filter deviates from default (AC2 default = all selected) */}
       {anyFilterActive && (
         <button
           type="button"
           style={styles.filterReset}
           onClick={() => {
             onProjectChange('');
-            onStatusChange(new Set());
+            onStatusChange(new Set(STATUS_LIFECYCLE)); // AC2: reset to all selected
             onLabelChange('');
           }}
           aria-label="Filter zurücksetzen"
         >
           Zurücksetzen
         </button>
+      )}
+    </div>
+  );
+}
+
+// ── ProjectListItem ───────────────────────────────────────────────────────────
+
+/**
+ * One row in the standalone project list (AC6).
+ * Shows slug + coarse counters; click loads the project.
+ *
+ * @param {{
+ *   item: { slug: string, feature_count?: number, story_count?: number, error?: string },
+ *   onSelect: (slug: string) => void
+ * }} props
+ */
+function ProjectListItem({ item, onSelect }) {
+  return (
+    <div
+      role="listitem"
+      style={styles.projectListItem}
+      data-project-list-item={item.slug}
+    >
+      {item.error ? (
+        <div style={styles.projectListItemContent}>
+          <span style={styles.projectListSlug}>{item.slug}</span>
+          <span style={styles.errorBadge} role="status" aria-label="Fehler">
+            Fehler: {item.error}
+          </span>
+        </div>
+      ) : (
+        <div style={styles.projectListItemContent}>
+          <button
+            type="button"
+            style={styles.projectListBtn}
+            onClick={() => onSelect(item.slug)}
+            aria-label={`Projekt ${item.slug} öffnen`}
+            data-testid={`project-select-${item.slug}`}
+          >
+            {item.slug}
+          </button>
+          <span style={styles.projectListMeta} aria-label="Zähler">
+            {item.feature_count ?? 0} Features · {item.story_count ?? 0} Stories
+          </span>
+        </div>
       )}
     </div>
   );
@@ -771,7 +1133,58 @@ const styles = {
     fontStyle: 'italic',
   },
 
-  // ── Filter bar (AC6)
+  // ── Back button (standalone project-detail view — AC6)
+  backBtn: {
+    background: 'transparent',
+    border: '1px solid #334155',
+    color: '#93c5fd',
+    borderRadius: 4,
+    padding: '6px 12px',
+    fontSize: 13,
+    cursor: 'pointer',
+    minHeight: 44,
+    marginBottom: 12,
+    // Focus ring preserved
+  },
+
+  // ── Standalone project list (AC6)
+  projectListItem: {
+    background: '#111',
+    border: '1px solid #2a2a2a',
+    borderRadius: 8,
+    padding: '12px 16px',
+    marginBottom: 8,
+  },
+  projectListItemContent: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 12,
+    flexWrap: 'wrap',
+  },
+  projectListBtn: {
+    background: 'transparent',
+    border: '1px solid #334155',
+    color: '#93c5fd',
+    borderRadius: 4,
+    padding: '8px 16px',
+    fontSize: 14,
+    fontWeight: 600,
+    cursor: 'pointer',
+    minHeight: 44,
+    // Focus ring preserved
+  },
+  projectListSlug: {
+    fontSize: 14,
+    fontWeight: 600,
+    color: '#e5e7eb',
+    fontFamily: 'monospace',
+  },
+  projectListMeta: {
+    fontSize: 12,
+    color: '#6b7280',
+  },
+
+  // ── Filter bar (AC4, studis-kanban-board-ux)
   filterBar: {
     display: 'flex',
     flexWrap: 'wrap',
@@ -797,6 +1210,42 @@ const styles = {
     flexDirection: 'column',
     gap: 4,
   },
+  // AC4: popover container (relative positioning anchor)
+  popoverContainer: {
+    position: 'relative',
+    display: 'inline-block',
+  },
+  // AC4: button "Status (n/5) ▾"
+  statusPopoverBtn: {
+    background: '#1a1a1a',
+    border: '1px solid #333',
+    color: '#e5e7eb',
+    borderRadius: 4,
+    padding: '6px 12px',
+    fontSize: 13,
+    cursor: 'pointer',
+    minHeight: 36,
+    whiteSpace: 'nowrap',
+    // Focus ring preserved
+  },
+  // AC4: floating popover panel
+  statusPopover: {
+    position: 'absolute',
+    top: 'calc(100% + 4px)',
+    left: 0,
+    zIndex: 100,
+    background: '#1a1a1a',
+    border: '1px solid #333',
+    borderRadius: 8,
+    padding: '12px 16px',
+    minWidth: 160,
+    boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
+  },
+  statusCheckboxCol: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 8,
+  },
   statusCheckboxRow: {
     display: 'flex',
     flexWrap: 'wrap',
@@ -805,11 +1254,11 @@ const styles = {
   statusCheckboxLabel: {
     display: 'flex',
     alignItems: 'center',
-    gap: 4,
-    fontSize: 12,
+    gap: 6,
+    fontSize: 13,
     color: '#e5e7eb',
     cursor: 'pointer',
-    minHeight: 24,
+    minHeight: 28,
     // Focus ring on the checkbox input itself is preserved
   },
   statusCheckbox: {
