@@ -1,4 +1,4 @@
-id: S-121
+id: S-124
 parent: F-005
 title: 'Projekt-Terminal: WS-Upgrade matcht pathname statt voller URL (socket hang up)'
 status: To Do

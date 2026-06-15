@@ -1,4 +1,4 @@
-id: S-122
+id: S-125
 parent: F-005
 title: 'Projekt-Terminal: Slug zentral zu WORKSPACE_DIR-Pfad aufloesen (WS + /api/command)'
 status: To Do
@@ -8,7 +8,7 @@ implements:
 - AC9
 - AC10
 depends:
-- S-121
+- S-124
 labels: null
 size_est: null
 dispo_est: null
