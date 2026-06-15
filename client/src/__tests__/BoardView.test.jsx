@@ -1,25 +1,33 @@
 /**
- * BoardView.test.jsx — Unit tests for BoardView (dev-gui-board-aggregator, AC4–AC6).
+ * BoardView.test.jsx — Unit tests for BoardView.
  *
  * Covers (dev-gui-board-aggregator):
  *   AC4 — Dreistufige Übersicht Projekt → Feature → Story mit Status-Spalten;
  *          aggregiert über alle Projekte; aria-busy/aria-live Ladezustand;
- *          Fehlerzustand; Leerzustand; GET /api/board/projects einmal beim Mount.
+ *          Fehlerzustand; Leerzustand; GET /api/board/projects/* Aufrufe.
  *   AC5 — Rollup-Anzeige je Feature: vorhandenes progress-Feld → direkt anzeigen;
  *          fehlendes/stale progress → read-only aus Kind-Story-Status berechnet;
  *          progressbar-Role mit aria-valuenow.
- *   AC6 — Filter nach Projekt (Dropdown), Status (Checkbox-Gruppe, leere Auswahl = alle),
- *          Label (Dropdown); unabhängig kombinierbar; Zurücksetzen-Button (löscht Auswahl
- *          vollständig); kein Backend-Aufruf beim Filtern.
- *          Filter-Leerzustand: role=status-Hinweis wenn Status- oder Label-Filter alle Stories eliminieren.
+ *   AC6 — Filter nach Projekt (Dropdown), Status (Checkbox-Gruppe),
+ *          Label (Dropdown); unabhängig kombinierbar; Zurücksetzen-Button;
+ *          kein Backend-Aufruf beim Filtern.
+ *          Filter-Leerzustand: role=status-Hinweis wenn Filter alle Stories eliminieren.
  *   Feature detail panel — expand/collapse je Feature-Titel (aria-expanded/aria-controls);
  *          goal, DoD, priority, depends, labels; null-Felder ausgeblendet.
- *   Multi-Status-Filter — leere Auswahl = alle; Mehrfach-Check; Uncheck;
- *          Reset löscht Auswahl vollständig (filterStatus → new Set()).
- *   AC4/A11y — <main> aria-label "Board-Übersicht"; Status-Badges mit Text-Label
- *               (Bedeutung nicht allein über Farbe); aria-current-Muster nicht benötigt
- *               (Übersicht, kein Master-Detail); WCAG-Kontrast in Quellcode-Kommentaren
- *               dokumentiert, jsdom nicht testbar.
+ *   Multi-Status-Filter — Mehrfach-Check; Uncheck; Reset.
+ *
+ * Covers (studis-kanban-board-ux):
+ *   AC1 — aria-label + h1 = „Studis-Kanban-Board"; Route-id `board` unverändert;
+ *          viewRegistry label = „Studis-Kanban-Board".
+ *   AC2 — Status-Filter Default: alle 5 angehakt; alles sichtbar; Deselektieren blendet aus.
+ *   AC3 — Alle Status deselektiert → role=status „Kein Status gewählt".
+ *   AC4 — Status-Filter als Popover: Button „Status (n/5) ▾"; öffnet/schließt per Klick;
+ *          schließt per Esc + Außenklick; aria-expanded/-controls korrekt.
+ *   AC5 — GET /api/board/projects/list (leicht) in standalone;
+ *          GET /api/board/projects/:slug (voll) on-demand;
+ *          GET /api/board/projects/:slug (cockpit) on mount.
+ *   AC6 — Standalone: öffnet mit Projektliste; Klick lädt Projekt (lazy, aria-busy);
+ *          Rückweg zur Liste; Cockpit-Modus (lockedProject): direkt ohne Liste.
  *
  * NOTE (jsdom-Limitation): jsdom hat keine Layout-Engine — Style-Property-Asserts beweisen
  * kein Scroll-/Layout-Verhalten; getestet werden Verhalten, Struktur, Rollen und aria.
@@ -45,6 +53,7 @@ const { render }    = await import('@testing-library/react');
 const React         = (await import('react')).default;
 const { BoardView } = await import('../BoardView.jsx');
 const { VIEWS, parseHash } = await import('../useHashRouter.js');
+const { VIEW_REGISTRY }    = await import('../viewRegistry.js');
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -162,24 +171,114 @@ afterEach(() => {
   window.location.hash = '';
 });
 
-function makeBoardFetch({ projects = [], ok = true } = {}) {
+/**
+ * Build a fetch mock that handles all three board API endpoints.
+ *
+ * - /api/board/projects/list  → { projects: listItems }
+ * - /api/board/projects/:slug → { project: fullProject } (looked up from fullProjects)
+ * - /api/board/projects       → { projects: fullProjects }
+ *
+ * @param {{ fullProjects?: object[], ok?: boolean }} opts
+ */
+function makeBoardFetch({ fullProjects = [], ok = true } = {}) {
   return jest.fn(async (url) => {
+    if (!ok) {
+      return { ok: false, status: 500, json: async () => ({}) };
+    }
+    if (url === '/api/board/projects/list') {
+      const list = fullProjects.map((p) => {
+        if (p.error) return { slug: p.slug, error: p.error };
+        const features = p.features ?? [];
+        return {
+          slug: p.slug,
+          feature_count: features.length,
+          story_count: features.reduce((a, f) => a + (f.stories ?? []).length, 0),
+        };
+      });
+      return { ok: true, status: 200, json: async () => ({ projects: list }) };
+    }
     if (url === '/api/board/projects') {
-      return {
-        ok,
-        status: ok ? 200 : 500,
-        json: async () => ({ projects }),
-      };
+      return { ok: true, status: 200, json: async () => ({ projects: fullProjects }) };
+    }
+    // /api/board/projects/:slug
+    const slugMatch = url.match(/^\/api\/board\/projects\/(.+)$/);
+    if (slugMatch) {
+      const slug = decodeURIComponent(slugMatch[1]);
+      const proj = fullProjects.find((p) => p.slug === slug);
+      if (proj) {
+        return { ok: true, status: 200, json: async () => ({ project: proj }) };
+      }
+      return { ok: false, status: 404, json: async () => ({ error: 'Projekt nicht gefunden.' }) };
     }
     return { ok: false, status: 404, json: async () => ({}) };
   });
 }
 
+/** Render BoardView in STANDALONE mode (no lockedProject). */
 function renderBoard(props = {}) {
   const onNavigate = jest.fn();
   const utils = render(React.createElement(BoardView, { onNavigate, ...props }));
   return { ...utils, onNavigate };
 }
+
+/** Render BoardView in COCKPIT mode (lockedProject set). */
+function renderCockpit(slug, props = {}) {
+  return renderBoard({ lockedProject: slug, ...props });
+}
+
+/** Load standalone board and click on a project to enter its detail view. */
+async function renderBoardWithProject(fullProjects, slugToSelect) {
+  globalThis.fetch = makeBoardFetch({ fullProjects });
+  const utils = renderBoard();
+
+  // Wait for project list
+  await waitFor(() => {
+    expect(utils.container.querySelector(`[data-project-list-item="${slugToSelect}"]`)).toBeTruthy();
+  });
+
+  // Click project to load it
+  await act(async () => {
+    const btn = utils.container.querySelector(`[data-testid="project-select-${slugToSelect}"]`);
+    expect(btn).toBeTruthy();
+    fireEvent.click(btn);
+  });
+
+  // Wait for project data
+  await waitFor(() => {
+    expect(utils.container.querySelector(`[data-project="${slugToSelect}"]`)).toBeTruthy();
+  });
+
+  return utils;
+}
+
+// ── AC1 (studis-kanban-board-ux) — Umbenennung ────────────────────────────────
+
+describe('studis-kanban-board-ux — AC1: Umbenennung „Studis-Kanban-Board"', () => {
+  it('<main> has aria-label "Studis-Kanban-Board"', () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [] });
+    const { getByRole } = renderBoard();
+    expect(getByRole('main', { name: /studis-kanban-board/i })).toBeTruthy();
+  });
+
+  it('<h1> text is "Studis-Kanban-Board"', () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [] });
+    const { container } = renderBoard();
+    const h1 = container.querySelector('h1');
+    expect(h1).toBeTruthy();
+    expect(h1.textContent).toBe('Studis-Kanban-Board');
+  });
+
+  it('viewRegistry board entry has label "Studis-Kanban-Board"', () => {
+    const entry = VIEW_REGISTRY.find((v) => v.id === 'board');
+    expect(entry).toBeTruthy();
+    expect(entry.label).toBe('Studis-Kanban-Board');
+  });
+
+  it('Route-id "board" remains unchanged (VIEWS contains "board")', () => {
+    expect(VIEWS).toContain('board');
+    expect(parseHash('#/board')).toBe('board');
+  });
+});
 
 // ── Route registration ────────────────────────────────────────────────────────
 
@@ -197,83 +296,280 @@ describe('dev-gui-board-aggregator — Route registration in useHashRouter', () 
   });
 });
 
-// ── AC4 — Mount loads projects exactly once ───────────────────────────────────
+// ── AC6 (studis-kanban-board-ux) — Standalone lazy-load ──────────────────────
 
-describe('dev-gui-board-aggregator — AC4: Mount loads projects exactly once', () => {
-  it('calls GET /api/board/projects exactly once on mount', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A] });
-
+describe('studis-kanban-board-ux — AC6: Standalone Projektliste + Lazy-Load', () => {
+  it('standalone board calls /api/board/projects/list on mount (not full endpoint)', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A, PROJECT_B] });
     renderBoard();
 
     await waitFor(() => {
-      const calls = globalThis.fetch.mock.calls.filter((c) => c[0] === '/api/board/projects');
-      expect(calls).toHaveLength(1);
+      const listCalls = globalThis.fetch.mock.calls.filter((c) => c[0] === '/api/board/projects/list');
+      expect(listCalls).toHaveLength(1);
+      // Full projects endpoint must NOT be called on mount
+      const fullCalls = globalThis.fetch.mock.calls.filter((c) => c[0] === '/api/board/projects');
+      expect(fullCalls).toHaveLength(0);
     });
   });
 
-  it('does NOT call GET /api/board/projects again on re-render', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A] });
-
-    const { rerender } = renderBoard();
+  it('standalone: shows project list with slugs and counters', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A, PROJECT_B] });
+    const { container } = renderBoard();
 
     await waitFor(() => {
-      expect(globalThis.fetch.mock.calls.filter((c) => c[0] === '/api/board/projects')).toHaveLength(1);
+      expect(container.querySelector('[data-project-list-item="project-alpha"]')).toBeTruthy();
+      expect(container.querySelector('[data-project-list-item="project-beta"]')).toBeTruthy();
+    });
+  });
+
+  it('standalone: shows aria-busy loading state during list fetch', async () => {
+    let resolveList;
+    globalThis.fetch = jest.fn(async (url) => {
+      if (url === '/api/board/projects/list') {
+        await new Promise((r) => { resolveList = r; });
+        return { ok: true, json: async () => ({ projects: [] }) };
+      }
+      return { ok: false, json: async () => ({}) };
+    });
+
+    const { container } = renderBoard();
+    expect(container.querySelector('[aria-busy="true"]')).toBeTruthy();
+
+    await act(async () => { resolveList(); });
+    await waitFor(() => {
+      expect(container.querySelector('[aria-busy="true"]')).toBeNull();
+    });
+  });
+
+  it('standalone: click on project calls /api/board/projects/:slug', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderBoard();
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-project-list-item="project-alpha"]')).toBeTruthy();
     });
 
     await act(async () => {
-      rerender(React.createElement(BoardView, { onNavigate: jest.fn() }));
+      fireEvent.click(container.querySelector('[data-testid="project-select-project-alpha"]'));
     });
 
-    expect(globalThis.fetch.mock.calls.filter((c) => c[0] === '/api/board/projects')).toHaveLength(1);
+    await waitFor(() => {
+      const slugCalls = globalThis.fetch.mock.calls.filter((c) =>
+        c[0] === '/api/board/projects/project-alpha'
+      );
+      expect(slugCalls).toHaveLength(1);
+    });
   });
 
-  it('shows aria-busy loading state during fetch', async () => {
-    let resolveProjects;
+  it('standalone: after project click shows project detail (not list)', async () => {
+    const { container } = await renderBoardWithProject([PROJECT_A], 'project-alpha');
+    expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
+    expect(container.querySelector('[data-project-list-item="project-alpha"]')).toBeNull();
+  });
+
+  it('standalone: shows back button in project-detail view', async () => {
+    const { container } = await renderBoardWithProject([PROJECT_A], 'project-alpha');
+    expect(container.querySelector('[data-testid="board-back-btn"]')).toBeTruthy();
+  });
+
+  it('standalone: back button returns to project list', async () => {
+    const { container } = await renderBoardWithProject([PROJECT_A], 'project-alpha');
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="board-back-btn"]'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-project-list-item="project-alpha"]')).toBeTruthy();
+      expect(container.querySelector('[data-project="project-alpha"]')).toBeNull();
+    });
+  });
+
+  it('standalone: shows aria-busy loading during project fetch (AC6 — Ladezustand)', async () => {
+    let resolveProject;
     globalThis.fetch = jest.fn(async (url) => {
-      if (url === '/api/board/projects') {
-        await new Promise((r) => { resolveProjects = r; });
-        return { ok: true, json: async () => ({ projects: [PROJECT_A] }) };
+      if (url === '/api/board/projects/list') {
+        return { ok: true, json: async () => ({ projects: [{ slug: 'project-alpha', feature_count: 2, story_count: 5 }] }) };
+      }
+      if (url === '/api/board/projects/project-alpha') {
+        await new Promise((r) => { resolveProject = r; });
+        return { ok: true, json: async () => ({ project: PROJECT_A }) };
       }
       return { ok: false, json: async () => ({}) };
     });
 
     const { container } = renderBoard();
 
+    await waitFor(() => {
+      expect(container.querySelector('[data-project-list-item="project-alpha"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="project-select-project-alpha"]'));
+    });
+
+    // aria-busy must appear while loading
     expect(container.querySelector('[aria-busy="true"]')).toBeTruthy();
 
-    await act(async () => { resolveProjects(); });
-
+    await act(async () => { resolveProject(); });
     await waitFor(() => {
-      expect(container.querySelector('[aria-busy="true"]')).toBeNull();
+      expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
     });
   });
 
-  it('renders project sections after load', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A, PROJECT_B] });
-
+  it('standalone: list error shows alert', async () => {
+    globalThis.fetch = makeBoardFetch({ ok: false });
     const { container } = renderBoard();
+    await waitFor(() => {
+      expect(container.querySelector('[role="alert"]')).toBeTruthy();
+    });
+  });
+
+  it('standalone: empty list shows no-projects hint', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [] });
+    const { container } = renderBoard();
+    await waitFor(() => {
+      const hint = container.querySelector('[role="status"]');
+      expect(hint).toBeTruthy();
+      expect(hint.textContent).toMatch(/keine projekte/i);
+    });
+  });
+});
+
+// ── AC6 — Cockpit mode (lockedProject) ───────────────────────────────────────
+
+describe('studis-kanban-board-ux — AC6: Cockpit-Modus (lockedProject)', () => {
+  it('cockpit: does NOT show project list', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
 
     await waitFor(() => {
       expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
-      expect(container.querySelector('[data-project="project-beta"]')).toBeTruthy();
+    });
+
+    // No project list items
+    expect(container.querySelector('[data-project-list-item]')).toBeNull();
+    // No back button
+    expect(container.querySelector('[data-testid="board-back-btn"]')).toBeNull();
+  });
+
+  it('cockpit: calls /api/board/projects/:slug on mount', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    renderCockpit('project-alpha');
+
+    await waitFor(() => {
+      const calls = globalThis.fetch.mock.calls.filter((c) =>
+        c[0] === '/api/board/projects/project-alpha'
+      );
+      expect(calls).toHaveLength(1);
     });
   });
 
-  it('renders feature rows within a project', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A] });
+  it('cockpit: does NOT call /api/board/projects/list', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
 
+    await waitFor(() => {
+      expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
+    });
+
+    const listCalls = globalThis.fetch.mock.calls.filter((c) => c[0] === '/api/board/projects/list');
+    expect(listCalls).toHaveLength(0);
+  });
+
+  it('cockpit: shows aria-busy during load', async () => {
+    let resolveProject;
+    globalThis.fetch = jest.fn(async (url) => {
+      if (url === '/api/board/projects/project-alpha') {
+        await new Promise((r) => { resolveProject = r; });
+        return { ok: true, json: async () => ({ project: PROJECT_A }) };
+      }
+      return { ok: false, json: async () => ({}) };
+    });
+
+    const { container } = renderCockpit('project-alpha');
+    expect(container.querySelector('[aria-busy="true"]')).toBeTruthy();
+
+    await act(async () => { resolveProject(); });
+    await waitFor(() => {
+      expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
+    });
+  });
+});
+
+// ── AC5 (studis-kanban-board-ux) — Backend endpoints ─────────────────────────
+
+describe('studis-kanban-board-ux — AC5: Backend endpoint URLs', () => {
+  it('standalone calls /api/board/projects/list (not /api/board/projects)', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
     const { container } = renderBoard();
 
     await waitFor(() => {
-      expect(container.querySelector('[data-feature="F-001"]')).toBeTruthy();
-      expect(container.querySelector('[data-feature="F-002"]')).toBeTruthy();
+      expect(container.querySelector('[data-project-list-item="project-alpha"]')).toBeTruthy();
+    });
+
+    const listCalls = globalThis.fetch.mock.calls.filter((c) => c[0] === '/api/board/projects/list');
+    expect(listCalls).toHaveLength(1);
+  });
+
+  it('standalone calls /api/board/projects/:slug when project selected', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderBoard();
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-project-list-item="project-alpha"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="project-select-project-alpha"]'));
+    });
+
+    await waitFor(() => {
+      const slugCalls = globalThis.fetch.mock.calls.filter((c) =>
+        c[0] === '/api/board/projects/project-alpha'
+      );
+      expect(slugCalls).toHaveLength(1);
     });
   });
 
-  it('renders story cards within a feature', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A] });
+  it('cockpit calls /api/board/projects/:slug on mount', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    renderCockpit('project-alpha');
 
-    const { container } = renderBoard();
+    await waitFor(() => {
+      expect(globalThis.fetch.mock.calls.some((c) => c[0] === '/api/board/projects/project-alpha')).toBe(true);
+    });
+  });
+});
+
+// ── AC2 (studis-kanban-board-ux) — Status-Filter Default alle gewählt ─────────
+
+describe('studis-kanban-board-ux — AC2: Status-Filter Default alle ausgewählt', () => {
+  it('all 5 status checkboxes are checked by default (cockpit)', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
+    });
+
+    // Open popover to see checkboxes
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="status-filter-btn"]'));
+    });
+
+    await waitFor(() => {
+      const checkboxes = container.querySelectorAll('#board-filter-status-group input[type="checkbox"]');
+      expect(checkboxes).toHaveLength(5);
+      for (const cb of checkboxes) {
+        expect(cb.checked).toBe(true);
+      }
+    });
+  });
+
+  it('all stories visible by default (all statuses selected — cockpit)', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
 
     await waitFor(() => {
       expect(container.querySelector('[data-story="S-001"]')).toBeTruthy();
@@ -282,10 +578,328 @@ describe('dev-gui-board-aggregator — AC4: Mount loads projects exactly once', 
     });
   });
 
-  it('renders all five status columns for a feature (AC4 status columns)', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A] });
+  it('deselecting a status hides its stories (cockpit)', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
 
-    const { container } = renderBoard();
+    await waitFor(() => {
+      expect(container.querySelector('[data-story="S-003"]')).toBeTruthy(); // Done
+    });
+
+    // Open popover
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="status-filter-btn"]'));
+    });
+
+    // Uncheck "Done"
+    await act(async () => {
+      const doneCheckbox = container.querySelector('#board-filter-status-done');
+      expect(doneCheckbox).toBeTruthy();
+      fireEvent.click(doneCheckbox);
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-story="S-003"]')).toBeNull();
+      expect(container.querySelector('[data-story="S-001"]')).toBeTruthy(); // To Do still visible
+    });
+  });
+
+  it('status button label shows "Status (5/5) ▾" by default (cockpit)', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
+    });
+
+    const btn = container.querySelector('[data-testid="status-filter-btn"]');
+    expect(btn).toBeTruthy();
+    expect(btn.textContent).toMatch(/Status \(5\/5\)/);
+  });
+
+  it('status button label shows "Status (n/5) ▾" after deselect', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
+    });
+
+    // Open popover and uncheck "Done"
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="status-filter-btn"]'));
+    });
+    await act(async () => {
+      const doneCheckbox = container.querySelector('#board-filter-status-done');
+      fireEvent.click(doneCheckbox);
+    });
+
+    const btn = container.querySelector('[data-testid="status-filter-btn"]');
+    expect(btn.textContent).toMatch(/Status \(4\/5\)/);
+  });
+});
+
+// ── AC3 (studis-kanban-board-ux) — Kein Status gewählt ───────────────────────
+
+describe('studis-kanban-board-ux — AC3: Alle Status deselektiert → Hinweis', () => {
+  it('shows "Kein Status gewählt" hint when all statuses deselected (cockpit)', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
+    });
+
+    // Open popover
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="status-filter-btn"]'));
+    });
+
+    // Uncheck all 5
+    const statuses = ['to-do', 'in-progress', 'blocked', 'in-review', 'done'];
+    for (const s of statuses) {
+      await act(async () => {
+        const cb = container.querySelector(`#board-filter-status-${s}`);
+        expect(cb).toBeTruthy();
+        fireEvent.click(cb);
+      });
+    }
+
+    await waitFor(() => {
+      const hint = container.querySelector('[data-testid="no-status-hint"]');
+      expect(hint).toBeTruthy();
+      expect(hint.getAttribute('role')).toBe('status');
+      expect(hint.textContent).toMatch(/kein status gewählt/i);
+    });
+  });
+
+  it('no stories shown when all statuses deselected (cockpit)', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="status-filter-btn"]'));
+    });
+
+    const statuses = ['to-do', 'in-progress', 'blocked', 'in-review', 'done'];
+    for (const s of statuses) {
+      await act(async () => {
+        fireEvent.click(container.querySelector(`#board-filter-status-${s}`));
+      });
+    }
+
+    await waitFor(() => {
+      // No story cards visible
+      expect(container.querySelector('[data-story]')).toBeNull();
+    });
+  });
+});
+
+// ── AC4 (studis-kanban-board-ux) — Status-Filter Popover ─────────────────────
+
+describe('studis-kanban-board-ux — AC4: Status-Filter als Popover', () => {
+  it('status filter button is present with aria-expanded=false initially (cockpit)', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
+    });
+
+    const btn = container.querySelector('[data-testid="status-filter-btn"]');
+    expect(btn).toBeTruthy();
+    expect(btn.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('click opens popover (aria-expanded=true) and shows checkboxes', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="status-filter-btn"]'));
+    });
+
+    const btn = container.querySelector('[data-testid="status-filter-btn"]');
+    expect(btn.getAttribute('aria-expanded')).toBe('true');
+    expect(container.querySelector('[data-testid="status-popover"]')).toBeTruthy();
+
+    const checkboxes = container.querySelectorAll('#board-filter-status-group input[type="checkbox"]');
+    expect(checkboxes).toHaveLength(5);
+  });
+
+  it('second click closes popover (aria-expanded=false)', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="status-filter-btn"]'));
+    });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="status-popover"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="status-filter-btn"]'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="status-popover"]')).toBeNull();
+      expect(container.querySelector('[data-testid="status-filter-btn"]').getAttribute('aria-expanded')).toBe('false');
+    });
+  });
+
+  it('Esc key closes popover', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="status-filter-btn"]'));
+    });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="status-popover"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.keyDown(document, { key: 'Escape' });
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="status-popover"]')).toBeNull();
+    });
+  });
+
+  it('outside click closes popover', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="status-filter-btn"]'));
+    });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="status-popover"]')).toBeTruthy();
+    });
+
+    // Click outside the popover
+    await act(async () => {
+      fireEvent.mouseDown(document.body);
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="status-popover"]')).toBeNull();
+    });
+  });
+
+  it('button has aria-controls pointing to popover id', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
+    });
+
+    const btn = container.querySelector('[data-testid="status-filter-btn"]');
+    expect(btn.getAttribute('aria-controls')).toBe('board-status-popover');
+  });
+
+  it('popover is not visible when closed (no status-popover testid)', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
+    });
+
+    expect(container.querySelector('[data-testid="status-popover"]')).toBeNull();
+  });
+});
+
+// ── AC4 — Mount loads projects exactly once (cockpit) ────────────────────────
+
+describe('dev-gui-board-aggregator — AC4: Mount loads project in cockpit', () => {
+  it('calls GET /api/board/projects/:slug exactly once on mount (cockpit)', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    renderCockpit('project-alpha');
+
+    await waitFor(() => {
+      const calls = globalThis.fetch.mock.calls.filter((c) =>
+        c[0] === '/api/board/projects/project-alpha'
+      );
+      expect(calls).toHaveLength(1);
+    });
+  });
+
+  it('shows aria-busy loading state during fetch (cockpit)', async () => {
+    let resolveProject;
+    globalThis.fetch = jest.fn(async (url) => {
+      if (url === '/api/board/projects/project-alpha') {
+        await new Promise((r) => { resolveProject = r; });
+        return { ok: true, json: async () => ({ project: PROJECT_A }) };
+      }
+      return { ok: false, json: async () => ({}) };
+    });
+
+    const { container } = renderCockpit('project-alpha');
+    expect(container.querySelector('[aria-busy="true"]')).toBeTruthy();
+
+    await act(async () => { resolveProject(); });
+    await waitFor(() => {
+      expect(container.querySelector('[aria-busy="true"]')).toBeNull();
+    });
+  });
+
+  it('renders project sections after load (cockpit)', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
+    });
+  });
+
+  it('renders feature rows within a project (cockpit)', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-feature="F-001"]')).toBeTruthy();
+      expect(container.querySelector('[data-feature="F-002"]')).toBeTruthy();
+    });
+  });
+
+  it('renders story cards within a feature (cockpit)', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-story="S-001"]')).toBeTruthy();
+      expect(container.querySelector('[data-story="S-002"]')).toBeTruthy();
+      expect(container.querySelector('[data-story="S-003"]')).toBeTruthy();
+    });
+  });
+
+  it('renders all five status columns for a feature (AC4 status columns, cockpit)', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
 
     await waitFor(() => {
       const feature = container.querySelector('[data-feature="F-001"]');
@@ -297,10 +911,9 @@ describe('dev-gui-board-aggregator — AC4: Mount loads projects exactly once', 
     });
   });
 
-  it('places stories in the correct status column (AC4)', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A] });
-
-    const { container } = renderBoard();
+  it('places stories in the correct status column (AC4, cockpit)', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
 
     await waitFor(() => {
       const toDoCol = container.querySelector('[data-status="To Do"]');
@@ -314,10 +927,9 @@ describe('dev-gui-board-aggregator — AC4: Mount loads projects exactly once', 
     });
   });
 
-  it('renders story title and id (AC3 model fields)', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A] });
-
-    const { container, getByText } = renderBoard();
+  it('renders story title and id (AC3 model fields, cockpit)', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container, getByText } = renderCockpit('project-alpha');
 
     await waitFor(() => {
       expect(container.querySelector('[data-story="S-001"]')).toBeTruthy();
@@ -325,71 +937,75 @@ describe('dev-gui-board-aggregator — AC4: Mount loads projects exactly once', 
     });
   });
 
-  it('<main> has aria-label "Board-Übersicht" (A11y)', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [] });
-
-    const { getByRole } = renderBoard();
-
-    expect(getByRole('main', { name: /board-übersicht/i })).toBeTruthy();
+  it('<main> has aria-label "Studis-Kanban-Board" (AC1/A11y)', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [] });
+    const { getByRole } = renderCockpit('project-alpha');
+    expect(getByRole('main', { name: /studis-kanban-board/i })).toBeTruthy();
   });
 });
 
-// ── AC4 — Empty + Error state ─────────────────────────────────────────────────
+// ── AC4 — Empty + Error state (cockpit) ───────────────────────────────────────
 
-describe('dev-gui-board-aggregator — AC4: Empty and Error states', () => {
-  it('shows hint when projects list is empty', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [] });
+describe('dev-gui-board-aggregator — AC4: Empty and Error states (cockpit)', () => {
+  it('shows hint when projects list is empty (cockpit)', async () => {
+    // When lockedProject slug not found, /api/board/projects/:slug returns 404
+    // fallback to /api/board/projects with empty list
+    globalThis.fetch = jest.fn(async (url) => {
+      if (url === '/api/board/projects/project-empty') {
+        return { ok: false, status: 404, json: async () => ({ error: 'not found' }) };
+      }
+      if (url === '/api/board/projects') {
+        return { ok: true, status: 200, json: async () => ({ projects: [] }) };
+      }
+      return { ok: false, json: async () => ({}) };
+    });
 
-    const { container } = renderBoard();
+    const { container } = renderCockpit('project-empty');
 
     await waitFor(() => {
       expect(container.querySelector('[role="status"]')).toBeTruthy();
     });
-
     expect(container.querySelector('[role="status"]').textContent).toMatch(/keine projekte/i);
   });
 
-  it('shows error alert when fetch fails with HTTP error', async () => {
-    globalThis.fetch = makeBoardFetch({ ok: false });
+  it('shows error alert when fetch fails with HTTP error (cockpit)', async () => {
+    globalThis.fetch = jest.fn(async () => {
+      return { ok: false, status: 500, json: async () => ({}) };
+    });
 
-    const { container } = renderBoard();
+    const { container } = renderCockpit('project-alpha');
 
     await waitFor(() => {
       expect(container.querySelector('[role="alert"]')).toBeTruthy();
     });
   });
 
-  it('shows error alert when fetch throws (network error)', async () => {
+  it('shows error alert when fetch throws (network error, cockpit)', async () => {
     globalThis.fetch = jest.fn(async () => { throw new Error('Network error'); });
 
-    const { container } = renderBoard();
+    const { container } = renderCockpit('project-alpha');
 
     await waitFor(() => {
       expect(container.querySelector('[role="alert"]')).toBeTruthy();
     });
   });
 
-  it('<main> remains in DOM when fetch fails (shell stays usable)', async () => {
+  it('<main> remains in DOM when fetch fails (cockpit)', async () => {
     globalThis.fetch = jest.fn(async () => { throw new Error('Network error'); });
 
-    const { getByRole } = renderBoard();
+    const { getByRole } = renderCockpit('project-alpha');
 
     await waitFor(() => {
-      expect(getByRole('main', { name: /board-übersicht/i })).toBeTruthy();
+      expect(getByRole('main', { name: /studis-kanban-board/i })).toBeTruthy();
     });
   });
 
-  it('renders project with error badge and skips features (AC8 / V8)', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_ERROR, PROJECT_A] });
-
-    const { container } = renderBoard();
+  it('renders project with error badge and skips features (AC8 / V8, cockpit)', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_ERROR, PROJECT_A] });
+    // cockpit locks to project-alpha — so it renders just that project via :slug
+    const { container } = renderCockpit('project-alpha');
 
     await waitFor(() => {
-      const broken = container.querySelector('[data-project="project-broken"]');
-      expect(broken).toBeTruthy();
-      expect(broken.querySelector('[role="status"]').textContent).toMatch(/fehler/i);
-
-      // Good project still visible
       expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
     });
   });
@@ -397,39 +1013,34 @@ describe('dev-gui-board-aggregator — AC4: Empty and Error states', () => {
 
 // ── AC5 — Rollup display ──────────────────────────────────────────────────────
 
-describe('dev-gui-board-aggregator — AC5: Rollup display', () => {
+describe('dev-gui-board-aggregator — AC5: Rollup display (cockpit)', () => {
   it('shows progress from progress field when present (AC5 — use existing)', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A] });
-
-    const { container } = renderBoard();
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
 
     await waitFor(() => {
       const feature = container.querySelector('[data-feature="F-001"]');
       const rollup = feature.querySelector('[data-testid="rollup-bar"]');
       expect(rollup).toBeTruthy();
-      // FEATURE_WITH_PROGRESS has progress: { done: 1, total: 3 }
       expect(rollup.textContent).toMatch(/1\/3/);
     });
   });
 
   it('computes rollup from child stories when progress is missing (AC5 — fallback)', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A] });
-
-    const { container } = renderBoard();
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
 
     await waitFor(() => {
       const feature = container.querySelector('[data-feature="F-002"]');
       const rollup = feature.querySelector('[data-testid="rollup-bar"]');
       expect(rollup).toBeTruthy();
-      // FEATURE_NO_PROGRESS: stories = [BLOCKED, IN_REVIEW] → 0 done, 2 total
       expect(rollup.textContent).toMatch(/0\/2/);
     });
   });
 
   it('progressbar has role="progressbar" with aria-valuenow (A11y)', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A] });
-
-    const { container } = renderBoard();
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
 
     await waitFor(() => {
       const progressbars = container.querySelectorAll('[role="progressbar"]');
@@ -443,12 +1054,10 @@ describe('dev-gui-board-aggregator — AC5: Rollup display', () => {
   });
 
   it('progressbar aria-valuenow equals 33 for 1/3 done (rounded)', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A] });
-
-    const { container } = renderBoard();
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
 
     await waitFor(() => {
-      // F-001 has progress { done: 1, total: 3 } → 33%
       const feature = container.querySelector('[data-feature="F-001"]');
       const pb = feature.querySelector('[role="progressbar"]');
       expect(parseInt(pb.getAttribute('aria-valuenow'), 10)).toBe(33);
@@ -456,26 +1065,23 @@ describe('dev-gui-board-aggregator — AC5: Rollup display', () => {
   });
 
   it('progressbar aria-valuenow equals 0 for 0/2 done', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A] });
-
-    const { container } = renderBoard();
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
 
     await waitFor(() => {
-      // F-002 has no progress and 0 done stories → 0%
       const feature = container.querySelector('[data-feature="F-002"]');
       const pb = feature.querySelector('[role="progressbar"]');
       expect(parseInt(pb.getAttribute('aria-valuenow'), 10)).toBe(0);
     });
   });
 
-  it('shows "0/0 done" for feature with no stories (empty feature)', async () => {
+  it('shows "0/0 done" for feature with no stories (empty feature, cockpit)', async () => {
     const projectWithEmpty = {
       slug: 'project-x',
       features: [FEATURE_EMPTY],
     };
-    globalThis.fetch = makeBoardFetch({ projects: [projectWithEmpty] });
-
-    const { container } = renderBoard();
+    globalThis.fetch = makeBoardFetch({ fullProjects: [projectWithEmpty] });
+    const { container } = renderCockpit('project-x');
 
     await waitFor(() => {
       const rollup = container.querySelector('[data-testid="rollup-bar"]');
@@ -484,7 +1090,6 @@ describe('dev-gui-board-aggregator — AC5: Rollup display', () => {
   });
 
   it('uses progress.done=2 progress.total=3 when progress field provided (not recount)', async () => {
-    // Feature with progress.done=2, total=3 but 0 actual done stories
     const featureStaleProgress = {
       id: 'F-stale',
       title: 'Stale Progress Feature',
@@ -496,61 +1101,23 @@ describe('dev-gui-board-aggregator — AC5: Rollup display', () => {
         { id: 'S-x2', parent: 'F-stale', title: 'Story 2', status: 'In Progress', labels: [] },
       ],
     };
-    globalThis.fetch = makeBoardFetch({
-      projects: [{ slug: 'project-stale', features: [featureStaleProgress] }],
-    });
-
-    const { container } = renderBoard();
+    const staleProject = { slug: 'project-stale', features: [featureStaleProgress] };
+    globalThis.fetch = makeBoardFetch({ fullProjects: [staleProject] });
+    const { container } = renderCockpit('project-stale');
 
     await waitFor(() => {
       const rollup = container.querySelector('[data-testid="rollup-bar"]');
-      // Must show 2/3 from progress field, not 0/2 from stories
       expect(rollup.textContent).toMatch(/2\/3/);
     });
   });
 });
 
-// ── AC6 — Filter ──────────────────────────────────────────────────────────────
+// ── AC6 (dev-gui-board-aggregator) — Filter (cockpit) ─────────────────────────
 
-describe('dev-gui-board-aggregator — AC6: Filter', () => {
-  it('renders project filter dropdown with project slugs', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A, PROJECT_B] });
-
-    const { container } = renderBoard();
-
-    await waitFor(() => {
-      const select = container.querySelector('#board-filter-project');
-      expect(select).toBeTruthy();
-      const options = Array.from(select.options).map((o) => o.value);
-      expect(options).toContain('project-alpha');
-      expect(options).toContain('project-beta');
-    });
-  });
-
-  it('renders status filter as checkbox group with all five status lifecycle values', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A] });
-
-    const { container } = renderBoard();
-
-    await waitFor(() => {
-      // Status filter is a fieldset/legend group (semantic), not a select
-      const group = container.querySelector('fieldset[aria-label*="Status"]');
-      expect(group).toBeTruthy();
-      // Five checkboxes — one per lifecycle status
-      const checkboxes = Array.from(group.querySelectorAll('input[type="checkbox"]'));
-      const values = checkboxes.map((cb) => cb.id);
-      expect(values.some((id) => /to-do/i.test(id))).toBe(true);
-      expect(values.some((id) => /in-progress/i.test(id))).toBe(true);
-      expect(values.some((id) => /blocked/i.test(id))).toBe(true);
-      expect(values.some((id) => /in-review/i.test(id))).toBe(true);
-      expect(values.some((id) => /done/i.test(id))).toBe(true);
-    });
-  });
-
+describe('dev-gui-board-aggregator — AC6: Filter (cockpit)', () => {
   it('renders label filter dropdown with labels from all stories', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A] });
-
-    const { container } = renderBoard();
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
 
     await waitFor(() => {
       const select = container.querySelector('#board-filter-label');
@@ -562,33 +1129,9 @@ describe('dev-gui-board-aggregator — AC6: Filter', () => {
     });
   });
 
-  it('filtering by project only shows that project (AC6)', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A, PROJECT_B] });
-
-    const { container } = renderBoard();
-
-    await waitFor(() => {
-      expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
-      expect(container.querySelector('[data-project="project-beta"]')).toBeTruthy();
-    });
-
-    // Select project-alpha only
-    await act(async () => {
-      fireEvent.change(container.querySelector('#board-filter-project'), {
-        target: { value: 'project-alpha' },
-      });
-    });
-
-    await waitFor(() => {
-      expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
-      expect(container.querySelector('[data-project="project-beta"]')).toBeNull();
-    });
-  });
-
-  it('filtering by status only shows stories with that status (AC6)', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A] });
-
-    const { container } = renderBoard();
+  it('filtering by status only shows stories with that status (AC6 — cockpit)', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
 
     await waitFor(() => {
       expect(container.querySelector('[data-story="S-001"]')).toBeTruthy();
@@ -596,12 +1139,18 @@ describe('dev-gui-board-aggregator — AC6: Filter', () => {
       expect(container.querySelector('[data-story="S-003"]')).toBeTruthy();
     });
 
-    // Filter: only 'Done' — click the "Done" checkbox
+    // Open popover and uncheck all except "Done"
     await act(async () => {
-      const doneCheckbox = container.querySelector('#board-filter-status-done');
-      expect(doneCheckbox).toBeTruthy();
-      fireEvent.click(doneCheckbox);
+      fireEvent.click(container.querySelector('[data-testid="status-filter-btn"]'));
     });
+
+    // Uncheck all except done: to-do, in-progress, blocked, in-review
+    for (const s of ['to-do', 'in-progress', 'blocked', 'in-review']) {
+      await act(async () => {
+        const cb = container.querySelector(`#board-filter-status-${s}`);
+        fireEvent.click(cb);
+      });
+    }
 
     await waitFor(() => {
       expect(container.querySelector('[data-story="S-003"]')).toBeTruthy();
@@ -610,16 +1159,14 @@ describe('dev-gui-board-aggregator — AC6: Filter', () => {
     });
   });
 
-  it('filtering by label only shows stories with that label (AC6)', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A] });
-
-    const { container } = renderBoard();
+  it('filtering by label only shows stories with that label (AC6 — cockpit)', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
 
     await waitFor(() => {
       expect(container.querySelector('[data-story="S-001"]')).toBeTruthy();
     });
 
-    // Filter: label 'ci'
     await act(async () => {
       fireEvent.change(container.querySelector('#board-filter-label'), {
         target: { value: 'ci' },
@@ -627,7 +1174,6 @@ describe('dev-gui-board-aggregator — AC6: Filter', () => {
     });
 
     await waitFor(() => {
-      // S-004 has label 'ci', others don't
       expect(container.querySelector('[data-story="S-004"]')).toBeTruthy();
       expect(container.querySelector('[data-story="S-001"]')).toBeNull();
       expect(container.querySelector('[data-story="S-002"]')).toBeNull();
@@ -635,50 +1181,20 @@ describe('dev-gui-board-aggregator — AC6: Filter', () => {
     });
   });
 
-  it('filters can be combined independently (AC6)', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A, PROJECT_B] });
-
-    const { container } = renderBoard();
-
-    await waitFor(() => {
-      expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
-    });
-
-    // Combine: project=alpha AND status=Done (checkbox)
-    await act(async () => {
-      fireEvent.change(container.querySelector('#board-filter-project'), {
-        target: { value: 'project-alpha' },
-      });
-      const doneCheckbox = container.querySelector('#board-filter-status-done');
-      expect(doneCheckbox).toBeTruthy();
-      fireEvent.click(doneCheckbox);
-    });
-
-    await waitFor(() => {
-      // project-beta not shown (project filter)
-      expect(container.querySelector('[data-project="project-beta"]')).toBeNull();
-      // S-003 is Done in alpha
-      expect(container.querySelector('[data-story="S-003"]')).toBeTruthy();
-      // S-001 is To Do — filtered out by status
-      expect(container.querySelector('[data-story="S-001"]')).toBeNull();
-    });
-  });
-
-  it('shows reset button when any filter is active', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A, PROJECT_B] });
-
-    const { container } = renderBoard();
+  it('shows reset button when label filter is active', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
 
     await waitFor(() => {
       expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
     });
 
-    // No filter active yet — no reset button
+    // No filter active yet (all 5 selected, no label)
     expect(container.querySelector('[aria-label="Filter zurücksetzen"]')).toBeNull();
 
     await act(async () => {
-      fireEvent.change(container.querySelector('#board-filter-project'), {
-        target: { value: 'project-alpha' },
+      fireEvent.change(container.querySelector('#board-filter-label'), {
+        target: { value: 'ci' },
       });
     });
 
@@ -687,24 +1203,24 @@ describe('dev-gui-board-aggregator — AC6: Filter', () => {
     });
   });
 
-  it('reset button clears all filters and shows all projects again', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A, PROJECT_B] });
-
-    const { container } = renderBoard();
+  it('reset button restores all 5 statuses checked and clears label (AC2 reset)', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
 
     await waitFor(() => {
       expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
     });
 
-    // Set a filter
+    // Open popover, uncheck "Done"
     await act(async () => {
-      fireEvent.change(container.querySelector('#board-filter-project'), {
-        target: { value: 'project-alpha' },
-      });
+      fireEvent.click(container.querySelector('[data-testid="status-filter-btn"]'));
     });
-
+    await act(async () => {
+      fireEvent.click(container.querySelector('#board-filter-status-done'));
+    });
+    // S-003 (Done) should be hidden now
     await waitFor(() => {
-      expect(container.querySelector('[data-project="project-beta"]')).toBeNull();
+      expect(container.querySelector('[data-story="S-003"]')).toBeNull();
     });
 
     // Click reset
@@ -713,124 +1229,18 @@ describe('dev-gui-board-aggregator — AC6: Filter', () => {
     });
 
     await waitFor(() => {
-      expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
-      expect(container.querySelector('[data-project="project-beta"]')).toBeTruthy();
+      // All stories restored
+      expect(container.querySelector('[data-story="S-001"]')).toBeTruthy();
+      expect(container.querySelector('[data-story="S-002"]')).toBeTruthy();
+      expect(container.querySelector('[data-story="S-003"]')).toBeTruthy();
+      // No reset button visible (all selected = no filter)
+      expect(container.querySelector('[aria-label="Filter zurücksetzen"]')).toBeNull();
     });
   });
 
-  it('shows "Keine Stories passen" hint when status-filter eliminates all stories (AC6 — filter empty-state)', async () => {
-    // PROJECT_B has FEATURE_EMPTY (stories: []) — a status filter that matches nothing
-    // leaves project nodes intact but zero filtered stories
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_B] });
-
-    const { container } = renderBoard();
-
-    await waitFor(() => {
-      expect(container.querySelector('[data-project="project-beta"]')).toBeTruthy();
-    });
-
-    // Apply a status filter that has no match in PROJECT_B (empty feature, zero stories)
-    // Click the "Done" checkbox
-    await act(async () => {
-      const doneCheckbox = container.querySelector('#board-filter-status-done');
-      expect(doneCheckbox).toBeTruthy();
-      fireEvent.click(doneCheckbox);
-    });
-
-    await waitFor(() => {
-      // Project node still present (filteredProjects.length >= 1)
-      expect(container.querySelector('[data-project="project-beta"]')).toBeTruthy();
-      // But the "no stories" hint must appear
-      const hints = Array.from(container.querySelectorAll('[role="status"]'));
-      const noStoriesHint = hints.find((el) =>
-        /keine stories passen/i.test(el.textContent),
-      );
-      expect(noStoriesHint).toBeTruthy();
-    });
-  });
-
-  it('shows "Keine Stories passen" hint when label-filter eliminates all stories (AC6 — label filter empty-state)', async () => {
-    // Build a project whose stories carry only label 'auth-only'.
-    // A second project (not used in the project filter) carries label 'devops-only',
-    // so both labels appear in the dropdown.  When we filter by project-auth-only AND
-    // label 'devops-only', zero stories survive from that project → hint must appear.
-    const STORY_AUTH = {
-      id: 'SA-001',
-      parent: 'FA-001',
-      title: 'Auth Story',
-      status: 'To Do',
-      priority: 'high',
-      labels: ['auth-only'],
-      spec: null,
-    };
-    const PROJECT_AUTH_ONLY = {
-      slug: 'project-auth-only',
-      features: [{ id: 'FA-001', title: 'Auth Feature', stories: [STORY_AUTH] }],
-    };
-    const STORY_DEVOPS = {
-      id: 'SD-001',
-      parent: 'FD-001',
-      title: 'Devops Story',
-      status: 'To Do',
-      priority: 'low',
-      labels: ['devops-only'],
-      spec: null,
-    };
-    const PROJECT_DEVOPS_ONLY = {
-      slug: 'project-devops-only',
-      features: [{ id: 'FD-001', title: 'Devops Feature', stories: [STORY_DEVOPS] }],
-    };
-
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_AUTH_ONLY, PROJECT_DEVOPS_ONLY] });
-
-    const { container } = renderBoard();
-
-    await waitFor(() => {
-      // Both projects loaded
-      expect(container.querySelector('[data-project="project-auth-only"]')).toBeTruthy();
-      expect(container.querySelector('[data-project="project-devops-only"]')).toBeTruthy();
-      // Both labels in the dropdown
-      const select = container.querySelector('#board-filter-label');
-      const opts = Array.from(select.options).map((o) => o.value);
-      expect(opts).toContain('auth-only');
-      expect(opts).toContain('devops-only');
-    });
-
-    // Step 1: scope to project-auth-only (project filter)
-    await act(async () => {
-      fireEvent.change(container.querySelector('#board-filter-project'), {
-        target: { value: 'project-auth-only' },
-      });
-    });
-
-    await waitFor(() => {
-      expect(container.querySelector('[data-project="project-devops-only"]')).toBeNull();
-    });
-
-    // Step 2: filter by 'devops-only' label — valid option in dropdown, but
-    // project-auth-only has NO story with that label → totalFilteredStories = 0
-    await act(async () => {
-      fireEvent.change(container.querySelector('#board-filter-label'), {
-        target: { value: 'devops-only' },
-      });
-    });
-
-    await waitFor(() => {
-      // Project node still present (filteredProjects.length >= 1)
-      expect(container.querySelector('[data-project="project-auth-only"]')).toBeTruthy();
-      // The "no stories" hint must appear
-      const hints = Array.from(container.querySelectorAll('[role="status"]'));
-      const noStoriesHint = hints.find((el) =>
-        /keine stories passen/i.test(el.textContent),
-      );
-      expect(noStoriesHint).toBeTruthy();
-    });
-  });
-
-  it('does NOT call /api/board/projects again when filters change (AC6 — client-side only)', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A, PROJECT_B] });
-
-    const { container } = renderBoard();
+  it('does NOT call /api/board/* again when filters change (AC6 — client-side only)', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
 
     await waitFor(() => {
       expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
@@ -838,30 +1248,24 @@ describe('dev-gui-board-aggregator — AC6: Filter', () => {
 
     const callsBefore = globalThis.fetch.mock.calls.length;
 
-    // Click the "Done" checkbox — triggers filter change without backend call
+    // Open popover and uncheck "Done"
     await act(async () => {
-      const doneCheckbox = container.querySelector('#board-filter-status-done');
-      expect(doneCheckbox).toBeTruthy();
-      fireEvent.click(doneCheckbox);
+      fireEvent.click(container.querySelector('[data-testid="status-filter-btn"]'));
+    });
+    await act(async () => {
+      fireEvent.click(container.querySelector('#board-filter-status-done'));
     });
 
-    // No additional fetch calls after filter change
     expect(globalThis.fetch.mock.calls.length).toBe(callsBefore);
   });
 
-  it('filter controls have aria-labels (A11y)', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A] });
-
-    const { container } = renderBoard();
+  it('filter controls have aria-labels (A11y, cockpit)', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
 
     await waitFor(() => {
-      const projectSelect = container.querySelector('#board-filter-project');
-      expect(projectSelect.getAttribute('aria-label')).toMatch(/projekt/i);
-
-      // Status filter is a fieldset/legend group — check fieldset has aria-label
-      const statusGroup = container.querySelector('fieldset[aria-label*="Status"]');
-      expect(statusGroup).toBeTruthy();
-      expect(statusGroup.getAttribute('aria-label')).toMatch(/status/i);
+      const statusBtn = container.querySelector('[data-testid="status-filter-btn"]');
+      expect(statusBtn.getAttribute('aria-label')).toMatch(/status/i);
 
       const labelSelect = container.querySelector('#board-filter-label');
       expect(labelSelect.getAttribute('aria-label')).toMatch(/label/i);
@@ -872,10 +1276,9 @@ describe('dev-gui-board-aggregator — AC6: Filter', () => {
 // ── AC4/A11y — Status badges ──────────────────────────────────────────────────
 
 describe('dev-gui-board-aggregator — AC4/A11y: Status badges have text labels', () => {
-  it('status column headers carry aria-label with status text (meaning not only colour)', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A] });
-
-    const { container } = renderBoard();
+  it('status column headers carry aria-label with status text (cockpit)', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
 
     await waitFor(() => {
       const statusBadges = container.querySelectorAll('[aria-label^="Status:"]');
@@ -887,9 +1290,8 @@ describe('dev-gui-board-aggregator — AC4/A11y: Status badges have text labels'
   });
 
   it('project section has aria-label with project slug', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A] });
-
-    const { container } = renderBoard();
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
 
     await waitFor(() => {
       const section = container.querySelector('[data-project="project-alpha"]');
@@ -898,9 +1300,8 @@ describe('dev-gui-board-aggregator — AC4/A11y: Status badges have text labels'
   });
 
   it('story cards have aria-label with story title', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A] });
-
-    const { container } = renderBoard();
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
 
     await waitFor(() => {
       const card = container.querySelector('[data-story="S-001"]');
@@ -909,9 +1310,8 @@ describe('dev-gui-board-aggregator — AC4/A11y: Status badges have text labels'
   });
 
   it('label chips are rendered with aria-label per chip', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A] });
-
-    const { container } = renderBoard();
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
 
     await waitFor(() => {
       const labelChips = container.querySelectorAll('[aria-label^="Label:"]');
@@ -926,10 +1326,30 @@ describe('dev-gui-board-aggregator — AC4/A11y: Status badges have text labels'
 // ── Security floor ────────────────────────────────────────────────────────────
 
 describe('dev-gui-board-aggregator — Security floor', () => {
-  it('only /api/board/* URLs are called (no other endpoints)', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A] });
+  it('only /api/board/* URLs are called (cockpit, no other endpoints)', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
 
+    await waitFor(() => {
+      expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
+    });
+
+    for (const call of globalThis.fetch.mock.calls) {
+      expect(call[0]).toMatch(/^\/api\/board\//);
+    }
+  });
+
+  it('only /api/board/* URLs are called (standalone, project list + project fetch)', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
     const { container } = renderBoard();
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-project-list-item="project-alpha"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="project-select-project-alpha"]'));
+    });
 
     await waitFor(() => {
       expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
@@ -973,20 +1393,17 @@ const PROJECT_WITH_DETAIL = {
   features: [FEATURE_WITH_DETAIL, FEATURE_NO_OPTIONAL],
 };
 
-describe('dev-gui-board-aggregator — Feature detail panel', () => {
+describe('dev-gui-board-aggregator — Feature detail panel (cockpit)', () => {
   it('feature title is a button that toggles the detail panel', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_WITH_DETAIL] });
-
-    const { container } = renderBoard();
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_WITH_DETAIL] });
+    const { container } = renderCockpit('project-detail');
 
     await waitFor(() => {
       expect(container.querySelector('[data-feature="F-detail"]')).toBeTruthy();
     });
 
-    // Detail panel not visible yet
     expect(container.querySelector('[data-testid="feature-detail-F-detail"]')).toBeNull();
 
-    // Click the title button to open
     await act(async () => {
       const btn = container.querySelector('[data-testid="feature-title-btn-F-detail"]');
       expect(btn).toBeTruthy();
@@ -999,9 +1416,8 @@ describe('dev-gui-board-aggregator — Feature detail panel', () => {
   });
 
   it('detail panel shows goal when present', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_WITH_DETAIL] });
-
-    const { container } = renderBoard();
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_WITH_DETAIL] });
+    const { container } = renderCockpit('project-detail');
 
     await waitFor(() => {
       expect(container.querySelector('[data-feature="F-detail"]')).toBeTruthy();
@@ -1019,9 +1435,8 @@ describe('dev-gui-board-aggregator — Feature detail panel', () => {
   });
 
   it('detail panel shows definition_of_done when present', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_WITH_DETAIL] });
-
-    const { container } = renderBoard();
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_WITH_DETAIL] });
+    const { container } = renderCockpit('project-detail');
 
     await waitFor(() => {
       expect(container.querySelector('[data-feature="F-detail"]')).toBeTruthy();
@@ -1039,9 +1454,8 @@ describe('dev-gui-board-aggregator — Feature detail panel', () => {
   });
 
   it('detail panel shows priority', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_WITH_DETAIL] });
-
-    const { container } = renderBoard();
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_WITH_DETAIL] });
+    const { container } = renderCockpit('project-detail');
 
     await waitFor(() => {
       expect(container.querySelector('[data-feature="F-detail"]')).toBeTruthy();
@@ -1059,9 +1473,8 @@ describe('dev-gui-board-aggregator — Feature detail panel', () => {
   });
 
   it('detail panel shows depends when present', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_WITH_DETAIL] });
-
-    const { container } = renderBoard();
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_WITH_DETAIL] });
+    const { container } = renderCockpit('project-detail');
 
     await waitFor(() => {
       expect(container.querySelector('[data-feature="F-detail"]')).toBeTruthy();
@@ -1079,9 +1492,8 @@ describe('dev-gui-board-aggregator — Feature detail panel', () => {
   });
 
   it('detail panel shows labels when present', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_WITH_DETAIL] });
-
-    const { container } = renderBoard();
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_WITH_DETAIL] });
+    const { container } = renderCockpit('project-detail');
 
     await waitFor(() => {
       expect(container.querySelector('[data-feature="F-detail"]')).toBeTruthy();
@@ -1100,9 +1512,8 @@ describe('dev-gui-board-aggregator — Feature detail panel', () => {
   });
 
   it('clicking title again closes the detail panel', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_WITH_DETAIL] });
-
-    const { container } = renderBoard();
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_WITH_DETAIL] });
+    const { container } = renderCockpit('project-detail');
 
     await waitFor(() => {
       expect(container.querySelector('[data-feature="F-detail"]')).toBeTruthy();
@@ -1116,7 +1527,6 @@ describe('dev-gui-board-aggregator — Feature detail panel', () => {
       expect(container.querySelector('[data-testid="feature-detail-F-detail"]')).toBeTruthy();
     });
 
-    // Click again to close
     await act(async () => {
       fireEvent.click(container.querySelector('[data-testid="feature-title-btn-F-detail"]'));
     });
@@ -1126,10 +1536,9 @@ describe('dev-gui-board-aggregator — Feature detail panel', () => {
     });
   });
 
-  it('detail panel omits null fields (goal/dod/depends/labels absent for plain feature)', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_WITH_DETAIL] });
-
-    const { container } = renderBoard();
+  it('detail panel omits null fields', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_WITH_DETAIL] });
+    const { container } = renderCockpit('project-detail');
 
     await waitFor(() => {
       expect(container.querySelector('[data-feature="F-plain"]')).toBeTruthy();
@@ -1143,7 +1552,6 @@ describe('dev-gui-board-aggregator — Feature detail panel', () => {
       expect(container.querySelector('[data-testid="feature-detail-F-plain"]')).toBeTruthy();
     });
 
-    // Null fields must not be rendered
     expect(container.querySelector('[data-testid="feature-detail-goal"]')).toBeNull();
     expect(container.querySelector('[data-testid="feature-detail-dod"]')).toBeNull();
     expect(container.querySelector('[data-testid="feature-detail-depends"]')).toBeNull();
@@ -1151,9 +1559,8 @@ describe('dev-gui-board-aggregator — Feature detail panel', () => {
   });
 
   it('title button has aria-expanded false initially and true when open', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_WITH_DETAIL] });
-
-    const { container } = renderBoard();
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_WITH_DETAIL] });
+    const { container } = renderCockpit('project-detail');
 
     await waitFor(() => {
       expect(container.querySelector('[data-feature="F-detail"]')).toBeTruthy();
@@ -1172,74 +1579,70 @@ describe('dev-gui-board-aggregator — Feature detail panel', () => {
   });
 });
 
-// ── Multi-Status-Filter (Erweiterung 3) ──────────────────────────────────────
+// ── Multi-Status-Filter (cockpit) ─────────────────────────────────────────────
 
-describe('dev-gui-board-aggregator — Multi-Status-Filter (Checkbox-Mehrfachauswahl)', () => {
-  it('empty status selection shows all stories', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A] });
-
-    const { container } = renderBoard();
+describe('dev-gui-board-aggregator — Multi-Status-Filter (cockpit)', () => {
+  it('all stories visible by default (all 5 selected, cockpit)', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
 
     await waitFor(() => {
-      // All stories visible when no status checkbox is checked
       expect(container.querySelector('[data-story="S-001"]')).toBeTruthy();
       expect(container.querySelector('[data-story="S-002"]')).toBeTruthy();
       expect(container.querySelector('[data-story="S-003"]')).toBeTruthy();
     });
   });
 
-  it('two status checkboxes checked → only stories with those statuses visible', async () => {
-    // S-001 is "To Do", S-002 is "In Progress", S-003 is "Done"
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A] });
-
-    const { container } = renderBoard();
+  it('two status checkboxes unchecked → only remaining statuses visible', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
 
     await waitFor(() => {
       expect(container.querySelector('[data-story="S-001"]')).toBeTruthy();
     });
 
-    // Check "To Do" and "In Progress"
+    // Open popover and uncheck "Blocked" and "In Review" and "Done"
+    // so only "To Do" and "In Progress" remain
     await act(async () => {
-      const todoCheckbox = container.querySelector('#board-filter-status-to-do');
-      expect(todoCheckbox).toBeTruthy();
-      fireEvent.click(todoCheckbox);
+      fireEvent.click(container.querySelector('[data-testid="status-filter-btn"]'));
     });
 
+    for (const s of ['blocked', 'in-review', 'done']) {
+      await act(async () => {
+        const cb = container.querySelector(`#board-filter-status-${s}`);
+        expect(cb).toBeTruthy();
+        fireEvent.click(cb);
+      });
+    }
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-story="S-001"]')).toBeTruthy(); // To Do
+      expect(container.querySelector('[data-story="S-002"]')).toBeTruthy(); // In Progress
+      expect(container.querySelector('[data-story="S-003"]')).toBeNull(); // Done
+    });
+  });
+
+  it('unchecking and rechecking a status restores its stories', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-story="S-001"]')).toBeTruthy();
+    });
+
+    // Open popover, uncheck "Done"
     await act(async () => {
-      const inProgressCheckbox = container.querySelector('#board-filter-status-in-progress');
-      expect(inProgressCheckbox).toBeTruthy();
-      fireEvent.click(inProgressCheckbox);
+      fireEvent.click(container.querySelector('[data-testid="status-filter-btn"]'));
+    });
+    await act(async () => {
+      fireEvent.click(container.querySelector('#board-filter-status-done'));
     });
 
     await waitFor(() => {
-      // S-001 (To Do) and S-002 (In Progress) visible
-      expect(container.querySelector('[data-story="S-001"]')).toBeTruthy();
-      expect(container.querySelector('[data-story="S-002"]')).toBeTruthy();
-      // S-003 (Done) filtered out
       expect(container.querySelector('[data-story="S-003"]')).toBeNull();
     });
-  });
 
-  it('unchecking a status checkbox removes that filter', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A] });
-
-    const { container } = renderBoard();
-
-    await waitFor(() => {
-      expect(container.querySelector('[data-story="S-001"]')).toBeTruthy();
-    });
-
-    // Check "Done"
-    await act(async () => {
-      fireEvent.click(container.querySelector('#board-filter-status-done'));
-    });
-
-    await waitFor(() => {
-      expect(container.querySelector('[data-story="S-001"]')).toBeNull();
-      expect(container.querySelector('[data-story="S-003"]')).toBeTruthy();
-    });
-
-    // Uncheck "Done" — all stories visible again
+    // Re-check "Done"
     await act(async () => {
       fireEvent.click(container.querySelector('#board-filter-status-done'));
     });
@@ -1251,35 +1654,31 @@ describe('dev-gui-board-aggregator — Multi-Status-Filter (Checkbox-Mehrfachaus
     });
   });
 
-  it('reset button clears status checkboxes and restores all stories', async () => {
-    globalThis.fetch = makeBoardFetch({ projects: [PROJECT_A] });
-
-    const { container } = renderBoard();
+  it('reset button clears status checkboxes back to all-5-selected', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
 
     await waitFor(() => {
       expect(container.querySelector('[data-story="S-001"]')).toBeTruthy();
     });
 
-    // Activate a status filter
+    // Open popover and activate a label filter (so reset button appears)
     await act(async () => {
-      fireEvent.click(container.querySelector('#board-filter-status-done'));
+      fireEvent.change(container.querySelector('#board-filter-label'), { target: { value: 'ci' } });
     });
 
     await waitFor(() => {
       expect(container.querySelector('[aria-label="Filter zurücksetzen"]')).toBeTruthy();
     });
 
-    // Click reset
     await act(async () => {
       fireEvent.click(container.querySelector('[aria-label="Filter zurücksetzen"]'));
     });
 
     await waitFor(() => {
-      // All stories restored
       expect(container.querySelector('[data-story="S-001"]')).toBeTruthy();
       expect(container.querySelector('[data-story="S-002"]')).toBeTruthy();
       expect(container.querySelector('[data-story="S-003"]')).toBeTruthy();
-      // No reset button visible
       expect(container.querySelector('[aria-label="Filter zurücksetzen"]')).toBeNull();
     });
   });

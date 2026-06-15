@@ -116,11 +116,12 @@ export const VIEW_REGISTRY = [
     Component: RetroTrendView,
     tile: null,
   },
-  // dev-gui-board-aggregator: route-only (not a panel tile)
+  // studis-kanban-board-ux AC1: label = "Studis-Kanban-Board"; route-only (not a panel tile)
   {
     id: 'board',
     Component: BoardView,
     tile: null,
+    label: 'Studis-Kanban-Board',
   },
 ];
 

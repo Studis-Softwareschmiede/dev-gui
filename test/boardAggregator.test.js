@@ -17,6 +17,12 @@
  *          "boardRouter HTTP — GET /api/board/projects" und
  *          "boardRouter HTTP — POST /api/board/projects/rescan (AC9)").
  *
+ * Covers (studis-kanban-board-ux):
+ *   AC5 — GET /api/board/projects/list liefert slug + grobe Zähler (kein Story-Body);
+ *          GET /api/board/projects/:slug liefert ein Projekt voll on-demand;
+ *          :slug mit ungültigem Format → 404; unbekannter Slug → 404;
+ *          GET /api/board/projects bleibt erhalten.
+ *
  * AccessGuard:
  *   POST /api/board/projects/rescan (Schreib-Trigger) liegt hinter
  *   app.use('/api', accessGuard) in server.js — kein separater Middleware-Test
@@ -1053,6 +1059,164 @@ describe('boardRouter HTTP — POST /api/board/projects/rescan (AC9)', () => {
       const { status, data } = await httpFetch(server, '/api/board/projects');
       expect(status).toBe(200);
       expect(data.projects.length).toBe(1);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+});
+
+// ── AC5 (studis-kanban-board-ux) — /api/board/projects/list + /projects/:slug ─
+
+describe('boardRouter HTTP — GET /api/board/projects/list (AC5)', () => {
+  it('returns 200 with { projects: [...] } — slug + counters only', async () => {
+    const { aggregator } = makeAggregator();
+    const server = await startServer(aggregator);
+    try {
+      const { status, data } = await httpFetch(server, '/api/board/projects/list');
+      expect(status).toBe(200);
+      expect(data).toHaveProperty('projects');
+      expect(Array.isArray(data.projects)).toBe(true);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('list items have slug, feature_count, story_count — no features array', async () => {
+    const { aggregator } = makeAggregator();
+    const server = await startServer(aggregator);
+    try {
+      const { data } = await httpFetch(server, '/api/board/projects/list');
+      expect(data.projects.length).toBe(1);
+      const item = data.projects[0];
+      expect(item.slug).toBe('my-repo');
+      expect(typeof item.feature_count).toBe('number');
+      expect(typeof item.story_count).toBe('number');
+      // Must NOT expose full story data
+      expect(item.features).toBeUndefined();
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('list counters are correct (feature_count ≥ 2, story_count ≥ 2)', async () => {
+    const { aggregator } = makeAggregator();
+    const server = await startServer(aggregator);
+    try {
+      const { data } = await httpFetch(server, '/api/board/projects/list');
+      const item = data.projects[0];
+      // Fixture has F-001 (2 stories) + F-002 (0 stories) + possibly orphaned pseudo-feature
+      expect(item.feature_count).toBeGreaterThanOrEqual(2);
+      expect(item.story_count).toBeGreaterThanOrEqual(2);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('error boards appear with slug + error field in list', async () => {
+    const { aggregator } = makeAggregator({ missingBoardYaml: true });
+    const server = await startServer(aggregator);
+    try {
+      const { data } = await httpFetch(server, '/api/board/projects/list');
+      const errItem = data.projects.find((p) => p.error);
+      expect(errItem).toBeDefined();
+      expect(errItem.slug).toBe('my-repo');
+      expect(typeof errItem.error).toBe('string');
+      expect(errItem.feature_count).toBeUndefined();
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('returns empty list when no board roots configured', async () => {
+    const fsDeps = buildFakeFsDeps();
+    const aggregator = new BoardAggregator({ boardRootsEnv: '', fsDeps });
+    const server = await startServer(aggregator);
+    try {
+      const { status, data } = await httpFetch(server, '/api/board/projects/list');
+      expect(status).toBe(200);
+      expect(data.projects).toEqual([]);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+});
+
+describe('boardRouter HTTP — GET /api/board/projects/:slug (AC5)', () => {
+  it('returns 200 with { project: {...} } for known slug', async () => {
+    const { aggregator } = makeAggregator();
+    const server = await startServer(aggregator);
+    try {
+      const { status, data } = await httpFetch(server, '/api/board/projects/my-repo');
+      expect(status).toBe(200);
+      expect(data).toHaveProperty('project');
+      expect(data.project.slug).toBe('my-repo');
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('returned project has full features array (stories included)', async () => {
+    const { aggregator } = makeAggregator();
+    const server = await startServer(aggregator);
+    try {
+      const { data } = await httpFetch(server, '/api/board/projects/my-repo');
+      const project = data.project;
+      expect(Array.isArray(project.features)).toBe(true);
+      expect(project.features.length).toBeGreaterThan(0);
+      // At least one feature has stories
+      const f001 = project.features.find((f) => f.id === 'F-001');
+      expect(f001).toBeDefined();
+      expect(Array.isArray(f001.stories)).toBe(true);
+      expect(f001.stories.length).toBeGreaterThan(0);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('returns 404 for unknown slug', async () => {
+    const { aggregator } = makeAggregator();
+    const server = await startServer(aggregator);
+    try {
+      const { status, data } = await httpFetch(server, '/api/board/projects/nonexistent-slug');
+      expect(status).toBe(404);
+      expect(data).toHaveProperty('error');
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('returns 404 for slug with path traversal attempt (..)', async () => {
+    const { aggregator } = makeAggregator();
+    const server = await startServer(aggregator);
+    try {
+      // URL-encode the traversal attempt
+      const { status } = await httpFetch(server, '/api/board/projects/..%2Fetc%2Fpasswd');
+      // Express parses %2F as path separator so route may not match — either 404 is correct
+      expect([404, 400]).toContain(status);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('returns 404 for slug starting with a dot (.hidden)', async () => {
+    const { aggregator } = makeAggregator();
+    const server = await startServer(aggregator);
+    try {
+      const { status } = await httpFetch(server, '/api/board/projects/.hidden');
+      expect(status).toBe(404);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('existing /api/board/projects still works (legacy endpoint preserved)', async () => {
+    const { aggregator } = makeAggregator();
+    const server = await startServer(aggregator);
+    try {
+      const { status, data } = await httpFetch(server, '/api/board/projects');
+      expect(status).toBe(200);
+      expect(Array.isArray(data.projects)).toBe(true);
+      expect(data.projects[0].slug).toBe('my-repo');
     } finally {
       await new Promise((r) => server.close(r));
     }

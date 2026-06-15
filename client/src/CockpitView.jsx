@@ -2,7 +2,7 @@
  * CockpitView.jsx — Projekt-Cockpit mit Reiter-Leiste (AC3).
  *
  * projekt-cockpit-navigation:
- *   AC3 — Reiter-Leiste „Arbeiten | Board | Spezifikation" mit aktivem Projekt-Kontext.
+ *   AC3 — Reiter-Leiste „Arbeiten | Studis-Kanban-Board | Spezifikation" mit aktivem Projekt-Kontext.
  *          „Arbeiten" zeigt den bisherigen FactoryView-Inhalt (Terminal + TriggerPanel +
  *          Dashboard) — unverändert eingebettet.
  *          „Board" und „Spezifikation" sind Platzhalter-Reiter.
@@ -36,7 +36,7 @@ import { BoardView } from './BoardView.jsx';
 /** @type {Array<{ id: string, label: string }>} */
 const TABS = [
   { id: 'arbeiten', label: 'Arbeiten' },
-  { id: 'board',    label: 'Board' },
+  { id: 'board',    label: 'Studis-Kanban-Board' },
   { id: 'spec',     label: 'Spezifikation' },
 ];
 

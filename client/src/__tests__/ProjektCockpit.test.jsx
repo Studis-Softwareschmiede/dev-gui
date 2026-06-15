@@ -8,15 +8,19 @@
  *          Deep-Link #/factory/<repo> stellt Projekt wieder her;
  *          Rückweg zur Übersicht (navigateFactory(null) → #/factory);
  *          parseHashFull parst #/factory/<repo> korrekt.
- *   AC3 — CockpitView zeigt Reiter-Leiste Arbeiten/Board/Spezifikation;
+ *   AC3 — CockpitView zeigt Reiter-Leiste Arbeiten/Studis-Kanban-Board/Spezifikation;
  *          „Arbeiten" zeigt Terminal (FactoryWorkspace);
- *          „Board" und „Spezifikation" sind Platzhalter mit „folgt";
+ *          „Studis-Kanban-Board" und „Spezifikation" sind Platzhalter mit „folgt";
  *          Reiter-Umschaltung wechselt Panel.
  *   AC4 — Terminal-WS-URL enthält ?project=<encoded-activeRepo> (S-111);
  *          buildTerminalWsUrl gibt absolute WS-URL zurück.
  *   AC5 — TriggerPanel erhält projectPath=activeRepo via FactoryWorkspace-Prop.
  *   AC6 — Board-Reiter bettet BoardView mit lockedProject=activeRepo ein;
  *          kein eigener Projekt-Selektor im Cockpit (S-113).
+ *
+ * Covers (studis-kanban-board-ux):
+ *   AC1 — CockpitView-Reiter trägt label „Studis-Kanban-Board" statt „Board"
+ *          (getestet per tab-name-Assertion).
  *
  * Terminal, Dashboard, TriggerPanel gemockt (WS/DOM-Komplexität vermeiden).
  *
@@ -44,16 +48,16 @@ jest.unstable_mockModule('../TriggerPanel.jsx', () => ({
 }));
 
 // Mock BoardView — AC6/S-113: board tab embeds BoardView.
-// Rendered as a recognizable stub (main[aria-label="Board-Übersicht"]) without
-// triggering real fetch calls, matching the real component's landmark.
+// Rendered as a recognizable stub (main[aria-label="Studis-Kanban-Board"]) without
+// triggering real fetch calls, matching the real component's landmark (AC1/studis-kanban-board-ux).
 jest.unstable_mockModule('../BoardView.jsx', async () => {
   const R = (await import('react')).default;
   return {
     BoardView: ({ lockedProject }) =>
       R.createElement(
         'main',
-        { 'aria-label': 'Board-Übersicht', 'data-locked-project': lockedProject ?? '' },
-        `Board für Projekt: ${lockedProject ?? '—'}`,
+        { 'aria-label': 'Studis-Kanban-Board', 'data-locked-project': lockedProject ?? '' },
+        `Studis-Kanban-Board für Projekt: ${lockedProject ?? '—'}`,
       ),
   };
 });
@@ -402,7 +406,7 @@ describe('CockpitView — AC2: Rückweg zur Übersicht', () => {
 // ── AC3 — Cockpit-Reiter-Shell ────────────────────────────────────────────────
 
 describe('CockpitView — AC3: Reiter-Leiste und Reiter-Umschaltung', () => {
-  it('zeigt Reiter-Leiste mit Arbeiten, Board, Spezifikation', () => {
+  it('zeigt Reiter-Leiste mit Arbeiten, Studis-Kanban-Board, Spezifikation (AC1/studis-kanban-board-ux)', () => {
     const { getByRole } = render(
       React.createElement(CockpitView, {
         activeRepo: 'dev-gui',
@@ -414,7 +418,7 @@ describe('CockpitView — AC3: Reiter-Leiste und Reiter-Umschaltung', () => {
     const tablist = getByRole('tablist', { name: /cockpit-reiter/i });
     expect(tablist).toBeTruthy();
     expect(tablist.textContent).toMatch(/arbeiten/i);
-    expect(tablist.textContent).toMatch(/board/i);
+    expect(tablist.textContent).toMatch(/studis-kanban-board/i);
     expect(tablist.textContent).toMatch(/spezifikation/i);
   });
 
@@ -444,7 +448,7 @@ describe('CockpitView — AC3: Reiter-Leiste und Reiter-Umschaltung', () => {
     expect(getByRole('main', { name: /^terminal$/i })).toBeTruthy();
   });
 
-  it('"Board"-Reiter ist initial nicht aktiv', () => {
+  it('"Studis-Kanban-Board"-Reiter ist initial nicht aktiv', () => {
     const { getByRole } = render(
       React.createElement(CockpitView, {
         activeRepo: 'dev-gui',
@@ -453,11 +457,11 @@ describe('CockpitView — AC3: Reiter-Leiste und Reiter-Umschaltung', () => {
       })
     );
 
-    const boardTab = getByRole('tab', { name: /^board$/i });
+    const boardTab = getByRole('tab', { name: /^studis-kanban-board$/i });
     expect(boardTab.getAttribute('aria-selected')).toBe('false');
   });
 
-  it('Klick auf "Board"-Reiter zeigt Platzhalter-Panel', async () => {
+  it('Klick auf "Studis-Kanban-Board"-Reiter zeigt Platzhalter-Panel', async () => {
     const { getByRole, queryByRole } = render(
       React.createElement(CockpitView, {
         activeRepo: 'dev-gui',
@@ -467,7 +471,7 @@ describe('CockpitView — AC3: Reiter-Leiste und Reiter-Umschaltung', () => {
     );
 
     await act(async () => {
-      fireEvent.click(getByRole('tab', { name: /^board$/i }));
+      fireEvent.click(getByRole('tab', { name: /^studis-kanban-board$/i }));
     });
 
     await waitFor(() => {
@@ -478,7 +482,7 @@ describe('CockpitView — AC3: Reiter-Leiste und Reiter-Umschaltung', () => {
     });
   });
 
-  it('Board-Reiter zeigt BoardView mit Projekt-Kontext (AC6/S-113)', async () => {
+  it('Studis-Kanban-Board-Reiter zeigt BoardView mit Projekt-Kontext (AC6/S-113)', async () => {
     const { getByRole } = render(
       React.createElement(CockpitView, {
         activeRepo: 'dev-gui',
@@ -488,15 +492,15 @@ describe('CockpitView — AC3: Reiter-Leiste und Reiter-Umschaltung', () => {
     );
 
     await act(async () => {
-      fireEvent.click(getByRole('tab', { name: /^board$/i }));
+      fireEvent.click(getByRole('tab', { name: /^studis-kanban-board$/i }));
     });
 
     await waitFor(() => {
       // Board tabpanel must be present
       const panel = getByRole('tabpanel', { name: /board/i });
       expect(panel).toBeTruthy();
-      // BoardView is embedded: the landmark main[aria-label="Board-Übersicht"] is in the panel
-      const boardMain = panel.querySelector('main[aria-label="Board-Übersicht"]');
+      // BoardView is embedded: the landmark main[aria-label="Studis-Kanban-Board"] is in the panel
+      const boardMain = panel.querySelector('main[aria-label="Studis-Kanban-Board"]');
       expect(boardMain).toBeTruthy();
       // Projekt-Kontext (activeRepo) is passed as lockedProject (no own selector, AC6)
       expect(boardMain.dataset.lockedProject).toBe('dev-gui');
@@ -550,9 +554,9 @@ describe('CockpitView — AC3: Reiter-Leiste und Reiter-Umschaltung', () => {
       })
     );
 
-    // Switch to Board
+    // Switch to Studis-Kanban-Board
     await act(async () => {
-      fireEvent.click(getByRole('tab', { name: /^board$/i }));
+      fireEvent.click(getByRole('tab', { name: /^studis-kanban-board$/i }));
     });
 
     // Switch back to Arbeiten
@@ -611,11 +615,11 @@ describe('CockpitView — AC6/S-113: Board-Reiter zeigt aktives Projekt (kein ei
     );
 
     await act(async () => {
-      fireEvent.click(getByRole('tab', { name: /^board$/i }));
+      fireEvent.click(getByRole('tab', { name: /^studis-kanban-board$/i }));
     });
 
     await waitFor(() => {
-      const boardMain = document.querySelector('main[aria-label="Board-Übersicht"]');
+      const boardMain = document.querySelector('main[aria-label="Studis-Kanban-Board"]');
       expect(boardMain).toBeTruthy();
       expect(boardMain.dataset.lockedProject).toBe('agent-flow');
     });
