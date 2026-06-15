@@ -1,7 +1,8 @@
 /**
  * retroReader.test.js — Unit tests for RetroReader, parseLearningsTable,
  *                        groupIntoRuns, buildRunReport, deriveSource, categoriseEntry,
- *                        derivePrefix, prefixCategory, computeMomentumLanes, getTrend().
+ *                        derivePrefix, prefixCategory, computeMomentumLanes, getTrend(),
+ *                        deriveArt, getPromotionCards().
  *
  * Covers (retro-view-backend):
  *   AC1 — getRuns() returns { runs: [...] } with correct shape; sorted descending by date.
@@ -26,6 +27,11 @@
  *   AC10 — Determinism: stable sort of lanes (by id), points (by run), contributingRules (by rule_id).
  *   AC11 — Read-only; no writes; no extra files read (injected fsDeps verifies single file access).
  *
+ * Covers (retro-train-board-local):
+ *   AC1 — deriveArt() maps retro/*, train/* correctly; other values → 'other'.
+ *   AC2 — getPromotionCards() returns { cards: { [status]: [...] } }; each card has
+ *         id/datum/ziel/regel/quelle/pr/status/art/kategorie/metric; missing file → empty, no crash.
+ *
  * Strategy:
  *   - Inject fake fsDeps (readFile) to avoid any real filesystem access.
  *   - Test exported helpers (deriveSource, categoriseEntry, parseLearningsTable, etc.) as units.
@@ -35,6 +41,7 @@
 import { describe, it, expect } from '@jest/globals';
 import {
   deriveSource,
+  deriveArt,
   categoriseEntry,
   parseLearningsTable,
   groupIntoRuns,
@@ -1428,5 +1435,213 @@ describe('retro-trend — RetroReader.getTrend() integration', () => {
     expect(learnAccess).toEqual([]);
     const baselineAccess = accessed.filter((p) => p.endsWith('baseline.json'));
     expect(baselineAccess.length).toBeGreaterThan(0);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// retro-train-board-local (AC1–AC2)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── AC1 — deriveArt ───────────────────────────────────────────────────────────
+
+describe('retro-train-board-local AC1 — deriveArt: value → art', () => {
+  it('retro/* → retro', () => {
+    expect(deriveArt('retro/PR-Q001-coder')).toBe('retro');
+  });
+
+  it('train/* → train', () => {
+    expect(deriveArt('train/PR-Q002')).toBe('train');
+  });
+
+  it('teamLeader/* → other (not retro or train)', () => {
+    expect(deriveArt('teamLeader/PR-Q003')).toBe('other');
+  });
+
+  it('feat/* → other', () => {
+    expect(deriveArt('feat/my-feature')).toBe('other');
+  });
+
+  it('empty string → other', () => {
+    expect(deriveArt('')).toBe('other');
+  });
+
+  it('null → other', () => {
+    expect(deriveArt(null)).toBe('other');
+  });
+
+  it('case-insensitive: RETRO/* → retro', () => {
+    expect(deriveArt('RETRO/pr-q001')).toBe('retro');
+  });
+
+  it('case-insensitive: TRAIN/* → train', () => {
+    expect(deriveArt('TRAIN/pr-q002')).toBe('train');
+  });
+
+  it('"retro" without slash → other', () => {
+    expect(deriveArt('retro')).toBe('other');
+  });
+
+  it('"train" without slash → other', () => {
+    expect(deriveArt('train')).toBe('other');
+  });
+});
+
+// ── AC2 — getPromotionCards() ─────────────────────────────────────────────────
+
+// LEARNINGS.md fixture for board tests (various statuses, retro + train)
+const LEARNINGS_BOARD = `# LEARNINGS
+
+| ID | Datum | Pack/Skill | Regel | Quelle | PR | Status |
+|---|---|---|---|---|---|---|
+| R01 | 2025-01-15 | agents/coder.md | Coder rule one | agents/coder.md | retro/PR-Q001 | Proposed |
+| R02 | 2025-02-10 | knowledge/js.md | JS knowledge rule | knowledge/js.md | train/PR-Q002 | Merged |
+| R03 | 2025-03-01 | skills/deploy/SKILL.md | Deploy skill rule | skills/deploy/SKILL.md | train/PR-Q002 | Validated |
+| R04 | 2025-04-05 | agents/orchestrator.md + knowledge/cicd.md | Multi-path rule | agents/orchestrator.md | retro/PR-Q003 | Measuring |
+`;
+
+const BASELINE_BOARD = JSON.stringify({
+  n_items: 4,
+  defect_rates: {
+    R01: { rate_per_100ep: 1.5, baseline: 2.0, neu: 1.5, status: 'improved' },
+  },
+});
+
+function makeBoardReader({ fileMap = {}, root = PLUGIN_ROOT } = {}) {
+  const fsDeps = buildFakeFsDeps(fileMap);
+  return new RetroReader({
+    fsDeps,
+    pluginRootResolver: async () => root,
+  });
+}
+
+describe('retro-train-board-local AC2 — getPromotionCards()', () => {
+  it('returns { cards: { ... } } shape', async () => {
+    const reader = makeBoardReader({
+      fileMap: { [`${PLUGIN_ROOT}/LEARNINGS.md`]: LEARNINGS_BOARD },
+    });
+    const result = await reader.getPromotionCards();
+    expect(result).toHaveProperty('cards');
+    expect(typeof result.cards).toBe('object');
+  });
+
+  it('cards grouped by status', async () => {
+    const reader = makeBoardReader({
+      fileMap: { [`${PLUGIN_ROOT}/LEARNINGS.md`]: LEARNINGS_BOARD },
+    });
+    const { cards } = await reader.getPromotionCards();
+    expect(Object.keys(cards)).toEqual(expect.arrayContaining(['Proposed', 'Merged', 'Validated', 'Measuring']));
+  });
+
+  it('each card has id, datum, ziel, regel, quelle, pr, status, art, kategorie, metric', async () => {
+    const reader = makeBoardReader({
+      fileMap: { [`${PLUGIN_ROOT}/LEARNINGS.md`]: LEARNINGS_BOARD },
+    });
+    const { cards } = await reader.getPromotionCards();
+    const allCards = Object.values(cards).flat();
+    expect(allCards.length).toBeGreaterThan(0);
+    for (const card of allCards) {
+      expect(card).toHaveProperty('id');
+      expect(card).toHaveProperty('datum');
+      expect(card).toHaveProperty('ziel');
+      expect(card).toHaveProperty('regel');
+      expect(card).toHaveProperty('quelle');
+      expect(card).toHaveProperty('pr');
+      expect(card).toHaveProperty('status');
+      expect(card).toHaveProperty('art');
+      expect(card).toHaveProperty('kategorie');
+      expect(card).toHaveProperty('metric');
+    }
+  });
+
+  it('art derived from quelle/pr: retro/* → retro, train/* → train', async () => {
+    const reader = makeBoardReader({
+      fileMap: { [`${PLUGIN_ROOT}/LEARNINGS.md`]: LEARNINGS_BOARD },
+    });
+    const { cards } = await reader.getPromotionCards();
+    const allCards = Object.values(cards).flat();
+
+    const r01 = allCards.find((c) => c.id === 'R01');
+    expect(r01.art).toBe('retro');
+
+    const r02 = allCards.find((c) => c.id === 'R02');
+    expect(r02.art).toBe('train');
+  });
+
+  it('kategorie is array derived from packSkill (ziel)', async () => {
+    const reader = makeBoardReader({
+      fileMap: { [`${PLUGIN_ROOT}/LEARNINGS.md`]: LEARNINGS_BOARD },
+    });
+    const { cards } = await reader.getPromotionCards();
+    const allCards = Object.values(cards).flat();
+
+    const r01 = allCards.find((c) => c.id === 'R01');
+    expect(Array.isArray(r01.kategorie)).toBe(true);
+    expect(r01.kategorie).toContain('agents');
+
+    const r02 = allCards.find((c) => c.id === 'R02');
+    expect(r02.kategorie).toContain('knowledge');
+
+    const r04 = allCards.find((c) => c.id === 'R04');
+    // agents + knowledge from multi-path
+    expect(r04.kategorie).toContain('agents');
+    expect(r04.kategorie).toContain('knowledge');
+  });
+
+  it('metric joined from defect_rates when rule_id matches', async () => {
+    const reader = makeBoardReader({
+      fileMap: {
+        [`${PLUGIN_ROOT}/LEARNINGS.md`]: LEARNINGS_BOARD,
+        [`${PLUGIN_ROOT}/.claude/metrics/baseline.json`]: BASELINE_BOARD,
+      },
+    });
+    const { cards } = await reader.getPromotionCards();
+    const allCards = Object.values(cards).flat();
+
+    const r01 = allCards.find((c) => c.id === 'R01');
+    expect(r01.metric).not.toBeNull();
+    expect(r01.metric.rate_per_100ep).toBe(1.5);
+
+    const r02 = allCards.find((c) => c.id === 'R02');
+    expect(r02.metric).toBeNull();
+  });
+
+  it('missing LEARNINGS.md → { cards: {} }, no crash', async () => {
+    const reader = makeBoardReader({ fileMap: {} });
+    const result = await reader.getPromotionCards();
+    expect(result).toEqual({ cards: {} });
+  });
+
+  it('pluginRootResolver returns null → { cards: {} }, no crash', async () => {
+    const reader = new RetroReader({ pluginRootResolver: async () => null });
+    const result = await reader.getPromotionCards();
+    expect(result).toEqual({ cards: {} });
+  });
+
+  it('pluginRootResolver throws → { cards: {} }, no crash', async () => {
+    const reader = new RetroReader({
+      pluginRootResolver: async () => { throw new Error('no root'); },
+    });
+    const result = await reader.getPromotionCards();
+    expect(result).toEqual({ cards: {} });
+  });
+
+  it('LEARNINGS.md with no data rows → { cards: {} }', async () => {
+    const reader = makeBoardReader({
+      fileMap: {
+        [`${PLUGIN_ROOT}/LEARNINGS.md`]: `| ID | Datum | Pack/Skill | Regel | Quelle | PR | Status |\n|---|---|---|---|---|---|---|\n`,
+      },
+    });
+    const result = await reader.getPromotionCards();
+    expect(result).toEqual({ cards: {} });
+  });
+
+  it('ziel field equals packSkill column (the Ziel from spec)', async () => {
+    const reader = makeBoardReader({
+      fileMap: { [`${PLUGIN_ROOT}/LEARNINGS.md`]: LEARNINGS_BOARD },
+    });
+    const { cards } = await reader.getPromotionCards();
+    const allCards = Object.values(cards).flat();
+    const r01 = allCards.find((c) => c.id === 'R01');
+    expect(r01.ziel).toBe('agents/coder.md');
   });
 });

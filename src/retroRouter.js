@@ -1,7 +1,9 @@
 /**
- * retroRouter — GET /api/retro/runs, GET /api/retro/runs/:slug, GET /api/retro/trend
+ * retroRouter — GET /api/retro/runs, GET /api/retro/runs/:slug, GET /api/retro/trend,
+ *               GET /api/retro/cards
  *
- * Exposes the retro/train/teamLeader run history and momentum trend view as read-only JSON endpoints.
+ * Exposes the retro/train/teamLeader run history, momentum trend view, and promotion
+ * cards board as read-only JSON endpoints.
  * All routes are behind the existing /api AccessGuard.
  *
  * Routes:
@@ -9,6 +11,7 @@
  *   GET /api/retro/runs/:slug         → { slug, date, source, statusMix, agents:[…], skills:[…], knowledge:[…] }
  *   GET /api/retro/trend?category=<knowledge|agents|skills>
  *                                     → { category, lanes:[…], runs:[…], empty?, placeholder? }
+ *   GET /api/retro/cards              → { cards: { <status>: [{ id, datum, ziel, regel, quelle, pr, status, art, kategorie, metric }] } }
  *
  * Security:
  *   - :slug validated against strict whitelist regex BEFORE any file/reader access (retro-view AC8).
@@ -62,6 +65,17 @@ function isValidSlug(slug) {
  */
 export function retroRouter({ retroReader }) {
   const router = Router();
+
+  /**
+   * GET /api/retro/cards
+   *
+   * Returns all promotion cards from LEARNINGS.md grouped by status.
+   * Read-only; missing LEARNINGS.md → valid empty response, no crash (AC1/AC2).
+   */
+  router.get('/api/retro/cards', async (_req, res) => {
+    const result = await retroReader.getPromotionCards();
+    res.json(result);
+  });
 
   /**
    * GET /api/retro/runs

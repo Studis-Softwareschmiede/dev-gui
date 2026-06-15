@@ -52,6 +52,7 @@
  *   GET    /api/team/:kind/:id                                 → { ...meta, body } (team-view-backend AC4)
  *   GET    /api/retro/runs                                     → { runs:[...] } (retro-view-backend AC1)
  *   GET    /api/retro/runs/:slug                               → { slug, date, source, statusMix, agents:[…], skills:[…], knowledge:[…] } (retro-view-backend AC5)
+ *   GET    /api/retro/cards                                    → { cards: { [status]: Card[] } } (retro-train-board-local AC2)
  *   GET    /api/retro/trend?category=<knowledge|agents|skills> → { category, lanes:[…], runs:[…], empty?, placeholder? } (retro-trend-backend AC1)
  *   GET    /api/board/projects                                → { projects:[…] } (dev-gui-board-aggregator AC1-3,AC7-9)
  *   POST   /api/board/projects/rescan                         → { ok: true } (dev-gui-board-aggregator AC9)

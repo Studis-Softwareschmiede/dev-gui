@@ -22,6 +22,12 @@
  *   AC11 — Keine Secrets im Bundle; nur /api/retro/* aufgerufen; kein dangerouslySetInnerHTML/
  *           innerHTML; keine externe Bibliothek; Regel-Text als React-Elemente.
  *
+ * retro-train-board-local:
+ *   AC3  — Reiter-Umschalter „Läufe | Verbesserungs-Board"; bestehende Lauf-Ansicht bleibt.
+ *   AC4  — Board-Reiter: Kanban-Spalten je Status (Proposed/Merged/Measuring/Validated/Reverted/Expired);
+ *           je Karte: Regel-ID, Ziel, Art-Badge, Status-Badge, PR-Link; Kennzahlen aus baseline.json.
+ *   AC5  — Filter nach Kategorie (agents|skills|knowledge) + Art (retro|train), Mehrfachauswahl.
+ *
  * A11y (WCAG 2.1 AA):
  *   - Semantische Navigationsliste mit aria-label.
  *   - Sichtbarer Fokusring — KEIN outline:none (Coder-Lesson 2026-05-27).
@@ -41,6 +47,16 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 
+// ── Board status columns (canonical order) ────────────────────────────────────
+const BOARD_STATUS_COLUMNS = [
+  'Proposed',
+  'Merged',
+  'Measuring',
+  'Validated',
+  'Reverted',
+  'Expired',
+];
+
 // ── RetroView ─────────────────────────────────────────────────────────────────
 
 /**
@@ -49,6 +65,9 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 export function RetroView({ onNavigate: _onNavigate }) {
   // reserved: Rückkehr/Navigation läuft aktuell über die NavBar — onNavigate ist für
   // zukünftige programmatische Navigation reserviert, wird hier noch nicht aktiv genutzt.
+
+  // ── State: active tab (AC3 retro-train-board-local)
+  const [activeTab, setActiveTab] = useState('runs'); // 'runs' | 'board'
 
   // ── State: runs overview
   const [runsState, setRunsState]   = useState('idle');   // 'idle'|'loading'|'ok'|'error'
@@ -60,6 +79,18 @@ export function RetroView({ onNavigate: _onNavigate }) {
   const [reportState, setReportState]     = useState('idle');  // 'idle'|'loading'|'ok'|'error'
   const [reportError, setReportError]     = useState('');
   const [report, setReport]               = useState(null);
+
+  // ── State: board cards (AC3/AC4 retro-train-board-local)
+  const [boardState, setBoardState]   = useState('idle');   // 'idle'|'loading'|'ok'|'error'
+  const [boardError, setBoardError]   = useState('');
+  const [boardCards, setBoardCards]   = useState({});       // { [status]: Card[] }
+
+  // Ref tracks whether board has been requested (avoids boardState in effect deps)
+  const boardRequestedRef = useRef(false);
+
+  // ── State: board filters (AC5 retro-train-board-local)
+  const [filterKategorie, setFilterKategorie] = useState(new Set()); // empty = all
+  const [filterArt, setFilterArt]             = useState(new Set()); // empty = all
 
   // ── Load overview on mount exactly once — AC4
   useEffect(() => {
@@ -85,6 +116,38 @@ export function RetroView({ onNavigate: _onNavigate }) {
 
     return () => { cancelled = true; };
   }, []); // empty deps = mount once
+
+  // ── Load board cards when board tab is first activated — AC3/AC4 retro-train-board-local
+  // Using a ref to track whether the fetch has been started avoids including boardState
+  // in the dependency array, which would cause a re-run (and cancellation loop) each time
+  // boardState transitions from 'idle' → 'loading' → 'ok'.
+  useEffect(() => {
+    if (activeTab !== 'board') return;
+    if (boardRequestedRef.current) return; // already started
+
+    boardRequestedRef.current = true;
+    let cancelled = false;
+    setBoardState('loading');
+    setBoardError('');
+
+    fetch('/api/retro/cards')
+      .then((res) => {
+        if (!res.ok) return Promise.reject(new Error(`HTTP ${res.status}`));
+        return res.json();
+      })
+      .then((data) => {
+        if (cancelled) return;
+        setBoardCards(data.cards ?? {});
+        setBoardState('ok');
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setBoardError(err.message || 'Netzwerkfehler');
+        setBoardState('error');
+      });
+
+    return () => { cancelled = true; };
+  }, [activeTab]);
 
   // ── Stale-response guard for loadReport — generation counter prevents an older,
   // slower fetch from overwriting the result of a newer selection (race condition).
@@ -122,6 +185,19 @@ export function RetroView({ onNavigate: _onNavigate }) {
       });
   }, []);
 
+  // ── Toggle a filter value in a Set (immutable) — AC5 retro-train-board-local
+  function toggleFilter(setter, value) {
+    setter((prev) => {
+      const next = new Set(prev);
+      if (next.has(value)) {
+        next.delete(value);
+      } else {
+        next.add(value);
+      }
+      return next;
+    });
+  }
+
   // ── Derived: empty state (AC7)
   const isEmpty = runsState === 'ok' && runs.length === 0;
 
@@ -130,76 +206,141 @@ export function RetroView({ onNavigate: _onNavigate }) {
     <main style={styles.main} aria-label="Retro-Ansicht">
       <h1 style={styles.h1}>Retro</h1>
 
-      {/* Loading state — accessible (AC4) */}
-      {runsState === 'loading' && (
-        <div
-          aria-busy="true"
-          aria-live="polite"
-          style={styles.statusMsg}
+      {/* ── Tab switcher (AC3 retro-train-board-local) ── */}
+      <div style={styles.tabBar} role="tablist" aria-label="Retro-Reiter">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeTab === 'runs'}
+          style={{
+            ...styles.tabBtn,
+            ...(activeTab === 'runs' ? styles.tabBtnActive : {}),
+          }}
+          onClick={() => setActiveTab('runs')}
+          data-tab="runs"
         >
-          Lade Retro-Läufe…
-        </div>
-      )}
+          Läufe
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeTab === 'board'}
+          style={{
+            ...styles.tabBtn,
+            ...(activeTab === 'board' ? styles.tabBtnActive : {}),
+          }}
+          onClick={() => setActiveTab('board')}
+          data-tab="board"
+        >
+          Verbesserungs-Board
+        </button>
+      </div>
 
-      {/* Error state for overview load (AC8) */}
-      {runsState === 'error' && (
-        <div role="alert" style={styles.errorMsg}>
-          Fehler beim Laden der Retro-Läufe: {runsError}
-        </div>
-      )}
+      {/* ── Läufe tab ── */}
+      {activeTab === 'runs' && (
+        <div style={styles.tabPanel} role="tabpanel" aria-label="Läufe">
+          {/* Loading state — accessible (AC4) */}
+          {runsState === 'loading' && (
+            <div
+              aria-busy="true"
+              aria-live="polite"
+              style={styles.statusMsg}
+            >
+              Lade Retro-Läufe…
+            </div>
+          )}
 
-      {/* Empty state (AC7) */}
-      {isEmpty && (
-        <div style={styles.statusMsg} role="status">
-          Noch keine Self-Improvement-Läufe vorhanden.
-        </div>
-      )}
+          {/* Error state for overview load (AC8) */}
+          {runsState === 'error' && (
+            <div role="alert" style={styles.errorMsg}>
+              Fehler beim Laden der Retro-Läufe: {runsError}
+            </div>
+          )}
 
-      {/* Master-Detail layout (AC4–AC5, AC10) */}
-      {runsState === 'ok' && !isEmpty && (
-        <div style={styles.layout}>
-          {/* ── Master: runs list ── */}
-          <nav style={styles.nav} aria-label="Retro-Läufe">
-            <ul style={styles.list} role="list">
-              {runs.map((run) => (
-                <RunItem
-                  key={run.slug}
-                  run={run}
-                  isActive={selectedSlug === run.slug}
-                  onSelect={loadReport}
-                />
-              ))}
-            </ul>
-          </nav>
+          {/* Empty state (AC7) */}
+          {isEmpty && (
+            <div style={styles.statusMsg} role="status">
+              Noch keine Self-Improvement-Läufe vorhanden.
+            </div>
+          )}
 
-          {/* ── Detail pane ── */}
-          <div style={styles.detail} aria-label="Report-Pane">
-            {/* No selection yet */}
-            {selectedSlug === null && (
-              <p style={styles.hintMsg}>
-                Wähle einen Lauf aus der Liste aus.
-              </p>
-            )}
+          {/* Master-Detail layout (AC4–AC5, AC10) */}
+          {runsState === 'ok' && !isEmpty && (
+            <div style={styles.layout}>
+              {/* ── Master: runs list ── */}
+              <nav style={styles.nav} aria-label="Retro-Läufe">
+                <ul style={styles.list} role="list">
+                  {runs.map((run) => (
+                    <RunItem
+                      key={run.slug}
+                      run={run}
+                      isActive={selectedSlug === run.slug}
+                      onSelect={loadReport}
+                    />
+                  ))}
+                </ul>
+              </nav>
 
-            {/* Report loading */}
-            {reportState === 'loading' && (
-              <div aria-busy="true" aria-live="polite" style={styles.statusMsg}>
-                Lade Report…
+              {/* ── Detail pane ── */}
+              <div style={styles.detail} aria-label="Report-Pane">
+                {/* No selection yet */}
+                {selectedSlug === null && (
+                  <p style={styles.hintMsg}>
+                    Wähle einen Lauf aus der Liste aus.
+                  </p>
+                )}
+
+                {/* Report loading */}
+                {reportState === 'loading' && (
+                  <div aria-busy="true" aria-live="polite" style={styles.statusMsg}>
+                    Lade Report…
+                  </div>
+                )}
+
+                {/* Report error (AC8) */}
+                {reportState === 'error' && (
+                  <div role="alert" style={styles.errorMsg}>
+                    Fehler beim Laden des Reports: {reportError}
+                  </div>
+                )}
+
+                {/* Report content (AC5, AC6) */}
+                {reportState === 'ok' && report && (
+                  <ReportPane report={report} />
+                )}
               </div>
-            )}
+            </div>
+          )}
+        </div>
+      )}
 
-            {/* Report error (AC8) */}
-            {reportState === 'error' && (
-              <div role="alert" style={styles.errorMsg}>
-                Fehler beim Laden des Reports: {reportError}
-              </div>
-            )}
+      {/* ── Verbesserungs-Board tab (AC3/AC4/AC5 retro-train-board-local) ── */}
+      {activeTab === 'board' && (
+        <div style={styles.tabPanel} role="tabpanel" aria-label="Verbesserungs-Board">
+          {/* Loading state */}
+          {boardState === 'loading' && (
+            <div aria-busy="true" aria-live="polite" style={styles.statusMsg}>
+              Lade Verbesserungs-Board…
+            </div>
+          )}
 
-            {/* Report content (AC5, AC6) */}
-            {reportState === 'ok' && report && (
-              <ReportPane report={report} />
-            )}
-          </div>
+          {/* Error state */}
+          {boardState === 'error' && (
+            <div role="alert" style={styles.errorMsg}>
+              Fehler beim Laden des Boards: {boardError}
+            </div>
+          )}
+
+          {/* Board content */}
+          {boardState === 'ok' && (
+            <BoardPanel
+              cards={boardCards}
+              filterKategorie={filterKategorie}
+              filterArt={filterArt}
+              onToggleKategorie={(v) => toggleFilter(setFilterKategorie, v)}
+              onToggleArt={(v) => toggleFilter(setFilterArt, v)}
+            />
+          )}
         </div>
       )}
     </main>
@@ -436,6 +577,255 @@ function EntryItem({ entry }) {
     </li>
   );
 }
+
+// ── BoardPanel (AC3/AC4/AC5 retro-train-board-local) ─────────────────────────
+
+/**
+ * Board panel: filter bar + Kanban columns.
+ *
+ * @param {{
+ *   cards: Object.<string, Array>,
+ *   filterKategorie: Set<string>,
+ *   filterArt: Set<string>,
+ *   onToggleKategorie: (v: string) => void,
+ *   onToggleArt: (v: string) => void,
+ * }} props
+ */
+function BoardPanel({ cards, filterKategorie, filterArt, onToggleKategorie, onToggleArt }) {
+  // Flatten all cards for filtering
+  const allCards = Object.values(cards).flat();
+
+  // Apply filters (AC5): empty set = all values allowed
+  const filtered = allCards.filter((card) => {
+    if (filterArt.size > 0 && !filterArt.has(card.art)) return false;
+    if (filterKategorie.size > 0) {
+      const cats = card.kategorie ?? [];
+      const matchesKat = cats.some((k) => filterKategorie.has(k));
+      if (!matchesKat) return false;
+    }
+    return true;
+  });
+
+  // Group filtered cards by status
+  const grouped = {};
+  for (const card of filtered) {
+    const s = card.status || 'Unknown';
+    if (!grouped[s]) grouped[s] = [];
+    grouped[s].push(card);
+  }
+
+  const totalCards = allCards.length;
+
+  return (
+    <div style={styles.boardRoot}>
+      {/* ── Filter bar (AC5) ── */}
+      <div style={styles.filterBar} aria-label="Board-Filter">
+        <span style={styles.filterLabel}>Kategorie:</span>
+        {['agents', 'skills', 'knowledge'].map((k) => (
+          <button
+            key={k}
+            type="button"
+            style={{
+              ...styles.filterChip,
+              ...(filterKategorie.has(k) ? styles.filterChipActive : {}),
+            }}
+            aria-pressed={filterKategorie.has(k)}
+            onClick={() => onToggleKategorie(k)}
+            data-filter-kategorie={k}
+          >
+            {k}
+          </button>
+        ))}
+        <span style={{ ...styles.filterLabel, marginLeft: 16 }}>Art:</span>
+        {['retro', 'train'].map((a) => (
+          <button
+            key={a}
+            type="button"
+            style={{
+              ...styles.filterChip,
+              ...(filterArt.has(a) ? styles.filterChipActive : {}),
+            }}
+            aria-pressed={filterArt.has(a)}
+            onClick={() => onToggleArt(a)}
+            data-filter-art={a}
+          >
+            {a}
+          </button>
+        ))}
+        {(filterKategorie.size > 0 || filterArt.size > 0) && (
+          <span style={styles.filterCount} aria-live="polite">
+            {filtered.length}/{totalCards} Karten
+          </span>
+        )}
+      </div>
+
+      {/* ── Kanban columns ── */}
+      <div style={styles.kanbanRow} aria-label="Kanban-Board">
+        {BOARD_STATUS_COLUMNS.map((status) => (
+          <KanbanColumn
+            key={status}
+            status={status}
+            cards={grouped[status] ?? []}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── KanbanColumn ──────────────────────────────────────────────────────────────
+
+/**
+ * A single Kanban column for one status.
+ *
+ * @param {{ status: string, cards: Array }} props
+ */
+function KanbanColumn({ status, cards }) {
+  const isEmpty = cards.length === 0;
+  return (
+    <section
+      style={{
+        ...styles.kanbanCol,
+        ...(isEmpty ? styles.kanbanColEmpty : {}),
+      }}
+      aria-label={`Spalte: ${status}`}
+    >
+      <h2 style={styles.kanbanColHeader}>
+        <BoardStatusBadge status={status} />
+        {cards.length > 0 && (
+          <span style={styles.kanbanColCount} aria-label={`${cards.length} Karten`}>
+            {cards.length}
+          </span>
+        )}
+      </h2>
+      {isEmpty ? (
+        <p style={styles.kanbanColEmpty_text} aria-label="Keine Karten">—</p>
+      ) : (
+        <ul style={styles.kanbanCardList} role="list">
+          {cards.map((card) => (
+            <PromotionCard key={card.id} card={card} />
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+// ── PromotionCard ─────────────────────────────────────────────────────────────
+
+/**
+ * A single promotion card in the Kanban board.
+ * Shows: Regel-ID, Ziel, Art-Badge, Status-Badge, PR-Link, optional metric.
+ *
+ * @param {{ card: object }} props
+ */
+function PromotionCard({ card }) {
+  const { id, ziel, regel, pr, status, art, metric } = card;
+
+  return (
+    <li style={styles.promoCard} role="listitem">
+      {/* ID + Art badge row */}
+      <div style={styles.promoCardHeader}>
+        <span style={styles.promoCardId} aria-label={`Regel-ID: ${id}`}>{id}</span>
+        <ArtBadge art={art} />
+      </div>
+
+      {/* Regel text */}
+      {regel && (
+        <p style={styles.promoCardRegel}>{regel}</p>
+      )}
+
+      {/* Ziel (Pack/Skill) */}
+      {ziel && (
+        <p style={styles.promoCardZiel} aria-label={`Ziel: ${ziel}`}>{ziel}</p>
+      )}
+
+      {/* Status badge */}
+      <div style={styles.promoCardBadgeRow}>
+        <BoardStatusBadge status={status} />
+      </div>
+
+      {/* PR link (external, AC4) — text node, no dangerouslySetInnerHTML */}
+      {pr && (
+        <a
+          href={`https://github.com/Studis-Softwareschmiede/agent-flow/pull/${encodeURIComponent(pr)}`}
+          style={styles.promoCardPrLink}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label={`PR: ${pr}`}
+        >
+          {pr}
+        </a>
+      )}
+
+      {/* Metric (AC4): only when available from baseline.json */}
+      {metric !== null && metric !== undefined && (
+        <div style={styles.promoCardMetric} aria-label="Metrik">
+          <span style={styles.metricLabel}>Rate: </span>
+          {metric.rate_per_100ep != null ? `${metric.rate_per_100ep}/100ep` : '—'}
+          {metric.baseline != null && (
+            <span style={{ marginLeft: 8 }}>
+              <span style={styles.metricLabel}>Baseline → neu: </span>
+              {String(metric.baseline)} → {metric.neu != null ? String(metric.neu) : '—'}
+            </span>
+          )}
+        </div>
+      )}
+    </li>
+  );
+}
+
+// ── ArtBadge ──────────────────────────────────────────────────────────────────
+
+/**
+ * Badge for the promotion card art (retro|train|other).
+ * Text label always present (AC9 — meaning not solely through colour).
+ *
+ * @param {{ art: string }} props
+ */
+function ArtBadge({ art }) {
+  const label = art || 'other';
+  const badgeStyle = ART_BADGE_STYLES[label] ?? ART_BADGE_STYLES.other;
+  return (
+    <span style={{ ...styles.artBadge, ...badgeStyle }} aria-label={`Art: ${label}`}>
+      {label}
+    </span>
+  );
+}
+
+const ART_BADGE_STYLES = {
+  retro: { background: '#1e293b', color: '#93c5fd', borderColor: '#334155' },
+  train: { background: '#1a2a1a', color: '#86efac', borderColor: '#14532d' },
+  other: { background: '#2a2a1a', color: '#fde68a', borderColor: '#78350f' },
+};
+
+// ── BoardStatusBadge ──────────────────────────────────────────────────────────
+
+/**
+ * Badge for a board status (Proposed/Merged/Measuring/Validated/Reverted/Expired).
+ * Text label always present (AC9).
+ *
+ * @param {{ status: string }} props
+ */
+function BoardStatusBadge({ status }) {
+  const label = status || '—';
+  const badgeStyle = BOARD_STATUS_BADGE_STYLES[label] ?? BOARD_STATUS_BADGE_STYLES._default;
+  return (
+    <span style={{ ...styles.boardStatusBadge, ...badgeStyle }} aria-label={`Status: ${label}`}>
+      {label}
+    </span>
+  );
+}
+
+const BOARD_STATUS_BADGE_STYLES = {
+  Proposed:  { background: '#2a2a1a', color: '#fde68a', borderColor: '#78350f' },
+  Merged:    { background: '#1a2a1a', color: '#86efac', borderColor: '#14532d' },
+  Measuring: { background: '#1e293b', color: '#93c5fd', borderColor: '#334155' },
+  Validated: { background: '#1a2a2a', color: '#6ee7b7', borderColor: '#065f46' },
+  Reverted:  { background: '#2a1a1a', color: '#f87171', borderColor: '#7f1d1d' },
+  Expired:   { background: '#2a2a2a', color: '#9ca3af', borderColor: '#4b5563' },
+  _default:  { background: '#1e293b', color: '#93c5fd', borderColor: '#334155' },
+};
 
 // ── Styles ────────────────────────────────────────────────────────────────────
 
@@ -705,5 +1095,235 @@ const styles = {
     fontSize: 12,
     color: '#6b7280',
     fontStyle: 'italic',
+  },
+
+  // ── Tab switcher (AC3 retro-train-board-local) ────────────────────────────
+  tabBar: {
+    display: 'flex',
+    gap: 4,
+    marginBottom: 16,
+    flexShrink: 0,
+  },
+
+  tabBtn: {
+    padding: '10px 16px',
+    minHeight: 44,
+    background: '#1e293b',
+    color: '#9ca3af',
+    border: '1px solid #334155',
+    borderRadius: 6,
+    fontSize: 13,
+    fontWeight: 500,
+    cursor: 'pointer',
+    // Focus ring preserved — no outline:none
+  },
+
+  tabBtnActive: {
+    background: '#334155',
+    color: '#f0f9ff',
+    borderColor: '#4a6fa5',
+  },
+
+  tabPanel: {
+    display: 'flex',
+    flexDirection: 'column',
+    flex: 1,
+    minHeight: 0,
+    overflow: 'hidden',
+  },
+
+  // ── Board (AC3/AC4/AC5 retro-train-board-local) ───────────────────────────
+  boardRoot: {
+    display: 'flex',
+    flexDirection: 'column',
+    flex: 1,
+    minHeight: 0,
+    overflow: 'hidden',
+  },
+
+  filterBar: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 12,
+    padding: '8px 12px',
+    background: '#111',
+    borderRadius: 6,
+    border: '1px solid #2a2a2a',
+    flexShrink: 0,
+  },
+
+  filterLabel: {
+    fontSize: 11,
+    color: '#6b7280',
+    fontWeight: 600,
+    textTransform: 'uppercase',
+    letterSpacing: '0.06em',
+  },
+
+  filterChip: {
+    padding: '8px 12px',
+    minHeight: 44,
+    background: '#1e293b',
+    color: '#9ca3af',
+    border: '1px solid #334155',
+    borderRadius: 12,
+    fontSize: 12,
+    cursor: 'pointer',
+    // Focus ring preserved — no outline:none
+  },
+
+  filterChipActive: {
+    background: '#334155',
+    color: '#f0f9ff',
+    borderColor: '#4a6fa5',
+  },
+
+  filterCount: {
+    marginLeft: 8,
+    fontSize: 11,
+    color: '#6b7280',
+    fontStyle: 'italic',
+  },
+
+  kanbanRow: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(6, minmax(140px, 1fr))',
+    gap: 10,
+    flex: 1,
+    minHeight: 0,
+    overflowX: 'auto',
+    overflowY: 'hidden',
+  },
+
+  kanbanCol: {
+    display: 'flex',
+    flexDirection: 'column',
+    minHeight: 0,
+    background: '#111',
+    borderRadius: 8,
+    border: '1px solid #2a2a2a',
+    padding: '10px 8px',
+    overflowY: 'auto',
+  },
+
+  kanbanColEmpty: {
+    opacity: 0.5,
+  },
+
+  kanbanColHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+    margin: '0 0 8px',
+    fontSize: 12,
+    fontWeight: 600,
+    flexShrink: 0,
+  },
+
+  kanbanColCount: {
+    fontSize: 11,
+    color: '#9ca3af',
+    background: '#2a2a2a',
+    borderRadius: 10,
+    padding: '1px 6px',
+  },
+
+  kanbanColEmpty_text: {
+    margin: 0,
+    fontSize: 12,
+    color: '#4b5563',
+    textAlign: 'center',
+  },
+
+  kanbanCardList: {
+    listStyle: 'none',
+    margin: 0,
+    padding: 0,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 6,
+  },
+
+  // Promotion card (AC4 retro-train-board-local)
+  promoCard: {
+    background: '#1e293b',
+    borderRadius: 6,
+    border: '1px solid #334155',
+    padding: '8px 10px',
+    fontSize: 12,
+    color: '#e5e7eb',
+  },
+
+  promoCardHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 4,
+    marginBottom: 4,
+  },
+
+  promoCardId: {
+    fontSize: 11,
+    fontFamily: 'monospace',
+    color: '#93c5fd',
+    fontWeight: 700,
+  },
+
+  promoCardRegel: {
+    margin: '0 0 4px',
+    fontSize: 11,
+    color: '#e5e7eb',
+    lineHeight: 1.4,
+  },
+
+  promoCardZiel: {
+    margin: '0 0 4px',
+    fontSize: 10,
+    color: '#9ca3af',
+    fontFamily: 'monospace',
+    wordBreak: 'break-all',
+  },
+
+  promoCardBadgeRow: {
+    marginBottom: 4,
+  },
+
+  promoCardPrLink: {
+    display: 'block',
+    fontSize: 10,
+    color: '#4a90d9',
+    wordBreak: 'break-all',
+    textDecoration: 'none',
+    marginBottom: 4,
+    // Focus ring preserved — no outline:none
+  },
+
+  promoCardMetric: {
+    fontSize: 10,
+    color: '#9ca3af',
+    marginTop: 4,
+    paddingTop: 4,
+    borderTop: '1px solid #334155',
+  },
+
+  // Art badge (AC4/AC9 retro-train-board-local)
+  artBadge: {
+    display: 'inline-block',
+    padding: '1px 6px',
+    fontSize: 10,
+    fontWeight: 600,
+    borderRadius: 8,
+    border: '1px solid',
+  },
+
+  // Board status badge (AC4/AC9 retro-train-board-local)
+  boardStatusBadge: {
+    display: 'inline-block',
+    padding: '2px 8px',
+    fontSize: 11,
+    borderRadius: 10,
+    border: '1px solid',
   },
 };

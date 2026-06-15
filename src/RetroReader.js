@@ -43,6 +43,22 @@ export function deriveSource(slug) {
 }
 
 /**
+ * Derive the art (type) of a promotion card from a column value (quelle or pr).
+ * Returns 'retro' | 'train' | 'other'.
+ * Case-insensitive, prefix-only match.
+ *
+ * @param {string} value  Raw value from quelle or pr column.
+ * @returns {'retro'|'train'|'other'}
+ */
+export function deriveArt(value) {
+  if (!value || typeof value !== 'string') return 'other';
+  const lower = value.toLowerCase();
+  if (lower.startsWith('retro/')) return 'retro';
+  if (lower.startsWith('train/')) return 'train';
+  return 'other';
+}
+
+/**
  * Categorise an entry based on the Pack/Skill column value.
  *
  * Searches the entire cell string for occurrences of the path segments
@@ -519,6 +535,77 @@ export class RetroReader {
     const { agents, skills, knowledge } = buildRunReport(runRows, defectRates);
 
     return { slug, date, source, statusMix, agents, skills, knowledge };
+  }
+
+  /**
+   * GET /api/retro/cards
+   *
+   * Returns all promotion cards from LEARNINGS.md, grouped by status.
+   * Each card has: id, datum, ziel, regel, quelle, pr, status, art, kategorie.
+   *   - art:       'retro' | 'train' | 'other'  (derived from quelle/pr prefix)
+   *   - kategorie: Array<'agents'|'skills'|'knowledge'>  (derived from ziel/packSkill)
+   *
+   * Missing LEARNINGS.md → returns empty grouped object, no crash (AC1).
+   *
+   * @returns {Promise<{ cards: object }>}
+   *   cards is an object keyed by status; each value is an Array of card objects.
+   */
+  async getPromotionCards() {
+    const root = await this.#pluginRootResolver().catch(() => null);
+    if (!root) {
+      return { cards: {} };
+    }
+
+    const rows = await this.#readLearnings(root);
+
+    // Read baseline.json for metric enrichment (same as getRunReport)
+    const baseline = await this.#readBaseline(root);
+    const defectRates = baseline?.defect_rates ?? null;
+
+    /** @type {Object.<string, Array>} */
+    const grouped = {};
+
+    for (const row of rows) {
+      // Derive art: prefer quelle, fall back to pr
+      const art = deriveArt(row.quelle) !== 'other'
+        ? deriveArt(row.quelle)
+        : deriveArt(row.pr);
+
+      // Derive kategorie: array of matched categories from ziel (packSkill)
+      const kategorieCats = categoriseEntry(row.packSkill);
+      const kategorie = [...kategorieCats];
+
+      // Metric join from defect_rates by rule_id (= id column)
+      let metric = null;
+      if (defectRates && row.id && defectRates[row.id]) {
+        const dr = defectRates[row.id];
+        metric = {
+          rate_per_100ep: dr.rate_per_100ep ?? null,
+          baseline:       dr.baseline       ?? null,
+          neu:            dr.neu            ?? null,
+          status:         dr.status         ?? null,
+        };
+      }
+
+      const card = {
+        id:       row.id,
+        datum:    row.datum,
+        ziel:     row.packSkill,
+        regel:    row.regel,
+        quelle:   row.quelle,
+        pr:       row.pr,
+        status:   row.status || 'Unknown',
+        art,
+        kategorie,
+        metric,
+      };
+
+      const statusKey = card.status;
+      if (!grouped[statusKey]) grouped[statusKey] = [];
+      grouped[statusKey].push(card);
+    }
+
+    return { cards: grouped };
   }
 
   /**

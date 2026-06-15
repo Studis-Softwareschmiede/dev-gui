@@ -1,7 +1,7 @@
 /**
  * Router-Wrapper: Retro-Ansicht + Retro-Trend.
  * Factory-Signatur: create(deps) → Express Router
- * Montiert: GET /api/retro/runs, GET /api/retro/runs/:slug, GET /api/retro/trend
+ * Montiert: GET /api/retro/runs, GET /api/retro/runs/:slug, GET /api/retro/trend, GET /api/retro/cards
  */
 import { retroRouter } from '../retroRouter.js';
 

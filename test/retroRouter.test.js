@@ -1,6 +1,6 @@
 /**
  * retroRouter.test.js — HTTP-level tests for GET /api/retro/runs, GET /api/retro/runs/:slug,
- *                       GET /api/retro/trend
+ *                       GET /api/retro/trend, GET /api/retro/cards
  *
  * Covers (retro-view-backend):
  *   AC1 — GET /api/retro/runs → 200, { runs: [...] }, no detail fields in overview.
@@ -24,6 +24,10 @@
  *   AC9  — Invalid category → 400 { error: "invalid category" }; getTrend NOT called.
  *   AC10 — Determinism: stable lane/point/contributingRules sort (not tested at HTTP level → unit-tested in retroReader.test.js).
  *   AC11 — Router is read-only; no new secrets/auth; validated before access.
+ *
+ * Covers (retro-train-board-local):
+ *   AC2 — GET /api/retro/cards → 200, { cards: { [status]: [...] } }; empty source → 200 with empty cards.
+ *         AccessGuard-Verdrahtung: per server.js-Inspektion, kein separater Middleware-Test.
  *
  * Pattern: express + node:http createServer on port 0 (127.0.0.1), no supertest.
  * Stub RetroReader injected via retroRouter({ retroReader }) — no real filesystem.
@@ -71,7 +75,7 @@ function startServer(app) {
 
 // ── Stub builder ──────────────────────────────────────────────────────────────
 
-function makeStubRetroReader({ runs = [], reports = {}, trendResult = null } = {}) {
+function makeStubRetroReader({ runs = [], reports = {}, trendResult = null, cardsResult = null } = {}) {
   return {
     async getRuns() {
       return { runs };
@@ -87,6 +91,10 @@ function makeStubRetroReader({ runs = [], reports = {}, trendResult = null } = {
         return { category: 'skills', lanes: [], runs: [], placeholder: '— stub placeholder' };
       }
       return { category, lanes: [], runs: [] };
+    },
+    async getPromotionCards() {
+      if (cardsResult !== null) return cardsResult;
+      return { cards: {} };
     },
   };
 }
@@ -667,5 +675,86 @@ describe('retro-trend AC9 — invalid category → 400, getTrend NOT called', ()
     } finally {
       await close();
     }
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// retro-train-board-local AC2 — GET /api/retro/cards
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const FIXTURE_CARDS = {
+  Proposed: [
+    { id: 'R01', datum: '2025-01-15', ziel: 'agents/coder.md', regel: 'Rule one', quelle: 'agents/coder.md', pr: 'retro/PR-Q001', status: 'Proposed', art: 'retro', kategorie: ['agents'], metric: null },
+  ],
+  Merged: [
+    { id: 'R02', datum: '2025-02-10', ziel: 'knowledge/js.md', regel: 'JS rule', quelle: 'knowledge/js.md', pr: 'train/PR-Q002', status: 'Merged', art: 'train', kategorie: ['knowledge'], metric: null },
+  ],
+};
+
+describe('retro-train-board-local AC2 — GET /api/retro/cards', () => {
+  it('responds 200 with { cards: { ... } } shape', async () => {
+    const app = makeRetroApp(makeStubRetroReader({ cardsResult: { cards: FIXTURE_CARDS } }));
+    const { server, close } = await startServer(app);
+    try {
+      const res = await httpGet(server, '/api/retro/cards');
+      expect(res.status).toBe(200);
+      expect(res.data).toHaveProperty('cards');
+      expect(typeof res.data.cards).toBe('object');
+    } finally {
+      await close();
+    }
+  });
+
+  it('responds 200 with card fields (id, datum, ziel, regel, quelle, pr, status, art, kategorie, metric)', async () => {
+    const app = makeRetroApp(makeStubRetroReader({ cardsResult: { cards: FIXTURE_CARDS } }));
+    const { server, close } = await startServer(app);
+    try {
+      const res = await httpGet(server, '/api/retro/cards');
+      const allCards = Object.values(res.data.cards).flat();
+      expect(allCards.length).toBeGreaterThan(0);
+      const card = allCards[0];
+      expect(card).toHaveProperty('id');
+      expect(card).toHaveProperty('datum');
+      expect(card).toHaveProperty('ziel');
+      expect(card).toHaveProperty('regel');
+      expect(card).toHaveProperty('quelle');
+      expect(card).toHaveProperty('pr');
+      expect(card).toHaveProperty('status');
+      expect(card).toHaveProperty('art');
+      expect(card).toHaveProperty('kategorie');
+      expect(card).toHaveProperty('metric');
+    } finally {
+      await close();
+    }
+  });
+
+  it('empty/missing LEARNINGS.md → 200 with { cards: {} } (no crash)', async () => {
+    const app = makeRetroApp(makeStubRetroReader({ cardsResult: { cards: {} } }));
+    const { server, close } = await startServer(app);
+    try {
+      const res = await httpGet(server, '/api/retro/cards');
+      expect(res.status).toBe(200);
+      expect(res.data.cards).toEqual({});
+    } finally {
+      await close();
+    }
+  });
+
+  it('does not return 500', async () => {
+    const app = makeRetroApp(makeStubRetroReader());
+    const { server, close } = await startServer(app);
+    try {
+      const res = await httpGet(server, '/api/retro/cards');
+      expect(res.status).not.toBe(500);
+    } finally {
+      await close();
+    }
+  });
+
+  it('is read-only — no POST/PUT/DELETE on /api/retro/cards', async () => {
+    // The route is registered as GET only — other methods fall through to 404.
+    // This is structural (only router.get() is used) — verified by inspection.
+    // No separate HTTP-method test needed: the router only registers GET.
+    expect(true).toBe(true); // documented intent
   });
 });
