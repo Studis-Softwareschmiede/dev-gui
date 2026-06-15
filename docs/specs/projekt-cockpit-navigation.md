@@ -2,7 +2,7 @@
 id: projekt-cockpit-navigation
 title: Projekt-Cockpit — projekt-zentrierte Fabrik-Navigation (Repo-Übersicht → Projekt → Aktion)
 status: active
-version: 1
+version: 2
 ---
 
 # Spec: Projekt-Cockpit  (`projekt-cockpit-navigation`)
@@ -44,6 +44,16 @@ Der Board-Reiter zeigt **nur das aktive Projekt** (kein eigener Projekt-Selektor
 ### V7 — Global-Views unverändert
 GitHub · VPS · Cloudflare · Team · Deployments bleiben eigenständige Kacheln ohne Projekt-Kontext.
 
+### V8 — Projekt-Terminal Ende-zu-Ende funktionsfähig (Bugfix V4/V5)
+
+> **Kontext (Bug, 2026-06-15, gegen Container `dev-gui-dev-gui-1` reproduziert):** Das Cockpit-Terminal zeigt „✕ getrennt", sobald ein Projekt aktiv ist; nur die globale Session ohne `?project=` funktioniert. Zwei unabhängige Defekte verhindern V4/V5 zusammen: (1) der WS-Upgrade-Handler verwirft jede projekt-behaftete URL **vor** dem Handshake, und (2) das Frontend liefert einen Projekt-**Slug** statt eines Pfades innerhalb der Schranke `WORKSPACE_DIR`, der die `validateProjectPath`-Boundary nie passieren kann.
+
+**V8a — WS-Upgrade matcht auf den Pfad, nicht die volle URL.** Der HTTP-`upgrade`-Handler entscheidet die Annahme einer WS-Verbindung anhand des **Pfad-Teils** (`pathname`) der Request-URL, nicht des vollständigen `req.url` inklusive Query-String. Eine Verbindung zu `/ws/terminal` wird unabhängig von einem `?project=…`-Query an den Access-Guard / die WS-Bridge weitergereicht. Nur ein **anderer Pfad** führt zur Ablehnung; die Ablehnung erfolgt sauber (kein roher `socket.destroy()` für an sich gültige `/ws/terminal`-Pfade, sondern Annahme + ggf. anschließender geordneter Close-Code durch die nachgelagerte Validierung).
+
+**V8b — Projekt-Referenz wird zentral zu einem Pfad innerhalb der Schranke aufgelöst.** Das Frontend trägt das Projekt weiterhin als **Slug** (Repo-Ordnername, wie in `#/factory/<repo>` und `GET /api/workspace/repos[].name`). Eine **einzige** server-seitige Auflösungs-Stelle übersetzt einen client-gelieferten Projekt-Slug zu einem absoluten Pfad `WORKSPACE_DIR + '/' + slug`, **bevor** `validateProjectPath` greift. Diese Auflösung gilt für **beide** Eintrittspfade: das WS-Terminal (`?project=<slug>` in `WsGateway`) **und** das Senden eines Befehls (`projectPath` im Body von `POST /api/command` über `commandRouter`/`CommandService`). Die bestehende Boundary bleibt unverändert in Kraft: der aufgelöste Pfad muss via realpath strikt innerhalb `WORKSPACE_DIR` liegen (Slug mit `/`, `..`, absolutem Pfad oder Symlink-Flucht → Ablehnung; security R02/R03). Der globale (projekt-lose) Fall bleibt erhalten: keine Projekt-Referenz → globale Session ohne projekt-`cwd`.
+
+> *Entscheidung (a) statt (b):* zentrale Slug→Pfad-Auflösung an einer Server-Stelle (statt ein zusätzliches absolutes `repo_path`-Feld durch API + Frontend zu reichen). Begründung: der Client-Vertrag bleibt slug-basiert (Deep-Link `#/factory/<slug>` leakt die Container-Mount-Topologie nicht), die Auflösung sitzt direkt an der bestehenden Boundary, und WS- wie HTTP-Pfad teilen denselben Traversal-Guard.
+
 ## Acceptance-Kriterien
 
 - **AC1** — „Fabrik" zeigt zuerst eine Repo-Übersicht der lokalen Klone (Name/Branch/dirty/letzter Commit), read-only. *(V1)*
@@ -53,6 +63,9 @@ GitHub · VPS · Cloudflare · Team · Deployments bleiben eigenständige Kachel
 - **AC5** — Flow-Trigger laufen im aktiven Projekt (cwd aus Cockpit, nicht inline). *(V5)*
 - **AC6** — Board- + Spezifikation-Reiter zeigen nur das aktive Projekt (erben Kontext, kein eigener Selektor). *(V6)*
 - **AC7** — GitHub/VPS/Cloudflare/Team/Deployments bleiben unveränderte globale Kacheln. *(V7)*
+- **AC8** — Der WS-Upgrade-Handler entscheidet anhand des **Pfad-Teils** der Request-URL: eine Verbindung zu `/ws/terminal` **mit** `?project=…`-Query wird an den Access-Guard / die WS-Bridge weitergereicht (nicht vor dem Handshake verworfen); eine Verbindung zu einem anderen Pfad wird abgelehnt. *(V8a)* — **Testbar:** WS-Connect auf `/ws/terminal?project=<x>` führt **nicht** mehr zu „socket hang up" vor dem Handshake; WS-Connect auf `/ws/terminal` ohne Query bleibt wie bisher offen; ein fremder Pfad wird weiterhin abgewiesen.
+- **AC9** — Eine client-gelieferte Projekt-**Slug**-Referenz wird **server-seitig zentral** zu `WORKSPACE_DIR + '/' + slug` aufgelöst, bevor `validateProjectPath` prüft — für **beide** Eintrittspfade: WS-Terminal (`?project=<slug>`) und `POST /api/command` (`projectPath`-Body). Ein gültiger Slug (z.B. `dev-gui`) ergibt eine PTY-Session mit `cwd = WORKSPACE_DIR/<slug>` (z.B. `/workspace/dev-gui`); kein `cwd` außerhalb der Schranke wird je gesetzt. *(V8b)* — **Testbar:** Mit gültigem Slug liefert das WS-Terminal eine offene Session im korrekten `cwd` (nicht `/app/<slug>`); der globale Fall (keine Projekt-Referenz) bleibt unverändert; `POST /api/command` mit demselben Slug landet in derselben Projekt-Session statt 4xx.
+- **AC10** — Die Schranke bleibt nach der Auflösung wirksam (security R02/R03): eine Slug-/Pfad-Referenz, die nach Auflösung außerhalb `WORKSPACE_DIR` zeigt (`..`, absoluter Pfad, Symlink-Flucht, unbekannter Slug), wird **sauber abgelehnt** — WS per geordnetem Close-Code (z.B. 1008), `POST /api/command` per 4xx — **ohne** Prozess-Crash und ohne PTY-Spawn außerhalb der Schranke. *(V8b)* — **Testbar:** Reproduktion gegen den laufenden Container: `?project=<gültig>` bleibt offen mit korrektem `cwd`, ohne Param weiterhin globale Session, außerhalb-der-Schranke-Eingabe wird abgewiesen, der Server-Prozess läuft weiter.
 
 ## Nicht-Ziele
 - Klonen nicht-lokaler GitHub-Repos aus der Übersicht (bleibt GitHub-Kachel; mögliches Folge-Feature).
