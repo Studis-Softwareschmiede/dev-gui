@@ -111,6 +111,11 @@ services:
       # Enables unattended operation (ADR-003); allowed because container is
       # non-root (uid 1000). Primary access control = Cloudflare Access (ADR-004).
       SESSION_ARGS: '["--dangerously-skip-permissions"]'
+      # Max concurrent project sessions (default: 5). Each additional open project
+      # in the UI spawns one PTY session; raise if you routinely work with >5 projects.
+      # SESSION_CAP: "5"
+      # Idle timeout before an unused project session is auto-closed (default: 1800000 ms = 30 min).
+      # SESSION_IDLE_MS: "1800000"
 
       # ── GitHub PAT ───────────────────────────────────────────────────────────
       # Required for GitHubReader (/api/status projects) and agent-flow plugin

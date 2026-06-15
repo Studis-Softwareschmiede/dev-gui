@@ -9,6 +9,10 @@
  *
  * Security: ANTHROPIC_API_KEY is explicitly deleted from the child env
  * (AC3). No secret is logged.
+ *
+ * Multi-session extension (AC4): the `cwd` constructor option sets the
+ * working directory of the spawned process.  When undefined, the process
+ * inherits the server's cwd (backward-compatible default).
  */
 
 import { EventEmitter } from 'node:events';
@@ -49,6 +53,8 @@ export class PtyManager extends EventEmitter {
   #args;
   #restartMax;
   #restartWindowMs;
+  /** @type {string|undefined} cwd for the spawned process (AC4 multi-session) */
+  #cwd;
 
   // AC6: bounded ring buffer of recent PTY output
   // Stored as an array of strings; total byte length tracked separately.
@@ -62,12 +68,14 @@ export class PtyManager extends EventEmitter {
     args = parseArgs(process.env.SESSION_ARGS),
     restartMax = parsePositiveInt(process.env.RESTART_MAX, 5),
     restartWindowMs = parsePositiveInt(process.env.RESTART_WINDOW_MS, 60_000),
+    cwd = undefined,
   } = {}) {
     super();
     this.#cmd = cmd;
     this.#args = args;
     this.#restartMax = restartMax;
     this.#restartWindowMs = restartWindowMs;
+    this.#cwd = cwd;
   }
 
   // ── Public API ──────────────────────────────────────────────────────────
@@ -78,7 +86,7 @@ export class PtyManager extends EventEmitter {
 
   /** Expose spawn config for testing (AC3). Read-only view. */
   get spawnConfig() {
-    return { cmd: this.#cmd, args: [...this.#args] };
+    return { cmd: this.#cmd, args: [...this.#args], cwd: this.#cwd };
   }
 
   /**
@@ -179,7 +187,9 @@ export class PtyManager extends EventEmitter {
         cols: 80,
         rows: 24,
         env: childEnv,
-        // cwd defaults to process.cwd() — fine for claude
+        // cwd: undefined → inherits process.cwd() (backward compat).
+        // When set (AC4 multi-session), the PTY starts in the project directory.
+        ...(this.#cwd !== undefined && { cwd: this.#cwd }),
       });
     } catch {
       // spawn failed (e.g. command not found) — treat as unexpected exit
