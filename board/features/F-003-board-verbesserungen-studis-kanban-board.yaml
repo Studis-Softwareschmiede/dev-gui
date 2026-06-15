@@ -1,0 +1,15 @@
+id: F-003
+title: Board-Verbesserungen (Studis-Kanban-Board)
+goal: 'UX-Verbesserungen am Studis-Kanban-Board: Default-Filter alle, Filter-Dropdown,
+  Lazy-Load pro Projekt, Umbenennung'
+status: Backlog
+priority: P2
+spec: null
+definition_of_done: null
+labels: null
+depends: null
+owner: null
+stories: null
+progress: null
+created_at: '2026-06-15T08:45:06Z'
+updated_at: '2026-06-15T08:45:06Z'
