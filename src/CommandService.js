@@ -19,11 +19,20 @@
  *   released. Cancel (AC5) short-circuits this: it sends Ctrl-C, sets status to
  *   'cancelled', and releases the lock immediately regardless of the idle timer.
  *
+ * Multi-session extension (AC5 / S-112):
+ *   When a PtySessionRegistry is provided (via `sessionRegistry` constructor param),
+ *   tryRun() accepts an optional `projectPath` parameter.  The command is written to
+ *   the session for that project path; if the session cap is exceeded, tryRun()
+ *   returns { ok: false, reason: 'session-cap' }.
+ *   When no registry is provided, the legacy single-session behaviour is preserved
+ *   (backward compat).
+ *
  * Security (Floor):
  *   - security/R02: untrusted command string validated (allowlist + control-char check)
  *     before any write to the PTY sink. Nothing raw is ever passed to a shell.
  *   - security/R04: all routes are behind AccessGuard (applied in server.js); this
  *     service trusts req.identity is already set by the guard.
+ *   - projectPath is NOT passed to a shell; it is only used as a session key.
  *   - No secrets are stored, logged, or returned.
  *
  * Config (env):
@@ -126,8 +135,14 @@ export function hasValidCostFlag(command, modes = COST_MODES) {
  * Expected lifecycle: one shared instance per process, shared across routes.
  */
 export class CommandService {
-  /** @type {import('./PtyManager.js').PtyManager} */
+  /** @type {import('./PtyManager.js').PtyManager|null} legacy single-session PTY */
   #pty;
+  /**
+   * Optional multi-session registry (AC5 / S-112).
+   * When set, tryRun() resolves the PTY from the registry using projectPath.
+   * @type {import('./PtySessionRegistry.js').PtySessionRegistry|null}
+   */
+  #registry;
   /** @type {import('./AuditStore.js').AuditStore} */
   #audit;
   /** @type {import('./JobLock.js').JobLock} */
@@ -148,18 +163,25 @@ export class CommandService {
   #idleTimer = null;
   /** @type {((data: string) => void)|null} active output listener for idle reset */
   #outputListener = null;
+  /** @type {import('./PtyManager.js').PtyManager|null} PTY used by the running command */
+  #currentPty = null;
 
   /**
    * @param {object} params
-   * @param {import('./PtyManager.js').PtyManager} params.ptyManager
+   * @param {import('./PtyManager.js').PtyManager} [params.ptyManager]
+   *   Single-session PTY (legacy mode). Used when sessionRegistry is not provided.
+   * @param {import('./PtySessionRegistry.js').PtySessionRegistry} [params.sessionRegistry]
+   *   Multi-session registry (AC5 / S-112). When provided, projectPath in tryRun()
+   *   selects the target session.
    * @param {import('./AuditStore.js').AuditStore} params.auditStore
    * @param {import('./JobLock.js').JobLock} [params.lock]     injectable for tests
    * @param {string[]} [params.allowlist]
    * @param {string[]} [params.costModes]  valid --cost values (default: COST_MODES)
    * @param {number} [params.idleMs]  quiet-period ms (default: env COMMAND_IDLE_MS || 8000)
    */
-  constructor({ ptyManager, auditStore, lock = jobLock, allowlist = DEFAULT_ALLOWED_COMMANDS, costModes = COST_MODES, idleMs } = {}) {
-    this.#pty = ptyManager;
+  constructor({ ptyManager, sessionRegistry, auditStore, lock = jobLock, allowlist = DEFAULT_ALLOWED_COMMANDS, costModes = COST_MODES, idleMs } = {}) {
+    this.#pty = ptyManager ?? null;
+    this.#registry = sessionRegistry ?? null;
     this.#audit = auditStore;
     this.#lock = lock;
     this.#allowlist = allowlist;
@@ -175,11 +197,14 @@ export class CommandService {
    * @param {object} params
    * @param {unknown} params.command   - Raw command string from the request body.
    * @param {string|null|object} params.identity - Identity from AccessGuard.
+   * @param {string|null|undefined} [params.projectPath] - Project path for multi-session
+   *   routing (AC5 / S-112). When provided with a sessionRegistry, the command is
+   *   written to the session for this project. Ignored in legacy single-session mode.
    *
    * @returns {{ ok: true, commandId: string, status: 'running' }}
-   *        | { ok: false, reason: 'invalid'|'locked' }
+   *        | { ok: false, reason: 'invalid'|'locked'|'session-cap'|'internal' }
    */
-  tryRun({ command, identity }) {
+  tryRun({ command, identity, projectPath }) {
     // Step 1: Sanitize (security/R02, AC2)
     const sanitized = sanitizeCommand(command);
     if (sanitized === null) {
@@ -194,6 +219,19 @@ export class CommandService {
     // Step 2b: Cost-mode flag validation (AC8) — reject malformed --cost <mode>
     if (!hasValidCostFlag(sanitized, this.#costModes)) {
       return { ok: false, reason: 'invalid' };
+    }
+
+    // Step 2c: Resolve target PTY (AC5 / S-112 multi-session extension)
+    // When a sessionRegistry is available, look up/create the session for projectPath.
+    // Fall back to the legacy single-session #pty when no registry is configured.
+    let targetPty;
+    if (this.#registry) {
+      targetPty = this.#registry.getOrCreate(projectPath ?? null);
+      if (!targetPty) {
+        return { ok: false, reason: 'session-cap' };
+      }
+    } else {
+      targetPty = this.#pty;
     }
 
     // Step 3: Concurrency lock (AC3)
@@ -218,7 +256,7 @@ export class CommandService {
     // Guard: if pty.write() throws (PTY destroyed/closed), release the lock
     // immediately so future commands are not permanently blocked.
     try {
-      this.#pty.write(sanitized + '\n');
+      targetPty.write(sanitized + '\n');
     } catch {
       this.#lock.release();
       return { ok: false, reason: 'internal' };
@@ -228,6 +266,7 @@ export class CommandService {
     const commandId = generateId();
     this.#currentId = commandId;
     this.#currentStatus = 'running';
+    this.#currentPty = targetPty;
     this.#armIdleTimer();
 
     return { ok: true, commandId, status: 'running' };
@@ -247,7 +286,10 @@ export class CommandService {
     // output triggers the timer path concurrently.
     this.#disarmIdleTimer();
     // Send interrupt (Ctrl-C = 0x03) to the PTY (AC5)
-    this.#pty.write('\x03');
+    // Use #currentPty (set in tryRun) so cancel targets the same session that
+    // received the command, whether that is the global session or a project session.
+    const ptyToCancel = this.#currentPty ?? this.#pty;
+    ptyToCancel?.write('\x03');
     this.#currentStatus = 'cancelled';
     this.#lock.release();
     return { cancelled: true };
@@ -271,27 +313,36 @@ export class CommandService {
     // Safety: disarm any previously lingering timer (shouldn't happen, but be safe)
     this.#disarmIdleTimer();
 
+    // Capture the target PTY at arm-time (set in tryRun() before #armIdleTimer() is called).
+    const listenPty = this.#currentPty ?? this.#pty;
+
     const onOutput = () => {
       if (this.#currentStatus === 'running') {
         // Reset the countdown on every output chunk
         clearTimeout(this.#idleTimer);
-        this.#idleTimer = setTimeout(() => this.#onIdleExpired(onOutput), this.#idleMs);
+        this.#idleTimer = setTimeout(() => this.#onIdleExpired(onOutput, listenPty), this.#idleMs);
       }
     };
     this.#outputListener = onOutput;
-    this.#pty.on('output', onOutput);
+    // Listen on the current session's PTY for output (AC5 multi-session)
+    listenPty.on('output', onOutput);
 
     // Arm initial timer
-    this.#idleTimer = setTimeout(() => this.#onIdleExpired(onOutput), this.#idleMs);
+    this.#idleTimer = setTimeout(() => this.#onIdleExpired(onOutput, listenPty), this.#idleMs);
   }
 
-  /** Called when the idle period elapses without any PTY output. */
-  #onIdleExpired(onOutput) {
-    this.#pty.off('output', onOutput);
+  /**
+   * Called when the idle period elapses without any PTY output.
+   * @param {Function} onOutput  the listener to detach
+   * @param {import('./PtyManager.js').PtyManager} listenPty  the PTY the listener is attached to
+   */
+  #onIdleExpired(onOutput, listenPty) {
+    listenPty.off('output', onOutput);
     this.#outputListener = null;
     this.#idleTimer = null;
     if (this.#currentStatus === 'running') {
       this.#currentStatus = 'done';
+      this.#currentPty = null;
       this.#lock.release();
     }
   }
@@ -303,7 +354,8 @@ export class CommandService {
       this.#idleTimer = null;
     }
     if (this.#outputListener !== null) {
-      this.#pty.off('output', this.#outputListener);
+      const detachPty = this.#currentPty ?? this.#pty;
+      detachPty?.off('output', this.#outputListener);
       this.#outputListener = null;
     }
   }

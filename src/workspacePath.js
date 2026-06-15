@@ -19,6 +19,14 @@
  *     (b) existieren und ein Verzeichnis sein.
  *     (c) für uid-1000 schreibbar sein.
  *
+ * Spawn-cwd boundary check (für WsGateway + commandRouter, security/R02/R03):
+ *   validateProjectPath() prüft ob ein client-gelieferter projectPath sicher als
+ *   spawn-cwd verwendet werden darf:
+ *     (a) realpath() auflösen (Symlinks, ..)
+ *     (b) Innerhalb WORKSPACE_DIR (Trailing-Slash-Prefix-Check)
+ *     (c) Existiert als Verzeichnis
+ *   Kein Schreibbar-Check nötig (spawn liest nur cwd, schreibt nicht).
+ *
  * Security (Floor):
  *   - Pfad ist kein Geheimnis — Klartext im meta-Block, nie in entries (AC6, ADR-007).
  *   - Traversal/Symlink-Schutz analog WorkspaceMutator/GitHubCloner (security/R03).
@@ -216,6 +224,127 @@ export async function validateWorkspacePath(inputPath, deps = {}) {
     throw new WorkspacePathError(
       `Pfad '${inputPath.trim()}' ist nicht schreibbar`,
       'not-writable',
+    );
+  }
+
+  return { resolvedPath: pathToCheck };
+}
+
+// ── Spawn-cwd Boundary-Check ──────────────────────────────────────────────────
+
+/**
+ * @typedef {'outside-boundary'|'not-exists'|'not-directory'|'empty-path'} ProjectPathErrorClass
+ */
+
+/**
+ * Typed error for project-path boundary violations.
+ * Thrown by validateProjectPath().
+ */
+export class ProjectPathError extends Error {
+  /** @type {ProjectPathErrorClass} */
+  errorClass;
+
+  /**
+   * @param {string} message
+   * @param {ProjectPathErrorClass} errorClass
+   */
+  constructor(message, errorClass) {
+    super(message);
+    this.name = 'ProjectPathError';
+    this.errorClass = errorClass;
+  }
+}
+
+/**
+ * Validate a client-supplied projectPath before using it as a spawn cwd.
+ *
+ * Checks (security/R02 / security/R03 — Path-Traversal via spawn-cwd):
+ *   1. Path must not be empty.
+ *   2. realpath() resolve to catch symlinks and `..` components.
+ *   3. Resolved path must equal or start with WORKSPACE_DIR + '/' (Trailing-Slash-Prefix).
+ *   4. Path must exist and be a directory.
+ *
+ * No writable check — spawn only reads cwd, does not write.
+ *
+ * @param {string|null|undefined} inputPath  Client-supplied project path (untrusted).
+ * @param {object} [deps]  Injectable dependencies for tests.
+ * @param {Function} [deps.realpath]   `(p) => Promise<string>` — default: node:fs/promises.realpath
+ * @param {Function} [deps.stat]       `(p) => Promise<Stats>` — default: node:fs/promises.stat
+ * @param {string}   [deps.mountRoot]  WORKSPACE_DIR override for tests.
+ * @returns {Promise<{ resolvedPath: string }>}
+ * @throws {ProjectPathError}
+ */
+export async function validateProjectPath(inputPath, deps = {}) {
+  const _realpath = deps.realpath ?? realpath;
+  const _stat = deps.stat ?? stat;
+
+  // (1) Empty check
+  if (!inputPath || typeof inputPath !== 'string' || inputPath.trim() === '') {
+    throw new ProjectPathError('Project path must not be empty', 'empty-path');
+  }
+
+  const normalized = resolve(inputPath.trim());
+
+  // (2) Workspace boundary (WORKSPACE_DIR)
+  const mountRoot = deps.mountRoot ?? process.env.WORKSPACE_DIR ?? '';
+  if (!mountRoot || !mountRoot.trim()) {
+    throw new ProjectPathError(
+      'WORKSPACE_DIR is not configured — cannot validate project path boundary',
+      'outside-boundary',
+    );
+  }
+
+  let resolvedMountRoot;
+  try {
+    resolvedMountRoot = await _realpath(mountRoot.trim());
+  } catch {
+    throw new ProjectPathError(
+      `Workspace boundary WORKSPACE_DIR '${mountRoot}' does not exist or is not accessible`,
+      'outside-boundary',
+    );
+  }
+
+  // (2b) realpath() the input path (catches symlinks + '..' components)
+  let resolvedInput;
+  try {
+    resolvedInput = await _realpath(normalized);
+  } catch {
+    // Path does not exist — stat() will produce a clearer error below
+    resolvedInput = null;
+  }
+
+  const pathToCheck = resolvedInput ?? normalized;
+
+  const mountPrefix = resolvedMountRoot.endsWith(sep)
+    ? resolvedMountRoot
+    : resolvedMountRoot + sep;
+
+  const isInsideBoundary =
+    pathToCheck === resolvedMountRoot ||
+    pathToCheck.startsWith(mountPrefix);
+
+  if (!isInsideBoundary) {
+    throw new ProjectPathError(
+      `Project path '${inputPath.trim()}' is outside the workspace boundary (WORKSPACE_DIR: '${mountRoot}')`,
+      'outside-boundary',
+    );
+  }
+
+  // (4) Must exist and be a directory
+  let statResult;
+  try {
+    statResult = await _stat(pathToCheck);
+  } catch {
+    throw new ProjectPathError(
+      `Project path '${inputPath.trim()}' does not exist`,
+      'not-exists',
+    );
+  }
+
+  if (!statResult.isDirectory()) {
+    throw new ProjectPathError(
+      `Project path '${inputPath.trim()}' is not a directory`,
+      'not-directory',
     );
   }
 

@@ -129,6 +129,7 @@ app.use('/api', accessGuard);
 export const auditStore = new AuditStore();
 
 // ── PtyManager ────────────────────────────────────────────────────────────────
+// TODO S-111: PtySessionRegistry verdrahten (deferred bis Client-Routing landet)
 const ptyManager = new PtyManager();
 ptyManager.start();
 
