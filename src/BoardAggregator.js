@@ -37,6 +37,115 @@ import { readdir, readFile, watch } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
 
+// ── Ready-Status Berechnung (AC4 — autonome-board-abarbeitung) ────────────────
+
+/**
+ * Parse the frontmatter `status:` field from a Markdown file.
+ * Returns the trimmed value string, or null when not found.
+ * Never throws (error tolerance).
+ *
+ * @param {string} content  Raw Markdown/YAML string.
+ * @returns {string|null}
+ */
+function _parseFrontmatterStatus(content) {
+  if (!content || typeof content !== 'string') return null;
+  // Frontmatter is between the first two "---" lines.
+  const lines = content.split('\n');
+  let inFrontmatter = false;
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (i === 0 && trimmed === '---') {
+      inFrontmatter = true;
+      continue;
+    }
+    if (inFrontmatter && trimmed === '---') {
+      break; // end of frontmatter
+    }
+    if (inFrontmatter) {
+      const m = trimmed.match(/^status\s*:\s*(.+)$/);
+      if (m) return m[1].trim();
+    }
+  }
+  return null;
+}
+
+/**
+ * Compute ready status for a single story.
+ *
+ * Rules (authoritative — must be consistent with agent-flow board ready-check):
+ *   A story is `ready` iff ALL:
+ *     (1) status === "To Do"
+ *     (2) `spec` set + spec file exists in repo + frontmatter `status: active`
+ *     (3) `implements` non-empty + every AC-nr from implements appears in the spec file
+ *     (4) `depends` empty OR every referenced story exists AND has status "Done"
+ *     (5) no `blocked_reason`
+ *
+ * Non-To-Do stories: ready=false, ready_reason=null (not relevant).
+ * Missing files/fields → ready=false with a reason string, no crash.
+ *
+ * @param {object} story  Story data object (after parsing).
+ * @param {object} fsDeps  Injectable { readFile }.
+ * @param {string} repoPath  Absolute path to the repo root (for spec file resolution).
+ * @param {Map<string, {status: string}>} allStoriesMap  id → { status } for depends-check.
+ * @returns {Promise<{ ready: boolean, ready_reason: string|null }>}
+ */
+export async function computeStoryReadyStatus(story, fsDeps, repoPath, allStoriesMap) {
+  // Non-To-Do stories: not relevant (no check needed)
+  if (story.status !== 'To Do') {
+    return { ready: false, ready_reason: null };
+  }
+
+  // Rule (5): blocked_reason
+  if (story.blocked_reason) {
+    return { ready: false, ready_reason: `blocked: ${story.blocked_reason}` };
+  }
+
+  // Rule (2a): spec field must be set
+  if (!story.spec) {
+    return { ready: false, ready_reason: 'spec nicht gesetzt' };
+  }
+
+  // Rule (2b): spec file must exist + frontmatter status: active
+  const specPath = join(repoPath, story.spec);
+  let specContent;
+  try {
+    specContent = await fsDeps.readFile(specPath, 'utf8');
+  } catch {
+    return { ready: false, ready_reason: `spec-Datei nicht gefunden: ${story.spec}` };
+  }
+  const specFmStatus = _parseFrontmatterStatus(specContent);
+  if (!specFmStatus || specFmStatus.toLowerCase() !== 'active') {
+    return { ready: false, ready_reason: `spec-Status nicht active (ist: ${specFmStatus ?? 'nicht gesetzt'})` };
+  }
+
+  // Rule (3): implements non-empty + every AC-nr present in spec file
+  const implements_ = Array.isArray(story.implements) ? story.implements : [];
+  if (implements_.length === 0) {
+    return { ready: false, ready_reason: 'implements leer' };
+  }
+  for (const ac of implements_) {
+    const acStr = String(ac);
+    // Check raw presence of "AC<n>" in the spec file content
+    if (!specContent.includes(acStr)) {
+      return { ready: false, ready_reason: `AC-Nummer nicht in Spec gefunden: ${acStr}` };
+    }
+  }
+
+  // Rule (4): depends empty OR all referenced stories exist + status Done
+  const depends = Array.isArray(story.depends) ? story.depends.filter(Boolean) : [];
+  for (const depId of depends) {
+    const dep = allStoriesMap.get(String(depId));
+    if (!dep) {
+      return { ready: false, ready_reason: `abhängige Story existiert nicht: ${depId}` };
+    }
+    if (dep.status !== 'Done') {
+      return { ready: false, ready_reason: `abhängige Story nicht Done: ${depId} (${dep.status})` };
+    }
+  }
+
+  return { ready: true, ready_reason: null };
+}
+
 /** Default FS dependencies (real node:fs/promises). */
 const defaultFsDeps = { readdir, readFile, watch };
 
@@ -449,6 +558,8 @@ export class BoardAggregator {
 
     /** @type {StoryEntry[]} */
     const orphanedStories = [];
+    /** @type {StoryEntry[]} all parsed stories, for depends-check later */
+    const allStoriesList = [];
 
     for (const sp of storyFiles) {
       try {
@@ -464,9 +575,17 @@ export class BoardAggregator {
           priority: data.priority ?? null,
           labels: Array.isArray(data.labels) ? data.labels.map(String) : [],
           spec: data.spec ?? null,
+          implements: Array.isArray(data.implements) ? data.implements.map(String) : [],
+          depends: Array.isArray(data.depends) ? data.depends.map(String).filter(Boolean) : [],
+          blocked_reason: data.blocked_reason != null ? String(data.blocked_reason) : null,
           dispo_est: data.dispo_est ?? null,
           dispo_act: data.dispo_act ?? null,
+          // ready/ready_reason computed below after all stories are parsed
+          ready: false,
+          ready_reason: null,
         };
+
+        allStoriesList.push(story);
 
         const parentId = story.parent;
         if (parentId && featuresMap.has(parentId)) {
@@ -477,6 +596,19 @@ export class BoardAggregator {
         }
       } catch {
         // Skip malformed story files — no crash (AC8)
+      }
+    }
+
+    // ── Ready-Status berechnen (AC4 — autonome-board-abarbeitung) ────────────
+    // Build id→{status} map for depends-checks (all stories across all features + orphaned)
+    const allStoriesMap = new Map(allStoriesList.map((s) => [s.id, s]));
+    for (const story of allStoriesList) {
+      try {
+        const result = await computeStoryReadyStatus(story, this.#fsDeps, repoPath, allStoriesMap);
+        story.ready = result.ready;
+        story.ready_reason = result.ready_reason;
+      } catch {
+        // Error tolerance: keep ready=false (already default)
       }
     }
 
@@ -637,7 +769,12 @@ export class BoardAggregator {
  *   priority: string|null,
  *   labels: string[],
  *   spec: string|null,
+ *   implements: string[],
+ *   depends: string[],
+ *   blocked_reason: string|null,
  *   dispo_est: *,
- *   dispo_act: *
+ *   dispo_act: *,
+ *   ready: boolean,
+ *   ready_reason: string|null
  * }} StoryEntry
  */
