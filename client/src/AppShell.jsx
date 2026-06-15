@@ -260,7 +260,7 @@ function VersionBadge() {
  *   cleans up the PTY session. Re-entering factory starts a fresh session.
  */
 export function AppShell() {
-  const { view, navigate } = useHashRouter();
+  const { view, factoryRepo, navigate, navigateFactory } = useHashRouter();
 
   // Look up the active view entry from the registry (AC7 — data-driven).
   // Returns undefined for 'panel' (handled separately below).
@@ -279,10 +279,16 @@ export function AppShell() {
       {/* Active view — only rendered while not on panel (AC11: conditional mount, not concurrent).
           Data-driven from VIEW_REGISTRY (AC7): no per-view switch chain here.
           FactoryView is only mounted when view === 'factory'; navigating away unmounts it,
-          cleaning up the Terminal/PTY session via its useEffect teardown. */}
+          cleaning up the Terminal/PTY session via its useEffect teardown.
+          projekt-cockpit-navigation: factoryRepo + navigateFactory passed to FactoryView
+          so it can switch between the repo overview and the project cockpit. */}
       {view !== 'panel' && activeEntry && (
         <div style={styles.viewPort}>
-          <activeEntry.Component onNavigate={navigate} />
+          <activeEntry.Component
+            onNavigate={navigate}
+            factoryRepo={factoryRepo}
+            navigateFactory={navigateFactory}
+          />
         </div>
       )}
 
