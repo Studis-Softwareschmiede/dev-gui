@@ -30,7 +30,7 @@
 
 import { WebSocket } from 'ws';
 import { SESSION_STATES } from './PtyManager.js';
-import { validateProjectPath, ProjectPathError } from './workspacePath.js';
+import { validateProjectPath, ProjectPathError, resolveProjectSlug } from './workspacePath.js';
 
 export class WsGateway {
   /** @type {import('ws').WebSocketServer} */
@@ -48,6 +48,12 @@ export class WsGateway {
    * @type {(path: string) => Promise<{ resolvedPath: string }>}
    */
   #pathValidator;
+  /**
+   * Slug-to-path resolver used to translate a client slug to an absolute path
+   * before boundary validation.  Injectable for tests.
+   * @type {(slug: string|null, deps?: object) => string|null}
+   */
+  #slugResolver;
 
   /**
    * @param {import('ws').WebSocketServer} wss   Pre-created WebSocketServer instance
@@ -58,11 +64,15 @@ export class WsGateway {
    * @param {(path: string) => Promise<{ resolvedPath: string }>} [options.pathValidator]
    *   Injectable path validator for multi-session mode (default: validateProjectPath).
    *   Inject a stub in tests to avoid real filesystem calls.
+   * @param {(slug: string|null, deps?: object) => string|null} [options.slugResolver]
+   *   Injectable slug-to-path resolver (default: resolveProjectSlug).
+   *   Translates a client-supplied slug to WORKSPACE_DIR/slug before boundary validation.
    */
   constructor(wss, backend, options = {}) {
     this.#backend = backend;
     this.#wss = wss;
     this.#pathValidator = options.pathValidator ?? validateProjectPath;
+    this.#slugResolver = options.slugResolver ?? resolveProjectSlug;
     // Detect registry by duck-typing: registries expose getOrCreate()
     this.#isRegistry = typeof backend.getOrCreate === 'function';
 
@@ -127,8 +137,24 @@ export class WsGateway {
       console.error('[WsGateway] socket error:', err.code ?? err.name);
     });
 
-    // Extract project path from query string (?project=<URL-encoded-path>)
-    const projectPath = extractProjectParam(req.url);
+    // Extract project slug from query string (?project=<slug>) and resolve to absolute path.
+    // V8b: client sends a slug (repo name), not an absolute path.  resolveProjectSlug()
+    // prepends WORKSPACE_DIR before validateProjectPath() runs the boundary check.
+    const rawSlug = extractProjectParam(req.url);
+
+    // Resolve slug → absolute path (null for global session).
+    let projectPath;
+    if (rawSlug !== null) {
+      try {
+        projectPath = this.#slugResolver(rawSlug);
+      } catch (err) {
+        // Slug form is invalid (e.g. contains '/', is '..' etc.) — reject with 1008.
+        ws.close(1008, err instanceof ProjectPathError ? err.message : 'Invalid project slug');
+        return;
+      }
+    } else {
+      projectPath = null;
+    }
 
     // Workspace-boundary validation (security/R02/R03 — Path-Traversal via spawn-cwd).
     // Only validate when a non-null projectPath is supplied (null → global session, no cwd set).

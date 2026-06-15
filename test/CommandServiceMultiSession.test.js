@@ -28,7 +28,17 @@ import { AuditStore } from '../src/AuditStore.js';
 import { JobLock } from '../src/JobLock.js';
 import { createAccessGuard } from '../src/AccessGuard.js';
 
-// ── Path validator stubs ──────────────────────────────────────────────────────
+// ── Slug resolver + path validator stubs ─────────────────────────────────────
+
+/**
+ * Pass-through slug resolver: returns the slug as-is (identity).
+ * Used in tests that pre-date the slug concept and use absolute-path-like
+ * strings as projectPath values.  Real slug resolution is tested in
+ * test/slugResolver.test.js.
+ */
+function passThruSlugResolver(slug) {
+  return slug;
+}
 
 /** Stub: always allows the path (simulates inside-workspace). */
 function allowAllValidator(path) {
@@ -267,8 +277,10 @@ describe('POST /api/command — multi-session HTTP integration (AC5)', () => {
     app = express();
     app.use(express.json());
     app.use('/api', createAccessGuard());
-    // Inject allowAllValidator: tests use fake paths like /p/myrepo that don't exist on disk
-    app.use(commandRouter(service, { pathValidator: allowAllValidator }));
+    // Inject passThruSlugResolver + allowAllValidator: tests use absolute-path-like strings
+    // (pre-slug test artifacts, e.g. /p/myrepo) that would fail slug-form validation.
+    // Real slug resolution is tested in test/slugResolver.test.js.
+    app.use(commandRouter(service, { slugResolver: passThruSlugResolver, pathValidator: allowAllValidator }));
 
     ({ server, port } = await startServer(app));
   });
@@ -348,8 +360,10 @@ describe('POST /api/command — path-traversal boundary rejection (security/R02/
     app = express();
     app.use(express.json());
     app.use('/api', createAccessGuard());
-    // Inject rejectOutsideBoundary: simulates path outside WORKSPACE_DIR
-    app.use(commandRouter(service, { pathValidator: rejectOutsideBoundary }));
+    // Inject passThruSlugResolver: tests use absolute-path-like strings that need to
+    // reach pathValidator (the layer being tested here), bypassing slug-form check.
+    // rejectOutsideBoundary simulates path outside WORKSPACE_DIR.
+    app.use(commandRouter(service, { slugResolver: passThruSlugResolver, pathValidator: rejectOutsideBoundary }));
 
     ({ server, port } = await startServer(app));
   });
@@ -392,8 +406,9 @@ describe('POST /api/command — path-traversal boundary rejection (security/R02/
     const app2 = express();
     app2.use(express.json());
     app2.use('/api', createAccessGuard());
-    // rejectOutsideBoundary: prove null path does NOT call the validator
+    // rejectOutsideBoundary: prove null path does NOT call slugResolver or validator
     app2.use(commandRouter(service2, {
+      slugResolver: () => { throw new Error('should not be called for null projectPath'); },
       pathValidator: () => { throw new Error('should not be called for null projectPath'); },
     }));
 

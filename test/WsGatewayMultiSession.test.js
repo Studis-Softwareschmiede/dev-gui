@@ -89,6 +89,18 @@ class FakeRegistry {
   }
 }
 
+// ── Slug resolver stubs ───────────────────────────────────────────────────────
+
+/**
+ * Pass-through slug resolver: returns the slug as-is (identity).
+ * Used in tests that test path routing logic with absolute-path-like strings
+ * (pre-slug test artifacts) — skips the real slug-form validation.
+ * Real slug resolution is tested in test/slugResolver.test.js.
+ */
+function passThruSlugResolver(slug) {
+  return slug;
+}
+
 // ── Path validator stubs ──────────────────────────────────────────────────────
 
 /** Stub: always allows the path (simulates path inside workspace). */
@@ -187,8 +199,9 @@ describe('WsGateway — multi-session (PtySessionRegistry)', () => {
     const registry = new FakeRegistry();
     const projectPty = new FakePty('project alpha scrollback');
     registry.addSession('/p/alpha', projectPty);
-    // inject allowAllValidator: skip real filesystem calls
-    new WsGateway(wss, registry, { pathValidator: allowAllValidator });
+    // inject passThruSlugResolver + allowAllValidator: skip slug-form + filesystem calls
+    // (this test uses absolute-path-like strings as project params — pre-slug test artifact)
+    new WsGateway(wss, registry, { slugResolver: passThruSlugResolver, pathValidator: allowAllValidator });
 
     const ws = new FakeSocket();
     const encoded = encodeURIComponent('/p/alpha');
@@ -207,7 +220,7 @@ describe('WsGateway — multi-session (PtySessionRegistry)', () => {
     const wss = new FakeWss();
     const registry = new FakeRegistry();
     registry.capExceeded = true;
-    new WsGateway(wss, registry, { pathValidator: allowAllValidator });
+    new WsGateway(wss, registry, { slugResolver: passThruSlugResolver, pathValidator: allowAllValidator });
 
     const ws = new FakeSocket();
     wss.simulateConnection(ws, '/ws/terminal?project=%2Fp%2Falpha');
@@ -226,7 +239,7 @@ describe('WsGateway — multi-session (PtySessionRegistry)', () => {
     const ptyB = new FakePty('');
     registry.addSession('/p/A', ptyA);
     registry.addSession('/p/B', ptyB);
-    new WsGateway(wss, registry, { pathValidator: allowAllValidator });
+    new WsGateway(wss, registry, { slugResolver: passThruSlugResolver, pathValidator: allowAllValidator });
 
     // Connect two sockets: one to A, one to B
     const wsA = new FakeSocket();
@@ -256,7 +269,7 @@ describe('WsGateway — multi-session (PtySessionRegistry)', () => {
     const ptyB = new FakePty('');
     registry.addSession('/p/A', ptyA);
     registry.addSession('/p/B', ptyB);
-    new WsGateway(wss, registry, { pathValidator: allowAllValidator });
+    new WsGateway(wss, registry, { slugResolver: passThruSlugResolver, pathValidator: allowAllValidator });
 
     const wsA = new FakeSocket();
     const wsB = new FakeSocket();
@@ -278,7 +291,7 @@ describe('WsGateway — multi-session (PtySessionRegistry)', () => {
     const registry = new FakeRegistry();
     const pty = new FakePty('');
     registry.addSession('/p/alpha', pty);
-    new WsGateway(wss, registry, { pathValidator: allowAllValidator });
+    new WsGateway(wss, registry, { slugResolver: passThruSlugResolver, pathValidator: allowAllValidator });
 
     const ws = new FakeSocket();
     wss.simulateConnection(ws, `/ws/terminal?project=${encodeURIComponent('/p/alpha')}`);
@@ -300,7 +313,7 @@ describe('WsGateway — multi-session (PtySessionRegistry)', () => {
     const ptyB = new FakePty('');
     registry.addSession('/p/A', ptyA);
     registry.addSession('/p/B', ptyB);
-    new WsGateway(wss, registry, { pathValidator: allowAllValidator });
+    new WsGateway(wss, registry, { slugResolver: passThruSlugResolver, pathValidator: allowAllValidator });
 
     const wsA = new FakeSocket();
     wss.simulateConnection(wsA, `/ws/terminal?project=${encodeURIComponent('/p/A')}`);
@@ -321,7 +334,7 @@ describe('WsGateway — multi-session (PtySessionRegistry)', () => {
     const ptyB = new FakePty('');
     registry.addSession('/p/A', ptyA);
     registry.addSession('/p/B', ptyB);
-    new WsGateway(wss, registry, { pathValidator: allowAllValidator });
+    new WsGateway(wss, registry, { slugResolver: passThruSlugResolver, pathValidator: allowAllValidator });
 
     const wsA = new FakeSocket();
     wss.simulateConnection(wsA, `/ws/terminal?project=${encodeURIComponent('/p/A')}`);
@@ -341,8 +354,12 @@ describe('WsGateway — path-traversal rejection (security/R02/R03)', () => {
   it('projectPath outside workspace boundary → socket closed with 1008', async () => {
     const wss = new FakeWss();
     const registry = new FakeRegistry();
-    // Stub: rejects with outside-boundary error (simulates /etc/passwd or /../escape)
-    new WsGateway(wss, registry, { pathValidator: rejectOutsideBoundary });
+    // passThruSlugResolver lets the absolute path reach pathValidator
+    // (which rejects with outside-boundary — the actual security check being tested).
+    new WsGateway(wss, registry, {
+      slugResolver: passThruSlugResolver,
+      pathValidator: rejectOutsideBoundary,
+    });
 
     const ws = new FakeSocket();
     const outsidePath = encodeURIComponent('/etc/passwd');
@@ -360,7 +377,10 @@ describe('WsGateway — path-traversal rejection (security/R02/R03)', () => {
   it('projectPath that does not exist → socket closed with 1008', async () => {
     const wss = new FakeWss();
     const registry = new FakeRegistry();
-    new WsGateway(wss, registry, { pathValidator: rejectNotExists });
+    new WsGateway(wss, registry, {
+      slugResolver: passThruSlugResolver,
+      pathValidator: rejectNotExists,
+    });
 
     const ws = new FakeSocket();
     wss.simulateConnection(ws, `/ws/terminal?project=${encodeURIComponent('/workspace/nonexistent')}`);
@@ -372,11 +392,15 @@ describe('WsGateway — path-traversal rejection (security/R02/R03)', () => {
   });
 
   it('symlink escaping workspace (realpath resolves outside) → socket closed with 1008', async () => {
-    // Simulates: /workspace/link → /etc (symlink escape)
+    // Simulates: /workspace/link → /etc (symlink escape).
+    // passThruSlugResolver lets the path reach pathValidator.
+    // rejectOutsideBoundary simulates realpath returning /etc (outside workspace).
     const wss = new FakeWss();
     const registry = new FakeRegistry();
-    // rejectOutsideBoundary simulates realpath returning /etc (outside workspace)
-    new WsGateway(wss, registry, { pathValidator: rejectOutsideBoundary });
+    new WsGateway(wss, registry, {
+      slugResolver: passThruSlugResolver,
+      pathValidator: rejectOutsideBoundary,
+    });
 
     const ws = new FakeSocket();
     // Syntactically inside workspace but resolves outside via symlink
@@ -392,9 +416,10 @@ describe('WsGateway — path-traversal rejection (security/R02/R03)', () => {
     // No pathValidator needed: null path bypasses validation entirely
     const wss = new FakeWss();
     const registry = new FakeRegistry();
-    // pathValidator NOT injected — if it were called it would throw (no stub)
-    // Using rejectOutsideBoundary to prove null path never reaches the validator
+    // slugResolver + pathValidator NOT injected for meaningful values here —
+    // they should NOT be called for a global (null-project) connection.
     new WsGateway(wss, registry, {
+      slugResolver: () => { throw new Error('should not be called for null path'); },
       pathValidator: () => { throw new Error('should not be called for null path'); },
     });
 
