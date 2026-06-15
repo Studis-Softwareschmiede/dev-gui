@@ -424,6 +424,10 @@ export class BoardAggregator {
           status: data.status ?? null,
           priority: data.priority ?? null,
           progress: data.progress ?? null, // may be stale/missing → recalc later
+          goal: data.goal ?? null,
+          definition_of_done: data.definition_of_done ?? null,
+          depends: Array.isArray(data.depends) ? data.depends.map(String) : null,
+          labels: Array.isArray(data.labels) ? data.labels.map(String) : null,
           stories: [],
         });
       } catch {
@@ -493,6 +497,10 @@ export class BoardAggregator {
         status: null,
         priority: null,
         progress: null,
+        goal: null,
+        definition_of_done: null,
+        depends: null,
+        labels: null,
         stories: orphanedStories,
         _orphaned: true,
       });
@@ -614,6 +622,10 @@ export class BoardAggregator {
  *   status: string|null,
  *   priority: string|null,
  *   progress: string|null,
+ *   goal: string|null,
+ *   definition_of_done: string|null,
+ *   depends: string[]|null,
+ *   labels: string[]|null,
  *   stories: StoryEntry[]
  * }} FeatureEntry
  *

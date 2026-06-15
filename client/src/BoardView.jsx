@@ -9,6 +9,7 @@
  *   AC5  — Rollup-Anzeige je Feature: vorhandenes progress-Feld nutzen; fehlt/stale
  *           → read-only aus Kind-Story-Status berechnet (done = 'done'-Stories).
  *   AC6  — Filter nach Projekt, Story-Status und Label (alle unabhängig kombinierbar).
+ *          Status-Filter: Mehrfachauswahl per Checkbox-Gruppe (leere Auswahl = alle sichtbar).
  *
  * Story-Status-Lebenszyklus (board-subsystem §9.3):
  *   To Do | In Progress | Blocked | In Review | Done
@@ -28,7 +29,7 @@
  * @param {{ onNavigate: (view: string) => void }} props
  */
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 
 // ── Status-Lebensyklus (board-subsystem §9.3) ─────────────────────────────────
 
@@ -81,9 +82,9 @@ export function BoardView({ onNavigate: _onNavigate }) {
   const [projects, setProjects] = useState([]);
 
   // ── Filter state (AC6)
-  const [filterProject, setFilterProject] = useState('');  // '' = alle
-  const [filterStatus, setFilterStatus]   = useState('');  // '' = alle
-  const [filterLabel, setFilterLabel]     = useState('');  // '' = alle (free-text)
+  const [filterProject, setFilterProject] = useState('');    // '' = alle
+  const [filterStatus, setFilterStatus]   = useState(new Set()); // empty Set = alle sichtbar
+  const [filterLabel, setFilterLabel]     = useState('');    // '' = alle (free-text)
 
   // ── Load once on mount (AC4)
   useEffect(() => {
@@ -147,7 +148,8 @@ export function BoardView({ onNavigate: _onNavigate }) {
         // Filter features whose stories pass the status/label filter
         const filteredFeatures = (p.features ?? []).map((f) => {
           const filteredStories = (f.stories ?? []).filter((s) => {
-            if (filterStatus && s.status !== filterStatus) return false;
+            // Multi-select status: empty Set = alle; non-empty = status must be in Set
+            if (filterStatus.size > 0 && !filterStatus.has(s.status)) return false;
             if (filterLabel && !(s.labels ?? []).includes(filterLabel)) return false;
             return true;
           });
@@ -189,6 +191,7 @@ export function BoardView({ onNavigate: _onNavigate }) {
         />
       )}
 
+
       {/* ── Loading */}
       {loadState === 'loading' && (
         <div aria-busy="true" aria-live="polite" style={styles.statusMsg}>
@@ -219,12 +222,12 @@ export function BoardView({ onNavigate: _onNavigate }) {
               project={project}
             />
           ))}
-          {filteredProjects.length === 0 && (filterProject || filterStatus || filterLabel) && (
+          {filteredProjects.length === 0 && (filterProject || filterStatus.size > 0 || filterLabel) && (
             <div role="status" style={styles.statusMsg}>
               Keine Projekte / Stories passen zum aktuellen Filter.
             </div>
           )}
-          {filteredProjects.length > 0 && totalFilteredStories === 0 && (filterStatus || filterLabel) && (
+          {filteredProjects.length > 0 && totalFilteredStories === 0 && (filterStatus.size > 0 || filterLabel) && (
             <div role="status" style={styles.statusMsg}>
               Keine Stories passen zum aktiven Filter.
             </div>
@@ -238,17 +241,17 @@ export function BoardView({ onNavigate: _onNavigate }) {
 // ── FilterBar ─────────────────────────────────────────────────────────────────
 
 /**
- * Filter controls for Projekt, Story-Status and Label (AC6).
+ * Filter controls for Projekt, Story-Status (multi-select checkboxes) and Label (AC6).
  *
  * @param {{
  *   projects: string[],
  *   statusOptions: string[],
  *   labelOptions: string[],
  *   filterProject: string,
- *   filterStatus: string,
+ *   filterStatus: Set<string>,
  *   filterLabel: string,
  *   onProjectChange: (v: string) => void,
- *   onStatusChange: (v: string) => void,
+ *   onStatusChange: (v: Set<string>) => void,
  *   onLabelChange: (v: string) => void,
  * }} props
  */
@@ -263,6 +266,19 @@ function FilterBar({
   onStatusChange,
   onLabelChange,
 }) {
+  /** Toggle a status value in the Set. */
+  function handleStatusToggle(status) {
+    const next = new Set(filterStatus);
+    if (next.has(status)) {
+      next.delete(status);
+    } else {
+      next.add(status);
+    }
+    onStatusChange(next);
+  }
+
+  const anyFilterActive = filterProject || filterStatus.size > 0 || filterLabel;
+
   return (
     <div style={styles.filterBar} role="search" aria-label="Board-Filter">
       {/* Projekt filter */}
@@ -282,22 +298,29 @@ function FilterBar({
         ))}
       </select>
 
-      {/* Status filter */}
-      <label style={styles.filterLabel} htmlFor="board-filter-status">
-        Status
-      </label>
-      <select
-        id="board-filter-status"
-        style={styles.filterSelect}
-        value={filterStatus}
-        onChange={(e) => onStatusChange(e.target.value)}
-        aria-label="Nach Status filtern"
-      >
-        <option value="">Alle Status</option>
-        {statusOptions.map((s) => (
-          <option key={s} value={s}>{s}</option>
-        ))}
-      </select>
+      {/* Status filter — Mehrfachauswahl per Checkbox-Gruppe (AC6) */}
+      <fieldset style={styles.filterFieldset} id="board-filter-status-group" aria-label="Nach Status filtern">
+        <legend style={styles.filterLabel}>Status</legend>
+        <div style={styles.statusCheckboxRow}>
+          {statusOptions.map((s) => {
+            const checked = filterStatus.has(s);
+            const inputId = `board-filter-status-${s.replace(/\s+/g, '-').toLowerCase()}`;
+            return (
+              <label key={s} style={styles.statusCheckboxLabel} htmlFor={inputId}>
+                <input
+                  id={inputId}
+                  type="checkbox"
+                  style={styles.statusCheckbox}
+                  checked={checked}
+                  onChange={() => handleStatusToggle(s)}
+                  aria-label={`Status ${s} ${checked ? 'aktiv' : 'inaktiv'}`}
+                />
+                {s}
+              </label>
+            );
+          })}
+        </div>
+      </fieldset>
 
       {/* Label filter */}
       <label style={styles.filterLabel} htmlFor="board-filter-label">
@@ -317,13 +340,13 @@ function FilterBar({
       </select>
 
       {/* Reset */}
-      {(filterProject || filterStatus || filterLabel) && (
+      {anyFilterActive && (
         <button
           type="button"
           style={styles.filterReset}
           onClick={() => {
             onProjectChange('');
-            onStatusChange('');
+            onStatusChange(new Set());
             onLabelChange('');
           }}
           aria-label="Filter zurücksetzen"
@@ -387,10 +410,12 @@ function ProjectSection({ project }) {
 
 /**
  * One feature row: title, rollup bar (AC5), then stories in status columns (AC4).
+ * Klick auf den Feature-Titel öffnet/schliesst das Detail-Panel (goal, DoD, …).
  *
  * @param {{ feature: object }} props
  */
 function FeatureRow({ feature }) {
+  const [detailOpen, setDetailOpen] = useState(false);
   const rollup = computeRollup(feature);
   const stories = Array.isArray(feature.stories) ? feature.stories : [];
 
@@ -411,6 +436,10 @@ function FeatureRow({ feature }) {
     }
   }
 
+  const handleTitleClick = useCallback(() => {
+    setDetailOpen((prev) => !prev);
+  }, []);
+
   return (
     <div
       style={styles.featureRow}
@@ -419,13 +448,38 @@ function FeatureRow({ feature }) {
     >
       {/* Feature header */}
       <div style={styles.featureHeader}>
-        <span style={styles.featureTitle}>{feature.title || feature.id}</span>
+        {/* Clickable title — toggles detail panel */}
+        <button
+          type="button"
+          style={styles.featureTitleBtn}
+          onClick={handleTitleClick}
+          aria-expanded={detailOpen}
+          aria-controls={detailOpen ? `feature-detail-${feature.id}` : undefined}
+          data-testid={`feature-title-btn-${feature.id}`}
+        >
+          <span style={styles.featureTitleChevron} aria-hidden="true">
+            {detailOpen ? '▾' : '▸'}
+          </span>
+          {feature.title || feature.id}
+        </button>
         {feature.status && (
           <StatusBadge status={feature.status} />
         )}
         {/* Rollup bar (AC5) */}
         <RollupBar done={rollup.done} total={rollup.total} />
       </div>
+
+      {/* Feature detail panel — shown when expanded */}
+      {detailOpen && (
+        <div
+          id={`feature-detail-${feature.id}`}
+          style={styles.featureDetail}
+          data-testid={`feature-detail-${feature.id}`}
+          aria-label={`Details für Feature: ${feature.title || feature.id}`}
+        >
+          <FeatureDetailPanel feature={feature} />
+        </div>
+      )}
 
       {/* Status columns (AC4) */}
       {stories.length > 0 && (
@@ -444,6 +498,66 @@ function FeatureRow({ feature }) {
         <p style={styles.hintMsg}>Keine Stories in diesem Feature.</p>
       )}
     </div>
+  );
+}
+
+// ── FeatureDetailPanel ────────────────────────────────────────────────────────
+
+/**
+ * Detail panel for a feature — shows goal, definition_of_done, priority, depends, labels.
+ * Fields that are null/empty are omitted (dezent ausgeblendet).
+ *
+ * @param {{ feature: object }} props
+ */
+function FeatureDetailPanel({ feature }) {
+  const hasLabels = Array.isArray(feature.labels) && feature.labels.length > 0;
+  const hasDepends = Array.isArray(feature.depends) && feature.depends.length > 0;
+
+  return (
+    <dl style={styles.detailDl}>
+      {feature.goal && (
+        <>
+          <dt style={styles.detailTerm}>Ziel</dt>
+          <dd style={styles.detailDesc} data-testid="feature-detail-goal">{feature.goal}</dd>
+        </>
+      )}
+      {feature.definition_of_done && (
+        <>
+          <dt style={styles.detailTerm}>Definition of Done</dt>
+          <dd style={styles.detailDesc} data-testid="feature-detail-dod">{feature.definition_of_done}</dd>
+        </>
+      )}
+      {feature.priority && (
+        <>
+          <dt style={styles.detailTerm}>Priorität</dt>
+          <dd style={styles.detailDesc} data-testid="feature-detail-priority">{feature.priority}</dd>
+        </>
+      )}
+      {hasDepends && (
+        <>
+          <dt style={styles.detailTerm}>Abhängigkeiten</dt>
+          <dd style={styles.detailDesc} data-testid="feature-detail-depends">
+            <div style={styles.labelRow}>
+              {feature.depends.map((dep) => (
+                <span key={dep} style={styles.dependsChip}>{dep}</span>
+              ))}
+            </div>
+          </dd>
+        </>
+      )}
+      {hasLabels && (
+        <>
+          <dt style={styles.detailTerm}>Labels</dt>
+          <dd style={styles.detailDesc} data-testid="feature-detail-labels">
+            <div style={styles.labelRow}>
+              {feature.labels.map((lbl) => (
+                <span key={lbl} style={styles.labelChip} aria-label={`Label: ${lbl}`}>{lbl}</span>
+              ))}
+            </div>
+          </dd>
+        </>
+      )}
+    </dl>
   );
 }
 
@@ -659,6 +773,33 @@ const styles = {
     color: '#9ca3af',
     letterSpacing: '0.04em',
   },
+  filterFieldset: {
+    border: 'none',
+    margin: 0,
+    padding: 0,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 4,
+  },
+  statusCheckboxRow: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: '4px 10px',
+  },
+  statusCheckboxLabel: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 4,
+    fontSize: 12,
+    color: '#e5e7eb',
+    cursor: 'pointer',
+    minHeight: 24,
+    // Focus ring on the checkbox input itself is preserved
+  },
+  statusCheckbox: {
+    accentColor: '#93c5fd',
+    cursor: 'pointer',
+  },
   filterSelect: {
     background: '#1a1a1a',
     border: '1px solid #333',
@@ -749,6 +890,68 @@ const styles = {
     color: '#d1d5db',
     flex: 1,
     minWidth: 0,
+  },
+
+  // Feature title as a button (expand/collapse detail)
+  featureTitleBtn: {
+    background: 'transparent',
+    border: 'none',
+    padding: '2px 0',
+    fontSize: 14,
+    fontWeight: 600,
+    color: '#d1d5db',
+    cursor: 'pointer',
+    textAlign: 'left',
+    flex: 1,
+    minWidth: 0,
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+    // Focus ring preserved (no outline:none)
+  },
+  featureTitleChevron: {
+    fontSize: 10,
+    color: '#6b7280',
+    flexShrink: 0,
+  },
+
+  // Feature detail panel (goal, DoD, priority, depends, labels)
+  featureDetail: {
+    marginBottom: 10,
+    padding: '10px 12px',
+    background: '#0a0a0a',
+    border: '1px solid #1e2a3a',
+    borderRadius: 6,
+  },
+  detailDl: {
+    margin: 0,
+    display: 'grid',
+    gridTemplateColumns: 'auto 1fr',
+    gap: '4px 12px',
+    alignItems: 'baseline',
+  },
+  detailTerm: {
+    fontSize: 11,
+    fontWeight: 600,
+    color: '#6b7280',
+    letterSpacing: '0.04em',
+    whiteSpace: 'nowrap',
+    margin: 0,
+  },
+  detailDesc: {
+    fontSize: 12,
+    color: '#9ca3af',
+    margin: 0,
+    lineHeight: 1.5,
+  },
+
+  dependsChip: {
+    fontSize: 10,
+    padding: '1px 6px',
+    borderRadius: 10,
+    background: '#1e2a1e',
+    color: '#86efac',
+    border: '1px solid #14532d',
   },
 
   // ── Rollup bar (AC5)

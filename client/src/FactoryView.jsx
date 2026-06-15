@@ -18,7 +18,7 @@ import { TriggerPanel } from './TriggerPanel.jsx';
 /**
  * @param {{ onNavigate: (view: string) => void }} props
  */
-export function FactoryView({ onNavigate: _onNavigate }) {
+export function FactoryView({ onNavigate }) {
   return (
     <div style={styles.factory}>
       {/* Terminal pane — dominant, scrollable xterm.js */}
@@ -28,6 +28,18 @@ export function FactoryView({ onNavigate: _onNavigate }) {
 
       {/* Right sidebar — TriggerPanel + Dashboard stacked */}
       <div style={styles.sidebar}>
+        {/* Board navigation link */}
+        <div style={styles.boardLinkBar}>
+          <button
+            type="button"
+            style={styles.boardLinkBtn}
+            onClick={() => onNavigate('board')}
+            aria-label="Zum Aufgaben-Board navigieren"
+          >
+            → Aufgaben-Board
+          </button>
+        </div>
+
         {/* Flow-Trigger-Panel — fire slash-commands */}
         <TriggerPanel />
 
@@ -61,5 +73,20 @@ const styles = {
     overflowY: 'auto',
     flex: '0 0 auto',
     order: 2,
+  },
+  boardLinkBar: {
+    padding: '10px 12px 6px',
+    borderBottom: '1px solid #2a2a2a',
+  },
+  boardLinkBtn: {
+    background: 'transparent',
+    border: '1px solid #334155',
+    color: '#93c5fd',
+    borderRadius: 4,
+    padding: '6px 12px',
+    fontSize: 13,
+    cursor: 'pointer',
+    minHeight: 36,
+    // Focus ring preserved (no outline:none)
   },
 };
