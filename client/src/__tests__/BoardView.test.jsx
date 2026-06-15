@@ -29,6 +29,9 @@
  *   AC6 — Standalone: öffnet mit Projektliste; Klick lädt Projekt (lazy, aria-busy);
  *          Rückweg zur Liste; Cockpit-Modus (lockedProject): direkt ohne Liste.
  *
+ * Covers (projekt-spezifikation-anzeige):
+ *   AC5 — Story-Spec-Bezug ist klickbar (onOpenSpec-Prop) und ruft onOpenSpec(relPath) auf.
+ *
  * NOTE (jsdom-Limitation): jsdom hat keine Layout-Engine — Style-Property-Asserts beweisen
  * kein Scroll-/Layout-Verhalten; getestet werden Verhalten, Struktur, Rollen und aria.
  *
@@ -1681,5 +1684,70 @@ describe('dev-gui-board-aggregator — Multi-Status-Filter (cockpit)', () => {
       expect(container.querySelector('[data-story="S-003"]')).toBeTruthy();
       expect(container.querySelector('[aria-label="Filter zurücksetzen"]')).toBeNull();
     });
+  });
+});
+
+// ── projekt-spezifikation-anzeige AC5: Spec-Bezug klickbar ───────────────────
+
+describe('BoardView — projekt-spezifikation-anzeige AC5: Spec-Link in StoryCard', () => {
+  it('rendert Spec-Bezug als klickbaren Button wenn onOpenSpec übergeben wird', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const onOpenSpec = jest.fn();
+    const { container } = renderCockpit('project-alpha', { onOpenSpec });
+
+    await waitFor(() => {
+      // S-001 hat spec: 'docs/specs/login.md'
+      expect(container.querySelector('[data-story="S-001"]')).toBeTruthy();
+    });
+
+    const specLink = container.querySelector('[data-testid="spec-link-S-001"]');
+    expect(specLink).not.toBeNull();
+    expect(specLink.tagName).toBe('BUTTON');
+    expect(specLink.textContent).toBe('docs/specs/login.md');
+  });
+
+  it('ruft onOpenSpec(relPath) auf wenn Spec-Link geklickt wird', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const onOpenSpec = jest.fn();
+    const { container } = renderCockpit('project-alpha', { onOpenSpec });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="spec-link-S-001"]')).not.toBeNull();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="spec-link-S-001"]'));
+    });
+
+    expect(onOpenSpec).toHaveBeenCalledWith('docs/specs/login.md');
+  });
+
+  it('rendert Spec-Bezug als reinen Text wenn kein onOpenSpec übergeben wird', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha'); // kein onOpenSpec
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-story="S-001"]')).toBeTruthy();
+    });
+
+    // Kein Button für Spec (statischer Text)
+    expect(container.querySelector('[data-testid="spec-link-S-001"]')).toBeNull();
+    // Spec-Wert erscheint aber als Text
+    const storyEl = container.querySelector('[data-story="S-001"]');
+    expect(storyEl?.textContent).toMatch(/docs\/specs\/login\.md/);
+  });
+
+  it('specLink-Button hat minHeight 44px (Touch-Target ≥ 44 px, WCAG 2.1 AA)', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const onOpenSpec = jest.fn();
+    const { container } = renderCockpit('project-alpha', { onOpenSpec });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="spec-link-S-001"]')).not.toBeNull();
+    });
+
+    const specLink = container.querySelector('[data-testid="spec-link-S-001"]');
+    // jsdom exposes inline styles via element.style
+    expect(specLink.style.minHeight).toBe('44px');
   });
 });

@@ -55,6 +55,8 @@
  *   GET    /api/retro/trend?category=<knowledge|agents|skills> → { category, lanes:[…], runs:[…], empty?, placeholder? } (retro-trend-backend AC1)
  *   GET    /api/board/projects                                → { projects:[…] } (dev-gui-board-aggregator AC1-3,AC7-9)
  *   POST   /api/board/projects/rescan                         → { ok: true } (dev-gui-board-aggregator AC9)
+ *   GET    /api/board/projects/:slug/docs                    → { docs:[…] } (projekt-spezifikation-anzeige AC1,AC2)
+ *   GET    /api/board/projects/:slug/docs/raw?path=<relpfad> → Roh-Markdown (projekt-spezifikation-anzeige AC2,AC3)
  *   WS   /ws/terminal                             → PtyManager bridge (guarded by AccessGuard)
  */
 
@@ -89,6 +91,7 @@ import { VpsComposeControl } from './src/deploy/VpsComposeControl.js';
 import { StackDeployOrchestrator } from './src/deploy/StackDeployOrchestrator.js';
 import { BitwardenMasterKeyService } from './src/BitwardenMasterKeyService.js';
 import { BoardAggregator } from './src/BoardAggregator.js';
+import { DocsReader } from './src/DocsReader.js';
 import { mountRouters } from './src/routerLoader.js';
 
 const PORT = Number(process.env.PORT ?? 8080);
@@ -202,6 +205,9 @@ const retroReader = new RetroReader({
 const boardAggregator = new BoardAggregator();
 boardAggregator.startWatchers();
 
+// ── DocsReader (read-only Projekt-Doku, AC1-3 projekt-spezifikation-anzeige) ──
+const docsReader = new DocsReader();
+
 // ── deps-Objekt: alle Boundaries für den Auto-Loader ─────────────────────────
 // Expose ptyManager for routers that reference it (e.g. session.js reads state/restarts/startedAt).
 // These routers operate on the global (no-project) session, which preserves backward compat.
@@ -229,6 +235,7 @@ const deps = {
   agentFlowReader,
   retroReader,
   boardAggregator,
+  docsReader,
 };
 
 // ── AC1/AC2: Auto-Discovery + Mount aller API-Router ─────────────────────────

@@ -1,13 +1,18 @@
 /**
- * CockpitView.jsx — Projekt-Cockpit mit Reiter-Leiste (AC3).
+ * CockpitView.jsx — Projekt-Cockpit mit Reiter-Leiste.
  *
  * projekt-cockpit-navigation:
  *   AC3 — Reiter-Leiste „Arbeiten | Studis-Kanban-Board | Spezifikation" mit aktivem Projekt-Kontext.
  *          „Arbeiten" zeigt den bisherigen FactoryView-Inhalt (Terminal + TriggerPanel +
  *          Dashboard) — unverändert eingebettet.
- *          „Board" und „Spezifikation" sind Platzhalter-Reiter.
  *          Reiter erben den Projekt-Kontext (activeRepo).
  *   AC2 — Rückweg zur Übersicht (#/factory) über den Back-Button.
+ *
+ * projekt-spezifikation-anzeige:
+ *   AC4 — Reiter „Spezifikation" ersetzt den „folgt mit F-004"-Platzhalter:
+ *          SpecView mit Navigation + gerendertem Markdown (markdownLite).
+ *   AC5 — BoardView erhält openSpec-Callback: Klick auf Spec-Bezug öffnet
+ *          den Spezifikation-Reiter und zeigt die jeweilige Datei.
  *
  * A11y (WCAG 2.1 AA):
  *   - Reiter-Leiste als <nav role="tablist"> mit aria-selected.
@@ -27,11 +32,12 @@
  * }} props
  */
 
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import { Terminal } from './Terminal.jsx';
 import { Dashboard } from './Dashboard.jsx';
 import { TriggerPanel } from './TriggerPanel.jsx';
 import { BoardView } from './BoardView.jsx';
+import { SpecView } from './SpecView.jsx';
 
 /** @type {Array<{ id: string, label: string }>} */
 const TABS = [
@@ -49,6 +55,17 @@ const TABS = [
  */
 export function CockpitView({ activeRepo, navigateFactory, onNavigate: _onNavigate }) {
   const [activeTab, setActiveTab] = useState('arbeiten');
+
+  // AC5: Pfad der im Spezifikation-Reiter direkt zu öffnenden Datei
+  // (wird gesetzt wenn BoardView auf einen Spec-Bezug klickt)
+  // SpecView remountet bei Tab-Wechsel — kein Reset nötig.
+  const [pendingSpecPath, setPendingSpecPath] = useState(null);
+
+  // AC5: Callback für BoardView — öffnet Spezifikation-Reiter + setzt Pfad
+  const openSpec = useCallback((relPath) => {
+    setPendingSpecPath(relPath);
+    setActiveTab('spec');
+  }, []);
 
   return (
     <div style={styles.cockpit}>
@@ -114,19 +131,22 @@ export function CockpitView({ activeRepo, navigateFactory, onNavigate: _onNaviga
           aria-labelledby="cockpit-tab-board"
           style={styles.tabPanel}
         >
-          <BoardView lockedProject={activeRepo} />
+          <BoardView lockedProject={activeRepo} onOpenSpec={openSpec} />
         </div>
       )}
 
-      {/* Spezifikation: Platzhalter — folgt mit F-004 (DocsReader nicht vorhanden) */}
+      {/* Spezifikation: SpecView (AC4 — F-004, ersetzt Platzhalter) */}
       {activeTab === 'spec' && (
         <div
           role="tabpanel"
           id="cockpit-panel-spec"
           aria-labelledby="cockpit-tab-spec"
-          style={styles.placeholderPanel}
+          style={styles.tabPanel}
         >
-          <p style={styles.placeholderText}>Spezifikation — folgt mit F-004</p>
+          <SpecView
+            projectSlug={activeRepo}
+            initialPath={pendingSpecPath}
+          />
         </div>
       )}
     </div>
