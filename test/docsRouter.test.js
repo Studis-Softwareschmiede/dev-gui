@@ -9,9 +9,14 @@
  *          kein separater Middleware-Test — see retroRouter.test.js pattern).
  *   AC3 — Pfad-Sicherheit: ..-Pfad → 400; absoluter Pfad → 400; leerer Pfad → 400;
  *          unbekannter Slug → 404; gültige Datei → 200 text/plain.
+ *   Fallback (non-board Workspace-Repos):
+ *     (a) Board-Repo weiterhin 200 (Regression).
+ *     (b) Nicht-board-Repo, das als Workspace-Verzeichnis existiert → 200 mit docs.
+ *     (c) Unbekannter Slug (kein Board, kein Verzeichnis) → 404.
+ *     (d) Traversal-Versuch über slug (validateProjectPath wirft ProjectPathError) → 404.
  *
  * Pattern: express + node:http createServer auf Port 0 (127.0.0.1), kein supertest.
- * Stub-BoardAggregator + Stub-DocsReader injiziert über docsRouter({ boardAggregator, docsReader }).
+ * Stub-BoardAggregator + Stub-DocsReader injiziert über docsRouter({ boardAggregator, docsReader, resolveWorkspaceRoot }).
  */
 
 import { describe, it, expect, afterEach } from '@jest/globals';
@@ -19,6 +24,7 @@ import express from 'express';
 import { createServer } from 'node:http';
 import { request as httpRequest } from 'node:http';
 import { docsRouter } from '../src/docsRouter.js';
+import { ProjectPathError } from '../src/workspacePath.js';
 
 // ── HTTP-Hilfsfunktionen ──────────────────────────────────────────────────────
 
@@ -233,5 +239,105 @@ describe('GET /api/board/projects/:slug/docs/raw — AC3: Pfad-Traversal-Abweisu
     // Die Verdrahtung `app.use('/api', accessGuard)` in server.js schützt alle /api/*-Routen.
     // Kein separater Middleware-Test nötig — analog retroRouter.test.js AC10.
     expect(true).toBe(true);
+  });
+});
+
+// ── Fallback: Nicht-Board Workspace-Repos ─────────────────────────────────────
+
+describe('findRepoPath Fallback — Nicht-Board-Workspace-Repos', () => {
+  it('(a) Regression: Board-Repo weiterhin 200 (Fallback wird nicht benötigt)', async () => {
+    // FAKE_PROJECT ist im Board-Index → Primärpfad greift, kein Fallback nötig.
+    const router = docsRouter({
+      boardAggregator: buildBoardAggregatorStub([FAKE_PROJECT]),
+      docsReader: buildDocsReaderStub(),
+      resolveWorkspaceRoot: async () => { throw new Error('should not be called'); },
+    });
+    const srv = await startServer(router);
+    servers.push(srv);
+
+    const res = await httpGet(srv, '/api/board/projects/myproject/docs');
+    expect(res.status).toBe(200);
+    expect(res.data.docs).toHaveLength(2);
+  });
+
+  it('(b) Nicht-Board-Repo als Workspace-Verzeichnis → 200 mit docs', async () => {
+    // Slug nicht im Board-Index; validateProjectPath simuliert Erfolg.
+    const router = docsRouter({
+      boardAggregator: buildBoardAggregatorStub([]),  // leerer Board-Index
+      docsReader: buildDocsReaderStub({ getDocs: async () => [{ path: 'README.md', title: 'README', type: 'readme', status: null, id: null, version: null }] }),
+      resolveWorkspaceRoot: async () => ({ path: '/workspace', source: 'env-default' }),
+      _deps: {
+        // Stub: gibt immer Erfolg zurück (simuliert existierendes Verzeichnis)
+        validateProjectPath: async (candidate) => ({ resolvedPath: candidate }),
+      },
+    });
+    const srv = await startServer(router);
+    servers.push(srv);
+
+    const res = await httpGet(srv, '/api/board/projects/climatedataanalyser/docs');
+    expect(res.status).toBe(200);
+    expect(res.data.docs).toHaveLength(1);
+    expect(res.data.docs[0].path).toBe('README.md');
+  });
+
+  it('(c) Unbekannter Slug (kein Board, kein Verzeichnis) → 404', async () => {
+    // validateProjectPath wirft ProjectPathError (not-exists)
+    const router = docsRouter({
+      boardAggregator: buildBoardAggregatorStub([]),
+      docsReader: buildDocsReaderStub(),
+      resolveWorkspaceRoot: async () => ({ path: '/workspace', source: 'env-default' }),
+      _deps: {
+        validateProjectPath: async () => {
+          throw new ProjectPathError('does not exist', 'not-exists');
+        },
+      },
+    });
+    const srv = await startServer(router);
+    servers.push(srv);
+
+    const res = await httpGet(srv, '/api/board/projects/totally-unknown/docs');
+    expect(res.status).toBe(404);
+    expect(res.data.error).toMatch(/nicht gefunden/);
+  });
+
+  it('(d) Traversal-Versuch über Slug (validateProjectPath wirft ProjectPathError) → 404', async () => {
+    // SLUG_RE verhindert führende '.' und '/', aber ein slug wie "etc" würde theoretisch
+    // zu /workspace/etc führen. validateProjectPath ist die zweite echte Schranke
+    // (outside-boundary bei outside WORKSPACE_DIR).
+    const router = docsRouter({
+      boardAggregator: buildBoardAggregatorStub([]),
+      docsReader: buildDocsReaderStub(),
+      resolveWorkspaceRoot: async () => ({ path: '/workspace', source: 'env-default' }),
+      _deps: {
+        validateProjectPath: async () => {
+          throw new ProjectPathError('outside workspace boundary', 'outside-boundary');
+        },
+      },
+    });
+    const srv = await startServer(router);
+    servers.push(srv);
+
+    // Slug ist SLUG_RE-konform aber würde außerhalb WORKSPACE_DIR landen
+    const res = await httpGet(srv, '/api/board/projects/outside-repo/docs');
+    expect(res.status).toBe(404);
+    expect(res.data.error).toMatch(/nicht gefunden/);
+  });
+
+  it('(b-raw) Nicht-Board-Repo: raw-Endpunkt ebenfalls 200', async () => {
+    // Beide Endpoints nutzen dieselbe findRepoPath → Fallback greift für /docs/raw genauso.
+    const router = docsRouter({
+      boardAggregator: buildBoardAggregatorStub([]),
+      docsReader: buildDocsReaderStub({ getRaw: async () => ({ content: '# Non-board content' }) }),
+      resolveWorkspaceRoot: async () => ({ path: '/workspace', source: 'env-default' }),
+      _deps: {
+        validateProjectPath: async (candidate) => ({ resolvedPath: candidate }),
+      },
+    });
+    const srv = await startServer(router);
+    servers.push(srv);
+
+    const res = await httpGet(srv, '/api/board/projects/sandbox-project/docs/raw?path=README.md');
+    expect(res.status).toBe(200);
+    expect(res.raw).toBe('# Non-board content');
   });
 });
