@@ -1,0 +1,22 @@
+id: S-106
+parent: F-004
+title: Story-Spec-Verknuepfung klickbar
+status: To Do
+priority: P3
+spec: docs/specs/projekt-spezifikation-anzeige.md
+implements:
+- AC5
+depends: null
+labels: null
+size_est: null
+dispo_est: null
+dispo_act: null
+dispo_forecast: null
+estimate_note: null
+confidence: null
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-06-15T08:55:06Z'
+updated_at: '2026-06-15T08:55:06Z'
+done_at: null
