@@ -105,9 +105,10 @@ const { CockpitView }         = await import('../CockpitView.jsx');
 
 let _origFetch;
 
+// lastCommit ist ein Objekt {hash,subject,date} (oder null) — so liefert es die API.
 const MOCK_REPOS = [
-  { name: 'dev-gui',    branch: 'main',    dirty: false, lastCommit: 'abc1234 Fix bug' },
-  { name: 'agent-flow', branch: 'feature', dirty: true,  lastCommit: 'def5678 Add feature' },
+  { name: 'dev-gui',    branch: 'main',    dirty: false, lastCommit: { hash: 'abc1234', subject: 'Fix bug', date: '2026-06-15T12:00:00Z' } },
+  { name: 'agent-flow', branch: 'feature', dirty: true,  lastCommit: { hash: 'def5678', subject: 'Add feature', date: '2026-06-15T12:00:00Z' } },
 ];
 
 function mockFetchRepos(repos = MOCK_REPOS) {
@@ -226,9 +227,9 @@ describe('RepoOverview — AC1: Rendert lokale Klone', () => {
     expect(getByText('clean')).toBeTruthy();
     expect(getByText('dirty')).toBeTruthy();
 
-    // lastCommit shown
-    expect(getByText('abc1234 Fix bug')).toBeTruthy();
-    expect(getByText('def5678 Add feature')).toBeTruthy();
+    // lastCommit shown (Objekt → "hash · subject")
+    expect(getByText('abc1234 · Fix bug')).toBeTruthy();
+    expect(getByText('def5678 · Add feature')).toBeTruthy();
   });
 
   it('zeigt Empty-State wenn keine Repos vorhanden', async () => {

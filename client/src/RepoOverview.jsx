@@ -111,12 +111,23 @@ export function RepoOverview({ navigateFactory }) {
  * Single repo row — activatable via click and keyboard (AC1 + AC2).
  *
  * @param {{
- *   repo: { name: string, branch: string, dirty: boolean, lastCommit: string },
+ *   repo: {
+ *     name: string,
+ *     branch: string | null,
+ *     dirty: boolean,
+ *     lastCommit: { hash: string, subject: string, date: string } | null,
+ *   },
  *   onSelect: () => void,
  * }} props
  */
 function RepoItem({ repo, onSelect }) {
   const { name, branch, dirty, lastCommit } = repo;
+
+  // lastCommit ist ein Objekt {hash, subject, date} oder null (Worktrees/leere
+  // Repos liefern null) — niemals direkt in JSX rendern (React-Crash).
+  const commitText = lastCommit
+    ? `${lastCommit.hash} · ${lastCommit.subject}`
+    : '—';
 
   return (
     <li role="listitem" style={styles.repoItem}>
@@ -144,8 +155,8 @@ function RepoItem({ repo, onSelect }) {
         </span>
 
         {/* Last commit */}
-        <span style={styles.lastCommit} aria-label={`Letzter Commit: ${lastCommit ?? '—'}`}>
-          {lastCommit ?? '—'}
+        <span style={styles.lastCommit} aria-label={`Letzter Commit: ${commitText}`}>
+          {commitText}
         </span>
       </button>
     </li>
