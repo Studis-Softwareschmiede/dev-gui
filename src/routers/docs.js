@@ -16,9 +16,10 @@ export const order = 182;
  * @param {{
  *   boardAggregator: import('../BoardAggregator.js').BoardAggregator,
  *   docsReader: import('../DocsReader.js').DocsReader,
+ *   resolveWorkspaceRoot: () => Promise<{ path: string, source: string }>,
  * }} deps
  * @returns {import('express').Router}
  */
-export function create({ boardAggregator, docsReader }) {
-  return docsRouter({ boardAggregator, docsReader });
+export function create({ boardAggregator, docsReader, resolveWorkspaceRoot }) {
+  return docsRouter({ boardAggregator, docsReader, resolveWorkspaceRoot });
 }
