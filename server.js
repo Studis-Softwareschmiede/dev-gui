@@ -63,7 +63,7 @@ import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
 import express from 'express';
 import { WebSocketServer } from 'ws';
-import { PtyManager } from './src/PtyManager.js';
+import { PtySessionRegistry } from './src/PtySessionRegistry.js';
 import { WsGateway } from './src/WsGateway.js';
 import { assertAccessConfig, createAccessGuard, createWsAccessGuard } from './src/AccessGuard.js';
 import { AuditStore } from './src/AuditStore.js';
@@ -128,13 +128,14 @@ app.use('/api', accessGuard);
 
 export const auditStore = new AuditStore();
 
-// ── PtyManager ────────────────────────────────────────────────────────────────
-// TODO S-111: PtySessionRegistry verdrahten (deferred bis Client-Routing landet)
-const ptyManager = new PtyManager();
-ptyManager.start();
+// ── PtySessionRegistry (AC4 / S-111) ─────────────────────────────────────────
+// Multi-session: one PTY per project, keyed by absolute project path.
+// Global (no-project) session preserved for backward compat.
+const ptyRegistry = new PtySessionRegistry();
+ptyRegistry.start(); // start global session
 
 // ── CommandService ────────────────────────────────────────────────────────────
-const commandService = new CommandService({ ptyManager, auditStore });
+const commandService = new CommandService({ sessionRegistry: ptyRegistry, auditStore });
 
 // ── GitHub / Docker Reader ────────────────────────────────────────────────────
 const githubReader = new GitHubReader();
@@ -202,6 +203,9 @@ const boardAggregator = new BoardAggregator();
 boardAggregator.startWatchers();
 
 // ── deps-Objekt: alle Boundaries für den Auto-Loader ─────────────────────────
+// Expose ptyManager for routers that reference it (e.g. session.js reads state/restarts/startedAt).
+// These routers operate on the global (no-project) session, which preserves backward compat.
+const ptyManager = ptyRegistry.getDefault();
 const deps = {
   auditStore,
   ptyManager,
@@ -245,7 +249,8 @@ const server = createServer(app);
 
 // ── AC1: WS upgrade interceptor (guards /ws/terminal before handshake) ────────
 const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
-new WsGateway(wss, ptyManager);
+// AC4/S-111: pass ptyRegistry (PtySessionRegistry) to WsGateway for per-project routing.
+new WsGateway(wss, ptyRegistry);
 
 const wsGuard = createWsAccessGuard(wss);
 
@@ -342,7 +347,7 @@ function buildReconcileVpsConfigs(targets, envValue) {
 function shutdown() {
   reconciliationJob.stopScheduler();
   boardAggregator.stopWatchers();
-  ptyManager.destroy();
+  ptyRegistry.destroy(); // destroy all sessions (global + project sessions)
   server.close(() => process.exit(0));
 }
 process.on('SIGTERM', shutdown);

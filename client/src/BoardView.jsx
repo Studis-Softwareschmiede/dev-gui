@@ -73,16 +73,23 @@ function computeRollup(feature) {
 // ── BoardView ─────────────────────────────────────────────────────────────────
 
 /**
- * @param {{ onNavigate: (view: string) => void }} props
+ * @param {{
+ *   onNavigate: (view: string) => void,
+ *   lockedProject?: string,
+ * }} props
+ *   lockedProject — when set, the board is pre-filtered to this project slug/repo_path
+ *   and the project-filter dropdown is hidden (AC6 Cockpit-Kontext, S-113).
  */
-export function BoardView({ onNavigate: _onNavigate }) {
+export function BoardView({ onNavigate: _onNavigate, lockedProject }) {
   // ── Data state
   const [loadState, setLoadState] = useState('idle'); // 'idle'|'loading'|'ok'|'error'
   const [loadError, setLoadError] = useState('');
   const [projects, setProjects] = useState([]);
 
   // ── Filter state (AC6)
-  const [filterProject, setFilterProject] = useState('');    // '' = alle
+  // When lockedProject is set, filterProject is initialised to it and cannot be changed
+  // by the user (the project-filter dropdown is hidden — no own selector, AC6/S-113).
+  const [filterProject, setFilterProject] = useState(lockedProject ?? '');
   const [filterStatus, setFilterStatus]   = useState(new Set()); // empty Set = alle sichtbar
   const [filterLabel, setFilterLabel]     = useState('');    // '' = alle (free-text)
 
@@ -188,6 +195,7 @@ export function BoardView({ onNavigate: _onNavigate }) {
           onProjectChange={setFilterProject}
           onStatusChange={setFilterStatus}
           onLabelChange={setFilterLabel}
+          hideProjectFilter={Boolean(lockedProject)}
         />
       )}
 
@@ -253,6 +261,7 @@ export function BoardView({ onNavigate: _onNavigate }) {
  *   onProjectChange: (v: string) => void,
  *   onStatusChange: (v: Set<string>) => void,
  *   onLabelChange: (v: string) => void,
+ *   hideProjectFilter?: boolean,
  * }} props
  */
 function FilterBar({
@@ -265,6 +274,7 @@ function FilterBar({
   onProjectChange,
   onStatusChange,
   onLabelChange,
+  hideProjectFilter = false,
 }) {
   /** Toggle a status value in the Set. */
   function handleStatusToggle(status) {
@@ -277,26 +287,32 @@ function FilterBar({
     onStatusChange(next);
   }
 
-  const anyFilterActive = filterProject || filterStatus.size > 0 || filterLabel;
+  // When lockedProject is active, only status/label filters count toward "any filter active"
+  // (project filter is locked, not something the user can reset).
+  const anyFilterActive = (!hideProjectFilter && filterProject) || filterStatus.size > 0 || filterLabel;
 
   return (
     <div style={styles.filterBar} role="search" aria-label="Board-Filter">
-      {/* Projekt filter */}
-      <label style={styles.filterLabel} htmlFor="board-filter-project">
-        Projekt
-      </label>
-      <select
-        id="board-filter-project"
-        style={styles.filterSelect}
-        value={filterProject}
-        onChange={(e) => onProjectChange(e.target.value)}
-        aria-label="Nach Projekt filtern"
-      >
-        <option value="">Alle Projekte</option>
-        {projects.map((p) => (
-          <option key={p} value={p}>{p}</option>
-        ))}
-      </select>
+      {/* Projekt filter — hidden when board is embedded in Cockpit with locked project (AC6/S-113) */}
+      {!hideProjectFilter && (
+        <>
+          <label style={styles.filterLabel} htmlFor="board-filter-project">
+            Projekt
+          </label>
+          <select
+            id="board-filter-project"
+            style={styles.filterSelect}
+            value={filterProject}
+            onChange={(e) => onProjectChange(e.target.value)}
+            aria-label="Nach Projekt filtern"
+          >
+            <option value="">Alle Projekte</option>
+            {projects.map((p) => (
+              <option key={p} value={p}>{p}</option>
+            ))}
+          </select>
+        </>
+      )}
 
       {/* Status filter — Mehrfachauswahl per Checkbox-Gruppe (AC6) */}
       <fieldset style={styles.filterFieldset} id="board-filter-status-group" aria-label="Nach Status filtern">
