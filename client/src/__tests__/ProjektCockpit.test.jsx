@@ -10,7 +10,6 @@
  *          parseHashFull parst #/factory/<repo> korrekt.
  *   AC3 — CockpitView zeigt Reiter-Leiste Arbeiten/Studis-Kanban-Board/Spezifikation;
  *          „Arbeiten" zeigt Terminal (FactoryWorkspace);
- *          „Studis-Kanban-Board" und „Spezifikation" sind Platzhalter mit „folgt";
  *          Reiter-Umschaltung wechselt Panel.
  *   AC4 — Terminal-WS-URL enthält ?project=<encoded-activeRepo> (S-111);
  *          buildTerminalWsUrl gibt absolute WS-URL zurück.
@@ -22,7 +21,13 @@
  *   AC1 — CockpitView-Reiter trägt label „Studis-Kanban-Board" statt „Board"
  *          (getestet per tab-name-Assertion).
  *
- * Terminal, Dashboard, TriggerPanel gemockt (WS/DOM-Komplexität vermeiden).
+ * Covers (projekt-spezifikation-anzeige):
+ *   AC4 — Spezifikation-Reiter eingebettet (SpecView gemockt; Volltest in SpecView.test.jsx);
+ *          CockpitView übergibt onOpenSpec-Callback an BoardView (AC5).
+ *   AC5 — AccessGuard-Verdrahtung: per server.js-Inspektion, kein separater Middleware-Test.
+ *          AC5 (nicht unit-testbar ohne echte SpecView) — dokumentiert im Covers-Block.
+ *
+ * Terminal, Dashboard, TriggerPanel, BoardView, SpecView gemockt (WS/DOM-Komplexität vermeiden).
  *
  * @jest-environment jsdom
  */
@@ -50,14 +55,32 @@ jest.unstable_mockModule('../TriggerPanel.jsx', () => ({
 // Mock BoardView — AC6/S-113: board tab embeds BoardView.
 // Rendered as a recognizable stub (main[aria-label="Studis-Kanban-Board"]) without
 // triggering real fetch calls, matching the real component's landmark (AC1/studis-kanban-board-ux).
+// The stub records the onOpenSpec prop for AC5 assertions.
+let _boardLastOnOpenSpec = null;
 jest.unstable_mockModule('../BoardView.jsx', async () => {
   const R = (await import('react')).default;
   return {
-    BoardView: ({ lockedProject }) =>
-      R.createElement(
+    BoardView: ({ lockedProject, onOpenSpec }) => {
+      _boardLastOnOpenSpec = onOpenSpec ?? null;
+      return R.createElement(
         'main',
         { 'aria-label': 'Studis-Kanban-Board', 'data-locked-project': lockedProject ?? '' },
         `Studis-Kanban-Board für Projekt: ${lockedProject ?? '—'}`,
+      );
+    },
+  };
+});
+
+// Mock SpecView — AC4 (projekt-spezifikation-anzeige): Spezifikation-Reiter bettet SpecView ein.
+// Rendered as recognizable stub without triggering real fetch calls.
+jest.unstable_mockModule('../SpecView.jsx', async () => {
+  const R = (await import('react')).default;
+  return {
+    SpecView: ({ projectSlug, initialPath }) =>
+      R.createElement(
+        'div',
+        { 'data-testid': 'spec-view-stub', 'data-project-slug': projectSlug ?? '' },
+        `Spezifikation für: ${projectSlug ?? '—'}${initialPath ? ` / ${initialPath}` : ''}`,
       ),
   };
 });
@@ -526,7 +549,7 @@ describe('CockpitView — AC3: Reiter-Leiste und Reiter-Umschaltung', () => {
     });
   });
 
-  it('Spezifikation-Platzhalter enthält "folgt"-Hinweis', async () => {
+  it('Spezifikation-Reiter bettet SpecView ein (AC4 — projekt-spezifikation-anzeige)', async () => {
     const { getByRole } = render(
       React.createElement(CockpitView, {
         activeRepo: 'dev-gui',
@@ -541,7 +564,8 @@ describe('CockpitView — AC3: Reiter-Leiste und Reiter-Umschaltung', () => {
 
     await waitFor(() => {
       const panel = getByRole('tabpanel', { name: /spezifikation/i });
-      expect(panel.textContent).toMatch(/folgt/i);
+      // SpecView-Stub rendert "Spezifikation für: dev-gui"
+      expect(panel.textContent).toMatch(/Spezifikation für: dev-gui/);
     });
   });
 
@@ -605,6 +629,37 @@ describe('CockpitView — AC3: Reiter-Leiste und Reiter-Umschaltung', () => {
 // ── AC6/S-113 — Board-Reiter Projekt-Kontext ─────────────────────────────────
 
 describe('CockpitView — AC6/S-113: Board-Reiter zeigt aktives Projekt (kein eigener Selektor)', () => {
+  it('BoardView erhält onOpenSpec-Callback (AC5 — projekt-spezifikation-anzeige)', async () => {
+    _boardLastOnOpenSpec = null;
+    const { getByRole } = render(
+      React.createElement(CockpitView, {
+        activeRepo: 'dev-gui',
+        navigateFactory: jest.fn(),
+        onNavigate: jest.fn(),
+      })
+    );
+
+    await act(async () => {
+      fireEvent.click(getByRole('tab', { name: /^studis-kanban-board$/i }));
+    });
+
+    await waitFor(() => {
+      // BoardView-Mock speichert onOpenSpec beim Render
+      expect(typeof _boardLastOnOpenSpec).toBe('function');
+    });
+
+    // Aufruf des Callbacks wechselt zum Spezifikation-Reiter
+    await act(async () => {
+      _boardLastOnOpenSpec('docs/specs/foo.md');
+    });
+
+    await waitFor(() => {
+      // Spezifikation-Panel sichtbar mit initialPath-Stub
+      const panel = getByRole('tabpanel', { name: /spezifikation/i });
+      expect(panel.textContent).toMatch(/docs\/specs\/foo\.md/);
+    });
+  });
+
   it('BoardView erhält lockedProject=activeRepo (kein eigener Projekt-Selektor)', async () => {
     const { getByRole } = render(
       React.createElement(CockpitView, {
@@ -642,7 +697,7 @@ describe('CockpitView — AC6/S-113: Board-Reiter zeigt aktives Projekt (kein ei
     expect(_terminalLastWsUrl).toContain(encodeURIComponent('/home/user/agent-flow'));
   });
 
-  it('Spezifikation-Reiter zeigt "folgt mit F-004"-Hinweis', async () => {
+  it('Spezifikation-Reiter zeigt SpecView mit projectSlug (AC4 — projekt-spezifikation-anzeige)', async () => {
     const { getByRole } = render(
       React.createElement(CockpitView, {
         activeRepo: 'dev-gui',
@@ -657,7 +712,10 @@ describe('CockpitView — AC6/S-113: Board-Reiter zeigt aktives Projekt (kein ei
 
     await waitFor(() => {
       const panel = getByRole('tabpanel', { name: /spezifikation/i });
-      expect(panel.textContent).toMatch(/folgt mit F-004/i);
+      // SpecView-Stub rendert projectSlug als data-attribute und im Text
+      const stub = panel.querySelector('[data-testid="spec-view-stub"]');
+      expect(stub).not.toBeNull();
+      expect(stub.getAttribute('data-project-slug')).toBe('dev-gui');
     });
   });
 });

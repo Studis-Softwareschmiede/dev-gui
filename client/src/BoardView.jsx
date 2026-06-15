@@ -37,7 +37,11 @@
  *   - Nur /api/board/* Endpunkte (hinter AccessGuard).
  *   - Keine Secrets im Bundle.
  *
- * @param {{ onNavigate: (view: string) => void, lockedProject?: string }} props
+ * @param {{
+ *   onNavigate: (view: string) => void,
+ *   lockedProject?: string,
+ *   onOpenSpec?: (relPath: string) => void,
+ * }} props
  */
 
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
@@ -92,7 +96,7 @@ function computeRollup(feature) {
  *   without project list; project-filter dropdown is hidden (AC6/studis-kanban-board-ux).
  *   When absent (STANDALONE #/board), shows project list first — lazy-load mode (AC6).
  */
-export function BoardView({ onNavigate: _onNavigate, lockedProject }) {
+export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }) {
   // ─── Mode: standalone (lazy) vs cockpit (lockedProject set) ─────────────────
   const isStandalone = !lockedProject;
 
@@ -391,6 +395,7 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject }) {
                 <ProjectSection
                   key={project.slug ?? project.repo_path ?? project.project_slug}
                   project={project}
+                  onOpenSpec={onOpenSpec}
                 />
               ))}
               {filteredProjects.length === 0 && (filterProject || filterStatus.size > 0 || filterLabel) && (
@@ -462,6 +467,7 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject }) {
                 <ProjectSection
                   key={project.slug ?? project.repo_path ?? project.project_slug}
                   project={project}
+                  onOpenSpec={onOpenSpec}
                 />
               ))}
               {filteredProjects.length === 0 && (filterProject || filterStatus.size > 0 || filterLabel) && (
@@ -742,9 +748,9 @@ function ProjectListItem({ item, onSelect }) {
  * One project block: header + list of features (AC4).
  * If the project has an error, renders an error badge (AC8).
  *
- * @param {{ project: object }} props
+ * @param {{ project: object, onOpenSpec?: (relPath: string) => void }} props
  */
-function ProjectSection({ project }) {
+function ProjectSection({ project, onOpenSpec }) {
   const slug = project.slug || project.project_slug || project.repo_path || '?';
 
   return (
@@ -778,6 +784,7 @@ function ProjectSection({ project }) {
         <FeatureRow
           key={feature.id}
           feature={feature}
+          onOpenSpec={onOpenSpec}
         />
       ))}
     </section>
@@ -790,9 +797,9 @@ function ProjectSection({ project }) {
  * One feature row: title, rollup bar (AC5), then stories in status columns (AC4).
  * Klick auf den Feature-Titel öffnet/schliesst das Detail-Panel (goal, DoD, …).
  *
- * @param {{ feature: object }} props
+ * @param {{ feature: object, onOpenSpec?: (relPath: string) => void }} props
  */
-function FeatureRow({ feature }) {
+function FeatureRow({ feature, onOpenSpec }) {
   const [detailOpen, setDetailOpen] = useState(false);
   const rollup = computeRollup(feature);
   const stories = Array.isArray(feature.stories) ? feature.stories : [];
@@ -867,6 +874,7 @@ function FeatureRow({ feature }) {
               key={status}
               status={status}
               stories={byStatus[status]}
+              onOpenSpec={onOpenSpec}
             />
           ))}
         </div>
@@ -983,9 +991,9 @@ function RollupBar({ done, total }) {
  * One status column with a header label and list of StoryCards.
  * Always rendered (even when empty) so the grid is consistent (AC4).
  *
- * @param {{ status: string, stories: object[] }} props
+ * @param {{ status: string, stories: object[], onOpenSpec?: (relPath: string) => void }} props
  */
-function StatusColumn({ status, stories }) {
+function StatusColumn({ status, stories, onOpenSpec }) {
   return (
     <div
       role="listitem"
@@ -1003,7 +1011,7 @@ function StatusColumn({ status, stories }) {
       </div>
 
       {stories.map((story) => (
-        <StoryCard key={story.id} story={story} />
+        <StoryCard key={story.id} story={story} onOpenSpec={onOpenSpec} />
       ))}
     </div>
   );
@@ -1013,10 +1021,12 @@ function StatusColumn({ status, stories }) {
 
 /**
  * Story card: id, title, priority, labels, spec link (AC3 model fields).
+ * AC5 — Spec-Bezug ist klickbar (wenn onOpenSpec vorhanden): öffnet Spec im
+ *        Spezifikation-Reiter. story.spec enthält den relativen Pfad (z.B. docs/specs/foo.md).
  *
- * @param {{ story: object }} props
+ * @param {{ story: object, onOpenSpec?: (relPath: string) => void }} props
  */
-function StoryCard({ story }) {
+function StoryCard({ story, onOpenSpec }) {
   return (
     <article
       style={styles.storyCard}
@@ -1047,11 +1057,23 @@ function StoryCard({ story }) {
         </div>
       )}
 
-      {/* Spec reference */}
+      {/* Spec reference (AC5 — klickbar wenn onOpenSpec vorhanden) */}
       {story.spec && (
         <div style={styles.specRef} aria-label="Spec">
           <span style={styles.specLabel}>Spec: </span>
-          <span style={styles.specValue}>{story.spec}</span>
+          {onOpenSpec ? (
+            <button
+              type="button"
+              style={styles.specLink}
+              onClick={() => onOpenSpec(story.spec)}
+              aria-label={`Spec öffnen: ${story.spec}`}
+              data-testid={`spec-link-${story.id}`}
+            >
+              {story.spec}
+            </button>
+          ) : (
+            <span style={styles.specValue}>{story.spec}</span>
+          )}
         </div>
       )}
     </article>
@@ -1551,6 +1573,22 @@ const styles = {
     overflow: 'hidden',
     textOverflow: 'ellipsis',
     whiteSpace: 'nowrap',
+  },
+  // AC5: klickbarer Spec-Link (Button-Reset-Stil, aber sichtbar klickbar)
+  specLink: {
+    fontSize: 10,
+    color: '#93c5fd',
+    fontFamily: 'monospace',
+    background: 'transparent',
+    border: 'none',
+    padding: 0,
+    cursor: 'pointer',
+    textDecoration: 'underline',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+    minHeight: 44, // Touch-Target ≥ 44 px (WCAG 2.1 AA / design.md)
+    // Focus ring preserved (no outline:none)
   },
 
   // ── Status badge (text label — not only colour)
