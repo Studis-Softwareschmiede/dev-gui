@@ -181,6 +181,10 @@ services:
       # POST /api/github/repos/clone klont. Der Host-Ordner wird unten als
       # Volume gemountet (WORKSPACE_HOST_DIR) — muss uid-1000-schreibbar sein.
       WORKSPACE_DIR: /workspace
+      # Host-Pfad des Workspace-Mounts — rein informativ für Setup-Anleitungen (AC5 workspace-health-hinweis).
+      # Auf dem VPS explizit setzen; ohne Setzung erscheint Platzhalter in der Setup-Anleitung.
+      # Muss mit dem Volume-Mount unten übereinstimmen.
+      WORKSPACE_HOST_DIR: ${WORKSPACE_HOST_DIR:-}
 
     volumes:
       # Claude OAuth credentials + agent-flow plugin cache (persisted across

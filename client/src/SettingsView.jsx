@@ -258,6 +258,18 @@ async function deleteWorkspacePath(fetchImpl) {
   return data;
 }
 
+/**
+ * GET /api/settings/workspace-health
+ * @param {typeof fetch} [fetchImpl]
+ * @returns {Promise<{ overall: string, checks: Array, counts: { repos: number, boardProjects: number } }>}
+ */
+async function fetchWorkspaceHealth(fetchImpl) {
+  const fn = fetchImpl ?? globalThis.fetch.bind(globalThis);
+  const res = await fn('/api/settings/workspace-health');
+  if (!res.ok) throw new Error(`Workspace-Health laden fehlgeschlagen (${res.status})`);
+  return res.json();
+}
+
 // ── SSH-Key-API-Helfer ────────────────────────────────────────────────────────
 
 async function fetchSshKeys() {
@@ -389,6 +401,7 @@ async function exportAndDownloadPrivateKey(user) {
  *
  * WS-AC1: Anzeige wirksamer Pfad + Quelle; Setzen/Ändern/Zurücksetzen.
  * WS-AC3 (UI): 4xx/422 → feldzugeordnete Fehlermeldung; alter Wert bleibt sichtbar.
+ * AC3 (workspace-health-hinweis): Health-Status-Block; grün bei ok, hervorgehoben bei warn/error.
  * A11y: label/htmlFor, aria-describedby, role=status/alert, aria-busy, Fokusführung.
  *
  * @param {{
@@ -397,9 +410,10 @@ async function exportAndDownloadPrivateKey(user) {
  *   mountRoot: string,
  *   onReload: () => Promise<void>,
  *   fetchFn?: typeof fetch,
+ *   health?: { overall: string, checks: Array, counts: { repos: number, boardProjects: number } }|null,
  * }} props
  */
-function WorkspacePathSection({ effectivePath, source, mountRoot, onReload, fetchFn }) {
+function WorkspacePathSection({ effectivePath, source, mountRoot, onReload, fetchFn, health }) {
   const [editing, setEditing] = useState(false);
   const [inputVal, setInputVal] = useState('');
   const [saving, setSaving] = useState(false);
@@ -498,6 +512,40 @@ function WorkspacePathSection({ effectivePath, source, mountRoot, onReload, fetc
           </span>
         )}
       </div>
+
+      {/* AC3 (workspace-health-hinweis): Health-Status-Block */}
+      {health && typeof health.overall === 'string' && health.overall === 'ok' && (
+        <div style={healthStyles.ok} role="status" aria-live="polite">
+          <span style={healthStyles.okIcon} aria-hidden="true">✓</span>
+          {' '}Workspace korrekt konfiguriert — {health.counts.repos} Repo(s), {health.counts.boardProjects} Board-Projekt(e)
+        </div>
+      )}
+      {health && typeof health.overall === 'string' && health.overall !== 'ok' && Array.isArray(health.checks) && (
+        <div
+          style={health.overall === 'error' ? healthStyles.error : healthStyles.warn}
+          role={health.overall === 'error' ? 'alert' : 'status'}
+          aria-live={health.overall === 'error' ? 'assertive' : 'polite'}
+        >
+          <p style={healthStyles.alertTitle}>
+            {health.overall === 'error' ? 'Workspace-Fehlkonfiguration erkannt' : 'Workspace-Hinweis'}
+          </p>
+          <ul style={healthStyles.checkList} aria-label="Health-Checks">
+            {health.checks.filter((c) => c.status !== 'ok').map((c) => (
+              <li key={c.key} style={healthStyles.checkItem}>
+                <span style={c.status === 'error' ? healthStyles.checkIconError : healthStyles.checkIconWarn} aria-hidden="true">
+                  {c.status === 'error' ? '✗' : '⚠'}
+                </span>
+                {' '}<strong>{c.key}:</strong> {c.message}
+                {c.fix && (
+                  <span style={healthStyles.fixHint}>
+                    {' → '}{c.fix}
+                  </span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {/* Erfolgs-Feedback */}
       {successMsg && (
@@ -2513,6 +2561,8 @@ export function SettingsView({ onNavigate, fetchFn }) {
   // WS-AC1 (#92): workspace path state
   const [workspacePath, setWorkspacePath] = useState(null);
   const [workspacePathError, setWorkspacePathError] = useState(null);
+  // AC3 (workspace-health-hinweis): health state
+  const [workspaceHealth, setWorkspaceHealth] = useState(null);
   // credential-unlock-dialog #185: Bitwarden-Unlock-Status + Dialog
   const [credentialStatus, setCredentialStatus] = useState(null); // null = noch nicht geladen
   const [showUnlockDialog, setShowUnlockDialog] = useState(false);
@@ -2561,11 +2611,25 @@ export function SettingsView({ onNavigate, fetchFn }) {
     }
   }, [fetchFn]);
 
+  /**
+   * AC3 (workspace-health-hinweis): Fetches health status and updates state.
+   * Silenced on error (health block simply stays hidden if endpoint not available).
+   */
+  const reloadWorkspaceHealth = useCallback(async () => {
+    try {
+      const data = await fetchWorkspaceHealth(fetchFn);
+      setWorkspaceHealth(data);
+    } catch {
+      // Non-critical: health block stays absent on error (no crash, no error message)
+    }
+  }, [fetchFn]);
+
   useEffect(() => {
     load();
     reloadWorkspacePath();
+    reloadWorkspaceHealth();
     reloadCredentialStatus();
-  }, [load, reloadWorkspacePath, reloadCredentialStatus]);
+  }, [load, reloadWorkspacePath, reloadWorkspaceHealth, reloadCredentialStatus]);
 
   /** Hilfsfunktion: Metadaten eines bestimmten Felds aus der Liste. */
   const getMeta = useCallback((integration, name) => {
@@ -2667,8 +2731,9 @@ export function SettingsView({ onNavigate, fetchFn }) {
                 effectivePath={workspacePath.effectivePath}
                 source={workspacePath.source}
                 mountRoot={workspacePath.mountRoot}
-                onReload={reloadWorkspacePath}
+                onReload={async () => { await reloadWorkspacePath(); await reloadWorkspaceHealth(); }}
                 fetchFn={fetchFn}
+                health={workspaceHealth}
               />
             )}
           </div>
@@ -3209,6 +3274,73 @@ const wsPathStyles = {
     fontSize: 13,
     cursor: 'pointer',
     minHeight: 44,
+  },
+};
+
+// ── Health-Status-Block styles (workspace-health-hinweis AC3) ────────────────
+
+/** Styles für den Workspace-Health-Status-Block in WorkspacePathSection. */
+const healthStyles = {
+  ok: {
+    marginTop: 10,
+    padding: '8px 12px',
+    background: '#052e16',
+    border: '1px solid #166534',
+    borderRadius: 4,
+    color: '#86efac',   // Grün, Kontrast auf #052e16 ≥ 4.5:1
+    fontSize: 13,
+    lineHeight: 1.5,
+  },
+  okIcon: {
+    fontWeight: 700,
+  },
+  warn: {
+    marginTop: 10,
+    padding: '10px 14px',
+    background: '#1c1200',
+    border: '1px solid #854d0e',
+    borderRadius: 4,
+    color: '#fef08a',   // Gelb, Kontrast auf #1c1200 ≥ 4.5:1
+    fontSize: 13,
+  },
+  error: {
+    marginTop: 10,
+    padding: '10px 14px',
+    background: '#2d0f0f',
+    border: '1px solid #991b1b',
+    borderRadius: 4,
+    color: '#fca5a5',   // Rot, Kontrast auf #2d0f0f ≥ 4.5:1
+    fontSize: 13,
+  },
+  alertTitle: {
+    margin: '0 0 8px',
+    fontWeight: 700,
+    fontSize: 13,
+  },
+  checkList: {
+    margin: 0,
+    padding: 0,
+    listStyle: 'none',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 6,
+  },
+  checkItem: {
+    fontSize: 13,
+    lineHeight: 1.5,
+  },
+  checkIconError: {
+    fontWeight: 700,
+    color: '#f87171',
+  },
+  checkIconWarn: {
+    fontWeight: 700,
+    color: '#fbbf24',
+  },
+  fixHint: {
+    fontSize: 12,
+    color: '#d4d4d4',
+    fontStyle: 'italic',
   },
 };
 

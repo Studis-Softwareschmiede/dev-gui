@@ -27,6 +27,10 @@
  *   AC6  — Fehlerpfade (403/404/422/500/502/Netzwerk) klar dargestellt ohne Secret;
  *           während Klonens: Button disabled/Loading-State (Mehrfachklick-Schutz).
  *
+ * workspace-health-hinweis (AC5 — Frontend-Anteil):
+ *   AC5  — Schreibfehler beim Klonen → Setup-Anleitung als monospaced Code-Block
+ *           mit „Kopieren"-Knopf (ganzer Block) + setup.message als Erklärung.
+ *
  * workspace-repos (AC6, AC9 — Frontend-Anteil, #68):
  *   AC9  — Workspace-Übersicht unterhalb der Org-Repo-Liste: pro Klon Name, Branch,
  *           clean/dirty-Status, letzter Commit, credential-freie origin-URL, Aktionen Pull + Löschen.
@@ -188,7 +192,8 @@ async function deleteWorkspaceRepo(body, fetchImpl) {
  * @param {{ repo: string, force?: boolean }} body
  * @param {typeof fetch} [fetchImpl]
  * @returns {Promise<{ repo: string, status: string, path: string }>}
- * @throws {Error} mit `.status` (HTTP-Statuscode), `.message` und optional `.alreadyPresent` + `.path`
+ * @throws {Error} mit `.status` (HTTP-Statuscode), `.message`, optional `.alreadyPresent` + `.path`,
+ *                 und optional `.setup` (AC5 workspace-write-error Setup-Anleitung)
  */
 async function cloneRepo(body, fetchImpl) {
   const fn = fetchImpl ?? globalThis.fetch.bind(globalThis);
@@ -209,9 +214,62 @@ async function cloneRepo(body, fetchImpl) {
   if (!res.ok) {
     const err = new Error(data.error ?? `Klonen fehlgeschlagen (${res.status})`);
     err.status = res.status;
+    // AC5: Wenn Backend eine Setup-Anleitung liefert, am Fehler anhängen
+    if (data.setup && typeof data.setup === 'object') {
+      err.setup = data.setup;
+    }
     throw err;
   }
   return data;
+}
+
+// ── SetupCommandsBlock ────────────────────────────────────────────────────────
+
+/**
+ * Monospaced Code-Block mit Kopieren-Knopf für Setup-Befehle (AC5 workspace-health-hinweis).
+ *
+ * Zeigt setup.message als Erklärung und setup.commands als kopierbaren Code-Block.
+ * A11y: Kopier-Knopf min-height 44px; aria-label erklärt die Aktion.
+ *
+ * @param {{ setup: { message: string, hostPath: string, commands: string[] } }} props
+ */
+function SetupCommandsBlock({ setup }) {
+  const [copied, setCopied] = useState(false);
+
+  if (!setup || !Array.isArray(setup.commands) || setup.commands.length === 0) return null;
+
+  const commandsText = setup.commands.join('\n');
+
+  const handleCopy = async () => {
+    try {
+      await globalThis.navigator.clipboard.writeText(commandsText);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard nicht verfügbar — kein Crash, Button bleibt sichtbar
+    }
+  };
+
+  return (
+    <div style={setupStyles.wrapper}>
+      {setup.message && (
+        <p style={setupStyles.message}>{setup.message}</p>
+      )}
+      <div style={setupStyles.codeRow}>
+        <pre style={setupStyles.codeBlock} aria-label="Ausführbare Host-Befehle">
+          {commandsText}
+        </pre>
+        <button
+          type="button"
+          style={setupStyles.copyBtn}
+          onClick={handleCopy}
+          aria-label={copied ? 'Befehle kopiert' : 'Befehle in Zwischenablage kopieren'}
+        >
+          {copied ? 'Kopiert!' : 'Kopieren'}
+        </button>
+      </div>
+    </div>
+  );
 }
 
 // ── CiBadge ──────────────────────────────────────────────────────────────────
@@ -257,6 +315,8 @@ function RepoRow({ repo, fetchFn, isLocal = false, onCloneSuccess }) {
   const [cloneState, setCloneState]   = useState('idle');
   const [clonePath, setClonePath]     = useState(null);   // path on success / alreadyPresent
   const [cloneError, setCloneError]   = useState(null);   // error message string
+  // AC5: Setup-Anleitung bei Workspace-Schreibfehler
+  const [cloneSetup, setCloneSetup]   = useState(null);   // { message, hostPath, commands } | null
 
   // Ref to the status/alert region for focus management (lessons: activeElement assertion)
   const statusRef = useRef(null);
@@ -284,6 +344,7 @@ function RepoRow({ repo, fetchFn, isLocal = false, onCloneSuccess }) {
     setCloneState('cloning');
     setCloneError(null);
     setClonePath(null);
+    setCloneSetup(null);
 
     try {
       const data = await cloneRepo({ repo: name, ...(force ? { force: true } : {}) }, fetchFn);
@@ -299,6 +360,10 @@ function RepoRow({ repo, fetchFn, isLocal = false, onCloneSuccess }) {
       } else {
         // AC6: alle anderen Fehler klar darstellen (error-Text vom Backend, kein Secret)
         setCloneError(err.message ?? 'Klonen fehlgeschlagen');
+        // AC5: Setup-Anleitung wenn Workspace-Schreibfehler
+        if (err.setup && typeof err.setup === 'object') {
+          setCloneSetup(err.setup);
+        }
         setCloneState('error');
       }
     }
@@ -312,6 +377,7 @@ function RepoRow({ repo, fetchFn, isLocal = false, onCloneSuccess }) {
     setCloneState('idle');
     setCloneError(null);
     setClonePath(null);
+    setCloneSetup(null);
   }, []);
 
   const isCloning = cloneState === 'cloning';
@@ -460,15 +526,19 @@ function RepoRow({ repo, fetchFn, isLocal = false, onCloneSuccess }) {
 
           {/* Fehler (AC6) — role=alert für sofortige A11y-Ankündigung */}
           {cloneState === 'error' && (
-            <p
+            <div
               ref={statusRef}
               id={cloneErrorId}
               role="alert"
               tabIndex={-1}
               style={styles.cloneError}
             >
-              {cloneError}
-            </p>
+              <p style={{ margin: '0 0 4px' }}>{cloneError}</p>
+              {/* AC5: Setup-Anleitung bei Workspace-Schreibfehler (kopierbar) */}
+              {cloneSetup && (
+                <SetupCommandsBlock setup={cloneSetup} />
+              )}
+            </div>
           )}
         </div>
       </td>
@@ -1867,6 +1937,58 @@ const styles = {
     fontWeight: 600,
     cursor: 'pointer',
     minHeight: 44,
+  },
+};
+
+// ── SetupCommandsBlock styles (workspace-health-hinweis AC5) ─────────────────
+
+const setupStyles = {
+  wrapper: {
+    marginTop: 10,
+    padding: '10px 12px',
+    background: '#0d1117',
+    border: '1px solid #374151',
+    borderRadius: 4,
+    fontSize: 12,
+  },
+  message: {
+    margin: '0 0 8px',
+    color: '#d4d4d4',
+    fontSize: 12,
+    lineHeight: 1.5,
+  },
+  codeRow: {
+    display: 'flex',
+    alignItems: 'flex-start',
+    gap: 8,
+  },
+  codeBlock: {
+    flex: 1,
+    margin: 0,
+    padding: '8px 10px',
+    background: '#161b22',
+    border: '1px solid #30363d',
+    borderRadius: 4,
+    fontFamily: 'monospace',
+    fontSize: 12,
+    color: '#e6edf3',
+    whiteSpace: 'pre',
+    overflowX: 'auto',
+    lineHeight: 1.6,
+  },
+  copyBtn: {
+    flexShrink: 0,
+    padding: '6px 14px',
+    background: '#21262d',
+    color: '#c9d1d9',           // Kontrast auf #21262d ≥ 4.5:1
+    border: '1px solid #30363d',
+    borderRadius: 4,
+    fontSize: 12,
+    cursor: 'pointer',
+    minHeight: 44,
+    minWidth: 80,
+    fontWeight: 500,
+    alignSelf: 'center',
   },
 };
 

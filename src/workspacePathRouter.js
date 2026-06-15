@@ -1,10 +1,14 @@
 /**
- * workspacePathRouter — Express-Router für Workspace-Pfad-Konfiguration (workspace-path-config AC2–AC9).
+ * workspacePathRouter — Express-Router für Workspace-Pfad-Konfiguration (workspace-path-config AC2–AC9)
+ *                       + Workspace-Health-Diagnose (workspace-health-hinweis AC1/AC2).
  *
  * Routes (alle hinter AccessGuard in server.js):
  *   GET    /api/settings/workspace-path
  *     → 200 { effectivePath: string|null, source: "configured"|"env-default", mountRoot: string }
  *       Read-only; hinter Access-Mauer, kein zusätzlicher Rollencheck.
+ *   GET    /api/settings/workspace-health
+ *     → 200 { overall: 'ok'|'warn'|'error', checks: [...], counts: { repos, boardProjects } }
+ *       Read-only; hinter AccessGuard, kein zusätzlicher Rollencheck (analog GET workspace-path).
  *   PUT    /api/settings/workspace-path
  *     → 200 { effectivePath, source: "configured" }     — Erfolg
  *     → 422 { error }                                   — Validierungsfehler (AC2/AC3)
@@ -28,6 +32,7 @@
 
 import { Router } from 'express';
 import { validateWorkspacePath, WorkspacePathError } from './workspacePath.js';
+import { WorkspaceHealthChecker } from './WorkspaceHealthChecker.js';
 
 /**
  * Prüft ob die anfragende Identität mutieren darf (AC8 / ADR-007 OA3).
@@ -57,10 +62,12 @@ function checkMutationAuthz(identity) {
  * @param {import('./AuditStore.js').AuditStore} auditStore
  * @param {object} [deps]  Injectable dependencies für Tests.
  * @param {Function} [deps.validatePath]  Override für validateWorkspacePath (für Tests).
+ * @param {WorkspaceHealthChecker} [deps.healthChecker]  Override für WorkspaceHealthChecker (für Tests).
  * @returns {import('express').Router}
  */
 export function workspacePathRouter(credentialStore, auditStore, deps = {}) {
   const _validatePath = deps.validatePath ?? validateWorkspacePath;
+  const _healthChecker = deps.healthChecker ?? new WorkspaceHealthChecker();
   const router = Router();
 
   /**
@@ -91,6 +98,23 @@ export function workspacePathRouter(credentialStore, auditStore, deps = {}) {
     } catch (err) {
       console.error('[workspacePathRouter] GET failed:', err.message);
       return res.status(500).json({ error: 'Workspace-Pfad-Konfiguration nicht erreichbar' });
+    }
+  });
+
+  /**
+   * GET /api/settings/workspace-health
+   * Read-only Workspace+Board-Konfigurations-Diagnose (AC1/AC2 workspace-health-hinweis).
+   * Hinter AccessGuard (server.js), kein zusätzlicher Rollencheck (analog GET workspace-path).
+   *
+   * Response: 200 { overall: 'ok'|'warn'|'error', checks: [...], counts: { repos, boardProjects } }
+   */
+  router.get('/api/settings/workspace-health', async (_req, res) => {
+    try {
+      const result = await _healthChecker.check();
+      return res.json(result);
+    } catch (err) {
+      console.error('[workspacePathRouter] GET workspace-health unexpected error:', err.message);
+      return res.status(500).json({ error: 'Workspace-Health konnte nicht abgerufen werden' });
     }
   });
 

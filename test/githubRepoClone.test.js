@@ -748,6 +748,42 @@ describe('githubRepoCloneRouter — AC7: Error status codes', () => {
     expect(res.body).not.toContain('ghs_');
   });
 
+  it('AC5 — workspace-not-writable with .setup → 500, response contains setup.commands (Array) + setup.hostPath (string)', async () => {
+    const setupPayload = {
+      message: 'Workspace-Verzeichnis nicht schreibbar. Führe folgende Befehle auf dem Host aus:',
+      hostPath: '/host/workspace',
+      commands: ['sudo mkdir -p /host/workspace', 'sudo chown -R 1000:1000 /host/workspace'],
+    };
+    const clonerErr = new GitHubClonerError('Workspace nicht schreibbar', 'workspace-not-writable');
+    clonerErr.setup = setupPayload;
+    const cloner = makeMockCloner({ shouldThrow: clonerErr });
+    testServer = await makeTestServer({ cloner });
+
+    const res = await testServer.req('POST', '/api/github/repos/clone', { repo: 'my-repo' });
+    expect(res.status).toBe(500);
+    const body = JSON.parse(res.body);
+    expect(Array.isArray(body.setup.commands)).toBe(true);
+    expect(typeof body.setup.hostPath).toBe('string');
+  });
+
+  it('AC5 — clone-failed with .setup → 502, response contains setup.commands (Array) + setup.hostPath (string)', async () => {
+    const setupPayload = {
+      message: 'Klonen fehlgeschlagen. Führe folgende Befehle auf dem Host aus:',
+      hostPath: '<dein-host-workspace-pfad>',
+      commands: ['sudo mkdir -p <dein-host-workspace-pfad>', 'sudo chown -R 1000:1000 <dein-host-workspace-pfad>'],
+    };
+    const clonerErr = new GitHubClonerError('git clone fehlgeschlagen: EACCES', 'clone-failed');
+    clonerErr.setup = setupPayload;
+    const cloner = makeMockCloner({ shouldThrow: clonerErr });
+    testServer = await makeTestServer({ cloner });
+
+    const res = await testServer.req('POST', '/api/github/repos/clone', { repo: 'my-repo' });
+    expect(res.status).toBe(502);
+    const body = JSON.parse(res.body);
+    expect(Array.isArray(body.setup.commands)).toBe(true);
+    expect(typeof body.setup.hostPath).toBe('string');
+  });
+
   it('Regression-I1 — unexpected (non-GitHubClonerError) exception from cloner → 502 (not 500)', async () => {
     // GitHubCloner.#mintInstallationToken fallback: before fix, re-wrapped unexpected errors
     // as 'credential-store-missing' → HTTP 500. After fix, re-throws so router default → 502.
