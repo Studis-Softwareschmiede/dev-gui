@@ -1,7 +1,7 @@
 ---
 id: studis-kanban-board-ux
 title: Studis-Kanban-Board — UX-Verbesserungen (Default-Filter, Filter-Dropdown, Lazy-Load, Umbenennung)
-status: draft
+status: active
 version: 1
 ---
 
