@@ -255,6 +255,90 @@ export class ProjectPathError extends Error {
   }
 }
 
+// ── Slug-Resolver ─────────────────────────────────────────────────────────────
+
+/**
+ * Resolve a client-supplied project slug to an absolute path within WORKSPACE_DIR.
+ *
+ * Design (Spec V8b / AC9 / AC10):
+ *   The frontend sends a project reference as a plain slug (repo directory name, e.g.
+ *   "dev-gui"), not an absolute path.  This single resolver translates a slug to
+ *   `WORKSPACE_DIR + '/' + slug` BEFORE validateProjectPath is called.  Both entry
+ *   paths (WsGateway ?project= and POST /api/command projectPath) use this function.
+ *
+ * Slug-form validation (security/R02 / security/R03 — pre-boundary guard):
+ *   A simple slug MUST NOT contain '/' or '..' components.  This check happens before
+ *   concatenation so that a slug like "../etc" cannot escape via naive concatenation.
+ *   The realpath-boundary in validateProjectPath is the final defence, but an explicit
+ *   slug-form check is cleaner and catches obvious abuse earlier.
+ *
+ *   Accepted slug: one or more characters that are not '/' and that do not form a '..'
+ *   or '.' path traversal token.  A slug that starts with '/' is treated as an absolute
+ *   path (not a slug) and is rejected.
+ *
+ * Global (project-less) case: pass null/undefined → null returned (caller skips validation).
+ *
+ * @param {string|null|undefined} slug  Client-supplied project slug (untrusted, from ?project= or body.projectPath).
+ * @param {object} [deps]  Injectable dependencies for tests.
+ * @param {string} [deps.mountRoot]  WORKSPACE_DIR override for tests.
+ * @returns {string|null}  Absolute path (WORKSPACE_DIR/slug) or null for empty slug.
+ * @throws {ProjectPathError} when the slug form is invalid (contains '/', starts with '/', is '.' or '..').
+ */
+export function resolveProjectSlug(slug, deps = {}) {
+  // Null/empty slug → global session (no project cwd)
+  if (slug === null || slug === undefined || (typeof slug === 'string' && slug.trim() === '')) {
+    return null;
+  }
+
+  if (typeof slug !== 'string') {
+    throw new ProjectPathError('Project slug must be a string', 'empty-path');
+  }
+
+  const trimmed = slug.trim();
+
+  // Slug-form check: must not contain any '/' (would indicate an absolute or relative path,
+  // not a simple repository name).  This prevents naive path traversal via concatenation
+  // (e.g. "../etc" or "/etc/passwd") before the slug even reaches validateProjectPath.
+  // Note: embedded '..' without a slash (e.g. 'foo..bar') is safe here because path.join /
+  // realpath in validateProjectPath evaluates it as a literal directory name, not traversal.
+  if (trimmed.includes('/')) {
+    throw new ProjectPathError(
+      `Project slug must not contain '/' — use a plain repository name`,
+      'outside-boundary',
+    );
+  }
+
+  // Reject NUL bytes: '\x00' is not stripped by trim() and causes ERR_INVALID_ARG_VALUE
+  // in downstream fs calls.  Slug-layer should classify this explicitly rather than letting
+  // it fall through to validateProjectPath as a not-exists error.
+  // Security: do NOT interpolate the raw slug into the message (NUL-byte logging risk).
+  if (trimmed.includes('\x00')) {
+    throw new ProjectPathError(
+      'Project slug must not contain null bytes',
+      'outside-boundary',
+    );
+  }
+
+  // Reject lone '.' or '..' — not valid repo names and potential traversal tokens.
+  if (trimmed === '.' || trimmed === '..') {
+    throw new ProjectPathError(
+      `Project slug '${trimmed}' is not a valid repository name`,
+      'outside-boundary',
+    );
+  }
+
+  const mountRoot = deps.mountRoot ?? process.env.WORKSPACE_DIR ?? '';
+  if (!mountRoot || !mountRoot.trim()) {
+    throw new ProjectPathError(
+      'WORKSPACE_DIR is not configured — cannot resolve project slug to a path',
+      'outside-boundary',
+    );
+  }
+
+  // Build the absolute path: WORKSPACE_DIR/slug
+  return mountRoot.trim().replace(/\/+$/, '') + '/' + trimmed;
+}
+
 /**
  * Validate a client-supplied projectPath before using it as a spawn cwd.
  *

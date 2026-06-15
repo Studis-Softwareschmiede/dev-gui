@@ -22,7 +22,7 @@
  */
 
 import { Router } from 'express';
-import { validateProjectPath, ProjectPathError } from './workspacePath.js';
+import { validateProjectPath, ProjectPathError, resolveProjectSlug } from './workspacePath.js';
 
 /**
  * Create and return the command router.
@@ -31,10 +31,14 @@ import { validateProjectPath, ProjectPathError } from './workspacePath.js';
  * @param {object} [options]
  * @param {(path: string) => Promise<{ resolvedPath: string }>} [options.pathValidator]
  *   Injectable path validator (default: validateProjectPath). Inject a stub in tests.
+ * @param {(slug: string|null, deps?: object) => string|null} [options.slugResolver]
+ *   Injectable slug-to-path resolver (default: resolveProjectSlug).
+ *   Translates a client-supplied slug to WORKSPACE_DIR/slug before boundary validation.
  * @returns {import('express').Router}
  */
 export function commandRouter(commandService, options = {}) {
   const _pathValidator = options.pathValidator ?? validateProjectPath;
+  const _slugResolver = options.slugResolver ?? resolveProjectSlug;
   const router = Router();
 
   /**
@@ -53,16 +57,36 @@ export function commandRouter(commandService, options = {}) {
     // req.identity is set by AccessGuard (or dev-bypass); may be { email } or null
     const identity = req.identity ?? null;
 
-    // Workspace-boundary validation (security/R02/R03 — Path-Traversal via spawn-cwd).
-    // Only validate when projectPath is present and non-empty; null/absent → global session.
+    // V8b: client sends projectPath as a slug (repo name), not an absolute path.
+    // Step 1: resolve slug → absolute path (null for global session).
+    // Step 2: validate the absolute path is inside WORKSPACE_DIR boundary.
     let validatedPath = projectPath ?? null;
     if (validatedPath !== null && typeof validatedPath === 'string' && validatedPath.trim() !== '') {
+      // Step 1 — Slug → absolute path (security/R02/R03: slug-form check before concatenation)
+      let resolvedSlugPath;
       try {
-        const { resolvedPath } = await _pathValidator(validatedPath);
-        validatedPath = resolvedPath;
+        resolvedSlugPath = _slugResolver(validatedPath);
       } catch (err) {
-        const reason = err instanceof ProjectPathError ? err.message : 'Invalid project path';
+        const reason = err instanceof ProjectPathError ? err.message : 'Invalid project slug';
         return res.status(400).json({ error: `Invalid projectPath: ${reason}` });
+      }
+
+      if (resolvedSlugPath === null) {
+        // Dead branch in practice: the outer guard already checks validatedPath.trim() !== ''
+        // before calling _slugResolver, and resolveProjectSlug only returns null for
+        // null/undefined/empty-string inputs — none of which reach this point.
+        // Kept as an explicit safety net in case a custom slugResolver returns null for a
+        // non-empty input (e.g. a stub in tests).
+        validatedPath = null;
+      } else {
+        // Step 2 — Boundary validation (security/R02/R03: realpath-containment)
+        try {
+          const { resolvedPath } = await _pathValidator(resolvedSlugPath);
+          validatedPath = resolvedPath;
+        } catch (err) {
+          const reason = err instanceof ProjectPathError ? err.message : 'Invalid project path';
+          return res.status(400).json({ error: `Invalid projectPath: ${reason}` });
+        }
       }
     } else {
       validatedPath = null;
