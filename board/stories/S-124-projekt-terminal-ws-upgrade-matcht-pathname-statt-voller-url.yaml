@@ -1,7 +1,8 @@
 id: S-124
 parent: F-005
-title: 'Projekt-Terminal: WS-Upgrade matcht pathname statt voller URL (socket hang up)'
-status: To Do
+title: 'Projekt-Terminal: WS-Upgrade matcht pathname statt voller URL (socket hang
+  up)'
+status: In Progress
 priority: P1
 spec: docs/specs/projekt-cockpit-navigation.md
 implements:
@@ -14,9 +15,9 @@ dispo_act: null
 dispo_forecast: null
 estimate_note: null
 confidence: null
-branch: null
+branch: feat/S-124-ws-upgrade-pathname
 pr: null
 blocked_reason: null
 created_at: '2026-06-15T00:00:00Z'
-updated_at: '2026-06-15T00:00:00Z'
+updated_at: '2026-06-15T18:49:58Z'
 done_at: null

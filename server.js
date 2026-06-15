@@ -291,7 +291,17 @@ new WsGateway(wss, ptyRegistry);
 const wsGuard = createWsAccessGuard(wss);
 
 server.on('upgrade', (req, socket, head) => {
-  if (req.url === '/ws/terminal') {
+  // AC8 (S-124): match on pathname only, not the full URL including query-string.
+  // A request to /ws/terminal?project=<x> must not be rejected before the handshake.
+  // Guard against malformed req.url: if new URL throws, fall through to destroy().
+  let pathname;
+  try {
+    pathname = new URL(req.url, 'ws://localhost').pathname;
+  } catch {
+    socket.destroy();
+    return;
+  }
+  if (pathname === '/ws/terminal') {
     wsGuard(req, socket, head);
   } else {
     socket.destroy();
