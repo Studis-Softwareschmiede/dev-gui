@@ -12,24 +12,25 @@
  *   - Bitwarden-Login-Daten erscheinen NIEMALS in Prozess-Argv (kein bw --password=...)
  *   - Passwort wird via BW_PASSWORD Env-Var an `bw` übergeben
  *   - BW_SESSION-Token wird als Env-Var weitergereicht (nie als Arg)
- *   - E-Mail-OTP-Code wird via stdin (pipe) übergeben — NICHT als Arg (AC7 bitwarden-new-device-otp)
+ *   - E-Mail-OTP-Code wird via PTY-Write übergeben — NICHT als Arg (AC7 bitwarden-new-device-otp)
  *   - Master-Key erscheint NIEMALS in Log/Audit/Response/WS/Frontend
  *   - stderr von `bw` wird NICHT in Response/Log weitergeleitet (könnte Secrets enthalten)
  *
  * New-Device-Verification (bitwarden-new-device-otp):
- *   - bw CLI 2026.5.0 unterstützt New-Device-Verification (PR #13568)
- *   - Wenn `requiresDeviceVerification`, liest `bw` den OTP-Code von stdin (via inquirer)
- *   - Erster Login-Versuch ohne emailOtp: stdin geschlossen → bw erkennt "new device verification required"
- *     in stderr → classifyBwError → 'email-otp-required'
- *   - Zweiter Versuch mit emailOtp: Code wird via stdin als Zeilenende-terminierter String übergeben
- *   - OTP-Code erscheint NIEMALS in Argv (sicherer als TOTP-Code-Ausnahme)
+ *   - bw CLI liest New-Device-OTP und 2FA via inquirer-Prompt — erfordert einen echten TTY
+ *   - Daher wird `bw login` via node-pty (Pseudo-Terminal) ausgeführt
+ *   - Der PTY-Output wird zeilenweise auf bekannte Prompt-Texte gescannt
+ *   - Bei New-Device-Prompt: emailOtp via PTY-Write übergeben (oder 'email-otp-required' melden)
+ *   - Bei 2FA/TOTP-Prompt: wird bereits via --code-Arg übergeben (bw inquirer-Prompt wird übersprungen)
+ *   - PTY-Output wird NICHT geloggt (echot Eingaben zurück → Secret-Leak-Risiko)
  *
  * Audit-First (AC8):
  *   - Vor jeder Beschaffungs-Aktion ein Audit-Eintrag (Identität, Aktion, Zeit) OHNE Werte
  *   - Schlägt der Audit-Write fehl, unterbleibt die Aktion
  *
  * Dependency-Injection (testbar ohne echtes `bw`):
- *   - `_spawnBw` kann via opts injiziert werden (Mock für Unit-Tests)
+ *   - `_spawnBw` kann via opts injiziert werden (Mock für nicht-interaktive bw-Kommandos)
+ *   - `_spawnBwPty` kann via opts injiziert werden (Mock für den interaktiven PTY-Login)
  *   - Kein echter Bitwarden-Netzwerkaufruf in Tests
  *
  * @module BitwardenMasterKeyService
@@ -42,6 +43,40 @@ const DEFAULT_ITEM_NAME = process.env.BW_ITEM_NAME ?? 'dev-gui-master-key';
 
 /** Mindest-Entropie für generierten Key (Bytes) — AC4 */
 const MIN_KEY_BYTES = 32;
+
+/**
+ * Timeout für PTY-Login in Millisekunden.
+ * Verhindert Hängenbleiben wenn ein erwarteter Prompt ausbleibt.
+ */
+const PTY_LOGIN_TIMEOUT_MS = 30_000;
+
+/**
+ * Bekannte inquirer-Prompt-Texte der bw-CLI (case-insensitiv verglichen).
+ * New-Device-Prompt: "New device verification required. Enter OTP sent to login email:"
+ * Wird verwendet um den PTY-Output zu klassifizieren.
+ *
+ * Jedes Muster hier ist für sich allein ausreichend präzise, mit einer Ausnahme:
+ * 'check your email' ist zu allgemein — es wird nur in Kombination mit einem
+ * New-Device-Keyword als Treffer gewertet (siehe isNewDevicePrompt).
+ */
+const NEW_DEVICE_PROMPT_PATTERNS = [
+  'new device verification',
+  'device verification required',
+  'otp sent to login email',
+  'enter otp sent to login email',
+];
+
+/**
+ * Phrase, die nur in Kombination mit einem weiteren New-Device-Keyword als Muster gilt.
+ * Verhindert false-positives bei generischen E-Mail-Hinweisen ohne Device-Kontext.
+ */
+const NEW_DEVICE_COMPOUND_KEYWORD = 'check your email';
+
+/**
+ * Weitere New-Device-Keywords, die in Kombination mit NEW_DEVICE_COMPOUND_KEYWORD
+ * einen positiven Treffer ergeben.
+ */
+const NEW_DEVICE_COMPOUND_PARTNERS = ['device', 'verification', 'otp'];
 
 /**
  * Gibt einen sicheren Fehlergrund zurück — ohne Geheimnis-Leak.
@@ -72,15 +107,15 @@ function sanitizeErrorReason(errorClass) {
 }
 
 /**
- * Klassifiziert einen bw-CLI-Fehler anhand von stderr-Mustern.
- * Analysiert NUR strukturelle Muster — gibt NIEMALS den stderr-Rohtext zurück.
+ * Klassifiziert einen bw-CLI-Fehler anhand von Output-Mustern (PTY-Output oder stderr).
+ * Analysiert NUR strukturelle Muster — gibt NIEMALS den Rohtext zurück.
  *
- * @param {string} stderr   - stderr-Buffer des bw-Prozesses (nur intern — nie nach außen)
+ * @param {string} output   - PTY-Output oder stderr-Buffer (nur intern — nie nach außen)
  * @param {number} exitCode - Exit-Code des Prozesses
  * @returns {string}        - maschinenlesbare Fehlerklasse
  */
-function classifyBwError(stderr, exitCode) {
-  const s = (stderr ?? '').toLowerCase();
+function classifyBwError(output, exitCode) {
+  const s = (output ?? '').toLowerCase();
 
   // Exit 127 = Binary nicht gefunden
   if (exitCode === 127 || s.includes('command not found')) {
@@ -101,8 +136,8 @@ function classifyBwError(stderr, exitCode) {
   }
 
   // New-Device-Verification (E-Mail-OTP): ZUERST prüfen (vor TOTP-2FA und auth-failed).
-  // bw CLI 2026.5.0 schreibt den inquirer-Prompt-Text an stderr, bevor es den Code liest.
-  // Wenn kein Code übergeben (stdin geschlossen), schlägt bw mit diesem Muster fehl.
+  // bw CLI schreibt den inquirer-Prompt-Text via PTY, bevor es den Code liest.
+  // Wenn kein Code übergeben (keine PTY-Write), schlägt bw mit diesem Muster fehl.
   // Unterscheidbar von TOTP-2FA durch "new device", "device verification", "check your email".
   if (
     s.includes('new device verification') ||
@@ -152,6 +187,32 @@ function classifyBwError(stderr, exitCode) {
 }
 
 /**
+ * Prüft ob ein PTY-Output-Chunk einen New-Device-OTP-Prompt enthält.
+ * Case-insensitiv, tolerant gegen leichte Wording-Varianten.
+ * NICHT anfällig für false-positive bei TOTP-2FA (andere Keywords).
+ *
+ * 'check your email' wird nur in Kombination mit einem weiteren New-Device-Keyword
+ * gewertet (z.B. 'device', 'verification', 'otp') — verhindert false-positives.
+ *
+ * @param {string} text - PTY-Output-Chunk (NICHT loggen — könnte echoed Input enthalten)
+ * @returns {boolean}
+ */
+function isNewDevicePrompt(text) {
+  const lower = text.toLowerCase();
+  if (NEW_DEVICE_PROMPT_PATTERNS.some((p) => lower.includes(p))) {
+    return true;
+  }
+  // 'check your email' gilt nur in Kombination mit einem weiteren New-Device-Keyword
+  if (
+    lower.includes(NEW_DEVICE_COMPOUND_KEYWORD) &&
+    NEW_DEVICE_COMPOUND_PARTNERS.some((kw) => lower.includes(kw))
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
  * BitwardenMasterKeyService
  *
  * Einziger Ort, der mit Bitwarden spricht (Boundary-Disziplin, ADR-014-Linie).
@@ -167,7 +228,7 @@ export class BitwardenMasterKeyService {
   #itemName;
 
   /**
-   * Injizierbare Spawn-Funktion für `bw` (für Unit-Tests mockbar).
+   * Injizierbare Spawn-Funktion für nicht-interaktive `bw`-Befehle (für Unit-Tests mockbar).
    * Signatur: (args: string[], opts: { env: object, input?: string }) => Promise<{ stdout: string, stderr: string, exitCode: number }>
    *
    * @type {Function}
@@ -175,13 +236,25 @@ export class BitwardenMasterKeyService {
   #spawnBw;
 
   /**
+   * Injizierbare PTY-Login-Funktion für den interaktiven `bw login`-Befehl (für Unit-Tests mockbar).
+   * Signatur: (args: string[], opts: { env: object, emailOtp?: string }) => Promise<{ stdout: string, output: string, exitCode: number }>
+   *
+   * `output` enthält den zusammengefassten PTY-Output (intern für Klassifizierung — NIEMALS loggen/ausgeben).
+   * `stdout` enthält den Session-Token wenn der Login erfolgreich war.
+   *
+   * @type {Function}
+   */
+  #spawnBwPty;
+
+  /**
    * @param {object} params
    * @param {import('./CredentialStore.js').CredentialStore} params.credentialStore
    * @param {import('./AuditStore.js').AuditStore} params.auditStore
-   * @param {string} [params.itemName]     - Bitwarden Item-Name (Default: BW_ITEM_NAME env oder 'dev-gui-master-key')
-   * @param {Function} [params._spawnBw]  - Testbare Spawn-Funktion (Default: echter bw-CLI-Aufruf)
+   * @param {string} [params.itemName]       - Bitwarden Item-Name (Default: BW_ITEM_NAME env oder 'dev-gui-master-key')
+   * @param {Function} [params._spawnBw]     - Testbare Spawn-Funktion für nicht-interaktive bw-Kommandos
+   * @param {Function} [params._spawnBwPty]  - Testbare PTY-Spawn-Funktion für `bw login` (interaktiv)
    */
-  constructor({ credentialStore, auditStore, itemName, _spawnBw } = {}) {
+  constructor({ credentialStore, auditStore, itemName, _spawnBw, _spawnBwPty } = {}) {
     if (!credentialStore || typeof credentialStore.unlock !== 'function') {
       throw new Error('[BitwardenMasterKeyService] credentialStore ist Pflicht');
     }
@@ -192,6 +265,7 @@ export class BitwardenMasterKeyService {
     this.#auditStore = auditStore;
     this.#itemName = itemName ?? DEFAULT_ITEM_NAME;
     this.#spawnBw = _spawnBw ?? spawnBwDefault;
+    this.#spawnBwPty = _spawnBwPty ?? spawnBwPtyDefault;
   }
 
   /**
@@ -199,7 +273,7 @@ export class BitwardenMasterKeyService {
    *
    * Ablauf:
    *   1. Audit-Eintrag (login-attempt) — AC8
-   *   2. Bitwarden-Login → BW_SESSION
+   *   2. Bitwarden-Login via PTY → BW_SESSION
    *   3. Audit-Eintrag (key-read) — AC8
    *   4. Item lesen → geheimer Wert
    *   5. Key store-intern an CredentialStore.unlock() — AC2
@@ -212,7 +286,7 @@ export class BitwardenMasterKeyService {
    * @param {string} params.email        - Bitwarden E-Mail (wird NICHT geloggt)
    * @param {string} params.password     - Bitwarden Master-Passwort (wird NICHT geloggt)
    * @param {string} [params.twofa]      - Optionaler 2FA-Code (wird NICHT geloggt, AC6-Ausnahme: als --code-Arg)
-   * @param {string} [params.emailOtp]   - Optionaler E-Mail-OTP-Code für New-Device-Verification (via stdin, NICHT als Arg)
+   * @param {string} [params.emailOtp]   - Optionaler E-Mail-OTP-Code für New-Device-Verification (via PTY-Write, NICHT als Arg)
    * @param {string|null} params.identity - Access-Identität für Audit
    * @returns {Promise<{ status: 'found' } | { status: 'not-found' } | { status: 'error', errorClass: string, reason: string }>}
    */
@@ -232,7 +306,7 @@ export class BitwardenMasterKeyService {
       };
     }
 
-    // ── AC1: Bitwarden-Login (Credentials via stdin/env, NICHT via Argv) ────
+    // ── AC1: Bitwarden-Login via PTY (Credentials via stdin/env, NICHT via Argv) ────
     let sessionToken;
     try {
       sessionToken = await this.#bwLogin({ email, password, twofa, emailOtp });
@@ -311,7 +385,7 @@ export class BitwardenMasterKeyService {
    * @param {string} params.email        - Bitwarden E-Mail
    * @param {string} params.password     - Bitwarden Master-Passwort
    * @param {string} [params.twofa]      - Optionaler 2FA-Code
-   * @param {string} [params.emailOtp]   - Optionaler E-Mail-OTP-Code für New-Device-Verification (via stdin, NICHT als Arg)
+   * @param {string} [params.emailOtp]   - Optionaler E-Mail-OTP-Code für New-Device-Verification (via PTY-Write, NICHT als Arg)
    * @param {string|null} params.identity - Access-Identität für Audit
    * @returns {Promise<{ status: 'created' } | { status: 'error', errorClass: string, reason: string }>}
    */
@@ -330,7 +404,7 @@ export class BitwardenMasterKeyService {
       };
     }
 
-    // ── AC1: Bitwarden-Login ─────────────────────────────────────────────────
+    // ── AC1: Bitwarden-Login via PTY ─────────────────────────────────────────
     let sessionToken;
     try {
       sessionToken = await this.#bwLogin({ email, password, twofa, emailOtp });
@@ -379,12 +453,18 @@ export class BitwardenMasterKeyService {
   // ── Private Bitwarden-CLI-Methoden ────────────────────────────────────────────
 
   /**
-   * Führt `bw login` aus und gibt den Session-Token zurück.
+   * Führt `bw login` via PTY aus und gibt den Session-Token zurück.
    *
-   * AC6-KRITISCH: Passwort wird via Env übergeben — NICHT via Argv.
-   * Der Login-Befehl für E-Mail+Passwort+optional 2FA+optional E-Mail-OTP:
-   *   bw login <email> --passwordenv BW_PASSWORD [--code <2fa>]
-   * Das Passwort kommt aus der Env-Var BW_PASSWORD des Subprozesses (nie als Arg).
+   * AC6-KRITISCH: Passwort wird via Env übergeben — NICHT via Argv oder PTY-Write.
+   * Der Login-Befehl:
+   *   bw login <email> --passwordenv BW_PASSWORD --raw [--code <2fa>]
+   *
+   * PTY-Verhalten:
+   *   - bw login sieht einen echten TTY → inquirer gibt Prompts aus
+   *   - Bei New-Device-Prompt → emailOtp via PTY-Write übergeben
+   *   - Kein emailOtp → 'email-otp-required' zurückmelden
+   *   - PTY-Output wird NICHT geloggt (enthält ggf. echoed Input — Secret-Leak-Risiko)
+   *   - Timeout (PTY_LOGIN_TIMEOUT_MS) verhindert Hängenbleiben
    *
    * AC6-AUSNAHME (dokumentiert in Spec #183 AC6): Der kurzlebige TOTP-2FA-Code darf als
    * `--code`-Argument übergeben werden, weil `bw login` keine Env/stdin-Alternative
@@ -392,18 +472,11 @@ export class BitwardenMasterKeyService {
    * und nach dem Login verbraucht — kein dauerhaftes Geheimnis.
    * Master-Passwort und Session-Token bleiben strikt Env-only.
    *
-   * E-Mail-OTP (bitwarden-new-device-otp — KEIN Argv-Leak):
-   * Der E-Mail-OTP-Code für New-Device-Verification wird via stdin übergeben.
-   * bw CLI 2026.5.0 (PR #13568) liest den Code interaktiv via inquirer von stdin.
-   * Da stdin in unserem Subprozess immer piped ist, schreiben wir den Code als
-   * newline-terminierte Zeile in stdin — inquirer liest sie und gibt sie als token zurück.
-   * Kein Arg-Leak, keine Env-Var nötig → sicherer als der TOTP-Ausnahme-Pfad.
-   *
    * @param {object} params
    * @param {string} params.email
    * @param {string} params.password
    * @param {string} [params.twofa]
-   * @param {string} [params.emailOtp]  - E-Mail-OTP für New-Device-Verification (via stdin, AC7)
+   * @param {string} [params.emailOtp]  - E-Mail-OTP für New-Device-Verification (via PTY-Write, AC7)
    * @returns {Promise<string>} BW_SESSION-Token
    */
   async #bwLogin({ email, password, twofa, emailOtp }) {
@@ -424,19 +497,16 @@ export class BitwardenMasterKeyService {
       PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin',
     };
 
-    // AC7 (bitwarden-new-device-otp): E-Mail-OTP via stdin — NICHT als Arg.
-    // bw CLI 2026.5.0 fragt den Code interaktiv via inquirer (output: process.stderr).
-    // Wenn wir stdin mit dem OTP-Code füttern, liest inquirer ihn und setzt ihn als
-    // newDeviceToken → Login läuft mit New-Device-Verification weiter.
-    // Ohne emailOtp: stdin wird sofort geschlossen (EOF) → inquirer gibt '' zurück →
-    // bw schreibt "New device verification required. Enter OTP sent to login email:"
-    // an stderr → classifyBwError erkennt das Muster → 'email-otp-required'.
-    const stdinInput = emailOtp ? (emailOtp + '\n') : undefined;
-
-    const { stdout, stderr, exitCode } = await this.#spawnBw(args, { env, input: stdinInput });
+    // AC7 (bitwarden-new-device-otp): E-Mail-OTP via PTY-Write — NICHT als Arg.
+    // bw CLI fragt den Code interaktiv via inquirer (erfordert echten TTY → node-pty).
+    // emailOtp wird an die PTY-Funktion übergeben, die es bei Prompt-Erkennung schreibt.
+    // Ohne emailOtp: kein Write → Prompt bleibt unbeantwortet → bw schlägt fehl →
+    // PTY-Output enthält New-Device-Muster → classifyBwError → 'email-otp-required'.
+    const { stdout, output, exitCode } = await this.#spawnBwPty(args, { env, emailOtp });
 
     if (exitCode !== 0) {
-      const errorClass = classifyBwError(stderr, exitCode);
+      // AC7-KRITISCH: output NICHT loggen (kann echoed emailOtp/PTY-Echo enthalten)
+      const errorClass = classifyBwError(output, exitCode);
       const err = new Error(`bw login fehlgeschlagen (exit ${exitCode})`);
       err.bwErrorClass = errorClass;
       throw err;
@@ -571,21 +641,22 @@ export class BitwardenMasterKeyService {
   }
 }
 
-// ── Standard-Spawn-Implementierung (echter bw-CLI-Aufruf) ─────────────────────
+// ── Standard-Spawn-Implementierung (echter bw-CLI-Aufruf, nicht-interaktiv) ──────
 
 /**
- * Führt `bw <args>` als Subprozess aus.
+ * Führt `bw <args>` als Subprozess aus (ohne TTY — für nicht-interaktive Kommandos).
  *
  * AC6-KRITISCH:
- *   - Geheimnisse (Passwort, Session-Token) werden via `opts.env` (Umgebung des Subprozesses)
- *     übergeben — NICHT als Argv-Argumente.
+ *   - Geheimnisse (Passwort, Session-Token) werden via `opts.env` übergeben — NICHT als Argv.
  *   - `stdin` (opts.input) wird für JSON-Payloads genutzt — ebenfalls kein Argv.
- *   - Der Parent-Prozess-Argv ist NIEMALS sichtbar (Node-Prozess spawnt eigenen Subprozess).
  *   - stderr wird NICHT in Response/Log weitergegeben (könnte Credentials enthalten).
+ *
+ * Nur für nicht-interaktive Kommandos (bw get, bw encode, bw create, bw logout).
+ * Für `bw login` muss spawnBwPtyDefault verwendet werden (node-pty).
  *
  * @param {string[]} args    - Argumente (ohne 'bw'); dürfen KEINE Geheimnisse enthalten
  * @param {object}   opts
- * @param {object}   opts.env    - Env-Vars des Subprozesses (enthält Credentials wie BW_PASSWORD)
+ * @param {object}   opts.env    - Env-Vars des Subprozesses (enthält Credentials wie BW_SESSION)
  * @param {string}   [opts.input] - stdin-Input (für bw encode / bw create)
  * @returns {Promise<{ stdout: string, stderr: string, exitCode: number }>}
  */
@@ -638,4 +709,172 @@ async function spawnBwDefault(args, { env, input } = {}) {
       });
     });
   });
+}
+
+// ── PTY-Spawn-Implementierung (echter bw-Login via node-pty) ─────────────────────
+
+/**
+ * Führt `bw login <args>` via node-pty aus — gibt dem Prozess einen echten TTY.
+ *
+ * Warum PTY: bw-CLI nutzt inquirer für interaktive Prompts (New-Device-OTP, ggf. 2FA).
+ * Inquirer erkennt non-TTY-stdin und gibt Prompts nicht aus → kein Prompt-Detection möglich.
+ * Mit node-pty sieht bw/inquirer einen echten TTY → Prompts erscheinen im PTY-Output.
+ *
+ * Security-Protokoll:
+ *   - PTY-Output wird NICHT geloggt — er kann echoed Input enthalten (OTP-Code-Echo)
+ *   - Nur der letzte Zeileninhalt (Session-Token) wird als `stdout` zurückgegeben
+ *   - `output` wird nur intern zur Fehlerklassifizierung verwendet — nie nach außen
+ *   - Timeout (PTY_LOGIN_TIMEOUT_MS) verhindert Hängenbleiben
+ *   - PTY-Prozess wird nach Abschluss oder Timeout sauber beendet
+ *
+ * Prompt-Handling:
+ *   - New-Device-Prompt erkannt (isNewDevicePrompt) + emailOtp vorhanden → PTY-Write
+ *   - New-Device-Prompt erkannt + kein emailOtp → PTY läuft bis Timeout/Exit → classifyBwError
+ *   - Kein Prompt im Output → Login lief non-interaktiv durch (Passwort via env, kein 2FA-Prompt)
+ *
+ * @param {string[]} args    - Login-Argumente (ohne 'bw'); dürfen KEINE Geheimnisse enthalten
+ * @param {object}   opts
+ * @param {object}   opts.env       - Env-Vars des Subprozesses (enthält BW_PASSWORD)
+ * @param {string}   [opts.emailOtp] - E-Mail-OTP für New-Device-Verification (via PTY-Write)
+ * @returns {Promise<{ stdout: string, output: string, exitCode: number }>}
+ *   stdout: letzter non-empty Zeileninhalt (Session-Token bei Erfolg)
+ *   output: akkumulierter PTY-Output (NUR intern für Klassifizierung — NIEMALS loggen)
+ */
+async function spawnBwPtyDefault(args, { env, emailOtp } = {}) {
+  const { spawn: ptySpawn } = await import('node-pty');
+
+  return new Promise((resolve) => {
+    let ptyProcess = null;
+    let outputBuf = '';   // AC7-KRITISCH: NIEMALS loggen — kann echoed OTP enthalten
+    let otpWritten = false;
+    let settled = false;
+    let timeoutHandle = null;
+
+    /**
+     * Sauber beenden und Ergebnis zurückgeben.
+     * @param {{ stdout: string, output: string, exitCode: number }} result
+     */
+    function settle(result) {
+      if (settled) return;
+      settled = true;
+      if (timeoutHandle !== null) {
+        clearTimeout(timeoutHandle);
+        timeoutHandle = null;
+      }
+      // Sauberes Cleanup des PTY-Prozesses — kein Hängenbleiben
+      try {
+        ptyProcess?.kill();
+      } catch {
+        // Prozess möglicherweise bereits beendet
+      }
+      resolve(result);
+    }
+
+    // Timeout: verhindert dauerhaftes Hängenbleiben wenn Prompt ausbleibt
+    timeoutHandle = setTimeout(() => {
+      // Timeout-Klassifizierung: wenn New-Device-Muster im Output → email-otp-required
+      // (Prompt erschien, aber kein Code übergeben → Timeout = 'kein Code'-Situation)
+      // Sonst: Auth-Fehler oder bw-unreachable
+      settle({
+        stdout: '',
+        output: outputBuf, // intern für classifyBwError
+        exitCode: 1,       // nicht-null = Fehler
+      });
+    }, PTY_LOGIN_TIMEOUT_MS);
+
+    let spawnError = null;
+    try {
+      ptyProcess = ptySpawn('bw', args, {
+        name: 'xterm',
+        cols: 80,
+        rows: 24,
+        // AC6: Sauber isolierte Umgebung — nur übergebene env-Vars (kein Parent-Leak)
+        env: { ...env },
+      });
+    } catch (err) {
+      // Spawn-Fehler (binary nicht gefunden etc.)
+      spawnError = err;
+    }
+
+    if (spawnError) {
+      settle({
+        stdout: '',
+        output: spawnError.message ?? 'pty spawn error',
+        exitCode: 127,
+      });
+      return;
+    }
+
+    // PTY-Output empfangen und auf Prompts scannen
+    // AC7-KRITISCH: outputBuf NICHT loggen (kann echoed OTP/Passwort enthalten)
+    ptyProcess.onData((data) => {
+      // Pufferung auf 2000 Zeichen begrenzen — verhindert Memory-Exhaustion
+      // (weniger als spawnBwDefault's 500-Byte-Limit, aber für Prompt-Detection ausreichend)
+      if (outputBuf.length < 2000) {
+        outputBuf += data;
+      }
+
+      // New-Device-OTP-Prompt erkannt?
+      if (!otpWritten && isNewDevicePrompt(outputBuf)) {
+        if (emailOtp) {
+          // AC7: OTP via PTY-Write — NICHT als Arg; NICHT geloggt
+          otpWritten = true;
+          // PTY echot den geschriebenen Text zurück → outputBuf enthält danach den OTP-Code.
+          // AC7-KRITISCH: outputBuf NIEMALS loggen nach diesem Punkt.
+          ptyProcess.write(emailOtp + '\r');
+        }
+        // Kein emailOtp → kein Write → bw läuft weiter bis Timeout oder Exit
+        // → classifyBwError erkennt New-Device-Muster im outputBuf → 'email-otp-required'
+      }
+    });
+
+    ptyProcess.onExit(({ exitCode }) => {
+      // Session-Token ist die letzte non-empty Zeile des PTY-Outputs.
+      // bw login --raw schreibt nur den Token auf stdout (eine Zeile).
+      // Im PTY-Output sind ANSI-Sequenzen und Prompt-Texte enthalten;
+      // der Token ist typischerweise die letzte nicht-leere Zeile nach dem letzten Prompt.
+      // Wir extrahieren ihn aus dem rohen Output-Buffer.
+      const sessionToken = extractSessionToken(outputBuf);
+
+      settle({
+        stdout: sessionToken,
+        output: outputBuf, // intern für classifyBwError — NIEMALS nach außen
+        exitCode: exitCode ?? 1,
+      });
+    });
+  });
+}
+
+/**
+ * Extrahiert den Session-Token aus dem PTY-Output von `bw login --raw`.
+ *
+ * bw login --raw schreibt den Session-Token als letzte Textzeile (nach allen Prompts).
+ * Im PTY-Output sind ANSI-Escape-Sequenzen und Prompt-Texte enthalten.
+ * Der Token besteht aus Base64-URL-sicheren Zeichen — typischerweise 100–200 Zeichen lang.
+ *
+ * Strategie: alle Zeilen durchsuchen, die wie ein Bitwarden-Session-Token aussehen.
+ * Bitwarden-Session-Tokens sind Base64-kodierte JWTs oder ähnliche Strings.
+ * Mindestlänge: 32 Zeichen (kurze Tokens sind kein Session-Token).
+ *
+ * AC7-KRITISCH: Diese Funktion gibt NUR den Token zurück — nie den gesamt-Output.
+ *
+ * @param {string} rawOutput - Roher PTY-Output (NICHT loggen)
+ * @returns {string} Session-Token oder leerer String
+ */
+function extractSessionToken(rawOutput) {
+  // ANSI-Escape-Sequenzen entfernen (PTY-Output enthält Cursor-Steuerung etc.)
+  // eslint-disable-next-line no-control-regex
+  const stripped = rawOutput.replace(/\x1b\[[0-9;]*[mGKHFABCDEJhlr]/g, '').replace(/\r/g, '');
+
+  // Zeilen von hinten durchsuchen — Token ist die letzte relevante Zeile
+  const lines = stripped.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    // Session-Token: mindestens 32 Zeichen, nur Base64/URL-sichere Zeichen + Punkte (JWT)
+    // Kein Leerzeichen, keine ANSI-Reste, keine Prompt-Texte
+    if (line.length >= 32 && /^[A-Za-z0-9+/=._-]+$/.test(line)) {
+      return line;
+    }
+  }
+  return '';
 }

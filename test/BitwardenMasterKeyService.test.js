@@ -1,9 +1,9 @@
 /**
- * BitwardenMasterKeyService.test.js — Unit-Tests (AC1–AC9)
+ * BitwardenMasterKeyService.test.js — Unit-Tests (AC1–AC9) + New-Device-OTP-Plumbing (#263)
  *
  * Spec: docs/specs/bitwarden-master-key-unlock.md
  *
- * Covers:
+ * Covers (bitwarden-master-key-unlock):
  *   AC1  — Login mit E-Mail + Master-Passwort (+ 2FA falls nötig), serverseitig
  *   AC2  — Existierendes Item → Key store-intern an CredentialStore.unlock(); NICHT in Response
  *   AC3  — Kein Item → Status 'not-found', KEIN automatisches Erstellen
@@ -14,8 +14,13 @@
  *   AC8  — Audit-First: vor Aktion ein Eintrag ohne Werte; Audit-Fehler → Aktion unterbleibt
  *   AC9  — Transiente Sitzung verworfen (bw logout nach Beschaffung)
  *
+ * Covers (bitwarden-new-device-otp #263):
+ *   AC1  — PTY-emailOtp-Plumbing: emailOtp wird via opts.emailOtp an _spawnBwPty übergeben (nicht Argv)
+ *   AC7  — emailOtp erscheint NICHT in Argv (kein Secret-Leak durch PTY-Übergabe)
+ *
  * Strategie:
- *   - `_spawnBw` wird vollständig gemockt → kein echter Bitwarden-Netzwerkaufruf
+ *   - `_spawnBwPty` wird für `bw login` gemockt (Fake-PTY: steuert Output + exitCode)
+ *   - `_spawnBw` wird für nicht-interaktive Kommandos gemockt (get, encode, create, logout)
  *   - CredentialStore mit tmpdir + injiziertem masterKey (echter Store für Boundary-Test)
  *   - AuditStore als echte In-Memory-Instanz (prüft Audit-Einträge exakt)
  *   - AC6: gespawnte Argv-Arrays werden explizit geprüft — dürfen keine Geheimnisse enthalten
@@ -42,25 +47,64 @@ const ITEM_NAME = 'dev-gui-master-key';
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 /**
- * Erstellt eine Mock-Spawn-Funktion, die bw-Kommandos simuliert.
+ * Erstellt eine Fake-PTY-Spawn-Funktion für `bw login` (ersetzt spawnBwPtyDefault).
+ *
+ * Gibt das Interface zurück, das der Service erwartet:
+ *   { stdout: string, output: string, exitCode: number }
  *
  * @param {object} opts
- * @param {string}    [opts.sessionToken]   - Session-Token für erfolgreichen Login
+ * @param {string}  [opts.sessionToken]   - Session-Token für erfolgreichen Login
+ * @param {boolean} [opts.loginFails]     - true = Login schlägt fehl
+ * @param {number}  [opts.loginExitCode]  - Exit-Code für Login (Default 0)
+ * @param {string}  [opts.loginOutput]    - PTY-Output (output-Feld, für Fehlerklassifizierung)
+ * @param {(args: string[], opts: object) => void} [opts.onSpawn] - Callback für Assertions
+ */
+function makePtyMock({
+  sessionToken = FAKE_SESSION,
+  loginFails = false,
+  loginExitCode = 0,
+  loginOutput = '',
+  onSpawn = null,
+} = {}) {
+  const spawnedArgvs = [];
+  const spawnedOpts = [];
+
+  const fn = jest.fn(async (args, opts) => {
+    spawnedArgvs.push([...args]);
+    spawnedOpts.push(opts ?? {});
+    if (onSpawn) onSpawn(args, opts);
+
+    if (loginFails) {
+      return {
+        stdout: '',
+        output: loginOutput || 'Username or password is incorrect.',
+        exitCode: loginExitCode || 1,
+      };
+    }
+    return {
+      stdout: sessionToken,
+      output: loginOutput || '',
+      exitCode: 0,
+    };
+  });
+
+  fn.spawnedArgvs = spawnedArgvs;
+  fn.spawnedOpts = spawnedOpts;
+  return fn;
+}
+
+/**
+ * Erstellt eine Mock-Spawn-Funktion für nicht-interaktive bw-Kommandos (get, encode, create, logout).
+ *
+ * @param {object} opts
  * @param {string}    [opts.itemPassword]   - Passwort-Feld für Item-Lese-Aktion
  * @param {boolean}   [opts.itemNotFound]   - true = Item nicht vorhanden
- * @param {boolean}   [opts.loginFails]     - true = Login schlägt fehl
- * @param {number}    [opts.loginExitCode]  - Exit-Code für Login (Default 0)
- * @param {string}    [opts.loginStderr]    - stderr bei Login-Fehler
  * @param {boolean}   [opts.createFails]    - true = bw create schlägt fehl
  * @param {(args: string[], opts: object) => void} [opts.onSpawn] - Callback für Assertion
  */
 function makeSpawnMock({
-  sessionToken = FAKE_SESSION,
   itemPassword = FAKE_KEY_VALUE,
   itemNotFound = false,
-  loginFails = false,
-  loginExitCode = 0,
-  loginStderr = '',
   createFails = false,
   onSpawn = null,
 } = {}) {
@@ -72,13 +116,6 @@ function makeSpawnMock({
     if (onSpawn) onSpawn(args, _opts);
 
     const cmd = args[0];
-
-    if (cmd === 'login') {
-      if (loginFails) {
-        return { stdout: '', stderr: loginStderr || 'Username or password is incorrect.', exitCode: loginExitCode || 1 };
-      }
-      return { stdout: sessionToken, stderr: '', exitCode: 0 };
-    }
 
     if (cmd === 'get' && args[1] === 'password') {
       if (itemNotFound) {
@@ -132,11 +169,12 @@ afterEach(async () => {
 
 // ── Hilfsfunktion: Service erstellen ──────────────────────────────────────────
 
-function makeService(spawnMock) {
+function makeService(ptyMock, spawnMock) {
   return new BitwardenMasterKeyService({
     credentialStore,
     auditStore,
     itemName: ITEM_NAME,
+    _spawnBwPty: ptyMock,
     _spawnBw: spawnMock,
   });
 }
@@ -146,23 +184,27 @@ function makeService(spawnMock) {
 // ══════════════════════════════════════════════════════════════════════════════
 
 describe('AC1 — Bitwarden-Login serverseitig', () => {
-  it('login wird mit E-Mail + Passwort durchgeführt (bw login aufgerufen)', async () => {
+  it('login wird via PTY mit E-Mail + Passwort durchgeführt (bw login über ptyMock aufgerufen)', async () => {
+    const ptyMock = makePtyMock();
     const spawnMock = makeSpawnMock();
-    const service = makeService(spawnMock);
+    const service = makeService(ptyMock, spawnMock);
 
     await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
 
-    const loginCall = spawnMock.spawnedArgvs.find((args) => args[0] === 'login');
-    expect(loginCall).toBeDefined();
+    expect(ptyMock).toHaveBeenCalledTimes(1);
+    const loginArgs = ptyMock.spawnedArgvs[0];
+    expect(loginArgs[0]).toBe('login');
+    expect(loginArgs[1]).toBe(FAKE_EMAIL);
   });
 
   it('login mit 2FA-Code: --code-Argument wird übergeben (AC6-Ausnahme: TOTP ist einmalig/kurzlebig, bw bietet keine Env/stdin-Alternative)', async () => {
+    const ptyMock = makePtyMock();
     const spawnMock = makeSpawnMock();
-    const service = makeService(spawnMock);
+    const service = makeService(ptyMock, spawnMock);
 
     await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, twofa: '123456', identity: null });
 
-    const loginArgs = spawnMock.spawnedArgvs.find((args) => args[0] === 'login');
+    const loginArgs = ptyMock.spawnedArgvs[0];
     expect(loginArgs).toContain('--code');
     expect(loginArgs).toContain('123456');
     // AC6: Master-Passwort erscheint NICHT als Arg (nur TOTP-Code ist Ausnahme)
@@ -170,13 +212,47 @@ describe('AC1 — Bitwarden-Login serverseitig', () => {
   });
 
   it('ohne 2FA-Code: kein --code-Argument', async () => {
+    const ptyMock = makePtyMock();
     const spawnMock = makeSpawnMock();
-    const service = makeService(spawnMock);
+    const service = makeService(ptyMock, spawnMock);
 
     await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
 
-    const loginArgs = spawnMock.spawnedArgvs.find((args) => args[0] === 'login');
+    const loginArgs = ptyMock.spawnedArgvs[0];
     expect(loginArgs).not.toContain('--code');
+  });
+
+  it('PTY-Login empfängt emailOtp als Option (für Prompt-gesteuerte Übergabe)', async () => {
+    const ptyMock = makePtyMock();
+    const spawnMock = makeSpawnMock();
+    const service = makeService(ptyMock, spawnMock);
+
+    await service.acquireMasterKey({
+      email: FAKE_EMAIL,
+      password: FAKE_PASSWORD,
+      emailOtp: '847291',
+      identity: null,
+    });
+
+    // emailOtp wird als opts.emailOtp an die PTY-Funktion übergeben (nicht als Argv)
+    const loginOpts = ptyMock.spawnedOpts[0];
+    expect(loginOpts.emailOtp).toBe('847291');
+    // Argv enthält emailOtp NICHT
+    const loginArgs = ptyMock.spawnedArgvs[0];
+    for (const arg of loginArgs) {
+      expect(String(arg)).not.toContain('847291');
+    }
+  });
+
+  it('PTY-Login ohne emailOtp: opts.emailOtp ist undefined', async () => {
+    const ptyMock = makePtyMock();
+    const spawnMock = makeSpawnMock();
+    const service = makeService(ptyMock, spawnMock);
+
+    await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
+
+    const loginOpts = ptyMock.spawnedOpts[0];
+    expect(loginOpts.emailOtp == null).toBe(true);
   });
 });
 
@@ -186,8 +262,9 @@ describe('AC1 — Bitwarden-Login serverseitig', () => {
 
 describe('AC2 — Item gefunden: Key store-intern, nicht in Response', () => {
   it('acquireMasterKey gibt { status: "found" } zurück — OHNE Key-Wert', async () => {
+    const ptyMock = makePtyMock();
     const spawnMock = makeSpawnMock({ itemPassword: FAKE_KEY_VALUE });
-    const service = makeService(spawnMock);
+    const service = makeService(ptyMock, spawnMock);
 
     const result = await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
 
@@ -198,8 +275,9 @@ describe('AC2 — Item gefunden: Key store-intern, nicht in Response', () => {
   });
 
   it('Store wird nach acquireMasterKey entsperrt (unlock wurde aufgerufen)', async () => {
+    const ptyMock = makePtyMock();
     const spawnMock = makeSpawnMock({ itemPassword: FAKE_KEY_VALUE });
-    const service = makeService(spawnMock);
+    const service = makeService(ptyMock, spawnMock);
 
     // Frischer Store ohne Key → frischer unlock mit beliebigem Key ok
     expect(credentialStore.isUnlocked()).toBe(true); // masterKey injiziert im Konstruktor
@@ -215,8 +293,9 @@ describe('AC2 — Item gefunden: Key store-intern, nicht in Response', () => {
 
 describe('AC3 — Item nicht gefunden: not-found, kein automatisches Erstellen', () => {
   it('acquireMasterKey gibt { status: "not-found" } zurück wenn Item fehlt', async () => {
+    const ptyMock = makePtyMock();
     const spawnMock = makeSpawnMock({ itemNotFound: true });
-    const service = makeService(spawnMock);
+    const service = makeService(ptyMock, spawnMock);
 
     const result = await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
 
@@ -224,8 +303,9 @@ describe('AC3 — Item nicht gefunden: not-found, kein automatisches Erstellen',
   });
 
   it('bei not-found wird KEIN bw create aufgerufen (kein automatisches Erstellen)', async () => {
+    const ptyMock = makePtyMock();
     const spawnMock = makeSpawnMock({ itemNotFound: true });
-    const service = makeService(spawnMock);
+    const service = makeService(ptyMock, spawnMock);
 
     await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
 
@@ -234,8 +314,9 @@ describe('AC3 — Item nicht gefunden: not-found, kein automatisches Erstellen',
   });
 
   it('leerer Item-Passwort-Wert → not-found', async () => {
+    const ptyMock = makePtyMock();
     const spawnMock = makeSpawnMock({ itemPassword: '   ' });
-    const service = makeService(spawnMock);
+    const service = makeService(ptyMock, spawnMock);
 
     const result = await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
 
@@ -249,8 +330,9 @@ describe('AC3 — Item nicht gefunden: not-found, kein automatisches Erstellen',
 
 describe('AC4 — createMasterKey: Zufalls-Key + Item anlegen', () => {
   it('createMasterKey gibt { status: "created" } zurück', async () => {
+    const ptyMock = makePtyMock();
     const spawnMock = makeSpawnMock();
-    const service = makeService(spawnMock);
+    const service = makeService(ptyMock, spawnMock);
 
     const result = await service.createMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
 
@@ -258,8 +340,9 @@ describe('AC4 — createMasterKey: Zufalls-Key + Item anlegen', () => {
   });
 
   it('createMasterKey ruft bw encode und bw create item auf', async () => {
+    const ptyMock = makePtyMock();
     const spawnMock = makeSpawnMock();
-    const service = makeService(spawnMock);
+    const service = makeService(ptyMock, spawnMock);
 
     await service.createMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
 
@@ -271,8 +354,9 @@ describe('AC4 — createMasterKey: Zufalls-Key + Item anlegen', () => {
 
   it('AC4: acquireMasterKey ohne Bestätigungs-Flag löst KEIN Erstellen aus', async () => {
     // acquireMasterKey → nur lesen, nie erstellen
+    const ptyMock = makePtyMock();
     const spawnMock = makeSpawnMock({ itemNotFound: true });
-    const service = makeService(spawnMock);
+    const service = makeService(ptyMock, spawnMock);
 
     const result = await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
 
@@ -284,6 +368,7 @@ describe('AC4 — createMasterKey: Zufalls-Key + Item anlegen', () => {
   it('generierter Key hat ≥32 Byte Entropie (≥44 base64-Zeichen)', async () => {
     // Prüfen: der JSON-Payload, der an bw encode übergeben wird, enthält einen Key ≥44 Zeichen
     let capturedEncodeInput = null;
+    const ptyMock = makePtyMock();
     const spawnMock = makeSpawnMock({
       onSpawn: (args, opts) => {
         if (args[0] === 'encode') {
@@ -291,7 +376,7 @@ describe('AC4 — createMasterKey: Zufalls-Key + Item anlegen', () => {
         }
       },
     });
-    const service = makeService(spawnMock);
+    const service = makeService(ptyMock, spawnMock);
 
     await service.createMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
 
@@ -303,8 +388,9 @@ describe('AC4 — createMasterKey: Zufalls-Key + Item anlegen', () => {
   });
 
   it('bw create schlägt fehl → item-create-failed, kein Teil-Zustand', async () => {
+    const ptyMock = makePtyMock();
     const spawnMock = makeSpawnMock({ createFails: true });
-    const service = makeService(spawnMock);
+    const service = makeService(ptyMock, spawnMock);
 
     const result = await service.createMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
 
@@ -319,12 +405,13 @@ describe('AC4 — createMasterKey: Zufalls-Key + Item anlegen', () => {
 
 describe('AC5 — Klassifizierte Fehler', () => {
   it('falsche Credentials → auth-failed', async () => {
-    const spawnMock = makeSpawnMock({
+    const ptyMock = makePtyMock({
       loginFails: true,
-      loginStderr: 'Username or password is incorrect.',
+      loginOutput: 'Username or password is incorrect.',
       loginExitCode: 1,
     });
-    const service = makeService(spawnMock);
+    const spawnMock = makeSpawnMock();
+    const service = makeService(ptyMock, spawnMock);
 
     const result = await service.acquireMasterKey({ email: FAKE_EMAIL, password: 'wrong', identity: null });
 
@@ -333,12 +420,13 @@ describe('AC5 — Klassifizierte Fehler', () => {
   });
 
   it('2FA erforderlich → twofa-required', async () => {
-    const spawnMock = makeSpawnMock({
+    const ptyMock = makePtyMock({
       loginFails: true,
-      loginStderr: 'Two-step login required.',
+      loginOutput: 'Two-step login required.',
       loginExitCode: 1,
     });
-    const service = makeService(spawnMock);
+    const spawnMock = makeSpawnMock();
+    const service = makeService(ptyMock, spawnMock);
 
     const result = await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
 
@@ -347,12 +435,13 @@ describe('AC5 — Klassifizierte Fehler', () => {
   });
 
   it('falscher 2FA-Code → twofa-invalid', async () => {
-    const spawnMock = makeSpawnMock({
+    const ptyMock = makePtyMock({
       loginFails: true,
-      loginStderr: 'Two-step login invalid code.',
+      loginOutput: 'Two-step login invalid code.',
       loginExitCode: 1,
     });
-    const service = makeService(spawnMock);
+    const spawnMock = makeSpawnMock();
+    const service = makeService(ptyMock, spawnMock);
 
     const result = await service.acquireMasterKey({
       email: FAKE_EMAIL, password: FAKE_PASSWORD, twofa: '000000', identity: null,
@@ -363,12 +452,13 @@ describe('AC5 — Klassifizierte Fehler', () => {
   });
 
   it('bw CLI nicht gefunden (exit 127) → bw-unreachable', async () => {
-    const spawnMock = makeSpawnMock({
+    const ptyMock = makePtyMock({
       loginFails: true,
-      loginStderr: 'command not found: bw',
+      loginOutput: 'command not found: bw',
       loginExitCode: 127,
     });
-    const service = makeService(spawnMock);
+    const spawnMock = makeSpawnMock();
+    const service = makeService(ptyMock, spawnMock);
 
     const result = await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
 
@@ -377,12 +467,13 @@ describe('AC5 — Klassifizierte Fehler', () => {
   });
 
   it('Netzwerk-Fehler → bw-unreachable', async () => {
-    const spawnMock = makeSpawnMock({
+    const ptyMock = makePtyMock({
       loginFails: true,
-      loginStderr: 'Failed to connect to server: ECONNREFUSED',
+      loginOutput: 'Failed to connect to server: ECONNREFUSED',
       loginExitCode: 1,
     });
-    const service = makeService(spawnMock);
+    const spawnMock = makeSpawnMock();
+    const service = makeService(ptyMock, spawnMock);
 
     const result = await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
 
@@ -391,12 +482,13 @@ describe('AC5 — Klassifizierte Fehler', () => {
   });
 
   it('Fehler-Reason enthält KEINE Klartext-Geheimnisse', async () => {
-    const spawnMock = makeSpawnMock({
+    const ptyMock = makePtyMock({
       loginFails: true,
-      loginStderr: `Username or password is incorrect. Your password is ${FAKE_PASSWORD}`,
+      loginOutput: `Username or password is incorrect. Your password is ${FAKE_PASSWORD}`,
       loginExitCode: 1,
     });
-    const service = makeService(spawnMock);
+    const spawnMock = makeSpawnMock();
+    const service = makeService(ptyMock, spawnMock);
 
     const result = await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
 
@@ -412,12 +504,19 @@ describe('AC5 — Klassifizierte Fehler', () => {
 
 describe('AC6 — Keine Geheimnisse in Argv oder Response', () => {
   it('Passwort erscheint NICHT in den gespawnten Argv-Arrays (kein bw-Arg-Leak)', async () => {
+    const ptyMock = makePtyMock();
     const spawnMock = makeSpawnMock();
-    const service = makeService(spawnMock);
+    const service = makeService(ptyMock, spawnMock);
 
     await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
 
-    // AC6: Jedes gespawnte Argv-Array auf Passwort prüfen
+    // PTY-Login-Argv prüfen
+    for (const argv of ptyMock.spawnedArgvs) {
+      for (const arg of argv) {
+        expect(String(arg)).not.toContain(FAKE_PASSWORD);
+      }
+    }
+    // Nicht-interaktive Spawn-Argv prüfen
     for (const argv of spawnMock.spawnedArgvs) {
       for (const arg of argv) {
         expect(String(arg)).not.toContain(FAKE_PASSWORD);
@@ -426,11 +525,13 @@ describe('AC6 — Keine Geheimnisse in Argv oder Response', () => {
   });
 
   it('Session-Token erscheint NICHT in den gespawnten Argv-Arrays', async () => {
-    const spawnMock = makeSpawnMock({ sessionToken: FAKE_SESSION });
-    const service = makeService(spawnMock);
+    const ptyMock = makePtyMock({ sessionToken: FAKE_SESSION });
+    const spawnMock = makeSpawnMock();
+    const service = makeService(ptyMock, spawnMock);
 
     await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
 
+    // Session-Token darf nicht in Argv der nicht-interaktiven Kommandos auftauchen
     for (const argv of spawnMock.spawnedArgvs) {
       for (const arg of argv) {
         expect(String(arg)).not.toContain(FAKE_SESSION);
@@ -439,8 +540,9 @@ describe('AC6 — Keine Geheimnisse in Argv oder Response', () => {
   });
 
   it('Key-Wert erscheint NICHT in der acquireMasterKey-Response', async () => {
+    const ptyMock = makePtyMock();
     const spawnMock = makeSpawnMock({ itemPassword: FAKE_KEY_VALUE });
-    const service = makeService(spawnMock);
+    const service = makeService(ptyMock, spawnMock);
 
     const result = await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
 
@@ -450,8 +552,9 @@ describe('AC6 — Keine Geheimnisse in Argv oder Response', () => {
   });
 
   it('Key-Wert erscheint NICHT in der createMasterKey-Response', async () => {
+    const ptyMock = makePtyMock();
     const spawnMock = makeSpawnMock();
-    const service = makeService(spawnMock);
+    const service = makeService(ptyMock, spawnMock);
 
     const result = await service.createMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
 
@@ -461,8 +564,9 @@ describe('AC6 — Keine Geheimnisse in Argv oder Response', () => {
   });
 
   it('Passwort erscheint NICHT im Audit-Eintrag', async () => {
+    const ptyMock = makePtyMock();
     const spawnMock = makeSpawnMock();
-    const service = makeService(spawnMock);
+    const service = makeService(ptyMock, spawnMock);
 
     await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: 'test@example.com' });
 
@@ -474,23 +578,44 @@ describe('AC6 — Keine Geheimnisse in Argv oder Response', () => {
   });
 
   it('Key-Wert in Fehlerfällen NICHT in Response (auth-failed)', async () => {
-    const spawnMock = makeSpawnMock({
+    const ptyMock = makePtyMock({
       loginFails: true,
-      loginStderr: `Authentication failed. Key: ${FAKE_KEY_VALUE}`,
+      loginOutput: `Authentication failed. Key: ${FAKE_KEY_VALUE}`,
       loginExitCode: 1,
     });
-    const service = makeService(spawnMock);
+    const spawnMock = makeSpawnMock();
+    const service = makeService(ptyMock, spawnMock);
 
     const result = await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
 
-    // AC6: stderr-Rohdaten (die den Key enthalten könnten) nicht in Response
+    // AC6: PTY-Output (der den Key enthalten könnte) nicht in Response
     expect(JSON.stringify(result)).not.toContain(FAKE_KEY_VALUE);
     expect(JSON.stringify(result)).not.toContain(FAKE_PASSWORD);
+  });
+
+  it('emailOtp erscheint NICHT in den PTY-Login-Argv-Arrays (via opts, nicht Arg)', async () => {
+    const FAKE_OTP = '847291';
+    const ptyMock = makePtyMock();
+    const spawnMock = makeSpawnMock();
+    const service = makeService(ptyMock, spawnMock);
+
+    await service.acquireMasterKey({
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, emailOtp: FAKE_OTP, identity: null,
+    });
+
+    // OTP darf NICHT in Argv stehen
+    for (const argv of ptyMock.spawnedArgvs) {
+      for (const arg of argv) {
+        expect(String(arg)).not.toContain(FAKE_OTP);
+      }
+    }
+    // OTP kommt als opts.emailOtp (nicht als Arg)
+    expect(ptyMock.spawnedOpts[0].emailOtp).toBe(FAKE_OTP);
   });
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
-// AC7 — Falscher Key → Ablehnung ohne .env-Persistenz
+// AC7 — Falscher Key → Ablehnung via CredentialStore.unlock()
 // ══════════════════════════════════════════════════════════════════════════════
 
 describe('AC7 — Falscher Key → Ablehnung via CredentialStore.unlock()', () => {
@@ -500,6 +625,7 @@ describe('AC7 — Falscher Key → Ablehnung via CredentialStore.unlock()', () =
 
     // Service mit einem falschen Key-Wert aus Bitwarden
     const wrongKey = 'wrong-key-not-matching-store-encryption';
+    const ptyMock = makePtyMock();
     const spawnMock = makeSpawnMock({ itemPassword: wrongKey });
 
     // Neuer Store-Instanz, die mit dem falschen Key konfrontiert wird
@@ -513,6 +639,7 @@ describe('AC7 — Falscher Key → Ablehnung via CredentialStore.unlock()', () =
       credentialStore: cs,
       auditStore,
       itemName: ITEM_NAME,
+      _spawnBwPty: ptyMock,
       _spawnBw: spawnMock,
     });
 
@@ -532,17 +659,15 @@ describe('AC7 — Falscher Key → Ablehnung via CredentialStore.unlock()', () =
 describe('AC8 — Audit-First: Eintrag vor Aktion, ohne Werte', () => {
   it('acquireMasterKey schreibt Audit-Eintrag für login-attempt VOR dem Login', async () => {
     const loginOrder = [];
-    const spawnMock = makeSpawnMock({
-      onSpawn: (args) => {
-        if (args[0] === 'login') loginOrder.push('bw-login');
+    const ptyMock = makePtyMock({
+      onSpawn: () => {
+        loginOrder.push('bw-login');
       },
     });
 
     // Audit-Record überwachen
     const originalRecord = auditStore.record.bind(auditStore);
-    let auditCallOrder = [];
     jest.spyOn(auditStore, 'record').mockImplementation((params) => {
-      auditCallOrder.push({ when: 'audit', command: params.command });
       if (params.command === 'bitwarden:login-attempt') {
         // Simuliere: Login noch nicht aufgerufen
         expect(loginOrder).toHaveLength(0);
@@ -550,7 +675,8 @@ describe('AC8 — Audit-First: Eintrag vor Aktion, ohne Werte', () => {
       return originalRecord(params);
     });
 
-    const service = makeService(spawnMock);
+    const spawnMock = makeSpawnMock();
+    const service = makeService(ptyMock, spawnMock);
     await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: 'test@example.com' });
 
     const auditEntries = auditStore.getAll();
@@ -560,8 +686,9 @@ describe('AC8 — Audit-First: Eintrag vor Aktion, ohne Werte', () => {
   });
 
   it('acquireMasterKey schreibt Audit-Eintrag für key-read', async () => {
+    const ptyMock = makePtyMock();
     const spawnMock = makeSpawnMock();
-    const service = makeService(spawnMock);
+    const service = makeService(ptyMock, spawnMock);
 
     await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: 'user@test.com' });
 
@@ -571,8 +698,9 @@ describe('AC8 — Audit-First: Eintrag vor Aktion, ohne Werte', () => {
   });
 
   it('createMasterKey schreibt Audit-Eintrag für key-create', async () => {
+    const ptyMock = makePtyMock();
     const spawnMock = makeSpawnMock();
-    const service = makeService(spawnMock);
+    const service = makeService(ptyMock, spawnMock);
 
     await service.createMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: 'admin@test.com' });
 
@@ -583,8 +711,9 @@ describe('AC8 — Audit-First: Eintrag vor Aktion, ohne Werte', () => {
   });
 
   it('Audit-Einträge enthalten KEINE Geheimnis-Werte (Passwort, Key, Session)', async () => {
+    const ptyMock = makePtyMock();
     const spawnMock = makeSpawnMock({ itemPassword: FAKE_KEY_VALUE });
-    const service = makeService(spawnMock);
+    const service = makeService(ptyMock, spawnMock);
 
     await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: 'user@test.com' });
 
@@ -598,6 +727,7 @@ describe('AC8 — Audit-First: Eintrag vor Aktion, ohne Werte', () => {
   });
 
   it('Audit-Write schlägt fehl → acquireMasterKey unterbleibt (kein bw-Aufruf)', async () => {
+    const ptyMock = makePtyMock();
     const spawnMock = makeSpawnMock();
 
     // Audit-Store so konfigurieren dass er wirft
@@ -605,28 +735,29 @@ describe('AC8 — Audit-First: Eintrag vor Aktion, ohne Werte', () => {
       throw new Error('Audit-Schreib-Fehler simuliert');
     });
 
-    const service = makeService(spawnMock);
+    const service = makeService(ptyMock, spawnMock);
     const result = await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
 
     expect(result.status).toBe('error');
-    // Kein bw-Kommando aufgerufen
-    expect(spawnMock).not.toHaveBeenCalled();
+    // Kein PTY-Login aufgerufen
+    expect(ptyMock).not.toHaveBeenCalled();
   });
 
   // S2: createMasterKey — kein bw-Kommando wenn Audit-Write fehlschlägt
   it('Audit-Write schlägt fehl → createMasterKey unterbleibt (kein bw-Aufruf)', async () => {
+    const ptyMock = makePtyMock();
     const spawnMock = makeSpawnMock();
 
     jest.spyOn(auditStore, 'record').mockImplementation(() => {
       throw new Error('Audit-Schreib-Fehler simuliert');
     });
 
-    const service = makeService(spawnMock);
+    const service = makeService(ptyMock, spawnMock);
     const result = await service.createMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
 
     expect(result.status).toBe('error');
-    // Kein bw-Kommando aufgerufen — analog acquireMasterKey-Test
-    expect(spawnMock).not.toHaveBeenCalled();
+    // Kein PTY-Login aufgerufen — analog acquireMasterKey-Test
+    expect(ptyMock).not.toHaveBeenCalled();
   });
 
   it('Audit-Write vor key-read schlägt fehl → Aktion unterbleibt, Session wird aufgeräumt', async () => {
@@ -642,8 +773,9 @@ describe('AC8 — Audit-First: Eintrag vor Aktion, ohne Werte', () => {
       return originalRecord(params);
     });
 
+    const ptyMock = makePtyMock();
     const spawnMock = makeSpawnMock();
-    const service = makeService(spawnMock);
+    const service = makeService(ptyMock, spawnMock);
 
     const result = await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
 
@@ -660,8 +792,9 @@ describe('AC8 — Audit-First: Eintrag vor Aktion, ohne Werte', () => {
 
 describe('AC9 — Bitwarden-Sitzung verworfen nach Beschaffung', () => {
   it('acquireMasterKey: bw logout wird nach dem Key-Lesen aufgerufen', async () => {
+    const ptyMock = makePtyMock();
     const spawnMock = makeSpawnMock();
-    const service = makeService(spawnMock);
+    const service = makeService(ptyMock, spawnMock);
 
     await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
 
@@ -670,8 +803,9 @@ describe('AC9 — Bitwarden-Sitzung verworfen nach Beschaffung', () => {
   });
 
   it('createMasterKey: bw logout wird nach dem Item-Anlegen aufgerufen', async () => {
+    const ptyMock = makePtyMock();
     const spawnMock = makeSpawnMock();
-    const service = makeService(spawnMock);
+    const service = makeService(ptyMock, spawnMock);
 
     await service.createMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
 
@@ -680,8 +814,9 @@ describe('AC9 — Bitwarden-Sitzung verworfen nach Beschaffung', () => {
   });
 
   it('not-found: bw logout wird auch bei fehlendem Item aufgerufen', async () => {
+    const ptyMock = makePtyMock();
     const spawnMock = makeSpawnMock({ itemNotFound: true });
-    const service = makeService(spawnMock);
+    const service = makeService(ptyMock, spawnMock);
 
     await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
 
@@ -690,8 +825,9 @@ describe('AC9 — Bitwarden-Sitzung verworfen nach Beschaffung', () => {
   });
 
   it('createMasterKey schlägt fehl: bw logout wird auch bei Fehler aufgerufen', async () => {
+    const ptyMock = makePtyMock();
     const spawnMock = makeSpawnMock({ createFails: true });
-    const service = makeService(spawnMock);
+    const service = makeService(ptyMock, spawnMock);
 
     await service.createMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
 
@@ -700,8 +836,9 @@ describe('AC9 — Bitwarden-Sitzung verworfen nach Beschaffung', () => {
   });
 
   it('bw logout empfängt keinen Session-Token als Arg (nur via Env)', async () => {
-    const spawnMock = makeSpawnMock({ sessionToken: FAKE_SESSION });
-    const service = makeService(spawnMock);
+    const ptyMock = makePtyMock({ sessionToken: FAKE_SESSION });
+    const spawnMock = makeSpawnMock();
+    const service = makeService(ptyMock, spawnMock);
 
     await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
 
@@ -719,6 +856,7 @@ describe('AC9 — Bitwarden-Sitzung verworfen nach Beschaffung', () => {
     await credentialStore.set('credentials/misc/test-s1', 'test-value-s1');
 
     const wrongKey = 'wrong-key-s1-not-matching-store-encryption';
+    const ptyMock = makePtyMock();
     const spawnMock = makeSpawnMock({ itemPassword: wrongKey });
 
     const cs = new CredentialStore({
@@ -731,6 +869,7 @@ describe('AC9 — Bitwarden-Sitzung verworfen nach Beschaffung', () => {
       credentialStore: cs,
       auditStore,
       itemName: ITEM_NAME,
+      _spawnBwPty: ptyMock,
       _spawnBw: spawnMock,
     });
 

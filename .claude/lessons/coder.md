@@ -1,5 +1,8 @@
 # Coder Lessons — dev-gui (newest first)
 
+## 2026-06-15 — Erweitertes Testfile mit PTY-Injection: Covers-Block für BEIDE Specs nachpflegen
+Wenn ein bestehendes Testfile (z.B. `BitwardenMasterKeyService.test.js`) durch ein neues Item um PTY-spezifische Tests erweitert wird (neue `makePtyMock`-Calls, neue `it`-Blöcke für emailOtp-Plumbing im AC1-Block, AC6-Block mit emailOtp-Argv-Leak-Test), müssen ZWEI Covers-Block-Einträge nachgezogen werden: (1) ein neuer Eintrag für die neue Spec (z.B. `Covers (bitwarden-new-device-otp): AC1 (PTY-Plumbing), AC7 (emailOtp-Argv-Leak)`), und (2) die erste Zeile des Datei-Headers muss auf den erweiterten Scope ausgeweitet werden. Gilt auch wenn die Haupt-Coverage der neuen Spec in einer separaten Testdatei (z.B. `BitwardenNewDeviceOtp.test.js`) liegt. *[seen-in: S-127 BitwardenMasterKeyService.test.js — neue emailOtp/PTY-it-Blöcke in AC1+AC6 ohne Covers-Block-Eintrag für bitwarden-new-device-otp; promoted: 2026-06-15]*
+
 ## 2026-06-15 — Slug-Form-Check: NUL-Bytes und noch-undekodierte Percent-Strings nicht vergessen
 Wenn `resolveProjectSlug()` (oder ein analoger Eingabe-Guard) einen Slug auf unerlaubte Zeichen prüft (`'/'`-Test + `'.'`/`'..'`-Literal-Test), deckt das die häufigsten Traversal-Vektoren ab. Zusätzliche Vektoren, die in der Prüfung fehlen, aber vom nachgelagerten `validateProjectPath`-Layer abgefangen werden (Defense in Depth):
 - **NUL-Bytes (`\x00`)**: `slug.trim()` entfernt NUL nicht. `/workspace/\x00` passiert die Slug-Form-Prüfung; `realpath()` und `stat()` werfen `ERR_INVALID_ARG_VALUE` → wird im `catch`-Block von `validateProjectPath` als `not-exists` behandelt → 400/1008 (kein Crash, kein PTY-Spawn). Safe, aber kein expliziter Fehler bei der Slug-Eingabe.
