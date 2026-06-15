@@ -1,0 +1,23 @@
+id: S-009
+parent: F-001
+title: 'Terminal: PTY-Resize + Scrollback-Replay (Darstellung zerschossen)'
+status: Done
+priority: P2
+spec: null
+implements: null
+depends: null
+labels: null
+github_issue: 22
+github_url: https://github.com/Studis-Softwareschmiede/dev-gui/issues/22
+size_est: null
+dispo_est: null
+dispo_act: null
+dispo_forecast: null
+estimate_note: null
+confidence: null
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-06-15T07:24:07Z'
+updated_at: '2026-06-15T07:24:07Z'
+done_at: null
