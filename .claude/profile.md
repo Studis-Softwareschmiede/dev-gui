@@ -4,7 +4,7 @@ domains: [security]
 build: "npm ci"
 test: "npm test"
 lint: "npm run lint"
-smoke: "curl -fsS -o /dev/null -w '%{http_code}' http://localhost:8080/"
+smoke: "curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/"
 merge_policy: pr
 board: file
 deploy: docker
