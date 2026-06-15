@@ -1,0 +1,22 @@
+id: S-101
+parent: F-003
+title: Status-Filter als Klick-Popover statt permanent
+status: To Do
+priority: P2
+spec: docs/specs/studis-kanban-board-ux.md
+implements:
+- AC4
+depends: null
+labels: null
+size_est: null
+dispo_est: null
+dispo_act: null
+dispo_forecast: null
+estimate_note: null
+confidence: null
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-06-15T08:45:06Z'
+updated_at: '2026-06-15T08:45:06Z'
+done_at: null
