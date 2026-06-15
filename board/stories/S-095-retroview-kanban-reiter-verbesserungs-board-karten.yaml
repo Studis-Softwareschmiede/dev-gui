@@ -1,7 +1,7 @@
 id: S-095
 parent: F-002
 title: RetroView Kanban-Reiter Verbesserungs-Board + Karten
-status: To Do
+status: Done
 priority: P2
 spec: docs/specs/retro-train-board-local.md
 implements:
@@ -19,5 +19,5 @@ branch: null
 pr: null
 blocked_reason: null
 created_at: '2026-06-15T08:35:43Z'
-updated_at: '2026-06-15T08:35:43Z'
-done_at: null
+updated_at: '2026-06-15T11:34:58Z'
+done_at: '2026-06-15T11:34:58Z'
