@@ -1,7 +1,7 @@
 id: S-115
 parent: F-006
 title: Feature-Branch-Strategie + Abarbeitungs-Hygiene
-status: To Do
+status: Done
 priority: P3
 spec: docs/specs/board-abarbeitungs-strategie.md
 implements:
@@ -19,5 +19,5 @@ branch: null
 pr: null
 blocked_reason: null
 created_at: '2026-06-15T10:07:22Z'
-updated_at: '2026-06-15T10:07:22Z'
-done_at: null
+updated_at: '2026-06-15T11:46:59Z'
+done_at: '2026-06-15T11:46:59Z'
