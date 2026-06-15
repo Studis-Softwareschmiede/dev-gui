@@ -1,7 +1,7 @@
 id: S-125
 parent: F-005
 title: 'Projekt-Terminal: Slug zentral zu WORKSPACE_DIR-Pfad aufloesen (WS + /api/command)'
-status: In Progress
+status: Done
 priority: P1
 spec: docs/specs/projekt-cockpit-navigation.md
 implements:
@@ -17,8 +17,8 @@ dispo_forecast: null
 estimate_note: null
 confidence: null
 branch: feat/S-125-slug-to-workspace-path
-pr: null
+pr: https://github.com/Studis-Softwareschmiede/dev-gui/pull/261
 blocked_reason: null
 created_at: '2026-06-15T00:00:00Z'
-updated_at: '2026-06-15T19:06:53Z'
-done_at: null
+updated_at: '2026-06-15T19:42:25Z'
+done_at: '2026-06-15T19:42:25Z'
