@@ -35,6 +35,7 @@ import {
   minimalGitEnv,
   GitHubAppTokenError,
 } from './githubAppToken.js';
+import { isWorkspaceWriteError, buildWriteErrorSetup } from './writeErrorSetup.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -379,10 +380,17 @@ export class GitHubCloner {
           'repo-not-found',
         );
       }
-      throw new GitHubClonerError(
+      // AC5: Klassifiziere Schreibfehler (z.B. Target nicht schreibbar) und baue Setup-Anleitung
+      const cloneErr = new GitHubClonerError(
         `git clone fehlgeschlagen: ${msg}`,
         'clone-failed',
       );
+      if (isWorkspaceWriteError(err)) {
+        cloneErr.setup = buildWriteErrorSetup({
+          errorMessage: `git clone fehlgeschlagen: ${msg}`,
+        });
+      }
+      throw cloneErr;
     } finally {
       // Always clean up the askpass script (contains no secret itself — token is in env)
       await this.#fsDeps.rm(askpassScript, { force: true }).catch(() => {});
@@ -427,10 +435,18 @@ export class GitHubCloner {
       await this.#fsDeps.mkdir(wsDir, { recursive: true });
     } catch (err) {
       // mkdir throws if exists AND some other error — recursive: true suppresses EEXIST
-      throw new GitHubClonerError(
-        `WORKSPACE_DIR '${wsDir}' konnte nicht angelegt werden: ${sanitizeErrorMessage(err.message)}`,
+      // AC5: Klassifiziere Schreibfehler (ENOENT/EACCES/EPERM/EROFS) und baue Setup-Anleitung.
+      const safeMsg = sanitizeErrorMessage(err.message);
+      const cloneErr = new GitHubClonerError(
+        `WORKSPACE_DIR '${wsDir}' konnte nicht angelegt werden: ${safeMsg}`,
         'workspace-not-writable',
       );
+      if (isWorkspaceWriteError(err)) {
+        cloneErr.setup = buildWriteErrorSetup({
+          errorMessage: `WORKSPACE_DIR '${wsDir}' konnte nicht angelegt werden: ${safeMsg}`,
+        });
+      }
+      throw cloneErr;
     }
   }
 
@@ -467,6 +483,8 @@ export class GitHubClonerError extends Error {
     this.name = 'GitHubClonerError';
     this.errorClass = errorClass;
     this.httpStatus = httpStatus ?? null;
+    /** @type {{ message: string, hostPath: string, commands: string[] }|null} */
+    this.setup = null; // Set by callers for AC5 workspace-write errors
   }
 }
 

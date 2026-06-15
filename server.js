@@ -18,6 +18,7 @@
  *   GET  /api/settings/ssh-keys/:user/private-key/export → Private-Key-Export (ssh-key-generation AC4, #115)
  *   POST /api/settings/ssh-keys/:user/rotate           → vollautomatische additive SSH-Key-Rotation (ssh-key-rotation AC1–AC8, #118)
  *   GET/PUT/DELETE /api/settings/workspace-path   → Workspace-Pfad-Konfiguration (workspace-path-config #85)
+ *   GET  /api/settings/workspace-health           → { overall, checks, counts } (workspace-health-hinweis AC2)
  *   POST /api/github/repos                        → Org-Repo anlegen (github-repo-create #59)
  *   GET  /api/workspace/repos                     → { repos: [...] } — live WORKSPACE_DIR scan (workspace-repos AC1, AC2)
  *   POST /api/workspace/repos/pull                → { name, status: "pulled" } — pull clone (workspace-repos AC3, AC4, AC7, AC8)
@@ -95,6 +96,7 @@ import { BitwardenMasterKeyService } from './src/BitwardenMasterKeyService.js';
 import { BoardAggregator } from './src/BoardAggregator.js';
 import { DocsReader } from './src/DocsReader.js';
 import { StoryMetricReader } from './src/StoryMetricReader.js';
+import { WorkspaceHealthChecker } from './src/WorkspaceHealthChecker.js';
 import { mountRouters } from './src/routerLoader.js';
 
 const PORT = Number(process.env.PORT ?? 8080);
@@ -207,6 +209,26 @@ const retroReader = new RetroReader({
 // ── Board-Aggregator (read-only Multi-Repo-Scan, AC1-3 + AC7-9) ──────────────
 const boardAggregator = new BoardAggregator();
 boardAggregator.startWatchers();
+
+// ── AC4 (workspace-health-hinweis): Start-Log-Warnung bei Fehlkonfiguration ──
+// Einmalig beim Boot — nie Start-Abbruch (try/catch), kein Secret im Log.
+try {
+  const bootHealthChecker = new WorkspaceHealthChecker({
+    listClonesFn: () => workspaceScanner.listClones(),
+    getIndexFn: () => boardAggregator.getIndex(),
+  });
+  const health = await bootHealthChecker.check();
+  if (health.overall !== 'ok') {
+    for (const c of health.checks) {
+      if (c.status !== 'ok') {
+        const fixPart = c.fix ? ` → Fix: ${c.fix}` : '';
+        console.warn(`[workspace-health] ${c.key}: ${c.status.toUpperCase()} — ${c.message}${fixPart}`);
+      }
+    }
+  }
+} catch (bootHealthErr) {
+  console.warn('[workspace-health] Boot-Check fehlgeschlagen (nicht kritisch):', bootHealthErr.message);
+}
 
 // ── DocsReader (read-only Projekt-Doku, AC1-3 projekt-spezifikation-anzeige) ──
 const docsReader = new DocsReader();

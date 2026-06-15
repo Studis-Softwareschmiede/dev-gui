@@ -165,17 +165,27 @@ function mapClonerErrorToResponse(res, err, repoName) {
       return res.status(400).json({ error: err.message });
 
     case 'workspace-missing':
-    case 'workspace-not-writable':
-      // AC7: WORKSPACE_DIR fehlt/nicht schreibbar
+      // AC7: WORKSPACE_DIR fehlt/nicht konfiguriert
       return res.status(500).json({ error: err.message });
+
+    case 'workspace-not-writable': {
+      // AC5/AC7: WORKSPACE_DIR nicht schreibbar → Setup-Anleitung falls vorhanden
+      const body = { error: err.message };
+      if (err.setup) body.setup = err.setup;
+      return res.status(500).json(body);
+    }
 
     case 'repo-not-found':
       // AC7: Repo nicht gefunden / kein Zugriff
       return res.status(404).json({ error: err.message });
 
-    case 'clone-failed':
+    case 'clone-failed': {
       // AC7: git clone fehlgeschlagen (Netz/Auth)
-      return res.status(502).json({ error: err.message });
+      // AC5: Setup-Anleitung wenn Ursache Schreibfehler ist
+      const body = { error: err.message };
+      if (err.setup) body.setup = err.setup;
+      return res.status(502).json(body);
+    }
 
     case 'credentials-incomplete':
     case 'credential-store-missing':

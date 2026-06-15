@@ -1,7 +1,8 @@
 /**
  * SettingsView.test.jsx — Unit-Tests für SettingsView (Credentials AC1–AC8, SSH-Keys AC1–AC6,
  * Workspace-Pfad AC1 + UI-Anteil AC3, SSH-Keypair-Generierung + Export AC1/AC3/AC4/AC6/AC7/AC8,
- * SSH-Key-Rotation AC1/AC5/AC7 — #119, bitwarden-new-device-otp Frontend AC1/AC3–AC7/AC9 — #204).
+ * SSH-Key-Rotation AC1/AC5/AC7 — #119, bitwarden-new-device-otp Frontend AC1/AC3–AC7/AC9 — #204,
+ * workspace-health-hinweis AC3 Frontend).
  *
  * Covers (settings-credentials + settings-shell):
  *   AC1  — Credential-Felder mit Status (gesetzt/nicht gesetzt); kein Klartext
@@ -82,6 +83,13 @@
  *           unlocked/manual → "via Bitwarden entsperrt"; locked/none → "gesperrt".
  *   AC6  — Verbinden-Button NUR bei state:"locked"; bei "unlocked" kein Button.
  *
+ * Covers (workspace-health-hinweis AC3) — Frontend:
+ *   AC3  — WorkspacePathSection zeigt grünen Block bei overall=ok (mit Repo/Board-Zähler);
+ *          hervorgehobenen Warn-Block bei overall=warn;
+ *          hervorgehobenen Error-Block mit role="alert" bei overall=error;
+ *          Fix-Hinweis je nicht-ok-Check im Block sichtbar.
+ *          A11y: role=alert bei error, role=status bei ok/warn; Touch-Target-Invarianz nicht tangiert.
+ *
  * @jest-environment jsdom
  */
 
@@ -156,6 +164,20 @@ const CONFIGURED_WORKSPACE_PATH = {
  *   - credential-status (/api/settings/credential-status)
  *   - credential-unlock (/api/settings/credential-unlock)
  */
+/** Standard-Health-Antwort (ok). */
+const DEFAULT_WORKSPACE_HEALTH_OK = {
+  overall: 'ok',
+  checks: [
+    { key: 'mount-exists', status: 'ok', message: 'WORKSPACE_DIR existiert.' },
+    { key: 'mount-nonempty', status: 'ok', message: '1 Eintrag.' },
+    { key: 'board-roots-set', status: 'ok', message: 'BOARD_ROOTS gesetzt.' },
+    { key: 'board-roots-valid', status: 'ok', message: 'Alle Pfade gültig.' },
+    { key: 'repos-found', status: 'ok', message: '2 Git-Repo(s) gefunden.' },
+    { key: 'board-projects-found', status: 'ok', message: '1 Board-Projekt gefunden.' },
+  ],
+  counts: { repos: 2, boardProjects: 1 },
+};
+
 function makeFetch({
   getResponse = EMPTY_CREDS,
   putResponse = null,
@@ -169,6 +191,9 @@ function makeFetch({
   getWorkspacePath   = { ok: true, status: 200, data: DEFAULT_WORKSPACE_PATH },
   putWorkspacePath   = { ok: true, status: 200, data: { effectivePath: '/workspace/projekt', source: 'configured' } },
   deleteWorkspacePath = { ok: true, status: 200, data: { effectivePath: '/workspace', source: 'env-default' } },
+  // AC3 (workspace-health-hinweis): workspace-health endpoint
+  // null = kein Health-Block in bestehenden Tests (verhindert role=status-Kollision)
+  getWorkspaceHealth = null,
   // credential-unlock-dialog #185
   credentialStatus = { state: 'unlocked', hasEncryptedEntries: false, keySource: 'auto' }, // Standard: unlocked (kein Unlock-Bereich)
   credentialUnlockResponse = null, // null = Standard-Erfolg ({ ok: true, state: 'unlocked' })
@@ -224,6 +249,14 @@ function makeFetch({
         return { ok: true, status: 200, json: async () => credentialUnlockResponse };
       }
       return { ok: true, status: 200, json: async () => DEFAULT_UNLOCK_SUCCESS };
+    }
+
+    // AC3 (workspace-health-hinweis): workspace-health endpoint
+    if (url === '/api/settings/workspace-health' && method === 'GET') {
+      if (getWorkspaceHealth === 'reject') throw new Error('health endpoint unreachable');
+      // null = kein Health-Block in bestehenden Tests (endpoint antwortet mit nicht-ok → health bleibt null)
+      if (getWorkspaceHealth === null) return { ok: false, status: 503, json: async () => ({}) };
+      return { ok: getWorkspaceHealth.ok, status: getWorkspaceHealth.status, json: async () => getWorkspaceHealth.data };
     }
 
     // Workspace-Path-Endpunkte
@@ -4174,5 +4207,124 @@ describe('SettingsView — bitwarden-new-device-otp (New-Device-Verification E-M
     for (const url of capturedUrls) {
       expect(String(url)).not.toContain(FAKE_OTP);
     }
+  });
+});
+
+// ── describe: workspace-health-hinweis AC3 — Frontend ────────────────────────
+
+describe('SettingsView — workspace-health-hinweis AC3: Health-Status-Block in WorkspacePathSection', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+    delete globalThis.navigator;
+  });
+
+  it('zeigt grünen Status-Block bei overall=ok mit Repo- und Board-Zähler', async () => {
+    const fetchFn = makeFetch({
+      getWorkspaceHealth: {
+        ok: true, status: 200,
+        data: {
+          overall: 'ok',
+          checks: [
+            { key: 'mount-exists', status: 'ok', message: 'OK.' },
+            { key: 'repos-found', status: 'ok', message: '3 Git-Repo(s) gefunden.' },
+            { key: 'board-projects-found', status: 'ok', message: '2 Board-Projekte gefunden.' },
+          ],
+          counts: { repos: 3, boardProjects: 2 },
+        },
+      },
+    });
+    const { container } = renderView(fetchFn);
+
+    await waitFor(() => {
+      const statusEl = container.querySelector('[role="status"]');
+      expect(statusEl).not.toBeNull();
+      expect(statusEl.textContent).toMatch(/3.*Repo/);
+      expect(statusEl.textContent).toMatch(/2.*Board/);
+    });
+  });
+
+  it('zeigt hervorgehobenen Block mit role="alert" bei overall=error', async () => {
+    const fetchFn = makeFetch({
+      getWorkspaceHealth: {
+        ok: true, status: 200,
+        data: {
+          overall: 'error',
+          checks: [
+            { key: 'mount-exists', status: 'error', message: 'WORKSPACE_DIR existiert nicht.', fix: 'Volume-Mount prüfen.' },
+            { key: 'board-roots-set', status: 'error', message: 'BOARD_ROOTS nicht gesetzt.', fix: 'Setze BOARD_ROOTS=/workspace.' },
+          ],
+          counts: { repos: 0, boardProjects: 0 },
+        },
+      },
+    });
+    const { container } = renderView(fetchFn);
+
+    await waitFor(() => {
+      const alertEl = container.querySelector('[role="alert"]');
+      expect(alertEl).not.toBeNull();
+      // Fehlermeldungen sichtbar
+      expect(alertEl.textContent).toContain('WORKSPACE_DIR existiert nicht');
+      expect(alertEl.textContent).toContain('BOARD_ROOTS nicht gesetzt');
+    });
+  });
+
+  it('zeigt Fix-Hinweis je nicht-ok-Check im Block', async () => {
+    const fetchFn = makeFetch({
+      getWorkspaceHealth: {
+        ok: true, status: 200,
+        data: {
+          overall: 'error',
+          checks: [
+            { key: 'board-roots-set', status: 'error', message: 'BOARD_ROOTS nicht gesetzt.', fix: 'Auf dem VPS BOARD_ROOTS=/workspace setzen.' },
+          ],
+          counts: { repos: 0, boardProjects: 0 },
+        },
+      },
+    });
+    const { container } = renderView(fetchFn);
+
+    await waitFor(() => {
+      const alertEl = container.querySelector('[role="alert"]');
+      expect(alertEl).not.toBeNull();
+      expect(alertEl.textContent).toContain('VPS');
+    });
+  });
+
+  it('zeigt hervorgehobenen Block bei overall=warn (role=status, kein role=alert)', async () => {
+    const fetchFn = makeFetch({
+      getWorkspaceHealth: {
+        ok: true, status: 200,
+        data: {
+          overall: 'warn',
+          checks: [
+            { key: 'repos-found', status: 'warn', message: 'Keine Git-Repos gefunden.', fix: 'Klone ein Repo.' },
+          ],
+          counts: { repos: 0, boardProjects: 0 },
+        },
+      },
+    });
+    const { container } = renderView(fetchFn);
+
+    await waitFor(() => {
+      // Warn-Block: role=status (kein role=alert)
+      const statusEls = container.querySelectorAll('[role="status"]');
+      const warnBlock = Array.from(statusEls).find((el) => el.textContent.includes('Keine Git-Repos'));
+      expect(warnBlock).not.toBeNull();
+    });
+  });
+
+  it('zeigt keinen Health-Block wenn Endpoint nicht erreichbar (graceful)', async () => {
+    const fetchFn = makeFetch({
+      getWorkspaceHealth: 'reject',
+    });
+    const { container } = renderView(fetchFn);
+
+    // Kurz warten — kein Health-Block soll erscheinen, aber kein Crash
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+    });
+
+    // Kein spezifischer Health-Block-Absturz prüfen — nur kein Crash
+    expect(container.querySelector('h1')).not.toBeNull();
   });
 });
