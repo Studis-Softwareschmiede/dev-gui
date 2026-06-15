@@ -22,6 +22,12 @@
  *   AC6  — Standalone: öffnet mit Projektliste, Klick lädt ein Projekt (lazy).
  *           Cockpit-Modus (lockedProject): direktes Anzeigen, keine Liste.
  *
+ * team-entity-icons:
+ *   AC12 — StoryCard zeigt ein <EntityIcon> (size=14) vor story.id wenn
+ *           story.labels ein Label der Form „<kind>:<id>" enthält
+ *           (kind ∈ agent|skill|knowledge). Label-Parsing via
+ *           parseEntityLabel(); kein neues Datenfeld, kein neuer API-Aufruf.
+ *
  * story-detail-ansicht:
  *   AC3  — Klick auf Story-Karte öffnet Detail-Ansicht mit drei Blöcken:
  *           (1) Zeiten (Start/Ende/Dauer), (2) Agenten-Flow (chronologisch,
@@ -54,6 +60,8 @@
  */
 
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { EntityIcon }       from './icons/EntityIcon.jsx';
+import { parseEntityLabel } from './icons/parseEntityLabel.js';
 
 // ── Status-Lebensyklus (board-subsystem §9.3) ─────────────────────────────────
 
@@ -1123,9 +1131,15 @@ function StatusColumn({ status, stories, onOpenSpec, onStoryClick }) {
  * }} props
  */
 function StoryCard({ story, onOpenSpec, onStoryClick }) {
+  // AC12 — derive entity reference from story labels for icon display.
+  const entityRef = parseEntityLabel(story.labels ?? []);
+
   const cardContent = (
     <>
       <div style={styles.storyHeader}>
+        {entityRef && (
+          <EntityIcon kind={entityRef.kind} id={entityRef.id} size={14} />
+        )}
         <span style={styles.storyId} aria-label="Story-ID">{story.id}</span>
         {story.priority && (
           <span style={styles.priorityBadge} aria-label={`Priorität: ${story.priority}`}>
