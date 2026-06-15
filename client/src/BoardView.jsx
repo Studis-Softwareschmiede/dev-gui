@@ -31,6 +31,11 @@
  *   AC4  — Soll-Ist zeigt ep_est↔ep_act + tok_est↔tok_total mit Abweichung %;
  *           fehlende Schätzung sauber dargestellt als „keine Schätzung".
  *
+ * autonome-board-abarbeitung:
+ *   AC4  — Board zeigt Ready-/Blocked-Status: Ready-To-Do-Stories tragen ein dezentes
+ *           „ready"-Badge (grün); Blocked-Stories zeigen ihren blocked_reason als
+ *           Hinweiszeile unter dem Titel. Kontrast WCAG AA; aria-label an Badges.
+ *
  * Story-Status-Lebenszyklus (board-subsystem §9.3):
  *   To Do | In Progress | Blocked | In Review | Done
  *
@@ -1115,6 +1120,8 @@ function StatusColumn({ status, stories, onOpenSpec, onStoryClick }) {
  * AC5 — Spec-Bezug ist klickbar (wenn onOpenSpec vorhanden): öffnet Spec im
  *        Spezifikation-Reiter. story.spec enthält den relativen Pfad (z.B. docs/specs/foo.md).
  * AC3 (story-detail-ansicht) — Karte als Button klickbar wenn onStoryClick vorhanden.
+ * AC4 (autonome-board-abarbeitung) — Ready-Badge für To-Do-Stories; blocked_reason als
+ *        Hinweiszeile unter dem Titel für Blocked-Stories.
  *
  * @param {{
  *   story: object,
@@ -1132,10 +1139,33 @@ function StoryCard({ story, onOpenSpec, onStoryClick }) {
             {story.priority}
           </span>
         )}
+        {/* AC4: Ready-Badge for To-Do stories */}
+        {story.status === 'To Do' && story.ready === true && (
+          <span
+            style={styles.readyBadge}
+            aria-label="Story ist ready für autonome Abarbeitung"
+            title="Ready — alle Voraussetzungen erfüllt"
+            data-testid={`ready-badge-${story.id}`}
+          >
+            ready
+          </span>
+        )}
       </div>
 
       {story.title && (
         <p style={styles.storyTitle}>{story.title}</p>
+      )}
+
+      {/* AC4: blocked_reason hint for Blocked stories */}
+      {story.status === 'Blocked' && story.blocked_reason && (
+        <p
+          style={styles.blockedReason}
+          aria-label={`Grund: ${story.blocked_reason}`}
+          title={story.blocked_reason}
+          data-testid={`blocked-reason-${story.id}`}
+        >
+          {story.blocked_reason}
+        </p>
       )}
 
       {/* Labels (AC6 — filter target) */}
@@ -1886,6 +1916,36 @@ const styles = {
     color: '#93c5fd',
     border: '1px solid #334155',
     flexShrink: 0,
+  },
+
+  // AC4 (autonome-board-abarbeitung): ready badge — dezent, grün-tonal
+  // #86efac on #1a2a1a: contrast ≈ 5.5:1 — WCAG AA compliant
+  readyBadge: {
+    fontSize: 9,
+    fontWeight: 700,
+    padding: '1px 5px',
+    borderRadius: 3,
+    background: '#1a2a1a',
+    color: '#86efac',
+    border: '1px solid #14532d',
+    flexShrink: 0,
+    letterSpacing: '0.04em',
+    textTransform: 'uppercase',
+  },
+
+  // AC4: blocked_reason display for Blocked stories
+  // #fbbf24 on #1a1a1a: contrast ≈ 6.9:1 — WCAG AA compliant
+  blockedReason: {
+    margin: '2px 0 4px',
+    fontSize: 11,
+    color: '#fbbf24',
+    lineHeight: 1.4,
+    fontStyle: 'italic',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    // Allow wrapping for accessibility — do not force single line for long reasons
+    whiteSpace: 'normal',
+    wordBreak: 'break-word',
   },
 
   labelRow: {

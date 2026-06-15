@@ -14,6 +14,12 @@
  *   AC5 — BoardView erhält openSpec-Callback: Klick auf Spec-Bezug öffnet
  *          den Spezifikation-Reiter und zeigt die jeweilige Datei.
  *
+ * autonome-board-abarbeitung:
+ *   AC2 — Im Reiter „Arbeiten" Knopf „Board abarbeiten", der mit
+ *          Bestätigungsdialog /agent-flow:flow im Projekt-Terminal startet.
+ *          Nutzt POST /api/command (bestehender CommandService-Mechanismus).
+ *   AC3 — Hinweis: offene Fragen → Story auf Blocked statt raten.
+ *
  * A11y (WCAG 2.1 AA):
  *   - Reiter-Leiste als <nav role="tablist"> mit aria-selected.
  *   - Aktive Reiter-Panel mit role="tabpanel".
@@ -24,6 +30,7 @@
  *   - Kein dangerouslySetInnerHTML.
  *   - Keine neuen Backend-Endpunkte in diesem Paket.
  *   - Keine Secrets im Bundle.
+ *   - Bestätigungsdialog verhindert versehentliches Auslösen.
  *
  * @param {{
  *   activeRepo: string,
@@ -162,13 +169,71 @@ export function CockpitView({ activeRepo, navigateFactory, onNavigate: _onNaviga
  * Extended for AC4/S-111: passes project-scoped wsUrl to Terminal and
  * projectPath to TriggerPanel so commands run in the active project session.
  *
- * @param {{ activeRepo: string }} props
+ * Extended for autonome-board-abarbeitung AC2/S-119:
+ * Adds „Board abarbeiten"-Knopf with confirmation dialog that fires
+ * /agent-flow:flow via POST /api/command (existing CommandService route).
+ * AC3: Hinweis that unclear items → Blocked (not guessing).
+ *
+ * @param {{ activeRepo: string, fetchFn?: Function }} props
+ *   fetchFn — injectable for tests (default: globalThis.fetch)
  */
-function FactoryWorkspace({ activeRepo }) {
+function FactoryWorkspace({ activeRepo, fetchFn }) {
   // Build project-scoped WS URL: /ws/terminal?project=<encoded-path>
   // Terminal already resolves the protocol (ws/wss) from window.location —
   // we pass a full URL here so it is testable without DOM.
   const wsUrl = buildTerminalWsUrl(activeRepo);
+
+  // ── Board-abarbeiten state (AC2 autonome-board-abarbeitung) ──────────────
+  /** 'idle' | 'confirm' | 'starting' | 'started' | 'error' */
+  const [flowState, setFlowState] = useState('idle');
+  const [flowError, setFlowError] = useState(null);
+
+  const handleFlowClick = useCallback(() => {
+    setFlowState('confirm');
+    setFlowError(null);
+  }, []);
+
+  const handleFlowCancel = useCallback(() => {
+    setFlowState('idle');
+    setFlowError(null);
+  }, []);
+
+  const handleFlowConfirm = useCallback(async () => {
+    setFlowState('starting');
+    setFlowError(null);
+
+    // Build request body — include projectPath for project-scoped session (AC5/S-111).
+    const body = { command: '/agent-flow:flow' };
+    if (activeRepo && typeof activeRepo === 'string' && activeRepo.trim()) {
+      body.projectPath = activeRepo.trim();
+    }
+
+    const _fetch = fetchFn ?? globalThis.fetch.bind(globalThis);
+    let res;
+    try {
+      res = await _fetch('/api/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    } catch {
+      setFlowState('error');
+      setFlowError('Netzwerkfehler — bitte erneut versuchen.');
+      return;
+    }
+
+    if (res.status === 202) {
+      setFlowState('started');
+      return;
+    }
+    if (res.status === 409) {
+      setFlowState('error');
+      setFlowError('Ein Job läuft bereits — bitte warten.');
+      return;
+    }
+    setFlowState('error');
+    setFlowError(`Fehler beim Starten (HTTP ${res.status}).`);
+  }, [activeRepo, fetchFn]);
 
   return (
     <div style={styles.factory}>
@@ -179,6 +244,113 @@ function FactoryWorkspace({ activeRepo }) {
 
       {/* Right sidebar — TriggerPanel + Dashboard stacked */}
       <div style={styles.sidebar}>
+        {/* AC2 (autonome-board-abarbeitung): Board-abarbeiten Knopf */}
+        <div style={styles.flowTriggerBox}>
+          <div style={styles.flowTriggerHeader}>Board abarbeiten</div>
+          <p style={styles.flowTriggerHint}>
+            Startet <code style={styles.code}>/agent-flow:flow</code> im Projekt-Terminal.
+            Offene Fragen oder Spec-Lücken → Story auf <strong>Blocked</strong> (statt raten).
+          </p>
+
+          {flowState === 'idle' && (
+            <button
+              type="button"
+              style={styles.btnFlowTrigger}
+              onClick={handleFlowClick}
+              aria-label="Board abarbeiten starten — öffnet Bestätigungsdialog"
+              data-testid="flow-board-btn"
+            >
+              Board abarbeiten
+            </button>
+          )}
+
+          {/* AC2: Bestätigungsdialog — verhindert versehentlichen Start */}
+          {flowState === 'confirm' && (
+            <div
+              role="dialog"
+              aria-modal="false"
+              aria-label="Board abarbeiten bestätigen"
+              style={styles.confirmBox}
+              data-testid="flow-confirm-dialog"
+            >
+              <p style={styles.confirmText}>
+                Startet die autonome Abarbeitung des Boards: ein Agent schreibt Code
+                und legt PRs an. Fortfahren?
+              </p>
+              <div style={styles.confirmBtns}>
+                <button
+                  type="button"
+                  style={styles.btnConfirm}
+                  onClick={handleFlowConfirm}
+                  aria-label="Bestätigen — Board-Abarbeitung starten"
+                  data-testid="flow-confirm-yes"
+                >
+                  Starten
+                </button>
+                <button
+                  type="button"
+                  style={styles.btnCancel}
+                  onClick={handleFlowCancel}
+                  aria-label="Abbrechen — kein Start"
+                  data-testid="flow-confirm-no"
+                >
+                  Abbrechen
+                </button>
+              </div>
+            </div>
+          )}
+
+          {flowState === 'starting' && (
+            <div
+              role="status"
+              aria-live="polite"
+              style={styles.flowStatus}
+              data-testid="flow-starting"
+            >
+              Starte…
+            </div>
+          )}
+
+          {flowState === 'started' && (
+            <div
+              role="status"
+              aria-live="polite"
+              style={styles.flowStatusOk}
+              data-testid="flow-started"
+            >
+              /agent-flow:flow gestartet. Fortschritt im Terminal.
+              <button
+                type="button"
+                style={styles.btnFlowReset}
+                onClick={() => setFlowState('idle')}
+                aria-label="Status zurücksetzen"
+                data-testid="flow-reset-btn"
+              >
+                OK
+              </button>
+            </div>
+          )}
+
+          {flowState === 'error' && (
+            <div
+              role="alert"
+              style={styles.flowStatusError}
+              data-testid="flow-error"
+            >
+              {flowError}
+              <button
+                type="button"
+                style={styles.btnFlowReset}
+                onClick={() => setFlowState('idle')}
+                aria-label="Fehlerstatus zurücksetzen"
+                data-testid="flow-error-reset"
+              >
+                Zurücksetzen
+              </button>
+            </div>
+          )}
+        </div>
+
         {/* Flow-Trigger-Panel — fire slash-commands in the active project session */}
         <TriggerPanel projectPath={activeRepo} />
 
@@ -335,6 +507,138 @@ const styles = {
     overflowY: 'auto',
     flex: '0 0 auto',
     order: 2,
+  },
+
+  // ── Board abarbeiten box (AC2 autonome-board-abarbeitung) ─────────────────
+
+  flowTriggerBox: {
+    padding: '12px 16px',
+    background: '#0d0d0d',
+    borderBottom: '1px solid #2a2a2a',
+    minWidth: 240,
+    maxWidth: 300,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 8,
+  },
+
+  flowTriggerHeader: {
+    fontSize: 12,
+    fontWeight: 700,
+    color: '#9ca3af',
+    textTransform: 'uppercase',
+    letterSpacing: '0.05em',
+  },
+
+  flowTriggerHint: {
+    fontSize: 11,
+    color: '#6b7280',
+    margin: 0,
+    lineHeight: 1.5,
+  },
+
+  code: {
+    fontFamily: 'monospace',
+    background: '#1a1a1a',
+    padding: '0 3px',
+    borderRadius: 2,
+    fontSize: 10,
+    color: '#93c5fd',
+  },
+
+  btnFlowTrigger: {
+    background: '#1d4ed8',
+    color: '#fff',
+    border: 'none',
+    borderRadius: 4,
+    padding: '8px 12px',
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: 'pointer',
+    minHeight: 44,
+    // Focus ring preserved (no outline:none)
+  },
+
+  confirmBox: {
+    background: '#111',
+    border: '1px solid #334155',
+    borderRadius: 6,
+    padding: '10px 12px',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 8,
+  },
+
+  confirmText: {
+    fontSize: 12,
+    color: '#d1d5db',
+    margin: 0,
+    lineHeight: 1.5,
+  },
+
+  confirmBtns: {
+    display: 'flex',
+    gap: 8,
+  },
+
+  btnConfirm: {
+    flex: 1,
+    background: '#15803d',
+    color: '#fff',
+    border: 'none',
+    borderRadius: 4,
+    padding: '6px 10px',
+    fontSize: 12,
+    fontWeight: 600,
+    cursor: 'pointer',
+    minHeight: 44,
+  },
+
+  btnCancel: {
+    flex: 1,
+    background: 'transparent',
+    color: '#9ca3af',
+    border: '1px solid #374151',
+    borderRadius: 4,
+    padding: '6px 10px',
+    fontSize: 12,
+    cursor: 'pointer',
+    minHeight: 44,
+  },
+
+  btnFlowReset: {
+    background: 'transparent',
+    border: '1px solid #374151',
+    color: '#9ca3af',
+    borderRadius: 4,
+    padding: '2px 8px',
+    fontSize: 11,
+    cursor: 'pointer',
+    marginTop: 4,
+    minHeight: 44,
+    display: 'block',
+  },
+
+  flowStatus: {
+    fontSize: 12,
+    color: '#9ca3af',
+    fontStyle: 'italic',
+  },
+
+  flowStatusOk: {
+    fontSize: 12,
+    color: '#86efac',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 4,
+  },
+
+  flowStatusError: {
+    fontSize: 12,
+    color: '#f87171',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 4,
   },
 
 };
