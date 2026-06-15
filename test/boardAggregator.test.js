@@ -23,6 +23,12 @@
  *          :slug mit ungültigem Format → 404; unbekannter Slug → 404;
  *          GET /api/board/projects bleibt erhalten.
  *
+ * Covers (story-detail-ansicht):
+ *   AC2 — GET /api/board/projects/:slug/stories/:id/detail liefert Story-Detail-Objekt
+ *          (read-only, lazy, hinter accessGuard);
+ *          ungültiges slug-Format → 404; ungültiges id-Format → 404;
+ *          unbekannter Slug → 404; happy-path 200 + { detail: {...} }.
+ *
  * AccessGuard:
  *   POST /api/board/projects/rescan (Schreib-Trigger) liegt hinter
  *   app.use('/api', accessGuard) in server.js — kein separater Middleware-Test
@@ -976,10 +982,10 @@ function httpFetch(server, path, method = 'GET') {
   });
 }
 
-function startServer(boardAggregator) {
+function startServer(boardAggregator, storyMetricReader) {
   const app = express();
   app.use(express.json());
-  app.use(boardRouter({ boardAggregator }));
+  app.use(boardRouter({ boardAggregator, storyMetricReader }));
   const server = createServer(app);
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server)));
 }
@@ -1217,6 +1223,107 @@ describe('boardRouter HTTP — GET /api/board/projects/:slug (AC5)', () => {
       expect(status).toBe(200);
       expect(Array.isArray(data.projects)).toBe(true);
       expect(data.projects[0].slug).toBe('my-repo');
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+});
+
+// ── AC2 (story-detail-ansicht) — GET /api/board/projects/:slug/stories/:id/detail ─
+
+describe('boardRouter HTTP — GET /api/board/projects/:slug/stories/:id/detail (AC2 story-detail-ansicht)', () => {
+  /** Minimal StoryMetricReader mock — returns a fixed detail object. */
+  function makeMockStoryMetricReader(detail = {}) {
+    return {
+      getDetail: async (_repoPath, _storyId) => ({
+        started_at: null,
+        ended_at: null,
+        duration: null,
+        flow: [],
+        ep_est: null,
+        ep_act: null,
+        tok_est: null,
+        tok_total: null,
+        size_est: null,
+        ep_dev: null,
+        ep_dev_pct: null,
+        tok_dev: null,
+        tok_dev_pct: null,
+        ...detail,
+      }),
+    };
+  }
+
+  it('returns 404 for slug with invalid format (starts with dot)', async () => {
+    const { aggregator } = makeAggregator();
+    const server = await startServer(aggregator, makeMockStoryMetricReader());
+    try {
+      const { status } = await httpFetch(server, '/api/board/projects/.invalid-slug/stories/S-001/detail');
+      expect(status).toBe(404);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('returns 404 for id with invalid format (starts with dot)', async () => {
+    const { aggregator } = makeAggregator();
+    const server = await startServer(aggregator, makeMockStoryMetricReader());
+    try {
+      const { status } = await httpFetch(server, '/api/board/projects/my-repo/stories/.invalid-id/detail');
+      expect(status).toBe(404);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('returns 404 for unknown slug', async () => {
+    const { aggregator } = makeAggregator();
+    const server = await startServer(aggregator, makeMockStoryMetricReader());
+    try {
+      const { status, data } = await httpFetch(server, '/api/board/projects/nonexistent/stories/S-001/detail');
+      expect(status).toBe(404);
+      expect(data).toHaveProperty('error');
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('happy-path: returns 200 + { detail: {...} } with mocked storyMetricReader', async () => {
+    const { aggregator } = makeAggregator();
+    const mockDetail = {
+      started_at: '2026-06-01T10:00:00.000Z',
+      ended_at: '2026-06-01T11:30:00.000Z',
+      duration: 5400,
+      flow: [{ seq: 1, agent: 'coder', iter: 1, gate: null, secs: 120, tok: 8000 }],
+      ep_est: 3,
+      ep_act: 4,
+      tok_est: 10000,
+      tok_total: 12000,
+      size_est: 'M',
+      ep_dev: 1,
+      ep_dev_pct: 33.3,
+      tok_dev: 2000,
+      tok_dev_pct: 20,
+    };
+    const server = await startServer(aggregator, makeMockStoryMetricReader(mockDetail));
+    try {
+      const { status, data } = await httpFetch(server, '/api/board/projects/my-repo/stories/S-001/detail');
+      expect(status).toBe(200);
+      expect(data).toHaveProperty('detail');
+      const { detail } = data;
+      expect(detail.started_at).toBe('2026-06-01T10:00:00.000Z');
+      expect(detail.ended_at).toBe('2026-06-01T11:30:00.000Z');
+      expect(detail.duration).toBe(5400);
+      expect(Array.isArray(detail.flow)).toBe(true);
+      expect(detail.flow.length).toBe(1);
+      expect(detail.flow[0].agent).toBe('coder');
+      expect(detail.ep_est).toBe(3);
+      expect(detail.ep_act).toBe(4);
+      expect(detail.tok_est).toBe(10000);
+      expect(detail.tok_total).toBe(12000);
+      expect(detail.size_est).toBe('M');
+      expect(detail.ep_dev).toBe(1);
+      expect(detail.tok_dev).toBe(2000);
     } finally {
       await new Promise((r) => server.close(r));
     }

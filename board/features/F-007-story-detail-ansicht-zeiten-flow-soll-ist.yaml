@@ -2,14 +2,16 @@ id: F-007
 title: Story-Detail-Ansicht (Zeiten/Flow/Soll-Ist)
 goal: 'Klick auf Story zeigt Detail: Start/Ende, Agenten-Flow, geschaetzte vs tatsaechliche
   EP+Tokens (Quelle Metrik-Ledger)'
-status: Backlog
+status: Done
 priority: P3
-spec: null
+spec: docs/specs/story-detail-ansicht.md
 definition_of_done: null
 labels: null
 depends: null
 owner: null
-stories: null
-progress: null
+stories:
+- S-116
+- S-117
+progress: 2/2
 created_at: '2026-06-15T10:07:22Z'
-updated_at: '2026-06-15T10:07:22Z'
+updated_at: '2026-06-15T12:17:00Z'

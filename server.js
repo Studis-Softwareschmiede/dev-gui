@@ -56,8 +56,9 @@
  *   GET    /api/retro/trend?category=<knowledge|agents|skills> → { category, lanes:[…], runs:[…], empty?, placeholder? } (retro-trend-backend AC1)
  *   GET    /api/board/projects                                → { projects:[…] } (dev-gui-board-aggregator AC1-3,AC7-9)
  *   POST   /api/board/projects/rescan                         → { ok: true } (dev-gui-board-aggregator AC9)
- *   GET    /api/board/projects/:slug/docs                    → { docs:[…] } (projekt-spezifikation-anzeige AC1,AC2)
- *   GET    /api/board/projects/:slug/docs/raw?path=<relpfad> → Roh-Markdown (projekt-spezifikation-anzeige AC2,AC3)
+ *   GET    /api/board/projects/:slug/docs                         → { docs:[…] } (projekt-spezifikation-anzeige AC1,AC2)
+ *   GET    /api/board/projects/:slug/docs/raw?path=<relpfad>      → Roh-Markdown (projekt-spezifikation-anzeige AC2,AC3)
+ *   GET    /api/board/projects/:slug/stories/:id/detail            → { detail: StoryDetail } (story-detail-ansicht AC2)
  *   WS   /ws/terminal                             → PtyManager bridge (guarded by AccessGuard)
  */
 
@@ -93,6 +94,7 @@ import { StackDeployOrchestrator } from './src/deploy/StackDeployOrchestrator.js
 import { BitwardenMasterKeyService } from './src/BitwardenMasterKeyService.js';
 import { BoardAggregator } from './src/BoardAggregator.js';
 import { DocsReader } from './src/DocsReader.js';
+import { StoryMetricReader } from './src/StoryMetricReader.js';
 import { mountRouters } from './src/routerLoader.js';
 
 const PORT = Number(process.env.PORT ?? 8080);
@@ -209,6 +211,9 @@ boardAggregator.startWatchers();
 // ── DocsReader (read-only Projekt-Doku, AC1-3 projekt-spezifikation-anzeige) ──
 const docsReader = new DocsReader();
 
+// ── StoryMetricReader (read-only, AC1-2 story-detail-ansicht) ────────────────
+const storyMetricReader = new StoryMetricReader();
+
 // ── deps-Objekt: alle Boundaries für den Auto-Loader ─────────────────────────
 // Expose ptyManager for routers that reference it (e.g. session.js reads state/restarts/startedAt).
 // These routers operate on the global (no-project) session, which preserves backward compat.
@@ -237,6 +242,7 @@ const deps = {
   retroReader,
   boardAggregator,
   docsReader,
+  storyMetricReader,
 };
 
 // ── AC1/AC2: Auto-Discovery + Mount aller API-Router ─────────────────────────
