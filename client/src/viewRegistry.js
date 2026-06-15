@@ -6,7 +6,7 @@
  *   AppShell.jsx imports only from here; no per-view imports or switch chains there.
  * AC8: Adding a new view = new view file + new entry here; AppShell.jsx unchanged.
  * AC9: All existing routes represented: factory, github, vps, cloudflare, deployments,
- *   settings, team, retro, retro-trend, and the implicit 'panel' root.
+ *   settings, team, retro, retro-trend, board, and the implicit 'panel' root.
  * AC10: Tile views listed in exact order (github, vps, cloudflare, factory, team,
  *   deployments); settings/retro/retro-trend have tile: null (no panel tile).
  * AC11: AppShell renders only the active view conditionally (see AppShell.jsx); all
@@ -28,6 +28,7 @@ import { SettingsView }     from './SettingsView.jsx';
 import { TeamView }         from './TeamView.jsx';
 import { RetroView }        from './RetroView.jsx';
 import { RetroTrendView }   from './RetroTrendView.jsx';
+import { BoardView }        from './BoardView.jsx';
 
 /**
  * @typedef {{ label: string, description: string }} TileMeta
@@ -113,6 +114,12 @@ export const VIEW_REGISTRY = [
   {
     id: 'retro-trend',
     Component: RetroTrendView,
+    tile: null,
+  },
+  // dev-gui-board-aggregator: route-only (not a panel tile)
+  {
+    id: 'board',
+    Component: BoardView,
     tile: null,
   },
 ];
