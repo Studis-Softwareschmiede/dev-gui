@@ -42,8 +42,14 @@
  *   - AC8: implizit — neue View nur via viewRegistry.js-Eintrag, kein AppShell-Edit.
  *   - AC9: alle Routen via Registry (github/vps/cloudflare/deployments/settings; retro + retro-trend in RetroView.test.jsx/RetroTrendView.test.jsx abgedeckt).
  *   - AC10: 6 Kacheln Reihenfolge github→vps→cloudflare→factory→team→deployments; Settings/Retro/Retro-Trend keine Kacheln.
- *   - AC11: FactoryView (Terminal) nur bei #/factory gemountet; Unmount bei Navigation weg.
+ *   - AC11: FactoryView (RepoOverview) nur bei #/factory gemountet; Unmount bei Navigation weg.
+ *          (projekt-cockpit-navigation AC1: #/factory zeigt jetzt Repo-Übersicht statt Terminal.)
  *   - AC12: A11y-neutral (aria-current/Fokus/Touch≥44px); keine neuen Secrets/Endpunkte.
+ *
+ * Covers (projekt-cockpit-navigation — AppShell-Ebene):
+ *   - AC1: #/factory zeigt Repo-Übersicht (statt Terminal); vollständige Tests in ProjektCockpit.test.jsx.
+ *   - AC2: #/factory/<repo> Deep-Link und Rückweg; vollständige Tests in ProjektCockpit.test.jsx.
+ *   - AC3: Cockpit mit Reitern; vollständige Tests in ProjektCockpit.test.jsx.
  *
  * Terminal, TriggerPanel and Dashboard are mocked to avoid WS/DOM complexity.
  *
@@ -1204,13 +1210,14 @@ describe('view-registry — AC11: FactoryView only mounted on factory route', ()
     expect(queryByRole('main', { name: /^terminal$/i })).toBeNull();
   });
 
-  it('FactoryView (Terminal main) IS present on factory route', async () => {
+  it('FactoryView (Repo-Übersicht) IS present on factory route (AC1: #/factory → Repo-Übersicht)', async () => {
     window.location.hash = '#/factory';
     window.dispatchEvent(new HashChangeEvent('hashchange'));
     const { queryByRole } = render(React.createElement(AppShell));
     await waitFor(() => {
-      // FactoryView mounts its main[aria-label="Terminal"] landmark
-      expect(queryByRole('main', { name: /^terminal$/i })).toBeTruthy();
+      // projekt-cockpit-navigation AC1: #/factory (no repo) → RepoOverview, not Terminal
+      expect(queryByRole('main', { name: /repo-übersicht/i })).toBeTruthy();
+      expect(queryByRole('main', { name: /^terminal$/i })).toBeNull();
     });
   });
 
@@ -1220,7 +1227,8 @@ describe('view-registry — AC11: FactoryView only mounted on factory route', ()
     const { queryByRole } = render(React.createElement(AppShell));
 
     await waitFor(() => {
-      expect(queryByRole('main', { name: /^terminal$/i })).toBeTruthy();
+      // projekt-cockpit-navigation AC1: #/factory → RepoOverview (not Terminal)
+      expect(queryByRole('main', { name: /repo-übersicht/i })).toBeTruthy();
     });
 
     // Navigate away (simulate browser hash change to github)
@@ -1230,8 +1238,8 @@ describe('view-registry — AC11: FactoryView only mounted on factory route', ()
     });
 
     await waitFor(() => {
-      // FactoryView must be gone (unmounted)
-      expect(queryByRole('main', { name: /^terminal$/i })).toBeNull();
+      // FactoryView (and its RepoOverview) must be gone (unmounted)
+      expect(queryByRole('main', { name: /repo-übersicht/i })).toBeNull();
       // GitHub view is now shown
       expect(queryByRole('main', { name: /github-ansicht/i })).toBeTruthy();
     });
