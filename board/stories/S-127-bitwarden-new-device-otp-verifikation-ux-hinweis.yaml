@@ -1,7 +1,7 @@
 id: S-127
 parent: F-010
 title: 'Bitwarden New-Device-OTP: Verifikation + UX-Hinweis im Verbinden-Dialog'
-status: To Do
+status: Done
 priority: P3
 spec: docs/specs/bitwarden-new-device-otp.md
 implements: null
@@ -22,5 +22,5 @@ branch: null
 pr: null
 blocked_reason: null
 created_at: '2026-06-15T19:42:15Z'
-updated_at: '2026-06-15T19:42:15Z'
-done_at: null
+updated_at: "2026-06-15T21:04:41Z"
+done_at: "2026-06-15T21:04:41Z"
