@@ -1,0 +1,26 @@
+id: S-127
+parent: F-010
+title: 'Bitwarden New-Device-OTP: Verifikation + UX-Hinweis im Verbinden-Dialog'
+status: To Do
+priority: P3
+spec: docs/specs/bitwarden-new-device-otp.md
+implements: null
+depends:
+- S-086
+labels:
+- ui
+- documentation
+github_issue: 263
+github_url: https://github.com/Studis-Softwareschmiede/dev-gui/issues/263
+size_est: null
+dispo_est: null
+dispo_act: null
+dispo_forecast: null
+estimate_note: null
+confidence: null
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-06-15T19:42:15Z'
+updated_at: '2026-06-15T19:42:15Z'
+done_at: null

@@ -1,0 +1,17 @@
+id: F-010
+title: Korrekturen
+goal: Sammel-Feature fuer kleinere Korrekturen/Nachbesserungen an der dev-gui (Auth-Robustheit,
+  Doku-Genauigkeit, UX-Klarstellungen), die keinem groesseren Feature zugeordnet sind
+status: To Do
+priority: P2
+spec: null
+definition_of_done: null
+labels: null
+depends: null
+owner: null
+stories:
+- S-126
+- S-127
+progress: 0/2
+created_at: '2026-06-15T19:42:15Z'
+updated_at: '2026-06-15T19:42:15Z'
