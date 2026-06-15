@@ -1,0 +1,15 @@
+id: F-002
+title: Retro/Train-Verbesserungs-Board lokal
+goal: 'retro/train-Promotion-Karten lokal im dev-gui als Kanban anzeigen (Quelle LEARNINGS.md),
+  GitHub-Board #5 ablösen + archivieren'
+status: Backlog
+priority: P2
+spec: null
+definition_of_done: null
+labels: null
+depends: null
+owner: null
+stories: null
+progress: null
+created_at: '2026-06-15T08:35:43Z'
+updated_at: '2026-06-15T08:35:43Z'

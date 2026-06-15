@@ -1,0 +1,23 @@
+id: S-094
+parent: F-002
+title: RetroReader getPromotionCards + api/retro/cards
+status: To Do
+priority: P2
+spec: docs/specs/retro-train-board-local.md
+implements:
+- AC1
+- AC2
+depends: null
+labels: null
+size_est: null
+dispo_est: null
+dispo_act: null
+dispo_forecast: null
+estimate_note: null
+confidence: null
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-06-15T08:35:43Z'
+updated_at: '2026-06-15T08:35:43Z'
+done_at: null
