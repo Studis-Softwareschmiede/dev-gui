@@ -16,4 +16,14 @@ Node-Vollstack: React-Frontend + Express/ws-Backend. Steuert die agent-flow-Fabr
 "$(ls -dt ~/.claude/plugins/cache/agent-flow/agent-flow/*/ | head -1)scripts/ensure-gh-auth.sh"
 ```
 
+Der Glob ist die **robuste, update-feste Variante** — er löst stets auf die aktuellste Plugin-Version auf.
+
+Für Kontexte ohne Glob-Auflösung (z.B. manuelles Ausführen in einer Shell, die Glob-Expansion in Anführungszeichen unterdrückt) ist nachfolgend der **aktuell aufgelöste absolute Pfad** (Plugin-Version `1da6c7dfc966`) angegeben:
+
+```bash
+/Users/alex/.claude/plugins/cache/agent-flow/agent-flow/1da6c7dfc966/scripts/ensure-gh-auth.sh
+```
+
+> **Hinweis:** Nach einem Plugin-Update ist dieser absolute Pfad veraltet. Neuen Pfad via `ls -dt ~/.claude/plugins/cache/agent-flow/agent-flow/*/` ermitteln und hier aktualisieren. Der Glob oben bleibt davon unberührt.
+
 Das Skript mintet den App-Token aus `.env.gpg`, loggt `gh` persistent ein (`~/.config/gh`) und konfiguriert git via `gh auth setup-git`. Idempotent — bei gültiger Auth passiert nichts. Gleicher Mechanismus läuft im Container über `docker-entrypoint.sh`.
