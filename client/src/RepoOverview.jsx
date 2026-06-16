@@ -7,6 +7,10 @@
  *          Loading-, Error- und Empty-State vorhanden.
  *   AC2 — Klick auf einen Repo-Eintrag setzt den Projekt-Kontext via navigateFactory(name).
  *
+ * fabric-intake-dialog:
+ *   AC1 — „Neues Projekt / Idee erfassen"-Button öffnet IntakeDialog (mode="new").
+ *          onNavigate('factory') nach erfolgreichem Submit (AC4).
+ *
  * A11y (WCAG 2.1 AA):
  *   - <main> mit aria-label.
  *   - aria-busy / aria-live für Ladezustand.
@@ -21,18 +25,40 @@
  *
  * @param {{
  *   navigateFactory: (repo: string | null) => void,
+ *   onNavigate?: (view: string) => void,
  * }} props
  */
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
+import { IntakeDialog } from './IntakeDialog.jsx';
 
 /**
- * @param {{ navigateFactory: (repo: string | null) => void }} props
+ * @param {{
+ *   navigateFactory: (repo: string | null) => void,
+ *   onNavigate?: (view: string) => void,
+ * }} props
  */
-export function RepoOverview({ navigateFactory }) {
+export function RepoOverview({ navigateFactory, onNavigate }) {
   const [loadState, setLoadState] = useState('idle'); // 'idle'|'loading'|'ok'|'error'
   const [loadError, setLoadError] = useState('');
   const [repos, setRepos] = useState([]);
+
+  // ── Intake-Dialog state (AC1 — fabric-intake-dialog, new mode) ───────────
+  const [intakeNewOpen, setIntakeNewOpen] = useState(false);
+
+  const handleIntakeNewOpen = useCallback(() => {
+    setIntakeNewOpen(true);
+  }, []);
+
+  const handleIntakeNewClose = useCallback(() => {
+    setIntakeNewOpen(false);
+  }, []);
+
+  // AC4: navigate to factory (terminal pane) after successful submit
+  const handleIntakeNewNavigate = useCallback((view) => {
+    setIntakeNewOpen(false);
+    if (onNavigate) onNavigate(view);
+  }, [onNavigate]);
 
   // Load once on mount (AC1)
   useEffect(() => {
@@ -66,7 +92,41 @@ export function RepoOverview({ navigateFactory }) {
 
   return (
     <main style={styles.main} aria-label="Repo-Übersicht">
-      <h1 style={styles.h1}>Fabrik — Projekt wählen</h1>
+      <div style={styles.headerRow}>
+        <h1 style={styles.h1}>Fabrik — Projekt wählen</h1>
+        {/* AC1 fabric-intake-dialog: new-mode trigger */}
+        {!intakeNewOpen ? (
+          <button
+            type="button"
+            style={styles.btnNewProject}
+            onClick={handleIntakeNewOpen}
+            aria-label="Neues Projekt / Idee erfassen — öffnet Intake-Dialog"
+            data-testid="intake-new-btn"
+          >
+            + Neues Projekt / Idee erfassen
+          </button>
+        ) : (
+          <button
+            type="button"
+            style={styles.btnNewProjectClose}
+            onClick={handleIntakeNewClose}
+            aria-label="Intake-Dialog schließen"
+            data-testid="intake-new-close-btn"
+          >
+            ✕ Schließen
+          </button>
+        )}
+      </div>
+
+      {/* Intake-Dialog (new mode) — visible when intakeNewOpen */}
+      {intakeNewOpen && (
+        <div style={styles.intakeNewWrapper} data-testid="intake-new-dialog-wrapper">
+          <IntakeDialog
+            mode="new"
+            onNavigate={handleIntakeNewNavigate}
+          />
+        </div>
+      )}
 
       {/* Loading */}
       {loadState === 'loading' && (
@@ -177,12 +237,53 @@ const styles = {
     color: '#e5e7eb',
   },
 
+  headerRow: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    flexWrap: 'wrap',
+    gap: 12,
+    marginBottom: 20,
+    flexShrink: 0,
+  },
+
   h1: {
-    margin: '0 0 20px',
+    margin: 0,
     fontSize: 24,
     fontWeight: 700,
     color: '#e5e7eb',
     flexShrink: 0,
+  },
+
+  btnNewProject: {
+    background: '#065f46',
+    color: '#fff',
+    border: 'none',
+    borderRadius: 4,
+    padding: '8px 16px',
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: 'pointer',
+    minHeight: 44,
+    flexShrink: 0,
+    // Focus ring preserved (no outline:none)
+  },
+
+  btnNewProjectClose: {
+    background: 'transparent',
+    color: '#9ca3af',
+    border: '1px solid #374151',
+    borderRadius: 4,
+    padding: '8px 16px',
+    fontSize: 13,
+    cursor: 'pointer',
+    minHeight: 44,
+    flexShrink: 0,
+  },
+
+  intakeNewWrapper: {
+    marginBottom: 20,
+    maxWidth: 560,
   },
 
   statusMsg: {

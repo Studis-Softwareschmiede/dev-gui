@@ -45,6 +45,7 @@ import { Dashboard } from './Dashboard.jsx';
 import { TriggerPanel } from './TriggerPanel.jsx';
 import { BoardView } from './BoardView.jsx';
 import { SpecView } from './SpecView.jsx';
+import { IntakeDialog } from './IntakeDialog.jsx';
 
 /** @type {Array<{ id: string, label: string }>} */
 const TABS = [
@@ -126,7 +127,7 @@ export function CockpitView({ activeRepo, navigateFactory, onNavigate: _onNaviga
           aria-labelledby="cockpit-tab-arbeiten"
           style={styles.tabPanel}
         >
-          <FactoryWorkspace activeRepo={activeRepo} />
+          <FactoryWorkspace activeRepo={activeRepo} onNavigate={_onNavigate} />
         </div>
       )}
 
@@ -177,11 +178,26 @@ export function CockpitView({ activeRepo, navigateFactory, onNavigate: _onNaviga
  * @param {{ activeRepo: string, fetchFn?: Function }} props
  *   fetchFn — injectable for tests (default: globalThis.fetch)
  */
-function FactoryWorkspace({ activeRepo, fetchFn }) {
+function FactoryWorkspace({ activeRepo, fetchFn, onNavigate }) {
   // Build project-scoped WS URL: /ws/terminal?project=<encoded-path>
   // Terminal already resolves the protocol (ws/wss) from window.location —
   // we pass a full URL here so it is testable without DOM.
   const wsUrl = buildTerminalWsUrl(activeRepo);
+
+  // ── Intake-Dialog state (C1 — fabric-intake-dialog AC1) ──────────────────
+  /** Whether the change-intake dialog is open */
+  const [intakeOpen, setIntakeOpen] = useState(false);
+
+  const handleIntakeClose = useCallback(() => {
+    setIntakeOpen(false);
+  }, []);
+
+  // AC4: after successful submit, navigate to factory (terminal pane)
+  // and close the intake panel
+  const handleIntakeNavigate = useCallback((view) => {
+    setIntakeOpen(false);
+    if (onNavigate) onNavigate(view);
+  }, [onNavigate]);
 
   // ── Board-abarbeiten state (AC2 autonome-board-abarbeitung) ──────────────
   /** 'idle' | 'confirm' | 'starting' | 'started' | 'error' */
@@ -351,6 +367,47 @@ function FactoryWorkspace({ activeRepo, fetchFn }) {
           )}
         </div>
 
+        {/* Intake-Dialog trigger (AC1 — fabric-intake-dialog, change mode) */}
+        <div style={styles.intakeTriggerBox}>
+          <div style={styles.flowTriggerHeader}>Änderung erfassen</div>
+          <p style={styles.flowTriggerHint}>
+            Beschreibe eine gewünschte Änderung — wird als{' '}
+            <code style={styles.code}>/agent-flow:requirement</code> an den Agenten übergeben.
+          </p>
+          {!intakeOpen ? (
+            <button
+              type="button"
+              style={styles.btnIntakeTrigger}
+              onClick={() => setIntakeOpen(true)}
+              aria-label="Änderungswunsch erfassen — öffnet Intake-Dialog"
+              data-testid="intake-change-btn"
+            >
+              Änderung erfassen
+            </button>
+          ) : (
+            <div style={styles.intakeDialogWrapper}>
+              <div style={styles.intakeDialogHeader}>
+                <span style={styles.intakeDialogTitle}>Änderungswunsch</span>
+                <button
+                  type="button"
+                  style={styles.btnIntakeClose}
+                  onClick={handleIntakeClose}
+                  aria-label="Intake-Dialog schließen"
+                  data-testid="intake-close-btn"
+                >
+                  ✕
+                </button>
+              </div>
+              <IntakeDialog
+                mode="change"
+                projectPath={activeRepo}
+                fetchFn={fetchFn}
+                onNavigate={handleIntakeNavigate}
+              />
+            </div>
+          )}
+        </div>
+
         {/* Flow-Trigger-Panel — fire slash-commands in the active project session */}
         <TriggerPanel projectPath={activeRepo} />
 
@@ -507,6 +564,63 @@ const styles = {
     overflowY: 'auto',
     flex: '0 0 auto',
     order: 2,
+  },
+
+  // ── Intake-Dialog trigger box (AC1 fabric-intake-dialog) ────────────────
+
+  intakeTriggerBox: {
+    padding: '12px 16px',
+    background: '#0d0d0d',
+    borderBottom: '1px solid #2a2a2a',
+    minWidth: 240,
+    maxWidth: 300,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 8,
+  },
+
+  btnIntakeTrigger: {
+    background: '#065f46',
+    color: '#fff',
+    border: 'none',
+    borderRadius: 4,
+    padding: '8px 12px',
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: 'pointer',
+    minHeight: 44,
+    // Focus ring preserved (no outline:none)
+  },
+
+  intakeDialogWrapper: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 0,
+  },
+
+  intakeDialogHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+  },
+
+  intakeDialogTitle: {
+    fontSize: 12,
+    fontWeight: 600,
+    color: '#9ca3af',
+  },
+
+  btnIntakeClose: {
+    background: 'transparent',
+    border: '1px solid #374151',
+    color: '#9ca3af',
+    borderRadius: 4,
+    padding: '2px 8px',
+    fontSize: 11,
+    cursor: 'pointer',
+    minHeight: 28,
+    // Focus ring preserved (no outline:none)
   },
 
   // ── Board abarbeiten box (AC2 autonome-board-abarbeitung) ─────────────────
