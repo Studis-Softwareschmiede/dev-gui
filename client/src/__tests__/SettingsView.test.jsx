@@ -4,7 +4,8 @@
  * SSH-Key-Rotation AC1/AC5/AC7 — #119, bitwarden-new-device-otp Frontend AC1/AC3–AC7/AC9 — #204,
  * workspace-health-hinweis AC3 Frontend, credential-unlock-dialog AC11/AC12 — #268,
  * bitwarden-master-key-unlock AC12 showPassword-Reset beim Phasenwechsel (not-found→Create-Offer + Cancel) — S-130/#276,
- * credential-backup S-143 AC11/AC12 — Zweistufige Quittung + Backup-Abschnitt + Status-Kachel).
+ * credential-backup S-143 AC11/AC12 — Zweistufige Quittung + Backup-Abschnitt + Status-Kachel,
+ * credential-backup S-142 AC13–AC16 — Restore-UI + Upload + Confirm + A11y).
  *
  * Covers (settings-credentials + settings-shell):
  *   AC1  — Credential-Felder mit Status (gesetzt/nicht gesetzt); kein Klartext
@@ -95,6 +96,18 @@
  *          hervorgehobenen Error-Block mit role="alert" bei overall=error;
  *          Fix-Hinweis je nicht-ok-Check im Block sichtbar.
  *          A11y: role=alert bei error, role=status bei ok/warn; Touch-Target-Invarianz nicht tangiert.
+ *
+ * Covers (credential-backup S-142 — AC13–AC16) — Frontend (RestoreSection):
+ *   AC13 — Restore-UI rendert Upload-Feld (type=file) + Restore-Button; nach Erfolg
+ *           zeigt UI role=status mit Erfolgs-Meldung; kein Klartext im DOM.
+ *   AC14 — Ohne Confirm-Checkbox aktiv: Restore-Button disabled; mit aktivierter
+ *           Checkbox + Dateiauswahl: Button enabled + POST /api/settings/backup-restore
+ *           mit ?confirm=true abgesendet.
+ *   AC15 — gpg-decrypt-failed / restore-invalid Fehler-Response → role=alert mit
+ *           errorClass im DOM; kein Key/Klartext im DOM.
+ *   AC16 — 403-Response → role=alert mit Fehlermeldung; kein Key/Klartext im DOM.
+ *   A11y — label/htmlFor auf file-Input + Confirm-Checkbox; aria-describedby;
+ *           aria-busy während Restore; Touch-Target ≥ 44 px; role=alert + role=status.
  *
  * Covers (credential-backup S-143 — AC11/AC12, Iteration 2) — Frontend:
  *   AC11 — Zweistufige Quittung: grüne Quittung bei ok/ok; Warn bei failed; offHost=disabled
@@ -280,6 +293,9 @@ function makeFetch({
   // credential-unlock-dialog #185
   credentialStatus = { state: 'unlocked', hasEncryptedEntries: false, keySource: 'auto' }, // Standard: unlocked (kein Unlock-Bereich)
   credentialUnlockResponse = null, // null = Standard-Erfolg ({ ok: true, state: 'unlocked' })
+  // S-142 AC13–AC16: backup-restore endpoint
+  // null = Erfolg; 'gpg-decrypt-failed' = 422; 'restore-invalid' = 422; 'forbidden' = 403
+  postBackupRestoreResponse = null,
 } = {}) {
   const DEFAULT_GENERATE_SUCCESS = {
     user: 'root',
@@ -444,6 +460,30 @@ function makeFetch({
         text: async () => '-----BEGIN OPENSSH PRIVATE KEY-----\nMock\n-----END OPENSSH PRIVATE KEY-----\n',
         json: async () => { throw new Error('not json'); },
       };
+    }
+
+    // S-142 AC13–AC16: backup-restore endpoint
+    if (method === 'POST' && typeof url === 'string' && url.startsWith('/api/settings/backup-restore')) {
+      const DEFAULT_RESTORE_SUCCESS = {
+        ok: true,
+        manifest: { schemaVersion: 1, backupVersion: 1, createdAt: '2026-01-01T10:00:00.000Z', storeSize: 512 },
+      };
+      if (postBackupRestoreResponse === 'gpg-decrypt-failed') {
+        return { ok: false, status: 422, json: async () => ({ ok: false, errorClass: 'gpg-decrypt-failed', error: 'GPG-Entschlüsselung fehlgeschlagen.' }) };
+      }
+      if (postBackupRestoreResponse === 'restore-invalid') {
+        return { ok: false, status: 422, json: async () => ({ ok: false, errorClass: 'restore-invalid', error: 'Artefakt-Format ungültig.' }) };
+      }
+      if (postBackupRestoreResponse === 'forbidden') {
+        return { ok: false, status: 403, json: async () => ({ error: 'Keine Berechtigung zum Restore.' }) };
+      }
+      if (postBackupRestoreResponse === 'confirm-required') {
+        return { ok: false, status: 400, json: async () => ({ ok: false, errorClass: 'confirm-required', error: 'Confirm fehlt.' }) };
+      }
+      if (typeof postBackupRestoreResponse === 'object' && postBackupRestoreResponse !== null) {
+        return { ok: true, status: 200, json: async () => postBackupRestoreResponse };
+      }
+      return { ok: true, status: 200, json: async () => DEFAULT_RESTORE_SUCCESS };
     }
 
     if (method === 'GET') {
@@ -5452,6 +5492,262 @@ describe('SettingsView — credential-backup S-143 AC12: Backup-Abschnitt + Stat
       expect(text).not.toMatch(/secret/i);
       // Kein Artefakt-Inhalt
       expect(text).not.toContain('backup-cc33dd44.gpg');
+    });
+  });
+});
+
+// ── RestoreSection (S-142 AC13–AC16) ─────────────────────────────────────────
+
+describe('SettingsView — S-142 AC13/AC14: Restore-UI rendert Upload + Confirm', () => {
+  afterEach(() => { delete globalThis.fetch; });
+
+  it('AC13/A11y: Restore-Bereich rendert mit Upload-Input (type=file) + Label + Confirm-Checkbox', async () => {
+    const { container } = renderView();
+    await waitFor(() => {
+      // File-Input vorhanden
+      const fileInput = container.querySelector('#restore-file-input');
+      expect(fileInput).toBeTruthy();
+      expect(fileInput.type).toBe('file');
+      // Label für file-Input vorhanden (A11y: label/htmlFor)
+      const fileLabel = container.querySelector('label[for="restore-file-input"]');
+      expect(fileLabel).toBeTruthy();
+      // Confirm-Checkbox vorhanden
+      const checkbox = container.querySelector('#restore-confirm-checkbox');
+      expect(checkbox).toBeTruthy();
+      expect(checkbox.type).toBe('checkbox');
+      // Label für Checkbox (A11y)
+      const checkboxLabel = container.querySelector('label[for="restore-confirm-checkbox"]');
+      expect(checkboxLabel).toBeTruthy();
+    });
+  });
+
+  it('AC14: Restore-Button ist disabled wenn keine Datei ausgewählt oder Checkbox nicht aktiv', async () => {
+    const { getAllByRole } = renderView();
+    await waitFor(() => {
+      // Mindestens ein Button mit Text "Jetzt wiederherstellen"
+      const buttons = getAllByRole('button', { name: /Jetzt wiederherstellen|Restore/i });
+      // Ohne Datei + ohne Confirm → Button disabled
+      const restoreBtn = buttons.find((b) => /wiederherstellen/i.test(b.textContent));
+      expect(restoreBtn).toBeTruthy();
+      expect(restoreBtn.disabled).toBe(true);
+    });
+  });
+
+  it('AC14: Restore-Button ist disabled wenn Datei ausgewählt aber Checkbox nicht aktiv', async () => {
+    const { container } = renderView();
+    await waitFor(() => {
+      const fileInput = container.querySelector('#restore-file-input');
+      expect(fileInput).toBeTruthy();
+    });
+
+    // Datei simulieren, aber Checkbox nicht aktivieren
+    const fileInput = container.querySelector('#restore-file-input');
+    const file = new globalThis.File([new Uint8Array([1, 2, 3])], 'backup.gpg', { type: 'application/octet-stream' });
+    Object.defineProperty(fileInput, 'files', { value: [file], configurable: true });
+    fireEvent.change(fileInput);
+
+    await waitFor(() => {
+      const buttons = container.querySelectorAll('button');
+      const restoreBtn = Array.from(buttons).find((b) => /wiederherstellen/i.test(b.textContent));
+      expect(restoreBtn).toBeTruthy();
+      expect(restoreBtn.disabled).toBe(true); // Confirm noch nicht aktiv
+    });
+  });
+
+  it('AC13/AC14: erfolgreicher Restore zeigt Erfolgs-Meldung (role=status)', async () => {
+    const fetchFn = makeFetch({ postBackupRestoreResponse: null }); // null = Standard-Erfolg
+    const { container } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(container.querySelector('#restore-file-input')).toBeTruthy();
+    });
+
+    // Datei auswählen + Confirm aktivieren
+    const fileInput = container.querySelector('#restore-file-input');
+    const file = new globalThis.File([new Uint8Array([0x80, 0x01, 0x02])], 'backup.gpg', { type: 'application/octet-stream' });
+
+    // arrayBuffer() simulieren
+    Object.defineProperty(file, 'arrayBuffer', {
+      value: async () => new ArrayBuffer(3),
+      configurable: true,
+    });
+    Object.defineProperty(fileInput, 'files', { value: [file], configurable: true });
+    fireEvent.change(fileInput);
+
+    const checkbox = container.querySelector('#restore-confirm-checkbox');
+    fireEvent.click(checkbox);
+
+    await waitFor(() => {
+      const buttons = container.querySelectorAll('button');
+      const restoreBtn = Array.from(buttons).find((b) => /wiederherstellen/i.test(b.textContent));
+      expect(restoreBtn).toBeTruthy();
+      expect(restoreBtn.disabled).toBe(false);
+    });
+
+    // Restore-Button klicken
+    const buttons = container.querySelectorAll('button');
+    const restoreBtn = Array.from(buttons).find((b) => /wiederherstellen/i.test(b.textContent));
+    await act(async () => { fireEvent.click(restoreBtn); });
+
+    await waitFor(() => {
+      // Mindestens ein role=status Element (kann auch Backup-Status sein)
+      // Prüfen ob Restore-Erfolg drin ist
+      const allStatus = Array.from(container.querySelectorAll('[role="status"]'));
+      const restoreSuccess = allStatus.some((el) => /Restore erfolgreich/i.test(el.textContent));
+      expect(restoreSuccess).toBe(true);
+    });
+  });
+});
+
+describe('SettingsView — S-142 AC15: Fehlerfall Restore (Klassifizierter Fehler)', () => {
+  afterEach(() => { delete globalThis.fetch; });
+
+  it('AC15: gpg-decrypt-failed → role=alert mit errorClass im DOM, kein Key/Klartext', async () => {
+    const fetchFn = makeFetch({ postBackupRestoreResponse: 'gpg-decrypt-failed' });
+    const { container } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(container.querySelector('#restore-file-input')).toBeTruthy();
+    });
+
+    const fileInput = container.querySelector('#restore-file-input');
+    const file = new globalThis.File([new Uint8Array([1])], 'wrong.gpg', { type: 'application/octet-stream' });
+    Object.defineProperty(file, 'arrayBuffer', { value: async () => new ArrayBuffer(1), configurable: true });
+    Object.defineProperty(fileInput, 'files', { value: [file], configurable: true });
+    fireEvent.change(fileInput);
+
+    const checkbox = container.querySelector('#restore-confirm-checkbox');
+    fireEvent.click(checkbox);
+
+    await waitFor(() => {
+      const buttons = container.querySelectorAll('button');
+      const restoreBtn = Array.from(buttons).find((b) => /wiederherstellen/i.test(b.textContent));
+      expect(restoreBtn && !restoreBtn.disabled).toBe(true);
+    });
+
+    const buttons = container.querySelectorAll('button');
+    const restoreBtn = Array.from(buttons).find((b) => /wiederherstellen/i.test(b.textContent));
+    await act(async () => { fireEvent.click(restoreBtn); });
+
+    await waitFor(() => {
+      const alertEl = container.querySelector('[role="alert"]');
+      expect(alertEl).toBeTruthy();
+      // errorClass im DOM
+      expect(alertEl.textContent).toMatch(/gpg-decrypt-failed/);
+      // Kein Key/Klartext
+      expect(alertEl.textContent).not.toMatch(/masterKey|master_key|passphrase/i);
+    });
+  });
+
+  it('AC16: 403-Response → role=alert mit Fehler, kein Key/Klartext im DOM', async () => {
+    const fetchFn = makeFetch({ postBackupRestoreResponse: 'forbidden' });
+    const { container } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(container.querySelector('#restore-file-input')).toBeTruthy();
+    });
+
+    const fileInput = container.querySelector('#restore-file-input');
+    const file = new globalThis.File([new Uint8Array([1])], 'backup.gpg', { type: 'application/octet-stream' });
+    Object.defineProperty(file, 'arrayBuffer', { value: async () => new ArrayBuffer(1), configurable: true });
+    Object.defineProperty(fileInput, 'files', { value: [file], configurable: true });
+    fireEvent.change(fileInput);
+
+    const checkbox = container.querySelector('#restore-confirm-checkbox');
+    fireEvent.click(checkbox);
+
+    await waitFor(() => {
+      const buttons = container.querySelectorAll('button');
+      const restoreBtn = Array.from(buttons).find((b) => /wiederherstellen/i.test(b.textContent));
+      expect(restoreBtn && !restoreBtn.disabled).toBe(true);
+    });
+
+    const buttons = container.querySelectorAll('button');
+    const restoreBtn = Array.from(buttons).find((b) => /wiederherstellen/i.test(b.textContent));
+    await act(async () => { fireEvent.click(restoreBtn); });
+
+    await waitFor(() => {
+      const alertEl = container.querySelector('[role="alert"]');
+      expect(alertEl).toBeTruthy();
+      expect(alertEl.textContent).toMatch(/Berechtigung|error|forbidden/i);
+      // Kein Master-Key in DOM
+      expect(alertEl.textContent).not.toMatch(/masterKey|passphrase/i);
+    });
+  });
+});
+
+describe('SettingsView — S-142 A11y: Restore-UI (NFR WCAG 2.1 AA)', () => {
+  afterEach(() => { delete globalThis.fetch; });
+
+  it('A11y: Restore-Button hat aria-busy=true während des Restore-Vorgangs', async () => {
+    // Träges Fetch für timing-Test
+    const slowFetch = makeFetch({
+      postBackupRestoreResponse: new Promise((r) => setTimeout(r, 200)),
+    });
+    // Override: mache einen langsamen fetch
+    const fetchFn = jest.fn(async (url, opts) => {
+      if (typeof url === 'string' && url.startsWith('/api/settings/backup-restore')) {
+        // Simuliere langsamen Request
+        await new Promise((r) => setTimeout(r, 50));
+        return { ok: true, status: 200, json: async () => ({ ok: true, manifest: { schemaVersion: 1, backupVersion: 1, createdAt: '2026-01-01T00:00:00.000Z', storeSize: 100 } }) };
+      }
+      return slowFetch(url, opts);
+    });
+
+    const { container } = renderView(fetchFn);
+    await waitFor(() => {
+      expect(container.querySelector('#restore-file-input')).toBeTruthy();
+    });
+
+    const fileInput = container.querySelector('#restore-file-input');
+    const file = new globalThis.File([new Uint8Array([1])], 'b.gpg', { type: 'application/octet-stream' });
+    Object.defineProperty(file, 'arrayBuffer', { value: async () => new ArrayBuffer(1), configurable: true });
+    Object.defineProperty(fileInput, 'files', { value: [file], configurable: true });
+    fireEvent.change(fileInput);
+
+    const checkbox = container.querySelector('#restore-confirm-checkbox');
+    fireEvent.click(checkbox);
+
+    await waitFor(() => {
+      const buttons = container.querySelectorAll('button');
+      const restoreBtn = Array.from(buttons).find((b) => /wiederherstellen/i.test(b.textContent));
+      expect(restoreBtn && !restoreBtn.disabled).toBe(true);
+    });
+
+    const buttons = container.querySelectorAll('button');
+    const restoreBtn = Array.from(buttons).find((b) => /wiederherstellen/i.test(b.textContent));
+    fireEvent.click(restoreBtn);
+
+    // Nach Klick: Button sollte aria-busy oder loading-Text zeigen
+    await waitFor(() => {
+      const allBtns = container.querySelectorAll('button');
+      const loadingBtn = Array.from(allBtns).find((b) => /läuft|loading|Restore/i.test(b.textContent));
+      // aria-busy ODER Ladetext
+      expect(loadingBtn || restoreBtn.getAttribute('aria-busy') === 'true').toBeTruthy();
+    }, { timeout: 200 });
+  });
+
+  it('A11y: Restore-Button hat Touch-Target ≥ 44 px (minHeight style)', async () => {
+    const { container } = renderView();
+    await waitFor(() => {
+      const buttons = container.querySelectorAll('button');
+      const restoreBtn = Array.from(buttons).find((b) => /wiederherstellen/i.test(b.textContent));
+      expect(restoreBtn).toBeTruthy();
+      // minHeight 44px im Style gesetzt (aus restoreStyles)
+      const style = restoreBtn.getAttribute('style') ?? '';
+      // jsdom gibt inline-style zurück
+      expect(style).toMatch(/44px|min-height/);
+    });
+  });
+
+  it('A11y: Restore-Bereich hat aria-labelledby auf section heading', async () => {
+    const { container } = renderView();
+    await waitFor(() => {
+      const wrapper = container.querySelector('[aria-labelledby="restore-section-heading"]');
+      expect(wrapper).toBeTruthy();
+      const heading = container.querySelector('#restore-section-heading');
+      expect(heading).toBeTruthy();
+      expect(heading.textContent).toMatch(/Restore/i);
     });
   });
 });

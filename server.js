@@ -48,6 +48,7 @@
  *   POST   /api/deployments/stacks/:stackName/deploy          → { result, stack? } (stack-deploy-orchestration AC6/AC7/AC10/AC11)
  *   DELETE /api/deployments/stacks/:stackName/undeploy        → { result, reason? } (stack-deploy-orchestration AC8/AC10/AC11)
  *   GET    /api/deployments/stacks/:stackName/status          → StackStatus (stack-deploy-orchestration AC9)
+ *   POST   /api/settings/backup-restore                        → { ok: true, manifest? } — Restore aus Backup-Artefakt (S-142 AC13–AC16)
  *   GET    /api/version                                        → { version } — image build timestamp (build-version)
  *   GET    /api/team                                           → { agents:[...], skills:[...], knowledge:[...] } (team-view-backend AC1)
  *   GET    /api/team/:kind/:id                                 → { ...meta, body } (team-view-backend AC4)
