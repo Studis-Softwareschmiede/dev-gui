@@ -56,10 +56,12 @@ Der verschlüsselte Credential-Store (`secrets.enc.json`) wird nach **jedem** er
 - **AC6** — **lokale Quittung:** Nach erfolgreicher lokaler Kopie liefert die Store-Operation eine Rückmeldung mit Stufe „lokal gesichert ✓"; bei lokalem Fehlschlag eine **Warnung** statt grüner Quittung. (Testbar über die Operations-Response/den UI-State.)
 - **AC7** — **Floor:** Master-Key, Master-Passwort und der **entschlüsselte** Store-Klartext erscheinen in **keinem** Log/Audit/HTTP-Response/WS-Frame/Argv/Frontend-Bundle — auch nicht beim Backup-Erzeugen/GPG-Aufruf (GPG-Passphrase nicht über Argv). (Testbar: Logs/Response/Argv enthalten Key/Passwort/Klartext nicht.)
 
-### Off-Host + Ziel-Einstellungen + zweistufige Quittung (S-141)
+### Off-Host-Backup Backend (S-141)
 - **AC8** — **Zusätzlich** zur lokalen Kopie wird dasselbe verschlüsselte Artefakt an das konfigurierte Off-Host-Ziel (S3-kompatibel **oder** SFTP) hochgeladen; die lokale Kopie bleibt unabhängig vom Remote-Ergebnis bestehen.
 - **AC9** — **Remote-Creds als Secrets:** Off-Host-Zugangsdaten werden im `CredentialStore` (write-only) gehalten und erscheinen **nie** als Settings-Klartext, **nie** im Frontend-Bundle/Log/Response/WS. (Testbar: Settings-/Status-Antworten enthalten die Remote-Secrets nicht im Klartext.)
 - **AC10** — **Transport-Robustheit:** Ein nicht erreichbares/abgelehntes Remote-Ziel führt **nicht** zum Crash und **nicht** zum Rollback der Cred-Operation; der Upload wird robust behandelt (begrenzter Retry/Status) und ein endgültiger Fehlschlag als „off-host fehlgeschlagen ⚠" quittiert, die lokale Kopie bleibt gültig. (Testbar: bei gemocktem Upload-Fehler bleibt der Store-Write erfolgreich + lokale Kopie vorhanden, die Off-Host-Stufe meldet Warnung.)
+
+### Backup-Settings-UI + zweistufige Quittung (S-143)
 - **AC11** — **Zweistufige Quittung:** Die UI zeigt „lokal gesichert ✓" sofort nach der lokalen Kopie und „off-host gesichert ✓" nach erfolgreichem Upload; bleibt eine Stufe aus/fehlerhaft, erscheint statt der grünen Quittung eine **Stufen-genaue Warnung**. (Testbar über den UI-State je Stufe.)
 - **AC12** — **Settings-Abschnitt „Backup / Sicherung":** Die `SettingsView` bietet einen Abschnitt mit Ziel-Typ (lokal/S3/SFTP), Pfad/URL, Remote-Creds (write-only), Retention, An/Aus und einer **Status-Kachel** (letztes Backup: Zeit, Ergebnis je Stufe, Ziel) — A11y-konform (Labels, Fehlerzuordnung, Touch-Targets ≥ 44 px). Die Status-Kachel zeigt **nur** Metadaten (kein Key/Secret/Klartext). (Testbar: Abschnitt rendert die Felder + Status-Kachel; keine Geheimwerte im DOM/Bundle.)
 
