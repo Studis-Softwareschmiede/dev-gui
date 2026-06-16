@@ -1,7 +1,7 @@
 id: S-126
 parent: F-010
 title: 'gh-Auth: absoluten ensure-gh-auth.sh-Pfad in CLAUDE.md hinterlegen'
-status: To Do
+status: Done
 priority: P3
 spec: null
 implements: null
@@ -10,15 +10,15 @@ labels:
 - documentation
 github_issue: 262
 github_url: https://github.com/Studis-Softwareschmiede/dev-gui/issues/262
-size_est: null
+size_est: S
 dispo_est: null
-dispo_act: null
+dispo_act: 2
 dispo_forecast: null
-estimate_note: null
-confidence: null
-branch: null
-pr: null
+estimate_note: 'Doku-only: absoluten ensure-gh-auth.sh-Pfad zusätzlich in CLAUDE.md, Glob bleibt primär. S (2 EP, 1 Iteration).'
+confidence: low
+branch: feat/S-126-gh-auth-abs-path
+pr: 303
 blocked_reason: null
 created_at: '2026-06-15T19:42:15Z'
-updated_at: '2026-06-15T19:42:15Z'
-done_at: null
+updated_at: '2026-06-17T02:00:00Z'
+done_at: '2026-06-17T02:00:00Z'
