@@ -1,0 +1,25 @@
+id: S-145
+parent: F-010
+title: 'dev-gui-cred-Volume: Ownership für frischen Deploy (Dockerfile mkdir+chown /home/node/.cred)'
+status: To Do
+priority: P1
+spec: docs/specs/credential-runtime-unlock.md
+implements:
+- AC18
+depends: null
+labels:
+- security
+github_issue: 300
+github_url: https://github.com/Studis-Softwareschmiede/dev-gui/issues/300
+size_est: S
+dispo_est: null
+dispo_act: null
+dispo_forecast: null
+estimate_note: 'Folge-Finding aus F-012/S-139: dev-gui-cred-Volume (Mount /home/node/.cred) wird bei frischer Erstellung root-owned → manueller chown beim S-139-Rollout nötig. Fix: Dockerfile pre-creates+chownt /home/node/.cred zu node:node (analog /home/node/.claude) vor USER node, damit Docker das Volume mit uid-1000-Ownership seedet. S.'
+confidence: medium
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-06-17T00:00:00Z'
+updated_at: '2026-06-17T00:00:00Z'
+done_at: null
