@@ -20,11 +20,19 @@
  *          Nutzt POST /api/command (bestehender CommandService-Mechanismus).
  *   AC3 — Hinweis: offene Fragen → Story auf Blocked statt raten.
  *
+ * fabric-intake-dialog:
+ *   AC8 — „Board abarbeiten"-Button (Phase B) löst /agent-flow:flow über
+ *          POST /api/command aus und ist bei aktivem Job (Session state:"busy")
+ *          deaktiviert (globales Lock-Modell, analog TriggerPanel). Nach
+ *          erfolgreichem Auslösen (202) → onNavigate('factory') damit der
+ *          Lauf live im Terminal sichtbar ist.
+ *
  * A11y (WCAG 2.1 AA):
  *   - Reiter-Leiste als <nav role="tablist"> mit aria-selected.
  *   - Aktive Reiter-Panel mit role="tabpanel".
  *   - Sichtbarer Fokusring — KEIN outline:none.
  *   - Touch-Targets ≥ 44 px.
+ *   - Button disabled via disabled-Attribut + Label (nie nur Farbe).
  *
  * Security (Floor):
  *   - Kein dangerouslySetInnerHTML.
@@ -39,7 +47,7 @@
  * }} props
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { Terminal } from './Terminal.jsx';
 import { Dashboard } from './Dashboard.jsx';
 import { TriggerPanel } from './TriggerPanel.jsx';
@@ -163,6 +171,9 @@ export function CockpitView({ activeRepo, navigateFactory, onNavigate: _onNaviga
 
 // ── FactoryWorkspace ──────────────────────────────────────────────────────────
 
+/** Session poll interval in ms — matches TriggerPanel default (AC8). */
+const SESSION_POLL_MS = 3_000;
+
 /**
  * FactoryWorkspace — the original FactoryView inner content:
  * Terminal + TriggerPanel + Dashboard.
@@ -175,10 +186,17 @@ export function CockpitView({ activeRepo, navigateFactory, onNavigate: _onNaviga
  * /agent-flow:flow via POST /api/command (existing CommandService route).
  * AC3: Hinweis that unclear items → Blocked (not guessing).
  *
- * @param {{ activeRepo: string, fetchFn?: Function }} props
- *   fetchFn — injectable for tests (default: globalThis.fetch)
+ * Extended for fabric-intake-dialog AC8/S-136:
+ * The „Board abarbeiten"-Knopf is now also AC8-compliant: polls GET /api/session
+ * (state:"busy") to derive busy state and disables the button when a job is
+ * running. After 202, calls onNavigate('factory') so the run is visible live
+ * in the Terminal pane (consistent with IntakeDialog/AC4 pattern).
+ *
+ * @param {{ activeRepo: string, fetchFn?: Function, pollInterval?: number }} props
+ *   fetchFn      — injectable for tests (default: globalThis.fetch)
+ *   pollInterval — session poll interval in ms (default: SESSION_POLL_MS, override for tests)
  */
-function FactoryWorkspace({ activeRepo, fetchFn, onNavigate }) {
+function FactoryWorkspace({ activeRepo, fetchFn, onNavigate, pollInterval = SESSION_POLL_MS }) {
   // Build project-scoped WS URL: /ws/terminal?project=<encoded-path>
   // Terminal already resolves the protocol (ws/wss) from window.location —
   // we pass a full URL here so it is testable without DOM.
@@ -199,10 +217,52 @@ function FactoryWorkspace({ activeRepo, fetchFn, onNavigate }) {
     if (onNavigate) onNavigate(view);
   }, [onNavigate]);
 
-  // ── Board-abarbeiten state (AC2 autonome-board-abarbeitung) ──────────────
+  // ── Session busy state (AC8 fabric-intake-dialog) ─────────────────────────
+  // Polls GET /api/session (state:"busy") to derive isRunning — same pattern
+  // as TriggerPanel. Used to disable the „Board abarbeiten"-Button (AC8).
+  /** 'idle' | 'running' — derived from GET /api/session state */
+  const [sessionRunState, setSessionRunState] = useState('idle');
+
+  // Stable ref so poll effect doesn't re-register on every render
+  const fetchFnRef = useRef(fetchFn ?? globalThis.fetch.bind(globalThis));
+  useEffect(() => {
+    fetchFnRef.current = fetchFn ?? globalThis.fetch.bind(globalThis);
+  }, [fetchFn]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function pollSession() {
+      try {
+        const res = await fetchFnRef.current('/api/session');
+        if (!res.ok) return;
+        const json = await res.json();
+        if (!cancelled) {
+          setSessionRunState(json.state === 'busy' ? 'running' : 'idle');
+        }
+      } catch {
+        // network error — keep current state
+      }
+    }
+
+    pollSession();
+    const timer = setInterval(pollSession, pollInterval);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [pollInterval]);
+
+  const isSessionBusy = sessionRunState === 'running';
+
+  // ── Board-abarbeiten state (AC2 autonome-board-abarbeitung / AC8 fabric-intake-dialog) ──
   /** 'idle' | 'confirm' | 'starting' | 'started' | 'error' */
   const [flowState, setFlowState] = useState('idle');
   const [flowError, setFlowError] = useState(null);
+
+  // AC8: button is disabled when a session is busy (global lock model).
+  // Also disabled when local flowState is in-progress (confirm/starting).
+  const isBoardBtnDisabled = isSessionBusy || flowState === 'starting';
 
   const handleFlowClick = useCallback(() => {
     setFlowState('confirm');
@@ -224,7 +284,7 @@ function FactoryWorkspace({ activeRepo, fetchFn, onNavigate }) {
       body.projectPath = activeRepo.trim();
     }
 
-    const _fetch = fetchFn ?? globalThis.fetch.bind(globalThis);
+    const _fetch = fetchFnRef.current;
     let res;
     try {
       res = await _fetch('/api/command', {
@@ -239,17 +299,23 @@ function FactoryWorkspace({ activeRepo, fetchFn, onNavigate }) {
     }
 
     if (res.status === 202) {
-      setFlowState('started');
+      // AC8 (fabric-intake-dialog): navigate to terminal pane so run is visible.
+      // Consistent with IntakeDialog/AC4 pattern (onNavigate('factory')).
+      setFlowState('idle');
+      setSessionRunState('running'); // optimistic update — poll will confirm
+      if (onNavigate) onNavigate('factory');
       return;
     }
     if (res.status === 409) {
+      // Job already running — reflect session state
+      setSessionRunState('running');
       setFlowState('error');
       setFlowError('Ein Job läuft bereits — bitte warten.');
       return;
     }
     setFlowState('error');
     setFlowError(`Fehler beim Starten (HTTP ${res.status}).`);
-  }, [activeRepo, fetchFn]);
+  }, [activeRepo, onNavigate]);
 
   return (
     <div style={styles.factory}>
@@ -271,13 +337,31 @@ function FactoryWorkspace({ activeRepo, fetchFn, onNavigate }) {
           {flowState === 'idle' && (
             <button
               type="button"
-              style={styles.btnFlowTrigger}
-              onClick={handleFlowClick}
-              aria-label="Board abarbeiten starten — öffnet Bestätigungsdialog"
+              style={isBoardBtnDisabled ? styles.btnFlowTriggerDisabled : styles.btnFlowTrigger}
+              disabled={isBoardBtnDisabled}
+              aria-disabled={isBoardBtnDisabled}
+              onClick={isBoardBtnDisabled ? undefined : handleFlowClick}
+              aria-label={
+                isSessionBusy
+                  ? 'Board abarbeiten — gesperrt (Job läuft)'
+                  : 'Board abarbeiten starten — öffnet Bestätigungsdialog'
+              }
               data-testid="flow-board-btn"
             >
-              Board abarbeiten
+              {isSessionBusy ? 'Board abarbeiten — gesperrt' : 'Board abarbeiten'}
             </button>
+          )}
+
+          {/* AC8 (fabric-intake-dialog): lock notice when session busy */}
+          {isSessionBusy && flowState === 'idle' && (
+            <div
+              role="status"
+              aria-live="polite"
+              style={styles.lockNotice}
+              data-testid="flow-board-lock-notice"
+            >
+              Ein Job läuft — Trigger gesperrt.
+            </div>
           )}
 
           {/* AC2: Bestätigungsdialog — verhindert versehentlichen Start */}
@@ -327,25 +411,7 @@ function FactoryWorkspace({ activeRepo, fetchFn, onNavigate }) {
             </div>
           )}
 
-          {flowState === 'started' && (
-            <div
-              role="status"
-              aria-live="polite"
-              style={styles.flowStatusOk}
-              data-testid="flow-started"
-            >
-              /agent-flow:flow gestartet. Fortschritt im Terminal.
-              <button
-                type="button"
-                style={styles.btnFlowReset}
-                onClick={() => setFlowState('idle')}
-                aria-label="Status zurücksetzen"
-                data-testid="flow-reset-btn"
-              >
-                OK
-              </button>
-            </div>
-          )}
+          {/* 'started' state no longer shown — AC8: after 202 we navigate to terminal pane */}
 
           {flowState === 'error' && (
             <div
@@ -671,6 +737,26 @@ const styles = {
     cursor: 'pointer',
     minHeight: 44,
     // Focus ring preserved (no outline:none)
+  },
+
+  // AC8 (fabric-intake-dialog): disabled state when session busy
+  btnFlowTriggerDisabled: {
+    background: '#1e293b',
+    color: '#64748b',
+    border: 'none',
+    borderRadius: 4,
+    padding: '8px 12px',
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: 'not-allowed',
+    minHeight: 44,
+  },
+
+  // AC8: lock notice text when session busy (supplements disabled button — not color alone)
+  lockNotice: {
+    fontSize: 11,
+    color: '#fbbf24',
+    fontStyle: 'italic',
   },
 
   confirmBox: {
