@@ -26,7 +26,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { CredentialStore } from '../src/CredentialStore.js';
-import { runBackup, resolveBackupDir, resolveRetentionCount, DEFAULT_RETENTION_COUNT, BACKUP_SCHEMA_VERSION } from '../src/BackupEngine.js';
+import { runBackup, resolveBackupDir, resolveRetentionCount, resolveSidecarPath, writeSidecar, DEFAULT_RETENTION_COUNT, BACKUP_SCHEMA_VERSION } from '../src/BackupEngine.js';
 import { encrypt, decrypt, isGpgAvailable } from '../src/BackupCrypto.js';
 
 // ── Konstanten ──────────────────────────────────────────────────────────────
@@ -538,5 +538,105 @@ describe('BackupEngine — resolveBackupDir / resolveRetentionCount (Konfigurati
       if (saved !== undefined) process.env.CRED_BACKUP_RETENTION = saved;
       else delete process.env.CRED_BACKUP_RETENTION;
     }
+  });
+});
+
+describe('BackupEngine — Sidecar-Persistenz (I2-Fix / AC12)', () => {
+  let dir;
+  let backupDir;
+  let savedEnv;
+
+  beforeEach(async () => {
+    gpgOk = await isGpgAvailable();
+    dir = await makeTmpDir();
+    backupDir = join(dir, 'backups');
+    savedEnv = {
+      CRED_STORE_DIR: process.env.CRED_STORE_DIR,
+      CRED_BACKUP_DIR: process.env.CRED_BACKUP_DIR,
+    };
+    // CRED_STORE_DIR → sidecar landet im tmpDir neben backup-config.json
+    process.env.CRED_STORE_DIR = dir;
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+    for (const [k, v] of Object.entries(savedEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+
+  it('Sidecar wird nach erfolgreichem runBackup() geschrieben (metadaten-only)', async () => {
+    if (!gpgOk) return;
+
+    await runBackup({
+      masterKeyRaw: TEST_MASTER_KEY,
+      storeFilePath: join(dir, 'secrets.enc.json'),
+      backupDir,
+      storeBlob: '{"version":1,"entries":{}}',
+      offHostConfig: null, // disabled
+    });
+
+    // Sidecar muss existieren
+    const sidecarPath = resolveSidecarPath();
+    expect(sidecarPath).toBeDefined();
+    const raw = await import('node:fs/promises').then((m) => m.readFile(sidecarPath, 'utf8'));
+    const parsed = JSON.parse(raw);
+
+    // Metadaten-only: nur local/offHost/at — kein Pfad/Secret/Artefakt-Inhalt
+    expect(parsed.local).toBe('ok');
+    expect(parsed.offHost).toBe('disabled');
+    expect(typeof parsed.at).toBe('string');
+
+    // Kein Pfad/Secret in der Sidecar
+    expect(raw).not.toContain(dir);
+    expect(raw).not.toContain(TEST_MASTER_KEY);
+    expect(raw).not.toContain('backups');
+  });
+
+  it('Sidecar hat Rechte 0600 (keine world-read)', async () => {
+    if (!gpgOk) return;
+
+    await runBackup({
+      masterKeyRaw: TEST_MASTER_KEY,
+      storeFilePath: join(dir, 'secrets.enc.json'),
+      backupDir,
+      storeBlob: '{"version":1}',
+      offHostConfig: null,
+    });
+
+    const sidecarPath = resolveSidecarPath();
+    const s = await import('node:fs/promises').then((m) => m.stat(sidecarPath));
+    expect(s.mode & 0o777).toBe(0o600);
+  });
+
+  it('Sidecar-Schreibfehler bricht den Backup-Flow nicht (best-effort, AC4)', async () => {
+    if (!gpgOk) return;
+
+    // CRED_STORE_DIR auf nicht-schreibbaren Pfad setzen → Sidecar-Schreiben schlägt fehl
+    process.env.CRED_STORE_DIR = '/dev/null/no-such-dir';
+
+    // runBackup darf trotzdem erfolgreich sein
+    const result = await runBackup({
+      masterKeyRaw: TEST_MASTER_KEY,
+      storeFilePath: join(dir, 'secrets.enc.json'),
+      backupDir,
+      storeBlob: '{"version":1}',
+      offHostConfig: null,
+    });
+
+    // Backup war erfolgreich (Sidecar-Fehler hat Flow nicht gebrochen)
+    expect(result.local).toBe('ok');
+    expect(result.offHost).toBe('disabled');
+  });
+
+  it('writeSidecar() ist ein No-Op wenn CRED_STORE_DIR nicht gesetzt', async () => {
+    delete process.env.CRED_STORE_DIR;
+
+    // Darf nicht werfen
+    await expect(writeSidecar('ok', 'disabled')).resolves.toBeUndefined();
+
+    // resolveSidecarPath gibt null zurück
+    expect(resolveSidecarPath()).toBeNull();
   });
 });

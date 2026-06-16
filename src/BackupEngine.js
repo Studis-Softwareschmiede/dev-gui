@@ -22,11 +22,11 @@
  * @module BackupEngine
  */
 
-import { readFile, readdir, rename, mkdir, open, unlink, stat as fsStat, chmod } from 'node:fs/promises';
+import { readFile, readdir, rename, mkdir, open, unlink, writeFile, stat as fsStat, chmod } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { encrypt } from './BackupCrypto.js';
-import { uploadArtefact, resolveOffHostConfig } from './BackupUploader.js';
+import { uploadArtefact, resolveOffHostConfigAsync } from './BackupUploader.js';
 
 /** Aktuelle Backup-Schema-Version (für Restore-Kompatibilitäts-Check). */
 export const BACKUP_SCHEMA_VERSION = 1;
@@ -78,10 +78,13 @@ export async function runBackup(opts) {
     _uploaderFn = uploadArtefact,
   } = opts;
 
-  // Resolve off-host config: null = disabled (explicit), undefined = read from env
+  // Resolve off-host config:
+  //   null       = explicitly disabled (test override)
+  //   object     = explicit override (tests or callers with pre-resolved config)
+  //   undefined  = read from BackupConfigStore (JSON-Datei > Env-Vars, Architekt-Entscheid S-143)
   const offHostConfig = _offHostConfigArg === null
     ? null
-    : (_offHostConfigArg !== undefined ? _offHostConfigArg : resolveOffHostConfig());
+    : (_offHostConfigArg !== undefined ? _offHostConfigArg : await resolveOffHostConfigAsync());
 
   // AC7: masterKeyRaw wird NIEMALS geloggt
   try {
@@ -93,9 +96,11 @@ export async function runBackup(opts) {
       try {
         blob = await readFile(storeFilePath, 'utf8');
       } catch (err) {
+        const offHostVal = offHostConfig ? 'failed' : 'disabled';
+        await writeSidecar('failed', offHostVal);
         return {
           local: 'failed',
-          offHost: offHostConfig ? 'failed' : 'disabled',
+          offHost: offHostVal,
           errorClass: 'backup-failed',
           message: `[BackupEngine] secrets.enc.json nicht lesbar: ${err.message}`,
         };
@@ -116,9 +121,11 @@ export async function runBackup(opts) {
     try {
       encryptedBuf = await encrypt(masterKeyRaw, Buffer.from(artefactJson, 'utf8'));
     } catch (gpgErr) {
+      const offHostVal = offHostConfig ? 'failed' : 'disabled';
+      await writeSidecar('failed', offHostVal);
       return {
         local: 'failed',
-        offHost: offHostConfig ? 'failed' : 'disabled',
+        offHost: offHostVal,
         errorClass: gpgErr.errorClass ?? 'backup-failed',
         // AC7: Fehlertext enthält NICHT den Master-Key
         message: `[BackupEngine] GPG-Verschlüsselung fehlgeschlagen: ${gpgErr.message}`,
@@ -177,6 +184,10 @@ export async function runBackup(opts) {
       }
     }
 
+    // 7. Sidecar-Persistenz: Stufen-Ergebnis für Status-Kachel (AC12 / I2-Fix).
+    // Metadaten-only (kein Pfad/Secret/Artefakt-Inhalt). Best-effort: Fehler darf Flow nicht brechen.
+    await writeSidecar('ok', offHostResult);
+
     return {
       local: 'ok',
       offHost: offHostResult,
@@ -186,6 +197,8 @@ export async function runBackup(opts) {
     // AC4: Kein Rollback des Store-Writes — nur Fehlerbericht
     // AC7: err.message enthält NICHT den Master-Key (alle internen Fehlertexte oben halten das ein)
     // AC10: Remote-Fehler dürfen nie diese Stelle erreichen (uploadArtefact fängt selbst ab)
+    // Sidecar: best-effort auch im Fehlerfall (damit Status-Kachel letzten Fehler zeigen kann)
+    await writeSidecar('failed', offHostConfig ? 'failed' : 'disabled');
     return {
       local: 'failed',
       offHost: offHostConfig ? 'failed' : 'disabled',
@@ -279,4 +292,43 @@ export function resolveRetentionCount() {
     if (Number.isFinite(n) && n >= 1) return n;
   }
   return DEFAULT_RETENTION_COUNT;
+}
+
+/**
+ * Gibt den Pfad zur Sidecar-Datei zurück (backup-last-result.json).
+ * Neben backup-config.json auf dem persistenten Credential-Volume (CRED_STORE_DIR).
+ *
+ * @returns {string|null} Absoluter Pfad oder null wenn CRED_STORE_DIR nicht gesetzt.
+ */
+export function resolveSidecarPath() {
+  const storeDir = process.env.CRED_STORE_DIR?.trim();
+  if (!storeDir) return null;
+  return join(storeDir, 'backup-last-result.json');
+}
+
+/**
+ * Schreibt das Stufen-Ergebnis atomar in die Sidecar-Datei (best-effort).
+ * Metadaten-only: local/offHost-Ergebnis + Zeitstempel — KEIN Pfad/Secret/Artefakt-Inhalt.
+ * Rechte: 0600. Atomar: tmp + rename.
+ * Fehler beim Schreiben brechen den Backup-/Cred-Flow NICHT (AC4).
+ *
+ * @param {'ok'|'failed'} local
+ * @param {'ok'|'failed'|'disabled'} offHost
+ * @returns {Promise<void>}
+ */
+export async function writeSidecar(local, offHost) {
+  const sidecarPath = resolveSidecarPath();
+  if (!sidecarPath) return; // CRED_STORE_DIR nicht gesetzt → still überspringen
+
+  const payload = JSON.stringify({ local, offHost, at: new Date().toISOString() });
+  const tmpPath = sidecarPath + '.tmp.' + randomBytes(4).toString('hex');
+
+  try {
+    await writeFile(tmpPath, payload, { encoding: 'utf8', mode: 0o600 });
+    await chmod(tmpPath, 0o600);
+    await rename(tmpPath, sidecarPath);
+  } catch {
+    // best-effort: Sidecar-Fehler darf den Backup-/Cred-Flow nicht brechen (AC4)
+    try { await unlink(tmpPath); } catch { /* ignore */ }
+  }
 }

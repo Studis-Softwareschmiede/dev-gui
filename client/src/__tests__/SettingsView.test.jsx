@@ -3,7 +3,8 @@
  * Workspace-Pfad AC1 + UI-Anteil AC3, SSH-Keypair-Generierung + Export AC1/AC3/AC4/AC6/AC7/AC8,
  * SSH-Key-Rotation AC1/AC5/AC7 — #119, bitwarden-new-device-otp Frontend AC1/AC3–AC7/AC9 — #204,
  * workspace-health-hinweis AC3 Frontend, credential-unlock-dialog AC11/AC12 — #268,
- * bitwarden-master-key-unlock AC12 showPassword-Reset beim Phasenwechsel (not-found→Create-Offer + Cancel) — S-130/#276).
+ * bitwarden-master-key-unlock AC12 showPassword-Reset beim Phasenwechsel (not-found→Create-Offer + Cancel) — S-130/#276,
+ * credential-backup S-143 AC11/AC12 — Zweistufige Quittung + Backup-Abschnitt + Status-Kachel).
  *
  * Covers (settings-credentials + settings-shell):
  *   AC1  — Credential-Felder mit Status (gesetzt/nicht gesetzt); kein Klartext
@@ -95,6 +96,24 @@
  *          Fix-Hinweis je nicht-ok-Check im Block sichtbar.
  *          A11y: role=alert bei error, role=status bei ok/warn; Touch-Target-Invarianz nicht tangiert.
  *
+ * Covers (credential-backup S-143 — AC11/AC12, Iteration 2) — Frontend:
+ *   AC11 — Zweistufige Quittung: grüne Quittung bei ok/ok; Warn bei failed; offHost=disabled
+ *          → nur lokale Stufe; kein backup-Feld → keine Quittung; role=status + aria-live=polite;
+ *          kein Secret/Klartext im Quittungs-DOM.
+ *          S1-Fix: setBackupResult(null) zu Beginn jeder async-Op.
+ *   AC12 — Abschnitt „Backup / Sicherung": h2 „Backup / Sicherung"; Status-Kachel (role=status,
+ *          aria-labelledby=backup-status-tile); Kachel zeigt Zeit + Ziel-Typ + „Noch kein Backup";
+ *          Remote-Creds-Felder nur bei offHostEnabled=true; write-only Input (type=password);
+ *          label/htmlFor A11y; aria-invalid bei Fehler; Touch-Target ≥ 44 px;
+ *          kein Secret in Status-Kachel (artefactName nicht im Tile-DOM).
+ *          Architekt-Entscheid (S-143, Variante B): Ziel-Konfiguration UI-schreibbar
+ *          (GET /api/settings/backup-config laden, PUT speichern); editierbare Felder
+ *          (offHostEnabled, targetType, bucket, endpoint, prefix, region, host, port, user,
+ *          retentionCount); Speichern-Button vorhanden; 403 → Fehlermeldung.
+ *          I1-Fix: backupDir NICHT in Status-Response + NICHT im DOM (I3).
+ *          I3-Fix: interner Backup-Pfad (/home/node/.cred/backups) nirgends im DOM.
+ *          S4-Fix: statusTileLabel color #9ca3af (WCAG ≥ 4.5:1).
+ *
  * @jest-environment jsdom
  */
 
@@ -183,6 +202,60 @@ const DEFAULT_WORKSPACE_HEALTH_OK = {
   counts: { repos: 2, boardProjects: 1 },
 };
 
+/** Standard-Backup-Status-Antwort (kein letztes Backup, off-host deaktiviert).
+ * I1-Fix: kein backupDir in der Response. */
+const DEFAULT_BACKUP_STATUS_NO_OFFHOST = {
+  lastBackup: null,
+  offHostType: null,
+  offHostEnabled: false,
+  targetConfig: null,
+  retentionCount: 10,
+};
+
+/** Backup-Status-Antwort mit letztem Backup + S3 off-host aktiv.
+ * I1-Fix: kein backupDir in der Response.
+ * I2-Fix: localResult/offHostResult aus Sidecar (AC12). */
+const DEFAULT_BACKUP_STATUS_S3 = {
+  lastBackup: {
+    at: '2026-01-01T10:30:00.000Z',
+    artefactName: 'backup-2026-01-01T10-30-00-000Z-ab12cd34.gpg',
+    localResult: 'ok',
+    offHostResult: 'ok',
+  },
+  offHostType: 's3',
+  offHostEnabled: true,
+  targetConfig: { endpoint: 'https://s3.example.com', bucket: 'my-backups', prefix: 'backups/', region: 'eu-central-1' },
+  retentionCount: 10,
+};
+
+/** Standard-Backup-Konfiguration (kein Off-Host — Architekt-Entscheid S-143, Variante B). */
+const DEFAULT_BACKUP_CONFIG_NO_OFFHOST = {
+  offHostEnabled: false,
+  targetType: 'local',
+  endpoint: '',
+  bucket: '',
+  prefix: 'backups/',
+  region: 'us-east-1',
+  host: '',
+  port: '22',
+  user: '',
+  retentionCount: 10,
+};
+
+/** Backup-Konfiguration mit S3 off-host aktiv. */
+const DEFAULT_BACKUP_CONFIG_S3 = {
+  offHostEnabled: true,
+  targetType: 's3',
+  endpoint: 'https://s3.example.com',
+  bucket: 'my-backups',
+  prefix: 'backups/',
+  region: 'eu-central-1',
+  host: '',
+  port: '22',
+  user: '',
+  retentionCount: 10,
+};
+
 function makeFetch({
   getResponse = EMPTY_CREDS,
   putResponse = null,
@@ -196,6 +269,11 @@ function makeFetch({
   getWorkspacePath   = { ok: true, status: 200, data: DEFAULT_WORKSPACE_PATH },
   putWorkspacePath   = { ok: true, status: 200, data: { effectivePath: '/workspace/projekt', source: 'configured' } },
   deleteWorkspacePath = { ok: true, status: 200, data: { effectivePath: '/workspace', source: 'env-default' } },
+  // S-143 AC12: backup-status endpoint (I1-Fix: kein backupDir)
+  getBackupStatus = { ok: true, status: 200, data: DEFAULT_BACKUP_STATUS_NO_OFFHOST },
+  // S-143 Architekt-Entscheid: backup-config endpoint (GET/PUT)
+  getBackupConfig = { ok: true, status: 200, data: DEFAULT_BACKUP_CONFIG_NO_OFFHOST },
+  putBackupConfigResponse = { ok: true, status: 200, data: { ok: true, config: DEFAULT_BACKUP_CONFIG_NO_OFFHOST } },
   // AC3 (workspace-health-hinweis): workspace-health endpoint
   // null = kein Health-Block in bestehenden Tests (verhindert role=status-Kollision)
   getWorkspaceHealth = null,
@@ -254,6 +332,29 @@ function makeFetch({
         return { ok: true, status: 200, json: async () => credentialUnlockResponse };
       }
       return { ok: true, status: 200, json: async () => DEFAULT_UNLOCK_SUCCESS };
+    }
+
+    // S-143 AC12: backup-status endpoint (I1-Fix: kein backupDir in Response)
+    if (url === '/api/settings/backup-status' && method === 'GET') {
+      if (getBackupStatus === null) return { ok: false, status: 503, json: async () => ({}) };
+      return { ok: getBackupStatus.ok, status: getBackupStatus.status, json: async () => getBackupStatus.data };
+    }
+
+    // S-143 Architekt-Entscheid: backup-config endpoint
+    if (url === '/api/settings/backup-config') {
+      if (method === 'GET') {
+        if (getBackupConfig === null) return { ok: false, status: 500, json: async () => ({ error: 'Fehler' }) };
+        return { ok: getBackupConfig.ok, status: getBackupConfig.status, json: async () => getBackupConfig.data };
+      }
+      if (method === 'PUT') {
+        if (putBackupConfigResponse === 'error') {
+          return { ok: false, status: 500, json: async () => ({ error: 'Speichern fehlgeschlagen' }) };
+        }
+        if (putBackupConfigResponse === 'forbidden') {
+          return { ok: false, status: 403, json: async () => ({ error: 'Keine Berechtigung' }) };
+        }
+        return { ok: putBackupConfigResponse.ok, status: putBackupConfigResponse.status, json: async () => putBackupConfigResponse.data };
+      }
     }
 
     // AC3 (workspace-health-hinweis): workspace-health endpoint
@@ -4631,6 +4732,726 @@ describe('SettingsView — AC12 showPassword-Reset beim Phasenwechsel (S-130 #27
       if (pwdInput) {
         expect(pwdInput.type).toBe('password');
       }
+    });
+  });
+});
+
+// ── AC11 — Zweistufige Backup-Quittung ────────────────────────────────────────
+
+describe('SettingsView — credential-backup S-143 AC11: Zweistufige Quittung', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('zeigt grüne Quittung „lokal gesichert ✓" wenn backup.local=ok, offHost=disabled', async () => {
+    const putResp = {
+      integration: 'github',
+      name: 'app_id',
+      status: 'set',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      backup: { local: 'ok', offHost: 'disabled' },
+    };
+    const fetchFn = makeFetch({
+      getResponse: CREDS_WITH_GITHUB_APP_ID,
+      putResponse: putResp,
+    });
+    const { container } = renderView(fetchFn);
+
+    // Warte auf Render
+    await waitFor(() => {
+      expect(container.querySelector('[aria-label="App-ID ändern"]')).toBeTruthy();
+    });
+
+    // Bearbeiten öffnen + Wert eingeben + speichern
+    await act(async () => {
+      fireEvent.click(container.querySelector('[aria-label="App-ID ändern"]'));
+    });
+    await waitFor(() => {
+      expect(document.getElementById('input-github-app_id')).toBeTruthy();
+    });
+    await act(async () => {
+      fireEvent.change(document.getElementById('input-github-app_id'), { target: { value: 'new-value' } });
+    });
+    await act(async () => {
+      const saveBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent?.match(/^speichern$/i));
+      fireEvent.click(saveBtn);
+    });
+
+    // Quittung erscheint: lokal ok, off-host nicht angezeigt (disabled)
+    await waitFor(() => {
+      const receipt = container.querySelector('[aria-label="Backup-Quittung"]');
+      expect(receipt).toBeTruthy();
+      expect(receipt.textContent).toMatch(/lokal gesichert ✓/);
+      expect(receipt.textContent).not.toMatch(/off-host/i);
+    });
+  });
+
+  it('zeigt „lokal gesichert ✓ · off-host gesichert ✓" wenn beide Stufen ok', async () => {
+    const putResp = {
+      integration: 'github',
+      name: 'app_id',
+      status: 'set',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      backup: { local: 'ok', offHost: 'ok' },
+    };
+    const fetchFn = makeFetch({
+      getResponse: CREDS_WITH_GITHUB_APP_ID,
+      putResponse: putResp,
+    });
+    const { container } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(container.querySelector('[aria-label="App-ID ändern"]')).toBeTruthy();
+    });
+    await act(async () => {
+      fireEvent.click(container.querySelector('[aria-label="App-ID ändern"]'));
+    });
+    await waitFor(() => {
+      expect(document.getElementById('input-github-app_id')).toBeTruthy();
+    });
+    await act(async () => {
+      fireEvent.change(document.getElementById('input-github-app_id'), { target: { value: 'test-value' } });
+    });
+    await act(async () => {
+      const saveBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent?.match(/^speichern$/i));
+      fireEvent.click(saveBtn);
+    });
+
+    await waitFor(() => {
+      const receipt = container.querySelector('[aria-label="Backup-Quittung"]');
+      expect(receipt).toBeTruthy();
+      expect(receipt.textContent).toMatch(/lokal gesichert ✓/);
+      expect(receipt.textContent).toMatch(/off-host gesichert ✓/);
+    });
+  });
+
+  it('zeigt stufen-genaue Warnung wenn local=ok, offHost=failed', async () => {
+    const putResp = {
+      integration: 'github',
+      name: 'app_id',
+      status: 'set',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      backup: { local: 'ok', offHost: 'failed' },
+    };
+    const fetchFn = makeFetch({
+      getResponse: CREDS_WITH_GITHUB_APP_ID,
+      putResponse: putResp,
+    });
+    const { container } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(container.querySelector('[aria-label="App-ID ändern"]')).toBeTruthy();
+    });
+    await act(async () => {
+      fireEvent.click(container.querySelector('[aria-label="App-ID ändern"]'));
+    });
+    await waitFor(() => {
+      expect(document.getElementById('input-github-app_id')).toBeTruthy();
+    });
+    await act(async () => {
+      fireEvent.change(document.getElementById('input-github-app_id'), { target: { value: 'test-val' } });
+    });
+    await act(async () => {
+      const saveBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent?.match(/^speichern$/i));
+      fireEvent.click(saveBtn);
+    });
+
+    await waitFor(() => {
+      const receipt = container.querySelector('[aria-label="Backup-Quittung"]');
+      expect(receipt).toBeTruthy();
+      expect(receipt.textContent).toMatch(/lokal gesichert ✓/);
+      expect(receipt.textContent).toMatch(/off-host fehlgeschlagen ⚠/);
+    });
+  });
+
+  it('zeigt stufen-genaue Warnung wenn local=failed', async () => {
+    const putResp = {
+      integration: 'github',
+      name: 'app_id',
+      status: 'set',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      backup: { local: 'failed', offHost: 'disabled' },
+    };
+    const fetchFn = makeFetch({
+      getResponse: CREDS_WITH_GITHUB_APP_ID,
+      putResponse: putResp,
+    });
+    const { container } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(container.querySelector('[aria-label="App-ID ändern"]')).toBeTruthy();
+    });
+    await act(async () => {
+      fireEvent.click(container.querySelector('[aria-label="App-ID ändern"]'));
+    });
+    await waitFor(() => {
+      expect(document.getElementById('input-github-app_id')).toBeTruthy();
+    });
+    await act(async () => {
+      fireEvent.change(document.getElementById('input-github-app_id'), { target: { value: 'test' } });
+    });
+    await act(async () => {
+      const saveBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent?.match(/^speichern$/i));
+      fireEvent.click(saveBtn);
+    });
+
+    await waitFor(() => {
+      const receipt = container.querySelector('[aria-label="Backup-Quittung"]');
+      expect(receipt).toBeTruthy();
+      expect(receipt.textContent).toMatch(/lokal fehlgeschlagen ⚠/);
+    });
+  });
+
+  it('zeigt keine Quittung wenn backup-Feld fehlt (kein Backup konfiguriert)', async () => {
+    // Standard-Response ohne backup-Feld
+    const fetchFn = makeFetch({
+      getResponse: CREDS_WITH_GITHUB_APP_ID,
+    });
+    const { container } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(container.querySelector('[aria-label="App-ID ändern"]')).toBeTruthy();
+    });
+    await act(async () => {
+      fireEvent.click(container.querySelector('[aria-label="App-ID ändern"]'));
+    });
+    await waitFor(() => {
+      expect(document.getElementById('input-github-app_id')).toBeTruthy();
+    });
+    await act(async () => {
+      fireEvent.change(document.getElementById('input-github-app_id'), { target: { value: 'test-value' } });
+    });
+    await act(async () => {
+      const saveBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent?.match(/^speichern$/i));
+      fireEvent.click(saveBtn);
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[aria-label="Backup-Quittung"]')).toBeFalsy();
+    });
+  });
+
+  it('Quittung zeigt role=status und aria-live=polite (A11y)', async () => {
+    const putResp = {
+      integration: 'github',
+      name: 'app_id',
+      status: 'set',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      backup: { local: 'ok', offHost: 'ok' },
+    };
+    const fetchFn = makeFetch({
+      getResponse: CREDS_WITH_GITHUB_APP_ID,
+      putResponse: putResp,
+    });
+    const { container } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(container.querySelector('[aria-label="App-ID ändern"]')).toBeTruthy();
+    });
+    await act(async () => {
+      fireEvent.click(container.querySelector('[aria-label="App-ID ändern"]'));
+    });
+    await waitFor(() => {
+      expect(document.getElementById('input-github-app_id')).toBeTruthy();
+    });
+    await act(async () => {
+      fireEvent.change(document.getElementById('input-github-app_id'), { target: { value: 'test-val' } });
+    });
+    await act(async () => {
+      const saveBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent?.match(/^speichern$/i));
+      fireEvent.click(saveBtn);
+    });
+
+    await waitFor(() => {
+      const receipt = container.querySelector('[aria-label="Backup-Quittung"]');
+      expect(receipt).toBeTruthy();
+      expect(receipt.getAttribute('role')).toBe('status');
+      expect(receipt.getAttribute('aria-live')).toBe('polite');
+    });
+  });
+
+  it('Quittung enthält kein Secret/Klartext im DOM (AC11 Security-Floor)', async () => {
+    const putResp = {
+      integration: 'github',
+      name: 'app_id',
+      status: 'set',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      backup: { local: 'ok', offHost: 'ok' },
+    };
+    const fetchFn = makeFetch({
+      getResponse: CREDS_WITH_GITHUB_APP_ID,
+      putResponse: putResp,
+    });
+    const { container } = renderView(fetchFn);
+
+    await waitFor(() => {
+      expect(container.querySelector('[aria-label="App-ID ändern"]')).toBeTruthy();
+    });
+    await act(async () => {
+      fireEvent.click(container.querySelector('[aria-label="App-ID ändern"]'));
+    });
+    await waitFor(() => {
+      expect(document.getElementById('input-github-app_id')).toBeTruthy();
+    });
+    await act(async () => {
+      fireEvent.change(document.getElementById('input-github-app_id'), { target: { value: 'secret-value-xyz' } });
+    });
+    await act(async () => {
+      const saveBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent?.match(/^speichern$/i));
+      fireEvent.click(saveBtn);
+    });
+
+    await waitFor(() => {
+      const receipt = container.querySelector('[aria-label="Backup-Quittung"]');
+      expect(receipt).toBeTruthy();
+      // Kein Secret-Wert im Quittungs-DOM
+      expect(receipt.textContent).not.toContain('secret-value-xyz');
+      // Keine localPath-Angabe (interner Volume-Pfad bleibt im Backend)
+      expect(receipt.textContent).not.toMatch(/\/home\//);
+    });
+  });
+});
+
+// ── AC12 — Settings-Abschnitt „Backup / Sicherung" ───────────────────────────
+
+describe('SettingsView — credential-backup S-143 AC12: Backup-Abschnitt + Status-Kachel', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('rendert h2 „Backup / Sicherung"', async () => {
+    const { getByRole } = renderView();
+    await waitFor(() => {
+      expect(getByRole('heading', { name: /backup.*sicherung/i })).toBeTruthy();
+    });
+  });
+
+  it('rendert Status-Kachel mit role=status', async () => {
+    const { container } = renderView();
+    await waitFor(() => {
+      // Die Status-Kachel hat role=status wenn kein Fehler
+      const tile = container.querySelector('[aria-labelledby="backup-status-tile"]');
+      expect(tile).toBeTruthy();
+    });
+  });
+
+  it('Status-Kachel zeigt „Noch kein Backup vorhanden" wenn lastBackup=null', async () => {
+    const { container } = renderView(); // Default: kein lastBackup
+    await waitFor(() => {
+      const tile = container.querySelector('[aria-labelledby="backup-status-tile"]');
+      expect(tile).toBeTruthy();
+      expect(tile.textContent).toMatch(/noch kein backup vorhanden/i);
+    });
+  });
+
+  it('Status-Kachel zeigt Zeitstempel wenn lastBackup vorhanden', async () => {
+    const fetchFn = makeFetch({
+      getBackupStatus: { ok: true, status: 200, data: DEFAULT_BACKUP_STATUS_S3 },
+    });
+    const { container } = renderView(fetchFn);
+    await waitFor(() => {
+      const tile = container.querySelector('[aria-labelledby="backup-status-tile"]');
+      expect(tile).toBeTruthy();
+      // Datum enthält "01" (Tag) und "2026" oder "26" (Jahr) — jsdom-Locale kann variieren
+      const text = tile.textContent;
+      expect(text).toMatch(/01|1\.1/);   // Tag 01 vorhanden
+      expect(text).toMatch(/2026|26/);    // Jahr 2026 oder 26
+    });
+  });
+
+  it('Status-Kachel zeigt Ziel-Typ S3 wenn offHostType=s3', async () => {
+    const fetchFn = makeFetch({
+      getBackupStatus: { ok: true, status: 200, data: DEFAULT_BACKUP_STATUS_S3 },
+      getBackupConfig: { ok: true, status: 200, data: DEFAULT_BACKUP_CONFIG_S3 },
+    });
+    const { container } = renderView(fetchFn);
+    await waitFor(() => {
+      const tile = container.querySelector('[aria-labelledby="backup-status-tile"]');
+      expect(tile).toBeTruthy();
+      expect(tile.textContent).toMatch(/s3-kompatibel/i);
+    });
+  });
+
+  it('Status-Kachel zeigt „nur lokal" als Ziel wenn offHostEnabled=false + lastBackup vorhanden', async () => {
+    const fetchFn = makeFetch({
+      getBackupStatus: {
+        ok: true,
+        status: 200,
+        data: {
+          lastBackup: { at: '2026-01-01T10:30:00.000Z', artefactName: 'backup-2026-01-01T10-30-00-000Z-ab12cd34.gpg' },
+          offHostType: null,
+          offHostEnabled: false,
+          targetConfig: null,
+          retentionCount: 10,
+          // I1-Fix: kein backupDir in Response
+        },
+      },
+    });
+    const { container } = renderView(fetchFn);
+    await waitFor(() => {
+      const tile = container.querySelector('[aria-labelledby="backup-status-tile"]');
+      expect(tile).toBeTruthy();
+      // Wenn off-host nicht aktiv und lastBackup vorhanden → Ziel „nur lokal"
+      expect(tile.textContent).toMatch(/nur lokal/i);
+    });
+  });
+
+  it('Status-Kachel enthält kein Secret/Klartext (AC12 Security-Floor)', async () => {
+    const fetchFn = makeFetch({
+      getBackupStatus: { ok: true, status: 200, data: DEFAULT_BACKUP_STATUS_S3 },
+      getBackupConfig: { ok: true, status: 200, data: DEFAULT_BACKUP_CONFIG_S3 },
+    });
+    const { container } = renderView(fetchFn);
+    await waitFor(() => {
+      const tile = container.querySelector('[aria-labelledby="backup-status-tile"]');
+      expect(tile).toBeTruthy();
+      const text = tile.textContent;
+      // Kein artefactName (Dateiname) in der Tile — nur Zeit und Ziel-Typ
+      expect(text).not.toContain('backup-2026-01-01T10-30-00-000Z-ab12cd34.gpg');
+      // Kein Backup-Verzeichnis-Pfad
+      expect(text).not.toContain('/home/node/.cred/backups');
+    });
+  });
+
+  it('Remote-Creds-Felder werden gezeigt wenn offHostEnabled=true (aus backup-config)', async () => {
+    const fetchFn = makeFetch({
+      getBackupStatus: { ok: true, status: 200, data: DEFAULT_BACKUP_STATUS_S3 },
+      getBackupConfig: { ok: true, status: 200, data: DEFAULT_BACKUP_CONFIG_S3 },
+    });
+    const { container } = renderView(fetchFn);
+    await waitFor(() => {
+      // S3 Access Key ID erscheint als group-label (Remote-Creds-Felder)
+      const group = container.querySelector('[aria-label="S3 Access Key ID"]');
+      expect(group).toBeTruthy();
+    });
+  });
+
+  it('Remote-Creds-Felder werden NICHT gezeigt wenn offHostEnabled=false', async () => {
+    const { container } = renderView(); // Default: offHostEnabled=false (aus DEFAULT_BACKUP_CONFIG_NO_OFFHOST)
+    await waitFor(() => {
+      // Warten bis Konfig geladen
+      expect(document.getElementById('backup-offhost-enabled')).toBeTruthy();
+    });
+    // Kein S3 Access Key ID wenn off-host deaktiviert
+    const group = container.querySelector('[aria-label="S3 Access Key ID"]');
+    expect(group).toBeFalsy();
+  });
+
+  it('Remote-Cred-Feld zeigt nur Status (nicht gesetzt / •••• gesetzt), kein Klartext (Secret-Floor)', async () => {
+    const credsWithBackupRemote = [
+      ...CREDS_WITH_GITHUB_APP_ID,
+      { integration: 'backup-remote', name: 's3_access_key', status: 'set', masked: '••••3456', updatedAt: '2026-01-01T00:00:00.000Z' },
+      { integration: 'backup-remote', name: 's3_secret_key', status: 'unset' },
+      { integration: 'backup-remote', name: 'sftp_password', status: 'unset' },
+      { integration: 'backup-remote', name: 'sftp_private_key', status: 'unset' },
+    ];
+    const fetchFn = makeFetch({
+      getResponse: credsWithBackupRemote,
+      getBackupStatus: { ok: true, status: 200, data: DEFAULT_BACKUP_STATUS_S3 },
+      getBackupConfig: { ok: true, status: 200, data: DEFAULT_BACKUP_CONFIG_S3 },
+    });
+    const { container } = renderView(fetchFn);
+    await waitFor(() => {
+      const group = container.querySelector('[aria-label="S3 Access Key ID"]');
+      expect(group).toBeTruthy();
+      // Nur maskierter Status, kein Klartext
+      expect(group.textContent).toMatch(/••••3456|gesetzt|nicht gesetzt/i);
+      // Kein echtes Secret
+      expect(group.textContent).not.toMatch(/secret[a-z0-9]/i);
+    });
+  });
+
+  it('Remote-Cred-Feld hat write-only Input (type=password) und label/htmlFor (A11y)', async () => {
+    const fetchFn = makeFetch({
+      getBackupStatus: { ok: true, status: 200, data: DEFAULT_BACKUP_STATUS_S3 },
+      getBackupConfig: { ok: true, status: 200, data: DEFAULT_BACKUP_CONFIG_S3 },
+    });
+    const { container } = renderView(fetchFn);
+    await waitFor(() => {
+      expect(container.querySelector('[aria-label="S3 Access Key ID"]')).toBeTruthy();
+    });
+
+    // Setzen-Button klicken → Input öffnet
+    await act(async () => {
+      const btn = container.querySelector('[aria-label="S3 Access Key ID setzen"]');
+      if (btn) fireEvent.click(btn);
+    });
+
+    await waitFor(() => {
+      const input = document.getElementById('input-backup-remote-s3_access_key');
+      if (input) {
+        // A11y: type=password (write-only)
+        expect(input.type).toBe('password');
+        // A11y: label verknüpft
+        const label = document.querySelector('label[for="input-backup-remote-s3_access_key"]');
+        expect(label).toBeTruthy();
+      }
+    });
+  });
+
+  it('Remote-Cred-Feld: Touch-Target ≥ 44 px (A11y)', async () => {
+    const fetchFn = makeFetch({
+      getBackupStatus: { ok: true, status: 200, data: DEFAULT_BACKUP_STATUS_S3 },
+      getBackupConfig: { ok: true, status: 200, data: DEFAULT_BACKUP_CONFIG_S3 },
+    });
+    const { container } = renderView(fetchFn);
+    await waitFor(() => {
+      expect(container.querySelector('[aria-label="S3 Access Key ID setzen"]')).toBeTruthy();
+    });
+    const btn = container.querySelector('[aria-label="S3 Access Key ID setzen"]');
+    const minHeight = parseInt(btn.style.minHeight ?? '0', 10);
+    expect(minHeight).toBeGreaterThanOrEqual(44);
+  });
+
+  it('Remote-Cred-Feld: aria-invalid bei Validierungsfehler (leerer Wert) (A11y)', async () => {
+    const fetchFn = makeFetch({
+      getBackupStatus: { ok: true, status: 200, data: DEFAULT_BACKUP_STATUS_S3 },
+      getBackupConfig: { ok: true, status: 200, data: DEFAULT_BACKUP_CONFIG_S3 },
+    });
+    const { container } = renderView(fetchFn);
+    await waitFor(() => {
+      expect(container.querySelector('[aria-label="S3 Access Key ID setzen"]')).toBeTruthy();
+    });
+
+    // Setzen öffnen → direkt speichern ohne Wert
+    await act(async () => {
+      fireEvent.click(container.querySelector('[aria-label="S3 Access Key ID setzen"]'));
+    });
+    await waitFor(() => {
+      expect(document.getElementById('input-backup-remote-s3_access_key')).toBeTruthy();
+    });
+    await act(async () => {
+      const saveBtn = Array.from(container.querySelectorAll('button')).find(
+        (b) => b.textContent?.match(/^speichern$/i) && !b.closest('[aria-label="App-ID"]'),
+      );
+      if (saveBtn) fireEvent.click(saveBtn);
+    });
+
+    await waitFor(() => {
+      const input = document.getElementById('input-backup-remote-s3_access_key');
+      if (input) {
+        expect(input.getAttribute('aria-invalid')).toBe('true');
+      }
+      // Fehlermeldung als role=alert
+      const alerts = Array.from(container.querySelectorAll('[role="alert"]'));
+      const hasCredError = alerts.some((a) => a.textContent?.match(/leer|pflicht/i));
+      expect(hasCredError).toBe(true);
+    });
+  });
+
+  it('Ziel-Konfiguration zeigt „Off-Host-Backup aktiv"-Select wenn keine Konfig geladen', async () => {
+    renderView(); // Default: offHostEnabled=false
+    await waitFor(() => {
+      // Editierbares Formular: select für Off-Host-Backup vorhanden (Architekt-Entscheid S-143)
+      const select = document.getElementById('backup-offhost-enabled');
+      expect(select).toBeTruthy();
+      expect(select.value).toBe('false');
+    });
+  });
+
+  it('Ziel-Konfiguration zeigt Ziel-Typ-Select wenn offHostEnabled=true (backup-config geladen)', async () => {
+    const fetchFn = makeFetch({
+      getBackupStatus: { ok: true, status: 200, data: DEFAULT_BACKUP_STATUS_S3 },
+      getBackupConfig: { ok: true, status: 200, data: DEFAULT_BACKUP_CONFIG_S3 },
+    });
+    renderView(fetchFn);
+    await waitFor(() => {
+      // Select für Ziel-Typ sichtbar (S3 vorausgewählt)
+      const typeSelect = document.getElementById('backup-target-type');
+      expect(typeSelect).toBeTruthy();
+      expect(typeSelect.value).toBe('s3');
+    });
+  });
+
+  it('Speichern-Button vorhanden (Architekt-Entscheid: UI-schreibbar)', async () => {
+    const { container } = renderView();
+    await waitFor(() => {
+      const main = container.querySelector('main');
+      // Speichern-Button ist sichtbar
+      const saveBtn = Array.from(main.querySelectorAll('button')).find(
+        (b) => b.textContent?.match(/backup-konfiguration speichern/i),
+      );
+      expect(saveBtn).toBeTruthy();
+    });
+  });
+
+  it('Speichern-Button ruft PUT /api/settings/backup-config auf (Architekt-Entscheid)', async () => {
+    const putSpy = jest.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: async () => ({ ok: true, config: DEFAULT_BACKUP_CONFIG_NO_OFFHOST }),
+    });
+    const fetchFn = makeFetch({});
+    // Override: spioniere auf backup-config PUT
+    const originalFetch = fetchFn;
+    const wrappedFetch = jest.fn(async (url, opts) => {
+      if (url === '/api/settings/backup-config' && (opts?.method ?? 'GET') === 'PUT') {
+        return putSpy(url, opts);
+      }
+      return originalFetch(url, opts);
+    });
+    const { container } = renderView(wrappedFetch);
+
+    await waitFor(() => {
+      expect(document.getElementById('backup-offhost-enabled')).toBeTruthy();
+    });
+
+    await act(async () => {
+      const main = container.querySelector('main');
+      const saveBtn = Array.from(main.querySelectorAll('button')).find(
+        (b) => b.textContent?.match(/backup-konfiguration speichern/i),
+      );
+      if (saveBtn) fireEvent.click(saveBtn);
+    });
+
+    await waitFor(() => {
+      expect(putSpy).toHaveBeenCalled();
+    });
+  });
+
+  // ── I3-Fix: interner Backup-Pfad NICHT im DOM ────────────────────────────────
+  it('interner Backup-Pfad (/home/node/.cred/backups) erscheint NIRGENDS im Container-DOM (I3)', async () => {
+    // Beide Status-Antworten enthalten den internen Pfad NICHT mehr (I1-Fix),
+    // aber der Test verifiziert dass er auch sonst nirgends im DOM erscheint.
+    const fetchFn = makeFetch({
+      getBackupStatus: { ok: true, status: 200, data: DEFAULT_BACKUP_STATUS_S3 },
+      getBackupConfig: { ok: true, status: 200, data: DEFAULT_BACKUP_CONFIG_S3 },
+    });
+    const { container } = renderView(fetchFn);
+    await waitFor(() => {
+      // Warten bis Backup-Section geladen
+      expect(document.getElementById('backup-offhost-enabled')).toBeTruthy();
+    });
+    // Der interne Volume-Pfad darf nirgends im gesamten Container-DOM erscheinen
+    expect(container.textContent).not.toContain('/home/node/.cred/backups');
+    expect(container.innerHTML).not.toContain('/home/node/.cred/backups');
+  });
+
+  // ── I2-Fix: Stufen-Ergebnis in der Status-Kachel (AC12 / Spec §12) ───────────
+
+  it('Status-Kachel zeigt lokal ✓ und off-host – wenn localResult=ok offHostResult=disabled (I2)', async () => {
+    const fetchFn = makeFetch({
+      getBackupStatus: {
+        ok: true, status: 200, data: {
+          lastBackup: {
+            at: '2026-06-01T10:30:00.000Z',
+            artefactName: 'backup-2026-06-01T10-30-00-000Z-cc33dd44.gpg',
+            localResult: 'ok',
+            offHostResult: 'disabled',
+          },
+          offHostType: null, offHostEnabled: false, targetConfig: null, retentionCount: 10,
+        },
+      },
+    });
+    const { container } = renderView(fetchFn);
+    await waitFor(() => {
+      const tile = container.querySelector('[aria-labelledby="backup-status-tile"]');
+      expect(tile).toBeTruthy();
+      // Stufen-Ergebnis: lokal ✓ vorhanden
+      expect(tile.textContent).toMatch(/lokal.*✓|lokal.*v/i);
+      // off-host – vorhanden
+      expect(tile.textContent).toMatch(/off-host.*–/i);
+    });
+  });
+
+  it('Status-Kachel zeigt lokal ✓ und off-host ✓ bei vollem Erfolg (I2)', async () => {
+    const fetchFn = makeFetch({
+      getBackupStatus: {
+        ok: true, status: 200, data: {
+          lastBackup: {
+            at: '2026-06-01T10:30:00.000Z',
+            artefactName: 'backup-2026-06-01T10-30-00-000Z-cc33dd44.gpg',
+            localResult: 'ok',
+            offHostResult: 'ok',
+          },
+          offHostType: 's3', offHostEnabled: true,
+          targetConfig: { bucket: 'my-bucket', prefix: 'backups/', region: 'eu-central-1' },
+          retentionCount: 10,
+        },
+      },
+      getBackupConfig: { ok: true, status: 200, data: DEFAULT_BACKUP_CONFIG_S3 },
+    });
+    const { container } = renderView(fetchFn);
+    await waitFor(() => {
+      const tile = container.querySelector('[aria-labelledby="backup-status-tile"]');
+      expect(tile).toBeTruthy();
+      expect(tile.textContent).toMatch(/lokal.*✓/i);
+      expect(tile.textContent).toMatch(/off-host.*✓/i);
+    });
+  });
+
+  it('Status-Kachel zeigt lokal ⚠ und off-host ⚠ bei Fehlschlag (I2)', async () => {
+    const fetchFn = makeFetch({
+      getBackupStatus: {
+        ok: true, status: 200, data: {
+          lastBackup: {
+            at: '2026-06-01T10:30:00.000Z',
+            artefactName: 'backup-2026-06-01T10-30-00-000Z-cc33dd44.gpg',
+            localResult: 'failed',
+            offHostResult: 'failed',
+          },
+          offHostType: 's3', offHostEnabled: true, targetConfig: null, retentionCount: 10,
+        },
+      },
+      getBackupConfig: { ok: true, status: 200, data: DEFAULT_BACKUP_CONFIG_S3 },
+    });
+    const { container } = renderView(fetchFn);
+    await waitFor(() => {
+      const tile = container.querySelector('[aria-labelledby="backup-status-tile"]');
+      expect(tile).toBeTruthy();
+      expect(tile.textContent).toMatch(/lokal.*⚠/i);
+      expect(tile.textContent).toMatch(/off-host.*⚠/i);
+    });
+  });
+
+  it('Status-Kachel zeigt keine Stufen-Ergebnisse wenn localResult=null (I2 — kein Backup seit Upgrade)', async () => {
+    // lastBackup vorhanden aber ohne localResult/offHostResult (Sidecar noch nicht geschrieben)
+    const fetchFn = makeFetch({
+      getBackupStatus: {
+        ok: true, status: 200, data: {
+          lastBackup: {
+            at: '2026-06-01T10:30:00.000Z',
+            artefactName: 'backup-2026-06-01T10-30-00-000Z-cc33dd44.gpg',
+            localResult: null,
+            offHostResult: null,
+          },
+          offHostType: null, offHostEnabled: false, targetConfig: null, retentionCount: 10,
+        },
+      },
+    });
+    const { container } = renderView(fetchFn);
+    await waitFor(() => {
+      const tile = container.querySelector('[aria-labelledby="backup-status-tile"]');
+      expect(tile).toBeTruthy();
+      // Kein Stufen-Ergebnis wenn null
+      expect(tile.textContent).not.toMatch(/lokal ✓|lokal ⚠|off-host ✓|off-host ⚠/);
+    });
+  });
+
+  it('Stufen-Ergebnis-Spans sind metadaten-only (kein Key/Secret/Klartext im DOM — AC12 / Spec §13)', async () => {
+    const fetchFn = makeFetch({
+      getBackupStatus: {
+        ok: true, status: 200, data: {
+          lastBackup: {
+            at: '2026-06-01T10:30:00.000Z',
+            artefactName: 'backup-cc33dd44.gpg',
+            localResult: 'ok',
+            offHostResult: 'disabled',
+          },
+          offHostType: null, offHostEnabled: false, targetConfig: null, retentionCount: 10,
+        },
+      },
+    });
+    const { container } = renderView(fetchFn);
+    await waitFor(() => {
+      const tile = container.querySelector('[aria-labelledby="backup-status-tile"]');
+      expect(tile).toBeTruthy();
+      const text = tile.textContent;
+      // Kein Key/Secret/Klartext
+      expect(text).not.toMatch(/master.?key/i);
+      expect(text).not.toMatch(/password/i);
+      expect(text).not.toMatch(/secret/i);
+      // Kein Artefakt-Inhalt
+      expect(text).not.toContain('backup-cc33dd44.gpg');
     });
   });
 });

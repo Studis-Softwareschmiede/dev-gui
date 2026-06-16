@@ -260,15 +260,17 @@ describe('routerLoader — Echte src/routers/ Module (AC1/AC3)', () => {
     }
   });
 
-  it('genau 22 Router-Module in src/routers/ — Smoke-Assertion gegen versehentliche Löschung (AC1)', async () => {
+  it('genau 24 Router-Module in src/routers/ — Smoke-Assertion gegen versehentliche Löschung (AC1)', async () => {
     // Diese Assertion schreibt die aktuelle Router-Anzahl fest.
     // Sinkt die Zahl (Router gelöscht/umbenannt), schlägt der Test sofort an.
     // Steigt die Zahl (neuer Router hinzugefügt), muss dieser Wert bewusst erhöht werden.
     // board.js wurde mit dev-gui-board-aggregator (#127) hinzugefügt → 20.
     // docs.js wurde mit projekt-spezifikation-anzeige (F-004) hinzugefügt → 21.
     // assist.js wurde mit fabric-intake-dialog (S-134) hinzugefügt → 22.
+    // backupStatus.js + backupConfig.js wurden mit credential-backup S-143 hinzugefügt
+    //   (backupStatus: AC12 Status-Kachel; backupConfig: Architekt-Entscheid B GET/PUT) → 24.
     const entries = await readdir(ROUTERS_DIR);
     const mountedCount = entries.filter((f) => f.endsWith('.js')).length;
-    expect(mountedCount).toBe(22);
+    expect(mountedCount).toBe(24);
   });
 });
