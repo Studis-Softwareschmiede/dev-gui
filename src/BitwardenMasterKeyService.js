@@ -294,15 +294,28 @@ export class BitwardenMasterKeyService {
   #ptySessionMap = new Map();
 
   /**
-   * @param {object} params
-   * @param {import('./CredentialStore.js').CredentialStore} params.credentialStore
-   * @param {import('./AuditStore.js').AuditStore} params.auditStore
-   * @param {string} [params.itemName]              - Bitwarden Item-Name (Default: BW_ITEM_NAME env oder 'dev-gui-master-key')
-   * @param {Function} [params._spawnBw]            - Testbare Spawn-Funktion für nicht-interaktive bw-Kommandos
-   * @param {Function} [params._spawnBwPty]         - Testbare PTY-Spawn-Funktion für `bw login` (interaktiv, Regression/TOTP)
-   * @param {Function} [params._spawnBwPtySession]  - Testbare Two-Phase-PTY-Session-Funktion (AC10/AC11, single-process)
+   * Gehaltene bw-Sessions nach acquire→not-found (AC10/AC11).
+   *
+   * Schlüssel: identity-String (E-Mail oder null → 'anon').
+   * Wert: { sessionToken: string, timeoutHandle: NodeJS.Timeout }
+   *
+   * Security: nur der Session-Token wird gespeichert — KEIN Passwort, kein OTP, kein Key.
+   * Der Token ist transient: er wird nach create+unlock+logout oder nach Timeout verworfen.
+   * Cleanup: bei createMasterKey (Erfolg/Fehler), bei Timeout, bei neuem acquire für dieselbe
+   * identity (vorheriger Handle wird überschrieben) → kein Leak, kein verwaister Prozess.
+   *
+   * @type {Map<string, { sessionToken: string, timeoutHandle: NodeJS.Timeout }>}
    */
-  constructor({ credentialStore, auditStore, itemName, _spawnBw, _spawnBwPty, _spawnBwPtySession } = {}) {
+  #acquireSessionMap = new Map();
+
+  /**
+   * Timeout für gehaltene acquire→not-found-Session (AC11).
+   * Injizierbar für Tests (sehr kurze Timeouts).
+   * @type {number}
+   */
+  #acquireSessionTimeoutMs;
+
+  constructor({ credentialStore, auditStore, itemName, _spawnBw, _spawnBwPty, _spawnBwPtySession, _acquireSessionTimeoutMs } = {}) {
     if (!credentialStore || typeof credentialStore.unlock !== 'function') {
       throw new Error('[BitwardenMasterKeyService] credentialStore ist Pflicht');
     }
@@ -315,6 +328,7 @@ export class BitwardenMasterKeyService {
     this.#spawnBw = _spawnBw ?? spawnBwDefault;
     this.#spawnBwPty = _spawnBwPty ?? spawnBwPtyDefault;
     this.#spawnBwPtySession = _spawnBwPtySession ?? spawnBwPtySessionDefault;
+    this.#acquireSessionTimeoutMs = _acquireSessionTimeoutMs ?? PTY_OTP_SESSION_TIMEOUT_MS;
   }
 
   /**
@@ -389,10 +403,24 @@ export class BitwardenMasterKeyService {
     try {
       keyValue = await this.#bwGetItemPassword(sessionToken, this.#itemName);
     } catch (err) {
-      await this.#bwLogout(sessionToken);
       if (err.bwNotFound) {
+        // AC10/AC9: Item nicht gefunden → Session NICHT sofort beenden.
+        // Die etablierte bw-Sitzung wird in einem geheimnisfreien Handle gehalten,
+        // damit createMasterKey die Session wiederverwenden kann (kein zweiter bw-Login).
+        // Timeout (AC11): nach #acquireSessionTimeoutMs wird die Session beendet + aufgeräumt.
+        const sessionKey = identity ?? 'anon';
+        // Alten Handle für dieselbe identity aufräumen + alten Session-Token ausloggen (AC11)
+        // Fire-and-forget: Best-effort logout des alten Tokens bei Parallel-Acquire.
+        this.#cleanupAcquireSessionWithLogout(sessionKey).catch(() => {});
+        const timeoutHandle = setTimeout(() => {
+          // Fire-and-forget: Best-effort logout bei Timeout (AC11).
+          // Fehler im Logout werden ignoriert (kein Crash des Timer-Callbacks).
+          this.#cleanupAcquireSessionWithLogout(sessionKey).catch(() => {});
+        }, this.#acquireSessionTimeoutMs);
+        this.#acquireSessionMap.set(sessionKey, { sessionToken, timeoutHandle });
         return { status: 'not-found' };
       }
+      await this.#bwLogout(sessionToken);
       return {
         status: 'error',
         errorClass: 'error',
@@ -453,17 +481,35 @@ export class BitwardenMasterKeyService {
       };
     }
 
-    // ── AC1: Bitwarden-Login via PTY ─────────────────────────────────────────
+    // ── AC10: Session-Wiederverwendung (acquire→not-found gehaltene Session) ──
+    // Wenn acquireMasterKey zuvor not-found zurückgegeben hat, wurde die bw-Session
+    // in #acquireSessionMap gehalten — dieselbe Session hier für bw create nutzen,
+    // damit KEIN zweiter bw-Login (und kein zweiter OTP-Request) nötig ist.
+    const sessionKey = identity ?? 'anon';
+    const heldHandle = this.#acquireSessionMap.get(sessionKey);
     let sessionToken;
-    try {
-      sessionToken = await this.#bwLogin({ email, password, twofa, emailOtp, identity });
-    } catch (err) {
-      const errorClass = err.bwErrorClass ?? 'error';
-      return {
-        status: 'error',
-        errorClass,
-        reason: sanitizeErrorReason(errorClass),
-      };
+
+    if (heldHandle) {
+      // Gehaltene Session gefunden → direkt verwenden (AC10: kein zweiter bw login)
+      sessionToken = heldHandle.sessionToken;
+      // Handle sofort entfernen + Timeout stoppen (AC11: kein Leak)
+      this.#cleanupAcquireSession(sessionKey);
+    } else {
+      // Keine gehaltene Session (Timeout abgelaufen / kein vorheriges acquire not-found).
+      // AC11: KEIN stiller Re-Login mit Alt-Daten → klassifizierter Fehler.
+      // Ausnahme: Wenn Login-Daten + ggf. OTP vorhanden sind, kann ein frischer Login
+      // versucht werden (regulärer Pfad für den Fall, dass create direkt ohne acquire
+      // aufgerufen wird — kein erzwungener Fehler, da der Aufrufer alle Daten hat).
+      try {
+        sessionToken = await this.#bwLogin({ email, password, twofa, emailOtp, identity });
+      } catch (err) {
+        const errorClass = err.bwErrorClass ?? 'error';
+        return {
+          status: 'error',
+          errorClass,
+          reason: sanitizeErrorReason(errorClass),
+        };
+      }
     }
 
     // ── AC4: Kryptographisch sicherer Zufalls-Key (≥ 32 Byte) ───────────────
@@ -710,6 +756,39 @@ export class BitwardenMasterKeyService {
     } catch {
       // Prozess möglicherweise bereits beendet — ignorieren
     }
+  }
+
+  /**
+   * Räumt eine gehaltene acquire-Session auf, OHNE bw logout zu rufen (AC11).
+   * Stoppt nur den Timeout + entfernt den Map-Eintrag.
+   * Wird intern verwendet wenn der Caller die Session selbst übernimmt.
+   *
+   * @param {string} sessionKey
+   */
+  #cleanupAcquireSession(sessionKey) {
+    const handle = this.#acquireSessionMap.get(sessionKey);
+    if (!handle) return;
+    this.#acquireSessionMap.delete(sessionKey);
+    if (handle.timeoutHandle !== null && handle.timeoutHandle !== undefined) {
+      clearTimeout(handle.timeoutHandle);
+    }
+  }
+
+  /**
+   * Räumt eine gehaltene acquire-Session auf UND ruft bw logout (AC11, Timeout-Pfad).
+   * Verwendet bei Timeout und beim Überschreiben eines alten Handles.
+   *
+   * @param {string} sessionKey
+   */
+  async #cleanupAcquireSessionWithLogout(sessionKey) {
+    const handle = this.#acquireSessionMap.get(sessionKey);
+    if (!handle) return;
+    this.#acquireSessionMap.delete(sessionKey);
+    if (handle.timeoutHandle !== null && handle.timeoutHandle !== undefined) {
+      clearTimeout(handle.timeoutHandle);
+    }
+    // AC9/AC11: Session beenden — kein dauerhaft offenes Vault
+    await this.#bwLogout(handle.sessionToken);
   }
 
   /**
