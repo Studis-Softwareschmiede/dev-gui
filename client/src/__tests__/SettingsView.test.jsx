@@ -2,7 +2,8 @@
  * SettingsView.test.jsx — Unit-Tests für SettingsView (Credentials AC1–AC8, SSH-Keys AC1–AC6,
  * Workspace-Pfad AC1 + UI-Anteil AC3, SSH-Keypair-Generierung + Export AC1/AC3/AC4/AC6/AC7/AC8,
  * SSH-Key-Rotation AC1/AC5/AC7 — #119, bitwarden-new-device-otp Frontend AC1/AC3–AC7/AC9 — #204,
- * workspace-health-hinweis AC3 Frontend, credential-unlock-dialog AC11/AC12 — #268).
+ * workspace-health-hinweis AC3 Frontend, credential-unlock-dialog AC11/AC12 — #268,
+ * bitwarden-master-key-unlock AC12 showPassword-Reset beim Phasenwechsel (not-found→Create-Offer + Cancel) — S-130/#276).
  *
  * Covers (settings-credentials + settings-shell):
  *   AC1  — Credential-Felder mit Status (gesetzt/nicht gesetzt); kein Klartext
@@ -4548,6 +4549,88 @@ describe('SettingsView — Bitwarden-Unlock-Dialog AC12 (Show/Hide-Toggle) #268'
     await waitFor(() => {
       const toggleBtn = getByRole('button', { name: /passwort anzeigen/i });
       expect(toggleBtn).toBeTruthy();
+    });
+  });
+});
+
+// ── AC12 (#276/S-130): showPassword-Reset beim Phasenwechsel (Create-Offer) ──
+
+describe('SettingsView — AC12 showPassword-Reset beim Phasenwechsel (S-130 #276)', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('AC12 S-130 — nach not-found (Create-Offer) ist das Passwort-Feld wieder type=password', async () => {
+    // Setup: not-found-Antwort → showCreateOffer wird gesetzt
+    const fetchFn = makeFetch({
+      credentialStatus: { state: 'locked', hasEncryptedEntries: false },
+      credentialUnlockResponse: 'not-found',
+    });
+    const { getByRole } = await openDialogWithCredentials(fetchFn);
+
+    // Passwort zunächst sichtbar machen (Toggle klicken)
+    await waitFor(() => { getByRole('button', { name: /passwort anzeigen/i }); });
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /passwort anzeigen/i }));
+    });
+    await waitFor(() => {
+      expect(document.getElementById('bw-unlock-password').type).toBe('text');
+    });
+
+    // Submit → not-found → showCreateOffer wird true → showPassword soll auf false zurückgesetzt werden
+    await clickSubmit(getByRole);
+
+    // Nach Phasenwechsel auf Create-Offer: Passwort-Feld nicht mehr sichtbar
+    // (Eingabe-Felder werden ausgeblendet wenn showCreateOffer=true, daher prüfen wir,
+    //  dass beim Zurückkehren aus dem Create-Offer das Passwort-Feld type=password hat.)
+    // Abbrechen → Felder wieder sichtbar, showPassword sollte false sein
+    await waitFor(() => {
+      const cancelBtn = Array.from(document.querySelectorAll('button')).find(
+        (b) => b.textContent?.match(/abbrechen/i),
+      );
+      if (cancelBtn) fireEvent.click(cancelBtn);
+    });
+
+    await waitFor(() => {
+      const pwdInput = document.getElementById('bw-unlock-password');
+      if (pwdInput) {
+        expect(pwdInput.type).toBe('password');
+      }
+    });
+  });
+
+  it('AC12 S-130 — nach handleCreateCancel ist showPassword=false (Passwort-Feld type=password)', async () => {
+    const fetchFn = makeFetch({
+      credentialStatus: { state: 'locked', hasEncryptedEntries: false },
+      credentialUnlockResponse: 'not-found',
+    });
+    const { getByRole } = await openDialogWithCredentials(fetchFn);
+
+    // Passwort sichtbar machen
+    await waitFor(() => { getByRole('button', { name: /passwort anzeigen/i }); });
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /passwort anzeigen/i }));
+    });
+    await waitFor(() => {
+      expect(document.getElementById('bw-unlock-password').type).toBe('text');
+    });
+
+    // Submit → not-found → showCreateOffer (showPassword wird jetzt false)
+    await clickSubmit(getByRole);
+
+    // Abbrechen → zurück zum Formular (showCreateOffer=false)
+    await act(async () => {
+      const btns = Array.from(document.querySelectorAll('button'));
+      const cancelBtn = btns.find((b) => b.textContent?.match(/^abbrechen$/i));
+      if (cancelBtn) fireEvent.click(cancelBtn);
+    });
+
+    // AC12: Passwort ist wieder maskiert nach Cancel
+    await waitFor(() => {
+      const pwdInput = document.getElementById('bw-unlock-password');
+      if (pwdInput) {
+        expect(pwdInput.type).toBe('password');
+      }
     });
   });
 });

@@ -2233,8 +2233,10 @@ function BitwardenUnlockDialog({ onSuccess, onClose, fetchFn }) {
 
     // AC4: not-found → Erstellungs-Angebot anzeigen
     // AC9-Ausnahme: Klartext NICHT verwerfen — Nutzer muss mit denselben Credentials create:true senden
+    // AC12: showPassword auf false zurücksetzen beim Phasenwechsel → Passwort nicht dauerhaft sichtbar
     if (!result.ok && result.status === 'not-found') {
       setShowCreateOffer(true);
+      setShowPassword(false);
       return;
     }
 
@@ -2293,6 +2295,8 @@ function BitwardenUnlockDialog({ onSuccess, onClose, fetchFn }) {
 
   const handleCreateCancel = useCallback(() => {
     setShowCreateOffer(false);
+    // AC12: showPassword beim Reset auf false → Passwort nicht dauerhaft im Klartext sichtbar
+    setShowPassword(false);
   }, []);
 
   const emailErrorId = fieldError?.field === 'email' ? EMAIL_ERROR_ID : undefined;
