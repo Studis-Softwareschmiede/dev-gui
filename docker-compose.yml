@@ -40,6 +40,28 @@ volumes:
   # the image layer (where /home/node is owned by node) on first run.
   dev-gui-claude:
 
+  # ── Dedicated credential-state volume (AC16 — S-139) ──────────────────────
+  # Holds devgui-cred.env (DEVGUI_CRED_MASTER_KEY persisted by runtime-unlock)
+  # and secrets.enc.json (AES-256-GCM encrypted credential store).
+  #
+  # IMPORTANT: NEVER pass `down -v` — this destroys the persisted master-key
+  # and renders the encrypted store unrecoverable without a Bitwarden re-unlock.
+  # To recreate a single container: `docker compose up -d --force-recreate dev-gui`
+  #
+  # VPS Bind-Mount (recommended for disaster recovery):
+  #   Replace the named volume below with a bind-mount on a secured host path:
+  #   services.dev-gui.volumes entry:
+  #     - /opt/dev-gui/state:/home/node/.cred
+  #   This ensures the credential state survives Docker volume pruning and
+  #   can be backed up with standard filesystem tools.
+  #
+  # Migration from dev-gui-claude (one-time, before first recreate):
+  #   1. docker compose exec dev-gui sh -c \
+  #        "cp /home/node/.claude/devgui-cred.env /home/node/.cred/ 2>/dev/null || true; \
+  #         cp /home/node/.claude/dev-gui/secrets.enc.json /home/node/.cred/ 2>/dev/null || true"
+  #   2. Recreate with this new compose: docker compose up -d --force-recreate dev-gui
+  dev-gui-cred:
+
 services:
   # ── socket-proxy ──────────────────────────────────────────────────────────────
   # Restricts raw Docker socket access to only the endpoints dev-gui needs.
@@ -142,12 +164,18 @@ services:
       # Option B — node-readable file (used only if DEVGUI_CRED_MASTER_KEY unset):
       #   DEVGUI_CRED_MASTER_KEY_FILE: /run/secrets/devgui_cred_master_key
       #   Add to volumes: - ${DEVGUI_CRED_KEY_FILE}:/run/secrets/devgui_cred_master_key:ro
-      # Option C — Persistenz-Pfad für Runtime-Unlock (AC10 credential-runtime-unlock):
+      # Option C — Persistenz-Pfad für Runtime-Unlock (AC10/AC13 credential-runtime-unlock):
       # /app ist im Container read-only; der Prozess läuft als uid 1000 (node).
-      # CRED_ENV_PATH muss auf einen uid-1000-beschreibbaren Pfad im Named Volume zeigen,
-      # damit unlock(key, {persist:true}) gelingt und der Store nach Container-Recreate
-      # autonom entsperrt startet (kein erneuter Dialog nötig).
-      CRED_ENV_PATH: /home/node/.claude/devgui-cred.env
+      # CRED_ENV_PATH zeigt auf das dedizierte dev-gui-cred-Volume (AC16 — S-139):
+      # - getrennt vom OAuth-Cache (dev-gui-claude) — verhindert versehentlichen Verlust
+      #   durch `docker compose down -v` (nur down ohne -v entfernt Named Volumes NICHT)
+      # - uid-1000-beschreibbar (node-User im Container)
+      # - Boot-Reload: CredentialStore liest diese Datei beim Start (AC13), sodass
+      #   der Store nach Container-Recreate autonom entsperrt startet (kein UI-Unlock nötig)
+      CRED_ENV_PATH: /home/node/.cred/devgui-cred.env
+      # Pfad zum Verzeichnis, in dem secrets.enc.json abgelegt wird (AC16 — S-139).
+      # Liegt im dedizierten dev-gui-cred-Volume (/home/node/.cred).
+      CRED_STORE_DIR: /home/node/.cred
       #
       # DEPRECATED — altes CRED_MASTER_KEY (übergangsweise Fallback, Warn-Log):
       # Bitte auf DEVGUI_CRED_MASTER_KEY umstellen. Wird in einem späteren Cleanup-Item entfernt.
@@ -195,6 +223,12 @@ services:
       # Claude OAuth credentials + agent-flow plugin cache (persisted across
       # restarts/image updates). Must be owned by uid 1000 (node).
       - dev-gui-claude:/home/node/.claude
+
+      # ── Dedicated credential-state volume (AC16 — S-139) ──────────────────────
+      # Contains devgui-cred.env (persisted master-key) + secrets.enc.json.
+      # NEVER use `docker compose down -v` — this destroys credential state.
+      # On VPS: replace with bind-mount: - /opt/dev-gui/state:/home/node/.cred
+      - dev-gui-cred:/home/node/.cred
 
       # GPG passphrase file (Option B — alternative to the env var above).
       # Uncomment and ensure the host file is readable by uid 1000:

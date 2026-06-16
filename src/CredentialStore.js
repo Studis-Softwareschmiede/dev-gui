@@ -44,6 +44,7 @@ import { createCipheriv, createDecipheriv, randomBytes, scrypt } from 'node:cryp
 import { promisify } from 'node:util';
 import { readFile, rename, mkdir, open, stat, chmod } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
+import { readFileSync } from 'node:fs';
 
 const scryptAsync = promisify(scrypt);
 
@@ -169,12 +170,16 @@ export class CredentialStore {
 
   /**
    * @param {object} [opts]
-   * @param {string} [opts.dir]         - Verzeichnis (default: /home/node/.claude/dev-gui)
+   * @param {string} [opts.dir]         - Verzeichnis (default: CRED_STORE_DIR env, oder /home/node/.cred)
    * @param {string} [opts.masterKey]   - Master-Key (für Tests injizierbar; sonst aus Env)
    * @param {string} [opts.envPath]     - Pfad zur .env-Datei (default: Projekt-Root/.env)
    */
   constructor(opts = {}) {
-    const dir = opts.dir ?? '/home/node/.claude/dev-gui';
+    // AC16 (S-139): Speicherpfad: opts.dir > CRED_STORE_DIR > /home/node/.cred (neues dediziertes Volume)
+    const dir = opts.dir
+      ?? (process.env.CRED_STORE_DIR && process.env.CRED_STORE_DIR.trim()
+        ? process.env.CRED_STORE_DIR.trim()
+        : '/home/node/.cred');
     this.#filePath = join(dir, 'secrets.enc.json');
 
     // .env-Pfad: opts.envPath > CRED_ENV_PATH > Projekt-Root/.env (neben server.js)
@@ -193,8 +198,15 @@ export class CredentialStore {
       this.#masterKeyRaw = opts.masterKey;
       this.#keySource = opts.masterKey ? 'auto' : 'none';
     } else {
+      // AC14 (S-139): process.env-Keys haben höchste Priorität; erst dann Datei-Reload
       this.#masterKeyRaw = this.#loadMasterKeyFromEnv();
-      // AC2: Key aus Env/Boot → keySource "auto"; kein Key → "none"
+
+      // AC13/AC14/AC15 (S-139): Boot-Reload aus CRED_ENV_PATH-Datei, falls Env leer
+      if (!this.#masterKeyRaw) {
+        this.#masterKeyRaw = this.#loadMasterKeyFromFile();
+      }
+
+      // AC2: Key aus Env/Boot-Reload → keySource "auto"; kein Key → "none"
       this.#keySource = this.#masterKeyRaw ? 'auto' : 'none';
     }
   }
@@ -239,6 +251,63 @@ export class CredentialStore {
         'Prozess wird abgebrochen (Fail-Fast). Env-Var DEVGUI_CRED_MASTER_KEY setzen.',
       );
     }
+  }
+
+  /**
+   * Boot-Reload (AC13/AC14/AC15 — S-139): Liest den Master-Key synchron aus
+   * der Datei unter CRED_ENV_PATH, falls process.env-Keys leer/ungesetzt sind.
+   *
+   * Format: Datei enthält Zeilen; es wird die erste Zeile mit dem Prefix
+   *   `DEVGUI_CRED_MASTER_KEY=` (primär) oder `CRED_MASTER_KEY=` (Alt-Name)
+   * gesucht; der Wert danach ist der Key.
+   *
+   * AC13: Nur aufgerufen wenn DEVGUI_CRED_MASTER_KEY und CRED_MASTER_KEY in
+   *       process.env leer/ungesetzt sind (Env-Priorität — AC14 gewährleistet
+   *       durch Aufrufreihenfolge in constructor).
+   * AC15: Fehlende Datei / keine passende Zeile → null (kein Crash).
+   *       Key-Wert wird NICHT geloggt (Security-Floor AC7/§8).
+   *
+   * @returns {string|null}
+   */
+  #loadMasterKeyFromFile() {
+    const envPath = this.#envPath;
+    let content;
+    try {
+      content = readFileSync(envPath, 'utf8');
+    } catch {
+      // AC15: Datei fehlt → kein Crash, null zurückgeben
+      return null;
+    }
+
+    const lines = content.split('\n');
+    let key = null;
+
+    for (const line of lines) {
+      // Primärer Name (neuer Name, höchste Priorität in der Datei)
+      if (line.startsWith('DEVGUI_CRED_MASTER_KEY=')) {
+        const val = line.slice('DEVGUI_CRED_MASTER_KEY='.length).trim();
+        if (val) {
+          key = val;
+          break;
+        }
+      }
+    }
+
+    // Alt-Name — nur wenn Primärname nicht gefunden
+    if (!key) {
+      for (const line of lines) {
+        if (line.startsWith('CRED_MASTER_KEY=')) {
+          const val = line.slice('CRED_MASTER_KEY='.length).trim();
+          if (val) {
+            key = val;
+            break;
+          }
+        }
+      }
+    }
+
+    // AC15: Key-Wert NICHT loggen (Security-Floor)
+    return key;
   }
 
   /**

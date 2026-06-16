@@ -40,6 +40,17 @@
  *   AC8  — docker-compose.yml + docker-entrypoint.sh: kein GPG-Passphrase→Store-Key-Fallback (nicht testbar per Unit-Test — textlich verifiziert)
  *   AC9  — .env mit CRED_MASTER_KEY= bricht nicht: deprecated-Fallback liest alten Namen; nächster unlock migriert auf neuen Namen
  *
+ * Covers (credential-runtime-unlock S-139 — Boot-Reload + dediziertes Volume):
+ *   AC13 — Boot-Reload: CRED_ENV_PATH-Datei mit DEVGUI_CRED_MASTER_KEY → Store startet unlocked (Klartext-Ops möglich)
+ *   AC13 — Alt-Name CRED_MASTER_KEY= in Datei wird ebenfalls akzeptiert (Fallback)
+ *   AC14 — Env-Priorität: process.env.DEVGUI_CRED_MASTER_KEY gesetzt → Datei wird nicht gelesen (Env gewinnt)
+ *   AC14 — process.env.CRED_MASTER_KEY gesetzt → Datei wird nicht gelesen (Env gewinnt, Alt-Name)
+ *   AC15 — Fehlende Datei → kein Crash, Store startet locked (Robustheit)
+ *   AC15 — Datei ohne Master-Key-Zeile → kein Crash, Store startet locked
+ *   AC15 — Key-Wert aus Datei erscheint nicht im Log (Security-Floor)
+ *   AC16 — Compose/Volume: kein Unit-Test — docker-compose.yml (Volume dev-gui-cred, CRED_ENV_PATH, CRED_STORE_DIR) textlich verifiziert
+ *   AC17 — Recovery-Runbook: kein Unit-Test — docs/credential-recovery-runbook.md textlich verifiziert
+ *
  * Strategie:
  *   - CredentialStore mit tmpdir + injiziertem masterKey (kein Env nötig)
  *   - credentialsRouter mit Express-Testserver + DEV_NO_ACCESS=1
@@ -1221,10 +1232,15 @@ describe('AC4 (credential-runtime-unlock) — Falscher Key bei vorhandenen Eintr
 
   it('AC4 — Key mit eingebettetem Newline → ok:false, reason:invalid-key-format, .env unverändert', async () => {
     // Embedded \n korrumpiert .env: "abc\ndef" erzeugt zwei Zeilen → späterer Boot liest nur "abc"
+    // Datei enthält NUR nicht-Master-Key-Zeilen, damit Boot-Reload (AC13/S-139) keinen Key lädt
+    // und der Store wirklich locked startet (Test: Store bleibt locked nach invalid-key-format).
     const { writeFile } = await import('node:fs/promises');
-    await writeFile(envFile, 'OTHER=preserved\nCRED_MASTER_KEY=old-key\n', { mode: 0o600 });
+    await writeFile(envFile, 'OTHER=preserved\n', { mode: 0o600 });
 
     const store = new CredentialStore({ dir, envPath: envFile });
+    // Store muss locked sein (kein gültiger Key in Datei, kein Env-Key)
+    expect(store.isUnlocked()).toBe(false);
+
     const result = await store.unlock('abc\ndef', { persist: true });
     expect(result.ok).toBe(false);
     expect(result.reason).toBe('invalid-key-format');
@@ -1232,11 +1248,33 @@ describe('AC4 (credential-runtime-unlock) — Falscher Key bei vorhandenen Eintr
     // .env darf nicht verändert worden sein
     const envContent = await fsReadFile(envFile, 'utf8');
     expect(envContent).toContain('OTHER=preserved');
-    expect(envContent).toContain('CRED_MASTER_KEY=old-key');
     expect(envContent).not.toContain('abc');
 
-    // Store bleibt locked
+    // Store bleibt locked (invalid-key-format ändert den Lock-Zustand nicht)
     expect(store.isUnlocked()).toBe(false);
+  });
+
+  it('AC4 — Key mit eingebettetem Newline: .env mit bestehendem CRED_MASTER_KEY= bleibt unverändert', async () => {
+    // Trennt den .env-Inhalt-Erhalt-Test (CRED_MASTER_KEY= in Datei) von der locked-Assertion:
+    // Boot-Reload (AC13/S-139) liest CRED_MASTER_KEY=old-key aus der Datei → Store startet unlocked.
+    // Ein nachfolgender unlock('abc\ndef') mit eingebettetem Newline wird abgelehnt (invalid-key-format),
+    // aber die .env-Datei bleibt unverändert (kein Schreib-Versuch).
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(envFile, 'OTHER=preserved\nCRED_MASTER_KEY=old-key\n', { mode: 0o600 });
+
+    // Store startet unlocked (Boot-Reload liest CRED_MASTER_KEY=old-key, AC13)
+    const store = new CredentialStore({ dir, envPath: envFile });
+    expect(store.isUnlocked()).toBe(true);
+
+    const result = await store.unlock('abc\ndef', { persist: true });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('invalid-key-format');
+
+    // .env darf nicht verändert worden sein (invalid-key-format bricht vor Schreiben ab)
+    const envContent = await fsReadFile(envFile, 'utf8');
+    expect(envContent).toContain('OTHER=preserved');
+    expect(envContent).toContain('CRED_MASTER_KEY=old-key');
+    expect(envContent).not.toContain('abc');
   });
 
   it('AC4 — Key mit eingebettetem \\r → ok:false, reason:invalid-key-format', async () => {
@@ -2050,5 +2088,319 @@ describe('AC9 (credential-master-key-decoupling) — Rückwärtskompatibilität:
     const store = new CredentialStore({ dir, envPath: envFile });
     // AC9: Kein Fail-Fast — der deprecated-Fallback liefert den Key
     await expect(store.assertCredentialConfig()).resolves.toBeUndefined();
+  });
+});
+
+// ── AC13/AC14/AC15 (credential-runtime-unlock S-139) — Boot-Reload aus CRED_ENV_PATH ──
+
+describe('AC13 (S-139 Boot-Reload) — CRED_ENV_PATH-Datei mit Key → Store startet unlocked', () => {
+  let dir, envFile;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'credstore-s139-ac13-'));
+    envFile = join(dir, 'devgui-cred.env');
+    // process.env-Keys leeren, damit Datei-Reload greift (AC13)
+    delete process.env.DEVGUI_CRED_MASTER_KEY;
+    delete process.env.CRED_MASTER_KEY;
+  });
+
+  afterEach(async () => {
+    delete process.env.DEVGUI_CRED_MASTER_KEY;
+    delete process.env.CRED_MASTER_KEY;
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('AC13 — Datei mit DEVGUI_CRED_MASTER_KEY= → Store startet unlocked (isUnlocked()=true)', async () => {
+    const { writeFile } = await import('node:fs/promises');
+    const key = 'boot-reload-primary-key-ac13-test';
+    await writeFile(envFile, `DEVGUI_CRED_MASTER_KEY=${key}\n`, { mode: 0o600 });
+
+    // Store mit envPath zeigend auf die Datei; keine Env-Var gesetzt
+    const store = new CredentialStore({ dir, envPath: envFile });
+    expect(store.isUnlocked()).toBe(true);
+  });
+
+  it('AC13 — Boot-Reload: Klartext-Op nach Datei-Reload möglich (getLockState = unlocked)', async () => {
+    const { writeFile } = await import('node:fs/promises');
+    const key = 'boot-reload-op-key-ac13-test';
+
+    // Einträge mit diesem Key anlegen
+    const setup = new CredentialStore({ dir, masterKey: key, envPath: envFile });
+    await setup.set('credentials/github/app_id', 'reload-app-id-value');
+
+    // Datei schreiben (wie #persistKeyToEnv nach unlock)
+    await writeFile(envFile, `DEVGUI_CRED_MASTER_KEY=${key}\n`, { mode: 0o600 });
+
+    // Neuer Store ohne Env-Var: muss Datei lesen und unlocked starten
+    const store = new CredentialStore({ dir, envPath: envFile });
+    expect(store.isUnlocked()).toBe(true);
+
+    const lockState = await store.getLockState();
+    expect(lockState.state).toBe('unlocked');
+
+    // Klartext-Op funktioniert
+    const pt = await store.getPlaintext('credentials/github/app_id');
+    expect(pt).toBe('reload-app-id-value');
+  });
+
+  it('AC13 — Alt-Name CRED_MASTER_KEY= in Datei wird akzeptiert (Fallback)', async () => {
+    const { writeFile } = await import('node:fs/promises');
+    const key = 'boot-reload-alt-name-key-ac13-test';
+    // Datei mit altem Schlüsselnamen
+    await writeFile(envFile, `CRED_MASTER_KEY=${key}\n`, { mode: 0o600 });
+
+    const store = new CredentialStore({ dir, envPath: envFile });
+    expect(store.isUnlocked()).toBe(true);
+  });
+
+  it('AC13 — Boot-Reload mit Alt-Name: Klartext-Op möglich', async () => {
+    const { writeFile } = await import('node:fs/promises');
+    const key = 'boot-reload-alt-op-key-ac13-test';
+
+    const setup = new CredentialStore({ dir, masterKey: key, envPath: envFile });
+    await setup.set('credentials/cloudflare/api_token', 'cf-token-via-alt');
+
+    // Datei mit altem Namen
+    await writeFile(envFile, `CRED_MASTER_KEY=${key}\n`, { mode: 0o600 });
+
+    const store = new CredentialStore({ dir, envPath: envFile });
+    expect(store.isUnlocked()).toBe(true);
+    const pt = await store.getPlaintext('credentials/cloudflare/api_token');
+    expect(pt).toBe('cf-token-via-alt');
+  });
+
+  it('AC13 — Datei mit DEVGUI_CRED_MASTER_KEY= hat Vorrang vor CRED_MASTER_KEY= in derselben Datei', async () => {
+    const { writeFile } = await import('node:fs/promises');
+    const correctKey = 'boot-reload-primary-wins-ac13';
+    // Setup: Store mit correctKey
+    const setup = new CredentialStore({ dir, masterKey: correctKey, envPath: envFile });
+    await setup.set('credentials/github/app_id', 'primary-wins-val');
+
+    // Datei: DEVGUI_CRED_MASTER_KEY zuerst (korrekt), dann CRED_MASTER_KEY (falsch)
+    await writeFile(envFile, `DEVGUI_CRED_MASTER_KEY=${correctKey}\nCRED_MASTER_KEY=wrong-key\n`, { mode: 0o600 });
+
+    const store = new CredentialStore({ dir, envPath: envFile });
+    expect(store.isUnlocked()).toBe(true);
+    // Klartext-Op muss mit correctKey klappen
+    const pt = await store.getPlaintext('credentials/github/app_id');
+    expect(pt).toBe('primary-wins-val');
+  });
+
+  it('AC13 — Boot-Reload: keySource ist "auto" (wie bei Env-Boot)', async () => {
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(envFile, `DEVGUI_CRED_MASTER_KEY=auto-source-key-ac13\n`, { mode: 0o600 });
+
+    const store = new CredentialStore({ dir, envPath: envFile });
+    const lockState = await store.getLockState();
+    expect(lockState.state).toBe('unlocked');
+    expect(lockState.keySource).toBe('auto');
+  });
+});
+
+describe('AC14 (S-139 Boot-Reload) — Env-Priorität: process.env gewinnt, Datei wird nicht gelesen', () => {
+  let dir, envFile;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'credstore-s139-ac14-'));
+    envFile = join(dir, 'devgui-cred.env');
+    delete process.env.DEVGUI_CRED_MASTER_KEY;
+    delete process.env.CRED_MASTER_KEY;
+  });
+
+  afterEach(async () => {
+    delete process.env.DEVGUI_CRED_MASTER_KEY;
+    delete process.env.CRED_MASTER_KEY;
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('AC14 — DEVGUI_CRED_MASTER_KEY in process.env gesetzt + Datei mit anderem Wert → Env-Key wird verwendet', async () => {
+    const { writeFile } = await import('node:fs/promises');
+    const envKey = 'env-wins-ac14-key';
+    const fileKey = 'file-should-be-ignored-ac14-key';
+
+    // Setup: Store mit Env-Key
+    const setup = new CredentialStore({ dir, masterKey: envKey, envPath: envFile });
+    await setup.set('credentials/github/app_id', 'env-key-value');
+
+    // Datei mit anderem (falschem) Key
+    await writeFile(envFile, `DEVGUI_CRED_MASTER_KEY=${fileKey}\n`, { mode: 0o600 });
+
+    // Env-Var setzen (korrekt)
+    process.env.DEVGUI_CRED_MASTER_KEY = envKey;
+
+    const store = new CredentialStore({ dir, envPath: envFile });
+    expect(store.isUnlocked()).toBe(true);
+    // Muss Env-Key verwenden (Klartext-Op klappt nur mit envKey)
+    const pt = await store.getPlaintext('credentials/github/app_id');
+    expect(pt).toBe('env-key-value');
+  });
+
+  it('AC14 — CRED_MASTER_KEY in process.env gesetzt + Datei mit anderem Wert → Env-Key gewinnt (Alt-Name)', async () => {
+    const { writeFile } = await import('node:fs/promises');
+    const envKey = 'cred-env-wins-ac14-key';
+    const fileKey = 'file-ignored-ac14-alt-key';
+
+    // Setup: Store mit envKey (via altem Namen)
+    const setup = new CredentialStore({ dir, masterKey: envKey, envPath: envFile });
+    await setup.set('credentials/github/app_id', 'alt-env-key-value');
+
+    // Datei mit falschem Key
+    await writeFile(envFile, `DEVGUI_CRED_MASTER_KEY=${fileKey}\n`, { mode: 0o600 });
+
+    // Alten Env-Namen setzen
+    process.env.CRED_MASTER_KEY = envKey;
+    delete process.env.DEVGUI_CRED_MASTER_KEY;
+
+    const store = new CredentialStore({ dir, envPath: envFile });
+    expect(store.isUnlocked()).toBe(true);
+    // Env-Key (alt) gewinnt
+    const pt = await store.getPlaintext('credentials/github/app_id');
+    expect(pt).toBe('alt-env-key-value');
+  });
+});
+
+describe('AC15 (S-139 Boot-Reload) — Robustheit: fehlende/leere Datei → kein Crash, kein Key-Leak', () => {
+  let dir, envFile;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'credstore-s139-ac15-'));
+    envFile = join(dir, 'devgui-cred.env');
+    delete process.env.DEVGUI_CRED_MASTER_KEY;
+    delete process.env.CRED_MASTER_KEY;
+  });
+
+  afterEach(async () => {
+    delete process.env.DEVGUI_CRED_MASTER_KEY;
+    delete process.env.CRED_MASTER_KEY;
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('AC15 — Datei existiert nicht → kein Crash, Store startet locked', () => {
+    // envFile existiert nicht (kein writeFile-Aufruf)
+    const store = new CredentialStore({ dir, envPath: envFile });
+    // Kein throw
+    expect(store.isUnlocked()).toBe(false);
+  });
+
+  it('AC15 — Datei ohne Master-Key-Zeile (nur andere Vars) → kein Crash, Store startet locked', async () => {
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(envFile, 'OTHER_VAR=some-value\nANOTHER=42\n', { mode: 0o600 });
+
+    const store = new CredentialStore({ dir, envPath: envFile });
+    expect(store.isUnlocked()).toBe(false);
+  });
+
+  it('AC15 — leere Datei → kein Crash, Store startet locked', async () => {
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(envFile, '', { mode: 0o600 });
+
+    const store = new CredentialStore({ dir, envPath: envFile });
+    expect(store.isUnlocked()).toBe(false);
+  });
+
+  it('AC15 — Datei mit leerer DEVGUI_CRED_MASTER_KEY=-Zeile → kein Crash, Store startet locked', async () => {
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(envFile, 'DEVGUI_CRED_MASTER_KEY=\n', { mode: 0o600 });
+
+    const store = new CredentialStore({ dir, envPath: envFile });
+    expect(store.isUnlocked()).toBe(false);
+  });
+
+  it('AC15 — kein Key-Leak im Log beim Boot-Reload (Security-Floor)', async () => {
+    const { writeFile } = await import('node:fs/promises');
+    const secretKey = 'boot-reload-no-log-leak-ac15-secret-0xcafe';
+    await writeFile(envFile, `DEVGUI_CRED_MASTER_KEY=${secretKey}\n`, { mode: 0o600 });
+
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+
+    try {
+      const _store = new CredentialStore({ dir, envPath: envFile });
+      void _store;
+
+      // Kein Aufruf darf den Key-Wert enthalten
+      const allOutput = [
+        ...warnSpy.mock.calls,
+        ...errorSpy.mock.calls,
+        ...logSpy.mock.calls,
+      ].map((c) => c.join(' ')).join('\n');
+
+      expect(allOutput).not.toContain(secretKey);
+    } finally {
+      warnSpy.mockRestore();
+      errorSpy.mockRestore();
+      logSpy.mockRestore();
+    }
+  });
+
+  it('AC15 — fehlende Datei + verschlüsselte Einträge → bestehender Fail-Fast greift (AC2 Regression)', async () => {
+    // Store mit Key anlegen
+    const setup = new CredentialStore({ dir, masterKey: 'fail-fast-key', envPath: envFile });
+    await setup.set('credentials/github/app_id', 'secret');
+
+    // Datei existiert nicht: kein Boot-Reload-Key → kein Master-Key → Fail-Fast
+    const store = new CredentialStore({ dir, envPath: '/nonexistent-dir/devgui-cred.env' });
+    expect(store.isUnlocked()).toBe(false);
+    await expect(store.assertCredentialConfig()).rejects.toThrow(/Master-Key/);
+  });
+});
+
+// ── AC16 (S-139) — CRED_STORE_DIR env-Override ────────────────────────────────
+
+describe('AC16 (S-139 dediziertes Volume) — CRED_STORE_DIR-Env-Override: opts.dir > CRED_STORE_DIR > default', () => {
+  let dir, envFile;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'credstore-s139-csd-'));
+    envFile = join(dir, 'devgui-cred.env');
+    delete process.env.CRED_STORE_DIR;
+    delete process.env.DEVGUI_CRED_MASTER_KEY;
+    delete process.env.CRED_MASTER_KEY;
+  });
+
+  afterEach(async () => {
+    delete process.env.CRED_STORE_DIR;
+    delete process.env.DEVGUI_CRED_MASTER_KEY;
+    delete process.env.CRED_MASTER_KEY;
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('AC16 — CRED_STORE_DIR gesetzt → secrets.enc.json liegt in diesem Verzeichnis', async () => {
+    process.env.CRED_STORE_DIR = dir;
+    // kein opts.dir → CRED_STORE_DIR greift
+    const store = new CredentialStore({ masterKey: TEST_MASTER_KEY, envPath: envFile });
+    await store.set('credentials/github/app_id', 'store-dir-env-test');
+
+    // Datei muss im per Env gesetzten dir liegen
+    const { stat } = await import('node:fs/promises');
+    const fileInDir = join(dir, 'secrets.enc.json');
+    const s = await stat(fileInDir);
+    expect(s.isFile()).toBe(true);
+  });
+
+  it('AC16 — opts.dir hat Vorrang vor CRED_STORE_DIR', async () => {
+    const optsDir = await mkdtemp(join(tmpdir(), 'credstore-s139-opts-'));
+    try {
+      process.env.CRED_STORE_DIR = dir; // wuerde normalerweise greifen
+      const store = new CredentialStore({ dir: optsDir, masterKey: TEST_MASTER_KEY, envPath: envFile });
+      await store.set('credentials/github/app_id', 'opts-dir-wins');
+
+      // Datei muss in optsDir liegen, NICHT in dir (CRED_STORE_DIR)
+      const { stat } = await import('node:fs/promises');
+      const fileInOptsDir = join(optsDir, 'secrets.enc.json');
+      const s = await stat(fileInOptsDir);
+      expect(s.isFile()).toBe(true);
+
+      // In CRED_STORE_DIR darf keine secrets.enc.json entstanden sein
+      let existsInEnvDir = false;
+      try {
+        await stat(join(dir, 'secrets.enc.json'));
+        existsInEnvDir = true;
+      } catch { /* ENOENT erwartet */ }
+      expect(existsInEnvDir).toBe(false);
+    } finally {
+      await rm(optsDir, { recursive: true, force: true });
+    }
   });
 });
