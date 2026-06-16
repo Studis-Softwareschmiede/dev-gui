@@ -1014,7 +1014,9 @@ describe('CredentialStore — SSH-Key-API (getPublicKey / setPublicKey / deleteP
   });
 
   it('AC3 — deletePublicKey ist idempotent', async () => {
-    await expect(store.deletePublicKey('doesnotexist')).resolves.toBeUndefined();
+    // Gibt {} zurück (kein Backup wenn kein Write stattfand — AC1/S-140)
+    const result = await store.deletePublicKey('doesnotexist');
+    expect(result).toBeDefined(); // mindestens leeres Objekt oder { backup }
   });
 
   it('AC1 — listSshKeys zeigt Benutzer mit Public-Key', async () => {
@@ -1104,6 +1106,8 @@ describe('CredentialStore — I2: Benutzer-Label-Validierung (Defense-in-Depth)'
   });
 
   it('I2 — deletePublicKey mit gültigem Label (nicht vorhanden) → idempotent, kein Fehler', async () => {
-    await expect(store.deletePublicKey('root')).resolves.toBeUndefined();
+    // Wirft keinen Fehler; gibt leeres Objekt zurück (kein Backup wenn kein Write stattfand)
+    const result = await store.deletePublicKey('root');
+    expect(result).toBeDefined();
   });
 });

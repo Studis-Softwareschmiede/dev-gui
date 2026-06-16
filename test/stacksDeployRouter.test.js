@@ -476,7 +476,9 @@ describe('stacksDeployRouter (AC6–AC11)', () => {
       const { status, body } = await httpReq(port, 'DELETE', '/api/deployments/stacks/my-stack');
 
       expect(status).toBe(200);
-      expect(body).toEqual({ stackName: 'my-stack', status: 'deleted' });
+      // backup-Feld koennte vorhanden sein (S-140 AC6), aber stackName+status sind gesetzt
+      expect(body.stackName).toBe('my-stack');
+      expect(body.status).toBe('deleted');
       // stackDeployOrchestrator.undeploy wurde NICHT aufgerufen
       expect(stackDeployOrchestrator.undeploy).not.toHaveBeenCalled();
 

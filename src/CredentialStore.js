@@ -45,6 +45,7 @@ import { promisify } from 'node:util';
 import { readFile, rename, mkdir, open, stat, chmod } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { readFileSync } from 'node:fs';
+import { runBackup, resolveBackupDir, resolveRetentionCount } from './BackupEngine.js';
 
 const scryptAsync = promisify(scrypt);
 
@@ -123,6 +124,22 @@ export function resolveKey(integration, name) {
   return { ok: true, storeKey: `credentials/${integration}/${name}` };
 }
 
+// ── Backup-Ergebnis-Helfer ────────────────────────────────────────────────────
+
+/**
+ * Erstellt die nach-außen (HTTP) sichere Ansicht eines Backup-Ergebnisses.
+ * Entfernt `localPath` (interner Volume-Pfad, S-1 / S-140): dieser gehört nicht ins Frontend.
+ *
+ * @param {{ local: string, offHost: string, localPath?: string, errorClass?: string, message?: string } | undefined} backup
+ * @returns {{ local: string, offHost: string, errorClass?: string, message?: string } | undefined}
+ */
+export function toExternalBackup(backup) {
+  if (!backup) return undefined;
+  // eslint-disable-next-line no-unused-vars
+  const { localPath: _localPath, ...external } = backup;
+  return external;
+}
+
 // ── CredentialStore ────────────────────────────────────────────────────────────
 
 export class CredentialStore {
@@ -154,6 +171,20 @@ export class CredentialStore {
   #envPath;
 
   /**
+   * Verzeichnis für lokale Backup-Artefakte (S-140 AC3).
+   * Überschreibbar via opts.backupDir (für Tests) oder CRED_BACKUP_DIR (Env).
+   * Default: <CRED_STORE_DIR>/backups
+   * @type {string}
+   */
+  #backupDir;
+
+  /**
+   * Maximale Anzahl lokaler Backup-Artefakte vor Retention-Aufräumen (S-140 AC5).
+   * @type {number}
+   */
+  #backupRetentionCount;
+
+  /**
    * Flag: Deprecation-Warnung für alten Key-Namen wurde bereits geloggt (einmalig pro Prozessstart).
    * @type {boolean}
    */
@@ -170,9 +201,11 @@ export class CredentialStore {
 
   /**
    * @param {object} [opts]
-   * @param {string} [opts.dir]         - Verzeichnis (default: CRED_STORE_DIR env, oder /home/node/.cred)
-   * @param {string} [opts.masterKey]   - Master-Key (für Tests injizierbar; sonst aus Env)
-   * @param {string} [opts.envPath]     - Pfad zur .env-Datei (default: Projekt-Root/.env)
+   * @param {string} [opts.dir]               - Verzeichnis (default: CRED_STORE_DIR env, oder /home/node/.cred)
+   * @param {string} [opts.masterKey]         - Master-Key (für Tests injizierbar; sonst aus Env)
+   * @param {string} [opts.envPath]           - Pfad zur .env-Datei (default: Projekt-Root/.env)
+   * @param {string} [opts.backupDir]         - Backup-Verzeichnis (für Tests; default: dir/backups)
+   * @param {number} [opts.backupRetention]   - Max. Anzahl lokaler Backups (für Tests; default: 10)
    */
   constructor(opts = {}) {
     // AC16 (S-139): Speicherpfad: opts.dir > CRED_STORE_DIR > /home/node/.cred (neues dediziertes Volume)
@@ -209,6 +242,16 @@ export class CredentialStore {
       // AC2: Key aus Env/Boot-Reload → keySource "auto"; kein Key → "none"
       this.#keySource = this.#masterKeyRaw ? 'auto' : 'none';
     }
+
+    // S-140: Backup-Verzeichnis + Retention-Konfiguration
+    if (opts.backupDir !== undefined) {
+      this.#backupDir = opts.backupDir;
+    } else {
+      this.#backupDir = resolveBackupDir(dir);
+    }
+    this.#backupRetentionCount = opts.backupRetention !== undefined
+      ? opts.backupRetention
+      : resolveRetentionCount();
   }
 
   /**
@@ -490,8 +533,10 @@ export class CredentialStore {
 
   /**
    * Schreibt den Store atomar (tmp + fsync + rename).
+   * Gibt den serialisierten JSON-String zurück (für den Backup-Hook, S-140 AC1).
    *
    * @param {object} data
+   * @returns {Promise<string>} Serialisierter Store-Inhalt (für Backup-Artefakt)
    */
   async #writeStore(data) {
     const tmp = `${this.#filePath}.tmp`;
@@ -513,6 +558,9 @@ export class CredentialStore {
     }
 
     await rename(tmp, this.#filePath);
+
+    // Rückgabe des serialisierten Inhalts für den Backup-Hook (S-140 AC1)
+    return json;
   }
 
   /**
@@ -601,6 +649,36 @@ export class CredentialStore {
     await rename(tmpPath, envPath);
     // Sicherstellen dass mode korrekt ist auch nach rename (AC5)
     await chmod(envPath, 0o600);
+  }
+
+  // ── Backup-Hook (S-140) ─────────────────────────────────────────────────────
+
+  /**
+   * Erzeugt ein lokales Backup-Artefakt nach erfolgreichem Store-Write (S-140 AC1).
+   *
+   * - Backup-Fehler rollt den Store-Write NICHT zurück (AC4).
+   * - Passphrase (Master-Key) wird NICHT geloggt, nicht in Argv (AC7).
+   * - Off-Host-Upload ist S-141 — hier immer 'disabled'.
+   *
+   * Muss innerhalb des Write-Locks aufgerufen werden, NACHDEM #writeStore() erfolgreich war.
+   *
+   * @param {string} storeBlob - Inhalt von secrets.enc.json (bereits serialisiert, atomar geschrieben)
+   * @returns {Promise<{ local: 'ok'|'failed', offHost: 'disabled', localPath?: string, errorClass?: string, message?: string }>}
+   */
+  async #runBackupHook(storeBlob) {
+    // Kein Master-Key → kein Backup möglich (Store müsste entsperrt sein für Store-Writes)
+    if (!this.#masterKeyRaw) {
+      return { local: 'failed', offHost: 'disabled', errorClass: 'backup-failed', message: '[BackupEngine] Kein Master-Key verfügbar (Store gesperrt)' };
+    }
+
+    // AC7: masterKeyRaw wird an BackupEngine weitergegeben, erscheint aber NICHT in Logs/Argv
+    return runBackup({
+      masterKeyRaw: this.#masterKeyRaw,
+      storeFilePath: this.#filePath,
+      backupDir: this.#backupDir,
+      retentionCount: this.#backupRetentionCount,
+      storeBlob,
+    });
   }
 
   // ── Öffentliche API ──────────────────────────────────────────────────────────
@@ -814,10 +892,11 @@ export class CredentialStore {
   /**
    * Setzt oder überschreibt einen Credential-Wert.
    * Gibt Metadaten zurück (niemals Klartext).
+   * Enthält Backup-Ergebnis als `backup`-Feld (S-140 AC6).
    *
    * @param {string} storeKey
    * @param {string} plaintext
-   * @returns {Promise<{ status: 'set', updatedAt: string }>}
+   * @returns {Promise<{ status: 'set', updatedAt: string, backup: BackupResult }>}
    */
   async set(storeKey, plaintext) {
     if (typeof plaintext !== 'string' || plaintext.trim() === '') {
@@ -860,28 +939,38 @@ export class CredentialStore {
 
       storeData.entries[storeKey] = { ...encrypted, updatedAt };
 
-      await this.#writeStore(storeData);
+      // S-140 AC1: Backup nach erfolgreichem Store-Write (im Write-Lock)
+      const storeBlob = await this.#writeStore(storeData);
+      const backup = await this.#runBackupHook(storeBlob);
 
-      return { status: 'set', updatedAt };
+      // AC4: backup-Fehler rollt Store-Write NICHT zurück
+      return { status: 'set', updatedAt, backup };
     });
   }
 
   /**
    * Löscht einen Credential-Eintrag. Idempotent (kein Fehler wenn nicht vorhanden).
+   * Enthält Backup-Ergebnis als `backup`-Feld (S-140 AC6).
    *
    * @param {string} storeKey
-   * @returns {Promise<{ status: 'unset' }>}
+   * @returns {Promise<{ status: 'unset', backup?: BackupResult }>}
    */
   async delete(storeKey) {
     return this.#withWriteLock(async () => {
       const storeData = await this.#readStore();
       if (!storeData || !storeData.entries[storeKey]) {
+        // Kein Write → kein Backup-Trigger (AC1: nur nach erfolgreichem Write)
         return { status: 'unset' };
       }
 
       delete storeData.entries[storeKey];
-      await this.#writeStore(storeData);
-      return { status: 'unset' };
+
+      // S-140 AC1: Backup nach erfolgreichem Store-Write (im Write-Lock)
+      const storeBlob = await this.#writeStore(storeData);
+      const backup = await this.#runBackupHook(storeBlob);
+
+      // AC4: backup-Fehler rollt Store-Write NICHT zurück
+      return { status: 'unset', backup };
     });
   }
 
@@ -927,8 +1016,9 @@ export class CredentialStore {
       }
       if (!storeData.meta) storeData.meta = {};
       storeData.meta[metaKey] = { value: publicKey, updatedAt };
-      await this.#writeStore(storeData);
-      return { updatedAt };
+      const storeBlob = await this.#writeStore(storeData);
+      const backup = await this.#runBackupHook(storeBlob);
+      return { updatedAt, backup };
     });
   }
 
@@ -936,7 +1026,7 @@ export class CredentialStore {
    * Löscht den Public-Key eines SSH-Benutzers. Idempotent.
    *
    * @param {string} user
-   * @returns {Promise<void>}
+   * @returns {Promise<{ backup?: BackupResult }>}
    */
   async deletePublicKey(user) {
     // I2: Defense-in-Depth — Benutzer-Label intern validieren
@@ -949,9 +1039,11 @@ export class CredentialStore {
     const metaKey = `ssh/${user}/public_key`;
     return this.#withWriteLock(async () => {
       const storeData = await this.#readStore();
-      if (!storeData?.meta?.[metaKey]) return;
+      if (!storeData?.meta?.[metaKey]) return {};
       delete storeData.meta[metaKey];
-      await this.#writeStore(storeData);
+      const storeBlob = await this.#writeStore(storeData);
+      const backup = await this.#runBackupHook(storeBlob);
+      return { backup };
     });
   }
 
@@ -972,7 +1064,7 @@ export class CredentialStore {
    * Persistiert den konfigurierten Workspace-Root-Pfad (Klartext-Metadatum, nicht geheim).
    *
    * @param {string} absPath  Bereits validierter absoluter Pfad.
-   * @returns {Promise<{ updatedAt: string }>}
+   * @returns {Promise<{ updatedAt: string, backup: BackupResult }>}
    */
   async writeWorkspacePath(absPath) {
     if (typeof absPath !== 'string' || absPath.trim() === '') {
@@ -986,22 +1078,25 @@ export class CredentialStore {
       }
       if (!storeData.meta) storeData.meta = {};
       storeData.meta[WORKSPACE_PATH_META_KEY] = { value: absPath.trim(), updatedAt };
-      await this.#writeStore(storeData);
-      return { updatedAt };
+      const storeBlob = await this.#writeStore(storeData);
+      const backup = await this.#runBackupHook(storeBlob);
+      return { updatedAt, backup };
     });
   }
 
   /**
    * Löscht den konfigurierten Workspace-Root-Pfad. Idempotent.
    *
-   * @returns {Promise<void>}
+   * @returns {Promise<{ backup?: BackupResult }>}
    */
   async deleteWorkspacePath() {
     return this.#withWriteLock(async () => {
       const storeData = await this.#readStore();
-      if (!storeData?.meta?.[WORKSPACE_PATH_META_KEY]) return;
+      if (!storeData?.meta?.[WORKSPACE_PATH_META_KEY]) return {};
       delete storeData.meta[WORKSPACE_PATH_META_KEY];
-      await this.#writeStore(storeData);
+      const storeBlob = await this.#writeStore(storeData);
+      const backup = await this.#runBackupHook(storeBlob);
+      return { backup };
     });
   }
 
@@ -1044,7 +1139,7 @@ export class CredentialStore {
    * @param {string} stackName  - Stack-Name (bereits validiert)
    * @param {string} jsonValue  - JSON-serialisierte StackDefinition
    * @param {string} updatedAt  - ISO-Timestamp
-   * @returns {Promise<void>}
+   * @returns {Promise<{ backup: BackupResult }>}
    */
   async setStackMeta(stackName, jsonValue, updatedAt) {
     const metaKey = `stacks/${stackName}`;
@@ -1055,7 +1150,9 @@ export class CredentialStore {
       }
       if (!storeData.meta) storeData.meta = {};
       storeData.meta[metaKey] = { value: jsonValue, updatedAt };
-      await this.#writeStore(storeData);
+      const storeBlob = await this.#writeStore(storeData);
+      const backup = await this.#runBackupHook(storeBlob);
+      return { backup };
     });
   }
 
@@ -1063,15 +1160,17 @@ export class CredentialStore {
    * Löscht eine Stack-Definition aus dem meta-Block. Idempotent.
    *
    * @param {string} stackName - Stack-Name (bereits validiert)
-   * @returns {Promise<void>}
+   * @returns {Promise<{ backup?: BackupResult }>}
    */
   async deleteStackMeta(stackName) {
     const metaKey = `stacks/${stackName}`;
     return this.#withWriteLock(async () => {
       const storeData = await this.#readStore();
-      if (!storeData?.meta?.[metaKey]) return;
+      if (!storeData?.meta?.[metaKey]) return {};
       delete storeData.meta[metaKey];
-      await this.#writeStore(storeData);
+      const storeBlob = await this.#writeStore(storeData);
+      const backup = await this.#runBackupHook(storeBlob);
+      return { backup };
     });
   }
 

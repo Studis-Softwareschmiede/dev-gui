@@ -33,6 +33,7 @@
 import { Router } from 'express';
 import { validateWorkspacePath, WorkspacePathError } from './workspacePath.js';
 import { WorkspaceHealthChecker } from './WorkspaceHealthChecker.js';
+import { toExternalBackup } from './CredentialStore.js';
 
 /**
  * Prüft ob die anfragende Identität mutieren darf (AC8 / ADR-007 OA3).
@@ -188,8 +189,9 @@ export function workspacePathRouter(credentialStore, auditStore, deps = {}) {
     }
 
     // Persistieren
+    let writeResult;
     try {
-      await credentialStore.writeWorkspacePath(resolvedPath);
+      writeResult = await credentialStore.writeWorkspacePath(resolvedPath);
     } catch (err) {
       // Outcome-Audit (Store-Fehler)
       try {
@@ -214,7 +216,12 @@ export function workspacePathRouter(credentialStore, auditStore, deps = {}) {
       console.error('[workspacePathRouter] Outcome-Audit-Write (Erfolg) fehlgeschlagen:', auditOutcomeErr.message);
     }
 
-    return res.json({ effectivePath: resolvedPath, source: 'configured' });
+    // S-1: localPath (interner Volume-Pfad) aus HTTP-Response filtern
+    return res.json({
+      effectivePath: resolvedPath,
+      source: 'configured',
+      ...(writeResult?.backup ? { backup: toExternalBackup(writeResult.backup) } : {}),
+    });
   });
 
   /**
@@ -253,8 +260,9 @@ export function workspacePathRouter(credentialStore, auditStore, deps = {}) {
     }
 
     // Konfiguration löschen
+    let deleteResult;
     try {
-      await credentialStore.deleteWorkspacePath();
+      deleteResult = await credentialStore.deleteWorkspacePath();
     } catch (err) {
       try {
         auditStore.record({
@@ -279,9 +287,11 @@ export function workspacePathRouter(credentialStore, auditStore, deps = {}) {
     }
 
     const mountRoot = process.env.WORKSPACE_DIR ?? '';
+    // S-1: localPath (interner Volume-Pfad) aus HTTP-Response filtern
     return res.json({
       effectivePath: mountRoot || null,
       source: 'env-default',
+      ...(deleteResult?.backup ? { backup: toExternalBackup(deleteResult.backup) } : {}),
     });
   });
 

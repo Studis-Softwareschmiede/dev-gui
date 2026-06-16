@@ -2404,3 +2404,133 @@ describe('AC16 (S-139 dediziertes Volume) — CRED_STORE_DIR-Env-Override: opts.
     }
   });
 });
+
+// ── AC6 (S-140) — backup-Feld im HTTP-Response (I-2) ─────────────────────────
+
+describe('credentialsRouter — AC6 (S-140): backup-Feld im HTTP-Response', () => {
+  // Prueft den HTTP-Pfad (I-2): PUT und DELETE muss body.backup enthalten.
+  // GPG-Pruefung: backup.local:'ok' nur wenn GPG verfuegbar, sonst 'failed'.
+  // localPath darf NICHT im HTTP-Response erscheinen (S-1).
+  let dir, store, testServer;
+  let gpgOk = false;
+
+  beforeEach(async () => {
+    process.env.DEV_NO_ACCESS = '1';
+    dir = await mkdtemp(join(tmpdir(), 'credstore-ac6-http-'));
+    const backupDir = join(dir, 'backups');
+    store = new CredentialStore({ dir, masterKey: TEST_MASTER_KEY, backupDir });
+    testServer = await makeTestServer(store);
+
+    // GPG-Verfuegbarkeit pruefen
+    const { isGpgAvailable } = await import('../src/BackupCrypto.js');
+    gpgOk = await isGpgAvailable();
+  });
+
+  afterEach(async () => {
+    delete process.env.DEV_NO_ACCESS;
+    await testServer.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('AC6 — PUT /api/settings/credentials Response enthaelt backup-Feld', async () => {
+    const res = await testServer.req('PUT', '/api/settings/credentials/github/app_id', { value: 'ac6-test-value' });
+    expect(res.status).toBe(200);
+    const data = JSON.parse(res.body);
+
+    // backup-Feld muss vorhanden sein (unabhaengig von GPG)
+    expect(data.backup).toBeDefined();
+    expect(data.backup.offHost).toBe('disabled');
+
+    // local: 'ok' wenn GPG verfuegbar, 'failed' wenn nicht
+    if (gpgOk) {
+      expect(data.backup.local).toBe('ok');
+    } else {
+      expect(['ok', 'failed']).toContain(data.backup.local);
+    }
+
+    // S-1: localPath darf NICHT im HTTP-Response erscheinen
+    expect(data.backup.localPath).toBeUndefined();
+    expect(res.body).not.toContain('localPath');
+  });
+
+  it('AC6 — PUT Response: backup.local === "ok" wenn GPG verfuegbar', async () => {
+    if (!gpgOk) return; // GPG nicht verfuegbar — Test ueberspringen
+    const res = await testServer.req('PUT', '/api/settings/credentials/github/app_id', { value: 'ac6-gpg-ok' });
+    expect(res.status).toBe(200);
+    const data = JSON.parse(res.body);
+    expect(data.backup).toBeDefined();
+    expect(data.backup.local).toBe('ok');
+    expect(data.backup.offHost).toBe('disabled');
+    expect(data.backup.localPath).toBeUndefined(); // S-1
+  });
+
+  it('AC6 — PUT Response: backup.local === "failed" wenn Backup-Dir nicht beschreibbar', async () => {
+    // Store mit ungueltigem Backup-Dir (simuliert Backup-Fehler)
+    const badBackupDir = '/dev/null/not-a-directory';
+    const storeWithBadBackup = new CredentialStore({
+      dir,
+      masterKey: TEST_MASTER_KEY,
+      backupDir: badBackupDir,
+    });
+    const app = (await import('express')).default();
+    app.use((await import('express')).json());
+    const { createAccessGuard } = await import('../src/AccessGuard.js');
+    app.use('/api', createAccessGuard());
+    const { credentialsRouter: cr } = await import('../src/credentialsRouter.js');
+    app.use(cr(storeWithBadBackup, new AuditStore()));
+    const { createServer: cs } = await import('node:http');
+    const srv = cs(app);
+    await new Promise((resolve) => srv.listen(0, '127.0.0.1', resolve));
+    const port = srv.address().port;
+
+    const res = await new Promise((resolve) => {
+      const headers = { 'Content-Type': 'application/json' };
+      const bodyStr = JSON.stringify({ value: 'ac6-bad-backup' });
+      headers['Content-Length'] = Buffer.byteLength(bodyStr);
+      const r = httpRequest(
+        { hostname: '127.0.0.1', port, path: '/api/settings/credentials/github/app_id', method: 'PUT', headers },
+        (response) => {
+          let d = '';
+          response.on('data', (c) => { d += c; });
+          response.on('end', () => resolve({ status: response.statusCode, body: d }));
+        },
+      );
+      r.on('error', () => resolve({ status: 0, body: '' }));
+      r.write(bodyStr);
+      r.end();
+    });
+
+    await new Promise((r) => srv.close(r));
+
+    expect(res.status).toBe(200); // Credential gesetzt (AC4: Backup-Fehler rollt nichts zurueck)
+    const data = JSON.parse(res.body);
+    expect(data.backup).toBeDefined();
+    expect(data.backup.local).toBe('failed'); // Backup fehlgeschlagen
+    expect(data.backup.offHost).toBe('disabled');
+    expect(data.backup.localPath).toBeUndefined(); // S-1: kein localPath
+  });
+
+  it('AC6 — DELETE /api/settings/credentials Response enthaelt backup-Feld (wenn Eintrag vorhanden)', async () => {
+    if (!gpgOk) return; // Backup-Ergebnis nur sinnvoll mit GPG
+    // Erst setzen
+    await store.set('credentials/github/app_id', 'to-delete-ac6');
+    // Dann loeschen via HTTP
+    const res = await testServer.req('DELETE', '/api/settings/credentials/github/app_id');
+    expect(res.status).toBe(200);
+    const data = JSON.parse(res.body);
+
+    expect(data.backup).toBeDefined();
+    expect(data.backup.local).toBe('ok');
+    expect(data.backup.offHost).toBe('disabled');
+    expect(data.backup.localPath).toBeUndefined(); // S-1
+  });
+
+  it('S-1 — localPath erscheint niemals im HTTP-Response-Body', async () => {
+    const res = await testServer.req('PUT', '/api/settings/credentials/github/app_id', { value: 'localpath-check' });
+    expect(res.status).toBe(200);
+    // localPath ist ein interner Volume-Pfad; er darf nicht im HTTP-Body erscheinen
+    expect(res.body).not.toContain('localPath');
+    // Auch nicht in anderem Schreibformat
+    expect(res.body).not.toMatch(/"localPath"/);
+  });
+});
