@@ -3,7 +3,7 @@
  *
  * Spec: docs/specs/bitwarden-new-device-otp.md
  *
- * Covers (bitwarden-new-device-otp AC1–AC8):
+ * Covers (bitwarden-new-device-otp AC1–AC11, #267):
  *   AC1  — bw verlangt New-Device-Verification + kein Code → 'email-otp-required' (≠ 'twofa-required')
  *   AC2  — Folge-Request mit gültigem E-Mail-OTP → Login erfolgreich, Beschaffung normal
  *   AC3  — Falscher/abgelaufener E-Mail-OTP → 'email-otp-invalid' (≠ 'twofa-invalid')
@@ -12,24 +12,29 @@
  *   AC6  — aria-describedby/role=alert für email-otp-invalid → Frontend-AC, getestet in SettingsView.test.jsx
  *   AC7  — E-Mail-OTP-Code erscheint NICHT in Argv, Logs, Audit oder Response
  *          (PTY-spawnedArgvs + spawnedOpts + console-Spy); fetch-URL-Leak getestet in SettingsView.test.jsx (AC7)
- *   AC8  — Autonomer Pfad (kein bw-Login) → kein OTP erwartet/ausgelöst
+ *   AC8  — Doku-/autonomer-Pfad-AC, kein bw-Login-Pfad
  *          (dokumentiert: acquireMasterKey ist der interaktive Pfad; autonomer Pfad = DEVGUI_CRED_MASTER_KEY)
- *   AC9  — A11y (label/htmlFor, autoComplete, aria-describedby, Fokus, Touch-Target) → Frontend-AC, getestet in SettingsView.test.jsx
+ *   AC9  — Frontend-AC, getestet in SettingsView.test.jsx
+ *   AC10 — Single-Process: genau EIN bw-Login-Spawn über den OTP-Zyklus; Request 1 hält Prozess offen;
+ *          Request 2 schreibt OTP in denselben Prozess (kein zweiter Spawn). (#267)
+ *   AC11 — Robustheit/Cleanup: Timeout beendet+räumt offenen Prozess auf; kein Alt-Code-Re-Spawn;
+ *          paralleler Versuch derselben identity ersetzt alten Handle sauber. (#267)
  *
  * Strategie:
- *   - `_spawnBwPty` vollständig gemockt (Fake-PTY für `bw login` — kein echter Bitwarden-Netzwerkaufruf)
+ *   - `_spawnBwPtySession` vollständig gemockt (Fake-Two-Phase-PTY für OTP-Fluss, AC10/AC11)
+ *   - `_spawnBwPty` vollständig gemockt (Fake-PTY für TOTP-Pfad, AC4-Regression)
  *   - `_spawnBw` vollständig gemockt (für get/encode/create/logout)
  *   - CredentialStore + AuditStore als echte In-Memory-Instanzen
  *   - AC7: PTY-spawnedArgvs + spawnedOpts werden auf OTP-Leak geprüft
- *          (emailOtp muss via opts.emailOtp übergeben werden, NICHT via Argv)
- *   - AC7: console.error wird bespioniert — OTP-Code darf nie in Logs erscheinen
+ *          (emailOtp muss via PTY-Write übergeben werden, NICHT via Argv)
+ *   - AC7: console.error/log/warn wird bespioniert — OTP-Code darf nie in Logs erscheinen
  *   - AC4: TOTP-Regression explizit: twofa-required/twofa-invalid bleiben distinkt
  *
- * PTY-Simulation (Fake-PTY):
- *   - Die Fake-PTY-Funktion (_spawnBwPty) empfängt emailOtp als opts.emailOtp
- *   - Sie simuliert das PTY-Prompt-Handling: wenn emailOtp gesetzt + requiresEmailOtp → Erfolg
- *   - Ohne emailOtp + requiresEmailOtp → Fehler mit New-Device-Prompt im output
- *   - So spiegelt der Test das reale PTY-Verhalten ohne echtes node-pty
+ * Two-Phase-PTY-Simulation (Fake-spawnBwPtySession, AC10/AC11):
+ *   - Phase 1 (kein emailOtp): resolves { phase: 'awaiting-otp', writeOtp, cleanup }
+ *     wenn New-Device-Verification simuliert wird
+ *   - Phase 2 (via writeOtp): simuliert PTY-Exit nach OTP-Eingabe
+ *   - Exakt EIN Spawn-Aufruf für den gesamten Zyklus (AC10)
  */
 
 import { describe, it, beforeEach, afterEach, expect, jest } from '@jest/globals';
@@ -50,39 +55,99 @@ const FAKE_SESSION = 'fake-bw-session-token-xyz';
 const FAKE_KEY_VALUE = 'dGVzdC1rZXktZm9yLW5ldy1kZXZpY2UtdmVyaWZpY2F0aW9u'; // base64
 const FAKE_EMAIL_OTP = '847291';  // 6-stelliger E-Mail-OTP-Code
 const ITEM_NAME = 'dev-gui-master-key';
+const FAKE_IDENTITY = 'admin@example.com';
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 /**
- * Erstellt eine Fake-PTY-Spawn-Funktion (_spawnBwPty) mit E-Mail-OTP-Unterstützung.
+ * Erstellt eine Fake-Two-Phase-PTY-Session-Funktion (_spawnBwPtySession) für AC10/AC11.
  *
- * Simuliert das PTY-Verhalten:
- *   - Bei requiresEmailOtp: prüft opts.emailOtp (nicht opts.input — PTY-Modell)
- *   - Ohne emailOtp → output enthält den New-Device-Prompt-Text → classifyBwError → 'email-otp-required'
- *   - Mit emailOtp + emailOtpInvalid → output enthält "invalid" → classifyBwError → 'email-otp-invalid'
- *   - Mit emailOtp (gültig) → exitCode 0, stdout = sessionToken
+ * Simuliert das Single-Process-PTY-Verhalten:
+ *   - Bei requiresEmailOtp: Phase 1 resolves { phase: 'awaiting-otp', writeOtp, cleanup }
+ *   - writeOtp(code) resolves mit { stdout: sessionToken, exitCode: 0 } bei gültigem Code
+ *   - writeOtp(code) resolves mit invalid-output bei emailOtpInvalid=true
+ *   - Kein requiresEmailOtp: Phase 1 resolves { phase: 'done', ... }
  *
- * @param {object} opts
- * @param {string}    [opts.sessionToken]         - Session-Token für erfolgreichen Login
- * @param {boolean}   [opts.requiresEmailOtp]     - true = erst ohne OTP schlägt fehl (device verif required)
- * @param {boolean}   [opts.emailOtpInvalid]      - true = OTP ist falsch/abgelaufen
- * @param {boolean}   [opts.requiresTwofa]        - true = TOTP-2FA erforderlich (kein Device-OTP)
- * @param {boolean}   [opts.twofaInvalid]         - true = TOTP-Code falsch
- * @param {boolean}   [opts.loginFails]           - true = Login schlägt generisch fehl
- * @param {string}    [opts.loginOutput]          - PTY-Output bei Login-Fehler
- * @param {number}    [opts.loginExitCode]        - Exit-Code für Login (Default 1)
- * @param {(args: string[], opts: object) => void} [opts.onSpawn] - Callback für Assertions
+ * AC10-Nachweis: spawnCallCount zählt die Aufrufe — darf für den OTP-Zyklus genau 1 sein.
  */
-function makePtyMock({
+function makePtySessionMock({
   sessionToken = FAKE_SESSION,
   requiresEmailOtp = false,
   emailOtpInvalid = false,
+  loginFails = false,
+  loginOutput = '',
+  loginExitCode = 1,
+} = {}) {
+  let spawnCallCount = 0;
+  const spawnedArgvs = [];
+
+  // Für jeden Spawn: { writeOtp, cleanup, cleanupCalled, otpCodes }
+  const sessions = [];
+
+  const fn = jest.fn(async (args, _env) => {
+    spawnCallCount++;
+    spawnedArgvs.push([...args]);
+
+    if (loginFails) {
+      sessions.push(null);
+      return {
+        phase: 'done',
+        stdout: '',
+        output: loginOutput || 'Username or password is incorrect.',
+        exitCode: loginExitCode,
+      };
+    }
+
+    if (!requiresEmailOtp) {
+      // Direkter Login ohne OTP-Prompt
+      sessions.push(null);
+      return { phase: 'done', stdout: sessionToken, output: '', exitCode: 0 };
+    }
+
+    // OTP-Prompt-Simulation: Phase 1 = awaiting-otp
+    const session = { cleanupCalled: false, otpCode: null };
+    sessions.push(session);
+
+    const writeOtp = jest.fn(async (code) => {
+      session.otpCode = code; // AC7: code nur intern gespeichert (für Test-Assertion)
+      if (emailOtpInvalid) {
+        return {
+          stdout: '',
+          output: 'New device verification invalid or expired.',
+          exitCode: 1,
+        };
+      }
+      return { stdout: sessionToken, output: '', exitCode: 0 };
+    });
+
+    const cleanup = jest.fn(() => {
+      session.cleanupCalled = true;
+    });
+
+    // Spies am session-Objekt exponieren, damit Tests via sessions[idx] darauf zugreifen
+    session.writeOtp = writeOtp;
+    session.cleanup = cleanup;
+
+    return { phase: 'awaiting-otp', writeOtp, cleanup };
+  });
+
+  fn.spawnCallCount = () => spawnCallCount;
+  fn.spawnedArgvs = spawnedArgvs;
+  fn.sessions = sessions;
+  return fn;
+}
+
+/**
+ * Erstellt eine Fake-PTY-Spawn-Funktion (_spawnBwPty) für den TOTP-2FA-Pfad (AC4, Regression).
+ * Unverändertes API — wird nur für twofa-Pfad verwendet.
+ */
+function makePtyMock({
+  sessionToken = FAKE_SESSION,
   requiresTwofa = false,
   twofaInvalid = false,
   loginFails = false,
   loginOutput = '',
   loginExitCode = 1,
-  onSpawn = null,
 } = {}) {
   const spawnedArgvs = [];
   const spawnedOpts = [];
@@ -90,30 +155,6 @@ function makePtyMock({
   const fn = jest.fn(async (args, opts) => {
     spawnedArgvs.push([...args]);
     spawnedOpts.push(opts ?? {});
-    if (onSpawn) onSpawn(args, opts);
-
-    // E-Mail-OTP (New-Device-Verification): Fake-PTY prüft opts.emailOtp (nicht opts.input)
-    if (requiresEmailOtp) {
-      const hasOtp = opts?.emailOtp && opts.emailOtp.trim().length > 0;
-      if (!hasOtp) {
-        // Kein OTP: output enthält New-Device-Prompt-Text → classifyBwError → 'email-otp-required'
-        return {
-          stdout: '',
-          output: 'New device verification required. Enter OTP sent to login email:',
-          exitCode: 1,
-        };
-      }
-      if (emailOtpInvalid) {
-        // OTP übergeben aber falsch/abgelaufen
-        return {
-          stdout: '',
-          output: 'New device verification invalid or expired.',
-          exitCode: 1,
-        };
-      }
-      // Gültiger OTP → Erfolg
-      return { stdout: sessionToken, output: '', exitCode: 0 };
-    }
 
     // TOTP-2FA-Fehler (distinkt von E-Mail-OTP — AC4)
     if (requiresTwofa) {
@@ -202,12 +243,18 @@ afterEach(async () => {
   await rm(tmpDir, { recursive: true, force: true });
 });
 
-function makeService(ptyMock, spawnMock) {
+/**
+ * Erstellt eine Service-Instanz mit injizierten Mocks.
+ * _spawnBwPtySession: für OTP-Pfad (AC10/AC11)
+ * _spawnBwPty: für TOTP-Pfad (AC4, Regression)
+ */
+function makeService(ptySessionMock, spawnMock, ptyMock) {
   return new BitwardenMasterKeyService({
     credentialStore,
     auditStore,
     itemName: ITEM_NAME,
-    _spawnBwPty: ptyMock,
+    _spawnBwPtySession: ptySessionMock,
+    _spawnBwPty: ptyMock ?? makePtyMock(),
     _spawnBw: spawnMock ?? makeSpawnMock(),
   });
 }
@@ -218,35 +265,43 @@ function makeService(ptyMock, spawnMock) {
 
 describe('AC1 — email-otp-required: kein OTP-Code übergeben → klassifizierter Fehler', () => {
   it('AC1 — New-Device-Verification ohne OTP → status "error", errorClass "email-otp-required"', async () => {
-    const ptyMock = makePtyMock({ requiresEmailOtp: true });
-    const service = makeService(ptyMock);
+    const ptySessionMock = makePtySessionMock({ requiresEmailOtp: true });
+    const service = makeService(ptySessionMock);
 
     const result = await service.acquireMasterKey({
       email: FAKE_EMAIL,
       password: FAKE_PASSWORD,
-      identity: null,
+      identity: FAKE_IDENTITY,
     });
 
     expect(result.status).toBe('error');
     expect(result.errorClass).toBe('email-otp-required');
   });
 
-  it('AC1 — email-otp-required ist UNTERSCHEIDBAR von twofa-required (verschiedene errorClass)', async () => {
-    const ptyMockEmailOtp = makePtyMock({ requiresEmailOtp: true });
+  it('AC1 — email-otp-required ist UNTERSCHEIDBAR von twofa-required', async () => {
+    const ptySessionMock = makePtySessionMock({ requiresEmailOtp: true });
     const ptyMockTwofa = makePtyMock({ requiresTwofa: true });
-    const serviceEmailOtp = makeService(ptyMockEmailOtp);
-    const serviceTwofa = makeService(ptyMockTwofa);
+
+    const serviceEmailOtp = makeService(ptySessionMock);
+    // TOTP-Pfad: übergebe twofa → verwendet _spawnBwPty (unveränderter Pfad)
+    const serviceTwofa = new BitwardenMasterKeyService({
+      credentialStore,
+      auditStore,
+      itemName: ITEM_NAME,
+      _spawnBwPtySession: makePtySessionMock(),
+      _spawnBwPty: ptyMockTwofa,
+      _spawnBw: makeSpawnMock(),
+    });
 
     const resultEmailOtp = await serviceEmailOtp.acquireMasterKey({
-      email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null,
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: FAKE_IDENTITY,
     });
     const resultTwofa = await serviceTwofa.acquireMasterKey({
-      email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null,
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, twofa: '123456', identity: FAKE_IDENTITY,
     });
 
     expect(resultEmailOtp.errorClass).toBe('email-otp-required');
     expect(resultTwofa.errorClass).toBe('twofa-required');
-    // Explizit: NICHT dasselbe
     expect(resultEmailOtp.errorClass).not.toBe(resultTwofa.errorClass);
   });
 
@@ -256,119 +311,92 @@ describe('AC1 — email-otp-required: kein OTP-Code übergeben → klassifiziert
       masterKey: null,
       envPath: join(tmpDir, '.env-otp1'),
     });
-    const ptyMock = makePtyMock({ requiresEmailOtp: true });
+    const ptySessionMock = makePtySessionMock({ requiresEmailOtp: true });
     const service = new BitwardenMasterKeyService({
       credentialStore: cs,
       auditStore,
       itemName: ITEM_NAME,
-      _spawnBwPty: ptyMock,
+      _spawnBwPtySession: ptySessionMock,
+      _spawnBwPty: makePtyMock(),
       _spawnBw: makeSpawnMock(),
     });
 
-    await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
+    await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: FAKE_IDENTITY });
 
-    // Store bleibt gesperrt — kein unlock ohne gültigen Key
     expect(cs.isUnlocked()).toBe(false);
   });
 
   it('AC1 — sanitizeErrorReason liefert für email-otp-required einen geheimnisfreien, unterscheidbaren Text', async () => {
-    const ptyMock = makePtyMock({ requiresEmailOtp: true });
-    const service = makeService(ptyMock);
+    const ptySessionMock = makePtySessionMock({ requiresEmailOtp: true });
+    const service = makeService(ptySessionMock);
 
     const result = await service.acquireMasterKey({
-      email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null,
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: FAKE_IDENTITY,
     });
 
     expect(result.reason).toBeDefined();
-    // Reason darf kein Passwort/OTP/Email enthalten
     expect(result.reason).not.toContain(FAKE_PASSWORD);
     expect(result.reason).not.toContain(FAKE_EMAIL);
-    // Reason ist für E-Mail-OTP-Fall spezifisch (enthält 'otp', 'verification' oder ähnliches)
     expect(result.reason.toLowerCase()).toMatch(/otp|verification|einmalcode/i);
+
     // Unterscheidbar vom TOTP-2FA-Reason
     const ptyMockTwofa = makePtyMock({ requiresTwofa: true });
-    const serviceTwofa = makeService(ptyMockTwofa);
+    const serviceTwofa = new BitwardenMasterKeyService({
+      credentialStore,
+      auditStore,
+      itemName: ITEM_NAME,
+      _spawnBwPtySession: makePtySessionMock(),
+      _spawnBwPty: ptyMockTwofa,
+      _spawnBw: makeSpawnMock(),
+    });
     const resultTwofa = await serviceTwofa.acquireMasterKey({
-      email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null,
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, twofa: '123456', identity: FAKE_IDENTITY,
     });
     expect(result.reason).not.toBe(resultTwofa.reason);
   });
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
-// AC2 — Gültiger E-Mail-OTP → Login erfolgreich + normale Beschaffung
+// AC2 — Gültiger E-Mail-OTP → Login erfolgreich + normale Beschaffung (single-process)
 // ══════════════════════════════════════════════════════════════════════════════
 
-describe('AC2 — gültiger E-Mail-OTP → acquireMasterKey läuft normal weiter', () => {
-  it('AC2 — mit gültigem emailOtp → status "found"', async () => {
-    const ptyMock = makePtyMock({ requiresEmailOtp: true });
+describe('AC2 — gültiger E-Mail-OTP → acquireMasterKey läuft normal weiter (single-process)', () => {
+  it('AC2 — Zwei-Schritt-Fluss: Request 1 → email-otp-required; Request 2 mit OTP → status "found"', async () => {
+    const ptySessionMock = makePtySessionMock({ requiresEmailOtp: true });
     const spawnMock = makeSpawnMock({ itemPassword: FAKE_KEY_VALUE });
-    const service = makeService(ptyMock, spawnMock);
+    const service = makeService(ptySessionMock, spawnMock);
 
+    // Request 1: kein OTP → Prozess öffnet, email-otp-required
+    const result1 = await service.acquireMasterKey({
+      email: FAKE_EMAIL,
+      password: FAKE_PASSWORD,
+      identity: FAKE_IDENTITY,
+    });
+    expect(result1.status).toBe('error');
+    expect(result1.errorClass).toBe('email-otp-required');
+
+    // Request 2: OTP übergeben → in denselben Prozess schreiben → Erfolg
+    const result2 = await service.acquireMasterKey({
+      email: FAKE_EMAIL,
+      password: FAKE_PASSWORD,
+      emailOtp: FAKE_EMAIL_OTP,
+      identity: FAKE_IDENTITY,
+    });
+    expect(result2.status).toBe('found');
+    expect(result2.key).toBeUndefined();
+  });
+
+  it('AC2 — mit gültigem emailOtp läuft Item-Lesen und Store-Unlock normal', async () => {
+    const ptySessionMock = makePtySessionMock({ requiresEmailOtp: true });
+    const spawnMock = makeSpawnMock({ itemPassword: FAKE_KEY_VALUE });
+    const service = makeService(ptySessionMock, spawnMock);
+
+    // Request 1
+    await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: FAKE_IDENTITY });
+
+    // Request 2
     const result = await service.acquireMasterKey({
-      email: FAKE_EMAIL,
-      password: FAKE_PASSWORD,
-      emailOtp: FAKE_EMAIL_OTP,
-      identity: null,
-    });
-
-    expect(result.status).toBe('found');
-    // Kein Key-Wert in Response
-    expect(result.key).toBeUndefined();
-  });
-
-  it('AC2 — emailOtp wird via opts.emailOtp übergeben (PTY-Modell), NICHT via Argv', async () => {
-    const ptyMock = makePtyMock({ requiresEmailOtp: true });
-    const spawnMock = makeSpawnMock({ itemPassword: FAKE_KEY_VALUE });
-    const service = makeService(ptyMock, spawnMock);
-
-    await service.acquireMasterKey({
-      email: FAKE_EMAIL,
-      password: FAKE_PASSWORD,
-      emailOtp: FAKE_EMAIL_OTP,
-      identity: null,
-    });
-
-    const loginCallIndex = ptyMock.spawnedArgvs.findIndex((args) => args[0] === 'login');
-    expect(loginCallIndex).toBeGreaterThanOrEqual(0);
-
-    // OTP-Code darf NICHT in den Argv erscheinen (AC7)
-    const loginArgs = ptyMock.spawnedArgvs[loginCallIndex];
-    for (const arg of loginArgs) {
-      expect(String(arg)).not.toContain(FAKE_EMAIL_OTP);
-    }
-
-    // OTP-Code MUSS als opts.emailOtp übergeben worden sein (PTY-Modell)
-    const loginOpts = ptyMock.spawnedOpts[loginCallIndex];
-    expect(loginOpts.emailOtp).toBe(FAKE_EMAIL_OTP);
-  });
-
-  it('AC2 — ohne emailOtp: opts.emailOtp ist null/undefined (kein leerer String als Arg)', async () => {
-    const ptyMock = makePtyMock(); // kein requiresEmailOtp
-    const service = makeService(ptyMock);
-
-    await service.acquireMasterKey({
-      email: FAKE_EMAIL,
-      password: FAKE_PASSWORD,
-      identity: null,
-    });
-
-    const loginCallIndex = ptyMock.spawnedArgvs.findIndex((args) => args[0] === 'login');
-    const loginOpts = ptyMock.spawnedOpts[loginCallIndex];
-    // Ohne emailOtp: kein opts.emailOtp (null oder undefined)
-    expect(loginOpts.emailOtp == null).toBe(true);
-  });
-
-  it('AC2 — mit emailOtp läuft Item-Lesen und Store-Unlock normal', async () => {
-    const ptyMock = makePtyMock({ requiresEmailOtp: true });
-    const spawnMock = makeSpawnMock({ itemPassword: FAKE_KEY_VALUE });
-    const service = makeService(ptyMock, spawnMock);
-
-    const result = await service.acquireMasterKey({
-      email: FAKE_EMAIL,
-      password: FAKE_PASSWORD,
-      emailOtp: FAKE_EMAIL_OTP,
-      identity: null,
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, emailOtp: FAKE_EMAIL_OTP, identity: FAKE_IDENTITY,
     });
 
     expect(result.status).toBe('found');
@@ -380,17 +408,20 @@ describe('AC2 — gültiger E-Mail-OTP → acquireMasterKey läuft normal weiter
     expect(logoutCall).toBeDefined();
   });
 
-  it('AC2 — createMasterKey akzeptiert ebenfalls emailOtp', async () => {
-    const ptyMock = makePtyMock({ requiresEmailOtp: true });
-    const service = makeService(ptyMock);
+  it('AC2 — createMasterKey akzeptiert ebenfalls den zwei-phasigen OTP-Fluss', async () => {
+    const ptySessionMock = makePtySessionMock({ requiresEmailOtp: true });
+    const service = makeService(ptySessionMock);
 
-    const result = await service.createMasterKey({
-      email: FAKE_EMAIL,
-      password: FAKE_PASSWORD,
-      emailOtp: FAKE_EMAIL_OTP,
-      identity: null,
+    // Request 1
+    const r1 = await service.createMasterKey({
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: FAKE_IDENTITY,
     });
+    expect(r1.errorClass).toBe('email-otp-required');
 
+    // Request 2
+    const result = await service.createMasterKey({
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, emailOtp: FAKE_EMAIL_OTP, identity: FAKE_IDENTITY,
+    });
     expect(result.status).toBe('created');
   });
 });
@@ -401,14 +432,15 @@ describe('AC2 — gültiger E-Mail-OTP → acquireMasterKey läuft normal weiter
 
 describe('AC3 — email-otp-invalid: falscher/abgelaufener OTP-Code', () => {
   it('AC3 — falscher OTP-Code → status "error", errorClass "email-otp-invalid"', async () => {
-    const ptyMock = makePtyMock({ requiresEmailOtp: true, emailOtpInvalid: true });
-    const service = makeService(ptyMock);
+    const ptySessionMock = makePtySessionMock({ requiresEmailOtp: true, emailOtpInvalid: true });
+    const service = makeService(ptySessionMock);
 
+    // Request 1
+    await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: FAKE_IDENTITY });
+
+    // Request 2: falscher Code
     const result = await service.acquireMasterKey({
-      email: FAKE_EMAIL,
-      password: FAKE_PASSWORD,
-      emailOtp: 'wrong-otp-code',
-      identity: null,
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, emailOtp: 'wrong-otp-code', identity: FAKE_IDENTITY,
     });
 
     expect(result.status).toBe('error');
@@ -416,17 +448,26 @@ describe('AC3 — email-otp-invalid: falscher/abgelaufener OTP-Code', () => {
   });
 
   it('AC3 — email-otp-invalid ist UNTERSCHEIDBAR von twofa-invalid', async () => {
-    const ptyMockEmailOtp = makePtyMock({ requiresEmailOtp: true, emailOtpInvalid: true });
+    const ptySessionMock = makePtySessionMock({ requiresEmailOtp: true, emailOtpInvalid: true });
     const ptyMockTwofa = makePtyMock({ twofaInvalid: true });
 
-    const serviceEmailOtp = makeService(ptyMockEmailOtp);
-    const serviceTwofa = makeService(ptyMockTwofa);
+    const serviceEmailOtp = makeService(ptySessionMock);
+    const serviceTwofa = new BitwardenMasterKeyService({
+      credentialStore,
+      auditStore,
+      itemName: ITEM_NAME,
+      _spawnBwPtySession: makePtySessionMock(),
+      _spawnBwPty: ptyMockTwofa,
+      _spawnBw: makeSpawnMock(),
+    });
 
+    // Setup OTP-State
+    await serviceEmailOtp.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: FAKE_IDENTITY });
     const resultEmailOtp = await serviceEmailOtp.acquireMasterKey({
-      email: FAKE_EMAIL, password: FAKE_PASSWORD, emailOtp: 'wrong', identity: null,
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, emailOtp: 'wrong', identity: FAKE_IDENTITY,
     });
     const resultTwofa = await serviceTwofa.acquireMasterKey({
-      email: FAKE_EMAIL, password: FAKE_PASSWORD, twofa: '000000', identity: null,
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, twofa: '000000', identity: FAKE_IDENTITY,
     });
 
     expect(resultEmailOtp.errorClass).toBe('email-otp-invalid');
@@ -436,43 +477,24 @@ describe('AC3 — email-otp-invalid: falscher/abgelaufener OTP-Code', () => {
 
   it('AC3 — bei email-otp-invalid bleibt Store gesperrt', async () => {
     const cs = new CredentialStore({
-      dir: tmpDir,
-      masterKey: null,
-      envPath: join(tmpDir, '.env-otp2'),
+      dir: tmpDir, masterKey: null, envPath: join(tmpDir, '.env-otp2'),
     });
-    const ptyMock = makePtyMock({ requiresEmailOtp: true, emailOtpInvalid: true });
+    const ptySessionMock = makePtySessionMock({ requiresEmailOtp: true, emailOtpInvalid: true });
     const service = new BitwardenMasterKeyService({
       credentialStore: cs,
       auditStore,
       itemName: ITEM_NAME,
-      _spawnBwPty: ptyMock,
+      _spawnBwPtySession: ptySessionMock,
+      _spawnBwPty: makePtyMock(),
       _spawnBw: makeSpawnMock(),
     });
 
+    await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: FAKE_IDENTITY });
     await service.acquireMasterKey({
-      email: FAKE_EMAIL, password: FAKE_PASSWORD, emailOtp: 'wrong-otp', identity: null,
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, emailOtp: 'wrong-otp', identity: FAKE_IDENTITY,
     });
 
     expect(cs.isUnlocked()).toBe(false);
-  });
-
-  it('AC3 — erneuter Versuch nach email-otp-invalid möglich (kein State-Lock in Service)', async () => {
-    // Erster Versuch: falscher OTP
-    const ptyMockInvalid = makePtyMock({ requiresEmailOtp: true, emailOtpInvalid: true });
-    const serviceInvalid = makeService(ptyMockInvalid);
-    const result1 = await serviceInvalid.acquireMasterKey({
-      email: FAKE_EMAIL, password: FAKE_PASSWORD, emailOtp: 'wrong', identity: null,
-    });
-    expect(result1.errorClass).toBe('email-otp-invalid');
-
-    // Zweiter Versuch: richtiger OTP (neuer Service, neuer Mock)
-    const ptyMockValid = makePtyMock({ requiresEmailOtp: true });
-    const spawnMockValid = makeSpawnMock({ itemPassword: FAKE_KEY_VALUE });
-    const serviceValid = makeService(ptyMockValid, spawnMockValid);
-    const result2 = await serviceValid.acquireMasterKey({
-      email: FAKE_EMAIL, password: FAKE_PASSWORD, emailOtp: FAKE_EMAIL_OTP, identity: null,
-    });
-    expect(result2.status).toBe('found');
   });
 });
 
@@ -483,24 +505,33 @@ describe('AC3 — email-otp-invalid: falscher/abgelaufener OTP-Code', () => {
 describe('AC4 — TOTP-2FA-Fluss bleibt unverändert (Regression)', () => {
   it('AC4 — twofa-required bleibt twofa-required (nicht email-otp-required)', async () => {
     const ptyMock = makePtyMock({ requiresTwofa: true });
-    const service = makeService(ptyMock);
+    const service = new BitwardenMasterKeyService({
+      credentialStore, auditStore, itemName: ITEM_NAME,
+      _spawnBwPtySession: makePtySessionMock(),
+      _spawnBwPty: ptyMock,
+      _spawnBw: makeSpawnMock(),
+    });
 
     const result = await service.acquireMasterKey({
-      email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null,
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, twofa: 'wrong', identity: FAKE_IDENTITY,
     });
 
     expect(result.status).toBe('error');
     expect(result.errorClass).toBe('twofa-required');
-    // Explizit: kein email-otp-required
     expect(result.errorClass).not.toBe('email-otp-required');
   });
 
   it('AC4 — twofa-invalid bleibt twofa-invalid (nicht email-otp-invalid)', async () => {
     const ptyMock = makePtyMock({ twofaInvalid: true });
-    const service = makeService(ptyMock);
+    const service = new BitwardenMasterKeyService({
+      credentialStore, auditStore, itemName: ITEM_NAME,
+      _spawnBwPtySession: makePtySessionMock(),
+      _spawnBwPty: ptyMock,
+      _spawnBw: makeSpawnMock(),
+    });
 
     const result = await service.acquireMasterKey({
-      email: FAKE_EMAIL, password: FAKE_PASSWORD, twofa: '000000', identity: null,
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, twofa: '000000', identity: FAKE_IDENTITY,
     });
 
     expect(result.status).toBe('error');
@@ -508,12 +539,37 @@ describe('AC4 — TOTP-2FA-Fluss bleibt unverändert (Regression)', () => {
     expect(result.errorClass).not.toBe('email-otp-invalid');
   });
 
-  it('AC4 — TOTP-Aufruf mit --code-Arg übergibt den Code als Argv (bisherige Ausnahme)', async () => {
+  it('AC4 — TOTP-Aufruf verwendet _spawnBwPty (nicht _spawnBwPtySession)', async () => {
     const ptyMock = makePtyMock();
-    const service = makeService(ptyMock);
+    const ptySessionMock = makePtySessionMock();
+    const service = new BitwardenMasterKeyService({
+      credentialStore, auditStore, itemName: ITEM_NAME,
+      _spawnBwPtySession: ptySessionMock,
+      _spawnBwPty: ptyMock,
+      _spawnBw: makeSpawnMock(),
+    });
 
     await service.acquireMasterKey({
-      email: FAKE_EMAIL, password: FAKE_PASSWORD, twofa: '654321', identity: null,
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, twofa: '654321', identity: FAKE_IDENTITY,
+    });
+
+    // TOTP-Pfad nutzt _spawnBwPty (unveränderter Pfad)
+    expect(ptyMock).toHaveBeenCalled();
+    // _spawnBwPtySession wird für TOTP NICHT aufgerufen
+    expect(ptySessionMock).not.toHaveBeenCalled();
+  });
+
+  it('AC4 — TOTP-Aufruf mit --code-Arg übergibt den Code als Argv (bisherige Ausnahme)', async () => {
+    const ptyMock = makePtyMock();
+    const service = new BitwardenMasterKeyService({
+      credentialStore, auditStore, itemName: ITEM_NAME,
+      _spawnBwPtySession: makePtySessionMock(),
+      _spawnBwPty: ptyMock,
+      _spawnBw: makeSpawnMock(),
+    });
+
+    await service.acquireMasterKey({
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, twofa: '654321', identity: FAKE_IDENTITY,
     });
 
     const loginArgs = ptyMock.spawnedArgvs.find((args) => args[0] === 'login');
@@ -521,30 +577,19 @@ describe('AC4 — TOTP-2FA-Fluss bleibt unverändert (Regression)', () => {
     expect(loginArgs).toContain('654321');
   });
 
-  it('AC4 — TOTP-Aufruf ohne emailOtp: opts.emailOtp ist null/undefined (keine gegenseitige Interferenz)', async () => {
-    const ptyMock = makePtyMock();
-    const service = makeService(ptyMock);
-
-    await service.acquireMasterKey({
-      email: FAKE_EMAIL, password: FAKE_PASSWORD, twofa: '654321', identity: null,
-    });
-
-    const loginCallIndex = ptyMock.spawnedArgvs.findIndex((args) => args[0] === 'login');
-    const loginOpts = ptyMock.spawnedOpts[loginCallIndex];
-    // Kein emailOtp → opts.emailOtp ist null oder undefined
-    expect(loginOpts.emailOtp == null).toBe(true);
-  });
-
   it('AC4 — twofa und emailOtp sind gegenseitig ausschließende Fehlerklassen (Spec §4)', async () => {
-    // Wenn TOTP-2FA-Account einen Login versucht → erhält twofa-required, NICHT email-otp-required
-    const ptyMockTwofa = makePtyMock({ requiresTwofa: true });
-    const serviceTwofa = makeService(ptyMockTwofa);
-
-    const result = await serviceTwofa.acquireMasterKey({
-      email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null,
+    const ptyMock = makePtyMock({ requiresTwofa: true });
+    const service = new BitwardenMasterKeyService({
+      credentialStore, auditStore, itemName: ITEM_NAME,
+      _spawnBwPtySession: makePtySessionMock(),
+      _spawnBwPty: ptyMock,
+      _spawnBw: makeSpawnMock(),
     });
 
-    // Nur einer der Fälle: twofa-required, NICHT email-otp-required
+    const result = await service.acquireMasterKey({
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, twofa: 'x', identity: FAKE_IDENTITY,
+    });
+
     expect(['twofa-required', 'twofa-invalid']).toContain(result.errorClass);
     expect(['email-otp-required', 'email-otp-invalid']).not.toContain(result.errorClass);
   });
@@ -555,16 +600,17 @@ describe('AC4 — TOTP-2FA-Fluss bleibt unverändert (Regression)', () => {
 // ══════════════════════════════════════════════════════════════════════════════
 
 describe('AC7 — OTP-Code-Leak: kein Leak in Argv, Logs, Audit oder Response', () => {
-  it('AC7 — OTP-Code erscheint NICHT in gespawnten Argv-Arrays', async () => {
-    const ptyMock = makePtyMock({ requiresEmailOtp: true });
+  it('AC7 — OTP-Code erscheint NICHT in gespawnten Argv-Arrays (PTY-Session + Spawn)', async () => {
+    const ptySessionMock = makePtySessionMock({ requiresEmailOtp: true });
     const spawnMock = makeSpawnMock({ itemPassword: FAKE_KEY_VALUE });
-    const service = makeService(ptyMock, spawnMock);
+    const service = makeService(ptySessionMock, spawnMock);
 
+    await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: FAKE_IDENTITY });
     await service.acquireMasterKey({
-      email: FAKE_EMAIL, password: FAKE_PASSWORD, emailOtp: FAKE_EMAIL_OTP, identity: null,
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, emailOtp: FAKE_EMAIL_OTP, identity: FAKE_IDENTITY,
     });
 
-    for (const argv of ptyMock.spawnedArgvs) {
+    for (const argv of ptySessionMock.spawnedArgvs) {
       for (const arg of argv) {
         expect(String(arg)).not.toContain(FAKE_EMAIL_OTP);
       }
@@ -576,16 +622,17 @@ describe('AC7 — OTP-Code-Leak: kein Leak in Argv, Logs, Audit oder Response', 
     }
   });
 
-  it('AC7 — Passwort erscheint NICHT in Argv (weiterhin; Regression)', async () => {
-    const ptyMock = makePtyMock({ requiresEmailOtp: true });
+  it('AC7 — Passwort erscheint NICHT in Argv (Regression)', async () => {
+    const ptySessionMock = makePtySessionMock({ requiresEmailOtp: true });
     const spawnMock = makeSpawnMock({ itemPassword: FAKE_KEY_VALUE });
-    const service = makeService(ptyMock, spawnMock);
+    const service = makeService(ptySessionMock, spawnMock);
 
+    await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: FAKE_IDENTITY });
     await service.acquireMasterKey({
-      email: FAKE_EMAIL, password: FAKE_PASSWORD, emailOtp: FAKE_EMAIL_OTP, identity: null,
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, emailOtp: FAKE_EMAIL_OTP, identity: FAKE_IDENTITY,
     });
 
-    for (const argv of ptyMock.spawnedArgvs) {
+    for (const argv of ptySessionMock.spawnedArgvs) {
       for (const arg of argv) {
         expect(String(arg)).not.toContain(FAKE_PASSWORD);
       }
@@ -598,13 +645,13 @@ describe('AC7 — OTP-Code-Leak: kein Leak in Argv, Logs, Audit oder Response', 
   });
 
   it('AC7 — OTP-Code erscheint NICHT in Audit-Einträgen', async () => {
-    const ptyMock = makePtyMock({ requiresEmailOtp: true });
+    const ptySessionMock = makePtySessionMock({ requiresEmailOtp: true });
     const spawnMock = makeSpawnMock({ itemPassword: FAKE_KEY_VALUE });
-    const service = makeService(ptyMock, spawnMock);
+    const service = makeService(ptySessionMock, spawnMock);
 
+    await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: FAKE_IDENTITY });
     await service.acquireMasterKey({
-      email: FAKE_EMAIL, password: FAKE_PASSWORD, emailOtp: FAKE_EMAIL_OTP,
-      identity: 'test@example.com',
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, emailOtp: FAKE_EMAIL_OTP, identity: FAKE_IDENTITY,
     });
 
     const entries = auditStore.getAll();
@@ -613,13 +660,14 @@ describe('AC7 — OTP-Code-Leak: kein Leak in Argv, Logs, Audit oder Response', 
     expect(auditJson).not.toContain(FAKE_PASSWORD);
   });
 
-  it('AC7 — OTP-Code erscheint NICHT in der acquireMasterKey-Response', async () => {
-    const ptyMock = makePtyMock({ requiresEmailOtp: true });
+  it('AC7 — OTP-Code erscheint NICHT in der acquireMasterKey-Response (Request 2)', async () => {
+    const ptySessionMock = makePtySessionMock({ requiresEmailOtp: true });
     const spawnMock = makeSpawnMock({ itemPassword: FAKE_KEY_VALUE });
-    const service = makeService(ptyMock, spawnMock);
+    const service = makeService(ptySessionMock, spawnMock);
 
+    await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: FAKE_IDENTITY });
     const result = await service.acquireMasterKey({
-      email: FAKE_EMAIL, password: FAKE_PASSWORD, emailOtp: FAKE_EMAIL_OTP, identity: null,
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, emailOtp: FAKE_EMAIL_OTP, identity: FAKE_IDENTITY,
     });
 
     const resultJson = JSON.stringify(result);
@@ -627,25 +675,25 @@ describe('AC7 — OTP-Code-Leak: kein Leak in Argv, Logs, Audit oder Response', 
   });
 
   it('AC7 — OTP-Code erscheint NICHT in der email-otp-required-Error-Response', async () => {
-    const ptyMock = makePtyMock({ requiresEmailOtp: true }); // kein OTP übergeben
-    const service = makeService(ptyMock);
+    const ptySessionMock = makePtySessionMock({ requiresEmailOtp: true });
+    const service = makeService(ptySessionMock);
 
     const result = await service.acquireMasterKey({
-      email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null,
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: FAKE_IDENTITY,
     });
 
     const resultJson = JSON.stringify(result);
-    // reason darf keinen OTP-Wert enthalten (sanitizeErrorReason)
     expect(resultJson).not.toContain(FAKE_EMAIL_OTP);
     expect(resultJson).not.toContain(FAKE_PASSWORD);
   });
 
   it('AC7 — OTP-Code erscheint NICHT in email-otp-invalid-Error-Response', async () => {
-    const ptyMock = makePtyMock({ requiresEmailOtp: true, emailOtpInvalid: true });
-    const service = makeService(ptyMock);
+    const ptySessionMock = makePtySessionMock({ requiresEmailOtp: true, emailOtpInvalid: true });
+    const service = makeService(ptySessionMock);
 
+    await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: FAKE_IDENTITY });
     const result = await service.acquireMasterKey({
-      email: FAKE_EMAIL, password: FAKE_PASSWORD, emailOtp: FAKE_EMAIL_OTP, identity: null,
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, emailOtp: FAKE_EMAIL_OTP, identity: FAKE_IDENTITY,
     });
 
     const resultJson = JSON.stringify(result);
@@ -653,20 +701,19 @@ describe('AC7 — OTP-Code-Leak: kein Leak in Argv, Logs, Audit oder Response', 
   });
 
   it('AC7 — console.error/log/warn enthalten KEINEN OTP-Code (console-Spy auf alle Kanäle)', async () => {
-    // Alle drei Konsolen-Kanäle bespionieren — ein OTP-/Secret-Leak über jeden Kanal wird gefangen
     const spyError = jest.spyOn(console, 'error').mockImplementation(() => {});
     const spyLog = jest.spyOn(console, 'log').mockImplementation(() => {});
     const spyWarn = jest.spyOn(console, 'warn').mockImplementation(() => {});
     try {
-      const ptyMock = makePtyMock({ requiresEmailOtp: true });
+      const ptySessionMock = makePtySessionMock({ requiresEmailOtp: true });
       const spawnMock = makeSpawnMock({ itemPassword: FAKE_KEY_VALUE });
-      const service = makeService(ptyMock, spawnMock);
+      const service = makeService(ptySessionMock, spawnMock);
 
+      await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: FAKE_IDENTITY });
       await service.acquireMasterKey({
-        email: FAKE_EMAIL, password: FAKE_PASSWORD, emailOtp: FAKE_EMAIL_OTP, identity: null,
+        email: FAKE_EMAIL, password: FAKE_PASSWORD, emailOtp: FAKE_EMAIL_OTP, identity: FAKE_IDENTITY,
       });
 
-      // Alle console.error / console.log / console.warn Aufrufe prüfen
       for (const spy of [spyError, spyLog, spyWarn]) {
         for (const call of spy.mock.calls) {
           const callStr = JSON.stringify(call);
@@ -680,131 +727,420 @@ describe('AC7 — OTP-Code-Leak: kein Leak in Argv, Logs, Audit oder Response', 
       spyWarn.mockRestore();
     }
   });
-
-  it('AC7 — OTP via opts.emailOtp übergeben (PTY-Modell, nicht Argv) — AC7-Beweis via spawnedOpts', async () => {
-    const ptyMock = makePtyMock({ requiresEmailOtp: true });
-    const spawnMock = makeSpawnMock({ itemPassword: FAKE_KEY_VALUE });
-    const service = makeService(ptyMock, spawnMock);
-
-    await service.acquireMasterKey({
-      email: FAKE_EMAIL, password: FAKE_PASSWORD, emailOtp: FAKE_EMAIL_OTP, identity: null,
-    });
-
-    const loginCallIndex = ptyMock.spawnedArgvs.findIndex((args) => args[0] === 'login');
-
-    // opts.emailOtp enthält den OTP-Code (PTY-Modell)
-    const loginOpts = ptyMock.spawnedOpts[loginCallIndex];
-    expect(loginOpts.emailOtp).toBe(FAKE_EMAIL_OTP);
-
-    // Argv enthält ihn NICHT
-    const loginArgs = ptyMock.spawnedArgvs[loginCallIndex];
-    expect(loginArgs.join(' ')).not.toContain(FAKE_EMAIL_OTP);
-  });
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
 // AC8 — Autonomer Pfad löst keinen E-Mail-OTP aus
-// (Dokumentiert: acquireMasterKey ist interaktiver Pfad; DEVGUI_CRED_MASTER_KEY = autonomer Pfad)
 // ══════════════════════════════════════════════════════════════════════════════
 
 describe('AC8 — Autonomer Pfad (DEVGUI_CRED_MASTER_KEY) löst kein E-Mail-OTP aus', () => {
   it('AC8 — BitwardenMasterKeyService.acquireMasterKey wird im autonomen Pfad NICHT aufgerufen', () => {
-    // Dokumentierter Test: Der autonome Pfad (DEVGUI_CRED_MASTER_KEY) liest den Key
-    // direkt aus der Env-Var — kein bw-Login, kein OTP. BitwardenMasterKeyService wird
-    // im autonomen Pfad nicht instanziiert/aufgerufen (Spec bitwarden-new-device-otp §6).
-    // Dieser Test verifiziert: acquireMasterKey ist der interaktive Pfad; der autonome Pfad
-    // geht an BitwardenMasterKeyService vorbei → keine OTP-Anforderung möglich.
-    //
-    // Nachweis: wenn wir acquireMasterKey() NICHT aufrufen, kann kein OTP verlangt werden.
-    const ptyMock = makePtyMock({ requiresEmailOtp: true });
-
+    const ptySessionMock = makePtySessionMock({ requiresEmailOtp: true });
     // Im autonomen Pfad wird acquireMasterKey() NICHT aufgerufen
-    // (stattdessen: CredentialStore direkt mit DEVGUI_CRED_MASTER_KEY entsperren)
-    // → PTY wird nie gespawnt → kein OTP ausgelöst
-    expect(ptyMock).not.toHaveBeenCalled();
+    expect(ptySessionMock).not.toHaveBeenCalled();
   });
 
   it('AC8 — kein Code in BitwardenMasterKeyService, der emailOtp im autonomen Pfad erwartet', async () => {
-    // acquireMasterKey ohne emailOtp → kein opts.emailOtp (autonomer Pfad käme nicht hierher)
-    const ptyMock = makePtyMock(); // normaler Login ohne Device-OTP-Anforderung
-    const service = makeService(ptyMock);
+    // normaler Login ohne Device-OTP-Anforderung
+    const ptySessionMock = makePtySessionMock();
+    const service = makeService(ptySessionMock);
 
     const result = await service.acquireMasterKey({
-      email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null,
-      // kein emailOtp — simuliert: wenn jemand den autonomen Pfad aus Versehen durch
-      // acquireMasterKey() ersetzt, ohne emailOtp → kein OTP wird erwartet/erzwungen
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: FAKE_IDENTITY,
     });
 
-    // Kein OTP-Fehler im normalen Login ohne Device-Verification-Anforderung
     expect(['found', 'not-found']).toContain(result.status);
   });
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
-// PTY-Modell: Fake-PTY-Klassifizierung für neue Prompt-Muster (classifyBwError)
+// AC10 — Single-Process: genau EIN bw-Login-Spawn über den OTP-Zyklus (#267)
+// ══════════════════════════════════════════════════════════════════════════════
+
+describe('AC10 — Single-Process OTP: genau EIN Spawn über den gesamten OTP-Zyklus (#267)', () => {
+  it('AC10 — Request 1 (kein OTP) spawnt exakt EINEN PTY-Prozess und hält ihn offen', async () => {
+    const ptySessionMock = makePtySessionMock({ requiresEmailOtp: true });
+    const service = makeService(ptySessionMock);
+
+    await service.acquireMasterKey({
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: FAKE_IDENTITY,
+    });
+
+    // Exakt ein Spawn für Request 1
+    expect(ptySessionMock.spawnCallCount()).toBe(1);
+  });
+
+  it('AC10 — Request 2 (mit OTP) spawnt KEINEN weiteren Prozess (schreibt in denselben)', async () => {
+    const ptySessionMock = makePtySessionMock({ requiresEmailOtp: true });
+    const spawnMock = makeSpawnMock({ itemPassword: FAKE_KEY_VALUE });
+    const service = makeService(ptySessionMock, spawnMock);
+
+    // Request 1
+    await service.acquireMasterKey({
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: FAKE_IDENTITY,
+    });
+
+    // Request 2
+    await service.acquireMasterKey({
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, emailOtp: FAKE_EMAIL_OTP, identity: FAKE_IDENTITY,
+    });
+
+    // AC10-KERNBEWEIS: über den gesamten OTP-Zyklus (Request 1 + Request 2) genau EIN Spawn
+    expect(ptySessionMock.spawnCallCount()).toBe(1);
+  });
+
+  it('AC10 — Request 1 liefert email-otp-required UND hält einen offenen Handle (writeOtp war noch nicht aufgerufen)', async () => {
+    const ptySessionMock = makePtySessionMock({ requiresEmailOtp: true });
+    const service = makeService(ptySessionMock);
+
+    const result1 = await service.acquireMasterKey({
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: FAKE_IDENTITY,
+    });
+
+    expect(result1.errorClass).toBe('email-otp-required');
+    // writeOtp wurde in Phase 1 NICHT aufgerufen (nur bereitgestellt)
+    const session = ptySessionMock.sessions[0];
+    expect(session).toBeDefined();
+    expect(session.writeOtp).not.toHaveBeenCalled();
+  });
+
+  it('AC10 — Request 2 ruft writeOtp des Phase-1-Handle auf (nicht einen neuen Spawn)', async () => {
+    const ptySessionMock = makePtySessionMock({ requiresEmailOtp: true });
+    const spawnMock = makeSpawnMock({ itemPassword: FAKE_KEY_VALUE });
+    const service = makeService(ptySessionMock, spawnMock);
+
+    // Request 1
+    await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: FAKE_IDENTITY });
+
+    // Request 2
+    await service.acquireMasterKey({
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, emailOtp: FAKE_EMAIL_OTP, identity: FAKE_IDENTITY,
+    });
+
+    const session = ptySessionMock.sessions[0];
+    // writeOtp wurde genau EINMAL aufgerufen (in Request 2)
+    expect(session.writeOtp).toHaveBeenCalledTimes(1);
+    // writeOtp wurde mit dem OTP-Code aufgerufen
+    expect(session.writeOtp).toHaveBeenCalledWith(FAKE_EMAIL_OTP);
+    // OTP-Code erscheint NICHT in Argv (AC7, Nachweis via Phase-1-Spawn-Args)
+    const loginArgs = ptySessionMock.spawnedArgvs[0];
+    expect(loginArgs.join(' ')).not.toContain(FAKE_EMAIL_OTP);
+  });
+
+  it('AC10 — gültiger OTP via Request 2 → status "found" (kein email-otp-invalid)', async () => {
+    const ptySessionMock = makePtySessionMock({ requiresEmailOtp: true, emailOtpInvalid: false });
+    const spawnMock = makeSpawnMock({ itemPassword: FAKE_KEY_VALUE });
+    const service = makeService(ptySessionMock, spawnMock);
+
+    await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: FAKE_IDENTITY });
+    const result = await service.acquireMasterKey({
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, emailOtp: FAKE_EMAIL_OTP, identity: FAKE_IDENTITY,
+    });
+
+    expect(result.status).toBe('found');
+    // Kein email-otp-invalid bei gültigem Code (AC10-Kern: gleicher Prozess → Code gültig)
+    expect(result.errorClass).toBeUndefined();
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// AC11 — Robustheit/Cleanup (#267)
+// ══════════════════════════════════════════════════════════════════════════════
+
+describe('AC11 — Robustheit und Cleanup des offenen PTY-Prozesses (#267)', () => {
+  it('AC11 — Timeout räumt den offenen Prozess auf (cleanup() wird aufgerufen)', async () => {
+    jest.useFakeTimers();
+    try {
+      const ptySessionMock = makePtySessionMock({ requiresEmailOtp: true });
+      const service = makeService(ptySessionMock);
+
+      // Request 1: Prozess öffnen
+      await service.acquireMasterKey({
+        email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: FAKE_IDENTITY,
+      });
+
+      const session = ptySessionMock.sessions[0];
+      expect(session.cleanupCalled).toBe(false);
+
+      // Timeout auslösen (> 3 Minuten)
+      jest.advanceTimersByTime(3 * 60 * 1000 + 1000);
+
+      // cleanup() muss durch den Timeout aufgerufen worden sein (AC11)
+      expect(session.cleanupCalled).toBe(true);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('AC11 — nach Timeout: Folge-Request mit OTP liefert email-otp-required (kein Alt-Code-Re-Spawn)', async () => {
+    jest.useFakeTimers();
+    try {
+      const ptySessionMock = makePtySessionMock({ requiresEmailOtp: true });
+      const service = makeService(ptySessionMock);
+
+      // Request 1
+      await service.acquireMasterKey({
+        email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: FAKE_IDENTITY,
+      });
+
+      // Timeout auslösen
+      jest.advanceTimersByTime(3 * 60 * 1000 + 1000);
+
+      // Request 2 nach Timeout: kein offener Handle mehr → email-otp-required (kein stiller Re-Spawn)
+      const result = await service.acquireMasterKey({
+        email: FAKE_EMAIL, password: FAKE_PASSWORD, emailOtp: FAKE_EMAIL_OTP, identity: FAKE_IDENTITY,
+      });
+
+      // AC11: klassifizierter, geheimnisfreier Fehler → KEIN stillschweigender Alt-Code-Re-Spawn
+      expect(result.errorClass).toBe('email-otp-required');
+      expect(result.status).toBe('error');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('AC11 — nach Timeout wird kein neuer Spawn für den OTP-Code gemacht (kein Alt-Code-Re-Spawn)', async () => {
+    jest.useFakeTimers();
+    try {
+      const ptySessionMock = makePtySessionMock({ requiresEmailOtp: true });
+      const service = makeService(ptySessionMock);
+
+      await service.acquireMasterKey({
+        email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: FAKE_IDENTITY,
+      });
+
+      // Spawn-Count nach Request 1 = 1
+      expect(ptySessionMock.spawnCallCount()).toBe(1);
+
+      jest.advanceTimersByTime(3 * 60 * 1000 + 1000);
+
+      // Request 2 nach Timeout → kein neuer Spawn (email-otp-required liefert früh zurück)
+      await service.acquireMasterKey({
+        email: FAKE_EMAIL, password: FAKE_PASSWORD, emailOtp: FAKE_EMAIL_OTP, identity: FAKE_IDENTITY,
+      });
+
+      // AC11: Spawn-Count bleibt 1 — kein zweiter Spawn für den OTP-Code
+      expect(ptySessionMock.spawnCallCount()).toBe(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('AC11 — paralleler Versuch derselben identity ersetzt alten Handle sauber', async () => {
+    const ptySessionMock = makePtySessionMock({ requiresEmailOtp: true });
+    const service = makeService(ptySessionMock);
+
+    // Erster Versuch
+    await service.acquireMasterKey({
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: FAKE_IDENTITY,
+    });
+    const session1 = ptySessionMock.sessions[0];
+    expect(session1.cleanupCalled).toBe(false);
+
+    // Zweiter Versuch derselben identity → alter Handle wird sauber ersetzt (cleanup() für alten)
+    await service.acquireMasterKey({
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: FAKE_IDENTITY,
+    });
+    const session2 = ptySessionMock.sessions[1];
+
+    // Alter Handle wurde aufgeräumt (kein Prozess-Leak, AC11)
+    expect(session1.cleanupCalled).toBe(true);
+    // Neuer Handle ist offen
+    expect(session2.cleanupCalled).toBe(false);
+    // Zwei Spawns insgesamt (einer pro Request-1-Versuch)
+    expect(ptySessionMock.spawnCallCount()).toBe(2);
+  });
+
+  it('AC11 — Erfolg räumt den Handle nach Request 2 auf (kein verwaister State)', async () => {
+    const ptySessionMock = makePtySessionMock({ requiresEmailOtp: true });
+    const spawnMock = makeSpawnMock({ itemPassword: FAKE_KEY_VALUE });
+    const service = makeService(ptySessionMock, spawnMock);
+
+    // Request 1
+    await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: FAKE_IDENTITY });
+
+    // Request 2: Erfolg
+    const result = await service.acquireMasterKey({
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, emailOtp: FAKE_EMAIL_OTP, identity: FAKE_IDENTITY,
+    });
+    expect(result.status).toBe('found');
+
+    // Nach Erfolg: cleanup() wurde aufgerufen (Timeout cleared + Handle aus Map gelöscht)
+    // Das bedeutet: ein weiterer Request 2 ohne neuen Request 1 liefert email-otp-required
+    const result3 = await service.acquireMasterKey({
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, emailOtp: FAKE_EMAIL_OTP, identity: FAKE_IDENTITY,
+    });
+    expect(result3.errorClass).toBe('email-otp-required');
+  });
+
+  it('AC11 — kein PTY-Output/Secret aus dem offenen Prozess in Response/Log während Wartezeit', async () => {
+    const spyError = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const spyLog = jest.spyOn(console, 'log').mockImplementation(() => {});
+    const spyWarn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ptySessionMock = makePtySessionMock({ requiresEmailOtp: true });
+      const service = makeService(ptySessionMock);
+
+      // Request 1 — Prozess offen, kein PTY-Output in Logs
+      const result = await service.acquireMasterKey({
+        email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: FAKE_IDENTITY,
+      });
+
+      // Kein Secret in Response
+      const resultJson = JSON.stringify(result);
+      expect(resultJson).not.toContain(FAKE_PASSWORD);
+      expect(resultJson).not.toContain(FAKE_EMAIL_OTP);
+
+      // Kein Secret in Logs
+      for (const spy of [spyError, spyLog, spyWarn]) {
+        for (const call of spy.mock.calls) {
+          const callStr = JSON.stringify(call);
+          expect(callStr).not.toContain(FAKE_PASSWORD);
+          expect(callStr).not.toContain(FAKE_EMAIL_OTP);
+        }
+      }
+    } finally {
+      spyError.mockRestore();
+      spyLog.mockRestore();
+      spyWarn.mockRestore();
+    }
+  });
+
+  it('AC11 — Phase-2-Timeout: writeOtp hängt dauerhaft → cleanup() aufgerufen + klassifizierter Fehler (kein Zombie-PTY)', async () => {
+    jest.useFakeTimers();
+    try {
+      // Fake-PTY-Session bei der writeOtp niemals resolved (simuliert hängendes bw nach OTP-Write)
+      let spawnCallCount = 0;
+      const sessions = [];
+      const hangingPtySessionMock = jest.fn(async (_args, _env) => {
+        spawnCallCount++;
+        const session = { cleanupCalled: false, otpCode: null };
+        // writeOtp gibt ein Promise zurück, das niemals resolved
+        const writeOtp = jest.fn((_code) => new Promise(() => { /* hängt für immer */ }));
+        const cleanup = jest.fn(() => { session.cleanupCalled = true; });
+        session.writeOtp = writeOtp;
+        session.cleanup = cleanup;
+        sessions.push(session);
+        return { phase: 'awaiting-otp', writeOtp, cleanup };
+      });
+      hangingPtySessionMock.spawnCallCount = () => spawnCallCount;
+      hangingPtySessionMock.sessions = sessions;
+
+      const service = makeService(hangingPtySessionMock);
+
+      // Request 1: Prozess öffnen → email-otp-required
+      const result1 = await service.acquireMasterKey({
+        email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: FAKE_IDENTITY,
+      });
+      expect(result1.errorClass).toBe('email-otp-required');
+
+      const session = sessions[0];
+      expect(session.cleanupCalled).toBe(false);
+
+      // Request 2: OTP schreiben → writeOtp hängt → Phase-2-Timeout nach PTY_LOGIN_TIMEOUT_MS (30 s)
+      const request2Promise = service.acquireMasterKey({
+        email: FAKE_EMAIL, password: FAKE_PASSWORD, emailOtp: FAKE_EMAIL_OTP, identity: FAKE_IDENTITY,
+      });
+
+      // Fake-Timer um 30 Sekunden vorspulen → Phase-2-Timeout greift
+      jest.advanceTimersByTime(30_000 + 500);
+
+      const result2 = await request2Promise;
+
+      // AC11: cleanup() muss aufgerufen worden sein (kein Zombie-PTY)
+      expect(session.cleanupCalled).toBe(true);
+
+      // Klassifizierter, geheimnisfreier Fehler zurückgegeben
+      expect(result2.status).toBe('error');
+      expect(result2.errorClass).toBe('error');
+      expect(result2.reason).toBeDefined();
+      expect(result2.reason).not.toContain(FAKE_PASSWORD);
+      expect(result2.reason).not.toContain(FAKE_EMAIL_OTP);
+
+      // Kein zweiter Spawn (AC10 — Phase-2-Timeout spawnt nicht neu)
+      expect(spawnCallCount).toBe(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('AC11 — Fehler in Request 2 (email-otp-invalid) räumt den Handle auf', async () => {
+    const ptySessionMock = makePtySessionMock({ requiresEmailOtp: true, emailOtpInvalid: true });
+    const service = makeService(ptySessionMock);
+
+    // Request 1
+    await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: FAKE_IDENTITY });
+
+    // Request 2: falscher OTP
+    await service.acquireMasterKey({
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, emailOtp: 'wrong', identity: FAKE_IDENTITY,
+    });
+
+    // Handle aufgeräumt: weiterer Request 2 ohne neuen Request 1 → email-otp-required
+    const result3 = await service.acquireMasterKey({
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, emailOtp: FAKE_EMAIL_OTP, identity: FAKE_IDENTITY,
+    });
+    expect(result3.errorClass).toBe('email-otp-required');
+    // Kein zusätzlicher Spawn für Request 3 (früh abgebrochen)
+    expect(ptySessionMock.spawnCallCount()).toBe(1);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PTY-classifyBwError — email-otp-* Muster-Erkennung via output-Feld (Regression)
 // ══════════════════════════════════════════════════════════════════════════════
 
 describe('PTY-classifyBwError — email-otp-* Muster-Erkennung via output-Feld', () => {
   it('PTY-output "new device verification required" → email-otp-required', async () => {
-    const ptyMock = makePtyMock({
+    const ptySessionMock = makePtySessionMock({
       loginFails: true,
       loginOutput: 'New device verification required. Enter OTP sent to login email:',
       loginExitCode: 1,
     });
-    const service = makeService(ptyMock);
+    const service = makeService(ptySessionMock);
 
     const result = await service.acquireMasterKey({
-      email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null,
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: FAKE_IDENTITY,
     });
 
     expect(result.errorClass).toBe('email-otp-required');
   });
 
-  it('PTY-output "device verification invalid" → email-otp-invalid', async () => {
-    const ptyMock = makePtyMock({
+  it('PTY-output "device verification invalid" → email-otp-invalid (via Phase-1-done)', async () => {
+    const ptySessionMock = makePtySessionMock({
       loginFails: true,
       loginOutput: 'New device verification invalid or expired.',
       loginExitCode: 1,
     });
-    const service = makeService(ptyMock);
+    const service = makeService(ptySessionMock);
 
+    // Wenn Phase 1 'done' mit diesem Output zurückkommt → classifyBwError → email-otp-invalid
     const result = await service.acquireMasterKey({
-      email: FAKE_EMAIL, password: FAKE_PASSWORD, emailOtp: 'some-otp', identity: null,
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: FAKE_IDENTITY,
     });
 
     expect(result.errorClass).toBe('email-otp-invalid');
   });
 
-  it('PTY-output "two-step" bleibt twofa-required (keine Interferenz mit email-otp-*)', async () => {
+  it('PTY-output "two-step" bleibt twofa-required (via _spawnBwPty — TOTP-Pfad)', async () => {
     const ptyMock = makePtyMock({
       loginFails: true,
       loginOutput: 'Two-step login required.',
       loginExitCode: 1,
     });
-    const service = makeService(ptyMock);
+    const service = new BitwardenMasterKeyService({
+      credentialStore, auditStore, itemName: ITEM_NAME,
+      _spawnBwPtySession: makePtySessionMock(),
+      _spawnBwPty: ptyMock,
+      _spawnBw: makeSpawnMock(),
+    });
 
+    // TOTP-Pfad: twofa übergeben → _spawnBwPty
     const result = await service.acquireMasterKey({
-      email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null,
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, twofa: 'x', identity: FAKE_IDENTITY,
     });
 
     expect(result.errorClass).toBe('twofa-required');
     expect(result.errorClass).not.toBe('email-otp-required');
-  });
-
-  it('PTY-output "verification ... otp sent to login email" → email-otp-required', async () => {
-    // Das vollständige PTY-output enthält immer "verification" und "otp sent to login email" zusammen.
-    // classifyBwError: s.includes('verification') && s.includes('otp sent to login email')
-    const ptyMock = makePtyMock({
-      loginFails: true,
-      loginOutput: 'New device verification required. Enter OTP sent to login email:',
-      loginExitCode: 1,
-    });
-    const service = makeService(ptyMock);
-
-    const result = await service.acquireMasterKey({
-      email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null,
-    });
-
-    expect(result.errorClass).toBe('email-otp-required');
   });
 });
