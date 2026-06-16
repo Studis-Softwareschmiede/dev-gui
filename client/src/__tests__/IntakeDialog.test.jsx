@@ -1,23 +1,31 @@
 /**
- * IntakeDialog.test.jsx — Unit tests for IntakeDialog component (S-132, fabric-intake-dialog).
+ * IntakeDialog.test.jsx — Unit tests for IntakeDialog component (S-132 + S-133, fabric-intake-dialog).
  *
- * Covers (fabric-intake-dialog): AC1, AC2b, AC4, AC9
+ * Covers (fabric-intake-dialog): AC1, AC2, AC2b, AC4, AC9
  *   AC1  — mode switching (new vs change): correct labels/placeholders rendered;
- *           both modes render a mehrzeilige textarea; new-mode shows bootstrap hint.
+ *           both modes render a mehrzeilige textarea.
+ *           new-mode shows two-step sequence status indicator (S-133, replaces S-132 bootstrap hint).
+ *   AC2  — new-mode two-trigger sequence (S-133):
+ *           Trigger 1 fires /agent-flow:new-project (no argument) → 202 → onNewStepChange('trigger2').
+ *           Trigger 2 fires /agent-flow:requirement <held-idea> → 202 → onNavigate('factory').
+ *           No auto-chaining: Trigger 2 only offered after explicit user confirmation.
+ *           change-mode fires one trigger /agent-flow:requirement <text> (regression).
+ *           Held idea survives across the Bootstrap step (heldIdeaText prop).
  *   AC2b — multiline text collapsed to single line (no newlines/control chars);
  *           empty/whitespace-only text → no request fired (Senden disabled).
- *   AC4  — after 202 → onNavigate('factory') called; no navigation on error.
+ *   AC4  — after 202 → onNavigate('factory') called for both triggers; no navigation on error.
  *   AC9  — cost-mode selector present, default 'balanced' → no --cost flag;
  *           non-balanced cost → --cost flag appended before text.
+ *           new-project (trigger1) does NOT show cost-mode (not cost-aware).
  *
  * Additional coverage:
  *   - Submit fires POST /api/command with /agent-flow:requirement <collapsed>
- *   - Optional field text included in collapsed argument
+ *   - Optional field text included in collapsed argument (step 2 / change mode)
  *   - 409 → error message, no navigation
  *   - 400 → error message, no navigation
  *   - 500 → error message, no navigation
  *   - Network error → error message, no navigation
- *   - I2: new mode renders aria-live bootstrap hint
+ *   - I2: new mode renders aria-live sequence status (intake-new-sequence-status)
  *   - I3: optional textarea has aria-describedby pointing to hint div
  *   - S2: cost select has aria-describedby="intake-cost-info"
  *
@@ -91,9 +99,16 @@ describe('IntakeDialog — AC1 mode rendering', () => {
     expect(el.tagName).toBe('TEXTAREA');
   });
 
-  it('shows "Stack-Wunsch / Constraints" optional label in new mode', () => {
-    const { getByLabelText } = renderDialog({ mode: 'new' });
+  it('shows "Stack-Wunsch / Constraints" optional label in new mode step 2 (trigger2)', () => {
+    // The optional field is hidden in step 1 (trigger1) but visible in step 2 (trigger2).
+    const { getByLabelText } = renderDialog({ mode: 'new', newStep: 'trigger2' });
     expect(getByLabelText(/stack-wunsch.*constraints/i)).toBeTruthy();
+  });
+
+  it('hides "Stack-Wunsch / Constraints" optional label in new mode step 1 (trigger1)', () => {
+    // In step 1 only the primary idea textarea is shown (optional field is for step 2).
+    const { queryByLabelText } = renderDialog({ mode: 'new', newStep: 'trigger1' });
+    expect(queryByLabelText(/stack-wunsch.*constraints/i)).toBeNull();
   });
 
   it('shows "Betroffener Bereich" optional label in change mode', () => {
@@ -115,20 +130,28 @@ describe('IntakeDialog — AC1 mode rendering', () => {
   });
 });
 
-// ── I2 — Bootstrap hint (new mode only) ──────────────────────────────────────
+// ── I2 — Sequence status indicator (new mode, S-133 two-step sequence) ───────
 
-describe('IntakeDialog — I2 bootstrap hint in new mode', () => {
-  it('renders aria-live bootstrap hint in new mode', () => {
-    const { getByTestId } = renderDialog({ mode: 'new' });
-    const hint = getByTestId('intake-new-bootstrap-hint');
-    expect(hint.textContent).toMatch(/new-project/i);
-    expect(hint.textContent).toMatch(/trigger-panel/i);
-    expect(hint.getAttribute('role')).toBe('note');
+describe('IntakeDialog — I2 sequence status indicator in new mode', () => {
+  it('renders aria-live sequence status in new mode step 1', () => {
+    const { getByTestId } = renderDialog({ mode: 'new', newStep: 'trigger1' });
+    const status = getByTestId('intake-new-sequence-status');
+    expect(status.getAttribute('role')).toBe('status');
+    expect(status.getAttribute('aria-live')).toBe('polite');
+    expect(status.textContent).toMatch(/schritt 1 von 2/i);
+    expect(status.textContent).toMatch(/new-project/i);
   });
 
-  it('does NOT render bootstrap hint in change mode', () => {
+  it('renders step 2 status when newStep=trigger2', () => {
+    const { getByTestId } = renderDialog({ mode: 'new', newStep: 'trigger2' });
+    const status = getByTestId('intake-new-sequence-status');
+    expect(status.textContent).toMatch(/schritt 2 von 2/i);
+    expect(status.textContent).toMatch(/requirement/i);
+  });
+
+  it('does NOT render sequence status in change mode', () => {
     const { queryByTestId } = renderDialog({ mode: 'change' });
-    expect(queryByTestId('intake-new-bootstrap-hint')).toBeNull();
+    expect(queryByTestId('intake-new-sequence-status')).toBeNull();
   });
 });
 
@@ -158,6 +181,327 @@ describe('IntakeDialog — S2 cost select aria-describedby', () => {
     const costSelect = container.querySelector('#intake-cost');
     expect(costSelect).not.toBeNull();
     expect(costSelect.getAttribute('aria-describedby')).toBe('intake-cost-info');
+  });
+});
+
+// ── AC2 — new-mode two-trigger sequence (S-133) ───────────────────────────────
+
+describe('IntakeDialog — AC2 new-mode two-trigger sequence (S-133)', () => {
+  it('change-mode: one trigger — /agent-flow:requirement <text> (regression)', async () => {
+    const fetchFn = makeFetchFn({
+      '/api/command': () => Promise.resolve(cmdResp(202, { commandId: 'c1', status: 'running' })),
+    });
+    const onNavigate = jest.fn();
+    const { getByLabelText, getByRole } = renderDialog({ mode: 'change', fetchFn, onNavigate });
+
+    await act(async () => {
+      fireEvent.change(getByLabelText(/was soll sich ändern/i), {
+        target: { value: 'Dark-Mode einbauen' },
+      });
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /änderung erfassen/i }));
+    });
+
+    await waitFor(() => {
+      expect(onNavigate).toHaveBeenCalledWith('factory');
+    });
+
+    // Exactly one POST to /api/command
+    const commandCalls = fetchFn.mock.calls.filter(([url]) => url === '/api/command');
+    expect(commandCalls).toHaveLength(1);
+    const body = JSON.parse(commandCalls[0][1].body);
+    expect(body.command).toBe('/agent-flow:requirement Dark-Mode einbauen');
+  });
+
+  it('new-mode Trigger 1: fires /agent-flow:new-project WITHOUT argument', async () => {
+    const fetchFn = makeFetchFn({
+      '/api/command': () => Promise.resolve(cmdResp(202, { commandId: 'np1', status: 'running' })),
+    });
+    const onNewStepChange = jest.fn();
+    const onNavigate = jest.fn();
+    const { getByRole } = renderDialog({
+      mode: 'new',
+      newStep: 'trigger1',
+      fetchFn,
+      onNavigate,
+      onNewStepChange,
+    });
+
+    // Step 1 button: "Bootstrap starten"
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /bootstrap starten/i }));
+    });
+
+    await waitFor(() => {
+      expect(onNavigate).toHaveBeenCalledWith('factory');
+    });
+
+    // Must advance to trigger2
+    expect(onNewStepChange).toHaveBeenCalledWith('trigger2');
+
+    // Command must be /agent-flow:new-project WITHOUT argument
+    const commandCalls = fetchFn.mock.calls.filter(([url]) => url === '/api/command');
+    expect(commandCalls).toHaveLength(1);
+    const body = JSON.parse(commandCalls[0][1].body);
+    expect(body.command).toBe('/agent-flow:new-project');
+    expect(body.command).not.toContain(' '); // no argument — single token
+  });
+
+  it('new-mode Trigger 1: fires /agent-flow:new-project even when idea text is empty', async () => {
+    // Trigger 1 does not require idea text (the idea is held for Trigger 2).
+    const fetchFn = makeFetchFn({
+      '/api/command': () => Promise.resolve(cmdResp(202, {})),
+    });
+    const onNewStepChange = jest.fn();
+    const { getByRole } = renderDialog({
+      mode: 'new',
+      newStep: 'trigger1',
+      fetchFn,
+      onNewStepChange,
+    });
+
+    // Button must be enabled even with no text (no idea text required for Trigger 1)
+    const btn = getByRole('button', { name: /bootstrap starten/i });
+    expect(btn.disabled).toBe(false);
+
+    await act(async () => { fireEvent.click(btn); });
+
+    await waitFor(() => {
+      expect(onNewStepChange).toHaveBeenCalledWith('trigger2');
+    });
+  });
+
+  it('new-mode Trigger 2: fires /agent-flow:requirement <held-idea> after bootstrap confirmed', async () => {
+    const fetchFn = makeFetchFn({
+      '/api/command': () => Promise.resolve(cmdResp(202, { commandId: 'r1', status: 'running' })),
+    });
+    const onNavigate = jest.fn();
+    const onNewStepChange = jest.fn();
+    const { getByRole } = renderDialog({
+      mode: 'new',
+      newStep: 'trigger2',         // Parent confirmed bootstrap done — now in step 2
+      heldIdeaText: 'Task-Manager für Studis',  // Idea held by parent across Bootstrap step
+      fetchFn,
+      onNavigate,
+      onNewStepChange,
+    });
+
+    // Step 2 button: "Idee übergeben"
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /idee übergeben/i }));
+    });
+
+    await waitFor(() => {
+      expect(onNavigate).toHaveBeenCalledWith('factory');
+    });
+
+    // onNewStepChange must NOT be called again in step 2
+    expect(onNewStepChange).not.toHaveBeenCalled();
+
+    // Command must carry the held idea text
+    const commandCalls = fetchFn.mock.calls.filter(([url]) => url === '/api/command');
+    expect(commandCalls).toHaveLength(1);
+    const body = JSON.parse(commandCalls[0][1].body);
+    expect(body.command).toBe('/agent-flow:requirement Task-Manager für Studis');
+  });
+
+  it('new-mode: held idea survives the Bootstrap step (heldIdeaText prop)', async () => {
+    // Simulate: user entered idea in step 1, then Bootstrap fired (nav to factory),
+    // user returned → dialog remounted with heldIdeaText still containing the idea.
+    const fetchFn = makeFetchFn({
+      '/api/command': () => Promise.resolve(cmdResp(202, {})),
+    });
+    const onNavigate = jest.fn();
+    const { container, getByRole } = renderDialog({
+      mode: 'new',
+      newStep: 'trigger2',
+      heldIdeaText: 'Idee aus Schritt 1',  // held by parent across unmount/remount
+      fetchFn,
+      onNavigate,
+    });
+
+    // The textarea must show the held idea text (populated from heldIdeaText prop)
+    const textarea = container.querySelector('#intake-idea');
+    expect(textarea.value).toBe('Idee aus Schritt 1');
+
+    // Submit must carry the held text
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /idee übergeben/i }));
+    });
+
+    await waitFor(() => {
+      expect(onNavigate).toHaveBeenCalledWith('factory');
+    });
+
+    const call = fetchFn.mock.calls.find(([url]) => url === '/api/command');
+    const body = JSON.parse(call[1].body);
+    expect(body.command).toBe('/agent-flow:requirement Idee aus Schritt 1');
+  });
+
+  it('new-mode Trigger 1 does NOT chain to Trigger 2 automatically (no auto-chaining)', async () => {
+    // After Trigger 1 202, onNewStepChange is called but onNavigate fires once (AC4),
+    // and the component does NOT immediately fire a second POST (no auto-chain).
+    const fetchFn = makeFetchFn({
+      '/api/command': () => Promise.resolve(cmdResp(202, { commandId: 'np2', status: 'running' })),
+    });
+    const onNewStepChange = jest.fn();
+    const onNavigate = jest.fn();
+    const { getByRole } = renderDialog({
+      mode: 'new',
+      newStep: 'trigger1',
+      heldIdeaText: 'Idee vorhanden',
+      fetchFn,
+      onNavigate,
+      onNewStepChange,
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /bootstrap starten/i }));
+    });
+
+    await waitFor(() => {
+      expect(onNavigate).toHaveBeenCalledWith('factory');
+    });
+
+    // Only one POST fired — no auto-chain to requirement
+    const commandCalls = fetchFn.mock.calls.filter(([url]) => url === '/api/command');
+    expect(commandCalls).toHaveLength(1);
+    expect(JSON.parse(commandCalls[0][1].body).command).toBe('/agent-flow:new-project');
+  });
+
+  it('new-mode step 2: disabled when held idea collapses to empty (AC2b)', () => {
+    // If the user navigated away before entering an idea, step 2 must block submit.
+    const { getByRole } = renderDialog({
+      mode: 'new',
+      newStep: 'trigger2',
+      heldIdeaText: '',   // empty — no idea held
+    });
+
+    const btn = getByRole('button', { name: /idee übergeben.*fehlt/i });
+    expect(btn.disabled).toBe(true);
+  });
+
+  it('new-mode step 1 shows "Schritt 1 von 2 — Bootstrap" sequence indicator', () => {
+    const { getByTestId } = renderDialog({ mode: 'new', newStep: 'trigger1' });
+    const status = getByTestId('intake-new-sequence-status');
+    expect(status.textContent).toMatch(/schritt 1 von 2/i);
+    expect(status.textContent).toMatch(/bootstrap/i);
+  });
+
+  it('new-mode step 2 shows "Schritt 2 von 2 — Idee übergeben" sequence indicator', () => {
+    const { getByTestId } = renderDialog({ mode: 'new', newStep: 'trigger2' });
+    const status = getByTestId('intake-new-sequence-status');
+    expect(status.textContent).toMatch(/schritt 2 von 2/i);
+    expect(status.textContent).toMatch(/bootstrap abgeschlossen/i);
+  });
+
+  it('new-mode step 1 does NOT show cost-mode switch (new-project is not cost-aware)', () => {
+    const { container } = renderDialog({ mode: 'new', newStep: 'trigger1' });
+    const costSelect = container.querySelector('#intake-cost');
+    expect(costSelect).toBeNull();
+  });
+
+  it('new-mode step 2 DOES show cost-mode switch (requirement is cost-aware)', () => {
+    const { container } = renderDialog({ mode: 'new', newStep: 'trigger2', heldIdeaText: 'Idee' });
+    const costSelect = container.querySelector('#intake-cost');
+    expect(costSelect).not.toBeNull();
+  });
+});
+
+// ── AC4 — Navigate to factory (Terminal-Pane) on 202 ─────────────────────────
+
+describe('IntakeDialog — AC4 navigate to factory after 202', () => {
+  it('calls onNavigate("factory") after 202 (change mode)', async () => {
+    const fetchFn = makeFetchFn({
+      '/api/command': () => Promise.resolve(cmdResp(202, { commandId: 'x', status: 'running' })),
+    });
+    const onNavigate = jest.fn();
+    const { getByLabelText, getByRole } = renderDialog({ mode: 'change', fetchFn, onNavigate });
+
+    await act(async () => {
+      fireEvent.change(getByLabelText(/was soll sich ändern/i), {
+        target: { value: 'API-Rate-Limiting' },
+      });
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /änderung erfassen/i }));
+    });
+
+    await waitFor(() => {
+      expect(onNavigate).toHaveBeenCalledWith('factory');
+    });
+  });
+
+  it('calls onNavigate("factory") after 202 on Trigger 1 (new-project)', async () => {
+    const fetchFn = makeFetchFn({
+      '/api/command': () => Promise.resolve(cmdResp(202, {})),
+    });
+    const onNavigate = jest.fn();
+    const onNewStepChange = jest.fn();
+    const { getByRole } = renderDialog({
+      mode: 'new',
+      newStep: 'trigger1',
+      fetchFn,
+      onNavigate,
+      onNewStepChange,
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /bootstrap starten/i }));
+    });
+
+    await waitFor(() => {
+      expect(onNavigate).toHaveBeenCalledWith('factory');
+    });
+  });
+
+  it('calls onNavigate("factory") after 202 on Trigger 2 (requirement)', async () => {
+    const fetchFn = makeFetchFn({
+      '/api/command': () => Promise.resolve(cmdResp(202, {})),
+    });
+    const onNavigate = jest.fn();
+    const { getByRole } = renderDialog({
+      mode: 'new',
+      newStep: 'trigger2',
+      heldIdeaText: 'Meine Idee',
+      fetchFn,
+      onNavigate,
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /idee übergeben/i }));
+    });
+
+    await waitFor(() => {
+      expect(onNavigate).toHaveBeenCalledWith('factory');
+    });
+  });
+
+  it('does NOT call onNavigate on 409 (error, not a success)', async () => {
+    const fetchFn = makeFetchFn({
+      '/api/command': () => Promise.resolve(cmdResp(409, {})),
+    });
+    const onNavigate = jest.fn();
+    const { getByLabelText, getByRole } = renderDialog({ mode: 'change', fetchFn, onNavigate });
+
+    await act(async () => {
+      fireEvent.change(getByLabelText(/was soll sich ändern/i), {
+        target: { value: 'API-Test' },
+      });
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /änderung erfassen/i }));
+    });
+
+    await waitFor(() => {
+      expect(getByRole('alert')).toBeTruthy();
+    });
+
+    expect(onNavigate).not.toHaveBeenCalled();
   });
 });
 
@@ -290,21 +634,22 @@ describe('IntakeDialog — Submit fires POST /api/command with requirement', () 
     expect(body.command).toBe('/agent-flow:requirement Dark-Mode-Toggle einbauen');
   });
 
-  it('posts /agent-flow:requirement <text> in new mode', async () => {
+  it('posts /agent-flow:requirement <text> in new mode step 2', async () => {
+    // In step 2 the idea has been held by the parent (heldIdeaText prop).
     const fetchFn = makeFetchFn({
       '/api/command': () => Promise.resolve(cmdResp(202, {})),
     });
     const onNavigate = jest.fn();
-    const { getByLabelText, getByRole } = renderDialog({ mode: 'new', fetchFn, onNavigate });
-
-    await act(async () => {
-      fireEvent.change(getByLabelText(/projektidee.*vision/i), {
-        target: { value: 'Task-Management-App für Studis' },
-      });
+    const { getByRole } = renderDialog({
+      mode: 'new',
+      newStep: 'trigger2',
+      heldIdeaText: 'Task-Management-App für Studis',
+      fetchFn,
+      onNavigate,
     });
 
     await act(async () => {
-      fireEvent.click(getByRole('button', { name: /idee erfassen/i }));
+      fireEvent.click(getByRole('button', { name: /idee übergeben/i }));
     });
 
     await waitFor(() => {
@@ -316,17 +661,18 @@ describe('IntakeDialog — Submit fires POST /api/command with requirement', () 
     expect(body.command).toBe('/agent-flow:requirement Task-Management-App für Studis');
   });
 
-  it('includes optional field text in the collapsed argument', async () => {
+  it('includes optional field text in the collapsed argument (step 2)', async () => {
+    // Optional field is available in step 2 / change mode (not step 1).
     const fetchFn = makeFetchFn({
       '/api/command': () => Promise.resolve(cmdResp(202, {})),
     });
     const onNavigate = jest.fn();
-    const { getByLabelText, getByRole } = renderDialog({ mode: 'new', fetchFn, onNavigate });
-
-    await act(async () => {
-      fireEvent.change(getByLabelText(/projektidee.*vision/i), {
-        target: { value: 'Task-Manager' },
-      });
+    const { getByLabelText, getByRole } = renderDialog({
+      mode: 'new',
+      newStep: 'trigger2',
+      heldIdeaText: 'Task-Manager',
+      fetchFn,
+      onNavigate,
     });
 
     await act(async () => {
@@ -336,7 +682,7 @@ describe('IntakeDialog — Submit fires POST /api/command with requirement', () 
     });
 
     await act(async () => {
-      fireEvent.click(getByRole('button', { name: /idee erfassen/i }));
+      fireEvent.click(getByRole('button', { name: /idee übergeben/i }));
     });
 
     await waitFor(() => {
@@ -347,56 +693,6 @@ describe('IntakeDialog — Submit fires POST /api/command with requirement', () 
     const body = JSON.parse(call[1].body);
     // Both fields appear in the argument, separated by a space
     expect(body.command).toBe('/agent-flow:requirement Task-Manager TypeScript React');
-  });
-});
-
-// ── AC4 — Navigate to factory (Terminal-Pane) on 202 ─────────────────────────
-
-describe('IntakeDialog — AC4 navigate to factory after 202', () => {
-  it('calls onNavigate("factory") after 202', async () => {
-    const fetchFn = makeFetchFn({
-      '/api/command': () => Promise.resolve(cmdResp(202, { commandId: 'x', status: 'running' })),
-    });
-    const onNavigate = jest.fn();
-    const { getByLabelText, getByRole } = renderDialog({ mode: 'change', fetchFn, onNavigate });
-
-    await act(async () => {
-      fireEvent.change(getByLabelText(/was soll sich ändern/i), {
-        target: { value: 'API-Rate-Limiting' },
-      });
-    });
-
-    await act(async () => {
-      fireEvent.click(getByRole('button', { name: /änderung erfassen/i }));
-    });
-
-    await waitFor(() => {
-      expect(onNavigate).toHaveBeenCalledWith('factory');
-    });
-  });
-
-  it('does NOT call onNavigate on 409 (error, not a success)', async () => {
-    const fetchFn = makeFetchFn({
-      '/api/command': () => Promise.resolve(cmdResp(409, {})),
-    });
-    const onNavigate = jest.fn();
-    const { getByLabelText, getByRole } = renderDialog({ mode: 'change', fetchFn, onNavigate });
-
-    await act(async () => {
-      fireEvent.change(getByLabelText(/was soll sich ändern/i), {
-        target: { value: 'API-Test' },
-      });
-    });
-
-    await act(async () => {
-      fireEvent.click(getByRole('button', { name: /änderung erfassen/i }));
-    });
-
-    await waitFor(() => {
-      expect(getByRole('alert')).toBeTruthy();
-    });
-
-    expect(onNavigate).not.toHaveBeenCalled();
   });
 });
 
@@ -647,7 +943,7 @@ describe('IntakeDialog — error responses', () => {
 // ── Command preview ───────────────────────────────────────────────────────────
 
 describe('IntakeDialog — command preview', () => {
-  it('shows command preview when primary text is non-empty', async () => {
+  it('shows command preview when primary text is non-empty (change mode)', async () => {
     const { getByLabelText, getByTestId } = renderDialog({ mode: 'change' });
 
     await act(async () => {
@@ -663,7 +959,20 @@ describe('IntakeDialog — command preview', () => {
     });
   });
 
-  it('hides command preview when text is empty', () => {
+  it('shows new-project preview in step 1 (no text required)', () => {
+    // In step 1, /agent-flow:new-project is always shown (no text argument needed).
+    const { getByTestId } = renderDialog({ mode: 'new', newStep: 'trigger1' });
+    const preview = getByTestId('intake-preview');
+    expect(preview.textContent).toContain('/agent-flow:new-project');
+  });
+
+  it('hides command preview in step 2 when held idea is empty', () => {
+    const { queryByTestId } = renderDialog({ mode: 'new', newStep: 'trigger2', heldIdeaText: '' });
+    // No held text → no command → no preview
+    expect(queryByTestId('intake-preview')).toBeNull();
+  });
+
+  it('hides command preview in change mode when text is empty', () => {
     const { queryByTestId } = renderDialog({ mode: 'change' });
     // No text entered → preview not shown
     expect(queryByTestId('intake-preview')).toBeNull();
