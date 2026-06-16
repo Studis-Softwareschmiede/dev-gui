@@ -1,5 +1,5 @@
 /**
- * TriggerPanel.test.jsx — Unit tests for TriggerPanel component (AC4, AC7).
+ * TriggerPanel.test.jsx — Unit tests for TriggerPanel component (AC4, AC7, AC3 fabric-intake-dialog).
  *
  * Mocks fetch via a fetchFn prop.
  * Verifies:
@@ -12,6 +12,8 @@
  *   - train with value → POSTs /agent-flow:train <value>
  *   - fire → POST /api/command; 202 → running state; Kill → cancel
  *   - 409 → running; 400/500 → error messages; /api/session busy → running state
+ *   - AC3 (fabric-intake-dialog) — /agent-flow:new-project im Dropdown wählbar,
+ *     feuert bare command (kein Arg) → 202, kein Cost-Mode-Schalter sichtbar
  *
  * @jest-environment jsdom
  */
@@ -489,6 +491,74 @@ describe('TriggerPanel — AC7 command composition', () => {
     expect(commandCall).toBeTruthy();
     const body = JSON.parse(commandCall[1].body);
     expect(body.command).toBe('/agent-flow:flow');
+  });
+
+  // AC3 (fabric-intake-dialog) — /agent-flow:new-project in frontend catalog
+  it('AC3 — /agent-flow:new-project is selectable in the command dropdown', async () => {
+    const fetchFn = makeFetchFn({
+      '/api/session': () => Promise.resolve(sessionResp('ready')),
+    });
+    const { getByRole } = renderPanel(fetchFn);
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
+    });
+
+    // The select must contain new-project as an option
+    const cmdSelect = getByRole('combobox', { name: /befehl/i });
+    const options = Array.from(cmdSelect.options).map((o) => o.value);
+    expect(options).toContain('/agent-flow:new-project');
+  });
+
+  it('AC3 — /agent-flow:new-project fires bare command (no argument) → 202', async () => {
+    const fetchFn = makeFetchFn({
+      '/api/session': () => Promise.resolve(sessionResp('ready')),
+      '/api/command': () => Promise.resolve(cmdResp(202, { commandId: 'c-np1', status: 'running' })),
+    });
+    const { getByRole } = renderPanel(fetchFn);
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
+    });
+
+    await act(async () => {
+      fireEvent.change(getByRole('combobox', { name: /befehl/i }), {
+        target: { value: '/agent-flow:new-project' },
+      });
+    });
+
+    // Senden must be enabled immediately (no required arg)
+    await waitFor(() => {
+      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /senden/i }));
+    });
+
+    const commandCall = fetchFn.mock.calls.find(([url]) => url === '/api/command');
+    expect(commandCall).toBeTruthy();
+    const body = JSON.parse(commandCall[1].body);
+    expect(body.command).toBe('/agent-flow:new-project');
+  });
+
+  it('AC3 — /agent-flow:new-project shows no cost-mode selector (not cost-aware)', async () => {
+    const fetchFn = makeFetchFn({
+      '/api/session': () => Promise.resolve(sessionResp('ready')),
+    });
+    const { getByRole, queryByLabelText } = renderPanel(fetchFn);
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
+    });
+
+    await act(async () => {
+      fireEvent.change(getByRole('combobox', { name: /befehl/i }), {
+        target: { value: '/agent-flow:new-project' },
+      });
+    });
+
+    expect(queryByLabelText(/cost-mode/i)).toBeNull();
   });
 });
 
