@@ -44,6 +44,7 @@ import { createCipheriv, createDecipheriv, randomBytes, scrypt } from 'node:cryp
 import { promisify } from 'node:util';
 import { readFile, rename, mkdir, open, stat, chmod } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
+import { decrypt as gpgDecrypt } from './BackupCrypto.js';
 import { readFileSync } from 'node:fs';
 import { runBackup, resolveBackupDir, resolveRetentionCount } from './BackupEngine.js';
 import { resolveOffHostConfig } from './BackupUploader.js';
@@ -1282,5 +1283,173 @@ export class CredentialStore {
     }
 
     return result;
+  }
+
+  // ── Restore (S-142 AC13–AC16) ────────────────────────────────────────────────
+
+  /**
+   * Stellt den Credential-Store aus einem verschlüsselten Backup-Artefakt wieder her.
+   *
+   * Ablauf:
+   *   1. Confirm-Flag prüfen — ohne Bestätigung kein Überschreiben (AC14).
+   *   2. GPG-decrypt des Artefakts mit dem geladenen Master-Key (AC13/AC15).
+   *   3. Artefakt parsen + Manifest-Version prüfen (Edge-Case: inkompatible Version).
+   *   4. Blob (secrets.enc.json-Inhalt) validieren (muss gültiges JSON mit kdf-Feld sein).
+   *   5. Atomares Zurückschreiben: tmp + fsync + rename (AC15: kein Teil-Überschreiben).
+   *   6. Store-Reload: Master-Key bleibt im Speicher; der Store ist sofort nutzbar (AC13).
+   *
+   * Security-Floor (AC15/AC16):
+   *   - Passphrase (Master-Key) NICHT in Logs/Argv/Response.
+   *   - Entschlüsselter Klartext bleibt NICHT als Datei liegen (nur in-memory, dann direkt
+   *     ins tmp-File — kein explizites temp-File für entschlüsselten Inhalt).
+   *   - Schreiben ERST nach erfolgreichem Decrypt: bei Fehler bleibt alter Store intakt.
+   *   - Fehlermeldungen sind geheimnisfrei (errorClass statt Details).
+   *
+   * @param {Buffer} artefactBuffer - Verschlüsseltes GPG-Artefakt (als Buffer)
+   * @param {object} [opts]
+   * @param {boolean} [opts.confirm=false] - Explizite Überschreib-Bestätigung (AC14)
+   * @returns {Promise<{
+   *   ok: true,
+   *   manifest: object
+   * } | {
+   *   ok: false,
+   *   errorClass: 'confirm-required'|'no-master-key'|'gpg-decrypt-failed'|'restore-invalid'|'restore-write-failed',
+   *   error: string
+   * }>}
+   */
+  async restore(artefactBuffer, { confirm = false } = {}) {
+    // AC14: Ohne explizite Bestätigung kein Überschreiben
+    if (!confirm) {
+      return {
+        ok: false,
+        errorClass: 'confirm-required',
+        error: 'Überschreib-Bestätigung fehlt (confirm: true erforderlich).',
+      };
+    }
+
+    // AC15: Master-Key muss verfügbar sein
+    if (!this.#masterKeyRaw) {
+      return {
+        ok: false,
+        errorClass: 'no-master-key',
+        error: 'Kein Master-Key geladen (Store gesperrt).',
+      };
+    }
+
+    // AC15: GPG-decrypt mit geladenem Master-Key (Passphrase via stdin — AC7/Floor)
+    let decryptedBuf;
+    try {
+      decryptedBuf = await gpgDecrypt(this.#masterKeyRaw, artefactBuffer);
+    } catch {
+      // AC15: GPG-Fehler (falscher Key / korruptes Artefakt) → Fehler-Klasse, kein Secret im Text
+      return {
+        ok: false,
+        errorClass: 'gpg-decrypt-failed',
+        error: 'GPG-Entschlüsselung fehlgeschlagen (falscher Master-Key oder korruptes Artefakt).',
+      };
+    }
+
+    // Artefakt parsen (muss JSON mit { manifest, blob } sein)
+    let artefact;
+    try {
+      artefact = JSON.parse(decryptedBuf.toString('utf8'));
+    } catch {
+      return {
+        ok: false,
+        errorClass: 'restore-invalid',
+        error: 'Artefakt ist kein gültiges JSON.',
+      };
+    }
+
+    // Manifest + Blob validieren
+    if (!artefact || typeof artefact !== 'object' || !artefact.manifest || typeof artefact.blob !== 'string') {
+      return {
+        ok: false,
+        errorClass: 'restore-invalid',
+        error: 'Artefakt-Format ungültig (fehlende manifest/blob-Felder).',
+      };
+    }
+
+    // Edge-Case: inkompatible Backup-Schema-Version
+    const { BACKUP_SCHEMA_VERSION } = await import('./BackupEngine.js');
+    const manifestVersion = artefact.manifest?.schemaVersion;
+    if (typeof manifestVersion === 'number' && manifestVersion > BACKUP_SCHEMA_VERSION) {
+      return {
+        ok: false,
+        errorClass: 'restore-invalid',
+        error: `Artefakt-Schema-Version ${manifestVersion} ist neuer als die unterstützte Version ${BACKUP_SCHEMA_VERSION}.`,
+      };
+    }
+
+    // Blob muss gültiges JSON mit kdf-Feld sein (Grundvalidierung)
+    let blobParsed;
+    try {
+      blobParsed = JSON.parse(artefact.blob);
+    } catch {
+      return {
+        ok: false,
+        errorClass: 'restore-invalid',
+        error: 'Blob im Artefakt ist kein gültiges JSON.',
+      };
+    }
+
+    if (!blobParsed || typeof blobParsed !== 'object') {
+      return {
+        ok: false,
+        errorClass: 'restore-invalid',
+        error: 'Blob im Artefakt hat kein gültiges Store-Format.',
+      };
+    }
+
+    // kdf-Guard: Blob muss ein kdf-Feld enthalten (Grundvalidierung des Store-Formats).
+    // Ein leerer Blob ({}) ohne kdf würde sonst akzeptiert und zurückgeschrieben — der
+    // alte Store bleibt intakt, wenn wir hier früh abbrechen.
+    if (!blobParsed?.kdf) {
+      return {
+        ok: false,
+        errorClass: 'restore-invalid',
+        error: 'Blob im Artefakt enthält kein kdf-Feld (kein gültiges Store-Format).',
+      };
+    }
+
+    // AC15: Atomares Zurückschreiben — Schreiben ERST nach erfolgreichem Decrypt.
+    // tmp + fsync + rename: kein Teil-Überschreiben bei Crash/Fehler.
+    return this.#withWriteLock(async () => {
+      const tmp = `${this.#filePath}.restore-tmp`;
+      const dir = this.#filePath.replace(/\/[^/]+$/, '');
+
+      try {
+        await mkdir(dir, { recursive: true, mode: 0o700 });
+
+        const json = artefact.blob; // bereits validiertes JSON-String
+        let fd;
+        try {
+          fd = await open(tmp, 'w', 0o600);
+          await fd.writeFile(json, 'utf8');
+          await fd.sync();
+        } finally {
+          if (fd) await fd.close();
+        }
+
+        await rename(tmp, this.#filePath);
+
+        // Floor: kein entschlüsselter Klartext bleibt als Datei liegen
+        // (tmp wurde direkt zu filePath umbenannt — kein separates Klartext-File)
+
+        return { ok: true, manifest: artefact.manifest };
+      } catch {
+        // AC15: bei Schreib-Fehler den tmp aufräumen (best-effort)
+        try {
+          const { unlink } = await import('node:fs/promises');
+          await unlink(tmp);
+        } catch { /* ignore */ }
+
+        return {
+          ok: false,
+          errorClass: 'restore-write-failed',
+          error: 'Schreiben des wiederhergestellten Stores fehlgeschlagen.',
+        };
+      }
+    });
   }
 }

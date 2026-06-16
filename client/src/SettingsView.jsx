@@ -483,6 +483,341 @@ async function deleteBackupRemoteCred(name) {
   return deleteCredential('backup-remote', name);
 }
 
+/**
+ * POST /api/settings/backup-restore?confirm=true
+ * Lädt ein verschlüsseltes Backup-Artefakt hoch und stellt den Store wieder her.
+ * Admin-geschützt (CRED_ADMIN_EMAILS) + Audit-First (AC16).
+ *
+ * Sendet die Datei als application/octet-stream (raw binary).
+ * Security-Floor: kein Master-Key / Klartext im Body/Response.
+ *
+ * @param {ArrayBuffer} artefactBuffer - Artefakt-Inhalt als ArrayBuffer
+ * @param {typeof fetch} [fetchImpl]
+ * @returns {Promise<{ ok: boolean, manifest?: object, errorClass?: string, error?: string, httpStatus: number }>}
+ */
+async function postBackupRestore(artefactBuffer, fetchImpl) {
+  const fn = fetchImpl ?? globalThis.fetch.bind(globalThis);
+  const res = await fn('/api/settings/backup-restore?confirm=true', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: artefactBuffer,
+  });
+  const data = await res.json();
+  return { ...data, httpStatus: res.status };
+}
+
+// ── RestoreSection (S-142 AC13–AC16) ─────────────────────────────────────────
+
+/**
+ * UI-Abschnitt „Restore" (S-142, AC13–AC16).
+ *
+ * Erlaubt das Hochladen eines verschlüsselten Backup-Artefakts, das mit dem
+ * geladenen Master-Key GPG-entschlüsselt und als wiederhergestelltes
+ * secrets.enc.json atomar ans Volume zurückgeschrieben wird.
+ *
+ * AC13 — Restore-Flow: Upload → GPG-decrypt → atomares Zurückschreiben → Store nutzbar.
+ * AC14 — Überschreib-Bestätigung: Checkbox muss aktiv sein; ohne → Fehler.
+ * AC15 — Sicherheit: Falscher Key/korruptes Artefakt → klassifizierter, geheimnisfreier Fehler;
+ *         alter Store bleibt intakt (Backend: Schreiben erst nach erfolgreichem Decrypt).
+ * AC16 — Schutz + Audit: Admin-Gate (CRED_ADMIN_EMAILS) + Audit-First im Backend.
+ *         403 → Fehlermeldung; kein Master-Key/Klartext in Response.
+ *
+ * Security-Floor:
+ *   - Kein Master-Key / Artefakt-Klartext in Response/DOM/Log.
+ *   - Datei-Inhalt wird als ArrayBuffer nur in-memory gehalten.
+ *   - Nach Abschluss (Erfolg oder Fehler) wird der ArrayBuffer-Verweis verworfen.
+ *
+ * A11y (NFR §96):
+ *   - label/htmlFor auf file-Input und Confirm-Checkbox.
+ *   - aria-describedby für Fehler (role=alert) und Erfolg (role=status).
+ *   - aria-busy auf Restore-Button während der Operation.
+ *   - Touch-Targets ≥ 44 px.
+ *
+ * @param {{ fetchFn?: typeof fetch }} props
+ */
+function RestoreSection({ fetchFn }) {
+  const [selectedFile, setSelectedFile] = useState(null);
+  const [confirmed, setConfirmed] = useState(false);
+  const [restoring, setRestoring] = useState(false);
+  const [result, setResult] = useState(null); // { ok, errorClass?, error?, manifest? }
+  const fileInputRef = useRef(null);
+  const ERROR_ID = 'restore-error';
+  const SUCCESS_ID = 'restore-success';
+
+  const handleFileChange = useCallback((e) => {
+    const file = e.target.files?.[0] ?? null;
+    setSelectedFile(file);
+    // Vorheriges Ergebnis zurücksetzen bei neuer Dateiauswahl
+    setResult(null);
+  }, []);
+
+  const handleCheckboxChange = useCallback((e) => {
+    setConfirmed(e.target.checked);
+    setResult(null);
+  }, []);
+
+  const handleRestore = useCallback(async () => {
+    if (!selectedFile) return;
+    if (!confirmed) {
+      setResult({ ok: false, errorClass: 'confirm-required', error: 'Bitte bestätige das Überschreiben des aktuellen Stores.' });
+      return;
+    }
+
+    setRestoring(true);
+    setResult(null);
+
+    let artefactBuffer;
+    try {
+      artefactBuffer = await selectedFile.arrayBuffer();
+    } catch {
+      setRestoring(false);
+      setResult({ ok: false, errorClass: 'restore-invalid', error: 'Datei konnte nicht gelesen werden.' });
+      return;
+    }
+
+    try {
+      const data = await postBackupRestore(artefactBuffer, fetchFn);
+      // Floor: artefactBuffer (Klartext nach Entschlüsselung) bleibt nur im Backend;
+      // Referenz hier (verschlüsseltes Artefakt) wird nach dem Request GC-freigegeben.
+      if (data.ok) {
+        setResult({ ok: true, manifest: data.manifest });
+        // Formular zurücksetzen nach Erfolg
+        setSelectedFile(null);
+        setConfirmed(false);
+        if (fileInputRef.current) fileInputRef.current.value = '';
+      } else {
+        setResult({ ok: false, errorClass: data.errorClass, error: data.error ?? 'Restore fehlgeschlagen.' });
+      }
+    } catch {
+      setResult({ ok: false, errorClass: 'error', error: 'Netzwerk-Fehler beim Restore.' });
+    } finally {
+      setRestoring(false);
+    }
+  }, [selectedFile, confirmed, fetchFn]);
+
+  const canRestore = selectedFile !== null && confirmed && !restoring;
+
+  return (
+    <div style={restoreStyles.wrapper} aria-labelledby="restore-section-heading">
+      <h3 id="restore-section-heading" style={restoreStyles.heading}>Restore aus Backup-Artefakt</h3>
+      <p style={restoreStyles.desc}>
+        Lade ein verschlüsseltes Backup-Artefakt (.gpg) hoch. Es wird mit dem geladenen
+        Master-Key entschlüsselt und der Store atomar wiederhergestellt.
+        Dieser Vorgang überschreibt den aktuellen Store unwiderruflich.
+      </p>
+
+      {/* Datei-Upload (AC13) */}
+      <div style={restoreStyles.fieldRow}>
+        <label htmlFor="restore-file-input" style={restoreStyles.label}>
+          Backup-Artefakt (.gpg):
+        </label>
+        <input
+          id="restore-file-input"
+          ref={fileInputRef}
+          type="file"
+          accept=".gpg,application/octet-stream"
+          onChange={handleFileChange}
+          style={restoreStyles.fileInput}
+          aria-describedby={result && !result.ok ? ERROR_ID : undefined}
+          aria-invalid={result && !result.ok ? 'true' : undefined}
+          disabled={restoring}
+        />
+      </div>
+
+      {/* Ausgewählte Datei */}
+      {selectedFile && (
+        <p style={restoreStyles.fileInfo} aria-live="polite">
+          Ausgewählt: <strong>{selectedFile.name}</strong> ({(selectedFile.size / 1024).toFixed(1)} KB)
+        </p>
+      )}
+
+      {/* Überschreib-Bestätigung (AC14) */}
+      <div style={restoreStyles.confirmRow}>
+        <label htmlFor="restore-confirm-checkbox" style={restoreStyles.confirmLabel}>
+          <input
+            id="restore-confirm-checkbox"
+            type="checkbox"
+            checked={confirmed}
+            onChange={handleCheckboxChange}
+            disabled={restoring}
+            style={restoreStyles.checkbox}
+            aria-describedby="restore-confirm-desc"
+          />
+          {' '}Ich bestätige, dass der aktuelle Credential-Store überschrieben werden soll.
+        </label>
+        <p id="restore-confirm-desc" style={restoreStyles.confirmDesc}>
+          Diese Aktion kann nicht rückgängig gemacht werden. Stelle sicher, dass du das
+          richtige Artefakt und den richtigen Master-Key verwendest.
+        </p>
+      </div>
+
+      {/* Fehler-Feedback (AC15: geheimnisfreier Fehler, AC16: 403) */}
+      {result && !result.ok && (
+        <div id={ERROR_ID} role="alert" style={restoreStyles.errorBox}>
+          <strong>Restore fehlgeschlagen</strong>
+          {result.errorClass && (
+            <span style={restoreStyles.errorClass}> [{result.errorClass}]</span>
+          )}
+          <p style={restoreStyles.errorText}>{result.error}</p>
+        </div>
+      )}
+
+      {/* Erfolgs-Feedback (AC13: Store wiederhergestellt) */}
+      {result && result.ok && (
+        <div id={SUCCESS_ID} role="status" style={restoreStyles.successBox}>
+          <strong>Restore erfolgreich!</strong>
+          <p style={restoreStyles.successText}>
+            Der Credential-Store wurde wiederhergestellt.
+            {result.manifest?.createdAt && (
+              <> Backup erstellt am: {new Date(result.manifest.createdAt).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'medium' })}.</>
+            )}
+          </p>
+        </div>
+      )}
+
+      {/* Restore-Button */}
+      <div style={{ marginTop: 12 }}>
+        <button
+          type="button"
+          onClick={handleRestore}
+          disabled={!canRestore}
+          aria-busy={restoring}
+          aria-describedby={result && !result.ok ? ERROR_ID : undefined}
+          style={canRestore ? restoreStyles.btnPrimary : restoreStyles.btnDisabled}
+        >
+          {restoring ? 'Restore läuft…' : 'Jetzt wiederherstellen'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Styles für RestoreSection (S-142). */
+const restoreStyles = {
+  wrapper: {
+    marginTop: 24,
+    paddingTop: 20,
+    borderTop: '1px solid #2a2a2a',
+  },
+  heading: {
+    margin: '0 0 8px',
+    fontSize: 14,
+    fontWeight: 700,
+    color: '#e5e7eb',
+  },
+  desc: {
+    margin: '0 0 14px',
+    fontSize: 12,
+    color: '#9ca3af',
+    lineHeight: 1.5,
+  },
+  fieldRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 8,
+    flexWrap: 'wrap',
+  },
+  label: {
+    color: '#9ca3af',
+    fontSize: 13,
+    minWidth: 160,
+  },
+  fileInput: {
+    color: '#e5e7eb',
+    fontSize: 13,
+    background: 'transparent',
+    border: 'none',
+    cursor: 'pointer',
+    minHeight: 44,
+  },
+  fileInfo: {
+    margin: '4px 0 8px',
+    fontSize: 12,
+    color: '#9ca3af',
+  },
+  confirmRow: {
+    marginBottom: 12,
+  },
+  confirmLabel: {
+    display: 'flex',
+    alignItems: 'flex-start',
+    gap: 8,
+    color: '#e5e7eb',
+    fontSize: 13,
+    cursor: 'pointer',
+    lineHeight: 1.4,
+    minHeight: 44,
+  },
+  checkbox: {
+    marginTop: 2,
+    minWidth: 16,
+    minHeight: 16,
+    cursor: 'pointer',
+  },
+  confirmDesc: {
+    margin: '6px 0 0 24px',
+    fontSize: 12,
+    color: '#9ca3af',
+    lineHeight: 1.4,
+  },
+  errorBox: {
+    padding: '10px 14px',
+    marginBottom: 10,
+    background: '#2d0f0f',
+    border: '1px solid #7f1d1d',
+    borderRadius: 4,
+    color: '#fca5a5',
+    fontSize: 13,
+  },
+  errorClass: {
+    fontFamily: 'monospace',
+    fontSize: 11,
+    color: '#fca5a5',
+    opacity: 0.7,
+  },
+  errorText: {
+    margin: '4px 0 0',
+    fontSize: 12,
+  },
+  successBox: {
+    padding: '10px 14px',
+    marginBottom: 10,
+    background: '#0d1a0d',
+    border: '1px solid #166534',
+    borderRadius: 4,
+    color: '#86efac',
+    fontSize: 13,
+  },
+  successText: {
+    margin: '4px 0 0',
+    fontSize: 12,
+    color: '#9ca3af',
+  },
+  btnPrimary: {
+    background: '#7f1d1d',
+    border: 'none',
+    borderRadius: 4,
+    color: '#fecaca',
+    cursor: 'pointer',
+    fontSize: 13,
+    fontWeight: 600,
+    minHeight: 44,
+    padding: '8px 18px',
+  },
+  btnDisabled: {
+    background: '#374151',
+    border: 'none',
+    borderRadius: 4,
+    color: '#6b7280',
+    cursor: 'not-allowed',
+    fontSize: 13,
+    fontWeight: 600,
+    minHeight: 44,
+    padding: '8px 18px',
+  },
+};
+
 // ── BackupSection (AC12) ──────────────────────────────────────────────────────
 
 /** Remote-Creds-Felder für backup-remote (write-only, analog Credential-Catalog). */
@@ -1121,6 +1456,9 @@ function BackupSection({ credentials, onSaved, fetchFn }) {
           ))}
         </div>
       )}
+
+      {/* Restore-Abschnitt (S-142 AC13–AC16) */}
+      <RestoreSection fetchFn={fetchFn} />
     </>
   );
 }
