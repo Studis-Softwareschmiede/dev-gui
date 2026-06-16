@@ -1,0 +1,29 @@
+id: S-130
+parent: F-010
+title: 'Bitwarden Master-Key-Create: bw-Session aus acquire wiederverwenden (kein
+  zweiter Login/OTP)'
+status: To Do
+priority: P1
+spec: docs/specs/bitwarden-master-key-unlock.md
+implements:
+- AC10
+- AC11
+- AC12
+depends:
+- S-128
+labels:
+- security
+github_issue: 276
+github_url: https://github.com/Studis-Softwareschmiede/dev-gui/issues/276
+size_est: null
+dispo_est: null
+dispo_act: null
+dispo_forecast: null
+estimate_note: null
+confidence: null
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-06-16T06:35:26Z'
+updated_at: '2026-06-16T06:35:26Z'
+done_at: null
