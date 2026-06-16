@@ -1,0 +1,26 @@
+id: S-134
+parent: F-011
+title: '"Let Claude proof"-Endpunkt POST /api/assist/refine (claude -p zustandslos, kein PTY-Lock, AccessGuard, auditiert, stdin)'
+status: To Do
+priority: P2
+spec: docs/specs/fabric-intake-dialog.md
+implements:
+- AC5
+- AC7
+- AC10
+depends: null
+labels:
+- backend
+- security
+size_est: null
+dispo_est: null
+dispo_act: null
+dispo_forecast: null
+estimate_note: null
+confidence: null
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-06-16T00:00:00Z'
+updated_at: '2026-06-16T00:00:00Z'
+done_at: null

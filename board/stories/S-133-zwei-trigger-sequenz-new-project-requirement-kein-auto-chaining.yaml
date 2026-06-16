@@ -1,0 +1,25 @@
+id: S-133
+parent: F-011
+title: Zwei-Trigger-Sequenz fuer new (new-project -> requirement, kein Auto-Chaining, Terminal-Handoff)
+status: To Do
+priority: P2
+spec: docs/specs/fabric-intake-dialog.md
+implements:
+- AC2
+- AC4
+depends:
+- S-132
+labels:
+- frontend
+size_est: null
+dispo_est: null
+dispo_act: null
+dispo_forecast: null
+estimate_note: null
+confidence: null
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-06-16T00:00:00Z'
+updated_at: '2026-06-16T00:00:00Z'
+done_at: null

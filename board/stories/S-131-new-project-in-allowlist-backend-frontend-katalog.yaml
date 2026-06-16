@@ -1,0 +1,24 @@
+id: S-131
+parent: F-011
+title: /agent-flow:new-project in Allowlist (Backend DEFAULT_ALLOWED_COMMANDS + Frontend-Katalog)
+status: To Do
+priority: P1
+spec: docs/specs/fabric-intake-dialog.md
+implements:
+- AC3
+depends: null
+labels:
+- backend
+- frontend
+size_est: null
+dispo_est: null
+dispo_act: null
+dispo_forecast: null
+estimate_note: null
+confidence: null
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-06-16T00:00:00Z'
+updated_at: '2026-06-16T00:00:00Z'
+done_at: null
