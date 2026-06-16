@@ -81,10 +81,11 @@ export async function defaultRunClaude({ text, kind, repoContext }) {
     });
 
     let stdout = '';
-    let stderr = '';
 
     child.stdout.on('data', (chunk) => { stdout += chunk; });
-    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    // stderr wird gedraint (verhindert Pipe-Blockade), aber NICHT gespeichert —
+    // kein Pfad-/Umgebungs-Leak in Fehlermeldungen (AC10, security/R01).
+    child.stderr.resume();
 
     const timeoutHandle = setTimeout(() => {
       child.kill('SIGTERM');

@@ -1,23 +1,32 @@
 /**
- * IntakeDialog.jsx — Fabric-Intake-Dialog (S-132, fabric-intake-dialog).
+ * IntakeDialog.jsx — Fabric-Intake-Dialog (S-132 + S-133, fabric-intake-dialog).
  *
  * AC1  — Dialog in zwei Modi: `new` (Projektidee/Vision, mehrzeilig, opt. Stack/Constraints)
  *         und `change` (Was soll sich ändern?, mehrzeilig, opt. Betroffener Bereich).
  *         Mehrzeilige Freitexterfassung via <textarea>.
- *         Beide Modi feuern `/agent-flow:requirement <text>` (S-133 ergänzt später das
- *         new-project-Pre-Trigger-Sequencing — Struktur dafür ist vorbereitet).
+ * AC2  — Modus-abhängige Trigger-Zahl (S-133):
+ *         `change`: ein Trigger `/agent-flow:requirement <text>`.
+ *         `new`: zwei sequentielle, je vom Nutzer bestätigte Trigger:
+ *           Schritt 1 (newStep='trigger1') — `/agent-flow:new-project` (ohne Idee-Argument).
+ *           Schritt 2 (newStep='trigger2') — `/agent-flow:requirement <text>` mit der
+ *             im Dialog vorab gehaltenen Idee.
+ *         Kein Auto-Chaining: Trigger 2 erst nach expliziter Nutzer-Bestätigung.
+ *         Die Schritt-Nummer wird via newStep/onNewStepChange nach außen geliftet
+ *         (RepoOverview hält den State damit er den Pane-Wechsel überlebt).
  * AC2b — Mehrzeiliger Text wird client-seitig zu einer einzigen Zeile kollabiert
  *         (alle Steuer-/Zeilenumbrüche → einzelne Spaces, getrimmt) bevor er an
  *         `/agent-flow:requirement` gehängt wird. Leerer Text → kein Request.
  * AC4  — Nach erfolgreichem Submit (202) wechselt die Ansicht in den Terminal-Pane
- *         (via onNavigate('factory')).
+ *         (via onNavigate('factory')). Gilt für beide Trigger (S-133).
  * AC9  — Cost-Mode-Schalter für `requirement` analog zu TriggerPanel (4-Wege
  *         low-cost|balanced|max-quality|frontier, Default balanced → kein --cost-Flag).
  *         Shared via costMode.js (keine Duplikation).
+ *         `new-project` (wie `adopt`) bietet keinen Cost-Mode (nicht cost-aware).
  *
  * Design constraints (docs/design.md):
  *   - Dark-first, 8-pt Spacing-Skala, UI-Sans für Panels.
- *   - Status nie nur über Farbe (WCAG 2.1 AA); Labels vorhanden.
+ *   - Status nie nur über Farbe (WCAG 2.1 AA); Labels vorhanden; Schritt-Status
+ *     über Text + visuelle Affordanz (nicht nur Farbe).
  *   - Touch-Targets ≥ 44 px; sichtbarer Fokusring (kein outline:none).
  *   - Fokusführung: primäre textarea erhält Fokus beim Öffnen des Dialogs.
  *
@@ -28,7 +37,7 @@
  *   - React escaped alle string-Renders per Default (security/R02).
  *   - Input wird client-seitig bereinigt (collapseToLine) — keine Steuerzeichen.
  *
- * Covers (fabric-intake-dialog): AC1, AC2b, AC4, AC9
+ * Covers (fabric-intake-dialog): AC1, AC2, AC2b, AC4, AC9
  *
  * @module IntakeDialog
  */
@@ -60,6 +69,9 @@ function fetchWithTimeout(fetchFn, url, opts = {}, ms = 5_000) {
 /** The command prefix for requirement (cost-aware). */
 const REQUIREMENT_CMD = '/agent-flow:requirement';
 
+/** The command for new-project bootstrap (NOT cost-aware; no Idee-Argument). */
+const NEW_PROJECT_CMD = '/agent-flow:new-project';
+
 // ── IntakeDialog component ────────────────────────────────────────────────────
 
 /**
@@ -70,20 +82,50 @@ const REQUIREMENT_CMD = '/agent-flow:requirement';
  *   onNavigate: (view: string) => void,
  *   fetchFn?: Function,
  *   projectPath?: string,
+ *   newStep?: 'trigger1' | 'trigger2',
+ *   onNewStepChange?: (step: 'trigger1' | 'trigger2') => void,
+ *   heldIdeaText?: string,
+ *   onIdeaTextChange?: (text: string) => void,
  * }} props
- *   mode        — 'new' (Projektidee) or 'change' (Änderungswunsch).
- *   onNavigate  — navigates to 'factory' after successful submit (AC4).
- *   fetchFn     — injectable for tests (default: global fetch).
- *   projectPath — when set, sent as projectPath in POST body for project-session routing.
+ *   mode              — 'new' (Projektidee) or 'change' (Änderungswunsch).
+ *   onNavigate        — navigates to 'factory' after successful submit (AC4).
+ *   fetchFn           — injectable for tests (default: global fetch).
+ *   projectPath       — when set, sent as projectPath in POST body for project-session routing.
+ *   newStep           — (new-mode only) current sequencing step: 'trigger1' (new-project)
+ *                       or 'trigger2' (requirement). Lifted to parent so it survives
+ *                       pane-switches (AC4 + AC2 state persistence across mount/unmount).
+ *   onNewStepChange   — called when the step advances to 'trigger2' after Trigger 1 202.
+ *   heldIdeaText      — (new-mode only) ideaText held in parent across remounts.
+ *   onIdeaTextChange  — called when ideaText changes in new-mode so parent can hold it.
  */
-export function IntakeDialog({ mode = 'change', onNavigate, fetchFn, projectPath }) {
+export function IntakeDialog({
+  mode = 'change',
+  onNavigate,
+  fetchFn,
+  projectPath,
+  newStep = 'trigger1',
+  onNewStepChange,
+  heldIdeaText,
+  onIdeaTextChange,
+}) {
+  const isNew = mode === 'new';
+
   // ── Field state ──────────────────────────────────────────────────────────
-  /** Primary idea/change textarea */
-  const [ideaText, setIdeaText]         = useState('');
+  /**
+   * Primary idea/change textarea.
+   * In new-mode, initial value comes from heldIdeaText (parent-held across remounts).
+   */
+  const [ideaText, setIdeaText]         = useState(heldIdeaText ?? '');
   /** Optional secondary field (stack/constraints for 'new'; area for 'change') */
   const [optionalText, setOptionalText] = useState('');
   /** Cost-mode for requirement (AC9) — default 'balanced' → no flag */
   const [costMode, setCostMode]         = useState('balanced');
+
+  // Sync ideaText changes back to parent in new-mode (for survival across remounts).
+  const handleIdeaTextChange = useCallback((val) => {
+    setIdeaText(val);
+    if (isNew && onIdeaTextChange) onIdeaTextChange(val);
+  }, [isNew, onIdeaTextChange]);
 
   // ── Submit state ─────────────────────────────────────────────────────────
   /** 'idle' | 'submitting' | 'error' */
@@ -103,9 +145,14 @@ export function IntakeDialog({ mode = 'change', onNavigate, fetchFn, projectPath
     primaryRef.current?.focus();
   }, []);
 
-  // ── Derived labels ───────────────────────────────────────────────────────
+  // ── Derived step info (AC2 — new mode two-trigger sequencing) ─────────────
 
-  const isNew = mode === 'new';
+  /**
+   * In new-mode, we are in Schritt 1 (bootstrap) or Schritt 2 (requirement).
+   * In change-mode, there is only one trigger so this is always effectively 'trigger2'
+   * semantics (requirement), but the variable is not used in change-mode branches.
+   */
+  const isStep1 = isNew && newStep === 'trigger1';
 
   const primaryLabel    = isNew
     ? 'Projektidee / Vision'
@@ -123,23 +170,40 @@ export function IntakeDialog({ mode = 'change', onNavigate, fetchFn, projectPath
     ? 'z. B. TypeScript, React, PostgreSQL …'
     : 'z. B. Auth-Modul, API-Schicht …';
 
+  /**
+   * Submit-button label is step-dependent in new-mode (AC2):
+   *   Schritt 1: "Bootstrap starten" → fires /agent-flow:new-project
+   *   Schritt 2: "Idee übergeben"   → fires /agent-flow:requirement <text>
+   *   change:    "Änderung erfassen" (unchanged)
+   */
   const submitLabel = isNew
-    ? 'Idee erfassen'
+    ? (isStep1 ? 'Bootstrap starten' : 'Idee übergeben')
     : 'Änderung erfassen';
 
   // ── Submit handler ───────────────────────────────────────────────────────
 
   /**
-   * Compose the requirement command line:
-   * 1. Collapse ideaText + optionalText to single lines (AC2b).
-   * 2. Concatenate into one space-separated argument string.
-   * 3. Prepend cost flag when not 'balanced' (AC9).
+   * Compose the command line for the current step (AC2, AC2b):
    *
-   * Returns null when the result is empty (guard for AC2b: leerer Text → kein Request).
+   * new-mode, Schritt 1 (trigger1):
+   *   → `/agent-flow:new-project`  (NO argument; Stack-Rückfragen im Terminal)
+   *   → Always non-null (no text required).
+   *
+   * new-mode, Schritt 2 (trigger2) / change-mode:
+   *   1. Collapse ideaText + optionalText to single lines (AC2b).
+   *   2. Concatenate into one space-separated argument string.
+   *   3. Prepend cost flag when not 'balanced' (AC9).
+   *   → Returns null when the collapsed text is empty (leerer Text → kein Request).
    *
    * @returns {string|null}
    */
   const composeCommand = useCallback(() => {
+    // Schritt 1 in new-mode: just bootstrap, no argument.
+    if (isStep1) {
+      return NEW_PROJECT_CMD;
+    }
+
+    // Schritt 2 (new-mode) or change-mode: requirement with collapsed text.
     const collapsed     = collapseToLine(ideaText);
     const collapsedOpt  = collapseToLine(optionalText);
 
@@ -152,11 +216,11 @@ export function IntakeDialog({ mode = 'change', onNavigate, fetchFn, projectPath
 
     const cost = costFlag(REQUIREMENT_CMD, costMode);
     return `${REQUIREMENT_CMD}${cost} ${argument}`;
-  }, [ideaText, optionalText, costMode]);
+  }, [isStep1, ideaText, optionalText, costMode]);
 
   const handleSubmit = useCallback(async () => {
     const command = composeCommand();
-    if (!command) return; // AC2b: guard — empty text
+    if (!command) return; // AC2b: guard — empty text (only applies in step2/change)
 
     setSubmitState('submitting');
     setErrorMsg(null);
@@ -181,8 +245,14 @@ export function IntakeDialog({ mode = 'change', onNavigate, fetchFn, projectPath
     }
 
     if (res.status === 202) {
-      // AC4: nach erfolgreichem Submit → Terminal-Pane
       setSubmitState('idle');
+      // AC4: nach erfolgreichem Submit → Terminal-Pane (für jeden Trigger)
+      // AC2: In new-mode Schritt 1: Schritt auf trigger2 voranschreiten + navigieren.
+      //      Der User kehrt zum Dialog zurück wenn er Schritt 2 auslösen will.
+      //      In new-mode Schritt 2 / change-mode: direkt navigieren.
+      if (isStep1 && onNewStepChange) {
+        onNewStepChange('trigger2');
+      }
       onNavigate('factory');
       return;
     }
@@ -206,7 +276,7 @@ export function IntakeDialog({ mode = 'change', onNavigate, fetchFn, projectPath
 
     setSubmitState('error');
     setErrorMsg('Serverfehler. Bitte erneut versuchen.');
-  }, [composeCommand, onNavigate, projectPath]);
+  }, [composeCommand, isStep1, onNewStepChange, onNavigate, projectPath]);
 
   // ── Derived: can submit? ─────────────────────────────────────────────────
 
@@ -237,24 +307,44 @@ export function IntakeDialog({ mode = 'change', onNavigate, fetchFn, projectPath
       </header>
 
       <div style={styles.body}>
-        {/* I2: new-mode aria-live hint — bootstrap prerequisite (removed once S-133 lands) */}
+        {/* AC2 (S-133): new-mode two-step sequence indicator.
+            Schritt-Status: text + visual affordanz (WCAG — nie nur über Farbe).
+            Replaces the S-132 aria-live bootstrap hint placeholder. */}
         {isNew && (
           <div
-            role="note"
+            role="status"
             aria-live="polite"
-            id="intake-new-bootstrap-hint"
-            style={styles.bootstrapHint}
-            data-testid="intake-new-bootstrap-hint"
+            id="intake-new-sequence-status"
+            style={isStep1 ? styles.sequenceStep1 : styles.sequenceStep2}
+            data-testid="intake-new-sequence-status"
           >
-            Noch kein new-project-Bootstrap ausgelöst. Bitte zuerst im Trigger-Panel{' '}
-            <code style={styles.inlineCode}>/agent-flow:new-project</code> starten, dann
-            hier die Idee erfassen.
+            {isStep1 ? (
+              <>
+                <strong>Schritt 1 von 2 — Bootstrap:</strong>{' '}
+                <code style={styles.inlineCode}>/agent-flow:new-project</code> starten.
+                Erfasse zuerst deine Idee unten, dann klicke „Bootstrap starten".
+                Der Agent stellt Stack-Rückfragen direkt im Terminal.
+              </>
+            ) : (
+              <>
+                <strong>Schritt 2 von 2 — Idee übergeben:</strong>{' '}
+                Bootstrap abgeschlossen. Klicke „Idee übergeben" um{' '}
+                <code style={styles.inlineCode}>/agent-flow:requirement</code> mit deiner Idee zu starten.
+              </>
+            )}
           </div>
         )}
 
-        {/* Primary textarea — receives focus on mount (A11y) */}
+        {/* Primary textarea — receives focus on mount (A11y).
+            In new-mode step 1: erfasse Idee vorab, wird nach Bootstrap in Schritt 2 gesendet.
+            In new-mode step 2 / change-mode: text required for submit. */}
         <label style={styles.label} htmlFor="intake-idea">
-          {primaryLabel} <span style={styles.required}>(Pflicht)</span>
+          {primaryLabel}{' '}
+          {/* In new-mode step 1, text is not required for trigger 1 but is for trigger 2 */}
+          {isStep1
+            ? <span style={styles.optional}>(für Schritt 2 vorab erfassen)</span>
+            : <span style={styles.required}>(Pflicht)</span>
+          }
         </label>
         <textarea
           id="intake-idea"
@@ -265,58 +355,72 @@ export function IntakeDialog({ mode = 'change', onNavigate, fetchFn, projectPath
           rows={6}
           disabled={isSubmitting}
           aria-disabled={isSubmitting}
-          aria-required="true"
+          aria-required={isStep1 ? 'false' : 'true'}
           aria-describedby="intake-idea-hint"
-          onChange={(e) => setIdeaText(e.target.value)}
+          onChange={(e) => handleIdeaTextChange(e.target.value)}
         />
         <div id="intake-idea-hint" style={styles.hint}>
-          Mehrere Zeilen möglich — wird beim Senden zu einer Zeile zusammengefasst.
+          {isStep1
+            ? 'Idee hier erfassen — wird nach dem Bootstrap-Schritt als Argument an requirement übergeben.'
+            : 'Mehrere Zeilen möglich — wird beim Senden zu einer Zeile zusammengefasst.'
+          }
         </div>
 
-        {/* Optional secondary field — I3: aria-describedby analogous to primary */}
-        <label style={styles.label} htmlFor="intake-optional">
-          {optionalLabel} <span style={styles.optional}>(optional)</span>
-        </label>
-        <textarea
-          id="intake-optional"
-          style={styles.textarea}
-          placeholder={optionalPlaceholder}
-          value={optionalText}
-          rows={2}
-          disabled={isSubmitting}
-          aria-disabled={isSubmitting}
-          aria-describedby="intake-optional-hint"
-          onChange={(e) => setOptionalText(e.target.value)}
-        />
-        {/* I3: hint div with id for aria-describedby */}
-        <div id="intake-optional-hint" style={styles.hint}>
-          Ergänzende Angaben — optional, wird mit dem Haupttext zusammengefasst.
-        </div>
+        {/* Optional secondary field — I3: aria-describedby analogous to primary.
+            Hidden in new-mode step 1 (only the idea matters for step 2; optional
+            fields are for step 2 / change-mode). */}
+        {!isStep1 && (
+          <>
+            <label style={styles.label} htmlFor="intake-optional">
+              {optionalLabel} <span style={styles.optional}>(optional)</span>
+            </label>
+            <textarea
+              id="intake-optional"
+              style={styles.textarea}
+              placeholder={optionalPlaceholder}
+              value={optionalText}
+              rows={2}
+              disabled={isSubmitting}
+              aria-disabled={isSubmitting}
+              aria-describedby="intake-optional-hint"
+              onChange={(e) => setOptionalText(e.target.value)}
+            />
+            {/* I3: hint div with id for aria-describedby */}
+            <div id="intake-optional-hint" style={styles.hint}>
+              Ergänzende Angaben — optional, wird mit dem Haupttext zusammengefasst.
+            </div>
+          </>
+        )}
 
-        {/* Cost-Mode switch (AC9) — requirement is cost-aware */}
-        <label style={styles.label} htmlFor="intake-cost">
-          Cost-Mode <span style={styles.optional}>(Token-Hebel)</span>
-        </label>
-        <select
-          id="intake-cost"
-          style={styles.select}
-          value={costMode}
-          disabled={isSubmitting}
-          aria-disabled={isSubmitting}
-          aria-describedby="intake-cost-info"
-          onChange={(e) => setCostMode(e.target.value)}
-        >
-          {COST_MODES.map((m) => (
-            <option key={m} value={m}>{m}</option>
-          ))}
-        </select>
-        {/* S2: id="intake-cost-info" so select's aria-describedby links here */}
-        <div id="intake-cost-info" style={styles.costInfo} aria-live="polite" data-testid="intake-cost-info">
-          <span>{COST_MODE_INFO[costMode].models} · {COST_MODE_INFO[costMode].price} /MTok</span>
-          <span style={styles.costDisclaimer}>
-            Abo-Betrieb — keine Direktkosten pro Token; Werte nur relative Tier-Schwere.
-          </span>
-        </div>
+        {/* Cost-Mode switch (AC9) — requirement is cost-aware.
+            new-project (like adopt) is NOT cost-aware → only show in step 2 / change-mode. */}
+        {!isStep1 && (
+          <>
+            <label style={styles.label} htmlFor="intake-cost">
+              Cost-Mode <span style={styles.optional}>(Token-Hebel)</span>
+            </label>
+            <select
+              id="intake-cost"
+              style={styles.select}
+              value={costMode}
+              disabled={isSubmitting}
+              aria-disabled={isSubmitting}
+              aria-describedby="intake-cost-info"
+              onChange={(e) => setCostMode(e.target.value)}
+            >
+              {COST_MODES.map((m) => (
+                <option key={m} value={m}>{m}</option>
+              ))}
+            </select>
+            {/* S2: id="intake-cost-info" so select's aria-describedby links here */}
+            <div id="intake-cost-info" style={styles.costInfo} aria-live="polite" data-testid="intake-cost-info">
+              <span>{COST_MODE_INFO[costMode].models} · {COST_MODE_INFO[costMode].price} /MTok</span>
+              <span style={styles.costDisclaimer}>
+                Abo-Betrieb — keine Direktkosten pro Token; Werte nur relative Tier-Schwere.
+              </span>
+            </div>
+          </>
+        )}
 
         {/* Command preview (informational — shows what will be sent) */}
         {/* S1: use derived `command` constant instead of calling composeCommand() */}
@@ -345,7 +449,9 @@ export function IntakeDialog({ mode = 'change', onNavigate, fetchFn, projectPath
           </div>
         )}
 
-        {/* Submit button */}
+        {/* Submit button — label is step-dependent in new-mode (AC2).
+            In step 1: always enabled (no text required for new-project).
+            In step 2 / change-mode: disabled when ideaText collapses to empty (AC2b). */}
         <div style={styles.buttonRow}>
           <button
             type="button"
@@ -457,6 +563,33 @@ const styles = {
     color: '#6b7280',
     fontStyle: 'italic',
   },
+  /**
+   * AC2 (S-133): two-step sequence status boxes.
+   * Step 1 (bootstrap): amber — prominent, action required.
+   * Step 2 (requirement): teal — confirms bootstrap done, proceed to idea.
+   * Both use text + background pattern (not color alone; WCAG — never status by color only).
+   */
+  sequenceStep1: {
+    padding: '8px 10px',
+    background: '#1a1400',
+    border: '1px solid #3a2f00',
+    borderRadius: 4,
+    color: '#fbbf24',
+    fontSize: 12,
+    lineHeight: 1.5,
+    marginBottom: 4,
+  },
+  sequenceStep2: {
+    padding: '8px 10px',
+    background: '#0d1f1a',
+    border: '1px solid #0f3d2e',
+    borderRadius: 4,
+    color: '#6ee7b7',
+    fontSize: 12,
+    lineHeight: 1.5,
+    marginBottom: 4,
+  },
+  /** @deprecated S-132 placeholder — replaced by sequenceStep1/sequenceStep2 (S-133) */
   bootstrapHint: {
     padding: '8px 10px',
     background: '#1a1400',
