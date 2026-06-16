@@ -142,10 +142,12 @@ services:
       # Option B — node-readable file (used only if DEVGUI_CRED_MASTER_KEY unset):
       #   DEVGUI_CRED_MASTER_KEY_FILE: /run/secrets/devgui_cred_master_key
       #   Add to volumes: - ${DEVGUI_CRED_KEY_FILE}:/run/secrets/devgui_cred_master_key:ro
-      # Option C — alternativer .env-Schreibpfad für DEVGUI_CRED_MASTER_KEY-Persistenz
-      # (Runtime-Unlock schreibt DEVGUI_CRED_MASTER_KEY standardmäßig in die Projekt-.env).
-      # Nur setzen, wenn der Container-Pfad von /app/.env abweichen soll:
-      #   CRED_ENV_PATH: /custom/path/.env
+      # Option C — Persistenz-Pfad für Runtime-Unlock (AC10 credential-runtime-unlock):
+      # /app ist im Container read-only; der Prozess läuft als uid 1000 (node).
+      # CRED_ENV_PATH muss auf einen uid-1000-beschreibbaren Pfad im Named Volume zeigen,
+      # damit unlock(key, {persist:true}) gelingt und der Store nach Container-Recreate
+      # autonom entsperrt startet (kein erneuter Dialog nötig).
+      CRED_ENV_PATH: /home/node/.claude/devgui-cred.env
       #
       # DEPRECATED — altes CRED_MASTER_KEY (übergangsweise Fallback, Warn-Log):
       # Bitte auf DEVGUI_CRED_MASTER_KEY umstellen. Wird in einem späteren Cleanup-Item entfernt.
