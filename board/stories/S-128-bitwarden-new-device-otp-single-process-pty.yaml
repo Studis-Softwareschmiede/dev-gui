@@ -1,0 +1,27 @@
+id: S-128
+parent: F-010
+title: 'Bitwarden New-Device-OTP: single-process PTY (Code-Invalidierung beheben)'
+status: To Do
+priority: P2
+spec: docs/specs/bitwarden-new-device-otp.md
+implements:
+- AC10
+- AC11
+depends:
+- S-127
+labels:
+- security
+github_issue: 267
+github_url: https://github.com/Studis-Softwareschmiede/dev-gui/issues/267
+size_est: null
+dispo_est: null
+dispo_act: null
+dispo_forecast: null
+estimate_note: null
+confidence: null
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-06-16T04:18:26Z'
+updated_at: '2026-06-16T04:18:26Z'
+done_at: null
