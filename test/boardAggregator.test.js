@@ -24,10 +24,12 @@
  *          GET /api/board/projects bleibt erhalten.
  *
  * Covers (story-detail-ansicht):
- *   AC2 — GET /api/board/projects/:slug/stories/:id/detail liefert Story-Detail-Objekt
- *          (read-only, lazy, hinter accessGuard);
+ *   AC2, AC5 — YAML-Fallback ep_est_source; ledger-Prio; null-Fälle.
+ *   AC2 — GET /api/board/projects/:slug/stories/:id/detail liefert Story-Detail-Objekt;
  *          ungültiges slug-Format → 404; ungültiges id-Format → 404;
  *          unbekannter Slug → 404; happy-path 200 + { detail: {...} }.
+ *   AC5 — ep_est_source: 'ledger' wenn Ledger-Wert vorhanden; 'yaml' bei YAML-Fallback
+ *          (dispo_est); null wenn weder Ledger noch dispo_est.
  *
  * AccessGuard:
  *   POST /api/board/projects/rescan (Schreib-Trigger) liegt hinter
@@ -1324,6 +1326,88 @@ describe('boardRouter HTTP — GET /api/board/projects/:slug/stories/:id/detail 
       expect(detail.size_est).toBe('M');
       expect(detail.ep_dev).toBe(1);
       expect(detail.tok_dev).toBe(2000);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('ledger ep_est present → ep_est_source is "ledger"', async () => {
+    const { aggregator } = makeAggregator();
+    const mockDetail = { ep_est: 3, ep_act: 4 };
+    const server = await startServer(aggregator, makeMockStoryMetricReader(mockDetail));
+    try {
+      const { status, data } = await httpFetch(server, '/api/board/projects/my-repo/stories/S-001/detail');
+      expect(status).toBe(200);
+      expect(data.detail.ep_est).toBe(3);
+      expect(data.detail.ep_est_source).toBe('ledger');
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('ledger ep_est null but story has dispo_est → YAML fallback with ep_est_source "yaml"', async () => {
+    // S-001 in the fixture has dispo_est: null — we need a story with dispo_est set.
+    // Override S-001 to have dispo_est: 2
+    const storyWithDispoEst = `id: S-001
+parent: F-001
+title: IONOS-Adapter
+status: To Do
+priority: P0
+spec: docs/specs/provisioning.md
+implements: [AC1]
+labels: []
+size_est: S
+dispo_est: 2
+dispo_act: null
+created_at: 2026-06-14T00:00:00Z
+updated_at: 2026-06-14T00:00:00Z
+done_at: null
+`;
+    const { aggregator } = makeAggregator({
+      fileOverrides: {
+        [`${BOARD_ROOT}/my-repo/board/stories/S-001-ionos-adapter.yaml`]: storyWithDispoEst,
+      },
+    });
+    // Ledger returns no ep_est
+    const server = await startServer(aggregator, makeMockStoryMetricReader({ ep_est: null }));
+    try {
+      const { status, data } = await httpFetch(server, '/api/board/projects/my-repo/stories/S-001/detail');
+      expect(status).toBe(200);
+      // YAML fallback applied
+      expect(data.detail.ep_est).toBe(2);
+      expect(data.detail.ep_est_source).toBe('yaml');
+      // Ist/Abweichung must remain null (kein Flow-Lauf)
+      expect(data.detail.ep_act).toBeNull();
+      expect(data.detail.ep_dev).toBeNull();
+      expect(data.detail.ep_dev_pct).toBeNull();
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('ledger ep_est null and story dispo_est null → ep_est_source null, ep_est null', async () => {
+    // S-001 fixture has dispo_est: null
+    const { aggregator } = makeAggregator();
+    const server = await startServer(aggregator, makeMockStoryMetricReader({ ep_est: null }));
+    try {
+      const { status, data } = await httpFetch(server, '/api/board/projects/my-repo/stories/S-001/detail');
+      expect(status).toBe(200);
+      expect(data.detail.ep_est).toBeNull();
+      expect(data.detail.ep_est_source).toBeNull();
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('ledger ep_est null and story not in index → ep_est_source null, ep_est null', async () => {
+    const { aggregator } = makeAggregator();
+    const server = await startServer(aggregator, makeMockStoryMetricReader({ ep_est: null }));
+    try {
+      // S-UNKNOWN does not exist in the fixture board
+      const { status, data } = await httpFetch(server, '/api/board/projects/my-repo/stories/S-UNKNOWN/detail');
+      expect(status).toBe(200);
+      expect(data.detail.ep_est).toBeNull();
+      expect(data.detail.ep_est_source).toBeNull();
     } finally {
       await new Promise((r) => server.close(r));
     }

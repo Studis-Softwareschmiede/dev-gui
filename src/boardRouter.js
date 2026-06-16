@@ -1,6 +1,6 @@
 /**
  * boardRouter — board API routes (read-only, AC1-3, AC5, AC7-9 studis-kanban-board-ux;
- *               AC1-AC2 story-detail-ansicht)
+ *               AC1-AC2, AC5 story-detail-ansicht)
  *
  * Exposes the in-memory Board-Aggregat as read-only JSON.
  *
@@ -11,6 +11,12 @@
  *   GET /api/board/projects/:slug                    → { project: {...} }  (ein Projekt voll, on-demand — AC5)
  *   POST /api/board/projects/rescan                  → { ok: true }  (on-demand re-scan, AC9)
  *   GET /api/board/projects/:slug/stories/:id/detail → { detail: StoryDetail }  (read-only, lazy — AC2)
+ *
+ * AC5 (story-detail-ansicht — Vorab-Schätzungs-Fallback):
+ *   Wenn items.jsonl für die Story kein ep_est/tok_est liefert, fällt die Soll-Ist-Ansicht
+ *   für die Schätzung auf dispo_est (und tok_est_yaml falls im Story-YAML vorhanden) zurück.
+ *   Die Herkunft wird als ep_est_source: 'yaml'|'ledger'|null im Detail-Objekt übermittelt.
+ *   Ist/Abweichungs-Felder bleiben null, bis ein Flow-Lauf echte Werte schreibt.
  *
  * Security:
  *   - Read-only: no writes to board/ files (AC7).
@@ -193,7 +199,46 @@ export function boardRouter({ boardAggregator, storyMetricReader }) {
     // Read metrics (lazy, read-only); missing files → null fields, no crash (AC1)
     const detail = await storyMetricReader.getDetail(repoPath, id);
 
-    return res.json({ detail });
+    // AC5 (story-detail-ansicht) — Vorab-Schätzungs-Fallback:
+    // Wenn der Ledger kein ep_est/tok_est liefert, fällt die Ansicht auf dispo_est
+    // (und ein Token-Schätzfeld, falls im Story-YAML vorhanden) aus der Story-YAML zurück.
+    // Ist-/Abweichungs-Felder bleiben null bis zum Flow-Lauf.
+    // Herkunft: ep_est_source 'ledger'|'yaml'|null (null = keine Schätzung vorhanden).
+    let ep_est_source = null;
+    let ep_est = detail.ep_est;
+    let tok_est = detail.tok_est;
+
+    if (ep_est != null) {
+      // Ledger hat einen Wert — Ledger hat Vorrang
+      ep_est_source = 'ledger';
+    } else {
+      // Ledger hat kein ep_est — YAML-Fallback: dispo_est aus Story-Index
+      const storyEntry = (project.features ?? [])
+        .flatMap((f) => f.stories ?? [])
+        .find((s) => String(s.id ?? '') === String(id));
+
+      const yamlEpEst = storyEntry?.dispo_est ?? null;
+      if (yamlEpEst != null) {
+        ep_est = yamlEpEst;
+        ep_est_source = 'yaml';
+        // Ist-/Abweichungs-Felder bleiben null (kein ep_act aus dem Ledger vorhanden)
+      }
+      // tok_est: YAML-Fallback nur wenn dort ein Token-Schätzfeld existiert.
+      // Story-YAML hat aktuell kein eigenständiges Token-Schätzfeld (nur dispo_est in EP);
+      // tok_est bleibt null (entspricht Spec: "falls in der YAML vorhanden").
+      if (tok_est == null && storyEntry?.tok_est_yaml != null) {
+        tok_est = storyEntry.tok_est_yaml;
+      }
+    }
+
+    const enrichedDetail = {
+      ...detail,
+      ep_est,
+      tok_est,
+      ep_est_source,
+    };
+
+    return res.json({ detail: enrichedDetail });
   });
 
   return router;

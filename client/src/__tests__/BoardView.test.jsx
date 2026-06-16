@@ -29,6 +29,12 @@
  *   AC6 — Standalone: öffnet mit Projektliste; Klick lädt Projekt (lazy, aria-busy);
  *          Rückweg zur Liste; Cockpit-Modus (lockedProject): direkt ohne Liste.
  *
+ * Covers (story-detail-ansicht):
+ *   AC3, AC4, AC5 — Story-Klick, Soll-Ist, Vorab-Badge; fehlende Schätzung; null-Fälle.
+ *   AC3 — Story-Klick öffnet Detail-Ansicht; drei Blöcke sichtbar.
+ *   AC4 — Soll-Ist zeigt ep_est/ep_act/tok_est/tok_total; null → „keine Schätzung".
+ *   AC5 — Vorab-Badge (ep-est-vorab-badge) bei ep_est_source='yaml'; kein Badge bei 'ledger'.
+ *
  * Covers (projekt-spezifikation-anzeige):
  *   AC5 — Story-Spec-Bezug ist klickbar (onOpenSpec-Prop) und ruft onOpenSpec(relPath) auf.
  *
@@ -2163,5 +2169,127 @@ describe('story-detail-ansicht — AC4: fehlende Schätzung sauber dargestellt',
 
     const epDev = container.querySelector('[data-testid="ep-dev"]');
     expect(epDev.textContent).toBe('—');
+  });
+});
+
+// ── story-detail-ansicht — AC5: Vorab-Schätzungs-Fallback ────────────────────
+
+/**
+ * Fixture: detail data from YAML-Fallback (ep_est from dispo_est, no Ledger-Wert).
+ * ep_est_source = 'yaml' → Vorab-Badge; Ist/Abweichung bleiben null/leer.
+ */
+const STORY_DETAIL_YAML_FALLBACK = {
+  started_at:  null,
+  ended_at:    null,
+  duration:    null,
+  flow:        [],
+  ep_est:      2,          // aus dispo_est der Story-YAML
+  ep_act:      null,       // kein Ledger-Wert
+  tok_est:     null,
+  tok_total:   null,
+  size_est:    'S',
+  ep_dev:      null,       // kein Ledger-Wert → keine Abweichung
+  ep_dev_pct:  null,
+  tok_dev:     null,
+  tok_dev_pct: null,
+  ep_est_source: 'yaml',   // Herkunfts-Flag
+};
+
+/**
+ * Fixture: detail data with Ledger-Wert (ep_est_source = 'ledger').
+ */
+const STORY_DETAIL_LEDGER = {
+  ...STORY_DETAIL_FULL,
+  ep_est_source: 'ledger',
+};
+
+describe('story-detail-ansicht — AC5: Vorab-Schätzungs-Fallback', () => {
+  /** Click the story card and wait for the detail block to appear. */
+  async function openDetailAC5(container) {
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="story-card-btn-S-001"]')).toBeTruthy();
+    });
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="story-card-btn-S-001"]'));
+    });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="detail-blocks"]')).toBeTruthy();
+    });
+  }
+
+  it('YAML-Fallback: ep-est cell zeigt dispo_est-Wert', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({
+      fullProjects: [PROJECT_A],
+      detailData: STORY_DETAIL_YAML_FALLBACK,
+    });
+    const { container } = renderCockpit('project-alpha');
+    await openDetailAC5(container);
+
+    const epEst = container.querySelector('[data-testid="ep-est"]');
+    expect(epEst.textContent).toContain('2');
+  });
+
+  it('YAML-Fallback: ep-est cell zeigt „Vorab"-Badge (Herkunfts-Kennzeichnung)', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({
+      fullProjects: [PROJECT_A],
+      detailData: STORY_DETAIL_YAML_FALLBACK,
+    });
+    const { container } = renderCockpit('project-alpha');
+    await openDetailAC5(container);
+
+    const vorabBadge = container.querySelector('[data-testid="ep-est-vorab-badge"]');
+    expect(vorabBadge).toBeTruthy();
+    expect(vorabBadge.textContent).toMatch(/vorab/i);
+  });
+
+  it('YAML-Fallback: ep-act (Ist) bleibt leer „—"', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({
+      fullProjects: [PROJECT_A],
+      detailData: STORY_DETAIL_YAML_FALLBACK,
+    });
+    const { container } = renderCockpit('project-alpha');
+    await openDetailAC5(container);
+
+    const epAct = container.querySelector('[data-testid="ep-act"]');
+    expect(epAct.textContent).toBe('—');
+  });
+
+  it('YAML-Fallback: ep-dev (Abweichung) bleibt leer „—"', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({
+      fullProjects: [PROJECT_A],
+      detailData: STORY_DETAIL_YAML_FALLBACK,
+    });
+    const { container } = renderCockpit('project-alpha');
+    await openDetailAC5(container);
+
+    const epDev = container.querySelector('[data-testid="ep-dev"]');
+    expect(epDev.textContent).toBe('—');
+  });
+
+  it('Ledger-Wert: kein Vorab-Badge wenn ep_est_source = "ledger"', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({
+      fullProjects: [PROJECT_A],
+      detailData: STORY_DETAIL_LEDGER,
+    });
+    const { container } = renderCockpit('project-alpha');
+    await openDetailAC5(container);
+
+    expect(container.querySelector('[data-testid="ep-est-vorab-badge"]')).toBeNull();
+
+    const epEst = container.querySelector('[data-testid="ep-est"]');
+    expect(epEst.textContent).toContain('3');
+  });
+
+  it('weder Ledger noch YAML → „keine Schätzung" (kein Vorab-Badge)', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({
+      fullProjects: [PROJECT_A],
+      detailData: { ...STORY_DETAIL_MISSING, ep_est_source: null },
+    });
+    const { container } = renderCockpit('project-alpha');
+    await openDetailAC5(container);
+
+    const epEst = container.querySelector('[data-testid="ep-est"]');
+    expect(epEst.textContent).toMatch(/keine Schätzung/i);
+    expect(container.querySelector('[data-testid="ep-est-vorab-badge"]')).toBeNull();
   });
 });
