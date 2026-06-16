@@ -7,6 +7,9 @@
  *   AC2  — disallowed/empty/newline-injection command → 400 + nothing written to PTY
  *          + no audit entry; un-namespaced commands (/preview, /flow) → 400
  *   AC3  — second concurrent command while one running → 409
+ *   AC3  (fabric-intake-dialog) — /agent-flow:new-project in DEFAULT_ALLOWED_COMMANDS,
+ *          bare command accepted → 202, PTY-write ohne Argument;
+ *          backwards-compat aller pre-existing Prefixe (isAllowed unit-level)
  *   AC5  — cancel → interrupt sent + status cancelled + lock released → next cmd accepted
  *   AC6  — audit record() throws → command not run + lock released (failure path)
  *
@@ -199,6 +202,11 @@ describe('isAllowed()', () => {
     }
   });
 
+  it('AC3 (fabric-intake-dialog) — /agent-flow:new-project is in DEFAULT_ALLOWED_COMMANDS', () => {
+    expect(DEFAULT_ALLOWED_COMMANDS).toContain('/agent-flow:new-project');
+    expect(isAllowed('/agent-flow:new-project', DEFAULT_ALLOWED_COMMANDS)).toBe(true);
+  });
+
   it('returns false for un-namespaced commands that were previously allowed', () => {
     expect(isAllowed('/flow', DEFAULT_ALLOWED_COMMANDS)).toBe(false);
     expect(isAllowed('/preview', DEFAULT_ALLOWED_COMMANDS)).toBe(false);
@@ -271,6 +279,14 @@ describe('CommandService.tryRun() — unit (no HTTP)', () => {
     expect(res.ok).toBe(true);
     expect(typeof res.commandId).toBe('string');
     expect(res.status).toBe('running');
+  });
+
+  it('AC3 (fabric-intake-dialog) — /agent-flow:new-project accepted: returns ok:true, written to PTY without argument', () => {
+    const res = svc.tryRun({ command: '/agent-flow:new-project', identity: { email: 'alice@test.com' } });
+    expect(res.ok).toBe(true);
+    expect(res.status).toBe('running');
+    expect(pty.written).toHaveLength(1);
+    expect(pty.written[0]).toBe('/agent-flow:new-project\n');
   });
 
   it('AC1 — accepted command with sub-command: writes full line to PTY', () => {
@@ -595,6 +611,28 @@ describe('POST /api/command — HTTP integration', () => {
     expect(res.status).toBe(400);
     expect(ptyStub.written).toHaveLength(0);
     expect(auditStore.getAll()).toHaveLength(0);
+  });
+
+  it('AC3 (fabric-intake-dialog) — /agent-flow:new-project → 202 and bare command written to PTY', async () => {
+    const res = await post(port, '/api/command', { command: '/agent-flow:new-project' });
+    expect(res.status).toBe(202);
+    expect(ptyStub.written[0]).toBe('/agent-flow:new-project\n');
+  });
+
+  it('AC3 (fabric-intake-dialog) — backwards-compat: all pre-existing prefixes still accepted (202)', async () => {
+    const legacyPrefixes = [
+      '/agent-flow:flow',
+      '/agent-flow:adopt octocat/Hello-World',
+      '/agent-flow:preview list',
+      '/agent-flow:requirement some text',
+      '/agent-flow:train security',
+    ];
+    // Each command needs a fresh server (lock is held after 202); use unit-level
+    // isAllowed() to verify allowlist membership without consuming the lock.
+    for (const cmd of legacyPrefixes) {
+      const firstToken = cmd.split(/\s+/)[0];
+      expect(isAllowed(firstToken, DEFAULT_ALLOWED_COMMANDS)).toBe(true);
+    }
   });
 
   it('AC8 — valid --cost flag → 202 and full line written to PTY', async () => {

@@ -7,6 +7,17 @@
  *          Loading-, Error- und Empty-State vorhanden.
  *   AC2 — Klick auf einen Repo-Eintrag setzt den Projekt-Kontext via navigateFactory(name).
  *
+ * fabric-intake-dialog:
+ *   AC1 — „Neues Projekt / Idee erfassen"-Button öffnet IntakeDialog (mode="new").
+ *          onNavigate('factory') nach erfolgreichem Submit (AC4).
+ *   AC2 — new-mode zwei-Trigger-Sequenz: newStep und heldIdeaText werden im Parent
+ *          gehalten (nicht nur lokal im Dialog), damit sie den Pane-Wechsel nach
+ *          Terminal (onNavigate('factory')) überleben. IntakeDialog nimmt diese Props
+ *          entgegen und ruft onNewStepChange/onIdeaTextChange bei Änderungen.
+ *          Nach Abschluss von Trigger 2 (und bei explizitem Schließen) wird der
+ *          Sequenz-State zurückgesetzt (resetNewSequence), damit ein erneutes Öffnen
+ *          sauber in Schritt 1 startet (kein Bootstrap-Skip bei Wiedereröffnung).
+ *
  * A11y (WCAG 2.1 AA):
  *   - <main> mit aria-label.
  *   - aria-busy / aria-live für Ladezustand.
@@ -21,18 +32,103 @@
  *
  * @param {{
  *   navigateFactory: (repo: string | null) => void,
+ *   onNavigate?: (view: string) => void,
  * }} props
  */
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { IntakeDialog } from './IntakeDialog.jsx';
 
 /**
- * @param {{ navigateFactory: (repo: string | null) => void }} props
+ * @param {{
+ *   navigateFactory: (repo: string | null) => void,
+ *   onNavigate?: (view: string) => void,
+ * }} props
  */
-export function RepoOverview({ navigateFactory }) {
+export function RepoOverview({ navigateFactory, onNavigate }) {
   const [loadState, setLoadState] = useState('idle'); // 'idle'|'loading'|'ok'|'error'
   const [loadError, setLoadError] = useState('');
   const [repos, setRepos] = useState([]);
+
+  // ── Intake-Dialog state (AC1, AC2 — fabric-intake-dialog, new mode) ────────
+  const [intakeNewOpen, setIntakeNewOpen] = useState(false);
+
+  /**
+   * AC2 (S-133): two-trigger sequence step for new-mode.
+   * Held in parent (not in IntakeDialog) so it survives unmounting when the
+   * user navigates to the Terminal pane after Trigger 1 (onNavigate → remount).
+   * @type {'trigger1' | 'trigger2'}
+   */
+  const [newStep, setNewStep] = useState('trigger1');
+
+  /**
+   * AC2 (S-133): ideaText held in parent across remounts.
+   * The user enters their idea in step 1 and it must still be available for
+   * step 2 after the Bootstrap pane-switch (dialog unmounts on navigate).
+   * @type {string}
+   */
+  const [heldIdeaText, setHeldIdeaText] = useState('');
+
+  const handleIntakeNewOpen = useCallback(() => {
+    setIntakeNewOpen(true);
+  }, []);
+
+  /**
+   * Reset the new-mode sequence state to its initial values.
+   * Called after Trigger 2 completes (dialog closes) and on explicit close,
+   * so a re-opened dialog always starts clean in step 1 with an empty field
+   * (AC2 — prevents Bootstrap-skip on repeated use, seen-in: S-133 I1).
+   */
+  const resetNewSequence = useCallback(() => {
+    setNewStep('trigger1');
+    setHeldIdeaText('');
+  }, []);
+
+  const handleIntakeNewClose = useCallback(() => {
+    setIntakeNewOpen(false);
+    // Reset sequence so a future re-open starts in step 1 (AC2, I1).
+    resetNewSequence();
+  }, [resetNewSequence]);
+
+  /**
+   * AC2 (S-133): signals that the step just advanced (Trigger 1 → Trigger 2).
+   * Used to distinguish "keep open after trigger1" from "close after trigger2"
+   * inside handleIntakeNewNavigate where React state batching prevents reading
+   * the freshly-set newStep value synchronously.
+   */
+  const stepJustAdvancedRef = useRef(false);
+
+  const handleIntakeNewStepChange = useCallback((step) => {
+    setNewStep(step);
+    // Signal to handleIntakeNewNavigate that the step just advanced
+    // (Trigger 1 completed → keep dialog open).
+    stepJustAdvancedRef.current = true;
+  }, []);
+
+  /**
+   * AC4 (S-133): called by IntakeDialog after each successful 202.
+   *
+   * After Trigger 1 (new-project): onNewStepChange has already advanced
+   * stepJustAdvancedRef to true BEFORE this callback fires. Keep dialog OPEN
+   * (user needs to trigger step 2 once bootstrap is done in the terminal).
+   * onNavigate navigates to factory terminal pane (AC4).
+   *
+   * After Trigger 2 (requirement): stepJustAdvancedRef is false.
+   * Close dialog + navigate, then reset sequence so re-opening starts clean
+   * (AC2, I1 — prevents stale step/idea on repeated use).
+   */
+  const handleIntakeNewNavigate = useCallback((view) => {
+    const justAdvanced = stepJustAdvancedRef.current;
+    stepJustAdvancedRef.current = false; // reset for next call
+
+    if (!justAdvanced) {
+      // Trigger 2 (requirement) completed → close dialog and reset sequence.
+      setIntakeNewOpen(false);
+      resetNewSequence();
+    }
+    // For Trigger 1: dialog stays open (justAdvanced=true), user sees step 2.
+    if (onNavigate) onNavigate(view);
+  }, [onNavigate, resetNewSequence]);
 
   // Load once on mount (AC1)
   useEffect(() => {
@@ -66,7 +162,48 @@ export function RepoOverview({ navigateFactory }) {
 
   return (
     <main style={styles.main} aria-label="Repo-Übersicht">
-      <h1 style={styles.h1}>Fabrik — Projekt wählen</h1>
+      <div style={styles.headerRow}>
+        <h1 style={styles.h1}>Fabrik — Projekt wählen</h1>
+        {/* AC1 fabric-intake-dialog: new-mode trigger */}
+        {!intakeNewOpen ? (
+          <button
+            type="button"
+            style={styles.btnNewProject}
+            onClick={handleIntakeNewOpen}
+            aria-label="Neues Projekt / Idee erfassen — öffnet Intake-Dialog"
+            data-testid="intake-new-btn"
+          >
+            + Neues Projekt / Idee erfassen
+          </button>
+        ) : (
+          <button
+            type="button"
+            style={styles.btnNewProjectClose}
+            onClick={handleIntakeNewClose}
+            aria-label="Intake-Dialog schließen"
+            data-testid="intake-new-close-btn"
+          >
+            ✕ Schließen
+          </button>
+        )}
+      </div>
+
+      {/* Intake-Dialog (new mode) — visible when intakeNewOpen.
+          AC2 (S-133): newStep and heldIdeaText are held here (parent) so they
+          survive when IntakeDialog unmounts/remounts during navigation.
+          onNewStepChange and onIdeaTextChange lift state back to parent. */}
+      {intakeNewOpen && (
+        <div style={styles.intakeNewWrapper} data-testid="intake-new-dialog-wrapper">
+          <IntakeDialog
+            mode="new"
+            onNavigate={handleIntakeNewNavigate}
+            newStep={newStep}
+            onNewStepChange={handleIntakeNewStepChange}
+            heldIdeaText={heldIdeaText}
+            onIdeaTextChange={setHeldIdeaText}
+          />
+        </div>
+      )}
 
       {/* Loading */}
       {loadState === 'loading' && (
@@ -177,12 +314,53 @@ const styles = {
     color: '#e5e7eb',
   },
 
+  headerRow: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    flexWrap: 'wrap',
+    gap: 12,
+    marginBottom: 20,
+    flexShrink: 0,
+  },
+
   h1: {
-    margin: '0 0 20px',
+    margin: 0,
     fontSize: 24,
     fontWeight: 700,
     color: '#e5e7eb',
     flexShrink: 0,
+  },
+
+  btnNewProject: {
+    background: '#065f46',
+    color: '#fff',
+    border: 'none',
+    borderRadius: 4,
+    padding: '8px 16px',
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: 'pointer',
+    minHeight: 44,
+    flexShrink: 0,
+    // Focus ring preserved (no outline:none)
+  },
+
+  btnNewProjectClose: {
+    background: 'transparent',
+    color: '#9ca3af',
+    border: '1px solid #374151',
+    borderRadius: 4,
+    padding: '8px 16px',
+    fontSize: 13,
+    cursor: 'pointer',
+    minHeight: 44,
+    flexShrink: 0,
+  },
+
+  intakeNewWrapper: {
+    marginBottom: 20,
+    maxWidth: 560,
   },
 
   statusMsg: {

@@ -52,6 +52,7 @@ import { jobLock } from './JobLock.js';
 export const DEFAULT_ALLOWED_COMMANDS = [
   '/agent-flow:flow',
   '/agent-flow:adopt',
+  '/agent-flow:new-project',
   '/agent-flow:preview',
   '/agent-flow:requirement',
   '/agent-flow:train',
