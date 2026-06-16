@@ -37,7 +37,7 @@ export function FactoryView({ onNavigate, factoryRepo = null, navigateFactory })
   // AC1: kein Repo → Übersicht
   if (!factoryRepo) {
     return (
-      <RepoOverview navigateFactory={navFactory} />
+      <RepoOverview navigateFactory={navFactory} onNavigate={onNavigate} />
     );
   }
 
