@@ -1,5 +1,8 @@
 # Reviewer Lessons — dev-gui (newest first)
 
+## 2026-06-17 — Covers-Block-Prüfung bei erweitertem (nicht neuem) describe-Block: selbe Lesson, anderer Trigger
+Wenn neue `it`-Blöcke für eine neue AC in einen *bestehenden* describe-Block eingefügt werden (statt einem neuen describe), gilt die Covers-Block-Lesson trotzdem: der Header muss die neue AC ergänzen. Erkennungsmuster: describe-Titel enthält nur "AC2", aber die neuen `it`-Blöcke asserten `ep_est_source` (→ AC5). Zusätzlich: wenn die gleiche AC gleichzeitig in einer zweiten Datei als *neuer* describe-Block erscheint (z.B. `BoardView.test.jsx`), dort prüfen ob die neue Spec (`story-detail-ansicht`) überhaupt im Header-Covers-Block vorkommt. Beide Lücken → Important. *[seen-in: S-144; promoted: 2026-06-17]*
+
 ## 2026-06-16 — Test-Beschreibungstext vs. expect()-Wert: Mismatch ist eigener Befund
 Wenn ein Test-Beschreibungstext (it('genau 23 Router-Module...')) und der tatsächliche expect()-Wert (toBe(24)) auseinanderklaffen, ist das ein eigenständiger Befund (Suggestion). Der Test läuft korrekt (Assertion passt zur Realität), aber die Beschreibung ist veraltet — kann beim nächsten Entwickler für Verwirrung sorgen. Nicht als "nur kosmetisch" übersehen: bei Smoke-Assertions dieser Art ist die Selbstdokumentation Teil des Werts. *[seen-in: S-143 routerLoader.test.js Zeile 263 "genau 23" vs toBe(24); promoted: 2026-06-16]*
 

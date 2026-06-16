@@ -36,6 +36,10 @@
  *           Rückweg zum Board. Touch-Targets ≥ 44 px.
  *   AC4  — Soll-Ist zeigt ep_est↔ep_act + tok_est↔tok_total mit Abweichung %;
  *           fehlende Schätzung sauber dargestellt als „keine Schätzung".
+ *   AC5  — Vorab-Schätzungs-Fallback: wenn items.jsonl kein ep_est liefert, zeigt
+ *           die Soll-Ist-Ansicht dispo_est aus der Story-YAML mit einem „Vorab"-Badge.
+ *           Ist-/Abweichungs-Spalten bleiben leer bis zum Flow-Lauf.
+ *           ep_est_source: 'yaml' → Vorab-Badge; 'ledger' → kein Badge; null → keine Schätzung.
  *
  * autonome-board-abarbeitung:
  *   AC4  — Board zeigt Ready-/Blocked-Status: Ready-To-Do-Stories tragen ein dezentes
@@ -1411,36 +1415,56 @@ function StoryDetailView({ story, detailState, detailData, detailError, onBack }
                 <tr data-testid="soll-ist-ep">
                   <td style={styles.flowTd}>Effort Points</td>
                   <td style={styles.flowTd} data-testid="ep-est">
-                    {detailData.ep_est != null ? detailData.ep_est : (
+                    {detailData.ep_est != null ? (
+                      <>
+                        {detailData.ep_est}
+                        {detailData.ep_est_source === 'yaml' && (
+                          <span
+                            style={styles.vorabBadge}
+                            aria-label="Vorab-Schätzung aus Story-YAML"
+                            title="Vorab-Schätzung aus Story-YAML — noch kein Flow-Lauf"
+                            data-testid="ep-est-vorab-badge"
+                          >
+                            Vorab
+                          </span>
+                        )}
+                      </>
+                    ) : (
                       <span style={styles.noEstimate}>keine Schätzung</span>
                     )}
                   </td>
                   <td style={styles.flowTd} data-testid="ep-act">
-                    {fmtNum(detailData.ep_act)}
+                    {/* AC5: Ist-Spalte leer wenn YAML-Fallback (kein Ledger-Wert) */}
+                    {detailData.ep_est_source === 'yaml' ? '—' : fmtNum(detailData.ep_act)}
                   </td>
                   <td style={{
                     ...styles.flowTd,
                     color: devColor(detailData.ep_dev_pct),
                   }} data-testid="ep-dev">
-                    {fmtDevPct(detailData.ep_dev_pct)}
+                    {/* AC5: Abweichung leer wenn YAML-Fallback */}
+                    {detailData.ep_est_source === 'yaml' ? '—' : fmtDevPct(detailData.ep_dev_pct)}
                   </td>
                 </tr>
                 {/* Tokens */}
                 <tr data-testid="soll-ist-tok">
                   <td style={styles.flowTd}>Tokens</td>
                   <td style={styles.flowTd} data-testid="tok-est">
-                    {detailData.tok_est != null ? detailData.tok_est : (
+                    {detailData.tok_est != null ? (
+                      detailData.tok_est
+                    ) : (
                       <span style={styles.noEstimate}>keine Schätzung</span>
                     )}
                   </td>
                   <td style={styles.flowTd} data-testid="tok-total">
-                    {fmtNum(detailData.tok_total)}
+                    {/* AC5: Ist-Spalte leer wenn YAML-Fallback */}
+                    {detailData.ep_est_source === 'yaml' ? '—' : fmtNum(detailData.tok_total)}
                   </td>
                   <td style={{
                     ...styles.flowTd,
                     color: devColor(detailData.tok_dev_pct),
                   }} data-testid="tok-dev">
-                    {fmtDevPct(detailData.tok_dev_pct)}
+                    {/* AC5: Abweichung leer wenn YAML-Fallback */}
+                    {detailData.ep_est_source === 'yaml' ? '—' : fmtDevPct(detailData.tok_dev_pct)}
                   </td>
                 </tr>
               </tbody>
@@ -2085,6 +2109,24 @@ const styles = {
   noEstimate: {
     color: '#6b7280',
     fontStyle: 'italic',
+    fontFamily: 'inherit',
+  },
+
+  // AC5 (story-detail-ansicht): Vorab-Badge — kennzeichnet Schätzung aus Story-YAML
+  // Contrast: #fbbf24 on #1a1500 ≈ 10.9:1 — WCAG AA compliant
+  vorabBadge: {
+    display: 'inline-block',
+    marginLeft: 6,
+    fontSize: 9,
+    fontWeight: 700,
+    padding: '1px 5px',
+    borderRadius: 3,
+    background: '#1a1500',
+    color: '#fbbf24',
+    border: '1px solid #78350f',
+    letterSpacing: '0.04em',
+    textTransform: 'uppercase',
+    verticalAlign: 'middle',
     fontFamily: 'inherit',
   },
 };
