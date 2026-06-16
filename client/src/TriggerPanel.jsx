@@ -62,6 +62,7 @@ function fetchWithTimeout(fetchFn, url, opts = {}, ms = 5_000) {
 const ALLOWED_COMMANDS = [
   '/agent-flow:flow',
   '/agent-flow:adopt',
+  '/agent-flow:new-project',
   '/agent-flow:preview',
   '/agent-flow:requirement',
   '/agent-flow:train',
@@ -136,6 +137,10 @@ function composeCommand(cmd, subCmd, repoArg, freeArg, costMode) {
   switch (cmd) {
     case '/agent-flow:flow':
       return `${cmd}${cost}`;
+
+    case '/agent-flow:new-project':
+      // No argument, no cost-mode (analogous to adopt — not cost-aware). AC3/AC9.
+      return cmd;
 
     case '/agent-flow:adopt': {
       const repo = repoArg.trim();
