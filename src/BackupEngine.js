@@ -1,27 +1,32 @@
 /**
- * BackupEngine.js — Lokale Backup-Erzeugung für den Credential-Store (S-140).
+ * BackupEngine.js — Lokale Backup-Erzeugung + Off-Host-Upload (S-140/S-141).
  *
  * Wird als Post-Write-Hook am einzigen lock-geschützten Schreibpfad des
  * CredentialStore aufgerufen. Erzeugt ein GPG-symmetrisch verschlüsseltes
- * Artefakt (secrets.enc.json-Blob + Manifest) und speichert es atomar (0600)
- * im konfigurierten Backup-Verzeichnis.
+ * Artefakt (secrets.enc.json-Blob + Manifest), speichert es atomar (0600)
+ * im konfigurierten Backup-Verzeichnis und lädt es ggf. an ein Off-Host-Ziel
+ * (S3-kompatibel oder SFTP) hoch.
  *
- * Verhaltensgrenzen (AC1–AC7, S-140):
- *   AC1: Einziger Auslöser = Post-Write-Hook. Kein Cron, kein zweiter Trigger.
- *   AC2: Artefakt = JSON { manifest, blob } → GPG-symmetrisch (Passphrase = Master-Key).
- *   AC3: Atomar (tmp + rename), Rechte 0600, im konfigurierten Backup-Dir.
- *   AC4: Backup-Fehler rollt den Store-Write NICHT zurück.
- *   AC5: Retention (max. N Dateien, jüngstes wird nie gelöscht).
- *   AC6: Rückmeldung { local: 'ok'|'failed', offHost: 'disabled' }.
- *   AC7: Master-Key / Passphrase erscheinen NIEMALS in Log/Argv/Fehlertext.
+ * Verhaltensgrenzen (AC1–AC10):
+ *   AC1:  Einziger Auslöser = Post-Write-Hook. Kein Cron, kein zweiter Trigger.
+ *   AC2:  Artefakt = JSON { manifest, blob } → GPG-symmetrisch (Passphrase = Master-Key).
+ *   AC3:  Atomar (tmp + rename), Rechte 0600, im konfigurierten Backup-Dir.
+ *   AC4:  Backup-Fehler rollt den Store-Write NICHT zurück.
+ *   AC5:  Retention (max. N Dateien, jüngstes wird nie gelöscht).
+ *   AC6:  Rückmeldung { local: 'ok'|'failed', offHost: 'ok'|'failed'|'disabled' }.
+ *   AC7:  Master-Key / Passphrase erscheinen NIEMALS in Log/Argv/Fehlertext.
+ *   AC8:  Zusätzlich zur lokalen Kopie wird das Artefakt an Off-Host-Ziel hochgeladen.
+ *   AC9:  Remote-Creds erscheinen NIEMALS in Logs/Responses/WS/Argv/Bundle.
+ *   AC10: Remote-Fehler führen NICHT zum Crash, NICHT zum Rollback; begrenzter Retry.
  *
  * @module BackupEngine
  */
 
-import { readdir, rename, mkdir, open, unlink, stat as fsStat, chmod } from 'node:fs/promises';
+import { readFile, readdir, rename, mkdir, open, unlink, stat as fsStat, chmod } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { encrypt } from './BackupCrypto.js';
+import { uploadArtefact, resolveOffHostConfig } from './BackupUploader.js';
 
 /** Aktuelle Backup-Schema-Version (für Restore-Kompatibilitäts-Check). */
 export const BACKUP_SCHEMA_VERSION = 1;
@@ -36,20 +41,25 @@ export const DEFAULT_RETENTION_COUNT = 10;
  * Erzeugt ein Backup-Artefakt und schreibt es atomar ins Backup-Verzeichnis.
  *
  * @param {object} opts
- * @param {string} opts.masterKeyRaw       - Master-Key-Rohwert (Passphrase für GPG). Wird NICHT geloggt.
- * @param {string} opts.storeFilePath      - Absoluter Pfad zu secrets.enc.json
- * @param {string} opts.backupDir          - Absoluter Pfad zum Backup-Verzeichnis
- * @param {number} [opts.retentionCount]   - Max. Anzahl lokaler Artefakte (default: DEFAULT_RETENTION_COUNT)
- * @param {string} [opts.storeBlob]        - Aktueller secrets.enc.json-Inhalt (bereits gelesen, für Tests)
+ * @param {string} opts.masterKeyRaw         - Master-Key-Rohwert (Passphrase für GPG). Wird NICHT geloggt.
+ * @param {string} opts.storeFilePath        - Absoluter Pfad zu secrets.enc.json
+ * @param {string} opts.backupDir            - Absoluter Pfad zum Backup-Verzeichnis
+ * @param {number} [opts.retentionCount]     - Max. Anzahl lokaler Artefakte (default: DEFAULT_RETENTION_COUNT)
+ * @param {string} [opts.storeBlob]          - Aktueller secrets.enc.json-Inhalt (bereits gelesen, für Tests)
+ * @param {object|null} [opts.offHostConfig] - Off-Host-Konfiguration (nicht-geheim, aus Env).
+ *                                             null/undefined → disabled. Default: resolveOffHostConfig()
+ * @param {object} [opts.offHostCreds]       - Geheime Zugangsdaten (aus CredentialStore, NICHT loggen).
+ *                                             { accessKey?, secretKey?, password?, privateKey? }
+ * @param {Function} [opts._uploaderFn]      - Test-Override für uploadArtefact (Dependency Injection)
  *
  * @returns {Promise<BackupResult>}
  *
  * @typedef {object} BackupResult
- * @property {'ok'|'failed'} local   - Ergebnis der lokalen Kopie
- * @property {'disabled'} offHost    - Off-Host ist in S-140 nicht implementiert (S-141)
- * @property {string} [localPath]    - Absoluter Pfad zum erzeugten Artefakt (bei 'ok')
- * @property {string} [errorClass]   - Fehlerklasse (bei 'failed')
- * @property {string} [message]      - Menschenlesbare Fehlermeldung ohne Secret-Inhalt (bei 'failed')
+ * @property {'ok'|'failed'} local              - Ergebnis der lokalen Kopie
+ * @property {'ok'|'failed'|'disabled'} offHost - Ergebnis des Off-Host-Uploads
+ * @property {string} [localPath]               - Absoluter Pfad zum erzeugten Artefakt (bei local: 'ok')
+ * @property {string} [errorClass]              - Fehlerklasse (bei 'failed')
+ * @property {string} [message]                 - Fehlermeldung ohne Secret-Inhalt (bei 'failed')
  */
 export async function runBackup(opts) {
   const {
@@ -58,7 +68,20 @@ export async function runBackup(opts) {
     backupDir,
     retentionCount = DEFAULT_RETENTION_COUNT,
     storeBlob,
+    // AC8/AC9/AC10: Off-Host-Upload (S-141)
+    // offHostConfig: nicht-geheime Konfiguration (Typ, Host/Bucket, Präfix, Region)
+    // undefined → wird aus Env gelesen; null → disabled (Override für Tests)
+    offHostConfig: _offHostConfigArg,
+    // AC9: geheime Zugangsdaten (aus CredentialStore, NICHT loggen, NICHT nach außen)
+    offHostCreds = {},
+    // Test-Override: Dependency Injection für uploadArtefact
+    _uploaderFn = uploadArtefact,
   } = opts;
+
+  // Resolve off-host config: null = disabled (explicit), undefined = read from env
+  const offHostConfig = _offHostConfigArg === null
+    ? null
+    : (_offHostConfigArg !== undefined ? _offHostConfigArg : resolveOffHostConfig());
 
   // AC7: masterKeyRaw wird NIEMALS geloggt
   try {
@@ -67,13 +90,12 @@ export async function runBackup(opts) {
     if (storeBlob !== undefined) {
       blob = storeBlob;
     } else {
-      const { readFile } = await import('node:fs/promises');
       try {
         blob = await readFile(storeFilePath, 'utf8');
       } catch (err) {
         return {
           local: 'failed',
-          offHost: 'disabled',
+          offHost: offHostConfig ? 'failed' : 'disabled',
           errorClass: 'backup-failed',
           message: `[BackupEngine] secrets.enc.json nicht lesbar: ${err.message}`,
         };
@@ -96,7 +118,7 @@ export async function runBackup(opts) {
     } catch (gpgErr) {
       return {
         local: 'failed',
-        offHost: 'disabled',
+        offHost: offHostConfig ? 'failed' : 'disabled',
         errorClass: gpgErr.errorClass ?? 'backup-failed',
         // AC7: Fehlertext enthält NICHT den Master-Key
         message: `[BackupEngine] GPG-Verschlüsselung fehlgeschlagen: ${gpgErr.message}`,
@@ -136,17 +158,37 @@ export async function runBackup(opts) {
       // Nicht-fatal — intern ignorieren (AC5: Aufräum-Warnung ist intern, kein Cred-Rollback)
     }
 
+    // 6. Off-Host-Upload (AC8/AC9/AC10 — S-141)
+    // AC8: Lokale Kopie bleibt unabhängig vom Remote-Ergebnis bestehen.
+    // AC10: Remote-Fehler kein Crash, kein Rollback; begrenzter Retry in uploadArtefact().
+    let offHostResult = 'disabled';
+    if (offHostConfig) {
+      try {
+        // AC9: offHostCreds (Secrets) werden NICHT geloggt, NICHT in Fehlertexten nach außen
+        offHostResult = await _uploaderFn({
+          artefactBuffer: encryptedBuf,
+          artefactName: filename,
+          config: offHostConfig,
+          creds: offHostCreds,
+        });
+      } catch {
+        // AC10: Kein Crash — unerwartete Exception (sollte nicht vorkommen, uploadArtefact gibt immer string)
+        offHostResult = 'failed';
+      }
+    }
+
     return {
       local: 'ok',
-      offHost: 'disabled',
+      offHost: offHostResult,
       localPath: finalPath,
     };
   } catch (err) {
     // AC4: Kein Rollback des Store-Writes — nur Fehlerbericht
     // AC7: err.message enthält NICHT den Master-Key (alle internen Fehlertexte oben halten das ein)
+    // AC10: Remote-Fehler dürfen nie diese Stelle erreichen (uploadArtefact fängt selbst ab)
     return {
       local: 'failed',
-      offHost: 'disabled',
+      offHost: offHostConfig ? 'failed' : 'disabled',
       errorClass: err.errorClass ?? 'backup-failed',
       message: `[BackupEngine] Unerwarteter Fehler: ${err.message}`,
     };

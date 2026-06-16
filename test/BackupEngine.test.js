@@ -10,6 +10,8 @@
  *   AC6 — lokale Quittung im Response (local:'ok'/'failed', offHost:'disabled')
  *   AC7 — kein Key/Passphrase in Log/Argv (console-spy + process-Argv-Prüfung)
  *
+ * Hinweis: AC8–AC10 (Off-Host-Backup) sind in BackupUploader.test.js abgedeckt.
+ *
  * Strategie:
  *   - CredentialStore mit tmpdir + injiziertem masterKey (kein Env, kein Bitwarden)
  *   - BackupEngine direkt + über CredentialStore-Hook

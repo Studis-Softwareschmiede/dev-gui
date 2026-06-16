@@ -46,6 +46,7 @@ import { readFile, rename, mkdir, open, stat, chmod } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { runBackup, resolveBackupDir, resolveRetentionCount } from './BackupEngine.js';
+import { resolveOffHostConfig } from './BackupUploader.js';
 
 const scryptAsync = promisify(scrypt);
 
@@ -54,6 +55,10 @@ export const CREDENTIAL_CATALOG = {
   github: ['app_id', 'installation_id', 'private_key'],
   cloudflare: ['api_token', 'account_id'],
   vps: ['hetzner_api_token', 'ionos_api_token', 'hostinger_api_token'],
+  // S-141: Off-Host-Backup Remote-Zugangsdaten (write-only, AC9)
+  // S3-kompatibel: s3_access_key, s3_secret_key
+  // SFTP:          sftp_password, sftp_private_key
+  'backup-remote': ['s3_access_key', 's3_secret_key', 'sftp_password', 'sftp_private_key'],
 };
 
 /** Maximale Länge eines Credential-Werts (Bytes). */
@@ -651,33 +656,92 @@ export class CredentialStore {
     await chmod(envPath, 0o600);
   }
 
-  // ── Backup-Hook (S-140) ─────────────────────────────────────────────────────
+  // ── Backup-Hook (S-140/S-141) ───────────────────────────────────────────────
 
   /**
-   * Erzeugt ein lokales Backup-Artefakt nach erfolgreichem Store-Write (S-140 AC1).
+   * Erzeugt ein lokales Backup-Artefakt nach erfolgreichem Store-Write und lädt
+   * es ggf. an ein Off-Host-Ziel hoch (S-141 AC8–AC10).
    *
    * - Backup-Fehler rollt den Store-Write NICHT zurück (AC4).
    * - Passphrase (Master-Key) wird NICHT geloggt, nicht in Argv (AC7).
-   * - Off-Host-Upload ist S-141 — hier immer 'disabled'.
+   * - Remote-Creds werden aus dem CredentialStore gelesen (AC9) und erscheinen
+   *   NIEMALS in Logs, Responses, WS oder Argv.
+   * - Remote-Fehler führen nicht zum Crash (AC10).
    *
    * Muss innerhalb des Write-Locks aufgerufen werden, NACHDEM #writeStore() erfolgreich war.
    *
    * @param {string} storeBlob - Inhalt von secrets.enc.json (bereits serialisiert, atomar geschrieben)
-   * @returns {Promise<{ local: 'ok'|'failed', offHost: 'disabled', localPath?: string, errorClass?: string, message?: string }>}
+   * @param {object|null} [offHostConfigOverride] - Test-Override für Off-Host-Config (null = disabled)
+   * @returns {Promise<{ local: 'ok'|'failed', offHost: 'ok'|'failed'|'disabled', localPath?: string, errorClass?: string, message?: string }>}
    */
-  async #runBackupHook(storeBlob) {
+  async #runBackupHook(storeBlob, offHostConfigOverride) {
     // Kein Master-Key → kein Backup möglich (Store müsste entsperrt sein für Store-Writes)
     if (!this.#masterKeyRaw) {
       return { local: 'failed', offHost: 'disabled', errorClass: 'backup-failed', message: '[BackupEngine] Kein Master-Key verfügbar (Store gesperrt)' };
     }
 
+    // I-1 Fix: Off-Host-Config ZUERST auflösen — bevor Creds gelesen werden.
+    // In Production ist offHostConfigOverride immer undefined; null = Test-Override (disabled).
+    // resolveOffHostConfig() wird hier (nicht in BackupEngine) aufgerufen, damit wir wissen
+    // ob Off-Host überhaupt aktiv ist, bevor wir unnötig Creds entschlüsseln.
+    const resolvedConfig = offHostConfigOverride === null
+      ? null
+      : (offHostConfigOverride !== undefined ? offHostConfigOverride : resolveOffHostConfig());
+
+    // AC9 (S-141): Remote-Zugangsdaten aus dem CredentialStore lesen (entschlüsselt zur Laufzeit).
+    // Sie erscheinen NIEMALS in Logs/Responses/WS/Argv/Bundle.
+    // NUR lesen wenn Off-Host wirklich aktiv ist (resolvedConfig !== null) — kein unnötiger Entschlüsselungsaufwand.
+    let offHostCreds = {};
+    if (resolvedConfig) {
+      try {
+        const storeData = await this.#readStore();
+        if (storeData && storeData.kdf) {
+          const salt = Buffer.from(storeData.kdf.salt, 'base64');
+          const aesKey = await this.#deriveKey(this.#masterKeyRaw, salt);
+
+          const _readCredSafe = (key) => {
+            try {
+              const entry = storeData.entries?.[key];
+              if (!entry) return null;
+              return this.#decrypt(aesKey, entry);
+            } catch {
+              // Entschlüsselungsfehler → ignorieren, kein Cred verfügbar
+              return null;
+            }
+          };
+
+          // AC9: Creds werden NUR zur Laufzeit entschlüsselt, nie persistiert/geloggt
+          const accessKey = _readCredSafe('credentials/backup-remote/s3_access_key');
+          const secretKey = _readCredSafe('credentials/backup-remote/s3_secret_key');
+          const password = _readCredSafe('credentials/backup-remote/sftp_password');
+          const privateKey = _readCredSafe('credentials/backup-remote/sftp_private_key');
+
+          offHostCreds = {
+            ...(accessKey ? { accessKey } : {}),
+            ...(secretKey ? { secretKey } : {}),
+            ...(password ? { password } : {}),
+            ...(privateKey ? { privateKey } : {}),
+          };
+        }
+      } catch {
+        // AC10: Fehler beim Lesen der Creds → Upload wird mit leeren Creds versucht
+        // (wird scheitern und offHost: 'failed' zurückgeben — lokale Kopie bleibt)
+        offHostCreds = {};
+      }
+    }
+
     // AC7: masterKeyRaw wird an BackupEngine weitergegeben, erscheint aber NICHT in Logs/Argv
+    // AC9: offHostCreds werden NICHT geloggt (BackupUploader/BackupEngine halten das ein)
+    // I-1/I-3: resolvedConfig (nicht der rohe Override) wird übergeben — BackupEngine ruft
+    // resolveOffHostConfig() nicht nochmals auf; Fehlerpfade in BackupEngine nutzen denselben Wert.
     return runBackup({
       masterKeyRaw: this.#masterKeyRaw,
       storeFilePath: this.#filePath,
       backupDir: this.#backupDir,
       retentionCount: this.#backupRetentionCount,
       storeBlob,
+      offHostConfig: resolvedConfig,
+      offHostCreds,
     });
   }
 

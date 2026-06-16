@@ -203,6 +203,28 @@ services:
       # Älteste werden gelöscht; das jüngste wird nie gelöscht.
       # CRED_BACKUP_RETENTION: "10"
 
+      # ── Off-Host-Backup (S-141) ──────────────────────────────────────────────
+      # Nicht-geheime Ziel-Konfiguration. Geheime Zugangsdaten (s3_access_key,
+      # s3_secret_key, sftp_password, sftp_private_key) werden ausschließlich im
+      # CredentialStore gehalten (write-only, nie hier oder in .env).
+      #
+      # Aktivierung: '1' oder 'true'. Default: deaktiviert.
+      # BACKUP_OFFHOST_ENABLED: ${BACKUP_OFFHOST_ENABLED:-}
+      # Ziel-Typ: 's3' oder 'sftp'
+      # BACKUP_OFFHOST_TYPE: ${BACKUP_OFFHOST_TYPE:-}
+      #
+      # S3-kompatibel (nicht-geheim):
+      # BACKUP_S3_ENDPOINT: ${BACKUP_S3_ENDPOINT:-}    # leer = AWS S3; MinIO/B2 = vollständige URL
+      # BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET:-}
+      # BACKUP_S3_PREFIX: ${BACKUP_S3_PREFIX:-backups/}
+      # BACKUP_S3_REGION: ${BACKUP_S3_REGION:-us-east-1}
+      #
+      # SFTP (nicht-geheim):
+      # BACKUP_SFTP_HOST: ${BACKUP_SFTP_HOST:-}
+      # BACKUP_SFTP_PORT: ${BACKUP_SFTP_PORT:-22}
+      # BACKUP_SFTP_USER: ${BACKUP_SFTP_USER:-}
+      # BACKUP_SFTP_PREFIX: ${BACKUP_SFTP_PREFIX:-/backups}
+
       # ── Bitwarden Master-Key-Beschaffung (bitwarden-master-key-unlock) ──────
       # Name des Bitwarden-Items, das den DEVGUI_CRED_MASTER_KEY enthält.
       # Nur setzen, wenn der Default 'dev-gui-master-key' nicht passt.

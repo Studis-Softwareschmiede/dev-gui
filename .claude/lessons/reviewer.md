@@ -1,5 +1,8 @@
 # Reviewer Lessons — dev-gui (newest first)
 
+## 2026-06-16 — git status untracked Files im Worktree: neue Dateien erscheinen NICHT in git diff origin/main
+Bei Worktree-Diffs (`git diff origin/main`) erscheinen neue, noch nicht committete Dateien (Untracked, `?? status`) NICHT im Diff — auch wenn sie funktional Teil des Items sind. Beim Review neuer Dateien immer `git status` prüfen: `??` markierte Dateien müssen direkt gelesen werden. Ohne diesen Schritt würden neue Module (`BackupUploader.js`, `BackupUploader.test.js`) komplett übersehen. Checkliste: nach `git diff` stets `git status --short` ausführen und alle `??`-Dateien explizit lesen. *[seen-in: S-141 BackupUploader.js + test/BackupUploader.test.js als untracked; promoted: 2026-06-16]*
+
 ## 2026-06-16 — GPG --passphrase-fd 0 + stdin-Daten: korrektes Muster kennen, kein false-positive
 Wenn BackupCrypto `spawn('gpg', [..., '--passphrase-fd', '0', '--symmetric', ...])` aufruft und danach `stdin.write(passphrase + '\n'); stdin.write(inputData); stdin.end()` ausführt, ist das das korrekte GPG-Passphrase-Handling. GPG mit `--passphrase-fd 0` liest die Passphrase als erste Zeile von fd 0 (stdin), danach liest es die Eingabedaten weiterhin von stdin. Kein Race-Condition-Problem, kein Passphrase-in-Argv-Problem — dieses Muster ist documented-correct. Kein Security-Critical dafür. *[seen-in: S-140 BackupCrypto._runGpg — korrekt; promoted: 2026-06-16]*
 
