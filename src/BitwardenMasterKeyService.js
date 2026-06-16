@@ -112,6 +112,8 @@ function sanitizeErrorReason(errorClass) {
       return 'Bitwarden-Dienst nicht erreichbar oder CLI nicht gefunden';
     case 'item-create-failed':
       return 'Bitwarden-Item konnte nicht angelegt werden';
+    case 'persist-failed':
+      return 'Master-Key konnte nicht gespeichert werden — Persistenz-Pfad nicht beschreibbar (CRED_ENV_PATH/Volume prüfen)';
     default:
       return 'BitwardenMasterKeyService: unerwarteter Fehler';
   }
@@ -439,7 +441,15 @@ export class BitwardenMasterKeyService {
     // ── AC2/AC7: Key store-intern übergeben — erscheint NICHT in Response ───
     const unlockResult = await this.#credentialStore.unlock(keyValue, { persist: true });
     if (!unlockResult.ok) {
-      // AC7: Falscher Key → Ablehnung ohne .env-Persistenz
+      // AC11 (credential-runtime-unlock): persist-failed ist eigene errorClass — nicht auf 'error' abbilden (AC10/AC11 spec §10)
+      if (unlockResult.reason === 'persist-failed') {
+        return {
+          status: 'error',
+          errorClass: 'persist-failed',
+          reason: sanitizeErrorReason('persist-failed'),
+        };
+      }
+      // AC7: Falscher Key oder anderer unlock-Fehler → Ablehnung ohne .env-Persistenz
       return {
         status: 'error',
         errorClass: 'error',
@@ -533,7 +543,15 @@ export class BitwardenMasterKeyService {
     // ── AC7: Key store-intern übergeben — erscheint NICHT in Response ────────
     const unlockResult = await this.#credentialStore.unlock(newKey, { persist: true });
     if (!unlockResult.ok) {
-      // Spec Edge-Case: Item angelegt aber unlock fehlgeschlagen
+      // AC11 (credential-runtime-unlock): persist-failed ist eigene errorClass — nicht auf 'error' abbilden (AC10/AC11 spec §10)
+      if (unlockResult.reason === 'persist-failed') {
+        return {
+          status: 'error',
+          errorClass: 'persist-failed',
+          reason: sanitizeErrorReason('persist-failed'),
+        };
+      }
+      // Spec Edge-Case: Item angelegt aber unlock fehlgeschlagen (anderer Grund)
       return {
         status: 'error',
         errorClass: 'error',

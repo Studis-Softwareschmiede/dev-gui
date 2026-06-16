@@ -18,6 +18,11 @@
  *           Cleanup garantiert bei Erfolg/Fehler/Timeout/Abbruch
  *   AC12 — showPassword-Reset beim Phasenwechsel (Frontend-UX, S-130/#276); getestet in SettingsView.test.jsx
  *
+ * Covers (credential-runtime-unlock #280/S-138):
+ *   AC11 — unlock(persist-failed) in acquireMasterKey → errorClass 'persist-failed', nicht 'error'
+ *   AC11 — unlock(persist-failed) in createMasterKey → errorClass 'persist-failed', nicht 'error'
+ *   AC12 — persist-failed-Reason enthält weder Master-Key noch Master-Passwort (Floor, AC12)
+ *
  * Covers (bitwarden-new-device-otp #263/#267):
  *   AC7  — emailOtp erscheint NICHT in Argv (AC10: single-process, kein emailOtp beim PTY-Start)
  *   OTP-Zwei-Phasen-Fluss + AC10/AC11 → getestet in BitwardenNewDeviceOtp.test.js
@@ -1164,5 +1169,137 @@ describe('AC11 — Gehaltene Session: Timeout + create ohne Session + Cleanup (#
     const logoutCalls = spawnMock.spawnedArgvs.filter((args) => args[0] === 'logout');
     // Mindestens ein logout für den überschriebenen Handle
     expect(logoutCalls.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// AC11/AC12 (credential-runtime-unlock #280/S-138) — persist-failed distinkt melden
+//
+// Spec §10/AC11: Gibt unlock() { ok:false, reason:'persist-failed' } zurück,
+// MÜSSEN beide Beschaffungspfade (acquireMasterKey + createMasterKey) errorClass
+// 'persist-failed' liefern — NICHT 'error'. AC12: kein Secret in der Meldung.
+// ══════════════════════════════════════════════════════════════════════════════
+
+describe('AC11/AC12 (credential-runtime-unlock #280) — persist-failed distinkt melden', () => {
+  /**
+   * Erstellt ein minimales CredentialStore-Stub, dessen unlock() kontrolliert werden kann.
+   * Der echte CredentialStore wird durch ein einfaches Objekt ersetzt, das nur die
+   * für BitwardenMasterKeyService benötigten Methoden implementiert.
+   *
+   * @param {{ unlockResult?: object, isUnlocked?: boolean }} opts
+   */
+  function makePersistFailedStore(opts = {}) {
+    const unlockResult = opts.unlockResult ?? { ok: false, reason: 'persist-failed' };
+    return {
+      unlock: jest.fn(async () => unlockResult),
+      isUnlocked: jest.fn(() => opts.isUnlocked ?? false),
+      getLockState: jest.fn(async () => ({ state: 'locked', hasEncryptedEntries: false })),
+    };
+  }
+
+  function makeServiceWithStore(store, ptyMock, spawnMock) {
+    return new BitwardenMasterKeyService({
+      credentialStore: store,
+      auditStore,
+      itemName: ITEM_NAME,
+      _spawnBwPty: ptyMock,
+      _spawnBwPtySession: wrapPtyMockAsSession(ptyMock),
+      _spawnBw: spawnMock,
+      _acquireSessionTimeoutMs: 60_000,
+    });
+  }
+
+  it('AC11 — acquireMasterKey: unlock(persist-failed) → errorClass "persist-failed", nicht "error"', async () => {
+    const store = makePersistFailedStore();
+    const ptyMock = makePtyMock();
+    // spawnMock: Item gefunden (kein not-found), damit unlock() aufgerufen wird
+    const spawnMock = makeSpawnMock({ itemPassword: FAKE_KEY_VALUE });
+    const service = makeServiceWithStore(store, ptyMock, spawnMock);
+
+    const result = await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
+
+    expect(result.status).toBe('error');
+    expect(result.errorClass).toBe('persist-failed');
+    expect(result.errorClass).not.toBe('error');
+  });
+
+  it('AC11 — createMasterKey: unlock(persist-failed) → errorClass "persist-failed", nicht "error"', async () => {
+    const store = makePersistFailedStore();
+    const ptyMock = makePtyMock();
+    const spawnMock = makeSpawnMock(); // encode + create gelingen; unlock gibt persist-failed
+    const service = makeServiceWithStore(store, ptyMock, spawnMock);
+
+    const result = await service.createMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
+
+    expect(result.status).toBe('error');
+    expect(result.errorClass).toBe('persist-failed');
+    expect(result.errorClass).not.toBe('error');
+  });
+
+  it('AC11 — persist-failed-Reason verweist auf Persistenz-Pfad (handlungsleitend)', async () => {
+    const store = makePersistFailedStore();
+    const ptyMock = makePtyMock();
+    const spawnMock = makeSpawnMock({ itemPassword: FAKE_KEY_VALUE });
+    const service = makeServiceWithStore(store, ptyMock, spawnMock);
+
+    const result = await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
+
+    expect(result.reason).toBeDefined();
+    // Reason soll auf CRED_ENV_PATH/Volume/Persistenz verweisen (handlungsleitend, nicht generisch)
+    const reasonLower = result.reason.toLowerCase();
+    expect(
+      reasonLower.includes('cred_env_path') ||
+      reasonLower.includes('persistenz') ||
+      reasonLower.includes('volume') ||
+      reasonLower.includes('persistiert') ||
+      reasonLower.includes('gespeichert')
+    ).toBe(true);
+  });
+
+  it('AC12 — persist-failed-Reason enthält weder Master-Key noch Master-Passwort (Floor)', async () => {
+    const store = makePersistFailedStore();
+    const ptyMock = makePtyMock();
+    // Simuliere: bw liefert FAKE_KEY_VALUE als Item-Passwort
+    const spawnMock = makeSpawnMock({ itemPassword: FAKE_KEY_VALUE });
+    const service = makeServiceWithStore(store, ptyMock, spawnMock);
+
+    const acquireResult = await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
+    // Weder FAKE_KEY_VALUE (Master-Key) noch FAKE_PASSWORD (BW-Master-Passwort) in reason/errorClass
+    expect(acquireResult.reason).not.toContain(FAKE_KEY_VALUE);
+    expect(acquireResult.reason).not.toContain(FAKE_PASSWORD);
+    expect(JSON.stringify(acquireResult)).not.toContain(FAKE_KEY_VALUE);
+    expect(JSON.stringify(acquireResult)).not.toContain(FAKE_PASSWORD);
+
+    // Dasselbe für createMasterKey
+    const createStore = makePersistFailedStore();
+    const spawnMock2 = makeSpawnMock(); // create gelingt, unlock gibt persist-failed
+    const service2 = makeServiceWithStore(createStore, ptyMock, spawnMock2);
+    const createResult = await service2.createMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
+
+    expect(createResult.reason).not.toContain(FAKE_PASSWORD);
+    expect(JSON.stringify(createResult)).not.toContain(FAKE_PASSWORD);
+  });
+
+  it('AC11 — Regression: normaler unlock-Erfolg bleibt { status: "found" } (kein Regressionsfehler)', async () => {
+    // Stellt sicher, dass die neue persist-failed-Prüfung den Erfolgspfad nicht stört
+    const store = makePersistFailedStore({ unlockResult: { ok: true }, isUnlocked: true });
+    const ptyMock = makePtyMock();
+    const spawnMock = makeSpawnMock({ itemPassword: FAKE_KEY_VALUE });
+    const service = makeServiceWithStore(store, ptyMock, spawnMock);
+
+    const result = await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
+
+    expect(result.status).toBe('found');
+  });
+
+  it('AC11 — Regression: createMasterKey normaler Erfolg bleibt { status: "created" } (kein Regressionsfehler)', async () => {
+    const store = makePersistFailedStore({ unlockResult: { ok: true }, isUnlocked: true });
+    const ptyMock = makePtyMock();
+    const spawnMock = makeSpawnMock();
+    const service = makeServiceWithStore(store, ptyMock, spawnMock);
+
+    const result = await service.createMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
+
+    expect(result.status).toBe('created');
   });
 });
