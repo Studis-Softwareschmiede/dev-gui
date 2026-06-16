@@ -20,11 +20,11 @@ labels:
 github_issue: 285
 github_url: https://github.com/Studis-Softwareschmiede/dev-gui/issues/285
 size_est: M
-dispo_est: null
+dispo_est: 5
 dispo_act: null
 dispo_forecast: null
-estimate_note: null
-confidence: null
+estimate_note: 'Backup-Engine: GPG-symmetrisch (Passphrase nicht über Argv: fd/stdin), Store-Write-Hook, Retention-Aufräumlogik, Stufen-Response; sicherheitsintensive Testtiefe. Oberes Ende M (5 EP).'
+confidence: low
 branch: null
 pr: null
 blocked_reason: null

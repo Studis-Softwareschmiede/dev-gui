@@ -17,12 +17,12 @@ labels:
 - ui
 github_issue: 286
 github_url: https://github.com/Studis-Softwareschmiede/dev-gui/issues/286
-size_est: M
-dispo_est: null
+size_est: L
+dispo_est: 9
 dispo_act: null
 dispo_forecast: null
-estimate_note: null
-confidence: null
+estimate_note: 'Off-Host: S3/SFTP-Client (SDK, Retry, Mock-Tests) + Settings-UI (A11y, Status-Kachel) + zweistufige Quittung + Remote-Creds write-only; zwei Schichten mit eigenem Security-Floor → L (9 EP). Split Backend/Frontend empfohlen (S-141a/S-141b).'
+confidence: low
 branch: null
 pr: null
 blocked_reason: null
