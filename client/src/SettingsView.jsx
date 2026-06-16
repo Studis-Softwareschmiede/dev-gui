@@ -2105,6 +2105,10 @@ function SshKeysSection({ sshKeys, setSshKeys, onSaved }) {
  * AC5a  — email-otp-required/email-otp-invalid → EIGENES E-Mail-OTP-Feld mit eigener Meldung
  *          (bitwarden-new-device-otp); textlich UNTERSCHIEDLICH von 2FA-Fall.
  * AC9   — Klartext nach Submit verworfen; kein console.log.
+ * AC11  — Master-Passwort bleibt bei Retry-Antworten (twofa-/email-otp-required/invalid)
+ *          erhalten; nur bei terminalem Ausgang (Erfolg/Fehler) verworfen.
+ * AC12  — Show/Hide-Toggle (showPassword-State): type=password ↔ type=text; A11y-Button
+ *          mit zustandsabhängigem aria-label, Touch-Target ≥ 44 px.
  *
  * @param {{
  *   onSuccess: () => void,
@@ -2115,6 +2119,8 @@ function SshKeysSection({ sshKeys, setSshKeys, onSaved }) {
 function BitwardenUnlockDialog({ onSuccess, onClose, fetchFn }) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  // AC12: Show/Hide-Toggle für Master-Passwort (default verborgen)
+  const [showPassword, setShowPassword] = useState(false);
   const [twofa, setTwofa] = useState('');
   const [showTwofa, setShowTwofa] = useState(false);
   // AC5a (bitwarden-new-device-otp): eigener State für E-Mail-OTP — GETRENNT von TOTP-2FA
@@ -2232,14 +2238,10 @@ function BitwardenUnlockDialog({ onSuccess, onClose, fetchFn }) {
       return;
     }
 
-    // AC9: Klartext nach terminalem Submit verwerfen (Security-Floor)
-    // E-Mail-OTP-Code wird nach Submit verworfen — nächster Versuch braucht neuen Code (AC7)
-    setPassword('');
-    setTwofa('');
-    setEmailOtp('');
-
     // AC5: 2FA-Fehler → 2FA-Feld erzwingen + Fehlermeldung (TOTP-Flow — UNVERÄNDERT, AC4)
+    // AC11: Retry-Fall — Master-Passwort NICHT leeren; nur verbrauchten Code leeren
     if (!result.ok && (result.errorClass === 'twofa-required' || result.errorClass === 'twofa-invalid')) {
+      setTwofa('');
       setShowTwofa(true);
       const msg = result.errorClass === 'twofa-invalid'
         ? '2FA-Code ungültig oder abgelaufen. Bitte erneut eingeben.'
@@ -2249,8 +2251,10 @@ function BitwardenUnlockDialog({ onSuccess, onClose, fetchFn }) {
     }
 
     // AC5a (bitwarden-new-device-otp): E-Mail-OTP-Fehler → EIGENES Feld einblenden
+    // AC11: Retry-Fall — Master-Passwort NICHT leeren; nur verbrauchten OTP-Code leeren
     // Meldung textlich UNTERSCHIEDLICH vom 2FA-Fall (AC5 spec)
     if (!result.ok && (result.errorClass === 'email-otp-required' || result.errorClass === 'email-otp-invalid')) {
+      setEmailOtp('');
       setShowEmailOtp(true);
       const msg = result.errorClass === 'email-otp-invalid'
         ? 'Der eingegebene Code ist ungültig oder abgelaufen. Bitte erneut eingeben.'
@@ -2258,6 +2262,12 @@ function BitwardenUnlockDialog({ onSuccess, onClose, fetchFn }) {
       setFieldError({ field: 'emailOtp', msg });
       return;
     }
+
+    // AC6/AC11: terminaler Fehler — Klartext nach terminalem Submit verwerfen (Security-Floor)
+    // E-Mail-OTP-Code wird nach Submit verworfen — nächster Versuch braucht neuen Code (AC7)
+    setPassword('');
+    setTwofa('');
+    setEmailOtp('');
 
     // AC6: Fehlerklassen → klare Meldung ohne Geheimnis-Leak
     const errorMessages = {
@@ -2429,24 +2439,40 @@ function BitwardenUnlockDialog({ onSuccess, onClose, fetchFn }) {
               )}
             </div>
 
-            {/* Master-Passwort-Feld — AC2: type=password, autoComplete=off */}
+            {/* Master-Passwort-Feld — AC2: type=password, autoComplete=off
+                AC12: Show/Hide-Toggle schaltet type password ↔ text; Klartext nur im Feld,
+                      nie in Log/URL/Response. */}
             <div style={unlockDialogStyles.fieldRow}>
               <label htmlFor="bw-unlock-password" style={unlockDialogStyles.label}>
                 Master-Passwort <span aria-hidden="true" style={unlockDialogStyles.required}>*</span>
               </label>
-              <input
-                id="bw-unlock-password"
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Bitwarden Master-Passwort"
-                style={unlockDialogStyles.input}
-                aria-required="true"
-                aria-describedby={passwordErrorId ?? (error ? ERROR_ID : undefined)}
-                autoComplete="off"
-                data-lpignore="true"
-                disabled={submitting}
-              />
+              <div style={unlockDialogStyles.passwordWrapper}>
+                <input
+                  id="bw-unlock-password"
+                  type={showPassword ? 'text' : 'password'}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="Bitwarden Master-Passwort"
+                  style={unlockDialogStyles.inputInWrapper}
+                  aria-required="true"
+                  aria-describedby={passwordErrorId ?? (error ? ERROR_ID : undefined)}
+                  autoComplete="off"
+                  data-lpignore="true"
+                  disabled={submitting}
+                />
+                {/* AC12: A11y-konformer Toggle-Button — zustandsabhängiges aria-label, Touch-Target ≥ 44 px */}
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((v) => !v)}
+                  style={unlockDialogStyles.passwordToggle}
+                  aria-label={showPassword ? 'Passwort verbergen' : 'Passwort anzeigen'}
+                  title={showPassword ? 'Passwort verbergen' : 'Passwort anzeigen'}
+                  tabIndex={0}
+                  disabled={submitting}
+                >
+                  <span aria-hidden="true">{showPassword ? '🙈' : '👁'}</span>
+                </button>
+              </div>
               {fieldError?.field === 'password' && (
                 <p id={PASSWORD_ERROR_ID} style={unlockDialogStyles.fieldError} role="alert">
                   {fieldError.msg}
@@ -3525,6 +3551,42 @@ const unlockDialogStyles = {
     fontSize: 14,
     boxSizing: 'border-box',
     minHeight: 44,
+  },
+  // AC12: Wrapper für Passwort-Feld + Show/Hide-Toggle nebeneinander
+  passwordWrapper: {
+    display: 'flex',
+    alignItems: 'stretch',
+    gap: 0,
+  },
+  // AC12: Passwort-Input im Wrapper (kein width:100% — Toggle-Button daneben)
+  inputInWrapper: {
+    flex: 1,
+    padding: '9px 12px',
+    background: '#1e293b',
+    color: '#e5e7eb',
+    border: '1px solid #334155',
+    borderRight: 'none',
+    borderRadius: '4px 0 0 4px',
+    fontSize: 14,
+    boxSizing: 'border-box',
+    minHeight: 44,
+  },
+  // AC12: Toggle-Button — A11y-konform, Touch-Target ≥ 44 px
+  passwordToggle: {
+    padding: '0 12px',
+    background: '#1e293b',
+    color: '#9ca3af',
+    border: '1px solid #334155',
+    borderLeft: 'none',
+    borderRadius: '0 4px 4px 0',
+    fontSize: 16,
+    cursor: 'pointer',
+    minWidth: 44,
+    minHeight: 44,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
   },
   fieldError: {
     margin: '2px 0 0',

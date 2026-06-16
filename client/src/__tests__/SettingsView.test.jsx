@@ -2,7 +2,7 @@
  * SettingsView.test.jsx — Unit-Tests für SettingsView (Credentials AC1–AC8, SSH-Keys AC1–AC6,
  * Workspace-Pfad AC1 + UI-Anteil AC3, SSH-Keypair-Generierung + Export AC1/AC3/AC4/AC6/AC7/AC8,
  * SSH-Key-Rotation AC1/AC5/AC7 — #119, bitwarden-new-device-otp Frontend AC1/AC3–AC7/AC9 — #204,
- * workspace-health-hinweis AC3 Frontend).
+ * workspace-health-hinweis AC3 Frontend, credential-unlock-dialog AC11/AC12 — #268).
  *
  * Covers (settings-credentials + settings-shell):
  *   AC1  — Credential-Felder mit Status (gesetzt/nicht gesetzt); kein Klartext
@@ -52,7 +52,7 @@
  *   ROT-AC7 — Kein Private-Key in Rotation-Anzeige; nur Public-Key/Status sichtbar.
  *             Labels programmatisch zugeordnet; Touch-Targets ≥ 44 px.
  *
- * Covers (credential-unlock-dialog #185) — Frontend-ACs:
+ * Covers (credential-unlock-dialog #185 + #268) — Frontend-ACs:
  *   AC1  — Bei state:"locked" → Button „Bitwarden verbinden" sichtbar; bei "unlocked" → kein Button, aber Status-Zeile mit Quelle sichtbar (ab #192).
  *   AC2  — Dialog modal (role=dialog/aria-modal), Labels, Fehler programmatisch zugeordnet (aria-describedby/role=alert),
  *           Fokusführung beim Öffnen, Touch-Targets ≥ 44 px; Fokus-Trap (Tab/Shift+Tab/Escape) — WCAG 2.1.2.
@@ -61,6 +61,10 @@
  *   AC5  — twofa-required/twofa-invalid → 2FA-Feld erscheint + feldzugeordnete Fehlermeldung (role=alert).
  *   AC9  — Passwort-Feld type=password/autoComplete=off (Frontend-Floor, testbar via DOM-Attribute).
  *   AC10 — Nach erfolgreichem Unlock: Dialog geschlossen, Unlock-Bereich verschwindet, Status neu geladen.
+ *   AC11 — Bei Retry-Antworten (twofa-required/twofa-invalid/email-otp-required/email-otp-invalid) bleibt
+ *           das Passwort-Feld befüllt; nach Erfolg / terminalem Fehler (auth-failed) ist es leer. (#268)
+ *   AC12 — Show/Hide-Toggle: default type=password; Button mit aria-label „Passwort anzeigen"/„Passwort verbergen"
+ *           schaltet auf type=text und zurück. (#268)
  * Backend-ACs (AC3/AC6/AC7/AC8) sind in Backend-Tests abgedeckt, nicht hier.
  *
  * Covers (bitwarden-new-device-otp #204) — Frontend-ACs:
@@ -4326,5 +4330,224 @@ describe('SettingsView — workspace-health-hinweis AC3: Health-Status-Block in 
 
     // Kein spezifischer Health-Block-Absturz prüfen — nur kein Crash
     expect(container.querySelector('h1')).not.toBeNull();
+  });
+});
+
+// ── credential-unlock-dialog AC11 + AC12 (#268) ───────────────────────────────
+
+/**
+ * Hilfsfunktion: Dialog öffnen und E-Mail + Passwort befüllen.
+ * Gibt den getByRole-Helper zurück.
+ */
+async function openDialogWithCredentials(fetchFn, email = 'user@example.com', password = 'my-password') {
+  const utils = renderView(fetchFn);
+  const { getByRole } = utils;
+  await waitFor(() => { getByRole('button', { name: /bitwarden verbinden/i }); });
+  await act(async () => {
+    fireEvent.click(getByRole('button', { name: /bitwarden verbinden/i }));
+  });
+  await act(async () => {
+    fireEvent.change(document.getElementById('bw-unlock-email'), {
+      target: { value: email },
+    });
+    fireEvent.change(document.getElementById('bw-unlock-password'), {
+      target: { value: password },
+    });
+  });
+  return utils;
+}
+
+/** Klickt den Submit-Button im Dialog. */
+async function clickSubmit(getByRole) {
+  await act(async () => {
+    const dialog = getByRole('dialog');
+    const submitBtn = Array.from(dialog.querySelectorAll('button')).find(
+      (b) => b.textContent?.match(/^verbinden$/i),
+    );
+    if (submitBtn) fireEvent.click(submitBtn);
+  });
+}
+
+describe('SettingsView — Bitwarden-Unlock-Dialog AC11 (Passwort bei Retry erhalten) #268', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('AC11 — nach email-otp-required: Passwort-Feld bleibt befüllt', async () => {
+    const fetchFn = makeFetch({
+      credentialStatus: { state: 'locked', hasEncryptedEntries: false },
+      credentialUnlockResponse: 'email-otp-required',
+    });
+    const { getByRole } = await openDialogWithCredentials(fetchFn);
+    await clickSubmit(getByRole);
+    await waitFor(() => {
+      const pwdInput = document.getElementById('bw-unlock-password');
+      expect(pwdInput.value).toBe('my-password');
+    });
+  });
+
+  it('AC11 — nach email-otp-invalid: Passwort-Feld bleibt befüllt', async () => {
+    const fetchFn = makeFetch({
+      credentialStatus: { state: 'locked', hasEncryptedEntries: false },
+      credentialUnlockResponse: 'email-otp-invalid',
+    });
+    const { getByRole } = await openDialogWithCredentials(fetchFn);
+    await clickSubmit(getByRole);
+    await waitFor(() => {
+      const pwdInput = document.getElementById('bw-unlock-password');
+      expect(pwdInput.value).toBe('my-password');
+    });
+  });
+
+  it('AC11 — nach twofa-required: Passwort-Feld bleibt befüllt', async () => {
+    const fetchFn = makeFetch({
+      credentialStatus: { state: 'locked', hasEncryptedEntries: false },
+      credentialUnlockResponse: 'twofa-required',
+    });
+    const { getByRole } = await openDialogWithCredentials(fetchFn);
+    await clickSubmit(getByRole);
+    await waitFor(() => {
+      const pwdInput = document.getElementById('bw-unlock-password');
+      expect(pwdInput.value).toBe('my-password');
+    });
+  });
+
+  it('AC11 — nach twofa-invalid: Passwort-Feld bleibt befüllt', async () => {
+    const fetchFn = makeFetch({
+      credentialStatus: { state: 'locked', hasEncryptedEntries: false },
+      credentialUnlockResponse: 'twofa-invalid',
+    });
+    const { getByRole } = await openDialogWithCredentials(fetchFn);
+    await clickSubmit(getByRole);
+    await waitFor(() => {
+      const pwdInput = document.getElementById('bw-unlock-password');
+      expect(pwdInput.value).toBe('my-password');
+    });
+  });
+
+  it('AC11 — nach Erfolg (unlocked): Passwort-Feld ist leer (terminaler Ausgang)', async () => {
+    // credentialUnlockResponse: null → DEFAULT_UNLOCK_SUCCESS ({ ok: true, state: 'unlocked' })
+    const fetchFn = makeFetch({
+      credentialStatus: { state: 'locked', hasEncryptedEntries: false },
+      credentialUnlockResponse: null,
+    });
+    const { getByRole } = await openDialogWithCredentials(fetchFn);
+    await clickSubmit(getByRole);
+    // Nach Erfolg schließt der Dialog — das Passwort-Feld verschwindet aus dem DOM.
+    // Wir prüfen, dass der Dialog nicht mehr sichtbar ist (onSuccess wurde gerufen → kein Dialog mehr).
+    await waitFor(() => {
+      expect(document.getElementById('bw-unlock-password')).toBeNull();
+    });
+  });
+
+  it('AC11 — nach auth-failed (terminaler Fehler): Passwort-Feld ist leer', async () => {
+    const fetchFn = makeFetch({
+      credentialStatus: { state: 'locked', hasEncryptedEntries: false },
+      credentialUnlockResponse: 'auth-failed',
+    });
+    const { getByRole } = await openDialogWithCredentials(fetchFn);
+    await clickSubmit(getByRole);
+    await waitFor(() => {
+      const pwdInput = document.getElementById('bw-unlock-password');
+      expect(pwdInput.value).toBe('');
+    });
+  });
+});
+
+describe('SettingsView — Bitwarden-Unlock-Dialog AC12 (Show/Hide-Toggle) #268', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('AC12 — Passwort-Feld startet mit type=password (Default)', async () => {
+    const fetchFn = makeFetch({
+      credentialStatus: { state: 'locked', hasEncryptedEntries: false },
+    });
+    await openDialogWithCredentials(fetchFn);
+    await waitFor(() => {
+      const pwdInput = document.getElementById('bw-unlock-password');
+      expect(pwdInput.type).toBe('password');
+    });
+  });
+
+  it('AC12 — Toggle-Button mit aria-label „Passwort anzeigen" vorhanden (Default-Zustand)', async () => {
+    const fetchFn = makeFetch({
+      credentialStatus: { state: 'locked', hasEncryptedEntries: false },
+    });
+    const { getByRole } = await openDialogWithCredentials(fetchFn);
+    await waitFor(() => {
+      const toggleBtn = getByRole('button', { name: /passwort anzeigen/i });
+      expect(toggleBtn).toBeTruthy();
+    });
+  });
+
+  it('AC12 — Klick auf Toggle schaltet type zu text', async () => {
+    const fetchFn = makeFetch({
+      credentialStatus: { state: 'locked', hasEncryptedEntries: false },
+    });
+    const { getByRole } = await openDialogWithCredentials(fetchFn);
+    await waitFor(() => { getByRole('button', { name: /passwort anzeigen/i }); });
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /passwort anzeigen/i }));
+    });
+    await waitFor(() => {
+      const pwdInput = document.getElementById('bw-unlock-password');
+      expect(pwdInput.type).toBe('text');
+    });
+  });
+
+  it('AC12 — Toggle-Button trägt nach Klick aria-label „Passwort verbergen"', async () => {
+    const fetchFn = makeFetch({
+      credentialStatus: { state: 'locked', hasEncryptedEntries: false },
+    });
+    const { getByRole } = await openDialogWithCredentials(fetchFn);
+    await waitFor(() => { getByRole('button', { name: /passwort anzeigen/i }); });
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /passwort anzeigen/i }));
+    });
+    await waitFor(() => {
+      const toggleBtn = getByRole('button', { name: /passwort verbergen/i });
+      expect(toggleBtn).toBeTruthy();
+    });
+  });
+
+  it('AC12 — zweiter Klick auf Toggle schaltet zurück zu type=password', async () => {
+    const fetchFn = makeFetch({
+      credentialStatus: { state: 'locked', hasEncryptedEntries: false },
+    });
+    const { getByRole } = await openDialogWithCredentials(fetchFn);
+    await waitFor(() => { getByRole('button', { name: /passwort anzeigen/i }); });
+    // Erstes Klick: anzeigen
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /passwort anzeigen/i }));
+    });
+    await waitFor(() => { getByRole('button', { name: /passwort verbergen/i }); });
+    // Zweites Klick: verbergen
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /passwort verbergen/i }));
+    });
+    await waitFor(() => {
+      const pwdInput = document.getElementById('bw-unlock-password');
+      expect(pwdInput.type).toBe('password');
+    });
+  });
+
+  it('AC12 — Toggle-Button trägt nach zweitem Klick wieder aria-label „Passwort anzeigen"', async () => {
+    const fetchFn = makeFetch({
+      credentialStatus: { state: 'locked', hasEncryptedEntries: false },
+    });
+    const { getByRole } = await openDialogWithCredentials(fetchFn);
+    await waitFor(() => { getByRole('button', { name: /passwort anzeigen/i }); });
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /passwort anzeigen/i }));
+    });
+    await waitFor(() => { getByRole('button', { name: /passwort verbergen/i }); });
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /passwort verbergen/i }));
+    });
+    await waitFor(() => {
+      const toggleBtn = getByRole('button', { name: /passwort anzeigen/i });
+      expect(toggleBtn).toBeTruthy();
+    });
   });
 });
