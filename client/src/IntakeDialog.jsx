@@ -18,6 +18,13 @@
  *         `/agent-flow:requirement` gehängt wird. Leerer Text → kein Request.
  * AC4  — Nach erfolgreichem Submit (202) wechselt die Ansicht in den Terminal-Pane
  *         (via onNavigate('factory')). Gilt für beide Trigger (S-133).
+ * AC6  — „Let Claude proof"-Button pro Freitextfeld (primär + optional).
+ *         Klick → POST /api/assist/refine { text, kind } → 200 { refinedText, openQuestions[] }.
+ *         refinedText wird editierbar angezeigt; „Übernehmen" ersetzt den Feldinhalt.
+ *         openQuestions als zugängliche <ul>-Liste (Frage + Begründung + optionale Optionen).
+ *         Leer-Guard: leerer/whitespace-only Text → Button disabled (kein Request).
+ *         Ladetindikator während des Requests; 400/502 → klare Fehlermeldung, Text unverändert.
+ *         Proof-Pfad ist UNABHÄNGIG vom Submit (kein Lock, keine Submit-Logik-Änderung).
  * AC9  — Cost-Mode-Schalter für `requirement` analog zu TriggerPanel (4-Wege
  *         low-cost|balanced|max-quality|frontier, Default balanced → kein --cost-Flag).
  *         Shared via costMode.js (keine Duplikation).
@@ -37,7 +44,7 @@
  *   - React escaped alle string-Renders per Default (security/R02).
  *   - Input wird client-seitig bereinigt (collapseToLine) — keine Steuerzeichen.
  *
- * Covers (fabric-intake-dialog): AC1, AC2, AC2b, AC4, AC9
+ * Covers (fabric-intake-dialog): AC1, AC2, AC2b, AC4, AC6, AC9
  *
  * @module IntakeDialog
  */
@@ -126,6 +133,147 @@ export function IntakeDialog({
     setIdeaText(val);
     if (isNew && onIdeaTextChange) onIdeaTextChange(val);
   }, [isNew, onIdeaTextChange]);
+
+  // ── Proof handlers (AC6) ─────────────────────────────────────────────────
+
+  /**
+   * Resolve the `kind` parameter for /api/assist/refine based on dialog mode (AC6).
+   * new-mode → 'idea'; change-mode → 'change'.
+   */
+  const proofKind = isNew ? 'idea' : 'change';
+
+  /**
+   * Handle "Let Claude proof" for the primary field (AC6).
+   * Leer-Guard: no-op when text collapses to empty.
+   */
+  const handlePrimaryProof = useCallback(async () => {
+    const trimmed = ideaText.trim();
+    if (!trimmed) return; // Leer-Guard (AC6)
+
+    setPrimaryProofState('loading');
+    setPrimaryProofError(null);
+    setPrimaryProofResult(null);
+
+    let res;
+    try {
+      res = await fetchWithTimeout(
+        fetchFnRef.current,
+        '/api/assist/refine',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: trimmed, kind: proofKind }),
+        },
+        30_000, // claude -p can take longer than command POST
+      );
+    } catch {
+      setPrimaryProofState('error');
+      setPrimaryProofError('Netzwerkfehler beim Proof-Aufruf. Bitte erneut versuchen.');
+      return;
+    }
+
+    if (res.status === 200) {
+      let data;
+      try { data = await res.json(); } catch {
+        setPrimaryProofState('error');
+        setPrimaryProofError('Ungültige Antwort vom Server.');
+        return;
+      }
+      setPrimaryProofResult(data);
+      setPrimaryRefinedEdit(data.refinedText ?? '');
+      setPrimaryProofState('done');
+      return;
+    }
+
+    // 400 / 502 → Fehlermeldung, Feldinhalt bleibt unverändert (AC6)
+    if (res.status === 400) {
+      setPrimaryProofState('error');
+      setPrimaryProofError('Ungültige Anfrage (400). Bitte Inhalt prüfen.');
+      return;
+    }
+    if (res.status === 502) {
+      setPrimaryProofState('error');
+      setPrimaryProofError('Proof-Dienst nicht verfügbar (502). Bitte später erneut versuchen.');
+      return;
+    }
+    setPrimaryProofState('error');
+    setPrimaryProofError('Serverfehler beim Proof-Aufruf. Bitte erneut versuchen.');
+  }, [ideaText, proofKind]);
+
+  /**
+   * Handle "Let Claude proof" for the optional field (AC6).
+   * Leer-Guard: no-op when text collapses to empty.
+   */
+  const handleOptionalProof = useCallback(async () => {
+    const trimmed = optionalText.trim();
+    if (!trimmed) return; // Leer-Guard (AC6)
+
+    setOptionalProofState('loading');
+    setOptionalProofError(null);
+    setOptionalProofResult(null);
+
+    let res;
+    try {
+      res = await fetchWithTimeout(
+        fetchFnRef.current,
+        '/api/assist/refine',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: trimmed, kind: proofKind }),
+        },
+        30_000,
+      );
+    } catch {
+      setOptionalProofState('error');
+      setOptionalProofError('Netzwerkfehler beim Proof-Aufruf. Bitte erneut versuchen.');
+      return;
+    }
+
+    if (res.status === 200) {
+      let data;
+      try { data = await res.json(); } catch {
+        setOptionalProofState('error');
+        setOptionalProofError('Ungültige Antwort vom Server.');
+        return;
+      }
+      setOptionalProofResult(data);
+      setOptionalRefinedEdit(data.refinedText ?? '');
+      setOptionalProofState('done');
+      return;
+    }
+
+    if (res.status === 400) {
+      setOptionalProofState('error');
+      setOptionalProofError('Ungültige Anfrage (400). Bitte Inhalt prüfen.');
+      return;
+    }
+    if (res.status === 502) {
+      setOptionalProofState('error');
+      setOptionalProofError('Proof-Dienst nicht verfügbar (502). Bitte später erneut versuchen.');
+      return;
+    }
+    setOptionalProofState('error');
+    setOptionalProofError('Serverfehler beim Proof-Aufruf. Bitte erneut versuchen.');
+  }, [optionalText, proofKind]);
+
+  // ── Proof state (AC6) ────────────────────────────────────────────────────
+  /**
+   * Proof state per field: 'idle' | 'loading' | 'done' | 'error'.
+   * 'primary' = primary idea/change textarea; 'optional' = secondary textarea.
+   */
+  const [primaryProofState, setPrimaryProofState]     = useState('idle');
+  /** Proof error message for primary field */
+  const [primaryProofError, setPrimaryProofError]     = useState(null);
+  /** Parsed result from /api/assist/refine for primary field */
+  const [primaryProofResult, setPrimaryProofResult]   = useState(null);
+  /** Editable refinedText for primary field (user can tweak before adopting) */
+  const [primaryRefinedEdit, setPrimaryRefinedEdit]   = useState('');
+
+  const [optionalProofState, setOptionalProofState]   = useState('idle');
+  const [optionalProofError, setOptionalProofError]   = useState(null);
+  const [optionalProofResult, setOptionalProofResult] = useState(null);
+  const [optionalRefinedEdit, setOptionalRefinedEdit] = useState('');
 
   // ── Submit state ─────────────────────────────────────────────────────────
   /** 'idle' | 'submitting' | 'error' */
@@ -366,6 +514,34 @@ export function IntakeDialog({
           }
         </div>
 
+        {/* AC6 — „Let Claude proof"-Button for primary field.
+            Leer-Guard: disabled when field empty/whitespace-only.
+            Race-Guard: disabled while loading (prevents double-POST on double-click).
+            Independent from Submit (no Lock, no submit-logic change). */}
+        <ProofButton
+          fieldId="primary"
+          disabled={!ideaText.trim() || isSubmitting || primaryProofState === 'loading'}
+          loading={primaryProofState === 'loading'}
+          onProof={handlePrimaryProof}
+        />
+
+        {/* AC6 — Proof result panel for primary field */}
+        {(primaryProofState === 'done' || primaryProofState === 'error') && (
+          <ProofResultPanel
+            fieldId="primary"
+            proofState={primaryProofState}
+            proofError={primaryProofError}
+            proofResult={primaryProofResult}
+            refinedEdit={primaryRefinedEdit}
+            onRefinedEditChange={setPrimaryRefinedEdit}
+            onAdopt={() => {
+              handleIdeaTextChange(primaryRefinedEdit);
+              setPrimaryProofState('idle');
+              setPrimaryProofResult(null);
+            }}
+          />
+        )}
+
         {/* Optional secondary field — I3: aria-describedby analogous to primary.
             Hidden in new-mode step 1 (only the idea matters for step 2; optional
             fields are for step 2 / change-mode). */}
@@ -389,6 +565,32 @@ export function IntakeDialog({
             <div id="intake-optional-hint" style={styles.hint}>
               Ergänzende Angaben — optional, wird mit dem Haupttext zusammengefasst.
             </div>
+
+            {/* AC6 — „Let Claude proof"-Button for optional field.
+                Race-Guard: disabled while loading (prevents double-POST on double-click). */}
+            <ProofButton
+              fieldId="optional"
+              disabled={!optionalText.trim() || isSubmitting || optionalProofState === 'loading'}
+              loading={optionalProofState === 'loading'}
+              onProof={handleOptionalProof}
+            />
+
+            {/* AC6 — Proof result panel for optional field */}
+            {(optionalProofState === 'done' || optionalProofState === 'error') && (
+              <ProofResultPanel
+                fieldId="optional"
+                proofState={optionalProofState}
+                proofError={optionalProofError}
+                proofResult={optionalProofResult}
+                refinedEdit={optionalRefinedEdit}
+                onRefinedEditChange={setOptionalRefinedEdit}
+                onAdopt={() => {
+                  setOptionalText(optionalRefinedEdit);
+                  setOptionalProofState('idle');
+                  setOptionalProofResult(null);
+                }}
+              />
+            )}
           </>
         )}
 
@@ -457,7 +659,6 @@ export function IntakeDialog({
             type="button"
             style={canSubmit ? styles.btnSubmit : styles.btnSubmitDisabled}
             disabled={!canSubmit}
-            aria-disabled={!canSubmit}
             aria-label={
               isSubmitting
                 ? `${submitLabel} — wird gesendet`
@@ -472,6 +673,169 @@ export function IntakeDialog({
         </div>
       </div>
     </section>
+  );
+}
+
+// ── ProofButton component (AC6) ───────────────────────────────────────────────
+
+/**
+ * „Let Claude proof"-Button for a single field (AC6).
+ *
+ * @param {{
+ *   fieldId: 'primary' | 'optional',
+ *   disabled: boolean,
+ *   loading: boolean,
+ *   onProof: () => void,
+ * }} props
+ */
+function ProofButton({ fieldId, disabled, loading, onProof }) {
+  const label = loading
+    ? 'Let Claude proof — wird geladen …'
+    : 'Let Claude proof';
+
+  return (
+    <button
+      type="button"
+      style={disabled ? styles.btnProofDisabled : styles.btnProof}
+      disabled={disabled}
+      aria-label={`${label} (${fieldId === 'primary' ? 'Hauptfeld' : 'Optionales Feld'})`}
+      data-testid={`proof-btn-${fieldId}`}
+      onClick={onProof}
+    >
+      {loading ? 'Wird geprüft …' : 'Let Claude proof'}
+    </button>
+  );
+}
+
+// ── ProofResultPanel component (AC6) ─────────────────────────────────────────
+
+/**
+ * Displays the result (or error) of a "Let Claude proof" call (AC6).
+ *
+ * refinedText is shown in an editable textarea; „Übernehmen" adopts it
+ * into the source field.
+ * openQuestions are rendered as a semantic <ul> list (not just visual).
+ * Error messages use role="alert" and include text + icon (not color alone).
+ *
+ * @param {{
+ *   fieldId: 'primary' | 'optional',
+ *   proofState: 'done' | 'error',
+ *   proofError: string|null,
+ *   proofResult: {refinedText:string, openQuestions:Array, notes?:string}|null,
+ *   refinedEdit: string,
+ *   onRefinedEditChange: (val: string) => void,
+ *   onAdopt: () => void,
+ * }} props
+ */
+function ProofResultPanel({
+  fieldId,
+  proofState,
+  proofError,
+  proofResult,
+  refinedEdit,
+  onRefinedEditChange,
+  onAdopt,
+}) {
+  const refinedId     = `proof-refined-${fieldId}`;
+  const questionsId   = `proof-questions-${fieldId}`;
+  const errorId       = `proof-error-${fieldId}`;
+  const panelTestId   = `proof-result-${fieldId}`;
+
+  return (
+    <div
+      style={styles.proofResultPanel}
+      aria-live="polite"
+      aria-atomic="false"
+      data-testid={panelTestId}
+    >
+      <div style={styles.proofResultHeader}>
+        <span style={styles.proofResultTitle}>Claude Proof</span>
+        {proofState === 'error' && (
+          <span style={styles.proofErrorBadge} aria-hidden="true">Fehler</span>
+        )}
+        {proofState === 'done' && (
+          <span style={styles.proofDoneBadge} aria-hidden="true">Fertig</span>
+        )}
+      </div>
+
+      {/* Error state — role=alert, text label (not color alone, design.md) */}
+      {proofState === 'error' && proofError && (
+        <div
+          role="alert"
+          id={errorId}
+          style={styles.proofErrorMsg}
+          data-testid={`proof-error-${fieldId}`}
+        >
+          <span aria-hidden="true">&#x26A0; </span>
+          {proofError}
+        </div>
+      )}
+
+      {/* Done state — refinedText (editable) + openQuestions list */}
+      {proofState === 'done' && proofResult && (
+        <>
+          {/* refinedText — editable textarea so user can adjust before adopting */}
+          <label style={styles.proofLabel} htmlFor={refinedId}>
+            Verfeinerte Formulierung <span style={styles.optional}>(bearbeitbar)</span>
+          </label>
+          <textarea
+            id={refinedId}
+            style={styles.proofRefinedTextarea}
+            value={refinedEdit}
+            rows={4}
+            aria-describedby={questionsId}
+            data-testid={`proof-refined-${fieldId}`}
+            onChange={(e) => onRefinedEditChange(e.target.value)}
+          />
+          {/* „Übernehmen"-Button — replaces source field content (AC6) */}
+          <button
+            type="button"
+            style={styles.btnAdopt}
+            aria-label={`Verfeinerten Text ins ${fieldId === 'primary' ? 'Hauptfeld' : 'optionale Feld'} übernehmen`}
+            data-testid={`proof-adopt-${fieldId}`}
+            onClick={onAdopt}
+          >
+            Übernehmen
+          </button>
+
+          {/* openQuestions — semantic <ul> list (not just visual, AC6 + A11y) */}
+          {proofResult.openQuestions && proofResult.openQuestions.length > 0 && (
+            <div id={questionsId} style={styles.proofQuestionsBox}>
+              <p style={styles.proofQuestionsTitle}>
+                Offene Rückfragen:
+              </p>
+              <ul
+                style={styles.proofQuestionsList}
+                aria-label="Offene Rückfragen"
+                data-testid={`proof-questions-${fieldId}`}
+              >
+                {proofResult.openQuestions.map((q, i) => (
+                  <li
+                    key={q.question}
+                    style={styles.proofQuestionItem}
+                    data-testid={`proof-question-item-${fieldId}-${i}`}
+                  >
+                    <span style={styles.proofQuestionText}>{q.question}</span>
+                    {q.why && (
+                      <span style={styles.proofQuestionWhy}>
+                        {' — '}{q.why}
+                      </span>
+                    )}
+                    {q.options && q.options.length > 0 && (
+                      <ul style={styles.proofQuestionOptions} aria-label="Optionen">
+                        {q.options.map((opt) => (
+                          <li key={opt} style={styles.proofQuestionOption}>{opt}</li>
+                        ))}
+                      </ul>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </>
+      )}
+    </div>
   );
 }
 
@@ -696,5 +1060,161 @@ const styles = {
     fontWeight: 600,
     cursor: 'not-allowed',
     minHeight: 44,
+  },
+
+  // ── AC6 Proof styles ───────────────────────────────────────────────────────
+
+  /** „Let Claude proof"-Button — enabled */
+  btnProof: {
+    padding: '5px 10px',
+    background: '#1a2a1a',
+    color: '#86efac',
+    border: '1px solid #2d5a2d',
+    borderRadius: 4,
+    fontSize: 11,
+    fontWeight: 600,
+    cursor: 'pointer',
+    alignSelf: 'flex-start',
+    minHeight: 32,
+  },
+  /** „Let Claude proof"-Button — disabled */
+  btnProofDisabled: {
+    padding: '5px 10px',
+    background: '#161616',
+    color: '#4b5563',
+    border: '1px solid #2a2a2a',
+    borderRadius: 4,
+    fontSize: 11,
+    fontWeight: 600,
+    cursor: 'not-allowed',
+    alignSelf: 'flex-start',
+    minHeight: 32,
+  },
+  /** Container for the proof result panel */
+  proofResultPanel: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 6,
+    padding: '10px 12px',
+    background: '#0d1a0d',
+    border: '1px solid #1e3b1e',
+    borderRadius: 4,
+    marginTop: 2,
+  },
+  proofResultHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+  },
+  proofResultTitle: {
+    fontSize: 11,
+    fontWeight: 600,
+    color: '#9ca3af',
+    textTransform: 'uppercase',
+    letterSpacing: '0.05em',
+    flex: 1,
+  },
+  proofDoneBadge: {
+    fontSize: 10,
+    fontWeight: 600,
+    padding: '1px 5px',
+    background: '#1a3a1a',
+    color: '#86efac',
+    borderRadius: 3,
+  },
+  proofErrorBadge: {
+    fontSize: 10,
+    fontWeight: 600,
+    padding: '1px 5px',
+    background: '#2a0f0f',
+    color: '#f87171',
+    borderRadius: 3,
+  },
+  /** Error message in proof panel — uses text label, not color alone (design.md) */
+  proofErrorMsg: {
+    padding: '6px 8px',
+    background: '#1f0f0f',
+    border: '1px solid #3f1010',
+    borderRadius: 4,
+    color: '#f87171',
+    fontSize: 12,
+  },
+  proofLabel: {
+    fontSize: 11,
+    color: '#9ca3af',
+    marginBottom: 2,
+  },
+  /** Editable textarea for refinedText (AC6 — editierbar) */
+  proofRefinedTextarea: {
+    background: '#1a2a1a',
+    color: '#d4d4d4',
+    border: '1px solid #2d5a2d',
+    borderRadius: 4,
+    padding: '6px 8px',
+    fontSize: 12,
+    fontFamily: 'system-ui, sans-serif',
+    width: '100%',
+    boxSizing: 'border-box',
+    resize: 'vertical',
+    lineHeight: 1.5,
+  },
+  /** „Übernehmen"-Button — adopts refinedText into source field */
+  btnAdopt: {
+    padding: '5px 12px',
+    background: '#1d4ed8',
+    color: '#ffffff',
+    border: 'none',
+    borderRadius: 4,
+    fontSize: 12,
+    fontWeight: 600,
+    cursor: 'pointer',
+    alignSelf: 'flex-start',
+    minHeight: 32,
+  },
+  /** Box wrapping the openQuestions list */
+  proofQuestionsBox: {
+    marginTop: 4,
+  },
+  /** Heading for the openQuestions list */
+  proofQuestionsTitle: {
+    fontSize: 11,
+    color: '#9ca3af',
+    fontWeight: 600,
+    marginBottom: 4,
+    marginTop: 0,
+  },
+  /**
+   * Semantic <ul> list for openQuestions (AC6 — zugängliche Liste, nicht nur visuell).
+   * list-style preserved so screen-readers announce list semantics.
+   */
+  proofQuestionsList: {
+    margin: 0,
+    paddingLeft: 18,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 6,
+  },
+  proofQuestionItem: {
+    fontSize: 12,
+    color: '#d4d4d4',
+    lineHeight: 1.5,
+  },
+  proofQuestionText: {
+    fontWeight: 500,
+  },
+  proofQuestionWhy: {
+    color: '#9ca3af',
+    fontSize: 11,
+    fontStyle: 'italic',
+  },
+  /** Nested <ul> for options within a question (AC6 — optionale Antwort-Optionen) */
+  proofQuestionOptions: {
+    marginTop: 4,
+    paddingLeft: 16,
+    listStyle: 'disc',
+  },
+  proofQuestionOption: {
+    fontSize: 11,
+    color: '#9ca3af',
   },
 };

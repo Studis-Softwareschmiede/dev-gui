@@ -1,7 +1,7 @@
 /**
  * IntakeDialog.test.jsx — Unit tests for IntakeDialog component (S-132 + S-133, fabric-intake-dialog).
  *
- * Covers (fabric-intake-dialog): AC1, AC2, AC2b, AC4, AC9
+ * Covers (fabric-intake-dialog): AC1, AC2, AC2b, AC4, AC6, AC9
  *   AC1  — mode switching (new vs change): correct labels/placeholders rendered;
  *           both modes render a mehrzeilige textarea.
  *           new-mode shows two-step sequence status indicator (S-133, replaces S-132 bootstrap hint).
@@ -14,6 +14,16 @@
  *   AC2b — multiline text collapsed to single line (no newlines/control chars);
  *           empty/whitespace-only text → no request fired (Senden disabled).
  *   AC4  — after 202 → onNavigate('factory') called for both triggers; no navigation on error.
+ *   AC6  — „Let Claude proof"-Button per field (primary + optional); POST /api/assist/refine
+ *           with kind='idea' (new-mode) or kind='change' (change-mode); refinedText editable +
+ *           „Übernehmen" replaces field content; openQuestions rendered as <ul> list
+ *           (including why and options); Leer-Guard (no request on empty/whitespace);
+ *           400/502 → error message (role=alert), field unchanged; Submit/Cost-Mode regression
+ *           (proof path does not break existing submit flow).
+ *           I1 Race-Guard: proof button disabled while in-flight (no double-POST on double-click)
+ *           — tested via hanging-fetch for both primary and optional fields.
+ *           S2 Loading-Indikator: button text "Wird geprüft …" + aria-label "wird geladen"
+ *           during in-flight state — tested via delayed-resolve fetch.
  *   AC9  — cost-mode selector present, default 'balanced' → no --cost flag;
  *           non-balanced cost → --cost flag appended before text.
  *           new-project (trigger1) does NOT show cost-mode (not cost-aware).
@@ -50,6 +60,10 @@ function makeFetchFn(map) {
 }
 
 function cmdResp(status, body = {}) {
+  return { ok: status >= 200 && status < 300, status, json: () => Promise.resolve(body) };
+}
+
+function refineResp(status, body = {}) {
   return { ok: status >= 200 && status < 300, status, json: () => Promise.resolve(body) };
 }
 
@@ -976,5 +990,675 @@ describe('IntakeDialog — command preview', () => {
     const { queryByTestId } = renderDialog({ mode: 'change' });
     // No text entered → preview not shown
     expect(queryByTestId('intake-preview')).toBeNull();
+  });
+});
+
+// ── AC6 — „Let Claude proof"-Button ──────────────────────────────────────────
+
+describe('IntakeDialog — AC6 "Let Claude proof" button', () => {
+  // Helper: build a fetch stub that handles both /api/assist/refine and /api/command.
+  function makeRefineAndCmdFetch({ refineStatus = 200, refineBody = {}, cmdStatus = 202 } = {}) {
+    return makeFetchFn({
+      '/api/assist/refine': () => Promise.resolve(refineResp(refineStatus, refineBody)),
+      '/api/command':       () => Promise.resolve(cmdResp(cmdStatus, {})),
+    });
+  }
+
+  // Minimal refine body with well-formed openQuestions
+  const REFINE_BODY = {
+    refinedText: 'Verfeinerte Projektidee',
+    openQuestions: [
+      { question: 'Welchen Stack bevorzugst du?', why: 'Abhängig von Team-Kenntnissen', options: ['React', 'Vue'] },
+      { question: 'Gibt es Deadlines?' },
+    ],
+  };
+
+  it('renders "Let Claude proof" button for primary field in change mode', () => {
+    const { getByTestId } = renderDialog({ mode: 'change' });
+    expect(getByTestId('proof-btn-primary')).toBeTruthy();
+  });
+
+  it('renders "Let Claude proof" button for primary field in new mode', () => {
+    const { getByTestId } = renderDialog({ mode: 'new' });
+    expect(getByTestId('proof-btn-primary')).toBeTruthy();
+  });
+
+  it('renders "Let Claude proof" button for optional field in change mode', () => {
+    const { getByTestId } = renderDialog({ mode: 'change' });
+    expect(getByTestId('proof-btn-optional')).toBeTruthy();
+  });
+
+  it('primary proof button is disabled when primary field is empty (Leer-Guard)', () => {
+    const { getByTestId } = renderDialog({ mode: 'change' });
+    const btn = getByTestId('proof-btn-primary');
+    expect(btn.disabled).toBe(true);
+  });
+
+  it('primary proof button is enabled when primary field has text', async () => {
+    const { getByTestId, getByLabelText } = renderDialog({ mode: 'change' });
+
+    await act(async () => {
+      fireEvent.change(getByLabelText(/was soll sich ändern/i), {
+        target: { value: 'Neue Funktion hinzufügen' },
+      });
+    });
+
+    await waitFor(() => {
+      expect(getByTestId('proof-btn-primary').disabled).toBe(false);
+    });
+  });
+
+  it('optional proof button is disabled when optional field is empty (Leer-Guard)', () => {
+    const { getByTestId } = renderDialog({ mode: 'change' });
+    const btn = getByTestId('proof-btn-optional');
+    expect(btn.disabled).toBe(true);
+  });
+
+  it('Leer-Guard: no POST to /api/assist/refine when primary field empty', async () => {
+    const fetchFn = makeRefineAndCmdFetch();
+    const { getByTestId } = renderDialog({ mode: 'change', fetchFn });
+
+    // Button is disabled — click should not fire request
+    await act(async () => {
+      fireEvent.click(getByTestId('proof-btn-primary'));
+    });
+
+    const refineCalls = fetchFn.mock.calls.filter(([url]) => url === '/api/assist/refine');
+    expect(refineCalls).toHaveLength(0);
+  });
+
+  it('POST /api/assist/refine fires with kind="change" in change-mode', async () => {
+    const fetchFn = makeRefineAndCmdFetch({ refineBody: REFINE_BODY });
+    const { getByTestId, getByLabelText } = renderDialog({ mode: 'change', fetchFn });
+
+    await act(async () => {
+      fireEvent.change(getByLabelText(/was soll sich ändern/i), {
+        target: { value: 'Dark-Mode einbauen' },
+      });
+    });
+
+    await act(async () => {
+      fireEvent.click(getByTestId('proof-btn-primary'));
+    });
+
+    await waitFor(() => {
+      expect(getByTestId('proof-result-primary')).toBeTruthy();
+    });
+
+    const refineCalls = fetchFn.mock.calls.filter(([url]) => url === '/api/assist/refine');
+    expect(refineCalls).toHaveLength(1);
+    const body = JSON.parse(refineCalls[0][1].body);
+    expect(body.text).toBe('Dark-Mode einbauen');
+    expect(body.kind).toBe('change');
+  });
+
+  it('POST /api/assist/refine fires with kind="idea" in new-mode', async () => {
+    const fetchFn = makeRefineAndCmdFetch({ refineBody: REFINE_BODY });
+    const { getByTestId, getByLabelText } = renderDialog({ mode: 'new', newStep: 'trigger1', fetchFn });
+
+    await act(async () => {
+      fireEvent.change(getByLabelText(/projektidee.*vision/i), {
+        target: { value: 'Task-Manager für Studis' },
+      });
+    });
+
+    await act(async () => {
+      fireEvent.click(getByTestId('proof-btn-primary'));
+    });
+
+    await waitFor(() => {
+      expect(getByTestId('proof-result-primary')).toBeTruthy();
+    });
+
+    const refineCalls = fetchFn.mock.calls.filter(([url]) => url === '/api/assist/refine');
+    expect(refineCalls).toHaveLength(1);
+    const body = JSON.parse(refineCalls[0][1].body);
+    expect(body.kind).toBe('idea');
+  });
+
+  it('refinedText is rendered in an editable textarea after successful proof', async () => {
+    const fetchFn = makeRefineAndCmdFetch({ refineBody: REFINE_BODY });
+    const { getByTestId, getByLabelText } = renderDialog({ mode: 'change', fetchFn });
+
+    await act(async () => {
+      fireEvent.change(getByLabelText(/was soll sich ändern/i), {
+        target: { value: 'Funktion X' },
+      });
+    });
+
+    await act(async () => {
+      fireEvent.click(getByTestId('proof-btn-primary'));
+    });
+
+    await waitFor(() => {
+      const textarea = getByTestId('proof-refined-primary');
+      expect(textarea.tagName).toBe('TEXTAREA');
+      expect(textarea.value).toBe('Verfeinerte Projektidee');
+    });
+  });
+
+  it('„Übernehmen" button replaces primary field content with refinedText', async () => {
+    const fetchFn = makeRefineAndCmdFetch({ refineBody: REFINE_BODY });
+    const { getByTestId, getByLabelText, container } = renderDialog({ mode: 'change', fetchFn });
+
+    await act(async () => {
+      fireEvent.change(getByLabelText(/was soll sich ändern/i), {
+        target: { value: 'Originaltext' },
+      });
+    });
+
+    await act(async () => {
+      fireEvent.click(getByTestId('proof-btn-primary'));
+    });
+
+    await waitFor(() => {
+      expect(getByTestId('proof-adopt-primary')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(getByTestId('proof-adopt-primary'));
+    });
+
+    // Primary textarea should now contain the refinedText
+    await waitFor(() => {
+      const primaryTextarea = container.querySelector('#intake-idea');
+      expect(primaryTextarea.value).toBe('Verfeinerte Projektidee');
+    });
+  });
+
+  it('proof result panel hides after „Übernehmen" (proof state reset to idle)', async () => {
+    const fetchFn = makeRefineAndCmdFetch({ refineBody: REFINE_BODY });
+    const { getByTestId, getByLabelText, queryByTestId } = renderDialog({ mode: 'change', fetchFn });
+
+    await act(async () => {
+      fireEvent.change(getByLabelText(/was soll sich ändern/i), {
+        target: { value: 'Originaltext' },
+      });
+    });
+
+    await act(async () => {
+      fireEvent.click(getByTestId('proof-btn-primary'));
+    });
+
+    await waitFor(() => {
+      expect(getByTestId('proof-adopt-primary')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(getByTestId('proof-adopt-primary'));
+    });
+
+    await waitFor(() => {
+      expect(queryByTestId('proof-result-primary')).toBeNull();
+    });
+  });
+
+  it('openQuestions rendered as semantic <ul> list (AC6 — zugängliche Liste)', async () => {
+    const fetchFn = makeRefineAndCmdFetch({ refineBody: REFINE_BODY });
+    const { getByTestId, getByLabelText } = renderDialog({ mode: 'change', fetchFn });
+
+    await act(async () => {
+      fireEvent.change(getByLabelText(/was soll sich ändern/i), {
+        target: { value: 'Funktion Y' },
+      });
+    });
+
+    await act(async () => {
+      fireEvent.click(getByTestId('proof-btn-primary'));
+    });
+
+    await waitFor(() => {
+      const list = getByTestId('proof-questions-primary');
+      expect(list.tagName).toBe('UL');
+      // Two questions in REFINE_BODY
+      expect(list.querySelectorAll('li').length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  it('openQuestions list items include question text', async () => {
+    const fetchFn = makeRefineAndCmdFetch({ refineBody: REFINE_BODY });
+    const { getByTestId, getByLabelText } = renderDialog({ mode: 'change', fetchFn });
+
+    await act(async () => {
+      fireEvent.change(getByLabelText(/was soll sich ändern/i), {
+        target: { value: 'Funktion Y' },
+      });
+    });
+
+    await act(async () => {
+      fireEvent.click(getByTestId('proof-btn-primary'));
+    });
+
+    await waitFor(() => {
+      const item0 = getByTestId('proof-question-item-primary-0');
+      expect(item0.textContent).toContain('Welchen Stack bevorzugst du?');
+    });
+  });
+
+  it('openQuestions list items include "why" explanation (AC6)', async () => {
+    const fetchFn = makeRefineAndCmdFetch({ refineBody: REFINE_BODY });
+    const { getByTestId, getByLabelText } = renderDialog({ mode: 'change', fetchFn });
+
+    await act(async () => {
+      fireEvent.change(getByLabelText(/was soll sich ändern/i), {
+        target: { value: 'Funktion Y' },
+      });
+    });
+
+    await act(async () => {
+      fireEvent.click(getByTestId('proof-btn-primary'));
+    });
+
+    await waitFor(() => {
+      const item0 = getByTestId('proof-question-item-primary-0');
+      // why field: 'Abhängig von Team-Kenntnissen'
+      expect(item0.textContent).toContain('Abhängig von Team-Kenntnissen');
+    });
+  });
+
+  it('openQuestions list items include options as nested <ul> (AC6)', async () => {
+    const fetchFn = makeRefineAndCmdFetch({ refineBody: REFINE_BODY });
+    const { getByTestId, getByLabelText } = renderDialog({ mode: 'change', fetchFn });
+
+    await act(async () => {
+      fireEvent.change(getByLabelText(/was soll sich ändern/i), {
+        target: { value: 'Funktion Y' },
+      });
+    });
+
+    await act(async () => {
+      fireEvent.click(getByTestId('proof-btn-primary'));
+    });
+
+    await waitFor(() => {
+      const item0 = getByTestId('proof-question-item-primary-0');
+      // options: ['React', 'Vue']
+      const optionsList = item0.querySelector('ul');
+      expect(optionsList).toBeTruthy();
+      const optionItems = optionsList.querySelectorAll('li');
+      expect(optionItems.length).toBe(2);
+      expect(optionItems[0].textContent).toBe('React');
+      expect(optionItems[1].textContent).toBe('Vue');
+    });
+  });
+
+  it('question without "why" or "options" renders only the question text', async () => {
+    const fetchFn = makeRefineAndCmdFetch({ refineBody: REFINE_BODY });
+    const { getByTestId, getByLabelText } = renderDialog({ mode: 'change', fetchFn });
+
+    await act(async () => {
+      fireEvent.change(getByLabelText(/was soll sich ändern/i), {
+        target: { value: 'Funktion Y' },
+      });
+    });
+
+    await act(async () => {
+      fireEvent.click(getByTestId('proof-btn-primary'));
+    });
+
+    await waitFor(() => {
+      // item1 has only question, no why/options
+      const item1 = getByTestId('proof-question-item-primary-1');
+      expect(item1.textContent).toContain('Gibt es Deadlines?');
+      expect(item1.querySelector('ul')).toBeNull(); // no options sub-list
+    });
+  });
+
+  it('openQuestions is empty → no questions list rendered', async () => {
+    const noQuestionsBody = { refinedText: 'Fertig', openQuestions: [] };
+    const fetchFn = makeRefineAndCmdFetch({ refineBody: noQuestionsBody });
+    const { getByTestId, queryByTestId, getByLabelText } = renderDialog({ mode: 'change', fetchFn });
+
+    await act(async () => {
+      fireEvent.change(getByLabelText(/was soll sich ändern/i), {
+        target: { value: 'Etwas' },
+      });
+    });
+
+    await act(async () => {
+      fireEvent.click(getByTestId('proof-btn-primary'));
+    });
+
+    await waitFor(() => {
+      expect(getByTestId('proof-result-primary')).toBeTruthy();
+      expect(queryByTestId('proof-questions-primary')).toBeNull();
+    });
+  });
+
+  it('400 response → error message (role=alert), field unchanged (AC6)', async () => {
+    const fetchFn = makeRefineAndCmdFetch({ refineStatus: 400, refineBody: { error: 'bad request' } });
+    const { getByTestId, getByLabelText } = renderDialog({ mode: 'change', fetchFn });
+
+    await act(async () => {
+      fireEvent.change(getByLabelText(/was soll sich ändern/i), {
+        target: { value: 'Inhalt bleibt' },
+      });
+    });
+
+    await act(async () => {
+      fireEvent.click(getByTestId('proof-btn-primary'));
+    });
+
+    await waitFor(() => {
+      const errEl = getByTestId('proof-error-primary');
+      expect(errEl.getAttribute('role')).toBe('alert');
+      expect(errEl.textContent).toMatch(/400/);
+    });
+
+    // Field content must remain unchanged
+    const primaryTextarea = getByLabelText(/was soll sich ändern/i);
+    expect(primaryTextarea.value).toBe('Inhalt bleibt');
+  });
+
+  it('502 response → error message (role=alert), field unchanged (AC6)', async () => {
+    const fetchFn = makeRefineAndCmdFetch({ refineStatus: 502, refineBody: { error: 'unavailable' } });
+    const { getByTestId, getByLabelText } = renderDialog({ mode: 'change', fetchFn });
+
+    await act(async () => {
+      fireEvent.change(getByLabelText(/was soll sich ändern/i), {
+        target: { value: 'Inhalt unveränderlich' },
+      });
+    });
+
+    await act(async () => {
+      fireEvent.click(getByTestId('proof-btn-primary'));
+    });
+
+    await waitFor(() => {
+      const errEl = getByTestId('proof-error-primary');
+      expect(errEl.getAttribute('role')).toBe('alert');
+      expect(errEl.textContent).toMatch(/502/);
+    });
+
+    // Field content must remain unchanged
+    const primaryTextarea = getByLabelText(/was soll sich ändern/i);
+    expect(primaryTextarea.value).toBe('Inhalt unveränderlich');
+  });
+
+  it('network error → proof error message, field unchanged (AC6)', async () => {
+    const fetchFn = jest.fn((url) => {
+      if (url === '/api/assist/refine') return Promise.reject(new Error('Network failure'));
+      return Promise.resolve(cmdResp(202, {}));
+    });
+    const { getByTestId, getByLabelText } = renderDialog({ mode: 'change', fetchFn });
+
+    await act(async () => {
+      fireEvent.change(getByLabelText(/was soll sich ändern/i), {
+        target: { value: 'Bleibt stehen' },
+      });
+    });
+
+    await act(async () => {
+      fireEvent.click(getByTestId('proof-btn-primary'));
+    });
+
+    await waitFor(() => {
+      const errEl = getByTestId('proof-error-primary');
+      expect(errEl.getAttribute('role')).toBe('alert');
+      expect(errEl.textContent).toMatch(/netzwerkfehler/i);
+    });
+
+    const primaryTextarea = getByLabelText(/was soll sich ändern/i);
+    expect(primaryTextarea.value).toBe('Bleibt stehen');
+  });
+
+  it('proof for optional field POSTs to /api/assist/refine with optional field text (AC6)', async () => {
+    const fetchFn = makeRefineAndCmdFetch({ refineBody: { refinedText: 'Optionaler Text verfeinert', openQuestions: [] } });
+    const { getByTestId, getByLabelText } = renderDialog({ mode: 'change', fetchFn });
+
+    await act(async () => {
+      fireEvent.change(getByLabelText(/betroffener bereich/i), {
+        target: { value: 'Auth-Modul' },
+      });
+    });
+
+    await act(async () => {
+      fireEvent.click(getByTestId('proof-btn-optional'));
+    });
+
+    await waitFor(() => {
+      expect(getByTestId('proof-result-optional')).toBeTruthy();
+    });
+
+    const refineCalls = fetchFn.mock.calls.filter(([url]) => url === '/api/assist/refine');
+    expect(refineCalls).toHaveLength(1);
+    const body = JSON.parse(refineCalls[0][1].body);
+    expect(body.text).toBe('Auth-Modul');
+  });
+
+  it('„Übernehmen" for optional field replaces optional field content (AC6)', async () => {
+    const fetchFn = makeRefineAndCmdFetch({ refineBody: { refinedText: 'Auth-Layer (verfeinert)', openQuestions: [] } });
+    const { getByTestId, getByLabelText, container } = renderDialog({ mode: 'change', fetchFn });
+
+    await act(async () => {
+      fireEvent.change(getByLabelText(/betroffener bereich/i), {
+        target: { value: 'Auth-Modul' },
+      });
+    });
+
+    await act(async () => {
+      fireEvent.click(getByTestId('proof-btn-optional'));
+    });
+
+    await waitFor(() => {
+      expect(getByTestId('proof-adopt-optional')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(getByTestId('proof-adopt-optional'));
+    });
+
+    await waitFor(() => {
+      const optionalTextarea = container.querySelector('#intake-optional');
+      expect(optionalTextarea.value).toBe('Auth-Layer (verfeinert)');
+    });
+  });
+
+  it('proof path does NOT affect submit path (regression — AC6 independent from submit)', async () => {
+    // Submit should still work normally after a proof interaction.
+    const fetchFn = makeFetchFn({
+      '/api/assist/refine': () => Promise.resolve(refineResp(200, REFINE_BODY)),
+      '/api/command':       () => Promise.resolve(cmdResp(202, { commandId: 'x' })),
+    });
+    const onNavigate = jest.fn();
+    const { getByTestId, getByLabelText, getByRole } = renderDialog({ mode: 'change', fetchFn, onNavigate });
+
+    const primaryTextarea = getByLabelText(/was soll sich ändern/i);
+
+    await act(async () => {
+      fireEvent.change(primaryTextarea, { target: { value: 'Kombination Proof + Submit' } });
+    });
+
+    // Do a proof first
+    await act(async () => {
+      fireEvent.click(getByTestId('proof-btn-primary'));
+    });
+
+    await waitFor(() => {
+      expect(getByTestId('proof-result-primary')).toBeTruthy();
+    });
+
+    // Now submit — must work as before (proof result panel does not block submit)
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /änderung erfassen/i }));
+    });
+
+    await waitFor(() => {
+      expect(onNavigate).toHaveBeenCalledWith('factory');
+    });
+
+    const cmdCalls = fetchFn.mock.calls.filter(([url]) => url === '/api/command');
+    expect(cmdCalls).toHaveLength(1);
+    const body = JSON.parse(cmdCalls[0][1].body);
+    expect(body.command).toContain('/agent-flow:requirement');
+  });
+
+  it('proof state is independent of Cost-Mode (regression — AC9 + AC6)', async () => {
+    // Cost-mode should still apply to submit even after a proof interaction.
+    const fetchFn = makeFetchFn({
+      '/api/assist/refine': () => Promise.resolve(refineResp(200, REFINE_BODY)),
+      '/api/command':       () => Promise.resolve(cmdResp(202, {})),
+    });
+    const onNavigate = jest.fn();
+    const { getByTestId, getByLabelText, getByRole } = renderDialog({ mode: 'change', fetchFn, onNavigate });
+
+    await act(async () => {
+      fireEvent.change(getByLabelText(/was soll sich ändern/i), {
+        target: { value: 'Feature mit Low-Cost' },
+      });
+    });
+
+    await act(async () => {
+      fireEvent.change(getByLabelText(/cost-mode/i), { target: { value: 'low-cost' } });
+    });
+
+    // Do proof (must not affect cost-mode)
+    await act(async () => {
+      fireEvent.click(getByTestId('proof-btn-primary'));
+    });
+
+    await waitFor(() => {
+      expect(getByTestId('proof-result-primary')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /änderung erfassen/i }));
+    });
+
+    await waitFor(() => {
+      expect(onNavigate).toHaveBeenCalled();
+    });
+
+    const cmdCalls = fetchFn.mock.calls.filter(([url]) => url === '/api/command');
+    const body = JSON.parse(cmdCalls[0][1].body);
+    expect(body.command).toContain('--cost low-cost');
+  });
+
+  // ── I1 — async-Button-Race: primary proof button disabled during in-flight request ──
+
+  it('I1 primary proof button is disabled while request is in-flight (no double-POST)', async () => {
+    // Use a never-resolving fetch to keep the request in-flight for the duration of the test.
+    let resolveRefine;
+    const hangingRefinePromise = new Promise((resolve) => { resolveRefine = resolve; });
+
+    const fetchFn = jest.fn((url) => {
+      if (url === '/api/assist/refine') return hangingRefinePromise;
+      return Promise.resolve(cmdResp(202, {}));
+    });
+
+    const { getByTestId, getByLabelText } = renderDialog({ mode: 'change', fetchFn });
+
+    await act(async () => {
+      fireEvent.change(getByLabelText(/was soll sich ändern/i), {
+        target: { value: 'Test in-flight' },
+      });
+    });
+
+    // Button is enabled before click
+    expect(getByTestId('proof-btn-primary').disabled).toBe(false);
+
+    // Start the proof — response is hanging (not yet resolved)
+    await act(async () => {
+      fireEvent.click(getByTestId('proof-btn-primary'));
+    });
+
+    // While in-flight: button must be disabled (Race-Guard)
+    await waitFor(() => {
+      expect(getByTestId('proof-btn-primary').disabled).toBe(true);
+    });
+
+    // A second click must not fire a second POST to /api/assist/refine
+    await act(async () => {
+      fireEvent.click(getByTestId('proof-btn-primary'));
+    });
+
+    const refineCalls = fetchFn.mock.calls.filter(([url]) => url === '/api/assist/refine');
+    expect(refineCalls).toHaveLength(1); // Only one POST fired
+
+    // Resolve the hanging request so React can clean up state
+    await act(async () => {
+      resolveRefine({ ok: true, status: 200, json: () => Promise.resolve({ refinedText: 'ok', openQuestions: [] }) });
+    });
+  });
+
+  it('I1 optional proof button is disabled while request is in-flight (no double-POST)', async () => {
+    // Use a never-resolving fetch to keep the optional field request in-flight.
+    let resolveRefine;
+    const hangingRefinePromise = new Promise((resolve) => { resolveRefine = resolve; });
+
+    const fetchFn = jest.fn((url) => {
+      if (url === '/api/assist/refine') return hangingRefinePromise;
+      return Promise.resolve(cmdResp(202, {}));
+    });
+
+    const { getByTestId, getByLabelText } = renderDialog({ mode: 'change', fetchFn });
+
+    await act(async () => {
+      fireEvent.change(getByLabelText(/betroffener bereich/i), {
+        target: { value: 'Auth-Modul' },
+      });
+    });
+
+    // Button is enabled before click
+    expect(getByTestId('proof-btn-optional').disabled).toBe(false);
+
+    // Start the proof — response is hanging
+    await act(async () => {
+      fireEvent.click(getByTestId('proof-btn-optional'));
+    });
+
+    // While in-flight: optional button must be disabled (Race-Guard)
+    await waitFor(() => {
+      expect(getByTestId('proof-btn-optional').disabled).toBe(true);
+    });
+
+    // A second click must not fire a second POST
+    await act(async () => {
+      fireEvent.click(getByTestId('proof-btn-optional'));
+    });
+
+    const refineCalls = fetchFn.mock.calls.filter(([url]) => url === '/api/assist/refine');
+    expect(refineCalls).toHaveLength(1); // Only one POST fired
+
+    // Resolve the hanging request so React can clean up state
+    await act(async () => {
+      resolveRefine({ ok: true, status: 200, json: () => Promise.resolve({ refinedText: 'ok', openQuestions: [] }) });
+    });
+  });
+
+  // ── S2 — Loading-Indikator: button text + aria-label change while in-flight ──
+
+  it('S2 primary proof button shows "Wird geprüft …" text + loading aria-label while in-flight', async () => {
+    let resolveRefine;
+    const hangingRefinePromise = new Promise((resolve) => { resolveRefine = resolve; });
+
+    const fetchFn = jest.fn((url) => {
+      if (url === '/api/assist/refine') return hangingRefinePromise;
+      return Promise.resolve(cmdResp(202, {}));
+    });
+
+    const { getByTestId, getByLabelText } = renderDialog({ mode: 'change', fetchFn });
+
+    await act(async () => {
+      fireEvent.change(getByLabelText(/was soll sich ändern/i), {
+        target: { value: 'Loading-Indikator-Test' },
+      });
+    });
+
+    await act(async () => {
+      fireEvent.click(getByTestId('proof-btn-primary'));
+    });
+
+    // While in-flight: button text must be "Wird geprüft …" and aria-label must contain "wird geladen"
+    await waitFor(() => {
+      const btn = getByTestId('proof-btn-primary');
+      expect(btn.textContent).toBe('Wird geprüft …');
+      expect(btn.getAttribute('aria-label')).toMatch(/wird geladen/i);
+    });
+
+    // Resolve and clean up
+    await act(async () => {
+      resolveRefine({ ok: true, status: 200, json: () => Promise.resolve({ refinedText: 'ok', openQuestions: [] }) });
+    });
   });
 });
