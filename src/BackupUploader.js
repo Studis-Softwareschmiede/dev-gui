@@ -13,6 +13,14 @@
  *   AC10: Remote-Fehler führen NICHT zum Crash und NICHT zum Rollback der
  *         Cred-Operation; begrenzter Retry; endgültiger Fehlschlag → 'failed'.
  *
+ * Architekt-Entscheid (S-143, Variante B):
+ *   resolveOffHostConfigAsync() liest zuerst aus BackupConfigStore (JSON-Datei auf
+ *   dem Credential-Volume), fällt dann auf Env-Vars zurück. Damit wirkt eine UI-
+ *   Änderung über PUT /api/settings/backup-config tatsächlich auf den nächsten
+ *   Backup-Lauf.
+ *   resolveOffHostConfig() (synchron, Env-only) bleibt für Rückwärtskompatibilität
+ *   und Unit-Tests erhalten.
+ *
  * Security-Floor (§NFRs, security/R01–R04):
  *   - Zugangsdaten werden ausschließlich über creds-Parameter übergeben (nie Argv/Log).
  *   - Alle Fehler werden abgefangen — kein uncaught-Exception-Crash.
@@ -28,6 +36,7 @@
 
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { Client as SshClient } from 'ssh2';
+import { read as readBackupConfig } from './BackupConfigStore.js';
 
 /** Maximale Anzahl Upload-Versuche (Retry + Erstversuch = UPLOAD_MAX_ATTEMPTS Versuche total). */
 export const UPLOAD_MAX_ATTEMPTS = 3;
@@ -97,6 +106,54 @@ export function resolveOffHostConfig() {
   }
 
   return null;
+}
+
+/**
+ * Liest Off-Host-Konfiguration: zuerst aus BackupConfigStore (JSON-Datei),
+ * dann Env-Vars als Fallback (Architekt-Entscheid S-143, Variante B).
+ *
+ * Konvertiert das BackupConfig-Format in das von BackupEngine/uploadArtefact
+ * erwartete { type, ...} Format.
+ *
+ * Gibt null zurück wenn Off-Host deaktiviert oder kein Ziel konfiguriert.
+ *
+ * @returns {Promise<{ type: 's3'|'sftp', [key: string]: string } | null>}
+ */
+export async function resolveOffHostConfigAsync() {
+  let config;
+  try {
+    config = await readBackupConfig();
+  } catch {
+    // Fallback auf synchrone Env-Variante bei Fehler
+    return resolveOffHostConfig();
+  }
+
+  if (!config.offHostEnabled) return null;
+
+  const type = config.targetType;
+  if (type === 's3') {
+    if (!config.bucket) return null; // Bucket ist Pflicht
+    return {
+      type: 's3',
+      endpoint: config.endpoint ?? '',
+      bucket: config.bucket,
+      prefix: config.prefix ?? 'backups/',
+      region: config.region ?? 'us-east-1',
+    };
+  }
+
+  if (type === 'sftp') {
+    if (!config.host) return null; // Host ist Pflicht
+    return {
+      type: 'sftp',
+      host: config.host,
+      port: config.port ?? '22',
+      user: config.user ?? '',
+      prefix: config.prefix ?? '/backups',
+    };
+  }
+
+  return null; // targetType='local' → kein Off-Host-Upload
 }
 
 /**

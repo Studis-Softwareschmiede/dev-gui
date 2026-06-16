@@ -70,6 +70,19 @@
  *   AC7  — OTP-Code nach Submit verworfen; autoComplete=one-time-code; kein Argv/Log/Audit-Leak.
  *   AC9  — label/htmlFor, Fokusführung, type=text, autoComplete=one-time-code, Touch-Target ≥ 44 px.
  *
+ * Backup-Settings-UI (credential-backup S-143 — AC11/AC12):
+ *   AC11 — Zweistufige Quittung: nach jeder Credential-Schreib-Operation zeigt CredentialField
+ *           „lokal gesichert ✓" (backup.local='ok') und „off-host gesichert ✓" (backup.offHost='ok');
+ *           bei failed → stufen-genaue Warnung; offHost='disabled' → nur lokale Stufe angezeigt.
+ *           Gilt für CredentialField (alle Integrationen) + BackupRemoteCredField.
+ *   AC12 — Abschnitt „Backup / Sicherung": Status-Kachel (letztes Backup: Zeit, Ergebnis je Stufe,
+ *           Ziel — leak-frei), Ziel-Konfiguration (UI-schreibbar, Architekt-Entscheid S-143),
+ *           Remote-Creds write-only (backup-remote Catalog).
+ *           Stufen-Ergebnis (lokal ✓/⚠, off-host ✓/⚠/–) aus Sidecar (backup-last-result.json).
+ *           A11y: Labels mit htmlFor, aria-invalid bei Fehler, Touch-Targets ≥ 44 px,
+ *           aria-describedby, role=status / role=alert, role=img auf Stufen-Icons.
+ *           Status-Kachel zeigt NUR Metadaten — kein Key/Secret/Klartext.
+ *
  * @param {{ onNavigate: (view: string) => void }} props
  */
 
@@ -392,6 +405,873 @@ async function exportAndDownloadPrivateKey(user) {
   return { ok: true };
 }
 
+// ── Backup-API-Helfer (S-143, AC12) ──────────────────────────────────────────
+
+/**
+ * GET /api/settings/backup-status
+ * Liefert Metadaten des letzten Backups (metadaten-only — kein Secret).
+ * Kein backupDir in der Response (I1-Fix: interner Volume-Pfad).
+ *
+ * @param {typeof fetch} [fetchImpl]
+ * @returns {Promise<{ lastBackup: { at: string, artefactName: string, localResult: 'ok'|'failed'|null, offHostResult: 'ok'|'failed'|'disabled'|null }|null, offHostType: string|null, offHostEnabled: boolean, targetConfig: object|null, retentionCount: number }>}
+ */
+async function fetchBackupStatus(fetchImpl) {
+  const fn = fetchImpl ?? globalThis.fetch.bind(globalThis);
+  const res = await fn('/api/settings/backup-status');
+  if (!res.ok) throw new Error(`Backup-Status laden fehlgeschlagen (${res.status})`);
+  return res.json();
+}
+
+/**
+ * GET /api/settings/backup-config
+ * Liefert die persistierte nicht-geheime Backup-Konfiguration
+ * (Architekt-Entscheid S-143, Variante B: JSON-Datei > Env-Vars > Defaults).
+ *
+ * @param {typeof fetch} [fetchImpl]
+ * @returns {Promise<import('../../../src/BackupConfigStore.js').BackupConfig>}
+ */
+async function fetchBackupConfig(fetchImpl) {
+  const fn = fetchImpl ?? globalThis.fetch.bind(globalThis);
+  const res = await fn('/api/settings/backup-config');
+  if (!res.ok) throw new Error(`Backup-Konfiguration laden fehlgeschlagen (${res.status})`);
+  return res.json();
+}
+
+/**
+ * PUT /api/settings/backup-config
+ * Schreibt die nicht-geheime Backup-Konfiguration (atomar, 0600 auf Credential-Volume).
+ * Admin-geschützt (CRED_ADMIN_EMAILS) + Audit-First.
+ *
+ * @param {object} config - Zu speichernde Konfiguration (alle Felder optional)
+ * @param {typeof fetch} [fetchImpl]
+ * @returns {Promise<{ ok: boolean, config: object }>}
+ */
+async function saveBackupConfig(config, fetchImpl) {
+  const fn = fetchImpl ?? globalThis.fetch.bind(globalThis);
+  const res = await fn('/api/settings/backup-config', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+    throw new Error(err.error ?? `Speichern fehlgeschlagen (${res.status})`);
+  }
+  return res.json();
+}
+
+/**
+ * PUT /api/settings/credentials/backup-remote/:name
+ * Setzt einen Remote-Credential-Wert (write-only). Renutzt putCredential().
+ *
+ * @param {string} name  - Feldname (s3_access_key|s3_secret_key|sftp_password|sftp_private_key)
+ * @param {string} value
+ * @returns {Promise<object>}
+ */
+async function putBackupRemoteCred(name, value) {
+  return putCredential('backup-remote', name, value);
+}
+
+/**
+ * DELETE /api/settings/credentials/backup-remote/:name
+ * Löscht einen Remote-Credential-Wert.
+ *
+ * @param {string} name
+ * @returns {Promise<object>}
+ */
+async function deleteBackupRemoteCred(name) {
+  return deleteCredential('backup-remote', name);
+}
+
+// ── BackupSection (AC12) ──────────────────────────────────────────────────────
+
+/** Remote-Creds-Felder für backup-remote (write-only, analog Credential-Catalog). */
+const BACKUP_REMOTE_FIELDS = [
+  { name: 's3_access_key',    label: 'S3 Access Key ID' },
+  { name: 's3_secret_key',    label: 'S3 Secret Access Key' },
+  { name: 'sftp_password',    label: 'SFTP Passwort' },
+  { name: 'sftp_private_key', label: 'SFTP Private Key (PEM)' },
+];
+
+/**
+ * Inline-Feld für einen write-only Remote-Credential-Wert.
+ * Folgt dem CredentialField-Muster (write-only, kein Klartext im DOM).
+ * AC12: Remote-Creds write-only, kein Secret im DOM/Bundle.
+ *
+ * @param {{ name: string, label: string, meta: object|null, onSaved: () => void }} props
+ */
+function BackupRemoteCredField({ name, label, meta, onSaved }) {
+  const [editing, setEditing] = useState(false);
+  const [inputVal, setInputVal] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [error, setError] = useState(null);
+  // AC11: Backup-Quittung auch für Remote-Cred-Felder
+  const [backupResult, setBackupResult] = useState(null);
+  const inputRef = useRef(null);
+  const errorId = `err-backup-remote-${name}`;
+
+  const isSet = meta?.status === 'set';
+
+  useEffect(() => {
+    if (editing && inputRef.current) inputRef.current.focus();
+  }, [editing]);
+
+  const handleSave = useCallback(async () => {
+    setError(null);
+    // S1: Quittung zu Beginn jeder async-Op zurücksetzen (Race-Condition-Guard)
+    setBackupResult(null);
+    const trimmed = inputVal.trim();
+    if (!trimmed) {
+      setError('Wert darf nicht leer sein.');
+      inputRef.current?.focus();
+      return;
+    }
+    if (trimmed.length > MAX_VALUE_LEN) {
+      setError(`Wert überschreitet das Längenlimit (${MAX_VALUE_LEN} Zeichen).`);
+      inputRef.current?.focus();
+      return;
+    }
+    setSaving(true);
+    try {
+      const data = await putBackupRemoteCred(name, trimmed);
+      // AC4/AC2: Klartext sofort verwerfen
+      setInputVal('');
+      setEditing(false);
+      // AC11: Backup-Quittung
+      if (data?.backup) setBackupResult(data.backup);
+      onSaved();
+    } catch (err) {
+      setError(err.message);
+      inputRef.current?.focus();
+    } finally {
+      setSaving(false);
+    }
+  }, [name, inputVal, onSaved]);
+
+  const handleDelete = useCallback(async () => {
+    setError(null);
+    // S1: Quittung zu Beginn jeder async-Op zurücksetzen
+    setBackupResult(null);
+    setDeleting(true);
+    try {
+      const data = await deleteBackupRemoteCred(name);
+      // AC11: Backup-Quittung
+      if (data?.backup) setBackupResult(data.backup);
+      onSaved();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setDeleting(false);
+    }
+  }, [name, onSaved]);
+
+  const handleCancel = useCallback(() => {
+    setInputVal('');
+    setError(null);
+    setEditing(false);
+  }, []);
+
+  return (
+    <div style={fieldStyles.row} role="group" aria-label={label}>
+      <div style={fieldStyles.labelRow}>
+        <span style={fieldStyles.fieldLabel}>{label}</span>
+        <span
+          style={isSet ? fieldStyles.statusSet : fieldStyles.statusUnset}
+          aria-label={isSet ? 'gesetzt' : 'nicht gesetzt'}
+        >
+          {isSet ? (meta.masked ?? '•••• gesetzt') : 'nicht gesetzt'}
+        </span>
+      </div>
+
+      {editing ? (
+        <div style={fieldStyles.editArea}>
+          <label htmlFor={`input-backup-remote-${name}`} style={fieldStyles.srOnly}>
+            {label} — neuer Wert
+          </label>
+          <input
+            id={`input-backup-remote-${name}`}
+            ref={inputRef}
+            type="password"
+            value={inputVal}
+            onChange={(e) => setInputVal(e.target.value)}
+            placeholder={isSet ? 'Neuen Wert eingeben (überschreibt bestehenden)' : 'Wert eingeben'}
+            style={fieldStyles.input}
+            aria-describedby={error ? errorId : undefined}
+            aria-invalid={error ? 'true' : undefined}
+            autoComplete="off"
+            data-lpignore="true"
+          />
+          {error && (
+            <p id={errorId} style={fieldStyles.error} role="alert" aria-live="polite">
+              {error}
+            </p>
+          )}
+          <div style={fieldStyles.actionRow}>
+            <button
+              type="button"
+              onClick={handleSave}
+              disabled={saving}
+              style={fieldStyles.btnPrimary}
+              aria-busy={saving}
+            >
+              {saving ? 'Speichern…' : 'Speichern'}
+            </button>
+            <button
+              type="button"
+              onClick={handleCancel}
+              disabled={saving}
+              style={fieldStyles.btnSecondary}
+            >
+              Abbrechen
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div style={fieldStyles.actionRow}>
+          <button
+            type="button"
+            onClick={() => setEditing(true)}
+            style={fieldStyles.btnSmall}
+            aria-label={isSet ? `${label} ändern` : `${label} setzen`}
+          >
+            {isSet ? 'Ändern' : 'Setzen'}
+          </button>
+          {isSet && (
+            <button
+              type="button"
+              onClick={handleDelete}
+              disabled={deleting}
+              style={fieldStyles.btnDanger}
+              aria-label={`${label} löschen`}
+              aria-busy={deleting}
+            >
+              {deleting ? 'Löschen…' : 'Löschen'}
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* AC11: Backup-Quittung nach Schreib-Operation */}
+      {backupResult && <BackupReceipt backup={backupResult} />}
+    </div>
+  );
+}
+
+/**
+ * Rendert das Stufen-Ergebnis (lokal ✓/⚠, off-host ✓/⚠/–) eines Backups (AC12 / I2-Fix).
+ * Metadaten-only: nur 'ok'|'failed'|'disabled'|null — kein Key/Secret/Klartext.
+ * A11y: role=img + aria-label auf den einzelnen Stufen-Spans.
+ *
+ * @param {{ localResult: 'ok'|'failed'|null, offHostResult: 'ok'|'failed'|'disabled'|null }} props
+ */
+function BackupStepResults({ localResult, offHostResult }) {
+  if (!localResult && !offHostResult) return null;
+
+  let localIcon = null;
+  let localColor = '#9ca3af';
+  let localAriaLabel = null;
+  if (localResult === 'ok') {
+    localIcon = '✓'; localColor = '#86efac'; localAriaLabel = 'lokal gesichert';
+  } else if (localResult === 'failed') {
+    localIcon = '⚠'; localColor = '#fca5a5'; localAriaLabel = 'lokal fehlgeschlagen';
+  }
+
+  let offHostIcon = null;
+  let offHostColor = '#9ca3af';
+  let offHostAriaLabel = null;
+  if (offHostResult === 'ok') {
+    offHostIcon = '✓'; offHostColor = '#86efac'; offHostAriaLabel = 'off-host gesichert';
+  } else if (offHostResult === 'failed') {
+    offHostIcon = '⚠'; offHostColor = '#fca5a5'; offHostAriaLabel = 'off-host fehlgeschlagen';
+  } else if (offHostResult === 'disabled') {
+    offHostIcon = '–'; offHostColor = '#9ca3af'; offHostAriaLabel = 'off-host deaktiviert';
+  }
+
+  return (
+    <p style={backupStyles.statusTileHint}>
+      {localIcon && (
+        <span style={{ color: localColor, marginRight: 4 }} role="img" aria-label={localAriaLabel}>
+          {'lokal ' + localIcon}
+        </span>
+      )}
+      {offHostIcon && (
+        <span style={{ color: offHostColor, marginLeft: localIcon ? 8 : 0 }} role="img" aria-label={offHostAriaLabel}>
+          {'off-host ' + offHostIcon}
+        </span>
+      )}
+    </p>
+  );
+}
+
+/**
+ * Status-Kachel (AC12): Zeigt Metadaten des letzten Backups — leak-frei.
+ * Spec §13: NUR Zeit, Stufen-Ergebnis, Ziel-Typ — KEIN Key/Secret/Klartext.
+ *
+ * @param {{ status: object|null, loading: boolean, error: string|null }} props
+ */
+function BackupStatusTile({ status, loading, error }) {
+  const tileId = 'backup-status-tile';
+  if (loading) {
+    return (
+      <div style={backupStyles.statusTile} aria-labelledby={tileId} aria-busy="true" role="status">
+        <p style={backupStyles.statusTileLabel} id={tileId}>Backup-Status</p>
+        <p style={backupStyles.statusTileHint}>Wird geladen…</p>
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <div style={backupStyles.statusTileError} role="alert" aria-labelledby={tileId}>
+        <p style={backupStyles.statusTileLabel} id={tileId}>Backup-Status</p>
+        <p style={backupStyles.statusTileHint}>Nicht abrufbar: {error}</p>
+      </div>
+    );
+  }
+  const offHostLabel = status?.offHostEnabled
+    ? (status.offHostType === 's3' ? 'S3-kompatibel' : status.offHostType === 'sftp' ? 'SFTP' : status.offHostType ?? 'unbekannt')
+    : 'nur lokal';
+
+  return (
+    <div style={backupStyles.statusTile} role="status" aria-labelledby={tileId}>
+      <p style={backupStyles.statusTileLabel} id={tileId}>Letztes Backup</p>
+      {status?.lastBackup ? (
+        <>
+          <p style={backupStyles.statusTileValue}>
+            {new Date(status.lastBackup.at).toLocaleString('de-DE', {
+              dateStyle: 'short',
+              timeStyle: 'medium',
+            })}
+          </p>
+          {/* AC12 / I2-Fix: Stufen-Ergebnis je Stufe (lokal ✓/⚠, off-host ✓/⚠/–) */}
+          <BackupStepResults
+            localResult={status.lastBackup.localResult ?? null}
+            offHostResult={status.lastBackup.offHostResult ?? null}
+          />
+          <p style={backupStyles.statusTileHint}>
+            Ziel: {offHostLabel}
+          </p>
+        </>
+      ) : (
+        <p style={backupStyles.statusTileHint}>Noch kein Backup vorhanden.</p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Abschnitt „Backup / Sicherung" in der SettingsView (AC12).
+ *
+ * Architekt-Entscheid (S-143, Variante B): Nicht-geheime Backup-Konfiguration
+ * (Ziel-Typ, Pfad/URL/Bucket/Host/Präfix/Region, Retention, An/Aus) ist in der UI
+ * schreibbar und wird persistent als backup-config.json auf dem Credential-Volume
+ * gespeichert. Env-Vars gelten als Initial-Default (Migration/Erstkonfig).
+ * Remote-Secrets bleiben write-only im CredentialStore.
+ *
+ * Enthält:
+ * - Status-Kachel (letztes Backup: Zeit, Ziel) — leak-frei
+ * - Editierbare Ziel-Konfiguration (Ziel-Typ, Felder je Typ, Retention, An/Aus)
+ * - Remote-Credentials (write-only, backup-remote Catalog)
+ *
+ * A11y: Labels mit htmlFor, aria-invalid bei Fehler, Touch-Targets ≥ 44 px,
+ *        Fehlerzuordnung via aria-describedby, role=status für Status-Kachel.
+ *
+ * Security (AC12/Floor): Remote-Creds nur als „•••• gesetzt"-Status — nie Klartext im DOM.
+ * Admin-Gate (CRED_ADMIN_EMAILS): PUT /api/settings/backup-config ist Admin-geschützt +
+ * Audit-First (im Backend, transparent für die UI → 403 als Fehlermeldung).
+ *
+ * @param {{ credentials: Array, onSaved: () => void, fetchFn?: typeof fetch }} props
+ */
+function BackupSection({ credentials, onSaved, fetchFn }) {
+  const [statusLoading, setStatusLoading] = useState(true);
+  const [statusData, setStatusData] = useState(null);
+  const [statusError, setStatusError] = useState(null);
+
+  // Editierbare Konfig-Felder (Architekt-Entscheid: UI-schreibbar)
+  const [configLoading, setConfigLoading] = useState(true);
+  const [configSaving, setConfigSaving] = useState(false);
+  const [configError, setConfigError] = useState(null);
+  const [configSaved, setConfigSaved] = useState(false);
+
+  // Form-State für die editierbaren Felder
+  const [offHostEnabled, setOffHostEnabled] = useState(false);
+  const [targetType, setTargetType] = useState('local');
+  const [endpoint, setEndpoint] = useState('');
+  const [bucket, setBucket] = useState('');
+  const [prefix, setPrefix] = useState('backups/');
+  const [region, setRegion] = useState('us-east-1');
+  const [host, setHost] = useState('');
+  const [port, setPort] = useState('22');
+  const [user, setUser] = useState('');
+  const [retentionCount, setRetentionCount] = useState(10);
+
+  const getMeta = useCallback(
+    (name) => credentials.find((c) => c.integration === 'backup-remote' && c.name === name) ?? null,
+    [credentials],
+  );
+
+  const loadStatus = useCallback(async () => {
+    setStatusLoading(true);
+    setStatusError(null);
+    try {
+      const data = await fetchBackupStatus(fetchFn);
+      setStatusData(data);
+    } catch (err) {
+      setStatusError(err.message ?? 'Unbekannter Fehler');
+    } finally {
+      setStatusLoading(false);
+    }
+  }, [fetchFn]);
+
+  const loadConfig = useCallback(async () => {
+    setConfigLoading(true);
+    setConfigError(null);
+    try {
+      const data = await fetchBackupConfig(fetchFn);
+      // Form-State mit geladener Konfiguration befüllen
+      setOffHostEnabled(Boolean(data.offHostEnabled));
+      setTargetType(data.targetType ?? 'local');
+      setEndpoint(data.endpoint ?? '');
+      setBucket(data.bucket ?? '');
+      setPrefix(data.prefix ?? 'backups/');
+      setRegion(data.region ?? 'us-east-1');
+      setHost(data.host ?? '');
+      setPort(data.port ?? '22');
+      setUser(data.user ?? '');
+      setRetentionCount(data.retentionCount ?? 10);
+    } catch (err) {
+      setConfigError(err.message ?? 'Konfiguration nicht abrufbar');
+    } finally {
+      setConfigLoading(false);
+    }
+  }, [fetchFn]);
+
+  useEffect(() => {
+    loadStatus();
+    loadConfig();
+  }, [loadStatus, loadConfig]);
+
+  const handleSaveConfig = useCallback(async () => {
+    setConfigError(null);
+    setConfigSaved(false);
+    setConfigSaving(true);
+    try {
+      await saveBackupConfig({
+        offHostEnabled,
+        targetType,
+        endpoint: endpoint.trim(),
+        bucket: bucket.trim(),
+        prefix: prefix.trim(),
+        region: region.trim(),
+        host: host.trim(),
+        port: port.trim(),
+        user: user.trim(),
+        retentionCount: Math.max(1, parseInt(String(retentionCount), 10) || 10),
+      }, fetchFn);
+      setConfigSaved(true);
+      // Status neu laden (zeigt aktuellen Zustand)
+      loadStatus();
+    } catch (err) {
+      setConfigError(err.message ?? 'Speichern fehlgeschlagen');
+    } finally {
+      setConfigSaving(false);
+    }
+  }, [offHostEnabled, targetType, endpoint, bucket, prefix, region, host, port, user, retentionCount, fetchFn, loadStatus]);
+
+  return (
+    <>
+      {/* Status-Kachel (AC12: Zeit, Ziel — kein Secret) */}
+      <BackupStatusTile status={statusData} loading={statusLoading} error={statusError} />
+
+      {/* Editierbare Ziel-Konfiguration (Architekt-Entscheid: UI-schreibbar, persistent) */}
+      <div style={backupStyles.configBlock}>
+        <h3 style={backupStyles.subHeading}>Ziel-Konfiguration</h3>
+        <p style={backupStyles.envNote}>
+          Nicht-geheime Einstellungen persistent gespeichert (Credential-Volume).
+          Env-Vars (<code style={backupStyles.code}>BACKUP_OFFHOST_*</code>) dienen als Initial-Default.
+        </p>
+
+        {configLoading ? (
+          <p style={backupStyles.envNote} aria-busy="true">Konfiguration wird geladen…</p>
+        ) : (
+          <>
+            {/* Off-Host aktiv (An/Aus) */}
+            <div style={backupStyles.configFormRow}>
+              <label htmlFor="backup-offhost-enabled" style={backupStyles.configFormLabel}>
+                Off-Host-Backup aktiv:
+              </label>
+              <select
+                id="backup-offhost-enabled"
+                value={offHostEnabled ? 'true' : 'false'}
+                onChange={(e) => setOffHostEnabled(e.target.value === 'true')}
+                style={backupStyles.configSelect}
+                aria-describedby={configError ? 'backup-config-error' : undefined}
+              >
+                <option value="false">Nein (nur lokal)</option>
+                <option value="true">Ja</option>
+              </select>
+            </div>
+
+            {/* Ziel-Typ */}
+            {offHostEnabled && (
+              <div style={backupStyles.configFormRow}>
+                <label htmlFor="backup-target-type" style={backupStyles.configFormLabel}>
+                  Ziel-Typ:
+                </label>
+                <select
+                  id="backup-target-type"
+                  value={targetType}
+                  onChange={(e) => setTargetType(e.target.value)}
+                  style={backupStyles.configSelect}
+                >
+                  <option value="s3">S3-kompatibel</option>
+                  <option value="sftp">SFTP</option>
+                </select>
+              </div>
+            )}
+
+            {/* S3-Felder */}
+            {offHostEnabled && targetType === 's3' && (
+              <>
+                <div style={backupStyles.configFormRow}>
+                  <label htmlFor="backup-s3-bucket" style={backupStyles.configFormLabel}>
+                    S3-Bucket:
+                  </label>
+                  <input
+                    id="backup-s3-bucket"
+                    type="text"
+                    value={bucket}
+                    onChange={(e) => setBucket(e.target.value)}
+                    placeholder="my-backup-bucket"
+                    style={backupStyles.configInput}
+                    autoComplete="off"
+                  />
+                </div>
+                <div style={backupStyles.configFormRow}>
+                  <label htmlFor="backup-s3-endpoint" style={backupStyles.configFormLabel}>
+                    S3-Endpoint (URL):
+                  </label>
+                  <input
+                    id="backup-s3-endpoint"
+                    type="text"
+                    value={endpoint}
+                    onChange={(e) => setEndpoint(e.target.value)}
+                    placeholder="leer = AWS S3"
+                    style={backupStyles.configInput}
+                    autoComplete="off"
+                  />
+                </div>
+                <div style={backupStyles.configFormRow}>
+                  <label htmlFor="backup-s3-prefix" style={backupStyles.configFormLabel}>
+                    Pfad-Präfix:
+                  </label>
+                  <input
+                    id="backup-s3-prefix"
+                    type="text"
+                    value={prefix}
+                    onChange={(e) => setPrefix(e.target.value)}
+                    placeholder="backups/"
+                    style={backupStyles.configInput}
+                    autoComplete="off"
+                  />
+                </div>
+                <div style={backupStyles.configFormRow}>
+                  <label htmlFor="backup-s3-region" style={backupStyles.configFormLabel}>
+                    AWS-Region:
+                  </label>
+                  <input
+                    id="backup-s3-region"
+                    type="text"
+                    value={region}
+                    onChange={(e) => setRegion(e.target.value)}
+                    placeholder="us-east-1"
+                    style={backupStyles.configInput}
+                    autoComplete="off"
+                  />
+                </div>
+              </>
+            )}
+
+            {/* SFTP-Felder */}
+            {offHostEnabled && targetType === 'sftp' && (
+              <>
+                <div style={backupStyles.configFormRow}>
+                  <label htmlFor="backup-sftp-host" style={backupStyles.configFormLabel}>
+                    SFTP-Host:
+                  </label>
+                  <input
+                    id="backup-sftp-host"
+                    type="text"
+                    value={host}
+                    onChange={(e) => setHost(e.target.value)}
+                    placeholder="sftp.example.com"
+                    style={backupStyles.configInput}
+                    autoComplete="off"
+                  />
+                </div>
+                <div style={backupStyles.configFormRow}>
+                  <label htmlFor="backup-sftp-port" style={backupStyles.configFormLabel}>
+                    SFTP-Port:
+                  </label>
+                  <input
+                    id="backup-sftp-port"
+                    type="text"
+                    value={port}
+                    onChange={(e) => setPort(e.target.value)}
+                    placeholder="22"
+                    style={backupStyles.configInput}
+                    autoComplete="off"
+                    inputMode="numeric"
+                  />
+                </div>
+                <div style={backupStyles.configFormRow}>
+                  <label htmlFor="backup-sftp-user" style={backupStyles.configFormLabel}>
+                    SFTP-Benutzer:
+                  </label>
+                  <input
+                    id="backup-sftp-user"
+                    type="text"
+                    value={user}
+                    onChange={(e) => setUser(e.target.value)}
+                    placeholder="backupuser"
+                    style={backupStyles.configInput}
+                    autoComplete="off"
+                  />
+                </div>
+                <div style={backupStyles.configFormRow}>
+                  <label htmlFor="backup-sftp-prefix" style={backupStyles.configFormLabel}>
+                    Pfad-Präfix:
+                  </label>
+                  <input
+                    id="backup-sftp-prefix"
+                    type="text"
+                    value={prefix}
+                    onChange={(e) => setPrefix(e.target.value)}
+                    placeholder="/backups"
+                    style={backupStyles.configInput}
+                    autoComplete="off"
+                  />
+                </div>
+              </>
+            )}
+
+            {/* Retention */}
+            <div style={backupStyles.configFormRow}>
+              <label htmlFor="backup-retention" style={backupStyles.configFormLabel}>
+                Retention (Kopien):
+              </label>
+              <input
+                id="backup-retention"
+                type="number"
+                value={retentionCount}
+                onChange={(e) => setRetentionCount(parseInt(e.target.value, 10) || 10)}
+                min={1}
+                max={9999}
+                style={{ ...backupStyles.configInput, width: 80 }}
+                autoComplete="off"
+              />
+            </div>
+
+            {/* Fehleranzeige */}
+            {configError && (
+              <p id="backup-config-error" role="alert" style={backupStyles.configErrorMsg}>
+                {configError}
+              </p>
+            )}
+
+            {/* Erfolgsbestätigung */}
+            {configSaved && !configError && (
+              <p role="status" style={backupStyles.configSuccessMsg}>
+                Konfiguration gespeichert.
+              </p>
+            )}
+
+            {/* Speichern-Button */}
+            <div style={{ marginTop: 10 }}>
+              <button
+                type="button"
+                onClick={handleSaveConfig}
+                disabled={configSaving}
+                aria-busy={configSaving}
+                style={backupStyles.saveButton}
+              >
+                {configSaving ? 'Wird gespeichert…' : 'Backup-Konfiguration speichern'}
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* Remote-Credentials (write-only, AC12: nur bei aktiviertem Off-Host) */}
+      {offHostEnabled && (
+        <div style={backupStyles.credsBlock}>
+          <h3 style={backupStyles.subHeading}>Remote-Zugangsdaten</h3>
+          <p style={backupStyles.envNote}>
+            Write-only — werden sicher im Credential-Store hinterlegt.
+            Klartext-Werte werden nach dem Speichern sofort verworfen.
+          </p>
+          {BACKUP_REMOTE_FIELDS.map(({ name, label }) => (
+            <BackupRemoteCredField
+              key={name}
+              name={name}
+              label={label}
+              meta={getMeta(name)}
+              onSaved={onSaved}
+            />
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+// ── Backup-Styles (AC12) ──────────────────────────────────────────────────────
+
+const backupStyles = {
+  statusTile: {
+    marginBottom: 16,
+    padding: '12px 16px',
+    background: '#0d1a0d',
+    border: '1px solid #166534',
+    borderRadius: 6,
+  },
+  statusTileError: {
+    marginBottom: 16,
+    padding: '12px 16px',
+    background: '#2d0f0f',
+    border: '1px solid #7f1d1d',
+    borderRadius: 6,
+  },
+  statusTileLabel: {
+    margin: '0 0 4px',
+    fontSize: 11,
+    fontWeight: 700,
+    color: '#9ca3af',  // S4-Fix: #9ca3af statt #6b7280 — WCAG 2.1 AA ≥ 4.5:1 auf #0d1a0d
+    textTransform: 'uppercase',
+    letterSpacing: '0.05em',
+  },
+  statusTileValue: {
+    margin: '0 0 2px',
+    fontSize: 14,
+    fontWeight: 600,
+    color: '#86efac',   // Grün — Kontrast auf #0d1a0d ≥ 4.5:1
+  },
+  statusTileHint: {
+    margin: 0,
+    fontSize: 12,
+    color: '#9ca3af',   // Kontrast auf #0d1a0d ≥ 4.5:1
+  },
+  configBlock: {
+    marginBottom: 16,
+  },
+  credsBlock: {
+    marginTop: 8,
+  },
+  subHeading: {
+    margin: '0 0 6px',
+    fontSize: 14,
+    fontWeight: 700,
+    color: '#e5e7eb',
+  },
+  envNote: {
+    margin: '0 0 10px',
+    fontSize: 12,
+    color: '#9ca3af',
+    lineHeight: 1.5,
+  },
+  code: {
+    fontFamily: 'monospace',
+    fontSize: 11,
+    padding: '1px 4px',
+    background: '#1e293b',
+    borderRadius: 3,
+    color: '#93c5fd',
+  },
+  configRow: {
+    display: 'flex',
+    gap: 8,
+    alignItems: 'center',
+    marginBottom: 6,
+    fontSize: 13,
+  },
+  configLabel: {
+    color: '#9ca3af',
+    minWidth: 100,
+  },
+  configValue: {
+    color: '#d4d4d4',
+    fontFamily: 'monospace',
+    fontSize: 12,
+  },
+  configValueGreen: {
+    color: '#86efac',
+    fontFamily: 'monospace',
+    fontSize: 12,
+  },
+  configValueGray: {
+    color: '#9ca3af',
+    fontFamily: 'monospace',
+    fontSize: 12,
+  },
+  // Formular-Elemente für editierbare Konfig (Architekt-Entscheid S-143)
+  configFormRow: {
+    display: 'flex',
+    gap: 8,
+    alignItems: 'center',
+    marginBottom: 8,
+    flexWrap: 'wrap',
+  },
+  configFormLabel: {
+    color: '#9ca3af',
+    fontSize: 13,
+    minWidth: 150,
+  },
+  configInput: {
+    background: '#1e293b',
+    border: '1px solid #374151',
+    borderRadius: 4,
+    color: '#e5e7eb',
+    fontSize: 13,
+    padding: '4px 8px',
+    minHeight: 32,
+    flex: 1,
+    minWidth: 180,
+    outline: 'none',
+    fontFamily: 'monospace',
+  },
+  configSelect: {
+    background: '#1e293b',
+    border: '1px solid #374151',
+    borderRadius: 4,
+    color: '#e5e7eb',
+    fontSize: 13,
+    padding: '4px 8px',
+    minHeight: 32,
+    outline: 'none',
+  },
+  saveButton: {
+    background: '#166534',
+    border: 'none',
+    borderRadius: 4,
+    color: '#bbf7d0',
+    cursor: 'pointer',
+    fontSize: 13,
+    fontWeight: 600,
+    minHeight: 44,
+    padding: '8px 18px',
+  },
+  configErrorMsg: {
+    color: '#fca5a5',
+    fontSize: 13,
+    margin: '6px 0 0',
+  },
+  configSuccessMsg: {
+    color: '#86efac',
+    fontSize: 13,
+    margin: '6px 0 0',
+  },
+};
+
 // ── WorkspacePathSection ──────────────────────────────────────────────────────
 
 /**
@@ -649,12 +1529,72 @@ function WorkspacePathSection({ effectivePath, source, mountRoot, onReload, fetc
  *   onSaved: () => void,
  * }} props
  */
+/**
+ * Rendert die zweistufige Backup-Quittung (AC11).
+ * local: 'ok'|'failed', offHost: 'ok'|'failed'|'disabled'
+ * Kein Secret, keine Pfadangabe — nur Stufen-Ergebnis.
+ *
+ * @param {{ local: string, offHost: string }} backup
+ */
+function BackupReceipt({ backup }) {
+  if (!backup) return null;
+  const { local, offHost } = backup;
+  return (
+    <div style={backupReceiptStyles.wrapper} role="status" aria-live="polite" aria-label="Backup-Quittung">
+      {/* Lokale Stufe */}
+      <span
+        style={local === 'ok' ? backupReceiptStyles.ok : backupReceiptStyles.warn}
+        aria-label={local === 'ok' ? 'lokal gesichert' : 'lokale Sicherung fehlgeschlagen'}
+      >
+        {local === 'ok' ? 'lokal gesichert ✓' : 'lokal fehlgeschlagen ⚠'}
+      </span>
+      {/* Off-Host-Stufe: nur anzeigen wenn nicht disabled */}
+      {offHost !== 'disabled' && (
+        <>
+          <span style={backupReceiptStyles.separator} aria-hidden="true">{' · '}</span>
+          <span
+            style={offHost === 'ok' ? backupReceiptStyles.ok : backupReceiptStyles.warn}
+            aria-label={offHost === 'ok' ? 'off-host gesichert' : 'off-host Sicherung fehlgeschlagen'}
+          >
+            {offHost === 'ok' ? 'off-host gesichert ✓' : 'off-host fehlgeschlagen ⚠'}
+          </span>
+        </>
+      )}
+    </div>
+  );
+}
+
+const backupReceiptStyles = {
+  wrapper: {
+    marginTop: 6,
+    fontSize: 12,
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: 2,
+    alignItems: 'center',
+  },
+  ok: {
+    color: '#86efac',   // Grün — Kontrast ≥ 4.5:1 auf #111
+    fontFamily: 'monospace',
+  },
+  warn: {
+    color: '#fca5a5',   // Rot — Kontrast ≥ 4.5:1 auf #111
+    fontFamily: 'monospace',
+  },
+  separator: {
+    color: '#6b7280',
+    userSelect: 'none',
+  },
+};
+
 function CredentialField({ integration, name, label, meta, onSaved }) {
   const [editing, setEditing] = useState(false);
   const [inputVal, setInputVal] = useState('');
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState(null);
+  // AC11: Backup-Quittung nach Credential-Schreib-Operation
+  const [backupResult, setBackupResult] = useState(null);
   const inputRef = useRef(null);
   const errorId = `err-${integration}-${name}`;
 
@@ -684,10 +1624,12 @@ function CredentialField({ integration, name, label, meta, onSaved }) {
 
     setSaving(true);
     try {
-      await putCredential(integration, name, trimmed);
+      const data = await putCredential(integration, name, trimmed);
       // AC4/AC2: Klartext sofort verwerfen nach Speichern
       setInputVal('');
       setEditing(false);
+      // AC11: Backup-Quittung anzeigen (falls Backup-Ergebnis in der Antwort vorhanden)
+      if (data?.backup) setBackupResult(data.backup);
       onSaved();
     } catch (err) {
       setError(err.message);
@@ -701,7 +1643,9 @@ function CredentialField({ integration, name, label, meta, onSaved }) {
     setError(null);
     setDeleting(true);
     try {
-      await deleteCredential(integration, name);
+      const data = await deleteCredential(integration, name);
+      // AC11: Backup-Quittung anzeigen (falls Backup-Ergebnis in der Antwort vorhanden)
+      if (data?.backup) setBackupResult(data.backup);
       onSaved();
     } catch (err) {
       setError(err.message);
@@ -794,6 +1738,9 @@ function CredentialField({ integration, name, label, meta, onSaved }) {
           )}
         </div>
       )}
+
+      {/* AC11: Zweistufige Backup-Quittung nach Schreib-Operation */}
+      {backupResult && <BackupReceipt backup={backupResult} />}
     </div>
   );
 }
@@ -2821,6 +3768,16 @@ export function SettingsView({ onNavigate, fetchFn }) {
             </p>
           )}
           <SshKeysSection sshKeys={sshKeys} setSshKeys={setSshKeys} onSaved={load} />
+        </section>
+
+        {/* Backup / Sicherung (AC12) */}
+        <section aria-labelledby="settings-section-backup" style={styles.section}>
+          <h2 id="settings-section-backup" style={styles.sectionHeading}>Backup / Sicherung</h2>
+          <p style={styles.sectionDesc}>
+            Automatische Sicherung des Credential-Stores nach jedem Schreib-Vorgang.
+            Remote-Zugangsdaten werden write-only im Credential-Store hinterlegt.
+          </p>
+          <BackupSection credentials={credentials} onSaved={load} fetchFn={fetchFn} />
         </section>
 
         <button

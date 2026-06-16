@@ -1,5 +1,11 @@
 # Reviewer Lessons — dev-gui (newest first)
 
+## 2026-06-16 — Test-Beschreibungstext vs. expect()-Wert: Mismatch ist eigener Befund
+Wenn ein Test-Beschreibungstext (it('genau 23 Router-Module...')) und der tatsächliche expect()-Wert (toBe(24)) auseinanderklaffen, ist das ein eigenständiger Befund (Suggestion). Der Test läuft korrekt (Assertion passt zur Realität), aber die Beschreibung ist veraltet — kann beim nächsten Entwickler für Verwirrung sorgen. Nicht als "nur kosmetisch" übersehen: bei Smoke-Assertions dieser Art ist die Selbstdokumentation Teil des Werts. *[seen-in: S-143 routerLoader.test.js Zeile 263 "genau 23" vs toBe(24); promoted: 2026-06-16]*
+
+## 2026-06-16 — SPEC-LÜCKE (strukturell/Scope): Critical zurückgeben mit "über `requirement` klären" — nicht als Suggestion behandeln
+Wenn ein coder explizit eine `SPEC-LÜCKE` deklariert (strukturell/Scope — z.B. „vollständige In-App-Persistenz der nicht-geheimen Konfiguration wäre eine Architektur-Entscheidung") UND die Spec-Formulierung „Einstellungen für Ziel-Typ, Retention, An/Aus" eigentlich Konfigurierbarkeit impliziert, ist das Gate-Verhalten klar: Critical „Spec-Drift" zurückgeben mit „über `requirement` klären". Die Gate-Regeln sagen explizit: „Meldete der coder eine `SPEC-LÜCKE` (strukturell/Scope) → Critical zurück mit ‚über `requirement` klären'". Nicht als Suggestion behandeln und durch, auch wenn der coder's Argumen­tation plausibel ist — Scope-Entscheide treffen Orchestrator/Architekt, nicht Coder allein. *[seen-in: S-143 BackupSection Env-vs-UI-Entscheidung; promoted: 2026-06-16]*
+
 ## 2026-06-16 — git status untracked Files im Worktree: neue Dateien erscheinen NICHT in git diff origin/main
 Bei Worktree-Diffs (`git diff origin/main`) erscheinen neue, noch nicht committete Dateien (Untracked, `?? status`) NICHT im Diff — auch wenn sie funktional Teil des Items sind. Beim Review neuer Dateien immer `git status` prüfen: `??` markierte Dateien müssen direkt gelesen werden. Ohne diesen Schritt würden neue Module (`BackupUploader.js`, `BackupUploader.test.js`) komplett übersehen. Checkliste: nach `git diff` stets `git status --short` ausführen und alle `??`-Dateien explizit lesen. *[seen-in: S-141 BackupUploader.js + test/BackupUploader.test.js als untracked; promoted: 2026-06-16]*
 
