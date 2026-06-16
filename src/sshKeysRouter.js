@@ -27,6 +27,7 @@
 import { createRequire } from 'node:module';
 import { Router } from 'express';
 import { VpsProvisioner } from './VpsProvisioner.js';
+import { toExternalBackup } from './CredentialStore.js';
 
 // ssh2.utils.generateKeyPair liefert ed25519-Keypairs direkt im OpenSSH-Format.
 // CJS-Import über createRequire (ssh2 ist CommonJS).
@@ -335,24 +336,29 @@ export function sshKeysRouter(credentialStore, auditStore, vpsProvisioner, keyge
     }
 
     try {
-      // Public-Key setzen (Klartext-Meta)
+      // Public-Key setzen (Klartext-Meta) — gibt { updatedAt, backup } zurück
+      let lastBackup;
       if (publicKey !== undefined) {
-        await credentialStore.setPublicKey(user, publicKey.trim());
+        const pubResult = await credentialStore.setPublicKey(user, publicKey.trim());
+        lastBackup = pubResult.backup;
       }
 
-      // Private-Key setzen (verschlüsselt in entries)
+      // Private-Key setzen (verschlüsselt in entries) — gibt { status, updatedAt, backup } zurück
       if (privateKey !== undefined) {
-        await credentialStore.set(`ssh/${user}/private_key`, privateKey.trim());
+        const privResult = await credentialStore.set(`ssh/${user}/private_key`, privateKey.trim());
+        lastBackup = privResult.backup;
       }
 
       // Antwort zusammenstellen — kein Private-Key-Klartext
       const storedPublicKey = await credentialStore.getPublicKey(user);
       const privMeta = await credentialStore.getMeta(`ssh/${user}/private_key`);
 
+      // S-1: localPath (interner Volume-Pfad) aus HTTP-Response filtern
       return res.json({
         user,
         ...(storedPublicKey ? { publicKey: storedPublicKey } : {}),
         privateKeyStatus: privMeta.status,
+        ...(lastBackup !== undefined ? { backup: toExternalBackup(lastBackup) } : {}),
       });
     } catch (err) {
       if (err.message.includes('Längenlimit')) {
@@ -418,21 +424,26 @@ export function sshKeysRouter(credentialStore, auditStore, vpsProvisioner, keyge
     }
 
     try {
+      let lastBackup;
       if (deletePublic) {
-        await credentialStore.deletePublicKey(user);
+        const pubResult = await credentialStore.deletePublicKey(user);
+        lastBackup = pubResult?.backup;
       }
       if (deletePrivate) {
-        await credentialStore.delete(`ssh/${user}/private_key`);
+        const privResult = await credentialStore.delete(`ssh/${user}/private_key`);
+        lastBackup = privResult?.backup ?? lastBackup;
       }
 
       // Aktuellen Status zurückgeben
       const storedPublicKey = await credentialStore.getPublicKey(user);
       const privMeta = await credentialStore.getMeta(`ssh/${user}/private_key`);
 
+      // S-1: localPath (interner Volume-Pfad) aus HTTP-Response filtern
       return res.json({
         user,
         ...(storedPublicKey ? { publicKey: storedPublicKey } : {}),
         privateKeyStatus: privMeta.status,
+        ...(lastBackup !== undefined ? { backup: toExternalBackup(lastBackup) } : {}),
       });
     } catch (err) {
       if (err.message.includes('Master-Key') || err.message.includes('CRED_MASTER_KEY')) {

@@ -34,6 +34,7 @@
 
 import { Router } from 'express';
 import { validateStackName, validateStackDefinition } from './StackRegistry.js';
+import { toExternalBackup } from './CredentialStore.js';
 
 // ── Authz-Helper (gleiche Logik wie credentialsRouter / deploymentsRouter / vpsRouter) ─────
 
@@ -184,7 +185,12 @@ export function stacksRouter(stackRegistry, auditStore, { stackDeployOrchestrato
 
     try {
       const result = await stackRegistry.set(def);
-      return res.status(201).json({ stackName: def.stackName, updatedAt: result.updatedAt });
+      // S-1: localPath (interner Volume-Pfad) aus HTTP-Response filtern
+      return res.status(201).json({
+        stackName: def.stackName,
+        updatedAt: result.updatedAt,
+        ...(result.backup ? { backup: toExternalBackup(result.backup) } : {}),
+      });
     } catch (err) {
       console.error('[stacksRouter] POST Stack-Registry-Schreib-Fehler:', sanitizeMsg(err?.message));
       return res.status(500).json({ error: 'Stack-Registry nicht schreibbar' });
@@ -245,7 +251,12 @@ export function stacksRouter(stackRegistry, auditStore, { stackDeployOrchestrato
 
     try {
       const result = await stackRegistry.set(def);
-      return res.json({ stackName: def.stackName, updatedAt: result.updatedAt });
+      // S-1: localPath (interner Volume-Pfad) aus HTTP-Response filtern
+      return res.json({
+        stackName: def.stackName,
+        updatedAt: result.updatedAt,
+        ...(result.backup ? { backup: toExternalBackup(result.backup) } : {}),
+      });
     } catch (err) {
       console.error('[stacksRouter] PUT Stack-Registry-Schreib-Fehler:', sanitizeMsg(err?.message));
       return res.status(500).json({ error: 'Stack-Registry nicht schreibbar' });
@@ -308,8 +319,13 @@ export function stacksRouter(stackRegistry, auditStore, { stackDeployOrchestrato
     }
 
     try {
-      await stackRegistry.delete(stackName);
-      return res.json({ stackName, status: 'deleted' });
+      const result = await stackRegistry.delete(stackName);
+      // S-1: localPath (interner Volume-Pfad) aus HTTP-Response filtern
+      return res.json({
+        stackName,
+        status: 'deleted',
+        ...(result?.backup ? { backup: toExternalBackup(result.backup) } : {}),
+      });
     } catch (err) {
       console.error('[stacksRouter] DELETE Stack-Registry-Schreib-Fehler:', sanitizeMsg(err?.message));
       return res.status(500).json({ error: 'Stack-Registry nicht schreibbar' });

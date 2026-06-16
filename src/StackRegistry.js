@@ -341,7 +341,7 @@ export class StackRegistry {
    * Prüft das Stack-Limit (MAX_STACKS) bei Neuanlage.
    *
    * @param {object} def - validierte StackDefinition (bereits durch validateStackDefinition geprüft)
-   * @returns {Promise<{ updatedAt: string }>}
+   * @returns {Promise<{ updatedAt: string, backup?: object }>}
    */
   async set(def) {
     if (!def || typeof def.stackName !== 'string') {
@@ -356,17 +356,18 @@ export class StackRegistry {
       }
     }
     const updatedAt = new Date().toISOString();
-    await this.#credentialStore.setStackMeta(def.stackName, JSON.stringify(def), updatedAt);
-    return { updatedAt };
+    const result = await this.#credentialStore.setStackMeta(def.stackName, JSON.stringify(def), updatedAt);
+    return { updatedAt, backup: result?.backup };
   }
 
   /**
    * Löscht eine Stack-Definition. Idempotent.
    *
    * @param {string} stackName
-   * @returns {Promise<void>}
+   * @returns {Promise<{ backup?: object }>}
    */
   async delete(stackName) {
-    await this.#credentialStore.deleteStackMeta(stackName);
+    const result = await this.#credentialStore.deleteStackMeta(stackName);
+    return { backup: result?.backup };
   }
 }

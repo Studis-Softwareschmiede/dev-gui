@@ -1,5 +1,8 @@
 # Reviewer Lessons — dev-gui (newest first)
 
+## 2026-06-16 — GPG --passphrase-fd 0 + stdin-Daten: korrektes Muster kennen, kein false-positive
+Wenn BackupCrypto `spawn('gpg', [..., '--passphrase-fd', '0', '--symmetric', ...])` aufruft und danach `stdin.write(passphrase + '\n'); stdin.write(inputData); stdin.end()` ausführt, ist das das korrekte GPG-Passphrase-Handling. GPG mit `--passphrase-fd 0` liest die Passphrase als erste Zeile von fd 0 (stdin), danach liest es die Eingabedaten weiterhin von stdin. Kein Race-Condition-Problem, kein Passphrase-in-Argv-Problem — dieses Muster ist documented-correct. Kein Security-Critical dafür. *[seen-in: S-140 BackupCrypto._runGpg — korrekt; promoted: 2026-06-16]*
+
 ## 2026-06-16 — Busy-Guard-Button: Button nur bei flowState==='idle' rendern ist ausreichender Click-Schutz
 Wenn ein Button in React mit `{flowState === 'idle' && <button ...>}` bedingt gerendert wird, ist jede zusätzliche `isBtnDisabled = isSessionBusy || flowState === 'starting'`-Bedingung für den `'starting'`-Zweig dead logic — der Button existiert im DOM gar nicht wenn `flowState !== 'idle'`. Kein Befund (Suggestion „redundante Bedingung"), kein Critical/Important. Analog: `isBoardBtnDisabled` im `confirm`-State ist ebenfalls dead (Button nicht sichtbar). Der eigentliche Click-Schutz kommt von der konditionalen Renderung, nicht von `disabled`. Kein Gate-Block, höchstens Suggestion auf Klarheit. *[seen-in: S-136 CockpitView.jsx isBoardBtnDisabled — flowState==='starting' nie wahr wenn Button sichtbar; promoted: 2026-06-16]*
 

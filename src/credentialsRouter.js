@@ -16,7 +16,7 @@
  */
 
 import { Router } from 'express';
-import { resolveKey } from './CredentialStore.js';
+import { resolveKey, toExternalBackup } from './CredentialStore.js';
 
 /**
  * Prüft ob die anfragende Identität mutieren darf (AC7/ADR-007).
@@ -120,7 +120,8 @@ export function credentialsRouter(credentialStore, auditStore) {
 
     try {
       const meta = await credentialStore.set(resolved.storeKey, value);
-      return res.json({ integration, name, ...meta });
+      // S-1: localPath (interner Volume-Pfad) aus HTTP-Response filtern
+      return res.json({ integration, name, ...meta, backup: toExternalBackup(meta.backup) });
     } catch (err) {
       if (err.message.includes('Längenlimit')) {
         return res.status(422).json({ error: 'Wert überschreitet das zulässige Längenlimit' });
@@ -141,7 +142,7 @@ export function credentialsRouter(credentialStore, auditStore) {
    * Löscht einen Credential-Eintrag. Idempotent.
    *
    * Responses:
-   *   200 { integration, name, status: 'unset' }
+   *   200 { integration, name, status: 'unset', backup? }
    *   403 { error: string }  — keine Berechtigung
    *   404 { error: string }  — unbekannte Integration/Name
    *   500 { error: string }  — Store nicht schreibbar
@@ -175,7 +176,8 @@ export function credentialsRouter(credentialStore, auditStore) {
 
     try {
       const meta = await credentialStore.delete(resolved.storeKey);
-      return res.json({ integration, name, ...meta });
+      // S-1: localPath (interner Volume-Pfad) aus HTTP-Response filtern
+      return res.json({ integration, name, ...meta, backup: toExternalBackup(meta.backup) });
     } catch (err) {
       if (err.message.includes('Master-Key') || err.message.includes('CRED_MASTER_KEY')) {
         return res.status(500).json({ error: 'Credential-Store nicht konfiguriert' });

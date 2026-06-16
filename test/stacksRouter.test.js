@@ -239,7 +239,9 @@ describe('stacksRouter', () => {
 
       const del = await httpReq(port, 'DELETE', '/api/deployments/stacks/my-app');
       expect(del.status).toBe(200);
-      expect(del.body).toEqual({ stackName: 'my-app', status: 'deleted' });
+      // backup-Feld koennte vorhanden sein (S-140 AC6), aber stackName+status sind gesetzt
+      expect(del.body.stackName).toBe('my-app');
+      expect(del.body.status).toBe('deleted');
 
       const get = await httpReq(port, 'GET', '/api/deployments/stacks/my-app');
       expect(get.status).toBe(404);

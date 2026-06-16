@@ -194,6 +194,15 @@ services:
       # Unset or empty = every valid Access identity may mutate (default).
       #   CRED_ADMIN_EMAILS: admin@example.com,ops@example.com
 
+      # ── Backup-Engine (S-140) ────────────────────────────────────────────────
+      # Verzeichnis für lokale GPG-Backup-Artefakte (Default: CRED_STORE_DIR/backups).
+      # WICHTIG: Liegt im dev-gui-cred-Volume — niemals mit `down -v` verwerfen.
+      # CRED_BACKUP_DIR: /home/node/.cred/backups
+      #
+      # Max. Anzahl lokaler Backup-Artefakte (Retention). Default: 10.
+      # Älteste werden gelöscht; das jüngste wird nie gelöscht.
+      # CRED_BACKUP_RETENTION: "10"
+
       # ── Bitwarden Master-Key-Beschaffung (bitwarden-master-key-unlock) ──────
       # Name des Bitwarden-Items, das den DEVGUI_CRED_MASTER_KEY enthält.
       # Nur setzen, wenn der Default 'dev-gui-master-key' nicht passt.
