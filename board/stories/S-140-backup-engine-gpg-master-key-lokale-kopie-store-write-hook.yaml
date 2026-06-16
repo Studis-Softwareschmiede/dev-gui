@@ -1,0 +1,33 @@
+id: S-140
+parent: F-012
+title: 'Backup-Engine: GPG-Master-Key-Wrapper, atomare lokale Kopie, Store-Write-Hook,
+  lokale Quittung'
+status: To Do
+priority: P1
+spec: docs/specs/credential-backup.md
+implements:
+- AC1
+- AC2
+- AC3
+- AC4
+- AC5
+- AC6
+- AC7
+depends:
+- S-139
+labels:
+- security
+github_issue: 285
+github_url: https://github.com/Studis-Softwareschmiede/dev-gui/issues/285
+size_est: M
+dispo_est: null
+dispo_act: null
+dispo_forecast: null
+estimate_note: null
+confidence: null
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-06-16T12:00:00Z'
+updated_at: '2026-06-16T12:00:00Z'
+done_at: null
