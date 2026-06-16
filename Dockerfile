@@ -95,12 +95,13 @@ COPY --chown=node:node --from=builder /build/package.json ./package.json
 COPY --chown=node:node docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh
 
-# AC2 — pre-create node-owned dirs so that a named volume mounted at
-# /home/node/.claude is initialised with node ownership (Docker copies the
-# image directory's ownership when seeding an empty named volume; without this
-# the mountpoint is created root-owned → EACCES on plugin auto-provision).
-RUN mkdir -p /home/node/.claude /home/node/.config \
-  && chown -R node:node /home/node/.claude /home/node/.config
+# AC2/AC18 — pre-create node-owned dirs so that named volumes mounted at
+# /home/node/.claude and /home/node/.cred are initialised with node ownership
+# (Docker copies the image directory's ownership when seeding an empty named
+# volume; without this the mountpoints are created root-owned → EACCES on
+# plugin auto-provision / credential persist+boot-reload).
+RUN mkdir -p /home/node/.claude /home/node/.config /home/node/.cred \
+  && chown -R node:node /home/node/.claude /home/node/.config /home/node/.cred
 
 # Build-Version — baked in at image build time (yymmddhhmmss TZ, Europe/Zurich).
 # Produced by CI and passed via --build-arg BUILD_VERSION=... .
