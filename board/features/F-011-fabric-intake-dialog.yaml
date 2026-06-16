@@ -4,9 +4,10 @@ goal: 'GUI-Intake-Dialog erfasst Idee (neues Repo) bzw. Aenderung (bestehendes R
   als Freitext und uebergibt sie ueber den bestehenden Command-Kanal an die agent-flow-Skills:
   Phase A (interaktiv) via requirement (bei neuem Repo davor new-project-Bootstrap,
   zwei bestaetigte Trigger, kein Auto-Chaining) erzeugt Konzept/Specs/Feature/Story;
-  Phase B (Button "Board abarbeiten") loest /agent-flow:flow aus. Plus "Let Claude proof"-Helfer
-  via POST /api/assist/refine (zustandsloser claude -p one-shot, kein PTY-Lock)'
-status: To Do
+  Phase B (Button "Board abarbeiten") loest /agent-flow:flow aus. Plus "Let Claude
+  proof"-Helfer via POST /api/assist/refine (zustandsloser claude -p one-shot, kein
+  PTY-Lock)'
+status: Done
 priority: P2
 spec: docs/specs/fabric-intake-dialog.md
 definition_of_done: null
@@ -23,4 +24,5 @@ stories:
 - S-137
 progress: 0/7
 created_at: '2026-06-16T00:00:00Z'
-updated_at: '2026-06-16T00:00:00Z'
+updated_at: '2026-06-16T16:17:37Z'
+done_at: '2026-06-16T16:17:37Z'
