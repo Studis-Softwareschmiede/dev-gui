@@ -66,13 +66,13 @@
 
 ## NFRs (prüfbar)
 - **Sicherheit (Floor):** keine `/api/*`-/WS-Anfrage ohne gültigen Access-Nachweis (→403). Dienst **startet nicht** ohne Access-Konfig in Produktion. Keine Secrets (API-Key, GPG-Passphrase, Tokens) in Frontend-Bundle, Logs, Audit oder WS-Stream.
-- **Kosten:** Engine nutzt ausschließlich die interaktive Abo-Session — **kein** API/`-p`. (Testbar: Prozess-Argv + Environment.)
+- **Kosten:** Engine nutzt ausschließlich die interaktive Abo-Session — **kein** Anthropic-API. Der interaktive Flow-/Intake-Pfad bleibt rein PTY-basiert (kein `-p`). **Bewusste Ausnahme:** der zustandslose „Let Claude proof"-Helfer (`POST /api/assist/refine`, `AssistService`-Boundary, headless one-shot, kein PTY-Lock, auditiert) nutzt `claude -p` ohne API-Key — eng begrenzt; Detail: docs/specs/fabric-intake-dialog.md (AC11). (Testbar: Prozess-Argv + Environment für den PTY-Pfad; Spawn-Argv für AssistService-Pfad.)
 - **Concurrency:** global **max. 1** laufender Command.
 - **Beobachtbarkeit:** jeder ausgelöste Befehl im append-only Audit-Log (`GET /api/audit`).
 - **Verfügbarkeit:** Session überlebt Absturz via Restart-Policy.
 
 ## Entscheidungen (ADR)
-- **ADR-001 · 2026-05-26 · Engine = interaktive Claude-Session via `node-pty`** (nicht Agent-SDK, nicht `claude -p`). *Grund:* Abo deckt nur interaktive Nutzung kostenlos; API + `-p` kosten Token bzw. ziehen ab 2026-06-15 aus separatem SDK-Kontingent. *Verworfen:* Agent-SDK (`@anthropic-ai/claude-agent-sdk`, API-Cost), `claude -p` (separates Kontingent).
+- **ADR-001 · 2026-05-26 · Engine = interaktive Claude-Session via `node-pty`** (nicht Agent-SDK; der interaktive Flow-/Intake-Pfad bleibt PTY-only, kein `-p`). *Grund:* Abo deckt nur interaktive Nutzung kostenlos; Anthropic-API + `-p` kosten Token bzw. ziehen ab 2026-06-15 aus separatem SDK-Kontingent. *Verworfen:* Agent-SDK (`@anthropic-ai/claude-agent-sdk`, API-Cost), `claude -p` als Engine-Pfad (separates Kontingent). **Ausnahme (bewusst, 2026-06-16):** der zustandslose „Let Claude proof"-Helfer (`POST /api/assist/refine`, eigene `AssistService`-Boundary, headless one-shot, kein PTY-Lock, auditiert, kein API-Key) nutzt `claude -p` — eng begrenzt auf diesen einen Endpunkt; Detail: docs/specs/fabric-intake-dialog.md (AC11).
 - **ADR-002 · 2026-05-26 · Session-Ort = VPS, always-on.** *Grund:* jederzeit über `devgui` erreichbar. *Verworfen:* Mac-Runner (muss laufen) — geringere Cred-Fläche, aber nicht always-on.
 - **ADR-003 · 2026-05-26 · Pre-granted, unbeaufsichtigt.** *Grund:* maximaler Komfort, Voll-Steuerung ab Tag 1. *Verworfen:* attended (Genehmigung pro Prompt). *Risiko* (RCE-Fläche) bewusst getragen — kompensiert durch ADR-004 + Leitplanken (`access-and-guardrails`).
 - **ADR-004 · 2026-05-26 · Auth = Cloudflare Access** (kein App-Login). *Grund:* Zero-Trust ohne App-Code; einzige Mauer vor der pre-granted Engine. *Verworfen:* Supabase-JWT (mehr Code, weiterer Dienst).

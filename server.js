@@ -60,6 +60,7 @@
  *   GET    /api/board/projects/:slug/docs                         → { docs:[…] } (projekt-spezifikation-anzeige AC1,AC2)
  *   GET    /api/board/projects/:slug/docs/raw?path=<relpfad>      → Roh-Markdown (projekt-spezifikation-anzeige AC2,AC3)
  *   GET    /api/board/projects/:slug/stories/:id/detail            → { detail: StoryDetail } (story-detail-ansicht AC2)
+ *   POST   /api/assist/refine                                      → { refinedText, openQuestions[], notes? } (fabric-intake-dialog AC5,AC7,AC10)
  *   WS   /ws/terminal                             → PtyManager bridge (guarded by AccessGuard)
  */
 
@@ -97,6 +98,7 @@ import { BoardAggregator } from './src/BoardAggregator.js';
 import { DocsReader } from './src/DocsReader.js';
 import { StoryMetricReader } from './src/StoryMetricReader.js';
 import { WorkspaceHealthChecker } from './src/WorkspaceHealthChecker.js';
+import { AssistService } from './src/AssistService.js';
 import { mountRouters } from './src/routerLoader.js';
 
 const PORT = Number(process.env.PORT ?? 8080);
@@ -236,6 +238,10 @@ const docsReader = new DocsReader();
 // ── StoryMetricReader (read-only, AC1-2 story-detail-ansicht) ────────────────
 const storyMetricReader = new StoryMetricReader();
 
+// ── AssistService (zustandsloser claude -p one-shot, fabric-intake-dialog AC5) ──
+// Kein JobLock — unabhängig von laufendem Flow-Command (AC5, AC7).
+const assistService = new AssistService();
+
 // ── deps-Objekt: alle Boundaries für den Auto-Loader ─────────────────────────
 // Expose ptyManager for routers that reference it (e.g. session.js reads state/restarts/startedAt).
 // These routers operate on the global (no-project) session, which preserves backward compat.
@@ -265,6 +271,7 @@ const deps = {
   boardAggregator,
   docsReader,
   storyMetricReader,
+  assistService,
 };
 
 // ── AC1/AC2: Auto-Discovery + Mount aller API-Router ─────────────────────────
