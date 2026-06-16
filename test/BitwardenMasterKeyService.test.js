@@ -14,12 +14,13 @@
  *   AC8  — Audit-First: vor Aktion ein Eintrag ohne Werte; Audit-Fehler → Aktion unterbleibt
  *   AC9  — Transiente Sitzung verworfen (bw logout nach Beschaffung)
  *
- * Covers (bitwarden-new-device-otp #263):
- *   AC1  — PTY-emailOtp-Plumbing: emailOtp wird via opts.emailOtp an _spawnBwPty übergeben (nicht Argv)
- *   AC7  — emailOtp erscheint NICHT in Argv (kein Secret-Leak durch PTY-Übergabe)
+ * Covers (bitwarden-new-device-otp #263/#267):
+ *   AC7  — emailOtp erscheint NICHT in Argv (AC10: single-process, kein emailOtp beim PTY-Start)
+ *   OTP-Zwei-Phasen-Fluss + AC10/AC11 → getestet in BitwardenNewDeviceOtp.test.js
  *
  * Strategie:
- *   - `_spawnBwPty` wird für `bw login` gemockt (Fake-PTY: steuert Output + exitCode)
+ *   - `_spawnBwPty` wird für `bw login` mit twofa gemockt (TOTP-Pfad, unveränderter Pfad)
+ *   - `_spawnBwPtySession` via wrapPtyMockAsSession: Kompatibilitäts-Wrapper für non-OTP-Tests
  *   - `_spawnBw` wird für nicht-interaktive Kommandos gemockt (get, encode, create, logout)
  *   - CredentialStore mit tmpdir + injiziertem masterKey (echter Store für Boundary-Test)
  *   - AuditStore als echte In-Memory-Instanz (prüft Audit-Einträge exakt)
@@ -169,12 +170,27 @@ afterEach(async () => {
 
 // ── Hilfsfunktion: Service erstellen ──────────────────────────────────────────
 
+/**
+ * Wraps eine legacy-ptyMock-Funktion (Signatur: (args, opts) => {stdout, output, exitCode})
+ * in eine _spawnBwPtySession-kompatible Funktion (AC10/AC11-Modell).
+ *
+ * Für Tests, die keinen OTP-Fluss testen: ptyMock gibt immer {phase: 'done', ...} zurück.
+ * Für Tests, die OTP testen: separaten makePtySessionMock verwenden (in BitwardenNewDeviceOtp.test.js).
+ */
+function wrapPtyMockAsSession(ptyMock) {
+  return async (args, env) => {
+    const result = await ptyMock(args, { env, emailOtp: undefined });
+    return { phase: 'done', ...result };
+  };
+}
+
 function makeService(ptyMock, spawnMock) {
   return new BitwardenMasterKeyService({
     credentialStore,
     auditStore,
     itemName: ITEM_NAME,
     _spawnBwPty: ptyMock,
+    _spawnBwPtySession: wrapPtyMockAsSession(ptyMock),
     _spawnBw: spawnMock,
   });
 }
@@ -222,37 +238,34 @@ describe('AC1 — Bitwarden-Login serverseitig', () => {
     expect(loginArgs).not.toContain('--code');
   });
 
-  it('PTY-Login empfängt emailOtp als Option (für Prompt-gesteuerte Übergabe)', async () => {
+  it('PTY-Session startet ohne emailOtp (single-process: emailOtp wird via writeOtp übergeben, nicht als Arg)', async () => {
+    // Single-process-Modell (AC10): emailOtp wird NICHT beim Start der PTY-Session übergeben.
+    // Stattdessen hält Phase 1 den Prozess offen; Phase 2 schreibt den OTP via writeOtp.
+    // Dieser Test prüft, dass die PTY-Session-Funktion kein emailOtp in den Args erhält.
     const ptyMock = makePtyMock();
     const spawnMock = makeSpawnMock();
     const service = makeService(ptyMock, spawnMock);
 
-    await service.acquireMasterKey({
-      email: FAKE_EMAIL,
-      password: FAKE_PASSWORD,
-      emailOtp: '847291',
-      identity: null,
-    });
+    // Request 1 ohne emailOtp: PTY startet, liefert {phase: 'done'} via wrapPtyMockAsSession
+    await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
 
-    // emailOtp wird als opts.emailOtp an die PTY-Funktion übergeben (nicht als Argv)
-    const loginOpts = ptyMock.spawnedOpts[0];
-    expect(loginOpts.emailOtp).toBe('847291');
-    // Argv enthält emailOtp NICHT
+    // Die PTY-Session-Funktion empfängt KEIN emailOtp in den Argv (AC7/AC10)
     const loginArgs = ptyMock.spawnedArgvs[0];
     for (const arg of loginArgs) {
       expect(String(arg)).not.toContain('847291');
     }
   });
 
-  it('PTY-Login ohne emailOtp: opts.emailOtp ist undefined', async () => {
+  it('PTY-Login ohne emailOtp: kein emailOtp in den Argv', async () => {
     const ptyMock = makePtyMock();
     const spawnMock = makeSpawnMock();
     const service = makeService(ptyMock, spawnMock);
 
     await service.acquireMasterKey({ email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null });
 
-    const loginOpts = ptyMock.spawnedOpts[0];
-    expect(loginOpts.emailOtp == null).toBe(true);
+    const loginArgs = ptyMock.spawnedArgvs[0];
+    expect(loginArgs).not.toContain('emailOtp');
+    expect(loginArgs.join(' ')).not.toMatch(/otp/i);
   });
 });
 
@@ -593,14 +606,18 @@ describe('AC6 — Keine Geheimnisse in Argv oder Response', () => {
     expect(JSON.stringify(result)).not.toContain(FAKE_PASSWORD);
   });
 
-  it('emailOtp erscheint NICHT in den PTY-Login-Argv-Arrays (via opts, nicht Arg)', async () => {
+  it('emailOtp erscheint NICHT in den PTY-Login-Argv-Arrays (AC7/AC10: kein emailOtp in Args)', async () => {
+    // Single-process-Modell (AC10): emailOtp wird NICHT beim PTY-Start als Arg übergeben.
+    // Der OTP-Code wird via writeOtp() in die offene Session geschrieben (Phase 2).
+    // Dieser Test prüft: PTY-Session startet ohne emailOtp im Argv-Array.
     const FAKE_OTP = '847291';
     const ptyMock = makePtyMock();
     const spawnMock = makeSpawnMock();
     const service = makeService(ptyMock, spawnMock);
 
+    // Request 1 ohne emailOtp: normaler Login (kein OTP-Fluss in diesem Basis-Test)
     await service.acquireMasterKey({
-      email: FAKE_EMAIL, password: FAKE_PASSWORD, emailOtp: FAKE_OTP, identity: null,
+      email: FAKE_EMAIL, password: FAKE_PASSWORD, identity: null,
     });
 
     // OTP darf NICHT in Argv stehen
@@ -609,8 +626,6 @@ describe('AC6 — Keine Geheimnisse in Argv oder Response', () => {
         expect(String(arg)).not.toContain(FAKE_OTP);
       }
     }
-    // OTP kommt als opts.emailOtp (nicht als Arg)
-    expect(ptyMock.spawnedOpts[0].emailOtp).toBe(FAKE_OTP);
   });
 });
 
@@ -640,6 +655,7 @@ describe('AC7 — Falscher Key → Ablehnung via CredentialStore.unlock()', () =
       auditStore,
       itemName: ITEM_NAME,
       _spawnBwPty: ptyMock,
+      _spawnBwPtySession: wrapPtyMockAsSession(ptyMock),
       _spawnBw: spawnMock,
     });
 
@@ -870,6 +886,7 @@ describe('AC9 — Bitwarden-Sitzung verworfen nach Beschaffung', () => {
       auditStore,
       itemName: ITEM_NAME,
       _spawnBwPty: ptyMock,
+      _spawnBwPtySession: wrapPtyMockAsSession(ptyMock),
       _spawnBw: spawnMock,
     });
 

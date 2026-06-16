@@ -16,13 +16,15 @@
  *   - Master-Key erscheint NIEMALS in Log/Audit/Response/WS/Frontend
  *   - stderr von `bw` wird NICHT in Response/Log weitergeleitet (könnte Secrets enthalten)
  *
- * New-Device-Verification (bitwarden-new-device-otp):
- *   - bw CLI liest New-Device-OTP und 2FA via inquirer-Prompt — erfordert einen echten TTY
+ * New-Device-Verification (bitwarden-new-device-otp, single-process, AC10/AC11):
+ *   - bw CLI liest New-Device-OTP via inquirer-Prompt — erfordert einen echten TTY
  *   - Daher wird `bw login` via node-pty (Pseudo-Terminal) ausgeführt
- *   - Der PTY-Output wird zeilenweise auf bekannte Prompt-Texte gescannt
- *   - Bei New-Device-Prompt: emailOtp via PTY-Write übergeben (oder 'email-otp-required' melden)
- *   - Bei 2FA/TOTP-Prompt: wird bereits via --code-Arg übergeben (bw inquirer-Prompt wird übersprungen)
+ *   - Single-Process-Modell (AC10): Request 1 startet PTY, hält ihn bei OTP-Prompt offen;
+ *     Request 2 schreibt OTP in DENSELBEN Prozess — kein zweiter Spawn
+ *   - State-Handle (#ptySessionMap) ist geheimsnisfrei (kein Passwort/Token im Handle)
+ *   - Bei 2FA/TOTP-Prompt: wird bereits via --code-Arg übergeben (bw inquirer-Prompt übersprungen)
  *   - PTY-Output wird NICHT geloggt (echot Eingaben zurück → Secret-Leak-Risiko)
+ *   - Cleanup (AC11): Timeout + sauberes Kill bei Erfolg/Fehler/Timeout/Abbruch
  *
  * Audit-First (AC8):
  *   - Vor jeder Beschaffungs-Aktion ein Audit-Eintrag (Identität, Aktion, Zeit) OHNE Werte
@@ -30,7 +32,8 @@
  *
  * Dependency-Injection (testbar ohne echtes `bw`):
  *   - `_spawnBw` kann via opts injiziert werden (Mock für nicht-interaktive bw-Kommandos)
- *   - `_spawnBwPty` kann via opts injiziert werden (Mock für den interaktiven PTY-Login)
+ *   - `_spawnBwPty` kann via opts injiziert werden (Mock für den interaktiven PTY-Login, TOTP-Pfad)
+ *   - `_spawnBwPtySession` kann via opts injiziert werden (Mock für Two-Phase-PTY, AC10/AC11)
  *   - Kein echter Bitwarden-Netzwerkaufruf in Tests
  *
  * @module BitwardenMasterKeyService
@@ -49,6 +52,14 @@ const MIN_KEY_BYTES = 32;
  * Verhindert Hängenbleiben wenn ein erwarteter Prompt ausbleibt.
  */
 const PTY_LOGIN_TIMEOUT_MS = 30_000;
+
+/**
+ * Timeout für eine offene PTY-Session im OTP-Wartezustand (AC11).
+ * Nach diesem Intervall wird die Session beendet und aufgeräumt.
+ * Wert: 3 Minuten — genug Zeit für den Nutzer, den Code einzugeben;
+ * kurz genug, um verwaiste Prozesse zu verhindern.
+ */
+const PTY_OTP_SESSION_TIMEOUT_MS = 3 * 60 * 1000; // 3 Minuten
 
 /**
  * Bekannte inquirer-Prompt-Texte der bw-CLI (case-insensitiv verglichen).
@@ -242,19 +253,56 @@ export class BitwardenMasterKeyService {
    * `output` enthält den zusammengefassten PTY-Output (intern für Klassifizierung — NIEMALS loggen/ausgeben).
    * `stdout` enthält den Session-Token wenn der Login erfolgreich war.
    *
+   * Wird weiterhin für den TOTP-2FA-Pfad und nicht-OTP-Logins verwendet (Regression-Schutz).
+   *
    * @type {Function}
    */
   #spawnBwPty;
 
   /**
+   * Injizierbare Two-Phase-PTY-Session-Funktion für den single-process OTP-Fluss (AC10/AC11).
+   *
+   * Signatur: (args: string[], env: object) =>
+   *   Promise<
+   *     | { phase: 'done', stdout: string, output: string, exitCode: number }
+   *     | { phase: 'awaiting-otp', writeOtp(code: string): Promise<{ stdout: string, output: string, exitCode: number }>, cleanup(): void }
+   *   >
+   *
+   * - 'done': Login abgeschlossen ohne OTP-Prompt (kein New-Device-Prompt erkannt).
+   * - 'awaiting-otp': New-Device-Prompt erkannt; PTY-Prozess läuft noch offen.
+   *   `writeOtp(code)` schreibt den Code in denselben Prozess und liefert das End-Ergebnis.
+   *   `cleanup()` beendet den Prozess ohne OTP-Einreichung (für Timeout/Abbruch).
+   *
+   * AC10: Es wird KEIN zweiter `bw login`-Prozess gestartet um den OTP-Code zu prüfen.
+   * AC11: cleanup() ist idempotent; PTY-Prozess hinterlässt keinen Zombie.
+   *
+   * @type {Function}
+   */
+  #spawnBwPtySession;
+
+  /**
+   * Offene PTY-Sessions im OTP-Wartezustand (AC10/AC11, single-process).
+   *
+   * Schlüssel: identity-String (CRED_ADMIN-E-Mail oder null → 'anon').
+   * Wert: { writeOtp, cleanup, timeoutHandle }
+   *
+   * Security: kein Passwort/Secret im Handle gespeichert — nur Prozess-Handle + Callbacks.
+   * Cleanup: bei Erfolg, Fehler, Timeout oder zweitem Versuch derselben identity sauber räumen.
+   *
+   * @type {Map<string, { writeOtp: Function, cleanup: Function, timeoutHandle: NodeJS.Timeout }>}
+   */
+  #ptySessionMap = new Map();
+
+  /**
    * @param {object} params
    * @param {import('./CredentialStore.js').CredentialStore} params.credentialStore
    * @param {import('./AuditStore.js').AuditStore} params.auditStore
-   * @param {string} [params.itemName]       - Bitwarden Item-Name (Default: BW_ITEM_NAME env oder 'dev-gui-master-key')
-   * @param {Function} [params._spawnBw]     - Testbare Spawn-Funktion für nicht-interaktive bw-Kommandos
-   * @param {Function} [params._spawnBwPty]  - Testbare PTY-Spawn-Funktion für `bw login` (interaktiv)
+   * @param {string} [params.itemName]              - Bitwarden Item-Name (Default: BW_ITEM_NAME env oder 'dev-gui-master-key')
+   * @param {Function} [params._spawnBw]            - Testbare Spawn-Funktion für nicht-interaktive bw-Kommandos
+   * @param {Function} [params._spawnBwPty]         - Testbare PTY-Spawn-Funktion für `bw login` (interaktiv, Regression/TOTP)
+   * @param {Function} [params._spawnBwPtySession]  - Testbare Two-Phase-PTY-Session-Funktion (AC10/AC11, single-process)
    */
-  constructor({ credentialStore, auditStore, itemName, _spawnBw, _spawnBwPty } = {}) {
+  constructor({ credentialStore, auditStore, itemName, _spawnBw, _spawnBwPty, _spawnBwPtySession } = {}) {
     if (!credentialStore || typeof credentialStore.unlock !== 'function') {
       throw new Error('[BitwardenMasterKeyService] credentialStore ist Pflicht');
     }
@@ -266,6 +314,7 @@ export class BitwardenMasterKeyService {
     this.#itemName = itemName ?? DEFAULT_ITEM_NAME;
     this.#spawnBw = _spawnBw ?? spawnBwDefault;
     this.#spawnBwPty = _spawnBwPty ?? spawnBwPtyDefault;
+    this.#spawnBwPtySession = _spawnBwPtySession ?? spawnBwPtySessionDefault;
   }
 
   /**
@@ -309,7 +358,7 @@ export class BitwardenMasterKeyService {
     // ── AC1: Bitwarden-Login via PTY (Credentials via stdin/env, NICHT via Argv) ────
     let sessionToken;
     try {
-      sessionToken = await this.#bwLogin({ email, password, twofa, emailOtp });
+      sessionToken = await this.#bwLogin({ email, password, twofa, emailOtp, identity });
     } catch (err) {
       const errorClass = err.bwErrorClass ?? 'error';
       return {
@@ -407,7 +456,7 @@ export class BitwardenMasterKeyService {
     // ── AC1: Bitwarden-Login via PTY ─────────────────────────────────────────
     let sessionToken;
     try {
-      sessionToken = await this.#bwLogin({ email, password, twofa, emailOtp });
+      sessionToken = await this.#bwLogin({ email, password, twofa, emailOtp, identity });
     } catch (err) {
       const errorClass = err.bwErrorClass ?? 'error';
       return {
@@ -459,12 +508,16 @@ export class BitwardenMasterKeyService {
    * Der Login-Befehl:
    *   bw login <email> --passwordenv BW_PASSWORD --raw [--code <2fa>]
    *
-   * PTY-Verhalten:
-   *   - bw login sieht einen echten TTY → inquirer gibt Prompts aus
-   *   - Bei New-Device-Prompt → emailOtp via PTY-Write übergeben
-   *   - Kein emailOtp → 'email-otp-required' zurückmelden
-   *   - PTY-Output wird NICHT geloggt (enthält ggf. echoed Input — Secret-Leak-Risiko)
-   *   - Timeout (PTY_LOGIN_TIMEOUT_MS) verhindert Hängenbleiben
+   * Single-Process-OTP-Fluss (AC10/AC11):
+   *   - Kein emailOtp + kein offener Handle: startet PTY via #spawnBwPtySession.
+   *     - Kein OTP-Prompt → Login direkt abgeschlossen (non-OTP-Pfad).
+   *     - OTP-Prompt erkannt → PTY bleibt offen, Handle wird in #ptySessionMap gespeichert.
+   *       Wirft mit bwErrorClass='email-otp-required' — der Aufrufer kann erneut mit emailOtp kommen.
+   *   - Mit emailOtp + offener Handle: schreibt OTP in denselben PTY — KEIN neuer Spawn.
+   *   - Mit emailOtp + KEIN Handle (Timeout abgelaufen): wirft mit 'email-otp-required' (frischer Start nötig).
+   *
+   * TOTP-2FA-Pfad (AC4, Regression-Schutz):
+   *   - twofa ist gesetzt → läuft weiter via #spawnBwPty (bestehender Pfad, unverändert).
    *
    * AC6-AUSNAHME (dokumentiert in Spec #183 AC6): Der kurzlebige TOTP-2FA-Code darf als
    * `--code`-Argument übergeben werden, weil `bw login` keine Env/stdin-Alternative
@@ -476,10 +529,11 @@ export class BitwardenMasterKeyService {
    * @param {string} params.email
    * @param {string} params.password
    * @param {string} [params.twofa]
-   * @param {string} [params.emailOtp]  - E-Mail-OTP für New-Device-Verification (via PTY-Write, AC7)
+   * @param {string} [params.emailOtp]    - E-Mail-OTP für New-Device-Verification (via PTY-Write, AC7)
+   * @param {string|null} params.identity - Identität für Session-Map-Key (niemals geloggt)
    * @returns {Promise<string>} BW_SESSION-Token
    */
-  async #bwLogin({ email, password, twofa, emailOtp }) {
+  async #bwLogin({ email, password, twofa, emailOtp, identity }) {
     // AC6: Args enthalten KEIN Passwort — Passwort via env (BW_PASSWORD)
     const args = ['login', email, '--passwordenv', 'BW_PASSWORD', '--raw'];
 
@@ -497,15 +551,129 @@ export class BitwardenMasterKeyService {
       PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin',
     };
 
-    // AC7 (bitwarden-new-device-otp): E-Mail-OTP via PTY-Write — NICHT als Arg.
-    // bw CLI fragt den Code interaktiv via inquirer (erfordert echten TTY → node-pty).
-    // emailOtp wird an die PTY-Funktion übergeben, die es bei Prompt-Erkennung schreibt.
-    // Ohne emailOtp: kein Write → Prompt bleibt unbeantwortet → bw schlägt fehl →
-    // PTY-Output enthält New-Device-Muster → classifyBwError → 'email-otp-required'.
-    const { stdout, output, exitCode } = await this.#spawnBwPty(args, { env, emailOtp });
+    // ── Single-Process-OTP-Pfad (AC10/AC11) ──────────────────────────────────
+    // Nur wenn kein TOTP-2FA-Code übergeben wird (TOTP und Email-OTP schließen sich aus, Spec §4).
+    if (!twofa) {
+      const sessionKey = identity ?? 'anon';
+
+      if (emailOtp) {
+        // Request 2: OTP vorhanden → in offenen Prozess schreiben (KEIN neuer Spawn, AC10).
+        const handle = this.#ptySessionMap.get(sessionKey);
+
+        if (!handle) {
+          // Kein offener Prozess (Timeout abgelaufen oder nie gestartet) — AC11.
+          // NICHT stillschweigend einen neuen Prozess starten (Spec: Vertrag "Prozess-State").
+          const err = new Error('Kein offener OTP-Prozess für diese Identität (Timeout oder neuer Versuch nötig)');
+          err.bwErrorClass = 'email-otp-required';
+          throw err;
+        }
+
+        // Handle gefunden: OTP in denselben PTY schreiben → auf Ergebnis warten.
+        // AC11: Handle NACH dem OTP-Write aufräumen (Timeout clearen; Map-Eintrag entfernen).
+        // Cleanup JETZT: Timeout stoppen + Map-Eintrag entfernen, aber PTY-Prozess läuft weiter
+        // (handle.cleanup() wird NICHT aufgerufen — writeOtp braucht den offenen Prozess).
+        this.#ptySessionMap.delete(sessionKey);
+        if (handle.timeoutHandle !== null && handle.timeoutHandle !== undefined) {
+          clearTimeout(handle.timeoutHandle);
+        }
+
+        let result;
+        // Phase-2-Timeout (30 s): Wenn bw nach dem OTP-Write hängt (Netz/unerwarteter Prompt),
+        // würde writeOtp dauerhaft unresolved bleiben → Zombie-PTY + hängender HTTP-Handler (AC11).
+        // Promise.race bricht das writeOtp-Promise nach PTY_LOGIN_TIMEOUT_MS ab und räumt auf.
+        let phase2TimeoutHandle = null;
+        const phase2TimeoutPromise = new Promise((_res, rej) => {
+          phase2TimeoutHandle = setTimeout(() => {
+            rej(Object.assign(new Error('Phase-2-OTP-Timeout: bw hat nach OTP-Write nicht reagiert'), { bwErrorClass: 'error' }));
+          }, PTY_LOGIN_TIMEOUT_MS);
+        });
+        try {
+          // AC7: emailOtp NICHT in Argv — writeOtp schreibt via PTY-Write.
+          // PTY_LOGIN_TIMEOUT_MS = 30 000 ms — verhindert dauerhaftes Hängen nach OTP-Write (AC11).
+          result = await Promise.race([handle.writeOtp(emailOtp), phase2TimeoutPromise]);
+        } catch (writeErr) {
+          // Prozess auch bei Fehler/Timeout sauber beenden (AC11)
+          try { handle.cleanup(); } catch { /* ignorieren */ }
+          const err = writeErr.bwErrorClass
+            ? writeErr
+            : Object.assign(new Error('PTY-OTP-Write fehlgeschlagen'), { bwErrorClass: 'error' });
+          throw err;
+        } finally {
+          clearTimeout(phase2TimeoutHandle);
+        }
+        // Nach dem OTP-Write: PTY-Prozess ist beendet (handle.writeOtp wartet auf PTY-Exit).
+        // Kein explizites cleanup() nötig — der Prozess hat sich selbst beendet.
+
+        if (result.exitCode !== 0) {
+          // AC7-KRITISCH: result.output NICHT loggen
+          const errorClass = classifyBwError(result.output, result.exitCode);
+          const err = new Error(`bw login (OTP-Phase) fehlgeschlagen (exit ${result.exitCode})`);
+          err.bwErrorClass = errorClass;
+          throw err;
+        }
+
+        const token = result.stdout.trim();
+        if (!token) {
+          const err = new Error('bw login (OTP-Phase): kein Session-Token erhalten');
+          err.bwErrorClass = 'error';
+          throw err;
+        }
+        return token;
+      }
+
+      // Request 1: Kein emailOtp → PTY starten, auf OTP-Prompt oder Abschluss warten.
+      const phase = await this.#spawnBwPtySession(args, env);
+
+      if (phase.phase === 'awaiting-otp') {
+        // New-Device-Prompt erkannt: PTY offen halten.
+        // Zwei parallele Versuche derselben identity: alten Handle zuerst sauber räumen (AC11).
+        if (this.#ptySessionMap.has(sessionKey)) {
+          this.#cleanupPtySession(sessionKey);
+        }
+
+        // Timeout: nach PTY_OTP_SESSION_TIMEOUT_MS den Prozess beenden + aufräumen (AC11).
+        const timeoutHandle = setTimeout(() => {
+          if (this.#ptySessionMap.has(sessionKey)) {
+            this.#cleanupPtySession(sessionKey);
+          }
+        }, PTY_OTP_SESSION_TIMEOUT_MS);
+
+        this.#ptySessionMap.set(sessionKey, {
+          writeOtp: phase.writeOtp,
+          cleanup: phase.cleanup,
+          timeoutHandle,
+        });
+
+        // Aufrufer bekommt email-otp-required → Dialog zeigt OTP-Feld.
+        const err = new Error('New-Device-Verification erforderlich — bitte OTP eingeben');
+        err.bwErrorClass = 'email-otp-required';
+        throw err;
+      }
+
+      // phase === 'done': Login ohne OTP-Prompt abgeschlossen (z.B. bekanntes Gerät).
+      const { stdout, output, exitCode } = phase;
+      if (exitCode !== 0) {
+        const errorClass = classifyBwError(output, exitCode);
+        const err = new Error(`bw login fehlgeschlagen (exit ${exitCode})`);
+        err.bwErrorClass = errorClass;
+        throw err;
+      }
+
+      const doneToken = stdout.trim();
+      if (!doneToken) {
+        const err = new Error('bw login: kein Session-Token erhalten');
+        err.bwErrorClass = 'error';
+        throw err;
+      }
+      return doneToken;
+    }
+
+    // ── TOTP-2FA-Pfad (AC4, Regression-Schutz, unveränderter bisheriger Pfad) ──
+    // AC7 (bitwarden-new-device-otp): emailOtp hier nie übergeben (twofa schließt email-otp aus).
+    const { stdout, output, exitCode } = await this.#spawnBwPty(args, { env, emailOtp: undefined });
 
     if (exitCode !== 0) {
-      // AC7-KRITISCH: output NICHT loggen (kann echoed emailOtp/PTY-Echo enthalten)
+      // AC7-KRITISCH: output NICHT loggen (kann echoed Eingaben/PTY-Echo enthalten)
       const errorClass = classifyBwError(output, exitCode);
       const err = new Error(`bw login fehlgeschlagen (exit ${exitCode})`);
       err.bwErrorClass = errorClass;
@@ -520,6 +688,28 @@ export class BitwardenMasterKeyService {
     }
 
     return token;
+  }
+
+  /**
+   * Räumt eine offene PTY-Session auf (AC11).
+   * Idempotent: mehrfacher Aufruf ist sicher.
+   *
+   * @param {string} sessionKey - Schlüssel in #ptySessionMap
+   */
+  #cleanupPtySession(sessionKey) {
+    const handle = this.#ptySessionMap.get(sessionKey);
+    if (!handle) return;
+    this.#ptySessionMap.delete(sessionKey);
+    // Timeout abbrechen
+    if (handle.timeoutHandle !== null && handle.timeoutHandle !== undefined) {
+      clearTimeout(handle.timeoutHandle);
+    }
+    // PTY-Prozess beenden
+    try {
+      handle.cleanup();
+    } catch {
+      // Prozess möglicherweise bereits beendet — ignorieren
+    }
   }
 
   /**
@@ -841,6 +1031,176 @@ async function spawnBwPtyDefault(args, { env, emailOtp } = {}) {
         output: outputBuf, // intern für classifyBwError — NIEMALS nach außen
         exitCode: exitCode ?? 1,
       });
+    });
+  });
+}
+
+// ── Two-Phase-PTY-Session-Implementierung (single-process OTP-Fluss, AC10/AC11) ────
+
+/**
+ * Führt `bw login <args>` via node-pty in einem zwei-phasigen, langlebigen Prozess aus.
+ *
+ * Phase 1 (kein emailOtp): PTY startet und läuft bis zum New-Device-Prompt oder Login-Ende.
+ *   - Kein OTP-Prompt: resolves { phase: 'done', stdout, output, exitCode }
+ *   - OTP-Prompt erkannt: resolves { phase: 'awaiting-otp', writeOtp, cleanup }
+ *     → PTY-Prozess bleibt OFFEN; writeOtp() schreibt OTP + wartet auf PTY-Exit.
+ *     → cleanup() beendet den Prozess ohne OTP-Einreichung.
+ *
+ * Phase 2 (via writeOtp(code)):
+ *   - Schreibt den OTP-Code in denselben offenen PTY-Prozess.
+ *   - Resolves { stdout, output, exitCode } nach PTY-Exit.
+ *
+ * Security:
+ *   - PTY-Output (outputBuf) wird NIEMALS geloggt — enthält echoed Eingaben.
+ *   - writeOtp() übergibt den Code per PTY-Write — NICHT als Arg (AC7).
+ *   - cleanup() ist idempotent (AC11).
+ *
+ * AC10: Es gibt genau einen ptySpawn-Aufruf für den gesamten OTP-Zyklus.
+ * AC11: Timeout + sauberes Kill in der aufrufenden Schicht (#cleanupPtySession).
+ *
+ * @param {string[]} args  - Login-Argumente (ohne 'bw'); dürfen KEINE Geheimnisse enthalten
+ * @param {object}   env   - Env-Vars des Subprozesses (enthält BW_PASSWORD)
+ * @returns {Promise<
+ *   | { phase: 'done', stdout: string, output: string, exitCode: number }
+ *   | { phase: 'awaiting-otp', writeOtp(code: string): Promise<{ stdout: string, output: string, exitCode: number }>, cleanup(): void }
+ * >}
+ */
+async function spawnBwPtySessionDefault(args, env) {
+  const { spawn: ptySpawn } = await import('node-pty');
+
+  // ── Phase-1-Promise: resolves wenn OTP-Prompt erkannt ODER Prozess beendet ──
+  return new Promise((resolvePhase1) => {
+    let ptyProcess = null;
+    let outputBuf = '';   // AC7-KRITISCH: NIEMALS loggen — kann echoed OTP/Passwort enthalten
+    let phase1Settled = false;
+
+    // Phase-2-Resolver: gesetzt wenn OTP-Prompt erkannt; resolves nach PTY-Exit
+    let phase2Resolve = null;
+
+    /**
+     * Beendet den PTY-Prozess sauber (idempotent, AC11).
+     */
+    function killPty() {
+      try {
+        ptyProcess?.kill();
+      } catch {
+        // Prozess möglicherweise bereits beendet
+      }
+    }
+
+    /**
+     * Phase-1-Auflösung: Login abgeschlossen ohne OTP-Prompt.
+     * @param {{ stdout: string, output: string, exitCode: number }} result
+     */
+    function settlePhase1Done(result) {
+      if (phase1Settled) return;
+      phase1Settled = true;
+      killPty();
+      resolvePhase1({ phase: 'done', ...result });
+    }
+
+    /**
+     * Phase-1-Auflösung: OTP-Prompt erkannt, PTY offen halten.
+     * Gibt writeOtp + cleanup zurück — PTY läuft weiter.
+     */
+    function settlePhase1AwaitingOtp() {
+      if (phase1Settled) return;
+      phase1Settled = true;
+
+      /**
+       * Phase 2: OTP in denselben PTY schreiben (AC10 — kein neuer Spawn).
+       * AC7: code via PTY-Write — NICHT als Arg.
+       * @param {string} code - E-Mail-OTP-Code (nach Gebrauch verworfen)
+       * @returns {Promise<{ stdout: string, output: string, exitCode: number }>}
+       */
+      const writeOtp = (code) => new Promise((resolve, reject) => {
+        phase2Resolve = resolve;
+        try {
+          // AC7: OTP via PTY-Write — NIEMALS als Arg/Env/Log
+          ptyProcess.write(code + '\r');
+        } catch (err) {
+          phase2Resolve = null; // Zustands-Konsistenz: kein No-op-Resolve bei späterem onExit
+          reject(err);
+        }
+      });
+
+      /**
+       * Prozess ohne OTP-Einreichung beenden (Timeout/Abbruch, AC11).
+       * Idempotent.
+       */
+      const cleanup = () => {
+        killPty();
+        // Falls phase2 auf Antwort wartet: nie auflösen (GC-safe, da handle aus Map entfernt)
+      };
+
+      resolvePhase1({ phase: 'awaiting-otp', writeOtp, cleanup });
+    }
+
+    let spawnError = null;
+    try {
+      ptyProcess = ptySpawn('bw', args, {
+        name: 'xterm',
+        cols: 80,
+        rows: 24,
+        // AC6: Sauber isolierte Umgebung — nur übergebene env-Vars (kein Parent-Leak)
+        env: { ...env },
+      });
+    } catch (err) {
+      spawnError = err;
+    }
+
+    if (spawnError) {
+      resolvePhase1({
+        phase: 'done',
+        stdout: '',
+        output: spawnError.message ?? 'pty spawn error',
+        exitCode: 127,
+      });
+      return;
+    }
+
+    // Phase-1-Timeout: verhindert dauerhaftes Hängenbleiben bei ausbleibendem Prompt
+    const phase1TimeoutHandle = setTimeout(() => {
+      // Nach Timeout: als 'done' mit exitCode=1 auflösen → classifyBwError greift
+      settlePhase1Done({ stdout: '', output: outputBuf, exitCode: 1 });
+    }, PTY_LOGIN_TIMEOUT_MS);
+
+    // PTY-Output empfangen + auf New-Device-Prompt scannen
+    // AC7-KRITISCH: outputBuf NICHT loggen (kann echoed OTP/Passwort enthalten)
+    ptyProcess.onData((data) => {
+      if (outputBuf.length < 4096) {
+        outputBuf += data;
+      }
+
+      // New-Device-OTP-Prompt erkannt?
+      if (!phase1Settled && isNewDevicePrompt(outputBuf)) {
+        clearTimeout(phase1TimeoutHandle);
+        settlePhase1AwaitingOtp();
+        // PTY läuft weiter — Phase 2 wartet auf OTP-Write
+        return;
+      }
+    });
+
+    ptyProcess.onExit(({ exitCode }) => {
+      clearTimeout(phase1TimeoutHandle);
+
+      const sessionToken = extractSessionToken(outputBuf);
+      const result = {
+        stdout: sessionToken,
+        output: outputBuf, // intern für classifyBwError — NIEMALS nach außen
+        exitCode: exitCode ?? 1,
+      };
+
+      if (!phase1Settled) {
+        // Phase 1 noch aktiv: Login ohne OTP-Prompt abgeschlossen
+        settlePhase1Done(result);
+      } else if (phase2Resolve) {
+        // Phase 2 aktiv: OTP eingeschickt, Prozess beendet → Phase-2-Promise auflösen
+        const p2Resolve = phase2Resolve;
+        phase2Resolve = null;
+        p2Resolve(result);
+      }
+      // Sonst: cleanup() wurde aufgerufen → phase2Resolve ist null → nichts zu tun
     });
   });
 }
