@@ -7,7 +7,7 @@
  *   AC10 — Remote-Fehler → offHost:'failed', kein Crash, lokale Kopie bleibt, kein Rollback
  *
  * Strategie:
- *   - BackupUploader direkt getestet mit gemocktem S3/SFTP-Client (kein echter Netzwerk-Upload)
+ *   - BackupUploader direkt getestet mit gemocktem S3-Client (kein echter Netzwerk-Upload)
  *   - BackupEngine mit _uploaderFn-Override (Dependency Injection)
  *   - CredentialStore mit tmpdir + injiziertem masterKey + gemocktem Upload
  *   - console.log/warn/error spies prüfen auf Secret-Leaks (AC9)
@@ -95,22 +95,15 @@ describe('resolveOffHostConfig() — Konfigurationsauflösung', () => {
     expect(config.region).toBe('eu-central-1');
   });
 
-  it('gibt SFTP-Konfiguration zurück wenn ENABLED=1 und TYPE=sftp', () => {
+  it('SFTP-2: gibt null zurück wenn TYPE=sftp (SFTP entfernt, S-160)', () => {
+    // SFTP-Off-Host-Pfad ist seit S-160 vollständig entfernt.
+    // resolveOffHostConfig() liefert null für type=sftp (kein SFTP-Zweig mehr).
     setEnv({
       BACKUP_OFFHOST_ENABLED: '1',
       BACKUP_OFFHOST_TYPE: 'sftp',
       BACKUP_SFTP_HOST: 'backup.example.com',
-      BACKUP_SFTP_PORT: '2222',
-      BACKUP_SFTP_USER: 'backupuser',
-      BACKUP_SFTP_PREFIX: '/remote/backups',
     });
-    const config = resolveOffHostConfig();
-    expect(config).not.toBeNull();
-    expect(config.type).toBe('sftp');
-    expect(config.host).toBe('backup.example.com');
-    expect(config.port).toBe('2222');
-    expect(config.user).toBe('backupuser');
-    expect(config.prefix).toBe('/remote/backups');
+    expect(resolveOffHostConfig()).toBeNull();
   });
 
   it('gibt null zurück wenn type=s3 aber BACKUP_S3_BUCKET fehlt', () => {
@@ -122,11 +115,11 @@ describe('resolveOffHostConfig() — Konfigurationsauflösung', () => {
     expect(resolveOffHostConfig()).toBeNull();
   });
 
-  it('gibt null zurück wenn type=sftp aber BACKUP_SFTP_HOST fehlt', () => {
+  it('SFTP-2: gibt null zurück wenn TYPE unbekannt (kein sftp/s3)', () => {
+    // SFTP-2: Weder sftp noch unbekannte Typen werden unterstützt.
     setEnv({
       BACKUP_OFFHOST_ENABLED: '1',
-      BACKUP_OFFHOST_TYPE: 'sftp',
-      BACKUP_SFTP_HOST: undefined,
+      BACKUP_OFFHOST_TYPE: 'unknown',
     });
     expect(resolveOffHostConfig()).toBeNull();
   });
@@ -237,22 +230,22 @@ describe('uploadArtefact() — direkter Uploader (AC8, AC10)', () => {
     expect(allLogOutput).not.toContain(SECRET_SECRET_KEY);
   }, 30_000);
 
-  it('AC10: SFTP-Upload mit nicht-erreichbarem Host → "failed" ohne Crash', async () => {
+  it('SFTP-2: uploadArtefact() mit type=sftp → "failed" (SFTP-Pfad entfernt, S-160)', async () => {
+    // SFTP-2: kein _uploadSftp-Zweig mehr — unbekannter Typ → sofort 'failed' (kein Retry)
     const result = await uploadArtefact({
       artefactBuffer: TEST_ARTEFACT,
       artefactName: TEST_ARTEFACT_NAME,
       config: {
         type: 'sftp',
         host: '127.0.0.1',
-        port: '19998', // nicht-erreichbar
+        port: '19998',
         user: 'testuser',
         prefix: '/backups',
       },
       creds: { password: 'test-password' },
     });
-    // Kein Crash — AC10: 'failed'
     expect(result).toBe('failed');
-  }, 30_000);
+  });
 });
 
 // ── BackupEngine mit _uploaderFn-Override (AC8/AC9/AC10) ───────────────────

@@ -10,10 +10,10 @@
  *             definierter Override               → wird genutzt
  *             undefined (Production-Pfad)        → via resolveOffHostConfigAsync() aufgelöst
  *   AC18 — targetType-Normalisierung beim Laden:
- *           offHostEnabled=true + targetType='local' → normalisiert auf 's3'
- *           offHostEnabled=false + targetType='local' → bleibt 'local' (kein Off-Host)
- *           offHostEnabled=true + targetType='s3'    → bleibt 's3'
- *           offHostEnabled=true + targetType='sftp'  → bleibt 'sftp'
+ *           offHostEnabled=true + targetType='local'    → normalisiert auf 's3'
+ *           offHostEnabled=false + targetType='local'   → bleibt 'local' (kein Off-Host)
+ *           offHostEnabled=true + targetType='s3'       → bleibt 's3'
+ *           offHostEnabled=true + targetType='sftp'     → normalisiert auf 's3' (S-160: sftp entfernt)
  *   AC19 — Präfix-Default 'dev-gui/':
  *           Kein gespeicherter Prefix (null/undefined/'') → 'dev-gui/'
  *           Gespeicherter Prefix 'eigenes/'              → bleibt 'eigenes/'
@@ -27,6 +27,7 @@
  *   - AC18/AC19: Reine Logik-Tests der Normalisierungs-/Default-Helfer (kein DOM nötig).
  *     Da die Logik in loadConfig() in SettingsView.jsx liegt (React-Komponente), testen wir
  *     die Logik isoliert als Pure-Function-Extrakt + über resolveOffHostConfigAsync direkt.
+ *   - SFTP-1…SFTP-5 (S-160): SFTP vollständig entfernt — Dropdown, Config, Catalog, BackupUploader.
  */
 
 import { describe, it, beforeEach, afterEach, expect, jest } from '@jest/globals';
@@ -228,15 +229,15 @@ describe('AC17 (S-147) — #runBackupHook nutzt resolveOffHostConfigAsync()', ()
  * Extrahiert die targetType-Normalisierungslogik aus loadConfig() in SettingsView.jsx,
  * damit wir sie als reine Funktion testen können (kein DOM/React nötig).
  *
- * Implementierung aus SettingsView.jsx loadConfig():
- *   const VALID_OFFHOST_TYPES = new Set(['s3', 'sftp']);
- *   const normalizedType =
- *     loadedOffHostEnabled && !VALID_OFFHOST_TYPES.has(loadedType) ? 's3' : loadedType;
+ * Implementierung aus SettingsView.jsx loadConfig() nach S-160:
+ *   const loadedType = data.targetType ?? 'local';
+ *   const normalizedType = loadedOffHostEnabled && loadedType !== 's3' ? 's3' : loadedType;
+ *
+ * SFTP ist seit S-160 entfernt — 'sftp' wird wie 'local' auf 's3' normalisiert.
  */
 function normalizeTargetType(offHostEnabled, rawType) {
-  const VALID_OFFHOST_TYPES = new Set(['s3', 'sftp']);
   const loadedType = rawType ?? 'local';
-  return offHostEnabled && !VALID_OFFHOST_TYPES.has(loadedType) ? 's3' : loadedType;
+  return offHostEnabled && loadedType !== 's3' ? 's3' : loadedType;
 }
 
 describe('AC18 (S-147) — targetType-Normalisierung bei offHostEnabled=true', () => {
@@ -256,8 +257,9 @@ describe('AC18 (S-147) — targetType-Normalisierung bei offHostEnabled=true', (
     expect(normalizeTargetType(true, 's3')).toBe('s3');
   });
 
-  it('offHostEnabled=true + targetType="sftp" → bleibt "sftp" (kein Mismatch)', () => {
-    expect(normalizeTargetType(true, 'sftp')).toBe('sftp');
+  it('SFTP-1/S-160: offHostEnabled=true + targetType="sftp" → normalisiert auf "s3" (sftp entfernt)', () => {
+    // Seit S-160 ist 'sftp' keine gültige Option mehr; beim Laden alter Konfigs wird auf 's3' normalisiert.
+    expect(normalizeTargetType(true, 'sftp')).toBe('s3');
   });
 
   it('offHostEnabled=false + targetType="local" → bleibt "local" (Off-Host inaktiv)', () => {
@@ -314,16 +316,14 @@ describe('AC19 (S-147) — Präfix-Default "dev-gui/" bei fehlendem/leerem gespe
 // ── AC19 — Integrations-Test: BackupConfigStore.read() auf frischem tmpDir ──
 
 /**
- * I-2 (S-147): Integrations-naher Test der tatsächlichen Erst-Konfig-Realität.
+ * I-2 (S-147) / SFTP-3 (S-160): Integrations-naher Test der tatsächlichen Erst-Konfig-Realität.
  * BackupConfigStore.read() auf einem frischen tmpDir ohne backup-config.json
- * und ohne BACKUP_S3_PREFIX / BACKUP_SFTP_PREFIX Env-Var → prefix muss 'dev-gui/' sein
- * (für den S3-relevanten Default-Pfad, d.h. wenn targetType nicht 'sftp').
+ * und ohne BACKUP_S3_PREFIX Env-Var → prefix muss 'dev-gui/' sein.
  *
- * Dieser Test deckt den realen Pfad ab, den I-1 (AC19 wirkungslos) beschrieb:
- * Das Backend liefert auf Erst-Konfig immer den DEFAULT_CONFIG.prefix; der muss
- * jetzt 'dev-gui/' sein, damit die UI keinen Fallback mehr benötigt.
+ * SFTP-3: BackupConfigStore enthält keine SFTP-Felder (host/port/user) mehr,
+ * und kein sftp-Zweig in _readFromEnv().
  */
-describe('AC19 (S-147) — BackupConfigStore.read() auf frischem tmpDir (Integrationstest)', () => {
+describe('AC19 (S-147) / SFTP-3 (S-160) — BackupConfigStore.read() auf frischem tmpDir (Integrationstest)', () => {
   let tmpDir;
   let originalEnv;
 
@@ -333,12 +333,10 @@ describe('AC19 (S-147) — BackupConfigStore.read() auf frischem tmpDir (Integra
     originalEnv = {
       CRED_STORE_DIR: process.env.CRED_STORE_DIR,
       BACKUP_S3_PREFIX: process.env.BACKUP_S3_PREFIX,
-      BACKUP_SFTP_PREFIX: process.env.BACKUP_SFTP_PREFIX,
       BACKUP_OFFHOST_ENABLED: process.env.BACKUP_OFFHOST_ENABLED,
       BACKUP_OFFHOST_TYPE: process.env.BACKUP_OFFHOST_TYPE,
     };
     delete process.env.BACKUP_S3_PREFIX;
-    delete process.env.BACKUP_SFTP_PREFIX;
     delete process.env.BACKUP_OFFHOST_ENABLED;
     delete process.env.BACKUP_OFFHOST_TYPE;
     process.env.CRED_STORE_DIR = tmpDir;
@@ -354,7 +352,7 @@ describe('AC19 (S-147) — BackupConfigStore.read() auf frischem tmpDir (Integra
 
   it('Erst-Konfig (kein backup-config.json, keine Env-Vars) → prefix === "dev-gui/" für S3', async () => {
     // Kein backup-config.json vorhanden (frisches tmpDir)
-    // targetType wird 'local' (kein offHostEnabled), also S3-Default-Pfad
+    // targetType wird 'local' (kein offHostEnabled), S3-Default-Pfad
     const config = await BackupConfigStore.read();
     expect(config.prefix).toBe('dev-gui/');
   });
@@ -368,12 +366,23 @@ describe('AC19 (S-147) — BackupConfigStore.read() auf frischem tmpDir (Integra
     expect(config.targetType).toBe('s3');
   });
 
-  it('Erst-Konfig mit BACKUP_OFFHOST_TYPE=sftp → prefix bleibt "/backups" (SFTP-Default unberührt)', async () => {
+  it('SFTP-3: Erst-Konfig mit BACKUP_OFFHOST_TYPE=sftp → targetType=local (sftp entfernt, S-160)', async () => {
     process.env.BACKUP_OFFHOST_ENABLED = '1';
     process.env.BACKUP_OFFHOST_TYPE = 'sftp';
-    // SFTP-Default darf nicht auf 'dev-gui/' kippen (I-1 Fix darf SFTP nicht brechen)
+    // SFTP-3: kein sftp-Zweig mehr — targetType landet auf 'local', prefix ist 'dev-gui/'
     const config = await BackupConfigStore.read();
-    expect(config.prefix).toBe('/backups');
-    expect(config.targetType).toBe('sftp');
+    expect(config.targetType).toBe('local');
+    expect(config.prefix).toBe('dev-gui/');
+    // SFTP-3: keine host/port/user-Felder mehr
+    expect(config.host).toBeUndefined();
+    expect(config.port).toBeUndefined();
+    expect(config.user).toBeUndefined();
+  });
+
+  it('SFTP-3: read() liefert niemals host/port/user-Felder', async () => {
+    const config = await BackupConfigStore.read();
+    expect(config.host).toBeUndefined();
+    expect(config.port).toBeUndefined();
+    expect(config.user).toBeUndefined();
   });
 });

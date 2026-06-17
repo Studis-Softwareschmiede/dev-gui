@@ -107,17 +107,16 @@ export function create(_deps) {
    *
    * Allowlist der zurückgegebenen targetConfig-Felder (I2-Fix: Allowlist statt Blocklist
    * gemäß coder.md Lesson 2026-06-16):
-   *   S3:   endpoint, bucket, prefix, region
-   *   SFTP: host, port, prefix, user
+   *   S3 (S3-only seit S-160): endpoint, bucket, prefix, region
    *
    * Response 200:
    *   {
    *     lastBackup: { at: ISO-string, artefactName: string,
    *                   localResult: 'ok'|'failed'|null,
    *                   offHostResult: 'ok'|'failed'|'disabled'|null } | null,
-   *     offHostType: 's3'|'sftp'|null,
+   *     offHostType: 's3'|null,
    *     offHostEnabled: boolean,
-   *     targetConfig: { endpoint?, bucket?, prefix?, region?, host?, port?, user? } | null,
+   *     targetConfig: { endpoint?, bucket?, prefix?, region? } | null,
    *     retentionCount: number
    *   }
    *
@@ -154,7 +153,8 @@ export function create(_deps) {
       // I2-Fix: Allowlist statt Blocklist — nur explizit erlaubte nicht-geheime Felder.
       // Verhindert dass zukünftig hinzugefügte Felder in resolveOffHostConfigAsync()
       // versehentlich exponiert werden (coder.md Lesson 2026-06-16).
-      const ALLOWED_TARGET_CONFIG_KEYS = new Set(['endpoint', 'bucket', 'prefix', 'region', 'host', 'port', 'user']);
+      // S3-only seit S-160: host/port/user (SFTP-Felder) entfernt.
+      const ALLOWED_TARGET_CONFIG_KEYS = new Set(['endpoint', 'bucket', 'prefix', 'region']);
       const targetConfig = offHostConfig
         ? Object.fromEntries(
             Object.entries(offHostConfig).filter(([k]) => ALLOWED_TARGET_CONFIG_KEYS.has(k)),

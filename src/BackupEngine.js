@@ -5,7 +5,7 @@
  * CredentialStore aufgerufen. Erzeugt ein GPG-symmetrisch verschlüsseltes
  * Artefakt (secrets.enc.json-Blob + Manifest + nicht-geheime Config), speichert
  * es atomar (0600) im konfigurierten Backup-Verzeichnis und lädt es ggf. an ein
- * Off-Host-Ziel (S3-kompatibel oder SFTP) hoch.
+ * Off-Host-Ziel (S3-kompatibel) hoch.
  *
  * Verhaltensgrenzen (AC1–AC10, AC20–AC24):
  *   AC1:  Einziger Auslöser = Post-Write-Hook. Kein Cron, kein zweiter Trigger.
@@ -34,6 +34,7 @@ import { read as readBackupConfig } from './BackupConfigStore.js';
 /**
  * Nicht-geheime Felder die ins `config`-Feld des Artefakts aufgenommen werden (AC20/AC21).
  * Explizite Allowlist — KEINE Remote-Creds, KEIN Master-Key.
+ * S3-only seit S-160: host/port/user (SFTP) entfernt.
  */
 const ALLOWED_CONFIG_FIELDS = [
   'offHostEnabled',
@@ -42,9 +43,6 @@ const ALLOWED_CONFIG_FIELDS = [
   'bucket',
   'prefix',
   'region',
-  'host',
-  'port',
-  'user',
   'retentionCount',
 ];
 

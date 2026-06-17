@@ -58,9 +58,8 @@ export const CREDENTIAL_CATALOG = {
   cloudflare: ['api_token', 'account_id'],
   vps: ['hetzner_api_token', 'ionos_api_token', 'hostinger_api_token'],
   // S-141: Off-Host-Backup Remote-Zugangsdaten (write-only, AC9)
-  // S3-kompatibel: s3_access_key, s3_secret_key
-  // SFTP:          sftp_password, sftp_private_key
-  'backup-remote': ['s3_access_key', 's3_secret_key', 'sftp_password', 'sftp_private_key'],
+  // S3-kompatibel (S3-only seit S-160): s3_access_key, s3_secret_key
+  'backup-remote': ['s3_access_key', 's3_secret_key'],
 };
 
 /** Maximale Länge eines Credential-Werts (Bytes). */
@@ -715,16 +714,13 @@ export class CredentialStore {
           };
 
           // AC9: Creds werden NUR zur Laufzeit entschlüsselt, nie persistiert/geloggt
+          // S3-only seit S-160 (sftp_password/sftp_private_key entfernt)
           const accessKey = _readCredSafe('credentials/backup-remote/s3_access_key');
           const secretKey = _readCredSafe('credentials/backup-remote/s3_secret_key');
-          const password = _readCredSafe('credentials/backup-remote/sftp_password');
-          const privateKey = _readCredSafe('credentials/backup-remote/sftp_private_key');
 
           offHostCreds = {
             ...(accessKey ? { accessKey } : {}),
             ...(secretKey ? { secretKey } : {}),
-            ...(password ? { password } : {}),
-            ...(privateKey ? { privateKey } : {}),
           };
         }
       } catch {
