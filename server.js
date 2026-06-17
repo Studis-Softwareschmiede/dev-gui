@@ -76,6 +76,7 @@ import { assertAccessConfig, createAccessGuard, createWsAccessGuard } from './sr
 import { AuditStore } from './src/AuditStore.js';
 import { CommandService } from './src/CommandService.js';
 import { GitHubReader } from './src/GitHubReader.js';
+import { GitHubAppTokenProvider } from './src/GitHubAppTokenProvider.js';
 import { DockerReader } from './src/DockerReader.js';
 import { CredentialStore } from './src/CredentialStore.js';
 import { GitHubWriter } from './src/GitHubWriter.js';
@@ -149,7 +150,11 @@ ptyRegistry.start(); // start global session
 const commandService = new CommandService({ sessionRegistry: ptyRegistry, auditStore });
 
 // ── GitHub / Docker Reader ────────────────────────────────────────────────────
-const githubReader = new GitHubReader();
+// AC5 (github-app-token-unification): GitHubReader is wired through the cached
+// App-Token-Provider.  The GH_TOKEN/GITHUB_TOKEN PAT is no longer the primary
+// read path — the App Identity covers both reads and writes.
+const githubAppTokenProvider = new GitHubAppTokenProvider({ credentialStore });
+const githubReader = new GitHubReader({ tokenProvider: () => githubAppTokenProvider.getToken() });
 const dockerReader = new DockerReader();
 
 // ── Workspace ─────────────────────────────────────────────────────────────────
