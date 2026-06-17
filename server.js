@@ -77,6 +77,7 @@ import { AuditStore } from './src/AuditStore.js';
 import { CommandService } from './src/CommandService.js';
 import { GitHubReader } from './src/GitHubReader.js';
 import { GitHubAppTokenProvider } from './src/GitHubAppTokenProvider.js';
+import { GitHubPackagesReader } from './src/GitHubPackagesReader.js';
 import { DockerReader } from './src/DockerReader.js';
 import { CredentialStore } from './src/CredentialStore.js';
 import { GitHubWriter } from './src/GitHubWriter.js';
@@ -155,6 +156,7 @@ const commandService = new CommandService({ sessionRegistry: ptyRegistry, auditS
 // read path — the App Identity covers both reads and writes.
 const githubAppTokenProvider = new GitHubAppTokenProvider({ credentialStore });
 const githubReader = new GitHubReader({ tokenProvider: () => githubAppTokenProvider.getToken() });
+const githubPackagesReader = new GitHubPackagesReader({ tokenProvider: () => githubAppTokenProvider.getToken() });
 const dockerReader = new DockerReader();
 
 // ── Workspace ─────────────────────────────────────────────────────────────────
@@ -257,6 +259,7 @@ const deps = {
   ptyManager,
   commandService,
   githubReader,
+  githubPackagesReader,
   dockerReader,
   credentialStore,
   bitwardenMasterKeyService,

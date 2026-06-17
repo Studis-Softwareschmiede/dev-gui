@@ -227,6 +227,7 @@ describe('routerLoader — Echte src/routers/ Module (AC1/AC3)', () => {
       'credentialUnlock.js',
       'credentials.js',
       'deployments.js',
+      'githubPackages.js',
       'githubRepoClone.js',
       'githubRepos.js',
       'githubReposList.js',
@@ -260,7 +261,7 @@ describe('routerLoader — Echte src/routers/ Module (AC1/AC3)', () => {
     }
   });
 
-  it('genau 25 Router-Module in src/routers/ — Smoke-Assertion gegen versehentliche Löschung (AC1)', async () => {
+  it('genau 26 Router-Module in src/routers/ — Smoke-Assertion gegen versehentliche Löschung (AC1)', async () => {
     // Diese Assertion schreibt die aktuelle Router-Anzahl fest.
     // Sinkt die Zahl (Router gelöscht/umbenannt), schlägt der Test sofort an.
     // Steigt die Zahl (neuer Router hinzugefügt), muss dieser Wert bewusst erhöht werden.
@@ -271,8 +272,10 @@ describe('routerLoader — Echte src/routers/ Module (AC1/AC3)', () => {
     //   (backupStatus: AC12 Status-Kachel; backupConfig: Architekt-Entscheid B GET/PUT) → 24.
     // backupRestore.js wurde mit credential-backup S-142 hinzugefügt
     //   (Restore-Endpunkt AC13–AC16) → 25.
+    // githubPackages.js wurde mit ghcr-image-list (S-154) hinzugefügt
+    //   (GET /api/github/packages + GET /api/github/packages/:name/tags) → 26.
     const entries = await readdir(ROUTERS_DIR);
     const mountedCount = entries.filter((f) => f.endsWith('.js')).length;
-    expect(mountedCount).toBe(25);
+    expect(mountedCount).toBe(26);
   });
 });
