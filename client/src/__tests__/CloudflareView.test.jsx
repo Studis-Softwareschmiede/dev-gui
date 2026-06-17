@@ -1,7 +1,7 @@
 /**
  * CloudflareView.test.jsx — Unit tests for the CloudflareView component (v2, Capability A).
  *
- * Covers (view-cloudflare spec AC1–AC11):
+ * Covers (view-cloudflare spec AC1–AC13):
  *   AC1  — Title "Cloudflare" as semantic <h1>; main landmark present.
  *   AC2  — Back-to-panel navigation (onNavigate).
  *   AC3  — Onboarding hint when not configured; no API call when configured=false.
@@ -17,6 +17,8 @@
  *   A11y — <h1>; aria-label; Buttons mit aria-label ≥44px; Fehler role=alert.
  *   AC10 — ReconciliationSection: Reconcile-Statusmeldungen + letzter Report read-only angezeigt.
  *   AC11 — „Jetzt abgleichen"-Trigger löst manuellen Reconcile-Lauf aus + Re-Fetch.
+ *   AC12 — (S-158) Hostname-Links: <a href="https://…" target="_blank" rel="noopener noreferrer">;
+ *           auch protected Hostnames sind verlinkt und tragen weiterhin das gesperrt-Kennzeichen.
  *
  * @jest-environment jsdom
  */
@@ -553,6 +555,92 @@ describe('CloudflareView — AC9: Error responses', () => {
     });
     expect(document.body.textContent).not.toMatch(/Bearer/);
     expect(document.body.textContent).not.toMatch(/api_token/);
+    restore();
+  });
+});
+
+// ── AC12: Hostname-Links (S-158) ──────────────────────────────────────────────
+
+describe('CloudflareView — AC12: Hostname-Links (S-158)', () => {
+  /**
+   * Helper: render with one normal + one protected route, select the zone,
+   * wait until routes are visible.
+   */
+  async function renderWithRoutes() {
+    const fetch = configuredFetch();
+    const utils = renderView(fetch);
+    await waitFor(() => {
+      expect(document.body.textContent).toMatch(/example\.com/);
+    });
+    await act(async () => {
+      fireEvent.click(utils.getByRole('button', { name: /zone example\.com auswählen/i }));
+    });
+    await waitFor(() => {
+      expect(document.body.textContent).toMatch(/app\.example\.com/);
+    });
+    return utils;
+  }
+
+  it('non-protected hostname is rendered as <a href="https://…">', async () => {
+    const { restore } = await renderWithRoutes();
+    const link = document.querySelector('a[href="https://app.example.com"]');
+    expect(link).toBeTruthy();
+    restore();
+  });
+
+  it('non-protected hostname link has target="_blank"', async () => {
+    const { restore } = await renderWithRoutes();
+    const link = document.querySelector('a[href="https://app.example.com"]');
+    expect(link?.getAttribute('target')).toBe('_blank');
+    restore();
+  });
+
+  it('non-protected hostname link has rel="noopener noreferrer"', async () => {
+    const { restore } = await renderWithRoutes();
+    const link = document.querySelector('a[href="https://app.example.com"]');
+    expect(link?.getAttribute('rel')).toBe('noopener noreferrer');
+    restore();
+  });
+
+  it('non-protected link text is the hostname itself', async () => {
+    const { restore } = await renderWithRoutes();
+    const link = document.querySelector('a[href="https://app.example.com"]');
+    expect(link?.textContent).toBe('app.example.com');
+    restore();
+  });
+
+  it('protected hostname is ALSO rendered as <a href="https://…">', async () => {
+    const { restore } = await renderWithRoutes();
+    const link = document.querySelector('a[href="https://devgui.example.com"]');
+    expect(link).toBeTruthy();
+    restore();
+  });
+
+  it('protected hostname link has target="_blank" and rel="noopener noreferrer"', async () => {
+    const { restore } = await renderWithRoutes();
+    const link = document.querySelector('a[href="https://devgui.example.com"]');
+    expect(link?.getAttribute('target')).toBe('_blank');
+    expect(link?.getAttribute('rel')).toBe('noopener noreferrer');
+    restore();
+  });
+
+  it('protected hostname still shows the "gesperrt" badge alongside the link', async () => {
+    const { restore } = await renderWithRoutes();
+    // The link itself is present
+    const link = document.querySelector('a[href="https://devgui.example.com"]');
+    expect(link).toBeTruthy();
+    // The protected badge is also present in the same row
+    const badge = document.querySelector('[aria-label="geschützt"]');
+    expect(badge).toBeTruthy();
+    restore();
+  });
+
+  it('protected hostname still has no active Löschen button (AC5 unaffected)', async () => {
+    const { restore } = await renderWithRoutes();
+    const disabledBtn = document.querySelector(
+      'button[disabled][aria-label*="devgui.example.com"]',
+    );
+    expect(disabledBtn).toBeTruthy();
     restore();
   });
 });

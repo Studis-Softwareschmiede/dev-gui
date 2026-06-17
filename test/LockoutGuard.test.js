@@ -5,7 +5,8 @@
  *   ADR-011 isProtected() Erkennungsregeln:
  *     - (a) devgui-Hostname aus DEVGUI_HOSTNAME → protected
  *     - (b) Cloudflare-Access-Mauer-Hostname → protected
- *     - fail-closed bei fehlendem DEVGUI_HOSTNAME
+ *     - AC13/S-159: ohne DEVGUI_HOSTNAME → normale Hostnames NICHT protected,
+ *       nur Access-Mauer-Patterns bleiben protected
  *     - normale (nicht-protected) Route → false
  *     - null/undefined/leer → fail-closed (protected)
  *     - Case-insensitive matching
@@ -66,23 +67,7 @@ describe('LockoutGuard — (b) Cloudflare Access wall hostname protected', () =>
   });
 });
 
-describe('LockoutGuard — fail-closed behaviour', () => {
-  it('returns true (protected) when DEVGUI_HOSTNAME is not set', () => {
-    const original = process.env.DEVGUI_HOSTNAME;
-    delete process.env.DEVGUI_HOSTNAME;
-    try {
-      // Constructor: devguiHostname not passed, env not set → fail-closed
-      const guard = new LockoutGuard({ devguiHostname: '' });
-      // Any target → protected because we can't distinguish
-      expect(guard.isProtected(NORMAL_HOST)).toBe(true);
-      expect(guard.isProtected('any.hostname.com')).toBe(true);
-    } finally {
-      if (original !== undefined) {
-        process.env.DEVGUI_HOSTNAME = original;
-      }
-    }
-  });
-
+describe('LockoutGuard — fail-closed on target (null/empty/non-string)', () => {
   it('returns true for null target', () => {
     const guard = new LockoutGuard({ devguiHostname: DEVGUI_HOST });
     expect(guard.isProtected(null)).toBe(true);
@@ -108,6 +93,50 @@ describe('LockoutGuard — fail-closed behaviour', () => {
     expect(guard.isProtected(42)).toBe(true);
     expect(guard.isProtected({})).toBe(true);
     expect(guard.isProtected([])).toBe(true);
+  });
+});
+
+// ── AC13/S-159: ohne DEVGUI_HOSTNAME → kein pauschal-protected ───────────────
+
+describe('LockoutGuard — AC13/S-159: ohne DEVGUI_HOSTNAME nur Access-Mauer protected', () => {
+  it('normaler App-Hostname ist NICHT protected wenn DEVGUI_HOSTNAME nicht gesetzt', () => {
+    const original = process.env.DEVGUI_HOSTNAME;
+    delete process.env.DEVGUI_HOSTNAME;
+    try {
+      const guard = new LockoutGuard({ devguiHostname: '' });
+      // Normal hostnames must NOT be falsely protected (AC13 fix)
+      expect(guard.isProtected(NORMAL_HOST)).toBe(false);
+      expect(guard.isProtected('any.hostname.com')).toBe(false);
+      expect(guard.isProtected(ANOTHER_HOST)).toBe(false);
+    } finally {
+      if (original !== undefined) {
+        process.env.DEVGUI_HOSTNAME = original;
+      }
+    }
+  });
+
+  it('Access-Mauer-Pattern (*.cloudflareaccess.com) IST protected — auch ohne DEVGUI_HOSTNAME', () => {
+    const original = process.env.DEVGUI_HOSTNAME;
+    delete process.env.DEVGUI_HOSTNAME;
+    try {
+      const guard = new LockoutGuard({ devguiHostname: '' });
+      expect(guard.isProtected('x.cloudflareaccess.com')).toBe(true);
+      expect(guard.isProtected('auth.cloudflareaccess.com')).toBe(true);
+    } finally {
+      if (original !== undefined) {
+        process.env.DEVGUI_HOSTNAME = original;
+      }
+    }
+  });
+
+  it('mit gesetztem DEVGUI_HOSTNAME ist der eigene Hostname protected', () => {
+    const guard = new LockoutGuard({ devguiHostname: DEVGUI_HOST });
+    expect(guard.isProtected(DEVGUI_HOST)).toBe(true);
+  });
+
+  it('mit gesetztem DEVGUI_HOSTNAME ist ein anderer Hostname NICHT protected', () => {
+    const guard = new LockoutGuard({ devguiHostname: DEVGUI_HOST });
+    expect(guard.isProtected(NORMAL_HOST)).toBe(false);
   });
 });
 

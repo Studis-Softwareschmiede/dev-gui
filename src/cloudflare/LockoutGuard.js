@@ -10,7 +10,9 @@
  *   (b) Any Cloudflare Access wall hostname — configurable allowlist of
  *       protected hostnames/suffixes.
  *
- * Fail-closed: if config is missing or target is ambiguous → protected = true.
+ * Fail-closed on target: if target is null/undefined/empty → protected = true.
+ * If DEVGUI_HOSTNAME is not configured, only Access-wall patterns are enforced;
+ * normal app hostnames are NOT falsely protected (AC13, S-159).
  * This deliberately prefers false-negative (blocking a legitimate deletion)
  * over false-positive (self-lockout).
  *
@@ -46,8 +48,8 @@ export class LockoutGuard {
    * @param {string} [options.devguiHostname]
    *   The devgui hostname (e.g. "devgui.example.com").
    *   Defaults to process.env.DEVGUI_HOSTNAME.
-   *   If absent → fail-closed for any target that cannot be definitively
-   *   classified as non-devgui.
+   *   If absent → only Access-wall patterns apply; normal app hostnames
+   *   are NOT falsely protected (AC13/S-159).
    * @param {Array<string|RegExp>} [options.protectedPatterns]
    *   Additional hostname strings (exact match) or RegExp patterns (suffix/pattern)
    *   that should always be treated as protected.
@@ -72,9 +74,10 @@ export class LockoutGuard {
    * Protected = (a) matches own devgui hostname, OR
    *             (b) matches a Cloudflare Access wall pattern.
    *
-   * Fail-closed: returns true (protected) when:
-   *   - DEVGUI_HOSTNAME is not configured (cannot exclude "could be own hostname")
-   *   - target is null/undefined/empty
+   * Fail-closed on target: returns true (protected) when:
+   *   - target is null/undefined/empty/non-string
+   * When DEVGUI_HOSTNAME is not configured, only Access-wall patterns apply;
+   * normal app hostnames return false (not falsely protected, AC13/S-159).
    *
    * @param {string|null|undefined} target - Hostname to check (e.g. "app.example.com")
    * @returns {boolean} true if protected, false if safe to mutate
@@ -93,18 +96,18 @@ export class LockoutGuard {
     }
 
     // (a) Check against own devgui hostname
-    if (this.#devguiHostname === null) {
-      // DEVGUI_HOSTNAME not configured → fail-closed: any target might be
-      // the devgui route, so treat everything as potentially protected.
-      // We still check Access wall patterns below to be precise when that is
-      // the reason (the caller only needs to know: protected or not).
-      return true;
+    if (this.#devguiHostname !== null) {
+      // DEVGUI_HOSTNAME is configured — protect it unconditionally.
+      const devguiNormalised = this.#devguiHostname.toLowerCase();
+      if (normalised === devguiNormalised) {
+        return true;
+      }
     }
-
-    const devguiNormalised = this.#devguiHostname.toLowerCase();
-    if (normalised === devguiNormalised) {
-      return true;
-    }
+    // If DEVGUI_HOSTNAME is not configured, the self-lockout protection for the
+    // own hostname cannot apply (hostname is unknown). We do NOT fail-closed over
+    // all targets: only the Access-wall patterns below still apply. This is
+    // acceptable per AC13 — the Self-Lockout-Floor for the own hostname naturally
+    // cannot be enforced when DEVGUI_HOSTNAME is absent.
 
     // (b) Check against Cloudflare Access wall patterns
     for (const pattern of this.#protectedPatterns) {
