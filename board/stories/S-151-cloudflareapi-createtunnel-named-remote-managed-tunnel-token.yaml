@@ -1,7 +1,7 @@
 id: S-151
 parent: F-013
 title: 'CloudflareApi.createTunnel: named remote-managed Tunnel anlegen + Tunnel-Token (Security-Floor)'
-status: To Do
+status: Done
 priority: P1
 spec: docs/specs/vps-tunnel-provisioning.md
 implements:
@@ -16,8 +16,10 @@ labels:
 - backend
 size_est: S
 dispo_est: 3
+dispo_act: 3
 dispo_forecast: 0.0
 confidence: high
 estimate_note: 'Neue Methode createTunnel(name) in src/cloudflare/CloudflareApi.js — analog der bestehenden Mutate-Methoden (addRoute/createDnsRecord/deleteTunnel). POST {CF_BASE}/accounts/{accountId}/cfd_tunnel mit { name, config_src: "cloudflare" } (remote-managed), Rueckgabe { tunnelId: result.id, token: result.token } (coder prueft, ob die API den Token direkt im Create liefert oder ein nachgelagerter Token-GET noetig ist — Recherche-Touchpoint). Wiederverwendung der vorhandenen #apiPost-/#resolveCredentials-Helper: per-request Token+Account-ID store-intern, AbortController-Timeout, Fehlerklassifikation (401/403→cloudflare-auth-failed 502, timeout/429/5xx→cloudflare-unavailable, not-configured→422 ohne API-Call, success:false-Guard). deleteTunnel existiert bereits (Zeile ~484) — wiederverwenden, KEIN neuer Loeschpfad. Security-Floor: weder Tunnel-Token noch API-Token in Fehlermeldung/Log/Response (API-Token nur Authorization:Bearer). Minimal-invasiv, 1 Methode + Helper-Reuse (~S, ~3 EP). Test: Mock-fetch — createTunnel liefert {tunnelId,token}; not-configured wirft 422 ohne fetch; 401→cloudflare-auth-failed; Token taucht in keinem geworfenen Error/Log auf.'
 created_at: '2026-06-17T00:00:00Z'
-updated_at: '2026-06-17T00:00:00Z'
+updated_at: '2026-06-17T22:13:47Z'
+done_at: '2026-06-17T22:13:47Z'
