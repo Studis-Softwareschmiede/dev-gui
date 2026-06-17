@@ -473,6 +473,60 @@ export class CloudflareApi {
   }
 
   /**
+   * Create a new remote-managed Cloudflare Tunnel and return its ID + connector token.
+   *
+   * Calls POST /accounts/{accountId}/cfd_tunnel with config_src:"cloudflare" (remote-managed).
+   * The returned token is the cloudflared connector token — treat as a secret:
+   *   - NEVER log the token (AC2, security/R01)
+   *   - NEVER include it in error messages
+   *   - Pass to caller; caller persists it in CredentialStore (not this method's responsibility)
+   *
+   * Not configured (no token/account-id) → throws CloudflareApiError('cloudflare-not-configured', 422)
+   * without making any API call (AC1).
+   *
+   * @param {string} name - Tunnel name (e.g. "devgui-<sanitized-vpsname>")
+   * @returns {Promise<{ tunnelId: string, token: string }>}
+   * @throws {CloudflareApiError}
+   */
+  async createTunnel(name) {
+    const creds = await this.#resolveCredentials();
+    if (!creds) {
+      throw new CloudflareApiError(
+        'Cloudflare not configured (no token/account-id)',
+        'cloudflare-not-configured',
+        422,
+      );
+    }
+
+    const { token, accountId } = creds;
+    const url = `${CF_BASE}/accounts/${encodeURIComponent(accountId)}/cfd_tunnel`;
+
+    // AC2: token NEVER in request body, error messages, or logs.
+    // token goes only in Authorization: Bearer header (handled by #apiPost / buildHeaders).
+    const response = await this.#apiPost(url, token, {
+      name,
+      config_src: 'cloudflare', // remote-managed (not local credentials file)
+    });
+
+    const result = response?.result;
+    const tunnelId = result?.id;
+    const tunnelToken = result?.token;
+
+    // Validate that both fields are present and are non-empty strings
+    if (typeof tunnelId !== 'string' || !tunnelId || typeof tunnelToken !== 'string' || !tunnelToken) {
+      throw new CloudflareApiError(
+        'Cloudflare API returned an invalid tunnel response (missing id or token)',
+        'invalid-response',
+        502,
+      );
+    }
+
+    // AC2: return token to caller — caller is responsible for secure storage.
+    // Do NOT log tunnelToken here or anywhere in this path.
+    return { tunnelId, token: tunnelToken };
+  }
+
+  /**
    * Delete a Cloudflare tunnel by ID.
    *
    * LockoutGuard check is done by the router caller (ADR-011) before invoking this method.
