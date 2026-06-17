@@ -106,6 +106,62 @@ export class VpsDockerControl {
   }
 
   /**
+   * Ermittelt die exponierten Ports eines Images via `docker inspect` auf dem VPS (AC13).
+   *
+   * Gibt die ExposedPorts-Keys zurück (z.B. ["8080/tcp", "3000/tcp"]).
+   * Bei Fehler → leeres Array (Caller nutzt Fallback).
+   *
+   * @param {VpsTarget} vps
+   * @param {string}    image
+   * @param {object}    [opts]
+   * @param {string}    [opts.hostFingerprint]
+   * @param {Function}  [opts._sshClientFactory]
+   * @returns {Promise<{ result: 'ok'|'error', ports?: string[], reason?: string, errorClass?: string }>}
+   */
+  async inspect(vps, image, opts = {}) {
+    const privateKey = await this.#loadPrivateKey(vps.targetUser);
+    if (!privateKey.ok) return { result: 'error', ports: [], ...privateKey.error };
+
+    // Security: image-Name via Shell-Escaping absichern
+    const escapedImage = shellEscape(image);
+    // docker inspect --format '{{json .Config.ExposedPorts}}' returns JSON like {"8080/tcp":{}}
+    const cmd = `docker inspect --format '{{json .Config.ExposedPorts}}' ${escapedImage}`;
+
+    try {
+      const stdout = await runSshCommand({
+        privateKey: privateKey.value,
+        host: vps.host,
+        port: vps.port ?? 22,
+        targetUser: vps.targetUser,
+        command: cmd,
+        timeoutMs: EXEC_TIMEOUT_MS,
+        hostFingerprint: opts.hostFingerprint ?? null,
+        sshClientFactory: opts._sshClientFactory,
+      });
+      // Parse JSON output; null means no ExposedPorts
+      let parsed;
+      try {
+        parsed = JSON.parse(stdout.trim());
+      } catch {
+        return { result: 'ok', ports: [] };
+      }
+      if (!parsed || typeof parsed !== 'object') {
+        return { result: 'ok', ports: [] };
+      }
+      const ports = Object.keys(parsed);
+      return { result: 'ok', ports };
+    } catch (err) {
+      const errorClass = classifyError(err);
+      return {
+        result: 'error',
+        ports: [],
+        reason: sanitizeErrorReason(errorClass),
+        errorClass,
+      };
+    }
+  }
+
+  /**
    * Pullt ein Docker-Image auf dem VPS.
    *
    * @param {VpsTarget} vps

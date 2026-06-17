@@ -31,8 +31,38 @@ const { DeploymentsView }     = await import('../DeploymentsView.jsx');
 
 let originalFetch;
 
+// Default fetch stub: returns empty lists for all dropdown sources
+// (packages, tags, vps-targets, zones) so that the component mounts
+// without errors even when a test doesn't set up its own fetch mock.
+function makeDefaultFetch() {
+  return jest.fn(async (url) => {
+    const u = String(url);
+    if (u.includes('/api/deployments/stacks')) {
+      return { ok: true, status: 200, json: async () => ({ stacks: [] }) };
+    }
+    if (u.includes('/api/github/packages') && !u.includes('/tags')) {
+      return { ok: true, status: 200, json: async () => ({ packages: [] }) };
+    }
+    if (u.includes('/tags')) {
+      return { ok: true, status: 200, json: async () => ({ tags: [] }) };
+    }
+    if (u.includes('/api/deployments/vps-targets')) {
+      return { ok: true, status: 200, json: async () => ({ vpsIds: [] }) };
+    }
+    if (u.includes('/api/cloudflare/zones')) {
+      return { ok: true, status: 200, json: async () => ({ zones: [] }) };
+    }
+    if (u.includes('/api/deployments')) {
+      return { ok: true, status: 200, json: async () => ({ deployments: [] }) };
+    }
+    return { ok: true, status: 200, json: async () => ({}) };
+  });
+}
+
 beforeEach(() => {
   originalFetch = globalThis.fetch;
+  // Install a default stub so component mount fetch calls don't throw
+  globalThis.fetch = makeDefaultFetch();
 });
 
 afterEach(() => {

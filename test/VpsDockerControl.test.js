@@ -986,3 +986,108 @@ describe('VpsDockerControl — run() — Hostname-Validierung (I2)', () => {
     expect(capturedCmd).toContain("'cloudflare.tunnel-hostname=app.example.com'");
   });
 });
+
+// ── AC13: inspect() — ExposedPorts via docker inspect ─────────────────────────
+
+describe('VpsDockerControl.inspect() — AC13', () => {
+  let store, dir;
+
+  beforeEach(async () => {
+    ({ store, dir } = await makeTmpStore());
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('gibt result:ok + ports-Array zurück wenn docker inspect JSON-Objekt liefert', async () => {
+    const inspectOutput = JSON.stringify({ '3000/tcp': {}, '8080/tcp': {} });
+    const ctrl = new VpsDockerControl(store);
+
+    const result = await ctrl.inspect(TEST_VPS, 'ghcr.io/org/app:v1', {
+      _sshClientFactory: makeMockSshClient({ stdout: inspectOutput, exitCode: 0 }),
+    });
+
+    expect(result.result).toBe('ok');
+    expect(result.ports).toEqual(expect.arrayContaining(['3000/tcp', '8080/tcp']));
+    expect(result.ports.length).toBe(2);
+  });
+
+  it('gibt result:ok + leeres ports-Array zurück wenn ExposedPorts null (kein Port exponiert)', async () => {
+    const ctrl = new VpsDockerControl(store);
+
+    const result = await ctrl.inspect(TEST_VPS, 'ghcr.io/org/app:v1', {
+      _sshClientFactory: makeMockSshClient({ stdout: 'null', exitCode: 0 }),
+    });
+
+    expect(result.result).toBe('ok');
+    expect(result.ports).toEqual([]);
+  });
+
+  it('gibt result:ok + leeres ports-Array zurück wenn stdout kein valides JSON ist', async () => {
+    const ctrl = new VpsDockerControl(store);
+
+    const result = await ctrl.inspect(TEST_VPS, 'ghcr.io/org/app:v1', {
+      _sshClientFactory: makeMockSshClient({ stdout: 'not-json', exitCode: 0 }),
+    });
+
+    expect(result.result).toBe('ok');
+    expect(result.ports).toEqual([]);
+  });
+
+  it('gibt result:ok + leeres ports-Array zurück wenn stdout leer ist', async () => {
+    const ctrl = new VpsDockerControl(store);
+
+    const result = await ctrl.inspect(TEST_VPS, 'ghcr.io/org/app:v1', {
+      _sshClientFactory: makeMockSshClient({ stdout: '', exitCode: 0 }),
+    });
+
+    expect(result.result).toBe('ok');
+    expect(result.ports).toEqual([]);
+  });
+
+  it('inspect-Kommando enthält docker inspect --format mit dem Image-Pfad', async () => {
+    const ctrl = new VpsDockerControl(store);
+    let capturedCmd = null;
+
+    await ctrl.inspect(TEST_VPS, 'ghcr.io/org/my-app:v2', {
+      _sshClientFactory: makeMockSshClient({
+        stdout: 'null',
+        exitCode: 0,
+        onCommand: (cmd) => { capturedCmd = cmd; },
+      }),
+    });
+
+    expect(capturedCmd).toContain('docker inspect');
+    expect(capturedCmd).toContain('ExposedPorts');
+    expect(capturedCmd).toContain('ghcr.io/org/my-app:v2');
+  });
+
+  it('gibt result:error zurück wenn SSH-Verbindung fehlschlägt', async () => {
+    const ctrl = new VpsDockerControl(store);
+
+    const result = await ctrl.inspect(TEST_VPS, 'ghcr.io/org/app:v1', {
+      _sshClientFactory: makeMockSshClient({
+        connectError: new Error('Connection refused'),
+      }),
+    });
+
+    expect(result.result).toBe('error');
+    expect(result.ports).toEqual([]);
+  });
+
+  it('gibt result:error zurück wenn kein Private Key in Store vorhanden', async () => {
+    const { store: emptyStore, dir: emptyDir } = await makeTmpStore();
+    const ctrl = new VpsDockerControl(emptyStore);
+
+    const result = await ctrl.inspect(TEST_VPS, 'ghcr.io/org/app:v1', {
+      _sshClientFactory: makeMockSshClient({ stdout: 'null', exitCode: 0 }),
+    });
+
+    await rm(emptyDir, { recursive: true, force: true });
+
+    expect(result.result).toBe('error');
+    expect(result.ports).toEqual([]);
+  });
+});

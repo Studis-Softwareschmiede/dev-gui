@@ -1,14 +1,23 @@
 /**
  * DeploymentsView.jsx — Deployments-Panel (Capability B, ADR-012).
  *
- * Spec: deploy-lifecycle.md AC3–AC9 (Frontend-Seite)
+ * Spec: deploy-lifecycle.md AC3–AC9, AC10–AC14 (S-155), AC15
  *       stack-deploy-orchestration.md AC12 (Modus-Umschalter)
  *
  * Responsibilities:
  *   - Mode toggle: "Single-Image" | "Compose-Stack aus Repo" (AC12)
- *   - Single-Image mode (unchanged, deploy-lifecycle.md):
+ *   - Single-Image mode (deploy-lifecycle.md AC10–AC14):
  *       List live deployments (Container↔Route as unit) — GET /api/deployments
- *       Deploy form: image + vps + hostname + tunnelId → POST /api/deployments
+ *       Deploy form — GUIDED DROPDOWNS (AC10):
+ *         Image-Dropdown (GET /api/github/packages)
+ *         Tag-Dropdown   (GET /api/github/packages/:name/tags, disabled until image chosen)
+ *         VPS-Dropdown   (GET /api/deployments/vps-targets)
+ *         Domain-Dropdown (GET /api/cloudflare/zones)
+ *         Subdomain field: pre-filled from image name (AC11), editable; shows assembled hostname
+ *         Deploy-Button: active only when Image+Tag+VPS+Domain+Subdomain non-empty (AC12)
+ *         POST /api/deployments { image: "fullRef:tag", vps, hostname: "sub.domain", tunnelId }
+ *         Auto-Port: resolved server-side via docker inspect after pull (AC13)
+ *         Re-Deploy: existing deploy on same hostname is replaced; UI shows "replaces existing" (AC14)
  *       Undeploy with type-to-confirm → DELETE /api/deployments/:vps/:hostname (AC5/AC6)
  *       Show 422/protected-resource / 422/confirmation-required clearly (no secrets) (AC7)
  *   - Compose-Stack mode (AC12):
@@ -16,7 +25,7 @@
  *       Deploy stack — POST /api/deployments/stacks/{stackName}/deploy
  *       Undeploy stack with type-to-confirm — DELETE /api/deployments/stacks/{stackName}/undeploy
  *       Stack status with drift flags — GET /api/deployments/stacks/{stackName}/status
- *   - No Cloudflare token or SSH key in frontend bundle (AC9/AC11/security)
+ *   - No Cloudflare token or SSH key in frontend bundle (AC9/AC15/security)
  *
  * A11y (WCAG 2.1 AA):
  *   - Semantic headings, landmarks (main, section, form)
@@ -37,13 +46,8 @@ import { useState, useEffect, useCallback } from 'react';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const INITIAL_DEPLOY_FORM = {
-  image: '',
-  vps: '',
-  hostname: '',
-  tunnelId: '',
-  // zoneId is NOT in the form — resolved server-side from hostname (Spec-Gap-Resolution)
-};
+/** Default domain suffix when none selected. */
+const DEFAULT_DOMAIN = '';
 
 const INITIAL_UNDEPLOY_STATE = {
   hostname: '',
@@ -57,6 +61,22 @@ const INITIAL_UNDEPLOY_STATE = {
 const MODE_SINGLE = 'single';
 const MODE_STACK  = 'stack';
 
+/**
+ * Derive a subdomain suggestion from an image name or fullImageRef.
+ * e.g. "brew-assistent" → "brew-assistent"
+ * e.g. "ghcr.io/org/brew-assistent" → "brew-assistent"
+ * AC11
+ *
+ * @param {string} nameOrRef
+ * @returns {string}
+ */
+function deriveSubdomain(nameOrRef) {
+  if (!nameOrRef) return '';
+  // Strip registry prefix if present (e.g. "ghcr.io/org/app" → "app")
+  const parts = nameOrRef.split('/');
+  return parts[parts.length - 1] ?? '';
+}
+
 // ── DeploymentsView ───────────────────────────────────────────────────────────
 
 /**
@@ -66,7 +86,7 @@ export function DeploymentsView({ onNavigate }) {
   // ── Mode toggle (AC12)
   const [mode, setMode] = useState(MODE_SINGLE); // 'single' | 'stack'
 
-  // ── Single-Image state (unchanged)
+  // ── Single-Image state
   const [deployments, setDeployments] = useState([]);
   const [loadErrors, setLoadErrors] = useState([]);
   const [loadState, setLoadState] = useState('idle'); // 'idle' | 'loading' | 'ok' | 'error'
@@ -75,10 +95,26 @@ export function DeploymentsView({ onNavigate }) {
   const [listVps, setListVps] = useState('');
   const [listTunnelId, setListTunnelId] = useState('');
 
-  // Deploy form
-  const [deployForm, setDeployForm] = useState(INITIAL_DEPLOY_FORM);
+  // ── AC10: Dropdown source data
+  const [packages, setPackages] = useState([]);         // [{ name, fullImageRef, ... }]
+  const [packagesState, setPackagesState] = useState('idle'); // 'idle'|'loading'|'ok'|'error'
+  const [tags, setTags] = useState([]);                 // [{ tag, digest, updatedAt }]
+  const [tagsState, setTagsState] = useState('idle');   // 'idle'|'loading'|'ok'|'error'
+  const [vpsIds, setVpsIds] = useState([]);             // string[]
+  const [vpsIdsState, setVpsIdsState] = useState('idle');
+  const [zones, setZones] = useState([]);               // [{ id, name }]
+  const [zonesState, setZonesState] = useState('idle');
+
+  // ── AC10–AC12: Guided deploy form state
+  const [selectedPackage, setSelectedPackage] = useState(''); // package name (e.g. "brew-assistent")
+  const [selectedTag, setSelectedTag] = useState('');          // tag string (e.g. "v1.2.0")
+  const [selectedVps, setSelectedVps] = useState('');          // vps id
+  const [selectedZone, setSelectedZone] = useState('');        // zone name (e.g. "alexstuder.cloud")
+  const [selectedZoneTunnels, setSelectedZoneTunnels] = useState([]); // [{id, name}] tunnels for zone
+  const [selectedTunnel, setSelectedTunnel] = useState('');    // tunnel id
+  const [subdomain, setSubdomain] = useState('');              // AC11: editable subdomain
   const [deploying, setDeploying] = useState(false);
-  const [deployResult, setDeployResult] = useState(null); // { ok, message }
+  const [deployResult, setDeployResult] = useState(null); // { ok, message, replaced? }
 
   // Undeploy
   const [undeployState, setUndeployState] = useState(null); // null | INITIAL_UNDEPLOY_STATE
@@ -135,21 +171,166 @@ export function DeploymentsView({ onNavigate }) {
     }
   }, [loadDeployments]);
 
-  // ── Deploy handler
+  // ── AC10: Load dropdown sources on mount (single-image mode) ─────────────
+
+  // Load packages list
+  useEffect(() => {
+    if (packagesState !== 'idle') return;
+    setPackagesState('loading');
+    fetch('/api/github/packages')
+      .then((r) => r.json())
+      .then((d) => {
+        setPackages(d.packages ?? []);
+        setPackagesState('ok');
+      })
+      .catch(() => setPackagesState('error'));
+  }, [packagesState]);
+
+  // Load VPS IDs
+  useEffect(() => {
+    if (vpsIdsState !== 'idle') return;
+    setVpsIdsState('loading');
+    fetch('/api/deployments/vps-targets')
+      .then((r) => r.json())
+      .then((d) => {
+        setVpsIds(d.vpsIds ?? []);
+        setVpsIdsState('ok');
+      })
+      .catch(() => setVpsIdsState('error'));
+  }, [vpsIdsState]);
+
+  // Load zones (domains)
+  useEffect(() => {
+    if (zonesState !== 'idle') return;
+    setZonesState('loading');
+    fetch('/api/cloudflare/zones')
+      .then((r) => r.json())
+      .then((d) => {
+        setZones(d.zones ?? []);
+        setZonesState('ok');
+      })
+      .catch(() => setZonesState('error'));
+  }, [zonesState]);
+
+  // ── AC10: Load tags when package selected ────────────────────────────────
+  useEffect(() => {
+    if (!selectedPackage) {
+      setTags([]);
+      setSelectedTag('');
+      setTagsState('idle');
+      return;
+    }
+    setTagsState('loading');
+    setTags([]);
+    setSelectedTag('');
+    fetch(`/api/github/packages/${encodeURIComponent(selectedPackage)}/tags`)
+      .then((r) => r.json())
+      .then((d) => {
+        setTags(d.tags ?? []);
+        setTagsState('ok');
+      })
+      .catch(() => setTagsState('error'));
+  }, [selectedPackage]);
+
+  // ── AC10: Load tunnels when zone selected ────────────────────────────────
+  useEffect(() => {
+    if (!selectedZone) {
+      setSelectedZoneTunnels([]);
+      setSelectedTunnel('');
+      return;
+    }
+    const zone = zones.find((z) => z.name === selectedZone);
+    if (!zone) return;
+    fetch(`/api/cloudflare/zones/${encodeURIComponent(zone.id)}/tunnels`)
+      .then((r) => r.json())
+      .then((d) => {
+        const tunnels = d.tunnels ?? [];
+        setSelectedZoneTunnels(tunnels);
+        // Auto-select first tunnel if only one
+        if (tunnels.length === 1) {
+          setSelectedTunnel(tunnels[0].id);
+        } else {
+          setSelectedTunnel('');
+        }
+      })
+      .catch(() => {
+        setSelectedZoneTunnels([]);
+        setSelectedTunnel('');
+      });
+  }, [selectedZone, zones]);
+
+  // ── AC11: Pre-fill subdomain from selected image name ───────────────────
+  useEffect(() => {
+    if (selectedPackage) {
+      setSubdomain(deriveSubdomain(selectedPackage));
+    } else {
+      setSubdomain('');
+    }
+  }, [selectedPackage]);
+
+  // Compute assembled hostname (AC11)
+  const assembledHostname = (subdomain.trim() && selectedZone)
+    ? `${subdomain.trim()}.${selectedZone}`
+    : '';
+
+  // AC14: Check if there is an existing deployment on the assembled hostname
+  const existingDeployOnHostname = assembledHostname
+    ? deployments.find((d) => d.hostname === assembledHostname)
+    : null;
+
+  // Find fullImageRef for selected package
+  const selectedPackageObj = packages.find((p) => p.name === selectedPackage);
+  const fullImageRef = selectedPackageObj?.fullImageRef ?? '';
+
+  // AC12: Deploy button active condition
+  const canDeploy =
+    !deploying &&
+    selectedPackage !== '' &&
+    selectedTag !== '' &&
+    selectedVps !== '' &&
+    selectedZone !== '' &&
+    selectedTunnel !== '' &&
+    subdomain.trim() !== '';
+
+  // ── AC12: Deploy handler ─────────────────────────────────────────────────
   async function handleDeploy(e) {
     e.preventDefault();
+    if (!canDeploy) return;
     setDeploying(true);
     setDeployResult(null);
+    const hostname = assembledHostname;
+    const imageWithTag = `${fullImageRef}:${selectedTag}`;
     try {
       const res = await fetch('/api/deployments', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(deployForm),
+        body: JSON.stringify({
+          image: imageWithTag,
+          vps: selectedVps,
+          hostname,
+          tunnelId: selectedTunnel,
+          // zoneId resolved server-side
+        }),
       });
       const data = await res.json();
       if (res.ok && data.result === 'ok') {
-        setDeployResult({ ok: true, message: `Deployed: ${deployForm.hostname}` });
-        setDeployForm(INITIAL_DEPLOY_FORM);
+        const replaced = data.deployment?.replaced === true;
+        setDeployResult({
+          ok: true,
+          message: replaced
+            ? `Re-Deployed (ersetzt): ${hostname}`
+            : `Deployed: ${hostname}`,
+          replaced,
+          portAmbiguous: data.deployment?.portAmbiguous ?? false,
+          portFallback: data.deployment?.portFallback ?? false,
+        });
+        // Reset form selections
+        setSelectedPackage('');
+        setSelectedTag('');
+        setSelectedVps('');
+        setSelectedZone('');
+        setSelectedTunnel('');
+        setSubdomain('');
         // Refresh list
         loadDeployments();
       } else {
@@ -509,63 +690,141 @@ export function DeploymentsView({ onNavigate }) {
           </section>
         )}
 
-        {/* ── Deploy form ──────────────────────────────────────────────── */}
+        {/* ── Deploy form (AC10–AC14: guided dropdowns) ────────────────── */}
         <section style={styles.section} aria-label="Neues Deployment">
           <h2 style={styles.sectionTitle}>Neues Deployment</h2>
           <form onSubmit={handleDeploy} noValidate aria-label="Deploy-Formular">
+
+            {/* AC10: Image-Dropdown */}
             <div style={styles.row}>
-              <label style={styles.label} htmlFor="deploy-image">Image</label>
+              <label style={styles.label} htmlFor="deploy-image-select">Image</label>
+              {packagesState === 'loading' && (
+                <p style={styles.hint} aria-live="polite">Lade Images…</p>
+              )}
+              <select
+                id="deploy-image-select"
+                style={styles.input}
+                value={selectedPackage}
+                onChange={(e) => setSelectedPackage(e.target.value)}
+                aria-label="Docker-Image (ghcr) auswählen"
+                disabled={packagesState === 'loading'}
+              >
+                <option value="">— Image wählen —</option>
+                {packages.map((p) => (
+                  <option key={p.name} value={p.name}>{p.name}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* AC10: Tag-Dropdown (disabled until image selected) */}
+            <div style={styles.row}>
+              <label style={styles.label} htmlFor="deploy-tag-select">Tag / Version</label>
+              {tagsState === 'loading' && (
+                <p style={styles.hint} aria-live="polite">Lade Tags…</p>
+              )}
+              <select
+                id="deploy-tag-select"
+                style={styles.input}
+                value={selectedTag}
+                onChange={(e) => setSelectedTag(e.target.value)}
+                aria-label="Image-Tag auswählen"
+                disabled={!selectedPackage || tagsState === 'loading'}
+              >
+                <option value="">
+                  {selectedPackage ? '— Tag wählen —' : '— zuerst Image wählen —'}
+                </option>
+                {tags.map((t) => (
+                  <option key={t.tag} value={t.tag}>{t.tag}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* AC10: VPS-Dropdown */}
+            <div style={styles.row}>
+              <label style={styles.label} htmlFor="deploy-vps-select">VPS</label>
+              <select
+                id="deploy-vps-select"
+                style={styles.input}
+                value={selectedVps}
+                onChange={(e) => setSelectedVps(e.target.value)}
+                aria-label="VPS auswählen"
+                disabled={vpsIdsState === 'loading'}
+              >
+                <option value="">— VPS wählen —</option>
+                {vpsIds.map((id) => (
+                  <option key={id} value={id}>{id}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* AC10: Domänen-Dropdown */}
+            <div style={styles.row}>
+              <label style={styles.label} htmlFor="deploy-zone-select">Domäne</label>
+              {zonesState === 'loading' && (
+                <p style={styles.hint} aria-live="polite">Lade Domänen…</p>
+              )}
+              <select
+                id="deploy-zone-select"
+                style={styles.input}
+                value={selectedZone}
+                onChange={(e) => setSelectedZone(e.target.value)}
+                aria-label="Domäne auswählen"
+                disabled={zonesState === 'loading'}
+              >
+                <option value="">— Domäne wählen —</option>
+                {zones.map((z) => (
+                  <option key={z.id ?? z.name} value={z.name}>{z.name}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* Tunnel-Dropdown (shown when zone selected + tunnels available) */}
+            {selectedZone && (
+              <div style={styles.row}>
+                <label style={styles.label} htmlFor="deploy-tunnel-select">Tunnel</label>
+                <select
+                  id="deploy-tunnel-select"
+                  style={styles.input}
+                  value={selectedTunnel}
+                  onChange={(e) => setSelectedTunnel(e.target.value)}
+                  aria-label="Cloudflare Tunnel auswählen"
+                >
+                  <option value="">— Tunnel wählen —</option>
+                  {selectedZoneTunnels.map((t) => (
+                    <option key={t.id} value={t.id}>{t.name ?? t.id}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            {/* AC11: Subdomain-Feld, vorausgefüllt + manuell editierbar */}
+            <div style={styles.row}>
+              <label style={styles.label} htmlFor="deploy-subdomain">Subdomain</label>
               <input
-                id="deploy-image"
+                id="deploy-subdomain"
                 type="text"
                 style={styles.input}
-                value={deployForm.image}
-                onChange={(e) => setDeployForm((f) => ({ ...f, image: e.target.value }))}
-                placeholder="ghcr.io/org/app:v1"
-                required
-                aria-label="Docker-Image (ghcr)"
+                value={subdomain}
+                onChange={(e) => setSubdomain(e.target.value)}
+                placeholder="app-name"
+                aria-label="Subdomain (editierbar)"
+                aria-describedby="deploy-hostname-preview"
               />
+              <span id="deploy-hostname-preview" style={styles.inputHint}>
+                {assembledHostname
+                  ? `Hostname: ${assembledHostname}`
+                  : 'Hostname: (Domäne + Subdomain wählen)'}
+              </span>
             </div>
-            <div style={styles.row}>
-              <label style={styles.label} htmlFor="deploy-vps">VPS-ID</label>
-              <input
-                id="deploy-vps"
-                type="text"
-                style={styles.input}
-                value={deployForm.vps}
-                onChange={(e) => setDeployForm((f) => ({ ...f, vps: e.target.value }))}
-                placeholder="vps-id"
-                required
-                aria-label="VPS-ID"
-              />
-            </div>
-            <div style={styles.row}>
-              <label style={styles.label} htmlFor="deploy-hostname">Hostname</label>
-              <input
-                id="deploy-hostname"
-                type="text"
-                style={styles.input}
-                value={deployForm.hostname}
-                onChange={(e) => setDeployForm((f) => ({ ...f, hostname: e.target.value }))}
-                placeholder="app.example.com"
-                required
-                aria-label="Ziel-Hostname"
-              />
-            </div>
-            <div style={styles.row}>
-              <label style={styles.label} htmlFor="deploy-tunnel">Tunnel-ID</label>
-              <input
-                id="deploy-tunnel"
-                type="text"
-                style={styles.input}
-                value={deployForm.tunnelId}
-                onChange={(e) => setDeployForm((f) => ({ ...f, tunnelId: e.target.value }))}
-                placeholder="Cloudflare Tunnel-ID"
-                required
-                aria-label="Cloudflare Tunnel-ID"
-              />
-            </div>
-            {/* Zone-ID is resolved server-side from hostname — not in the form */}
+
+            {/* AC14: Re-Deploy indicator */}
+            {existingDeployOnHostname && (
+              <div style={styles.warnBox} role="status" aria-live="polite">
+                <p style={styles.warnText}>
+                  Hinweis: Ein Deploy auf {assembledHostname} existiert bereits — dieser wird ersetzt.
+                </p>
+              </div>
+            )}
 
             {deployResult && (
               <div
@@ -576,23 +835,32 @@ export function DeploymentsView({ onNavigate }) {
                 <p style={deployResult.ok ? styles.successText : styles.errorText}>
                   {deployResult.message}
                 </p>
+                {/* AC13: Port-Hinweise */}
+                {deployResult.ok && deployResult.portAmbiguous && (
+                  <p style={styles.successText}>
+                    Hinweis: Mehrere exponierte Ports gefunden — kleinster Port verwendet.
+                  </p>
+                )}
+                {deployResult.ok && deployResult.portFallback && (
+                  <p style={styles.successText}>
+                    Hinweis: Kein exponierter Port gefunden — Standard-Port 8080 verwendet.
+                  </p>
+                )}
               </div>
             )}
 
+            {/* AC12: Deploy-Button — aktiv nur bei vollständiger Auswahl */}
             <button
               type="submit"
-              style={styles.btnPrimary}
-              disabled={
-                deploying ||
-                !deployForm.image.trim() ||
-                !deployForm.vps.trim() ||
-                !deployForm.hostname.trim() ||
-                !deployForm.tunnelId.trim()
-                // zoneId not required — resolved server-side
-              }
+              style={canDeploy ? styles.btnPrimary : { ...styles.btnPrimary, opacity: 0.5, cursor: 'not-allowed' }}
+              disabled={!canDeploy}
               aria-busy={deploying}
             >
-              {deploying ? 'Deploye…' : 'Deploy starten'}
+              {deploying
+                ? 'Deploye…'
+                : existingDeployOnHostname
+                  ? 'Re-Deploy starten (ersetzt bestehenden Deploy)'
+                  : 'Deploy starten'}
             </button>
           </form>
         </section>
@@ -973,6 +1241,18 @@ const styles = {
     margin: 0,
     fontSize: 13,
     color: '#86efac',
+  },
+  warnBox: {
+    background: '#1c1400',
+    border: '1px solid #78350f',
+    borderRadius: 4,
+    padding: '10px 14px',
+    marginBottom: 12,
+  },
+  warnText: {
+    margin: 0,
+    fontSize: 13,
+    color: '#fcd34d',
   },
   homeBtn: {
     marginTop: 8,

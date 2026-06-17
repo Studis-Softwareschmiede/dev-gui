@@ -33,6 +33,9 @@ const HOST_PORT_START = 8080;
 /** Max host-ports to try before giving up. */
 const HOST_PORT_MAX = 200;
 
+/** Default container port when no ExposedPorts found (AC13 fallback). */
+const DEFAULT_CONTAINER_PORT = 8080;
+
 // ── DeployOrchestrator ────────────────────────────────────────────────────────
 
 export class DeployOrchestrator {
@@ -126,6 +129,22 @@ export class DeployOrchestrator {
       };
     }
 
+    // AC14: Re-deploy = replace. If an existing container with this hostname is running,
+    // remove it first (analogous to `preview up` which replaces a running instance).
+    // This is best-effort — if removal fails, we still attempt the new deploy.
+    let replacingExisting = false;
+    {
+      const existingPs = await this.#dockerControl.ps(vps, dockerOpts);
+      if (existingPs.result === 'ok') {
+        const existing = (existingPs.containers ?? []).find((c) => c.hostname === hostname);
+        if (existing) {
+          replacingExisting = true;
+          // Best-effort: remove old container before starting new one
+          await this.#rollbackContainer(vps, existing.containerId, dockerOpts);
+        }
+      }
+    }
+
     // Step 1: Pull image (AC3)
     const pullResult = await this.#dockerControl.pull(vps, image, dockerOpts);
     if (pullResult.result !== 'ok') {
@@ -136,6 +155,30 @@ export class DeployOrchestrator {
       };
     }
 
+    // AC13: Auto-Port — nach docker pull via docker inspect ExposedPorts ermitteln.
+    // Genau ein exponierter Port → diesen verwenden; mehrere → kleinsten + ambiguous-Flag;
+    // kein Port → Fallback auf DEFAULT_CONTAINER_PORT (8080).
+    let containerPort = DEFAULT_CONTAINER_PORT;
+    let portAmbiguous = false;
+    let portFallback = false;
+    if (typeof this.#dockerControl.inspect === 'function') {
+      const inspectResult = await this.#dockerControl.inspect(vps, image, dockerOpts);
+      if (inspectResult.result === 'ok' && Array.isArray(inspectResult.ports)) {
+        const numericPorts = inspectResult.ports
+          .map((p) => parseInt(p, 10))
+          .filter((n) => Number.isFinite(n) && n > 0)
+          .sort((a, b) => a - b);
+        if (numericPorts.length === 1) {
+          containerPort = numericPorts[0];
+        } else if (numericPorts.length > 1) {
+          containerPort = numericPorts[0]; // smallest
+          portAmbiguous = true;
+        } else {
+          portFallback = true; // no exposed ports — use default
+        }
+      }
+    }
+
     // Determine a free host port from currently running managed containers
     const hostPort = await this.#selectFreeHostPort(vps, dockerOpts);
 
@@ -143,6 +186,7 @@ export class DeployOrchestrator {
     const runResult = await this.#dockerControl.run(vps, image, hostname, {
       ...dockerOpts,
       hostPort,
+      containerPort,
     });
     if (runResult.result !== 'ok') {
       return {
@@ -198,9 +242,15 @@ export class DeployOrchestrator {
       image,
       containerId,
       hostPort,
+      containerPort,
       status: 'running',
       routePresent: true,
       containerPresent: true,
+      // AC13: Port-Auflösungs-Metadaten
+      portAmbiguous,   // true wenn mehrere ExposedPorts → erster/kleinster gewählt
+      portFallback,    // true wenn kein ExposedPort → Default 8080
+      // AC14: Re-Deploy = Ersetzen
+      replaced: replacingExisting,
     };
 
     return { result: 'ok', deployment };
