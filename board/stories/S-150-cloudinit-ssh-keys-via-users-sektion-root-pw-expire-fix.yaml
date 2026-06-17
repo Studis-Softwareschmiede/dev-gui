@@ -1,0 +1,26 @@
+id: S-150
+parent: null
+title: 'CloudInitBuilder: SSH-Keys via users:-Sektion deployen + root-Passwort-Expire entfernen (v2) — Server-Login-Fix'
+status: In Progress
+priority: P1
+spec: docs/specs/vps-cloud-init-setup.md
+implements:
+- AC4
+- AC5
+- AC6
+- AC9
+- AC10
+- AC11
+depends: []
+labels:
+- security
+- backend
+size_est: S
+dispo_est: 3
+confidence: high
+branch: feat/S-150-cloudinit-ssh-fix
+pr: null
+blocked_reason: null
+estimate_note: 'Bug-Fix, am ECHTEN Hetzner-VPS verifiziert (root+alex Key-Login + Docker funktionieren mit dem unten beschriebenen cloud-init). VPS-Subsystem ist ohne diesen Fix unbenutzbar (kein Server-Login). src/vps/CloudInitBuilder.js erzeugt in v1 cloud-init, das KEINE SSH-Keys auf den Server bringt — zwei am Server reproduzierte Ursachen: (1) Falsche Modul-Reihenfolge: alex-Key via write_files mit owner:alex:alex, aber alex wird erst in runcmd useradd angelegt (läuft NACH write_files) → der alex-Block bricht das gesamte write_files-Modul ab, bevor der root-Block geschrieben wird → gar kein Key auf dem Server, root- UND alex-Login scheitern mit "Permission denied (publickey)". (2) Hetzner-Ubuntu-Image setzt root-Passwort-Änderungsdatum auf Epoch 0 → root-Key-Login scheitert mit "Password change required but no TTY available". Bewiesener Fix (coder soll genau dieses cloud-init reproduzieren): TEMPLATE_VERSION auf 2 erhöhen; users:-Sektion mit disable_root:false, name:root + ssh_authorized_keys[root-key], name:alex mit groups:[sudo,docker], shell:/bin/bash, sudo:"ALL=(ALL) NOPASSWD:ALL", ssh_authorized_keys[alex-key]; runcmd beginnt mit "chage -d -1 root" und behält danach den bestehenden Docker-CE-Install-Block (apt keyrings, docker.list, apt-get install docker-ce docker-ce-cli containerd.io docker-compose-plugin, systemctl enable --now docker) UNVERAENDERT. Die alte runcmd-Sequenz (useradd alex/usermod/mkdir .ssh/mkdir /root/.ssh) + beide write_files-authorized_keys-Bloecke ENTFALLEN (durch users: ersetzt). Security-Floor bleibt: nur Public-Keys, keys nur in users:->ssh_authorized_keys (kein Shell-Sink); AC7-Validierung (fehlender Key root/alex → CloudInitError 422) + build({name, sshPublicKeys:{root,alex}})-Signatur + Hostname-Handling bleiben. Minimal-invasiv, 1 Methode (~S, ~3 EP). Test: erzeugtes Dokument enthaelt users:-Sektion mit beiden Keys, chage -d -1 root, keine write_files-authorized_keys-Bloecke, TEMPLATE_VERSION==2; AC7 weiterhin gruen.'
+created_at: '2026-06-17T00:00:00Z'
+updated_at: '2026-06-17T00:00:00Z'
