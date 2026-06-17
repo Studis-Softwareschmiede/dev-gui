@@ -1,0 +1,25 @@
+id: S-160
+parent: F-013
+title: 'SFTP aus Backup entfernen, nur S3: Frontend-Felder + Dropdown-Option, _uploadSftp + SFTP-Config + targetType:sftp-Zweig, Tresor-Keys sftp_* raus (ssh2-Dependency bleibt)'
+status: To Do
+priority: P2
+spec: docs/specs/credential-backup.md
+implements:
+- SFTP-1
+- SFTP-2
+- SFTP-3
+- SFTP-4
+- SFTP-5
+depends: []
+labels:
+- backend
+- security
+size_est: M
+dispo_est: 4
+estimate_note: 'Off-Host-Backup auf nur-S3 reduzieren, SFTP-Pfad vollständig entfernen. Frontend (client/src/SettingsView.jsx): Felder „SFTP Passwort"+„SFTP Private Key" raus, SFTP-Option im Ziel-Typ-Dropdown raus (nur s3), getrennte SFTP-Präfix/Host/Port/User-State-Reste (S-147) entfernen. Backend: _uploadSftp + targetType:sftp-Zweig + BACKUP_SFTP_*-Auflösung in src/BackupUploader.js raus, ssh2-Import IN DIESEM MODUL raus; SFTP-Felder (host/port/user) + sftp-Zweig in src/BackupConfigStore.js raus (targetType {local|s3}, prefix=S3-Default dev-gui/); Tresor-Schlüssel sftp_password/sftp_private_key aus dem backup-remote-Katalog in src/CredentialStore.js raus (nur s3_access_key/s3_secret_key) + sftp_*-Reads in der Off-Host-Cred-Bereitstellung entfernen. WICHTIG: ssh2-Dependency in package.json NICHT entfernen (VPS/cloudflared brauchen sie) — nur der SFTP-Backup-Code. Kein Floor-/DR-Regress: S3-Creds write-only, Quittung geheimnisfrei, AC20-AC24 (DR) bleiben gültig (S3-only). Mehrere Dateien, aber jeweils gezielte Streichungen → ~M (~4 EP). Test/Grep: kein _uploadSftp/"sftp"/from "ssh2" in BackupUploader; Dropdown ohne sftp-Option; Katalog ohne sftp_*; ssh2 weiter in package.json + von VPS-Modulen importiert.'
+confidence: high
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-06-17T00:00:00Z'
+updated_at: '2026-06-17T00:00:00Z'

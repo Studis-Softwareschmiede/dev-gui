@@ -1,0 +1,20 @@
+id: S-158
+parent: F-013
+title: 'Cloudflare-Hostnames als klickbare Links: Hostnames/Routen öffnen https://<hostname> in neuem Tab (rel=noopener)'
+status: To Do
+priority: P3
+spec: docs/specs/view-cloudflare.md
+implements:
+- AC12
+depends: []
+labels:
+- ui
+size_est: S
+dispo_est: 2
+estimate_note: 'Reine UI-Politur in client/src/CloudflareView.jsx: jeden angezeigten Hostname/jede Route als anklickbaren Link rendern, der https://<hostname> in neuem Tab öffnet (target="_blank" + rel="noopener noreferrer", kein window.opener-Leak). Gilt für alle Routen — auch protected; das gesperrt-Kennzeichen + die fehlende Lösch-Affordance (AC5) bleiben unberührt. Linktext = Hostname. Lokalisiert auf die Hostname-Render-Stelle (~Zeile 326) + analoge Reconcile-Listen → ~S (~2 EP). Test: gerendertes <a href="https://<hostname>" target="_blank" rel="noopener…">; protected Hostname verlinkt UND weiter gesperrt ohne Lösch-Button.'
+confidence: high
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-06-17T00:00:00Z'
+updated_at: '2026-06-17T00:00:00Z'

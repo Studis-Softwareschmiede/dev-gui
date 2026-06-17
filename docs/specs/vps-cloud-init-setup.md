@@ -2,7 +2,7 @@
 id: vps-cloud-init-setup
 title: VPS Default-Setup-Pipeline via cloud-init / user-data
 status: draft
-version: 2
+version: 3
 ---
 
 # Spec: VPS Default-Setup-Pipeline (cloud-init / user-data) (`vps-cloud-init-setup`)
@@ -41,6 +41,12 @@ Beim **Create-from-scratch** eines neuen Servers ([[vps-provider-boundary]]) lä
 - **AC10** — *(Live verifiziert.)* Das cloud-config entfernt den durch das Hetzner-Ubuntu-Image gesetzten root-Passwort-Expire (Ablaufdatum Epoch 0) über einen frühen `runcmd`-Schritt **`chage -d -1 root`** (vor/unabhängig vom Docker-Install), damit der root-Key-Login nicht mit „Password change required but no TTY available" scheitert. Testbar: das Dokument enthält den `chage -d -1 root`-Schritt.
 - **AC11** — Der bestehende **Docker-CE-Install-Block** (apt-keyrings, `docker.list`, `apt-get install … docker-ce`, `systemctl enable --now docker`) bleibt inhaltlich erhalten und wirksam; `alex` ist weiterhin in den Gruppen `sudo` + `docker` (jetzt über `users:`). AC3/AC4 bleiben damit erfüllt.
 
+### cloudflared (Tunnel-Provisionierung, v3 — siehe [[vps-tunnel-provisioning]])
+> Diese ACs gelten **nur**, wenn die cloud-init-Variante für die cloudflared-Provisionierung gewählt wird ([[vps-tunnel-provisioning]] AC5/AC6). Wird stattdessen der post-create-SSH-Pfad gewählt, bleibt TEMPLATE_VERSION bei v2 und diese ACs entfallen; verbindlich ist dann die Mechanik-Garantie aus [[vps-tunnel-provisioning]].
+
+- **AC12** — Wird die cloud-init-Variante gewählt, installiert das cloud-config **`cloudflared`** und startet es als token-basierten, remote-managed **Dienst** (z.B. `cloudflared service install <TOKEN>` via systemd) — testbar am erzeugten Dokument (cloudflared-Install- + Service-Start-Schritt vorhanden). TEMPLATE_VERSION wird in diesem Fall auf **v3** erhöht.
+- **AC13** — Das **Tunnel-Token** wird im cloud-config **secret-sicher** behandelt: es steht ausschließlich als YAML-Wert in einer `write_files`-Datei (mit restriktiven Permissions) und/oder wird so an `cloudflared` übergeben, dass es **nicht** in einem geloggten `runcmd`-Echo oder in Argv im Klartext erscheint ([[vps-tunnel-provisioning]] AC6). Das Dokument enthält weiterhin **keine** anderen Geheimnisse (Private-Keys/Provider-Tokens), nur das Tunnel-Token an dieser einen, kontrollierten Stelle.
+
 ## Verträge
 > Konkrete cloud-init-Syntax (cloud-config-Keys vs. `runcmd`, exakte Docker-Installations-Schritte) wählt der `coder`; die ACs prüfen die Garantien, nicht die exakte Zeilenform.
 
@@ -72,3 +78,4 @@ Beim **Create-from-scratch** eines neuen Servers ([[vps-provider-boundary]]) lä
 - [[vps-provider-boundary]] (Create-Pfad, der die user-data übergibt).
 - [[vps-ssh-key-assignment]] (liefert die root-/alex-Public-Keys).
 - [[settings-ssh-keys]] (Quelle + Public-Key-Format-Validierung).
+- [[vps-tunnel-provisioning]] (cloudflared-Abschnitt, AC12/AC13; TEMPLATE_VERSION v3, falls cloud-init-Variante gewählt).

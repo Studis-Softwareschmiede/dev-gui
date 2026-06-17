@@ -2,13 +2,14 @@
 id: credential-backup
 title: Verschlüsseltes Off-Host-Backup & Restore des Credential-Stores
 status: draft
-version: 1
+version: 2
 ---
 
 # Spec: Verschlüsseltes Off-Host-Backup & Restore des Credential-Stores (`credential-backup`)
 
 > **Schicht 3 von 3.** Testbares Verhalten + Verträge, sprach-/paradigma-unabhängig.
 > **Source of Truth** für `coder`, `tester`, `reviewer`. Security-kritisch.
+> **v2 — SFTP entfernt, nur S3 (S-160):** Der Off-Host-Backup-Pfad unterstützt **ausschließlich S3-kompatible** Ziele. Der **SFTP-Off-Host-Pfad ist vollständig entfernt** (Frontend-Felder + Dropdown-Option, Backend `_uploadSftp` + SFTP-Config-Felder + `targetType:'sftp'`-Zweig, Tresor-Schlüssel `sftp_password`/`sftp_private_key`). Alle nachstehenden Erwähnungen von „SFTP" / „`targetType:'sftp'`" / „SFTP-Creds" gelten als **gestrichen** und werden durch den **Abschnitt „S3-only (S-160)"** + die **ACs SFTP-1…SFTP-5** überschrieben. **Wichtig:** die `ssh2`-Dependency bleibt erhalten (VPS/cloudflared brauchen sie) — nur der SFTP-**Backup**-Code wird entfernt.
 
 ## Zweck
 Der verschlüsselte Credential-Store (`secrets.enc.json`) wird nach **jedem** erfolgreichen Store-Write automatisch in einem **mit dem Master-Key symmetrisch verschlüsselten GPG-Container** gesichert — zuerst als atomare **lokale Kopie**, danach zusätzlich an ein **Off-Host-Ziel** (S3-kompatibel oder SFTP). Damit überlebt der Credential-State nicht nur Container-Recreate/Volume-Reset (das deckt die lokale Persistenz-Schleife [[credential-runtime-unlock]] Teil A ab), sondern auch **Host-/VPS-Totalverlust**: aus dem Off-Host-Backup **+** dem Master-Key aus Bitwarden ([[bitwarden-master-key-unlock]]) lässt sich der Store vollständig **wiederherstellen**. Diese Spec definiert die **Backup-Engine**, das **Remote-Ziel + dessen Einstellungen**, die **zweistufige UI-Quittung** und den **manuellen Restore-Vorgang** — provider-agnostisch im Verhalten; konkrete Bibliotheken/Clients entscheidet `coder`/`architekt`.
@@ -51,6 +52,14 @@ Der verschlüsselte Credential-Store (`secrets.enc.json`) wird nach **jedem** er
 18. **Restore stellt die Ziel-Config mit wieder her:** Enthält das Artefakt das `config`-Feld, schreibt der Restore-Pfad (`CredentialStore.restore()` bzw. `src/routers/backupRestore.js`) die nicht-geheime Ziel-Config **atomar** (tmp+rename, `0600`) über den `BackupConfigStore` zurück ans wiederhergestellte Volume — sodass Off-Host nach dem DR-Restore **ohne manuelle Neukonfiguration** weiterläuft. Das Zurückschreiben der Config darf den (vorrangigen) Store-Restore **nicht** zurückrollen: schlägt nur das Config-Zurückschreiben fehl, gilt der Store-Restore weiterhin als erfolgreich (best-effort, geheimnisfreie Warnung).
 19. **Rückwärtskompatibilität:** Ein **altes** Artefakt **ohne** `config`-Feld wird wie bisher restored (nur Blob) — der Restore bricht **nicht** ab; die Backup-Ziel-Config bleibt dann auf Default/Env-Fallback (bestehendes Verhalten). Das Hinzufügen des `config`-Feldes ändert die `manifest.schemaVersion` **nicht** so, dass ältere Versionen abgelehnt würden (additiv, vorwärts-tolerant).
 
+### S3-only — SFTP-Off-Host-Pfad entfernt (v2 — S-160)
+20. **Off-Host-Ziel nur noch S3-kompatibel:** Off-Host-Backup unterstützt ausschließlich **S3-kompatible** Ziele. Der **SFTP-Off-Host-Pfad ist vollständig entfernt** — es gibt keinen `targetType:'sftp'` mehr, keine SFTP-Upload-Funktion, keine SFTP-Config-Felder und keine SFTP-Remote-Creds. Off-Host-Ziel-Typ ist damit faktisch `{local|s3}` (local = aus/nur-lokal, s3 = Off-Host an).
+21. **Frontend (`client/src/SettingsView.jsx`):** Im Backup-Abschnitt entfallen die Eingabefelder **SFTP Passwort** und **SFTP Private Key** sowie die **SFTP-Option** im Ziel-Typ-Dropdown (nur noch S3). Die getrennte SFTP-Präfix-/Host-/Port-/User-State-Logik (S-147-Reste) wird entfernt; es bleibt der S3-Pfad (Bucket/Endpoint/Präfix/Region + S3-Creds).
+22. **Backend (`src/BackupUploader.js`):** `_uploadSftp` wird entfernt; der `targetType:'sftp'`-Zweig in `uploadArtefact` / `resolveOffHostConfig` / `resolveOffHostConfigAsync` und die SFTP-Env-Auflösung (`BACKUP_SFTP_*`) entfallen. `import { Client as SshClient } from 'ssh2'` in **diesem** Modul entfällt, **aber** die `ssh2`-Dependency selbst bleibt in `package.json` (VPS/cloudflared nutzen sie weiter).
+23. **Config-Store (`src/BackupConfigStore.js`):** Die SFTP-Felder (`host`, `port`, `user`) und der `sftp`-Zweig in `_readFromEnv()` entfallen; `targetType` ist `{local|s3}`; das `prefix`-Feld ist der S3-Key-Präfix (Default `dev-gui/`). `BackupConfig` enthält keine SFTP-Felder mehr.
+24. **Tresor-Katalog (`src/CredentialStore.js`):** Die Schlüssel `sftp_password` und `sftp_private_key` werden aus dem `backup-remote`-Katalog entfernt (nur noch `s3_access_key`, `s3_secret_key`); die SFTP-Cred-Auflösung in der Off-Host-Cred-Bereitstellung (`_readCredSafe('credentials/backup-remote/sftp_*')`) entfällt.
+25. **Kein Regress am Floor:** Die Entfernung ändert **nicht** den Sicherheits-Floor (S3-Creds bleiben write-only im `CredentialStore`, geheimnisfreie Quittung) und **nicht** die DR-Vollständigkeit (Artefakt-`config` enthält weiterhin nur nicht-geheime S3-Ziel-Config; AC20–AC24 bleiben gültig, nur ohne SFTP-Felder).
+
 ## Acceptance-Kriterien
 
 ### Engine + lokale Quittung (S-140)
@@ -89,6 +98,13 @@ Der verschlüsselte Credential-Store (`secrets.enc.json`) wird nach **jedem** er
 - **AC23** — **Config-Restore ist best-effort, kein Store-Rollback:** Schlägt **nur** das Zurückschreiben der Ziel-Config fehl, gilt der Store-Restore (Blob ans Volume) weiterhin als **erfolgreich** (`ok:true`); es entsteht eine geheimnisfreie Warnung, kein Abbruch/Rollback des Store-Restores. (Testbar: bei erzwungenem `BackupConfigStore`-Schreibfehler liefert der Restore weiterhin Erfolg für den Store, der wiederhergestellte `secrets.enc.json` ist intakt.)
 - **AC24** — **Rückwärtskompatibilität (Artefakt ohne `config`):** Ein Artefakt **ohne** `config`-Feld (Alt-Format) wird wie bisher restored (nur Blob) — kein Abbruch, keine Fehlerklasse; die Backup-Ziel-Config bleibt auf Default/Env-Fallback. (Testbar: Restore eines `config`-losen Artefakts liefert `ok:true` und schreibt keine `backup-config.json` aus dem Restore-Pfad.)
 
+### S3-only — SFTP entfernt (S-160)
+- **SFTP-1** — **Frontend ohne SFTP:** Der Backup-Abschnitt der `SettingsView` enthält **keine** Felder „SFTP Passwort" / „SFTP Private Key" mehr und das Ziel-Typ-Dropdown bietet **keine** SFTP-Option (nur S3). (Testbar: gerendertes Dropdown hat keine `<option value="sftp">`; die SFTP-Cred-Felder existieren nicht im DOM/Komponentenbaum.)
+- **SFTP-2** — **BackupUploader ohne SFTP:** `src/BackupUploader.js` enthält **keine** `_uploadSftp`-Funktion, **keinen** `targetType:'sftp'`-Zweig in `uploadArtefact` und **keine** `BACKUP_SFTP_*`-Auflösung; `resolveOffHostConfig`/`resolveOffHostConfigAsync` liefern für nicht-S3/aktive Off-Host-Config nur den S3-Pfad (oder `null`). Der `ssh2`-Import in **diesem** Modul ist entfernt. (Testbar/Grep: kein `_uploadSftp`, kein `'sftp'`-String, kein `from 'ssh2'` in `BackupUploader.js`.)
+- **SFTP-3** — **BackupConfigStore ohne SFTP:** `BackupConfig` / `BackupConfigStore.js` führt **keine** SFTP-Felder (`host`/`port`/`user`) und **keinen** `sftp`-Zweig; `targetType` ist auf `{local|s3}` beschränkt; `prefix` ist der S3-Default `dev-gui/`. (Testbar: `read()`/Default-Config enthält keine `host`/`port`/`user`-SFTP-Felder; `targetType:'sftp'` wird nicht erzeugt.)
+- **SFTP-4** — **CredentialStore-Katalog ohne SFTP-Keys:** Der `backup-remote`-Eintrag im `CREDENTIAL_CATALOG` enthält **nur** `s3_access_key` und `s3_secret_key`; `sftp_password`/`sftp_private_key` sind entfernt; die Off-Host-Cred-Bereitstellung liest **keine** `credentials/backup-remote/sftp_*` mehr. (Testbar/Grep: Katalog ohne `sftp_password`/`sftp_private_key`; keine `sftp_*`-Reads im Store.)
+- **SFTP-5** — **`ssh2`-Dependency bleibt + kein Floor-/DR-Regress:** `ssh2` bleibt in `package.json` (VPS/cloudflared-Pfade nutzen es weiter, kein `npm uninstall`); S3-Creds bleiben write-only im `CredentialStore`, die Quittung bleibt geheimnisfrei und die DR-Vollständigkeit (AC20–AC24, jetzt S3-only) bleibt erfüllt. (Testbar: `ssh2` weiterhin in `package.json` + von VPS-Modulen importiert; AC20–AC24-Tests bleiben grün ohne SFTP-Felder.)
+
 ## Verträge
 > Pfade/Felder kanonisch im Verhalten; konkrete Clients (S3-SDK/SFTP-Lib/GPG-Aufruf) entscheidet `coder`/`architekt`. `CredentialStore` bleibt der **einzige** Lese-/Schreibpfad zu `secrets.enc.json` (ADR-007).
 
@@ -119,6 +135,7 @@ Der verschlüsselte Credential-Store (`secrets.enc.json`) wird nach **jedem** er
 - **Master-Key als VPS-Klartext-Secret** (z.B. in einer Host-Env/Datei im Klartext) — der Key bleibt in Bitwarden; lokal nur die beim Unlock persistierte `devgui-cred.env`.
 - **Automatisiertes Backup-Schedule/Cron** — Backup ist strikt event-getrieben (nach jedem Store-Write).
 - **Manueller „Jetzt sichern"-Button** ohne Store-Write — nicht Teil dieser Spec.
+- **SFTP als Off-Host-Ziel** (v2/S-160 entfernt) — Off-Host ist ausschließlich S3-kompatibel; der SFTP-Backup-Pfad ist vollständig gestrichen. (Die `ssh2`-Dependency bleibt für VPS/cloudflared erhalten — nur der SFTP-Backup-Code entfällt.)
 
 ## Bedrohungsmodell (dokumentiert)
 - **Schützt:** Host-/VPS-Totalverlust + Volume-Reset — aus Off-Host-Artefakt + Master-Key (Bitwarden) ist der Store wiederherstellbar; das Off-Host-Artefakt ist ohne den Master-Key wertlos (zweite GPG-Hülle verbirgt zusätzlich Struktur/Metadaten).

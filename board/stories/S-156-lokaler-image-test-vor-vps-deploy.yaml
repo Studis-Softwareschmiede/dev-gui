@@ -1,0 +1,26 @@
+id: S-156
+parent: F-013
+title: 'Lokaler Image-Test vor VPS-Deploy: ephemerer Probe-Container (Start/Port/Reachability) + Aufräum-Garantie'
+status: To Do
+priority: P1
+spec: docs/specs/local-image-test.md
+implements:
+- AC1
+- AC2
+- AC3
+- AC4
+- AC5
+depends:
+- S-155
+labels:
+- deploy
+- backend
+size_est: M
+dispo_est: 5
+estimate_note: 'Sicherheits-Vorstufe für Paket ②: gewähltes Image+Tag VOR dem VPS-Deploy LOKAL (dev-gui-Host via socket-proxy/DOCKER_HOST) probestarten. Neue schreibend-lokale Docker-Boundary (run/inspect/rm lokal) — read-only DockerReader bleibt unberührt; Test-Container mit eindeutigem Label dev-gui.local-test + Pro-Aufruf-Name. POST /api/deployments/local-test { image, tag }: pull → kurzlebigen Container starten → Start-Status + ExposedPorts via docker inspect → Best-Effort-HTTP-Reachability gegen 127.0.0.1:<hostPort> (jeder Statuscode=erreichbar; Timeout/Refused=nicht erreichbar, kein Crash) → strukturierter LocalTestReport { started, exitedEarly, hostPort, exposedPorts, reachable, durationMs, reason? }. Port-Logik wie VPS-Pfad: ein Port/mehrere(erster+Vermerk)/keiner(null+reason). AUFRÄUM-GARANTIE (AC4, hart): Test-Container IMMER rm -f via try/finally — bei Erfolg/Pull-Fehler/Start-Fehler/Timeout/Exception; nach jedem Aufruf kein Container mit Test-Label. Floor: hinter Access + identitäts-/rollengeschützt (CRED_ADMIN_EMAILS, 403) + audit-first (image/tag VOR pull; Audit-Fail→keine Aktion); image/tag validiert vor Docker-Sink (Argv, kein Shell); keine Secrets/Mounts. UI-Element "Lokal testen" im Deployment-Menü (deploy-lifecycle AC16, sichtbar bei gewähltem Image+Tag, zeigt Report). Tests: Report-Shapes, Port 1/mehrere/keiner, Reachability ok/timeout, exitedEarly (Crash-Loop), Aufräumen in ALLEN Pfaden (auch Exception), Authz/Audit-First, image/tag-Validierung, kein Leak, socket-proxy unerreichbar→502. M (~5 EP) — neue lokale Docker-Write-Boundary + Endpunkt + Aufräum-/Security-Garantien + UI-Anbindung; hängt am Menü aus S-155.'
+confidence: medium
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-06-17T00:00:00Z'
+updated_at: '2026-06-17T00:00:00Z'

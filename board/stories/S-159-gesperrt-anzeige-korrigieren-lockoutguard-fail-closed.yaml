@@ -1,0 +1,21 @@
+id: S-159
+parent: F-013
+title: '„Gesperrt"-Anzeige korrigieren: nicht mehr ALLE Hostnames protected — DEVGUI_HOSTNAME konfigurierbar / LockoutGuard nur eigener Hostname + Access-Mauer'
+status: To Do
+priority: P3
+spec: docs/specs/view-cloudflare.md
+implements:
+- AC13
+depends: []
+labels:
+- ui
+- security
+size_est: M
+dispo_est: 4
+estimate_note: 'Bug: in der Cloudflare-Ansicht werden aktuell ALLE Hostnames als „gesperrt/protected" angezeigt, obwohl in Cloudflare gültig. Vermutete Ursache (coder MUSS echte Ursache verifizieren — Reproduktion: gültige Hostnames erscheinen alle gesperrt): src/cloudflare/LockoutGuard.js ist fail-closed, wenn DEVGUI_HOSTNAME nicht gesetzt ist → isProtected() gibt für JEDES Ziel true zurück (Zeile ~96-103). Anforderung: DEVGUI_HOSTNAME sauber konfigurierbar machen (docker-compose.yml + .env.example bereits vorhanden — Doku/Wirksamkeit prüfen) UND/ODER die Protected-Logik so anpassen, dass bei fehlender devgui-Hostname-Konfiguration NUR Access-Mauer-Hostnames (cloudflareaccess.com, ADR-011) als geschützt gelten, statt pauschal alles. Self-Lockout-Floor bleibt hart: eigener Hostname + Access-Mauer immer geschützt (nicht schwächen). Lokalisiert auf LockoutGuard (+ ggf. Config-Doku/Wiring) → ~M (~4 EP). Test: isProtected("app.example.com") = false bei gesetztem abweichendem DEVGUI_HOSTNAME; bei NICHT gesetztem DEVGUI_HOSTNAME ebenfalls false für normale Hostnames, aber true für <devgui-hostname> + <access-wall>.cloudflareaccess.com.'
+confidence: medium
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-06-17T00:00:00Z'
+updated_at: '2026-06-17T00:00:00Z'

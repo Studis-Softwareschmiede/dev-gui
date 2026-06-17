@@ -2,7 +2,7 @@
 id: view-cloudflare
 title: Cloudflare-Ansicht — Inventar + Lösch-Werkzeug (Zones / Tunnel / Routen)
 status: draft
-version: 2
+version: 3
 ---
 
 # Spec: Cloudflare-Ansicht (`view-cloudflare`)
@@ -10,6 +10,7 @@ version: 2
 > **Schicht 3 von 3.** Testbares Verhalten + Verträge.
 > **Source of Truth** für `coder`, `tester`, `reviewer` (Drift-Gate). Security-kritisch (Cloudflare-Token, Self-Lockout-Risiko).
 > **v2:** erweitert das in v1 gelieferte Platzhalter-Gerüst (AC1–AC3) um **Capability A — Cloudflare-Inventar**: verwaltete Zones/Domänen auflisten + anwählen → zugehörige Tunnel + Public-Hostname-Routen anzeigen → einzelne Tunnel/Routen **löschen**. Der Cloudflare-API-Boundary ist in **ADR-010** fixiert, der Self-Lockout-Schutz in **ADR-011**. Deploy-Lifecycle (B) und Reconciliation (C) sind **bewusst eigene Specs** ([[deploy-lifecycle]], [[cloudflare-reconciliation]]) — diese View bleibt Inventar+Lösch-Werkzeug.
+> **v3 — UI-Politur (Capability D):** (1) angezeigte **Hostnames als klickbare Links** (öffnen `https://<hostname>` in neuem Tab); (2) **Korrektur der „gesperrt"-Anzeige** — heute werden ALLE Hostnames als protected/gesperrt angezeigt, weil der `LockoutGuard` „fail-closed" ist, wenn `DEVGUI_HOSTNAME` nicht gesetzt ist: nur die wirklich schützenswerten Hostnames (eigener devgui-Hostname + Access-Mauer) dürfen als gesperrt markiert sein.
 
 ## Zweck
 Eine eigenständige Ansicht zum **Inventarisieren und Bereinigen** der bei Cloudflare verwalteten Domänen/Tunnel: der Betreiber wählt eine Zone an, sieht deren Tunnel + Public-Hostname-Routen und kann einzelne **löschen**. Die Ansicht konsumiert ausschließlich provider-agnostische Read-Models + `protected`-Flags (`CloudflareApi`, ADR-010) und kennt keinen Cloudflare-API-Token.
@@ -32,6 +33,10 @@ Eine eigenständige Ansicht zum **Inventarisieren und Bereinigen** der bei Cloud
 9. Die Ansicht zeigt einen **read-only Bereich „Reconciliation"** mit (a) den letzten internen **Statusmeldungen** des Reconciliation-Crons (`GET /api/deployments/reconcile/notices`: angelegt / gelöscht / protected-übersprungen / Fehler, je mit Hostname + VPS + Zeit) und (b) dem **letzten `ReconcileReport`** (`GET /api/deployments/reconcile/last`: je VPS/Provider geprüfte Container, angelegte/gelöschte Routen, protected-übersprungene, unmanaged, Fehler). Beides ist **read-only** — die Heilung selbst läuft im Cron/headless ([[cloudflare-reconciliation]]).
 10. Die Ansicht bietet einen **manuellen „jetzt abgleichen"-Trigger** (`POST /api/deployments/reconcile`), der einen Ad-hoc-Lauf auslöst; nach Abschluss aktualisiert sie die Statusmeldungen + den Report (Re-Fetch). Der Trigger ist serverseitig identitäts-/rollengeschützt (403 → klare „keine Berechtigung"-Meldung).
 
+### UI-Politur (v3 — Capability D)
+11. **Hostnames als klickbare Links:** Jeder in der Ansicht angezeigte Hostname/jede Route wird als anklickbarer Link gerendert, der `https://<hostname>` in einem **neuen Tab** öffnet (`target="_blank"` **mit** `rel="noopener noreferrer"` — kein `window.opener`-Leak). Der Link gilt unabhängig vom `protected`-Status (auch geschützte Hostnames sind aufrufbar); die `protected`-Kennzeichnung (gesperrt-Badge) und das Fehlen der Lösch-Affordance (AC5) bleiben davon unberührt. Der angezeigte Linktext ist der Hostname selbst.
+12. **„Gesperrt"-Anzeige korrekt (Self-Lockout-Floor präzisiert):** Eine Route/ein Hostname wird **nur dann** als `protected`/gesperrt markiert, wenn er wirklich schützenswert ist — d.h. (a) der **eigene devgui-Hostname** (`DEVGUI_HOSTNAME`) ODER (b) ein **Cloudflare-Access-Mauer**-Hostname (ADR-011). Der bisherige Defekt — bei **nicht gesetztem** `DEVGUI_HOSTNAME` markiert der `LockoutGuard` **alle** Hostnames als protected (fail-closed über alles) — wird behoben: `DEVGUI_HOSTNAME` ist sauber konfigurierbar (docker-compose/`.env.example` dokumentiert) UND/ODER die Protected-Logik markiert bei fehlender devgui-Hostname-Konfiguration **nur** die Access-Mauer-Hostnames als geschützt, statt pauschal alles. Der `coder` muss die **echte Ursache verifizieren** (Reproduktion: gültige Cloudflare-Hostnames erscheinen alle als gesperrt) und die `LockoutGuard`-Linie (ADR-011) so anpassen, dass der Self-Lockout-Schutz erhalten bleibt (eigener Hostname + Access-Mauer bleiben hart geschützt), aber normale App-Hostnames **nicht** fälschlich gesperrt werden.
+
 ## Acceptance-Kriterien
 
 ### Gerüst (bestehend — unverändert gültig)
@@ -49,6 +54,10 @@ Eine eigenständige Ansicht zum **Inventarisieren und Bereinigen** der bei Cloud
 ### Reconciliation-Anzeige (v2 — read-only, ADR-013)
 - **AC10** — Die Ansicht zeigt die letzten internen Reconciliation-**Statusmeldungen** (`GET /api/deployments/reconcile/notices`) mit `kind` (`route-created` | `route-removed` | `protected-skipped` | `error`), Hostname, VPS und Zeit, **read-only**; sie enthält **keine** Secrets. Ist nichts vorhanden, zeigt sie einen neutralen Leer-Zustand.
 - **AC11** — Die Ansicht zeigt den **letzten `ReconcileReport`** (`GET /api/deployments/reconcile/last`) read-only (je VPS/Provider: geprüfte Container, angelegte/gelöschte Routen, protected-übersprungene, unmanaged, Fehler) und bietet einen **manuellen „jetzt abgleichen"-Trigger** (`POST /api/deployments/reconcile`); nach Abschluss werden Statusmeldungen + Report neu geladen. 403 → „keine Berechtigung", Fehler ohne Secret-Leak.
+
+### UI-Politur (v3)
+- **AC12** — **Hostname-Links (S-158):** Jeder angezeigte Hostname/jede Route wird als anklickbarer Link auf `https://<hostname>` gerendert, der in einem **neuen Tab** öffnet (`target="_blank"`) und `rel="noopener noreferrer"` trägt (kein `window.opener`-Leak). Der Link erscheint für **alle** Routen — auch protected; die `protected`-Kennzeichnung + fehlende Lösch-Affordance (AC5) bleiben unverändert. (Testbar: gerendertes `<a href="https://<hostname>" target="_blank" rel="noopener…">`; ein protected Hostname ist verlinkt **und** trägt weiterhin das gesperrt-Kennzeichen ohne Lösch-Button.)
+- **AC13** — **„Gesperrt"-Anzeige korrigiert (S-159):** Bei korrekt konfiguriertem `DEVGUI_HOSTNAME` werden **nur** der eigene devgui-Hostname **und** Access-Mauer-Hostnames als `protected`/gesperrt markiert; gültige normale App-Hostnames erscheinen **nicht** gesperrt und bieten die Lösch-Affordance (AC5/AC6). Der Defekt — bei **nicht gesetztem** `DEVGUI_HOSTNAME` markiert der `LockoutGuard` **alle** Hostnames als protected — tritt nicht mehr auf: bei fehlender devgui-Hostname-Konfiguration markiert die Protected-Logik **nur** Access-Mauer-Hostnames (ADR-011) als geschützt, nicht pauschal alles. `DEVGUI_HOSTNAME` ist in `docker-compose.yml` + `.env.example` dokumentiert/konfigurierbar. (Testbar: `LockoutGuard.isProtected('app.example.com')` ist bei gesetztem abweichendem `DEVGUI_HOSTNAME` `false`; bei **nicht gesetztem** `DEVGUI_HOSTNAME` ist `isProtected('app.example.com')` ebenfalls `false`, während `isProtected('<access-wall>.cloudflareaccess.com')` und `isProtected('<devgui-hostname>')` `true` bleiben. Der bisherige fail-closed-über-alles-Pfad wird nicht mehr getroffen.)
 
 ### Sicherheit / A11y
 - **AC9** — Die Ansicht ist hinter der Access-Mauer; sie führt **keine** Cloudflare-Token mit (alle Secrets bleiben im Backend/`CredentialStore`). Lösch-Aktionen sind serverseitig zusätzlich identitäts-/rollengeschützt (ADR-010/011) — die UI behandelt 403 als klare „keine Berechtigung"-Meldung, 422 `protected-resource` als „geschützt", 422 `confirmation-required` als „Bestätigung nötig".
@@ -79,6 +88,7 @@ Eine eigenständige Ansicht zum **Inventarisieren und Bereinigen** der bei Cloud
 ## NFRs
 - **A11y (WCAG 2.1 AA):** Titel als Überschrift; Listen/Tabellen mit Header; Lösch-Buttons beschriftet, protected-Status für Screenreader erkennbar; type-to-confirm-Feld beschriftet, Fehler programmatisch zugeordnet; sichtbarer Fokus.
 - **Sicherheit (Floor, hart):** Tunnel-/Routen-/DNS-mutierende Aktionen sind hoch-privilegiert (können die eigene Erreichbarkeit + Zugangsmauer betreffen) — serverseitig auditiert, identitäts-/rollengeschützt, mit Self-Lockout-Hard-Block (ADR-011) + type-to-confirm. Cloudflare-API-Token **nie** im Frontend-Bundle/Log/WS-Stream/Audit (durchgesetzt im Backend, ADR-010).
+- **Self-Lockout-Floor bleibt hart (v3/AC13):** Der eigene devgui-Hostname (`DEVGUI_HOSTNAME`) und Access-Mauer-Hostnames (ADR-011) bleiben **immer** als protected markiert und nicht löschbar — die S-159-Korrektur lockert **nur** das fälschliche pauschale Sperren normaler Hostnames bei fehlender `DEVGUI_HOSTNAME`-Konfiguration; sie darf den Schutz des eigenen Hostnames + der Access-Mauer **nicht** schwächen.
 
 ## Nicht-Ziele
 - **Deploy-Lifecycle** (Image→Container+Route als Einheit) → eigene Spec [[deploy-lifecycle]] / eigene View (`deployments`), nicht in diese Ansicht gedrängt.
