@@ -2,7 +2,7 @@
 id: vps-cloud-init-setup
 title: VPS Default-Setup-Pipeline via cloud-init / user-data
 status: draft
-version: 1
+version: 2
 ---
 
 # Spec: VPS Default-Setup-Pipeline (cloud-init / user-data) (`vps-cloud-init-setup`)
@@ -17,24 +17,29 @@ Beim **Create-from-scratch** eines neuen Servers ([[vps-provider-boundary]]) lä
 
 ## Verhalten
 1. Vor jedem Create erzeugt das Backend ein **cloud-init-Dokument** (cloud-config / user-data) aus einer **versionierten Vorlage** + den eingesetzten Parametern (SSH-Public-Keys je User, Hostname/Name).
-2. Das Dokument enthält die folgenden Schritte, in dieser Reihenfolge:
+2. Das Dokument enthält die folgenden Schritte:
    - **(a) System-Update:** Paketquellen aktualisieren und alle Pakete auf den neuesten Stand bringen (Ubuntu-Update direkt beim ersten Boot).
    - **(b) Docker (neueste Version):** Installation der **aktuellsten** stabilen Docker-Engine (offizielle Docker-Apt-Quelle, nicht das veraltete Distro-Paket) inkl. Aktivieren/Starten des Docker-Dienstes.
-   - **(c) Benutzer `alex`:** Anlegen (falls nicht vorhanden), mit Login-Shell; Aufnahme in die `sudo`- und `docker`-Gruppe; sein SSH-Public-Key landet in `~alex/.ssh/authorized_keys`.
-   - **(d) Benutzer `root`:** sein (distinkter) SSH-Public-Key landet in `/root/.ssh/authorized_keys`.
-3. Die SSH-Public-Keys stammen aus [[vps-ssh-key-assignment]] (distinkte Keys je User-Rolle, aus separaten `settings-ssh-keys`-Labels). Es werden **nur Public-Keys** ins cloud-init geschrieben; **niemals** ein Private-Key.
-4. Das Default-Setup ist **idempotent/robust** gegenüber cloud-init-Semantik (cloud-init führt user-data einmalig beim ersten Boot aus); die Schritte sind so formuliert, dass ein erneuter Lauf nichts kaputt macht (z.B. User-Anlage „falls nicht vorhanden").
-5. Das erzeugte cloud-init-Dokument ist vor der Übergabe an die Provider-API **validierbar** (wohlgeformtes cloud-config-YAML mit `#cloud-config`-Header); ungültige/leere Pflichtparameter (z.B. fehlende Public-Keys für `root` **oder** `alex`) brechen den Create **vor** dem Provider-Call ab.
+   - **(c) Benutzer `alex`:** über die cloud-init-nativen **`users:`**-Sektion angelegt, mit Login-Shell (`/bin/bash`); Aufnahme in die `sudo`- und `docker`-Gruppe; passwortloses sudo (`NOPASSWD:ALL`); sein SSH-Public-Key wird über `users:`→`ssh_authorized_keys` deployed.
+   - **(d) Benutzer `root`:** über die `users:`-Sektion (`disable_root: false`); sein (distinkter) SSH-Public-Key wird über `users:`→`ssh_authorized_keys` deployed.
+   - **(e) root-Passwort-Expire entfernen:** ein früher `runcmd`-Schritt (`chage -d -1 root`) hebt das durch das Hetzner-Ubuntu-Image gesetzte Passwort-Ablaufdatum (Epoch 0) auf, damit der root-Key-Login nicht an „Password change required" scheitert.
+3. **Deploy-Mechanik (verbindlich, am echten Server verifiziert):** SSH-Public-Keys + Benutzer werden über die cloud-init-native **`users:`**-Sektion bereitgestellt, **nicht** über `write_files`+`runcmd useradd`. Begründung: `write_files` läuft vor `runcmd`, ein `owner: alex:alex` für einen erst in `runcmd` angelegten User bricht das `write_files`-Modul ab (kein Key landet auf dem Server — auch nicht für root). Die `users:`-Sektion legt Benutzer und Keys in korrekter Reihenfolge an, bevor `runcmd` läuft.
+4. Die SSH-Public-Keys stammen aus [[vps-ssh-key-assignment]] (distinkte Keys je User-Rolle, aus separaten `settings-ssh-keys`-Labels). Es werden **nur Public-Keys** ins cloud-init geschrieben; **niemals** ein Private-Key.
+5. Das Default-Setup ist **idempotent/robust** gegenüber cloud-init-Semantik (cloud-init führt user-data einmalig beim ersten Boot aus); die Schritte sind so formuliert, dass ein erneuter Lauf nichts kaputt macht.
+6. Das erzeugte cloud-init-Dokument ist vor der Übergabe an die Provider-API **validierbar** (wohlgeformtes cloud-config-YAML mit `#cloud-config`-Header); ungültige/leere Pflichtparameter (z.B. fehlende Public-Keys für `root` **oder** `alex`) brechen den Create **vor** dem Provider-Call ab.
 
 ## Acceptance-Kriterien
 - **AC1** — Für einen Create erzeugt das Backend ein wohlgeformtes cloud-config-Dokument (Header `#cloud-config`, gültiges YAML), das genau die vier Default-Setup-Bereiche abdeckt: System-Update, Docker-Installation (neueste stabile Version aus offizieller Docker-Quelle), User `alex`, User `root`.
 - **AC2** — Das cloud-config enthält einen Update-Schritt, der die Paketquellen aktualisiert **und** vorhandene Pakete aktualisiert (z.B. `package_update: true` + `package_upgrade: true` bzw. äquivalente runcmd-Schritte) — testbar am erzeugten Dokument.
 - **AC3** — Das cloud-config installiert Docker aus der **offiziellen Docker-Apt-Quelle** (neueste stabile Version), **nicht** das ältere Distro-`docker.io`-Paket, und aktiviert/startet den Docker-Dienst. Testbar: das Dokument referenziert die offizielle Docker-Quelle/Installationsschritte, nicht `apt-get install docker.io` als Default.
-- **AC4** — Das cloud-config legt Benutzer `alex` mit Login-Shell an, fügt ihn den Gruppen `sudo` **und** `docker` hinzu und schreibt **seinen** Public-Key in `alex`s `authorized_keys`.
-- **AC5** — Das cloud-config schreibt den **distinkten** `root`-Public-Key in `/root/.ssh/authorized_keys`; `root`- und `alex`-Key sind getrennt zugeordnet (kein Key-Crossover).
-- **AC6** — Das erzeugte Dokument enthält **ausschließlich Public-Keys** und keinerlei Private-Key-Material oder andere Geheimnisse; das Dokument erscheint nicht im Frontend-Bundle als statisches Secret und wird beim Logging (falls geloggt) ohne Geheimnisse behandelt.
+- **AC4** — Das cloud-config legt Benutzer `alex` über die cloud-init-native **`users:`**-Sektion an (Login-Shell `/bin/bash`), fügt ihn den Gruppen `sudo` **und** `docker` hinzu, gewährt passwortloses sudo (`sudo: "ALL=(ALL) NOPASSWD:ALL"`) und deployt **seinen** Public-Key über `users:`→`ssh_authorized_keys` (nicht über `write_files`).
+- **AC5** — Das cloud-config deployt den **distinkten** `root`-Public-Key über die **`users:`**-Sektion (`name: root` + `disable_root: false`); `root`- und `alex`-Key sind getrennt zugeordnet (kein Key-Crossover). Es gibt **keine** `write_files`-Blöcke für `authorized_keys` und **keine** `runcmd useradd`/`usermod`/`mkdir .ssh`-Sequenz mehr für die Key-/User-Anlage.
+- **AC6** — Das erzeugte Dokument enthält **ausschließlich Public-Keys** und keinerlei Private-Key-Material oder andere Geheimnisse; Public-Keys landen ausschließlich in `users:`→`ssh_authorized_keys` (cloud-init-nativ, **kein** Shell-Sink in `runcmd`). Das Dokument erscheint nicht im Frontend-Bundle als statisches Secret und wird beim Logging (falls geloggt) ohne Geheimnisse behandelt.
 - **AC7** — Fehlt für `root` **oder** `alex` ein zugeordneter Public-Key, bricht die Erzeugung mit klarer 422-Meldung ab (`errorClass: "missing-ssh-key"`), **bevor** ein Provider-Create-Call erfolgt — kein Server wird erstellt.
-- **AC8** — Die Setup-Vorlage ist **versioniert** (eine identifizierbare Template-Version), sodass spätere Änderungen am Default-Setup nachvollziehbar sind und Tests die Bereiche stabil prüfen können.
+- **AC8** — Die Setup-Vorlage ist **versioniert** (`TEMPLATE_VERSION`); nach diesem Fix ist die Version **v2** (war v1). Tests prüfen die Bereiche stabil über die Version.
+- **AC9** — *(Live am echten Hetzner-VPS verifiziert.)* Die SSH-Keys werden über die **`users:`**-Sektion deployed, sodass **beide** User (`root` **und** `alex`) nach dem ersten Boot per Key login-fähig sind. Negativ-Garantie testbar am Dokument: der frühere Defekt — `write_files` mit `owner: alex:alex` für einen erst in `runcmd useradd` angelegten User, der das gesamte `write_files`-Modul (inkl. root-Key) abbrechen lässt — ist beseitigt (keine `write_files`-`authorized_keys`-Blöcke mehr).
+- **AC10** — *(Live verifiziert.)* Das cloud-config entfernt den durch das Hetzner-Ubuntu-Image gesetzten root-Passwort-Expire (Ablaufdatum Epoch 0) über einen frühen `runcmd`-Schritt **`chage -d -1 root`** (vor/unabhängig vom Docker-Install), damit der root-Key-Login nicht mit „Password change required but no TTY available" scheitert. Testbar: das Dokument enthält den `chage -d -1 root`-Schritt.
+- **AC11** — Der bestehende **Docker-CE-Install-Block** (apt-keyrings, `docker.list`, `apt-get install … docker-ce`, `systemctl enable --now docker`) bleibt inhaltlich erhalten und wirksam; `alex` ist weiterhin in den Gruppen `sudo` + `docker` (jetzt über `users:`). AC3/AC4 bleiben damit erfüllt.
 
 ## Verträge
 > Konkrete cloud-init-Syntax (cloud-config-Keys vs. `runcmd`, exakte Docker-Installations-Schritte) wählt der `coder`; die ACs prüfen die Garantien, nicht die exakte Zeilenform.
@@ -49,6 +54,8 @@ Beim **Create-from-scratch** eines neuen Servers ([[vps-provider-boundary]]) lä
 - Public-Key in ungültigem OpenSSH-Format → Ablehnung vor Create (validiert wie [[settings-ssh-keys]] AC4); kein Provider-Call.
 - Provider akzeptiert die user-data-Größe nicht (cloud-init zu groß) → Fehler aus dem Create-Pfad mit klarer Meldung; kein Teil-Server.
 - Setup-Schritt schlägt **auf dem Server** zur Laufzeit fehl (z.B. Docker-Quelle vorübergehend down) → liegt außerhalb der Backend-Kontrolle; das Backend garantiert nur ein **korrektes** user-data-Dokument, nicht den Server-Laufzeit-Erfolg. (Dokumentiert als Nicht-Ziel der Backend-Verifikation.)
+- **Regression (v1, am echten Server reproduziert):** Key-Deploy via `write_files`+`owner: alex:alex` schlägt fehl, weil `alex` erst in `runcmd useradd` (läuft NACH `write_files`) angelegt wird → der alex-Block bricht das gesamte `write_files`-Modul ab, **bevor** der root-Block geschrieben wird → gar kein Key auf dem Server (Login als root UND alex scheitert mit „Permission denied (publickey)"). Fix: `users:`-Sektion statt `write_files` (AC5, AC9).
+- **Regression (v1, am echten Server reproduziert):** Hetzner-Ubuntu-Image setzt das root-Passwort-Änderungsdatum auf Epoch 0 → root gilt als „muss Passwort ändern", root-Key-Login scheitert mit „Password change required but no TTY available". Fix: `chage -d -1 root` (AC10).
 
 ## NFRs
 - **Sicherheit (Floor, hart):** Niemals Private-Key-/Geheimnis-Material im cloud-init; nur Public-Keys. cloud-init-Dokument enthält keine Provider-Tokens.
