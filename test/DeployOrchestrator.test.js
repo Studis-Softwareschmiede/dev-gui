@@ -663,3 +663,206 @@ describe('DeployOrchestrator — Host-Port-Auswahl', () => {
     expect(runCall[3].hostPort).toBe(8081);
   });
 });
+
+// ── AC13: Auto-Port via inspect() ─────────────────────────────────────────────
+
+describe('DeployOrchestrator — AC13: Container-Port via docker inspect', () => {
+  it('uses single exposed port from inspect()', async () => {
+    const docker = {
+      pull: jest.fn(async () => ({ result: 'ok' })),
+      run: jest.fn(async () => ({ result: 'ok', containerId: 'cnt-123', hostPort: 8080 })),
+      rm: jest.fn(async () => ({ result: 'ok' })),
+      ps: jest.fn(async () => ({ result: 'ok', containers: [] })),
+      inspect: jest.fn(async () => ({ result: 'ok', ports: ['3000/tcp'] })),
+    };
+    const cf = makeCloudflareApi();
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.result).toBe('ok');
+    // run() should be called with containerPort=3000
+    const runCall = docker.run.mock.calls[0];
+    expect(runCall[3].containerPort).toBe(3000);
+    // portAmbiguous/portFallback should be false
+    expect(result.deployment.portAmbiguous).toBe(false);
+    expect(result.deployment.portFallback).toBe(false);
+  });
+
+  it('uses smallest port when multiple ExposedPorts returned (portAmbiguous=true)', async () => {
+    const docker = {
+      pull: jest.fn(async () => ({ result: 'ok' })),
+      run: jest.fn(async () => ({ result: 'ok', containerId: 'cnt-123', hostPort: 8080 })),
+      rm: jest.fn(async () => ({ result: 'ok' })),
+      ps: jest.fn(async () => ({ result: 'ok', containers: [] })),
+      inspect: jest.fn(async () => ({ result: 'ok', ports: ['8080/tcp', '3000/tcp', '5000/tcp'] })),
+    };
+    const cf = makeCloudflareApi();
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.result).toBe('ok');
+    // smallest port = 3000
+    const runCall = docker.run.mock.calls[0];
+    expect(runCall[3].containerPort).toBe(3000);
+    expect(result.deployment.portAmbiguous).toBe(true);
+    expect(result.deployment.portFallback).toBe(false);
+  });
+
+  it('uses default port 8080 and sets portFallback=true when no ExposedPorts', async () => {
+    const docker = {
+      pull: jest.fn(async () => ({ result: 'ok' })),
+      run: jest.fn(async () => ({ result: 'ok', containerId: 'cnt-123', hostPort: 8080 })),
+      rm: jest.fn(async () => ({ result: 'ok' })),
+      ps: jest.fn(async () => ({ result: 'ok', containers: [] })),
+      inspect: jest.fn(async () => ({ result: 'ok', ports: [] })),
+    };
+    const cf = makeCloudflareApi();
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.result).toBe('ok');
+    const runCall = docker.run.mock.calls[0];
+    expect(runCall[3].containerPort).toBe(8080); // default
+    expect(result.deployment.portFallback).toBe(true);
+    expect(result.deployment.portAmbiguous).toBe(false);
+  });
+
+  it('falls back to default port when inspect() not available (no method)', async () => {
+    // dockerControl without inspect() (legacy)
+    const docker = makeDockerControl();
+    const cf = makeCloudflareApi();
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.result).toBe('ok');
+    // containerPort should default (inspect not called)
+    expect(result.deployment.portAmbiguous).toBe(false);
+    expect(result.deployment.portFallback).toBe(false);
+  });
+
+  it('falls back to default port when inspect() returns error (graceful degradation)', async () => {
+    const docker = {
+      pull: jest.fn(async () => ({ result: 'ok' })),
+      run: jest.fn(async () => ({ result: 'ok', containerId: 'cnt-123', hostPort: 8080 })),
+      rm: jest.fn(async () => ({ result: 'ok' })),
+      ps: jest.fn(async () => ({ result: 'ok', containers: [] })),
+      inspect: jest.fn(async () => ({ result: 'error', ports: [], reason: 'docker-failed', errorClass: 'docker-failed' })),
+    };
+    const cf = makeCloudflareApi();
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    // Deploy should still succeed (inspect is best-effort)
+    expect(result.result).toBe('ok');
+    expect(result.deployment.portFallback).toBe(false); // fallback is only set when ports:[]
+  });
+});
+
+// ── AC14: Re-Deploy = Ersetzen ────────────────────────────────────────────────
+
+describe('DeployOrchestrator — AC14: Re-Deploy = replace existing', () => {
+  it('removes existing container with same hostname before deploying (replaced=true)', async () => {
+    const existingContainer = { containerId: 'old-cnt', hostname: 'app.example.com', image: 'old:v1', status: 'Up', hostPort: 8080 };
+    const docker = {
+      pull: jest.fn(async () => ({ result: 'ok' })),
+      run: jest.fn(async () => ({ result: 'ok', containerId: 'new-cnt', hostPort: 8081 })),
+      rm: jest.fn(async () => ({ result: 'ok' })),
+      ps: jest.fn(async () => ({ result: 'ok', containers: [existingContainer] })),
+      inspect: jest.fn(async () => ({ result: 'ok', ports: ['8080/tcp'] })),
+    };
+    const cf = makeCloudflareApi();
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.result).toBe('ok');
+    // rm() should be called for the old container (re-deploy)
+    expect(docker.rm).toHaveBeenCalledWith(
+      expect.anything(),
+      'old-cnt',
+      expect.anything(),
+    );
+    // replaced flag set in deployment
+    expect(result.deployment.replaced).toBe(true);
+  });
+
+  it('replaced=false when no existing container on hostname', async () => {
+    const docker = {
+      pull: jest.fn(async () => ({ result: 'ok' })),
+      run: jest.fn(async () => ({ result: 'ok', containerId: 'new-cnt', hostPort: 8080 })),
+      rm: jest.fn(async () => ({ result: 'ok' })),
+      ps: jest.fn(async () => ({ result: 'ok', containers: [] })),
+      inspect: jest.fn(async () => ({ result: 'ok', ports: [] })),
+    };
+    const cf = makeCloudflareApi();
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.result).toBe('ok');
+    expect(result.deployment.replaced).toBe(false);
+    // rm() only called once for the re-deploy check (but no existing container found)
+    // The initial ps() for re-deploy check returns empty containers
+    // No rm() call for re-deploy
+    // (rm may still be called in rollback path, but here no rollback occurs)
+    const rmCallsForReplace = docker.rm.mock.calls.filter((call) => call[1] === 'old-cnt');
+    expect(rmCallsForReplace.length).toBe(0);
+  });
+});
+
+// ── AC10/UI: deploymentsRouter vps-targets endpoint ───────────────────────────
+
+describe('deploymentsRouter — GET /api/deployments/vps-targets (AC10)', () => {
+  it('returns list of vps IDs from configured vpsTargets', async () => {
+    // Import and test the endpoint directly
+    const { deploymentsRouter } = await import('../src/deploymentsRouter.js');
+    const { AuditStore } = await import('../src/AuditStore.js');
+    const express = (await import('express')).default;
+    const http = await import('node:http');
+
+    const vpsTargets = new Map([
+      ['vps-1', { host: '1.2.3.4', port: 22, targetUser: 'root' }],
+      ['vps-2', { host: '5.6.7.8', port: 22, targetUser: 'root' }],
+    ]);
+    const orchestratorStub = {
+      listDeployments: jest.fn(async () => ({ deployments: [] })),
+      deploy: jest.fn(),
+      undeploy: jest.fn(),
+    };
+    const auditStore = new AuditStore();
+
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => { req.identity = { email: 'admin@example.com' }; next(); });
+    app.use(deploymentsRouter(orchestratorStub, auditStore, vpsTargets));
+
+    const { port, server } = await new Promise((resolve) => {
+      const s = http.createServer(app);
+      s.listen(0, () => resolve({ port: s.address().port, server: s }));
+    });
+
+    const result = await new Promise((resolve, reject) => {
+      const req = http.request({ hostname: 'localhost', port, path: '/api/deployments/vps-targets', method: 'GET' }, (res) => {
+        let data = '';
+        res.on('data', (c) => { data += c; });
+        res.on('end', () => {
+          try { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
+          catch { resolve({ status: res.statusCode, body: data }); }
+        });
+      });
+      req.on('error', reject);
+      req.end();
+    });
+
+    server.close();
+
+    expect(result.status).toBe(200);
+    expect(result.body.vpsIds).toEqual(expect.arrayContaining(['vps-1', 'vps-2']));
+    expect(result.body.vpsIds.length).toBe(2);
+  });
+});

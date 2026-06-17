@@ -172,6 +172,14 @@ function validateUndeployParams(params, body) {
 export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconciliationJob) {
   const router = Router();
 
+  // ── GET /api/deployments/vps-targets ────────────────────────────────────
+  // Returns the list of configured VPS IDs for the frontend dropdown (AC10).
+  // Read-only — no mutation, no secrets (only ids, no host/user/key data exposed).
+  router.get('/api/deployments/vps-targets', (_req, res) => {
+    const ids = Array.from(vpsTargets.keys());
+    return res.json({ vpsIds: ids });
+  });
+
   // ── GET /api/deployments ──────────────────────────────────────────────────
 
   /**
