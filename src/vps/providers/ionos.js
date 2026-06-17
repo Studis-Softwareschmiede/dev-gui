@@ -103,12 +103,12 @@ export class IonosAdapter {
 
   /**
    * Returns static capability flags for IONOS.
-   * IONOS Cloud API v6 supports all four Lifecycle actions.
+   * IONOS Cloud API v6 supports all five Lifecycle actions.
    *
-   * @returns {{ list: boolean, start: boolean, stop: boolean, create: boolean }}
+   * @returns {{ list: boolean, start: boolean, stop: boolean, create: boolean, delete: boolean }}
    */
   capabilities() {
-    return { list: true, start: true, stop: true, create: true };
+    return { list: true, start: true, stop: true, create: true, delete: true };
   }
 
   /**
@@ -227,6 +227,38 @@ export class IonosAdapter {
         return { result: 'error', reason: err.message };
       }
       return { result: 'error', reason: 'Unerwarteter Fehler beim Stoppen' };
+    }
+  }
+
+  /**
+   * Deletes a server at IONOS (DELETE /datacenters/{dcId}/servers/{srvId}).
+   *
+   * Idempotent: if the server is already gone (404), returns ok.
+   * serverId must be composite "<datacenterId>/<serverId>".
+   *
+   * @param {string} serverId - Composite "<dcId>/<srvId>"
+   * @param {string} token    - API token (transient)
+   * @returns {Promise<{ result: "ok"|"unsupported"|"error", reason?: string }>}
+   */
+  async deleteServer(serverId, token) {
+    const parts = parseCompositeId(serverId);
+    if (!parts) {
+      return { result: 'error', reason: 'Ungültige serverId — Format erwartet: "<datacenterId>/<serverId>"' };
+    }
+    const { datacenterId, serverId: srvId } = parts;
+    const url = `${IONOS_API}/datacenters/${encodeURIComponent(datacenterId)}/servers/${encodeURIComponent(srvId)}`;
+    try {
+      await this.#apiDelete(url, token);
+      return { result: 'ok' };
+    } catch (err) {
+      if (err instanceof IonosAdapterError) {
+        if (err.errorClass === 'not-found') {
+          // Already gone — idempotent ok
+          return { result: 'ok' };
+        }
+        return { result: 'error', reason: err.message };
+      }
+      return { result: 'error', reason: 'Unerwarteter Fehler beim Löschen' };
     }
   }
 
@@ -465,6 +497,47 @@ export class IonosAdapter {
       } catch {
         return {};
       }
+    }
+    return this.#handleErrorResponse(res);
+  }
+
+  /**
+   * Performs a DELETE request with Bearer auth and timeout.
+   * Throws IonosAdapterError on non-2xx (except 404) or network failure.
+   *
+   * @param {string} url
+   * @param {string} token
+   * @returns {Promise<void>}
+   */
+  async #apiDelete(url, token) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    let res;
+    try {
+      res = await this.#fetch(url, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        signal: controller.signal,
+      });
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        throw new IonosAdapterError('IONOS API Timeout', 'provider-unavailable', null);
+      }
+      throw new IonosAdapterError(
+        `IONOS API nicht erreichbar: ${sanitizeMsg(err.message)}`,
+        'provider-unavailable',
+        null,
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+
+    // IONOS returns 202 Accepted for async deletes, or 200/204
+    if (res.ok || res.status === 202 || res.status === 204) {
+      return;
     }
     return this.#handleErrorResponse(res);
   }

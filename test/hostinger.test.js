@@ -4,10 +4,13 @@
  * Covers:
  *   AC1  — HostingerAdapter implementiert den VpsProvider-Vertrag
  *           (capabilities/listMachines/start/stop/create)
+ *   AC2  — capabilities().delete ausgewiesen (vps-delete)
  *   AC5  — start/stop liefern { result: "ok" } bei Erfolg; idempotent bei 409
  *   AC6  — create liefert { result: "unsupported" } + capabilities().create === false
  *           (HOSTINGER_CREATE_UNSUPPORTED: kostenpflichtiger Kauf, nicht im Scope)
  *   AC10 — Token erscheint NICHT in Fehlermeldungen / Antworten
+ *
+ * Covers (vps-delete): AC2 — capabilities().delete ausgewiesen
  *
  * Strategy:
  *   - fetchFn wird injiziert (kein echter Netzwerkaufruf)
@@ -55,10 +58,10 @@ function makeFetchFn(responses = []) {
 // ── AC1/AC6: capabilities() ───────────────────────────────────────────────────
 
 describe('HostingerAdapter — AC1/AC6: capabilities()', () => {
-  it('liefert list/start/stop:true und create:false', () => {
+  it('liefert list/start/stop:true und create:false, delete:false', () => {
     const adapter = new HostingerAdapter();
     const caps = adapter.capabilities();
-    expect(caps).toEqual({ list: true, start: true, stop: true, create: false });
+    expect(caps).toEqual({ list: true, start: true, stop: true, create: false, delete: false });
   });
 
   it('capabilities().create ist false (HOSTINGER_CREATE_UNSUPPORTED)', () => {

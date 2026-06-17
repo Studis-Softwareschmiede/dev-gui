@@ -71,12 +71,12 @@ export class HetznerAdapter {
 
   /**
    * Returns static capability flags for Hetzner.
-   * Hetzner Cloud API supports all four Lifecycle actions.
+   * Hetzner Cloud API supports all five Lifecycle actions.
    *
-   * @returns {{ list: boolean, start: boolean, stop: boolean, create: boolean }}
+   * @returns {{ list: boolean, start: boolean, stop: boolean, create: boolean, delete: boolean }}
    */
   capabilities() {
-    return { list: true, start: true, stop: true, create: true };
+    return { list: true, start: true, stop: true, create: true, delete: true };
   }
 
   /**
@@ -165,6 +165,33 @@ export class HetznerAdapter {
         return { result: 'error', reason: err.message };
       }
       return { result: 'error', reason: 'Unerwarteter Fehler beim Stoppen' };
+    }
+  }
+
+  /**
+   * Deletes a server at Hetzner (DELETE /servers/{id}).
+   *
+   * Idempotent: if the server is already gone (404), returns ok.
+   *
+   * @param {string} serverId - Numeric server ID (as string)
+   * @param {string} token    - API token (transient)
+   * @returns {Promise<{ result: "ok"|"unsupported"|"error", reason?: string }>}
+   */
+  async deleteServer(serverId, token) {
+    const id = encodeURIComponent(serverId);
+    const url = `${HETZNER_API}/servers/${id}`;
+    try {
+      await this.#apiDelete(url, token);
+      return { result: 'ok' };
+    } catch (err) {
+      if (err instanceof HetznerAdapterError) {
+        if (err.errorClass === 'not-found') {
+          // Already gone — idempotent ok
+          return { result: 'ok' };
+        }
+        return { result: 'error', reason: err.message };
+      }
+      return { result: 'error', reason: 'Unerwarteter Fehler beim Löschen' };
     }
   }
 
@@ -308,6 +335,47 @@ export class HetznerAdapter {
 
     if (res.ok || res.status === 201) {
       return res.json();
+    }
+    return this.#handleErrorResponse(res);
+  }
+
+  /**
+   * Performs a DELETE request with Bearer auth and timeout.
+   * Throws HetznerAdapterError on non-2xx (except 404) or network failure.
+   *
+   * @param {string} url
+   * @param {string} token
+   * @returns {Promise<void>}
+   */
+  async #apiDelete(url, token) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    let res;
+    try {
+      res = await this.#fetch(url, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        signal: controller.signal,
+      });
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        throw new HetznerAdapterError('Hetzner API Timeout', 'provider-unavailable', null);
+      }
+      throw new HetznerAdapterError(
+        `Hetzner API nicht erreichbar: ${sanitizeMsg(err.message)}`,
+        'provider-unavailable',
+        null,
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+
+    // 204 No Content or 200 OK on successful delete
+    if (res.ok || res.status === 204) {
+      return;
     }
     return this.#handleErrorResponse(res);
   }

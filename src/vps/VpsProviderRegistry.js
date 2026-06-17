@@ -34,7 +34,7 @@
  * @typedef {object} ProviderInfo
  * @property {"hetzner"|"ionos"|"hostinger"} id
  * @property {boolean} configured
- * @property {{ list: boolean, start: boolean, stop: boolean, create: boolean }} capabilities
+ * @property {{ list: boolean, start: boolean, stop: boolean, create: boolean, delete: boolean }} capabilities
  *
  * @typedef {object} ListResult
  * @property {VpsMachine[]} machines
@@ -202,6 +202,186 @@ export class VpsProviderRegistry {
   async stop(provider, serverId) {
     const { token, adapter } = await this.#resolveProviderOrThrow(provider);
     return adapter.stop(serverId, token);
+  }
+
+  /**
+   * Löscht einen Server beim adressierten Provider und räumt den zugehörigen
+   * Cloudflare-Tunnel auf (S-153 AC1–AC5).
+   *
+   * Delete-Ablauf:
+   *   1. Provider-Adapter deleteServer(serverId, token) aufrufen.
+   *   2. Tunnel-Cleanup (best-effort): Tunnel-ID aus dem CredentialStore lesen,
+   *      Routen/DNS via CloudflareApi entfernen, Tunnel löschen, Token-Referenz entfernen.
+   *   Schritt 2 ist best-effort: ein Cleanup-Fehler maskiert nicht den Provider-Status.
+   *   Keine Tunnel-Zuordnung → Cleanup übersprungen (AC5).
+   *
+   * Security-Floor:
+   *   - Provider-/Tunnel-Tokens erscheinen NIEMALS in Response/Log/Audit (security/R01).
+   *   - Cleanup-Fehler werden gemeldet/auditiert, blockieren aber nicht das Ergebnis.
+   *
+   * @param {string} provider - "hetzner" | "ionos" | "hostinger"
+   * @param {string} serverId
+   * @param {string} vpsName  - VPS-Name für Tunnel-Lookup (Konvention: devgui-<sanitized-vpsname>)
+   * @returns {Promise<{
+   *   result: "ok"|"unsupported"|"error",
+   *   reason?: string,
+   *   errorClass?: string,
+   *   cleanupError?: string
+   * }>}
+   * @throws {VpsRegistryError} bei provider-not-configured oder unbekanntem Provider
+   */
+  async delete(provider, serverId, vpsName) {
+    const { token, adapter } = await this.#resolveProviderOrThrow(provider);
+
+    // AC2: Prüfe ob Provider Löschen unterstützt (capability.delete)
+    const caps = adapter.capabilities();
+    if (!caps.delete) {
+      return { result: 'unsupported', reason: `Provider '${provider}' unterstützt kein programmatisches Löschen` };
+    }
+
+    // AC1: Server beim Provider löschen
+    const deleteResult = await adapter.deleteServer(serverId, token);
+
+    // AC3/AC4: Tunnel-Cleanup (best-effort, nach Provider-Delete)
+    // Cleanup-Fehler maskieren NICHT den Provider-Delete-Status (AC4).
+    let cleanupError = undefined;
+    try {
+      const cleanupResult = await this.#cleanupTunnel(vpsName);
+      if (cleanupResult?.error) {
+        cleanupError = cleanupResult.error;
+      }
+    } catch (err) {
+      // Best-effort: Cleanup-Fehler protokollieren, nicht weiterwerfen
+      // Security: err.message darf kein Token enthalten (CloudflareApi garantiert das)
+      const safeMsg = String(err?.message ?? 'Tunnel-Cleanup fehlgeschlagen').slice(0, 200);
+      cleanupError = safeMsg;
+      console.error('[VpsProviderRegistry] Tunnel-Cleanup-Fehler (best-effort):', safeMsg);
+    }
+
+    const response = { ...deleteResult };
+    if (cleanupError) {
+      response.cleanupError = cleanupError;
+    }
+    return response;
+  }
+
+  // ── Tunnel-Cleanup (S-153 AC3–AC5) ──────────────────────────────────────────
+
+  /**
+   * Räumt den Cloudflare-Tunnel auf, der dem VPS zugeordnet ist.
+   *
+   * Lookup-Pfad:
+   *   credentials/misc/vps-<sanitized-vpsname>-tunnel-id → tunnelId
+   *   CloudflareApi.listRoutes(tunnelId) → Routen entfernen
+   *   CloudflareApi.deleteTunnel(tunnelId) → Tunnel löschen
+   *   CredentialStore.delete(TUNNEL_TOKEN_KEY(tunnelId)) → Token-Referenz entfernen
+   *
+   * Idempotent: 404/„already gone" ist kein Fehler (AC3).
+   * AC5: Keine Tunnel-Zuordnung → Cleanup übersprungen, kein Fehler.
+   * AC4: Alle Fehler werden als { error: string } zurückgegeben, nicht geworfen
+   *      (best-effort — der Aufrufer entscheidet über Reporting).
+   *
+   * Security: Tokens erscheinen NIEMALS in Log/Return (security/R01).
+   *
+   * @param {string} vpsName - VPS-Name (roh)
+   * @returns {Promise<{ skipped?: boolean, error?: string }|void>}
+   */
+  async #cleanupTunnel(vpsName) {
+    if (!this.#credentialStore) {
+      // Kein Store → kein Lookup möglich → Cleanup überspringen (AC5-analog)
+      console.log('[VpsProviderRegistry] Tunnel-Cleanup übersprungen: kein CredentialStore');
+      return { skipped: true };
+    }
+
+    const sanitized = sanitizeTunnelName(vpsName);
+    const tunnelIdKey = TUNNEL_ID_KEY(sanitized);
+
+    // Tunnel-ID aus dem Store lesen (Zuordnung aus S-152)
+    let tunnelId;
+    try {
+      tunnelId = await this.#credentialStore.getPlaintext(tunnelIdKey);
+    } catch (err) {
+      // Store-Fehler → Cleanup überspringen (kein Token-Leak in Log)
+      console.log('[VpsProviderRegistry] Tunnel-ID-Lookup fehlgeschlagen:', String(err?.message ?? '').slice(0, 100));
+      return { skipped: true };
+    }
+
+    if (!tunnelId) {
+      // AC5: Keine Tunnel-Zuordnung → Cleanup überspringen
+      console.log(`[VpsProviderRegistry] Kein Tunnel für VPS '${sanitized}' gefunden — Cleanup übersprungen (AC5)`);
+      return { skipped: true };
+    }
+
+    if (!this.#cloudflareApi) {
+      // Kein cloudflareApi → Cleanup überspringen (keine API-Calls möglich)
+      console.log('[VpsProviderRegistry] Tunnel-Cleanup übersprungen: kein CloudflareApi konfiguriert');
+      // Auch Token-Referenz aus Store entfernen (best-effort)
+      try {
+        await this.#credentialStore.delete(TUNNEL_TOKEN_KEY(tunnelId));
+        await this.#credentialStore.delete(tunnelIdKey);
+      } catch { /* best-effort */ }
+      return { skipped: true };
+    }
+
+    // AC3: Tunnel-Cleanup via CloudflareApi
+    // Schritt 1: Routen entfernen (best-effort, idempotent)
+    try {
+      const routes = await this.#cloudflareApi.listRoutes(tunnelId);
+      for (const route of routes ?? []) {
+        if (route?.hostname) {
+          // Security: LockoutGuard schützt devgui-Hostname — nicht entfernen
+          if (!this.#cloudflareApi.isProtected(route.hostname)) {
+            await this.#cloudflareApi.removeRoute(tunnelId, route.hostname);
+          }
+        }
+      }
+    } catch (err) {
+      // Routen-Cleanup-Fehler: protokollieren, aber weiter (idempotent + best-effort)
+      const errorClass = err?.errorClass ?? 'unknown';
+      if (errorClass !== 'not-found') {
+        console.log(`[VpsProviderRegistry] Routen-Cleanup-Fehler (best-effort): ${errorClass}`);
+      }
+      // 'not-found' oder 'cloudflare-not-configured' → Tunnel ist weg/nicht konfiguriert → ok
+    }
+
+    // Schritt 2: Tunnel löschen (idempotent: 404 = already gone = ok)
+    try {
+      await this.#cloudflareApi.deleteTunnel(tunnelId);
+      // Security: tunnelId im Log erlaubt (keine Secret), Token nie
+      console.log(`[VpsProviderRegistry] Cloudflare-Tunnel gelöscht: id=${tunnelId}`);
+    } catch (err) {
+      const errorClass = err?.errorClass ?? 'unknown';
+      if (errorClass === 'not-found') {
+        // Idempotent: already gone → ok (AC3)
+        console.log(`[VpsProviderRegistry] Tunnel ${tunnelId} bereits gelöscht (idempotent, AC3)`);
+      } else if (errorClass === 'cloudflare-not-configured') {
+        // Cloudflare nicht konfiguriert → Cleanup nicht möglich, aber kein Fehler (AC3/AC5)
+        console.log('[VpsProviderRegistry] Tunnel-Cleanup übersprungen: Cloudflare nicht konfiguriert');
+      } else {
+        // Echter Fehler → als cleanupError melden (AC4)
+        const safeMsg = String(err?.message ?? 'Tunnel-Delete fehlgeschlagen').slice(0, 200);
+        console.error(`[VpsProviderRegistry] Tunnel-Delete-Fehler: ${errorClass}`);
+        // Token-Referenz trotzdem aus dem Store entfernen (best-effort)
+        try {
+          await this.#credentialStore.delete(TUNNEL_TOKEN_KEY(tunnelId));
+          await this.#credentialStore.delete(tunnelIdKey);
+        } catch { /* best-effort */ }
+        return { error: safeMsg };
+      }
+    }
+
+    // Schritt 3: Token-Referenz aus dem CredentialStore entfernen (AC3)
+    // Security: Token-Wert erscheint NIE in Log; nur der Schlüssel
+    try {
+      await this.#credentialStore.delete(TUNNEL_TOKEN_KEY(tunnelId));
+    } catch (err) {
+      console.log('[VpsProviderRegistry] Token-Referenz-Cleanup-Fehler (best-effort):', String(err?.message ?? '').slice(0, 100));
+    }
+    try {
+      await this.#credentialStore.delete(tunnelIdKey);
+    } catch (err) {
+      console.log('[VpsProviderRegistry] Tunnel-ID-Referenz-Cleanup-Fehler (best-effort):', String(err?.message ?? '').slice(0, 100));
+    }
   }
 
   /**

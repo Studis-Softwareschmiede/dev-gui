@@ -384,6 +384,108 @@ export function vpsRouter(registry, auditStore) {
     );
   });
 
+  // ── DELETE /api/vps/machines/:provider/*splat ─────────────────────────────
+
+  /**
+   * DELETE /api/vps/machines/:provider/*splat
+   * Löscht einen Server beim Provider und räumt den Cloudflare-Tunnel auf.
+   * MUTATION: Audit-First + Identitäts-/Rollenschutz (AC6/AC7, vps-delete).
+   *
+   * *splat captures composite serverIds (see /start above for details).
+   *
+   * Body: { vpsName: string } — VPS-Name für den Tunnel-Lookup (Zuordnung devgui-<sanitized-vpsname>)
+   *
+   * Responses:
+   *   200 { result: "ok"|"unsupported"|"error", reason?, cleanupError? }
+   *   400 { error }         — Validierungsfehler (vpsName fehlt)
+   *   403 { error }         — kein Zugriff / nicht in CRED_ADMIN_EMAILS
+   *   422 { error }         — provider nicht konfiguriert / unsupported
+   *   500 { error }         — Audit-Write fehlgeschlagen
+   *   502 { error }         — Provider-API-Fehler
+   */
+  router.delete('/api/vps/machines/:provider/*splat', async (req, res) => {
+    const identity = req.identity ?? null;
+
+    // AC6: Identitäts-/Rollenschutz
+    const authz = checkMutationAuthz(identity);
+    if (!authz.allowed) {
+      return res.status(403).json({ error: 'Keine Berechtigung für diese Aktion' });
+    }
+
+    // Provider validieren (security/R02)
+    const providerVal = validateProvider(req.params.provider);
+    if (!providerVal.ok) {
+      return res.status(422).json({ error: providerVal.error });
+    }
+    const provider = req.params.provider;
+
+    // ServerId aus *splat rekonstruieren (Express 5 liefert Array bei mehreren Segmenten).
+    const splatRaw = req.params.splat;
+    const rawServerId = Array.isArray(splatRaw) ? splatRaw.join('/') : String(splatRaw ?? '');
+
+    // ServerId validieren (security/R02/R03)
+    const serverIdVal = validateServerId(rawServerId);
+    if (!serverIdVal.ok) {
+      return res.status(422).json({ error: serverIdVal.error });
+    }
+    const serverId = rawServerId.trim();
+
+    // vpsName aus Body für Tunnel-Lookup (AC3)
+    const vpsName = req.body?.vpsName;
+    if (typeof vpsName !== 'string' || !vpsName.trim()) {
+      return res.status(400).json({ error: 'vpsName ist ein Pflichtfeld für den Tunnel-Cleanup' });
+    }
+    const vpsNameTrimmed = vpsName.trim();
+    if (vpsNameTrimmed.length > MAX_FIELD_LEN) {
+      return res.status(400).json({ error: `vpsName überschreitet Längenlimit (max. ${MAX_FIELD_LEN} Zeichen)` });
+    }
+
+    // AC7: Audit-First — Token NICHT im Audit
+    const auditAction = `vps:delete:${provider}:${serverId}`;
+    try {
+      auditStore.record({ identity: identity?.email ?? null, command: auditAction });
+    } catch (auditErr) {
+      console.error('[vpsRouter] Audit-Write fehlgeschlagen (delete):', sanitizeMsg(auditErr.message));
+      return res.status(500).json({ error: 'Audit-Write fehlgeschlagen — Aktion abgebrochen' });
+    }
+
+    // Provider-API-Aufruf via Registry (Boundary)
+    let result;
+    try {
+      result = await registry.delete(provider, serverId, vpsNameTrimmed);
+    } catch (err) {
+      const errorClass = (err instanceof VpsRegistryError) ? err.errorClass : 'unexpected';
+      try {
+        auditStore.record({
+          identity: identity?.email ?? null,
+          command: `vps:delete:${provider}:${serverId}:failed:${errorClass}`,
+        });
+      } catch (ae) {
+        console.error('[vpsRouter] Outcome-Audit (Fehlschlag) fehlgeschlagen:', sanitizeMsg(ae.message));
+      }
+      return mapRegistryErrorToResponse(res, err, 'delete');
+    }
+
+    // Outcome-Audit (AC7)
+    // cleanupError wird auditiert falls vorhanden (AC4: Teil-Erfolg klar melden)
+    const outcomeLabel = result.cleanupError ? `partial:cleanup-error` : result.result;
+    try {
+      auditStore.record({
+        identity: identity?.email ?? null,
+        command: `vps:delete:${provider}:${serverId}:${outcomeLabel}`,
+      });
+    } catch (ae) {
+      console.error('[vpsRouter] Outcome-Audit fehlgeschlagen:', sanitizeMsg(ae.message));
+    }
+
+    // AC2: unsupported → 422 mit result:"unsupported"
+    if (result.result === 'unsupported') {
+      return res.status(422).json(result);
+    }
+
+    return res.json(result);
+  });
+
   // ── Power-Action-Handler (shared for start/stop) ──────────────────────────
 
   /**

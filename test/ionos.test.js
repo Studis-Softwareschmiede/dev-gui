@@ -3,12 +3,15 @@
  *
  * Covers:
  *   AC1  — IonosAdapter implementiert den VpsProvider-Vertrag (capabilities/list/start/stop/create)
+ *   AC2  — capabilities().delete ausgewiesen (vps-delete)
  *   AC3  — listMachines() iteriert über alle Datacenters und aggregiert Server
  *   AC5  — start/stop liefern { result: "ok" } bei Erfolg; idempotent bei 422/already-in-target-state
  *   AC6  — capabilities() liefert alle vier Lifecycle-Flags als true (IONOS unterstützt alle)
  *   AC7  — create übergibt base64-kodierte userData; Default-Image-Fallback
  *   AC8  — create-Antwort ist VpsMachine; Fehler → IonosAdapterError ohne Token-Leak
  *   AC10 — Token erscheint NICHT in Fehlermeldungen / Antworten
+ *
+ * Covers (vps-delete): AC2 — capabilities().delete ausgewiesen
  *
  * Strategy:
  *   - fetchFn wird injiziert (kein echter Netzwerkaufruf)
@@ -116,10 +119,10 @@ function makeCapturingFetch(responses = []) {
 // ── AC1/AC6: capabilities() ───────────────────────────────────────────────────
 
 describe('IonosAdapter — AC1/AC6: capabilities()', () => {
-  it('liefert alle vier Lifecycle-Flags als true', () => {
+  it('liefert alle fünf Lifecycle-Flags (inkl. delete:true)', () => {
     const adapter = new IonosAdapter();
     const caps = adapter.capabilities();
-    expect(caps).toEqual({ list: true, start: true, stop: true, create: true });
+    expect(caps).toEqual({ list: true, start: true, stop: true, create: true, delete: true });
   });
 });
 
@@ -365,6 +368,63 @@ describe('IonosAdapter — AC5: stop()', () => {
     const adapter = new IonosAdapter({ fetchFn: capFetch });
     await adapter.stop('dc-xyz/srv-xyz', MOCK_TOKEN);
     expect(capFetch.calls[0].url).toContain('/datacenters/dc-xyz/servers/srv-xyz/stop');
+  });
+});
+
+// ── deleteServer() ────────────────────────────────────────────────────────────
+
+describe('IonosAdapter — deleteServer()', () => {
+  it('liefert { result: "ok" } bei HTTP 204 (Erfolg)', async () => {
+    const fetchFn = makeFetchFn([{ status: 204, body: null }]);
+    const adapter = new IonosAdapter({ fetchFn });
+    const result = await adapter.deleteServer('dc-001/srv-abc123', MOCK_TOKEN);
+    expect(result).toEqual({ result: 'ok' });
+  });
+
+  it('liefert { result: "ok" } bei HTTP 200 (Erfolg)', async () => {
+    const fetchFn = makeFetchFn([{ status: 200, body: {} }]);
+    const adapter = new IonosAdapter({ fetchFn });
+    const result = await adapter.deleteServer('dc-001/srv-abc123', MOCK_TOKEN);
+    expect(result).toEqual({ result: 'ok' });
+  });
+
+  it('idempotent: liefert { result: "ok" } bei 404 (Server bereits gelöscht)', async () => {
+    const fetchFn = makeFetchFn([{
+      status: 404,
+      body: { message: 'The requested resource could not be found' },
+    }]);
+    const adapter = new IonosAdapter({ fetchFn });
+    const result = await adapter.deleteServer('dc-001/srv-gone', MOCK_TOKEN);
+    expect(result).toEqual({ result: 'ok' });
+  });
+
+  it('liefert { result: "error" } bei 401 — Token erscheint NICHT im Fehlertext', async () => {
+    const fetchFn = makeFetchFn([{
+      status: 401,
+      body: { message: `Bearer ${MOCK_TOKEN} is invalid` },
+    }]);
+    const adapter = new IonosAdapter({ fetchFn });
+    const result = await adapter.deleteServer('dc-001/srv-abc123', MOCK_TOKEN);
+    expect(result.result).toBe('error');
+    expect(JSON.stringify(result)).not.toContain(MOCK_TOKEN);
+  });
+
+  it('liefert { result: "error" } bei Timeout (AbortError)', async () => {
+    const fetchFn = async () => {
+      const err = new Error('The operation was aborted');
+      err.name = 'AbortError';
+      throw err;
+    };
+    const adapter = new IonosAdapter({ fetchFn });
+    const result = await adapter.deleteServer('dc-001/srv-abc123', MOCK_TOKEN);
+    expect(result.result).toBe('error');
+  });
+
+  it('liefert { result: "error" } bei ungültiger composite-ID ohne "/"', async () => {
+    const adapter = new IonosAdapter();
+    const result = await adapter.deleteServer('invalid-no-slash', MOCK_TOKEN);
+    expect(result.result).toBe('error');
+    expect(result.reason).toMatch(/serverId/i);
   });
 });
 
