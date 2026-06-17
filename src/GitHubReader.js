@@ -5,8 +5,11 @@
  *
  * Design:
  *   - Token is injectable: `tokenProvider` is a function () => string|Promise<string>.
- *     Falls back to env GH_TOKEN. If neither is present, GitHub data degrades to
- *     "unknown" (AC4) — no crash.
+ *     In production server.js ALWAYS injects the App-Token-Provider (AC5), so the
+ *     App identity covers reads too. The env-GH_TOKEN default is a LEGACY fallback
+ *     only for isolated use of GitHubReader outside server.js — not the regular
+ *     read path (AC6). If no token resolves, GitHub data degrades to "unknown"
+ *     (AC7) — no crash.
  *   - Every external fetch has a timeout (js/R03).
  *   - Token is NEVER included in responses, logs, or errors (security/R01).
  *   - Repo names come from the GitHub API list (not user input) — no SSRF (security/R05).

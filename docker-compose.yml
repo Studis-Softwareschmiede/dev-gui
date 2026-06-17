@@ -139,10 +139,15 @@ services:
       # Idle timeout before an unused project session is auto-closed (default: 1800000 ms = 30 min).
       # SESSION_IDLE_MS: "1800000"
 
-      # ── GitHub PAT ───────────────────────────────────────────────────────────
-      # Required for GitHubReader (/api/status projects) and agent-flow plugin
-      # auto-provision (clone private repo on first boot).
-      GH_TOKEN: ${GH_TOKEN}
+      # ── GitHub PAT (gh-CLI bootstrap only) ───────────────────────────────────
+      # Used by docker-entrypoint.sh to configure git credentials for the
+      # agent-flow plugin auto-provision (clone private repo on first boot)
+      # and by ensure-gh-auth.sh for the gh-CLI auth bootstrap.
+      # NOT used by GitHubReader — the reader uses the cached App-Token-Provider
+      # (credentials/github/{app_id,installation_id,private_key} in CredentialStore).
+      # After the gh-Auth-bootstrap the entrypoint unsets GH_TOKEN/GITHUB_TOKEN
+      # so the gh-CLI uses its persistent file-auth, not this env-var.
+      GH_TOKEN: ${GH_TOKEN:-}
 
       # ── GPG passphrase (choose one option) ──────────────────────────────────
       # Option A — environment variable (simplest):
