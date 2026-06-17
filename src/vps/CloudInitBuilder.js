@@ -8,14 +8,19 @@
  * Vorlage-Version: TEMPLATE_VERSION — wird bei strukturellen Änderungen erhöht.
  * Änderungshistorie:
  *   v1 (2026-06-08) — Ubuntu-Update, Docker CE aus offizieller Docker-Apt-Quelle,
- *                     User alex (sudo+docker-Gruppe, bash, SSH-Key),
- *                     User root (SSH-Key).
+ *                     User alex (sudo+docker-Gruppe, bash, SSH-Key via write_files),
+ *                     User root (SSH-Key via write_files). [DEFEKT: write_files läuft
+ *                     vor runcmd useradd → alex-owner-Block bricht write_files ab →
+ *                     kein Key landet; außerdem: Hetzner-Epoch-0-Expire blockiert root]
+ *   v2 (2026-06-17) — Benutzer + SSH-Keys via cloud-init-native users:-Sektion
+ *                     (behebt write_files/useradd-Race); chage -d -1 root entfernt
+ *                     Hetzner-root-Passwort-Expire (Epoch 0). (ADR-009, AC4–AC6, AC9–AC11)
  *
  * @module CloudInitBuilder
  */
 
 /** Aktuelle Vorlage-Version — erhöhen bei jeder strukturellen Änderung. */
-export const TEMPLATE_VERSION = 1;
+export const TEMPLATE_VERSION = 2;
 
 // ── CloudInitBuilder ──────────────────────────────────────────────────────────
 
@@ -24,16 +29,19 @@ export class CloudInitBuilder {
    * Erzeugt ein vollständiges, versioniertes cloud-init-user-data-Dokument.
    *
    * Enthält:
-   *   (a) Ubuntu System-Update (package_update + package_upgrade + apt-get upgrade)
+   *   (a) Ubuntu System-Update (package_update + package_upgrade)
    *   (b) Docker CE aus offizieller Docker-Apt-Quelle (GPG-Key + Repo +
    *       docker-ce docker-ce-cli containerd.io docker-compose-plugin)
    *   (c) User alex: sudo- + docker-Gruppe, Login-Shell bash, SSH-Public-Key
-   *   (d) User root: SSH-Public-Key in /root/.ssh/authorized_keys
+   *       — via cloud-init-native users:-Sektion (ssh_authorized_keys)
+   *   (d) User root: SSH-Public-Key — via users:-Sektion (ssh_authorized_keys),
+   *       disable_root: false
+   *   (e) chage -d -1 root: entfernt Hetzner-Epoch-0-Passwort-Expire (AC10)
    *
    * Security-Floor (AC6 / NFR):
    *   - Nur Public-Keys werden eingebettet; niemals Private-Keys oder Provider-Tokens.
-   *   - Die Public-Key-Strings werden nicht shell-escaped in runcmd eingebettet;
-   *     sie landen nur in write_files-Blöcken (cloud-init-nativ, kein Shell-Sink).
+   *   - Public-Keys landen ausschließlich in users:→ssh_authorized_keys
+   *     (cloud-init-nativ, kein Shell-Sink in runcmd).
    *
    * @param {object} params
    * @param {string} params.name              - Hostname des Servers (optional; wird
@@ -62,10 +70,8 @@ export class CloudInitBuilder {
       );
     }
 
-    // YAML-Werte müssen für den write_files-content-Block sicher eingebettet werden.
-    // Public-Keys landen ausschliesslich in write_files-content (kein Shell-Sink).
-    // Zur Sicherheit: Public-Keys dürfen keine YAML-Block-Abschlüsse enthalten —
-    // ein echter OpenSSH-Public-Key (Base64 + Kommentar) enthält keine solchen Zeichen.
+    // Public-Keys werden NUR in users:→ssh_authorized_keys eingebettet (kein Shell-Sink).
+    // Zur Sicherheit: trimmen; ein echter OpenSSH-Public-Key enthält keine YAML-Sonderzeichen.
     const rootKeyLine = rootKey.trim();
     const alexKeyLine = alexKey.trim();
 
@@ -75,54 +81,32 @@ export class CloudInitBuilder {
     // Template-Version als Kommentar im Dokument (AC8)
     const doc = `#cloud-config
 # cloud-init Default-Setup-Vorlage v${TEMPLATE_VERSION} (CloudInitBuilder, ADR-009)
-# Erzeugt: Ubuntu-Update, Docker CE (offizielle Quelle), User alex+root mit SSH-Keys.
-${hostnameBlock}
-# (a) System-Update beim ersten Boot
-package_update: true
+${hostnameBlock}package_update: true
 package_upgrade: true
-
-# (b) Docker CE aus offizieller Docker-Apt-Quelle installieren und starten
-# Quelle: https://docs.docker.com/engine/install/ubuntu/
-# Nicht: docker.io (veraltetes Distro-Paket)
+disable_root: false
+users:
+  - name: root
+    ssh_authorized_keys:
+      - ${rootKeyLine}
+  - name: alex
+    groups: [sudo, docker]
+    shell: /bin/bash
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    ssh_authorized_keys:
+      - ${alexKeyLine}
 runcmd:
-  # GPG-Key der offiziellen Docker-Apt-Quelle holen
+  # Hetzner-root-Passwort-Expire (Epoch 0) entfernen → root-Key-Login non-interaktiv möglich
+  - chage -d -1 root
+  # Docker CE aus offizieller Quelle (https://docs.docker.com/engine/install/ubuntu/)
   - install -m 0755 -d /etc/apt/keyrings
   - curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
   - chmod a+r /etc/apt/keyrings/docker.asc
-  # Offizielle Docker-Apt-Quelle eintragen
   - |
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list
   - apt-get update
-  # Docker CE + CLI + containerd + Compose-Plugin installieren (neueste stabile Version)
   - apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-  # Docker-Dienst aktivieren und starten
   - systemctl enable docker
   - systemctl start docker
-  # (c) User alex anlegen (falls nicht vorhanden), Gruppen setzen, .ssh einrichten
-  - id -u alex &>/dev/null || useradd -m -s /bin/bash alex
-  - usermod -aG sudo alex
-  - usermod -aG docker alex
-  - mkdir -p /home/alex/.ssh
-  - chmod 700 /home/alex/.ssh
-  - chown alex:alex /home/alex/.ssh
-  - chown alex:alex /home/alex/.ssh/authorized_keys || true
-  # (d) SSH-Verzeichnis für root sicherstellen
-  - mkdir -p /root/.ssh
-  - chmod 700 /root/.ssh
-
-# (c) SSH-Public-Key für User alex
-write_files:
-  - path: /home/alex/.ssh/authorized_keys
-    permissions: "0600"
-    owner: alex:alex
-    content: |
-      ${alexKeyLine}
-  # (d) SSH-Public-Key für User root
-  - path: /root/.ssh/authorized_keys
-    permissions: "0600"
-    owner: root:root
-    content: |
-      ${rootKeyLine}
 `;
 
     return doc;

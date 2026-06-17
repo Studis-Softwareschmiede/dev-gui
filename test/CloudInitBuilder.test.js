@@ -1,15 +1,20 @@
 /**
  * CloudInitBuilder.test.js — Unit-Tests für CloudInitBuilder (vps-cloud-init-setup).
  *
- * Covers:
+ * Covers (vps-cloud-init-setup):
  *   AC1  — Wohlgeformtes #cloud-config-YAML (Header + gültiges YAML)
- *   AC2  — Update-Schritt: package_update:true + package_upgrade:true + apt-get upgrade
+ *   AC2  — Update-Schritt: package_update:true + package_upgrade:true
  *   AC3  — Docker aus offizieller Docker-Apt-Quelle (download.docker.com), NICHT docker.io
- *   AC4  — User alex: bash-Shell, sudo-Gruppe, docker-Gruppe, SSH-Key in authorized_keys
- *   AC5  — User root: distinkter SSH-Key in /root/.ssh/authorized_keys; kein Key-Crossover
- *   AC6  — Kein Private-Key / kein Secret-Material im Output
+ *   AC4  — User alex: users:-Sektion, bash-Shell, sudo-Gruppe, docker-Gruppe, NOPASSWD, ssh_authorized_keys
+ *   AC5  — User root: users:-Sektion, distinkter SSH-Key in ssh_authorized_keys; kein Key-Crossover;
+ *           kein write_files authorized_keys, kein useradd
+ *   AC6  — Kein Private-Key / kein Secret-Material im Output; Keys nur in users:-Sektion
  *   AC7  — Fehlender Public-Key → CloudInitError(missing-ssh-key, 422)
- *   AC8  — Vorlage ist versioniert (TEMPLATE_VERSION-Konstante + Kommentar im Dokument)
+ *   AC8  — Vorlage ist versioniert (TEMPLATE_VERSION === 2 + Kommentar im Dokument)
+ *   AC9  — Negativ-Garantie: kein write_files authorized_keys-Block, kein useradd alex
+ *   AC10 — runcmd enthält chage -d -1 root (Hetzner Epoch-0-Expire entfernen)
+ *   AC11 — Docker-CE-Install-Block (apt-keyrings, docker.list, apt-get install docker-ce,
+ *           systemctl enable/start docker) inhaltlich erhalten
  *
  * Strategy:
  *   - Reine Unit-Tests; keine externen I/O-Abhängigkeiten.
@@ -120,67 +125,83 @@ describe('CloudInitBuilder — AC3: Docker aus offizieller Docker-Apt-Quelle', (
   });
 });
 
-// ── AC4: User alex ────────────────────────────────────────────────────────────
+// ── AC4: User alex via users:-Sektion ─────────────────────────────────────────
 
-describe('CloudInitBuilder — AC4: User alex', () => {
-  it('legt User alex an (useradd oder äquivalent)', () => {
+describe('CloudInitBuilder — AC4: User alex via users:-Sektion', () => {
+  it('enthält eine users:-Sektion mit name: alex', () => {
     const doc = buildDefault();
-    expect(doc).toContain('alex');
-    // useradd-Befehl vorhanden
-    expect(doc).toMatch(/useradd.+alex/);
+    expect(doc).toMatch(/^users:/m);
+    expect(doc).toMatch(/name:\s*alex/);
   });
 
-  it('setzt Login-Shell bash für alex', () => {
+  it('setzt Login-Shell /bin/bash für alex in der users:-Sektion', () => {
     const doc = buildDefault();
-    expect(doc).toMatch(/useradd.+-s\s+\/bin\/bash.+alex|useradd.+alex.+-s\s+\/bin\/bash/);
+    expect(doc).toContain('shell: /bin/bash');
   });
 
-  it('fügt alex der sudo-Gruppe hinzu', () => {
+  it('fügt alex der sudo-Gruppe hinzu (groups: [sudo, docker])', () => {
     const doc = buildDefault();
-    expect(doc).toMatch(/usermod.+-aG.+sudo.+alex|usermod.+-aG.+alex.+sudo/);
+    expect(doc).toMatch(/groups:.*sudo/);
   });
 
-  it('fügt alex der docker-Gruppe hinzu', () => {
+  it('fügt alex der docker-Gruppe hinzu (groups: [sudo, docker])', () => {
     const doc = buildDefault();
-    expect(doc).toMatch(/usermod.+-aG.+docker.+alex|usermod.+-aG.+alex.+docker/);
+    expect(doc).toMatch(/groups:.*docker/);
   });
 
-  it('schreibt alex Public-Key in /home/alex/.ssh/authorized_keys', () => {
+  it('gewährt alex passwortloses sudo (NOPASSWD)', () => {
     const doc = buildDefault();
-    expect(doc).toContain('/home/alex/.ssh/authorized_keys');
+    expect(doc).toContain('NOPASSWD');
+    expect(doc).toMatch(/sudo:.*ALL.*NOPASSWD/);
+  });
+
+  it('deployt alex Public-Key via ssh_authorized_keys in der users:-Sektion', () => {
+    const doc = buildDefault();
+    // Key muss nach dem alex-users:-Block erscheinen
     expect(doc).toContain(ALEX_KEY);
+    // ssh_authorized_keys-Schlüssel muss vorhanden sein
+    expect(doc).toMatch(/ssh_authorized_keys:/);
   });
 });
 
-// ── AC5: User root — distinkter Key, kein Crossover ──────────────────────────
+// ── AC5: User root — users:-Sektion, distinkter Key, kein Crossover ───────────
 
-describe('CloudInitBuilder — AC5: User root', () => {
-  it('schreibt root Public-Key in /root/.ssh/authorized_keys', () => {
+describe('CloudInitBuilder — AC5: User root via users:-Sektion', () => {
+  it('enthält eine users:-Sektion mit name: root', () => {
     const doc = buildDefault();
-    expect(doc).toContain('/root/.ssh/authorized_keys');
-    expect(doc).toContain(ROOT_KEY);
+    expect(doc).toMatch(/name:\s*root/);
   });
 
-  it('kein Key-Crossover: alex-Key nicht in /root/.ssh, root-Key nicht in /home/alex/.ssh', () => {
+  it('enthält disable_root: false', () => {
+    const doc = buildDefault();
+    expect(doc).toMatch(/disable_root:\s*false/);
+  });
+
+  it('deployt root Public-Key via ssh_authorized_keys (nicht via write_files)', () => {
+    const doc = buildDefault();
+    expect(doc).toContain(ROOT_KEY);
+    // Kein write_files-Block für authorized_keys (AC5/AC9)
+    expect(doc).not.toMatch(/path:.*authorized_keys/);
+  });
+
+  it('kein Key-Crossover: alex-Key nicht bei root, root-Key nicht bei alex', () => {
     // Distinkte Keys verwenden
     const rootKey = 'ssh-ed25519 AAAAC3Nza111RootKeyDistinct root@host';
     const alexKey = 'ssh-ed25519 AAAAC3Nza222AlexKeyDistinct alex@host';
     const builder = new CloudInitBuilder();
     const doc = builder.build({ name: 'srv', sshPublicKeys: { root: rootKey, alex: alexKey } });
 
-    // Dokument nach Write-Files-Blöcken aufteilen
-    // Einfache Heuristik: Key-Strings kommen genau einmal vor
+    // Jeder Key genau einmal (kein Cross-Einbetten)
     const rootKeyOccurrences = (doc.match(new RegExp(rootKey.replace(/\+/g, '\\+'), 'g')) ?? []).length;
     const alexKeyOccurrences = (doc.match(new RegExp(alexKey.replace(/\+/g, '\\+'), 'g')) ?? []).length;
 
-    // Jeder Key genau einmal (kein Cross-Einbetten)
     expect(rootKeyOccurrences).toBe(1);
     expect(alexKeyOccurrences).toBe(1);
   });
 
   it('root-Key und alex-Key sind getrennte Strings', () => {
     const doc = buildDefault();
-    // Beide Keys im Dokument, aber nur der richtige je Pfad
+    // Beide Keys im Dokument
     expect(doc).toContain(ROOT_KEY);
     expect(doc).toContain(ALEX_KEY);
     // Beide Keys sind nicht identisch (Distinktheit der Fixtures)
@@ -211,6 +232,13 @@ describe('CloudInitBuilder — AC6: Kein Private-Key / kein Secret im Output', (
     const doc = buildDefault();
     expect(doc.toLowerCase()).not.toContain('bearer ');
     expect(doc.toLowerCase()).not.toContain('authorization:');
+  });
+
+  it('Public-Keys liegen nur in ssh_authorized_keys (kein echo <key> | tee in runcmd)', () => {
+    const doc = buildDefault();
+    // Keys dürfen nicht per Shell-Echo in runcmd eingebettet sein
+    expect(doc).not.toMatch(/echo.*authorized_keys/);
+    expect(doc).not.toMatch(/tee.*authorized_keys/);
   });
 });
 
@@ -293,6 +321,10 @@ describe('CloudInitBuilder — AC7: Fehlerverhalten bei fehlendem Public-Key', (
 // ── AC8: Versionierung ────────────────────────────────────────────────────────
 
 describe('CloudInitBuilder — AC8: Versionierung', () => {
+  it('TEMPLATE_VERSION ist 2 (v2 nach cloud-init-fix)', () => {
+    expect(TEMPLATE_VERSION).toBe(2);
+  });
+
   it('TEMPLATE_VERSION ist eine positive ganze Zahl', () => {
     expect(typeof TEMPLATE_VERSION).toBe('number');
     expect(Number.isInteger(TEMPLATE_VERSION)).toBe(true);
@@ -301,7 +333,7 @@ describe('CloudInitBuilder — AC8: Versionierung', () => {
 
   it('Dokument enthält die Template-Version als identifizierbares Kommentar', () => {
     const doc = buildDefault();
-    // Versions-Kommentar im Dokument — z.B. "v1" oder "version 1"
+    // Versions-Kommentar im Dokument — z.B. "v2"
     expect(doc).toMatch(new RegExp(`v${TEMPLATE_VERSION}`));
   });
 
@@ -311,5 +343,96 @@ describe('CloudInitBuilder — AC8: Versionierung', () => {
     const doc1 = builder.build(params);
     const doc2 = builder.build(params);
     expect(doc1).toBe(doc2);
+  });
+});
+
+// ── AC9: Negativ-Garantie — kein write_files / kein useradd ──────────────────
+
+describe('CloudInitBuilder — AC9: Negativ-Garantie (v1-Defekt beseitigt)', () => {
+  it('enthält KEINE write_files-Sektion mit authorized_keys', () => {
+    const doc = buildDefault();
+    // Der v1-Defekt: write_files mit owner:alex:alex schlug fehl, weil alex erst
+    // in runcmd useradd angelegt wurde → gesamtes write_files-Modul bricht ab.
+    // In v2: kein write_files mehr für Keys.
+    expect(doc).not.toMatch(/write_files:/);
+    expect(doc).not.toMatch(/path:.*authorized_keys/);
+  });
+
+  it('enthält KEIN useradd alex im runcmd', () => {
+    const doc = buildDefault();
+    // In v2: alex wird via users:-Sektion angelegt, nicht via useradd in runcmd.
+    expect(doc).not.toMatch(/useradd.*alex/);
+  });
+
+  it('enthält KEIN usermod in runcmd (Gruppen via users:-Sektion)', () => {
+    const doc = buildDefault();
+    // In v2: Gruppen werden direkt in users: gesetzt, kein usermod mehr nötig.
+    expect(doc).not.toMatch(/usermod/);
+  });
+
+  it('enthält KEIN mkdir .ssh in runcmd (Key-Deploy via users:-Sektion)', () => {
+    const doc = buildDefault();
+    // In v2: kein manuelles mkdir /home/alex/.ssh oder /root/.ssh nötig.
+    expect(doc).not.toMatch(/mkdir.*\.ssh/);
+  });
+
+  it('root-Key landet in ssh_authorized_keys unter name: root (kein write_files)', () => {
+    const doc = buildDefault();
+    // Sicherstellen: root-Key ist vorhanden und kein write_files-Block für /root/.ssh
+    expect(doc).toContain(ROOT_KEY);
+    expect(doc).not.toContain('/root/.ssh/authorized_keys');
+  });
+});
+
+// ── AC10: chage -d -1 root (Hetzner Epoch-0-Expire entfernen) ────────────────
+
+describe('CloudInitBuilder — AC10: chage -d -1 root', () => {
+  it('enthält chage -d -1 root im runcmd', () => {
+    const doc = buildDefault();
+    expect(doc).toContain('chage -d -1 root');
+  });
+
+  it('chage -d -1 root erscheint im runcmd-Block (nach runcmd:)', () => {
+    const doc = buildDefault();
+    const runcmdIdx = doc.indexOf('runcmd:');
+    const chageIdx = doc.indexOf('chage -d -1 root');
+    expect(runcmdIdx).toBeGreaterThanOrEqual(0);
+    expect(chageIdx).toBeGreaterThan(runcmdIdx);
+  });
+});
+
+// ── AC11: Docker-CE-Install-Block inhaltlich erhalten ─────────────────────────
+
+describe('CloudInitBuilder — AC11: Docker-CE-Install-Block erhalten', () => {
+  it('enthält apt-keyrings-Erstellung', () => {
+    const doc = buildDefault();
+    expect(doc).toContain('/etc/apt/keyrings');
+  });
+
+  it('enthält docker.asc GPG-Key-Download von download.docker.com', () => {
+    const doc = buildDefault();
+    expect(doc).toContain('docker.asc');
+    expect(doc).toContain('download.docker.com/linux/ubuntu/gpg');
+  });
+
+  it('enthält docker.list Repo-Eintrag', () => {
+    const doc = buildDefault();
+    expect(doc).toContain('docker.list');
+  });
+
+  it('enthält apt-get install docker-ce docker-ce-cli containerd.io docker-compose-plugin', () => {
+    const doc = buildDefault();
+    expect(doc).toMatch(/apt-get\s+install\s+-y\s+docker-ce\s+docker-ce-cli\s+containerd\.io\s+docker-compose-plugin/);
+  });
+
+  it('aktiviert und startet Docker (systemctl enable + start)', () => {
+    const doc = buildDefault();
+    expect(doc).toMatch(/systemctl\s+enable\s+docker/);
+    expect(doc).toMatch(/systemctl\s+start\s+docker/);
+  });
+
+  it('alex ist in docker-Gruppe (users:-Sektion, groups enthält docker)', () => {
+    const doc = buildDefault();
+    expect(doc).toMatch(/groups:.*docker/);
   });
 });
