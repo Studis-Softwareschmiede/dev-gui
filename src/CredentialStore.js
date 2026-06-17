@@ -47,7 +47,7 @@ import { join, dirname } from 'node:path';
 import { decrypt as gpgDecrypt } from './BackupCrypto.js';
 import { readFileSync } from 'node:fs';
 import { runBackup, resolveBackupDir, resolveRetentionCount } from './BackupEngine.js';
-import { resolveOffHostConfig } from './BackupUploader.js';
+import { resolveOffHostConfigAsync } from './BackupUploader.js';
 
 const scryptAsync = promisify(scrypt);
 
@@ -681,13 +681,15 @@ export class CredentialStore {
       return { local: 'failed', offHost: 'disabled', errorClass: 'backup-failed', message: '[BackupEngine] Kein Master-Key verfügbar (Store gesperrt)' };
     }
 
-    // I-1 Fix: Off-Host-Config ZUERST auflösen — bevor Creds gelesen werden.
+    // AC17 (S-147) + I-1 Fix: Off-Host-Config ZUERST auflösen — bevor Creds gelesen werden.
     // In Production ist offHostConfigOverride immer undefined; null = Test-Override (disabled).
-    // resolveOffHostConfig() wird hier (nicht in BackupEngine) aufgerufen, damit wir wissen
-    // ob Off-Host überhaupt aktiv ist, bevor wir unnötig Creds entschlüsseln.
+    // resolveOffHostConfigAsync() liest BackupConfigStore (JSON) mit Env-Fallback, damit
+    // UI-Config-Änderungen (S-143) wirksam sind ohne BACKUP_OFFHOST_*-Env-Vars.
+    // Wird hier (nicht in BackupEngine) aufgerufen, damit wir wissen ob Off-Host aktiv ist,
+    // bevor wir unnötig Creds entschlüsseln.
     const resolvedConfig = offHostConfigOverride === null
       ? null
-      : (offHostConfigOverride !== undefined ? offHostConfigOverride : resolveOffHostConfig());
+      : (offHostConfigOverride !== undefined ? offHostConfigOverride : await resolveOffHostConfigAsync());
 
     // AC9 (S-141): Remote-Zugangsdaten aus dem CredentialStore lesen (entschlüsselt zur Laufzeit).
     // Sie erscheinen NIEMALS in Logs/Responses/WS/Argv/Bundle.
