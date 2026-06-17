@@ -65,10 +65,16 @@ export class HostingerAdapter {
    * POST /api/vps/v1/virtual-machines endpoint is a paid purchase action —
    * not a lifecycle panel operation. See module-level comment.
    *
-   * @returns {{ list: boolean, start: boolean, stop: boolean, create: boolean }}
+   * HOSTINGER_DELETE_UNSUPPORTED: delete is false — the Hostinger VPS API
+   * does not expose a programmatic server deletion endpoint in the public
+   * REST API scope used by this adapter (only billing-level teardown exists,
+   * which is out of scope for a lifecycle panel). Per AC2, unsupported →
+   * result:"unsupported" (HTTP 422), no destructive fallback action.
+   *
+   * @returns {{ list: boolean, start: boolean, stop: boolean, create: boolean, delete: boolean }}
    */
   capabilities() {
-    return { list: true, start: true, stop: true, create: false };
+    return { list: true, start: true, stop: true, create: false, delete: false };
   }
 
   /**
@@ -145,6 +151,26 @@ export class HostingerAdapter {
       }
       return { result: 'error', reason: 'Unerwarteter Fehler beim Stoppen' };
     }
+  }
+
+  /**
+   * Delete is NOT supported for Hostinger.
+   *
+   * HOSTINGER_DELETE_UNSUPPORTED: No programmatic server deletion endpoint
+   * is available in the Hostinger VPS REST API scope used by this adapter.
+   * Per AC2: returns result:"unsupported" without any destructive fallback action.
+   *
+   * @param {object} _serverId - ignored
+   * @param {string} _token  - ignored
+   * @returns {Promise<{ result: "unsupported", reason: string }>}
+   */
+  async deleteServer(_serverId, _token) {
+    return {
+      result: 'unsupported',
+      reason:
+        'Hostinger delete ist nicht unterstützt: kein programmatischer Lösch-Endpunkt ' +
+        'verfügbar im Scope des Lifecycle-Panels. (HOSTINGER_DELETE_UNSUPPORTED)',
+    };
   }
 
   /**

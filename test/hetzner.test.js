@@ -3,11 +3,14 @@
  *
  * Covers:
  *   AC1  — HetznerAdapter implementiert den VpsProvider-Vertrag (capabilities/list/start/stop/create)
+ *   AC2  — capabilities().delete ausgewiesen (vps-delete)
  *   AC5  — start/stop liefern { result: "ok" } bei Erfolg; idempotent bei 422
  *   AC6  — Lifecycle-Aktion: Hetzner unterstützt alle vier → capabilities() alle true
  *   AC7  — create übergibt userData + sshPublicKeys als Params; Default-Image wenn keins angegeben
  *   AC8  — create-Antwort ist VpsMachine; Fehler → HetznerAdapterError ohne Token-Leak
  *   AC10 — Token erscheint NICHT in Fehlermeldungen / Antworten
+ *
+ * Covers (vps-delete): AC2 — capabilities().delete ausgewiesen
  *
  * Strategy:
  *   - fetchFn wird injiziert (kein echter Netzwerkaufruf)
@@ -55,10 +58,10 @@ function makeFetchFn(responses = []) {
 // ── AC1/AC6: capabilities() ───────────────────────────────────────────────────
 
 describe('HetznerAdapter — AC1/AC6: capabilities()', () => {
-  it('liefert alle vier Lifecycle-Flags als true', () => {
+  it('liefert alle fünf Lifecycle-Flags (inkl. delete:true)', () => {
     const adapter = new HetznerAdapter();
     const caps = adapter.capabilities();
-    expect(caps).toEqual({ list: true, start: true, stop: true, create: true });
+    expect(caps).toEqual({ list: true, start: true, stop: true, create: true, delete: true });
   });
 });
 
@@ -207,6 +210,56 @@ describe('HetznerAdapter — AC5: stop()', () => {
     const adapter = new HetznerAdapter({ fetchFn });
     const result = await adapter.stop('123', MOCK_TOKEN);
     expect(result.result).toBe('ok');
+  });
+});
+
+// ── deleteServer() ────────────────────────────────────────────────────────────
+
+describe('HetznerAdapter — deleteServer()', () => {
+  it('liefert { result: "ok" } bei HTTP 204 (Erfolg)', async () => {
+    const fetchFn = makeFetchFn([{ status: 204, body: null }]);
+    const adapter = new HetznerAdapter({ fetchFn });
+    const result = await adapter.deleteServer('123', MOCK_TOKEN);
+    expect(result).toEqual({ result: 'ok' });
+  });
+
+  it('liefert { result: "ok" } bei HTTP 200 (Erfolg)', async () => {
+    const fetchFn = makeFetchFn([{ status: 200, body: {} }]);
+    const adapter = new HetznerAdapter({ fetchFn });
+    const result = await adapter.deleteServer('123', MOCK_TOKEN);
+    expect(result).toEqual({ result: 'ok' });
+  });
+
+  it('idempotent: liefert { result: "ok" } bei 404 (Server bereits gelöscht)', async () => {
+    const fetchFn = makeFetchFn([{
+      status: 404,
+      body: { error: { code: 'not_found', message: 'server not found' } },
+    }]);
+    const adapter = new HetznerAdapter({ fetchFn });
+    const result = await adapter.deleteServer('999', MOCK_TOKEN);
+    expect(result).toEqual({ result: 'ok' });
+  });
+
+  it('liefert { result: "error" } bei 401 — Token erscheint NICHT im Fehlertext', async () => {
+    const fetchFn = makeFetchFn([{
+      status: 401,
+      body: { error: { code: 'unauthorized', message: `Bearer ${MOCK_TOKEN} is invalid` } },
+    }]);
+    const adapter = new HetznerAdapter({ fetchFn });
+    const result = await adapter.deleteServer('123', MOCK_TOKEN);
+    expect(result.result).toBe('error');
+    expect(JSON.stringify(result)).not.toContain(MOCK_TOKEN);
+  });
+
+  it('liefert { result: "error" } bei Timeout (AbortError)', async () => {
+    const fetchFn = async () => {
+      const err = new Error('The operation was aborted');
+      err.name = 'AbortError';
+      throw err;
+    };
+    const adapter = new HetznerAdapter({ fetchFn });
+    const result = await adapter.deleteServer('123', MOCK_TOKEN);
+    expect(result.result).toBe('error');
   });
 });
 

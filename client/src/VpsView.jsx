@@ -79,6 +79,32 @@ async function postPowerAction({ provider, serverId, action }) {
 }
 
 /**
+ * Sendet eine Delete-Aktion an DELETE /api/vps/machines/:provider/:serverId.
+ * Gibt { result, reason?, cleanupError? } zurück; wirft bei HTTP-Fehler.
+ *
+ * @param {{ provider: string, serverId: string, vpsName: string }} params
+ */
+async function deleteVps({ provider, serverId, vpsName }) {
+  // ServerId kann Slashes enthalten (IONOS composite IDs) — direkt als Pfadsegmente
+  const url = `/api/vps/machines/${encodeURIComponent(provider)}/${serverId}`;
+  const res = await fetch(url, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ vpsName }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 403) {
+    const err = new Error(data.error ?? 'Keine Berechtigung für diese Aktion');
+    err.is403 = true;
+    throw err;
+  }
+  if (!res.ok) {
+    throw new Error(data.reason ?? data.error ?? `Löschen fehlgeschlagen (${res.status})`);
+  }
+  return data;
+}
+
+/**
  * Sendet einen Create-Request an POST /api/vps/machines/:provider.
  * Body enthält NUR fachliche Parameter + Label-Referenzen (keine rohen Keys).
  */
@@ -386,22 +412,106 @@ function VpsCreateForm({ providers, sshLabels, onCreated, onCancel }) {
 // ── VpsMachineRow ─────────────────────────────────────────────────────────────
 
 /**
- * Eine einzelne Maschinen-Zeile mit Start/Stop-Buttons (AC6).
+ * type-to-confirm-Dialog für das Löschen eines VPS (AC9, vps-delete).
+ *
+ * Der Nutzer muss den VPS-Namen exakt eintippen, bevor der finale
+ * Löschen-Button aktiv wird. Abbruch verwirft die Eingabe folgenlos.
+ *
+ * @param {{
+ *   vpsName: string,
+ *   onConfirm: () => Promise<void>,
+ *   onCancel: () => void,
+ *   pending: boolean,
+ * }} props
+ */
+function VpsDeleteConfirm({ vpsName, onConfirm, onCancel, pending }) {
+  const [input, setInput] = useState('');
+  const inputRef = useRef(null);
+  const matches = input === vpsName;
+
+  useEffect(() => {
+    if (inputRef.current) inputRef.current.focus();
+  }, []);
+
+  const handleSubmit = useCallback(async (e) => {
+    e.preventDefault();
+    if (!matches) return;
+    await onConfirm();
+  }, [matches, onConfirm]);
+
+  const CONFIRM_INPUT_ID = `vps-delete-confirm-${vpsName}`.replace(/[^a-zA-Z0-9-]/g, '-');
+  const CONFIRM_HINT_ID = `${CONFIRM_INPUT_ID}-hint`;
+
+  return (
+    <form onSubmit={handleSubmit} style={deleteStyles.confirmForm} aria-label={`${vpsName} löschen bestätigen`}>
+      <p style={deleteStyles.confirmWarning} role="alert">
+        Achtung: Diese Aktion löscht den Server <strong>{vpsName}</strong> unwiderruflich.
+      </p>
+      <label htmlFor={CONFIRM_INPUT_ID} style={deleteStyles.confirmLabel}>
+        Zur Bestätigung den VPS-Namen eintippen:
+      </label>
+      <input
+        id={CONFIRM_INPUT_ID}
+        ref={inputRef}
+        type="text"
+        value={input}
+        onChange={(e) => setInput(e.target.value)}
+        placeholder={vpsName}
+        style={deleteStyles.confirmInput}
+        aria-required="true"
+        aria-describedby={CONFIRM_HINT_ID}
+        autoComplete="off"
+        disabled={pending}
+      />
+      <p id={CONFIRM_HINT_ID} style={deleteStyles.confirmHint}>
+        {matches ? 'Name stimmt überein.' : `Bitte genau "${vpsName}" eintippen.`}
+      </p>
+      <div style={deleteStyles.confirmActions}>
+        <button
+          type="submit"
+          style={(!matches || pending)
+            ? { ...deleteStyles.btnDelete, opacity: 0.5, cursor: 'not-allowed' }
+            : deleteStyles.btnDelete}
+          disabled={!matches || pending}
+          aria-busy={pending}
+          aria-disabled={!matches}
+        >
+          {pending ? 'Löschen…' : 'Endgültig löschen'}
+        </button>
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={pending}
+          style={deleteStyles.btnCancelDelete}
+        >
+          Abbrechen
+        </button>
+      </div>
+    </form>
+  );
+}
+
+/**
+ * Eine einzelne Maschinen-Zeile mit Start/Stop/Löschen-Buttons (AC6/AC8–AC10).
  *
  * @param {{
  *   machine: object,
- *   providerCapabilities: { start: boolean, stop: boolean } | null,
+ *   providerCapabilities: { start: boolean, stop: boolean, delete: boolean } | null,
  *   onAction: (provider: string, serverId: string, action: 'start'|'stop') => Promise<void>,
+ *   onDelete: (provider: string, serverId: string, vpsName: string) => Promise<void>,
  * }} props
  */
-function VpsMachineRow({ machine: m, providerCapabilities, onAction }) {
-  const [actionState, setActionState] = useState(null); // null | 'pending' | 'ok' | 'error' | 'unsupported' | 'forbidden'
+function VpsMachineRow({ machine: m, providerCapabilities, onAction, onDelete }) {
+  const [actionState, setActionState] = useState(null); // null | 'pending' | 'ok' | 'error' | 'unsupported' | 'forbidden' | 'deleted'
   const [actionMsg, setActionMsg] = useState(null);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deletePending, setDeletePending] = useState(false);
 
-  const caps = providerCapabilities ?? { start: true, stop: true };
+  const caps = providerCapabilities ?? { start: true, stop: true, delete: false };
 
-  const startDisabled = !caps.start || actionState === 'pending';
-  const stopDisabled = !caps.stop || actionState === 'pending';
+  const startDisabled = !caps.start || actionState === 'pending' || deletePending;
+  const stopDisabled = !caps.stop || actionState === 'pending' || deletePending;
+  const deleteDisabled = !caps.delete || actionState === 'pending' || deletePending;
 
   const handleAction = useCallback(async (action) => {
     setActionState('pending');
@@ -426,7 +536,47 @@ function VpsMachineRow({ machine: m, providerCapabilities, onAction }) {
     }
   }, [m.provider, m.serverId, onAction]);
 
+  const handleDeleteConfirm = useCallback(async () => {
+    setDeletePending(true);
+    setActionMsg(null);
+    try {
+      const result = await onDelete(m.provider, m.serverId, m.name);
+      if (result?.result === 'unsupported') {
+        setActionState('unsupported');
+        setActionMsg(result.reason ?? 'Löschen nicht unterstützt');
+        setShowDeleteConfirm(false);
+      } else if (result?.result === 'error') {
+        setActionState('error');
+        setActionMsg(result.reason ?? 'Löschen fehlgeschlagen');
+        setShowDeleteConfirm(false);
+      } else {
+        // result: "ok" (mit möglichem cleanupError)
+        setActionState('deleted');
+        setActionMsg(result?.cleanupError
+          ? `Gelöscht (Tunnel-Cleanup fehlgeschlagen: ${result.cleanupError})`
+          : 'Gelöscht');
+        setShowDeleteConfirm(false);
+      }
+    } catch (err) {
+      if (err.is403) {
+        setActionState('forbidden');
+        setActionMsg('Keine Berechtigung für diese Aktion');
+      } else {
+        setActionState('error');
+        setActionMsg(err.message ?? 'Löschen fehlgeschlagen');
+      }
+      setShowDeleteConfirm(false);
+    } finally {
+      setDeletePending(false);
+    }
+  }, [m.provider, m.serverId, m.name, onDelete]);
+
   const ACTION_MSG_ID = `vps-action-msg-${m.provider}-${m.serverId}`.replace(/[^a-zA-Z0-9-]/g, '-');
+
+  // Nach erfolgreichem Löschen: Zeile ausblenden (AC10 — VPS verschwindet aus Übersicht)
+  if (actionState === 'deleted') {
+    return null;
+  }
 
   return (
     <li style={listStyles.item}>
@@ -440,7 +590,7 @@ function VpsMachineRow({ machine: m, providerCapabilities, onAction }) {
       </span>
       {m.ipv4 && <span style={listStyles.ip}>{m.ipv4}</span>}
 
-      {/* Start/Stop-Buttons (AC6) */}
+      {/* Start/Stop/Löschen-Buttons (AC6/AC8) */}
       <div style={listStyles.actions}>
         <button
           type="button"
@@ -468,7 +618,33 @@ function VpsMachineRow({ machine: m, providerCapabilities, onAction }) {
         >
           {actionState === 'pending' ? '…' : 'Stop'}
         </button>
+        {/* AC8: Löschen-Button — disabled/als unsupported markiert wenn caps.delete=false */}
+        <button
+          type="button"
+          style={deleteDisabled
+            ? { ...listStyles.actionBtn, ...listStyles.actionBtnDelete, opacity: 0.45, cursor: 'not-allowed' }
+            : { ...listStyles.actionBtn, ...listStyles.actionBtnDelete }}
+          disabled={deleteDisabled}
+          aria-label={`${m.name} löschen`}
+          aria-describedby={actionMsg ? ACTION_MSG_ID : undefined}
+          title={!caps.delete ? 'Löschen wird von diesem Provider nicht unterstützt' : 'Server löschen'}
+          onClick={() => setShowDeleteConfirm(true)}
+        >
+          {deletePending ? '…' : 'Löschen'}
+        </button>
       </div>
+
+      {/* type-to-confirm-Dialog (AC9, vps-delete) */}
+      {showDeleteConfirm && (
+        <div style={listStyles.deleteConfirmContainer}>
+          <VpsDeleteConfirm
+            vpsName={m.name}
+            onConfirm={handleDeleteConfirm}
+            onCancel={() => setShowDeleteConfirm(false)}
+            pending={deletePending}
+          />
+        </div>
+      )}
 
       {/* Aktions-Feedback (AC9/AC10) */}
       {actionMsg && (
@@ -496,16 +672,17 @@ function VpsMachineRow({ machine: m, providerCapabilities, onAction }) {
 
 /**
  * Listet alle bekannten VPS-Maschinen auf inkl. Provider-Fehler (AC5) und
- * „nicht konfiguriert"-Hinweise (AC4). Start/Stop-Buttons (AC6).
+ * „nicht konfiguriert"-Hinweise (AC4). Start/Stop/Löschen-Buttons (AC6/AC8).
  *
  * @param {{
  *   machines: Array,
  *   providers: Array<{ id: string, configured: boolean, capabilities: object }>,
  *   providerErrors?: Array,
  *   onAction: (provider: string, serverId: string, action: 'start'|'stop') => Promise<void>,
+ *   onDelete: (provider: string, serverId: string, vpsName: string) => Promise<void>,
  * }} props
  */
-function VpsMachineList({ machines, providers, providerErrors, onAction }) {
+function VpsMachineList({ machines, providers, providerErrors, onAction, onDelete }) {
   const unconfiguredProviders = (providers ?? []).filter((p) => !p.configured);
 
   const hasContent = machines.length > 0
@@ -517,10 +694,12 @@ function VpsMachineList({ machines, providers, providerErrors, onAction }) {
   }
 
   // Capabilities per Provider (für Buttons in Zeilen)
-  // S2: unkonfigurierte Provider erhalten start/stop=false (kein Lifecycle-Aufruf — AC4)
+  // S2: unkonfigurierte Provider erhalten start/stop/delete=false (kein Lifecycle-Aufruf — AC4)
   const capsMap = {};
   for (const p of (providers ?? [])) {
-    capsMap[p.id] = !p.configured ? { start: false, stop: false } : (p.capabilities ?? { start: true, stop: true });
+    capsMap[p.id] = !p.configured
+      ? { start: false, stop: false, delete: false }
+      : (p.capabilities ?? { start: true, stop: true, delete: false });
   }
 
   return (
@@ -558,6 +737,7 @@ function VpsMachineList({ machines, providers, providerErrors, onAction }) {
               machine={m}
               providerCapabilities={capsMap[m.provider] ?? null}
               onAction={onAction}
+              onDelete={onDelete}
             />
           ))}
         </ul>
@@ -627,6 +807,25 @@ export function VpsView({ onNavigate }) {
     return result;
   }, [load]);
 
+  /**
+   * Delete-Aktion pro Maschine (AC8–AC10, vps-delete).
+   * Gibt das Backend-Ergebnis zurück; Fehler (inkl. 403) propagieren als Exception.
+   * Nach Erfolg: Re-Fetch der Maschinenliste (AC10 — VPS verschwindet aus Übersicht).
+   *
+   * @param {string} provider
+   * @param {string} serverId
+   * @param {string} vpsName
+   * @returns {Promise<{ result: string, reason?: string, cleanupError?: string }>}
+   */
+  const handleDelete = useCallback(async (provider, serverId, vpsName) => {
+    const result = await deleteVps({ provider, serverId, vpsName });
+    // Nach Erfolg: Liste neu laden (AC10 — VPS soll aus der Übersicht verschwinden)
+    if (result?.result === 'ok') {
+      await load();
+    }
+    return result;
+  }, [load]);
+
   // Kein konfigurierter Provider → Onboarding-Hinweis
   const allUnconfigured = providers.length > 0 && providers.every((p) => !p.configured);
 
@@ -682,6 +881,7 @@ export function VpsView({ onNavigate }) {
               providers={providers}
               providerErrors={providerErrors}
               onAction={handlePowerAction}
+              onDelete={handleDelete}
             />
           </>
         )}
@@ -900,6 +1100,68 @@ const createStyles = {
   },
 };
 
+const deleteStyles = {
+  confirmForm: {
+    background: '#1a0a0a',
+    border: '1px solid #7f1d1d',
+    borderRadius: 6,
+    padding: '16px',
+    marginTop: 10,
+    width: '100%',
+  },
+  confirmWarning: {
+    color: '#fca5a5',
+    fontSize: 13,
+    margin: '0 0 12px',
+  },
+  confirmLabel: {
+    display: 'block',
+    fontSize: 12,
+    color: '#9ca3af',
+    marginBottom: 4,
+  },
+  confirmInput: {
+    width: '100%',
+    padding: '6px 8px',
+    background: '#111',
+    color: '#e5e7eb',
+    border: '1px solid #7f1d1d',
+    borderRadius: 4,
+    fontSize: 13,
+    boxSizing: 'border-box',
+    minHeight: 32,
+  },
+  confirmHint: {
+    fontSize: 11,
+    color: '#9ca3af',
+    margin: '4px 0 8px',
+  },
+  confirmActions: {
+    display: 'flex',
+    gap: 8,
+  },
+  btnDelete: {
+    padding: '7px 14px',
+    background: '#7f1d1d',
+    color: '#fca5a5',
+    border: '1px solid #991b1b',
+    borderRadius: 4,
+    fontSize: 12,
+    cursor: 'pointer',
+    minHeight: 36,
+  },
+  btnCancelDelete: {
+    padding: '7px 14px',
+    background: '#1e293b',
+    color: '#d4d4d4',
+    border: '1px solid #334155',
+    borderRadius: 4,
+    fontSize: 12,
+    cursor: 'pointer',
+    minHeight: 36,
+  },
+};
+
 const listStyles = {
   empty: {
     color: '#9ca3af',
@@ -963,6 +1225,15 @@ const listStyles = {
     background: '#2c1a00',
     color: '#fbbf24',
     border: '1px solid #92400e',
+  },
+  actionBtnDelete: {
+    background: '#2c0000',
+    color: '#fca5a5',
+    border: '1px solid #7f1d1d',
+  },
+  deleteConfirmContainer: {
+    width: '100%',
+    marginTop: 4,
   },
   actionError: {
     fontSize: 11,
