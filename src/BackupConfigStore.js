@@ -46,7 +46,11 @@ const DEFAULT_CONFIG = {
   targetType: 'local',
   endpoint: '',
   bucket: '',
-  prefix: 'backups/',
+  // S3-Präfix-Default ist 'dev-gui/' (AC19, S-147).
+  // SFTP nutzt ein absolutes Pfad-Format ('/backups') und wird in _readFromEnv()
+  // kontextabhängig vom targetType gesetzt; das gemeinsame prefix-Feld enthält
+  // im Default den S3-Wert, weil 'local' (kein Off-Host) der häufigste Erst-Zustand ist.
+  prefix: 'dev-gui/',
   region: 'us-east-1',
   host: '',
   port: '22',
@@ -172,9 +176,11 @@ function _readFromEnv() {
     targetType,
     endpoint: process.env.BACKUP_S3_ENDPOINT?.trim() ?? '',
     bucket: process.env.BACKUP_S3_BUCKET?.trim() ?? '',
+    // SFTP nutzt absoluten Pfad-Default '/backups'; S3 nutzt relativen Key-Präfix 'dev-gui/' (AC19).
+    // Getrennte Defaults sind nötig, weil die Konzepte verschieden sind.
     prefix: targetType === 'sftp'
       ? (process.env.BACKUP_SFTP_PREFIX?.trim() ?? '/backups')
-      : (process.env.BACKUP_S3_PREFIX?.trim() ?? 'backups/'),
+      : (process.env.BACKUP_S3_PREFIX?.trim() ?? 'dev-gui/'),
     region: process.env.BACKUP_S3_REGION?.trim() ?? 'us-east-1',
     host: process.env.BACKUP_SFTP_HOST?.trim() ?? '',
     port: process.env.BACKUP_SFTP_PORT?.trim() ?? '22',
