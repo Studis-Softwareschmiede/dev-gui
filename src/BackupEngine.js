@@ -1,13 +1,13 @@
 /**
- * BackupEngine.js — Lokale Backup-Erzeugung + Off-Host-Upload (S-140/S-141).
+ * BackupEngine.js — Lokale Backup-Erzeugung + Off-Host-Upload (S-140/S-141/S-148).
  *
  * Wird als Post-Write-Hook am einzigen lock-geschützten Schreibpfad des
  * CredentialStore aufgerufen. Erzeugt ein GPG-symmetrisch verschlüsseltes
- * Artefakt (secrets.enc.json-Blob + Manifest), speichert es atomar (0600)
- * im konfigurierten Backup-Verzeichnis und lädt es ggf. an ein Off-Host-Ziel
- * (S3-kompatibel oder SFTP) hoch.
+ * Artefakt (secrets.enc.json-Blob + Manifest + nicht-geheime Config), speichert
+ * es atomar (0600) im konfigurierten Backup-Verzeichnis und lädt es ggf. an ein
+ * Off-Host-Ziel (S3-kompatibel oder SFTP) hoch.
  *
- * Verhaltensgrenzen (AC1–AC10):
+ * Verhaltensgrenzen (AC1–AC10, AC20–AC24):
  *   AC1:  Einziger Auslöser = Post-Write-Hook. Kein Cron, kein zweiter Trigger.
  *   AC2:  Artefakt = JSON { manifest, blob } → GPG-symmetrisch (Passphrase = Master-Key).
  *   AC3:  Atomar (tmp + rename), Rechte 0600, im konfigurierten Backup-Dir.
@@ -18,6 +18,8 @@
  *   AC8:  Zusätzlich zur lokalen Kopie wird das Artefakt an Off-Host-Ziel hochgeladen.
  *   AC9:  Remote-Creds erscheinen NIEMALS in Logs/Responses/WS/Argv/Bundle.
  *   AC10: Remote-Fehler führen NICHT zum Crash, NICHT zum Rollback; begrenzter Retry.
+ *   AC20: Artefakt enthält zusätzlich Feld `config` mit nicht-geheimer Backup-Ziel-Config.
+ *   AC21: Floor — `config`-Feld enthält NIEMALS Remote-Creds oder Master-Key.
  *
  * @module BackupEngine
  */
@@ -27,6 +29,24 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { encrypt } from './BackupCrypto.js';
 import { uploadArtefact, resolveOffHostConfigAsync } from './BackupUploader.js';
+import { read as readBackupConfig } from './BackupConfigStore.js';
+
+/**
+ * Nicht-geheime Felder die ins `config`-Feld des Artefakts aufgenommen werden (AC20/AC21).
+ * Explizite Allowlist — KEINE Remote-Creds, KEIN Master-Key.
+ */
+const ALLOWED_CONFIG_FIELDS = [
+  'offHostEnabled',
+  'targetType',
+  'endpoint',
+  'bucket',
+  'prefix',
+  'region',
+  'host',
+  'port',
+  'user',
+  'retentionCount',
+];
 
 /** Aktuelle Backup-Schema-Version (für Restore-Kompatibilitäts-Check). */
 export const BACKUP_SCHEMA_VERSION = 1;
@@ -51,6 +71,7 @@ export const DEFAULT_RETENTION_COUNT = 10;
  * @param {object} [opts.offHostCreds]       - Geheime Zugangsdaten (aus CredentialStore, NICHT loggen).
  *                                             { accessKey?, secretKey?, password?, privateKey? }
  * @param {Function} [opts._uploaderFn]      - Test-Override für uploadArtefact (Dependency Injection)
+ * @param {Function} [opts._backupConfigFn]  - Test-Override für readBackupConfig (Dependency Injection, AC20)
  *
  * @returns {Promise<BackupResult>}
  *
@@ -76,6 +97,8 @@ export async function runBackup(opts) {
     offHostCreds = {},
     // Test-Override: Dependency Injection für uploadArtefact
     _uploaderFn = uploadArtefact,
+    // AC20: Test-Override für BackupConfigStore.read() (Dependency Injection)
+    _backupConfigFn = readBackupConfig,
   } = opts;
 
   // Resolve off-host config:
@@ -114,7 +137,28 @@ export async function runBackup(opts) {
       storeSize: Buffer.byteLength(blob, 'utf8'),
     };
 
-    const artefactJson = JSON.stringify({ manifest, blob });
+    // AC20/AC21 (S-148): nicht-geheime Backup-Ziel-Config ins Artefakt aufnehmen.
+    // Allowlist stellt sicher dass KEINE Remote-Creds und KEIN Master-Key ins config-Feld gelangen.
+    // Best-effort: schlägt das Lesen fehl, wird das Backup ohne config-Feld erzeugt (kein Abbruch).
+    let artefactConfig;
+    try {
+      const rawConfig = await _backupConfigFn();
+      // Nur erlaubte, nicht-geheime Felder übernehmen (AC21 Floor)
+      artefactConfig = Object.fromEntries(
+        ALLOWED_CONFIG_FIELDS
+          .filter((k) => Object.prototype.hasOwnProperty.call(rawConfig, k))
+          .map((k) => [k, rawConfig[k]]),
+      );
+    } catch {
+      // Best-effort: Fehler beim Config-Lesen bricht Backup nicht ab
+      artefactConfig = undefined;
+    }
+
+    const artefactObj = { manifest, blob };
+    if (artefactConfig !== undefined) {
+      artefactObj.config = artefactConfig;
+    }
+    const artefactJson = JSON.stringify(artefactObj);
 
     // 2. GPG-Verschlüsselung (AC2, AC7: Passphrase via stdin, nicht Argv)
     let encryptedBuf;

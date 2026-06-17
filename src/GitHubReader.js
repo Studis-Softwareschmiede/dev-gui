@@ -6,10 +6,12 @@
  * Design:
  *   - Token is injectable: `tokenProvider` is a function () => string|Promise<string>.
  *     In production server.js ALWAYS injects the App-Token-Provider (AC5), so the
- *     App identity covers reads too. The env-GH_TOKEN default is a LEGACY fallback
- *     only for isolated use of GitHubReader outside server.js — not the regular
- *     read path (AC6). If no token resolves, GitHub data degrades to "unknown"
- *     (AC7) — no crash.
+ *     App identity covers reads too.
+ *   - The env-GH_TOKEN default has been REMOVED (S-149, AC9): the constructor no
+ *     longer falls back to `process.env.GH_TOKEN`. Without an injected `tokenProvider`,
+ *     the reader resolves no token and degrades gracefully to "unknown"/empty list
+ *     (AC10). The env-GH_TOKEN minted by `ensure-gh-auth.sh` for the gh-CLI remains
+ *     unaffected — the reader simply no longer reads it (AC6/§8).
  *   - Every external fetch has a timeout (js/R03).
  *   - Token is NEVER included in responses, logs, or errors (security/R01).
  *   - Repo names come from the GitHub API list (not user input) — no SSRF (security/R05).
@@ -64,7 +66,9 @@ async function fetchWithTimeout(url, init, timeoutMs = FETCH_TIMEOUT_MS) {
  * @param {object} [options]
  * @param {() => string|Promise<string>} [options.tokenProvider]
  *   Async or sync function that returns a GitHub token.
- *   Defaults to () => process.env.GH_TOKEN.
+ *   In production, `server.js` always injects the App-Token-Provider (S-146 AC5).
+ *   Without an injected provider, the reader resolves no token and degrades
+ *   gracefully (S-149 AC9/AC10) — it does NOT fall back to process.env.GH_TOKEN.
  * @param {typeof fetch} [options.fetchFn]
  *   Injectable fetch implementation (default: global fetch).
  */
@@ -73,7 +77,10 @@ export class GitHubReader {
   #fetch;
 
   constructor({ tokenProvider, fetchFn } = {}) {
-    this.#tokenProvider = tokenProvider ?? (() => process.env.GH_TOKEN);
+    // AC9 (S-149): NO process.env.GH_TOKEN fallback. Without an injected tokenProvider,
+    // the reader resolves undefined and degrades gracefully (AC10). The env-GH_TOKEN
+    // minted by ensure-gh-auth.sh for the gh-CLI is intentionally NOT read here.
+    this.#tokenProvider = tokenProvider ?? (() => undefined);
     this.#fetch = fetchFn ?? ((...args) => fetchWithTimeout(...args));
   }
 

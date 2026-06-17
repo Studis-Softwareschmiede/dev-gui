@@ -48,6 +48,7 @@ import { decrypt as gpgDecrypt } from './BackupCrypto.js';
 import { readFileSync } from 'node:fs';
 import { runBackup, resolveBackupDir, resolveRetentionCount } from './BackupEngine.js';
 import { resolveOffHostConfigAsync } from './BackupUploader.js';
+import { write as writeBackupConfig } from './BackupConfigStore.js';
 
 const scryptAsync = promisify(scrypt);
 
@@ -1438,7 +1439,23 @@ export class CredentialStore {
         // Floor: kein entschlüsselter Klartext bleibt als Datei liegen
         // (tmp wurde direkt zu filePath umbenannt — kein separates Klartext-File)
 
-        return { ok: true, manifest: artefact.manifest };
+        // AC22/AC23 (S-148): Ziel-Config aus dem Artefakt zurückschreiben (best-effort).
+        // Enthält das Artefakt ein `config`-Feld, wird es atomar über BackupConfigStore
+        // zurückgeschrieben. Schlägt nur das Config-Zurückschreiben fehl, gilt der
+        // Store-Restore weiterhin als erfolgreich (Credentials haben Vorrang — AC23).
+        // AC24: Artefakt ohne `config`-Feld → kein Config-Schreiben, kein Fehler.
+        let configWarning;
+        if (artefact.config && typeof artefact.config === 'object') {
+          try {
+            await writeBackupConfig(artefact.config);
+          } catch (configErr) {
+            // AC23: Config-Schreib-Fehler bricht Store-Restore NICHT ab (best-effort)
+            configWarning = `[CredentialStore] Backup-Ziel-Config aus Artefakt konnte nicht zurückgeschrieben werden: ${configErr.message}`;
+            console.error(configWarning);
+          }
+        }
+
+        return { ok: true, manifest: artefact.manifest, ...(configWarning ? { configWarning } : {}) };
       } catch {
         // AC15: bei Schreib-Fehler den tmp aufräumen (best-effort)
         try {
