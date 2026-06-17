@@ -18,9 +18,18 @@
  *   AC5  — fehlendes Public-Key → CloudInitError(missing-ssh-key), kein Provider-Call
  *   AC6  — Audit ohne Key-Material
  *
+ * Covers (vps-tunnel-provisioning / S-152):
+ *   AC5  — create() ruft createTunnel('devgui-<sanitized-vpsname>') auf + Token in cloud-init
+ *   AC6  — Token erscheint NICHT im Log/Response/Argv (Token-Floor)
+ *   AC7  — tunnelId dem VPS zugeordnet (im CredentialStore gespeichert); keine Token-Referenz
+ *   AC8  — Token im CredentialStore abgelegt (set() aufgerufen); kein Token in VpsMachine-Return
+ *   AC9  — cloudflare-not-configured → Create ohne Tunnel, kein Crash
+ *   AC10 — Token bleibt im CredentialStore auch wenn VPS-Start-Fehler (Persistenz-Reihenfolge)
+ *
  * Strategy:
  *   - CredentialStore wird als Stub injiziert
  *   - Adapter werden als Stubs injiziert (kein echter Fetch)
+ *   - CloudflareApi wird als Stub injiziert (kein echter Fetch)
  */
 
 import { describe, it, expect } from '@jest/globals';
@@ -31,6 +40,7 @@ const MOCK_TOKEN = 'registry-test-token-never-in-output';
 // ── Mock-Bausteine ─────────────────────────────────────────────────────────────
 
 function makeCredentialStore(tokensByProvider = {}, publicKeysByLabel = {}) {
+  const storedEntries = {};
   return {
     async getMeta(key) {
       // Gibt "set" wenn ein Token für den Provider gesetzt ist
@@ -39,11 +49,20 @@ function makeCredentialStore(tokensByProvider = {}, publicKeysByLabel = {}) {
     },
     async getPlaintext(key) {
       const provider = key.replace('credentials/vps/', '').replace('_api_token', '');
-      return tokensByProvider[provider] ?? null;
+      if (tokensByProvider[provider] !== undefined) {
+        return tokensByProvider[provider] ?? null;
+      }
+      // Für misc/tunnel-id Lookups
+      return storedEntries[key] ?? null;
     },
     async getPublicKey(label) {
       return publicKeysByLabel[label] ?? null;
     },
+    async set(storeKey, value) {
+      storedEntries[storeKey] = value;
+      return { status: 'set', updatedAt: new Date().toISOString() };
+    },
+    _storedEntries: storedEntries, // für Test-Assertions zugänglich
   };
 }
 
@@ -518,6 +537,7 @@ describe('VpsProviderRegistry — SSH-Key-Auflösung (vps-ssh-key-assignment)', 
     const registry = new VpsProviderRegistry({
       credentialStore: store,
       adapters: { hetzner: makeAdapter(), ionos: makeAdapter(), hostinger: makeAdapter() },
+      cloudflareApi: null, // kein Tunnel (CF nicht konfiguriert)
     });
 
     try {
@@ -533,5 +553,360 @@ describe('VpsProviderRegistry — SSH-Key-Auflösung (vps-ssh-key-assignment)', 
       expect(err.message).not.toContain(ALEX_PUB_KEY);
       expect(err.message).not.toContain(MOCK_TOKEN);
     }
+  });
+});
+
+// ── vps-tunnel-provisioning S-152: Tunnel-Provisionierung beim Create ────────
+
+const MOCK_TUNNEL_ID = 'cf-tunnel-uuid-1234';
+const MOCK_TUNNEL_TOKEN = 'eyJhbGci.mock-tunnel-token-never-in-output';
+
+/**
+ * Baut einen CloudflareApi-Stub.
+ * @param {object} [opts]
+ * @param {boolean} [opts.notConfigured] - wirft cloudflare-not-configured
+ * @param {boolean} [opts.authFailed] - wirft cloudflare-auth-failed
+ * @returns {{ stub: object, calls: string[] }}
+ */
+function makeCloudflareApiStub(opts = {}) {
+  const calls = [];
+  const stub = {
+    async createTunnel(name) {
+      calls.push(`createTunnel:${name}`);
+      if (opts.notConfigured) {
+        const err = new Error('Cloudflare not configured');
+        err.errorClass = 'cloudflare-not-configured';
+        throw err;
+      }
+      if (opts.authFailed) {
+        const err = new Error('Cloudflare auth failed');
+        err.errorClass = 'cloudflare-auth-failed';
+        throw err;
+      }
+      return { tunnelId: MOCK_TUNNEL_ID, token: MOCK_TUNNEL_TOKEN };
+    },
+  };
+  return { stub, calls };
+}
+
+/** Baut einen CloudInitBuilder-Stub, der die build()-Argumente aufzeichnet. */
+function makeBuildCapture() {
+  let captured = null;
+  const stub = {
+    build(params) {
+      captured = params;
+      return '#cloud-config\n# stub\n';
+    },
+  };
+  return { stub, getCapture: () => captured };
+}
+
+describe('VpsProviderRegistry — S-152 Tunnel-Provisionierung beim Create', () => {
+  it('AC5 — createTunnel("devgui-<sanitized-vpsname>") wird aufgerufen', async () => {
+    const store = makeCredentialStore(
+      { hetzner: MOCK_TOKEN },
+      { root: ROOT_PUB_KEY, alex: ALEX_PUB_KEY },
+    );
+    const { stub: cfStub, calls } = makeCloudflareApiStub();
+    const { stub: builderStub } = makeBuildCapture();
+
+    const registry = new VpsProviderRegistry({
+      credentialStore: store,
+      cloudflareApi: cfStub,
+      cloudInitBuilder: builderStub,
+      adapters: {
+        hetzner: makeAdapter(),
+        ionos: makeAdapter(),
+        hostinger: makeAdapter(),
+      },
+    });
+
+    await registry.create('hetzner', {
+      name: 'My Server 01',
+      region: 'nbg1',
+      serverType: 'cx11',
+      sshKeyAssignment: { root: 'root', alex: 'alex' },
+    });
+
+    // Tunnel-Name-Konvention: devgui-<sanitized> (lowercase, alphanumerisch+Bindestrich)
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatch(/^createTunnel:devgui-my-server-01$/);
+  });
+
+  it('AC5 — tunnelToken wird an CloudInitBuilder.build() übergeben', async () => {
+    const store = makeCredentialStore(
+      { hetzner: MOCK_TOKEN },
+      { root: ROOT_PUB_KEY, alex: ALEX_PUB_KEY },
+    );
+    const { stub: cfStub } = makeCloudflareApiStub();
+    const { stub: builderStub, getCapture } = makeBuildCapture();
+
+    const registry = new VpsProviderRegistry({
+      credentialStore: store,
+      cloudflareApi: cfStub,
+      cloudInitBuilder: builderStub,
+      adapters: {
+        hetzner: makeAdapter(),
+        ionos: makeAdapter(),
+        hostinger: makeAdapter(),
+      },
+    });
+
+    await registry.create('hetzner', {
+      name: 'srv',
+      region: 'nbg1',
+      serverType: 'cx11',
+      sshKeyAssignment: { root: 'root', alex: 'alex' },
+    });
+
+    const buildArgs = getCapture();
+    expect(buildArgs).not.toBeNull();
+    // tunnelToken wurde an build() übergeben
+    expect(buildArgs.tunnelToken).toBe(MOCK_TUNNEL_TOKEN);
+  });
+
+  it('AC7/AC8 — Token wird im CredentialStore abgelegt (credentials/cloudflare/tunnel_token/<tunnelId>)', async () => {
+    const store = makeCredentialStore(
+      { hetzner: MOCK_TOKEN },
+      { root: ROOT_PUB_KEY, alex: ALEX_PUB_KEY },
+    );
+    const setCallKeys = [];
+    const origSet = store.set.bind(store);
+    store.set = async (key, value) => {
+      setCallKeys.push(key);
+      return origSet(key, value);
+    };
+
+    const { stub: cfStub } = makeCloudflareApiStub();
+    const { stub: builderStub } = makeBuildCapture();
+
+    const registry = new VpsProviderRegistry({
+      credentialStore: store,
+      cloudflareApi: cfStub,
+      cloudInitBuilder: builderStub,
+      adapters: {
+        hetzner: makeAdapter(),
+        ionos: makeAdapter(),
+        hostinger: makeAdapter(),
+      },
+    });
+
+    await registry.create('hetzner', {
+      name: 'my-vps',
+      region: 'nbg1',
+      serverType: 'cx11',
+      sshKeyAssignment: { root: 'root', alex: 'alex' },
+    });
+
+    // Token muss unter credentials/cloudflare/tunnel_token/<tunnelId> abgelegt sein
+    const tokenKey = `credentials/cloudflare/tunnel_token/${MOCK_TUNNEL_ID}`;
+    expect(setCallKeys).toContain(tokenKey);
+
+    // Tunnel-ID muss ebenfalls abgelegt sein (AC7 — Zuordnung VPS ↔ Tunnel)
+    const idKey = `credentials/misc/vps-my-vps-tunnel-id`;
+    expect(setCallKeys).toContain(idKey);
+
+    // Tunnel-ID-Wert ist korrekt
+    expect(store._storedEntries[idKey]).toBe(MOCK_TUNNEL_ID);
+  });
+
+  it('AC8 — Token erscheint NICHT in der Create-Response (VpsMachine)', async () => {
+    const store = makeCredentialStore(
+      { hetzner: MOCK_TOKEN },
+      { root: ROOT_PUB_KEY, alex: ALEX_PUB_KEY },
+    );
+    const { stub: cfStub } = makeCloudflareApiStub();
+    const { stub: builderStub } = makeBuildCapture();
+
+    const registry = new VpsProviderRegistry({
+      credentialStore: store,
+      cloudflareApi: cfStub,
+      cloudInitBuilder: builderStub,
+      adapters: {
+        hetzner: makeAdapter(),
+        ionos: makeAdapter(),
+        hostinger: makeAdapter(),
+      },
+    });
+
+    const machine = await registry.create('hetzner', {
+      name: 'srv',
+      region: 'nbg1',
+      serverType: 'cx11',
+      sshKeyAssignment: { root: 'root', alex: 'alex' },
+    });
+
+    // Token darf NICHT in der VpsMachine / Create-Response erscheinen (AC8 / security/R01)
+    const machineStr = JSON.stringify(machine);
+    expect(machineStr).not.toContain(MOCK_TUNNEL_TOKEN);
+    expect(machineStr).not.toContain('tunnel_token');
+  });
+
+  it('AC9 — cloudflare-not-configured → Create ohne Tunnel, kein Crash', async () => {
+    const store = makeCredentialStore(
+      { hetzner: MOCK_TOKEN },
+      { root: ROOT_PUB_KEY, alex: ALEX_PUB_KEY },
+    );
+    const { stub: cfStub } = makeCloudflareApiStub({ notConfigured: true });
+    let buildArgs = null;
+    const builderStub = { build: (p) => { buildArgs = p; return '#cloud-config\n# stub\n'; } };
+
+    const registry = new VpsProviderRegistry({
+      credentialStore: store,
+      cloudflareApi: cfStub,
+      cloudInitBuilder: builderStub,
+      adapters: {
+        hetzner: makeAdapter(),
+        ionos: makeAdapter(),
+        hostinger: makeAdapter(),
+      },
+    });
+
+    // Kein Crash — Create läuft durch (AC9)
+    const machine = await registry.create('hetzner', {
+      name: 'srv',
+      region: 'nbg1',
+      serverType: 'cx11',
+      sshKeyAssignment: { root: 'root', alex: 'alex' },
+    });
+
+    expect(machine).toBeDefined();
+    // Kein tunnelToken in build()-Aufruf (da CF nicht konfiguriert)
+    expect(buildArgs).not.toBeNull();
+    expect(buildArgs.tunnelToken).toBeUndefined();
+  });
+
+  it('AC9 — kein cloudflareApi injiziert → Create ohne Tunnel, kein Crash', async () => {
+    const store = makeCredentialStore(
+      { hetzner: MOCK_TOKEN },
+      { root: ROOT_PUB_KEY, alex: ALEX_PUB_KEY },
+    );
+    let buildArgs = null;
+    const builderStub = { build: (p) => { buildArgs = p; return '#cloud-config\n# stub\n'; } };
+
+    const registry = new VpsProviderRegistry({
+      credentialStore: store,
+      cloudflareApi: null, // kein CF
+      cloudInitBuilder: builderStub,
+      adapters: {
+        hetzner: makeAdapter(),
+        ionos: makeAdapter(),
+        hostinger: makeAdapter(),
+      },
+    });
+
+    const machine = await registry.create('hetzner', {
+      name: 'srv',
+      region: 'nbg1',
+      serverType: 'cx11',
+      sshKeyAssignment: { root: 'root', alex: 'alex' },
+    });
+
+    expect(machine).toBeDefined();
+    // Kein Token weitergegeben
+    expect(buildArgs.tunnelToken).toBeUndefined();
+  });
+
+  it('AC9 — andere CF-Fehler (auth-failed) → Create bricht ab', async () => {
+    const store = makeCredentialStore(
+      { hetzner: MOCK_TOKEN },
+      { root: ROOT_PUB_KEY, alex: ALEX_PUB_KEY },
+    );
+    const { stub: cfStub } = makeCloudflareApiStub({ authFailed: true });
+    const builderStub = { build: () => '#cloud-config\n# stub\n' };
+
+    const registry = new VpsProviderRegistry({
+      credentialStore: store,
+      cloudflareApi: cfStub,
+      cloudInitBuilder: builderStub,
+      adapters: {
+        hetzner: makeAdapter(),
+        ionos: makeAdapter(),
+        hostinger: makeAdapter(),
+      },
+    });
+
+    // Auth-Fehler → Create bricht ab (kein VPS-Create ohne Tunnel bei CF-Fehler ≠ not-configured)
+    await expect(
+      registry.create('hetzner', {
+        name: 'srv',
+        region: 'nbg1',
+        serverType: 'cx11',
+        sshKeyAssignment: { root: 'root', alex: 'alex' },
+      }),
+    ).rejects.toMatchObject({ errorClass: 'cloudflare-auth-failed' });
+  });
+
+  it('AC6 Token-Floor — tunnelToken erscheint NICHT im tunnelId-Wert im CredentialStore', async () => {
+    const store = makeCredentialStore(
+      { hetzner: MOCK_TOKEN },
+      { root: ROOT_PUB_KEY, alex: ALEX_PUB_KEY },
+    );
+    const { stub: cfStub } = makeCloudflareApiStub();
+    const { stub: builderStub } = makeBuildCapture();
+
+    const registry = new VpsProviderRegistry({
+      credentialStore: store,
+      cloudflareApi: cfStub,
+      cloudInitBuilder: builderStub,
+      adapters: {
+        hetzner: makeAdapter(),
+        ionos: makeAdapter(),
+        hostinger: makeAdapter(),
+      },
+    });
+
+    await registry.create('hetzner', {
+      name: 'srv',
+      region: 'nbg1',
+      serverType: 'cx11',
+      sshKeyAssignment: { root: 'root', alex: 'alex' },
+    });
+
+    // Tunnel-ID-Zuordnung darf NUR die tunnelId enthalten, NICHT das Token
+    const idKey = 'credentials/misc/vps-srv-tunnel-id';
+    const storedIdValue = store._storedEntries[idKey];
+    expect(storedIdValue).toBe(MOCK_TUNNEL_ID);
+    expect(storedIdValue).not.toContain(MOCK_TUNNEL_TOKEN);
+  });
+
+  it('AC10 — Token bleibt im CredentialStore, auch wenn Adapter-Create fehlschlägt', async () => {
+    const store = makeCredentialStore(
+      { hetzner: MOCK_TOKEN },
+      { root: ROOT_PUB_KEY, alex: ALEX_PUB_KEY },
+    );
+    const { stub: cfStub } = makeCloudflareApiStub();
+    const { stub: builderStub } = makeBuildCapture();
+
+    const registry = new VpsProviderRegistry({
+      credentialStore: store,
+      cloudflareApi: cfStub,
+      cloudInitBuilder: builderStub,
+      adapters: {
+        hetzner: {
+          capabilities: () => ({ list: true, start: true, stop: true, create: true }),
+          listMachines: async () => [],
+          start: async () => ({ result: 'ok' }),
+          stop: async () => ({ result: 'ok' }),
+          create: async () => { throw new Error('Provider-API nicht erreichbar'); },
+        },
+        ionos: makeAdapter(),
+        hostinger: makeAdapter(),
+      },
+    });
+
+    // Create schlägt beim Adapter fehl — Token wurde aber VOR dem Adapter-Call persistiert
+    await expect(
+      registry.create('hetzner', {
+        name: 'my-vps',
+        region: 'nbg1',
+        serverType: 'cx11',
+        sshKeyAssignment: { root: 'root', alex: 'alex' },
+      }),
+    ).rejects.toThrow();
+
+    // Token muss im Store sein (AC10 — kein verwaistes, unreferenziertes Geheimnis)
+    const tokenKey = `credentials/cloudflare/tunnel_token/${MOCK_TUNNEL_ID}`;
+    expect(store._storedEntries[tokenKey]).toBe(MOCK_TUNNEL_TOKEN);
   });
 });

@@ -45,6 +45,7 @@ import { HetznerAdapter } from './providers/hetzner.js';
 import { IonosAdapter } from './providers/ionos.js';
 import { HostingerAdapter } from './providers/hostinger.js';
 import { CloudInitBuilder } from './CloudInitBuilder.js';
+import { sanitizeTunnelName } from './tunnelName.js';
 
 /** Alle bekannten Provider-IDs. */
 const KNOWN_PROVIDERS = ['hetzner', 'ionos', 'hostinger'];
@@ -57,6 +58,12 @@ const LIST_TIMEOUT_MS = 10000;
 
 // ── VpsProviderRegistry ────────────────────────────────────────────────────────
 
+/** CredentialStore-Schlüssel für das Tunnel-Token (Geheimnis, verschlüsselt at rest). */
+const TUNNEL_TOKEN_KEY = (tunnelId) => `credentials/cloudflare/tunnel_token/${tunnelId}`;
+
+/** CredentialStore-Schlüssel für die Tunnel-ID-Zuordnung (nicht geheim, encrypted für Einheitlichkeit). */
+const TUNNEL_ID_KEY = (sanitizedName) => `credentials/misc/vps-${sanitizedName}-tunnel-id`;
+
 export class VpsProviderRegistry {
   /** @type {import('../CredentialStore.js').CredentialStore} */
   #credentialStore;
@@ -68,12 +75,23 @@ export class VpsProviderRegistry {
   #cloudInitBuilder;
 
   /**
+   * Cloudflare-API-Boundary für Tunnel-Provisionierung beim VPS-Create (S-152).
+   * Null wenn nicht konfiguriert → VPS-Create läuft ohne Tunnel (AC9).
+   *
+   * @type {import('../cloudflare/CloudflareApi.js').CloudflareApi|null}
+   */
+  #cloudflareApi;
+
+  /**
    * @param {object} options
    * @param {import('../CredentialStore.js').CredentialStore} options.credentialStore
    * @param {object} [options.adapters] - Injectable adapters for tests: { hetzner, ionos, hostinger }
    * @param {CloudInitBuilder} [options.cloudInitBuilder] - Injectable for tests
+   * @param {import('../cloudflare/CloudflareApi.js').CloudflareApi|null} [options.cloudflareApi]
+   *   Cloudflare-API-Instanz für Tunnel-Provisionierung beim Create (S-152, AC5–AC10).
+   *   Wenn null/undefined → Create läuft ohne Tunnel-Provisionierung (AC9-Variante: kein Crash).
    */
-  constructor({ credentialStore, adapters, cloudInitBuilder } = {}) {
+  constructor({ credentialStore, adapters, cloudInitBuilder, cloudflareApi } = {}) {
     this.#credentialStore = credentialStore;
 
     // Adapter-Instanzen aufbauen (injectable für Tests)
@@ -86,6 +104,9 @@ export class VpsProviderRegistry {
 
     // CloudInitBuilder: server-intern, nie client-controlled (ADR-009)
     this.#cloudInitBuilder = cloudInitBuilder ?? new CloudInitBuilder();
+
+    // CloudflareApi: optional — fehlt → kein Tunnel (AC9)
+    this.#cloudflareApi = cloudflareApi ?? null;
   }
 
   // ── Öffentliche API ──────────────────────────────────────────────────────────
@@ -213,13 +234,28 @@ export class VpsProviderRegistry {
     // Nur Public-Keys verlassen den Store (security/R01 / NFR AC4).
     const sshPublicKeys = await this.#resolveSshPublicKeys(params.sshKeyAssignment);
 
+    // S-152 AC5–AC10: Cloudflare-Tunnel-Provisionierung VOR dem cloud-init-Build.
+    // AC9-Variante (dokumentiert): Wenn Cloudflare nicht konfiguriert ist (cloudflare-not-configured)
+    // oder kein cloudflareApi injiziert wurde → Create läuft ohne Tunnel-Setup weiter.
+    // Bei anderen CF-Fehlern (Auth, Netz) → Create bricht ab (Fehler wird weiter geworfen).
+    const tunnelResult = await this.#provisionTunnel(params.name);
+    // tunnelResult: { tunnelId, tunnelToken } | null (null = kein Tunnel, kein Fehler)
+
     // ADR-009: cloud-init server-intern erzeugen — NIE vom Client übernehmen.
     // CloudInitBuilder.build() wirft CloudInitError(missing-ssh-key, 422) wenn
     // ein Public-Key fehlt — vor jedem Provider-Call (AC5/AC7).
+    // Wenn tunnelToken vorhanden → cloudflared-Block wird eingebaut (vps-cloud-init-setup AC12).
     const userData = this.#cloudInitBuilder.build({
       name: params.name,
       sshPublicKeys,
+      tunnelToken: tunnelResult?.tunnelToken, // undefined wenn kein Tunnel (rückwärtskompatibel)
     });
+
+    // S-152 AC8/AC10: Token im CredentialStore ablegen NACH Build (aber VOR Provider-Call).
+    // Bei späterer VPS-Laufzeit-Fehler bleibt Token referenziert (AC10 — kein verwaistes Geheimnis).
+    if (tunnelResult) {
+      await this.#persistTunnelCredentials(params.name, tunnelResult.tunnelId, tunnelResult.tunnelToken);
+    }
 
     const adapterParams = {
       name: params.name,
@@ -228,9 +264,99 @@ export class VpsProviderRegistry {
       image: params.image,
       userData,
       sshPublicKeys,
+      // S-152 AC7: tunnelId für nachgelagerte Zuordnung (Deploy, vps-delete).
+      // Tunnel-Name-Konvention devgui-<sanitized-vpsname> ist der primäre Lookup-Pfad.
+      // tunnelId steht zusätzlich im CredentialStore (TUNNEL_ID_KEY).
+      // NICHT das tunnelToken selbst weitergeben — nur die ID.
+      tunnelId: tunnelResult?.tunnelId ?? null,
     };
 
     return adapter.create(adapterParams, token);
+  }
+
+  // ── Tunnel-Provisionierung (S-152) ───────────────────────────────────────────
+
+  /**
+   * Legt einen Cloudflare-Tunnel für den VPS an (S-152 AC5).
+   *
+   * Tunnel-Name-Konvention: `devgui-<sanitized-vpsname>` (AC5, vps-tunnel-provisioning).
+   * Der Deploy (S-155) findet den Tunnel via listTunnels + Namensabgleich.
+   * Zusätzlich wird die tunnelId im CredentialStore gespeichert (TUNNEL_ID_KEY).
+   *
+   * AC9-Verhalten:
+   *   - Kein cloudflareApi injiziert → return null (kein Tunnel, kein Crash).
+   *   - cloudflare-not-configured → return null (kein Tunnel, kein Crash; klar protokolliert).
+   *   - Andere CF-Fehler (Auth, Netz) → Fehler weiter werfen → Create bricht ab.
+   *
+   * Security-Floor:
+   *   - tunnelToken NIEMALS in Log oder Fehlermeldung (AC2, AC6, security/R01).
+   *   - Token fließt nur in CloudInitBuilder.build() + CredentialStore (verschlüsselt at rest).
+   *
+   * @param {string} vpsName - VPS-Name (roh, wird zu Tunnel-Name sanitisiert)
+   * @returns {Promise<{ tunnelId: string, tunnelToken: string }|null>}
+   */
+  async #provisionTunnel(vpsName) {
+    if (!this.#cloudflareApi) {
+      // Kein cloudflareApi injiziert — AC9: VPS-Create ohne Tunnel
+      console.log('[VpsProviderRegistry] Tunnel-Provisionierung übersprungen: kein CloudflareApi konfiguriert');
+      return null;
+    }
+
+    const tunnelName = `devgui-${sanitizeTunnelName(vpsName)}`;
+
+    try {
+      // AC5: genau 1 Tunnel anlegen; Tunnel-Name-Konvention devgui-<sanitized-vpsname>
+      const { tunnelId, token: tunnelToken } = await this.#cloudflareApi.createTunnel(tunnelName);
+
+      // AC2/AC6/Security-Floor: Token NIEMALS loggen — nur tunnelId protokollieren
+      console.log(`[VpsProviderRegistry] Cloudflare-Tunnel angelegt: id=${tunnelId} name=${tunnelName}`);
+
+      return { tunnelId, tunnelToken };
+    } catch (err) {
+      if (err?.errorClass === 'cloudflare-not-configured') {
+        // AC9: Cloudflare nicht konfiguriert → Create ohne Tunnel (kein Crash)
+        // Kein Secret in diesem Log (errorClass, kein Token)
+        console.log(`[VpsProviderRegistry] Tunnel-Provisionierung übersprungen: Cloudflare nicht konfiguriert (${err.errorClass})`);
+        return null;
+      }
+      // Alle anderen Fehler (Auth, Netz, Name-Kollision) → weiter werfen → Create bricht ab
+      // Security: err.message enthält kein Token (CloudflareApi-Floor)
+      throw err;
+    }
+  }
+
+  /**
+   * Legt Tunnel-Token + Tunnel-ID im CredentialStore ab (S-152 AC7/AC8).
+   *
+   * Token-Schlüssel:  credentials/cloudflare/tunnel_token/<tunnelId>  (geheim, verschlüsselt)
+   * ID-Schlüssel:     credentials/misc/vps-<sanitized-vpsname>-tunnel-id (nicht geheim, aber
+   *                   encrypted für Einheitlichkeit; dient Deploy+vps-delete als Lookup)
+   *
+   * AC7: Token-Referenz = Token-Schlüssel (TUNNEL_TOKEN_KEY(tunnelId)); NICHT das Token selbst.
+   * AC8: Token at rest verschlüsselt (ADR-007 / CredentialStore.set()).
+   * AC10: Falls der VPS-Start zur Laufzeit scheitert, bleibt Token hier referenziert.
+   *
+   * Security: Bei Store-Fehler → Fehler weiter werfen (kein silent-Ignore bei Credentials-Write).
+   *
+   * @param {string} vpsName
+   * @param {string} tunnelId
+   * @param {string} tunnelToken
+   */
+  async #persistTunnelCredentials(vpsName, tunnelId, tunnelToken) {
+    if (!this.#credentialStore) {
+      // Kein Store (nur in Tests ohne Store-Stub) — kein Fehler, nur Log
+      console.log('[VpsProviderRegistry] Tunnel-Credentials nicht persistiert: kein CredentialStore');
+      return;
+    }
+
+    const sanitized = sanitizeTunnelName(vpsName);
+
+    // AC8: Token verschlüsselt at rest im CredentialStore
+    // Security-Floor: Token geht NUR in den Store — nie in Log, Response, Argv
+    await this.#credentialStore.set(TUNNEL_TOKEN_KEY(tunnelId), tunnelToken);
+
+    // AC7: Tunnel-ID als Zuordnung speichern (nicht geheim, aber im Store für Konsistenz)
+    await this.#credentialStore.set(TUNNEL_ID_KEY(sanitized), tunnelId);
   }
 
   // ── Private Helpers ──────────────────────────────────────────────────────────

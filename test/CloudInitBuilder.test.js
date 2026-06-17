@@ -10,11 +10,17 @@
  *           kein write_files authorized_keys, kein useradd
  *   AC6  — Kein Private-Key / kein Secret-Material im Output; Keys nur in users:-Sektion
  *   AC7  — Fehlender Public-Key → CloudInitError(missing-ssh-key, 422)
- *   AC8  — Vorlage ist versioniert (TEMPLATE_VERSION === 2 + Kommentar im Dokument)
+ *   AC8  — Vorlage ist versioniert (TEMPLATE_VERSION === 4 + Kommentar im Dokument)
  *   AC9  — Negativ-Garantie: kein write_files authorized_keys-Block, kein useradd alex
  *   AC10 — runcmd enthält chage -d -1 root (Hetzner Epoch-0-Expire entfernen)
  *   AC11 — Docker-CE-Install-Block (apt-keyrings, docker.list, apt-get install docker-ce,
  *           systemctl enable/start docker) inhaltlich erhalten
+ *
+ * Covers (vps-tunnel-provisioning / vps-cloud-init-setup AC12/AC13):
+ *   AC12 — Mit tunnelToken: cloudflared docker-run-Schritt in runcmd vorhanden
+ *   AC13 — Token steht nur als write_files-Wert (0600); NICHT in runcmd-Argv/Echo;
+ *           Token-Floor: Token erscheint nicht in einem Log-Pfad oder Adapter-Arg
+ *   Rückwärtskompatibilität: ohne tunnelToken → kein cloudflared-Block
  *
  * Strategy:
  *   - Reine Unit-Tests; keine externen I/O-Abhängigkeiten.
@@ -321,8 +327,8 @@ describe('CloudInitBuilder — AC7: Fehlerverhalten bei fehlendem Public-Key', (
 // ── AC8: Versionierung ────────────────────────────────────────────────────────
 
 describe('CloudInitBuilder — AC8: Versionierung', () => {
-  it('TEMPLATE_VERSION ist 2 (v2 nach cloud-init-fix)', () => {
-    expect(TEMPLATE_VERSION).toBe(2);
+  it('TEMPLATE_VERSION ist 4 (v4 nach cloudflared-Erweiterung, S-152)', () => {
+    expect(TEMPLATE_VERSION).toBe(4);
   });
 
   it('TEMPLATE_VERSION ist eine positive ganze Zahl', () => {
@@ -434,5 +440,139 @@ describe('CloudInitBuilder — AC11: Docker-CE-Install-Block erhalten', () => {
   it('alex ist in docker-Gruppe (users:-Sektion, groups enthält docker)', () => {
     const doc = buildDefault();
     expect(doc).toMatch(/groups:.*docker/);
+  });
+});
+
+// ── AC12/AC13: cloudflared-Provisionierung (vps-tunnel-provisioning S-152) ────
+
+const TUNNEL_TOKEN = 'eyJhbGciOiJFZERTQSIsImtpZCI6InRlc3Qta2V5In0.dGVzdC10dW5uZWwtdG9rZW4';
+
+/** Baut ein Dokument MIT tunnelToken. */
+function buildWithTunnel(overrides = {}) {
+  const builder = new CloudInitBuilder();
+  return builder.build({
+    name: 'test-server',
+    sshPublicKeys: { root: ROOT_KEY, alex: ALEX_KEY },
+    tunnelToken: TUNNEL_TOKEN,
+    ...overrides,
+  });
+}
+
+describe('CloudInitBuilder — AC12/AC13: cloudflared-Provisionierung mit tunnelToken', () => {
+  it('AC12 — docker run cloudflared erscheint im runcmd-Block', () => {
+    const doc = buildWithTunnel();
+    expect(doc).toContain('cloudflare/cloudflared:latest');
+    expect(doc).toContain('tunnel');
+    expect(doc).toContain('run');
+  });
+
+  it('AC12 — cloudflared Container heißt "cloudflared" und hat --restart unless-stopped', () => {
+    const doc = buildWithTunnel();
+    expect(doc).toContain('--name cloudflared');
+    expect(doc).toContain('--restart unless-stopped');
+  });
+
+  it('AC12 — cloudflared liest Token via --env-file (kein Token in Argv)', () => {
+    const doc = buildWithTunnel();
+    // Token wird via Docker --env-file übergeben — Token erscheint NICHT direkt als CLI-Arg
+    expect(doc).toContain('--env-file /etc/cloudflared/env');
+    // Token selbst darf NICHT direkt als Argument in der docker-run-Zeile stehen
+    const dockerRunLine = doc.split('\n').find((l) => l.includes('docker run') && l.includes('cloudflared'));
+    expect(dockerRunLine).toBeDefined();
+    expect(dockerRunLine).not.toContain(TUNNEL_TOKEN);
+  });
+
+  it('AC13 — Token steht in write_files als TUNNEL_TOKEN= in /etc/cloudflared/env', () => {
+    const doc = buildWithTunnel();
+    expect(doc).toContain('/etc/cloudflared/env');
+    expect(doc).toContain('write_files:');
+    // Token ist im Dokument als YAML-Wert (TUNNEL_TOKEN=...) vorhanden
+    expect(doc).toContain(`TUNNEL_TOKEN=${TUNNEL_TOKEN}`);
+  });
+
+  it('AC13 — write_files-Eintrag für das Token hat permissions 0600', () => {
+    const doc = buildWithTunnel();
+    expect(doc).toContain("permissions: '0600'");
+  });
+
+  it('AC13 — Token erscheint NICHT als Argument eines Shell-Befehls in runcmd', () => {
+    const doc = buildWithTunnel();
+    // Token darf NICHT in runcmd-Zeilen erscheinen (liegt im write_files-Block)
+    const lines = doc.split('\n');
+    const runcmdIdx = lines.findIndex((l) => l.trim() === 'runcmd:');
+    expect(runcmdIdx).toBeGreaterThanOrEqual(0);
+    // Nach runcmd: darf keine Zeile das Token direkt enthalten
+    const runcmdLines = lines.slice(runcmdIdx);
+    const tokenInArgv = runcmdLines.find(
+      (l) => l.includes(TUNNEL_TOKEN) && !l.trim().startsWith('#'),
+    );
+    expect(tokenInArgv).toBeUndefined();
+  });
+
+  it('AC13 — write_files-Block (env-Datei) erscheint VOR runcmd (cloud-init-Ausführungsreihenfolge)', () => {
+    const doc = buildWithTunnel();
+    const writeFilesIdx = doc.indexOf('write_files:');
+    const runcmdIdx = doc.indexOf('runcmd:');
+    expect(writeFilesIdx).toBeGreaterThanOrEqual(0);
+    expect(runcmdIdx).toBeGreaterThan(writeFilesIdx);
+  });
+});
+
+describe('CloudInitBuilder — Rückwärtskompatibilität: kein tunnelToken → kein cloudflared', () => {
+  it('ohne tunnelToken: kein cloudflared im Dokument', () => {
+    const doc = buildDefault(); // kein tunnelToken
+    expect(doc).not.toContain('cloudflared');
+    expect(doc).not.toContain('cloudflare/cloudflared');
+  });
+
+  it('ohne tunnelToken: kein write_files-Block (Token-Env-Datei nicht vorhanden)', () => {
+    const doc = buildDefault(); // kein tunnelToken
+    expect(doc).not.toContain('write_files:');
+    expect(doc).not.toContain('/etc/cloudflared/env');
+  });
+
+  it('mit tunnelToken=null: kein cloudflared-Block', () => {
+    const builder = new CloudInitBuilder();
+    const doc = builder.build({
+      name: 'srv',
+      sshPublicKeys: { root: ROOT_KEY, alex: ALEX_KEY },
+      tunnelToken: null,
+    });
+    expect(doc).not.toContain('cloudflared');
+    expect(doc).not.toContain('write_files:');
+  });
+
+  it('mit tunnelToken="" (leer): kein cloudflared-Block', () => {
+    const builder = new CloudInitBuilder();
+    const doc = builder.build({
+      name: 'srv',
+      sshPublicKeys: { root: ROOT_KEY, alex: ALEX_KEY },
+      tunnelToken: '',
+    });
+    expect(doc).not.toContain('cloudflared');
+    expect(doc).not.toContain('write_files:');
+  });
+
+  it('mit tunnelToken=" " (Whitespace): kein cloudflared-Block', () => {
+    const builder = new CloudInitBuilder();
+    const doc = builder.build({
+      name: 'srv',
+      sshPublicKeys: { root: ROOT_KEY, alex: ALEX_KEY },
+      tunnelToken: '   ',
+    });
+    expect(doc).not.toContain('cloudflared');
+  });
+
+  it('ohne tunnelToken: alle v2-Garantien weiterhin erfüllt (Docker, Users, chage)', () => {
+    const doc = buildDefault();
+    // Docker
+    expect(doc).toContain('docker-ce');
+    // Users
+    expect(doc).toMatch(/name:\s*alex/);
+    expect(doc).toMatch(/name:\s*root/);
+    // chage
+    expect(doc).toContain('chage -d -1 root');
+    // kein cloudflared
+    expect(doc).not.toContain('cloudflared');
   });
 });

@@ -38,7 +38,7 @@ Jeder VPS bekommt **beim Anlegen automatisch genau einen Cloudflare-Tunnel** (1 
 - **AC8** — Das Tunnel-Token wird im `CredentialStore` (verschlüsselt at rest, ADR-007) abgelegt; es erscheint nicht in der Create-Response, im Maschinen-Read-Model (`VpsMachine`), im Audit oder im Frontend-Bundle. Testbar: Create-Response + `VpsMachine` enthalten kein Token.
 
 ### Fehler/Resilienz (Floor)
-- **AC9** — Schlägt `createTunnel` fehl (z.B. `cloudflare-not-configured`, `cloudflare-auth-failed`), wird **kein** VPS-orphan-Geheimnis hinterlassen und der Create-Pfad meldet einen klaren Fehler; ist Cloudflare nicht konfiguriert, ist das Verhalten beim Create klar definiert (entweder Create bricht mit 422 ab **oder** Create läuft ohne Tunnel und kennzeichnet den VPS als „kein Tunnel" — die gewählte Variante ist im Code dokumentiert und getestet).
+- **AC9** — Schlägt `createTunnel` fehl (z.B. `cloudflare-not-configured`, `cloudflare-auth-failed`), wird **kein** VPS-orphan-Geheimnis hinterlassen und der Create-Pfad meldet einen klaren Fehler; ist Cloudflare nicht konfiguriert, ist das Verhalten beim Create klar definiert. **Gewählte Variante (S-152, coder-Entscheid):** Bei `cloudflare-not-configured` → Create läuft **ohne Tunnel** weiter (kein Crash, kein 422); VPS wird ohne cloudflared angelegt, Console-Log ohne Secret. Bei anderen CF-Fehlern (`cloudflare-auth-failed`, Netzfehler) → Create **bricht ab** (Fehler wird weiter geworfen). Getestet in `VpsProviderRegistry.test.js` (S-152-Tunnel-Block, AC9).
 - **AC10** — Schlägt das cloudflared-Setup **auf dem VPS** fehl (Laufzeit), bleibt der account-seitig angelegte Tunnel **referenziert** (Token im Store, ID dem VPS zugeordnet) — kein verwaistes, unreferenziertes Geheimnis. (Die Laufzeit-Verifikation auf dem Server selbst ist Nicht-Ziel der Backend-Garantie, analog [[vps-cloud-init-setup]].)
 
 ## Verträge
@@ -52,7 +52,7 @@ Jeder VPS bekommt **beim Anlegen automatisch genau einen Cloudflare-Tunnel** (1 
 - **Create-Pfad:** Erweiterung von `POST /api/vps/machines/{provider}` ([[vps-provider-boundary]] AC7) — Tunnel-Provisionierung läuft als Teil des Create, audit-first wie die übrige Mutation.
 
 ## Edge-Cases & Fehlerverhalten
-- Cloudflare nicht konfiguriert → `createTunnel` 422 `cloudflare-not-configured`, kein API-Call; Create-Verhalten gemäß AC9.
+- Cloudflare nicht konfiguriert → `createTunnel` 422 `cloudflare-not-configured`, kein API-Call; VPS-Create läuft ohne Tunnel (AC9-Variante: skip + log, kein 422).
 - Cloudflare-Auth fehlgeschlagen → 502 `cloudflare-auth-failed`, ohne Token-Leak, auditiert.
 - Tunnel-Name-Kollision → klare Fehlermeldung, kein halb angelegtes Geheimnis.
 - cloudflared-Install auf dem VPS schlägt zur Laufzeit fehl → Teil-Fehler gemeldet, Tunnel bleibt referenziert (AC10).
