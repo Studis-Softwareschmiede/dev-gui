@@ -2,14 +2,17 @@
  * CloudflareApiMutate.test.js — Tests für CloudflareApi-Mutate-Methoden (ADR-010/012).
  *
  * Covers:
+ *   createTunnel   — POST /accounts/{id}/cfd_tunnel → { tunnelId, token } (AC1–AC4, vps-tunnel-provisioning)
  *   addRoute       — Adds/replaces a route in tunnel ingress config (LockoutGuard-Check)
  *   removeRoute    — Removes a route from tunnel ingress config (LockoutGuard-Check)
  *   createDnsRecord — Creates a DNS CNAME record (LockoutGuard-Check)
  *   deleteDnsRecord — Deletes a DNS record by hostname lookup + DELETE
- *   deleteTunnel   — Deletes a tunnel
+ *   deleteTunnel   — Deletes a tunnel (AC4: exists, no duplication)
  *   #apiDelete success:false guard — Cloudflare HTTP 200 + { success: false } must throw
  *   LockoutGuard   — protected target → CloudflareApiError(protected-resource) before API call
  *   not-configured — missing token/accountId → CloudflareApiError(cloudflare-not-configured)
+ *
+ * Covers (vps-tunnel-provisioning): AC1, AC2, AC3, AC4
  */
 
 import { describe, it, expect } from '@jest/globals';
@@ -77,6 +80,179 @@ const DNS_LIST_RESPONSE = {
   result: [{ id: 'dns-record-id-123', name: 'app.example.com', type: 'CNAME' }],
 };
 const DELETE_SUCCESS_RESPONSE = { success: true, result: { id: TUNNEL_ID } };
+
+// ── createTunnel ──────────────────────────────────────────────────────────────
+// AC1: POST /accounts/{accountId}/cfd_tunnel, config_src:"cloudflare", returns { tunnelId, token }
+// AC2: token never appears in logs/errors; API-token never in errors
+// AC3: error classification (auth-failed/rate-limit/5xx/timeout) + AbortController-Timeout
+// AC4: deleteTunnel exists (no own delete path in createTunnel)
+
+const MOCK_TUNNEL_ID = 'tunnel-created-abcdef1234567890';
+const MOCK_TUNNEL_TOKEN = 'eyJhbGciOiJIUzI1NiJ9.tunnel-connector-token-secret';
+
+function makeCreateTunnelSuccessResponse({ id = MOCK_TUNNEL_ID, token = MOCK_TUNNEL_TOKEN } = {}) {
+  return {
+    success: true,
+    result: { id, token },
+  };
+}
+
+describe('CloudflareApi — createTunnel() — AC1–AC4 (vps-tunnel-provisioning)', () => {
+  it('AC1: POSTs to /accounts/{accountId}/cfd_tunnel with config_src:cloudflare', async () => {
+    let capturedUrl;
+    let capturedBody;
+    const fetchFn = async (url, init) => {
+      capturedUrl = url;
+      capturedBody = JSON.parse(init.body);
+      return makeFetchResponse(200, makeCreateTunnelSuccessResponse());
+    };
+    const api = makeApi({ fetchFn });
+    await api.createTunnel('devgui-my-vps');
+
+    expect(capturedUrl).toContain(`/accounts/${MOCK_ACCOUNT_ID}/cfd_tunnel`);
+    expect(capturedBody.name).toBe('devgui-my-vps');
+    expect(capturedBody.config_src).toBe('cloudflare');
+  });
+
+  it('AC1: returns { tunnelId, token } on success', async () => {
+    const fetchFn = async () => makeFetchResponse(200, makeCreateTunnelSuccessResponse());
+    const api = makeApi({ fetchFn });
+    const result = await api.createTunnel('devgui-my-vps');
+
+    expect(result.tunnelId).toBe(MOCK_TUNNEL_ID);
+    expect(result.token).toBe(MOCK_TUNNEL_TOKEN);
+  });
+
+  it('AC1: not configured → throws cloudflare-not-configured (422) without API call', async () => {
+    const calls = [];
+    const fetchFn = async (url) => { calls.push(url); return makeFetchResponse(200, {}); };
+    const api = makeApi({ configured: false, fetchFn });
+
+    await expect(api.createTunnel('devgui-my-vps'))
+      .rejects.toMatchObject({ errorClass: 'cloudflare-not-configured', httpStatus: 422 });
+    expect(calls).toHaveLength(0); // no API call made
+  });
+
+  it('AC2: tunnel token does not appear in thrown error message on auth failure', async () => {
+    // Simulate a scenario where we have a tunnel token in memory and auth fails
+    // The tunnel token must NOT leak into any error message
+    const fetchFn = async () => makeFetchResponse(401, { success: false, errors: [] });
+    const api = makeApi({ fetchFn });
+
+    let thrown;
+    try {
+      await api.createTunnel('devgui-my-vps');
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeDefined();
+    expect(thrown.message).not.toContain(MOCK_TUNNEL_TOKEN);
+    expect(thrown.message).not.toContain(MOCK_TOKEN); // API token also must not leak
+  });
+
+  it('AC2: tunnel token does not appear in error on network failure', async () => {
+    const fetchFn = async () => { throw new Error('ECONNREFUSED'); };
+    const api = makeApi({ fetchFn });
+
+    let thrown;
+    try {
+      await api.createTunnel('devgui-my-vps');
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeDefined();
+    expect(thrown.message).not.toContain(MOCK_TUNNEL_TOKEN);
+    expect(thrown.message).not.toContain(MOCK_TOKEN);
+  });
+
+  it('AC2: tunnel token does not appear in invalid-response error when result is missing', async () => {
+    // API returns 200 but result has no token
+    const fetchFn = async () => makeFetchResponse(200, { success: true, result: { id: MOCK_TUNNEL_ID } });
+    const api = makeApi({ fetchFn });
+
+    let thrown;
+    try {
+      await api.createTunnel('devgui-my-vps');
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeDefined();
+    expect(thrown.errorClass).toBe('invalid-response');
+    expect(thrown.message).not.toContain(MOCK_TOKEN);
+  });
+
+  it('AC3: 401 → cloudflare-auth-failed (502)', async () => {
+    const fetchFn = async () => makeFetchResponse(401, {});
+    const api = makeApi({ fetchFn });
+
+    await expect(api.createTunnel('devgui-my-vps'))
+      .rejects.toMatchObject({ errorClass: 'cloudflare-auth-failed', httpStatus: 502 });
+  });
+
+  it('AC3: 403 → cloudflare-auth-failed (502)', async () => {
+    const fetchFn = async () => makeFetchResponse(403, {});
+    const api = makeApi({ fetchFn });
+
+    await expect(api.createTunnel('devgui-my-vps'))
+      .rejects.toMatchObject({ errorClass: 'cloudflare-auth-failed', httpStatus: 502 });
+  });
+
+  it('AC3: 429 → cloudflare-unavailable (503)', async () => {
+    const fetchFn = async () => makeFetchResponse(429, {});
+    const api = makeApi({ fetchFn });
+
+    await expect(api.createTunnel('devgui-my-vps'))
+      .rejects.toMatchObject({ errorClass: 'cloudflare-unavailable', httpStatus: 503 });
+  });
+
+  it('AC3: 500 → cloudflare-unavailable (502)', async () => {
+    const fetchFn = async () => makeFetchResponse(500, {});
+    const api = makeApi({ fetchFn });
+
+    await expect(api.createTunnel('devgui-my-vps'))
+      .rejects.toMatchObject({ errorClass: 'cloudflare-unavailable', httpStatus: 502 });
+  });
+
+  it('AC3: timeout (AbortError) → cloudflare-unavailable (503)', async () => {
+    const fetchFn = async () => {
+      const err = new Error('The operation was aborted.');
+      err.name = 'AbortError';
+      throw err;
+    };
+    const api = makeApi({ fetchFn });
+
+    await expect(api.createTunnel('devgui-my-vps'))
+      .rejects.toMatchObject({ errorClass: 'cloudflare-unavailable', httpStatus: 503 });
+  });
+
+  it('AC3: success:false with auth error code → cloudflare-auth-failed', async () => {
+    const fetchFn = async () => makeFetchResponse(200, {
+      success: false,
+      errors: [{ code: 10000, message: 'Authentication error' }],
+    });
+    const api = makeApi({ fetchFn });
+
+    await expect(api.createTunnel('devgui-my-vps'))
+      .rejects.toMatchObject({ errorClass: 'cloudflare-auth-failed' });
+  });
+
+  it('AC3: success:false (generic) → cloudflare-unavailable', async () => {
+    const fetchFn = async () => makeFetchResponse(200, {
+      success: false,
+      errors: [{ code: 1200, message: 'conflict' }],
+    });
+    const api = makeApi({ fetchFn });
+
+    await expect(api.createTunnel('devgui-my-vps'))
+      .rejects.toMatchObject({ errorClass: 'cloudflare-unavailable' });
+  });
+
+  it('AC4: deleteTunnel method exists on CloudflareApi (no new delete path in createTunnel)', () => {
+    const api = makeApi();
+    expect(typeof api.deleteTunnel).toBe('function');
+    // createTunnel does not define its own delete path — deleteTunnel is the single path (AC4)
+  });
+});
 
 // ── addRoute ──────────────────────────────────────────────────────────────────
 
