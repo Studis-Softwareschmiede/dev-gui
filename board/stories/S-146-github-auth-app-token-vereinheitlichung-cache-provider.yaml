@@ -1,0 +1,33 @@
+id: S-146
+parent: null
+title: 'GitHub-Auth vereinheitlichen: gecachter App-Token-Provider + Reader verdrahten, GH_TOKEN-PAT entfernen'
+status: In Progress
+priority: P2
+spec: docs/specs/github-app-token-unification.md
+implements:
+- AC1
+- AC2
+- AC3
+- AC4
+- AC5
+- AC6
+- AC7
+- AC8
+depends: null
+labels:
+- security
+- backend
+github_issue: 304
+github_url: https://github.com/Studis-Softwareschmiede/dev-gui/issues/304
+size_est: M
+dispo_est: 5
+dispo_act: null
+dispo_forecast: null
+estimate_note: 'Neuer GitHubAppTokenProvider (Cache + Safety-Margin + Single-Flight, injizierbare Clock/Mint), Verdrahtung GitHubReader in server.js, GH_TOKEN-PAT-Pfad aus compose/.env.example/Reader-Default entfernen, graceful degradation + Token-Floor. Tests: Cache-Hit/Miss, Refresh-vor-Ablauf, Concurrency (kein Doppel-Mint), Reader-über-Provider, kein Token-Leak. M (~5 EP).'
+confidence: medium
+branch: feat/S-146-github-auth-unify
+pr: null
+blocked_reason: null
+created_at: '2026-06-17T00:00:00Z'
+updated_at: '2026-06-17T00:00:00Z'
+done_at: null
