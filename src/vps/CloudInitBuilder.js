@@ -15,12 +15,20 @@
  *   v2 (2026-06-17) — Benutzer + SSH-Keys via cloud-init-native users:-Sektion
  *                     (behebt write_files/useradd-Race); chage -d -1 root entfernt
  *                     Hetzner-root-Passwort-Expire (Epoch 0). (ADR-009, AC4–AC6, AC9–AC11)
+ *   v3 (2026-06-18) — (Skip — v3 wurde in der Spec für post-create-SSH-Pfad reserviert;
+ *                     cloud-init-Variante startet bei v4.)
+ *   v4 (2026-06-18) — cloudflared als Docker-Container via cloud-init (S-152, AC12/AC13).
+ *                     Tunnel-Token als Docker env-file (/etc/cloudflared/env, TUNNEL_TOKEN=<wert>,
+ *                     0600 root:root) via write_files; cloudflared liest TUNNEL_TOKEN nativ
+ *                     aus Docker-Env (--env-file) — Token NICHT in runcmd-Argv/Shell-Log
+ *                     (vps-tunnel-provisioning AC6, vps-cloud-init-setup AC13).
+ *                     Optionaler Parameter: ohne tunnelToken → kein cloudflared-Block (rückwärtskompatibel).
  *
  * @module CloudInitBuilder
  */
 
 /** Aktuelle Vorlage-Version — erhöhen bei jeder strukturellen Änderung. */
-export const TEMPLATE_VERSION = 2;
+export const TEMPLATE_VERSION = 4;
 
 // ── CloudInitBuilder ──────────────────────────────────────────────────────────
 
@@ -37,21 +45,35 @@ export class CloudInitBuilder {
    *   (d) User root: SSH-Public-Key — via users:-Sektion (ssh_authorized_keys),
    *       disable_root: false
    *   (e) chage -d -1 root: entfernt Hetzner-Epoch-0-Passwort-Expire (AC10)
+   *   (f) cloudflared als Docker-Container (optional, nur wenn tunnelToken übergeben):
+   *       Token wird via write_files in /etc/cloudflared/env (0600) abgelegt;
+   *       cloudflared liest Token via --env-file (TUNNEL_TOKEN) — NIEMALS Token in Argv/runcmd-Echo
+   *       (vps-tunnel-provisioning AC6 / vps-cloud-init-setup AC12/AC13).
    *
-   * Security-Floor (AC6 / NFR):
-   *   - Nur Public-Keys werden eingebettet; niemals Private-Keys oder Provider-Tokens.
-   *   - Public-Keys landen ausschließlich in users:→ssh_authorized_keys
-   *     (cloud-init-nativ, kein Shell-Sink in runcmd).
+   * Security-Floor (AC6 / vps-cloud-init-setup AC13 / NFR):
+   *   - Nur Public-Keys werden in users:→ssh_authorized_keys eingebettet.
+   *   - Das Tunnel-Token (wenn übergeben) landet NUR im write_files-YAML-Wert
+   *     mit restriktiven Permissions (0600, root:root) — NICHT in runcmd-Argv.
+   *   - Docker nutzt das Token ausschließlich via --env-file (TUNNEL_TOKEN) — kein Token in Argv.
+   *   - Das erzeugte cloud-init-Dokument fließt NUR an die Provider-Create-API
+   *     (server-privat). Es erscheint nicht im Frontend-Bundle oder in Logs.
    *
    * @param {object} params
    * @param {string} params.name              - Hostname des Servers (optional; wird
    *                                            als cloud-init-hostname gesetzt, falls angegeben)
    * @param {{ root: string, alex: string }} params.sshPublicKeys
    *   - Distinkte SSH-Public-Keys je User-Rolle (nur Public-Keys, nie Private-Keys).
+   * @param {string} [params.tunnelToken]
+   *   - Cloudflare Tunnel-Token (Geheimnis). Wenn übergeben, wird cloudflared als
+   *     Docker-Container eingerichtet. Wenn nicht übergeben → kein cloudflared-Block
+   *     (rückwärtskompatibel mit v2).
+   *     Security: Token erscheint NICHT in runcmd-Argv — nur als YAML-Wert im
+   *     write_files-Block (`/etc/cloudflared/env` als Docker env-file, 0600 Permissions;
+   *     cloudflared liest TUNNEL_TOKEN aus Docker-Env ohne argv-Exposition; AC6).
    * @returns {string} Wohlgeformtes #cloud-config-YAML-Dokument (user-data).
    * @throws {CloudInitError} wenn ein Public-Key für root oder alex fehlt (AC7).
    */
-  build({ name, sshPublicKeys } = {}) {
+  build({ name, sshPublicKeys, tunnelToken } = {}) {
     const { root: rootKey, alex: alexKey } = sshPublicKeys ?? {};
 
     // AC7 — fehlende Public-Keys → 422-fähiger Fehler vor jedem Provider-Call
@@ -78,10 +100,40 @@ export class CloudInitBuilder {
     // Hostname-Block (optional)
     const hostnameBlock = name ? `hostname: ${sanitizeHostname(name)}\n` : '';
 
+    // cloudflared-Block: nur wenn tunnelToken übergeben (vps-cloud-init-setup AC12/AC13).
+    // Security-Floor: Token landet NUR im write_files-YAML-Wert mit 0600-Permissions.
+    // Es erscheint NICHT in runcmd-Argv oder geloggten Shell-Befehlen (AC6).
+    //
+    // Mechanik (coder-Entscheid S-152, AC6 / vps-cloud-init-setup AC13):
+    //   Das Token wird als Docker --env-file übergeben (Datei: /etc/cloudflared/env,
+    //   Inhalt: TUNNEL_TOKEN=<wert>). cloudflared liest TUNNEL_TOKEN nativ ohne weiteres Argument.
+    //   Damit erscheint das Token NICHT in docker-run-Argv (sichtbar via `ps aux`),
+    //   sondern nur im Datei-Inhalt — vor Cloud-init-Logs/Shell-Protokoll geschützt.
+    //   Der runcmd-Eintrag ist: docker run ... --env-file /etc/cloudflared/env ...
+    //   — kein Token-Wert in der Befehlszeile selbst.
+    const hasTunnel = typeof tunnelToken === 'string' && tunnelToken.trim() !== '';
+    const writeFilesBlock = hasTunnel
+      ? `write_files:
+  # Tunnel-Token als Docker env-file (0600 root:root) — NICHT in runcmd-Argv (vps-tunnel-provisioning AC6)
+  # Das Token fließt ausschließlich an die Provider-Create-API (server-privat, nie in Logs/Frontend).
+  - path: /etc/cloudflared/env
+    permissions: '0600'
+    owner: 'root:root'
+    content: |
+      TUNNEL_TOKEN=${tunnelToken.trim()}
+`
+      : '';
+
+    const cloudflaredRuncmd = hasTunnel
+      ? `  # cloudflared als Docker-Container — Token via --env-file (kein Token in Argv, AC6)
+  - docker run -d --name cloudflared --restart unless-stopped --env-file /etc/cloudflared/env cloudflare/cloudflared:latest tunnel --no-autoupdate run
+`
+      : '';
+
     // Template-Version als Kommentar im Dokument (AC8)
     const doc = `#cloud-config
 # cloud-init Default-Setup-Vorlage v${TEMPLATE_VERSION} (CloudInitBuilder, ADR-009)
-${hostnameBlock}package_update: true
+${hostnameBlock}${writeFilesBlock}package_update: true
 package_upgrade: true
 disable_root: false
 users:
@@ -107,7 +159,7 @@ runcmd:
   - apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
   - systemctl enable docker
   - systemctl start docker
-`;
+${cloudflaredRuncmd}`;
 
     return doc;
   }

@@ -166,11 +166,16 @@ const workspaceScanner = new WorkspaceScanner({ workspaceRootResolver: resolveWo
 const workspaceMutator = new WorkspaceMutator({ workspaceRootResolver: resolveWorkspaceRoot });
 const githubCloner = new GitHubCloner({ credentialStore, workspaceRootResolver: resolveWorkspaceRoot });
 
-// ── VPS ───────────────────────────────────────────────────────────────────────
-const vpsRegistry = new VpsProviderRegistry({ credentialStore });
-
 // ── Cloudflare ────────────────────────────────────────────────────────────────
+// CloudflareApi wird vor VpsProviderRegistry instanziiert, damit sie als
+// Dependency für die Tunnel-Provisionierung beim VPS-Create (S-152) injiziert
+// werden kann.
 const cloudflareApi = new CloudflareApi({ credentialStore });
+
+// ── VPS ───────────────────────────────────────────────────────────────────────
+// cloudflareApi wird injiziert für Tunnel-Provisionierung beim Create (S-152 AC5–AC10).
+// Wenn Cloudflare nicht konfiguriert ist, läuft VPS-Create ohne Tunnel (AC9).
+const vpsRegistry = new VpsProviderRegistry({ credentialStore, cloudflareApi });
 
 // ── Deploy ────────────────────────────────────────────────────────────────────
 const lockoutGuard = new LockoutGuard();
