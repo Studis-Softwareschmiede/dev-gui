@@ -14,6 +14,8 @@
  * AC11 — Letzter ReconcileReport (GET /api/deployments/reconcile/last) read-only;
  *         manueller „jetzt abgleichen"-Trigger (POST /api/deployments/reconcile);
  *         nach Abschluss Re-Fetch; 403 → „keine Berechtigung"; kein Secret-Leak.
+ * AC12 — (S-158) Jeder Hostname/jede Route als anklickbarer Link (<a href="https://…"
+ *         target="_blank" rel="noopener noreferrer">); auch für protected Hostnames.
  * A11y — Titel als <h1>; Listen/Tabellen mit Header; Buttons beschriftet; Fehler aria-zugeordnet;
  *         sichtbarer Fokus; Touch-Target ≥ 44px.
  * Security (Floor) — Kein Token im Frontend; Error-Messages ohne Secret-Leak.
@@ -323,7 +325,15 @@ function RouteRow({ route, onDeleted }) {
     <>
       <tr style={route.protected ? tableStyles.protectedRow : tableStyles.normalRow}>
         <td style={tableStyles.cell}>
-          <span style={tableStyles.hostname}>{route.hostname}</span>
+          {/* AC12 — hostname as clickable link; opens https://<hostname> in new tab */}
+          <a
+            href={`https://${route.hostname}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={tableStyles.hostnameLink}
+          >
+            {route.hostname}
+          </a>
           {route.protected && (
             <span
               style={tableStyles.protectedBadge}
@@ -1204,6 +1214,14 @@ const tableStyles = {
     fontFamily: 'monospace',
     color: '#e5e7eb',
     fontSize: 13,
+  },
+  /* AC12 — hostname link style; same monospace look, visually distinct as link */
+  hostnameLink: {
+    fontFamily: 'monospace',
+    color: '#60a5fa',
+    fontSize: 13,
+    textDecoration: 'underline',
+    textUnderlineOffset: 2,
   },
   service: {
     fontFamily: 'monospace',
