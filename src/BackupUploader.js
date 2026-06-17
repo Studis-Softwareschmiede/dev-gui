@@ -1,8 +1,8 @@
 /**
- * BackupUploader.js — Off-Host-Upload für Backup-Artefakte (S-141).
+ * BackupUploader.js — Off-Host-Upload für Backup-Artefakte (S-141, S3-only ab S-160).
  *
- * Kapselt die Provider-Implementierungen für den Upload des GPG-verschlüsselten
- * Backup-Artefakts an ein Off-Host-Ziel (S3-kompatibel oder SFTP).
+ * Kapselt die Provider-Implementierung für den Upload des GPG-verschlüsselten
+ * Backup-Artefakts an ein Off-Host-Ziel (S3-kompatibel).
  *
  * Verhaltens-Verträge (AC8–AC10, credential-backup spec):
  *   AC8:  Dasselbe Artefakt wird zusätzlich zur lokalen Kopie hochgeladen;
@@ -12,6 +12,10 @@
  *         Argv oder dem Frontend-Bundle.
  *   AC10: Remote-Fehler führen NICHT zum Crash und NICHT zum Rollback der
  *         Cred-Operation; begrenzter Retry; endgültiger Fehlschlag → 'failed'.
+ *
+ * SFTP-Off-Host-Pfad entfernt (S-160):
+ *   _uploadSftp, targetType:'sftp'-Zweig und BACKUP_SFTP_*-Auflösung sind vollständig
+ *   entfernt. Die ssh2-Dependency bleibt in package.json (VPS/cloudflared nutzen sie).
  *
  * Architekt-Entscheid (S-143, Variante B):
  *   resolveOffHostConfigAsync() liest zuerst aus BackupConfigStore (JSON-Datei auf
@@ -28,14 +32,12 @@
  *   - Keine verarbeiteten Remote-Responses im Log (können Sensitive-Info enthalten).
  *
  * Provider-Schema:
- *   Typ "s3":   { type:'s3', endpoint, bucket, prefix, region } + Creds { accessKey, secretKey }
- *   Typ "sftp": { type:'sftp', host, port, prefix, user } + Creds { password?, privateKey? }
+ *   Typ "s3": { type:'s3', endpoint, bucket, prefix, region } + Creds { accessKey, secretKey }
  *
  * @module BackupUploader
  */
 
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
-import { Client as SshClient } from 'ssh2';
 import { read as readBackupConfig } from './BackupConfigStore.js';
 
 /** Maximale Anzahl Upload-Versuche (Retry + Erstversuch = UPLOAD_MAX_ATTEMPTS Versuche total). */
@@ -43,9 +45,6 @@ export const UPLOAD_MAX_ATTEMPTS = 3;
 
 /** Basis-Wartezeit (ms) zwischen Retry-Versuchen (exponentielles Backoff). */
 const RETRY_BASE_MS = 500;
-
-/** Timeout pro SFTP-Verbindung + Upload (ms). */
-const SFTP_TIMEOUT_MS = 30_000;
 
 /** Timeout pro S3-Upload (ms). */
 const S3_TIMEOUT_MS = 30_000;
@@ -55,7 +54,7 @@ const S3_TIMEOUT_MS = 30_000;
  * Gibt null zurück wenn kein Ziel konfiguriert (→ offHost: 'disabled').
  *
  * Nicht-geheime Konfigurationsparameter:
- *   BACKUP_OFFHOST_TYPE    = 's3' | 'sftp'  (Pflicht, wenn Off-Host aktiv)
+ *   BACKUP_OFFHOST_TYPE    = 's3'  (Pflicht, wenn Off-Host aktiv)
  *   BACKUP_OFFHOST_ENABLED = '1' | 'true'   (Pflicht, sonst disabled)
  *
  * S3-spezifisch (nicht-geheim):
@@ -64,13 +63,7 @@ const S3_TIMEOUT_MS = 30_000;
  *   BACKUP_S3_PREFIX    — Pfad-Präfix im Bucket (optional, default: 'backups/')
  *   BACKUP_S3_REGION    — AWS Region (default: 'us-east-1')
  *
- * SFTP-spezifisch (nicht-geheim):
- *   BACKUP_SFTP_HOST    — Hostname/IP
- *   BACKUP_SFTP_PORT    — Port (default: 22)
- *   BACKUP_SFTP_USER    — Benutzername
- *   BACKUP_SFTP_PREFIX  — Remote-Verzeichnis-Präfix (default: '/backups')
- *
- * @returns {{ type: 's3'|'sftp', [key: string]: string } | null}
+ * @returns {{ type: 's3', [key: string]: string } | null}
  */
 export function resolveOffHostConfig() {
   const enabled = process.env.BACKUP_OFFHOST_ENABLED;
@@ -93,18 +86,6 @@ export function resolveOffHostConfig() {
     };
   }
 
-  if (type === 'sftp') {
-    const host = process.env.BACKUP_SFTP_HOST?.trim();
-    if (!host) return null; // Host ist Pflicht
-    return {
-      type: 'sftp',
-      host,
-      port: process.env.BACKUP_SFTP_PORT?.trim() ?? '22',
-      user: process.env.BACKUP_SFTP_USER?.trim() ?? '',
-      prefix: process.env.BACKUP_SFTP_PREFIX?.trim() ?? '/backups',
-    };
-  }
-
   return null;
 }
 
@@ -117,7 +98,7 @@ export function resolveOffHostConfig() {
  *
  * Gibt null zurück wenn Off-Host deaktiviert oder kein Ziel konfiguriert.
  *
- * @returns {Promise<{ type: 's3'|'sftp', [key: string]: string } | null>}
+ * @returns {Promise<{ type: 's3', [key: string]: string } | null>}
  */
 export async function resolveOffHostConfigAsync() {
   let config;
@@ -142,18 +123,7 @@ export async function resolveOffHostConfigAsync() {
     };
   }
 
-  if (type === 'sftp') {
-    if (!config.host) return null; // Host ist Pflicht
-    return {
-      type: 'sftp',
-      host: config.host,
-      port: config.port ?? '22',
-      user: config.user ?? '',
-      prefix: config.prefix ?? '/backups',
-    };
-  }
-
-  return null; // targetType='local' → kein Off-Host-Upload
+  return null; // targetType='local' oder unbekannt → kein Off-Host-Upload
 }
 
 /**
@@ -166,12 +136,10 @@ export async function resolveOffHostConfigAsync() {
  * @param {object} opts
  * @param {Buffer} opts.artefactBuffer       - Das verschlüsselte GPG-Artefakt
  * @param {string} opts.artefactName         - Dateiname (z.B. 'backup-2026-01-01T00-00-00-000Z-abcd1234.gpg')
- * @param {{ type: 's3'|'sftp', [key: string]: string }} opts.config   - Nicht-geheime Konfiguration
+ * @param {{ type: 's3', [key: string]: string }} opts.config   - Nicht-geheime Konfiguration
  * @param {object} opts.creds                - Zugangsdaten (NICHT loggen)
  * @param {string} [opts.creds.accessKey]    - S3 Access Key ID
  * @param {string} [opts.creds.secretKey]    - S3 Secret Access Key
- * @param {string} [opts.creds.password]     - SFTP Passwort
- * @param {string} [opts.creds.privateKey]   - SFTP Private Key (PEM)
  * @returns {Promise<'ok'|'failed'>}
  */
 export async function uploadArtefact({ artefactBuffer, artefactName, config, creds }) {
@@ -182,8 +150,6 @@ export async function uploadArtefact({ artefactBuffer, artefactName, config, cre
     try {
       if (config.type === 's3') {
         await _uploadS3({ artefactBuffer, artefactName, config, creds });
-      } else if (config.type === 'sftp') {
-        await _uploadSftp({ artefactBuffer, artefactName, config, creds });
       } else {
         // Unbekannter Provider
         return 'failed';
@@ -258,117 +224,8 @@ async function _uploadS3({ artefactBuffer, artefactName, config, creds }) {
 }
 
 /**
- * SFTP-Upload via ssh2.
- * AC9: password/privateKey erscheinen NIEMALS im Log/Fehlertext.
- *
- * @private
- */
-async function _uploadSftp({ artefactBuffer, artefactName, config, creds }) {
-  return new Promise((resolve, reject) => {
-    const conn = new SshClient();
-    let settled = false;
-
-    const timer = setTimeout(() => {
-      if (!settled) {
-        settled = true;
-        conn.end();
-        const e = new Error('[BackupUploader] SFTP-Upload-Timeout');
-        e.errorClass = 'remote-upload-failed';
-        reject(e);
-      }
-    }, SFTP_TIMEOUT_MS);
-
-    const fail = (msg) => {
-      if (!settled) {
-        settled = true;
-        clearTimeout(timer);
-        conn.end();
-        // AC9: msg enthält KEINE Credentials (bereits durch _scrubCredsFromMessage bereinigt)
-        const e = new Error(`[BackupUploader] SFTP-Upload fehlgeschlagen: ${msg}`);
-        e.errorClass = 'remote-upload-failed';
-        reject(e);
-      }
-    };
-
-    conn.on('error', (err) => {
-      // AC9: err.message wird bereinigt (kann Host/User enthalten — das ist OK)
-      // Passwort/PrivateKey erscheinen nicht (ssh2 gibt sie nicht in Fehlern aus)
-      fail(_scrubCredsFromMessage(err.message ?? '', creds));
-    });
-
-    conn.on('ready', () => {
-      conn.sftp((err, sftp) => {
-        if (err) {
-          fail(_scrubCredsFromMessage(err.message ?? '', creds));
-          return;
-        }
-
-        const remotePath = _buildSftpPath(config.prefix, artefactName);
-
-        // S-4 Fix: mkdir MUSS abgeschlossen sein, bevor createWriteStream aufgerufen wird —
-        // sonst kann ENOENT auftreten wenn das Verzeichnis noch nicht existiert.
-        // mkdir-Callback-Fehler ignorieren (EEXIST = Verzeichnis existiert bereits → OK).
-        sftp.mkdir(config.prefix, (_mkErr) => {
-          // Fehler ignorieren (EEXIST ist erwartet wenn Verzeichnis schon existiert)
-          // Erst NACH dem mkdir-Callback den WriteStream öffnen
-          const writeStream = sftp.createWriteStream(remotePath);
-
-          writeStream.on('error', (writeErr) => {
-            fail(_scrubCredsFromMessage(writeErr.message ?? '', creds));
-          });
-
-          writeStream.on('close', () => {
-            if (!settled) {
-              settled = true;
-              clearTimeout(timer);
-              conn.end();
-              resolve();
-            }
-          });
-
-          // Artefakt schreiben
-          writeStream.end(artefactBuffer);
-        });
-      });
-    });
-
-    // AC9: Verbindungsparameter übergeben — Credentials erscheinen NICHT im Argv/Log
-    const connectConfig = {
-      host: config.host,
-      port: parseInt(config.port || '22', 10),
-      username: config.user || '',
-      readyTimeout: SFTP_TIMEOUT_MS,
-    };
-
-    // Priorität: privateKey > password (wie SSH-Standard)
-    if (creds.privateKey) {
-      connectConfig.privateKey = creds.privateKey;
-    } else if (creds.password) {
-      connectConfig.password = creds.password;
-    }
-
-    try {
-      conn.connect(connectConfig);
-    } catch (connectErr) {
-      fail(_scrubCredsFromMessage(connectErr.message ?? '', creds));
-    }
-  });
-}
-
-/**
- * Baut den SFTP-Remote-Pfad aus Präfix und Dateiname.
- * @param {string} prefix - Remote-Verzeichnis-Präfix
- * @param {string} filename - Dateiname
- * @returns {string}
- */
-function _buildSftpPath(prefix, filename) {
-  const normalPrefix = prefix.endsWith('/') ? prefix.slice(0, -1) : prefix;
-  return `${normalPrefix}/${filename}`;
-}
-
-/**
  * Bereinigt bekannte Credential-Werte aus einer Fehlermeldung (Defense-in-Depth).
- * AC9: Verhindert dass accessKey/secretKey/password/privateKey in Fehlertexten erscheinen.
+ * AC9: Verhindert dass accessKey/secretKey in Fehlertexten erscheinen.
  *
  * @param {string} message
  * @param {object} creds
@@ -388,9 +245,7 @@ export function _scrubCredsFromMessage(message, creds) {
   if (creds.password && creds.password.length > 4) {
     result = result.replaceAll(creds.password, '[REDACTED]');
   }
-  // I-2 Fix: privateKey Defence-in-Depth — bei fehlerhaftem PEM kann OpenSSH/ssh2
-  // Teile des Keys in Fehlertexten zurückgeben. Den ersten ~40-Zeichen-Header-Snippet
-  // (PEM-Zeile 1, z.B. "-----BEGIN OPENSSH PRIVATE KEY-----") redaktieren.
+  // privateKey Defence-in-Depth (erhalten für Rückwärtskompatibilität mit _scrubCredsFromMessage-Aufrufen)
   if (creds.privateKey && creds.privateKey.length > 10) {
     // Ersten 40 Zeichen des PEM-Schlüssels aus dem Fehlertext entfernen
     const pkSnippet = creds.privateKey.slice(0, 40);

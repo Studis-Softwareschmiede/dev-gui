@@ -15,7 +15,7 @@
  *   - Die UI schreibt über PUT /api/settings/backup-config → JSON-Datei wird erstellt/aktualisiert.
  *
  * Security-Floor:
- *   - Nur nicht-geheime Felder (Typ, Pfad/URL/Bucket/Host/Präfix/Region, Retention, An/Aus).
+ *   - Nur nicht-geheime Felder (Typ, Pfad/URL/Bucket/Präfix/Region, Retention, An/Aus).
  *   - KEINE Remote-Secrets (die bleiben im CredentialStore).
  *   - Schreib-Operationen auditiert + CRED_ADMIN_EMAILS-gesichert (im Router, nicht hier).
  *
@@ -28,16 +28,13 @@ import { randomBytes } from 'node:crypto';
 
 /**
  * @typedef {object} BackupConfig
- * @property {boolean}              offHostEnabled - Off-Host-Backup aktiv
- * @property {'local'|'s3'|'sftp'}  targetType     - Ziel-Typ
- * @property {string}               endpoint       - S3-Endpoint-URL (leer = AWS S3)
- * @property {string}               bucket         - S3-Bucket-Name
- * @property {string}               prefix         - Pfad-Präfix (S3/SFTP)
- * @property {string}               region         - S3-Region
- * @property {string}               host           - SFTP-Hostname
- * @property {string}               port           - SFTP-Port
- * @property {string}               user           - SFTP-Benutzer
- * @property {number}               retentionCount - Max. Anzahl lokaler Kopien
+ * @property {boolean}        offHostEnabled - Off-Host-Backup aktiv
+ * @property {'local'|'s3'}  targetType     - Ziel-Typ (S3-only seit S-160)
+ * @property {string}         endpoint       - S3-Endpoint-URL (leer = AWS S3)
+ * @property {string}         bucket         - S3-Bucket-Name
+ * @property {string}         prefix         - S3-Key-Präfix (default 'dev-gui/')
+ * @property {string}         region         - S3-Region
+ * @property {number}         retentionCount - Max. Anzahl lokaler Kopien
  */
 
 /** Default-Konfiguration (überschrieben durch Env-Vars oder gespeicherte JSON). */
@@ -47,14 +44,8 @@ const DEFAULT_CONFIG = {
   endpoint: '',
   bucket: '',
   // S3-Präfix-Default ist 'dev-gui/' (AC19, S-147).
-  // SFTP nutzt ein absolutes Pfad-Format ('/backups') und wird in _readFromEnv()
-  // kontextabhängig vom targetType gesetzt; das gemeinsame prefix-Feld enthält
-  // im Default den S3-Wert, weil 'local' (kein Off-Host) der häufigste Erst-Zustand ist.
   prefix: 'dev-gui/',
   region: 'us-east-1',
-  host: '',
-  port: '22',
-  user: '',
   retentionCount: 10,
 };
 
@@ -155,6 +146,7 @@ export async function write(config) {
 /**
  * Liest Backup-Konfiguration aus BACKUP_OFFHOST_* Env-Vars (Initial-Default / Migration).
  * Entspricht der bisherigen resolveOffHostConfig()-Logik aus BackupUploader.js.
+ * S3-only seit S-160 (SFTP-Zweig entfernt).
  *
  * @returns {BackupConfig}
  * @private
@@ -166,25 +158,16 @@ function _readFromEnv() {
   const retentionEnv = parseInt(process.env.CRED_BACKUP_RETENTION ?? '', 10);
   const retentionCount = Number.isFinite(retentionEnv) && retentionEnv > 0 ? retentionEnv : DEFAULT_CONFIG.retentionCount;
 
-  // Ziel-Typ normalisieren
-  let targetType = 'local';
-  if (isEnabled && type === 's3') targetType = 's3';
-  else if (isEnabled && type === 'sftp') targetType = 'sftp';
+  // Ziel-Typ normalisieren (nur noch s3; sftp ist seit S-160 entfernt)
+  const targetType = isEnabled && type === 's3' ? 's3' : 'local';
 
   return {
     offHostEnabled: isEnabled,
     targetType,
     endpoint: process.env.BACKUP_S3_ENDPOINT?.trim() ?? '',
     bucket: process.env.BACKUP_S3_BUCKET?.trim() ?? '',
-    // SFTP nutzt absoluten Pfad-Default '/backups'; S3 nutzt relativen Key-Präfix 'dev-gui/' (AC19).
-    // Getrennte Defaults sind nötig, weil die Konzepte verschieden sind.
-    prefix: targetType === 'sftp'
-      ? (process.env.BACKUP_SFTP_PREFIX?.trim() ?? '/backups')
-      : (process.env.BACKUP_S3_PREFIX?.trim() ?? 'dev-gui/'),
+    prefix: process.env.BACKUP_S3_PREFIX?.trim() ?? 'dev-gui/',
     region: process.env.BACKUP_S3_REGION?.trim() ?? 'us-east-1',
-    host: process.env.BACKUP_SFTP_HOST?.trim() ?? '',
-    port: process.env.BACKUP_SFTP_PORT?.trim() ?? '22',
-    user: process.env.BACKUP_SFTP_USER?.trim() ?? '',
     retentionCount,
   };
 }

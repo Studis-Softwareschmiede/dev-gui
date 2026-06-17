@@ -464,7 +464,7 @@ async function saveBackupConfig(config, fetchImpl) {
  * PUT /api/settings/credentials/backup-remote/:name
  * Setzt einen Remote-Credential-Wert (write-only). Renutzt putCredential().
  *
- * @param {string} name  - Feldname (s3_access_key|s3_secret_key|sftp_password|sftp_private_key)
+ * @param {string} name  - Feldname (s3_access_key|s3_secret_key)
  * @param {string} value
  * @returns {Promise<object>}
  */
@@ -820,12 +820,10 @@ const restoreStyles = {
 
 // ── BackupSection (AC12) ──────────────────────────────────────────────────────
 
-/** Remote-Creds-Felder für backup-remote (write-only, analog Credential-Catalog). */
+/** Remote-Creds-Felder für backup-remote (write-only, analog Credential-Catalog). S3-only seit S-160. */
 const BACKUP_REMOTE_FIELDS = [
-  { name: 's3_access_key',    label: 'S3 Access Key ID' },
-  { name: 's3_secret_key',    label: 'S3 Secret Access Key' },
-  { name: 'sftp_password',    label: 'SFTP Passwort' },
-  { name: 'sftp_private_key', label: 'SFTP Private Key (PEM)' },
+  { name: 's3_access_key', label: 'S3 Access Key ID' },
+  { name: 's3_secret_key', label: 'S3 Secret Access Key' },
 ];
 
 /**
@@ -1064,7 +1062,7 @@ function BackupStatusTile({ status, loading, error }) {
     );
   }
   const offHostLabel = status?.offHostEnabled
-    ? (status.offHostType === 's3' ? 'S3-kompatibel' : status.offHostType === 'sftp' ? 'SFTP' : status.offHostType ?? 'unbekannt')
+    ? (status.offHostType === 's3' ? 'S3-kompatibel' : status.offHostType ?? 'unbekannt')
     : 'nur lokal';
 
   return (
@@ -1133,15 +1131,9 @@ function BackupSection({ credentials, onSaved, fetchFn }) {
   const [targetType, setTargetType] = useState('s3');
   const [endpoint, setEndpoint] = useState('');
   const [bucket, setBucket] = useState('');
-  // I-3 (S-147): Getrennte States für S3- und SFTP-Präfix, weil die Semantiken verschieden sind:
-  //   S3   → relativer Key-Präfix (z.B. 'dev-gui/')
-  //   SFTP → absoluter Pfad       (z.B. '/backups')
+  // S3-Präfix (relativer Key-Präfix, z.B. 'dev-gui/')
   const [s3Prefix, setS3Prefix] = useState('dev-gui/');
-  const [sftpPrefix, setSftpPrefix] = useState('/backups');
   const [region, setRegion] = useState('us-east-1');
-  const [host, setHost] = useState('');
-  const [port, setPort] = useState('22');
-  const [user, setUser] = useState('');
   const [retentionCount, setRetentionCount] = useState(10);
 
   const getMeta = useCallback(
@@ -1171,31 +1163,19 @@ function BackupSection({ credentials, onSaved, fetchFn }) {
       const loadedOffHostEnabled = Boolean(data.offHostEnabled);
       setOffHostEnabled(loadedOffHostEnabled);
 
-      // AC18 (S-147): Normalisierung targetType — bei offHostEnabled=true muss targetType
-      // in {s3, sftp} liegen; 'local' (oder unbekannte Werte) werden auf 's3' normalisiert,
+      // AC18 (S-147, S-160): Normalisierung targetType — bei offHostEnabled=true muss targetType
+      // 's3' sein; 'local' (oder unbekannte Werte) werden auf 's3' normalisiert,
       // damit das Dropdown immer einen darstellbaren Wert zeigt und keine stillen Mismatches entstehen.
-      const VALID_OFFHOST_TYPES = new Set(['s3', 'sftp']);
+      // S3-only seit S-160: 'sftp' ist keine gültige Option mehr.
       const loadedType = data.targetType ?? 'local';
-      const normalizedType =
-        loadedOffHostEnabled && !VALID_OFFHOST_TYPES.has(loadedType) ? 's3' : loadedType;
+      const normalizedType = loadedOffHostEnabled && loadedType !== 's3' ? 's3' : loadedType;
       setTargetType(normalizedType);
 
       setEndpoint(data.endpoint ?? '');
       setBucket(data.bucket ?? '');
-      // I-3/AC19 (S-147): Getrennte Zuweisung für S3- und SFTP-Präfix.
-      // Das Backend speichert ein gemeinsames 'prefix'-Feld; welchem Typ es gehört,
-      // ergibt sich aus normalizedType. Nur der zugehörige State wird aus dem Backend-Wert
-      // befüllt; der andere State behält seinen Default — so entsteht kein falscher Mix.
-      if (normalizedType === 'sftp') {
-        setSftpPrefix(data.prefix || '/backups');
-      } else {
-        // S3 (oder 'local'): AC19 — Default 'dev-gui/' wenn kein gespeicherter Wert vorhanden
-        setS3Prefix(data.prefix || 'dev-gui/');
-      }
+      // AC19 (S-147): Default 'dev-gui/' wenn kein gespeicherter Wert vorhanden
+      setS3Prefix(data.prefix || 'dev-gui/');
       setRegion(data.region ?? 'us-east-1');
-      setHost(data.host ?? '');
-      setPort(data.port ?? '22');
-      setUser(data.user ?? '');
       setRetentionCount(data.retentionCount ?? 10);
     } catch (err) {
       setConfigError(err.message ?? 'Konfiguration nicht abrufbar');
@@ -1219,12 +1199,8 @@ function BackupSection({ credentials, onSaved, fetchFn }) {
         targetType,
         endpoint: endpoint.trim(),
         bucket: bucket.trim(),
-        // Beim Speichern den zum aktiven targetType gehörenden Präfix verwenden
-        prefix: (targetType === 'sftp' ? sftpPrefix : s3Prefix).trim(),
+        prefix: s3Prefix.trim(),
         region: region.trim(),
-        host: host.trim(),
-        port: port.trim(),
-        user: user.trim(),
         retentionCount: Math.max(1, parseInt(String(retentionCount), 10) || 10),
       }, fetchFn);
       setConfigSaved(true);
@@ -1235,7 +1211,7 @@ function BackupSection({ credentials, onSaved, fetchFn }) {
     } finally {
       setConfigSaving(false);
     }
-  }, [offHostEnabled, targetType, endpoint, bucket, s3Prefix, sftpPrefix, region, host, port, user, retentionCount, fetchFn, loadStatus]);
+  }, [offHostEnabled, targetType, endpoint, bucket, s3Prefix, region, retentionCount, fetchFn, loadStatus]);
 
   return (
     <>
@@ -1284,7 +1260,6 @@ function BackupSection({ credentials, onSaved, fetchFn }) {
                   style={backupStyles.configSelect}
                 >
                   <option value="s3">S3-kompatibel</option>
-                  <option value="sftp">SFTP</option>
                 </select>
               </div>
             )}
@@ -1344,69 +1319,6 @@ function BackupSection({ credentials, onSaved, fetchFn }) {
                     value={region}
                     onChange={(e) => setRegion(e.target.value)}
                     placeholder="us-east-1"
-                    style={backupStyles.configInput}
-                    autoComplete="off"
-                  />
-                </div>
-              </>
-            )}
-
-            {/* SFTP-Felder */}
-            {offHostEnabled && targetType === 'sftp' && (
-              <>
-                <div style={backupStyles.configFormRow}>
-                  <label htmlFor="backup-sftp-host" style={backupStyles.configFormLabel}>
-                    SFTP-Host:
-                  </label>
-                  <input
-                    id="backup-sftp-host"
-                    type="text"
-                    value={host}
-                    onChange={(e) => setHost(e.target.value)}
-                    placeholder="sftp.example.com"
-                    style={backupStyles.configInput}
-                    autoComplete="off"
-                  />
-                </div>
-                <div style={backupStyles.configFormRow}>
-                  <label htmlFor="backup-sftp-port" style={backupStyles.configFormLabel}>
-                    SFTP-Port:
-                  </label>
-                  <input
-                    id="backup-sftp-port"
-                    type="text"
-                    value={port}
-                    onChange={(e) => setPort(e.target.value)}
-                    placeholder="22"
-                    style={backupStyles.configInput}
-                    autoComplete="off"
-                    inputMode="numeric"
-                  />
-                </div>
-                <div style={backupStyles.configFormRow}>
-                  <label htmlFor="backup-sftp-user" style={backupStyles.configFormLabel}>
-                    SFTP-Benutzer:
-                  </label>
-                  <input
-                    id="backup-sftp-user"
-                    type="text"
-                    value={user}
-                    onChange={(e) => setUser(e.target.value)}
-                    placeholder="backupuser"
-                    style={backupStyles.configInput}
-                    autoComplete="off"
-                  />
-                </div>
-                <div style={backupStyles.configFormRow}>
-                  <label htmlFor="backup-sftp-prefix" style={backupStyles.configFormLabel}>
-                    Pfad-Präfix:
-                  </label>
-                  <input
-                    id="backup-sftp-prefix"
-                    type="text"
-                    value={sftpPrefix}
-                    onChange={(e) => setSftpPrefix(e.target.value)}
-                    placeholder="/backups"
                     style={backupStyles.configInput}
                     autoComplete="off"
                   />

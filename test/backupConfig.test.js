@@ -183,20 +183,28 @@ describe('backupConfig — GET + PUT /api/settings/backup-config (AC12, Architek
   });
 
   it('GET nach PUT gibt gespeicherte Konfiguration zurück (JSON > Env-Fallback)', async () => {
-    // PUT zuerst
+    // PUT zuerst — S3-only seit S-160 (kein sftp mehr)
     await httpPut(port, '/api/settings/backup-config', {
       offHostEnabled: true,
-      targetType: 'sftp',
-      host: 'sftp.example.com',
+      targetType: 's3',
+      bucket: 'my-get-after-put-bucket',
+      endpoint: 'https://s3.example.com',
+      region: 'eu-central-1',
       retentionCount: 7,
     });
     // GET danach
     const { status, body } = await httpGet(port, '/api/settings/backup-config');
     expect(status).toBe(200);
     expect(body.offHostEnabled).toBe(true);
-    expect(body.targetType).toBe('sftp');
-    expect(body.host).toBe('sftp.example.com');
+    expect(body.targetType).toBe('s3');
+    expect(body.bucket).toBe('my-get-after-put-bucket');
+    expect(body.endpoint).toBe('https://s3.example.com');
+    expect(body.region).toBe('eu-central-1');
     expect(body.retentionCount).toBe(7);
+    // SFTP-3: keine host/port/user-Felder in der Response
+    expect(body.host).toBeUndefined();
+    expect(body.port).toBeUndefined();
+    expect(body.user).toBeUndefined();
   });
 
   it('PUT schreibt backup-config.json atomar auf Credential-Volume', async () => {
@@ -274,6 +282,14 @@ describe('backupConfig — GET + PUT /api/settings/backup-config (AC12, Architek
   it('PUT 400 bei ungültigem targetType', async () => {
     const { status, body } = await httpPut(port, '/api/settings/backup-config', {
       targetType: 'evil-type',
+    });
+    expect(status).toBe(400);
+    expect(body.error).toMatch(/targetType/i);
+  });
+
+  it('SFTP-3: PUT 400 bei targetType=sftp (seit S-160 nicht mehr gültig)', async () => {
+    const { status, body } = await httpPut(port, '/api/settings/backup-config', {
+      targetType: 'sftp',
     });
     expect(status).toBe(400);
     expect(body.error).toMatch(/targetType/i);

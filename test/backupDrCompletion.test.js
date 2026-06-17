@@ -6,11 +6,12 @@
  *           BackupConfigStore.read() eine Config liefert (Testbar: GPG-entschlüsseltes
  *           Artefakt eines Writes bei vorhandener config enthält `config` mit
  *           genau den erlaubten nicht-geheimen Feldern).
- *   AC21 — Floor: `config`-Feld enthält NIEMALS Remote-Creds (s3_access_key, s3_secret_key,
- *           sftp_password, sftp_private_key) oder den Master-Key; nur nicht-geheime Felder
+ *   AC21 — Floor: `config`-Feld enthält NIEMALS Remote-Creds (s3_access_key, s3_secret_key)
+ *           oder den Master-Key; nur nicht-geheime Felder
  *           (Allowlist: offHostEnabled, targetType, endpoint, bucket, prefix, region,
- *           host, port, user, retentionCount). Testbar: auch wenn ein Cred-Feld irgendwie
- *           im BackupConfigStore auftaucht, erscheint es NICHT im `config`-Artefakt-Feld.
+ *           retentionCount — S3-only seit S-160, host/port/user entfernt). Testbar: auch wenn
+ *           ein Cred-Feld irgendwie im BackupConfigStore auftaucht, erscheint es NICHT im
+ *           `config`-Artefakt-Feld.
  *   AC22 — Restore schreibt `artefact.config` atomar über BackupConfigStore zurück;
  *           nach dem Restore liefert BackupConfigStore.read() exakt diese Werte.
  *   AC23 — Config-Restore ist best-effort: schlägt das Zurückschreiben der Config fehl,
@@ -38,14 +39,16 @@ import { encrypt, decrypt, isGpgAvailable } from '../src/BackupCrypto.js';
 const TEST_MASTER_KEY = 'test-dr-completion-master-key-s148';
 
 // Nicht-geheime Felder die im `config`-Feld erwartet werden (AC20, Allowlist)
+// S3-only seit S-160: host/port/user (SFTP) entfernt.
 const ALLOWED_CONFIG_FIELDS = [
   'offHostEnabled', 'targetType', 'endpoint', 'bucket', 'prefix',
-  'region', 'host', 'port', 'user', 'retentionCount',
+  'region', 'retentionCount',
 ];
 
 // Geheime Felder die NIEMALS im `config`-Feld erscheinen dürfen (AC21 Floor)
 // inkl. Master-Key-Varianten — der Spec-Wortlaut „NIEMALS den Master-Key" wird so
 // explizit testiert (strukturell kann er nicht auftauchen, der Test verriegelt es).
+// sftp_password/sftp_private_key bleiben in der Forbidden-Liste (Defense-in-Depth).
 const FORBIDDEN_CONFIG_FIELDS = [
   's3_access_key', 's3_secret_key', 'sftp_password', 'sftp_private_key',
   'masterKeyRaw', 'master_key', 'DEVGUI_CRED_MASTER_KEY',
@@ -122,9 +125,6 @@ describe('S-148 AC20/AC21 — runBackup: Artefakt enthält config-Feld (nicht-ge
       bucket: 'my-bucket',
       prefix: 'dev-gui/',
       region: 'eu-central-1',
-      host: '',
-      port: '22',
-      user: '',
       retentionCount: 10,
     };
 
@@ -161,7 +161,7 @@ describe('S-148 AC20/AC21 — runBackup: Artefakt enthält config-Feld (nicht-ge
     expect(artefact.config.retentionCount).toBe(10);
   });
 
-  it('AC21 Floor: `config`-Feld enthält KEINE geheimen Felder (s3_access_key, sftp_password, …)', async () => {
+  it('AC21 Floor: `config`-Feld enthält KEINE geheimen Felder (s3_access_key, …)', async () => {
     if (!gpgOk) {
       console.warn('[SKIP] GPG nicht verfügbar — AC21-Floor-Test übersprungen');
       return;
@@ -175,13 +175,11 @@ describe('S-148 AC20/AC21 — runBackup: Artefakt enthält config-Feld (nicht-ge
       prefix: 'test/',
       region: 'us-east-1',
       endpoint: '',
-      host: '',
-      port: '22',
-      user: '',
       retentionCount: 5,
       // Die folgenden Felder dürfen NIE ins config-Feld des Artefakts gelangen (AC21):
       s3_access_key: 'AKIAIOSFODNN7EXAMPLE',
       s3_secret_key: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+      // sftp_* bleiben in der Forbidden-Liste (Defense-in-Depth, auch wenn sftp entfernt):
       sftp_password: 'super-secret-sftp-pass',
       sftp_private_key: '-----BEGIN RSA PRIVATE KEY-----',
     };

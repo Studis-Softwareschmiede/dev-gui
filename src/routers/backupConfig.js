@@ -9,7 +9,8 @@
  * PUT /api/settings/backup-config
  *   Schreibt die nicht-geheime Konfiguration in backup-config.json (atomar, 0600).
  *   Body: { offHostEnabled, targetType, endpoint, bucket, prefix, region,
- *            host, port, user, retentionCount }
+ *            retentionCount }
+ *   SFTP-Felder (host, port, user) sind seit S-160 entfernt.
  *   Schutz: AccessGuard (via server.js /api-Middleware) +
  *            CRED_ADMIN_EMAILS-Rollencheck + Audit-First.
  *
@@ -32,8 +33,8 @@ export const order = 52;
 /** Maximal erlaubte Zeichenlänge für String-Felder in der Konfig. */
 const MAX_STRING_LEN = 1024;
 
-/** Erlaubte targetType-Werte. */
-const ALLOWED_TYPES = new Set(['local', 's3', 'sftp']);
+/** Erlaubte targetType-Werte (S3-only seit S-160). */
+const ALLOWED_TYPES = new Set(['local', 's3']);
 
 /**
  * Prüft ob die anfragende Identität die Backup-Konfiguration mutieren darf.
@@ -108,9 +109,10 @@ export function create({ auditStore }) {
    * Schutz: AccessGuard (global /api-Middleware) + CRED_ADMIN_EMAILS + Audit-First.
    *
    * Body (alle Felder optional, werden mit aktueller Konfig gemergt):
-   *   { offHostEnabled?: boolean, targetType?: 'local'|'s3'|'sftp',
+   *   { offHostEnabled?: boolean, targetType?: 'local'|'s3',
    *     endpoint?: string, bucket?: string, prefix?: string, region?: string,
-   *     host?: string, port?: string, user?: string, retentionCount?: number }
+   *     retentionCount?: number }
+   * SFTP-Felder (host, port, user) sind seit S-160 entfernt.
    *
    * Response 200: { ok: true, config: BackupConfig }
    * Response 400: { error: string }  — Validierungsfehler
@@ -133,15 +135,12 @@ export function create({ auditStore }) {
       bucket,
       prefix,
       region,
-      host,
-      port,
-      user,
       retentionCount,
     } = body;
 
-    // targetType validieren
+    // targetType validieren (S3-only seit S-160)
     if (targetType !== undefined && !ALLOWED_TYPES.has(targetType)) {
-      return res.status(400).json({ error: `targetType muss 'local', 's3' oder 'sftp' sein (erhalten: ${targetType}).` });
+      return res.status(400).json({ error: `targetType muss 'local' oder 's3' sein (erhalten: ${targetType}).` });
     }
 
     // String-Felder validieren
@@ -150,9 +149,6 @@ export function create({ auditStore }) {
       ['bucket', bucket],
       ['prefix', prefix],
       ['region', region],
-      ['host', host],
-      ['port', port],
-      ['user', user],
     ]) {
       const r = validateStringField(val, fieldName);
       if (!r.ok) return res.status(400).json({ error: r.error });
@@ -186,9 +182,6 @@ export function create({ auditStore }) {
     if (bucket !== undefined) update.bucket = String(bucket).trim();
     if (prefix !== undefined) update.prefix = String(prefix).trim();
     if (region !== undefined) update.region = String(region).trim();
-    if (host !== undefined) update.host = String(host).trim();
-    if (port !== undefined) update.port = String(port).trim();
-    if (user !== undefined) update.user = String(user).trim();
     if (retentionCount !== undefined) update.retentionCount = Math.floor(Number(retentionCount));
 
     try {
