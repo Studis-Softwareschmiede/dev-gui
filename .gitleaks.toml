@@ -16,5 +16,15 @@
 useDefault = true
 
 [allowlist]
-description = "Test-Fixtures: Dummy-Credentials mit FAKE_*/TEST_*-Praefixen"
-paths = ['''test/''']
+description = "Test-Fixtures und Spec-Dokumente: False-Positives"
+# test/: Dummy-Credentials (FAKE_*/TEST_*-Praefixe)
+# docs/specs/: Spec-Dokumente referenzieren PEM-Format-Marker als Bezeichner (kein Key-Material)
+# board/stories/: Story-YAML referenziert PEM-Format-Marker in Beschreibungstexten (kein Key-Material)
+# Beweise fuer False-Positive: In diesen Pfaden erscheinen ausschliesslich PEM-Header/Footer-
+# Zeichenketten als Format-Bezeichner in Freitext/Markdown/YAML-Beschreibungen.
+# Kein Base64-Key-Body ist vorhanden — nur die Marker-Zeilen selbst (die allein kein Secret ergeben).
+paths = ['''test/''', '''docs/specs/''', '''board/stories/''']
+
+[[allowlist.regexes]]
+description = "PEM-Header/Footer als Format-Bezeichner in JSDoc-Kommentaren (src/githubAppToken.js) — kein Key-Material, nur Regex-Pattern und Doku-Backtick-Referenzen. Beweis: Zeile 40 enthaelt nur den Header-String in Backticks als JSDoc-Erlaeuterung; kein Base64-Body folgt."
+regex = '''`-----BEGIN (RSA )?PRIVATE KEY-----`'''
