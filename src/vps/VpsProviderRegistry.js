@@ -249,6 +249,68 @@ export class VpsProviderRegistry {
   }
 
   /**
+   * Listet alle persistierten VPS-Ziel-Datensätze (S-167 AC3/AC4/AC6).
+   *
+   * Scannt credentials/misc/ nach dem Schema vps-*-target und gibt alle gültigen
+   * Einträge zurück. Jeder Eintrag enthält zusätzlich `_vpsId` (sanitisierter VPS-Name,
+   * aus dem Store-Schlüssel abgeleitet) — wird von AC3 (Dropdown-ID) und AC6 (Reconcile)
+   * benötigt.
+   *
+   * Keine Secrets — nur Verbindungs-Metadaten + Referenzen (ADR-007/ADR-008).
+   * Datensätze mit Parse-Fehlern werden übersprungen (degradierend).
+   *
+   * @returns {Promise<Array<VpsTargetRecord & { _vpsId: string }>>}
+   */
+  async listTargetRecords() {
+    if (!this.#credentialStore) return [];
+
+    try {
+      const allEntries = await this.#credentialStore.list();
+      // Filtere: integration='misc', name='vps-<sanitized>-target'
+      const targetEntries = allEntries.filter(
+        (e) =>
+          e.integration === 'misc' &&
+          typeof e.name === 'string' &&
+          e.name.startsWith('vps-') &&
+          e.name.endsWith('-target'),
+      );
+
+      const records = [];
+      for (const entry of targetEntries) {
+        // vpsId = sanitisierter VPS-Name (zwischen "vps-" und "-target")
+        const vpsId = entry.name.slice('vps-'.length, -'-target'.length);
+        if (!vpsId) continue; // Defensive: leerer Name → überspringen
+
+        const key = `credentials/misc/${entry.name}`;
+        try {
+          const raw = await this.#credentialStore.getPlaintext(key);
+          if (!raw) continue;
+          const record = JSON.parse(raw);
+          // Sicherheits-Assertion: nur Datensätze mit den erwarteten Pflichtfeldern
+          if (record && typeof record.provider === 'string' && typeof record.serverId === 'string') {
+            // Allowlist statt Spread: schützt gegen versehentliche Secret-Felder
+            // aus dem write-path (S-152) — nur bekannte Metadaten durchreichen (AC8).
+            records.push({
+              provider: record.provider,
+              serverId: record.serverId,
+              host: record.host ?? null,
+              port: record.port ?? 22,
+              targetUser: record.targetUser ?? 'root',
+              tunnelId: record.tunnelId ?? null,
+              _vpsId: vpsId,
+            });
+          }
+        } catch {
+          // Parse-Fehler → Datensatz überspringen (defensiv, kein Crash)
+        }
+      }
+      return records;
+    } catch {
+      return []; // Store-Fehler degradierend — leere Liste statt Crash
+    }
+  }
+
+  /**
    * Liest den persistierten VPS-Ziel-Datensatz aus dem CredentialStore (Baustein für S-167).
    *
    * Gibt null zurück wenn kein Datensatz vorhanden (Bestandssetup ohne dynamischen Eintrag).
