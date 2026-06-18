@@ -10,16 +10,17 @@
  *           kein write_files authorized_keys, kein useradd
  *   AC6  — Kein Private-Key / kein Secret-Material im Output; Keys nur in users:-Sektion
  *   AC7  — Fehlender Public-Key → CloudInitError(missing-ssh-key, 422)
- *   AC8  — Vorlage ist versioniert (TEMPLATE_VERSION === 4 + Kommentar im Dokument)
+ *   AC8  — Vorlage ist versioniert (TEMPLATE_VERSION === 5 + Kommentar im Dokument)
  *   AC9  — Negativ-Garantie: kein write_files authorized_keys-Block, kein useradd alex
  *   AC10 — runcmd enthält chage -d -1 root (Hetzner Epoch-0-Expire entfernen)
  *   AC11 — Docker-CE-Install-Block (apt-keyrings, docker.list, apt-get install docker-ce,
  *           systemctl enable/start docker) inhaltlich erhalten
  *
- * Covers (vps-tunnel-provisioning / vps-cloud-init-setup AC12/AC13):
+ * Covers (vps-tunnel-provisioning / vps-cloud-init-setup AC12/AC13/AC14):
  *   AC12 — Mit tunnelToken: cloudflared docker-run-Schritt in runcmd vorhanden
  *   AC13 — Token steht nur als write_files-Wert (0600); NICHT in runcmd-Argv/Echo;
  *           Token-Floor: Token erscheint nicht in einem Log-Pfad oder Adapter-Arg
+ *   AC14 — cloudflared docker-run enthält --network host; Token-Floor (AC13) bleibt erhalten
  *   Rückwärtskompatibilität: ohne tunnelToken → kein cloudflared-Block
  *
  * Strategy:
@@ -327,8 +328,8 @@ describe('CloudInitBuilder — AC7: Fehlerverhalten bei fehlendem Public-Key', (
 // ── AC8: Versionierung ────────────────────────────────────────────────────────
 
 describe('CloudInitBuilder — AC8: Versionierung', () => {
-  it('TEMPLATE_VERSION ist 4 (v4 nach cloudflared-Erweiterung, S-152)', () => {
-    expect(TEMPLATE_VERSION).toBe(4);
+  it('TEMPLATE_VERSION ist 5 (v5 nach --network host Fix, S-170)', () => {
+    expect(TEMPLATE_VERSION).toBe(5);
   });
 
   it('TEMPLATE_VERSION ist eine positive ganze Zahl', () => {
@@ -472,6 +473,11 @@ describe('CloudInitBuilder — AC12/AC13: cloudflared-Provisionierung mit tunnel
     expect(doc).toContain('--restart unless-stopped');
   });
 
+  it('AC12 — cloudflared docker run enthält --network host (Host-Netzwerk, AC14)', () => {
+    const doc = buildWithTunnel();
+    expect(doc).toContain('--network host');
+  });
+
   it('AC12 — cloudflared liest Token via --env-file (kein Token in Argv)', () => {
     const doc = buildWithTunnel();
     // Token wird via Docker --env-file übergeben — Token erscheint NICHT direkt als CLI-Arg
@@ -515,6 +521,41 @@ describe('CloudInitBuilder — AC12/AC13: cloudflared-Provisionierung mit tunnel
     const runcmdIdx = doc.indexOf('runcmd:');
     expect(writeFilesIdx).toBeGreaterThanOrEqual(0);
     expect(runcmdIdx).toBeGreaterThan(writeFilesIdx);
+  });
+});
+
+// ── AC14: cloudflared im Host-Netzwerk (--network host, S-170) ────────────────
+
+describe('CloudInitBuilder — AC14: cloudflared mit --network host', () => {
+  it('AC14 — das erzeugte cloud-init enthält --network host im cloudflared docker-run-Eintrag', () => {
+    const doc = buildWithTunnel();
+    // Der vollständige docker-run-Befehl muss --network host enthalten
+    const dockerRunLine = doc.split('\n').find((l) => l.includes('docker run') && l.includes('cloudflared'));
+    expect(dockerRunLine).toBeDefined();
+    expect(dockerRunLine).toContain('--network host');
+  });
+
+  it('AC14 — der vollständige docker-run-Befehl entspricht dem spezifizierten Aufruf (AC12)', () => {
+    const doc = buildWithTunnel();
+    // Vollständige Befehlssignatur prüfen (Reihenfolge der Flags ist wichtig für Lesbarkeit, nicht für Funktion)
+    expect(doc).toContain('docker run -d --name cloudflared --restart unless-stopped --network host --env-file /etc/cloudflared/env cloudflare/cloudflared:latest tunnel --no-autoupdate run');
+  });
+
+  it('AC14 — Token-Floor (AC13) bleibt mit --network host erhalten: Token nicht in Argv', () => {
+    const doc = buildWithTunnel();
+    const dockerRunLine = doc.split('\n').find((l) => l.includes('docker run') && l.includes('cloudflared'));
+    expect(dockerRunLine).toBeDefined();
+    // --network host ist vorhanden
+    expect(dockerRunLine).toContain('--network host');
+    // Token ist NICHT in der docker-run-Zeile
+    expect(dockerRunLine).not.toContain(TUNNEL_TOKEN);
+    // Token weiterhin via --env-file übergeben
+    expect(dockerRunLine).toContain('--env-file /etc/cloudflared/env');
+  });
+
+  it('AC14 — ohne tunnelToken: kein --network host im Dokument (kein Cloudflared-Block)', () => {
+    const doc = buildDefault(); // kein tunnelToken
+    expect(doc).not.toContain('--network host');
   });
 });
 

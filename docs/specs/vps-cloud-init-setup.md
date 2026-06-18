@@ -2,7 +2,7 @@
 id: vps-cloud-init-setup
 title: VPS Default-Setup-Pipeline via cloud-init / user-data
 status: draft
-version: 4
+version: 5
 ---
 
 # Spec: VPS Default-Setup-Pipeline (cloud-init / user-data) (`vps-cloud-init-setup`)
