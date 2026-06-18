@@ -1872,6 +1872,12 @@ function CredentialField({ integration, name, label, meta, onSaved }) {
   const inputRef = useRef(null);
   const errorId = `err-${integration}-${name}`;
 
+  // AC5 (github-app-key-format-tolerant): private_key uses a multiline textarea
+  // so that pasted PEMs retain their newlines intact.  All other fields stay
+  // single-line (type=password).  Write-only semantics are unchanged — the
+  // component never renders the stored value as cleartext.
+  const isPrivateKeyField = integration === 'github' && name === 'private_key';
+
   const isSet = meta?.status === 'set';
 
   // Fokus auf Input wenn Bearbeiten-Modus öffnet
@@ -1951,18 +1957,36 @@ function CredentialField({ integration, name, label, meta, onSaved }) {
           <label htmlFor={`input-${integration}-${name}`} style={fieldStyles.srOnly}>
             {label} — neuer Wert
           </label>
-          <input
-            id={`input-${integration}-${name}`}
-            ref={inputRef}
-            type="password"
-            value={inputVal}
-            onChange={(e) => setInputVal(e.target.value)}
-            placeholder={isSet ? 'Neuen Wert eingeben (überschreibt bestehenden)' : 'Wert eingeben'}
-            style={fieldStyles.input}
-            aria-describedby={error ? errorId : undefined}
-            autoComplete="off"
-            data-lpignore="true"
-          />
+          {isPrivateKeyField ? (
+            /* AC5: mehrzeilige Textarea für private_key — Newlines bleiben erhalten */
+            <textarea
+              id={`input-${integration}-${name}`}
+              ref={inputRef}
+              value={inputVal}
+              onChange={(e) => setInputVal(e.target.value)}
+              placeholder={isSet ? 'PEM einfügen (überschreibt bestehenden Key)' : 'PEM einfügen (-----BEGIN … KEY-----)'}
+              style={{ ...fieldStyles.input, minHeight: 160, resize: 'vertical', fontFamily: 'monospace', fontSize: 12 }}
+              aria-describedby={error ? errorId : undefined}
+              aria-invalid={error ? 'true' : undefined}
+              autoComplete="off"
+              data-lpignore="true"
+              spellCheck={false}
+            />
+          ) : (
+            <input
+              id={`input-${integration}-${name}`}
+              ref={inputRef}
+              type="password"
+              value={inputVal}
+              onChange={(e) => setInputVal(e.target.value)}
+              placeholder={isSet ? 'Neuen Wert eingeben (überschreibt bestehenden)' : 'Wert eingeben'}
+              style={fieldStyles.input}
+              aria-describedby={error ? errorId : undefined}
+              aria-invalid={error ? 'true' : undefined}
+              autoComplete="off"
+              data-lpignore="true"
+            />
+          )}
           {error && (
             <p id={errorId} style={fieldStyles.error} role="alert" aria-live="polite">
               {error}

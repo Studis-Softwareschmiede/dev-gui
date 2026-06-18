@@ -5,7 +5,11 @@
  * workspace-health-hinweis AC3 Frontend, credential-unlock-dialog AC11/AC12 — #268,
  * bitwarden-master-key-unlock AC12 showPassword-Reset beim Phasenwechsel (not-found→Create-Offer + Cancel) — S-130/#276,
  * credential-backup S-143 AC11/AC12 — Zweistufige Quittung + Backup-Abschnitt + Status-Kachel,
- * credential-backup S-142 AC13–AC16 — Restore-UI + Upload + Confirm + A11y).
+ * credential-backup S-142 AC13–AC16 — Restore-UI + Upload + Confirm + A11y,
+ * github-app-key-format-tolerant S-168 AC5).
+ *
+ * Covers (github-app-key-format-tolerant S-168) — Frontend-ACs:
+ *   AC5 — Textarea für github/private_key; Newlines erhalten; andere Felder password-input; nach Speichern kein Klartext im DOM.
  *
  * Covers (settings-credentials + settings-shell):
  *   AC1  — Credential-Felder mit Status (gesetzt/nicht gesetzt); kein Klartext
@@ -793,6 +797,206 @@ describe('SettingsView — AC5: Weitere Credentials (misc)', () => {
       const main = getByRole('main', { name: /einstellungen-ansicht/i });
       expect(main.textContent).toContain('openai-key');
       expect(main.textContent).not.toContain('my-openai-secret');
+    });
+  });
+});
+
+// ── AC5 (github-app-key-format-tolerant S-168) — Textarea für github/private_key ──────────────
+
+describe('SettingsView — S-168 AC5: github/private_key Eingabe ist eine Textarea', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('AC5a — Klick auf "Setzen" für github/private_key öffnet eine <textarea>, nicht <input type=password>', async () => {
+    const { getAllByRole } = renderView(makeFetch({ getResponse: EMPTY_CREDS }));
+
+    // Warten bis alle Setzen-Buttons gerendert sind
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.textContent.trim() === 'Setzen')).toBe(true);
+    });
+
+    // Private-Key-Setzen-Button hat aria-label "Private Key setzen"
+    await act(async () => {
+      const setzenBtns = getAllByRole('button', { name: /private key setzen/i });
+      expect(setzenBtns.length).toBeGreaterThan(0);
+      fireEvent.click(setzenBtns[0]);
+    });
+
+    // Das Edit-Control für private_key muss eine textarea sein
+    await waitFor(() => {
+      const textarea = document.getElementById('input-github-private_key');
+      expect(textarea).not.toBeNull();
+      expect(textarea.tagName.toLowerCase()).toBe('textarea');
+    });
+  });
+
+  it('AC5b — Andere Credential-Felder (app_id) öffnen ein <input type=password>, nicht textarea', async () => {
+    const { getAllByRole } = renderView(makeFetch({ getResponse: EMPTY_CREDS }));
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.textContent.trim() === 'Setzen')).toBe(true);
+    });
+
+    await act(async () => {
+      const setzenBtns = getAllByRole('button', { name: /app-id setzen/i });
+      expect(setzenBtns.length).toBeGreaterThan(0);
+      fireEvent.click(setzenBtns[0]);
+    });
+
+    await waitFor(() => {
+      const input = document.getElementById('input-github-app_id');
+      expect(input).not.toBeNull();
+      expect(input.tagName.toLowerCase()).toBe('input');
+      expect(input.getAttribute('type')).toBe('password');
+    });
+  });
+
+  it('AC5c — In der Textarea eingegebener PEM (mit Newlines) landet unverändert im PUT-Request', async () => {
+    const capturedRequests = [];
+    const fetchMock = jest.fn(async (url, opts) => {
+      capturedRequests.push({ url, opts });
+      const method = opts?.method ?? 'GET';
+      if (url === '/api/settings/credential-status') {
+        return { ok: true, status: 200, json: async () => ({ state: 'unlocked', hasEncryptedEntries: false, keySource: 'auto' }) };
+      }
+      if (url === '/api/settings/credentials' && method === 'GET') {
+        return { ok: true, json: async () => EMPTY_CREDS };
+      }
+      if (url === '/api/settings/credentials' && method === 'GET') {
+        return { ok: true, json: async () => [] };
+      }
+      if (url.includes('/api/settings/ssh-keys') && method === 'GET') {
+        return { ok: true, json: async () => [] };
+      }
+      if (url.includes('/api/settings/workspace-path') && method === 'GET') {
+        return { ok: true, json: async () => DEFAULT_WORKSPACE_PATH };
+      }
+      if (url.includes('/api/settings/workspace-health') && method === 'GET') {
+        return { ok: true, json: async () => ({ overall: 'ok', checks: [], counts: { repos: 0, boardProjects: 0 } }) };
+      }
+      if (url.includes('/api/settings/backup-status')) {
+        return { ok: true, json: async () => DEFAULT_BACKUP_STATUS_NO_OFFHOST };
+      }
+      if (url.includes('/api/settings/backup-config') && method === 'GET') {
+        return { ok: true, json: async () => DEFAULT_BACKUP_CONFIG_NO_OFFHOST };
+      }
+      if (url.includes('/credentials/github/private_key') && method === 'PUT') {
+        return { ok: true, json: async () => ({ integration: 'github', name: 'private_key', status: 'set', updatedAt: '2026-01-01T00:00:00.000Z' }) };
+      }
+      // Fallback
+      if (method === 'GET') return { ok: true, json: async () => [] };
+      return { ok: false, json: async () => ({ error: 'unbekannt' }) };
+    });
+    globalThis.fetch = fetchMock;
+
+    const onNavigate = jest.fn();
+    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate, fetchFn: fetchMock }));
+
+    // Setzen-Button für private_key klicken
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.textContent.trim() === 'Setzen')).toBe(true);
+    });
+
+    await act(async () => {
+      const setzenBtn = getAllByRole('button', { name: /private key setzen/i })[0];
+      fireEvent.click(setzenBtn);
+    });
+
+    // Textarea befüllen mit PEM inkl. Newlines
+    const pemWithNewlines = '-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\nABCD1234\n-----END RSA PRIVATE KEY-----\n';
+    await waitFor(() => {
+      expect(document.getElementById('input-github-private_key')).not.toBeNull();
+    });
+
+    await act(async () => {
+      const textarea = document.getElementById('input-github-private_key');
+      fireEvent.change(textarea, { target: { value: pemWithNewlines } });
+    });
+
+    // Speichern
+    await act(async () => {
+      const saveBtns = getAllByRole('button').filter((b) => b.textContent.trim() === 'Speichern');
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    // Prüfen ob der PUT-Request den PEM mit Newlines enthält
+    await waitFor(() => {
+      const putReq = capturedRequests.find((r) => r.url.includes('/credentials/github/private_key') && r.opts?.method === 'PUT');
+      expect(putReq).toBeDefined();
+      const body = JSON.parse(putReq.opts.body);
+      // Der Wert nach trim() (Frontend-Trim) muss die Newlines enthalten
+      expect(body.value).toContain('\n');
+    });
+  });
+
+  it('AC5d — Nach dem Speichern ist kein PEM-Klartext im DOM sichtbar', async () => {
+    const fetchMock = jest.fn(async (url, opts) => {
+      const method = opts?.method ?? 'GET';
+      if (url === '/api/settings/credential-status') {
+        return { ok: true, status: 200, json: async () => ({ state: 'unlocked', hasEncryptedEntries: false, keySource: 'auto' }) };
+      }
+      if (url === '/api/settings/credentials' && method === 'GET') {
+        return { ok: true, json: async () => EMPTY_CREDS };
+      }
+      if (url.includes('/api/settings/ssh-keys') && method === 'GET') {
+        return { ok: true, json: async () => [] };
+      }
+      if (url.includes('/api/settings/workspace-path') && method === 'GET') {
+        return { ok: true, json: async () => DEFAULT_WORKSPACE_PATH };
+      }
+      if (url.includes('/api/settings/workspace-health') && method === 'GET') {
+        return { ok: true, json: async () => ({ overall: 'ok', checks: [], counts: { repos: 0, boardProjects: 0 } }) };
+      }
+      if (url.includes('/api/settings/backup-status')) {
+        return { ok: true, json: async () => DEFAULT_BACKUP_STATUS_NO_OFFHOST };
+      }
+      if (url.includes('/api/settings/backup-config') && method === 'GET') {
+        return { ok: true, json: async () => DEFAULT_BACKUP_CONFIG_NO_OFFHOST };
+      }
+      if (url.includes('/credentials/github/private_key') && method === 'PUT') {
+        return { ok: true, json: async () => ({ integration: 'github', name: 'private_key', status: 'set', updatedAt: '2026-01-01T00:00:00.000Z' }) };
+      }
+      if (method === 'GET') return { ok: true, json: async () => [] };
+      return { ok: false, json: async () => ({ error: 'unbekannt' }) };
+    });
+    globalThis.fetch = fetchMock;
+
+    const onNavigate = jest.fn();
+    const { getAllByRole, getByRole } = render(React.createElement(SettingsView, { onNavigate, fetchFn: fetchMock }));
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.textContent.trim() === 'Setzen')).toBe(true);
+    });
+
+    await act(async () => {
+      const setzenBtn = getAllByRole('button', { name: /private key setzen/i })[0];
+      fireEvent.click(setzenBtn);
+    });
+
+    const secretPem = 'SUPERSECRET_PEM_BODY_UNIQUE_MARKER_XYZ';
+    await waitFor(() => {
+      expect(document.getElementById('input-github-private_key')).not.toBeNull();
+    });
+
+    await act(async () => {
+      const textarea = document.getElementById('input-github-private_key');
+      fireEvent.change(textarea, { target: { value: secretPem } });
+    });
+
+    await act(async () => {
+      const saveBtns = getAllByRole('button').filter((b) => b.textContent.trim() === 'Speichern');
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    // Nach Speichern kein Klartext im DOM
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      expect(main.textContent).not.toContain(secretPem);
     });
   });
 });
