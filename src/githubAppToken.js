@@ -20,7 +20,8 @@
  * @module githubAppToken
  */
 
-import { SignJWT, importPKCS8 } from 'jose';
+import { SignJWT } from 'jose';
+import { createPrivateKey } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
 
 /** GitHub API base URL. */
@@ -28,6 +29,51 @@ const GITHUB_API = 'https://api.github.com';
 
 /** Fetch timeout for token minting (ms). */
 const MINT_TIMEOUT_MS = 15000;
+
+// ── PEM normalization ─────────────────────────────────────────────────────────
+
+/**
+ * Normalize a PEM-encoded private key to recover missing/mangled newlines.
+ *
+ * Handles the copy-paste fallback where body newlines were replaced by spaces
+ * (common with single-line <input> fields).  Works for both PKCS#1
+ * (`-----BEGIN RSA PRIVATE KEY-----`) and PKCS#8 (`-----BEGIN PRIVATE KEY-----`).
+ *
+ * Algorithm:
+ *  1. Extract the header and footer lines (regex allows optional whitespace).
+ *  2. Strip ALL whitespace characters from the Base64 body.
+ *  3. Re-wrap the body into 64-character lines separated by `\n`.
+ *  4. Re-assemble header + body + footer with `\n`.
+ *
+ * If no recognisable PEM header/footer is found the input is returned unchanged
+ * so that the subsequent `createPrivateKey()` call fails cleanly (AC7).
+ *
+ * Idempotent: calling twice yields the same result (AC4).
+ *
+ * Security: this function only manipulates whitespace in the already-persisted
+ * key material — it does NOT log, return, or expose the key content.
+ *
+ * @param {string} pem  Raw PEM string from the CredentialStore.
+ * @returns {string}    Whitespace-normalised PEM string.
+ */
+export function normalizePem(pem) {
+  // Match header and footer for both PKCS#1 and PKCS#8 (incl. trailing whitespace)
+  const match = /^(-----BEGIN (?:RSA )?PRIVATE KEY-----)\s*([\s\S]*?)\s*(-----END (?:RSA )?PRIVATE KEY-----)[\s]*$/.exec(
+    (pem ?? '').trim(),
+  );
+  if (!match) {
+    // Unrecognised format — return as-is; downstream import will throw (AC7)
+    return pem;
+  }
+  const [, header, rawBody, footer] = match;
+  // Remove all whitespace from the Base64 body, then re-wrap in 64-char lines
+  const cleanBody = rawBody.replace(/\s+/g, '');
+  const lines = [];
+  for (let i = 0; i < cleanBody.length; i += 64) {
+    lines.push(cleanBody.slice(i, i + 64));
+  }
+  return `${header}\n${lines.join('\n')}\n${footer}\n`;
+}
 
 // ── GitHubAppTokenError ───────────────────────────────────────────────────────
 
@@ -104,9 +150,16 @@ export async function mintInstallationToken(credentialStore, { fetchFn = fetch }
   }
 
   // Build App JWT (RS256, 10-minute expiry)
+  // Format-tolerant: accepts both PKCS#1 (-----BEGIN RSA PRIVATE KEY-----)
+  // and PKCS#8 (-----BEGIN PRIVATE KEY-----).  Newline-normalisation first
+  // recovers keys whose body newlines were mangled to spaces (copy-paste fallback).
+  // Security: privateKeyPem and appJwt are NEVER logged or included in errors.
   let appJwt;
   try {
-    const privateKey = await importPKCS8(privateKeyPem, 'RS256');
+    const normalizedPem = normalizePem(privateKeyPem);
+    // node:crypto createPrivateKey accepts PKCS#1 and PKCS#8 natively.
+    // The resulting KeyObject is accepted directly by jose's SignJWT.sign().
+    const privateKey = createPrivateKey(normalizedPem);
     const now = Math.floor(Date.now() / 1000);
     appJwt = await new SignJWT({})
       .setProtectedHeader({ alg: 'RS256' })
