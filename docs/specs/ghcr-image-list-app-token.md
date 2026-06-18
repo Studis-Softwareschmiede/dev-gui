@@ -46,16 +46,28 @@ Im Live-Test (2026-06) deckte der erste echte Deploy-Versuch auf: das Image-Drop
 
 - **`GET /api/github/packages`** → `200 { packages: ImagePackage[], errors?: [{ scope, errorClass }] }` (unverändert zu [[ghcr-image-list]], jetzt mit der Garantie: nicht-leer bei vorhandenen Paketen + gültigem/berechtigtem App-Token).
 - **`ImagePackage`** unverändert: `{ name, fullImageRef, visibility, htmlUrl, updatedAt }`, `fullImageRef = ghcr.io/<org>/<name>` (lowercase).
-- **Erlaubte Upstream-Pfade (read, App-Token):** der korrekte REST-Listen-Endpunkt **oder** GraphQL `organization.packages(packageType: CONTAINER)` **oder** Repo-/Installation-Inventar (`GET /installation/repositories`) + die live als `200` belegten Einzel-Endpunkte `GET /orgs/{org}/packages/container/{name}` / `.../versions`. Jeder externe Fetch mit Timeout (js/R03) und Seiten-/Element-Limit (DoS).
+- **Gewählter Upstream-Pfad (live-verifiziert 2026-06-18, Variante c):**
+  1. `GET /installation/repositories?per_page=100` → liefert Repo-Namen der App-Installation (live: agent-flow, sandbox-2, sandbox-3, sandbox-flutter, dev-gui, climatedataanalyser).
+  2. Für jeden Repo-Namen: `GET /orgs/{org}/packages/container/{name}` → 200 wenn Container-Image existiert, 404 wenn nicht (live: 5 von 6 Repos haben Images). Probes laufen parallel (Promise.allSettled).
+  3. Ergebnis: ImagePackage[] aus den 200-Probes; 404-Probes werden still übersprungen (kein Fehler).
+  - Der REST-Org-Listen-Endpunkt (`GET /orgs/{org}/packages?package_type=container`) ist **nicht nutzbar** mit App-Installation-Token (live: `400 Invalid argument`, nicht Permission-abhängig — permanent).
+  - GraphQL `organization.packages(packageType:CONTAINER)` ist **nicht nutzbar** (live: `CONTAINER` ist kein gültiger `PackageType` im GraphQL-Schema; `DOCKER` liefert leere Liste mit App-Token).
 - **Org:** fest = `Studis-Softwareschmiede` (Konstante, keine Nutzereingabe).
-- **Setup-Vorbedingung (von `coder`/`architekt` zu finalisieren, AC6):** *Falls* die Wurzel eine fehlende App-Permission ist → die GitHub-App `softwareschmiede-bot[bot]` benötigt **„Packages: Read"** (org-/installation-level); nach Nachzug trägt das frisch geminte Installation-Token den Scope und der REST-Listen-Endpunkt liefert `200`. Dieser Befund wird hier nach Live-Verifikation konkret eingetragen (kein offener Platzhalter im Merge-Stand).
+- **Setup-Vorbedingung (AC6, live-verifiziert 2026-06-18):**
+  - Die Ursache des `400 Invalid argument` am Org-Listen-Endpunkt ist **kein Permission-Problem**: die GitHub-App `softwareschmiede-bot[bot]` hat nachweislich Packages-Lesezugriff (Einzel-Endpunkte liefern 200 mit demselben Token).
+  - Das `400` ist eine **bekannte GitHub-API-Limitation** für App-Installation-Tokens am Org-Listen-Endpunkt — unabhängig von Permissions, nicht behebbar durch Permission-Nachzug.
+  - **Keine „Packages: Read"-Permission muss nachgezogen werden** für den gewählten Lösungsweg (Variante c nutzt ausschließlich die bereits funktionierenden Endpunkte).
+  - Voraussetzung: Die GitHub-App benötigt `Contents: Read` (für `/installation/repositories`) und Zugriff auf die Container-Packages der Org (bereits vorhanden, belegt durch 200 auf Einzel-Endpunkten).
 
 ## Edge-Cases & Fehlerverhalten
 - Org-Listen-Endpunkt antwortet `400 "Invalid argument"` (heutiger Live-Befund) → der gewählte Lösungsweg umgeht/behebt das; **kein** stilles Verschlucken zur Leerliste, solange Pakete existieren + Token berechtigt (AC1).
 - App-Token gültig, aber Permission fehlt (`401/403/400`) → degradiert zu leerer Liste + `errors` (AC4); die fehlende Permission ist als Setup-Vorbedingung dokumentiert (AC6), nicht als Dauerzustand akzeptiert.
 - GraphQL-Variante: `errors`-Array in der GraphQL-Antwort → wie API-Fehler behandelt (Degradation, kein Leak).
-- Einzel-Endpunkt-Variante: einzelne Pakete 404/403 → Teil-Ergebnis + `errors` (AC3), übrige Pakete bleiben.
+- Einzel-Endpunkt-Variante: einzelne Pakete **404** → stilles Skip (kein Error-Eintrag; Repo hat einfach kein gleichnamiges Container-Image — erwarteter Normalfall); **5xx / 403 / Netzwerkfehler** → `errors[]`-Eintrag je gescheitertem Paket, übrige Pakete bleiben (AC3).
 - Token nicht auflösbar (Provider `undefined`) → leere Liste, 200 (AC4).
+
+## Bekannte Einschränkung (Variante c)
+- **Annahme: Container-Package-Name == Repository-Name.** Die Probe-Strategie leitet den Package-Namen direkt aus dem Repo-Namen ab und ruft `GET /orgs/{org}/packages/container/{repo-name}` auf. Packages unter einem vom Repo-Namen abweichenden Namen sowie mehrere Container-Packages pro Repo werden von dieser Strategie **nicht entdeckt**. Im aktuellen Setup der Softwareschmiede trägt jedes Repo genau ein Container-Image mit identischem Namen (live-verifiziert 2026-06-18), sodass die Annahme zutrifft.
 
 ## NFRs
 - **Sicherheit (Floor, hart):** read-only; App-Token-only ([[github-app-token-unification]] AC9, **kein** `GH_TOKEN`); App-Token nie geleakt (Response/Log/WS/Argv/Bundle); Org fix (kein SSRF); `{name}` (Tag-Pfad) bleibt validiert.
