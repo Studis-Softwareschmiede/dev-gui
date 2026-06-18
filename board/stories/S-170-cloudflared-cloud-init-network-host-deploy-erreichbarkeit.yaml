@@ -1,8 +1,8 @@
 id: S-170
 parent: F-017
 title: 'cloudflared im cloud-init mit --network host starten (Deploy-Erreichbarkeit)'
-status: To Do
-branch: null
+status: Done
+branch: feat/S-170-cloudflared-host-network
 priority: P1
 spec: docs/specs/vps-cloud-init-setup.md
 implements:
@@ -38,4 +38,4 @@ estimate_note: 'Kleiner, fokussierter Fix im CloudInitBuilder (src/vps/CloudInit
   === 5. Bestehende CloudInitBuilder-Tests fuer den cloudflared-Block (AC12/AC13)
   entsprechend anpassen. ~S, ~1 EP.'
 created_at: '2026-06-18T00:00:00Z'
-updated_at: '2026-06-18T00:00:00Z'
+updated_at: '2026-06-18T14:20:00Z'
