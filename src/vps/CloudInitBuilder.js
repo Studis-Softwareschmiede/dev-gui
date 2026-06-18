@@ -23,12 +23,16 @@
  *                     aus Docker-Env (--env-file) — Token NICHT in runcmd-Argv/Shell-Log
  *                     (vps-tunnel-provisioning AC6, vps-cloud-init-setup AC13).
  *                     Optionaler Parameter: ohne tunnelToken → kein cloudflared-Block (rückwärtskompatibel).
+ *   v5 (2026-06-18) — cloudflared Container im Host-Netzwerk gestartet (--network host, AC14).
+ *                     Ohne --network host ist localhost im Container der Container selbst (nicht der Host)
+ *                     → Tunnel-Route http://localhost:<hostPort> unerreichbar (live verifiziert, S-170).
+ *                     Token-Floor (AC13) bleibt unverändert: Token nur via --env-file, nie in Argv/Log.
  *
  * @module CloudInitBuilder
  */
 
 /** Aktuelle Vorlage-Version — erhöhen bei jeder strukturellen Änderung. */
-export const TEMPLATE_VERSION = 4;
+export const TEMPLATE_VERSION = 5;
 
 // ── CloudInitBuilder ──────────────────────────────────────────────────────────
 
@@ -125,8 +129,9 @@ export class CloudInitBuilder {
       : '';
 
     const cloudflaredRuncmd = hasTunnel
-      ? `  # cloudflared als Docker-Container — Token via --env-file (kein Token in Argv, AC6)
-  - docker run -d --name cloudflared --restart unless-stopped --env-file /etc/cloudflared/env cloudflare/cloudflared:latest tunnel --no-autoupdate run
+      ? `  # cloudflared als Docker-Container im Host-Netzwerk — Token via --env-file (kein Token in Argv, AC6/AC13/AC14)
+  # --network host: localhost im Container = Host-localhost; Route http://localhost:<port> erreichbar (AC14, S-170)
+  - docker run -d --name cloudflared --restart unless-stopped --network host --env-file /etc/cloudflared/env cloudflare/cloudflared:latest tunnel --no-autoupdate run
 `
       : '';
 
