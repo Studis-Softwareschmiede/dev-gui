@@ -4,18 +4,20 @@
  * Read-only endpoints: lists Org container packages + tags live via GitHubPackagesReader.
  * Hinter AccessGuard (montiert via app.use('/api', accessGuard) in server.js).
  *
- * Response shapes (Spec ghcr-image-list AC2, AC3, Verträge):
+ * Response shapes (Spec ghcr-image-list AC2, AC3, Verträge; S-165 Reparatur):
  *   GET /api/github/packages
  *     200 { packages: [{ name, fullImageRef, visibility, htmlUrl, updatedAt }], errors? }
+ *     List-path: Variante (c) — /installation/repositories + single-package probes.
+ *     errors[] only contains { scope, errorClass } — no token, no internal detail (AC5).
  *
  *   GET /api/github/packages/{name}/tags
  *     200 { tags: [{ tag, digest, updatedAt }], errors? }
  *     400 { error } — when {name} fails validation (^[A-Za-z0-9._-]+$)
  *
- * Graceful degradation (AC5):
+ * Graceful degradation (AC4/AC5):
  *   - GitHub unreachable / no token / 401/404 → packages:[] or tags:[] (kein Crash, kein Secret-Leak)
  *
- * Security (security/R01, AC4):
+ * Security (security/R01, AC2/AC5):
  *   - App-Token erscheint NIE in Response, Log oder WS-Stream.
  *   - Kein POST/PATCH/PUT/DELETE auf diesem Router.
  *   - {name}-Parameter wird validiert (AC5).
@@ -41,20 +43,26 @@ export function githubPackagesRouter({ githubPackagesReader }) {
    *
    * Returns all org container packages with shape
    * { name, fullImageRef, visibility, htmlUrl, updatedAt }.
-   * Always 200 — on source failure packages:[] is returned (AC5, graceful degradation).
+   * Uses listPackagesWithErrors() to surface partial-error info (AC3).
+   * Always 200 — on source failure packages:[] is returned (AC4, graceful degradation).
+   * errors[] entries contain only { scope, errorClass } — no token, no internal detail (AC5).
    */
   router.get('/api/github/packages', async (_req, res) => {
     let packages;
+    let errors;
     try {
-      packages = await githubPackagesReader.listPackages();
+      ({ packages, errors } = await githubPackagesReader.listPackagesWithErrors());
     } catch {
-      // Unexpected rejection (should not happen — listPackages degrades internally)
-      // Degrade gracefully: return empty list (AC5), never expose internals or token
+      // Unexpected rejection (should not happen — listPackagesWithErrors degrades internally)
+      // Degrade gracefully: return empty list (AC4), never expose internals or token
       packages = [];
+      errors = [];
     }
 
     // Security: token is only ever in GitHubPackagesReader internals — nothing sensitive here
-    return res.json({ packages });
+    const body = { packages };
+    if (errors.length > 0) body.errors = errors;
+    return res.json(body);
   });
 
   /**
