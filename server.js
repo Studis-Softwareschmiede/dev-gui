@@ -189,7 +189,13 @@ const deployOrchestrator = new DeployOrchestrator({
 const vpsTargets = buildVpsTargetsFromEnv(process.env.VPS_TARGETS);
 
 // ── ReconciliationJob (Capability C, ADR-013) ─────────────────────────────
-const reconcileVpsConfigs = buildReconcileVpsConfigs(vpsTargets, process.env.RECONCILE_TUNNEL_IDS);
+// S-167 AC6: Vereinigung dynamischer Target-Records (aus persistierten Create-Datensätzen)
+// und Env-Konfiguration (RECONCILE_TUNNEL_IDS). Env gewinnt bei Kollision.
+const reconcileVpsConfigs = await buildReconcileVpsConfigsDynamic(
+  vpsTargets,
+  process.env.RECONCILE_TUNNEL_IDS,
+  vpsRegistry,
+);
 const reconciliationJob = new ReconciliationJob({
   dockerControl: vpsDockerControl,
   cloudflareApi,
@@ -416,6 +422,54 @@ function buildReconcileVpsConfigs(targets, envValue) {
     }
   }
   return configs;
+}
+
+/**
+ * Vereinigte Reconcile-Konfiguration: dynamische Target-Records ⊕ Env (S-167 AC6).
+ *
+ * Basis ist die Env-Konfiguration (RECONCILE_TUNNEL_IDS — Env gewinnt bei Kollision).
+ * Zusätzlich werden persistierte Target-Records aus der VpsProviderRegistry einbezogen,
+ * sofern sie eine tunnelId tragen und noch nicht durch die Env abgedeckt sind.
+ *
+ * Degradierend: Fehler beim Laden der dynamischen Records → nur Env-Konfiguration.
+ * Kein neuer RECONCILE_TUNNEL_IDS-Env-Eintrag nötig für dynamische VPS (AC6).
+ *
+ * @param {Map<string, object>} targets - Env-vpsTargets (VPS_TARGETS)
+ * @param {string|undefined} envValue   - RECONCILE_TUNNEL_IDS-Env-String
+ * @param {import('./src/vps/VpsProviderRegistry.js').VpsProviderRegistry} [registry]
+ * @returns {Promise<Array<{ vpsId: string, vps: object, tunnelId: string }>>}
+ */
+async function buildReconcileVpsConfigsDynamic(targets, envValue, registry) {
+  // Env-Konfiguration als Basis (Env gewinnt bei Kollision)
+  const envConfigs = buildReconcileVpsConfigs(targets, envValue);
+  const envVpsIds = new Set(envConfigs.map((c) => c.vpsId));
+
+  // Dynamische Target-Records einbeziehen (S-167 AC6)
+  const dynamicConfigs = [];
+  if (registry && typeof registry.listTargetRecords === 'function') {
+    try {
+      const records = await registry.listTargetRecords();
+      for (const record of records) {
+        const vpsId = record._vpsId;
+        // Nur einbeziehen wenn: nicht bereits durch Env abgedeckt, tunnelId vorhanden
+        if (!vpsId || envVpsIds.has(vpsId) || !record.tunnelId) continue;
+        // VPS-Ziel aus dem Record aufbauen (security: kein Key/Token)
+        const vps = {
+          host: record.host ?? null,
+          port: record.port ?? 22,
+          targetUser: record.targetUser ?? 'root',
+        };
+        dynamicConfigs.push({ vpsId, vps, tunnelId: record.tunnelId });
+      }
+    } catch (err) {
+      // Degradierend: Fehler beim Laden → nur Env-Konfiguration nutzen
+      // Security: err.message darf kein Token enthalten (VpsProviderRegistry-Floor)
+      const safeMsg = String(err?.message ?? '').slice(0, 200);
+      console.warn('[buildReconcileVpsConfigsDynamic] Dynamische Datensätze konnten nicht geladen werden (best-effort):', safeMsg);
+    }
+  }
+
+  return [...envConfigs, ...dynamicConfigs];
 }
 
 // Graceful shutdown

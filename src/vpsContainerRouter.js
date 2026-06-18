@@ -175,13 +175,18 @@ function sanitizeMsg(msg) {
 /**
  * Löst das SSH-Ziel { host, port, targetUser } für ein provider+serverId-Paar auf.
  *
- * Strategie (zwei Quellen):
- *   1. vpsRegistry.getMachineIp(provider, serverId) → IPv4 des Servers (Provider-API)
- *   2. vpsTargets: iteriert alle Einträge und matcht auf host (IPv4 oder Hostname).
- *      Findet sich kein Match: ersten Eintrag verwenden (Fallback, wenn VPS_TARGETS
- *      nur mit Hostname konfiguriert ist und Provider IPv4 zurückgibt).
+ * Strategie (drei Quellen, S-167 AC4):
+ *   1. Dynamische Quelle: vpsRegistry.listTargetRecords() → exakter {provider, serverId}-Match.
+ *      Ist host null/veraltet, wird er über getMachineIp aufgefrischt.
+ *      Env-Eintrag (falls vorhanden) hat Vorrang vor dem dynamischen Datensatz.
+ *   2. Env-Quelle (vpsTargets): vpsRegistry.getMachineIp(provider, serverId) → IPv4;
+ *      matcht gegen vpsTargets-Hosts.
+ *   3. Fallback: erster vpsTargets-Eintrag (Single-VPS-Setup).
  *
- * Rückgabe: null wenn Provider unbekannt/nicht konfiguriert oder kein Target gefunden.
+ * Rückgabe: null nur wenn weder dynamisch noch Env ein Ziel ergibt (AC4 garantiert
+ * non-null für rein-dynamischen VPS bei leerem vpsTargets).
+ *
+ * Security: kein SSH-Key/Token erscheint in der Rückgabe (nur host/port/targetUser).
  *
  * @param {string} provider
  * @param {string} serverId
@@ -190,11 +195,37 @@ function sanitizeMsg(msg) {
  * @returns {Promise<{ host: string, port: number, targetUser: string } | null>}
  */
 async function resolveVpsTarget(provider, serverId, vpsRegistry, vpsTargets) {
-  // Fallback: wenn nur ein vpsTarget konfiguriert oder kein Auflösung möglich →
-  // ersten Eintrag verwenden (Single-VPS-Setups).
-  if (vpsTargets.size === 0) return null;
+  // ── 1. Dynamische Quelle: exakter {provider, serverId}-Match (S-167 AC4) ──
+  // Suche zuerst im persistierten Target-Record-Speicher.
+  // Env-Override: wenn vpsTargets einen Eintrag mit passender IP enthält, gewinnt die Env.
+  let dynamicTarget = null;
+  if (vpsRegistry && typeof vpsRegistry.listTargetRecords === 'function') {
+    try {
+      const records = await vpsRegistry.listTargetRecords();
+      const match = records.find(
+        (r) => r.provider === provider && String(r.serverId) === String(serverId),
+      );
+      if (match) {
+        // Host aus Record; bei null/leer über getMachineIp auffrischen (AC2/AC4)
+        let host = match.host ?? null;
+        if (!host && typeof vpsRegistry.getMachineIp === 'function') {
+          try {
+            host = await vpsRegistry.getMachineIp(provider, serverId);
+          } catch {
+            // Degradierend — kein Host via Provider-API
+          }
+        }
+        if (host) {
+          dynamicTarget = { host, port: match.port ?? 22, targetUser: match.targetUser ?? 'root' };
+        }
+      }
+    } catch {
+      // Degradierend — dynamische Auflösung nicht kritisch; fällt auf Env-Strategie zurück
+    }
+  }
 
-  // Versuche Machine-IP über Registry (Provider-API)
+  // ── 2. Env-Quelle (vpsTargets) mit IP-Match (bestehende Strategie) ──
+  // Versuche Machine-IP über Registry (Provider-API) für Env-Host-Match
   let machineIp = null;
   if (vpsRegistry && typeof vpsRegistry.getMachineIp === 'function') {
     try {
@@ -204,16 +235,23 @@ async function resolveVpsTarget(provider, serverId, vpsRegistry, vpsTargets) {
     }
   }
 
-  // Mit Machine-IP: exakter Treffer in vpsTargets
+  // Mit Machine-IP: exakter Treffer in vpsTargets (Env)
   if (machineIp) {
     for (const target of vpsTargets.values()) {
       if (target.host === machineIp) {
+        // Env-Treffer gewinnt über dynamischen Datensatz (Override, Spec §Vereinigungs-Regel)
         return { host: target.host, port: target.port ?? 22, targetUser: target.targetUser };
       }
     }
   }
 
-  // Ohne IP-Match: ersten vpsTarget-Eintrag als Fallback (Single-VPS-Setup)
+  // Env hatte keinen IP-Match → dynamischer Datensatz (falls vorhanden) greift jetzt
+  if (dynamicTarget) {
+    return dynamicTarget;
+  }
+
+  // ── 3. Fallback: erster vpsTargets-Eintrag (Single-VPS-Setup) ──
+  // Nur wenn vpsTargets nicht leer ist (bestehende Semantik erhalten).
   const first = vpsTargets.values().next().value;
   if (first) {
     return { host: first.host, port: first.port ?? 22, targetUser: first.targetUser };

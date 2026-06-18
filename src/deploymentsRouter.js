@@ -224,16 +224,45 @@ function validateUndeployParams(params, body) {
  * @param {Map<string, object>} vpsTargets - map of vpsId → VpsTarget { host, port?, targetUser }
  * @param {import('./deploy/ReconciliationJob.js').ReconciliationJob} [reconciliationJob]
  * @param {import('./deploy/LocalDockerControl.js').LocalDockerControl} [localDockerControl]
+ * @param {import('./vps/VpsProviderRegistry.js').VpsProviderRegistry} [vpsRegistry]
+ *   Optionale Registry-Referenz für dynamische VPS-Ziel-Auflösung (S-167 AC3).
+ *   Wenn gesetzt: dynamisch angelegte VPS erscheinen zusätzlich zur Env im Dropdown.
+ *   Env gewinnt bei Kollision (Override/Fallback).
  * @returns {import('express').Router}
  */
-export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconciliationJob, localDockerControl) {
+export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconciliationJob, localDockerControl, vpsRegistry) {
   const router = Router();
 
   // ── GET /api/deployments/vps-targets ────────────────────────────────────
-  // Returns the list of configured VPS IDs for the frontend dropdown (AC10).
-  // Read-only — no mutation, no secrets (only ids, no host/user/key data exposed).
-  router.get('/api/deployments/vps-targets', (_req, res) => {
-    const ids = Array.from(vpsTargets.keys());
+  // Returns the unified list of VPS IDs (dynamisch ⊕ Env) for the frontend dropdown.
+  // S-167 AC3: dynamisch angelegte VPS + VPS_TARGETS-Env; Env gewinnt bei Kollision.
+  // Read-only — no mutation, no secrets (only IDs, no host/user/key exposed — AC8).
+  router.get('/api/deployments/vps-targets', async (_req, res) => {
+    // Env-IDs als Override-Menge (Env gewinnt bei Kollision)
+    const envIds = new Set(vpsTargets.keys());
+
+    // Dynamische IDs aus persistierten Target-Records (S-167 AC3)
+    // _vpsId = sanitisierter VPS-Name (aus CredentialStore-Schlüssel abgeleitet)
+    const dynamicIds = new Set();
+    if (vpsRegistry && typeof vpsRegistry.listTargetRecords === 'function') {
+      try {
+        const records = await vpsRegistry.listTargetRecords();
+        for (const record of records) {
+          if (record._vpsId) dynamicIds.add(record._vpsId);
+        }
+      } catch {
+        // Degradierend: Quell-Fehler → nur Env-IDs zurückliefern (kein Crash)
+      }
+    }
+
+    // Vereinigung: Env-IDs zuerst, dann dynamische IDs die noch nicht vorhanden sind
+    // (Env gewinnt bei Kollision — gleicher _vpsId → Env-Eintrag bleibt)
+    const ids = [...envIds];
+    for (const id of dynamicIds) {
+      if (!envIds.has(id)) ids.push(id);
+    }
+
+    // Security-Floor (AC8): nur IDs — kein host/user/key in der Response
     return res.json({ vpsIds: ids });
   });
 
