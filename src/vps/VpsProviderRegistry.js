@@ -31,6 +31,14 @@
  * @property {string|null} serverType
  * @property {string|null} createdAt
  *
+ * @typedef {object} VpsTargetRecord
+ * @property {"hetzner"|"ionos"|"hostinger"} provider
+ * @property {string} serverId
+ * @property {string|null} host   - Öffentliche IPv4 (null wenn noch nicht final — über getMachineIp auflösbar)
+ * @property {number} port        - SSH-Port (Default 22)
+ * @property {string} targetUser  - SSH-Benutzername (Default "root")
+ * @property {string|null} tunnelId - Cloudflare-Tunnel-ID (null wenn kein Tunnel angelegt)
+ *
  * @typedef {object} ProviderInfo
  * @property {"hetzner"|"ionos"|"hostinger"} id
  * @property {boolean} configured
@@ -63,6 +71,13 @@ const TUNNEL_TOKEN_KEY = (tunnelId) => `credentials/cloudflare/tunnel_token/${tu
 
 /** CredentialStore-Schlüssel für die Tunnel-ID-Zuordnung (nicht geheim, encrypted für Einheitlichkeit). */
 const TUNNEL_ID_KEY = (sanitizedName) => `credentials/misc/vps-${sanitizedName}-tunnel-id`;
+
+/**
+ * CredentialStore-Schlüssel für den VPS-Ziel-Datensatz (nicht geheim — nur Verbindungs-Metadaten).
+ * Schema: { provider, serverId, host, port, targetUser, tunnelId }
+ * Kein SSH-Private-Key, kein Tunnel-Token (ADR-007/ADR-008).
+ */
+const TARGET_RECORD_KEY = (sanitizedName) => `credentials/misc/vps-${sanitizedName}-target`;
 
 export class VpsProviderRegistry {
   /** @type {import('../CredentialStore.js').CredentialStore} */
@@ -205,6 +220,59 @@ export class VpsProviderRegistry {
   }
 
   /**
+   * Liest die aktuelle öffentliche IP eines Servers live vom Provider (AC2).
+   *
+   * Wird verwendet, wenn die host-IP zum Create-Zeitpunkt noch nicht final war
+   * (asynchrone Provisionierung) — der Ziel-Datensatz kann so nachträglich
+   * aufgefrischt werden, ohne eine stale IP fest zu verdrahten.
+   *
+   * @param {string} provider - "hetzner" | "ionos" | "hostinger"
+   * @param {string} serverId
+   * @returns {Promise<string|null>} Aktuelle IPv4 oder null (wenn noch nicht bereit)
+   * @throws {VpsRegistryError} bei unbekanntem oder nicht konfiguriertem Provider
+   */
+  async getMachineIp(provider, serverId) {
+    const { token, adapter } = await this.#resolveProviderOrThrow(provider);
+
+    // Alle Maschinen des Providers listen und die passende heraussuchen.
+    // Bewusste Entscheidung: kein spezieller "get single server" Aufruf —
+    // die bestehende listMachines() Boundary reicht aus (ADR-009).
+    try {
+      const machines = await adapter.listMachines(token);
+      const machine = machines.find(
+        (m) => String(m.serverId) === String(serverId),
+      );
+      return machine?.ipv4 ?? null;
+    } catch {
+      return null; // degradierend: bei Fehler keine IP — Aufrufer muss damit umgehen
+    }
+  }
+
+  /**
+   * Liest den persistierten VPS-Ziel-Datensatz aus dem CredentialStore (Baustein für S-167).
+   *
+   * Gibt null zurück wenn kein Datensatz vorhanden (Bestandssetup ohne dynamischen Eintrag).
+   * Der Datensatz enthält KEINE Secrets (nur Verbindungs-Metadaten + Referenzen).
+   *
+   * @param {string} vpsName - VPS-Name (roh, wird sanitisiert)
+   * @returns {Promise<import('./VpsProviderRegistry.js').VpsTargetRecord|null>}
+   */
+  async getTargetRecord(vpsName) {
+    if (!this.#credentialStore) return null;
+
+    const sanitized = sanitizeTunnelName(vpsName);
+    const key = TARGET_RECORD_KEY(sanitized);
+
+    try {
+      const raw = await this.#credentialStore.getPlaintext(key);
+      if (!raw) return null;
+      return JSON.parse(raw);
+    } catch {
+      return null; // kein gültiger JSON → kein Datensatz (defensiv)
+    }
+  }
+
+  /**
    * Löscht einen Server beim adressierten Provider und räumt den zugehörigen
    * Cloudflare-Tunnel auf (S-153 AC1–AC5).
    *
@@ -307,8 +375,12 @@ export class VpsProviderRegistry {
     }
 
     if (!tunnelId) {
-      // AC5: Keine Tunnel-Zuordnung → Cleanup überspringen
-      console.log(`[VpsProviderRegistry] Kein Tunnel für VPS '${sanitized}' gefunden — Cleanup übersprungen (AC5)`);
+      // AC5: Keine Tunnel-Zuordnung → Tunnel-Cleanup überspringen
+      // S-166 AC7: Ziel-Datensatz trotzdem entfernen (best-effort, idempotent)
+      console.log(`[VpsProviderRegistry] Kein Tunnel für VPS '${sanitized}' gefunden — Tunnel-Cleanup übersprungen (AC5)`);
+      try {
+        await this.#credentialStore.delete(TARGET_RECORD_KEY(sanitized));
+      } catch { /* best-effort */ }
       return { skipped: true };
     }
 
@@ -319,6 +391,10 @@ export class VpsProviderRegistry {
       try {
         await this.#credentialStore.delete(TUNNEL_TOKEN_KEY(tunnelId));
         await this.#credentialStore.delete(tunnelIdKey);
+      } catch { /* best-effort */ }
+      // S-166 AC7: Ziel-Datensatz entfernen (best-effort, idempotent)
+      try {
+        await this.#credentialStore.delete(TARGET_RECORD_KEY(sanitized));
       } catch { /* best-effort */ }
       return { skipped: true };
     }
@@ -366,6 +442,10 @@ export class VpsProviderRegistry {
           await this.#credentialStore.delete(TUNNEL_TOKEN_KEY(tunnelId));
           await this.#credentialStore.delete(tunnelIdKey);
         } catch { /* best-effort */ }
+        // S-166 AC7: Ziel-Datensatz entfernen auch bei Tunnel-Delete-Fehler (best-effort)
+        try {
+          await this.#credentialStore.delete(TARGET_RECORD_KEY(sanitized));
+        } catch { /* best-effort */ }
         return { error: safeMsg };
       }
     }
@@ -381,6 +461,12 @@ export class VpsProviderRegistry {
       await this.#credentialStore.delete(tunnelIdKey);
     } catch (err) {
       console.log('[VpsProviderRegistry] Tunnel-ID-Referenz-Cleanup-Fehler (best-effort):', String(err?.message ?? '').slice(0, 100));
+    }
+    // S-166 AC7: Ziel-Datensatz entfernen (best-effort, idempotent)
+    try {
+      await this.#credentialStore.delete(TARGET_RECORD_KEY(sanitized));
+    } catch (err) {
+      console.log('[VpsProviderRegistry] Ziel-Datensatz-Cleanup-Fehler (best-effort):', String(err?.message ?? '').slice(0, 100));
     }
   }
 
@@ -451,7 +537,21 @@ export class VpsProviderRegistry {
       tunnelId: tunnelResult?.tunnelId ?? null,
     };
 
-    return adapter.create(adapterParams, token);
+    const machine = await adapter.create(adapterParams, token);
+
+    // S-166 AC1: Ziel-Metadaten persistieren — nach erfolgreichem Create.
+    // Best-effort: schlägt die Persistenz fehl, bleibt der VPS angelegt (EC analog AC10/S-152).
+    // host = IPv4 aus der Provider-Antwort (bei asynchroner Provisionierung ggf. null).
+    // targetUser/port aus dem Create-Kontext (root-Key + alex-Key hinterlegt → Default root/22).
+    try {
+      await this.#persistTargetMetadata(params.name, machine, tunnelResult?.tunnelId ?? null);
+    } catch (err) {
+      // Datensatz-Fehler protokollieren; VPS bleibt angelegt, Betreiber kann via VPS_TARGETS nachsteuern
+      const safeMsg = String(err?.message ?? 'Ziel-Datensatz-Persistenz fehlgeschlagen').slice(0, 200);
+      console.error('[VpsProviderRegistry] Ziel-Datensatz konnte nicht persistiert werden (best-effort):', safeMsg);
+    }
+
+    return machine;
   }
 
   // ── Tunnel-Provisionierung (S-152) ───────────────────────────────────────────
@@ -537,6 +637,50 @@ export class VpsProviderRegistry {
 
     // AC7: Tunnel-ID als Zuordnung speichern (nicht geheim, aber im Store für Konsistenz)
     await this.#credentialStore.set(TUNNEL_ID_KEY(sanitized), tunnelId);
+  }
+
+  /**
+   * Persistiert den VPS-Ziel-Datensatz im CredentialStore (S-166 AC1).
+   *
+   * Schlüssel: credentials/misc/vps-<sanitized-vpsname>-target (nicht geheim)
+   * Schema:    { provider, serverId, host, port, targetUser, tunnelId }
+   *
+   * host = IPv4 aus der VpsMachine-Rückgabe (kann null sein bei asynchroner Provisionierung —
+   *   dann über getMachineIp(provider, serverId) nachträglich auflösbar, AC2).
+   * targetUser = "root" (Annahme dokumentiert: root- + alex-Keys beim Create hinterlegt; Spec §Verträge).
+   * port = 22 (Standard-SSH-Port; pro Provider verfeinerbar durch architekt/coder).
+   * tunnelId = die im gleichen Create-Schritt angelegte Tunnel-ID (oder null wenn kein Tunnel).
+   *
+   * Security-Floor (AC8):
+   *   - Kein SSH-Private-Key in diesem Datensatz (bleibt store-intern + transient, ADR-008).
+   *   - Kein Tunnel-Token in diesem Datensatz (bleibt verschlüsselt at rest, ADR-007).
+   *   - Nur Verbindungs-Metadaten + Referenzen.
+   *
+   * @param {string} vpsName
+   * @param {import('./VpsProviderRegistry.js').VpsMachine} machine
+   * @param {string|null} tunnelId
+   */
+  async #persistTargetMetadata(vpsName, machine, tunnelId) {
+    if (!this.#credentialStore) {
+      console.log('[VpsProviderRegistry] Ziel-Datensatz nicht persistiert: kein CredentialStore');
+      return;
+    }
+
+    const sanitized = sanitizeTunnelName(vpsName);
+
+    /** @type {VpsTargetRecord} */
+    const record = {
+      provider: machine.provider,
+      serverId: machine.serverId,
+      host: machine.ipv4 ?? null,  // null wenn IP noch nicht final (AC2: über getMachineIp auffrischbar)
+      port: 22,                     // Default aus Create-Kontext (Spec §Verträge: root + alex Keys hinterlegt)
+      targetUser: 'root',           // Default aus Create-Kontext (Annahme dokumentiert, Spec §Verträge)
+      tunnelId: tunnelId ?? null,
+    };
+
+    // Security-Floor (AC8): kein Private-Key, kein Token im Datensatz — nur Metadaten
+    await this.#credentialStore.set(TARGET_RECORD_KEY(sanitized), JSON.stringify(record));
+    console.log(`[VpsProviderRegistry] VPS-Ziel-Datensatz persistiert: provider=${record.provider} serverId=${record.serverId}`);
   }
 
   // ── Private Helpers ──────────────────────────────────────────────────────────
