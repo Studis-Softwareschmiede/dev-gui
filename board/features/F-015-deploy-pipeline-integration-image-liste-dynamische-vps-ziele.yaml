@@ -11,7 +11,7 @@ goal: 'Die beim ersten echten Live-Test (2026-06) aufgedeckten Integrationslück
   nur aus der statischen VPS_TARGETS-Env aufgelöst werden → beim Create die Ziel-Metadaten
   persistieren und alle drei Konsumenten (Deploy-Dropdown, Container-Übersicht, Reconcile)
   zusätzlich zur Env aus dieser dynamischen Quelle auflösen.'
-status: To Do
+status: Done
 priority: P1
 spec: docs/specs/vps-dynamic-ssh-targets.md
 definition_of_done: null
@@ -27,6 +27,6 @@ stories:
 - S-165
 - S-166
 - S-167
-progress: 0/3
+progress: 3/3
 created_at: '2026-06-18T00:00:00Z'
-updated_at: '2026-06-18T00:00:00Z'
+updated_at: '2026-06-18T10:35:00Z'
