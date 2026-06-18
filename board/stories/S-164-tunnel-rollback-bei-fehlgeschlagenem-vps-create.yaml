@@ -1,0 +1,35 @@
+id: S-164
+parent: F-014
+title: 'Tunnel-Rollback bei fehlgeschlagenem VPS-Create (kein verwaister Tunnel)'
+status: To Do
+priority: P1
+spec: docs/specs/vps-create-options.md
+implements:
+- AC13
+- AC14
+depends:
+- S-153
+labels:
+- vps
+- cloudflare
+- backend
+- security
+size_est: S
+dispo_est: 3
+confidence: high
+branch: null
+pr: null
+blocked_reason: null
+estimate_note: 'Backend-Fix in src/vps/VpsProviderRegistry.js create(). Heute legt #provisionTunnel ZUERST den
+  Cloudflare-Tunnel an (Zeile ~421) und ruft DANN adapter.create() (Zeile ~454); scheitert der Server-Schritt, bleibt
+  der Tunnel verwaist (real beobachtet: devgui-testserver). Fix: adapter.create() in try/catch kapseln — wirft es,
+  nachdem ein Tunnel angelegt wurde (tunnelResult != null), den Tunnel via CloudflareApi.deleteTunnel(tunnelId)
+  entfernen und Tunnel-Token-/Tunnel-ID-Credential-Referenzen aufraeumen (TUNNEL_TOKEN_KEY / TUNNEL_ID_KEY), analog
+  dem bestehenden #cleanupTunnel aus S-153. Rollback best-effort + idempotent: Cleanup-Fehler maskiert NICHT den
+  urspruenglichen Create-Fehler (Original-Fehler wird weitergeworfen), Cleanup-Fehler token-frei protokolliert/auditiert
+  (security/R01 — kein Token im Log). Kein Tunnel angelegt (tunnelResult=null, z.B. Cloudflare nicht konfiguriert) ->
+  kein Rollback. Kein neuer oeffentlicher Endpunkt. Tests: adapter.create() wirft nach Tunnel-Anlage -> deleteTunnel +
+  Credential-delete aufgerufen, Original-Fehler propagiert; Cleanup-Fehler verschluckt Original-Fehler nicht;
+  tunnelResult=null -> kein deleteTunnel; kein Token im Log. S (~3 EP), eng begrenzter Fix mit klarem Vorbild (S-153).'
+created_at: '2026-06-18T00:00:00Z'
+updated_at: '2026-06-18T00:00:00Z'

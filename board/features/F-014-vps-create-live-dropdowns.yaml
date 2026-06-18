@@ -1,0 +1,28 @@
+id: F-014
+title: 'VPS-Create-Formular: Live-Dropdowns für Typ/Region/Image mit Kosten'
+goal: 'Im VPS-Create-Formular ("Neuen Server erstellen") die fehleranfälligen Freitextfelder
+  Server-Typ, Region und Image durch Dropdowns mit live von der Hetzner-API geladenen
+  Werten ersetzen; beim Server-Typ die Kosten (monatlich + stündlich, regionsbezogen)
+  anzeigen. Nur Hetzner — andere Provider behalten Freitext (graceful Fallback), Architektur
+  aber für späteres Nachziehen vorbereitet. Zusätzlich: Tunnel-Rollback, wenn der VPS-Create
+  nach bereits angelegtem Cloudflare-Tunnel scheitert (kein verwaister Tunnel mehr).'
+status: To Do
+priority: P1
+spec: docs/specs/vps-create-options.md
+definition_of_done: null
+labels:
+- vps
+- ui
+- hetzner
+- cloudflare
+depends:
+- F-013
+owner: alex
+stories:
+- S-161
+- S-162
+- S-163
+- S-164
+progress: 0/4
+created_at: '2026-06-18T00:00:00Z'
+updated_at: '2026-06-18T00:00:00Z'

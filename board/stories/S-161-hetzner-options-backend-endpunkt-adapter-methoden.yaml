@@ -1,0 +1,43 @@
+id: S-161
+parent: F-014
+title: 'Hetzner-Options-Backend: read-only Endpunkt + Adapter-Methoden (server_types/locations/images mit Preisen)'
+status: To Do
+priority: P1
+spec: docs/specs/vps-create-options.md
+implements:
+- AC1
+- AC2
+- AC3
+- AC4
+- AC5
+depends:
+- S-040
+labels:
+- vps
+- hetzner
+- backend
+- security
+size_est: M
+dispo_est: 5
+confidence: medium
+branch: null
+pr: null
+blocked_reason: null
+estimate_note: 'Backend-Vertikalschnitt. Neue read-only-Route (Vorschlag GET /api/vps/providers/:provider/options)
+  in einem auto-registrierten Router (src/routers/*.js mit create(deps); KEINE manuelle server.js-Liste)
+  hinter AccessGuard — wie die uebrigen /api/vps/*. Neue HetznerAdapter-Methoden in src/vps/providers/hetzner.js
+  (listServerTypes/listLocations/listSystemImages) mit derselben #apiGet-/AbortController-Timeout-/Bearer-Header-/sanitizeMsg-Disziplin
+  wie list/start/stop/create — Token nie in URL/Log/Response. Hetzner-Endpunkte: GET /v1/server_types?per_page=60
+  (name,cores,memory,disk,deprecated,prices[{location,price_monthly{net,gross},price_hourly{net,gross}}]),
+  GET /v1/locations (name,network_zone,city,country), GET /v1/images?type=system&per_page=60
+  (name,description,os_flavor,os_version). Registry-Methode resolved Token store-intern (credentials/vps/hetzner_api_token),
+  ruft NUR den Adapter (R01 — keine api.hetzner.cloud-URL ausserhalb providers/hetzner.js). Aufbereitung:
+  deprecated-Typen filtern/markieren; fehlende Preisfelder -> weglassen/null (kein Fehler, ADR-009-Degradation);
+  Felder auf {serverTypes[],locations[],images[]} normalisieren. Nicht-Hetzner-Provider -> klares
+  optionsAvailable:false (kein 500); Hetzner nicht konfiguriert / API-Fehler -> token-freies Fehler-/Leer-Signal.
+  Tests (gemockter fetch/Adapter): Endpunkt liefert normalisierte Listen inkl. Preise; deprecated gefiltert;
+  fehlende Preisfelder kein Fehler; Nicht-Hetzner -> optionsAvailable:false; nicht konfiguriert/API-Fehler
+  graceful; AccessGuard 403; KEIN Token in Response/Log; Grep: keine Hetzner-URL ausserhalb des Adapters.
+  M (~5 EP) — Router + 3 Adapter-Methoden + Normalisierung + Degradation, klar getrennte Boundary.'
+created_at: '2026-06-18T00:00:00Z'
+updated_at: '2026-06-18T00:00:00Z'
