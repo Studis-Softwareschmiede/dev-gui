@@ -214,6 +214,63 @@ function validateUndeployParams(params, body) {
   };
 }
 
+// ── Vereinigte VPS-Ziel-Auflösung (AC9) ──────────────────────────────────────
+
+/**
+ * Löst eine vpsId zur vereinigten VpsTarget-Quelle (Env-Map ⊕ dynamische Records) auf.
+ *
+ * Strategie (AC9, identisch zu vps-targets-Listing AC3 + resolveVpsTarget AC4):
+ *   1. Env-Map (vpsTargets): direkter Key-Lookup → Env gewinnt bei Kollision.
+ *   2. Dynamische Records (vpsRegistry.listTargetRecords()): exakter _vpsId-Match.
+ *      Ist host null/veraltet, wird er über getMachineIp aufgefrischt (AC2-Analogie).
+ *   3. Kein Treffer → undefined (→ 422 "Unbekannter VPS: <vpsId>").
+ *
+ * Security (AC8): kein SSH-Key, kein Tunnel-Token in der Rückgabe (nur host/port/targetUser).
+ * Die 422-Fehlermeldung enthält nur die vpsId, kein host/targetUser/Key.
+ *
+ * @param {string} vpsId - sanitisierter VPS-Name aus Request
+ * @param {Map<string, { host: string, port?: number, targetUser: string }>} vpsTargets
+ * @param {import('./vps/VpsProviderRegistry.js').VpsProviderRegistry|undefined} vpsRegistry
+ * @returns {Promise<{ host: string, port: number, targetUser: string } | undefined>}
+ */
+async function resolveVpsIdToTarget(vpsId, vpsTargets, vpsRegistry) {
+  // ── 1. Env-Map: Env gewinnt bei Kollision (Override/Fallback) ──
+  const envTarget = vpsTargets.get(vpsId);
+  if (envTarget) {
+    return { host: envTarget.host, port: envTarget.port ?? 22, targetUser: envTarget.targetUser };
+  }
+
+  // ── 2. Dynamische Records (vpsRegistry) ──
+  if (vpsRegistry && typeof vpsRegistry.listTargetRecords === 'function') {
+    try {
+      const records = await vpsRegistry.listTargetRecords();
+      const match = records.find((r) => r._vpsId === vpsId);
+      if (match) {
+        // Host aus Record; bei null/leer über getMachineIp auffrischen (AC2-Analogie)
+        let host = match.host ?? null;
+        if (!host && typeof vpsRegistry.getMachineIp === 'function') {
+          try {
+            host = await vpsRegistry.getMachineIp(match.provider, match.serverId);
+          } catch {
+            // Degradierend — IP-Refresh fehlgeschlagen; host bleibt null
+          }
+        }
+        if (host) {
+          // Security-Floor (AC8): nur Verbindungs-Metadaten, kein Key/Token
+          return { host, port: match.port ?? 22, targetUser: match.targetUser ?? 'root' };
+        }
+        // host nicht auflösbar (kein Host in Record und getMachineIp fehlgeschlagen):
+        // kein Ziel lieferbar → undefined (→ 422), kein Crash
+      }
+    } catch {
+      // Degradierend — Store-Fehler bei listTargetRecords → kein Ziel via dynamische Quelle
+    }
+  }
+
+  // ── 3. Keine Quelle kennt die vpsId → undefined (→ 422) ──
+  return undefined;
+}
+
 // ── Router Factory ─────────────────────────────────────────────────────────────
 
 /**
@@ -225,8 +282,9 @@ function validateUndeployParams(params, body) {
  * @param {import('./deploy/ReconciliationJob.js').ReconciliationJob} [reconciliationJob]
  * @param {import('./deploy/LocalDockerControl.js').LocalDockerControl} [localDockerControl]
  * @param {import('./vps/VpsProviderRegistry.js').VpsProviderRegistry} [vpsRegistry]
- *   Optionale Registry-Referenz für dynamische VPS-Ziel-Auflösung (S-167 AC3).
- *   Wenn gesetzt: dynamisch angelegte VPS erscheinen zusätzlich zur Env im Dropdown.
+ *   Optionale Registry-Referenz für dynamische VPS-Ziel-Auflösung (S-167 AC3, S-169 AC9).
+ *   Wenn gesetzt: dynamisch angelegte VPS erscheinen zusätzlich zur Env im Dropdown
+ *   und sind über Deploy/Undeploy/Listing auflösbar.
  *   Env gewinnt bei Kollision (Override/Fallback).
  * @returns {import('express').Router}
  */
@@ -287,7 +345,8 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconcil
       return res.status(422).json({ error: 'tunnelId query-Parameter ist Pflicht' });
     }
 
-    const vpsTarget = vpsTargets.get(vpsId.trim());
+    // AC9: Vereinigte Auflösung (Env-Map ⊕ dynamische Records, Env gewinnt bei Kollision)
+    const vpsTarget = await resolveVpsIdToTarget(vpsId.trim(), vpsTargets, vpsRegistry);
     if (!vpsTarget) {
       return res.status(422).json({ error: `Unbekannter VPS: ${vpsId.trim()}` });
     }
@@ -339,8 +398,8 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconcil
     }
     const { image, vps: vpsId, hostname, tunnelId } = bodyVal.params;
 
-    // Resolve VPS target
-    const vpsTarget = vpsTargets.get(vpsId);
+    // AC9: Vereinigte Auflösung (Env-Map ⊕ dynamische Records, Env gewinnt bei Kollision)
+    const vpsTarget = await resolveVpsIdToTarget(vpsId, vpsTargets, vpsRegistry);
     if (!vpsTarget) {
       return res.status(422).json({ error: `Unbekannter VPS: ${vpsId}` });
     }
@@ -447,8 +506,8 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconcil
     }
     const { vps: vpsId, hostname, confirm, tunnelId } = paramsVal.params;
 
-    // Resolve VPS target
-    const vpsTarget = vpsTargets.get(vpsId);
+    // AC9: Vereinigte Auflösung (Env-Map ⊕ dynamische Records, Env gewinnt bei Kollision)
+    const vpsTarget = await resolveVpsIdToTarget(vpsId, vpsTargets, vpsRegistry);
     if (!vpsTarget) {
       return res.status(422).json({ error: `Unbekannter VPS: ${vpsId}` });
     }
