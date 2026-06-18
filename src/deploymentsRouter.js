@@ -1,6 +1,7 @@
 /**
  * deploymentsRouter — Express-Router für Deploy-Lifecycle (AC3–AC9, ADR-012)
- *                     + Reconciliation-Endpunkte (AC2/AC8/AC8b, ADR-013).
+ *                     + Reconciliation-Endpunkte (AC2/AC8/AC8b, ADR-013)
+ *                     + Lokaler Image-Test (S-156, AC1–AC5).
  *
  * Routes (alle hinter AccessGuard in server.js):
  *   GET    /api/deployments                          → { deployments: Deployment[], errors? }
@@ -10,6 +11,7 @@
  *   GET    /api/deployments/reconcile/last           → ReconcileReport | {}
  *   GET    /api/deployments/reconcile/reports        → ReconcileReport[]
  *   GET    /api/deployments/reconcile/notices        → ReconcileNotice[]
+ *   POST   /api/deployments/local-test               → { result, report? }               [MUTATION, S-156]
  *
  * Security (AC7–AC9 / ADR-012):
  *   - Alle /api/deployments/* hinter AccessGuard (server.js — alle /api/* sind geschützt).
@@ -36,6 +38,60 @@ const MAX_FIELD_LEN = 512;
 
 /** Hostname param: only DNS chars, no shell metacharacters. */
 const HOSTNAME_PARAM_RE = /^[a-zA-Z0-9._-]+$/;
+
+// ── Local-Test Validation (S-156, AC5) ────────────────────────────────────────
+
+/**
+ * ghcr image reference: letters, digits, dots, underscores, forward slashes, colons, hyphens.
+ * No shell metacharacters (AC5).
+ */
+const IMAGE_RE = /^[A-Za-z0-9._/:@-]+$/;
+
+/** Maximum image reference length. */
+const MAX_IMAGE_LEN = 512;
+
+/**
+ * Tag: letters, digits, dots, underscores, hyphens — no shell metacharacters (AC5).
+ */
+const TAG_RE = /^[A-Za-z0-9._-]+$/;
+
+/** Maximum tag length. */
+const MAX_TAG_LEN = 128;
+
+/**
+ * Validates POST /api/deployments/local-test body (AC5).
+ *
+ * @param {unknown} body
+ * @returns {{ ok: boolean, params?: { image: string, tag: string }, error?: string }}
+ */
+function validateLocalTestBody(body) {
+  if (!body || typeof body !== 'object') {
+    return { ok: false, error: 'Request-Body ist Pflicht' };
+  }
+  const { image, tag } = body;
+
+  if (typeof image !== 'string' || !image.trim()) {
+    return { ok: false, error: 'image ist ein Pflichtfeld' };
+  }
+  if (image.trim().length > MAX_IMAGE_LEN) {
+    return { ok: false, error: `image überschreitet Längenlimit (max. ${MAX_IMAGE_LEN})` };
+  }
+  if (!IMAGE_RE.test(image.trim())) {
+    return { ok: false, error: 'image enthält ungültige Zeichen (nur ghcr-Referenz-Zeichensatz erlaubt)' };
+  }
+
+  if (typeof tag !== 'string' || !tag.trim()) {
+    return { ok: false, error: 'tag ist ein Pflichtfeld' };
+  }
+  if (tag.trim().length > MAX_TAG_LEN) {
+    return { ok: false, error: `tag überschreitet Längenlimit (max. ${MAX_TAG_LEN})` };
+  }
+  if (!TAG_RE.test(tag.trim())) {
+    return { ok: false, error: 'tag enthält ungültige Zeichen (nur alphanumerisch, Punkte, Bindestriche, Unterstriche)' };
+  }
+
+  return { ok: true, params: { image: image.trim(), tag: tag.trim() } };
+}
 
 // ── Authz-Helper (same pattern as vpsRouter / credentialsRouter) ──────────────
 
@@ -167,9 +223,10 @@ function validateUndeployParams(params, body) {
  * @param {import('./AuditStore.js').AuditStore} auditStore
  * @param {Map<string, object>} vpsTargets - map of vpsId → VpsTarget { host, port?, targetUser }
  * @param {import('./deploy/ReconciliationJob.js').ReconciliationJob} [reconciliationJob]
+ * @param {import('./deploy/LocalDockerControl.js').LocalDockerControl} [localDockerControl]
  * @returns {import('express').Router}
  */
-export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconciliationJob) {
+export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconciliationJob, localDockerControl) {
   const router = Router();
 
   // ── GET /api/deployments/vps-targets ────────────────────────────────────
@@ -440,6 +497,68 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconcil
     } catch { /* ignore */ }
 
     return res.status(200).json(result);
+  });
+
+  // ── POST /api/deployments/local-test ─────────────────────────────────────
+  // S-156: Lokaler Image-Test vor VPS-Deploy.
+  // MUTATION: Audit-First + Identitäts-/Rollenschutz (AC5).
+  // MUSS vor /api/deployments/:vps/:hostname registriert sein (Express matcht "local-test" sonst als :vps).
+
+  /**
+   * POST /api/deployments/local-test
+   * Lokaler Probe-Lauf: Image lokal pullen → kurzlebigen Container starten →
+   * Start-Status + ExposedPorts (docker inspect) → Best-Effort HTTP-Reachability →
+   * Container immer entfernen (rm -f, try/finally, AC4).
+   *
+   * Body: { image, tag }
+   *
+   * Responses:
+   *   200 { result: "ok", report: LocalTestReport }
+   *   400 { error }        — Validierungsfehler (image/tag ungültig)
+   *   403 { error }        — nicht in CRED_ADMIN_EMAILS oder AccessGuard-Block
+   *   500 { error }        — Audit-Write fehlgeschlagen
+   *   502 { result: "error", reason }  — Pull/Start-Fehler oder Docker unerreichbar
+   */
+  router.post('/api/deployments/local-test', async (req, res) => {
+    const identity = req.identity ?? null;
+
+    // AC5: Identitäts-/Rollenschutz (analog Deploy-Mutationen)
+    const authz = checkMutationAuthz(identity);
+    if (!authz.allowed) {
+      return res.status(403).json({ error: 'Keine Berechtigung für diese Aktion' });
+    }
+
+    // AC5: Input-Validierung vor Docker-Sink
+    const bodyVal = validateLocalTestBody(req.body);
+    if (!bodyVal.ok) {
+      return res.status(400).json({ error: bodyVal.error });
+    }
+    const { image, tag } = bodyVal.params;
+
+    // AC5: Audit-First — Eintrag VOR Pull/Start; schlägt Audit fehl → keine Aktion
+    const auditAction = `local-test:${image}:${tag}`;
+    try {
+      auditStore.record({ identity: identity?.email ?? null, command: auditAction });
+    } catch (auditErr) {
+      console.error('[deploymentsRouter] Audit-Write fehlgeschlagen:', sanitizeMsg(auditErr?.message));
+      return res.status(500).json({ error: 'Audit-Write fehlgeschlagen — Aktion abgebrochen' });
+    }
+
+    // Prüfen ob LocalDockerControl verfügbar
+    if (!localDockerControl) {
+      return res.status(502).json({ result: 'error', reason: 'Lokaler Docker-Zugriff nicht konfiguriert' });
+    }
+
+    // Probe-Lauf (AC2, AC3, AC4 — rm -f in LocalDockerControl try/finally garantiert)
+    try {
+      const report = await localDockerControl.runProbe(image, tag);
+      return res.status(200).json({ result: 'ok', report });
+    } catch (err) {
+      // Pull-Fehler, Start-Fehler oder Docker unerreichbar → 502 (kein Leak)
+      const reason = sanitizeMsg(err?.message ?? 'Probe-Lauf fehlgeschlagen');
+      console.error('[deploymentsRouter] POST /api/deployments/local-test Fehler:', reason);
+      return res.status(502).json({ result: 'error', reason });
+    }
   });
 
   // ── POST /api/deployments/reconcile ──────────────────────────────────────
