@@ -73,6 +73,7 @@ const DEFAULT_HOST_PORT_START = 8080;
 /**
  * @typedef {object} PsEntry
  * @property {string}      containerId   - Container-ID (kurz)
+ * @property {string}      [name]        - Docker-Container-Name (aus {{.Names}}); nur in psAll() gefüllt
  * @property {string}      image         - Image-Name
  * @property {string|null} hostname      - cloudflare.tunnel-hostname-Label-Wert; null für unmanaged Container
  * @property {string}      status        - Container-Status (z.B. "Up 2 hours")
@@ -320,6 +321,202 @@ export class VpsDockerControl {
   }
 
   /**
+   * Startet einen bereits vorhandenen Container auf dem VPS (docker start).
+   *
+   * @param {VpsTarget} vps
+   * @param {string}    containerId
+   * @param {object}    [opts]
+   * @param {string}    [opts.hostFingerprint]    - SHA-256-Fingerprint für Host-Key-Verifikation
+   * @param {Function}  [opts._sshClientFactory]
+   * @returns {Promise<{ result: 'ok'|'error', reason?: string, errorClass?: string }>}
+   */
+  async start(vps, containerId, opts = {}) {
+    const privateKey = await this.#loadPrivateKey(vps.targetUser);
+    if (!privateKey.ok) return privateKey.error;
+
+    // Security: containerId validieren (nur alphanumerische Zeichen + Bindestrich erlaubt)
+    if (!isValidContainerId(containerId)) {
+      return {
+        result: 'error',
+        reason: 'Ungültige Container-ID (nur alphanumerische Zeichen erlaubt)',
+        errorClass: 'error',
+      };
+    }
+
+    const cmd = `docker start ${containerId}`;
+
+    try {
+      await runSshCommand({
+        privateKey: privateKey.value,
+        host: vps.host,
+        port: vps.port ?? 22,
+        targetUser: vps.targetUser,
+        command: cmd,
+        timeoutMs: EXEC_TIMEOUT_MS,
+        hostFingerprint: opts.hostFingerprint ?? null,
+        sshClientFactory: opts._sshClientFactory,
+      });
+      return { result: 'ok' };
+    } catch (err) {
+      const errorClass = classifyError(err);
+      return {
+        result: 'error',
+        reason: sanitizeErrorReason(errorClass),
+        errorClass,
+      };
+    }
+  }
+
+  /**
+   * Stoppt einen laufenden Container auf dem VPS (docker stop).
+   *
+   * @param {VpsTarget} vps
+   * @param {string}    containerId
+   * @param {object}    [opts]
+   * @param {string}    [opts.hostFingerprint]    - SHA-256-Fingerprint für Host-Key-Verifikation
+   * @param {Function}  [opts._sshClientFactory]
+   * @returns {Promise<{ result: 'ok'|'error', reason?: string, errorClass?: string }>}
+   */
+  async stop(vps, containerId, opts = {}) {
+    const privateKey = await this.#loadPrivateKey(vps.targetUser);
+    if (!privateKey.ok) return privateKey.error;
+
+    // Security: containerId validieren
+    if (!isValidContainerId(containerId)) {
+      return {
+        result: 'error',
+        reason: 'Ungültige Container-ID (nur alphanumerische Zeichen erlaubt)',
+        errorClass: 'error',
+      };
+    }
+
+    const cmd = `docker stop ${containerId}`;
+
+    try {
+      await runSshCommand({
+        privateKey: privateKey.value,
+        host: vps.host,
+        port: vps.port ?? 22,
+        targetUser: vps.targetUser,
+        command: cmd,
+        timeoutMs: EXEC_TIMEOUT_MS,
+        hostFingerprint: opts.hostFingerprint ?? null,
+        sshClientFactory: opts._sshClientFactory,
+      });
+      return { result: 'ok' };
+    } catch (err) {
+      const errorClass = classifyError(err);
+      return {
+        result: 'error',
+        reason: sanitizeErrorReason(errorClass),
+        errorClass,
+      };
+    }
+  }
+
+  /**
+   * Startet einen Container neu (docker restart).
+   *
+   * @param {VpsTarget} vps
+   * @param {string}    containerId
+   * @param {object}    [opts]
+   * @param {string}    [opts.hostFingerprint]    - SHA-256-Fingerprint für Host-Key-Verifikation
+   * @param {Function}  [opts._sshClientFactory]
+   * @returns {Promise<{ result: 'ok'|'error', reason?: string, errorClass?: string }>}
+   */
+  async restart(vps, containerId, opts = {}) {
+    const privateKey = await this.#loadPrivateKey(vps.targetUser);
+    if (!privateKey.ok) return privateKey.error;
+
+    // Security: containerId validieren
+    if (!isValidContainerId(containerId)) {
+      return {
+        result: 'error',
+        reason: 'Ungültige Container-ID (nur alphanumerische Zeichen erlaubt)',
+        errorClass: 'error',
+      };
+    }
+
+    const cmd = `docker restart ${containerId}`;
+
+    try {
+      await runSshCommand({
+        privateKey: privateKey.value,
+        host: vps.host,
+        port: vps.port ?? 22,
+        targetUser: vps.targetUser,
+        command: cmd,
+        timeoutMs: EXEC_TIMEOUT_MS,
+        hostFingerprint: opts.hostFingerprint ?? null,
+        sshClientFactory: opts._sshClientFactory,
+      });
+      return { result: 'ok' };
+    } catch (err) {
+      const errorClass = classifyError(err);
+      return {
+        result: 'error',
+        reason: sanitizeErrorReason(errorClass),
+        errorClass,
+      };
+    }
+  }
+
+  /**
+   * Liest die letzten N Zeilen des Container-Logs read-only (docker logs --tail N).
+   *
+   * Kein Secret-Leak: stdout/stderr des Kommandos werden als Log-Zeilen zurückgegeben;
+   * der SSH-Private-Key erscheint NICHT in der Response.
+   *
+   * @param {VpsTarget} vps
+   * @param {string}    containerId
+   * @param {object}    [opts]
+   * @param {number}    [opts.tail]              - Anzahl der letzten Zeilen (Default: 100)
+   * @param {string}    [opts.hostFingerprint]   - SHA-256-Fingerprint für Host-Key-Verifikation
+   * @param {Function}  [opts._sshClientFactory]
+   * @returns {Promise<{ result: 'ok'|'error', lines?: string[], reason?: string, errorClass?: string }>}
+   */
+  async logs(vps, containerId, opts = {}) {
+    const privateKey = await this.#loadPrivateKey(vps.targetUser);
+    if (!privateKey.ok) return { result: 'error', ...privateKey.error };
+
+    // Security: containerId validieren
+    if (!isValidContainerId(containerId)) {
+      return {
+        result: 'error',
+        reason: 'Ungültige Container-ID (nur alphanumerische Zeichen erlaubt)',
+        errorClass: 'error',
+      };
+    }
+
+    const tail = (Number.isFinite(opts.tail) && opts.tail > 0) ? Math.min(opts.tail, 1000) : 100;
+    // docker logs gibt stdout UND stderr des Containers aus — beide Streams sind Log-Inhalt
+    // (nicht Backend-Secrets). Das `2>&1` leitet stderr → stdout, damit wir alles per stdout lesen.
+    const cmd = `docker logs --tail ${tail} ${containerId} 2>&1`;
+
+    try {
+      const stdout = await runSshCommand({
+        privateKey: privateKey.value,
+        host: vps.host,
+        port: vps.port ?? 22,
+        targetUser: vps.targetUser,
+        command: cmd,
+        timeoutMs: EXEC_TIMEOUT_MS,
+        hostFingerprint: opts.hostFingerprint ?? null,
+        sshClientFactory: opts._sshClientFactory,
+      });
+      const lines = stdout.split('\n').filter((l) => l !== '');
+      return { result: 'ok', lines };
+    } catch (err) {
+      const errorClass = classifyError(err);
+      return {
+        result: 'error',
+        reason: sanitizeErrorReason(errorClass),
+        errorClass,
+      };
+    }
+  }
+
+  /**
    * Listet laufende Container mit cloudflare.tunnel-hostname-Label auf dem VPS.
    *
    * @param {VpsTarget} vps
@@ -392,10 +589,11 @@ export class VpsDockerControl {
     if (!privateKey.ok) return { result: 'error', ...privateKey.error };
 
     // docker ps ohne --filter gibt alle laufenden Container zurück.
-    // Format: ID, Image, Ports, Status, Label cloudflare.tunnel-hostname, Label com.docker.compose.project
+    // Format: ID, Names, Image, Ports, Status, Label cloudflare.tunnel-hostname, Label com.docker.compose.project
     // Der Label-Wert ist leer ("") für Container ohne das jeweilige Label.
+    // I1: {{.Names}} liefert den lesbaren Container-Namen (z.B. "my-app_web_1").
     // AC13: com.docker.compose.project-Label für stack-aware Reconciliation mitgelesen.
-    const formatStr = shellEscape('{{.ID}}\t{{.Image}}\t{{.Ports}}\t{{.Status}}\t{{.Label "cloudflare.tunnel-hostname"}}\t{{.Label "com.docker.compose.project"}}');
+    const formatStr = shellEscape('{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Ports}}\t{{.Status}}\t{{.Label "cloudflare.tunnel-hostname"}}\t{{.Label "com.docker.compose.project"}}');
     const cmd = [
       'docker', 'ps',
       '--format', formatStr,
@@ -412,7 +610,7 @@ export class VpsDockerControl {
         hostFingerprint: opts.hostFingerprint ?? null,
         sshClientFactory: opts._sshClientFactory,
       });
-      // parsePsAllOutput markiert Container ohne Label mit hostname: null (unmanaged)
+      // parsePsAllOutput markiert Container ohne Label mit hostname: null (unmanaged); füllt name-Feld (I1)
       const containers = parsePsAllOutput(stdout);
       return { result: 'ok', containers };
     } catch (err) {
@@ -652,9 +850,12 @@ function parsePsOutput(output) {
  * Container mit cloudflare.tunnel-hostname-Label → hostname = Label-Wert (managed).
  * Container OHNE das Label → hostname = null (unmanaged).
  *
+ * I1 (name-Feld): Format enthält {{.Names}} → lesbarer Container-Name in PsEntry.name.
  * AC13 (stack-aware): parst zusätzlich das com.docker.compose.project-Label.
  * Interne Stack-Container haben hostname: null (kein cloudflare.tunnel-hostname) aber
  * composeProject gesetzt — sie werden von ReconciliationJob nie geroutet/als verwaist gewertet.
+ *
+ * Format-Reihenfolge: ID\tNames\tImage\tPorts\tStatus\tCF-Label\tCompose-Label
  *
  * @param {string} output
  * @returns {PsEntry[]}
@@ -666,11 +867,12 @@ function parsePsAllOutput(output) {
   for (const line of lines) {
     const parts = line.split('\t');
     const containerId = (parts[0] ?? '').trim();
-    const image = (parts[1] ?? '').trim();
-    const ports = (parts[2] ?? '').trim();
-    const status = (parts[3] ?? '').trim();
-    const cfLabelValue = (parts[4] ?? '').trim();
-    const composeProjValue = (parts[5] ?? '').trim();
+    const name = (parts[1] ?? '').trim() || undefined; // I1: lesbarer Name; undefined wenn leer
+    const image = (parts[2] ?? '').trim();
+    const ports = (parts[3] ?? '').trim();
+    const status = (parts[4] ?? '').trim();
+    const cfLabelValue = (parts[5] ?? '').trim();
+    const composeProjValue = (parts[6] ?? '').trim();
 
     if (!containerId) continue;
 
@@ -685,7 +887,9 @@ function parsePsAllOutput(output) {
     // AC13: interne Stack-Container haben composeProject gesetzt, aber hostname: null
     const composeProject = composeProjValue || null;
 
-    containers.push({ containerId, image, hostname, status, hostPort, composeProject });
+    const entry = { containerId, image, hostname, status, hostPort, composeProject };
+    if (name) entry.name = name; // I1: nur setzen wenn vorhanden
+    containers.push(entry);
   }
 
   return containers;
