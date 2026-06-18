@@ -2,7 +2,7 @@
 id: vps-delete
 title: VPS löschen (DELETE + Tunnel-Cleanup + UI)
 status: draft
-version: 1
+version: 2
 ---
 
 # Spec: VPS löschen (`vps-delete`)
@@ -19,6 +19,7 @@ Ein VPS kann aus dev-gui **gelöscht** werden — heute existieren nur list/crea
 1. **DELETE-Endpunkt:** `DELETE /api/vps/machines/{provider}/{serverId}` löscht den adressierten Server beim Provider. `serverId` kann (IONOS) ein composite `"<datacenterId>/<serverId>"` mit `/` sein — gleiches `*splat`-Routing wie start/stop ([[vps-provider-boundary]]).
 2. **Provider-Adapter `deleteServer`:** Der jeweilige Adapter führt das Provider-spezifische Löschen aus. Unterstützt ein Provider programmatisches Löschen API-seitig nicht, meldet der Adapter `result: "unsupported"` (HTTP 422), ohne destruktive Ersatzaktion. Die Capability wird über `GET /api/vps/providers` (`capabilities.delete`) ausgewiesen.
 3. **Tunnel-Cleanup:** Beim Löschen wird der zum VPS gehörende Cloudflare-Tunnel ([[vps-tunnel-provisioning]] AC7: Tunnel-ID/Token-Referenz aus der VPS-Zuordnung) aufgeräumt: dessen **Routen/DNS** werden entfernt und der **Tunnel gelöscht** (`CloudflareApi.deleteTunnel` + ggf. `removeRoute`/`deleteDnsRecord`), und die **Token-Referenz** im `CredentialStore` wird entfernt. Cleanup ist **idempotent** (bereits gelöschte Cloudflare-Ressourcen sind kein Fehler) und **best-effort robust** (ein Cloudflare-Cleanup-Fehler verhindert nicht das Server-Löschen, wird aber klar gemeldet/auditiert).
+6. **Connections-Cleanup vor Tunnel-Delete (kein verwaister Tunnel):** Unmittelbar nach dem Server-Delete ist die `cloudflared`-Connection des Tunnels Cloudflare-seitig oft noch als **aktiv** registriert; ein direktes `DELETE .../cfd_tunnel/{id}` antwortet dann mit **HTTP 400, Cloudflare-Fehler-Code 1022** („This tunnel has active connections"), und der Tunnel bleibt **verwaist** zurück (live verifiziert). `deleteTunnel(tunnelId)` muss daher die **aktiven Connections** des Tunnels aufräumen — `DELETE /accounts/{accountId}/cfd_tunnel/{id}/connections` — und erst danach den Tunnel löschen; mindestens muss bei Fehler-Code **1022** ein Connections-Cleanup + **Retry** des Tunnel-Delete erfolgen. So entfernt ein VPS-Delete den Tunnel zuverlässig. Der Connections-Cleanup ist **idempotent/best-effort** (keine aktive Connection / bereits gelöschter Tunnel = kein Fehler) und steht unter demselben Token-Floor (kein Token/Geheimnis in Fehlertext/Log/Audit/WS/Argv); schlägt der Cleanup auch nach Retry endgültig fehl, gilt weiterhin AC4 (geheimnisfreier `cleanupError`, der den Server-Delete-Erfolg nicht maskiert).
 4. **Sicherheit (Floor):** Wie alle VPS-Mutationen — hinter der Access-Mauer, identitäts-/rollengeschützt (`CRED_ADMIN_EMAILS`-Logik), **audit-first** (Audit-Eintrag VOR Ausführung; schlägt der Audit-Write fehl → Aktion unterbleibt). Provider-/Tunnel-Tokens erscheinen nie in Response/Log/Audit/WS/Argv.
 5. **type-to-confirm (UI):** Im Frontend ([[view-vps]]) gibt es pro VPS-Zeile einen **Löschen-Button** (neben Start/Stop). Das Löschen erfordert eine explizite Bestätigung, bei der der Nutzer den **VPS-Namen exakt eintippen** muss (type-to-confirm), bevor `DELETE` ausgelöst wird; ein Tippfehler/Abbruch löst keine Aktion aus.
 
@@ -28,6 +29,7 @@ Ein VPS kann aus dev-gui **gelöscht** werden — heute existieren nur list/crea
 - **AC1** — `DELETE /api/vps/machines/{provider}/{serverId}` existiert und löscht den adressierten Server beim Provider; composite IONOS-`serverId` mit `/` wird via `*splat` korrekt rekonstruiert (gleiche Routing-/Validierungslogik wie start/stop). Antwort `{ result: "ok"|"unsupported"|"error", reason? }`.
 - **AC2** — Der jeweilige Provider-Adapter besitzt eine `deleteServer(serverId, token)`-Methode (neu, falls nicht vorhanden) und ist über `capabilities()` als `delete: true|false` ausgewiesen; ein Provider ohne API-seitiges Löschen liefert `result: "unsupported"` (422), keine destruktive Ersatzaktion.
 - **AC3** — Beim Löschen wird der zum VPS gehörende Cloudflare-Tunnel aufgeräumt: Routen/DNS entfernt + `deleteTunnel(tunnelId)` aufgerufen + Token-Referenz aus dem `CredentialStore` entfernt. Cleanup ist **idempotent** (404/„already gone" ist kein Fehler) — kein verwaister Tunnel, kein verwaistes Token.
+- **AC3a** — `deleteTunnel(tunnelId)` räumt **vor** dem Tunnel-Delete die aktiven Connections des Tunnels auf (`DELETE /accounts/{accountId}/cfd_tunnel/{id}/connections`) **oder** behandelt den Cloudflare-Fehler-Code **1022** („active connections", HTTP 400) durch Connections-Cleanup + **Retry** des Tunnel-Delete, sodass der Tunnel zuverlässig gelöscht wird (kein verwaister Tunnel bei einem VPS-Delete mit noch aktiver `cloudflared`-Connection). Testbar mit gemocktem `CloudflareApi`: erstes `DELETE .../cfd_tunnel/{id}` → 400/1022 → `DELETE .../cfd_tunnel/{id}/connections` (200) → Retry `DELETE .../cfd_tunnel/{id}` (200) ⇒ Tunnel gelöscht. Idempotent: keine aktive Connection bzw. bereits gelöschter Tunnel (404/„gone") → kein Fehler, kein überflüssiger Retry-Loop (begrenzte Retry-Anzahl). Kein Token/Geheimnis im Fehlertext/Log/Audit/WS/Argv (Token-Floor, ADR-010).
 - **AC4** — Schlägt der Cloudflare-Cleanup fehl, während das Server-Löschen erfolgreich war (oder umgekehrt), wird der Teil-Erfolg klar gemeldet und auditiert; der Cleanup-Fehler maskiert nicht fälschlich einen Server-Lösch-Erfolg/-Fehler (klare `reason`/`errorClass`).
 - **AC5** — Existiert keine Tunnel-Zuordnung für den VPS (z.B. vor Paket ① angelegt), läuft das Server-Löschen normal durch und der Tunnel-Cleanup wird übersprungen (kein Fehler).
 
@@ -44,6 +46,7 @@ Ein VPS kann aus dev-gui **gelöscht** werden — heute existieren nur list/crea
 - **DELETE `/api/vps/machines/{provider}/{serverId}`** → `{ result: "ok"|"unsupported"|"error", reason?, errorClass? }`. `*splat`-Routing + serverId-Validierung wie start/stop ([[vps-provider-boundary]]).
 - **`VpsProvider.deleteServer(serverId, token)`** → `{ result: "ok"|"unsupported"|"error", reason? }`; `capabilities()` → `{ list, start, stop, create, delete }` (delete neu).
 - **Tunnel-Cleanup:** nutzt `CloudflareApi.deleteTunnel(tunnelId)` (+ `removeRoute`/`deleteDnsRecord` falls Routen vorhanden) und die VPS↔Tunnel-Zuordnung aus [[vps-tunnel-provisioning]] AC7; entfernt zudem die Token-Referenz `credentials/cloudflare/tunnel_token/<tunnelId>`.
+- **`CloudflareApi.deleteTunnel(tunnelId)`** räumt vor dem Tunnel-Delete die aktiven Connections auf (`DELETE {CF_BASE}/accounts/{accountId}/cfd_tunnel/{tunnelId}/connections`) bzw. reagiert auf Cloudflare-Fehler-Code **1022** (HTTP 400, „active connections") mit Connections-Cleanup + **begrenztem Retry** des `DELETE {CF_BASE}/accounts/{accountId}/cfd_tunnel/{tunnelId}`. Idempotent (404/„gone" = ok), unter dem bestehenden `CloudflareApi`-Token-Floor (ADR-010); endgültiger Fehlschlag → klassifizierter `CloudflareApiError` ohne Token-Leak, der oben zu geheimnisfreiem `cleanupError` führt (AC4).
 - **Token-Quelle:** Provider-Token aus `credentials/vps/<provider>_api_token`; Cloudflare-Token store-intern (ADR-010). Alle Endpunkte hinter AccessGuard; mutierend zusätzlich identitäts-/rollengeprüft + AuditEntry.
 
 ## Edge-Cases & Fehlerverhalten
@@ -51,6 +54,7 @@ Ein VPS kann aus dev-gui **gelöscht** werden — heute existieren nur list/crea
 - Unbekannter `serverId` beim Provider → 404 durchgereicht als `result: "error"`, `errorClass: "not-found"` (idempotent: bereits gelöscht ≈ ok, sofern Provider 404 als „gone" liefert — Verhalten dokumentiert/getestet).
 - Provider unterstützt Löschen nicht → 422 `result: "unsupported"`.
 - Cloudflare nicht konfiguriert / Tunnel bereits gelöscht → Cleanup übersprungen/idempotent, kein Fehler (AC3/AC5).
+- Tunnel hat beim Delete noch aktive `cloudflared`-Connections → Cloudflare 400/Code 1022 → Connections-Cleanup + Retry, Tunnel wird gelöscht (AC3a); endgültiger Fehlschlag nach Retry → geheimnisfreier `cleanupError`, Server-Delete-Erfolg bleibt unmaskiert (AC4).
 - type-to-confirm-Name stimmt nicht → kein `DELETE` (AC9).
 
 ## NFRs

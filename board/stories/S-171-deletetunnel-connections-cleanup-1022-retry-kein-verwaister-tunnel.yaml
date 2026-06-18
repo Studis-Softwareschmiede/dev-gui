@@ -1,0 +1,49 @@
+id: S-171
+parent: F-018
+title: 'VPS-Delete: deleteTunnel raeumt aktive Connections auf (1022 -> connections-cleanup
+  + retry, kein verwaister Tunnel)'
+status: To Do
+branch: null
+priority: P1
+spec: docs/specs/vps-delete.md
+implements:
+- AC3a
+- AC3
+- AC4
+depends:
+- S-153
+labels:
+- vps
+- cloudflare
+- security
+- backend
+size_est: S
+dispo_est: 1
+dispo_forecast: 0.0
+confidence: high
+estimate_note: 'Live beim VPS-Delete gefunden (DELETE /api/vps/machines/:provider/*splat,
+  S-153): VpsProviderRegistry.#cleanupTunnel -> CloudflareApi.deleteTunnel(tunnelId)
+  loescht den Tunnel NICHT, wenn die cloudflared-Connection direkt nach dem Server-Delete
+  noch aktiv ist — Cloudflare antwortet auf DELETE .../cfd_tunnel/{id} mit HTTP 400,
+  Fehler-Code 1022 ("This tunnel has active connections. Please stop all cloudflared
+  replicas, or wait a few minutes for connections to close, then try again."). Folge:
+  VPS-Delete liefert {result:"ok", cleanupError:"Cloudflare API error (HTTP 400)"} —
+  Server weg, Tunnel bleibt verwaist. Live-Beweis + Loesung: DELETE .../cfd_tunnel/{id}/connections
+  -> 200, dann DELETE .../cfd_tunnel/{id} -> 200 entfernt den Tunnel zuverlaessig.
+  Fix in CloudflareApi.deleteTunnel(tunnelId): vor dem Tunnel-Delete die aktiven
+  Connections aufraeumen (DELETE /accounts/{accountId}/cfd_tunnel/{id}/connections) ODER
+  bei Cloudflare-Fehler-Code 1022 einen connections-cleanup + begrenzten Retry des
+  Tunnel-Delete durchfuehren. Idempotent/best-effort: keine aktive Connection bzw.
+  bereits geloeschter Tunnel (404/gone) = kein Fehler, kein endloser Retry-Loop
+  (begrenzte Anzahl). Floor unveraendert (ADR-010): kein Token/Geheimnis in
+  Fehlertext/Log/Audit/WS/Argv; endgueltiger Fehlschlag nach Retry -> klassifizierter
+  CloudflareApiError, der oben weiterhin zu geheimnisfreiem cleanupError fuehrt und
+  den Server-Delete-Erfolg NICHT maskiert (AC4 S-153 bleibt). Connections-Endpunkt
+  bleibt innerhalb von CloudflareApi (einziger Cloudflare-API-Sprecher, ADR-010) —
+  kein neuer API-Sprecher. Tests mit gemocktem CloudflareApi: erstes DELETE cfd_tunnel
+  -> 400/1022 -> DELETE cfd_tunnel/.../connections (200) -> Retry DELETE cfd_tunnel
+  (200) ⇒ Tunnel geloescht; keine aktive Connection / 404-gone -> idempotent kein
+  Fehler; Regression-Guard: kein Token im Fehlertext; cleanupError maskiert Server-Delete
+  nicht (AC4). ~S, ~1 EP — fokussierter Backend-Fix im deleteTunnel-Pfad.'
+created_at: '2026-06-18T00:00:00Z'
+updated_at: '2026-06-18T00:00:00Z'
