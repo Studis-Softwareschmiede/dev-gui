@@ -1,0 +1,34 @@
+id: F-016
+title: 'Deploy-Pipeline-Robustheit: App-Key-Format + Deploy-VPS-Auflösung'
+goal: 'Zwei beim ersten echten Live-Deploy (2026-06, VPS unter alexstuder.cloud) aufgedeckte
+  Robustheits-Lücken der Deploy-Pipeline (F-013/F-015) schließen — beide passierten
+  alle Mock-Tests und sind am laufenden System verifiziert. (A) Setup-Falle: der App-Token-Provider
+  (src/githubAppToken.js:109) nutzt importPKCS8 (jose), das nur PKCS#8 akzeptiert —
+  GitHub liefert App-Private-Keys aber als PKCS#1, und ein einzeiliges Eingabefeld
+  zerstört die Zeilenumbrüche. Folge: jwt-sign-failed → kein App-Token → Image-Dropdown
+  leer + alle App-Token-Funktionen tot. Fix: Key format-tolerant (PKCS#1 ⊕ PKCS#8 via
+  crypto.createPrivateKey) + newline-normalisiert laden + mehrzeilige Textarea-Eingabe;
+  App-Token-only bleibt (kein GH_TOKEN-Fallback). (B) Echter Bug: S-167 stellte nur das
+  vps-targets-Listing auf die dynamische Quelle um — die Deploy-/Undeploy-/Deployments-Handler
+  im deploymentsRouter lösen die vpsId weiterhin nur über die statische VPS_TARGETS-Env
+  auf (Zeilen 261/314/422) → ein dynamisch angelegter VPS (testdevgui) erscheint im
+  Dropdown, aber "Deploy starten" scheitert mit "Unbekannter VPS". Fix: dieselbe vereinigte
+  Auflösung (Env ⊕ dynamische Records, Env gewinnt) wie Listing + resolveVpsTarget.'
+status: To Do
+priority: P1
+spec: docs/specs/vps-dynamic-ssh-targets.md
+definition_of_done: null
+labels:
+- deploy
+- vps
+- github
+- robustness
+depends:
+- F-015
+owner: alex
+stories:
+- S-168
+- S-169
+progress: 0/2
+created_at: '2026-06-18T00:00:00Z'
+updated_at: '2026-06-18T00:00:00Z'
