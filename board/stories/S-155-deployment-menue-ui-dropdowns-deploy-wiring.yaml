@@ -1,7 +1,7 @@
 id: S-155
 parent: F-013
 title: 'Deployment-Menü-UI: Image/Tag/VPS/Domäne-Dropdowns + Subdomain + Auto-Port + Deploy-Wiring'
-status: To Do
+status: Done
 priority: P1
 spec: docs/specs/deploy-lifecycle.md
 implements:
@@ -19,8 +19,8 @@ size_est: M
 dispo_est: 6
 estimate_note: 'Frontend (client/src/DeploymentsView.jsx) + Auto-Port-Wiring im Container-Schritt. Ersetzt die heutigen Freitext-Felder (image/vps/hostname/tunnelId) durch geführte Dropdowns: Image-Dropdown (GET /api/github/packages, S-154), abhängiges Tag-Dropdown (GET /api/github/packages/{name}/tags, deaktiviert bis Image gewählt), VPS-Dropdown (konfigurierte VPS), Domänen-Dropdown (GET /api/cloudflare/zones). Subdomain-Feld aus dem Image-Namen vorausgefüllt + manuell editierbar; effektiver hostname=<subdomain>.<domäne> sichtbar zusammengesetzt. Deploy-Button aktiv nur bei Image+Tag+VPS+Domäne(+nicht-leere Subdomain) → ruft bestehenden POST /api/deployments { image:"<fullImageRef>:<tag>", vps, hostname, tunnelId(des VPS) } — KEIN neuer Endpunkt, atomarer Saga-Vertrag (AC3/AC4) unverändert. Auto-Port (AC13): Container-Port nach docker pull via docker inspect ExposedPorts ermitteln (ein Port→binden, mehrere→erster+Mehrdeutigkeit sichtbar, keiner→Fallback/klare Meldung); Nutzer tippt keinen Port. Re-Deploy=ersetzen, in UI erkennbar. Floor: kein neues Secret/Bundle, kein neuer Endpunkt, hostname serverseitig validiert+LockoutGuard. Tests: Dropdown-Abhängigkeit (Tag erst nach Image), Subdomain-Vorausfüllung+Edit, Button-Aktivierung, korrekte POST-Payload, Auto-Port-Logik (1/mehrere/kein Port), Degradation leerer Quellen, kein Secret im Bundle. M (~6 EP) — mehrere abhängige Dropdowns + Datenquellen-Verdrahtung + Auto-Port-Logik im Backend-Container-Schritt; UI-Umbau einer bestehenden View, hängt an S-154.'
 confidence: medium
-branch: null
+branch: feat/S-155-deploy-menu
 pr: null
 blocked_reason: null
 created_at: '2026-06-17T00:00:00Z'
-updated_at: '2026-06-17T00:00:00Z'
+updated_at: '2026-06-18T02:00:00Z'
