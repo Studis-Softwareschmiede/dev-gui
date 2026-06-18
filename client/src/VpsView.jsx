@@ -19,14 +19,25 @@
  *   AC5 — UI sperrt Create-Button wenn kein Label mit Public-Key vorhanden ist
  *          oder eine Rolle kein Label zugeordnet hat.
  *
+ * Implements: vps-container-overview AC1–AC7 (Container-Übersicht)
+ *   AC1 — Container-Button je VPS-Zeile; Klick öffnet Übersicht + Listing-Fetch.
+ *   AC2 — Listet je Container: Name, Status, Image, Port; managed vs. unmanaged.
+ *   AC3 — Leer-Zustand; SSH-Fehler degradiert nur diese Übersicht.
+ *   AC4 — Start/Stop/Neustart/Logs/Entfernen-Buttons; nach Erfolg Re-Fetch; 403 → Hinweis.
+ *   AC5 — Logs lesen: render Log-Zeilen; kein SSH-Key/Token im Frontend.
+ *   AC6 — Managed-Remove: type-to-confirm (Hostname); voller Undeploy.
+ *   AC7 — Unmanaged-Remove: type-to-confirm (ContainerId); nur docker rm.
+ *
  * Security (Floor):
  *   - Nur Label-Referenzen werden an das Backend gesendet (sshKeyAssignment),
  *     niemals rohe Key-Material-Strings vom Client.
  *   - Public-Keys dürfen angezeigt werden (nicht geheim).
  *   - 403-Antworten werden als „keine Berechtigung" dargestellt; kein Token-Leak.
+ *   - SSH-Private-Key und Cloudflare-Token erscheinen NICHT im Frontend-Bundle.
  *
  * A11y: WCAG 2.1 AA — Beschriftete select/input-Elemente, aria-required,
- *   aria-describedby für Fehlermeldungen, role=alert, Touch-Target ≥ 44 px.
+ *   aria-describedby für Fehlermeldungen, role=alert/status, Touch-Target ≥ 44 px,
+ *   sichtbarer Fokus, managed/unmanaged für Screenreader erkennbar.
  *
  * @param {{ onNavigate: (view: string) => void }} props
  */
@@ -105,6 +116,99 @@ async function deleteVps({ provider, serverId, vpsName }) {
 }
 
 /**
+ * Lädt die Container-Übersicht eines VPS.
+ * GET /api/vps/machines/:provider/:serverId/containers
+ *
+ * @param {{ provider: string, serverId: string }} params
+ * @returns {Promise<{ result: string, containers?: Array, errorClass?: string, reason?: string }>}
+ */
+async function fetchContainers({ provider, serverId }) {
+  const url = `/api/vps/machines/${encodeURIComponent(provider)}/${serverId}/containers`;
+  const res = await fetch(url);
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 403) {
+    const err = new Error(data.error ?? 'Keine Berechtigung');
+    err.is403 = true;
+    throw err;
+  }
+  if (!res.ok) {
+    throw new Error(data.reason ?? data.error ?? `Listing fehlgeschlagen (${res.status})`);
+  }
+  return data;
+}
+
+/**
+ * Führt eine Container-Aktion aus (start/stop/restart).
+ * POST /api/vps/machines/:provider/:serverId/containers/:containerId/:action
+ *
+ * @param {{ provider: string, serverId: string, containerId: string, action: 'start'|'stop'|'restart' }} params
+ * @returns {Promise<{ result: string, reason?: string }>}
+ */
+async function postContainerAction({ provider, serverId, containerId, action }) {
+  const url = `/api/vps/machines/${encodeURIComponent(provider)}/${serverId}/containers/${encodeURIComponent(containerId)}/${action}`;
+  const res = await fetch(url, { method: 'POST' });
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 403) {
+    const err = new Error(data.error ?? 'Keine Berechtigung für diese Aktion');
+    err.is403 = true;
+    throw err;
+  }
+  if (!res.ok) {
+    throw new Error(data.reason ?? data.error ?? `${action} fehlgeschlagen (${res.status})`);
+  }
+  return data;
+}
+
+/**
+ * Lädt die letzten N Zeilen Container-Logs.
+ * GET /api/vps/machines/:provider/:serverId/containers/:containerId/logs?tail=N
+ *
+ * @param {{ provider: string, serverId: string, containerId: string, tail?: number }} params
+ * @returns {Promise<{ result: string, lines?: string[] }>}
+ */
+async function fetchContainerLogs({ provider, serverId, containerId, tail = 100 }) {
+  const url = `/api/vps/machines/${encodeURIComponent(provider)}/${serverId}/containers/${encodeURIComponent(containerId)}/logs?tail=${tail}`;
+  const res = await fetch(url);
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 403) {
+    const err = new Error(data.error ?? 'Keine Berechtigung');
+    err.is403 = true;
+    throw err;
+  }
+  if (!res.ok) {
+    throw new Error(data.reason ?? data.error ?? `Logs-Abruf fehlgeschlagen (${res.status})`);
+  }
+  return data;
+}
+
+/**
+ * Entfernt einen Container (managed → vollständiger Undeploy; unmanaged → docker rm).
+ * DELETE /api/vps/machines/:provider/:serverId/containers/:containerId
+ * Body: { confirm: "<hostname-oder-containerId>" }
+ *
+ * @param {{ provider: string, serverId: string, containerId: string, confirm: string }} params
+ * @returns {Promise<{ result: string, reason?: string }>}
+ */
+async function deleteContainer({ provider, serverId, containerId, confirm }) {
+  const url = `/api/vps/machines/${encodeURIComponent(provider)}/${serverId}/containers/${encodeURIComponent(containerId)}`;
+  const res = await fetch(url, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ confirm }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 403) {
+    const err = new Error(data.error ?? 'Keine Berechtigung für diese Aktion');
+    err.is403 = true;
+    throw err;
+  }
+  if (!res.ok) {
+    throw new Error(data.reason ?? data.error ?? `Entfernen fehlgeschlagen (${res.status})`);
+  }
+  return data;
+}
+
+/**
  * Sendet einen Create-Request an POST /api/vps/machines/:provider.
  * Body enthält NUR fachliche Parameter + Label-Referenzen (keine rohen Keys).
  */
@@ -121,6 +225,467 @@ async function postCreateMachine({ provider, name, region, serverType, image, ss
   const data = await res.json();
   if (!res.ok) throw Object.assign(new Error(data.error ?? data.reason ?? `Create fehlgeschlagen (${res.status})`), { errorClass: data.errorClass });
   return data;
+}
+
+// ── ContainerRemoveConfirm ────────────────────────────────────────────────────
+
+/**
+ * type-to-confirm-Dialog für das Entfernen eines Containers (AC6/AC7).
+ *
+ * Managed: Hostname eintippen → voller Undeploy.
+ * Unmanaged: ContainerId eintippen → nur docker rm.
+ *
+ * A11y: WCAG 2.1 AA — beschriftetes Feld mit aria-describedby für Fehler/Hinweis,
+ *   role=alert für Warnung, Touch-Target ≥ 44 px.
+ *
+ * @param {{
+ *   container: { containerId: string, hostname: string|null, managed: boolean },
+ *   onConfirm: (confirm: string) => Promise<void>,
+ *   onCancel: () => void,
+ *   pending: boolean,
+ * }} props
+ */
+function ContainerRemoveConfirm({ container, onConfirm, onCancel, pending }) {
+  const [input, setInput] = useState('');
+  const inputRef = useRef(null);
+
+  // Managed: Hostname eintippen; Unmanaged: ContainerId eintippen
+  const expectedValue = container.managed ? (container.hostname ?? container.containerId) : container.containerId;
+  const matches = input === expectedValue;
+
+  const CONFIRM_INPUT_ID = `ctr-remove-confirm-${container.containerId}`.replace(/[^a-zA-Z0-9-]/g, '-');
+  const CONFIRM_HINT_ID = `${CONFIRM_INPUT_ID}-hint`;
+
+  useEffect(() => {
+    if (inputRef.current) inputRef.current.focus();
+  }, []);
+
+  const handleSubmit = useCallback(async (e) => {
+    e.preventDefault();
+    if (!matches) return;
+    await onConfirm(input);
+  }, [matches, input, onConfirm]);
+
+  return (
+    <form
+      onSubmit={handleSubmit}
+      style={containerStyles.removeForm}
+      aria-label={`Container ${container.containerId} entfernen bestätigen`}
+    >
+      <p style={containerStyles.removeWarning} role="alert">
+        {container.managed
+          ? <>Achtung: Managed-Container-Entfernen löscht Container <strong>und</strong> Cloudflare-Route unwiderruflich.</>
+          : <>Achtung: Dieser Container wird unwiderruflich entfernt.</>
+        }
+      </p>
+      <label htmlFor={CONFIRM_INPUT_ID} style={containerStyles.removeLabel}>
+        {container.managed
+          ? `Hostname zur Bestätigung eintippen: ${expectedValue}`
+          : `Container-ID zur Bestätigung eintippen: ${expectedValue}`
+        }
+      </label>
+      <input
+        id={CONFIRM_INPUT_ID}
+        ref={inputRef}
+        type="text"
+        value={input}
+        onChange={(e) => setInput(e.target.value)}
+        placeholder={expectedValue}
+        style={containerStyles.removeInput}
+        aria-required="true"
+        aria-describedby={CONFIRM_HINT_ID}
+        autoComplete="off"
+        disabled={pending}
+      />
+      <p id={CONFIRM_HINT_ID} style={containerStyles.removeHint}>
+        {matches ? 'Wert stimmt überein.' : `Bitte genau "${expectedValue}" eintippen.`}
+      </p>
+      <div style={containerStyles.removeActions}>
+        <button
+          type="submit"
+          style={(!matches || pending)
+            ? { ...containerStyles.btnRemove, opacity: 0.5, cursor: 'not-allowed' }
+            : containerStyles.btnRemove}
+          disabled={!matches || pending}
+          aria-busy={pending}
+          aria-disabled={!matches}
+          aria-label={`Container ${container.containerId} endgültig entfernen`}
+        >
+          {pending ? 'Entfernen…' : 'Endgültig entfernen'}
+        </button>
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={pending}
+          style={containerStyles.btnCancelRemove}
+          aria-label="Entfernen abbrechen"
+        >
+          Abbrechen
+        </button>
+      </div>
+    </form>
+  );
+}
+
+// ── ContainerRow ──────────────────────────────────────────────────────────────
+
+/**
+ * Eine einzelne Container-Zeile mit Aktions-Buttons (AC4–AC7).
+ *
+ * A11y: WCAG 2.1 AA — Buttons mit aria-label, managed/unmanaged per aria-label,
+ *   Lade-/Erfolg-/Fehlerzustände als role=status/alert, Touch-Target ≥ 44 px.
+ *
+ * @param {{
+ *   container: { containerId: string, name: string, image: string, hostname: string|null,
+ *                status: string, hostPort: number|null, managed: boolean },
+ *   provider: string,
+ *   serverId: string,
+ *   onAction: (provider: string, serverId: string, containerId: string, action: string) => Promise<void>,
+ *   onLogs: (container: object) => void,
+ *   onRemove: (container: object) => void,
+ * }} props
+ */
+function ContainerRow({ container: c, provider, serverId, onAction, onLogs, onRemove }) {
+  const [actionState, setActionState] = useState(null); // null | 'pending' | 'ok' | 'error' | 'forbidden'
+  const [actionMsg, setActionMsg] = useState(null);
+
+  const isPending = actionState === 'pending';
+
+  const handleAction = useCallback(async (action) => {
+    setActionState('pending');
+    setActionMsg(null);
+    try {
+      await onAction(provider, serverId, c.containerId, action);
+      setActionState('ok');
+      setActionMsg(null);
+    } catch (err) {
+      if (err.is403) {
+        setActionState('forbidden');
+        setActionMsg('Keine Berechtigung für diese Aktion');
+      } else {
+        setActionState('error');
+        setActionMsg(err.message ?? 'Aktion fehlgeschlagen');
+      }
+    }
+  }, [provider, serverId, c.containerId, onAction]);
+
+  const ACTION_MSG_ID = `ctr-action-${c.containerId}`.replace(/[^a-zA-Z0-9-]/g, '-');
+
+  return (
+    <li style={containerStyles.containerItem}>
+      <div style={containerStyles.containerInfo}>
+        {/* managed/unmanaged Badge — AC2, A11y */}
+        <span
+          style={c.managed ? containerStyles.managedBadge : containerStyles.unmanagedBadge}
+          aria-label={c.managed ? `Managed (Hostname: ${c.hostname})` : 'Unmanaged'}
+          title={c.managed ? `Managed: ${c.hostname}` : 'Unmanaged (kein cloudflare.tunnel-hostname-Label)'}
+        >
+          {c.managed ? 'M' : 'U'}
+        </span>
+        <div style={containerStyles.containerMeta}>
+          <span style={containerStyles.containerName}>{c.name}</span>
+          {c.managed && c.hostname && (
+            <span style={containerStyles.containerHostname}>{c.hostname}</span>
+          )}
+          <span style={containerStyles.containerImage}>{c.image}</span>
+          <span style={containerStyles.containerStatus}>{c.status}</span>
+          {c.hostPort !== null && (
+            <span style={containerStyles.containerPort}>:{c.hostPort}</span>
+          )}
+        </div>
+      </div>
+
+      {/* Aktions-Buttons (AC4) */}
+      <div style={containerStyles.containerActions}>
+        <button
+          type="button"
+          style={isPending ? { ...containerStyles.actionSmall, opacity: 0.45, cursor: 'not-allowed' } : containerStyles.actionSmall}
+          disabled={isPending}
+          aria-label={`Container ${c.name} starten`}
+          aria-describedby={actionMsg ? ACTION_MSG_ID : undefined}
+          aria-busy={isPending}
+          onClick={() => handleAction('start')}
+        >
+          {isPending ? '…' : 'Start'}
+        </button>
+        <button
+          type="button"
+          style={isPending
+            ? { ...containerStyles.actionSmall, ...containerStyles.actionStop, opacity: 0.45, cursor: 'not-allowed' }
+            : { ...containerStyles.actionSmall, ...containerStyles.actionStop }}
+          disabled={isPending}
+          aria-label={`Container ${c.name} stoppen`}
+          aria-describedby={actionMsg ? ACTION_MSG_ID : undefined}
+          aria-busy={isPending}
+          onClick={() => handleAction('stop')}
+        >
+          Stop
+        </button>
+        <button
+          type="button"
+          style={isPending
+            ? { ...containerStyles.actionSmall, ...containerStyles.actionRestart, opacity: 0.45, cursor: 'not-allowed' }
+            : { ...containerStyles.actionSmall, ...containerStyles.actionRestart }}
+          disabled={isPending}
+          aria-label={`Container ${c.name} neu starten`}
+          aria-describedby={actionMsg ? ACTION_MSG_ID : undefined}
+          aria-busy={isPending}
+          onClick={() => handleAction('restart')}
+        >
+          Neustart
+        </button>
+        <button
+          type="button"
+          style={containerStyles.actionSmall}
+          disabled={isPending}
+          aria-label={`Logs von Container ${c.name} anzeigen`}
+          onClick={() => onLogs(c)}
+        >
+          Logs
+        </button>
+        <button
+          type="button"
+          style={isPending
+            ? { ...containerStyles.actionSmall, ...containerStyles.actionRemove, opacity: 0.45, cursor: 'not-allowed' }
+            : { ...containerStyles.actionSmall, ...containerStyles.actionRemove }}
+          disabled={isPending}
+          aria-label={`Container ${c.name} entfernen`}
+          onClick={() => onRemove(c)}
+        >
+          Entfernen
+        </button>
+      </div>
+
+      {/* Aktions-Feedback (AC4) */}
+      {actionMsg && (
+        <span
+          id={ACTION_MSG_ID}
+          style={actionState === 'ok' ? containerStyles.feedbackOk
+            : actionState === 'forbidden' ? containerStyles.feedbackForbidden
+              : containerStyles.feedbackError}
+          role={actionState === 'forbidden' || actionState === 'error' ? 'alert' : 'status'}
+        >
+          {actionMsg}
+        </span>
+      )}
+      {actionState === 'ok' && (
+        <span style={containerStyles.feedbackOk} role="status">OK</span>
+      )}
+    </li>
+  );
+}
+
+// ── ContainerOverview ─────────────────────────────────────────────────────────
+
+/**
+ * Container-Übersicht für einen VPS (AC1–AC7, vps-container-overview).
+ *
+ * Listet alle laufenden Container (managed + unmanaged) mit Aktionen.
+ * Degradiert je VPS — Fehler zeigt Fehlermarkierung ohne die übrige Liste zu zerstören.
+ *
+ * A11y: WCAG 2.1 AA — role=status für Lade-/Leer-Zustand, role=alert für Fehler.
+ *
+ * @param {{
+ *   provider: string,
+ *   serverId: string,
+ *   machineName: string,
+ *   onClose: () => void,
+ * }} props
+ */
+function ContainerOverview({ provider, serverId, machineName, onClose }) {
+  const [containers, setContainers] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
+  const [logsContainer, setLogsContainer] = useState(null);   // Container für Logs-Panel
+  const [logsLines, setLogsLines] = useState([]);
+  const [logsLoading, setLogsLoading] = useState(false);
+  const [logsError, setLogsError] = useState(null);
+  const [removeContainer, setRemoveContainer] = useState(null); // Container im Remove-Dialog
+  const [removePending, setRemovePending] = useState(false);
+  const [removeError, setRemoveError] = useState(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const data = await fetchContainers({ provider, serverId });
+      if (data.result === 'error') {
+        setLoadError(data.reason ?? data.errorClass ?? 'Listing fehlgeschlagen');
+        setContainers([]);
+      } else {
+        setContainers(data.containers ?? []);
+      }
+    } catch (err) {
+      setLoadError(err.message ?? 'Listing fehlgeschlagen');
+      setContainers([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [provider, serverId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  // AC4: Start/Stop/Neustart → Re-Fetch nach Erfolg
+  const handleAction = useCallback(async (prov, srv, containerId, action) => {
+    await postContainerAction({ provider: prov, serverId: srv, containerId, action });
+    await load();
+  }, [load]);
+
+  // AC5: Logs anzeigen
+  const handleLogs = useCallback(async (container) => {
+    setLogsContainer(container);
+    setLogsLines([]);
+    setLogsError(null);
+    setLogsLoading(true);
+    try {
+      const data = await fetchContainerLogs({ provider, serverId, containerId: container.containerId });
+      if (data.result === 'error') {
+        setLogsError(data.reason ?? 'Logs konnten nicht geladen werden');
+      } else {
+        setLogsLines(data.lines ?? []);
+      }
+    } catch (err) {
+      setLogsError(err.message ?? 'Logs-Abruf fehlgeschlagen');
+    } finally {
+      setLogsLoading(false);
+    }
+  }, [provider, serverId]);
+
+  // AC6/AC7: Entfernen mit type-to-confirm
+  const handleRemoveRequest = useCallback((container) => {
+    setRemoveContainer(container);
+    setRemoveError(null);
+  }, []);
+
+  const handleRemoveConfirm = useCallback(async (confirm) => {
+    if (!removeContainer) return;
+    setRemovePending(true);
+    setRemoveError(null);
+    try {
+      const result = await deleteContainer({
+        provider,
+        serverId,
+        containerId: removeContainer.containerId,
+        confirm,
+      });
+      if (result.result === 'ok') {
+        setRemoveContainer(null);
+        await load();
+      } else {
+        setRemoveError(result.reason ?? 'Entfernen fehlgeschlagen');
+      }
+    } catch (err) {
+      setRemoveError(err.message ?? 'Entfernen fehlgeschlagen');
+    } finally {
+      setRemovePending(false);
+    }
+  }, [removeContainer, provider, serverId, load]);
+
+  const OVERVIEW_ID = `ctr-overview-${provider}-${serverId}`.replace(/[^a-zA-Z0-9-]/g, '-');
+
+  return (
+    <div style={containerStyles.panel} aria-label={`Container-Übersicht: ${machineName}`}>
+      <div style={containerStyles.panelHeader}>
+        <h3 style={containerStyles.panelTitle}>Container: {machineName}</h3>
+        <div style={containerStyles.panelHeaderActions}>
+          <button
+            type="button"
+            onClick={load}
+            style={containerStyles.btnRefresh}
+            aria-label="Container-Übersicht aktualisieren"
+            disabled={loading}
+          >
+            {loading ? '…' : 'Aktualisieren'}
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            style={containerStyles.btnClose}
+            aria-label={`Container-Übersicht für ${machineName} schließen`}
+          >
+            Schließen
+          </button>
+        </div>
+      </div>
+
+      {/* Lade-Zustand (AC3) */}
+      {loading && (
+        <p style={containerStyles.loadingText} role="status" aria-live="polite">
+          Lade Container…
+        </p>
+      )}
+
+      {/* Fehler-Zustand — degradierend (AC3/AC8) */}
+      {!loading && loadError && (
+        <p style={containerStyles.errorText} role="alert" id={`${OVERVIEW_ID}-error`}>
+          Fehler: {loadError}
+        </p>
+      )}
+
+      {/* Leer-Zustand (AC3) */}
+      {!loading && !loadError && containers.length === 0 && (
+        <p style={containerStyles.emptyText} role="status">
+          Keine Container laufend.
+        </p>
+      )}
+
+      {/* Container-Liste (AC2) */}
+      {!loading && !loadError && containers.length > 0 && (
+        <ul style={containerStyles.containerList} aria-label="Laufende Container">
+          {containers.map((c) => (
+            <ContainerRow
+              key={c.containerId}
+              container={c}
+              provider={provider}
+              serverId={serverId}
+              onAction={handleAction}
+              onLogs={handleLogs}
+              onRemove={handleRemoveRequest}
+            />
+          ))}
+        </ul>
+      )}
+
+      {/* Logs-Panel (AC5) */}
+      {logsContainer && (
+        <div style={containerStyles.logsPanel} aria-label={`Logs: ${logsContainer.name}`}>
+          <div style={containerStyles.logsPanelHeader}>
+            <h4 style={containerStyles.logsPanelTitle}>Logs: {logsContainer.name}</h4>
+            <button
+              type="button"
+              onClick={() => { setLogsContainer(null); setLogsLines([]); setLogsError(null); }}
+              style={containerStyles.btnClose}
+              aria-label="Logs schließen"
+            >
+              ✕
+            </button>
+          </div>
+          {logsLoading && <p style={containerStyles.loadingText} role="status">Lade Logs…</p>}
+          {logsError && <p style={containerStyles.errorText} role="alert">{logsError}</p>}
+          {!logsLoading && !logsError && (
+            <pre style={containerStyles.logsPre} aria-label="Log-Ausgabe">
+              {logsLines.length > 0 ? logsLines.join('\n') : '(keine Log-Ausgabe)'}
+            </pre>
+          )}
+        </div>
+      )}
+
+      {/* Remove-Dialog (AC6/AC7) */}
+      {removeContainer && (
+        <div style={containerStyles.removeDialogWrapper}>
+          {removeError && (
+            <p style={containerStyles.errorText} role="alert">{removeError}</p>
+          )}
+          <ContainerRemoveConfirm
+            container={removeContainer}
+            onConfirm={handleRemoveConfirm}
+            onCancel={() => { setRemoveContainer(null); setRemoveError(null); }}
+            pending={removePending}
+          />
+        </div>
+      )}
+    </div>
+  );
 }
 
 // ── VpsCreateForm ─────────────────────────────────────────────────────────────
@@ -492,7 +1057,7 @@ function VpsDeleteConfirm({ vpsName, onConfirm, onCancel, pending }) {
 }
 
 /**
- * Eine einzelne Maschinen-Zeile mit Start/Stop/Löschen-Buttons (AC6/AC8–AC10).
+ * Eine einzelne Maschinen-Zeile mit Start/Stop/Löschen/Container-Buttons (AC6/AC8–AC10, vps-container-overview AC1).
  *
  * @param {{
  *   machine: object,
@@ -506,6 +1071,8 @@ function VpsMachineRow({ machine: m, providerCapabilities, onAction, onDelete })
   const [actionMsg, setActionMsg] = useState(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deletePending, setDeletePending] = useState(false);
+  // AC1 (vps-container-overview): Container-Übersicht ein-/ausklappen
+  const [showContainerOverview, setShowContainerOverview] = useState(false);
 
   const caps = providerCapabilities ?? { start: true, stop: true, delete: false };
 
@@ -590,7 +1157,7 @@ function VpsMachineRow({ machine: m, providerCapabilities, onAction, onDelete })
       </span>
       {m.ipv4 && <span style={listStyles.ip}>{m.ipv4}</span>}
 
-      {/* Start/Stop/Löschen-Buttons (AC6/AC8) */}
+      {/* Start/Stop/Löschen/Container-Buttons (AC6/AC8, AC1-container-overview) */}
       <div style={listStyles.actions}>
         <button
           type="button"
@@ -632,6 +1199,19 @@ function VpsMachineRow({ machine: m, providerCapabilities, onAction, onDelete })
         >
           {deletePending ? '…' : 'Löschen'}
         </button>
+        {/* AC1 (vps-container-overview): Container-Button */}
+        <button
+          type="button"
+          style={showContainerOverview
+            ? { ...listStyles.actionBtn, ...listStyles.actionBtnContainer, ...listStyles.actionBtnContainerActive }
+            : { ...listStyles.actionBtn, ...listStyles.actionBtnContainer }}
+          aria-label={`Container-Übersicht für ${m.name} ${showContainerOverview ? 'schließen' : 'öffnen'}`}
+          aria-expanded={showContainerOverview}
+          aria-controls={`ctr-overview-${m.provider}-${m.serverId}`.replace(/[^a-zA-Z0-9-]/g, '-')}
+          onClick={() => setShowContainerOverview((v) => !v)}
+        >
+          Container
+        </button>
       </div>
 
       {/* type-to-confirm-Dialog (AC9, vps-delete) */}
@@ -663,6 +1243,18 @@ function VpsMachineRow({ machine: m, providerCapabilities, onAction, onDelete })
         <span style={listStyles.actionSuccess} role="status">
           OK
         </span>
+      )}
+
+      {/* AC1/AC2/AC3 (vps-container-overview): Container-Übersicht — inline aufklappend */}
+      {showContainerOverview && (
+        <div style={listStyles.containerOverviewWrapper} id={`ctr-overview-${m.provider}-${m.serverId}`.replace(/[^a-zA-Z0-9-]/g, '-')}>
+          <ContainerOverview
+            provider={m.provider}
+            serverId={m.serverId}
+            machineName={m.name}
+            onClose={() => setShowContainerOverview(false)}
+          />
+        </div>
       )}
     </li>
   );
@@ -1282,5 +1874,327 @@ const listStyles = {
   unconfiguredItem: {
     fontSize: 13,
     color: '#fcd34d',
+  },
+  // AC1 (vps-container-overview): Container-Button Styles
+  actionBtnContainer: {
+    background: '#0f3460',
+    color: '#93c5fd',
+    border: '1px solid #1d4ed8',
+  },
+  // Active-Zustand (Übersicht offen)
+  actionBtnContainerActive: {
+    background: '#1e40af',
+    color: '#bfdbfe',
+    border: '1px solid #3b82f6',
+  },
+  // Container-Übersicht wrapper (inline, volle Breite der Zeile)
+  containerOverviewWrapper: {
+    width: '100%',
+    marginTop: 8,
+  },
+};
+
+// ── Container-Styles ──────────────────────────────────────────────────────────
+
+const containerStyles = {
+  panel: {
+    background: '#0d1117',
+    border: '1px solid #30363d',
+    borderRadius: 6,
+    padding: '14px 16px',
+    marginTop: 2,
+    width: '100%',
+    boxSizing: 'border-box',
+  },
+  panelHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  panelTitle: {
+    margin: 0,
+    fontSize: 14,
+    fontWeight: 700,
+    color: '#c9d1d9',
+  },
+  panelHeaderActions: {
+    display: 'flex',
+    gap: 6,
+  },
+  btnRefresh: {
+    padding: '5px 10px',
+    background: '#161b22',
+    color: '#8b949e',
+    border: '1px solid #30363d',
+    borderRadius: 4,
+    fontSize: 12,
+    cursor: 'pointer',
+    minHeight: 44,
+  },
+  btnClose: {
+    padding: '5px 10px',
+    background: '#161b22',
+    color: '#8b949e',
+    border: '1px solid #30363d',
+    borderRadius: 4,
+    fontSize: 12,
+    cursor: 'pointer',
+    minHeight: 44,
+  },
+  loadingText: {
+    color: '#8b949e',
+    fontSize: 13,
+    margin: '8px 0',
+  },
+  errorText: {
+    color: '#f85149',
+    fontSize: 13,
+    margin: '8px 0',
+    padding: '6px 10px',
+    background: '#1a0000',
+    border: '1px solid #58131a',
+    borderRadius: 4,
+  },
+  emptyText: {
+    color: '#8b949e',
+    fontSize: 13,
+    fontStyle: 'italic',
+    margin: '8px 0',
+  },
+  containerList: {
+    listStyle: 'none',
+    padding: 0,
+    margin: 0,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 6,
+  },
+  containerItem: {
+    background: '#161b22',
+    border: '1px solid #30363d',
+    borderRadius: 4,
+    padding: '8px 10px',
+    display: 'flex',
+    alignItems: 'flex-start',
+    gap: 8,
+    flexWrap: 'wrap',
+  },
+  containerInfo: {
+    display: 'flex',
+    alignItems: 'flex-start',
+    gap: 8,
+    flex: 1,
+    minWidth: 0,
+  },
+  managedBadge: {
+    fontSize: 10,
+    fontWeight: 700,
+    padding: '1px 5px',
+    background: '#0d3349',
+    color: '#79c0ff',
+    border: '1px solid #1f6feb',
+    borderRadius: 3,
+    flexShrink: 0,
+    minHeight: 20,
+    lineHeight: '18px',
+    cursor: 'default',
+  },
+  unmanagedBadge: {
+    fontSize: 10,
+    fontWeight: 700,
+    padding: '1px 5px',
+    background: '#1a1a1a',
+    color: '#8b949e',
+    border: '1px solid #30363d',
+    borderRadius: 3,
+    flexShrink: 0,
+    minHeight: 20,
+    lineHeight: '18px',
+    cursor: 'default',
+  },
+  containerMeta: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: 6,
+    alignItems: 'center',
+    minWidth: 0,
+  },
+  containerName: {
+    fontWeight: 600,
+    fontSize: 12,
+    color: '#c9d1d9',
+    fontFamily: 'monospace',
+    wordBreak: 'break-all',
+  },
+  containerHostname: {
+    fontSize: 11,
+    color: '#79c0ff',
+    fontFamily: 'monospace',
+  },
+  containerImage: {
+    fontSize: 11,
+    color: '#8b949e',
+    fontFamily: 'monospace',
+    wordBreak: 'break-all',
+  },
+  containerStatus: {
+    fontSize: 11,
+    color: '#3fb950',
+  },
+  containerPort: {
+    fontSize: 11,
+    color: '#f0883e',
+    fontFamily: 'monospace',
+  },
+  containerActions: {
+    display: 'flex',
+    gap: 4,
+    flexShrink: 0,
+    flexWrap: 'wrap',
+  },
+  actionSmall: {
+    padding: '4px 8px',
+    background: '#21262d',
+    color: '#c9d1d9',
+    border: '1px solid #30363d',
+    borderRadius: 4,
+    fontSize: 11,
+    cursor: 'pointer',
+    minHeight: 44,
+    minWidth: 44,
+  },
+  actionStop: {
+    background: '#1a1000',
+    color: '#e3b341',
+    border: '1px solid #9e6a03',
+  },
+  actionRestart: {
+    background: '#0f2022',
+    color: '#56d364',
+    border: '1px solid #1b4332',
+  },
+  actionRemove: {
+    background: '#1a0000',
+    color: '#f85149',
+    border: '1px solid #58131a',
+  },
+  feedbackOk: {
+    fontSize: 11,
+    color: '#3fb950',
+    marginLeft: 4,
+  },
+  feedbackError: {
+    fontSize: 11,
+    color: '#f85149',
+    marginLeft: 4,
+  },
+  feedbackForbidden: {
+    fontSize: 11,
+    color: '#e3b341',
+    marginLeft: 4,
+  },
+  // Logs-Panel (AC5)
+  logsPanel: {
+    background: '#0d1117',
+    border: '1px solid #30363d',
+    borderRadius: 4,
+    padding: '10px 12px',
+    marginTop: 8,
+    width: '100%',
+    boxSizing: 'border-box',
+  },
+  logsPanelHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+  },
+  logsPanelTitle: {
+    margin: 0,
+    fontSize: 12,
+    fontWeight: 600,
+    color: '#c9d1d9',
+  },
+  logsPre: {
+    margin: 0,
+    fontSize: 11,
+    color: '#8b949e',
+    fontFamily: 'monospace',
+    whiteSpace: 'pre-wrap',
+    wordBreak: 'break-all',
+    maxHeight: 300,
+    overflowY: 'auto',
+    background: '#010409',
+    padding: '8px',
+    borderRadius: 3,
+  },
+  // Remove-Dialog (AC6/AC7)
+  removeDialogWrapper: {
+    width: '100%',
+    marginTop: 6,
+  },
+  removeForm: {
+    background: '#1a0000',
+    border: '1px solid #58131a',
+    borderRadius: 4,
+    padding: '12px 14px',
+    width: '100%',
+    boxSizing: 'border-box',
+  },
+  removeWarning: {
+    color: '#f85149',
+    fontSize: 12,
+    margin: '0 0 8px',
+  },
+  removeLabel: {
+    display: 'block',
+    fontSize: 11,
+    color: '#8b949e',
+    marginBottom: 4,
+    wordBreak: 'break-all',
+  },
+  removeInput: {
+    width: '100%',
+    padding: '5px 8px',
+    background: '#0d1117',
+    color: '#c9d1d9',
+    border: '1px solid #58131a',
+    borderRadius: 3,
+    fontSize: 12,
+    boxSizing: 'border-box',
+    minHeight: 32,
+    fontFamily: 'monospace',
+  },
+  removeHint: {
+    fontSize: 10,
+    color: '#8b949e',
+    margin: '3px 0 6px',
+  },
+  removeActions: {
+    display: 'flex',
+    gap: 6,
+  },
+  btnRemove: {
+    padding: '6px 12px',
+    background: '#58131a',
+    color: '#f85149',
+    border: '1px solid #b91c1c',
+    borderRadius: 4,
+    fontSize: 11,
+    cursor: 'pointer',
+    minHeight: 44,
+  },
+  btnCancelRemove: {
+    padding: '6px 12px',
+    background: '#21262d',
+    color: '#c9d1d9',
+    border: '1px solid #30363d',
+    borderRadius: 4,
+    fontSize: 11,
+    cursor: 'pointer',
+    minHeight: 44,
   },
 };

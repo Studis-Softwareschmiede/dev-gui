@@ -276,6 +276,7 @@ const deps = {
   vpsRegistry,
   cloudflareApi,
   deployOrchestrator,
+  vpsDockerControl,
   vpsTargets,
   reconciliationJob,
   stackRegistry,
