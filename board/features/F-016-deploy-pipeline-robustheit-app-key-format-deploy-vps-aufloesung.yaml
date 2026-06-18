@@ -14,7 +14,7 @@ goal: 'Zwei beim ersten echten Live-Deploy (2026-06, VPS unter alexstuder.cloud)
   auf (Zeilen 261/314/422) → ein dynamisch angelegter VPS (testdevgui) erscheint im
   Dropdown, aber "Deploy starten" scheitert mit "Unbekannter VPS". Fix: dieselbe vereinigte
   Auflösung (Env ⊕ dynamische Records, Env gewinnt) wie Listing + resolveVpsTarget.'
-status: To Do
+status: Done
 priority: P1
 spec: docs/specs/vps-dynamic-ssh-targets.md
 definition_of_done: null
@@ -29,6 +29,6 @@ owner: alex
 stories:
 - S-168
 - S-169
-progress: 0/2
+progress: 2/2
 created_at: '2026-06-18T00:00:00Z'
-updated_at: '2026-06-18T00:00:00Z'
+updated_at: '2026-06-18T11:00:00Z'

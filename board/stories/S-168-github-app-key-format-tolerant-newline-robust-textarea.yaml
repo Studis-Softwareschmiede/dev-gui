@@ -1,7 +1,7 @@
 id: S-168
 parent: F-016
 title: 'GitHub-App-Private-Key format-tolerant + newline-robust laden (PKCS#1 ⊕ PKCS#8) + Textarea-Eingabe'
-status: To Do
+status: Done
 priority: P1
 spec: docs/specs/github-app-key-format-tolerant.md
 implements:
@@ -23,8 +23,8 @@ size_est: M
 dispo_est: 4
 estimate_note: 'Lücke A (live verifiziert beim ersten echten Deploy): der App-Token-Provider src/githubAppToken.js:109 nutzt importPKCS8(privateKeyPem, "RS256") aus jose — das akzeptiert NUR PKCS#8 (-----BEGIN PRIVATE KEY-----). GitHub liefert App-Private-Keys aber als PKCS#1 (-----BEGIN RSA PRIVATE KEY-----), und der im CredentialStore hinterlegte Key war OHNE Zeilenumbrüche gespeichert (Newlines→Leerzeichen, Copy-Paste-Fallstrick im einzeiligen Eingabefeld). Folge: importPKCS8 wirft → GitHubAppTokenError("jwt-sign-failed") → KEIN Installation-Token → GET /api/github/packages liefert [] (Image-Dropdown leer) UND alle anderen App-Token-Funktionen (Repo-Create/Clone/Pull, Reconcile, gh-Auth) tot. Gegenprobe live: Node crypto.createPrivateKey() erkennt BEIDE Formate; normalisierter Key signiert einwandfrei. Fix dreiteilig: (a) format-tolerant laden — crypto.createPrivateKey(pem) → KeyObject an jose SignJWT().sign() (oder PKCS#1→PKCS#8-Konvertierung vor importPKCS8); PKCS#1 (AC1) + PKCS#8 (AC2) ergeben gültiges, gegen Public-Key verifizierbares RS256-JWT. (b) Newline-Normalisierung vor Import — PEM-Body zwischen Header/Footer extrahieren, Whitespace entfernen, in 64-Zeichen-Zeilen umbrechen; PKCS#1 mit Newlines→Leerzeichen liefert nach Normalisierung gültiges JWT (AC3), idempotent für korrekt formatierte Keys (AC4). (c) Frontend client/src/SettingsView.jsx CredentialField: für integration=github & name=private_key eine mehrzeilige <textarea> statt einzeiligem <input type=password>, damit Newlines beim Einfügen erhalten bleiben; andere Felder bleiben einzeilig; Write-only bleibt (AC5). Floor (AC6/AC7): Private-Key/JWT/Token nie in Log/Response/Audit/WS/Argv/Bundle; App-Token-only bleibt (KEIN process.env.GH_TOKEN-Fallback, Grep-prüfbar); unbrauchbarer Key → jwt-sign-failed ohne Crash/Leak. Nur node:crypto + bereits genutztes jose (kein neues SDK). Tests: lokal generierter PKCS#1- und PKCS#8-Key (mit + ohne Newlines) im gemockten Store → getToken-JWT gegen Public-Key verifizieren; Textarea-Komponententest (mehrzeiliger Wert inkl. \n im Request-Body); Log/Response secret-frei; Grep ohne GH_TOKEN. M (~4 EP) — ein Mint-Pfad härten + Normalisierung-Helper + ein UI-Control + Security-/Verifikations-Tests.'
 confidence: medium
-branch: null
+branch: feat/S-168-key-format
 pr: null
 blocked_reason: null
 created_at: '2026-06-18T00:00:00Z'
-updated_at: '2026-06-18T00:00:00Z'
+updated_at: '2026-06-18T11:00:00Z'
