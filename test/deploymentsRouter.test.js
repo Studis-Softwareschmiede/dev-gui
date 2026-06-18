@@ -9,8 +9,12 @@
  *   AC6  — DELETE with wrong confirm → 422 confirmation-required
  *   AC7  — Deploy/Undeploy protected hostname → 422 protected-resource
  *   AC8  — Access+Role guard: 403 without CRED_ADMIN_EMAILS match
+ *   AC8  — (vps-dynamic-ssh-targets S-169) Security floor: vpsId nur in 422-Meldung, kein host/key/token
  *   AC9  — Audit-First: audit.record() called before any mutation; Audit-Write-Fail → 500 + no action
  *   AC9  — No SSH-Key / CF-Token in any response body
+ *   AC9  — (vps-dynamic-ssh-targets S-169) Vereinigte VPS-Auflösung: Env ⊕ dynamisch, Env gewinnt
+ *          leere Env + dynamischer VPS → aufgelöst (kein 422); unbekannte ID → 422;
+ *          Kollision → Env gewinnt; AccessGuard-403 vor Auflösung
  */
 
 import { describe, it, expect, jest } from '@jest/globals';
@@ -23,12 +27,14 @@ import { AuditStore } from '../src/AuditStore.js';
 /**
  * Build Express app with deploymentsRouter wired.
  * Identity is injected via req.identity (simulating AccessGuard).
+ * vpsRegistry optionally passed for S-169 AC9 vereinigte Auflösung.
  */
 function makeApp({
   orchestratorStub,
   auditStore,
   vpsTargets = new Map([['vps-1', { host: '1.2.3.4', port: 22, targetUser: 'root' }]]),
   identity = { email: 'admin@example.com' },
+  vpsRegistry = undefined,
 } = {}) {
   const app = express();
   app.use(express.json());
@@ -37,7 +43,7 @@ function makeApp({
     req.identity = identity;
     next();
   });
-  app.use(deploymentsRouter(orchestratorStub, auditStore, vpsTargets));
+  app.use(deploymentsRouter(orchestratorStub, auditStore, vpsTargets, undefined, undefined, vpsRegistry));
   return app;
 }
 
@@ -492,5 +498,288 @@ describe('deploymentsRouter — AC9: Kein Secret in Response', () => {
     const bodyStr = JSON.stringify(res.body);
     expect(bodyStr).not.toContain('SECRET_KEY_DATA');
     expect(bodyStr).not.toContain('PRIVATE KEY');
+  });
+});
+
+// ── S-169 AC9: Vereinigte VPS-Auflösung (Env ⊕ dynamisch) ───────────────────
+
+/**
+ * Erstellt einen vpsRegistry-Mock mit einer vordefinierten Liste von Target-Records.
+ * Simuliert vpsRegistry.listTargetRecords() und optional getMachineIp().
+ *
+ * @param {Array<object>} records - Simulierte Target-Records (mit _vpsId-Feld)
+ * @param {Function|null} getMachineIpFn - Optionale getMachineIp-Implementierung
+ */
+function makeVpsRegistryMock(records = [], getMachineIpFn = null) {
+  const stub = {
+    listTargetRecords: jest.fn(async () => records),
+  };
+  if (getMachineIpFn) {
+    stub.getMachineIp = getMachineIpFn;
+  }
+  return stub;
+}
+
+/** Dynamischer VPS-Datensatz für testdevgui (reales Live-Szenario, S-169). */
+const DYNAMIC_TESTDEVGUI = {
+  _vpsId: 'testdevgui',
+  provider: 'hetzner',
+  serverId: '142574176',
+  host: '188.34.202.209',
+  port: 22,
+  targetUser: 'root',
+  tunnelId: 'devgui-testdevgui',
+};
+
+/** Deploy-Body für den dynamischen VPS. */
+const DEPLOY_BODY_DYN = {
+  image: 'ghcr.io/org/app:v1',
+  vps: 'testdevgui',
+  hostname: 'app.example.com',
+  tunnelId: 'devgui-testdevgui',
+};
+
+describe('S-169 AC9: deploymentsRouter — Vereinigte VPS-Auflösung (Env ⊕ dynamisch)', () => {
+  // ── GET /api/deployments — Listing ────────────────────────────────────────
+
+  it('AC9: GET /api/deployments — leere Env + dynamischer VPS → aufgelöst, kein 422', async () => {
+    const orch = makeOrchestratorStub();
+    const registry = makeVpsRegistryMock([DYNAMIC_TESTDEVGUI]);
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore: new AuditStore(),
+      vpsTargets: new Map(), // leere Env
+      vpsRegistry: registry,
+    });
+
+    const res = await request(app, 'GET', '/api/deployments?vps=testdevgui&tunnelId=devgui-testdevgui');
+    expect(res.status).toBe(200);
+    expect(orch.listDeployments).toHaveBeenCalledWith({
+      vps: { host: '188.34.202.209', port: 22, targetUser: 'root' },
+      tunnelId: 'devgui-testdevgui',
+    });
+  });
+
+  it('AC9: GET /api/deployments — Env-Kollision → Env-Ziel gewinnt', async () => {
+    const orch = makeOrchestratorStub();
+    // Env hat dieselbe vpsId mit anderer IP
+    const envTargets = new Map([['testdevgui', { host: '10.0.0.1', port: 22, targetUser: 'root' }]]);
+    const registry = makeVpsRegistryMock([DYNAMIC_TESTDEVGUI]); // host 188.34.202.209
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore: new AuditStore(),
+      vpsTargets: envTargets,
+      vpsRegistry: registry,
+    });
+
+    const res = await request(app, 'GET', '/api/deployments?vps=testdevgui&tunnelId=devgui-testdevgui');
+    expect(res.status).toBe(200);
+    // Env-Eintrag (10.0.0.1) muss gewinnen — nicht der dynamische (188.34.202.209)
+    expect(orch.listDeployments).toHaveBeenCalledWith(
+      expect.objectContaining({ vps: expect.objectContaining({ host: '10.0.0.1' }) }),
+    );
+  });
+
+  it('AC9: GET /api/deployments — unbekannte vpsId (in keiner Quelle) → 422', async () => {
+    const orch = makeOrchestratorStub();
+    const registry = makeVpsRegistryMock([DYNAMIC_TESTDEVGUI]);
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore: new AuditStore(),
+      vpsTargets: new Map(),
+      vpsRegistry: registry,
+    });
+
+    const res = await request(app, 'GET', '/api/deployments?vps=nonexistent&tunnelId=tun-x');
+    expect(res.status).toBe(422);
+    expect(orch.listDeployments).not.toHaveBeenCalled();
+  });
+
+  // ── POST /api/deployments — Deploy ────────────────────────────────────────
+
+  it('AC9: POST /api/deployments — leere Env + dynamischer VPS → Deploy aufgelöst, kein 422', async () => {
+    const orch = makeOrchestratorStub();
+    const registry = makeVpsRegistryMock([DYNAMIC_TESTDEVGUI]);
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore: new AuditStore(),
+      vpsTargets: new Map(),
+      vpsRegistry: registry,
+    });
+
+    const res = await request(app, 'POST', '/api/deployments', DEPLOY_BODY_DYN);
+    expect(res.status).toBe(200);
+    expect(orch.deploy).toHaveBeenCalledWith(
+      expect.objectContaining({ vps: { host: '188.34.202.209', port: 22, targetUser: 'root' } }),
+    );
+  });
+
+  it('AC9: POST /api/deployments — Env-Kollision → Env-Ziel gewinnt bei Deploy', async () => {
+    const orch = makeOrchestratorStub();
+    const envTargets = new Map([['testdevgui', { host: '10.0.0.1', port: 22, targetUser: 'alex' }]]);
+    const registry = makeVpsRegistryMock([DYNAMIC_TESTDEVGUI]);
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore: new AuditStore(),
+      vpsTargets: envTargets,
+      vpsRegistry: registry,
+    });
+
+    const res = await request(app, 'POST', '/api/deployments', DEPLOY_BODY_DYN);
+    expect(res.status).toBe(200);
+    expect(orch.deploy).toHaveBeenCalledWith(
+      expect.objectContaining({ vps: expect.objectContaining({ host: '10.0.0.1', targetUser: 'alex' }) }),
+    );
+  });
+
+  it('AC9: POST /api/deployments — unbekannte vpsId → 422, kein Deploy, Audit unterbleibt', async () => {
+    const orch = makeOrchestratorStub();
+    const auditStore = new AuditStore();
+    const auditSpy = jest.spyOn(auditStore, 'record');
+    const registry = makeVpsRegistryMock([DYNAMIC_TESTDEVGUI]);
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore,
+      vpsTargets: new Map(),
+      vpsRegistry: registry,
+    });
+
+    const res = await request(app, 'POST', '/api/deployments', { ...DEPLOY_BODY_DYN, vps: 'nonexistent' });
+    expect(res.status).toBe(422);
+    expect(orch.deploy).not.toHaveBeenCalled();
+    // Audit-First gilt NUR wenn VPS aufgelöst wurde; vor der Auflösung kein Audit-Eintrag
+    expect(auditSpy).not.toHaveBeenCalled();
+  });
+
+  it('AC9: POST /api/deployments — AccessGuard-403 vor VPS-Auflösung (Rollencheck zuerst)', async () => {
+    const old = process.env.CRED_ADMIN_EMAILS;
+    process.env.CRED_ADMIN_EMAILS = 'other@example.com';
+    try {
+      const orch = makeOrchestratorStub();
+      const registry = makeVpsRegistryMock([DYNAMIC_TESTDEVGUI]);
+      const app = makeApp({
+        orchestratorStub: orch,
+        auditStore: new AuditStore(),
+        vpsTargets: new Map(),
+        vpsRegistry: registry,
+        identity: { email: 'admin@example.com' }, // nicht in CRED_ADMIN_EMAILS
+      });
+
+      const res = await request(app, 'POST', '/api/deployments', DEPLOY_BODY_DYN);
+      expect(res.status).toBe(403);
+      expect(orch.deploy).not.toHaveBeenCalled();
+      expect(registry.listTargetRecords).not.toHaveBeenCalled();
+    } finally {
+      if (old === undefined) { delete process.env.CRED_ADMIN_EMAILS; } else { process.env.CRED_ADMIN_EMAILS = old; }
+    }
+  });
+
+  // ── DELETE /api/deployments/:vps/:hostname — Undeploy ─────────────────────
+
+  it('AC9: DELETE /api/deployments — leere Env + dynamischer VPS → Undeploy aufgelöst, kein 422', async () => {
+    const orch = makeOrchestratorStub();
+    const registry = makeVpsRegistryMock([DYNAMIC_TESTDEVGUI]);
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore: new AuditStore(),
+      vpsTargets: new Map(),
+      vpsRegistry: registry,
+    });
+
+    const res = await request(
+      app, 'DELETE',
+      '/api/deployments/testdevgui/app.example.com',
+      { confirm: 'app.example.com', tunnelId: 'devgui-testdevgui' },
+    );
+    expect(res.status).toBe(200);
+    expect(orch.undeploy).toHaveBeenCalledWith(
+      expect.objectContaining({ vps: { host: '188.34.202.209', port: 22, targetUser: 'root' } }),
+    );
+  });
+
+  it('AC9: DELETE /api/deployments — Env-Kollision → Env-Ziel gewinnt bei Undeploy', async () => {
+    const orch = makeOrchestratorStub();
+    const envTargets = new Map([['testdevgui', { host: '10.0.0.2', port: 22, targetUser: 'root' }]]);
+    const registry = makeVpsRegistryMock([DYNAMIC_TESTDEVGUI]);
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore: new AuditStore(),
+      vpsTargets: envTargets,
+      vpsRegistry: registry,
+    });
+
+    const res = await request(
+      app, 'DELETE',
+      '/api/deployments/testdevgui/app.example.com',
+      { confirm: 'app.example.com', tunnelId: 'devgui-testdevgui' },
+    );
+    expect(res.status).toBe(200);
+    expect(orch.undeploy).toHaveBeenCalledWith(
+      expect.objectContaining({ vps: expect.objectContaining({ host: '10.0.0.2' }) }),
+    );
+  });
+
+  it('AC9: DELETE /api/deployments — unbekannte vpsId → 422, Undeploy unterbleibt', async () => {
+    const orch = makeOrchestratorStub();
+    const registry = makeVpsRegistryMock([DYNAMIC_TESTDEVGUI]);
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore: new AuditStore(),
+      vpsTargets: new Map(),
+      vpsRegistry: registry,
+    });
+
+    const res = await request(
+      app, 'DELETE',
+      '/api/deployments/unknown-vps/app.example.com',
+      { confirm: 'app.example.com', tunnelId: 'devgui-testdevgui' },
+    );
+    expect(res.status).toBe(422);
+    expect(orch.undeploy).not.toHaveBeenCalled();
+  });
+
+  // ── AC8: Security-Floor — 422-Meldung enthält nur vpsId, kein host/key/token ──
+
+  it('AC8: 422-Response enthält nur vpsId, keinen host/targetUser/key/token', async () => {
+    const orch = makeOrchestratorStub();
+    const registry = makeVpsRegistryMock([DYNAMIC_TESTDEVGUI]);
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore: new AuditStore(),
+      vpsTargets: new Map(),
+      vpsRegistry: registry,
+    });
+
+    // Unbekannte ID → 422
+    const res = await request(app, 'GET', '/api/deployments?vps=nonexistent&tunnelId=tun-x');
+    expect(res.status).toBe(422);
+    const bodyStr = JSON.stringify(res.body);
+    // Meldung enthält nur die vpsId, kein Ziel-Metadatum
+    expect(bodyStr).toContain('nonexistent');
+    expect(bodyStr).not.toContain('188.34.202.209'); // kein host leak
+    expect(bodyStr).not.toContain('root');            // kein targetUser leak
+    expect(bodyStr).not.toContain('token');           // kein token leak
+  });
+
+  it('AC9: dynamischer VPS mit veraltetem host → getMachineIp-Refresh wird versucht', async () => {
+    const orch = makeOrchestratorStub();
+    const staleRecord = { ...DYNAMIC_TESTDEVGUI, host: null }; // kein host im Record
+    const registry = makeVpsRegistryMock(
+      [staleRecord],
+      jest.fn(async () => '188.34.202.209'), // getMachineIp liefert frische IP
+    );
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore: new AuditStore(),
+      vpsTargets: new Map(),
+      vpsRegistry: registry,
+    });
+
+    const res = await request(app, 'GET', '/api/deployments?vps=testdevgui&tunnelId=devgui-testdevgui');
+    expect(res.status).toBe(200);
+    expect(orch.listDeployments).toHaveBeenCalledWith(
+      expect.objectContaining({ vps: expect.objectContaining({ host: '188.34.202.209' }) }),
+    );
+    expect(registry.getMachineIp).toHaveBeenCalled();
   });
 });
