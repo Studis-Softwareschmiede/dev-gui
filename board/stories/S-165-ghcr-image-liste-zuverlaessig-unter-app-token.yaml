@@ -1,7 +1,7 @@
 id: S-165
 parent: F-015
 title: 'GHCR-Image-Liste zuverlässig unter dem GitHub-App-Token: Auflist-Pfad reparieren (Dropdown nicht mehr leer)'
-status: To Do
+status: Done
 priority: P1
 spec: docs/specs/ghcr-image-list-app-token.md
 implements:
@@ -21,8 +21,8 @@ size_est: M
 dispo_est: 5
 estimate_note: 'Lücke A (live verifiziert): GET /api/github/packages liefert {packages:[]}, weil der Org-Listen-Endpunkt GET /orgs/{org}/packages?package_type=container mit dem GitHub-App-Installation-Token "400 Invalid argument" antwortet (src/GitHubPackagesReader.js:195), während die Einzel-Endpunkte (GET /orgs/{org}/packages/container/{name} + .../versions) mit DEMSELBEN App-Token 200 liefern. Folge: Image-Dropdown im Deploy-Menü (deploy-lifecycle AC10) leer. Ziel: Org-Container-Images unter App-Token zuverlässig auflisten — listPackages() liefert nicht-leer, wenn Pakete existieren + Token berechtigt. Lösungsweg architekt/coder-Wahl (in Spec als Vorschlag): (a) korrekter REST-Listen-Aufruf nach App-Permission-Nachzug, (b) GraphQL organization.packages(packageType:CONTAINER), oder (c) Repo-/Installation-Inventar + die als 200 belegten Einzel-Endpunkte je Paket. App-Token-only bleibt Vorgabe (KEIN process.env.GH_TOKEN-Fallback, S-146/S-149), Boundary unverändert (nur GitHubPackagesReader spricht die API, Grep-prüfbar), Org fix (kein SSRF). Read-Model {name,fullImageRef,visibility,htmlUrl,updatedAt} + alphab. Sortierung unverändert (ghcr-image-list AC2); Tag-Pfad /{name}/tags unverändert (funktioniert bereits). Teil-Fehler-Robustheit für Einzel-Endpunkt-Variante: erfolgreich aufgelöste Pakete + errors je gescheitertem (AC3). Floor: graceful Degradation (leere Liste, 200, kein Crash), kein Token-Leak (Response/Log/WS/Argv/Bundle). OFFENE FRAGE für architekt/coder (AC6): braucht die GitHub-App eine "Packages: Read"-Permission (org-/installation-level)? Plausibel die eigentliche Ursache des 400 — live verifizieren und als Setup-Vorbedingung in der Spec dokumentieren (kein offener Platzhalter im Merge-Stand). Tests: gemockter fetch mit dem 400-Listen-Fall → Liste über den gewählten Weg trotzdem nicht-leer; Teil-Fehler → Teil-Ergebnis+errors; Degradation (kein Token/voll-Fehler) → leer/200; kein Token-Leak; App-Token-only Grep. M (~5 EP) — ein Reader-Pfad + ggf. GraphQL/Einzelabfrage + Degradations-/Security-Pfade, etabliertes Boundary-Muster, Hauptaufwand in der Live-Ursachen-Klärung.'
 confidence: medium
-branch: null
+branch: feat/S-165-image-list
 pr: null
 blocked_reason: null
 created_at: '2026-06-18T00:00:00Z'
-updated_at: '2026-06-18T00:00:00Z'
+updated_at: '2026-06-18T10:30:00Z'

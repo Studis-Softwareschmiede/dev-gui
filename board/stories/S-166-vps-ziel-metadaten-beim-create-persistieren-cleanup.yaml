@@ -1,7 +1,7 @@
 id: S-166
 parent: F-015
 title: 'Dynamische VPS-SSH-Ziele: Ziel-Metadaten beim Create persistieren + beim Löschen aufräumen'
-status: To Do
+status: Done
 priority: P1
 spec: docs/specs/vps-dynamic-ssh-targets.md
 implements:
@@ -20,8 +20,8 @@ size_est: M
 dispo_est: 5
 estimate_note: 'Lücke B, Teil 1 (Wurzel-Fix): Beim VPS-Create (VpsProviderRegistry.create, S-152) wird die tunnelId persistiert (credentials/misc/vps-<sanitized>-tunnel-id), aber NICHT die SSH-Verbindungsdaten — daher ist ein dynamisch angelegter VPS (real: testDevGui, hetzner, 188.34.202.209) als SSH-Ziel unsichtbar. Diese Story: nach erfolgreichem adapter.create einen VpsTargetRecord {provider, serverId, host, port, targetUser, tunnelId} persistieren, analog der bestehenden tunnelId-Persistenz (Empfehlung: nicht-geheimer Schlüssel credentials/misc/vps-<sanitized>-target als JSON — KEINE Secrets, nur Metadaten/Referenzen). targetUser default root, port default 22 aus dem Create-Kontext (root+alex-Keys hinterlegt; Annahme dokumentiert, pro Provider verfeinerbar). host = Provider-IP; ist sie zum Create-Zeitpunkt nicht final, über getMachineIp(provider,serverId) nachträglich auflösbar halten (kein stale-IP-Lock, AC2). Cleanup: beim VPS-Löschen (vps-delete) den Datensatz mit entfernen (analog tunnelId-/Token-Cleanup), kein verwaistes Ziel (AC7). Floor (AC8): KEIN SSH-Private-Key, KEIN Tunnel-Token im Datensatz/Log/Argv/Response; Private-Key store-intern transient (ADR-008), Tunnel-Token verschlüsselt at rest (ADR-007). Kein neuer Endpunkt. Tests mit gemocktem CredentialStore/Registry: Datensatz nach Create abrufbar+secret-frei (defaults root/22), getMachineIp-Auffrischung, Cleanup nach Delete, kein Key/Token-Leak. M (~5 EP) — Create-Pfad + Persistenz + Delete-Cleanup + Security-Pfade, reiht sich in die etablierte S-152-tunnelId-Linie ein.'
 confidence: medium
-branch: null
+branch: feat/S-166-vps-target-metadata
 pr: null
 blocked_reason: null
 created_at: '2026-06-18T00:00:00Z'
-updated_at: '2026-06-18T00:00:00Z'
+updated_at: '2026-06-18T10:30:00Z'
