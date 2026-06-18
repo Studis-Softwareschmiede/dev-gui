@@ -121,6 +121,10 @@ export function DeploymentsView({ onNavigate }) {
   const [undeploying, setUndeploying] = useState(false);
   const [undeployResult, setUndeployResult] = useState(null); // { ok, message }
 
+  // ── S-156: Lokal-Test state
+  const [localTesting, setLocalTesting] = useState(false);
+  const [localTestResult, setLocalTestResult] = useState(null); // { ok, report?, reason? }
+
   // ── Stack-Modus state (AC12)
   const [stacks, setStacks] = useState([]);
   const [stacksLoadState, setStacksLoadState] = useState('idle'); // 'idle'|'loading'|'ok'|'error'
@@ -291,6 +295,33 @@ export function DeploymentsView({ onNavigate }) {
     selectedZone !== '' &&
     selectedTunnel !== '' &&
     subdomain.trim() !== '';
+
+  // ── S-156: Lokal-Test handler ────────────────────────────────────────────
+  async function handleLocalTest(e) {
+    e.preventDefault();
+    if (!selectedPackage || !selectedTag) return;
+    setLocalTesting(true);
+    setLocalTestResult(null);
+    const imageWithTag = fullImageRef;
+    try {
+      const res = await fetch('/api/deployments/local-test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image: imageWithTag, tag: selectedTag }),
+      });
+      const data = await res.json();
+      if (res.ok && data.result === 'ok') {
+        setLocalTestResult({ ok: true, report: data.report });
+      } else {
+        const reason = data?.reason ?? data?.error ?? 'Lokal-Test fehlgeschlagen';
+        setLocalTestResult({ ok: false, reason: String(reason).slice(0, 200) });
+      }
+    } catch {
+      setLocalTestResult({ ok: false, reason: 'Netzwerkfehler beim Lokal-Test' });
+    } finally {
+      setLocalTesting(false);
+    }
+  }
 
   // ── AC12: Deploy handler ─────────────────────────────────────────────────
   async function handleDeploy(e) {
@@ -817,6 +848,38 @@ export function DeploymentsView({ onNavigate }) {
               </span>
             </div>
 
+            {/* ── S-156: Lokal testen (vor Deploy auf VPS) ──────────────── */}
+            {(selectedPackage && selectedTag) && (
+              <div style={styles.localTestSection}>
+                <button
+                  type="button"
+                  style={localTesting
+                    ? { ...styles.btnLocalTest, opacity: 0.6, cursor: 'not-allowed' }
+                    : styles.btnLocalTest}
+                  disabled={localTesting}
+                  aria-busy={localTesting}
+                  onClick={handleLocalTest}
+                >
+                  {localTesting ? 'Teste lokal…' : 'Lokal testen'}
+                </button>
+                {localTestResult && (
+                  <div
+                    role="status"
+                    aria-live="polite"
+                    style={localTestResult.ok ? styles.localTestOk : styles.localTestError}
+                  >
+                    {localTestResult.ok ? (
+                      <LocalTestReport report={localTestResult.report} />
+                    ) : (
+                      <p style={{ margin: 0, fontSize: 13 }}>
+                        Lokal-Test fehlgeschlagen: {localTestResult.reason}
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* AC14: Re-Deploy indicator */}
             {existingDeployOnHostname && (
               <div style={styles.warnBox} role="status" aria-live="polite">
@@ -1079,6 +1142,40 @@ export function DeploymentsView({ onNavigate }) {
   );
 }
 
+// ── LocalTestReport component (S-156) ────────────────────────────────────────
+
+/**
+ * Renders a structured LocalTestReport (AC2, AC3).
+ * @param {{ report: import('../../src/deploy/LocalDockerControl.js').LocalTestReport }} props
+ */
+function LocalTestReport({ report }) {
+  if (!report) return null;
+  const rows = [
+    ['Gestartet', report.started ? 'ja' : 'nein'],
+    ['Frühzeitig beendet (crash)', report.exitedEarly ? 'ja' : 'nein'],
+    ['Host-Port', report.hostPort != null ? String(report.hostPort) : 'keiner'],
+    ['Exponierte Ports', report.exposedPorts?.length > 0 ? report.exposedPorts.join(', ') : '—'],
+    ['Erreichbar (HTTP)', report.reachable ? 'ja' : 'nein'],
+    ['Dauer', `${report.durationMs ?? '?'} ms`],
+  ];
+  if (report.reason) {
+    rows.push(['Hinweis', report.reason]);
+  }
+  return (
+    <div>
+      <p style={{ margin: '0 0 8px', fontSize: 13, fontWeight: 600 }}>
+        Lokal-Test abgeschlossen {report.started ? '(gestartet)' : '(nicht gestartet)'}
+      </p>
+      {rows.map(([label, value]) => (
+        <div key={label} style={{ display: 'flex', gap: 8, marginBottom: 2 }}>
+          <span style={{ fontSize: 12, color: '#9ca3af', minWidth: 160 }}>{label}:</span>
+          <span style={{ fontSize: 12, color: '#e5e7eb' }}>{value}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /**
@@ -1292,6 +1389,43 @@ const styles = {
   cellAction: {
     width: 110,
     flexShrink: 0,
+  },
+  // Local-Test (S-156)
+  localTestSection: {
+    marginTop: 12,
+    marginBottom: 12,
+    padding: '12px 16px',
+    background: '#0f172a',
+    border: '1px solid #1e3a5f',
+    borderRadius: 6,
+  },
+  btnLocalTest: {
+    padding: '8px 16px',
+    background: '#0e4a7a',
+    color: '#93c5fd',
+    border: '1px solid #1e6fab',
+    borderRadius: 6,
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: 'pointer',
+    minHeight: 44,
+    minWidth: 120,
+  },
+  localTestOk: {
+    marginTop: 10,
+    padding: '10px 14px',
+    background: '#071826',
+    border: '1px solid #0e4a7a',
+    borderRadius: 4,
+    color: '#93c5fd',
+  },
+  localTestError: {
+    marginTop: 10,
+    padding: '10px 14px',
+    background: '#1c0a0a',
+    border: '1px solid #7f1d1d',
+    borderRadius: 4,
+    color: '#fca5a5',
   },
   // Mode toggle (AC12)
   modeToggle: {

@@ -96,6 +96,7 @@ import { RetroReader } from './src/RetroReader.js';
 import { StackRegistry } from './src/StackRegistry.js';
 import { VpsComposeControl } from './src/deploy/VpsComposeControl.js';
 import { StackDeployOrchestrator } from './src/deploy/StackDeployOrchestrator.js';
+import { LocalDockerControl } from './src/deploy/LocalDockerControl.js';
 import { BitwardenMasterKeyService } from './src/BitwardenMasterKeyService.js';
 import { BoardAggregator } from './src/BoardAggregator.js';
 import { DocsReader } from './src/DocsReader.js';
@@ -199,6 +200,11 @@ const reconciliationJob = new ReconciliationJob({
 });
 reconciliationJob.startScheduler();
 
+// ── Lokaler Image-Test (S-156, AC1–AC5) ───────────────────────────────────────
+// Schreibend-lokale Docker-Boundary (run/inspect/rm lokal via DOCKER_HOST).
+// Read-only DockerReader bleibt unberührt.
+const localDockerControl = new LocalDockerControl();
+
 // ── Stack ─────────────────────────────────────────────────────────────────────
 const stackRegistry = new StackRegistry(credentialStore);
 const vpsComposeControl = new VpsComposeControl(credentialStore);
@@ -279,6 +285,7 @@ const deps = {
   vpsDockerControl,
   vpsTargets,
   reconciliationJob,
+  localDockerControl,
   stackRegistry,
   stackDeployOrchestrator,
   agentFlowReader,
