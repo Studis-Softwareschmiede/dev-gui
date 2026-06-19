@@ -55,6 +55,23 @@
  *           „ready"-Badge (grün); Blocked-Stories zeigen ihren blocked_reason als
  *           Hinweiszeile unter dem Titel. Kontrast WCAG AA; aria-label an Badges.
  *
+ * board-feature-collapse:
+ *   AC1  — Jede Feature-Zeile hat einen Auf-/Zu-Schalter (Collapse-Button mit Chevron);
+ *           eingeklappt sind Story-Spalten ausgeblendet; ausgeklappt wie bisher sichtbar.
+ *   AC2  — Ziel/DoD-Detail-Panel auf separaten Schalter entkoppelt; bei eingeklapptem
+ *           Feature ist der Detail-Schalter ausgeblendet.
+ *   AC3  — Default „Gemischt": erledigte Features (done==total, total>0, oder status
+ *           Done/Archived) eingeklappt; übrige ausgeklappt.
+ *   AC4  — „Alle einklappen" / „Alle ausklappen" in der Board-Kopfleiste.
+ *   AC5  — Zustand pro Projekt im localStorage (Key boardview.collapsed.<slug>);
+ *           defektes/fehlendes localStorage → stiller Default, kein Crash.
+ *   AC6  — Bei aktivem einschränkendem Filter: eingeklappte Features mit passenden
+ *           Stories temporär ausgeklappt dargestellt; gespeicherter Zustand nicht
+ *           überschrieben.
+ *   AC7  — A11y: Auf-/Zu-Schalter sind button mit aria-expanded + aria-controls;
+ *           Tastatur (Enter/Space); Fokusring erhalten; Chevron aria-hidden.
+ *   AC8  — Kein dangerouslySetInnerHTML; kein neuer API-Aufruf; keine Secrets.
+ *
  * Story-Status-Lebenszyklus (board-subsystem §9.3):
  *   To Do | In Progress | Blocked | In Review | Done
  *
@@ -91,6 +108,111 @@ const STATUS_LIFECYCLE = ['To Do', 'In Progress', 'Blocked', 'In Review', 'Done'
  * 'done' is a defensive fallback for non-canonical backend values.
  */
 const DONE_STATUSES = new Set(['Done', 'done']);
+
+// ── Feature-collapse helpers (board-feature-collapse) ─────────────────────────
+
+/**
+ * localStorage key for a project slug.
+ * Key: `boardview.collapsed.<slug>` → JSON `{ "collapsed": ["F-012","F-018"] }`
+ * (AC5: localStorage pro Projekt)
+ *
+ * @param {string} slug
+ * @returns {string}
+ */
+function collapseKey(slug) {
+  return `boardview.collapsed.${slug}`;
+}
+
+/**
+ * Load collapsed feature IDs from localStorage.
+ * Returns null when no persisted state exists for this slug.
+ * Returns an empty Set when persisted but nothing is collapsed.
+ * Falls back silently to null on any error (AC5: defektes localStorage → Default).
+ *
+ * @param {string} slug
+ * @returns {Set<string>|null}
+ */
+function loadCollapsedSet(slug) {
+  try {
+    const raw = window.localStorage.getItem(collapseKey(slug));
+    if (raw == null) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || !Array.isArray(parsed.collapsed)) return null;
+    return new Set(parsed.collapsed);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Persist collapsed feature IDs to localStorage.
+ * Silently ignores errors (quota, security, …) (AC5).
+ *
+ * @param {string} slug
+ * @param {Set<string>} collapsedSet
+ */
+function saveCollapsedSet(slug, collapsedSet) {
+  try {
+    window.localStorage.setItem(
+      collapseKey(slug),
+      JSON.stringify({ collapsed: Array.from(collapsedSet) }),
+    );
+  } catch {
+    // Silently ignore — AC5: kein Crash bei defektem localStorage
+  }
+}
+
+/**
+ * Determine whether a feature counts as "done" for the default-mixed rule (AC3).
+ * Done = (rollup.done === rollup.total && rollup.total > 0) OR
+ *        feature.status ∈ {'Done', 'Archived'}.
+ *
+ * @param {{ status?: string, progress?: unknown, stories?: Array<{status: string}> }} feature
+ * @returns {boolean}
+ */
+function isFeatureDone(feature) {
+  if (feature.status === 'Done' || feature.status === 'Archived') return true;
+  const rollup = computeRollup(feature);
+  return rollup.total > 0 && rollup.done === rollup.total;
+}
+
+/**
+ * Compute the default collapsed set for a list of features (AC3 — Default „Gemischt").
+ * Erledigte Features eingeklappt, übrige ausgeklappt.
+ *
+ * @param {Array<{id: string}>} features
+ * @returns {Set<string>}
+ */
+function computeDefaultCollapsed(features) {
+  const collapsed = new Set();
+  for (const f of features) {
+    if (isFeatureDone(f)) collapsed.add(f.id);
+  }
+  return collapsed;
+}
+
+/**
+ * Derive the effective collapsed set for a project:
+ * - If localStorage has state → use it; new features not yet stored follow default.
+ * - Otherwise → default „Gemischt" from computeDefaultCollapsed.
+ *
+ * @param {string} slug
+ * @param {Array<{id: string}>} features
+ * @returns {Set<string>}
+ */
+function resolveCollapsedSet(slug, features) {
+  const stored = loadCollapsedSet(slug);
+  if (stored === null) {
+    // No persisted state → default „Gemischt" (AC3/V3)
+    return computeDefaultCollapsed(features);
+  }
+  // Persisted state exists → use it as-is (AC5: gespeicherter Zustand hat Vorrang).
+  // Our format stores only collapsed IDs.
+  // - Feature in stored → collapsed.
+  // - Feature absent from stored → was explicitly expanded (or "Alle ausklappen" was used).
+  // Spec V5: "gespeicherter Feature-Zustand vorhanden → diesen verwenden"
+  return new Set(stored);
+}
 
 // ── Rollup helper ─────────────────────────────────────────────────────────────
 
@@ -165,6 +287,63 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
   const [filterStatus, setFilterStatus]   = useState(() => new Set(STATUS_LIFECYCLE)); // AC2: alle vorausgewählt
   const [filterLabel, setFilterLabel]     = useState('');
 
+  // ─── Collapse state (AC1/AC3/AC4/AC5 board-feature-collapse) ─────────────────
+  // collapsedIds: Set<featureId> — which features are currently collapsed.
+  // Initialized synchronously in the fetch callbacks alongside setProjects.
+  const [collapsedIds, setCollapsedIds] = useState(() => new Set());
+
+  /**
+   * Toggle a single feature's collapsed state and persist it.
+   * AC1: ein-/ausklappen. AC5: Persistenz.
+   */
+  const handleCollapseToggle = useCallback((featureId) => {
+    setCollapsedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(featureId)) {
+        next.delete(featureId);
+      } else {
+        next.add(featureId);
+      }
+      // Persist per current project slug (AC5)
+      const slug = projects[0]?.slug ?? projects[0]?.project_slug ?? projects[0]?.repo_path ?? null;
+      if (slug) saveCollapsedSet(slug, next);
+      return next;
+    });
+  }, [projects]);
+
+  /**
+   * Collapse all features of the current project (AC4).
+   */
+  const handleCollapseAll = useCallback(() => {
+    setCollapsedIds(() => {
+      const allIds = (projects[0]?.features ?? []).map((f) => f.id);
+      const next = new Set(allIds);
+      const slug = projects[0]?.slug ?? projects[0]?.project_slug ?? projects[0]?.repo_path ?? null;
+      if (slug) saveCollapsedSet(slug, next);
+      return next;
+    });
+  }, [projects]);
+
+  /**
+   * Expand all features of the current project (AC4).
+   */
+  const handleExpandAll = useCallback(() => {
+    setCollapsedIds(() => {
+      const next = new Set();
+      const slug = projects[0]?.slug ?? projects[0]?.project_slug ?? projects[0]?.repo_path ?? null;
+      if (slug) saveCollapsedSet(slug, next);
+      return next;
+    });
+  }, [projects]);
+
+  /**
+   * Whether ANY filter is restricting the view — used for AC6 filter-wechselwirkung.
+   * A restricting filter = status filter not all-5, OR label filter active.
+   */
+  const hasRestrictingFilter = useMemo(() => {
+    return filterStatus.size < STATUS_LIFECYCLE.length || Boolean(filterLabel);
+  }, [filterStatus, filterLabel]);
+
   // ─── STANDALONE: load project list on mount (AC6) ───────────────────────────
   useEffect(() => {
     if (!isStandalone) return;
@@ -209,7 +388,13 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
       .then((data) => {
         if (cancelled) return;
         const proj = data.project ?? null;
-        setProjects(proj ? [proj] : []);
+        const projList = proj ? [proj] : [];
+        setProjects(projList);
+        // AC3/AC5: resolve collapse state synchronously with project load
+        if (proj) {
+          const slug = proj.slug ?? proj.project_slug ?? proj.repo_path ?? null;
+          if (slug) setCollapsedIds(resolveCollapsedSet(slug, proj.features ?? []));
+        }
         setLoadState('ok');
       })
       .catch((err) => {
@@ -228,7 +413,14 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
               const slug = p.slug || p.project_slug || p.repo_path || '';
               return slug === lockedProject;
             });
-            setProjects(filtered.length > 0 ? filtered : all);
+            const projList = filtered.length > 0 ? filtered : all;
+            setProjects(projList);
+            // AC3/AC5: resolve collapse state for fallback
+            if (projList.length > 0) {
+              const p = projList[0];
+              const slug = p.slug ?? p.project_slug ?? p.repo_path ?? null;
+              if (slug) setCollapsedIds(resolveCollapsedSet(slug, p.features ?? []));
+            }
             setLoadState('ok');
           })
           .catch((err2) => {
@@ -248,6 +440,7 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
     setLoadState('loading');
     setLoadError('');
     setProjects([]);
+    setCollapsedIds(new Set()); // reset while loading
 
     fetch(`/api/board/projects/${encodeURIComponent(slug)}`)
       .then((res) => {
@@ -257,6 +450,11 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
       .then((data) => {
         const proj = data.project ?? null;
         setProjects(proj ? [proj] : []);
+        // AC3/AC5: resolve collapse state synchronously with project load
+        if (proj) {
+          const projSlug = proj.slug ?? proj.project_slug ?? proj.repo_path ?? null;
+          if (projSlug) setCollapsedIds(resolveCollapsedSet(projSlug, proj.features ?? []));
+        }
         setLoadState('ok');
       })
       .catch((err) => {
@@ -452,6 +650,10 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
               onStatusChange={setFilterStatus}
               onLabelChange={setFilterLabel}
               hideProjectFilter={true}
+              collapsedIds={collapsedIds}
+              allFeatureIds={(projects[0]?.features ?? []).map((f) => f.id)}
+              onCollapseAll={handleCollapseAll}
+              onExpandAll={handleExpandAll}
             />
           )}
 
@@ -490,6 +692,9 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
                   onStoryClick={currentProjectSlug
                     ? (story) => handleStoryClick(currentProjectSlug, story)
                     : null}
+                  collapsedIds={collapsedIds}
+                  onCollapseToggle={handleCollapseToggle}
+                  hasRestrictingFilter={hasRestrictingFilter}
                 />
               ))}
               {filteredProjects.length === 0 && (filterProject || filterStatus.size > 0 || filterLabel) && (
@@ -523,6 +728,10 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
               onStatusChange={setFilterStatus}
               onLabelChange={setFilterLabel}
               hideProjectFilter={true}
+              collapsedIds={collapsedIds}
+              allFeatureIds={(projects[0]?.features ?? []).map((f) => f.id)}
+              onCollapseAll={handleCollapseAll}
+              onExpandAll={handleExpandAll}
             />
           )}
 
@@ -565,6 +774,9 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
                   onStoryClick={currentProjectSlug
                     ? (story) => handleStoryClick(currentProjectSlug, story)
                     : null}
+                  collapsedIds={collapsedIds}
+                  onCollapseToggle={handleCollapseToggle}
+                  hasRestrictingFilter={hasRestrictingFilter}
                 />
               ))}
               {filteredProjects.length === 0 && (filterProject || filterStatus.size > 0 || filterLabel) && (
@@ -589,12 +801,15 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
 
 /**
  * Filter controls for Projekt, Story-Status (popover, AC4) and Label.
+ * Also contains Alle-ein-/ausklappen-Schalter (AC4 board-feature-collapse).
  *
  * AC4 (studis-kanban-board-ux): Status-Filter as click-toggle popover.
  *   Button "Status (n/5) ▾" opens a floating panel with checkboxes.
  *   Closes on outside click and Esc. Button carries aria-expanded/aria-controls.
  *
  * AC2 (studis-kanban-board-ux): default = all 5 selected (passed in from parent).
+ *
+ * AC4 (board-feature-collapse): "Alle einklappen" / "Alle ausklappen" Schalter.
  *
  * @param {{
  *   projects: string[],
@@ -607,6 +822,10 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
  *   onStatusChange: (v: Set<string>) => void,
  *   onLabelChange: (v: string) => void,
  *   hideProjectFilter?: boolean,
+ *   collapsedIds?: Set<string>,
+ *   allFeatureIds?: string[],
+ *   onCollapseAll?: () => void,
+ *   onExpandAll?: () => void,
  * }} props
  */
 function FilterBar({
@@ -620,7 +839,17 @@ function FilterBar({
   onStatusChange,
   onLabelChange,
   hideProjectFilter = false,
+  collapsedIds,
+  allFeatureIds,
+  onCollapseAll,
+  onExpandAll,
 }) {
+  // AC4 (board-feature-collapse): derive whether any feature is collapsed/expanded
+  // to decide which button to show.
+  const allCollapsed = useMemo(() => {
+    if (!allFeatureIds || allFeatureIds.length === 0 || !collapsedIds) return false;
+    return allFeatureIds.every((id) => collapsedIds.has(id));
+  }, [allFeatureIds, collapsedIds]);
   // AC4: popover open/close state
   const [popoverOpen, setPopoverOpen] = useState(false);
   const popoverRef = useRef(null);
@@ -790,6 +1019,20 @@ function FilterBar({
           Zurücksetzen
         </button>
       )}
+
+      {/* AC4 (board-feature-collapse): „Alle einklappen" / „Alle ausklappen" */}
+      {allFeatureIds && allFeatureIds.length > 0 && onCollapseAll && onExpandAll && (
+        <button
+          type="button"
+          style={styles.collapseAllBtn}
+          onClick={allCollapsed ? onExpandAll : onCollapseAll}
+          aria-label={allCollapsed ? 'Alle Features ausklappen' : 'Alle Features einklappen'}
+          aria-pressed={allCollapsed}
+          data-testid="collapse-all-btn"
+        >
+          {allCollapsed ? '▾ Alle ausklappen' : '▸ Alle einklappen'}
+        </button>
+      )}
     </div>
   );
 }
@@ -849,9 +1092,12 @@ function ProjectListItem({ item, onSelect }) {
  *   project: object,
  *   onOpenSpec?: (relPath: string) => void,
  *   onStoryClick?: (story: object) => void,
+ *   collapsedIds?: Set<string>,
+ *   onCollapseToggle?: (featureId: string) => void,
+ *   hasRestrictingFilter?: boolean,
  * }} props
  */
-function ProjectSection({ project, onOpenSpec, onStoryClick }) {
+function ProjectSection({ project, onOpenSpec, onStoryClick, collapsedIds, onCollapseToggle, hasRestrictingFilter }) {
   const slug = project.slug || project.project_slug || project.repo_path || '?';
 
   return (
@@ -887,6 +1133,9 @@ function ProjectSection({ project, onOpenSpec, onStoryClick }) {
           feature={feature}
           onOpenSpec={onOpenSpec}
           onStoryClick={onStoryClick}
+          isCollapsed={collapsedIds ? collapsedIds.has(feature.id) : false}
+          onCollapseToggle={onCollapseToggle}
+          hasRestrictingFilter={hasRestrictingFilter ?? false}
         />
       ))}
     </section>
@@ -896,19 +1145,35 @@ function ProjectSection({ project, onOpenSpec, onStoryClick }) {
 // ── FeatureRow ────────────────────────────────────────────────────────────────
 
 /**
- * One feature row: title, rollup bar (AC5), then stories in status columns (AC4).
- * Klick auf den Feature-Titel öffnet/schliesst das Detail-Panel (goal, DoD, …).
+ * One feature row: collapse-button (AC1/AC7), title, rollup bar (AC5),
+ * detail-button (AC2), then stories in status columns (AC4).
+ *
+ * AC1: Auf-/Zu-Schalter (Collapse-Button) blendet Story-Spalten aus.
+ * AC2: Detail-Panel (Ziel/DoD) über separaten Schalter; bei eingeklappt verborgen.
+ * AC6: Filter-Wechselwirkung — temporär ausgeklappt wenn Treffer vorhanden + Filter aktiv.
+ * AC7: aria-expanded + aria-controls, Fokusring erhalten, Chevron aria-hidden.
  *
  * @param {{
  *   feature: object,
  *   onOpenSpec?: (relPath: string) => void,
  *   onStoryClick?: (story: object) => void,
+ *   isCollapsed?: boolean,
+ *   onCollapseToggle?: (featureId: string) => void,
+ *   hasRestrictingFilter?: boolean,
  * }} props
  */
-function FeatureRow({ feature, onOpenSpec, onStoryClick }) {
+function FeatureRow({ feature, onOpenSpec, onStoryClick, isCollapsed = false, onCollapseToggle, hasRestrictingFilter = false }) {
+  // AC2: separate detail-panel open/close state (entkoppelt vom Einklappen)
   const [detailOpen, setDetailOpen] = useState(false);
   const rollup = computeRollup(feature);
+  // stories prop contains FILTERED stories (from filteredProjects — only matching filter)
   const stories = Array.isArray(feature.stories) ? feature.stories : [];
+
+  // AC6: Wenn Filter aktiv UND Feature hat passende Stories → temporär ausgeklappt anzeigen.
+  // Diese Aufklappung überschreibt isCollapsed NUR für die Anzeige, nie den gespeicherten Zustand.
+  const hasFilteredStories = hasRestrictingFilter && stories.length > 0;
+  // Effective collapsed: eingeklappt wenn isCollapsed UND (kein Filter ODER keine Treffer)
+  const effectivelyCollapsed = isCollapsed && !hasFilteredStories;
 
   // Group stories by status column (AC4)
   const byStatus = {};
@@ -927,9 +1192,16 @@ function FeatureRow({ feature, onOpenSpec, onStoryClick }) {
     }
   }
 
-  const handleTitleClick = useCallback(() => {
+  const handleCollapseClick = useCallback(() => {
+    if (onCollapseToggle) onCollapseToggle(feature.id);
+  }, [feature.id, onCollapseToggle]);
+
+  const handleDetailClick = useCallback(() => {
     setDetailOpen((prev) => !prev);
   }, []);
+
+  const storiesRegionId = `feature-stories-${feature.id}`;
+  const detailRegionId  = `feature-detail-${feature.id}`;
 
   return (
     <div
@@ -939,31 +1211,51 @@ function FeatureRow({ feature, onOpenSpec, onStoryClick }) {
     >
       {/* Feature header */}
       <div style={styles.featureHeader}>
-        {/* Clickable title — toggles detail panel */}
+        {/* AC1/AC7: Collapse-Button — blendet Story-Spalten aus/ein */}
         <button
           type="button"
-          style={styles.featureTitleBtn}
-          onClick={handleTitleClick}
-          aria-expanded={detailOpen}
-          aria-controls={detailOpen ? `feature-detail-${feature.id}` : undefined}
-          data-testid={`feature-title-btn-${feature.id}`}
+          style={styles.featureCollapseBtn}
+          onClick={handleCollapseClick}
+          aria-expanded={!effectivelyCollapsed}
+          aria-controls={storiesRegionId}
+          aria-label={effectivelyCollapsed
+            ? `Feature ${feature.title || feature.id} ausklappen`
+            : `Feature ${feature.title || feature.id} einklappen`}
+          data-testid={`feature-collapse-btn-${feature.id}`}
         >
+          {/* Chevron aria-hidden (AC7) */}
           <span style={styles.featureTitleChevron} aria-hidden="true">
-            {detailOpen ? '▾' : '▸'}
+            {effectivelyCollapsed ? '▸' : '▾'}
           </span>
           {feature.title || feature.id}
         </button>
+
         {feature.status && (
           <StatusBadge status={feature.status} />
         )}
         {/* Rollup bar (AC5) */}
         <RollupBar done={rollup.done} total={rollup.total} />
+
+        {/* AC2: Separater Details-Schalter (Ziel/DoD) — nur sichtbar wenn ausgeklappt */}
+        {!effectivelyCollapsed && (
+          <button
+            type="button"
+            style={styles.featureTitleBtn}
+            onClick={handleDetailClick}
+            aria-expanded={detailOpen}
+            aria-controls={detailOpen ? detailRegionId : undefined}
+            data-testid={`feature-title-btn-${feature.id}`}
+            aria-label={`Details für Feature ${feature.title || feature.id} ${detailOpen ? 'schließen' : 'öffnen'}`}
+          >
+            <span aria-hidden="true">{detailOpen ? 'ⓘ ▾' : 'ⓘ ▸'}</span>
+          </button>
+        )}
       </div>
 
-      {/* Feature detail panel — shown when expanded */}
-      {detailOpen && (
+      {/* AC2: Feature detail panel — shown when detail expanded AND feature not collapsed */}
+      {!effectivelyCollapsed && detailOpen && (
         <div
-          id={`feature-detail-${feature.id}`}
+          id={detailRegionId}
           style={styles.featureDetail}
           data-testid={`feature-detail-${feature.id}`}
           aria-label={`Details für Feature: ${feature.title || feature.id}`}
@@ -972,23 +1264,28 @@ function FeatureRow({ feature, onOpenSpec, onStoryClick }) {
         </div>
       )}
 
-      {/* Status columns (AC4) */}
-      {stories.length > 0 && (
-        <div style={styles.statusColumns} role="list" aria-label="Stories nach Status">
-          {STATUS_LIFECYCLE.map((status) => (
-            <StatusColumn
-              key={status}
-              status={status}
-              stories={byStatus[status]}
-              onOpenSpec={onOpenSpec}
-              onStoryClick={onStoryClick}
-            />
-          ))}
-        </div>
-      )}
+      {/* AC1: Stories region — hidden when collapsed */}
+      {!effectivelyCollapsed && (
+        <div id={storiesRegionId}>
+          {/* Status columns (AC4) */}
+          {stories.length > 0 && (
+            <div style={styles.statusColumns} role="list" aria-label="Stories nach Status">
+              {STATUS_LIFECYCLE.map((status) => (
+                <StatusColumn
+                  key={status}
+                  status={status}
+                  stories={byStatus[status]}
+                  onOpenSpec={onOpenSpec}
+                  onStoryClick={onStoryClick}
+                />
+              ))}
+            </div>
+          )}
 
-      {stories.length === 0 && (
-        <p style={styles.hintMsg}>Keine Stories in diesem Feature.</p>
+          {stories.length === 0 && (
+            <p style={styles.hintMsg}>Keine Stories in diesem Feature.</p>
+          )}
+        </div>
       )}
     </div>
   );
@@ -1864,8 +2161,9 @@ const styles = {
     minWidth: 0,
   },
 
-  // Feature title as a button (expand/collapse detail)
-  featureTitleBtn: {
+  // AC1 (board-feature-collapse): Collapse-Button — blendet Story-Spalten aus
+  // Der Hauptschalter mit Chevron + Titel; flex:1 damit er den Raum ausfüllt.
+  featureCollapseBtn: {
     background: 'transparent',
     border: 'none',
     padding: '2px 0',
@@ -1881,10 +2179,41 @@ const styles = {
     gap: 6,
     // Focus ring preserved (no outline:none)
   },
+
+  // AC2 (board-feature-collapse): Detail-Schalter (Ziel/DoD) — separater, kleiner Button
+  // kein flex:1; rechts positioniert im Header
+  featureTitleBtn: {
+    background: 'transparent',
+    border: '1px solid #334155',
+    padding: '2px 6px',
+    fontSize: 11,
+    color: '#6b7280',
+    cursor: 'pointer',
+    borderRadius: 4,
+    display: 'flex',
+    alignItems: 'center',
+    gap: 3,
+    flexShrink: 0,
+    // Focus ring preserved (no outline:none)
+  },
   featureTitleChevron: {
     fontSize: 10,
     color: '#6b7280',
     flexShrink: 0,
+  },
+
+  // AC4 (board-feature-collapse): „Alle einklappen/ausklappen"-Button in der FilterBar
+  collapseAllBtn: {
+    background: 'transparent',
+    border: '1px solid #334155',
+    color: '#9ca3af',
+    borderRadius: 4,
+    padding: '6px 12px',
+    fontSize: 12,
+    cursor: 'pointer',
+    minHeight: 36,
+    whiteSpace: 'nowrap',
+    // Focus ring preserved (no outline:none)
   },
 
   // Feature detail panel (goal, DoD, priority, depends, labels)

@@ -1,8 +1,8 @@
 id: S-173
 parent: F-020
 title: 'Board: Feature-Zeilen ein-/ausklappbar (Stories verstecken) + Alle-Toggle + localStorage-Persistenz'
-status: To Do
-branch: null
+status: Done
+branch: board/concepts-2026-06-19
 priority: P2
 spec: docs/specs/board-feature-collapse.md
 implements:
@@ -36,4 +36,4 @@ pr: null
 blocked_reason: null
 created_at: '2026-06-19T00:00:00Z'
 updated_at: '2026-06-19T00:00:00Z'
-done_at: null
+done_at: '2026-06-19T00:00:00Z'

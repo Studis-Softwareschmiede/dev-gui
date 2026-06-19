@@ -62,6 +62,7 @@
  *   GET    /api/board/projects/:slug/docs/raw?path=<relpfad>      → Roh-Markdown (projekt-spezifikation-anzeige AC2,AC3)
  *   GET    /api/board/projects/:slug/stories/:id/detail            → { detail: StoryDetail } (story-detail-ansicht AC2)
  *   POST   /api/assist/refine                                      → { refinedText, openQuestions[], notes? } (fabric-intake-dialog AC5,AC7,AC10)
+ *   POST   /api/assist/knowledge-sources                          → { ok, suggestedPackId, suggestedType, sources[], notes? } (team-knowledge-add AC3,AC6,AC11-AC15)
  *   WS   /ws/terminal                             → PtyManager bridge (guarded by AccessGuard)
  */
 
@@ -103,6 +104,7 @@ import { DocsReader } from './src/DocsReader.js';
 import { StoryMetricReader } from './src/StoryMetricReader.js';
 import { WorkspaceHealthChecker } from './src/WorkspaceHealthChecker.js';
 import { AssistService } from './src/AssistService.js';
+import { KnowledgeSourceService } from './src/KnowledgeSourceService.js';
 import { mountRouters } from './src/routerLoader.js';
 
 const PORT = Number(process.env.PORT ?? 8080);
@@ -267,6 +269,12 @@ const storyMetricReader = new StoryMetricReader();
 // Kein JobLock — unabhängig von laufendem Flow-Command (AC5, AC7).
 const assistService = new AssistService();
 
+// ── KnowledgeSourceService (web-fähiger Quellen-Such-Helfer, team-knowledge-add AC11) ──
+// Bewusste zweite headless-Ausnahme (Doktrin A1/A2): eigene Boundary,
+// claude -p mit --allowedTools WebSearch exklusiv (A3), kein JobLock, auditiert (A6).
+// AssistService bleibt tool-/netz-los (kein kind-Switch).
+const knowledgeSourceService = new KnowledgeSourceService();
+
 // ── deps-Objekt: alle Boundaries für den Auto-Loader ─────────────────────────
 // Expose ptyManager for routers that reference it (e.g. session.js reads state/restarts/startedAt).
 // These routers operate on the global (no-project) session, which preserves backward compat.
@@ -300,6 +308,7 @@ const deps = {
   docsReader,
   storyMetricReader,
   assistService,
+  knowledgeSourceService,
 };
 
 // ── AC1/AC2: Auto-Discovery + Mount aller API-Router ─────────────────────────

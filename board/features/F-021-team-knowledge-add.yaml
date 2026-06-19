@@ -11,7 +11,7 @@ goal: 'Der Owner soll einen NEUEN Knowledge Space komplett aus der GUI anlegen k
   Spec: WebSearch-only ohne WebFetch, eigener KnowledgeSourceService, Doktrin-Nachführung,
   backend-URL-Validierung, Audit, Timeout/Retry). Auslösen weiter über den einzeiligen
   PTY-Befehlspfad. Setzt den agent-flow-Enabler (train-bootstrap-new-pack) voraus.'
-status: To Do
+status: Done
 priority: P2
 spec: docs/specs/team-knowledge-add.md
 definition_of_done: null

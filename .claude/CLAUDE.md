@@ -2,7 +2,7 @@
 
 Node-Vollstack: React-Frontend + Express/ws-Backend. Steuert die agent-flow-Fabrik über eine Web-GUI.
 
-- **Engine:** fernsteuert eine INTERAKTIVE Claude-Code-Session (Abo-OAuth) per `node-pty` — KEIN Anthropic-API; der interaktive Flow-/Intake-Pfad bleibt **rein PTY** (kein `claude -p`, kein PTY-Lock-Bypass). **Bewusste Ausnahme:** der zustandslose „Let Claude proof"-Helfer (`POST /api/assist/refine`, eigene `AssistService`-Boundary, headless one-shot, kein PTY-Lock) nutzt `claude -p` — eng begrenzt, auditiert, ohne API-Key (docs/specs/fabric-intake-dialog.md AC11). Kein Anthropic-API bleibt unverändert ausgeschlossen.
+- **Engine:** fernsteuert eine INTERAKTIVE Claude-Code-Session (Abo-OAuth) per `node-pty` — KEIN Anthropic-API; der interaktive Flow-/Intake-Pfad bleibt **rein PTY** (kein `claude -p`, kein PTY-Lock-Bypass). **Bewusste Ausnahmen (headless, one-shot, kein PTY-Lock, kein API-Key, auditiert):** (1) der zustandslose „Let Claude proof"-Helfer (`POST /api/assist/refine`, eigene `AssistService`-Boundary, tool-los) — AC11 docs/specs/fabric-intake-dialog.md; (2) der zustandslose Quellen-Such-Helfer (`POST /api/assist/knowledge-sources`, eigene `KnowledgeSourceService`-Boundary, **Web-fähig**: Tool-Allowlist exklusiv `WebSearch`, kein `WebFetch`) — AC10 docs/specs/team-knowledge-add.md. Beide Boundaries sind getrennt (unterschiedliche Capability + Risikoprofil); `AssistService` bleibt tool-/netz-los. Kein Anthropic-API bleibt unverändert ausgeschlossen.
 - **Auth:** Cloudflare Access vor dem öffentlichen Endpunkt (`devgui.<domain>`).
 - **State:** live aus GitHub-API + Docker, keine eigene DB.
 - **Konventionen:** ESM, async/await; kein Secret in Code/Log.

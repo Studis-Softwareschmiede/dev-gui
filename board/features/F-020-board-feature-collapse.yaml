@@ -7,7 +7,7 @@ goal: 'Im Board liegen alle Features offen mit ihren Story-Spalten untereinander
   Browser (localStorage). Default "Gemischt": erledigte Features eingeklappt, aktive offen.
   Reine Frontend-/Anzeige-Verbesserung — kein Backend, kein neuer Endpunkt. Das bisherige
   Ziel/DoD-Detail-Panel wird vom Einklappen entkoppelt (eigener Schalter).'
-status: To Do
+status: Done
 priority: P2
 spec: docs/specs/board-feature-collapse.md
 definition_of_done: null

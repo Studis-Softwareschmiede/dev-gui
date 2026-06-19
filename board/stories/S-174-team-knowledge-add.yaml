@@ -1,8 +1,8 @@
 id: S-174
 parent: F-021
 title: 'Knowledge Space anlegen: Beschreibung → headless Quellen-Suche → Bestätigen → train --bootstrap'
-status: To Do
-branch: null
+status: Done
+branch: board/concepts-2026-06-19
 priority: P3
 spec: docs/specs/team-knowledge-add.md
 implements:
@@ -51,4 +51,4 @@ pr: null
 blocked_reason: null
 created_at: '2026-06-19T00:00:00Z'
 updated_at: '2026-06-19T00:00:00Z'
-done_at: null
+done_at: '2026-06-19T00:00:00Z'

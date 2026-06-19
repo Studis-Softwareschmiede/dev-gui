@@ -12,7 +12,7 @@ goal: 'Beim VPS-Erstellen fuehrt eine Region+Server-Typ-Kombination oft zu "Hetz
   und setzt bei Region-Wechsel einen ungueltigen Typ zurueck, sodass nie eine
   bekannt-ungueltige Kombi absendbar ist. Graceful: fehlt availability -> heutiges
   Verhalten (alle Typen). Korrektur/Erweiterung von F-014.'
-status: To Do
+status: Done
 priority: P1
 spec: docs/specs/vps-create-options.md
 definition_of_done: null
