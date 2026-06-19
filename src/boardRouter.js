@@ -259,8 +259,26 @@ export function boardRouter({ boardAggregator, storyMetricReader }) {
     const pr = storyEntry?.pr ?? null;
     const status = storyEntry?.status ?? null;
 
+    // Lauf-Metrik-Gate: Eine Story im Status "To Do" wurde nie gestartet und kann
+    // daher keine Lauf-Daten (Start/Ende/Dauer/Agenten-Flow) haben. Das robuste ID-Matching
+    // im StoryMetricReader (Zahl ↔ "S-###") könnte sonst alte Ledger-Zeilen einer
+    // wiederverwendeten Nummer fälschlich dieser noch nicht umgesetzten Story zuordnen.
+    // Schätzungen (ep_est/tok_est/size_est) bleiben sichtbar — sie sind Vorab-Werte, kein Lauf-Ist.
+    const notStarted = status === 'To Do';
+    const started_at = notStarted ? null : detail.started_at;
+    const duration   = notStarted ? null : detail.duration;
+    const flow       = notStarted ? [] : detail.flow;
+    if (notStarted) {
+      // Auch ein aus dem Ledger gezogenes ended_at unterdrücken (YAML-done_at gibt es bei To Do nicht).
+      ended_at = null;
+      ended_at_source = null;
+    }
+
     const enrichedDetail = {
       ...detail,
+      started_at,
+      duration,
+      flow,
       ep_est,
       tok_est,
       ep_est_source,
