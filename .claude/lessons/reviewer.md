@@ -1,5 +1,8 @@
 # Reviewer Lessons — dev-gui (newest first)
 
+## 2026-06-19 — deploymentsRouter.test.js Covers-Block updaten wenn deploymentsRouter.js neue Fehlerklassen-Handler bekommt
+Wenn `deploymentsRouter.js` einen neuen errorClass-Mapping-Branch bekommt (z.B. `vps-provisioning` → HTTP 422 mit `errorClass`-Feld), muss `deploymentsRouter.test.js` (a) einen HTTP-Ebenen-Test für diesen neuen Branch enthalten (R04: POST /api/deployments mit stub-result errorClass:vps-provisioning → 422 + errorClass im Body) und (b) den Covers-Block im Dateiheader um die neue AC/Spec-Referenz ergänzen. Fehlt beides: zwei unabhängige Befunde (R04 Important + R03 Important). Muster: der deploy()-Stub im deploymentsRouter.test.js gibt `{ result:'error', errorClass:'vps-provisioning', reason:'...' }` zurück → expect 422 + body.errorClass === 'vps-provisioning'. *[seen-in: S-179 deploymentsRouter.js Zeile 457-459 neuer vps-provisioning-Branch; deploymentsRouter.test.js enthält weder Test noch Covers-Eintrag; promoted: 2026-06-19]*
+
 ## 2026-06-17 — Covers-Block-Prüfung bei erweitertem (nicht neuem) describe-Block: selbe Lesson, anderer Trigger
 Wenn neue `it`-Blöcke für eine neue AC in einen *bestehenden* describe-Block eingefügt werden (statt einem neuen describe), gilt die Covers-Block-Lesson trotzdem: der Header muss die neue AC ergänzen. Erkennungsmuster: describe-Titel enthält nur "AC2", aber die neuen `it`-Blöcke asserten `ep_est_source` (→ AC5). Zusätzlich: wenn die gleiche AC gleichzeitig in einer zweiten Datei als *neuer* describe-Block erscheint (z.B. `BoardView.test.jsx`), dort prüfen ob die neue Spec (`story-detail-ansicht`) überhaupt im Header-Covers-Block vorkommt. Beide Lücken → Important. *[seen-in: S-144; promoted: 2026-06-17]*
 

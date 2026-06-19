@@ -8,6 +8,7 @@
  *   - Kein Secret (Private-Key, Token) in Argv/Log/Audit/Response.
  *
  * Methoden:
+ *   - probe(vps, opts?)        — Bereitschafts-Probe: { state: "unreachable"|"provisioning"|"ready" }
  *   - pull(vps, image)         — docker pull auf dem VPS
  *   - run(vps, image, hostname, opts?) — docker run mit Bindungs-Label + --restart unless-stopped
  *   - rm(vps, containerId)     — docker rm -f auf dem VPS
@@ -92,6 +93,28 @@ const DEFAULT_HOST_PORT_START = 8080;
  * @property {string}       [errorClass]  - maschinenlesbare Fehlerklasse
  */
 
+/**
+ * @typedef {'unreachable'|'provisioning'|'ready'} ProbeState
+ */
+
+/**
+ * @typedef {object} ProbeResult
+ * @property {ProbeState} state   - Bereitschaftszustand des VPS
+ * @property {string}     [reason] - neutrale, secret-freie Begründung (kein Host/Key/Token)
+ */
+
+/**
+ * Kanonischer Bereitschafts-Probe-Befehl (Spec §2, AC2/AC3).
+ * Prüft drei Bedingungen:
+ *   1. cloud-init fertig (/var/lib/cloud/instance/boot-finished)
+ *   2. Docker läuft (docker info exit 0; Fehler → /dev/null; kein DOCKER_FAILED)
+ *   3. mindestens ein cloudflared-Container mit Status "running"
+ * stdout READY → ready; stdout NOTREADY → provisioning.
+ * SSH-Fehler → unreachable (nie provisioning, nie Fehler).
+ */
+const PROBE_COMMAND =
+  'test -f /var/lib/cloud/instance/boot-finished && docker info >/dev/null 2>&1 && docker ps --filter name=cloudflared --filter status=running -q | grep -q . && echo READY || echo NOTREADY';
+
 export class VpsDockerControl {
   /** @type {import('../CredentialStore.js').CredentialStore} */
   #credentialStore;
@@ -104,6 +127,71 @@ export class VpsDockerControl {
       throw new Error('[VpsDockerControl] credentialStore ist Pflicht');
     }
     this.#credentialStore = credentialStore;
+  }
+
+  /**
+   * Readiness-Probe (AC1–AC3, AC13/vps-readiness-gate): ermittelt den Bereitschaftszustand
+   * des VPS in EINER SSH-Session mit dem kanonischen Befehl (Spec §2).
+   *
+   * Zustand:
+   *   - "ready"       — stdout enthält "READY" (cloud-init + Docker + cloudflared bereit)
+   *   - "provisioning"— stdout enthält "NOTREADY" oder unerwartetes stdout (konservativ)
+   *   - "unreachable" — SSH-Connect-Fehler / Auth-Fehler / Timeout
+   *
+   * Sicherheit (AC13):
+   *   - SSH-Private-Key store-intern, NIE in Argv/Log/Audit/Response.
+   *   - reason enthält keinen Host, Key oder Token.
+   *   - probe() wirft NIE (jeder Fehler → definierter Zustand).
+   *
+   * @param {VpsTarget} vps
+   * @param {object}    [opts]
+   * @param {string}    [opts.hostFingerprint]    - SHA-256-Fingerprint für Host-Key-Verifikation
+   * @param {Function}  [opts._sshClientFactory] - testbare SSH-Client-Fabrik (für Unit-Tests)
+   * @returns {Promise<ProbeResult>}
+   */
+  async probe(vps, opts = {}) {
+    // probe() wirft NIE — alle Fehler werden auf einen Zustand abgebildet
+    let privateKey;
+    try {
+      const loaded = await this.#loadPrivateKey(vps.targetUser);
+      if (!loaded.ok) {
+        // Kein Private-Key → VPS nicht erreichbar (kann keine SSH-Verbindung aufbauen)
+        return { state: 'unreachable', reason: 'Kein SSH-Private-Key hinterlegt' };
+      }
+      privateKey = loaded.value;
+    } catch {
+      return { state: 'unreachable', reason: 'SSH-Key-Store nicht lesbar' };
+    }
+
+    try {
+      const stdout = await runSshCommand({
+        privateKey,
+        host: vps.host,
+        port: vps.port ?? 22,
+        targetUser: vps.targetUser,
+        command: PROBE_COMMAND,
+        timeoutMs: EXEC_TIMEOUT_MS,
+        hostFingerprint: opts.hostFingerprint ?? null,
+        sshClientFactory: opts._sshClientFactory,
+      });
+
+      const trimmed = stdout.trim();
+      if (trimmed === 'READY') {
+        return { state: 'ready' };
+      }
+      // NOTREADY oder unerwartetes stdout → provisioning (konservativ: nie fälschlich ready)
+      return { state: 'provisioning', reason: 'VPS wird noch eingerichtet (cloud-init / Docker / cloudflared)' };
+    } catch (err) {
+      // SSH-Fehler: classifyError, dann unreachable oder provisioning
+      const errorClass = classifyError(err);
+      if (errorClass === 'docker-failed') {
+        // exit != 0 trotz /dev/null-Umleitung: konservativ provisioning (kein DOCKER_FAILED)
+        // (der PROBE_COMMAND selbst hat exit 0 — dieser Pfad ist eine Absicherung)
+        return { state: 'provisioning', reason: 'VPS wird noch eingerichtet (cloud-init / Docker / cloudflared)' };
+      }
+      // Connect-Fehler / Auth-Fehler / Timeout / host-key-mismatch → unreachable
+      return { state: 'unreachable', reason: 'VPS nicht erreichbar (SSH-Verbindung fehlgeschlagen)' };
+    }
   }
 
   /**

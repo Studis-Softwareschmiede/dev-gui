@@ -1,7 +1,8 @@
 id: S-179
 parent: F-024
-title: 'VpsDockerControl.probe() (drei Zustaende) + Deploy-Gate vor dem pull (errorClass vps-provisioning)'
-status: To Do
+title: VpsDockerControl.probe() (drei Zustaende) + Deploy-Gate vor dem pull (errorClass
+  vps-provisioning)
+status: Done
 priority: P1
 spec: docs/specs/vps-readiness-gate.md
 implements:
@@ -21,27 +22,33 @@ labels:
 size_est: L
 dispo_est: 5
 confidence: medium
-estimate_note: 'Heuristik-Score ~11 -> L (7 AC + ~3 Komponenten + security-Bump). L/XL =>
-  estimator-Dispatch vorgesehen (Spec metrics-estimation AC7/V7); im /flow-Lauf nachzuziehen.
-  dispo_est aus baseline.json-Lookup js|balanced|L (ep 5.0, n=5), confidence medium.
-  Inhalt: neue read-only-Operation VpsDockerControl.probe(vps, opts?) in src/deploy/VpsDockerControl.js
-  -> {state: "unreachable"|"provisioning"|"ready", reason?}. EINE SSH-Session (kanonischer Befehl:
-  test -f /var/lib/cloud/instance/boot-finished && docker info >/dev/null 2>&1 && docker ps
-  --filter name=cloudflared --filter status=running -q | grep -q . && echo READY || echo NOTREADY).
-  stdout READY->ready, NOTREADY->provisioning, SSH/Connect/Auth/Timeout->unreachable (AC2/AC3);
-  docker-info-Fehler erzeugt KEIN DOCKER_FAILED (nach /dev/null verworfen). Wiederverwendung der
-  bestehenden runSshCommand/classifyError + CONNECT_TIMEOUT_MS/EXEC_TIMEOUT_MS (keine zweite
-  Timeout-Quelle); Private-Key store-intern aus CredentialStore wie inspect/pull/ps (AC13: nie
-  in Argv/Log/Audit/Response/WS). Deploy-Gate (AC4/AC5/AC6): DeployOrchestrator.deploy()
-  (src/deploy/DeployOrchestrator.js, vor dem pull ~Zeile 149) ruft probe() auf; state != ready ->
-  kein pull/run, kein Cloudflare-Schritt, Rueckgabe {result:"error", errorClass:"vps-provisioning",
-  reason:freundlich}; state == ready -> bestehende Saga unveraendert (AC3-AC9 deploy-lifecycle).
-  Floor: kein neuer Store; probe wirft nie (jeder Fehler -> einer der drei Zustaende). Tests:
-  probe-Klassifikation (READY/NOTREADY/connect-fail/auth-fail/timeout, unerwartetes stdout->provisioning);
-  Orchestrator mit probe->provisioning/unreachable ruft pull NIE auf; probe->ready -> Saga laeuft;
-  kein Key/Token im Argv/Response/Audit. L (~5 EP) — Boundary-Operation + Orchestrator-Gate + Tests.'
-branch: null
+estimate_note: 'Heuristik-Score ~11 -> L (7 AC + ~3 Komponenten + security-Bump).
+  L/XL => estimator-Dispatch vorgesehen (Spec metrics-estimation AC7/V7); im /flow-Lauf
+  nachzuziehen. dispo_est aus baseline.json-Lookup js|balanced|L (ep 5.0, n=5), confidence
+  medium. Inhalt: neue read-only-Operation VpsDockerControl.probe(vps, opts?) in src/deploy/VpsDockerControl.js
+  -> {state: "unreachable"|"provisioning"|"ready", reason?}. EINE SSH-Session (kanonischer
+  Befehl: test -f /var/lib/cloud/instance/boot-finished && docker info >/dev/null
+  2>&1 && docker ps --filter name=cloudflared --filter status=running -q | grep -q
+  . && echo READY || echo NOTREADY). stdout READY->ready, NOTREADY->provisioning,
+  SSH/Connect/Auth/Timeout->unreachable (AC2/AC3); docker-info-Fehler erzeugt KEIN
+  DOCKER_FAILED (nach /dev/null verworfen). Wiederverwendung der bestehenden runSshCommand/classifyError
+  + CONNECT_TIMEOUT_MS/EXEC_TIMEOUT_MS (keine zweite Timeout-Quelle); Private-Key
+  store-intern aus CredentialStore wie inspect/pull/ps (AC13: nie in Argv/Log/Audit/Response/WS).
+  Deploy-Gate (AC4/AC5/AC6): DeployOrchestrator.deploy() (src/deploy/DeployOrchestrator.js,
+  vor dem pull ~Zeile 149) ruft probe() auf; state != ready -> kein pull/run, kein
+  Cloudflare-Schritt, Rueckgabe {result:"error", errorClass:"vps-provisioning", reason:freundlich};
+  state == ready -> bestehende Saga unveraendert (AC3-AC9 deploy-lifecycle). Floor:
+  kein neuer Store; probe wirft nie (jeder Fehler -> einer der drei Zustaende). Tests:
+  probe-Klassifikation (READY/NOTREADY/connect-fail/auth-fail/timeout, unerwartetes
+  stdout->provisioning); Orchestrator mit probe->provisioning/unreachable ruft pull
+  NIE auf; probe->ready -> Saga laeuft; kein Key/Token im Argv/Response/Audit. L (~5
+  EP) — Boundary-Operation + Orchestrator-Gate + Tests.'
+branch: feat/S-179-vps-probe-deploy-gate
 pr: null
 blocked_reason: null
 created_at: '2026-06-19T00:00:00Z'
-updated_at: '2026-06-19T00:00:00Z'
+updated_at: '2026-06-19T16:11:47Z'
+done_at: '2026-06-19T16:09:54Z'
+dispo_act: '7'
+tok: '5736917'
+dispo_forecast: -.2857

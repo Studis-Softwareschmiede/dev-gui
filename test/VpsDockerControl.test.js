@@ -9,6 +9,12 @@
  *         composeProject-Feld in PsEntry; interne Stack-Container haben hostname:null
  *   AC9  (vps-container-overview) — start/stop/restart/logs Methoden; Container-ID-Validierung;
  *         secret-freie Fehlerklassen
+ *   AC1  (vps-readiness-gate) — probe() exponiert Bereitschafts-Probe als VpsDockerControl-Methode
+ *   AC2  (vps-readiness-gate) — probe() führt genau eine SSH-Session mit kanonischem Befehl aus;
+ *         READY→ready, NOTREADY→provisioning, connect-fail/auth-fail/timeout→unreachable,
+ *         unerwartetes stdout→provisioning (nie fälschlich ready)
+ *   AC3  (vps-readiness-gate) — kanonischer Befehl prüft boot-finished + docker info + cloudflared
+ *   AC13 (vps-readiness-gate) — SSH-Key nie in Argv/Reason; probe() wirft NIE
  *
  * Strategie:
  *   - CredentialStore mit tmpdir + injiziertem masterKey (echter Store für Boundary-Test)
@@ -1387,5 +1393,256 @@ describe('VpsDockerControl — logs() (AC9, vps-container-overview)', () => {
     });
     expect(result.result).toBe('error');
     expect(result.reason).not.toContain(FAKE_PRIVATE_KEY);
+  });
+});
+
+// ── AC1/AC2/AC3/AC13 (vps-readiness-gate): probe() ──────────────────────────
+
+describe('VpsDockerControl — probe() (vps-readiness-gate AC1/AC2/AC3/AC13)', () => {
+  let dir, store;
+
+  beforeEach(async () => {
+    ({ store, dir } = await makeTmpStore());
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  // ── AC2: stdout READY → state:ready ──────────────────────────────────────
+
+  it('AC2 — stdout READY → state:ready', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    const result = await ctrl.probe(TEST_VPS, {
+      _sshClientFactory: makeMockSshClient({ stdout: 'READY\n', exitCode: 0 }),
+    });
+
+    expect(result.state).toBe('ready');
+    expect(result.reason).toBeUndefined();
+  });
+
+  it('AC2 — stdout READY (mit Whitespace) → state:ready (trim)', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    const result = await ctrl.probe(TEST_VPS, {
+      _sshClientFactory: makeMockSshClient({ stdout: '  READY  \n', exitCode: 0 }),
+    });
+
+    expect(result.state).toBe('ready');
+  });
+
+  // ── AC2: stdout NOTREADY → state:provisioning ─────────────────────────────
+
+  it('AC2 — stdout NOTREADY → state:provisioning', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    const result = await ctrl.probe(TEST_VPS, {
+      _sshClientFactory: makeMockSshClient({ stdout: 'NOTREADY\n', exitCode: 0 }),
+    });
+
+    expect(result.state).toBe('provisioning');
+  });
+
+  // ── AC2: unerwartetes stdout → provisioning (nie fälschlich ready) ─────────
+
+  it('AC2 — unerwartetes stdout → state:provisioning (konservativ, nie ready)', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    const result = await ctrl.probe(TEST_VPS, {
+      _sshClientFactory: makeMockSshClient({ stdout: 'some unexpected output\n', exitCode: 0 }),
+    });
+
+    expect(result.state).toBe('provisioning');
+  });
+
+  it('AC2 — leeres stdout → state:provisioning (nie fälschlich ready)', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    const result = await ctrl.probe(TEST_VPS, {
+      _sshClientFactory: makeMockSshClient({ stdout: '', exitCode: 0 }),
+    });
+
+    expect(result.state).toBe('provisioning');
+  });
+
+  // ── AC2: Connect-Fehler → state:unreachable ───────────────────────────────
+
+  it('AC2 — Connect-Fehler (ECONNREFUSED) → state:unreachable', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    const connErr = new Error('Connection refused');
+    connErr.code = 'ECONNREFUSED';
+
+    const result = await ctrl.probe(TEST_VPS, {
+      _sshClientFactory: makeMockSshClient({ connectError: connErr }),
+    });
+
+    expect(result.state).toBe('unreachable');
+  });
+
+  it('AC2 — Connect-Timeout (ETIMEDOUT) → state:unreachable', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    const timeoutErr = new Error('ETIMEDOUT');
+    timeoutErr.code = 'ETIMEDOUT';
+
+    const result = await ctrl.probe(TEST_VPS, {
+      _sshClientFactory: makeMockSshClient({ connectError: timeoutErr }),
+    });
+
+    expect(result.state).toBe('unreachable');
+  });
+
+  it('AC2 — Auth-Fehler → state:unreachable', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    const authErr = new Error('All configured authentication methods failed');
+
+    const result = await ctrl.probe(TEST_VPS, {
+      _sshClientFactory: makeMockSshClient({ connectError: authErr }),
+    });
+
+    expect(result.state).toBe('unreachable');
+  });
+
+  it('AC2 — Host-nicht-erreichbar (EHOSTUNREACH) → state:unreachable', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    const hostErr = new Error('No route to host');
+    hostErr.code = 'EHOSTUNREACH';
+
+    const result = await ctrl.probe(TEST_VPS, {
+      _sshClientFactory: makeMockSshClient({ connectError: hostErr }),
+    });
+
+    expect(result.state).toBe('unreachable');
+  });
+
+  // ── AC3: kanonischer Befehl wird verwendet ────────────────────────────────
+
+  it('AC3 — probe() verwendet genau den kanonischen Befehl (boot-finished + docker info + cloudflared)', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    let capturedCmd = null;
+    await ctrl.probe(TEST_VPS, {
+      _sshClientFactory: makeMockSshClient({
+        stdout: 'READY',
+        exitCode: 0,
+        onCommand: (cmd) => { capturedCmd = cmd; },
+      }),
+    });
+
+    // Kanonischer Befehl (Spec §2) muss enthalten:
+    expect(capturedCmd).toContain('/var/lib/cloud/instance/boot-finished');
+    expect(capturedCmd).toContain('docker info');
+    expect(capturedCmd).toContain('/dev/null');
+    expect(capturedCmd).toContain('cloudflared');
+    expect(capturedCmd).toContain('echo READY');
+    expect(capturedCmd).toContain('echo NOTREADY');
+  });
+
+  it('AC2 — probe() öffnet genau EINE SSH-Session (kein zweiter SSH-Aufruf)', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    let connectCount = 0;
+    const factory = () => {
+      const base = makeMockSshClient({ stdout: 'READY', exitCode: 0 })();
+      const origConnect = base.connect.bind(base);
+      base.connect = (cfg) => { connectCount++; origConnect(cfg); };
+      return base;
+    };
+
+    await ctrl.probe(TEST_VPS, { _sshClientFactory: () => factory() });
+
+    expect(connectCount).toBe(1);
+  });
+
+  // ── AC13/Security: kein Private-Key in Argv/Reason ───────────────────────
+
+  it('AC13 — Private-Key erscheint NICHT im probe()-Kommando (Argv)', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    let capturedCmd = null;
+    await ctrl.probe(TEST_VPS, {
+      _sshClientFactory: makeMockSshClient({
+        stdout: 'READY',
+        exitCode: 0,
+        onCommand: (cmd) => { capturedCmd = cmd; },
+      }),
+    });
+
+    expect(capturedCmd).not.toContain(FAKE_PRIVATE_KEY);
+    expect(capturedCmd).not.toContain('FAKEPRIVATE');
+  });
+
+  it('AC13 — probe()-Fehler-reason enthält keinen Private-Key (kein Secret-Leak)', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    const connErr = new Error('Connection refused');
+    connErr.code = 'ECONNREFUSED';
+
+    const result = await ctrl.probe(TEST_VPS, {
+      _sshClientFactory: makeMockSshClient({ connectError: connErr }),
+    });
+
+    expect(result.reason).not.toContain(FAKE_PRIVATE_KEY);
+    expect(result.reason).not.toContain('FAKEPRIVATE');
+  });
+
+  it('AC13 — probe() wirft NIE (kein Private-Key → unreachable statt Throw)', async () => {
+    // Kein Key im Store → probe() gibt unreachable zurück (wirft nicht)
+    const ctrl = new VpsDockerControl(store); // leerer Store
+    const result = await ctrl.probe(TEST_VPS);
+    expect(result.state).toBe('unreachable');
+    expect(result).toHaveProperty('state');
+  });
+
+  it('AC13 — probe() reason enthält keinen Host, kein Token (nur neutrale Meldung)', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    const result = await ctrl.probe(TEST_VPS, {
+      _sshClientFactory: makeMockSshClient({ stdout: 'NOTREADY', exitCode: 0 }),
+    });
+
+    expect(result.state).toBe('provisioning');
+    // reason darf Host-IP nicht enthalten
+    if (result.reason) {
+      expect(result.reason).not.toContain('1.2.3.4');
+      expect(result.reason).not.toContain(FAKE_PRIVATE_KEY);
+    }
+  });
+
+  // ── AC2: Docker-Info-Fehler erzeugt kein DOCKER_FAILED / keinen state:error ─
+
+  it('AC2 — docker info exit != 0 (aber /dev/null-umgeleitet) → provisioning, kein DOCKER_FAILED', async () => {
+    // Der Probe-Befehl hat >/dev/null 2>&1 für docker info; das bedeutet exit 0 des Befehls
+    // und stdout NOTREADY. Dieser Test bestätigt, dass ein exit-Code 0 mit NOTREADY-stdout
+    // zu provisioning führt (nicht zu einem Fehler-State).
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    // Simuliert: cloud-init fertig, docker info fehlgeschlagen (exit 0 des Skripts = NOTREADY)
+    const result = await ctrl.probe(TEST_VPS, {
+      _sshClientFactory: makeMockSshClient({ stdout: 'NOTREADY\n', exitCode: 0 }),
+    });
+
+    expect(result.state).toBe('provisioning');
+    // KEIN error-state, kein DOCKER_FAILED (AC2)
+    expect(result.state).not.toBe('error');
   });
 });
