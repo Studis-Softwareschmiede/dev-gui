@@ -19,12 +19,15 @@
  *   AC5 — UI sperrt Create-Button wenn kein Label mit Public-Key vorhanden ist
  *          oder eine Rolle kein Label zugeordnet hat.
  *
- * Implements: vps-create-options AC6–AC10 (Server-Typ/Region-Dropdowns mit Kosten)
+ * Implements: vps-create-options AC6–AC12 (Server-Typ/Region/Image-Dropdowns mit Kosten)
  *   AC6  — Bei Provider hetzner: Region + Server-Typ als Dropdowns aus Live-Listen.
  *   AC7  — Server-Typ-Dropdown zeigt Specs + Kosten; Preis folgt gewählter Region.
  *   AC8  — Fehlende Preise → „Preis unbekannt"; deprecated Typen nicht wählbar.
  *   AC9  — Graceful Degradation: Fehler/optionsAvailable:false → Freitext-Fallback.
  *   AC10 — Kein Hetzner-Token im Frontend-Bundle/Log; Create-Payload unverändert.
+ *   AC11 — Bei Provider hetzner: Image-Feld als Dropdown aus System-Images; Default Ubuntu 26.04
+ *          (falls vorhanden, sonst LTS-Fallback ubuntu-24.04). Auswahl setzt image=name.
+ *   AC12 — Fehler/keine Quelle → Image-Feld bleibt Freitext mit Default-Hinweis Ubuntu 26.04.
  *
  * Implements: vps-container-overview AC1–AC7 (Container-Übersicht)
  *   AC1 — Container-Button je VPS-Zeile; Klick öffnet Übersicht + Listing-Fetch.
@@ -820,21 +823,29 @@ function VpsCreateForm({ providers, sshLabels, onCreated, onCancel }) {
   const ERROR_ID = 'vps-create-error';
   const OPTIONS_STATUS_ID = 'vps-create-options-status';
 
-  // ── vps-create-options AC6–AC10: Options-State ──────────────────────────────
+  // ── vps-create-options AC6–AC12: Options-State ──────────────────────────────
   // 'idle' | 'loading' | 'ok' | 'fallback'
   const [optionsState, setOptionsState] = useState('idle');
   const [locations, setLocations] = useState([]);    // HetznerLocationOption[]
   const [serverTypes, setServerTypes] = useState([]); // HetznerServerTypeOption[]
+  const [images, setImages] = useState([]);           // HetznerImageOption[] (AC11)
 
-  // Optionen laden wenn Provider "hetzner" gewählt (AC6)
+  // LTS-Fallback-Slug (UBUNTU_26_04_SLUG — analog hetzner.js Backend)
+  // Wird als Default-Vorauswahl im Image-Dropdown genutzt wenn ubuntu-26.04 noch nicht verfügbar.
+  const UBUNTU_26_04_SLUG = 'ubuntu-26.04';
+  const UBUNTU_LTS_FALLBACK_SLUG = 'ubuntu-24.04';
+
+  // Optionen laden wenn Provider "hetzner" gewählt (AC6/AC11)
   useEffect(() => {
     if (provider !== 'hetzner') {
-      // Nicht-Hetzner: Freitext-Fallback (AC9)
+      // Nicht-Hetzner: Freitext-Fallback (AC9/AC12)
       setOptionsState('idle');
       setLocations([]);
       setServerTypes([]);
+      setImages([]);
       setRegion('');
       setServerType('');
+      setImage('');
       return;
     }
     let cancelled = false;
@@ -848,31 +859,51 @@ function VpsCreateForm({ providers, sshLabels, onCreated, onCancel }) {
         // Wenn alle Typen deprecated sind → Freitext-Fallback (kein leeres Dropdown)
         if (activeTypes.length === 0) {
           setServerTypes([]);
+          setImages([]);
           setRegion('');
           setServerType('');
+          setImage('');
           setOptionsState('fallback');
         } else {
           setServerTypes(activeTypes);
           // Vorauswahl: erste Location + erster Typ
           setRegion((prev) => prev || data.locations[0]?.name || '');
           setServerType((prev) => prev || activeTypes[0]?.name || '');
+
+          // AC11: System-Images laden und Default-Vorauswahl Ubuntu 26.04 setzen
+          const availableImages = Array.isArray(data.images) ? data.images : [];
+          setImages(availableImages);
+          if (availableImages.length > 0) {
+            // Default-Vorauswahl: ubuntu-26.04 bevorzugt, sonst ubuntu-24.04, sonst erstes Image
+            const ubuntu2604 = availableImages.find((img) => img.name === UBUNTU_26_04_SLUG);
+            const ubuntuLts = availableImages.find((img) => img.name === UBUNTU_LTS_FALLBACK_SLUG);
+            const defaultImg = ubuntu2604 ?? ubuntuLts ?? availableImages[0];
+            setImage((prev) => prev || defaultImg?.name || '');
+          } else {
+            setImage('');
+          }
+
           setOptionsState('ok');
         }
       } else {
-        // optionsAvailable:false oder Fehler → Freitext-Fallback (AC9)
+        // optionsAvailable:false oder Fehler → Freitext-Fallback (AC9/AC12)
         setOptionsState('fallback');
         setLocations([]);
         setServerTypes([]);
+        setImages([]);
         setRegion('');
         setServerType('');
+        setImage('');
       }
     }).catch(() => {
       if (cancelled) return;
       setOptionsState('fallback');
       setLocations([]);
       setServerTypes([]);
+      setImages([]);
       setRegion('');
       setServerType('');
+      setImage('');
     });
     return () => { cancelled = true; };
   }, [provider]);
@@ -1090,21 +1121,50 @@ function VpsCreateForm({ providers, sshLabels, onCreated, onCancel }) {
         )}
       </div>
 
-      {/* Image (optional) — bleibt Freitext (S-163) */}
+      {/* Image — Dropdown (hetzner+ok+images) oder Freitext-Fallback (AC11/AC12) */}
       <div style={createStyles.field}>
         <label htmlFor="vps-create-image" style={createStyles.label}>
           Image <span style={createStyles.optional}>(optional)</span>
         </label>
-        <input
-          id="vps-create-image"
-          type="text"
-          value={image}
-          onChange={(e) => setImage(e.target.value)}
-          placeholder="Default: Ubuntu 26.04 LTS"
-          style={createStyles.input}
-          autoComplete="off"
-          disabled={submitting}
-        />
+        {optionsState === 'loading' ? (
+          <p style={createStyles.optionsLoading} aria-live="polite">
+            Lade verfügbare Images…
+          </p>
+        ) : useDropdowns && images.length > 0 ? (
+          <select
+            id="vps-create-image"
+            value={image}
+            onChange={(e) => setImage(e.target.value)}
+            style={createStyles.select}
+            aria-required="false"
+            disabled={submitting}
+          >
+            <option value="">— Default (Ubuntu 26.04 LTS) —</option>
+            {images.map((img) => (
+              <option key={img.name} value={img.name}>
+                {img.description || img.name}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <>
+            <input
+              id="vps-create-image"
+              type="text"
+              value={image}
+              onChange={(e) => setImage(e.target.value)}
+              placeholder="Default: Ubuntu 26.04 LTS"
+              style={createStyles.input}
+              autoComplete="off"
+              disabled={submitting}
+            />
+            {optionsState === 'fallback' && (
+              <p style={createStyles.optionsFallbackHint} aria-live="polite">
+                Live-Optionen nicht verfügbar — bitte Image manuell eingeben.
+              </p>
+            )}
+          </>
+        )}
       </div>
 
       {/* SSH-Key-Zuordnung — AC1/AC2 */}
