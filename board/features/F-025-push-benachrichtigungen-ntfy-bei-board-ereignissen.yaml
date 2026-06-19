@@ -3,7 +3,7 @@ title: Push-Benachrichtigungen (ntfy) bei Board-Ereignissen
 goal: Owner erhält Push auf Handy/Uhr via ntfy, wenn eine Story Done (o.a. konfigurierte
   Ereignisse) wird; konfigurierbar in den Einstellungen; Auslöser als Watcher in der
   dev-gui.
-status: Backlog
+status: Done
 priority: P2
 spec: docs/specs/push-notifications.md
 definition_of_done: null
@@ -17,6 +17,7 @@ stories:
 - S-182
 - S-183
 - S-184
-progress: 0/3 done
+progress: 3/3 done
 created_at: '2026-06-19T15:39:05Z'
-updated_at: '2026-06-19T15:39:54Z'
+updated_at: '2026-06-19T18:12:02Z'
+done_at: '2026-06-19T18:12:02Z'
