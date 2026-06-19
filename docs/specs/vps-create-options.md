@@ -2,7 +2,7 @@
 id: vps-create-options
 title: VPS-Create-Formular — Live-Dropdowns (Typ/Region/Image) mit Kosten + Tunnel-Rollback
 status: draft
-version: 1
+version: 2
 ---
 
 # Spec: VPS-Create-Formular — Live-Dropdowns mit Kosten (`vps-create-options`)
@@ -20,7 +20,10 @@ Das Create-Formular der VPS-Ansicht („Neuen Server erstellen", [[view-vps]] AC
   - `GET /v1/server_types?per_page=60` → Felder je Typ: `name, cores, memory, disk, deprecated, prices[]`; je `prices`-Eintrag: `{ location, price_monthly{net,gross}, price_hourly{net,gross} }`.
   - `GET /v1/locations` → `name, network_zone, city, country`.
   - `GET /v1/images?type=system&per_page=60` → `name, description, os_flavor, os_version`.
+  - `GET /v1/datacenters` → je Datacenter `name, location{name,…}, server_types{available[<id>], supported[], available_for_migration[]}` — **autoritative** Bereitstellbarkeit (Story E/F).
 - Beim Create legt `VpsProviderRegistry.create()` ZUERST den Cloudflare-Tunnel an (`#provisionTunnel`) und ruft DANN `adapter.create()`. Scheitert der Server-Schritt, bleibt der Tunnel verwaist (real beobachtet: Tunnel `devgui-testserver` blieb übrig).
+- **Live gefundene Lücke (2026-06-19, gegen Hetzner-API verifiziert) — begründet Story E/F:** Region+Server-Typ-Kombinationen, die das Formular anbietet, sind oft **nicht bereitstellbar** → Hetzner antwortet beim Create mit `unsupported location for server type` (z.B. `fsn1` + `cpx11`). Ursache: Die heutige Anzeige (Story A/B) leitet Verfügbarkeit implizit aus `server_types.prices[].location` ab — das ist **falsch/irreführend**: `cpx11` hat einen `fsn1`-**Preis** hinterlegt, ist laut `/v1/datacenters` in `fsn1` aber **nicht bereitstellbar** (cpx11 nur in `ash` + `hil`). Ein Preis-Eintrag ≠ Bereitstellbarkeit.
+- **Autoritative Verfügbarkeits-Quelle:** `GET /v1/datacenters` → je Datacenter `{ name, location: { name, … }, server_types: { available: [<server_type_id>, …], supported: [...], available_for_migration: [...] } }`. `server_types.available` ist die Menge der server-type-**IDs**, die in diesem Datacenter **bereitstellbar** sind; `datacenter.location.name` ordnet das Datacenter einer Location zu. Eine Location kann **mehrere** Datacenters haben → pro Location die **Vereinigung (Union)** der `available`-Listen bilden. Beispiel-Befund: `fsn1-dc14.available = ccx13..ccx63, cpx22, cpx32, cpx42, cpx52, cpx62` (KEIN cpx11/cx33); `hel1` zusätzlich `cx33/cx43/cx53`; `ash`/`hil` `cpx11`..`cpx51`. server-type-IDs werden über die bereits in Story A geladenen `server_types` (`{ id, name }`) auf **Namen** gemappt, damit Frontend/Vertrag mit Typ-`name` (nicht-ID) arbeiten.
 
 ## Verhalten
 
@@ -50,6 +53,16 @@ Das Create-Formular der VPS-Ansicht („Neuen Server erstellen", [[view-vps]] AC
 17. Das Rollback ist **best-effort + idempotent**: schlägt das Tunnel-Cleanup selbst fehl, maskiert das **nicht** den ursprünglichen Create-Fehler (dieser wird weiterhin propagiert), und der Cleanup-Fehler wird klar protokolliert/auditiert (kein Token im Log). Wurde kein Tunnel angelegt (`#provisionTunnel` = `null`, z.B. Cloudflare nicht konfiguriert), entfällt das Rollback.
 18. Nach erfolgreichem Rollback existiert **kein** verwaister Tunnel und **keine** verwaiste Tunnel-Token-/Tunnel-ID-Credential-Referenz für den fehlgeschlagenen Create.
 
+### Backend — Region-Verfügbarkeits-Map aus `/v1/datacenters` (Story E)
+19. Der Options-Endpunkt liefert für `hetzner` zusätzlich eine **autoritative Verfügbarkeits-Map** `availability: { <location-name>: [<server-type-name>, …] }`. Sie wird aus `GET /v1/datacenters` gebildet, **nicht** aus `prices[].location`. Ein neuer `HetznerAdapter`-Aufruf (`listDatacenters(token)`, Boundary/ADR-009 — selbe `#apiGet`-/Timeout-/Bearer-/Sanitize-Disziplin) holt die Datacenters; alle Hetzner-Calls bleiben im Adapter.
+20. Die Map wird je **Location** als **Vereinigung** der `server_types.available`-Listen aller Datacenters dieser Location (`datacenter.location.name`) gebildet; die server-type-**IDs** werden über die in Story A geladenen `server_types` (`{ id, name }`) auf **Namen** gemappt. IDs ohne Name-Match werden ausgelassen (kein Fehler). Pro Location-Eintrag sind die Typ-Namen **dedupliziert**.
+21. **Graceful Degradation (kein Hard-Fail):** Schlägt `GET /v1/datacenters` fehl (Auth/Netz/Timeout) oder ist die Antwort leer/unbrauchbar, wird `availability` **weggelassen oder leer** geliefert — die übrigen Optionen (`serverTypes`/`locations`/`images`) bleiben unverändert nutzbar, und das Frontend fällt für die Filterung auf das heutige Verhalten (alle Typen) zurück. Der Hetzner-Token bleibt store-intern (kein Token-Leak in `availability`/Response/Log).
+
+### Frontend — region-gefiltertes Server-Typ-Dropdown (Story F)
+22. **Region zuerst → Typen filtern (verbindliche UX):** Ist eine Region gewählt und liegt `availability[region]` vor, zeigt das Server-Typ-Dropdown ([[#Frontend — Typ/Region-Dropdowns mit Kosten (Story B)]], AC6/AC7) **nur** die in `availability[region]` enthaltenen Typen. Typen, die in der Region nicht bereitstellbar sind, erscheinen **nicht** als wählbare Option. (Kein beidseitiges Filtern — die Region steuert die Typen-Liste, nicht umgekehrt.)
+23. **Kein ungültiger Submit bei Region-Wechsel:** Wechselt der Nutzer die Region und der aktuell gewählte Server-Typ ist in der neuen Region **nicht** verfügbar (`!availability[neueRegion].includes(serverType)`), wird die Typ-Auswahl **zurückgesetzt** (auf „kein Typ gewählt" oder den ersten gültigen Typ vorausgewählt), sodass nie eine bekannt-ungültige Region+Typ-Kombination absendbar ist. Bei verbleibender Verfügbarkeit bleibt die Typ-Wahl erhalten.
+24. **Graceful Fallback:** Fehlt `availability` ganz (Story-E-Degradation, AC21) oder fehlt der Eintrag für die gewählte Region, wird **ungefiltert** gerendert (heutiges Story-B-Verhalten — alle nicht-deprecated Typen wählbar). Behebt nebenbei den „Preis unbekannt"-Fall für `fsn1`+`cpx11`-artige Kombis, da bei vorhandener `availability` nur Typen mit Region-Preis erscheinen. Floor unverändert: kein Token im Bundle/Log, Create-Payload (`region`/`serverType`/`image` + SSH-Label-Referenzen) unverändert; eine angebotene Region+Typ-Kombination führt **nicht** mehr zu `unsupported location for server type`.
+
 ## Acceptance-Kriterien
 
 ### Story A — Backend Hetzner-Options-Endpunkt
@@ -74,17 +87,28 @@ Das Create-Formular der VPS-Ansicht („Neuen Server erstellen", [[view-vps]] AC
 - **AC13** — Wirft `adapter.create()`, nachdem ein Tunnel angelegt wurde, entfernt `VpsProviderRegistry.create()` den Tunnel (`CloudflareApi.deleteTunnel(tunnelId)`) und räumt die Tunnel-Token-/Tunnel-ID-Credential-Referenzen auf (analog `#cleanupTunnel`, S-153). Wurde kein Tunnel angelegt, entfällt das Rollback.
 - **AC14** — Das Rollback ist best-effort + idempotent: ein fehlschlagendes Cleanup maskiert **nicht** den ursprünglichen Create-Fehler (Original-Fehler wird propagiert), und der Cleanup-Fehler wird token-frei protokolliert/auditiert. Nach erfolgreichem Rollback existiert kein verwaister Tunnel und keine verwaiste Tunnel-Credential-Referenz.
 
+### Story E — Backend Region-Verfügbarkeits-Map aus `/v1/datacenters`
+- **AC15** — Der Options-Endpunkt liefert für konfiguriertes+erreichbares `hetzner` zusätzlich `availability: { <location-name>: [<server-type-name>, …] }`, gebildet aus `GET /v1/datacenters` (autoritativ), **nicht** aus `prices[].location`. Der Datacenters-Call erfolgt ausschließlich im `HetznerAdapter` (`listDatacenters(token)`); Grep-prüfbar keine `api.hetzner.cloud`-URL außerhalb `src/vps/providers/hetzner.js`.
+- **AC16** — Pro Location ist der Wert die **Vereinigung** der `server_types.available`-Listen aller Datacenters mit dieser `location.name`, mit server-type-**ID→Name**-Mapping über die geladenen `server_types` und **deduplizierten** Namen. Verifikationsbeispiel: `availability["fsn1"]` enthält `cpx22`, **nicht** `cpx11`; `availability["ash"]` (bzw. `hil`) enthält `cpx11`; IDs ohne Name-Match werden ausgelassen (kein Fehler).
+- **AC17** — **Graceful (kein Hard-Fail):** Schlägt `/v1/datacenters` fehl oder ist die Antwort leer/unbrauchbar, wird `availability` weggelassen/leer geliefert und `serverTypes`/`locations`/`images` bleiben vollständig nutzbar; der Hetzner-Token erscheint nicht in `availability`/Response/Log.
+
+### Story F — Frontend region-gefiltertes Server-Typ-Dropdown
+- **AC18** — Bei gewählter Region und vorhandenem `availability[region]` zeigt das Server-Typ-Dropdown **nur** die in `availability[region]` enthaltenen Typen; in der Region nicht bereitstellbare Typen sind nicht wählbar (Region steuert die Typen-Liste, kein beidseitiges Filtern).
+- **AC19** — Wechselt die Region und der gewählte `serverType` ist in `availability[neueRegion]` **nicht** enthalten, wird die Typ-Auswahl zurückgesetzt (kein Typ bzw. erster gültiger vorausgewählt); eine bekannt-ungültige Region+Typ-Kombination ist nie absendbar. Bleibt der Typ verfügbar, bleibt die Wahl erhalten.
+- **AC20** — **Graceful Fallback:** Fehlt `availability` ganz oder fehlt der Eintrag für die gewählte Region, wird ungefiltert gerendert (heutiges Story-B-Verhalten). Floor unverändert (kein Token im Bundle/Log, AccessGuard, Create-Payload unverändert); eine vom Formular angebotene Region+Typ-Kombination führt nicht mehr zu `unsupported location for server type`.
+
 ## Verträge
 > Pfad/Felder kanonisch; konkreter Routen-Slug und Adapter-Methodennamen sind `coder`-Detail (an bestehende Konventionen anschließen). Vorschlag: `GET /api/vps/providers/:provider/options`.
 
 - **GET `/api/vps/providers/:provider/options`** (read-only, hinter AccessGuard) →
-  - für `hetzner` konfiguriert+erreichbar: `200 { provider: "hetzner", serverTypes: HetznerServerTypeOption[], locations: HetznerLocationOption[], images: HetznerImageOption[] }`
+  - für `hetzner` konfiguriert+erreichbar: `200 { provider: "hetzner", serverTypes: HetznerServerTypeOption[], locations: HetznerLocationOption[], images: HetznerImageOption[], availability?: HetznerAvailabilityMap }`
   - für Provider ohne Optionen-Quelle: `200 { provider, optionsAvailable: false, reason }` (Frontend → Freitext-Fallback)
   - Hetzner nicht konfiguriert / API-Fehler: klares token-freies Signal (z.B. `200 { optionsAvailable: false, reason }` oder `502 { error, errorClass }`) — `coder` wählt konsistent zum bestehenden Degradations-Muster; das Frontend behandelt **jedes** Nicht-Erfolg-Ergebnis als Freitext-Fallback (AC9/AC12).
 - **`HetznerServerTypeOption`** = `{ name, cores, memory, disk, deprecated?: boolean, prices: [{ location, priceMonthly?: { net?, gross? }, priceHourly?: { net?, gross? } }] }` (fehlende Preisfelder → weggelassen/`null`).
 - **`HetznerLocationOption`** = `{ name, networkZone, city, country }`.
 - **`HetznerImageOption`** = `{ name, description, osFlavor, osVersion }`.
-- **Neue `HetznerAdapter`-Methoden** (Boundary, ADR-009): z.B. `listServerTypes(token)`, `listLocations(token)`, `listSystemImages(token)` — selbe `#apiGet`-/Timeout-/Token-Header-/Sanitize-Disziplin wie die bestehenden Methoden (Bearer-Header, nie URL/Log/Response).
+- **`HetznerAvailabilityMap`** = `{ [locationName: string]: string[] }` — je Location die deduplizierte Liste der dort **bereitstellbaren** server-type-Namen (Union der `server_types.available` aller Datacenters der Location, ID→Name-gemappt). Optional: fehlt bei Datacenters-Degradation (AC17); das Frontend behandelt fehlende Map / fehlende Location als ungefiltert (AC20).
+- **Neue `HetznerAdapter`-Methoden** (Boundary, ADR-009): z.B. `listServerTypes(token)`, `listLocations(token)`, `listSystemImages(token)`, **`listDatacenters(token)`** (`GET /v1/datacenters`, liefert je Datacenter mindestens `{ location: { name }, server_types: { available: number[] } }`) — selbe `#apiGet`-/Timeout-/Token-Header-/Sanitize-Disziplin wie die bestehenden Methoden (Bearer-Header, nie URL/Log/Response).
 - **Create-Vertrag unverändert:** `POST /api/vps/machines/:provider` Body `{ name, region, serverType, image?, sshKeyAssignment }` ([[vps-provider-boundary]] AC7). Diese Spec ändert nur, **wie** `region`/`serverType`/`image` im UI gewählt werden, nicht das Create-Schema.
 - **Tunnel-Rollback** nutzt die bestehenden Registry-Bausteine: `#provisionTunnel` (liefert `{ tunnelId, tunnelToken } | null`), `CloudflareApi.deleteTunnel(tunnelId)`, `CredentialStore.delete(TUNNEL_TOKEN_KEY/TUNNEL_ID_KEY)` — kein neuer öffentlicher Endpunkt.
 
@@ -97,6 +121,11 @@ Das Create-Formular der VPS-Ansicht („Neuen Server erstellen", [[view-vps]] AC
 - Optionen-Endpunkt-Timeout → wie API-Fehler behandelt (Freitext-Fallback).
 - `adapter.create()`-Fehler nach Tunnel-Anlage → Tunnel-Rollback (AC13); Rollback-Fehler maskiert Original-Fehler nicht (AC14).
 - Aufruf ohne Access-Cookie → Access-Mauer greift davor (AC2).
+- `/v1/datacenters` schlägt fehl / liefert leer → `availability` weggelassen, Frontend filtert nicht (AC17/AC20); übrige Optionen unverändert.
+- Location ohne Datacenters-Eintrag (oder `availability[region]` fehlt) → Frontend rendert Typen ungefiltert für diese Region (AC20).
+- server-type-ID in `available` ohne Name-Match in `server_types` → wird ausgelassen, kein Fehler (AC16).
+- Region-Wechsel auf Region, in der der gewählte Typ nicht bereitstellbar ist → Typ-Auswahl-Reset, kein ungültiger Submit (AC19).
+- `prices[]` listet eine Location für einen Typ, der laut `availability` dort NICHT bereitstellbar ist (z.B. `cpx11`+`fsn1`) → Typ erscheint dort dank `availability`-Filter nicht (Wurzel der Live-Lücke, AC18).
 
 ## NFRs
 - **Sicherheit (Floor, hart):** Hetzner-Token bleibt store-intern, **nie** in Response/Log/Audit/WS/Argv/Frontend-Bundle ([[vps-provider-boundary]] AC10). Nur abgeleitete Listen/Preise gehen an den Client. Der Optionen-Endpunkt ist read-only und ändert keinen Server-/Tunnel-Zustand.

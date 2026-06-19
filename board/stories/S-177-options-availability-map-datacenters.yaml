@@ -1,0 +1,38 @@
+id: S-177
+parent: F-023
+title: 'Options-Endpunkt: availability-Map aus /v1/datacenters (autoritative Region->Server-Typen) + HetznerAdapter.listDatacenters'
+status: To Do
+priority: P1
+spec: docs/specs/vps-create-options.md
+implements:
+- AC15
+- AC16
+- AC17
+depends:
+- S-161
+labels:
+- vps
+- hetzner
+- backend
+- security
+size_est: S
+dispo_est: 2
+confidence: high
+estimate_note: 'Backend-Erweiterung des Options-Pfads aus S-161 (GET /api/vps/providers/:provider/options).
+  Neue HetznerAdapter-Methode listDatacenters(token) in src/vps/providers/hetzner.js (GET /v1/datacenters)
+  mit derselben #apiGet-/AbortController-Timeout-/Bearer-Header-/sanitizeMsg-Disziplin wie list/listServerTypes
+  — Token nie in URL/Log/Response (R01/ADR-009: keine api.hetzner.cloud-URL ausserhalb des Adapters).
+  Datacenter-Felder: { name, location:{name}, server_types:{available:[<id>]} }. Registry/Router bildet aus
+  den Datacenters eine availability-Map { <location-name>: [<server-type-name>] }: pro location.name die
+  Vereinigung (Union) der server_types.available aller Datacenters dieser Location, server-type-ID->Name
+  gemappt ueber die bereits geladenen server_types ({id,name}); deduplizieren; IDs ohne Name-Match auslassen
+  (kein Fehler). availability autoritativ aus /v1/datacenters, NICHT aus prices[].location. Antwort fuer
+  hetzner: 200 {...serverTypes, locations, images, availability?}. Graceful (kein Hard-Fail): /v1/datacenters
+  fehlgeschlagen/leer -> availability weglassen/leer, serverTypes/locations/images bleiben vollstaendig; Token
+  bleibt store-intern (kein Leak in availability/Response/Log). Tests (gemockter fetch/Adapter): availability
+  korrekt als Union je Location mit ID->Name-Mapping (Beispiel: fsn1 enthaelt cpx22, NICHT cpx11; ash/hil
+  enthaelt cpx11); deduplizierte Namen; ID ohne Name-Match ausgelassen; /v1/datacenters-Fehler -> availability
+  weg, restliche Optionen unveraendert (kein 500); KEIN Token in Response/Log; Grep: keine Hetzner-URL ausserhalb
+  des Adapters. S (~2 EP) — eine Adapter-Methode + Map-Aggregation + Degradation, haengt an S-161.'
+created_at: '2026-06-19T00:00:00Z'
+updated_at: '2026-06-19T00:00:00Z'
