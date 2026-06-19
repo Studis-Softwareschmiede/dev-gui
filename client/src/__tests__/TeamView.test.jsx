@@ -1,6 +1,8 @@
 /**
  * TeamView.test.jsx — Unit tests for TeamView component (team-view-frontend).
  *
+ * @file Scope: client/src/TeamView.jsx
+ *
  * Covers (team-view-frontend):
  *   - AC3: Mount calls GET /api/team exactly once; grouped list AGENTEN/SKILLS/KNOWLEDGE;
  *          Knowledge grouped by `group` with stable sort (group first, name second);
@@ -49,6 +51,12 @@
  *           buttons with visible focus ring and loadDetail(kind,id) click behaviour.
  *   - AC11: All EntityIcons are aria-hidden; no new fetch calls; no new data fields consumed;
  *           existing tests stay green.
+ *
+ * Covers (team-train-trigger — S-175):
+ *   NOTE: Haupttests für team-train-trigger sind in TrainDialog.test.jsx; hier nur
+ *   Regressions-Sicherung für bestehende Tests (TeamView-Kern bleibt grün).
+ *   AC1  — Train-Button vorhanden (smoke): vollständige Tests in TrainDialog.test.jsx.
+ *   AC2–AC11 — in TrainDialog.test.jsx.
  *
  * @jest-environment jsdom
  */

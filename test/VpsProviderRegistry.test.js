@@ -26,6 +26,13 @@
  *   AC9  — cloudflare-not-configured → Create ohne Tunnel, kein Crash
  *   AC10 — Token bleibt im CredentialStore auch wenn VPS-Start-Fehler (Persistenz-Reihenfolge)
  *
+ * Covers (vps-create-options AC15–AC17 / S-177):
+ *   AC15 — getProviderOptions('hetzner') ruft listDatacenters(token) im Adapter auf
+ *   AC16 — availability-Map korrekt als Union je Location mit ID→name-Mapping gebaut;
+ *           dedupliziert; ID ohne Match ausgelassen; Beispiel fsn1→cpx22 nicht cpx11
+ *   AC17 — Graceful: listDatacenters-Fehler → availability weggelassen, Rest vollständig;
+ *           Token erscheint nicht in availability/Response
+ *
  * Strategy:
  *   - CredentialStore wird als Stub injiziert
  *   - Adapter werden als Stubs injiziert (kein echter Fetch)
@@ -1017,5 +1024,199 @@ describe('VpsProviderRegistry — S-161: getProviderOptions()', () => {
     const store = makeCredentialStore({});
     const registry = new VpsProviderRegistry({ credentialStore: store });
     expect(await registry.getProviderOptions('hetzner')).toEqual({ optionsAvailable: false });
+  });
+});
+
+// ── S-177 AC15–AC17: getProviderOptions() + availability-Map ─────────────────
+
+describe('VpsProviderRegistry — S-177 AC15–AC17: availability-Map in getProviderOptions()', () => {
+  /**
+   * Baut einen Hetzner-Adapter-Stub mit listDatacenters-Unterstützung.
+   * serverTypesWithIds enthält {id, name, ...} wie der echte Adapter jetzt liefert (AC16).
+   */
+  function makeHetznerAdapterWithDatacenters({ serverTypesWithIds, datacenters, datacenterError } = {}) {
+    return {
+      ...makeAdapter(),
+      listServerTypes: async () => serverTypesWithIds ?? [
+        { id: 22, name: 'cpx22', cores: 2, memory: 4, disk: 40, prices: [] },
+        { id: 32, name: 'cpx32', cores: 3, memory: 8, disk: 80, prices: [] },
+        { id: 11, name: 'cpx11', cores: 1, memory: 2, disk: 20, prices: [] },
+      ],
+      listLocations: async () => [{ name: 'fsn1', networkZone: 'eu-central' }],
+      listImages: async () => [{ name: 'ubuntu-26.04' }],
+      listDatacenters: async () => {
+        if (datacenterError) throw datacenterError;
+        return datacenters ?? [
+          // fsn1-dc14: cpx22 (id=22) + cpx32 (id=32), KEIN cpx11
+          { locationName: 'fsn1', availableIds: [22, 32] },
+          // hel1-dc2: cpx22 (id=22)
+          { locationName: 'hel1', availableIds: [22] },
+          // ash: cpx11 (id=11) + cpx22 (id=22)
+          { locationName: 'ash', availableIds: [11, 22] },
+        ];
+      },
+    };
+  }
+
+  it('AC15 — getProviderOptions ruft listDatacenters(token) im Adapter auf', async () => {
+    let datacentersCalled = false;
+    const store = makeCredentialStore({ hetzner: MOCK_TOKEN });
+    const registry = new VpsProviderRegistry({
+      credentialStore: store,
+      adapters: {
+        hetzner: {
+          ...makeAdapter(),
+          listServerTypes: async () => [],
+          listLocations: async () => [],
+          listImages: async () => [],
+          listDatacenters: async (_token) => {
+            datacentersCalled = true;
+            return [];
+          },
+        },
+        ionos: makeAdapter(),
+        hostinger: makeAdapter(),
+      },
+    });
+    await registry.getProviderOptions('hetzner');
+    expect(datacentersCalled).toBe(true);
+  });
+
+  it('AC16 — availability-Map: Union je Location, ID→name-Mapping, korrekte Beispiele', async () => {
+    const store = makeCredentialStore({ hetzner: MOCK_TOKEN });
+    const registry = new VpsProviderRegistry({
+      credentialStore: store,
+      adapters: {
+        hetzner: makeHetznerAdapterWithDatacenters(),
+        ionos: makeAdapter(),
+        hostinger: makeAdapter(),
+      },
+    });
+    const opts = await registry.getProviderOptions('hetzner');
+    expect(opts.optionsAvailable).toBe(true);
+    expect(opts.availability).toBeDefined();
+
+    // AC16-Verifikationsbeispiel aus der Spec:
+    // fsn1 enthält cpx22 — NICHT cpx11 (cpx11 nur in ash/hil)
+    expect(opts.availability.fsn1).toContain('cpx22');
+    expect(opts.availability.fsn1).toContain('cpx32');
+    expect(opts.availability.fsn1).not.toContain('cpx11');
+
+    // ash enthält cpx11
+    expect(opts.availability.ash).toContain('cpx11');
+    expect(opts.availability.ash).toContain('cpx22');
+
+    // hel1 enthält nur cpx22
+    expect(opts.availability.hel1).toContain('cpx22');
+    expect(opts.availability.hel1).not.toContain('cpx11');
+  });
+
+  it('AC16 — Union über mehrere Datacenters einer Location (Deduplizierung)', async () => {
+    const store = makeCredentialStore({ hetzner: MOCK_TOKEN });
+    const registry = new VpsProviderRegistry({
+      credentialStore: store,
+      adapters: {
+        hetzner: makeHetznerAdapterWithDatacenters({
+          serverTypesWithIds: [
+            { id: 22, name: 'cpx22', cores: 2, memory: 4, disk: 40, prices: [] },
+            { id: 32, name: 'cpx32', cores: 3, memory: 8, disk: 80, prices: [] },
+          ],
+          datacenters: [
+            // Zwei Datacenters in fsn1 — Union, dedupliziert
+            { locationName: 'fsn1', availableIds: [22, 32] },
+            { locationName: 'fsn1', availableIds: [22] }, // cpx22 nochmals, darf nicht doppelt erscheinen
+          ],
+        }),
+        ionos: makeAdapter(),
+        hostinger: makeAdapter(),
+      },
+    });
+    const opts = await registry.getProviderOptions('hetzner');
+    // Union: [22,32] ∪ [22] = {22,32} → ['cpx22','cpx32'] (dedupliziert, AC16)
+    expect(opts.availability.fsn1).toHaveLength(2);
+    expect(opts.availability.fsn1).toContain('cpx22');
+    expect(opts.availability.fsn1).toContain('cpx32');
+  });
+
+  it('AC16 — ID ohne Name-Match wird ausgelassen (kein Fehler)', async () => {
+    const store = makeCredentialStore({ hetzner: MOCK_TOKEN });
+    const registry = new VpsProviderRegistry({
+      credentialStore: store,
+      adapters: {
+        hetzner: makeHetznerAdapterWithDatacenters({
+          serverTypesWithIds: [
+            { id: 22, name: 'cpx22', cores: 2, memory: 4, disk: 40, prices: [] },
+          ],
+          datacenters: [
+            // id=999 existiert nicht in serverTypes → wird ausgelassen (AC16)
+            { locationName: 'fsn1', availableIds: [22, 999] },
+          ],
+        }),
+        ionos: makeAdapter(),
+        hostinger: makeAdapter(),
+      },
+    });
+    const opts = await registry.getProviderOptions('hetzner');
+    // Nur cpx22 (id=22); id=999 ohne Match → ausgelassen
+    expect(opts.availability.fsn1).toEqual(['cpx22']);
+  });
+
+  it('AC17 — listDatacenters-Fehler → availability weggelassen, serverTypes/locations/images vollständig', async () => {
+    const store = makeCredentialStore({ hetzner: MOCK_TOKEN });
+    const registry = new VpsProviderRegistry({
+      credentialStore: store,
+      adapters: {
+        hetzner: makeHetznerAdapterWithDatacenters({
+          datacenterError: new Error('Hetzner API nicht erreichbar'),
+        }),
+        ionos: makeAdapter(),
+        hostinger: makeAdapter(),
+      },
+    });
+    const opts = await registry.getProviderOptions('hetzner');
+    // Kein Hard-Fail: optionsAvailable bleibt true (AC17)
+    expect(opts.optionsAvailable).toBe(true);
+    // serverTypes/locations/images vollständig (AC17)
+    expect(opts.serverTypes).toBeDefined();
+    expect(opts.locations).toBeDefined();
+    expect(opts.images).toBeDefined();
+    // availability weggelassen (kein undefined-Feld in Response)
+    expect(opts.availability).toBeUndefined();
+  });
+
+  it('AC17 — Token erscheint NICHT in Optionen-Response (Security-Floor)', async () => {
+    const store = makeCredentialStore({ hetzner: MOCK_TOKEN });
+    const registry = new VpsProviderRegistry({
+      credentialStore: store,
+      adapters: {
+        hetzner: makeHetznerAdapterWithDatacenters(),
+        ionos: makeAdapter(),
+        hostinger: makeAdapter(),
+      },
+    });
+    const opts = await registry.getProviderOptions('hetzner');
+    const serialized = JSON.stringify(opts);
+    expect(serialized).not.toContain(MOCK_TOKEN);
+  });
+
+  it('AC17 — leere datacenters-Antwort → leere availability-Map (graceful)', async () => {
+    const store = makeCredentialStore({ hetzner: MOCK_TOKEN });
+    const registry = new VpsProviderRegistry({
+      credentialStore: store,
+      adapters: {
+        hetzner: makeHetznerAdapterWithDatacenters({
+          datacenters: [], // leere Antwort
+        }),
+        ionos: makeAdapter(),
+        hostinger: makeAdapter(),
+      },
+    });
+    const opts = await registry.getProviderOptions('hetzner');
+    // Leere Map ist gültig — kein Hard-Fail, kein undefined
+    expect(opts.optionsAvailable).toBe(true);
+    // availability kann leer sein oder fehlen — beides ist AC17-konform
+    if (opts.availability !== undefined) {
+      expect(Object.keys(opts.availability)).toHaveLength(0);
+    }
   });
 });

@@ -25,6 +25,11 @@
  *   - Fehlende / kaputte Dateien → Felder null, kein Crash (AC1).
  *   - Injectable fsDeps für Tests (kein echtes Filesystem nötig).
  *
+ * story-detail-yaml-fallback:
+ *   AC2 — Robustes ID-Matching: item ↔ storyId matcht sowohl bei String- als auch bei
+ *          Integer-Ledgerzeilen (z.B. "S-165" == 165 nach Normalisierung).
+ *          Matching rein wertbasiert — item/storyId nie als Pfad benutzt.
+ *
  * Security:
  *   - Liest NUR .claude/metrics/dispatches.jsonl + items.jsonl.
  *   - Kein User-Input in Pfadkonstruktion; storyId wird NUR zum Vergleich genutzt, nie als Pfad.
@@ -38,6 +43,34 @@ import { join } from 'node:path';
 
 /** Default FS dependencies (real node:fs/promises). */
 const defaultFsDeps = { readFile };
+
+/**
+ * Robustes ID-Matching zwischen einem Ledger-item-Feld und einer Story-ID (AC2).
+ *
+ * Matcht wenn:
+ *   (a) String-Gleichheit: String(item) === String(storyId), ODER
+ *   (b) Numerische Gleichheit: Zahl aus item (Präfix S-/s- + führende Nullen entfernen)
+ *       entspricht Zahl aus storyId — damit matchen Integer-Ledgerzeilen (165) gegen "S-165".
+ *
+ * Reiner Wertvergleich — item/storyId werden NIE als Pfad benutzt (Security unverändert).
+ *
+ * @param {unknown} item       Ledger-item-Wert (string oder number).
+ * @param {string}  storyId    Story-ID (z.B. "S-165").
+ * @returns {boolean}
+ */
+export function matchesStoryId(item, storyId) {
+  if (item == null) return false;
+  // (a) String-Gleichheit
+  if (String(item) === String(storyId)) return true;
+  // (b) Numerische Gleichheit nach Normalisierung: S-Präfix + führende Nullen entfernen
+  const normalize = (v) => {
+    const s = String(v).trim().replace(/^[Ss]-?0*/, '');
+    return /^\d+$/.test(s) ? Number(s) : NaN;
+  };
+  const n1 = normalize(item);
+  const n2 = normalize(storyId);
+  return !Number.isNaN(n1) && !Number.isNaN(n2) && n1 === n2;
+}
 
 /**
  * Parse a JSONL file: each non-empty line as JSON. Invalid lines silently skipped.
@@ -123,9 +156,9 @@ export class StoryMetricReader {
       this.#readJsonl(join(metricsDir, 'items.jsonl')),
     ]);
 
-    // ── dispatches: filter by item == storyId ───────────────────────────────────
+    // ── dispatches: filter by item == storyId (AC2 robustes ID-Matching) ──────────
     const storyDispatches = dispatches.filter(
-      (d) => d && String(d.item ?? '') === String(storyId),
+      (d) => d && matchesStoryId(d.item, storyId),
     );
 
     // ── Zeiten (Start/Ende/Dauer) ───────────────────────────────────────────────
@@ -167,9 +200,9 @@ export class StoryMetricReader {
         return sa - sb;
       });
 
-    // ── Story-Metrik aus items.jsonl ────────────────────────────────────────────
+    // ── Story-Metrik aus items.jsonl (AC2 robustes ID-Matching) ────────────────
     const storyItem = items.find(
-      (i) => i && String(i.id ?? '') === String(storyId),
+      (i) => i && matchesStoryId(i.id, storyId),
     ) ?? null;
 
     const ep_est    = storyItem?.ep_est    ?? null;

@@ -19,7 +19,7 @@
  *   AC5 — UI sperrt Create-Button wenn kein Label mit Public-Key vorhanden ist
  *          oder eine Rolle kein Label zugeordnet hat.
  *
- * Implements: vps-create-options AC6–AC12 (Server-Typ/Region/Image-Dropdowns mit Kosten)
+ * Implements: vps-create-options AC6–AC12, AC18–AC20 (Server-Typ/Region/Image-Dropdowns mit Kosten + availability-Filter)
  *   AC6  — Bei Provider hetzner: Region + Server-Typ als Dropdowns aus Live-Listen.
  *   AC7  — Server-Typ-Dropdown zeigt Specs + Kosten; Preis folgt gewählter Region.
  *   AC8  — Fehlende Preise → „Preis unbekannt"; deprecated Typen nicht wählbar.
@@ -28,6 +28,12 @@
  *   AC11 — Bei Provider hetzner: Image-Feld als Dropdown aus System-Images; Default Ubuntu 26.04
  *          (falls vorhanden, sonst LTS-Fallback ubuntu-24.04). Auswahl setzt image=name.
  *   AC12 — Fehler/keine Quelle → Image-Feld bleibt Freitext mit Default-Hinweis Ubuntu 26.04.
+ *   AC18 — Bei gewählter Region + vorhandenem availability[region]: Server-Typ-Dropdown zeigt
+ *           nur bereitstellbare Typen (Region steuert die Typen-Liste, kein beidseitiges Filtern).
+ *   AC19 — Bei Region-Wechsel: serverType zurücksetzen wenn Typ in neuer Region nicht verfügbar;
+ *           Wahl bleibt erhalten wenn der Typ verfügbar bleibt.
+ *   AC20 — Graceful Fallback: fehlt availability ganz oder fehlt Eintrag für die Region →
+ *           ungefiltert rendern (heutiges AC6/AC8-Verhalten, alle nicht-deprecated Typen).
  *
  * Implements: vps-container-overview AC1–AC7 (Container-Übersicht)
  *   AC1 — Container-Button je VPS-Zeile; Klick öffnet Übersicht + Listing-Fetch.
@@ -823,12 +829,14 @@ function VpsCreateForm({ providers, sshLabels, onCreated, onCancel }) {
   const ERROR_ID = 'vps-create-error';
   const OPTIONS_STATUS_ID = 'vps-create-options-status';
 
-  // ── vps-create-options AC6–AC12: Options-State ──────────────────────────────
+  // ── vps-create-options AC6–AC12, AC18–AC20: Options-State ──────────────────
   // 'idle' | 'loading' | 'ok' | 'fallback'
   const [optionsState, setOptionsState] = useState('idle');
   const [locations, setLocations] = useState([]);    // HetznerLocationOption[]
-  const [serverTypes, setServerTypes] = useState([]); // HetznerServerTypeOption[]
+  const [serverTypes, setServerTypes] = useState([]); // HetznerServerTypeOption[] (alle aktiven, ungefiltert)
   const [images, setImages] = useState([]);           // HetznerImageOption[] (AC11)
+  // AC18/AC20: availability-Map { [locationName]: string[] } — optional (S-177)
+  const [availability, setAvailability] = useState(null); // null = nicht vorhanden → ungefiltert (AC20)
 
   // LTS-Fallback-Slug (UBUNTU_26_04_SLUG — analog hetzner.js Backend)
   // Wird als Default-Vorauswahl im Image-Dropdown genutzt wenn ubuntu-26.04 noch nicht verfügbar.
@@ -843,6 +851,7 @@ function VpsCreateForm({ providers, sshLabels, onCreated, onCancel }) {
       setLocations([]);
       setServerTypes([]);
       setImages([]);
+      setAvailability(null);
       setRegion('');
       setServerType('');
       setImage('');
@@ -860,15 +869,28 @@ function VpsCreateForm({ providers, sshLabels, onCreated, onCancel }) {
         if (activeTypes.length === 0) {
           setServerTypes([]);
           setImages([]);
+          setAvailability(null);
           setRegion('');
           setServerType('');
           setImage('');
           setOptionsState('fallback');
         } else {
           setServerTypes(activeTypes);
-          // Vorauswahl: erste Location + erster Typ
-          setRegion((prev) => prev || data.locations[0]?.name || '');
-          setServerType((prev) => prev || activeTypes[0]?.name || '');
+          // AC18/AC20: availability-Map aus Response übernehmen (optional — S-177 Degradation möglich)
+          const availMap = (data.availability && typeof data.availability === 'object')
+            ? data.availability
+            : null;
+          setAvailability(availMap);
+
+          // Vorauswahl: erste Location + erster Typ der in der ersten Region verfügbar ist
+          const firstLocation = data.locations[0]?.name || '';
+          setRegion((prev) => prev || firstLocation);
+          // Erster verfügbarer Typ für die erste Region (AC18: availability-gefiltert)
+          const firstRegionTypes = (availMap && firstLocation && Array.isArray(availMap[firstLocation]))
+            ? activeTypes.filter((t) => availMap[firstLocation].includes(t.name))
+            : activeTypes;
+          const firstType = firstRegionTypes[0]?.name || activeTypes[0]?.name || '';
+          setServerType((prev) => prev || firstType);
 
           // AC11: System-Images laden und Default-Vorauswahl Ubuntu 26.04 setzen
           const availableImages = Array.isArray(data.images) ? data.images : [];
@@ -891,6 +913,7 @@ function VpsCreateForm({ providers, sshLabels, onCreated, onCancel }) {
         setLocations([]);
         setServerTypes([]);
         setImages([]);
+        setAvailability(null);
         setRegion('');
         setServerType('');
         setImage('');
@@ -901,12 +924,43 @@ function VpsCreateForm({ providers, sshLabels, onCreated, onCancel }) {
       setLocations([]);
       setServerTypes([]);
       setImages([]);
+      setAvailability(null);
       setRegion('');
       setServerType('');
       setImage('');
     });
     return () => { cancelled = true; };
   }, [provider]);
+
+  // AC19: Bei Region-Wechsel serverType zurücksetzen wenn nicht mehr in availability[neueRegion]
+  // Läuft nach dem Options-Load-Effect (useEffect-Reihenfolge: Options-Effect ändert region,
+  // dieser Effect reagiert danach auf region-Änderungen durch den Nutzer).
+  useEffect(() => {
+    // Nur aktiv wenn Dropdowns sichtbar sind (useDropdowns) UND availability vorhanden
+    if (optionsState !== 'ok' || !availability || !region) return;
+    const regionList = availability[region];
+    if (!Array.isArray(regionList)) {
+      // Kein Eintrag für diese Region → ungefiltert (AC20): Wahl behalten
+      return;
+    }
+    if (serverType && !regionList.includes(serverType)) {
+      // Typ nicht mehr verfügbar → zurücksetzen auf ersten gültigen (AC19)
+      const filtered = serverTypes.filter((t) => regionList.includes(t.name));
+      setServerType(filtered[0]?.name || '');
+    }
+    // Typ noch verfügbar → Wahl behalten (AC19, letzter Satz)
+  }, [region]); // eslint-disable-line react-hooks/exhaustive-deps
+  // ^ bewusst nur auf region reagieren (nicht auf serverTypes/availability — diese ändern
+  //   sich nur beim Options-Load, der den serverType selbst setzt).
+
+  // AC18/AC20: gefilterte Typen-Liste für das Server-Typ-Dropdown
+  // Wenn availability[region] vorhanden → filtern; sonst alle aktiven Typen (Fallback).
+  const filteredServerTypes = (() => {
+    if (!availability || !region) return serverTypes;
+    const regionList = availability[region];
+    if (!Array.isArray(regionList)) return serverTypes; // AC20: kein Eintrag → ungefiltert
+    return serverTypes.filter((t) => regionList.includes(t.name));
+  })();
 
   // Hinweis wenn beide Rollen dasselbe Label nutzen (non-distinkter Key)
   const nonDistinct = rootLabel && alexLabel && rootLabel === alexLabel;
@@ -1087,7 +1141,7 @@ function VpsCreateForm({ providers, sshLabels, onCreated, onCancel }) {
             aria-describedby={error ? ERROR_ID : undefined}
             disabled={submitting}
           >
-            {serverTypes.map((st) => {
+            {filteredServerTypes.map((st) => {
               const { priceEntry, isFallback } = resolvePriceEntry(st.prices ?? [], region);
               const costText = buildCostText(priceEntry, isFallback);
               const specsText = `${st.name} — ${st.cores} vCPU, ${st.memory} GB RAM, ${st.disk} GB · ${costText}`;

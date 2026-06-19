@@ -1,0 +1,39 @@
+id: S-172
+parent: F-019
+title: 'Story-Detail: Board-YAML-Fallback (Ende/Branch/PR) + int/string-tolerantes ID-Matching + klarer Leer-Zustand'
+status: Done
+branch: board/concepts-2026-06-19
+priority: P2
+spec: docs/specs/story-detail-yaml-fallback.md
+implements:
+- AC1
+- AC2
+- AC3
+- AC4
+- AC5
+- AC6
+- AC7
+- AC8
+depends: null
+labels:
+- board
+- frontend
+- backend
+- metrics
+size_est: M
+dispo_est: null
+dispo_forecast: null
+confidence: medium
+estimate_note: 'Anzeige-Ebene (kein Schreibpfad). Backend: BoardAggregator um done_at/branch/pr
+  erweitern; StoryMetricReader int+string-tolerant matchen (String-Gleichheit ODER
+  numerische Gleichheit nach S--/Null-Strip — reiner Wertvergleich, kein Pfad-Gebrauch);
+  boardRouter-Detail-Endpoint: ended_at-Fallback aus done_at (+ended_at_source) und
+  branch/pr/status durchreichen. Frontend: differenzierter Leer-Hinweis + Verknüpfungen-Block
+  (Branch/PR-Link, rel=noopener). Ledger behält Vorrang (AC7). M heuristisch (Backend+Frontend,
+  mehrere kleine Stellen, keine db/security-Achse). Wurzel-Fix der Aufzeichnung separat
+  in agent-flow (metrics-recording-reliability).'
+pr: null
+blocked_reason: null
+created_at: '2026-06-19T00:00:00Z'
+updated_at: '2026-06-19T00:00:00Z'
+done_at: '2026-06-19T00:00:00Z'

@@ -18,6 +18,12 @@
  *   Die Herkunft wird als ep_est_source: 'yaml'|'ledger'|null im Detail-Objekt übermittelt.
  *   Ist/Abweichungs-Felder bleiben null, bis ein Flow-Lauf echte Werte schreibt.
  *
+ * story-detail-yaml-fallback (AC3, AC4):
+ *   AC3 — ended_at-Fallback: liefert Ledger kein ended_at, aber YAML ein done_at →
+ *          ended_at = done_at, ended_at_source: 'yaml'. Sonst 'ledger'. Ohne beides: null.
+ *          started_at/duration bleiben null ohne Ledger (nicht aus YAML ableitbar).
+ *   AC4 — Neue Felder branch, pr, status aus dem Story-Index werden durchgereicht.
+ *
  * Security:
  *   - Read-only: no writes to board/ files (AC7).
  *   - :slug and :id parameters validated against regex before use as index lookup.
@@ -199,6 +205,11 @@ export function boardRouter({ boardAggregator, storyMetricReader }) {
     // Read metrics (lazy, read-only); missing files → null fields, no crash (AC1)
     const detail = await storyMetricReader.getDetail(repoPath, id);
 
+    // Suche den Story-Eintrag aus dem Index für YAML-Fallback-Felder
+    const storyEntry = (project.features ?? [])
+      .flatMap((f) => f.stories ?? [])
+      .find((s) => String(s.id ?? '') === String(id));
+
     // AC5 (story-detail-ansicht) — Vorab-Schätzungs-Fallback:
     // Wenn der Ledger kein ep_est/tok_est liefert, fällt die Ansicht auf dispo_est
     // (und ein Token-Schätzfeld, falls im Story-YAML vorhanden) aus der Story-YAML zurück.
@@ -213,10 +224,6 @@ export function boardRouter({ boardAggregator, storyMetricReader }) {
       ep_est_source = 'ledger';
     } else {
       // Ledger hat kein ep_est — YAML-Fallback: dispo_est aus Story-Index
-      const storyEntry = (project.features ?? [])
-        .flatMap((f) => f.stories ?? [])
-        .find((s) => String(s.id ?? '') === String(id));
-
       const yamlEpEst = storyEntry?.dispo_est ?? null;
       if (yamlEpEst != null) {
         ep_est = yamlEpEst;
@@ -231,11 +238,37 @@ export function boardRouter({ boardAggregator, storyMetricReader }) {
       }
     }
 
+    // story-detail-yaml-fallback AC3 — ended_at-Fallback aus done_at wenn Ledger leer:
+    // Liefert der Ledger ein ended_at (aus Dispatches), hat Ledger Vorrang (AC7).
+    // Sonst: done_at aus dem Story-Index verwenden wenn vorhanden.
+    // started_at/duration bleiben null ohne Ledger (nicht aus YAML ableitbar).
+    let ended_at = detail.ended_at;
+    let ended_at_source = null;
+    if (ended_at != null) {
+      ended_at_source = 'ledger';
+    } else {
+      const yamlDoneAt = storyEntry?.done_at ?? null;
+      if (yamlDoneAt != null) {
+        ended_at = yamlDoneAt;
+        ended_at_source = 'yaml';
+      }
+    }
+
+    // story-detail-yaml-fallback AC4 — branch, pr, status aus Index durchreichen
+    const branch = storyEntry?.branch ?? null;
+    const pr = storyEntry?.pr ?? null;
+    const status = storyEntry?.status ?? null;
+
     const enrichedDetail = {
       ...detail,
       ep_est,
       tok_est,
       ep_est_source,
+      ended_at,
+      ended_at_source,
+      branch,
+      pr,
+      status,
     };
 
     return res.json({ detail: enrichedDetail });

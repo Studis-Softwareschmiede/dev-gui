@@ -1,7 +1,7 @@
 /**
  * vpsRouter.test.js — Integrationstests für die VPS-Endpunkte.
  *
- * Covers:
+ * Covers (vps-provider-boundary):
  *   AC1  — Registry ist die einzige Boundary (Router ruft nur registry.*, nie direkt Adapter)
  *   AC2  — GET /api/vps/providers liefert [{ id, configured, capabilities }]
  *   AC3  — GET /api/vps/machines aggregiert VpsMachines
@@ -18,6 +18,11 @@
  *   AC3  — sshKeyAssignment-Labels im Body → 201; ungültige Labels → 400
  *   AC5  — CloudInitError(missing-ssh-key) → 422 errorClass
  *   AC6  — Label-Zuordnung im Audit, kein Key-Material
+ *
+ * Covers (vps-create-options AC15–AC17 / S-177):
+ *   AC15 — GET /api/vps/providers/hetzner/options enthält availability-Map wenn vorhanden
+ *   AC16 — availability-Map korrekt aus Registry geliefert (Union je Location)
+ *   AC17 — Graceful: availability weggelassen wenn Registry es weglässt; kein 500
  *
  * Strategy:
  *   - VpsProviderRegistry wird als Mock injiziert (keine echten Adapter/Fetch-Calls)
@@ -213,6 +218,94 @@ describe('vpsRouter — S-161: GET /api/vps/providers/:provider/options', () => 
     const res = await ts.req('GET', '/api/vps/providers/hetzner/options');
     expect(res.status).toBe(200);
     expect(JSON.parse(res.body).optionsAvailable).toBe(false);
+  });
+});
+
+// ── S-177 AC15–AC17: availability-Map in GET /api/vps/providers/:provider/options ────
+
+describe('vpsRouter — S-177 AC15–AC17: availability-Map in Options-Endpunkt', () => {
+  let ts;
+  beforeEach(() => { process.env.DEV_NO_ACCESS = '1'; });
+  afterEach(async () => { delete process.env.DEV_NO_ACCESS; if (ts) await ts.close(); ts = null; });
+
+  it('AC15/AC16 — hetzner/options liefert availability-Map wenn vorhanden', async () => {
+    const availabilityMap = {
+      fsn1: ['cpx22', 'cpx32'],
+      hel1: ['cpx22', 'cx33'],
+      ash: ['cpx11', 'cpx22'],
+    };
+    ts = await makeTestServer({
+      registry: makeMockRegistry({
+        optionsResult: {
+          optionsAvailable: true,
+          serverTypes: [{ name: 'cpx22', cores: 2, memory: 4, disk: 40, prices: [] }],
+          locations: [{ name: 'fsn1', networkZone: 'eu-central' }],
+          images: [{ name: 'ubuntu-26.04' }],
+          availability: availabilityMap,
+        },
+      }),
+    });
+    const res = await ts.req('GET', '/api/vps/providers/hetzner/options');
+    expect(res.status).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.optionsAvailable).toBe(true);
+    expect(body.availability).toBeDefined();
+    expect(body.availability.fsn1).toEqual(expect.arrayContaining(['cpx22', 'cpx32']));
+    expect(body.availability.ash).toContain('cpx11');
+    // AC16-Verifikationsbeispiel: fsn1 enthält cpx22, NICHT cpx11
+    expect(body.availability.fsn1).not.toContain('cpx11');
+    expect(body.availability.fsn1).toContain('cpx22');
+  });
+
+  it('AC17 — availability weggelassen wenn nicht vorhanden (graceful Fallback)', async () => {
+    ts = await makeTestServer({
+      registry: makeMockRegistry({
+        optionsResult: {
+          optionsAvailable: true,
+          serverTypes: [{ name: 'cpx22', cores: 2, memory: 4, disk: 40, prices: [] }],
+          locations: [{ name: 'fsn1', networkZone: 'eu-central' }],
+          images: [{ name: 'ubuntu-26.04' }],
+          // availability explizit weggelassen → graceful degradation
+        },
+      }),
+    });
+    const res = await ts.req('GET', '/api/vps/providers/hetzner/options');
+    expect(res.status).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.optionsAvailable).toBe(true);
+    // serverTypes/locations/images müssen vollständig vorhanden sein (AC17)
+    expect(body.serverTypes).toBeDefined();
+    expect(body.locations).toBeDefined();
+    expect(body.images).toBeDefined();
+    // availability weggelassen ist OK (kein 500, kein Fehler)
+    // body.availability ist undefined oder fehlt — das ist korrekt
+    expect(body.availability === undefined || body.availability === null).toBe(true);
+  });
+
+  it('AC17 — Registry-Fehler bei getProviderOptions → 200 optionsAvailable:false (kein 500)', async () => {
+    ts = await makeTestServer({ registry: makeMockRegistry({ throwOn: 'getProviderOptions' }) });
+    const res = await ts.req('GET', '/api/vps/providers/hetzner/options');
+    expect(res.status).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.optionsAvailable).toBe(false);
+    // Token NIEMALS in Response (AC17 Security-Floor)
+    expect(res.body).not.toContain(MOCK_TOKEN);
+  });
+
+  it('AC17 — Token erscheint NICHT in availability/Response (Security-Floor)', async () => {
+    ts = await makeTestServer({
+      registry: makeMockRegistry({
+        optionsResult: {
+          optionsAvailable: true,
+          serverTypes: [],
+          locations: [],
+          images: [],
+          availability: { fsn1: ['cpx22'] },
+        },
+      }),
+    });
+    const res = await ts.req('GET', '/api/vps/providers/hetzner/options');
+    expect(res.body).not.toContain(MOCK_TOKEN);
   });
 });
 

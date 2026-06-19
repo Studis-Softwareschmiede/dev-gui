@@ -35,6 +35,16 @@
  *   AC4 — Soll-Ist zeigt ep_est/ep_act/tok_est/tok_total; null → „keine Schätzung".
  *   AC5 — Vorab-Badge (ep-est-vorab-badge) bei ep_est_source='yaml'; kein Badge bei 'ledger'.
  *
+ * Covers (story-detail-yaml-fallback):
+ *   AC5 — Differenzierter Leer-Zustand: „Vor Metrik-Erfassung abgeschlossen" wenn
+ *          ended_at vorhanden; „Noch kein Flow-Lauf" wenn nicht. YAML-Badge bei
+ *          ended_at_source='yaml'. Bestehender Text „Keine Flow-Daten" ersetzt.
+ *   AC6 — Block „Verknüpfungen" mit Branch + PR-Link wenn vorhanden; Block ausgeblendet
+ *          wenn beide null. PR-Link mit rel=noopener noreferrer (AC8 Floor).
+ *   AC7 — Ledger-Daten: bestehende Tests unverändert (Ledger hat Vorrang).
+ *   AC8 — Kein dangerouslySetInnerHTML; PR-Link rel=noopener noreferrer.
+ *          jsdom-Limitation: WCAG-Kontrast und Layout nicht testbar — visuell verifiziert.
+ *
  * Covers (projekt-spezifikation-anzeige):
  *   AC5 — Story-Spec-Bezug ist klickbar (onOpenSpec-Prop) und ruft onOpenSpec(relPath) auf.
  *
@@ -2134,7 +2144,9 @@ describe('story-detail-ansicht — AC4: fehlende Schätzung sauber dargestellt',
     expect(tokEst.textContent).toMatch(/keine Schätzung/i);
   });
 
-  it('shows "Keine Flow-Daten vorhanden" when flow is empty (AC4)', async () => {
+  it('shows "Noch kein Flow-Lauf erfasst" when flow is empty and ended_at null (AC4 + AC5)', async () => {
+    // AC5 (story-detail-yaml-fallback): Leer-Zustand differenziert:
+    // kein ended_at → "Noch kein Flow-Lauf erfasst."
     globalThis.fetch = makeBoardFetchWithDetail({
       fullProjects: [PROJECT_A],
       detailData: STORY_DETAIL_MISSING,
@@ -2144,7 +2156,7 @@ describe('story-detail-ansicht — AC4: fehlende Schätzung sauber dargestellt',
 
     const flowEmpty = container.querySelector('[data-testid="flow-empty"]');
     expect(flowEmpty).toBeTruthy();
-    expect(flowEmpty.textContent).toMatch(/keine flow-daten/i);
+    expect(flowEmpty.textContent).toMatch(/noch kein flow-lauf/i);
   });
 
   it('shows "—" for started_at when null (no crash)', async () => {
@@ -2291,5 +2303,241 @@ describe('story-detail-ansicht — AC5: Vorab-Schätzungs-Fallback', () => {
     const epEst = container.querySelector('[data-testid="ep-est"]');
     expect(epEst.textContent).toMatch(/keine Schätzung/i);
     expect(container.querySelector('[data-testid="ep-est-vorab-badge"]')).toBeNull();
+  });
+});
+
+// ── story-detail-yaml-fallback — AC5: differenzierter Leer-Zustand + YAML-Badge ─
+
+/**
+ * Fixture: Story erledigt (done_at), aber kein Ledger.
+ * ended_at kommt aus YAML (ended_at_source = 'yaml'), flow leer.
+ */
+const STORY_DETAIL_DONE_NO_LEDGER = {
+  ...STORY_DETAIL_MISSING,
+  ended_at: '2026-06-14T12:00:00.000Z',
+  ended_at_source: 'yaml',
+};
+
+/**
+ * Fixture: Story noch nicht erledigt, kein Ledger.
+ */
+const STORY_DETAIL_NOT_DONE_NO_LEDGER = {
+  ...STORY_DETAIL_MISSING,
+  ended_at: null,
+  ended_at_source: null,
+};
+
+describe('story-detail-yaml-fallback — AC5: differenzierter Leer-Zustand im Flow-Block', () => {
+  async function openDetailYamlFallback(container) {
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="story-card-btn-S-001"]')).toBeTruthy();
+    });
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="story-card-btn-S-001"]'));
+    });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="detail-blocks"]')).toBeTruthy();
+    });
+  }
+
+  it('zeigt "Vor Metrik-Erfassung abgeschlossen" wenn ended_at vorhanden aber flow leer', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({
+      fullProjects: [PROJECT_A],
+      detailData: STORY_DETAIL_DONE_NO_LEDGER,
+    });
+    const { container } = renderCockpit('project-alpha');
+    await openDetailYamlFallback(container);
+
+    const flowEmpty = container.querySelector('[data-testid="flow-empty"]');
+    expect(flowEmpty).toBeTruthy();
+    expect(flowEmpty.textContent).toMatch(/vor metrik-erfassung abgeschlossen/i);
+  });
+
+  it('zeigt "Noch kein Flow-Lauf erfasst" wenn ended_at null und flow leer', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({
+      fullProjects: [PROJECT_A],
+      detailData: STORY_DETAIL_NOT_DONE_NO_LEDGER,
+    });
+    const { container } = renderCockpit('project-alpha');
+    await openDetailYamlFallback(container);
+
+    const flowEmpty = container.querySelector('[data-testid="flow-empty"]');
+    expect(flowEmpty).toBeTruthy();
+    expect(flowEmpty.textContent).toMatch(/noch kein flow-lauf/i);
+  });
+
+  it('zeigt YAML-Badge bei ended_at aus YAML (ended_at_source="yaml")', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({
+      fullProjects: [PROJECT_A],
+      detailData: STORY_DETAIL_DONE_NO_LEDGER,
+    });
+    const { container } = renderCockpit('project-alpha');
+    await openDetailYamlFallback(container);
+
+    const yamlBadge = container.querySelector('[data-testid="ended-at-yaml-badge"]');
+    expect(yamlBadge).toBeTruthy();
+    expect(yamlBadge.textContent.trim().toLowerCase()).toContain('yaml');
+  });
+
+  it('zeigt keinen YAML-Badge wenn ended_at_source="ledger"', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({
+      fullProjects: [PROJECT_A],
+      detailData: { ...STORY_DETAIL_FULL, ended_at_source: 'ledger' },
+    });
+    const { container } = renderCockpit('project-alpha');
+    await openDetailYamlFallback(container);
+
+    expect(container.querySelector('[data-testid="ended-at-yaml-badge"]')).toBeNull();
+  });
+
+  it('zeigt "—" für ended_at wenn null (kein Badge, kein Datum)', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({
+      fullProjects: [PROJECT_A],
+      detailData: STORY_DETAIL_MISSING,
+    });
+    const { container } = renderCockpit('project-alpha');
+    await openDetailYamlFallback(container);
+
+    const endEl = container.querySelector('[data-testid="detail-ended-at"]');
+    expect(endEl.textContent).toBe('—');
+    expect(container.querySelector('[data-testid="ended-at-yaml-badge"]')).toBeNull();
+  });
+});
+
+// ── story-detail-yaml-fallback — AC6: Block „Verknüpfungen" ──────────────────
+
+/**
+ * Fixture: mit branch und pr.
+ */
+const STORY_DETAIL_WITH_LINKS = {
+  ...STORY_DETAIL_MISSING,
+  branch: 'board/my-feature-2026-06-14',
+  pr: 'https://github.com/org/repo/pull/42',
+};
+
+/**
+ * Fixture: nur branch, kein pr.
+ */
+const STORY_DETAIL_BRANCH_ONLY = {
+  ...STORY_DETAIL_MISSING,
+  branch: 'board/my-feature-2026-06-14',
+  pr: null,
+};
+
+/**
+ * Fixture: weder branch noch pr.
+ */
+const STORY_DETAIL_NO_LINKS = {
+  ...STORY_DETAIL_MISSING,
+  branch: null,
+  pr: null,
+};
+
+describe('story-detail-yaml-fallback — AC6: Block Verknüpfungen (Branch + PR)', () => {
+  async function openDetailLinks(container) {
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="story-card-btn-S-001"]')).toBeTruthy();
+    });
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="story-card-btn-S-001"]'));
+    });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="detail-blocks"]')).toBeTruthy();
+    });
+  }
+
+  it('zeigt Block Verknüpfungen wenn branch und pr vorhanden', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({
+      fullProjects: [PROJECT_A],
+      detailData: STORY_DETAIL_WITH_LINKS,
+    });
+    const { container } = renderCockpit('project-alpha');
+    await openDetailLinks(container);
+
+    expect(container.querySelector('[data-testid="block-verknuepfungen"]')).toBeTruthy();
+  });
+
+  it('zeigt Branch-Text im Verknüpfungen-Block', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({
+      fullProjects: [PROJECT_A],
+      detailData: STORY_DETAIL_WITH_LINKS,
+    });
+    const { container } = renderCockpit('project-alpha');
+    await openDetailLinks(container);
+
+    const branchEl = container.querySelector('[data-testid="detail-branch"]');
+    expect(branchEl).toBeTruthy();
+    expect(branchEl.textContent).toContain('board/my-feature-2026-06-14');
+  });
+
+  it('zeigt PR-Link mit korrektem href (AC6)', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({
+      fullProjects: [PROJECT_A],
+      detailData: STORY_DETAIL_WITH_LINKS,
+    });
+    const { container } = renderCockpit('project-alpha');
+    await openDetailLinks(container);
+
+    const prEl = container.querySelector('[data-testid="detail-pr"]');
+    expect(prEl).toBeTruthy();
+    const link = prEl.querySelector('a');
+    expect(link).toBeTruthy();
+    expect(link.getAttribute('href')).toBe('https://github.com/org/repo/pull/42');
+  });
+
+  it('PR-Link hat rel=noopener noreferrer (AC8 Security-Floor)', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({
+      fullProjects: [PROJECT_A],
+      detailData: STORY_DETAIL_WITH_LINKS,
+    });
+    const { container } = renderCockpit('project-alpha');
+    await openDetailLinks(container);
+
+    const link = container.querySelector('[data-testid="detail-pr"] a');
+    expect(link).toBeTruthy();
+    expect(link.getAttribute('rel')).toBe('noopener noreferrer');
+    expect(link.getAttribute('target')).toBe('_blank');
+  });
+
+  it('zeigt Block Verknüpfungen auch wenn nur branch gesetzt ist (kein pr)', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({
+      fullProjects: [PROJECT_A],
+      detailData: STORY_DETAIL_BRANCH_ONLY,
+    });
+    const { container } = renderCockpit('project-alpha');
+    await openDetailLinks(container);
+
+    expect(container.querySelector('[data-testid="block-verknuepfungen"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="detail-branch"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="detail-pr"]')).toBeNull();
+  });
+
+  it('blendet Block Verknüpfungen aus wenn weder branch noch pr gesetzt (AC6)', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({
+      fullProjects: [PROJECT_A],
+      detailData: STORY_DETAIL_NO_LINKS,
+    });
+    const { container } = renderCockpit('project-alpha');
+    await openDetailLinks(container);
+
+    expect(container.querySelector('[data-testid="block-verknuepfungen"]')).toBeNull();
+  });
+
+  it('AC7 — bestehende Ledger-Daten (flow vorhanden) bleiben unverändert', async () => {
+    // Stellt sicher dass AC7 (Ledger Vorrang) durch Erweiterung nicht gebrochen wird
+    globalThis.fetch = makeBoardFetchWithDetail({
+      fullProjects: [PROJECT_A],
+      detailData: { ...STORY_DETAIL_FULL, ended_at_source: 'ledger', branch: null, pr: null },
+    });
+    const { container } = renderCockpit('project-alpha');
+    await openDetailLinks(container);
+
+    // Flow-Tabelle zeigt echte Ledger-Daten
+    expect(container.querySelector('[data-testid="flow-step-0"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="flow-step-1"]')).toBeTruthy();
+    // Kein YAML-Badge (Ledger hat Vorrang)
+    expect(container.querySelector('[data-testid="ended-at-yaml-badge"]')).toBeNull();
+    // Kein Verknüpfungen-Block (branch/pr null)
+    expect(container.querySelector('[data-testid="block-verknuepfungen"]')).toBeNull();
   });
 });

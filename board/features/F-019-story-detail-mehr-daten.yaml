@@ -1,0 +1,28 @@
+id: F-019
+title: 'Story-Detail mit mehr Daten: YAML-Fallback, robustes ID-Matching, klarer Leer-Zustand'
+goal: 'Die Story-Detailansicht bleibt für aktuelle Stories (z.B. S-165) leer — nicht
+  wegen der Anzeige, sondern weil das Metrik-Ledger keine passende Zeile liefert. Drei
+  Ursachen live verifiziert (2026-06-19): (1) Ledger ab ~16.06. nicht mehr befüllt
+  (Wurzel agent-flow), (2) ID-Format-Bruch — StoryMetricReader matcht den Voll-String
+  "S-165", alte Ledger-Zeilen schreiben item als Zahl (165) → kein Match, (3) tok
+  überall null. Diese Feature behebt die ANZEIGE-Ebene: BoardAggregator exponiert
+  done_at/branch/pr, StoryMetricReader matcht int+string tolerant, Detail-Endpoint
+  fällt für Ende auf done_at zurück, Frontend zeigt branch/PR + einen verständlichen
+  Leer-Hinweis statt "Keine Flow-Daten vorhanden". Für erledigte Stories wird gezeigt,
+  was aus der Board-YAML ableitbar ist (Owner-Entscheid: kein Rückbau des Flows).'
+status: Done
+priority: P2
+spec: docs/specs/story-detail-yaml-fallback.md
+definition_of_done: null
+labels:
+- board
+- frontend
+- backend
+- metrics
+depends: null
+owner: alex
+stories:
+- S-172
+progress: 0/1
+created_at: '2026-06-19T00:00:00Z'
+updated_at: '2026-06-19T00:00:00Z'

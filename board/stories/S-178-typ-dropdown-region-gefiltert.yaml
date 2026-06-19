@@ -1,7 +1,7 @@
 id: S-178
 parent: F-023
 title: 'Create-Formular: Server-Typ-Dropdown auf availability[region] filtern + Reset bei Region-Wechsel (kein "unsupported location")'
-status: To Do
+status: Done
 priority: P1
 spec: docs/specs/vps-create-options.md
 implements:

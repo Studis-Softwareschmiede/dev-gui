@@ -29,7 +29,22 @@
  *          Kennzahlen aus baseline.json eingeblendet wo vorhanden.
  *   AC5  — Filter nach Kategorie + Art (Mehrfachauswahl); aktive Filter als aria-pressed.
  *
- * NOTE (Touch-Target): Touch-Target ≥44px (tabBtn, filterChip) — jsdom nicht testbar, visuell verifiziert.
+ * Covers (team-train-trigger):
+ *   AC8  — „Retro starten"-Button in Reiter-Leiste (kein role=tab); öffnet Ja/Nein-Dialog;
+ *          „Ja" sendet genau einen POST /api/command {command:'/agent-flow:retro'};
+ *          klar abgesetzt vom „Retro"-Historie-Link.
+ *   AC9  — Doppel-Feuer-Schutz: „Ja"-Button disabled während sending; 409 → Hinweis
+ *          „Session belegt"; ok/error → Status-Feedback.
+ *   AC10 — Dialog: role=dialog, aria-modal, aria-labelledby, Esc schließt, Fokus-Rückgabe;
+ *          Touch-Targets ≥ 44 px auf Trigger-Button — jsdom inline-style-Check;
+ *          Fokus-Falle — jsdom nicht vollständig testbar (kein echtes focus-management),
+ *          visuell und per Tab-Handler-Inspektion verifiziert.
+ *   AC11 — Security-Floor: POST /api/command mit genau {command:'/agent-flow:retro'};
+ *          kein dangerouslySetInnerHTML; Abgrenzung: nur /api/retro/* + /api/command gerufen.
+ *
+ * NOTE (Touch-Target): Touch-Target ≥44px (tabBtn, filterChip, retroStartBtn, dialog-Buttons)
+ *   — jsdom inline-style-Check für retroStartBtn; für dialog-Buttons visuell verifiziert
+ *   (jsdom rendert keine Pixel-Layout).
  *
  * NOTE (jsdom-Limitation): jsdom hat keine Layout-Engine — Style-Property-Asserts beweisen kein
  * Scroll-/Layout-Verhalten; getestet werden Verhalten, Struktur, Rollen und aria, nicht Pixel.
@@ -153,8 +168,9 @@ function makeRetroFetch({
   runsOk = true,
   reportOk = true,
   cardsOk = true,
+  commandStatus = 202, // status for POST /api/command
 }) {
-  return jest.fn(async (url) => {
+  return jest.fn(async (url, opts) => {
     if (url === '/api/retro/runs') {
       return {
         ok: runsOk,
@@ -174,6 +190,13 @@ function makeRetroFetch({
         ok: reportOk,
         status: reportOk ? 200 : 500,
         json: async () => reportBody,
+      };
+    }
+    if (url === '/api/command' && opts?.method === 'POST') {
+      return {
+        ok: commandStatus >= 200 && commandStatus < 300,
+        status: commandStatus,
+        json: async () => ({}),
       };
     }
     return { ok: false, status: 404, json: async () => ({}) };
@@ -1498,5 +1521,498 @@ describe('retro-train-board-local — AC5: Filter nach Kategorie + Art (Mehrfach
     // No filter active — count should not be shown
     const filterBar = container.querySelector('[aria-label="Board-Filter"]');
     expect(filterBar.textContent).not.toMatch(/\d+\/\d+ Karten/);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// team-train-trigger — AC8, AC9, AC10, AC11 (S-176)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Helper: render RetroView with a simple runs+command mock
+function renderRetroForTrigger({ commandStatus = 202 } = {}) {
+  globalThis.fetch = makeRetroFetch({
+    runsBody: { runs: [] },
+    commandStatus,
+  });
+  const onNavigate = jest.fn();
+  const utils = render(React.createElement(RetroView, { onNavigate }));
+  return utils;
+}
+
+// Helper: open dialog by clicking the trigger button
+async function openRetroDialog(container) {
+  // Wait for the trigger button to be available (mount + initial fetch resolves)
+  await waitFor(() => {
+    expect(container.querySelector('[data-testid="retro-start-btn"]')).toBeTruthy();
+  });
+  const triggerBtn = container.querySelector('[data-testid="retro-start-btn"]');
+  await act(async () => {
+    fireEvent.click(triggerBtn);
+  });
+  await waitFor(() => {
+    expect(container.querySelector('[data-testid="retro-confirm-dialog"]')).toBeTruthy();
+  });
+}
+
+// ── AC8 — Button vorhanden, kein role=tab, Dialog öffnet ─────────────────────
+
+describe('team-train-trigger — AC8: „Retro starten"-Button + Dialog öffnet', () => {
+  it('renders a "Retro starten" button in the tab bar', async () => {
+    const { container } = renderRetroForTrigger();
+    await waitFor(() => {
+      expect(container.querySelector('[aria-busy="true"]')).toBeNull();
+    });
+    const btn = container.querySelector('[data-testid="retro-start-btn"]');
+    expect(btn).toBeTruthy();
+    expect(btn.textContent).toMatch(/Retro starten/i);
+  });
+
+  it('"Retro starten" button does NOT have role=tab (AC8 — kein role=tab)', async () => {
+    const { container } = renderRetroForTrigger();
+    await waitFor(() => {
+      expect(container.querySelector('[aria-busy="true"]')).toBeNull();
+    });
+    const btn = container.querySelector('[data-testid="retro-start-btn"]');
+    expect(btn.getAttribute('role')).not.toBe('tab');
+  });
+
+  it('"Retro starten" button is visually distinct: NOT inside the tablist (AC8)', async () => {
+    const { container } = renderRetroForTrigger();
+    await waitFor(() => {
+      expect(container.querySelector('[aria-busy="true"]')).toBeNull();
+    });
+    // The tablist must still have only the two role=tab buttons
+    const tablist = container.querySelector('[role="tablist"]');
+    const tabBtns = tablist.querySelectorAll('[role="tab"]');
+    expect(tabBtns).toHaveLength(2);
+    // None of the tab buttons is "Retro starten"
+    for (const tb of tabBtns) {
+      expect(tb.textContent).not.toMatch(/retro starten/i);
+    }
+  });
+
+  it('clicking "Retro starten" opens the confirm dialog', async () => {
+    const { container } = renderRetroForTrigger();
+    await openRetroDialog(container);
+    expect(container.querySelector('[data-testid="retro-confirm-dialog"]')).toBeTruthy();
+  });
+
+  it('dialog has role=dialog (AC8/AC10)', async () => {
+    const { container } = renderRetroForTrigger();
+    await openRetroDialog(container);
+    const dialog = container.querySelector('[data-testid="retro-confirm-dialog"]');
+    expect(dialog.getAttribute('role')).toBe('dialog');
+  });
+
+  it('dialog has aria-modal="true" (AC10)', async () => {
+    const { container } = renderRetroForTrigger();
+    await openRetroDialog(container);
+    const dialog = container.querySelector('[data-testid="retro-confirm-dialog"]');
+    expect(dialog.getAttribute('aria-modal')).toBe('true');
+  });
+
+  it('dialog has aria-labelledby pointing to a title element (AC10)', async () => {
+    const { container } = renderRetroForTrigger();
+    await openRetroDialog(container);
+    const dialog = container.querySelector('[data-testid="retro-confirm-dialog"]');
+    const labelledById = dialog.getAttribute('aria-labelledby');
+    expect(labelledById).toBeTruthy();
+    // useId() generates IDs with colons (e.g. ":r0:") — use getElementById instead of
+    // CSS-selector (CSS.escape not available in jsdom)
+    const titleEl = document.getElementById(labelledById);
+    expect(titleEl).toBeTruthy();
+    expect(titleEl.textContent).toMatch(/Retro/i);
+  });
+
+  it('dialog contains "Ja"-Button and "Nein"-Button (AC8)', async () => {
+    const { container } = renderRetroForTrigger();
+    await openRetroDialog(container);
+    expect(container.querySelector('[data-testid="retro-confirm-yes"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="retro-confirm-no"]')).toBeTruthy();
+  });
+
+  it('"Nein"-Button closes dialog without firing (AC8)', async () => {
+    const { container } = renderRetroForTrigger();
+    await openRetroDialog(container);
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="retro-confirm-no"]'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="retro-confirm-dialog"]')).toBeNull();
+    });
+    // No /api/command call
+    const cmdCalls = globalThis.fetch.mock.calls.filter(
+      (c) => c[0] === '/api/command',
+    );
+    expect(cmdCalls).toHaveLength(0);
+  });
+
+  it('Esc key closes dialog without firing (AC10)', async () => {
+    const { container } = renderRetroForTrigger();
+    await openRetroDialog(container);
+
+    await act(async () => {
+      fireEvent.keyDown(document, { key: 'Escape' });
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="retro-confirm-dialog"]')).toBeNull();
+    });
+    const cmdCalls = globalThis.fetch.mock.calls.filter((c) => c[0] === '/api/command');
+    expect(cmdCalls).toHaveLength(0);
+  });
+
+  it('"Retro starten" button has aria-label describing it as action (AC10)', async () => {
+    const { container } = renderRetroForTrigger();
+    await waitFor(() => {
+      expect(container.querySelector('[aria-busy="true"]')).toBeNull();
+    });
+    const btn = container.querySelector('[data-testid="retro-start-btn"]');
+    const label = btn.getAttribute('aria-label') ?? btn.textContent;
+    expect(label).toMatch(/retro/i);
+  });
+
+  it('"Retro starten" button has minHeight >= 44px (Touch-Target AC10)', async () => {
+    const { container } = renderRetroForTrigger();
+    await waitFor(() => {
+      expect(container.querySelector('[aria-busy="true"]')).toBeNull();
+    });
+    const btn = container.querySelector('[data-testid="retro-start-btn"]');
+    const minH = parseInt(btn.style.minHeight, 10);
+    expect(minH).toBeGreaterThanOrEqual(44);
+  });
+
+  it('"Retro starten" button does not have outline:none (focus ring preserved AC10)', async () => {
+    const { container } = renderRetroForTrigger();
+    await waitFor(() => {
+      expect(container.querySelector('[aria-busy="true"]')).toBeNull();
+    });
+    const btn = container.querySelector('[data-testid="retro-start-btn"]');
+    expect(btn.style.outline).not.toBe('none');
+    expect(btn.style.outline).not.toBe('0');
+  });
+});
+
+// ── AC8 — Genau EIN /agent-flow:retro feuern ─────────────────────────────────
+
+describe('team-train-trigger — AC8: „Ja" sendet genau einen /agent-flow:retro', () => {
+  it('clicking "Ja" calls POST /api/command exactly once', async () => {
+    const { container } = renderRetroForTrigger();
+    await openRetroDialog(container);
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="retro-confirm-yes"]'));
+    });
+
+    await waitFor(() => {
+      const cmdCalls = globalThis.fetch.mock.calls.filter((c) => c[0] === '/api/command');
+      expect(cmdCalls).toHaveLength(1);
+    });
+  });
+
+  it('POST /api/command body contains command="/agent-flow:retro" (AC8/AC11)', async () => {
+    const { container } = renderRetroForTrigger();
+    await openRetroDialog(container);
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="retro-confirm-yes"]'));
+    });
+
+    await waitFor(() => {
+      const cmdCalls = globalThis.fetch.mock.calls.filter((c) => c[0] === '/api/command');
+      expect(cmdCalls).toHaveLength(1);
+    });
+
+    const [, opts] = globalThis.fetch.mock.calls.find((c) => c[0] === '/api/command');
+    expect(opts.method).toBe('POST');
+    const body = JSON.parse(opts.body);
+    expect(body.command).toBe('/agent-flow:retro');
+  });
+
+  it('POST /api/command uses Content-Type application/json (AC11)', async () => {
+    const { container } = renderRetroForTrigger();
+    await openRetroDialog(container);
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="retro-confirm-yes"]'));
+    });
+
+    await waitFor(() => {
+      const cmdCalls = globalThis.fetch.mock.calls.filter((c) => c[0] === '/api/command');
+      expect(cmdCalls).toHaveLength(1);
+    });
+
+    const [, opts] = globalThis.fetch.mock.calls.find((c) => c[0] === '/api/command');
+    expect(opts.headers?.['Content-Type']).toBe('application/json');
+  });
+
+  it('shows success status after "Ja" (ok-response) (AC9)', async () => {
+    const { container } = renderRetroForTrigger({ commandStatus: 202 });
+    await openRetroDialog(container);
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="retro-confirm-yes"]'));
+    });
+
+    await waitFor(() => {
+      // status feedback with role=status (polite) rendered
+      const statusEl = container.querySelector('[role="status"]');
+      expect(statusEl).toBeTruthy();
+      expect(statusEl.textContent).toMatch(/gestartet/i);
+    });
+  });
+
+  it('no additional /api/command calls are made after successful send (AC9 — Doppel-Feuer-Schutz)', async () => {
+    const { container } = renderRetroForTrigger({ commandStatus: 202 });
+    await openRetroDialog(container);
+
+    // Click Ja
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="retro-confirm-yes"]'));
+    });
+
+    // Wait for status to appear
+    await waitFor(() => {
+      expect(container.querySelector('[role="status"]')).toBeTruthy();
+    });
+
+    // Try clicking Ja again (button should now be disabled)
+    await act(async () => {
+      const yesBtn = container.querySelector('[data-testid="retro-confirm-yes"]');
+      if (yesBtn) fireEvent.click(yesBtn);
+    });
+
+    // Still only 1 call
+    const cmdCalls = globalThis.fetch.mock.calls.filter((c) => c[0] === '/api/command');
+    expect(cmdCalls).toHaveLength(1);
+  });
+});
+
+// ── AC9 — Doppel-Feuer-Schutz + 409-Hinweis ──────────────────────────────────
+
+describe('team-train-trigger — AC9: Doppel-Feuer-Schutz + 409-Hinweis', () => {
+  it('"Ja"-Button is disabled while sending (Doppel-Feuer-Schutz)', async () => {
+    // Slow fetch so we can observe disabled state
+    let resolveCmd;
+    globalThis.fetch = jest.fn(async (url, opts) => {
+      if (url === '/api/retro/runs') {
+        return { ok: true, json: async () => ({ runs: [] }) };
+      }
+      if (url === '/api/command' && opts?.method === 'POST') {
+        await new Promise((r) => { resolveCmd = r; });
+        return { ok: true, status: 202, json: async () => ({}) };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+
+    const { container } = render(React.createElement(RetroView, { onNavigate: jest.fn() }));
+    await waitFor(() => {
+      expect(container.querySelector('[aria-busy="true"]')).toBeNull();
+    });
+
+    // Open dialog
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="retro-start-btn"]'));
+    });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="retro-confirm-dialog"]')).toBeTruthy();
+    });
+
+    // Click Ja — fetch is slow
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="retro-confirm-yes"]'));
+    });
+
+    // While sending: "Ja"-Button must be disabled
+    const yesBtn = container.querySelector('[data-testid="retro-confirm-yes"]');
+    expect(yesBtn.disabled).toBe(true);
+
+    // Resolve the fetch
+    await act(async () => {
+      if (resolveCmd) resolveCmd();
+      await new Promise((r) => setTimeout(r, 10));
+    });
+  });
+
+  it('409 response shows "Session belegt" hint (AC9)', async () => {
+    const { container } = renderRetroForTrigger({ commandStatus: 409 });
+    await openRetroDialog(container);
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="retro-confirm-yes"]'));
+    });
+
+    await waitFor(() => {
+      const alert = container.querySelector('[role="alert"]');
+      expect(alert).toBeTruthy();
+      expect(alert.textContent).toMatch(/Session belegt/i);
+    });
+  });
+
+  it('network error shows error feedback (AC9)', async () => {
+    globalThis.fetch = jest.fn(async (url) => {
+      if (url === '/api/retro/runs') {
+        return { ok: true, json: async () => ({ runs: [] }) };
+      }
+      if (url === '/api/command') {
+        throw new Error('Network error');
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+
+    const { container } = render(React.createElement(RetroView, { onNavigate: jest.fn() }));
+    await waitFor(() => {
+      expect(container.querySelector('[aria-busy="true"]')).toBeNull();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="retro-start-btn"]'));
+    });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="retro-confirm-dialog"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="retro-confirm-yes"]'));
+    });
+
+    await waitFor(() => {
+      const alert = container.querySelector('[role="alert"]');
+      expect(alert).toBeTruthy();
+      expect(alert.textContent).toMatch(/Fehler/i);
+    });
+  });
+
+  it('after 409, exactly one /api/command was called (no auto-retry)', async () => {
+    const { container } = renderRetroForTrigger({ commandStatus: 409 });
+    await openRetroDialog(container);
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="retro-confirm-yes"]'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[role="alert"]')).toBeTruthy();
+    });
+
+    const cmdCalls = globalThis.fetch.mock.calls.filter((c) => c[0] === '/api/command');
+    expect(cmdCalls).toHaveLength(1);
+  });
+});
+
+// ── AC10 — A11y: Dialog Semantik + Fokus-Rückgabe ────────────────────────────
+
+describe('team-train-trigger — AC10: A11y Dialog-Semantik', () => {
+  it('closing dialog with "Nein" does not crash (focus-return smoke test)', async () => {
+    const { container } = renderRetroForTrigger();
+    await openRetroDialog(container);
+
+    await expect(
+      act(async () => {
+        fireEvent.click(container.querySelector('[data-testid="retro-confirm-no"]'));
+        await new Promise((r) => setTimeout(r, 10));
+      }),
+    ).resolves.not.toThrow();
+
+    // Dialog gone
+    expect(container.querySelector('[data-testid="retro-confirm-dialog"]')).toBeNull();
+  });
+
+  it('"Nein"-Button text is readable (Bedeutung nicht allein über Farbe, AC10)', async () => {
+    const { container } = renderRetroForTrigger();
+    await openRetroDialog(container);
+
+    const noBtn = container.querySelector('[data-testid="retro-confirm-no"]');
+    expect(noBtn.textContent.trim().length).toBeGreaterThan(0);
+  });
+
+  it('"Ja"-Button text is readable (Bedeutung nicht allein über Farbe, AC10)', async () => {
+    const { container } = renderRetroForTrigger();
+    await openRetroDialog(container);
+
+    const yesBtn = container.querySelector('[data-testid="retro-confirm-yes"]');
+    expect(yesBtn.textContent.trim().length).toBeGreaterThan(0);
+  });
+
+  it('dialog does not have outline:none on Yes-button (focus ring preserved, AC10)', async () => {
+    const { container } = renderRetroForTrigger();
+    await openRetroDialog(container);
+
+    const yesBtn = container.querySelector('[data-testid="retro-confirm-yes"]');
+    expect(yesBtn.style.outline).not.toBe('none');
+    expect(yesBtn.style.outline).not.toBe('0');
+  });
+
+  it('dialog does not have outline:none on No-button (focus ring preserved, AC10)', async () => {
+    const { container } = renderRetroForTrigger();
+    await openRetroDialog(container);
+
+    const noBtn = container.querySelector('[data-testid="retro-confirm-no"]');
+    expect(noBtn.style.outline).not.toBe('none');
+    expect(noBtn.style.outline).not.toBe('0');
+  });
+});
+
+// ── AC11 — Security-Floor: kein dangerouslySetInnerHTML, Endpunkte ────────────
+
+describe('team-train-trigger — AC11: Security-Floor', () => {
+  it('only /api/retro/* and /api/command endpoints are called', async () => {
+    const { container } = renderRetroForTrigger({ commandStatus: 202 });
+    await openRetroDialog(container);
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="retro-confirm-yes"]'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[role="status"]')).toBeTruthy();
+    });
+
+    for (const call of globalThis.fetch.mock.calls) {
+      expect(call[0]).toMatch(/^\/api\/(retro\/|command$)/);
+    }
+  });
+
+  it('dialog text nodes are plain text (no dangerouslySetInnerHTML, AC11)', async () => {
+    const { container } = renderRetroForTrigger();
+    await openRetroDialog(container);
+
+    const dialog = container.querySelector('[data-testid="retro-confirm-dialog"]');
+    // Heading and body must be simple text — no child elements injected by React
+    const title = dialog.querySelector('h2');
+    const bodyP = dialog.querySelectorAll('p');
+    expect(title).toBeTruthy();
+    // No script/style/img injected
+    expect(dialog.querySelector('script')).toBeNull();
+    expect(dialog.querySelector('img')).toBeNull();
+    // Body paragraphs have text
+    for (const p of bodyP) {
+      // Check the paragraph has no injected HTML elements (plain text)
+      expect(p.querySelector('*')).toBeNull();
+    }
+  });
+
+  it('POST /api/command body has exactly {command} (no extra keys, AC11)', async () => {
+    const { container } = renderRetroForTrigger();
+    await openRetroDialog(container);
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="retro-confirm-yes"]'));
+    });
+
+    await waitFor(() => {
+      const cmdCalls = globalThis.fetch.mock.calls.filter((c) => c[0] === '/api/command');
+      expect(cmdCalls).toHaveLength(1);
+    });
+
+    const [, opts] = globalThis.fetch.mock.calls.find((c) => c[0] === '/api/command');
+    const body = JSON.parse(opts.body);
+    // Must have 'command' key; no injected data
+    expect(body.command).toBe('/agent-flow:retro');
+    // projectPath is optional per spec; only 'command' is mandatory — no extra sensitive keys
+    const keys = Object.keys(body);
+    expect(keys.every((k) => k === 'command' || k === 'projectPath')).toBe(true);
   });
 });
