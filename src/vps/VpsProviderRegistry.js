@@ -599,7 +599,28 @@ export class VpsProviderRegistry {
       tunnelId: tunnelResult?.tunnelId ?? null,
     };
 
-    const machine = await adapter.create(adapterParams, token);
+    let machine;
+    try {
+      machine = await adapter.create(adapterParams, token);
+    } catch (createErr) {
+      // S-164 AC13/AC14: Tunnel-Rollback bei fehlgeschlagenem Server-Create.
+      // Der Tunnel wurde VOR adapter.create() angelegt (#provisionTunnel oben). Scheitert der
+      // Server-Create (z.B. ungültiger Server-Typ/Region), würde der Tunnel sonst verwaisen
+      // ("Cloudflare resource already exists" beim nächsten Versuch mit gleichem Namen).
+      // #cleanupTunnel (S-153) ist idempotent + best-effort (deleteTunnel inkl. Connections-
+      // Cleanup S-171 + Store-Bereinigung). Der ursprüngliche Create-Fehler wird NIE maskiert.
+      if (tunnelResult) {
+        try {
+          await this.#cleanupTunnel(params.name);
+          console.log(`[VpsProviderRegistry] Tunnel-Rollback nach fehlgeschlagenem Create für '${sanitizeTunnelName(params.name)}'`);
+        } catch (rollbackErr) {
+          // Rollback-Fehler nur protokollieren (geheimnisfrei) — Original-Fehler bleibt maßgeblich
+          const safeMsg = String(rollbackErr?.message ?? 'unbekannt').slice(0, 200);
+          console.error('[VpsProviderRegistry] Tunnel-Rollback fehlgeschlagen (best-effort):', safeMsg);
+        }
+      }
+      throw createErr;
+    }
 
     // S-166 AC1: Ziel-Metadaten persistieren — nach erfolgreichem Create.
     // Best-effort: schlägt die Persistenz fehl, bleibt der VPS angelegt (EC analog AC10/S-152).

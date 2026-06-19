@@ -62,6 +62,10 @@ function makeCredentialStore(tokensByProvider = {}, publicKeysByLabel = {}) {
       storedEntries[storeKey] = value;
       return { status: 'set', updatedAt: new Date().toISOString() };
     },
+    async delete(storeKey) {
+      delete storedEntries[storeKey];
+      return { status: 'deleted' };
+    },
     _storedEntries: storedEntries, // für Test-Assertions zugänglich
   };
 }
@@ -330,6 +334,62 @@ describe('VpsProviderRegistry — AC7: create()', () => {
     await expect(
       registry.create('ionos', { name: 'x', region: 'de', serverType: 'small' }),
     ).rejects.toThrow(VpsRegistryError);
+  });
+});
+
+// ── S-164: Tunnel-Rollback bei fehlgeschlagenem VPS-Create (vps-create-options AC13/AC14) ──
+
+describe('VpsProviderRegistry — S-164: Tunnel-Rollback bei Create-Fehler', () => {
+  function makeCfApi({ createTunnel, deleteTunnel } = {}) {
+    return {
+      createTunnel: createTunnel ?? (async () => ({ tunnelId: 'T-rollback', token: 'tunnel-secret-never-logged' })),
+      deleteTunnel: deleteTunnel ?? (async () => ({ result: 'ok' })),
+      listRoutes: async () => [],
+      removeRoute: async () => ({ result: 'ok' }),
+      isProtected: () => false,
+    };
+  }
+  function makeFailingRegistry(store, cloudflareApi, createErr) {
+    return new VpsProviderRegistry({
+      credentialStore: store,
+      cloudInitBuilder: { build: () => '#cloud-config\n# stub\n' },
+      cloudflareApi,
+      adapters: {
+        hetzner: { capabilities: () => ({ list: true, start: true, stop: true, create: true }),
+          listMachines: async () => [], start: async () => ({ result: 'ok' }), stop: async () => ({ result: 'ok' }),
+          create: async () => { throw createErr; } },
+        ionos: makeAdapter(), hostinger: makeAdapter(),
+      },
+    });
+  }
+  const validParams = { name: 'rollback-srv', region: 'nbg1', serverType: 'cx-invalid', sshKeyAssignment: { root: 'root', alex: 'alex' } };
+
+  it('AC13/AC14: adapter.create() wirft → deleteTunnel(tunnelId) aufgerufen + Original-Fehler propagiert', async () => {
+    const store = makeCredentialStore({ hetzner: MOCK_TOKEN }, { root: ROOT_PUB_KEY, alex: ALEX_PUB_KEY });
+    const deleted = [];
+    const cf = makeCfApi({ deleteTunnel: async (id) => { deleted.push(id); return { result: 'ok' }; } });
+    const registry = makeFailingRegistry(store, cf, new Error('Server-Typ ungültig (cx-invalid)'));
+    await expect(registry.create('hetzner', validParams)).rejects.toThrow('Server-Typ ungültig');
+    expect(deleted).toContain('T-rollback');
+  });
+
+  it('AC9: cloudflare-not-configured (kein Tunnel angelegt) → kein deleteTunnel beim Create-Fehler', async () => {
+    const store = makeCredentialStore({ hetzner: MOCK_TOKEN }, { root: ROOT_PUB_KEY, alex: ALEX_PUB_KEY });
+    const deleted = [];
+    const cf = makeCfApi({
+      createTunnel: async () => { const e = new Error('not configured'); e.errorClass = 'cloudflare-not-configured'; throw e; },
+      deleteTunnel: async (id) => { deleted.push(id); },
+    });
+    const registry = makeFailingRegistry(store, cf, new Error('boom'));
+    await expect(registry.create('hetzner', validParams)).rejects.toThrow('boom');
+    expect(deleted).toEqual([]);
+  });
+
+  it('AC14: Rollback-Fehler maskiert den Original-Create-Fehler NICHT', async () => {
+    const store = makeCredentialStore({ hetzner: MOCK_TOKEN }, { root: ROOT_PUB_KEY, alex: ALEX_PUB_KEY });
+    const cf = makeCfApi({ deleteTunnel: async () => { throw new Error('rollback failed'); } });
+    const registry = makeFailingRegistry(store, cf, new Error('original create error'));
+    await expect(registry.create('hetzner', validParams)).rejects.toThrow('original create error');
   });
 });
 
@@ -870,12 +930,22 @@ describe('VpsProviderRegistry — S-152 Tunnel-Provisionierung beim Create', () 
     expect(storedIdValue).not.toContain(MOCK_TUNNEL_TOKEN);
   });
 
-  it('AC10 — Token bleibt im CredentialStore, auch wenn Adapter-Create fehlschlägt', async () => {
+  it('AC10/S-164 — Adapter-Create-Fehler → Tunnel-Rollback (Token + Tunnel entfernt, kein verwaister Tunnel)', async () => {
     const store = makeCredentialStore(
       { hetzner: MOCK_TOKEN },
       { root: ROOT_PUB_KEY, alex: ALEX_PUB_KEY },
     );
-    const { stub: cfStub } = makeCloudflareApiStub();
+    // S-164 überschreibt die ursprüngliche S-152-AC10-Annahme ("Token bleibt"): der beim
+    // Create vorab angelegte Tunnel war bei einem Adapter-Fehler GENAU das Problem (verwaister
+    // Tunnel → "Cloudflare resource already exists" beim nächsten Versuch). Daher: Rollback.
+    const deletedTunnels = [];
+    const cfStub = {
+      async createTunnel(_name) { return { tunnelId: MOCK_TUNNEL_ID, token: MOCK_TUNNEL_TOKEN }; },
+      async deleteTunnel(id) { deletedTunnels.push(id); return { result: 'ok' }; },
+      async listRoutes(_id) { return []; },
+      async removeRoute(_id, _h) { return { result: 'ok' }; },
+      isProtected() { return false; },
+    };
     const { stub: builderStub } = makeBuildCapture();
 
     const registry = new VpsProviderRegistry({
@@ -895,18 +965,19 @@ describe('VpsProviderRegistry — S-152 Tunnel-Provisionierung beim Create', () 
       },
     });
 
-    // Create schlägt beim Adapter fehl — Token wurde aber VOR dem Adapter-Call persistiert
+    // Create schlägt beim Adapter fehl → S-164: Tunnel zurückrollen, Original-Fehler propagieren.
     await expect(
       registry.create('hetzner', {
         name: 'my-vps',
         region: 'nbg1',
-        serverType: 'cx11',
+        serverType: 'cx23',
         sshKeyAssignment: { root: 'root', alex: 'alex' },
       }),
-    ).rejects.toThrow();
+    ).rejects.toThrow('Provider-API nicht erreichbar');
 
-    // Token muss im Store sein (AC10 — kein verwaistes, unreferenziertes Geheimnis)
+    // Rollback: Tunnel gelöscht + Token-Referenz aus dem Store entfernt (kein verwaistes Geheimnis).
+    expect(deletedTunnels).toContain(MOCK_TUNNEL_ID);
     const tokenKey = `credentials/cloudflare/tunnel_token/${MOCK_TUNNEL_ID}`;
-    expect(store._storedEntries[tokenKey]).toBe(MOCK_TUNNEL_TOKEN);
+    expect(store._storedEntries[tokenKey]).toBeUndefined();
   });
 });
