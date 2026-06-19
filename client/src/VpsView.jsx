@@ -19,6 +19,13 @@
  *   AC5 — UI sperrt Create-Button wenn kein Label mit Public-Key vorhanden ist
  *          oder eine Rolle kein Label zugeordnet hat.
  *
+ * Implements: vps-create-options AC6–AC10 (Server-Typ/Region-Dropdowns mit Kosten)
+ *   AC6  — Bei Provider hetzner: Region + Server-Typ als Dropdowns aus Live-Listen.
+ *   AC7  — Server-Typ-Dropdown zeigt Specs + Kosten; Preis folgt gewählter Region.
+ *   AC8  — Fehlende Preise → „Preis unbekannt"; deprecated Typen nicht wählbar.
+ *   AC9  — Graceful Degradation: Fehler/optionsAvailable:false → Freitext-Fallback.
+ *   AC10 — Kein Hetzner-Token im Frontend-Bundle/Log; Create-Payload unverändert.
+ *
  * Implements: vps-container-overview AC1–AC7 (Container-Übersicht)
  *   AC1 — Container-Button je VPS-Zeile; Klick öffnet Übersicht + Listing-Fetch.
  *   AC2 — Listet je Container: Name, Status, Image, Port; managed vs. unmanaged.
@@ -33,7 +40,8 @@
  *     niemals rohe Key-Material-Strings vom Client.
  *   - Public-Keys dürfen angezeigt werden (nicht geheim).
  *   - 403-Antworten werden als „keine Berechtigung" dargestellt; kein Token-Leak.
- *   - SSH-Private-Key und Cloudflare-Token erscheinen NICHT im Frontend-Bundle.
+ *   - SSH-Private-Key, Cloudflare-Token und Hetzner-Token erscheinen NICHT im Frontend-Bundle.
+ *   - Provider-Options-Endpunkt liefert nur abgeleitete Listen/Preise (kein Token an Client).
  *
  * A11y: WCAG 2.1 AA — Beschriftete select/input-Elemente, aria-required,
  *   aria-describedby für Fehlermeldungen, role=alert/status, Touch-Target ≥ 44 px,
@@ -206,6 +214,23 @@ async function deleteContainer({ provider, serverId, containerId, confirm }) {
     throw new Error(data.reason ?? data.error ?? `Entfernen fehlgeschlagen (${res.status})`);
   }
   return data;
+}
+
+/**
+ * Lädt die verfügbaren Create-Optionen (Server-Typen, Locations, Images) für einen Provider.
+ * GET /api/vps/providers/:provider/options
+ *
+ * Liefert { optionsAvailable: true, serverTypes, locations, images } für Hetzner,
+ * oder { optionsAvailable: false } bei Fehler / nicht-Hetzner / nicht konfiguriert.
+ * Kein Hetzner-Token im Response (AC10) — nur abgeleitete Listen.
+ *
+ * @param {string} provider
+ * @returns {Promise<{ optionsAvailable: boolean, serverTypes?: Array, locations?: Array, images?: Array }>}
+ */
+async function fetchProviderOptions(provider) {
+  const res = await fetch(`/api/vps/providers/${encodeURIComponent(provider)}/options`);
+  if (!res.ok) return { optionsAvailable: false };
+  return res.json();
 }
 
 /**
@@ -688,12 +713,78 @@ function ContainerOverview({ provider, serverId, machineName, onClose }) {
   );
 }
 
+// ── Preis-Helfer (vps-create-options AC7/AC8) ─────────────────────────────────
+
+/**
+ * Gibt den besten verfügbaren Preis-Eintrag für eine Location zurück.
+ * Versucht zuerst die gewählte Region (locationName); fällt auf ersten Eintrag zurück.
+ * Gibt { priceEntry, isFallback } zurück oder { priceEntry: null, isFallback: false }.
+ *
+ * @param {Array<{ location: string, priceMonthly?: object, priceHourly?: object }>} prices
+ * @param {string} locationName - aktuell gewählte Region (z.B. "nbg1")
+ * @returns {{ priceEntry: object|null, isFallback: boolean }}
+ */
+function resolvePriceEntry(prices, locationName) {
+  if (!Array.isArray(prices) || prices.length === 0) {
+    return { priceEntry: null, isFallback: false };
+  }
+  const exact = prices.find((p) => p.location === locationName);
+  if (exact) return { priceEntry: exact, isFallback: false };
+  // Kein Preis für diese Region → Fallback auf ersten Eintrag
+  return { priceEntry: prices[0], isFallback: true };
+}
+
+/**
+ * Formatiert einen Preis-Wert (gross bevorzugt, net als Fallback mit Kennzeichnung).
+ * Gibt einen lesbaren String oder null zurück.
+ *
+ * @param {{ gross?: string|number|null, net?: string|number|null }|null|undefined} priceObj
+ * @param {'monatlich'|'stündlich'} label
+ * @returns {string|null}
+ */
+function formatPrice(priceObj, label) {
+  if (!priceObj) return null;
+  const gross = priceObj.gross;
+  const net = priceObj.net;
+  if (gross != null && gross !== '' && gross !== null) {
+    const val = parseFloat(gross);
+    return `~${isNaN(val) ? gross : val.toFixed(2)} € ${label} (brutto)`;
+  }
+  if (net != null && net !== '' && net !== null) {
+    const val = parseFloat(net);
+    return `~${isNaN(val) ? net : val.toFixed(2)} € ${label} (netto)`;
+  }
+  return null;
+}
+
+/**
+ * Baut den Kosten-Text für eine Server-Typ-Option zusammen.
+ * Zeigt monatlich + stündlich; brutto bevorzugt; "Preis unbekannt" wenn keine Preisdaten.
+ *
+ * @param {{ priceMonthly?: object, priceHourly?: object }|null} priceEntry
+ * @param {boolean} isFallback
+ * @returns {string}
+ */
+function buildCostText(priceEntry, isFallback) {
+  if (!priceEntry) return 'Preis unbekannt';
+  const monthly = formatPrice(priceEntry.priceMonthly, 'monatlich');
+  const hourly = formatPrice(priceEntry.priceHourly, 'stündlich');
+  const parts = [monthly, hourly].filter(Boolean);
+  if (parts.length === 0) return 'Preis unbekannt';
+  const suffix = isFallback ? ' (anderer Standort)' : '';
+  return parts.join(' · ') + suffix;
+}
+
 // ── VpsCreateForm ─────────────────────────────────────────────────────────────
 
 /**
  * Create-Formular — Pro Rolle (root, alex) ein Dropdown mit verfügbaren SSH-Labels.
  * Default-Vorbelegung: gleichnamiges Label → Rolle (AC2).
  * UI-Sperre wenn kein wählbares Label vorhanden (AC5).
+ *
+ * Bei Provider "hetzner" werden Region + Server-Typ als Dropdowns angezeigt (AC6/AC7).
+ * Graceful Degradation: Fehler beim Options-Laden → Freitext-Fallback (AC9).
+ * Kein Hetzner-Token im Frontend-Bundle (AC10).
  *
  * @param {{
  *   providers: Array<{ id: string, configured: boolean }>,
@@ -727,6 +818,64 @@ function VpsCreateForm({ providers, sshLabels, onCreated, onCancel }) {
   const [error, setError] = useState(null);
   const nameInputRef = useRef(null);
   const ERROR_ID = 'vps-create-error';
+  const OPTIONS_STATUS_ID = 'vps-create-options-status';
+
+  // ── vps-create-options AC6–AC10: Options-State ──────────────────────────────
+  // 'idle' | 'loading' | 'ok' | 'fallback'
+  const [optionsState, setOptionsState] = useState('idle');
+  const [locations, setLocations] = useState([]);    // HetznerLocationOption[]
+  const [serverTypes, setServerTypes] = useState([]); // HetznerServerTypeOption[]
+
+  // Optionen laden wenn Provider "hetzner" gewählt (AC6)
+  useEffect(() => {
+    if (provider !== 'hetzner') {
+      // Nicht-Hetzner: Freitext-Fallback (AC9)
+      setOptionsState('idle');
+      setLocations([]);
+      setServerTypes([]);
+      setRegion('');
+      setServerType('');
+      return;
+    }
+    let cancelled = false;
+    setOptionsState('loading');
+    fetchProviderOptions('hetzner').then((data) => {
+      if (cancelled) return;
+      if (data?.optionsAvailable === true && Array.isArray(data.locations) && data.locations.length > 0) {
+        setLocations(data.locations);
+        // Deprecated Typen rausfiltern (AC8)
+        const activeTypes = (data.serverTypes ?? []).filter((t) => !t.deprecated);
+        // Wenn alle Typen deprecated sind → Freitext-Fallback (kein leeres Dropdown)
+        if (activeTypes.length === 0) {
+          setServerTypes([]);
+          setRegion('');
+          setServerType('');
+          setOptionsState('fallback');
+        } else {
+          setServerTypes(activeTypes);
+          // Vorauswahl: erste Location + erster Typ
+          setRegion((prev) => prev || data.locations[0]?.name || '');
+          setServerType((prev) => prev || activeTypes[0]?.name || '');
+          setOptionsState('ok');
+        }
+      } else {
+        // optionsAvailable:false oder Fehler → Freitext-Fallback (AC9)
+        setOptionsState('fallback');
+        setLocations([]);
+        setServerTypes([]);
+        setRegion('');
+        setServerType('');
+      }
+    }).catch(() => {
+      if (cancelled) return;
+      setOptionsState('fallback');
+      setLocations([]);
+      setServerTypes([]);
+      setRegion('');
+      setServerType('');
+    });
+    return () => { cancelled = true; };
+  }, [provider]);
 
   // Hinweis wenn beide Rollen dasselbe Label nutzen (non-distinkter Key)
   const nonDistinct = rootLabel && alexLabel && rootLabel === alexLabel;
@@ -735,6 +884,9 @@ function VpsCreateForm({ providers, sshLabels, onCreated, onCancel }) {
   const noLabelsAvailable = labelsWithKey.length === 0;
   const missingAssignment = !rootLabel || !alexLabel;
   const createBlocked = noLabelsAvailable || missingAssignment || !provider || !name.trim() || !region.trim() || !serverType.trim();
+
+  // Wir zeigen Dropdowns wenn Provider=hetzner und Options erfolgreich geladen (AC6)
+  const useDropdowns = provider === 'hetzner' && optionsState === 'ok' && locations.length > 0;
 
   const handleSubmit = useCallback(async (e) => {
     e.preventDefault();
@@ -830,45 +982,115 @@ function VpsCreateForm({ providers, sshLabels, onCreated, onCancel }) {
         />
       </div>
 
-      {/* Region */}
+      {/* Region — Dropdown (hetzner+ok) oder Freitext (AC9 Fallback) */}
       <div style={createStyles.field}>
         <label htmlFor="vps-create-region" style={createStyles.label}>
           Region <span aria-hidden="true" style={createStyles.required}>*</span>
         </label>
-        <input
-          id="vps-create-region"
-          type="text"
-          value={region}
-          onChange={(e) => setRegion(e.target.value)}
-          placeholder="z.B. nbg1 oder fsn1"
-          style={createStyles.input}
-          aria-required="true"
-          aria-describedby={error ? ERROR_ID : undefined}
-          autoComplete="off"
-          disabled={submitting}
-        />
+        {optionsState === 'loading' ? (
+          <p
+            id={OPTIONS_STATUS_ID}
+            style={createStyles.optionsLoading}
+            aria-live="polite"
+          >
+            Lade verfügbare Regionen…
+          </p>
+        ) : useDropdowns ? (
+          <select
+            id="vps-create-region"
+            value={region}
+            onChange={(e) => setRegion(e.target.value)}
+            style={createStyles.select}
+            aria-required="true"
+            aria-describedby={error ? ERROR_ID : undefined}
+            disabled={submitting}
+          >
+            {locations.map((loc) => (
+              <option key={loc.name} value={loc.name}>
+                {loc.name}
+                {loc.city ? ` — ${loc.city}` : ''}
+                {loc.country ? ` (${loc.country})` : ''}
+                {loc.networkZone ? ` [${loc.networkZone}]` : ''}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <>
+            <input
+              id="vps-create-region"
+              type="text"
+              value={region}
+              onChange={(e) => setRegion(e.target.value)}
+              placeholder="z.B. nbg1 oder fsn1"
+              style={createStyles.input}
+              aria-required="true"
+              aria-describedby={error ? ERROR_ID : undefined}
+              autoComplete="off"
+              disabled={submitting}
+            />
+            {optionsState === 'fallback' && (
+              <p style={createStyles.optionsFallbackHint} aria-live="polite">
+                Live-Optionen nicht verfügbar — bitte Region manuell eingeben.
+              </p>
+            )}
+          </>
+        )}
       </div>
 
-      {/* Server-Typ */}
+      {/* Server-Typ — Dropdown (hetzner+ok) oder Freitext (AC9 Fallback) */}
       <div style={createStyles.field}>
         <label htmlFor="vps-create-servertype" style={createStyles.label}>
           Server-Typ <span aria-hidden="true" style={createStyles.required}>*</span>
         </label>
-        <input
-          id="vps-create-servertype"
-          type="text"
-          value={serverType}
-          onChange={(e) => setServerType(e.target.value)}
-          placeholder="z.B. cx11 oder cx21"
-          style={createStyles.input}
-          aria-required="true"
-          aria-describedby={error ? ERROR_ID : undefined}
-          autoComplete="off"
-          disabled={submitting}
-        />
+        {optionsState === 'loading' ? (
+          <p style={createStyles.optionsLoading} aria-live="polite">
+            Lade verfügbare Server-Typen…
+          </p>
+        ) : useDropdowns ? (
+          <select
+            id="vps-create-servertype"
+            value={serverType}
+            onChange={(e) => setServerType(e.target.value)}
+            style={createStyles.select}
+            aria-required="true"
+            aria-describedby={error ? ERROR_ID : undefined}
+            disabled={submitting}
+          >
+            {serverTypes.map((st) => {
+              const { priceEntry, isFallback } = resolvePriceEntry(st.prices ?? [], region);
+              const costText = buildCostText(priceEntry, isFallback);
+              const specsText = `${st.name} — ${st.cores} vCPU, ${st.memory} GB RAM, ${st.disk} GB · ${costText}`;
+              return (
+                <option key={st.name} value={st.name}>
+                  {specsText}
+                </option>
+              );
+            })}
+          </select>
+        ) : (
+          <>
+            <input
+              id="vps-create-servertype"
+              type="text"
+              value={serverType}
+              onChange={(e) => setServerType(e.target.value)}
+              placeholder="z.B. cx23 oder cpx21"
+              style={createStyles.input}
+              aria-required="true"
+              aria-describedby={error ? ERROR_ID : undefined}
+              autoComplete="off"
+              disabled={submitting}
+            />
+            {optionsState === 'fallback' && (
+              <p style={createStyles.optionsFallbackHint} aria-live="polite">
+                Live-Optionen nicht verfügbar — bitte Server-Typ manuell eingeben.
+              </p>
+            )}
+          </>
+        )}
       </div>
 
-      {/* Image (optional) */}
+      {/* Image (optional) — bleibt Freitext (S-163) */}
       <div style={createStyles.field}>
         <label htmlFor="vps-create-image" style={createStyles.label}>
           Image <span style={createStyles.optional}>(optional)</span>
@@ -1614,7 +1836,7 @@ const createStyles = {
     borderRadius: 4,
     fontSize: 14,
     boxSizing: 'border-box',
-    minHeight: 36,
+    minHeight: 44,
   },
   fieldset: {
     border: '1px solid #374151',
@@ -1689,6 +1911,18 @@ const createStyles = {
     color: '#9ca3af',
     fontSize: 11,
     marginLeft: 4,
+  },
+  // vps-create-options AC9: Lade- und Fallback-Hinweis
+  optionsLoading: {
+    margin: '4px 0',
+    fontSize: 12,
+    color: '#9ca3af',
+    fontStyle: 'italic',
+  },
+  optionsFallbackHint: {
+    margin: '4px 0 0',
+    fontSize: 11,
+    color: '#fbbf24',
   },
 };
 
