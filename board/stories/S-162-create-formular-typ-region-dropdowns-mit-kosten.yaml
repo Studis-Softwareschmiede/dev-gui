@@ -1,7 +1,7 @@
 id: S-162
 parent: F-014
 title: 'Create-Formular: Server-Typ- und Region-Dropdowns mit Kosten-Anzeige (Hetzner)'
-status: To Do
+status: Done
 priority: P1
 spec: docs/specs/vps-create-options.md
 implements:
@@ -19,7 +19,7 @@ labels:
 size_est: M
 dispo_est: 5
 confidence: medium
-branch: null
+branch: feat/S-162-typ-region-dropdowns
 pr: null
 blocked_reason: null
 estimate_note: 'Frontend-Umbau in client/src/VpsView.jsx (VpsCreateForm). Bei Provider=hetzner Optionen
@@ -38,4 +38,4 @@ estimate_note: 'Frontend-Umbau in client/src/VpsView.jsx (VpsCreateForm). Bei Pr
   korrekte Create-Payload; kein Secret im Bundle. M (~5 EP) — UI-Umbau einer bestehenden View mit abhaengiger
   Preis-Logik + Degradation, haengt an S-161.'
 created_at: '2026-06-18T00:00:00Z'
-updated_at: '2026-06-18T00:00:00Z'
+updated_at: '2026-06-19T03:20:00Z'
