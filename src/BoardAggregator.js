@@ -3,6 +3,9 @@
  *                   (AC1: Scan, AC2: flüchtiger Index/Watcher, AC3: Aggregat-Modell,
  *                    AC7: Read-only-Garantie, AC8: Fehlertoleranz, AC9: Aktualität)
  *
+ * story-detail-yaml-fallback:
+ *   AC1 — Story-Index enthält done_at, branch, pr (null wenn YAML-Feld fehlt).
+ *
  * Scannt die konfigurierten Repo-Wurzeln (BOARD_ROOTS env-Variable) read-only nach
  * board/-Ordnern und liest je Repo:
  *   - board/board.yaml               (Projekt-Meta)
@@ -580,6 +583,10 @@ export class BoardAggregator {
           blocked_reason: data.blocked_reason != null ? String(data.blocked_reason) : null,
           dispo_est: data.dispo_est ?? null,
           dispo_act: data.dispo_act ?? null,
+          // story-detail-yaml-fallback AC1: YAML-Felder für Fallback
+          done_at: data.done_at != null ? String(data.done_at) : null,
+          branch: data.branch != null ? String(data.branch) : null,
+          pr: data.pr != null ? String(data.pr) : null,
           // ready/ready_reason computed below after all stories are parsed
           ready: false,
           ready_reason: null,
@@ -774,6 +781,9 @@ export class BoardAggregator {
  *   blocked_reason: string|null,
  *   dispo_est: *,
  *   dispo_act: *,
+ *   done_at: string|null,
+ *   branch: string|null,
+ *   pr: string|null,
  *   ready: boolean,
  *   ready_reason: string|null
  * }} StoryEntry

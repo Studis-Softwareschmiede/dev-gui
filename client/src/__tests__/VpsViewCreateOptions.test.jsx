@@ -1,6 +1,6 @@
 /**
- * VpsViewCreateOptions.test.jsx — Tests für S-162: Server-Typ- und Region-Dropdowns
- * mit Kosten-Anzeige im VPS-Create-Formular.
+ * VpsViewCreateOptions.test.jsx — Tests für S-162 + S-178: Server-Typ- und Region-Dropdowns
+ * mit Kosten-Anzeige und availability-basierter Filterung im VPS-Create-Formular.
  *
  * Covers (vps-create-options AC6–AC10):
  *   AC6  — Bei Provider hetzner + optionsAvailable:true → Region und Server-Typ als Dropdowns;
@@ -13,6 +13,14 @@
  *           Freitext-Felder bleiben, Create bleibt absendbar; Fallback-Hinweis sichtbar.
  *   AC10 — Kein Hetzner-Token im Frontend-Bundle/Log; Create-Payload enthält nur
  *           region (Location-name) und serverType (Typ-name), kein Token.
+ *
+ * Covers (vps-create-options AC18–AC20, S-178):
+ *   AC18 — Bei gewählter Region + vorhandenem availability[region]: Server-Typ-Dropdown zeigt
+ *           nur bereitstellbare Typen (Region steuert die Typen-Liste, kein beidseitiges Filtern).
+ *   AC19 — Bei Region-Wechsel: serverType zurücksetzen wenn Typ in neuer Region nicht verfügbar;
+ *           Wahl bleibt erhalten wenn der Typ verfügbar bleibt.
+ *   AC20 — Graceful Fallback: fehlt availability ganz oder fehlt Eintrag für die Region →
+ *           ungefiltert rendern (heutiges Story-B-Verhalten); Floor unverändert.
  *
  * A11y (jsdom-testbar):
  *   — Dropdowns haben beschriftete selects (label htmlFor, aria-required).
@@ -669,6 +677,296 @@ describe('VpsView — S-162 AC10: Kein Token im Bundle/Payload', () => {
     expect(optionsUrl).toBeTruthy();
     // URL enthält keinen Bearer-Token-ähnlichen String
     expect(optionsUrl).not.toMatch(/Bearer|[A-Za-z0-9]{40,}/);
+  });
+});
+
+// ── AC18–AC20: availability-Filter + Region-Wechsel-Reset (S-178) ────────────
+
+/**
+ * Fixture: Options-Response MIT availability-Map.
+ * - nbg1: nur cx33 bereitstellbar (NICHT cx23)
+ * - ash:  nur cx23 bereitstellbar (NICHT cx33)
+ * - fsn1: kein Eintrag in availability → ungefiltert (AC20)
+ *
+ * Beide Typen cx23 + cx33 sind nicht deprecated (in serverTypes enthalten).
+ * cpx11 ist ebenfalls in ash verfügbar (für Preis-unbekannt-Test nicht nötig hier,
+ * aber dokumentiert dass availability unabhängig von prices[] ist).
+ */
+const OPTIONS_WITH_AVAILABILITY = {
+  optionsAvailable: true,
+  serverTypes: [
+    {
+      name: 'cx23',
+      cores: 2,
+      memory: 4,
+      disk: 40,
+      deprecated: false,
+      prices: [
+        { location: 'nbg1', priceMonthly: { net: '3.79', gross: '4.51' }, priceHourly: { net: '0.005', gross: '0.006' } },
+        { location: 'ash',  priceMonthly: { net: '3.79', gross: '3.79' }, priceHourly: { net: '0.005', gross: '0.005' } },
+      ],
+    },
+    {
+      name: 'cx33',
+      cores: 4,
+      memory: 8,
+      disk: 80,
+      deprecated: false,
+      prices: [
+        { location: 'nbg1', priceMonthly: { net: '6.72', gross: '7.99' }, priceHourly: { net: '0.009', gross: '0.011' } },
+      ],
+    },
+  ],
+  locations: [
+    { name: 'nbg1', networkZone: 'eu-central', city: 'Nuremberg', country: 'DE' },
+    { name: 'ash',  networkZone: 'us-east',    city: 'Ashburn',   country: 'US' },
+    { name: 'fsn1', networkZone: 'eu-central', city: 'Falkenstein', country: 'DE' },
+  ],
+  images: [
+    { name: 'ubuntu-24.04', description: 'Ubuntu 24.04', osFlavor: 'ubuntu', osVersion: '24.04' },
+  ],
+  // availability: nbg1 → cx33 only; ash → cx23 only; fsn1 fehlt → ungefiltert (AC20)
+  availability: {
+    nbg1: ['cx33'],
+    ash:  ['cx23'],
+    // fsn1 absichtlich nicht eingetragen (AC20-Fallback-Test)
+  },
+};
+
+describe('VpsView — S-178 AC18: availability[region]-Filter im Server-Typ-Dropdown', () => {
+  let restoreFetch;
+  afterEach(() => { if (restoreFetch) restoreFetch(); restoreFetch = null; });
+
+  it('AC18 — Server-Typ-Dropdown zeigt nur Typen aus availability[region] (nbg1 → nur cx33)', async () => {
+    const utils = await renderVpsView(makeFetch({ options: OPTIONS_WITH_AVAILABILITY }));
+    restoreFetch = utils.restoreFetch;
+    await openCreateForm(utils);
+
+    // Default-Region ist nbg1 (erste Location); availability[nbg1] = ['cx33']
+    const regionSelect = document.getElementById('vps-create-region');
+    expect(regionSelect.value).toBe('nbg1');
+
+    const stSelect = document.getElementById('vps-create-servertype');
+    const values = Array.from(stSelect.options).map((o) => o.value);
+    // cx33 muss vorhanden sein (in nbg1 bereitstellbar)
+    expect(values).toContain('cx33');
+    // cx23 darf NICHT erscheinen (nicht in availability[nbg1])
+    expect(values).not.toContain('cx23');
+  });
+
+  it('AC18 — Region ash: nur cx23 wählbar (cx33 nicht in availability[ash])', async () => {
+    const utils = await renderVpsView(makeFetch({ options: OPTIONS_WITH_AVAILABILITY }));
+    restoreFetch = utils.restoreFetch;
+    await openCreateForm(utils);
+
+    // Region auf ash wechseln
+    const regionSelect = document.getElementById('vps-create-region');
+    await act(async () => {
+      fireEvent.change(regionSelect, { target: { value: 'ash' } });
+    });
+
+    const stSelect = document.getElementById('vps-create-servertype');
+    const values = Array.from(stSelect.options).map((o) => o.value);
+    expect(values).toContain('cx23');
+    expect(values).not.toContain('cx33');
+  });
+
+  it('AC18 — Region steuert Typen-Liste; keine beidseitige Filterung (Region ändert sich nicht wenn Typ gewählt)', async () => {
+    const utils = await renderVpsView(makeFetch({ options: OPTIONS_WITH_AVAILABILITY }));
+    restoreFetch = utils.restoreFetch;
+    await openCreateForm(utils);
+
+    // Region-Dropdown muss unabhängig von gewähltem Typ alle Locations anbieten
+    const regionSelect = document.getElementById('vps-create-region');
+    const regionValues = Array.from(regionSelect.options).map((o) => o.value);
+    expect(regionValues).toContain('nbg1');
+    expect(regionValues).toContain('ash');
+    expect(regionValues).toContain('fsn1');
+  });
+});
+
+describe('VpsView — S-178 AC19: Typ-Reset bei Region-Wechsel wenn Typ nicht mehr verfügbar', () => {
+  let restoreFetch;
+  afterEach(() => { if (restoreFetch) restoreFetch(); restoreFetch = null; });
+
+  it('AC19 — Wechsel von nbg1 (cx33) zu ash: cx33 nicht in availability[ash] → Typ wird zurückgesetzt', async () => {
+    const utils = await renderVpsView(makeFetch({ options: OPTIONS_WITH_AVAILABILITY }));
+    restoreFetch = utils.restoreFetch;
+    await openCreateForm(utils);
+
+    // Initial: nbg1 gewählt, cx33 vorausgewählt (einziger nbg1-Typ)
+    const regionSelect = document.getElementById('vps-create-region');
+    expect(regionSelect.value).toBe('nbg1');
+    const stSelect = document.getElementById('vps-create-servertype');
+    expect(stSelect.value).toBe('cx33');
+
+    // Wechsel zu ash — cx33 ist nicht in availability[ash]
+    await act(async () => {
+      fireEvent.change(regionSelect, { target: { value: 'ash' } });
+    });
+
+    // serverType muss zurückgesetzt worden sein (nicht mehr cx33)
+    expect(stSelect.value).not.toBe('cx33');
+    // Stattdessen cx23 (einziger Typ in ash)
+    expect(stSelect.value).toBe('cx23');
+  });
+
+  it('AC19 — Wechsel zu Region wo der gewählte Typ noch verfügbar ist → Wahl bleibt erhalten', async () => {
+    // cx23 ist in ash verfügbar; wählen wir ash initial, dann zurück zu fsn1 (ungefiltert → cx23 bleibt)
+    const utils = await renderVpsView(makeFetch({ options: OPTIONS_WITH_AVAILABILITY }));
+    restoreFetch = utils.restoreFetch;
+    await openCreateForm(utils);
+
+    // Zu ash wechseln (cx23 wird vorausgewählt)
+    const regionSelect = document.getElementById('vps-create-region');
+    await act(async () => {
+      fireEvent.change(regionSelect, { target: { value: 'ash' } });
+    });
+    const stSelect = document.getElementById('vps-create-servertype');
+    expect(stSelect.value).toBe('cx23');
+
+    // Zu fsn1 wechseln (kein Eintrag in availability → ungefiltert → cx23 ist weiter vorhanden)
+    await act(async () => {
+      fireEvent.change(regionSelect, { target: { value: 'fsn1' } });
+    });
+
+    // cx23 muss noch ausgewählt sein (AC19: Wahl bleibt wenn Typ verfügbar; AC20: fsn1 ungefiltert)
+    expect(stSelect.value).toBe('cx23');
+  });
+
+  it('AC19 — keine ungültige Region+Typ-Kombi absendbar nach Reset', async () => {
+    let capturedBody = null;
+    const baseFetch = makeFetch({ options: OPTIONS_WITH_AVAILABILITY });
+    const fetchMock = jest.fn(async (url, opts) => {
+      if (url.startsWith('/api/vps/machines/hetzner') && opts?.method === 'POST') {
+        capturedBody = JSON.parse(opts.body);
+        return { ok: true, status: 201, json: async () => ({ result: 'ok', machine: { provider: 'hetzner', serverId: '1', name: 'x', status: 'provisioning', ipv4: null, ipv6: null, region: null, serverType: null, createdAt: null } }) };
+      }
+      return baseFetch(url, opts);
+    });
+
+    const savedFetch = globalThis.fetch;
+    globalThis.fetch = fetchMock;
+    restoreFetch = () => { globalThis.fetch = savedFetch; };
+    const onNavigate = jest.fn();
+    let utils;
+    await act(async () => {
+      utils = render(React.createElement(VpsView, { onNavigate }));
+    });
+    await openCreateForm(utils);
+
+    // nbg1 → cx33; Wechsel zu ash → Reset auf cx23
+    const regionSelect = document.getElementById('vps-create-region');
+    await act(async () => {
+      fireEvent.change(regionSelect, { target: { value: 'ash' } });
+    });
+
+    // Name setzen + submit
+    await act(async () => {
+      fireEvent.change(document.getElementById('vps-create-name'), { target: { value: 'test-srv' } });
+    });
+    await act(async () => {
+      fireEvent.click(utils.getByRole('button', { name: /^erstellen$/i }));
+    });
+
+    await waitFor(() => expect(capturedBody).not.toBeNull());
+    // Nach Reset: region=ash, serverType=cx23 — eine gültige Kombi laut availability
+    expect(capturedBody.region).toBe('ash');
+    expect(capturedBody.serverType).toBe('cx23');
+    // cx33 darf NICHT im Payload stehen (wäre ungültig für ash)
+    expect(capturedBody.serverType).not.toBe('cx33');
+  });
+});
+
+describe('VpsView — S-178 AC20: Graceful Fallback wenn availability fehlt oder Region-Eintrag fehlt', () => {
+  let restoreFetch;
+  afterEach(() => { if (restoreFetch) restoreFetch(); restoreFetch = null; });
+
+  it('AC20 — fehlt availability komplett → alle nicht-deprecated Typen wählbar (ungefiltert)', async () => {
+    // OPTIONS_HETZNER hat kein availability-Feld
+    const utils = await renderVpsView(makeFetch({ options: OPTIONS_HETZNER }));
+    restoreFetch = utils.restoreFetch;
+    await openCreateForm(utils);
+
+    // Alle aktiven Typen müssen erscheinen (cx23 + cx33; cx11-old deprecated → nicht da)
+    const stSelect = document.getElementById('vps-create-servertype');
+    const values = Array.from(stSelect.options).map((o) => o.value);
+    expect(values).toContain('cx23');
+    expect(values).toContain('cx33');
+    expect(values).not.toContain('cx11-old'); // deprecated bleibt draussen (AC8)
+  });
+
+  it('AC20 — fsn1 hat keinen Eintrag in availability → ungefiltert (alle Typen sichtbar)', async () => {
+    const utils = await renderVpsView(makeFetch({ options: OPTIONS_WITH_AVAILABILITY }));
+    restoreFetch = utils.restoreFetch;
+    await openCreateForm(utils);
+
+    // Wechsel zu fsn1 (kein availability-Eintrag)
+    const regionSelect = document.getElementById('vps-create-region');
+    await act(async () => {
+      fireEvent.change(regionSelect, { target: { value: 'fsn1' } });
+    });
+
+    // Beide Typen müssen sichtbar sein (Fallback: ungefiltert)
+    const stSelect = document.getElementById('vps-create-servertype');
+    const values = Array.from(stSelect.options).map((o) => o.value);
+    expect(values).toContain('cx23');
+    expect(values).toContain('cx33');
+  });
+
+  it('AC20 — availability = {} (leeres Objekt) → alle Regionen ungefiltert', async () => {
+    const optionsEmptyAvailability = {
+      ...OPTIONS_HETZNER,
+      availability: {},
+    };
+    const utils = await renderVpsView(makeFetch({ options: optionsEmptyAvailability }));
+    restoreFetch = utils.restoreFetch;
+    await openCreateForm(utils);
+
+    const stSelect = document.getElementById('vps-create-servertype');
+    const values = Array.from(stSelect.options).map((o) => o.value);
+    // Kein Eintrag für nbg1 → ungefiltert → alle aktiven Typen sichtbar
+    expect(values).toContain('cx23');
+    expect(values).toContain('cx33');
+  });
+
+  it('AC20 — Floor: Create-Payload unverändert (nur region/serverType/image + sshKeyAssignment)', async () => {
+    // Stellt sicher dass die availability-Map NICHT in der Create-Payload landet
+    let capturedBody = null;
+    const baseFetch = makeFetch({ options: OPTIONS_WITH_AVAILABILITY });
+    const fetchMock = jest.fn(async (url, opts) => {
+      if (url.startsWith('/api/vps/machines/hetzner') && opts?.method === 'POST') {
+        capturedBody = JSON.parse(opts.body);
+        return { ok: true, status: 201, json: async () => ({ result: 'ok', machine: { provider: 'hetzner', serverId: '1', name: 'x', status: 'provisioning', ipv4: null, ipv6: null, region: null, serverType: null, createdAt: null } }) };
+      }
+      return baseFetch(url, opts);
+    });
+    const savedFetch = globalThis.fetch;
+    globalThis.fetch = fetchMock;
+    restoreFetch = () => { globalThis.fetch = savedFetch; };
+    const onNavigate = jest.fn();
+    let utils;
+    await act(async () => {
+      utils = render(React.createElement(VpsView, { onNavigate }));
+    });
+    await openCreateForm(utils);
+
+    await act(async () => {
+      fireEvent.change(document.getElementById('vps-create-name'), { target: { value: 'test-srv' } });
+    });
+    await act(async () => {
+      fireEvent.click(utils.getByRole('button', { name: /^erstellen$/i }));
+    });
+    await waitFor(() => expect(capturedBody).not.toBeNull());
+
+    // Payload darf KEIN availability-Feld enthalten
+    expect(capturedBody).not.toHaveProperty('availability');
+    // Pflicht-Felder vorhanden
+    expect(capturedBody).toHaveProperty('region');
+    expect(capturedBody).toHaveProperty('serverType');
+    expect(capturedBody).toHaveProperty('sshKeyAssignment');
+    // Kein Token
+    expect(JSON.stringify(capturedBody)).not.toMatch(/Bearer|api.*token/i);
   });
 });
 

@@ -276,8 +276,10 @@ describe('routerLoader — Echte src/routers/ Module (AC1/AC3)', () => {
     //   (GET /api/github/packages + GET /api/github/packages/:name/tags) → 26.
     // vpsContainers.js wurde mit vps-container-overview (S-157) hinzugefügt
     //   (Container-Listing, Start/Stop/Restart/Logs/Remove pro VPS) → 27.
+    // knowledgeSources.js wurde mit team-knowledge-add (S-174) hinzugefügt
+    //   (POST /api/assist/knowledge-sources, headless WebSearch-Helfer) → 28.
     const entries = await readdir(ROUTERS_DIR);
     const mountedCount = entries.filter((f) => f.endsWith('.js')).length;
-    expect(mountedCount).toBe(27);
+    expect(mountedCount).toBe(28);
   });
 });

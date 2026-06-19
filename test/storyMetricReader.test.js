@@ -1,5 +1,5 @@
 /**
- * storyMetricReader.test.js — Unit tests for StoryMetricReader + parseJsonl.
+ * storyMetricReader.test.js — Unit tests for StoryMetricReader + parseJsonl + matchesStoryId.
  *
  * Covers (story-detail-ansicht):
  *   AC1 — Backend-Reader liefert zu einer Story aus dispatches.jsonl + items.jsonl:
@@ -7,15 +7,23 @@
  *          ep_est / ep_act / tok_est / tok_total / size_est + Abweichungen.
  *          Fehlende Metrik → null, kein Crash.
  *
+ * Covers (story-detail-yaml-fallback):
+ *   AC2 — matchesStoryId: int/string-tolerantes ID-Matching.
+ *          String-Gleichheit ("S-165" == "S-165") UND
+ *          numerische Gleichheit (165 == "S-165" nach Normalisierung).
+ *          Kein Pfad-Gebrauch von item/storyId.
+ *          Integration in getDetail: Integer-Ledgerzeilen werden korrekt gefunden.
+ *
  * Strategy:
  *   - Inject fake fsDeps (readFile) — kein echtes Filesystem.
  *   - Verify all fields on happy path.
  *   - Verify null / graceful-degradation on missing files.
  *   - Verify flow is sorted by seq.
+ *   - matchesStoryId: reine Unit-Tests ohne FS.
  */
 
 import { describe, it, expect } from '@jest/globals';
-import { StoryMetricReader, parseJsonl } from '../src/StoryMetricReader.js';
+import { StoryMetricReader, parseJsonl, matchesStoryId } from '../src/StoryMetricReader.js';
 
 // ── parseJsonl unit tests ──────────────────────────────────────────────────────
 
@@ -278,5 +286,86 @@ describe('StoryMetricReader.getDetail — flow seq order', () => {
 
     expect(detail.flow.map((f) => f.seq)).toEqual([1, 2, 3]);
     expect(detail.flow.map((f) => f.agent)).toEqual(['coder', 'coder', 'reviewer']);
+  });
+});
+
+// ── AC2 (story-detail-yaml-fallback): matchesStoryId ─────────────────────────
+
+describe('matchesStoryId — AC2: int/string-tolerantes ID-Matching', () => {
+  // String-Gleichheit
+  it('matches same string "S-165"', () => {
+    expect(matchesStoryId('S-165', 'S-165')).toBe(true);
+  });
+
+  it('does not match different strings "S-165" vs "S-166"', () => {
+    expect(matchesStoryId('S-165', 'S-166')).toBe(false);
+  });
+
+  // Numerische Gleichheit: integer item gegen "S-N" storyId
+  it('matches integer 165 against "S-165" (old integer ledger format)', () => {
+    expect(matchesStoryId(165, 'S-165')).toBe(true);
+  });
+
+  it('matches integer 108 against "S-108"', () => {
+    expect(matchesStoryId(108, 'S-108')).toBe(true);
+  });
+
+  it('matches integer 1 against "S-001" (leading-zero strip)', () => {
+    expect(matchesStoryId(1, 'S-001')).toBe(true);
+  });
+
+  it('does not match integer 165 against "S-166"', () => {
+    expect(matchesStoryId(165, 'S-166')).toBe(false);
+  });
+
+  it('matches bare numeric string "165" against "S-165"', () => {
+    expect(matchesStoryId('165', 'S-165')).toBe(true);
+  });
+
+  // Null/Undefined-Robustheit
+  it('returns false for null item', () => {
+    expect(matchesStoryId(null, 'S-165')).toBe(false);
+  });
+
+  it('returns false for undefined item', () => {
+    expect(matchesStoryId(undefined, 'S-165')).toBe(false);
+  });
+
+  it('returns false for non-numeric string "foo" against "S-165"', () => {
+    expect(matchesStoryId('foo', 'S-165')).toBe(false);
+  });
+});
+
+// ── AC2 Integration: getDetail mit Integer-item-Zeilen ───────────────────────
+
+describe('StoryMetricReader.getDetail — AC2 int/string integration', () => {
+  it('finds dispatch with integer item 116 when querying "S-116"', async () => {
+    const dispatchLine = JSON.stringify({
+      item: 116, ts: '2025-01-10T10:00:00.000Z', seq: 1, agent: 'coder', iter: 1, gate: null, secs: 60, tok: null,
+    });
+    const reader = new StoryMetricReader({ fsDeps: makeFsDeps({ dispatches: dispatchLine, items: '' }) });
+    const detail = await reader.getDetail(REPO_PATH, 'S-116');
+    expect(detail.started_at).not.toBeNull();
+    expect(detail.flow).toHaveLength(1);
+    expect(detail.flow[0].agent).toBe('coder');
+  });
+
+  it('finds items.jsonl row with integer id 116 when querying "S-116"', async () => {
+    const itemLine = JSON.stringify({ id: 116, ep_est: 5, ep_act: 6, tok_total: 2000, size_est: 'L' });
+    const reader = new StoryMetricReader({ fsDeps: makeFsDeps({ dispatches: '', items: itemLine }) });
+    const detail = await reader.getDetail(REPO_PATH, 'S-116');
+    expect(detail.ep_est).toBe(5);
+    expect(detail.ep_act).toBe(6);
+    expect(detail.tok_total).toBe(2000);
+  });
+
+  it('does NOT match dispatches with integer 117 when querying "S-116"', async () => {
+    const dispatchLine = JSON.stringify({
+      item: 117, ts: '2025-01-10T10:00:00.000Z', seq: 1, agent: 'coder', iter: 1, gate: null, secs: 60, tok: null,
+    });
+    const reader = new StoryMetricReader({ fsDeps: makeFsDeps({ dispatches: dispatchLine, items: '' }) });
+    const detail = await reader.getDetail(REPO_PATH, 'S-116');
+    expect(detail.started_at).toBeNull();
+    expect(detail.flow).toHaveLength(0);
   });
 });

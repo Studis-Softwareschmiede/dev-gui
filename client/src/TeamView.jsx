@@ -37,6 +37,22 @@
  *   AC11 — Alle Icons aria-hidden; keine neuen API-Aufrufe/Endpunkte/Datenfelder;
  *           Icons leiten sich allein aus vorhandenem kind/id/group ab.
  *
+ * team-train-trigger:
+ *   AC1  — Train-Button im Kopfbereich (Maus + Tastatur, Touch-Target ≥ 44 px,
+ *           sichtbarer Fokusring). Retro-/Retro-Trend-Link bleiben unverändert.
+ *   AC2  — Train-Button öffnet TrainDialog (role=dialog, aria-modal, Fokus-Falle,
+ *           Esc schließt, Fokus-Rückgabe); nur KNOWLEDGE-Bereiche, gruppiert.
+ *   AC3  — „Alle"-Master-Checkbox + individuelle Häkchen + indeterminate-Zustand.
+ *   AC4  — Kostenmodus-Radios + Abarbeitungs-Radios.
+ *   AC5  — „Weiter" → Bestätigungs-Step; Ja feuert; leere Auswahl deaktiviert Weiter.
+ *   AC6  — Befehls-Komposition: Queue = N Befehle, Parallel = 1 Befehl.
+ *   AC7  — „Parallel" deaktiviert mit Hinweis.
+ *   AC9  — Doppel-Feuer-Schutz; je Befehl Status; 409 → Hinweis.
+ *   AC10 — WCAG 2.1 AA: semantische Dialoge, beschriftete Checkboxen/Radios,
+ *           indeterminate-Kommunikation, sichtbare Fokusringe, aria-busy/aria-live.
+ *   AC11 — Security-Floor: kein dangerouslySetInnerHTML/innerHTML; keine Secrets;
+ *           nur /api/team, /api/session, /api/command.
+ *
  * A11y (WCAG 2.1 AA):
  *   - Semantische Navigationsliste mit aria-label.
  *   - Sichtbarer Fokusring — KEIN outline:none (Coder-Lesson 2026-05-27).
@@ -48,22 +64,23 @@
  *
  * Security (Floor):
  *   - Kein dangerouslySetInnerHTML / kein innerHTML.
- *   - Nur /api/team* Endpunkte (hinter AccessGuard).
+ *   - Nur /api/team* Endpunkte (hinter AccessGuard); /api/command für Train-Befehle.
  *   - Keine Secrets im Bundle.
  *
- * @param {{ onNavigate: (view: string) => void }} props
+ * @param {{ onNavigate: (view: string) => void, fetchFn?: Function }} props
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { MarkdownLite } from './markdownLite.jsx';
 import { EntityIcon } from './icons/EntityIcon.jsx';
+import { TrainDialog } from './TrainDialog.jsx';
 
 // ── TeamView ──────────────────────────────────────────────────────────────────
 
 /**
- * @param {{ onNavigate: (view: string) => void }} props
+ * @param {{ onNavigate: (view: string) => void, fetchFn?: Function }} props
  */
-export function TeamView({ onNavigate }) {
+export function TeamView({ onNavigate, fetchFn }) {
   // ── State
   const [loadState, setLoadState] = useState('idle'); // 'idle' | 'loading' | 'ok' | 'error'
   const [loadError, setLoadError] = useState('');
@@ -77,13 +94,20 @@ export function TeamView({ onNavigate }) {
   const [detailState, setDetailState] = useState('idle'); // 'idle' | 'loading' | 'ok' | 'error'
   const [detailError, setDetailError] = useState('');
 
+  // ── Train dialog state (team-train-trigger AC1/AC2)
+  const [trainOpen, setTrainOpen] = useState(false);
+  const trainBtnRef = useRef(null); // Fokus-Rückgabe (AC2/AC10)
+
+  // ── Stable fetch ref (allows test injection)
+  const fetch_ = fetchFn ?? globalThis.fetch.bind(globalThis);
+
   // ── Load overview on mount (exactly once — AC3)
   useEffect(() => {
     let cancelled = false;
     setLoadState('loading');
     setLoadError('');
 
-    fetch('/api/team')
+    fetch_('/api/team')
       .then((res) => {
         if (!res.ok) return Promise.reject(new Error(`HTTP ${res.status}`));
         return res.json();
@@ -102,6 +126,8 @@ export function TeamView({ onNavigate }) {
       });
 
     return () => { cancelled = true; };
+    // fetch_ is derived from the fetchFn prop (stable per mount); intentional mount-once
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // empty deps = mount once
 
   // ── Load detail when selection changes (AC4)
@@ -111,7 +137,7 @@ export function TeamView({ onNavigate }) {
     setDetailError('');
     setDetail(null);
 
-    fetch(`/api/team/${kind}/${id}`)
+    fetch_(`/api/team/${kind}/${id}`)
       .then((res) => {
         if (!res.ok) return Promise.reject(new Error(`HTTP ${res.status}`));
         return res.json();
@@ -124,7 +150,8 @@ export function TeamView({ onNavigate }) {
         setDetailError(err.message || 'Netzwerkfehler');
         setDetailState('error');
       });
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // empty deps: fetch_ is stable within a render cycle
 
   // ── Derived: is data available and all lists empty? (AC6)
   const isEmpty =
@@ -142,6 +169,25 @@ export function TeamView({ onNavigate }) {
     <main style={styles.main} aria-label="Team-Ansicht">
       <div style={styles.headerRow}>
         <h1 style={styles.h1}>Team</h1>
+
+        {/* Train-Button — team-train-trigger AC1; markant, Touch-Target ≥ 44 px */}
+        <button
+          ref={trainBtnRef}
+          type="button"
+          style={styles.trainBtn}
+          onClick={() => setTrainOpen(true)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              setTrainOpen(true);
+            }
+          }}
+          aria-label="Train — Knowledge-Bereiche aktualisieren"
+          data-nav="train"
+        >
+          Train
+        </button>
+
         {/* Retro-Link im Kopfbereich — team-view-frontend AC1 */}
         <button
           type="button"
@@ -175,6 +221,16 @@ export function TeamView({ onNavigate }) {
           Retro-Trend
         </button>
       </div>
+
+      {/* Train-Dialog — team-train-trigger AC2–AC11 */}
+      {trainOpen && (
+        <TrainDialog
+          knowledge={knowledge}
+          onClose={() => setTrainOpen(false)}
+          triggerRef={trainBtnRef}
+          fetchFn={fetchFn}
+        />
+      )}
 
       {/* Loading state — accessible (AC3, AC8) */}
       {loadState === 'loading' && (
@@ -551,6 +607,21 @@ const styles = {
     fontSize: 24,
     fontWeight: 700,
     color: '#e5e7eb',
+  },
+
+  // Train-Button — markant (akzentuiert), Touch-Target ≥ 44px, sichtbarer Fokusring
+  // team-train-trigger AC1: visuell erkennbar als Aktion (blauer Akzent)
+  trainBtn: {
+    minHeight: 44,
+    padding: '10px 18px',
+    background: '#1d4ed8',
+    border: '1px solid #2563eb',
+    borderRadius: 6,
+    color: '#ffffff',
+    fontSize: 13,
+    fontWeight: 700,
+    cursor: 'pointer',
+    // Focus ring preserved — no outline:none (A11y, WCAG 2.1 AA)
   },
 
   // Retro-Link button — markant, Touch-Target ≥ 44px, sichtbarer Fokusring (kein outline:none)

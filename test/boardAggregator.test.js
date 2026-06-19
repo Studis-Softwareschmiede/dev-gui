@@ -31,6 +31,13 @@
  *   AC5 — ep_est_source: 'ledger' wenn Ledger-Wert vorhanden; 'yaml' bei YAML-Fallback
  *          (dispo_est); null wenn weder Ledger noch dispo_est.
  *
+ * Covers (story-detail-yaml-fallback):
+ *   AC1 — BoardAggregator-Story-Index enthält done_at, branch, pr (null wenn YAML-Feld fehlt).
+ *   AC3 — Detail-Endpoint: ended_at-Fallback aus done_at (ended_at_source 'yaml'/'ledger');
+ *          started_at/duration bleiben null ohne Ledger.
+ *   AC4 — Detail-Response enthält branch, pr, status aus dem Index.
+ *   AC7 — Ledger hat Vorrang: volle Ledger-Daten → ended_at_source 'ledger'.
+ *
  * AccessGuard:
  *   POST /api/board/projects/rescan (Schreib-Trigger) liegt hinter
  *   app.use('/api', accessGuard) in server.js — kein separater Middleware-Test
@@ -584,6 +591,57 @@ describe('AC3 — Aggregat model: Projekt → Feature → Story with required fi
     const s001 = f001.stories.find((s) => s.id === 'S-001');
     expect(s001).toHaveProperty('dispo_est', null);
     expect(s001).toHaveProperty('dispo_act', null);
+  });
+
+  // ── story-detail-yaml-fallback AC1 ──────────────────────────────────────────
+
+  it('story entry carries done_at (string wenn gesetzt, null wenn fehlt)', async () => {
+    const { aggregator } = makeAggregator();
+    const index = await aggregator.getIndex();
+    const f001 = index[0].features.find((f) => f.id === 'F-001');
+    const s001 = f001.stories.find((s) => s.id === 'S-001');
+    const s002 = f001.stories.find((s) => s.id === 'S-002');
+    // S-001 hat done_at in der Fixture
+    expect(s001).toHaveProperty('done_at', '2026-06-14T00:00:00Z');
+    // S-002 hat done_at: null in der Fixture
+    expect(s002).toHaveProperty('done_at', null);
+  });
+
+  it('story entry carries branch and pr (null in fixture)', async () => {
+    const { aggregator } = makeAggregator();
+    const index = await aggregator.getIndex();
+    const f001 = index[0].features.find((f) => f.id === 'F-001');
+    const s001 = f001.stories.find((s) => s.id === 'S-001');
+    expect(s001).toHaveProperty('branch', null);
+    expect(s001).toHaveProperty('pr', null);
+  });
+
+  it('story entry carries branch/pr as string when set in YAML', async () => {
+    const storyWithBranchPr = `id: S-001
+parent: F-001
+title: IONOS-Adapter
+status: Done
+priority: P0
+spec: docs/specs/provisioning.md
+implements: [AC1]
+labels: []
+dispo_est: null
+dispo_act: null
+branch: board/my-feature-2026-06-14
+pr: https://github.com/org/repo/pull/42
+done_at: '2026-06-14T00:00:00Z'
+`;
+    const { aggregator } = makeAggregator({
+      fileOverrides: {
+        [`${BOARD_ROOT}/my-repo/board/stories/S-001-ionos-adapter.yaml`]: storyWithBranchPr,
+      },
+    });
+    const index = await aggregator.getIndex();
+    const f001 = index[0].features.find((f) => f.id === 'F-001');
+    const s001 = f001.stories.find((s) => s.id === 'S-001');
+    expect(s001.branch).toBe('board/my-feature-2026-06-14');
+    expect(s001.pr).toBe('https://github.com/org/repo/pull/42');
+    expect(s001.done_at).toBe('2026-06-14T00:00:00Z');
   });
 
   it('stories are attached to their parent feature', async () => {
@@ -1408,6 +1466,142 @@ done_at: null
       expect(status).toBe(200);
       expect(data.detail.ep_est).toBeNull();
       expect(data.detail.ep_est_source).toBeNull();
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+});
+
+// ── story-detail-yaml-fallback: AC3/AC4/AC7 HTTP-Tests ───────────────────────
+
+describe('boardRouter HTTP — story-detail-yaml-fallback AC3/AC4/AC7', () => {
+  /** Minimal StoryMetricReader mock — returns a fixed detail object (scoped to this describe). */
+  function makeMockStoryMetricReader(detail = {}) {
+    return {
+      getDetail: async (_repoPath, _storyId) => ({
+        started_at: null,
+        ended_at: null,
+        duration: null,
+        flow: [],
+        ep_est: null,
+        ep_act: null,
+        tok_est: null,
+        tok_total: null,
+        size_est: null,
+        ep_dev: null,
+        ep_dev_pct: null,
+        tok_dev: null,
+        tok_dev_pct: null,
+        ...detail,
+      }),
+    };
+  }
+
+  /** Story-Fixture mit done_at und branch/pr gesetzt */
+  const STORY_WITH_YAML_FIELDS = `id: S-001
+parent: F-001
+title: IONOS-Adapter
+status: Done
+priority: P0
+spec: docs/specs/provisioning.md
+implements: [AC1]
+labels: []
+dispo_est: null
+dispo_act: null
+branch: board/my-feature-2026-06-14
+pr: https://github.com/org/repo/pull/42
+done_at: '2026-06-14T12:00:00Z'
+`;
+
+  function makeAggregatorWithYamlFields() {
+    return makeAggregator({
+      fileOverrides: {
+        [`${BOARD_ROOT}/my-repo/board/stories/S-001-ionos-adapter.yaml`]: STORY_WITH_YAML_FIELDS,
+      },
+    });
+  }
+
+  it('AC3 — ended_at-Fallback aus done_at wenn Ledger kein ended_at liefert', async () => {
+    const { aggregator } = makeAggregatorWithYamlFields();
+    // Ledger liefert kein ended_at
+    const server = await startServer(aggregator, makeMockStoryMetricReader({ ended_at: null }));
+    try {
+      const { status, data } = await httpFetch(server, '/api/board/projects/my-repo/stories/S-001/detail');
+      expect(status).toBe(200);
+      expect(data.detail.ended_at).toBe('2026-06-14T12:00:00Z');
+      expect(data.detail.ended_at_source).toBe('yaml');
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('AC3 — started_at/duration bleiben null wenn kein Ledger (nicht aus YAML ableitbar)', async () => {
+    const { aggregator } = makeAggregatorWithYamlFields();
+    const server = await startServer(aggregator, makeMockStoryMetricReader({
+      started_at: null,
+      ended_at: null,
+      duration: null,
+    }));
+    try {
+      const { data } = await httpFetch(server, '/api/board/projects/my-repo/stories/S-001/detail');
+      expect(data.detail.started_at).toBeNull();
+      expect(data.detail.duration).toBeNull();
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('AC4 — branch, pr, status aus Index werden in der Detail-Response durchgereicht', async () => {
+    const { aggregator } = makeAggregatorWithYamlFields();
+    const server = await startServer(aggregator, makeMockStoryMetricReader());
+    try {
+      const { data } = await httpFetch(server, '/api/board/projects/my-repo/stories/S-001/detail');
+      expect(data.detail.branch).toBe('board/my-feature-2026-06-14');
+      expect(data.detail.pr).toBe('https://github.com/org/repo/pull/42');
+      expect(data.detail.status).toBe('Done');
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('AC4 — branch/pr/status null wenn Story-YAML kein branch/pr/done_at hat', async () => {
+    // S-001 in der Standard-Fixture hat branch: null, pr: null
+    const { aggregator } = makeAggregator();
+    const server = await startServer(aggregator, makeMockStoryMetricReader());
+    try {
+      const { data } = await httpFetch(server, '/api/board/projects/my-repo/stories/S-001/detail');
+      expect(data.detail.branch).toBeNull();
+      expect(data.detail.pr).toBeNull();
+      // status ist immer gesetzt (aus dem Story-YAML)
+      expect(typeof data.detail.status).toBe('string');
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('AC7 — Ledger hat Vorrang: ended_at aus Ledger → ended_at_source "ledger"', async () => {
+    const { aggregator } = makeAggregatorWithYamlFields();
+    // Ledger liefert einen echten ended_at-Wert
+    const server = await startServer(aggregator, makeMockStoryMetricReader({
+      ended_at: '2026-06-15T08:00:00.000Z',
+    }));
+    try {
+      const { data } = await httpFetch(server, '/api/board/projects/my-repo/stories/S-001/detail');
+      expect(data.detail.ended_at).toBe('2026-06-15T08:00:00.000Z');
+      expect(data.detail.ended_at_source).toBe('ledger');
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('AC3 — kein done_at und kein Ledger → ended_at null, ended_at_source null', async () => {
+    // S-002 hat done_at: null in der Standard-Fixture
+    const { aggregator } = makeAggregator();
+    const server = await startServer(aggregator, makeMockStoryMetricReader({ ended_at: null }));
+    try {
+      const { data } = await httpFetch(server, '/api/board/projects/my-repo/stories/S-002/detail');
+      expect(data.detail.ended_at).toBeNull();
+      expect(data.detail.ended_at_source).toBeNull();
     } finally {
       await new Promise((r) => server.close(r));
     }
