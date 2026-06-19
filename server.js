@@ -63,6 +63,9 @@
  *   GET    /api/board/projects/:slug/stories/:id/detail            → { detail: StoryDetail } (story-detail-ansicht AC2)
  *   POST   /api/assist/refine                                      → { refinedText, openQuestions[], notes? } (fabric-intake-dialog AC5,AC7,AC10)
  *   POST   /api/assist/knowledge-sources                          → { ok, suggestedPackId, suggestedType, sources[], notes? } (team-knowledge-add AC3,AC6,AC11-AC15)
+ *   GET    /api/settings/notifications                             → Settings inkl. has_token (push-notifications S-183 AC2)
+ *   PUT    /api/settings/notifications                             → Settings speichern mit Validierung (push-notifications S-183 AC2)
+ *   POST   /api/settings/notifications/test                        → { ok, error? } Test-Versand (push-notifications S-182 AC5)
  *   WS   /ws/terminal                             → PtyManager bridge (guarded by AccessGuard)
  */
 
@@ -105,6 +108,7 @@ import { StoryMetricReader } from './src/StoryMetricReader.js';
 import { WorkspaceHealthChecker } from './src/WorkspaceHealthChecker.js';
 import { AssistService } from './src/AssistService.js';
 import { KnowledgeSourceService } from './src/KnowledgeSourceService.js';
+import { read as readNotificationSettings } from './src/NotificationSettingsStore.js';
 import { mountRouters } from './src/routerLoader.js';
 
 const PORT = Number(process.env.PORT ?? 8080);
@@ -309,6 +313,9 @@ const deps = {
   storyMetricReader,
   assistService,
   knowledgeSourceService,
+  // S-183 AC1/AC2: NotificationSettingsStore als Config-Provider für notificationSettings-Router (AC5).
+  // Ersetzt den Default-Provider (enabled=false/leer) — der Test-Endpunkt liest jetzt echte Settings.
+  getNotificationConfig: readNotificationSettings,
 };
 
 // ── AC1/AC2: Auto-Discovery + Mount aller API-Router ─────────────────────────
