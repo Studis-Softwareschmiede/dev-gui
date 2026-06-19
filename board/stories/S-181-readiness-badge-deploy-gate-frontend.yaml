@@ -1,0 +1,44 @@
+id: S-181
+parent: F-024
+title: 'Frontend: Readiness-Status-Badge + "Deploy starten" gesperrt bis ready + errorClass-Retry-Hinweis'
+status: To Do
+priority: P1
+spec: docs/specs/vps-readiness-gate.md
+implements:
+- AC9
+- AC10
+- AC11
+- AC12
+depends:
+- S-180
+labels:
+- deploy
+- vps
+- ui
+size_est: M
+dispo_est: 5
+confidence: medium
+estimate_note: 'Heuristik-Score ~6 -> M (4 AC + ~1 Komponente + ui-Bump). S/M => kein estimator;
+  dispo_est aus baseline.json-Lookup js|balanced|M (ep 5.0, n=8), confidence medium.
+  Inhalt: client/src/DeploymentsView.jsx. Status-Badge neben dem VPS-Auswahlfeld, das
+  GET /api/deployments/readiness?vps=<gewaehlter VPS> (S-180) periodisch pollt (Standard ~3 s,
+  AC9): unreachable->"VPS wird hochgefahren...", provisioning->"VPS wird eingerichtet (Docker
+  installieren)...", ready->"VPS bereit". Ohne gewaehlten VPS kein Badge/kein Poll. AC10:
+  "Deploy starten" zusaetzlich zur bestehenden AC12-Bedingung (deploy-lifecycle: Image+Tag+VPS+
+  Domaene+Subdomain) deaktiviert, solange state != ready; bei ready automatisch freigeben (kein
+  erneuter Klick). AC11: Polling stoppt bei ready (kein Dauer-Poll), startet neu bei Wechsel auf
+  anderen, noch nicht bereiten VPS; Timer-Cleanup bei Verlassen/Abwahl (kein Leak, kein Poll auf
+  abgewaehltem VPS). AC12: Deploy-Antwort errorClass "vps-provisioning" ODER "docker-failed" ->
+  derselbe freundliche Retry-Hinweis ("VPS wird noch eingerichtet (Docker installieren) - in
+  ~1-2 Min erneut versuchen") statt roher Klasse; andere Klassen behalten ihre Anzeige.
+  Floor: kein neues Secret im Bundle, kein neuer Endpunkt; nur Konsum von /api/deployments/readiness
+  + /api/deployments. A11y: Badge mit role=status/aria-live, Button-disabled erreichbar.
+  Tests (RTL, gemockter Readiness-Endpunkt): Badge-Text je Zustand; Button gesperrt bis ready,
+  dann automatisch frei; Poll stoppt bei ready; Timer-Cleanup bei Unmount/VPS-Wechsel;
+  errorClass vps-provisioning/docker-failed -> Retry-Hinweis. M (~5 EP) — fokussierte
+  Frontend-Erweiterung der bestehenden View + Tests.'
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-06-19T00:00:00Z'
+updated_at: '2026-06-19T00:00:00Z'

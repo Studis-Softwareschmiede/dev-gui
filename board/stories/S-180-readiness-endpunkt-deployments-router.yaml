@@ -1,0 +1,38 @@
+id: S-180
+parent: F-024
+title: 'Readiness-Endpunkt GET /api/deployments/readiness?vps= (read-only, vereinigte VPS-Aufloesung)'
+status: To Do
+priority: P1
+spec: docs/specs/vps-readiness-gate.md
+implements:
+- AC7
+- AC8
+depends:
+- S-179
+labels:
+- deploy
+- vps
+- backend
+size_est: M
+dispo_est: 5
+confidence: medium
+estimate_note: 'Heuristik-Score ~4 -> M (2 AC + ~2 Komponenten). S/M => kein estimator;
+  dispo_est aus baseline.json-Lookup js|balanced|M (ep 5.0, n=8), confidence medium.
+  Inhalt: neuer read-only-Endpunkt GET /api/deployments/readiness?vps=<vpsId> in
+  src/deploymentsRouter.js. Loest vpsId ueber dieselbe VEREINIGTE Quelle auf wie der Deploy-Pfad
+  (Env-Map ⊕ dynamische Records, resolveVpsIdToTarget, vps-dynamic-ssh-targets/S-169) und ruft
+  VpsDockerControl.probe(target) (S-179) auf -> 200 {state: "unreachable"|"provisioning"|"ready"}.
+  Fehlt vps-Query -> 400; unbekannte vpsId -> 422 "Unbekannter VPS: <id>" (analog Deploy, ohne
+  Probe-Versuch). AC8: nicht-mutierend (kein Audit-First, keine Mutation, kein Container/Route),
+  Antwort ohne Host/Key/Token/rohen SSH-Fehlertext (nur state + optional neutrale reason).
+  AccessGuard-403 vor dem Endpunkt (AC7). Wiring: deploymentsRouter erhaelt orchestrator/dockerControl
+  + vpsRegistry bereits (S-169); ggf. dockerControl.probe durchreichen. Tests (gemockter
+  Store/Registry/DockerControl): leere VPS_TARGETS + dynamischer Datensatz -> probe wird mit
+  aufgeloestem {host,port,targetUser} gerufen; unbekannte ID -> 422; fehlt vps-Param -> 400;
+  AccessGuard-403; Antwort enthaelt nur state, keinen Host/Key. M (~5 EP) — ein read-only-Handler
+  + Resolver-Wiring + Tests, kein UI.'
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-06-19T00:00:00Z'
+updated_at: '2026-06-19T00:00:00Z'
