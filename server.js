@@ -109,6 +109,7 @@ import { WorkspaceHealthChecker } from './src/WorkspaceHealthChecker.js';
 import { AssistService } from './src/AssistService.js';
 import { KnowledgeSourceService } from './src/KnowledgeSourceService.js';
 import { read as readNotificationSettings } from './src/NotificationSettingsStore.js';
+import { NotificationWatcher } from './src/NotificationWatcher.js';
 import { mountRouters } from './src/routerLoader.js';
 
 const PORT = Number(process.env.PORT ?? 8080);
@@ -243,6 +244,16 @@ const retroReader = new RetroReader({
 const boardAggregator = new BoardAggregator();
 boardAggregator.startWatchers();
 
+// ── NotificationWatcher (push-notifications S-184 AC6–AC9) ───────────────────
+// Hängt am Board-Scan-Ergebnis; check() wird periodisch aufgerufen.
+// rescan-Router ruft notificationWatcher.check() nach boardAggregator.scan() auf
+// (via deps — kein separates Polling, nutzt vorhandenen Scan).
+const notificationWatcher = new NotificationWatcher({
+  boardAggregator,
+  credentialStore,
+  readNotificationSettings,
+});
+
 // ── AC4 (workspace-health-hinweis): Start-Log-Warnung bei Fehlkonfiguration ──
 // Einmalig beim Boot — nie Start-Abbruch (try/catch), kein Secret im Log.
 try {
@@ -316,12 +327,19 @@ const deps = {
   // S-183 AC1/AC2: NotificationSettingsStore als Config-Provider für notificationSettings-Router (AC5).
   // Ersetzt den Default-Provider (enabled=false/leer) — der Test-Endpunkt liest jetzt echte Settings.
   getNotificationConfig: readNotificationSettings,
+  // S-184 AC6–AC9: NotificationWatcher für rescan-Router (nach explizitem Rescan sofort prüfen).
+  notificationWatcher,
 };
 
 // ── AC1/AC2: Auto-Discovery + Mount aller API-Router ─────────────────────────
 // AccessGuard (oben) greift bereits; mountRouters() montiert alphabetisch-nach-order.
 // Kein manuelles pro-Router import/app.use() nötig — neuer Endpunkt = neue Datei.
 await mountRouters(app, deps);
+
+// ── NotificationWatcher starten (S-184 AC6–AC9) ───────────────────────────────
+// Muss NACH mountRouters() starten (Router sind gemountet; Board-Scan kann sofort laufen).
+// Erster check() etabliert Baseline (AC7).
+notificationWatcher.start();
 
 // ── AC5: SPA-Catch-All NACH allen API-Routern ─────────────────────────────────
 // Reihenfolge-Invariante: API-404 wird NICHT maskiert (AC5).
@@ -492,6 +510,7 @@ async function buildReconcileVpsConfigsDynamic(targets, envValue, registry) {
 function shutdown() {
   reconciliationJob.stopScheduler();
   boardAggregator.stopWatchers();
+  notificationWatcher.stop();
   ptyRegistry.destroy(); // destroy all sessions (global + project sessions)
   server.close(() => process.exit(0));
 }

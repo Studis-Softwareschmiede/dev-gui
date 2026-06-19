@@ -52,9 +52,10 @@ const STORY_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
  * @param {object} options
  * @param {import('./BoardAggregator.js').BoardAggregator} options.boardAggregator
  * @param {import('./StoryMetricReader.js').StoryMetricReader} options.storyMetricReader
+ * @param {import('./NotificationWatcher.js').NotificationWatcher} [options.notificationWatcher]
  * @returns {import('express').Router}
  */
-export function boardRouter({ boardAggregator, storyMetricReader }) {
+export function boardRouter({ boardAggregator, storyMetricReader, notificationWatcher }) {
   const router = Router();
 
   /**
@@ -152,12 +153,21 @@ export function boardRouter({ boardAggregator, storyMetricReader }) {
    * Triggers an on-demand re-scan of all configured board roots (AC9).
    * The new index is immediately available for the next GET request.
    *
+   * Also triggers a NotificationWatcher check (S-184 AC6–AC9) after the scan,
+   * so manual rescans immediately pick up status transitions.
+   *
    * This route does NOT write to any board/ file (AC7 read-only guarantee).
    *
    * Response: { ok: true }
    */
   router.post('/api/board/projects/rescan', async (_req, res) => {
     await boardAggregator.scan();
+    // S-184 AC6: Nach explizitem Rescan Watcher-Check auslösen (best-effort, kein Crash)
+    if (notificationWatcher) {
+      notificationWatcher.check().catch((err) => {
+        console.error('[boardRouter] NotificationWatcher.check() fehlgeschlagen:', err.message);
+      });
+    }
     return res.json({ ok: true });
   });
 
