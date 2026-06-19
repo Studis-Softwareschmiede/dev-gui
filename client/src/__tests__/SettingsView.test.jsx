@@ -6,7 +6,8 @@
  * bitwarden-master-key-unlock AC12 showPassword-Reset beim Phasenwechsel (not-found→Create-Offer + Cancel) — S-130/#276,
  * credential-backup S-143 AC11/AC12 — Zweistufige Quittung + Backup-Abschnitt + Status-Kachel,
  * credential-backup S-142 AC13–AC16 — Restore-UI + Upload + Confirm + A11y,
- * github-app-key-format-tolerant S-168 AC5).
+ * github-app-key-format-tolerant S-168 AC5,
+ * push-notifications S-183 AC3/AC10 — Benachrichtigungs-Sektion).
  *
  * Covers (github-app-key-format-tolerant S-168) — Frontend-ACs:
  *   AC5 — Textarea für github/private_key; Newlines erhalten; andere Felder password-input; nach Speichern kein Klartext im DOM.
@@ -130,6 +131,18 @@
  *          I1-Fix: backupDir NICHT in Status-Response + NICHT im DOM (I3).
  *          I3-Fix: interner Backup-Pfad (/home/node/.cred/backups) nirgends im DOM.
  *          S4-Fix: statusTileLabel color #9ca3af (WCAG ≥ 4.5:1).
+ *
+ * Covers (push-notifications S-183) — Frontend AC3/AC10:
+ *   AC3  — Sektion „Benachrichtigungen (ntfy)" gerendert mit h2; Ein/Aus-Schalter vorhanden;
+ *           gespeicherte Werte beim Laden angezeigt (enabled, server, topic, priority, events);
+ *           Speichern ruft PUT /api/settings/notifications auf;
+ *           Test-Benachrichtigung ruft POST /api/settings/notifications/test;
+ *           Test-Ergebnis angezeigt (role=status / role=alert).
+ *   AC10 — Token nur als „gesetzt/nicht gesetzt" (has_token Bool aus GET);
+ *           Token NIE im Klartext im DOM;
+ *           Token-Feld schreibt über PUT /api/settings/credentials/notifications/ntfy_token
+ *           (bestehender Credential-Pfad, kein Klartext in DOM nach Speichern).
+ *           Responsiv/Theme: jsdom nicht testbar — visuell verifiziert via Styles.
  *
  * @jest-environment jsdom
  */
@@ -273,6 +286,16 @@ const DEFAULT_BACKUP_CONFIG_S3 = {
   retentionCount: 10,
 };
 
+/** Standard-Notification-Settings-Response (Default-Werte, kein Token). */
+const DEFAULT_NOTIFICATION_SETTINGS = {
+  enabled: false,
+  server: 'https://ntfy.sh',
+  topic: '',
+  priority: null,
+  events: [],
+  has_token: false,
+};
+
 function makeFetch({
   getResponse = EMPTY_CREDS,
   putResponse = null,
@@ -300,6 +323,10 @@ function makeFetch({
   // S-142 AC13–AC16: backup-restore endpoint
   // null = Erfolg; 'gpg-decrypt-failed' = 422; 'restore-invalid' = 422; 'forbidden' = 403
   postBackupRestoreResponse = null,
+  // S-183 AC3: notification settings + test endpoints
+  getNotificationSettings = { ok: true, status: 200, data: DEFAULT_NOTIFICATION_SETTINGS },
+  putNotificationSettingsResponse = { ok: true, status: 200, data: DEFAULT_NOTIFICATION_SETTINGS },
+  postNotificationTestResponse = null, // null = { ok: true }; 'error' = { ok: false, error: '…' }
 } = {}) {
   const DEFAULT_GENERATE_SUCCESS = {
     user: 'root',
@@ -488,6 +515,37 @@ function makeFetch({
         return { ok: true, status: 200, json: async () => postBackupRestoreResponse };
       }
       return { ok: true, status: 200, json: async () => DEFAULT_RESTORE_SUCCESS };
+    }
+
+    // S-183 AC3: notification settings endpoints
+    if (url === '/api/settings/notifications') {
+      if (method === 'GET') {
+        if (getNotificationSettings === null) return { ok: false, status: 500, json: async () => ({ error: 'Fehler' }) };
+        return { ok: getNotificationSettings.ok, status: getNotificationSettings.status, json: async () => getNotificationSettings.data };
+      }
+      if (method === 'PUT') {
+        if (putNotificationSettingsResponse === 'error') {
+          return { ok: false, status: 500, json: async () => ({ error: 'Speichern fehlgeschlagen' }) };
+        }
+        if (putNotificationSettingsResponse === 'invalid-server') {
+          return { ok: false, status: 400, json: async () => ({ field: 'server', message: 'Ungültige URL' }) };
+        }
+        if (putNotificationSettingsResponse === 'invalid-topic') {
+          return { ok: false, status: 400, json: async () => ({ field: 'topic', message: 'topic darf nicht leer sein' }) };
+        }
+        return { ok: putNotificationSettingsResponse.ok, status: putNotificationSettingsResponse.status, json: async () => putNotificationSettingsResponse.data };
+      }
+    }
+
+    // S-183 AC3: notification test endpoint
+    if (url === '/api/settings/notifications/test' && method === 'POST') {
+      if (postNotificationTestResponse === 'error') {
+        return { ok: true, status: 200, json: async () => ({ ok: false, error: 'ntfy nicht erreichbar' }) };
+      }
+      if (typeof postNotificationTestResponse === 'object' && postNotificationTestResponse !== null) {
+        return { ok: true, status: 200, json: async () => postNotificationTestResponse };
+      }
+      return { ok: true, status: 200, json: async () => ({ ok: true }) };
     }
 
     if (method === 'GET') {
@@ -5952,6 +6010,253 @@ describe('SettingsView — S-142 A11y: Restore-UI (NFR WCAG 2.1 AA)', () => {
       const heading = container.querySelector('#restore-section-heading');
       expect(heading).toBeTruthy();
       expect(heading.textContent).toMatch(/Restore/i);
+    });
+  });
+});
+
+// ── push-notifications S-183 AC3/AC10 — NotificationSection ──────────────────
+
+describe('push-notifications S-183 — AC3: Benachrichtigungs-Sektion', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('AC3: rendert h2 "Benachrichtigungen (ntfy)"', async () => {
+    const { getByRole } = renderView(makeFetch());
+    await waitFor(() => {
+      expect(getByRole('heading', { name: /Benachrichtigungen.*ntfy/i })).toBeTruthy();
+    });
+  });
+
+  it('AC3: rendert Ein/Aus-Schalter (label "Benachrichtigungen:")', async () => {
+    const { container } = renderView(makeFetch());
+    await waitFor(() => {
+      const label = Array.from(container.querySelectorAll('label')).find(
+        (l) => /Benachrichtigungen:/i.test(l.textContent),
+      );
+      expect(label).toBeTruthy();
+    });
+  });
+
+  it('AC3: gespeicherte Werte beim Laden angezeigt (enabled=true, server, topic)', async () => {
+    const fetchMock = makeFetch({
+      getNotificationSettings: {
+        ok: true,
+        status: 200,
+        data: {
+          enabled: true,
+          server: 'https://my-ntfy.example.com',
+          topic: 'board-alerts',
+          priority: 3,
+          events: ['story_done'],
+          has_token: false,
+        },
+      },
+    });
+    const { container } = renderView(fetchMock);
+    await waitFor(() => {
+      // Server-URL-Input zeigt gespeicherten Wert
+      const serverInput = container.querySelector('#notif-server');
+      expect(serverInput).toBeTruthy();
+      expect(serverInput.value).toBe('https://my-ntfy.example.com');
+      // Topic-Input zeigt gespeicherten Wert
+      const topicInput = container.querySelector('#notif-topic');
+      expect(topicInput).toBeTruthy();
+      expect(topicInput.value).toBe('board-alerts');
+    });
+  });
+
+  it('AC3: Ereignis-Checkboxen für story_done/story_blocked/feature_done vorhanden', async () => {
+    const { container } = renderView(makeFetch());
+    await waitFor(() => {
+      expect(container.querySelector('#notif-event-story_done')).toBeTruthy();
+      expect(container.querySelector('#notif-event-story_blocked')).toBeTruthy();
+      expect(container.querySelector('#notif-event-feature_done')).toBeTruthy();
+    });
+  });
+
+  it('AC3: Speichern-Button ruft PUT /api/settings/notifications auf', async () => {
+    const fetchMock = makeFetch();
+    const { container } = renderView(fetchMock);
+
+    await waitFor(() => {
+      expect(container.querySelector('#notif-server')).toBeTruthy();
+    });
+
+    const saveBtn = Array.from(container.querySelectorAll('button')).find(
+      (b) => /Einstellungen speichern/i.test(b.textContent),
+    );
+    expect(saveBtn).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.click(saveBtn);
+    });
+
+    await waitFor(() => {
+      const putCalls = fetchMock.mock.calls.filter(
+        ([url, opts]) => url === '/api/settings/notifications' && opts?.method === 'PUT',
+      );
+      expect(putCalls.length).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  it('AC3: Test-Button ruft POST /api/settings/notifications/test auf', async () => {
+    const fetchMock = makeFetch();
+    const { container } = renderView(fetchMock);
+
+    await waitFor(() => {
+      expect(container.querySelector('#notif-server')).toBeTruthy();
+    });
+
+    const testBtn = Array.from(container.querySelectorAll('button')).find(
+      (b) => /Test-Benachrichtigung senden/i.test(b.textContent),
+    );
+    expect(testBtn).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.click(testBtn);
+    });
+
+    await waitFor(() => {
+      const testCalls = fetchMock.mock.calls.filter(
+        ([url, opts]) => url === '/api/settings/notifications/test' && opts?.method === 'POST',
+      );
+      expect(testCalls.length).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  it('AC3: Erfolgreiches Test-Ergebnis zeigt role=status', async () => {
+    const fetchMock = makeFetch({ postNotificationTestResponse: null }); // null = ok: true
+    const { container } = renderView(fetchMock);
+
+    await waitFor(() => {
+      expect(container.querySelector('#notif-server')).toBeTruthy();
+    });
+
+    const testBtn = Array.from(container.querySelectorAll('button')).find(
+      (b) => /Test-Benachrichtigung senden/i.test(b.textContent),
+    );
+
+    await act(async () => {
+      fireEvent.click(testBtn);
+    });
+
+    await waitFor(() => {
+      // Suche unter den role=status-Elementen nach dem Test-Ergebnis
+      const statusEls = Array.from(container.querySelectorAll('[role="status"]'));
+      const testStatusEl = statusEls.find((el) => /erfolgreich.*gesendet/i.test(el.textContent));
+      expect(testStatusEl).toBeTruthy();
+    });
+  });
+
+  it('AC3: Fehlerhaftes Test-Ergebnis zeigt role=alert', async () => {
+    const fetchMock = makeFetch({ postNotificationTestResponse: 'error' });
+    const { container } = renderView(fetchMock);
+
+    await waitFor(() => {
+      expect(container.querySelector('#notif-server')).toBeTruthy();
+    });
+
+    const testBtn = Array.from(container.querySelectorAll('button')).find(
+      (b) => /Test-Benachrichtigung senden/i.test(b.textContent),
+    );
+
+    await act(async () => {
+      fireEvent.click(testBtn);
+    });
+
+    await waitFor(() => {
+      // role=alert für Fehler-Fall
+      const alertEl = Array.from(container.querySelectorAll('[role="alert"]')).find(
+        (el) => /fehlgeschlagen|nicht erreichbar/i.test(el.textContent),
+      );
+      expect(alertEl).toBeTruthy();
+    });
+  });
+
+  it('AC10: Token nur als "gesetzt/nicht gesetzt" — nie Klartext im DOM', async () => {
+    const SECRET_TOKEN = 'sk_super_secret_ntfy_token_9876';
+    const fetchMock = makeFetch({
+      getNotificationSettings: {
+        ok: true,
+        status: 200,
+        data: { ...DEFAULT_NOTIFICATION_SETTINGS, has_token: true },
+      },
+    });
+    const { container } = renderView(fetchMock);
+
+    await waitFor(() => {
+      expect(container.querySelector('#notif-server')).toBeTruthy();
+      // has_token=true → "gesetzt" angezeigt, aber NIE der Klartext
+      const dom = container.innerHTML;
+      expect(dom).not.toContain(SECRET_TOKEN);
+      // Status-Anzeige "gesetzt" vorhanden
+      expect(dom).toMatch(/gesetzt/);
+    });
+  });
+
+  it('AC10: Token-Eingabe versendet über Credential-Pfad (/api/settings/credentials/notifications/ntfy_token), nicht über PUT /api/settings/notifications', async () => {
+    const fetchMock = makeFetch({
+      getNotificationSettings: {
+        ok: true,
+        status: 200,
+        data: { ...DEFAULT_NOTIFICATION_SETTINGS, has_token: false },
+      },
+    });
+    const { container } = renderView(fetchMock);
+
+    await waitFor(() => {
+      expect(container.querySelector('#notif-server')).toBeTruthy();
+    });
+
+    // Token-Setzen-Button klicken
+    const setTokenBtn = Array.from(container.querySelectorAll('button')).find(
+      (b) => /ntfy-Token setzen/i.test(b.getAttribute('aria-label') ?? ''),
+    );
+    expect(setTokenBtn).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.click(setTokenBtn);
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('#notif-token-input')).toBeTruthy();
+    });
+
+    // Token eingeben und speichern
+    await act(async () => {
+      fireEvent.change(container.querySelector('#notif-token-input'), {
+        target: { value: 'my-secret-token' },
+      });
+    });
+
+    await act(async () => {
+      const tokenSaveBtn = Array.from(container.querySelectorAll('button')).find(
+        (b) => /^Speichern$/.test(b.textContent) && container.querySelector('#notif-token-input'),
+      );
+      if (tokenSaveBtn) fireEvent.click(tokenSaveBtn);
+    });
+
+    await waitFor(() => {
+      // PUT muss an den Credential-Endpunkt gegangen sein
+      const credPutCalls = fetchMock.mock.calls.filter(
+        ([url, opts]) =>
+          typeof url === 'string' &&
+          url.includes('/api/settings/credentials/notifications/ntfy_token') &&
+          opts?.method === 'PUT',
+      );
+      expect(credPutCalls.length).toBeGreaterThanOrEqual(1);
+
+      // Token darf NICHT über /api/settings/notifications geschickt worden sein
+      const notifPutCalls = fetchMock.mock.calls.filter(
+        ([url, opts]) =>
+          url === '/api/settings/notifications' &&
+          opts?.method === 'PUT',
+      );
+      for (const [, opts] of notifPutCalls) {
+        const body = typeof opts?.body === 'string' ? opts.body : '';
+        expect(body).not.toContain('my-secret-token');
+      }
     });
   });
 });
