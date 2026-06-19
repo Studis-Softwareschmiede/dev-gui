@@ -60,6 +60,8 @@ export const CREDENTIAL_CATALOG = {
   // S-141: Off-Host-Backup Remote-Zugangsdaten (write-only, AC9)
   // S3-kompatibel (S3-only seit S-160): s3_access_key, s3_secret_key
   'backup-remote': ['s3_access_key', 's3_secret_key'],
+  // S-182: ntfy-Zugriffs-Token (verschlüsselt, write-only, AC1/AC10 push-notifications)
+  notifications: ['ntfy_token'],
 };
 
 /** Maximale Länge eines Credential-Werts (Bytes). */
