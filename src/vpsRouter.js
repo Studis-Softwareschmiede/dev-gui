@@ -237,6 +237,31 @@ export function vpsRouter(registry, auditStore) {
     }
   });
 
+  // ── GET /api/vps/providers/:provider/options ─────────────────────────────────
+
+  /**
+   * GET /api/vps/providers/:provider/options
+   * Wählbare Create-Optionen (server_types/locations/images mit Preisen) fürs Create-Formular
+   * (S-161, vps-create-options AC1–AC5). Nur Hetzner liefert Live-Optionen; sonst
+   * { optionsAvailable: false } (Frontend bleibt bei Freitext). API-Fehler → geheimnisfrei
+   * degradiert (200 { optionsAvailable: false }), damit das Create-Formular nie blockiert.
+   *
+   * Responses:
+   *   200 { optionsAvailable: true, serverTypes, locations, images }
+   *   200 { optionsAvailable: false }   (nicht-Hetzner / nicht konfiguriert / API-Fehler)
+   */
+  router.get('/api/vps/providers/:provider/options', async (req, res) => {
+    const provider = String(req.params.provider ?? '').trim();
+    try {
+      const options = await registry.getProviderOptions(provider);
+      return res.json(options);
+    } catch (err) {
+      // Hetzner-API-Fehler → geheimnisfrei degradieren (Token nie im Log/Response)
+      console.error('[vpsRouter] GET options Fehler:', sanitizeMsg(err?.message ?? ''));
+      return res.json({ optionsAvailable: false });
+    }
+  });
+
   // ── GET /api/vps/machines ──────────────────────────────────────────────────
 
   /**

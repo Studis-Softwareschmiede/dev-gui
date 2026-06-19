@@ -981,3 +981,41 @@ describe('VpsProviderRegistry — S-152 Tunnel-Provisionierung beim Create', () 
     expect(store._storedEntries[tokenKey]).toBeUndefined();
   });
 });
+
+// ── S-161: getProviderOptions() (vps-create-options AC1–AC5) ──────────────────
+
+describe('VpsProviderRegistry — S-161: getProviderOptions()', () => {
+  it('hetzner → optionsAvailable:true mit serverTypes/locations/images', async () => {
+    const store = makeCredentialStore({ hetzner: MOCK_TOKEN });
+    const registry = new VpsProviderRegistry({
+      credentialStore: store,
+      adapters: {
+        hetzner: {
+          ...makeAdapter(),
+          listServerTypes: async () => [{ name: 'cx23', cores: 2, memory: 4, disk: 40, prices: [] }],
+          listLocations: async () => [{ name: 'nbg1', networkZone: 'eu-central' }],
+          listImages: async () => [{ name: 'ubuntu-26.04' }],
+        },
+        ionos: makeAdapter(),
+        hostinger: makeAdapter(),
+      },
+    });
+    const opts = await registry.getProviderOptions('hetzner');
+    expect(opts.optionsAvailable).toBe(true);
+    expect(opts.serverTypes[0].name).toBe('cx23');
+    expect(opts.locations[0].name).toBe('nbg1');
+    expect(opts.images[0].name).toBe('ubuntu-26.04');
+  });
+
+  it('nicht-hetzner Provider → optionsAvailable:false (Freitext-Fallback)', async () => {
+    const store = makeCredentialStore({ hetzner: MOCK_TOKEN, ionos: 'tok' });
+    const registry = new VpsProviderRegistry({ credentialStore: store });
+    expect(await registry.getProviderOptions('ionos')).toEqual({ optionsAvailable: false });
+  });
+
+  it('hetzner nicht konfiguriert (kein Token) → optionsAvailable:false', async () => {
+    const store = makeCredentialStore({});
+    const registry = new VpsProviderRegistry({ credentialStore: store });
+    expect(await registry.getProviderOptions('hetzner')).toEqual({ optionsAvailable: false });
+  });
+});
