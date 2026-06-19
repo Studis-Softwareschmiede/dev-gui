@@ -13,9 +13,10 @@ export const order = 180;
  * @param {{
  *   boardAggregator: import('../BoardAggregator.js').BoardAggregator,
  *   storyMetricReader: import('../StoryMetricReader.js').StoryMetricReader,
+ *   notificationWatcher?: import('../NotificationWatcher.js').NotificationWatcher,
  * }} deps
  * @returns {import('express').Router}
  */
-export function create({ boardAggregator, storyMetricReader }) {
-  return boardRouter({ boardAggregator, storyMetricReader });
+export function create({ boardAggregator, storyMetricReader, notificationWatcher }) {
+  return boardRouter({ boardAggregator, storyMetricReader, notificationWatcher });
 }
