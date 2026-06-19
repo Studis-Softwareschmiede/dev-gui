@@ -96,6 +96,8 @@ export default [
         beforeAll: 'readonly',
         afterAll: 'readonly',
         jest: 'readonly',
+        // Node.js global object (used for fetch-mocking in tests)
+        global: 'readonly',
         // jsdom browser globals used in frontend tests
         window: 'readonly',
         document: 'readonly',

@@ -104,6 +104,16 @@ Server/Topic/Token, sind in den **Einstellungen** parametrisierbar.
 **ntfy-Request (ausgehend):** `POST <server>/<topic>` mit Headern `Title`, `Priority`,
 `Tags` und Body = Nachrichtentext; optional `Authorization: Bearer <token>`.
 
+**Config-Provider-Naht (S-182/S-183):** Der Test-Endpunkt (AC5) bezieht die aktuelle
+Notification-Config über eine injizierbare `getNotificationConfig()`-Funktion in den
+`deps`. Signatur:
+```
+getNotificationConfig(): Promise<{ enabled: boolean, server: string, topic: string,
+  priority?: number, events: string[] }>
+```
+Default-Provider (S-182): liefert `{ enabled: false, server: 'https://ntfy.sh', topic: '', events: [] }`.
+S-183 ersetzt den Provider mit dem echten persistierten Store — kein weiterer Umbau des Routers nötig.
+
 **Watcher-Snapshot:** persistierte Abbildung `story_id → letzter_status` (+ ggf.
 `feature_id → komplett?`), atomar geschrieben, im dev-gui-Datenverzeichnis.
 
