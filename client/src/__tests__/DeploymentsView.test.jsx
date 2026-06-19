@@ -11,11 +11,17 @@
  *   - AC10: Image-Dropdown (from /api/github/packages), Tag-Dropdown (disabled until image chosen),
  *           VPS-Dropdown (from /api/deployments/vps-targets), Domain-Dropdown (/api/cloudflare/zones)
  *   - AC11: Subdomain pre-filled from image name, editable; assembled hostname shown
- *   - AC12: Deploy-Button active only when Image+Tag+VPS+Domain+Subdomain set
+ *   - AC12: Deploy-Button active when Image+Tag+VPS+Domain+Subdomain set + VPS ready
+ *           (vpsReadiness==='ready'; vollständige AC10-Coverage in readiness.test.jsx)
  *           POST body: { image: "fullRef:tag", vps, hostname: "sub.domain", tunnelId }
  *   - AC13: Port-Ambiguity/Fallback hints shown in success response
  *   - AC14: Re-Deploy indicator shown when existing deploy matches hostname
  *   - A11y WCAG 2.1 AA: semantic landmarks, h1, aria-live, htmlFor labels, touch-targets ≥44px
+ *
+ * Note (vps-readiness-gate.md AC9–AC12, S-181):
+ *   - AC9–AC12 covered in dedicated DeploymentsView.readiness.test.jsx
+ *   - fetch stubs in this file updated to include readiness→'ready' responses so existing
+ *     Deploy-Button tests remain green (canDeploy now requires vpsReadiness==='ready')
  *
  * @jest-environment jsdom
  */
@@ -78,8 +84,13 @@ function makeDropdownFetchWithData({
   zones = [{ id: 'zone-abc', name: 'alexstuder.cloud' }],
   tunnels = [{ id: 'tunnel-uuid-1', name: 'main-tunnel' }],
   deployResult = { result: 'ok', deployment: { hostname: 'brew-assistent.alexstuder.cloud', replaced: false } },
+  // S-181 AC9/AC10: readiness stub — default 'ready' so existing tests still pass
+  readinessState = 'ready',
 } = {}) {
   return jest.fn(async (url, init) => {
+    if (url.includes('/api/deployments/readiness')) {
+      return { ok: true, status: 200, json: async () => ({ state: readinessState }) };
+    }
     if (url.includes('/api/github/packages') && !url.includes('/tags')) {
       return { ok: true, status: 200, json: async () => ({ packages }) };
     }
@@ -444,6 +455,9 @@ describe('DeploymentsView — AC12: Deploy-Button activation', () => {
   it('POST /api/deployments with correct body: fullRef:tag + vps + hostname + tunnelId', async () => {
     let capturedBody;
     globalThis.fetch = jest.fn(async (url, init) => {
+      if (url.includes('/api/deployments/readiness')) {
+        return { ok: true, status: 200, json: async () => ({ state: 'ready' }) };
+      }
       if (url === '/api/deployments' && init?.method === 'POST') {
         capturedBody = JSON.parse(init.body);
         return { ok: true, status: 200, json: async () => ({ result: 'ok', deployment: { replaced: false } }) };
@@ -537,6 +551,9 @@ describe('DeploymentsView — AC14: Re-Deploy indicator', () => {
   it('shows re-deploy warning when existing deploy matches hostname', async () => {
     // Mock fetch: deployments list returns an existing deploy on our target hostname
     globalThis.fetch = jest.fn(async (url, init) => {
+      if (url.includes('/api/deployments/readiness')) {
+        return { ok: true, status: 200, json: async () => ({ state: 'ready' }) };
+      }
       if (url.includes('/api/github/packages') && !url.includes('/tags')) {
         return { ok: true, status: 200, json: async () => ({
           packages: [{ name: 'brew-assistent', fullImageRef: 'ghcr.io/org/brew-assistent' }],
@@ -575,19 +592,28 @@ describe('DeploymentsView — AC14: Re-Deploy indicator', () => {
     // Now fill the deploy form to target the same hostname
     await fillDeployForm(utils);
 
-    // Re-deploy warning should appear
+    // Re-deploy warning should appear (may be multiple role="status" elements now
+    // — the readiness badge is also role="status"; find the re-deploy one by text content)
     await waitFor(() => {
-      const warning = utils.container.querySelector('[role="status"]');
+      const statuses = utils.container.querySelectorAll('[role="status"]');
+      const warning = Array.from(statuses).find((el) =>
+        el.textContent.includes('brew-assistent.alexstuder.cloud'),
+      );
       expect(warning).not.toBeNull();
-      expect(warning.textContent).toContain('brew-assistent.alexstuder.cloud');
     });
-    const warning = utils.container.querySelector('[role="status"]');
+    const statuses = utils.container.querySelectorAll('[role="status"]');
+    const warning = Array.from(statuses).find((el) =>
+      el.textContent.includes('brew-assistent.alexstuder.cloud'),
+    );
     expect(warning.textContent).toMatch(/existiert bereits/i);
   });
 
   it('shows "Re-Deploy starten" in button text when replacing', async () => {
     // Fetch that returns an existing deployment matching the target hostname
     globalThis.fetch = jest.fn(async (url, init) => {
+      if (url.includes('/api/deployments/readiness')) {
+        return { ok: true, status: 200, json: async () => ({ state: 'ready' }) };
+      }
       if (url.includes('/api/github/packages') && !url.includes('/tags')) {
         return { ok: true, status: 200, json: async () => ({ packages: [{ name: 'brew-assistent', fullImageRef: 'ghcr.io/org/brew-assistent' }] }) };
       }

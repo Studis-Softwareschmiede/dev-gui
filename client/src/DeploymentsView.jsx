@@ -3,6 +3,7 @@
  *
  * Spec: deploy-lifecycle.md AC3–AC9, AC10–AC14 (S-155), AC15
  *       stack-deploy-orchestration.md AC12 (Modus-Umschalter)
+ *       vps-readiness-gate.md AC9–AC12 (S-181)
  *
  * Responsibilities:
  *   - Mode toggle: "Single-Image" | "Compose-Stack aus Repo" (AC12)
@@ -42,7 +43,7 @@
  *   - Error messages from backend are rendered as text (no innerHTML)
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -60,6 +61,9 @@ const INITIAL_UNDEPLOY_STATE = {
 // Modes for the toggle (AC12)
 const MODE_SINGLE = 'single';
 const MODE_STACK  = 'stack';
+
+/** Poll interval for VPS readiness check (AC9/AC11 — NFR: ~3s). */
+const READINESS_POLL_MS = 3000;
 
 /**
  * Derive a subdomain suggestion from an image name or fullImageRef.
@@ -124,6 +128,11 @@ export function DeploymentsView({ onNavigate }) {
   // ── S-156: Lokal-Test state
   const [localTesting, setLocalTesting] = useState(false);
   const [localTestResult, setLocalTestResult] = useState(null); // { ok, report?, reason? }
+
+  // ── AC9/AC10/AC11: VPS Readiness polling ─────────────────────────────────
+  // 'unknown' = not yet polled; 'unreachable'|'provisioning'|'ready' = from API
+  const [vpsReadiness, setVpsReadiness] = useState('unknown');
+  const readinessTimerRef = useRef(null);
 
   // ── Stack-Modus state (AC12)
   const [stacks, setStacks] = useState([]);
@@ -272,6 +281,63 @@ export function DeploymentsView({ onNavigate }) {
     }
   }, [selectedPackage]);
 
+  // ── AC9/AC11: VPS Readiness polling ─────────────────────────────────────
+  // Poll GET /api/deployments/readiness?vps=<selectedVps> periodically.
+  // Stops when 'ready' is reached (AC11). Clears timer on unmount or VPS change.
+  useEffect(() => {
+    // Helper to stop any running timer
+    function clearTimer() {
+      if (readinessTimerRef.current !== null) {
+        clearInterval(readinessTimerRef.current);
+        readinessTimerRef.current = null;
+      }
+    }
+
+    // No VPS selected → no badge, no poll (AC9)
+    if (!selectedVps) {
+      clearTimer();
+      setVpsReadiness('unknown');
+      return;
+    }
+
+    // Reset state for new VPS selection
+    setVpsReadiness('unknown');
+    clearTimer();
+
+    let active = true; // prevent state update after cleanup
+
+    async function poll() {
+      try {
+        const res = await fetch(
+          `/api/deployments/readiness?vps=${encodeURIComponent(selectedVps)}`,
+        );
+        if (!active) return;
+        if (res.ok) {
+          const data = await res.json();
+          const state = data?.state;
+          if (!active) return;
+          setVpsReadiness(state ?? 'unknown');
+          // AC11: stop polling once ready
+          if (state === 'ready') {
+            clearTimer();
+          }
+        }
+        // On non-ok response: leave current readiness state unchanged, keep polling
+      } catch {
+        // Network error: leave state, keep polling
+      }
+    }
+
+    // Immediate first poll, then interval
+    poll();
+    readinessTimerRef.current = setInterval(poll, READINESS_POLL_MS);
+
+    return () => {
+      active = false;
+      clearTimer();
+    };
+  }, [selectedVps]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Compute assembled hostname (AC11)
   const assembledHostname = (subdomain.trim() && selectedZone)
     ? `${subdomain.trim()}.${selectedZone}`
@@ -287,6 +353,7 @@ export function DeploymentsView({ onNavigate }) {
   const fullImageRef = selectedPackageObj?.fullImageRef ?? '';
 
   // AC12: Deploy button active condition
+  // AC10 (vps-readiness-gate): additionally requires vpsReadiness === 'ready'
   const canDeploy =
     !deploying &&
     selectedPackage !== '' &&
@@ -294,7 +361,8 @@ export function DeploymentsView({ onNavigate }) {
     selectedVps !== '' &&
     selectedZone !== '' &&
     selectedTunnel !== '' &&
-    subdomain.trim() !== '';
+    subdomain.trim() !== '' &&
+    vpsReadiness === 'ready';
 
   // ── S-156: Lokal-Test handler ────────────────────────────────────────────
   async function handleLocalTest(e) {
@@ -365,7 +433,9 @@ export function DeploymentsView({ onNavigate }) {
         // Refresh list
         loadDeployments();
       } else {
-        const reason = data?.reason ?? data?.error ?? 'Deploy fehlgeschlagen';
+        // AC12 (vps-readiness-gate): map errorClass first, then fall back to reason/error
+        const errorClass = data?.errorClass;
+        const reason = errorClass ?? data?.reason ?? data?.error ?? 'Deploy fehlgeschlagen';
         setDeployResult({ ok: false, message: formatReason(reason) });
       }
     } catch {
@@ -770,22 +840,28 @@ export function DeploymentsView({ onNavigate }) {
               </select>
             </div>
 
-            {/* AC10: VPS-Dropdown */}
+            {/* AC10: VPS-Dropdown + Readiness-Badge (AC9) */}
             <div style={styles.row}>
               <label style={styles.label} htmlFor="deploy-vps-select">VPS</label>
-              <select
-                id="deploy-vps-select"
-                style={styles.input}
-                value={selectedVps}
-                onChange={(e) => setSelectedVps(e.target.value)}
-                aria-label="VPS auswählen"
-                disabled={vpsIdsState === 'loading'}
-              >
-                <option value="">— VPS wählen —</option>
-                {vpsIds.map((id) => (
-                  <option key={id} value={id}>{id}</option>
-                ))}
-              </select>
+              <div style={styles.vpsRow}>
+                <select
+                  id="deploy-vps-select"
+                  style={{ ...styles.input, flex: 1, width: 'auto' }}
+                  value={selectedVps}
+                  onChange={(e) => setSelectedVps(e.target.value)}
+                  aria-label="VPS auswählen"
+                  disabled={vpsIdsState === 'loading'}
+                >
+                  <option value="">— VPS wählen —</option>
+                  {vpsIds.map((id) => (
+                    <option key={id} value={id}>{id}</option>
+                  ))}
+                </select>
+                {/* AC9: Readiness-Badge — only when a VPS is selected */}
+                {selectedVps && (
+                  <VpsReadinessBadge state={vpsReadiness} />
+                )}
+              </div>
             </div>
 
             {/* AC10: Domänen-Dropdown */}
@@ -1142,6 +1218,49 @@ export function DeploymentsView({ onNavigate }) {
   );
 }
 
+// ── VpsReadinessBadge component (S-181, AC9) ─────────────────────────────────
+
+/**
+ * Shows a status badge reflecting the VPS readiness state.
+ * Rendered only when a VPS is selected.
+ *
+ * @param {{ state: 'unknown'|'unreachable'|'provisioning'|'ready' }} props
+ */
+function VpsReadinessBadge({ state }) {
+  let text;
+  let badgeStyle;
+
+  switch (state) {
+    case 'unreachable':
+      text = '⏳ VPS wird hochgefahren…';
+      badgeStyle = styles.badgeWaiting;
+      break;
+    case 'provisioning':
+      text = '⏳ VPS wird eingerichtet (Docker installieren)…';
+      badgeStyle = styles.badgeWaiting;
+      break;
+    case 'ready':
+      text = '✅ VPS bereit';
+      badgeStyle = styles.badgeReady;
+      break;
+    default:
+      // 'unknown' = first poll pending
+      text = '⏳ Bereitschaft wird geprüft…';
+      badgeStyle = styles.badgeWaiting;
+  }
+
+  return (
+    <span
+      role="status"
+      aria-live="polite"
+      aria-label={`VPS-Bereitschaft: ${text}`}
+      style={badgeStyle}
+    >
+      {text}
+    </span>
+  );
+}
+
 // ── LocalTestReport component (S-156) ────────────────────────────────────────
 
 /**
@@ -1195,6 +1314,10 @@ function formatReason(reason, context = 'single') {
         return 'Bitte den Stack-Namen exakt eintippen, um das Entfernen zu bestaetigen.';
       }
       return 'Bitte den Hostname exakt eintippen, um das Entfernen zu bestaetigen.';
+    // AC12 (vps-readiness-gate): friendly retry hint for provisioning errors
+    case 'vps-provisioning':
+    case 'docker-failed':
+      return 'VPS wird noch eingerichtet (Docker installieren) – in ~1–2 Min erneut versuchen';
     default:
       // Strip anything that looks like a secret from the displayed message
       return String(reason)
@@ -1426,6 +1549,37 @@ const styles = {
     border: '1px solid #7f1d1d',
     borderRadius: 4,
     color: '#fca5a5',
+  },
+  // VPS-Row: select + readiness badge side-by-side (AC9)
+  vpsRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 12,
+    flexWrap: 'wrap',
+  },
+  // Readiness badge: waiting states (unreachable / provisioning / unknown)
+  badgeWaiting: {
+    display: 'inline-block',
+    fontSize: 12,
+    color: '#fcd34d',
+    background: '#1c1400',
+    border: '1px solid #78350f',
+    borderRadius: 4,
+    padding: '4px 8px',
+    whiteSpace: 'nowrap',
+    flexShrink: 0,
+  },
+  // Readiness badge: ready state
+  badgeReady: {
+    display: 'inline-block',
+    fontSize: 12,
+    color: '#86efac',
+    background: '#0a1c0a',
+    border: '1px solid #14532d',
+    borderRadius: 4,
+    padding: '4px 8px',
+    whiteSpace: 'nowrap',
+    flexShrink: 0,
   },
   // Mode toggle (AC12)
   modeToggle: {
