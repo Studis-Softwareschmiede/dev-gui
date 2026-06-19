@@ -1,0 +1,27 @@
+id: F-022
+title: 'Team-Train-Dialog: Train-Button + Auswahl-Popup und „Retro starten"'
+goal: 'Basis-Dialog für Self-Improvement aus der GUI (Wurzel für F-021 Knowledge-hinzufügen).
+  Teamsicht bekommt einen Train-Button → modales Popup mit Mehrfach-Auswahl der Knowledge-Bereiche
+  (inkl. „Alle"), Kostenmodus als Radio-Buttons, Abarbeitung Warteschlange/Parallel und einer
+  Ja/Nein-Bestätigung; je Auswahl wird /agent-flow:train gefeuert (Warteschlange = N Einzelbefehle,
+  Parallel = ein Mehr-Pack-Befehl). Parallel ist nur aktiv, wenn agent-flow den Mehr-Pack-Train
+  unterstützt (cross-repo F-004), sonst deaktiviert mit Hinweis. Retro-Sicht bekommt neben dem
+  Reiter „Verbesserungs-Board" einen Button „Retro starten" → kleine Ja/Nein-Nachfrage → ein
+  /agent-flow:retro-Lauf. Reine Anzeige/Trigger über den bestehenden PTY-Schreibpfad
+  (POST /api/command, Allowlist train/retro); kein neuer Endpunkt.'
+status: To Do
+priority: P2
+spec: docs/specs/team-train-trigger.md
+definition_of_done: null
+labels:
+- team
+- train
+- frontend
+depends: null
+owner: alex
+stories:
+- S-175
+- S-176
+progress: 0/2
+created_at: '2026-06-19T00:00:00Z'
+updated_at: '2026-06-19T00:00:00Z'

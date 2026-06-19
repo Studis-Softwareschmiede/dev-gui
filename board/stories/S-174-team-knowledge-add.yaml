@@ -1,0 +1,54 @@
+id: S-174
+parent: F-021
+title: 'Knowledge Space anlegen: Beschreibung → headless Quellen-Suche → Bestätigen → train --bootstrap'
+status: To Do
+branch: null
+priority: P3
+spec: docs/specs/team-knowledge-add.md
+implements:
+- AC1
+- AC2
+- AC3
+- AC4
+- AC5
+- AC6
+- AC7
+- AC8
+- AC9
+- AC10
+- AC11
+- AC12
+- AC13
+- AC14
+- AC15
+depends:
+- S-175
+labels:
+- team
+- knowledge
+- frontend
+- backend
+- security
+size_est: L
+dispo_est: null
+dispo_forecast: null
+confidence: medium
+estimate_note: 'Zwei Teile. Backend: neuer headless Helfer KnowledgeSourceService + Router
+  POST /api/assist/knowledge-sources (Muster src/AssistService.js/assistRefineRouter.js) —
+  claude -p mit --allowedTools WebSearch (kein WebFetch — A3), description via stdin (R02),
+  Array-Args (R03), Timeout 60s + 1 Retry, strukturiertes JSON {suggestedPackId,suggestedType,
+  sources[],notes}, kein JobLock, eigener Service + Audit hinter AccessGuard. Frontend
+  (client/src/TeamView.jsx): Button „Neuen Knowledge Space anlegen" → Beschreibungsfeld +
+  „Quellen suchen" (aria-busy) → Checkbox-Liste der Quellen (Titel/URL/why, vorausgewählt,
+  „Vorschlag, bitte prüfen") + editierbarer Name/Typ + manueller Fallback → OK feuert einzeiligen
+  /agent-flow:train --bootstrap <pack-id> <bestätigte-urls…> an POST /api/command (backend-seitige
+  URL-Validierung); Kollisions-Check gegen /api/team; Doppel-Feuer-Schutz. Plus Doktrin-Nachführung
+  CLAUDE.md/architecture.md (A1). L heuristisch (neuer Backend-Service + mehrstufiger Dialog +
+  Web-Capability + Doktrin-Doku). architekt-Review 2026-06-19: APPROVE-WITH-CONDITIONS (Auflagen als
+  AC10-AC15 verankert). Setzt voraus: team-train-trigger (Basis-Dialog, noch nicht geboardet) +
+  agent-flow train-bootstrap-new-pack (Enabler).'
+pr: null
+blocked_reason: null
+created_at: '2026-06-19T00:00:00Z'
+updated_at: '2026-06-19T00:00:00Z'
+done_at: null

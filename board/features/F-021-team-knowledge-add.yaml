@@ -1,0 +1,28 @@
+id: F-021
+title: 'Team-Train: neuen Knowledge Space anlegen (Beschreibung → Quellen-Suche → Bestätigen → train --bootstrap)'
+goal: 'Der Owner soll einen NEUEN Knowledge Space komplett aus der GUI anlegen können. Ablauf
+  (Owner-Vision 2026-06-19): Train-Button → Popup → Button "Neuen Knowledge Space anlegen" →
+  Beschreibung eingeben (was angelegt werden soll) → im Hintergrund läuft Claude headless los
+  und sucht offizielle Quellen → diese werden unten zur Auswahl aufgelistet und mit OK bestätigt
+  → mit Pack-ID + bestätigten Quellen wird agent-flow Train (--bootstrap) gespeist → neuer Pack
+  als PR + Mensch-Approve. Die Quellen-Suche nutzt das bestehende AssistService-Muster (claude -p,
+  headless, kein JobLock), erweitert um Web-Zugriff (neuer Endpunkt /api/assist/knowledge-sources)
+  — architekt-Review 2026-06-19 erteilt (APPROVE-WITH-CONDITIONS; Auflagen als AC10-AC15 in der
+  Spec: WebSearch-only ohne WebFetch, eigener KnowledgeSourceService, Doktrin-Nachführung,
+  backend-URL-Validierung, Audit, Timeout/Retry). Auslösen weiter über den einzeiligen
+  PTY-Befehlspfad. Setzt den agent-flow-Enabler (train-bootstrap-new-pack) voraus.'
+status: To Do
+priority: P2
+spec: docs/specs/team-knowledge-add.md
+definition_of_done: null
+labels:
+- team
+- knowledge
+- frontend
+depends: null
+owner: alex
+stories:
+- S-174
+progress: 0/1
+created_at: '2026-06-19T00:00:00Z'
+updated_at: '2026-06-19T00:00:00Z'
