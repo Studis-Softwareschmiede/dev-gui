@@ -1,8 +1,8 @@
 id: S-175
 parent: F-022
 title: 'Teamsicht: Train-Button + Auswahl-Popup (Alle/Knowledge, Kostenmodus, Warteschlange/Parallel, Bestätigung) feuert /agent-flow:train'
-status: To Do
-branch: null
+status: Done
+branch: board/concepts-2026-06-19
 priority: P2
 spec: docs/specs/team-train-trigger.md
 implements:
@@ -39,4 +39,4 @@ pr: null
 blocked_reason: null
 created_at: '2026-06-19T00:00:00Z'
 updated_at: '2026-06-19T00:00:00Z'
-done_at: null
+done_at: '2026-06-19T00:00:00Z'

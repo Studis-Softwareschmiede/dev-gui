@@ -638,12 +638,15 @@ export class VpsProviderRegistry {
   }
 
   /**
-   * Liefert die wählbaren Create-Optionen eines Providers (S-161, vps-create-options AC1–AC5).
+   * Liefert die wählbaren Create-Optionen eines Providers (S-161/S-177, vps-create-options AC1–AC5, AC15–AC17).
    * Nur Hetzner implementiert die Live-Quelle (server_types/locations/images mit Preisen);
    * andere/nicht-konfigurierte Provider → { optionsAvailable: false } (Frontend bleibt bei Freitext).
    *
+   * S-177 (AC15–AC17): Fügt authoritative availability-Map aus GET /v1/datacenters hinzu.
+   * Schlägt der Datacenter-Call fehl → availability weggelassen, Rest vollständig nutzbar (graceful).
+   *
    * @param {string} provider
-   * @returns {Promise<{ optionsAvailable: boolean, serverTypes?, locations?, images? }>}
+   * @returns {Promise<{ optionsAvailable: boolean, serverTypes?, locations?, images?, availability? }>}
    */
   async getProviderOptions(provider) {
     if (provider !== 'hetzner') {
@@ -666,7 +669,27 @@ export class VpsProviderRegistry {
       adapter.listLocations(token),
       adapter.listImages(token),
     ]);
-    return { optionsAvailable: true, serverTypes, locations, images };
+
+    // S-177 AC15–AC17: availability-Map aus /v1/datacenters (authoritativ).
+    // Graceful: schlägt der Call fehl → availability weggelassen, übrige Optionen vollständig.
+    // Token bleibt store-intern (nie in availability/Response/Log).
+    let availability = undefined;
+    if (typeof adapter.listDatacenters === 'function') {
+      try {
+        const datacenters = await adapter.listDatacenters(token);
+        availability = buildAvailabilityMap(datacenters, serverTypes);
+      } catch {
+        // AC17: Datacenter-Fehler → availability weggelassen, kein Hard-Fail, kein Token-Leak
+        // (Stack-Trace und Token gehen nie in Log hier — sanitizeMsg wird im Adapter angewandt)
+        availability = undefined;
+      }
+    }
+
+    const result = { optionsAvailable: true, serverTypes, locations, images };
+    if (availability !== undefined) {
+      result.availability = availability;
+    }
+    return result;
   }
 
   // ── Tunnel-Provisionierung (S-152) ───────────────────────────────────────────
@@ -933,6 +956,66 @@ export class VpsRegistryError extends Error {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+// ── Availability-Map-Builder (S-177 AC15–AC17) ───────────────────────────────
+
+/**
+ * Baut die autoritative availability-Map aus den listDatacenters-Ergebnissen und
+ * den bereits geladenen server_types auf (S-177 AC15–AC16).
+ *
+ * Pro Location wird die Vereinigung (Union) der server_types.available-Listen aller
+ * Datacenters dieser Location gebildet; server-type-IDs werden über serverTypes
+ * ({id, name}) auf Namen gemappt. IDs ohne Name-Match werden ausgelassen (AC16).
+ * Pro Location-Eintrag sind die Typ-Namen dedupliziert (AC16).
+ *
+ * Security-Floor: kein Token in Eingabe/Ausgabe; nur abgeleitete Bezeichner.
+ *
+ * @param {Array<{ locationName: string, availableIds: number[] }>} datacenters
+ *   Rohdaten aus HetznerAdapter.listDatacenters()
+ * @param {Array<{ id: number|null, name: string }>} serverTypes
+ *   Bereits geladene server_types (id + name aus listServerTypes, AC16)
+ * @returns {{ [locationName: string]: string[] }}
+ *   Map von Location-Name → deduplizierte Liste bereitstellbarer server-type-Namen
+ */
+function buildAvailabilityMap(datacenters, serverTypes) {
+  // ID → name-Lookup aus den geladenen server_types (AC16: ID ohne Match → auslassen)
+  const idToName = new Map();
+  if (Array.isArray(serverTypes)) {
+    for (const st of serverTypes) {
+      if (st && typeof st.name === 'string' && st.id != null) {
+        idToName.set(Number(st.id), st.name);
+      }
+    }
+  }
+
+  // Pro Location: Union der available-IDs → Namen (dedupliziert via Set)
+  /** @type {{ [location: string]: Set<string> }} */
+  const locationSets = {};
+
+  if (Array.isArray(datacenters)) {
+    for (const dc of datacenters) {
+      const loc = dc.locationName;
+      if (!loc || typeof loc !== 'string') continue;
+      if (!locationSets[loc]) {
+        locationSets[loc] = new Set();
+      }
+      for (const id of (dc.availableIds ?? [])) {
+        const name = idToName.get(Number(id));
+        if (name) {
+          locationSets[loc].add(name);
+        }
+        // AC16: IDs ohne Name-Match → ausgelassen, kein Fehler
+      }
+    }
+  }
+
+  // Set → Array (dedupliziert durch Set-Semantik, AC16)
+  const result = {};
+  for (const [loc, names] of Object.entries(locationSets)) {
+    result[loc] = Array.from(names);
+  }
+  return result;
+}
 
 /**
  * Klassifiziert einen Provider-Fehler für den providerErrors-Array.

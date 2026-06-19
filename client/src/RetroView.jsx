@@ -28,6 +28,15 @@
  *           je Karte: Regel-ID, Ziel, Art-Badge, Status-Badge, PR-Link; Kennzahlen aus baseline.json.
  *   AC5  — Filter nach Kategorie (agents|skills|knowledge) + Art (retro|train), Mehrfachauswahl.
  *
+ * team-train-trigger:
+ *   AC8  — „Retro starten" öffnet eine kleine modale Ja/Nein-Nachfrage; „Ja" sendet genau
+ *           einen /agent-flow:retro; keine Auswahl/kein Kostenmodus. (V7)
+ *   AC9  — Doppel-Feuer-Schutz während des Sendens; Statusanzeige (gestartet/abgelehnt). (V7, V8)
+ *   AC10 — A11y WCAG 2.1 AA: semantischer Dialog (role=dialog, aria-modal), Esc schließt,
+ *           Fokus-Rückgabe, beschriftete Buttons, sichtbare Fokusringe. (V7)
+ *   AC11 — Security-Floor: kein dangerouslySetInnerHTML/innerHTML, keine Secrets im Bundle,
+ *           nur /api/command (POST); Server bleibt Allowlist-Grenze. (alle)
+ *
  * A11y (WCAG 2.1 AA):
  *   - Semantische Navigationsliste mit aria-label.
  *   - Sichtbarer Fokusring — KEIN outline:none (Coder-Lesson 2026-05-27).
@@ -38,14 +47,14 @@
  *
  * Security (Floor):
  *   - Kein dangerouslySetInnerHTML / kein innerHTML.
- *   - Nur /api/retro/* Endpunkte (hinter AccessGuard).
+ *   - Nur /api/retro/* und /api/command Endpunkte (hinter AccessGuard).
  *   - Keine Secrets im Bundle.
  *   - Keine neue externe Bibliothek.
  *
  * @param {{ onNavigate: (view: string) => void }} props
  */
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useId } from 'react';
 
 // ── Board status columns (canonical order) ────────────────────────────────────
 const BOARD_STATUS_COLUMNS = [
@@ -91,6 +100,13 @@ export function RetroView({ onNavigate: _onNavigate }) {
   // ── State: board filters (AC5 retro-train-board-local)
   const [filterKategorie, setFilterKategorie] = useState(new Set()); // empty = all
   const [filterArt, setFilterArt]             = useState(new Set()); // empty = all
+
+  // ── State: Retro-Start dialog (AC8/AC9/AC10 team-train-trigger)
+  const [retroDialogOpen, setRetroDialogOpen]   = useState(false); // dialog visible
+  const [retroSending, setRetroSending]         = useState(false); // Doppel-Feuer-Schutz
+  const [retroStatus, setRetroStatus]           = useState(null);  // null | 'ok' | '409' | 'error'
+  const retroTriggerBtnRef                      = useRef(null);    // focus-return target
+  const retroConfirmBtnRef                      = useRef(null);    // initial focus in dialog
 
   // ── Load overview on mount exactly once — AC4
   useEffect(() => {
@@ -198,6 +214,57 @@ export function RetroView({ onNavigate: _onNavigate }) {
     });
   }
 
+  // ── Open/Close Retro dialog (AC8/AC10 team-train-trigger)
+  function openRetroDialog() {
+    setRetroDialogOpen(true);
+    setRetroStatus(null);
+    // Focus moves to confirm button via effect below
+  }
+
+  function closeRetroDialog() {
+    if (retroSending) return; // guard: don't close while sending
+    setRetroDialogOpen(false);
+    setRetroStatus(null);
+    // Return focus to trigger button (AC10 — Fokus-Rückgabe)
+    retroTriggerBtnRef.current?.focus();
+  }
+
+  // ── Focus the confirm button when dialog opens (AC10 — Fokus-Falle: initial focus)
+  useEffect(() => {
+    if (retroDialogOpen) {
+      // Defer to next tick so the dialog is rendered
+      const id = setTimeout(() => {
+        retroConfirmBtnRef.current?.focus();
+      }, 0);
+      return () => clearTimeout(id);
+    }
+  }, [retroDialogOpen]);
+
+  // ── Send /agent-flow:retro — AC8/AC9 team-train-trigger
+  async function sendRetro() {
+    if (retroSending) return; // Doppel-Feuer-Schutz (AC9)
+    setRetroSending(true);
+    setRetroStatus(null);
+    try {
+      const res = await fetch('/api/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: '/agent-flow:retro' }),
+      });
+      if (res.status === 409) {
+        setRetroStatus('409');
+      } else if (res.ok || res.status === 202) {
+        setRetroStatus('ok');
+      } else {
+        setRetroStatus('error');
+      }
+    } catch {
+      setRetroStatus('error');
+    } finally {
+      setRetroSending(false);
+    }
+  }
+
   // ── Derived: empty state (AC7)
   const isEmpty = runsState === 'ok' && runs.length === 0;
 
@@ -206,7 +273,7 @@ export function RetroView({ onNavigate: _onNavigate }) {
     <main style={styles.main} aria-label="Retro-Ansicht">
       <h1 style={styles.h1}>Retro</h1>
 
-      {/* ── Tab switcher (AC3 retro-train-board-local) ── */}
+      {/* ── Tab switcher + Action button row (AC3 retro-train-board-local, AC8 team-train-trigger) ── */}
       <div style={styles.tabBar} role="tablist" aria-label="Retro-Reiter">
         <button
           type="button"
@@ -234,7 +301,31 @@ export function RetroView({ onNavigate: _onNavigate }) {
         >
           Verbesserungs-Board
         </button>
+
+        {/* ── „Retro starten" action button — kein role=tab, klar abgesetzt (AC8, AC10) ── */}
+        <div style={styles.tabBarSpacer} aria-hidden="true" />
+        <button
+          ref={retroTriggerBtnRef}
+          type="button"
+          style={styles.retroStartBtn}
+          onClick={openRetroDialog}
+          data-testid="retro-start-btn"
+          aria-label="Retro starten — Retro-Agenten starten"
+        >
+          Retro starten
+        </button>
       </div>
+
+      {/* ── Retro-Start-Dialog (AC8/AC9/AC10 team-train-trigger) ── */}
+      {retroDialogOpen && (
+        <RetroConfirmDialog
+          sending={retroSending}
+          status={retroStatus}
+          onConfirm={sendRetro}
+          onCancel={closeRetroDialog}
+          confirmBtnRef={retroConfirmBtnRef}
+        />
+      )}
 
       {/* ── Läufe tab ── */}
       {activeTab === 'runs' && (
@@ -827,6 +918,139 @@ const BOARD_STATUS_BADGE_STYLES = {
   _default:  { background: '#1e293b', color: '#93c5fd', borderColor: '#334155' },
 };
 
+// ── RetroConfirmDialog (AC8/AC9/AC10 team-train-trigger) ─────────────────────
+
+/**
+ * Modal Ja/Nein-Nachfrage before firing /agent-flow:retro.
+ * - role=dialog, aria-modal, aria-labelledby (AC10)
+ * - Esc/„Nein" schließen (AC10)
+ * - Fokus-Falle: Tab-Cycling innerhalb des Dialogs (AC10)
+ * - Doppel-Feuer-Schutz: „Ja"-Button deaktiviert während sending (AC9)
+ * - 409 → Hinweis „Session belegt" (AC9)
+ * - Bedeutung nicht allein über Farbe: Text-Labels bei allen Status-Hinweisen (AC10)
+ *
+ * @param {{
+ *   sending: boolean,
+ *   status: null | 'ok' | '409' | 'error',
+ *   onConfirm: () => void,
+ *   onCancel: () => void,
+ *   confirmBtnRef: React.RefObject,
+ * }} props
+ */
+function RetroConfirmDialog({ sending, status, onConfirm, onCancel, confirmBtnRef }) {
+  const titleId = useId();
+  const cancelBtnRef = useRef(null);
+
+  // ── Esc closes dialog (AC10)
+  useEffect(() => {
+    function handleKeyDown(e) {
+      if (e.key === 'Escape') {
+        onCancel();
+      }
+      // Focus-trap: cycle Tab within dialog (AC10)
+      if (e.key === 'Tab') {
+        const focusable = [confirmBtnRef.current, cancelBtnRef.current].filter(Boolean);
+        if (focusable.length < 2) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (e.shiftKey) {
+          if (document.activeElement === first) {
+            e.preventDefault();
+            last.focus();
+          }
+        } else {
+          if (document.activeElement === last) {
+            e.preventDefault();
+            first.focus();
+          }
+        }
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [onCancel, confirmBtnRef]);
+
+  // ── Status text for aria-live region (AC9/AC10)
+  let statusNode = null;
+  if (status === 'ok') {
+    statusNode = (
+      <p style={styles.retroDialogStatusOk} role="status" aria-live="polite">
+        Retro-Agent gestartet. Das Ergebnis erscheint später im Verbesserungs-Board.
+      </p>
+    );
+  } else if (status === '409') {
+    statusNode = (
+      <p style={styles.retroDialogStatus409} role="alert" aria-live="assertive">
+        Session belegt — bitte warten und erneut versuchen.
+      </p>
+    );
+  } else if (status === 'error') {
+    statusNode = (
+      <p style={styles.retroDialogStatusErr} role="alert" aria-live="assertive">
+        Fehler beim Starten des Retro-Agenten. Bitte erneut versuchen.
+      </p>
+    );
+  }
+
+  // After a final status (ok/409/error), allow closing via the cancel/close button label
+  const isDone = status === 'ok' || status === '409' || status === 'error';
+
+  return (
+    /* Backdrop */
+    <div
+      style={styles.retroDialogBackdrop}
+      onClick={(e) => { if (e.target === e.currentTarget) onCancel(); }}
+      aria-hidden="false"
+    >
+      {/* Dialog */}
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        style={styles.retroDialog}
+        data-testid="retro-confirm-dialog"
+      >
+        <h2 id={titleId} style={styles.retroDialogTitle}>
+          Retro-Agenten starten?
+        </h2>
+        <p style={styles.retroDialogBody}>
+          Soll ich den Retro-Agenten starten? Der Lauf läuft global über das ganze Team.
+        </p>
+
+        {/* Status feedback (aria-live, AC9/AC10) */}
+        {statusNode}
+
+        {/* Buttons row */}
+        <div style={styles.retroDialogBtnRow}>
+          <button
+            ref={confirmBtnRef}
+            type="button"
+            style={{
+              ...styles.retroDialogBtnYes,
+              ...(sending ? styles.retroDialogBtnDisabled : {}),
+            }}
+            disabled={sending || isDone}
+            aria-disabled={sending || isDone}
+            onClick={onConfirm}
+            data-testid="retro-confirm-yes"
+          >
+            {sending ? 'Wird gestartet…' : 'Ja, starten'}
+          </button>
+          <button
+            ref={cancelBtnRef}
+            type="button"
+            style={styles.retroDialogBtnNo}
+            onClick={onCancel}
+            data-testid="retro-confirm-no"
+          >
+            {isDone ? 'Schliessen' : 'Nein, abbrechen'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Styles ────────────────────────────────────────────────────────────────────
 
 const styles = {
@@ -1325,5 +1549,136 @@ const styles = {
     fontSize: 11,
     borderRadius: 10,
     border: '1px solid',
+  },
+
+  // ── Tab-bar: spacer + Retro-Start button (AC8/AC10 team-train-trigger)
+  tabBarSpacer: {
+    flex: 1,
+  },
+
+  // „Retro starten" — visually an action button, NOT a tab (AC8, AC10)
+  // Touch-Target ≥ 44 px (AC10); focus ring preserved (no outline:none) (AC10)
+  retroStartBtn: {
+    padding: '10px 18px',
+    minHeight: 44,
+    minWidth: 44,
+    background: '#1a2a1a',
+    color: '#86efac',
+    border: '1px solid #14532d',
+    borderRadius: 6,
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: 'pointer',
+    // Focus ring preserved — no outline:none (AC10)
+  },
+
+  // ── Retro-Confirm-Dialog (AC8/AC9/AC10 team-train-trigger)
+  retroDialogBackdrop: {
+    position: 'fixed',
+    inset: 0,
+    background: 'rgba(0,0,0,0.6)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 1000,
+  },
+
+  retroDialog: {
+    background: '#1e293b',
+    border: '1px solid #334155',
+    borderRadius: 10,
+    padding: '28px 32px',
+    minWidth: 320,
+    maxWidth: 480,
+    width: '90vw',
+    color: '#e5e7eb',
+    boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+  },
+
+  retroDialogTitle: {
+    margin: '0 0 12px',
+    fontSize: 18,
+    fontWeight: 700,
+    color: '#f0f9ff',
+  },
+
+  retroDialogBody: {
+    margin: '0 0 20px',
+    fontSize: 14,
+    color: '#cbd5e1',
+    lineHeight: 1.5,
+  },
+
+  retroDialogBtnRow: {
+    display: 'flex',
+    gap: 10,
+    justifyContent: 'flex-end',
+    marginTop: 8,
+  },
+
+  // „Ja, starten" — primary action
+  // Touch-Target ≥ 44 px; focus ring preserved (AC10)
+  retroDialogBtnYes: {
+    padding: '10px 20px',
+    minHeight: 44,
+    background: '#14532d',
+    color: '#86efac',
+    border: '1px solid #15803d',
+    borderRadius: 6,
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: 'pointer',
+    // Focus ring preserved — no outline:none
+  },
+
+  // „Nein, abbrechen" / „Schliessen"
+  // Touch-Target ≥ 44 px; focus ring preserved (AC10)
+  retroDialogBtnNo: {
+    padding: '10px 20px',
+    minHeight: 44,
+    background: '#1e293b',
+    color: '#9ca3af',
+    border: '1px solid #334155',
+    borderRadius: 6,
+    fontSize: 13,
+    cursor: 'pointer',
+    // Focus ring preserved — no outline:none
+  },
+
+  // Disabled state visual — „Ja"-Button while sending (AC9)
+  retroDialogBtnDisabled: {
+    opacity: 0.5,
+    cursor: 'not-allowed',
+  },
+
+  // Status feedback styles (AC9/AC10 — bedeutung nicht allein über Farbe: Text-Labels)
+  retroDialogStatusOk: {
+    margin: '0 0 16px',
+    padding: '10px 14px',
+    background: '#1a2a1a',
+    color: '#86efac',
+    border: '1px solid #14532d',
+    borderRadius: 6,
+    fontSize: 13,
+  },
+
+  retroDialogStatus409: {
+    margin: '0 0 16px',
+    padding: '10px 14px',
+    background: '#2a1a1a',
+    color: '#f87171',
+    border: '1px solid #7f1d1d',
+    borderRadius: 6,
+    fontSize: 13,
+  },
+
+  retroDialogStatusErr: {
+    margin: '0 0 16px',
+    padding: '10px 14px',
+    background: '#2a1a1a',
+    color: '#f87171',
+    border: '1px solid #7f1d1d',
+    borderRadius: 6,
+    fontSize: 13,
   },
 };

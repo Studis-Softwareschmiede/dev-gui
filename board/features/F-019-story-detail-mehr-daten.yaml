@@ -10,7 +10,7 @@ goal: 'Die Story-Detailansicht bleibt für aktuelle Stories (z.B. S-165) leer �
   fällt für Ende auf done_at zurück, Frontend zeigt branch/PR + einen verständlichen
   Leer-Hinweis statt "Keine Flow-Daten vorhanden". Für erledigte Stories wird gezeigt,
   was aus der Board-YAML ableitbar ist (Owner-Entscheid: kein Rückbau des Flows).'
-status: To Do
+status: Done
 priority: P2
 spec: docs/specs/story-detail-yaml-fallback.md
 definition_of_done: null

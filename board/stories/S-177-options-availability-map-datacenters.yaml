@@ -1,7 +1,7 @@
 id: S-177
 parent: F-023
 title: 'Options-Endpunkt: availability-Map aus /v1/datacenters (autoritative Region->Server-Typen) + HetznerAdapter.listDatacenters'
-status: To Do
+status: Done
 priority: P1
 spec: docs/specs/vps-create-options.md
 implements:

@@ -128,6 +128,7 @@ export class HetznerAdapter {
       for (const t of list) {
         if (t.deprecated) continue; // AC: deprecated Typen ausblenden
         types.push({
+          id: t.id ?? null,  // S-177 AC16: ID für availability-Map-Mapping (ID→name)
           name: t.name,
           cores: t.cores ?? null,
           memory: t.memory ?? null,
@@ -191,6 +192,29 @@ export class HetznerAdapter {
       page++;
     }
     return images;
+  }
+
+  /**
+   * Lists datacenters from the Hetzner Cloud API (S-177, vps-create-options AC15–AC17).
+   * Returns the minimal fields needed to build the availability map:
+   *   location.name → which location a datacenter belongs to
+   *   server_types.available → IDs of server types that can be provisioned in this datacenter
+   *
+   * Security (ADR-009 / security/R01):
+   *   - Token is passed transiently; never cached, logged, or returned.
+   *   - Same #apiGet / AbortController / Bearer-Header / sanitizeMsg discipline as other methods.
+   *
+   * @param {string} token - API token (transient)
+   * @returns {Promise<Array<{ locationName: string, availableIds: number[] }>>}
+   * @throws {HetznerAdapterError}
+   */
+  async listDatacenters(token) {
+    const data = await this.#apiGet(`${HETZNER_API}/datacenters`, token);
+    const datacenters = data.datacenters ?? [];
+    return datacenters.map((dc) => ({
+      locationName: dc.location?.name ?? null,
+      availableIds: Array.isArray(dc.server_types?.available) ? dc.server_types.available : [],
+    })).filter((dc) => dc.locationName !== null);
   }
 
   /**

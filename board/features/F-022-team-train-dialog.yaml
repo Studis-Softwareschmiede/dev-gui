@@ -9,7 +9,7 @@ goal: 'Basis-Dialog für Self-Improvement aus der GUI (Wurzel für F-021 Knowled
   Reiter „Verbesserungs-Board" einen Button „Retro starten" → kleine Ja/Nein-Nachfrage → ein
   /agent-flow:retro-Lauf. Reine Anzeige/Trigger über den bestehenden PTY-Schreibpfad
   (POST /api/command, Allowlist train/retro); kein neuer Endpunkt.'
-status: To Do
+status: Done
 priority: P2
 spec: docs/specs/team-train-trigger.md
 definition_of_done: null

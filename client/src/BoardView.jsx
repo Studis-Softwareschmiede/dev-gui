@@ -41,6 +41,15 @@
  *           Ist-/Abweichungs-Spalten bleiben leer bis zum Flow-Lauf.
  *           ep_est_source: 'yaml' → Vorab-Badge; 'ledger' → kein Badge; null → keine Schätzung.
  *
+ * story-detail-yaml-fallback:
+ *   AC5  — Differenzierter Leer-Zustand im Agenten-Flow-Block: „Vor Metrik-Erfassung
+ *           abgeschlossen" (done_at vorhanden) vs. „Noch kein Flow-Lauf erfasst".
+ *           Ende-Zeit zeigt auch YAML-Quelle (ended_at_source='yaml') mit YAML-Badge.
+ *   AC6  — Block „Verknüpfungen" mit Branch (Text) + PR (externer Link, noopener noreferrer);
+ *           Block ausgeblendet wenn weder branch noch pr vorhanden.
+ *   AC7  — Ledger hat Vorrang: bestehende Ledger-Daten unverändert.
+ *   AC8  — Kein dangerouslySetInnerHTML; externer PR-Link mit rel=noopener noreferrer.
+ *
  * autonome-board-abarbeitung:
  *   AC4  — Board zeigt Ready-/Blocked-Status: Ready-To-Do-Stories tragen ein dezentes
  *           „ready"-Badge (grün); Blocked-Stories zeigen ihren blocked_reason als
@@ -1249,16 +1258,17 @@ function StoryCard({ story, onOpenSpec, onStoryClick }) {
 // ── StoryDetailView ───────────────────────────────────────────────────────────
 
 /**
- * Story-Detail-Ansicht (AC3/AC4 story-detail-ansicht).
+ * Story-Detail-Ansicht (AC3/AC4 story-detail-ansicht; AC5/AC6 story-detail-yaml-fallback).
  *
- * Drei Blöcke:
- *   (1) Zeiten       — Start / Ende / Dauer
- *   (2) Agenten-Flow — chronologisch: Agent / Iteration / Gate / Dauer
- *   (3) Soll-Ist     — ep_est↔ep_act, tok_est↔tok_total, Abweichung %;
- *                      fehlende Schätzung → „keine Schätzung"
+ * Blöcke:
+ *   (1) Zeiten       — Start / Ende (auch aus YAML) / Dauer
+ *   (2) Agenten-Flow — chronologisch; differenzierter Leer-Zustand (AC5 yaml-fallback)
+ *   (3) Soll-Ist     — ep_est↔ep_act, tok_est↔tok_total, Abweichung %
+ *   (4) Verknüpfungen — Branch + PR-Link (AC6 yaml-fallback); ausgeblendet wenn beide null
  *
  * Rückweg zum Board per onBack (AC3 Rückweg vorhanden).
  * Touch-Targets ≥ 44 px (WCAG 2.1 AA).
+ * Kein dangerouslySetInnerHTML; externer PR-Link rel=noopener noreferrer (AC8 Floor).
  *
  * @param {{
  *   story: { slug: string, storyId: string, storyTitle: string },
@@ -1344,7 +1354,7 @@ function StoryDetailView({ story, detailState, detailData, detailError, onBack }
       {detailState === 'ok' && detailData != null && (
         <div style={styles.detailBlocks} data-testid="detail-blocks">
 
-          {/* ── Block 1: Zeiten (AC3) ──────────────────────────────────────── */}
+          {/* ── Block 1: Zeiten (AC3; AC5 yaml-fallback — Ende aus YAML mit Badge) ── */}
           <section style={styles.detailBlock} aria-label="Zeiten" data-testid="block-zeiten">
             <h2 style={styles.detailBlockTitle}>Zeiten</h2>
             <dl style={styles.detailDl}>
@@ -1354,7 +1364,23 @@ function StoryDetailView({ story, detailState, detailData, detailError, onBack }
               </dd>
               <dt style={styles.detailTerm}>Ende</dt>
               <dd style={styles.detailDesc} data-testid="detail-ended-at">
-                {fmtTs(detailData.ended_at)}
+                {detailData.ended_at != null ? (
+                  <>
+                    {fmtTs(detailData.ended_at)}
+                    {detailData.ended_at_source === 'yaml' && (
+                      <span
+                        style={styles.yamlBadge}
+                        aria-label="Ende-Zeit aus Board-YAML (done_at)"
+                        title="Ende-Zeit aus Board-YAML — kein Ledger-Eintrag"
+                        data-testid="ended-at-yaml-badge"
+                      >
+                        YAML
+                      </span>
+                    )}
+                  </>
+                ) : (
+                  '—'
+                )}
               </dd>
               <dt style={styles.detailTerm}>Dauer</dt>
               <dd style={styles.detailDesc} data-testid="detail-duration">
@@ -1363,11 +1389,16 @@ function StoryDetailView({ story, detailState, detailData, detailError, onBack }
             </dl>
           </section>
 
-          {/* ── Block 2: Agenten-Flow (AC3) ────────────────────────────────── */}
+          {/* ── Block 2: Agenten-Flow (AC3; AC5 yaml-fallback — differenz. Leer-Zustand) ── */}
           <section style={styles.detailBlock} aria-label="Agenten-Flow" data-testid="block-flow">
             <h2 style={styles.detailBlockTitle}>Agenten-Flow</h2>
             {(!detailData.flow || detailData.flow.length === 0) ? (
-              <p style={styles.hintMsg} data-testid="flow-empty">Keine Flow-Daten vorhanden.</p>
+              <p style={styles.hintMsg} data-testid="flow-empty">
+                {/* AC5 yaml-fallback: differenzierter Leer-Hinweis */}
+                {detailData.ended_at != null
+                  ? 'Vor Metrik-Erfassung abgeschlossen — kein Agenten-Flow aufgezeichnet.'
+                  : 'Noch kein Flow-Lauf erfasst.'}
+              </p>
             ) : (
               <table style={styles.flowTable} aria-label="Agenten-Flow-Schritte">
                 <thead>
@@ -1470,6 +1501,45 @@ function StoryDetailView({ story, detailState, detailData, detailError, onBack }
               </tbody>
             </table>
           </section>
+
+          {/* ── Block 4: Verknüpfungen (AC6 story-detail-yaml-fallback) ────────── */}
+          {/* Block nur anzeigen wenn branch oder pr vorhanden (AC6: sonst ausblenden) */}
+          {(detailData.branch != null || detailData.pr != null) && (
+            <section
+              style={styles.detailBlock}
+              aria-label="Verknüpfungen"
+              data-testid="block-verknuepfungen"
+            >
+              <h2 style={styles.detailBlockTitle}>Verknüpfungen</h2>
+              <dl style={styles.detailDl}>
+                {detailData.branch != null && (
+                  <>
+                    <dt style={styles.detailTerm}>Branch</dt>
+                    <dd style={styles.detailDesc} data-testid="detail-branch">
+                      <span style={styles.monoText}>{detailData.branch}</span>
+                    </dd>
+                  </>
+                )}
+                {detailData.pr != null && (
+                  <>
+                    <dt style={styles.detailTerm}>Pull Request</dt>
+                    <dd style={styles.detailDesc} data-testid="detail-pr">
+                      {/* AC8: externer Link mit rel=noopener noreferrer; kein dangerouslySetInnerHTML */}
+                      <a
+                        href={detailData.pr}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={styles.prLink}
+                        aria-label={`Pull Request öffnen: ${detailData.pr}`}
+                      >
+                        {detailData.pr}
+                      </a>
+                    </dd>
+                  </>
+                )}
+              </dl>
+            </section>
+          )}
         </div>
       )}
 
@@ -2110,6 +2180,41 @@ const styles = {
     color: '#6b7280',
     fontStyle: 'italic',
     fontFamily: 'inherit',
+  },
+
+  // story-detail-yaml-fallback AC5: YAML-Badge für ended_at aus Board-YAML (done_at)
+  // Contrast: #93c5fd on #0d1a2a ≈ 7.1:1 — WCAG AA compliant
+  yamlBadge: {
+    display: 'inline-block',
+    marginLeft: 6,
+    fontSize: 9,
+    fontWeight: 700,
+    padding: '1px 5px',
+    borderRadius: 3,
+    background: '#0d1a2a',
+    color: '#93c5fd',
+    border: '1px solid #1e3a5f',
+    letterSpacing: '0.04em',
+    textTransform: 'uppercase',
+    verticalAlign: 'middle',
+    fontFamily: 'inherit',
+  },
+
+  // story-detail-yaml-fallback AC6: monospace Text für Branch-Namen
+  monoText: {
+    fontFamily: 'monospace',
+    fontSize: 12,
+    color: '#d1d5db',
+  },
+
+  // story-detail-yaml-fallback AC6: PR-Link (externer Link, noopener noreferrer)
+  // Contrast: #93c5fd on #111 ≈ 7.1:1 — WCAG AA compliant
+  prLink: {
+    color: '#93c5fd',
+    fontSize: 12,
+    fontFamily: 'monospace',
+    textDecoration: 'underline',
+    // Focus ring preserved (no outline:none)
   },
 
   // AC5 (story-detail-ansicht): Vorab-Badge — kennzeichnet Schätzung aus Story-YAML
