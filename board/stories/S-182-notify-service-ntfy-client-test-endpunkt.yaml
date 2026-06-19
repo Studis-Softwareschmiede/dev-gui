@@ -1,0 +1,25 @@
+id: S-182
+parent: F-025
+title: Notify-Service (ntfy-Client) + Test-Endpunkt
+status: To Do
+priority: P2
+spec: docs/specs/push-notifications.md
+implements:
+- AC4
+- AC5
+depends: null
+labels:
+- notifications
+- backend
+size_est: null
+dispo_est: null
+dispo_act: null
+dispo_forecast: null
+estimate_note: null
+confidence: null
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-06-19T15:39:12Z'
+updated_at: '2026-06-19T15:39:12Z'
+done_at: null

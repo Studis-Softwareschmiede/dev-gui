@@ -1,0 +1,30 @@
+id: S-184
+parent: F-025
+title: 'Board-Watcher: Status-Übergänge erkennen → ntfy senden (Baseline, Mapping,
+  Idempotenz)'
+status: To Do
+priority: P2
+spec: docs/specs/push-notifications.md
+implements:
+- AC6
+- AC7
+- AC8
+- AC9
+depends:
+- S-182
+- S-183
+labels:
+- notifications
+- backend
+size_est: null
+dispo_est: null
+dispo_act: null
+dispo_forecast: null
+estimate_note: null
+confidence: null
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-06-19T15:39:13Z'
+updated_at: '2026-06-19T15:39:13Z'
+done_at: null

@@ -12,8 +12,7 @@ implements:
 - AC5
 - AC6
 - AC13
-depends:
-- F-013
+depends: null
 labels:
 - deploy
 - vps

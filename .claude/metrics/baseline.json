@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "calibrated_at": "2026-06-19",
+  "n_items": 16,
+  "ep_per_token": null,
+  "cache_kappa": 0.1,
+  "weights": {
+    "iter": 2,
+    "crit": 1,
+    "imp": 0.5,
+    "test_fail": 2,
+    "loc_log": 1,
+    "blocked": 3
+  },
+  "medians": {
+    "js|balanced|L": {
+      "n": 5,
+      "ep": 5.0,
+      "iters": 2,
+      "crit": 0,
+      "tok_total": null,
+      "secs_total": 1286.0
+    },
+    "js|balanced|M": {
+      "n": 8,
+      "ep": 5.0,
+      "iters": 1.5,
+      "crit": 0.0,
+      "tok_total": null,
+      "secs_total": 2095.0
+    },
+    "js|balanced|S": {
+      "n": 3,
+      "ep": 2.0,
+      "iters": 1,
+      "crit": 0,
+      "tok_total": null,
+      "secs_total": 800.0
+    }
+  },
+  "forecast_mae": null,
+  "defect_rates": {},
+  "retro_effectiveness": null,
+  "learnings_rules": [],
+  "estimator_bias": {},
+  "estimator_calibration": [],
+  "_calibration_note": "Keine Token-Daten — ep_per_token bleibt null"
+}
