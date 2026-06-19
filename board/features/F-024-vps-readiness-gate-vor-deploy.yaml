@@ -1,18 +1,18 @@
 id: F-024
-title: 'VPS-Bereitschafts-Gate vor dem Deploy (Readiness-Probe + Deploy-Gate + Status-Badge)'
-goal: 'Folge-Story zu F-013 (Deploy-Pipeline, Done). Beim Neuanlegen eines VPS laeuft
+title: VPS-Bereitschafts-Gate vor dem Deploy (Readiness-Probe + Deploy-Gate + Status-Badge)
+goal: Folge-Story zu F-013 (Deploy-Pipeline, Done). Beim Neuanlegen eines VPS laeuft
   cloud-init mehrere Minuten (Ubuntu-Update -> Docker installieren -> Docker starten
   -> cloudflared-Container starten). SSH ist meist schon da, waehrend Docker noch
   fehlt. Drueckt man dann "Deploy starten", scheitert der erste Schritt (docker pull)
   mit der verwirrenden Meldung "docker-Kommando auf VPS fehlgeschlagen". Es gibt aktuell
-  KEIN Bereitschafts-Gate. Diese Feature fuehrt eine guenstige SSH-Readiness-Probe in
-  der VpsDockerControl-Boundary (ADR-012) ein, die drei Zustaende unterscheidet
+  KEIN Bereitschafts-Gate. Diese Feature fuehrt eine guenstige SSH-Readiness-Probe
+  in der VpsDockerControl-Boundary (ADR-012) ein, die drei Zustaende unterscheidet
   (unreachable / provisioning / ready), ein Deploy-Gate vor dem pull (neue freundliche
   errorClass "vps-provisioning" statt "docker-failed") sowie ein Frontend-Status-Badge,
-  das einen Readiness-Endpoint pollt und "Deploy starten" sperrt, bis der VPS bereit ist.
-  Kein Secret in Argv/Log/Audit/Response. Auto-Deploy nach Create + cloud-init-Umbau
-  bewusst ausgeschlossen.'
-status: To Do
+  das einen Readiness-Endpoint pollt und "Deploy starten" sperrt, bis der VPS bereit
+  ist. Kein Secret in Argv/Log/Audit/Response. Auto-Deploy nach Create + cloud-init-Umbau
+  bewusst ausgeschlossen.
+status: Done
 priority: P1
 spec: docs/specs/vps-readiness-gate.md
 definition_of_done: null
@@ -27,6 +27,7 @@ stories:
 - S-179
 - S-180
 - S-181
-progress: 0/3
+progress: 3/3 done
 created_at: '2026-06-19T00:00:00Z'
-updated_at: '2026-06-19T00:00:00Z'
+updated_at: '2026-06-19T16:55:15Z'
+done_at: '2026-06-19T16:55:15Z'
