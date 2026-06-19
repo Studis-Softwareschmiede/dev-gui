@@ -1,9 +1,11 @@
 /**
  * deploymentsRouter — Express-Router für Deploy-Lifecycle (AC3–AC9, ADR-012)
  *                     + Reconciliation-Endpunkte (AC2/AC8/AC8b, ADR-013)
- *                     + Lokaler Image-Test (S-156, AC1–AC5).
+ *                     + Lokaler Image-Test (S-156, AC1–AC5)
+ *                     + Readiness-Endpunkt (S-180, AC7–AC8).
  *
  * Routes (alle hinter AccessGuard in server.js):
+ *   GET    /api/deployments/readiness?vps=<vpsId>    → { state: "unreachable"|"provisioning"|"ready" } [READ-ONLY, S-180 AC7]
  *   GET    /api/deployments                          → { deployments: Deployment[], errors? }
  *   POST   /api/deployments                          → { result, deployment?, reason? }   [MUTATION]
  *   DELETE /api/deployments/:vps/:hostname           → { result, reason? }               [MUTATION]
@@ -22,6 +24,7 @@
  *   - Undeploy: type-to-confirm (confirm must equal hostname) (AC6).
  *   - SSH-Key + Cloudflare-Token erscheinen NIEMALS in Response, Log, Audit, WS oder URL.
  *   - Untrusted Input (vps, hostname, image, confirm) wird validiert (security/R02/R03).
+ *   - Readiness-Endpunkt (S-180): read-only, kein Audit, keine Mutation, kein Secret in Response.
  *
  * VPS configuration: The router receives a pre-configured vpsConfig map
  * (vpsId → VpsTarget) from server.js. The client sends a vpsId string;
@@ -286,9 +289,12 @@ async function resolveVpsIdToTarget(vpsId, vpsTargets, vpsRegistry) {
  *   Wenn gesetzt: dynamisch angelegte VPS erscheinen zusätzlich zur Env im Dropdown
  *   und sind über Deploy/Undeploy/Listing auflösbar.
  *   Env gewinnt bei Kollision (Override/Fallback).
+ * @param {import('./deploy/VpsDockerControl.js').VpsDockerControl} [vpsDockerControl]
+ *   Optional injected for the readiness endpoint (S-180 AC7–AC8).
+ *   When provided, GET /api/deployments/readiness?vps=<vpsId> uses probe() read-only.
  * @returns {import('express').Router}
  */
-export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconciliationJob, localDockerControl, vpsRegistry) {
+export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconciliationJob, localDockerControl, vpsRegistry, vpsDockerControl) {
   const router = Router();
 
   // ── GET /api/deployments/vps-targets ────────────────────────────────────
@@ -322,6 +328,67 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconcil
 
     // Security-Floor (AC8): nur IDs — kein host/user/key in der Response
     return res.json({ vpsIds: ids });
+  });
+
+  // ── GET /api/deployments/readiness ───────────────────────────────────────
+  // S-180 AC7–AC8: Read-only Bereitschafts-Probe. Kein Audit, keine Mutation, kein Secret.
+  // MUSS vor GET /api/deployments stehen (sonst würde "readiness" als tunnelId-Query-Param
+  // interpretiert, da /api/deployments keine Pfad-Segmente hat — kein echtes Express-Konflikt,
+  // aber semantisch klar vor dem allgemeinen Listing-Endpunkt).
+  // Hinter AccessGuard: server.js setzt app.use('/api', accessGuard) vor mountRouters().
+
+  /**
+   * GET /api/deployments/readiness?vps=<vpsId>
+   * Read-only Bereitschafts-Probe via VpsDockerControl.probe() (AC7).
+   * Kein Audit-Eintrag, keine Mutation, kein Container, keine Route (AC8).
+   *
+   * Query params: vps (required)
+   *
+   * Responses:
+   *   200 { state: "unreachable"|"provisioning"|"ready" }
+   *   400 { error }  — vps-Parameter fehlt
+   *   403            — kein gültiger Access (AccessGuard, server.js)
+   *   422 { error }  — unbekannte vpsId ("Unbekannter VPS: <id>")
+   *   503 { error }  — vpsDockerControl nicht konfiguriert
+   */
+  router.get('/api/deployments/readiness', async (req, res) => {
+    const { vps: vpsId } = req.query;
+
+    // AC7: vps Query-Parameter ist Pflicht
+    if (!vpsId || typeof vpsId !== 'string' || !vpsId.trim()) {
+      return res.status(400).json({ error: 'vps query-Parameter ist Pflicht' });
+    }
+
+    // AC7: Vereinigte VPS-Auflösung (Env-Map ⊕ dynamische Records) — analog Deploy-Pfad
+    const vpsTarget = await resolveVpsIdToTarget(vpsId.trim(), vpsTargets, vpsRegistry);
+    if (!vpsTarget) {
+      // AC7: 422 mit vpsId — kein host/targetUser/key in Response (AC8, Security-Floor)
+      return res.status(422).json({ error: `Unbekannter VPS: ${vpsId.trim()}` });
+    }
+
+    // Dependency-Guard: vpsDockerControl muss injiziert sein
+    if (!vpsDockerControl || typeof vpsDockerControl.probe !== 'function') {
+      return res.status(503).json({ error: 'Readiness-Probe nicht konfiguriert' });
+    }
+
+    // AC7: Probe ausführen — probe() wirft NIE (alle Fehler → definierter Zustand)
+    // AC8: Kein Audit-Eintrag (read-only, kein Audit-First nötig)
+    // Defensive try/catch: probe() ist per Spec NIE-werfend; schützt gegen künftige Umbauten.
+    let probeResult;
+    try {
+      probeResult = await vpsDockerControl.probe(vpsTarget);
+    } catch {
+      // Unerwarteter Fehler in probe() — secret-freie Meldung, kein host/key/token
+      return res.status(502).json({ error: 'Readiness-Probe fehlgeschlagen (interner Fehler)' });
+    }
+
+    // AC8: Nur state + optionale neutrale reason in Response — kein Host, Key, Token
+    const response = { state: probeResult.state };
+    // reason ist optional und muss secret-frei sein (probe() garantiert das per Spec)
+    if (probeResult.reason) {
+      response.reason = probeResult.reason;
+    }
+    return res.status(200).json(response);
   });
 
   // ── GET /api/deployments ──────────────────────────────────────────────────
