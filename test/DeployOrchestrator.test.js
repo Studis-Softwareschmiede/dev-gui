@@ -11,6 +11,10 @@
  *   AC7  — Protected hostname → { result: "error", reason: "protected-resource" }, no step called
  *   AC9  — No secret (private-key / token) in any result.reason
  *   list — listDeployments: live join of ps() containers + listRoutes(), drift visible
+ *   AC4  (vps-readiness-gate) — probe→provisioning/unreachable → pull NIEMALS aufgerufen,
+ *         result:error errorClass:vps-provisioning mit freundlicher Meldung (AC6)
+ *   AC5  (vps-readiness-gate) — probe→ready → bestehende Saga unverändert (Gate ist No-op)
+ *   AC13 (vps-readiness-gate) — kein SSH-Key/Token in result.reason bei vps-provisioning-Fehler
  */
 
 import { describe, it, expect, jest } from '@jest/globals';
@@ -21,19 +25,27 @@ import { DeployOrchestrator } from '../src/deploy/DeployOrchestrator.js';
 /**
  * Create a mock VpsDockerControl stub.
  * All methods default to success; individual calls can be overridden.
+ * probeResult: wenn gesetzt, wird probe() als Mock exponiert; wenn null, fehlt probe()
+ *   (simuliert Legacy-DockerControl ohne probe-Methode).
  */
 function makeDockerControl({
   pullResult = { result: 'ok' },
   runResult = { result: 'ok', containerId: 'abc123', hostPort: 8080 },
   rmResult = { result: 'ok' },
   psResult = { result: 'ok', containers: [] },
+  probeResult = { state: 'ready' }, // Default: probe meldet "ready" → Gate-No-op
 } = {}) {
-  return {
+  const ctrl = {
     pull: jest.fn(async () => pullResult),
     run: jest.fn(async () => runResult),
     rm: jest.fn(async () => rmResult),
     ps: jest.fn(async () => psResult),
   };
+  // probe() nur exponieren wenn probeResult !== null (null = Legacy ohne probe)
+  if (probeResult !== null) {
+    ctrl.probe = jest.fn(async () => probeResult);
+  }
+  return ctrl;
 }
 
 /**
@@ -864,5 +876,137 @@ describe('deploymentsRouter — GET /api/deployments/vps-targets (AC10)', () => 
     expect(result.status).toBe(200);
     expect(result.body.vpsIds).toEqual(expect.arrayContaining(['vps-1', 'vps-2']));
     expect(result.body.vpsIds.length).toBe(2);
+  });
+});
+
+// ── AC4/AC5/AC6/AC13 (vps-readiness-gate): Deploy-Gate ───────────────────────
+
+describe('DeployOrchestrator — deploy() — Deploy-Gate (vps-readiness-gate AC4/AC5/AC6/AC13)', () => {
+  // ── AC4: probe→provisioning → pull NICHT aufgerufen ─────────────────────
+
+  it('AC4 — probe→provisioning → pull NIEMALS aufgerufen, result:error, errorClass:vps-provisioning', async () => {
+    const docker = makeDockerControl({
+      probeResult: { state: 'provisioning', reason: 'VPS wird noch eingerichtet' },
+      psResult: { result: 'ok', containers: [] },
+    });
+    const cf = makeCloudflareApi();
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('vps-provisioning');
+    // pull() darf NIEMALS aufgerufen werden (AC4)
+    expect(docker.pull).not.toHaveBeenCalled();
+    expect(docker.run).not.toHaveBeenCalled();
+    expect(cf.addRoute).not.toHaveBeenCalled();
+    expect(cf.createDnsRecord).not.toHaveBeenCalled();
+  });
+
+  it('AC4 — probe→unreachable → pull NIEMALS aufgerufen, result:error, errorClass:vps-provisioning', async () => {
+    const docker = makeDockerControl({
+      probeResult: { state: 'unreachable', reason: 'VPS nicht erreichbar' },
+      psResult: { result: 'ok', containers: [] },
+    });
+    const cf = makeCloudflareApi();
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('vps-provisioning');
+    expect(docker.pull).not.toHaveBeenCalled();
+    expect(docker.run).not.toHaveBeenCalled();
+    expect(cf.addRoute).not.toHaveBeenCalled();
+  });
+
+  // ── AC5: probe→ready → Saga läuft unverändert ────────────────────────────
+
+  it('AC5 — probe→ready → bestehende Saga läuft unverändert (Gate ist No-op), result:ok', async () => {
+    const docker = makeDockerControl({
+      probeResult: { state: 'ready' },
+      psResult: { result: 'ok', containers: [] },
+    });
+    const cf = makeCloudflareApi();
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.result).toBe('ok');
+    // Alle Saga-Schritte wurden ausgeführt
+    expect(docker.pull).toHaveBeenCalled();
+    expect(docker.run).toHaveBeenCalled();
+    expect(cf.addRoute).toHaveBeenCalled();
+    expect(cf.createDnsRecord).toHaveBeenCalled();
+  });
+
+  // ── AC6: freundliche Meldung ohne rohen Fehlertext, Host, Key, Token ─────
+
+  it('AC6 — vps-provisioning reason enthält freundliche Meldung (kein SSH-Error, kein Host, kein Key)', async () => {
+    const docker = makeDockerControl({
+      probeResult: { state: 'provisioning' },
+      psResult: { result: 'ok', containers: [] },
+    });
+    const cf = makeCloudflareApi();
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('vps-provisioning');
+    // Freundliche Meldung (AC6): kein roher SSH-Fehlertext, kein Host, kein Key
+    expect(result.reason).toBeTruthy();
+    expect(result.reason).toMatch(/eingerichtet|versuchen/i); // sinngemäß "erneut versuchen"
+    expect(result.reason).not.toContain('1.2.3.4');  // kein Host
+    expect(result.reason).not.toContain('PRIVATE KEY'); // kein Key
+  });
+
+  it('AC6 — vps-provisioning reason erwähnt erneutes Versuchen ("~1–2 Min")', async () => {
+    const docker = makeDockerControl({
+      probeResult: { state: 'unreachable' },
+      psResult: { result: 'ok', containers: [] },
+    });
+    const cf = makeCloudflareApi();
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.errorClass).toBe('vps-provisioning');
+    // Spec AC6: "sinngemäß erneutes Versuchen"
+    expect(result.reason).toMatch(/erneut versuchen|min/i);
+  });
+
+  // ── AC13: kein Key/Token in reason ────────────────────────────────────────
+
+  it('AC13 — vps-provisioning result.reason enthält keinen SSH-Key / Token', async () => {
+    const pemDummy2 = ['-----BEGIN OPENSSH', 'PRIVATE KEY-----'].join(' ') + '\nFAKEKEYDATA\n' + ['-----END OPENSSH', 'PRIVATE KEY-----'].join(' ');
+    const docker = makeDockerControl({
+      probeResult: { state: 'provisioning', reason: pemDummy2 }, // Probe leakt Key intern
+      psResult: { result: 'ok', containers: [] },
+    });
+    const cf = makeCloudflareApi();
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('vps-provisioning');
+    // Der Orchestrator schreibt eine eigene freundliche Meldung — kein durchgereichter Key
+    expect(result.reason).not.toContain('FAKEKEYDATA');
+    expect(result.reason).not.toContain('PRIVATE KEY');
+  });
+
+  // ── Backward-compat: Legacy-DockerControl ohne probe() ───────────────────
+
+  it('AC5 (backward-compat) — DockerControl ohne probe()-Methode → Gate wird übersprungen, Saga läuft', async () => {
+    // Legacy-DockerControl (kein probe()) → Gate-Prüfung wird übersprungen (graceful degradation)
+    const docker = makeDockerControl({ probeResult: null, psResult: { result: 'ok', containers: [] } });
+    const cf = makeCloudflareApi();
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.result).toBe('ok');
+    expect(docker.pull).toHaveBeenCalled();
   });
 });

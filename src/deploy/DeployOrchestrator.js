@@ -145,6 +145,23 @@ export class DeployOrchestrator {
       }
     }
 
+    // Deploy-Gate (vps-readiness-gate AC4/AC5): Probe VOR dem docker-pull-Schritt.
+    // state != ready → kein pull/run, kein Cloudflare-Schritt.
+    // state == ready → bestehende Saga unverändert (Gate ist ein No-op-Vorschritt).
+    // Graceful Degradation: Ältere/Stub-DockerControl-Instanzen (z.B. in Tests ohne probe-Methode)
+    // haben probe() noch nicht implementiert — typeof-Guard überspringt das Gate in diesem Fall.
+    if (typeof this.#dockerControl.probe === 'function') {
+      const probeResult = await this.#dockerControl.probe(vps, dockerOpts);
+      if (probeResult.state !== 'ready') {
+        // AC6: freundliche Meldung ohne rohen Docker-/SSH-Fehlertext, Host, Key oder Token
+        return {
+          result: 'error',
+          errorClass: 'vps-provisioning',
+          reason: 'VPS wird noch eingerichtet (Docker installieren) – in ~1–2 Min erneut versuchen',
+        };
+      }
+    }
+
     // Step 1: Pull image (AC3)
     const pullResult = await this.#dockerControl.pull(vps, image, dockerOpts);
     if (pullResult.result !== 'ok') {

@@ -15,6 +15,7 @@
  *   AC9  — (vps-dynamic-ssh-targets S-169) Vereinigte VPS-Auflösung: Env ⊕ dynamisch, Env gewinnt
  *          leere Env + dynamischer VPS → aufgelöst (kein 422); unbekannte ID → 422;
  *          Kollision → Env gewinnt; AccessGuard-403 vor Auflösung
+ *   AC4  (vps-readiness-gate) — POST /api/deployments → 422 vps-provisioning bei state != ready
  */
 
 import { describe, it, expect, jest } from '@jest/globals';
@@ -214,6 +215,22 @@ describe('POST /api/deployments', () => {
     const res = await request(app, 'POST', '/api/deployments', DEPLOY_BODY);
     expect(res.status).toBe(422);
     expect(res.body.reason).toBe('protected-resource');
+  });
+
+  it('AC4 (vps-readiness-gate): 422 vps-provisioning wenn VPS noch nicht bereit', async () => {
+    const orch = makeOrchestratorStub({
+      deployResult: {
+        result: 'error',
+        errorClass: 'vps-provisioning',
+        reason: 'VPS wird noch eingerichtet (Docker installieren) – in ~1–2 Min erneut versuchen',
+      },
+    });
+    const app = makeApp({ orchestratorStub: orch, auditStore: new AuditStore() });
+
+    const res = await request(app, 'POST', '/api/deployments', DEPLOY_BODY);
+    expect(res.status).toBe(422);
+    expect(res.body.errorClass).toBe('vps-provisioning');
+    expect(res.body.reason).toMatch(/eingerichtet|versuchen/i);
   });
 
   it('AC8: 403 wenn CRED_ADMIN_EMAILS gesetzt und Identität nicht in Liste', async () => {

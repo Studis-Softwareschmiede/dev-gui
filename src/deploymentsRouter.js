@@ -454,6 +454,10 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconcil
       if (errorClass === 'zone-not-found') {
         return res.status(422).json({ result: 'error', reason: 'zone-not-found' });
       }
+      if (errorClass === 'vps-provisioning') {
+        // AC4 (vps-readiness-gate): VPS noch nicht bereit — freundliche Meldung, kein 5xx
+        return res.status(422).json({ result: 'error', errorClass: 'vps-provisioning', reason: sanitizeMsg(reason ?? 'VPS wird noch eingerichtet (Docker installieren) – in ~1–2 Min erneut versuchen') });
+      }
       if (errorClass === 'validation-error') {
         return res.status(400).json({ result: 'error', reason });
       }
