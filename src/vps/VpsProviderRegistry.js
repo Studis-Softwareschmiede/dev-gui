@@ -637,6 +637,38 @@ export class VpsProviderRegistry {
     return machine;
   }
 
+  /**
+   * Liefert die wählbaren Create-Optionen eines Providers (S-161, vps-create-options AC1–AC5).
+   * Nur Hetzner implementiert die Live-Quelle (server_types/locations/images mit Preisen);
+   * andere/nicht-konfigurierte Provider → { optionsAvailable: false } (Frontend bleibt bei Freitext).
+   *
+   * @param {string} provider
+   * @returns {Promise<{ optionsAvailable: boolean, serverTypes?, locations?, images? }>}
+   */
+  async getProviderOptions(provider) {
+    if (provider !== 'hetzner') {
+      return { optionsAvailable: false };
+    }
+    let token;
+    let adapter;
+    try {
+      ({ token, adapter } = await this.#resolveProviderOrThrow(provider));
+    } catch {
+      // Provider nicht konfiguriert (kein Token) → Freitext-Fallback im Frontend
+      return { optionsAvailable: false };
+    }
+    if (typeof adapter.listServerTypes !== 'function') {
+      return { optionsAvailable: false };
+    }
+    // Hetzner-API-Fehler propagieren → der Router degradiert geheimnisfrei (kein Token im Fehler)
+    const [serverTypes, locations, images] = await Promise.all([
+      adapter.listServerTypes(token),
+      adapter.listLocations(token),
+      adapter.listImages(token),
+    ]);
+    return { optionsAvailable: true, serverTypes, locations, images };
+  }
+
   // ── Tunnel-Provisionierung (S-152) ───────────────────────────────────────────
 
   /**

@@ -379,3 +379,51 @@ describe('HetznerAdapter — AC7/AC8: create()', () => {
     }
   });
 });
+
+// ── S-161: listServerTypes() / listLocations() / listImages() (vps-create-options AC1–AC5) ──
+
+describe('HetznerAdapter — S-161: listServerTypes()', () => {
+  it('liefert Typen mit Preisen; deprecated ausgeblendet (AC1–AC3)', async () => {
+    const fetchFn = makeFetchFn([{ status: 200, body: { server_types: [
+      { name: 'cx23', cores: 2, memory: 4, disk: 40, deprecated: false,
+        prices: [{ location: 'nbg1', price_monthly: { net: '3.79', gross: '4.51' }, price_hourly: { net: '0.006', gross: '0.007' } }] },
+      { name: 'cx11', cores: 1, memory: 2, disk: 20, deprecated: true, prices: [] },
+    ], meta: { pagination: { last_page: 1 } } } }]);
+    const adapter = new HetznerAdapter({ fetchFn });
+    const types = await adapter.listServerTypes(MOCK_TOKEN);
+    expect(types.map((t) => t.name)).toEqual(['cx23']); // deprecated cx11 ausgeblendet
+    expect(types[0]).toMatchObject({ cores: 2, memory: 4, disk: 40 });
+    expect(types[0].prices[0]).toMatchObject({ location: 'nbg1', monthly: { gross: '4.51' }, hourly: { gross: '0.007' } });
+  });
+
+  it('graceful bei fehlenden Preisfeldern', async () => {
+    const fetchFn = makeFetchFn([{ status: 200, body: { server_types: [
+      { name: 'cx23', cores: 2, memory: 4, disk: 40, deprecated: false, prices: [{ location: 'nbg1' }] },
+    ], meta: { pagination: { last_page: 1 } } } }]);
+    const adapter = new HetznerAdapter({ fetchFn });
+    const types = await adapter.listServerTypes(MOCK_TOKEN);
+    expect(types[0].prices[0]).toMatchObject({ location: 'nbg1', monthly: null, hourly: null });
+  });
+});
+
+describe('HetznerAdapter — S-161: listLocations()', () => {
+  it('liefert Locations mit name (z.B. nbg1) + networkZone (AC4)', async () => {
+    const fetchFn = makeFetchFn([{ status: 200, body: { locations: [
+      { name: 'nbg1', network_zone: 'eu-central', city: 'Nuremberg', country: 'DE' },
+    ] } }]);
+    const adapter = new HetznerAdapter({ fetchFn });
+    const locs = await adapter.listLocations(MOCK_TOKEN);
+    expect(locs[0]).toMatchObject({ name: 'nbg1', networkZone: 'eu-central', city: 'Nuremberg', country: 'DE' });
+  });
+});
+
+describe('HetznerAdapter — S-161: listImages()', () => {
+  it('liefert System-Images (AC5)', async () => {
+    const fetchFn = makeFetchFn([{ status: 200, body: { images: [
+      { name: 'ubuntu-26.04', description: 'Ubuntu 26.04', os_flavor: 'ubuntu', os_version: '26.04' },
+    ], meta: { pagination: { last_page: 1 } } } }]);
+    const adapter = new HetznerAdapter({ fetchFn });
+    const imgs = await adapter.listImages(MOCK_TOKEN);
+    expect(imgs[0]).toMatchObject({ name: 'ubuntu-26.04', osFlavor: 'ubuntu', osVersion: '26.04' });
+  });
+});

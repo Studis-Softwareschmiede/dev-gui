@@ -46,6 +46,7 @@ function makeMockRegistry({
   startResult = null,
   stopResult = null,
   createResult = null,
+  optionsResult = null,
   throwOn = null,
 } = {}) {
   return {
@@ -78,6 +79,16 @@ function makeMockRegistry({
         provider: 'hetzner', serverId: '42', name: 'new-srv',
         status: 'provisioning', ipv4: null, ipv6: null,
         region: null, serverType: null, createdAt: null,
+      };
+    },
+    async getProviderOptions(provider) {
+      if (throwOn === 'getProviderOptions') throw new Error('Options-Fehler');
+      if (provider !== 'hetzner') return { optionsAvailable: false };
+      return optionsResult ?? {
+        optionsAvailable: true,
+        serverTypes: [{ name: 'cx23', cores: 2, memory: 4, disk: 40, prices: [] }],
+        locations: [{ name: 'nbg1', networkZone: 'eu-central' }],
+        images: [{ name: 'ubuntu-26.04' }],
       };
     },
   };
@@ -163,6 +174,45 @@ describe('vpsRouter — AC9: AccessGuard', () => {
     ts = await makeTestServer();
     const res = await ts.req('POST', '/api/vps/machines/hetzner/123/start');
     expect(res.status).toBe(403);
+  });
+
+  it('GET /api/vps/providers/:provider/options → 403 ohne Access-Token (S-161)', async () => {
+    ts = await makeTestServer();
+    const res = await ts.req('GET', '/api/vps/providers/hetzner/options');
+    expect(res.status).toBe(403);
+  });
+});
+
+// ── S-161: GET /api/vps/providers/:provider/options ──────────────────────────
+
+describe('vpsRouter — S-161: GET /api/vps/providers/:provider/options', () => {
+  let ts;
+  beforeEach(() => { process.env.DEV_NO_ACCESS = '1'; });
+  afterEach(async () => { delete process.env.DEV_NO_ACCESS; if (ts) await ts.close(); ts = null; });
+
+  it('hetzner → 200 mit optionsAvailable:true + serverTypes/locations/images', async () => {
+    ts = await makeTestServer();
+    const res = await ts.req('GET', '/api/vps/providers/hetzner/options');
+    expect(res.status).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.optionsAvailable).toBe(true);
+    expect(body.serverTypes[0].name).toBe('cx23');
+    expect(body.locations[0].name).toBe('nbg1');
+    expect(body.images[0].name).toBe('ubuntu-26.04');
+  });
+
+  it('nicht-hetzner → 200 mit optionsAvailable:false (Freitext-Fallback)', async () => {
+    ts = await makeTestServer();
+    const res = await ts.req('GET', '/api/vps/providers/ionos/options');
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body).optionsAvailable).toBe(false);
+  });
+
+  it('Registry-Fehler → 200 mit optionsAvailable:false (geheimnisfrei degradiert)', async () => {
+    ts = await makeTestServer({ registry: makeMockRegistry({ throwOn: 'getProviderOptions' }) });
+    const res = await ts.req('GET', '/api/vps/providers/hetzner/options');
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body).optionsAvailable).toBe(false);
   });
 });
 

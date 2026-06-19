@@ -112,6 +112,88 @@ export class HetznerAdapter {
   }
 
   /**
+   * Lists available server types (S-161, vps-create-options AC1–AC3).
+   * Deprecated types are excluded. Prices are returned per location (monthly + hourly).
+   *
+   * @param {string} token - API token (transient)
+   * @returns {Promise<Array<{ name, cores, memory, disk, prices }>>}
+   * @throws {HetznerAdapterError}
+   */
+  async listServerTypes(token) {
+    const types = [];
+    let page = 1;
+    while (true) {
+      const data = await this.#apiGet(`${HETZNER_API}/server_types?per_page=50&page=${page}`, token);
+      const list = data.server_types ?? [];
+      for (const t of list) {
+        if (t.deprecated) continue; // AC: deprecated Typen ausblenden
+        types.push({
+          name: t.name,
+          cores: t.cores ?? null,
+          memory: t.memory ?? null,
+          disk: t.disk ?? null,
+          // Preise je Location (monatlich + stündlich, net+gross); graceful bei fehlenden Feldern
+          prices: (t.prices ?? []).map((p) => ({
+            location: p.location ?? null,
+            monthly: p.price_monthly ? { net: p.price_monthly.net ?? null, gross: p.price_monthly.gross ?? null } : null,
+            hourly: p.price_hourly ? { net: p.price_hourly.net ?? null, gross: p.price_hourly.gross ?? null } : null,
+          })),
+        });
+      }
+      const meta = data.meta?.pagination;
+      if (!meta || page >= meta.last_page || list.length === 0) break;
+      page++;
+    }
+    return types;
+  }
+
+  /**
+   * Lists available locations (S-161, vps-create-options AC1/AC4).
+   * `name` is the location slug (e.g. nbg1/fsn1/hel1) — NOT the network zone (eu-central).
+   *
+   * @param {string} token - API token (transient)
+   * @returns {Promise<Array<{ name, networkZone, city, country }>>}
+   * @throws {HetznerAdapterError}
+   */
+  async listLocations(token) {
+    const data = await this.#apiGet(`${HETZNER_API}/locations`, token);
+    return (data.locations ?? []).map((l) => ({
+      name: l.name,
+      networkZone: l.network_zone ?? null,
+      city: l.city ?? null,
+      country: l.country ?? null,
+    }));
+  }
+
+  /**
+   * Lists available system images (S-161, vps-create-options AC1/AC5).
+   *
+   * @param {string} token - API token (transient)
+   * @returns {Promise<Array<{ name, description, osFlavor, osVersion }>>}
+   * @throws {HetznerAdapterError}
+   */
+  async listImages(token) {
+    const images = [];
+    let page = 1;
+    while (true) {
+      const data = await this.#apiGet(`${HETZNER_API}/images?type=system&per_page=50&page=${page}`, token);
+      const list = data.images ?? [];
+      for (const img of list) {
+        images.push({
+          name: img.name,
+          description: img.description ?? null,
+          osFlavor: img.os_flavor ?? null,
+          osVersion: img.os_version ?? null,
+        });
+      }
+      const meta = data.meta?.pagination;
+      if (!meta || page >= meta.last_page || list.length === 0) break;
+      page++;
+    }
+    return images;
+  }
+
+  /**
    * Powers on a server.
    * Idempotent: if the server is already running, Hetzner returns success.
    *
