@@ -546,10 +546,33 @@ export class CloudflareApi {
     }
 
     const { token, accountId } = creds;
-    await this.#apiDelete(
-      `${CF_BASE}/accounts/${encodeURIComponent(accountId)}/cfd_tunnel/${encodeURIComponent(tunnelId)}`,
-      token,
-    );
+    const tunnelUrl = `${CF_BASE}/accounts/${encodeURIComponent(accountId)}/cfd_tunnel/${encodeURIComponent(tunnelId)}`;
+    const connectionsUrl = `${tunnelUrl}/connections`;
+
+    // AC3a (vps-delete): Aktive cloudflared-Connections VOR dem Tunnel-Delete aufräumen.
+    // Ein gerade getrennter Tunnel meldet sonst HTTP 400 / Code 1022 ("This tunnel has
+    // active connections") und bliebe verwaist. Der Connections-Cleanup ist idempotent
+    // (0 Connections → 200) und best-effort: schlägt er fehl, wird der Delete (+ Retry)
+    // trotzdem versucht. Token nie im Log (CloudflareApiError enthält kein Secret).
+    try {
+      await this.#apiDelete(connectionsUrl, token);
+    } catch {
+      // best-effort — der eigentliche Delete (+ Retry) ist maßgeblich
+    }
+
+    try {
+      await this.#apiDelete(tunnelUrl, token);
+    } catch {
+      // Falls der Delete dennoch scheitert (Connections noch nicht geschlossen, Code 1022):
+      // Connections einmal erneut aufräumen und Delete wiederholen. Schlägt auch das fehl,
+      // wird der Fehler propagiert (→ geheimnisfreier cleanupError in VpsProviderRegistry, AC4).
+      try {
+        await this.#apiDelete(connectionsUrl, token);
+      } catch {
+        // best-effort
+      }
+      await this.#apiDelete(tunnelUrl, token);
+    }
     return { result: 'ok' };
   }
 

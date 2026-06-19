@@ -526,6 +526,60 @@ describe('CloudflareApi — deleteTunnel()', () => {
     await expect(api.deleteTunnel(TUNNEL_ID))
       .rejects.toMatchObject({ errorClass: 'cloudflare-not-configured' });
   });
+
+  // ── AC3a (vps-delete S-171): Connections-Cleanup vor dem Tunnel-Delete ──────
+  it('AC3a: räumt Connections VOR dem Tunnel-Delete auf', async () => {
+    const calls = [];
+    const fetchFn = async (url, init) => {
+      if (init?.method === 'DELETE') {
+        calls.push(url.includes('/connections') ? 'connections' : 'tunnel');
+        return makeFetchResponse(200, DELETE_SUCCESS_RESPONSE);
+      }
+      return makeFetchResponse(200, { success: true, result: {} });
+    };
+    const api = makeApi({ fetchFn });
+    await api.deleteTunnel(TUNNEL_ID);
+    expect(calls).toEqual(['connections', 'tunnel']);
+  });
+
+  it('AC3a: Tunnel-Delete scheitert (1022) → Connections-Cleanup + Retry → ok', async () => {
+    const seq = [];
+    let tunnelAttempts = 0;
+    const fetchFn = async (url, init) => {
+      if (init?.method !== 'DELETE') return makeFetchResponse(200, { success: true, result: {} });
+      if (url.includes('/connections')) { seq.push('conn'); return makeFetchResponse(200, DELETE_SUCCESS_RESPONSE); }
+      tunnelAttempts++; seq.push('tunnel');
+      if (tunnelAttempts === 1) {
+        return makeFetchResponse(400, { success: false, errors: [{ code: 1022, message: 'This tunnel has active connections' }] });
+      }
+      return makeFetchResponse(200, DELETE_SUCCESS_RESPONSE);
+    };
+    const api = makeApi({ fetchFn });
+    await expect(api.deleteTunnel(TUNNEL_ID)).resolves.toEqual({ result: 'ok' });
+    expect(seq).toEqual(['conn', 'tunnel', 'conn', 'tunnel']);
+  });
+
+  it('AC3a: Connections-Cleanup-Fehler ist best-effort (Tunnel-Delete trotzdem)', async () => {
+    const fetchFn = async (url, init) => {
+      if (init?.method !== 'DELETE') return makeFetchResponse(200, { success: true, result: {} });
+      if (url.includes('/connections')) return makeFetchResponse(500, { success: false });
+      return makeFetchResponse(200, DELETE_SUCCESS_RESPONSE);
+    };
+    const api = makeApi({ fetchFn });
+    await expect(api.deleteTunnel(TUNNEL_ID)).resolves.toEqual({ result: 'ok' });
+  });
+
+  it('AC3a/AC4: dauerhafter Delete-Fehler propagiert geheimnisfrei (kein Token im Fehler)', async () => {
+    const fetchFn = async (url, init) => {
+      if (init?.method !== 'DELETE') return makeFetchResponse(200, { success: true, result: {} });
+      if (url.includes('/connections')) return makeFetchResponse(200, DELETE_SUCCESS_RESPONSE);
+      return makeFetchResponse(400, { success: false, errors: [{ code: 1022 }] });
+    };
+    const api = makeApi({ fetchFn });
+    const err = await api.deleteTunnel(TUNNEL_ID).catch((e) => e);
+    expect(err).toMatchObject({ errorClass: 'cloudflare-unavailable' });
+    expect(JSON.stringify(err.message)).not.toContain(MOCK_TOKEN);
+  });
 });
 
 // ── #apiDelete success:false Guard ────────────────────────────────────────────
