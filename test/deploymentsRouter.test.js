@@ -1,7 +1,7 @@
 /**
  * deploymentsRouter.test.js — HTTP-Router-Tests für Deploy-Lifecycle-Endpunkte (AC3–AC9).
  *
- * Covers:
+ * Covers (deploy-lifecycle):
  *   AC3  — GET /api/deployments → { deployments: [...] }
  *   AC3  — POST /api/deployments (deploy) → { result: "ok", deployment }
  *   AC4  — POST /api/deployments → route-fail rollback → { result: "error", reason }
@@ -16,6 +16,15 @@
  *          leere Env + dynamischer VPS → aufgelöst (kein 422); unbekannte ID → 422;
  *          Kollision → Env gewinnt; AccessGuard-403 vor Auflösung
  *   AC4  (vps-readiness-gate) — POST /api/deployments → 422 vps-provisioning bei state != ready
+ *
+ * Covers (vps-readiness-gate S-180):
+ *   AC7  — GET /api/deployments/readiness?vps=<vpsId> → 200 { state }; fehlendes vps → 400;
+ *          unbekannte vpsId → 422; bekannte vps → 200 + state aus probe();
+ *          503 wenn vpsDockerControl nicht injiziert (Dependency-Guard);
+ *          403 via AccessGuard: server.js `app.use('/api', accessGuard)` greift vor
+ *          mountRouters() — nicht unit-testbar im Router-Test, durch server.js-Inspektion
+ *          verifiziert (deploymentsRouter trägt keinen eigenen Access-Check für read-only-Pfade)
+ *   AC8  — Kein Audit-Eintrag bei Readiness-Probe; kein Key/Host/Token in Response
  */
 
 import { describe, it, expect, jest } from '@jest/globals';
@@ -29,6 +38,7 @@ import { AuditStore } from '../src/AuditStore.js';
  * Build Express app with deploymentsRouter wired.
  * Identity is injected via req.identity (simulating AccessGuard).
  * vpsRegistry optionally passed for S-169 AC9 vereinigte Auflösung.
+ * vpsDockerControl optionally passed for S-180 AC7 Readiness-Probe.
  */
 function makeApp({
   orchestratorStub,
@@ -36,6 +46,7 @@ function makeApp({
   vpsTargets = new Map([['vps-1', { host: '1.2.3.4', port: 22, targetUser: 'root' }]]),
   identity = { email: 'admin@example.com' },
   vpsRegistry = undefined,
+  vpsDockerControl = undefined,
 } = {}) {
   const app = express();
   app.use(express.json());
@@ -44,7 +55,7 @@ function makeApp({
     req.identity = identity;
     next();
   });
-  app.use(deploymentsRouter(orchestratorStub, auditStore, vpsTargets, undefined, undefined, vpsRegistry));
+  app.use(deploymentsRouter(orchestratorStub, auditStore, vpsTargets, undefined, undefined, vpsRegistry, vpsDockerControl));
   return app;
 }
 
@@ -798,5 +809,240 @@ describe('S-169 AC9: deploymentsRouter — Vereinigte VPS-Auflösung (Env ⊕ dy
       expect.objectContaining({ vps: expect.objectContaining({ host: '188.34.202.209' }) }),
     );
     expect(registry.getMachineIp).toHaveBeenCalled();
+  });
+});
+
+// ── S-180 AC7–AC8: GET /api/deployments/readiness ────────────────────────────
+
+/**
+ * Erstellt einen vpsDockerControl-Mock mit konfigurierbarem probe()-Rückgabewert.
+ *
+ * @param {{ state: string, reason?: string }} probeResult
+ */
+function makeVpsDockerControlMock(probeResult = { state: 'ready' }) {
+  return {
+    probe: jest.fn(async () => probeResult),
+  };
+}
+
+describe('S-180 AC7–AC8: GET /api/deployments/readiness', () => {
+  // ── AC7: vps-Parameter fehlt → 400 ───────────────────────────────────────
+
+  it('AC7: 400 wenn vps query-Parameter fehlt', async () => {
+    const orch = makeOrchestratorStub();
+    const dockerControl = makeVpsDockerControlMock();
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore: new AuditStore(),
+      vpsDockerControl: dockerControl,
+    });
+
+    const res = await request(app, 'GET', '/api/deployments/readiness');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBeDefined();
+    expect(dockerControl.probe).not.toHaveBeenCalled();
+  });
+
+  it('AC7: 400 wenn vps query-Parameter leer', async () => {
+    const orch = makeOrchestratorStub();
+    const dockerControl = makeVpsDockerControlMock();
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore: new AuditStore(),
+      vpsDockerControl: dockerControl,
+    });
+
+    const res = await request(app, 'GET', '/api/deployments/readiness?vps=');
+    expect(res.status).toBe(400);
+    expect(dockerControl.probe).not.toHaveBeenCalled();
+  });
+
+  // ── AC7: vpsDockerControl nicht konfiguriert → 503 ──────────────────────
+  // Dokumentierender Test: wenn deploymentsRouter ohne vpsDockerControl gebaut wird
+  // (z.B. fehlende Dependency-Injektion), liefert der Endpunkt 503 statt 500/Crash.
+
+  it('AC7: 503 wenn vpsDockerControl nicht injiziert', async () => {
+    const orch = makeOrchestratorStub();
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore: new AuditStore(),
+      // vpsDockerControl absichtlich nicht gesetzt → Dependency-Guard greift
+    });
+
+    const res = await request(app, 'GET', '/api/deployments/readiness?vps=vps-1');
+    expect(res.status).toBe(503);
+    expect(res.body.error).toBeDefined();
+    // Keine secrets in der 503-Meldung
+    const bodyStr = JSON.stringify(res.body);
+    expect(bodyStr).not.toContain('1.2.3.4');
+    expect(bodyStr).not.toContain('PRIVATE KEY');
+  });
+
+  // ── AC7: unbekannte vpsId → 422 ──────────────────────────────────────────
+
+  it('AC7: 422 bei unbekannter vpsId', async () => {
+    const orch = makeOrchestratorStub();
+    const dockerControl = makeVpsDockerControlMock();
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore: new AuditStore(),
+      vpsDockerControl: dockerControl,
+      vpsTargets: new Map(), // keine VPS in Env
+    });
+
+    const res = await request(app, 'GET', '/api/deployments/readiness?vps=unknown-vps');
+    expect(res.status).toBe(422);
+    expect(res.body.error).toMatch(/Unbekannter VPS: unknown-vps/);
+    expect(dockerControl.probe).not.toHaveBeenCalled();
+  });
+
+  it('AC7: 422 enthält nur vpsId, keinen host/key/token', async () => {
+    const orch = makeOrchestratorStub();
+    const dockerControl = makeVpsDockerControlMock();
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore: new AuditStore(),
+      vpsDockerControl: dockerControl,
+      vpsTargets: new Map(),
+    });
+
+    const res = await request(app, 'GET', '/api/deployments/readiness?vps=ghost-vps');
+    expect(res.status).toBe(422);
+    const bodyStr = JSON.stringify(res.body);
+    expect(bodyStr).toContain('ghost-vps'); // vpsId ist in Fehlermeldung
+    expect(bodyStr).not.toContain('1.2.3.4'); // kein host leak
+    expect(bodyStr).not.toContain('root');     // kein targetUser leak
+    expect(bodyStr).not.toContain('token');    // kein token leak
+  });
+
+  // ── AC7: bekannte vpsId → 200 + state ────────────────────────────────────
+
+  it('AC7: 200 { state: "ready" } bei bekannter vpsId und probe → ready', async () => {
+    const orch = makeOrchestratorStub();
+    const dockerControl = makeVpsDockerControlMock({ state: 'ready' });
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore: new AuditStore(),
+      vpsDockerControl: dockerControl,
+    });
+
+    const res = await request(app, 'GET', '/api/deployments/readiness?vps=vps-1');
+    expect(res.status).toBe(200);
+    expect(res.body.state).toBe('ready');
+    expect(dockerControl.probe).toHaveBeenCalledWith({ host: '1.2.3.4', port: 22, targetUser: 'root' });
+  });
+
+  it('AC7: 200 { state: "provisioning" } bei probe → provisioning', async () => {
+    const orch = makeOrchestratorStub();
+    const dockerControl = makeVpsDockerControlMock({
+      state: 'provisioning',
+      reason: 'VPS wird noch eingerichtet (cloud-init / Docker / cloudflared)',
+    });
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore: new AuditStore(),
+      vpsDockerControl: dockerControl,
+    });
+
+    const res = await request(app, 'GET', '/api/deployments/readiness?vps=vps-1');
+    expect(res.status).toBe(200);
+    expect(res.body.state).toBe('provisioning');
+  });
+
+  it('AC7: 200 { state: "unreachable" } bei probe → unreachable', async () => {
+    const orch = makeOrchestratorStub();
+    const dockerControl = makeVpsDockerControlMock({
+      state: 'unreachable',
+      reason: 'VPS nicht erreichbar (SSH-Verbindung fehlgeschlagen)',
+    });
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore: new AuditStore(),
+      vpsDockerControl: dockerControl,
+    });
+
+    const res = await request(app, 'GET', '/api/deployments/readiness?vps=vps-1');
+    expect(res.status).toBe(200);
+    expect(res.body.state).toBe('unreachable');
+  });
+
+  // ── AC8: ohne gültigen Access → 403 ─────────────────────────────────────
+  // AccessGuard in server.js setzt app.use('/api', accessGuard) vor mountRouters().
+  // Im Test simulieren wir den Guard durch identity = null (kein req.identity).
+  // Die Router selbst prüfen kein Access (nur Mutation-Authz); der echte
+  // AccessGuard sitzt in server.js. Hier testen wir den Mutation-Authz-Pfad NICHT
+  // (readiness ist read-only, kein CRED_ADMIN_EMAILS-Check), sondern das Verhalten
+  // ohne jegliche identity — eine kein-identity-Anfrage darf die Probe NICHT starten,
+  // weil der echte AccessGuard in server.js schon blockieren würde.
+  // Da der deploymentsRouter selbst den AccessGuard nicht trägt (liegt in server.js),
+  // dokumentieren wir hier: kein eigener 403-Check im Router für readiness.
+  // (AC8-Verifikation durch server.js-Inspektion: /api-Middleware greift vor Routes)
+
+  // ── AC8: kein Audit-Eintrag ───────────────────────────────────────────────
+
+  it('AC8: kein Audit-Eintrag bei Readiness-Probe (read-only)', async () => {
+    const orch = makeOrchestratorStub();
+    const dockerControl = makeVpsDockerControlMock({ state: 'ready' });
+    const auditStore = new AuditStore();
+    const auditSpy = jest.spyOn(auditStore, 'record');
+
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore,
+      vpsDockerControl: dockerControl,
+    });
+
+    const res = await request(app, 'GET', '/api/deployments/readiness?vps=vps-1');
+    expect(res.status).toBe(200);
+    expect(auditSpy).not.toHaveBeenCalled();
+  });
+
+  // ── AC8: kein Key/Host/Token in Response ─────────────────────────────────
+
+  it('AC8: kein host/key/token in der 200-Response', async () => {
+    const orch = makeOrchestratorStub();
+    const dockerControl = makeVpsDockerControlMock({
+      state: 'provisioning',
+      reason: 'VPS wird noch eingerichtet (cloud-init / Docker / cloudflared)',
+    });
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore: new AuditStore(),
+      vpsDockerControl: dockerControl,
+    });
+
+    const res = await request(app, 'GET', '/api/deployments/readiness?vps=vps-1');
+    expect(res.status).toBe(200);
+    const bodyStr = JSON.stringify(res.body);
+    // Nur state (und optionale neutrale reason) — kein host/key/token
+    expect(bodyStr).not.toContain('1.2.3.4');     // kein host leak
+    expect(bodyStr).not.toContain('root');          // kein targetUser leak
+    expect(bodyStr).not.toContain('PRIVATE KEY');   // kein key leak
+    expect(bodyStr).not.toContain('Bearer');         // kein token leak
+    // state muss vorhanden sein
+    expect(res.body.state).toBe('provisioning');
+  });
+
+  // ── AC7: vereinigte VPS-Auflösung (dynamische Records) ───────────────────
+
+  it('AC7: dynamischer VPS (kein Env) → aufgelöst, probe() wird aufgerufen', async () => {
+    const orch = makeOrchestratorStub();
+    const dockerControl = makeVpsDockerControlMock({ state: 'ready' });
+    const registry = makeVpsRegistryMock([DYNAMIC_TESTDEVGUI]);
+
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore: new AuditStore(),
+      vpsTargets: new Map(), // leere Env
+      vpsRegistry: registry,
+      vpsDockerControl: dockerControl,
+    });
+
+    const res = await request(app, 'GET', '/api/deployments/readiness?vps=testdevgui');
+    expect(res.status).toBe(200);
+    expect(res.body.state).toBe('ready');
+    expect(dockerControl.probe).toHaveBeenCalledWith(
+      expect.objectContaining({ host: '188.34.202.209' }),
+    );
   });
 });
