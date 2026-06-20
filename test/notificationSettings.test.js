@@ -277,6 +277,35 @@ describe('AC2 — validate() Feldvalidierung', () => {
     expect(result.ok).toBe(true);
   });
 
+  it('topic: Leerzeichen + Doppelpunkt ("DEV-GUI melder :") → 400 field=topic (sonst ntfy-404)', () => {
+    const result = validate({ enabled: true, server: 'https://ntfy.sh', topic: 'DEV-GUI melder :', events: [] });
+    expect(result.ok).toBe(false);
+    expect(result.field).toBe('topic');
+  });
+
+  it('topic: internes Leerzeichen → 400 field=topic', () => {
+    const result = validate({ enabled: true, server: 'https://ntfy.sh', topic: 'my topic', events: [] });
+    expect(result.ok).toBe(false);
+    expect(result.field).toBe('topic');
+  });
+
+  it('topic: Sonderzeichen (#) → 400 field=topic', () => {
+    const result = validate({ enabled: false, server: 'https://ntfy.sh', topic: 'alerts#1', events: [] });
+    expect(result.ok).toBe(false);
+    expect(result.field).toBe('topic');
+  });
+
+  it('topic: über 64 Zeichen → 400 field=topic', () => {
+    const result = validate({ enabled: true, server: 'https://ntfy.sh', topic: 'a'.repeat(65), events: [] });
+    expect(result.ok).toBe(false);
+    expect(result.field).toBe('topic');
+  });
+
+  it('topic: gültig (Buchstaben/Ziffern/Bindestrich/Unterstrich) → ok', () => {
+    const result = validate({ enabled: true, server: 'https://ntfy.sh', topic: 'DEV-GUI_melder-1', events: [] });
+    expect(result.ok).toBe(true);
+  });
+
   it('events: ungültiger Schlüssel → 400 field=events', () => {
     const result = validate({ enabled: false, server: 'https://ntfy.sh', topic: '', events: ['invalid_event'] });
     expect(result.ok).toBe(false);

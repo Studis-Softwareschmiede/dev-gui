@@ -31,6 +31,14 @@ export const NTFY_PRIORITY_MAX = 5;
 export const ALLOWED_EVENTS = ['story_done', 'story_blocked', 'feature_done'];
 
 /**
+ * Erlaubtes ntfy-Topic-Format: nur Buchstaben, Ziffern, `-` und `_`, 1–64 Zeichen.
+ * ntfy lehnt Leerzeichen/Sonderzeichen (z.B. `:`) ab → POST an `<server>/<topic>`
+ * liefert sonst HTTP 404. Diese Validierung fängt das mit klarer Feldmeldung beim
+ * Speichern ab, statt den Nutzer in die rohe ntfy-404 laufen zu lassen.
+ */
+export const NTFY_TOPIC_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+/**
  * @typedef {object} NotificationSettings
  * @property {boolean}  enabled  - Benachrichtigungen global aktiviert
  * @property {string}   server   - ntfy-Server-URL (http(s))
@@ -181,6 +189,19 @@ export function validate(body) {
     const topicVal = (topic ?? '').trim();
     if (!topicVal) {
       return { ok: false, field: 'topic', message: 'topic darf nicht leer sein wenn enabled=true.' };
+    }
+  }
+
+  // topic: muss ntfy-konform sein (nur A-Z a-z 0-9 _ -, 1–64 Zeichen, keine
+  // Leerzeichen/Sonderzeichen). Sonst liefert der ntfy-POST HTTP 404.
+  if (topic !== undefined && topic !== null && String(topic) !== '') {
+    if (!NTFY_TOPIC_RE.test(String(topic))) {
+      return {
+        ok: false,
+        field: 'topic',
+        message:
+          'topic darf nur Buchstaben, Ziffern, - und _ enthalten (1–64 Zeichen, keine Leerzeichen/Sonderzeichen).',
+      };
     }
   }
 
