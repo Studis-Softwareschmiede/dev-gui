@@ -2,7 +2,7 @@ id: F-004
 title: Projekt-Spezifikation (Repo-Doku im Board)
 goal: README/Konzept/Architektur/Specs eines Repos im Studis-Kanban-Board anzeigen
   (Reiter im Projekt, Markdown-Render, Story-Spec-Verknuepfung, Filter)
-status: Backlog
+status: Done
 priority: P3
 spec: null
 definition_of_done: null
@@ -12,4 +12,4 @@ owner: null
 stories: null
 progress: null
 created_at: '2026-06-15T08:55:06Z'
-updated_at: '2026-06-15T08:55:06Z'
+updated_at: '2026-06-20T08:19:35Z'

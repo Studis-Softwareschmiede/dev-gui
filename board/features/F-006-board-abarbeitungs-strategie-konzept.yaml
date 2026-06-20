@@ -2,7 +2,7 @@ id: F-006
 title: Board-Abarbeitungs-Strategie (Konzept)
 goal: Vorab-Konflikt/Parallel-Analyse, Feature-Branch-Strategie, Abarbeitungs-Hygiene
   fuer /flow
-status: Backlog
+status: Done
 priority: P3
 spec: null
 definition_of_done: null
@@ -12,4 +12,4 @@ owner: null
 stories: null
 progress: null
 created_at: '2026-06-15T10:07:21Z'
-updated_at: '2026-06-15T10:07:21Z'
+updated_at: '2026-06-20T08:19:35Z'
