@@ -36,7 +36,7 @@
     "jest": "^30.4.2",
     "jest-environment-jsdom": "^30.4.1",
     "vite": "^8.0.16",
-    "@babel/core": "^8.0.0"
+    "@babel/core": "^8.0.1"
   },
   "engines": {
     "node": ">=20"
