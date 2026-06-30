@@ -17,7 +17,7 @@
  *   GET    /api/deployments/reconcile/reports        → ReconcileReport[]
  *   GET    /api/deployments/reconcile/notices        → ReconcileNotice[]
  *   POST   /api/deployments/local-test               → { result, report? }               [MUTATION, S-156]
- *   POST   /api/deployments/vps/:vpsId/tunnel/recreate → { result, report } [MUTATION, S-187 AC1–5,11,12]
+ *   POST   /api/deployments/vps/:vpsId/tunnel/recreate → { result, report } [MUTATION, S-187 AC1–5,11,12 + S-188 AC6–8]
  *
  * Security (AC7–AC9 / ADR-012):
  *   - Alle /api/deployments/* hinter AccessGuard (server.js — alle /api/* sind geschützt).
@@ -847,7 +847,7 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconcil
   });
 
   // ── POST /api/deployments/vps/:vpsId/tunnel/recreate ─────────────────────
-  // S-187: Tunnel-Selbstheilung Phase 1+2.
+  // S-187+S-188: Tunnel-Selbstheilung Phase 1+2+3.
   // MUTATION: Audit-First (in TunnelHealService) + CRED_ADMIN_EMAILS + AccessGuard.
   // Kein Token/Key in Response/Audit/Log (AC11/AC12 HART).
   // MUSS vor /api/deployments/vps/:vps/:hostname registriert sein (kein Express-Pfadkonflikt,
@@ -855,12 +855,13 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconcil
 
   /**
    * POST /api/deployments/vps/:vpsId/tunnel/recreate
-   * Legt einen neuen Cloudflare-Tunnel an (Phase 1), pusht das Token per SSH (Phase 2).
-   * Phase 3 (Routen bestücken) folgt in S-188.
+   * Legt einen neuen Cloudflare-Tunnel an (Phase 1), pusht das Token per SSH (Phase 2),
+   * und bestückt die laufenden managed Container mit Routen am neuen Tunnel (Phase 3, S-188).
    *
    * Responses:
-   *   200 { result: "ok",    report: TunnelRecreateReport }   — Phase 1+2 erfolgreich
-   *   200 { result: "partial", report: TunnelRecreateReport } — Phase 1 ok, Phase 2 fehlgeschlagen
+   *   200 { result: "ok",    report: TunnelRecreateReport }   — Phase 1+2+3 erfolgreich
+   *   200 { result: "partial", report: TunnelRecreateReport } — Phase 2 fehlgeschlagen ODER
+   *                                                             Phase 3 Teil-Fehler (AC8)
    *   400 { error }              — vpsId fehlt/ungültig
    *   403 { error }              — nicht in CRED_ADMIN_EMAILS
    *   422 { error }              — unbekannte vpsId / tunnelHealService nicht konfiguriert
@@ -928,8 +929,11 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconcil
     }
 
     // Security-Floor (AC11): Report muss secret-frei sein (TunnelHealService garantiert das).
-    // HTTP-Status: Phase 1 fehlgeschlagen → 502; Phase 2 fehlgeschlagen → 200 partial;
-    //              Alles ok → 200.
+    // HTTP-Status:
+    //   Phase 1 fehlgeschlagen → 502 (oder 422 bei cloudflare-not-configured)
+    //   Phase 2 fehlgeschlagen → 200 partial (Tunnel referenziert, cloudflared nicht neu)
+    //   Phase 1+2 ok, Phase 3 Teil-Fehler → 200 partial (AC8: Teil-Fehler-Semantik)
+    //   Alles ok → 200 ok
     if (!report.phase1.ok) {
       // Phase 1 fehlgeschlagen: kein Tunnel angelegt, kein Token, kein SSH
       const errorClass = report.phase1.errorClass ?? 'cloudflare-unavailable';
@@ -944,11 +948,13 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconcil
 
     if (!report.phase2.ok) {
       // Phase 1 erfolgreich, Phase 2 fehlgeschlagen: Tunnel referenziert, cloudflared nicht neu gestartet
-      // → AC5: kein verwaistes Geheimnis; Phase 3 (S-188) wird ebenfalls übersprungen
+      // → AC5: kein verwaistes Geheimnis; Phase 3 übersprungen
       return res.status(200).json({ result: 'partial', report });
     }
 
-    return res.status(200).json({ result: 'ok', report });
+    // Phase 1+2 erfolgreich; Phase 3 (S-188 AC8): report.result zeigt ok/partial
+    const finalResult = report.result ?? 'ok'; // 'partial' wenn Phase-3-Teil-Fehler
+    return res.status(200).json({ result: finalResult, report });
   });
 
   // ── POST /api/deployments/reconcile ──────────────────────────────────────

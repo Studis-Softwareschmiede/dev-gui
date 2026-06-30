@@ -38,13 +38,17 @@
  *   AC12 — vpsId an orchestrator.deploy() weitergegeben (Mismatch-Check ermöglichen)
  *   AC13 — GET /api/deployments/vps-tunnel-status erzeugt keinen Audit-Eintrag
  *
- * Covers (vps-tunnel-self-heal S-187 AC1–AC5, AC11, AC12):
+ * Covers (vps-tunnel-self-heal S-187 AC1–AC5, AC11, AC12 + S-188 AC6–AC8):
  *   AC1  — POST /api/deployments/vps/:vpsId/tunnel/recreate → 200 { result:"ok", report } Phase 1+2 ok
  *   AC2  — Phase 1 fehlgeschlagen (cloudflare-not-configured → 422; cloudflare-auth-failed → 502;
  *          cloudflare-unavailable → 502) → korrekte HTTP-Status + errorClass im Body
  *   AC3  — Phase 2 ok: result:"ok"; Phase 2 fehlgeschlagen: result:"partial" (HTTP 200)
  *   AC4  — Security: kein Token in HTTP-Response (Report traversal-Prüfung)
  *   AC5  — Phase 2 fehlgeschlagen → Report nennt Phase-2-Fehler klar (partial-result)
+ *   AC6  — Phase 3 (S-188): routes[] im Report mit route-created-Einträgen;
+ *          report.result "ok" bei Phase 1+2+3 erfolgreich
+ *   AC7  — Protected Hostname in Phase 3 → protected-skipped im routes[]-Report (HTTP 200 ok)
+ *   AC8  — Teil-Fehler Phase 3: ein Container error → result "partial"; übrige laufen weiter
  *   AC11 — kein Token/Key in Response-Body (vollständige Prüfung)
  *   AC12 — 403 ohne CRED_ADMIN_EMAILS; 422 unbekannte vpsId; 500 Audit-Fail; 422 TunnelHealService
  *          nicht konfiguriert;
@@ -1726,5 +1730,115 @@ describe('POST /api/deployments/vps/:vpsId/tunnel/recreate (S-187)', () => {
     expect(args.vpsId).toBe('vps-1');
     expect(args.vpsTarget).toMatchObject({ host: '10.0.0.1' });
     expect(args.auditStore).toBeDefined();
+  });
+});
+
+// ── S-188 AC6–AC8: Phase 3 HTTP-Ebenen-Tests ──────────────────────────────────
+
+describe('POST /api/deployments/vps/:vpsId/tunnel/recreate — Phase 3 (S-188 AC6–AC8)', () => {
+  it('AC6: 200 ok + routes[] im Report bei erfolgreichem Phase-3-Bestücken', async () => {
+    const orch = makeOrchestratorStub();
+    const audit = new AuditStore();
+    const healSvc = makeTunnelHealServiceStub({
+      recreateResult: {
+        vpsId: 'vps-1',
+        newTunnelId: 'new-tunnel-id',
+        oldTunnelId: null,
+        phase1: { ok: true },
+        phase2: { ok: true },
+        routes: [{ hostname: 'app.example.com', result: 'route-created' }],
+        errors: [],
+        result: 'ok',
+      },
+    });
+    const app = makeApp({ orchestratorStub: orch, auditStore: audit, tunnelHealService: healSvc });
+
+    const res = await request(app, 'POST', '/api/deployments/vps/vps-1/tunnel/recreate');
+    expect(res.status).toBe(200);
+    expect(res.body.result).toBe('ok');
+    expect(Array.isArray(res.body.report.routes)).toBe(true);
+    expect(res.body.report.routes).toHaveLength(1);
+    expect(res.body.report.routes[0]).toMatchObject({ hostname: 'app.example.com', result: 'route-created' });
+  });
+
+  it('AC7: 200 ok + protected-skipped in routes[] bei geschütztem Hostname', async () => {
+    const orch = makeOrchestratorStub();
+    const audit = new AuditStore();
+    const healSvc = makeTunnelHealServiceStub({
+      recreateResult: {
+        vpsId: 'vps-1',
+        newTunnelId: 'new-tunnel-id',
+        oldTunnelId: null,
+        phase1: { ok: true },
+        phase2: { ok: true },
+        routes: [{ hostname: 'protected.example.com', result: 'protected-skipped' }],
+        errors: [],
+        result: 'ok',
+      },
+    });
+    const app = makeApp({ orchestratorStub: orch, auditStore: audit, tunnelHealService: healSvc });
+
+    const res = await request(app, 'POST', '/api/deployments/vps/vps-1/tunnel/recreate');
+    expect(res.status).toBe(200);
+    expect(res.body.result).toBe('ok');
+    expect(res.body.report.routes[0]).toMatchObject({
+      hostname: 'protected.example.com',
+      result: 'protected-skipped',
+    });
+  });
+
+  it('AC8: 200 partial bei Phase-3-Teil-Fehler (ein Container error, einer route-created)', async () => {
+    const orch = makeOrchestratorStub();
+    const audit = new AuditStore();
+    const healSvc = makeTunnelHealServiceStub({
+      recreateResult: {
+        vpsId: 'vps-1',
+        newTunnelId: 'new-tunnel-id',
+        oldTunnelId: null,
+        phase1: { ok: true },
+        phase2: { ok: true },
+        routes: [
+          { hostname: 'app-a.example.com', result: 'route-created' },
+          { hostname: 'app-b.example.com', result: 'error', errorClass: 'zone-not-found' },
+        ],
+        errors: [{ scope: 'phase3:route:app-b.example.com', errorClass: 'zone-not-found' }],
+        result: 'partial',
+      },
+    });
+    const app = makeApp({ orchestratorStub: orch, auditStore: audit, tunnelHealService: healSvc });
+
+    const res = await request(app, 'POST', '/api/deployments/vps/vps-1/tunnel/recreate');
+    expect(res.status).toBe(200);
+    // AC8: Gesamt-Ergebnis partial
+    expect(res.body.result).toBe('partial');
+    expect(res.body.report.routes).toHaveLength(2);
+    const routeA = res.body.report.routes.find((r) => r.hostname === 'app-a.example.com');
+    const routeB = res.body.report.routes.find((r) => r.hostname === 'app-b.example.com');
+    expect(routeA.result).toBe('route-created');
+    expect(routeB.result).toBe('error');
+    expect(routeB.errorClass).toBe('zone-not-found');
+  });
+
+  it('AC8: 200 ok + leere routes[] wenn keine managed Container (no-op)', async () => {
+    const orch = makeOrchestratorStub();
+    const audit = new AuditStore();
+    const healSvc = makeTunnelHealServiceStub({
+      recreateResult: {
+        vpsId: 'vps-1',
+        newTunnelId: 'new-tunnel-id',
+        oldTunnelId: null,
+        phase1: { ok: true },
+        phase2: { ok: true },
+        routes: [],
+        errors: [],
+        result: 'ok',
+      },
+    });
+    const app = makeApp({ orchestratorStub: orch, auditStore: audit, tunnelHealService: healSvc });
+
+    const res = await request(app, 'POST', '/api/deployments/vps/vps-1/tunnel/recreate');
+    expect(res.status).toBe(200);
+    expect(res.body.result).toBe('ok');
+    expect(res.body.report.routes).toHaveLength(0);
   });
 });

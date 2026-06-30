@@ -11,6 +11,13 @@
  *   AC11 — tunnel-missing / tunnel-mismatch errorClass → freundliche Meldung
  *           (in DeploymentsView.test.jsx mitgetestet)
  *
+ * Covers (vps-tunnel-self-heal.md, S-188):
+ *   AC9  — „Tunnel neu anlegen & bestücken"-Knopf sichtbar wenn tunnelPresent !== true;
+ *           kein Knopf wenn tunnelPresent === true; Pending-State während Lauf
+ *   AC10 — Ergebnis-Anzeige nach Heal: Phase-1/2/3-Status + je-Hostname-Routen;
+ *           kein Token in UI; Teil-Fehler als freundlicher Hinweis;
+ *           Knopf disabled während Lauf (Race-Condition-Guard)
+ *
  * @jest-environment jsdom
  */
 
@@ -435,5 +442,245 @@ describe('AC10 — Deploy-Button gesperrt solange tunnelPresent !== true', () =>
       const btn = utils.getByRole('button', { name: /Deploy starten|Re-Deploy starten/i });
       expect(btn.disabled).toBe(false);
     });
+  });
+});
+
+// ── S-188 AC9: Tunnel-Selbstheilung-Knopf ─────────────────────────────────────
+
+describe('S-188 AC9 — Tunnel-Heal-Knopf: Sichtbarkeit', () => {
+  it('Knopf erscheint wenn tunnelPresent=false + VPS ausgewählt', async () => {
+    globalThis.fetch = makeTunnelFetch({ tunnelPresent: false });
+    const utils = renderView();
+    await selectVps(utils);
+    await act(async () => { jest.advanceTimersByTime(200); });
+    await waitFor(() => {
+      const btn = utils.container.querySelector('[aria-label="Tunnel neu anlegen und bestücken"]');
+      expect(btn).not.toBeNull();
+    });
+  });
+
+  it('Knopf erscheint NICHT wenn tunnelPresent=true', async () => {
+    globalThis.fetch = makeTunnelFetch({ tunnelPresent: true });
+    const utils = renderView();
+    await selectVps(utils);
+    await act(async () => { jest.advanceTimersByTime(200); });
+    await waitFor(() => {
+      // Tunnel-Badge "Tunnel ✓" sichtbar
+      const badge = utils.container.querySelector('[aria-label*="Tunnel-Status"]');
+      expect(badge?.textContent).toContain('Tunnel ✓');
+    });
+    // Kein Heal-Knopf wenn Tunnel vorhanden
+    const btn = utils.container.querySelector('[aria-label="Tunnel neu anlegen und bestücken"]');
+    expect(btn).toBeNull();
+  });
+
+  it('Kein Knopf ohne VPS-Auswahl', async () => {
+    globalThis.fetch = makeTunnelFetch({ tunnelPresent: false });
+    const utils = renderView();
+    await act(async () => { jest.advanceTimersByTime(200); });
+    const btn = utils.container.querySelector('[aria-label="Tunnel neu anlegen und bestücken"]');
+    expect(btn).toBeNull();
+  });
+
+  it('Knopf erscheint bei tunnelPresent="unknown" (CF nicht erreichbar)', async () => {
+    globalThis.fetch = makeTunnelFetch({ tunnelPresent: 'unknown' });
+    const utils = renderView();
+    await selectVps(utils);
+    await act(async () => { jest.advanceTimersByTime(200); });
+    await waitFor(() => {
+      const badge = utils.container.querySelector('[aria-label*="Tunnel-Status"]');
+      expect(badge?.textContent).toContain('Tunnel fehlt ✗');
+    });
+    const btn = utils.container.querySelector('[aria-label="Tunnel neu anlegen und bestücken"]');
+    expect(btn).not.toBeNull();
+  });
+});
+
+// ── S-188 AC9/AC10: Tunnel-Heal Pending-State & Ergebnis ─────────────────────
+
+describe('S-188 AC9/AC10 — Tunnel-Heal: Pending-State + Ergebnis-Anzeige', () => {
+  it('AC9: Knopf disabled während Lauf (Race-Condition-Guard)', async () => {
+    let resolveFetch;
+    const healPromise = new Promise((resolve) => { resolveFetch = resolve; });
+
+    globalThis.fetch = jest.fn(async (url, init) => {
+      const u = String(url);
+      if (u.includes('/tunnel/recreate') && init?.method === 'POST') {
+        return healPromise;
+      }
+      if (u.includes('/api/deployments/vps-tunnel-status')) {
+        return { ok: true, status: 200, json: async () => [{ vpsId: 'vps-1', tunnelId: null, tunnelPresent: false }] };
+      }
+      if (u.includes('/api/deployments/readiness')) {
+        return { ok: true, status: 200, json: async () => ({ state: 'ready' }) };
+      }
+      if (u.includes('/api/github/packages') && !u.includes('/tags')) {
+        return { ok: true, status: 200, json: async () => ({ packages: [] }) };
+      }
+      if (u.includes('/api/deployments/vps-targets')) {
+        return { ok: true, status: 200, json: async () => ({ vpsIds: ['vps-1'], tunnelIds: { 'vps-1': null } }) };
+      }
+      if (u.includes('/api/cloudflare/zones')) {
+        return { ok: true, status: 200, json: async () => ({ zones: [] }) };
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    });
+
+    const utils = renderView();
+    await selectVps(utils);
+    await act(async () => { jest.advanceTimersByTime(200); });
+
+    // Warte auf Heal-Knopf
+    await waitFor(() => {
+      expect(utils.container.querySelector('[aria-label="Tunnel neu anlegen und bestücken"]')).not.toBeNull();
+    });
+
+    // Click → Knopf startet Lauf
+    await act(async () => {
+      fireEvent.click(utils.container.querySelector('[aria-label="Tunnel neu anlegen und bestücken"]'));
+    });
+
+    // Knopf muss während Lauf disabled sein
+    await waitFor(() => {
+      const btn = utils.container.querySelector('[aria-label="Tunnel neu anlegen und bestücken"]');
+      expect(btn?.disabled).toBe(true);
+    });
+
+    // Resolve fetch (Lauf abschließen)
+    resolveFetch({ ok: true, status: 200, json: async () => ({ result: 'ok', report: { phase1: { ok: true }, phase2: { ok: true }, routes: [] } }) });
+  });
+
+  it('AC10: Ergebnis-Anzeige nach erfolgreichem Heal — Phase-1/2-Status + Routen', async () => {
+    const healReport = {
+      phase1: { ok: true },
+      phase2: { ok: true },
+      routes: [
+        { hostname: 'app.example.com', result: 'route-created' },
+      ],
+    };
+
+    globalThis.fetch = jest.fn(async (url, init) => {
+      const u = String(url);
+      if (u.includes('/tunnel/recreate') && init?.method === 'POST') {
+        return { ok: true, status: 200, json: async () => ({ result: 'ok', report: healReport }) };
+      }
+      if (u.includes('/api/deployments/vps-tunnel-status')) {
+        return { ok: true, status: 200, json: async () => [{ vpsId: 'vps-1', tunnelId: null, tunnelPresent: false }] };
+      }
+      if (u.includes('/api/deployments/readiness')) {
+        return { ok: true, status: 200, json: async () => ({ state: 'ready' }) };
+      }
+      if (u.includes('/api/github/packages') && !u.includes('/tags')) {
+        return { ok: true, status: 200, json: async () => ({ packages: [] }) };
+      }
+      if (u.includes('/api/deployments/vps-targets')) {
+        return { ok: true, status: 200, json: async () => ({ vpsIds: ['vps-1'], tunnelIds: { 'vps-1': null } }) };
+      }
+      if (u.includes('/api/cloudflare/zones')) {
+        return { ok: true, status: 200, json: async () => ({ zones: [] }) };
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    });
+
+    const utils = renderView();
+    await selectVps(utils);
+    await act(async () => { jest.advanceTimersByTime(200); });
+
+    await waitFor(() => {
+      expect(utils.container.querySelector('[aria-label="Tunnel neu anlegen und bestücken"]')).not.toBeNull();
+    });
+
+    // Click Heal-Knopf
+    await act(async () => {
+      fireEvent.click(utils.container.querySelector('[aria-label="Tunnel neu anlegen und bestücken"]'));
+    });
+
+    // AC10: Ergebnis-Anzeige erscheint (Phase-1/2 ok + Route)
+    await waitFor(() => {
+      const text = utils.container.textContent;
+      // Phase-1/2 Ergebnis
+      expect(text).toMatch(/Phase 1.*OK|Tunnel.*wiederhergestellt/i);
+    });
+
+    // AC10: Route im Report sichtbar
+    await waitFor(() => {
+      expect(utils.container.textContent).toContain('app.example.com');
+    });
+
+    // AC10: kein Tunnel-Token-Wert in UI (Security — AC11).
+    // "Token" als Wort in UI-Labels (z.B. "Token-Push") ist erlaubt; der geheime Token-WERT nie.
+    // Der Token-Wert wäre eine lange zufällige Zeichenkette (z.B. eyJ... JWT oder UUID).
+    // Prüfung: kein "tunnelToken"-Feld, kein Wert der wie ein CF-Token aussieht.
+    const uiText = utils.container.textContent;
+    expect(uiText).not.toMatch(/tunnelToken/i);
+    expect(uiText).not.toMatch(/eyJ[A-Za-z0-9_-]{20,}/); // JWT-Pattern
+    expect(uiText).not.toMatch(/private.?key|ssh.?key/i);
+  });
+
+  it('AC10: Teil-Fehler (partial) → freundlicher Hinweis ohne rohe Fehlertexte', async () => {
+    const healReport = {
+      phase1: { ok: true },
+      phase2: { ok: true },
+      routes: [
+        { hostname: 'app-a.example.com', result: 'route-created' },
+        { hostname: 'app-b.example.com', result: 'error', errorClass: 'zone-not-found' },
+      ],
+    };
+
+    globalThis.fetch = jest.fn(async (url, init) => {
+      const u = String(url);
+      if (u.includes('/tunnel/recreate') && init?.method === 'POST') {
+        return { ok: true, status: 200, json: async () => ({ result: 'partial', report: healReport }) };
+      }
+      if (u.includes('/api/deployments/vps-tunnel-status')) {
+        return { ok: true, status: 200, json: async () => [{ vpsId: 'vps-1', tunnelId: null, tunnelPresent: false }] };
+      }
+      if (u.includes('/api/deployments/readiness')) {
+        return { ok: true, status: 200, json: async () => ({ state: 'ready' }) };
+      }
+      if (u.includes('/api/github/packages') && !u.includes('/tags')) {
+        return { ok: true, status: 200, json: async () => ({ packages: [] }) };
+      }
+      if (u.includes('/api/deployments/vps-targets')) {
+        return { ok: true, status: 200, json: async () => ({ vpsIds: ['vps-1'], tunnelIds: { 'vps-1': null } }) };
+      }
+      if (u.includes('/api/cloudflare/zones')) {
+        return { ok: true, status: 200, json: async () => ({ zones: [] }) };
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    });
+
+    const utils = renderView();
+    await selectVps(utils);
+    await act(async () => { jest.advanceTimersByTime(200); });
+
+    await waitFor(() => {
+      expect(utils.container.querySelector('[aria-label="Tunnel neu anlegen und bestücken"]')).not.toBeNull();
+    });
+
+    await act(async () => {
+      fireEvent.click(utils.container.querySelector('[aria-label="Tunnel neu anlegen und bestücken"]'));
+    });
+
+    // AC10: Teil-Fehler sichtbar — freundliche Meldung
+    await waitFor(() => {
+      const text = utils.container.textContent;
+      expect(text).toMatch(/teilweise|Teil-Fehler|partial/i);
+    });
+
+    // AC10: beide Hostnamen sichtbar
+    await waitFor(() => {
+      const text = utils.container.textContent;
+      expect(text).toContain('app-a.example.com');
+      expect(text).toContain('app-b.example.com');
+    });
+
+    // AC10: kein roher SSH-/CF-Fehlertext, kein geheimer Token-Wert in UI (AC11)
+    const uiText = utils.container.textContent;
+    expect(uiText).not.toMatch(/tunnelToken/i);
+    expect(uiText).not.toMatch(/eyJ[A-Za-z0-9_-]{20,}/); // JWT-Pattern (CF-Token-Wert)
+    // zone-not-found darf als errorClass im routes[]-Eintrag angezeigt werden (kein Secret)
+    // aber kein roher SSH-Stack-Trace o.ä.
+    expect(uiText).not.toMatch(/private.?key|ssh.?key/i);
   });
 });

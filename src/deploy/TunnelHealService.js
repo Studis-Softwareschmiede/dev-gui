@@ -1,7 +1,7 @@
 /**
- * TunnelHealService — Tunnel-Selbstheilung (Capability B, S-187).
+ * TunnelHealService — Tunnel-Selbstheilung (Capability B, S-187+S-188).
  *
- * Implementiert Phase 1 und Phase 2 der Tunnel-Wiederherstellung:
+ * Implementiert Phase 1, Phase 2 und Phase 3 der Tunnel-Wiederherstellung:
  *
  * Phase 1 — Tunnel neu anlegen & Referenz ersetzen:
  *   1. CloudflareApi.createTunnel("devgui-<sanitized-vpsname>") → { tunnelId, token }
@@ -15,7 +15,13 @@
  *   2. cloudflared-Container-Neustart (in pushTunnelEnvFile integriert).
  *   Token NIE in Argv/Log/Audit/Response/WS (AC4, HART).
  *
- * Phase 3 (S-188) wird NICHT hier implementiert — sie dockt am Rückgabe-Report an.
+ * Phase 3 — Routen bestücken (S-188 AC6/AC7/AC8):
+ *   1. VpsDockerControl.ps(vpsTarget) → managed Container (Label cloudflare.tunnel-hostname).
+ *   2. Für jeden Container: DeployOrchestrator.addRouteOnly({ tunnelId: newTunnelId, hostname, hostPort })
+ *      — GETEILTER ADR-012-Pfad: LockoutGuard → addRoute → createDnsRecord (idempotent).
+ *      Kein eigener CF-Mutationscode neben dem geteilten Pfad.
+ *   3. Pro Container: route-created / protected-skipped / error → routes[]-Eintrag.
+ *   4. Teil-Fehler-Semantik: ein Container-Fehler kippt die übrigen nicht.
  *
  * Security-Floor (AC4/AC11, HART):
  *   - Token erscheint NIEMALS in Argv, Log, Audit, HTTP-Response oder WS-Stream.
@@ -24,9 +30,10 @@
  *   - Keine Secrets in TunnelRecreateReport.
  *
  * Boundary (ADR-012):
- *   - CloudflareApi bleibt einziger CF-Sprecher.
+ *   - CloudflareApi bleibt einziger CF-Sprecher (via addRouteOnly).
  *   - VpsDockerControl bleibt einziger SSH+Docker-auf-VPS-Pfad.
  *   - VpsProviderRegistry bleibt Tunnel-Persistenz-Boundary.
+ *   - DeployOrchestrator.addRouteOnly ist der GETEILTE Anlege-Pfad (S-188 AC6).
  *
  * @module deploy/TunnelHealService
  */
@@ -52,12 +59,22 @@ export class TunnelHealService {
   #credentialStore;
 
   /**
+   * Shared ADR-012 route-add path (S-188 AC6).
+   * null = not configured → Phase 3 skipped (no-op with empty routes[]).
+   *
+   * @type {import('./DeployOrchestrator.js').DeployOrchestrator|null}
+   */
+  #deployOrchestrator;
+
+  /**
    * @param {object} opts
    * @param {import('../cloudflare/CloudflareApi.js').CloudflareApi} opts.cloudflareApi
    * @param {import('./VpsDockerControl.js').VpsDockerControl} opts.vpsDockerControl
    * @param {import('../CredentialStore.js').CredentialStore} opts.credentialStore
+   * @param {import('./DeployOrchestrator.js').DeployOrchestrator} [opts.deployOrchestrator]
+   *   Shared ADR-012 route-add path (S-188 AC6). When omitted, Phase 3 is skipped.
    */
-  constructor({ cloudflareApi, vpsDockerControl, credentialStore }) {
+  constructor({ cloudflareApi, vpsDockerControl, credentialStore, deployOrchestrator }) {
     if (!cloudflareApi || typeof cloudflareApi.createTunnel !== 'function') {
       throw new Error('[TunnelHealService] cloudflareApi ist Pflicht');
     }
@@ -70,25 +87,30 @@ export class TunnelHealService {
     this.#cloudflareApi = cloudflareApi;
     this.#vpsDockerControl = vpsDockerControl;
     this.#credentialStore = credentialStore;
+    // deployOrchestrator is optional — Phase 3 is skipped if not provided
+    this.#deployOrchestrator = (deployOrchestrator && typeof deployOrchestrator.addRouteOnly === 'function')
+      ? deployOrchestrator
+      : null;
   }
 
-  // ── Phase 1 + 2 (S-187) ───────────────────────────────────────────────────────
+  // ── Phase 1 + 2 + 3 (S-187 + S-188) ────────────────────────────────────────────
 
   /**
-   * Führt Phase 1 (Tunnel neu anlegen & Referenz ersetzen) und Phase 2
-   * (Token-Push via SSH + cloudflared-Restart) durch.
+   * Führt Phase 1 (Tunnel neu anlegen & Referenz ersetzen), Phase 2
+   * (Token-Push via SSH + cloudflared-Restart) und Phase 3 (Routen bestücken)
+   * durch.
    *
    * Gibt einen secret-freien TunnelRecreateReport zurück.
-   * Phase 3 (Routen bestücken) ist nicht Teil dieser Methode — wird von S-188 ergänzt.
    *
    * Security-Floor (AC4/AC11, HART):
    *   - Token NIE in Audit, Response, Argv, Log.
    *   - Audit-First VOR Phase 1 (vorPhase1-Audit) und vor Phase 2.
+   *   - Phase 3 nutzt ausschließlich den geteilten addRouteOnly-Pfad (AC6).
    *
    * @param {object} params
    * @param {string} params.vpsId        - VPS-ID (sanitisierter Name)
    * @param {string} params.vpsName      - VPS-Name für Tunnel-Namenskonvention
-   * @param {object} params.vpsTarget    - { host, port?, targetUser } für SSH in Phase 2
+   * @param {object} params.vpsTarget    - { host, port?, targetUser } für SSH in Phase 2+3
    * @param {string|null} [params.identity] - Identität für Audit-Einträge (nie Token)
    * @param {import('../AuditStore.js').AuditStore} params.auditStore
    * @returns {Promise<TunnelRecreateReport>}
@@ -283,16 +305,119 @@ export class TunnelHealService {
 
     console.log(`[TunnelHealService] Phase 1+2 erfolgreich: vpsId=${vpsId} newTunnelId=${newTunnelId}`);
 
-    // Phase 3 (Routen bestücken) liegt in S-188 — dieser Report signalisiert Bereitschaft.
-    // S-188 dockt an: report.phase2.ok === true + report.newTunnelId → addRouteOnly je Container.
+    // ── Phase 3 — Routen bestücken (S-188 AC6/AC7/AC8) ───────────────────────────
+    // Nur wenn deployOrchestrator konfiguriert ist (optionale Dependency).
+    const routes = [];
+    const phase3Errors = [];
+
+    if (!this.#deployOrchestrator) {
+      // Phase 3 nicht konfiguriert — no-op (graceful degradation)
+      console.log(`[TunnelHealService] Phase 3 übersprungen (kein deployOrchestrator)`);
+    } else {
+      // AC6: Managed Container auslesen (Label cloudflare.tunnel-hostname + Host-Port)
+      let psResult;
+      try {
+        psResult = await this.#vpsDockerControl.ps(vpsTarget);
+      } catch (psErr) {
+        // ps() fehlgeschlagen → Phase 3 abgebrochen, Tunnel referenziert (additiv)
+        const errorClass = psErr?.errorClass ?? 'ps-failed';
+        console.log(`[TunnelHealService] Phase 3: ps() fehlgeschlagen: ${errorClass}`);
+        phase3Errors.push({ scope: 'phase3:ps', errorClass });
+        return {
+          vpsId,
+          newTunnelId,
+          oldTunnelId,
+          phase1: { ok: true },
+          phase2: { ok: true },
+          routes,
+          errors: phase3Errors,
+          result: 'partial',
+        };
+      }
+
+      if (psResult.result !== 'ok') {
+        // ps() returned error (non-throw)
+        const errorClass = psResult.errorClass ?? 'ps-failed';
+        console.log(`[TunnelHealService] Phase 3: ps() Fehler: ${errorClass}`);
+        phase3Errors.push({ scope: 'phase3:ps', errorClass });
+        return {
+          vpsId,
+          newTunnelId,
+          oldTunnelId,
+          phase1: { ok: true },
+          phase2: { ok: true },
+          routes,
+          errors: phase3Errors,
+          result: 'partial',
+        };
+      }
+
+      const containers = psResult.containers ?? [];
+
+      if (containers.length === 0) {
+        // Keine managed Container → Phase 3 no-op (Spec: leere routes[]-Liste)
+        console.log(`[TunnelHealService] Phase 3: Keine managed Container gefunden — no-op`);
+      }
+
+      // AC6/AC7/AC8: je Container über geteilten addRouteOnly-Pfad (LockoutGuard inbegriffen)
+      // Pro Container degradierend: ein Fehler kippt die übrigen nicht (AC8).
+      for (const container of containers) {
+        const hostname = container.hostname;
+        const hostPort = container.hostPort ?? 8080;
+
+        if (!hostname) {
+          // Unmanaged Container (kein Label) — überspringen, wie Reconciliation
+          continue;
+        }
+
+        try {
+          // AC6: GETEILTER ADR-012-Anlege-Pfad — kein eigener CF-Mutationscode
+          const addResult = await this.#deployOrchestrator.addRouteOnly({
+            tunnelId: newTunnelId,
+            hostname,
+            hostPort,
+          });
+
+          if (addResult.result === 'ok') {
+            // AC8: Ergebnis je Container: route-created
+            routes.push({ hostname, result: 'route-created' });
+            console.log(`[TunnelHealService] Phase 3: Route angelegt: ${hostname}`);
+          } else if (addResult.errorClass === 'protected-resource') {
+            // AC7: Protected Hostname → protectedSkipped, kein Anlege-Call ausgeführt
+            routes.push({ hostname, result: 'protected-skipped' });
+            console.log(`[TunnelHealService] Phase 3: Protected-Skip: ${hostname}`);
+          } else {
+            // AC8: Fehler beim Anlegen → error im Report, übrige Container laufen weiter
+            const errorClass = addResult.errorClass ?? 'error';
+            routes.push({ hostname, result: 'error', errorClass });
+            phase3Errors.push({ scope: `phase3:route:${hostname}`, errorClass });
+            console.log(`[TunnelHealService] Phase 3: Route fehlgeschlagen ${hostname}: ${errorClass}`);
+          }
+        } catch (routeErr) {
+          // AC8: Unerwarteter Fehler → error, übrige Container laufen weiter
+          const errorClass = routeErr?.errorClass ?? 'error';
+          routes.push({ hostname, result: 'error', errorClass });
+          phase3Errors.push({ scope: `phase3:route:${hostname}`, errorClass });
+          console.log(`[TunnelHealService] Phase 3: Unerwarteter Fehler ${hostname}: ${errorClass}`);
+        }
+      }
+    }
+
+    // AC8: Gesamt-Ergebnis: "ok" wenn keine Phase-3-Fehler, "partial" wenn Teil-Fehler
+    const hasPhase3Errors = phase3Errors.length > 0;
+    const overallResult = hasPhase3Errors ? 'partial' : 'ok';
+
+    console.log(`[TunnelHealService] Phase 1+2+3 abgeschlossen: vpsId=${vpsId} newTunnelId=${newTunnelId} result=${overallResult} routes=${routes.length}`);
+
     return {
       vpsId,
       newTunnelId,
       oldTunnelId,
       phase1: { ok: true },
       phase2: { ok: true },
-      routes: [], // S-188 füllt dieses Feld
-      errors: [],
+      routes,
+      errors: phase3Errors,
+      result: overallResult,
     };
   }
 }
@@ -304,8 +429,10 @@ export class TunnelHealService {
  * @property {string|null}   oldTunnelId  - alte Tunnel-Id (null wenn keine vorhanden war)
  * @property {{ ok: boolean, errorClass?: string }} phase1  - Phase-1-Ergebnis
  * @property {{ ok: boolean, errorClass?: string }} phase2  - Phase-2-Ergebnis
- * @property {Array<{ hostname: string, result: string, errorClass?: string }>} routes
- *   Phase-3-Routen-Ergebnisse (S-188); leer in S-187
+ * @property {Array<{ hostname: string, result: 'route-created'|'protected-skipped'|'error', errorClass?: string }>} routes
+ *   Phase-3-Routen-Ergebnisse (S-188 AC6/AC7/AC8): je Container
  * @property {Array<{ scope: string, errorClass: string }>} errors
  *   Alle Fehler-Einträge (secret-frei)
+ * @property {'ok'|'partial'} [result]
+ *   Gesamt-Ergebnis: "ok" = alles erfolgreich; "partial" = Teil-Fehler (AC8)
  */

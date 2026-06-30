@@ -14,7 +14,7 @@ goal: >-
   atomaren Anlege-Pfad des DeployOrchestrator. Security-kritisch: Token NIE in
   Argv/Log/Audit/Response/WS; mutierend, Access + CRED_ADMIN_EMAILS + Audit-First +
   LockoutGuard.
-status: To Do
+status: Done
 priority: P1
 spec: docs/specs/vps-tunnel-self-heal.md
 definition_of_done: null

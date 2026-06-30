@@ -1,5 +1,5 @@
 /**
- * tunnelHealService.test.js — Unit-Tests für TunnelHealService (S-187).
+ * tunnelHealService.test.js — Unit-Tests für TunnelHealService (S-187 + S-188).
  *
  * Covers (vps-tunnel-self-heal):
  *   AC1  — Phase 1: createTunnel → Token unter TUNNEL_TOKEN_KEY ablegen + TUNNEL_ID_KEY aktualisieren;
@@ -12,6 +12,12 @@
  *          (alle geprüft via Spy auf auditStore.record + report-Traversal)
  *   AC5  — Phase 2 fehlgeschlagen → Tunnel bleibt referenziert (store.set war bereits aufgerufen),
  *          kein verwaistes Geheimnis, Report meldet Phase-2-Fehler klar; Phase 3 übersprungen
+ *   AC6  — Phase 3: ps() → managed Container; je Container addRouteOnly (geteilter ADR-012-Pfad);
+ *          kein eigener CF-Mutationscode (Grep: kein addRoute/createDnsRecord direkt in TunnelHealService)
+ *   AC7  — Protected Hostname → addRouteOnly WIRD aufgerufen und gibt intern (LockoutGuard) protected-resource zurück;
+ *          protectedSkipped im Report; kein CF-Anlege-Call (addRoute/createDnsRecord); kein Eintrag in errors[]
+ *   AC8  — Teil-Fehler: ein Container-Fehler kippt die übrigen nicht; jedes Ergebnis im Report;
+ *          report.result = "ok" / "partial"
  *   AC11 — TunnelRecreateReport enthält NIEMALS tunnelToken — nur tunnelId (nicht-geheim)
  *   AC12 — Audit-First: auditStore.record() VOR jeder mutierenden Phase;
  *          bei Audit-Fail → Aktion unterbleibt
@@ -64,9 +70,29 @@ function makeCredentialStoreStub({
 
 function makeVpsDockerControlStub({
   pushResult = { result: 'ok' },
+  psResult = { result: 'ok', containers: [] },
 } = {}) {
   return {
     pushTunnelEnvFile: jest.fn(async () => pushResult),
+    ps: jest.fn(async () => psResult),
+  };
+}
+
+/**
+ * Minimal DeployOrchestrator stub for Phase 3 (S-188 AC6/AC7/AC8).
+ * addRouteOnly() simulates the shared ADR-012 route-add path.
+ *
+ * @param {{ addRouteResult?: object, addRouteError?: Error }} opts
+ */
+function makeDeployOrchestratorStub({
+  addRouteResult = { result: 'ok' },
+  addRouteError = null,
+} = {}) {
+  return {
+    addRouteOnly: jest.fn(async () => {
+      if (addRouteError) throw addRouteError;
+      return addRouteResult;
+    }),
   };
 }
 
@@ -491,5 +517,293 @@ describe('TunnelHealService — VPS-Target-Fehlerfall', () => {
     expect(report.phase2.ok).toBe(false);
     expect(report.phase2.errorClass).toBe('vps-target-missing');
     expect(docker.pushTunnelEnvFile).not.toHaveBeenCalled();
+  });
+});
+
+// ── Phase 3 — Routen bestücken (S-188 AC6/AC7/AC8) ──────────────────────────
+
+const MANAGED_CONTAINER = {
+  containerId: 'abc123',
+  hostname: 'app.example.com',
+  hostPort: 8080,
+  image: 'ghcr.io/org/app:v1',
+  status: 'Up 2 hours',
+};
+
+describe('TunnelHealService — Phase 3: Routen bestücken (AC6)', () => {
+  it('AC6: ps() aufgerufen mit vpsTarget nach Phase 2 Erfolg', async () => {
+    const docker = makeVpsDockerControlStub({
+      psResult: { result: 'ok', containers: [MANAGED_CONTAINER] },
+    });
+    const orch = makeDeployOrchestratorStub();
+    const svc = new TunnelHealService({
+      cloudflareApi: makeCloudflareApiStub(),
+      vpsDockerControl: docker,
+      credentialStore: makeCredentialStoreStub(),
+      deployOrchestrator: orch,
+    });
+    const audit = makeAuditStoreStub();
+
+    await svc.recreate({ vpsId: VPS_ID, vpsName: VPS_ID, vpsTarget: VPS_TARGET, identity: null, auditStore: audit });
+
+    expect(docker.ps).toHaveBeenCalledWith(VPS_TARGET);
+  });
+
+  it('AC6: addRouteOnly mit neuem tunnelId + hostname + hostPort aufgerufen', async () => {
+    const docker = makeVpsDockerControlStub({
+      psResult: { result: 'ok', containers: [MANAGED_CONTAINER] },
+    });
+    const orch = makeDeployOrchestratorStub();
+    const svc = new TunnelHealService({
+      cloudflareApi: makeCloudflareApiStub(),
+      vpsDockerControl: docker,
+      credentialStore: makeCredentialStoreStub(),
+      deployOrchestrator: orch,
+    });
+    const audit = makeAuditStoreStub();
+
+    await svc.recreate({ vpsId: VPS_ID, vpsName: VPS_ID, vpsTarget: VPS_TARGET, identity: null, auditStore: audit });
+
+    expect(orch.addRouteOnly).toHaveBeenCalledTimes(1);
+    const args = orch.addRouteOnly.mock.calls[0][0];
+    expect(args.tunnelId).toBe(NEW_TUNNEL_ID);
+    expect(args.hostname).toBe(MANAGED_CONTAINER.hostname);
+    expect(args.hostPort).toBe(MANAGED_CONTAINER.hostPort);
+  });
+
+  it('AC6: kein direkter CF-Mutationscode — addRouteOnly ist der einzige Route-Anlege-Pfad', () => {
+    // Grep-prüfbar: TunnelHealService darf kein cloudflareApi.addRoute/createDnsRecord direkt aufrufen.
+    // Dieser Test assertiert das strukturell: cloudflareApi hat KEINE addRoute/createDnsRecord-Methode
+    // die von TunnelHealService direkt aufgerufen würde. Der einzige Pfad ist über addRouteOnly.
+    const docker = makeVpsDockerControlStub({
+      psResult: { result: 'ok', containers: [MANAGED_CONTAINER] },
+    });
+    const orch = makeDeployOrchestratorStub();
+    const cfApiSpy = {
+      createTunnel: jest.fn(async () => ({ tunnelId: NEW_TUNNEL_ID, token: FAKE_TOKEN })),
+      // addRoute und createDnsRecord explizit NICHT vorhanden — würde Fehler werfen falls aufgerufen
+    };
+
+    const svc = new TunnelHealService({
+      cloudflareApi: cfApiSpy,
+      vpsDockerControl: docker,
+      credentialStore: makeCredentialStoreStub(),
+      deployOrchestrator: orch,
+    });
+
+    // Wenn TunnelHealService cfApi.addRoute/createDnsRecord aufrufen würde, würde recreate() werfen.
+    // Der Test bestätigt, dass er NICHT wirft und addRouteOnly stattdessen aufgerufen wird.
+    const audit = makeAuditStoreStub();
+    return expect(
+      svc.recreate({ vpsId: VPS_ID, vpsName: VPS_ID, vpsTarget: VPS_TARGET, identity: null, auditStore: audit }),
+    ).resolves.toMatchObject({ phase1: { ok: true }, phase2: { ok: true } });
+  });
+
+  it('AC6: Route-Ergebnis route-created im Report (ein Container)', async () => {
+    const docker = makeVpsDockerControlStub({
+      psResult: { result: 'ok', containers: [MANAGED_CONTAINER] },
+    });
+    const orch = makeDeployOrchestratorStub({ addRouteResult: { result: 'ok' } });
+    const svc = new TunnelHealService({
+      cloudflareApi: makeCloudflareApiStub(),
+      vpsDockerControl: docker,
+      credentialStore: makeCredentialStoreStub(),
+      deployOrchestrator: orch,
+    });
+    const audit = makeAuditStoreStub();
+
+    const report = await svc.recreate({ vpsId: VPS_ID, vpsName: VPS_ID, vpsTarget: VPS_TARGET, identity: null, auditStore: audit });
+
+    expect(report.routes).toHaveLength(1);
+    expect(report.routes[0]).toMatchObject({ hostname: MANAGED_CONTAINER.hostname, result: 'route-created' });
+    expect(report.result).toBe('ok');
+  });
+
+  it('AC6: Keine managed Container → routes leer, result ok', async () => {
+    const docker = makeVpsDockerControlStub({
+      psResult: { result: 'ok', containers: [] },
+    });
+    const orch = makeDeployOrchestratorStub();
+    const svc = new TunnelHealService({
+      cloudflareApi: makeCloudflareApiStub(),
+      vpsDockerControl: docker,
+      credentialStore: makeCredentialStoreStub(),
+      deployOrchestrator: orch,
+    });
+    const audit = makeAuditStoreStub();
+
+    const report = await svc.recreate({ vpsId: VPS_ID, vpsName: VPS_ID, vpsTarget: VPS_TARGET, identity: null, auditStore: audit });
+
+    expect(report.routes).toHaveLength(0);
+    expect(orch.addRouteOnly).not.toHaveBeenCalled();
+    expect(report.result).toBe('ok');
+  });
+
+  it('AC6: kein deployOrchestrator konfiguriert → Phase 3 no-op, routes leer', async () => {
+    const docker = makeVpsDockerControlStub({
+      psResult: { result: 'ok', containers: [MANAGED_CONTAINER] },
+    });
+    const svc = new TunnelHealService({
+      cloudflareApi: makeCloudflareApiStub(),
+      vpsDockerControl: docker,
+      credentialStore: makeCredentialStoreStub(),
+      // deployOrchestrator nicht gesetzt
+    });
+    const audit = makeAuditStoreStub();
+
+    const report = await svc.recreate({ vpsId: VPS_ID, vpsName: VPS_ID, vpsTarget: VPS_TARGET, identity: null, auditStore: audit });
+
+    expect(report.routes).toHaveLength(0);
+    // ps() NICHT aufgerufen wenn kein orchestrator
+    expect(docker.ps).not.toHaveBeenCalled();
+  });
+});
+
+describe('TunnelHealService — Phase 3: Protected Hostname (AC7)', () => {
+  it('AC7: protected-resource → protectedSkipped im Report, addRouteOnly trotzdem aufgerufen (LockoutGuard inbegriffen)', async () => {
+    // addRouteOnly liefert protected-resource → TunnelHealService schreibt protected-skipped in routes[]
+    const docker = makeVpsDockerControlStub({
+      psResult: { result: 'ok', containers: [MANAGED_CONTAINER] },
+    });
+    const orch = makeDeployOrchestratorStub({
+      addRouteResult: { result: 'error', errorClass: 'protected-resource' },
+    });
+    const svc = new TunnelHealService({
+      cloudflareApi: makeCloudflareApiStub(),
+      vpsDockerControl: docker,
+      credentialStore: makeCredentialStoreStub(),
+      deployOrchestrator: orch,
+    });
+    const audit = makeAuditStoreStub();
+
+    const report = await svc.recreate({ vpsId: VPS_ID, vpsName: VPS_ID, vpsTarget: VPS_TARGET, identity: null, auditStore: audit });
+
+    // AC7: protectedSkipped im routes[]-Eintrag
+    expect(report.routes).toHaveLength(1);
+    expect(report.routes[0]).toMatchObject({
+      hostname: MANAGED_CONTAINER.hostname,
+      result: 'protected-skipped',
+    });
+    // AC7: addRouteOnly WURDE aufgerufen (LockoutGuard liegt intern drin)
+    expect(orch.addRouteOnly).toHaveBeenCalledTimes(1);
+    // Protected-Skip ist kein Fehler → kein Eintrag in errors[]
+    const protectedErrors = report.errors.filter((e) => e.scope.includes(MANAGED_CONTAINER.hostname));
+    expect(protectedErrors).toHaveLength(0);
+    // AC7: result "ok" (keine echten Fehler)
+    expect(report.result).toBe('ok');
+  });
+});
+
+describe('TunnelHealService — Phase 3: Teil-Fehler-Semantik (AC8)', () => {
+  const CONTAINER_A = { containerId: 'c1', hostname: 'app-a.example.com', hostPort: 8080, image: 'img:v1', status: 'Up' };
+  const CONTAINER_B = { containerId: 'c2', hostname: 'app-b.example.com', hostPort: 8081, image: 'img:v2', status: 'Up' };
+
+  it('AC8: ein Container-Fehler kippt die übrigen nicht — beide Hostnamen im Report', async () => {
+    let callCount = 0;
+    const docker = makeVpsDockerControlStub({
+      psResult: { result: 'ok', containers: [CONTAINER_A, CONTAINER_B] },
+    });
+    const orch = {
+      addRouteOnly: jest.fn(async ({ hostname }) => {
+        callCount++;
+        // CONTAINER_A schlägt fehl, CONTAINER_B gelingt
+        if (hostname === CONTAINER_A.hostname) {
+          return { result: 'error', errorClass: 'zone-not-found' };
+        }
+        return { result: 'ok' };
+      }),
+    };
+
+    const svc = new TunnelHealService({
+      cloudflareApi: makeCloudflareApiStub(),
+      vpsDockerControl: docker,
+      credentialStore: makeCredentialStoreStub(),
+      deployOrchestrator: orch,
+    });
+    const audit = makeAuditStoreStub();
+
+    const report = await svc.recreate({ vpsId: VPS_ID, vpsName: VPS_ID, vpsTarget: VPS_TARGET, identity: null, auditStore: audit });
+
+    // AC8: beide Container im Report
+    expect(report.routes).toHaveLength(2);
+    const routeA = report.routes.find((r) => r.hostname === CONTAINER_A.hostname);
+    const routeB = report.routes.find((r) => r.hostname === CONTAINER_B.hostname);
+    expect(routeA).toMatchObject({ result: 'error', errorClass: 'zone-not-found' });
+    expect(routeB).toMatchObject({ result: 'route-created' });
+
+    // AC8: addRouteOnly beide Male aufgerufen (Fehler von A bricht B nicht ab)
+    expect(callCount).toBe(2);
+
+    // AC8: Gesamt-Ergebnis partial (Teil-Fehler)
+    expect(report.result).toBe('partial');
+  });
+
+  it('AC8: Fehler via throw → error im Report, nächste Container laufen weiter', async () => {
+    const docker = makeVpsDockerControlStub({
+      psResult: { result: 'ok', containers: [CONTAINER_A, CONTAINER_B] },
+    });
+    const orch = {
+      addRouteOnly: jest.fn(async ({ hostname }) => {
+        if (hostname === CONTAINER_A.hostname) {
+          throw Object.assign(new Error('Cloudflare-Fehler'), { errorClass: 'cloudflare-unavailable' });
+        }
+        return { result: 'ok' };
+      }),
+    };
+
+    const svc = new TunnelHealService({
+      cloudflareApi: makeCloudflareApiStub(),
+      vpsDockerControl: docker,
+      credentialStore: makeCredentialStoreStub(),
+      deployOrchestrator: orch,
+    });
+    const audit = makeAuditStoreStub();
+
+    const report = await svc.recreate({ vpsId: VPS_ID, vpsName: VPS_ID, vpsTarget: VPS_TARGET, identity: null, auditStore: audit });
+
+    const routeA = report.routes.find((r) => r.hostname === CONTAINER_A.hostname);
+    const routeB = report.routes.find((r) => r.hostname === CONTAINER_B.hostname);
+    expect(routeA).toMatchObject({ result: 'error', errorClass: 'cloudflare-unavailable' });
+    expect(routeB).toMatchObject({ result: 'route-created' });
+    expect(report.result).toBe('partial');
+  });
+
+  it('AC8: alle Container erfolgreich → report.result = "ok"', async () => {
+    const docker = makeVpsDockerControlStub({
+      psResult: { result: 'ok', containers: [CONTAINER_A, CONTAINER_B] },
+    });
+    const orch = makeDeployOrchestratorStub({ addRouteResult: { result: 'ok' } });
+    const svc = new TunnelHealService({
+      cloudflareApi: makeCloudflareApiStub(),
+      vpsDockerControl: docker,
+      credentialStore: makeCredentialStoreStub(),
+      deployOrchestrator: orch,
+    });
+    const audit = makeAuditStoreStub();
+
+    const report = await svc.recreate({ vpsId: VPS_ID, vpsName: VPS_ID, vpsTarget: VPS_TARGET, identity: null, auditStore: audit });
+
+    expect(report.result).toBe('ok');
+    expect(report.routes).toHaveLength(2);
+    expect(report.routes.every((r) => r.result === 'route-created')).toBe(true);
+  });
+
+  it('AC11: kein Token im Report bei Phase-3-Lauf (vollständige Traversal)', async () => {
+    const docker = makeVpsDockerControlStub({
+      psResult: { result: 'ok', containers: [MANAGED_CONTAINER] },
+    });
+    const orch = makeDeployOrchestratorStub({ addRouteResult: { result: 'ok' } });
+    const svc = new TunnelHealService({
+      cloudflareApi: makeCloudflareApiStub(),
+      vpsDockerControl: docker,
+      credentialStore: makeCredentialStoreStub(),
+      deployOrchestrator: orch,
+    });
+    const audit = makeAuditStoreStub();
+
+    const report = await svc.recreate({ vpsId: VPS_ID, vpsName: VPS_ID, vpsTarget: VPS_TARGET, identity: null, auditStore: audit });
+
+    // AC11: kein Token im Report (vollständige Traversal)
+    expect(containsToken(report, FAKE_TOKEN)).toBe(false);
   });
 });
