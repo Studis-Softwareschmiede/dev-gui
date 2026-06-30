@@ -443,6 +443,37 @@ describe('CloudflareApi — createDnsRecord()', () => {
     expect(postBody.proxied).toBe(true);
   });
 
+  it('vorhandener CNAME → PUT-Update statt Duplikat-POST (idempotent), Duplikate gelöscht', async () => {
+    const calls = [];
+    const fetchFn = async (url, init) => {
+      const method = init?.method ?? 'GET';
+      calls.push({ url, method, body: init?.body ? JSON.parse(init.body) : null });
+      if (method === 'GET') {
+        // Zwei vorhandene CNAMEs für denselben Hostnamen (Record + Duplikat)
+        return makeFetchResponse(200, {
+          success: true,
+          result: [
+            { id: 'rec-1', name: 'app.example.com', type: 'CNAME', content: 'old.cfargotunnel.com' },
+            { id: 'rec-2', name: 'app.example.com', type: 'CNAME', content: 'old.cfargotunnel.com' },
+          ],
+        });
+      }
+      return makeFetchResponse(200, { success: true, result: {} });
+    };
+    const api = makeApi({ fetchFn });
+    await api.createDnsRecord(ZONE_ID, 'app.example.com', TUNNEL_ID);
+
+    const post = calls.find((c) => c.method === 'POST');
+    const put = calls.find((c) => c.method === 'PUT');
+    const del = calls.find((c) => c.method === 'DELETE');
+    expect(post).toBeUndefined();              // KEIN Duplikat-POST (das wäre der HTTP-400-Fehler)
+    expect(put).toBeDefined();
+    expect(put.url).toContain('rec-1');
+    expect(put.body.content).toContain(TUNNEL_ID); // auf neuen Tunnel umgebogen
+    expect(del).toBeDefined();
+    expect(del.url).toContain('rec-2');         // Duplikat aufgeräumt
+  });
+
   it('protected hostname → throws protected-resource', async () => {
     const api = makeApi({
       lockoutGuard: new LockoutGuard({ devguiHostname: 'devgui.example.com' }),

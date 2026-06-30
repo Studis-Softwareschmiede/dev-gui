@@ -55,6 +55,8 @@ function makeStubs({
   const cloudflareApi = {
     listRoutes: jest.fn().mockResolvedValue(listRoutesResult),
     removeRoute: jest.fn().mockResolvedValue(removeRouteResult),
+    resolveZoneForHostname: jest.fn().mockResolvedValue('zone-1'),
+    deleteDnsRecord: jest.fn().mockResolvedValue(undefined),
   };
 
   const lockoutGuard = {
@@ -170,6 +172,38 @@ describe('ReconciliationJob', () => {
 
       const report = await job.reconcile('manual');
       expect(stubs.cloudflareApi.removeRoute).toHaveBeenCalledWith('tunnel-1', 'orphan.example.com');
+      expect(report.perVps[0].removedRoutes).toContain('orphan.example.com');
+    });
+
+    it('räumt auch den verwaisten CNAME mit auf (Route + DNS)', async () => {
+      const { job, stubs } = makeJob({
+        stubs: {
+          psResult: { result: 'ok', containers: [] },
+          listRoutesResult: [
+            { hostname: 'orphan.example.com', service: 'http://localhost:9090', tunnelId: 'tunnel-1', protected: false },
+          ],
+        },
+      });
+
+      await job.reconcile('manual');
+      expect(stubs.cloudflareApi.removeRoute).toHaveBeenCalledWith('tunnel-1', 'orphan.example.com');
+      // Symmetrie zum Undeploy: der CNAME wird mit-gelöscht, sonst blockiert er spätere Re-Deploys
+      expect(stubs.cloudflareApi.deleteDnsRecord).toHaveBeenCalledWith('zone-1', 'orphan.example.com');
+    });
+
+    it('DNS-Cleanup ist best-effort: deleteDnsRecord-Fehler bricht den Reconcile nicht ab', async () => {
+      const { job, stubs } = makeJob({
+        stubs: {
+          psResult: { result: 'ok', containers: [] },
+          listRoutesResult: [
+            { hostname: 'orphan.example.com', service: 'http://localhost:9090', tunnelId: 'tunnel-1', protected: false },
+          ],
+        },
+      });
+      stubs.cloudflareApi.deleteDnsRecord.mockRejectedValue(new Error('cf down'));
+
+      const report = await job.reconcile('manual');
+      // Route gilt weiterhin als entfernt; kein Abbruch trotz DNS-Fehler
       expect(report.perVps[0].removedRoutes).toContain('orphan.example.com');
     });
 

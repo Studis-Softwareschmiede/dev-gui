@@ -411,6 +411,19 @@ export class ReconciliationJob {
       await this.#cloudflareApi.removeRoute(tunnelId, hostname);
       result.removedRoutes.push(hostname);
 
+      // CNAME mit-aufräumen (best-effort, analog undeploy): eine verwaiste Route hinterlässt
+      // sonst einen verwaisten DNS-CNAME, der spätere Re-Deploys desselben Hostnamen als
+      // Duplikat blockiert. Route ist bereits entfernt — ein DNS-Fehler darf den Reconcile
+      // nicht abbrechen.
+      try {
+        const zoneId = await this.#cloudflareApi.resolveZoneForHostname(hostname);
+        if (zoneId) {
+          await this.#cloudflareApi.deleteDnsRecord(zoneId, hostname);
+        }
+      } catch {
+        // best-effort — verwaister CNAME wird beim nächsten idempotenten Anlegen ohnehin überschrieben
+      }
+
       // ReconcileNotice (AC8b)
       this.#persistNotice({
         kind: 'route-removed',

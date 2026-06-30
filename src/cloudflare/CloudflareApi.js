@@ -414,15 +414,44 @@ export class CloudflareApi {
     }
 
     const { token } = creds;
-    const url = `${CF_BASE}/zones/${encodeURIComponent(zoneId)}/dns_records`;
-
-    await this.#apiPost(url, token, {
+    const body = {
       type: 'CNAME',
       name: hostname,
       content: `${tunnelId}.cfargotunnel.com`,
       proxied: true,
       ttl: 1,
-    });
+    };
+
+    // Idempotenz (Re-Deploy-fest): einen bereits existierenden CNAME für den Hostnamen
+    // NICHT als Duplikat-Fehler behandeln. Cloudflare lehnt ein zweites POST mit gleichem
+    // name sonst mit HTTP 400 ab — das blockierte Re-Deploys und Hostnamen mit Alt-Eintrag
+    // (z.B. aus einem früheren Tunnel). Vorhanden → ersten Record per PUT aktualisieren
+    // (biegt ihn ggf. auf den neuen Tunnel um); etwaige Duplikate löschen. Keiner → neu anlegen.
+    const listUrl = `${CF_BASE}/zones/${encodeURIComponent(zoneId)}/dns_records?name=${encodeURIComponent(hostname)}&type=CNAME`;
+    const listData = await this.#apiGet(listUrl, token);
+    const existing = Array.isArray(listData?.result) ? listData.result : [];
+
+    if (existing.length > 0) {
+      const [first, ...dupes] = existing;
+      await this.#apiPut(
+        `${CF_BASE}/zones/${encodeURIComponent(zoneId)}/dns_records/${encodeURIComponent(first.id)}`,
+        token,
+        body,
+      );
+      // Hygiene: idempotenter Endzustand = genau ein Record je Hostname
+      for (const dupe of dupes) {
+        if (dupe?.id) {
+          await this.#apiDelete(
+            `${CF_BASE}/zones/${encodeURIComponent(zoneId)}/dns_records/${encodeURIComponent(dupe.id)}`,
+            token,
+          );
+        }
+      }
+      return;
+    }
+
+    const url = `${CF_BASE}/zones/${encodeURIComponent(zoneId)}/dns_records`;
+    await this.#apiPost(url, token, body);
   }
 
   /**
