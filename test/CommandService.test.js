@@ -10,6 +10,9 @@
  *   AC3  (fabric-intake-dialog) — /agent-flow:new-project in DEFAULT_ALLOWED_COMMANDS,
  *          bare command accepted → 202, PTY-write ohne Argument;
  *          backwards-compat aller pre-existing Prefixe (isAllowed unit-level)
+ *   AC3  (reconcile-trigger/S-201) — /agent-flow:reconcile in DEFAULT_ALLOWED_COMMANDS,
+ *          bare command (auch mit leerem projectPath) akzeptiert → 202, PTY-write
+ *          ohne Argument; siehe reconcile-trigger.md Verträge.
  *   AC5  — cancel → interrupt sent + status cancelled + lock released → next cmd accepted
  *   AC6  — audit record() throws → command not run + lock released (failure path)
  *
@@ -619,11 +622,24 @@ describe('POST /api/command — HTTP integration', () => {
     expect(ptyStub.written[0]).toBe('/agent-flow:new-project\n');
   });
 
+  it('AC3 (reconcile-trigger/S-201) — /agent-flow:reconcile → 202 and bare command written to PTY', async () => {
+    const res = await post(port, '/api/command', { command: '/agent-flow:reconcile' });
+    expect(res.status).toBe(202);
+    expect(ptyStub.written[0]).toBe('/agent-flow:reconcile\n');
+  });
+
+  it('AC3 (reconcile-trigger/S-201) — /agent-flow:reconcile with projectPath → 202, command line unchanged', async () => {
+    const res = await post(port, '/api/command', { command: '/agent-flow:reconcile', projectPath: '' });
+    expect(res.status).toBe(202);
+    expect(ptyStub.written[0]).toBe('/agent-flow:reconcile\n');
+  });
+
   it('AC3 (fabric-intake-dialog) — backwards-compat: all pre-existing prefixes still accepted (202)', async () => {
     const legacyPrefixes = [
       '/agent-flow:flow',
       '/agent-flow:adopt octocat/Hello-World',
       '/agent-flow:preview list',
+      '/agent-flow:reconcile',
       '/agent-flow:requirement some text',
       '/agent-flow:train security',
     ];

@@ -15,28 +15,52 @@
  *        (draft/active/superseded). Mehrfachauswahl konsistent zum Board-Filter-Muster:
  *        Checkboxen in einem kleinen FilterBar-Element.
  *
+ * reconcile-trigger (S-201) — Button „Konzept/Spec nachziehen" oben in der Sidebar:
+ * AC1 — Button + Hinweistext nennt den ausgelösten Befehl `/agent-flow:reconcile`;
+ *        Touch-Target ≥ 44 px.
+ * AC2 — Klick (bei freier Session) öffnet Bestätigungsdialog (role="dialog");
+ *        noch kein POST.
+ * AC3 — „Starten" POSTet genau einmal {command:'/agent-flow:reconcile', projectPath}
+ *        an /api/command; „Abbrechen" schließt ohne POST.
+ * AC4 — Bei `GET /api/session` state:"busy" ist der Button deaktiviert
+ *        (disabled-Attribut + Text-Label, nie Farbe allein); kein Dialog/POST bei Klick.
+ * AC5 — 202 → onNavigate('factory'); kein stehengebliebenes Element im Reiter.
+ * AC6 — 409 → sichtbare Fehleranzeige, kein onNavigate, kein Crash.
+ * AC7 — Netzwerkfehler/500 → sichtbare Fehleranzeige mit Reset, kein onNavigate.
+ * Gespiegelt vom „Board abarbeiten"-Muster (CockpitView.jsx FactoryWorkspace).
+ *
  * Security (Floor):
  *   - Kein dangerouslySetInnerHTML / kein innerHTML.
  *   - Nur /api/board/projects/:slug/docs Endpunkte (hinter AccessGuard).
  *   - Keine Secrets im Bundle.
  *   - Markdown via vorhandenen markdownLite-Renderer (kein fremder Parser).
+ *   - reconcile-trigger: kein neuer Endpunkt — bestehender allowlisted/sanitisierter
+ *     /api/command-Kanal; Bestätigungsdialog verhindert versehentliches Auslösen.
  *
  * A11y (WCAG 2.1 AA):
  *   - Navigation als <nav> mit aria-label.
  *   - Aktives Dokument mit aria-current="page".
  *   - Ladezustand aria-busy auf dem Inhalts-Container.
  *   - Fokusring nie unterdrückt.
- *   - Touch-Targets ≥ 44 px für Nav-Buttons.
+ *   - Touch-Targets ≥ 44 px für Nav-Buttons und den Reconcile-Button.
+ *
+ * Covers (reconcile-trigger): AC1, AC2, AC3, AC4, AC5, AC6, AC7
  *
  * @param {{
  *   projectSlug: string,
  *   initialPath?: string | null,
+ *   onNavigate?: (view: string) => void,
+ *   fetchFn?: Function,
  * }} props
  *   projectSlug   — Slug des aktiven Projekts (aus CockpitView/BoardAggregator)
  *   initialPath   — optional: direkt zu öffnende Datei (AC5, z.B. via Story-Klick)
+ *   onNavigate    — (reconcile-trigger AC5) navigiert nach erfolgreichem Auslösen
+ *                    in den Terminal-/Arbeiten-Bereich ('factory').
+ *   fetchFn       — injectable für Tests (default: globalThis.fetch); nur vom
+ *                    Reconcile-Trigger genutzt (Doku-Laden bleibt unverändert).
  */
 
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { MarkdownLite } from './markdownLite.jsx';
 
 // ── Typ-Konstanten ─────────────────────────────────────────────────────────────
@@ -61,9 +85,11 @@ const ALL_SPEC_STATUSES = ['draft', 'active', 'superseded'];
  * @param {{
  *   projectSlug: string,
  *   initialPath?: string | null,
+ *   onNavigate?: (view: string) => void,
+ *   fetchFn?: Function,
  * }} props
  */
-export function SpecView({ projectSlug, initialPath }) {
+export function SpecView({ projectSlug, initialPath, onNavigate, fetchFn }) {
   // ── Doku-Struktur (Navigation) ─────────────────────────────────────────────
   const [docsState, setDocsState] = useState('idle');  // 'idle'|'loading'|'ok'|'error'
   const [docsError, setDocsError] = useState('');
@@ -195,8 +221,15 @@ export function SpecView({ projectSlug, initialPath }) {
 
   return (
     <div style={styles.container}>
-      {/* Linke Spalte: Filter + Navigation */}
+      {/* Linke Spalte: Reconcile-Trigger + Filter + Navigation */}
       <div style={styles.sidebar}>
+        {/* reconcile-trigger (S-201): „Konzept/Spec nachziehen"-Button */}
+        <ReconcileTrigger
+          projectSlug={projectSlug}
+          fetchFn={fetchFn}
+          onNavigate={onNavigate}
+        />
+
         {/* Filter (AC6) */}
         <SpecFilterBar
           filterTypes={filterTypes}
@@ -265,6 +298,232 @@ export function SpecView({ projectSlug, initialPath }) {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// ── ReconcileTrigger (reconcile-trigger AC1–AC7) ──────────────────────────────
+
+/** Session poll interval in ms — matches CockpitView/FactoryWorkspace default. */
+const RECONCILE_SESSION_POLL_MS = 3_000;
+
+/**
+ * ReconcileTrigger — „Konzept/Spec nachziehen"-Button (reconcile-trigger AC1–AC7).
+ *
+ * Gespiegelt vom „Board abarbeiten"-Knopf (CockpitView.jsx FactoryWorkspace):
+ * Bestätigungsdialog vor dem doku-ändernden Lauf, Busy-Guard via GET /api/session,
+ * POST /api/command {command:'/agent-flow:reconcile', projectPath}, 202→onNavigate,
+ * 409/500/Netzfehler→sichtbare Fehleranzeige mit Reset.
+ *
+ * @param {{
+ *   projectSlug: string,
+ *   fetchFn?: Function,
+ *   onNavigate?: (view: string) => void,
+ *   pollInterval?: number,
+ * }} props
+ *   fetchFn      — injectable for tests (default: globalThis.fetch)
+ *   pollInterval — session poll interval in ms (default: RECONCILE_SESSION_POLL_MS)
+ */
+function ReconcileTrigger({ projectSlug, fetchFn, onNavigate, pollInterval = RECONCILE_SESSION_POLL_MS }) {
+  // Stable ref so the poll effect doesn't re-register on every render.
+  const fetchFnRef = useRef(fetchFn ?? globalThis.fetch.bind(globalThis));
+  useEffect(() => {
+    fetchFnRef.current = fetchFn ?? globalThis.fetch.bind(globalThis);
+  }, [fetchFn]);
+
+  // ── Session busy state (AC4) ──────────────────────────────────────────────
+  /** 'idle' | 'running' — derived from GET /api/session state */
+  const [sessionRunState, setSessionRunState] = useState('idle');
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function pollSession() {
+      try {
+        const res = await fetchFnRef.current('/api/session');
+        if (!res.ok) return;
+        const json = await res.json();
+        if (!cancelled) {
+          setSessionRunState(json.state === 'busy' ? 'running' : 'idle');
+        }
+      } catch {
+        // network error — keep current state
+      }
+    }
+
+    pollSession();
+    const timer = setInterval(pollSession, pollInterval);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [pollInterval]);
+
+  const isSessionBusy = sessionRunState === 'running';
+
+  // ── Trigger state (AC2, AC3, AC6, AC7) ────────────────────────────────────
+  /** 'idle' | 'confirm' | 'starting' | 'error' */
+  const [reconcileState, setReconcileState] = useState('idle');
+  const [reconcileError, setReconcileError] = useState(null);
+
+  // AC4: button disabled when session busy or a start is already in flight.
+  const isBtnDisabled = isSessionBusy || reconcileState === 'starting';
+
+  const handleClick = useCallback(() => {
+    setReconcileState('confirm');
+    setReconcileError(null);
+  }, []);
+
+  const handleCancel = useCallback(() => {
+    setReconcileState('idle');
+    setReconcileError(null);
+  }, []);
+
+  const handleConfirm = useCallback(async () => {
+    setReconcileState('starting');
+    setReconcileError(null);
+
+    // AC3: include projectPath when an active project is set (backwards-compat
+    // with the global session when absent, per Edge-Cases in the spec).
+    const body = { command: '/agent-flow:reconcile' };
+    if (projectSlug && typeof projectSlug === 'string' && projectSlug.trim()) {
+      body.projectPath = projectSlug.trim();
+    }
+
+    let res;
+    try {
+      res = await fetchFnRef.current('/api/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    } catch {
+      // AC7: network error → visible error, no onNavigate
+      setReconcileState('error');
+      setReconcileError('Netzwerkfehler — bitte erneut versuchen.');
+      return;
+    }
+
+    if (res.status === 202) {
+      // AC5: success → navigate to terminal pane, no stale element left behind
+      setReconcileState('idle');
+      setSessionRunState('running'); // optimistic update — poll will confirm
+      if (onNavigate) onNavigate('factory');
+      return;
+    }
+    if (res.status === 409) {
+      // AC6: job already running → visible error, no onNavigate
+      setSessionRunState('running');
+      setReconcileState('error');
+      setReconcileError('Ein Job läuft bereits — bitte warten.');
+      return;
+    }
+    // AC7: 500/unexpected status → visible error, no onNavigate
+    setReconcileState('error');
+    setReconcileError(`Fehler beim Starten (HTTP ${res.status}).`);
+  }, [projectSlug, onNavigate]);
+
+  return (
+    <div style={styles.reconcileBox} data-testid="reconcile-box">
+      <div style={styles.reconcileHeader}>Konzept/Spec nachziehen</div>
+      {/* AC1: Hinweistext nennt den ausgelösten Befehl */}
+      <p style={styles.reconcileHint}>
+        Startet <code style={styles.code}>/agent-flow:reconcile</code> — gleicht
+        Konzept, Architektur und Specs wieder mit Vorlage und Code ab.
+      </p>
+
+      {reconcileState === 'idle' && (
+        <button
+          type="button"
+          style={isBtnDisabled ? styles.btnReconcileDisabled : styles.btnReconcile}
+          disabled={isBtnDisabled}
+          aria-disabled={isBtnDisabled}
+          onClick={isBtnDisabled ? undefined : handleClick}
+          aria-label={
+            isSessionBusy
+              ? 'Konzept/Spec nachziehen — gesperrt (Job läuft)'
+              : 'Konzept/Spec nachziehen starten — öffnet Bestätigungsdialog'
+          }
+          data-testid="reconcile-btn"
+        >
+          {isSessionBusy ? 'Konzept/Spec nachziehen — gesperrt' : 'Konzept/Spec nachziehen'}
+        </button>
+      )}
+
+      {/* AC4: Lock-Hinweis (Text, nicht nur Farbe) */}
+      {isSessionBusy && reconcileState === 'idle' && (
+        <div
+          role="status"
+          aria-live="polite"
+          style={styles.reconcileLockNotice}
+          data-testid="reconcile-lock-notice"
+        >
+          Ein Job läuft — Trigger gesperrt.
+        </div>
+      )}
+
+      {/* AC2: Bestätigungsdialog — verhindert versehentlichen Start */}
+      {reconcileState === 'confirm' && (
+        <div
+          role="dialog"
+          aria-modal="false"
+          aria-label="Konzept/Spec nachziehen bestätigen"
+          style={styles.reconcileConfirmBox}
+          data-testid="reconcile-confirm-dialog"
+        >
+          <p style={styles.reconcileConfirmText}>
+            Startet einen Fabrik-Lauf, der die Doku (Konzept, Architektur, Specs)
+            automatisch ändert/abgleicht. Fortfahren?
+          </p>
+          <div style={styles.reconcileConfirmBtns}>
+            <button
+              type="button"
+              style={styles.btnReconcileConfirm}
+              onClick={handleConfirm}
+              aria-label="Bestätigen — Konzept/Spec nachziehen starten"
+              data-testid="reconcile-confirm-yes"
+            >
+              Starten
+            </button>
+            <button
+              type="button"
+              style={styles.btnReconcileCancel}
+              onClick={handleCancel}
+              aria-label="Abbrechen — kein Start"
+              data-testid="reconcile-confirm-no"
+            >
+              Abbrechen
+            </button>
+          </div>
+        </div>
+      )}
+
+      {reconcileState === 'starting' && (
+        <div
+          role="status"
+          aria-live="polite"
+          style={styles.reconcileStatus}
+          data-testid="reconcile-starting"
+        >
+          Starte…
+        </div>
+      )}
+
+      {/* AC6/AC7: Fehleranzeige mit Reset-Möglichkeit */}
+      {reconcileState === 'error' && (
+        <div role="alert" style={styles.reconcileStatusError} data-testid="reconcile-error">
+          {reconcileError}
+          <button
+            type="button"
+            style={styles.btnReconcileReset}
+            onClick={() => setReconcileState('idle')}
+            aria-label="Fehlerstatus zurücksetzen"
+            data-testid="reconcile-error-reset"
+          >
+            Zurücksetzen
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -565,5 +824,144 @@ const styles = {
   filterCheckbox: {
     accentColor: '#93c5fd',
     cursor: 'pointer',
+  },
+
+  // ── Reconcile-Trigger (reconcile-trigger AC1–AC7) ──
+  reconcileBox: {
+    padding: '10px 12px',
+    borderBottom: '1px solid #1e1e1e',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 6,
+  },
+
+  reconcileHeader: {
+    fontSize: 11,
+    fontWeight: 700,
+    color: '#9ca3af',
+    textTransform: 'uppercase',
+    letterSpacing: '0.05em',
+  },
+
+  reconcileHint: {
+    fontSize: 11,
+    color: '#6b7280',
+    margin: 0,
+    lineHeight: 1.5,
+  },
+
+  code: {
+    fontFamily: 'monospace',
+    background: '#1a1a1a',
+    padding: '0 3px',
+    borderRadius: 2,
+    fontSize: 10,
+    color: '#93c5fd',
+  },
+
+  btnReconcile: {
+    background: '#1d4ed8',
+    color: '#fff',
+    border: 'none',
+    borderRadius: 4,
+    padding: '8px 12px',
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: 'pointer',
+    minHeight: 44,
+    // Focus ring preserved (no outline:none)
+  },
+
+  // AC4: disabled state when session busy
+  btnReconcileDisabled: {
+    background: '#1e293b',
+    color: '#64748b',
+    border: 'none',
+    borderRadius: 4,
+    padding: '8px 12px',
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: 'not-allowed',
+    minHeight: 44,
+  },
+
+  // AC4: lock notice text when session busy (supplements disabled button — not color alone)
+  reconcileLockNotice: {
+    fontSize: 11,
+    color: '#fbbf24',
+    fontStyle: 'italic',
+  },
+
+  reconcileConfirmBox: {
+    background: '#111',
+    border: '1px solid #334155',
+    borderRadius: 6,
+    padding: '10px 12px',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 8,
+  },
+
+  reconcileConfirmText: {
+    fontSize: 12,
+    color: '#d1d5db',
+    margin: 0,
+    lineHeight: 1.5,
+  },
+
+  reconcileConfirmBtns: {
+    display: 'flex',
+    gap: 8,
+  },
+
+  btnReconcileConfirm: {
+    flex: 1,
+    background: '#15803d',
+    color: '#fff',
+    border: 'none',
+    borderRadius: 4,
+    padding: '6px 10px',
+    fontSize: 12,
+    fontWeight: 600,
+    cursor: 'pointer',
+    minHeight: 44,
+  },
+
+  btnReconcileCancel: {
+    flex: 1,
+    background: 'transparent',
+    color: '#9ca3af',
+    border: '1px solid #374151',
+    borderRadius: 4,
+    padding: '6px 10px',
+    fontSize: 12,
+    cursor: 'pointer',
+    minHeight: 44,
+  },
+
+  reconcileStatus: {
+    fontSize: 12,
+    color: '#9ca3af',
+    fontStyle: 'italic',
+  },
+
+  reconcileStatusError: {
+    fontSize: 12,
+    color: '#f87171',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 6,
+    alignItems: 'flex-start',
+  },
+
+  btnReconcileReset: {
+    background: 'transparent',
+    color: '#9ca3af',
+    border: '1px solid #374151',
+    borderRadius: 4,
+    padding: '4px 10px',
+    fontSize: 11,
+    cursor: 'pointer',
+    minHeight: 32,
   },
 };
