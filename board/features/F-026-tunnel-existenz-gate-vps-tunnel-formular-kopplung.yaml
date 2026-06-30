@@ -13,7 +13,7 @@ goal: >-
   Badge "Tunnel ✓ / Tunnel fehlt ✗", Deploy-Button gesperrt bei fehlendem Tunnel,
   Backend lehnt fremde tunnelId ab (tunnel-mismatch). Read-only Existenzpruefung,
   kein Token-Leak.
-status: To Do
+status: Done
 priority: P1
 spec: docs/specs/vps-tunnel-existence-gate.md
 definition_of_done: null

@@ -12,16 +12,24 @@
  *           VPS-Dropdown (from /api/deployments/vps-targets), Domain-Dropdown (/api/cloudflare/zones)
  *   - AC11: Subdomain pre-filled from image name, editable; assembled hostname shown
  *   - AC12: Deploy-Button active when Image+Tag+VPS+Domain+Subdomain set + VPS ready
- *           (vpsReadiness==='ready'; vollständige AC10-Coverage in readiness.test.jsx)
+ *           (vpsReadiness==='ready' + tunnelPresent===true; vollständige readiness-Coverage
+ *           in readiness.test.jsx; vollständige tunnel-Coverage in tunnel.test.jsx)
  *           POST body: { image: "fullRef:tag", vps, hostname: "sub.domain", tunnelId }
+ *           tunnelId from VPS↔Tunnel-Read-Model (S-186 AC8)
  *   - AC13: Port-Ambiguity/Fallback hints shown in success response
  *   - AC14: Re-Deploy indicator shown when existing deploy matches hostname
  *   - A11y WCAG 2.1 AA: semantic landmarks, h1, aria-live, htmlFor labels, touch-targets ≥44px
  *
+ * Covers (vps-tunnel-existence-gate.md, S-186):
+ *   - AC11: tunnel-missing / tunnel-mismatch errorClass → freundliche Meldung in formatReason()
+ *
  * Note (vps-readiness-gate.md AC9–AC12, S-181):
  *   - AC9–AC12 covered in dedicated DeploymentsView.readiness.test.jsx
- *   - fetch stubs in this file updated to include readiness→'ready' responses so existing
- *     Deploy-Button tests remain green (canDeploy now requires vpsReadiness==='ready')
+ *   - fetch stubs in this file updated to include readiness→'ready' responses
+ *
+ * Note (vps-tunnel-existence-gate.md AC8–AC10, S-186):
+ *   - AC8–AC10 covered in dedicated DeploymentsView.tunnel.test.jsx
+ *   - fetch stubs in this file include tunnelPresent=true so existing deploy-button tests pass
  *
  * @jest-environment jsdom
  */
@@ -67,7 +75,11 @@ function makeDropdownFetch(overrideFn) {
       return { ok: true, status: 200, json: async () => ({ tags: [] }) };
     }
     if (url.includes('/api/deployments/vps-targets')) {
-      return { ok: true, status: 200, json: async () => ({ vpsIds: [] }) };
+      return { ok: true, status: 200, json: async () => ({ vpsIds: [], tunnelIds: {} }) };
+    }
+    // S-186 AC9: vps-tunnel-status stub (no VPS → empty)
+    if (url.includes('/api/deployments/vps-tunnel-status')) {
+      return { ok: true, status: 200, json: async () => [] };
     }
     if (url.includes('/api/cloudflare/zones')) {
       return { ok: true, status: 200, json: async () => ({ configured: false, zones: [] }) };
@@ -76,20 +88,38 @@ function makeDropdownFetch(overrideFn) {
   });
 }
 
-/** Stub fetch for dropdown sources with populated data. */
+/**
+ * Stub fetch for dropdown sources with populated data.
+ * S-186: vps-targets now returns tunnelIds map; vps-tunnel-status returns [{vpsId, tunnelId, tunnelPresent}].
+ */
 function makeDropdownFetchWithData({
   packages = [{ name: 'brew-assistent', fullImageRef: 'ghcr.io/org/brew-assistent', visibility: 'public', htmlUrl: '', updatedAt: '' }],
   tags = [{ tag: 'v1.0.0', digest: 'sha256:abc', updatedAt: '' }],
   vpsIds = ['vps-1'],
+  // S-186 AC8: tunnelIds map — 'vps-1' is linked to 'tunnel-uuid-1'
+  tunnelIds = { 'vps-1': 'tunnel-uuid-1' },
   zones = [{ id: 'zone-abc', name: 'alexstuder.cloud' }],
   tunnels = [{ id: 'tunnel-uuid-1', name: 'main-tunnel' }],
   deployResult = { result: 'ok', deployment: { hostname: 'brew-assistent.alexstuder.cloud', replaced: false } },
   // S-181 AC9/AC10: readiness stub — default 'ready' so existing tests still pass
   readinessState = 'ready',
+  // S-186 AC9/AC10: tunnel status — default tunnelPresent=true so deploy button tests pass
+  tunnelPresent = true,
 } = {}) {
   return jest.fn(async (url, init) => {
     if (url.includes('/api/deployments/readiness')) {
       return { ok: true, status: 200, json: async () => ({ state: readinessState }) };
+    }
+    // S-186 AC9: vps-tunnel-status Read-Model
+    if (url.includes('/api/deployments/vps-tunnel-status')) {
+      return {
+        ok: true, status: 200,
+        json: async () => vpsIds.map((id) => ({
+          vpsId: id,
+          tunnelId: tunnelIds[id] ?? null,
+          tunnelPresent,
+        })),
+      };
     }
     if (url.includes('/api/github/packages') && !url.includes('/tags')) {
       return { ok: true, status: 200, json: async () => ({ packages }) };
@@ -98,7 +128,8 @@ function makeDropdownFetchWithData({
       return { ok: true, status: 200, json: async () => ({ tags }) };
     }
     if (url.includes('/api/deployments/vps-targets')) {
-      return { ok: true, status: 200, json: async () => ({ vpsIds }) };
+      // S-186 AC8: include tunnelIds map
+      return { ok: true, status: 200, json: async () => ({ vpsIds, tunnelIds }) };
     }
     if (url.includes('/api/cloudflare/zones/') && url.includes('/tunnels')) {
       return { ok: true, status: 200, json: async () => ({ tunnels }) };
@@ -118,6 +149,8 @@ function makeDropdownFetchWithData({
 
 /**
  * Select image, tag, vps, zone and fill subdomain; waits for dropdown rendering.
+ * S-186: no longer waits for zone-tunnel dropdown (tunnelId is derived from VPS, not dropdown).
+ * Instead waits for the Tunnel-Badge to appear (AC9), which confirms tunnelPresent resolved.
  * Uses expect() inside waitFor() so it throws when not ready (waitFor polls until no-throw).
  */
 async function fillDeployForm(utils) {
@@ -153,7 +186,7 @@ async function fillDeployForm(utils) {
     expect(vpsSelect.querySelectorAll('option').length).toBeGreaterThan(1);
   });
 
-  // Select VPS
+  // Select VPS (triggers readiness poll + tunnel status poll — S-181 + S-186)
   await act(async () => {
     fireEvent.change(utils.container.querySelector('#deploy-vps-select'), {
       target: { value: 'vps-1' },
@@ -166,27 +199,18 @@ async function fillDeployForm(utils) {
     expect(zoneSelect.querySelectorAll('option').length).toBeGreaterThan(1);
   });
 
-  // Select zone (triggers tunnel loading)
+  // Select zone
   await act(async () => {
     fireEvent.change(utils.container.querySelector('#deploy-zone-select'), {
       target: { value: 'alexstuder.cloud' },
     });
   });
 
-  // Wait for tunnel dropdown to appear with options loaded
+  // S-186 AC9: Wait for Tunnel-Badge to appear (confirms tunnelPresent resolved from vps-tunnel-status)
+  // Badge appears once the first poll of /api/deployments/vps-tunnel-status completes.
   await waitFor(() => {
-    const tunnelSelect = utils.container.querySelector('#deploy-tunnel-select');
-    // Tunnel select must exist AND have at least 2 options (placeholder + real)
-    expect(tunnelSelect).not.toBeNull();
-    expect(tunnelSelect.querySelectorAll('option').length).toBeGreaterThan(1);
-  });
-
-  // Select tunnel
-  await act(async () => {
-    const tunnelSelect = utils.container.querySelector('#deploy-tunnel-select');
-    if (tunnelSelect) {
-      fireEvent.change(tunnelSelect, { target: { value: 'tunnel-uuid-1' } });
-    }
+    const badge = utils.container.querySelector('[aria-label*="Tunnel-Status"]');
+    expect(badge).not.toBeNull();
   });
 }
 
@@ -452,11 +476,16 @@ describe('DeploymentsView — AC12: Deploy-Button activation', () => {
     expect(btn.disabled).toBe(true);
   });
 
-  it('POST /api/deployments with correct body: fullRef:tag + vps + hostname + tunnelId', async () => {
+  it('POST /api/deployments with correct body: fullRef:tag + vps + hostname + tunnelId (from VPS-linked tunnel, S-186 AC8)', async () => {
     let capturedBody;
+    // S-186 AC8: tunnelId='tunnel-uuid-1' is linked to vps-1 via tunnelIds map in vps-targets
     globalThis.fetch = jest.fn(async (url, init) => {
       if (url.includes('/api/deployments/readiness')) {
         return { ok: true, status: 200, json: async () => ({ state: 'ready' }) };
+      }
+      // S-186 AC9: vps-tunnel-status
+      if (url.includes('/api/deployments/vps-tunnel-status')) {
+        return { ok: true, status: 200, json: async () => [{ vpsId: 'vps-1', tunnelId: 'tunnel-uuid-1', tunnelPresent: true }] };
       }
       if (url === '/api/deployments' && init?.method === 'POST') {
         capturedBody = JSON.parse(init.body);
@@ -468,10 +497,11 @@ describe('DeploymentsView — AC12: Deploy-Button activation', () => {
         }) };
       }
       if (url.includes('/tags')) return { ok: true, status: 200, json: async () => ({ tags: [{ tag: 'v1.0.0' }] }) };
-      if (url.includes('/vps-targets')) return { ok: true, status: 200, json: async () => ({ vpsIds: ['vps-1'] }) };
-      if (url.includes('/api/cloudflare/zones/') && url.includes('/tunnels')) {
-        return { ok: true, status: 200, json: async () => ({ tunnels: [{ id: 'tunnel-uuid-1', name: 'main' }] }) };
-      }
+      if (url.includes('/vps-targets')) return {
+        ok: true, status: 200,
+        // S-186 AC8: tunnelIds map — vps-1 → tunnel-uuid-1
+        json: async () => ({ vpsIds: ['vps-1'], tunnelIds: { 'vps-1': 'tunnel-uuid-1' } }),
+      };
       if (url.includes('/api/cloudflare/zones')) {
         return { ok: true, status: 200, json: async () => ({ zones: [{ id: 'zone-abc', name: 'alexstuder.cloud' }] }) };
       }
@@ -494,6 +524,7 @@ describe('DeploymentsView — AC12: Deploy-Button activation', () => {
       image: 'ghcr.io/org/brew-assistent:v1.0.0',
       vps: 'vps-1',
       hostname: 'brew-assistent.alexstuder.cloud',
+      // S-186 AC8: tunnelId comes from VPS↔Tunnel-Read-Model (tunnelIds map), not dropdown
       tunnelId: 'tunnel-uuid-1',
     });
     // zoneId must NOT be in the POST body
@@ -554,16 +585,17 @@ describe('DeploymentsView — AC14: Re-Deploy indicator', () => {
       if (url.includes('/api/deployments/readiness')) {
         return { ok: true, status: 200, json: async () => ({ state: 'ready' }) };
       }
+      // S-186 AC9: vps-tunnel-status
+      if (url.includes('/api/deployments/vps-tunnel-status')) {
+        return { ok: true, status: 200, json: async () => [{ vpsId: 'vps-1', tunnelId: 'tunnel-uuid-1', tunnelPresent: true }] };
+      }
       if (url.includes('/api/github/packages') && !url.includes('/tags')) {
         return { ok: true, status: 200, json: async () => ({
           packages: [{ name: 'brew-assistent', fullImageRef: 'ghcr.io/org/brew-assistent' }],
         }) };
       }
       if (url.includes('/tags')) return { ok: true, status: 200, json: async () => ({ tags: [{ tag: 'v1.0.0' }] }) };
-      if (url.includes('/vps-targets')) return { ok: true, status: 200, json: async () => ({ vpsIds: ['vps-1'] }) };
-      if (url.includes('/api/cloudflare/zones/') && url.includes('/tunnels')) {
-        return { ok: true, status: 200, json: async () => ({ tunnels: [{ id: 'tunnel-uuid-1', name: 'main' }] }) };
-      }
+      if (url.includes('/vps-targets')) return { ok: true, status: 200, json: async () => ({ vpsIds: ['vps-1'], tunnelIds: { 'vps-1': 'tunnel-uuid-1' } }) };
       if (url.includes('/api/cloudflare/zones')) {
         return { ok: true, status: 200, json: async () => ({ zones: [{ id: 'zone-abc', name: 'alexstuder.cloud' }] }) };
       }
@@ -614,14 +646,15 @@ describe('DeploymentsView — AC14: Re-Deploy indicator', () => {
       if (url.includes('/api/deployments/readiness')) {
         return { ok: true, status: 200, json: async () => ({ state: 'ready' }) };
       }
+      // S-186 AC9: vps-tunnel-status
+      if (url.includes('/api/deployments/vps-tunnel-status')) {
+        return { ok: true, status: 200, json: async () => [{ vpsId: 'vps-1', tunnelId: 'tunnel-uuid-1', tunnelPresent: true }] };
+      }
       if (url.includes('/api/github/packages') && !url.includes('/tags')) {
         return { ok: true, status: 200, json: async () => ({ packages: [{ name: 'brew-assistent', fullImageRef: 'ghcr.io/org/brew-assistent' }] }) };
       }
       if (url.includes('/tags')) return { ok: true, status: 200, json: async () => ({ tags: [{ tag: 'v1.0.0' }] }) };
-      if (url.includes('/vps-targets')) return { ok: true, status: 200, json: async () => ({ vpsIds: ['vps-1'] }) };
-      if (url.includes('/api/cloudflare/zones/') && url.includes('/tunnels')) {
-        return { ok: true, status: 200, json: async () => ({ tunnels: [{ id: 'tunnel-uuid-1', name: 'main' }] }) };
-      }
+      if (url.includes('/vps-targets')) return { ok: true, status: 200, json: async () => ({ vpsIds: ['vps-1'], tunnelIds: { 'vps-1': 'tunnel-uuid-1' } }) };
       if (url.includes('/api/cloudflare/zones')) {
         return { ok: true, status: 200, json: async () => ({ zones: [{ id: 'zone-abc', name: 'alexstuder.cloud' }] }) };
       }
@@ -1040,5 +1073,66 @@ describe('DeploymentsView — List: degrading errors display', () => {
     await act(async () => {
       resolveList({ ok: true, status: 200, json: async () => ({ deployments: [], errors: [] }) });
     });
+  });
+});
+
+// ── S-186 AC11: tunnel-missing / tunnel-mismatch errorClass-Mapping ───────────
+
+describe('DeploymentsView — S-186 AC11: tunnel errorClass friendly messages', () => {
+  /** Build a fetch stub that returns a given errorClass from POST /api/deployments */
+  function makeTunnelErrorFetch(errorClass) {
+    return jest.fn(async (url, init) => {
+      if (url === '/api/deployments' && init?.method === 'POST') {
+        return {
+          ok: false,
+          status: 422,
+          json: async () => ({ result: 'error', errorClass, reason: 'raw backend reason' }),
+        };
+      }
+      return makeDropdownFetchWithData()(url, init);
+    });
+  }
+
+  it('errorClass "tunnel-missing" → freundliche Meldung (kein roher String)', async () => {
+    globalThis.fetch = makeTunnelErrorFetch('tunnel-missing');
+    const utils = renderView();
+    await fillDeployForm(utils);
+    await waitFor(() => { expect(utils.getByRole('button', { name: /Deploy starten|Re-Deploy starten/i }).disabled).toBe(false); });
+    await act(async () => {
+      fireEvent.submit(utils.getByRole('form', { name: /Deploy-Formular/i }));
+    });
+    const alert = await utils.findByRole('alert');
+    // Must show a friendly message mentioning tunnel and action hint
+    expect(alert.textContent).toMatch(/tunnel|cloudflare/i);
+    // Must NOT show the raw error class string
+    expect(alert.textContent).not.toContain('tunnel-missing');
+  });
+
+  it('errorClass "tunnel-mismatch" → freundliche Meldung (kein roher String)', async () => {
+    globalThis.fetch = makeTunnelErrorFetch('tunnel-mismatch');
+    const utils = renderView();
+    await fillDeployForm(utils);
+    await waitFor(() => { expect(utils.getByRole('button', { name: /Deploy starten|Re-Deploy starten/i }).disabled).toBe(false); });
+    await act(async () => {
+      fireEvent.submit(utils.getByRole('form', { name: /Deploy-Formular/i }));
+    });
+    const alert = await utils.findByRole('alert');
+    // Must show a friendly message
+    expect(alert.textContent).toMatch(/tunnel|fehlverdrahtung/i);
+    // Must NOT show the raw error class string
+    expect(alert.textContent).not.toContain('tunnel-mismatch');
+  });
+
+  it('other errorClass (vps-provisioning) retains its own message after adding tunnel classes', async () => {
+    globalThis.fetch = makeTunnelErrorFetch('vps-provisioning');
+    const utils = renderView();
+    await fillDeployForm(utils);
+    await waitFor(() => { expect(utils.getByRole('button', { name: /Deploy starten|Re-Deploy starten/i }).disabled).toBe(false); });
+    await act(async () => {
+      fireEvent.submit(utils.getByRole('form', { name: /Deploy-Formular/i }));
+    });
+    const alert = await utils.findByRole('alert');
+    expect(alert.textContent).toContain('Docker installieren');
+    expect(alert.textContent).not.toContain('tunnel-missing');
   });
 });
