@@ -1768,8 +1768,16 @@ describe('VpsDockerControl — pushTunnelEnvFile() (S-187 AC3/AC4)', () => {
     expect(capturedStdin).toContain(FAKE_TUNNEL_TOKEN);
     // stdin enthält TUNNEL_TOKEN= Zuweisung (env-file Format)
     expect(capturedStdin).toContain('TUNNEL_TOKEN=');
-    // stdin enthält docker restart cloudflared
-    expect(capturedStdin).toContain('docker restart cloudflared');
+    // cloudflared wird NEU ERSTELLT (rm + run --env-file), NICHT `docker restart`
+    // — `docker restart` würde die neue env-file nicht neu einlesen.
+    expect(capturedStdin).not.toContain('docker restart cloudflared');
+    expect(capturedStdin).toContain('docker rm -f cloudflared');
+    expect(capturedStdin).toContain('docker run -d --name cloudflared');
+    expect(capturedStdin).toContain('--env-file /etc/cloudflared/env');
+    // Token-Floor: das Token steht NUR in der env-file-Zuweisung (printf), NICHT im docker-run-Argv
+    const runLine = capturedStdin.split('\n').find((l) => l.includes('docker run'));
+    expect(runLine).toBeDefined();
+    expect(runLine).not.toContain(FAKE_TUNNEL_TOKEN);
   });
 
   it('AC3: SSH-Fehler (connectError) → errorClass:unreachable, result:error', async () => {

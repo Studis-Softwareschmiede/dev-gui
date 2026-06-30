@@ -762,8 +762,13 @@ export class VpsDockerControl {
       `printf 'TUNNEL_TOKEN=%s\\n' '${escapedToken}' > /etc/cloudflared/env`,
       'chmod 600 /etc/cloudflared/env',
       'chown root:root /etc/cloudflared/env',
-      // cloudflared Container-Neustart (--env-file Muster aus CloudInitBuilder v4/v5)
-      'docker restart cloudflared',
+      // cloudflared-Container NEU ERSTELLEN (rm + run), NICHT `docker restart`:
+      // `docker restart` liest die `--env-file` NICHT neu ein (env wird nur bei `docker run`
+      // geladen) — das neue Token bliebe sonst unwirksam und der Tunnel `inactive`.
+      // Run-Kommando = CloudInitBuilder v5 (--network host, --env-file). Token NICHT in Argv:
+      // es kommt ausschließlich aus der zuvor geschriebenen env-Datei (Token-Floor gewahrt).
+      'docker rm -f cloudflared 2>/dev/null || true',
+      'docker run -d --name cloudflared --restart unless-stopped --network host --env-file /etc/cloudflared/env cloudflare/cloudflared:latest tunnel --no-autoupdate run',
     ].join('\n');
 
     try {

@@ -151,6 +151,22 @@ export class TunnelHealService {
 
     // ── Phase 1 — Tunnel neu anlegen & Referenz ersetzen ─────────────────────────
 
+    // Idempotenz (Selbstheilung wiederholbar): Ein gleichnamiger Tunnel aus einem früheren
+    // (Teil-)Lauf — oder ein verwaister `devgui-<vps>`, der den Namen noch belegt — würde
+    // createTunnel mit HTTP 409 conflict blockieren. Vorab abräumen. Best-effort: scheitert
+    // der Cleanup, kommt der Konflikt unten sauber als errorClass 'conflict' hoch.
+    try {
+      const accountTunnels = await this.#cloudflareApi.listTunnels('');
+      for (const t of (accountTunnels ?? [])) {
+        if (t?.name === tunnelName && t?.id) {
+          await this.#cloudflareApi.deleteTunnel(t.id);
+          console.log(`[TunnelHealService] Phase 1: gleichnamigen Alt-Tunnel entfernt: id=${t.id} name=${tunnelName}`);
+        }
+      }
+    } catch (cleanupErr) {
+      console.log(`[TunnelHealService] Phase 1: Alt-Tunnel-Cleanup übersprungen (${cleanupErr?.errorClass ?? 'error'})`);
+    }
+
     let newTunnelId;
     let tunnelToken; // transient — nie loggen, nie in Response
 

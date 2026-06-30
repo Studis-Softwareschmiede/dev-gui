@@ -36,8 +36,15 @@ const VPS_ID = 'my-vps';
 function makeCloudflareApiStub({
   createTunnelResult = { tunnelId: NEW_TUNNEL_ID, token: FAKE_TOKEN },
   createTunnelError = null,
+  listTunnelsResult = [],
+  deleteTunnelError = null,
 } = {}) {
   return {
+    listTunnels: jest.fn(async () => listTunnelsResult),
+    deleteTunnel: jest.fn(async () => {
+      if (deleteTunnelError) throw deleteTunnelError;
+      return { result: 'ok' };
+    }),
     createTunnel: jest.fn(async () => {
       if (createTunnelError) throw createTunnelError;
       return createTunnelResult;
@@ -163,6 +170,43 @@ describe('TunnelHealService — Phase 1: Tunnel anlegen (AC1)', () => {
     await svc.recreate({ vpsId: VPS_ID, vpsName: VPS_ID, vpsTarget: VPS_TARGET, identity: 'admin@test.com', auditStore: audit });
 
     expect(cfApi.createTunnel).toHaveBeenCalledWith(`devgui-${VPS_ID}`);
+  });
+
+  it('Idempotenz: gleichnamiger Alt-Tunnel wird VOR createTunnel gelöscht (kein 409-conflict)', async () => {
+    const cfApi = makeCloudflareApiStub({
+      listTunnelsResult: [
+        { id: 'stale-same-name', name: `devgui-${VPS_ID}`, status: 'inactive' },
+        { id: 'fremder-tunnel', name: 'beautymoltTunnel', status: 'down' },
+      ],
+    });
+    const svc = new TunnelHealService({
+      cloudflareApi: cfApi,
+      vpsDockerControl: makeVpsDockerControlStub(),
+      credentialStore: makeCredentialStoreStub(),
+    });
+    await svc.recreate({ vpsId: VPS_ID, vpsName: VPS_ID, vpsTarget: VPS_TARGET, identity: 'admin@test.com', auditStore: makeAuditStoreStub() });
+
+    // Nur der gleichnamige Alt-Tunnel wird entfernt, NICHT der fremde
+    expect(cfApi.deleteTunnel).toHaveBeenCalledWith('stale-same-name');
+    expect(cfApi.deleteTunnel).toHaveBeenCalledTimes(1);
+    // Cleanup läuft VOR createTunnel
+    expect(cfApi.deleteTunnel.mock.invocationCallOrder[0])
+      .toBeLessThan(cfApi.createTunnel.mock.invocationCallOrder[0]);
+  });
+
+  it('Idempotenz: kein gleichnamiger Tunnel → kein deleteTunnel, createTunnel läuft normal', async () => {
+    const cfApi = makeCloudflareApiStub({
+      listTunnelsResult: [{ id: 'fremder-tunnel', name: 'beautymoltTunnel' }],
+    });
+    const svc = new TunnelHealService({
+      cloudflareApi: cfApi,
+      vpsDockerControl: makeVpsDockerControlStub(),
+      credentialStore: makeCredentialStoreStub(),
+    });
+    await svc.recreate({ vpsId: VPS_ID, vpsName: VPS_ID, vpsTarget: VPS_TARGET, identity: 'admin@test.com', auditStore: makeAuditStoreStub() });
+
+    expect(cfApi.deleteTunnel).not.toHaveBeenCalled();
+    expect(cfApi.createTunnel).toHaveBeenCalledTimes(1);
   });
 
   it('AC1: Token wird unter TUNNEL_TOKEN_KEY(newTunnelId) gespeichert', async () => {
