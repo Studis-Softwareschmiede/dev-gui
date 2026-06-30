@@ -4,6 +4,7 @@
  * Spec: deploy-lifecycle.md AC3–AC9, AC10–AC14 (S-155), AC15
  *       stack-deploy-orchestration.md AC12 (Modus-Umschalter)
  *       vps-readiness-gate.md AC9–AC12 (S-181)
+ *       vps-tunnel-existence-gate.md AC8–AC11 (S-186)
  *
  * Responsibilities:
  *   - Mode toggle: "Single-Image" | "Compose-Stack aus Repo" (AC12)
@@ -12,11 +13,14 @@
  *       Deploy form — GUIDED DROPDOWNS (AC10):
  *         Image-Dropdown (GET /api/github/packages)
  *         Tag-Dropdown   (GET /api/github/packages/:name/tags, disabled until image chosen)
- *         VPS-Dropdown   (GET /api/deployments/vps-targets)
+ *         VPS-Dropdown   (GET /api/deployments/vps-targets, incl. tunnelIds map)
  *         Domain-Dropdown (GET /api/cloudflare/zones)
  *         Subdomain field: pre-filled from image name (AC11), editable; shows assembled hostname
  *         Deploy-Button: active only when Image+Tag+VPS+Domain+Subdomain non-empty (AC12)
+ *                        + VPS ready (vpsReadiness==='ready', S-181 AC10)
+ *                        + Tunnel present (tunnelPresent===true, S-186 AC10)
  *         POST /api/deployments { image: "fullRef:tag", vps, hostname: "sub.domain", tunnelId }
+ *         tunnelId: derived from VPS↔Tunnel-Read-Model (S-186 AC8), not from zone-tunnel dropdown
  *         Auto-Port: resolved server-side via docker inspect after pull (AC13)
  *         Re-Deploy: existing deploy on same hostname is replaced; UI shows "replaces existing" (AC14)
  *       Undeploy with type-to-confirm → DELETE /api/deployments/:vps/:hostname (AC5/AC6)
@@ -26,7 +30,14 @@
  *       Deploy stack — POST /api/deployments/stacks/{stackName}/deploy
  *       Undeploy stack with type-to-confirm — DELETE /api/deployments/stacks/{stackName}/undeploy
  *       Stack status with drift flags — GET /api/deployments/stacks/{stackName}/status
- *   - No Cloudflare token or SSH key in frontend bundle (AC9/AC15/security)
+ *   - No Cloudflare token or SSH key in frontend bundle (AC9/AC15/security, S-186 AC12)
+ *
+ * VPS↔Tunnel-Kopplung (S-186 AC8–AC10):
+ *   - GET /api/deployments/vps-targets returns { vpsIds, tunnelIds: { vpsId: tunnelId|null } }
+ *   - GET /api/deployments/vps-tunnel-status returns [{vpsId, tunnelId, tunnelPresent}] (polled)
+ *   - Tunnel-Badge shows "Tunnel ✓" / "Tunnel fehlt ✗" (AC9); no badge without VPS selection
+ *   - Deploy-Button blocked when tunnelPresent !== true (AC10)
+ *   - formatReason() maps tunnel-missing / tunnel-mismatch (AC11)
  *
  * A11y (WCAG 2.1 AA):
  *   - Semantic headings, landmarks (main, section, form)
@@ -39,7 +50,7 @@
  *   - Mode toggle: role="group" + aria-label, keyboard-navigable buttons
  *
  * Security:
- *   - No token/key displayed or bundled
+ *   - No token/key displayed or bundled (AC12 S-186: tunnelId is non-secret; tunnelToken never)
  *   - Error messages from backend are rendered as text (no innerHTML)
  */
 
@@ -64,6 +75,9 @@ const MODE_STACK  = 'stack';
 
 /** Poll interval for VPS readiness check (AC9/AC11 — NFR: ~3s). */
 const READINESS_POLL_MS = 3000;
+
+/** Poll interval for Tunnel-Existenz-Check (S-186 AC9 — NFR: moderate, ~5s). */
+const TUNNEL_STATUS_POLL_MS = 5000;
 
 /**
  * Derive a subdomain suggestion from an image name or fullImageRef.
@@ -106,6 +120,8 @@ export function DeploymentsView({ onNavigate }) {
   const [tagsState, setTagsState] = useState('idle');   // 'idle'|'loading'|'ok'|'error'
   const [vpsIds, setVpsIds] = useState([]);             // string[]
   const [vpsIdsState, setVpsIdsState] = useState('idle');
+  // S-186 AC8: tunnelIds map from vps-targets { vpsId: tunnelId|null }
+  const [tunnelIdsByVps, setTunnelIdsByVps] = useState({}); // { [vpsId]: tunnelId|null }
   const [zones, setZones] = useState([]);               // [{ id, name }]
   const [zonesState, setZonesState] = useState('idle');
 
@@ -114,8 +130,7 @@ export function DeploymentsView({ onNavigate }) {
   const [selectedTag, setSelectedTag] = useState('');          // tag string (e.g. "v1.2.0")
   const [selectedVps, setSelectedVps] = useState('');          // vps id
   const [selectedZone, setSelectedZone] = useState('');        // zone name (e.g. "alexstuder.cloud")
-  const [selectedZoneTunnels, setSelectedZoneTunnels] = useState([]); // [{id, name}] tunnels for zone
-  const [selectedTunnel, setSelectedTunnel] = useState('');    // tunnel id
+  // Note: zone-based tunnel dropdown removed by S-186 AC8 — tunnelId now derived from VPS-linked Read-Model
   const [subdomain, setSubdomain] = useState('');              // AC11: editable subdomain
   const [deploying, setDeploying] = useState(false);
   const [deployResult, setDeployResult] = useState(null); // { ok, message, replaced? }
@@ -133,6 +148,12 @@ export function DeploymentsView({ onNavigate }) {
   // 'unknown' = not yet polled; 'unreachable'|'provisioning'|'ready' = from API
   const [vpsReadiness, setVpsReadiness] = useState('unknown');
   const readinessTimerRef = useRef(null);
+
+  // ── S-186 AC9/AC10: Tunnel-Existenz-Status polling ───────────────────────
+  // null = no VPS selected / not yet polled; true/false/null = tunnelPresent; 'unknown' = CF unavailable
+  // tunnelPresent: true → "Tunnel ✓"; false / 'unknown' / null → "Tunnel fehlt ✗"
+  const [tunnelPresent, setTunnelPresent] = useState(null); // null | boolean | 'unknown'
+  const tunnelTimerRef = useRef(null);
 
   // ── Stack-Modus state (AC12)
   const [stacks, setStacks] = useState([]);
@@ -199,7 +220,7 @@ export function DeploymentsView({ onNavigate }) {
       .catch(() => setPackagesState('error'));
   }, [packagesState]);
 
-  // Load VPS IDs
+  // Load VPS IDs (S-186 AC8: also loads tunnelIds map for VPS↔Tunnel-Kopplung)
   useEffect(() => {
     if (vpsIdsState !== 'idle') return;
     setVpsIdsState('loading');
@@ -207,6 +228,8 @@ export function DeploymentsView({ onNavigate }) {
       .then((r) => r.json())
       .then((d) => {
         setVpsIds(d.vpsIds ?? []);
+        // S-186 AC8: tunnelIds map { vpsId: tunnelId|null } — non-secret, no token
+        setTunnelIdsByVps(d.tunnelIds ?? {});
         setVpsIdsState('ok');
       })
       .catch(() => setVpsIdsState('error'));
@@ -245,32 +268,9 @@ export function DeploymentsView({ onNavigate }) {
       .catch(() => setTagsState('error'));
   }, [selectedPackage]);
 
-  // ── AC10: Load tunnels when zone selected ────────────────────────────────
-  useEffect(() => {
-    if (!selectedZone) {
-      setSelectedZoneTunnels([]);
-      setSelectedTunnel('');
-      return;
-    }
-    const zone = zones.find((z) => z.name === selectedZone);
-    if (!zone) return;
-    fetch(`/api/cloudflare/zones/${encodeURIComponent(zone.id)}/tunnels`)
-      .then((r) => r.json())
-      .then((d) => {
-        const tunnels = d.tunnels ?? [];
-        setSelectedZoneTunnels(tunnels);
-        // Auto-select first tunnel if only one
-        if (tunnels.length === 1) {
-          setSelectedTunnel(tunnels[0].id);
-        } else {
-          setSelectedTunnel('');
-        }
-      })
-      .catch(() => {
-        setSelectedZoneTunnels([]);
-        setSelectedTunnel('');
-      });
-  }, [selectedZone, zones]);
+  // ── S-186 AC8: Zone-based tunnel dropdown removed.
+  // Tunnel-Id is now derived from the VPS↔Tunnel-Read-Model (vpsLinkedTunnelId).
+  // The zone-per-tunnel load effect is no longer needed.
 
   // ── AC11: Pre-fill subdomain from selected image name ───────────────────
   useEffect(() => {
@@ -336,7 +336,69 @@ export function DeploymentsView({ onNavigate }) {
       active = false;
       clearTimer();
     };
-  }, [selectedVps]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selectedVps]); // dep: selectedVps only — clearTimer/poll/readinessTimerRef are stable refs
+
+  // ── S-186 AC9/AC10: Tunnel-Existenz-Status polling ───────────────────────
+  // Polls GET /api/deployments/vps-tunnel-status and extracts tunnelPresent for selectedVps.
+  // Analog zum VPS-Readiness-Polling (S-181 AC9/AC11).
+  // Stops when tunnelPresent === true (Tunnel existiert — Badge "Tunnel ✓").
+  useEffect(() => {
+    function clearTunnelTimer() {
+      if (tunnelTimerRef.current !== null) {
+        clearInterval(tunnelTimerRef.current);
+        tunnelTimerRef.current = null;
+      }
+    }
+
+    // No VPS selected → no tunnel badge (AC9)
+    if (!selectedVps) {
+      clearTunnelTimer();
+      setTunnelPresent(null);
+      return;
+    }
+
+    // Reset tunnel status on new VPS selection
+    setTunnelPresent(null);
+    clearTunnelTimer();
+
+    let active = true;
+
+    async function poll() {
+      try {
+        const res = await fetch('/api/deployments/vps-tunnel-status');
+        if (!active) return;
+        if (res.ok) {
+          const data = await res.json();
+          if (!active) return;
+          // Find the entry for the currently selected VPS
+          const entry = Array.isArray(data) ? data.find((e) => e.vpsId === selectedVps) : null;
+          const present = entry ? entry.tunnelPresent : false;
+          setTunnelPresent(present);
+          // Stop polling once tunnel is confirmed present
+          if (present === true) {
+            clearTunnelTimer();
+          }
+        }
+        // On non-ok response: leave state, keep polling
+      } catch {
+        // Network error: keep polling
+      }
+    }
+
+    // Immediate first poll, then interval
+    poll();
+    tunnelTimerRef.current = setInterval(poll, TUNNEL_STATUS_POLL_MS);
+
+    return () => {
+      active = false;
+      clearTunnelTimer();
+    };
+  }, [selectedVps]); // dep: selectedVps only — clearTunnelTimer/poll/tunnelTimerRef are stable refs
+
+  // ── S-186 AC8: Derive effective tunnelId from VPS selection ──────────────
+  // The tunnelId used in the deploy POST comes from the VPS↔Tunnel-Read-Model
+  // (not from the zone-based tunnel dropdown). Non-secret: tunnelId may be shown.
+  const vpsLinkedTunnelId = selectedVps ? (tunnelIdsByVps[selectedVps] ?? null) : null;
 
   // Compute assembled hostname (AC11)
   const assembledHostname = (subdomain.trim() && selectedZone)
@@ -354,15 +416,16 @@ export function DeploymentsView({ onNavigate }) {
 
   // AC12: Deploy button active condition
   // AC10 (vps-readiness-gate): additionally requires vpsReadiness === 'ready'
+  // S-186 AC10: additionally requires tunnelPresent === true
   const canDeploy =
     !deploying &&
     selectedPackage !== '' &&
     selectedTag !== '' &&
     selectedVps !== '' &&
     selectedZone !== '' &&
-    selectedTunnel !== '' &&
     subdomain.trim() !== '' &&
-    vpsReadiness === 'ready';
+    vpsReadiness === 'ready' &&
+    tunnelPresent === true;
 
   // ── S-156: Lokal-Test handler ────────────────────────────────────────────
   async function handleLocalTest(e) {
@@ -407,7 +470,8 @@ export function DeploymentsView({ onNavigate }) {
           image: imageWithTag,
           vps: selectedVps,
           hostname,
-          tunnelId: selectedTunnel,
+          // S-186 AC8: tunnelId derived from VPS↔Tunnel-Read-Model, not from zone-tunnel dropdown
+          tunnelId: vpsLinkedTunnelId,
           // zoneId resolved server-side
         }),
       });
@@ -428,7 +492,6 @@ export function DeploymentsView({ onNavigate }) {
         setSelectedTag('');
         setSelectedVps('');
         setSelectedZone('');
-        setSelectedTunnel('');
         setSubdomain('');
         // Refresh list
         loadDeployments();
@@ -861,6 +924,10 @@ export function DeploymentsView({ onNavigate }) {
                 {selectedVps && (
                   <VpsReadinessBadge state={vpsReadiness} />
                 )}
+                {/* S-186 AC9: Tunnel-Badge — only when a VPS is selected */}
+                {selectedVps && tunnelPresent !== null && (
+                  <TunnelStatusBadge present={tunnelPresent} />
+                )}
               </div>
             </div>
 
@@ -885,22 +952,19 @@ export function DeploymentsView({ onNavigate }) {
               </select>
             </div>
 
-            {/* Tunnel-Dropdown (shown when zone selected + tunnels available) */}
-            {selectedZone && (
+            {/* S-186 AC8: Tunnel is derived from VPS selection (VPS↔Tunnel-Kopplung).
+                The zone-tunnel dropdown below is kept for information only (zone selection UX);
+                it is NOT the source of the tunnelId sent in the deploy POST.
+                The effective tunnelId (vpsLinkedTunnelId) comes from the VPS↔Tunnel-Read-Model. */}
+            {selectedVps && (
               <div style={styles.row}>
-                <label style={styles.label} htmlFor="deploy-tunnel-select">Tunnel</label>
-                <select
-                  id="deploy-tunnel-select"
-                  style={styles.input}
-                  value={selectedTunnel}
-                  onChange={(e) => setSelectedTunnel(e.target.value)}
-                  aria-label="Cloudflare Tunnel auswählen"
-                >
-                  <option value="">— Tunnel wählen —</option>
-                  {selectedZoneTunnels.map((t) => (
-                    <option key={t.id} value={t.id}>{t.name ?? t.id}</option>
-                  ))}
-                </select>
+                <label style={styles.label}>Tunnel (aus VPS-Kopplung)</label>
+                <span style={{ ...styles.input, display: 'flex', alignItems: 'center', color: vpsLinkedTunnelId ? '#e5e7eb' : '#9ca3af', fontStyle: vpsLinkedTunnelId ? 'normal' : 'italic' }}>
+                  {vpsLinkedTunnelId ?? '— kein Tunnel diesem VPS zugeordnet —'}
+                </span>
+                <span style={styles.inputHint}>
+                  Tunnel wird automatisch aus der VPS-Registrierung übernommen.
+                </span>
               </div>
             )}
 
@@ -1261,6 +1325,37 @@ function VpsReadinessBadge({ state }) {
   );
 }
 
+// ── TunnelStatusBadge component (S-186, AC9) ─────────────────────────────────
+
+/**
+ * Shows a status badge reflecting tunnel existence for the selected VPS.
+ * Rendered only when a VPS is selected (tunnelPresent !== null from parent).
+ *
+ * @param {{ present: boolean|'unknown'|null }} props
+ */
+function TunnelStatusBadge({ present }) {
+  // null = no VPS / initial (should not render — parent guards)
+  // true  → "Tunnel ✓"
+  // false → "Tunnel fehlt ✗"
+  // 'unknown' → "Tunnel fehlt ✗" (Cloudflare nicht erreichbar — fail-visible per spec)
+  if (present === null) return null;
+
+  const ok = present === true;
+  const text = ok ? 'Tunnel ✓' : 'Tunnel fehlt ✗';
+  const badgeStyle = ok ? styles.badgeTunnelOk : styles.badgeTunnelMissing;
+
+  return (
+    <span
+      role="status"
+      aria-live="polite"
+      aria-label={`Tunnel-Status: ${text}`}
+      style={badgeStyle}
+    >
+      {text}
+    </span>
+  );
+}
+
 // ── LocalTestReport component (S-156) ────────────────────────────────────────
 
 /**
@@ -1318,6 +1413,11 @@ function formatReason(reason, context = 'single') {
     case 'vps-provisioning':
     case 'docker-failed':
       return 'VPS wird noch eingerichtet (Docker installieren) – in ~1–2 Min erneut versuchen';
+    // S-186 AC11: tunnel-missing / tunnel-mismatch → freundliche, handlungsleitende Meldungen
+    case 'tunnel-missing':
+      return 'Tunnel fuer diesen VPS fehlt in Cloudflare – bitte ueber „Tunnel neu anlegen & bestuecken" wiederherstellen';
+    case 'tunnel-mismatch':
+      return 'Tunnel-ID stimmt nicht mit dem fuer diesen VPS registrierten Tunnel ueberein (Fehlverdrahtungs-Schutz) – VPS im Formular neu waehlen';
     default:
       // Strip anything that looks like a secret from the displayed message
       return String(reason)
@@ -1576,6 +1676,30 @@ const styles = {
     color: '#86efac',
     background: '#0a1c0a',
     border: '1px solid #14532d',
+    borderRadius: 4,
+    padding: '4px 8px',
+    whiteSpace: 'nowrap',
+    flexShrink: 0,
+  },
+  // Tunnel badge: present (S-186 AC9)
+  badgeTunnelOk: {
+    display: 'inline-block',
+    fontSize: 12,
+    color: '#86efac',
+    background: '#0a1c0a',
+    border: '1px solid #14532d',
+    borderRadius: 4,
+    padding: '4px 8px',
+    whiteSpace: 'nowrap',
+    flexShrink: 0,
+  },
+  // Tunnel badge: missing or unknown (S-186 AC9)
+  badgeTunnelMissing: {
+    display: 'inline-block',
+    fontSize: 12,
+    color: '#fca5a5',
+    background: '#1c0a0a',
+    border: '1px solid #7f1d1d',
     borderRadius: 4,
     padding: '4px 8px',
     whiteSpace: 'nowrap',

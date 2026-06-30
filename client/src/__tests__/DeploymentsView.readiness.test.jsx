@@ -8,6 +8,11 @@
  *   AC11 — Polling stoppt bei ready (kein Dauer-Poll); Timer-Cleanup bei Unmount und VPS-Wechsel
  *   AC12 — errorClass vps-provisioning / docker-failed → Retry-Hinweis; andere Klassen unverändert
  *
+ * Note (vps-tunnel-existence-gate.md, S-186 AC8–AC10):
+ *   fetch stubs in this file include vps-tunnel-status→tunnelPresent=true so the
+ *   tunnel gate does not block the deploy button in readiness-focused tests.
+ *   Full tunnel-gate Coverage in DeploymentsView.tunnel.test.jsx.
+ *
  * @jest-environment jsdom
  */
 
@@ -45,6 +50,17 @@ function makeReadinessFetch({ readinessState = 'ready', readinessFn } = {}) {
       if (readinessFn) return readinessFn(u);
       return { ok: true, status: 200, json: async () => ({ state: readinessState }) };
     }
+    // S-186 AC9: vps-tunnel-status — tunnelPresent=true so tunnel gate does not block deploy button
+    // Full tunnel-gate tests are in DeploymentsView.tunnel.test.jsx
+    if (u.includes('/api/deployments/vps-tunnel-status')) {
+      return {
+        ok: true, status: 200,
+        json: async () => [
+          { vpsId: 'vps-1', tunnelId: 'tunnel-1', tunnelPresent: true },
+          { vpsId: 'vps-2', tunnelId: 'tunnel-2', tunnelPresent: true },
+        ],
+      };
+    }
     if (u.includes('/api/github/packages') && !u.includes('/tags')) {
       return { ok: true, status: 200, json: async () => ({ packages: [{ name: 'brew-assistent', fullImageRef: 'ghcr.io/org/brew-assistent' }] }) };
     }
@@ -52,15 +68,16 @@ function makeReadinessFetch({ readinessState = 'ready', readinessFn } = {}) {
       return { ok: true, status: 200, json: async () => ({ tags: [{ tag: 'v1.0.0' }] }) };
     }
     if (u.includes('/api/deployments/vps-targets')) {
-      return { ok: true, status: 200, json: async () => ({ vpsIds: ['vps-1', 'vps-2'] }) };
-    }
-    if (u.includes('/api/cloudflare/zones/') && u.includes('/tunnels')) {
-      return { ok: true, status: 200, json: async () => ({ tunnels: [{ id: 'tunnel-1', name: 'main' }] }) };
+      // S-186 AC8: include tunnelIds map — tunnel-1 for vps-1, tunnel-2 for vps-2
+      return { ok: true, status: 200, json: async () => ({
+        vpsIds: ['vps-1', 'vps-2'],
+        tunnelIds: { 'vps-1': 'tunnel-1', 'vps-2': 'tunnel-2' },
+      }) };
     }
     if (u.includes('/api/cloudflare/zones')) {
       return { ok: true, status: 200, json: async () => ({ zones: [{ id: 'zone-1', name: 'alexstuder.cloud' }] }) };
     }
-    if (u.includes('/api/deployments') && !u.includes('/vps-targets') && !u.includes('/stacks') && !u.includes('/readiness')) {
+    if (u.includes('/api/deployments') && !u.includes('/vps-targets') && !u.includes('/stacks') && !u.includes('/readiness') && !u.includes('/vps-tunnel-status')) {
       return { ok: true, status: 200, json: async () => ({ deployments: [], errors: [] }) };
     }
     return { ok: true, status: 200, json: async () => ({}) };
@@ -86,7 +103,10 @@ async function selectVps(utils, vpsId = 'vps-1') {
   });
 }
 
-/** Fill the full deploy form (image + tag + vps + zone + tunnel + subdomain). */
+/** Fill the full deploy form (image + tag + vps + zone + subdomain).
+ * S-186: zone-tunnel dropdown no longer needed; tunnelId derived from VPS-linked Read-Model.
+ * Waits for the Tunnel-Badge to appear (AC9) instead of waiting for tunnel dropdown.
+ */
 async function fillFullForm(utils) {
   // Wait for image dropdown
   await waitFor(() => {
@@ -102,7 +122,7 @@ async function fillFullForm(utils) {
   await act(async () => {
     fireEvent.change(utils.container.querySelector('#deploy-tag-select'), { target: { value: 'v1.0.0' } });
   });
-  // VPS
+  // VPS (also triggers tunnel status poll — S-186 AC9)
   await selectVps(utils);
   // Zone
   await waitFor(() => {
@@ -111,14 +131,10 @@ async function fillFullForm(utils) {
   await act(async () => {
     fireEvent.change(utils.container.querySelector('#deploy-zone-select'), { target: { value: 'alexstuder.cloud' } });
   });
-  // Tunnel
+  // S-186 AC9: wait for Tunnel-Badge to confirm tunnel status resolved
   await waitFor(() => {
-    const sel = utils.container.querySelector('#deploy-tunnel-select');
-    expect(sel).not.toBeNull();
-    expect(sel.querySelectorAll('option').length).toBeGreaterThan(1);
-  });
-  await act(async () => {
-    fireEvent.change(utils.container.querySelector('#deploy-tunnel-select'), { target: { value: 'tunnel-1' } });
+    const badge = utils.container.querySelector('[aria-label*="Tunnel-Status"]');
+    expect(badge).not.toBeNull();
   });
 }
 
@@ -418,6 +434,10 @@ describe('AC12 — errorClass vps-provisioning / docker-failed → Retry-Hinweis
       if (u.includes('/api/deployments/readiness')) {
         return { ok: true, status: 200, json: async () => ({ state: 'ready' }) };
       }
+      // S-186 AC9: vps-tunnel-status — tunnelPresent=true so tunnel gate doesn't block
+      if (u.includes('/api/deployments/vps-tunnel-status')) {
+        return { ok: true, status: 200, json: async () => [{ vpsId: 'vps-1', tunnelId: 'tunnel-1', tunnelPresent: true }] };
+      }
       if (u.includes('/api/github/packages') && !u.includes('/tags')) {
         return { ok: true, status: 200, json: async () => ({ packages: [{ name: 'brew-assistent', fullImageRef: 'ghcr.io/org/brew-assistent' }] }) };
       }
@@ -425,10 +445,8 @@ describe('AC12 — errorClass vps-provisioning / docker-failed → Retry-Hinweis
         return { ok: true, status: 200, json: async () => ({ tags: [{ tag: 'v1.0.0' }] }) };
       }
       if (u.includes('/api/deployments/vps-targets')) {
-        return { ok: true, status: 200, json: async () => ({ vpsIds: ['vps-1'] }) };
-      }
-      if (u.includes('/api/cloudflare/zones/') && u.includes('/tunnels')) {
-        return { ok: true, status: 200, json: async () => ({ tunnels: [{ id: 'tunnel-1', name: 'main' }] }) };
+        // S-186 AC8: include tunnelIds map
+        return { ok: true, status: 200, json: async () => ({ vpsIds: ['vps-1'], tunnelIds: { 'vps-1': 'tunnel-1' } }) };
       }
       if (u.includes('/api/cloudflare/zones')) {
         return { ok: true, status: 200, json: async () => ({ zones: [{ id: 'zone-1', name: 'alexstuder.cloud' }] }) };
