@@ -164,6 +164,43 @@ describe('AC4 — NotifyService.sendNotification', () => {
     expect(init.headers['Tags']).toBe('tada,warning');
   });
 
+  it('kodiert Emoji-Titel als RFC-2047 (kein ByteString-Fehler, Push nicht verschluckt)', async () => {
+    const fetchMock = makeFetchMock();
+    global.fetch = fetchMock;
+
+    const { sendNotification } = await import('../src/NotifyService.js');
+    const result = await sendNotification(
+      { server: 'https://ntfy.sh', topic: 'topic' },
+      { title: '✅ Story Done: S-189', message: 'Feature fertig' },
+    );
+
+    // Kein throw/Netzfehler — Push wird tatsächlich abgesetzt
+    expect(result.ok).toBe(true);
+    const [, init] = fetchMock.mock.calls[0];
+    const titleHeader = init.headers['Title'];
+    // Header-Wert ist reines ASCII (ByteString-sicher) und RFC-2047-kodiert
+    // eslint-disable-next-line no-control-regex
+    expect(/^[\x00-\x7F]*$/.test(titleHeader)).toBe(true);
+    expect(titleHeader).toMatch(/^=\?UTF-8\?B\?.+\?=$/);
+    // Dekodiert zurück zum Originaltitel (ntfy macht das serverseitig)
+    const b64 = titleHeader.replace(/^=\?UTF-8\?B\?/, '').replace(/\?=$/, '');
+    expect(Buffer.from(b64, 'base64').toString('utf8')).toBe('✅ Story Done: S-189');
+  });
+
+  it('lässt reinen ASCII-Titel unverändert (keine RFC-2047-Kodierung)', async () => {
+    const fetchMock = makeFetchMock();
+    global.fetch = fetchMock;
+
+    const { sendNotification } = await import('../src/NotifyService.js');
+    await sendNotification(
+      { server: 'https://ntfy.sh', topic: 'topic' },
+      { title: 'Plain ASCII Title', message: 'M' },
+    );
+
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.headers['Title']).toBe('Plain ASCII Title');
+  });
+
   it('setzt Authorization-Header wenn token vorhanden', async () => {
     const fetchMock = makeFetchMock();
     global.fetch = fetchMock;

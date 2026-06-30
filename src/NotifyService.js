@@ -16,6 +16,26 @@
 const NTFY_TIMEOUT_MS = 10_000;
 
 /**
+ * Kodiert einen Header-Wert sicher für `fetch`.
+ *
+ * HTTP-Header-Werte sind ByteStrings (Latin-1, Zeichencode ≤ 255). Ein nicht-ASCII-Zeichen
+ * — z.B. ein Emoji wie ✅ (U+2705) im ntfy-`Title`/`Tags`-Header — würde `fetch` mit
+ * "Cannot convert argument to a ByteString" abbrechen und die Benachrichtigung komplett
+ * verschlucken. Reine ASCII-Werte bleiben unverändert; alles andere wird als
+ * RFC-2047-Encoded-Word (`=?UTF-8?B?…?=`) kodiert, das ntfy serverseitig wieder dekodiert.
+ *
+ * @param {string} value
+ * @returns {string}
+ */
+function encodeHeaderValue(value) {
+  const str = String(value ?? '');
+  // eslint-disable-next-line no-control-regex
+  if (/^[\x00-\x7F]*$/.test(str)) return str; // reines ASCII → unverändert
+  const b64 = Buffer.from(str, 'utf8').toString('base64');
+  return `=?UTF-8?B?${b64}?=`;
+}
+
+/**
  * Sendet eine ntfy-Benachrichtigung.
  *
  * @param {object} config - Notification-Konfiguration
@@ -47,7 +67,8 @@ export async function sendNotification(config, payload, options = {}) {
   try {
     // Headers aufbauen — Token NIE in Logs oder Responses
     const headers = {
-      'Title': title,
+      // RFC-2047 für nicht-ASCII (Emoji-Titel sonst → fetch ByteString-Fehler, Push verschluckt)
+      'Title': encodeHeaderValue(title),
       'Content-Type': 'text/plain; charset=utf-8',
     };
 
@@ -56,7 +77,7 @@ export async function sendNotification(config, payload, options = {}) {
     }
 
     if (tags && tags.length > 0) {
-      headers['Tags'] = tags.join(',');
+      headers['Tags'] = encodeHeaderValue(tags.join(','));
     }
 
     if (token) {
