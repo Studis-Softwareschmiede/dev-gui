@@ -10,7 +10,7 @@ goal: >-
   Erkennung gegen Push-Sturm, neues Ereignis tunnel_missing. Der Cron heilt NICHT
   autonom (read-only listTunnels) — er meldet nur; die Heilung bleibt der manuelle
   Ein-Klick-Pfad (F-027). Kein Secret in Push/Report/Notice/Log/Audit.
-status: To Do
+status: Done
 priority: P2
 spec: docs/specs/vps-tunnel-drift-notify.md
 definition_of_done: null

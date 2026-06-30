@@ -9,6 +9,9 @@
  *   - Scheduler: node-internal midnight timer (UTC) in the always-on dev-gui process (ADR-002).
  *     No external cron, no new dependency. Skip-if-running lock prevents overlapping runs.
  *   - Per-VPS reconciliation:
+ *     0. [vps-tunnel-drift-notify] Tunnel-Existenz-Check (AC1): wenn tunnelId gesetzt und
+ *        nicht in listTunnels() → VPS als tunnel-missing markieren; fail-closed für Route-
+ *        Konvergenz; ntfy-Push best-effort beim Übergang (AC3/AC4/AC5/AC6/AC7/AC8).
  *     1. VpsDockerControl.psAll() → managed containers (with cloudflare.tunnel-hostname label)
  *        and unmanaged containers (without the label, only reported).
  *        Stack-aware (AC13): psAll() also returns com.docker.compose.project label; internal
@@ -25,6 +28,13 @@
  *   - Ambiguous binding (two managed containers → same hostname) → not healed, flagged ambiguous.
  *   - Degradation per VPS/provider: errors don't abort the overall run.
  *   - ReconcileReport + ReconcileNotice: persisted via AuditStore (kein neuer Store, ADR-005-Linie).
+ *
+ * Tunnel-Drift-Push (vps-tunnel-drift-notify, Capability C):
+ *   - Tunnel-Drift erkannt → ReconcileNotice kind=tunnel-missing (AC3) + optionaler ntfy-Push (AC4).
+ *   - Push nur beim Übergang (AC6): Übergangszustand wird in einem Snapshot-File
+ *     (${CRED_STORE_DIR}/tunnel-drift-snapshot.json) gespeichert → kein Re-Fire nach Neustart.
+ *   - Best-effort: ntfy-Fehler bricht den Reconcile nicht ab (AC5).
+ *   - Sicherheit: kein Tunnel-Token, kein SSH-Key, kein CF-API-Token in Push/Notice/Log (AC8).
  *
  * Security (Floor):
  *   - LockoutGuard-Hard-Block: protected hostnames are never deleted or healed (automatic via
@@ -51,8 +61,23 @@
  * AC14 — all existing ADR-013 behaviors (AC3–AC9) remain unchanged; healing path remains the
  *         shared ADR-012 addRouteOnly path (no new Cloudflare mutation code, grep-verifiable).
  *
+ * vps-tunnel-drift-notify:
+ * AC1  — [drift] Tunnel-Existenz-Check je VPS via listTunnels (tunnelMissing-Prädikat).
+ * AC2  — [drift] Tunnel-Drift → fail-closed für Route-Konvergenz dieses VPS; kein createTunnel.
+ * AC3  — [drift] tunnelMissing:true im ReconcileReport; kind:tunnel-missing in ReconcileNotice.
+ * AC4  — [drift] ntfy-Push via NotifyService.sendNotification wenn aktiviert + tunnel_missing-Event.
+ * AC5  — [drift] Push best-effort; ntfy-Fehler bricht Reconcile nicht ab.
+ * AC6  — [drift] Push nur beim Übergang; Snapshot-File verhindert Re-Fire nach Neustart.
+ * AC7  — [drift] tunnel_missing in ALLOWED_EVENTS (NotificationSettingsStore), PUT-Validierung.
+ * AC8  — [drift] Kein Tunnel-Token, SSH-Key, CF-Token in Push/Notice/Log (Security Floor).
+ *
  * @module deploy/ReconciliationJob
  */
+
+import { readFile, writeFile, rename, mkdir, chmod, unlink } from 'node:fs/promises';
+import { join, dirname } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { catalogKey } from '../CredentialStore.js';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -64,6 +89,72 @@ const AUDIT_REPORT = 'reconcile:report';
 
 /** AuditStore command for a ReconcileNotice entry. */
 const AUDIT_NOTICE = 'reconcile:notice';
+
+/**
+ * Tunnel-Drift-Snapshot: Datei im CRED_STORE_DIR, die merkt welche VPSes bereits als
+ * tunnel-missing gemeldet wurden → verhindert Re-Fire nach Neustart (AC6 vps-tunnel-drift-notify).
+ *
+ * Format: { tunnelMissing: { [vpsId]: true } }
+ */
+const TUNNEL_DRIFT_SNAPSHOT_FILE = 'tunnel-drift-snapshot.json';
+
+/** Notification event key for tunnel missing drift (AC7 vps-tunnel-drift-notify). */
+const EVENT_TUNNEL_MISSING = 'tunnel_missing';
+
+// ── Tunnel-Drift-Snapshot Helpers ─────────────────────────────────────────────
+
+/**
+ * Liest den Pfad zur Tunnel-Drift-Snapshot-Datei aus der Umgebung.
+ * @returns {string|null}
+ */
+function resolveTunnelDriftSnapshotPath() {
+  const storeDir = process.env.CRED_STORE_DIR?.trim();
+  if (!storeDir) return null;
+  return join(storeDir, TUNNEL_DRIFT_SNAPSHOT_FILE);
+}
+
+/**
+ * Liest den persistierten Tunnel-Drift-Snapshot.
+ * @returns {Promise<{ tunnelMissing: Record<string, boolean> }>}
+ */
+async function readTunnelDriftSnapshot() {
+  const filePath = resolveTunnelDriftSnapshotPath();
+  const empty = { tunnelMissing: {} };
+  if (!filePath) return empty;
+
+  try {
+    const raw = await readFile(filePath, 'utf8');
+    const parsed = JSON.parse(raw);
+    return {
+      tunnelMissing: (parsed.tunnelMissing && typeof parsed.tunnelMissing === 'object')
+        ? parsed.tunnelMissing
+        : {},
+    };
+  } catch {
+    return empty;
+  }
+}
+
+/**
+ * Schreibt den Tunnel-Drift-Snapshot atomar.
+ * @param {{ tunnelMissing: Record<string, boolean> }} snapshot
+ */
+async function writeTunnelDriftSnapshot(snapshot) {
+  const filePath = resolveTunnelDriftSnapshotPath();
+  if (!filePath) return;
+
+  const json = JSON.stringify(snapshot, null, 2);
+  const tmpPath = filePath + '.tmp.' + randomBytes(4).toString('hex');
+
+  try {
+    await mkdir(dirname(filePath), { recursive: true });
+    await writeFile(tmpPath, json, { encoding: 'utf8', mode: 0o600 });
+    await chmod(tmpPath, 0o600);
+    await rename(tmpPath, filePath);
+  } catch {
+    await unlink(tmpPath).catch(() => {});
+  }
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -84,14 +175,15 @@ const AUDIT_NOTICE = 'reconcile:notice';
  * @property {string[]} protectedSkipped
  * @property {string[]} reportedUnmanaged
  * @property {Array<{ scope: string, errorClass: string }>} errors
+ * @property {boolean} [tunnelMissing] - true wenn der Cloudflare-Tunnel dieses VPS fehlt (vps-tunnel-drift-notify AC3)
  */
 
 /**
  * @typedef {object} ReconcileNotice
  * @property {string} at
- * @property {'route-created'|'route-removed'|'protected-skipped'|'error'} kind
+ * @property {'route-created'|'route-removed'|'protected-skipped'|'error'|'tunnel-missing'} kind
  * @property {string} vps
- * @property {string} hostname
+ * @property {string} [hostname]
  * @property {string} [detail]
  */
 
@@ -125,6 +217,34 @@ export class ReconciliationJob {
   /** Scheduled midnight timer handle. */
   #timer = null;
 
+  // ── Tunnel-Drift-Push deps (vps-tunnel-drift-notify, optional — best-effort) ──
+
+  /**
+   * sendNotification function (injectable for tests).
+   * @type {import('../NotifyService.js').sendNotification|null}
+   */
+  #sendNotificationFn;
+
+  /**
+   * Reads current NotificationSettings (enabled, events, server, topic, priority).
+   * @type {(() => Promise<import('../NotificationSettingsStore.js').NotificationSettings>)|null}
+   */
+  #readNotificationSettings;
+
+  /**
+   * CredentialStore for reading ntfy_token (optional; no token → push without auth).
+   * @type {import('../CredentialStore.js').CredentialStore|null}
+   */
+  #credentialStore;
+
+  /**
+   * In-memory set of vpsIds currently in tunnel-missing drift state.
+   * Populated from disk-snapshot on first use; tracks transition to avoid push-spam (AC6).
+   * null = not yet loaded from disk.
+   * @type {Set<string>|null}
+   */
+  #knownDriftVps = null;
+
   /**
    * @param {object} opts
    * @param {import('./VpsDockerControl.js').VpsDockerControl} opts.dockerControl
@@ -133,8 +253,24 @@ export class ReconciliationJob {
    * @param {import('./DeployOrchestrator.js').DeployOrchestrator} opts.orchestrator
    * @param {import('../AuditStore.js').AuditStore} opts.auditStore
    * @param {Array<{ vpsId: string, vps: object, tunnelId: string }>} opts.vpsConfigs
+   * @param {import('../NotifyService.js').sendNotification} [opts.sendNotificationFn]
+   *   Injectable ntfy-Versand-Funktion (default: NotifyService.sendNotification). Optional.
+   * @param {() => Promise<import('../NotificationSettingsStore.js').NotificationSettings>} [opts.readNotificationSettings]
+   *   Liest aktuelle Notification-Settings. Optional — ohne diese Dep kein ntfy-Push.
+   * @param {import('../CredentialStore.js').CredentialStore} [opts.credentialStore]
+   *   CredentialStore für ntfy_token. Optional.
    */
-  constructor({ dockerControl, cloudflareApi, lockoutGuard, orchestrator, auditStore, vpsConfigs }) {
+  constructor({
+    dockerControl,
+    cloudflareApi,
+    lockoutGuard,
+    orchestrator,
+    auditStore,
+    vpsConfigs,
+    sendNotificationFn,
+    readNotificationSettings,
+    credentialStore,
+  }) {
     if (!dockerControl || typeof dockerControl.psAll !== 'function') {
       throw new Error('[ReconciliationJob] dockerControl with psAll() ist Pflicht');
     }
@@ -156,6 +292,11 @@ export class ReconciliationJob {
     this.#orchestrator = orchestrator;
     this.#auditStore = auditStore;
     this.#vpsConfigs = Array.isArray(vpsConfigs) ? vpsConfigs : [];
+
+    // Optional Tunnel-Drift-Push deps (best-effort; fehlt → kein ntfy-Push, kein Crash)
+    this.#sendNotificationFn = sendNotificationFn ?? null;
+    this.#readNotificationSettings = readNotificationSettings ?? null;
+    this.#credentialStore = credentialStore ?? null;
   }
 
   // ── Scheduler ─────────────────────────────────────────────────────────────
@@ -275,6 +416,44 @@ export class ReconciliationJob {
       reportedUnmanaged: [],
       errors: [],
     };
+
+    // ── Step 0: Tunnel-Existenz-Check (vps-tunnel-drift-notify AC1/AC2) ───────
+    // Nur wenn eine tunnelId gespeichert ist. Kein Tunnel registriert → kein Drift-Check.
+    // Cloudflare-Fehler → VPS degradierend (nicht als tunnel-missing melden; kein Fehlalarm, AC spec Edge-Cases).
+    if (tunnelId) {
+      const driftResult = await this.#checkTunnelDrift(vpsId, tunnelId);
+      if (driftResult === 'missing') {
+        // Tunnel fehlt → fail-closed für Route-Konvergenz (AC2); kein createTunnel; kein psAll
+        result.tunnelMissing = true;
+        result.errors.push({
+          scope: `vps:${vpsId}:tunnel:${tunnelId}`,
+          errorClass: 'tunnel-missing',
+        });
+        // ReconcileNotice (AC3 vps-tunnel-drift-notify)
+        this.#persistNotice({
+          kind: 'tunnel-missing',
+          vps: vpsId,
+          detail: sanitizeString(tunnelId),
+        });
+        // ntfy-Push best-effort, nur beim Übergang (AC4/AC5/AC6 vps-tunnel-drift-notify)
+        // Transition-Management erfolgt in #sendTunnelDriftPush
+        await this.#sendTunnelDriftPushIfTransition(vpsId);
+        // Fail-closed: keine Route-Konvergenz für diesen VPS (AC2)
+        return result;
+      } else if (driftResult === 'cf-error') {
+        // Cloudflare nicht konsultierbar → degradierend; kein Fehlalarm-Push (AC spec Edge-Cases)
+        result.errors.push({
+          scope: `vps:${vpsId}:tunnel-check:${tunnelId}`,
+          errorClass: 'cloudflare-unavailable',
+        });
+        // Kein fail-closed auf Basis eines unprüfbaren Zustands — Route-Konvergenz läuft normal weiter
+        // (Der Tunnel-Check-Fehler ist bereits im errors[]-Array vermerkt)
+      } else if (driftResult === 'ok') {
+        // Tunnel existiert → Drift aufgelöst: Snapshot aktualisieren wenn vorher als missing bekannt
+        await this.#resolveTunnelDrift(vpsId);
+      }
+      // driftResult === 'no-tunnel-id': kein tunnelId → nicht möglich (Guard oben)
+    }
 
     // ── Step 1: Read container state (fail-closed on error, AC7) ──────────────
     // psAll() returns managed (hostname set) AND unmanaged (hostname: null) containers.
@@ -525,6 +704,170 @@ export class ReconciliationJob {
     }
   }
 
+  // ── Tunnel-Drift-Erkennung + Push (vps-tunnel-drift-notify) ──────────────
+
+  /**
+   * Prüft ob der Cloudflare-Tunnel eines VPS existiert.
+   *
+   * Gibt zurück:
+   *   'missing'  — tunnelId nicht in listTunnels() → Drift erkannt (AC1)
+   *   'ok'       — tunnelId in listTunnels() → kein Drift
+   *   'cf-error' — Cloudflare nicht konsultierbar → unbestimmter Zustand (kein Fehlalarm, AC spec Edge-Cases)
+   *
+   * Security: kein Token in Log/Return (AC8).
+   *
+   * @param {string} vpsId
+   * @param {string} tunnelId
+   * @returns {Promise<'missing'|'ok'|'cf-error'>}
+   */
+  async #checkTunnelDrift(vpsId, tunnelId) {
+    try {
+      // listTunnels() listet account-weit alle Tunnel — der übergebene Wert ist KEINE echte zoneId;
+      // er wird intern nicht als Filter genutzt. Die Existenz-Prüfung erfolgt via Array.some(t => t.id === tunnelId).
+      // (Konsistent mit deploymentsRouter-Konsument: auch dort listTunnels('') + Filter.)
+      const tunnels = await this.#cloudflareApi.listTunnels(tunnelId);
+      const exists = Array.isArray(tunnels) && tunnels.some((t) => t.id === tunnelId);
+      return exists ? 'ok' : 'missing';
+    } catch {
+      // Cloudflare nicht konsultierbar → unbestimmt; kein Fehlalarm-Push (AC spec Edge-Cases)
+      // Security: kein CF-Token, kein Fehler-Detail mit Geheimnis im Log
+      console.warn(`[ReconciliationJob] Tunnel-Existenz-Check für VPS '${sanitizeString(vpsId)}' fehlgeschlagen (CF nicht erreichbar) — kein Fehlalarm`);
+      return 'cf-error';
+    }
+  }
+
+  /**
+   * Lädt den Drift-Snapshot (lazy, einmalig pro Reconcile-Lauf-Lebensdauer).
+   * Setzt #knownDriftVps aus Disk wenn noch nicht geladen.
+   *
+   * @returns {Promise<Set<string>>}
+   */
+  async #loadDriftSnapshot() {
+    if (this.#knownDriftVps === null) {
+      const snapshot = await readTunnelDriftSnapshot();
+      this.#knownDriftVps = new Set(
+        Object.entries(snapshot.tunnelMissing)
+          .filter(([, v]) => v === true)
+          .map(([k]) => k),
+      );
+    }
+    return this.#knownDriftVps;
+  }
+
+  /**
+   * Persistiert den aktuellen Drift-Snapshot auf Disk.
+   * Best-effort: Schreib-Fehler werden geloggt, aber nicht geworfen.
+   *
+   * @returns {Promise<void>}
+   */
+  async #persistDriftSnapshot() {
+    if (this.#knownDriftVps === null) return;
+    const tunnelMissing = {};
+    for (const vpsId of this.#knownDriftVps) {
+      tunnelMissing[vpsId] = true;
+    }
+    try {
+      await writeTunnelDriftSnapshot({ tunnelMissing });
+    } catch {
+      // Best-effort: kein Crash bei Schreib-Fehler
+    }
+  }
+
+  /**
+   * Sendet einen ntfy-Push für Tunnel-Drift, aber NUR beim Übergang
+   * „Tunnel war da / unbekannt → jetzt missing" (AC6 vps-tunnel-drift-notify).
+   *
+   * Übergangs-Zustand: in #knownDriftVps (Set); wird auf Disk persistiert.
+   * Best-effort: ntfy-Fehler bricht nichts ab (AC5).
+   * Security: kein Tunnel-Token, kein CF-Token in Payload/Log (AC8).
+   *
+   * @param {string} vpsId
+   * @returns {Promise<void>}
+   */
+  async #sendTunnelDriftPushIfTransition(vpsId) {
+    const knownDrift = await this.#loadDriftSnapshot();
+
+    // Übergang erkennen: war noch nicht als missing bekannt → erster Befund → Push
+    const isTransition = !knownDrift.has(vpsId);
+
+    // Zustand immer setzen (auch wenn push-Pfad nicht konfiguriert)
+    knownDrift.add(vpsId);
+    await this.#persistDriftSnapshot();
+
+    if (!isTransition) {
+      // Bereits als missing bekannt → kein Push-Sturm (AC6)
+      return;
+    }
+
+    // ntfy-Push konfiguriert? (readNotificationSettings + sendNotificationFn erforderlich)
+    if (!this.#readNotificationSettings || !this.#sendNotificationFn) {
+      return;
+    }
+
+    let settings;
+    try {
+      settings = await this.#readNotificationSettings();
+    } catch {
+      // Settings-Lese-Fehler → kein Push, kein Crash (best-effort)
+      return;
+    }
+
+    // AC4 vps-tunnel-drift-notify: Push nur wenn global enabled und tunnel_missing in events
+    if (!settings.enabled) return;
+    if (!Array.isArray(settings.events) || !settings.events.includes(EVENT_TUNNEL_MISSING)) return;
+
+    // ntfy-Token store-intern (NIE in Payload/Log/Response)
+    let token = null;
+    if (this.#credentialStore) {
+      try {
+        token = await this.#credentialStore.getPlaintext(catalogKey('notifications', 'ntfy_token'));
+      } catch {
+        // Token-Lese-Fehler → Versand ohne Auth (best-effort)
+      }
+    }
+
+    // AC8 Security: kein Tunnel-Token, kein CF-Token, kein SSH-Key in Payload
+    // Nur nicht-geheime vpsId in der Nachricht (AC spec §Sicherheit)
+    const slug = process.env.PROJECT_SLUG ?? 'dev-gui';
+    const payload = {
+      title: `⚠️ ${slug} · VPS ${sanitizeString(vpsId)}: Tunnel fehlt`,
+      message: 'Der Cloudflare-Tunnel dieses VPS existiert nicht mehr — über \'Tunnel neu anlegen & bestücken\' wiederherstellen',
+      tags: ['warning'],
+    };
+
+    // Versand best-effort (AC5)
+    try {
+      await this.#sendNotificationFn(
+        {
+          server: settings.server,
+          topic: settings.topic,
+          priority: settings.priority,
+          token, // AC8: Token NIE im Log; nur im Authorization-Header (NotifyService-Contract)
+        },
+        payload,
+      );
+    } catch {
+      // Best-effort: Versand-Fehler loggen, Reconcile läuft weiter (AC5)
+      console.error(`[ReconciliationJob] Tunnel-Drift-Push für VPS '${sanitizeString(vpsId)}' fehlgeschlagen (best-effort)`);
+    }
+  }
+
+  /**
+   * Löst den Drift-Zustand für einen VPS auf (Tunnel wieder vorhanden).
+   * Entfernt den VPS aus dem Snapshot-Set.
+   * Der nächste Ausfall ist dann ein neuer Übergang und feuert erneut (AC6 spec).
+   *
+   * @param {string} vpsId
+   * @returns {Promise<void>}
+   */
+  async #resolveTunnelDrift(vpsId) {
+    const knownDrift = await this.#loadDriftSnapshot();
+    if (knownDrift.has(vpsId)) {
+      knownDrift.delete(vpsId);
+      await this.#persistDriftSnapshot();
+    }
+  }
+
   // ── Notice persistence ────────────────────────────────────────────────────
 
   /**
@@ -540,7 +883,8 @@ export class ReconciliationJob {
       at: new Date().toISOString(),
       kind,
       vps,
-      hostname,
+      // hostname ist optional (tunnel-missing notices sind VPS-scoped, nicht hostname-scoped)
+      ...(hostname !== undefined ? { hostname } : {}),
       // S4: sanitizeString auf detail (Tiefenverteidigung — kein Secret im Notice-Log)
       ...(detail ? { detail: sanitizeString(detail) } : {}),
     };
@@ -640,6 +984,8 @@ function sanitizeReport(report) {
         scope: sanitizeString(e.scope),
         errorClass: sanitizeString(e.errorClass),
       })),
+      // vps-tunnel-drift-notify AC3: tunnelMissing im Report (keine Secrets — nur boolean)
+      ...(v.tunnelMissing === true ? { tunnelMissing: true } : {}),
     })),
   };
 }

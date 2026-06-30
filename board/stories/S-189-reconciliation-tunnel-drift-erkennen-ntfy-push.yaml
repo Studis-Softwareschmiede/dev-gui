@@ -1,7 +1,7 @@
 id: S-189
 parent: F-028
 title: "ReconciliationJob: fehlenden Tunnel als Drift erkennen -> ntfy-Push (Uebergang, best-effort, Ereignis tunnel_missing)"
-status: To Do
+status: Done
 priority: P2
 spec: docs/specs/vps-tunnel-drift-notify.md
 implements:
@@ -32,7 +32,7 @@ estimate_note: >-
   js|balanced|L (ep=5.0). confidence low. Uebergangs-Erkennung gegen Push-Sturm
   (AC6) + fail-closed bei nicht-pruefbarem Cloudflare (kein Fehlalarm) sind die
   kniffligen Punkte.
-branch: null
+branch: feat/S-189-tunnel-drift-push
 pr: null
 blocked_reason: null
 created_at: '2026-06-30T00:00:00Z'

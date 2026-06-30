@@ -23,6 +23,23 @@
  *   AC14 — all existing ADR-013 behaviors (AC3–AC9) remain valid (covered by AC3–AC9 tests above).
  *   AC14 — healing path is addRouteOnly (no new Cloudflare mutation code in ReconciliationJob).
  *
+ * Covers (vps-tunnel-drift-notify):
+ *   AC1  — Drift erkannt wenn tunnelId nicht in listTunnels(); kein Drift wenn Tunnel existiert.
+ *   AC1  — CF-Fehler bei listTunnels → kein Fehlalarm-Push, degradierend.
+ *   AC2  — Tunnel-Drift → fail-closed für Route-Konvergenz; kein psAll/addRouteOnly/removeRoute.
+ *   AC2  — VPS ohne registrierte tunnelId → kein Drift-Check, kein Push.
+ *   AC3  — tunnelMissing:true im ReconcileReport; kind:tunnel-missing in ReconcileNotice.
+ *   AC4  — ntfy-Push via sendNotification wenn enabled und tunnel_missing in events.
+ *   AC4  — kein Push wenn enabled=false oder tunnel_missing nicht in events.
+ *   AC5  — Push-Fehler bricht Reconcile nicht ab (best-effort).
+ *   AC6  — Push nur beim Übergang (kein Spam); kein Re-Fire nach In-Memory-Deduplizierung
+ *           testbar (Set-basiert); Disk-Snapshot greift zusätzlich wenn CRED_STORE_DIR gesetzt
+ *           ist — verhindert Re-Fire nach Neustart (nur in Production mit persistentem Volume).
+ *   AC7  — tunnel_missing in ALLOWED_EVENTS (NotificationSettingsStore) — via validate().
+ *   AC8  — kein Tunnel-Token, kein CF-Token in Push-Payload/Report/Notice (Security Floor).
+ *   AC4  — Composition-Root-Naht: sendNotificationFn + readNotificationSettings + credentialStore
+ *           korrekt verdrahtet → sendNotificationFn wird bei Drift aufgerufen (Naht-Test).
+ *
  * Covers (deploymentsRouter — reconcile endpoints):
  *   POST /api/deployments/reconcile — AC2: 200 { result: "ok", report }; 403 without auth.
  *   GET  /api/deployments/reconcile/last — returns last report.
@@ -35,11 +52,22 @@ import express from 'express';
 import { ReconciliationJob } from '../src/deploy/ReconciliationJob.js';
 import { AuditStore } from '../src/AuditStore.js';
 import { deploymentsRouter } from '../src/deploymentsRouter.js';
+import { validate as validateNotificationSettings, ALLOWED_EVENTS } from '../src/NotificationSettingsStore.js';
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 /**
  * Build minimal stubs for ReconciliationJob dependencies.
+ *
+ * @param {object} [opts]
+ * @param {object} [opts.psResult]
+ * @param {Array} [opts.listRoutesResult]
+ * @param {*} [opts.removeRouteResult]
+ * @param {object} [opts.addRouteOnlyResult]
+ * @param {boolean} [opts.isProtected]
+ * @param {Array|'error'} [opts.listTunnelsResult]
+ *   Array → listTunnels resolves with this (default: [{ id: 'tunnel-1' }] to match default vpsConfig tunnelId).
+ *   'error' → listTunnels rejects (simulates CF-unavailable).
  */
 function makeStubs({
   psResult = { result: 'ok', containers: [] },
@@ -47,12 +75,18 @@ function makeStubs({
   removeRouteResult = undefined,
   addRouteOnlyResult = { result: 'ok' },
   isProtected = false,
+  listTunnelsResult = [{ id: 'tunnel-1' }], // default: tunnel exists (no drift)
 } = {}) {
   const dockerControl = {
     psAll: jest.fn().mockResolvedValue(psResult),
   };
 
+  const listTunnelsMock = listTunnelsResult === 'error'
+    ? jest.fn().mockRejectedValue(Object.assign(new Error('CF unavailable'), { errorClass: 'cloudflare-unavailable' }))
+    : jest.fn().mockResolvedValue(listTunnelsResult);
+
   const cloudflareApi = {
+    listTunnels: listTunnelsMock,
     listRoutes: jest.fn().mockResolvedValue(listRoutesResult),
     removeRoute: jest.fn().mockResolvedValue(removeRouteResult),
     resolveZoneForHostname: jest.fn().mockResolvedValue('zone-1'),
@@ -408,6 +442,8 @@ describe('ReconciliationJob', () => {
           .mockResolvedValueOnce({ result: 'ok', containers: [] }), // vps-2 succeeds
       };
       const cloudflareApi = {
+        // listTunnels: returns both tunnels as existing (no drift in this test)
+        listTunnels: jest.fn().mockResolvedValue([{ id: 'tunnel-1' }, { id: 'tunnel-2' }]),
         listRoutes: jest.fn().mockResolvedValue([]),
         removeRoute: jest.fn(),
       };
@@ -463,6 +499,7 @@ describe('ReconciliationJob', () => {
       const auditStore = new AuditStore();
       const dockerControl = { psAll: jest.fn().mockRejectedValue(new Error('Network error')) };
       const cloudflareApi = {
+        listTunnels: jest.fn().mockResolvedValue([{ id: 'tunnel-1' }]),
         listRoutes: jest.fn().mockResolvedValue([{ hostname: 'x.example.com', tunnelId: 'tunnel-1', protected: false }]),
         removeRoute: jest.fn(),
       };
@@ -634,6 +671,7 @@ describe('ReconciliationJob', () => {
 
       const dockerControl = { psAll: jest.fn().mockResolvedValue({ result: 'ok', containers: [] }) };
       const cloudflareApi = {
+        listTunnels: jest.fn().mockResolvedValue([{ id: 'tunnel-1' }]),
         listRoutes: jest.fn().mockResolvedValue([
           { hostname: 'orphan.example.com', tunnelId: 'tunnel-1', protected: false },
         ]),
@@ -674,6 +712,7 @@ describe('ReconciliationJob', () => {
 
       const dockerControl = { psAll: jest.fn().mockResolvedValue({ result: 'ok', containers: [] }) };
       const cloudflareApi = {
+        listTunnels: jest.fn().mockResolvedValue([{ id: 'tunnel-1' }]),
         listRoutes: jest.fn().mockResolvedValue([
           { hostname: 'orphan.example.com', tunnelId: 'tunnel-1', protected: false },
         ]),
@@ -992,6 +1031,581 @@ describe('ReconciliationJob', () => {
       );
       // Direct CF mutation must not have been called
       expect(stubs.cloudflareApi.addRoute).toBeUndefined();
+    });
+  });
+});
+
+// ── vps-tunnel-drift-notify (S-189) ──────────────────────────────────────────
+
+describe('vps-tunnel-drift-notify — Tunnel-Drift-Erkennung + ntfy-Push', () => {
+  /**
+   * Helper: baut einen ReconciliationJob mit optionalem ntfy-Push-Stub.
+   * listTunnelsResult steuert ob der Tunnel existiert oder fehlt.
+   */
+  function makeDriftJob({
+    tunnelId = 'tunnel-123',
+    vpsId = 'test-vps',
+    listTunnelsResult = [{ id: 'tunnel-123' }], // default: tunnel exists
+    sendNotificationFn = null,
+    readNotificationSettings = null,
+    credentialStore = null,
+  } = {}) {
+    const auditStore = new AuditStore();
+    const dockerControl = {
+      psAll: jest.fn().mockResolvedValue({ result: 'ok', containers: [] }),
+    };
+    const cloudflareApi = {
+      listTunnels: listTunnelsResult === 'error'
+        ? jest.fn().mockRejectedValue(Object.assign(new Error('CF down'), { errorClass: 'cloudflare-unavailable' }))
+        : jest.fn().mockResolvedValue(listTunnelsResult),
+      listRoutes: jest.fn().mockResolvedValue([]),
+      removeRoute: jest.fn(),
+      resolveZoneForHostname: jest.fn().mockResolvedValue('zone-1'),
+      deleteDnsRecord: jest.fn().mockResolvedValue(undefined),
+    };
+    const lockoutGuard = { isProtected: jest.fn().mockReturnValue(false) };
+    const orchestrator = { addRouteOnly: jest.fn().mockResolvedValue({ result: 'ok' }) };
+
+    const job = new ReconciliationJob({
+      dockerControl,
+      cloudflareApi,
+      lockoutGuard,
+      orchestrator,
+      auditStore,
+      vpsConfigs: [{ vpsId, vps: { host: '1.2.3.4', port: 22, targetUser: 'root' }, tunnelId }],
+      sendNotificationFn,
+      readNotificationSettings,
+      credentialStore,
+    });
+
+    return { job, auditStore, cloudflareApi, dockerControl, orchestrator };
+  }
+
+  // ── AC1: Drift-Erkennung ────────────────────────────────────────────────────
+
+  describe('AC1 — Tunnel-Existenz-Check', () => {
+    it('erkennt Drift wenn tunnelId nicht in listTunnels() → tunnelMissing:true im Report', async () => {
+      const { job } = makeDriftJob({
+        tunnelId: 'tunnel-abc',
+        listTunnelsResult: [{ id: 'tunnel-other' }], // tunnel-abc ist nicht dabei
+      });
+
+      const report = await job.reconcile('manual');
+      const vps = report.perVps[0];
+      expect(vps.tunnelMissing).toBe(true);
+      expect(vps.errors.some((e) => e.errorClass === 'tunnel-missing')).toBe(true);
+    });
+
+    it('kein Drift wenn tunnelId in listTunnels() enthalten → tunnelMissing undefined', async () => {
+      const { job } = makeDriftJob({
+        tunnelId: 'tunnel-abc',
+        listTunnelsResult: [{ id: 'tunnel-abc' }, { id: 'tunnel-other' }],
+      });
+
+      const report = await job.reconcile('manual');
+      const vps = report.perVps[0];
+      expect(vps.tunnelMissing).toBeUndefined();
+      expect(vps.errors).toHaveLength(0);
+    });
+
+    it('kein Tunnel-Drift-Check wenn VPS keine tunnelId hat', async () => {
+      const auditStore = new AuditStore();
+      const dockerControl = { psAll: jest.fn().mockResolvedValue({ result: 'ok', containers: [] }) };
+      const cloudflareApi = {
+        listTunnels: jest.fn(), // darf NICHT aufgerufen werden
+        listRoutes: jest.fn().mockResolvedValue([]),
+        removeRoute: jest.fn(),
+        resolveZoneForHostname: jest.fn(),
+        deleteDnsRecord: jest.fn(),
+      };
+      const lockoutGuard = { isProtected: jest.fn().mockReturnValue(false) };
+      const orchestrator = { addRouteOnly: jest.fn().mockResolvedValue({ result: 'ok' }) };
+
+      // tunnelId ist null → kein Drift-Check
+      const job = new ReconciliationJob({
+        dockerControl, cloudflareApi, lockoutGuard, orchestrator, auditStore,
+        vpsConfigs: [{ vpsId: 'no-tunnel-vps', vps: { host: '1.2.3.4' }, tunnelId: null }],
+      });
+
+      const report = await job.reconcile('manual');
+      expect(cloudflareApi.listTunnels).not.toHaveBeenCalled();
+      expect(report.perVps[0].tunnelMissing).toBeUndefined();
+    });
+  });
+
+  // ── AC2: Fail-closed + kein automatisches Heilen ───────────────────────────
+
+  describe('AC2 — Tunnel-Drift → fail-closed für Route-Konvergenz; kein createTunnel', () => {
+    it('bei Tunnel-Drift: kein psAll(), kein addRouteOnly(), kein removeRoute()', async () => {
+      const { job, dockerControl, orchestrator, cloudflareApi } = makeDriftJob({
+        listTunnelsResult: [], // Tunnel fehlt
+      });
+
+      await job.reconcile('manual');
+
+      // Fail-closed: psAll darf NICHT aufgerufen werden
+      expect(dockerControl.psAll).not.toHaveBeenCalled();
+      // Keine Route-Mutation
+      expect(orchestrator.addRouteOnly).not.toHaveBeenCalled();
+      expect(cloudflareApi.removeRoute).not.toHaveBeenCalled();
+      // Auch kein createTunnel-ähnlicher Aufruf (nicht vorhanden = implizit erfüllt)
+    });
+
+    it('bei Tunnel-Drift eines VPS: anderer VPS wird normal weiter abgeglichen', async () => {
+      const auditStore = new AuditStore();
+      const dockerControl = {
+        psAll: jest.fn().mockResolvedValue({ result: 'ok', containers: [] }),
+      };
+      const cloudflareApi = {
+        listTunnels: jest.fn()
+          .mockResolvedValueOnce([]) // vps-1: tunnel fehlt
+          .mockResolvedValueOnce([{ id: 'tunnel-2' }]), // vps-2: tunnel existiert
+        listRoutes: jest.fn().mockResolvedValue([]),
+        removeRoute: jest.fn(),
+        resolveZoneForHostname: jest.fn(),
+        deleteDnsRecord: jest.fn(),
+      };
+      const lockoutGuard = { isProtected: jest.fn().mockReturnValue(false) };
+      const orchestrator = { addRouteOnly: jest.fn().mockResolvedValue({ result: 'ok' }) };
+
+      const job = new ReconciliationJob({
+        dockerControl, cloudflareApi, lockoutGuard, orchestrator, auditStore,
+        vpsConfigs: [
+          { vpsId: 'vps-1', vps: { host: '1.2.3.4' }, tunnelId: 'tunnel-1' },
+          { vpsId: 'vps-2', vps: { host: '5.6.7.8' }, tunnelId: 'tunnel-2' },
+        ],
+      });
+
+      const report = await job.reconcile('manual');
+      const vps1 = report.perVps.find((v) => v.vps === 'vps-1');
+      const vps2 = report.perVps.find((v) => v.vps === 'vps-2');
+
+      // vps-1: Drift; vps-2: normal
+      expect(vps1.tunnelMissing).toBe(true);
+      expect(vps2.tunnelMissing).toBeUndefined();
+      // psAll darf für vps-1 nicht, für vps-2 schon aufgerufen werden
+      expect(dockerControl.psAll).toHaveBeenCalledTimes(1); // nur vps-2
+    });
+  });
+
+  // ── AC3: Report + Notice ───────────────────────────────────────────────────
+
+  describe('AC3 — tunnelMissing in Report; kind:tunnel-missing in Notice', () => {
+    it('persistiert ReconcileNotice kind:tunnel-missing im AuditStore', async () => {
+      const { job } = makeDriftJob({
+        listTunnelsResult: [], // tunnel fehlt
+      });
+
+      await job.reconcile('manual');
+
+      const notices = job.getNotices(10);
+      const notice = notices.find((n) => n.kind === 'tunnel-missing');
+      expect(notice).toBeTruthy();
+      expect(notice.vps).toBe('test-vps');
+    });
+
+    it('kein Tunnel-Token, kein CF-Token im Notice (AC8 Security)', async () => {
+      const { job } = makeDriftJob({
+        listTunnelsResult: [],
+      });
+
+      await job.reconcile('manual');
+
+      const notices = job.getNotices(10);
+      const noticeStr = JSON.stringify(notices);
+      expect(noticeStr).not.toMatch(/Bearer|PRIVATE KEY|api_token|ntfy_token/i);
+    });
+
+    it('tunnelMissing:true im ReconcileReport (kein Secret darin)', async () => {
+      const { job } = makeDriftJob({
+        tunnelId: 'tunnel-secret-free',
+        listTunnelsResult: [],
+      });
+
+      const report = await job.reconcile('manual');
+      const vps = report.perVps[0];
+      expect(vps.tunnelMissing).toBe(true);
+      // kein Secret in Report
+      expect(JSON.stringify(report)).not.toMatch(/Bearer|PRIVATE KEY/i);
+    });
+  });
+
+  // ── AC4: ntfy-Push ─────────────────────────────────────────────────────────
+
+  describe('AC4 — ntfy-Push beim Drift wenn aktiviert und tunnel_missing in events', () => {
+    it('sendet ntfy-Push beim neuen Tunnel-Drift (enabled=true, tunnel_missing in events)', async () => {
+      const sendFn = jest.fn(async () => ({ ok: true }));
+      const { job } = makeDriftJob({
+        listTunnelsResult: [], // tunnel fehlt → neuer Drift
+        sendNotificationFn: sendFn,
+        readNotificationSettings: async () => ({
+          enabled: true,
+          server: 'https://ntfy.sh',
+          topic: 'alerts',
+          priority: 4,
+          events: ['tunnel_missing'],
+        }),
+      });
+
+      await job.reconcile('manual');
+
+      expect(sendFn).toHaveBeenCalledTimes(1);
+      const [config, payload] = sendFn.mock.calls[0];
+      expect(config.server).toBe('https://ntfy.sh');
+      expect(config.topic).toBe('alerts');
+      // Payload nennt VPS und Hinweis — ohne Secrets
+      expect(payload.title).toContain('test-vps');
+      expect(payload.message).toContain('Tunnel');
+    });
+
+    it('kein Push wenn enabled=false', async () => {
+      const sendFn = jest.fn(async () => ({ ok: true }));
+      const { job } = makeDriftJob({
+        listTunnelsResult: [],
+        sendNotificationFn: sendFn,
+        readNotificationSettings: async () => ({
+          enabled: false,
+          server: 'https://ntfy.sh',
+          topic: 'alerts',
+          priority: null,
+          events: ['tunnel_missing'],
+        }),
+      });
+
+      await job.reconcile('manual');
+
+      expect(sendFn).not.toHaveBeenCalled();
+    });
+
+    it('kein Push wenn tunnel_missing nicht in events', async () => {
+      const sendFn = jest.fn(async () => ({ ok: true }));
+      const { job } = makeDriftJob({
+        listTunnelsResult: [],
+        sendNotificationFn: sendFn,
+        readNotificationSettings: async () => ({
+          enabled: true,
+          server: 'https://ntfy.sh',
+          topic: 'alerts',
+          priority: null,
+          events: ['story_done'], // tunnel_missing NICHT aktiviert
+        }),
+      });
+
+      await job.reconcile('manual');
+
+      expect(sendFn).not.toHaveBeenCalled();
+    });
+
+    it('kein Push wenn kein sendNotificationFn konfiguriert (kein Crash)', async () => {
+      const { job } = makeDriftJob({
+        listTunnelsResult: [],
+        sendNotificationFn: null,
+        readNotificationSettings: async () => ({
+          enabled: true,
+          server: 'https://ntfy.sh',
+          topic: 'alerts',
+          priority: null,
+          events: ['tunnel_missing'],
+        }),
+      });
+
+      // Kein Fehler, kein Crash
+      const report = await job.reconcile('manual');
+      expect(report.perVps[0].tunnelMissing).toBe(true);
+    });
+
+    it('kein Token in Push-Payload (AC8 Security)', async () => {
+      const sendFn = jest.fn(async () => ({ ok: true }));
+      const { job } = makeDriftJob({
+        listTunnelsResult: [],
+        sendNotificationFn: sendFn,
+        readNotificationSettings: async () => ({
+          enabled: true,
+          server: 'https://ntfy.sh',
+          topic: 'alerts',
+          priority: null,
+          events: ['tunnel_missing'],
+        }),
+      });
+
+      await job.reconcile('manual');
+
+      // Payload darf kein Token enthalten
+      const payload = sendFn.mock.calls[0]?.[1];
+      expect(payload).toBeTruthy();
+      const payloadStr = JSON.stringify(payload);
+      expect(payloadStr).not.toMatch(/Bearer|api_token|ntfy_token|PRIVATE KEY/i);
+    });
+  });
+
+  // ── AC5: Best-effort (Push-Fehler bricht Reconcile nicht ab) ──────────────
+
+  describe('AC5 — Push best-effort: ntfy-Fehler bricht Reconcile nicht ab', () => {
+    it('sendNotification wirft → reconcile() resolved trotzdem', async () => {
+      const sendFn = jest.fn(async () => {
+        throw new Error('ntfy network error');
+      });
+      const { job } = makeDriftJob({
+        listTunnelsResult: [],
+        sendNotificationFn: sendFn,
+        readNotificationSettings: async () => ({
+          enabled: true,
+          server: 'https://ntfy.sh',
+          topic: 'alerts',
+          priority: null,
+          events: ['tunnel_missing'],
+        }),
+      });
+
+      let threw = false;
+      try {
+        await job.reconcile('manual');
+      } catch {
+        threw = true;
+      }
+
+      expect(threw).toBe(false);
+      expect(sendFn).toHaveBeenCalled();
+    });
+
+    it('Settings-Lese-Fehler → kein Push, kein Crash', async () => {
+      const sendFn = jest.fn();
+      const { job } = makeDriftJob({
+        listTunnelsResult: [],
+        sendNotificationFn: sendFn,
+        readNotificationSettings: async () => {
+          throw new Error('Settings nicht lesbar');
+        },
+      });
+
+      let threw = false;
+      try {
+        await job.reconcile('manual');
+      } catch {
+        threw = true;
+      }
+
+      expect(threw).toBe(false);
+      expect(sendFn).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── AC6: Kein Push-Sturm / Übergangs-Erkennung ────────────────────────────
+
+  describe('AC6 — Push nur beim Übergang (kein Spam); kein Re-Fire nach Neustart', () => {
+    it('zweiter Reconcile-Lauf mit gleichem Drift → kein erneuter Push', async () => {
+      const sendFn = jest.fn(async () => ({ ok: true }));
+      const { job } = makeDriftJob({
+        listTunnelsResult: [], // Tunnel fehlt in BEIDEN Läufen
+        sendNotificationFn: sendFn,
+        readNotificationSettings: async () => ({
+          enabled: true,
+          server: 'https://ntfy.sh',
+          topic: 'alerts',
+          priority: null,
+          events: ['tunnel_missing'],
+        }),
+      });
+
+      // Erster Lauf: Übergang → Push
+      await job.reconcile('manual');
+      expect(sendFn).toHaveBeenCalledTimes(1);
+
+      // Zweiter Lauf: Drift unverändert → kein weiterer Push
+      await job.reconcile('manual');
+      expect(sendFn).toHaveBeenCalledTimes(1); // immer noch nur 1
+    });
+
+    it('Tunnel geheilt + erneut weg → neuer Übergang → Push erneut', async () => {
+      const sendFn = jest.fn(async () => ({ ok: true }));
+      const cloudflareApi = {
+        listTunnels: jest.fn()
+          .mockResolvedValueOnce([])                     // Lauf 1: Tunnel fehlt
+          .mockResolvedValueOnce([{ id: 'tunnel-123' }]) // Lauf 2: geheilt
+          .mockResolvedValueOnce([]),                    // Lauf 3: fehlt wieder
+        listRoutes: jest.fn().mockResolvedValue([]),
+        removeRoute: jest.fn(),
+        resolveZoneForHostname: jest.fn(),
+        deleteDnsRecord: jest.fn(),
+      };
+      const auditStore = new AuditStore();
+      const dockerControl = { psAll: jest.fn().mockResolvedValue({ result: 'ok', containers: [] }) };
+      const lockoutGuard = { isProtected: jest.fn().mockReturnValue(false) };
+      const orchestrator = { addRouteOnly: jest.fn().mockResolvedValue({ result: 'ok' }) };
+
+      const job = new ReconciliationJob({
+        dockerControl, cloudflareApi, lockoutGuard, orchestrator, auditStore,
+        vpsConfigs: [{ vpsId: 'heal-vps', vps: { host: '1.2.3.4' }, tunnelId: 'tunnel-123' }],
+        sendNotificationFn: sendFn,
+        readNotificationSettings: async () => ({
+          enabled: true, server: 'https://ntfy.sh', topic: 'alerts', priority: null,
+          events: ['tunnel_missing'],
+        }),
+      });
+
+      await job.reconcile('manual'); // Push 1 (erster Drift)
+      expect(sendFn).toHaveBeenCalledTimes(1);
+
+      await job.reconcile('manual'); // Tunnel geheilt → kein Push
+      expect(sendFn).toHaveBeenCalledTimes(1);
+
+      await job.reconcile('manual'); // Tunnel wieder weg → neuer Übergang → Push 2
+      expect(sendFn).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  // ── AC7: tunnel_missing in ALLOWED_EVENTS ─────────────────────────────────
+
+  describe('AC7 — tunnel_missing in ALLOWED_EVENTS; PUT-Validierung akzeptiert ihn', () => {
+    it('ALLOWED_EVENTS enthält tunnel_missing', () => {
+      expect(ALLOWED_EVENTS).toContain('tunnel_missing');
+    });
+
+    it('validate() akzeptiert events: ["tunnel_missing"]', () => {
+      const result = validateNotificationSettings({
+        enabled: true,
+        server: 'https://ntfy.sh',
+        topic: 'my-topic',
+        events: ['tunnel_missing'],
+        priority: null,
+      });
+      expect(result.ok).toBe(true);
+    });
+
+    it('validate() akzeptiert Kombination von Story- und Tunnel-Events', () => {
+      const result = validateNotificationSettings({
+        events: ['story_done', 'tunnel_missing', 'feature_done'],
+      });
+      expect(result.ok).toBe(true);
+    });
+
+    it('validate() lehnt unbekannte Events ab (tunnel_missing allein gültig, anderes_event nicht)', () => {
+      const result = validateNotificationSettings({
+        events: ['tunnel_missing', 'unbekannt_event'],
+      });
+      expect(result.ok).toBe(false);
+      expect(result.field).toBe('events');
+    });
+  });
+
+  // ── AC8: Security Floor ────────────────────────────────────────────────────
+
+  describe('AC8 — Security: kein Tunnel-Token, kein CF-Token in Push/Notice/Report', () => {
+    it('CF-Fehler bei listTunnels → kein Fehlalarm-Push, degradierend', async () => {
+      const sendFn = jest.fn(async () => ({ ok: true }));
+      const { job } = makeDriftJob({
+        listTunnelsResult: 'error', // CF nicht erreichbar
+        sendNotificationFn: sendFn,
+        readNotificationSettings: async () => ({
+          enabled: true, server: 'https://ntfy.sh', topic: 'alerts', priority: null,
+          events: ['tunnel_missing'],
+        }),
+      });
+
+      const report = await job.reconcile('manual');
+
+      // Kein Fehlalarm-Push bei nicht-prüfbarem Zustand (AC spec Edge-Cases)
+      expect(sendFn).not.toHaveBeenCalled();
+      // VPS als degradiert vermerkt (cloudflare-unavailable im errors[])
+      const vps = report.perVps[0];
+      expect(vps.tunnelMissing).toBeUndefined();
+      expect(vps.errors.some((e) => e.errorClass === 'cloudflare-unavailable')).toBe(true);
+    });
+
+    it('kein tunnelId → kein Drift, kein Push, kein listTunnels-Aufruf', async () => {
+      const sendFn = jest.fn();
+      const auditStore = new AuditStore();
+      const listTunnelsFn = jest.fn();
+      const dockerControl = { psAll: jest.fn().mockResolvedValue({ result: 'ok', containers: [] }) };
+      const cloudflareApi = {
+        listTunnels: listTunnelsFn,
+        listRoutes: jest.fn().mockResolvedValue([]),
+        removeRoute: jest.fn(),
+        resolveZoneForHostname: jest.fn(),
+        deleteDnsRecord: jest.fn(),
+      };
+      const lockoutGuard = { isProtected: jest.fn().mockReturnValue(false) };
+      const orchestrator = { addRouteOnly: jest.fn().mockResolvedValue({ result: 'ok' }) };
+
+      const job = new ReconciliationJob({
+        dockerControl, cloudflareApi, lockoutGuard, orchestrator, auditStore,
+        // tunnelId ist leer-String → kein Drift-Check
+        vpsConfigs: [{ vpsId: 'no-tunnel', vps: { host: '1.2.3.4' }, tunnelId: '' }],
+        sendNotificationFn: sendFn,
+        readNotificationSettings: async () => ({
+          enabled: true, server: 'https://ntfy.sh', topic: 'alerts', priority: null,
+          events: ['tunnel_missing'],
+        }),
+      });
+
+      await job.reconcile('manual');
+
+      expect(listTunnelsFn).not.toHaveBeenCalled();
+      expect(sendFn).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── Composition-Root-Naht: alle drei Deps verdrahtet → Push feuert ──────────
+  // Absichert I1 (server.js-Befund): sendNotificationFn/readNotificationSettings/credentialStore
+  // müssen im Constructor übergeben werden, damit AC4 zur Laufzeit aktiv ist.
+
+  describe('Composition-Root-Naht — sendNotificationFn + readNotificationSettings + credentialStore korrekt verdrahtet', () => {
+    it('sendNotificationFn wird aufgerufen wenn alle drei Deps gesetzt und Drift erkannt', async () => {
+      const sendFn = jest.fn(async () => ({ ok: true }));
+      const readSettings = jest.fn(async () => ({
+        enabled: true,
+        server: 'https://ntfy.sh',
+        topic: 'alerts',
+        priority: null,
+        events: ['tunnel_missing'],
+      }));
+      // Minimal credentialStore stub — getPlaintext gibt null zurück (kein Token nötig)
+      const credStore = { getPlaintext: jest.fn(async () => null) };
+
+      const { job } = makeDriftJob({
+        tunnelId: 'tunnel-wiring',
+        listTunnelsResult: [], // Tunnel fehlt → Drift → Push
+        sendNotificationFn: sendFn,
+        readNotificationSettings: readSettings,
+        credentialStore: credStore,
+      });
+
+      await job.reconcile('manual');
+
+      // sendNotificationFn muss aufgerufen worden sein — AC4 zur Laufzeit aktiv
+      expect(sendFn).toHaveBeenCalledTimes(1);
+      // readNotificationSettings muss aufgerufen worden sein
+      expect(readSettings).toHaveBeenCalled();
+      // Payload darf keinen Token enthalten (AC8)
+      const [config, payload] = sendFn.mock.calls[0];
+      expect(config.token).toBeNull(); // credStore.getPlaintext gab null zurück
+      expect(payload.title).toContain('Tunnel fehlt');
+      expect(payload.message).not.toMatch(/token|Token|secret|key|Key/i);
+    });
+
+    it('ohne sendNotificationFn (fehlendes Dep wie vor dem Fix) → kein Push, kein Crash', async () => {
+      // Simuliert den Zustand vor dem I1-Fix: sendNotificationFn nicht übergeben
+      const { job } = makeDriftJob({
+        tunnelId: 'tunnel-unwired',
+        listTunnelsResult: [], // Drift erkannt
+        sendNotificationFn: null, // bewusst nicht gesetzt
+        readNotificationSettings: async () => ({
+          enabled: true, server: 'https://ntfy.sh', topic: 'alerts', priority: null,
+          events: ['tunnel_missing'],
+        }),
+      });
+
+      let threw = false;
+      let report;
+      try {
+        report = await job.reconcile('manual');
+      } catch {
+        threw = true;
+      }
+
+      expect(threw).toBe(false);
+      // Drift wird im Report vermerkt, aber kein Push gesendet
+      expect(report.perVps[0].tunnelMissing).toBe(true);
     });
   });
 });

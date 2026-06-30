@@ -27,8 +27,8 @@ import { randomBytes } from 'node:crypto';
 export const NTFY_PRIORITY_MIN = 1;
 export const NTFY_PRIORITY_MAX = 5;
 
-/** Erlaubte Ereignis-Schlüssel (AC2). */
-export const ALLOWED_EVENTS = ['story_done', 'story_blocked', 'feature_done'];
+/** Erlaubte Ereignis-Schlüssel (AC2 push-notifications; AC7 vps-tunnel-drift-notify). */
+export const ALLOWED_EVENTS = ['story_done', 'story_blocked', 'feature_done', 'tunnel_missing'];
 
 /**
  * Erlaubtes ntfy-Topic-Format: nur Buchstaben, Ziffern, `-` und `_`, 1–64 Zeichen.

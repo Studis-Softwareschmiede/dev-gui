@@ -113,6 +113,7 @@ import { AssistService } from './src/AssistService.js';
 import { KnowledgeSourceService } from './src/KnowledgeSourceService.js';
 import { read as readNotificationSettings } from './src/NotificationSettingsStore.js';
 import { NotificationWatcher } from './src/NotificationWatcher.js';
+import { sendNotification } from './src/NotifyService.js';
 import { mountRouters } from './src/routerLoader.js';
 
 const PORT = Number(process.env.PORT ?? 8080);
@@ -215,6 +216,9 @@ const reconciliationJob = new ReconciliationJob({
   orchestrator: deployOrchestrator,
   auditStore,
   vpsConfigs: reconcileVpsConfigs,
+  sendNotificationFn: sendNotification,
+  readNotificationSettings,
+  credentialStore,
 });
 reconciliationJob.startScheduler();
 
