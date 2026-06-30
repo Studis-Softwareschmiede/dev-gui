@@ -12,7 +12,7 @@
  *        CockpitView setzt activeSpecPath als State und übergibt es als Prop.
  *
  * AC6 — Filter nach Doku-Typ (Konzept/Architektur/Spec/README) + Spec-Status
- *        (draft/active/approved/superseded). Mehrfachauswahl konsistent zum Board-Filter-Muster:
+ *        (draft/active/superseded). Mehrfachauswahl konsistent zum Board-Filter-Muster:
  *        Checkboxen in einem kleinen FilterBar-Element.
  *
  * Security (Floor):
@@ -53,7 +53,7 @@ const TYPE_LABELS = {
 };
 
 /** Alle Spec-Status-Werte (AC6 Filter). */
-const ALL_SPEC_STATUSES = ['draft', 'active', 'approved', 'superseded'];
+const ALL_SPEC_STATUSES = ['draft', 'active', 'superseded'];
 
 // ── SpecView ──────────────────────────────────────────────────────────────────
 
@@ -387,7 +387,6 @@ function SpecFilterBar({ filterTypes, filterStatuses, onToggleType, onToggleStat
 const STATUS_CHIP_STYLES = {
   draft:      { background: '#1e293b', color: '#93c5fd', borderColor: '#334155' },
   active:     { background: '#1a2a1a', color: '#86efac', borderColor: '#14532d' },
-  approved:   { background: '#1a2a1a', color: '#4ade80', borderColor: '#166534' },
   superseded: { background: '#2a2a2a', color: '#6b7280', borderColor: '#374151' },
   _default:   { background: '#2a2a2a', color: '#9ca3af', borderColor: '#4b5563' },
 };

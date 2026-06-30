@@ -16,7 +16,7 @@ version: 1
 - **WO — keine neue Kachel.** Die Doku lebt **im geöffneten Projekt des Studis-Kanban-Boards** als zweiter Reiter „Spezifikation" neben „Board". Begründung: Specs sind ohnehin **pro Projekt** und **mit Stories verknüpft** (jede Story zeigt auf `docs/specs/<x>.md`). Das Board lädt eh pro Projekt (Lazy-Load, [[studis-kanban-board-ux]]) — die Doku gehört genau dorthin. Kein neuer Einstiegspunkt.
 - **WIE — zweispaltig.** Links eine **Navigation** (gruppiert nach Schicht: Konzept · Architektur · Specs · README/Sonstige), rechts der **gerenderte Markdown-Inhalt** (vorhandener `markdownLite.jsx`).
 - **NAVIGATION — bidirektional.** (a) Vom Board: Klick auf den Spec-Bezug einer Story öffnet die Spec im Reiter. (b) Optional Rückverweis: Spec → welche Stories implementieren sie.
-- **FILTER.** Nach **Doku-Typ** (Konzept/Architektur/Spec/README) und **Spec-Status** (draft/active/approved/superseded — aus dem Frontmatter). Bei 56 Specs (dev-gui) nötig.
+- **FILTER.** Nach **Doku-Typ** (Konzept/Architektur/Spec/README) und **Spec-Status** (draft/active/superseded — aus dem Frontmatter). Bei 56 Specs (dev-gui) nötig.
 - **QUELLE/PERSISTENZ.** Die `.md`-Dateien im Repo, **read-only** gelesen. Neuer `DocsReader` (analog RetroReader/AgentFlowReader). **Lazy pro Projekt** (konsistent mit dem Board-Lazy-Load) — nicht alle Repos vorab.
 - **FLOW.** Reine Anzeige. Geschrieben wird die Doku von requirement/architekt/designer via PR (unverändert).
 
@@ -36,7 +36,7 @@ Im geöffneten Projekt ein Reiter neben „Board". Links Navigationsbaum (Schich
 Im Board-Reiter: der Spec-Bezug einer Story (z.B. „Spec: docs/specs/x.md") ist klickbar und öffnet die Datei im Spezifikation-Reiter. (Optional: Spec-Detail zeigt rückverweisend die implementierenden Stories.)
 
 ### V5 — Filter (Frontend)
-Im Spezifikation-Reiter Filter nach Doku-Typ (Konzept/Architektur/Spec/README) + Spec-Status (draft/active/approved/superseded). Mehrfachauswahl konsistent zum Board-Filter-Muster.
+Im Spezifikation-Reiter Filter nach Doku-Typ (Konzept/Architektur/Spec/README) + Spec-Status (draft/active/superseded). Mehrfachauswahl konsistent zum Board-Filter-Muster.
 
 ## Acceptance-Kriterien
 
