@@ -1,7 +1,7 @@
 id: S-192
 parent: F-029
 title: 'ProjectDrain-Engine: zustandsbasierte Abbruch-Regel + Eskalation-auf-Blocked'
-status: To Do
+status: Done
 priority: P1
 spec: docs/specs/taktgeber-nachtwaechter.md
 implements:
@@ -25,30 +25,50 @@ estimate_note: 'L-Heuristik (requirement): score>=8 (6 AC + Orchestrierung mehre
   Umgebung; dispo_est=5 aus baseline.json js|balanced|L (n=5). confidence low — vor
   Abarbeitung ggf. splitten (Abbruch-Regel vs. Eskalation).'
 confidence: low
-branch: null
+branch: feat/S-192-project-drain-engine
 pr: null
 blocked_reason: null
 created_at: '2026-06-30T20:09:55Z'
-updated_at: '2026-06-30T20:09:55Z'
-done_at: null
-notes: |
-  Kern: drainProject(projectPath) stoesst wiederholt /agent-flow:flow an (ueber
+updated_at: '2026-06-30T22:47:57Z'
+done_at: '2026-06-30T22:47:57Z'
+notes: 'Kern: drainProject(projectPath) stoesst wiederholt /agent-flow:flow an (ueber
+
   CommandService.tryRun, einziger PTY-Schreibpfad), solange mindestens eine
+
   DRAIN-ZIEL-Story existiert (zustandsbasiert, KEINE Fortschritts-Bremse).
+
   DRAIN-ZIELE (Spec v2, verbindlich) = (a) To-Do mit ready==true gemaess
+
   BoardAggregator.computeStoryReadyStatus (massgebliche ready-Regel, NICHT neu
+
   definieren) PLUS (b) verwaiste In Progress (staleInProgressHours). NICHT-Drain-
+
   Ziele (nie autonom anfassen): To-Do mit ready==false (fehlende/inaktive Spec,
+
   fehlende AC, unerfuellte depends), Blocked, Status Idee ([[ideen-inbox]]), Done.
+
   Abbruch/Konvergenz (AC2): stoppen genau dann, wenn keine Drain-Ziel-Story mehr
+
   existiert UND kein To-Do durch Fertigstellen eines Vorgaengers ready werden KANN
+
   (depends-only Wartende werden automatisch ready und mitgezogen). Status-Quelle:
+
   BoardAggregator.getIndex() inkl. ready-Flag (read-only). Fortschritt (AC5) = jede
+
   Status-Aenderung ODER ready==false->true-Uebergang zwischen zwei Scans (Snapshot-
+
   Diff, Muster NotificationWatcher.detectTransitions) -> setzt kein-Fortschritt-
+
   Zaehler zurueck. Eskalation (AC4): nach escalationAttempts (Default 3)
+
   fortschrittslosen Laeufen -> aelteste unbewegte DRAIN-ZIEL-Story via BoardWriter
+
   (S-191) auf Blocked + blocked_reason "Taktgeber: Nx kein Fortschritt" ->
+
   garantierte Konvergenz; nicht-ready To-Do und Idee werden nie eskaliert.
+
   Projekt-Lock (S-190) = 1 je Projekt. Audit (AC18) je Drain-Start/flow-Anstoss/
+
   Eskalation. Zentrale Engine fuer S-195 (Scheduler) + S-196 (Knopf).
+
+  '
