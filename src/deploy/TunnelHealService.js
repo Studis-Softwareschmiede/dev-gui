@@ -4,7 +4,7 @@
  * Implementiert Phase 1, Phase 2 und Phase 3 der Tunnel-Wiederherstellung:
  *
  * Phase 1 — Tunnel neu anlegen & Referenz ersetzen:
- *   1. CloudflareApi.createTunnel("devgui-<sanitized-vpsname>") → { tunnelId, token }
+ *   1. CloudflareApi.createTunnel("<sanitized-vpsname>") → { tunnelId, token }
  *   2. Token im CredentialStore unter TUNNEL_TOKEN_KEY(newTunnelId) ablegen.
  *   3. TUNNEL_ID_KEY(sanitized) auf die neue Id aktualisieren (alte tote Referenz ersetzt).
  *   4. Alte Token-Referenz best-effort aufräumen (kein Rollback bei Fehler).
@@ -117,7 +117,8 @@ export class TunnelHealService {
    */
   async recreate({ vpsId, vpsName, vpsTarget, identity, auditStore }) {
     const sanitized = sanitizeTunnelName(vpsName);
-    const tunnelName = `devgui-${sanitized}`;
+    // Tunnel-Name = Servername (sanitisiert). Kein Präfix — der Name spiegelt den VPS.
+    const tunnelName = sanitized;
 
     // Alte Tunnel-Id lesen (für best-effort Alt-Token-Cleanup nach Phase 1, AC1)
     let oldTunnelId = null;
@@ -152,7 +153,7 @@ export class TunnelHealService {
     // ── Phase 1 — Tunnel neu anlegen & Referenz ersetzen ─────────────────────────
 
     // Idempotenz (Selbstheilung wiederholbar): Ein gleichnamiger Tunnel aus einem früheren
-    // (Teil-)Lauf — oder ein verwaister `devgui-<vps>`, der den Namen noch belegt — würde
+    // (Teil-)Lauf — oder ein verwaister gleichnamiger Tunnel, der den Namen noch belegt — würde
     // createTunnel mit HTTP 409 conflict blockieren. Vorab abräumen. Best-effort: scheitert
     // der Cleanup, kommt der Konflikt unten sauber als errorClass 'conflict' hoch.
     try {

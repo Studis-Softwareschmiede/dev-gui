@@ -19,7 +19,7 @@
  *   AC6  — Audit ohne Key-Material
  *
  * Covers (vps-tunnel-provisioning / S-152):
- *   AC5  — create() ruft createTunnel('devgui-<sanitized-vpsname>') auf + Token in cloud-init
+ *   AC5  — create() ruft createTunnel('<sanitized-vpsname>') auf (Tunnel-Name = Servername) + Token in cloud-init
  *   AC6  — Token erscheint NICHT im Log/Response/Argv (Token-Floor)
  *   AC7  — tunnelId dem VPS zugeordnet (im CredentialStore gespeichert); keine Token-Referenz
  *   AC8  — Token im CredentialStore abgelegt (set() aufgerufen); kein Token in VpsMachine-Return
@@ -669,7 +669,7 @@ function makeBuildCapture() {
 }
 
 describe('VpsProviderRegistry — S-152 Tunnel-Provisionierung beim Create', () => {
-  it('AC5 — createTunnel("devgui-<sanitized-vpsname>") wird aufgerufen', async () => {
+  it('AC5 — createTunnel("<sanitized-vpsname>") wird aufgerufen (Tunnel-Name = Servername)', async () => {
     const store = makeCredentialStore(
       { hetzner: MOCK_TOKEN },
       { root: ROOT_PUB_KEY, alex: ALEX_PUB_KEY },
@@ -695,9 +695,9 @@ describe('VpsProviderRegistry — S-152 Tunnel-Provisionierung beim Create', () 
       sshKeyAssignment: { root: 'root', alex: 'alex' },
     });
 
-    // Tunnel-Name-Konvention: devgui-<sanitized> (lowercase, alphanumerisch+Bindestrich)
+    // Tunnel-Name-Konvention: Servername sanitisiert, kein Präfix (lowercase, alphanumerisch+Bindestrich)
     expect(calls).toHaveLength(1);
-    expect(calls[0]).toMatch(/^createTunnel:devgui-my-server-01$/);
+    expect(calls[0]).toMatch(/^createTunnel:my-server-01$/);
   });
 
   it('AC5 — tunnelToken wird an CloudInitBuilder.build() übergeben', async () => {

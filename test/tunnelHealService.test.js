@@ -160,7 +160,7 @@ describe('TunnelHealService — Konstruktor', () => {
 // ── Phase 1 — Tunnel neu anlegen & Referenz ersetzen ─────────────────────────
 
 describe('TunnelHealService — Phase 1: Tunnel anlegen (AC1)', () => {
-  it('AC1: createTunnel mit devgui-<vpsId>-Namen aufgerufen', async () => {
+  it('AC1: createTunnel mit Servername (sanitisiert, kein Präfix) aufgerufen', async () => {
     const cfApi = makeCloudflareApiStub();
     const store = makeCredentialStoreStub();
     const docker = makeVpsDockerControlStub();
@@ -169,13 +169,13 @@ describe('TunnelHealService — Phase 1: Tunnel anlegen (AC1)', () => {
     const svc = new TunnelHealService({ cloudflareApi: cfApi, vpsDockerControl: docker, credentialStore: store });
     await svc.recreate({ vpsId: VPS_ID, vpsName: VPS_ID, vpsTarget: VPS_TARGET, identity: 'admin@test.com', auditStore: audit });
 
-    expect(cfApi.createTunnel).toHaveBeenCalledWith(`devgui-${VPS_ID}`);
+    expect(cfApi.createTunnel).toHaveBeenCalledWith(VPS_ID);
   });
 
   it('Idempotenz: gleichnamiger Alt-Tunnel wird VOR createTunnel gelöscht (kein 409-conflict)', async () => {
     const cfApi = makeCloudflareApiStub({
       listTunnelsResult: [
-        { id: 'stale-same-name', name: `devgui-${VPS_ID}`, status: 'inactive' },
+        { id: 'stale-same-name', name: VPS_ID, status: 'inactive' },
         { id: 'fremder-tunnel', name: 'beautymoltTunnel', status: 'down' },
       ],
     });

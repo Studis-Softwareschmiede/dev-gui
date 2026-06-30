@@ -13,7 +13,7 @@ version: 1
 
 ## Zweck
 **Capability B des selbstheilenden VPS-Tunnel-Vorhabens.** Wenn der Cloudflare-Tunnel eines VPS extern gelöscht wurde ([[vps-tunnel-existence-gate]] erkennt das als `tunnel-missing`), soll der Owner ihn **mit einem Klick** wiederherstellen — **ohne** den VPS neu zu bauen und **ohne** manuelles Nachpflegen. Pro VPS gibt es einen Knopf „Tunnel neu anlegen & bestücken", der in einem Rutsch:
-1. einen **neuen Cloudflare-Tunnel** anlegt (`CloudflareApi.createTunnel`, Namens-Konvention `devgui-<vps>`), die gespeicherte `tunnelId` in der `VpsProviderRegistry` aktualisiert (alte tote Referenz ersetzen) und das neue Token im `CredentialStore` ablegt;
+1. einen **neuen Cloudflare-Tunnel** anlegt (`CloudflareApi.createTunnel`, Namens-Konvention `<vpsname>`), die gespeicherte `tunnelId` in der `VpsProviderRegistry` aktualisiert (alte tote Referenz ersetzen) und das neue Token im `CredentialStore` ablegt;
 2. das **neue Token per SSH auf den VPS** schiebt — die env-file `/etc/cloudflared/env` ersetzt (`TUNNEL_TOKEN=<neu>`, `0600 root:root`) und den `cloudflared`-Docker-Container neu startet (sonst verbindet sich der VPS nie mit dem neuen Tunnel); Token nie in Argv/Log/Audit/Response/WS;
 3. die laufenden **managed Container** des VPS ausliest (`VpsDockerControl.ps` → Hostname via Label `cloudflare.tunnel-hostname` + Host-Port) und für **jeden** Container am neuen Tunnel die **Route anlegt** (`addRoute`) + **CNAME setzt** (`createDnsRecord` ist idempotent → biegt bestehende CNAMEs auf den neuen Tunnel um) — über denselben atomaren Anlege-Pfad wie der Deploy/die Reconciliation.
 
@@ -24,7 +24,7 @@ Ergebnis: VPS wieder voll erreichbar, ohne VPS-Neubau.
 ## Verhalten
 1. **Ein-Klick-Endpunkt.** Ein mutierender Endpunkt `POST /api/deployments/vps/{vpsId}/tunnel/recreate` (Access + `CRED_ADMIN_EMAILS`-Rolle + Audit-First + LockoutGuard) führt die drei Phasen sequenziell aus und liefert einen strukturierten, **secret-freien** Report.
 2. **Phase 1 — Tunnel neu anlegen & Referenz ersetzen.**
-   - `CloudflareApi.createTunnel("devgui-<sanitized-vpsname>")` → `{ tunnelId, token }` (remote-managed; Namens-/Sanitize-Konvention identisch zu [[vps-tunnel-provisioning]]).
+   - `CloudflareApi.createTunnel("<sanitized-vpsname>")` → `{ tunnelId, token }` (remote-managed; Namens-/Sanitize-Konvention identisch zu [[vps-tunnel-provisioning]]).
    - Das neue **Token** wird im `CredentialStore` unter `TUNNEL_TOKEN_KEY(newTunnelId)` (`credentials/cloudflare/tunnel_token/<tunnelId>`) abgelegt; die gespeicherte `tunnelId` des VPS (`TUNNEL_ID_KEY(sanitize(vpsName))` = `credentials/misc/vps-<name>-tunnel-id`) wird **auf die neue Id aktualisiert** (alte tote Referenz ersetzt).
    - Die **alte** Token-Referenz wird best-effort aufgeräumt (`CredentialStore.delete(TUNNEL_TOKEN_KEY(oldTunnelId))`), sofern eine alte Id bekannt war; ein Fehler dabei kippt die Heilung nicht.
 3. **Phase 2 — Token auf den VPS pushen & cloudflared neu starten (via SSH).**
@@ -42,7 +42,7 @@ Ergebnis: VPS wieder voll erreichbar, ohne VPS-Neubau.
 ## Acceptance-Kriterien
 
 ### Phase 1 — Tunnel neu anlegen & Referenz ersetzen
-- **AC1** — `POST /api/deployments/vps/{vpsId}/tunnel/recreate` legt über `CloudflareApi.createTunnel("devgui-<sanitized-vpsname>")` genau **einen** neuen remote-managed Tunnel an, legt das zurückgegebene **Token** im `CredentialStore` unter `TUNNEL_TOKEN_KEY(newTunnelId)` ab und **aktualisiert** die gespeicherte `tunnelId` des VPS (`TUNNEL_ID_KEY`) auf die neue Id (testbar: nach Erfolg liefert die VPS↔Tunnel-Auflösung die **neue** Id; das alte Token-Referenz-Key wird best-effort entfernt).
+- **AC1** — `POST /api/deployments/vps/{vpsId}/tunnel/recreate` legt über `CloudflareApi.createTunnel("<sanitized-vpsname>")` genau **einen** neuen remote-managed Tunnel an, legt das zurückgegebene **Token** im `CredentialStore` unter `TUNNEL_TOKEN_KEY(newTunnelId)` ab und **aktualisiert** die gespeicherte `tunnelId` des VPS (`TUNNEL_ID_KEY`) auf die neue Id (testbar: nach Erfolg liefert die VPS↔Tunnel-Auflösung die **neue** Id; das alte Token-Referenz-Key wird best-effort entfernt).
 - **AC2** — Schlägt `createTunnel` fehl (`cloudflare-not-configured`/`cloudflare-auth-failed`/`cloudflare-unavailable`), bricht die Heilung **vor** Phase 2 ab (kein SSH-Schritt, keine Routen), mit klarer Fehlerklasse; es bleibt **kein** halb angelegtes, unreferenziertes Geheimnis zurück.
 
 ### Phase 2 — Token-Push & cloudflared-Restart (SSH)
@@ -68,7 +68,7 @@ Ergebnis: VPS wieder voll erreichbar, ohne VPS-Neubau.
 
 - **POST `/api/deployments/vps/{vpsId}/tunnel/recreate`** — Body optional `{}` → `{ result: "ok"|"error", report }`. Hinter Access + Rolle + Audit + LockoutGuard.
 - **`TunnelRecreateReport` (secret-frei):** `{ vpsId, newTunnelId: string, oldTunnelId: string|null, phase2: { ok: boolean, errorClass?: string }, routes: [{ hostname, result: "route-created"|"protected-skipped"|"error", errorClass? }], errors: [{ scope, errorClass }] }`. **Keine** Secrets (kein Token, kein Key).
-- **Phase 1:** `CloudflareApi.createTunnel("devgui-<sanitize(vpsName)>")` → `{ tunnelId, token }`; Token → `CredentialStore.set(TUNNEL_TOKEN_KEY(newTunnelId), token)`; `TUNNEL_ID_KEY(sanitize(vpsName))` → newTunnelId; alte Token-Referenz best-effort gelöscht.
+- **Phase 1:** `CloudflareApi.createTunnel("<sanitize(vpsName)>")` → `{ tunnelId, token }`; Token → `CredentialStore.set(TUNNEL_TOKEN_KEY(newTunnelId), token)`; `TUNNEL_ID_KEY(sanitize(vpsName))` → newTunnelId; alte Token-Referenz best-effort gelöscht.
 - **Phase 2:** `VpsDockerControl`-SSH: env-file `/etc/cloudflared/env` (`TUNNEL_TOKEN=<neu>`, `0600 root:root`) ersetzt + cloudflared-Container-Restart. SSH-Private-Key store-intern (`ssh/<user>/private_key`, ADR-007/008). Token via Dateiinhalt, **nie** Argv/Log.
 - **Phase 3:** `VpsDockerControl.ps(vps)` → managed Container `{ hostname, hostPort }`; je Container `DeployOrchestrator.addRouteOnly({ tunnelId: newTunnelId, hostname, hostPort })` (ADR-012-Anlege-Pfad: LockoutGuard → `addRoute` → `createDnsRecord` idempotent). **Kein** eigener CF-Mutationscode.
 - **Token-/Key-Quelle:** Cloudflare-Token + Account-Id aus `credentials/cloudflare/*`; SSH-Private-Key aus `ssh/<user>/private_key`; Tunnel-Token in `credentials/cloudflare/tunnel_token/<tunnelId>` (ADR-007/010). Store-intern, transient, nie geleakt.

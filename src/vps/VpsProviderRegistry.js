@@ -697,7 +697,7 @@ export class VpsProviderRegistry {
   /**
    * Legt einen Cloudflare-Tunnel für den VPS an (S-152 AC5).
    *
-   * Tunnel-Name-Konvention: `devgui-<sanitized-vpsname>` (AC5, vps-tunnel-provisioning).
+   * Tunnel-Name-Konvention: `<sanitized-vpsname>` (Tunnel-Name = Servername, kein Präfix).
    * Der Deploy (S-155) findet den Tunnel via listTunnels + Namensabgleich.
    * Zusätzlich wird die tunnelId im CredentialStore gespeichert (TUNNEL_ID_KEY).
    *
@@ -720,7 +720,8 @@ export class VpsProviderRegistry {
       return null;
     }
 
-    const tunnelName = `devgui-${sanitizeTunnelName(vpsName)}`;
+    // Tunnel-Name = Servername (sanitisiert). Kein Präfix — der Name spiegelt den VPS.
+    const tunnelName = sanitizeTunnelName(vpsName);
 
     try {
       // AC5: genau 1 Tunnel anlegen; Tunnel-Name-Konvention devgui-<sanitized-vpsname>

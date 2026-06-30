@@ -1,7 +1,7 @@
 /**
  * tunnelName.js — Hilfsfunktion zur Sanitisierung von VPS-Namen für Tunnel-Namen.
  *
- * Tunnel-Name-Konvention (vps-tunnel-provisioning Spec): `devgui-<sanitized-vpsname>`.
+ * Tunnel-Name-Konvention: `<sanitized-vpsname>` (Tunnel-Name = Servername, kein Präfix).
  * Sanitisierung: lowercase, nur [a-z0-9-], max 63 Zeichen (RFC 1123 Hostname-Label).
  *
  * Diese Funktion ist auch für den Deploy-Pfad (S-155) zugänglich —

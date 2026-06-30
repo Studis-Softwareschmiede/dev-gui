@@ -513,7 +513,7 @@ export class CloudflareApi {
    * Not configured (no token/account-id) → throws CloudflareApiError('cloudflare-not-configured', 422)
    * without making any API call (AC1).
    *
-   * @param {string} name - Tunnel name (e.g. "devgui-<sanitized-vpsname>")
+   * @param {string} name - Tunnel name (e.g. "<sanitized-vpsname>" = Servername)
    * @returns {Promise<{ tunnelId: string, token: string }>}
    * @throws {CloudflareApiError}
    */
