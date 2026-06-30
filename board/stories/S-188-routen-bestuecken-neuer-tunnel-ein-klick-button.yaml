@@ -1,7 +1,7 @@
 id: S-188
 parent: F-027
 title: "Routen am neuen Tunnel bestuecken (Phase 3, geteilter addRouteOnly-Pfad) + Ein-Klick-Button & Ergebnis-Anzeige (Frontend)"
-status: To Do
+status: Done
 priority: P1
 spec: docs/specs/vps-tunnel-self-heal.md
 implements:
@@ -28,7 +28,7 @@ estimate_note: >-
   requirement-Lauf nicht verfuegbar -> Fallback dispo_est aus baseline.json
   js|balanced|L (ep=5.0). confidence low. Grep-Kriterium: kein eigener
   CloudflareApi.mutate*-Anlegecode neben dem geteilten Pfad (AC6).
-branch: null
+branch: feat/S-188-tunnel-repopulate-button
 pr: null
 blocked_reason: null
 created_at: '2026-06-30T00:00:00Z'

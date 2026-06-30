@@ -5,6 +5,7 @@
  *       stack-deploy-orchestration.md AC12 (Modus-Umschalter)
  *       vps-readiness-gate.md AC9–AC12 (S-181)
  *       vps-tunnel-existence-gate.md AC8–AC11 (S-186)
+ *       vps-tunnel-self-heal.md AC9–AC10 (S-188)
  *
  * Responsibilities:
  *   - Mode toggle: "Single-Image" | "Compose-Stack aus Repo" (AC12)
@@ -154,6 +155,13 @@ export function DeploymentsView({ onNavigate }) {
   // tunnelPresent: true → "Tunnel ✓"; false / 'unknown' / null → "Tunnel fehlt ✗"
   const [tunnelPresent, setTunnelPresent] = useState(null); // null | boolean | 'unknown'
   const tunnelTimerRef = useRef(null);
+
+  // ── S-188 AC9/AC10: Tunnel-Selbstheilung (Ein-Klick-Knopf) ──────────────
+  // tunnelHealState: null = idle; 'running' = Lauf läuft; 'done' = Ergebnis vorhanden
+  const [tunnelHealState, setTunnelHealState] = useState(null); // null | 'running' | 'done'
+  const [tunnelHealResult, setTunnelHealResult] = useState(null); // null | { ok, report?, errorMsg? }
+  // tunnelPollCounter: inkrementiert nach erfolgreichem Heal → triggert Neupoll
+  const [tunnelPollCounter, setTunnelPollCounter] = useState(0);
 
   // ── Stack-Modus state (AC12)
   const [stacks, setStacks] = useState([]);
@@ -350,10 +358,12 @@ export function DeploymentsView({ onNavigate }) {
       }
     }
 
-    // No VPS selected → no tunnel badge (AC9)
+    // No VPS selected → no tunnel badge (AC9); reset heal state (S-188)
     if (!selectedVps) {
       clearTunnelTimer();
       setTunnelPresent(null);
+      setTunnelHealState(null);
+      setTunnelHealResult(null);
       return;
     }
 
@@ -393,7 +403,7 @@ export function DeploymentsView({ onNavigate }) {
       active = false;
       clearTunnelTimer();
     };
-  }, [selectedVps]); // dep: selectedVps only — clearTunnelTimer/poll/tunnelTimerRef are stable refs
+  }, [selectedVps, tunnelPollCounter]); // tunnelPollCounter re-triggers after successful heal (S-188)
 
   // ── S-186 AC8: Derive effective tunnelId from VPS selection ──────────────
   // The tunnelId used in the deploy POST comes from the VPS↔Tunnel-Read-Model
@@ -451,6 +461,36 @@ export function DeploymentsView({ onNavigate }) {
       setLocalTestResult({ ok: false, reason: 'Netzwerkfehler beim Lokal-Test' });
     } finally {
       setLocalTesting(false);
+    }
+  }
+
+  // ── S-188 AC9/AC10: Tunnel-Selbstheilung handler ────────────────────────
+  // Ruft POST /api/deployments/vps/:vpsId/tunnel/recreate auf.
+  // Security: Token NIE in Frontend/UI/Log (AC11).
+  async function handleTunnelHeal() {
+    if (!selectedVps || tunnelHealState === 'running') return;
+    setTunnelHealState('running');
+    setTunnelHealResult(null);
+    try {
+      const res = await fetch(
+        `/api/deployments/vps/${encodeURIComponent(selectedVps)}/tunnel/recreate`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' } },
+      );
+      const data = await res.json();
+      if (res.ok && (data.result === 'ok' || data.result === 'partial')) {
+        setTunnelHealResult({ ok: data.result === 'ok', report: data.report, partial: data.result === 'partial' });
+        // Aktualisierung: Tunnel-Status neu pollen (Badge soll auf "Tunnel ✓" wechseln)
+        // tunnelPollCounter-Increment triggert das Polling-useEffect neu
+        setTunnelPresent(null);
+        setTunnelPollCounter((c) => c + 1);
+      } else {
+        const errorMsg = formatTunnelHealError(data);
+        setTunnelHealResult({ ok: false, errorMsg });
+      }
+    } catch {
+      setTunnelHealResult({ ok: false, errorMsg: 'Netzwerkfehler beim Tunnel-Neu-Anlegen' });
+    } finally {
+      setTunnelHealState('done');
     }
   }
 
@@ -928,8 +968,30 @@ export function DeploymentsView({ onNavigate }) {
                 {selectedVps && tunnelPresent !== null && (
                   <TunnelStatusBadge present={tunnelPresent} />
                 )}
+                {/* S-188 AC9: Tunnel-Selbstheilung-Knopf — nur wenn Tunnel fehlt */}
+                {selectedVps && tunnelPresent !== null && tunnelPresent !== true && (
+                  <button
+                    type="button"
+                    style={
+                      tunnelHealState === 'running'
+                        ? { ...styles.btnTunnelHeal, opacity: 0.6, cursor: 'not-allowed' }
+                        : styles.btnTunnelHeal
+                    }
+                    disabled={tunnelHealState === 'running'}
+                    aria-busy={tunnelHealState === 'running'}
+                    aria-label="Tunnel neu anlegen und bestücken"
+                    onClick={handleTunnelHeal}
+                  >
+                    {tunnelHealState === 'running' ? 'Tunnel wird wiederhergestellt…' : 'Tunnel neu anlegen & bestücken'}
+                  </button>
+                )}
               </div>
             </div>
+
+            {/* S-188 AC10: Tunnel-Selbstheilung Ergebnis-Anzeige */}
+            {selectedVps && tunnelHealResult && (
+              <TunnelHealResultDisplay result={tunnelHealResult} />
+            )}
 
             {/* AC10: Domänen-Dropdown */}
             <div style={styles.row}>
@@ -1356,6 +1418,144 @@ function TunnelStatusBadge({ present }) {
   );
 }
 
+// ── TunnelHealResultDisplay component (S-188, AC9/AC10) ──────────────────────
+
+/**
+ * Renders the result of a tunnel heal operation in a friendly, secret-free way (AC10).
+ * Shows Phase-1/2/3 status + per-hostname route results.
+ * Never displays tokens, SSH keys, or raw error messages (AC11).
+ *
+ * @param {{ result: { ok: boolean, partial?: boolean, report?: object, errorMsg?: string } }} props
+ */
+function TunnelHealResultDisplay({ result }) {
+  if (!result) return null;
+
+  const { ok, partial, report, errorMsg } = result;
+
+  // Error path (Phase 1 failed or network error)
+  if (!ok && !partial && !report) {
+    return (
+      <div role="alert" aria-live="polite" style={styles.errorBox}>
+        <p style={styles.errorText}>
+          Tunnel-Wiederherstellung fehlgeschlagen: {errorMsg ?? 'Unbekannter Fehler'}
+        </p>
+      </div>
+    );
+  }
+
+  const boxStyle = ok ? styles.successBox : styles.warnBox;
+  const textStyle = ok ? styles.successText : styles.warnText;
+
+  return (
+    <div role="status" aria-live="polite" style={boxStyle}>
+      <p style={{ ...textStyle, marginBottom: 6 }}>
+        {ok
+          ? 'Tunnel erfolgreich wiederhergestellt.'
+          : 'Tunnel teilweise wiederhergestellt (Teil-Fehler).'}
+      </p>
+
+      {/* Phase 1 */}
+      {report?.phase1 && (
+        <p style={{ ...textStyle, fontSize: 12 }}>
+          Phase 1 (Tunnel anlegen): {report.phase1.ok ? 'OK' : `Fehler — ${friendlyPhase1Error(report.phase1.errorClass)}`}
+        </p>
+      )}
+
+      {/* Phase 2 */}
+      {report?.phase2 && (
+        <p style={{ ...textStyle, fontSize: 12 }}>
+          Phase 2 (Token-Push + cloudflared-Neustart):{' '}
+          {report.phase2.ok
+            ? 'OK'
+            : `Fehlgeschlagen — ${friendlyPhase2Error(report.phase2.errorClass)}`}
+        </p>
+      )}
+
+      {/* Phase 3: per-Container Routen-Ergebnisse */}
+      {Array.isArray(report?.routes) && report.routes.length > 0 && (
+        <div style={{ marginTop: 8 }}>
+          <p style={{ ...textStyle, fontSize: 12, marginBottom: 4 }}>
+            Phase 3 (Routen bestücken):
+          </p>
+          {report.routes.map((r, i) => (
+            <p key={i} style={{ ...textStyle, fontSize: 12, marginLeft: 12 }}>
+              {r.hostname}: {friendlyRouteResult(r.result)}
+            </p>
+          ))}
+        </div>
+      )}
+
+      {/* Partial-Hinweis wenn kein Phase-2-Fehler aber Phase-3-Fehler */}
+      {partial && report?.phase2?.ok && (
+        <p style={{ ...textStyle, fontSize: 12, marginTop: 6 }}>
+          Einzelne Routen konnten nicht angelegt werden. VPS erneut verbinden oder Reconciliation abwarten.
+        </p>
+      )}
+
+      {/* Phase-2-Fehler-Hinweis */}
+      {report?.phase2 && !report.phase2.ok && (
+        <p style={{ ...textStyle, fontSize: 12, marginTop: 6 }}>
+          VPS konnte nicht erreicht werden. Routen wurden nicht bestückt.
+          Tunnel ist im System referenziert — bei erneuter VPS-Verbindung nochmals versuchen.
+        </p>
+      )}
+    </div>
+  );
+}
+
+/** Friendly message for a route result (AC10: no raw error text). */
+function friendlyRouteResult(result) {
+  switch (result) {
+    case 'route-created':      return 'Angelegt';
+    case 'protected-skipped':  return 'Uebersprungen (geschuetzt)';
+    case 'error':              return 'Fehlgeschlagen';
+    default:                   return 'Unbekannt';
+  }
+}
+
+/** Friendly message for Phase-1 error (AC10: no raw Cloudflare error). */
+function friendlyPhase1Error(errorClass) {
+  switch (errorClass) {
+    case 'cloudflare-not-configured': return 'Cloudflare nicht konfiguriert';
+    case 'cloudflare-auth-failed':    return 'Cloudflare-Authentifizierung fehlgeschlagen';
+    case 'cloudflare-unavailable':    return 'Cloudflare nicht erreichbar';
+    default:                          return 'Tunnel konnte nicht angelegt werden';
+  }
+}
+
+/** Friendly message for Phase-2 error (AC10: no raw SSH/cloudflare error). */
+function friendlyPhase2Error(errorClass) {
+  switch (errorClass) {
+    case 'unreachable':        return 'VPS nicht erreichbar';
+    case 'auth-failed':        return 'SSH-Authentifizierung fehlgeschlagen';
+    case 'no-private-key':     return 'Kein SSH-Key hinterlegt';
+    case 'docker-failed':      return 'cloudflared-Neustart fehlgeschlagen';
+    case 'vps-target-missing': return 'VPS-Ziel nicht konfiguriert';
+    default:                   return 'VPS nicht erreichbar';
+  }
+}
+
+/**
+ * Maps a backend error response to a user-friendly message (AC10).
+ * Never exposes tokens, keys, or raw error text.
+ *
+ * @param {object} data - raw response body from tunnel/recreate
+ * @returns {string}
+ */
+function formatTunnelHealError(data) {
+  const errorClass = data?.errorClass ?? data?.error ?? '';
+  switch (errorClass) {
+    case 'cloudflare-not-configured':
+      return 'Cloudflare ist nicht konfiguriert. Bitte Cloudflare-Token in den Einstellungen hinterlegen.';
+    case 'cloudflare-auth-failed':
+      return 'Cloudflare-Authentifizierung fehlgeschlagen. Bitte API-Token pruefen.';
+    case 'cloudflare-unavailable':
+      return 'Cloudflare ist nicht erreichbar. Bitte spaeter erneut versuchen.';
+    default:
+      return 'Tunnel-Wiederherstellung fehlgeschlagen. Bitte spaeter erneut versuchen.';
+  }
+}
+
 // ── LocalTestReport component (S-156) ────────────────────────────────────────
 
 /**
@@ -1537,6 +1737,21 @@ const styles = {
     color: '#9ca3af',
     margin: '0 0 16px',
     lineHeight: 1.5,
+  },
+  // S-188 AC9: Tunnel-Selbstheilung-Knopf (orange/amber tone — destructive-adjacent but constructive)
+  // Contrast: #fbbf24 on #7c2d12 ≈ 4.7:1 (WCAG AA)
+  btnTunnelHeal: {
+    padding: '6px 12px',
+    background: '#7c2d12',
+    color: '#fbbf24',
+    border: '1px solid #92400e',
+    borderRadius: 6,
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: 'pointer',
+    minHeight: 36,
+    minWidth: 200,
+    whiteSpace: 'nowrap',
   },
   errorBox: {
     background: '#1c0a0a',

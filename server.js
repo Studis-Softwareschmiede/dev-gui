@@ -34,7 +34,7 @@
  *   DELETE /api/cloudflare/tunnels/:tunnelId/routes/:hostname  → { result, reason? } (view-cloudflare AC5/AC6/AC9)
  *   DELETE /api/cloudflare/tunnels/:tunnelId                   → { result, reason? } (view-cloudflare AC5/AC6/AC9)
  *   GET    /api/deployments/vps-tunnel-status                  → [{ vpsId, tunnelId, tunnelPresent }] (vps-tunnel-existence-gate S-185 AC7)
- *   POST   /api/deployments/vps/:vpsId/tunnel/recreate        → { result, report } [MUTATION, S-187 AC1–5,11,12]
+ *   POST   /api/deployments/vps/:vpsId/tunnel/recreate        → { result, report } [MUTATION, S-187 AC1–5,11,12 + S-188 AC6–8]
  *   GET    /api/deployments                                    → { deployments:[...], errors? } (deploy-lifecycle AC3)
  *   POST   /api/deployments                                    → { result, deployment?, reason? } (deploy-lifecycle AC3/AC4)
  *   DELETE /api/deployments/:vps/:hostname                     → { result, reason? } (deploy-lifecycle AC5/AC6)
@@ -223,13 +223,15 @@ reconciliationJob.startScheduler();
 // Read-only DockerReader bleibt unberührt.
 const localDockerControl = new LocalDockerControl();
 
-// ── Tunnel-Selbstheilung (S-187 AC1–5, AC11, AC12) ───────────────────────────
-// TunnelHealService orchestriert Phase 1 (CF + CredentialStore) + Phase 2 (SSH-Token-Push).
+// ── Tunnel-Selbstheilung (S-187 AC1–5, AC11, AC12 + S-188 AC6–10) ───────────
+// TunnelHealService orchestriert Phase 1 (CF + CredentialStore) + Phase 2 (SSH-Token-Push)
+// + Phase 3 (Routen bestücken via geteiltem addRouteOnly-Pfad, S-188 AC6).
 // Token NIE in Argv/Log/Audit/Response (AC4/AC11 HART).
 const tunnelHealService = new TunnelHealService({
   cloudflareApi,
   vpsDockerControl,
   credentialStore,
+  deployOrchestrator, // S-188 AC6: geteilter ADR-012 addRouteOnly-Pfad
 });
 
 // ── Stack ─────────────────────────────────────────────────────────────────────
