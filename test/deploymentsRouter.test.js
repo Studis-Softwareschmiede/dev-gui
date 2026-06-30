@@ -37,6 +37,19 @@
  *          kein Audit-Eintrag (read-only)
  *   AC12 — vpsId an orchestrator.deploy() weitergegeben (Mismatch-Check ermöglichen)
  *   AC13 — GET /api/deployments/vps-tunnel-status erzeugt keinen Audit-Eintrag
+ *
+ * Covers (vps-tunnel-self-heal S-187 AC1–AC5, AC11, AC12):
+ *   AC1  — POST /api/deployments/vps/:vpsId/tunnel/recreate → 200 { result:"ok", report } Phase 1+2 ok
+ *   AC2  — Phase 1 fehlgeschlagen (cloudflare-not-configured → 422; cloudflare-auth-failed → 502;
+ *          cloudflare-unavailable → 502) → korrekte HTTP-Status + errorClass im Body
+ *   AC3  — Phase 2 ok: result:"ok"; Phase 2 fehlgeschlagen: result:"partial" (HTTP 200)
+ *   AC4  — Security: kein Token in HTTP-Response (Report traversal-Prüfung)
+ *   AC5  — Phase 2 fehlgeschlagen → Report nennt Phase-2-Fehler klar (partial-result)
+ *   AC11 — kein Token/Key in Response-Body (vollständige Prüfung)
+ *   AC12 — 403 ohne CRED_ADMIN_EMAILS; 422 unbekannte vpsId; 500 Audit-Fail; 422 TunnelHealService
+ *          nicht konfiguriert;
+ *          403 via AccessGuard (Cloudflare Access): server.js `app.use('/api', accessGuard)`
+ *          greift vor mountRouters() — nicht unit-testbar, durch server.js-Inspektion verifiziert.
  */
 
 import { describe, it, expect, jest } from '@jest/globals';
@@ -52,6 +65,7 @@ import { AuditStore } from '../src/AuditStore.js';
  * vpsRegistry optionally passed for S-169 AC9 vereinigte Auflösung.
  * vpsDockerControl optionally passed for S-180 AC7 Readiness-Probe.
  * cloudflareApi optionally passed for S-185 AC7 VPS-Tunnel-Read-Model.
+ * tunnelHealService optionally passed for S-187 AC1–5,11,12 Tunnel-Selbstheilung.
  */
 function makeApp({
   orchestratorStub,
@@ -61,6 +75,7 @@ function makeApp({
   vpsRegistry = undefined,
   vpsDockerControl = undefined,
   cloudflareApi = undefined,
+  tunnelHealService = undefined,
 } = {}) {
   const app = express();
   app.use(express.json());
@@ -69,7 +84,7 @@ function makeApp({
     req.identity = identity;
     next();
   });
-  app.use(deploymentsRouter(orchestratorStub, auditStore, vpsTargets, undefined, undefined, vpsRegistry, vpsDockerControl, cloudflareApi));
+  app.use(deploymentsRouter(orchestratorStub, auditStore, vpsTargets, undefined, undefined, vpsRegistry, vpsDockerControl, cloudflareApi, tunnelHealService));
   return app;
 }
 
@@ -1468,5 +1483,248 @@ describe('S-185 AC7/AC13: deploymentsRouter — GET /api/deployments/vps-tunnel-
     expect(res.status).toBe(200);
     const entry = res.body.find((e) => e.vpsId === 'testdevgui');
     expect(entry.tunnelPresent).toBe('unknown');
+  });
+});
+
+// ── POST /api/deployments/vps/:vpsId/tunnel/recreate (S-187 AC1–5, AC11, AC12) ─
+
+const FAKE_TUNNEL_TOKEN = 'eyJhbGciOiJFZERTQSJ9.SECRET_TOKEN_VALUE.sig';
+
+function makeTunnelHealServiceStub({
+  recreateResult = {
+    vpsId: 'vps-1',
+    newTunnelId: 'new-tunnel-id',
+    oldTunnelId: null,
+    phase1: { ok: true },
+    phase2: { ok: true },
+    routes: [],
+    errors: [],
+  },
+  recreateError = null,
+} = {}) {
+  return {
+    recreate: jest.fn(async () => {
+      if (recreateError) throw recreateError;
+      return recreateResult;
+    }),
+  };
+}
+
+describe('POST /api/deployments/vps/:vpsId/tunnel/recreate (S-187)', () => {
+  it('AC1: 200 + { result:"ok", report } bei Phase 1+2 erfolgreich', async () => {
+    const orch = makeOrchestratorStub();
+    const audit = new AuditStore();
+    const healSvc = makeTunnelHealServiceStub();
+    const app = makeApp({ orchestratorStub: orch, auditStore: audit, tunnelHealService: healSvc });
+
+    const res = await request(app, 'POST', '/api/deployments/vps/vps-1/tunnel/recreate');
+    expect(res.status).toBe(200);
+    expect(res.body.result).toBe('ok');
+    expect(res.body.report).toBeDefined();
+    expect(res.body.report.newTunnelId).toBe('new-tunnel-id');
+  });
+
+  it('AC3: 200 + { result:"partial", report } bei Phase 2 fehlgeschlagen', async () => {
+    const orch = makeOrchestratorStub();
+    const audit = new AuditStore();
+    const healSvc = makeTunnelHealServiceStub({
+      recreateResult: {
+        vpsId: 'vps-1',
+        newTunnelId: 'new-tunnel-id',
+        oldTunnelId: null,
+        phase1: { ok: true },
+        phase2: { ok: false, errorClass: 'unreachable' },
+        routes: [],
+        errors: [{ scope: 'phase2', errorClass: 'unreachable' }],
+      },
+    });
+    const app = makeApp({ orchestratorStub: orch, auditStore: audit, tunnelHealService: healSvc });
+
+    const res = await request(app, 'POST', '/api/deployments/vps/vps-1/tunnel/recreate');
+    expect(res.status).toBe(200);
+    expect(res.body.result).toBe('partial');
+    expect(res.body.report.phase2.ok).toBe(false);
+    expect(res.body.report.phase2.errorClass).toBe('unreachable');
+  });
+
+  it('AC2: 422 bei cloudflare-not-configured (Phase 1 fehlgeschlagen)', async () => {
+    const orch = makeOrchestratorStub();
+    const audit = new AuditStore();
+    const healSvc = makeTunnelHealServiceStub({
+      recreateResult: {
+        vpsId: 'vps-1',
+        newTunnelId: null,
+        oldTunnelId: null,
+        phase1: { ok: false, errorClass: 'cloudflare-not-configured' },
+        phase2: { ok: false, errorClass: 'skipped' },
+        routes: [],
+        errors: [{ scope: 'phase1', errorClass: 'cloudflare-not-configured' }],
+      },
+    });
+    const app = makeApp({ orchestratorStub: orch, auditStore: audit, tunnelHealService: healSvc });
+
+    const res = await request(app, 'POST', '/api/deployments/vps/vps-1/tunnel/recreate');
+    expect(res.status).toBe(422);
+    expect(res.body.errorClass).toBe('cloudflare-not-configured');
+  });
+
+  it('AC2: 502 bei cloudflare-auth-failed (Phase 1 fehlgeschlagen)', async () => {
+    const orch = makeOrchestratorStub();
+    const audit = new AuditStore();
+    const healSvc = makeTunnelHealServiceStub({
+      recreateResult: {
+        vpsId: 'vps-1',
+        newTunnelId: null,
+        oldTunnelId: null,
+        phase1: { ok: false, errorClass: 'cloudflare-auth-failed' },
+        phase2: { ok: false, errorClass: 'skipped' },
+        routes: [],
+        errors: [{ scope: 'phase1', errorClass: 'cloudflare-auth-failed' }],
+      },
+    });
+    const app = makeApp({ orchestratorStub: orch, auditStore: audit, tunnelHealService: healSvc });
+
+    const res = await request(app, 'POST', '/api/deployments/vps/vps-1/tunnel/recreate');
+    expect(res.status).toBe(502);
+    expect(res.body.errorClass).toBe('cloudflare-auth-failed');
+  });
+
+  it('AC2: 502 bei cloudflare-unavailable (Phase 1 fehlgeschlagen)', async () => {
+    const orch = makeOrchestratorStub();
+    const audit = new AuditStore();
+    const healSvc = makeTunnelHealServiceStub({
+      recreateResult: {
+        vpsId: 'vps-1',
+        newTunnelId: null,
+        oldTunnelId: null,
+        phase1: { ok: false, errorClass: 'cloudflare-unavailable' },
+        phase2: { ok: false, errorClass: 'skipped' },
+        routes: [],
+        errors: [{ scope: 'phase1', errorClass: 'cloudflare-unavailable' }],
+      },
+    });
+    const app = makeApp({ orchestratorStub: orch, auditStore: audit, tunnelHealService: healSvc });
+
+    const res = await request(app, 'POST', '/api/deployments/vps/vps-1/tunnel/recreate');
+    expect(res.status).toBe(502);
+    expect(res.body.errorClass).toBe('cloudflare-unavailable');
+  });
+
+  it('AC12: 403 wenn nicht in CRED_ADMIN_EMAILS', async () => {
+    const orch = makeOrchestratorStub();
+    const audit = new AuditStore();
+    const healSvc = makeTunnelHealServiceStub();
+    const origEnv = process.env.CRED_ADMIN_EMAILS;
+    process.env.CRED_ADMIN_EMAILS = 'other@example.com';
+
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore: audit,
+      tunnelHealService: healSvc,
+      identity: { email: 'notadmin@example.com' },
+    });
+
+    const res = await request(app, 'POST', '/api/deployments/vps/vps-1/tunnel/recreate');
+    expect(res.status).toBe(403);
+    expect(healSvc.recreate).not.toHaveBeenCalled();
+
+    if (origEnv === undefined) { delete process.env.CRED_ADMIN_EMAILS; } else { process.env.CRED_ADMIN_EMAILS = origEnv; }
+  });
+
+  it('AC12: 422 bei unbekannter vpsId', async () => {
+    const orch = makeOrchestratorStub();
+    const audit = new AuditStore();
+    const healSvc = makeTunnelHealServiceStub();
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore: audit,
+      tunnelHealService: healSvc,
+      vpsTargets: new Map([['vps-1', { host: '1.2.3.4', port: 22, targetUser: 'root' }]]),
+    });
+
+    const res = await request(app, 'POST', '/api/deployments/vps/unknown-vps/tunnel/recreate');
+    expect(res.status).toBe(422);
+    expect(res.body.error).toMatch(/Unbekannter VPS/);
+    expect(healSvc.recreate).not.toHaveBeenCalled();
+  });
+
+  it('AC12: 422 wenn tunnelHealService nicht konfiguriert', async () => {
+    const orch = makeOrchestratorStub();
+    const audit = new AuditStore();
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore: audit,
+      // tunnelHealService fehlt → 422
+    });
+
+    const res = await request(app, 'POST', '/api/deployments/vps/vps-1/tunnel/recreate');
+    expect(res.status).toBe(422);
+    expect(res.body.error).toMatch(/TunnelHealService/);
+  });
+
+  it('AC12: 500 bei Audit-Write-Fehler → recreate nicht aufgerufen', async () => {
+    const orch = makeOrchestratorStub();
+    const brokenAudit = { record: () => { throw new Error('audit-store-fail'); } };
+    const healSvc = makeTunnelHealServiceStub();
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore: brokenAudit,
+      tunnelHealService: healSvc,
+    });
+
+    const res = await request(app, 'POST', '/api/deployments/vps/vps-1/tunnel/recreate');
+    expect(res.status).toBe(500);
+    expect(res.body.error).toMatch(/Audit-Write/);
+    expect(healSvc.recreate).not.toHaveBeenCalled();
+  });
+
+  it('AC4/AC11: kein Token in HTTP-Response (traversal-Prüfung)', async () => {
+    const orch = makeOrchestratorStub();
+    const audit = new AuditStore();
+    // Report enthält kein Token (TunnelHealService garantiert das; Router-Test verifiziert es)
+    const healSvc = makeTunnelHealServiceStub({
+      recreateResult: {
+        vpsId: 'vps-1',
+        newTunnelId: 'new-tunnel-id',
+        oldTunnelId: 'old-tunnel-id',
+        phase1: { ok: true },
+        phase2: { ok: true },
+        routes: [],
+        errors: [],
+        // Kein token/tunnelToken-Feld hier — TunnelHealService gibt diese nicht zurück
+      },
+    });
+    const app = makeApp({ orchestratorStub: orch, auditStore: audit, tunnelHealService: healSvc });
+
+    const res = await request(app, 'POST', '/api/deployments/vps/vps-1/tunnel/recreate');
+    expect(res.status).toBe(200);
+
+    // AC4/AC11: Token NIEMALS in Response-Body
+    const responseStr = JSON.stringify(res.body);
+    expect(responseStr).not.toContain(FAKE_TUNNEL_TOKEN);
+    expect(responseStr).not.toContain('token');
+    // Explizit: kein token-Feld in report
+    expect(res.body.report).not.toHaveProperty('token');
+    expect(res.body.report).not.toHaveProperty('tunnelToken');
+  });
+
+  it('AC1: tunnelHealService.recreate() erhält vpsId + vpsTarget + auditStore', async () => {
+    const orch = makeOrchestratorStub();
+    const audit = new AuditStore();
+    const healSvc = makeTunnelHealServiceStub();
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore: audit,
+      tunnelHealService: healSvc,
+      vpsTargets: new Map([['vps-1', { host: '10.0.0.1', port: 22, targetUser: 'root' }]]),
+    });
+
+    await request(app, 'POST', '/api/deployments/vps/vps-1/tunnel/recreate');
+
+    expect(healSvc.recreate).toHaveBeenCalledTimes(1);
+    const args = healSvc.recreate.mock.calls[0][0];
+    expect(args.vpsId).toBe('vps-1');
+    expect(args.vpsTarget).toMatchObject({ host: '10.0.0.1' });
+    expect(args.auditStore).toBeDefined();
   });
 });

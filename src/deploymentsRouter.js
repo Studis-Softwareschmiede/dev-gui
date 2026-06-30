@@ -17,6 +17,7 @@
  *   GET    /api/deployments/reconcile/reports        → ReconcileReport[]
  *   GET    /api/deployments/reconcile/notices        → ReconcileNotice[]
  *   POST   /api/deployments/local-test               → { result, report? }               [MUTATION, S-156]
+ *   POST   /api/deployments/vps/:vpsId/tunnel/recreate → { result, report } [MUTATION, S-187 AC1–5,11,12]
  *
  * Security (AC7–AC9 / ADR-012):
  *   - Alle /api/deployments/* hinter AccessGuard (server.js — alle /api/* sind geschützt).
@@ -300,9 +301,12 @@ async function resolveVpsIdToTarget(vpsId, vpsTargets, vpsRegistry) {
  *   Optional injected for the VPS-Tunnel-Read-Model (S-185 AC7).
  *   When provided, GET /api/deployments/vps-tunnel-status uses listTunnels() to check existence.
  *   When absent, tunnelPresent degrades to null/"unknown" (no crash).
+ * @param {import('./deploy/TunnelHealService.js').TunnelHealService} [tunnelHealService]
+ *   Optional injected for the Tunnel-Selbstheilung (S-187 AC1–AC5, AC11, AC12).
+ *   When provided, POST /api/deployments/vps/:vpsId/tunnel/recreate is active.
  * @returns {import('express').Router}
  */
-export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconciliationJob, localDockerControl, vpsRegistry, vpsDockerControl, cloudflareApi) {
+export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconciliationJob, localDockerControl, vpsRegistry, vpsDockerControl, cloudflareApi, tunnelHealService) {
   const router = Router();
 
   // ── GET /api/deployments/vps-targets ────────────────────────────────────
@@ -840,6 +844,111 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconcil
       console.error('[deploymentsRouter] POST /api/deployments/local-test Fehler:', reason);
       return res.status(502).json({ result: 'error', reason });
     }
+  });
+
+  // ── POST /api/deployments/vps/:vpsId/tunnel/recreate ─────────────────────
+  // S-187: Tunnel-Selbstheilung Phase 1+2.
+  // MUTATION: Audit-First (in TunnelHealService) + CRED_ADMIN_EMAILS + AccessGuard.
+  // Kein Token/Key in Response/Audit/Log (AC11/AC12 HART).
+  // MUSS vor /api/deployments/vps/:vps/:hostname registriert sein (kein Express-Pfadkonflikt,
+  // aber klare Segmentierung: /vps/:vpsId/tunnel/recreate ist eindeutig).
+
+  /**
+   * POST /api/deployments/vps/:vpsId/tunnel/recreate
+   * Legt einen neuen Cloudflare-Tunnel an (Phase 1), pusht das Token per SSH (Phase 2).
+   * Phase 3 (Routen bestücken) folgt in S-188.
+   *
+   * Responses:
+   *   200 { result: "ok",    report: TunnelRecreateReport }   — Phase 1+2 erfolgreich
+   *   200 { result: "partial", report: TunnelRecreateReport } — Phase 1 ok, Phase 2 fehlgeschlagen
+   *   400 { error }              — vpsId fehlt/ungültig
+   *   403 { error }              — nicht in CRED_ADMIN_EMAILS
+   *   422 { error }              — unbekannte vpsId / tunnelHealService nicht konfiguriert
+   *   500 { error }              — Audit-Write fehlgeschlagen
+   *   502 { result: "error", report: TunnelRecreateReport } — Phase 1 fehlgeschlagen (CF-Fehler)
+   */
+  router.post('/api/deployments/vps/:vpsId/tunnel/recreate', async (req, res) => {
+    const identity = req.identity ?? null;
+
+    // AC12: Identitäts-/Rollenschutz (CRED_ADMIN_EMAILS)
+    const authz = checkMutationAuthz(identity);
+    if (!authz.allowed) {
+      return res.status(403).json({ error: 'Keine Berechtigung für diese Aktion' });
+    }
+
+    // vpsId aus Pfad-Parameter (Input-Validierung)
+    const { vpsId } = req.params;
+    if (!vpsId || typeof vpsId !== 'string' || !vpsId.trim()) {
+      return res.status(400).json({ error: 'vpsId-Parameter fehlt' });
+    }
+    const vpsIdClean = vpsId.trim();
+
+    // Dependency-Guard: tunnelHealService muss konfiguriert sein
+    if (!tunnelHealService || typeof tunnelHealService.recreate !== 'function') {
+      return res.status(422).json({ error: 'TunnelHealService nicht konfiguriert' });
+    }
+
+    // AC12: Audit-First — VOR jeder Mutation; schlägt Audit fehl → Aktion unterbleibt
+    // (Die feingranularen Audit-Einträge werden in TunnelHealService geschrieben;
+    //  hier nur der Einstiegs-Audit)
+    try {
+      auditStore.record({
+        identity: identity?.email ?? null,
+        command: `tunnel:recreate:start:${vpsIdClean}`,
+      });
+    } catch (auditErr) {
+      console.error('[deploymentsRouter] Audit-Write fehlgeschlagen:', sanitizeMsg(auditErr?.message));
+      return res.status(500).json({ error: 'Audit-Write fehlgeschlagen — Aktion abgebrochen' });
+    }
+
+    // AC1/AC12: VPS-Auflösung (vereinigte Quelle: Env ⊕ dynamisch)
+    // Unbekannte vpsId → 422 (kein Tunnel-Anlage)
+    const vpsTarget = await resolveVpsIdToTarget(vpsIdClean, vpsTargets, vpsRegistry);
+    if (!vpsTarget) {
+      return res.status(422).json({ error: `Unbekannter VPS: ${vpsIdClean}` });
+    }
+
+    // TunnelHealService.recreate() führt Phase 1 + Phase 2 durch.
+    // Audit-Einträge (Audit-First je Phase) werden in TunnelHealService gemacht.
+    // Security-Floor (AC11): kein Token in Rückgabe / Response.
+    let report;
+    try {
+      report = await tunnelHealService.recreate({
+        vpsId: vpsIdClean,
+        vpsName: vpsIdClean, // sanitizeTunnelName aus dem vpsId ableiten
+        vpsTarget,
+        identity: identity?.email ?? null,
+        auditStore,
+      });
+    } catch (err) {
+      // Unerwarteter Fehler — secret-freie Antwort
+      const errorClass = err?.errorClass ?? 'error';
+      console.error('[deploymentsRouter] tunnel/recreate Fehler:', sanitizeMsg(err?.message));
+      return res.status(502).json({ result: 'error', errorClass });
+    }
+
+    // Security-Floor (AC11): Report muss secret-frei sein (TunnelHealService garantiert das).
+    // HTTP-Status: Phase 1 fehlgeschlagen → 502; Phase 2 fehlgeschlagen → 200 partial;
+    //              Alles ok → 200.
+    if (!report.phase1.ok) {
+      // Phase 1 fehlgeschlagen: kein Tunnel angelegt, kein Token, kein SSH
+      const errorClass = report.phase1.errorClass ?? 'cloudflare-unavailable';
+      if (errorClass === 'cloudflare-not-configured') {
+        return res.status(422).json({ result: 'error', errorClass, report });
+      }
+      if (errorClass === 'cloudflare-auth-failed') {
+        return res.status(502).json({ result: 'error', errorClass, report });
+      }
+      return res.status(502).json({ result: 'error', errorClass, report });
+    }
+
+    if (!report.phase2.ok) {
+      // Phase 1 erfolgreich, Phase 2 fehlgeschlagen: Tunnel referenziert, cloudflared nicht neu gestartet
+      // → AC5: kein verwaistes Geheimnis; Phase 3 (S-188) wird ebenfalls übersprungen
+      return res.status(200).json({ result: 'partial', report });
+    }
+
+    return res.status(200).json({ result: 'ok', report });
   });
 
   // ── POST /api/deployments/reconcile ──────────────────────────────────────
