@@ -194,6 +194,20 @@ export function buildNotificationPayload(eventType, slug, itemId, title) {
  *   newSnapshot: { stories: Record<string,string>, features: Record<string,boolean> }
  * }}
  */
+/**
+ * Snapshot-Schlüssel mit Projekt-Namespace. Verhindert ID-Kollisionen, wenn mehrere
+ * Projekte dieselbe Feature-/Story-ID tragen (z.B. dev-gui F-001 vs. agent-flow F-001) —
+ * sonst kippt der Eintrag bei jedem Scan hin und her und feuert das Ereignis im
+ * Watcher-Takt (jede Minute) erneut.
+ *
+ * @param {string} slug
+ * @param {string} id
+ * @returns {string}
+ */
+function snapKey(slug, id) {
+  return `${slug ?? '?'}::${id}`;
+}
+
 export function detectTransitions(index, oldSnapshot) {
   const events = [];
   const newStories = { ...oldSnapshot.stories };
@@ -210,19 +224,19 @@ export function detectTransitions(index, oldSnapshot) {
       const isOrphaned = feature._orphaned === true;
 
       for (const story of feature.stories ?? []) {
-        const storyId = story.id;
-        const prevStatus = oldSnapshot.stories[storyId];
+        const storyKey = snapKey(slug, story.id);
+        const prevStatus = oldSnapshot.stories[storyKey];
         const currStatus = story.status;
 
         // Snapshot immer aktualisieren (auch bei enabled=false)
-        newStories[storyId] = currStatus ?? null;
+        newStories[storyKey] = currStatus ?? null;
 
         if (currStatus === DONE_STATUS && prevStatus !== DONE_STATUS && prevStatus !== undefined) {
           // → Done (echter Übergang, nicht Erststart)
-          events.push({ eventType: 'story_done', slug, id: storyId, title: story.title });
+          events.push({ eventType: 'story_done', slug, id: story.id, title: story.title });
         } else if (currStatus === BLOCKED_STATUS && prevStatus !== BLOCKED_STATUS && prevStatus !== undefined) {
           // → Blocked (echter Übergang, nicht Erststart)
-          events.push({ eventType: 'story_blocked', slug, id: storyId, title: story.title });
+          events.push({ eventType: 'story_blocked', slug, id: story.id, title: story.title });
         }
       }
 
@@ -232,12 +246,13 @@ export function detectTransitions(index, oldSnapshot) {
         if (stories.length > 0) {
           const allDone = stories.every((s) => s.status === DONE_STATUS);
           // Prüfe ob Feature-ID bereits im Snapshot bekannt ist (undefined = Erststart, kein Event)
-          const prevFeatureEntry = Object.prototype.hasOwnProperty.call(oldSnapshot.features, feature.id)
-            ? oldSnapshot.features[feature.id]
+          const featureKey = snapKey(slug, feature.id);
+          const prevFeatureEntry = Object.prototype.hasOwnProperty.call(oldSnapshot.features, featureKey)
+            ? oldSnapshot.features[featureKey]
             : undefined;
 
           // Snapshot immer aktualisieren
-          newFeatures[feature.id] = allDone;
+          newFeatures[featureKey] = allDone;
 
           if (allDone && prevFeatureEntry !== undefined && prevFeatureEntry !== true) {
             // Feature ist jetzt komplett, war vorher bekannt und noch NICHT komplett
@@ -265,16 +280,18 @@ export function buildBaseline(index) {
   for (const project of index) {
     if (project.error) continue;
 
+    const slug = project.project_slug ?? project.slug;
+
     for (const feature of project.features ?? []) {
       const isOrphaned = feature._orphaned === true;
 
       for (const story of feature.stories ?? []) {
-        stories[story.id] = story.status ?? null;
+        stories[snapKey(slug, story.id)] = story.status ?? null;
       }
 
       if (!isOrphaned && feature.id) {
         const fStories = feature.stories ?? [];
-        features[feature.id] = fStories.length > 0 && fStories.every((s) => s.status === DONE_STATUS);
+        features[snapKey(slug, feature.id)] = fStories.length > 0 && fStories.every((s) => s.status === DONE_STATUS);
       }
     }
   }

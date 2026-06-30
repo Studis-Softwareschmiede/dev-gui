@@ -52,7 +52,7 @@ describe('AC6 — detectTransitions: Übergangs-Erkennung', () => {
         })],
       }),
     ]);
-    const oldSnapshot = { stories: { 'S-1': 'To Do' }, features: {} };
+    const oldSnapshot = { stories: { 'dev-gui::S-1': 'To Do' }, features: {} };
 
     const { events } = detectTransitions(index, oldSnapshot);
 
@@ -70,7 +70,7 @@ describe('AC6 — detectTransitions: Übergangs-Erkennung', () => {
       }),
     ]);
     // S-1 war bereits Done im Snapshot
-    const oldSnapshot = { stories: { 'S-1': 'Done' }, features: {} };
+    const oldSnapshot = { stories: { 'dev-gui::S-1': 'Done' }, features: {} };
 
     const { events } = detectTransitions(index, oldSnapshot);
 
@@ -103,7 +103,7 @@ describe('AC6 — detectTransitions: Übergangs-Erkennung', () => {
       }),
     ]);
     // Snapshot zeigt 'To Do' (S-1 wurde re-opened und jetzt wieder Done)
-    const oldSnapshot = { stories: { 'S-1': 'To Do' }, features: {} };
+    const oldSnapshot = { stories: { 'dev-gui::S-1': 'To Do' }, features: {} };
 
     const { events } = detectTransitions(index, oldSnapshot);
 
@@ -123,7 +123,7 @@ describe('AC6 — detectTransitions: Übergangs-Erkennung', () => {
       }),
     ]);
     const oldSnapshot = {
-      stories: { 'S-1': 'In Progress', 'S-2': 'To Do' },
+      stories: { 'dev-gui::S-1': 'In Progress', 'dev-gui::S-2': 'To Do' },
       features: {},
     };
 
@@ -143,11 +143,11 @@ describe('AC6 — detectTransitions: Übergangs-Erkennung', () => {
         })],
       }),
     ]);
-    const oldSnapshot = { stories: { 'S-1': 'In Progress' }, features: {} };
+    const oldSnapshot = { stories: { 'dev-gui::S-1': 'In Progress' }, features: {} };
 
     const { newSnapshot } = detectTransitions(index, oldSnapshot);
 
-    expect(newSnapshot.stories['S-1']).toBe('In Progress');
+    expect(newSnapshot.stories['dev-gui::S-1']).toBe('In Progress');
   });
 
   it('Fehler-Boards (project.error) werden übersprungen — kein Snapshot-Update', () => {
@@ -161,6 +161,34 @@ describe('AC6 — detectTransitions: Übergangs-Erkennung', () => {
     expect(events).toHaveLength(0);
     // Kein Story aus Fehler-Board im neuen Snapshot
     expect(Object.keys(newSnapshot.stories)).toHaveLength(0);
+  });
+
+  it('Cross-Projekt-Kollision: gleiche Feature-ID in zwei Projekten feuert NICHT im Dauertakt', () => {
+    // Realer Bug: dev-gui UND agent-flow haben beide ein "F-001". Ohne Projekt-Namespace
+    // kollidierten die Snapshot-Keys → der Eintrag kippte jeden Scan hin und her und
+    // feuerte feature_done jede Minute erneut.
+    const index = makeIndex([
+      { slug: 'dev-gui', project_slug: 'dev-gui', features: [
+        makeFeature({ id: 'F-001', stories: [makeStory({ id: 'S-1', status: 'In Progress' })] }), // NICHT komplett
+      ] },
+      { slug: 'agent-flow', project_slug: 'agent-flow', features: [
+        makeFeature({ id: 'F-001', stories: [makeStory({ id: 'S-1', status: 'Done' })] }), // komplett, schon bekannt
+      ] },
+    ]);
+    const snapshot = {
+      stories: { 'dev-gui::S-1': 'In Progress', 'agent-flow::S-1': 'Done' },
+      features: { 'dev-gui::F-001': false, 'agent-flow::F-001': true },
+    };
+
+    // Erster Lauf: nichts geändert → kein Event; Einträge bleiben projekt-getrennt
+    const r1 = detectTransitions(index, snapshot);
+    expect(r1.events).toHaveLength(0);
+    expect(r1.newSnapshot.features['dev-gui::F-001']).toBe(false);
+    expect(r1.newSnapshot.features['agent-flow::F-001']).toBe(true);
+
+    // Zweiter Lauf gegen den aktualisierten Snapshot: weiterhin KEIN Re-Fire (kein Dauertakt)
+    const r2 = detectTransitions(index, r1.newSnapshot);
+    expect(r2.events).toHaveLength(0);
   });
 });
 
@@ -182,8 +210,8 @@ describe('AC7 — Baseline-Erststart sendet nichts', () => {
 
     const baseline = buildBaseline(index);
 
-    expect(baseline.stories['S-1']).toBe('Done');
-    expect(baseline.stories['S-2']).toBe('In Progress');
+    expect(baseline.stories['dev-gui::S-1']).toBe('Done');
+    expect(baseline.stories['dev-gui::S-2']).toBe('In Progress');
     expect(Object.keys(baseline.stories)).toHaveLength(2);
   });
 
@@ -324,7 +352,7 @@ describe('AC6 — Snapshot-Persistenz: kein Re-Fire nach Neustart', () => {
   });
 
   it('readSnapshot: gibt persistierten Snapshot + found=true zurück', async () => {
-    const stored = { stories: { 'S-5': 'Done' }, features: { 'F-2': true } };
+    const stored = { stories: { 'dev-gui::S-5': 'Done' }, features: { 'dev-gui::F-2': true } };
     const fsDeps = {
       readFile: jest.fn(async () => JSON.stringify(stored)),
     };
@@ -333,8 +361,8 @@ describe('AC6 — Snapshot-Persistenz: kein Re-Fire nach Neustart', () => {
     process.env.CRED_STORE_DIR = '/some/dir';
     try {
       const { snapshot, found } = await readSnapshot(fsDeps);
-      expect(snapshot.stories['S-5']).toBe('Done');
-      expect(snapshot.features['F-2']).toBe(true);
+      expect(snapshot.stories['dev-gui::S-5']).toBe('Done');
+      expect(snapshot.features['dev-gui::F-2']).toBe(true);
       expect(found).toBe(true);
     } finally {
       if (origCredStoreDir !== undefined) {
@@ -349,7 +377,7 @@ describe('AC6 — Snapshot-Persistenz: kein Re-Fire nach Neustart', () => {
     const sendFn = jest.fn(async () => ({ ok: true }));
 
     // "Auf Disk" persistierter Snapshot: S-1 ist bereits Done
-    const diskSnapshot = { stories: { 'S-1': 'Done' }, features: { 'F-1': true } };
+    const diskSnapshot = { stories: { 'dev-gui::S-1': 'Done' }, features: { 'dev-gui::F-1': true } };
 
     const mockBoardAggregator = {
       getIndex: jest.fn(async () => makeIndex([
@@ -405,7 +433,7 @@ describe('AC8 — Ereignis-Mapping', () => {
     const index = makeIndex([makeProject({
       features: [makeFeature({ stories: [makeStory({ id: 'S-1', status: 'Done' })] })],
     })]);
-    const { events } = detectTransitions(index, { stories: { 'S-1': 'In Progress' }, features: {} });
+    const { events } = detectTransitions(index, { stories: { 'dev-gui::S-1': 'In Progress' }, features: {} });
     expect(events[0].eventType).toBe('story_done');
   });
 
@@ -413,7 +441,7 @@ describe('AC8 — Ereignis-Mapping', () => {
     const index = makeIndex([makeProject({
       features: [makeFeature({ stories: [makeStory({ id: 'S-1', status: 'Blocked' })] })],
     })]);
-    const { events } = detectTransitions(index, { stories: { 'S-1': 'To Do' }, features: {} });
+    const { events } = detectTransitions(index, { stories: { 'dev-gui::S-1': 'To Do' }, features: {} });
     expect(events[0].eventType).toBe('story_blocked');
   });
 
@@ -429,8 +457,8 @@ describe('AC8 — Ereignis-Mapping', () => {
     })]);
     // Snapshot: F-1 war noch NICHT komplett
     const oldSnapshot = {
-      stories: { 'S-1': 'In Progress', 'S-2': 'Done' },
-      features: { 'F-1': false },
+      stories: { 'dev-gui::S-1': 'In Progress', 'dev-gui::S-2': 'Done' },
+      features: { 'dev-gui::F-1': false },
     };
     const { events } = detectTransitions(index, oldSnapshot);
     const featDone = events.find((e) => e.eventType === 'feature_done');
@@ -449,8 +477,8 @@ describe('AC8 — Ereignis-Mapping', () => {
       })],
     })]);
     const oldSnapshot = {
-      stories: { 'S-1': 'In Progress', 'S-2': 'In Progress' },
-      features: { 'F-1': false },
+      stories: { 'dev-gui::S-1': 'In Progress', 'dev-gui::S-2': 'In Progress' },
+      features: { 'dev-gui::F-1': false },
     };
     const { events } = detectTransitions(index, oldSnapshot);
     const featDone = events.find((e) => e.eventType === 'feature_done');
@@ -473,7 +501,7 @@ describe('AC8 — Gating: enabled=false / Ereignis nicht aktiviert', () => {
     };
 
     const fsDeps = {
-      readFile: jest.fn(async () => JSON.stringify({ stories: { 'S-1': 'In Progress' }, features: {} })),
+      readFile: jest.fn(async () => JSON.stringify({ stories: { 'dev-gui::S-1': 'In Progress' }, features: {} })),
       writeFile: jest.fn(async () => {}),
       rename: jest.fn(async () => {}),
       mkdir: jest.fn(async () => {}),
@@ -524,7 +552,7 @@ describe('AC8 — Gating: enabled=false / Ereignis nicht aktiviert', () => {
     };
 
     const fsDeps = {
-      readFile: jest.fn(async () => JSON.stringify({ stories: { 'S-1': 'In Progress' }, features: {} })),
+      readFile: jest.fn(async () => JSON.stringify({ stories: { 'dev-gui::S-1': 'In Progress' }, features: {} })),
       writeFile: jest.fn(async () => {}),
       rename: jest.fn(async () => {}),
       mkdir: jest.fn(async () => {}),
@@ -580,7 +608,7 @@ describe('AC6 — NotifyService-Fehler crasht den Watcher nicht', () => {
     };
 
     const fsDeps = {
-      readFile: jest.fn(async () => JSON.stringify({ stories: { 'S-1': 'In Progress' }, features: {} })),
+      readFile: jest.fn(async () => JSON.stringify({ stories: { 'dev-gui::S-1': 'In Progress' }, features: {} })),
       writeFile: jest.fn(async () => {}),
       rename: jest.fn(async () => {}),
       mkdir: jest.fn(async () => {}),
@@ -712,7 +740,7 @@ describe('AC9 — Nachrichteninhalt: buildNotificationPayload', () => {
     };
 
     const fsDeps = {
-      readFile: jest.fn(async () => JSON.stringify({ stories: { 'S-181': 'In Progress' }, features: { 'F-1': false } })),
+      readFile: jest.fn(async () => JSON.stringify({ stories: { 'dev-gui::S-181': 'In Progress' }, features: { 'dev-gui::F-1': false } })),
       writeFile: jest.fn(async () => {}),
       rename: jest.fn(async () => {}),
       mkdir: jest.fn(async () => {}),
@@ -809,7 +837,7 @@ describe('writeSnapshot', () => {
     };
 
     try {
-      await writeSnapshot({ stories: { 'S-1': 'Done' }, features: {} }, fsDeps);
+      await writeSnapshot({ stories: { 'dev-gui::S-1': 'Done' }, features: {} }, fsDeps);
       expect(calls).toContain('writeFile');
       expect(calls).toContain('rename');
       // rename kommt nach writeFile
