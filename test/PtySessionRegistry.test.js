@@ -9,6 +9,9 @@
  *   - Idle-close: sessions destroyed after idle timeout
  *   - Session isolation: destroy one session, others remain
  *
+ * Covers (taktgeber-nachtwaechter AC7): hasSession() — non-mutating existence
+ * check used by ProjectJobLock.isProjectBusy() busy-detection.
+ *
  * All tests use stub commands / no real PTY spawned where possible.
  * For cwd verification, PtyManager.spawnConfig is used (no real spawn needed).
  */
@@ -131,6 +134,50 @@ describe('PtySessionRegistry — AC4: multi-session keyed by project path', () =
     expect(registry.sessionCount).toBe(2);
     registry.getOrCreate('/project/beta');
     expect(registry.sessionCount).toBe(3);
+  });
+});
+
+describe('PtySessionRegistry — hasSession() (taktgeber-nachtwaechter AC7)', () => {
+  let registry;
+  afterEach(() => { try { registry?.destroy(); } catch { /* ignore */ } });
+
+  it('returns false when no session exists for the path', () => {
+    registry = new PtySessionRegistry({ cap: 3, idleMs: 60_000, cmd: 'echo', args: ['hi'] });
+    registry.start();
+    expect(registry.hasSession('/project/never-opened')).toBe(false);
+  });
+
+  it('returns true after getOrCreate() for the same path', () => {
+    registry = new PtySessionRegistry({ cap: 3, idleMs: 60_000, cmd: 'echo', args: ['hi'] });
+    registry.start();
+    registry.getOrCreate('/project/alpha');
+    expect(registry.hasSession('/project/alpha')).toBe(true);
+  });
+
+  it('is non-mutating: does NOT create a session as a side effect', () => {
+    registry = new PtySessionRegistry({ cap: 3, idleMs: 60_000, cmd: 'echo', args: ['hi'] });
+    registry.start();
+    expect(registry.sessionCount).toBe(1); // global only
+    registry.hasSession('/project/alpha');
+    expect(registry.sessionCount).toBe(1); // unchanged — no session created
+    expect(registry.hasSession('/project/alpha')).toBe(false);
+  });
+
+  it('returns false for the global key (null/undefined/empty) — global is not a project session', () => {
+    registry = new PtySessionRegistry({ cap: 3, idleMs: 60_000, cmd: 'echo', args: ['hi'] });
+    registry.start();
+    expect(registry.hasSession(null)).toBe(false);
+    expect(registry.hasSession(undefined)).toBe(false);
+    expect(registry.hasSession('')).toBe(false);
+  });
+
+  it('returns false after the session was closed', () => {
+    registry = new PtySessionRegistry({ cap: 3, idleMs: 60_000, cmd: 'echo', args: ['hi'] });
+    registry.start();
+    registry.getOrCreate('/project/alpha');
+    expect(registry.hasSession('/project/alpha')).toBe(true);
+    registry.closeSession('/project/alpha');
+    expect(registry.hasSession('/project/alpha')).toBe(false);
   });
 });
 

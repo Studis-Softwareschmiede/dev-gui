@@ -1,7 +1,7 @@
 id: S-190
 parent: F-029
-title: 'Projektweise Locks + Busy-Erkennung (ProjectJobLock)'
-status: To Do
+title: Projektweise Locks + Busy-Erkennung (ProjectJobLock)
+status: Done
 priority: P1
 spec: docs/specs/taktgeber-nachtwaechter.md
 implements:
@@ -16,17 +16,26 @@ dispo_act: null
 estimate_note: 'S/M-Heuristik (requirement): size_est aus AC/Komponenten-Zaehlung;
   dispo_est=5 aus baseline.json js|balanced|M (n=8). confidence medium.'
 confidence: medium
-branch: null
+branch: feat/S-190-project-job-lock
 pr: null
 blocked_reason: null
 created_at: '2026-06-30T20:09:55Z'
-updated_at: '2026-06-30T20:09:55Z'
-done_at: null
-notes: |
-  ProjectJobLock (Schluessel = absoluter Projektpfad) ersetzt fuer Drains den globalen
-  JobLock (src/JobLock.js, max 1 process-weit reicht fuer maxParallel>1 nicht). Busy je
+updated_at: '2026-06-30T21:02:47Z'
+done_at: '2026-06-30T21:02:47Z'
+notes: 'ProjectJobLock (Schluessel = absoluter Projektpfad) ersetzt fuer Drains den
+  globalen
+
+  JobLock (src/JobLock.js, max 1 process-weit reicht fuer maxParallel>1 nicht). Busy
+  je
+
   Projekt = Lock-gehalten ODER aktive Session/aktiver Command (auch manuell im UI
+
   gestartet, via CommandService/PtySessionRegistry) -> kein Doppel-Trigger.
+
   Lock wird bei Drain-Ende/Fehler IMMER freigegeben (kein Dauer-Lock, analog
+
   CommandService-Lock-Freigabe). Fundament fuer S-192 (ProjectDrain).
+
   Wiederverwenden: JobLock-Muster, CommandService.getStatus(), PtySessionRegistry.
+
+  '

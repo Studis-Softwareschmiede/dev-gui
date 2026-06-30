@@ -42,6 +42,7 @@ const GLOBAL_KEY = '__global__';
  *   registry.start();                              // start global session
  *   const session = registry.getOrCreate('/path/to/project');  // create/return project session
  *   const global  = registry.getDefault();         // global fallback session
+ *   const active  = registry.hasSession('/path/to/project'); // non-mutating existence check
  */
 export class PtySessionRegistry extends EventEmitter {
   /** @type {number} */
@@ -146,6 +147,26 @@ export class PtySessionRegistry extends EventEmitter {
     const entry = this.#ensureSession(key, cwd);
     entry.pty.start();
     return entry.pty;
+  }
+
+  /**
+   * Check whether a session currently exists for `projectPath`, WITHOUT
+   * creating one (non-mutating, unlike `getOrCreate()`). Used by busy-
+   * detection (`ProjectJobLock.isProjectBusy`,
+   * docs/specs/taktgeber-nachtwaechter.md AC7) so checking "is this project
+   * active?" never has the side effect of spawning a new PTY.
+   *
+   * The global key (null/undefined/''/whitespace-only) is intentionally
+   * NOT considered a project session — always returns `false` for it, since
+   * the global session is not project-scoped.
+   *
+   * @param {string|null|undefined} projectPath
+   * @returns {boolean}
+   */
+  hasSession(projectPath) {
+    const key = toKey(projectPath);
+    if (key === GLOBAL_KEY) return false;
+    return this.#sessions.has(key);
   }
 
   /**
