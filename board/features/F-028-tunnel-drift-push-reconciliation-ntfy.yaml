@@ -1,0 +1,28 @@
+id: F-028
+title: "Tunnel-Drift-Push — Reconciliation erkennt fehlenden Tunnel -> ntfy-Push (Capability C)"
+goal: >-
+  Heute merkt niemand, wenn der Cloudflare-Tunnel eines VPS extern geloescht wurde —
+  erst der naechste Deploy scheitert. Diese Feature macht den Drift proaktiv sichtbar:
+  die periodische ReconciliationJob erkennt "VPS hat gespeicherte tunnelId, die in
+  Cloudflare nicht mehr existiert" (listTunnels-Existenzpruefung) als Drift und schickt
+  eine ntfy-Push ueber den bestehenden Notify-Pfad aus F-025 (NotifyService/
+  NotificationWatcher). Best-effort (ntfy-Fehler kippt den Cron nicht), Uebergangs-
+  Erkennung gegen Push-Sturm, neues Ereignis tunnel_missing. Der Cron heilt NICHT
+  autonom (read-only listTunnels) — er meldet nur; die Heilung bleibt der manuelle
+  Ein-Klick-Pfad (F-027). Kein Secret in Push/Report/Notice/Log/Audit.
+status: To Do
+priority: P2
+spec: docs/specs/vps-tunnel-drift-notify.md
+definition_of_done: null
+labels:
+- cloudflare
+- notifications
+- security
+depends:
+- F-025
+- F-026
+owner: alex
+stories:
+- S-189
+created_at: '2026-06-30T00:00:00Z'
+updated_at: '2026-06-30T00:00:00Z'

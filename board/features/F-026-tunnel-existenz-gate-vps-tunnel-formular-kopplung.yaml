@@ -1,0 +1,32 @@
+id: F-026
+title: "Tunnel-Existenz-Gate + VPS↔Tunnel-Formular-Kopplung (Capability A)"
+goal: >-
+  Real aufgetreten: wird der Cloudflare-Tunnel eines VPS extern geloescht, bleibt
+  die gespeicherte tunnelId (credentials/misc/vps-<name>-tunnel-id) stehen -> VPS
+  zeigt auf einen toten Tunnel, Deploys scheitern (Error 1033), ohne dass es vorher
+  auffaellt. Zusaetzlich konnte das Deploy-Formular ueber einen account-weiten
+  Tunnel-Dropdown einen Hostname am falschen Tunnel verdrahten (sandbox-3 landete
+  am beautymoltTunnel). Diese Feature fuehrt (1) ein Tunnel-Existenz-Gate im
+  Deploy-Preflight ein (Abgleich gegen CloudflareApi.listTunnels, neue Fehlerklasse
+  tunnel-missing, harter Abbruch vor Docker/Route) und (2) eine VPS<->Tunnel-Kopplung
+  im Formular: tunnelId aus der VPS-Registry abgeleitet statt account-weitem Dropdown,
+  Badge "Tunnel ✓ / Tunnel fehlt ✗", Deploy-Button gesperrt bei fehlendem Tunnel,
+  Backend lehnt fremde tunnelId ab (tunnel-mismatch). Read-only Existenzpruefung,
+  kein Token-Leak.
+status: To Do
+priority: P1
+spec: docs/specs/vps-tunnel-existence-gate.md
+definition_of_done: null
+labels:
+- deploy
+- cloudflare
+- security
+depends:
+- F-013
+- F-024
+owner: alex
+stories:
+- S-185
+- S-186
+created_at: '2026-06-30T00:00:00Z'
+updated_at: '2026-06-30T00:00:00Z'

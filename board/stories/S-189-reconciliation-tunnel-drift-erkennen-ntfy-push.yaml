@@ -1,0 +1,39 @@
+id: S-189
+parent: F-028
+title: "ReconciliationJob: fehlenden Tunnel als Drift erkennen -> ntfy-Push (Uebergang, best-effort, Ereignis tunnel_missing)"
+status: To Do
+priority: P2
+spec: docs/specs/vps-tunnel-drift-notify.md
+implements:
+- AC1
+- AC2
+- AC3
+- AC4
+- AC5
+- AC6
+- AC7
+- AC8
+depends:
+- F-025
+- F-026
+labels:
+- cloudflare
+- notifications
+- security
+size_est: XL
+dispo_est: '5'
+dispo_act: null
+confidence: low
+estimate_note: >-
+  Heuristik (n_ac=8, n_comp=5 [ReconciliationJob, CloudflareApi.listTunnels,
+  NotifyService, push-notifications Config/events, AuditStore Report/Notice],
+  label_bump=+1 security) -> Score 14 -> XL. estimator-Dispatch (L/XL) im
+  requirement-Lauf nicht verfuegbar -> Fallback dispo_est aus baseline.json
+  js|balanced|L (ep=5.0). confidence low. Uebergangs-Erkennung gegen Push-Sturm
+  (AC6) + fail-closed bei nicht-pruefbarem Cloudflare (kein Fehlalarm) sind die
+  kniffligen Punkte.
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-06-30T00:00:00Z'
+updated_at: '2026-06-30T00:00:00Z'
