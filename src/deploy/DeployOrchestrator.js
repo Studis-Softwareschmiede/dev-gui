@@ -6,10 +6,12 @@
  * atomic unit. No other module orchestrates both steps.
  *
  * Design:
- *   - Deploy saga: (1) LockoutGuard-Check → (2) pull image → (3) run container
- *     with label cloudflare.tunnel-hostname=<hostname> → (4) add tunnel route +
- *     DNS CNAME. On failure at step 4 → rollback container (rm). On failure at
- *     step 3 → no route step. (AC3, AC4)
+ *   - Deploy saga: (1) LockoutGuard-Check → (2) Tunnel-Mismatch/Missing-Gate
+ *     (vps-tunnel-existence-gate AC5/AC6) → (3) Readiness-Probe (vps-readiness-gate AC4) →
+ *     (4) Tunnel-Existenz-Gate via listTunnels (vps-tunnel-existence-gate AC1) →
+ *     (5) pull image → (6) run container with label cloudflare.tunnel-hostname=<hostname> →
+ *     (7) add tunnel route + DNS CNAME. On failure at step 7 → rollback container (rm).
+ *     On failure at step 6 → no route step. (AC3, AC4)
  *   - Undeploy: (1) LockoutGuard-Check → (2) confirm-token check → (3) remove
  *     route + DNS → (4) container rm. Route-first to prevent traffic on removed
  *     container. (AC5, AC6)
@@ -49,12 +51,24 @@ export class DeployOrchestrator {
   #lockoutGuard;
 
   /**
+   * Optional VpsProviderRegistry reference for tunnel-mismatch + tunnel-missing checks
+   * (vps-tunnel-existence-gate AC5/AC6). When null/undefined, both checks are skipped
+   * (graceful degradation — e.g. legacy setups without VpsProviderRegistry).
+   *
+   * @type {import('../vps/VpsProviderRegistry.js').VpsProviderRegistry|null}
+   */
+  #vpsRegistry;
+
+  /**
    * @param {object} opts
    * @param {import('./VpsDockerControl.js').VpsDockerControl} opts.dockerControl
    * @param {import('../cloudflare/CloudflareApi.js').CloudflareApi} opts.cloudflareApi
    * @param {import('../cloudflare/LockoutGuard.js').LockoutGuard} opts.lockoutGuard
+   * @param {import('../vps/VpsProviderRegistry.js').VpsProviderRegistry} [opts.vpsRegistry]
+   *   Optional — enables tunnel-mismatch + tunnel-missing pre-flight checks (AC5/AC6).
+   *   When omitted, only the listTunnels-based existence probe runs (AC1–AC4).
    */
-  constructor({ dockerControl, cloudflareApi, lockoutGuard }) {
+  constructor({ dockerControl, cloudflareApi, lockoutGuard, vpsRegistry }) {
     if (!dockerControl || typeof dockerControl.pull !== 'function') {
       throw new Error('[DeployOrchestrator] dockerControl ist Pflicht');
     }
@@ -67,6 +81,7 @@ export class DeployOrchestrator {
     this.#dockerControl = dockerControl;
     this.#cloudflareApi = cloudflareApi;
     this.#lockoutGuard = lockoutGuard;
+    this.#vpsRegistry = vpsRegistry ?? null;
   }
 
   // ── Deploy ──────────────────────────────────────────────────────────────────
@@ -79,6 +94,18 @@ export class DeployOrchestrator {
    * AC4: route-step fails → container rolled back → { result: "error", reason }
    * AC7: protected hostname → { result: "error", reason: "protected-resource" }, no step
    *
+   * Preflight gates (all before any Docker/Cloudflare mutation step, incl. re-deploy rm):
+   *   (a) LockoutGuard (AC7)
+   *   (b) hostname validation
+   *   (c) resolveZoneForHostname — zone-not-found / cloudflare-unavailable
+   *   (d) Tunnel-Mismatch/-Missing via VpsProviderRegistry (AC5/AC6, when vpsId + vpsRegistry set)
+   *   (e) Tunnel-Existenz via CloudflareApi.listTunnels() (AC1–AC4)
+   *   (f) Readiness-Probe via VpsDockerControl.probe() (vps-readiness-gate)
+   *   (g) Re-deploy: ps() → rm() existing container (AC14)
+   *
+   * Gates (d)/(e) run BEFORE (g) so that a missing/mismatched tunnel aborts the deploy
+   * without removing the existing container first (AC1/AC3/AC5/AC6: "no step before the gate").
+   *
    * zoneId is NOT a parameter — it is resolved server-side from the hostname via
    * CloudflareApi.resolveZoneForHostname() (longest-suffix match). No zone-not-found
    * is leaked to the caller (400/422 zone-not-found reason only).
@@ -88,11 +115,12 @@ export class DeployOrchestrator {
    * @param {object} params.vps      - VpsTarget { host, port?, targetUser }
    * @param {string} params.hostname - target hostname (cloudflare tunnel route)
    * @param {string} params.tunnelId - Cloudflare tunnel ID to add the route to
+   * @param {string} [params.vpsId]  - Sanitized VPS name used for tunnel-mismatch check (AC5/AC6)
    * @param {object} [params.dockerOpts] - additional VpsDockerControl options
    * @returns {Promise<DeployResult>}
    */
-  async deploy({ image, vps, hostname, tunnelId, dockerOpts = {} }) {
-    // AC7: LockoutGuard-Hard-Block — before any step
+  async deploy({ image, vps, hostname, tunnelId, vpsId, dockerOpts = {} }) {
+    // (a) AC7: LockoutGuard-Hard-Block — before any step
     if (this.#lockoutGuard.isProtected(hostname)) {
       return {
         result: 'error',
@@ -101,7 +129,7 @@ export class DeployOrchestrator {
       };
     }
 
-    // Validate hostname (security: untrusted input before SSH sink)
+    // (b) Validate hostname (security: untrusted input before SSH sink)
     if (!isValidHostname(hostname)) {
       return {
         result: 'error',
@@ -110,7 +138,7 @@ export class DeployOrchestrator {
       };
     }
 
-    // Resolve zoneId server-side via longest-suffix match (Spec-Gap-Resolution, O3 analogy)
+    // (c) Resolve zoneId server-side via longest-suffix match (Spec-Gap-Resolution, O3 analogy)
     let zoneId;
     try {
       zoneId = await this.#cloudflareApi.resolveZoneForHostname(hostname);
@@ -129,23 +157,75 @@ export class DeployOrchestrator {
       };
     }
 
-    // AC14: Re-deploy = replace. If an existing container with this hostname is running,
-    // remove it first (analogous to `preview up` which replaces a running instance).
-    // This is best-effort — if removal fails, we still attempt the new deploy.
-    let replacingExisting = false;
-    {
-      const existingPs = await this.#dockerControl.ps(vps, dockerOpts);
-      if (existingPs.result === 'ok') {
-        const existing = (existingPs.containers ?? []).find((c) => c.hostname === hostname);
-        if (existing) {
-          replacingExisting = true;
-          // Best-effort: remove old container before starting new one
-          await this.#rollbackContainer(vps, existing.containerId, dockerOpts);
-        }
+    // (d) Tunnel-Mismatch/-Missing-Gate (vps-tunnel-existence-gate AC5/AC6):
+    // Prüft ob die im Request mitgegebene tunnelId mit der für den VPS registrierten
+    // Tunnel-Id übereinstimmt — VOR dem Re-Deploy-Replace-Schritt (AC1/AC3/AC5/AC6:
+    // kein Schritt vor dem Gate).
+    // Erfordert: vpsId (sanitisierter VPS-Name) + vpsRegistry (optional dependency).
+    // Ohne vpsRegistry oder vpsId → Gate wird übersprungen (Graceful Degradation für
+    // Legacy-Setups und Tests ohne VpsProviderRegistry).
+    if (this.#vpsRegistry && vpsId && typeof this.#vpsRegistry.getTargetRecord === 'function') {
+      // Registrierte Tunnel-Id aus dem CredentialStore lesen (store-intern, kein Secret-Leak)
+      // Wir nutzen getTargetRecord (das tunnelId-Feld im Target-Record) — identisch zu TUNNEL_ID_KEY-Lookup,
+      // da VpsProviderRegistry.#persistTargetMetadata() tunnelId im Record speichert.
+      let registeredTunnelId;
+      try {
+        const record = await this.#vpsRegistry.getTargetRecord(vpsId);
+        registeredTunnelId = record?.tunnelId ?? null;
+      } catch {
+        // Store-Fehler → defensiv: kein Tunnel registriert → tunnel-missing
+        registeredTunnelId = null;
+      }
+
+      if (!registeredTunnelId) {
+        // AC6: Kein Tunnel dem VPS zugeordnet → tunnel-missing, kein Schritt
+        return {
+          result: 'error',
+          errorClass: 'tunnel-missing',
+          reason: 'Kein Tunnel für diesen VPS registriert – bitte Tunnel neu anlegen & bestücken',
+        };
+      }
+
+      if (registeredTunnelId !== tunnelId) {
+        // AC5: Mitgegebene tunnelId stimmt nicht mit registrierter überein → tunnel-mismatch, kein Schritt
+        return {
+          result: 'error',
+          errorClass: 'tunnel-mismatch',
+          reason: 'Tunnel-ID stimmt nicht mit dem für diesen VPS registrierten Tunnel überein (Fehlverdrahtungs-Schutz)',
+        };
       }
     }
 
-    // Deploy-Gate (vps-readiness-gate AC4/AC5): Probe VOR dem docker-pull-Schritt.
+    // (e) Tunnel-Existenz-Gate (vps-tunnel-existence-gate AC1–AC4):
+    // Prüft via CloudflareApi.listTunnels(), ob die mitgegebene tunnelId in Cloudflare existiert.
+    // Fail-closed: Cloudflare nicht erreichbar → kein Deploy (AC4).
+    // Läuft VOR dem Re-Deploy-Replace-Schritt und VOR dem docker-pull (AC1/AC3).
+    {
+      let tunnels;
+      try {
+        // listTunnels() wirft CloudflareApiError bei fehlender Konfiguration / Auth / Netz (AC4)
+        tunnels = await this.#cloudflareApi.listTunnels(tunnelId);
+      } catch (cfErr) {
+        // AC4: Fail-closed — Cloudflare-Fehler → kein Docker-Schritt, bestehende Fehlerklasse weitergeben
+        return {
+          result: 'error',
+          errorClass: cfErr?.errorClass ?? 'cloudflare-unavailable',
+          reason: 'Cloudflare konnte nicht konsultiert werden – Tunnel-Existenz nicht prüfbar (fail-closed)',
+        };
+      }
+      // AC1: Tunnel existiert nicht → tunnel-missing, kein Schritt
+      const tunnelExists = Array.isArray(tunnels) && tunnels.some((t) => t.id === tunnelId);
+      if (!tunnelExists) {
+        return {
+          result: 'error',
+          errorClass: 'tunnel-missing',
+          reason: 'Tunnel existiert nicht in Cloudflare (extern gelöscht?) – bitte Tunnel neu anlegen & bestücken',
+        };
+      }
+      // AC2: Tunnel existiert → Gate ist No-op, Saga läuft unverändert weiter
+    }
+
+    // (f) Deploy-Gate (vps-readiness-gate AC4/AC5): Probe VOR dem docker-pull-Schritt.
     // state != ready → kein pull/run, kein Cloudflare-Schritt.
     // state == ready → bestehende Saga unverändert (Gate ist ein No-op-Vorschritt).
     // Graceful Degradation: Ältere/Stub-DockerControl-Instanzen (z.B. in Tests ohne probe-Methode)
@@ -159,6 +239,24 @@ export class DeployOrchestrator {
           errorClass: 'vps-provisioning',
           reason: 'VPS wird noch eingerichtet (Docker installieren) – in ~1–2 Min erneut versuchen',
         };
+      }
+    }
+
+    // (g) AC14: Re-deploy = replace. Gates (a)–(f) have all passed; now check whether
+    // an existing container with this hostname is running and remove it before starting
+    // the new one. This is best-effort — if removal fails, we still attempt the new deploy.
+    // Placed AFTER all Tunnel/Readiness gates so a missing/mismatched tunnel never causes
+    // the existing container to be removed (AC1/AC3/AC5/AC6: no step before the gate).
+    let replacingExisting = false;
+    {
+      const existingPs = await this.#dockerControl.ps(vps, dockerOpts);
+      if (existingPs.result === 'ok') {
+        const existing = (existingPs.containers ?? []).find((c) => c.hostname === hostname);
+        if (existing) {
+          replacingExisting = true;
+          // Best-effort: remove old container before starting new one
+          await this.#rollbackContainer(vps, existing.containerId, dockerOpts);
+        }
       }
     }
 

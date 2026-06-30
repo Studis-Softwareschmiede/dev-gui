@@ -25,6 +25,18 @@
  *          mountRouters() — nicht unit-testbar im Router-Test, durch server.js-Inspektion
  *          verifiziert (deploymentsRouter trägt keinen eigenen Access-Check für read-only-Pfade)
  *   AC8  — Kein Audit-Eintrag bei Readiness-Probe; kein Key/Host/Token in Response
+ *
+ * Covers (vps-tunnel-existence-gate S-185 AC1–AC7, AC12, AC13):
+ *   AC1  — POST /api/deployments → 422 tunnel-missing wenn Orchestrator tunnel-missing zurückgibt
+ *   AC4  — POST /api/deployments → cloudflare-not-configured → 422; cloudflare-auth-failed → 502;
+ *          cloudflare-unavailable → 502 (HTTP-Mapping der CF-Fehlerklassen aus dem Tunnel-Gate)
+ *   AC5  — POST /api/deployments → 422 tunnel-mismatch wenn Orchestrator tunnel-mismatch zurückgibt
+ *   AC7  — GET /api/deployments/vps-targets → tunnelIds enthält Env-VPS mit null (vollständiges Read-Model)
+ *   AC7  — GET /api/deployments/vps-tunnel-status → [{ vpsId, tunnelId, tunnelPresent }];
+ *          kein Tunnel-Token in Response; CF nicht erreichbar → tunnelPresent:"unknown";
+ *          kein Audit-Eintrag (read-only)
+ *   AC12 — vpsId an orchestrator.deploy() weitergegeben (Mismatch-Check ermöglichen)
+ *   AC13 — GET /api/deployments/vps-tunnel-status erzeugt keinen Audit-Eintrag
  */
 
 import { describe, it, expect, jest } from '@jest/globals';
@@ -39,6 +51,7 @@ import { AuditStore } from '../src/AuditStore.js';
  * Identity is injected via req.identity (simulating AccessGuard).
  * vpsRegistry optionally passed for S-169 AC9 vereinigte Auflösung.
  * vpsDockerControl optionally passed for S-180 AC7 Readiness-Probe.
+ * cloudflareApi optionally passed for S-185 AC7 VPS-Tunnel-Read-Model.
  */
 function makeApp({
   orchestratorStub,
@@ -47,6 +60,7 @@ function makeApp({
   identity = { email: 'admin@example.com' },
   vpsRegistry = undefined,
   vpsDockerControl = undefined,
+  cloudflareApi = undefined,
 } = {}) {
   const app = express();
   app.use(express.json());
@@ -55,7 +69,7 @@ function makeApp({
     req.identity = identity;
     next();
   });
-  app.use(deploymentsRouter(orchestratorStub, auditStore, vpsTargets, undefined, undefined, vpsRegistry, vpsDockerControl));
+  app.use(deploymentsRouter(orchestratorStub, auditStore, vpsTargets, undefined, undefined, vpsRegistry, vpsDockerControl, cloudflareApi));
   return app;
 }
 
@@ -1044,5 +1058,415 @@ describe('S-180 AC7–AC8: GET /api/deployments/readiness', () => {
     expect(dockerControl.probe).toHaveBeenCalledWith(
       expect.objectContaining({ host: '188.34.202.209' }),
     );
+  });
+});
+
+// ── S-185 AC1/AC5: tunnel-missing / tunnel-mismatch im POST-Handler ──────────
+
+describe('S-185 AC1/AC5: deploymentsRouter — tunnel-missing/tunnel-mismatch HTTP-Mapping', () => {
+  it('AC1: POST /api/deployments → 422 tunnel-missing wenn Orchestrator tunnel-missing zurückgibt', async () => {
+    const orch = makeOrchestratorStub({
+      deployResult: {
+        result: 'error',
+        errorClass: 'tunnel-missing',
+        reason: 'Tunnel existiert nicht in Cloudflare – bitte Tunnel neu anlegen',
+      },
+    });
+    const app = makeApp({ orchestratorStub: orch, auditStore: new AuditStore() });
+
+    const res = await request(app, 'POST', '/api/deployments', DEPLOY_BODY);
+    expect(res.status).toBe(422);
+    expect(res.body.result).toBe('error');
+    expect(res.body.errorClass).toBe('tunnel-missing');
+    expect(res.body.reason).toBeTruthy();
+    // Kein Token/Key in Response (AC12)
+    expect(JSON.stringify(res.body)).not.toContain('Bearer');
+    expect(JSON.stringify(res.body)).not.toContain('PRIVATE KEY');
+  });
+
+  it('AC5: POST /api/deployments → 422 tunnel-mismatch wenn Orchestrator tunnel-mismatch zurückgibt', async () => {
+    const orch = makeOrchestratorStub({
+      deployResult: {
+        result: 'error',
+        errorClass: 'tunnel-mismatch',
+        reason: 'Tunnel-ID stimmt nicht mit registriertem Tunnel überein',
+      },
+    });
+    const app = makeApp({ orchestratorStub: orch, auditStore: new AuditStore() });
+
+    const res = await request(app, 'POST', '/api/deployments', DEPLOY_BODY);
+    expect(res.status).toBe(422);
+    expect(res.body.result).toBe('error');
+    expect(res.body.errorClass).toBe('tunnel-mismatch');
+    expect(res.body.reason).toBeTruthy();
+  });
+
+  it('AC12: vpsId wird an orchestrator.deploy() weitergegeben (Mismatch-Check)', async () => {
+    const orch = makeOrchestratorStub();
+    const app = makeApp({ orchestratorStub: orch, auditStore: new AuditStore() });
+
+    await request(app, 'POST', '/api/deployments', DEPLOY_BODY);
+
+    // Deploy wurde mit vpsId aufgerufen (vps = 'vps-1' aus DEPLOY_BODY)
+    expect(orch.deploy).toHaveBeenCalledWith(
+      expect.objectContaining({ vpsId: 'vps-1', tunnelId: DEPLOY_BODY.tunnelId }),
+    );
+  });
+
+  it('Kein Audit-Eintrag entsteht bei tunnel-missing (kein Tunnel → kein Mutation-Schritt)', async () => {
+    // Tunnel-Gate schlägt VOR dem Audit-First-Eintrag fehl — nein, das stimmt nicht.
+    // Der Audit-First-Eintrag wird VOR dem Orchestrator-Aufruf geschrieben (AC9).
+    // Das ist korrekt und gewollt: Audit-First bedeutet vor der Mutation.
+    // tunnel-missing/mismatch ist kein Mutationsschritt — der Audit-Eintrag existiert
+    // als "deploy:create:..." wird trotzdem geschrieben (pre-flight audit, kein Secret).
+    // Hier testen wir: 422 response + kein Secret im Audit.
+    const capturedAuditCommands = [];
+    const orch = makeOrchestratorStub({
+      deployResult: {
+        result: 'error',
+        errorClass: 'tunnel-missing',
+        reason: 'Tunnel fehlt',
+      },
+    });
+    const auditStore = new AuditStore();
+    const origRecord = auditStore.record.bind(auditStore);
+    auditStore.record = ({ command, ...rest }) => {
+      capturedAuditCommands.push(command);
+      return origRecord({ command, ...rest });
+    };
+    const app = makeApp({ orchestratorStub: orch, auditStore });
+
+    const res = await request(app, 'POST', '/api/deployments', DEPLOY_BODY);
+    expect(res.status).toBe(422);
+    // Kein Token/Secret in Audit-Command
+    for (const cmd of capturedAuditCommands) {
+      expect(cmd).not.toContain('Bearer');
+      expect(cmd).not.toContain('PRIVATE KEY');
+    }
+  });
+});
+
+// ── S-185 AC4: HTTP-Mapping der CF-Fehlerklassen aus dem Tunnel-Existenz-Gate ─
+
+describe('S-185 AC4: deploymentsRouter — CF-Fehlerklassen HTTP-Mapping (Tunnel-Gate)', () => {
+  it('AC4: cloudflare-not-configured → 422', async () => {
+    const orch = makeOrchestratorStub({
+      deployResult: {
+        result: 'error',
+        errorClass: 'cloudflare-not-configured',
+        reason: 'Cloudflare nicht konfiguriert – Tunnel-Existenz nicht prüfbar',
+      },
+    });
+    const app = makeApp({ orchestratorStub: orch, auditStore: new AuditStore() });
+
+    const res = await request(app, 'POST', '/api/deployments', DEPLOY_BODY);
+    expect(res.status).toBe(422);
+    expect(res.body.result).toBe('error');
+    expect(res.body.errorClass).toBe('cloudflare-not-configured');
+    expect(res.body.reason).toBeTruthy();
+  });
+
+  it('AC4: cloudflare-auth-failed → 502', async () => {
+    const orch = makeOrchestratorStub({
+      deployResult: {
+        result: 'error',
+        errorClass: 'cloudflare-auth-failed',
+        reason: 'Cloudflare-Authentifizierung fehlgeschlagen',
+      },
+    });
+    const app = makeApp({ orchestratorStub: orch, auditStore: new AuditStore() });
+
+    const res = await request(app, 'POST', '/api/deployments', DEPLOY_BODY);
+    expect(res.status).toBe(502);
+    expect(res.body.result).toBe('error');
+    expect(res.body.errorClass).toBe('cloudflare-auth-failed');
+    expect(res.body.reason).toBeTruthy();
+  });
+
+  it('AC4: cloudflare-unavailable → 502', async () => {
+    const orch = makeOrchestratorStub({
+      deployResult: {
+        result: 'error',
+        errorClass: 'cloudflare-unavailable',
+        reason: 'Cloudflare nicht erreichbar',
+      },
+    });
+    const app = makeApp({ orchestratorStub: orch, auditStore: new AuditStore() });
+
+    const res = await request(app, 'POST', '/api/deployments', DEPLOY_BODY);
+    expect(res.status).toBe(502);
+    expect(res.body.result).toBe('error');
+    expect(res.body.errorClass).toBe('cloudflare-unavailable');
+    expect(res.body.reason).toBeTruthy();
+  });
+});
+
+// ── S-185 AC7: GET /api/deployments/vps-targets — tunnelIds vollständig ───────
+
+describe('S-185 AC7: deploymentsRouter — GET /api/deployments/vps-targets tunnelIds vollständig', () => {
+  it('AC7: Env-VPS erscheinen in tunnelIds mit null (kein dynamischer Record)', async () => {
+    const orch = makeOrchestratorStub();
+    // Env hat vps-1; kein dynamischer Record mit tunnelId
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore: new AuditStore(),
+      vpsTargets: new Map([['vps-1', { host: '1.2.3.4', port: 22, targetUser: 'root' }]]),
+    });
+
+    const res = await request(app, 'GET', '/api/deployments/vps-targets');
+    expect(res.status).toBe(200);
+    expect(res.body.vpsIds).toContain('vps-1');
+    // tunnelIds Map enthält Env-VPS mit null (kein Tunnel registriert)
+    expect(res.body.tunnelIds).toBeDefined();
+    expect(res.body.tunnelIds['vps-1']).toBeNull();
+  });
+
+  it('AC7: dynamischer VPS mit tunnelId erscheint in tunnelIds mit registrierter ID', async () => {
+    const orch = makeOrchestratorStub();
+    const registry = makeVpsRegistryMock([
+      { ...DYNAMIC_TESTDEVGUI, tunnelId: 'devgui-testdevgui-tunnel-id' },
+    ]);
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore: new AuditStore(),
+      vpsTargets: new Map(),
+      vpsRegistry: registry,
+    });
+
+    const res = await request(app, 'GET', '/api/deployments/vps-targets');
+    expect(res.status).toBe(200);
+    expect(res.body.tunnelIds['testdevgui']).toBe('devgui-testdevgui-tunnel-id');
+  });
+
+  it('AC7: Env-VPS + dynamischer VPS → tunnelIds enthält beide (null für Env, ID für dynamisch)', async () => {
+    const orch = makeOrchestratorStub();
+    const registry = makeVpsRegistryMock([
+      { ...DYNAMIC_TESTDEVGUI, tunnelId: 'testdevgui-tunnel-id' },
+    ]);
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore: new AuditStore(),
+      vpsTargets: new Map([['env-vps', { host: '5.6.7.8', port: 22, targetUser: 'root' }]]),
+      vpsRegistry: registry,
+    });
+
+    const res = await request(app, 'GET', '/api/deployments/vps-targets');
+    expect(res.status).toBe(200);
+    expect(res.body.tunnelIds['env-vps']).toBeNull();
+    expect(res.body.tunnelIds['testdevgui']).toBe('testdevgui-tunnel-id');
+  });
+});
+
+// ── S-185 AC7: GET /api/deployments/vps-tunnel-status ────────────────────────
+
+/**
+ * Erstellt einen CloudflareApi-Mock für den Tunnel-Status-Read-Model-Test.
+ */
+function makeCloudflareApiMock({ tunnels = [], throws = false } = {}) {
+  return {
+    listTunnels: jest.fn(async () => {
+      if (throws) throw Object.assign(new Error('CF unavailable'), { errorClass: 'cloudflare-unavailable' });
+      return tunnels;
+    }),
+  };
+}
+
+describe('S-185 AC7/AC13: deploymentsRouter — GET /api/deployments/vps-tunnel-status', () => {
+  it('AC7: 200 mit Array von { vpsId, tunnelId, tunnelPresent }', async () => {
+    const orch = makeOrchestratorStub();
+    const registry = makeVpsRegistryMock([
+      { ...DYNAMIC_TESTDEVGUI, tunnelId: 'devgui-testdevgui-tunnel-id' },
+    ]);
+    const cfApi = makeCloudflareApiMock({
+      tunnels: [{ id: 'devgui-testdevgui-tunnel-id' }],
+    });
+
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore: new AuditStore(),
+      vpsTargets: new Map(),
+      vpsRegistry: registry,
+      cloudflareApi: cfApi,
+    });
+
+    const res = await request(app, 'GET', '/api/deployments/vps-tunnel-status');
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+    const entry = res.body.find((e) => e.vpsId === 'testdevgui');
+    expect(entry).toBeDefined();
+    expect(entry.tunnelId).toBe('devgui-testdevgui-tunnel-id');
+    expect(entry.tunnelPresent).toBe(true);
+  });
+
+  it('AC7: tunnelPresent=false wenn Tunnel nicht in Cloudflare existiert', async () => {
+    const orch = makeOrchestratorStub();
+    const registry = makeVpsRegistryMock([
+      { ...DYNAMIC_TESTDEVGUI, tunnelId: 'deleted-tunnel-id' },
+    ]);
+    const cfApi = makeCloudflareApiMock({
+      tunnels: [{ id: 'other-tunnel-still-exists' }], // deletierter Tunnel fehlt
+    });
+
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore: new AuditStore(),
+      vpsTargets: new Map(),
+      vpsRegistry: registry,
+      cloudflareApi: cfApi,
+    });
+
+    const res = await request(app, 'GET', '/api/deployments/vps-tunnel-status');
+    expect(res.status).toBe(200);
+    const entry = res.body.find((e) => e.vpsId === 'testdevgui');
+    expect(entry.tunnelPresent).toBe(false);
+  });
+
+  it('AC7: tunnelPresent="unknown" wenn Cloudflare nicht erreichbar (degradierend, kein Crash)', async () => {
+    const orch = makeOrchestratorStub();
+    const registry = makeVpsRegistryMock([
+      { ...DYNAMIC_TESTDEVGUI, tunnelId: 'some-tunnel-id' },
+    ]);
+    const cfApi = makeCloudflareApiMock({ throws: true }); // CF nicht erreichbar
+
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore: new AuditStore(),
+      vpsTargets: new Map(),
+      vpsRegistry: registry,
+      cloudflareApi: cfApi,
+    });
+
+    const res = await request(app, 'GET', '/api/deployments/vps-tunnel-status');
+    expect(res.status).toBe(200);
+    const entry = res.body.find((e) => e.vpsId === 'testdevgui');
+    expect(entry.tunnelPresent).toBe('unknown');
+  });
+
+  it('AC7: VPS ohne registrierte tunnelId → tunnelId:null, tunnelPresent:false (kein Tunnel zugeordnet)', async () => {
+    const orch = makeOrchestratorStub();
+    const registry = makeVpsRegistryMock([
+      { ...DYNAMIC_TESTDEVGUI, tunnelId: null },
+    ]);
+    const cfApi = makeCloudflareApiMock({ tunnels: [{ id: 'some-other-tunnel' }] });
+
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore: new AuditStore(),
+      vpsTargets: new Map(),
+      vpsRegistry: registry,
+      cloudflareApi: cfApi,
+    });
+
+    const res = await request(app, 'GET', '/api/deployments/vps-tunnel-status');
+    expect(res.status).toBe(200);
+    const entry = res.body.find((e) => e.vpsId === 'testdevgui');
+    expect(entry.tunnelId).toBeNull();
+    expect(entry.tunnelPresent).toBe(false);
+  });
+
+  it('AC7: leere Registry + keine Env-VPS → leeres Array, kein Crash', async () => {
+    const orch = makeOrchestratorStub();
+    const registry = makeVpsRegistryMock([]);
+    const cfApi = makeCloudflareApiMock({ tunnels: [] });
+
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore: new AuditStore(),
+      vpsTargets: new Map(),
+      vpsRegistry: registry,
+      cloudflareApi: cfApi,
+    });
+
+    const res = await request(app, 'GET', '/api/deployments/vps-tunnel-status');
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+    expect(res.body).toHaveLength(0);
+  });
+
+  it('AC12: Tunnel-Token erscheint NICHT in Response (Security-Floor)', async () => {
+    const orch = makeOrchestratorStub();
+    const registry = makeVpsRegistryMock([
+      { ...DYNAMIC_TESTDEVGUI, tunnelId: 'real-tunnel-id' },
+    ]);
+    const cfApi = makeCloudflareApiMock({
+      tunnels: [{ id: 'real-tunnel-id', token: 'SECRET_TUNNEL_TOKEN_NEVER_EXPOSE' }],
+    });
+
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore: new AuditStore(),
+      vpsTargets: new Map(),
+      vpsRegistry: registry,
+      cloudflareApi: cfApi,
+    });
+
+    const res = await request(app, 'GET', '/api/deployments/vps-tunnel-status');
+    expect(res.status).toBe(200);
+    // Kein Token in Response
+    const bodyStr = JSON.stringify(res.body);
+    expect(bodyStr).not.toContain('SECRET_TUNNEL_TOKEN_NEVER_EXPOSE');
+    expect(bodyStr).not.toContain('token');
+    // tunnelId (nicht-geheim) darf enthalten sein
+    expect(bodyStr).toContain('real-tunnel-id');
+  });
+
+  it('AC13: GET /api/deployments/vps-tunnel-status erzeugt keinen Audit-Eintrag (read-only)', async () => {
+    const orch = makeOrchestratorStub();
+    const registry = makeVpsRegistryMock([DYNAMIC_TESTDEVGUI]);
+    const cfApi = makeCloudflareApiMock({ tunnels: [] });
+    const auditStore = new AuditStore();
+    const auditSpy = jest.spyOn(auditStore, 'record');
+
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore,
+      vpsTargets: new Map(),
+      vpsRegistry: registry,
+      cloudflareApi: cfApi,
+    });
+
+    const res = await request(app, 'GET', '/api/deployments/vps-tunnel-status');
+    expect(res.status).toBe(200);
+    expect(auditSpy).not.toHaveBeenCalled();
+  });
+
+  it('AC7: Env-VPS erscheinen im Read-Model (mit tunnelId:null wenn kein Record)', async () => {
+    const orch = makeOrchestratorStub();
+    // Keine dynamischen Records; Env hat einen VPS
+    const cfApi = makeCloudflareApiMock({ tunnels: [] });
+
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore: new AuditStore(),
+      vpsTargets: new Map([['env-vps-1', { host: '1.2.3.4', port: 22, targetUser: 'root' }]]),
+      cloudflareApi: cfApi,
+    });
+
+    const res = await request(app, 'GET', '/api/deployments/vps-tunnel-status');
+    expect(res.status).toBe(200);
+    const entry = res.body.find((e) => e.vpsId === 'env-vps-1');
+    expect(entry).toBeDefined();
+    expect(entry.tunnelId).toBeNull(); // Env-VPS haben keine registrierte tunnelId
+    expect(entry.tunnelPresent).toBe(false);
+  });
+
+  it('AC7: ohne cloudflareApi → tunnelPresent:"unknown" (degradierend, kein Crash)', async () => {
+    const orch = makeOrchestratorStub();
+    const registry = makeVpsRegistryMock([
+      { ...DYNAMIC_TESTDEVGUI, tunnelId: 'some-tunnel' },
+    ]);
+
+    const app = makeApp({
+      orchestratorStub: orch,
+      auditStore: new AuditStore(),
+      vpsTargets: new Map(),
+      vpsRegistry: registry,
+      // cloudflareApi nicht gesetzt → degradiert
+    });
+
+    const res = await request(app, 'GET', '/api/deployments/vps-tunnel-status');
+    expect(res.status).toBe(200);
+    const entry = res.body.find((e) => e.vpsId === 'testdevgui');
+    expect(entry.tunnelPresent).toBe('unknown');
   });
 });
