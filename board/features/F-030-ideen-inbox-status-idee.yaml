@@ -1,0 +1,31 @@
+id: F-030
+title: Ideen-Inbox / Status „Idee"
+goal: Front-of-Funnel vor "To Do" — eine vage Idee in Sekunden ins Board werfen
+  (neuer Status "Idee", Spalte ganz links), ohne Spec/AC. "Idee"-Button + Modal auf
+  der "Arbeiten"-Seite legt ein Idee-Item an (status Idee, ohne spec/implements,
+  token-frei); Idee-Items sind nie ready und damit explizites Nicht-Drain-Ziel des
+  Taktgebers. Aufgreifen ist KEINE Ein-Klick-Automatik, sondern eine INTERAKTIVE
+  Besprechung — Karte-Klick startet eine dialogische Gespraechs-Session (dieselbe
+  interaktive PTY-Engine wie das "Arbeiten"-Terminal, kein claude -p) mit den
+  Stichworten als Einstieg; der requirement-Flow laeuft als Abschluss/Formalisierung
+  des Besprochenen (nicht one-shot auf den rohen Text) und erzeugt Spec + echte
+  To-Do-Stories. Die Idee bleibt Idee waehrend des Gespraechs; erst wenn echte
+  Stories entstanden sind, loest der Owner sie explizit auf (Done + resolved_at +
+  Verlinkung), so dass keine Dublette entsteht.
+status: To Do
+priority: P2
+spec: docs/specs/ideen-inbox.md
+definition_of_done: null
+labels:
+- backend
+- ui
+depends: null
+owner: null
+stories:
+- S-198
+- S-199
+- S-200
+progress: 0/3 done
+created_at: '2026-06-30T20:27:38Z'
+updated_at: '2026-06-30T20:27:38Z'
+done_at: null

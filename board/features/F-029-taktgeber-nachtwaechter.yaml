@@ -1,0 +1,31 @@
+id: F-029
+title: Taktgeber / Nachtwächter — Boards automatisch leerziehen
+goal: Offene Boards (To Do / verwaiste In Progress) werden automatisch leergezogen
+  — über eine zentrale ProjectDrain-Engine mit zustandsbasierter Abbruch-Regel (jede
+  Story Done ODER Blocked) und Eskalation-auf-Blocked. Zwei Auslöser, gleiche Engine
+  manueller Knopf "Board abarbeiten" + automatischer Nachtwächter (Fenster 23:00-07:00
+  Europe/Zurich, bis 3 parallel, sanftes Ende, Token-Limit-Pause). Nutzt bezahlte Tokens
+  nachts produktiv.
+status: To Do
+priority: P1
+spec: docs/specs/taktgeber-nachtwaechter.md
+definition_of_done: null
+labels:
+- backend
+- scheduler
+- ui
+depends: null
+owner: null
+stories:
+- S-190
+- S-191
+- S-192
+- S-193
+- S-194
+- S-195
+- S-196
+- S-197
+progress: 0/8 done
+created_at: '2026-06-30T20:09:55Z'
+updated_at: '2026-06-30T20:09:55Z'
+done_at: null
