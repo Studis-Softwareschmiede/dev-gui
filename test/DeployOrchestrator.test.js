@@ -15,6 +15,19 @@
  *         result:error errorClass:vps-provisioning mit freundlicher Meldung (AC6)
  *   AC5  (vps-readiness-gate) — probe→ready → bestehende Saga unverändert (Gate ist No-op)
  *   AC13 (vps-readiness-gate) — kein SSH-Key/Token in result.reason bei vps-provisioning-Fehler
+ *
+ * Covers (vps-tunnel-existence-gate S-185 AC1–AC6, AC12, AC13):
+ *   AC1  — listTunnels-Gate: tunnelId nicht in Cloudflare → tunnel-missing, pull NIEMALS aufgerufen
+ *   AC2  — listTunnels-Gate: tunnelId in Cloudflare → Gate ist No-op, Saga läuft weiter
+ *   AC3  — Preflight-Reihenfolge: LockoutGuard → Tunnel-Mismatch/-Missing → listTunnels → Readiness
+ *          → Re-Deploy-ps/rm → pull (Gate vor Re-Deploy-Replace, AC1/AC3/AC5/AC6)
+ *   AC4  — Cloudflare nicht konsultierbar (nicht konfiguriert/Auth/Netz) → fail-closed, kein Docker-Schritt
+ *   AC5  — Tunnel-Mismatch: mitgegebene tunnelId ≠ registrierte → tunnel-mismatch, kein Schritt
+ *          inkl. EXISTING container: dockerControl.rm wird NICHT aufgerufen (C1-Fix)
+ *   AC6  — VPS ohne registrierte Tunnel-Id → tunnel-missing, kein Schritt
+ *          inkl. EXISTING container: dockerControl.rm wird NICHT aufgerufen (C1-Fix)
+ *   AC12 — Kein Token in result.reason bei tunnel-missing/tunnel-mismatch
+ *   AC13 — Read-only Checks erzeugen keinen Audit-Eintrag (Orchestrator ist audit-frei → gilt via Router)
  */
 
 import { describe, it, expect, jest } from '@jest/globals';
@@ -50,6 +63,8 @@ function makeDockerControl({
 
 /**
  * Create a mock CloudflareApi stub.
+ * S-185: listTunnels is now included — default returns [{ id: DEPLOY_PARAMS.tunnelId }]
+ * so existing tests remain unaffected (tunnel exists → Gate ist No-op).
  */
 function makeCloudflareApi({
   addRouteResult = undefined, // undefined = resolves (no throw)
@@ -65,6 +80,10 @@ function makeCloudflareApi({
   isProtectedFn = () => false,
   resolvedZoneId = 'zone-resolved-abc',  // default resolved zone
   resolveZoneError = null,
+  // S-185 AC1–AC4: listTunnels mock
+  // Default: Tunnel existiert → Gate ist No-op (Rückwärtskompatibilität für alle bestehenden Tests)
+  listTunnelsResult = [{ id: 'tunnel-abc-123' }], // matches DEPLOY_PARAMS.tunnelId
+  listTunnelsError = null,
 } = {}) {
   return {
     addRoute: jest.fn(async () => {
@@ -87,10 +106,28 @@ function makeCloudflareApi({
       if (listRoutesError) throw listRoutesError;
       return listRoutesResult;
     }),
+    listTunnels: jest.fn(async () => {
+      if (listTunnelsError) throw listTunnelsError;
+      return listTunnelsResult;
+    }),
     isProtected: jest.fn(isProtectedFn),
     resolveZoneForHostname: jest.fn(async () => {
       if (resolveZoneError) throw resolveZoneError;
       return resolvedZoneId;
+    }),
+  };
+}
+
+/**
+ * Create a mock VpsProviderRegistry stub for S-185 AC5/AC6 tests.
+ * @param {{ tunnelId: string|null }} [opts]
+ */
+function makeVpsRegistry({ tunnelId = 'tunnel-abc-123', throws = false } = {}) {
+  return {
+    getTargetRecord: jest.fn(async () => {
+      if (throws) throw new Error('Store unavailable');
+      if (tunnelId === null) return null;
+      return { tunnelId };
     }),
   };
 }
@@ -1008,5 +1045,393 @@ describe('DeployOrchestrator — deploy() — Deploy-Gate (vps-readiness-gate AC
 
     expect(result.result).toBe('ok');
     expect(docker.pull).toHaveBeenCalled();
+  });
+});
+
+// ── S-185 AC1–AC4: Tunnel-Existenz-Gate (listTunnels) ────────────────────────
+
+describe('DeployOrchestrator — deploy() — S-185 AC1–AC4: Tunnel-Existenz-Gate', () => {
+  // ── AC1: Tunnel fehlt in Cloudflare → tunnel-missing, kein Docker-Schritt ──
+
+  it('AC1 — tunnelId nicht in Cloudflare → result:error, errorClass:tunnel-missing, pull NICHT aufgerufen', async () => {
+    const docker = makeDockerControl({ psResult: { result: 'ok', containers: [] } });
+    // listTunnels gibt keine Tunnel zurück → Tunnel fehlt
+    const cf = makeCloudflareApi({ listTunnelsResult: [] });
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('tunnel-missing');
+    expect(docker.pull).not.toHaveBeenCalled();
+    expect(docker.run).not.toHaveBeenCalled();
+    expect(cf.addRoute).not.toHaveBeenCalled();
+    expect(cf.createDnsRecord).not.toHaveBeenCalled();
+  });
+
+  it('AC1 — listTunnels gibt anderen Tunnel zurück (nicht die gesuchte ID) → tunnel-missing', async () => {
+    const docker = makeDockerControl({ psResult: { result: 'ok', containers: [] } });
+    const cf = makeCloudflareApi({ listTunnelsResult: [{ id: 'different-tunnel-999' }] });
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('tunnel-missing');
+    expect(docker.pull).not.toHaveBeenCalled();
+  });
+
+  // ── AC2: Tunnel existiert → Gate ist No-op, Saga läuft weiter ──────────────
+
+  it('AC2 — tunnelId in Cloudflare → Gate ist No-op, bestehende Saga läuft unverändert', async () => {
+    const docker = makeDockerControl({ psResult: { result: 'ok', containers: [] } });
+    // Standard-Mock: Tunnel existiert (matches DEPLOY_PARAMS.tunnelId)
+    const cf = makeCloudflareApi({ listTunnelsResult: [{ id: DEPLOY_PARAMS.tunnelId }] });
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.result).toBe('ok');
+    expect(docker.pull).toHaveBeenCalled();
+    expect(docker.run).toHaveBeenCalled();
+    expect(cf.addRoute).toHaveBeenCalled();
+  });
+
+  it('AC2 — mehrere Tunnel im Account, registrierter existiert → Gate ist No-op', async () => {
+    const docker = makeDockerControl({ psResult: { result: 'ok', containers: [] } });
+    const cf = makeCloudflareApi({
+      listTunnelsResult: [
+        { id: 'other-tunnel-aaa' },
+        { id: DEPLOY_PARAMS.tunnelId }, // registrierter existiert
+        { id: 'other-tunnel-bbb' },
+      ],
+    });
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.result).toBe('ok');
+    expect(docker.pull).toHaveBeenCalled();
+  });
+
+  // ── AC4: Cloudflare nicht konsultierbar → fail-closed ────────────────────
+
+  it('AC4 — listTunnels wirft cloudflare-not-configured → fail-closed, kein Docker-Schritt', async () => {
+    const docker = makeDockerControl({ psResult: { result: 'ok', containers: [] } });
+    const cfNotConfigured = Object.assign(
+      new Error('Cloudflare not configured'),
+      { errorClass: 'cloudflare-not-configured' },
+    );
+    const cf = makeCloudflareApi({ listTunnelsError: cfNotConfigured });
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('cloudflare-not-configured');
+    expect(docker.pull).not.toHaveBeenCalled();
+    expect(cf.addRoute).not.toHaveBeenCalled();
+  });
+
+  it('AC4 — listTunnels wirft cloudflare-auth-failed → fail-closed, kein Docker-Schritt', async () => {
+    const docker = makeDockerControl({ psResult: { result: 'ok', containers: [] } });
+    const cfAuthErr = Object.assign(
+      new Error('Cloudflare auth failed'),
+      { errorClass: 'cloudflare-auth-failed' },
+    );
+    const cf = makeCloudflareApi({ listTunnelsError: cfAuthErr });
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('cloudflare-auth-failed');
+    expect(docker.pull).not.toHaveBeenCalled();
+  });
+
+  it('AC4 — listTunnels wirft cloudflare-unavailable (Netzfehler) → fail-closed, kein Docker-Schritt', async () => {
+    const docker = makeDockerControl({ psResult: { result: 'ok', containers: [] } });
+    const netErr = Object.assign(
+      new Error('Network error'),
+      { errorClass: 'cloudflare-unavailable' },
+    );
+    const cf = makeCloudflareApi({ listTunnelsError: netErr });
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('cloudflare-unavailable');
+    expect(docker.pull).not.toHaveBeenCalled();
+  });
+
+  // ── AC12: Kein Token in result.reason ─────────────────────────────────────
+
+  it('AC12 — result.reason bei tunnel-missing enthält keinen Token/Key', async () => {
+    const docker = makeDockerControl({ psResult: { result: 'ok', containers: [] } });
+    const cf = makeCloudflareApi({ listTunnelsResult: [] });
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.result).toBe('error');
+    expect(result.reason).not.toContain('Bearer');
+    expect(result.reason).not.toContain('PRIVATE KEY');
+    expect(result.reason).not.toContain('token');
+  });
+});
+
+// ── S-185 AC5/AC6: Tunnel-Mismatch/-Missing via VpsProviderRegistry ─────────
+
+describe('DeployOrchestrator — deploy() — S-185 AC5/AC6: Fehlverdrahtungs-Schutz', () => {
+  // AC5: mitgegebene tunnelId ≠ registrierte → tunnel-mismatch
+  it('AC5 — tunnelId stimmt nicht mit registrierter überein → tunnel-mismatch, kein Schritt', async () => {
+    const docker = makeDockerControl({ psResult: { result: 'ok', containers: [] } });
+    const cf = makeCloudflareApi();
+    // Registry hat andere tunnelId registriert
+    const registry = makeVpsRegistry({ tunnelId: 'registered-tunnel-different' });
+    const orch = new DeployOrchestrator({
+      dockerControl: docker,
+      cloudflareApi: cf,
+      lockoutGuard: makeLockoutGuard(false),
+      vpsRegistry: registry,
+    });
+
+    // Deploy sendet 'tunnel-abc-123' aber Registry hat 'registered-tunnel-different'
+    const result = await orch.deploy({ ...DEPLOY_PARAMS, vpsId: 'sandbox-3' });
+
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('tunnel-mismatch');
+    expect(docker.pull).not.toHaveBeenCalled();
+    expect(cf.addRoute).not.toHaveBeenCalled();
+  });
+
+  it('AC5 — fremder tunnelId (beautymoltTunnel für sandbox-3) → tunnel-mismatch (realer Vorfall)', async () => {
+    const docker = makeDockerControl({ psResult: { result: 'ok', containers: [] } });
+    const cf = makeCloudflareApi();
+    const registry = makeVpsRegistry({ tunnelId: 'correct-sandbox3-tunnel-id' });
+    const orch = new DeployOrchestrator({
+      dockerControl: docker,
+      cloudflareApi: cf,
+      lockoutGuard: makeLockoutGuard(false),
+      vpsRegistry: registry,
+    });
+
+    const result = await orch.deploy({
+      ...DEPLOY_PARAMS,
+      tunnelId: 'beautymolt-tunnel-xyz', // fremder Tunnel
+      vpsId: 'sandbox-3',
+    });
+
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('tunnel-mismatch');
+    expect(docker.pull).not.toHaveBeenCalled();
+  });
+
+  // AC5: richtige tunnelId → kein Mismatch, Saga läuft weiter
+  it('AC5 — tunnelId stimmt mit registrierter überein → kein Mismatch, Saga läuft weiter', async () => {
+    const docker = makeDockerControl({ psResult: { result: 'ok', containers: [] } });
+    const cf = makeCloudflareApi({ listTunnelsResult: [{ id: DEPLOY_PARAMS.tunnelId }] });
+    // Registry hat dieselbe tunnelId registriert
+    const registry = makeVpsRegistry({ tunnelId: DEPLOY_PARAMS.tunnelId });
+    const orch = new DeployOrchestrator({
+      dockerControl: docker,
+      cloudflareApi: cf,
+      lockoutGuard: makeLockoutGuard(false),
+      vpsRegistry: registry,
+    });
+
+    const result = await orch.deploy({ ...DEPLOY_PARAMS, vpsId: 'my-vps' });
+
+    expect(result.result).toBe('ok');
+    expect(docker.pull).toHaveBeenCalled();
+  });
+
+  // AC6: VPS ohne registrierte Tunnel-Id → tunnel-missing
+  it('AC6 — VPS ohne registrierte tunnelId (null) → tunnel-missing, kein Schritt', async () => {
+    const docker = makeDockerControl({ psResult: { result: 'ok', containers: [] } });
+    const cf = makeCloudflareApi();
+    const registry = makeVpsRegistry({ tunnelId: null }); // kein Tunnel
+    const orch = new DeployOrchestrator({
+      dockerControl: docker,
+      cloudflareApi: cf,
+      lockoutGuard: makeLockoutGuard(false),
+      vpsRegistry: registry,
+    });
+
+    const result = await orch.deploy({ ...DEPLOY_PARAMS, vpsId: 'vps-no-tunnel' });
+
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('tunnel-missing');
+    expect(docker.pull).not.toHaveBeenCalled();
+    expect(cf.addRoute).not.toHaveBeenCalled();
+  });
+
+  it('AC6 — getTargetRecord gibt null zurück (kein Record) → tunnel-missing', async () => {
+    const docker = makeDockerControl({ psResult: { result: 'ok', containers: [] } });
+    const cf = makeCloudflareApi();
+    // Record existiert nicht
+    const registry = {
+      getTargetRecord: jest.fn(async () => null),
+    };
+    const orch = new DeployOrchestrator({
+      dockerControl: docker,
+      cloudflareApi: cf,
+      lockoutGuard: makeLockoutGuard(false),
+      vpsRegistry: registry,
+    });
+
+    const result = await orch.deploy({ ...DEPLOY_PARAMS, vpsId: 'ghost-vps' });
+
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('tunnel-missing');
+    expect(docker.pull).not.toHaveBeenCalled();
+  });
+
+  it('AC6 — Store-Fehler in getTargetRecord → tunnel-missing (kein Crash, kein Token-Leak)', async () => {
+    const docker = makeDockerControl({ psResult: { result: 'ok', containers: [] } });
+    const cf = makeCloudflareApi();
+    const registry = makeVpsRegistry({ throws: true }); // Store wirft
+    const orch = new DeployOrchestrator({
+      dockerControl: docker,
+      cloudflareApi: cf,
+      lockoutGuard: makeLockoutGuard(false),
+      vpsRegistry: registry,
+    });
+
+    const result = await orch.deploy({ ...DEPLOY_PARAMS, vpsId: 'vps-store-error' });
+
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('tunnel-missing');
+    expect(docker.pull).not.toHaveBeenCalled();
+    // Kein Token in reason
+    expect(result.reason).not.toContain('Bearer');
+  });
+
+  // C1-Fix: Tunnel-Gates laufen VOR dem Re-Deploy-Replace-Block (kein rm bei fehlendem Tunnel)
+  it('C1/AC5 — tunnel-mismatch mit EXISTING container: dockerControl.rm wird NICHT aufgerufen', async () => {
+    const existingContainer = { containerId: 'old-cnt', hostname: 'app.example.com', image: 'old:v1', status: 'Up', hostPort: 8080 };
+    const docker = makeDockerControl({
+      psResult: { result: 'ok', containers: [existingContainer] },
+    });
+    const cf = makeCloudflareApi();
+    const registry = makeVpsRegistry({ tunnelId: 'registered-tunnel-different' });
+    const orch = new DeployOrchestrator({
+      dockerControl: docker,
+      cloudflareApi: cf,
+      lockoutGuard: makeLockoutGuard(false),
+      vpsRegistry: registry,
+    });
+
+    const result = await orch.deploy({ ...DEPLOY_PARAMS, vpsId: 'sandbox-3' });
+
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('tunnel-mismatch');
+    // rm() darf NIEMALS aufgerufen werden — bestehender Container bleibt (AC5/C1)
+    expect(docker.rm).not.toHaveBeenCalled();
+    expect(docker.pull).not.toHaveBeenCalled();
+  });
+
+  it('C1/AC6 — tunnel-missing (kein Tunnel registriert) mit EXISTING container: dockerControl.rm wird NICHT aufgerufen', async () => {
+    const existingContainer = { containerId: 'old-cnt', hostname: 'app.example.com', image: 'old:v1', status: 'Up', hostPort: 8080 };
+    const docker = makeDockerControl({
+      psResult: { result: 'ok', containers: [existingContainer] },
+    });
+    const cf = makeCloudflareApi();
+    const registry = makeVpsRegistry({ tunnelId: null }); // kein Tunnel registriert
+    const orch = new DeployOrchestrator({
+      dockerControl: docker,
+      cloudflareApi: cf,
+      lockoutGuard: makeLockoutGuard(false),
+      vpsRegistry: registry,
+    });
+
+    const result = await orch.deploy({ ...DEPLOY_PARAMS, vpsId: 'vps-no-tunnel' });
+
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('tunnel-missing');
+    // rm() darf NIEMALS aufgerufen werden — bestehender Container bleibt (AC6/C1)
+    expect(docker.rm).not.toHaveBeenCalled();
+    expect(docker.pull).not.toHaveBeenCalled();
+  });
+
+  it('C1/AC1 — listTunnels gibt leere Liste (Tunnel fehlt in CF) mit EXISTING container: dockerControl.rm wird NICHT aufgerufen', async () => {
+    const existingContainer = { containerId: 'old-cnt', hostname: 'app.example.com', image: 'old:v1', status: 'Up', hostPort: 8080 };
+    const docker = makeDockerControl({
+      psResult: { result: 'ok', containers: [existingContainer] },
+    });
+    // Kein vpsRegistry → Mismatch-Gate übersprungen; listTunnels-Gate schlägt an
+    const cf = makeCloudflareApi({ listTunnelsResult: [] }); // Tunnel fehlt in Cloudflare
+    const orch = new DeployOrchestrator({
+      dockerControl: docker,
+      cloudflareApi: cf,
+      lockoutGuard: makeLockoutGuard(false),
+    });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('tunnel-missing');
+    // rm() darf NIEMALS aufgerufen werden — bestehender Container bleibt (AC1/C1)
+    expect(docker.rm).not.toHaveBeenCalled();
+    expect(docker.pull).not.toHaveBeenCalled();
+  });
+
+  // Graceful Degradation: ohne vpsRegistry oder vpsId → Gate überspringen
+  it('AC2 (backward-compat) — ohne vpsRegistry → Mismatch-Gate übersprungen, Saga läuft', async () => {
+    const docker = makeDockerControl({ psResult: { result: 'ok', containers: [] } });
+    const cf = makeCloudflareApi();
+    // Kein vpsRegistry → Gate übersprungen (Legacy-Setups)
+    const orch = new DeployOrchestrator({
+      dockerControl: docker,
+      cloudflareApi: cf,
+      lockoutGuard: makeLockoutGuard(false),
+    });
+
+    const result = await orch.deploy({ ...DEPLOY_PARAMS, vpsId: 'some-vps' });
+
+    expect(result.result).toBe('ok');
+    expect(docker.pull).toHaveBeenCalled();
+  });
+
+  it('AC2 (backward-compat) — ohne vpsId → Mismatch-Gate übersprungen, Saga läuft', async () => {
+    const docker = makeDockerControl({ psResult: { result: 'ok', containers: [] } });
+    const cf = makeCloudflareApi();
+    const registry = makeVpsRegistry({ tunnelId: 'other-tunnel' });
+    const orch = new DeployOrchestrator({
+      dockerControl: docker,
+      cloudflareApi: cf,
+      lockoutGuard: makeLockoutGuard(false),
+      vpsRegistry: registry,
+    });
+
+    // Kein vpsId im deploy() Call → Gate übersprungen
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.result).toBe('ok');
+    expect(docker.pull).toHaveBeenCalled();
+  });
+
+  // AC3: Präzedenz-Reihenfolge — Mismatch-Gate kommt VOR listTunnels-Gate
+  it('AC3 — Mismatch-Gate (AC5) läuft VOR listTunnels-Gate (AC1): tunnel-mismatch wenn beide Probleme', async () => {
+    const docker = makeDockerControl({ psResult: { result: 'ok', containers: [] } });
+    // listTunnels liefert leere Liste UND Mismatch
+    const cf = makeCloudflareApi({ listTunnelsResult: [] });
+    const registry = makeVpsRegistry({ tunnelId: 'completely-different-tunnel' });
+    const orch = new DeployOrchestrator({
+      dockerControl: docker,
+      cloudflareApi: cf,
+      lockoutGuard: makeLockoutGuard(false),
+      vpsRegistry: registry,
+    });
+
+    const result = await orch.deploy({ ...DEPLOY_PARAMS, vpsId: 'my-vps' });
+
+    // Mismatch-Gate schlägt zuerst an (AC3-Reihenfolge)
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('tunnel-mismatch');
+    // listTunnels wurde NICHT aufgerufen (Mismatch beendet schon vorher)
+    expect(cf.listTunnels).not.toHaveBeenCalled();
+    expect(docker.pull).not.toHaveBeenCalled();
   });
 });

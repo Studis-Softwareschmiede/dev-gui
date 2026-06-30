@@ -2,9 +2,12 @@
  * deploymentsRouter — Express-Router für Deploy-Lifecycle (AC3–AC9, ADR-012)
  *                     + Reconciliation-Endpunkte (AC2/AC8/AC8b, ADR-013)
  *                     + Lokaler Image-Test (S-156, AC1–AC5)
- *                     + Readiness-Endpunkt (S-180, AC7–AC8).
+ *                     + Readiness-Endpunkt (S-180, AC7–AC8)
+ *                     + VPS-Tunnel-Read-Model (S-185 AC7).
  *
  * Routes (alle hinter AccessGuard in server.js):
+ *   GET    /api/deployments/vps-targets              → { vpsIds, tunnelInfo? } [READ-ONLY, S-185 AC7]
+ *   GET    /api/deployments/vps-tunnel-status        → [{ vpsId, tunnelId, tunnelPresent }] [READ-ONLY, S-185 AC7]
  *   GET    /api/deployments/readiness?vps=<vpsId>    → { state: "unreachable"|"provisioning"|"ready" } [READ-ONLY, S-180 AC7]
  *   GET    /api/deployments                          → { deployments: Deployment[], errors? }
  *   POST   /api/deployments                          → { result, deployment?, reason? }   [MUTATION]
@@ -25,6 +28,7 @@
  *   - SSH-Key + Cloudflare-Token erscheinen NIEMALS in Response, Log, Audit, WS oder URL.
  *   - Untrusted Input (vps, hostname, image, confirm) wird validiert (security/R02/R03).
  *   - Readiness-Endpunkt (S-180): read-only, kein Audit, keine Mutation, kein Secret in Response.
+ *   - VPS-Tunnel-Read-Model (S-185 AC7): read-only, kein Audit, kein Tunnel-Token, nur tunnelId.
  *
  * VPS configuration: The router receives a pre-configured vpsConfig map
  * (vpsId → VpsTarget) from server.js. The client sends a vpsId string;
@@ -292,27 +296,48 @@ async function resolveVpsIdToTarget(vpsId, vpsTargets, vpsRegistry) {
  * @param {import('./deploy/VpsDockerControl.js').VpsDockerControl} [vpsDockerControl]
  *   Optional injected for the readiness endpoint (S-180 AC7–AC8).
  *   When provided, GET /api/deployments/readiness?vps=<vpsId> uses probe() read-only.
+ * @param {import('./cloudflare/CloudflareApi.js').CloudflareApi} [cloudflareApi]
+ *   Optional injected for the VPS-Tunnel-Read-Model (S-185 AC7).
+ *   When provided, GET /api/deployments/vps-tunnel-status uses listTunnels() to check existence.
+ *   When absent, tunnelPresent degrades to null/"unknown" (no crash).
  * @returns {import('express').Router}
  */
-export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconciliationJob, localDockerControl, vpsRegistry, vpsDockerControl) {
+export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconciliationJob, localDockerControl, vpsRegistry, vpsDockerControl, cloudflareApi) {
   const router = Router();
 
   // ── GET /api/deployments/vps-targets ────────────────────────────────────
   // Returns the unified list of VPS IDs (dynamisch ⊕ Env) for the frontend dropdown.
   // S-167 AC3: dynamisch angelegte VPS + VPS_TARGETS-Env; Env gewinnt bei Kollision.
-  // Read-only — no mutation, no secrets (only IDs, no host/user/key exposed — AC8).
+  // S-185 AC7 (additiv): liefert zusätzlich tunnelId pro VPS-Eintrag (nicht-geheim, aus Target-Record).
+  //   Kein Tunnel-Token, kein host/user/key.
+  // Read-only — no mutation, no secrets (only IDs + tunnelId, no host/user/key exposed — AC8).
   router.get('/api/deployments/vps-targets', async (_req, res) => {
     // Env-IDs als Override-Menge (Env gewinnt bei Kollision)
     const envIds = new Set(vpsTargets.keys());
 
-    // Dynamische IDs aus persistierten Target-Records (S-167 AC3)
-    // _vpsId = sanitisierter VPS-Name (aus CredentialStore-Schlüssel abgeleitet)
+    // Dynamische Records aus persistierten Target-Records (S-167 AC3, S-185 AC7)
+    // _vpsId = sanitisierter VPS-Name; tunnelId = registrierte Tunnel-Id (nicht-geheim)
     const dynamicIds = new Set();
+    /** @type {Map<string, string|null>} vpsId → registrierte tunnelId (oder null) */
+    const tunnelIdMap = new Map();
+
+    // I2: Env-VPS werden mit null-tunnelId vorbelegt, damit das Read-Model vollständig ist
+    // (konsistent mit /vps-tunnel-status, das Env-VPS ebenfalls mit tunnelId:null listet).
+    for (const id of envIds) {
+      tunnelIdMap.set(id, null);
+    }
+
     if (vpsRegistry && typeof vpsRegistry.listTargetRecords === 'function') {
       try {
         const records = await vpsRegistry.listTargetRecords();
         for (const record of records) {
-          if (record._vpsId) dynamicIds.add(record._vpsId);
+          if (record._vpsId) {
+            dynamicIds.add(record._vpsId);
+            // S-185 AC7: tunnelId aus Target-Record (nicht-geheim, AC12-konform)
+            // Nur die ID, niemals das Token (store-intern)
+            // Env-Kollision: dynamischer Record kann tunnelId überschreiben (Env hat bereits null)
+            tunnelIdMap.set(record._vpsId, record.tunnelId ?? null);
+          }
         }
       } catch {
         // Degradierend: Quell-Fehler → nur Env-IDs zurückliefern (kein Crash)
@@ -320,14 +345,92 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconcil
     }
 
     // Vereinigung: Env-IDs zuerst, dann dynamische IDs die noch nicht vorhanden sind
-    // (Env gewinnt bei Kollision — gleicher _vpsId → Env-Eintrag bleibt)
+    // (Env gewinnt bei Kollision bzgl. VPS-Auflösung; tunnelId kommt vom dynamischen Record)
     const ids = [...envIds];
     for (const id of dynamicIds) {
       if (!envIds.has(id)) ids.push(id);
     }
 
-    // Security-Floor (AC8): nur IDs — kein host/user/key in der Response
-    return res.json({ vpsIds: ids });
+    // Security-Floor (AC8, AC12): nur IDs + tunnelId — kein host/user/key/token in der Response
+    return res.json({ vpsIds: ids, tunnelIds: Object.fromEntries(tunnelIdMap) });
+  });
+
+  // ── GET /api/deployments/vps-tunnel-status ──────────────────────────────
+  // VPS-Tunnel-Read-Model (S-185 AC7): read-only, kein Audit, kein Tunnel-Token.
+  // Liefert je VPS: { vpsId, tunnelId: string|null, tunnelPresent: boolean|"unknown" }
+  // Cloudflare nicht erreichbar → tunnelPresent: "unknown" (kein Crash, degradierend).
+  // MUSS vor GET /api/deployments/readiness und GET /api/deployments stehen
+  // (kein Pfadkonflikt, aber klare Reihenfolge — kein :vps-Match).
+  router.get('/api/deployments/vps-tunnel-status', async (_req, res) => {
+    // Alle bekannten vpsIds sammeln (Env ⊕ dynamisch)
+    const envIds = new Set(vpsTargets.keys());
+    /** @type {Map<string, string|null>} vpsId → registrierte tunnelId */
+    const tunnelIdMap = new Map();
+
+    // Env-VPS haben keine registrierte Tunnel-Id im Store (nur in dynamischen Records)
+    for (const id of envIds) {
+      tunnelIdMap.set(id, null);
+    }
+
+    if (vpsRegistry && typeof vpsRegistry.listTargetRecords === 'function') {
+      try {
+        const records = await vpsRegistry.listTargetRecords();
+        for (const record of records) {
+          if (record._vpsId) {
+            // Security-Floor (AC12): nur tunnelId (nicht-geheim), niemals tunnelToken
+            tunnelIdMap.set(record._vpsId, record.tunnelId ?? null);
+          }
+        }
+      } catch {
+        // Degradierend: Store-Fehler → tunnelIds bleiben null für dynamische VPS
+      }
+    }
+
+    // Eindeutige tunnelIds für einen einzelnen listTunnels()-Call ermitteln
+    const uniqueTunnelIds = new Set(
+      [...tunnelIdMap.values()].filter((id) => typeof id === 'string' && id),
+    );
+
+    /** @type {Set<string>} Tunnel-Ids die in Cloudflare existieren */
+    const existingTunnelIds = new Set();
+    let cloudflareAvailable = true;
+
+    if (cloudflareApi && typeof cloudflareApi.listTunnels === 'function' && uniqueTunnelIds.size > 0) {
+      try {
+        // Ein einziger listTunnels()-Call (AC7: kein Polling-Sturm)
+        // listTunnels() nimmt einen zoneId-Parameter (für Annotation), wir übergeben einen
+        // Platzhalter — die Existenz-Prüfung braucht nur die id-Felder (AC7 Spec-Kommentar).
+        const tunnels = await cloudflareApi.listTunnels('');
+        for (const t of tunnels ?? []) {
+          if (t?.id) existingTunnelIds.add(t.id);
+        }
+      } catch {
+        // AC7: Cloudflare nicht konsultierbar → tunnelPresent: "unknown" (kein Crash)
+        cloudflareAvailable = false;
+      }
+    } else if (!cloudflareApi) {
+      // AC7: Cloudflare nicht konfiguriert → tunnelPresent: "unknown"
+      cloudflareAvailable = false;
+    }
+
+    // Read-Model aufbauen: { vpsId, tunnelId, tunnelPresent }
+    // Security-Floor (AC12): kein Tunnel-Token, kein host/key in Response
+    const result = [];
+    for (const [vpsId, tunnelId] of tunnelIdMap) {
+      let tunnelPresent;
+      if (!tunnelId) {
+        // Kein Tunnel registriert → kein Cloudflare-Check nötig
+        tunnelPresent = false;
+      } else if (!cloudflareAvailable) {
+        // AC7: Cloudflare nicht erreichbar → degradiert sichtbar
+        tunnelPresent = 'unknown';
+      } else {
+        tunnelPresent = existingTunnelIds.has(tunnelId);
+      }
+      result.push({ vpsId, tunnelId, tunnelPresent });
+    }
+
+    return res.json(result);
   });
 
   // ── GET /api/deployments/readiness ───────────────────────────────────────
@@ -481,6 +584,7 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconcil
     }
 
     // Execute deploy saga (zoneId resolved server-side in DeployOrchestrator)
+    // vpsId is passed for tunnel-mismatch/-missing checks (S-185 AC5/AC6)
     let result;
     try {
       result = await orchestrator.deploy({
@@ -488,6 +592,7 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconcil
         vps: vpsTarget,
         hostname,
         tunnelId,
+        vpsId,
       });
     } catch (err) {
       const errorClass = err?.errorClass ?? 'error';
@@ -524,6 +629,23 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconcil
       if (errorClass === 'vps-provisioning') {
         // AC4 (vps-readiness-gate): VPS noch nicht bereit — freundliche Meldung, kein 5xx
         return res.status(422).json({ result: 'error', errorClass: 'vps-provisioning', reason: sanitizeMsg(reason ?? 'VPS wird noch eingerichtet (Docker installieren) – in ~1–2 Min erneut versuchen') });
+      }
+      if (errorClass === 'tunnel-missing') {
+        // S-185 AC1/AC6: Tunnel fehlt in Cloudflare oder kein Tunnel dem VPS zugeordnet
+        return res.status(422).json({ result: 'error', errorClass: 'tunnel-missing', reason: sanitizeMsg(reason ?? 'Tunnel für diesen VPS fehlt in Cloudflare – bitte über „Tunnel neu anlegen & bestücken" wiederherstellen') });
+      }
+      if (errorClass === 'tunnel-mismatch') {
+        // S-185 AC5: Mitgegebene tunnelId stimmt nicht mit registrierter überein
+        return res.status(422).json({ result: 'error', errorClass: 'tunnel-mismatch', reason: sanitizeMsg(reason ?? 'Tunnel-ID stimmt nicht mit dem für diesen VPS registrierten Tunnel überein (Fehlverdrahtungs-Schutz)') });
+      }
+      if (errorClass === 'cloudflare-not-configured') {
+        return res.status(422).json({ result: 'error', errorClass: 'cloudflare-not-configured', reason: sanitizeMsg(reason ?? 'Cloudflare nicht konfiguriert – Tunnel-Existenz nicht prüfbar') });
+      }
+      if (errorClass === 'cloudflare-auth-failed') {
+        return res.status(502).json({ result: 'error', errorClass: 'cloudflare-auth-failed', reason: sanitizeMsg(reason ?? 'Cloudflare-Authentifizierung fehlgeschlagen') });
+      }
+      if (errorClass === 'cloudflare-unavailable') {
+        return res.status(502).json({ result: 'error', errorClass: 'cloudflare-unavailable', reason: sanitizeMsg(reason ?? 'Cloudflare nicht erreichbar') });
       }
       if (errorClass === 'validation-error') {
         return res.status(400).json({ result: 'error', reason });

@@ -33,6 +33,7 @@
  *   GET    /api/cloudflare/zones/:zoneId/tunnels               → { tunnels:[...], routes:[...], errors? } (view-cloudflare AC4)
  *   DELETE /api/cloudflare/tunnels/:tunnelId/routes/:hostname  → { result, reason? } (view-cloudflare AC5/AC6/AC9)
  *   DELETE /api/cloudflare/tunnels/:tunnelId                   → { result, reason? } (view-cloudflare AC5/AC6/AC9)
+ *   GET    /api/deployments/vps-tunnel-status                  → [{ vpsId, tunnelId, tunnelPresent }] (vps-tunnel-existence-gate S-185 AC7)
  *   GET    /api/deployments                                    → { deployments:[...], errors? } (deploy-lifecycle AC3)
  *   POST   /api/deployments                                    → { result, deployment?, reason? } (deploy-lifecycle AC3/AC4)
  *   DELETE /api/deployments/:vps/:hostname                     → { result, reason? } (deploy-lifecycle AC5/AC6)
@@ -188,10 +189,12 @@ const vpsRegistry = new VpsProviderRegistry({ credentialStore, cloudflareApi });
 // ── Deploy ────────────────────────────────────────────────────────────────────
 const lockoutGuard = new LockoutGuard();
 const vpsDockerControl = new VpsDockerControl(credentialStore);
+// S-185: vpsRegistry wird für Tunnel-Mismatch/-Missing-Gate (AC5/AC6) mitgegeben.
 const deployOrchestrator = new DeployOrchestrator({
   dockerControl: vpsDockerControl,
   cloudflareApi,
   lockoutGuard,
+  vpsRegistry,
 });
 const vpsTargets = buildVpsTargetsFromEnv(process.env.VPS_TARGETS);
 

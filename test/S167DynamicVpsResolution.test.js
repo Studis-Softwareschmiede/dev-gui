@@ -4,6 +4,8 @@
  * Covers (vps-dynamic-ssh-targets):
  *   AC3 — GET /api/deployments/vps-targets: vereinigte IDs (dynamisch ⊕ Env);
  *          dynamischer VPS erscheint; Env gewinnt bei Kollision; kein Secret in Response.
+ *          S-185 AC7 (additiv): vps-targets liefert jetzt auch tunnelIds-Map —
+ *          tunnelId ist laut S-185 Spec nicht-geheim und darf in der Response stehen.
  *   AC4 — resolveVpsTarget: dynamisch angelegter VPS löst auf (provider+serverId-Match);
  *          bei leerem vpsTargets und dynamischem Datensatz → non-null.
  *   AC5 — Container-Listing-Route erreicht dynamischen VPS (statt "nicht konfiguriert").
@@ -11,6 +13,7 @@
  *          Reconcile-Konfig (ohne RECONCILE_TUNNEL_IDS-Env-Eintrag); Env bleibt Override.
  *   AC8 — Security-Floor: kein host/targetUser/key/token in vps-targets-Response;
  *          resolveVpsTarget exponiert kein Key-Material; AccessGuard-403.
+ *          tunnelId-Wert (UUID) ist nicht-geheim (S-185 AC12); tunnelToken niemals in Response.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
@@ -201,11 +204,12 @@ describe('S-167 AC3 — GET /api/deployments/vps-targets: vereinigte IDs', () =>
       expect(res.status).toBe(200);
       const bodyStr = JSON.stringify(res.body);
       // Nur IDs — kein host/IP/user/key in Response
+      // Hinweis: tunnelId ist laut S-185 AC7/AC12 nicht-geheim und darf in der Response erscheinen.
+      // Tunnel-Token (FAKE_CF_TOKEN) dagegen darf NIEMALS in der Response stehen.
       expect(bodyStr).not.toContain('188.34.202.209');
       expect(bodyStr).not.toContain('targetUser');
       expect(bodyStr).not.toContain(FAKE_SSH_KEY);
       expect(bodyStr).not.toContain(FAKE_CF_TOKEN);
-      expect(bodyStr).not.toContain('tunnelId');
     } finally {
       await closeServer(server);
     }
@@ -682,15 +686,17 @@ describe('S-167 AC8 — Security-Floor: kein Secret-Leak in neuen Auflösungs-Pf
       expect(res.status).toBe(200);
       const bodyStr = JSON.stringify(res.body);
 
-      // Nur IDs in der Response — kein IP, kein User, kein tunnelId, kein Secret
+      // IDs in der Response — kein IP, kein User, kein Secret
+      // Hinweis: tunnelId-Werte (UUIDs) sind laut S-185 AC7/AC12 nicht-geheim
+      // und erscheinen ab S-185 in der tunnelIds-Map der Response. Nur das
+      // tunnelToken (FAKE_CF_TOKEN) ist geheim und muss ausgeblendet bleiben.
       expect(bodyStr).not.toContain('188.34.202.209');
       expect(bodyStr).not.toContain('root');
-      expect(bodyStr).not.toContain('cf-tunnel-dyn-uuid');
       expect(bodyStr).not.toContain('hetzner');
       expect(bodyStr).not.toContain(FAKE_SSH_KEY);
       expect(bodyStr).not.toContain(FAKE_CF_TOKEN);
 
-      // Nur vpsIds-Array
+      // vpsIds-Array vorhanden
       expect(Array.isArray(res.body.vpsIds)).toBe(true);
     } finally {
       await closeServer(server);
