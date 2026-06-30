@@ -27,6 +27,11 @@
  *          erfolgreichem Auslösen (202) → onNavigate('factory') damit der
  *          Lauf live im Terminal sichtbar ist.
  *
+ * reconcile-trigger (S-201):
+ *   onNavigate wird zusätzlich an SpecView durchgereicht — der dortige
+ *   „Konzept/Spec nachziehen"-Button (siehe SpecView.jsx) navigiert nach
+ *   erfolgreichem Auslösen (202) ebenfalls in den „Arbeiten"-Bereich (AC5).
+ *
  * A11y (WCAG 2.1 AA):
  *   - Reiter-Leiste als <nav role="tablist"> mit aria-selected.
  *   - Aktive Reiter-Panel mit role="tabpanel".
@@ -162,6 +167,7 @@ export function CockpitView({ activeRepo, navigateFactory, onNavigate: _onNaviga
           <SpecView
             projectSlug={activeRepo}
             initialPath={pendingSpecPath}
+            onNavigate={_onNavigate}
           />
         </div>
       )}

@@ -2,7 +2,7 @@ id: S-201
 parent: F-031
 title: Button 'Konzept/Spec nachziehen' im Spezifikation-Reiter -> /agent-flow:reconcile
   (Bestätigung, Busy-Guard, Navigate)
-status: To Do
+status: Done
 priority: P2
 spec: docs/specs/reconcile-trigger.md
 implements:
@@ -29,9 +29,9 @@ estimate_note: 'Heuristik (n_ac=7, n_comp=3 [SpecView.jsx, CockpitView.jsx, __te
   Cross-Repo-Abhaengigkeit (SR3) zu agent-flow nur als Befehlsstring, UI entkoppelt
   testbar.'
 confidence: low
-branch: null
+branch: feat/S-201-reconcile-button
 pr: null
 blocked_reason: null
 created_at: '2026-06-30T21:15:15Z'
-updated_at: '2026-06-30T21:15:44Z'
-done_at: null
+updated_at: '2026-06-30T22:32:25Z'
+done_at: '2026-06-30T22:32:25Z'

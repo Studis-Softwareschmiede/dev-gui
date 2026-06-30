@@ -2,7 +2,7 @@
 id: reconcile-trigger
 title: Reconcile-Trigger — Button „Konzept/Spec nachziehen" im Spezifikation-Reiter
 status: draft
-version: 1
+version: 2
 ---
 
 # Spec: Reconcile-Trigger  (`reconcile-trigger`)
@@ -31,9 +31,9 @@ Ein **dünner** GUI-Auslöser im „Spezifikation"-Reiter eines Projekts startet
 - **AC7** — Netzwerkfehler oder `500`/unerwarteter Status → sichtbare Fehler-Anzeige mit Reset-Möglichkeit; `onNavigate` wird **nicht** aufgerufen.
 
 ## Verträge
-- `POST /api/command` `{command:"/agent-flow:reconcile", projectPath?:string}` → `202 {commandId, status}` | `400` (Allowlist/Sanitisierung) | `409` (Lock) | `500`. **Vertrag mit [[flow-trigger]]:** der Endpunkt, die Allowlist und die Sanitisierung sind **unverändert**; dieses Feature fügt nur einen weiteren Auslöser hinzu, der einen bereits-allowlisteten Befehl sendet.
+- `POST /api/command` `{command:"/agent-flow:reconcile", projectPath?:string}` → `202 {commandId, status}` | `400` (Allowlist/Sanitisierung) | `409` (Lock) | `500`. **Vertrag mit [[flow-trigger]]:** der Endpunkt und die Sanitisierung sind **unverändert**. `/agent-flow:reconcile` ist ein **bare** Befehl ohne Sub-Argumente/Cost-Mode (analog `/agent-flow:flow`) und wurde in der **Backend-Allowlist** (`DEFAULT_ALLOWED_COMMANDS`, `src/CommandService.js`) ergänzt — ohne diesen Eintrag würde jeder Klick mit `400` abgewiesen (Allowlist-Reject), der Button wäre funktionslos. Präzedenzfall: `/agent-flow:new-project` wurde analog von [[fabric-intake-dialog]] AC3 in dieselbe Allowlist aufgenommen, ohne dass [[flow-trigger]] selbst (dortige AC2-Aufzählung/Befehls-Katalog, der nur das generische TriggerPanel beschreibt) geändert wurde — derselben Konvention folgt dieser Eintrag.
 - `GET /api/session` → `{state:"ready"|"busy", …}` — Quelle des Busy-/Lock-Zustands (Polling-Muster wie `TriggerPanel`/`FactoryWorkspace`).
-- **Cross-Repo (SR3):** Der Befehl `/agent-flow:reconcile` **selbst** (Allowlist-Eintrag im dev-gui-Backend + die gesamte Abgleich-Logik) lebt in **agent-flow** (`docs/architecture/reconcile-subsystem.md`). dev-gui injiziert nur die fertige Befehlszeile; die Modell-/Logik-Auflösung liegt drüben. Die UI ist davon **entkoppelt** baubar und testbar (mockbarer `fetchFn`); kein dev-gui-Test hängt von einer realen agent-flow-Antwort ab.
+- **Cross-Repo (SR3):** Die gesamte Abgleich-**Logik** des `/agent-flow:reconcile`-Skills (Erkennen, Konvertieren, Nachziehen) lebt in **agent-flow** (`docs/architecture/reconcile-subsystem.md`); der Allowlist-Eintrag selbst ist dev-gui-lokale Backend-Konfiguration (siehe Verträge oben). dev-gui injiziert nur die fertige Befehlszeile; die Modell-/Logik-Auflösung liegt drüben. Die UI ist davon **entkoppelt** baubar und testbar (mockbarer `fetchFn`); kein dev-gui-Test hängt von einer realen agent-flow-Antwort ab.
 
 ## Edge-Cases & Fehlerverhalten
 - Klick bei bereits busy-er Session → no-op (kein Dialog, kein POST), AC4.
@@ -43,11 +43,11 @@ Ein **dünner** GUI-Auslöser im „Spezifikation"-Reiter eines Projekts startet
 
 ## NFRs
 - **A11y (WCAG 2.1 AA):** Dialog mit `role="dialog"` + zugänglichem Namen; Button-Sperre via disabled-Attribut **und** Text-Label (nie Farbe allein); sichtbarer Fokusring (kein `outline:none`); Touch-Targets ≥ 44 px.
-- **Sicherheit (Floor):** Kein neuer Backend-Endpunkt, keine neue Trust-Boundary — der Befehl ist bereits Server-seitig allowlistet/sanitisiert ([[flow-trigger]] AC2). Bestätigungsdialog verhindert versehentliches Auslösen eines doku-ändernden Laufs. Kein `dangerouslySetInnerHTML`, keine Secrets im Bundle.
+- **Sicherheit (Floor):** Kein neuer Backend-Endpunkt, keine neue Trust-Boundary — der Befehl durchläuft die bestehende, unveränderte Sanitisierung ([[flow-trigger]] AC2) und ist Server-seitig allowlistet (siehe Verträge oben). Bestätigungsdialog verhindert versehentliches Auslösen eines doku-ändernden Laufs. Kein `dangerouslySetInnerHTML`, keine Secrets im Bundle.
 
 ## Nicht-Ziele
 - Die Reconcile-**Logik** (Stufe 1 Form / Stufe 2 Inhalt, Diff-Freigabe, Logbuch `docs/spec-audit.md`) — liegt vollständig in agent-flow (`reconcile-subsystem.md`).
-- Eintrag des Befehls in die Backend-Allowlist von dev-gui — eigenes Paket/Repo-Zuständigkeit (Vertrag mit [[flow-trigger]]); diese Spec deckt nur den Frontend-Auslöser.
+- Änderungen am `/api/command`-Endpunkt, an der Sanitisierung oder am generischen TriggerPanel-Befehlskatalog von [[flow-trigger]] — bleiben unverändert. (Die Backend-**Allowlist** wird hier ergänzt, siehe Verträge — das ist der minimale, technisch notwendige Konfigurationswert, ohne den der Button nicht funktioniert; Präzedenz: [[fabric-intake-dialog]] AC3.)
 - Fortschritts-/Ergebnisanzeige des Reconcile-Laufs über das Terminal hinaus.
 
 ## Abhängigkeiten

@@ -48,12 +48,17 @@ import { jobLock } from './JobLock.js';
  * Only plugin-namespaced `/agent-flow:<skill>` prefixes are accepted.
  * Un-namespaced commands like `/flow` or `/preview` → rejected with 400.
  * Configurable at construction time.
+ *
+ * `/agent-flow:reconcile` (reconcile-trigger AC3/S-201): bare command, no
+ * sub-args/cost-mode — fired by the „Konzept/Spec nachziehen"-Button in the
+ * Spezifikation-Reiter. Mirrors `/agent-flow:flow` (no cost flag).
  */
 export const DEFAULT_ALLOWED_COMMANDS = [
   '/agent-flow:flow',
   '/agent-flow:adopt',
   '/agent-flow:new-project',
   '/agent-flow:preview',
+  '/agent-flow:reconcile',
   '/agent-flow:requirement',
   '/agent-flow:train',
 ];
