@@ -15,6 +15,9 @@
  *         unerwartetes stdout→provisioning (nie fälschlich ready)
  *   AC3  (vps-readiness-gate) — kanonischer Befehl prüft boot-finished + docker info + cloudflared
  *   AC13 (vps-readiness-gate) — SSH-Key nie in Argv/Reason; probe() wirft NIE
+ *   AC3  (vps-tunnel-self-heal S-187) — pushTunnelEnvFile: bash -s exec, Token via stdin (nie Argv);
+ *         Token NIE in SSH-exec-Argv; SSH-Fehler → errorClass korrekt
+ *   AC4  (vps-tunnel-self-heal S-187) — Token NIE in Argv des SSH-exec-Aufrufs (kein Token in cmd)
  *
  * Strategie:
  *   - CredentialStore mit tmpdir + injiziertem masterKey (echter Store für Boundary-Test)
@@ -1644,5 +1647,157 @@ describe('VpsDockerControl — probe() (vps-readiness-gate AC1/AC2/AC3/AC13)', (
     expect(result.state).toBe('provisioning');
     // KEIN error-state, kein DOCKER_FAILED (AC2)
     expect(result.state).not.toBe('error');
+  });
+});
+
+// ── pushTunnelEnvFile() (S-187 AC3/AC4) ───────────────────────────────────────
+
+/**
+ * Mock-SSH-Client für stdin-basierte Kommandos (bash -s).
+ * Simuliert: exec('bash -s') → stream mit stdin + sofortiger close(0).
+ * Token wird VIA stdin.write() übergeben und erfasst.
+ */
+function makeMockSshClientWithStdin({
+  exitCode = 0,
+  connectError = null,
+  onCommand = null,
+  onStdinWrite = null,
+} = {}) {
+  return () => {
+    const client = new EventEmitter();
+
+    client.connect = (_config) => {
+      if (connectError) {
+        setTimeout(() => client.emit('error', connectError), 0);
+        return;
+      }
+      setTimeout(() => client.emit('ready'), 0);
+    };
+
+    client.exec = (cmd, _opts, callback) => {
+      if (onCommand) onCommand(cmd);
+
+      const stream = new EventEmitter();
+      stream.stderr = new EventEmitter();
+
+      // stdin: Token fließt via stdin.write() — NIE via exec-Argv
+      let stdinContent = '';
+      stream.stdin = {
+        write: (data) => {
+          stdinContent += String(data);
+          if (onStdinWrite) onStdinWrite(stdinContent);
+        },
+        end: () => {
+          setTimeout(() => {
+            stream.emit('close', exitCode);
+          }, 5);
+        },
+      };
+
+      setTimeout(() => callback(null, stream), 0);
+    };
+
+    client.end = () => {};
+
+    return client;
+  };
+}
+
+describe('VpsDockerControl — pushTunnelEnvFile() (S-187 AC3/AC4)', () => {
+  const FAKE_TUNNEL_TOKEN = 'eyJhbGciOiJFZERTQSJ9.TUNNEL_SECRET.signature';
+  let dir, store;
+
+  beforeEach(async () => {
+    ({ store, dir } = await makeTmpStore());
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('AC3: kein Private-Key → errorClass:no-private-key', async () => {
+    const ctrl = new VpsDockerControl(store);
+    const result = await ctrl.pushTunnelEnvFile(TEST_VPS, FAKE_TUNNEL_TOKEN);
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('no-private-key');
+  });
+
+  it('AC3: erfolgreich → result:ok', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    const result = await ctrl.pushTunnelEnvFile(TEST_VPS, FAKE_TUNNEL_TOKEN, {
+      _sshClientFactory: makeMockSshClientWithStdin({ exitCode: 0 }),
+    });
+
+    expect(result.result).toBe('ok');
+  });
+
+  it('AC4 (HART): Token NIE in SSH-exec-Argv — exec-Kommando ist nur "bash -s"', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    let capturedCmd = null;
+    await ctrl.pushTunnelEnvFile(TEST_VPS, FAKE_TUNNEL_TOKEN, {
+      _sshClientFactory: makeMockSshClientWithStdin({
+        exitCode: 0,
+        onCommand: (cmd) => { capturedCmd = cmd; },
+      }),
+    });
+
+    // AC4 HART: Token NIE im exec-Argv
+    expect(capturedCmd).toBeDefined();
+    expect(capturedCmd).not.toContain(FAKE_TUNNEL_TOKEN);
+    // exec-Kommando muss "bash -s" sein (stdin-Muster)
+    expect(capturedCmd).toBe('bash -s');
+  });
+
+  it('AC4 (HART): Token fließt via stdin.write() — capturedStdin enthält Token', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    let capturedStdin = '';
+    await ctrl.pushTunnelEnvFile(TEST_VPS, FAKE_TUNNEL_TOKEN, {
+      _sshClientFactory: makeMockSshClientWithStdin({
+        exitCode: 0,
+        onStdinWrite: (content) => { capturedStdin = content; },
+      }),
+    });
+
+    // Token kommt via stdin (Dateiinhalt), nicht via Argv
+    expect(capturedStdin).toContain(FAKE_TUNNEL_TOKEN);
+    // stdin enthält TUNNEL_TOKEN= Zuweisung (env-file Format)
+    expect(capturedStdin).toContain('TUNNEL_TOKEN=');
+    // stdin enthält docker restart cloudflared
+    expect(capturedStdin).toContain('docker restart cloudflared');
+  });
+
+  it('AC3: SSH-Fehler (connectError) → errorClass:unreachable, result:error', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    const connErr = Object.assign(new Error('Connection refused'), { code: 'ECONNREFUSED' });
+    const result = await ctrl.pushTunnelEnvFile(TEST_VPS, FAKE_TUNNEL_TOKEN, {
+      _sshClientFactory: makeMockSshClientWithStdin({ connectError: connErr }),
+    });
+
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('unreachable');
+    // Security-Floor: kein Token im reason
+    expect(result.reason).not.toContain(FAKE_TUNNEL_TOKEN);
+  });
+
+  it('AC3: Skript-Exit != 0 → errorClass:docker-failed, kein Token in reason', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    const result = await ctrl.pushTunnelEnvFile(TEST_VPS, FAKE_TUNNEL_TOKEN, {
+      _sshClientFactory: makeMockSshClientWithStdin({ exitCode: 1 }),
+    });
+
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('docker-failed');
+    // Security-Floor: Token nie im reason (AC4)
+    expect(result.reason).not.toContain(FAKE_TUNNEL_TOKEN);
   });
 });

@@ -34,6 +34,7 @@
  *   DELETE /api/cloudflare/tunnels/:tunnelId/routes/:hostname  → { result, reason? } (view-cloudflare AC5/AC6/AC9)
  *   DELETE /api/cloudflare/tunnels/:tunnelId                   → { result, reason? } (view-cloudflare AC5/AC6/AC9)
  *   GET    /api/deployments/vps-tunnel-status                  → [{ vpsId, tunnelId, tunnelPresent }] (vps-tunnel-existence-gate S-185 AC7)
+ *   POST   /api/deployments/vps/:vpsId/tunnel/recreate        → { result, report } [MUTATION, S-187 AC1–5,11,12]
  *   GET    /api/deployments                                    → { deployments:[...], errors? } (deploy-lifecycle AC3)
  *   POST   /api/deployments                                    → { result, deployment?, reason? } (deploy-lifecycle AC3/AC4)
  *   DELETE /api/deployments/:vps/:hostname                     → { result, reason? } (deploy-lifecycle AC5/AC6)
@@ -102,6 +103,7 @@ import { StackRegistry } from './src/StackRegistry.js';
 import { VpsComposeControl } from './src/deploy/VpsComposeControl.js';
 import { StackDeployOrchestrator } from './src/deploy/StackDeployOrchestrator.js';
 import { LocalDockerControl } from './src/deploy/LocalDockerControl.js';
+import { TunnelHealService } from './src/deploy/TunnelHealService.js';
 import { BitwardenMasterKeyService } from './src/BitwardenMasterKeyService.js';
 import { BoardAggregator } from './src/BoardAggregator.js';
 import { DocsReader } from './src/DocsReader.js';
@@ -221,6 +223,15 @@ reconciliationJob.startScheduler();
 // Read-only DockerReader bleibt unberührt.
 const localDockerControl = new LocalDockerControl();
 
+// ── Tunnel-Selbstheilung (S-187 AC1–5, AC11, AC12) ───────────────────────────
+// TunnelHealService orchestriert Phase 1 (CF + CredentialStore) + Phase 2 (SSH-Token-Push).
+// Token NIE in Argv/Log/Audit/Response (AC4/AC11 HART).
+const tunnelHealService = new TunnelHealService({
+  cloudflareApi,
+  vpsDockerControl,
+  credentialStore,
+});
+
 // ── Stack ─────────────────────────────────────────────────────────────────────
 const stackRegistry = new StackRegistry(credentialStore);
 const vpsComposeControl = new VpsComposeControl(credentialStore);
@@ -318,6 +329,7 @@ const deps = {
   vpsTargets,
   reconciliationJob,
   localDockerControl,
+  tunnelHealService,
   stackRegistry,
   stackDeployOrchestrator,
   agentFlowReader,

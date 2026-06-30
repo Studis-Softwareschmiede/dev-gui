@@ -711,6 +711,83 @@ export class VpsDockerControl {
     }
   }
 
+  /**
+   * Schreibt das Cloudflare-Tunnel-Token in /etc/cloudflared/env auf dem VPS und
+   * startet den cloudflared-Docker-Container neu (S-187 AC3/AC4, Token-Floor).
+   *
+   * Security-Floor (AC4, HART):
+   *   - Das Tunnel-Token erscheint NIEMALS in Argv/Log/Audit/Response.
+   *   - Das Token fließt ausschließlich als Dateiinhalt via stdin (bash -s Muster,
+   *     analog VpsProvisioner authorized_keys). Kein Token in der Kommandozeile.
+   *   - Der Dateiinhalt (env-file) wird NICHT geloggt.
+   *
+   * Mechanik:
+   *   1. bash -s liest ein Shell-Skript von stdin.
+   *   2. Das Skript erhält das Token via Shell-Variable (stdin-sicher: Token nie in exec-Argv).
+   *   3. mkdir -p /etc/cloudflared; printf '%s\n' "TUNNEL_TOKEN=$TOKEN" > /etc/cloudflared/env
+   *   4. chmod 600 /etc/cloudflared/env; chown root:root /etc/cloudflared/env
+   *   5. docker restart cloudflared
+   *
+   * Das Token-Einbetten per Heredoc/printf in das Skript (das via stdin übergeben wird)
+   * ist sicher: es erscheint NICHT als Prozess-Argv — nur als Skript-Body auf stdin.
+   *
+   * @param {VpsTarget} vps
+   * @param {string}    tunnelToken  - Cloudflare Tunnel-Token (Geheimnis, NIE loggen)
+   * @param {object}    [opts]
+   * @param {string}    [opts.hostFingerprint]    - SHA-256-Fingerprint für Host-Key-Verifikation
+   * @param {Function}  [opts._sshClientFactory]
+   * @returns {Promise<{ result: 'ok'|'error', reason?: string, errorClass?: string }>}
+   */
+  async pushTunnelEnvFile(vps, tunnelToken, opts = {}) {
+    const privateKey = await this.#loadPrivateKey(vps.targetUser);
+    if (!privateKey.ok) return privateKey.error;
+
+    // Security-Floor: Token NIEMALS in Argv. Stattdessen: bash -s liest Skript von stdin.
+    // Das Skript bettet das Token in einen printf-Befehl ein — das Token ist im Skript-Body
+    // (stdin-Datenstrom), nicht im exec-Argv. Kein `echo $TOKEN` in runcmd/Log.
+    //
+    // Single-Quote-Escaping: Wenn das Token ein Einfach-Anführungszeichen enthält,
+    // muss es escaped werden: ' → '\''. Cloudflare-Tokens bestehen aus Base64-ähnlichen
+    // Zeichen (keine Sonderzeichen erwartet), aber defensive Escaping ist Pflicht.
+    const escapedToken = String(tunnelToken).replace(/'/g, "'\\''");
+
+    // Shell-Skript: über stdin übergeben, Token NICHT in Argv
+    // Token-Floor: `printf '%s\n' '...'` ist KEIN Argv-Token für den SSH-exec-Befehl (bash -s);
+    // der SSH-exec-Argv ist nur "bash -s". Das Token erscheint ausschließlich im stdin-Body.
+    const script = [
+      'set -e',
+      'mkdir -p /etc/cloudflared',
+      // Token via printf-Literal (stdin-Body, nie Argv) in die env-Datei schreiben.
+      // printf statt echo: kein Trailing-Newline-Problem, kein Interpretation von Escape-Sequences.
+      `printf 'TUNNEL_TOKEN=%s\\n' '${escapedToken}' > /etc/cloudflared/env`,
+      'chmod 600 /etc/cloudflared/env',
+      'chown root:root /etc/cloudflared/env',
+      // cloudflared Container-Neustart (--env-file Muster aus CloudInitBuilder v4/v5)
+      'docker restart cloudflared',
+    ].join('\n');
+
+    try {
+      await runSshScript({
+        privateKey: privateKey.value,
+        host: vps.host,
+        port: vps.port ?? 22,
+        targetUser: vps.targetUser,
+        script,
+        timeoutMs: EXEC_TIMEOUT_MS,
+        hostFingerprint: opts.hostFingerprint ?? null,
+        sshClientFactory: opts._sshClientFactory,
+      });
+      return { result: 'ok' };
+    } catch (err) {
+      const errorClass = classifyError(err);
+      return {
+        result: 'error',
+        reason: sanitizeErrorReason(errorClass),
+        errorClass,
+      };
+    }
+  }
+
   // ── Private Hilfsmethoden ──────────────────────────────────────────────────────
 
   /**
@@ -884,6 +961,140 @@ function runSshCommand(params) {
       }
 
       // TOFU: kein Fingerprint konfiguriert → akzeptieren
+      return true;
+    };
+
+    conn.connect({
+      host,
+      port,
+      username: targetUser,
+      privateKey,
+      readyTimeout: CONNECT_TIMEOUT_MS,
+      hostVerifier,
+    });
+  });
+}
+
+// ── SSH-Skript ausführen via stdin (module-private) ───────────────────────────
+
+/**
+ * Baut eine SSH-Verbindung auf und führt ein Shell-Skript über stdin aus (bash -s).
+ *
+ * Security-Floor (S-187 AC4):
+ *   - Das Skript (inkl. Token-Inhalten) wird via stdin übergeben — NIEMALS als Argv.
+ *   - Der exec()-Argv ist nur "bash -s"; der Skript-Body ist ein Datenstrom.
+ *   - Kein Secret erscheint in Argv/Log/Error-Meldungen.
+ *
+ * Analog VpsProvisioner.#addAuthorizedKey (bash -s + stdin.write(script)).
+ *
+ * @param {object} params
+ * @param {string}   params.privateKey
+ * @param {string}   params.host
+ * @param {number}   params.port
+ * @param {string}   params.targetUser
+ * @param {string}   params.script      - Shell-Skript (wird über stdin übergeben)
+ * @param {number}   params.timeoutMs
+ * @param {string}   [params.hostFingerprint]
+ * @param {Function} [params.sshClientFactory]
+ * @returns {Promise<string>} stdout
+ */
+function runSshScript(params) {
+  const {
+    privateKey, host, port, targetUser,
+    script, timeoutMs,
+    hostFingerprint = null,
+    sshClientFactory,
+  } = params;
+
+  const clientFactory = sshClientFactory ?? (() => new Client());
+
+  return new Promise((resolve, reject) => {
+    const conn = clientFactory();
+    let resolved = false;
+
+    function safeReject(err) {
+      if (!resolved) {
+        resolved = true;
+        try { conn.end(); } catch { /* ignore */ }
+        reject(err);
+      }
+    }
+
+    function safeResolve(value) {
+      if (!resolved) {
+        resolved = true;
+        try { conn.end(); } catch { /* ignore */ }
+        resolve(value);
+      }
+    }
+
+    const connectTimeout = setTimeout(() => {
+      const err = new Error('SSH-Verbindungs-Timeout');
+      err.code = 'ETIMEDOUT';
+      safeReject(err);
+    }, CONNECT_TIMEOUT_MS);
+
+    conn.on('ready', () => {
+      clearTimeout(connectTimeout);
+
+      const execTimeout = setTimeout(() => {
+        const err = new Error('SSH-Kommando-Timeout');
+        err.code = 'ETIMEDOUT';
+        safeReject(err);
+      }, timeoutMs);
+
+      // "bash -s": Skript wird über stdin übergeben — Token NIE in Argv
+      conn.exec('bash -s', { pty: false }, (execErr, stream) => {
+        if (execErr) {
+          clearTimeout(execTimeout);
+          safeReject(execErr);
+          return;
+        }
+
+        let stdout = '';
+
+        stream.on('data', (data) => { stdout += data.toString(); });
+        stream.stderr.on('data', () => { /* stderr consumed but not propagated (Security-Floor: könnte Token enthalten) */ });
+
+        stream.on('close', (code) => {
+          clearTimeout(execTimeout);
+          if (resolved) return;
+
+          if (code !== 0) {
+            const err = new Error(`Remote-Skript fehlgeschlagen (exit ${code})`);
+            err.code = 'DOCKER_FAILED';
+            safeReject(err);
+          } else {
+            safeResolve(stdout);
+          }
+        });
+
+        // Skript via stdin übergeben — Token erscheint NICHT in exec-Argv
+        stream.stdin.write(script);
+        stream.stdin.end();
+      });
+    });
+
+    conn.on('error', (err) => {
+      clearTimeout(connectTimeout);
+      safeReject(err);
+    });
+
+    const hostVerifier = (key) => {
+      let hash = null;
+      try {
+        hash = createHash('sha256').update(key).digest('base64');
+      } catch {
+        // Fingerprint-Berechnung nicht kritisch
+      }
+
+      if (hostFingerprint) {
+        if (hash === hostFingerprint) return true;
+        const fpErr = new Error('SSH-Host-Key-Fingerprint stimmt nicht überein (möglicher MITM)');
+        fpErr.code = 'HOST_KEY_MISMATCH';
+        setTimeout(() => safeReject(fpErr), 0);
+        return false;
+      }
       return true;
     };
 
