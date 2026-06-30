@@ -1,0 +1,21 @@
+id: F-031
+title: Reconcile-Auslöser im Frontend — Button im Spezifikation-Reiter
+goal: 'Ein dünner GUI-Auslöser im Spezifikation-Reiter startet den Fabrik-Befehl /agent-flow:reconcile
+  (Doku wieder mit Vorlage+Code in Deckung bringen). Muster identisch zu ''Board abarbeiten''
+  (/agent-flow:flow) und ''Änderung erfassen'' (/agent-flow:requirement): POST /api/command
+  mit projectPath, Bestätigungsdialog vor dem doku-ändernden Lauf, Sperre bei laufendem
+  Job, Fehler-/Status-Anzeige. Die Abgleich-Logik selbst lebt cross-repo in agent-flow
+  (reconcile-subsystem.md); die UI ist entkoppelt baubar + testbar (mockbarer fetch).'
+status: Backlog
+priority: P2
+spec: docs/specs/reconcile-trigger.md
+definition_of_done: null
+labels:
+- ui
+depends: null
+owner: null
+stories:
+- S-201
+progress: 0/1 done
+created_at: '2026-06-30T21:15:10Z'
+updated_at: '2026-06-30T21:15:53Z'
