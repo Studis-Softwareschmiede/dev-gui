@@ -38,6 +38,11 @@
  *   AC4 — Detail-Response enthält branch, pr, status aus dem Index.
  *   AC7 — Ledger hat Vorrang: volle Ledger-Daten → ended_at_source 'ledger'.
  *
+ * Covers (taktgeber-nachtwaechter):
+ *   AC1 — BoardAggregator-Story-Index enthält zusätzlich updated_at (null wenn YAML-Feld
+ *          fehlt) — Quelle für ProjectDrain's "verwaiste In-Progress"-Stale-Erkennung
+ *          (vollständige ProjectDrain-Coverage in test/ProjectDrain.test.js).
+ *
  * AccessGuard:
  *   POST /api/board/projects/rescan (Schreib-Trigger) liegt hinter
  *   app.use('/api', accessGuard) in server.js — kein separater Middleware-Test
@@ -591,6 +596,30 @@ describe('AC3 — Aggregat model: Projekt → Feature → Story with required fi
     const s001 = f001.stories.find((s) => s.id === 'S-001');
     expect(s001).toHaveProperty('dispo_est', null);
     expect(s001).toHaveProperty('dispo_act', null);
+  });
+
+  // ── taktgeber-nachtwaechter AC1 ──────────────────────────────────────────────
+
+  it('story entry carries updated_at (string wenn gesetzt, null wenn fehlt) — ProjectDrain Stale-Quelle', async () => {
+    const { aggregator } = makeAggregator();
+    const index = await aggregator.getIndex();
+    const f001 = index[0].features.find((f) => f.id === 'F-001');
+    const s001 = f001.stories.find((s) => s.id === 'S-001');
+    // S-001-Fixture hat updated_at gesetzt
+    expect(s001).toHaveProperty('updated_at', '2026-06-14T00:00:00Z');
+  });
+
+  it('story entry carries updated_at: null wenn YAML-Feld fehlt', async () => {
+    const { aggregator } = makeAggregator({
+      fileOverrides: {
+        [`${BOARD_ROOT}/my-repo/board/stories/S-001-ionos-adapter.yaml`]:
+          'id: S-001\nparent: F-001\ntitle: No updated_at\nstatus: To Do\npriority: P1\n',
+      },
+    });
+    const index = await aggregator.getIndex();
+    const f001 = index[0].features.find((f) => f.id === 'F-001');
+    const s001 = f001.stories.find((s) => s.id === 'S-001');
+    expect(s001).toHaveProperty('updated_at', null);
   });
 
   // ── story-detail-yaml-fallback AC1 ──────────────────────────────────────────
