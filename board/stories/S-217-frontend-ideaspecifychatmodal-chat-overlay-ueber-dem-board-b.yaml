@@ -2,7 +2,7 @@ id: S-217
 parent: F-039
 title: 'Frontend: IdeaSpecifyChatModal (Chat-Overlay ueber dem Board, Bubbles, Story-anlegen-Button,
   Finalize-Polling)'
-status: To Do
+status: In Progress
 priority: P2
 spec: docs/specs/idea-specify-chat.md
 implements:
@@ -23,11 +23,11 @@ estimate_note: 'M-Heuristik: n_ac=3 (AC1,AC10,AC11), n_comp~3 (IdeaSpecifyChatMo
   7 -> M. estimator nicht dispatchbar (kein Task-Tool); baseline.json js|balanced|M
   ep=5.0 (n=8) als Proxy. confidence medium. A11y-Muster aus IdeaResolveModal wiederverwenden.'
 confidence: medium
-branch: null
+branch: feat/S-217-idea-specify-chat-modal
 pr: null
 blocked_reason: null
 created_at: '2026-07-01T15:25:53Z'
-updated_at: '2026-07-01T15:28:59Z'
+updated_at: '2026-07-01T16:58:56Z'
 done_at: null
 notes: 'Spec: docs/specs/idea-specify-chat.md AC1,AC10,AC11. Depends: S-215 (start/message-Endpunkte),
   S-216 (finalize-Endpunkte).
