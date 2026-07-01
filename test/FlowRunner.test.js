@@ -21,6 +21,17 @@
  * Der ProjectDrain-Injections-/Konvergenz-Nachweis mit beiden Adaptern
  * (AC5/AC6) lebt in test/ProjectDrain.test.js (describe-Block "FlowRunner-
  * Injection").
+ *
+ * Covers (headless-parallel-drain, S-213):
+ *   AC11 — `HeadlessFlowRunnerAdapter` erzeugt bei injiziertem `auditStore`
+ *          je headless-Lauf genau EINEN Start- (`startRun`, ok:true) und
+ *          genau EINEN Ende(Erfolg)/Fehler-`AuditEntry` (`awaitCompletion`,
+ *          Korrelation über `jobId`); secret-/pfad-frei (Basename statt
+ *          absolutem `projectPath`); ohne `auditStore` unverändert kein
+ *          Audit, kein Crash (Rückwärtskompatibilität S-212). Die ECHTE
+ *          Naht (ProjectDrain + HeadlessFlowRunner, echte Parallelität,
+ *          Selbst-Blockade-Vermeidung, Sanftes Fensterende) lebt in
+ *          test/headless-night-drain.integration.test.js.
  */
 
 import { describe, it, expect, jest } from '@jest/globals';
@@ -240,5 +251,90 @@ describe('HeadlessFlowRunnerAdapter (AC4 — headless adapter, real close-event 
     const result = await adapter.awaitCompletion({ jobId: 'job-1' });
 
     expect(result.status).toBe('failed');
+  });
+});
+
+describe('HeadlessFlowRunnerAdapter — Audit je headless-Lauf (headless-parallel-drain AC11)', () => {
+  it('startRun() ok:true → genau EIN Start-AuditEntry (identity durchgereicht, secret-/pfad-frei)', () => {
+    const headlessRunner = { start: () => ({ ok: true, jobId: 'job-1' }), getJob: () => undefined };
+    const auditStore = { record: jest.fn() };
+    const adapter = new HeadlessFlowRunnerAdapter({ headlessRunner, auditStore });
+
+    adapter.startRun({ projectPath: '/workspace/my-project', command: '/agent-flow:flow', identity: 'alex@example.com' });
+
+    expect(auditStore.record).toHaveBeenCalledTimes(1);
+    const entry = auditStore.record.mock.calls[0][0];
+    expect(entry.identity).toBe('alex@example.com');
+    expect(entry.command).toContain('taktgeber:headless-flow-start');
+    expect(entry.command).toContain('jobId=job-1');
+    expect(entry.command).toContain('project=my-project');
+    expect(entry.command).not.toContain('/workspace/my-project');
+  });
+
+  it('startRun() ok:false (locked/internal/rejected command) → KEIN Audit-Eintrag (kein Lauf hat stattgefunden)', () => {
+    const headlessRunner = { start: () => ({ ok: false, reason: 'locked' }), getJob: () => undefined };
+    const auditStore = { record: jest.fn() };
+    const adapter = new HeadlessFlowRunnerAdapter({ headlessRunner, auditStore });
+
+    adapter.startRun({ projectPath: PROJECT_PATH, command: '/agent-flow:flow' });
+    adapter.startRun({ projectPath: PROJECT_PATH, command: 'rm -rf /' }); // Allowlist-Reject
+
+    expect(auditStore.record).not.toHaveBeenCalled();
+  });
+
+  it('awaitCompletion() status "done" → genau EIN Ende(Erfolg)-AuditEntry, korreliert über jobId (nicht "start")', async () => {
+    const headlessRunner = {
+      start: () => ({ ok: true, jobId: 'job-1' }),
+      getJob: () => ({ status: 'done', result: 'Flow abgeschlossen' }),
+    };
+    const auditStore = { record: jest.fn() };
+    const adapter = new HeadlessFlowRunnerAdapter({ headlessRunner, auditStore, sleepFn: async () => {} });
+
+    const { handle } = adapter.startRun({ projectPath: '/workspace/my-project', command: '/agent-flow:flow', identity: 'a@b.c' });
+    auditStore.record.mockClear(); // nur das awaitCompletion()-Audit prüfen
+    await adapter.awaitCompletion(handle);
+
+    expect(auditStore.record).toHaveBeenCalledTimes(1);
+    const entry = auditStore.record.mock.calls[0][0];
+    expect(entry.identity).toBe('a@b.c');
+    expect(entry.command).toContain('taktgeber:headless-flow-done');
+    expect(entry.command).toContain('jobId=job-1');
+  });
+
+  it('awaitCompletion() status "failed"/"auth-expired" → genau EIN Fehler-AuditEntry mit status im Text', async () => {
+    for (const status of ['failed', 'auth-expired']) {
+      const headlessRunner = { start: () => ({ ok: true, jobId: `job-${status}` }), getJob: () => ({ status }) };
+      const auditStore = { record: jest.fn() };
+      const adapter = new HeadlessFlowRunnerAdapter({ headlessRunner, auditStore, sleepFn: async () => {} });
+
+      const { handle } = adapter.startRun({ projectPath: PROJECT_PATH, command: '/agent-flow:flow' });
+      auditStore.record.mockClear();
+      await adapter.awaitCompletion(handle);
+
+      expect(auditStore.record).toHaveBeenCalledTimes(1);
+      const entry = auditStore.record.mock.calls[0][0];
+      expect(entry.command).toContain('taktgeber:headless-flow-failed');
+      expect(entry.command).toContain(`status=${status}`);
+    }
+  });
+
+  it('ohne injizierten auditStore: kein Crash, kein Audit-Aufruf (Rückwärtskompatibilität S-212)', async () => {
+    const headlessRunner = { start: () => ({ ok: true, jobId: 'job-1' }), getJob: () => ({ status: 'done' }) };
+    const adapter = new HeadlessFlowRunnerAdapter({ headlessRunner, sleepFn: async () => {} });
+
+    const { handle } = adapter.startRun({ projectPath: PROJECT_PATH, command: '/agent-flow:flow' });
+    await expect(adapter.awaitCompletion(handle)).resolves.toEqual(
+      expect.objectContaining({ status: 'done' }),
+    );
+  });
+
+  it('ein werfender auditStore.record() crasht den Lauf nicht (best-effort, analog ProjectDrain#auditRecord)', () => {
+    const headlessRunner = { start: () => ({ ok: true, jobId: 'job-1' }), getJob: () => undefined };
+    const auditStore = { record: () => { throw new Error('audit down'); } };
+    const adapter = new HeadlessFlowRunnerAdapter({ headlessRunner, auditStore });
+
+    expect(() =>
+      adapter.startRun({ projectPath: PROJECT_PATH, command: '/agent-flow:flow' }),
+    ).not.toThrow();
   });
 });

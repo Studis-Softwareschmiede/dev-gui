@@ -41,14 +41,30 @@
  *
  * Security-Hygiene (Floor, kein Gold-Plating): `HeadlessFlowRunnerAdapter`
  * lehnt einen `command`, der nicht mit `/agent-flow:` beginnt, defensiv ab
- * (`reason:'internal'`) — falls ein künftiger, hier NICHT gebauter
- * Konfigurations-Speisepunkt (S-213) je einen Fremd-Befehl durchreichen
- * würde. `ProjectDrain` selbst übergibt hier immer `FLOW_COMMAND`
- * (`/agent-flow:flow`), dieser Guard greift also im aktuellen Scope nie,
- * ist aber Defense-in-Depth für den Adapter als solchen.
+ * (`reason:'internal'`) — falls ein künftiger Konfigurations-Speisepunkt je
+ * einen Fremd-Befehl durchreichen würde. `ProjectDrain` selbst übergibt hier
+ * immer `FLOW_COMMAND` (`/agent-flow:flow`), dieser Guard greift also im
+ * aktuellen Scope nie, ist aber Defense-in-Depth für den Adapter als solchen.
+ *
+ * Audit (S-213, docs/specs/headless-parallel-drain.md AC11): `HeadlessFlowRunnerAdapter`
+ * ist im Headless-Modus der funktionale Ersatz für `CommandService`s Audit-Rolle
+ * (`CommandService.tryRun()` auditiert heute JEDEN akzeptierten interaktiven
+ * `/flow`-Anstoß, siehe `ProjectDrain.js` Modul-Doku „jeder /flow-Anstoß wird
+ * bereits durch CommandService selbst auditiert"). Ein injizierter `auditStore`
+ * erzeugt hier ANALOG je headless-Lauf **genau einen** Start- und **genau
+ * einen** Ende(Erfolg)/Fehler-`AuditEntry` (AC11) — Korrelation über die
+ * `jobId`, Identität + ein secret-/pfad-freies Projekt-Label (Basename statt
+ * absolutem Host-Pfad, NFR „keine absoluten Host-Pfade in Audit/Log") werden
+ * intern (Map `jobId → {identity, projectLabel}`) zwischen `startRun()` und
+ * `awaitCompletion()` weitergereicht — die `handle`-Form selbst (`{jobId}`)
+ * bleibt dabei unverändert (AC4-Vertrag, Rückwärtskompatibilität zu S-212).
+ * `auditStore` ist optional — ohne ihn verhält sich der Adapter identisch zu
+ * S-212 (kein Audit, kein Crash).
  *
  * @module FlowRunner
  */
+
+import { basename } from 'node:path';
 
 /** Default Poll-Intervall (ms) für den interaktiven Adapter (identisch zum bisherigen ProjectDrain-Default). */
 const DEFAULT_INTERACTIVE_POLL_INTERVAL_MS = 500;
@@ -130,17 +146,22 @@ export class HeadlessFlowRunnerAdapter {
   #headlessRunner;
   #sleepFn;
   #pollIntervalMs;
+  #auditStore;
+  /** @type {Map<string, { identity: string|null, projectLabel: string }>} jobId → Audit-Korrelation (AC11) */
+  #jobAuditMeta = new Map();
 
   /**
    * @param {object} [params]
    * @param {{ start: Function, getJob: Function }} params.headlessRunner  z.B. `HeadlessFlowRunner`-Instanz (S-204)
    * @param {(ms: number) => Promise<void>} [params.sleepFn]  injectable für Tests
    * @param {number} [params.pollIntervalMs]  default: DEFAULT_HEADLESS_POLL_INTERVAL_MS (2000)
+   * @param {{ record: Function }} [params.auditStore]  optional — je headless-Lauf Start/Ende/Fehler (AC11)
    */
-  constructor({ headlessRunner, sleepFn, pollIntervalMs = DEFAULT_HEADLESS_POLL_INTERVAL_MS } = {}) {
+  constructor({ headlessRunner, sleepFn, pollIntervalMs = DEFAULT_HEADLESS_POLL_INTERVAL_MS, auditStore } = {}) {
     this.#headlessRunner = headlessRunner;
     this.#sleepFn = sleepFn ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.#pollIntervalMs = pollIntervalMs;
+    this.#auditStore = auditStore ?? null;
   }
 
   /**
@@ -153,10 +174,10 @@ export class HeadlessFlowRunnerAdapter {
    * @param {{ projectPath: string, command: string, identity?: string|null, args?: string[] }} params
    * @returns {{ ok: true, handle: { jobId: string } } | { ok: false, reason: string }}
    */
-  startRun({ projectPath, command, args }) {
+  startRun({ projectPath, command, args, identity = null }) {
     // Security-Hygiene (Floor, s. Modul-Doku): defensiver Allowlist-Guard,
-    // falls ein künftiger Speisepunkt (S-213) je einen Fremd-Befehl
-    // durchreicht — ProjectDrain selbst übergibt hier immer FLOW_COMMAND.
+    // falls ein künftiger Speisepunkt je einen Fremd-Befehl durchreicht —
+    // ProjectDrain selbst übergibt hier immer FLOW_COMMAND.
     if (typeof command !== 'string' || !command.startsWith('/agent-flow:')) {
       return { ok: false, reason: 'internal' };
     }
@@ -169,6 +190,11 @@ export class HeadlessFlowRunnerAdapter {
     if (!result || !result.ok) {
       return { ok: false, reason: result?.reason ?? 'internal' };
     }
+    // AC11: Start-Audit je headless-Lauf. Kein absoluter Host-Pfad im Audit-
+    // Text (NFR) — nur der Basename (project-Label) statt `projectPath`.
+    const projectLabel = typeof projectPath === 'string' && projectPath ? basename(projectPath) : 'unknown';
+    this.#jobAuditMeta.set(result.jobId, { identity: identity ?? null, projectLabel });
+    this.#audit(identity, `taktgeber:headless-flow-start project=${projectLabel} jobId=${result.jobId}`);
     return { ok: true, handle: { jobId: result.jobId } };
   }
 
@@ -186,14 +212,43 @@ export class HeadlessFlowRunnerAdapter {
     for (;;) {
       const job = this.#headlessRunner.getJob(handle.jobId);
       if (!job || job.status !== 'running') {
+        const status = job?.status ?? 'failed';
+        // AC11: Ende(Erfolg)/Fehler-Audit je headless-Lauf — genau EIN
+        // AuditEntry, Korrelation über die beim startRun() hinterlegte
+        // Meta (Identität + secret-/pfad-freies Projekt-Label).
+        const meta = this.#jobAuditMeta.get(handle.jobId) ?? { identity: null, projectLabel: 'unknown' };
+        this.#jobAuditMeta.delete(handle.jobId);
+        if (status === 'done') {
+          this.#audit(meta.identity, `taktgeber:headless-flow-done project=${meta.projectLabel} jobId=${handle.jobId}`);
+        } else {
+          this.#audit(
+            meta.identity,
+            `taktgeber:headless-flow-failed project=${meta.projectLabel} jobId=${handle.jobId} status=${status}`,
+          );
+        }
         return {
-          status: job?.status ?? 'failed',
+          status,
           result: job?.result,
           error: job?.error,
           prHint: job?.prHint,
         };
       }
       await this.#sleepFn(this.#pollIntervalMs);
+    }
+  }
+
+  /**
+   * Best-effort Audit-Eintrag (AC11). Ein Audit-Fehler darf einen headless-
+   * Lauf nicht crashen (analog `ProjectDrain#auditRecord`/`NightWatchScheduler#audit`).
+   * @param {string|null} identity
+   * @param {string} command
+   */
+  #audit(identity, command) {
+    if (!this.#auditStore) return;
+    try {
+      this.#auditStore.record({ identity: identity ?? null, command });
+    } catch {
+      // best-effort — kein Crash
     }
   }
 }

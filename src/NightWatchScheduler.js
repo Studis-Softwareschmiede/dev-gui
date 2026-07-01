@@ -1,6 +1,7 @@
 /**
  * NightWatchScheduler — Nachtfenster-Scheduler für den Taktgeber/Nachtwächter
- * (docs/specs/taktgeber-nachtwaechter.md AC9, AC10, AC11).
+ * (docs/specs/taktgeber-nachtwaechter.md AC9, AC10, AC11; erweitert um
+ * docs/specs/headless-parallel-drain.md AC7, AC8, AC9, AC11, AC12, S-213).
  *
  * Fügt die bereits gebauten Bausteine (ProjectDrain S-192, ProjectJobLock
  * S-190, TokenLimitWatcher S-193, TickerSettingsStore S-194) zu einem
@@ -30,7 +31,9 @@
  *   vor jedem Lauf (kein Doppel-Trigger, siehe ProjectDrain.js).
  *
  * EHRLICHER Parallelitäts-Hinweis (S-195 Review-Iteration 2, live
- * verifiziert critical, siehe `.claude/lessons/coder.md` 2026-07-01):
+ * verifiziert critical, siehe `.claude/lessons/coder.md` 2026-07-01) —
+ * HISTORISCH, gilt nur solange dieser Scheduler mit einer INTERAKTIV
+ * verdrahteten `ProjectDrain`-Instanz betrieben wird (siehe darunter, S-213):
  *   `maxParallel>1` startet zwar wirklich bis zu `maxParallel` parallele
  *   `ProjectDrain.drainProject()`-Loops (dieser Scheduler selbst limitiert
  *   nichts weiter) — ABER der darunterliegende `CommandService` serialisiert
@@ -44,19 +47,61 @@
  *   den nächsten Tick. `drainProject()`-Ausgänge mit `reason`
  *   `'command-channel-busy'`, `'contended'` oder `'already-busy'` sind daher
  *   ein NORMALER, unkritischer Tick-Ausgang (kein Fehler, kein Warnsignal) —
- *   das Projekt wird beim nächsten Poll erneut versucht. Volle, ECHTE
- *   Parallelität (mehrere /flow-Prozesse gleichzeitig) ist bewusst NICHT
- *   Teil dieser Story — sie erfordert einen Umbau von `CommandService` auf
- *   einen projektweisen PTY-Lock (separate Folge-Story `S-204`, `depends:
- *   [S-195]`). WICHTIG: kein Fehl-Blocked mehr — das war der behobene
- *   Critical-Bug dieser Iteration.
+ *   das Projekt wird beim nächsten Poll erneut versucht.
+ *
+ * ECHTE Parallelität (S-213, docs/specs/headless-parallel-drain.md AC7/AC8):
+ *   Die Composition-Root (`server.js`) verdrahtet diesen Scheduler mit einer
+ *   EIGENEN `ProjectDrain`-Instanz, deren `flowRunner` ein
+ *   `HeadlessFlowRunnerAdapter` (`src/FlowRunner.js`) ist — jeder `/flow`-
+ *   Anstoß läuft dadurch als eigener `claude -p`-Kindprozess (kein globaler
+ *   PTY-`JobLock`, nur ein projektweises `ProjectJobLock` des Kindprozess-
+ *   Runners, EIGENE Instanz — NICHT die `ProjectDrain`-Lock-Instanz, sonst
+ *   Selbst-Blockade). Bis zu `maxParallel` Projekte drainen damit ECHT
+ *   gleichzeitig (mehrere unabhängige OS-Subprozesse). Der oben beschriebene
+ *   Engpass (`command-channel-busy`) tritt im Headless-Modus strukturell
+ *   NICHT mehr auf (AC8) — der manuelle „Board abarbeiten"-Knopf (S-196)
+ *   nutzt weiterhin eine SEPARATE, interaktiv verdrahtete `ProjectDrain`-
+ *   Instanz und bleibt davon unberührt (AC6, bit-identisches Verhalten).
+ *
+ * sessionRegistry-Naht — Attach (hier) vs. Busy-Check (`ProjectDrain`), CRITICAL-
+ * Fix S-213 Iteration 2 (live reproduziert, siehe `.claude/lessons/coder.md`
+ * 2026-07-01 "attachTokenWatcher (PTY-Session-CREATE) läuft VOR isProjectBusy()
+ * (PTY-Session-EXISTS)"): `server.js` injiziert DIESELBE `sessionRegistry`
+ * (`ptyRegistry`) in ZWEI Collaborators mit UNTERSCHIEDLICHEM Zweck:
+ *   (1) hier, `#attachTokenWatcher()` — hängt den `TokenLimitWatcher` an eine
+ *       PTY-Session (S-193, konto-weite Token-Limit-Erkennung).
+ *   (2) `ProjectDrain#drainProject()`s allererster Schritt, `isProjectBusy()`
+ *       (`ProjectJobLock.js`) — fragt `sessionRegistry.hasSession(projectPath)`
+ *       (NICHT-mutierend) ab, um eine UNABHÄNGIG vom Scheduler entstandene
+ *       (z.B. manuell in der UI geöffnete) Session als "busy" zu erkennen
+ *       (kein Doppel-Trigger, AC7 taktgeber-nachtwaechter).
+ * `#attachTokenWatcher()` ruft daher NIEMALS `getOrCreate()` (das eine PTY-
+ * Session ERZEUGEN würde) ohne vorherigen `hasSession()`-Check — sonst würde
+ * (1) genau die Session-EXISTENZ herstellen, die (2) unmittelbar danach als
+ * "busy" liest (Selbst-Blockade, `already-busy`, `flowRunner.startRun()` wird
+ * NIE aufgerufen — der Normalfall JEDEN automatischen Nacht-Ticks für ein
+ * Projekt ohne bereits offene manuelle PTY-Session). Im Headless-Nacht-Modus
+ * gibt es ohnehin keine PTY-Ausgabe zum Mitlesen (`claude -p` schreibt auf
+ * stdout/stderr des Kindprozesses, nicht in eine PTY) — ein Attach ohne
+ * bereits bestehende Session entfällt daher im Headless-Modus vollständig
+ * (die headless-Token-Limit-Erkennung selbst bleibt ein separates,
+ * spec-benanntes Restrisiko, docs/specs/headless-parallel-drain.md
+ * Abschnitt "Restrisiko" — NICHT Teil dieser Story). Details siehe
+ * `#attachTokenWatcher()` unten.
+ *
+ * Auth-Vorabprüfung (S-213 AC9): vor jedem Tick, der neue Drains starten
+ * würde, wird — sofern injiziert — `claudeAuthHealthService.getState()`
+ * geprüft. Bei `claudeAuth:'expired'` startet dieser Tick KEINE neuen Drains
+ * (spart Fehl-Läufe gegen eine abgelaufene Container-Anmeldung) und der
+ * Umstand wird EINMALIG auditiert (Dedupe, kein Audit-Spam pro Tick, analog
+ * zum bestehenden `token-limit-stop`-Dedupe unten). `'unknown'`/`'ok'`
+ * blockieren nicht (kein Fehlalarm-Stop, AC9).
  *
  * Nicht in dieser Story (bewusst NICHT gebaut):
  *   - „Board abarbeiten"-Knopf-Umbau (S-196) / Settings-API (S-194, fertig)
  *     / UI (S-197).
  *   - Kein eigener Board-Schreibpfad — Eskalation bleibt Sache von
  *     `ProjectDrain`/`BoardWriter` (S-191/S-192).
- *   - Echte projektweise CommandService-Parallelität (S-204, s.o.).
  *
  * Zeitzone/über-Mitternacht (AC10):
  *   Wiederverwendet die TZ-Wandzeit-Helfer aus `TokenLimitWatcher.js`
@@ -233,11 +278,13 @@ export function selectCandidateProjects(index, projectsSetting) {
  * @param {{ getState: Function, waitForReset: Function }} [deps.tokenLimitWatcher]
  *   Konto-weiter Token-Limit-Watcher (S-193). Optional — ohne ihn läuft der
  *   Scheduler ohne Token-Limit-Gate (kein Crash, degradiert).
- * @param {{ getOrCreate: (path: string|null) => object|null }} [deps.sessionRegistry]
+ * @param {{ hasSession: (path: string) => boolean, getOrCreate: (path: string|null) => object|null }} [deps.sessionRegistry]
  *   `PtySessionRegistry` — nur genutzt um `tokenLimitWatcher.attach()` an die
  *   PTY-Session eines gerade gestarteten Projekt-Drains zu hängen ("welche
  *   Sessions das sind, entscheidet der Scheduler", TokenLimitWatcher-Doku).
  * @param {{ record: Function }} [deps.auditStore]  best-effort Audit für Token-Limit-Pause/Stop.
+ * @param {{ getState: () => { claudeAuth: 'ok'|'expired'|'unknown', lastCheckedAt: string|null } }} [deps.claudeAuthHealthService]
+ *   Auth-Vorabprüfung (S-213 AC9). Optional — ohne ihn läuft der Scheduler ohne Auth-Gate (kein Crash, degradiert).
  * @param {string|null} [deps.identity]  auslösende Identität (Audit + ProjectDrain-Weiterreichung).
  * @param {() => number} [deps.now]  injizierbare Uhr (ms epoch), Default `Date.now`.
  * @param {(ms: number) => Promise<void>} [deps.sleepFn]  injizierbares Sleep (für `waitForReset`), Default echtes `setTimeout`.
@@ -251,6 +298,7 @@ export class NightWatchScheduler {
   #tokenLimitWatcher;
   #sessionRegistry;
   #auditStore;
+  #claudeAuthHealthService;
   #identity;
   #now;
   #sleepFn;
@@ -269,6 +317,8 @@ export class NightWatchScheduler {
   #lastIntervalMs = DEFAULT_INTERVAL_MINUTES * 60_000;
   /** Dedupe: verhindert wiederholte "token-limit-stop"-Audit-Spam für denselben Reset-Zeitpunkt. */
   #lastAuditedStopResetAt = null;
+  /** Dedupe: verhindert wiederholten "auth-expired-skip"-Audit-Spam über mehrere Ticks hinweg (AC9). */
+  #lastAuditedAuthExpired = false;
 
   constructor({
     readSettings,
@@ -277,6 +327,7 @@ export class NightWatchScheduler {
     tokenLimitWatcher,
     sessionRegistry,
     auditStore,
+    claudeAuthHealthService,
     identity = null,
     now,
     sleepFn,
@@ -289,6 +340,7 @@ export class NightWatchScheduler {
     this.#tokenLimitWatcher = tokenLimitWatcher ?? null;
     this.#sessionRegistry = sessionRegistry ?? null;
     this.#auditStore = auditStore ?? null;
+    this.#claudeAuthHealthService = claudeAuthHealthService ?? null;
     this.#identity = identity;
     this.#now = now ?? (() => Date.now());
     this.#sleepFn = sleepFn ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -381,6 +433,14 @@ export class NightWatchScheduler {
       return { skipped: true, reason: 'outside-window', activeDrains: this.#activeDrains.size };
     }
 
+    // AC9 Auth-Vorabprüfung: bei abgelaufener Container-Anmeldung KEINE neuen
+    // Drains in diesem Tick (spart Fehl-Läufe). Bereits laufende Drains
+    // (#activeDrains) werden NICHT angefasst — analog AC11/AC12 Sanftes Ende.
+    if (this.#claudeAuthHealthService) {
+      const authGateResult = this.#applyAuthGate();
+      if (authGateResult) return authGateResult;
+    }
+
     // Token-Limit-Gate (Konsum von S-193 TokenLimitWatcher, siehe Modul-Doku).
     if (this.#tokenLimitWatcher) {
       const gateResult = await this.#applyTokenLimitGate(nowMs, window);
@@ -412,6 +472,30 @@ export class NightWatchScheduler {
     }
 
     return { started, activeDrains: this.#activeDrains.size };
+  }
+
+  /**
+   * Auth-Vorabprüfung (S-213 AC9): bei `claudeAuth:'expired'` startet dieser
+   * Tick keine neuen Drains. `'unknown'`/`'ok'` blockieren nicht (kein
+   * Fehlalarm-Stop). Dedupe verhindert Audit-Spam über mehrere Ticks hinweg,
+   * solange die Anmeldung durchgängig abgelaufen bleibt (analog
+   * `#lastAuditedStopResetAt` beim Token-Limit-Gate).
+   *
+   * @returns {object|null}  ein Tick-Ergebnis wenn dieser Tick mit
+   *   "auth-expired" abbrechen muss, sonst `null` (weiter mit dem normalen
+   *   Drain-Start).
+   */
+  #applyAuthGate() {
+    const state = this.#claudeAuthHealthService.getState();
+    if (state?.claudeAuth !== 'expired') {
+      this.#lastAuditedAuthExpired = false; // Anmeldung (wieder) gesund/unbekannt → nächster Stop ist wieder neu
+      return null;
+    }
+    if (!this.#lastAuditedAuthExpired) {
+      this.#audit(`taktgeber:auth-expired-skip lastCheckedAt=${state.lastCheckedAt ?? ''}`);
+      this.#lastAuditedAuthExpired = true;
+    }
+    return { skipped: true, reason: 'auth-expired', activeDrains: this.#activeDrains.size };
   }
 
   /**
@@ -489,10 +573,42 @@ export class NightWatchScheduler {
    * Session (Idle-Timeout) zerstört und neu erstellt, wird erneut attached
    * (Vergleich per Objekt-Referenz, nicht nur per Pfad).
    *
+   * NICHT-ERZEUGEND (S-213 headless-parallel-drain, CRITICAL-Fix Iteration 2,
+   * siehe `.claude/lessons/coder.md` 2026-07-01 "attachTokenWatcher (PTY-
+   * Session-CREATE) läuft VOR isProjectBusy() (PTY-Session-EXISTS)"): attacht
+   * NUR, wenn `sessionRegistry.hasSession(projectPath)` bereits `true` ist —
+   * niemals via `getOrCreate()` selbst eine PTY-Session anlegen. Grund: in
+   * `server.js` teilen `NightWatchScheduler` (hier) UND `ProjectDrain` (für
+   * `isProjectBusy()`, siehe `ProjectDrain.js`) dieselbe `sessionRegistry`-
+   * Instanz (`ptyRegistry`). Würde hier `getOrCreate()` aufgerufen, legt das
+   * für ein frisches Projekt OHNE offene manuelle Session GERADE JETZT eine
+   * neue PTY-Session an — `ProjectDrain#drainProject()`s allererster Schritt
+   * (`isProjectBusy()` → `sessionRegistry.hasSession()`) sieht diese Session
+   * dann als "aktiv" und bricht sofort mit `already-busy` ab, OHNE
+   * `flowRunner.startRun()` je aufzurufen (Selbst-Blockade — live
+   * reproduziert: `started:[proj]`, aber `spawnCount` blieb 0). Im
+   * Headless-Nacht-Modus gibt es ohnehin KEINE PTY-Ausgabe zum Mitlesen —
+   * `claude -p` schreibt auf stdout/stderr des Kindprozesses, nicht in eine
+   * PTY (siehe `HeadlessRunnerCore`/`combinedOutput`) — ein Attach ohne
+   * bereits bestehende (z.B. manuell in der UI geöffnete) Session wäre also
+   * ohnehin nutzlos für die Token-Limit-Erkennung. Die headless-Token-Limit-
+   * Erkennung selbst ist ein separates, spec-benanntes Restrisiko
+   * (docs/specs/headless-parallel-drain.md, Abschnitt "Restrisiko") — NICHT
+   * Teil dieser Story. Das fremd-erzeugte (z.B. manuell geöffnete)
+   * Session-Signal für `isProjectBusy()` bleibt davon unberührt: `hasSession`
+   * (non-mutating) prüft weiterhin exakt wie zuvor.
+   *
    * @param {string} projectPath
    */
   #attachTokenWatcher(projectPath) {
     if (!this.#tokenLimitWatcher || !this.#sessionRegistry) return;
+    let hasSession;
+    try {
+      hasSession = this.#sessionRegistry.hasSession(projectPath);
+    } catch {
+      return; // best-effort — fehlende Session-Anbindung darf den Drain nicht verhindern
+    }
+    if (!hasSession) return; // kein getOrCreate() — keine Session erzeugen (Selbst-Blockade-Vermeidung)
     let pty;
     try {
       pty = this.#sessionRegistry.getOrCreate(projectPath);

@@ -129,6 +129,8 @@ import { ProjectDrain } from './src/ProjectDrain.js';
 import { BoardWriter } from './src/BoardWriter.js';
 import { TokenLimitWatcher } from './src/TokenLimitWatcher.js';
 import { NightWatchScheduler } from './src/NightWatchScheduler.js';
+import { HeadlessFlowRunner } from './src/HeadlessFlowRunner.js';
+import { HeadlessFlowRunnerAdapter } from './src/FlowRunner.js';
 import { mountRouters } from './src/routerLoader.js';
 
 const PORT = Number(process.env.PORT ?? 8080);
@@ -279,6 +281,14 @@ const retroReader = new RetroReader({
 const boardAggregator = new BoardAggregator();
 boardAggregator.startWatchers();
 
+// ── ClaudeAuthHealthService (Boot- + periodische Auth-Probe, claude-auth-health AC1–AC6) ──
+// Getrennt vom interaktiven PTY-Pfad (analog HeadlessReconcileRunner AC7) — eigener
+// kurzlebiger claude-Kindprozess. start() ist fire-and-forget (blockiert den Boot nie,
+// Edge-Case "Probe-Fehler beim Boot"); stop() in shutdown() unten. Vorgezogen (vor dem
+// Taktgeber-Block) — S-213 AC9: der NightWatchScheduler braucht diese Instanz für seine
+// Auth-Vorabprüfung.
+const claudeAuthHealthService = new ClaudeAuthHealthService();
+
 // ── Taktgeber/Nachtwächter (taktgeber-nachtwaechter.md) ───────────────────────
 // ProjectDrain (S-192) + BoardWriter (S-191) + TokenLimitWatcher (S-193) +
 // NightWatchScheduler (S-195, AC9–AC11): zieht die bereits gebauten Bausteine
@@ -286,6 +296,10 @@ boardAggregator.startWatchers();
 // deckt sowohl die Busy-Erkennung (AC7, ProjectDrain) als auch den
 // Token-Limit-Watcher-Attach je Projekt-Session ab (S-195, konto-weit).
 const boardWriter = new BoardWriter();
+// Manueller „Board abarbeiten"-Knopf (S-196): bleibt INTERAKTIV — kein
+// `flowRunner` injiziert → ProjectDrain baut per Default einen
+// InteractiveFlowRunner um `commandService` (headless-parallel-drain AC6,
+// bit-identisches Verhalten).
 const projectDrain = new ProjectDrain({
   boardAggregator,
   commandService,
@@ -293,14 +307,42 @@ const projectDrain = new ProjectDrain({
   sessionRegistry: ptyRegistry,
   auditStore,
 });
+
+// ── Headless-Nacht-Drain (S-213, docs/specs/headless-parallel-drain.md AC7/AC9/AC11) ──
+// EIGENE HeadlessFlowRunner-Instanz mit ihrer EIGENEN, eigenständigen
+// ProjectJobLock-Instanz (Konstruktor-Default `new ProjectJobLock()` in
+// HeadlessFlowRunner.js) — bewusst NICHT die `projectJobLock`-Singleton-
+// Instanz, die `ProjectDrain` für die Dauer der GESAMTEN Drain-Session hält.
+// Würde derselbe Lock-Singleton in BEIDE injiziert, würde JEDER headless-Lauf
+// sich SELBST blockieren (`reason:'locked'`), weil ProjectDrain das
+// projektweise Lock schon hält, bevor `#runLoop` überhaupt den ersten
+// `/flow`-Anstoß versucht (S-212-Review-Kritikpunkt).
+const headlessFlowRunner = new HeadlessFlowRunner();
+const headlessFlowRunnerAdapter = new HeadlessFlowRunnerAdapter({
+  headlessRunner: headlessFlowRunner,
+  auditStore, // AC11: Start/Ende(Erfolg)/Fehler je headless-Lauf
+});
+// SEPARATE ProjectDrain-Instanz ausschließlich für den Nachtwächter — nutzt
+// denselben commandService NUR für die bestehende `isProjectBusy()`-Erkennung
+// (AC6/AC7 taktgeber-nachtwaechter, unverändert), der Ausführungs-Schritt
+// selbst läuft über den headless-Adapter (AC5/AC7 headless-parallel-drain).
+const nightProjectDrain = new ProjectDrain({
+  boardAggregator,
+  commandService,
+  boardWriter,
+  sessionRegistry: ptyRegistry,
+  auditStore,
+  flowRunner: headlessFlowRunnerAdapter,
+});
 const tokenLimitWatcher = new TokenLimitWatcher();
 const nightWatchScheduler = new NightWatchScheduler({
   readSettings: readTickerSettings,
   boardAggregator,
-  projectDrain,
+  projectDrain: nightProjectDrain,
   tokenLimitWatcher,
   sessionRegistry: ptyRegistry,
   auditStore,
+  claudeAuthHealthService, // S-213 AC9: Auth-Vorabprüfung vor jedem Nacht-Tick
 });
 // Immer gestartet — tick() selbst prüft `enabled` (AC16: enabled=false → idle,
 // analog NotificationWatcher.start(), das ebenfalls unbedingt läuft).
@@ -351,11 +393,10 @@ const assistService = new AssistService();
 // getrennt (AC7) — eigene ProjectJobLock-Instanz, kein Idle-/Rate-Timer.
 const reconcileRunner = new HeadlessReconcileRunner();
 
-// ── ClaudeAuthHealthService (Boot- + periodische Auth-Probe, claude-auth-health AC1–AC6) ──
-// Getrennt vom interaktiven PTY-Pfad (analog HeadlessReconcileRunner AC7) — eigener
-// kurzlebiger claude-Kindprozess. start() ist fire-and-forget (blockiert den Boot nie,
-// Edge-Case "Probe-Fehler beim Boot"); stop() in shutdown() unten.
-const claudeAuthHealthService = new ClaudeAuthHealthService();
+// claudeAuthHealthService-Instanz wurde bereits weiter oben (vor dem
+// Taktgeber-Block, S-213 AC9) konstruiert — hier nur noch fire-and-forget
+// gestartet (blockiert den Boot nie, Edge-Case "Probe-Fehler beim Boot"),
+// stop() in shutdown() unten.
 claudeAuthHealthService.start();
 
 // ── KnowledgeSourceService (web-fähiger Quellen-Such-Helfer, team-knowledge-add AC11) ──

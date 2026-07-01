@@ -35,6 +35,29 @@
  *   `token-limit-stop` (kein Board-Scan/Drain in diesem Tick, Audit-Dedupe
  *   pro `resetAt`). `#attachTokenWatcher`: Attach nur einmal pro
  *   PTY-Instanz (Objekt-Identität), erneuter Attach bei Session-Neuerstellung.
+ *   NICHT-ERZEUGEND (S-213 CRITICAL-Fix Iteration 2, headless-parallel-drain
+ *   AC7): Attach findet NUR statt, wenn `sessionRegistry.hasSession()`
+ *   bereits `true` ist — NIE via `getOrCreate()` selbst eine PTY-Session
+ *   anlegen (sonst Selbst-Blockade über `ProjectDrain#isProjectBusy()`, siehe
+ *   `.claude/lessons/coder.md` 2026-07-01). Die ECHTE Naht (beide
+ *   Collaborators teilen dieselbe `sessionRegistry`-Instanz, exakt wie
+ *   `server.js`) lebt als eigener Regressionstest in
+ *   test/headless-night-drain.integration.test.js.
+ *
+ * Covers (headless-parallel-drain):
+ *   AC9 — Auth-Vorabprüfung: `claudeAuthHealthService.getState().claudeAuth
+ *         === 'expired'` → dieser Tick startet KEINE neuen Drains (Board-Scan
+ *         + `projectDrain.drainProject()` werden gar nicht erst aufgerufen)
+ *         + EIN Audit-Eintrag (Dedupe über mehrere Ticks hinweg, analog
+ *         `token-limit-stop`). `'ok'`/`'unknown'` blockieren nicht (kein
+ *         Fehlalarm-Stop). Kein injizierter `claudeAuthHealthService` →
+ *         Scheduler läuft unverändert ohne Auth-Gate (Rückwärtskompatibilität).
+ *   Die ECHTE Naht (Scheduler + ProjectDrain + HeadlessFlowRunnerAdapter +
+ *   HeadlessFlowRunner, AC7/AC8/AC11/AC12 — real-parallelism-Beleg + Selbst-
+ *   Blockade-Vermeidung) lebt in
+ *   test/headless-night-drain.integration.test.js (echte Prozess-Naht, kein
+ *   ProjectDrain-Mock — dieselbe Konvention wie
+ *   nightwatch-lock-contention.integration.test.js).
  *
  * Strategy:
  *   - Pure Helper (`parseHHMM`, `isWithinWindow`, `computeWindowEndMs`,
@@ -135,6 +158,7 @@ function makeScheduler(overrides = {}) {
     tokenLimitWatcher: overrides.tokenLimitWatcher,
     sessionRegistry: overrides.sessionRegistry,
     auditStore,
+    claudeAuthHealthService: overrides.claudeAuthHealthService,
     now: () => nowMs,
     sleepFn: overrides.sleepFn ?? (() => Promise.resolve()),
   });
@@ -560,10 +584,93 @@ describe('NightWatchScheduler — Token-Limit-Konsum (waitForReset, exceeds-wind
   });
 });
 
-describe('NightWatchScheduler — TokenLimitWatcher-Attach an PTY-Sessions', () => {
-  it('attacht den Watcher genau einmal pro PTY-Instanz beim Drain-Start', async () => {
+// ── Auth-Vorabprüfung (headless-parallel-drain AC9) ─────────────────────────────
+
+describe('NightWatchScheduler — Auth-Vorabprüfung (headless-parallel-drain AC9)', () => {
+  it('kein claudeAuthHealthService injiziert → Scheduler läuft unverändert ohne Auth-Gate', async () => {
+    const { scheduler, projectDrain } = makeScheduler({ claudeAuthHealthService: undefined });
+    const result = await scheduler.tick();
+    expect(result.started.length).toBeGreaterThan(0);
+    expect(projectDrain.drainProject).toHaveBeenCalled();
+  });
+
+  it('claudeAuth: "ok" → normaler Ablauf, keine Blockade', async () => {
+    const claudeAuthHealthService = { getState: jest.fn(() => ({ claudeAuth: 'ok', lastCheckedAt: '2026-01-15T00:00:00.000Z' })) };
+    const { scheduler, projectDrain } = makeScheduler({ claudeAuthHealthService });
+    const result = await scheduler.tick();
+    expect(result.started.length).toBeGreaterThan(0);
+    expect(projectDrain.drainProject).toHaveBeenCalled();
+  });
+
+  it('claudeAuth: "unknown" → normaler Ablauf (kein Fehlalarm-Stop)', async () => {
+    const claudeAuthHealthService = { getState: jest.fn(() => ({ claudeAuth: 'unknown', lastCheckedAt: null })) };
+    const { scheduler, projectDrain } = makeScheduler({ claudeAuthHealthService });
+    const result = await scheduler.tick();
+    expect(result.started.length).toBeGreaterThan(0);
+    expect(projectDrain.drainProject).toHaveBeenCalled();
+  });
+
+  it('claudeAuth: "expired" → keine neuen Drains, kein Board-Scan, Audit-Eintrag', async () => {
+    const claudeAuthHealthService = {
+      getState: jest.fn(() => ({ claudeAuth: 'expired', lastCheckedAt: '2026-01-15T00:00:00.000Z' })),
+    };
+    const { scheduler, projectDrain, boardAggregator, auditStore } = makeScheduler({ claudeAuthHealthService });
+    const result = await scheduler.tick();
+    expect(result).toEqual({ skipped: true, reason: 'auth-expired', activeDrains: 0 });
+    expect(boardAggregator.getIndex).not.toHaveBeenCalled();
+    expect(projectDrain.drainProject).not.toHaveBeenCalled();
+    expect(auditStore.record).toHaveBeenCalledWith(
+      expect.objectContaining({ command: expect.stringContaining('taktgeber:auth-expired-skip') }),
+    );
+  });
+
+  it('expired über mehrere Ticks mit unverändertem Zustand → nur EIN Audit-Eintrag (kein Spam)', async () => {
+    const claudeAuthHealthService = { getState: jest.fn(() => ({ claudeAuth: 'expired', lastCheckedAt: null })) };
+    const { scheduler, auditStore } = makeScheduler({ claudeAuthHealthService });
+    await scheduler.tick();
+    await scheduler.tick();
+    await scheduler.tick();
+    const expiredEntries = auditStore.record.mock.calls.filter(([entry]) =>
+      entry.command.includes('taktgeber:auth-expired-skip'),
+    );
+    expect(expiredEntries).toHaveLength(1);
+  });
+
+  it('expired → ok → erneut expired: der zweite expired-Zustand wird wieder auditiert (Dedupe-Reset)', async () => {
+    let state = { claudeAuth: 'expired', lastCheckedAt: null };
+    const claudeAuthHealthService = { getState: jest.fn(() => state) };
+    const { scheduler, auditStore } = makeScheduler({ claudeAuthHealthService });
+
+    await scheduler.tick(); // expired #1 → auditiert
+    state = { claudeAuth: 'ok', lastCheckedAt: null };
+    await scheduler.tick(); // ok → Dedupe zurückgesetzt
+    state = { claudeAuth: 'expired', lastCheckedAt: null };
+    await scheduler.tick(); // expired #2 → erneut auditiert
+
+    const expiredEntries = auditStore.record.mock.calls.filter(([entry]) =>
+      entry.command.includes('taktgeber:auth-expired-skip'),
+    );
+    expect(expiredEntries).toHaveLength(2);
+  });
+
+  it('Auth-Gate greift NACH dem Fenster-Check (außerhalb des Fensters bleibt "outside-window", nicht "auth-expired")', async () => {
+    const claudeAuthHealthService = { getState: jest.fn(() => ({ claudeAuth: 'expired', lastCheckedAt: null })) };
+    const outsideWindowMs = Date.UTC(2026, 0, 15, 11, 0);
+    const { scheduler } = makeScheduler({ claudeAuthHealthService, nowMs: outsideWindowMs });
+    const result = await scheduler.tick();
+    expect(result).toEqual({ skipped: true, reason: 'outside-window', activeDrains: 0 });
+    // Das Auth-Gate wurde erst gar nicht ausgewertet (Fenster-Check hat bereits gestoppt).
+    expect(claudeAuthHealthService.getState).not.toHaveBeenCalled();
+  });
+});
+
+describe('NightWatchScheduler — TokenLimitWatcher-Attach an PTY-Sessions (NICHT-ERZEUGEND, S-213 CRITICAL-Fix Iteration 2)', () => {
+  it('attacht den Watcher genau einmal pro PTY-Instanz beim Drain-Start — NUR wenn bereits eine Session existiert (hasSession:true)', async () => {
     const ptyA = { on: jest.fn(), off: jest.fn() };
-    const sessionRegistry = { getOrCreate: jest.fn(() => ptyA) };
+    // hasSession:true simuliert eine UNABHÄNGIG vom Scheduler bereits bestehende
+    // (z.B. manuell in der UI geöffnete) Session — genau der Fall, in dem
+    // Attach weiterhin stattfinden soll.
+    const sessionRegistry = { hasSession: jest.fn(() => true), getOrCreate: jest.fn(() => ptyA) };
     const tokenLimitWatcher = {
       getState: jest.fn(() => ({ limited: false })),
       attach: jest.fn(),
@@ -577,6 +684,7 @@ describe('NightWatchScheduler — TokenLimitWatcher-Attach an PTY-Sessions', () 
     });
 
     await scheduler.tick();
+    expect(sessionRegistry.hasSession).toHaveBeenCalledWith('/workspace/proj-a');
     expect(tokenLimitWatcher.attach).toHaveBeenCalledTimes(1);
     expect(tokenLimitWatcher.attach).toHaveBeenCalledWith(ptyA);
 
@@ -587,11 +695,11 @@ describe('NightWatchScheduler — TokenLimitWatcher-Attach an PTY-Sessions', () 
     expect(tokenLimitWatcher.attach).toHaveBeenCalledTimes(1);
   });
 
-  it('attacht erneut, wenn die Session neu erstellt wurde (andere PTY-Instanz)', async () => {
+  it('attacht erneut, wenn die Session neu erstellt wurde (andere PTY-Instanz, weiterhin hasSession:true)', async () => {
     const ptyA1 = { on: jest.fn(), off: jest.fn() };
     const ptyA2 = { on: jest.fn(), off: jest.fn() };
     let current = ptyA1;
-    const sessionRegistry = { getOrCreate: jest.fn(() => current) };
+    const sessionRegistry = { hasSession: jest.fn(() => true), getOrCreate: jest.fn(() => current) };
     const tokenLimitWatcher = {
       getState: jest.fn(() => ({ limited: false })),
       attach: jest.fn(),
@@ -620,6 +728,28 @@ describe('NightWatchScheduler — TokenLimitWatcher-Attach an PTY-Sessions', () 
     await scheduler.tick();
     expect(tokenLimitWatcher.attach).not.toHaveBeenCalled();
   });
+
+  it(
+    'CRITICAL-FIX (S-213 Iteration 2): hasSession:false (frisches Projekt OHNE offene Session) → ' +
+      'KEIN getOrCreate()-Aufruf, KEIN Attach — Selbst-Blockade-Vermeidung (kein Session-CREATE durch den Scheduler selbst)',
+    async () => {
+      const sessionRegistry = { hasSession: jest.fn(() => false), getOrCreate: jest.fn() };
+      const tokenLimitWatcher = { getState: jest.fn(() => ({ limited: false })), attach: jest.fn() };
+      const projectDrain = makeControllableProjectDrain();
+      const { scheduler } = makeScheduler({
+        tokenLimitWatcher,
+        sessionRegistry,
+        projectDrain,
+        settings: makeSettings({ maxParallel: 1, projects: ['proj-a'] }),
+      });
+
+      await scheduler.tick();
+      expect(sessionRegistry.hasSession).toHaveBeenCalledWith('/workspace/proj-a');
+      // Der zentrale Fix-Beleg: getOrCreate() (Session-CREATE) wird NIE aufgerufen.
+      expect(sessionRegistry.getOrCreate).not.toHaveBeenCalled();
+      expect(tokenLimitWatcher.attach).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe('DEFAULT_INTERVAL_MINUTES', () => {
