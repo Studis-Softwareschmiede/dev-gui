@@ -41,6 +41,13 @@
  *          Test hängt an einem realen Reconcile-Lauf) — durchgängig in dieser
  *          Datei demonstriert.
  *
+ * Covers (audit-spec-main-pane):
+ *   AC5 — Edge-Case „aktiv gezeigtes Navigations-Dokument": zeigt die
+ *          Hauptfläche gerade ein per Navigation gewähltes Dokument, schaltet
+ *          der Auto-Reload nach Reconcile-Abschluss die Hauptfläche NICHT
+ *          unbemerkt auf das Audit-Logbuch um (der Reload lädt trotzdem genau
+ *          einmal im Hintergrund).
+ *
  * @jest-environment jsdom
  */
 
@@ -130,6 +137,9 @@ function makeFetchFn({
         status: auditStatus,
         text: async () => auditBody,
       };
+    }
+    if (typeof url === 'string' && url.includes('docs/raw') && url.includes('README.md')) {
+      return { ok: true, status: 200, text: async () => '# README Inhalt' };
     }
     return { ok: true, status: 200, json: async () => ({}) };
   });
@@ -495,5 +505,43 @@ describe('reconcile-inline-feedback AC8 (Quelle jetzt headless-reconcile-runner 
     await waitFor(() => {
       expect(document.querySelector('[data-testid="reconcile-degraded"]')).toBeTruthy();
     }, { timeout: 3000 });
+  });
+});
+
+// ── audit-spec-main-pane AC5: Auto-Reload verdrängt kein aktiv gezeigtes Dokument ──
+
+describe('audit-spec-main-pane AC5: Auto-Reload nach Reconcile-Abschluss überschreibt kein aktiv gezeigtes Navigations-Dokument', () => {
+  it('Hauptfläche zeigt aktiv README.md → Übergang auf "Fertig" lädt Audit im Hintergrund, ersetzt aber nicht die Dokument-Anzeige', async () => {
+    const fetchFn = makeFetchFn({ jobStatusSequence: ['running', 'done'] });
+    renderSpecView(fetchFn);
+
+    // Navigations-Dokument öffnen, bevor der Reconcile-Lauf abgeschlossen ist.
+    await waitFor(() => {
+      expect(document.querySelector('button[title="README.md"]')).toBeTruthy();
+    });
+    await act(async () => {
+      fireEvent.click(document.querySelector('button[title="README.md"]'));
+    });
+    await waitFor(() => {
+      const h1 = document.querySelector('h1');
+      expect(h1?.textContent).toBe('README Inhalt');
+    });
+
+    await startRun(fetchFn);
+
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="reconcile-done"]')).toBeTruthy();
+    });
+
+    // Der Auto-Reload feuert trotzdem genau einmal im Hintergrund …
+    await waitFor(() => {
+      expect(fetchFn._auditCalls).toHaveLength(1);
+    });
+
+    // … aber die Hauptfläche bleibt beim Dokument — kein unbemerktes Umschalten,
+    // kein audit-spec-content sichtbar.
+    const h1 = document.querySelector('h1');
+    expect(h1?.textContent).toBe('README Inhalt');
+    expect(document.querySelector('[data-testid="audit-spec-content"]')).toBeNull();
   });
 });
