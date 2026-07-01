@@ -345,8 +345,17 @@ function _parseScalar(s) {
   if (t === 'true') return true;
   if (t === 'false') return false;
 
-  // Quoted string — single or double
-  if ((t.startsWith("'") && t.endsWith("'")) || (t.startsWith('"') && t.endsWith('"'))) {
+  // Quoted string — single or double.
+  // Single-quoted YAML scalars use the standard doubled-quote escape for an
+  // embedded `'` (`'` → `''`, written by `BoardWriter._yamlSingleQuote()`).
+  // Strip the outer quotes, THEN unescape `''` back to `'` — otherwise a
+  // title/body/blocked_reason with an apostrophe round-trips as `''` instead
+  // of `'` (S-199 Iteration 2 fix; ONLY this single-quote unescape changes —
+  // no other parse semantics touched, BoardAggregator stays read-only).
+  if (t.startsWith("'") && t.endsWith("'")) {
+    return t.slice(1, -1).replace(/''/g, "'");
+  }
+  if (t.startsWith('"') && t.endsWith('"')) {
     return t.slice(1, -1);
   }
 

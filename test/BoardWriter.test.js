@@ -1,5 +1,5 @@
 /**
- * BoardWriter.test.js — Unit-/Integrationstests für BoardWriter (S-191).
+ * BoardWriter.test.js — Unit-/Integrationstests für BoardWriter (S-191, erweitert S-199).
  *
  * Covers (taktgeber-nachtwaechter):
  *   AC8 — Schmale Schreib-Boundary in board/stories/<id>.yaml: setzt
@@ -17,6 +17,20 @@
  *          (`duplicate-key`); JEDER Feldwert (nicht nur blocked_reason) wird
  *          auf der `patchTopLevelFields`-API-Grenze gegen eingebettete
  *          Steuerzeichen/Zeilenumbrüche geprüft (YAML-Line-Injection-Schutz).
+ *
+ * Covers (ideen-inbox):
+ *   AC3 — `createIdea()`: Quick-Capture-Create-Pfad legt `board/stories/S-<n>.yaml`
+ *          mit `status: Idee`, `title`, optional `notes` an — OHNE `spec`, OHNE
+ *          `implements`. Story-ID wird atomar aus `board/board.yaml`
+ *          (`next_story_id`) allokiert + hochgezählt (inkl. paralleler Aufrufe,
+ *          In-Process-Mutex). Validierung: leerer/zu langer Titel, Titel/Body mit
+ *          Steuerzeichen → `invalid-title`/`invalid-body` (kein Schreiben).
+ *   AC7 — Audit ist Router-Verantwortung (`ideasRouter.test.js`), hier nicht
+ *          direkt testbar (BoardWriter kennt keinen AuditStore) — Note only.
+ *   AC8 — Atomarer Write (tmp+rename, 0600) für Story-Datei UND board.yaml-
+ *          Zähler-Update; Pfad-/Slug-Sicherheit (kein Traversal, gleiche
+ *          `_resolveProjectPath`-Schranke wie `setBlocked`); kein anderer
+ *          Board-Schreibpfad (BoardAggregator bleibt read-only, s.u. Test).
  *
  * Strategy:
  *   - `patchTopLevelFields` (reine Funktion, kein IO) wird direkt mit String-
@@ -41,7 +55,10 @@ import {
   BoardWriterError,
   patchTopLevelFields,
   ALLOWED_FIELDS,
+  IDEA_TITLE_MAX_LENGTH,
+  IDEA_BODY_MAX_LENGTH,
 } from '../src/BoardWriter.js';
+import { parseYaml } from '../src/BoardAggregator.js';
 
 // ── patchTopLevelFields (pure, no IO) ─────────────────────────────────────────
 
@@ -435,5 +452,367 @@ describe('AC8 — BoardWriter.setBlocked (real fs)', () => {
     const src = await readFile(new URL('../src/BoardWriter.js', import.meta.url), 'utf8');
     expect(src).not.toMatch(/new BoardAggregator/);
     expect(src).toMatch(/import \{ parseBoardRoots \} from '\.\/BoardAggregator\.js'/);
+  });
+});
+
+// ── BoardWriter.createIdea (real fs, tmp-Verzeichnis) — ideen-inbox AC3/AC8 ──
+
+describe('ideen-inbox AC3/AC8 — BoardWriter.createIdea (real fs)', () => {
+  let boardRootsDir;
+  let projectDir;
+  let boardDir;
+  let storiesDir;
+  let boardYamlPath;
+
+  beforeEach(async () => {
+    boardRootsDir = await mkdtemp(join(tmpdir(), 'boardwriter-idea-test-'));
+    projectDir = join(boardRootsDir, 'myproject');
+    boardDir = join(projectDir, 'board');
+    storiesDir = join(boardDir, 'stories');
+    boardYamlPath = join(boardDir, 'board.yaml');
+    await mkdir(storiesDir, { recursive: true });
+    await writeFile(
+      boardYamlPath,
+      'schema_version: 1\nproject_slug: myproject\nnext_feature_id: 1\nnext_story_id: 42\n',
+      'utf8',
+    );
+  });
+
+  afterEach(async () => {
+    await rm(boardRootsDir, { recursive: true, force: true });
+  });
+
+  function makeWriter() {
+    return new BoardWriter({ boardRootsEnv: boardRootsDir });
+  }
+
+  it('happy path (nur Titel): legt S-42.yaml mit status Idee an, zählt next_story_id hoch, KEIN spec/implements', async () => {
+    const writer = makeWriter();
+    const { storyId, filePath } = await writer.createIdea({
+      projectSlug: 'myproject',
+      title: 'Eine schnelle Idee',
+      now: '2026-07-01T10:00:00.000Z',
+    });
+
+    expect(storyId).toBe('S-42');
+    expect(filePath.endsWith(join('myproject', 'board', 'stories', 'S-42.yaml'))).toBe(true);
+
+    const raw = await readFile(filePath, 'utf8');
+    expect(raw).toContain('id: S-42');
+    expect(raw).toContain('status: Idee');
+    expect(raw).toContain("title: 'Eine schnelle Idee'");
+    expect(raw).toContain("created_at: '2026-07-01T10:00:00.000Z'");
+    expect(raw).toContain("updated_at: '2026-07-01T10:00:00.000Z'");
+    expect(raw).not.toMatch(/^spec:/m);
+    expect(raw).not.toMatch(/^implements:/m);
+    expect(raw).not.toMatch(/^notes:/m); // kein Body → kein notes-Key
+
+    const boardRaw = await readFile(boardYamlPath, 'utf8');
+    expect(boardRaw).toContain('next_story_id: 43');
+    expect(boardRaw).toContain('schema_version: 1'); // übrige Felder erhalten
+    expect(boardRaw).toContain('project_slug: myproject');
+  });
+
+  it('mit Body: schreibt notes als mehrzeiligen Literal-Block-Skalar', async () => {
+    const writer = makeWriter();
+    const { filePath } = await writer.createIdea({
+      projectSlug: 'myproject',
+      title: 'Idee mit Stichworten',
+      body: 'Erste Zeile\nZweite Zeile\n\nAbsatz nach Leerzeile',
+      now: '2026-07-01T10:00:00.000Z',
+    });
+
+    const raw = await readFile(filePath, 'utf8');
+    expect(raw).toContain('notes: |\n  Erste Zeile\n  Zweite Zeile\n\n  Absatz nach Leerzeile');
+  });
+
+  it('whitespace-only Body wird wie "kein Body" behandelt (kein notes-Key)', async () => {
+    const writer = makeWriter();
+    const { filePath } = await writer.createIdea({
+      projectSlug: 'myproject',
+      title: 'Idee ohne echten Body',
+      body: '   \n  \n',
+      now: '2026-07-01T10:00:00.000Z',
+    });
+
+    const raw = await readFile(filePath, 'utf8');
+    expect(raw).not.toMatch(/^notes:/m);
+  });
+
+  it('escaped eingebettete Single-Quotes im Titel (YAML-Standard-Escaping)', async () => {
+    const writer = makeWriter();
+    const { filePath } = await writer.createIdea({
+      projectSlug: 'myproject',
+      title: "Owner's Idee — kann's losgehen",
+      now: '2026-07-01T10:00:00.000Z',
+    });
+
+    const raw = await readFile(filePath, 'utf8');
+    expect(raw).toContain("title: 'Owner''s Idee — kann''s losgehen'");
+  });
+
+  it('zwei aufeinanderfolgende Anlagen erhalten fortlaufende, unterschiedliche IDs', async () => {
+    const writer = makeWriter();
+    const first = await writer.createIdea({ projectSlug: 'myproject', title: 'Erste Idee' });
+    const second = await writer.createIdea({ projectSlug: 'myproject', title: 'Zweite Idee' });
+
+    expect(first.storyId).toBe('S-42');
+    expect(second.storyId).toBe('S-43');
+
+    const boardRaw = await readFile(boardYamlPath, 'utf8');
+    expect(boardRaw).toContain('next_story_id: 44');
+  });
+
+  it('parallele Anlagen (Promise.all) erhalten JEDE eine eindeutige ID — kein Race auf next_story_id', async () => {
+    const writer = makeWriter();
+    const results = await Promise.all(
+      Array.from({ length: 8 }, (_, i) => writer.createIdea({ projectSlug: 'myproject', title: `Idee ${i}` })),
+    );
+
+    const ids = results.map((r) => r.storyId);
+    expect(new Set(ids).size).toBe(8); // alle eindeutig
+    expect(ids.sort()).toEqual(
+      Array.from({ length: 8 }, (_, i) => `S-${42 + i}`).sort(),
+    );
+
+    const boardRaw = await readFile(boardYamlPath, 'utf8');
+    expect(boardRaw).toContain('next_story_id: 50');
+
+    // Jede Datei existiert genau einmal, keine .tmp-Reste
+    const entries = await readdir(storiesDir);
+    expect(entries.filter((n) => n.includes('.tmp.'))).toEqual([]);
+    expect(entries.sort()).toEqual(ids.map((id) => `${id}.yaml`).sort());
+  });
+
+  it('atomar: keine .tmp-Datei bleibt in stories/ oder board/ zurück nach erfolgreichem Schreiben', async () => {
+    const writer = makeWriter();
+    await writer.createIdea({ projectSlug: 'myproject', title: 'Idee' });
+
+    const storyEntries = await readdir(storiesDir);
+    expect(storyEntries.filter((n) => n.includes('.tmp.'))).toEqual([]);
+
+    const boardEntries = await readdir(boardDir);
+    expect(boardEntries.filter((n) => n.includes('.tmp.'))).toEqual([]);
+  });
+
+  it('restriktive Permissions: neue Story-Datei hat Mode 0600', async () => {
+    const writer = makeWriter();
+    const { filePath } = await writer.createIdea({ projectSlug: 'myproject', title: 'Idee' });
+    const st = await stat(filePath);
+    expect(st.mode & 0o777).toBe(0o600);
+  });
+
+  it('leerer/whitespace-only Titel → invalid-title, kein Schreiben, next_story_id unverändert', async () => {
+    const writer = makeWriter();
+    await expect(
+      writer.createIdea({ projectSlug: 'myproject', title: '   ' }),
+    ).rejects.toMatchObject({ errorClass: 'invalid-title' });
+
+    const boardRaw = await readFile(boardYamlPath, 'utf8');
+    expect(boardRaw).toContain('next_story_id: 42'); // unverändert
+    const storyEntries = await readdir(storiesDir);
+    expect(storyEntries).toEqual([]);
+  });
+
+  it('Titel über Längenlimit → invalid-title', async () => {
+    const writer = makeWriter();
+    await expect(
+      writer.createIdea({ projectSlug: 'myproject', title: 'x'.repeat(IDEA_TITLE_MAX_LENGTH + 1) }),
+    ).rejects.toMatchObject({ errorClass: 'invalid-title' });
+  });
+
+  it('Titel mit eingebettetem Zeilenumbruch → invalid-title', async () => {
+    const writer = makeWriter();
+    await expect(
+      writer.createIdea({ projectSlug: 'myproject', title: 'Zeile1\nZeile2' }),
+    ).rejects.toMatchObject({ errorClass: 'invalid-title' });
+  });
+
+  it('Body über Längenlimit → invalid-body', async () => {
+    const writer = makeWriter();
+    await expect(
+      writer.createIdea({
+        projectSlug: 'myproject',
+        title: 'Idee',
+        body: 'x'.repeat(IDEA_BODY_MAX_LENGTH + 1),
+      }),
+    ).rejects.toMatchObject({ errorClass: 'invalid-body' });
+  });
+
+  it('Body mit eingebettetem Steuerzeichen (nicht \\n) → invalid-body', async () => {
+    const writer = makeWriter();
+    await expect(
+      writer.createIdea({ projectSlug: 'myproject', title: 'Idee', body: 'Zeile1\x00Zeile2' }),
+    ).rejects.toMatchObject({ errorClass: 'invalid-body' });
+  });
+
+  it('unbekanntes projectSlug → project-not-found, kein Crash', async () => {
+    const writer = makeWriter();
+    await expect(
+      writer.createIdea({ projectSlug: 'does-not-exist', title: 'Idee' }),
+    ).rejects.toMatchObject({ errorClass: 'project-not-found' });
+  });
+
+  it('Pfad-Traversal im projectSlug ("..") → invalid-slug, keine Auflösung außerhalb BOARD_ROOTS', async () => {
+    const writer = makeWriter();
+    await expect(
+      writer.createIdea({ projectSlug: '../../etc', title: 'Idee' }),
+    ).rejects.toMatchObject({ errorClass: 'invalid-slug' });
+  });
+
+  it('Symlink-Flucht: projectSlug zeigt via Symlink aus BOARD_ROOTS heraus → project-not-found', async () => {
+    const outsideDir = await mkdtemp(join(tmpdir(), 'boardwriter-idea-outside-'));
+    try {
+      const outsideStories = join(outsideDir, 'board', 'stories');
+      await mkdir(outsideStories, { recursive: true });
+      await writeFile(
+        join(outsideDir, 'board', 'board.yaml'),
+        'schema_version: 1\nproject_slug: outside\nnext_feature_id: 1\nnext_story_id: 1\n',
+        'utf8',
+      );
+
+      const linkPath = join(boardRootsDir, 'evil-link');
+      await symlink(outsideDir, linkPath, 'dir');
+
+      const writer = makeWriter();
+      await expect(
+        writer.createIdea({ projectSlug: 'evil-link', title: 'Idee' }),
+      ).rejects.toMatchObject({ errorClass: 'project-not-found' });
+
+      const outsideEntries = await readdir(outsideStories);
+      expect(outsideEntries).toEqual([]); // nichts wurde außerhalb der Schranke geschrieben
+    } finally {
+      await rm(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  it('fehlendes/ungültiges next_story_id in board.yaml → invalid-board-yaml, kein Schreiben', async () => {
+    await writeFile(boardYamlPath, 'schema_version: 1\nproject_slug: myproject\n', 'utf8');
+    const writer = makeWriter();
+    await expect(
+      writer.createIdea({ projectSlug: 'myproject', title: 'Idee' }),
+    ).rejects.toMatchObject({ errorClass: 'invalid-board-yaml' });
+
+    const storyEntries = await readdir(storiesDir);
+    expect(storyEntries).toEqual([]);
+  });
+
+  it('Kollisions-Guard (S-199 Iteration 2 — Retry statt stillem Überschreiben): eine vorab von "fremder Hand" ' +
+    'angelegte S-42.yaml (z.B. das parallele board-CLI) führt NICHT zu einem Fehler und überschreibt sie NICHT ' +
+    '— stattdessen wird next_story_id neu gelesen und mit S-43 erneut versucht', async () => {
+    await writeFile(join(storiesDir, 'S-42.yaml'), 'id: S-42\nstatus: To Do\ntitle: Fremde Story\n', 'utf8');
+    const writer = makeWriter();
+
+    const { storyId, filePath } = await writer.createIdea({ projectSlug: 'myproject', title: 'Meine Idee' });
+
+    expect(storyId).toBe('S-43'); // S-42 war belegt — nächste freie ID
+    expect(filePath.endsWith('S-43.yaml')).toBe(true);
+
+    // Die fremde S-42.yaml wurde NICHT angerührt/überschrieben.
+    const foreignRaw = await readFile(join(storiesDir, 'S-42.yaml'), 'utf8');
+    expect(foreignRaw).toBe('id: S-42\nstatus: To Do\ntitle: Fremde Story\n');
+
+    // Die eigene Idee wurde tatsächlich geschrieben, nicht verloren.
+    const ownRaw = await readFile(filePath, 'utf8');
+    expect(ownRaw).toContain("title: 'Meine Idee'");
+
+    const boardRaw = await readFile(boardYamlPath, 'utf8');
+    expect(boardRaw).toContain('next_story_id: 44'); // zweimal hochgezählt (42 verbraucht per Kollision, 43 erfolgreich)
+  });
+
+  it('Kollisions-Guard: bricht nach MAX_ID_ALLOCATION_RETRIES Versuchen mit id-allocation-exhausted ab, ' +
+    'statt endlos zu retryen, wenn JEDE ID kollidiert', async () => {
+    // Simuliert eine pathologische Dauer-Kollision: jeder exklusive Create schlägt fehl.
+    const writer = new BoardWriter({
+      boardRootsEnv: boardRootsDir,
+      fsDeps: {
+        link: async () => {
+          const err = new Error('EEXIST: file already exists');
+          err.code = 'EEXIST';
+          throw err;
+        },
+      },
+    });
+
+    await expect(
+      writer.createIdea({ projectSlug: 'myproject', title: 'Idee' }),
+    ).rejects.toMatchObject({ errorClass: 'id-allocation-exhausted' });
+
+    // Kein .tmp-Rest im Stories-Verzeichnis (Cleanup nach jedem gescheiterten Versuch).
+    const entries = await readdir(storiesDir);
+    expect(entries.filter((n) => n.includes('.tmp.'))).toEqual([]);
+  });
+
+  it('Cross-Prozess-Race (S-199 Iteration 2): ZWEI unabhängige BoardWriter-Instanzen (simuliert zwei ' +
+    'Prozesse — z.B. dev-gui-Server + externes board-CLI) lesen denselben next_story_id-Wert NAHEZU ' +
+    'gleichzeitig — keine der beiden Ideen geht verloren, keine doppelt vergebene ID, keine still ' +
+    'überschriebene Story-Datei', async () => {
+    // Künstliche Verzögerung NUR beim Lesen von board.yaml erzwingt echtes
+    // Interleaving zwischen den zwei unabhängigen Instanzen (jede mit eigenem
+    // In-Process-Mutex — der Mutex schützt hier NICHTS, weil es zwei separate
+    // BoardWriter-Objekte sind, genau wie Server-Prozess + CLI-Prozess).
+    function delayedReadFsDeps() {
+      return {
+        readFile: async (p, enc) => {
+          const raw = await readFile(p, enc);
+          if (p === boardYamlPath) {
+            await new Promise((resolve) => setTimeout(resolve, 15));
+          }
+          return raw;
+        },
+      };
+    }
+
+    const writerA = new BoardWriter({ boardRootsEnv: boardRootsDir, fsDeps: delayedReadFsDeps() });
+    const writerB = new BoardWriter({ boardRootsEnv: boardRootsDir, fsDeps: delayedReadFsDeps() });
+
+    const [resultA, resultB] = await Promise.all([
+      writerA.createIdea({ projectSlug: 'myproject', title: 'Idee von Prozess A' }),
+      writerB.createIdea({ projectSlug: 'myproject', title: 'Idee von Prozess B' }),
+    ]);
+
+    // Keine doppelt vergebene ID.
+    expect(resultA.storyId).not.toBe(resultB.storyId);
+    expect(resultA.filePath).not.toBe(resultB.filePath);
+
+    // BEIDE Ideen sind tatsächlich vorhanden — keine wurde still überschrieben.
+    const rawA = await readFile(resultA.filePath, 'utf8');
+    const rawB = await readFile(resultB.filePath, 'utf8');
+    expect(rawA).toContain("title: 'Idee von Prozess A'");
+    expect(rawB).toContain("title: 'Idee von Prozess B'");
+
+    const entries = await readdir(storiesDir);
+    expect(entries.sort()).toEqual([resultA.filePath, resultB.filePath].map((fp) => fp.split('/').pop()).sort());
+    expect(entries.filter((n) => n.includes('.tmp.'))).toEqual([]);
+  });
+
+  it('default now: setzt created_at/updated_at auf einen plausiblen ISO-Zeitstempel wenn now nicht übergeben wird', async () => {
+    const writer = makeWriter();
+    const before = Date.now();
+    const { filePath } = await writer.createIdea({ projectSlug: 'myproject', title: 'Idee' });
+    const after = Date.now();
+
+    const raw = await readFile(filePath, 'utf8');
+    const m = raw.match(/^created_at: '([^']+)'$/m);
+    expect(m).not.toBeNull();
+    const ts = Date.parse(m[1]);
+    expect(ts).toBeGreaterThanOrEqual(before - 1000);
+    expect(ts).toBeLessThanOrEqual(after + 1000);
+  });
+
+  it('Apostroph-Round-Trip (S-199 Iteration 2): Titel mit eingebettetem Apostroph wird beim Lesen über ' +
+    'BoardAggregator.parseYaml korrekt zurück-unescaped (nicht als doppelter Apostroph)', async () => {
+    const writer = makeWriter();
+    const { filePath } = await writer.createIdea({
+      projectSlug: 'myproject',
+      title: "Nutzer's Idee",
+      now: '2026-07-01T10:00:00.000Z',
+    });
+    const raw = await readFile(filePath, 'utf8');
+    // Geschrieben mit korrektem YAML-Standard-Escaping (verdoppelt).
+    expect(raw).toContain("title: 'Nutzer''s Idee'");
+    // Aber über den TATSÄCHLICHEN Read-Parser zurückgelesen: unescaped.
+    const parsed = parseYaml(raw);
+    expect(parsed.title).toBe("Nutzer's Idee");
   });
 });

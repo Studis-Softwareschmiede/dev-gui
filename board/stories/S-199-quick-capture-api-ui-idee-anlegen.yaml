@@ -1,7 +1,8 @@
 id: S-199
 parent: F-030
-title: 'Quick-Capture: Ideen-Button + Modal auf Arbeiten-Seite -> Idee anlegen (status Idee, ohne Spec)'
-status: To Do
+title: 'Quick-Capture: Ideen-Button + Modal auf Arbeiten-Seite -> Idee anlegen (status
+  Idee, ohne Spec)'
+status: Done
 priority: P2
 spec: docs/specs/ideen-inbox.md
 implements:
@@ -24,25 +25,41 @@ estimate_note: 'L-Heuristik (requirement v2): n_ac=4, n_comp~5 (BoardWriter-Crea
   js|balanced|L (ep=5.0, n=5). confidence low — neuer atomarer Board-Create-Pfad,
   ggf. API vs. UI splitten.'
 confidence: low
-branch: null
+branch: feat/S-199-idee-quick-capture
 pr: null
 blocked_reason: null
 created_at: '2026-06-30T20:27:38Z'
-updated_at: '2026-06-30T20:27:38Z'
-done_at: null
-notes: |
-  Quick-Capture: vage Idee in Sekunden reinwerfen. UI (client/src/BoardView.jsx /
+updated_at: '2026-07-01T08:27:15Z'
+done_at: '2026-07-01T08:27:15Z'
+notes: 'Quick-Capture: vage Idee in Sekunden reinwerfen. UI (client/src/BoardView.jsx
+  /
+
   "Arbeiten"-Seite): sichtbarer Button "Idee" -> Klick oeffnet ein kleines Fenster
+
   (Modal) mit Eingabefeld fuer freie Stichwort-Notizen: Einzeiler-Titel (Pflicht)
+
   + optionaler MEHRZEILIGER Stichwort-Body. Bewusst minimal, KEIN Spec/AC-Zwang.
+
   Speichern -> POST /api/board/projects/:slug/ideas {title, body?} -> 201 {storyId}.
+
   Legt ueber BoardWriter (CREATE-Pfad, NEU; Boundary aus S-191) board/stories/
+
   <id>.yaml mit status: Idee, title, optional notes(Body) an -- OHNE spec, OHNE
+
   implements. Story-ID atomar aus board/board.yaml (next_story_id) allokieren +
+
   hochzaehlen. Token-frei: KEIN Agent. Validierung: title getrimmt nicht-leer +
+
   Laengenlimit -> 400 {field,message}; leerer Titel -> Speichern deaktiviert.
+
   Nach 201 erscheint die Idee SOFORT als Karte in der "Idee"-Spalte (ganz links;
+
   Re-Fetch/Rescan). Audit (AC7) je Anlage. NFR (AC8): atomarer Write (tmp+rename),
+
   Pfad-/Slug-Sicherheit (kein Traversal aus title), BoardAggregator read-only,
+
   kein anderer Board-Schreibpfad. Wiederverwenden: BoardWriter (S-191),
+
   boardRouter, AuditStore. Setzt S-198 (Status Idee bekannt) voraus.
+
+  '
