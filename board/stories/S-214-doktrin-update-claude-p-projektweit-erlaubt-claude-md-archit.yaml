@@ -2,7 +2,7 @@ id: S-214
 parent: F-039
 title: 'Doktrin-Update: claude -p projektweit erlaubt (CLAUDE.md + architecture.md
   ADR-016, Ausnahme 5)'
-status: To Do
+status: In Progress
 priority: P1
 spec: docs/specs/idea-specify-chat.md
 implements:
@@ -20,11 +20,11 @@ estimate_note: 'S-Heuristik: n_ac=1 (AC12), n_comp~2 (.claude/CLAUDE.md + docs/a
   medium. Docs-only, kein Laufzeitcode. Sollte ZUERST landen (unblockt claude -p Code
   ohne Drift-Gate-Fail).'
 confidence: medium
-branch: null
+branch: feat/S-214-doktrin-update-claude-p
 pr: null
 blocked_reason: null
 created_at: '2026-07-01T15:25:42Z'
-updated_at: '2026-07-01T15:28:17Z'
+updated_at: '2026-07-01T15:34:34Z'
 done_at: null
 notes: 'Spec: docs/specs/idea-specify-chat.md AC12 (Doktrin-Anpassung, Drift-Gate).
   NUR docs/.claude, KEIN Laufzeitcode.
