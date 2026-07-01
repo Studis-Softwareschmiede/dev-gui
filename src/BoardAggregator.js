@@ -594,6 +594,10 @@ export class BoardAggregator {
           implements: Array.isArray(data.implements) ? data.implements.map(String) : [],
           depends: Array.isArray(data.depends) ? data.depends.map(String).filter(Boolean) : [],
           blocked_reason: data.blocked_reason != null ? String(data.blocked_reason) : null,
+          // ideen-inbox AC5: Stichwort-Body einer Idee (aus createIdea()/S-199 notes-Feld) —
+          // wird als Gesprächs-Einstieg für die Besprechungs-Session (POST .../discuss)
+          // wiederverwendet. null wenn kein notes-Feld gesetzt ist.
+          notes: data.notes != null ? String(data.notes) : null,
           dispo_est: data.dispo_est ?? null,
           dispo_act: data.dispo_act ?? null,
           // taktgeber-nachtwaechter AC1: letzter Änderungszeitstempel (story.schema.json

@@ -1,8 +1,9 @@
 /**
  * BoardWriter — schmale, atomare Schreib-Boundary in board/stories/<id>.yaml (S-191, AC8;
- * erweitert um den Create-Pfad in S-199, ideen-inbox AC3/AC4/AC7/AC8).
+ * erweitert um den Create-Pfad in S-199, ideen-inbox AC3/AC4/AC7/AC8; erweitert um den
+ * Resolve-Pfad in S-200, ideen-inbox AC6/AC8).
  *
- * Einziger Schreibpfad in Board-Dateien. Zwei Methoden, zwei enge Verträge:
+ * Einziger Schreibpfad in Board-Dateien. Drei Methoden, drei enge Verträge:
  *
  *   `setBlocked()` (Taktgeber-Eskalation, S-191) patcht eine BESTEHENDE Story-Datei
  *   und setzt AUSSCHLIESSLICH:
@@ -20,6 +21,23 @@
  *   `BoardWriter`-Instanz, damit zwei nahezu gleichzeitige Anlagen INNERHALB
  *   DIESES PROZESSES nie dieselbe `next_story_id` lesen, bevor die erste sie
  *   hochgezählt hat.
+ *
+ *   `resolveIdea()` (explizite Owner-Auflösung, S-200, ideen-inbox AC6) patcht
+ *   eine BESTEHENDE `Idee`-Story-Datei und setzt AUSSCHLIESSLICH:
+ *     - status              (→ immer der konstante Wert "Done")
+ *     - updated_at
+ *     - resolved_at
+ *     - resolved_story_ids  (optional — nur gesetzt wenn übergeben)
+ *     - resolved_note       (optional — nur gesetzt wenn übergeben)
+ *   `resolved_at`/`resolved_story_ids`/`resolved_note` existieren in einer frisch
+ *   über `createIdea()` angelegten Story-Datei noch NICHT als Top-Level-Schlüssel
+ *   (siehe Story-Schema, ideen-inbox.md) — `patchTopLevelFields()` wird daher mit
+ *   `{ allowAppend: true }` aufgerufen: fehlende Ziel-Felder werden ans Dateiende
+ *   angehängt statt (wie bei `setBlocked()`) einen `field-not-found`-Fehler zu
+ *   werfen. Nur `Idee`-Items sind auflösbar (Guard: aktueller `status`-Wert muss
+ *   exakt `'Idee'` sein) — ein bereits `Done`/aufgelöstes Item wirft
+ *   `not-resolvable` (Router mappt auf `400 { field: 'status' }`, kein zweites
+ *   `Done`, idempotenz-tolerant gegenüber Doppel-Klick).
  *
  *   **Cross-Prozess-Risiko (KORRIGIERT, S-199 Iteration 2):** `board/board.yaml`
  *   und `board/stories/` werden NICHT nur von dieser `BoardWriter`-Instanz
@@ -87,7 +105,17 @@ import { randomBytes } from 'node:crypto';
 import { parseBoardRoots } from './BoardAggregator.js';
 
 /** Die drei einzigen Felder, die `setBlocked()` jemals patcht (AC8). */
-export const ALLOWED_FIELDS = Object.freeze(['status', 'blocked_reason', 'updated_at']);
+export const ALLOWED_FIELDS = Object.freeze([
+  'status',
+  'blocked_reason',
+  'updated_at',
+  // ideen-inbox AC6/AC8 (S-200) — zusätzlich erlaubte Felder für `resolveIdea()`.
+  // Erweitert nur die Allowlist von `patchTopLevelFields()` — `setBlocked()` übergibt
+  // weiterhin ausschließlich seine eigenen drei Felder oben, unverändertes Verhalten.
+  'resolved_at',
+  'resolved_story_ids',
+  'resolved_note',
+]);
 
 /** Story-ID-Format (z.B. "S-191") — eng gefasst, kein Pfad-Zeichen erlaubt. */
 const STORY_ID_RE = /^[A-Za-z0-9_-]+$/;
@@ -131,6 +159,14 @@ const BODY_CONTROL_CHAR_RE = /[\x00-\x09\x0b\x0c\x0e-\x1f\x7f\u2028\u2029]/;
  * `next_story_id`-Zähler.
  */
 const MAX_ID_ALLOCATION_RETRIES = 10;
+
+/** Längenlimit für `resolved_note` (ideen-inbox AC6/AC8, S-200) — optionaler,
+ *  einzeiliger Verweis auf Spec/Kontext der Auflösung. */
+export const RESOLVED_NOTE_MAX_LENGTH = 500;
+
+/** Obergrenze für die Anzahl verlinkter Story-IDs bei `resolveIdea()` (ideen-inbox
+ *  AC6/AC8, S-200) — Schutz vor Riesen-Payloads, analog Titel-/Body-Limits. */
+export const RESOLVE_STORY_IDS_MAX_COUNT = 50;
 
 /**
  * Typisierter Fehler für alle BoardWriter-Fehlschläge.
@@ -180,18 +216,34 @@ function _yamlSingleQuote(value) {
 }
 
 /**
- * Formatiert den finalen Zeileninhalt für einen der drei erlaubten Felder.
- * `status` ist immer die kontrollierte Konstante "Blocked" (keine Sonderzeichen,
- * unquoted). `blocked_reason`/`updated_at` werden — konsistent mit bestehenden
- * gequoteten Feldern wie `created_at` im Schema — single-quoted geschrieben.
+ * Formatiert den finalen Zeileninhalt für eines der erlaubten Felder.
+ * `status` ist immer eine kontrollierte Konstante ("Blocked"/"Done", keine
+ * Sonderzeichen, unquoted). `resolved_story_ids` wird als bereits vorformatierter
+ * YAML-Flow-Sequence-String übergeben (`_formatResolvedStoryIds()`, z.B.
+ * `[S-201, S-202]`) — ebenfalls unquoted geschrieben. Alle übrigen Felder
+ * (`blocked_reason`/`updated_at`/`resolved_at`/`resolved_note`) werden —
+ * konsistent mit bestehenden gequoteten Feldern wie `created_at` im Schema —
+ * single-quoted geschrieben.
  *
  * @param {string} key
  * @param {string} value
  * @returns {string}
  */
 function _formatFieldValue(key, value) {
-  if (key === 'status') return String(value);
+  if (key === 'status' || key === 'resolved_story_ids') return String(value);
   return _yamlSingleQuote(value);
+}
+
+/**
+ * Formatiert eine Liste von Story-IDs als YAML-Flow-Sequence (ideen-inbox AC6,
+ * S-200) — z.B. `['S-201', 'S-202']` → `"[S-201, S-202]"`. IDs sind bereits
+ * gegen `STORY_ID_RE` geprüft (kein Sonderzeichen, kein Quoting nötig).
+ *
+ * @param {string[]} ids
+ * @returns {string}
+ */
+function _formatResolvedStoryIds(ids) {
+  return `[${ids.join(', ')}]`;
 }
 
 /**
@@ -208,12 +260,19 @@ function _formatFieldValue(key, value) {
  *
  * @param {string} content  Roher YAML-Inhalt der Story-Datei.
  * @param {Record<string, string>} fields  Map erlaubter Feldname → Roh-Wert (unquoted).
+ * @param {object} [options]
+ * @param {boolean} [options.allowAppend=false]  Wenn `true` (ideen-inbox AC6,
+ *   `resolveIdea()`, S-200): ein in `fields` genanntes Feld, das NICHT als
+ *   Top-Level-Schlüssel existiert, wird als NEUE Zeile ans Dateiende angehängt,
+ *   statt (Default-Verhalten, unverändert für `setBlocked()`) einen
+ *   `field-not-found`-Fehler zu werfen.
  * @returns {string} Gepatchter Inhalt (gleiche Trailing-Newline-Konvention wie der Input).
  * @throws {BoardWriterError} bei nicht erlaubtem Feld, fehlendem/doppeltem
- *   Top-Level-Schlüssel oder einem Feldwert mit eingebetteten Steuerzeichen
- *   (YAML-Line-Injection-Schutz, Defense-in-Depth auf der öffentlichen API-Grenze).
+ *   Top-Level-Schlüssel (außer bei `allowAppend: true`) oder einem Feldwert mit
+ *   eingebetteten Steuerzeichen (YAML-Line-Injection-Schutz, Defense-in-Depth
+ *   auf der öffentlichen API-Grenze).
  */
-export function patchTopLevelFields(content, fields) {
+export function patchTopLevelFields(content, fields, { allowAppend = false } = {}) {
   if (typeof content !== 'string') {
     throw new BoardWriterError('content muss ein String sein', 'invalid-content');
   }
@@ -259,8 +318,14 @@ export function patchTopLevelFields(content, fields) {
   if (current) segments.push(current);
 
   const foundKeys = new Set(segments.filter((s) => s.key).map((s) => s.key));
+  /** @type {string[]} Felder, die (nur bei allowAppend) ans Ende angehängt werden. */
+  const missingKeys = [];
   for (const key of Object.keys(fields)) {
     if (!foundKeys.has(key)) {
+      if (allowAppend) {
+        missingKeys.push(key);
+        continue;
+      }
       throw new BoardWriterError(
         `Feld '${key}' nicht als Top-Level-Schlüssel in der Story-Datei gefunden`,
         'field-not-found',
@@ -303,20 +368,31 @@ export function patchTopLevelFields(content, fields) {
     }
   }
 
+  // allowAppend (ideen-inbox AC6, resolveIdea(), S-200): Felder, die nicht als
+  // Top-Level-Schlüssel existierten, werden als neue Zeilen ans Ende angehängt —
+  // in der Reihenfolge, in der sie in `fields` übergeben wurden.
+  for (const key of missingKeys) {
+    outLines.push(`${key}: ${_formatFieldValue(key, fields[key])}`);
+  }
+
   return outLines.join('\n') + (hasTrailingNewline ? '\n' : '');
 }
 
 /**
- * Liest den Top-Level-`id:`-Wert aus rohem YAML-Inhalt (ohne vollen Parse).
- * Strippt umschließende einfache/doppelte Anführungszeichen.
+ * Liest den Wert eines beliebigen Top-Level-Schlüssels aus rohem YAML-Inhalt
+ * (ohne vollen Parse). Strippt umschließende einfache/doppelte Anführungszeichen.
+ * Nur für einzeilige Skalar-Werte gedacht (z.B. `id`, `status`) — KEIN Block-
+ * Skalar-/Listen-Support (siehe `parseYaml` in BoardAggregator.js für den vollen
+ * Read-Parser).
  *
  * @param {string} content
+ * @param {string} key
  * @returns {string|null}
  */
-function _extractTopLevelId(content) {
+function _extractTopLevelField(content, key) {
   if (typeof content !== 'string') return null;
   for (const line of content.split('\n')) {
-    if (_topLevelKeyOf(line) !== 'id') continue;
+    if (_topLevelKeyOf(line) !== key) continue;
     let v = line.slice(line.indexOf(':') + 1).trim();
     if ((v.startsWith("'") && v.endsWith("'")) || (v.startsWith('"') && v.endsWith('"'))) {
       v = v.slice(1, -1);
@@ -324,6 +400,15 @@ function _extractTopLevelId(content) {
     return v;
   }
   return null;
+}
+
+/**
+ * Liest den Top-Level-`id:`-Wert aus rohem YAML-Inhalt.
+ * @param {string} content
+ * @returns {string|null}
+ */
+function _extractTopLevelId(content) {
+  return _extractTopLevelField(content, 'id');
 }
 
 // ── BoardWriter ────────────────────────────────────────────────────────────
@@ -403,6 +488,80 @@ export class BoardWriter {
       blocked_reason: blockedReason.trim(),
       updated_at: updatedAt,
     });
+
+    return { filePath };
+  }
+
+  /**
+   * Explizite Auflösung eines `Idee`-Items (ideen-inbox AC6/AC8, S-200): patcht
+   * eine BESTEHENDE Story-Datei mit `status: Idee` auf `status: Done` und
+   * ergänzt `resolved_at` (+ optional `resolved_story_ids`/`resolved_note`).
+   * `updated_at` wird ebenfalls aktualisiert (Konsistenz mit `setBlocked()`).
+   *
+   * Guard: nur Items mit aktuellem `status: Idee` sind auflösbar — ein bereits
+   * `Done`/aufgelöstes (oder aus anderem Grund nicht-`Idee`) Item wirft
+   * `not-resolvable` (idempotenz-tolerant gegenüber Doppel-Klick, KEIN zweites
+   * `Done`, Edge-Case ideen-inbox.md). Das bloße Öffnen der Besprechung
+   * (`discuss()`, AC5) ruft diese Methode NIE auf — die Auflösung ist eine
+   * separate, explizite Owner-Aktion (dieser Router-Endpunkt wird nie aus dem
+   * `discuss`-Pfad heraus aufgerufen).
+   *
+   * @param {object} params
+   * @param {string} params.projectSlug   Repo-Verzeichnisname unter einem
+   *   BOARD_ROOTS-Eintrag (kein Pfad — siehe Modul-Doku Pfad-Sicherheit).
+   * @param {string} params.storyId       Story-ID des Idee-Items, z.B. "S-200".
+   * @param {string[]} [params.resolvedStoryIds]  IDs der erzeugten To-Do-Story(s)
+   *   (bereits validiert — `validateResolveInput()`), optional.
+   * @param {string|null} [params.resolvedNote]  Optionaler einzeiliger Verweis
+   *   (bereits validiert), optional.
+   * @param {string} [params.now]  ISO-8601-Zeitstempel für `updated_at`/`resolved_at`
+   *   (Default: `new Date().toISOString()`; injizierbar für deterministische Tests).
+   * @returns {Promise<{ filePath: string }>}
+   * @throws {BoardWriterError}
+   */
+  async resolveIdea({ projectSlug, storyId, resolvedStoryIds = [], resolvedNote = null, now }) {
+    const timestamp = now ?? new Date().toISOString();
+    if (typeof timestamp !== 'string' || !ISO_TIMESTAMP_RE.test(timestamp)) {
+      throw new BoardWriterError(`Ungültiges Zeitstempel-Format: '${timestamp}'`, 'invalid-value');
+    }
+
+    const repoPath = await this._resolveProjectPath(projectSlug);
+    const storiesDir = join(repoPath, 'board', 'stories');
+    const filePath = await this._findStoryFile(storiesDir, storyId);
+
+    let raw;
+    try {
+      raw = await this.#fsDeps.readFile(filePath, 'utf8');
+    } catch (err) {
+      throw new BoardWriterError(`Story-Datei nicht lesbar: ${filePath} (${err.message})`, 'read-failed');
+    }
+
+    const currentStatus = _extractTopLevelField(raw, 'status');
+    if (currentStatus !== 'Idee') {
+      throw new BoardWriterError(
+        `Story '${storyId}' ist nicht (mehr) auflösbar (aktueller Status: '${currentStatus ?? 'unbekannt'}')`,
+        'not-resolvable',
+      );
+    }
+
+    /** @type {Record<string, string>} */
+    const fields = {
+      status: 'Done',
+      updated_at: timestamp,
+      resolved_at: timestamp,
+    };
+    if (Array.isArray(resolvedStoryIds) && resolvedStoryIds.length > 0) {
+      fields.resolved_story_ids = _formatResolvedStoryIds(resolvedStoryIds);
+    }
+    if (resolvedNote) {
+      fields.resolved_note = resolvedNote;
+    }
+
+    // allowAppend: resolved_at/resolved_story_ids/resolved_note existieren in
+    // einem frisch über createIdea() angelegten Item noch NICHT als Top-Level-
+    // Schlüssel — anhängen statt field-not-found zu werfen (siehe Modul-Doku).
+    const patched = patchTopLevelFields(raw, fields, { allowAppend: true });
+    await this._atomicWrite(filePath, patched);
 
     return { filePath };
   }
@@ -810,6 +969,65 @@ export function validateIdeaInput({ title, body, now }) {
   }
 
   return { trimmedTitle, normalizedBody, timestamp };
+}
+
+/**
+ * Reine Eingabe-Validierung für `resolveIdea` (ideen-inbox AC6/AC8, S-200) —
+ * kein IO, keine Instanz nötig. Vom Router (`boardRouter.js`) VOR dem
+ * Audit-Eintrag wiederverwendet (Audit-First — analog `validateIdeaInput`).
+ *
+ * @param {object} [params]
+ * @param {unknown} [params.resolvedStoryIds]  Optionales Array von Story-IDs.
+ * @param {unknown} [params.resolvedNote]  Optionaler einzeiliger Verweis.
+ * @returns {{ resolvedStoryIds: string[], resolvedNote: string|null }}
+ * @throws {BoardWriterError} `invalid-story-ids` bzw. `invalid-note`.
+ */
+export function validateResolveInput({ resolvedStoryIds, resolvedNote } = {}) {
+  const normalizedIds = [];
+  if (resolvedStoryIds != null) {
+    if (!Array.isArray(resolvedStoryIds)) {
+      throw new BoardWriterError('resolved_story_ids muss ein Array sein', 'invalid-story-ids');
+    }
+    if (resolvedStoryIds.length > RESOLVE_STORY_IDS_MAX_COUNT) {
+      throw new BoardWriterError(
+        `resolved_story_ids überschreitet Längenlimit (${RESOLVE_STORY_IDS_MAX_COUNT})`,
+        'invalid-story-ids',
+      );
+    }
+    for (const raw of resolvedStoryIds) {
+      if (typeof raw !== 'string' || !STORY_ID_RE.test(raw.trim())) {
+        throw new BoardWriterError(
+          `Ungültige Story-ID in resolved_story_ids: '${raw}'`,
+          'invalid-story-ids',
+        );
+      }
+      normalizedIds.push(raw.trim());
+    }
+  }
+
+  let normalizedNote = null;
+  if (resolvedNote != null) {
+    if (typeof resolvedNote !== 'string') {
+      throw new BoardWriterError('resolved_note muss ein String sein', 'invalid-note');
+    }
+    const trimmed = resolvedNote.trim();
+    // eslint-disable-next-line no-control-regex
+    if (/[\x00-\x1f\x7f\u2028\u2029]/.test(trimmed)) {
+      throw new BoardWriterError(
+        'resolved_note darf keine Steuerzeichen/Zeilenumbrüche enthalten',
+        'invalid-note',
+      );
+    }
+    if (trimmed.length > RESOLVED_NOTE_MAX_LENGTH) {
+      throw new BoardWriterError(
+        `resolved_note überschreitet Längenlimit (${RESOLVED_NOTE_MAX_LENGTH})`,
+        'invalid-note',
+      );
+    }
+    normalizedNote = trimmed === '' ? null : trimmed;
+  }
+
+  return { resolvedStoryIds: normalizedIds, resolvedNote: normalizedNote };
 }
 
 /**

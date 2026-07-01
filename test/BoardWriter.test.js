@@ -1,5 +1,5 @@
 /**
- * BoardWriter.test.js — Unit-/Integrationstests für BoardWriter (S-191, erweitert S-199).
+ * BoardWriter.test.js — Unit-/Integrationstests für BoardWriter (S-191, erweitert S-199, S-200).
  *
  * Covers (taktgeber-nachtwaechter):
  *   AC8 — Schmale Schreib-Boundary in board/stories/<id>.yaml: setzt
@@ -32,6 +32,18 @@
  *          `_resolveProjectPath`-Schranke wie `setBlocked`); kein anderer
  *          Board-Schreibpfad (BoardAggregator bleibt read-only, s.u. Test).
  *
+ * Covers (ideen-inbox, S-200 — Resolve-Pfad):
+ *   AC6 — `resolveIdea()`: patcht eine bestehende `status: Idee`-Story-Datei auf
+ *          `status: Done` + `resolved_at` (+ optional resolved_story_ids/
+ *          resolved_note) — Felder existieren in einer frisch angelegten
+ *          Idee-Datei NICHT und werden ans Dateiende angehängt (`allowAppend`).
+ *          Bereits `Done`/nicht-`Idee` → `not-resolvable` (kein zweites `Done`,
+ *          idempotenz-tolerant). `validateResolveInput()`: Story-ID-Format,
+ *          Längenlimit resolved_story_ids/resolved_note, Steuerzeichen-Ablehnung.
+ *   AC8 — Atomarer Write (tmp+rename); übrige Felder byte-genau erhalten;
+ *          `patchTopLevelFields({ allowAppend: true })`-Pfad getrennt von
+ *          `setBlocked()`s striktem Default-Verhalten (field-not-found) getestet.
+ *
  * Strategy:
  *   - `patchTopLevelFields` (reine Funktion, kein IO) wird direkt mit String-
  *     Fixtures getestet — deckt Quoting, Block-Skalare, Schlüssel-Reihenfolge,
@@ -57,6 +69,9 @@ import {
   ALLOWED_FIELDS,
   IDEA_TITLE_MAX_LENGTH,
   IDEA_BODY_MAX_LENGTH,
+  validateResolveInput,
+  RESOLVED_NOTE_MAX_LENGTH,
+  RESOLVE_STORY_IDS_MAX_COUNT,
 } from '../src/BoardWriter.js';
 import { parseYaml } from '../src/BoardAggregator.js';
 
@@ -170,8 +185,15 @@ describe('AC8 — patchTopLevelFields (pure)', () => {
     }
   });
 
-  it('ALLOWED_FIELDS enthält exakt status, blocked_reason, updated_at', () => {
-    expect(ALLOWED_FIELDS).toEqual(['status', 'blocked_reason', 'updated_at']);
+  it('ALLOWED_FIELDS enthält exakt status, blocked_reason, updated_at, resolved_at, resolved_story_ids, resolved_note (ideen-inbox AC6/AC8, S-200)', () => {
+    expect(ALLOWED_FIELDS).toEqual([
+      'status',
+      'blocked_reason',
+      'updated_at',
+      'resolved_at',
+      'resolved_story_ids',
+      'resolved_note',
+    ]);
   });
 
   it('erhält eine Leerzeile unmittelbar nach dem gepatchten Feld (gehört zur Formatierung, nicht zum Feld-Segment)', () => {
@@ -814,5 +836,253 @@ describe('ideen-inbox AC3/AC8 — BoardWriter.createIdea (real fs)', () => {
     // Aber über den TATSÄCHLICHEN Read-Parser zurückgelesen: unescaped.
     const parsed = parseYaml(raw);
     expect(parsed.title).toBe("Nutzer's Idee");
+  });
+});
+
+// ── validateResolveInput (pure, no IO) — ideen-inbox AC6/AC8, S-200 ───────────
+
+describe('ideen-inbox AC6/AC8 — validateResolveInput (pure)', () => {
+  it('leerer Aufruf (kein Payload): resolvedStoryIds=[] , resolvedNote=null', () => {
+    expect(validateResolveInput()).toEqual({ resolvedStoryIds: [], resolvedNote: null });
+    expect(validateResolveInput({})).toEqual({ resolvedStoryIds: [], resolvedNote: null });
+  });
+
+  it('gültige resolved_story_ids + resolved_note werden getrimmt durchgereicht', () => {
+    const result = validateResolveInput({
+      resolvedStoryIds: [' S-201 ', 'S-202'],
+      resolvedNote: '  siehe docs/specs/foo.md  ',
+    });
+    expect(result.resolvedStoryIds).toEqual(['S-201', 'S-202']);
+    expect(result.resolvedNote).toBe('siehe docs/specs/foo.md');
+  });
+
+  it('resolvedStoryIds kein Array → invalid-story-ids', () => {
+    expect(() => validateResolveInput({ resolvedStoryIds: 'S-201' })).toThrow(BoardWriterError);
+    try {
+      validateResolveInput({ resolvedStoryIds: 'S-201' });
+    } catch (err) {
+      expect(err.errorClass).toBe('invalid-story-ids');
+    }
+  });
+
+  it('ungültiges Story-ID-Format in resolvedStoryIds → invalid-story-ids', () => {
+    try {
+      validateResolveInput({ resolvedStoryIds: ['S-201', 'not a valid id!'] });
+      throw new Error('sollte werfen');
+    } catch (err) {
+      expect(err).toBeInstanceOf(BoardWriterError);
+      expect(err.errorClass).toBe('invalid-story-ids');
+    }
+  });
+
+  it('resolvedStoryIds über Längenlimit (RESOLVE_STORY_IDS_MAX_COUNT) → invalid-story-ids', () => {
+    const tooMany = Array.from({ length: RESOLVE_STORY_IDS_MAX_COUNT + 1 }, (_, i) => `S-${i}`);
+    try {
+      validateResolveInput({ resolvedStoryIds: tooMany });
+      throw new Error('sollte werfen');
+    } catch (err) {
+      expect(err.errorClass).toBe('invalid-story-ids');
+    }
+  });
+
+  it('resolvedNote mit Steuerzeichen → invalid-note', () => {
+    try {
+      validateResolveInput({ resolvedNote: 'Zeile1\nZeile2' });
+      throw new Error('sollte werfen');
+    } catch (err) {
+      expect(err).toBeInstanceOf(BoardWriterError);
+      expect(err.errorClass).toBe('invalid-note');
+    }
+  });
+
+  it('resolvedNote über Längenlimit (RESOLVED_NOTE_MAX_LENGTH) → invalid-note', () => {
+    try {
+      validateResolveInput({ resolvedNote: 'x'.repeat(RESOLVED_NOTE_MAX_LENGTH + 1) });
+      throw new Error('sollte werfen');
+    } catch (err) {
+      expect(err.errorClass).toBe('invalid-note');
+    }
+  });
+
+  it('whitespace-only resolvedNote wird zu null normalisiert (wie "kein Note")', () => {
+    const result = validateResolveInput({ resolvedNote: '   ' });
+    expect(result.resolvedNote).toBeNull();
+  });
+});
+
+// ── BoardWriter.resolveIdea (real fs) — ideen-inbox AC6/AC8, S-200 ────────────
+
+describe('ideen-inbox AC6/AC8 — BoardWriter.resolveIdea (real fs)', () => {
+  let boardRootsDir;
+  let projectDir;
+  let boardDir;
+  let storiesDir;
+  let boardYamlPath;
+
+  beforeEach(async () => {
+    boardRootsDir = await mkdtemp(join(tmpdir(), 'boardwriter-resolve-test-'));
+    projectDir = join(boardRootsDir, 'myproject');
+    boardDir = join(projectDir, 'board');
+    storiesDir = join(boardDir, 'stories');
+    boardYamlPath = join(boardDir, 'board.yaml');
+    await mkdir(storiesDir, { recursive: true });
+    await writeFile(
+      boardYamlPath,
+      'schema_version: 1\nproject_slug: myproject\nnext_feature_id: 1\nnext_story_id: 42\n',
+      'utf8',
+    );
+  });
+
+  afterEach(async () => {
+    await rm(boardRootsDir, { recursive: true, force: true });
+  });
+
+  function makeWriter() {
+    return new BoardWriter({ boardRootsEnv: boardRootsDir });
+  }
+
+  /** Legt eine minimale Idee-Story-Datei an (Format wie createIdea() sie schreibt). */
+  async function writeIdeaFixture(id = 'S-42') {
+    const filePath = join(storiesDir, `${id}.yaml`);
+    await writeFile(
+      filePath,
+      [
+        `id: ${id}`,
+        'status: Idee',
+        "title: 'Eine Idee'",
+        "created_at: '2026-07-01T10:00:00.000Z'",
+        "updated_at: '2026-07-01T10:00:00.000Z'",
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    return filePath;
+  }
+
+  it('happy path (mit resolved_story_ids + resolved_note): setzt status Done, hängt resolved_at/resolved_story_ids/resolved_note an', async () => {
+    const filePath = await writeIdeaFixture();
+    const writer = makeWriter();
+
+    const result = await writer.resolveIdea({
+      projectSlug: 'myproject',
+      storyId: 'S-42',
+      resolvedStoryIds: ['S-201', 'S-202'],
+      resolvedNote: 'docs/specs/foo.md',
+      now: '2026-07-01T12:00:00.000Z',
+    });
+
+    expect(result.filePath.endsWith(join('myproject', 'board', 'stories', 'S-42.yaml'))).toBe(true);
+    const raw = await readFile(filePath, 'utf8');
+    expect(raw).toContain('status: Done');
+    expect(raw).toContain("updated_at: '2026-07-01T12:00:00.000Z'");
+    expect(raw).toContain("resolved_at: '2026-07-01T12:00:00.000Z'");
+    expect(raw).toContain('resolved_story_ids: [S-201, S-202]');
+    expect(raw).toContain("resolved_note: 'docs/specs/foo.md'");
+    // Unverändertes Feld bleibt byte-genau erhalten
+    expect(raw).toContain("title: 'Eine Idee'");
+    expect(raw).toContain("created_at: '2026-07-01T10:00:00.000Z'");
+  });
+
+  it('ohne resolved_story_ids/resolved_note: setzt nur status/updated_at/resolved_at, KEINE leeren Felder', async () => {
+    await writeIdeaFixture();
+    const writer = makeWriter();
+
+    const { filePath } = await writer.resolveIdea({
+      projectSlug: 'myproject',
+      storyId: 'S-42',
+      now: '2026-07-01T12:00:00.000Z',
+    });
+
+    const raw = await readFile(filePath, 'utf8');
+    expect(raw).toContain('status: Done');
+    expect(raw).toContain("resolved_at: '2026-07-01T12:00:00.000Z'");
+    expect(raw).not.toMatch(/^resolved_story_ids:/m);
+    expect(raw).not.toMatch(/^resolved_note:/m);
+  });
+
+  it('bereits Done/aufgelöst → not-resolvable (kein zweites Done, idempotenz-tolerant)', async () => {
+    const filePath = await writeIdeaFixture();
+    const writer = makeWriter();
+
+    await writer.resolveIdea({ projectSlug: 'myproject', storyId: 'S-42', now: '2026-07-01T12:00:00.000Z' });
+
+    try {
+      await writer.resolveIdea({ projectSlug: 'myproject', storyId: 'S-42', now: '2026-07-01T13:00:00.000Z' });
+      throw new Error('sollte werfen');
+    } catch (err) {
+      expect(err).toBeInstanceOf(BoardWriterError);
+      expect(err.errorClass).toBe('not-resolvable');
+    }
+
+    // Datei unverändert seit dem ERSTEN (erfolgreichen) Resolve — kein zweiter Write.
+    const raw = await readFile(filePath, 'utf8');
+    expect(raw).toContain("resolved_at: '2026-07-01T12:00:00.000Z'");
+  });
+
+  it('Story mit status ≠ Idee (z.B. To Do) → not-resolvable, Datei unverändert', async () => {
+    const filePath = join(storiesDir, 'S-50.yaml');
+    await writeFile(filePath, 'id: S-50\nstatus: To Do\ntitle: \'Normale Story\'\n', 'utf8');
+    const writer = makeWriter();
+
+    try {
+      await writer.resolveIdea({ projectSlug: 'myproject', storyId: 'S-50' });
+      throw new Error('sollte werfen');
+    } catch (err) {
+      expect(err.errorClass).toBe('not-resolvable');
+    }
+
+    const raw = await readFile(filePath, 'utf8');
+    expect(raw).toBe('id: S-50\nstatus: To Do\ntitle: \'Normale Story\'\n');
+  });
+
+  it('unbekannte Story-ID → story-not-found', async () => {
+    await writeIdeaFixture();
+    const writer = makeWriter();
+    try {
+      await writer.resolveIdea({ projectSlug: 'myproject', storyId: 'S-999' });
+      throw new Error('sollte werfen');
+    } catch (err) {
+      expect(err.errorClass).toBe('story-not-found');
+    }
+  });
+
+  it('unbekanntes Projekt → project-not-found', async () => {
+    await writeIdeaFixture();
+    const writer = makeWriter();
+    try {
+      await writer.resolveIdea({ projectSlug: 'does-not-exist', storyId: 'S-42' });
+      throw new Error('sollte werfen');
+    } catch (err) {
+      expect(err.errorClass).toBe('project-not-found');
+    }
+  });
+
+  it('atomar: keine .tmp-Datei bleibt nach erfolgreichem Resolve zurück', async () => {
+    await writeIdeaFixture();
+    const writer = makeWriter();
+    await writer.resolveIdea({ projectSlug: 'myproject', storyId: 'S-42' });
+
+    const entries = await readdir(storiesDir);
+    expect(entries.filter((n) => n.includes('.tmp.'))).toEqual([]);
+    expect(entries).toEqual(['S-42.yaml']);
+  });
+
+  it('Round-Trip über BoardAggregator.parseYaml: resolved_story_ids/resolved_note korrekt lesbar', async () => {
+    const filePath = await writeIdeaFixture();
+    const writer = makeWriter();
+    await writer.resolveIdea({
+      projectSlug: 'myproject',
+      storyId: 'S-42',
+      resolvedStoryIds: ['S-201'],
+      resolvedNote: 'docs/specs/foo.md',
+      now: '2026-07-01T12:00:00.000Z',
+    });
+
+    const raw = await readFile(filePath, 'utf8');
+    const parsed = parseYaml(raw);
+    expect(parsed.status).toBe('Done');
+    expect(parsed.resolved_story_ids).toEqual(['S-201']);
+    expect(parsed.resolved_note).toBe('docs/specs/foo.md');
+    expect(parsed.resolved_at).toBe('2026-07-01T12:00:00.000Z');
   });
 });

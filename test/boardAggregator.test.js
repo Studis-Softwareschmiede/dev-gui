@@ -1,5 +1,6 @@
 /**
- * boardAggregator.test.js — Unit tests for BoardAggregator, parseYaml, parseBoardRoots.
+ * boardAggregator.test.js — Unit tests for BoardAggregator, parseYaml, parseBoardRoots +
+ *   boardRouter HTTP-Ebene (inkl. `buildDiscussSeed()` Unit-Tests, ideen-inbox S-200).
  *
  * Covers (dev-gui-board-aggregator backend):
  *   AC1 — Scant konfigurierte Repo-Wurzeln read-only nach board/-Ordnern;
@@ -52,6 +53,28 @@
  *          Audit-Eintrag bei 400-Validierungsablehnung.
  *   AC8 — boardWriter fehlt in den Deps → 500 (kein Crash); Response enthält
  *          keine Pfade/Secrets.
+ *
+ * Covers (ideen-inbox, S-200 — Besprechung + Auflösung, HTTP-Ebene):
+ *   AC5 — POST .../ideas/:id/discuss → 200 { sessionId } startet die Session
+ *          (Fake-sessionRegistry/commandService), schreibt den Gesprächs-Seed
+ *          via `pty.write()`; Idee-Status bleibt unverändert (kein Detail-Fetch,
+ *          kein Board-Write). 400 bei bereits aufgelöster Idee (field: 'status');
+ *          404 bei unbekanntem Slug/Idee; 409 bei laufendem Command
+ *          (`commandService.getStatus().status === 'running'`) ODER wenn das
+ *          projektweite `ProjectJobLock` bereits gehalten wird — simuliert
+ *          ProjectDrain/Taktgeber (Lock extern akquiriert, CommandService idle)
+ *          UND symmetrisch ein zweiter gleichzeitiger discuss-Aufruf fürs selbe
+ *          Projekt (Iteration 2, Finding 1); Lock wird in beiden Erfolgs- und
+ *          409-Pfaden sofort wieder freigegeben (kein Deadlock für Folge-Requests).
+ *   AC6 — POST .../ideas/:id/resolve → 200 { storyId }, setzt via echtem
+ *          `BoardWriter` (real fs, analog POST .../ideas) status: Done +
+ *          resolved_at/resolved_story_ids/resolved_note; 400 bei ungültigem
+ *          Payload ODER bereits aufgelöst; 404 bei unbekanntem Slug/Idee.
+ *   AC7 — genau EIN Audit-Eintrag je discuss-Start bzw. je resolve.
+ *   AC5/AC8 — `buildDiscussSeed()` (adversariale Unit-Tests, Iteration 2 Finding 2):
+ *          mehrzeiliger Titel/Body, `\n`/`\r`/CRLF, ESC/ANSI-Sequenzen, U+2028/
+ *          U+2029, eingebetteter Slash-Befehl (`/agent-flow:flow`) → Ergebnis ist
+ *          IMMER genau eine Zeile ohne Steuerzeichen (kein zweites Submit möglich).
  *
  * AccessGuard:
  *   POST /api/board/projects/rescan (Schreib-Trigger) liegt hinter
@@ -1062,9 +1085,10 @@ import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mkdir, mkdtemp, rm, readFile, readdir, writeFile } from 'node:fs/promises';
-import { boardRouter } from '../src/boardRouter.js';
+import { boardRouter, buildDiscussSeed } from '../src/boardRouter.js';
 import { BoardWriter } from '../src/BoardWriter.js';
 import { AuditStore } from '../src/AuditStore.js';
+import { ProjectJobLock } from '../src/ProjectJobLock.js';
 
 function httpFetch(server, path, method = 'GET', body) {
   return new Promise((resolve, reject) => {
@@ -1094,10 +1118,23 @@ function httpFetch(server, path, method = 'GET', body) {
   });
 }
 
-function startServer(boardAggregator, storyMetricReader, { notificationWatcher, boardWriter, auditStore } = {}) {
+function startServer(
+  boardAggregator,
+  storyMetricReader,
+  { notificationWatcher, boardWriter, auditStore, commandService, sessionRegistry, lock } = {},
+) {
   const app = express();
   app.use(express.json());
-  app.use(boardRouter({ boardAggregator, storyMetricReader, notificationWatcher, boardWriter, auditStore }));
+  app.use(boardRouter({
+    boardAggregator,
+    storyMetricReader,
+    notificationWatcher,
+    boardWriter,
+    auditStore,
+    commandService,
+    sessionRegistry,
+    lock,
+  }));
   const server = createServer(app);
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server)));
 }
@@ -1808,6 +1845,480 @@ describe('boardRouter HTTP — POST /api/board/projects/:slug/ideas (ideen-inbox
       const second = await httpFetch(server, '/api/board/projects/my-repo/ideas', 'POST', { title: 'Zweite' });
       expect(first.data.storyId).toBe('S-42');
       expect(second.data.storyId).toBe('S-43');
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+});
+
+// ── boardRouter HTTP — POST .../ideas/:id/discuss (ideen-inbox AC5/AC7/AC8, S-200) ──
+//
+// Real BoardAggregator gegen ein echtes tmp-Verzeichnis (Story-Index inkl.
+// `notes` — nur so entsteht der reale Gesprächs-Seed). Fake commandService/
+// sessionRegistry (kein echter PTY-Prozess nötig — nur die tryRun()/getOrCreate()-
+// Verträge werden geprüft).
+
+describe('boardRouter HTTP — POST .../ideas/:id/discuss (ideen-inbox AC5/AC7/AC8, S-200)', () => {
+  let boardRootsDir;
+  let ideaFilePath;
+
+  beforeEach(async () => {
+    boardRootsDir = await mkdtemp(join(tmpdir(), 'boardrouter-discuss-test-'));
+    const boardDir = join(boardRootsDir, 'my-repo', 'board');
+    const storiesDir = join(boardDir, 'stories');
+    await mkdir(storiesDir, { recursive: true });
+    await writeFile(join(boardDir, 'board.yaml'), 'schema_version: 1\nproject_slug: my-repo\nnext_story_id: 1\n', 'utf8');
+    ideaFilePath = join(storiesDir, 'S-42.yaml');
+    await writeFile(
+      ideaFilePath,
+      [
+        'id: S-42',
+        'status: Idee',
+        "title: 'Dark Mode fürs Dashboard'",
+        'notes: |',
+        '  Toggle im Header',
+        "created_at: '2026-07-01T10:00:00.000Z'",
+        "updated_at: '2026-07-01T10:00:00.000Z'",
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+  });
+
+  afterEach(async () => {
+    await rm(boardRootsDir, { recursive: true, force: true });
+  });
+
+  function makeFakeCommandService(running = false) {
+    return { getStatus: () => ({ status: running ? 'running' : 'done' }) };
+  }
+
+  function makeFakeSessionRegistry(pty) {
+    return { getOrCreate: () => pty };
+  }
+
+  function makeFakePty() {
+    return { writes: [], write(data) { this.writes.push(data); } };
+  }
+
+  async function makeServer({ running = false, ptyOrNull, auditStore = new AuditStore(), lock = new ProjectJobLock() } = {}) {
+    const aggregator = new BoardAggregator({ boardRootsEnv: boardRootsDir });
+    const pty = ptyOrNull !== undefined ? ptyOrNull : makeFakePty();
+    const commandService = makeFakeCommandService(running);
+    const sessionRegistry = makeFakeSessionRegistry(pty);
+    // Frische ProjectJobLock-Instanz je Server (Default) statt des globalen
+    // Singletons — Test-Isolation, analog ProjectDrain.test.js. Ein injizierbares
+    // `lock` erlaubt adversariale Tests (Finding 1, S-200 Iteration 2).
+    const server = await startServer(aggregator, null, { commandService, sessionRegistry, auditStore, lock });
+    return { server, pty, auditStore, lock };
+  }
+
+  it('200 happy path: schreibt GENAU EINEN konversationellen Seed (Titel+Body) in die PTY, GENAU EIN Audit-Eintrag, Idee bleibt unverändert', async () => {
+    const { server, pty, auditStore } = await makeServer();
+    try {
+      const { status, data } = await httpFetch(server, '/api/board/projects/my-repo/ideas/S-42/discuss', 'POST');
+      expect(status).toBe(200);
+      expect(data).toEqual({ sessionId: 'my-repo' });
+
+      // GENAU EIN Write, endet mit GENAU EINEM Submit-Newline (keine zweite Submit-Zeile).
+      expect(pty.writes.length).toBe(1);
+      expect(pty.writes[0].endsWith('\n')).toBe(true);
+      expect(pty.writes[0].slice(0, -1).includes('\n')).toBe(false);
+      expect(pty.writes[0]).toContain('Dark Mode fürs Dashboard');
+      expect(pty.writes[0]).toContain('Toggle im Header');
+
+      const entries = auditStore.getAll();
+      expect(entries.length).toBe(1);
+      expect(entries[0].command).toBe('board:idea:discuss:my-repo:S-42');
+
+      // Idee bleibt UNVERÄNDERT im Status Idee (kein Board-Write durch discuss).
+      const raw = await readFile(ideaFilePath, 'utf8');
+      expect(raw).toContain('status: Idee');
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('400 bei bereits aufgelöster Idee (status: Done): field "status", KEIN PTY-Write, KEIN Audit', async () => {
+    await writeFile(
+      ideaFilePath,
+      'id: S-42\nstatus: Done\ntitle: \'Dark Mode\'\nresolved_at: \'2026-07-01T11:00:00.000Z\'\n',
+      'utf8',
+    );
+    const { server, pty, auditStore } = await makeServer();
+    try {
+      const { status, data } = await httpFetch(server, '/api/board/projects/my-repo/ideas/S-42/discuss', 'POST');
+      expect(status).toBe(400);
+      expect(data.field).toBe('status');
+      expect(pty.writes).toEqual([]);
+      expect(auditStore.getAll()).toEqual([]);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('404 bei unbekanntem Projekt-Slug', async () => {
+    const { server } = await makeServer();
+    try {
+      const { status } = await httpFetch(server, '/api/board/projects/does-not-exist/ideas/S-42/discuss', 'POST');
+      expect(status).toBe(404);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('404 bei unbekannter Idee-ID', async () => {
+    const { server } = await makeServer();
+    try {
+      const { status } = await httpFetch(server, '/api/board/projects/my-repo/ideas/S-999/discuss', 'POST');
+      expect(status).toBe(404);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('409 bei laufendem Command (Session busy — [[flow-trigger]] AC3): Idee bleibt Idee, KEIN PTY-Write', async () => {
+    const { server, pty } = await makeServer({ running: true });
+    try {
+      const { status } = await httpFetch(server, '/api/board/projects/my-repo/ideas/S-42/discuss', 'POST');
+      expect(status).toBe(409);
+      expect(pty.writes).toEqual([]);
+
+      const raw = await readFile(ideaFilePath, 'utf8');
+      expect(raw).toContain('status: Idee');
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('500 wenn commandService/sessionRegistry nicht verdrahtet sind (kein Crash)', async () => {
+    const aggregator = new BoardAggregator({ boardRootsEnv: boardRootsDir });
+    const server = await startServer(aggregator, null, { auditStore: new AuditStore() });
+    try {
+      const { status } = await httpFetch(server, '/api/board/projects/my-repo/ideas/S-42/discuss', 'POST');
+      expect(status).toBe(500);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('503 bei Session-Cap (sessionRegistry.getOrCreate liefert null)', async () => {
+    const { server } = await makeServer({ ptyOrNull: null });
+    try {
+      const { status } = await httpFetch(server, '/api/board/projects/my-repo/ideas/S-42/discuss', 'POST');
+      expect(status).toBe(503);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  // ── Finding 1 (Iteration 2, coder-Lesson 2026-07-01): ProjectJobLock-Naht ──
+  // gegen den Taktgeber/ProjectDrain + symmetrischer Schutz gegen zwei
+  // gleichzeitige discuss-Aufrufe fürs selbe Projekt.
+
+  it('409 wenn das projektweite ProjectJobLock bereits gehalten wird (simuliert ProjectDrain — CommandService ist idle), KEIN PTY-Write, KEIN Audit, Idee bleibt unverändert', async () => {
+    const lock = new ProjectJobLock();
+    const { server, pty, auditStore } = await makeServer({ lock });
+    try {
+      const aggregator = new BoardAggregator({ boardRootsEnv: boardRootsDir });
+      const project = (await aggregator.getIndex()).find((p) => p.slug === 'my-repo');
+      // Simuliert: ProjectDrain hat das Lock für die GESAMTE Drain-Session akquiriert,
+      // während CommandService.getStatus() zwischen zwei /flow-Runden bereits wieder 'done' ist.
+      expect(lock.tryAcquire(project.repo_path)).toBe(true);
+
+      const { status } = await httpFetch(server, '/api/board/projects/my-repo/ideas/S-42/discuss', 'POST');
+      expect(status).toBe(409);
+      expect(pty.writes).toEqual([]);
+      expect(auditStore.getAll()).toEqual([]);
+
+      const raw = await readFile(ideaFilePath, 'utf8');
+      expect(raw).toContain('status: Idee');
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('symmetrischer Schutz: während des ersten discuss-Aufrufs (Lock gehalten, Check+Write noch nicht abgeschlossen) scheitert ein zweiter tryAcquire für dasselbe Projekt — kein Interleaving zweier Seeds in derselben PTY', async () => {
+    const lock = new ProjectJobLock();
+    let secondAcquireDuringFirstRequest;
+    const aggregator = new BoardAggregator({ boardRootsEnv: boardRootsDir });
+    const pty = makeFakePty();
+    const commandService = makeFakeCommandService(false);
+    // sessionRegistry.getOrCreate() wird im boardRouter erst NACH lock.tryAcquire()
+    // aufgerufen (innerhalb des try-Blocks) — genau der richtige Zeitpunkt, um zu
+    // simulieren, dass ein zweiter discuss-Aufruf für dasselbe Projekt "gleichzeitig"
+    // versucht, das Lock zu akquirieren, während der erste Request es noch hält.
+    const sessionRegistry = {
+      getOrCreate: (repoPath) => {
+        secondAcquireDuringFirstRequest = lock.tryAcquire(repoPath);
+        return pty;
+      },
+    };
+    const server = await startServer(aggregator, null, { commandService, sessionRegistry, auditStore: new AuditStore(), lock });
+    try {
+      const { status } = await httpFetch(server, '/api/board/projects/my-repo/ideas/S-42/discuss', 'POST');
+      expect(status).toBe(200);
+      // Während des ersten Requests hielt DIESER bereits das Lock — ein zweiter
+      // tryAcquire-Versuch (simulierter gleichzeitiger discuss-Aufruf) scheitert.
+      expect(secondAcquireDuringFirstRequest).toBe(false);
+      // Nur EIN Seed wurde tatsächlich in die PTY geschrieben.
+      expect(pty.writes.length).toBe(1);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('Lock wird nach dem discuss-Aufruf wieder freigegeben (kurz gehalten — nicht für die Dauer des Gesprächs)', async () => {
+    const lock = new ProjectJobLock();
+    const { server } = await makeServer({ lock });
+    try {
+      const aggregator = new BoardAggregator({ boardRootsEnv: boardRootsDir });
+      const project = (await aggregator.getIndex()).find((p) => p.slug === 'my-repo');
+
+      const { status } = await httpFetch(server, '/api/board/projects/my-repo/ideas/S-42/discuss', 'POST');
+      expect(status).toBe(200);
+      expect(lock.isHeld(project.repo_path)).toBe(false);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('409 bei laufendem Command (CommandService) gibt das ProjectJobLock ebenfalls sofort wieder frei (kein Deadlock für Folge-Requests)', async () => {
+    const lock = new ProjectJobLock();
+    const { server } = await makeServer({ running: true, lock });
+    try {
+      const aggregator = new BoardAggregator({ boardRootsEnv: boardRootsDir });
+      const project = (await aggregator.getIndex()).find((p) => p.slug === 'my-repo');
+
+      const { status } = await httpFetch(server, '/api/board/projects/my-repo/ideas/S-42/discuss', 'POST');
+      expect(status).toBe(409);
+      expect(lock.isHeld(project.repo_path)).toBe(false);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+});
+
+// ── buildDiscussSeed() Unit-Tests (Finding 2, S-200 Iteration 2) ─────────────
+//
+// Sicherheitskritische Sanitisierung (ideen-inbox AC5/AC8): der Gesprächs-Seed
+// darf NIEMALS mehr als eine PTY-Submit-Zeile erzeugen und KEINE Steuerzeichen
+// (inkl. ESC/ANSI, U+2028/U+2029) durchreichen — genau die Eigenschaft, die der
+// reviewer in Iteration 1 nur manuell verifiziert hat, hier als Regressionstest.
+
+describe('buildDiscussSeed() — Sanitisierung (ideen-inbox AC5/AC8, S-200 Finding 2)', () => {
+  // eslint-disable-next-line no-control-regex
+  const CONTROL_CHAR_RE = /[\x00-\x1f\x7f\u2028\u2029]/;
+
+  function assertSingleSafeLine(seed) {
+    expect(typeof seed).toBe('string');
+    // Genau eine Zeile: kein \n/\r irgendwo im Ergebnis (der Aufrufer hängt das
+    // EINE abschließende \n selbst an, buildDiscussSeed() selbst liefert keins).
+    expect(seed.includes('\n')).toBe(false);
+    expect(seed.includes('\r')).toBe(false);
+    expect(CONTROL_CHAR_RE.test(seed)).toBe(false);
+  }
+
+  it('mehrzeiliger Titel wird zu einer Zeile kollabiert', () => {
+    const seed = buildDiscussSeed({ title: 'Zeile eins\nZeile zwei\nZeile drei' });
+    assertSingleSafeLine(seed);
+    expect(seed).toContain('Zeile eins Zeile zwei Zeile drei');
+  });
+
+  it('mehrzeiliger Body (\\n) wird zu einer Zeile kollabiert', () => {
+    const seed = buildDiscussSeed({ title: 'Titel', body: 'Punkt 1\nPunkt 2\nPunkt 3' });
+    assertSingleSafeLine(seed);
+    expect(seed).toContain('Punkt 1 Punkt 2 Punkt 3');
+  });
+
+  it('eingebettete \\r\\n (CRLF) und einzelne \\r werden kollabiert', () => {
+    const seed = buildDiscussSeed({ title: 'A\r\nB\rC', body: 'D\r\nE' });
+    assertSingleSafeLine(seed);
+    expect(seed).toContain('A B C');
+    expect(seed).toContain('D E');
+  });
+
+  it('ESC/ANSI-Escape-Sequenzen (\\x1b[...) werden entfernt/kollabiert — keine Terminal-Steuerung', () => {
+    const seed = buildDiscussSeed({ title: '\x1b[31mRot\x1b[0m Titel', body: '\x1b[2J\x1b[H löscht Bildschirm' });
+    assertSingleSafeLine(seed);
+    // Der ESC-Charakter selbst darf nicht mehr vorkommen.
+    expect(seed.includes('\x1b')).toBe(false);
+  });
+
+  it('U+2028 (Line Separator) und U+2029 (Paragraph Separator) werden kollabiert', () => {
+    const seed = buildDiscussSeed({ title: 'Erster Teil\u2028Zweiter Teil', body: 'A\u2029B' });
+    assertSingleSafeLine(seed);
+    expect(seed).toContain('Erster Teil Zweiter Teil');
+    expect(seed).toContain('A B');
+  });
+
+  it('ein eingebetteter Slash-Befehl (/agent-flow:flow) bleibt harmloser Freitext — KEINE zweite Submit-Zeile, kein Slash-Dispatch möglich', () => {
+    const seed = buildDiscussSeed({
+      title: 'Idee',
+      body: 'Bitte danach /agent-flow:flow\nausführen und alles committen',
+    });
+    assertSingleSafeLine(seed);
+    // Der Slash-Text taucht als reiner String im konversationellen Satz auf,
+    // aber OHNE das \n davor/danach — kein zweiter PTY-Submit möglich, da der
+    // Aufrufer nur EIN abschließendes \n anhängt (siehe HTTP-Ebenen-Test oben:
+    // `pty.writes[0].slice(0, -1).includes('\n')` ist false).
+    expect(seed).toContain('/agent-flow:flow ausführen und alles committen');
+  });
+
+  it('C0-Steuerzeichen (z.B. Tab \\x09, Bell \\x07) und DEL (\\x7f) werden kollabiert', () => {
+    const seed = buildDiscussSeed({ title: 'Tab\x09hier', body: 'Bell\x07 und DEL\x7fEnde' });
+    assertSingleSafeLine(seed);
+  });
+
+  it('leerer/fehlender Body erzeugt keine leere "Stichworte:"-Zeile', () => {
+    const seed = buildDiscussSeed({ title: 'Nur Titel' });
+    assertSingleSafeLine(seed);
+    expect(seed).not.toContain('Stichworte:');
+  });
+});
+
+// ── boardRouter HTTP — POST .../ideas/:id/resolve (ideen-inbox AC6/AC7/AC8, S-200) ──
+//
+// Reale BoardWriter-Instanz gegen ein echtes tmp-Verzeichnis (analog POST .../ideas).
+
+describe('boardRouter HTTP — POST .../ideas/:id/resolve (ideen-inbox AC6/AC7/AC8, S-200)', () => {
+  let boardRootsDir;
+  let storiesDir;
+  let ideaFilePath;
+
+  beforeEach(async () => {
+    boardRootsDir = await mkdtemp(join(tmpdir(), 'boardrouter-resolve-test-'));
+    const boardDir = join(boardRootsDir, 'my-repo', 'board');
+    storiesDir = join(boardDir, 'stories');
+    await mkdir(storiesDir, { recursive: true });
+    await writeFile(join(boardDir, 'board.yaml'), 'schema_version: 1\nproject_slug: my-repo\nnext_story_id: 1\n', 'utf8');
+    ideaFilePath = join(storiesDir, 'S-42.yaml');
+    await writeFile(
+      ideaFilePath,
+      [
+        'id: S-42',
+        'status: Idee',
+        "title: 'Dark Mode fürs Dashboard'",
+        "created_at: '2026-07-01T10:00:00.000Z'",
+        "updated_at: '2026-07-01T10:00:00.000Z'",
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+  });
+
+  afterEach(async () => {
+    await rm(boardRootsDir, { recursive: true, force: true });
+  });
+
+  function makeBoardWriter() {
+    return new BoardWriter({ boardRootsEnv: boardRootsDir });
+  }
+
+  it('200 happy path: setzt status Done + resolved_at/resolved_story_ids/resolved_note, GENAU EIN Audit-Eintrag', async () => {
+    const boardWriter = makeBoardWriter();
+    const auditStore = new AuditStore();
+    const server = await startServer(null, null, { boardWriter, auditStore });
+    try {
+      const { status, data } = await httpFetch(
+        server,
+        '/api/board/projects/my-repo/ideas/S-42/resolve',
+        'POST',
+        { resolved_story_ids: ['S-201', 'S-202'], resolved_note: 'docs/specs/dark-mode.md' },
+      );
+      expect(status).toBe(200);
+      expect(data).toEqual({ storyId: 'S-42' });
+
+      const raw = await readFile(ideaFilePath, 'utf8');
+      expect(raw).toContain('status: Done');
+      expect(raw).toContain('resolved_story_ids: [S-201, S-202]');
+      expect(raw).toContain("resolved_note: 'docs/specs/dark-mode.md'");
+      expect(raw).toMatch(/^resolved_at: '[^']+'$/m);
+
+      const entries = auditStore.getAll();
+      expect(entries.length).toBe(1);
+      expect(entries[0].command).toBe('board:idea:resolve:my-repo:S-42');
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('200 ohne Payload (nur Pflicht-Auflösung): setzt status Done + resolved_at, keine resolved_story_ids/resolved_note', async () => {
+    const boardWriter = makeBoardWriter();
+    const server = await startServer(null, null, { boardWriter, auditStore: new AuditStore() });
+    try {
+      const { status } = await httpFetch(server, '/api/board/projects/my-repo/ideas/S-42/resolve', 'POST', {});
+      expect(status).toBe(200);
+      const raw = await readFile(ideaFilePath, 'utf8');
+      expect(raw).toContain('status: Done');
+      expect(raw).not.toMatch(/^resolved_story_ids:/m);
+      expect(raw).not.toMatch(/^resolved_note:/m);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('400 bei ungültigem resolved_story_ids (kein Array): field "resolved_story_ids", KEIN Audit, Datei unverändert', async () => {
+    const boardWriter = makeBoardWriter();
+    const auditStore = new AuditStore();
+    const server = await startServer(null, null, { boardWriter, auditStore });
+    try {
+      const { status, data } = await httpFetch(server, '/api/board/projects/my-repo/ideas/S-42/resolve', 'POST', {
+        resolved_story_ids: 'S-201',
+      });
+      expect(status).toBe(400);
+      expect(data.field).toBe('resolved_story_ids');
+      expect(auditStore.getAll()).toEqual([]);
+
+      const raw = await readFile(ideaFilePath, 'utf8');
+      expect(raw).toContain('status: Idee');
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('400 bei bereits aufgelöster Idee (zweiter Resolve-Versuch): field "status", kein zweites Done', async () => {
+    const boardWriter = makeBoardWriter();
+    const server = await startServer(null, null, { boardWriter, auditStore: new AuditStore() });
+    try {
+      const first = await httpFetch(server, '/api/board/projects/my-repo/ideas/S-42/resolve', 'POST', {});
+      expect(first.status).toBe(200);
+
+      const second = await httpFetch(server, '/api/board/projects/my-repo/ideas/S-42/resolve', 'POST', {});
+      expect(second.status).toBe(400);
+      expect(second.data.field).toBe('status');
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('404 bei unbekanntem Projekt-Slug', async () => {
+    const boardWriter = makeBoardWriter();
+    const server = await startServer(null, null, { boardWriter, auditStore: new AuditStore() });
+    try {
+      const { status } = await httpFetch(server, '/api/board/projects/does-not-exist/ideas/S-42/resolve', 'POST', {});
+      expect(status).toBe(404);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('404 bei unbekannter Idee-ID', async () => {
+    const boardWriter = makeBoardWriter();
+    const server = await startServer(null, null, { boardWriter, auditStore: new AuditStore() });
+    try {
+      const { status } = await httpFetch(server, '/api/board/projects/my-repo/ideas/S-999/resolve', 'POST', {});
+      expect(status).toBe(404);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('500 wenn boardWriter nicht verdrahtet ist (kein Crash)', async () => {
+    const server = await startServer(null, null, { auditStore: new AuditStore() });
+    try {
+      const { status } = await httpFetch(server, '/api/board/projects/my-repo/ideas/S-42/resolve', 'POST', {});
+      expect(status).toBe(500);
     } finally {
       await new Promise((r) => server.close(r));
     }
