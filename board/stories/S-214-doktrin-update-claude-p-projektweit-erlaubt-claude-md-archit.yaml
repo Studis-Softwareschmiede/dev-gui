@@ -1,0 +1,49 @@
+id: S-214
+parent: F-039
+title: 'Doktrin-Update: claude -p projektweit erlaubt (CLAUDE.md + architecture.md
+  ADR-016, Ausnahme 5)'
+status: To Do
+priority: P1
+spec: docs/specs/idea-specify-chat.md
+implements:
+- AC12
+depends: null
+labels:
+- docs
+size_est: S
+dispo_est: '2'
+dispo_act: null
+dispo_forecast: null
+estimate_note: 'S-Heuristik: n_ac=1 (AC12), n_comp~2 (.claude/CLAUDE.md + docs/architecture.md),
+  label_bump 0 (docs) -> score 3 -> S. estimator nicht dispatchbar im requirement-Agent-Kontext
+  (kein Task-Tool); baseline.json js|balanced|S ep=2.0 (n=3) als Proxy. confidence
+  medium. Docs-only, kein Laufzeitcode. Sollte ZUERST landen (unblockt claude -p Code
+  ohne Drift-Gate-Fail).'
+confidence: medium
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-07-01T15:25:42Z'
+updated_at: '2026-07-01T15:28:17Z'
+done_at: null
+notes: 'Spec: docs/specs/idea-specify-chat.md AC12 (Doktrin-Anpassung, Drift-Gate).
+  NUR docs/.claude, KEIN Laufzeitcode.
+
+
+  Owner-Entscheidung 2026-07-01: claude -p ist ab jetzt PROJEKTWEIT erlaubt (nicht
+  mehr nur schmale Einzel-Ausnahmen). .claude/CLAUDE.md Z.5 + docs/architecture.md
+  (Kosten-NFR Z.70 + ADR-001 Z.76): Absolutaussage ''interaktiver Flow-/Intake-Pfad
+  bleibt rein PTY (kein claude -p)'' umschreiben -> claude -p grundsaetzlich erlaubt,
+  zustandslos/tool-los UND tool-faehig via HeadlessFlowRunner; interaktiver PTY-Pfad
+  bleibt PARALLEL bestehen (keine Alleinstellungs-Doktrin mehr). Ausnahmen-Liste (1)-(4)
+  um (5) ''Idee-Specify-Chat + Requirement-Finalizer'' ergaenzen (Verweis docs/specs/idea-specify-chat.md).
+
+
+  docs/architecture.md: NEUER ADR mit NAECHSTER FREIER Nummer = ADR-016 (Achtung:
+  der Owner-Plan nannte faelschlich ''ADR-002'' -- ADR-002 ist bereits vergeben; ADRs
+  laufen bis ADR-015). ''ADR-016 - 2026-07-01 - claude -p projektweit erlaubt'' +
+  Verweis auf die Spec. ADR-001 als ''ERWEITERT'' markieren, NICHT rueckwirkend umschreiben.
+
+
+  Sollte ZUERST gemergt werden, damit die claude -p Code-Stories (S-215/S-216) nicht
+  am reviewer-Drift-Gate scheitern.'

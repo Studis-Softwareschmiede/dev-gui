@@ -1,0 +1,107 @@
+---
+id: idea-specify-chat
+title: Idee spezifizieren — Chat-Overlay statt Tab-Sprung, Feature+Story automatisch
+status: draft
+version: 1
+---
+
+# Spec: Idee spezifizieren — Chat-Overlay  (`idea-specify-chat`)
+
+> **Schicht 3 von 3.** Testbares **Verhalten + Verträge**, sprach-/paradigma-unabhängig (Intent, keine Idiome/Klassen).
+> **Source of Truth** für `coder` (baut daraus), `tester` (testet die Acceptance-Kriterien), `reviewer` (prüft den Diff dagegen — hartes Drift-Gate).
+
+## Zweck
+Eine **Idee** (Board-Status `Idee`, [[ideen-inbox]]) wird nicht mehr verworfen und nicht mehr über einen Tab-Sprung ins „Arbeiten"-Terminal ausformuliert, sondern in einem **Chat-Overlay direkt über dem Board** geschärft. Ein Klick auf die Idee-Karte **oder** auf den (umbenannten) Button **„Spezifizieren"** öffnet ein Dialog-Overlay: darin führt der Owner ein **Multi-Turn-Gespräch** mit Claude, bis die Anforderung vollständig ist. Am Ende erzeugt ein **einziger Klick** automatisch ein **eigenes Feature + eine vollständige `To Do`-Story samt Spec** — indem der **echte `/agent-flow:requirement`-Agent** headless über die bereits vorhandene `HeadlessFlowRunner`-Infrastruktur läuft. Der Board-Kontext bleibt die ganze Zeit sichtbar (kein Tab-Wechsel).
+
+> **Architektur-Hinweis (Doktrin-Erweiterung — projektweit, Owner-Entscheidung 2026-07-01):** Bislang galt laut `.claude/CLAUDE.md` / `docs/architecture.md` „der interaktive Flow-/Intake-Pfad bleibt **rein PTY** (kein `claude -p`)", ergänzt um vier eng begrenzte Einzel-Ausnahmen. Diese Spec setzt die **bewusste Owner-Entscheidung** um, `claude -p` **projektweit** zu erlauben — sowohl zustandslos/tool-los (Proof-/Such-Helfer, neuer Multi-Turn-Chat) als auch mit vollem Tool-Zugriff via `HeadlessFlowRunner` (Reconcile, Nacht-Drain, jetzt auch Idee-Specify). Der interaktive PTY-Pfad **bleibt parallel bestehen**, ist aber keine Alleinstellungs-Doktrin mehr. Mit Annahme dieser Spec MÜSSEN `.claude/CLAUDE.md` und `docs/architecture.md` entsprechend angepasst werden (neuer ADR, nächste freie Nummer **ADR-016**; ADR-001 wird als „erweitert" markiert, nicht rückwirkend umgeschrieben), sonst entsteht Doktrin-Drift (hartes `reviewer`-Gate). **AC12.**
+
+> **Verhältnis zu [[ideen-inbox]] (supersede):** Diese Spec **ersetzt** das „Aufgreifen"-Verhalten aus [[ideen-inbox]] AC5/AC6 (interaktive PTY-Besprechung mit Tab-Wechsel + expliziter `resolve`-Owner-Aktion) durch das Chat-Overlay + den headless `requirement`-Finalizer. Die **Quick-Capture**-Erfassung (Anlage einer Idee, [[ideen-inbox]] AC3/AC4) und der Status `Idee` als Nicht-Drain-Ziel ([[ideen-inbox]] AC1/AC2) bleiben **unverändert** gültig. Der bisherige `POST …/ideas/:id/discuss` (PTY-Seed, Tab-Sprung) und der explizite `POST …/ideas/:id/resolve`-Button entfallen an dieser Stelle.
+
+## Verhalten
+
+### Chat-Overlay (kein Tab-Sprung)
+1. Ein Klick auf eine **Idee-Karte** (`story.status === 'Idee'`) **oder** auf den Button **„Spezifizieren"** (vormals „Idee auflösen") öffnet ein **modales Chat-Overlay über dem Board**. Das Board bleibt im Hintergrund sichtbar; es findet **kein** Wechsel in den Terminal-/Arbeiten-Tab statt. Beide Auslöser (Karte, Button) führen zum **selben** Overlay.
+2. Das Overlay seedet das Gespräch mit **Titel + Notes** der Idee als erste (bereits von Claude beantwortete) Chat-Antwort und stellt Rückfragen, bis die Anforderung vollständig ist.
+3. Das Overlay folgt dem A11y-Muster des bisherigen Idee-Modals: Backdrop, Fokus-Management beim Öffnen, `Esc` schließt, Fokus-Rückgabe an das auslösende Element. Statt Formularfeldern rendert es eine **Chat-Bubble-Liste** (Owner- vs. Claude-Turns unterscheidbar, nicht nur über Farbe).
+
+### Multi-Turn-Chat (zustandsloser `claude -p`-Baustein, tool-los)
+4. Jede Nutzer-Nachricht geht an den Chat-Endpunkt; die Antwort erscheint als neue Chat-Bubble. Der **komplette bisherige Gesprächsverlauf** wird **serverseitig in-memory** je Session gehalten (`sessionId → turns[]`); der Client schickt nur die **neue** Nachricht, nicht die ganze Historie.
+5. Jeder Turn ruft `claude -p` als **zustandslosen one-shot** auf und übergibt den **kompletten Gesprächsverlauf** (System-Prompt + alle bisherigen Turns) via **stdin** — nie als argv. Der Aufruf ist **tool-los** (**kein** `--dangerously-skip-permissions`, reiner Text-Chat), belegt **nicht** den PTY-Job-Lock, funktioniert **auch während ein Flow-Lauf aktiv ist**, und läuft **ohne** Anthropic-/OpenAI-API-Key (Trust-Boundary wie die bestehenden Helfer). Der System-Prompt instruiert Claude, Rückfragen zu stellen bis die Story vollständig ist, und dann strukturiert `{reply, readyToSpecify, draftText?}` zu liefern (Markdown-Fence-tolerant geparst).
+6. Der Chat-Baustein lebt in einer **eigenen, schmalen Service-Boundary** (analog `AssistService`/`KnowledgeSourceService`), getrennt vom PTY-Pfad und vom tool-fähigen `HeadlessFlowRunner`. Der injizierbare Claude-Runner macht den Service ohne echten `claude`-Lauf testbar.
+
+### Finalisierung → echtes Feature+Story via `/agent-flow:requirement` (headless)
+7. Sobald der Chat `readyToSpecify === true` meldet, wird der **„Story anlegen"**-Button aktiv. Ein Klick startet den **Finalizer**: eine **eigene `HeadlessFlowRunner`-Instanz mit eigener `ProjectJobLock`-Instanz** (bewusst getrennt von Flow-/Reconcile-/Nacht-Drain-Lock — sonst Selbstblockade) fährt `claude -p '/agent-flow:requirement <promptText>'` als eigenen Kindprozess. Der Finalizer erfindet **kein** Spec-Format-Wissen selbst — der `requirement`-Agent legt Feature+Story+Spec (inkl. `spec_format`-Stempel) korrekt an.
+8. `buildRequirementPrompt({draftText, ideaStoryId})` hängt an den `draftText` **zwei** Hinweise an: (a) „Alle nötigen Informationen liegen bereits vor — bitte nicht nachfragen, sondern mit sinnvollen Annahmen weiterarbeiten." (mildert das headless-Ohne-Rückfrage-Risiko); (b) „Es existiert bereits eine Platzhalter-Idee `<ideaStoryId>` in `board/stories/`. Übernimm nach Möglichkeit genau diese Story-ID/-Datei, statt eine neue anzulegen." (**best effort**, kein Garant).
+9. **Sicherheitsnetz** nach Job-Status `done`: der Finalizer prüft, ob die ursprüngliche Idee-Story weiterhin `status: Idee` trägt (Agent hat die Übernahme-Vorgabe nicht befolgt). Falls ja, patcht er sie automatisch über eine neue, schmale **`BoardWriter.archiveSupersededIdea`**-Methode auf `status: Done` + festes `resolved_note: 'superseded-by-specify'` (+ Zeitstempel). So bleibt **nie** eine verwaiste Idee-Karte liegen — unabhängig davon, ob der Agent die Story-ID übernommen hat.
+
+### Frontend-Rückkopplung
+10. Bei Finalize-Job-Status `done` schließt das Overlay mit Erfolgsmeldung; ein `onSpecified`-Callback löst ein **Re-Fetch der Board-Daten** aus, sodass das **neue Feature** (unter `board/features/`) und die **neue `To Do`-Story** (mit gesetztem `parent`) sofort erscheinen — und die alte Idee-Karte entweder übernommen/verschwunden oder (Sicherheitsnetz, AC9) auf `Done` archiviert ist.
+11. **Fehler-/Randpfade:** Bei Finalize-Job-Status `auth-expired`/`failed` erscheint der Fehler **inline**, das Overlay bleibt offen, ein **Retry** ist möglich (kein Secret-/Pfad-Leak). Ein „Story anlegen"-Klick **ohne** `readyToSpecify` wird abgelehnt (Button deaktiviert).
+
+## Acceptance-Kriterien
+
+- **AC1** — Ein Klick auf eine Idee-Karte (`status === 'Idee'`) **oder** auf den Button „Spezifizieren" öffnet ein **Chat-Overlay über dem Board** (Modal), **ohne** Wechsel in den Terminal-/Arbeiten-Tab; das Board bleibt im Hintergrund sichtbar. Beide Auslöser führen zum selben Overlay. Das Overlay erfüllt das A11y-Muster (Backdrop, Fokus beim Öffnen, `Esc` schließt, Fokus-Rückgabe an den Auslöser) und rendert eine Chat-Bubble-Liste (Owner-/Claude-Turns unterscheidbar, nicht nur über Farbe). *(1,2,3)*
+- **AC2** — Button-Umbenennung: der bisherige „Idee auflösen"-Button heißt **„Spezifizieren"** (Prop/Handler entsprechend umbenannt, `aria-label` angepasst). Der alte reine „auf `Done` setzen/verwerfen"-Pfad an dieser Stelle sowie der bisherige `discuss`-Tab-Sprung (inkl. `onDiscussIdea`-Prop-Weiterreichung und Tab-Wechsel-Logik in der Cockpit-/Board-Ansicht) sind **entfernt**. *(1)*
+- **AC3** — `POST /api/board/projects/:slug/ideas/:id/specify/start` → `201 { sessionId, reply }`: legt eine neue serverseitige Chat-Session an und seedet sie mit **Titel + Notes** der Idee; die erste `reply` ist Claudes Eröffnungs-Turn. Slug-/ID-Validierung identisch zum bestehenden Board-Router (`resolveProjectSlug`/`validateProjectPath`, `STORY_ID_RE`). `404` bei unbekanntem Projekt/Idee; `400` wenn das Item keine besprechbare Idee ist. *(2,4)*
+- **AC4** — `POST /api/board/projects/:slug/ideas/:id/specify/message` `{ sessionId, message }` → `200 { reply, readyToSpecify, draftText? }`: hängt die Nutzer-Nachricht an die **serverseitig gehaltene** Session-Historie an und liefert Claudes nächsten Turn. Der Client übermittelt **nur** die neue Nachricht (nicht die ganze Historie). `400`/`404` bei unbekannter/abgelaufener Session. *(4)*
+- **AC5** — Der Chat nutzt `claude -p` als **zustandslosen one-shot je Turn**, **tool-los** (**kein** `--dangerously-skip-permissions`), **belegt den PTY-Job-Lock nicht** (ein parallel laufender Flow-Command bleibt unberührt, kein `409`) und läuft **ohne** `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` in der Child-Env (harter Block). Der Nutzer-/Verlaufstext geht via **stdin**, **nicht** als argv (keine Prozessliste-/Log-Leaks). Der Aufruf liegt hinter dem AccessGuard und ist **auditiert** (genau ein Audit-Eintrag je akzeptiertem Turn, Identität + Aktion, **ohne** Klartext-Secret). Eigene, schmale Service-Boundary mit **injizierbarem** Claude-Runner (testbar ohne echten `claude`-Lauf). *(5,6)*
+- **AC6** — `POST /api/board/projects/:slug/ideas/:id/specify/finalize` `{ sessionId }` → `202 { jobId, status: 'running' }`: startet den **Finalizer** über eine **eigene `HeadlessFlowRunner`-Instanz mit eigener `ProjectJobLock`-Instanz** (getrennt von Flow-/Reconcile-/Nacht-Drain-Lock, sonst Selbstblockade), der `/agent-flow:requirement <promptText>` als headless-Kindprozess fährt. Finalize ist nur zulässig, wenn der Chat `readyToSpecify` gemeldet hat (sonst `400`/`409`). Job-Start/-Ende/-Fehler auditiert; keine Secrets/Token/Host-Pfade in Audit/Log/Response. *(7)*
+- **AC7** — `GET /api/board/projects/:slug/ideas/:id/specify/finalize/:jobId` → `200 { status, result?, error? }` (Status aus der In-Memory-Job-Registry: `running`|`done`|`failed`|`auth-expired`); Format 1:1 wie der bestehende headless-Reconcile-Status-Endpunkt. Secret-freie Response. *(7,10,11)*
+- **AC8** — `buildRequirementPrompt({draftText, ideaStoryId})` hängt an den `draftText` **genau** die zwei Hinweise an: (a) „bereits vollständig — nicht nachfragen, mit sinnvollen Annahmen weiterarbeiten"; (b) „Platzhalter-Idee `<ideaStoryId>` existiert bereits — nach Möglichkeit genau diese Story-ID/-Datei übernehmen". Der zusammengesetzte Prompt ist die einzige, sanitisierte Argument-/stdin-Übergabe an den `requirement`-Lauf. *(8)*
+- **AC9** — Sicherheitsnetz nach Job-Status `done`: trägt die ursprüngliche Idee-Story weiterhin `status: Idee`, patcht der Finalizer sie über die neue, schmale **`BoardWriter.archiveSupersededIdea({projectSlug, storyId, now})`**-Methode **atomar** (tmp+rename) auf `status: Done` + festes `resolved_note: 'superseded-by-specify'` (+ `resolved_at`). `BoardWriter` bleibt der **einzige** Board-Schreibpfad; `BoardAggregator` bleibt read-only. So bleibt **nie** eine verwaiste Idee-Karte liegen (unabhängig von der best-effort-Story-ID-Übernahme des Agenten). *(9)*
+- **AC10** — Bei Finalize-Job-Status `done` schließt das Overlay mit Erfolgsmeldung und löst über einen `onSpecified`-Callback ein **Re-Fetch der Board-Daten** aus: das **neue Feature** (`board/features/`) und die **neue `To Do`-Story** (mit gesetztem `parent`) erscheinen sofort; die alte Idee ist übernommen/verschwunden **oder** (AC9) auf `Done` archiviert. *(10)*
+- **AC11** — Fehler-/Randpfade: bei `auth-expired`/`failed` erscheint der Fehler **inline**, das Overlay **bleibt offen**, Retry möglich, **kein** Secret-/Pfad-Leak. Der „Story anlegen"-Klick **ohne** `readyToSpecify` wird abgelehnt (Button deaktiviert). Ein `claude -p`-Fehler im Chat (AC5) liefert einen klaren, secret-freien Fehler; das Overlay bleibt nutzbar. *(11)*
+- **AC12** (Doktrin-Anpassung — Drift-Gate) — `.claude/CLAUDE.md` und `docs/architecture.md` sind so angepasst, dass `claude -p` **projektweit erlaubt** ist (nicht mehr nur die schmalen Einzel-Ausnahmen): die bisherige Absolutaussage „der interaktive Flow-/Intake-Pfad bleibt rein PTY (kein `claude -p`)" ist zu einer Formulierung umgeschrieben, die beide Pfade als **grundsätzlich erlaubt** ausweist (zustandslos/tool-los **und** tool-fähig via `HeadlessFlowRunner`), mit dem interaktiven PTY-Pfad als **weiterhin bestehendem Parallel-Pfad**. Die bestehende Ausnahmen-Liste (1)–(4) ist um **(5) „Idee-Specify-Chat + Requirement-Finalizer"** ergänzt; `docs/architecture.md` trägt einen **neuen ADR (nächste freie Nummer, ADR-016 · 2026-07-01)** mit Verweis auf diese Spec, und ADR-001 ist als **„erweitert"** markiert (nicht rückwirkend umgeschrieben). Nach der Anpassung enthält die Engine-Doktrin **keine** unbedingte „kein `claude -p`"-Aussage mehr, die den neuen Chat-/Finalizer-Pfad ausschließt (sonst Doktrin-Drift → hartes `reviewer`-Gate). Diese Story ändert **ausschließlich** `docs/`/`.claude/`-Doktrin-Dokumente, **keinen** Laufzeit-Code. *(Zweck-Architektur-Hinweis)*
+- **AC13** — Multi-Turn-Kontext **ohne Verlust**: bei jedem `claude -p`-Turn geht der **komplette** bisherige Gesprächsverlauf (alle vorherigen Owner- und Claude-Turns) in den Aufruf ein (via stdin), sodass Claude frühere Turns kennt; die Historie wird **serverseitig** je Session gehalten (In-Memory-Registry, analog Job-Registry-Muster der bestehenden Runner). *(4,5)*
+
+## Verträge
+
+### Endpunkte (neuer `ideaSpecifyRouter`, Slug-/ID-Validierung wie `boardRouter`)
+- `POST /api/board/projects/:slug/ideas/:id/specify/start` → `201 { sessionId, reply }` | `400 { field, message }` (Item ist keine besprechbare Idee) | `404` (Projekt/Idee unbekannt). Seedet die Chat-Session mit Titel/Notes der Idee.
+- `POST /api/board/projects/:slug/ideas/:id/specify/message` `{ sessionId, message }` → `200 { reply, readyToSpecify: boolean, draftText? }` | `400 { field, message }` | `404` (Session/Idee unbekannt) | `502` (`claude -p`-Fehler, secret-frei).
+- `POST /api/board/projects/:slug/ideas/:id/specify/finalize` `{ sessionId }` → `202 { jobId, status: 'running' }` | `400`/`409` (kein `readyToSpecify` / Idee-Lock belegt) | `404`.
+- `GET /api/board/projects/:slug/ideas/:id/specify/finalize/:jobId` → `200 { status: 'running'|'done'|'failed'|'auth-expired', result?, error? }` | `404` (Job unbekannt). Format 1:1 wie der headless-Reconcile-Status-Endpunkt.
+
+### Chat-Boundary (`IdeaSpecifyChatService`)
+- `defaultRunClaude({history, repoContext}) → { reply, readyToSpecify, draftText? }` — `spawn('claude', ['-p', SYSTEM_PROMPT])`, Gesprächsverlauf via **stdin**, tool-los (kein `--dangerously-skip-permissions`), 30–60 s Timeout, Markdown-Fence-tolerantes JSON-Parsing (analog `AssistService.parseClaudeOutput`). Claude-Runner **injizierbar**.
+- Session-Registry: `Map sessionId → turns[]`, in-memory (Verlust bei Server-Neustart = Nicht-Ziel).
+
+### Finalizer-Boundary (`IdeaSpecifyFinalizer`, dünner Orchestrator)
+- Eigene `HeadlessFlowRunner`-Instanz + eigene `ProjectJobLock()` (Konstruktor-Default) — getrennt von Flow-/Reconcile-/Nacht-Drain-Lock.
+- `start(projectPath, { draftText, ideaStoryId }) → { jobId }` → `runner.start(projectPath, { command: '/agent-flow:requirement', args: [buildRequirementPrompt(...)] })`.
+- Nach Job `done`: Sicherheitsnetz-Check → ggf. `BoardWriter.archiveSupersededIdea(...)`.
+- `getJob(jobId)` (In-Memory-Registry) für den Status-Endpunkt.
+
+### `BoardWriter.archiveSupersededIdea({ projectSlug, storyId, now })`
+- Patch-Muster analog `resolveIdea()`, aber mit festem `resolved_note: 'superseded-by-specify'`; setzt `status: Done` + `resolved_at`; atomarer Write (tmp+rename) ausschließlich nach `board/stories/<id>.yaml`.
+
+## Edge-Cases & Fehlerverhalten
+- **`claude -p` im Chat schlägt fehl / nicht im PATH** → `502` mit klarer, secret-freier Meldung; Overlay bleibt nutzbar (Historie erhalten, erneuter Versuch möglich).
+- **Finalize-`requirement`-Job `failed`/`auth-expired`** → Status-Endpunkt liefert den Terminal-Status; Overlay zeigt Fehler inline, bleibt offen, Retry möglich; `ProjectJobLock` im finally freigegeben (kein Dauer-Lock).
+- **„Story anlegen" ohne `readyToSpecify`** → Button deaktiviert; ein dennoch abgesetzter Request → `400`/`409`, kein Job-Start.
+- **Agent übernimmt die Platzhalter-Idee nicht** (Story bleibt `status: Idee`) → Sicherheitsnetz (AC9) archiviert sie automatisch auf `Done` — keine verwaiste Idee-Karte. Story-ID-**Kontinuität** ist damit **nicht** garantiert (bewusst akzeptiertes Restrisiko, best effort).
+- **Server-Neustart während Chat/Finalize** → In-Memory-Chat-Session + Job-Registry gehen verloren (Nicht-Ziel, wie bei den bestehenden Runnern); ein laufender `claude -p`-Subprozess wird ggf. verwaist (Timeout/OS bereinigt).
+- **Parallele Finalize fürs selbe Projekt** → das **eigene** `ProjectJobLock` des Finalizers verhindert Doppel-Läufe fürs selbe Projekt (`409`/`locked`), ohne den Flow-/Reconcile-/Nacht-Drain-Lock zu berühren.
+
+## NFRs
+- **Sicherheit (Floor):** Chat-Pfad hinter AccessGuard, auditiert, Text via **stdin** (nicht argv), tool-los, **kein** API-Key in der Child-Env. Finalizer nutzt den tool-fähigen `HeadlessFlowRunner` (argv als Array, kein Shell-String; harter `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`-Block; `--dangerously-skip-permissions` bleibt ausschließlich im getrennten headless-Pfad). Keine Secrets/Token/Host-Pfade in Log/Audit/Response/WS. Board-Schreiben ausschließlich über `BoardWriter` (atomar, kein Traversal).
+- **Isolation:** der Chat-Baustein importiert/mutiert **weder** den PTY-/CommandService-Schreibpfad **noch** den `HeadlessFlowRunner`-Toolpfad; der Finalizer hält eine **eigene** `ProjectJobLock`-Instanz (kein geteilter Lock → keine Selbstblockade).
+- **A11y:** Overlay-Fokusführung (Öffnen/Schließen/Fehler), `Esc`-Handling, Fokus-Rückgabe an den Auslöser; Chat-Turns semantisch/typografisch unterscheidbar (nicht nur Farbe); Status/Fehler programmatisch zugeordnet ([[terminal-frontend]]/design.md).
+- **Token-Sparsamkeit:** der Chat kostet je Turn einen kleinen, tool-losen `claude -p`-Aufruf; der teure `requirement`-Lauf läuft **genau einmal** beim „Story anlegen".
+
+## Nicht-Ziele
+- **Kein** neuer Runner-Typ: der Finalizer nutzt den **bestehenden** `HeadlessFlowRunner` (nur eine eigene Instanz + eigenen Lock).
+- **Kein** neues Spec-Format-Wissen in dev-gui: Feature/Story/Spec (inkl. `spec_format`-Stempel) legt **ausschließlich** der `requirement`-Agent an.
+- **Keine** Story-ID-Kontinuitäts-Garantie (best effort + Sicherheitsnetz).
+- **Keine** persistente Chat-/Job-Historie (In-Memory, geht bei Neustart verloren).
+- **Kein** Umbau des interaktiven PTY-/CommandService-Pfads (bleibt parallel bestehen).
+
+## Abhängigkeiten
+- [[ideen-inbox]] (Status `Idee`, Quick-Capture-Anlage, `BoardWriter`-Boundary — **supersedet** dessen AC5/AC6 Aufgreifen/Auflösen) · [[headless-parallel-drain]] (`HeadlessFlowRunner`/`HeadlessRunnerCore` — Wiederverwendung) · [[headless-reconcile-runner]] (Runner-/Status-Endpunkt-Muster, `ProjectJobLock`, 401-Vorrang, Timeout) · [[fabric-intake-dialog]] (`AssistService`-Boundary-/`claude -p`-Muster, Doktrin-Erweiterungs-Muster) · [[team-knowledge-add]] (`KnowledgeSourceService`-Boundary-Muster) · [[access-and-guardrails]] (AccessGuard, Audit-First) · [[flow-trigger]] (CommandService/PTY — interaktiver Pfad, unverändert).
+- **agent-flow-Skills:** `requirement` (Idee → Feature/Story/Spec) — **keine** Änderung nötig; wird headless mit den zwei Prompt-Hinweisen (AC8) aufgerufen.
+- **Doktrin-Anpassung (eigenes Board-Item, AC12):** `.claude/CLAUDE.md` + `docs/architecture.md` — projektweite `claude -p`-Freigabe + Ausnahme (5) + neuer ADR-016.
+
+## Restrisiko (bewusst akzeptiert)
+- Der `requirement`-Agent ist für **interaktive** Rückfragen gebaut; im headless-Lauf kann er niemanden fragen. Mitigation: expliziter Prompt-Hinweis (AC8) + der vorgelagerte Chat klärt die Idee bereits vollständig.
+- „Gleicher Datensatz wird übernommen" ist **best effort**, kein Garant — das Sicherheitsnetz (AC9) verhindert nur verwaiste Idee-Karten, keine Story-ID-Kontinuität.
+- Chat-Sessions und Job-Registries sind **in-memory** — Verlust bei Server-Neustart (Nicht-Ziel, wie bei den bestehenden Runnern).

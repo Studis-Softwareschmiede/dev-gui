@@ -1,0 +1,56 @@
+id: S-215
+parent: F-039
+title: 'Backend: IdeaSpecifyChatService + Router (Multi-Turn claude -p Chat, start/message,
+  In-Memory-Session)'
+status: To Do
+priority: P1
+spec: docs/specs/idea-specify-chat.md
+implements:
+- AC3
+- AC4
+- AC5
+- AC13
+depends: null
+labels:
+- backend
+- security
+size_est: L
+dispo_est: '5'
+dispo_act: null
+dispo_forecast: null
+estimate_note: 'L-Heuristik: n_ac=4 (AC3,AC4,AC5,AC13), n_comp~4 (IdeaSpecifyChatService
+  NEU, ideaSpecifyRouter NEU start/message, In-Memory-Session-Registry, server.js-Wiring),
+  label_bump+1 (security) -> score 9 -> L. estimator nicht dispatchbar (kein Task-Tool);
+  baseline.json js|balanced|L ep=5.0 (n=5) als Proxy. confidence medium; neue zustandslose
+  claude -p Multi-Turn-Boundary, ggf. Service/Router splitten falls zu gross.'
+confidence: medium
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-07-01T15:25:43Z'
+updated_at: '2026-07-01T15:28:22Z'
+done_at: null
+notes: 'Spec: docs/specs/idea-specify-chat.md AC3,AC4,AC5,AC13. Depends: keine (parallel
+  zu S-214, aber S-214 sollte vorher landen). Setzt Doktrin-Lockerung (S-214) voraus,
+  um Drift-Gate zu passieren.
+
+
+  NEU src/IdeaSpecifyChatService.js (Vorlage src/AssistService.js): defaultRunClaude({history,
+  repoContext}) -> spawn(''claude'', [''-p'', SYSTEM_PROMPT]); KOMPLETTER Gespraechsverlauf
+  via STDIN (nie argv); 30-60s Timeout; TOOL-LOS (KEIN --dangerously-skip-permissions);
+  KEIN ANTHROPIC_API_KEY/OPENAI_API_KEY in Child-Env (harter Block). System-Prompt:
+  Rueckfragen bis Story vollstaendig, dann JSON {reply, readyToSpecify, draftText?};
+  Parsing analog AssistService.parseClaudeOutput (Markdown-Fence-Stripping). Claude-Runner
+  INJIZIERBAR (testbar ohne echten claude-Lauf). Session-Historie serverseitig in-memory
+  (Map sessionId -> turns[]); Client schickt nur neue Nachricht.
+
+
+  NEU src/ideaSpecifyRouter.js (Slug/ID-Validierung wie boardRouter.js: resolveProjectSlug/validateProjectPath/STORY_ID_RE):
+  POST .../ideas/:id/specify/start -> 201 {sessionId, reply} (seedet mit Titel/Notes
+  der Idee); POST .../ideas/:id/specify/message {sessionId, message} -> 200 {reply,
+  readyToSpecify, draftText?}. Hinter AccessGuard, auditiert (1 Eintrag je Turn, secret-frei).
+  502 bei claude -p Fehler (secret-frei).
+
+
+  Wiring in server.js. Gate: Unit-Tests mit injiziertem Claude-Runner. finalize-Endpunkte
+  kommen in S-216 (gleicher Router, daher S-216 depends S-215).'

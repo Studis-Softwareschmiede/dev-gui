@@ -1,0 +1,27 @@
+id: F-039
+title: 'Idee spezifizieren: Chat-Overlay statt Tab-Sprung, Feature+Story automatisch'
+goal: 'Ein Klick auf eine Idee-Karte oder den (umbenannten) Button ''Spezifizieren''
+  oeffnet ein Chat-Overlay ueber dem Board (kein Tab-Sprung); darin wird die Idee
+  in einem Multi-Turn-claude-p-Chat geschaerft, und am Ende erzeugt ein Klick automatisch
+  ein eigenes Feature + eine vollstaendige To-Do-Story samt Spec via headless /agent-flow:requirement
+  (HeadlessFlowRunner). Setzt die projektweite claude-p-Doktrin-Lockerung um. Spec:
+  docs/specs/idea-specify-chat.md'
+status: Backlog
+priority: P2
+spec: docs/specs/idea-specify-chat.md
+definition_of_done: null
+labels:
+- backend
+- ui
+- security
+depends: null
+owner: null
+stories:
+- S-214
+- S-215
+- S-216
+- S-217
+- S-218
+progress: 0/5 done
+created_at: '2026-07-01T15:25:32Z'
+updated_at: '2026-07-01T15:29:29Z'
