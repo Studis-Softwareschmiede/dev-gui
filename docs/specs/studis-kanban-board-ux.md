@@ -2,7 +2,7 @@
 id: studis-kanban-board-ux
 title: Studis-Kanban-Board — UX-Verbesserungen (Default-Filter, Filter-Dropdown, Lazy-Load, Umbenennung)
 status: active
-version: 1
+version: 2
 ---
 
 # Spec: Studis-Kanban-Board — UX-Verbesserungen  (`studis-kanban-board-ux`)
@@ -42,6 +42,13 @@ Endpunkte: `GET /api/board/projects/list` (leicht) + `GET /api/board/projects/:s
 ### V6 — Lazy-Load Frontend
 Das Studis-Kanban-Board öffnet mit der Projektliste (Auswahl). Erst ein Klick auf ein Projekt lädt dessen Daten (`/projects/:slug`) und zeigt **nur dieses** Projekt (Feature→Story-Kanban). Wechsel zurück zur Liste möglich. Ladezustand (aria-busy) während des Nachladens.
 
+### V7 — Status-Filter „Alle/Keine"-Umschalter (fortgeschrieben v2)
+Im Status-Filter-Popover (V4, Checkbox-Liste Idee / To Do / In Progress / Blocked / In Review / Done) steht **ganz oben** — vor den einzelnen Status-Checkboxen — ein **Toggle-Button „Alle/Keine"**, der mit einem Klick den Gesamtzustand umschaltet:
+- Sind **aktuell alle** Status ausgewählt → Klick **wählt alle ab** (leere Auswahl; greift dann V3-Leer-Hinweis).
+- Sind **nicht alle** ausgewählt (keiner oder ein Teil) → Klick **wählt alle aus** (Default-Zustand, alles sichtbar).
+
+Das Verhalten ist also „falls alle an → alle aus, sonst alle an". Der Button ist visuell **leicht nach links versetzt** gegenüber den darunterliegenden Checkbox-Einträgen, um ihn optisch als **übergeordnete Aktion** abzusetzen. Er trägt einen sprechenden Zustand (z.B. Label/`aria-pressed` bzw. ein `aria-label`, das die auszuführende Aktion nennt) und ist per Tastatur bedienbar (Teil der Popover-Tab-Ordnung, sichtbarer Fokusring). Reine Frontend-Änderung im bestehenden `FilterBar`-Popover; kein neuer API-Aufruf, keine Board-Daten-Änderung.
+
 ## Acceptance-Kriterien
 
 - **AC1** — Alle nutzersichtbaren Board-Bezeichnungen lauten „Studis-Kanban-Board" (View-Titel, Fabrik-Link, Label/aria); Route-id `board` unverändert. *(V1)*
@@ -50,6 +57,7 @@ Das Studis-Kanban-Board öffnet mit der Projektliste (Auswahl). Erst ein Klick a
 - **AC4** — Status-Filter ist ein per Klick auf-/zuklappbares Popover (Button „Status (n/5) ▾"), nicht permanent sichtbar; schließt bei Außenklick + Esc; aria-expanded/-controls korrekt. *(V4)*
 - **AC5** — `GET /api/board/projects/list` liefert je Repo nur slug + grobe Zähler ohne Story-Scan; `GET /api/board/projects/:slug` liefert ein Projekt voll on-demand. *(V5)*
 - **AC6** — Das Board öffnet mit der Projektliste; Klick auf ein Projekt lädt + zeigt nur dieses (mit Ladezustand); Rückweg zur Liste vorhanden. *(V6)*
+- **AC7** — Im Status-Filter-Popover steht oberhalb der einzelnen Status-Checkboxen ein „Alle/Keine"-Toggle-Button, der bei „alle ausgewählt" → alle abwählt und sonst (keiner/teilweise) → alle auswählt; er ist optisch leicht nach links versetzt gegenüber den Checkboxen, trägt einen sprechenden Zustand (Label/`aria-pressed`/`aria-label`), ist tastaturbedienbar mit sichtbarem Fokusring; keine neue API, keine Board-Daten-Änderung. *(V7)*
 
 ## Nicht-Ziele
 - Schreibpfad aus der GUI (Board bleibt read-only).
