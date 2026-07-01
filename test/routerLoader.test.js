@@ -292,8 +292,11 @@ describe('routerLoader — Echte src/routers/ Module (AC1/AC3)', () => {
     //   (POST .../specify/start + .../specify/message — Multi-Turn claude -p-Chat AC3/AC4/AC5/AC13) → 34.
     // costModeCheck.js wurde mit cost-mode-model-check (S-211) hinzugefügt
     //   (GET /api/cost-mode/check/:checkId — Status-Endpunkt der Modellprüfung AC7) → 35.
+    // storySpecify.js wurde mit new-story-chat (S-226) hinzugefügt
+    //   (POST .../story-specify/start|message|finalize + GET .../finalize/:jobId —
+    //    Neue-Story-Chat „from scratch" AC2/AC3/AC4/AC5/AC8) → 36.
     const entries = await readdir(ROUTERS_DIR);
     const mountedCount = entries.filter((f) => f.endsWith('.js')).length;
-    expect(mountedCount).toBe(35);
+    expect(mountedCount).toBe(36);
   });
 });

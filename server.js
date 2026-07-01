@@ -124,6 +124,7 @@ import { WorkspaceHealthChecker } from './src/WorkspaceHealthChecker.js';
 import { AssistService } from './src/AssistService.js';
 import { IdeaSpecifyChatService } from './src/IdeaSpecifyChatService.js';
 import { IdeaSpecifyFinalizer } from './src/IdeaSpecifyFinalizer.js';
+import { StorySpecifyFinalizer } from './src/StorySpecifyFinalizer.js';
 import { HeadlessReconcileRunner } from './src/HeadlessReconcileRunner.js';
 import { ClaudeAuthHealthService } from './src/ClaudeAuthHealthService.js';
 import { KnowledgeSourceService } from './src/KnowledgeSourceService.js';
@@ -443,6 +444,19 @@ const ideaSpecifyChatService = new IdeaSpecifyChatService();
 // `no-op` erkennt (weder neues Artefakt noch Idee-Transformation).
 const ideaSpecifyFinalizer = new IdeaSpecifyFinalizer({ boardWriter, auditStore });
 
+// ── StorySpecifyFinalizer (headless requirement-Finalizer „from scratch", new-story-chat AC4/AC5/AC8) ──
+// Schlanke Schwester-Boundary des IdeaSpecifyFinalizer für den Neue-Story-Chat:
+// EIGENE `HeadlessFlowRunner`-Instanz mit EIGENER, frischer `ProjectJobLock`-
+// Instanz (Konstruktor-Default in HeadlessFlowRunner.js) — bewusst getrennt von
+// ALLEN anderen headless-Locks (Nacht-Drain, Reconcile, ideaSpecifyFinalizer),
+// sonst würde ein paralleler Lauf für dasselbe Projekt fälschlich blockiert
+// (Selbstblockade-Vermeidung, analog dem ideaSpecifyFinalizer-Kommentar oben).
+// Unterschied zum ideaSpecifyFinalizer (new-story-chat AC8): „from scratch"-
+// Prompt OHNE Idee-Übernahme-Hinweis + KEIN archiveSupersededIdea-Netz — daher
+// KEIN boardWriter nötig. Kein Audit hier (der Router auditiert den Job-Start;
+// es gibt keinen no-op-Sicherheitsnetz-Pfad, der hier auditieren müsste).
+const storySpecifyFinalizer = new StorySpecifyFinalizer();
+
 // ── HeadlessReconcileRunner (getrennter claude -p-Kindprozess, headless-reconcile-runner AC1–AC7) ──
 // Bewusst vom interaktiven PTY-Pfad (CommandService/PtyManager/PtySessionRegistry)
 // getrennt (AC7) — eigene ProjectJobLock-Instanz, kein Idle-/Rate-Timer.
@@ -555,6 +569,12 @@ const deps = {
   // S-216 (idea-specify-chat AC6/AC7/AC8/AC9): IdeaSpecifyFinalizer für
   // POST .../specify/finalize + GET .../specify/finalize/:jobId (ideaSpecify.js).
   ideaSpecifyFinalizer,
+  // S-226 (new-story-chat AC4/AC5/AC8): StorySpecifyFinalizer für den
+  // Neue-Story-Chat „from scratch" — POST .../story-specify/finalize +
+  // GET .../story-specify/finalize/:jobId (storySpecify.js). Der Chat-Router
+  // (storySpecify.js start/message) nutzt DIESELBE ideaSpecifyChatService-Instanz
+  // (oben) — kein neuer Chat-Service (AC8).
+  storySpecifyFinalizer,
 };
 
 // ── AC1/AC2: Auto-Discovery + Mount aller API-Router ─────────────────────────
