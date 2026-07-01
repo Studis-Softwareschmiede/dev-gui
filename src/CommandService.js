@@ -27,6 +27,16 @@
  *   When no registry is provided, the legacy single-session behaviour is preserved
  *   (backward compat).
  *
+ * Session keep-alive while a job is in flight (reconcile-inline-feedback / S-205 AC6/AC7):
+ *   When a command starts writing to a registry-backed session, CommandService calls
+ *   `sessionRegistry.holdForJob(projectPath)` so that session is NOT idle-destroyed
+ *   while the job runs (even without a WebSocket subscriber). On completion (idle-
+ *   detected done) or cancel(), `sessionRegistry.releaseJobHold(projectPath)` resumes
+ *   the regular idle regime. `getStatus().status === 'running'` is also what
+ *   `src/routers/session.js` surfaces as `state:"busy"` on `GET /api/session` (AC6).
+ *   Both registry calls are optional-chained (`?.`) — safe no-ops for duck-typed test
+ *   fakes / legacy single-session mode without a registry.
+ *
  * Security (Floor):
  *   - security/R02: untrusted command string validated (allowlist + control-char check)
  *     before any write to the PTY sink. Nothing raw is ever passed to a shell.
@@ -171,6 +181,14 @@ export class CommandService {
   #outputListener = null;
   /** @type {import('./PtyManager.js').PtyManager|null} PTY used by the running command */
   #currentPty = null;
+  /**
+   * projectPath the running command was routed to (reconcile-inline-feedback
+   * / S-205 AC6/AC7 — used to hold/release the registry's job-hold for this
+   * session). `null` when routed to the global session or in legacy
+   * single-session mode.
+   * @type {string|null}
+   */
+  #currentProjectPath = null;
 
   /**
    * @param {object} params
@@ -273,6 +291,10 @@ export class CommandService {
     this.#currentId = commandId;
     this.#currentStatus = 'running';
     this.#currentPty = targetPty;
+    this.#currentProjectPath = projectPath ?? null;
+    // S-205 AC7: hold the target session alive for the duration of the job —
+    // the registry will not idle-destroy it even without a WS subscriber.
+    this.#registry?.holdForJob?.(this.#currentProjectPath);
     this.#armIdleTimer();
 
     return { ok: true, commandId, status: 'running' };
@@ -298,6 +320,10 @@ export class CommandService {
     ptyToCancel?.write('\x03');
     this.#currentStatus = 'cancelled';
     this.#lock.release();
+    // S-205 AC7: release the job-hold — the registry's regular idle regime
+    // resumes for this session.
+    this.#registry?.releaseJobHold?.(this.#currentProjectPath);
+    this.#currentProjectPath = null;
     return { cancelled: true };
   }
 
@@ -350,6 +376,10 @@ export class CommandService {
       this.#currentStatus = 'done';
       this.#currentPty = null;
       this.#lock.release();
+      // S-205 AC7: release the job-hold — the registry's regular idle regime
+      // resumes for this session.
+      this.#registry?.releaseJobHold?.(this.#currentProjectPath);
+      this.#currentProjectPath = null;
     }
   }
 

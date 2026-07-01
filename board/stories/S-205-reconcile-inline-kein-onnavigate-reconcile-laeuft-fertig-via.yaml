@@ -3,7 +3,7 @@ parent: F-034
 title: 'Reconcile inline: kein onNavigate, ''Reconcile laeuft...'' -> ''Fertig'' via
   /api/session-Poll, Session bei aktivem Job halten (PtySessionRegistry/CommandService),
   Audit-Anzeige auto-refresh + PR-Hinweis (best-effort)'
-status: To Do
+status: Done
 priority: P2
 spec: docs/specs/reconcile-inline-feedback.md
 implements:
@@ -38,9 +38,9 @@ estimate_note: 'Heuristik: n_ac=9, n_comp=4 (SpecView.jsx, PtySessionRegistry.js
   fetch + Backend Command/Registry-Muster). Cross-Repo SR3-Dep zu agent-flow Variante
   D (No-Op-Logbucheintrag) nur funktional, UI entkoppelt testbar.'
 confidence: low
-branch: null
+branch: feat/S-205-reconcile-inline
 pr: null
 blocked_reason: null
 created_at: '2026-07-01T05:54:55Z'
-updated_at: '2026-07-01T05:55:32Z'
-done_at: null
+updated_at: '2026-07-01T06:35:27Z'
+done_at: '2026-07-01T06:35:27Z'

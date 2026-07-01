@@ -9,6 +9,14 @@
  *   - cancel() sends Ctrl-C to the correct (project) session
  *   - idle timer tracks output on the correct (project) PTY
  *
+ * Covers (reconcile-inline-feedback / S-205):
+ *   AC6 — getStatus().status === 'running' while a job is in flight (what
+ *          src/routers/session.js surfaces as GET /api/session state:"busy").
+ *   AC7 — registry.holdForJob(projectPath) called when a job starts;
+ *          registry.releaseJobHold(projectPath) called exactly once on
+ *          completion (idle-detected done) OR cancel(); a legacy duck-typed
+ *          registry without these methods does not crash CommandService.
+ *
  * Strategy:
  *   - Fake PtySessionRegistry (duck-typed — same as WsGateway tests)
  *   - StubPtyManager EventEmitter-based (same pattern as CommandService.test.js)
@@ -65,12 +73,21 @@ class StubPty extends EventEmitter {
   emitOutput(data) { this.emit('output', data); }
 }
 
-/** Fake PtySessionRegistry with injectable sessions. */
+/**
+ * Fake PtySessionRegistry with injectable sessions.
+ *
+ * holdForJob()/releaseJobHold() (reconcile-inline-feedback / S-205 AC6/AC7)
+ * are recorded (not simulated) — the real hold/idle-timer interaction is
+ * covered by test/PtySessionRegistry.test.js; here we only assert
+ * CommandService calls the registry correctly.
+ */
 class FakeRegistry {
   constructor() {
     this.globalPty = new StubPty();
     this.sessions = new Map(); // path → StubPty
     this._capExceeded = false;
+    this.holdCalls = [];
+    this.releaseCalls = [];
   }
 
   // duck-type: CommandService checks for getOrCreate
@@ -85,6 +102,28 @@ class FakeRegistry {
   }
 
   setCapExceeded(exceeded) { this._capExceeded = exceeded; }
+
+  holdForJob(projectPath) { this.holdCalls.push(projectPath); }
+  releaseJobHold(projectPath) { this.releaseCalls.push(projectPath); }
+}
+
+/**
+ * Legacy-shaped fake registry WITHOUT holdForJob()/releaseJobHold() — mirrors
+ * a duck-typed collaborator that predates S-205 (AC6/AC7 regression guard:
+ * CommandService must not crash when these methods are absent).
+ */
+class FakeRegistryNoHold {
+  constructor() {
+    this.globalPty = new StubPty();
+    this.sessions = new Map();
+  }
+  getOrCreate(path) {
+    if (!path) return this.globalPty;
+    if (this.sessions.has(path)) return this.sessions.get(path);
+    const pty = new StubPty();
+    this.sessions.set(path, pty);
+    return pty;
+  }
 }
 
 // HTTP helpers (copied from CommandService.test.js)
@@ -236,6 +275,77 @@ describe('CommandService.tryRun() — multi-session (sessionRegistry)', () => {
     expect(lock.isHeld()).toBe(false);
     expect(svc.getStatus().status).toBe('done');
   }, 5000);
+});
+
+// ── Unit tests: registry job-hold integration (reconcile-inline-feedback / S-205 AC6/AC7) ──
+
+describe('CommandService — S-205 AC6/AC7: registry.holdForJob()/releaseJobHold() integration', () => {
+  let registry, audit, lock, svc;
+
+  beforeEach(() => {
+    registry = new FakeRegistry();
+    audit = new AuditStore();
+    lock = new JobLock();
+    svc = new CommandService({ sessionRegistry: registry, auditStore: audit, lock, idleMs: 200 });
+  });
+
+  afterEach(() => { lock.release(); });
+
+  it('AC7 — tryRun() with projectPath calls registry.holdForJob(projectPath) exactly once', () => {
+    const res = svc.tryRun({ command: '/agent-flow:flow', identity: null, projectPath: '/p/myrepo' });
+    expect(res.ok).toBe(true);
+    expect(registry.holdCalls).toEqual(['/p/myrepo']);
+    expect(registry.releaseCalls).toHaveLength(0);
+  });
+
+  it('AC7 — tryRun() without projectPath calls registry.holdForJob(null) (global session, harmless no-op in the registry)', () => {
+    const res = svc.tryRun({ command: '/agent-flow:flow', identity: null });
+    expect(res.ok).toBe(true);
+    expect(registry.holdCalls).toEqual([null]);
+  });
+
+  it('AC6/AC7 — idle-completion releases the hold exactly once, matching the started projectPath', async () => {
+    svc.tryRun({ command: '/agent-flow:flow', identity: null, projectPath: '/p/myrepo' });
+    expect(registry.holdCalls).toEqual(['/p/myrepo']);
+
+    // AC6: while running, getStatus().status === 'running' (what session.js surfaces as busy).
+    expect(svc.getStatus().status).toBe('running');
+
+    await new Promise((r) => setTimeout(r, 350)); // idleMs=200 → completes
+    expect(svc.getStatus().status).toBe('done');
+    expect(registry.releaseCalls).toEqual(['/p/myrepo']);
+  }, 5000);
+
+  it('AC7 — cancel() releases the hold immediately (no wait for idle timer)', () => {
+    svc.tryRun({ command: '/agent-flow:flow', identity: null, projectPath: '/p/myrepo' });
+    expect(registry.holdCalls).toEqual(['/p/myrepo']);
+    expect(registry.releaseCalls).toHaveLength(0);
+
+    const result = svc.cancel();
+    expect(result.cancelled).toBe(true);
+    expect(registry.releaseCalls).toEqual(['/p/myrepo']);
+  });
+
+  it('AC7 — session-cap rejection does NOT call holdForJob (no job actually started)', () => {
+    registry.setCapExceeded(true);
+    svc.tryRun({ command: '/agent-flow:flow', identity: null, projectPath: '/p/myrepo' });
+    expect(registry.holdCalls).toHaveLength(0);
+  });
+
+  it('AC7 — a legacy duck-typed registry without holdForJob()/releaseJobHold() does not crash CommandService', async () => {
+    const legacyRegistry = new FakeRegistryNoHold();
+    const legacyLock = new JobLock();
+    const legacySvc = new CommandService({
+      sessionRegistry: legacyRegistry,
+      auditStore: new AuditStore(),
+      lock: legacyLock,
+      idleMs: 50,
+    });
+
+    expect(() => legacySvc.tryRun({ command: '/agent-flow:flow', identity: null, projectPath: '/p/x' })).not.toThrow();
+    expect(() => legacySvc.cancel()).not.toThrow();
+    legacyLock.release();
+  });
 });
 
 // ── Unit tests: backward compat — ptyManager without registry ─────────────────

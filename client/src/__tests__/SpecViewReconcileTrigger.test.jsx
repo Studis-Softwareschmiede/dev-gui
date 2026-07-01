@@ -1,5 +1,5 @@
 /**
- * SpecViewReconcileTrigger.test.jsx — Tests für AC1–AC7 (reconcile-trigger):
+ * SpecViewReconcileTrigger.test.jsx — Tests für AC1–AC4/AC6/AC7 (reconcile-trigger):
  * „Konzept/Spec nachziehen"-Button im Spezifikation-Reiter (SpecView.jsx).
  *
  * Covers (reconcile-trigger):
@@ -14,8 +14,9 @@
  *          deaktiviert (disabled-Attribut + zugängliches Label, nie Farbe
  *          allein); Klick auf deaktivierten Button öffnet keinen Dialog,
  *          löst keinen POST aus.
- *   AC5 — Antwort 202 → onNavigate('factory') wird aufgerufen; kein
- *          stehengebliebenes „gestartet"-Element im Spezifikation-Reiter.
+ *   AC5 — ÜBERSCHRIEBEN durch reconcile-inline-feedback (S-205) AC1: kein
+ *          `onNavigate` mehr nach 202. Siehe SpecViewReconcileInline.test.jsx
+ *          für die AC1-Tests (kein onNavigate, inline „Reconcile läuft…").
  *   AC6 — Antwort 409 → sichtbare Fehler-/Status-Anzeige; onNavigate wird
  *          NICHT aufgerufen; kein Crash.
  *   AC7 — Netzwerkfehler oder 500/unerwarteter Status → sichtbare
@@ -261,42 +262,9 @@ describe('SpecView — reconcile-trigger AC4: Busy-Guard (Session state:"busy")'
   });
 });
 
-// ── AC5: Erfolg (202) ──────────────────────────────────────────────────────────
-
-describe('SpecView — reconcile-trigger AC5: 202 → onNavigate("factory")', () => {
-  it('202 → onNavigate("factory") wird aufgerufen', async () => {
-    const fetchFn = makeFetchFn({ sessionState: 'ready', commandStatus: 202 });
-    const { onNavigateSpy } = renderSpecView(fetchFn);
-
-    await act(async () => {
-      fireEvent.click(document.querySelector('[data-testid="reconcile-btn"]'));
-    });
-    await act(async () => {
-      fireEvent.click(document.querySelector('[data-testid="reconcile-confirm-yes"]'));
-    });
-
-    await waitFor(() => {
-      expect(onNavigateSpy).toHaveBeenCalledWith('factory');
-    });
-  });
-
-  it('202 → kein stehengebliebenes „gestartet"-Element im Spezifikation-Reiter', async () => {
-    const fetchFn = makeFetchFn({ sessionState: 'ready', commandStatus: 202 });
-    renderSpecView(fetchFn);
-
-    await act(async () => {
-      fireEvent.click(document.querySelector('[data-testid="reconcile-btn"]'));
-    });
-    await act(async () => {
-      fireEvent.click(document.querySelector('[data-testid="reconcile-confirm-yes"]'));
-    });
-
-    await waitFor(() => {
-      expect(document.querySelector('[data-testid="reconcile-starting"]')).toBeNull();
-      expect(document.querySelector('[data-testid="reconcile-confirm-dialog"]')).toBeNull();
-    });
-  });
-});
+// ── AC5: ÜBERSCHRIEBEN durch reconcile-inline-feedback (S-205) AC1 ─────────────
+// Die 202-Erfolgs-Tests (kein onNavigate mehr, inline „Reconcile läuft…") leben
+// jetzt in SpecViewReconcileInline.test.jsx (S-205 AC1).
 
 // ── AC6: 409 ────────────────────────────────────────────────────────────────────
 

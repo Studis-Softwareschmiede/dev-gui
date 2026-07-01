@@ -3,7 +3,12 @@
  *
  * Each session is keyed by the project path (an absolute filesystem path).
  * Sessions are created on first access and destroyed after an idle period
- * (no active WebSocket subscriber + no write activity).
+ * (no active WebSocket subscriber + no write activity) — UNLESS a job is
+ * currently in flight for that session (holdForJob()/releaseJobHold(),
+ * reconcile-inline-feedback / S-205 AC7): a session with an active job is
+ * never idle-destroyed, even without a WebSocket subscriber. CommandService
+ * calls holdForJob() when it starts writing a command to a session and
+ * releaseJobHold() when that command completes/cancels.
  *
  * Config (env):
  *   SESSION_CAP       — max concurrent sessions (default: 5)
@@ -53,6 +58,14 @@ export class PtySessionRegistry extends EventEmitter {
   #sessions = new Map();
   /** @type {boolean} */
   #destroyed = false;
+  /**
+   * Keys of sessions that currently have an active job in flight
+   * (reconcile-inline-feedback / S-205 AC7). While a key is held here, the
+   * idle-destroy timer for that session re-arms instead of destroying —
+   * even with no WebSocket subscriber. See #resetIdleTimer().
+   * @type {Set<string>}
+   */
+  #activeJobs = new Set();
 
   // Spawn config forwarded to each PtyManager
   #cmd;
@@ -181,10 +194,45 @@ export class PtySessionRegistry extends EventEmitter {
   }
 
   /**
+   * Mark a project session as having an active job in flight
+   * (reconcile-inline-feedback / S-205 AC7 — CommandService calls this when a
+   * command starts writing to this session). While held, the idle-destroy
+   * timer will NOT destroy the session even if it elapses — it re-arms and
+   * checks again next window instead. No-op for the global session (it never
+   * idle-destroys anyway — see #ensureSession()).
+   *
+   * @param {string|null|undefined} projectPath
+   */
+  holdForJob(projectPath) {
+    const key = toKey(projectPath);
+    this.#activeJobs.add(key);
+  }
+
+  /**
+   * Release a previously held job-hold (S-205 AC7 — CommandService calls this
+   * when the command completes/cancels). Resumes normal idle behaviour by
+   * re-arming the idle timer fresh from "now" — so a session gets one full
+   * idle window after job-end before being eligible for destruction (Edge-Case
+   * „Idle-Race Backend": no double-destroy/use-after-free even if the job ends
+   * exactly inside what would have been the idle window).
+   *
+   * @param {string|null|undefined} projectPath
+   */
+  releaseJobHold(projectPath) {
+    const key = toKey(projectPath);
+    this.#activeJobs.delete(key);
+    const entry = this.#sessions.get(key);
+    if (entry && key !== GLOBAL_KEY) {
+      this.#resetIdleTimer(key, entry);
+    }
+  }
+
+  /**
    * Destroy all sessions (graceful shutdown).
    */
   destroy() {
     this.#destroyed = true;
+    this.#activeJobs.clear();
     for (const key of [...this.#sessions.keys()]) {
       this.#destroySession(key);
     }
@@ -260,6 +308,13 @@ export class PtySessionRegistry extends EventEmitter {
       clearTimeout(entry.idleTimer);
     }
     entry.idleTimer = setTimeout(() => {
+      // S-205 AC7: a session with an active job is held alive — re-arm and
+      // check again next window instead of destroying. Once the job ends
+      // (releaseJobHold), the regular idle regime resumes immediately.
+      if (this.#activeJobs.has(key)) {
+        this.#resetIdleTimer(key, entry);
+        return;
+      }
       this.#destroySession(key);
     }, this.#idleMs);
     // Don't block process exit on this timer

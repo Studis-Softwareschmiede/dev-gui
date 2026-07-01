@@ -12,6 +12,13 @@
  * Covers (taktgeber-nachtwaechter AC7): hasSession() — non-mutating existence
  * check used by ProjectJobLock.isProjectBusy() busy-detection.
  *
+ * Covers (reconcile-inline-feedback / S-205):
+ *   AC7 — holdForJob()/releaseJobHold(): a session with an active job is NOT
+ *          idle-destroyed even past the idle window; the regular idle regime
+ *          resumes once the hold is released (incl. Edge-Case „Idle-Race
+ *          Backend" — job ends exactly inside what would've been the idle
+ *          window → no double-destroy/use-after-free).
+ *
  * All tests use stub commands / no real PTY spawned where possible.
  * For cwd verification, PtyManager.spawnConfig is used (no real spawn needed).
  */
@@ -279,6 +286,80 @@ describe('PtySessionRegistry — AC4: idle-close', () => {
     expect(registry.getDefault()).not.toBeNull();
     expect(registry.sessionCount).toBe(1);
   }, 3000);
+});
+
+describe('PtySessionRegistry — reconcile-inline-feedback (S-205) AC7: job-hold vs. idle-destroy', () => {
+  let registry;
+  afterEach(() => { try { registry?.destroy(); } catch { /* ignore */ } });
+
+  it('holdForJob() prevents idle-destroy even past the idle window', async () => {
+    registry = new PtySessionRegistry({ cap: 3, idleMs: 100, cmd: 'echo', args: ['hi'] });
+    registry.start();
+
+    const path = '/project/job-active';
+    registry.getOrCreate(path);
+    registry.holdForJob(path);
+
+    // Wait well past the idle window — session must still be alive.
+    await new Promise((r) => setTimeout(r, 300));
+    expect(registry.sessionCount).toBe(2); // global + held session
+
+    registry.releaseJobHold(path);
+  }, 5000);
+
+  it('releaseJobHold() resumes the regular idle regime — session is destroyed afterwards', async () => {
+    registry = new PtySessionRegistry({ cap: 3, idleMs: 100, cmd: 'echo', args: ['hi'] });
+    registry.start();
+
+    const path = '/project/job-then-idle';
+    registry.getOrCreate(path);
+    registry.holdForJob(path);
+
+    // Held past the idle window — still alive.
+    await new Promise((r) => setTimeout(r, 150));
+    expect(registry.sessionCount).toBe(2);
+
+    registry.releaseJobHold(path);
+
+    // Now the regular idle timer (re-armed fresh by releaseJobHold) fires.
+    await waitForSessionClosed(registry, path, 2000);
+    expect(registry.sessionCount).toBe(1);
+  }, 5000);
+
+  it('Edge-Case „Idle-Race Backend": job ends exactly inside the idle window — no double-destroy/use-after-free', async () => {
+    registry = new PtySessionRegistry({ cap: 3, idleMs: 80, cmd: 'echo', args: ['hi'] });
+    registry.start();
+
+    const path = '/project/idle-race';
+    registry.getOrCreate(path);
+    registry.holdForJob(path);
+
+    // Release right around when the idle timer would have fired (racy on purpose).
+    await new Promise((r) => setTimeout(r, 80));
+    expect(() => registry.releaseJobHold(path)).not.toThrow();
+
+    // Session must still resolve to exactly one eventual close — no crash, no
+    // dangling reference (closeSession()/getOrCreate() still work afterwards).
+    await waitForSessionClosed(registry, path, 2000);
+    expect(registry.sessionCount).toBe(1);
+    expect(() => registry.closeSession(path)).not.toThrow(); // no-op, already gone
+  }, 5000);
+
+  it('holdForJob()/releaseJobHold() on the global session (null projectPath) is a safe no-op', () => {
+    registry = new PtySessionRegistry({ cap: 3, idleMs: 60_000, cmd: 'echo', args: ['hi'] });
+    registry.start();
+
+    expect(() => registry.holdForJob(null)).not.toThrow();
+    expect(() => registry.releaseJobHold(null)).not.toThrow();
+    expect(registry.getDefault()).not.toBeNull();
+  });
+
+  it('releaseJobHold() for a session that no longer exists is a safe no-op', () => {
+    registry = new PtySessionRegistry({ cap: 3, idleMs: 60_000, cmd: 'echo', args: ['hi'] });
+    registry.start();
+
+    expect(() => registry.releaseJobHold('/project/never-created')).not.toThrow();
+  });
 });
 
 describe('PtySessionRegistry — AC4: session isolation (destroy one, others remain)', () => {
