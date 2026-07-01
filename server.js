@@ -9,7 +9,7 @@
  *   GET  /api/audit                               → [{time, identity, command}]
  *   POST /api/command                             → inject slash-command into PTY session
  *   POST /api/command/cancel                      → send Ctrl-C, cancel running command
- *   POST /api/projects/:slug/drain                 → { drainId } | 409 (busy) — manueller „Board abarbeiten"-Knopf via ProjectDrain-Engine (taktgeber-nachtwaechter S-196 AC12)
+ *   POST /api/projects/:slug/drain                 → { drainId } | 400 (costMode) | 409 (busy) — manueller „Board abarbeiten"-Knopf: HEADLESS via dedizierter ProjectDrain-Instanz + Cost-Mode (headless-manual-drain AC1/AC2/AC3, ADR-017)
  *   GET/PUT /api/settings/ticker                   → Nachtwächter-Settings (taktgeber-nachtwaechter S-194 AC15/AC16)
  *   GET  /api/settings/ticker/status               → { enabled, window, withinWindow, activeDrains } — Statusanzeige (taktgeber-nachtwaechter S-197 AC17)
  *   GET/PUT/DELETE /api/settings/credentials*     → Credential-Verwaltung (settings-credentials)
@@ -137,6 +137,7 @@ import { TokenLimitWatcher } from './src/TokenLimitWatcher.js';
 import { NightWatchScheduler } from './src/NightWatchScheduler.js';
 import { HeadlessFlowRunner } from './src/HeadlessFlowRunner.js';
 import { HeadlessFlowRunnerAdapter } from './src/FlowRunner.js';
+import { ProjectJobLock } from './src/ProjectJobLock.js';
 import { mountRouters } from './src/routerLoader.js';
 
 const PORT = Number(process.env.PORT ?? 8080);
@@ -302,16 +303,43 @@ const claudeAuthHealthService = new ClaudeAuthHealthService();
 // deckt sowohl die Busy-Erkennung (AC7, ProjectDrain) als auch den
 // Token-Limit-Watcher-Attach je Projekt-Session ab (S-195, konto-weit).
 const boardWriter = new BoardWriter();
-// Manueller „Board abarbeiten"-Knopf (S-196): bleibt INTERAKTIV — kein
-// `flowRunner` injiziert → ProjectDrain baut per Default einen
-// InteractiveFlowRunner um `commandService` (headless-parallel-drain AC6,
-// bit-identisches Verhalten).
+// ── Manueller „Board abarbeiten"-Knopf: HEADLESS (ADR-017, docs/specs/headless-manual-drain.md AC1/AC2/AC3) ──
+// Seit ADR-017 (Owner-Entscheidung 2026-07-01) läuft der manuelle Knopf NICHT
+// mehr interaktiv über den PTY-`CommandService`, sondern headless — analog zum
+// Nacht-Drain (unten): eine DEDIZIERTE `ProjectDrain`-Instanz mit einem
+// `HeadlessFlowRunnerAdapter` um eine EIGENE `HeadlessFlowRunner`-Instanz. Der
+// Flow-Schritt jeder Drain-Runde ist damit ein `claude -p '/agent-flow:flow …'`-
+// Kindprozess (kein PTY-Write, kein globaler PTY-Lock, AC1).
+//
+// Lock-Trennung (AC2 — sonst Selbst-/Fremdblockade):
+//   - `manualHeadlessFlowRunner` bekommt per Default (`new HeadlessFlowRunner()`)
+//     seine EIGENE `ProjectJobLock`-Instanz für den per-Runden-Lock — getrennt
+//     vom Nacht-Drain-Runner, Reconcile-Runner und IdeaSpecifyFinalizer.
+//   - `manualDrainLock` ist die EIGENE Session-Lock-Instanz dieser ProjectDrain-
+//     Instanz — bewusst NICHT der `projectJobLock`-Singleton (den der Nacht-
+//     Drain als Session-Lock hält). Dadurch blockiert ein laufender Nacht-/
+//     Finalize-/Reconcile-Lauf fürs selbe Projekt den manuellen Drain NICHT
+//     strukturell über einen geteilten Lock (und umgekehrt).
+//   - Dieselbe `manualDrainLock`-Instanz wird zusätzlich in den
+//     projectDrainRouter injiziert (deps unten), damit dessen `isProjectBusy`-
+//     Vorabprüfung den laufenden manuellen Drain sieht → ein zweiter manueller
+//     Drain fürs selbe Projekt liefert `409` (AC2).
+// `commandService` wird NUR für die `isProjectBusy()`-Busy-Erkennung gehalten
+// (aktive PTY-Session/Command), NICHT für den Ausführungs-Schritt.
+const manualDrainLock = new ProjectJobLock();
+const manualHeadlessFlowRunner = new HeadlessFlowRunner();
+const manualHeadlessFlowRunnerAdapter = new HeadlessFlowRunnerAdapter({
+  headlessRunner: manualHeadlessFlowRunner,
+  auditStore, // AC1: Start/Ende(Erfolg)/Fehler je headless-Lauf (keine Secrets/Pfade)
+});
 const projectDrain = new ProjectDrain({
   boardAggregator,
   commandService,
   boardWriter,
   sessionRegistry: ptyRegistry,
   auditStore,
+  flowRunner: manualHeadlessFlowRunnerAdapter,
+  lock: manualDrainLock,
 });
 
 // ── Headless-Nacht-Drain (S-213, docs/specs/headless-parallel-drain.md AC7/AC9/AC11) ──
@@ -482,9 +510,13 @@ const deps = {
   readTickerSettings,
   // S-195 AC9–AC11: NightWatchScheduler-Instanz für künftige Statusanzeige (S-197).
   nightWatchScheduler,
-  // S-196 AC12: ProjectDrain-Instanz + sessionRegistry (Busy-Erkennung, AC7) für
-  // den manuellen „Board abarbeiten"-Knopf-Endpunkt (projectDrainRouter).
+  // headless-manual-drain AC1/AC2/AC3 (ADR-017): DEDIZIERTE headless ProjectDrain-
+  // Instanz + ihre EIGENE Session-Lock-Instanz (manualDrainLock) + sessionRegistry
+  // (Busy-Erkennung) für den manuellen „Board abarbeiten"-Knopf (projectDrainRouter).
+  // manualDrainLock MUSS dieselbe Instanz sein, die projectDrain als Session-Lock
+  // hält — sonst sieht der Router-Busy-Read den laufenden Drain nicht (AC2).
   projectDrain,
+  manualDrainLock,
   sessionRegistry: ptyRegistry,
   // S-199 (ideen-inbox AC3/AC7/AC8): BoardWriter-Create-Pfad für den
   // Quick-Capture-Endpunkt (boardRouter POST .../ideas). Instanz existiert

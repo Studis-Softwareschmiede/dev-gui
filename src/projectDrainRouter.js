@@ -1,30 +1,48 @@
 /**
  * projectDrainRouter — Express router: manueller „Board abarbeiten"-Knopf
- * gegen die ProjectDrain-Engine (docs/specs/taktgeber-nachtwaechter.md AC12).
+ * gegen die ProjectDrain-Engine (docs/specs/headless-manual-drain.md AC1/AC2/AC3;
+ * ersetzt den bislang interaktiven Pfad, taktgeber-nachtwaechter AC12 →
+ * superseded durch ADR-017).
  *
  * Route (hinter dem AccessGuard, wie alle /api/*, s. server.js):
- *   POST /api/projects/:slug/drain
+ *   POST /api/projects/:slug/drain  { costMode?: 'low-cost'|'balanced'|'max-quality'|'frontier' }
  *
- * AC12 — der manuelle Knopf nutzt dieselbe `ProjectDrain`-Engine (S-192):
- * draint das EINE geöffnete Projekt SOFORT (kein Nachtfenster-Gate — das
- * betrifft nur `NightWatchScheduler`/S-195 und ist hier irrelevant),
- * Parallelität 1. `ProjectDrain` garantiert intern max. einen aktiven Drain
- * je Projektpfad über `ProjectJobLock`/`isProjectBusy` (AC6/AC7) — dieser
- * Router dupliziert die Lock-Erwerbslogik NICHT, sondern liest sie nur
- * lesend vor, um sofort einen passenden HTTP-Status zu liefern.
+ * HEADLESS-Ausführung (ADR-017, headless-manual-drain AC1): der manuelle Knopf
+ * fährt den Drain über eine DEDIZIERTE, headless verdrahtete `ProjectDrain`-
+ * Instanz (`HeadlessFlowRunnerAdapter` um eine eigene `HeadlessFlowRunner`-
+ * Instanz mit eigener `ProjectJobLock`-Instanz — Verdrahtung in `server.js`).
+ * Der Flow-Schritt jeder Drain-Runde ist damit ein `claude -p '/agent-flow:flow …'`-
+ * Kindprozess (KEIN PTY-Write, KEIN globaler PTY-Lock). Der interaktive
+ * `CommandService`-/PTY-Pfad wird für den Flow-Schritt NICHT mehr benutzt —
+ * dieser Router kennt den Ausführungspfad aber gar nicht: er reicht nur den
+ * injizierten `projectDrain` an. Dieselbe Router-Logik bliebe daher auch mit
+ * einer interaktiv verdrahteten `ProjectDrain`-Instanz korrekt.
  *
- * Fire-and-forget (Spec „Definition" — der Drain läuft wiederholte
- * /flow-Runden, bis das Board keine offene Ziel-Story mehr hat):
+ * KEIN Live-Terminal (headless-manual-drain AC1/Restrisiko): ein headless-Drain
+ * schreibt NICHT in die interaktive PTY-Session — es erscheint keine
+ * Live-Ausgabe im Terminal-Pane. Fortschritt/Ergebnis werden über den
+ * Board-Re-Fetch (Karten-Updates) + das Audit-Log sichtbar; der Drain-Job-
+ * Status über `drainId` (`GET …/drain/:drainId`) ist eine SEPARATE Story
+ * (headless-manual-drain AC4) und hier NICHT gebaut — die POST-Route liefert
+ * `drainId` bereits als Korrelations-ID zurück.
+ *
+ * Cost-Mode (headless-manual-drain AC3): der Endpunkt akzeptiert optional
+ * `{ costMode }` (Enum `low-cost|balanced|max-quality|frontier`, geteilt mit
+ * flow-trigger AC8 via `COST_MODES` aus `CommandService.js` — NICHT dupliziert).
+ * Validierung ist serverseitig autoritativ: ein ungültiger Modus → `400`, KEIN
+ * Drain-Start. `balanced` (Default) bzw. fehlend → KEIN Flag; `low-cost|
+ * max-quality|frontier` → `['--cost', <mode>]` wird als per-Drain-`args` an
+ * `projectDrain.drainProject({ args })` durchgereicht und gilt für ALLE
+ * Flow-Runden dieses Drains. Der Runner reicht das Arg nur durch — die
+ * Modell-Auflösung liegt in agent-flow (flow-trigger AC8/AC9).
+ *
+ * Fire-and-forget (der Drain läuft wiederholte /flow-Runden, bis das Board
+ * keine offene Ziel-Story mehr hat):
  *   `ProjectDrain.drainProject()` kann potenziell über viele Minuten/Stunden
  *   laufen. Der HTTP-Request wartet NICHT auf das Ende des Drains — er startet
  *   den Drain (Promise wird bewusst NICHT awaited, nur mit `.catch()`
  *   gegen unhandled rejections abgesichert) und antwortet sofort mit
- *   `202 {drainId}`. Der Fortschritt bleibt weiterhin im Projekt-Terminal
- *   sichtbar: jeder /flow-Anstoß läuft über den bestehenden
- *   `CommandService`, der unverändert in dieselbe Projekt-PTY-Session
- *   schreibt (TerminalPane/WsGateway unberührt) — kein neuer
- *   Completion-Kanal, kein Nachtwächter-UI (S-197 bleibt Nicht-Ziel dieser
- *   Story), keine Statusabfrage über `drainId` (nicht gefordert von AC12).
+ *   `202 {drainId}`.
  *
  * Slug→Pfad-Auflösung (Muster `commandRouter.js`, security/R02/R03):
  *   Der Client sendet einen Slug (Repo-Verzeichnisname), keinen absoluten
@@ -36,20 +54,24 @@
  *   `BOARD_ROOTS == WORKSPACE_DIR` (docker-compose.yml), beide Bäume sind
  *   identisch.
  *
- * Concurrency (AC6/AC7, Wiederverwendung S-190 — KEIN eigener Lock):
+ * Concurrency (headless-manual-drain AC2 — KEIN eigener Lock-Erwerb hier):
  *   `isProjectBusy()` wird NUR lesend geprüft (Lock-Status + Command-Status +
  *   Session-Existenz), um sofort `409` zurückzugeben, wenn bereits gearbeitet
- *   wird. Der tatsächliche Lock-Erwerb (atomar, ohne `await` dazwischen)
- *   passiert ausschließlich INNERHALB von `ProjectDrain.drainProject()`
- *   selbst — kein doppelter Erwerbsversuch hier. Da zwischen dem
- *   Busy-Read und dem `drainProject()`-Aufruf in dieser Funktion kein
- *   `await` liegt, ist auch dieser Router-Check TOCTOU-frei (Node
- *   Single-Thread-Event-Loop — analog der Begründung in `ProjectDrain.js`).
+ *   wird — ein zweiter manueller Drain fürs selbe Projekt startet so nicht
+ *   doppelt. Der geprüfte `lock` MUSS dieselbe `ProjectJobLock`-Instanz sein,
+ *   die die dedizierte manuelle `ProjectDrain`-Instanz als Session-Lock hält
+ *   (via `options.lock` injiziert, `server.js`) — sonst würde der Busy-Read
+ *   den laufenden manuellen Drain nicht sehen. Der tatsächliche Lock-Erwerb
+ *   (atomar, ohne `await` dazwischen) passiert ausschließlich INNERHALB von
+ *   `ProjectDrain.drainProject()` selbst. Da zwischen dem Busy-Read und dem
+ *   `drainProject()`-Aufruf in dieser Funktion kein `await` liegt, ist auch
+ *   dieser Router-Check TOCTOU-frei (Node Single-Thread-Event-Loop).
  *
  * Security (Floor): keine Secrets in Response/Log; Pfad-Validierung wie
  * `commandRouter.js` (realpath-Containment gegen `WORKSPACE_DIR`); kein
- * direkter Shell-/Pfad-Sink; `drainId` ist eine reine Korrelations-ID
- * (`randomUUID()`), kein Secret.
+ * direkter Shell-/Pfad-Sink; `costMode` gegen das feste Enum validiert (keine
+ * Weiterreichung eines beliebigen argv-Werts); `drainId` ist eine reine
+ * Korrelations-ID (`randomUUID()`), kein Secret.
  *
  * @module projectDrainRouter
  */
@@ -58,6 +80,7 @@ import { Router } from 'express';
 import { randomUUID } from 'node:crypto';
 import { validateProjectPath, ProjectPathError, resolveProjectSlug } from './workspacePath.js';
 import { isProjectBusy } from './ProjectJobLock.js';
+import { COST_MODES } from './CommandService.js';
 
 /**
  * @param {object} deps
@@ -81,12 +104,12 @@ export function projectDrainRouter(deps = {}, options = {}) {
   const router = Router();
 
   /**
-   * POST /api/projects/:slug/drain
+   * POST /api/projects/:slug/drain  { costMode?: 'low-cost'|'balanced'|'max-quality'|'frontier' }
    *
    * Responses:
-   *   202 { drainId }  — Drain gestartet (läuft im Hintergrund weiter, s. Modul-Doku)
-   *   400 { error }    — ungültiger Slug/Pfad
-   *   409 { error }    — Projekt bereits busy (AC6/AC7) — kein Doppel-Start
+   *   202 { drainId }  — Drain gestartet (headless, läuft im Hintergrund weiter, s. Modul-Doku)
+   *   400 { error }    — ungültiger Slug/Pfad ODER ungültiger costMode (AC3)
+   *   409 { error }    — Projekt bereits busy (AC2) — kein Doppel-Start
    *   500 { error }    — ProjectDrain-Engine nicht verdrahtet (Composition-Root-Fehler)
    */
   router.post('/api/projects/:slug/drain', async (req, res) => {
@@ -106,6 +129,20 @@ export function projectDrainRouter(deps = {}, options = {}) {
       return res.status(400).json({ error: `Invalid slug: ${reason}` });
     }
 
+    // AC3: optionaler Cost-Mode → serverseitig autoritativ gegen das feste Enum
+    // validiert (geteilt mit flow-trigger AC8). `balanced`/fehlend → KEIN Flag;
+    // sonst `['--cost', <mode>]` als per-Drain-args. Ungültig → 400, KEIN Start.
+    const rawCostMode = req.body?.costMode;
+    let drainArgs = [];
+    if (rawCostMode !== undefined && rawCostMode !== null && rawCostMode !== '') {
+      if (typeof rawCostMode !== 'string' || !COST_MODES.includes(rawCostMode)) {
+        return res.status(400).json({ error: 'Invalid costMode' });
+      }
+      if (rawCostMode !== 'balanced') {
+        drainArgs = ['--cost', rawCostMode];
+      }
+    }
+
     if (!projectDrain) {
       return res.status(500).json({ error: 'Drain-Engine nicht verfügbar' });
     }
@@ -119,11 +156,12 @@ export function projectDrainRouter(deps = {}, options = {}) {
     }
 
     const drainId = randomUUID();
-    // Fire-and-forget (Modul-Doku "Definition"): der Drain läuft potenziell
-    // lange; die HTTP-Antwort wartet nicht auf sein Ende (AC12 "sofort").
-    // ProjectDrain.drainProject() erwirbt/gibt das ProjectJobLock intern
-    // selbst frei (try/finally) — kein zusätzliches Lock-Handling hier nötig.
-    projectDrain.drainProject(resolvedPath, { identity }).catch((err) => {
+    // Fire-and-forget (Modul-Doku): der Drain läuft potenziell lange; die
+    // HTTP-Antwort wartet nicht auf sein Ende. ProjectDrain.drainProject()
+    // erwirbt/gibt das ProjectJobLock intern selbst frei (try/finally) — kein
+    // zusätzliches Lock-Handling hier nötig. `args` (AC3): Cost-Mode-Flag,
+    // gilt für ALLE Flow-Runden dieses Drains.
+    projectDrain.drainProject(resolvedPath, { identity, args: drainArgs }).catch((err) => {
       console.error(`[projectDrain] Drain fehlgeschlagen (drainId=${drainId}):`, err.message);
     });
 

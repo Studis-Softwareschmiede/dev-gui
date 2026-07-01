@@ -1,19 +1,27 @@
 /**
  * projectDrainRouter.test.js — HTTP-Ebenen-Tests für POST /api/projects/:slug/drain
- * (docs/specs/taktgeber-nachtwaechter.md AC12, S-196).
+ * (docs/specs/headless-manual-drain.md AC1/AC2/AC3, ADR-017 — ersetzt den
+ * interaktiven Pfad aus taktgeber-nachtwaechter AC12).
  *
- * Covers (taktgeber-nachtwaechter):
- *   AC12 — der manuelle „Board abarbeiten"-Knopf nutzt die ProjectDrain-Engine:
- *          POST /api/projects/:slug/drain löst `projectDrain.drainProject()`
- *          für das aufgelöste Projekt aus und antwortet SOFORT mit
- *          202 {drainId} (Fire-and-forget — der Request wartet nicht auf das
- *          Ende des potenziell lang laufenden Drains, s. projectDrainRouter.js
- *          Modul-Doku); ein rejecteter Drain crasht den Server nicht.
- *   AC6/AC7 (Wiederverwendung S-190/S-192) — 409, wenn das Projekt bereits
- *          busy ist (Lock gehalten ODER CommandService running ODER aktive
- *          Session) — kein Doppel-Start; drainProject() wird in diesem Fall
- *          NICHT aufgerufen (Router dupliziert den Lock-Erwerb nicht, prüft
- *          nur lesend vor).
+ * Covers (headless-manual-drain):
+ *   AC1 — der manuelle „Board abarbeiten"-Knopf löst `projectDrain.drainProject()`
+ *          für das aufgelöste Projekt aus und antwortet SOFORT mit 202 {drainId}
+ *          (Fire-and-forget — der Request wartet nicht auf das Ende des
+ *          potenziell lang laufenden Drains, s. projectDrainRouter.js Modul-Doku);
+ *          ein rejecteter Drain crasht den Server nicht. Ob die injizierte
+ *          ProjectDrain-Instanz headless oder interaktiv verdrahtet ist, ist auf
+ *          Router-Ebene transparent — der Router kennt nur `drainProject()`;
+ *          die konkrete headless-Verdrahtung (HeadlessFlowRunnerAdapter) ist in
+ *          server.js + test/FlowRunner.test.js/test/ProjectDrain.test.js abgedeckt.
+ *   AC2 — 409, wenn das Projekt bereits busy ist (Lock gehalten ODER
+ *          CommandService running ODER aktive Session) — kein Doppel-Start;
+ *          drainProject() wird in diesem Fall NICHT aufgerufen (Router dupliziert
+ *          den Lock-Erwerb nicht, prüft nur lesend vor). Der geprüfte Lock ist
+ *          via `options.lock` injiziert (in server.js dieselbe Instanz wie der
+ *          Session-Lock der manuellen ProjectDrain-Instanz).
+ *   AC3 — Cost-Mode-Durchreichung: `{ costMode }` gültig+≠balanced → args
+ *          `['--cost', <mode>]` an drainProject; `balanced`/fehlend → args `[]`
+ *          (kein Flag); ungültiger costMode → 400, KEIN Drain-Start.
  *   Slug-/Pfad-Validierung — 400 bei ungültigem Slug (Traversal-Token) oder
  *          wenn der Pfad-Validator eine Boundary-Verletzung meldet.
  *          500, wenn die ProjectDrain-Engine nicht verdrahtet ist
@@ -60,6 +68,32 @@ function postNoBody(port, path) {
     );
     req.on('error', reject);
     req.end();
+  });
+}
+
+/** POST mit JSON-Body (AC3 costMode). */
+function postJson(port, path, bodyObj) {
+  const payload = JSON.stringify(bodyObj);
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      {
+        hostname: '127.0.0.1',
+        port,
+        path,
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) },
+      },
+      (res) => {
+        let raw = '';
+        res.on('data', (c) => { raw += c; });
+        res.on('end', () => {
+          try { resolve({ status: res.statusCode, body: JSON.parse(raw) }); }
+          catch { resolve({ status: res.statusCode, body: raw }); }
+        });
+      },
+    );
+    req.on('error', reject);
+    req.end(payload);
   });
 }
 
@@ -111,7 +145,7 @@ function makeApp({
   return app;
 }
 
-describe('POST /api/projects/:slug/drain (AC12 taktgeber-nachtwaechter)', () => {
+describe('POST /api/projects/:slug/drain (headless-manual-drain AC1/AC2/AC3)', () => {
   let server;
   let consoleErrorSpy;
 
@@ -138,9 +172,12 @@ describe('POST /api/projects/:slug/drain (AC12 taktgeber-nachtwaechter)', () => 
     expect(res.body.drainId.length).toBeGreaterThan(0);
 
     // drainProject wird synchron (fire-and-forget) angestoßen — nach dem Response
-    // ist der Aufruf bereits erfolgt.
+    // ist der Aufruf bereits erfolgt. Ohne costMode → args: [] (kein --cost-Flag).
     expect(drainProject).toHaveBeenCalledTimes(1);
-    expect(drainProject).toHaveBeenCalledWith('/workspace/dev-gui', { identity: { email: 'test@example.com' } });
+    expect(drainProject).toHaveBeenCalledWith('/workspace/dev-gui', {
+      identity: { email: 'test@example.com' },
+      args: [],
+    });
   });
 
   it('Fire-and-forget: HTTP-Antwort kommt SOFORT, ohne auf das Drain-Ende zu warten', async () => {
@@ -270,5 +307,93 @@ describe('POST /api/projects/:slug/drain (AC12 taktgeber-nachtwaechter)', () => 
 
     const res = await postNoBody(s.port, '/api/projects/dev-gui/drain');
     expect(res.status).toBe(500);
+  });
+
+  // ── AC3: Cost-Mode-Durchreichung ────────────────────────────────────────────
+
+  it('AC3 — costMode gültig+≠balanced → args ["--cost", <mode>] an drainProject, 202', async () => {
+    const drainProject = jest.fn(async () => ({ stopped: true, reason: 'no-drain-target', flowRuns: 0, escalated: [] }));
+    const app = makeApp({ projectDrain: { drainProject } });
+    const s = await startServer(app);
+    server = s.server;
+
+    const res = await postJson(s.port, '/api/projects/dev-gui/drain', { costMode: 'low-cost' });
+
+    expect(res.status).toBe(202);
+    expect(typeof res.body.drainId).toBe('string');
+    expect(drainProject).toHaveBeenCalledWith('/workspace/dev-gui', {
+      identity: { email: 'test@example.com' },
+      args: ['--cost', 'low-cost'],
+    });
+  });
+
+  it('AC3 — costMode "frontier" → args ["--cost", "frontier"]', async () => {
+    const drainProject = jest.fn(async () => ({ stopped: true, reason: 'no-drain-target', flowRuns: 0, escalated: [] }));
+    const app = makeApp({ projectDrain: { drainProject } });
+    const s = await startServer(app);
+    server = s.server;
+
+    const res = await postJson(s.port, '/api/projects/dev-gui/drain', { costMode: 'frontier' });
+
+    expect(res.status).toBe(202);
+    expect(drainProject).toHaveBeenCalledWith('/workspace/dev-gui', {
+      identity: { email: 'test@example.com' },
+      args: ['--cost', 'frontier'],
+    });
+  });
+
+  it('AC3 — costMode "balanced" (Default) → KEIN Flag (args: [])', async () => {
+    const drainProject = jest.fn(async () => ({ stopped: true, reason: 'no-drain-target', flowRuns: 0, escalated: [] }));
+    const app = makeApp({ projectDrain: { drainProject } });
+    const s = await startServer(app);
+    server = s.server;
+
+    const res = await postJson(s.port, '/api/projects/dev-gui/drain', { costMode: 'balanced' });
+
+    expect(res.status).toBe(202);
+    expect(drainProject).toHaveBeenCalledWith('/workspace/dev-gui', {
+      identity: { email: 'test@example.com' },
+      args: [],
+    });
+  });
+
+  it('AC3 — ungültiger costMode → 400, KEIN Drain-Start', async () => {
+    const drainProject = jest.fn();
+    const app = makeApp({ projectDrain: { drainProject } });
+    const s = await startServer(app);
+    server = s.server;
+
+    const res = await postJson(s.port, '/api/projects/dev-gui/drain', { costMode: 'ultra-mega' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/costMode/i);
+    expect(drainProject).not.toHaveBeenCalled();
+  });
+
+  it('AC3 — costMode nicht-String (z.B. Zahl) → 400, KEIN Drain-Start', async () => {
+    const drainProject = jest.fn();
+    const app = makeApp({ projectDrain: { drainProject } });
+    const s = await startServer(app);
+    server = s.server;
+
+    const res = await postJson(s.port, '/api/projects/dev-gui/drain', { costMode: 42 });
+
+    expect(res.status).toBe(400);
+    expect(drainProject).not.toHaveBeenCalled();
+  });
+
+  it('AC3 — leerer JSON-Body {} → args: [] (costMode optional, kein Flag)', async () => {
+    const drainProject = jest.fn(async () => ({ stopped: true, reason: 'no-drain-target', flowRuns: 0, escalated: [] }));
+    const app = makeApp({ projectDrain: { drainProject } });
+    const s = await startServer(app);
+    server = s.server;
+
+    const res = await postJson(s.port, '/api/projects/dev-gui/drain', {});
+
+    expect(res.status).toBe(202);
+    expect(drainProject).toHaveBeenCalledWith('/workspace/dev-gui', {
+      identity: { email: 'test@example.com' },
+      args: [],
+    });
   });
 });

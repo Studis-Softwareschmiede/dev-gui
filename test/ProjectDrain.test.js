@@ -76,6 +76,16 @@
  *          "bit-identisch zu heute" (kein separater Regressionstest nötig,
  *          identische Assertions wie vor S-212).
  *
+ * Covers (headless-manual-drain):
+ *   AC3 — drainProject({ args }) reicht die per-Drain-argv (z.B. ['--cost',
+ *          <mode>]) an JEDEN `flowRunner.startRun({ args })`-Aufruf durch —
+ *          gilt für ALLE Flow-Runden desselben Drains (siehe describe-Block
+ *          "FlowRunner-Injection", Test "passes per-drain args"). Die
+ *          Cost-Mode-Validierung + das Enum-Mapping (balanced → kein Flag)
+ *          leben auf HTTP-Ebene in test/projectDrainRouter.test.js (AC3); die
+ *          reale headless-Verdrahtung (dedizierte Instanz + eigener Lock, AC1/AC2)
+ *          in server.js.
+ *
  * Strategy:
  *   - Pure Helper-Funktionen (flattenProjectStories, isStaleInProgress,
  *     computeAliveStoryIds, couldBecomeReadyViaDepends, computeDrainState,
@@ -1447,6 +1457,60 @@ describe('ProjectDrain — FlowRunner-Injection (headless-parallel-drain AC5/AC6
     ]);
   });
 
+  it('passes per-drain args to every startRun() call (headless-manual-drain AC3: --cost durchgereicht an ALLE Flow-Runden)', async () => {
+    const { state, boardAggregator } = makeBoard([
+      makeStory({ id: 'S-1', status: 'To Do', ready: true }),
+      makeStory({ id: 'S-2', status: 'To Do', ready: true }),
+    ]);
+    // Capturing runner: hält den VOLLEN startRun-Payload inkl. args fest.
+    const capturedCalls = [];
+    const flowRunner = {
+      startRun(payload) {
+        capturedCalls.push(payload);
+        const project = state.projects[0];
+        const id = capturedCalls.length === 1 ? 'S-1' : 'S-2';
+        findStory(project, id).status = 'Done';
+        findStory(project, id).ready = false;
+        return { ok: true, handle: { runId: capturedCalls.length } };
+      },
+      async awaitCompletion() {
+        return { status: 'done' };
+      },
+    };
+    const drain = new ProjectDrain({ boardAggregator, flowRunner, lock: new ProjectJobLock(), now: () => NOW_MS });
+
+    const result = await drain.drainProject(PROJECT_PATH, { identity: 'alex@example.com', args: ['--cost', 'low-cost'] });
+
+    expect(result).toEqual({ stopped: true, reason: 'no-drain-target', flowRuns: 2, escalated: [] });
+    // AC3: JEDE Flow-Runde erhält dieselben per-Drain-args.
+    expect(capturedCalls).toEqual([
+      { projectPath: PROJECT_PATH, command: FLOW_COMMAND, identity: 'alex@example.com', args: ['--cost', 'low-cost'] },
+      { projectPath: PROJECT_PATH, command: FLOW_COMMAND, identity: 'alex@example.com', args: ['--cost', 'low-cost'] },
+    ]);
+  });
+
+  it('defaults args to [] when drainProject() is called without args (AC3: balanced/kein Flag)', async () => {
+    const { state, boardAggregator } = makeBoard([makeStory({ id: 'S-1', status: 'To Do', ready: true })]);
+    const capturedCalls = [];
+    const flowRunner = {
+      startRun(payload) {
+        capturedCalls.push(payload);
+        findStory(state.projects[0], 'S-1').status = 'Done';
+        findStory(state.projects[0], 'S-1').ready = false;
+        return { ok: true, handle: { runId: 1 } };
+      },
+      async awaitCompletion() {
+        return { status: 'done' };
+      },
+    };
+    const drain = new ProjectDrain({ boardAggregator, flowRunner, lock: new ProjectJobLock(), now: () => NOW_MS });
+
+    await drain.drainProject(PROJECT_PATH);
+
+    expect(capturedCalls).toHaveLength(1);
+    expect(capturedCalls[0].args).toEqual([]);
+  });
+
   it('escalates via an injected custom FlowRunner exactly like the default interactive adapter (AC5: escalation logic unaffected by the adapter)', async () => {
     const { state, boardAggregator } = makeBoard([makeStory({ id: 'S-1', status: 'To Do', ready: true })]);
     const flowRunner = new FakeFlowRunner(); // never mutates the board → never progresses
@@ -1515,9 +1579,11 @@ describe('ProjectDrain — FlowRunner-Injection (headless-parallel-drain AC5/AC6
     const result = await drain.drainProject(PROJECT_PATH);
 
     expect(result).toEqual({ stopped: true, reason: 'no-drain-target', flowRuns: 2, escalated: [] });
+    // drainProject() ohne `args` reicht per Default `args: []` durch (headless-manual-drain
+    // AC3) — verhaltensgleich zu „kein Flag" (HeadlessRunnerCore behandelt [] wie ohne args).
     expect(headlessRunner.calls).toEqual([
-      { projectPath: PROJECT_PATH, command: FLOW_COMMAND, args: undefined },
-      { projectPath: PROJECT_PATH, command: FLOW_COMMAND, args: undefined },
+      { projectPath: PROJECT_PATH, command: FLOW_COMMAND, args: [] },
+      { projectPath: PROJECT_PATH, command: FLOW_COMMAND, args: [] },
     ]);
   });
 

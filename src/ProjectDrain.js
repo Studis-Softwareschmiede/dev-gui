@@ -505,6 +505,14 @@ export class ProjectDrain {
    *   `ProjectJobLock`/`BoardAggregator.repo_path`/`isProjectBusy`).
    * @param {object} [opts]
    * @param {string|null} [opts.identity]  auslösende Identität (Audit + CommandService).
+   * @param {string[]} [opts.args]  zusätzliche argv-Elemente, die an JEDEN
+   *   `/agent-flow:flow`-Anstoß dieses Drains durchgereicht werden
+   *   (`flowRunner.startRun({ args })`, docs/specs/headless-manual-drain.md AC3).
+   *   Z.B. `['--cost', 'low-cost']` für den Cost-Mode-Hebel des manuellen
+   *   Headless-Knopfs. Gilt für ALLE Flow-Runden desselben Drains. Der
+   *   `InteractiveFlowRunner` ignoriert `args` (interaktiver Pfad kennt keinen
+   *   `--cost`-Hebel); der `HeadlessFlowRunnerAdapter` reicht sie an den
+   *   `claude -p '/agent-flow:flow …'`-Kindprozess durch. Default: `[]`.
    * @returns {Promise<{
    *   stopped: true,
    *   reason: 'no-drain-target'|'already-busy'|'command-channel-busy'|'safety-stop-no-progress'|'scan-failed',
@@ -514,6 +522,9 @@ export class ProjectDrain {
    */
   async drainProject(projectPath, opts = {}) {
     const identity = opts.identity ?? null;
+    // AC3: per-Drain durchgereichte argv (z.B. ['--cost', <mode>]) — gilt für
+    // ALLE Flow-Runden dieses Drains. Defensiv auf ein Array normalisiert.
+    const args = Array.isArray(opts.args) ? opts.args : [];
 
     // AC6/AC7: Busy-Check + eigenes Lock — KEIN await dazwischen (Node
     // Single-Thread-Event-Loop ⇒ atomar, kein Doppel-Trigger-Race).
@@ -532,7 +543,7 @@ export class ProjectDrain {
 
     try {
       this.#auditRecord(identity, `taktgeber:drain-start project=${projectPath}`);
-      return await this.#runLoop(projectPath, identity);
+      return await this.#runLoop(projectPath, identity, args);
     } finally {
       // Edge-Case "Projekt-Lock bei Crash": Lock wird IMMER freigegeben,
       // auch bei einem Fehler irgendwo in #runLoop (kein Dauer-Lock).
@@ -545,6 +556,7 @@ export class ProjectDrain {
    * Sicherheitsgürtel Defense-in-Depth — siehe Modul-Doku).
    * @param {string} projectPath
    * @param {string|null} identity
+   * @param {string[]} [args]  per-Drain durchgereichte argv (AC3, s. drainProject).
    * @returns {Promise<{
    *   stopped: true,
    *   reason: 'no-drain-target'|'command-channel-busy'|'safety-stop-no-progress'|'scan-failed',
@@ -552,7 +564,7 @@ export class ProjectDrain {
    *   escalated: string[]
    * }>}
    */
-  async #runLoop(projectPath, identity) {
+  async #runLoop(projectPath, identity, args = []) {
     let flowRuns = 0;
     let consecutiveNoProgress = 0;
     // Sicherheitsgürtel-Zähler (Defense-in-Depth, S-192 Iteration 2):
@@ -590,7 +602,10 @@ export class ProjectDrain {
       // Interface (S-212 AC4/AC5; CommandService auditiert den akzeptierten
       // interaktiven Aufruf bereits selbst — AC18 "jeder /flow-Anstoß").
       flowRuns += 1;
-      const startResult = this.#flowRunner.startRun({ projectPath, command: FLOW_COMMAND, identity });
+      // AC3: `args` (z.B. ['--cost', <mode>]) an JEDEN Flow-Anstoß durchreichen.
+      // Der InteractiveFlowRunner ignoriert `args`; der HeadlessFlowRunnerAdapter
+      // hängt sie an den `claude -p '/agent-flow:flow …'`-Kindprozess (headless-manual-drain AC3).
+      const startResult = this.#flowRunner.startRun({ projectPath, command: FLOW_COMMAND, identity, args });
 
       // Lock-Contention-Fix (S-195 Review-Iteration 2, live verifiziert
       // critical — siehe Modul-Doku): `reason: 'locked'|'busy'` bedeutet, es
