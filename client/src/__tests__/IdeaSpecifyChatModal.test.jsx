@@ -1,6 +1,6 @@
 /**
  * IdeaSpecifyChatModal.test.jsx — Tests für das Chat-Overlay
- * (docs/specs/idea-specify-chat.md AC1, AC10, AC11).
+ * (docs/specs/idea-specify-chat.md AC1, AC10, AC11, AC14 — v2 fire-and-forget).
  *
  * Isoliert getestet (ohne BoardView — die Verdrahtung ist S-218, Folge-Item),
  * analog dem "IdeaCaptureModal (isoliert)"-Muster in IdeaCaptureModal.test.jsx.
@@ -11,31 +11,37 @@
  *          Claude-Unterscheidung nicht nur über Farbe (data-role-Attribut +
  *          textuelles Label), Fokus beim Öffnen, Esc schließt + Fokus-
  *          Rückgabe an triggerRef.
- *   AC10 — Bei Finalize-Status `done`: onSpecified(projectSlug) wird VOR
- *          onClose() aufgerufen (Re-Fetch-Trigger für den Aufrufer).
- *   AC11 — „Story anlegen" ohne readyToSpecify ist disabled (Gate); bei
- *          Finalize-Status `auth-expired`/`failed` erscheint der Fehler
- *          inline, das Overlay bleibt offen (Modal weiterhin im DOM), Retry
- *          ist möglich (Button wieder enabled); ein Chat-Sende-Fehler (502)
- *          zeigt einen secret-freien Fehler inline, Overlay bleibt nutzbar;
- *          der „Erneut versuchen"-Button nach fehlgeschlagenem
- *          `.../specify/start` löst tatsächlich einen neuen Request aus
- *          (Review-Fix Iteration 2); ein dauerhaft nicht auflösbarer
- *          Finalize-Status (z.B. permanenter 404 „Unknown jobId") führt nach
- *          mehreren aufeinanderfolgenden Fehlversuchen zu einem terminalen
- *          `finalizeState: 'error'` statt endlosem Polling (Review-Fix
- *          Iteration 2).
+ *   AC10 — Fire-and-forget: „Story anlegen" (nur bei readyToSpecify) setzt
+ *          genau EIN POST .../specify/finalize ab; bei `202 { jobId }` schließt
+ *          das Overlay SOFORT (onClose) + Fokus-Rückgabe an triggerRef, OHNE
+ *          jeglichen Status-GET (kein Poll-Loop mehr).
+ *   AC11 — „Story anlegen" ohne readyToSpecify ist disabled (Gate); ein
+ *          SYNCHRONER Finalize-Start-Fehlschlag (non-202: 409 Lock, 400 kein
+ *          readyToSpecify, Netzwerkfehler) erscheint inline, das Overlay bleibt
+ *          offen (Modal weiterhin im DOM) + secret-frei, Retry ist möglich
+ *          (Button wieder enabled); ein Chat-Sende-Fehler (502) zeigt einen
+ *          secret-freien Fehler inline, Overlay bleibt nutzbar; der „Erneut
+ *          versuchen"-Button nach fehlgeschlagenem .../specify/start löst
+ *          tatsächlich einen neuen Request aus (Review-Fix Iteration 2).
+ *   AC14 — „Schließen"(X)/Esc/Backdrop rufen onClose IMMER auf — auch während
+ *          ein Chat-Send unterwegs ist (sending) oder ein Finalize-Start in
+ *          flight ist (submitting); der frühere blockierende Guard ist
+ *          entfernt. Fokus-Rückgabe an triggerRef. Ein nach dem Unmount noch
+ *          auflaufender in-flight-Fetch (message/finalize) löst KEINEN
+ *          State-Update und KEIN (doppeltes) onClose mehr aus (mountedRef-Guard).
  *
- *   Teilweise/nicht unit-testbar hier (AC3/AC4/AC6/AC7 — Backend-Contract):
- *          die HTTP-Contract-Details (Statuscodes, Validierung, Audit) sind
- *          bereits in `test/ideaSpecifyRouter.test.js` abgedeckt (S-215/S-216);
- *          diese Datei prüft nur, dass das Frontend die dokumentierten
- *          Response-Shapes korrekt konsumiert.
- *
- * Covers (headless-arg-finalize-safety):
- *   AC7  — Finalize-Status `no-op` (Fetch-Sequenz `running` → `no-op`):
- *          Overlay bleibt offen, KEIN `onSpecified`/`onClose`-Aufruf, ein
- *          sichtbarer Fehler-/Warnhinweis (Text, `role="alert"`) erscheint.
+ *   Teilweise/nicht unit-testbar hier:
+ *          - AC3/AC4/AC6 (Backend-Contract): Statuscodes, Validierung, Audit
+ *            sind in `test/ideaSpecifyRouter.test.js` abgedeckt (S-215/S-216);
+ *            diese Datei prüft nur, dass das Frontend die dokumentierten
+ *            Response-Shapes korrekt konsumiert.
+ *          - AC7 (idea-specify-chat, Status-Endpunkt): der GET-Status-Poll
+ *            entfällt im Overlay mit fire-and-forget — im Modal nicht mehr
+ *            aufgerufen (hier nur negativ geprüft: kein Status-GET nach 202).
+ *          - AC15/AC16 (Ausgang via Board-Zustand): by-design KEIN Overlay-Code
+ *            mehr — der durable Signalweg ist der Board-Zustand; das
+ *            overlay-unabhängige Re-Fetch/der Status-Watcher ist S-230 (AC17).
+ *            Kein Modal-Verhalten hier testbar.
  *
  * @jest-environment jsdom
  */
@@ -57,8 +63,18 @@ const MESSAGE_RE = /\/specify\/message$/;
 const FINALIZE_RE = /\/specify\/finalize$/;
 const FINALIZE_STATUS_RE = /\/specify\/finalize\/([^/]+)$/;
 
+/** Externally-resolvable promise, für in-flight-Fetch-Szenarien (AC14). */
+function deferred() {
+  let resolve;
+  const promise = new Promise((r) => { resolve = r; });
+  return { promise, resolve };
+}
+
 /**
- * Konfigurierbarer fetch-Mock für die vier Endpunkte.
+ * Konfigurierbarer fetch-Mock für die drei im Overlay genutzten Endpunkte
+ * (start/message/finalize). Der Finalize-Status-GET wird — anders als vor der
+ * v2-Umstellung — NICHT mehr modelliert: das Overlay pollt nach dem
+ * fire-and-forget-Schließen keinen Job-Status mehr (AC10).
  *
  * @param {object} opts
  * @param {number} [opts.startStatus=201]
@@ -67,7 +83,6 @@ const FINALIZE_STATUS_RE = /\/specify\/finalize\/([^/]+)$/;
  * @param {object} [opts.messageBody]
  * @param {number} [opts.finalizeStatus=202]
  * @param {object} [opts.finalizeBody]
- * @param {(jobId: string, callIndex: number) => { status: number, body: object }} [opts.finalizeStatusFn]
  */
 function makeFetchFn({
   startStatus = 201,
@@ -76,9 +91,7 @@ function makeFetchFn({
   messageBody = { reply: 'Verstanden.', readyToSpecify: false },
   finalizeStatus = 202,
   finalizeBody = { jobId: 'job-1', status: 'running' },
-  finalizeStatusFn,
 } = {}) {
-  let finalizeStatusCalls = 0;
   return jest.fn(async (url, opts) => {
     if (START_RE.test(url) && opts?.method === 'POST') {
       return { status: startStatus, json: async () => startBody };
@@ -89,42 +102,30 @@ function makeFetchFn({
     if (FINALIZE_RE.test(url) && opts?.method === 'POST') {
       return { status: finalizeStatus, json: async () => finalizeBody };
     }
-    const statusMatch = FINALIZE_STATUS_RE.exec(url);
-    if (statusMatch && (!opts || !opts.method)) {
-      const jobId = statusMatch[1];
-      finalizeStatusCalls += 1;
-      if (finalizeStatusFn) {
-        const { status, body } = finalizeStatusFn(jobId, finalizeStatusCalls);
-        return { status, json: async () => body };
-      }
-      return { status: 200, json: async () => ({ status: 'done' }) };
-    }
     return { status: 200, json: async () => ({}) };
   });
 }
 
-async function renderModal({ fetchFn, onClose, onSpecified, triggerRef, pollIntervalMs = 5 } = {}) {
+async function renderModal({ fetchFn, onClose, triggerRef } = {}) {
   const fn = fetchFn ?? makeFetchFn();
   globalThis.fetch = fn;
   const close = onClose ?? jest.fn();
-  const specified = onSpecified ?? jest.fn();
   const trigger = triggerRef ?? { current: { focus: jest.fn() } };
 
+  let result;
   await act(async () => {
-    render(
+    result = render(
       React.createElement(IdeaSpecifyChatModal, {
         projectSlug: 'my-project',
         story: { id: 'S-900', title: 'Eine rohe Idee', notes: 'ein paar Stichworte' },
         onClose: close,
-        onSpecified: specified,
         triggerRef: trigger,
         fetchFn: fn,
-        pollIntervalMs,
       }),
     );
   });
 
-  return { fetchFn: fn, onClose: close, onSpecified: specified, triggerRef: trigger };
+  return { fetchFn: fn, onClose: close, triggerRef: trigger, unmount: result.unmount };
 }
 
 async function waitForReady() {
@@ -132,6 +133,27 @@ async function waitForReady() {
     expect(document.querySelector('[data-testid="idea-specify-message-list"]')).toBeTruthy();
   });
 }
+
+/** Treibt den Chat bis `readyToSpecify: true` (Finalize-Button enabled). */
+async function makeReady(opts = {}) {
+  const helpers = await renderModal(opts);
+  await waitForReady();
+
+  await act(async () => {
+    fireEvent.change(document.querySelector('[data-testid="idea-specify-input"]'), {
+      target: { value: 'Das ist alles.' },
+    });
+  });
+  await act(async () => {
+    fireEvent.click(document.querySelector('[data-testid="idea-specify-send-btn"]'));
+  });
+  await waitFor(() => {
+    expect(document.querySelector('[data-testid="idea-specify-finalize-btn"]').disabled).toBe(false);
+  });
+  return helpers;
+}
+
+const READY_MSG = { reply: 'Alles klar.', readyToSpecify: true };
 
 // ── AC1: Grundstruktur, Seed, Bubble-Unterscheidung ──────────────────────────
 
@@ -269,170 +291,65 @@ describe('IdeaSpecifyChatModal — AC11: „Story anlegen" nur mit readyToSpecif
   });
 });
 
-// ── AC10: Finalize done → onSpecified + onClose ──────────────────────────────
+// ── AC10: Fire-and-forget — 202 schließt das Overlay sofort, kein Poll ────────
 
-describe('IdeaSpecifyChatModal — AC10: Finalize done schließt + onSpecified(slug)', () => {
-  it('polls the finalize status and calls onSpecified(projectSlug) before onClose on status "done"', async () => {
+describe('IdeaSpecifyChatModal — AC10: Fire-and-forget (202 → sofort onClose, kein Poll)', () => {
+  it('a 202 finalize start immediately closes the overlay (onClose) and returns focus to triggerRef', async () => {
+    const triggerRef = { current: { focus: jest.fn() } };
     const fetchFn = makeFetchFn({
-      messageBody: { reply: 'Alles klar.', readyToSpecify: true },
-      finalizeStatusFn: () => ({ status: 200, body: { status: 'done', result: 'S-901' } }),
+      messageBody: READY_MSG,
+      finalizeStatus: 202,
+      finalizeBody: { jobId: 'job-1', status: 'running' },
     });
-    const { onClose, onSpecified } = await renderModal({ fetchFn });
-    await waitForReady();
-
-    await act(async () => {
-      fireEvent.change(document.querySelector('[data-testid="idea-specify-input"]'), {
-        target: { value: 'Das ist alles.' },
-      });
-    });
-    await act(async () => {
-      fireEvent.click(document.querySelector('[data-testid="idea-specify-send-btn"]'));
-    });
-    await waitFor(() => {
-      expect(document.querySelector('[data-testid="idea-specify-finalize-btn"]').disabled).toBe(false);
-    });
+    const { onClose } = await makeReady({ fetchFn, triggerRef });
 
     await act(async () => {
       fireEvent.click(document.querySelector('[data-testid="idea-specify-finalize-btn"]'));
     });
 
     await waitFor(() => {
-      expect(onSpecified).toHaveBeenCalledWith('my-project');
       expect(onClose).toHaveBeenCalled();
     });
+    expect(triggerRef.current.focus).toHaveBeenCalled();
+  });
 
-    const specifiedOrder = onSpecified.mock.invocationCallOrder[0];
-    const closeOrder = onClose.mock.invocationCallOrder[0];
-    expect(specifiedOrder).toBeLessThan(closeOrder);
+  it('fires EXACTLY one POST .../specify/finalize and never polls the status endpoint (no Poll-Loop)', async () => {
+    const fetchFn = makeFetchFn({
+      messageBody: READY_MSG,
+      finalizeStatus: 202,
+      finalizeBody: { jobId: 'job-1', status: 'running' },
+    });
+    const { onClose } = await makeReady({ fetchFn });
+
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="idea-specify-finalize-btn"]'));
+    });
+    await waitFor(() => { expect(onClose).toHaveBeenCalled(); });
+
+    // Kurz warten, um sicherzugehen, dass KEIN nachgelagerter Status-Poll läuft.
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 30)); });
+
+    const finalizePosts = fetchFn.mock.calls.filter(
+      (c) => FINALIZE_RE.test(c[0]) && c[1]?.method === 'POST',
+    );
+    const statusGets = fetchFn.mock.calls.filter(
+      (c) => FINALIZE_STATUS_RE.test(c[0]) && (!c[1] || !c[1].method),
+    );
+    expect(finalizePosts).toHaveLength(1);
+    expect(statusGets).toHaveLength(0);
   });
 });
 
-// ── AC11: Fehlerpfad — auth-expired/failed inline, Overlay bleibt offen, Retry ─
+// ── AC11: Finalize-START-Fehlerpfad (non-202) — inline, Overlay bleibt offen ──
 
-describe('IdeaSpecifyChatModal — AC11: Finalize-Fehlerpfad (auth-expired/failed)', () => {
-  async function makeReady(fetchFn) {
-    const helpers = await renderModal({ fetchFn });
-    await waitForReady();
-
-    await act(async () => {
-      fireEvent.change(document.querySelector('[data-testid="idea-specify-input"]'), {
-        target: { value: 'Das ist alles.' },
-      });
-    });
-    await act(async () => {
-      fireEvent.click(document.querySelector('[data-testid="idea-specify-send-btn"]'));
-    });
-    await waitFor(() => {
-      expect(document.querySelector('[data-testid="idea-specify-finalize-btn"]').disabled).toBe(false);
-    });
-    return helpers;
-  }
-
-  it('status "failed" shows an inline error, the modal stays open, and the button is enabled again for a retry', async () => {
+describe('IdeaSpecifyChatModal — AC11: Finalize-Start-Fehlschlag (non-202) hält das Overlay offen', () => {
+  it('a 409 lock response shows an inline error, keeps the modal open, and allows a retry (button re-enabled)', async () => {
     const fetchFn = makeFetchFn({
-      messageBody: { reply: 'Alles klar.', readyToSpecify: true },
-      finalizeStatusFn: () => ({ status: 200, body: { status: 'failed', error: 'requirement-Agent fehlgeschlagen.' } }),
-    });
-    const { onClose, onSpecified } = await makeReady(fetchFn);
-
-    await act(async () => {
-      fireEvent.click(document.querySelector('[data-testid="idea-specify-finalize-btn"]'));
-    });
-
-    await waitFor(() => {
-      const err = document.querySelector('[data-testid="idea-specify-finalize-error"]');
-      expect(err).toBeTruthy();
-      expect(err.textContent).toMatch(/requirement-agent fehlgeschlagen/i);
-    });
-
-    // Overlay bleibt offen — kein onClose/onSpecified-Aufruf.
-    expect(onClose).not.toHaveBeenCalled();
-    expect(onSpecified).not.toHaveBeenCalled();
-    expect(document.querySelector('[data-testid="idea-specify-chat-modal"]')).toBeTruthy();
-
-    // Retry möglich: Button wieder enabled (kein Dauer-Stuck-State).
-    expect(document.querySelector('[data-testid="idea-specify-finalize-btn"]').disabled).toBe(false);
-  });
-
-  it('status "auth-expired" shows an inline error, no secret/path leak, modal stays open', async () => {
-    const fetchFn = makeFetchFn({
-      messageBody: { reply: 'Alles klar.', readyToSpecify: true },
-      finalizeStatusFn: () => ({ status: 200, body: { status: 'auth-expired', error: 'Anmeldung abgelaufen — bitte erneut versuchen.' } }),
-    });
-    await makeReady(fetchFn);
-
-    await act(async () => {
-      fireEvent.click(document.querySelector('[data-testid="idea-specify-finalize-btn"]'));
-    });
-
-    await waitFor(() => {
-      const err = document.querySelector('[data-testid="idea-specify-finalize-error"]');
-      expect(err).toBeTruthy();
-      expect(err.textContent).toMatch(/anmeldung abgelaufen/i);
-    });
-
-    expect(document.querySelector('[data-testid="idea-specify-chat-modal"]')).toBeTruthy();
-  });
-
-  it('a non-202 finalize start response (e.g. 409 lock) shows an inline error and keeps the modal usable', async () => {
-    const fetchFn = makeFetchFn({
-      messageBody: { reply: 'Alles klar.', readyToSpecify: true },
+      messageBody: READY_MSG,
       finalizeStatus: 409,
       finalizeBody: { error: 'Finalizer läuft bereits für dieses Projekt.' },
     });
-    const { onClose } = await makeReady(fetchFn);
-
-    await act(async () => {
-      fireEvent.click(document.querySelector('[data-testid="idea-specify-finalize-btn"]'));
-    });
-
-    await waitFor(() => {
-      const err = document.querySelector('[data-testid="idea-specify-finalize-error"]');
-      expect(err).toBeTruthy();
-      expect(err.textContent).toMatch(/finalizer läuft bereits/i);
-    });
-
-    expect(onClose).not.toHaveBeenCalled();
-    expect(document.querySelector('[data-testid="idea-specify-finalize-btn"]').disabled).toBe(false);
-  });
-});
-
-// ── AC7 (headless-arg-finalize-safety): Finalize "no-op" — kein stiller Erfolg ─
-
-describe('IdeaSpecifyChatModal — AC7 (headless-arg-finalize-safety): Finalize-Status "no-op"', () => {
-  async function makeReady(fetchFn) {
-    const helpers = await renderModal({ fetchFn });
-    await waitForReady();
-
-    await act(async () => {
-      fireEvent.change(document.querySelector('[data-testid="idea-specify-input"]'), {
-        target: { value: 'Das ist alles.' },
-      });
-    });
-    await act(async () => {
-      fireEvent.click(document.querySelector('[data-testid="idea-specify-send-btn"]'));
-    });
-    await waitFor(() => {
-      expect(document.querySelector('[data-testid="idea-specify-finalize-btn"]').disabled).toBe(false);
-    });
-    return helpers;
-  }
-
-  it('a status sequence running → no-op keeps the overlay open, calls neither onSpecified nor onClose, and shows a visible inline warning', async () => {
-    const fetchFn = makeFetchFn({
-      messageBody: { reply: 'Alles klar.', readyToSpecify: true },
-      finalizeStatusFn: (jobId, callIndex) =>
-        callIndex === 1
-          ? { status: 200, body: { status: 'running' } }
-          : {
-              status: 200,
-              body: {
-                status: 'no-op',
-                error: 'Es ist kein Feature/keine Story entstanden — die Idee bleibt unverändert, bitte erneut versuchen.',
-              },
-            },
-    });
-    const { onClose, onSpecified } = await makeReady(fetchFn);
+    const { onClose } = await makeReady({ fetchFn });
 
     await act(async () => {
       fireEvent.click(document.querySelector('[data-testid="idea-specify-finalize-btn"]'));
@@ -442,16 +359,174 @@ describe('IdeaSpecifyChatModal — AC7 (headless-arg-finalize-safety): Finalize-
       const err = document.querySelector('[data-testid="idea-specify-finalize-error"]');
       expect(err).toBeTruthy();
       expect(err.getAttribute('role')).toBe('alert');
-      expect(err.textContent).toMatch(/kein feature\/keine story entstanden/i);
+      expect(err.textContent).toMatch(/finalizer läuft bereits/i);
     });
 
-    // Overlay bleibt offen — kein Erfolg, kein Re-Fetch-Trigger.
+    // Overlay bleibt offen — KEIN onClose (Fire-and-forget greift nur bei 202).
     expect(onClose).not.toHaveBeenCalled();
-    expect(onSpecified).not.toHaveBeenCalled();
     expect(document.querySelector('[data-testid="idea-specify-chat-modal"]')).toBeTruthy();
-
     // Retry möglich: Button wieder enabled (kein Dauer-Stuck-State).
     expect(document.querySelector('[data-testid="idea-specify-finalize-btn"]').disabled).toBe(false);
+  });
+
+  it('a 400 (no readyToSpecify) response shows an inline error and keeps the modal open, no secret/path leak', async () => {
+    const fetchFn = makeFetchFn({
+      messageBody: READY_MSG,
+      finalizeStatus: 400,
+      finalizeBody: { field: 'readyToSpecify', message: 'Die Idee ist noch nicht bereit zum Spezifizieren.' },
+    });
+    const { onClose } = await makeReady({ fetchFn });
+
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="idea-specify-finalize-btn"]'));
+    });
+
+    await waitFor(() => {
+      const err = document.querySelector('[data-testid="idea-specify-finalize-error"]');
+      expect(err).toBeTruthy();
+      expect(err.textContent).toMatch(/noch nicht bereit/i);
+    });
+
+    expect(onClose).not.toHaveBeenCalled();
+    expect(document.querySelector('[data-testid="idea-specify-finalize-error"]').textContent)
+      .not.toMatch(/token|secret|\/Users\//i);
+    expect(document.querySelector('[data-testid="idea-specify-chat-modal"]')).toBeTruthy();
+  });
+
+  it('a network failure on the finalize start shows an inline error and keeps the modal open + retryable', async () => {
+    const fetchFn = jest.fn(async (url, opts) => {
+      if (START_RE.test(url) && opts?.method === 'POST') {
+        return { status: 201, json: async () => ({ sessionId: 'sess-1', reply: 'hi' }) };
+      }
+      if (MESSAGE_RE.test(url) && opts?.method === 'POST') {
+        return { status: 200, json: async () => READY_MSG };
+      }
+      if (FINALIZE_RE.test(url) && opts?.method === 'POST') {
+        throw new TypeError('Failed to fetch');
+      }
+      return { status: 200, json: async () => ({}) };
+    });
+    const { onClose } = await makeReady({ fetchFn });
+
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="idea-specify-finalize-btn"]'));
+    });
+
+    await waitFor(() => {
+      const err = document.querySelector('[data-testid="idea-specify-finalize-error"]');
+      expect(err).toBeTruthy();
+      expect(err.textContent).toMatch(/netzwerkfehler/i);
+    });
+
+    expect(onClose).not.toHaveBeenCalled();
+    expect(document.querySelector('[data-testid="idea-specify-finalize-btn"]').disabled).toBe(false);
+  });
+});
+
+// ── AC14: „Schließen" reagiert IMMER (auch während sending/submitting) ────────
+
+describe('IdeaSpecifyChatModal — AC14: Schließen reagiert immer', () => {
+  it('clicking "Schließen" WHILE a chat send is still in flight (sending) closes the overlay (onClose)', async () => {
+    const msg = deferred();
+    const fetchFn = jest.fn(async (url, opts) => {
+      if (START_RE.test(url) && opts?.method === 'POST') {
+        return { status: 201, json: async () => ({ sessionId: 'sess-1', reply: 'hi' }) };
+      }
+      if (MESSAGE_RE.test(url) && opts?.method === 'POST') {
+        return msg.promise; // bleibt in flight → sending bleibt true
+      }
+      return { status: 200, json: async () => ({}) };
+    });
+    const { onClose, triggerRef } = await renderModal({ fetchFn });
+    await waitForReady();
+
+    await act(async () => {
+      fireEvent.change(document.querySelector('[data-testid="idea-specify-input"]'), {
+        target: { value: 'Eine Nachricht.' },
+      });
+    });
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="idea-specify-send-btn"]'));
+    });
+    // Send ist in flight — der Button zeigt „Sende…" (sending === true).
+    expect(document.querySelector('[data-testid="idea-specify-send-btn"]').textContent).toMatch(/sende/i);
+
+    // Trotz laufendem Send MUSS „Schließen" reagieren (kein blockierender Guard).
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="idea-specify-close-btn"]'));
+    });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(triggerRef.current.focus).toHaveBeenCalled();
+
+    // Aufräumen: den in-flight-Send auflösen (Component ist noch gemountet).
+    await act(async () => {
+      msg.resolve({ status: 200, json: async () => ({ reply: 'ok', readyToSpecify: false }) });
+    });
+  });
+
+  it('Escape closes the overlay WHILE a finalize start is still in flight (submitting)', async () => {
+    const fin = deferred();
+    const fetchFn = jest.fn(async (url, opts) => {
+      if (START_RE.test(url) && opts?.method === 'POST') {
+        return { status: 201, json: async () => ({ sessionId: 'sess-1', reply: 'hi' }) };
+      }
+      if (MESSAGE_RE.test(url) && opts?.method === 'POST') {
+        return { status: 200, json: async () => READY_MSG };
+      }
+      if (FINALIZE_RE.test(url) && opts?.method === 'POST') {
+        return fin.promise; // bleibt in flight → submitting bleibt true
+      }
+      return { status: 200, json: async () => ({}) };
+    });
+    const { onClose } = await makeReady({ fetchFn });
+
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="idea-specify-finalize-btn"]'));
+    });
+    // Finalize-Start in flight — der Button zeigt „Lege Story an…" (submitting).
+    expect(document.querySelector('[data-testid="idea-specify-finalize-btn"]').textContent).toMatch(/lege story an/i);
+
+    await act(async () => {
+      fireEvent.keyDown(document.querySelector('[data-testid="idea-specify-chat-modal"]'), { key: 'Escape' });
+    });
+    expect(onClose).toHaveBeenCalledTimes(1);
+
+    // Aufräumen: den in-flight-Finalize-Start auflösen.
+    await act(async () => {
+      fin.resolve({ status: 202, json: async () => ({ jobId: 'job-1', status: 'running' }) });
+    });
+  });
+
+  it('an in-flight finalize start that resolves AFTER unmount neither throws nor calls onClose (mountedRef guard)', async () => {
+    const fin = deferred();
+    const fetchFn = jest.fn(async (url, opts) => {
+      if (START_RE.test(url) && opts?.method === 'POST') {
+        return { status: 201, json: async () => ({ sessionId: 'sess-1', reply: 'hi' }) };
+      }
+      if (MESSAGE_RE.test(url) && opts?.method === 'POST') {
+        return { status: 200, json: async () => READY_MSG };
+      }
+      if (FINALIZE_RE.test(url) && opts?.method === 'POST') {
+        return fin.promise;
+      }
+      return { status: 200, json: async () => ({}) };
+    });
+    const { onClose, unmount } = await makeReady({ fetchFn });
+
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="idea-specify-finalize-btn"]'));
+    });
+
+    // Parent entfernt das Overlay, WÄHREND der Finalize-Start noch unterwegs ist.
+    await act(async () => { unmount(); });
+
+    // Jetzt kommt die 202 zurück — der mountedRef-Guard MUSS das
+    // fire-and-forget-onClose unterdrücken (Component ist bereits unmounted).
+    await act(async () => {
+      fin.resolve({ status: 202, json: async () => ({ jobId: 'job-1', status: 'running' }) });
+    });
+
+    expect(onClose).not.toHaveBeenCalled();
   });
 });
 
@@ -547,79 +622,5 @@ describe('IdeaSpecifyChatModal — Init-Fehlerpfad (.../specify/start)', () => {
     const bubbles = document.querySelectorAll('[data-testid="idea-specify-message"]');
     expect(bubbles).toHaveLength(1);
     expect(bubbles[0].textContent).toMatch(/los geht/i);
-  });
-});
-
-// ── AC11: permanenter Nicht-200/unerkennbarer Finalize-Status → terminaler Fehler statt Endlos-Poll ──
-
-describe('IdeaSpecifyChatModal — Finalize-Polling: dauerhafter Fehlerstatus führt zu terminal error, nicht Endlos-Poll', () => {
-  async function makeReady(fetchFn) {
-    const helpers = await renderModal({ fetchFn });
-    await waitForReady();
-
-    await act(async () => {
-      fireEvent.change(document.querySelector('[data-testid="idea-specify-input"]'), {
-        target: { value: 'Das ist alles.' },
-      });
-    });
-    await act(async () => {
-      fireEvent.click(document.querySelector('[data-testid="idea-specify-send-btn"]'));
-    });
-    await waitFor(() => {
-      expect(document.querySelector('[data-testid="idea-specify-finalize-btn"]').disabled).toBe(false);
-    });
-    return helpers;
-  }
-
-  it('a permanent 404 "Unknown jobId" on the status endpoint eventually yields finalizeState: error instead of polling forever', async () => {
-    const fetchFn = makeFetchFn({
-      messageBody: { reply: 'Alles klar.', readyToSpecify: true },
-      finalizeStatusFn: () => ({ status: 404, body: { error: 'Unknown jobId' } }),
-    });
-    const { onClose, onSpecified } = await makeReady(fetchFn);
-
-    await act(async () => {
-      fireEvent.click(document.querySelector('[data-testid="idea-specify-finalize-btn"]'));
-    });
-
-    await waitFor(() => {
-      expect(document.querySelector('[data-testid="idea-specify-finalize-error"]')).toBeTruthy();
-    });
-
-    // Terminal error statt endlosem Poll — Overlay bleibt offen, kein onClose/onSpecified.
-    expect(onClose).not.toHaveBeenCalled();
-    expect(onSpecified).not.toHaveBeenCalled();
-    expect(document.querySelector('[data-testid="idea-specify-finalize-btn"]').disabled).toBe(false);
-
-    // Das Polling ist tatsächlich gestoppt: Anzahl Status-Calls bleibt danach konstant.
-    const statusCallsAfterError = fetchFn.mock.calls.filter((c) => FINALIZE_STATUS_RE.test(c[0])).length;
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    const statusCallsLater = fetchFn.mock.calls.filter((c) => FINALIZE_STATUS_RE.test(c[0])).length;
-    expect(statusCallsLater).toBe(statusCallsAfterError);
-  });
-
-  it('a single transient non-200 status blip does not trigger a terminal error (retries, then succeeds)', async () => {
-    let statusCalls = 0;
-    const fetchFn = makeFetchFn({
-      messageBody: { reply: 'Alles klar.', readyToSpecify: true },
-      finalizeStatusFn: () => {
-        statusCalls += 1;
-        if (statusCalls === 1) return { status: 404, body: { error: 'Unknown jobId' } };
-        return { status: 200, body: { status: 'done', result: 'S-901' } };
-      },
-    });
-    const { onClose, onSpecified } = await makeReady(fetchFn);
-
-    await act(async () => {
-      fireEvent.click(document.querySelector('[data-testid="idea-specify-finalize-btn"]'));
-    });
-
-    await waitFor(() => {
-      expect(onSpecified).toHaveBeenCalledWith('my-project');
-      expect(onClose).toHaveBeenCalled();
-    });
-
-    // Kein Fehler wurde je angezeigt — der einzelne Hickup wurde toleriert.
-    expect(document.querySelector('[data-testid="idea-specify-finalize-error"]')).toBeFalsy();
   });
 });

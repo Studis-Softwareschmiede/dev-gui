@@ -2,7 +2,7 @@
  * IdeaSpecifyChatModal.jsx — Chat-Overlay über dem Board, um eine Idee
  * (`story.status === 'Idee'`) im Multi-Turn-Gespräch mit Claude zu schärfen
  * und am Ende automatisch ein Feature + eine `To Do`-Story anzulegen
- * (docs/specs/idea-specify-chat.md AC1, AC10, AC11).
+ * (docs/specs/idea-specify-chat.md AC1, AC10, AC11, AC14 — v2 fire-and-forget).
  *
  * A11y-/Struktur-Muster aus `IdeaResolveModal.jsx` übernommen (Backdrop,
  * Fokus-Management beim Öffnen, `Esc` schließt, Fokus-Rückgabe an
@@ -18,59 +18,83 @@
  * (S-218, Folge-Item) — dieses Modal definiert nur den Props-Vertrag, den
  * S-218 als Konsument verwendet.
  *
+ * ── v2 (S-229) — Fire-and-forget + „Schließen reagiert immer" ─────────────
+ * AC10/AC11/AC14 sind in v2 der Spec revidiert:
+ *   - „Story anlegen" ist FIRE-AND-FORGET: sobald der Finalize-Start mit
+ *     `202 { jobId }` bestätigt ist, schließt das Overlay SOFORT (`onClose`) —
+ *     es wird im UI weder gewartet noch gepollt. Der frühere overlay-gebundene
+ *     Status-Poll-`useEffect` (bis `status !== 'running'`) ist ENTFERNT; der
+ *     Job läuft im Backend detached weiter (AC10).
+ *   - „Schließen"(X), `Esc` und Backdrop-Klick rufen `onClose` IMMER auf —
+ *     der frühere blockierende Guard (`if (sending || finalizeState === …)`)
+ *     ist ENTFERNT (AC14). Ein noch laufender Chat-Send/Finalize-Start wird
+ *     NICHT abgebrochen; ein nach Unmount auflaufender `message`-Fetch löst
+ *     dank `mountedRef`-Guard KEINEN State-Update mehr aus (AC14).
+ *   - Nur ein SYNCHRONER Fehlschlag des Finalize-STARTS (non-`202`: `409`
+ *     Lock, `400` kein `readyToSpecify`, Netzwerkfehler) hält das Overlay
+ *     offen + zeigt den Fehler inline + erlaubt Retry (AC11). Der Ausgang des
+ *     bereits gestarteten (detachten) Jobs wird NICHT mehr im Overlay
+ *     angezeigt — dafür der Board-Zustand (AC15/AC16, Watcher = S-230/AC17).
+ *
  * ── Component-Props-Vertrag (verbindlich für S-218 als Konsument) ──────────
  * @param {{
  *   projectSlug: string,
  *   story: { id: string, title?: string, notes?: string },
  *   onClose: () => void,
- *   onSpecified: (projectSlug: string) => void,
  *   triggerRef?: React.RefObject,
  *   fetchFn?: Function,
- *   pollIntervalMs?: number,
  * }} props
  *
  * - `projectSlug` — Board-Projekt-Slug (für alle vier Endpunkte).
  * - `story` — die Idee (`id` Pflicht; `title`/`notes` nur für die Überschrift,
  *   der eigentliche Seed passiert serverseitig in `.../specify/start`).
- * - `onClose` — schließt das Overlay (Abbrechen, Esc, Backdrop-Klick).
- * - `onSpecified(projectSlug)` — wird NACH erfolgreichem Finalize
- *   (Job-Status `done`) aufgerufen, BEVOR `onClose()` — der Aufrufer
- *   (BoardView/S-218) löst darüber ein Re-Fetch der Board-Daten aus, damit
- *   das neue Feature + die neue `To Do`-Story sofort erscheinen (AC10).
- * - `triggerRef` — optional; erhält beim Schließen (Esc/Abbrechen/Erfolg)
+ * - `onClose` — schließt das Overlay (Abbrechen, Esc, Backdrop-Klick, sowie
+ *   fire-and-forget nach bestätigtem Finalize-Start `202`).
+ * - `triggerRef` — optional; erhält beim Schließen (Esc/Abbrechen/202)
  *   den Fokus zurück (A11y, analog `IdeaResolveModal`).
  * - `fetchFn` — injectable `fetch` für Tests (default: `globalThis.fetch`).
- * - `pollIntervalMs` — Intervall für das Finalize-Status-Polling (default
- *   1500 ms) — als Prop injizierbar, damit Tests nicht auf echte Timer
- *   warten müssen.
+ *
+ * Hinweis: der bisherige `onSpecified(projectSlug)`-Prop entfällt in v2 — es
+ *   gibt keinen overlay-gebundenen `done`-Zeitpunkt mehr, an dem das Modal ein
+ *   Board-Re-Fetch anstoßen könnte. Das automatische Re-Fetch bei Job-Ende ist
+ *   in die overlay-unabhängige Folge-Story S-230 (AC17,
+ *   [[idea-specify-background-status]]) ausgelagert. Ein von einem Alt-Aufrufer
+ *   weiterhin übergebener `onSpecified`-Prop wird ignoriert (React verwirft
+ *   unbekannte Props einer Funktionskomponente).
  *
  * Covers (idea-specify-chat):
  *   AC1  — Chat-Overlay (Modal, Backdrop, Fokus beim Öffnen, Esc schließt,
  *          Fokus-Rückgabe an triggerRef, Bubble-Liste mit Owner-/
  *          Claude-Unterscheidung nicht nur über Farbe).
- *   AC10 — Bei Finalize-Status `done`: Overlay schließt, `onSpecified(slug)`
- *          wird aufgerufen (Re-Fetch obliegt dem Aufrufer).
- *   AC11 — `auth-expired`/`failed` → Fehler inline, Overlay bleibt offen,
- *          Retry möglich; „Story anlegen" ohne `readyToSpecify` ist
- *          deaktiviert; ein Chat-Fehler (502) zeigt einen klaren,
- *          secret-freien Fehler, Overlay bleibt nutzbar.
- *   AC3/AC4/AC6/AC7 (Backend, hier nur als Client-Aufrufer) — nicht separat
+ *   AC10 — Fire-and-forget: „Story anlegen" setzt genau EIN
+ *          POST .../specify/finalize ab; bei `202 { jobId }` schließt das
+ *          Overlay SOFORT (`onClose`), OHNE Warten/Pollen. Kein Poll-Loop mehr.
+ *   AC11 — Non-`202`-Finalize-Start (`409`/`400`/Netzwerkfehler) → Fehler
+ *          inline, Overlay bleibt offen, Retry möglich; „Story anlegen" ohne
+ *          `readyToSpecify` ist deaktiviert; ein Chat-Fehler (502) zeigt einen
+ *          klaren, secret-freien Fehler, Overlay bleibt nutzbar.
+ *   AC14 — „Schließen"(X)/`Esc`/Backdrop rufen `onClose` IMMER auf (kein
+ *          blockierender Guard mehr), auch während `sending`/Finalize-Start;
+ *          Fokus-Rückgabe an `triggerRef`; ein nach Unmount auflaufender
+ *          `message`-Fetch löst dank `mountedRef`-Guard KEINEN State-Update aus.
+ *   AC3/AC4/AC6 (Backend, hier nur als Client-Aufrufer) — nicht separat
  *          unit-getestet in dieser Datei (Backend-Contract-Tests leben in
  *          `test/ideaSpecifyRouter.test.js`); hier wird nur das
  *          Frontend-Verhalten gegen den dokumentierten Response-Shape geprüft.
- *
- * Covers (headless-arg-finalize-safety):
- *   AC7  — Finalize-Status `no-op` (gehärtetes Sicherheitsnetz meldet: weder
- *          neues Artefakt noch Idee-Transformation) wird wie ein Fehlerzustand
- *          BEHANDELT (analog `failed`/`auth-expired`, AC11 oben): inline
- *          `role="alert"`, Overlay bleibt offen, Retry möglich, KEIN
- *          `onSpecified`-Aufruf, KEIN automatisches `onClose` — im
- *          Unterschied zum `done`-Pfad (AC10).
+ *   AC15/AC16 — by-design: das Overlay zeigt den Job-Ausgang nach dem
+ *          fire-and-forget-Schließen NICHT mehr an; der durable Signalweg ist
+ *          der Board-Zustand (kein overlay-seitiger Code hier). Das
+ *          overlay-unabhängige Re-Fetch/der Status-Watcher ist S-230 (AC17).
+ *          Nicht in dieser Datei unit-getestet (kein Overlay-Code).
+ *   AC7 (idea-specify-chat, Status-Endpunkt) — der GET-Status-Poll entfällt
+ *          im Overlay mit fire-and-forget; im Modal nicht mehr aufgerufen.
  *
  * Nicht-Ziele (spiegelt Spec):
  *   Kein Tab-Wechsel-Code, keine BoardView-Verdrahtung (S-218).
  *   Keine Anzeige von `draftText` (nicht von der Spec verlangt — nur Server-
  *   seitig relevant für den Finalize-Prompt).
+ *   Keine overlay-interne Anzeige des Finalize-Ausgangs nach fire-and-forget
+ *   (AC16 — Board-Zustand ist der Signalweg; Watcher = S-230).
  *
  * Security (Floor):
  *   - Kein `dangerouslySetInnerHTML` — Chat-Text wird als reiner React-Text
@@ -81,16 +105,12 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 
-const DEFAULT_POLL_INTERVAL_MS = 1500;
-
 export function IdeaSpecifyChatModal({
   projectSlug,
   story,
   onClose,
-  onSpecified,
   triggerRef,
   fetchFn,
-  pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
 }) {
   const fetch_ = fetchFn ?? globalThis.fetch.bind(globalThis);
   const storyId = story?.id;
@@ -112,21 +132,35 @@ export function IdeaSpecifyChatModal({
   const [readyToSpecify, setReadyToSpecify] = useState(false);
   const [draftText, setDraftText] = useState(undefined);
 
-  // ── Finalize ─────────────────────────────────────────────────────────────
-  const [finalizeState, setFinalizeState] = useState('idle'); // idle|running|done|error
-  const [finalizeJobId, setFinalizeJobId] = useState(null);
+  // ── Finalize (v2 — fire-and-forget: nur der Start-Request, kein Poll-Loop) ─
+  // 'idle'    — noch nicht abgeschickt / nach non-202-Fehler wieder bereit
+  // 'submitting' — Finalize-Start-Request unterwegs (Button „Lege Story an…")
+  // 'error'   — synchroner Start-Fehlschlag (non-202); Overlay bleibt offen
+  const [finalizeState, setFinalizeState] = useState('idle');
   const [finalizeError, setFinalizeError] = useState('');
 
   const dialogRef = useRef(null);
 
+  // AC14: ein nach dem Schließen/Unmount noch auflaufender in-flight-Fetch
+  // (Chat-Send oder Finalize-Start) darf KEINEN State-Update auf der
+  // unmounteten Komponente mehr auslösen. `mountedRef` wird beim Unmount auf
+  // false gesetzt und vor jedem post-await-setState geprüft.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
   const handleClose = useCallback(() => {
-    // Doppel-Feuer-/Verlust-Schutz analog IdeaResolveModal: kein Schließen
-    // (Backdrop/Esc/„Schließen"), solange eine Nachricht gesendet oder ein
-    // Finalize-Job läuft (Review-Suggestion Iteration 2).
-    if (sending || finalizeState === 'running') return;
+    // AC14: „Schließen"(X)/Esc/Backdrop reagieren IMMER — der frühere
+    // blockierende Guard (`if (sending || finalizeState === 'running') return;`)
+    // ist bewusst entfernt (er ließ das Overlay bei laufendem Send/Finalize
+    // still „aufgehängt" wirken). Ein in-flight Chat-Send oder ein bereits
+    // gestarteter Finalize-Job wird NICHT abgebrochen — er läuft detached
+    // weiter; der `mountedRef`-Guard verhindert nur State-Updates nach Unmount.
     onClose();
     if (triggerRef?.current) triggerRef.current.focus();
-  }, [sending, finalizeState, onClose, triggerRef]);
+  }, [onClose, triggerRef]);
 
   // Fokus beim Öffnen; Esc schließt (analog IdeaResolveModal).
   useEffect(() => {
@@ -204,6 +238,7 @@ export function IdeaSpecifyChatModal({
         },
       );
     } catch {
+      if (!mountedRef.current) return; // AC14: kein State-Update nach Unmount
       setSending(false);
       setChatError('Netzwerkfehler — bitte erneut versuchen.');
       return;
@@ -212,6 +247,7 @@ export function IdeaSpecifyChatModal({
     if (res.status === 200) {
       let data = {};
       try { data = await res.json(); } catch { /* ignore */ }
+      if (!mountedRef.current) return; // AC14: kein State-Update nach Unmount
       setMessages((prev) => [...prev, { role: 'claude', text: data.reply ?? '' }]);
       setReadyToSpecify(Boolean(data.readyToSpecify));
       if (data.draftText !== undefined) setDraftText(data.draftText);
@@ -221,14 +257,21 @@ export function IdeaSpecifyChatModal({
 
     let data = {};
     try { data = await res.json(); } catch { /* ignore */ }
+    if (!mountedRef.current) return; // AC14: kein State-Update nach Unmount
     setSending(false);
     setChatError(data.message ?? data.error ?? `Nachricht konnte nicht gesendet werden (HTTP ${res.status}).`);
   }
 
+  // AC10 (v2 — fire-and-forget): genau EIN POST .../specify/finalize; bei
+  // bestätigtem Start (`202 { jobId }`) schließt das Overlay SOFORT (`onClose`),
+  // OHNE zu warten oder zu pollen — der Finalize-Kindprozess läuft im Backend
+  // detached weiter. Nur ein SYNCHRONER Start-Fehlschlag (non-202: 409 Lock,
+  // 400 kein readyToSpecify, Netzwerkfehler) hält das Overlay offen + zeigt den
+  // Fehler inline + erlaubt Retry (AC11).
   async function handleFinalize() {
-    if (!readyToSpecify || finalizeState === 'running' || !sessionId) return;
+    if (!readyToSpecify || finalizeState === 'submitting' || !sessionId) return;
 
-    setFinalizeState('running');
+    setFinalizeState('submitting');
     setFinalizeError('');
 
     let res;
@@ -238,111 +281,31 @@ export function IdeaSpecifyChatModal({
         { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId }) },
       );
     } catch {
+      if (!mountedRef.current) return; // AC14: kein State-Update nach Unmount
       setFinalizeState('error');
       setFinalizeError('Netzwerkfehler — bitte erneut versuchen.');
       return;
     }
 
     if (res.status === 202) {
-      let data = {};
-      try { data = await res.json(); } catch { /* ignore */ }
-      setFinalizeJobId(data.jobId);
-      return; // Polling übernimmt der useEffect unten.
+      // Job bestätigt gestartet → fire-and-forget: Overlay sofort schließen.
+      // Der `mountedRef`-Guard fängt den Fall ab, dass der Owner das Overlay
+      // (X/Esc/Backdrop) bereits geschlossen hat, während der Start-Request
+      // unterwegs war — dann kein doppeltes onClose.
+      if (!mountedRef.current) return;
+      handleClose();
+      return;
     }
 
     let data = {};
     try { data = await res.json(); } catch { /* ignore */ }
+    if (!mountedRef.current) return; // AC14: kein State-Update nach Unmount
     setFinalizeState('error');
     setFinalizeError(data.message ?? data.error ?? `Finalisierung konnte nicht gestartet werden (HTTP ${res.status}).`);
   }
 
-  // AC10/AC11 (idea-specify-chat) + AC7 (headless-arg-finalize-safety):
-  // Poll GET .../specify/finalize/:jobId bis status !== 'running'.
-  useEffect(() => {
-    if (finalizeState !== 'running' || !finalizeJobId) return undefined;
-
-    let cancelled = false;
-    let timer = null;
-    // Ein einzelner Netzwerk-/Nicht-200-Hickup soll nicht sofort als Fehler
-    // gewertet werden — aber ein permanent nicht auflösbarer Status (z.B.
-    // dauerhafter 404 nach Server-Neustart/Registry-Verlust, Spec-Edge-Case)
-    // darf NICHT endlos weiterpollen (Review-Fix Iteration 2, Important 2).
-    const MAX_CONSECUTIVE_POLL_FAILURES = 3;
-    let consecutiveFailures = 0;
-
-    function giveUp(message) {
-      setFinalizeState('error');
-      setFinalizeError(message);
-    }
-
-    async function poll() {
-      let res;
-      try {
-        res = await fetch_(
-          `/api/board/projects/${encodeURIComponent(projectSlug)}/ideas/${encodeURIComponent(storyId)}/specify/finalize/${encodeURIComponent(finalizeJobId)}`,
-        );
-      } catch {
-        if (cancelled) return;
-        consecutiveFailures += 1;
-        if (consecutiveFailures >= MAX_CONSECUTIVE_POLL_FAILURES) {
-          giveUp('Netzwerkfehler beim Status-Abruf — bitte erneut versuchen.');
-          return;
-        }
-        timer = setTimeout(poll, pollIntervalMs);
-        return;
-      }
-      if (cancelled) return;
-
-      let data = {};
-      try { data = await res.json(); } catch { /* ignore */ }
-
-      if (res.status === 200 && data.status && data.status !== 'running') {
-        consecutiveFailures = 0;
-
-        if (data.status === 'done') {
-          setFinalizeState('done');
-          onSpecified(projectSlug);
-          onClose();
-          return;
-        }
-
-        // 'failed' | 'auth-expired' | 'no-op' — AC11 (idea-specify-chat) /
-        // AC7 (headless-arg-finalize-safety): der `no-op`-Status (gehärtetes
-        // Sicherheitsnetz: weder neues Artefakt noch Idee-Transformation) wird
-        // GENAUSO behandelt wie ein Fehlerzustand — Fehler inline (role=alert,
-        // Text statt nur Farbe), Overlay bleibt offen, Retry möglich, KEIN
-        // onSpecified/onClose (im Unterschied zum 'done'-Pfad oben).
-        setFinalizeState('error');
-        setFinalizeError(data.error ?? 'Finalisierung fehlgeschlagen.');
-        return;
-      }
-
-      if (res.status === 200 && data.status === 'running') {
-        consecutiveFailures = 0;
-        timer = setTimeout(poll, pollIntervalMs);
-        return;
-      }
-
-      // Nicht-200 oder unerkennbarer Status: erst nach mehreren aufeinander-
-      // folgenden Fehlversuchen terminal aufgeben, sonst normal weiterpollen.
-      consecutiveFailures += 1;
-      if (consecutiveFailures >= MAX_CONSECUTIVE_POLL_FAILURES) {
-        giveUp(data.error ?? data.message ?? 'Status konnte nicht ermittelt werden — bitte erneut versuchen.');
-        return;
-      }
-      timer = setTimeout(poll, pollIntervalMs);
-    }
-
-    poll();
-    return () => {
-      cancelled = true;
-      if (timer) clearTimeout(timer);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [finalizeState, finalizeJobId]);
-
   const titleId = 'idea-specify-chat-modal-title';
-  const finalizeDisabled = !readyToSpecify || finalizeState === 'running' || initState !== 'ready';
+  const finalizeDisabled = !readyToSpecify || finalizeState === 'submitting' || initState !== 'ready';
 
   return (
     <>
@@ -432,7 +395,7 @@ export function IdeaSpecifyChatModal({
                 onClick={handleFinalize}
                 data-testid="idea-specify-finalize-btn"
               >
-                {finalizeState === 'running' ? 'Lege Story an…' : 'Story anlegen'}
+                {finalizeState === 'submitting' ? 'Lege Story an…' : 'Story anlegen'}
               </button>
             </div>
 
