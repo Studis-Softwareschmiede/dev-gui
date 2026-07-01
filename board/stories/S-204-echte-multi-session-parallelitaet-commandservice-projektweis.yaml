@@ -1,8 +1,8 @@
 id: S-204
 parent: F-029
-title: 'Echte Multi-Session-Parallelitaet: CommandService projektweise entkoppeln
-  (maxParallel>1 real)'
-status: To Do
+title: Echte Parallelität im Nacht-Drain via headless claude -p (mehrere Prozesse
+  gleichzeitig)
+status: Blocked
 priority: P2
 spec: docs/specs/taktgeber-nachtwaechter.md
 implements:
@@ -19,17 +19,36 @@ estimate_note: null
 confidence: null
 branch: null
 pr: null
-blocked_reason: null
+blocked_reason: Wartet auf headless 'claude -p'-Ausfuehrungspfad (F-035/S-206/S-207,
+  anderer Arbeitsstrang, noch in Arbeit). Alter Ansatz (CommandService entkoppeln)
+  verworfen; neu gefasst auf parallele headless claude -p Prozesse. Entblocken sobald
+  claude -p steht.
 created_at: '2026-07-01T05:34:18Z'
-updated_at: '2026-07-01T05:34:37Z'
+updated_at: '2026-07-01T10:12:36Z'
 done_at: null
-notes: 'Folge aus S-195-Review: NightWatchScheduler startet zwar maxParallel Drains,
-  aber CommandService.tryRun nutzt einen GLOBALEN JobLock (src/JobLock.js) statt des
-  projektweisen ProjectJobLock (S-190) -> nur 1 echter /flow-Anstoss gleichzeitig;
-  uebrige Projekte bekommen ''locked'' und warten auf naechsten Tick. S-195-Iteration-2
-  hat die Fehl-Blocked-Korruption behoben (locked zaehlt nicht als kein-Fortschritt),
-  aber die ECHTE Gleichzeitigkeit fehlt weiterhin. Diese Story: CommandService/PtySessionRegistry
-  so entkoppeln, dass pro Projekt-Session ein eigener Lock gilt und maxParallel>1
-  tatsaechlich mehrere /flow parallel faehrt. ACHTUNG: beruehrt den zentralen interaktiven
-  Terminal-Baustein (CommandService) -> sorgfaeltig, eigener Review. Nutzen relativiert
-  durch konto-weites Token-Limit (parallel = schneller am Limit, nicht mehr Gesamtdurchsatz).'
+notes: 'NEU GEFASST (2026-07-01, Owner-Challenge). Der urspruengliche Ansatz (interaktiven
+  CommandService/globalen JobLock projektweise entkoppeln) ist OBSOLET und wird NICHT
+  gebaut: er wuerde den zentralen interaktiven Terminal-Baustein umbauen (hohes Risiko)
+  und mehrere gleichzeitige Claude-Instanzen ueber EINE interaktive PTY erzwingen.
+
+
+  RICHTIGER Ansatz: Der Nachtwaechter-Drain (NightWatchScheduler/ProjectDrain) fuehrt
+  die /flow-Laeufe NACHTS als parallele HEADLESS ''claude -p''-Prozesse aus (one-shot,
+  non-interaktiv), authentifiziert ueber CLAUDE_CODE_OAUTH_TOKEN aus der host-.env
+  (S-206). Jeder Lauf = eigener Prozess -> echte Gleichzeitigkeit bis maxParallel
+  OHNE den interaktiven CommandService anzufassen. Der manuelle ''Board abarbeiten''-Knopf
+  + das Terminal bleiben tagsueber beim interaktiven PTY-Weg (unveraendert).
+
+
+  Ziel (Owner): das bezahlte Token-Kontingent nachts moeglichst ausschoepfen. Parallelitaet
+  hilft, weil ein einzelner /flow-Lauf die Rate wegen Tool-/CI-/IO-Wartezeiten oft
+  NICHT saettigt -> mehrere parallele Laeufe verwandeln mehr Budget in erledigte Stories.
+
+
+  ABHAENGIGKEIT / BLOCKED-GRUND: Setzt den headless-''claude -p''-Ausfuehrungspfad
+  voraus, der aktuell in einem parallelen Arbeitsstrang (F-035/F-036/F-037, S-206
+  OAuth-Token, S-207 Headless-Reconcile-Runner) noch IN ARBEIT ist. Sobald der headless-Pfad
+  steht: entblocken, ggf. splitten (Ausfuehrungs-Adapter ''claude -p'' im ProjectDrain
+  + Parallel-Orchestrierung im Scheduler + Rate-/Konflikt-Verhalten mehrerer Prozesse
+  auf demselben OAuth-Token pruefen). Zu klaeren beim Entblocken: max. sinnvolle Parallelitaet
+  auf einem Abo-Token (Rate-Limits), Fehler-/Timeout-Handling headless, Audit je Lauf.'
