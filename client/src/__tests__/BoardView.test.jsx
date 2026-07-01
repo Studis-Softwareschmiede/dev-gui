@@ -55,6 +55,25 @@
  *   AC2 — Idee-Story trägt kein ready-Badge (ready-Badge-Bedingung bleibt auf
  *          status === 'To Do' beschränkt; Cross-Ref zur Backend-Zusicherung in
  *          test/boardReadyStatus.test.js).
+ *   AC5 (S-200) — Klick auf eine Idee-Karte (status:'Idee') löst POST .../ideas/:id/
+ *          discuss aus (NICHT den Detail-Fetch); onDiscussIdea-Callback bei Erfolg
+ *          (200); dismissbarer Fehlerhinweis bei Fehlschlag (409/…), kein Callback-
+ *          Aufruf; Klick auf eine Nicht-Idee-Karte bleibt unverändert (Detail-Ansicht,
+ *          keine Regression). Der Gesprächs-Seed selbst (Titel+Body-Sanitisierung)
+ *          ist Backend-Verantwortung — abgedeckt in test/boardAggregator.test.js
+ *          (HTTP-Ebene) + test/BoardWriter.test.js (Resolve-Pfad-Pendant).
+ *          Doppelklick-Schutz (Suggestion, S-200 Iteration 2): während
+ *          discussState==='starting' ist die Idee-Karte `disabled` — verhindert
+ *          einen doppelten Seed-Write in dieselbe PTY-Session.
+ *   AC6 (S-200 Iteration 2, Finding 3) — Minimale Resolve-UI: „Idee auflösen"-Trigger
+ *          NEBEN der Idee-Karte (additiv, kein `<button>`-in-`<button>`, nur bei
+ *          status:'Idee' gerendert); Klick öffnet `IdeaResolveModal` (optionale
+ *          Felder resolved_story_ids [Komma-Liste→Array]/resolved_note). Absenden →
+ *          POST .../ideas/:id/resolve; leeres Formular sendet BEIDE Felder weg
+ *          (optional); bei Erfolg (200) schließt das Modal und die Idee wird lokal
+ *          auf `status:'Done'` gesetzt (verschwindet aus der „Idee"-Spalte); 400
+ *          zeigt Fehlermeldung inline, Modal bleibt offen; Abbrechen schließt ohne
+ *          POST.
  *
  * NOTE (jsdom-Limitation): jsdom hat keine Layout-Engine — Style-Property-Asserts beweisen
  * kein Scroll-/Layout-Verhalten; getestet werden Verhalten, Struktur, Rollen und aria.
@@ -1047,6 +1066,334 @@ describe('dev-gui-board-aggregator — AC4: Mount loads project in cockpit', () 
     globalThis.fetch = makeBoardFetch({ fullProjects: [] });
     const { getByRole } = renderCockpit('project-alpha');
     expect(getByRole('main', { name: /studis-kanban-board/i })).toBeTruthy();
+  });
+});
+
+// ── ideen-inbox AC5 (S-200): Idee-Karte-Klick startet Besprechung ────────────
+//
+// Der Gesprächs-Seed (Titel+Body) wird SERVERSEITIG aus dem Board-Index gebaut
+// (boardRouter.js buildDiscussSeed) — die Frontend-Verantwortung ist NUR: bei
+// status==='Idee' den discuss-POST statt des Detail-Fetches auslösen, den
+// Erfolgs-Callback (Pane-Wechsel) aufrufen bzw. einen Fehler sichtbar machen.
+
+/**
+ * Build a fetch mock that additionally handles POST .../ideas/:id/discuss.
+ * @param {{ fullProjects?: object[], discussStatus?: number, discussBody?: object }} opts
+ */
+function makeBoardFetchWithDiscuss({ fullProjects = [], discussStatus = 200, discussBody } = {}) {
+  const boardMock = makeBoardFetch({ fullProjects });
+  return jest.fn(async (url, options) => {
+    if (/\/ideas\/[^/]+\/discuss$/.test(url)) {
+      expect(options?.method).toBe('POST');
+      return {
+        ok: discussStatus === 200,
+        status: discussStatus,
+        json: async () => discussBody ?? (discussStatus === 200 ? { sessionId: 'project-idee' } : { error: 'Fehler' }),
+      };
+    }
+    return boardMock(url);
+  });
+}
+
+describe('ideen-inbox AC5 (S-200) — Idee-Karte-Klick startet Besprechung', () => {
+  it('Klick auf eine Idee-Karte (status:Idee) sendet POST .../ideas/:id/discuss (NICHT den Detail-Fetch)', async () => {
+    const fetchMock = makeBoardFetchWithDiscuss({ fullProjects: [PROJECT_IDEE] });
+    globalThis.fetch = fetchMock;
+    const { container } = renderCockpit('project-idee');
+
+    await waitFor(() => {
+      expect(container.querySelector(`[data-testid="story-card-btn-${STORY_IDEE.id}"]`)).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector(`[data-testid="story-card-btn-${STORY_IDEE.id}"]`));
+    });
+
+    await waitFor(() => {
+      const discussCalls = fetchMock.mock.calls.filter(([url]) => /\/ideas\/[^/]+\/discuss$/.test(url));
+      expect(discussCalls.length).toBe(1);
+      expect(discussCalls[0][0]).toBe(`/api/board/projects/project-idee/ideas/${STORY_IDEE.id}/discuss`);
+    });
+
+    // KEIN Detail-Fetch — die normale Detail-Ansicht öffnet nicht für eine Idee.
+    const detailCalls = fetchMock.mock.calls.filter(([url]) => /\/stories\/[^/]+\/detail$/.test(url));
+    expect(detailCalls.length).toBe(0);
+    expect(container.querySelector('h1')?.textContent).not.toMatch(new RegExp(STORY_IDEE.id));
+  });
+
+  it('bei Erfolg (200) ruft BoardView das onDiscussIdea-Callback auf (Cockpit wechselt ins Terminal-Pane)', async () => {
+    globalThis.fetch = makeBoardFetchWithDiscuss({ fullProjects: [PROJECT_IDEE] });
+    const onDiscussIdea = jest.fn();
+    const { container } = renderCockpit('project-idee', { onDiscussIdea });
+
+    await waitFor(() => {
+      expect(container.querySelector(`[data-testid="story-card-btn-${STORY_IDEE.id}"]`)).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector(`[data-testid="story-card-btn-${STORY_IDEE.id}"]`));
+    });
+
+    await waitFor(() => {
+      expect(onDiscussIdea).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('bei Fehler (409 — Session busy) zeigt einen dismissbaren Hinweis, ruft onDiscussIdea NICHT auf', async () => {
+    globalThis.fetch = makeBoardFetchWithDiscuss({
+      fullProjects: [PROJECT_IDEE],
+      discussStatus: 409,
+      discussBody: { error: 'Ein Command läuft bereits.' },
+    });
+    const onDiscussIdea = jest.fn();
+    const { container } = renderCockpit('project-idee', { onDiscussIdea });
+
+    await waitFor(() => {
+      expect(container.querySelector(`[data-testid="story-card-btn-${STORY_IDEE.id}"]`)).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector(`[data-testid="story-card-btn-${STORY_IDEE.id}"]`));
+    });
+
+    await waitFor(() => {
+      const banner = container.querySelector('[data-testid="idea-discuss-error"]');
+      expect(banner).toBeTruthy();
+      expect(banner.textContent).toMatch(/Ein Command läuft bereits/);
+    });
+    expect(onDiscussIdea).not.toHaveBeenCalled();
+
+    // Dismiss-Button entfernt den Hinweis wieder.
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="idea-discuss-error-dismiss"]'));
+    });
+    expect(container.querySelector('[data-testid="idea-discuss-error"]')).toBeNull();
+  });
+
+  it('Klick auf eine NICHT-Idee-Karte (status:To Do) öffnet weiterhin die normale Detail-Ansicht (keine Regression)', async () => {
+    const fetchMock = makeBoardFetchWithDetail({ fullProjects: [PROJECT_IDEE] });
+    globalThis.fetch = fetchMock;
+    const { container } = renderCockpit('project-idee');
+
+    await waitFor(() => {
+      expect(container.querySelector(`[data-testid="story-card-btn-${STORY_TODO.id}"]`)).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector(`[data-testid="story-card-btn-${STORY_TODO.id}"]`));
+    });
+
+    await waitFor(() => {
+      const h1 = container.querySelector('h1');
+      expect(h1?.textContent).toMatch(new RegExp(STORY_TODO.id));
+    });
+    const discussCalls = fetchMock.mock.calls.filter(([url]) => /\/discuss$/.test(url));
+    expect(discussCalls.length).toBe(0);
+  });
+
+  it('Doppelklick-Schutz (Suggestion): während discussState==="starting" ist die Idee-Karte disabled', async () => {
+    // discuss-Aufruf bleibt absichtlich PENDING (nie resolved) — hält discussState
+    // auf 'starting' fest, damit der Disabled-Zustand geprüft werden kann.
+    let neverResolve;
+    const boardMock = makeBoardFetch({ fullProjects: [PROJECT_IDEE] });
+    const fetchMock = jest.fn(async (url, options) => {
+      if (/\/ideas\/[^/]+\/discuss$/.test(url)) {
+        expect(options?.method).toBe('POST');
+        return new Promise(() => { neverResolve = true; });
+      }
+      return boardMock(url);
+    });
+    globalThis.fetch = fetchMock;
+    const { container } = renderCockpit('project-idee');
+
+    await waitFor(() => {
+      expect(container.querySelector(`[data-testid="story-card-btn-${STORY_IDEE.id}"]`)).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector(`[data-testid="story-card-btn-${STORY_IDEE.id}"]`));
+    });
+
+    await waitFor(() => {
+      const btn = container.querySelector(`[data-testid="story-card-btn-${STORY_IDEE.id}"]`);
+      expect(btn.disabled).toBe(true);
+    });
+    expect(neverResolve).toBe(true);
+  });
+});
+
+// ── ideen-inbox AC6 (S-200 Iteration 2, Finding 3) — Resolve-UI ───────────────
+//
+// Minimale, additive Resolve-UI: ein „Idee auflösen"-Trigger neben der Idee-
+// Karte öffnet IdeaResolveModal (optionale Felder resolved_story_ids/resolved_note).
+
+/**
+ * Build a fetch mock that additionally handles POST .../ideas/:id/resolve.
+ * @param {{ fullProjects?: object[], resolveStatus?: number, resolveBody?: object, captureBody?: Function }} opts
+ */
+function makeBoardFetchWithResolve({ fullProjects = [], resolveStatus = 200, resolveBody, captureBody } = {}) {
+  const boardMock = makeBoardFetch({ fullProjects });
+  return jest.fn(async (url, options) => {
+    if (/\/ideas\/[^/]+\/resolve$/.test(url)) {
+      expect(options?.method).toBe('POST');
+      if (captureBody) captureBody(JSON.parse(options.body ?? '{}'));
+      return {
+        ok: resolveStatus === 200,
+        status: resolveStatus,
+        json: async () => resolveBody ?? (resolveStatus === 200 ? { storyId: STORY_IDEE.id } : { error: 'Fehler' }),
+      };
+    }
+    return boardMock(url);
+  });
+}
+
+describe('ideen-inbox AC6 (S-200 Iteration 2, Finding 3) — Resolve-UI', () => {
+  it('Idee-Karte zeigt einen "Idee auflösen"-Trigger NEBEN der Karte (kein <button> im <button>); Klick öffnet das Resolve-Modal', async () => {
+    globalThis.fetch = makeBoardFetchWithResolve({ fullProjects: [PROJECT_IDEE] });
+    const { container } = renderCockpit('project-idee');
+
+    await waitFor(() => {
+      expect(container.querySelector(`[data-testid="idea-resolve-btn-${STORY_IDEE.id}"]`)).toBeTruthy();
+    });
+
+    // Nicht-Idee-Karten (status:To Do) bekommen KEINEN Auflösen-Trigger.
+    expect(container.querySelector(`[data-testid="idea-resolve-btn-${STORY_TODO.id}"]`)).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(container.querySelector(`[data-testid="idea-resolve-btn-${STORY_IDEE.id}"]`));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="idea-resolve-modal"]')).toBeTruthy();
+    });
+  });
+
+  it('Absenden mit befüllten Feldern: POST resolve mit resolved_story_ids (Komma-Liste→Array) + resolved_note; bei Erfolg schließt das Modal und die Idee verschwindet aus der "Idee"-Spalte (wird Done)', async () => {
+    let capturedBody = null;
+    globalThis.fetch = makeBoardFetchWithResolve({
+      fullProjects: [PROJECT_IDEE],
+      captureBody: (body) => { capturedBody = body; },
+    });
+    const { container } = renderCockpit('project-idee');
+
+    await waitFor(() => {
+      expect(container.querySelector(`[data-testid="idea-resolve-btn-${STORY_IDEE.id}"]`)).toBeTruthy();
+    });
+    await act(async () => {
+      fireEvent.click(container.querySelector(`[data-testid="idea-resolve-btn-${STORY_IDEE.id}"]`));
+    });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="idea-resolve-modal"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.change(container.querySelector('[data-testid="idea-resolve-story-ids-input"]'), {
+        target: { value: 'S-201, S-202' },
+      });
+      fireEvent.change(container.querySelector('[data-testid="idea-resolve-note-input"]'), {
+        target: { value: 'Verweis auf neue Spec' },
+      });
+    });
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="idea-resolve-submit-btn"]'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="idea-resolve-modal"]')).toBeNull();
+    });
+    expect(capturedBody).toEqual({
+      resolved_story_ids: ['S-201', 'S-202'],
+      resolved_note: 'Verweis auf neue Spec',
+    });
+
+    // Idee verschwindet aus der "Idee"-Spalte (optimistisches lokales status:'Done'-Update).
+    const ideeCol = container.querySelector('[data-status="Idee"]');
+    expect(ideeCol.querySelector(`[data-story="${STORY_IDEE.id}"]`)).toBeNull();
+    const doneCol = container.querySelector('[data-status="Done"]');
+    expect(doneCol.querySelector(`[data-story="${STORY_IDEE.id}"]`)).toBeTruthy();
+  });
+
+  it('Absenden mit leerem Formular sendet resolve OHNE resolved_story_ids/resolved_note (beide optional, AC6)', async () => {
+    let capturedBody = null;
+    globalThis.fetch = makeBoardFetchWithResolve({
+      fullProjects: [PROJECT_IDEE],
+      captureBody: (body) => { capturedBody = body; },
+    });
+    const { container } = renderCockpit('project-idee');
+
+    await waitFor(() => {
+      expect(container.querySelector(`[data-testid="idea-resolve-btn-${STORY_IDEE.id}"]`)).toBeTruthy();
+    });
+    await act(async () => {
+      fireEvent.click(container.querySelector(`[data-testid="idea-resolve-btn-${STORY_IDEE.id}"]`));
+    });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="idea-resolve-modal"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="idea-resolve-submit-btn"]'));
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="idea-resolve-modal"]')).toBeNull();
+    });
+    expect(capturedBody).toEqual({});
+  });
+
+  it('400 (Idee nicht auflösbar) zeigt eine Fehlermeldung inline, Modal bleibt offen (Owner kann korrigieren/abbrechen)', async () => {
+    globalThis.fetch = makeBoardFetchWithResolve({
+      fullProjects: [PROJECT_IDEE],
+      resolveStatus: 400,
+      resolveBody: { field: 'status', message: 'Idee ist nicht (mehr) auflösbar.' },
+    });
+    const { container } = renderCockpit('project-idee');
+
+    await waitFor(() => {
+      expect(container.querySelector(`[data-testid="idea-resolve-btn-${STORY_IDEE.id}"]`)).toBeTruthy();
+    });
+    await act(async () => {
+      fireEvent.click(container.querySelector(`[data-testid="idea-resolve-btn-${STORY_IDEE.id}"]`));
+    });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="idea-resolve-modal"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="idea-resolve-submit-btn"]'));
+    });
+
+    await waitFor(() => {
+      const err = container.querySelector('[data-testid="idea-resolve-error"]');
+      expect(err).toBeTruthy();
+      expect(err.textContent).toMatch(/nicht \(mehr\) auflösbar/);
+    });
+    // Modal bleibt offen.
+    expect(container.querySelector('[data-testid="idea-resolve-modal"]')).toBeTruthy();
+  });
+
+  it('Abbrechen schließt das Modal OHNE POST .../resolve', async () => {
+    const fetchMock = makeBoardFetchWithResolve({ fullProjects: [PROJECT_IDEE] });
+    globalThis.fetch = fetchMock;
+    const { container } = renderCockpit('project-idee');
+
+    await waitFor(() => {
+      expect(container.querySelector(`[data-testid="idea-resolve-btn-${STORY_IDEE.id}"]`)).toBeTruthy();
+    });
+    await act(async () => {
+      fireEvent.click(container.querySelector(`[data-testid="idea-resolve-btn-${STORY_IDEE.id}"]`));
+    });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="idea-resolve-modal"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="idea-resolve-cancel-btn"]'));
+    });
+
+    expect(container.querySelector('[data-testid="idea-resolve-modal"]')).toBeNull();
+    const resolveCalls = fetchMock.mock.calls.filter(([url]) => /\/resolve$/.test(url));
+    expect(resolveCalls.length).toBe(0);
   });
 });
 

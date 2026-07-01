@@ -12,6 +12,8 @@
  *   POST /api/board/projects/rescan                  → { ok: true }  (on-demand re-scan, AC9)
  *   GET /api/board/projects/:slug/stories/:id/detail → { detail: StoryDetail }  (read-only, lazy — AC2)
  *   POST /api/board/projects/:slug/ideas             → { storyId }  (Quick-Capture-Create, ideen-inbox AC3)
+ *   POST /api/board/projects/:slug/ideas/:id/discuss → { sessionId }  (Besprechungs-Start, ideen-inbox AC5, S-200)
+ *   POST /api/board/projects/:slug/ideas/:id/resolve → { storyId }  (explizite Auflösung, ideen-inbox AC6, S-200)
  *
  * AC5 (story-detail-ansicht — Vorab-Schätzungs-Fallback):
  *   Wenn items.jsonl für die Story kein ep_est/tok_est liefert, fällt die Soll-Ist-Ansicht
@@ -38,6 +40,40 @@
  *          Sicherheit siehe BoardWriter.js-Moduldoku); dieser Router selbst schreibt
  *          nichts. `BoardAggregator` bleibt unverändert read-only.
  *
+ * ideen-inbox (AC5, AC6, AC7, AC8 — Besprechung + Auflösung, S-200):
+ *   AC5 — POST .../ideas/:id/discuss → 200 { sessionId } startet/nutzt die interaktive
+ *          PTY-Session des Projekts (`sessionRegistry.getOrCreate()`, DIESELBE Engine
+ *          wie das „Arbeiten"-Terminal) und schreibt die Stichworte der Idee (Titel +
+ *          Body/notes) als KONVERSATIONELLEN Gesprächs-Einstieg direkt in die Session
+ *          (`pty.write()` — der GLEICHE Pfad wie freies Terminal-Tippen über
+ *          `WsGateway#handleMessage`, NICHT `CommandService.tryRun()`/die Slash-
+ *          Allowlist, KEIN `claude -p`). Der Seed wird sanitisiert (alle Steuerzeichen
+ *          inkl. Zeilenumbrüche zu Leerzeichen kollabiert → GENAU EIN Submit-`\n` am
+ *          Ende, siehe `buildDiscussSeed()`) — „keine zweite Submit-Zeile" (AC8).
+ *          Ändert den Status der Idee NICHT (bleibt `Idee`). 400 { field: 'status' }
+ *          wenn die Idee nicht (mehr) besprechbar ist (bereits aufgelöst/kein `Idee`-Item
+ *          mehr). 404 bei unbekanntem Slug/Idee. 409 wenn bereits ein Command läuft
+ *          (`commandService.getStatus().status === 'running'`, [[flow-trigger]] AC3 —
+ *          globaler Lock, spiegelt `POST /api/command`s eigene 409-Semantik) ODER
+ *          wenn das projektweite `ProjectJobLock` (`lock.tryAcquire(repoPath)`, Default:
+ *          Singleton `projectJobLock`, geteilt mit `ProjectDrain`) bereits gehalten wird —
+ *          schließt die Naht zum Taktgeber (der zwischen zwei `/flow`-Runden den globalen
+ *          CommandService-Lock freigibt, aber sein `ProjectJobLock` für die gesamte
+ *          Drain-Session hält) und schützt symmetrisch gegen zwei gleichzeitige discuss-
+ *          Aufrufe fürs selbe Projekt. Das Lock wird nur kurz (Check+PTY-Write) gehalten,
+ *          nicht für die Dauer des Gesprächs (coder-Lesson 2026-07-01).
+ *   AC6 — POST .../ideas/:id/resolve { resolved_story_ids?, resolved_note? } → 200
+ *          { storyId } setzt über `BoardWriter.resolveIdea()` (Resolve-Pfad, S-200) das
+ *          Idee-Item auf `status: Done` + `resolved_at` (+ optional resolved_story_ids/
+ *          resolved_note) — KEIN Agent-Dispatch. 400 { field } bei ungültigem Payload
+ *          ODER bereits aufgelöstem/nicht-`Idee`-Item (`field: 'status'`). 404 bei
+ *          unbekanntem Slug/Idee.
+ *   AC7 — GENAU EIN Audit-Eintrag je discuss-Start bzw. je resolve — Audit-First
+ *          (nach Validierung/Busy-Check, VOR der eigentlichen Aktion), analog AC3 oben.
+ *   AC8 — `resolveIdea()` schreibt weiterhin ausschließlich über `BoardWriter` (atomar).
+ *          Der Gesprächs-Seed (AC5) ist freier Text in die bestehende PTY — kein neuer
+ *          Board-Schreibpfad, keine Slash-Allowlist-Umgehung.
+ *
  * Security:
  *   - Read-only für alle GET-Routen (AC7 studis-kanban-board-ux).
  *   - :slug and :id parameters validated against regex before use as index lookup.
@@ -47,6 +83,13 @@
  *     validiert/sanitisiert (Steuerzeichen-Schutz, Längenlimits) — kein Roh-Schreiben
  *     im Router; projectSlug läuft durch dieselbe BOARD_ROOTS-Realpath-Schranke wie
  *     `setBlocked` (siehe BoardWriter.js).
+ *   - POST .../discuss: der Gesprächs-Seed wird VOR dem PTY-Write sanitisiert
+ *     (`buildDiscussSeed()` kollabiert alle Steuerzeichen — kein Zeilenumbruch,
+ *     keine zweite Submit-Zeile). Schreibt NICHT über `CommandService.tryRun()`/
+ *     die Slash-Allowlist — reiner PTY-Freitext-Pfad, identisch zum Terminal-Tippen.
+ *   - POST .../resolve: resolved_story_ids/resolved_note werden ausschließlich über
+ *     `BoardWriter.validateResolveInput()`/`resolveIdea()` validiert/sanitisiert;
+ *     kein Roh-Schreiben im Router.
  *   - Behind existing /api AccessGuard via server.js registration.
  *   - No secrets in output; no new authentication surface.
  *
@@ -54,7 +97,8 @@
  */
 
 import { Router } from 'express';
-import { BoardWriterError, validateIdeaInput } from './BoardWriter.js';
+import { BoardWriterError, validateIdeaInput, validateResolveInput } from './BoardWriter.js';
+import { projectJobLock } from './ProjectJobLock.js';
 
 /** Valid slug characters: alphanumeric, dash, underscore, dot. No leading slash. */
 const SLUG_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
@@ -64,6 +108,53 @@ const SLUG_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
  * Must start with alphanumeric. No path traversal possible.
  */
 const STORY_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
+
+/**
+ * Baut den konversationellen Gesprächs-Einstieg für die Besprechungs-Session
+ * (ideen-inbox AC5/AC8, S-200) aus Titel + optionalem Body einer Idee.
+ *
+ * Kollabiert JEDES Steuerzeichen (inkl. `\n`/`\r`, C0, DEL, U+2028/U+2029) im
+ * Titel/Body zu einem einzelnen Leerzeichen, BEVOR der Text in die interaktive
+ * PTY geschrieben wird — ein mehrzeiliger Stichwort-Body (z.B. aus dem
+ * Quick-Capture-Modal) würde sonst als mehrere Enter-Tastendrücke interpretiert
+ * (jede PTY-Zeile = ein Submit) und die Nachricht vorzeitig/fragmentiert
+ * abschicken. Der Aufrufer hängt GENAU EIN abschließendes `\n` an das
+ * Rückgabe-Ergebnis an — „keine zweite Submit-Zeile" (AC8).
+ *
+ * Bewusst FREIER Gesprächstext (kein Slash-Befehl, keine Allowlist-Prüfung) —
+ * geschrieben über denselben Pfad wie freies Terminal-Tippen (`pty.write()`,
+ * analog `WsGateway#handleMessage`), NICHT über `CommandService.tryRun()`.
+ *
+ * @param {{ title: unknown, body?: unknown }} idea
+ * @returns {string}
+ */
+export function buildDiscussSeed({ title, body }) {
+  // eslint-disable-next-line no-control-regex
+  const flatten = (s) => String(s).replace(/[\x00-\x1f\x7f\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const flatTitle = flatten(title ?? '');
+  const parts = [`Lass uns die folgende Idee gemeinsam zu einer Anforderung schärfen: "${flatTitle}".`];
+  if (body != null) {
+    const flatBody = flatten(body);
+    if (flatBody) parts.push(`Stichworte: ${flatBody}`);
+  }
+  return parts.join(' ');
+}
+
+/**
+ * Findet einen Story-Eintrag (Idee ODER jede andere Story) im Board-Index
+ * anhand ihrer ID — durchsucht alle Features EINSCHLIESSLICH der
+ * `_orphaned`-Pseudo-Feature (Idee-Items haben typischerweise kein `parent`
+ * und landen dort, siehe `BoardAggregator.js`).
+ *
+ * @param {object} project  Ein Eintrag aus `boardAggregator.getIndex()`.
+ * @param {string} id
+ * @returns {object|undefined}
+ */
+function _findStoryInProject(project, id) {
+  return (project.features ?? [])
+    .flatMap((f) => f.stories ?? [])
+    .find((s) => String(s.id ?? '') === String(id));
+}
 
 /**
  * Extrahiert identity-String aus req.identity (AccessGuard-Claim) — analog
@@ -82,11 +173,34 @@ function _resolveIdentity(identity) {
  * @param {import('./BoardAggregator.js').BoardAggregator} options.boardAggregator
  * @param {import('./StoryMetricReader.js').StoryMetricReader} options.storyMetricReader
  * @param {import('./NotificationWatcher.js').NotificationWatcher} [options.notificationWatcher]
- * @param {import('./BoardWriter.js').BoardWriter} [options.boardWriter]  Create-Pfad (ideen-inbox AC3).
- * @param {import('./AuditStore.js').AuditStore} [options.auditStore]  Audit je Anlage (ideen-inbox AC7).
+ * @param {import('./BoardWriter.js').BoardWriter} [options.boardWriter]  Create-/Resolve-Pfad
+ *   (ideen-inbox AC3/AC6).
+ * @param {import('./AuditStore.js').AuditStore} [options.auditStore]  Audit je Anlage/Besprechung/
+ *   Auflösung (ideen-inbox AC7).
+ * @param {{ tryRun: Function, getStatus: () => { status: string|null } }} [options.commandService]
+ *   Busy-Erkennung (`getStatus().status === 'running'`) für den Besprechungs-Start
+ *   (ideen-inbox AC5, S-200 — [[flow-trigger]] AC3-Semantik).
+ * @param {{ getOrCreate: (p: string|null) => object|null }} [options.sessionRegistry]
+ *   Multi-Session-PTY-Registry — liefert/erzeugt die Projekt-Session für den
+ *   Gesprächs-Seed (ideen-inbox AC5, S-200 — dieselbe Engine wie das Terminal).
+ * @param {import('./ProjectJobLock.js').ProjectJobLock} [options.lock]  default: Singleton
+ *   `projectJobLock` (S-190/S-192). Wird für den Besprechungs-Start (AC5) kurz
+ *   (Check+PTY-Write) um `repoPath` gehalten — schließt die Naht zum Taktgeber/
+ *   `ProjectDrain` (der dasselbe Lock für die GESAMTE Drain-Session hält, aber
+ *   den globalen `CommandService`-Lock zwischen zwei `/flow`-Runden freigibt),
+ *   siehe coder-Lesson 2026-07-01.
  * @returns {import('express').Router}
  */
-export function boardRouter({ boardAggregator, storyMetricReader, notificationWatcher, boardWriter, auditStore }) {
+export function boardRouter({
+  boardAggregator,
+  storyMetricReader,
+  notificationWatcher,
+  boardWriter,
+  auditStore,
+  commandService,
+  sessionRegistry,
+  lock = projectJobLock,
+}) {
   const router = Router();
 
   /**
@@ -414,6 +528,200 @@ export function boardRouter({ boardAggregator, storyMetricReader, notificationWa
     }
 
     return res.status(201).json({ storyId: result.storyId });
+  });
+
+  /**
+   * POST /api/board/projects/:slug/ideas/:id/discuss
+   *
+   * Besprechungs-Start (ideen-inbox AC5/AC7/AC8, S-200): startet/nutzt die
+   * interaktive PTY-Session des Projekts und lädt die Stichworte der Idee als
+   * konversationellen Gesprächs-Einstieg vor. Ändert den Status der Idee NICHT.
+   *
+   * Response 200: { sessionId }
+   * Response 400: { field: 'status', message }  (Idee nicht (mehr) besprechbar)
+   * Response 404: { error }  (Slug/Idee ungültig oder unbekannt)
+   * Response 409: { error }  (ein Command läuft bereits — [[flow-trigger]] AC3)
+   * Response 500/503: { error }  (Wiring fehlt / PTY-Write fehlgeschlagen / Session-Cap)
+   */
+  router.post('/api/board/projects/:slug/ideas/:id/discuss', async (req, res) => {
+    const { slug, id } = req.params;
+
+    if (!slug || !SLUG_RE.test(slug)) {
+      return res.status(404).json({ error: 'Projekt nicht gefunden.' });
+    }
+    if (!id || !STORY_ID_RE.test(id)) {
+      return res.status(404).json({ error: 'Idee nicht gefunden.' });
+    }
+
+    if (!commandService || !sessionRegistry) {
+      console.error('[boardRouter] POST .../discuss: commandService/sessionRegistry nicht verdrahtet');
+      return res.status(500).json({ error: 'Besprechung konnte nicht gestartet werden.' });
+    }
+
+    const projects = await boardAggregator.getIndex();
+    const project = projects.find((p) => p.slug === slug);
+    if (!project || project.error) {
+      return res.status(404).json({ error: 'Projekt nicht gefunden.' });
+    }
+
+    const storyEntry = _findStoryInProject(project, id);
+    if (!storyEntry) {
+      return res.status(404).json({ error: 'Idee nicht gefunden.' });
+    }
+
+    // Edge-Case (ideen-inbox.md): ein bereits aufgelöstes (oder aus anderem
+    // Grund nicht-`Idee`-) Item ist nicht (mehr) besprechbar.
+    if (storyEntry.status !== 'Idee') {
+      return res.status(400).json({ field: 'status', message: 'Idee ist nicht (mehr) besprechbar.' });
+    }
+
+    const repoPath = project.repo_path;
+
+    // Finding 1 (Iteration 2, coder-Lesson 2026-07-01): ProjectJobLock kurz
+    // (Check+PTY-Write) um repoPath halten — schließt die Naht zum Taktgeber/
+    // ProjectDrain (hält dasselbe Lock für die GESAMTE Drain-Session, gibt aber
+    // den globalen CommandService-Lock zwischen zwei /flow-Runden frei) UND
+    // schützt symmetrisch gegen zwei gleichzeitige discuss-Aufrufe fürs selbe
+    // Projekt. Bewusst NICHT sessionRegistry.hasSession() (isProjectBusy)
+    // übernehmen — das würde jede bereits offene Terminal-Session fälschlich
+    // blockieren (der Owner hat die Projekt-Session evtl. schon offen).
+    if (!lock.tryAcquire(repoPath)) {
+      return res.status(409).json({ error: 'Projekt wird gerade vom Taktgeber oder einer anderen Besprechung bearbeitet.' });
+    }
+
+    try {
+      // Busy-Check ([[flow-trigger]] AC3 — globaler Lock, spiegelt POST /api/command
+      // 409-Semantik): kein Start bei laufendem Command, Idee bleibt unverändert.
+      if (commandService.getStatus().status === 'running') {
+        return res.status(409).json({ error: 'Ein Command läuft bereits.' });
+      }
+
+      const targetPty = sessionRegistry.getOrCreate(repoPath);
+      if (!targetPty) {
+        // Session-Cap erreicht (analog commandRouter/WsGateway) — kein AC-Vertrag
+        // nennt diesen Fall explizit; degradiert graceful statt zu crashen.
+        return res.status(503).json({ error: 'Session-Limit erreicht — bitte später erneut versuchen.' });
+      }
+
+      const seed = buildDiscussSeed({ title: storyEntry.title, body: storyEntry.notes });
+
+      // Audit-First (AC7 — GENAU EIN Eintrag je Besprechungs-Start): schlägt
+      // record() fehl, wird NICHT in die PTY geschrieben (kein nicht-auditierter Lauf).
+      if (auditStore) {
+        try {
+          auditStore.record({
+            identity: _resolveIdentity(req.identity ?? null),
+            command: `board:idea:discuss:${slug}:${id}`,
+          });
+        } catch (auditErr) {
+          console.error('[boardRouter] Audit-Write fehlgeschlagen (POST .../discuss):', auditErr.message);
+          return res.status(500).json({ error: 'Audit-Write fehlgeschlagen — Aktion abgebrochen' });
+        }
+      }
+
+      try {
+        targetPty.write(`${seed}\n`);
+      } catch (err) {
+        console.error('[boardRouter] PTY-Write fehlgeschlagen (POST .../discuss):', err.message);
+        return res.status(500).json({ error: 'Besprechung konnte nicht gestartet werden.' });
+      }
+
+      // sessionId: die Projekt-Session ist innerhalb der PtySessionRegistry eindeutig
+      // über den (Slug-abgeleiteten) Projekt-Pfad identifiziert — der Slug ist dem
+      // Client bereits bekannt und stabil je Projekt-Session (Interpretationsentscheidung,
+      // siehe Handoff — kein separates Session-ID-Konzept in PtySessionRegistry).
+      return res.status(200).json({ sessionId: slug });
+    } finally {
+      // Lock nur kurz halten (Check+Write) — das Gespräch selbst läuft danach
+      // frei in der Terminal-Session, NICHT unter diesem Lock.
+      lock.release(repoPath);
+    }
+  });
+
+  /**
+   * POST /api/board/projects/:slug/ideas/:id/resolve
+   *
+   * Explizite Auflösung (ideen-inbox AC6/AC7/AC8, S-200): setzt das Idee-Item
+   * über `BoardWriter.resolveIdea()` auf `status: Done` + `resolved_at` (+
+   * optional resolved_story_ids/resolved_note). KEIN Agent-Dispatch.
+   *
+   * Body: { resolved_story_ids?: string[], resolved_note?: string }
+   * Response 200: { storyId }
+   * Response 400: { field, message }  (ungültiger Payload ODER nicht (mehr) auflösbar)
+   * Response 404: { error }  (Slug/Idee ungültig oder unbekannt)
+   * Response 500: { error }  (Wiring fehlt / Audit-/Schreibfehler — kein Secret-Leak)
+   */
+  router.post('/api/board/projects/:slug/ideas/:id/resolve', async (req, res) => {
+    const { slug, id } = req.params;
+
+    if (!slug || !SLUG_RE.test(slug)) {
+      return res.status(404).json({ error: 'Projekt nicht gefunden.' });
+    }
+    if (!id || !STORY_ID_RE.test(id)) {
+      return res.status(404).json({ error: 'Idee nicht gefunden.' });
+    }
+
+    if (!boardWriter) {
+      console.error('[boardRouter] POST .../resolve: boardWriter nicht verdrahtet');
+      return res.status(500).json({ error: 'Idee konnte nicht aufgelöst werden.' });
+    }
+
+    const { resolved_story_ids: resolvedStoryIdsRaw, resolved_note: resolvedNoteRaw } = req.body ?? {};
+
+    // Validierung VOR dem Audit-Eintrag — eine abgelehnte Eingabe ist KEINE
+    // versuchte Aktion und wird nicht auditiert (Audit-First gilt nur für
+    // tatsächlich versuchte Aktionen, analog POST .../ideas).
+    let validated;
+    try {
+      validated = validateResolveInput({ resolvedStoryIds: resolvedStoryIdsRaw, resolvedNote: resolvedNoteRaw });
+    } catch (err) {
+      if (err instanceof BoardWriterError) {
+        const field = err.errorClass === 'invalid-note' ? 'resolved_note' : 'resolved_story_ids';
+        return res.status(400).json({ field, message: err.message });
+      }
+      throw err;
+    }
+
+    // Audit-First (AC7 — GENAU EIN Eintrag je Auflösung): schlägt record() fehl,
+    // wird resolveIdea() NICHT aufgerufen.
+    if (auditStore) {
+      try {
+        auditStore.record({
+          identity: _resolveIdentity(req.identity ?? null),
+          command: `board:idea:resolve:${slug}:${id}`,
+        });
+      } catch (auditErr) {
+        console.error('[boardRouter] Audit-Write fehlgeschlagen (POST .../resolve):', auditErr.message);
+        return res.status(500).json({ error: 'Audit-Write fehlgeschlagen — Aktion abgebrochen' });
+      }
+    }
+
+    try {
+      await boardWriter.resolveIdea({
+        projectSlug: slug,
+        storyId: id,
+        resolvedStoryIds: validated.resolvedStoryIds,
+        resolvedNote: validated.resolvedNote,
+      });
+    } catch (err) {
+      if (err instanceof BoardWriterError) {
+        if (err.errorClass === 'not-resolvable') {
+          return res.status(400).json({ field: 'status', message: err.message });
+        }
+        if (err.errorClass === 'invalid-slug' || err.errorClass === 'project-not-found') {
+          return res.status(404).json({ error: 'Projekt nicht gefunden.' });
+        }
+        if (err.errorClass === 'story-not-found' || err.errorClass === 'invalid-story-id') {
+          return res.status(404).json({ error: 'Idee nicht gefunden.' });
+        }
+        console.error('[boardRouter] resolveIdea fehlgeschlagen:', err.errorClass, err.message);
+        return res.status(500).json({ error: 'Idee konnte nicht aufgelöst werden.' });
+      }
+      console.error('[boardRouter] resolveIdea unerwarteter Fehler:', err.message);
+      return res.status(500).json({ error: 'Idee konnte nicht aufgelöst werden.' });
+    }
+
+    return res.status(200).json({ storyId: id });
   });
 
   return router;

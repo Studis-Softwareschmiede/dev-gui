@@ -44,6 +44,13 @@
  *          Quick-Capture: Titel + optionaler Stichwort-Body → POST
  *          .../ideas). Token-frei — kein Agent, kein /flow-Trigger.
  *
+ * ideen-inbox (S-200):
+ *   AC5 — BoardView erhält onDiscussIdea-Callback: nach erfolgreichem
+ *          Besprechungs-Start (Klick auf eine Idee-Karte → POST .../discuss)
+ *          wechselt CockpitView in den Reiter „Arbeiten" (Terminal-Pane) —
+ *          derselbe Wechsel-Mechanismus wie AC8/fabric-intake-dialog
+ *          (onNavigate('factory')-Muster, hier: setActiveTab('arbeiten')).
+ *
  * reconcile-trigger (S-201) / reconcile-inline-feedback (S-205):
  *   SpecView erhält onNavigate weiterhin als Prop (Signatur-Kompatibilität),
  *   ruft sie aber NICHT mehr auf: der „Konzept/Spec nachziehen"-Button (siehe
@@ -106,6 +113,12 @@ export function CockpitView({ activeRepo, navigateFactory, onNavigate: _onNaviga
   const openSpec = useCallback((relPath) => {
     setPendingSpecPath(relPath);
     setActiveTab('spec');
+  }, []);
+
+  // ideen-inbox AC5 (S-200): Callback für BoardView — nach erfolgreichem
+  // Besprechungs-Start (Idee-Karte-Klick) in den Terminal-Pane wechseln.
+  const handleDiscussIdea = useCallback(() => {
+    setActiveTab('arbeiten');
   }, []);
 
   return (
@@ -172,7 +185,7 @@ export function CockpitView({ activeRepo, navigateFactory, onNavigate: _onNaviga
           aria-labelledby="cockpit-tab-board"
           style={styles.tabPanel}
         >
-          <BoardView lockedProject={activeRepo} onOpenSpec={openSpec} />
+          <BoardView lockedProject={activeRepo} onOpenSpec={openSpec} onDiscussIdea={handleDiscussIdea} />
         </div>
       )}
 
