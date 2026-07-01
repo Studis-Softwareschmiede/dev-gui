@@ -1,0 +1,27 @@
+id: S-221
+parent: F-041
+title: 'Doktrin-Update: manueller Board-abarbeiten-Knopf laeuft headless (CLAUDE.md
+  + ADR-017 + Supersede-Vermerke)'
+status: To Do
+priority: P1
+spec: docs/specs/headless-manual-drain.md
+implements:
+- AC7
+depends: null
+labels:
+- docs
+size_est: S
+dispo_est: '2'
+dispo_act: null
+dispo_forecast: null
+estimate_note: 'S-Heuristik: n_ac=1 (AC7), n_comp~2 (.claude/CLAUDE.md + docs/architecture.md
+  ADR-017; Supersede-Vermerke in 2 Specs sind Einzeiler), docs -> score 3 -> S. Docs-only,
+  kein Laufzeitcode; muss ZUERST landen (unblockt S-222 ohne reviewer-Drift-Gate-Fail).
+  baseline js|balanced|S ep=2.0 (n=3) als Proxy. estimator nicht dispatchbar im requirement-Agent-Kontext.'
+confidence: medium
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-07-01T20:06:45Z'
+updated_at: '2026-07-01T20:07:33Z'
+done_at: null
