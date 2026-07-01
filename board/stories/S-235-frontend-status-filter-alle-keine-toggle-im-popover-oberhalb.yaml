@@ -2,7 +2,7 @@ id: S-235
 parent: F-045
 title: 'Frontend: Status-Filter Alle/Keine-Toggle im Popover (oberhalb der Checkboxen,
   versetzt)'
-status: To Do
+status: Done
 priority: P2
 spec: docs/specs/studis-kanban-board-ux.md
 implements:
@@ -12,15 +12,16 @@ labels:
 - ui
 size_est: S
 dispo_est: '2'
-dispo_act: null
-dispo_forecast: null
+dispo_act: '3'
+dispo_forecast: '-0.3333'
 estimate_note: 'S-Heuristik: n_ac=1 (AC7), n_comp~1 (FilterBar Alle/Keine-Toggle-Button
   + setFilterStatus-Handler), label_bump+1 (ui) -> score 3 -> S. baseline.json js|balanced|S
   ep=2.0 (n=3). confidence medium. Rein Frontend, keine neue API.'
 confidence: medium
-branch: null
+branch: feat/S-235-status-filter-alle-keine-toggle
 pr: null
 blocked_reason: null
 created_at: '2026-07-01T20:49:22Z'
-updated_at: '2026-07-01T20:51:23Z'
-done_at: null
+updated_at: '2026-07-01T22:01:32Z'
+done_at: '2026-07-01T22:01:32Z'
+tok: null
