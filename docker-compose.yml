@@ -133,6 +133,12 @@ services:
       # Enables unattended operation (ADR-003); allowed because container is
       # non-root (uid 1000). Primary access control = Cloudflare Access (ADR-004).
       SESSION_ARGS: '["--dangerously-skip-permissions"]'
+      # Langlebiges Agent-Auth-Token für die gespawnten claude-PTY-Sessions
+      # (docs/specs/claude-code-oauth-token.md AC1). Quelle = host-.env
+      # (gitignored), erzeugt via `claude setup-token` (Claude-Abo nötig).
+      # Leer, wenn der Host das Token nicht setzt — kein Boot-Bruch; der
+      # Entrypoint warnt in diesem Fall nur (AC4).
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
       # Max concurrent project sessions (default: 5). Each additional open project
       # in the UI spawns one PTY session; raise if you routinely work with >5 projects.
       # SESSION_CAP: "5"

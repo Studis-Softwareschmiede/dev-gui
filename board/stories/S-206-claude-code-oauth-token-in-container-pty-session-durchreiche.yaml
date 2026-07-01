@@ -2,7 +2,7 @@ id: S-206
 parent: F-035
 title: CLAUDE_CODE_OAUTH_TOKEN in Container + PTY-Session durchreichen (compose, PtyManager-Allowlist,
   Entrypoint-Warnung, .env.example)
-status: To Do
+status: Done
 priority: P1
 spec: docs/specs/claude-code-oauth-token.md
 implements:
@@ -26,9 +26,9 @@ estimate_note: 'Heuristik: n_ac=5, n_comp=4 (docker-compose.yml, src/PtyManager.
   baseline.json js|balanced|L ep=5.0 (n=5). Sachlich eher schlanke Aenderung (1 Env-Var
   an 4 Beruehrungspunkten + Unit-Test), Score von 4 Dateien getrieben.'
 confidence: low
-branch: null
+branch: feat/S-206-claude-auth
 pr: null
 blocked_reason: null
 created_at: '2026-07-01T08:44:41Z'
-updated_at: '2026-07-01T08:45:46Z'
-done_at: null
+updated_at: '2026-07-01T08:58:56Z'
+done_at: '2026-07-01T08:58:56Z'

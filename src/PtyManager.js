@@ -157,15 +157,24 @@ export class PtyManager extends EventEmitter {
     //                            ~1h). Yes, a secret — but skills already read
     //                            the contents of `.env.gpg`, so the passphrase
     //                            is not "more secret" than what it unlocks.
+    //       • CLAUDE_CODE_OAUTH_TOKEN — langlebiges Claude-Code-Auth-Token
+    //                            (docs/specs/claude-code-oauth-token.md AC2).
+    //                            Das ist die Auth des Agenten SELBST (Abo-
+    //                            OAuth), keine server-only-Plattform-Config —
+    //                            bewusst durchgereicht, damit die gespawnte
+    //                            `claude`-Session headless funktioniert.
     //
     // Explicitly NOT on the list (server-only, must not leak to the agent):
     //   ACCESS_TEAM_DOMAIN, ACCESS_AUD, ANTHROPIC_API_KEY, OPENAI_API_KEY,
     //   NODE_ENV, DEV_NO_ACCESS, GH_TOKEN, GITHUB_TOKEN (cleared at boot anyway).
+    //   ANTHROPIC_API_KEY/OPENAI_API_KEY stay blocked even though
+    //   CLAUDE_CODE_OAUTH_TOKEN is now allowed — both conditions hold at once
+    //   (AC3 trust-boundary).
     const ALLOWED_ENV_KEYS = [
       'PATH', 'HOME', 'TERM', 'LANG', 'LC_ALL', 'LC_CTYPE',
       'USER', 'LOGNAME', 'SHELL', 'TZ',
       // Skill-Bridge:
-      'DOCKER_HOST', 'GPG_PASSPHRASE',
+      'DOCKER_HOST', 'GPG_PASSPHRASE', 'CLAUDE_CODE_OAUTH_TOKEN',
     ];
     const childEnv = {};
     for (const key of ALLOWED_ENV_KEYS) {
