@@ -389,6 +389,48 @@ function computeRollup(stories) {
   return s;
 }
 
+// ── Feature-Status-Ableitung (read-only, Anzeige) — feature-status-derivation ──
+
+/**
+ * Weakest-wins Fortschritts-Ordnung: kleinster Index = schwächste Stufe.
+ * `Blocked` ist ein Sonderfall mit höchster Priorität (nicht Teil dieser Skala).
+ * (feature-status-derivation, Vertrag „Ordnungs-Skala").
+ */
+const FEATURE_STATUS_ORDER = ['To Do', 'In Progress', 'In Review', 'Done'];
+
+/**
+ * Derive a feature status live from its child stories (read-only display value).
+ * Reine Funktion — kein Filesystem-Zugriff, keine Mutation der Eingabe.
+ *
+ * Ableitungsregel (Priorität von oben nach unten, feature-status-derivation V1–V6):
+ *   1. V1 — Stories mit `status: Idee` vollständig ausschließen (noch nicht committet).
+ *   2. V2 — bleibt ≥1 verbleibende Story `Blocked` → `Blocked` (höchste Priorität).
+ *   3. V3 — sonst schwächste vorkommende Stufe in
+ *           To Do < In Progress < In Review < Done (kleinster Index gewinnt);
+ *      V6 — unbekannter/fehlender Story-Status zählt als schwächste Stufe `To Do`.
+ *   4. V4 — keine verbleibende (nicht-Idee-)Story → `Backlog` (Default).
+ *
+ * @param {Array<{ status: string|null }>} stories
+ * @returns {'Backlog'|'To Do'|'In Progress'|'Blocked'|'In Review'|'Done'}
+ */
+export function computeFeatureStatus(stories) {
+  const list = Array.isArray(stories) ? stories : [];
+  // V1: Idee-Stories vollständig ausschließen.
+  const counted = list.filter((s) => s && s.status !== 'Idee');
+  // V4: keine verbleibende zählbare Story → Backlog.
+  if (counted.length === 0) return 'Backlog';
+  // V2: Blocked gewinnt (höchste Priorität), überschreibt jede andere Ableitung.
+  if (counted.some((s) => s.status === 'Blocked')) return 'Blocked';
+  // V3 + V6: schwächste Stufe; unbekannter/fehlender Status → schwächste Stufe (To Do).
+  let minIdx = FEATURE_STATUS_ORDER.length - 1; // Startwert: 'Done' (stärkste Stufe)
+  for (const s of counted) {
+    const idx = FEATURE_STATUS_ORDER.indexOf(s.status);
+    const rank = idx === -1 ? 0 : idx; // unbekannt/fehlend → schwächste Stufe (To Do)
+    if (rank < minIdx) minIdx = rank;
+  }
+  return FEATURE_STATUS_ORDER[minIdx];
+}
+
 // ── Tilde-Expansion ───────────────────────────────────────────────────────────
 
 /**
@@ -665,6 +707,13 @@ export class BoardAggregator {
         // Missing or stale → recalculate from child stories (read-only, no file write)
         feature.progress = computeRollup(feature.stories);
       }
+      // feature-status-derivation V5/AC5: Feature-Status IMMER live aus den
+      // Kind-Stories ableiten (V1–V4/V6) — überschreibt das persistierte YAML-
+      // status:-Feld bedingungslos (für die Anzeige nicht mehr gelesen). Read-only:
+      // reine In-Memory-Berechnung, kein Board-Datei-Schreibvorgang. Gilt nur für
+      // echte Features; das _orphaned-Pseudo-Feature wird unten mit status:null
+      // ohne Ableitung angehängt (AC7).
+      feature.status = computeFeatureStatus(feature.stories);
     }
 
     // ── Orphaned stories: add as a pseudo-feature if any ─────────────────────

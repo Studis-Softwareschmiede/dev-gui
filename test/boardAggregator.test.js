@@ -1,7 +1,9 @@
 /**
- * boardAggregator.test.js — Unit tests for BoardAggregator, parseYaml, parseBoardRoots +
+ * boardAggregator.test.js — Unit tests for BoardAggregator, parseYaml, parseBoardRoots,
+ *   computeFeatureStatus +
  *   boardRouter HTTP-Ebene (inkl. `buildDiscussSeed()` Unit-Tests, ideen-inbox S-200;
- *   includeArchived-Filter + POST .../archive-done, board-feature-archive S-232).
+ *   includeArchived-Filter + POST .../archive-done, board-feature-archive S-232;
+ *   Feature-Status-Ableitung, feature-status-derivation S-238).
  *
  * Covers (dev-gui-board-aggregator backend):
  *   AC1 — Scant konfigurierte Repo-Wurzeln read-only nach board/-Ordnern;
@@ -96,6 +98,22 @@
  *          verwendet (nie als Pfad); Fehler/Response enthalten keine Pfade/Secrets;
  *          ungültige Eingaben werden sauber abgewiesen (kein Crash).
  *
+ * Covers (feature-status-derivation, S-238 — Feature-Status live aus Kind-Stories):
+ *   AC1 — `computeFeatureStatus()` schließt Stories mit `status: Idee` vollständig
+ *          von der Zählung aus (reine-Funktion-Unit + Aggregator-Integration).
+ *   AC2 — mindestens eine verbleibende `Blocked`-Story → `Blocked` (höchste
+ *          Priorität, unabhängig von anderen vorkommenden Status).
+ *   AC3 — ohne Blocked: schwächste Stufe To Do < In Progress < In Review < Done
+ *          (jede Stufe einzeln + alle-Done→Done).
+ *   AC4 — keine Stories bzw. nur Idee-Stories → `Backlog` (Default).
+ *   AC5 — BoardAggregator setzt `feature.status` IMMER auf den abgeleiteten Wert
+ *          (ignoriert persistiertes YAML-`status:`), Progress-Rollup „X/Y done"
+ *          unverändert, keine board/-Schreibvorgänge (read-only, real tmp-Board).
+ *   AC6 — nicht-Idee-Story mit Status außerhalb der bekannten Skala → schwächste
+ *          Stufe `To Do` (nie fälschlich `Done`); auch fehlender/null-Status.
+ *   AC7 — `_orphaned`-Pseudo-Feature (verwaiste Stories/Ideen) behält `status: null`
+ *          (von der Ableitung ausgenommen).
+ *
  * AccessGuard:
  *   POST /api/board/projects/rescan (Schreib-Trigger) liegt hinter
  *   app.use('/api', accessGuard) in server.js — kein separater Middleware-Test
@@ -108,7 +126,12 @@
  */
 
 import { describe, it, expect } from '@jest/globals';
-import { BoardAggregator, parseYaml, parseBoardRoots } from '../src/BoardAggregator.js';
+import {
+  BoardAggregator,
+  parseYaml,
+  parseBoardRoots,
+  computeFeatureStatus,
+} from '../src/BoardAggregator.js';
 
 // ── parseYaml unit tests ──────────────────────────────────────────────────────
 
@@ -620,7 +643,11 @@ describe('AC3 — Aggregat model: Projekt → Feature → Story with required fi
     const f001 = index[0].features.find((f) => f.id === 'F-001');
     expect(f001).toHaveProperty('id', 'F-001');
     expect(f001).toHaveProperty('title', 'Server-Provisioning');
-    expect(f001).toHaveProperty('status', 'Active');
+    // feature-status-derivation (S-238, AC5): feature.status ist jetzt IMMER live
+    // aus den Kind-Stories abgeleitet und ignoriert das persistierte YAML-status:
+    // (Fixture: status: Active). F-001 hat S-001=Done + S-002=In Progress →
+    // weakest-wins ⇒ In Progress (schwächste vorkommende Stufe).
+    expect(f001).toHaveProperty('status', 'In Progress');
     expect(f001).toHaveProperty('priority', 'P1');
     expect(f001).toHaveProperty('progress');
     expect(f001).toHaveProperty('stories');
@@ -2645,5 +2672,265 @@ describe('boardRouter HTTP — POST /api/board/projects/:slug/archive-done (boar
     } finally {
       await new Promise((r) => server.close(r));
     }
+  });
+});
+
+// ── feature-status-derivation (S-238) — computeFeatureStatus() reine Funktion ──
+//
+// Deckt jede Ableitungs-Priorität einzeln + in Kombination ab (V1–V6 / AC1–AC6).
+// Reine Funktion — kein Filesystem, keine Mutation der Eingabe.
+
+describe('computeFeatureStatus (feature-status-derivation)', () => {
+  const story = (status) => ({ status });
+
+  // AC4 / V4 — Default bei keiner zählbaren Story.
+  it('AC4: keine Stories → Backlog', () => {
+    expect(computeFeatureStatus([])).toBe('Backlog');
+  });
+
+  it('AC4: undefined/nicht-Array → Backlog (kein Crash)', () => {
+    expect(computeFeatureStatus(undefined)).toBe('Backlog');
+    expect(computeFeatureStatus(null)).toBe('Backlog');
+  });
+
+  it('AC1+AC4: nur Idee-Stories → Backlog (Ideen ausgeschlossen, dann keine verbleibende)', () => {
+    expect(computeFeatureStatus([story('Idee'), story('Idee')])).toBe('Backlog');
+  });
+
+  // AC1 / V1 — Idee-Ausschluss vor allem anderen.
+  it('AC1: Idee-Stories werden vollständig ausgeschlossen (Idee + Done → Done)', () => {
+    expect(computeFeatureStatus([story('Idee'), story('Done')])).toBe('Done');
+  });
+
+  it('AC1: Idee wird nicht als schwächste Stufe gewertet (Idee + In Review → In Review)', () => {
+    expect(computeFeatureStatus([story('Idee'), story('In Review')])).toBe('In Review');
+  });
+
+  // AC2 / V2 — Blocked gewinnt (höchste Priorität).
+  it('AC2: eine Blocked-Story → Blocked (unabhängig von anderen Status)', () => {
+    expect(computeFeatureStatus([story('To Do'), story('Blocked'), story('Done')])).toBe('Blocked');
+  });
+
+  it('AC2: Blocked überschreibt selbst reines To Do (Blocked + To Do → Blocked)', () => {
+    expect(computeFeatureStatus([story('Blocked'), story('To Do')])).toBe('Blocked');
+  });
+
+  it('AC1+AC2: Blocked + Done + Idee → Idee raus, Blocked gewinnt', () => {
+    expect(computeFeatureStatus([story('Idee'), story('Blocked'), story('Done')])).toBe('Blocked');
+  });
+
+  // AC3 / V3 — weakest-wins: To Do < In Progress < In Review < Done.
+  it('AC3: To Do vorhanden → To Do (schwächste Stufe gewinnt)', () => {
+    expect(computeFeatureStatus([story('To Do'), story('In Progress'), story('Done')])).toBe('To Do');
+  });
+
+  it('AC3: kein To Do, aber In Progress → In Progress', () => {
+    expect(computeFeatureStatus([story('In Progress'), story('In Review'), story('Done')])).toBe('In Progress');
+  });
+
+  it('AC3: nur In Review + Done → In Review', () => {
+    expect(computeFeatureStatus([story('In Review'), story('Done')])).toBe('In Review');
+  });
+
+  it('AC3: alle verbleibenden Done → Done', () => {
+    expect(computeFeatureStatus([story('Done'), story('Done')])).toBe('Done');
+  });
+
+  // AC6 / V6 — unbekannter/fehlender Status → schwächste Stufe To Do (nie Done).
+  it('AC6: unbekannter Status → als schwächste Stufe To Do behandelt', () => {
+    expect(computeFeatureStatus([story('Frobnicating'), story('Done')])).toBe('To Do');
+  });
+
+  it('AC6: fehlender/null-Status → schwächste Stufe To Do (kein Crash)', () => {
+    expect(computeFeatureStatus([story(null), story('Done')])).toBe('To Do');
+    expect(computeFeatureStatus([{ /* kein status */ }, story('Done')])).toBe('To Do');
+  });
+
+  it('AC6: unbekannter Status verschwindet nie fälschlich als Done', () => {
+    expect(computeFeatureStatus([story('Waiting'), story('In Review')])).not.toBe('Done');
+    expect(computeFeatureStatus([story('Waiting'), story('In Review')])).toBe('To Do');
+  });
+
+  it('mutiert die Eingabe-Story-Liste nicht (reine Funktion)', () => {
+    const input = [story('Idee'), story('Done')];
+    const snapshot = JSON.parse(JSON.stringify(input));
+    computeFeatureStatus(input);
+    expect(input).toEqual(snapshot);
+  });
+});
+
+// ── feature-status-derivation (S-238) — Aggregator-Integration (AC1–AC7) ──────
+//
+// Realer BoardAggregator gegen ein echtes tmp-Board: verifiziert, dass der
+// ausgegebene feature.status IMMER abgeleitet ist (persistiertes YAML-status:
+// wird ignoriert, AC5), die Progress-Rollup unverändert bleibt, das _orphaned-
+// Pseudo-Feature status:null behält (AC7) und keine board/-Datei geschrieben wird.
+
+describe('BoardAggregator — Feature-Status-Ableitung (feature-status-derivation AC1–AC7)', () => {
+  let boardRootsDir;
+  let featuresDir;
+  let storiesDir;
+
+  beforeEach(async () => {
+    boardRootsDir = await mkdtemp(join(tmpdir(), 'boardagg-featstatus-test-'));
+    const boardDir = join(boardRootsDir, 'my-repo', 'board');
+    featuresDir = join(boardDir, 'features');
+    storiesDir = join(boardDir, 'stories');
+    await mkdir(featuresDir, { recursive: true });
+    await mkdir(storiesDir, { recursive: true });
+    await writeFile(join(boardDir, 'board.yaml'), 'schema_version: 1\nproject_slug: my-repo\n', 'utf8');
+
+    // F-100: persistiertes status: Backlog, aber einzige Story ist Done →
+    // abgeleitet MUSS Done sein (Praxis-Bug aus der Spec, AC5).
+    await writeFile(
+      join(featuresDir, 'F-100.yaml'),
+      ['id: F-100', 'title: Fertig aber Backlog persistiert', 'status: Backlog', ''].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(storiesDir, 'S-100.yaml'),
+      ['id: S-100', 'parent: F-100', 'title: Erledigt', 'status: Done', ''].join('\n'),
+      'utf8',
+    );
+
+    // F-101: persistiertes status: Done, aber eine Story Blocked → abgeleitet Blocked (AC2/AC5).
+    await writeFile(
+      join(featuresDir, 'F-101.yaml'),
+      ['id: F-101', 'title: Blockiert', 'status: Done', ''].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(storiesDir, 'S-101.yaml'),
+      ['id: S-101', 'parent: F-101', 'title: Steckt fest', 'status: Blocked', ''].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(storiesDir, 'S-102.yaml'),
+      ['id: S-102', 'parent: F-101', 'title: Fertig', 'status: Done', ''].join('\n'),
+      'utf8',
+    );
+
+    // F-102: nur eine Idee-Story → abgeleitet Backlog (AC1/AC4).
+    await writeFile(
+      join(featuresDir, 'F-102.yaml'),
+      ['id: F-102', 'title: Nur eine Idee', 'status: In Progress', ''].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(storiesDir, 'S-103.yaml'),
+      ['id: S-103', 'parent: F-102', 'title: Bloss eine Idee', 'status: Idee', ''].join('\n'),
+      'utf8',
+    );
+
+    // F-103: gar keine Story → abgeleitet Backlog (AC4).
+    await writeFile(
+      join(featuresDir, 'F-103.yaml'),
+      ['id: F-103', 'title: Leeres Feature', 'status: Done', ''].join('\n'),
+      'utf8',
+    );
+
+    // F-104: To Do + In Progress + Idee → Idee raus, schwächste = To Do (AC1/AC3).
+    await writeFile(
+      join(featuresDir, 'F-104.yaml'),
+      ['id: F-104', 'title: Gemischt', 'status: Done', ''].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(storiesDir, 'S-104.yaml'),
+      ['id: S-104', 'parent: F-104', 'title: Offen', 'status: To Do', ''].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(storiesDir, 'S-105.yaml'),
+      ['id: S-105', 'parent: F-104', 'title: Laeuft', 'status: In Progress', ''].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(storiesDir, 'S-106.yaml'),
+      ['id: S-106', 'parent: F-104', 'title: Idee-Story', 'status: Idee', ''].join('\n'),
+      'utf8',
+    );
+
+    // Verwaiste Story (parent existiert nicht) → landet im _orphaned-Pseudo-Feature (AC7).
+    await writeFile(
+      join(storiesDir, 'S-999.yaml'),
+      ['id: S-999', 'parent: F-nonexistent', 'title: Verwaist', 'status: Done', ''].join('\n'),
+      'utf8',
+    );
+  });
+
+  afterEach(async () => {
+    await rm(boardRootsDir, { recursive: true, force: true });
+  });
+
+  it('AC5: leitet Done ab, obwohl persistiertes status: Backlog ist (persistiertes Feld ignoriert)', async () => {
+    const aggregator = new BoardAggregator({ boardRootsEnv: boardRootsDir });
+    const index = await aggregator.getIndex();
+    const project = index.find((p) => p.slug === 'my-repo');
+    const f100 = project.features.find((f) => f.id === 'F-100');
+    expect(f100.status).toBe('Done');
+  });
+
+  it('AC2/AC5: Blocked-Story überschreibt persistiertes status: Done → Blocked', async () => {
+    const aggregator = new BoardAggregator({ boardRootsEnv: boardRootsDir });
+    const index = await aggregator.getIndex();
+    const project = index.find((p) => p.slug === 'my-repo');
+    const f101 = project.features.find((f) => f.id === 'F-101');
+    expect(f101.status).toBe('Blocked');
+  });
+
+  it('AC1/AC4: Feature nur mit Idee-Story → Backlog', async () => {
+    const aggregator = new BoardAggregator({ boardRootsEnv: boardRootsDir });
+    const index = await aggregator.getIndex();
+    const project = index.find((p) => p.slug === 'my-repo');
+    const f102 = project.features.find((f) => f.id === 'F-102');
+    expect(f102.status).toBe('Backlog');
+  });
+
+  it('AC4: Feature ganz ohne Story → Backlog', async () => {
+    const aggregator = new BoardAggregator({ boardRootsEnv: boardRootsDir });
+    const index = await aggregator.getIndex();
+    const project = index.find((p) => p.slug === 'my-repo');
+    const f103 = project.features.find((f) => f.id === 'F-103');
+    expect(f103.status).toBe('Backlog');
+  });
+
+  it('AC1/AC3: To Do + In Progress + Idee → Idee raus, schwächste = To Do', async () => {
+    const aggregator = new BoardAggregator({ boardRootsEnv: boardRootsDir });
+    const index = await aggregator.getIndex();
+    const project = index.find((p) => p.slug === 'my-repo');
+    const f104 = project.features.find((f) => f.id === 'F-104');
+    expect(f104.status).toBe('To Do');
+  });
+
+  it('AC7: _orphaned-Pseudo-Feature behält status: null (von der Ableitung ausgenommen)', async () => {
+    const aggregator = new BoardAggregator({ boardRootsEnv: boardRootsDir });
+    const index = await aggregator.getIndex();
+    const project = index.find((p) => p.slug === 'my-repo');
+    const orphaned = project.features.find((f) => f.id === '_orphaned');
+    expect(orphaned).toBeDefined();
+    expect(orphaned.status).toBeNull();
+  });
+
+  it('AC5: Progress-Rollup „X/Y done" bleibt unverändert (zählt Idee mit, nicht die Ableitung)', async () => {
+    const aggregator = new BoardAggregator({ boardRootsEnv: boardRootsDir });
+    const index = await aggregator.getIndex();
+    const project = index.find((p) => p.slug === 'my-repo');
+    // F-104: 3 Stories (To Do, In Progress, Idee), 0 Done → Rollup zählt alle mit.
+    const f104 = project.features.find((f) => f.id === 'F-104');
+    expect(f104.progress).toBe('0/3 done · 1 in progress');
+    // F-100: 1 Story Done → 1/1 done.
+    const f100 = project.features.find((f) => f.id === 'F-100');
+    expect(f100.progress).toBe('1/1 done');
+  });
+
+  it('AC5: read-only — kein board/-YAML wird durch den Scan verändert (byte-genau)', async () => {
+    const featurePath = join(featuresDir, 'F-100.yaml');
+    const before = await readFile(featurePath, 'utf8');
+    const aggregator = new BoardAggregator({ boardRootsEnv: boardRootsDir });
+    await aggregator.getIndex();
+    const after = await readFile(featurePath, 'utf8');
+    expect(after).toBe(before); // persistiertes status: Backlog bleibt in der Datei
+    expect(after).toContain('status: Backlog');
   });
 });
