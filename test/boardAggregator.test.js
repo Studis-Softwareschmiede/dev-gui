@@ -1,6 +1,7 @@
 /**
  * boardAggregator.test.js — Unit tests for BoardAggregator, parseYaml, parseBoardRoots +
- *   boardRouter HTTP-Ebene (inkl. `buildDiscussSeed()` Unit-Tests, ideen-inbox S-200).
+ *   boardRouter HTTP-Ebene (inkl. `buildDiscussSeed()` Unit-Tests, ideen-inbox S-200;
+ *   includeArchived-Filter + POST .../archive-done, board-feature-archive S-232).
  *
  * Covers (dev-gui-board-aggregator backend):
  *   AC1 — Scant konfigurierte Repo-Wurzeln read-only nach board/-Ordnern;
@@ -75,6 +76,25 @@
  *          mehrzeiliger Titel/Body, `\n`/`\r`/CRLF, ESC/ANSI-Sequenzen, U+2028/
  *          U+2029, eingebetteter Slash-Befehl (`/agent-flow:flow`) → Ergebnis ist
  *          IMMER genau eine Zeile ohne Steuerzeichen (kein zweites Submit möglich).
+ *
+ * Covers (board-feature-archive, S-232 — includeArchived-Filter + HTTP-Ebene;
+ * Unit-Coverage des Schreibpfads `archiveDoneFeatures()` in test/BoardWriter.test.js):
+ *   AC3 — BoardAggregator.getIndex() blendet in der Standardansicht Features mit
+ *          `archived: true` (und deren Stories) aus — auch aus Zählern/Rollups; eine
+ *          einzeln `archived: true` markierte Story (Feature sichtbar, Randfall) wird
+ *          ebenfalls ausgeblendet und der Feature-Rollup neu berechnet. Mit
+ *          `getIndex({ includeArchived: true })` erscheinen archivierte Features/Stories
+ *          zusätzlich, `archived: true` + `archived_at` durchgereicht. Der interne Index
+ *          bleibt vollständig (nicht-mutierende Standardansicht).
+ *   AC4 — POST /api/board/projects/:slug/archive-done → 200 { archivedFeatureCount,
+ *          archivedStoryCount } archiviert alle archivierbaren Features via
+ *          `BoardWriter.archiveDoneFeatures()`; GENAU EIN Audit-Eintrag (Audit-First);
+ *          0/0 ohne Fehler wenn nichts archivierbar; 404 bei ungültigem/unbekanntem Slug;
+ *          409 wenn das ProjectJobLock belegt ist (Lock danach wieder frei); 500 wenn
+ *          boardWriter fehlt (kein Crash).
+ *   AC8 — einziger Schreibpfad ist `BoardWriter`; Slug wird nur als Index-Lookup
+ *          verwendet (nie als Pfad); Fehler/Response enthalten keine Pfade/Secrets;
+ *          ungültige Eingaben werden sauber abgewiesen (kein Crash).
  *
  * AccessGuard:
  *   POST /api/board/projects/rescan (Schreib-Trigger) liegt hinter
@@ -2319,6 +2339,309 @@ describe('boardRouter HTTP — POST .../ideas/:id/resolve (ideen-inbox AC6/AC7/A
     try {
       const { status } = await httpFetch(server, '/api/board/projects/my-repo/ideas/S-42/resolve', 'POST', {});
       expect(status).toBe(500);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+});
+
+// ── board-feature-archive (S-232) — AC3: includeArchived-Filter (BoardAggregator) ──
+//
+// Realer BoardAggregator gegen ein echtes tmp-Board mit archivierten +
+// nicht-archivierten Features/Stories. Der Schreibpfad (archiveDoneFeatures) ist
+// separat in test/BoardWriter.test.js unit-getestet; hier zählt die Lese-Sicht.
+
+describe('BoardAggregator — includeArchived-Filter (board-feature-archive AC3)', () => {
+  let boardRootsDir;
+  let featuresDir;
+  let storiesDir;
+
+  beforeEach(async () => {
+    boardRootsDir = await mkdtemp(join(tmpdir(), 'boardagg-archive-test-'));
+    const boardDir = join(boardRootsDir, 'my-repo', 'board');
+    featuresDir = join(boardDir, 'features');
+    storiesDir = join(boardDir, 'stories');
+    await mkdir(featuresDir, { recursive: true });
+    await mkdir(storiesDir, { recursive: true });
+    await writeFile(join(boardDir, 'board.yaml'), 'schema_version: 1\nproject_slug: my-repo\n', 'utf8');
+
+    // F-001: archiviertes Feature samt archivierter Story S-001.
+    await writeFile(
+      join(featuresDir, 'F-001.yaml'),
+      ['id: F-001', 'title: Erledigtes Feature', 'status: Done',
+        'archived: true', "archived_at: '2026-07-02T00:00:00.000Z'", ''].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(storiesDir, 'S-001.yaml'),
+      ['id: S-001', 'parent: F-001', 'title: Erledigte Story', 'status: Done',
+        'archived: true', "archived_at: '2026-07-02T00:00:00.000Z'", ''].join('\n'),
+      'utf8',
+    );
+
+    // F-002: NICHT archiviert, zwei sichtbare Stories (Done + To Do).
+    await writeFile(
+      join(featuresDir, 'F-002.yaml'),
+      ['id: F-002', 'title: Laufendes Feature', 'status: In Progress', ''].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(storiesDir, 'S-002.yaml'),
+      ['id: S-002', 'parent: F-002', 'title: Fertige Story', 'status: Done', ''].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(storiesDir, 'S-003.yaml'),
+      ['id: S-003', 'parent: F-002', 'title: Offene Story', 'status: To Do', ''].join('\n'),
+      'utf8',
+    );
+
+    // F-003: sichtbares Feature MIT einer einzeln archivierten Story (Randfall V3).
+    await writeFile(
+      join(featuresDir, 'F-003.yaml'),
+      ['id: F-003', 'title: Feature mit Rand-Archiv-Story', 'status: Done', ''].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(storiesDir, 'S-004.yaml'),
+      ['id: S-004', 'parent: F-003', 'title: Einzeln archivierte Story', 'status: Done',
+        'archived: true', "archived_at: '2026-07-02T00:00:00.000Z'", ''].join('\n'),
+      'utf8',
+    );
+  });
+
+  afterEach(async () => {
+    await rm(boardRootsDir, { recursive: true, force: true });
+  });
+
+  it('Standardansicht (Default) blendet archivierte Features samt ihren Stories aus', async () => {
+    const aggregator = new BoardAggregator({ boardRootsEnv: boardRootsDir });
+    const index = await aggregator.getIndex();
+    const project = index.find((p) => p.slug === 'my-repo');
+    const featureIds = project.features.map((f) => f.id);
+    expect(featureIds).not.toContain('F-001');
+    expect(featureIds).toContain('F-002');
+    expect(featureIds).toContain('F-003');
+    const allStoryIds = project.features.flatMap((f) => f.stories.map((s) => s.id));
+    expect(allStoryIds).not.toContain('S-001');
+  });
+
+  it('Standardansicht: einzeln archivierte Story ausgeblendet + Feature-Rollup neu berechnet (Randfall V3)', async () => {
+    const aggregator = new BoardAggregator({ boardRootsEnv: boardRootsDir });
+    const index = await aggregator.getIndex();
+    const project = index.find((p) => p.slug === 'my-repo');
+    const f003 = project.features.find((f) => f.id === 'F-003');
+    expect(f003.stories.map((s) => s.id)).toEqual([]); // S-004 ausgeblendet
+    expect(f003.progress).toBe('0/0 done'); // Zähler/Rollup ohne die archivierte Story
+  });
+
+  it('includeArchived: true liefert archivierte Features/Stories zusätzlich, als archived markiert', async () => {
+    const aggregator = new BoardAggregator({ boardRootsEnv: boardRootsDir });
+    const index = await aggregator.getIndex({ includeArchived: true });
+    const project = index.find((p) => p.slug === 'my-repo');
+    const f001 = project.features.find((f) => f.id === 'F-001');
+    expect(f001).toBeDefined();
+    expect(f001.archived).toBe(true);
+    expect(f001.archived_at).toBe('2026-07-02T00:00:00.000Z');
+    const s001 = f001.stories.find((s) => s.id === 'S-001');
+    expect(s001.archived).toBe(true);
+    expect(s001.archived_at).toBe('2026-07-02T00:00:00.000Z');
+    // Einzeln archivierte Story unter sichtbarem Feature: mit includeArchived sichtbar+markiert.
+    const f003 = project.features.find((f) => f.id === 'F-003');
+    expect(f003.stories.find((s) => s.id === 'S-004').archived).toBe(true);
+  });
+
+  it('Standardansicht mutiert den internen Index nicht — includeArchived bleibt vollständig', async () => {
+    const aggregator = new BoardAggregator({ boardRootsEnv: boardRootsDir });
+    await aggregator.getIndex(); // gefilterte Standardansicht zuerst anfordern
+    const full = await aggregator.getIndex({ includeArchived: true });
+    const project = full.find((p) => p.slug === 'my-repo');
+    expect(project.features.map((f) => f.id)).toContain('F-001');
+  });
+
+  it('nicht-archivierte Features/Stories tragen archived:false + archived_at:null', async () => {
+    const aggregator = new BoardAggregator({ boardRootsEnv: boardRootsDir });
+    const index = await aggregator.getIndex();
+    const project = index.find((p) => p.slug === 'my-repo');
+    const f002 = project.features.find((f) => f.id === 'F-002');
+    expect(f002.archived).toBe(false);
+    expect(f002.archived_at).toBeNull();
+    const s002 = f002.stories.find((s) => s.id === 'S-002');
+    expect(s002.archived).toBe(false);
+    expect(s002.archived_at).toBeNull();
+  });
+});
+
+// ── board-feature-archive (S-232) — AC4/AC8: POST .../archive-done (HTTP-Ebene) ──
+//
+// Realer BoardAggregator + realer BoardWriter gegen dasselbe tmp-Board (der
+// einzige Schreibpfad, AC8). Frische ProjectJobLock-Instanz je Server
+// (Test-Isolation + adversariale 409-Tests), analog discuss.
+
+describe('boardRouter HTTP — POST /api/board/projects/:slug/archive-done (board-feature-archive AC4/AC8)', () => {
+  let boardRootsDir;
+  let featuresDir;
+  let storiesDir;
+
+  beforeEach(async () => {
+    boardRootsDir = await mkdtemp(join(tmpdir(), 'boardrouter-archive-test-'));
+    const boardDir = join(boardRootsDir, 'my-repo', 'board');
+    featuresDir = join(boardDir, 'features');
+    storiesDir = join(boardDir, 'stories');
+    await mkdir(featuresDir, { recursive: true });
+    await mkdir(storiesDir, { recursive: true });
+    await writeFile(join(boardDir, 'board.yaml'), 'schema_version: 1\nproject_slug: my-repo\n', 'utf8');
+  });
+
+  afterEach(async () => {
+    await rm(boardRootsDir, { recursive: true, force: true });
+  });
+
+  async function writeArchivableFeature() {
+    // F-010 vollständig erledigt (zwei Done-Stories) → archivierbar (V1).
+    await writeFile(
+      join(featuresDir, 'F-010.yaml'),
+      ['id: F-010', 'title: Fertig', 'status: Done', "updated_at: '2026-07-01T00:00:00.000Z'", ''].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(storiesDir, 'S-010.yaml'),
+      ['id: S-010', 'parent: F-010', 'title: A', 'status: Done', "updated_at: '2026-07-01T00:00:00.000Z'", ''].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(storiesDir, 'S-011.yaml'),
+      ['id: S-011', 'parent: F-010', 'title: B', 'status: Done', "updated_at: '2026-07-01T00:00:00.000Z'", ''].join('\n'),
+      'utf8',
+    );
+  }
+
+  function makeDeps({ lock = new ProjectJobLock(), auditStore = new AuditStore() } = {}) {
+    const boardAggregator = new BoardAggregator({ boardRootsEnv: boardRootsDir });
+    const boardWriter = new BoardWriter({ boardRootsEnv: boardRootsDir });
+    return { boardAggregator, boardWriter, auditStore, lock };
+  }
+
+  it('200 happy path: archiviert das erledigte Feature, GENAU EIN Audit-Eintrag, { counts }, Lock danach frei', async () => {
+    await writeArchivableFeature();
+    const { boardAggregator, boardWriter, auditStore, lock } = makeDeps();
+    const server = await startServer(boardAggregator, null, { boardWriter, auditStore, lock });
+    try {
+      const project = (await boardAggregator.getIndex({ includeArchived: true })).find((p) => p.slug === 'my-repo');
+
+      const { status, data } = await httpFetch(server, '/api/board/projects/my-repo/archive-done', 'POST');
+      expect(status).toBe(200);
+      expect(data).toEqual({ archivedFeatureCount: 1, archivedStoryCount: 2 });
+
+      const rawF = await readFile(join(featuresDir, 'F-010.yaml'), 'utf8');
+      expect(rawF).toContain('archived: true');
+      const rawS = await readFile(join(storiesDir, 'S-010.yaml'), 'utf8');
+      expect(rawS).toContain('archived: true');
+      expect(rawS).toContain('status: Done'); // Story-Status bleibt Done (V2)
+
+      const entries = auditStore.getAll();
+      expect(entries.length).toBe(1);
+      expect(entries[0].command).toBe('board:archive-done:my-repo');
+
+      expect(lock.isHeld(project.repo_path)).toBe(false);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('200 { 0, 0 } ohne Fehler, wenn nichts archivierbar ist (immer noch GENAU EIN Audit-Eintrag)', async () => {
+    const { boardAggregator, boardWriter, auditStore, lock } = makeDeps();
+    const server = await startServer(boardAggregator, null, { boardWriter, auditStore, lock });
+    try {
+      const { status, data } = await httpFetch(server, '/api/board/projects/my-repo/archive-done', 'POST');
+      expect(status).toBe(200);
+      expect(data).toEqual({ archivedFeatureCount: 0, archivedStoryCount: 0 });
+      expect(auditStore.getAll().length).toBe(1);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('nach dem Archivieren ist das Feature aus der Standardansicht verschwunden (AC3+AC4 end-to-end)', async () => {
+    await writeArchivableFeature();
+    const { boardAggregator, boardWriter, auditStore, lock } = makeDeps();
+    const server = await startServer(boardAggregator, null, { boardWriter, auditStore, lock });
+    try {
+      const { status } = await httpFetch(server, '/api/board/projects/my-repo/archive-done', 'POST');
+      expect(status).toBe(200);
+
+      // Frischer Scan (die Dateien tragen jetzt archived: true) → Standardansicht ohne F-010.
+      const fresh = new BoardAggregator({ boardRootsEnv: boardRootsDir });
+      const project = (await fresh.getIndex()).find((p) => p.slug === 'my-repo');
+      expect(project.features.map((f) => f.id)).not.toContain('F-010');
+      // mit includeArchived ist F-010 (jetzt archived) wieder sichtbar.
+      const withArchived = (await fresh.getIndex({ includeArchived: true })).find((p) => p.slug === 'my-repo');
+      const f010 = withArchived.features.find((f) => f.id === 'F-010');
+      expect(f010.archived).toBe(true);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('404 bei ungültigem Slug-Format (führendes Sonderzeichen)', async () => {
+    const { boardAggregator, boardWriter, auditStore, lock } = makeDeps();
+    const server = await startServer(boardAggregator, null, { boardWriter, auditStore, lock });
+    try {
+      const { status, data } = await httpFetch(server, '/api/board/projects/-badslug/archive-done', 'POST');
+      expect(status).toBe(404);
+      // AC8: keine Pfade/Secrets in der Ausgabe.
+      expect(JSON.stringify(data)).not.toContain(boardRootsDir);
+      expect(auditStore.getAll()).toEqual([]);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('404 bei unbekanntem Projekt-Slug (nicht unter BOARD_ROOTS) — KEIN Audit', async () => {
+    const { boardAggregator, boardWriter, auditStore, lock } = makeDeps();
+    const server = await startServer(boardAggregator, null, { boardWriter, auditStore, lock });
+    try {
+      const { status } = await httpFetch(server, '/api/board/projects/does-not-exist/archive-done', 'POST');
+      expect(status).toBe(404);
+      expect(auditStore.getAll()).toEqual([]);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('409 wenn das projektweite ProjectJobLock bereits gehalten wird — KEIN Audit, nichts archiviert, Lock danach unverändert gehalten', async () => {
+    await writeArchivableFeature();
+    const lock = new ProjectJobLock();
+    const { boardAggregator, boardWriter, auditStore } = makeDeps({ lock });
+    const server = await startServer(boardAggregator, null, { boardWriter, auditStore, lock });
+    try {
+      const project = (await boardAggregator.getIndex({ includeArchived: true })).find((p) => p.slug === 'my-repo');
+      // Simuliert: Taktgeber/Drain hält das Lock bereits.
+      expect(lock.tryAcquire(project.repo_path)).toBe(true);
+
+      const { status, data } = await httpFetch(server, '/api/board/projects/my-repo/archive-done', 'POST');
+      expect(status).toBe(409);
+      expect(JSON.stringify(data)).not.toContain(boardRootsDir);
+      expect(auditStore.getAll()).toEqual([]);
+
+      // Nichts wurde archiviert.
+      const rawF = await readFile(join(featuresDir, 'F-010.yaml'), 'utf8');
+      expect(rawF).not.toContain('archived: true');
+
+      // Der externe Lock-Halter behält das Lock (der Endpunkt hat es NICHT freigegeben).
+      expect(lock.isHeld(project.repo_path)).toBe(true);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('500 wenn boardWriter nicht verdrahtet ist (kein Crash, kein Secret-Leak)', async () => {
+    const boardAggregator = new BoardAggregator({ boardRootsEnv: boardRootsDir });
+    const server = await startServer(boardAggregator, null, { auditStore: new AuditStore() });
+    try {
+      const { status, data } = await httpFetch(server, '/api/board/projects/my-repo/archive-done', 'POST');
+      expect(status).toBe(500);
+      expect(JSON.stringify(data)).not.toContain(boardRootsDir);
     } finally {
       await new Promise((r) => server.close(r));
     }

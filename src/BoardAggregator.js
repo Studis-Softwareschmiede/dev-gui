@@ -444,6 +444,14 @@ export class BoardAggregator {
    * @type {Array<ProjectEntry|ErrorEntry>|null}
    */
   #index = null;
+  /**
+   * Memoized Standardansicht (archivierte Features/Stories ausgeblendet, AC3/V3).
+   * Abgeleitet aus `#index`; wird bei jedem Index-Wechsel (scan/Watcher) verworfen,
+   * damit wiederholte `getIndex()`-Aufrufe ohne Re-Scan dieselbe Referenz liefern
+   * (AC2 — flüchtiger Index, kein Re-Scan bei wiederholtem Lesen).
+   * @type {Array<ProjectEntry|ErrorEntry>|null}
+   */
+  #standardIndex = null;
   /** Active watchers (AbortController per watched path). */
   #watchers = [];
 
@@ -494,8 +502,9 @@ export class BoardAggregator {
       }
     }
 
-    // Atomically replace the index
+    // Atomically replace the index (+ verwerfe die abgeleitete Standardansicht).
     this.#index = projects;
+    this.#standardIndex = null;
   }
 
   /**
@@ -553,6 +562,11 @@ export class BoardAggregator {
           definition_of_done: data.definition_of_done ?? null,
           depends: Array.isArray(data.depends) ? data.depends.map(String) : null,
           labels: Array.isArray(data.labels) ? data.labels.map(String) : null,
+          // board-feature-archive AC3: In-place-Archiv-Flag (additiv/optional).
+          // Fehlt das YAML-Feld → archived: false (nicht archiviert). Standardansicht
+          // (getIndex ohne includeArchived) blendet archived===true aus.
+          archived: data.archived === true,
+          archived_at: data.archived_at != null ? String(data.archived_at) : null,
           stories: [],
         });
       } catch {
@@ -608,6 +622,11 @@ export class BoardAggregator {
           done_at: data.done_at != null ? String(data.done_at) : null,
           branch: data.branch != null ? String(data.branch) : null,
           pr: data.pr != null ? String(data.pr) : null,
+          // board-feature-archive AC3: In-place-Archiv-Flag (additiv/optional).
+          // Fehlt das YAML-Feld → archived: false. Standardansicht blendet
+          // archived===true aus (auch einzeln-archivierte Stories — Randfall V3).
+          archived: data.archived === true,
+          archived_at: data.archived_at != null ? String(data.archived_at) : null,
           // ready/ready_reason computed below after all stories are parsed
           ready: false,
           ready_reason: null,
@@ -678,13 +697,71 @@ export class BoardAggregator {
   /**
    * Return the current in-memory index. If not yet scanned, triggers a scan first.
    *
+   * board-feature-archive AC3 (V3): In der Standardansicht (`includeArchived`
+   * false, Default) werden Features mit `archived: true` (und deren Stories)
+   * ausgeblendet — sie erscheinen weder in der Feature-Liste noch in den
+   * Zählern/Rollups. Eine einzeln `archived: true` markierte Story (deren Feature
+   * sichtbar bliebe — Randfall) wird ebenfalls ausgeblendet; der Feature-Rollup
+   * wird dann aus den verbleibenden (sichtbaren) Stories neu berechnet. Mit
+   * `includeArchived: true` wird der vollständige Index geliefert — archivierte
+   * Features/Stories tragen dabei `archived: true` + `archived_at` (durchgereicht).
+   *
+   * Der interne `#index` bleibt stets vollständig (inkl. Archivierte); die
+   * Standardansicht ist eine gefilterte, nicht-mutierende Kopie.
+   *
+   * @param {{ includeArchived?: boolean }} [options]
    * @returns {Promise<Array<ProjectEntry|ErrorEntry>>}
    */
-  async getIndex() {
+  async getIndex({ includeArchived = false } = {}) {
     if (this.#index === null) {
       await this.scan();
     }
-    return this.#index;
+    if (includeArchived) {
+      return this.#index;
+    }
+    // Standardansicht memoisieren: wiederholte getIndex()-Aufrufe ohne Re-Scan
+    // liefern dieselbe Referenz (AC2), die abgeleitete Sicht wird bei Index-Wechsel
+    // (scan/Watcher) verworfen.
+    if (this.#standardIndex === null) {
+      this.#standardIndex = this.#index.map((project) => this._filterArchived(project));
+    }
+    return this.#standardIndex;
+  }
+
+  /**
+   * Build a standard-view copy of a project entry with archived features/stories
+   * removed (board-feature-archive AC3/V3). Non-mutating: the internal `#index`
+   * keeps the full data. Error entries pass through unchanged.
+   *
+   * @param {ProjectEntry|ErrorEntry} project
+   * @returns {ProjectEntry|ErrorEntry}
+   * @private
+   */
+  _filterArchived(project) {
+    if (project.error) return project; // Fehler-Board (features: []) unverändert.
+
+    const features = [];
+    for (const feature of project.features ?? []) {
+      // Archiviertes Feature (samt Stories) komplett aus der Standardansicht.
+      if (feature.archived === true) continue;
+
+      const stories = feature.stories ?? [];
+      const visibleStories = stories.filter((s) => s.archived !== true);
+      if (visibleStories.length === stories.length) {
+        // Nichts entfernt → Feature unverändert übernehmen (Original-Rollup bleibt,
+        // inkl. eines evtl. aus dem YAML gelesenen progress-Werts).
+        features.push(feature);
+      } else {
+        // Einzeln-archivierte Story entfernt (Randfall) → Rollup aus den sichtbaren
+        // Stories neu berechnen, damit Zähler/Rollup keine Archivierten zählen (V3).
+        features.push({
+          ...feature,
+          stories: visibleStories,
+          progress: computeRollup(visibleStories),
+        });
+      }
+    }
+    return { ...project, features };
   }
 
   /**
@@ -735,6 +812,7 @@ export class BoardAggregator {
         if (debounceTimer !== null) clearTimeout(debounceTimer);
         debounceTimer = setTimeout(() => {
           this.#index = null;
+          this.#standardIndex = null;
           debounceTimer = null;
         }, 200);
       }
@@ -786,6 +864,8 @@ export class BoardAggregator {
  *   definition_of_done: string|null,
  *   depends: string[]|null,
  *   labels: string[]|null,
+ *   archived: boolean,
+ *   archived_at: string|null,
  *   stories: StoryEntry[]
  * }} FeatureEntry
  *
@@ -806,6 +886,8 @@ export class BoardAggregator {
  *   done_at: string|null,
  *   branch: string|null,
  *   pr: string|null,
+ *   archived: boolean,
+ *   archived_at: string|null,
  *   ready: boolean,
  *   ready_reason: string|null
  * }} StoryEntry
