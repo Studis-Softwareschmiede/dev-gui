@@ -2,7 +2,7 @@ id: S-210
 parent: F-038
 title: Audit-Spec-Ausgabe von der Sidebar in die rechte Haupt-Inhaltsflaeche verlagern
   (Button bleibt links)
-status: To Do
+status: Done
 priority: P2
 spec: docs/specs/audit-spec-main-pane.md
 implements:
@@ -30,9 +30,9 @@ estimate_note: 'Heuristik: n_ac=7, n_comp=2 (SpecView.jsx, docs/spec-audit.md), 
   Sidebar in Haupt-Inhaltsflaeche), Auto-Reload (S-205) + PR-Bezug + 404/Fehlerzustaende
   erhalten; bestehende SpecViewAuditSpec-Tests anpassen + neue ''rechts nicht Sidebar''-Tests.'
 confidence: medium
-branch: null
+branch: feat/S-210-audit-main-pane
 pr: null
 blocked_reason: null
 created_at: '2026-07-01T11:06:46Z'
-updated_at: '2026-07-01T11:07:05Z'
-done_at: null
+updated_at: '2026-07-01T11:26:19Z'
+done_at: '2026-07-01T11:26:19Z'

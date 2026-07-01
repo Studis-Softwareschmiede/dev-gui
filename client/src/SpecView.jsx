@@ -105,9 +105,40 @@
  *        Markdown wird über MarkdownLite gerendert und ist sichtbar.
  * AC3 — 404 (Datei fehlt) → freundlicher Hinweis „noch kein Reconcile-Lauf"
  *        (role="status"), keine rohe Fehlermeldung, kein Crash.
- * AC4 — Zugänglicher Lade-Zustand während des Ladens; Netzwerkfehler/500/
- *        unerwarteter Status → sichtbare, neutrale Fehleranzeige (role="alert"),
- *        kein Crash, übriger Reiter bleibt bedienbar.
+ * AC4 — **überschrieben durch audit-spec-main-pane (S-210) AC4** — Zugänglicher
+ *        Lade-Zustand während des Ladens; Netzwerkfehler/500/unerwarteter
+ *        Status → sichtbare, neutrale Fehleranzeige (role="alert"), kein
+ *        Crash, übriger Reiter bleibt bedienbar. Die Zustände erscheinen jetzt
+ *        in der Haupt-Inhaltsfläche statt in der Sidebar.
+ *
+ * audit-spec-main-pane (S-210) — Ausgabe von AuditSpecView (S-203) verlagert
+ * von der schmalen linken Sidebar in die rechte Haupt-Inhaltsfläche (derselbe
+ * Content-Container, in dem ein per Navigation gewähltes Dokument erscheint).
+ * Der Button selbst bleibt an seiner Stelle in der Sidebar:
+ * AC1 — Button bleibt links (Position/Label/Touch-Target unverändert); keine
+ *        gerenderte Markdown-Ausgabe mehr innerhalb der Sidebar.
+ * AC2 — Klick löst weiterhin genau einen GET .../docs/raw?path=docs/spec-audit.md
+ *        aus; Markdown wird über MarkdownLite in der rechten Haupt-
+ *        Inhaltsfläche gerendert (gleicher Content-Container/Breite/Padding/
+ *        Scroll wie ein per Navigation gewähltes Dokument).
+ * AC3 — Umschalten statt Doppelanzeige: Klick auf „Audit-Spec anzeigen"
+ *        ersetzt ein ggf. gewähltes Navigations-Dokument in der Hauptfläche
+ *        durch das Logbuch (`mainSource` state 'doc'|'audit'); ein
+ *        anschließender Navigations-Klick (`handleSelect`) schaltet zurück auf
+ *        `doc`. Nie beide gleichzeitig sichtbar.
+ * AC4 — Lade-/404-/Fehlerzustand erscheinen jetzt in der Haupt-Inhaltsfläche.
+ * AC5 — Der automatische Reload nach Reconcile-Abschluss ([[reconcile-inline-
+ *        feedback]] AC4, `reloadSignal`) bleibt erhalten (genau ein Reload);
+ *        Edge-Case: zeigt die Hauptfläche gerade aktiv ein per Navigation
+ *        gewähltes Dokument (`mainSource === 'doc'` UND `activePath` gesetzt),
+ *        schaltet der Auto-Reload die Hauptfläche NICHT unbemerkt auf das
+ *        Logbuch um (nur der Hintergrund-Inhalt wird aktualisiert); ohne aktiv
+ *        gezeigtes Dokument schaltet er auf `audit` um. Der PR-Bezug-Hinweis
+ *        (AC5 reconcile-inline-feedback) bleibt erhalten.
+ * AC6 — Security-Floor unverändert (kein neuer Endpunkt, fester Pfad, nur
+ *        MarkdownLite, kein dangerouslySetInnerHTML).
+ * AC7 — `useAuditSpec`-Hook bleibt über injizierbaren `fetchFn` entkoppelt
+ *        testbar (kein Test hängt an einem realen Reconcile-Lauf).
  *
  * Security (Floor):
  *   - Kein dangerouslySetInnerHTML / kein innerHTML.
@@ -139,11 +170,12 @@
  *
  * Covers (reconcile-trigger): AC1, AC2, AC4 (AC3/AC6/AC7 überschrieben — siehe
  *   headless-reconcile-runner AC10/AC13; AC5 überschrieben — siehe reconcile-inline-feedback AC1)
- * Covers (spec-audit-view): AC1, AC2, AC3, AC4
+ * Covers (spec-audit-view): AC1, AC2, AC3 (AC4 überschrieben — siehe audit-spec-main-pane AC4)
  * Covers (reconcile-inline-feedback): AC1, AC4, AC5 (AC2/AC3/AC9 überschrieben — siehe
  *   headless-reconcile-runner AC11/AC12/AC13; AC8-Mechanismus jetzt job-poll-basiert
  *   — siehe headless-reconcile-runner; AC6/AC7 sind Backend — siehe src/routers/session.js, src/PtySessionRegistry.js)
  * Covers (headless-reconcile-runner): AC10, AC11, AC12, AC13, AC14, AC15
+ * Covers (audit-spec-main-pane): AC1, AC2, AC3, AC4, AC5, AC6, AC7
  *
  * @param {{
  *   projectSlug: string,
@@ -229,12 +261,49 @@ export function SpecView({
 
   // ── reconcile-inline-feedback (S-205) AC4: Audit-Reload-Signal ────────────
   // Zähler, der bei jedem Reconcile-Abschluss ("Fertig") hochgezählt wird.
-  // AuditSpecView beobachtet die Änderung (reloadSignal-Prop) und lädt
+  // useAuditSpec beobachtet die Änderung (reloadSignal-Prop) und lädt
   // daraufhin automatisch genau einmal neu (Edge-Case „Doppel-Reload").
   const [auditReloadSignal, setAuditReloadSignal] = useState(0);
   const handleReconcileDone = useCallback(() => {
     setAuditReloadSignal((n) => n + 1);
   }, []);
+
+  // ── audit-spec-main-pane (S-210): Haupt-Inhaltsfläche-Quelle ──────────────
+  // 'doc'   — zeigt das per Navigation gewählte Dokument (activePath/content*)
+  // 'audit' — zeigt das Audit-Logbuch (useAuditSpec-State)
+  // Nie beide gleichzeitig (AC3).
+  const [mainSource, setMainSource] = useState('doc');
+
+  // Refs für die Auto-Reload-Entscheidung (AC5 Edge-Case): der automatische
+  // Reload nach Reconcile-Abschluss darf ein AKTIV gezeigtes Navigations-
+  // Dokument nicht unbemerkt aus der Hauptfläche verdrängen — er greift nur,
+  // wenn gerade KEIN Dokument aktiv gezeigt wird (bzw. das Logbuch bereits
+  // sichtbar ist). Refs statt Deps, damit der Reload-Effect in useAuditSpec
+  // nicht bei jeder mainSource-/activePath-Änderung neu registriert wird.
+  const activePathRef = useRef(activePath);
+  useEffect(() => { activePathRef.current = activePath; }, [activePath]);
+  const mainSourceRef = useRef(mainSource);
+  useEffect(() => { mainSourceRef.current = mainSource; }, [mainSource]);
+
+  const handleAuditAutoReload = useCallback(() => {
+    const hasActiveDoc = mainSourceRef.current === 'doc' && !!activePathRef.current;
+    if (!hasActiveDoc) {
+      setMainSource('audit');
+    }
+  }, []);
+
+  const audit = useAuditSpec({
+    projectSlug,
+    fetchFn,
+    reloadSignal: auditReloadSignal,
+    onAutoReload: handleAuditAutoReload,
+  });
+  const { load: auditLoad } = audit;
+
+  const handleAuditClick = useCallback(() => {
+    setMainSource('audit');
+    auditLoad();
+  }, [auditLoad]);
 
   // ── Doku-Struktur laden (beim Mount + wenn Slug wechselt) ─────────────────
   useEffect(() => {
@@ -326,6 +395,9 @@ export function SpecView({
   // ── Callback: Dokument öffnen ─────────────────────────────────────────────
   const handleSelect = useCallback((path) => {
     setActivePath(path);
+    // audit-spec-main-pane (S-210) AC3: Navigations-Klick schaltet die
+    // Hauptfläche zurück auf das Dokument (Logbuch verschwindet).
+    setMainSource('doc');
   }, []);
 
   // ── Filter-Toggle-Callbacks ────────────────────────────────────────────────
@@ -350,7 +422,7 @@ export function SpecView({
   return (
     <div style={styles.container}>
       {/* Linke Spalte: Reconcile-Trigger + Filter + Navigation */}
-      <div style={styles.sidebar}>
+      <div style={styles.sidebar} data-testid="specview-sidebar">
         {/* reconcile-trigger (S-201) + reconcile-inline-feedback (S-205):
             „Konzept/Spec nachziehen"-Button, bleibt auf dem Reiter (kein
             onNavigate mehr), meldet Lauf/Fertig inline. */}
@@ -364,11 +436,11 @@ export function SpecView({
         />
 
         {/* spec-audit-view (S-203): „Audit-Spec anzeigen"-Button, direkt unterhalb.
-            reloadSignal (S-205 AC4): automatischer Reload nach Reconcile-Abschluss. */}
-        <AuditSpecView
-          projectSlug={projectSlug}
-          fetchFn={fetchFn}
-          reloadSignal={auditReloadSignal}
+            audit-spec-main-pane (S-210): Button bleibt hier — die Ausgabe
+            rendert jetzt in der Haupt-Inhaltsfläche (unten). */}
+        <AuditSpecButton
+          disabled={audit.isBtnDisabled}
+          onClick={handleAuditClick}
         />
 
         {/* Filter (AC6) */}
@@ -412,31 +484,90 @@ export function SpecView({
         </nav>
       </div>
 
-      {/* Rechte Spalte: Markdown-Inhalt */}
+      {/* Rechte Spalte: Markdown-Inhalt — audit-spec-main-pane (S-210) AC3:
+          genau eine sichtbare Quelle (`mainSource`): Navigations-Dokument
+          ODER Audit-Logbuch, nie beide gleichzeitig. */}
       <div
         style={styles.content}
-        aria-busy={contentState === 'loading'}
+        aria-busy={mainSource === 'audit' ? audit.auditState === 'loading' : contentState === 'loading'}
         aria-live="polite"
+        data-testid="specview-content"
       >
-        {!activePath && (
-          <div style={styles.contentHint} role="status">
-            Dokument aus der Navigation auswählen.
-          </div>
+        {mainSource === 'doc' && (
+          <>
+            {!activePath && (
+              <div style={styles.contentHint} role="status">
+                Dokument aus der Navigation auswählen.
+              </div>
+            )}
+            {activePath && contentState === 'loading' && (
+              <div style={styles.contentHint} aria-busy="true">
+                Lade Dokument…
+              </div>
+            )}
+            {activePath && contentState === 'error' && (
+              <div style={styles.contentError} role="alert">
+                Fehler beim Laden: {contentError}
+              </div>
+            )}
+            {activePath && contentState === 'ok' && (
+              <div style={styles.markdownWrapper}>
+                <MarkdownLite markdown={content} style={styles.markdown} />
+              </div>
+            )}
+          </>
         )}
-        {activePath && contentState === 'loading' && (
-          <div style={styles.contentHint} aria-busy="true">
-            Lade Dokument…
-          </div>
-        )}
-        {activePath && contentState === 'error' && (
-          <div style={styles.contentError} role="alert">
-            Fehler beim Laden: {contentError}
-          </div>
-        )}
-        {activePath && contentState === 'ok' && (
-          <div style={styles.markdownWrapper}>
-            <MarkdownLite markdown={content} style={styles.markdown} />
-          </div>
+
+        {/* audit-spec-main-pane (S-210) AC2/AC4: Audit-Logbuch-Zustände in
+            der Haupt-Inhaltsfläche (gleicher Container/Breite/Padding/Scroll
+            wie ein Navigations-Dokument, statt der schmalen Sidebar). */}
+        {mainSource === 'audit' && (
+          <>
+            {audit.auditState === 'loading' && (
+              <div
+                role="status"
+                aria-live="polite"
+                aria-busy="true"
+                style={styles.contentHint}
+                data-testid="audit-spec-loading"
+              >
+                Lade Audit-Spec…
+              </div>
+            )}
+            {audit.auditState === 'notfound' && (
+              <div role="status" style={styles.contentHint} data-testid="audit-spec-notfound">
+                Noch kein Reconcile-Lauf.
+              </div>
+            )}
+            {audit.auditState === 'error' && (
+              <div role="alert" style={styles.contentError} data-testid="audit-spec-error">
+                {audit.auditError}
+              </div>
+            )}
+            {audit.auditState === 'ok' && (
+              <div style={styles.markdownWrapper} data-testid="audit-spec-content">
+                <MarkdownLite markdown={audit.auditContent} style={styles.markdown} />
+                {/* reconcile-inline-feedback AC5: dezenter PR-Bezug (graceful absence) */}
+                {audit.prReference && (
+                  audit.prReference.url ? (
+                    <a
+                      href={audit.prReference.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={styles.auditPrLink}
+                      data-testid="audit-spec-pr-link"
+                    >
+                      {audit.prReference.label}
+                    </a>
+                  ) : (
+                    <span style={styles.auditPrHint} data-testid="audit-spec-pr-hint">
+                      {audit.prReference.label}
+                    </span>
+                  )
+                )}
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>
@@ -961,20 +1092,21 @@ function extractPrReference(markdown) {
 }
 
 /**
- * AuditSpecView — „Audit-Spec anzeigen"-Sekundär-Button, direkt unterhalb des
- * ReconcileTrigger-Buttons (spec-audit-view AC1–AC4).
+ * useAuditSpec — Lade-/Fetch-Zustandsmaschine für das Audit-Logbuch
+ * (`docs/spec-audit.md`), gelöst aus der (jetzt rein präsentationalen)
+ * `AuditSpecButton`-Komponente heraus (audit-spec-main-pane / S-210), damit
+ * SpecView die Zustände in der Haupt-Inhaltsfläche rendern kann, während der
+ * Button in der Sidebar bleibt (spec-audit-view AC1–AC4).
  *
  * Klick lädt `docs/spec-audit.md` des aktiven Projekts über die bestehende
- * Doku-Lese-API und rendert den Inhalt über MarkdownLite. 404 (kein
- * Reconcile-Lauf) → freundlicher Hinweis statt Fehleranzeige. Netzwerkfehler
- * oder unerwarteter Status → sichtbare, neutrale Fehleranzeige. Ein
- * `requestId`-Zähler stellt sicher, dass bei überlappenden Anfragen nur die
- * zuletzt gestartete Antwort den State setzt („letzte Ladung gewinnt"); ein
- * synchroner `loadingRef`-Flag (statt eines State-Reads) verhindert, dass
- * mehrere synchron aufeinanderfolgende Klicks (Doppelklick, bevor React den
- * `disabled`-State neu gerendert hat) einen zweiten konkurrierenden Request
- * auslösen. Der Button ist zusätzlich während einer aktiven Ladung
- * deaktiviert (State-basiert, für den sichtbaren/zugänglichen Zustand).
+ * Doku-Lese-API. 404 (kein Reconcile-Lauf) → freundlicher Hinweis statt
+ * Fehleranzeige. Netzwerkfehler oder unerwarteter Status → sichtbare,
+ * neutrale Fehleranzeige. Ein `requestId`-Zähler stellt sicher, dass bei
+ * überlappenden Anfragen nur die zuletzt gestartete Antwort den State setzt
+ * („letzte Ladung gewinnt"); ein synchroner `loadingRef`-Flag (statt eines
+ * State-Reads) verhindert, dass mehrere synchron aufeinanderfolgende Klicks
+ * (Doppelklick, bevor React den `disabled`-State neu gerendert hat) einen
+ * zweiten konkurrierenden Request auslösen.
  *
  * reconcile-inline-feedback (S-205):
  * AC4 — `reloadSignal` (ein monoton hochgezählter Zähler von SpecView, bei
@@ -990,17 +1122,25 @@ function extractPrReference(markdown) {
  *        bzw. reiner Text-Hinweis (Bare-Hash ohne Domain); sonst kein Element
  *        (graceful absence, kein Platzhalter, kein Crash).
  *
+ * audit-spec-main-pane (S-210) AC5 — `onAutoReload` wird aufgerufen, BEVOR der
+ * automatische Reload seinen Request feuert (nicht bei manuellen Klicks), damit
+ * SpecView entscheiden kann, ob die Hauptfläche auf `audit` umschaltet (Edge-
+ * Case: nicht, wenn dort gerade aktiv ein Navigations-Dokument gezeigt wird).
+ *
  * @param {{
  *   projectSlug: string,
  *   fetchFn?: Function,
  *   reloadSignal?: number,
- * }} props
+ *   onAutoReload?: () => void,
+ * }} params
  *   fetchFn      — injectable für Tests (default: globalThis.fetch), analog zum
  *                  ReconcileTrigger.
  *   reloadSignal — (S-205 AC4) monoton hochgezählter Zähler; jede Änderung ab
  *                  dem Mount-Wert löst genau einen automatischen Reload aus.
+ *   onAutoReload — (S-210 AC5) Callback vor einem automatischen (nicht
+ *                  manuellen) Reload.
  */
-function AuditSpecView({ projectSlug, fetchFn, reloadSignal }) {
+function useAuditSpec({ projectSlug, fetchFn, reloadSignal, onAutoReload }) {
   const fetchFnRef = useRef(fetchFn ?? globalThis.fetch.bind(globalThis));
   useEffect(() => {
     fetchFnRef.current = fetchFn ?? globalThis.fetch.bind(globalThis);
@@ -1068,10 +1208,6 @@ function AuditSpecView({ projectSlug, fetchFn, reloadSignal }) {
     setAuditState('ok');
   }, [projectSlug, hasProjectSlug]);
 
-  const handleClick = useCallback(() => {
-    load();
-  }, [load]);
-
   // reconcile-inline-feedback (S-205) AC4: automatischer Reload nach Reconcile-
   // Abschluss. Der Ref erfasst den Startwert beim Mount, damit der Effect NICHT
   // beim initialen Mount feuert — nur bei einer echten Änderung (= Abschluss).
@@ -1080,8 +1216,9 @@ function AuditSpecView({ projectSlug, fetchFn, reloadSignal }) {
     if (reloadSignal === undefined || reloadSignal === null) return;
     if (reloadSignal === lastReloadSignalRef.current) return; // kein neuer Abschluss
     lastReloadSignalRef.current = reloadSignal;
+    onAutoReload?.();
     load();
-  }, [reloadSignal, load]);
+  }, [reloadSignal, load, onAutoReload]);
 
   // AC5: PR-Bezug aus dem geladenen Inhalt (best-effort, nur wenn geladen).
   const prReference = useMemo(() => {
@@ -1089,70 +1226,32 @@ function AuditSpecView({ projectSlug, fetchFn, reloadSignal }) {
     return extractPrReference(auditContent);
   }, [auditState, auditContent]);
 
+  return { auditState, auditContent, auditError, prReference, load, isBtnDisabled };
+}
+
+/**
+ * AuditSpecButton — „Audit-Spec anzeigen"-Sekundär-Button, direkt unterhalb
+ * des ReconcileTrigger-Buttons (spec-audit-view AC1; Position/Label/Touch-
+ * Target unverändert). Rein präsentational — die Lade-/Render-Zustände
+ * rendert SpecView jetzt in der Haupt-Inhaltsfläche statt hier
+ * (audit-spec-main-pane / S-210 AC1).
+ *
+ * @param {{ disabled: boolean, onClick: () => void }} props
+ */
+function AuditSpecButton({ disabled, onClick }) {
   return (
     <div style={styles.auditBox} data-testid="audit-spec-box">
       <button
         type="button"
-        style={isBtnDisabled ? styles.btnAuditSpecDisabled : styles.btnAuditSpec}
-        disabled={isBtnDisabled}
-        aria-disabled={isBtnDisabled}
-        onClick={isBtnDisabled ? undefined : handleClick}
+        style={disabled ? styles.btnAuditSpecDisabled : styles.btnAuditSpec}
+        disabled={disabled}
+        aria-disabled={disabled}
+        onClick={disabled ? undefined : onClick}
         aria-label="Audit-Spec anzeigen — zeigt die letzten Reconcile-Aktionen"
         data-testid="audit-spec-btn"
       >
         Audit-Spec anzeigen
       </button>
-
-      {/* AC4: zugänglicher Lade-Zustand (Text, nicht nur Farbe) */}
-      {auditState === 'loading' && (
-        <div
-          role="status"
-          aria-live="polite"
-          style={styles.auditHint}
-          data-testid="audit-spec-loading"
-        >
-          Lade Audit-Spec…
-        </div>
-      )}
-
-      {/* AC3: 404 → freundlicher Hinweis, kein Fehler-Look */}
-      {auditState === 'notfound' && (
-        <div role="status" style={styles.auditHint} data-testid="audit-spec-notfound">
-          Noch kein Reconcile-Lauf.
-        </div>
-      )}
-
-      {/* AC4: Netzwerkfehler/500/unerwarteter Status → sichtbare Fehleranzeige */}
-      {auditState === 'error' && (
-        <div role="alert" style={styles.auditError} data-testid="audit-spec-error">
-          {auditError}
-        </div>
-      )}
-
-      {/* AC2: geladener Markdown-Inhalt über MarkdownLite */}
-      {auditState === 'ok' && (
-        <div style={styles.auditContentWrapper} data-testid="audit-spec-content">
-          <MarkdownLite markdown={auditContent} style={styles.auditMarkdown} />
-          {/* reconcile-inline-feedback AC5: dezenter PR-Bezug (graceful absence) */}
-          {prReference && (
-            prReference.url ? (
-              <a
-                href={prReference.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                style={styles.auditPrLink}
-                data-testid="audit-spec-pr-link"
-              >
-                {prReference.label}
-              </a>
-            ) : (
-              <span style={styles.auditPrHint} data-testid="audit-spec-pr-hint">
-                {prReference.label}
-              </span>
-            )
-          )}
-        </div>
-      )}
     </div>
   );
 }
@@ -1635,32 +1734,6 @@ const styles = {
     fontWeight: 600,
     cursor: 'not-allowed',
     minHeight: 44,
-  },
-
-  auditHint: {
-    fontSize: 11,
-    color: '#9ca3af',
-    fontStyle: 'italic',
-  },
-
-  auditError: {
-    fontSize: 11,
-    color: '#f87171',
-  },
-
-  auditContentWrapper: {
-    maxHeight: 300,
-    overflowY: 'auto',
-    border: '1px solid #1e1e1e',
-    borderRadius: 4,
-    padding: '8px 10px',
-    background: '#0d0d0d',
-  },
-
-  auditMarkdown: {
-    fontSize: 12,
-    lineHeight: 1.6,
-    color: '#d1d5db',
   },
 
   // reconcile-inline-feedback (S-205) AC5: dezenter PR-Bezug

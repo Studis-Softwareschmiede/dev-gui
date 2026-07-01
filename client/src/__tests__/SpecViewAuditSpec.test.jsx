@@ -1,7 +1,9 @@
 /**
- * SpecViewAuditSpec.test.jsx — Tests für AC1–AC4 (spec-audit-view):
- * „Audit-Spec anzeigen"-Sekundär-Button direkt unterhalb des
- * ReconcileTrigger-Buttons im Spezifikation-Reiter (SpecView.jsx).
+ * SpecViewAuditSpec.test.jsx — Tests für spec-audit-view AC1–AC3 (Button +
+ * Lade-Logik) UND audit-spec-main-pane (S-210) AC1–AC7: die Ausgabe des
+ * „Audit-Spec anzeigen"-Buttons erscheint jetzt in der rechten
+ * Haupt-Inhaltsfläche (statt in der schmalen linken Sidebar); der Button
+ * selbst bleibt unverändert an seiner Stelle in der Sidebar.
  *
  * Covers (spec-audit-view):
  *   AC1 — Sekundär-Button „Audit-Spec anzeigen" im Spezifikation-Reiter
@@ -13,10 +15,20 @@
  *   AC3 — 404 (Datei fehlt) → freundlicher Hinweis „noch kein
  *          Reconcile-Lauf" (role="status"), keine rohe Fehlermeldung,
  *          kein Crash.
- *   AC4 — Zugänglicher Lade-Zustand während des Ladens; Netzwerkfehler/500/
- *          unerwarteter Status → sichtbare, neutrale Fehleranzeige
- *          (role="alert"), kein Crash, übriger Reiter bleibt bedienbar;
- *          Doppelklick löst keinen zweiten konkurrierenden Render aus.
+ *   AC4 — überschrieben durch audit-spec-main-pane (S-210) AC4 (siehe unten).
+ *
+ * Covers (audit-spec-main-pane):
+ *   AC1 — Sidebar zeigt nach Klick KEINE gerenderte Markdown-Ausgabe mehr
+ *          (audit-spec-box enthält nur noch den Button).
+ *   AC2 — Ausgabe erscheint im Haupt-Content-Container (`specview-content`),
+ *          nicht in der Sidebar (`specview-sidebar`).
+ *   AC3 — Umschalten: Klick auf „Audit-Spec anzeigen" ersetzt ein per
+ *          Navigation gewähltes Dokument in der Hauptfläche durch das
+ *          Logbuch; ein anschließender Navigations-Klick schaltet zurück.
+ *   AC4 — Lade-/404-/Fehlerzustand jetzt in der Haupt-Inhaltsfläche, nicht in
+ *          der Sidebar.
+ *   AC7 — entkoppelt über `fetchFn` testbar (siehe Rest der Datei) + neue
+ *          Ausgabe-Ort-/Umschalt-Tests unten.
  *
  * reconcile-trigger (S-201) Tests liegen in SpecViewReconcileTrigger.test.jsx;
  * Doc-Navigation/-Filter in SpecView.test.jsx — diese Datei deckt
@@ -47,7 +59,8 @@ const FAKE_DOCS = [
 ];
 
 /**
- * Build a fetch mock that handles the doc list, /api/session and the
+ * Build a fetch mock that handles the doc list, /api/session, a plain
+ * docs/raw?path=README.md request (Navigations-Dokument) and the
  * docs/raw?path=docs/spec-audit.md request.
  *
  * @param {object} opts
@@ -74,6 +87,9 @@ function makeFetchFn({ sessionState = 'ready', auditStatus = 200, auditBody = '#
         status: auditStatus,
         text: async () => auditBody,
       };
+    }
+    if (typeof url === 'string' && url.includes('docs/raw') && url.includes('README.md')) {
+      return { ok: true, status: 200, text: async () => '# README Inhalt' };
     }
     return { ok: true, status: 200, json: async () => ({}) };
   });
@@ -132,6 +148,24 @@ describe('SpecView — spec-audit-view AC1: Button vorhanden + positioniert', ()
     const btn = document.querySelector('[data-testid="audit-spec-btn"]');
     expect(btn.getAttribute('aria-label')).toMatch(/Audit-Spec/i);
   });
+
+  // audit-spec-main-pane (S-210) AC1
+  it('audit-spec-main-pane AC1: audit-spec-box enthält NUR den Button, keine gerenderte Markdown-Ausgabe', async () => {
+    const fetchFn = makeFetchFn({ auditStatus: 200 });
+    renderSpecView(fetchFn);
+
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="audit-spec-btn"]'));
+    });
+
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="audit-spec-content"]')).toBeTruthy();
+    });
+
+    const auditBox = document.querySelector('[data-testid="audit-spec-box"]');
+    expect(auditBox.querySelector('[data-testid="audit-spec-content"]')).toBeNull();
+    expect(auditBox.textContent).toMatch(/^Audit-Spec anzeigen$/);
+  });
 });
 
 // ── AC2: Klick lädt + rendert ──────────────────────────────────────────────────
@@ -171,6 +205,25 @@ describe('SpecView — spec-audit-view AC2: Klick lädt genau einmal + rendert M
       expect(content.textContent).toMatch(/Reconcile-Aktion 1/);
     });
   });
+
+  // audit-spec-main-pane (S-210) AC2
+  it('audit-spec-main-pane AC2: Ausgabe erscheint im Haupt-Content-Container (specview-content), nicht in der Sidebar', async () => {
+    const fetchFn = makeFetchFn({ auditStatus: 200, auditBody: '# Audit-Log\n\n- Reconcile-Aktion 1' });
+    renderSpecView(fetchFn);
+
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="audit-spec-btn"]'));
+    });
+
+    await waitFor(() => {
+      const content = document.querySelector('[data-testid="audit-spec-content"]');
+      expect(content).toBeTruthy();
+      const contentPane = document.querySelector('[data-testid="specview-content"]');
+      const sidebar = document.querySelector('[data-testid="specview-sidebar"]');
+      expect(contentPane.contains(content)).toBe(true);
+      expect(sidebar.contains(content)).toBe(false);
+    });
+  });
 });
 
 // ── AC3: 404 → freundlicher Hinweis ───────────────────────────────────────────
@@ -189,17 +242,82 @@ describe('SpecView — spec-audit-view AC3: 404 → freundlicher Hinweis, kein C
       expect(notice).toBeTruthy();
       expect(notice.getAttribute('role')).toBe('status');
       expect(notice.textContent).toMatch(/noch kein reconcile-lauf/i);
+      // audit-spec-main-pane AC4: Hinweis erscheint in der Hauptfläche, nicht in der Sidebar.
+      const contentPane = document.querySelector('[data-testid="specview-content"]');
+      expect(contentPane.contains(notice)).toBe(true);
     });
 
     // kein Fehler-Element, kein Crash
     expect(document.querySelector('[data-testid="audit-spec-error"]')).toBeNull();
+    // AC1: keine Markdown-Ausgabe/kein 404-Hinweis in der Sidebar.
+    const auditBox = document.querySelector('[data-testid="audit-spec-box"]');
+    expect(auditBox.querySelector('[data-testid="audit-spec-notfound"]')).toBeNull();
   });
 });
 
-// ── AC4: Lade-Zustand, Fehler, Doppelklick-Guard ──────────────────────────────
+// ── audit-spec-main-pane AC3: Umschalten Audit ↔ Navigations-Dokument ─────────
 
-describe('SpecView — spec-audit-view AC4: Lade-Zustand + Fehleranzeige, kein Crash', () => {
-  it('zugänglicher Lade-Zustand während des Ladens sichtbar', async () => {
+describe('SpecView — audit-spec-main-pane AC3: Umschalten statt Doppelanzeige', () => {
+  it('Klick auf „Audit-Spec anzeigen" ersetzt ein bereits gewähltes Navigations-Dokument in der Hauptfläche', async () => {
+    const fetchFn = makeFetchFn({ auditStatus: 200, auditBody: '# Audit-Log\n\n- Aktion' });
+    renderSpecView(fetchFn);
+
+    // Erst ein Navigations-Dokument öffnen (README.md aus FAKE_DOCS).
+    await waitFor(() => {
+      expect(document.querySelector('button[title="README.md"]')).toBeTruthy();
+    });
+    await act(async () => {
+      fireEvent.click(document.querySelector('button[title="README.md"]'));
+    });
+    await waitFor(() => {
+      const h1 = document.querySelector('[data-testid="specview-content"] h1');
+      expect(h1?.textContent).toBe('README Inhalt');
+    });
+
+    // Klick auf Audit-Spec-Button → Logbuch ersetzt das Dokument.
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="audit-spec-btn"]'));
+    });
+
+    await waitFor(() => {
+      const content = document.querySelector('[data-testid="audit-spec-content"]');
+      expect(content).toBeTruthy();
+    });
+    // Beide nie gleichzeitig sichtbar — kein Dokument-Hinweis/-Inhalt mehr in der Hauptfläche.
+    const contentPane = document.querySelector('[data-testid="specview-content"]');
+    expect(contentPane.textContent).not.toMatch(/Dokument aus der Navigation auswählen/);
+  });
+
+  it('anschließender Navigations-Klick schaltet die Hauptfläche zurück auf das Dokument (Logbuch verschwindet)', async () => {
+    const fetchFn = makeFetchFn({ auditStatus: 200, auditBody: '# Audit-Log\n\n- Aktion' });
+    renderSpecView(fetchFn);
+
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="audit-spec-btn"]'));
+    });
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="audit-spec-content"]')).toBeTruthy();
+    });
+
+    await waitFor(() => {
+      expect(document.querySelector('button[title="README.md"]')).toBeTruthy();
+    });
+    await act(async () => {
+      fireEvent.click(document.querySelector('button[title="README.md"]'));
+    });
+
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="audit-spec-content"]')).toBeNull();
+      const h1 = document.querySelector('[data-testid="specview-content"] h1');
+      expect(h1).toBeTruthy();
+    });
+  });
+});
+
+// ── AC4 (überschrieben durch audit-spec-main-pane AC4): Lade-Zustand, Fehler, Doppelklick-Guard ──
+
+describe('SpecView — audit-spec-main-pane AC4: Lade-Zustand + Fehleranzeige in der Hauptfläche, kein Crash', () => {
+  it('zugänglicher Lade-Zustand während des Ladens sichtbar — in der Haupt-Inhaltsfläche, nicht in der Sidebar', async () => {
     let resolveFetch;
     const fetchFn = jest.fn(async (url) => {
       if (typeof url === 'string' && url.includes('/docs') && !url.includes('/raw')) {
@@ -226,6 +344,9 @@ describe('SpecView — spec-audit-view AC4: Lade-Zustand + Fehleranzeige, kein C
       expect(loading).toBeTruthy();
       expect(loading.getAttribute('role')).toBe('status');
       expect(loading.textContent).toMatch(/lade/i);
+      // audit-spec-main-pane AC4: Ort ist die Hauptfläche, nicht die Sidebar.
+      expect(document.querySelector('[data-testid="specview-content"]').contains(loading)).toBe(true);
+      expect(document.querySelector('[data-testid="specview-sidebar"]').contains(loading)).toBe(false);
     });
 
     await act(async () => {
@@ -233,7 +354,7 @@ describe('SpecView — spec-audit-view AC4: Lade-Zustand + Fehleranzeige, kein C
     });
   });
 
-  it('Netzwerkfehler → sichtbare, neutrale Fehleranzeige (role="alert"), kein Crash', async () => {
+  it('Netzwerkfehler → sichtbare, neutrale Fehleranzeige (role="alert") in der Hauptfläche, kein Crash', async () => {
     const fetchFn = makeFetchFn({ auditStatus: 'network-error' });
     renderSpecView(fetchFn);
 
@@ -245,6 +366,7 @@ describe('SpecView — spec-audit-view AC4: Lade-Zustand + Fehleranzeige, kein C
       const err = document.querySelector('[data-testid="audit-spec-error"]');
       expect(err).toBeTruthy();
       expect(err.getAttribute('role')).toBe('alert');
+      expect(document.querySelector('[data-testid="specview-content"]').contains(err)).toBe(true);
     });
 
     // übriger Reiter bleibt bedienbar — Reconcile-Button noch da und klickbar
