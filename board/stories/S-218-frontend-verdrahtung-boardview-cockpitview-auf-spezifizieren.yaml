@@ -2,7 +2,7 @@ id: S-218
 parent: F-039
 title: 'Frontend-Verdrahtung: BoardView/CockpitView auf Spezifizieren umstellen (Button-Rename,
   discuss/resolve-Tab-Sprung entfernen)'
-status: To Do
+status: In Progress
 priority: P2
 spec: docs/specs/idea-specify-chat.md
 implements:
@@ -22,11 +22,11 @@ estimate_note: 'M-Heuristik: n_ac=2 (AC1,AC2), n_comp~4 (BoardView.jsx Handler+S
   (kein Task-Tool); baseline.json js|balanced|M ep=5.0 (n=8) als Proxy. confidence
   medium. Reine Verdrahtung/Entfernung, aber breit gestreut.'
 confidence: medium
-branch: null
+branch: feat/S-218-boardview-cockpitview-wiring
 pr: null
 blocked_reason: null
 created_at: '2026-07-01T15:25:54Z'
-updated_at: '2026-07-01T15:29:04Z'
+updated_at: '2026-07-01T17:30:36Z'
 done_at: null
 notes: 'Spec: docs/specs/idea-specify-chat.md AC1,AC2. Depends: S-217 (Modal-Komponente
   muss existieren).

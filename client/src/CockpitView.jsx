@@ -44,12 +44,13 @@
  *          Quick-Capture: Titel + optionaler Stichwort-Body → POST
  *          .../ideas). Token-frei — kein Agent, kein /flow-Trigger.
  *
- * ideen-inbox (S-200):
- *   AC5 — BoardView erhält onDiscussIdea-Callback: nach erfolgreichem
- *          Besprechungs-Start (Klick auf eine Idee-Karte → POST .../discuss)
- *          wechselt CockpitView in den Reiter „Arbeiten" (Terminal-Pane) —
- *          derselbe Wechsel-Mechanismus wie AC8/fabric-intake-dialog
- *          (onNavigate('factory')-Muster, hier: setActiveTab('arbeiten')).
+ * ideen-inbox (S-200) / idea-specify-chat (S-218):
+ *   Der frühere discuss-Tab-Sprung (onDiscussIdea-Callback, Wechsel in den
+ *   Reiter „Arbeiten" nach POST .../discuss) ist SUPERSEDED durch
+ *   idea-specify-chat (S-218): BoardView öffnet jetzt ein eigenes
+ *   Chat-Overlay (`IdeaSpecifyChatModal`) direkt über dem Board — kein
+ *   Tab-Wechsel mehr nötig. CockpitView reicht dafür keinen Callback mehr
+ *   durch.
  *
  * reconcile-trigger (S-201) / reconcile-inline-feedback (S-205):
  *   SpecView erhält onNavigate weiterhin als Prop (Signatur-Kompatibilität),
@@ -113,12 +114,6 @@ export function CockpitView({ activeRepo, navigateFactory, onNavigate: _onNaviga
   const openSpec = useCallback((relPath) => {
     setPendingSpecPath(relPath);
     setActiveTab('spec');
-  }, []);
-
-  // ideen-inbox AC5 (S-200): Callback für BoardView — nach erfolgreichem
-  // Besprechungs-Start (Idee-Karte-Klick) in den Terminal-Pane wechseln.
-  const handleDiscussIdea = useCallback(() => {
-    setActiveTab('arbeiten');
   }, []);
 
   return (
@@ -185,7 +180,7 @@ export function CockpitView({ activeRepo, navigateFactory, onNavigate: _onNaviga
           aria-labelledby="cockpit-tab-board"
           style={styles.tabPanel}
         >
-          <BoardView lockedProject={activeRepo} onOpenSpec={openSpec} onDiscussIdea={handleDiscussIdea} />
+          <BoardView lockedProject={activeRepo} onOpenSpec={openSpec} />
         </div>
       )}
 

@@ -63,23 +63,27 @@
  *           liefert für status ≠ To Do bereits ready=false/ready_reason=null; die
  *           Ready-Badge-Bedingung bleibt auf story.status === 'To Do' beschränkt →
  *           „Idee"-Karten zeigen kein ready-Badge (kein neuer Code nötig, nur Test-Beleg).
- *   AC5  — (S-200) Klick auf eine Idee-Karte (status === 'Idee') startet — statt der
- *           normalen Story-Detail-Ansicht — die Besprechungs-Session: POST
- *           .../ideas/:id/discuss (Titel+Body als konversationeller Gesprächs-Einstieg,
- *           interaktive PTY-Session). Bei Erfolg (200) ruft BoardView `onDiscussIdea()`
- *           auf (Cockpit wechselt ins „Arbeiten"-Terminal-Pane) — der Status der Idee
- *           bleibt unverändert. Bei Fehler (400/404/409/5xx) zeigt ein dismissbarer
- *           Hinweis die Fehlermeldung, kein Tab-Wechsel. Während `discussState ===
- *           'starting'` sind Idee-Karten `disabled` (Doppelklick-Schutz, S-200
- *           Iteration 2 Suggestion) — verhindert einen doppelten Seed-Write.
- *   AC6  — (S-200 Iteration 2, Finding 3) Minimale Resolve-UI: neben jeder Idee-Karte
- *           ein „Idee auflösen"-Button (additiv, kein `<button>`-in-`<button>`) öffnet
- *           `IdeaResolveModal` (eigene Komponente, `IdeaResolveModal.jsx`) mit den
- *           OPTIONALEN Feldern `resolved_story_ids` (Komma-Liste) + `resolved_note`.
- *           Absenden → POST .../ideas/:id/resolve; bei Erfolg (200) markiert BoardView
- *           die Idee lokal als `status: 'Done'` (optimistisches Update — verschwindet
- *           aus der „Idee"-Spalte) und schließt das Modal. 400/404 → Fehlermeldung
- *           inline im Modal (Owner kann korrigieren/abbrechen).
+ *   AC5/AC6 — SUPERSEDED durch idea-specify-chat (S-218, siehe unten): der frühere
+ *           discuss-Tab-Sprung (POST .../discuss, onDiscussIdea, PTY-Terminal-Wechsel)
+ *           und die frühere Resolve-UI (IdeaResolveModal, POST .../resolve) sind
+ *           vollständig entfernt und durch das Chat-Overlay (IdeaSpecifyChatModal)
+ *           ersetzt.
+ *
+ * idea-specify-chat:
+ *   AC1  — Klick auf eine Idee-Karte (status === 'Idee') ODER auf den Button
+ *           „Spezifizieren" öffnet dasselbe Chat-Overlay (`IdeaSpecifyChatModal`)
+ *           über dem Board — kein Tab-Wechsel, kein Detail-Fetch. Beide Auslöser
+ *           rufen `handleOpenSpecifyChat(slug, story, triggerEl)` auf, die den
+ *           `specifyingIdea`-State ({slug, story}) setzt; das Modal rendert, wenn
+ *           `specifyingIdea` gesetzt ist. A11y/Bubble-Verhalten lebt in
+ *           `IdeaSpecifyChatModal.jsx` (S-217).
+ *   AC2  — Button-Umbenennung: `StoryCard` zeigt statt „Idee auflösen" den Button
+ *           „Spezifizieren" (Prop `onResolveIdea` → `onSpecifyIdea`, gleiche
+ *           Aufrufsignatur `(story, triggerEl)`); der alte reine Verwerfen-Pfad
+ *           (IdeaResolveModal) sowie der discuss-Tab-Sprung (onDiscussIdea,
+ *           handleIdeaDiscuss) sind entfernt. `onSpecified(projectSlug)` löst ein
+ *           Re-Fetch der Board-Daten aus (Wiederverwendung des bestehenden
+ *           Cockpit-/Standalone-Lade-Mechanismus über `reloadToken`).
  *
  * board-feature-collapse:
  *   AC1  — Jede Feature-Zeile hat einen Auf-/Zu-Schalter (Collapse-Button mit Chevron);
@@ -117,18 +121,13 @@
  *   onNavigate: (view: string) => void,
  *   lockedProject?: string,
  *   onOpenSpec?: (relPath: string) => void,
- *   onDiscussIdea?: () => void,
  * }} props
- *   onDiscussIdea — (S-200/AC5) called after a successful POST .../discuss
- *   triggered by an Idea-card click, so the Cockpit-Parent can switch to the
- *   Terminal-Pane. Optional — when absent (standalone route), the discuss POST
- *   still runs but no pane-switch happens.
  */
 
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { EntityIcon }       from './icons/EntityIcon.jsx';
-import { parseEntityLabel } from './icons/parseEntityLabel.js';
-import { IdeaResolveModal } from './IdeaResolveModal.jsx';
+import { EntityIcon }             from './icons/EntityIcon.jsx';
+import { parseEntityLabel }       from './icons/parseEntityLabel.js';
+import { IdeaSpecifyChatModal }   from './IdeaSpecifyChatModal.jsx';
 
 // ── Status-Lebensyklus (board-subsystem §9.3) ─────────────────────────────────
 
@@ -290,52 +289,25 @@ function computeRollup(feature) {
  *   without project list; project-filter dropdown is hidden (AC6/studis-kanban-board-ux).
  *   When absent (STANDALONE #/board), shows project list first — lazy-load mode (AC6).
  */
-export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec, onDiscussIdea }) {
+export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }) {
   // ─── Mode: standalone (lazy) vs cockpit (lockedProject set) ─────────────────
   const isStandalone = !lockedProject;
 
-  // ─── Idee-Besprechung (ideen-inbox AC5, S-200) ───────────────────────────────
-  // discussState: 'idle'|'starting'|'error' — starting disables no UI element
-  // itself (POST is fire-and-forget-ish, fast), but guards against a stale
-  // error message lingering after a new attempt starts.
-  const [discussState, setDiscussState] = useState('idle');
-  const [discussError, setDiscussError] = useState('');
+  // ─── Idee spezifizieren (idea-specify-chat AC1/AC2, S-218) ───────────────────
+  // specifyingIdea: { slug, story } | null — welche Idee gerade im Chat-Overlay
+  // besprochen wird. Wird sowohl vom Karte-Klick (handleStoryClick, status ===
+  // 'Idee') als auch vom „Spezifizieren"-Button (StoryCard) aufgerufen — beide
+  // führen zum selben Overlay (AC1).
+  const [specifyingIdea, setSpecifyingIdea] = useState(null);
+  const specifyTriggerRef = useRef(null);
 
-  const handleDismissDiscussError = useCallback(() => {
-    setDiscussState('idle');
-    setDiscussError('');
+  const handleOpenSpecifyChat = useCallback((slug, story, triggerEl) => {
+    specifyTriggerRef.current = triggerEl ?? null;
+    setSpecifyingIdea({ slug, story });
   }, []);
 
-  // ─── Idee-Auflösung (ideen-inbox AC6, S-200 Iteration 2 Finding 3) ───────────
-  // resolvingIdea: { slug, story } | null — welche Idee gerade im Auflösen-Modal ist.
-  const [resolvingIdea, setResolvingIdea] = useState(null);
-  const resolveTriggerRef = useRef(null);
-
-  const handleOpenResolveIdea = useCallback((slug, story, triggerEl) => {
-    resolveTriggerRef.current = triggerEl ?? null;
-    setResolvingIdea({ slug, story });
-  }, []);
-
-  const handleCloseResolveIdea = useCallback(() => {
-    setResolvingIdea(null);
-  }, []);
-
-  // AC6: bei Erfolg (200) verschwindet die Idee aus der „Idee"-Spalte — optimistisches
-  // lokales Update auf status: 'Done' (der eigentliche BoardWriter-Write ist bereits
-  // serverseitig abgeschlossen, bevor der 200er zurückkam; kein zusätzlicher Re-Fetch nötig).
-  const handleIdeaResolved = useCallback((slug, storyId) => {
-    setProjects((prev) => prev.map((p) => {
-      if (p.error) return p;
-      const pSlug = p.slug || p.project_slug || p.repo_path || '';
-      if (pSlug !== slug) return p;
-      const features = (p.features ?? []).map((f) => ({
-        ...f,
-        stories: (f.stories ?? []).map((s) => (
-          String(s.id) === String(storyId) ? { ...s, status: 'Done' } : s
-        )),
-      }));
-      return { ...p, features };
-    }));
+  const handleCloseSpecifyChat = useCallback(() => {
+    setSpecifyingIdea(null);
   }, []);
 
   // ─── Story Detail (AC3/AC4 story-detail-ansicht) ─────────────────────────────
@@ -361,6 +333,12 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec, 
   // In cockpit mode: projects = [ lockedProject full data ]
   // In standalone mode: projects = [ selectedProject full data ]
   const [projects, setProjects] = useState([]);
+
+  // ─── Reload trigger (idea-specify-chat AC10-Konsument, S-218) ───────────────
+  // Incremented after a successful Finalize (onSpecified) to force a re-fetch
+  // in Cockpit-Modus (the load-effect below depends on it). Standalone-Modus
+  // re-fetched stattdessen direkt über handleProjectSelect (imperativ).
+  const [reloadToken, setReloadToken] = useState(0);
 
   // ─── Filter state (AC2, AC3, AC4) ───────────────────────────────────────────
   // AC2: default = all status selected (new Set(STATUS_LIFECYCLE), now 6 incl. „Idee")
@@ -513,7 +491,7 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec, 
 
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lockedProject]); // re-run if locked project changes
+  }, [lockedProject, reloadToken]); // re-run if locked project changes OR a reload was requested (AC10)
 
   // ─── STANDALONE: load single project when user clicks (AC6) ─────────────────
   const handleProjectSelect = useCallback((slug) => {
@@ -555,40 +533,14 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec, 
     setFilterLabel('');
   }, []);
 
-  // ─── Idee-Karte-Klick → Besprechungs-Start (ideen-inbox AC5, S-200) ──────────
-  // POST .../ideas/:id/discuss statt der normalen Detail-Ansicht. Der Status der
-  // Idee bleibt unverändert (bloßes Öffnen ändert nichts, kein Detail-Fetch).
-  const handleIdeaDiscuss = useCallback((slug, story) => {
-    setDiscussState('starting');
-    setDiscussError('');
-
-    fetch(`/api/board/projects/${encodeURIComponent(slug)}/ideas/${encodeURIComponent(story.id)}/discuss`, {
-      method: 'POST',
-    })
-      .then(async (res) => {
-        if (res.status === 200) {
-          setDiscussState('idle');
-          if (onDiscussIdea) onDiscussIdea();
-          return;
-        }
-        let body = {};
-        try { body = await res.json(); } catch { /* non-JSON error body — ignore */ }
-        setDiscussState('error');
-        setDiscussError(body.message || body.error || `Besprechung konnte nicht gestartet werden (HTTP ${res.status}).`);
-      })
-      .catch((err) => {
-        setDiscussState('error');
-        setDiscussError(err.message || 'Netzwerkfehler');
-      });
-  }, [onDiscussIdea]);
-
   // ─── Story click → Detail-Ansicht (AC3 story-detail-ansicht) ─────────────────
   // slug: the current project slug (from standalone selectedSlug or lockedProject)
-  // ideen-inbox AC5 (S-200): ein Klick auf eine Idee-Karte (status === 'Idee')
-  // startet stattdessen die Besprechung (handleIdeaDiscuss) — keine Detail-Ansicht.
-  const handleStoryClick = useCallback((slug, story) => {
+  // idea-specify-chat AC1 (S-218): ein Klick auf eine Idee-Karte (status === 'Idee')
+  // öffnet stattdessen das Spezifizieren-Chat-Overlay (handleOpenSpecifyChat) —
+  // keine Detail-Ansicht, kein Tab-Wechsel.
+  const handleStoryClick = useCallback((slug, story, triggerEl) => {
     if (story.status === 'Idee') {
-      handleIdeaDiscuss(slug, story);
+      handleOpenSpecifyChat(slug, story, triggerEl);
       return;
     }
 
@@ -610,7 +562,19 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec, 
         setDetailError(err.message || 'Netzwerkfehler');
         setDetailState('error');
       });
-  }, [handleIdeaDiscuss]);
+  }, [handleOpenSpecifyChat]);
+
+  // ─── onSpecified: Board-Re-Fetch nach erfolgreichem Finalize (AC10) ──────────
+  // Cockpit-Modus: reloadToken hochzählen → Load-Effect (oben) fetcht neu.
+  // Standalone-Modus: direkt handleProjectSelect erneut aufrufen (imperativer
+  // Re-Fetch desselben Projekts, wiederverwendet den bestehenden Mechanismus).
+  const handleSpecified = useCallback((_slug) => {
+    if (isStandalone) {
+      if (selectedSlug) handleProjectSelect(selectedSlug);
+    } else {
+      setReloadToken((t) => t + 1);
+    }
+  }, [isStandalone, selectedSlug, handleProjectSelect]);
 
   // ─── Back from story detail → board ─────────────────────────────────────────
   const handleDetailBack = useCallback(() => {
@@ -706,31 +670,14 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec, 
     <main style={styles.main} aria-label="Studis-Kanban-Board">
       <h1 style={styles.h1}>Studis-Kanban-Board</h1>
 
-      {/* ideen-inbox AC5 (S-200): Besprechungs-Start fehlgeschlagen (400/404/409/5xx) */}
-      {discussState === 'error' && (
-        <div role="alert" style={styles.errorMsg} data-testid="idea-discuss-error">
-          {discussError}
-          <button
-            type="button"
-            style={styles.btnDismissError}
-            onClick={handleDismissDiscussError}
-            aria-label="Besprechungs-Fehler zurücksetzen"
-            data-testid="idea-discuss-error-dismiss"
-          >
-            Verstanden
-          </button>
-        </div>
-      )}
-
-      {/* ideen-inbox AC6 (S-200 Iteration 2, Finding 3): Explizite Auflösung — Owner-Aktion + UI */}
-      {resolvingIdea && (
-        <IdeaResolveModal
-          projectSlug={resolvingIdea.slug}
-          storyId={resolvingIdea.story.id}
-          storyTitle={resolvingIdea.story.title}
-          onClose={handleCloseResolveIdea}
-          onResolved={(storyId) => handleIdeaResolved(resolvingIdea.slug, storyId)}
-          triggerRef={resolveTriggerRef}
+      {/* idea-specify-chat AC1 (S-218): Chat-Overlay über dem Board (kein Tab-Wechsel) */}
+      {specifyingIdea && (
+        <IdeaSpecifyChatModal
+          projectSlug={specifyingIdea.slug}
+          story={specifyingIdea.story}
+          onClose={handleCloseSpecifyChat}
+          onSpecified={handleSpecified}
+          triggerRef={specifyTriggerRef}
         />
       )}
 
@@ -833,12 +780,11 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec, 
                   project={project}
                   onOpenSpec={onOpenSpec}
                   onStoryClick={currentProjectSlug
-                    ? (story) => handleStoryClick(currentProjectSlug, story)
+                    ? (story, triggerEl) => handleStoryClick(currentProjectSlug, story, triggerEl)
                     : null}
-                  onResolveIdea={currentProjectSlug
-                    ? (story, triggerEl) => handleOpenResolveIdea(currentProjectSlug, story, triggerEl)
+                  onSpecifyIdea={currentProjectSlug
+                    ? (story, triggerEl) => handleOpenSpecifyChat(currentProjectSlug, story, triggerEl)
                     : null}
-                  discussStarting={discussState === 'starting'}
                   collapsedIds={collapsedIds}
                   onCollapseToggle={handleCollapseToggle}
                   hasRestrictingFilter={hasRestrictingFilter}
@@ -919,12 +865,11 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec, 
                   project={project}
                   onOpenSpec={onOpenSpec}
                   onStoryClick={currentProjectSlug
-                    ? (story) => handleStoryClick(currentProjectSlug, story)
+                    ? (story, triggerEl) => handleStoryClick(currentProjectSlug, story, triggerEl)
                     : null}
-                  onResolveIdea={currentProjectSlug
-                    ? (story, triggerEl) => handleOpenResolveIdea(currentProjectSlug, story, triggerEl)
+                  onSpecifyIdea={currentProjectSlug
+                    ? (story, triggerEl) => handleOpenSpecifyChat(currentProjectSlug, story, triggerEl)
                     : null}
-                  discussStarting={discussState === 'starting'}
                   collapsedIds={collapsedIds}
                   onCollapseToggle={handleCollapseToggle}
                   hasRestrictingFilter={hasRestrictingFilter}
@@ -1244,14 +1189,13 @@ function ProjectListItem({ item, onSelect }) {
  *   project: object,
  *   onOpenSpec?: (relPath: string) => void,
  *   onStoryClick?: (story: object) => void,
- *   onResolveIdea?: (story: object, triggerEl: HTMLElement) => void,
- *   discussStarting?: boolean,
+ *   onSpecifyIdea?: (story: object, triggerEl: HTMLElement) => void,
  *   collapsedIds?: Set<string>,
  *   onCollapseToggle?: (featureId: string) => void,
  *   hasRestrictingFilter?: boolean,
  * }} props
  */
-function ProjectSection({ project, onOpenSpec, onStoryClick, onResolveIdea, discussStarting, collapsedIds, onCollapseToggle, hasRestrictingFilter }) {
+function ProjectSection({ project, onOpenSpec, onStoryClick, onSpecifyIdea, collapsedIds, onCollapseToggle, hasRestrictingFilter }) {
   const slug = project.slug || project.project_slug || project.repo_path || '?';
 
   return (
@@ -1287,8 +1231,7 @@ function ProjectSection({ project, onOpenSpec, onStoryClick, onResolveIdea, disc
           feature={feature}
           onOpenSpec={onOpenSpec}
           onStoryClick={onStoryClick}
-          onResolveIdea={onResolveIdea}
-          discussStarting={discussStarting}
+          onSpecifyIdea={onSpecifyIdea}
           isCollapsed={collapsedIds ? collapsedIds.has(feature.id) : false}
           onCollapseToggle={onCollapseToggle}
           hasRestrictingFilter={hasRestrictingFilter ?? false}
@@ -1313,14 +1256,13 @@ function ProjectSection({ project, onOpenSpec, onStoryClick, onResolveIdea, disc
  *   feature: object,
  *   onOpenSpec?: (relPath: string) => void,
  *   onStoryClick?: (story: object) => void,
- *   onResolveIdea?: (story: object, triggerEl: HTMLElement) => void,
- *   discussStarting?: boolean,
+ *   onSpecifyIdea?: (story: object, triggerEl: HTMLElement) => void,
  *   isCollapsed?: boolean,
  *   onCollapseToggle?: (featureId: string) => void,
  *   hasRestrictingFilter?: boolean,
  * }} props
  */
-function FeatureRow({ feature, onOpenSpec, onStoryClick, onResolveIdea, discussStarting, isCollapsed = false, onCollapseToggle, hasRestrictingFilter = false }) {
+function FeatureRow({ feature, onOpenSpec, onStoryClick, onSpecifyIdea, isCollapsed = false, onCollapseToggle, hasRestrictingFilter = false }) {
   // AC2: separate detail-panel open/close state (entkoppelt vom Einklappen)
   const [detailOpen, setDetailOpen] = useState(false);
   const rollup = computeRollup(feature);
@@ -1435,8 +1377,7 @@ function FeatureRow({ feature, onOpenSpec, onStoryClick, onResolveIdea, discussS
                   stories={byStatus[status]}
                   onOpenSpec={onOpenSpec}
                   onStoryClick={onStoryClick}
-                  onResolveIdea={onResolveIdea}
-                  discussStarting={discussStarting}
+                  onSpecifyIdea={onSpecifyIdea}
                 />
               ))}
             </div>
@@ -1560,11 +1501,10 @@ function RollupBar({ done, total }) {
  *   stories: object[],
  *   onOpenSpec?: (relPath: string) => void,
  *   onStoryClick?: (story: object) => void,
- *   onResolveIdea?: (story: object, triggerEl: HTMLElement) => void,
- *   discussStarting?: boolean,
+ *   onSpecifyIdea?: (story: object, triggerEl: HTMLElement) => void,
  * }} props
  */
-function StatusColumn({ status, stories, onOpenSpec, onStoryClick, onResolveIdea, discussStarting }) {
+function StatusColumn({ status, stories, onOpenSpec, onStoryClick, onSpecifyIdea }) {
   return (
     <div
       role="listitem"
@@ -1587,8 +1527,7 @@ function StatusColumn({ status, stories, onOpenSpec, onStoryClick, onResolveIdea
           story={story}
           onOpenSpec={onOpenSpec}
           onStoryClick={onStoryClick}
-          onResolveIdea={onResolveIdea}
-          discussStarting={discussStarting}
+          onSpecifyIdea={onSpecifyIdea}
         />
       ))}
     </div>
@@ -1605,20 +1544,20 @@ function StatusColumn({ status, stories, onOpenSpec, onStoryClick, onResolveIdea
  * AC4 (autonome-board-abarbeitung) — Ready-Badge für To-Do-Stories; blocked_reason als
  *        Hinweiszeile unter dem Titel für Blocked-Stories.
  *
- * ideen-inbox AC6 (S-200 Iteration 2, Finding 3) — für `status === 'Idee'` UND
- * `onResolveIdea` vorhanden zusätzlich ein kleiner „Idee auflösen"-Trigger NEBEN
- * der (weiterhin klickbaren, Besprechung startenden) Karte — additiv, kein
- * verschachteltes `<button>`-in-`<button>` (ungültiges HTML).
+ * idea-specify-chat AC1/AC2 (S-218) — für `status === 'Idee'` UND `onSpecifyIdea`
+ * vorhanden zusätzlich ein kleiner „Spezifizieren"-Trigger NEBEN der (weiterhin
+ * klickbaren, dasselbe Chat-Overlay öffnenden) Karte — additiv, kein
+ * verschachteltes `<button>`-in-`<button>` (ungültiges HTML). Beide Auslöser
+ * (Karte, Button) rufen dieselbe Handler-Signatur `(story, triggerEl)` auf.
  *
  * @param {{
  *   story: object,
  *   onOpenSpec?: (relPath: string) => void,
  *   onStoryClick?: (story: object) => void,
- *   onResolveIdea?: (story: object, triggerEl: HTMLElement) => void,
- *   discussStarting?: boolean,
+ *   onSpecifyIdea?: (story: object, triggerEl: HTMLElement) => void,
  * }} props
  */
-function StoryCard({ story, onOpenSpec, onStoryClick, onResolveIdea, discussStarting }) {
+function StoryCard({ story, onOpenSpec, onStoryClick, onSpecifyIdea }) {
   // AC12 — derive entity reference from story labels for icon display.
   const entityRef = parseEntityLabel(story.labels ?? []);
 
@@ -1697,45 +1636,38 @@ function StoryCard({ story, onOpenSpec, onStoryClick, onResolveIdea, discussStar
   );
 
   // AC3 (story-detail-ansicht): when onStoryClick is provided, wrap the card in a button.
-  // ideen-inbox AC5 (S-200): for status === 'Idee', the click starts the discuss-session
-  // instead of the detail view — reflected in the aria-label for screen-reader clarity.
+  // idea-specify-chat AC1 (S-218): for status === 'Idee', the click opens the
+  // Spezifizieren-Chat-Overlay instead of the detail view — reflected in the
+  // aria-label for screen-reader clarity.
   if (onStoryClick) {
     const isIdea = story.status === 'Idee';
-    // Doppelklick-Schutz (Suggestion, S-200 Iteration 2): während ein Besprechungs-
-    // Start bereits läuft (discussState === 'starting'), Idee-Karten nicht erneut
-    // klickbar — verhindert einen doppelten Seed-Write in dieselbe PTY-Session.
-    const ideaDisabled = isIdea && Boolean(discussStarting);
     const cardButton = (
       <button
         type="button"
-        style={ideaDisabled
-          ? { ...styles.storyCard, ...styles.storyCardBtn, ...styles.storyCardBtnDisabled }
-          : { ...styles.storyCard, ...styles.storyCardBtn }}
-        aria-label={isIdea ? `Idee besprechen: ${story.title || story.id}` : `Story: ${story.title || story.id}`}
+        style={{ ...styles.storyCard, ...styles.storyCardBtn }}
+        aria-label={isIdea ? `Idee spezifizieren: ${story.title || story.id}` : `Story: ${story.title || story.id}`}
         data-story={story.id}
-        onClick={() => onStoryClick(story)}
-        disabled={ideaDisabled}
-        aria-disabled={ideaDisabled}
+        onClick={(e) => onStoryClick(story, e.currentTarget)}
         data-testid={`story-card-btn-${story.id}`}
       >
         {cardContent}
       </button>
     );
 
-    // ideen-inbox AC6 (S-200 Iteration 2, Finding 3): additiver „Idee auflösen"-
-    // Trigger NEBEN der Karte (kein <button> in <button>).
-    if (isIdea && onResolveIdea) {
+    // idea-specify-chat AC2 (S-218): additiver „Spezifizieren"-Trigger NEBEN
+    // der Karte (kein <button> in <button>) — gleiches Overlay wie der Karte-Klick.
+    if (isIdea && onSpecifyIdea) {
       return (
         <div style={styles.ideaCardWrapper} data-testid={`idea-card-wrapper-${story.id}`}>
           {cardButton}
           <button
             type="button"
-            style={styles.ideaResolveBtn}
-            onClick={(e) => onResolveIdea(story, e.currentTarget)}
-            aria-label={`Idee auflösen: ${story.title || story.id}`}
-            data-testid={`idea-resolve-btn-${story.id}`}
+            style={styles.ideaSpecifyBtn}
+            onClick={(e) => onSpecifyIdea(story, e.currentTarget)}
+            aria-label={`Spezifizieren: ${story.title || story.id}`}
+            data-testid={`idea-specify-btn-${story.id}`}
           >
-            Idee auflösen
+            Spezifizieren
           </button>
         </div>
       );
@@ -2134,19 +2066,6 @@ const styles = {
     borderRadius: 6,
     border: '1px solid #7f1d1d',
     marginBottom: 16,
-  },
-  // ideen-inbox AC5 (S-200): Dismiss-Button innerhalb des Besprechungs-Fehlerbanners.
-  btnDismissError: {
-    display: 'block',
-    marginTop: 8,
-    background: 'transparent',
-    border: '1px solid #7f1d1d',
-    color: '#f87171',
-    borderRadius: 4,
-    padding: '6px 10px',
-    fontSize: 12,
-    cursor: 'pointer',
-    minHeight: 36,
   },
   hintMsg: {
     color: '#6b7280',
@@ -2676,18 +2595,12 @@ const styles = {
     // Focus ring preserved (no outline:none)
   },
 
-  // Doppelklick-Schutz während eines laufenden Besprechungs-Starts (Suggestion, S-200 Iteration 2)
-  storyCardBtnDisabled: {
-    cursor: 'not-allowed',
-    opacity: 0.6,
-  },
-
-  // ── Idee-Karte + Auflösen-Trigger (ideen-inbox AC6, S-200 Iteration 2 Finding 3)
+  // ── Idee-Karte + Spezifizieren-Trigger (idea-specify-chat AC1/AC2, S-218)
   ideaCardWrapper: {
     marginBottom: 4,
   },
 
-  ideaResolveBtn: {
+  ideaSpecifyBtn: {
     display: 'block',
     width: '100%',
     marginTop: 2,
