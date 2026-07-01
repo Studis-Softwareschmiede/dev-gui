@@ -1,0 +1,28 @@
+id: F-034
+title: Reconcile inline — auf dem Spezifikation-Reiter bleiben, Lauf halten, Fortschritt
+  + Audit-Refresh
+goal: 'Der Reconcile-Button (S-201) navigiert nach dem Ausloesen zwangsweise weg (onNavigate(''factory''))
+  -> User landet auf der Projektauswahl und sieht nie, ob der Lauf passiert; zudem
+  haelt die Hintergrund-Session ohne Terminal-Zuschauer nicht (PtySessionRegistry
+  Idle-Destroy) -> Lauf findet faktisch nicht statt. Ziel: Der Button bleibt auf dem
+  Spezifikation-Reiter (kein Wegspringen), startet den Lauf im Hintergrund fuer DIESES
+  Projekt und haelt die Session am Leben bis fertig (Mechanik entscheidet coder gegen
+  JobLock/busy oder Keep-Alive), zeigt inline ''Reconcile laeuft...'' + pollt GET
+  /api/session + meldet ''Fertig'', und laedt danach die Audit-Anzeige (S-203, docs/spec-audit.md)
+  automatisch neu; PR-Link best-effort. Ueberschreibt reconcile-trigger AC5. Backend
+  surft busy ueber /api/session + haelt Session bei aktivem Job. UI entkoppelt testbar
+  (mockbarer fetch).'
+status: Backlog
+priority: P2
+spec: docs/specs/reconcile-inline-feedback.md
+definition_of_done: null
+labels:
+- ui
+- reconcile
+depends: null
+owner: null
+stories:
+- S-205
+progress: 0/1 done
+created_at: '2026-07-01T05:54:49Z'
+updated_at: '2026-07-01T05:56:05Z'
