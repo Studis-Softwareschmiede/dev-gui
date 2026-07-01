@@ -8,6 +8,11 @@
  *          Nicht-ready To-Do-Stories (ready=false) tragen kein Badge.
  *          Kontrast/aria: Badge hat aria-label; Grund hat aria-label und data-testid.
  *
+ * Covers (ideen-inbox):
+ *   AC2 — Idee-Story (status=Idee, ready=false laut computeStoryReadyStatus) trägt
+ *          kein ready-Badge — Ready-Badge-Bedingung bleibt auf status === 'To Do'
+ *          beschränkt (Cross-Ref zur Backend-Zusicherung in test/boardReadyStatus.test.js).
+ *
  * @jest-environment jsdom
  */
 
@@ -73,13 +78,29 @@ const STORY_BLOCKED = {
   ready_reason: null,
 };
 
+/** An Idee story — never ready (ideen-inbox AC2, status ≠ To Do) */
+const STORY_IDEE = {
+  id: 'S-013',
+  parent: 'F-001',
+  title: 'Idee Story',
+  status: 'Idee',
+  priority: null,
+  labels: [],
+  spec: null,
+  implements: [],
+  depends: [],
+  blocked_reason: null,
+  ready: false,
+  ready_reason: null,
+};
+
 const FEATURE = {
   id: 'F-001',
   title: 'Test Feature',
   status: 'Active',
   priority: 'P1',
   progress: null,
-  stories: [STORY_READY, STORY_NOT_READY, STORY_BLOCKED],
+  stories: [STORY_READY, STORY_NOT_READY, STORY_BLOCKED, STORY_IDEE],
 };
 
 const PROJECT = {
@@ -147,6 +168,12 @@ describe('BoardView — AC4 (autonome-board-abarbeitung): Ready-Badge', () => {
   it('does NOT show ready-badge for a Blocked story', async () => {
     const { container } = await renderWithProject(PROJECT);
     const badge = container.querySelector(`[data-testid="ready-badge-${STORY_BLOCKED.id}"]`);
+    expect(badge).toBeNull();
+  });
+
+  it('does NOT show ready-badge for an Idee story (ideen-inbox AC2 — nie ready)', async () => {
+    const { container } = await renderWithProject(PROJECT);
+    const badge = container.querySelector(`[data-testid="ready-badge-${STORY_IDEE.id}"]`);
     expect(badge).toBeNull();
   });
 });
