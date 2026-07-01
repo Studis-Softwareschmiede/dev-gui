@@ -1,0 +1,25 @@
+id: F-040
+title: 'Bugfix: Headless-claude-p-Argumentverlust + Finalize-Sicherheitsnetz (kein
+  stiller Idee-Verlust)'
+goal: 'Behebt den per Produktions-Transcript bestaetigten Bug, dass HeadlessRunnerCore
+  command+args als zwei getrennte argv-Elemente an claude -p uebergibt (Zusatztext
+  verpufft -> IdeaSpecifyFinalizer-Requirement-Lauf ohne ARGUMENTS), und dass das
+  Finalize-Sicherheitsnetz blind auf Exit 0 vertraut und eine unbearbeitete Idee faelschlich
+  archiviert. Zentraler argv-Fix im gemeinsamen Core + Ergebnis-Verifikation vor Archivierung
+  + sichtbarer no-op-Status. Spec: docs/specs/headless-arg-finalize-safety.md'
+status: Backlog
+priority: P1
+spec: docs/specs/headless-arg-finalize-safety.md
+definition_of_done: null
+labels:
+- backend
+- security
+- ui
+depends: null
+owner: null
+stories:
+- S-219
+- S-220
+progress: 0/2 done
+created_at: '2026-07-01T19:37:05Z'
+updated_at: '2026-07-01T19:38:57Z'

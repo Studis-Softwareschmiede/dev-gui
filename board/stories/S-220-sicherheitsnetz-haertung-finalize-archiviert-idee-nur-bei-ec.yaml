@@ -1,0 +1,64 @@
+id: S-220
+parent: F-040
+title: 'Sicherheitsnetz-Haertung: Finalize archiviert Idee nur bei echtem Ergebnis
+  + sichtbarer no-op-Status (Backend + IdeaSpecifyChatModal)'
+status: To Do
+priority: P2
+spec: docs/specs/headless-arg-finalize-safety.md
+implements:
+- AC4
+- AC5
+- AC6
+- AC7
+- AC8
+depends:
+- S-219
+labels:
+- backend
+- ui
+- security
+size_est: L
+dispo_est: '5.0'
+dispo_act: null
+dispo_forecast: null
+estimate_note: 'L-Heuristik: n_ac=5 (AC4,AC5,AC6,AC7,AC8), n_comp~4 (IdeaSpecifyFinalizer.js
+  Baseline-Snapshot+Verifikation+no-op-Mapping, IdeaSpecifyChatModal.jsx no-op-Zweig,
+  ideaSpecifyRouter passthrough, Tests), label_bump+2 (security,ui) -> score 11 ->
+  L. estimator nicht dispatchbar (kein Task-Tool im requirement-Agent, analog S-216);
+  baseline.json js|balanced|L ep=5.0 (n=5) als Proxy -> dispo_est 5.0. confidence
+  medium.'
+confidence: medium
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-07-01T19:37:15Z'
+updated_at: '2026-07-01T19:38:29Z'
+done_at: null
+notes: 'Spec: docs/specs/headless-arg-finalize-safety.md AC4,AC5,AC6,AC7,AC8. Depends:
+  S-219 (Core-Fix zuerst -- ohne ihn produziert der Lauf ohnehin nur no-op). SEKUNDAERBUG
+  (RC2), Defense-in-Depth + Sichtbarkeit.
+
+
+  GEAENDERT src/IdeaSpecifyFinalizer.js: VOR runner.start() Baseline-Snapshot der
+  Board-/Spec-Artefakte (board/stories/ + board/features/ + docs/specs/) in #jobMeta
+  ablegen. Nach Job done: Ergebnis-Verifikation -> archiveSupersededIdea NUR wenn
+  neue Story/Spec/Feature entstand UND Idee noch status:Idee (Fall a). Fall b (Idee
+  nicht mehr Idee) unveraendertes No-Op. Fall c (weder neues Artefakt noch Idee-Transformation)
+  -> KEINE Archivierung, Idee bleibt sichtbar Idee. getJob() mappt done->no-op (Fall
+  c) + secret-freie Meldung + genau 1 Audit-Eintrag. HeadlessFlowRunner/HeadlessRunnerCore
+  UNVERAENDERT (Mapping nur im Finalizer). Board-/FS-Reader injizierbar (Test ohne
+  echtes FS). Fail-safe: Snapshot-Fehler -> no-op statt archivieren.
+
+
+  GEAENDERT client/src/IdeaSpecifyChatModal.jsx: Finalize-Poll-Zweig data.status===''no-op''
+  -> inline Fehler-/Warnzustand (role=alert/status, Text nicht nur Farbe), Overlay
+  bleibt offen, Retry moeglich, KEIN onSpecified, KEIN onClose (im Gegensatz zum done-Pfad).
+  Behebt den reproduzierten ''stillen Erfolg trotz No-Op''.
+
+
+  Router GET .../specify/finalize/:jobId reicht neuen Statuswert no-op unveraendert
+  durch (kein Umbau, ggf. Doku-Kommentar).
+
+
+  Gate: Unit-Tests (Verifikations-Faelle a/b/c mit gestubtem Runner + FS-Reader; no-op-Mapping;
+  Audit) + Modal-Test (fetchFn-Sequenz running->no-op) + kein Regress an IdeaSpecifyFinalizer/BoardWriter/Modal.'
