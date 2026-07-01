@@ -1,7 +1,7 @@
 id: S-193
 parent: F-029
-title: 'Token-Limit-Erkennung (konto-weit) + Reset-Wartelogik (TokenLimitWatcher)'
-status: To Do
+title: Token-Limit-Erkennung (konto-weit) + Reset-Wartelogik (TokenLimitWatcher)
+status: Done
 priority: P2
 spec: docs/specs/taktgeber-nachtwaechter.md
 implements:
@@ -18,17 +18,24 @@ estimate_note: 'L-Heuristik (requirement): PTY-Output-Parsing + Zeit-/Fenster-Lo
   + Edge-Cases. estimator nicht dispatchbar im requirement-Kontext dieser Umgebung;
   dispo_est=5 aus baseline.json js|balanced|L (n=5). confidence low.'
 confidence: low
-branch: null
+branch: feat/S-193-token-limit-watcher
 pr: null
 blocked_reason: null
 created_at: '2026-06-30T20:09:55Z'
-updated_at: '2026-06-30T20:09:55Z'
-done_at: null
-notes: |
-  TokenLimitWatcher liest den PTY-Output KONTO-WEIT mit (Muster: PtyManager
-  'output'-Events) und parst Claudes Token-/Usage-Limit-Meldung samt Reset-Zeitpunkt.
+updated_at: '2026-07-01T04:44:40Z'
+done_at: '2026-07-01T04:44:40Z'
+notes: 'TokenLimitWatcher liest den PTY-Output KONTO-WEIT mit (Muster: PtyManager
+
+  ''output''-Events) und parst Claudes Token-/Usage-Limit-Meldung samt Reset-Zeitpunkt.
+
   Bei erkanntem Limit: alle neuen /flow-Anstoesse pausieren bis Reset + 1 min Puffer,
+
   dann fortsetzen. Liegt der Reset NACH window.end -> nicht warten, stoppen (naechste
+
   Nacht). Edge-Cases: nicht parsebare/mehrdeutige Meldung -> KEIN Fehlalarm (weiter);
+
   Reset in Vergangenheit -> minimaler Puffer. Integriert in die ProjectDrain-Trigger-
+
   Gate (S-192). Audit der Pause. Konsumiert von Scheduler (S-195) + Knopf (S-196).
+
+  '
