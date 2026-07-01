@@ -1,6 +1,7 @@
 /**
  * projectDrainRouter.test.js — HTTP-Ebenen-Tests für POST /api/projects/:slug/drain
- * (docs/specs/headless-manual-drain.md AC1/AC2/AC3, ADR-017 — ersetzt den
+ * + GET /api/projects/:slug/drain/:drainId
+ * (docs/specs/headless-manual-drain.md AC1/AC2/AC3/AC4, ADR-017 — ersetzt den
  * interaktiven Pfad aus taktgeber-nachtwaechter AC12).
  *
  * Covers (headless-manual-drain):
@@ -22,6 +23,13 @@
  *   AC3 — Cost-Mode-Durchreichung: `{ costMode }` gültig+≠balanced → args
  *          `['--cost', <mode>]` an drainProject; `balanced`/fehlend → args `[]`
  *          (kein Flag); ungültiger costMode → 400, KEIN Drain-Start.
+ *   AC4 — Drain-Job-Status: jeder gestartete Drain wird unter seiner `drainId`
+ *          in der In-Memory-Registry geführt; `GET …/drain/:drainId` liefert
+ *          `200 { status: 'running'|'done'|'failed', … }` (secret-/pfad-frei) |
+ *          `404` (unbekannte drainId) | `400` (ungültiger Slug). `running` vor
+ *          Auflösung, `done` (mit Ergebnis-Zusammenfassung) nach resolve,
+ *          `failed` (generischer Text) nach reject. Der DrainJobRegistry-Baustein
+ *          selbst ist zusätzlich unit-getestet in test/DrainJobRegistry.test.js.
  *   Slug-/Pfad-Validierung — 400 bei ungültigem Slug (Traversal-Token) oder
  *          wenn der Pfad-Validator eine Boundary-Verletzung meldet.
  *          500, wenn die ProjectDrain-Engine nicht verdrahtet ist
@@ -69,6 +77,31 @@ function postNoBody(port, path) {
     req.on('error', reject);
     req.end();
   });
+}
+
+/** GET → JSON (AC4 Drain-Job-Status). */
+function getJson(port, path) {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      { hostname: '127.0.0.1', port, path, method: 'GET' },
+      (res) => {
+        let raw = '';
+        res.on('data', (c) => { raw += c; });
+        res.on('end', () => {
+          try { resolve({ status: res.statusCode, body: JSON.parse(raw) }); }
+          catch { resolve({ status: res.statusCode, body: raw }); }
+        });
+      },
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+/** Flush pending microtasks + one macrotask tick — der fire-and-forget
+ *  drainProject().then()/catch() (Registry-Update, AC4) läuft danach garantiert. */
+function flushAsync() {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 /** POST mit JSON-Body (AC3 costMode). */
@@ -395,5 +428,131 @@ describe('POST /api/projects/:slug/drain (headless-manual-drain AC1/AC2/AC3)', (
       identity: { email: 'test@example.com' },
       args: [],
     });
+  });
+});
+
+// ── AC4: Drain-Job-Status (GET /api/projects/:slug/drain/:drainId) ─────────────
+
+describe('GET /api/projects/:slug/drain/:drainId (headless-manual-drain AC4)', () => {
+  let server;
+  let consoleErrorSpy;
+
+  beforeEach(() => {
+    consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(async () => {
+    if (server) await closeServer(server);
+    server = null;
+    consoleErrorSpy.mockRestore();
+  });
+
+  it('404 — unbekannte drainId', async () => {
+    const drainProject = jest.fn(async () => ({ stopped: true, reason: 'no-drain-target', flowRuns: 0, escalated: [] }));
+    const app = makeApp({ projectDrain: { drainProject } });
+    const s = await startServer(app);
+    server = s.server;
+
+    const res = await getJson(s.port, '/api/projects/dev-gui/drain/does-not-exist');
+    expect(res.status).toBe(404);
+    expect(res.body.error).toMatch(/drainId/i);
+  });
+
+  it('200 { status: "running" } — solange der Drain noch läuft (Promise offen)', async () => {
+    let resolveDrain;
+    const drainPromise = new Promise((resolve) => { resolveDrain = resolve; });
+    const drainProject = jest.fn(() => drainPromise);
+    const app = makeApp({ projectDrain: { drainProject } });
+    const s = await startServer(app);
+    server = s.server;
+
+    const post = await postNoBody(s.port, '/api/projects/dev-gui/drain');
+    expect(post.status).toBe(202);
+    const { drainId } = post.body;
+
+    const res = await getJson(s.port, `/api/projects/dev-gui/drain/${drainId}`);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ status: 'running' });
+
+    // Aufräumen: Promise auflösen, damit kein offener Handle übrig bleibt.
+    resolveDrain({ stopped: true, reason: 'no-drain-target', flowRuns: 0, escalated: [] });
+  });
+
+  it('200 { status: "done", result } — nach erfolgreichem Drain (secret-/pfad-frei)', async () => {
+    const drainProject = jest.fn(async () => ({
+      stopped: true, reason: 'no-drain-target', flowRuns: 2, escalated: ['S-5'],
+    }));
+    const app = makeApp({ projectDrain: { drainProject } });
+    const s = await startServer(app);
+    server = s.server;
+
+    const post = await postNoBody(s.port, '/api/projects/dev-gui/drain');
+    const { drainId } = post.body;
+
+    await flushAsync(); // fire-and-forget .then() (Registry → done) durchlaufen lassen
+
+    const res = await getJson(s.port, `/api/projects/dev-gui/drain/${drainId}`);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      status: 'done',
+      result: { reason: 'no-drain-target', flowRuns: 2, escalated: ['S-5'] },
+    });
+  });
+
+  it('200 { status: "failed", error } — nach rejectetem Drain (generischer Text, kein Roh-Fehler)', async () => {
+    const drainProject = jest.fn(() => Promise.reject(new Error('boom /workspace/secret/path')));
+    const app = makeApp({ projectDrain: { drainProject } });
+    const s = await startServer(app);
+    server = s.server;
+
+    const post = await postNoBody(s.port, '/api/projects/dev-gui/drain');
+    const { drainId } = post.body;
+
+    await flushAsync(); // fire-and-forget .catch() (Registry → failed) durchlaufen lassen
+
+    const res = await getJson(s.port, `/api/projects/dev-gui/drain/${drainId}`);
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('failed');
+    expect(typeof res.body.error).toBe('string');
+    // Security-Floor: der Roh-Fehlertext (inkl. Pfad) darf NICHT in der Response landen.
+    expect(res.body.error).not.toMatch(/workspace|secret|boom/i);
+  });
+
+  it('400 — ungültiger Slug (Traversal-Token) via echtem resolveProjectSlug', async () => {
+    const drainProject = jest.fn(async () => ({ stopped: true, reason: 'no-drain-target', flowRuns: 0, escalated: [] }));
+    const app = makeApp({ projectDrain: { drainProject }, slugResolver: undefined });
+    const s = await startServer(app);
+    server = s.server;
+
+    const res = await getJson(s.port, '/api/projects/%2e%2e/drain/some-id');
+    expect(res.status).toBe(400);
+  });
+
+  it('400 — slugResolver liefert null (leerer/ungültiger Slug)', async () => {
+    const drainProject = jest.fn();
+    const app = makeApp({ projectDrain: { drainProject }, slugResolver: () => null });
+    const s = await startServer(app);
+    server = s.server;
+
+    const res = await getJson(s.port, '/api/projects/dev-gui/drain/some-id');
+    expect(res.status).toBe(400);
+  });
+
+  it('POST → GET Round-Trip: dieselbe drainId ist über die geteilte Registry auflösbar', async () => {
+    const drainProject = jest.fn(async () => ({ stopped: true, reason: 'already-busy', flowRuns: 0, escalated: [] }));
+    const app = makeApp({ projectDrain: { drainProject } });
+    const s = await startServer(app);
+    server = s.server;
+
+    const post = await postNoBody(s.port, '/api/projects/dev-gui/drain');
+    expect(post.status).toBe(202);
+    const { drainId } = post.body;
+
+    await flushAsync();
+
+    const res = await getJson(s.port, `/api/projects/dev-gui/drain/${drainId}`);
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('done');
+    expect(res.body.result.reason).toBe('already-busy');
   });
 });

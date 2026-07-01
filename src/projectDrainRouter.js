@@ -1,11 +1,12 @@
 /**
  * projectDrainRouter — Express router: manueller „Board abarbeiten"-Knopf
- * gegen die ProjectDrain-Engine (docs/specs/headless-manual-drain.md AC1/AC2/AC3;
+ * gegen die ProjectDrain-Engine (docs/specs/headless-manual-drain.md AC1/AC2/AC3/AC4;
  * ersetzt den bislang interaktiven Pfad, taktgeber-nachtwaechter AC12 →
  * superseded durch ADR-017).
  *
- * Route (hinter dem AccessGuard, wie alle /api/*, s. server.js):
- *   POST /api/projects/:slug/drain  { costMode?: 'low-cost'|'balanced'|'max-quality'|'frontier' }
+ * Routes (hinter dem AccessGuard, wie alle /api/*, s. server.js):
+ *   POST /api/projects/:slug/drain            { costMode?: 'low-cost'|'balanced'|'max-quality'|'frontier' }
+ *   GET  /api/projects/:slug/drain/:drainId   → Drain-Job-Status (AC4)
  *
  * HEADLESS-Ausführung (ADR-017, headless-manual-drain AC1): der manuelle Knopf
  * fährt den Drain über eine DEDIZIERTE, headless verdrahtete `ProjectDrain`-
@@ -21,10 +22,12 @@
  * KEIN Live-Terminal (headless-manual-drain AC1/Restrisiko): ein headless-Drain
  * schreibt NICHT in die interaktive PTY-Session — es erscheint keine
  * Live-Ausgabe im Terminal-Pane. Fortschritt/Ergebnis werden über den
- * Board-Re-Fetch (Karten-Updates) + das Audit-Log sichtbar; der Drain-Job-
- * Status über `drainId` (`GET …/drain/:drainId`) ist eine SEPARATE Story
- * (headless-manual-drain AC4) und hier NICHT gebaut — die POST-Route liefert
- * `drainId` bereits als Korrelations-ID zurück.
+ * Board-Re-Fetch (Karten-Updates) + das Audit-Log sichtbar; zusätzlich über den
+ * Drain-Job-Status (AC4): jeder gestartete Drain wird unter seiner `drainId` in
+ * einer In-Memory-`DrainJobRegistry` geführt (`running`→`done`|`failed`);
+ * `GET /api/projects/:slug/drain/:drainId` liest den Status (secret-/pfad-frei,
+ * Format analog zum headless-Reconcile-Status). So sieht der Owner „läuft /
+ * fertig / fehlgeschlagen" trotz fehlender Live-Ausgabe.
  *
  * Cost-Mode (headless-manual-drain AC3): der Endpunkt akzeptiert optional
  * `{ costMode }` (Enum `low-cost|balanced|max-quality|frontier`, geteilt mit
@@ -81,6 +84,7 @@ import { randomUUID } from 'node:crypto';
 import { validateProjectPath, ProjectPathError, resolveProjectSlug } from './workspacePath.js';
 import { isProjectBusy } from './ProjectJobLock.js';
 import { COST_MODES } from './CommandService.js';
+import { DrainJobRegistry } from './DrainJobRegistry.js';
 
 /**
  * @param {object} deps
@@ -94,6 +98,9 @@ import { COST_MODES } from './CommandService.js';
  *   Injectable slug-to-path resolver (default: resolveProjectSlug).
  * @param {import('./ProjectJobLock.js').ProjectJobLock} [options.lock]
  *   Injectable lock for isProjectBusy (default: module singleton via isProjectBusy).
+ * @param {import('./DrainJobRegistry.js').DrainJobRegistry} [options.jobRegistry]
+ *   Injectable Drain-Job-Status-Registry (AC4). Default: eine eigene, router-
+ *   interne In-Memory-Instanz — POST und GET teilen dieselbe Instanz.
  * @returns {import('express').Router}
  */
 export function projectDrainRouter(deps = {}, options = {}) {
@@ -101,6 +108,7 @@ export function projectDrainRouter(deps = {}, options = {}) {
   const _pathValidator = options.pathValidator ?? validateProjectPath;
   const _slugResolver = options.slugResolver ?? resolveProjectSlug;
   const _lock = options.lock;
+  const _jobRegistry = options.jobRegistry ?? new DrainJobRegistry();
   const router = Router();
 
   /**
@@ -156,16 +164,67 @@ export function projectDrainRouter(deps = {}, options = {}) {
     }
 
     const drainId = randomUUID();
+    // AC4: Drain sofort als `running` in der Job-Registry führen — noch VOR dem
+    // fire-and-forget-Start, damit ein direkt danach eintreffender
+    // `GET …/drain/:drainId` den Job garantiert sieht (kein Registrierungs-Race).
+    _jobRegistry.register(drainId);
+
     // Fire-and-forget (Modul-Doku): der Drain läuft potenziell lange; die
     // HTTP-Antwort wartet nicht auf sein Ende. ProjectDrain.drainProject()
     // erwirbt/gibt das ProjectJobLock intern selbst frei (try/finally) — kein
     // zusätzliches Lock-Handling hier nötig. `args` (AC3): Cost-Mode-Flag,
-    // gilt für ALLE Flow-Runden dieses Drains.
-    projectDrain.drainProject(resolvedPath, { identity, args: drainArgs }).catch((err) => {
-      console.error(`[projectDrain] Drain fehlgeschlagen (drainId=${drainId}):`, err.message);
-    });
+    // gilt für ALLE Flow-Runden dieses Drains. Der Ausgang aktualisiert den
+    // Registry-Status (AC4): resolved → `done` (mit secret-freier
+    // Ergebnis-Zusammenfassung), rejected → `failed` (generischer Text; die
+    // konkrete Fehlermeldung bleibt im Server-Log, nie in der Response).
+    projectDrain.drainProject(resolvedPath, { identity, args: drainArgs })
+      .then((result) => {
+        _jobRegistry.markDone(drainId, result ?? {});
+      })
+      .catch((err) => {
+        _jobRegistry.markFailed(drainId);
+        console.error(`[projectDrain] Drain fehlgeschlagen (drainId=${drainId}):`, err.message);
+      });
 
     return res.status(202).json({ drainId });
+  });
+
+  /**
+   * GET /api/projects/:slug/drain/:drainId — Drain-Job-Status (AC4).
+   *
+   * Der Slug wird wie bei POST validiert (400 bei Traversal/Boundary), dient
+   * hier aber nur der Konsistenz/Härtung — die `drainId` ist eine globale
+   * Korrelations-ID; die Registry ist NICHT pro Slug partitioniert
+   * (headless-manual-drain Verträge: 400 ungültiger Slug | 404 drainId
+   * unbekannt).
+   *
+   * Responses:
+   *   200 { status: 'running'|'done'|'failed', result?, error? }  — secret-/pfad-frei
+   *   400 { error }  — ungültiger Slug/Pfad
+   *   404 { error }  — unbekannte drainId (auch nach Server-Neustart, In-Memory)
+   */
+  router.get('/api/projects/:slug/drain/:drainId', async (req, res) => {
+    try {
+      const slugPath = _slugResolver(req.params.slug);
+      if (slugPath === null) {
+        return res.status(400).json({ error: 'Invalid project slug' });
+      }
+      await _pathValidator(slugPath);
+    } catch (err) {
+      const reason = err instanceof ProjectPathError ? err.message : 'Invalid project path';
+      return res.status(400).json({ error: `Invalid slug: ${reason}` });
+    }
+
+    const job = _jobRegistry.getJob(req.params.drainId);
+    if (!job) {
+      return res.status(404).json({ error: 'Unknown drainId' });
+    }
+
+    const body = { status: job.status };
+    if (job.result !== undefined) body.result = job.result;
+    if (job.error !== undefined) body.error = job.error;
+
+    return res.status(200).json(body);
   });
 
   return router;

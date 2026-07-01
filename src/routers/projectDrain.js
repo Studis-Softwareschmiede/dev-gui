@@ -1,8 +1,10 @@
 /**
  * Router-Wrapper: manueller „Board abarbeiten"-Knopf → ProjectDrain-Engine.
  * Factory-Signatur: create(deps) → Express Router
- * Montiert: POST /api/projects/:slug/drain (headless-manual-drain AC1/AC2/AC3,
- * ADR-017 — ersetzt den interaktiven Pfad aus taktgeber-nachtwaechter AC12).
+ * Montiert: POST /api/projects/:slug/drain + GET /api/projects/:slug/drain/:drainId
+ * (headless-manual-drain AC1/AC2/AC3/AC4, ADR-017 — ersetzt den interaktiven
+ * Pfad aus taktgeber-nachtwaechter AC12). Die In-Memory-Drain-Job-Registry
+ * (AC4) lebt router-intern (Default-Instanz); kein Wiring nötig.
  */
 import { projectDrainRouter } from '../projectDrainRouter.js';
 
