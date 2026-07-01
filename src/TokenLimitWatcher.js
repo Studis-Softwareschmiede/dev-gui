@@ -163,11 +163,16 @@ export function isValidIanaTimeZone(tz) {
 /**
  * Liest Jahr/Monat/Tag/Stunde/Minute/Sekunde eines Zeitpunkts in einer
  * gegebenen IANA-Zeitzone (Wandzeit).
+ *
+ * Exportiert (S-195 NightWatchScheduler, taktgeber-nachtwaechter AC10):
+ * Wiederverwendung statt Duplikation des TZ-Wandzeit-Musters für die
+ * Nachtfenster-Berechnung (über-Mitternacht + TZ, siehe Modul-Doku dort).
+ *
  * @param {number} instantMs
  * @param {string} timeZone
  * @returns {{year:number,month:number,day:number,hour:number,minute:number,second:number}}
  */
-function getZonedParts(instantMs, timeZone) {
+export function getZonedParts(instantMs, timeZone) {
   const dtf = new Intl.DateTimeFormat('en-US', {
     timeZone,
     hourCycle: 'h23',
@@ -226,13 +231,17 @@ export function zonedWallTimeToUtc(year, month, day, hour, minute, timeZone) {
 /**
  * Addiert Kalendertage auf ein Jahr/Monat/Tag-Tripel (reine Kalenderarithmetik,
  * unabhängig von Zeitzone/DST — für "nächster Kalendertag" ausreichend).
+ *
+ * Exportiert (S-195 NightWatchScheduler): Wiederverwendung für die
+ * Über-Mitternacht-Fensterende-Berechnung (AC10/AC11) statt Duplikation.
+ *
  * @param {number} year
  * @param {number} month  1-12
  * @param {number} day
  * @param {number} deltaDays
  * @returns {{year:number, month:number, day:number}}
  */
-function addCalendarDays(year, month, day, deltaDays) {
+export function addCalendarDays(year, month, day, deltaDays) {
   const d = new Date(Date.UTC(year, month - 1, day));
   d.setUTCDate(d.getUTCDate() + deltaDays);
   return { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate() };

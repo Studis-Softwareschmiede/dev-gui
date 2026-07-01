@@ -1,0 +1,35 @@
+id: S-204
+parent: F-029
+title: 'Echte Multi-Session-Parallelitaet: CommandService projektweise entkoppeln
+  (maxParallel>1 real)'
+status: To Do
+priority: P2
+spec: docs/specs/taktgeber-nachtwaechter.md
+implements:
+- AC9
+depends:
+- S-195
+labels:
+- backend
+size_est: null
+dispo_est: null
+dispo_act: null
+dispo_forecast: null
+estimate_note: null
+confidence: null
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-07-01T05:34:18Z'
+updated_at: '2026-07-01T05:34:37Z'
+done_at: null
+notes: 'Folge aus S-195-Review: NightWatchScheduler startet zwar maxParallel Drains,
+  aber CommandService.tryRun nutzt einen GLOBALEN JobLock (src/JobLock.js) statt des
+  projektweisen ProjectJobLock (S-190) -> nur 1 echter /flow-Anstoss gleichzeitig;
+  uebrige Projekte bekommen ''locked'' und warten auf naechsten Tick. S-195-Iteration-2
+  hat die Fehl-Blocked-Korruption behoben (locked zaehlt nicht als kein-Fortschritt),
+  aber die ECHTE Gleichzeitigkeit fehlt weiterhin. Diese Story: CommandService/PtySessionRegistry
+  so entkoppeln, dass pro Projekt-Session ein eigener Lock gilt und maxParallel>1
+  tatsaechlich mehrere /flow parallel faehrt. ACHTUNG: beruehrt den zentralen interaktiven
+  Terminal-Baustein (CommandService) -> sorgfaeltig, eigener Review. Nutzen relativiert
+  durch konto-weites Token-Limit (parallel = schneller am Limit, nicht mehr Gesamtdurchsatz).'

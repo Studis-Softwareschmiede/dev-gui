@@ -44,6 +44,19 @@
  *          einen AuditEntry (AuditStore.record); "jeder /flow-Anstoß" wird
  *          bereits durch CommandService selbst auditiert (nicht hier
  *          dupliziert — siehe CommandService.test.js AC1).
+ *   AC9/AC11 (S-195 Review-Iteration 2, Regressionsschutz für den
+ *          live-verifizierten Critical-Bug "Fehl-Blocked durch globale
+ *          Lock-Contention") — wenn CommandService.tryRun() {ok:false,
+ *          reason:'locked'|'busy'} liefert (der PROZESSWEITE CommandService-
+ *          JobLock wird von einem ANDEREN Projekt gehalten, kein /flow-Lauf
+ *          fand statt), stoppt drainProject() sofort mit reason
+ *          'command-channel-busy' — KEIN Eskalations-Zähler-Increment, KEIN
+ *          boardWriter.setBlocked, auch nicht über viele aufeinanderfolgende
+ *          scheduler-artige drainProject()-Aufrufe hinweg. Der echte-Naht-
+ *          Regressionstest (Scheduler+Drain+echter CommandService+echter
+ *          globaler JobLock+echtes ProjectJobLock+BoardWriter gegen ein
+ *          tmp-Board, ≥2 Projekte, maxParallel:2) lebt separat in
+ *          test/nightwatch-lock-contention.integration.test.js (siehe dort).
  *
  * Strategy:
  *   - Pure Helper-Funktionen (flattenProjectStories, isStaleInProgress,
@@ -1112,6 +1125,96 @@ describe('ProjectDrain.drainProject — AC6/AC7: concurrency + lock discipline',
     expect(lock.isHeld(PROJECT_PATH)).toBe(false);
   });
 });
+
+describe(
+  'ProjectDrain.drainProject — Lock-Contention gegen den globalen CommandService-JobLock ' +
+    '(S-195 Review-Iteration 2, live verifiziert critical: reason "locked" darf NICHT als ' +
+    'kein-Fortschritt gezählt werden, siehe .claude/lessons/coder.md 2026-07-01)',
+  () => {
+    it('stops immediately with reason "command-channel-busy", no spin, no escalation, when tryRun() reports the global lock is held by another project', async () => {
+      const { state, boardAggregator } = makeBoard([makeStory({ id: 'S-1', status: 'To Do', ready: true })]);
+      const commandService = {
+        tryRun: () => ({ ok: false, reason: 'locked' }),
+        getStatus: () => ({ commandId: null, status: null }),
+      };
+      const boardWriter = new FakeBoardWriter(state);
+      const lock = new ProjectJobLock();
+      const drain = new ProjectDrain({
+        boardAggregator,
+        commandService,
+        boardWriter,
+        lock,
+        escalationAttempts: 1, // deliberately low — if the bug regresses, this would escalate on round 1
+        now: () => NOW_MS,
+      });
+
+      const result = await drain.drainProject(PROJECT_PATH);
+
+      expect(result).toEqual({ stopped: true, reason: 'command-channel-busy', flowRuns: 1, escalated: [] });
+      // The healthy, unchanged ready story must NEVER be escalated to Blocked —
+      // this is exactly the corruption the reviewer live-reproduced.
+      expect(boardWriter.calls).toEqual([]);
+      expect(findStory(state.projects[0], 'S-1').status).toBe('To Do');
+      expect(findStory(state.projects[0], 'S-1').blocked_reason).toBeNull();
+      // Own ProjectJobLock is released (project remains a candidate for the next tick).
+      expect(lock.isHeld(PROJECT_PATH)).toBe(false);
+    });
+
+    it('treats reason "busy" the same way as "locked" (defensive — CommandService today only returns "locked")', async () => {
+      const { state, boardAggregator } = makeBoard([makeStory({ id: 'S-1', status: 'To Do', ready: true })]);
+      const commandService = {
+        tryRun: () => ({ ok: false, reason: 'busy' }),
+        getStatus: () => ({ commandId: null, status: null }),
+      };
+      const boardWriter = new FakeBoardWriter(state);
+      const drain = new ProjectDrain({
+        boardAggregator,
+        commandService,
+        boardWriter,
+        lock: new ProjectJobLock(),
+        escalationAttempts: 1,
+        now: () => NOW_MS,
+      });
+
+      const result = await drain.drainProject(PROJECT_PATH);
+
+      expect(result.reason).toBe('command-channel-busy');
+      expect(result.escalated).toEqual([]);
+      expect(boardWriter.calls).toEqual([]);
+    });
+
+    it('across many repeated scheduler-style drainProject() calls (simulating consecutive ticks), a permanently contended project never accumulates escalation and never touches the story', async () => {
+      const { state, boardAggregator } = makeBoard([makeStory({ id: 'S-1', status: 'To Do', ready: true })]);
+      const commandService = {
+        tryRun: () => ({ ok: false, reason: 'locked' }),
+        getStatus: () => ({ commandId: null, status: null }),
+      };
+      const boardWriter = new FakeBoardWriter(state);
+      const lock = new ProjectJobLock();
+      const drain = new ProjectDrain({
+        boardAggregator,
+        commandService,
+        boardWriter,
+        lock,
+        escalationAttempts: 2,
+        now: () => NOW_MS,
+      });
+
+      // Simulate 10 consecutive scheduler ticks, each starting a fresh drainProject()
+      // call for this project (as NightWatchScheduler does once the previous drain's
+      // promise has settled — see NightWatchScheduler.js #startDrain/#activeDrains).
+      for (let i = 0; i < 10; i += 1) {
+        const result = await drain.drainProject(PROJECT_PATH);
+        expect(result.reason).toBe('command-channel-busy');
+        expect(result.escalated).toEqual([]);
+      }
+
+      expect(boardWriter.calls).toEqual([]);
+      expect(findStory(state.projects[0], 'S-1').status).toBe('To Do');
+      expect(lock.isHeld(PROJECT_PATH)).toBe(false);
+    });
+  },
+);
 
 describe('ProjectDrain.drainProject — AC18: audit', () => {
   it('records exactly one drain-start entry and one escalation entry', async () => {

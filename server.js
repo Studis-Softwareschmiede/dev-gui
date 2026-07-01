@@ -115,6 +115,10 @@ import { read as readNotificationSettings } from './src/NotificationSettingsStor
 import { read as readTickerSettings } from './src/TickerSettingsStore.js';
 import { NotificationWatcher } from './src/NotificationWatcher.js';
 import { sendNotification } from './src/NotifyService.js';
+import { ProjectDrain } from './src/ProjectDrain.js';
+import { BoardWriter } from './src/BoardWriter.js';
+import { TokenLimitWatcher } from './src/TokenLimitWatcher.js';
+import { NightWatchScheduler } from './src/NightWatchScheduler.js';
 import { mountRouters } from './src/routerLoader.js';
 
 const PORT = Number(process.env.PORT ?? 8080);
@@ -265,6 +269,33 @@ const retroReader = new RetroReader({
 const boardAggregator = new BoardAggregator();
 boardAggregator.startWatchers();
 
+// ── Taktgeber/Nachtwächter (taktgeber-nachtwaechter.md) ───────────────────────
+// ProjectDrain (S-192) + BoardWriter (S-191) + TokenLimitWatcher (S-193) +
+// NightWatchScheduler (S-195, AC9–AC11): zieht die bereits gebauten Bausteine
+// zu einem periodischen Nachtfenster-Job zusammen. sessionRegistry=ptyRegistry
+// deckt sowohl die Busy-Erkennung (AC7, ProjectDrain) als auch den
+// Token-Limit-Watcher-Attach je Projekt-Session ab (S-195, konto-weit).
+const boardWriter = new BoardWriter();
+const projectDrain = new ProjectDrain({
+  boardAggregator,
+  commandService,
+  boardWriter,
+  sessionRegistry: ptyRegistry,
+  auditStore,
+});
+const tokenLimitWatcher = new TokenLimitWatcher();
+const nightWatchScheduler = new NightWatchScheduler({
+  readSettings: readTickerSettings,
+  boardAggregator,
+  projectDrain,
+  tokenLimitWatcher,
+  sessionRegistry: ptyRegistry,
+  auditStore,
+});
+// Immer gestartet — tick() selbst prüft `enabled` (AC16: enabled=false → idle,
+// analog NotificationWatcher.start(), das ebenfalls unbedingt läuft).
+nightWatchScheduler.start();
+
 // ── NotificationWatcher (push-notifications S-184 AC6–AC9) ───────────────────
 // Hängt am Board-Scan-Ergebnis; check() wird periodisch aufgerufen.
 // rescan-Router ruft notificationWatcher.check() nach boardAggregator.scan() auf
@@ -354,6 +385,9 @@ const deps = {
   // S-194 AC15/AC16: TickerSettingsStore-Reader als Konfig-Quelle für künftige Konsumenten
   // (S-195 NightWatchScheduler, S-192 Status-Widget) — analog readNotificationSettings.
   readTickerSettings,
+  // S-195 AC9–AC11: NightWatchScheduler-Instanz für künftige Statusanzeige (S-197)
+  // bzw. manuellen Trigger-Umbau (S-196) — kein Router konsumiert sie in dieser Story.
+  nightWatchScheduler,
 };
 
 // ── AC1/AC2: Auto-Discovery + Mount aller API-Router ─────────────────────────
@@ -534,6 +568,7 @@ async function buildReconcileVpsConfigsDynamic(targets, envValue, registry) {
 // Graceful shutdown
 function shutdown() {
   reconciliationJob.stopScheduler();
+  nightWatchScheduler.stop();
   boardAggregator.stopWatchers();
   notificationWatcher.stop();
   ptyRegistry.destroy(); // destroy all sessions (global + project sessions)

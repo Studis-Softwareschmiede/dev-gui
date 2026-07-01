@@ -116,9 +116,46 @@
  *   - Nachtfenster-Scheduler / `maxParallel` (S-195 NightWatchScheduler)
  *   - Token-Limit-Erkennung/-Pause (S-193 TokenLimitWatcher) — daher gibt
  *     `drainProject()` hier nie `reason: 'token-limit-stop'|'window-end'`
- *     zurück (nur `'no-drain-target'|'already-busy'|'safety-stop-no-progress'
- *     |'scan-failed'`, AC1/AC2/AC4/AC6/AC7).
+ *     zurück (nur `'no-drain-target'|'already-busy'|'command-channel-busy'
+ *     |'safety-stop-no-progress'|'scan-failed'`, AC1/AC2/AC4/AC6/AC7).
  *   - "Board abarbeiten"-Knopf-Umbau (S-196) / Settings-Store (S-194) / UI (S-197)
+ *
+ * Lock-Contention gegen den GLOBALEN CommandService/JobLock (S-195 Review-
+ * Iteration 2, live verifiziert — critical, siehe `.claude/lessons/coder.md`
+ * 2026-07-01): `NightWatchScheduler` startet bis zu `maxParallel`
+ * `drainProject()`-Läufe für VERSCHIEDENE Projekte, aber `CommandService`
+ * serialisiert weiterhin über einen einzigen PROZESSWEITEN `JobLock`
+ * (`src/CommandService.js`, "Step 3: Concurrency lock") — der projektweise
+ * `ProjectJobLock` (AC6/AC7) gilt nur für den DRAIN selbst, nicht für den
+ * darunterliegenden PTY-Schreibpfad. Gewinnt Projekt A den globalen Lock,
+ * bekommt jeder GLEICHZEITIGE `tryRun()`-Aufruf für Projekt B
+ * `{ok:false, reason:'locked'}` zurück — OBWOHL Projekt B's Drain-Ziel-Story
+ * völlig gesund und unverändert ist. Eine frühere Fassung dieser Klasse
+ * wertete das fälschlich als "Lauf ohne Fortschritt" und eskalierte B's
+ * legitime Story nach `escalationAttempts` auf `Blocked` — reine
+ * Lock-Contention, keine echte Blockade (Board-Datenkorruption im
+ * Standard-Nachtbetrieb, Default `maxParallel=3`).
+ *
+ *   FIX: `#runLoop` unterscheidet jetzt explizit "der /flow-Anstoß konnte
+ *   gerade nicht starten, weil der globale Command-Kanal von einem ANDEREN
+ *   Projekt belegt ist" (`tryResult.reason === 'locked'|'busy'`, KEIN Lauf
+ *   fand statt) von "ein /flow lief wirklich, brachte aber keinen
+ *   Fortschritt" (normale AC4/AC5-Eskalationslogik, unverändert). Im
+ *   Contention-Fall bricht der Drain für DIESES Projekt SOFORT sauber ab
+ *   (`reason: 'command-channel-busy'`, kein Spin, keine Eskalation, keine
+ *   Zustandsänderung an irgendeiner Story) — das eigene `ProjectJobLock` wird
+ *   wie immer in `finally` freigegeben, das Projekt bleibt Kandidat für den
+ *   nächsten Scheduler-Tick (`NightWatchScheduler` filtert `#activeDrains`
+ *   nur auf tatsächlich noch laufende Promises, nicht auf diesen Ausgang).
+ *
+ *   Bewusst NICHT Teil dieses Fixes (separate Folge-Story S-204, `depends:
+ *   [S-195]`): der zentrale `CommandService`/`JobLock`-Umbau auf einen
+ *   projektweisen PTY-Lock, der ECHTE parallele /flow-Läufe ermöglichen
+ *   würde. Dieser Fix macht den Drain nur ROBUST gegen die bestehende
+ *   Serialisierung — er hebt sie nicht auf. Effektiv bleibt bei
+ *   `maxParallel>1` (Default 3) genau EIN /flow-Lauf gleichzeitig aktiv;
+ *   die übrigen Projekte "warten" (kein Spin, kein Fehl-Blocked) bis zum
+ *   nächsten Tick, an dem der globale Kanal wieder frei sein kann.
  *
  * @module ProjectDrain
  */
@@ -434,7 +471,7 @@ export class ProjectDrain {
    * @param {string|null} [opts.identity]  auslösende Identität (Audit + CommandService).
    * @returns {Promise<{
    *   stopped: true,
-   *   reason: 'no-drain-target'|'already-busy'|'safety-stop-no-progress'|'scan-failed',
+   *   reason: 'no-drain-target'|'already-busy'|'command-channel-busy'|'safety-stop-no-progress'|'scan-failed',
    *   flowRuns: number,
    *   escalated: string[]
    * }>}
@@ -474,7 +511,7 @@ export class ProjectDrain {
    * @param {string|null} identity
    * @returns {Promise<{
    *   stopped: true,
-   *   reason: 'no-drain-target'|'safety-stop-no-progress'|'scan-failed',
+   *   reason: 'no-drain-target'|'command-channel-busy'|'safety-stop-no-progress'|'scan-failed',
    *   flowRuns: number,
    *   escalated: string[]
    * }>}
@@ -524,6 +561,21 @@ export class ProjectDrain {
         // Lauf zählen, kein Crash.
         tryResult = { ok: false, reason: 'internal' };
       }
+
+      // Lock-Contention-Fix (S-195 Review-Iteration 2, live verifiziert
+      // critical — siehe Modul-Doku): `reason: 'locked'|'busy'` bedeutet, es
+      // fand GAR KEIN /flow-Lauf statt — der globale CommandService-JobLock
+      // wird gerade von einem ANDEREN Projekt gehalten. Das ist KEIN
+      // fortschrittsloser LAUF dieses Projekts (kein `#awaitCompletion`, kein
+      // Snapshot-Vergleich, keine Eskalation) — sondern reine
+      // Ressourcen-Kontention außerhalb der Kontrolle dieses Drains. Sofort
+      // sauber beenden (Lock-Freigabe passiert wie immer in `finally` von
+      // `drainProject`), kein Spin, keine Zustandsänderung an der Story. Das
+      // Projekt bleibt Kandidat für den nächsten Scheduler-Tick.
+      if (tryResult && !tryResult.ok && (tryResult.reason === 'locked' || tryResult.reason === 'busy')) {
+        return { stopped: true, reason: 'command-channel-busy', flowRuns, escalated };
+      }
+
       if (tryResult && tryResult.ok) {
         await this.#awaitCompletion();
       }

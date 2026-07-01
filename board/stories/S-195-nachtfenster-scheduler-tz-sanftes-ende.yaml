@@ -1,7 +1,8 @@
 id: S-195
 parent: F-029
-title: 'Nachtfenster-Scheduler (NightWatchScheduler): TZ + ueber-Mitternacht + sanftes Ende + maxParallel'
-status: To Do
+title: 'Nachtfenster-Scheduler (NightWatchScheduler): TZ + ueber-Mitternacht + sanftes
+  Ende + maxParallel'
+status: Done
 priority: P2
 spec: docs/specs/taktgeber-nachtwaechter.md
 implements:
@@ -18,23 +19,30 @@ labels:
 size_est: L
 dispo_est: '5'
 dispo_act: null
-estimate_note: 'L-Heuristik (requirement): TZ-/Fenster-Logik + Parallelitaet +
-  Orchestrierung der Engine ueber alle Projekte. estimator nicht dispatchbar im
-  requirement-Kontext dieser Umgebung; dispo_est=5 aus baseline.json js|balanced|L
-  (n=5). confidence low.'
+estimate_note: 'L-Heuristik (requirement): TZ-/Fenster-Logik + Parallelitaet + Orchestrierung
+  der Engine ueber alle Projekte. estimator nicht dispatchbar im requirement-Kontext
+  dieser Umgebung; dispo_est=5 aus baseline.json js|balanced|L (n=5). confidence low.'
 confidence: low
-branch: null
+branch: feat/S-195-nightwatch-scheduler
 pr: null
 blocked_reason: null
 created_at: '2026-06-30T20:09:55Z'
-updated_at: '2026-06-30T20:09:55Z'
-done_at: null
-notes: |
-  NightWatchScheduler (Muster ReconciliationJob: einzelne setTimeout-Kette,
+updated_at: '2026-07-01T05:54:34Z'
+done_at: '2026-07-01T05:54:34Z'
+notes: 'NightWatchScheduler (Muster ReconciliationJob: einzelne setTimeout-Kette,
+
   Skip-if-running, unref(), pro Projekt degradierend). Draint im Nachtfenster ALLE
+
   Projekte (oder projects-Liste) ueber die ProjectDrain-Engine (S-192), bis maxParallel
+
   (Default 3, geklemmt 1-3) parallel; Polling intervalMinutes (Default 15). Fenster
+
   window.start/end in window.timezone (Europe/Zurich); UEBER MITTERNACHT (start>end):
+
   im Fenster wenn Zeit >= start ODER < end. SANFTES ENDE: ab window.end keine NEUEN
+
   /flow mehr; laufende NICHT killen, zu Ende fuehren. Busy-Erkennung (S-190) verhindert
+
   Doppel-Trigger bereits bearbeiteter Projekte. enabled=false -> idle.
+
+  '
