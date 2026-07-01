@@ -2,7 +2,7 @@ id: S-203
 parent: F-033
 title: Button 'Audit-Spec anzeigen' unter ReconcileTrigger + Anzeige der docs/spec-audit.md
   (404 -> freundlicher Hinweis)
-status: To Do
+status: Done
 priority: P2
 spec: docs/specs/spec-audit-view.md
 implements:
@@ -26,9 +26,9 @@ estimate_note: 'Heuristik: n_ac=4, n_comp=2 (SpecView.jsx, docs/spec-audit.md), 
   Hauptaufwand: Positionierung unter ReconcileTrigger + 404-Pfad + Test-Suite. depends
   S-202 (reales spec-audit.md braucht aktuelles Plugin); UI selbst entkoppelt testbar.'
 confidence: medium
-branch: null
+branch: feat/S-203-audit-view
 pr: null
 blocked_reason: null
 created_at: '2026-07-01T04:47:13Z'
-updated_at: '2026-07-01T04:48:16Z'
-done_at: null
+updated_at: '2026-07-01T05:24:45Z'
+done_at: '2026-07-01T05:24:45Z'
