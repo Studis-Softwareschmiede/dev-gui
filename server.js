@@ -4,7 +4,7 @@
  *
  * Routes:
  *   GET  /                    → React SPA (client/dist) — public, no Access required
- *   GET  /api/status                              → { projects:[...], previews:[...] }
+ *   GET  /api/status                              → { projects:[...], previews:[...], claudeAuth, lastCheckedAt } (claude-auth-health AC4)
  *   GET  /api/session                             → { state, restarts, startedAt }
  *   GET  /api/audit                               → [{time, identity, command}]
  *   POST /api/command                             → inject slash-command into PTY session
@@ -119,6 +119,7 @@ import { StoryMetricReader } from './src/StoryMetricReader.js';
 import { WorkspaceHealthChecker } from './src/WorkspaceHealthChecker.js';
 import { AssistService } from './src/AssistService.js';
 import { HeadlessReconcileRunner } from './src/HeadlessReconcileRunner.js';
+import { ClaudeAuthHealthService } from './src/ClaudeAuthHealthService.js';
 import { KnowledgeSourceService } from './src/KnowledgeSourceService.js';
 import { read as readNotificationSettings } from './src/NotificationSettingsStore.js';
 import { read as readTickerSettings } from './src/TickerSettingsStore.js';
@@ -350,6 +351,13 @@ const assistService = new AssistService();
 // getrennt (AC7) — eigene ProjectJobLock-Instanz, kein Idle-/Rate-Timer.
 const reconcileRunner = new HeadlessReconcileRunner();
 
+// ── ClaudeAuthHealthService (Boot- + periodische Auth-Probe, claude-auth-health AC1–AC6) ──
+// Getrennt vom interaktiven PTY-Pfad (analog HeadlessReconcileRunner AC7) — eigener
+// kurzlebiger claude-Kindprozess. start() ist fire-and-forget (blockiert den Boot nie,
+// Edge-Case "Probe-Fehler beim Boot"); stop() in shutdown() unten.
+const claudeAuthHealthService = new ClaudeAuthHealthService();
+claudeAuthHealthService.start();
+
 // ── KnowledgeSourceService (web-fähiger Quellen-Such-Helfer, team-knowledge-add AC11) ──
 // Bewusste zweite headless-Ausnahme (Doktrin A1/A2): eigene Boundary,
 // claude -p mit --allowedTools WebSearch exklusiv (A3), kein JobLock, auditiert (A6).
@@ -394,6 +402,9 @@ const deps = {
   // headless-reconcile-runner AC1-AC9: getrennter claude -p-Kindprozess-Runner
   // für POST /api/reconcile + GET /api/reconcile/:jobId (reconcile.js Router).
   reconcileRunner,
+  // claude-auth-health AC4: Zustand für GET /api/status (statusRouter, angegliedert
+  // an die bestehende Route, kein dedizierter Endpunkt).
+  claudeAuthHealthService,
   // S-183 AC1/AC2: NotificationSettingsStore als Config-Provider für notificationSettings-Router (AC5).
   // Ersetzt den Default-Provider (enabled=false/leer) — der Test-Endpunkt liest jetzt echte Settings.
   getNotificationConfig: readNotificationSettings,
@@ -597,6 +608,7 @@ async function buildReconcileVpsConfigsDynamic(targets, envValue, registry) {
 function shutdown() {
   reconciliationJob.stopScheduler();
   nightWatchScheduler.stop();
+  claudeAuthHealthService.stop();
   boardAggregator.stopWatchers();
   notificationWatcher.stop();
   ptyRegistry.destroy(); // destroy all sessions (global + project sessions)

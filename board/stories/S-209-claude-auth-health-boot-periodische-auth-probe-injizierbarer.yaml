@@ -3,7 +3,7 @@ parent: F-037
 title: 'Claude-Auth-Health: Boot- + periodische Auth-Probe (injizierbarer Runner/Timer,
   setTimeout-Kette), 401->expired / ok / unknown, Status-Endpunkt ohne Token, Panel-Badge
   ''Claude-Auth: abgelaufen'' + Erneuerungs-Hinweis, kein Token im Log'
-status: To Do
+status: Done
 priority: P2
 spec: docs/specs/claude-auth-health.md
 implements:
@@ -30,9 +30,9 @@ estimate_note: 'Heuristik: n_ac=6 (AC1-AC6), n_comp~3 (ClaudeAuthHealthService.j
   Story (Owner-Vorgabe, kein Split-Hint). Unabhaengig, kein hartes depends (Story
   A=Done).'
 confidence: low
-branch: null
+branch: feat/S-209-auth-health
 pr: null
 blocked_reason: null
 created_at: '2026-07-01T09:32:14Z'
-updated_at: '2026-07-01T09:33:46Z'
-done_at: null
+updated_at: '2026-07-01T10:47:47Z'
+done_at: '2026-07-01T10:47:47Z'

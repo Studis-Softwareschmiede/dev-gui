@@ -9,6 +9,14 @@
  *         One repo CI fails → that repo.lastCi = 'unknown', others fine
  *         No GH_TOKEN → GitHub degrades, no crash, no token in output
  *
+ * Covers (claude-auth-health):
+ *   AC4 — Feld claudeAuth ("ok"|"expired"|"unknown") + lastCheckedAt in der
+ *         GET /api/status-Response (angegliedert an die bestehende Route,
+ *         keine Doppelung); ohne verdrahteten Service → 'unknown'/null
+ *         (graceful degradation, kein Crash) statt 500.
+ *   AC6 — kein Token-Wert im Response-Body, auch wenn ein claudeAuthHealthService
+ *         mit gesetztem CLAUDE_CODE_OAUTH_TOKEN verdrahtet ist.
+ *
  * Strategy:
  *   - Inject fake fetch into GitHubReader (no real HTTP)
  *   - Inject fake execFn into DockerReader (no real Docker)
@@ -67,12 +75,12 @@ function get(port, path) {
  * Build a minimal Express app with AccessGuard (dev bypass) + statusRouter.
  * Accepts pre-constructed reader instances so tests can inject fakes.
  */
-function makeApp({ githubReader, dockerReader }) {
+function makeApp({ githubReader, dockerReader, claudeAuthHealthService }) {
   const app = express();
   app.use(express.json());
   const guard = createAccessGuard();
   app.use('/api', guard);
-  app.use(statusRouter({ githubReader, dockerReader }));
+  app.use(statusRouter({ githubReader, dockerReader, claudeAuthHealthService }));
   return app;
 }
 
@@ -660,6 +668,99 @@ describe('AC2 — openItems uses Search API (is:issue) so PRs are excluded', () 
       expect(proj?.openItems).toBe(7);
     } finally {
       await closeServer(srv);
+      delete process.env.DEV_NO_ACCESS;
+    }
+  });
+});
+
+// ── claude-auth-health AC4/AC6 — claudeAuth field on GET /api/status ─────────
+
+describe('claude-auth-health AC4 — claudeAuth + lastCheckedAt field on GET /api/status', () => {
+  afterEach(() => { delete process.env.DEV_NO_ACCESS; });
+
+  it('with a wired claudeAuthHealthService (state=ok) → response contains claudeAuth="ok" + lastCheckedAt', async () => {
+    process.env.DEV_NO_ACCESS = '1';
+    const githubReader = new GitHubReader({ tokenProvider: () => 'test-token', fetchFn: buildFakeFetch({ repos: [] }) });
+    const dockerReader = new DockerReader({ execFn: buildFakeExec([]) });
+    const claudeAuthHealthService = { getState: () => ({ claudeAuth: 'ok', lastCheckedAt: '2026-07-01T10:00:00.000Z' }) };
+    const app = makeApp({ githubReader, dockerReader, claudeAuthHealthService });
+    const { server, port } = await startServer(app);
+    try {
+      const res = await get(port, '/api/status');
+      expect(res.status).toBe(200);
+      expect(res.body.claudeAuth).toBe('ok');
+      expect(res.body.lastCheckedAt).toBe('2026-07-01T10:00:00.000Z');
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it('with a wired claudeAuthHealthService (state=expired) → response contains claudeAuth="expired"', async () => {
+    process.env.DEV_NO_ACCESS = '1';
+    const githubReader = new GitHubReader({ tokenProvider: () => 'test-token', fetchFn: buildFakeFetch({ repos: [] }) });
+    const dockerReader = new DockerReader({ execFn: buildFakeExec([]) });
+    const claudeAuthHealthService = { getState: () => ({ claudeAuth: 'expired', lastCheckedAt: '2026-07-01T09:00:00.000Z' }) };
+    const app = makeApp({ githubReader, dockerReader, claudeAuthHealthService });
+    const { server, port } = await startServer(app);
+    try {
+      const res = await get(port, '/api/status');
+      expect(res.status).toBe(200);
+      expect(res.body.claudeAuth).toBe('expired');
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it('without a wired claudeAuthHealthService → degrades to claudeAuth="unknown", lastCheckedAt=null (no crash)', async () => {
+    process.env.DEV_NO_ACCESS = '1';
+    const githubReader = new GitHubReader({ tokenProvider: () => 'test-token', fetchFn: buildFakeFetch({ repos: [] }) });
+    const dockerReader = new DockerReader({ execFn: buildFakeExec([]) });
+    const app = makeApp({ githubReader, dockerReader });
+    const { server, port } = await startServer(app);
+    try {
+      const res = await get(port, '/api/status');
+      expect(res.status).toBe(200);
+      expect(res.body.claudeAuth).toBe('unknown');
+      expect(res.body.lastCheckedAt).toBeNull();
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it('a throwing claudeAuthHealthService.getState() → degrades to "unknown"/null, still 200 (no crash)', async () => {
+    process.env.DEV_NO_ACCESS = '1';
+    const githubReader = new GitHubReader({ tokenProvider: () => 'test-token', fetchFn: buildFakeFetch({ repos: [] }) });
+    const dockerReader = new DockerReader({ execFn: buildFakeExec([]) });
+    const claudeAuthHealthService = { getState: () => { throw new Error('boom'); } };
+    const app = makeApp({ githubReader, dockerReader, claudeAuthHealthService });
+    const { server, port } = await startServer(app);
+    try {
+      const res = await get(port, '/api/status');
+      expect(res.status).toBe(200);
+      expect(res.body.claudeAuth).toBe('unknown');
+      expect(res.body.lastCheckedAt).toBeNull();
+    } finally {
+      await closeServer(server);
+    }
+  });
+});
+
+describe('claude-auth-health AC6 — no token value ever appears in GET /api/status', () => {
+  it('response body does not contain the CLAUDE_CODE_OAUTH_TOKEN value even when the service is wired with it', async () => {
+    process.env.DEV_NO_ACCESS = '1';
+    const githubReader = new GitHubReader({ tokenProvider: () => 'test-token', fetchFn: buildFakeFetch({ repos: [] }) });
+    const dockerReader = new DockerReader({ execFn: buildFakeExec([]) });
+    // Simulates a service whose internal probe used the real token — getState() must never expose it.
+    const claudeAuthHealthService = { getState: () => ({ claudeAuth: 'ok', lastCheckedAt: '2026-07-01T10:00:00.000Z' }) };
+    const app = makeApp({ githubReader, dockerReader, claudeAuthHealthService });
+    const { server, port } = await startServer(app);
+    try {
+      const res = await get(port, '/api/status');
+      const bodyStr = JSON.stringify(res.body);
+      expect(bodyStr).not.toContain('sk-ant-oat01');
+      expect(bodyStr).not.toContain('CLAUDE_CODE_OAUTH_TOKEN');
+    } finally {
+      await closeServer(server);
       delete process.env.DEV_NO_ACCESS;
     }
   });
