@@ -518,4 +518,16 @@ export class NightWatchScheduler {
       // best-effort — kein Crash
     }
   }
+
+  /**
+   * Rein lesender Momentan-Status-Snapshot — Erweiterungspunkt für die
+   * Nachtwächter-Statusanzeige (S-197, AC17 "aktuell laufende Drains").
+   * Nutzt ausschließlich die in-memory Buchführung dieser Instanz
+   * (`#activeDrains`) — kein Board-/PTY-Zugriff, keine Seiteneffekte.
+   *
+   * @returns {{ activeDrainProjectPaths: string[] }}
+   */
+  getStatus() {
+    return { activeDrainProjectPaths: [...this.#activeDrains.keys()] };
+  }
 }

@@ -24,6 +24,10 @@
  *          In-Fenster-Tick) wird NICHT abgebrochen — er bleibt in
  *          `#activeDrains` bis er selbst resolved, unabhängig vom
  *          aktuellen Fenster-Status des nächsten Ticks.
+ *   AC17 — `getStatus()` (S-197, Erweiterungspunkt für die Statusanzeige):
+ *          rein lesender Snapshot der aktuell aktiven Drain-Projektpfade
+ *          (leer ohne aktive Drains; enthält genau die laufenden Pfade;
+ *          Einträge verschwinden nach Abschluss des jeweiligen Drains).
  *
  *   Zusätzlich (Story-Vorgabe, Konsum von TokenLimitWatcher S-193 — AC13/14
  *   selbst bleiben dort implementiert): Token-Limit-Pause (bis Reset+1min,
@@ -621,5 +625,29 @@ describe('NightWatchScheduler — TokenLimitWatcher-Attach an PTY-Sessions', () 
 describe('DEFAULT_INTERVAL_MINUTES', () => {
   it('entspricht dem TickerSettingsStore-Default (15)', () => {
     expect(DEFAULT_INTERVAL_MINUTES).toBe(15);
+  });
+});
+
+// ── getStatus() (S-197, AC17 — Erweiterungspunkt für die Statusanzeige) ─────────
+
+describe('NightWatchScheduler.getStatus() (S-197 AC17)', () => {
+  it('keine aktiven Drains → leere Liste', () => {
+    const { scheduler } = makeScheduler();
+    expect(scheduler.getStatus()).toEqual({ activeDrainProjectPaths: [] });
+  });
+
+  it('während laufender Drains → activeDrainProjectPaths enthält genau die aktiven Projektpfade', async () => {
+    const projectDrain = makeControllableProjectDrain();
+    const { scheduler } = makeScheduler({ projectDrain, settings: makeSettings({ maxParallel: 2 }) });
+
+    await scheduler.tick();
+    expect(scheduler.getStatus().activeDrainProjectPaths.sort()).toEqual(
+      ['/workspace/proj-a', '/workspace/proj-b'].sort(),
+    );
+
+    // Nach Abschluss eines Drains wird er aus dem Status entfernt (asynchron über .finally()).
+    projectDrain.resolve('/workspace/proj-a');
+    await flush();
+    expect(scheduler.getStatus().activeDrainProjectPaths).toEqual(['/workspace/proj-b']);
   });
 });

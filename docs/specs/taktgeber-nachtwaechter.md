@@ -67,6 +67,7 @@ In der Fabrik bleiben Stories auf `To Do`/`In Progress` liegen — besonders bei
 ### Endpunkte
 - `GET /api/settings/ticker` → `200 { enabled, window:{start,end,timezone}, intervalMinutes, maxParallel, staleInProgressHours, escalationAttempts, projects }`.
 - `PUT /api/settings/ticker` `{…dieselben Felder…}` → `200 {…gespeicherte Settings…}` | `400 {field,message}` (Validierung).
+- `GET /api/settings/ticker/status` (S-197, AC17 — kompakte Statusanzeige Fabrik-Übersicht) → `200 { enabled, window:{start,end,timezone}, withinWindow, activeDrains }`. `withinWindow` = `isWithinWindow(now, window)` (Wiederverwendung `NightWatchScheduler.js`, AC10 — keine eigene TZ-Logik). `activeDrains` = Anzahl aktuell laufender Drains (`NightWatchScheduler#getStatus()`); `0` wenn der Scheduler nicht verdrahtet ist (graceful degradation).
 - `POST /api/projects/:slug/drain` (oder Wiederverwendung des bestehenden „Board abarbeiten"-Pfads) → startet einen manuellen Drain für **ein** Projekt; `202 {drainId}` | `409` (Projekt-Lock gehalten / Projekt bereits busy, AC7).
 - Bestehender Pfad `POST /api/command` (CommandService, [[flow-trigger]]) bleibt der **einzige** Schreibweg in den PTY; der Drain ruft ihn pro /flow-Anstoß.
 

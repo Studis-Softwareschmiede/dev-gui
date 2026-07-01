@@ -10,6 +10,8 @@
  *   POST /api/command                             → inject slash-command into PTY session
  *   POST /api/command/cancel                      → send Ctrl-C, cancel running command
  *   POST /api/projects/:slug/drain                 → { drainId } | 409 (busy) — manueller „Board abarbeiten"-Knopf via ProjectDrain-Engine (taktgeber-nachtwaechter S-196 AC12)
+ *   GET/PUT /api/settings/ticker                   → Nachtwächter-Settings (taktgeber-nachtwaechter S-194 AC15/AC16)
+ *   GET  /api/settings/ticker/status               → { enabled, window, withinWindow, activeDrains } — Statusanzeige (taktgeber-nachtwaechter S-197 AC17)
  *   GET/PUT/DELETE /api/settings/credentials*     → Credential-Verwaltung (settings-credentials)
  *   GET  /api/settings/credential-status          → { state, hasEncryptedEntries } (credential-bootstrap-status #184)
  *   POST /api/settings/credential-unlock          → { ok, state? } (credential-unlock-dialog #185)
