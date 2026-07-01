@@ -285,6 +285,11 @@ export function selectCandidateProjects(index, projectsSetting) {
  * @param {{ record: Function }} [deps.auditStore]  best-effort Audit für Token-Limit-Pause/Stop.
  * @param {{ getState: () => { claudeAuth: 'ok'|'expired'|'unknown', lastCheckedAt: string|null } }} [deps.claudeAuthHealthService]
  *   Auth-Vorabprüfung (S-213 AC9). Optional — ohne ihn läuft der Scheduler ohne Auth-Gate (kein Crash, degradiert).
+ * @param {{ runCheck: (trigger?: string) => Promise<object> }} [deps.costModeModelCheck]
+ *   Cost-Mode-Frische-Prüfung beim Dispatch (cost-mode-model-check AC4/AC5,
+ *   Wiederverwendung der S-211-Boundary). Optional — vor jedem Nacht-Drain-Start
+ *   wird `runCheck('dispatch')` fire-and-forget angestoßen (blockiert den
+ *   Drain-Start NIE, AC5). Ohne ihn läuft der Scheduler unverändert.
  * @param {string|null} [deps.identity]  auslösende Identität (Audit + ProjectDrain-Weiterreichung).
  * @param {() => number} [deps.now]  injizierbare Uhr (ms epoch), Default `Date.now`.
  * @param {(ms: number) => Promise<void>} [deps.sleepFn]  injizierbares Sleep (für `waitForReset`), Default echtes `setTimeout`.
@@ -299,6 +304,7 @@ export class NightWatchScheduler {
   #sessionRegistry;
   #auditStore;
   #claudeAuthHealthService;
+  #costModeModelCheck;
   #identity;
   #now;
   #sleepFn;
@@ -328,6 +334,7 @@ export class NightWatchScheduler {
     sessionRegistry,
     auditStore,
     claudeAuthHealthService,
+    costModeModelCheck,
     identity = null,
     now,
     sleepFn,
@@ -341,6 +348,7 @@ export class NightWatchScheduler {
     this.#sessionRegistry = sessionRegistry ?? null;
     this.#auditStore = auditStore ?? null;
     this.#claudeAuthHealthService = claudeAuthHealthService ?? null;
+    this.#costModeModelCheck = costModeModelCheck ?? null;
     this.#identity = identity;
     this.#now = now ?? (() => Date.now());
     this.#sleepFn = sleepFn ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -546,11 +554,35 @@ export class NightWatchScheduler {
    */
   #startDrain(projectPath) {
     this.#attachTokenWatcher(projectPath);
+    // cost-mode-model-check AC4/AC5: Dispatch-Frische-Prüfung unmittelbar vor der
+    // Cost-Mode-Übergabe an den Nacht-Drain — fire-and-forget, blockiert den
+    // Drain-Start NIE (AC5). Der drainProject-Aufruf unten läuft unabhängig; der
+    // Curator-Anstoß in runCheck ist asynchron/best-effort mit eigener Runner-/
+    // Lock-Instanz (getrennt vom Nacht-Drain-Lock, keine Selbst-/Fremdblockade).
+    this.#runCostModeDispatchCheck();
     const promise = this.#projectDrain
       .drainProject(projectPath, { identity: this.#identity })
       .catch(() => null) // ein Drain-Fehler darf den Scheduler nie crashen (Robustheit-NFR)
       .finally(() => this.#activeDrains.delete(projectPath));
     this.#activeDrains.set(projectPath, promise);
+  }
+
+  /**
+   * Stößt die Cost-Mode-Frische-Prüfung fire-and-forget an (cost-mode-model-check
+   * AC4/AC5, Wiederverwendung der S-211-Boundary). NICHT-BLOCKIEREND: das
+   * zurückgegebene Promise wird bewusst NICHT awaitet — nur mit `.catch()` gegen
+   * unhandled rejections abgesichert. `CostModeModelCheck.runCheck` hat selbst
+   * ein Skip-if-running (ein Curator-Lauf zur Zeit), sodass ein wiederholter
+   * Anstoß je Drain-Start unschädlich ist. Ohne injizierte Boundary → No-op.
+   */
+  #runCostModeDispatchCheck() {
+    if (!this.#costModeModelCheck || typeof this.#costModeModelCheck.runCheck !== 'function') return;
+    try {
+      const result = this.#costModeModelCheck.runCheck('dispatch');
+      if (result && typeof result.catch === 'function') result.catch(() => {});
+    } catch {
+      // best-effort — die Prüfung darf den Drain-Start nie verhindern (AC5).
+    }
   }
 
   /**

@@ -371,6 +371,22 @@ const nightProjectDrain = new ProjectDrain({
   flowRunner: headlessFlowRunnerAdapter,
 });
 const tokenLimitWatcher = new TokenLimitWatcher();
+// ── CostModeModelCheck (Boot + periodische + Dispatch-Cost-Mode-Modellprüfung,
+// cost-mode-model-check AC1–AC7) — VOR dem NightWatchScheduler konstruiert, da
+// dieser die Boundary für seine Dispatch-Frische-Prüfung (AC4/AC5) braucht. ──
+// Liest READ-ONLY das Frische-Signal (`last_curated`) der agent-flow-Matrix
+// (`knowledge/model-tiers.md`) über den bereits vorhandenen `agentFlowReader`-
+// Plugin-Root-Resolver; bei Drift stößt sie den Curator headless an
+// (`claude -p '/agent-flow:train model-tiers'`). EIGENE HeadlessFlowRunner-
+// Instanz mit ihrer EIGENEN ProjectJobLock-Instanz (Konstruktor-Default in
+// HeadlessFlowRunner.js) — bewusst getrennt von Nacht-Drain/Reconcile/
+// Finalizer/manuellem Drain (AC7-Isolation, sonst Fremd-/Selbstblockade).
+// dev-gui MUTIERT die Matrix NICHT (A2/A3 — nur Anstoß + read-only Signal).
+const costModeModelCheck = new CostModeModelCheck({
+  pluginRootResolver: () => agentFlowReader.resolvePluginRoot(),
+  flowRunner: new HeadlessFlowRunner(),
+  auditStore,
+});
 const nightWatchScheduler = new NightWatchScheduler({
   readSettings: readTickerSettings,
   boardAggregator,
@@ -379,6 +395,7 @@ const nightWatchScheduler = new NightWatchScheduler({
   sessionRegistry: ptyRegistry,
   auditStore,
   claudeAuthHealthService, // S-213 AC9: Auth-Vorabprüfung vor jedem Nacht-Tick
+  costModeModelCheck, // cost-mode-model-check AC4/AC5: Dispatch-Frische-Prüfung vor jedem Nacht-Drain-Start
 });
 // Immer gestartet — tick() selbst prüft `enabled` (AC16: enabled=false → idle,
 // analog NotificationWatcher.start(), das ebenfalls unbedingt läuft).
@@ -462,20 +479,10 @@ const storySpecifyFinalizer = new StorySpecifyFinalizer();
 // getrennt (AC7) — eigene ProjectJobLock-Instanz, kein Idle-/Rate-Timer.
 const reconcileRunner = new HeadlessReconcileRunner();
 
-// ── CostModeModelCheck (Boot + periodische Cost-Mode-Modellprüfung, cost-mode-model-check AC1–AC3/AC6/AC7) ──
-// Liest READ-ONLY das Frische-Signal (`last_curated`) der agent-flow-Matrix
-// (`knowledge/model-tiers.md`) über den bereits vorhandenen `agentFlowReader`-
-// Plugin-Root-Resolver; bei Drift stößt sie den Curator headless an
-// (`claude -p '/agent-flow:train model-tiers'`). EIGENE HeadlessFlowRunner-
-// Instanz mit ihrer EIGENEN ProjectJobLock-Instanz (Konstruktor-Default in
-// HeadlessFlowRunner.js) — bewusst getrennt von Nacht-Drain/Reconcile/
-// Finalizer/manuellem Drain (AC7-Isolation, sonst Fremd-/Selbstblockade).
-// dev-gui MUTIERT die Matrix NICHT (A2/A3 — nur Anstoß + read-only Signal).
-const costModeModelCheck = new CostModeModelCheck({
-  pluginRootResolver: () => agentFlowReader.resolvePluginRoot(),
-  flowRunner: new HeadlessFlowRunner(),
-  auditStore,
-});
+// ── CostModeModelCheck starten (cost-mode-model-check AC1–AC3/AC6/AC7) ──
+// Die Instanz wurde bereits weiter oben (im Taktgeber-Block, vor dem
+// NightWatchScheduler — der sie für seine Dispatch-Frische-Prüfung AC4/AC5
+// braucht) konstruiert; hier nur noch gestartet.
 // Immer gestartet — Boot-Check fire-and-forget (blockiert den Boot nie, AC1) +
 // periodische Kette; stiller Normalfall bei frischem Signal (AC2). stop() in
 // shutdown() unten.

@@ -87,6 +87,7 @@ import { BoardView } from './BoardView.jsx';
 import { SpecView } from './SpecView.jsx';
 import { IntakeDialog } from './IntakeDialog.jsx';
 import { IdeaCaptureModal } from './IdeaCaptureModal.jsx';
+import { CostModeDriftNotice } from './CostModeDriftNotice.jsx';
 
 /** @type {Array<{ id: string, label: string }>} */
 const TABS = [
@@ -306,6 +307,13 @@ function FactoryWorkspace({ activeRepo, fetchFn, onNavigate, pollInterval = SESS
   const [flowState, setFlowState] = useState('idle');
   const [flowError, setFlowError] = useState(null);
 
+  // ── Cost-Mode-Drift-Meldung (cost-mode-model-check AC4/AC5, S-228) ──
+  // checkId aus der Drain-Antwort (`costModeCheckId`), falls der Dispatch eine
+  // Drift erkannt hat → CostModeDriftNotice pollt den Status-Endpunkt und zeigt
+  // die nicht-modale „Modell veraltet"-Meldung + Vorher/Nachher-Übersicht.
+  // Additiv/nicht-blockierend: hat KEINEN Einfluss auf den Drain-Start.
+  const [costModeCheckId, setCostModeCheckId] = useState(null);
+
   // AC8: button is disabled when a session is busy (global lock model).
   // Also disabled when local flowState is in-progress (confirm/starting).
   const isBoardBtnDisabled = isSessionBusy || flowState === 'starting';
@@ -354,6 +362,20 @@ function FactoryWorkspace({ activeRepo, fetchFn, onNavigate, pollInterval = SESS
       // Consistent with IntakeDialog/AC4 pattern (onNavigate('factory')).
       setFlowState('idle');
       setSessionRunState('running'); // optimistic update — poll will confirm
+      // cost-mode-model-check AC4/AC5: bei Dispatch-Drift trägt die Antwort ein
+      // `costModeCheckId` → nicht-modale Drift-Meldung + Vorher/Nachher-Übersicht
+      // (CostModeDriftNotice, im Board-abarbeiten-Kasten). Best-effort: ein
+      // fehlendes/unlesbares Feld unterdrückt nur die Meldung (kein Fehler, der
+      // Drain läuft ohnehin bereits). onNavigate('factory') bleibt auf demselben
+      // Factory-View (CockpitView bleibt montiert), die Meldung überlebt.
+      try {
+        const body = await res.json();
+        if (body && typeof body.costModeCheckId === 'string' && body.costModeCheckId) {
+          setCostModeCheckId(body.costModeCheckId);
+        }
+      } catch {
+        // best-effort — keine Drift-Meldung, kein Crash
+      }
       if (onNavigate) onNavigate('factory');
       return;
     }
@@ -481,6 +503,13 @@ function FactoryWorkspace({ activeRepo, fetchFn, onNavigate, pollInterval = SESS
                 Zurücksetzen
               </button>
             </div>
+          )}
+
+          {/* cost-mode-model-check AC4/AC5 (S-228): nicht-modale Drift-Meldung +
+              Vorher/Nachher-Übersicht, wenn der Dispatch eine Modell-Drift erkannt
+              hat (checkId aus der Drain-Antwort). Rein additiv — blockiert nichts. */}
+          {costModeCheckId && (
+            <CostModeDriftNotice checkId={costModeCheckId} fetchFn={fetchFn} />
           )}
         </div>
 

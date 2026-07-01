@@ -35,6 +35,16 @@
  *          500, wenn die ProjectDrain-Engine nicht verdrahtet ist
  *          (Composition-Root-Fehler, defensiv).
  *
+ * Covers (cost-mode-model-check, S-228):
+ *   AC4 — Dispatch-Frische-Prüfung: `costModeModelCheck.runCheck('dispatch')`
+ *          wird beim Cost-Mode-Dispatch aufgerufen; bei erkanntem Drift
+ *          (`{ drift:true, checkId }`) trägt die 202-Antwort das optionale Feld
+ *          `costModeCheckId`. Kein Drift / `skipped` (keine checkId) / fehlende
+ *          Boundary → KEIN Feld (stiller Normalfall).
+ *   AC5 — nicht-blockierend: der Drain wird VOR der Prüfung gestartet
+ *          (drainProject() aufgerufen, auch wenn runCheck wirft/hängt); ein
+ *          Fehler in runCheck verhindert die 202-Antwort NIE (best-effort).
+ *
  * Strategy: echter Express-App + echter HTTP-Server (Muster
  * test/slugResolver.test.js "commandRouter integration" + test/tickerSettings.test.js
  * HTTP-Helpers) — injizierbarer slugResolver/pathValidator/lock (kein echtes
@@ -153,6 +163,7 @@ function identityPathValidator() {
  * @param {Function} [opts.slugResolver]    default: makeSlugResolver()
  * @param {Function} [opts.pathValidator]   default: identityPathValidator()
  * @param {object|null} [opts.identity]     req.identity (default: {email:'test@example.com'})
+ * @param {object} [opts.costModeModelCheck] Fake CostModeModelCheck (runCheck jest.fn) — AC4/AC5
  */
 function makeApp({
   projectDrain,
@@ -162,6 +173,7 @@ function makeApp({
   slugResolver = makeSlugResolver(),
   pathValidator = identityPathValidator(),
   identity = { email: 'test@example.com' },
+  costModeModelCheck,
 } = {}) {
   const app = express();
   app.use(express.json());
@@ -171,7 +183,7 @@ function makeApp({
   });
   app.use(
     projectDrainRouter(
-      { projectDrain, commandService, sessionRegistry },
+      { projectDrain, commandService, sessionRegistry, costModeModelCheck },
       { slugResolver, pathValidator, lock },
     ),
   );
@@ -428,6 +440,119 @@ describe('POST /api/projects/:slug/drain (headless-manual-drain AC1/AC2/AC3)', (
       identity: { email: 'test@example.com' },
       args: [],
     });
+  });
+});
+
+// ── AC4/AC5 (cost-mode-model-check, S-228): Dispatch-Frische-Prüfung ───────────
+
+describe('POST /api/projects/:slug/drain — Cost-Mode-Frische-Prüfung (cost-mode-model-check AC4/AC5)', () => {
+  let server;
+  let consoleErrorSpy;
+
+  beforeEach(() => {
+    consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(async () => {
+    if (server) await closeServer(server);
+    server = null;
+    consoleErrorSpy.mockRestore();
+  });
+
+  const okDrain = () => jest.fn(async () => ({ stopped: true, reason: 'no-drain-target', flowRuns: 0, escalated: [] }));
+
+  it('AC4 — Drift erkannt: runCheck("dispatch") aufgerufen + costModeCheckId in der 202-Antwort', async () => {
+    const drainProject = okDrain();
+    const runCheck = jest.fn(async () => ({ drift: true, checkId: 'chk-123', done: Promise.resolve() }));
+    const app = makeApp({ projectDrain: { drainProject }, costModeModelCheck: { runCheck } });
+    const s = await startServer(app);
+    server = s.server;
+
+    const res = await postNoBody(s.port, '/api/projects/dev-gui/drain');
+
+    expect(res.status).toBe(202);
+    expect(typeof res.body.drainId).toBe('string');
+    expect(res.body.costModeCheckId).toBe('chk-123');
+    expect(runCheck).toHaveBeenCalledWith('dispatch');
+    // AC5: der Drain wurde ebenfalls gestartet (nicht durch die Prüfung ersetzt).
+    expect(drainProject).toHaveBeenCalledTimes(1);
+  });
+
+  it('AC4 — kein Drift (fresh): KEIN costModeCheckId-Feld, runCheck trotzdem aufgerufen', async () => {
+    const drainProject = okDrain();
+    const runCheck = jest.fn(async () => ({ drift: false, reason: 'fresh' }));
+    const app = makeApp({ projectDrain: { drainProject }, costModeModelCheck: { runCheck } });
+    const s = await startServer(app);
+    server = s.server;
+
+    const res = await postNoBody(s.port, '/api/projects/dev-gui/drain');
+
+    expect(res.status).toBe(202);
+    expect(res.body).toEqual({ drainId: expect.any(String) });
+    expect(res.body.costModeCheckId).toBeUndefined();
+    expect(runCheck).toHaveBeenCalledWith('dispatch');
+  });
+
+  it('AC4 — Curator läuft bereits (skipped, keine checkId): KEIN costModeCheckId-Feld', async () => {
+    const drainProject = okDrain();
+    const runCheck = jest.fn(async () => ({ drift: true, skipped: 'locked' }));
+    const app = makeApp({ projectDrain: { drainProject }, costModeModelCheck: { runCheck } });
+    const s = await startServer(app);
+    server = s.server;
+
+    const res = await postNoBody(s.port, '/api/projects/dev-gui/drain');
+
+    expect(res.status).toBe(202);
+    expect(res.body.costModeCheckId).toBeUndefined();
+  });
+
+  it('AC5 — nicht-blockierend: runCheck wirft → 202 kommt trotzdem, Drain wurde gestartet', async () => {
+    const drainProject = okDrain();
+    const runCheck = jest.fn(async () => { throw new Error('curator boom'); });
+    const app = makeApp({ projectDrain: { drainProject }, costModeModelCheck: { runCheck } });
+    const s = await startServer(app);
+    server = s.server;
+
+    const res = await postNoBody(s.port, '/api/projects/dev-gui/drain');
+
+    expect(res.status).toBe(202);
+    expect(typeof res.body.drainId).toBe('string');
+    expect(res.body.costModeCheckId).toBeUndefined();
+    // AC5: der Drain-Start ist unabhängig von der Prüfung erfolgt.
+    expect(drainProject).toHaveBeenCalledTimes(1);
+  });
+
+  it('AC5 — Drain wird VOR der Prüfung gestartet (drainProject aufgerufen, bevor runCheck resolved)', async () => {
+    const callOrder = [];
+    const drainProject = jest.fn(async () => {
+      callOrder.push('drain');
+      return { stopped: true, reason: 'no-drain-target', flowRuns: 0, escalated: [] };
+    });
+    const runCheck = jest.fn(async () => {
+      callOrder.push('check');
+      return { drift: false, reason: 'fresh' };
+    });
+    const app = makeApp({ projectDrain: { drainProject }, costModeModelCheck: { runCheck } });
+    const s = await startServer(app);
+    server = s.server;
+
+    const res = await postNoBody(s.port, '/api/projects/dev-gui/drain');
+    expect(res.status).toBe(202);
+    // drainProject() wird synchron VOR dem await runCheck() angestoßen.
+    expect(callOrder[0]).toBe('drain');
+  });
+
+  it('ohne injizierte Boundary läuft der Drain unverändert (kein costModeCheckId, kein Crash)', async () => {
+    const drainProject = okDrain();
+    const app = makeApp({ projectDrain: { drainProject } }); // kein costModeModelCheck
+    const s = await startServer(app);
+    server = s.server;
+
+    const res = await postNoBody(s.port, '/api/projects/dev-gui/drain');
+
+    expect(res.status).toBe(202);
+    expect(res.body).toEqual({ drainId: expect.any(String) });
+    expect(drainProject).toHaveBeenCalledTimes(1);
   });
 });
 

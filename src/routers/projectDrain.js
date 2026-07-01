@@ -16,13 +16,22 @@ export const order = 21;
  *   commandService: import('../CommandService.js').CommandService,
  *   sessionRegistry: import('../PtySessionRegistry.js').PtySessionRegistry,
  *   manualDrainLock: import('../ProjectJobLock.js').ProjectJobLock,
+ *   costModeModelCheck: import('../CostModeModelCheck.js').CostModeModelCheck,
  * }} deps
  * @returns {import('express').Router}
  */
-export function create({ projectDrain, commandService, sessionRegistry, manualDrainLock }) {
+export function create({ projectDrain, commandService, sessionRegistry, manualDrainLock, costModeModelCheck }) {
   // headless-manual-drain AC2: die isProjectBusy-Prüfung MUSS gegen dieselbe
   // ProjectJobLock-Instanz laufen, die die dedizierte manuelle ProjectDrain-
   // Instanz als Session-Lock hält (via server.js injiziert) — sonst sieht der
   // Busy-Read den laufenden manuellen Drain nicht (→ Doppel-Start statt 409).
-  return projectDrainRouter({ projectDrain, commandService, sessionRegistry }, { lock: manualDrainLock });
+  //
+  // cost-mode-model-check AC4/AC5: `costModeModelCheck` (dieselbe S-211-Boundary-
+  // Instanz, in server.js verdrahtet) wird zusätzlich injiziert — der Router
+  // stößt bei der Cost-Mode-Übergabe die Dispatch-Frische-Prüfung an (nicht-
+  // blockierend) und reicht bei Drift die checkId ans Frontend durch.
+  return projectDrainRouter(
+    { projectDrain, commandService, sessionRegistry, costModeModelCheck },
+    { lock: manualDrainLock },
+  );
 }

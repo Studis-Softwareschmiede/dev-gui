@@ -39,6 +39,21 @@
  * Flow-Runden dieses Drains. Der Runner reicht das Arg nur durch — die
  * Modell-Auflösung liegt in agent-flow (flow-trigger AC8/AC9).
  *
+ * Cost-Mode-Frische-Prüfung beim Dispatch (cost-mode-model-check AC4/AC5):
+ *   Unmittelbar bei der Cost-Mode-Übergabe an den Drain stößt der Endpunkt —
+ *   sofern `costModeModelCheck` injiziert ist — dieselbe leichtgewichtige
+ *   Frische-Prüfung an wie Boot/periodisch (S-211, `CostModeModelCheck.runCheck`).
+ *   NICHT-BLOCKIEREND (AC5): der Drain wird VOR der Prüfung fire-and-forget
+ *   gestartet — die Prüfung läuft danach und blockiert den Drain-Start nie; der
+ *   Curator-Anstoß in `runCheck` ist ohnehin asynchron/best-effort (eigene
+ *   Runner-/Lock-Instanz). Erkennt die Prüfung Drift, liefert sie eine `checkId`,
+ *   die als optionales Feld `costModeCheckId` in die `202`-Antwort gereicht wird —
+ *   das Frontend pollt damit `GET /api/cost-mode/check/:checkId` und zeigt die
+ *   nicht-modale „Modell veraltet"-Meldung + Vorher/Nachher-Übersicht. Kein Drift
+ *   / bereits laufender Curator (`skipped`) / fehlende Boundary → KEIN Feld
+ *   (Frontend zeigt dann keine Meldung — stiller Normalfall, AC2-Analogon). Ein
+ *   Fehler in der Prüfung darf die `202`-Antwort NIE verhindern (best-effort).
+ *
  * Fire-and-forget (der Drain läuft wiederholte /flow-Runden, bis das Board
  * keine offene Ziel-Story mehr hat):
  *   `ProjectDrain.drainProject()` kann potenziell über viele Minuten/Stunden
@@ -91,6 +106,10 @@ import { DrainJobRegistry } from './DrainJobRegistry.js';
  * @param {import('./ProjectDrain.js').ProjectDrain} [deps.projectDrain]
  * @param {{ getStatus: () => { status: string|null } }} [deps.commandService]  für isProjectBusy (AC7)
  * @param {{ hasSession: (p: string) => boolean }} [deps.sessionRegistry]        für isProjectBusy (AC7)
+ * @param {{ runCheck: (trigger?: string) => Promise<{ drift: boolean, checkId?: string }> }} [deps.costModeModelCheck]
+ *   Cost-Mode-Frische-Prüfung beim Dispatch (cost-mode-model-check AC4/AC5,
+ *   Wiederverwendung der S-211-Boundary). Optional — ohne sie läuft der Drain
+ *   unverändert (kein `costModeCheckId` in der Antwort).
  * @param {object} [options]
  * @param {(path: string) => Promise<{ resolvedPath: string }>} [options.pathValidator]
  *   Injectable path validator (default: validateProjectPath). Inject a stub in tests.
@@ -104,7 +123,7 @@ import { DrainJobRegistry } from './DrainJobRegistry.js';
  * @returns {import('express').Router}
  */
 export function projectDrainRouter(deps = {}, options = {}) {
-  const { projectDrain, commandService, sessionRegistry } = deps;
+  const { projectDrain, commandService, sessionRegistry, costModeModelCheck } = deps;
   const _pathValidator = options.pathValidator ?? validateProjectPath;
   const _slugResolver = options.slugResolver ?? resolveProjectSlug;
   const _lock = options.lock;
@@ -186,7 +205,27 @@ export function projectDrainRouter(deps = {}, options = {}) {
         console.error(`[projectDrain] Drain fehlgeschlagen (drainId=${drainId}):`, err.message);
       });
 
-    return res.status(202).json({ drainId });
+    // AC4/AC5 (cost-mode-model-check): Dispatch-Frische-Prüfung NACH dem bereits
+    // (fire-and-forget) gestarteten Drain — der Drain läuft schon, die Prüfung
+    // blockiert seinen Start nie (AC5). Bei erkanntem Drift liefert `runCheck`
+    // eine `checkId`, die als optionales `costModeCheckId` in die 202-Antwort
+    // wandert (Frontend pollt darüber den Status-Endpunkt). Kein Drift / bereits
+    // laufender Curator (`skipped`, keine checkId) / fehlende Boundary → kein
+    // Feld. Best-effort: ein Fehler hier darf die 202-Antwort nie verhindern.
+    const body = { drainId };
+    if (costModeModelCheck && typeof costModeModelCheck.runCheck === 'function') {
+      try {
+        const check = await costModeModelCheck.runCheck('dispatch');
+        if (check && check.drift === true && typeof check.checkId === 'string' && check.checkId) {
+          body.costModeCheckId = check.checkId;
+        }
+      } catch {
+        // best-effort — die Frische-Prüfung ist rein additiv (AC5); kein Einfluss
+        // auf den bereits gestarteten Drain und keine 202-Verhinderung.
+      }
+    }
+
+    return res.status(202).json(body);
   });
 
   /**

@@ -27,6 +27,14 @@
  *          Busy-Disable-Verhalten (AC8) bleiben unverändert — nur der
  *          Auslöse-Mechanismus wechselt.
  *
+ * Covers (cost-mode-model-check, S-228):
+ *   AC4/AC5 — Verdrahtung: liefert die 202-Drain-Antwort das optionale Feld
+ *          `costModeCheckId`, blendet CockpitView die nicht-modale
+ *          CostModeDriftNotice ein (pollt GET /api/cost-mode/check/:checkId,
+ *          zeigt Vorher/Nachher). Ohne das Feld erscheint keine Meldung
+ *          (stiller Normalfall). Rein additiv — der bestehende 202→navigate-
+ *          Vertrag (AC12/AC8) bleibt unberührt.
+ *
  * Terminal, Dashboard, TriggerPanel, BoardView, SpecView sind gemockt
  * (WS/DOM-Komplexität vermeiden).
  *
@@ -354,5 +362,78 @@ describe('CockpitView — AC8 (fabric-intake-dialog): Board abarbeiten mit Sessi
     // section AND the TriggerPanel slot (even when mocked to null).
     // The board button and sidebar coexist — TriggerPanel is not removed.
     expect(document.querySelector('[data-testid="flow-board-btn"]')).toBeTruthy();
+  });
+});
+
+// ── S-228 (cost-mode-model-check AC4/AC5): Drift-Meldung nach Dispatch-Drift ───
+
+describe('CockpitView — Cost-Mode-Drift-Meldung (cost-mode-model-check AC4/AC5)', () => {
+  const CHECK_URL_RE = /^\/api\/cost-mode\/check\//;
+
+  /**
+   * fetch-Mock mit optionalem costModeCheckId in der 202-Drain-Antwort + einem
+   * done+changed-Status auf dem Check-Endpunkt.
+   * @param {object} [opts]
+   * @param {boolean} [opts.includeCheckId=true] — true → Feld `costModeCheckId` in der 202-Antwort
+   */
+  function makeDriftFetch({ includeCheckId = true } = {}) {
+    return jest.fn(async (url, opts) => {
+      if (url === '/api/session') {
+        return { ok: true, status: 200, json: async () => ({ state: 'ready', restarts: 0 }) };
+      }
+      if (DRAIN_URL_RE.test(url) && opts?.method === 'POST') {
+        const body = includeCheckId ? { drainId: 'd-1', costModeCheckId: 'chk-x' } : { drainId: 'd-1' };
+        return { ok: true, status: 202, json: async () => body };
+      }
+      if (CHECK_URL_RE.test(url)) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            status: 'done',
+            changed: true,
+            before: { lastCurated: '2026-05-01' },
+            after: { lastCurated: '2026-07-01' },
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    });
+  }
+
+  async function triggerDrain() {
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="flow-board-btn"]'));
+    });
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="flow-confirm-yes"]'));
+    });
+  }
+
+  it('202 mit costModeCheckId → CostModeDriftNotice erscheint + Vorher/Nachher', async () => {
+    renderCockpit(makeDriftFetch({ includeCheckId: true }));
+    await triggerDrain();
+
+    await waitFor(() => {
+      const notice = document.querySelector('[data-testid="cost-mode-drift-notice"]');
+      expect(notice).toBeTruthy();
+    });
+    await waitFor(() => {
+      const ba = document.querySelector('[data-testid="cost-mode-drift-beforeafter"]');
+      expect(ba).toBeTruthy();
+      expect(ba.textContent).toMatch(/2026-05-01/);
+      expect(ba.textContent).toMatch(/2026-07-01/);
+    });
+  });
+
+  it('202 OHNE costModeCheckId → keine Drift-Meldung (stiller Normalfall)', async () => {
+    renderCockpit(makeDriftFetch({ includeCheckId: false }));
+    await triggerDrain();
+
+    // Nach dem 202 + navigate: keine Drift-Meldung (kein Feld geliefert).
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="flow-confirm-dialog"]')).toBeNull();
+    });
+    expect(document.querySelector('[data-testid="cost-mode-drift-notice"]')).toBeNull();
   });
 });

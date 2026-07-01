@@ -59,6 +59,14 @@
  *   ProjectDrain-Mock — dieselbe Konvention wie
  *   nightwatch-lock-contention.integration.test.js).
  *
+ * Covers (cost-mode-model-check, S-228):
+ *   AC4 — Dispatch-Frische-Prüfung vor dem Nacht-Drain: pro gestartetem Drain
+ *         wird `costModeModelCheck.runCheck('dispatch')` genau einmal aufgerufen.
+ *   AC5 — nicht-blockierend: die Prüfung wird fire-and-forget angestoßen (nicht
+ *         awaitet) — ein werfendes/hängendes `runCheck` verhindert den
+ *         Drain-Start NIE (drainProject wird trotzdem aufgerufen). Kein
+ *         injizierter `costModeModelCheck` → Scheduler läuft unverändert (No-op).
+ *
  * Strategy:
  *   - Pure Helper (`parseHHMM`, `isWithinWindow`, `computeWindowEndMs`,
  *     `clampMaxParallel`, `selectCandidateProjects`) direkt mit
@@ -159,6 +167,7 @@ function makeScheduler(overrides = {}) {
     sessionRegistry: overrides.sessionRegistry,
     auditStore,
     claudeAuthHealthService: overrides.claudeAuthHealthService,
+    costModeModelCheck: overrides.costModeModelCheck,
     now: () => nowMs,
     sleepFn: overrides.sleepFn ?? (() => Promise.resolve()),
   });
@@ -503,6 +512,61 @@ describe('NightWatchScheduler.tick() — enabled/window Gates (AC9/AC10/AC11)', 
     custom.start();
     custom.stop();
     expect(clearTimeoutFn).toHaveBeenCalledWith(handle);
+  });
+});
+
+// ── Cost-Mode-Dispatch-Frische-Prüfung (cost-mode-model-check AC4/AC5, S-228) ──
+
+describe('NightWatchScheduler — Cost-Mode-Frische-Prüfung vor dem Nacht-Drain (cost-mode-model-check AC4/AC5)', () => {
+  it('AC4 — runCheck("dispatch") wird pro gestartetem Drain genau einmal aufgerufen', async () => {
+    const runCheck = jest.fn(async () => ({ drift: false, reason: 'fresh' }));
+    const { scheduler, projectDrain } = makeScheduler({
+      costModeModelCheck: { runCheck },
+      settings: makeSettings({ maxParallel: 2 }),
+    });
+
+    const result = await scheduler.tick();
+
+    expect(result.started).toHaveLength(2);
+    expect(projectDrain.drainProject).toHaveBeenCalledTimes(2);
+    // Genau ein runCheck('dispatch') je gestartetem Drain.
+    expect(runCheck).toHaveBeenCalledTimes(2);
+    expect(runCheck).toHaveBeenCalledWith('dispatch');
+  });
+
+  it('AC5 — nicht-blockierend: ein werfendes runCheck verhindert den Drain-Start NICHT', async () => {
+    const runCheck = jest.fn(() => { throw new Error('curator boom'); });
+    const { scheduler, projectDrain } = makeScheduler({
+      costModeModelCheck: { runCheck },
+      settings: makeSettings({ maxParallel: 2 }),
+    });
+
+    const result = await scheduler.tick();
+
+    expect(result.started).toHaveLength(2);
+    expect(projectDrain.drainProject).toHaveBeenCalledTimes(2);
+    expect(runCheck).toHaveBeenCalledTimes(2);
+  });
+
+  it('AC5 — nicht-blockierend: ein rejectendes runCheck-Promise crasht den Tick nicht', async () => {
+    const runCheck = jest.fn(async () => { throw new Error('async boom'); });
+    const { scheduler, projectDrain } = makeScheduler({
+      costModeModelCheck: { runCheck },
+      settings: makeSettings({ maxParallel: 1 }),
+    });
+
+    const result = await scheduler.tick();
+    await flush();
+
+    expect(result.started).toHaveLength(1);
+    expect(projectDrain.drainProject).toHaveBeenCalledTimes(1);
+  });
+
+  it('ohne injizierten costModeModelCheck läuft der Scheduler unverändert (No-op)', async () => {
+    const { scheduler, projectDrain } = makeScheduler({ settings: makeSettings({ maxParallel: 2 }) });
+    const result = await scheduler.tick();
+    expect(result.started).toHaveLength(2);
+    expect(projectDrain.drainProject).toHaveBeenCalledTimes(2);
   });
 });
 
