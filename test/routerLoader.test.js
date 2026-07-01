@@ -282,8 +282,10 @@ describe('routerLoader — Echte src/routers/ Module (AC1/AC3)', () => {
     //   (POST /api/settings/notifications/test — Test-Versand-Endpunkt AC5) → 29.
     // notifications.js wurde mit push-notifications (S-183) hinzugefügt
     //   (GET/PUT /api/settings/notifications — Settings-Persistenz AC1/AC2) → 30.
+    // ticker.js wurde mit taktgeber-nachtwaechter (S-194) hinzugefügt
+    //   (GET/PUT /api/settings/ticker — Settings-Persistenz AC15/AC16) → 31.
     const entries = await readdir(ROUTERS_DIR);
     const mountedCount = entries.filter((f) => f.endsWith('.js')).length;
-    expect(mountedCount).toBe(30);
+    expect(mountedCount).toBe(31);
   });
 });
