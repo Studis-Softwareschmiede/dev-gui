@@ -2,7 +2,7 @@
 id: taktgeber-nachtwaechter
 title: Taktgeber / Nachtwächter — Boards automatisch leerziehen (ProjectDrain-Engine + Nachtfenster)
 status: active
-version: 2
+version: 3
 ---
 
 # Spec: Taktgeber / Nachtwächter  (`taktgeber-nachtwaechter`)
@@ -35,6 +35,8 @@ In der Fabrik bleiben Stories auf `To Do`/`In Progress` liegen — besonders bei
 10. Innerhalb des Fensters: Polling-Intervall `intervalMinutes` (Default 15), bis zu `maxParallel` (Default 3) Projekte parallel.
 
 ### Concurrency (projektweise Locks)
+> **Echte Parallelität im Nacht-Drain** — der globale `CommandService`-`JobLock` serialisiert alle interaktiven /flow-Läufe (nur ein Projekt bekommt die PTV; die übrigen erhalten `command-channel-busy`). Die **echte** gleichzeitige Ausführung bei `maxParallel>1` löst der **headless-Ausführungspfad** ([[headless-parallel-drain]]): der Nachtwächter fährt /flow als parallele one-shot `claude -p`-Prozesse, die gar nicht am PTY-Lock hängen. Der interaktive Knopf/Terminal bleibt rein PTY.
+
 11. Der bestehende globale `JobLock` (process-weit, max. 1) genügt für 3 parallele Projekt-Läufe **nicht**. Für Drains gilt ein **projektweises Lock** (Schlüssel = absoluter Projektpfad). „Arbeitet jemand dran?" wird je Projekt aus aktivem Projekt-Lock **und** aktiver Session/aktivem Command (auch manuell im UI gestartete Läufe) bestimmt — kein Doppel-Trigger.
 
 ### Token-Limit (konto-weit)
@@ -131,4 +133,4 @@ In der Fabrik bleiben Stories auf `To Do`/`In Progress` liegen — besonders bei
 - Kein eigener Board-Schreibpfad jenseits von `BoardWriter` (status/blocked_reason).
 
 ## Abhängigkeiten
-- [[flow-trigger]] (CommandService, `POST /api/command`, Allowlist) · [[autonome-board-abarbeitung]] (Blocked-statt-Raten, „Board abarbeiten"-Knopf) · [[board-abarbeitungs-strategie]] (Parallelität/Worktrees in agent-flow) · [[ideen-inbox]] (Status `Idee` als explizites Nicht-Drain-Ziel, AC3) · [[push-notifications]] (NotificationSettingsStore-Muster) · `BoardAggregator` + `computeStoryReadyStatus` (ready-Regel) · `PtySessionRegistry` · `ReconciliationJob` (Scheduler-Muster) · `AuditStore`.
+- [[headless-parallel-drain]] (headless `claude -p`-Ausführungspfad für echte Nacht-Parallelität, löst `command-channel-busy` im Headless-Modus auf) · [[flow-trigger]] (CommandService, `POST /api/command`, Allowlist) · [[autonome-board-abarbeitung]] (Blocked-statt-Raten, „Board abarbeiten"-Knopf) · [[board-abarbeitungs-strategie]] (Parallelität/Worktrees in agent-flow) · [[ideen-inbox]] (Status `Idee` als explizites Nicht-Drain-Ziel, AC3) · [[push-notifications]] (NotificationSettingsStore-Muster) · `BoardAggregator` + `computeStoryReadyStatus` (ready-Regel) · `PtySessionRegistry` · `ReconciliationJob` (Scheduler-Muster) · `AuditStore`.

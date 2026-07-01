@@ -25,7 +25,10 @@ stories:
 - S-195
 - S-196
 - S-197
-progress: 0/8 done
+- S-204
+- S-212
+- S-213
+progress: 8/11 done
 created_at: '2026-06-30T20:09:55Z'
-updated_at: '2026-06-30T20:09:55Z'
+updated_at: '2026-07-01T12:00:00Z'
 done_at: null

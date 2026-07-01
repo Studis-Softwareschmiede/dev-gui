@@ -1,0 +1,56 @@
+id: S-213
+parent: F-029
+title: 'NightWatchScheduler Headless-Integration: echte Parallelitaet + Auth-Vorabpruefung
+  + Audit + CLAUDE.md'
+status: To Do
+priority: P2
+spec: docs/specs/headless-parallel-drain.md
+implements:
+- AC7
+- AC8
+- AC9
+- AC10
+- AC11
+- AC12
+- AC14
+depends:
+- S-212
+- S-209
+- S-195
+labels:
+- backend
+size_est: L
+dispo_est: '5'
+dispo_act: null
+dispo_forecast: null
+estimate_note: 'L per Heuristik (n_ac=7, n_comp~5, label_bump=0 -> score 12). estimator
+  nicht dispatchbar im requirement-Agent-Kontext (kein Task-Tool); baseline.json js|balanced|L
+  Median (ep 5.0, n=5) als Proxy. confidence medium.'
+confidence: medium
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-07-01T12:00:00Z'
+updated_at: '2026-07-01T12:00:00Z'
+done_at: null
+notes: 'Story 3 von 3 des headless-parallel-drain-Epics (Spec: docs/specs/headless-parallel-drain.md).
+
+
+  NightWatchScheduler (src/NightWatchScheduler.js) verdrahtet im NACHTMODUS den HEADLESS
+  FlowRunner-Adapter (S-212) -> bis zu maxParallel (Default 3, geklemmt 1-3) ECHT parallele
+  claude -p Subprozesse, nicht mehr am globalen PTY-Lock serialisiert (loest den in
+  der Scheduler-Modul-Doku Z.34-41 beschriebenen Engpass). Nachtfenster/sanftes Ende/Token-Pause/maxParallel-Klemmung
+  unveraendert. Stop-Grund command-channel-busy ENTFAELLT im Headless-Modus (kein globaler
+  Lock; projektweises ProjectJobLock genuegt, AC8) - interaktiver Pfad behaelt ihn.
+
+
+  Auth-Vorabpruefung (AC9): vor Nacht-Lauf ClaudeAuthHealthService.getState() (S-209);
+  bei expired NICHT starten + auditieren. Headless-Laeufe warten nie auf User-Input
+  (AC10, /flow setzt Blocked statt zu fragen; Timeout faengt haenger). Audit je headless-Lauf
+  Start/Ende/Fehler (AC11). Sanftes Fensterende: laufende Subprozesse nicht killen (AC12).
+  CLAUDE.md: headless-Nacht-Drain als bewusste, auditierte Ausnahme dokumentieren (AC14).
+
+
+  Gate: Unit-/Integrationstests mit gemocktem spawn/Runner (AC13). KEIN echter claude
+  -p Live-Lauf - reale Naht erst im ersten Nacht-Einsatz (Restrisiko, Spec). Depends:
+  S-212 (FlowRunner-Injection), S-209 (Auth-Health), S-195 (Scheduler).'

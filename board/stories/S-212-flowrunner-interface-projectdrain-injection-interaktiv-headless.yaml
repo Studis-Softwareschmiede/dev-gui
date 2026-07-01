@@ -1,0 +1,48 @@
+id: S-212
+parent: F-029
+title: 'FlowRunner-Interface + ProjectDrain-Injection (interaktiver + headless Adapter)'
+status: To Do
+priority: P2
+spec: docs/specs/headless-parallel-drain.md
+implements:
+- AC4
+- AC5
+- AC6
+- AC13
+depends:
+- S-204
+labels:
+- backend
+size_est: L
+dispo_est: '5'
+dispo_act: null
+dispo_forecast: null
+estimate_note: 'L per Heuristik (n_ac=4, n_comp~4, label_bump=0 -> score 8). estimator
+  nicht dispatchbar im requirement-Agent-Kontext (kein Task-Tool); baseline.json js|balanced|L
+  Median (ep 5.0, n=5) als Proxy. confidence medium.'
+confidence: medium
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-07-01T12:00:00Z'
+updated_at: '2026-07-01T12:00:00Z'
+done_at: null
+notes: 'Story 2 von 3 des headless-parallel-drain-Epics (Spec: docs/specs/headless-parallel-drain.md).
+
+
+  FlowRunner-Interface einfuehren (2 Operationen: Lauf starten {projectPath,command}
+  + auf ECHTES Ende warten -> terminaler Status). Zwei Adapter: (a) INTERAKTIV ueber
+  CommandService.tryRun() + Idle-Completion-Poll (heutiges Verhalten bit-identisch),
+  (b) HEADLESS ueber HeadlessFlowRunner (S-204), Ende = close-Event statt PTY-Idle-Poll.
+
+
+  ProjectDrain (src/ProjectDrain.js) bekommt den FlowRunner INJIZIERT: der Ausfuehrungs-Schritt
+  in #runLoop (Z.558 commandService.tryRun + Z.580 #awaitCompletion) geht ueber das
+  Interface statt hart ueber CommandService. GESAMTE uebrige Drain-Logik unveraendert
+  (Drain-Ziele/ready, zustandsbasierte Abbruch-/Konvergenz-Regel, Eskalation-auf-Blocked,
+  Snapshot-Diff, Sicherheitsguertel). Ohne Injection (Default) = interaktiver Adapter
+  -> manueller "Board abarbeiten"-Knopf (S-196) + Terminal + bestehende Tests bit-identisch
+  (AC6, Regressions-Guard).
+
+
+  Gate: Unit-/Integrationstests mit gemocktem Runner/spawn (AC13). Depends: S-204 (HeadlessFlowRunner).'

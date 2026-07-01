@@ -1,54 +1,59 @@
 id: S-204
 parent: F-029
-title: Echte Parallelität im Nacht-Drain via headless claude -p (mehrere Prozesse
-  gleichzeitig)
+title: 'Generischer Headless-Runner: HeadlessFlowRunner (claude -p) mit konfigurierbarem
+  Befehl + eigenem /flow-Timeout'
 status: Blocked
 priority: P2
-spec: docs/specs/taktgeber-nachtwaechter.md
+spec: docs/specs/headless-parallel-drain.md
 implements:
-- AC9
+- AC1
+- AC2
+- AC3
+- AC13
 depends:
 - S-195
+- S-206
+- S-207
+- S-209
 labels:
 - backend
-size_est: null
-dispo_est: null
+size_est: L
+dispo_est: '5'
 dispo_act: null
 dispo_forecast: null
-estimate_note: null
-confidence: null
+estimate_note: 'L per Heuristik (n_ac=4, n_comp~4, label_bump=0 -> score 8). estimator
+  nicht dispatchbar im requirement-Agent-Kontext (kein Task-Tool); baseline.json js|balanced|L
+  Median (ep 5.0, n=5) als Proxy. confidence medium.'
+confidence: medium
 branch: null
 pr: null
-blocked_reason: Wartet auf headless 'claude -p'-Ausfuehrungspfad (F-035/S-206/S-207,
-  anderer Arbeitsstrang, noch in Arbeit). Alter Ansatz (CommandService entkoppeln)
-  verworfen; neu gefasst auf parallele headless claude -p Prozesse. Entblocken sobald
-  claude -p steht.
+blocked_reason: 'Anker-Story von 3 (S-204 -> S-212 -> S-213). Bleibt Blocked bis /flow-Orchestrator
+  entblockt. Fundamente jetzt Done: S-206 (CLAUDE_CODE_OAUTH_TOKEN), S-207 (HeadlessReconcileRunner),
+  S-209 (ClaudeAuthHealthService), S-195 (NightWatchScheduler) -> entblockbar.'
 created_at: '2026-07-01T05:34:18Z'
-updated_at: '2026-07-01T10:12:36Z'
+updated_at: '2026-07-01T12:00:00Z'
 done_at: null
-notes: 'NEU GEFASST (2026-07-01, Owner-Challenge). Der urspruengliche Ansatz (interaktiven
-  CommandService/globalen JobLock projektweise entkoppeln) ist OBSOLET und wird NICHT
-  gebaut: er wuerde den zentralen interaktiven Terminal-Baustein umbauen (hohes Risiko)
-  und mehrere gleichzeitige Claude-Instanzen ueber EINE interaktive PTY erzwingen.
+notes: 'NEU GESCHNITTEN (2026-07-01, requirement). Ziel des Gesamt-Epics: echte Parallelitaet
+  im Nacht-Drain via headless "claude -p" (mehrere gleichzeitig), interaktiver PTV-Pfad
+  100% unangetastet. Spec: docs/specs/headless-parallel-drain.md.
 
 
-  RICHTIGER Ansatz: Der Nachtwaechter-Drain (NightWatchScheduler/ProjectDrain) fuehrt
-  die /flow-Laeufe NACHTS als parallele HEADLESS ''claude -p''-Prozesse aus (one-shot,
-  non-interaktiv), authentifiziert ueber CLAUDE_CODE_OAUTH_TOKEN aus der host-.env
-  (S-206). Jeder Lauf = eigener Prozess -> echte Gleichzeitigkeit bis maxParallel
-  OHNE den interaktiven CommandService anzufassen. Der manuelle ''Board abarbeiten''-Knopf
-  + das Terminal bleiben tagsueber beim interaktiven PTY-Weg (unveraendert).
+  DIESE Story (Anker, 1 von 3) = GENERISCHER RUNNER: HeadlessReconcileRunner (src/HeadlessReconcileRunner.js,
+  heute hart auf /agent-flow:reconcile verdrahtet Z.212) generalisieren -> HeadlessFlowRunner
+  bzw. gemeinsame Basis, sodass ein KONFIGURIERBARER Befehl gefahren wird (Default
+  /agent-flow:flow, optional --cost-Args). Reconcile-Verhalten 1:1 uebernehmen: buildChildEnv
+  Env-Allowlist + CLAUDE_CODE_OAUTH_TOKEN (Z.77-91), ANTHROPIC_API_KEY-Block, isAuthError
+  401-Vorrang (Z.102-105), close-Event als einzige Fertig-Quelle (Z.235-249), SIGTERM-Timeout,
+  ProjectJobLock finally-Freigabe (Z.157-159,260-262), In-Memory Job-Registry getJob.
+  EIGENER, viel groesserer + konfigurierbarer Timeout FLOW_HEADLESS_TIMEOUT_MS (nicht
+  der 15-min-Reconcile-Wert -> ein /flow-Lauf ueber ein Board dauert lange). KEIN Regress
+  am Reconcile-Pfad (alle ACs von headless-reconcile-runner.md bleiben gruen).
 
 
-  Ziel (Owner): das bezahlte Token-Kontingent nachts moeglichst ausschoepfen. Parallelitaet
-  hilft, weil ein einzelner /flow-Lauf die Rate wegen Tool-/CI-/IO-Wartezeiten oft
-  NICHT saettigt -> mehrere parallele Laeufe verwandeln mehr Budget in erledigte Stories.
+  Gate: Unit-/Integrationstests mit gemocktem spawn (injizierbare spawnFn wie im ReconcileRunner).
+  KEIN echter claude -p Live-Lauf (Restrisiko in der Spec vermerkt).
 
 
-  ABHAENGIGKEIT / BLOCKED-GRUND: Setzt den headless-''claude -p''-Ausfuehrungspfad
-  voraus, der aktuell in einem parallelen Arbeitsstrang (F-035/F-036/F-037, S-206
-  OAuth-Token, S-207 Headless-Reconcile-Runner) noch IN ARBEIT ist. Sobald der headless-Pfad
-  steht: entblocken, ggf. splitten (Ausfuehrungs-Adapter ''claude -p'' im ProjectDrain
-  + Parallel-Orchestrierung im Scheduler + Rate-/Konflikt-Verhalten mehrerer Prozesse
-  auf demselben OAuth-Token pruefen). Zu klaeren beim Entblocken: max. sinnvolle Parallelitaet
-  auf einem Abo-Token (Rate-Limits), Fehler-/Timeout-Handling headless, Audit je Lauf.'
+  Folge-Stories: S-212 (FlowRunner-Interface + ProjectDrain-Injection), S-213 (Scheduler-Headless-Integration
+  + Auth-Vorabpruefung + Audit + CLAUDE.md). Alter Ansatz (interaktiven CommandService/JobLock
+  projektweise entkoppeln) bleibt OBSOLET/verworfen.'
