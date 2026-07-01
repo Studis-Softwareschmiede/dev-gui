@@ -1,0 +1,24 @@
+id: F-033
+title: Audit-Spec-Anzeige im Spezifikation-Reiter
+goal: 'Der Reconcile-Lauf schreibt ein Logbuch nach docs/spec-audit.md (Protokoll
+  der letzten Doku-Aufhol-Aktionen), das in der GUI bisher nicht einsehbar ist. Ziel:
+  ein kleiner Sekundaer-Button ''Audit-Spec anzeigen'' direkt UNTERHALB des bestehenden
+  ''Konzept/Spec nachziehen''-Buttons (ReconcileTrigger, S-201) in SpecView.jsx laedt
+  die docs/spec-audit.md des aktiven Projekts ueber die bestehende Doku-Lese-API (docs/raw)
+  und rendert sie via MarkdownLite. Fehlt die Datei (noch kein Reconcile-Lauf) ->
+  freundlicher Hinweis statt Fehler. UI entkoppelt baubar/testbar (mockbarer fetch).'
+status: Backlog
+priority: P2
+spec: docs/specs/spec-audit-view.md
+definition_of_done: null
+labels:
+- ui
+- reconcile
+depends:
+- F-032
+owner: null
+stories:
+- S-203
+progress: 0/1 done
+created_at: '2026-07-01T04:47:04Z'
+updated_at: '2026-07-01T04:48:50Z'
