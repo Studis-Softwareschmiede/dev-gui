@@ -290,8 +290,10 @@ describe('routerLoader — Echte src/routers/ Module (AC1/AC3)', () => {
     //   (POST /api/reconcile + GET /api/reconcile/:jobId — getrennter claude -p-Runner AC8/AC9) → 33.
     // ideaSpecify.js wurde mit idea-specify-chat (S-215) hinzugefügt
     //   (POST .../specify/start + .../specify/message — Multi-Turn claude -p-Chat AC3/AC4/AC5/AC13) → 34.
+    // costModeCheck.js wurde mit cost-mode-model-check (S-211) hinzugefügt
+    //   (GET /api/cost-mode/check/:checkId — Status-Endpunkt der Modellprüfung AC7) → 35.
     const entries = await readdir(ROUTERS_DIR);
     const mountedCount = entries.filter((f) => f.endsWith('.js')).length;
-    expect(mountedCount).toBe(34);
+    expect(mountedCount).toBe(35);
   });
 });

@@ -138,6 +138,7 @@ import { NightWatchScheduler } from './src/NightWatchScheduler.js';
 import { HeadlessFlowRunner } from './src/HeadlessFlowRunner.js';
 import { HeadlessFlowRunnerAdapter } from './src/FlowRunner.js';
 import { ProjectJobLock } from './src/ProjectJobLock.js';
+import { CostModeModelCheck } from './src/CostModeModelCheck.js';
 import { mountRouters } from './src/routerLoader.js';
 
 const PORT = Number(process.env.PORT ?? 8080);
@@ -447,6 +448,25 @@ const ideaSpecifyFinalizer = new IdeaSpecifyFinalizer({ boardWriter, auditStore 
 // getrennt (AC7) — eigene ProjectJobLock-Instanz, kein Idle-/Rate-Timer.
 const reconcileRunner = new HeadlessReconcileRunner();
 
+// ── CostModeModelCheck (Boot + periodische Cost-Mode-Modellprüfung, cost-mode-model-check AC1–AC3/AC6/AC7) ──
+// Liest READ-ONLY das Frische-Signal (`last_curated`) der agent-flow-Matrix
+// (`knowledge/model-tiers.md`) über den bereits vorhandenen `agentFlowReader`-
+// Plugin-Root-Resolver; bei Drift stößt sie den Curator headless an
+// (`claude -p '/agent-flow:train model-tiers'`). EIGENE HeadlessFlowRunner-
+// Instanz mit ihrer EIGENEN ProjectJobLock-Instanz (Konstruktor-Default in
+// HeadlessFlowRunner.js) — bewusst getrennt von Nacht-Drain/Reconcile/
+// Finalizer/manuellem Drain (AC7-Isolation, sonst Fremd-/Selbstblockade).
+// dev-gui MUTIERT die Matrix NICHT (A2/A3 — nur Anstoß + read-only Signal).
+const costModeModelCheck = new CostModeModelCheck({
+  pluginRootResolver: () => agentFlowReader.resolvePluginRoot(),
+  flowRunner: new HeadlessFlowRunner(),
+  auditStore,
+});
+// Immer gestartet — Boot-Check fire-and-forget (blockiert den Boot nie, AC1) +
+// periodische Kette; stiller Normalfall bei frischem Signal (AC2). stop() in
+// shutdown() unten.
+costModeModelCheck.start();
+
 // claudeAuthHealthService-Instanz wurde bereits weiter oben (vor dem
 // Taktgeber-Block, S-213 AC9) konstruiert — hier nur noch fire-and-forget
 // gestartet (blockiert den Boot nie, Edge-Case "Probe-Fehler beim Boot"),
@@ -497,6 +517,9 @@ const deps = {
   // headless-reconcile-runner AC1-AC9: getrennter claude -p-Kindprozess-Runner
   // für POST /api/reconcile + GET /api/reconcile/:jobId (reconcile.js Router).
   reconcileRunner,
+  // cost-mode-model-check AC7: CostModeModelCheck-Registry für den Status-
+  // Endpunkt GET /api/cost-mode/check/:checkId (costModeCheck.js Router).
+  costModeModelCheck,
   // claude-auth-health AC4: Zustand für GET /api/status (statusRouter, angegliedert
   // an die bestehende Route, kein dedizierter Endpunkt).
   claudeAuthHealthService,
@@ -713,6 +736,7 @@ async function buildReconcileVpsConfigsDynamic(targets, envValue, registry) {
 function shutdown() {
   reconciliationJob.stopScheduler();
   nightWatchScheduler.stop();
+  costModeModelCheck.stop();
   claudeAuthHealthService.stop();
   boardAggregator.stopWatchers();
   notificationWatcher.stop();
