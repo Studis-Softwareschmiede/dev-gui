@@ -1,0 +1,29 @@
+id: F-042
+title: 'Automatische Cost-Mode-Modellprüfung (Boot + Dispatch, Auto-Reparametrisierung
+  via agent-flow-Curator)'
+goal: 'dev-gui hält die Cost-Mode->Modell-Zuordnung automatisch aktuell. Prüfung
+  still im Hintergrund: beim dev-gui-Boot (always-on, kein neuer Dienst), periodisch,
+  und unmittelbar vor der Cost-Mode-Übergabe an einen Board-/Flow-Lauf. Normalfall
+  (Frische-Signal aktuell) -> keinerlei Meldung. Drift -> kurze nicht-modale Meldung
+  ("Modell veraltet"), Reparametrisierung DELEGIERT an den agent-flow-Curator
+  (/agent-flow:train model-tiers, headless, eigene Runner-/Lock-Instanz) + Vorher/Nachher-
+  Übersicht; der Vorgang läuft ohne Bestätigung automatisch weiter. WICHTIG (Scope):
+  die maßgebliche Cost-Mode->Modell-Matrix + der Auswahlbarkeits-Filter (Ausschluss
+  nicht-auswählbarer Modelle wie Mythos/Fable) liegen AGENT-FLOW-seitig (model-tier-
+  curator.md, anderes Repo); dev-gui stößt nur an, mutiert die Matrix NICHT und hat
+  keinen eigenen Live-Modell-Auswahlbarkeits-Check (dokumentierte Limitation).
+  Interpretation "Defy"=dev-gui. Spec: docs/specs/cost-mode-model-check.md.'
+status: Backlog
+priority: P2
+spec: docs/specs/cost-mode-model-check.md
+definition_of_done: null
+labels:
+- security
+depends: null
+owner: null
+stories:
+- S-211
+- S-228
+progress: 0/2 done
+created_at: '2026-07-01T21:30:00Z'
+updated_at: '2026-07-01T21:30:00Z'
