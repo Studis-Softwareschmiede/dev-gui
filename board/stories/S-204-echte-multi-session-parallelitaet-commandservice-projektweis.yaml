@@ -2,7 +2,7 @@ id: S-204
 parent: F-029
 title: 'Generischer Headless-Runner: HeadlessFlowRunner (claude -p) mit konfigurierbarem
   Befehl + eigenem /flow-Timeout'
-status: Blocked
+status: Done
 priority: P2
 spec: docs/specs/headless-parallel-drain.md
 implements:
@@ -21,18 +21,16 @@ size_est: L
 dispo_est: '5'
 dispo_act: null
 dispo_forecast: null
-estimate_note: 'L per Heuristik (n_ac=4, n_comp~4, label_bump=0 -> score 8). estimator
+estimate_note: L per Heuristik (n_ac=4, n_comp~4, label_bump=0 -> score 8). estimator
   nicht dispatchbar im requirement-Agent-Kontext (kein Task-Tool); baseline.json js|balanced|L
-  Median (ep 5.0, n=5) als Proxy. confidence medium.'
+  Median (ep 5.0, n=5) als Proxy. confidence medium.
 confidence: medium
-branch: null
+branch: feat/S-204-headless-flow-runner
 pr: null
-blocked_reason: 'Anker-Story von 3 (S-204 -> S-212 -> S-213). Bleibt Blocked bis /flow-Orchestrator
-  entblockt. Fundamente jetzt Done: S-206 (CLAUDE_CODE_OAUTH_TOKEN), S-207 (HeadlessReconcileRunner),
-  S-209 (ClaudeAuthHealthService), S-195 (NightWatchScheduler) -> entblockbar.'
+blocked_reason: null
 created_at: '2026-07-01T05:34:18Z'
-updated_at: '2026-07-01T12:00:00Z'
-done_at: null
+updated_at: '2026-07-01T11:41:59Z'
+done_at: '2026-07-01T11:41:59Z'
 notes: 'NEU GESCHNITTEN (2026-07-01, requirement). Ziel des Gesamt-Epics: echte Parallelitaet
   im Nacht-Drain via headless "claude -p" (mehrere gleichzeitig), interaktiver PTV-Pfad
   100% unangetastet. Spec: docs/specs/headless-parallel-drain.md.
@@ -46,8 +44,8 @@ notes: 'NEU GESCHNITTEN (2026-07-01, requirement). Ziel des Gesamt-Epics: echte 
   401-Vorrang (Z.102-105), close-Event als einzige Fertig-Quelle (Z.235-249), SIGTERM-Timeout,
   ProjectJobLock finally-Freigabe (Z.157-159,260-262), In-Memory Job-Registry getJob.
   EIGENER, viel groesserer + konfigurierbarer Timeout FLOW_HEADLESS_TIMEOUT_MS (nicht
-  der 15-min-Reconcile-Wert -> ein /flow-Lauf ueber ein Board dauert lange). KEIN Regress
-  am Reconcile-Pfad (alle ACs von headless-reconcile-runner.md bleiben gruen).
+  der 15-min-Reconcile-Wert -> ein /flow-Lauf ueber ein Board dauert lange). KEIN
+  Regress am Reconcile-Pfad (alle ACs von headless-reconcile-runner.md bleiben gruen).
 
 
   Gate: Unit-/Integrationstests mit gemocktem spawn (injizierbare spawnFn wie im ReconcileRunner).
