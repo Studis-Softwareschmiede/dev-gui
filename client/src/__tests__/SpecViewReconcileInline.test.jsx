@@ -1,28 +1,45 @@
 /**
  * SpecViewReconcileInline.test.jsx — Tests für reconcile-inline-feedback (S-205)
- * AC1–AC5, AC8, AC9 (Frontend-Teil; AC6/AC7 sind Backend, siehe
- * test/session-router.test.js + test/PtySessionRegistry.test.js).
+ * AC1/AC4/AC5 (unverändert) + headless-reconcile-runner (S-208) AC11–AC14 und den
+ * job-poll-basierten Degradierungs-Schutz (Ablösung von AC2/AC3/AC8-Quelle).
  *
  * Covers (reconcile-inline-feedback):
  *   AC1 — Nach 202 wird `onNavigate` NICHT mehr aufgerufen (überschreibt
  *          reconcile-trigger AC5); inline „Reconcile läuft…" (role="status"),
  *          Button deaktiviert (disabled + Text-Label).
- *   AC2 — Solange `GET /api/session` `state:"busy"` liefert, bleibt „Reconcile
- *          läuft…" sichtbar, Button deaktiviert.
- *   AC3 — Erstmaliges nicht-`busy` nach `busy` → „Fertig" (role="status"),
- *          Button wieder auslösbar. Inklusive Edge-Case „Race busy→ready
- *          sofort" (erster Poll nach dem Start bereits nicht-busy).
+ *   AC2 — ÜBERSCHRIEBEN durch headless-reconcile-runner (S-208) AC11: die
+ *          Fertig-Quelle ist jetzt `GET /api/reconcile/:jobId` (nicht mehr
+ *          `/api/session`). Siehe AC11-Tests unten.
+ *   AC3 — ÜBERSCHRIEBEN durch headless-reconcile-runner (S-208) AC12: Status
+ *          `done` (statt „erstmaliges nicht-busy") → „Fertig". Siehe AC12-Tests.
  *   AC4 — Beim Übergang auf „Fertig" wird AuditSpecView automatisch GENAU
  *          EINMAL neu geladen (kein manueller Klick, kein Doppel-Reload).
+ *          Mechanismus unverändert, jetzt ausgelöst von Job-Status `done` (AC12).
  *   AC5 — Erkennbarer PR-Bezug im Audit-Inhalt → dezenter Link/Hinweis; kein
- *          Bezug → kein Element (graceful absence).
- *   AC8 — Sicherheitsfenster überschritten (Session flippt nie zurück) ODER
- *          wiederholte Poll-Fehler → neutrale Degradierung statt Endlos-
- *          Spinner; „Audit-Spec anzeigen" bleibt bedienbar.
+ *          Bezug → kein Element (graceful absence). Unverändert.
+ *   AC8 — ÜBERSCHRIEBEN durch headless-reconcile-runner (S-208): Quelle des
+ *          Sicherheitsfensters/Poll-Fehlerzählers ist jetzt der Job-Poll
+ *          (`/api/reconcile/:jobId`), nicht mehr `/api/session`. Siehe unten.
  *   AC9 — Regression zu reconcile-trigger AC6/AC7: bereits vollständig
- *          gedeckt in SpecViewReconcileTrigger.test.jsx (409/500/Netzwerkfehler
+ *          gedeckt in SpecViewReconcileTrigger.test.jsx (409/400/500/Netzwerkfehler
  *          → Fehleranzeige mit Reset, kein onNavigate) — identisches
  *          Verhalten, hier nicht dupliziert.
+ *
+ * Covers (headless-reconcile-runner):
+ *   AC11 — Im Lauf-Zustand pollt der Trigger `GET /api/reconcile/:jobId`
+ *          (nicht `/api/session` als Fertig-Quelle); solange `status:"running"`
+ *          bleibt „Reconcile läuft…", kein onNavigate.
+ *   AC12 — Status `done` → „Fertig" (role="status"), Button wieder auslösbar,
+ *          AuditSpecView automatisch genau einmal neu geladen; PR-Hinweis
+ *          best-effort über den bestehenden Audit-Mechanismus (AC5).
+ *   AC13 — Status `failed` (Job-Poll) → inline Fehleranzeige mit Reset
+ *          (role="alert"), kein Crash.
+ *   AC14 — Status `auth-expired` → klarer Hinweis „Claude-Anmeldung
+ *          abgelaufen — Token via `claude setup-token` erneuern" (role="alert",
+ *          Text nicht nur Farbe); kein falsches „Fertig".
+ *   AC15 — Alle Zustände sind über den injizierbaren `fetchFn` steuerbar (kein
+ *          Test hängt an einem realen Reconcile-Lauf) — durchgängig in dieser
+ *          Datei demonstriert.
  *
  * @jest-environment jsdom
  */
@@ -49,22 +66,32 @@ const FAKE_DOCS = [
 ];
 
 /**
- * Build a fetch mock with a scripted /api/session state sequence.
+ * Build a fetch mock with a scripted GET /api/reconcile/:jobId status sequence
+ * (headless-reconcile-runner AC11–AC14).
  *
  * @param {object} opts
- * @param {Array<'busy'|'ready'|'error'>} [opts.sessionSequence=['ready']] —
- *   consumed in order per /api/session call; last entry repeats once exhausted.
- * @param {number} [opts.commandStatus=202]
+ * @param {'ready'|'busy'} [opts.sessionState='ready'] — constant /api/session state
+ *   (Fremd-Busy-Guard, reconcile-trigger AC4 — irrelevant to done-detection here).
+ * @param {number} [opts.reconcileStartStatus=202] — HTTP status for POST /api/reconcile
+ * @param {object} [opts.reconcileStartBody={jobId:'job-1', status:'running'}]
+ * @param {Array<'running'|'done'|'failed'|'auth-expired'|'network-error'|'not-found'>}
+ *   [opts.jobStatusSequence=['running']] — consumed in order per GET /api/reconcile/:jobId
+ *   call; last entry repeats once exhausted.
+ * @param {string} [opts.jobStatusFailedError='Reconcile fehlgeschlagen.'] — error text
+ *   returned alongside a 'failed' entry.
  * @param {string} [opts.auditBody='# Audit-Log\n\n- Aktion 1'] — spec-audit.md body
  * @param {number} [opts.auditStatus=200]
  */
 function makeFetchFn({
-  sessionSequence = ['ready'],
-  commandStatus = 202,
+  sessionState = 'ready',
+  reconcileStartStatus = 202,
+  reconcileStartBody = { jobId: 'job-1', status: 'running' },
+  jobStatusSequence = ['running'],
+  jobStatusFailedError = 'Reconcile fehlgeschlagen.',
   auditBody = '# Audit-Log\n\n- Aktion 1',
   auditStatus = 200,
 } = {}) {
-  let sessionCallIdx = 0;
+  let jobCallIdx = 0;
   const auditCalls = [];
 
   const fn = jest.fn(async (url, opts) => {
@@ -72,16 +99,29 @@ function makeFetchFn({
       return { ok: true, status: 200, json: async () => ({ docs: FAKE_DOCS }) };
     }
     if (url === '/api/session') {
-      const idx = Math.min(sessionCallIdx, sessionSequence.length - 1);
-      sessionCallIdx += 1;
-      const state = sessionSequence[idx];
-      if (state === 'error') {
+      return { ok: true, status: 200, json: async () => ({ state: sessionState, restarts: 0 }) };
+    }
+    if (url === '/api/reconcile' && opts?.method === 'POST') {
+      return {
+        ok: reconcileStartStatus === 202,
+        status: reconcileStartStatus,
+        json: async () => reconcileStartBody,
+      };
+    }
+    if (typeof url === 'string' && url.startsWith('/api/reconcile/')) {
+      const idx = Math.min(jobCallIdx, jobStatusSequence.length - 1);
+      jobCallIdx += 1;
+      const entry = jobStatusSequence[idx];
+      if (entry === 'network-error') {
         throw new Error('network down');
       }
-      return { ok: true, status: 200, json: async () => ({ state, restarts: 0 }) };
-    }
-    if (url === '/api/command' && opts?.method === 'POST') {
-      return { ok: commandStatus === 202, status: commandStatus, json: async () => ({}) };
+      if (entry === 'not-found') {
+        return { ok: false, status: 404, json: async () => ({ error: 'Unknown jobId' }) };
+      }
+      if (entry === 'failed') {
+        return { ok: true, status: 200, json: async () => ({ status: 'failed', error: jobStatusFailedError }) };
+      }
+      return { ok: true, status: 200, json: async () => ({ status: entry }) };
     }
     if (typeof url === 'string' && url.includes('docs/raw') && url.includes('spec-audit.md')) {
       auditCalls.push(url);
@@ -125,7 +165,7 @@ async function startRun(fetchFn) {
   });
   await waitFor(() => {
     const calls = fetchFn.mock.calls.filter(
-      (c) => c[0] === '/api/command' && c[1]?.method === 'POST',
+      (c) => c[0] === '/api/reconcile' && c[1]?.method === 'POST',
     );
     expect(calls).toHaveLength(1);
   });
@@ -135,7 +175,7 @@ async function startRun(fetchFn) {
 
 describe('reconcile-inline-feedback AC1: 202 → kein onNavigate, inline "Reconcile läuft…"', () => {
   it('202 → onNavigate wird NICHT aufgerufen', async () => {
-    const fetchFn = makeFetchFn({ sessionSequence: ['ready', 'busy', 'busy'] });
+    const fetchFn = makeFetchFn({ jobStatusSequence: ['running'] });
     const { onNavigateSpy } = renderSpecView(fetchFn);
 
     await startRun(fetchFn);
@@ -147,7 +187,7 @@ describe('reconcile-inline-feedback AC1: 202 → kein onNavigate, inline "Reconc
   });
 
   it('202 → inline "Reconcile läuft…" (role="status"), Button disabled + Text-Label', async () => {
-    const fetchFn = makeFetchFn({ sessionSequence: ['ready', 'busy', 'busy'] });
+    const fetchFn = makeFetchFn({ jobStatusSequence: ['running'] });
     renderSpecView(fetchFn);
 
     await startRun(fetchFn);
@@ -165,7 +205,7 @@ describe('reconcile-inline-feedback AC1: 202 → kein onNavigate, inline "Reconc
   });
 
   it('202 → bleibt auf dem Spezifikation-Reiter (SpecView selbst bleibt gemountet, kein Wegspringen)', async () => {
-    const fetchFn = makeFetchFn({ sessionSequence: ['ready', 'busy', 'busy'] });
+    const fetchFn = makeFetchFn({ jobStatusSequence: ['running'] });
     renderSpecView(fetchFn);
 
     await startRun(fetchFn);
@@ -177,11 +217,11 @@ describe('reconcile-inline-feedback AC1: 202 → kein onNavigate, inline "Reconc
   });
 });
 
-// ── AC2: Poll hält "Reconcile läuft…" solange busy ─────────────────────────────
+// ── AC11 (headless-reconcile-runner): Job-Poll hält "Reconcile läuft…" solange running ──
 
-describe('reconcile-inline-feedback AC2: solange busy, bleibt "Reconcile läuft…" + Button disabled', () => {
-  it('mehrere busy-Polls in Folge → weiterhin "Reconcile läuft…", Button disabled', async () => {
-    const fetchFn = makeFetchFn({ sessionSequence: ['ready', 'busy', 'busy', 'busy', 'busy'] });
+describe('headless-reconcile-runner AC11: solange status:"running" (Job-Poll), bleibt "Reconcile läuft…" + Button disabled', () => {
+  it('mehrere running-Polls in Folge → weiterhin "Reconcile läuft…", Button disabled, kein /api/session-Fertig-Poll nötig', async () => {
+    const fetchFn = makeFetchFn({ jobStatusSequence: ['running'] });
     renderSpecView(fetchFn);
 
     await startRun(fetchFn);
@@ -195,14 +235,20 @@ describe('reconcile-inline-feedback AC2: solange busy, bleibt "Reconcile läuft�
     expect(running).toBeTruthy();
     const btn = document.querySelector('[data-testid="reconcile-btn"]');
     expect(btn.disabled).toBe(true);
+
+    // Fertig-Quelle ist /api/reconcile/:jobId, nicht /api/session.
+    const jobPollCalls = fetchFn.mock.calls.filter(
+      (c) => typeof c[0] === 'string' && c[0].startsWith('/api/reconcile/'),
+    );
+    expect(jobPollCalls.length).toBeGreaterThan(0);
   });
 });
 
-// ── AC3: busy → ready ⇒ "Fertig" ────────────────────────────────────────────────
+// ── AC12 (headless-reconcile-runner): Status "done" ⇒ "Fertig" ─────────────────
 
-describe('reconcile-inline-feedback AC3: busy → nicht-busy ⇒ "Fertig", Button wieder auslösbar', () => {
-  it('busy → ready ⇒ "Fertig" (role="status"), Button wieder auslösbar', async () => {
-    const fetchFn = makeFetchFn({ sessionSequence: ['ready', 'busy', 'ready', 'ready'] });
+describe('headless-reconcile-runner AC12: Job-Status "done" ⇒ "Fertig", Button wieder auslösbar', () => {
+  it('running → done ⇒ "Fertig" (role="status"), Button wieder auslösbar', async () => {
+    const fetchFn = makeFetchFn({ jobStatusSequence: ['running', 'done'] });
     renderSpecView(fetchFn);
 
     await startRun(fetchFn);
@@ -223,9 +269,9 @@ describe('reconcile-inline-feedback AC3: busy → nicht-busy ⇒ "Fertig", Butto
     expect(document.querySelector('[data-testid="reconcile-running"]')).toBeNull();
   });
 
-  it('Edge-Case „Race busy→ready sofort": erster Poll nach Start bereits nicht-busy ⇒ direkt "Fertig"', async () => {
-    // Kein "busy" in der Sequenz — der erste Poll NACH dem Start liefert bereits ready.
-    const fetchFn = makeFetchFn({ sessionSequence: ['ready', 'ready', 'ready'] });
+  it('Edge-Case „erster Job-Poll nach Start bereits done": direkt "Fertig", kein Hängenbleiben in "läuft"', async () => {
+    // Kein "running" in der Sequenz — der erste Poll NACH dem Start liefert bereits "done".
+    const fetchFn = makeFetchFn({ jobStatusSequence: ['done'] });
     renderSpecView(fetchFn);
 
     await startRun(fetchFn);
@@ -233,16 +279,15 @@ describe('reconcile-inline-feedback AC3: busy → nicht-busy ⇒ "Fertig", Butto
     await waitFor(() => {
       expect(document.querySelector('[data-testid="reconcile-done"]')).toBeTruthy();
     });
-    // Kein Hängenbleiben in "läuft".
     expect(document.querySelector('[data-testid="reconcile-running"]')).toBeNull();
   });
 });
 
-// ── AC4: Audit-Reload genau einmal bei Abschluss ───────────────────────────────
+// ── AC4/AC12: Audit-Reload genau einmal bei Abschluss ──────────────────────────
 
-describe('reconcile-inline-feedback AC4: Audit-Reload automatisch + genau einmal', () => {
+describe('reconcile-inline-feedback AC4 (Quelle jetzt headless-reconcile-runner AC12): Audit-Reload automatisch + genau einmal', () => {
   it('Übergang auf "Fertig" → genau ein GET docs/raw?path=docs/spec-audit.md, ohne manuellen Klick', async () => {
-    const fetchFn = makeFetchFn({ sessionSequence: ['ready', 'busy', 'ready', 'ready', 'ready'] });
+    const fetchFn = makeFetchFn({ jobStatusSequence: ['running', 'done'] });
     renderSpecView(fetchFn);
 
     // Vor dem Lauf: kein Audit-Request.
@@ -259,7 +304,8 @@ describe('reconcile-inline-feedback AC4: Audit-Reload automatisch + genau einmal
       expect(document.querySelector('[data-testid="audit-spec-content"]')).toBeTruthy();
     });
 
-    // Genau ein Audit-Request, auch nach weiteren ready-Polls (kein Doppel-Reload).
+    // Genau ein Audit-Request, auch nach weiteren Ticks (Job-Poll stoppt nach
+    // dem terminalen Status — kein Doppel-Reload).
     await act(async () => {
       await new Promise((r) => setTimeout(r, 60));
     });
@@ -267,7 +313,7 @@ describe('reconcile-inline-feedback AC4: Audit-Reload automatisch + genau einmal
   });
 
   it('Kein projectSlug → Audit-Reload feuert keinen Request mit leerem Slug (Edge-Case)', async () => {
-    const fetchFn = makeFetchFn({ sessionSequence: ['ready', 'busy', 'ready', 'ready'] });
+    const fetchFn = makeFetchFn({ jobStatusSequence: ['running', 'done'] });
     globalThis.fetch = fetchFn;
     const onNavigateSpy = jest.fn();
     render(
@@ -297,7 +343,7 @@ describe('reconcile-inline-feedback AC4: Audit-Reload automatisch + genau einmal
 describe('reconcile-inline-feedback AC5: PR-Bezug im Audit-Inhalt (best-effort)', () => {
   it('PR-URL im Audit-Inhalt → dezenter Link (target=_blank, rel=noopener noreferrer)', async () => {
     const fetchFn = makeFetchFn({
-      sessionSequence: ['ready', 'ready', 'ready'],
+      jobStatusSequence: ['done'],
       auditBody: '# Audit-Log\n\n- Reconcile-Lauf siehe https://github.com/org/repo/pull/42',
     });
     renderSpecView(fetchFn);
@@ -317,7 +363,7 @@ describe('reconcile-inline-feedback AC5: PR-Bezug im Audit-Inhalt (best-effort)'
 
   it('Bare #<nummer> ohne URL → Text-Hinweis (kein anklickbarer Link)', async () => {
     const fetchFn = makeFetchFn({
-      sessionSequence: ['ready', 'ready', 'ready'],
+      jobStatusSequence: ['done'],
       auditBody: '# Audit-Log\n\n- Siehe PR #17 für Details',
     });
     renderSpecView(fetchFn);
@@ -334,7 +380,7 @@ describe('reconcile-inline-feedback AC5: PR-Bezug im Audit-Inhalt (best-effort)'
 
   it('Kein erkennbarer PR-Bezug → kein Link/Hinweis-Element (graceful absence)', async () => {
     const fetchFn = makeFetchFn({
-      sessionSequence: ['ready', 'ready', 'ready'],
+      jobStatusSequence: ['done'],
       auditBody: '# Audit-Log\n\n- Keine PR-Referenz hier.',
     });
     renderSpecView(fetchFn);
@@ -349,14 +395,65 @@ describe('reconcile-inline-feedback AC5: PR-Bezug im Audit-Inhalt (best-effort)'
   });
 });
 
-// ── AC8: robuste Degradierung ────────────────────────────────────────────────────
+// ── AC13 (headless-reconcile-runner): Job-Status "failed" ──────────────────────
 
-describe('reconcile-inline-feedback AC8: robuste Degradierung — kein Endlos-Spinner', () => {
-  it('Session bleibt dauerhaft busy → nach Sicherheitsfenster neutrale Degradierung', async () => {
-    // Immer busy — Session flippt nie zurück.
+describe('headless-reconcile-runner AC13: Job-Status "failed" → inline Fehleranzeige mit Reset', () => {
+  it('running → failed ⇒ sichtbare Fehleranzeige (role="alert") mit dem Fehlertext aus dem Job, Reset möglich', async () => {
     const fetchFn = makeFetchFn({
-      sessionSequence: ['ready', 'busy', 'busy', 'busy', 'busy', 'busy', 'busy', 'busy', 'busy'],
+      jobStatusSequence: ['running', 'failed'],
+      jobStatusFailedError: 'claude nicht verfügbar',
     });
+    const { onNavigateSpy } = renderSpecView(fetchFn);
+
+    await startRun(fetchFn);
+
+    await waitFor(() => {
+      const failed = document.querySelector('[data-testid="reconcile-job-failed"]');
+      expect(failed).toBeTruthy();
+      expect(failed.getAttribute('role')).toBe('alert');
+      expect(failed.textContent).toMatch(/claude nicht verfügbar/i);
+    });
+    expect(onNavigateSpy).not.toHaveBeenCalled();
+    // Kein falsches "Fertig".
+    expect(document.querySelector('[data-testid="reconcile-done"]')).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="reconcile-job-failed-reset"]'));
+    });
+    expect(document.querySelector('[data-testid="reconcile-job-failed"]')).toBeNull();
+    expect(document.querySelector('[data-testid="reconcile-btn"]')).toBeTruthy();
+  });
+});
+
+// ── AC14 (headless-reconcile-runner): Job-Status "auth-expired" ────────────────
+
+describe('headless-reconcile-runner AC14: Job-Status "auth-expired" → klarer Erneuerungs-Hinweis, kein falsches "Fertig"', () => {
+  it('running → auth-expired ⇒ Hinweis "Claude-Anmeldung abgelaufen … claude setup-token … erneuern"', async () => {
+    const fetchFn = makeFetchFn({ jobStatusSequence: ['running', 'auth-expired'] });
+    const { onNavigateSpy } = renderSpecView(fetchFn);
+
+    await startRun(fetchFn);
+
+    await waitFor(() => {
+      const authExpired = document.querySelector('[data-testid="reconcile-auth-expired"]');
+      expect(authExpired).toBeTruthy();
+      expect(authExpired.getAttribute('role')).toBe('alert');
+      expect(authExpired.textContent).toMatch(/Claude-Anmeldung abgelaufen/i);
+      expect(authExpired.textContent).toMatch(/claude setup-token/i);
+      expect(authExpired.textContent).toMatch(/erneuern/i);
+    });
+    expect(onNavigateSpy).not.toHaveBeenCalled();
+    // Kein falsches "Fertig".
+    expect(document.querySelector('[data-testid="reconcile-done"]')).toBeNull();
+  });
+});
+
+// ── AC8 (Quelle jetzt Job-Poll): robuste Degradierung ───────────────────────────
+
+describe('reconcile-inline-feedback AC8 (Quelle jetzt headless-reconcile-runner Job-Poll): robuste Degradierung — kein Endlos-Spinner', () => {
+  it('Job-Status bleibt dauerhaft "running" → nach Sicherheitsfenster neutrale Degradierung', async () => {
+    // Immer "running" — nie ein Endzustand.
+    const fetchFn = makeFetchFn({ jobStatusSequence: ['running'] });
     renderSpecView(fetchFn, { reconcilePollInterval: 10, reconcileSafetyWindowMs: 40, reconcileMaxConsecutiveFailures: 100 });
 
     await startRun(fetchFn);
@@ -374,9 +471,22 @@ describe('reconcile-inline-feedback AC8: robuste Degradierung — kein Endlos-Sp
     expect(auditBtn.disabled).toBe(false);
   });
 
-  it('/api/session schlägt wiederholt fehl → neutrale Degradierung statt Hängenbleiben', async () => {
+  it('GET /api/reconcile/:jobId schlägt wiederholt fehl (Netzwerkfehler) → neutrale Degradierung statt Hängenbleiben', async () => {
     const fetchFn = makeFetchFn({
-      sessionSequence: ['ready', 'error', 'error', 'error', 'error', 'error', 'error'],
+      jobStatusSequence: ['running', 'network-error', 'network-error', 'network-error', 'network-error'],
+    });
+    renderSpecView(fetchFn, { reconcilePollInterval: 10, reconcileSafetyWindowMs: 5 * 60 * 1000, reconcileMaxConsecutiveFailures: 3 });
+
+    await startRun(fetchFn);
+
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="reconcile-degraded"]')).toBeTruthy();
+    }, { timeout: 3000 });
+  });
+
+  it('GET /api/reconcile/:jobId liefert 404 (Server-Neustart, unbekannte jobId) wiederholt → neutrale Degradierung', async () => {
+    const fetchFn = makeFetchFn({
+      jobStatusSequence: ['running', 'not-found', 'not-found', 'not-found', 'not-found'],
     });
     renderSpecView(fetchFn, { reconcilePollInterval: 10, reconcileSafetyWindowMs: 5 * 60 * 1000, reconcileMaxConsecutiveFailures: 3 });
 

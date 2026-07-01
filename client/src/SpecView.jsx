@@ -20,14 +20,23 @@
  *        Touch-Target ≥ 44 px.
  * AC2 — Klick (bei freier Session) öffnet Bestätigungsdialog (role="dialog");
  *        noch kein POST.
- * AC3 — „Starten" POSTet genau einmal {command:'/agent-flow:reconcile', projectPath}
- *        an /api/command; „Abbrechen" schließt ohne POST.
+ * AC3 — **überschrieben durch headless-reconcile-runner (S-208) AC10** — „Starten"
+ *        POSTet jetzt genau einmal {projectSlug} an `/api/reconcile` (statt
+ *        {command:'/agent-flow:reconcile', projectPath} an /api/command);
+ *        „Abbrechen" schließt weiterhin ohne POST.
  * AC4 — Bei `GET /api/session` state:"busy" ist der Button deaktiviert
- *        (disabled-Attribut + Text-Label, nie Farbe allein); kein Dialog/POST bei Klick.
+ *        (disabled-Attribut + Text-Label, nie Farbe allein); kein Dialog/POST bei
+ *        Klick. Gilt **weiter** (headless-reconcile-runner-Abhängigkeiten: „Busy-Guard
+ *        AC1–AC4 gelten weiter") — unabhängig vom Headless-Runner-Projekt-Lock.
  * AC5 — **überschrieben durch reconcile-inline-feedback (S-205) AC1** — kein
  *        `onNavigate` mehr nach 202; siehe unten.
- * AC6 — 409 → sichtbare Fehleranzeige, kein onNavigate, kein Crash.
- * AC7 — Netzwerkfehler/500 → sichtbare Fehleranzeige mit Reset, kein onNavigate.
+ * AC6 — **überschrieben durch headless-reconcile-runner (S-208) AC13** — 409 kommt
+ *        jetzt vom POST `/api/reconcile` (Headless-Runner-Projekt-Sperre statt
+ *        /api/command-409); weiterhin sichtbare Fehleranzeige, kein onNavigate,
+ *        kein Crash.
+ * AC7 — **überschrieben durch headless-reconcile-runner (S-208) AC13** — Netzwerkfehler/
+ *        500/400 vom neuen `/api/reconcile`-Start weiterhin sichtbare Fehleranzeige
+ *        mit Reset, kein onNavigate.
  * Gespiegelt vom „Board abarbeiten"-Muster (CockpitView.jsx FactoryWorkspace).
  *
  * reconcile-inline-feedback (S-205) — bleibt auf dem Spezifikation-Reiter, hält
@@ -35,25 +44,57 @@
  * AC1 — Nach 202 wird `onNavigate` NICHT mehr aufgerufen (überschreibt
  *        reconcile-trigger AC5); stattdessen inline „Reconcile läuft…"
  *        (role="status"), Button deaktiviert (disabled + Text-Label).
- * AC2 — Solange `GET /api/session` `state:"busy"` liefert, bleibt „Reconcile
- *        läuft…" sichtbar, Button deaktiviert (bestehendes Poll-Muster,
- *        kein zusätzliches Dauer-Polling).
- * AC3 — Erstmaliges nicht-`busy` nach `busy` (bzw. sofort bei sehr kurzem Lauf,
- *        Edge-Case) → „Fertig" (role="status"), Button wieder auslösbar.
+ * AC2 — **überschrieben durch headless-reconcile-runner (S-208) AC11** — die
+ *        Fertig-Quelle ist jetzt `GET /api/reconcile/:jobId` (nicht mehr
+ *        `GET /api/session`); solange `status:"running"` bleibt „Reconcile
+ *        läuft…" sichtbar, Button deaktiviert.
+ * AC3 — **überschrieben durch headless-reconcile-runner (S-208) AC12** — Status
+ *        `done` (statt „erstmaliges nicht-busy") → „Fertig" (role="status"),
+ *        Button wieder auslösbar.
  * AC4 — Beim Übergang auf „Fertig" wird `AuditSpecView` automatisch genau
  *        einmal neu geladen (Reload-Signal-Zähler, kein manueller Klick nötig).
+ *        Mechanismus unverändert, jetzt ausgelöst vom Job-Status `done` (AC12)
+ *        statt vom Session-Busy-Flip.
  * AC5 — Erkennbarer PR-Bezug (URL oder `#<nummer>`) im Audit-Inhalt → dezenter
  *        Link/Hinweis; sonst kein Element (graceful absence, best-effort).
+ *        Unverändert (headless-reconcile-runner AC12 „PR-Hinweis … falls im
+ *        result/Audit erkennbar" nutzt denselben Mechanismus).
  * AC6 — Backend: `GET /api/session` meldet `busy` solange ein Reconcile-Job
  *        in Flight ist (CommandService/JobLock-Zustand sichtbar gemacht).
  * AC7 — Backend: `PtySessionRegistry` verwirft eine Session mit aktivem Job
  *        nicht idle — auch ohne WebSocket-Zuschauer.
- * AC8 — Bestätigt der Poll den Abschluss nicht innerhalb eines beschränkten
- *        Sicherheitsfensters (Session flippt nie zurück / Poll schlägt
- *        wiederholt fehl) → neutraler Text-Hinweis statt Endlos-Spinner;
- *        „Audit-Spec anzeigen" bleibt manuell bedienbar.
- * AC9 — 409/500/Netzwerkfehler weiterhin inline Fehleranzeige mit Reset, ohne
- *        `onNavigate`, ohne Crash (Regression zu reconcile-trigger AC6/AC7).
+ * AC8 — **Quelle geändert (headless-reconcile-runner S-208):** Bestätigt der
+ *        Job-Poll (`/api/reconcile/:jobId`) den Abschluss nicht innerhalb eines
+ *        beschränkten Sicherheitsfensters (Status bleibt dauerhaft „running" /
+ *        Poll schlägt wiederholt fehl, z.B. 404 nach Server-Neustart) → neutraler
+ *        Text-Hinweis statt Endlos-Spinner; „Audit-Spec anzeigen" bleibt manuell
+ *        bedienbar. (Zuvor: Session-Poll: jetzt Job-Poll.)
+ * AC9 — **überschrieben durch headless-reconcile-runner (S-208) AC13** — 409/500/
+ *        400/Netzwerkfehler vom neuen `/api/reconcile`-Start weiterhin inline
+ *        Fehleranzeige mit Reset, ohne `onNavigate`, ohne Crash.
+ *
+ * headless-reconcile-runner (S-208) — ReconcileTrigger vom `/api/command`+
+ * `/api/session`-Fertig-Poll ([[reconcile-inline-feedback]] S-205) auf den
+ * Headless-Runner-Endpunkt umgehängt (Ablösung der S-205-Poll-Quelle):
+ * AC10 — „Starten" POSTet genau einmal `{projectSlug}` an `POST /api/reconcile`
+ *        (statt /api/command) und erhält `202 {jobId}`; inline „Reconcile läuft…"
+ *        (role="status"), Button deaktiviert; `onNavigate` weiterhin nicht aufgerufen.
+ * AC11 — Im Lauf-Zustand pollt der Trigger `GET /api/reconcile/:jobId` — **nicht**
+ *        mehr `/api/session` als Fertig-Quelle. Solange `status:"running"` bleibt
+ *        „Reconcile läuft…"; der generische Busy-Guard-Poll gegen `/api/session`
+ *        (reconcile-trigger AC4, Fremd-Busy z.B. Flow-/Board-Button) läuft
+ *        unabhängig davon weiter.
+ * AC12 — Status `done` → „Fertig" (role="status"), Button wieder auslösbar,
+ *        `AuditSpecView` automatisch genau einmal neu geladen; PR-Hinweis
+ *        best-effort über den bestehenden Audit-Inhalt-Mechanismus (AC5).
+ * AC13 — Status `failed` (Job-Poll) → inline Fehler-/Status-Anzeige mit Reset
+ *        (role="alert"), kein Crash. `409` beim Start (Headless-Runner-Projekt-
+ *        Sperre) → passender Hinweis, kein Crash.
+ * AC14 — Status `auth-expired` → klarer Hinweis „Claude-Anmeldung abgelaufen —
+ *        Token via `claude setup-token` erneuern" (Text, role="alert", nicht nur
+ *        Farbe); kein falsches „Fertig".
+ * AC15 — Trigger bleibt entkoppelt testbar über injizierbaren `fetchFn`; kein
+ *        Test hängt an einem realen Reconcile-Lauf.
  *
  * spec-audit-view (S-203) — Sekundär-Button „Audit-Spec anzeigen" direkt
  * unterhalb des ReconcileTrigger-Buttons:
@@ -73,8 +114,12 @@
  *   - Nur /api/board/projects/:slug/docs Endpunkte (hinter AccessGuard).
  *   - Keine Secrets im Bundle.
  *   - Markdown via vorhandenen markdownLite-Renderer (kein fremder Parser).
- *   - reconcile-trigger: kein neuer Endpunkt — bestehender allowlisted/sanitisierter
- *     /api/command-Kanal; Bestätigungsdialog verhindert versehentliches Auslösen.
+ *   - reconcile-trigger: Bestätigungsdialog verhindert versehentliches Auslösen.
+ *   - headless-reconcile-runner: `POST /api/reconcile` sendet nur `{projectSlug}`
+ *     (Server löst den Pfad auf, kein absoluter Host-Pfad im Client-Request/-State);
+ *     `jobId` ist eine reine Korrelations-ID (kein Secret); `error`/`result` aus
+ *     der Job-Antwort kommen bereits secret-/pfad-frei vom Server (AC9 Backend-Spec)
+ *     und werden hier nur als Text angezeigt (kein dangerouslySetInnerHTML).
  *   - spec-audit-view: kein neuer Endpunkt — wiederverwendet den bestehenden
  *     docs/raw-Endpunkt mit festem, nicht nutzergesteuertem Pfad
  *     (docs/spec-audit.md — kein Traversal-Vektor).
@@ -92,9 +137,13 @@
  *   - Lauf-/Fertig-/Degraded-Zustände (S-205) als Text (role="status",
  *     aria-live="polite"), nicht nur Farbe.
  *
- * Covers (reconcile-trigger): AC1, AC2, AC3, AC4, AC6, AC7 (AC5 überschrieben — siehe reconcile-inline-feedback AC1)
+ * Covers (reconcile-trigger): AC1, AC2, AC4 (AC3/AC6/AC7 überschrieben — siehe
+ *   headless-reconcile-runner AC10/AC13; AC5 überschrieben — siehe reconcile-inline-feedback AC1)
  * Covers (spec-audit-view): AC1, AC2, AC3, AC4
- * Covers (reconcile-inline-feedback): AC1, AC2, AC3, AC4, AC5, AC8, AC9 (AC6/AC7 sind Backend — siehe src/routers/session.js, src/PtySessionRegistry.js)
+ * Covers (reconcile-inline-feedback): AC1, AC4, AC5 (AC2/AC3/AC9 überschrieben — siehe
+ *   headless-reconcile-runner AC11/AC12/AC13; AC8-Mechanismus jetzt job-poll-basiert
+ *   — siehe headless-reconcile-runner; AC6/AC7 sind Backend — siehe src/routers/session.js, src/PtySessionRegistry.js)
+ * Covers (headless-reconcile-runner): AC10, AC11, AC12, AC13, AC14, AC15
  *
  * @param {{
  *   projectSlug: string,
@@ -394,48 +443,54 @@ export function SpecView({
   );
 }
 
-// ── ReconcileTrigger (reconcile-trigger AC1–AC4/AC6/AC7 + reconcile-inline-feedback AC1–AC3/AC8/AC9) ──
+// ── ReconcileTrigger (reconcile-trigger AC1/AC2/AC4 + reconcile-inline-feedback AC1/AC4/AC5 + headless-reconcile-runner AC10–AC15) ──
 
-/** Session poll interval in ms — matches CockpitView/FactoryWorkspace default. */
+/** Busy-guard poll interval in ms (GET /api/session, Fremd-Busy) — matches CockpitView/FactoryWorkspace default. */
 const RECONCILE_SESSION_POLL_MS = 3_000;
 
 /**
- * reconcile-inline-feedback (S-205) AC8: bounded safety window against an
- * endless spinner — if the session never flips back to non-busy (or the poll
- * fails repeatedly) within this window, the UI degrades to a neutral hint.
+ * headless-reconcile-runner (S-208) AC13/Edge-Cases: bounded safety window
+ * against an endless spinner — if the job poll (GET /api/reconcile/:jobId)
+ * never reaches a terminal status (or fails repeatedly — e.g. 404 after a
+ * server restart) within this window, the UI degrades to a neutral hint.
  */
 const RECONCILE_SAFETY_WINDOW_MS = 5 * 60 * 1000; // 5 min
 
-/** AC8: max consecutive /api/session poll failures before degrading. */
+/** Max consecutive /api/reconcile/:jobId poll failures before degrading. */
 const RECONCILE_MAX_CONSECUTIVE_FAILURES = 5;
 
 /**
  * ReconcileTrigger — „Konzept/Spec nachziehen"-Button
- * (reconcile-trigger AC1–AC4/AC6/AC7 + reconcile-inline-feedback AC1–AC3/AC8/AC9).
+ * (reconcile-trigger AC1/AC2/AC4 + reconcile-inline-feedback AC1/AC4/AC5 +
+ * headless-reconcile-runner AC10–AC15).
  *
  * Gespiegelt vom „Board abarbeiten"-Knopf (CockpitView.jsx FactoryWorkspace):
- * Bestätigungsdialog vor dem doku-ändernden Lauf, Busy-Guard via GET /api/session,
- * POST /api/command {command:'/agent-flow:reconcile', projectPath}.
+ * Bestätigungsdialog vor dem doku-ändernden Lauf, Busy-Guard via GET /api/session
+ * (Fremd-Busy, z.B. Flow-/Board-Button — reconcile-trigger AC4, unverändert).
  *
- * reconcile-inline-feedback (S-205): nach 202 bleibt die Ansicht auf dem Reiter
- * (kein onNavigate mehr, überschreibt reconcile-trigger AC5) — stattdessen
- * inline „Reconcile läuft…" (AC1), abgeleitet aus demselben Busy-Poll, der
- * bereits für AC4 läuft (kein zusätzliches Dauer-Polling, NFR Performance).
- * Kippt der Poll von busy → nicht-busy (oder ist der allererste Poll nach dem
- * Start bereits nicht-busy — Edge-Case „Race busy→ready sofort"), wechselt
- * die Anzeige auf „Fertig" (AC3) und `onDone()` wird genau einmal aufgerufen
- * (AuditSpecView-Reload-Signal, AC4). Ein `reconcileStateRef` hält den
- * aktuellen Phasen-Wert synchron zum State, damit der Poll-Handler (der aus
- * einem einmalig registrierten Effect heraus läuft) nie mit einem veralteten
- * Closure-Wert vergleicht — das verhindert sowohl den Doppel-Reload
- * (Edge-Case) als auch verpasste Übergänge.
+ * headless-reconcile-runner (S-208): „Starten" POSTet jetzt an `/api/reconcile`
+ * `{projectSlug}` (statt `/api/command`) und erhält `202 {jobId}` (AC10). Der
+ * Lauf-Fortschritt wird über `GET /api/reconcile/:jobId` gepollt — **nicht**
+ * mehr über `/api/session` (AC11, bewusste Ablösung der S-205-Poll-Quelle).
+ * Der generische Busy-Guard-Poll (AC4, Fremd-Busy) bleibt als **separater**
+ * Poll bestehen, weil der Headless-Runner vollständig vom CommandService/
+ * PtyManager getrennt ist (Spec AC7 Backend) — `/api/session` wird durch einen
+ * Reconcile-Job nicht mehr „busy".
  *
- * AC8 (robuste Degradierung): `runStartRef` verankert den Start-Zeitpunkt des
- * eigenen Laufs; `consecutiveFailRef` zählt aufeinanderfolgende Poll-Fehler
- * (Netzwerkfehler oder !res.ok). Überschreitet die verstrichene Zeit das
- * Sicherheitsfenster ODER die Fehlerzahl den Schwellwert, während der Lauf
- * noch als „running" geführt wird, degradiert die Anzeige neutral (kein
- * Endlos-Spinner, kein Crash) — der separate „Audit-Spec anzeigen"-Button
+ * Job-Status `done` → „Fertig" (AC12), `onDone()` genau einmal (AuditSpecView-
+ * Reload-Signal, reconcile-inline-feedback AC4). `failed` → inline Fehleranzeige
+ * mit Reset (AC13). `auth-expired` → klarer Erneuerungs-Hinweis (AC14, kein
+ * falsches „Fertig"). `409` beim Start (Projekt-Sperre des Headless-Runners) →
+ * passender Hinweis (AC13).
+ *
+ * Robuste Degradierung (Timeout/Endlos-Spinner-Schutz, beibehalten aus
+ * reconcile-inline-feedback AC8): `runStartRef` verankert den Start-Zeitpunkt
+ * des eigenen Laufs; `consecutiveFailRef` zählt aufeinanderfolgende Job-Poll-
+ * Fehler (Netzwerkfehler, nicht-ok Status inkl. 404 nach Server-Neustart, oder
+ * ein unbekannter Status-Wert). Überschreitet die verstrichene Zeit das
+ * Sicherheitsfenster ODER die Fehlerzahl den Schwellwert, während der Lauf noch
+ * als „running" geführt wird, degradiert die Anzeige neutral (kein Endlos-
+ * Spinner, kein Crash) — der separate „Audit-Spec anzeigen"-Button
  * (AuditSpecView) bleibt unabhängig davon manuell bedienbar.
  *
  * @param {{
@@ -446,11 +501,12 @@ const RECONCILE_MAX_CONSECUTIVE_FAILURES = 5;
  *   safetyWindowMs?: number,
  *   maxConsecutiveFailures?: number,
  * }} props
- *   fetchFn                — injectable for tests (default: globalThis.fetch)
- *   onDone                 — (AC4) aufgerufen genau einmal beim Übergang auf „Fertig"
- *   pollInterval           — session poll interval in ms (default: RECONCILE_SESSION_POLL_MS)
- *   safetyWindowMs         — (AC8) Sicherheitsfenster in ms (default: RECONCILE_SAFETY_WINDOW_MS)
- *   maxConsecutiveFailures — (AC8) max. aufeinanderfolgende Poll-Fehler (default: RECONCILE_MAX_CONSECUTIVE_FAILURES)
+ *   fetchFn                — injectable for tests (default: globalThis.fetch), AC15
+ *   onDone                 — (AC12) aufgerufen genau einmal beim Übergang auf „Fertig"
+ *   pollInterval           — Poll-Intervall in ms für BEIDE Polls (Busy-Guard `/api/session`
+ *                            UND Job-Status `/api/reconcile/:jobId`; default: RECONCILE_SESSION_POLL_MS)
+ *   safetyWindowMs         — Sicherheitsfenster für den Job-Poll in ms (default: RECONCILE_SAFETY_WINDOW_MS)
+ *   maxConsecutiveFailures — max. aufeinanderfolgende Job-Poll-Fehler (default: RECONCILE_MAX_CONSECUTIVE_FAILURES)
  */
 function ReconcileTrigger({
   projectSlug,
@@ -460,7 +516,7 @@ function ReconcileTrigger({
   safetyWindowMs = RECONCILE_SAFETY_WINDOW_MS,
   maxConsecutiveFailures = RECONCILE_MAX_CONSECUTIVE_FAILURES,
 }) {
-  // Stable ref so the poll effect doesn't re-register on every render.
+  // Stable ref so the poll effects don't re-register on every render.
   const fetchFnRef = useRef(fetchFn ?? globalThis.fetch.bind(globalThis));
   useEffect(() => {
     fetchFnRef.current = fetchFn ?? globalThis.fetch.bind(globalThis);
@@ -471,85 +527,53 @@ function ReconcileTrigger({
     onDoneRef.current = onDone;
   }, [onDone]);
 
-  // ── Session busy state (AC4) ──────────────────────────────────────────────
+  // ── Fremd-Busy state (reconcile-trigger AC4, unverändert) ─────────────────
   /** 'idle' | 'running' — derived from GET /api/session state */
   const [sessionRunState, setSessionRunState] = useState('idle');
 
-  // ── Trigger state (AC2, AC3, AC6, AC7 + reconcile-inline-feedback AC1–AC3, AC8, AC9) ──
-  /** 'idle' | 'confirm' | 'starting' | 'running' | 'done' | 'degraded' | 'error' */
+  // ── Trigger state (AC2 + headless-reconcile-runner AC10–AC14) ─────────────
+  /** 'idle' | 'confirm' | 'starting' | 'running' | 'done' | 'failed' | 'auth-expired' | 'degraded' | 'error' */
   const [reconcileState, setReconcileState] = useState('idle');
   const [reconcileError, setReconcileError] = useState(null);
 
-  // Kept in sync with reconcileState so the poll-effect closure (registered
-  // once) always reads the CURRENT phase, not a stale one (avoids the
-  // Doppel-Reload edge-case and missed running→done/degraded transitions).
-  const reconcileStateRef = useRef('idle');
   const runStartRef = useRef(null);
   const consecutiveFailRef = useRef(0);
+  /** headless-reconcile-runner AC10/AC11: jobId of the in-flight run (from POST /api/reconcile). */
+  const jobIdRef = useRef(null);
 
-  /** Transition helper — keeps state + ref in lockstep. */
+  /** Transition helper. */
   const setPhase = useCallback((next) => {
-    reconcileStateRef.current = next;
     setReconcileState(next);
   }, []);
 
-  /** AC3/AC8: end this trigger's own run, transitioning to 'done' or 'degraded'. */
+  /** End this trigger's own run, transitioning to a terminal phase. */
   const finishRun = useCallback((nextPhase) => {
     setPhase(nextPhase);
     runStartRef.current = null;
     consecutiveFailRef.current = 0;
+    jobIdRef.current = null;
     if (nextPhase === 'done') {
-      onDoneRef.current?.(); // AC4 — exactly once per completion
+      onDoneRef.current?.(); // AC12 — exactly once per completion
     }
   }, [setPhase]);
 
-  // ── Poll /api/session — single continuous poll (NFR: kein zusätzliches
-  // Dauer-Polling über den bestehenden Busy-Poll hinaus) serves BOTH the
-  // generic busy-guard (reconcile-trigger AC4) AND this trigger's own
-  // running→done/degraded tracking (AC2/AC3/AC8). ────────────────────────
+  // ── Poll /api/session — generic Fremd-Busy guard (reconcile-trigger AC4,
+  // unverändert). Läuft unabhängig vom eigenen Reconcile-Job, weil der
+  // Headless-Runner vollständig vom CommandService getrennt ist (Spec AC7). ──
   useEffect(() => {
     let cancelled = false;
 
     async function pollSession() {
-      let ok = false;
-      let busy = false;
       try {
         const res = await fetchFnRef.current('/api/session');
+        if (cancelled) return;
         if (res.ok) {
           const json = await res.json();
-          ok = true;
-          busy = json.state === 'busy';
+          if (cancelled) return;
+          setSessionRunState(json.state === 'busy' ? 'running' : 'idle');
         }
       } catch {
-        ok = false; // network error — handled below (AC8)
-      }
-
-      if (cancelled) return;
-
-      if (ok) {
-        setSessionRunState(busy ? 'running' : 'idle');
-      }
-
-      // AC2/AC3/AC8: track this trigger's own run.
-      if (reconcileStateRef.current === 'running') {
-        if (ok) {
-          consecutiveFailRef.current = 0;
-          if (!busy) {
-            // AC3 (+ Edge-Case „Race busy→ready sofort"): Übergang zu „Fertig".
-            finishRun('done');
-            return;
-          }
-        } else {
-          consecutiveFailRef.current += 1;
-        }
-
-        const elapsed = Date.now() - (runStartRef.current ?? Date.now());
-        const timedOut = elapsed >= safetyWindowMs;
-        const tooManyFailures = consecutiveFailRef.current >= maxConsecutiveFailures;
-        if (timedOut || tooManyFailures) {
-          // AC8: robuste Degradierung — kein Endlos-Spinner, kein Crash.
-          finishRun('degraded');
-        }
+        // Netzwerkfehler beim Busy-Guard-Poll — Zustand bleibt unverändert (kein Crash).
       }
     }
 
@@ -559,7 +583,97 @@ function ReconcileTrigger({
       cancelled = true;
       clearInterval(timer);
     };
-  }, [pollInterval, safetyWindowMs, maxConsecutiveFailures, finishRun]);
+  }, [pollInterval]);
+
+  // ── Poll GET /api/reconcile/:jobId — Fertig-/Fehler-Quelle des eigenen Laufs
+  // (headless-reconcile-runner AC11: Ablösung von /api/session als Fertig-Quelle). ──
+  useEffect(() => {
+    if (reconcileState !== 'running') return undefined;
+    let cancelled = false;
+
+    function maybeDegrade() {
+      const elapsed = Date.now() - (runStartRef.current ?? Date.now());
+      const timedOut = elapsed >= safetyWindowMs;
+      const tooManyFailures = consecutiveFailRef.current >= maxConsecutiveFailures;
+      if (timedOut || tooManyFailures) {
+        // Robuste Degradierung — kein Endlos-Spinner, kein Crash.
+        finishRun('degraded');
+      }
+    }
+
+    async function pollJob() {
+      const jobId = jobIdRef.current;
+      if (!jobId) return;
+
+      let res;
+      try {
+        res = await fetchFnRef.current(`/api/reconcile/${encodeURIComponent(jobId)}`);
+      } catch {
+        if (cancelled) return;
+        consecutiveFailRef.current += 1;
+        maybeDegrade();
+        return;
+      }
+      if (cancelled) return;
+
+      // Edge-Case: 404 (unbekannte jobId, z.B. Server-Neustart — In-Memory-
+      // Job-Registry geht verloren) zählt als Poll-Fehler, kein Crash.
+      if (!res.ok) {
+        consecutiveFailRef.current += 1;
+        maybeDegrade();
+        return;
+      }
+
+      let json;
+      try {
+        json = await res.json();
+      } catch {
+        consecutiveFailRef.current += 1;
+        maybeDegrade();
+        return;
+      }
+      if (cancelled) return;
+
+      consecutiveFailRef.current = 0;
+
+      if (json.status === 'done') {
+        // AC12: Übergang zu „Fertig".
+        finishRun('done');
+        return;
+      }
+      if (json.status === 'failed') {
+        // AC13: inline Fehleranzeige mit Reset.
+        setReconcileError(
+          typeof json.error === 'string' && json.error.trim()
+            ? json.error
+            : 'Reconcile fehlgeschlagen.',
+        );
+        finishRun('failed');
+        return;
+      }
+      if (json.status === 'auth-expired') {
+        // AC14: klarer Erneuerungs-Hinweis, kein falsches „Fertig".
+        finishRun('auth-expired');
+        return;
+      }
+      if (json.status === 'running') {
+        // Weiter im Lauf-Zustand — Sicherheitsfenster trotzdem prüfen (Timeout-
+        // Schutz, falls der Job nie einen Endzustand erreicht).
+        maybeDegrade();
+        return;
+      }
+      // Unbekannter Status — defensiv wie ein Poll-Fehler behandeln.
+      consecutiveFailRef.current += 1;
+      maybeDegrade();
+    }
+
+    pollJob();
+    const timer = setInterval(pollJob, pollInterval);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [reconcileState, pollInterval, safetyWindowMs, maxConsecutiveFailures, finishRun]);
 
   const isSessionBusy = sessionRunState === 'running';
   const isOwnRunActive = reconcileState === 'running';
@@ -569,8 +683,9 @@ function ReconcileTrigger({
   const isBtnDisabled = isSessionBusy || reconcileState === 'starting' || isOwnRunActive;
 
   // Button remains visible (and re-enables) across idle/running/done/degraded —
-  // only hidden during the brief 'starting' POST-in-flight window and during
-  // 'error' (replaced by the error alert + reset, unchanged AC6/AC7/AC9 behaviour).
+  // hidden during 'starting' (POST-in-flight), 'error' (start-time failure),
+  // 'failed' and 'auth-expired' (job-status terminal errors — replaced by the
+  // alert + reset, AC13/AC14).
   const showButton = ['idle', 'running', 'done', 'degraded'].includes(reconcileState);
 
   const handleClick = useCallback(() => {
@@ -587,46 +702,50 @@ function ReconcileTrigger({
     setPhase('starting');
     setReconcileError(null);
 
-    // AC3 (reconcile-trigger): include projectPath when an active project is set
-    // (backwards-compat with the global session when absent, per Edge-Cases).
-    const body = { command: '/agent-flow:reconcile' };
-    if (projectSlug && typeof projectSlug === 'string' && projectSlug.trim()) {
-      body.projectPath = projectSlug.trim();
-    }
+    // AC10: POST /api/reconcile {projectSlug} (statt /api/command).
+    const body = { projectSlug };
 
     let res;
     try {
-      res = await fetchFnRef.current('/api/command', {
+      res = await fetchFnRef.current('/api/reconcile', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
     } catch {
-      // AC9: network error → visible error, no onNavigate
+      // Netzwerkfehler → sichtbare Fehleranzeige, kein onNavigate.
       setPhase('error');
       setReconcileError('Netzwerkfehler — bitte erneut versuchen.');
       return;
     }
 
     if (res.status === 202) {
-      // reconcile-inline-feedback AC1: bleibt auf dem Reiter — kein onNavigate
-      // mehr (überschreibt reconcile-trigger AC5). Inline „Reconcile läuft…".
+      // AC10: bleibt auf dem Reiter — kein onNavigate. Inline „Reconcile läuft…".
+      let json;
+      try {
+        json = await res.json();
+      } catch {
+        json = {};
+      }
+      jobIdRef.current = typeof json.jobId === 'string' ? json.jobId : null;
       runStartRef.current = Date.now();
       consecutiveFailRef.current = 0;
       setPhase('running');
-      setSessionRunState('running'); // optimistic update — poll will confirm
       return;
     }
     if (res.status === 409) {
-      // AC6 (reconcile-trigger) / AC9 (reconcile-inline-feedback): job already
-      // running → visible error, no onNavigate
-      setSessionRunState('running');
+      // AC13: Headless-Runner-Projekt-Sperre → passender Hinweis, kein Crash.
       setPhase('error');
-      setReconcileError('Ein Job läuft bereits — bitte warten.');
+      setReconcileError('Reconcile läuft bereits für dieses Projekt — bitte warten.');
       return;
     }
-    // AC7 (reconcile-trigger) / AC9 (reconcile-inline-feedback): 500/unexpected
-    // status → visible error, no onNavigate
+    if (res.status === 400) {
+      // Edge-Case (Spec): fehlender/ungültiger Slug → sichtbare Fehleranzeige.
+      setPhase('error');
+      setReconcileError('Reconcile konnte nicht gestartet werden (ungültiges Projekt).');
+      return;
+    }
+    // 500/unerwarteter Status → sichtbare Fehleranzeige, kein onNavigate.
     setPhase('error');
     setReconcileError(`Fehler beim Starten (HTTP ${res.status}).`);
   }, [projectSlug, setPhase]);
@@ -676,7 +795,7 @@ function ReconcileTrigger({
         </div>
       )}
 
-      {/* reconcile-inline-feedback AC1/AC2: eigener Lauf aktiv */}
+      {/* headless-reconcile-runner AC10/AC11: eigener Lauf aktiv */}
       {reconcileState === 'running' && (
         <div
           role="status"
@@ -688,7 +807,7 @@ function ReconcileTrigger({
         </div>
       )}
 
-      {/* reconcile-inline-feedback AC3: eigener Lauf abgeschlossen */}
+      {/* headless-reconcile-runner AC12: eigener Lauf abgeschlossen */}
       {reconcileState === 'done' && (
         <div
           role="status"
@@ -700,7 +819,40 @@ function ReconcileTrigger({
         </div>
       )}
 
-      {/* reconcile-inline-feedback AC8: robuste Degradierung — kein Endlos-Spinner */}
+      {/* headless-reconcile-runner AC13: Job-Status "failed" → Fehleranzeige mit Reset */}
+      {reconcileState === 'failed' && (
+        <div role="alert" style={styles.reconcileStatusError} data-testid="reconcile-job-failed">
+          {reconcileError}
+          <button
+            type="button"
+            style={styles.btnReconcileReset}
+            onClick={() => setPhase('idle')}
+            aria-label="Fehlerstatus zurücksetzen"
+            data-testid="reconcile-job-failed-reset"
+          >
+            Zurücksetzen
+          </button>
+        </div>
+      )}
+
+      {/* headless-reconcile-runner AC14: Job-Status "auth-expired" → klarer Erneuerungs-Hinweis */}
+      {reconcileState === 'auth-expired' && (
+        <div role="alert" style={styles.reconcileStatusError} data-testid="reconcile-auth-expired">
+          Claude-Anmeldung abgelaufen — Token via{' '}
+          <code style={styles.code}>claude setup-token</code> erneuern.
+          <button
+            type="button"
+            style={styles.btnReconcileReset}
+            onClick={() => setPhase('idle')}
+            aria-label="Hinweis zurücksetzen"
+            data-testid="reconcile-auth-expired-reset"
+          >
+            Zurücksetzen
+          </button>
+        </div>
+      )}
+
+      {/* reconcile-inline-feedback AC8 (Quelle jetzt Job-Poll): robuste Degradierung — kein Endlos-Spinner */}
       {reconcileState === 'degraded' && (
         <div
           role="status"
@@ -759,7 +911,7 @@ function ReconcileTrigger({
         </div>
       )}
 
-      {/* AC6/AC7 (reconcile-trigger) / AC9 (reconcile-inline-feedback): Fehleranzeige mit Reset */}
+      {/* headless-reconcile-runner AC13: Start-Fehler (409/400/500/Netzwerkfehler) */}
       {reconcileState === 'error' && (
         <div role="alert" style={styles.reconcileStatusError} data-testid="reconcile-error">
           {reconcileError}
