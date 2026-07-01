@@ -36,23 +36,50 @@
  *     bereits gestarteten (detachten) Jobs wird NICHT mehr im Overlay
  *     angezeigt — dafür der Board-Zustand (AC15/AC16, Watcher = S-230/AC17).
  *
+ * ── v3 (S-227) — „scratch"-Modus (new-story-chat, from scratch, ohne Idee) ──
+ * Dasselbe Overlay dient auch dem „Neue Story"-Fluss (docs/specs/new-story-chat.md
+ * AC1/AC6/AC7). Über `mode="scratch"`:
+ *   - Statt Auto-Seed beim Öffnen zeigt das Overlay zuerst ein START-FELD
+ *     (Titel + optionale Stichworte); erst dessen Absenden POSTet `.../story-
+ *     specify/start { initialText }` und startet den Chat (AC1/AC2).
+ *   - Endpunkt-Basis ist `.../story-specify` (KEIN `story.id`).
+ *   - Finalize ist im scratch-Modus NICHT fire-and-forget, sondern POLLT den
+ *     Job-Status (`GET .../finalize/:jobId`) bis Terminal: bei `done` kurze
+ *     Erfolgsmeldung → `onSpecified(projectSlug)` (Board-Re-Fetch) → Close
+ *     (AC6); bei `failed`/`auth-expired` erscheint der Fehler inline, das
+ *     Overlay bleibt offen, Retry möglich (AC7). „Story anlegen" ohne
+ *     `readyToSpecify` bleibt deaktiviert (AC7). Der idea-Modus bleibt
+ *     unverändert fire-and-forget (v2).
+ *
  * ── Component-Props-Vertrag (verbindlich für S-218 als Konsument) ──────────
  * @param {{
  *   projectSlug: string,
- *   story: { id: string, title?: string, notes?: string },
+ *   story?: { id: string, title?: string, notes?: string },
  *   onClose: () => void,
  *   triggerRef?: React.RefObject,
  *   fetchFn?: Function,
+ *   mode?: 'idea' | 'scratch',
+ *   onSpecified?: (projectSlug: string) => void,
+ *   successLingerMs?: number,
+ *   finalizePollMs?: number,
  * }} props
  *
  * - `projectSlug` — Board-Projekt-Slug (für alle vier Endpunkte).
- * - `story` — die Idee (`id` Pflicht; `title`/`notes` nur für die Überschrift,
- *   der eigentliche Seed passiert serverseitig in `.../specify/start`).
+ * - `story` — die Idee (`id` Pflicht im idea-Modus; im scratch-Modus NICHT
+ *   nötig — der Seed kommt aus dem Start-Feld statt aus einer Idee-Karte).
  * - `onClose` — schließt das Overlay (Abbrechen, Esc, Backdrop-Klick, sowie
- *   fire-and-forget nach bestätigtem Finalize-Start `202`).
+ *   fire-and-forget nach bestätigtem Finalize-Start `202` im idea-Modus bzw.
+ *   nach done im scratch-Modus).
  * - `triggerRef` — optional; erhält beim Schließen (Esc/Abbrechen/202)
  *   den Fokus zurück (A11y, analog `IdeaResolveModal`).
  * - `fetchFn` — injectable `fetch` für Tests (default: `globalThis.fetch`).
+ * - `mode` — `'idea'` (default, fire-and-forget) | `'scratch'` (new-story-chat,
+ *   Start-Feld + Poll-bis-Terminal + onSpecified).
+ * - `onSpecified` — im scratch-Modus bei Finalize `done` aufgerufen
+ *   (Board-Re-Fetch, AC6). Im idea-Modus (v2) ignoriert.
+ * - `successLingerMs` — scratch: Anzeigedauer der Erfolgsmeldung vor dem
+ *   Schließen (default 1500; in Tests überschreibbar).
+ * - `finalizePollMs` — scratch: Poll-Intervall des Finalize-Status (default 1500).
  *
  * Hinweis: der bisherige `onSpecified(projectSlug)`-Prop entfällt in v2 — es
  *   gibt keinen overlay-gebundenen `done`-Zeitpunkt mehr, an dem das Modal ein
@@ -87,7 +114,21 @@
  *          overlay-unabhängige Re-Fetch/der Status-Watcher ist S-230 (AC17).
  *          Nicht in dieser Datei unit-getestet (kein Overlay-Code).
  *   AC7 (idea-specify-chat, Status-Endpunkt) — der GET-Status-Poll entfällt
- *          im Overlay mit fire-and-forget; im Modal nicht mehr aufgerufen.
+ *          im idea-Modus mit fire-and-forget; dort nicht mehr aufgerufen.
+ *
+ * Covers (new-story-chat) — nur im `mode="scratch"`:
+ *   AC1  — „Neue Story" öffnet DASSELBE Overlay (scratch-Modus): Start-Feld
+ *          (Titel + optionale Stichworte) → POST .../story-specify/start
+ *          { initialText } → derselbe Chat (Bubble-Liste, A11y, Esc, Fokus-
+ *          Rückgabe) OHNE Idee-Karte. (Sidebar-Button-Ersatz + Modal-
+ *          Verdrahtung leben in CockpitView.jsx / dortiger Test.)
+ *   AC6  — Finalize pollt `GET .../finalize/:jobId`; bei `done` Erfolgsmeldung
+ *          → onSpecified(projectSlug) (Board-Re-Fetch) → Close.
+ *   AC7  — bei `failed`/`auth-expired` Fehler inline, Overlay bleibt offen,
+ *          Retry möglich; „Story anlegen" ohne readyToSpecify deaktiviert; ein
+ *          Chat-`502` zeigt einen secret-freien Fehler, Overlay bleibt nutzbar.
+ *   AC2–AC5 (Backend-Contract) — in test/storySpecifyRouter.test.js abgedeckt;
+ *          hier nur der Client-Konsum der dokumentierten Response-Shapes.
  *
  * Covers (idea-specify-background-status, S-230):
  *   AC6  — Reopen zeigt letzten Status inline: beim Öffnen fragt das Overlay
@@ -115,24 +156,55 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 
+/**
+ * Poll-Intervall (ms) für den scratch-Finalize-Job (new-story-chat AC6/AC7).
+ * Überschreibbar via Prop `finalizePollMs` (Tests).
+ */
+const FINALIZE_POLL_MS = 1500;
+
 export function IdeaSpecifyChatModal({
   projectSlug,
   story,
   onClose,
   triggerRef,
   fetchFn,
+  mode = 'idea',
+  onSpecified,
+  successLingerMs = 1500,
+  finalizePollMs = FINALIZE_POLL_MS,
 }) {
   const fetch_ = fetchFn ?? globalThis.fetch.bind(globalThis);
   const storyId = story?.id;
+  // scratch-Modus (new-story-chat): „from scratch", ohne Idee-Karte — Start-Feld
+  // statt Auto-Seed, andere Endpunkt-Basis (.../story-specify), Finalize pollt
+  // bis Terminal-Status (AC6/AC7) statt fire-and-forget wie der idea-Modus.
+  const isScratch = mode === 'scratch';
 
-  // ── Init (POST .../specify/start) ─────────────────────────────────────────
-  const [initState, setInitState] = useState('loading'); // 'loading'|'ready'|'error'
+  // Endpunkt-Basis: idea-Modus → .../ideas/:id/specify; scratch-Modus (new-
+  // story-chat) → .../story-specify (kein story.id). Alle vier Endpunkte
+  // (start/message/finalize/finalize/:jobId) hängen an dieser Basis.
+  const endpointBase = isScratch
+    ? `/api/board/projects/${encodeURIComponent(projectSlug)}/story-specify`
+    : `/api/board/projects/${encodeURIComponent(projectSlug)}/ideas/${encodeURIComponent(storyId)}/specify`;
+
+  // ── Init (POST .../start) ─────────────────────────────────────────────────
+  // idea: 'loading' (Auto-Start beim Öffnen). scratch: 'compose' (erst das
+  // Start-Feld, Start erst beim Absenden — new-story-chat AC1/AC2).
+  const [initState, setInitState] = useState(isScratch ? 'compose' : 'loading'); // 'compose'|'loading'|'ready'|'error'
   const [initError, setInitError] = useState('');
   const [sessionId, setSessionId] = useState(null);
   // Retry-Zähler: erhöht sich bei jedem "Erneut versuchen"-Klick und steht im
   // Dependency-Array des Init-Effects, damit der Retry den Fetch tatsächlich
   // neu auslöst (Review-Fix Iteration 2, Important 1).
   const [initRetryToken, setInitRetryToken] = useState(0);
+
+  // scratch-Start-Feld (new-story-chat AC2): Titel (Pflicht) + optionaler
+  // Stichwort-Body; zusammen bilden sie `initialText`, das den ersten Turn
+  // seedet. `composedInitialText` hält den zuletzt abgesendeten Seed, damit ein
+  // „Erneut versuchen" nach Start-Fehler denselben Text erneut sendet (AC7).
+  const [composeTitle, setComposeTitle] = useState('');
+  const [composeBody, setComposeBody] = useState('');
+  const [composedInitialText, setComposedInitialText] = useState('');
 
   // ── Chat ───────────────────────────────────────────────────────────────────
   const [messages, setMessages] = useState([]); // [{ role: 'owner'|'claude', text }]
@@ -146,8 +218,12 @@ export function IdeaSpecifyChatModal({
   // 'idle'    — noch nicht abgeschickt / nach non-202-Fehler wieder bereit
   // 'submitting' — Finalize-Start-Request unterwegs (Button „Lege Story an…")
   // 'error'   — synchroner Start-Fehlschlag (non-202); Overlay bleibt offen
+  // idea (fire-and-forget): 'idle'|'submitting'|'error'.
+  // scratch (new-story-chat AC6/AC7 — poll bis Terminal-Status):
+  //   'idle'|'submitting'|'polling'|'done'|'error'.
   const [finalizeState, setFinalizeState] = useState('idle');
   const [finalizeError, setFinalizeError] = useState('');
+  const [finalizeJobId, setFinalizeJobId] = useState(null); // scratch: Poll-Ziel
 
   // ── Reopen-Status (idea-specify-background-status AC6, S-230) ──────────────
   // Beim (Wieder-)Öffnen den letzten bekannten Finalize-Job DIESER Idee abfragen
@@ -196,8 +272,11 @@ export function IdeaSpecifyChatModal({
     return () => dialog.removeEventListener('keydown', handleKeyDown);
   }, [handleClose]);
 
-  // AC1/AC3: seedet die Session beim Öffnen (POST .../specify/start).
+  // AC1/AC3 (idea): seedet die Session beim Öffnen (POST .../start). Im
+  // scratch-Modus (new-story-chat) passiert der Start NICHT automatisch, sondern
+  // erst beim Absenden des Start-Felds (handleComposeStart) — daher hier gated.
   useEffect(() => {
+    if (isScratch) return;
     let cancelled = false;
 
     async function init() {
@@ -206,7 +285,7 @@ export function IdeaSpecifyChatModal({
       let res;
       try {
         res = await fetch_(
-          `/api/board/projects/${encodeURIComponent(projectSlug)}/ideas/${encodeURIComponent(storyId)}/specify/start`,
+          `${endpointBase}/start`,
           { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) },
         );
       } catch {
@@ -236,13 +315,65 @@ export function IdeaSpecifyChatModal({
     init();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectSlug, storyId, initRetryToken]);
+  }, [projectSlug, storyId, initRetryToken, isScratch, endpointBase]);
 
-  // AC6: beim Öffnen den letzten bekannten Finalize-Job dieser Idee laden und
-  // inline nachziehen (running/failed-Banner + Finalize-Sperre bei running).
-  // Läuft parallel zum Chat-Init und blockiert den Chat NICHT; degradiert bei
-  // Netz-/Parse-Fehlern still (kein Banner, normaler Chat-Einstieg).
+  // scratch (new-story-chat AC2): Start-Feld absenden → POST .../story-specify/
+  // start { initialText }. Bei 201 läuft ab hier derselbe Chat wie im idea-
+  // Modus. Bei Fehler bleibt das Overlay nutzbar (initState 'error' + Retry mit
+  // demselben Seed, AC7). Fehlertext kommt 1:1 vom secret-freien Backend.
+  async function performScratchStart(initialText) {
+    setInitState('loading');
+    setInitError('');
+    let res;
+    try {
+      res = await fetch_(
+        `${endpointBase}/start`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initialText }) },
+      );
+    } catch {
+      if (!mountedRef.current) return;
+      setInitState('error');
+      setInitError('Netzwerkfehler — bitte erneut versuchen.');
+      return;
+    }
+    if (!mountedRef.current) return;
+
+    if (res.status === 201) {
+      let data = {};
+      try { data = await res.json(); } catch { /* ignore */ }
+      if (!mountedRef.current) return;
+      setSessionId(data.sessionId);
+      setMessages([{ role: 'claude', text: data.reply ?? '' }]);
+      setInitState('ready');
+      return;
+    }
+
+    let data = {};
+    try { data = await res.json(); } catch { /* ignore */ }
+    if (!mountedRef.current) return;
+    setInitState('error');
+    setInitError(data.message ?? data.error ?? `Chat konnte nicht gestartet werden (HTTP ${res.status}).`);
+  }
+
+  function handleComposeStart() {
+    const title = composeTitle.trim();
+    if (!title) return;
+    const body = composeBody.trim();
+    const initialText = body ? `${title}\n\n${body}` : title;
+    setComposedInitialText(initialText);
+    performScratchStart(initialText);
+  }
+
+  // AC6 (S-230): beim Öffnen den letzten bekannten Finalize-Job dieser Idee
+  // laden und inline nachziehen (running/failed-Banner + Finalize-Sperre bei
+  // running). Läuft parallel zum Chat-Init und blockiert den Chat NICHT;
+  // degradiert bei Netz-/Parse-Fehlern still (kein Banner, normaler
+  // Chat-Einstieg). Im scratch-Modus (S-227, new-story-chat) gibt es KEINE
+  // Idee (storyId ist undefined) — dieser Effect ist idea-spezifisch und muss
+  // daher gegated werden, sonst würde er fälschlich
+  // `.../ideas/undefined/specify/status` fetchen (Merge-Fallstrick S-227).
   useEffect(() => {
+    if (isScratch) return;
     let cancelled = false;
     async function fetchReopenStatus() {
       let res;
@@ -261,7 +392,7 @@ export function IdeaSpecifyChatModal({
     fetchReopenStatus();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectSlug, storyId]);
+  }, [projectSlug, storyId, isScratch]);
 
   async function handleSend() {
     const text = inputText.trim();
@@ -275,7 +406,7 @@ export function IdeaSpecifyChatModal({
     let res;
     try {
       res = await fetch_(
-        `/api/board/projects/${encodeURIComponent(projectSlug)}/ideas/${encodeURIComponent(storyId)}/specify/message`,
+        `${endpointBase}/message`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -314,7 +445,7 @@ export function IdeaSpecifyChatModal({
   // 400 kein readyToSpecify, Netzwerkfehler) hält das Overlay offen + zeigt den
   // Fehler inline + erlaubt Retry (AC11).
   async function handleFinalize() {
-    if (!readyToSpecify || finalizeState === 'submitting' || !sessionId) return;
+    if (!readyToSpecify || finalizeState === 'submitting' || finalizeState === 'polling' || !sessionId) return;
 
     setFinalizeState('submitting');
     setFinalizeError('');
@@ -322,7 +453,7 @@ export function IdeaSpecifyChatModal({
     let res;
     try {
       res = await fetch_(
-        `/api/board/projects/${encodeURIComponent(projectSlug)}/ideas/${encodeURIComponent(storyId)}/specify/finalize`,
+        `${endpointBase}/finalize`,
         { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId }) },
       );
     } catch {
@@ -333,11 +464,26 @@ export function IdeaSpecifyChatModal({
     }
 
     if (res.status === 202) {
-      // Job bestätigt gestartet → fire-and-forget: Overlay sofort schließen.
+      let data = {};
+      try { data = await res.json(); } catch { /* ignore */ }
+      if (!mountedRef.current) return;
+      if (isScratch) {
+        // new-story-chat AC6/AC7: NICHT fire-and-forget — das Overlay bleibt
+        // offen und pollt den Job-Status bis Terminal (done/failed/auth-expired).
+        const jobId = data.jobId;
+        if (!jobId) {
+          setFinalizeState('error');
+          setFinalizeError('Story-Anlage konnte nicht gestartet werden.');
+          return;
+        }
+        setFinalizeJobId(jobId);
+        setFinalizeState('polling');
+        return;
+      }
+      // idea (v2 fire-and-forget): Overlay sofort schließen, kein Poll.
       // Der `mountedRef`-Guard fängt den Fall ab, dass der Owner das Overlay
       // (X/Esc/Backdrop) bereits geschlossen hat, während der Start-Request
       // unterwegs war — dann kein doppeltes onClose.
-      if (!mountedRef.current) return;
       handleClose();
       return;
     }
@@ -349,12 +495,75 @@ export function IdeaSpecifyChatModal({
     setFinalizeError(data.message ?? data.error ?? `Finalisierung konnte nicht gestartet werden (HTTP ${res.status}).`);
   }
 
+  // new-story-chat AC6/AC7 (scratch): pollt den Finalize-Job bis Terminal-
+  // Status. done → 'done' (Erfolgsmeldung + Linger + onSpecified + Close);
+  // failed/auth-expired → 'error' (inline, Overlay offen, Retry). running →
+  // weiterpollen. Ein transienter Netzwerk-/non-200-Fehler pausiert nur diese
+  // Runde (kein Abbruch). Secret-frei: der Fehlertext kommt 1:1 vom bereits
+  // secret-freien Backend-Contract (storySpecifyRouter.js).
+  useEffect(() => {
+    if (!isScratch || finalizeState !== 'polling' || !finalizeJobId) return;
+    let cancelled = false;
+
+    async function pollOnce() {
+      let res;
+      try {
+        res = await fetch_(`${endpointBase}/finalize/${encodeURIComponent(finalizeJobId)}`);
+      } catch {
+        return; // transienter Fehler — nächste Runde erneut versuchen
+      }
+      if (cancelled || !mountedRef.current) return;
+      if (res.status !== 200) return; // z.B. 404 (Job noch nicht sichtbar) → retry
+      let data = {};
+      try { data = await res.json(); } catch { /* ignore */ }
+      if (cancelled || !mountedRef.current) return;
+
+      if (data.status === 'done') {
+        setFinalizeState('done');
+      } else if (data.status === 'failed' || data.status === 'auth-expired') {
+        setFinalizeState('error');
+        setFinalizeError(
+          data.error ??
+            (data.status === 'auth-expired'
+              ? 'Anmeldung abgelaufen — bitte erneut versuchen.'
+              : 'Story-Anlage fehlgeschlagen — bitte erneut versuchen.'),
+        );
+      }
+      // 'running' → weiterpollen (Intervall)
+    }
+
+    pollOnce();
+    const timer = setInterval(pollOnce, finalizePollMs);
+    return () => { cancelled = true; clearInterval(timer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isScratch, finalizeState, finalizeJobId, endpointBase, finalizePollMs]);
+
+  // new-story-chat AC6 (scratch): bei done kurz die Erfolgsmeldung zeigen, dann
+  // onSpecified (Board-Re-Fetch) auslösen und das Overlay schließen.
+  useEffect(() => {
+    if (!isScratch || finalizeState !== 'done') return;
+    const t = setTimeout(() => {
+      if (!mountedRef.current) return;
+      handleClose();
+      if (onSpecified) onSpecified(projectSlug);
+    }, successLingerMs);
+    return () => clearTimeout(t);
+  }, [isScratch, finalizeState, successLingerMs, onSpecified, projectSlug, handleClose]);
+
   const titleId = 'idea-specify-chat-modal-title';
-  // AC6: „Story anlegen" zusätzlich deaktiviert, solange für DIESE Idee bereits
-  // ein Finalize-Lauf `running` ist (kein zweiter Lauf — Server lehnte ihn mit
-  // 409 ohnehin ab, wir verhindern ihn proaktiv).
+  // AC6 (S-230): „Story anlegen" zusätzlich deaktiviert, solange für DIESE
+  // Idee bereits ein Finalize-Lauf `running` ist (kein zweiter Lauf — Server
+  // lehnte ihn mit 409 ohnehin ab, wir verhindern ihn proaktiv). Vereinigt mit
+  // den scratch-Zuständen (S-227, new-story-chat AC6/AC7): 'polling'/'done'
+  // sperren den Button ebenfalls, während der Finalize-Job läuft bzw. bereits
+  // fertig ist.
   const finalizeDisabled =
-    !readyToSpecify || finalizeState === 'submitting' || initState !== 'ready' || reopenRunning;
+    !readyToSpecify ||
+    finalizeState === 'submitting' ||
+    finalizeState === 'polling' ||
+    finalizeState === 'done' ||
+    initState !== 'ready' ||
+    reopenRunning;
 
   return (
     <>
@@ -369,8 +578,53 @@ export function IdeaSpecifyChatModal({
         style={styles.dialog}
         data-testid="idea-specify-chat-modal"
       >
-        <h2 id={titleId} style={styles.heading}>Idee spezifizieren</h2>
-        {story?.title && <p style={styles.hint}>„{story.title}"</p>}
+        <h2 id={titleId} style={styles.heading}>{isScratch ? 'Neue Story' : 'Idee spezifizieren'}</h2>
+        {!isScratch && story?.title && <p style={styles.hint}>„{story.title}"</p>}
+
+        {/* scratch (new-story-chat AC1/AC2): Start-Feld — Titel + optionale
+            Stichworte seeden den ersten Chat-Turn (kein Idee-Karte). */}
+        {isScratch && initState === 'compose' && (
+          <div data-testid="new-story-compose">
+            <p style={styles.hint}>
+              Titel + Stichworte eingeben — Claude spezifiziert daraus im Chat
+              eine neue Story von Grund auf (ohne Idee-Karte).
+            </p>
+            <label style={styles.label} htmlFor="new-story-title-input">Titel</label>
+            <input
+              id="new-story-title-input"
+              type="text"
+              style={styles.input}
+              value={composeTitle}
+              onChange={(e) => setComposeTitle(e.target.value)}
+              placeholder="z.B. Export als CSV"
+              aria-label="Titel der neuen Story"
+              data-testid="new-story-title-input"
+            />
+            <label style={styles.label} htmlFor="new-story-body-input">Stichworte (optional)</label>
+            <textarea
+              id="new-story-body-input"
+              style={styles.textarea}
+              value={composeBody}
+              onChange={(e) => setComposeBody(e.target.value)}
+              rows={4}
+              placeholder="Freie Stichwort-Notizen…"
+              aria-label="Stichworte zur neuen Story"
+              data-testid="new-story-body-input"
+            />
+            <div style={styles.buttonRow}>
+              <button
+                type="button"
+                style={!composeTitle.trim() ? styles.btnDisabled : styles.btnPrimary}
+                disabled={!composeTitle.trim()}
+                aria-disabled={!composeTitle.trim()}
+                onClick={handleComposeStart}
+                data-testid="new-story-start-btn"
+              >
+                Chat starten
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* AC6: Reopen-Status-Banner — läuft-noch (running) bzw. zuletzt
             fehlgeschlagen (failed/auth-expired). Overlay-unabhängig aus der
@@ -407,7 +661,10 @@ export function IdeaSpecifyChatModal({
               <button
                 type="button"
                 style={styles.btnSecondary}
-                onClick={() => setInitRetryToken((t) => t + 1)}
+                onClick={() => {
+                  if (isScratch) performScratchStart(composedInitialText);
+                  else setInitRetryToken((t) => t + 1);
+                }}
                 data-testid="idea-specify-init-retry-btn"
               >
                 Erneut versuchen
@@ -468,13 +725,28 @@ export function IdeaSpecifyChatModal({
                 onClick={handleFinalize}
                 data-testid="idea-specify-finalize-btn"
               >
-                {finalizeState === 'submitting' ? 'Lege Story an…' : 'Story anlegen'}
+                {finalizeState === 'submitting' || finalizeState === 'polling'
+                  ? 'Lege Story an…'
+                  : 'Story anlegen'}
               </button>
             </div>
 
             {finalizeState === 'error' && (
               <div role="alert" style={styles.error} data-testid="idea-specify-finalize-error">
                 {finalizeError}
+              </div>
+            )}
+
+            {/* new-story-chat AC6 (scratch): Erfolgsmeldung bei done, bevor das
+                Overlay schließt und onSpecified das Board-Re-Fetch auslöst. */}
+            {isScratch && finalizeState === 'done' && (
+              <div
+                role="status"
+                aria-live="polite"
+                style={styles.success}
+                data-testid="new-story-finalize-success"
+              >
+                Story angelegt ✓ — das Board wird aktualisiert…
               </div>
             )}
           </>
@@ -625,6 +897,43 @@ const styles = {
     resize: 'vertical',
     fontFamily: 'system-ui, sans-serif',
     boxSizing: 'border-box',
+  },
+
+  // scratch-Start-Feld (new-story-chat AC2), Muster analog IdeaCaptureModal.
+  label: {
+    display: 'block',
+    fontSize: 11,
+    fontWeight: 700,
+    letterSpacing: '0.06em',
+    color: '#9ca3af',
+    textTransform: 'uppercase',
+    marginBottom: 4,
+  },
+
+  input: {
+    width: '100%',
+    background: '#111',
+    border: '1px solid #374151',
+    borderRadius: 6,
+    color: '#e5e7eb',
+    fontSize: 14,
+    padding: '9px 10px',
+    marginBottom: 14,
+    fontFamily: 'system-ui, sans-serif',
+    boxSizing: 'border-box',
+    minHeight: 40,
+  },
+
+  // Erfolgsmeldung bei scratch-Finalize done (new-story-chat AC6).
+  // #86efac auf #0f2417 ≈ AA-Kontrast für 13px-Text.
+  success: {
+    color: '#86efac',
+    fontSize: 13,
+    padding: '8px 10px',
+    background: '#0f2417',
+    borderRadius: 6,
+    border: '1px solid #14532d',
+    marginBottom: 12,
   },
 
   error: {
