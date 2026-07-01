@@ -698,6 +698,63 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
     prevRunningIdeasRef.current = new Set();
   }, [currentProjectSlug]);
 
+  // ─── Archivierbarkeit + Archiv-Schreibpfad (board-feature-archive AC5/V5) ────
+  // Zählt die aktuell archivierbaren Features + deren Stories NACH V1 aus den
+  // bereits geladenen (UNGEFILTERTEN) Board-Daten: ein Feature ist archivierbar,
+  // wenn es ≥1 Story hat, JEDE seiner Stories `Done` ist, es NICHT bereits
+  // archiviert ist und es NICHT das Pseudo-Feature `_orphaned` ist. Der Zähler
+  // speist sowohl den Disabled-Zustand des Buttons als auch die Bestätigungs-
+  // abfrage (V5: „N Features mit M Stories werden archiviert"). Bewusst aus
+  // `projects` (roh) statt `filteredProjects`, damit ein aktiver Status-/Label-
+  // Filter die Zählung nicht verfälscht.
+  const archivable = useMemo(() => {
+    let featureCount = 0;
+    let storyCount = 0;
+    for (const p of projects) {
+      if (p.error) continue;
+      for (const f of p.features ?? []) {
+        if (f._orphaned || f.id === '_orphaned') continue; // Pseudo-Feature (V1)
+        if (f.archived === true) continue;                 // bereits archiviert (V1)
+        const st = Array.isArray(f.stories) ? f.stories : [];
+        if (st.length === 0) continue;                     // ohne Stories → nicht archivierbar
+        if (!st.every((s) => DONE_STATUSES.has(s.status))) continue; // ≥1 nicht-Done → nein
+        featureCount += 1;
+        storyCount += st.length;
+      }
+    }
+    return { featureCount, storyCount };
+  }, [projects]);
+
+  // Archiv-Schreibpfad (V5-Bestätigen): POST .../archive-done und danach die
+  // Übersicht neu laden (Rescan — bestehender handleSpecified-Re-Fetch-Weg).
+  // Wirft bei Fehler (409/5xx/Netz) eine secret-freie, nutzerlesbare Meldung —
+  // die FilterBar zeigt sie nicht-blockierend im Dialog, ohne die Ansicht zu
+  // zerstören (AC5).
+  const handleArchiveDone = useCallback(async () => {
+    const slug = currentProjectSlug;
+    if (!slug) throw new Error('Kein Projekt geladen.');
+    let res;
+    try {
+      res = await fetch(`/api/board/projects/${encodeURIComponent(slug)}/archive-done`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+    } catch {
+      throw new Error('Netzwerkfehler — bitte erneut versuchen.');
+    }
+    if (!res.ok) {
+      if (res.status === 409) {
+        throw new Error('Board ist gerade beschäftigt — bitte später erneut versuchen.');
+      }
+      throw new Error(`Archivieren fehlgeschlagen (HTTP ${res.status}).`);
+    }
+    // Erfolg → Übersicht neu laden (Rescan); die archivierten Features
+    // verschwinden aus der Standardansicht. handleSpecified ist der generische
+    // Board-Re-Fetch (Cockpit: reloadToken++, Standalone: handleProjectSelect).
+    handleSpecified(slug);
+  }, [currentProjectSlug, handleSpecified]);
+
   // ─── Derived: project options for filter dropdown (only in cockpit mode) ─────
   const projectOptions = useMemo(() => {
     return projects
@@ -854,6 +911,9 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
               allFeatureIds={(projects[0]?.features ?? []).map((f) => f.id)}
               onCollapseAll={handleCollapseAll}
               onExpandAll={handleExpandAll}
+              archivableFeatureCount={archivable.featureCount}
+              archivableStoryCount={archivable.storyCount}
+              onArchiveDone={handleArchiveDone}
             />
           )}
 
@@ -936,6 +996,9 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
               allFeatureIds={(projects[0]?.features ?? []).map((f) => f.id)}
               onCollapseAll={handleCollapseAll}
               onExpandAll={handleExpandAll}
+              archivableFeatureCount={archivable.featureCount}
+              archivableStoryCount={archivable.storyCount}
+              onArchiveDone={handleArchiveDone}
             />
           )}
 
@@ -1020,6 +1083,14 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
  *
  * AC4 (board-feature-collapse): "Alle einklappen" / "Alle ausklappen" Schalter.
  *
+ * AC5/AC7 (board-feature-archive): Button „Erledigte Features archivieren" +
+ *   Bestätigungsabfrage. Der Button ist deaktiviert, wenn nichts archivierbar ist
+ *   (`archivableFeatureCount === 0`); sonst öffnet ein Klick einen fokussierten
+ *   Bestätigungsdialog (`role="dialog"`, Fokusfalle/Esc), der die Anzahl
+ *   betroffener Features UND Stories nennt. Bestätigen ruft `onArchiveDone()`
+ *   (POST + Rescan, wirft bei Fehler eine secret-freie Meldung), Abbrechen
+ *   ändert nichts. Endpoint-Fehler erscheinen nicht-blockierend im Dialog.
+ *
  * @param {{
  *   projects: string[],
  *   statusOptions: string[],
@@ -1035,6 +1106,9 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
  *   allFeatureIds?: string[],
  *   onCollapseAll?: () => void,
  *   onExpandAll?: () => void,
+ *   archivableFeatureCount?: number,
+ *   archivableStoryCount?: number,
+ *   onArchiveDone?: () => Promise<void>,
  * }} props
  */
 function FilterBar({
@@ -1052,7 +1126,51 @@ function FilterBar({
   allFeatureIds,
   onCollapseAll,
   onExpandAll,
+  archivableFeatureCount = 0,
+  archivableStoryCount = 0,
+  onArchiveDone,
 }) {
+  // AC5 (board-feature-archive): Zustand der Archiv-Bestätigungsabfrage.
+  //   archiveConfirmOpen — Dialog sichtbar?
+  //   archiveState        — 'idle' | 'submitting' | 'error' (POST-Fortschritt)
+  //   archiveError        — nicht-blockierende, secret-freie Fehlermeldung
+  // archiveTriggerRef merkt den auslösenden Button für die Fokus-Rückgabe (A11y).
+  const [archiveConfirmOpen, setArchiveConfirmOpen] = useState(false);
+  const [archiveState, setArchiveState] = useState('idle');
+  const [archiveError, setArchiveError] = useState('');
+  const archiveTriggerRef = useRef(null);
+  const hasArchivable = archivableFeatureCount > 0;
+
+  const handleOpenArchiveConfirm = useCallback(() => {
+    setArchiveState('idle');
+    setArchiveError('');
+    setArchiveConfirmOpen(true);
+  }, []);
+
+  const handleCancelArchive = useCallback(() => {
+    setArchiveConfirmOpen(false);
+    setArchiveState('idle');
+    setArchiveError('');
+    archiveTriggerRef.current?.focus(); // Fokus-Rückgabe an den Auslöser (A11y)
+  }, []);
+
+  const handleConfirmArchive = useCallback(async () => {
+    if (!onArchiveDone) return;
+    setArchiveState('submitting');
+    setArchiveError('');
+    try {
+      await onArchiveDone();
+      // Erfolg → Dialog schließen; die Übersicht wurde bereits neu geladen.
+      setArchiveConfirmOpen(false);
+      setArchiveState('idle');
+      archiveTriggerRef.current?.focus();
+    } catch (err) {
+      // AC5: nicht-blockierend — Dialog bleibt offen, Fehler wird angezeigt,
+      // Ansicht bleibt intakt, Retry/Abbrechen möglich.
+      setArchiveState('error');
+      setArchiveError(err?.message || 'Archivieren fehlgeschlagen.');
+    }
+  }, [onArchiveDone]);
   // AC4 (board-feature-collapse): derive whether any feature is collapsed/expanded
   // to decide which button to show.
   const allCollapsed = useMemo(() => {
@@ -1258,7 +1376,159 @@ function FilterBar({
           {allCollapsed ? '▾ Alle ausklappen' : '▸ Alle einklappen'}
         </button>
       )}
+
+      {/* AC5/AC7 (board-feature-archive): „Erledigte Features archivieren" —
+          deaktiviert wenn nichts archivierbar; sonst öffnet ein Klick die
+          Bestätigungsabfrage. Echter <button> mit sprechendem aria-label,
+          Bedeutung nicht allein über Farbe (Text). */}
+      {onArchiveDone && (
+        <button
+          ref={archiveTriggerRef}
+          type="button"
+          style={styles.archiveDoneBtn}
+          disabled={!hasArchivable}
+          onClick={handleOpenArchiveConfirm}
+          aria-label={hasArchivable
+            ? `Erledigte Features archivieren: ${archivableFeatureCount} Features mit ${archivableStoryCount} Stories`
+            : 'Erledigte Features archivieren — keine erledigten Features vorhanden'}
+          title={hasArchivable ? undefined : 'Keine erledigten Features'}
+          data-testid="archive-done-btn"
+        >
+          Erledigte Features archivieren
+        </button>
+      )}
+
+      {/* AC5/AC7: Bestätigungsabfrage (fokussiertes Dialog-Muster). */}
+      {archiveConfirmOpen && (
+        <ArchiveConfirmDialog
+          featureCount={archivableFeatureCount}
+          storyCount={archivableStoryCount}
+          state={archiveState}
+          error={archiveError}
+          onCancel={handleCancelArchive}
+          onConfirm={handleConfirmArchive}
+        />
+      )}
     </div>
+  );
+}
+
+// ── ArchiveConfirmDialog (board-feature-archive AC5/AC7) ──────────────────────
+
+/**
+ * Bestätigungsabfrage für „Erledigte Features archivieren" (V5).
+ *
+ * AC5: nennt die Anzahl betroffener Features UND Stories; Abbrechen ändert
+ *   nichts; Bestätigen ruft `onConfirm`; ein Endpoint-Fehler wird
+ *   nicht-blockierend (role=alert) im Dialog gezeigt, ohne die Ansicht zu
+ *   zerstören.
+ * AC7: fokussiertes Dialog-Muster — `role="dialog"`, `aria-modal`,
+ *   `aria-labelledby`; Fokus beim Öffnen auf das erste Bedienelement;
+ *   Fokusfalle (Tab/Shift+Tab zyklisch); Esc bricht ab (außer während des
+ *   laufenden POST); sichtbarer Fokusring (kein outline:none); Bedeutung nicht
+ *   allein über Farbe (Text).
+ *
+ * @param {{
+ *   featureCount: number,
+ *   storyCount: number,
+ *   state: 'idle'|'submitting'|'error',
+ *   error?: string,
+ *   onCancel: () => void,
+ *   onConfirm: () => void,
+ * }} props
+ */
+function ArchiveConfirmDialog({ featureCount, storyCount, state, error, onCancel, onConfirm }) {
+  const dialogRef = useRef(null);
+  const titleId = 'archive-confirm-title';
+  const submitting = state === 'submitting';
+
+  // Fokus beim Öffnen + Esc-Abbruch + Fokusfalle (AC7).
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    const focusable = dialog.querySelectorAll('button:not([disabled])');
+    if (focusable.length > 0) focusable[0].focus();
+
+    function handleKeyDown(e) {
+      if (e.key === 'Escape') {
+        if (!submitting) onCancel();
+        return;
+      }
+      if (e.key === 'Tab') {
+        const items = dialog.querySelectorAll('button:not([disabled])');
+        if (items.length === 0) return;
+        const first = items[0];
+        const last = items[items.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    }
+    dialog.addEventListener('keydown', handleKeyDown);
+    return () => dialog.removeEventListener('keydown', handleKeyDown);
+  }, [onCancel, submitting]);
+
+  const featureWord = featureCount === 1 ? 'Feature' : 'Features';
+  const storyWord   = storyCount === 1 ? 'Story' : 'Stories';
+
+  return (
+    <>
+      {/* Backdrop — Board bleibt dahinter sichtbar; Klick bricht ab (nicht
+          während des laufenden POST). */}
+      <div
+        style={styles.archiveBackdrop}
+        onClick={submitting ? undefined : onCancel}
+        aria-hidden="true"
+      />
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        style={styles.archiveDialog}
+        data-testid="archive-confirm-dialog"
+      >
+        <h2 id={titleId} style={styles.archiveHeading}>Erledigte Features archivieren</h2>
+        <p style={styles.archiveBody} data-testid="archive-confirm-summary">
+          {featureCount} {featureWord} mit {storyCount} {storyWord} {featureCount === 1 ? 'wird' : 'werden'} archiviert.
+          Sie verschwinden aus der Übersicht, bleiben aber gespeichert.
+        </p>
+
+        {state === 'error' && error && (
+          <div role="alert" style={styles.archiveError} data-testid="archive-confirm-error">
+            {error}
+          </div>
+        )}
+
+        <div style={styles.archiveActions}>
+          <button
+            type="button"
+            style={styles.archiveCancelBtn}
+            onClick={onCancel}
+            disabled={submitting}
+            aria-label="Archivieren abbrechen"
+            data-testid="archive-cancel-btn"
+          >
+            Abbrechen
+          </button>
+          <button
+            type="button"
+            style={styles.archiveConfirmBtn}
+            onClick={onConfirm}
+            disabled={submitting}
+            aria-busy={submitting}
+            aria-label="Archivieren bestätigen"
+            data-testid="archive-confirm-btn"
+          >
+            {submitting ? 'Archiviere…' : 'Bestätigen'}
+          </button>
+        </div>
+      </div>
+    </>
   );
 }
 
@@ -2544,6 +2814,96 @@ const styles = {
     cursor: 'pointer',
     minHeight: 36,
     whiteSpace: 'nowrap',
+    // Focus ring preserved (no outline:none)
+  },
+
+  // ── Archiv-Button + Bestätigungsabfrage (board-feature-archive AC5/AC7) ──────
+  archiveDoneBtn: {
+    background: 'transparent',
+    border: '1px solid #4b5563',
+    color: '#e5e7eb',
+    borderRadius: 4,
+    padding: '6px 12px',
+    fontSize: 12,
+    cursor: 'pointer',
+    minHeight: 36,
+    whiteSpace: 'nowrap',
+    // :disabled wird per opacity/cursor via inline nicht möglich — jsdom-neutral;
+    // der disabled-Zustand kommt vom DOM-Attribut (aria/Testbarkeit).
+    // Focus ring preserved (no outline:none)
+  },
+  archiveBackdrop: {
+    position: 'fixed',
+    inset: 0,
+    background: 'rgba(0,0,0,0.6)',
+    zIndex: 999,
+  },
+  archiveDialog: {
+    position: 'fixed',
+    top: '50%',
+    left: '50%',
+    transform: 'translate(-50%, -50%)',
+    zIndex: 1000,
+    background: '#1a1a1a',
+    border: '1px solid #374151',
+    borderRadius: 10,
+    padding: '24px 28px',
+    minWidth: 360,
+    maxWidth: 480,
+    color: '#e5e7eb',
+    fontFamily: 'system-ui, sans-serif',
+    fontSize: 14,
+    boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
+    display: 'flex',
+    flexDirection: 'column',
+  },
+  archiveHeading: {
+    margin: '0 0 8px',
+    fontSize: 18,
+    fontWeight: 700,
+    color: '#f0f9ff',
+  },
+  archiveBody: {
+    margin: '0 0 16px',
+    fontSize: 14,
+    color: '#d1d5db',
+    lineHeight: 1.5,
+  },
+  archiveError: {
+    margin: '0 0 12px',
+    padding: '8px 12px',
+    fontSize: 13,
+    color: '#fecaca',
+    background: '#3f1d1d',
+    border: '1px solid #7f1d1d',
+    borderRadius: 6,
+  },
+  archiveActions: {
+    display: 'flex',
+    justifyContent: 'flex-end',
+    gap: 10,
+  },
+  archiveCancelBtn: {
+    background: 'transparent',
+    border: '1px solid #4b5563',
+    color: '#e5e7eb',
+    borderRadius: 4,
+    padding: '8px 16px',
+    fontSize: 13,
+    cursor: 'pointer',
+    minHeight: 40,
+    // Focus ring preserved (no outline:none)
+  },
+  archiveConfirmBtn: {
+    background: '#b45309',
+    border: '1px solid #b45309',
+    color: '#fff',
+    borderRadius: 4,
+    padding: '8px 16px',
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: 'pointer',
+    minHeight: 40,
     // Focus ring preserved (no outline:none)
   },
 

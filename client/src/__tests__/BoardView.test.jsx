@@ -93,6 +93,23 @@
  *          (`GET /api/board/projects/:slug` erneut) — Wiederverwendung des
  *          bestehenden Cockpit-Lade-Mechanismus (`reloadToken`).
  *
+ * Covers (board-feature-archive, S-233):
+ *   AC5 — Button „Erledigte Features archivieren" ist deaktiviert, wenn nichts
+ *          archivierbar ist (V1: kein Feature mit ≥1 Story, alle Done, nicht
+ *          archiviert); sonst öffnet ein Klick eine Bestätigungsabfrage mit der
+ *          Anzahl betroffener Features UND Stories (aus den geladenen Board-Daten
+ *          nach V1 berechnet, ungefiltert). Abbrechen ändert nichts + setzt kein
+ *          POST ab; Bestätigen setzt genau EIN POST .../archive-done ab und lädt
+ *          die Übersicht neu (archivierte Features verschwinden → Button wieder
+ *          deaktiviert). Endpoint-Fehler (409/5xx) erscheinen nicht-blockierend
+ *          (role=alert) im Dialog, ohne die Ansicht zu zerstören (Board bleibt).
+ *   AC7 — A11y: Button ist echter <button> mit sprechendem aria-label; die
+ *          Bestätigungsabfrage ist ein fokussiertes Dialog-Muster
+ *          (role="dialog" + aria-modal + aria-labelledby, Esc-Abbruch). Bedeutung
+ *          nicht allein über Farbe (Text-Zusammenfassung). Sichtbarer Fokusring +
+ *          Fokusfalle (Tab-Zyklus) in Quelle umgesetzt — jsdom hat keine
+ *          Layout-Engine, daher Fokus-Zyklus/Fokusring nur strukturell belegt.
+ *
  * NOTE (jsdom-Limitation): jsdom hat keine Layout-Engine — Style-Property-Asserts beweisen
  * kein Scroll-/Layout-Verhalten; getestet werden Verhalten, Struktur, Rollen und aria.
  *
@@ -285,6 +302,97 @@ const PROJECT_ERROR = {
   error: 'board.yaml not found',
   features: [],
 };
+
+// ── board-feature-archive (S-233) fixtures ─────────────────────────────────────
+// FEATURE_ALL_DONE: ≥1 Story UND alle Done UND nicht archiviert → archivierbar (V1).
+const FEATURE_ALL_DONE = {
+  id: 'F-900',
+  title: 'Fertiges Feature',
+  status: 'Done',
+  priority: 'medium',
+  stories: [
+    { id: 'S-900', parent: 'F-900', title: 'Teil A', status: 'Done', priority: 'low', labels: [], spec: null },
+    { id: 'S-901', parent: 'F-900', title: 'Teil B', status: 'Done', priority: 'low', labels: [], spec: null },
+  ],
+};
+// FEATURE_MIXED: eine nicht-Done-Story → NICHT archivierbar (bleibt unangetastet).
+const FEATURE_MIXED = {
+  id: 'F-901',
+  title: 'Halbfertiges Feature',
+  status: 'In Progress',
+  priority: 'high',
+  stories: [
+    { id: 'S-902', parent: 'F-901', title: 'Teil C', status: 'Done', priority: 'low', labels: [], spec: null },
+    { id: 'S-903', parent: 'F-901', title: 'Teil D', status: 'To Do', priority: 'low', labels: [], spec: null },
+  ],
+};
+// Vor dem Archivieren: 1 archivierbares Feature (F-900) mit 2 Stories + 1 gemischtes.
+const PROJECT_ARCHIVE_BEFORE = {
+  slug: 'proj-arch',
+  repo_path: '/home/user/Git/arch',
+  project_slug: 'proj-arch',
+  schema_version: 1,
+  features: [FEATURE_ALL_DONE, FEATURE_MIXED],
+};
+// Nach dem Archivieren: das erledigte Feature ist aus der Standardansicht raus (V3).
+const PROJECT_ARCHIVE_AFTER = {
+  slug: 'proj-arch',
+  repo_path: '/home/user/Git/arch',
+  project_slug: 'proj-arch',
+  schema_version: 1,
+  features: [FEATURE_MIXED],
+};
+// Kein archivierbares Feature (nur gemischt) → Button deaktiviert.
+const PROJECT_NO_ARCHIVABLE = {
+  slug: 'proj-arch',
+  repo_path: '/home/user/Git/arch',
+  project_slug: 'proj-arch',
+  schema_version: 1,
+  features: [FEATURE_MIXED],
+};
+
+/**
+ * Stateful fetch mock for the archive flow (cockpit mode).
+ * - GET /api/board/projects/:slug     → projectBefore (or projectAfter after archive)
+ * - GET …/:slug/specify/jobs          → { jobs: {} } (no running jobs)
+ * - POST …/:slug/archive-done         → archiveResult; on success flips to projectAfter
+ *
+ * @param {{ projectBefore: object, projectAfter: object,
+ *           archiveResult?: { ok: boolean, status: number, body?: object } }} opts
+ */
+function makeArchiveFetch({
+  projectBefore,
+  projectAfter,
+  archiveResult = { ok: true, status: 200, body: { archivedFeatureCount: 1, archivedStoryCount: 2 } },
+}) {
+  let archived = false;
+  return jest.fn(async (url, opts) => {
+    const method = opts?.method ?? 'GET';
+    if (url.endsWith('/archive-done') && method === 'POST') {
+      if (archiveResult.ok) archived = true;
+      return { ok: archiveResult.ok, status: archiveResult.status, json: async () => archiveResult.body ?? {} };
+    }
+    if (url.endsWith('/specify/jobs')) {
+      return { ok: true, status: 200, json: async () => ({ jobs: {} }) };
+    }
+    const slugMatch = url.match(/^\/api\/board\/projects\/([^/]+)$/);
+    if (slugMatch) {
+      const proj = archived ? projectAfter : projectBefore;
+      return { ok: true, status: 200, json: async () => ({ project: proj }) };
+    }
+    return { ok: false, status: 404, json: async () => ({}) };
+  });
+}
+
+/** Render cockpit for the archive project and wait for the archive button. */
+async function renderArchiveCockpit(fetchMock) {
+  globalThis.fetch = fetchMock;
+  const utils = renderCockpit('proj-arch');
+  await waitFor(() => {
+    expect(utils.container.querySelector('[data-testid="archive-done-btn"]')).toBeTruthy();
+  });
+  return utils;
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -3139,5 +3247,150 @@ describe('story-detail-yaml-fallback — AC6: Block Verknüpfungen (Branch + PR)
     expect(container.querySelector('[data-testid="ended-at-yaml-badge"]')).toBeNull();
     // Kein Verknüpfungen-Block (branch/pr null)
     expect(container.querySelector('[data-testid="block-verknuepfungen"]')).toBeNull();
+  });
+});
+
+// ── board-feature-archive (S-233) — Button + Bestätigungsabfrage ──────────────
+
+describe('board-feature-archive — AC5/AC7: Archiv-Button + Bestätigungsabfrage', () => {
+  it('AC5: Button ist deaktiviert, wenn nichts archivierbar ist', async () => {
+    const fetchMock = makeArchiveFetch({
+      projectBefore: PROJECT_NO_ARCHIVABLE,
+      projectAfter: PROJECT_NO_ARCHIVABLE,
+    });
+    const utils = await renderArchiveCockpit(fetchMock);
+    const btn = utils.container.querySelector('[data-testid="archive-done-btn"]');
+    expect(btn).toBeTruthy();
+    expect(btn.disabled).toBe(true);
+    // AC7: echter <button> mit sprechendem aria-label (Zustand nicht nur Farbe)
+    expect(btn.tagName).toBe('BUTTON');
+    expect(btn.getAttribute('aria-label')).toMatch(/keine erledigten Features/i);
+  });
+
+  it('AC5: Klick öffnet Bestätigungsabfrage mit Anzahl Features UND Stories', async () => {
+    const fetchMock = makeArchiveFetch({
+      projectBefore: PROJECT_ARCHIVE_BEFORE,
+      projectAfter: PROJECT_ARCHIVE_AFTER,
+    });
+    const utils = await renderArchiveCockpit(fetchMock);
+    const btn = utils.container.querySelector('[data-testid="archive-done-btn"]');
+    expect(btn.disabled).toBe(false);
+    // sprechendes aria-label nennt die Anzahl (AC7)
+    expect(btn.getAttribute('aria-label')).toMatch(/1 Features mit 2 Stories/);
+
+    await act(async () => { fireEvent.click(btn); });
+
+    const dialog = utils.container.querySelector('[data-testid="archive-confirm-dialog"]');
+    expect(dialog).toBeTruthy();
+    // AC7: fokussiertes Dialog-Muster
+    expect(dialog.getAttribute('role')).toBe('dialog');
+    expect(dialog.getAttribute('aria-modal')).toBe('true');
+    expect(dialog.getAttribute('aria-labelledby')).toBe('archive-confirm-title');
+    // AC5: Anzahl Features UND Stories genannt (Text, nicht nur Farbe)
+    const summary = utils.container.querySelector('[data-testid="archive-confirm-summary"]');
+    expect(summary.textContent).toMatch(/1 Feature/);
+    expect(summary.textContent).toMatch(/2 Stories/);
+  });
+
+  it('AC5: Abbrechen schließt den Dialog ohne POST', async () => {
+    const fetchMock = makeArchiveFetch({
+      projectBefore: PROJECT_ARCHIVE_BEFORE,
+      projectAfter: PROJECT_ARCHIVE_AFTER,
+    });
+    const utils = await renderArchiveCockpit(fetchMock);
+    await act(async () => {
+      fireEvent.click(utils.container.querySelector('[data-testid="archive-done-btn"]'));
+    });
+    expect(utils.container.querySelector('[data-testid="archive-confirm-dialog"]')).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.click(utils.container.querySelector('[data-testid="archive-cancel-btn"]'));
+    });
+
+    // Dialog geschlossen; kein POST abgesetzt
+    expect(utils.container.querySelector('[data-testid="archive-confirm-dialog"]')).toBeFalsy();
+    const postCalls = fetchMock.mock.calls.filter(
+      (c) => typeof c[0] === 'string' && c[0].endsWith('/archive-done') && c[1]?.method === 'POST',
+    );
+    expect(postCalls).toHaveLength(0);
+  });
+
+  it('AC5: Bestätigen setzt EIN POST .../archive-done ab und lädt neu (archivierte verschwinden)', async () => {
+    const fetchMock = makeArchiveFetch({
+      projectBefore: PROJECT_ARCHIVE_BEFORE,
+      projectAfter: PROJECT_ARCHIVE_AFTER,
+    });
+    const utils = await renderArchiveCockpit(fetchMock);
+    await act(async () => {
+      fireEvent.click(utils.container.querySelector('[data-testid="archive-done-btn"]'));
+    });
+    await act(async () => {
+      fireEvent.click(utils.container.querySelector('[data-testid="archive-confirm-btn"]'));
+    });
+
+    // genau EIN POST an den Endpoint
+    await waitFor(() => {
+      const postCalls = fetchMock.mock.calls.filter(
+        (c) => typeof c[0] === 'string' && c[0].endsWith('/archive-done') && c[1]?.method === 'POST',
+      );
+      expect(postCalls).toHaveLength(1);
+    });
+
+    // Nach dem Rescan ist das erledigte Feature weg → Button wieder deaktiviert
+    await waitFor(() => {
+      const btn = utils.container.querySelector('[data-testid="archive-done-btn"]');
+      expect(btn.disabled).toBe(true);
+    });
+    // Dialog geschlossen
+    expect(utils.container.querySelector('[data-testid="archive-confirm-dialog"]')).toBeFalsy();
+  });
+
+  it('AC5: Endpoint-Fehler (409) wird nicht-blockierend gezeigt, Dialog + Ansicht bleiben', async () => {
+    const fetchMock = makeArchiveFetch({
+      projectBefore: PROJECT_ARCHIVE_BEFORE,
+      projectAfter: PROJECT_ARCHIVE_AFTER,
+      archiveResult: { ok: false, status: 409 },
+    });
+    const utils = await renderArchiveCockpit(fetchMock);
+    await act(async () => {
+      fireEvent.click(utils.container.querySelector('[data-testid="archive-done-btn"]'));
+    });
+    await act(async () => {
+      fireEvent.click(utils.container.querySelector('[data-testid="archive-confirm-btn"]'));
+    });
+
+    // nicht-blockierender Fehler (role=alert), Dialog bleibt offen
+    await waitFor(() => {
+      const err = utils.container.querySelector('[data-testid="archive-confirm-error"]');
+      expect(err).toBeTruthy();
+      expect(err.getAttribute('role')).toBe('alert');
+    });
+    expect(utils.container.querySelector('[data-testid="archive-confirm-dialog"]')).toBeTruthy();
+    // Ansicht bleibt intakt (Board weiterhin sichtbar)
+    expect(utils.container.querySelector('[data-project="proj-arch"]')).toBeTruthy();
+  });
+
+  it('AC7: Esc bricht die Bestätigungsabfrage ab (Fokus-Dialog-Muster)', async () => {
+    const fetchMock = makeArchiveFetch({
+      projectBefore: PROJECT_ARCHIVE_BEFORE,
+      projectAfter: PROJECT_ARCHIVE_AFTER,
+    });
+    const utils = await renderArchiveCockpit(fetchMock);
+    await act(async () => {
+      fireEvent.click(utils.container.querySelector('[data-testid="archive-done-btn"]'));
+    });
+    const dialog = utils.container.querySelector('[data-testid="archive-confirm-dialog"]');
+    expect(dialog).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.keyDown(dialog, { key: 'Escape' });
+    });
+
+    expect(utils.container.querySelector('[data-testid="archive-confirm-dialog"]')).toBeFalsy();
+    // kein POST bei Esc-Abbruch
+    const postCalls = fetchMock.mock.calls.filter(
+      (c) => typeof c[0] === 'string' && c[0].endsWith('/archive-done') && c[1]?.method === 'POST',
+    );
+    expect(postCalls).toHaveLength(0);
   });
 });
