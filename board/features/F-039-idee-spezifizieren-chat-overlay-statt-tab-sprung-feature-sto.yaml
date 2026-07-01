@@ -6,7 +6,7 @@ goal: 'Ein Klick auf eine Idee-Karte oder den (umbenannten) Button ''Spezifizier
   ein eigenes Feature + eine vollstaendige To-Do-Story samt Spec via headless /agent-flow:requirement
   (HeadlessFlowRunner). Setzt die projektweite claude-p-Doktrin-Lockerung um. Spec:
   docs/specs/idea-specify-chat.md'
-status: Backlog
+status: Done
 priority: P2
 spec: docs/specs/idea-specify-chat.md
 definition_of_done: null
@@ -22,6 +22,7 @@ stories:
 - S-216
 - S-217
 - S-218
-progress: 0/5 done
+progress: 5/5 done
 created_at: '2026-07-01T15:25:32Z'
-updated_at: '2026-07-01T15:29:29Z'
+updated_at: '2026-07-01T17:58:49Z'
+done_at: '2026-07-01T17:58:49Z'

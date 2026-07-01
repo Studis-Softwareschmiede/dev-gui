@@ -2,7 +2,7 @@ id: S-218
 parent: F-039
 title: 'Frontend-Verdrahtung: BoardView/CockpitView auf Spezifizieren umstellen (Button-Rename,
   discuss/resolve-Tab-Sprung entfernen)'
-status: In Progress
+status: Done
 priority: P2
 spec: docs/specs/idea-specify-chat.md
 implements:
@@ -14,8 +14,8 @@ labels:
 - ui
 size_est: M
 dispo_est: '5'
-dispo_act: null
-dispo_forecast: null
+dispo_act: '4'
+dispo_forecast: '.2500'
 estimate_note: 'M-Heuristik: n_ac=2 (AC1,AC2), n_comp~4 (BoardView.jsx Handler+StoryCard-Rename,
   IdeaResolveModal-Entfernung, handleIdeaDiscuss/onDiscussIdea-Entfernung, CockpitView.jsx
   Tab-Sprung raus), label_bump+1 (ui) -> score 7 -> M. estimator nicht dispatchbar
@@ -26,8 +26,8 @@ branch: feat/S-218-boardview-cockpitview-wiring
 pr: null
 blocked_reason: null
 created_at: '2026-07-01T15:25:54Z'
-updated_at: '2026-07-01T17:30:36Z'
-done_at: null
+updated_at: '2026-07-01T17:58:23Z'
+done_at: '2026-07-01T17:58:23Z'
 notes: 'Spec: docs/specs/idea-specify-chat.md AC1,AC2. Depends: S-217 (Modal-Komponente
   muss existieren).
 
@@ -48,3 +48,4 @@ notes: 'Spec: docs/specs/idea-specify-chat.md AC1,AC2. Depends: S-217 (Modal-Kom
 
   Gate: Tests fuer beide Trigger (Karte-Klick + Button) oeffnen dasselbe Overlay ohne
   Tab-Sprung; alter resolve/discuss-Pfad entfernt.'
+tok: '6444736'
