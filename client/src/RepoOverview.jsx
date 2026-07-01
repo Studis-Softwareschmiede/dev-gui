@@ -35,6 +35,11 @@
  *   eingebunden) in der Header-Zeile: aktiv/pausiert, im/außerhalb Fenster, aktuell
  *   laufende Drains.
  *
+ * claude-auth-health (S-209 — AC5):
+ *   Panel-Badge (`ClaudeAuthBadge`, eigenständige Komponente, additiv eingebunden)
+ *   in derselben Header-Zeile: „Claude-Auth: ok/abgelaufen/unbekannt", bei
+ *   abgelaufen mit Erneuerungs-Hinweis (`claude setup-token`).
+ *
  * @param {{
  *   navigateFactory: (repo: string | null) => void,
  *   onNavigate?: (view: string) => void,
@@ -45,6 +50,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { IntakeDialog } from './IntakeDialog.jsx';
 import { NightWatchStatusBadge } from './NightWatchStatusBadge.jsx';
+import { ClaudeAuthBadge } from './ClaudeAuthBadge.jsx';
 
 /**
  * @param {{
@@ -174,6 +180,8 @@ export function RepoOverview({ navigateFactory, onNavigate, fetchFn }) {
         <h1 style={styles.h1}>Fabrik — Projekt wählen</h1>
         {/* taktgeber-nachtwaechter S-197 AC17: kompakte Statusanzeige */}
         <NightWatchStatusBadge fetchFn={fetchFn} />
+        {/* claude-auth-health S-209 AC5: Panel-Badge Claude-Auth ok/abgelaufen/unbekannt */}
+        <ClaudeAuthBadge fetchFn={fetchFn} />
         {/* AC1 fabric-intake-dialog: new-mode trigger */}
         {!intakeNewOpen ? (
           <button
