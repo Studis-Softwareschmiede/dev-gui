@@ -409,8 +409,10 @@ const ideaSpecifyChatService = new IdeaSpecifyChatService();
 // Projekt einen parallelen Idee-Specify-Finalize-Lauf fälschlich blockieren
 // (Selbstblockade-Vermeidung, analog dem Nacht-Drain-Kommentar oben).
 // Nutzt die bereits vorhandene `boardWriter`-Instanz (S-191, oben) für das
-// AC9-Sicherheitsnetz.
-const ideaSpecifyFinalizer = new IdeaSpecifyFinalizer({ boardWriter });
+// Sicherheitsnetz. `auditStore` injiziert (headless-arg-finalize-safety AC6) —
+// genau EIN Audit-Eintrag, wenn das gehärtete Sicherheitsnetz einen Lauf als
+// `no-op` erkennt (weder neues Artefakt noch Idee-Transformation).
+const ideaSpecifyFinalizer = new IdeaSpecifyFinalizer({ boardWriter, auditStore });
 
 // ── HeadlessReconcileRunner (getrennter claude -p-Kindprozess, headless-reconcile-runner AC1–AC7) ──
 // Bewusst vom interaktiven PTY-Pfad (CommandService/PtyManager/PtySessionRegistry)

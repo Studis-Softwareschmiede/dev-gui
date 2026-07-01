@@ -2,7 +2,7 @@ id: S-220
 parent: F-040
 title: 'Sicherheitsnetz-Haertung: Finalize archiviert Idee nur bei echtem Ergebnis
   + sichtbarer no-op-Status (Backend + IdeaSpecifyChatModal)'
-status: To Do
+status: In Progress
 priority: P2
 spec: docs/specs/headless-arg-finalize-safety.md
 implements:
@@ -28,11 +28,11 @@ estimate_note: 'L-Heuristik: n_ac=5 (AC4,AC5,AC6,AC7,AC8), n_comp~4 (IdeaSpecify
   baseline.json js|balanced|L ep=5.0 (n=5) als Proxy -> dispo_est 5.0. confidence
   medium.'
 confidence: medium
-branch: null
+branch: feat/S-220-finalize-safety-net-hardening
 pr: null
 blocked_reason: null
 created_at: '2026-07-01T19:37:15Z'
-updated_at: '2026-07-01T19:38:29Z'
+updated_at: '2026-07-01T19:56:28Z'
 done_at: null
 notes: 'Spec: docs/specs/headless-arg-finalize-safety.md AC4,AC5,AC6,AC7,AC8. Depends:
   S-219 (Core-Fix zuerst -- ohne ihn produziert der Lauf ohnehin nur no-op). SEKUNDAERBUG

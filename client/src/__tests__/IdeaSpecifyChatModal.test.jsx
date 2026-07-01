@@ -32,6 +32,11 @@
  *          diese Datei prüft nur, dass das Frontend die dokumentierten
  *          Response-Shapes korrekt konsumiert.
  *
+ * Covers (headless-arg-finalize-safety):
+ *   AC7  — Finalize-Status `no-op` (Fetch-Sequenz `running` → `no-op`):
+ *          Overlay bleibt offen, KEIN `onSpecified`/`onClose`-Aufruf, ein
+ *          sichtbarer Fehler-/Warnhinweis (Text, `role="alert"`) erscheint.
+ *
  * @jest-environment jsdom
  */
 
@@ -388,6 +393,64 @@ describe('IdeaSpecifyChatModal — AC11: Finalize-Fehlerpfad (auth-expired/faile
     });
 
     expect(onClose).not.toHaveBeenCalled();
+    expect(document.querySelector('[data-testid="idea-specify-finalize-btn"]').disabled).toBe(false);
+  });
+});
+
+// ── AC7 (headless-arg-finalize-safety): Finalize "no-op" — kein stiller Erfolg ─
+
+describe('IdeaSpecifyChatModal — AC7 (headless-arg-finalize-safety): Finalize-Status "no-op"', () => {
+  async function makeReady(fetchFn) {
+    const helpers = await renderModal({ fetchFn });
+    await waitForReady();
+
+    await act(async () => {
+      fireEvent.change(document.querySelector('[data-testid="idea-specify-input"]'), {
+        target: { value: 'Das ist alles.' },
+      });
+    });
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="idea-specify-send-btn"]'));
+    });
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="idea-specify-finalize-btn"]').disabled).toBe(false);
+    });
+    return helpers;
+  }
+
+  it('a status sequence running → no-op keeps the overlay open, calls neither onSpecified nor onClose, and shows a visible inline warning', async () => {
+    const fetchFn = makeFetchFn({
+      messageBody: { reply: 'Alles klar.', readyToSpecify: true },
+      finalizeStatusFn: (jobId, callIndex) =>
+        callIndex === 1
+          ? { status: 200, body: { status: 'running' } }
+          : {
+              status: 200,
+              body: {
+                status: 'no-op',
+                error: 'Es ist kein Feature/keine Story entstanden — die Idee bleibt unverändert, bitte erneut versuchen.',
+              },
+            },
+    });
+    const { onClose, onSpecified } = await makeReady(fetchFn);
+
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="idea-specify-finalize-btn"]'));
+    });
+
+    await waitFor(() => {
+      const err = document.querySelector('[data-testid="idea-specify-finalize-error"]');
+      expect(err).toBeTruthy();
+      expect(err.getAttribute('role')).toBe('alert');
+      expect(err.textContent).toMatch(/kein feature\/keine story entstanden/i);
+    });
+
+    // Overlay bleibt offen — kein Erfolg, kein Re-Fetch-Trigger.
+    expect(onClose).not.toHaveBeenCalled();
+    expect(onSpecified).not.toHaveBeenCalled();
+    expect(document.querySelector('[data-testid="idea-specify-chat-modal"]')).toBeTruthy();
+
+    // Retry möglich: Button wieder enabled (kein Dauer-Stuck-State).
     expect(document.querySelector('[data-testid="idea-specify-finalize-btn"]').disabled).toBe(false);
   });
 });

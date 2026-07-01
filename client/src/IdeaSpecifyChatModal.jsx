@@ -59,6 +59,14 @@
  *          `test/ideaSpecifyRouter.test.js`); hier wird nur das
  *          Frontend-Verhalten gegen den dokumentierten Response-Shape geprüft.
  *
+ * Covers (headless-arg-finalize-safety):
+ *   AC7  — Finalize-Status `no-op` (gehärtetes Sicherheitsnetz meldet: weder
+ *          neues Artefakt noch Idee-Transformation) wird wie ein Fehlerzustand
+ *          BEHANDELT (analog `failed`/`auth-expired`, AC11 oben): inline
+ *          `role="alert"`, Overlay bleibt offen, Retry möglich, KEIN
+ *          `onSpecified`-Aufruf, KEIN automatisches `onClose` — im
+ *          Unterschied zum `done`-Pfad (AC10).
+ *
  * Nicht-Ziele (spiegelt Spec):
  *   Kein Tab-Wechsel-Code, keine BoardView-Verdrahtung (S-218).
  *   Keine Anzeige von `draftText` (nicht von der Spec verlangt — nur Server-
@@ -248,7 +256,8 @@ export function IdeaSpecifyChatModal({
     setFinalizeError(data.message ?? data.error ?? `Finalisierung konnte nicht gestartet werden (HTTP ${res.status}).`);
   }
 
-  // AC10/AC11: Poll GET .../specify/finalize/:jobId bis status !== 'running'.
+  // AC10/AC11 (idea-specify-chat) + AC7 (headless-arg-finalize-safety):
+  // Poll GET .../specify/finalize/:jobId bis status !== 'running'.
   useEffect(() => {
     if (finalizeState !== 'running' || !finalizeJobId) return undefined;
 
@@ -297,7 +306,12 @@ export function IdeaSpecifyChatModal({
           return;
         }
 
-        // 'failed' | 'auth-expired' — AC11: Fehler inline, Overlay bleibt offen, Retry möglich.
+        // 'failed' | 'auth-expired' | 'no-op' — AC11 (idea-specify-chat) /
+        // AC7 (headless-arg-finalize-safety): der `no-op`-Status (gehärtetes
+        // Sicherheitsnetz: weder neues Artefakt noch Idee-Transformation) wird
+        // GENAUSO behandelt wie ein Fehlerzustand — Fehler inline (role=alert,
+        // Text statt nur Farbe), Overlay bleibt offen, Retry möglich, KEIN
+        // onSpecified/onClose (im Unterschied zum 'done'-Pfad oben).
         setFinalizeState('error');
         setFinalizeError(data.error ?? 'Finalisierung fehlgeschlagen.');
         return;

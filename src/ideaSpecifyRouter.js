@@ -6,7 +6,9 @@
  *   POST /api/board/projects/:slug/ideas/:id/specify/start           → 201 { sessionId, reply }
  *   POST /api/board/projects/:slug/ideas/:id/specify/message         → 200 { reply, readyToSpecify, draftText? }
  *   POST /api/board/projects/:slug/ideas/:id/specify/finalize        → 202 { jobId, status: 'running' }  (S-216, AC6)
- *   GET  /api/board/projects/:slug/ideas/:id/specify/finalize/:jobId → 200 { status, result?, error? }   (S-216, AC7)
+ *   GET  /api/board/projects/:slug/ideas/:id/specify/finalize/:jobId → 200 { status, result?, error? }   (S-216, AC7;
+ *        status ∈ {running,done,failed,auth-expired,no-op} seit S-220/headless-arg-finalize-safety AC5 —
+ *        `no-op` wird vom `IdeaSpecifyFinalizer` gemappt, hier nur unverändert durchgereicht)
  *
  * S-216 (FOLGE-ITEM, GLEICHE Datei) ergänzt die beiden `finalize`-Routen unten,
  * OHNE die bestehenden `start`/`message`-Handler umzubauen — die Datei war
@@ -321,7 +323,7 @@ export function ideaSpecifyRouter({ boardAggregator, chatService, finalizer, aud
       }
     }
 
-    const result = finalizer.start(project.repo_path, {
+    const result = await finalizer.start(project.repo_path, {
       draftText: sessionState.draftText,
       ideaStoryId: id,
       projectSlug: slug,
@@ -339,9 +341,12 @@ export function ideaSpecifyRouter({ boardAggregator, chatService, finalizer, aud
    * GET /api/board/projects/:slug/ideas/:id/specify/finalize/:jobId
    *
    * Liest den Job-Status (AC7) — Format 1:1 wie der bestehende headless-
-   * Reconcile-Status-Endpunkt (`reconcileRouter.js`).
+   * Reconcile-Status-Endpunkt (`reconcileRouter.js`). Der `no-op`-Statuswert
+   * (headless-arg-finalize-safety AC5/AC6) wird vom `IdeaSpecifyFinalizer`
+   * selbst gemappt — dieser Router-Handler reicht ihn nur unverändert durch,
+   * kein struktureller Umbau nötig.
    *
-   * Response 200: { status, result?, error? }
+   * Response 200: { status, result?, error? }  (status ∈ {running,done,failed,auth-expired,no-op})
    * Response 404: { error }  (unbekannte jobId, auch nach Server-Neustart)
    */
   router.get('/api/board/projects/:slug/ideas/:id/specify/finalize/:jobId', async (req, res) => {
