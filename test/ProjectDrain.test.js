@@ -58,6 +58,24 @@
  *          tmp-Board, ≥2 Projekte, maxParallel:2) lebt separat in
  *          test/nightwatch-lock-contention.integration.test.js (siehe dort).
  *
+ * Covers (headless-parallel-drain):
+ *   AC5 — der Ausführungs-Schritt in #runLoop läuft über das injizierte
+ *          FlowRunner-Interface statt hart über CommandService; ein
+ *          injizierter Fake-FlowRunner (custom startRun/awaitCompletion)
+ *          UND ein injizierter HeadlessFlowRunnerAdapter (echte Klasse aus
+ *          src/FlowRunner.js, gegen einen Fake-Headless-Runner) draint
+ *          korrekt — Ziel-Auswahl/Konvergenz/Eskalation/Snapshot-Diff
+ *          funktionieren identisch mit beiden Adaptern (siehe describe-Block
+ *          "FlowRunner-Injection" unten). Die adapter-eigenen Unit-Tests
+ *          (InteractiveFlowRunner/HeadlessFlowRunnerAdapter isoliert,
+ *          AC4/AC13) leben in test/FlowRunner.test.js.
+ *   AC6 — ohne injizierten flowRunner baut der Konstruktor per Default einen
+ *          InteractiveFlowRunner um `commandService` — ALLE bestehenden
+ *          Tests oben (die nur `commandService` übergeben, kein `flowRunner`)
+ *          belegen dies bereits: unverändertes Verhalten ist der Beweis für
+ *          "bit-identisch zu heute" (kein separater Regressionstest nötig,
+ *          identische Assertions wie vor S-212).
+ *
  * Strategy:
  *   - Pure Helper-Funktionen (flattenProjectStories, isStaleInProgress,
  *     computeAliveStoryIds, couldBecomeReadyViaDepends, computeDrainState,
@@ -91,6 +109,7 @@ import {
   pickLongestUnmovedTarget,
 } from '../src/ProjectDrain.js';
 import { ProjectJobLock } from '../src/ProjectJobLock.js';
+import { HeadlessFlowRunnerAdapter } from '../src/FlowRunner.js';
 
 const PROJECT_PATH = '/workspace/my-project';
 const PROJECT_SLUG = 'my-project';
@@ -1346,5 +1365,195 @@ describe('ProjectDrain — defaults', () => {
     // No throw at construction time; defaults silently applied.
     const result = await drain.drainProject(PROJECT_PATH);
     expect(result.reason).toBe('no-drain-target');
+  });
+});
+
+// ── FlowRunner-Injection (headless-parallel-drain AC5/AC6) ────────────────────
+
+describe('ProjectDrain — FlowRunner-Injection (headless-parallel-drain AC5/AC6)', () => {
+  /**
+   * FakeFlowRunner — duck-typed `FlowRunner` (startRun/awaitCompletion), NOT
+   * a CommandService. Proves #runLoop genuinely goes through the injected
+   * interface rather than any CommandService-shaped object (AC5: "über das
+   * Interface statt über ein hart verdrahtetes CommandService").
+   */
+  class FakeFlowRunner {
+    constructor(onRun) {
+      this.onRun = onRun;
+      this.calls = [];
+    }
+
+    startRun({ projectPath, command, identity }) {
+      this.calls.push({ projectPath, command, identity });
+      const result = this.onRun ? this.onRun(this.calls.length) : undefined;
+      if (result && result.ok === false) return result;
+      return { ok: true, handle: { runId: this.calls.length } };
+    }
+
+    async awaitCompletion() {
+      return { status: 'done' };
+    }
+  }
+
+  /**
+   * FakeHeadlessRunner — mirrors the `HeadlessFlowRunner` (S-204) API
+   * (`start(projectPath, {command, args}) → {ok,jobId}`,
+   * `getJob(jobId) → {status,...}`). Mutates the board synchronously inside
+   * `start()` and marks the job `'done'` immediately (deterministic tests,
+   * analogous to `FakeCommandService` above) — the real async/close-event
+   * semantics are covered separately in test/HeadlessFlowRunner.test.js and
+   * test/FlowRunner.test.js (AC1-AC4/AC13).
+   */
+  class FakeHeadlessRunner {
+    constructor(onRun) {
+      this.onRun = onRun;
+      this.calls = [];
+      this.jobs = new Map();
+    }
+
+    start(projectPath, { command, args }) {
+      this.calls.push({ projectPath, command, args });
+      const jobId = `job-${this.calls.length}`;
+      const runResult = this.onRun ? this.onRun(this.calls.length) : undefined;
+      if (runResult && runResult.ok === false) return runResult;
+      this.jobs.set(jobId, { status: 'done', result: 'Flow abgeschlossen' });
+      return { ok: true, jobId };
+    }
+
+    getJob(jobId) {
+      return this.jobs.get(jobId);
+    }
+  }
+
+  it('drains via an injected custom FlowRunner (not a CommandService) — targets/escalation/snapshot unaffected', async () => {
+    const { state, boardAggregator } = makeBoard([
+      makeStory({ id: 'S-1', status: 'To Do', ready: true }),
+      makeStory({ id: 'S-2', status: 'To Do', ready: true }),
+    ]);
+    const flowRunner = new FakeFlowRunner((callIndex) => {
+      const project = state.projects[0];
+      const id = callIndex === 1 ? 'S-1' : 'S-2';
+      findStory(project, id).status = 'Done';
+      findStory(project, id).ready = false;
+    });
+    const drain = new ProjectDrain({ boardAggregator, flowRunner, lock: new ProjectJobLock(), now: () => NOW_MS });
+
+    const result = await drain.drainProject(PROJECT_PATH);
+
+    expect(result).toEqual({ stopped: true, reason: 'no-drain-target', flowRuns: 2, escalated: [] });
+    expect(flowRunner.calls).toEqual([
+      { projectPath: PROJECT_PATH, command: FLOW_COMMAND, identity: null },
+      { projectPath: PROJECT_PATH, command: FLOW_COMMAND, identity: null },
+    ]);
+  });
+
+  it('escalates via an injected custom FlowRunner exactly like the default interactive adapter (AC5: escalation logic unaffected by the adapter)', async () => {
+    const { state, boardAggregator } = makeBoard([makeStory({ id: 'S-1', status: 'To Do', ready: true })]);
+    const flowRunner = new FakeFlowRunner(); // never mutates the board → never progresses
+    const boardWriter = new FakeBoardWriter(state);
+    const drain = new ProjectDrain({
+      boardAggregator,
+      flowRunner,
+      boardWriter,
+      lock: new ProjectJobLock(),
+      escalationAttempts: 2,
+      now: () => NOW_MS,
+    });
+
+    const result = await drain.drainProject(PROJECT_PATH);
+
+    expect(result).toEqual({ stopped: true, reason: 'no-drain-target', flowRuns: 2, escalated: ['S-1'] });
+    expect(findStory(state.projects[0], 'S-1').status).toBe('Blocked');
+  });
+
+  it('maps an injected FlowRunner\'s reason "locked"/"busy" to "command-channel-busy" generically (not CommandService-specific — same contract for any adapter)', async () => {
+    const { state, boardAggregator } = makeBoard([makeStory({ id: 'S-1', status: 'To Do', ready: true })]);
+    const flowRunner = { startRun: () => ({ ok: false, reason: 'locked' }), awaitCompletion: async () => ({ status: 'done' }) };
+    const boardWriter = new FakeBoardWriter(state);
+    const drain = new ProjectDrain({
+      boardAggregator,
+      flowRunner,
+      boardWriter,
+      lock: new ProjectJobLock(),
+      escalationAttempts: 1,
+      now: () => NOW_MS,
+    });
+
+    const result = await drain.drainProject(PROJECT_PATH);
+
+    expect(result).toEqual({ stopped: true, reason: 'command-channel-busy', flowRuns: 1, escalated: [] });
+    expect(boardWriter.calls).toEqual([]);
+  });
+
+  it('drains via an injected real HeadlessFlowRunnerAdapter (S-212 headless path) — convergence + progress detection work identically to the interactive default', async () => {
+    const { state, boardAggregator } = makeBoard([
+      makeStory({ id: 'S-1', status: 'To Do', ready: true }),
+      makeStory({
+        id: 'S-2',
+        status: 'To Do',
+        ready: false,
+        ready_reason: 'abhängige Story nicht Done: S-1',
+        depends: ['S-1'],
+      }),
+    ]);
+    const headlessRunner = new FakeHeadlessRunner((callIndex) => {
+      const project = state.projects[0];
+      if (callIndex === 1) {
+        findStory(project, 'S-1').status = 'Done';
+        findStory(project, 'S-1').ready = false;
+        const s2 = findStory(project, 'S-2');
+        s2.ready = true;
+        s2.ready_reason = null;
+      } else {
+        findStory(project, 'S-2').status = 'Done';
+        findStory(project, 'S-2').ready = false;
+      }
+    });
+    const flowRunner = new HeadlessFlowRunnerAdapter({ headlessRunner, sleepFn: async () => {} });
+    const drain = new ProjectDrain({ boardAggregator, flowRunner, lock: new ProjectJobLock(), now: () => NOW_MS });
+
+    const result = await drain.drainProject(PROJECT_PATH);
+
+    expect(result).toEqual({ stopped: true, reason: 'no-drain-target', flowRuns: 2, escalated: [] });
+    expect(headlessRunner.calls).toEqual([
+      { projectPath: PROJECT_PATH, command: FLOW_COMMAND, args: undefined },
+      { projectPath: PROJECT_PATH, command: FLOW_COMMAND, args: undefined },
+    ]);
+  });
+
+  it('never escalates a permanently-dead-end story through the headless adapter either (transitive Konvergenz-Regel is adapter-independent)', async () => {
+    const { boardAggregator } = makeBoard([
+      makeStory({ id: 'S-A', status: 'Blocked', blocked_reason: 'manual' }),
+      makeStory({
+        id: 'S-B',
+        status: 'To Do',
+        ready: false,
+        ready_reason: 'abhängige Story nicht Done: S-A',
+        depends: ['S-A'],
+      }),
+    ]);
+    const headlessRunner = new FakeHeadlessRunner();
+    const flowRunner = new HeadlessFlowRunnerAdapter({ headlessRunner, sleepFn: async () => {} });
+    const drain = new ProjectDrain({ boardAggregator, flowRunner, lock: new ProjectJobLock(), now: () => NOW_MS });
+
+    const result = await drain.drainProject(PROJECT_PATH);
+
+    expect(result).toEqual({ stopped: true, reason: 'no-drain-target', flowRuns: 0, escalated: [] });
+    expect(headlessRunner.calls).toHaveLength(0);
+  });
+
+  it('AC6: without an injected flowRunner, the default InteractiveFlowRunner is built around commandService — isProjectBusy() still consults commandService.getStatus() independently of the execution step', async () => {
+    const { boardAggregator } = makeBoard([makeStory({ id: 'S-1', status: 'To Do', ready: true })]);
+    const commandService = new FakeCommandService();
+    commandService._status = { commandId: 'external-cmd', status: 'running' }; // some OTHER command is running
+    const drain = new ProjectDrain({ boardAggregator, commandService, lock: new ProjectJobLock(), now: () => NOW_MS });
+
+    const result = await drain.drainProject(PROJECT_PATH);
+
+    // isProjectBusy() sees commandService.getStatus().status==='running' and
+    // rejects before the execution step is ever reached (AC7 busy-check is
+    // untouched by the FlowRunner-Injection, exactly as documented).
+    expect(result).toEqual({ stopped: true, reason: 'already-busy', flowRuns: 0, escalated: [] });
+    expect(commandService.calls).toHaveLength(0);
   });
 });

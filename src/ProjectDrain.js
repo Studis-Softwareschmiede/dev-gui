@@ -157,10 +157,30 @@
  *   die übrigen Projekte "warten" (kein Spin, kein Fehl-Blocked) bis zum
  *   nächsten Tick, an dem der globale Kanal wieder frei sein kann.
  *
+ * FlowRunner-Injection (S-212, docs/specs/headless-parallel-drain.md
+ * AC4/AC5/AC6): der Ausführungs-Schritt — "einen /flow-Lauf starten + auf
+ * sein ECHTES Ende warten" — läuft NICHT mehr hart über `CommandService`,
+ * sondern über ein injizierbares `FlowRunner`-Interface (`src/FlowRunner.js`,
+ * `startRun()`/`awaitCompletion()`). Ohne explizit übergebenen `flowRunner`
+ * baut der Konstruktor per Default einen `InteractiveFlowRunner` um das
+ * übergebene `commandService` — DAS bedeutet: der manuelle „Board
+ * abarbeiten"-Knopf (S-196) und das Terminal bleiben bit-identisch zum
+ * bisherigen Verhalten (AC6), inklusive des `command-channel-busy`-Mappings
+ * für `reason:'locked'|'busy'` oben. `commandService` wird zusätzlich WEITER
+ * separat für `isProjectBusy()` (AC7-Busy-Erkennung) gehalten — das ist ein
+ * eigenständiges Signal, unabhängig vom Ausführungs-Schritt, und bleibt
+ * unverändert. Ein injizierter `HeadlessFlowRunnerAdapter` (S-213
+ * Scheduler-Verdrahtung, hier NICHT gebaut) ersetzt nur den Ausführungs-
+ * Schritt — die gesamte übrige Logik oben (Ziel-Auswahl, Konvergenz,
+ * Eskalation, Snapshot-Diff, Sicherheitsgürtel) arbeitet identisch mit
+ * beiden Adaptern, da sie ausschließlich auf dem Board-Snapshot (nicht auf
+ * dem FlowRunner-Ergebnis) operiert.
+ *
  * @module ProjectDrain
  */
 
 import { projectJobLock, isProjectBusy } from './ProjectJobLock.js';
+import { InteractiveFlowRunner } from './FlowRunner.js';
 
 /** Einziger /flow-Befehl, den der Drain anstößt (Nicht-Ziel: keine Modell-/Cost-Mode-Logik). */
 export const FLOW_COMMAND = '/agent-flow:flow';
@@ -403,37 +423,48 @@ export function pickLongestUnmovedTarget(targets, lastChangeRound) {
 /**
  * @param {object} deps
  * @param {import('./BoardAggregator.js').BoardAggregator} deps.boardAggregator  read-only Status-Quelle
- * @param {{ tryRun: Function, getStatus: () => { commandId: string|null, status: string|null } }} deps.commandService
+ * @param {{ tryRun: Function, getStatus: () => { commandId: string|null, status: string|null } }} [deps.commandService]
+ *   Nur noch für die AC7-Busy-Erkennung (`isProjectBusy()`) verwendet — der
+ *   Ausführungs-Schritt selbst geht über `deps.flowRunner` (S-212). Wird
+ *   `flowRunner` NICHT übergeben, baut der Konstruktor per Default einen
+ *   `InteractiveFlowRunner` um dieses `commandService` (AC6, bit-identisches
+ *   Verhalten zum bisherigen hart-verdrahteten Pfad).
+ * @param {{ startRun: Function, awaitCompletion: Function }} [deps.flowRunner]
+ *   injizierbares `FlowRunner`-Interface (`src/FlowRunner.js`, AC4/AC5) für
+ *   den Ausführungs-Schritt. Default: `InteractiveFlowRunner` um
+ *   `deps.commandService` (AC6). Ein `HeadlessFlowRunnerAdapter` kann hier
+ *   für den Nacht-Drain injiziert werden (Verdrahtung selbst ist S-213,
+ *   NICHT Teil dieser Story).
  * @param {{ setBlocked: Function }} [deps.boardWriter]  Eskalations-Schreibpfad (AC4/AC8)
  * @param {import('./ProjectJobLock.js').ProjectJobLock} [deps.lock]  default: Singleton `projectJobLock`
  * @param {{ hasSession: (p: string) => boolean }} [deps.sessionRegistry]  für Busy-Erkennung (AC7)
  * @param {{ record: Function }} [deps.auditStore]  Drain-Start + Eskalation (AC18)
  * @param {number} [deps.staleInProgressHours]  default: DEFAULT_STALE_IN_PROGRESS_HOURS (4)
  * @param {number} [deps.escalationAttempts]    default: DEFAULT_ESCALATION_ATTEMPTS (3)
- * @param {number} [deps.pollIntervalMs]        Poll-Intervall beim Warten auf Lauf-Ende
+ * @param {number} [deps.pollIntervalMs]        Poll-Intervall des Default-`InteractiveFlowRunner`s
  * @param {number} [deps.safetyMaxNoProgressRounds]  Sicherheitsgürtel-Obergrenze
  *   (Defense-in-Depth, S-192 Review-Iteration 2), default:
  *   DEFAULT_SAFETY_MAX_NO_PROGRESS_ROUNDS (50)
- * @param {(ms: number) => Promise<void>} [deps.sleepFn]  injectable für Tests
+ * @param {(ms: number) => Promise<void>} [deps.sleepFn]  injectable für Tests (Default-`InteractiveFlowRunner`)
  * @param {() => number} [deps.now]  injectable Uhr (ms epoch) für Tests
  */
 export class ProjectDrain {
   #boardAggregator;
   #commandService;
+  #flowRunner;
   #boardWriter;
   #lock;
   #sessionRegistry;
   #auditStore;
   #staleInProgressHours;
   #escalationAttempts;
-  #pollIntervalMs;
   #safetyMaxNoProgressRounds;
-  #sleepFn;
   #now;
 
   constructor({
     boardAggregator,
     commandService,
+    flowRunner,
     boardWriter,
     lock = projectJobLock,
     sessionRegistry,
@@ -446,17 +477,22 @@ export class ProjectDrain {
     now,
   } = {}) {
     this.#boardAggregator = boardAggregator;
-    this.#commandService = commandService;
+    // AC7: weiterhin gehalten für isProjectBusy() — unabhängig vom
+    // Ausführungs-Schritt (der über #flowRunner läuft, s.u.).
+    this.#commandService = commandService ?? null;
+    // AC4/AC5/AC6: Default = InteractiveFlowRunner um `commandService`
+    // (bit-identisches Verhalten zum bisherigen hart-verdrahteten Pfad).
+    // Ein injizierter `flowRunner` (z.B. HeadlessFlowRunnerAdapter, S-213)
+    // ersetzt NUR den Ausführungs-Schritt, keine sonstige Logik.
+    this.#flowRunner = flowRunner ?? new InteractiveFlowRunner({ commandService, sleepFn, pollIntervalMs });
     this.#boardWriter = boardWriter ?? null;
     this.#lock = lock;
     this.#sessionRegistry = sessionRegistry ?? null;
     this.#auditStore = auditStore ?? null;
     this.#staleInProgressHours = staleInProgressHours > 0 ? staleInProgressHours : DEFAULT_STALE_IN_PROGRESS_HOURS;
     this.#escalationAttempts = escalationAttempts > 0 ? escalationAttempts : DEFAULT_ESCALATION_ATTEMPTS;
-    this.#pollIntervalMs = pollIntervalMs;
     this.#safetyMaxNoProgressRounds =
       safetyMaxNoProgressRounds > 0 ? safetyMaxNoProgressRounds : DEFAULT_SAFETY_MAX_NO_PROGRESS_ROUNDS;
-    this.#sleepFn = sleepFn ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.#now = now ?? (() => Date.now());
   }
 
@@ -550,34 +586,30 @@ export class ProjectDrain {
         if (!lastChangeRound.has(target.id)) lastChangeRound.set(target.id, round);
       }
 
-      // AC1: /agent-flow:flow anstoßen (CommandService auditiert den
-      // akzeptierten Aufruf bereits selbst — AC18 "jeder /flow-Anstoß").
+      // AC1: /agent-flow:flow anstoßen — über das injizierte FlowRunner-
+      // Interface (S-212 AC4/AC5; CommandService auditiert den akzeptierten
+      // interaktiven Aufruf bereits selbst — AC18 "jeder /flow-Anstoß").
       flowRuns += 1;
-      let tryResult;
-      try {
-        tryResult = this.#commandService.tryRun({ command: FLOW_COMMAND, identity, projectPath });
-      } catch {
-        // Edge-Case "/flow wirft / Session nicht ready" → fortschrittsloser
-        // Lauf zählen, kein Crash.
-        tryResult = { ok: false, reason: 'internal' };
-      }
+      const startResult = this.#flowRunner.startRun({ projectPath, command: FLOW_COMMAND, identity });
 
       // Lock-Contention-Fix (S-195 Review-Iteration 2, live verifiziert
       // critical — siehe Modul-Doku): `reason: 'locked'|'busy'` bedeutet, es
-      // fand GAR KEIN /flow-Lauf statt — der globale CommandService-JobLock
-      // wird gerade von einem ANDEREN Projekt gehalten. Das ist KEIN
-      // fortschrittsloser LAUF dieses Projekts (kein `#awaitCompletion`, kein
-      // Snapshot-Vergleich, keine Eskalation) — sondern reine
-      // Ressourcen-Kontention außerhalb der Kontrolle dieses Drains. Sofort
-      // sauber beenden (Lock-Freigabe passiert wie immer in `finally` von
-      // `drainProject`), kein Spin, keine Zustandsänderung an der Story. Das
-      // Projekt bleibt Kandidat für den nächsten Scheduler-Tick.
-      if (tryResult && !tryResult.ok && (tryResult.reason === 'locked' || tryResult.reason === 'busy')) {
+      // fand GAR KEIN /flow-Lauf statt — beim interaktiven Adapter, weil der
+      // globale CommandService-JobLock gerade von einem ANDEREN Projekt
+      // gehalten wird (headless-Adapter: praktisch ausgeschlossen, kein
+      // globaler Lock, AC8). Das ist KEIN fortschrittsloser LAUF dieses
+      // Projekts (kein `awaitCompletion`, kein Snapshot-Vergleich, keine
+      // Eskalation) — sondern reine Ressourcen-Kontention außerhalb der
+      // Kontrolle dieses Drains. Sofort sauber beenden (Lock-Freigabe
+      // passiert wie immer in `finally` von `drainProject`), kein Spin,
+      // keine Zustandsänderung an der Story. Das Projekt bleibt Kandidat für
+      // den nächsten Scheduler-Tick.
+      if (startResult && !startResult.ok && (startResult.reason === 'locked' || startResult.reason === 'busy')) {
         return { stopped: true, reason: 'command-channel-busy', flowRuns, escalated };
       }
 
-      if (tryResult && tryResult.ok) {
-        await this.#awaitCompletion();
+      if (startResult && startResult.ok) {
+        await this.#flowRunner.awaitCompletion(startResult.handle);
       }
 
       const { project: projectAfter } = await this.#findProject(projectPath);
@@ -665,20 +697,6 @@ export class ProjectDrain {
     }
     this.#auditRecord(identity, `taktgeber:escalate story=${victim.id} project=${project.slug} reason="${reason}"`);
     return true;
-  }
-
-  /**
-   * Wartet, bis der aktuell laufende Befehl in `CommandService` nicht mehr
-   * `'running'` ist (Idle-Completion-Mechanismus von `CommandService`, kein
-   * zweiter Completion-Detektor — Story-Vorgabe).
-   * @returns {Promise<{ commandId: string|null, status: string|null }>}
-   */
-  async #awaitCompletion() {
-    for (;;) {
-      const status = this.#commandService.getStatus();
-      if (!status || status.status !== 'running') return status;
-      await this.#sleepFn(this.#pollIntervalMs);
-    }
   }
 
   /**
