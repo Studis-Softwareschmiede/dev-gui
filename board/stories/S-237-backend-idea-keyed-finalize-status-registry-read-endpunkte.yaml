@@ -1,0 +1,67 @@
+id: S-237
+parent: F-043
+title: 'Backend: idea-keyed Finalize-Status-Registry + Read-Endpunkte (specify/jobs
+  + ideas/:id/specify/status) + synchrone running-Registrierung'
+status: To Do
+priority: P1
+spec: docs/specs/idea-specify-background-status.md
+implements:
+- AC1
+- AC2
+- AC7
+- AC8
+depends: null
+labels:
+- backend
+- security
+size_est: M
+dispo_est: '5.0'
+dispo_act: null
+dispo_forecast: null
+estimate_note: 'M-Heuristik: n_ac=4 (AC1,AC2,AC7,AC8), n_comp~2 (IdeaSpecifyFinalizer
+  idea-keyed Registry+Guard, ideaSpecifyRouter 2 Read-Endpunkte), label_bump+1 (security)
+  -> score 7 -> M. estimator nicht dispatchbar (kein Task-Tool im requirement-Lauf,
+  analog S-217); baseline.json js|balanced|M ep=5.0 (n=8) als Proxy. confidence medium
+  -- ueberwiegend schmale Ergaenzungen an bestehenden Boundaries (In-Memory-Map +
+  duenne Reads).'
+confidence: medium
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-07-01T21:05:00Z'
+updated_at: '2026-07-01T21:05:00Z'
+done_at: null
+notes: 'Spec: docs/specs/idea-specify-background-status.md AC1,AC2,AC7,AC8 (Owner-Entscheidung
+  2026-07-01: Hintergrund-Lauf sichtbar machen, kombinierte Variante). Realisiert den
+  Server-Teil der bisher als [[idea-specify-chat]] AC17 gestubbten Sichtbarkeit;
+  reload-fest statt client-gehaltenem jobId.
+
+
+  GEAENDERT src/IdeaSpecifyFinalizer.js (o.ae.): zusaetzlich zur bestehenden jobId-Registry
+  eine idea-keyed Sicht lastJobByIdea: Map ideaStoryId -> { status, jobId, error? }.
+  start(...) registriert den Job SYNCHRON (keyed by ideaStoryId UND jobId) mit status
+  running VOR dem requirement-Kindprozess-Spawn (AC1) und lehnt einen zweiten Start
+  ab, wenn fuer die Idee bereits ein Job running ist -> 409 (AC7, zusaetzlich zum
+  bestehenden ProjectJobLock auf Projekt-Ebene). error als secret-/pfad-freie Kurzmeldung.
+  jobsForProject(slug) -> nur nicht-done Jobs; statusForIdea(slug, ideaStoryId) ->
+  letzter Job | null.
+
+
+  GEAENDERT src/ideaSpecifyRouter.js: zwei neue Read-Endpunkte (AC2):
+  GET /api/board/projects/:slug/specify/jobs -> 200 { jobs: { [ideaStoryId]: { status,
+  jobId, error? } } } (nur running/failed/auth-expired). GET .../ideas/:id/specify/status
+  -> 200 { job | null }. Slug-/ID-Validierung wie bestehender Router (resolveProjectSlug/validateProjectPath,
+  STORY_ID_RE); 404 bei unbekanntem Projekt/Idee. Beide hinter AccessGuard, token-frei
+  (KEIN Agenten-Dispatch, KEINE Board-Schreibaktion), secret-/token-/host-pfad-frei
+  (AC8). Der per-Job-Endpunkt GET .../specify/finalize/:jobId bleibt unveraendert.
+
+
+  Kein neuer Board-Schreibpfad -- Idee-Archivierung bei done bleibt [[idea-specify-chat]]
+  AC9 (BoardWriter.archiveSupersededIdea). In-Memory-Registry: Verlust bei Neustart
+  = Nicht-Ziel (wie AC7 der Chat-Spec).
+
+
+  Gate: Backend-Tests -- synchrone running-Registrierung vor Spawn (idea-keyed sichtbar
+  ohne 202-Verarbeitung); jobs-Endpunkt liefert nur nicht-done; per-Idee-status-Endpunkt
+  liefert letzten Job/null; zweiter Finalize je Idee -> 409; 404-Pfade; Response/Log/Audit
+  secret-frei. Injizierbarer Runner (kein echter claude-Lauf im Test).'

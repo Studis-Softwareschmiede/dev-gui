@@ -1,62 +1,75 @@
 id: S-230
 parent: F-043
-title: 'BoardView: overlay-unabhaengiger Finalize-Ausgangs-Watcher (Re-Fetch bei done
-  + Fehler-Hinweis an Idee-Karte)'
+title: 'Frontend: Idee-Karten-Status-Badge (running/Fehler) + Poll/Re-Fetch + Reopen-Inline-Status
+  fuer den detachten Finalize-Lauf'
 status: To Do
 priority: P2
-spec: docs/specs/idea-specify-chat.md
+spec: docs/specs/idea-specify-background-status.md
 implements:
-- AC17
+- AC3
+- AC4
+- AC5
+- AC6
 depends:
 - S-229
+- S-237
 labels:
 - ui
 size_est: M
 dispo_est: '5.0'
 dispo_act: null
 dispo_forecast: null
-estimate_note: 'M-Heuristik: n_ac=1 (AC17), n_comp~2 (BoardView.jsx Watcher+Badge
-  + Test), label_bump+1 (ui) -> score 4 -> M. estimator nicht dispatchbar (kein Task-Tool
-  im requirement-Lauf); baseline.json js|balanced|M ep=5.0 (n=8) als Proxy. confidence
-  LOW: neuer detached-Watcher-Mechanismus + offene Owner-Entscheidung zur Richtung
-  (Variante b vs. blosser Board-Zustand) -- Scope kann sich je nach Owner-Wunsch aendern.'
-confidence: low
+estimate_note: 'M-Heuristik: n_ac=4 (AC3,AC4,AC5,AC6), n_comp~2 (BoardView.jsx Badge+Poll+Re-Fetch,
+  IdeaSpecifyChatModal.jsx Reopen-Status-Fetch+Banner), label_bump+1 (ui) -> score
+  7 -> M. estimator nicht dispatchbar (kein Task-Tool im requirement-Lauf, analog S-217);
+  baseline.json js|balanced|M ep=5.0 (n=8) als Proxy. confidence medium: Owner hat
+  Richtung 2026-07-01 bestaetigt (kombinierte Variante running-Badge + Reopen-Inline),
+  Scope stabil; nutzt reload-feste idea-keyed Endpunkte aus S-237.'
+confidence: medium
 branch: null
 pr: null
 blocked_reason: null
 created_at: '2026-07-01T20:44:07Z'
-updated_at: '2026-07-01T20:45:25Z'
+updated_at: '2026-07-01T21:05:00Z'
 done_at: null
-notes: 'Spec: docs/specs/idea-specify-chat.md AC17 (v2). FOLGE-STORY zu S-229 (depends).
-  OFFENE OWNER-ENTSCHEIDUNG: der Owner hat fire-and-forget explizit gewuenscht, aber
-  die Richtung der Fehler-Sichtbarkeit NICHT bestaetigt -- diese Story ist die empfohlene,
-  aber deferrable Antwort (Variante b). Vor /flow mit dem Owner bestaetigen ODER bewusst
-  zurueckstellen.
+notes: 'Spec: docs/specs/idea-specify-background-status.md AC3,AC4,AC5,AC6 (Owner-Entscheidung
+  2026-07-01: Hintergrund-Lauf sichtbar machen, kombinierte Variante -- Karten-Badge
+  UND Reopen-Inline-Status). Frontend-Teil; depends S-237 (idea-keyed Read-Endpunkte)
+  + S-229 (fire-and-forget-Close des Modals).
 
 
-  Da nach S-229 das Overlay bei "Story anlegen" sofort schliesst, verliert das UI
-  den natuerlichen Moment fuer (a) Re-Fetch bei Job-Ende und (b) Fehler-Anzeige. Board
-  aktualisiert aktuell NUR ueber reloadToken (onSpecified / lockedProject-Wechsel)
-  -- KEIN periodischer Board-Poll (verifiziert in BoardView.jsx/CockpitView.jsx).
-  Ohne diese Story erscheint die neue To-Do-Story erst nach manuellem Reload; ein
-  No-Op/Fehler ist nur daran erkennbar, dass die Idee noch status:Idee ist.
+  Kontext: Nach S-229 schliesst das Overlay bei "Story anlegen" sofort (fire-and-forget),
+  der Finalize-Lauf laeuft detached weiter. Board aktualisiert bisher NUR ueber reloadToken
+  (onSpecified / lockedProject-Wechsel), KEIN periodischer Poll (verifiziert in BoardView.jsx/CockpitView.jsx).
+  Der Owner will sehen, ob "noch laeuft" vs. "fehlgeschlagen" -- beides sieht sonst
+  gleich aus (Idee bleibt status:Idee).
 
 
-  GEAENDERT client/src/BoardView.jsx: overlay-unabhaengiger Watcher fuer in-flight
-  Finalize-Jobs (jobId + slug beim Fire-and-forget-Close nach oben reichen, z.B. neuer
-  Callback onFinalizeStarted(slug, jobId); Watcher-State in BoardView, entkoppelt
-  vom Modal-Lebenszyklus). Detached Poll des bestehenden GET .../specify/finalize/:jobId.
-  Bei done -> setReloadToken hochzaehlen (bestehender Re-Fetch-Mechanismus, handleSpecified-Muster)
-  -> neue To-Do-Story erscheint ohne manuellen Reload. Bei no-op/failed/auth-expired
-  -> nicht-blockierender, secret-freier Hinweis an der betroffenen Idee-Karte ("letzter
-  Versuch fehlgeschlagen - erneut spezifizieren"). Modal (S-229) muss dafuer den jobId
-  nach oben geben statt ihn beim Schliessen zu verwerfen.
+  GEAENDERT client/src/BoardView.jsx:
+  - Idee-Karte: Lauf-Badge/Spinner "wird spezifiziert..." solange Job running (AC3;
+  nicht nur farblich, aria-busy/role=status). Bei failed/auth-expired -> nicht-blockierender
+  Fehler-Hinweis "Spezifizieren fehlgeschlagen - erneut versuchen", Karte bleibt anklickbar
+  (AC4). Bei done -> kein Badge (Karte uebernommen/verschwunden oder auf Done archiviert).
+  - Hydratisieren + Polling: GET .../specify/jobs (aus S-237) beim Board-Load lesen;
+  leichtgewichtig pollen solange >=1 Idee running ODER direkt nach "Story anlegen"-Ausloesung;
+  KEIN Poll wenn keine Idee aktiv (AC5). Verschwindet ein running-Job aus dem Snapshot
+  (-> done) -> genau EIN Re-Fetch ueber bestehenden reloadToken/onSpecified-Mechanismus
+  -> neue To-Do-Story ohne manuellen Reload. Reload-fest (Status aus Server-Registry,
+  nicht Client-State).
 
 
-  Kein Backend-Change (nutzt bestehenden Status-Endpunkt). Watcher-Verlust bei Neustart
-  = Nicht-Ziel (In-Memory, wie AC7).
+  GEAENDERT client/src/IdeaSpecifyChatModal.jsx:
+  - Beim Oeffnen GET .../ideas/:id/specify/status abfragen (AC6): running -> inline
+  Status-Banner "Ein Spezifizieren-Lauf laeuft noch..." + "Story anlegen" deaktiviert
+  (kein zweiter Lauf, AC7 aus S-237); failed/auth-expired -> inline Fehler-Banner +
+  Retry; null/done -> normaler Chat-Einstieg. Secret-/pfad-frei. Das fire-and-forget-Schliessen
+  selbst bleibt S-229 (nicht hier erneut anfassen).
 
 
-  Gate: BoardView-Tests -- done-Poll loest Re-Fetch aus (neue Story erscheint), no-op/failed
-  zeigt Hinweis an der Idee-Karte, Watcher entkoppelt vom Overlay (Overlay zu, Poll
-  laeuft weiter). Kein Regress an bestehendem Board-Rendering/Idee-Karten/Spezifizieren-Trigger.'
+  Kein neuer Board-Schreibpfad. Kein claude-/Agenten-Aufruf (nur lokale Reads).
+
+
+  Gate: BoardView-Tests -- running-Badge sichtbar, failed-Hinweis an Karte, done ->
+  Re-Fetch (neue Story erscheint), kein Dauer-Poll im Ruhezustand, reload-fest. Modal-Tests
+  -- Reopen zeigt running/failed inline, "Story anlegen" bei running deaktiviert. Kein
+  Regress an Bubble-/A11y-/readyToSpecify-Gating.'
