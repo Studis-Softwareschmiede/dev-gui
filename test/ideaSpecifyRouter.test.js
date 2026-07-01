@@ -1,8 +1,24 @@
 /**
  * @file ideaSpecifyRouter.test.js — HTTP-level tests for the Idea-Specify Chat
- * endpoints (docs/specs/idea-specify-chat.md AC3, AC4, AC5, AC6, AC7, AC8, AC13).
+ * endpoints (docs/specs/idea-specify-chat.md AC3, AC4, AC5, AC6, AC7, AC8, AC13;
+ * idea-keyed status reads + differentiated double-start 409 per
+ * docs/specs/idea-specify-background-status.md AC2, AC7, AC8).
  *
  * Covers (idea-specify-chat): AC3, AC4, AC5, AC6, AC7, AC8, AC13
+ * Covers (idea-specify-background-status): AC2, AC7, AC8
+ *
+ *   AC2 (background-status) — GET .../specify/jobs → 200 { jobs } (delegiert an
+ *          `finalizer.jobsForProject(slug)`); GET .../ideas/:id/specify/status →
+ *          200 { job|null } (delegiert an `finalizer.statusForIdea(slug,id)`);
+ *          404 bei unbekanntem Projekt/Idee/Slug-Format; beide GET, KEIN Audit
+ *          (token-frei). Der Registry-Inhalt selbst ist in
+ *          IdeaSpecifyFinalizer.test.js abgedeckt — hier die HTTP-Verdrahtung.
+ *   AC7 (background-status) — POST .../specify/finalize mit `finalizer.start()`
+ *          → `{ ok:false, reason:'idea-locked' }` ergibt 409 mit einer
+ *          idee-spezifischen Meldung (differenziert vom projekt-weiten 'locked').
+ *   AC8 (background-status) — die neuen Reads schreiben KEINEN Audit-Eintrag und
+ *          liefern keine Secrets/Token/Host-Pfade; AccessGuard-Verdrahtung wie
+ *          die übrigen /api/*-Routen (server.js-Inspektion, kein Middleware-Test).
  *
  *   AC3  — POST .../specify/start → 201 { sessionId, reply }; seedet mit Titel+Notes;
  *          404 bei unbekanntem Projekt/Slug-Format/Idee; 400 { field:'status' }
@@ -121,11 +137,20 @@ function makeProject({ slug = 'demo', storyId = 'S-900', storyStatus = 'Idee', t
 
 /** Test-Stub für `IdeaSpecifyFinalizer` (AC6/AC7) — der echte Orchestrator wird
  *  in `IdeaSpecifyFinalizer.test.js` getestet, hier nur die Router-Verdrahtung. */
-function makeFinalizerStub({ startResult = { ok: true, jobId: 'job-1' }, jobs = {} } = {}) {
+function makeFinalizerStub({
+  startResult = { ok: true, jobId: 'job-1' },
+  jobs = {},
+  jobsForProject = {},
+  statusForIdea = null,
+} = {}) {
   const jobsMap = new Map(Object.entries(jobs));
   return {
     start: jest.fn(() => startResult),
     getJob: jest.fn(async (jobId) => jobsMap.get(jobId)),
+    // idea-keyed reads (idea-specify-background-status AC2) — hier reine Stubs;
+    // der echte Registry-Inhalt ist in IdeaSpecifyFinalizer.test.js abgedeckt.
+    jobsForProject: jest.fn(async () => jobsForProject),
+    statusForIdea: jest.fn(async () => statusForIdea),
     _jobsMap: jobsMap,
   };
 }
@@ -644,6 +669,165 @@ describe('GET .../specify/finalize/:jobId — AC7: Job-Status', () => {
       const { status, body } = await httpGet(srv, '/api/board/projects/demo/ideas/S-900/specify/finalize/unknown-job');
       expect(status).toBe(404);
       expect(typeof body.error).toBe('string');
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+});
+
+// ── AC7 (background-status): differenzierter 409 (idea-locked) ────────────────
+
+describe('POST .../specify/finalize — AC7 (background-status): idea-locked → 409 mit idee-spezifischer Meldung', () => {
+  it('409 wenn finalizer.start() { ok:false, reason:"idea-locked" } liefert (differenziert vom projekt-weiten locked)', async () => {
+    const runClaude = jest.fn()
+      .mockResolvedValueOnce(NOT_READY_RAW)
+      .mockResolvedValueOnce(READY_RAW);
+    const finalizer = makeFinalizerStub({ startResult: { ok: false, reason: 'idea-locked' } });
+    const { app } = makeApp({ runClaude, finalizer });
+    const srv = await startServer(app);
+
+    try {
+      const sessionId = await makeReadySession(srv);
+      const { status, body } = await httpPost(srv, '/api/board/projects/demo/ideas/S-900/specify/finalize', { sessionId });
+      expect(status).toBe(409);
+      expect(typeof body.error).toBe('string');
+      expect(body.error).toMatch(/Idee/i); // idee-spezifisch, nicht die projekt-weite Meldung
+      expect(body.error).not.toMatch(/token|secret|\/Users\//i);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+});
+
+// ── AC2 (background-status): GET .../specify/jobs ─────────────────────────────
+
+describe('GET .../specify/jobs — AC2 (background-status): projektweite idea-keyed Sicht', () => {
+  it('200 { jobs } — delegiert an finalizer.jobsForProject(slug); kein Audit (token-frei, AC8)', async () => {
+    const jobsForProject = {
+      'S-900': { status: 'running', jobId: 'job-1' },
+      'S-901': { status: 'failed', jobId: 'job-2', error: 'Flow-Lauf fehlgeschlagen' },
+    };
+    const finalizer = makeFinalizerStub({ jobsForProject });
+    const { app, auditStore } = makeApp({ finalizer });
+    const srv = await startServer(app);
+
+    try {
+      const { status, body } = await httpGet(srv, '/api/board/projects/demo/specify/jobs');
+      expect(status).toBe(200);
+      expect(body).toEqual({ jobs: jobsForProject });
+      expect(finalizer.jobsForProject).toHaveBeenCalledWith('demo');
+      expect(auditStore.getAll()).toHaveLength(0); // Read → kein Audit
+      // secret-frei
+      expect(JSON.stringify(body)).not.toMatch(/token|secret|\/Users\//i);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('200 { jobs: {} } wenn keine aktiven Jobs (Ruhezustand)', async () => {
+    const finalizer = makeFinalizerStub({ jobsForProject: {} });
+    const { app } = makeApp({ finalizer });
+    const srv = await startServer(app);
+    try {
+      const { status, body } = await httpGet(srv, '/api/board/projects/demo/specify/jobs');
+      expect(status).toBe(200);
+      expect(body).toEqual({ jobs: {} });
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('404 bei ungültigem Slug-Format (führender Punkt)', async () => {
+    const { app } = makeApp({});
+    const srv = await startServer(app);
+    try {
+      const { status } = await httpGet(srv, '/api/board/projects/.bad/specify/jobs');
+      expect(status).toBe(404);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('404 bei unbekanntem Projekt-Slug', async () => {
+    const finalizer = makeFinalizerStub();
+    const { app } = makeApp({ projects: [], finalizer });
+    const srv = await startServer(app);
+    try {
+      const { status, body } = await httpGet(srv, '/api/board/projects/does-not-exist/specify/jobs');
+      expect(status).toBe(404);
+      expect(typeof body.error).toBe('string');
+      expect(finalizer.jobsForProject).not.toHaveBeenCalled();
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+});
+
+// ── AC2 (background-status): GET .../ideas/:id/specify/status ─────────────────
+
+describe('GET .../ideas/:id/specify/status — AC2 (background-status): per-Idee Reopen-Sicht', () => {
+  it('200 { job } — delegiert an finalizer.statusForIdea(slug,id); kein Audit (token-frei, AC8)', async () => {
+    const statusForIdea = { status: 'running', jobId: 'job-1' };
+    const finalizer = makeFinalizerStub({ statusForIdea });
+    const { app, auditStore } = makeApp({ finalizer });
+    const srv = await startServer(app);
+
+    try {
+      const { status, body } = await httpGet(srv, '/api/board/projects/demo/ideas/S-900/specify/status');
+      expect(status).toBe(200);
+      expect(body).toEqual({ job: statusForIdea });
+      expect(finalizer.statusForIdea).toHaveBeenCalledWith('demo', 'S-900');
+      expect(auditStore.getAll()).toHaveLength(0);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('200 { job: null } wenn nie ein Finalize für diese Idee lief', async () => {
+    const finalizer = makeFinalizerStub({ statusForIdea: null });
+    const { app } = makeApp({ finalizer });
+    const srv = await startServer(app);
+    try {
+      const { status, body } = await httpGet(srv, '/api/board/projects/demo/ideas/S-900/specify/status');
+      expect(status).toBe(200);
+      expect(body).toEqual({ job: null });
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('404 bei ungültigem Slug-Format (führender Punkt)', async () => {
+    const { app } = makeApp({});
+    const srv = await startServer(app);
+    try {
+      const { status } = await httpGet(srv, '/api/board/projects/.bad/ideas/S-900/specify/status');
+      expect(status).toBe(404);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('404 bei unbekanntem Projekt-Slug', async () => {
+    const finalizer = makeFinalizerStub();
+    const { app } = makeApp({ projects: [], finalizer });
+    const srv = await startServer(app);
+    try {
+      const { status } = await httpGet(srv, '/api/board/projects/does-not-exist/ideas/S-900/specify/status');
+      expect(status).toBe(404);
+      expect(finalizer.statusForIdea).not.toHaveBeenCalled();
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('404 bei unbekannter Idee-ID im Projekt', async () => {
+    const finalizer = makeFinalizerStub();
+    const { app } = makeApp({ projects: [makeProject()], finalizer });
+    const srv = await startServer(app);
+    try {
+      const { status } = await httpGet(srv, '/api/board/projects/demo/ideas/S-999/specify/status');
+      expect(status).toBe(404);
+      expect(finalizer.statusForIdea).not.toHaveBeenCalled();
     } finally {
       await new Promise((r) => srv.close(r));
     }

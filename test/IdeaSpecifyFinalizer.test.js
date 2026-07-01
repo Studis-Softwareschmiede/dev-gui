@@ -2,10 +2,32 @@
  * @file IdeaSpecifyFinalizer.test.js — Unit tests for the headless
  * `requirement`-Finalizer orchestrator (docs/specs/idea-specify-chat.md
  * AC6, AC7, AC8, AC9; hardened safety net per
- * docs/specs/headless-arg-finalize-safety.md AC4, AC5, AC6, AC8).
+ * docs/specs/headless-arg-finalize-safety.md AC4, AC5, AC6, AC8;
+ * idea-keyed status registry + synchronous running-registration + per-idea
+ * double-start guard per docs/specs/idea-specify-background-status.md AC1, AC7).
  *
  * Covers (idea-specify-chat): AC6, AC7, AC8, AC9
  * Covers (headless-arg-finalize-safety): AC4, AC5, AC6, AC8
+ * Covers (idea-specify-background-status): AC1, AC7 (+ AC2 registry feeders
+ *   `jobsForProject`/`statusForIdea`; the HTTP contract of AC2/AC8 is covered
+ *   in ideaSpecifyRouter.test.js)
+ *
+ *   AC1 (idea-specify-background-status) — `start()` registers the job in the
+ *         idea-keyed `#lastJobByIdea` view SYNCHRONOUSLY (keyed by
+ *         projectSlug+ideaStoryId, status `running`) — observable via
+ *         `statusForIdea()`/`jobsForProject()` WITHOUT ever polling `getJob()`
+ *         (i.e. without the client having processed the 202).
+ *   AC7 (idea-specify-background-status) — a second `start()` for the SAME idea
+ *         while its job is still `running` is rejected `{ ok:false,
+ *         reason:'idea-locked' }` with NO second spawn; a different idea in the
+ *         same project is allowed (per-idea, not per-project); after the first
+ *         job reaches a terminal status, a fresh start for the same idea is
+ *         allowed again.
+ *   AC2 (idea-specify-background-status, registry feeders) — `jobsForProject()`
+ *         returns only NON-`done` jobs keyed by ideaStoryId (running/failed/
+ *         auth-expired; `no-op`→`failed`), filtered by project; `statusForIdea()`
+ *         returns the last job (incl. `done`) or `null`; both resolve the LIVE
+ *         status via `getJob()`.
  *
  *   AC6 (idea-specify-chat) — `start(projectPath, { draftText, ideaStoryId, projectSlug })`
  *         calls the (wrapped) `HeadlessFlowRunner` with `{ command: '/agent-flow:requirement',
@@ -522,5 +544,197 @@ describe('IdeaSpecifyFinalizer — fail-safe: a failed baseline/after snapshot r
 
     expect(job.status).toBe('no-op');
     expect(archiveSupersededIdea).not.toHaveBeenCalled();
+  });
+});
+
+// ── AC1 (background-status): synchrone idea-keyed running-Registrierung ───────
+
+describe('IdeaSpecifyFinalizer — AC1 (background-status): synchronous idea-keyed running-registration', () => {
+  it('registers the idea-keyed running job in start() — visible via statusForIdea()/jobsForProject() WITHOUT polling getJob() (reload-fest, unabhängig von der 202-Verarbeitung)', async () => {
+    const runner = {
+      start: jest.fn(() => ({ ok: true, jobId: 'job-1' })),
+      getJob: jest.fn(() => ({ status: 'running' })),
+    };
+    const finalizer = new IdeaSpecifyFinalizer({ runner, boardWriter: fakeBoardWriter(), artifactReader: makeArtifactReader() });
+
+    await finalizer.start('/workspace/proj', { draftText: 'd', ideaStoryId: 'S-900', projectSlug: 'demo' });
+
+    // Kein finalizer.getJob() dazwischen — die Sichten müssen den Lauf dennoch
+    // finden (die Registrierung passierte synchron in start()).
+    await expect(finalizer.statusForIdea('demo', 'S-900')).resolves.toEqual({ status: 'running', jobId: 'job-1' });
+    await expect(finalizer.jobsForProject('demo')).resolves.toEqual({ 'S-900': { status: 'running', jobId: 'job-1' } });
+  });
+
+  it('does NOT register anything when the runner refuses the start (project lock) — no phantom running badge', async () => {
+    const runner = { start: jest.fn(() => ({ ok: false, reason: 'locked' })), getJob: jest.fn() };
+    const finalizer = new IdeaSpecifyFinalizer({ runner, boardWriter: fakeBoardWriter(), artifactReader: makeArtifactReader() });
+
+    const result = await finalizer.start('/workspace/proj', { draftText: 'd', ideaStoryId: 'S-900', projectSlug: 'demo' });
+    expect(result).toEqual({ ok: false, reason: 'locked' });
+
+    await expect(finalizer.statusForIdea('demo', 'S-900')).resolves.toBeNull();
+    await expect(finalizer.jobsForProject('demo')).resolves.toEqual({});
+  });
+});
+
+// ── AC7 (background-status): höchstens ein aktiver Finalize je Idee ───────────
+
+describe('IdeaSpecifyFinalizer — AC7 (background-status): at most one active finalize per idea', () => {
+  /** Runner-Stub mit steuerbarem Status je jobId (kein echter claude-Lauf). */
+  function makeStatusRunner() {
+    const statuses = new Map();
+    let n = 0;
+    const runner = {
+      start: jest.fn(() => {
+        n += 1;
+        const jobId = `job-${n}`;
+        statuses.set(jobId, 'running');
+        return { ok: true, jobId };
+      }),
+      getJob: jest.fn((jobId) => (statuses.has(jobId) ? { status: statuses.get(jobId) } : undefined)),
+    };
+    return { runner, statuses };
+  }
+
+  it('rejects a second start for the SAME idea while its job is running (idea-locked, no second spawn)', async () => {
+    const { runner } = makeStatusRunner();
+    const finalizer = new IdeaSpecifyFinalizer({ runner, boardWriter: fakeBoardWriter(), artifactReader: makeArtifactReader() });
+
+    const first = await finalizer.start('/p', { draftText: 'd', ideaStoryId: 'S-900', projectSlug: 'demo' });
+    expect(first.ok).toBe(true);
+
+    const second = await finalizer.start('/p', { draftText: 'd', ideaStoryId: 'S-900', projectSlug: 'demo' });
+    expect(second).toEqual({ ok: false, reason: 'idea-locked' });
+    expect(runner.start).toHaveBeenCalledTimes(1); // no second child process spawned
+  });
+
+  it('allows a start for a DIFFERENT idea in the same project (guard is per-idea, not per-project)', async () => {
+    const { runner } = makeStatusRunner();
+    const finalizer = new IdeaSpecifyFinalizer({ runner, boardWriter: fakeBoardWriter(), artifactReader: makeArtifactReader() });
+
+    const first = await finalizer.start('/p', { draftText: 'd', ideaStoryId: 'S-900', projectSlug: 'demo' });
+    const second = await finalizer.start('/p', { draftText: 'd', ideaStoryId: 'S-901', projectSlug: 'demo' });
+
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    expect(runner.start).toHaveBeenCalledTimes(2);
+  });
+
+  it('allows the same idea to be started again once its previous job reached a terminal status', async () => {
+    const { runner, statuses } = makeStatusRunner();
+    const finalizer = new IdeaSpecifyFinalizer({ runner, boardWriter: fakeBoardWriter(), artifactReader: makeArtifactReader() });
+
+    const first = await finalizer.start('/p', { draftText: 'd', ideaStoryId: 'S-900', projectSlug: 'demo' });
+    expect(first.ok).toBe(true);
+
+    // Vor-Job terminal → der idea-Guard darf nicht mehr blockieren.
+    statuses.set(first.jobId, 'failed');
+
+    const retry = await finalizer.start('/p', { draftText: 'd', ideaStoryId: 'S-900', projectSlug: 'demo' });
+    expect(retry.ok).toBe(true);
+    expect(runner.start).toHaveBeenCalledTimes(2);
+  });
+
+  it('the same ideaStoryId in a DIFFERENT project is tracked independently', async () => {
+    const { runner } = makeStatusRunner();
+    const finalizer = new IdeaSpecifyFinalizer({ runner, boardWriter: fakeBoardWriter(), artifactReader: makeArtifactReader() });
+
+    const a = await finalizer.start('/p1', { draftText: 'd', ideaStoryId: 'S-900', projectSlug: 'alpha' });
+    const b = await finalizer.start('/p2', { draftText: 'd', ideaStoryId: 'S-900', projectSlug: 'beta' });
+
+    expect(a.ok).toBe(true);
+    expect(b.ok).toBe(true);
+    await expect(finalizer.statusForIdea('alpha', 'S-900')).resolves.toEqual({ status: 'running', jobId: a.jobId });
+    await expect(finalizer.statusForIdea('beta', 'S-900')).resolves.toEqual({ status: 'running', jobId: b.jobId });
+  });
+});
+
+// ── AC2 (background-status): jobsForProject() / statusForIdea() feeders ───────
+
+describe('IdeaSpecifyFinalizer — AC2 (background-status): jobsForProject()/statusForIdea() registry feeders', () => {
+  it('jobsForProject() returns only NON-done jobs, keyed by ideaStoryId, filtered by project', async () => {
+    const statuses = new Map();
+    const runner = {
+      start: jest.fn(() => {
+        const jobId = `job-${statuses.size + 1}`;
+        statuses.set(jobId, 'running');
+        return { ok: true, jobId };
+      }),
+      getJob: jest.fn((jobId) => (statuses.has(jobId) ? { status: statuses.get(jobId) } : undefined)),
+    };
+    // ideaStatus 'Done' → ein `done`-Job wird vom Sicherheitsnetz als echtes
+    // `done` behandelt (Fall b: Idee transformiert), NICHT als `no-op`.
+    const finalizer = new IdeaSpecifyFinalizer({ runner, boardWriter: fakeBoardWriter(), artifactReader: makeArtifactReader({ ideaStatus: 'Done' }) });
+
+    const j1 = await finalizer.start('/p', { draftText: 'd', ideaStoryId: 'S-900', projectSlug: 'demo' }); // stays running
+    const j2 = await finalizer.start('/p', { draftText: 'd', ideaStoryId: 'S-901', projectSlug: 'demo' }); // -> done (dropped)
+    const j3 = await finalizer.start('/p', { draftText: 'd', ideaStoryId: 'S-902', projectSlug: 'other' }); // other project
+
+    statuses.set(j2.jobId, 'done');
+
+    const jobs = await finalizer.jobsForProject('demo');
+    expect(jobs).toEqual({ 'S-900': { status: 'running', jobId: j1.jobId } });
+    expect(jobs['S-901']).toBeUndefined(); // done → dropped
+    expect(jobs['S-902']).toBeUndefined(); // other project
+
+    // other project view is independent
+    statuses.set(j3.jobId, 'running');
+    await expect(finalizer.jobsForProject('other')).resolves.toEqual({ 'S-902': { status: 'running', jobId: j3.jobId } });
+  });
+
+  it('jobsForProject() surfaces failed/auth-expired (with error) and maps no-op → failed', async () => {
+    // Ein Runner, dessen Job auf `done` steht, aber dessen Sicherheitsnetz Fall (c)
+    // (no-op) ergibt → getJob() liefert `no-op`, die idea-Sicht mappt auf `failed`.
+    const runner = {
+      start: jest.fn(() => ({ ok: true, jobId: 'job-noop' })),
+      getJob: jest.fn(() => ({ status: 'done', result: 'Flow abgeschlossen' })),
+    };
+    const artifactReader = makeArtifactReader({
+      snapshots: [{ stories: new Set(['S-900.yaml']) }, { stories: new Set(['S-900.yaml']) }],
+      ideaStatus: 'Idee',
+    });
+    const finalizer = new IdeaSpecifyFinalizer({ runner, boardWriter: fakeBoardWriter(), artifactReader });
+
+    await finalizer.start('/p', { draftText: 'd', ideaStoryId: 'S-900', projectSlug: 'demo' });
+
+    const jobs = await finalizer.jobsForProject('demo');
+    expect(jobs['S-900'].status).toBe('failed'); // no-op → failed (non-done, retry-worthy)
+    expect(jobs['S-900'].error).toBe(NO_OP_MESSAGE);
+    expect(jobs['S-900'].error).not.toMatch(/token|secret|\/Users\//i);
+  });
+
+  it('statusForIdea() returns the last job (incl. done) or null for an unknown idea', async () => {
+    const statuses = new Map();
+    const runner = {
+      start: jest.fn(() => {
+        const jobId = `job-${statuses.size + 1}`;
+        statuses.set(jobId, 'running');
+        return { ok: true, jobId };
+      }),
+      getJob: jest.fn((jobId) => (statuses.has(jobId) ? { status: statuses.get(jobId) } : undefined)),
+    };
+    // ideaStatus 'Done' → das Sicherheitsnetz behandelt einen `done`-Job als
+    // echtes `done` (Fall b), nicht als `no-op`.
+    const finalizer = new IdeaSpecifyFinalizer({ runner, boardWriter: fakeBoardWriter(), artifactReader: makeArtifactReader({ ideaStatus: 'Done' }) });
+
+    await expect(finalizer.statusForIdea('demo', 'S-900')).resolves.toBeNull();
+
+    const started = await finalizer.start('/p', { draftText: 'd', ideaStoryId: 'S-900', projectSlug: 'demo' });
+    statuses.set(started.jobId, 'done');
+
+    // done is retained on the per-idea endpoint (Reopen decides: done → fresh chat).
+    await expect(finalizer.statusForIdea('demo', 'S-900')).resolves.toEqual({ status: 'done', jobId: started.jobId });
+  });
+
+  it('statusForIdea() returns null when the runner no longer knows the job (post-restart degradation)', async () => {
+    const runner = {
+      start: jest.fn(() => ({ ok: true, jobId: 'job-gone' })),
+      getJob: jest.fn(() => undefined), // job entry lost (e.g. restart)
+    };
+    const finalizer = new IdeaSpecifyFinalizer({ runner, boardWriter: fakeBoardWriter(), artifactReader: makeArtifactReader() });
+
+    await finalizer.start('/p', { draftText: 'd', ideaStoryId: 'S-900', projectSlug: 'demo' });
+    await expect(finalizer.statusForIdea('demo', 'S-900')).resolves.toBeNull();
+    await expect(finalizer.jobsForProject('demo')).resolves.toEqual({});
   });
 });

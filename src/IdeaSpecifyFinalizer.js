@@ -2,7 +2,24 @@
  * IdeaSpecifyFinalizer — dünner Orchestrator für die Finalisierung eines
  * Idee-Specify-Chats über den echten `/agent-flow:requirement`-Agent, headless
  * (docs/specs/idea-specify-chat.md AC6, AC7, AC8, AC9; Sicherheitsnetz
- * GEHÄRTET durch docs/specs/headless-arg-finalize-safety.md AC4, AC5, AC6, AC8).
+ * GEHÄRTET durch docs/specs/headless-arg-finalize-safety.md AC4, AC5, AC6, AC8;
+ * idea-keyed Status-Registry + synchrone `running`-Registrierung + Doppelstart-
+ * Guard je Idee durch docs/specs/idea-specify-background-status.md AC1, AC7).
+ *
+ * Idea-keyed Sicht (idea-specify-background-status AC1): zusätzlich zur jobId-
+ * basierten Registry der `HeadlessFlowRunner`-Instanz hält der Finalizer eine
+ * `#lastJobByIdea`-Map (Schlüssel = `projectSlug` + `ideaStoryId`) mit dem
+ * ZULETZT gestarteten Finalize-Job je Idee. Der Eintrag wird in `start()`
+ * SYNCHRON (kein `await` zwischen Runner-`start()` und `set()`) mit Status
+ * `running` gesetzt — reload-fest und unabhängig davon, ob der Client die
+ * `202`-Antwort noch verarbeitet (das Overlay ist beim fire-and-forget-Klick
+ * schon zu, idea-specify-chat AC10/AC14). Die Read-Sichten `jobsForProject()`/
+ * `statusForIdea()` lesen den AKTUELLEN Status stets LIVE über `getJob()`
+ * (inkl. Sicherheitsnetz-/`no-op`-Mapping), damit ein terminaler Job nicht als
+ * stale `running` hängen bleibt. Der `no-op`-Terminalstatus (headless-arg-
+ * finalize-safety AC5 — Idee bleibt sichtbar `Idee`) wird in der idea-keyed
+ * Sicht auf `failed` gemappt: aus Board-/Reopen-Sicht ist er ein nicht-`done`,
+ * retry-würdiges Ergebnis (Idee unverändert, erneut versuchen).
  *
  * KEIN neuer Runner-Typ (Nicht-Ziel, siehe Spec): nutzt ausschließlich den
  * bestehenden, bewährten `HeadlessFlowRunner` (S-212/S-213) — eine EIGENE
@@ -259,6 +276,15 @@ export class IdeaSpecifyFinalizer {
   #safetyNetChecked = new Set();
   /** @type {Map<string, string>} jobId -> secret-freie No-Op-Meldung (AC5) — einmal gesetzt, bleibt stabil. */
   #noOpJobs = new Map();
+  /**
+   * @type {Map<string, { status: string, jobId: string, projectSlug: string, ideaStoryId: string }>}
+   * Idea-keyed Sicht (idea-specify-background-status AC1): `#ideaKey(slug, id)` ->
+   * ZULETZT gestarteter Finalize-Job dieser Idee. In-Memory (Verlust bei
+   * Neustart = Nicht-Ziel, wie die jobId-Registry). Der gespeicherte `status`
+   * ist der Registrierungs-Status (`running`); die Read-Sichten resolven den
+   * aktuellen Status stets LIVE über `getJob()`.
+   */
+  #lastJobByIdea = new Map();
 
   /**
    * @param {object} [params]
@@ -304,9 +330,20 @@ export class IdeaSpecifyFinalizer {
    * @param {string} params.ideaStoryId
    * @param {string} params.projectSlug - für das Sicherheitsnetz vorgehalten,
    *   NICHT an den Runner weitergereicht.
-   * @returns {Promise<{ ok: true, jobId: string } | { ok: false, reason: 'locked' }>}
+   * @returns {Promise<{ ok: true, jobId: string } | { ok: false, reason: 'locked'|'idea-locked' }>}
    */
   async start(projectPath, { draftText, ideaStoryId, projectSlug }) {
+    const ideaKey = this.#ideaKey(projectSlug, ideaStoryId);
+
+    // AC7 (idea-specify-background-status): höchstens EIN aktiver Finalize je
+    // Idee. Läuft für dieselbe Idee bereits ein Job (`running`), wird der
+    // zweite Start abgelehnt — SYNCHRON, BEVOR ein Kindprozess spawnt (kein
+    // `await` vor dieser Prüfung) — zusätzlich zum projekt-weiten
+    // `ProjectJobLock` des Runners (idea-specify-chat AC6).
+    if (this.#hasRunningJobForIdea(ideaKey)) {
+      return { ok: false, reason: 'idea-locked' };
+    }
+
     let baselineSnapshot = null;
     let baselineFailed = false;
     try {
@@ -328,8 +365,49 @@ export class IdeaSpecifyFinalizer {
         baselineSnapshot,
         baselineFailed,
       });
+      // AC1 (idea-specify-background-status): idea-keyed `running`-Registrierung
+      // SYNCHRON direkt nach dem Spawn-Start — kein `await` zwischen
+      // `runner.start()` (spawnt den Kindprozess) und diesem `set()`, also
+      // atomar aus Sicht jedes Beobachters (ein `jobs`-/`status`-Poll kann erst
+      // laufen, nachdem `start()` awaited/zurückgekehrt ist). Damit ist der
+      // Lauf reload-fest sichtbar, unabhängig von der Client-Verarbeitung der 202.
+      this.#lastJobByIdea.set(ideaKey, {
+        status: 'running',
+        jobId: result.jobId,
+        projectSlug,
+        ideaStoryId,
+      });
     }
     return result;
+  }
+
+  /**
+   * Composite-Key der idea-keyed Registry: `projectSlug` + NUL + `ideaStoryId`.
+   * Beide Bestandteile sind Router-validiert (SLUG_RE/STORY_ID_RE — kein
+   * NUL-Byte) und werden NIE als Dateisystem-Pfad verwendet (reiner Map-Key).
+   *
+   * @param {string} projectSlug
+   * @param {string} ideaStoryId
+   * @returns {string}
+   */
+  #ideaKey(projectSlug, ideaStoryId) {
+    return `${projectSlug}\u0000${ideaStoryId}`;
+  }
+
+  /**
+   * `true`, wenn für die Idee bereits ein Job `running` ist (AC7). Liest den
+   * AKTUELLEN Runner-Status SYNCHRON (kein Sicherheitsnetz nötig — `no-op`
+   * betrifft nur `done`-Jobs, nie `running`). Ein terminaler/unbekannter
+   * (nach Neustart weggefallener) Vor-Job zählt NICHT als laufend.
+   *
+   * @param {string} ideaKey
+   * @returns {boolean}
+   */
+  #hasRunningJobForIdea(ideaKey) {
+    const entry = this.#lastJobByIdea.get(ideaKey);
+    if (!entry) return false;
+    const job = this.#runner.getJob(entry.jobId);
+    return job?.status === 'running';
   }
 
   /**
@@ -359,6 +437,64 @@ export class IdeaSpecifyFinalizer {
     }
 
     return job;
+  }
+
+  /**
+   * Idea-keyed Sicht aller NICHT-`done` Finalize-Jobs eines Projekts (idea-
+   * specify-background-status AC2) — je Idee der letzte Job, sofern er noch
+   * `running`/`failed`/`auth-expired` ist. `done`-Jobs werden ausgelassen (die
+   * Idee-Karte ist dann ohnehin übernommen/archiviert). `no-op` wird auf
+   * `failed` gemappt (Idee bleibt `Idee` → Fehler-Badge, AC4). Speist den
+   * projektweiten Board-Hydration-/Polling-Endpunkt. Degradiert robust: ein
+   * nach Neustart weggefallener Job (kein Runner-Eintrag) wird still ausgelassen.
+   *
+   * @param {string} projectSlug
+   * @returns {Promise<Record<string, { status: 'running'|'failed'|'auth-expired', jobId: string, error?: string }>>}
+   */
+  async jobsForProject(projectSlug) {
+    const jobs = {};
+    for (const entry of this.#lastJobByIdea.values()) {
+      if (entry.projectSlug !== projectSlug) continue;
+      const view = await this.#ideaJobView(entry.jobId);
+      if (!view || view.status === 'done') continue;
+      jobs[entry.ideaStoryId] = view;
+    }
+    return jobs;
+  }
+
+  /**
+   * Letzter bekannter Finalize-Job EINER Idee (idea-specify-background-status
+   * AC2) — für das Overlay-Reopen. `done` bleibt erhalten (Reopen entscheidet:
+   * `done`/`null` → frischer Chat-Einstieg, AC6); `no-op` → `failed`. `null`,
+   * wenn nie ein Finalize für diese Idee lief ODER der Job-Eintrag nach einem
+   * Neustart weggefallen ist.
+   *
+   * @param {string} projectSlug
+   * @param {string} ideaStoryId
+   * @returns {Promise<{ status: 'running'|'done'|'failed'|'auth-expired', jobId: string, error?: string } | null>}
+   */
+  async statusForIdea(projectSlug, ideaStoryId) {
+    const entry = this.#lastJobByIdea.get(this.#ideaKey(projectSlug, ideaStoryId));
+    if (!entry) return null;
+    const view = await this.#ideaJobView(entry.jobId);
+    return view ?? null;
+  }
+
+  /**
+   * Baut die schmale idea-keyed Job-Sicht aus dem LIVE-Status (`getJob()`,
+   * inkl. Sicherheitsnetz-/`no-op`-Mapping). `no-op` → `failed`. `null`, wenn
+   * der Runner den Job nicht (mehr) kennt.
+   *
+   * @param {string} jobId
+   * @returns {Promise<{ status: string, jobId: string, error?: string } | null>}
+   */
+  async #ideaJobView(jobId) {
+    const job = await this.getJob(jobId);
+    if (!job) return null;
+    const status = job.status === 'no-op' ? 'failed' : job.status;
+    const view = { status, jobId };
+    if (job.error !== undefined) view.error = job.error;
+    return view;
   }
 
   /**

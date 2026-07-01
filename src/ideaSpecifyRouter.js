@@ -1,14 +1,22 @@
 /**
  * ideaSpecifyRouter — Express-Router für das Idee-Specify-Chat-Overlay
- * (docs/specs/idea-specify-chat.md AC3, AC4, AC5, AC6, AC7, AC8, AC9, AC13).
+ * (docs/specs/idea-specify-chat.md AC3, AC4, AC5, AC6, AC7, AC8, AC9, AC13;
+ * idea-keyed Status-Reads + differenzierter Doppelstart-409 durch
+ * docs/specs/idea-specify-background-status.md AC2, AC7, AC8).
  *
  * Routes (hinter dem AccessGuard, wie alle /api/*, s. server.js):
  *   POST /api/board/projects/:slug/ideas/:id/specify/start           → 201 { sessionId, reply }
  *   POST /api/board/projects/:slug/ideas/:id/specify/message         → 200 { reply, readyToSpecify, draftText? }
- *   POST /api/board/projects/:slug/ideas/:id/specify/finalize        → 202 { jobId, status: 'running' }  (S-216, AC6)
+ *   POST /api/board/projects/:slug/ideas/:id/specify/finalize        → 202 { jobId, status: 'running' }  (S-216, AC6;
+ *        409 differenziert: projekt-weiter Lock ('locked') ODER idea-keyed Doppelstart ('idea-locked'),
+ *        idea-specify-background-status AC7)
  *   GET  /api/board/projects/:slug/ideas/:id/specify/finalize/:jobId → 200 { status, result?, error? }   (S-216, AC7;
  *        status ∈ {running,done,failed,auth-expired,no-op} seit S-220/headless-arg-finalize-safety AC5 —
  *        `no-op` wird vom `IdeaSpecifyFinalizer` gemappt, hier nur unverändert durchgereicht)
+ *   GET  /api/board/projects/:slug/specify/jobs                      → 200 { jobs: { [ideaStoryId]: {...} } }
+ *        (idea-specify-background-status AC2 — nur nicht-`done`; Board-Hydration/Polling; token-/secret-frei)
+ *   GET  /api/board/projects/:slug/ideas/:id/specify/status          → 200 { job | null }
+ *        (idea-specify-background-status AC2 — letzter Job dieser Idee; Overlay-Reopen; token-/secret-frei)
  *
  * S-216 (FOLGE-ITEM, GLEICHE Datei) ergänzt die beiden `finalize`-Routen unten,
  * OHNE die bestehenden `start`/`message`-Handler umzubauen — die Datei war
@@ -330,11 +338,90 @@ export function ideaSpecifyRouter({ boardAggregator, chatService, finalizer, aud
     });
 
     if (!result.ok) {
-      // Aktuell einzige Ablehnungs-Ursache: 'locked' (eigene ProjectJobLock-Instanz).
-      return res.status(409).json({ error: 'Finalizer läuft bereits für dieses Projekt.' });
+      // Zwei Ablehnungs-Ursachen, beide 409 (idea-specify-background-status AC7):
+      //   'locked'      → projekt-weiter ProjectJobLock des Runners (idea-specify-chat AC6).
+      //   'idea-locked' → für DIESE Idee läuft bereits ein Finalize (idea-keyed Guard).
+      const error =
+        result.reason === 'idea-locked'
+          ? 'Für diese Idee läuft bereits ein Spezifizieren-Lauf.'
+          : 'Finalizer läuft bereits für dieses Projekt.';
+      return res.status(409).json({ error });
     }
 
     return res.status(202).json({ jobId: result.jobId, status: 'running' });
+  });
+
+  /**
+   * GET /api/board/projects/:slug/specify/jobs
+   *
+   * Idea-keyed Status aller NICHT-`done` Finalize-Jobs eines Projekts
+   * (idea-specify-background-status AC2) — für Board-Hydration + leichtes
+   * Polling der Idee-Badges (AC3/AC5). Token-frei (KEIN Agenten-Dispatch, KEINE
+   * Board-Schreibaktion, KEIN Audit), secret-/token-/host-pfad-frei (AC8).
+   *
+   * Response 200: { jobs: { [ideaStoryId]: { status: 'running'|'failed'|'auth-expired', jobId, error? } } }
+   * Response 404: { error }  (Projekt unbekannt / ungültiges Slug-Format)
+   */
+  router.get('/api/board/projects/:slug/specify/jobs', async (req, res) => {
+    const { slug } = req.params;
+
+    if (!slug || !SLUG_RE.test(slug)) {
+      return res.status(404).json({ error: 'Projekt nicht gefunden.' });
+    }
+
+    if (!finalizer) {
+      console.error('[ideaSpecifyRouter] GET .../specify/jobs: finalizer nicht verdrahtet');
+      return res.status(500).json({ error: 'Status konnte nicht gelesen werden.' });
+    }
+
+    const projects = await boardAggregator.getIndex();
+    const project = projects.find((p) => p.slug === slug);
+    if (!project || project.error) {
+      return res.status(404).json({ error: 'Projekt nicht gefunden.' });
+    }
+
+    const jobs = await finalizer.jobsForProject(slug);
+    return res.status(200).json({ jobs });
+  });
+
+  /**
+   * GET /api/board/projects/:slug/ideas/:id/specify/status
+   *
+   * Letzter bekannter Finalize-Job EINER Idee (idea-specify-background-status
+   * AC2) — für das Overlay-Reopen (AC6). Token-frei (KEIN Agenten-Dispatch,
+   * KEINE Board-Schreibaktion, KEIN Audit), secret-/token-/host-pfad-frei (AC8).
+   *
+   * Response 200: { job: { status: 'running'|'done'|'failed'|'auth-expired', jobId, error? } | null }
+   * Response 404: { error }  (Projekt/Idee unbekannt / ungültiges Format)
+   */
+  router.get('/api/board/projects/:slug/ideas/:id/specify/status', async (req, res) => {
+    const { slug, id } = req.params;
+
+    if (!slug || !SLUG_RE.test(slug)) {
+      return res.status(404).json({ error: 'Projekt nicht gefunden.' });
+    }
+    if (!id || !STORY_ID_RE.test(id)) {
+      return res.status(404).json({ error: 'Idee nicht gefunden.' });
+    }
+
+    if (!finalizer) {
+      console.error('[ideaSpecifyRouter] GET .../specify/status: finalizer nicht verdrahtet');
+      return res.status(500).json({ error: 'Status konnte nicht gelesen werden.' });
+    }
+
+    const projects = await boardAggregator.getIndex();
+    const project = projects.find((p) => p.slug === slug);
+    if (!project || project.error) {
+      return res.status(404).json({ error: 'Projekt nicht gefunden.' });
+    }
+
+    const storyEntry = _findStoryInProject(project, id);
+    if (!storyEntry) {
+      return res.status(404).json({ error: 'Idee nicht gefunden.' });
+    }
+
+    const job = await finalizer.statusForIdea(slug, id);
+    return res.status(200).json({ job });
   });
 
   /**
