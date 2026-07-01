@@ -2,7 +2,7 @@ id: S-217
 parent: F-039
 title: 'Frontend: IdeaSpecifyChatModal (Chat-Overlay ueber dem Board, Bubbles, Story-anlegen-Button,
   Finalize-Polling)'
-status: In Progress
+status: Done
 priority: P2
 spec: docs/specs/idea-specify-chat.md
 implements:
@@ -16,8 +16,8 @@ labels:
 - ui
 size_est: M
 dispo_est: '5'
-dispo_act: null
-dispo_forecast: null
+dispo_act: '7'
+dispo_forecast: -.2857
 estimate_note: 'M-Heuristik: n_ac=3 (AC1,AC10,AC11), n_comp~3 (IdeaSpecifyChatModal.jsx
   NEU, Finalize-Polling, onSpecified-Re-Fetch-Callback), label_bump+1 (ui) -> score
   7 -> M. estimator nicht dispatchbar (kein Task-Tool); baseline.json js|balanced|M
@@ -27,8 +27,8 @@ branch: feat/S-217-idea-specify-chat-modal
 pr: null
 blocked_reason: null
 created_at: '2026-07-01T15:25:53Z'
-updated_at: '2026-07-01T16:58:56Z'
-done_at: null
+updated_at: '2026-07-01T17:30:09Z'
+done_at: '2026-07-01T17:30:09Z'
 notes: 'Spec: docs/specs/idea-specify-chat.md AC1,AC10,AC11. Depends: S-215 (start/message-Endpunkte),
   S-216 (finalize-Endpunkte).
 
@@ -48,3 +48,4 @@ notes: 'Spec: docs/specs/idea-specify-chat.md AC1,AC10,AC11. Depends: S-215 (sta
 
   Gate: Frontend-Rendering/Interaktions-Tests (readyToSpecify-Gating, Fehlerpfad,
   Fokusfuehrung).'
+tok: '15156239'
