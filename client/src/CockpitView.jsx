@@ -16,16 +16,27 @@
  *
  * autonome-board-abarbeitung:
  *   AC2 — Im Reiter „Arbeiten" Knopf „Board abarbeiten", der mit
- *          Bestätigungsdialog /agent-flow:flow im Projekt-Terminal startet.
- *          Nutzt POST /api/command (bestehender CommandService-Mechanismus).
+ *          Bestätigungsdialog das aktive Projekt-Board abarbeitet (s. AC12
+ *          taktgeber-nachtwaechter unten für den aktuellen Auslöse-Mechanismus).
  *   AC3 — Hinweis: offene Fragen → Story auf Blocked statt raten.
  *
  * fabric-intake-dialog:
- *   AC8 — „Board abarbeiten"-Button (Phase B) löst /agent-flow:flow über
- *          POST /api/command aus und ist bei aktivem Job (Session state:"busy")
- *          deaktiviert (globales Lock-Modell, analog TriggerPanel). Nach
- *          erfolgreichem Auslösen (202) → onNavigate('factory') damit der
- *          Lauf live im Terminal sichtbar ist.
+ *   AC8 — „Board abarbeiten"-Button (Phase B) ist bei aktivem Job (Session
+ *          state:"busy") deaktiviert (globales Lock-Modell, analog
+ *          TriggerPanel). Nach erfolgreichem Auslösen (202) → onNavigate('factory')
+ *          damit der Lauf live im Terminal sichtbar ist.
+ *
+ * taktgeber-nachtwaechter (S-196):
+ *   AC12 — Umbau: der Knopf ruft nicht mehr direkt POST /api/command mit
+ *          einem einzelnen /agent-flow:flow-Schuss auf, sondern
+ *          POST /api/projects/:slug/drain — dieser Endpunkt startet die
+ *          zentrale ProjectDrain-Engine (S-192), die /agent-flow:flow
+ *          wiederholt anstößt, bis das Board des Projekts keine offene
+ *          Drain-Ziel-Story mehr hat (sofort, ohne Nachtfenster-Gate,
+ *          Parallelität 1). 202 {drainId} → weiterhin onNavigate('factory')
+ *          (Terminal-Pane, AC8-Muster); 409 → Fehler-Info (Projekt bereits
+ *          busy). Der /flow-Lauf selbst bleibt weiterhin über CommandService
+ *          im Projekt-Terminal sichtbar (kein neuer Completion-Kanal nötig).
  *
  * reconcile-trigger (S-201):
  *   onNavigate wird zusätzlich an SpecView durchgereicht — der dortige
@@ -188,15 +199,22 @@ const SESSION_POLL_MS = 3_000;
  * projectPath to TriggerPanel so commands run in the active project session.
  *
  * Extended for autonome-board-abarbeitung AC2/S-119:
- * Adds „Board abarbeiten"-Knopf with confirmation dialog that fires
- * /agent-flow:flow via POST /api/command (existing CommandService route).
+ * Adds „Board abarbeiten"-Knopf with confirmation dialog.
  * AC3: Hinweis that unclear items → Blocked (not guessing).
  *
  * Extended for fabric-intake-dialog AC8/S-136:
- * The „Board abarbeiten"-Knopf is now also AC8-compliant: polls GET /api/session
+ * The „Board abarbeiten"-Knopf is AC8-compliant: polls GET /api/session
  * (state:"busy") to derive busy state and disables the button when a job is
  * running. After 202, calls onNavigate('factory') so the run is visible live
  * in the Terminal pane (consistent with IntakeDialog/AC4 pattern).
+ *
+ * Extended for taktgeber-nachtwaechter AC12/S-196:
+ * The confirmed click now POSTs to /api/projects/:slug/drain (ProjectDrain-
+ * Engine) instead of directly to /api/command with a single /agent-flow:flow
+ * shot — draining the active project immediately (no night-window gate,
+ * parallelism 1) until its board has no open drain-target story left. The
+ * response contract (202 {drainId} → onNavigate('factory'); 409 → error) and
+ * the busy-poll/disable behaviour (AC8 above) are unchanged.
  *
  * @param {{ activeRepo: string, fetchFn?: Function, pollInterval?: number }} props
  *   fetchFn      — injectable for tests (default: globalThis.fetch)
@@ -284,19 +302,24 @@ function FactoryWorkspace({ activeRepo, fetchFn, onNavigate, pollInterval = SESS
     setFlowState('starting');
     setFlowError(null);
 
-    // Build request body — include projectPath for project-scoped session (AC5/S-111).
-    const body = { command: '/agent-flow:flow' };
-    if (activeRepo && typeof activeRepo === 'string' && activeRepo.trim()) {
-      body.projectPath = activeRepo.trim();
+    // taktgeber-nachtwaechter AC12: der Knopf ruft die ProjectDrain-Engine über
+    // POST /api/projects/:slug/drain auf (statt vormals direkt /api/command mit
+    // einem einzelnen /agent-flow:flow-Schuss) — draint das aktive Projekt
+    // sofort, bis das Board keine offene Drain-Ziel-Story mehr hat. CockpitView
+    // wird nur mit aktivem Projekt gerendert (FactoryView), activeRepo ist hier
+    // erwartungsgemäß immer gesetzt; defensiver Guard falls doch leer.
+    const slug = activeRepo && typeof activeRepo === 'string' ? activeRepo.trim() : '';
+    if (!slug) {
+      setFlowState('error');
+      setFlowError('Kein aktives Projekt — Drain kann nicht gestartet werden.');
+      return;
     }
 
     const _fetch = fetchFnRef.current;
     let res;
     try {
-      res = await _fetch('/api/command', {
+      res = await _fetch(`/api/projects/${encodeURIComponent(slug)}/drain`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
       });
     } catch {
       setFlowState('error');

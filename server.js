@@ -9,6 +9,7 @@
  *   GET  /api/audit                               → [{time, identity, command}]
  *   POST /api/command                             → inject slash-command into PTY session
  *   POST /api/command/cancel                      → send Ctrl-C, cancel running command
+ *   POST /api/projects/:slug/drain                 → { drainId } | 409 (busy) — manueller „Board abarbeiten"-Knopf via ProjectDrain-Engine (taktgeber-nachtwaechter S-196 AC12)
  *   GET/PUT/DELETE /api/settings/credentials*     → Credential-Verwaltung (settings-credentials)
  *   GET  /api/settings/credential-status          → { state, hasEncryptedEntries } (credential-bootstrap-status #184)
  *   POST /api/settings/credential-unlock          → { ok, state? } (credential-unlock-dialog #185)
@@ -385,9 +386,12 @@ const deps = {
   // S-194 AC15/AC16: TickerSettingsStore-Reader als Konfig-Quelle für künftige Konsumenten
   // (S-195 NightWatchScheduler, S-192 Status-Widget) — analog readNotificationSettings.
   readTickerSettings,
-  // S-195 AC9–AC11: NightWatchScheduler-Instanz für künftige Statusanzeige (S-197)
-  // bzw. manuellen Trigger-Umbau (S-196) — kein Router konsumiert sie in dieser Story.
+  // S-195 AC9–AC11: NightWatchScheduler-Instanz für künftige Statusanzeige (S-197).
   nightWatchScheduler,
+  // S-196 AC12: ProjectDrain-Instanz + sessionRegistry (Busy-Erkennung, AC7) für
+  // den manuellen „Board abarbeiten"-Knopf-Endpunkt (projectDrainRouter).
+  projectDrain,
+  sessionRegistry: ptyRegistry,
 };
 
 // ── AC1/AC2: Auto-Discovery + Mount aller API-Router ─────────────────────────
