@@ -71,6 +71,8 @@
  *   POST   /api/board/projects/:slug/ideas/:id/resolve              → { storyId } — Idee → Done + resolved_at/resolved_story_ids (ideen-inbox S-200 AC6)
  *   POST   /api/board/projects/:slug/ideas/:id/specify/start        → { sessionId, reply } — Chat-Session-Start, mit Titel/Notes geseedet (idea-specify-chat S-215 AC3)
  *   POST   /api/board/projects/:slug/ideas/:id/specify/message      → { reply, readyToSpecify, draftText? } — nächster Chat-Turn (idea-specify-chat S-215 AC4,AC13)
+ *   POST   /api/board/projects/:slug/ideas/:id/specify/finalize     → { jobId, status:"running" } | 400/404/409 — headless requirement-Finalizer (idea-specify-chat S-216 AC6)
+ *   GET    /api/board/projects/:slug/ideas/:id/specify/finalize/:jobId → { status, result?, error? } | 404 (idea-specify-chat S-216 AC7)
  *   POST   /api/assist/refine                                      → { refinedText, openQuestions[], notes? } (fabric-intake-dialog AC5,AC7,AC10)
  *   POST   /api/reconcile                                          → { jobId, status:"running" } | 409 (busy) | 400 (invalid slug) — Headless-Reconcile-Runner (headless-reconcile-runner AC8)
  *   GET    /api/reconcile/:jobId                                   → { status, result?, error?, prHint? } | 404 (headless-reconcile-runner AC9)
@@ -121,6 +123,7 @@ import { StoryMetricReader } from './src/StoryMetricReader.js';
 import { WorkspaceHealthChecker } from './src/WorkspaceHealthChecker.js';
 import { AssistService } from './src/AssistService.js';
 import { IdeaSpecifyChatService } from './src/IdeaSpecifyChatService.js';
+import { IdeaSpecifyFinalizer } from './src/IdeaSpecifyFinalizer.js';
 import { HeadlessReconcileRunner } from './src/HeadlessReconcileRunner.js';
 import { ClaudeAuthHealthService } from './src/ClaudeAuthHealthService.js';
 import { KnowledgeSourceService } from './src/KnowledgeSourceService.js';
@@ -397,6 +400,18 @@ const assistService = new AssistService();
 // in dieser einen Instanz (Map sessionId -> turns[], AC13).
 const ideaSpecifyChatService = new IdeaSpecifyChatService();
 
+// ── IdeaSpecifyFinalizer (headless requirement-Finalizer, idea-specify-chat AC6/AC7/AC8/AC9) ──
+// Dünner Orchestrator um eine EIGENE `HeadlessFlowRunner`-Instanz mit EIGENER,
+// frischer `ProjectJobLock`-Instanz (Konstruktor-Default in HeadlessFlowRunner.js)
+// — bewusst getrennt von `headlessFlowRunner` (Nacht-Drain, oben) UND von
+// `reconcileRunner` (unten): jede headless-Boundary hält ihre eigene Lock-
+// Instanz, sonst würde ein laufender Nacht-Drain/Reconcile-Lauf für dasselbe
+// Projekt einen parallelen Idee-Specify-Finalize-Lauf fälschlich blockieren
+// (Selbstblockade-Vermeidung, analog dem Nacht-Drain-Kommentar oben).
+// Nutzt die bereits vorhandene `boardWriter`-Instanz (S-191, oben) für das
+// AC9-Sicherheitsnetz.
+const ideaSpecifyFinalizer = new IdeaSpecifyFinalizer({ boardWriter });
+
 // ── HeadlessReconcileRunner (getrennter claude -p-Kindprozess, headless-reconcile-runner AC1–AC7) ──
 // Bewusst vom interaktiven PTY-Pfad (CommandService/PtyManager/PtySessionRegistry)
 // getrennt (AC7) — eigene ProjectJobLock-Instanz, kein Idle-/Rate-Timer.
@@ -480,6 +495,9 @@ const deps = {
   // S-215 (idea-specify-chat AC3/AC4/AC5/AC13): IdeaSpecifyChatService für den
   // Multi-Turn-Chat-Router (ideaSpecify.js, POST .../specify/start + .../specify/message).
   ideaSpecifyChatService,
+  // S-216 (idea-specify-chat AC6/AC7/AC8/AC9): IdeaSpecifyFinalizer für
+  // POST .../specify/finalize + GET .../specify/finalize/:jobId (ideaSpecify.js).
+  ideaSpecifyFinalizer,
 };
 
 // ── AC1/AC2: Auto-Discovery + Mount aller API-Router ─────────────────────────

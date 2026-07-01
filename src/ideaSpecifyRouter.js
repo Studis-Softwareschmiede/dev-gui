@@ -1,35 +1,48 @@
 /**
  * ideaSpecifyRouter — Express-Router für das Idee-Specify-Chat-Overlay
- * (docs/specs/idea-specify-chat.md AC3, AC4, AC5, AC13).
+ * (docs/specs/idea-specify-chat.md AC3, AC4, AC5, AC6, AC7, AC8, AC9, AC13).
  *
  * Routes (hinter dem AccessGuard, wie alle /api/*, s. server.js):
- *   POST /api/board/projects/:slug/ideas/:id/specify/start   → 201 { sessionId, reply }
- *   POST /api/board/projects/:slug/ideas/:id/specify/message → 200 { reply, readyToSpecify, draftText? }
+ *   POST /api/board/projects/:slug/ideas/:id/specify/start           → 201 { sessionId, reply }
+ *   POST /api/board/projects/:slug/ideas/:id/specify/message         → 200 { reply, readyToSpecify, draftText? }
+ *   POST /api/board/projects/:slug/ideas/:id/specify/finalize        → 202 { jobId, status: 'running' }  (S-216, AC6)
+ *   GET  /api/board/projects/:slug/ideas/:id/specify/finalize/:jobId → 200 { status, result?, error? }   (S-216, AC7)
  *
- * NICHT Teil dieser Story (S-215) — kommt in S-216 (FOLGE-ITEM, GLEICHE Datei):
- *   POST /api/board/projects/:slug/ideas/:id/specify/finalize
- *   GET  /api/board/projects/:slug/ideas/:id/specify/finalize/:jobId
- * Diese Datei ist bewusst so aufgebaut (eigene Router-Instanz-Funktion,
- * `chatService`-Dependency getrennt von einem künftigen `finalizer`-Parameter),
- * dass S-216 hier zusätzliche Routen ergänzen kann, ohne die bestehenden
- * start/message-Handler umzubauen.
+ * S-216 (FOLGE-ITEM, GLEICHE Datei) ergänzt die beiden `finalize`-Routen unten,
+ * OHNE die bestehenden `start`/`message`-Handler umzubauen — die Datei war
+ * dafür bereits vorbereitet (eigene `chatService`-Dependency getrennt vom
+ * neuen `finalizer`-Parameter).
  *
  * Slug-/ID-Validierung: identisches Muster zu `boardRouter.js` (SLUG_RE/STORY_ID_RE,
  * Story-Lookup via `boardAggregator.getIndex()`) — Slug/ID werden NIE als
  * Dateisystem-Pfad verwendet, nur als Werte-Vergleich gegen den
- * vertrauenswürdigen In-Memory-Index (kein Traversal möglich).
+ * vertrauenswürdigen In-Memory-Index (kein Traversal möglich). Für `finalize`
+ * wird der bereits vertrauenswürdige `project.repo_path` aus demselben Index
+ * als `projectPath` an den `IdeaSpecifyFinalizer` durchgereicht (identisches
+ * Muster zu `boardRouter.js` `.../discuss` — KEINE erneute
+ * `resolveProjectSlug`/`validateProjectPath`-Auflösung nötig).
  *
  * Audit-First-Konvention (analog `assistRefineRouter`/`boardRouter` discuss):
- *   1. Validierung (Format, Existenz, Status) — bei Ablehnung KEIN Audit.
- *   2. Genau EIN Audit-Eintrag je akzeptiertem Turn (start ODER message).
- *   3. Erst danach der eigentliche `IdeaSpecifyChatService`-Aufruf (`claude -p`).
+ *   1. Validierung (Format, Existenz, Status/Gate) — bei Ablehnung KEIN Audit.
+ *   2. Genau EIN Audit-Eintrag je akzeptiertem Turn/Job-Start (start, message
+ *      ODER finalize).
+ *   3. Erst danach der eigentliche `IdeaSpecifyChatService`- bzw.
+ *      `IdeaSpecifyFinalizer`-Aufruf.
+ *
+ * `finalize`-Gate (AC6): nur zulässig, wenn der Chat zuvor `readyToSpecify`
+ * gemeldet hat — gelesen über `chatService.getSessionState(sessionId)` (S-216),
+ * NICHT aus dem Request-Body (der Client sendet nur `{ sessionId }`, siehe
+ * Verträge). Fehlt das Gate (kein `readyToSpecify`) → `400`; belegtes
+ * `IdeaSpecifyFinalizer`-Lock für dasselbe Projekt → `409`.
  *
  * Security (Floor):
  *   - Hinter AccessGuard (server.js).
  *   - Nutzer-Text (message) geht ausschliesslich über `IdeaSpecifyChatService`
  *     → STDIN an `claude -p`, NIE als argv (security/R02).
- *   - Kein PTY-/CommandService-/HeadlessFlowRunner-Import — komplett getrennte
- *     Boundary (AC5/AC12).
+ *   - Kein PTY-/CommandService-Import — komplett getrennte Boundary (AC5/AC12).
+ *     `IdeaSpecifyFinalizer` (S-216) nutzt intern den tool-fähigen
+ *     `HeadlessFlowRunner` MIT eigener `ProjectJobLock`-Instanz (AC6) — bewusst
+ *     eine andere Boundary als der tool-lose Chat-Pfad oben.
  *   - Keine Secrets in Log/Audit/Response.
  *
  * @module ideaSpecifyRouter
@@ -78,10 +91,11 @@ function _resolveIdentity(identity) {
  * @param {object} options
  * @param {import('./BoardAggregator.js').BoardAggregator} options.boardAggregator
  * @param {import('./IdeaSpecifyChatService.js').IdeaSpecifyChatService} options.chatService
+ * @param {import('./IdeaSpecifyFinalizer.js').IdeaSpecifyFinalizer} [options.finalizer] - S-216, AC6/AC7.
  * @param {import('./AuditStore.js').AuditStore} [options.auditStore]
  * @returns {import('express').Router}
  */
-export function ideaSpecifyRouter({ boardAggregator, chatService, auditStore }) {
+export function ideaSpecifyRouter({ boardAggregator, chatService, finalizer, auditStore }) {
   const router = Router();
 
   /**
@@ -229,6 +243,123 @@ export function ideaSpecifyRouter({ boardAggregator, chatService, auditStore }) 
       readyToSpecify: result.readyToSpecify,
       ...(result.draftText !== undefined ? { draftText: result.draftText } : {}),
     });
+  });
+
+  // ── S-216: Finalize-Endpunkte (AC6, AC7, AC8, AC9) ─────────────────────────
+
+  /**
+   * POST /api/board/projects/:slug/ideas/:id/specify/finalize
+   *
+   * Startet den headless `requirement`-Finalizer (AC6) — nur zulässig, wenn
+   * der Chat zuvor `readyToSpecify` gemeldet hat (Gate, gelesen über
+   * `chatService.getSessionState()`, NICHT aus dem Request-Body).
+   *
+   * Body: { sessionId: string }
+   * Response 202: { jobId, status: 'running' }
+   * Response 400: { field, message }  (fehlende/ungültige sessionId ODER kein readyToSpecify)
+   * Response 404: { error }  (Projekt/Idee/Session unbekannt)
+   * Response 409: { error }  (Finalizer-Lock für dieses Projekt bereits belegt)
+   */
+  router.post('/api/board/projects/:slug/ideas/:id/specify/finalize', async (req, res) => {
+    const { slug, id } = req.params;
+
+    if (!slug || !SLUG_RE.test(slug)) {
+      return res.status(404).json({ error: 'Projekt nicht gefunden.' });
+    }
+    if (!id || !STORY_ID_RE.test(id)) {
+      return res.status(404).json({ error: 'Idee nicht gefunden.' });
+    }
+
+    if (!chatService || !finalizer) {
+      console.error('[ideaSpecifyRouter] POST .../specify/finalize: chatService/finalizer nicht verdrahtet');
+      return res.status(500).json({ error: 'Finalisierung konnte nicht gestartet werden.' });
+    }
+
+    const { sessionId } = req.body ?? {};
+
+    // Validierung VOR dem Audit-Eintrag (Audit-First-Konvention).
+    if (typeof sessionId !== 'string' || sessionId.trim() === '') {
+      return res.status(400).json({ field: 'sessionId', message: 'sessionId must be a non-empty string' });
+    }
+
+    if (!chatService.hasSession(sessionId)) {
+      return res.status(404).json({ error: 'Session nicht gefunden.' });
+    }
+
+    const projects = await boardAggregator.getIndex();
+    const project = projects.find((p) => p.slug === slug);
+    if (!project || project.error) {
+      return res.status(404).json({ error: 'Projekt nicht gefunden.' });
+    }
+
+    const storyEntry = _findStoryInProject(project, id);
+    if (!storyEntry) {
+      return res.status(404).json({ error: 'Idee nicht gefunden.' });
+    }
+
+    // AC6-Gate: kein readyToSpecify → 400 (Button ist im Frontend deaktiviert,
+    // AC11 — dieser Check schützt gegen einen dennoch abgesetzten Request).
+    const sessionState = chatService.getSessionState(sessionId);
+    if (!sessionState || sessionState.readyToSpecify !== true) {
+      return res.status(400).json({
+        field: 'readyToSpecify',
+        message: 'Chat ist noch nicht bereit zur Finalisierung (readyToSpecify fehlt).',
+      });
+    }
+
+    // Audit-First (genau EIN Eintrag je akzeptiertem Finalize-Start): schlägt
+    // record() fehl, wird der Finalizer NICHT gestartet.
+    if (auditStore) {
+      try {
+        auditStore.record({
+          identity: _resolveIdentity(req.identity ?? null),
+          command: `board:idea:specify:finalize:${slug}:${id}`,
+        });
+      } catch (auditErr) {
+        console.error('[ideaSpecifyRouter] Audit-Write fehlgeschlagen (POST .../specify/finalize):', auditErr.message);
+        return res.status(500).json({ error: 'Audit-Write fehlgeschlagen — Aktion abgebrochen' });
+      }
+    }
+
+    const result = finalizer.start(project.repo_path, {
+      draftText: sessionState.draftText,
+      ideaStoryId: id,
+      projectSlug: slug,
+    });
+
+    if (!result.ok) {
+      // Aktuell einzige Ablehnungs-Ursache: 'locked' (eigene ProjectJobLock-Instanz).
+      return res.status(409).json({ error: 'Finalizer läuft bereits für dieses Projekt.' });
+    }
+
+    return res.status(202).json({ jobId: result.jobId, status: 'running' });
+  });
+
+  /**
+   * GET /api/board/projects/:slug/ideas/:id/specify/finalize/:jobId
+   *
+   * Liest den Job-Status (AC7) — Format 1:1 wie der bestehende headless-
+   * Reconcile-Status-Endpunkt (`reconcileRouter.js`).
+   *
+   * Response 200: { status, result?, error? }
+   * Response 404: { error }  (unbekannte jobId, auch nach Server-Neustart)
+   */
+  router.get('/api/board/projects/:slug/ideas/:id/specify/finalize/:jobId', async (req, res) => {
+    if (!finalizer) {
+      console.error('[ideaSpecifyRouter] GET .../specify/finalize/:jobId: finalizer nicht verdrahtet');
+      return res.status(500).json({ error: 'Status konnte nicht gelesen werden.' });
+    }
+
+    const job = await finalizer.getJob(req.params.jobId);
+    if (!job) {
+      return res.status(404).json({ error: 'Unknown jobId' });
+    }
+
+    const body = { status: job.status };
+    if (job.result !== undefined) body.result = job.result;
+    if (job.error !== undefined) body.error = job.error;
+
+    return res.status(200).json(body);
   });
 
   return router;

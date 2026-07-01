@@ -3,7 +3,7 @@
  * erweitert um den Create-Pfad in S-199, ideen-inbox AC3/AC4/AC7/AC8; erweitert um den
  * Resolve-Pfad in S-200, ideen-inbox AC6/AC8).
  *
- * Einziger Schreibpfad in Board-Dateien. Drei Methoden, drei enge Verträge:
+ * Einziger Schreibpfad in Board-Dateien. Vier Methoden, vier enge Verträge:
  *
  *   `setBlocked()` (Taktgeber-Eskalation, S-191) patcht eine BESTEHENDE Story-Datei
  *   und setzt AUSSCHLIESSLICH:
@@ -38,6 +38,16 @@
  *   exakt `'Idee'` sein) — ein bereits `Done`/aufgelöstes Item wirft
  *   `not-resolvable` (Router mappt auf `400 { field: 'status' }`, kein zweites
  *   `Done`, idempotenz-tolerant gegenüber Doppel-Klick).
+ *
+ *   `archiveSupersededIdea()` (Sicherheitsnetz nach headless-`requirement`-Lauf,
+ *   S-216, idea-specify-chat AC9) patcht eine BESTEHENDE `Idee`-Story-Datei
+ *   AUSSCHLIESSLICH wie `resolveIdea()`, aber mit einem FESTEN
+ *   `resolved_note: 'superseded-by-specify'` (`SUPERSEDED_BY_SPECIFY_NOTE`,
+ *   keine Nutzer-Eingabe) statt optionaler Owner-Felder. Gleicher Guard (nur
+ *   `status: Idee` ist archivierbar, sonst `not-resolvable`) — der aufrufende
+ *   `IdeaSpecifyFinalizer` behandelt `not-resolvable` als No-Op (der
+ *   `requirement`-Agent hat die Platzhalter-Idee bereits selbst übernommen/
+ *   aufgelöst, best effort AC8, kein zweiter Write nötig).
  *
  *   **Cross-Prozess-Risiko (KORRIGIERT, S-199 Iteration 2):** `board/board.yaml`
  *   und `board/stories/` werden NICHT nur von dieser `BoardWriter`-Instanz
@@ -167,6 +177,11 @@ export const RESOLVED_NOTE_MAX_LENGTH = 500;
 /** Obergrenze für die Anzahl verlinkter Story-IDs bei `resolveIdea()` (ideen-inbox
  *  AC6/AC8, S-200) — Schutz vor Riesen-Payloads, analog Titel-/Body-Limits. */
 export const RESOLVE_STORY_IDS_MAX_COUNT = 50;
+
+/** Fester `resolved_note`-Wert für `archiveSupersededIdea()` (idea-specify-chat
+ *  AC9) — im Unterschied zu `resolveIdea()` KEINE Nutzer-Eingabe, sondern eine
+ *  konstante Markierung, dass der Finalizer die Idee automatisch archiviert hat. */
+export const SUPERSEDED_BY_SPECIFY_NOTE = 'superseded-by-specify';
 
 /**
  * Typisierter Fehler für alle BoardWriter-Fehlschläge.
@@ -560,6 +575,73 @@ export class BoardWriter {
     // allowAppend: resolved_at/resolved_story_ids/resolved_note existieren in
     // einem frisch über createIdea() angelegten Item noch NICHT als Top-Level-
     // Schlüssel — anhängen statt field-not-found zu werfen (siehe Modul-Doku).
+    const patched = patchTopLevelFields(raw, fields, { allowAppend: true });
+    await this._atomicWrite(filePath, patched);
+
+    return { filePath };
+  }
+
+  /**
+   * Sicherheitsnetz-Archivierung einer superseded Idee (idea-specify-chat AC9):
+   * patcht eine BESTEHENDE Story-Datei, die nach einem abgeschlossenen
+   * `requirement`-Finalizer-Lauf WEITERHIN `status: Idee` trägt (der Agent hat
+   * die Platzhalter-Idee nicht wie erhofft übernommen, best effort AC8), auf
+   * `status: Done` + ein FESTES `resolved_note: 'superseded-by-specify'`
+   * (+ `resolved_at`/`updated_at`). Anders als `resolveIdea()` (Owner-Aktion mit
+   * optionalen Nutzer-Feldern) ist `resolved_note` hier IMMER die Konstante
+   * `SUPERSEDED_BY_SPECIFY_NOTE` — keine Nutzer-Eingabe.
+   *
+   * Patch-Muster 1:1 von `resolveIdea()` übernommen (gleicher Guard: nur ein
+   * Item mit aktuellem `status: Idee` ist archivierbar — ein bereits archiviertes/
+   * übernommenes Item wirft `not-resolvable`; der `IdeaSpecifyFinalizer` behandelt
+   * das als No-Op — der Agent hat die Idee bereits selbst korrekt aufgelöst/
+   * übernommen, kein zweiter Write nötig).
+   *
+   * @param {object} params
+   * @param {string} params.projectSlug   Repo-Verzeichnisname unter einem
+   *   BOARD_ROOTS-Eintrag (kein Pfad — siehe Modul-Doku Pfad-Sicherheit).
+   * @param {string} params.storyId       Story-ID des Idee-Items, z.B. "S-900".
+   * @param {string} [params.now]  ISO-8601-Zeitstempel für `updated_at`/`resolved_at`
+   *   (Default: `new Date().toISOString()`; injizierbar für deterministische Tests).
+   * @returns {Promise<{ filePath: string }>}
+   * @throws {BoardWriterError}
+   */
+  async archiveSupersededIdea({ projectSlug, storyId, now }) {
+    const timestamp = now ?? new Date().toISOString();
+    if (typeof timestamp !== 'string' || !ISO_TIMESTAMP_RE.test(timestamp)) {
+      throw new BoardWriterError(`Ungültiges Zeitstempel-Format: '${timestamp}'`, 'invalid-value');
+    }
+
+    const repoPath = await this._resolveProjectPath(projectSlug);
+    const storiesDir = join(repoPath, 'board', 'stories');
+    const filePath = await this._findStoryFile(storiesDir, storyId);
+
+    let raw;
+    try {
+      raw = await this.#fsDeps.readFile(filePath, 'utf8');
+    } catch (err) {
+      throw new BoardWriterError(`Story-Datei nicht lesbar: ${filePath} (${err.message})`, 'read-failed');
+    }
+
+    const currentStatus = _extractTopLevelField(raw, 'status');
+    if (currentStatus !== 'Idee') {
+      throw new BoardWriterError(
+        `Story '${storyId}' ist nicht (mehr) archivierbar (aktueller Status: '${currentStatus ?? 'unbekannt'}')`,
+        'not-resolvable',
+      );
+    }
+
+    /** @type {Record<string, string>} */
+    const fields = {
+      status: 'Done',
+      updated_at: timestamp,
+      resolved_at: timestamp,
+      resolved_note: SUPERSEDED_BY_SPECIFY_NOTE,
+    };
+
+    // allowAppend: resolved_at/resolved_note existieren in einem frisch über
+    // createIdea() angelegten Item noch NICHT als Top-Level-Schlüssel —
+    // anhängen statt field-not-found zu werfen (siehe resolveIdea()/Modul-Doku).
     const patched = patchTopLevelFields(raw, fields, { allowAppend: true });
     await this._atomicWrite(filePath, patched);
 

@@ -44,6 +44,14 @@
  *          `patchTopLevelFields({ allowAppend: true })`-Pfad getrennt von
  *          `setBlocked()`s striktem Default-Verhalten (field-not-found) getestet.
  *
+ * Covers (idea-specify-chat, S-216 — Sicherheitsnetz-Archivierung):
+ *   AC9 — `archiveSupersededIdea()`: 1:1-Patch-Muster von `resolveIdea()`
+ *          (gleicher Guard: nur `status: Idee` archivierbar, sonst
+ *          `not-resolvable`), aber mit dem FESTEN `resolved_note:
+ *          'superseded-by-specify'` (`SUPERSEDED_BY_SPECIFY_NOTE`) statt
+ *          optionaler Nutzer-Eingabe. Atomar (tmp+rename); übrige Felder
+ *          byte-genau erhalten; Round-Trip über `BoardAggregator.parseYaml`.
+ *
  * Strategy:
  *   - `patchTopLevelFields` (reine Funktion, kein IO) wird direkt mit String-
  *     Fixtures getestet — deckt Quoting, Block-Skalare, Schlüssel-Reihenfolge,
@@ -72,6 +80,7 @@ import {
   validateResolveInput,
   RESOLVED_NOTE_MAX_LENGTH,
   RESOLVE_STORY_IDS_MAX_COUNT,
+  SUPERSEDED_BY_SPECIFY_NOTE,
 } from '../src/BoardWriter.js';
 import { parseYaml } from '../src/BoardAggregator.js';
 
@@ -1083,6 +1092,160 @@ describe('ideen-inbox AC6/AC8 — BoardWriter.resolveIdea (real fs)', () => {
     expect(parsed.status).toBe('Done');
     expect(parsed.resolved_story_ids).toEqual(['S-201']);
     expect(parsed.resolved_note).toBe('docs/specs/foo.md');
+    expect(parsed.resolved_at).toBe('2026-07-01T12:00:00.000Z');
+  });
+});
+
+// ── BoardWriter.archiveSupersededIdea (real fs) — idea-specify-chat AC9, S-216 ──
+
+describe('idea-specify-chat AC9 — BoardWriter.archiveSupersededIdea (real fs)', () => {
+  let boardRootsDir;
+  let projectDir;
+  let boardDir;
+  let storiesDir;
+  let boardYamlPath;
+
+  beforeEach(async () => {
+    boardRootsDir = await mkdtemp(join(tmpdir(), 'boardwriter-archive-test-'));
+    projectDir = join(boardRootsDir, 'myproject');
+    boardDir = join(projectDir, 'board');
+    storiesDir = join(boardDir, 'stories');
+    boardYamlPath = join(boardDir, 'board.yaml');
+    await mkdir(storiesDir, { recursive: true });
+    await writeFile(
+      boardYamlPath,
+      'schema_version: 1\nproject_slug: myproject\nnext_feature_id: 1\nnext_story_id: 901\n',
+      'utf8',
+    );
+  });
+
+  afterEach(async () => {
+    await rm(boardRootsDir, { recursive: true, force: true });
+  });
+
+  function makeWriter() {
+    return new BoardWriter({ boardRootsEnv: boardRootsDir });
+  }
+
+  /** Legt eine minimale Idee-Story-Datei an (Format wie createIdea() sie schreibt). */
+  async function writeIdeaFixture(id = 'S-900') {
+    const filePath = join(storiesDir, `${id}.yaml`);
+    await writeFile(
+      filePath,
+      [
+        `id: ${id}`,
+        'status: Idee',
+        "title: 'Dark mode'",
+        "created_at: '2026-07-01T10:00:00.000Z'",
+        "updated_at: '2026-07-01T10:00:00.000Z'",
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    return filePath;
+  }
+
+  it('happy path: setzt status Done + resolved_at + FESTEN resolved_note (superseded-by-specify)', async () => {
+    const filePath = await writeIdeaFixture();
+    const writer = makeWriter();
+
+    const result = await writer.archiveSupersededIdea({
+      projectSlug: 'myproject',
+      storyId: 'S-900',
+      now: '2026-07-01T12:00:00.000Z',
+    });
+
+    expect(result.filePath.endsWith(join('myproject', 'board', 'stories', 'S-900.yaml'))).toBe(true);
+    const raw = await readFile(filePath, 'utf8');
+    expect(raw).toContain('status: Done');
+    expect(raw).toContain("updated_at: '2026-07-01T12:00:00.000Z'");
+    expect(raw).toContain("resolved_at: '2026-07-01T12:00:00.000Z'");
+    expect(raw).toContain(`resolved_note: '${SUPERSEDED_BY_SPECIFY_NOTE}'`);
+    expect(SUPERSEDED_BY_SPECIFY_NOTE).toBe('superseded-by-specify');
+    // Unverändertes Feld bleibt byte-genau erhalten
+    expect(raw).toContain("title: 'Dark mode'");
+    expect(raw).toContain("created_at: '2026-07-01T10:00:00.000Z'");
+  });
+
+  it('bereits Done/übernommen (Agent hat die Idee selbst aufgelöst) → not-resolvable, kein zweiter Write', async () => {
+    const filePath = await writeIdeaFixture();
+    const writer = makeWriter();
+
+    await writer.archiveSupersededIdea({ projectSlug: 'myproject', storyId: 'S-900', now: '2026-07-01T12:00:00.000Z' });
+
+    try {
+      await writer.archiveSupersededIdea({ projectSlug: 'myproject', storyId: 'S-900', now: '2026-07-01T13:00:00.000Z' });
+      throw new Error('sollte werfen');
+    } catch (err) {
+      expect(err).toBeInstanceOf(BoardWriterError);
+      expect(err.errorClass).toBe('not-resolvable');
+    }
+
+    const raw = await readFile(filePath, 'utf8');
+    expect(raw).toContain("resolved_at: '2026-07-01T12:00:00.000Z'");
+  });
+
+  it('Story mit status ≠ Idee (Agent hat die Platzhalter-Idee bereits als eigene Story übernommen) → not-resolvable, Datei unverändert', async () => {
+    const filePath = join(storiesDir, 'S-901.yaml');
+    await writeFile(filePath, 'id: S-901\nstatus: To Do\ntitle: \'Uebernommene Story\'\n', 'utf8');
+    const writer = makeWriter();
+
+    try {
+      await writer.archiveSupersededIdea({ projectSlug: 'myproject', storyId: 'S-901' });
+      throw new Error('sollte werfen');
+    } catch (err) {
+      expect(err.errorClass).toBe('not-resolvable');
+    }
+
+    const raw = await readFile(filePath, 'utf8');
+    expect(raw).toBe('id: S-901\nstatus: To Do\ntitle: \'Uebernommene Story\'\n');
+  });
+
+  it('unbekannte Story-ID → story-not-found', async () => {
+    await writeIdeaFixture();
+    const writer = makeWriter();
+    try {
+      await writer.archiveSupersededIdea({ projectSlug: 'myproject', storyId: 'S-999' });
+      throw new Error('sollte werfen');
+    } catch (err) {
+      expect(err.errorClass).toBe('story-not-found');
+    }
+  });
+
+  it('unbekanntes Projekt → project-not-found', async () => {
+    await writeIdeaFixture();
+    const writer = makeWriter();
+    try {
+      await writer.archiveSupersededIdea({ projectSlug: 'does-not-exist', storyId: 'S-900' });
+      throw new Error('sollte werfen');
+    } catch (err) {
+      expect(err.errorClass).toBe('project-not-found');
+    }
+  });
+
+  it('atomar: keine .tmp-Datei bleibt nach erfolgreicher Archivierung zurück', async () => {
+    await writeIdeaFixture();
+    const writer = makeWriter();
+    await writer.archiveSupersededIdea({ projectSlug: 'myproject', storyId: 'S-900' });
+
+    const entries = await readdir(storiesDir);
+    expect(entries.filter((n) => n.includes('.tmp.'))).toEqual([]);
+    expect(entries).toEqual(['S-900.yaml']);
+  });
+
+  it('Round-Trip über BoardAggregator.parseYaml: status/resolved_note/resolved_at korrekt lesbar', async () => {
+    const filePath = await writeIdeaFixture();
+    const writer = makeWriter();
+    await writer.archiveSupersededIdea({
+      projectSlug: 'myproject',
+      storyId: 'S-900',
+      now: '2026-07-01T12:00:00.000Z',
+    });
+
+    const raw = await readFile(filePath, 'utf8');
+    const parsed = parseYaml(raw);
+    expect(parsed.status).toBe('Done');
+    expect(parsed.resolved_note).toBe(SUPERSEDED_BY_SPECIFY_NOTE);
     expect(parsed.resolved_at).toBe('2026-07-01T12:00:00.000Z');
   });
 });

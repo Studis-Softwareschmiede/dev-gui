@@ -1,8 +1,8 @@
 /**
  * @file IdeaSpecifyChatService.test.js — Unit tests for the Idea-Specify Multi-Turn
- * chat boundary (docs/specs/idea-specify-chat.md AC3, AC4, AC5, AC13).
+ * chat boundary (docs/specs/idea-specify-chat.md AC3, AC4, AC5, AC6, AC13).
  *
- * Covers (idea-specify-chat): AC3, AC4, AC5, AC13
+ * Covers (idea-specify-chat): AC3, AC4, AC5, AC6, AC13
  *
  *   AC3  — start(): seedet die Session mit Titel + Notes; liefert Claudes
  *          Eröffnungs-Turn als `reply`; sessionId ist erzeugt und über
@@ -16,6 +16,10 @@
  *          Block via `buildChildEnv()`, injizierbarer Runner (kein echter
  *          `claude`-Aufruf nötig), `claude -p`-Fehler → `{ ok:false, reason:'claude-error' }`,
  *          Markdown-Fence-tolerantes JSON-Parsing.
+ *   AC6  — `getSessionState(sessionId)` (S-216): liefert den ZULETZT bekannten
+ *          `readyToSpecify`/`draftText`-Zustand einer Session (aktualisiert von
+ *          sowohl `start()` als auch `message()`); `undefined` bei unbekannter
+ *          Session — die Grundlage für das `finalize`-Gate im Router.
  *   AC13 — der KOMPLETTE bisherige Gesprächsverlauf (alle Owner-/Claude-Turns)
  *          geht bei JEDEM Turn erneut in den `runClaude`-Aufruf ein — kein
  *          Kontextverlust über mehrere Turns; Historie wird NUR bei Erfolg
@@ -243,6 +247,51 @@ describe('IdeaSpecifyChatService#message — AC4, AC13', () => {
     const thirdCallArgs = runClaude.mock.calls[2][0];
     const ownerTurns = thirdCallArgs.history.filter((t) => t.role === 'user' && t.content === 'First attempt.');
     expect(ownerTurns).toHaveLength(1);
+  });
+});
+
+describe('IdeaSpecifyChatService#getSessionState — AC6 (S-216)', () => {
+  it('unbekannte sessionId → undefined', () => {
+    const service = new IdeaSpecifyChatService({ runClaude: jest.fn(async () => NOT_READY_RAW) });
+    expect(service.getSessionState('does-not-exist')).toBeUndefined();
+  });
+
+  it('nach start() (noch nicht ready): readyToSpecify false, kein draftText', async () => {
+    const service = new IdeaSpecifyChatService({ runClaude: jest.fn(async () => NOT_READY_RAW) });
+    const started = await service.start({ title: 'Dark mode' });
+
+    const state = service.getSessionState(started.sessionId);
+    expect(state).toEqual({ readyToSpecify: false });
+  });
+
+  it('nach message() mit readyToSpecify:true — getSessionState() spiegelt den LETZTEN Turn (readyToSpecify + draftText)', async () => {
+    const runClaude = jest.fn()
+      .mockResolvedValueOnce(NOT_READY_RAW)
+      .mockResolvedValueOnce(READY_RAW);
+    const service = new IdeaSpecifyChatService({ runClaude });
+
+    const started = await service.start({ title: 'Dark mode' });
+    await service.message({ sessionId: started.sessionId, message: 'Only for premium users.' });
+
+    const state = service.getSessionState(started.sessionId);
+    expect(state.readyToSpecify).toBe(true);
+    expect(state.draftText).toBe('Build a dark-mode toggle in settings, persisted per user.');
+  });
+
+  it('ein FEHLGESCHLAGENER Turn ändert getSessionState() NICHT (transaktional, wie die Historie selbst)', async () => {
+    const runClaude = jest.fn()
+      .mockResolvedValueOnce(READY_RAW)
+      .mockRejectedValueOnce(new Error('claude -p timed out after 45 s'));
+    const service = new IdeaSpecifyChatService({ runClaude });
+
+    const started = await service.start({ title: 'Dark mode' });
+    expect(service.getSessionState(started.sessionId).readyToSpecify).toBe(true);
+
+    const failed = await service.message({ sessionId: started.sessionId, message: 'Anything else?' });
+    expect(failed.ok).toBe(false);
+
+    // Gate-Zustand bleibt der letzte ERFOLGREICHE Turn (aus start()), kein Rückfall auf false.
+    expect(service.getSessionState(started.sessionId).readyToSpecify).toBe(true);
   });
 });
 

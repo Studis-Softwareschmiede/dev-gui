@@ -1,6 +1,6 @@
 /**
  * IdeaSpecifyChatService — zustandsloser, tool-loser Multi-Turn `claude -p`-Chat
- * für das Idee-Specify-Overlay (docs/specs/idea-specify-chat.md AC3, AC4, AC5, AC13).
+ * für das Idee-Specify-Overlay (docs/specs/idea-specify-chat.md AC3, AC4, AC5, AC6, AC13).
  *
  * Kapselt den Turn-für-Turn `claude -p`-Aufruf für die Router-Endpunkte
  * `POST .../specify/start` und `POST .../specify/message`. Diese Boundary ist
@@ -13,11 +13,19 @@
  *     `--dangerously-skip-permissions`, anders als `HeadlessFlowRunner`/
  *     `HeadlessReconcileRunner`).
  *
- * Session-Historie (AC13): serverseitig in-memory (`Map sessionId -> { turns, repoContext }`),
- * analog dem Job-Registry-Muster der bestehenden Runner. Der KOMPLETTE bisherige
- * Gesprächsverlauf geht bei JEDEM Turn erneut in den `claude -p`-Aufruf ein (via
- * stdin) — kein Kontextverlust über mehrere Turns. Verlust bei Server-Neustart
- * ist ein bewusstes Nicht-Ziel (wie bei den bestehenden Runnern).
+ * Session-Historie (AC13): serverseitig in-memory (`Map sessionId -> { turns, repoContext,
+ * readyToSpecify, draftText }`), analog dem Job-Registry-Muster der bestehenden
+ * Runner. Der KOMPLETTE bisherige Gesprächsverlauf geht bei JEDEM Turn erneut in
+ * den `claude -p`-Aufruf ein (via stdin) — kein Kontextverlust über mehrere Turns.
+ * Verlust bei Server-Neustart ist ein bewusstes Nicht-Ziel (wie bei den
+ * bestehenden Runnern).
+ *
+ * `getSessionState(sessionId)` (S-216, AC6): liest den ZULETZT bekannten
+ * `readyToSpecify`/`draftText`-Zustand einer Session — `POST .../specify/finalize`
+ * erhält vom Client NUR `{ sessionId }` (kein `draftText`/`readyToSpecify` im
+ * Body, siehe Verträge), der `ideaSpecifyRouter`-Finalize-Handler liest den
+ * Gate-Zustand + den Prompt-Baustoff für den `IdeaSpecifyFinalizer` ausschließlich
+ * über diese Methode.
  *
  * Security (Floor):
  *   - security/R01: kein Secret hartkodiert; kein Secret in Logs/Response.
@@ -204,7 +212,19 @@ export class IdeaSpecifyChatService {
   /** @type {(params: {history: Array<object>, repoContext?: string}) => Promise<string>} */
   #runClaude;
 
-  /** @type {Map<string, { turns: Array<{role:string, content:string}>, repoContext?: string }>} */
+  /**
+   * @type {Map<string, {
+   *   turns: Array<{role:string, content:string}>,
+   *   repoContext?: string,
+   *   readyToSpecify: boolean,
+   *   draftText?: string,
+   * }>}
+   * `readyToSpecify`/`draftText` spiegeln IMMER den letzten Turn dieser Session
+   * (idea-specify-chat AC6): `POST .../specify/finalize` erhält vom Client NUR
+   * `{ sessionId }` (kein `draftText`/`readyToSpecify` im Body) — der Router
+   * liest den finalize-Gate-Zustand über `getSessionState()` aus dieser
+   * serverseitig gehaltenen Historie, nicht aus dem Request.
+   */
   #sessions = new Map();
 
   /**
@@ -261,6 +281,8 @@ export class IdeaSpecifyChatService {
     this.#sessions.set(sessionId, {
       turns: [...history, { role: 'assistant', content: parsed.reply }],
       repoContext,
+      readyToSpecify: parsed.readyToSpecify,
+      draftText: parsed.draftText,
     });
 
     return { ok: true, sessionId, reply: parsed.reply };
@@ -307,12 +329,33 @@ export class IdeaSpecifyChatService {
 
     // Commit erst NACH erfolgreichem Aufruf (AC13 — kein Verlust über mehrere Turns).
     session.turns = [...candidateHistory, { role: 'assistant', content: parsed.reply }];
+    session.readyToSpecify = parsed.readyToSpecify;
+    session.draftText = parsed.draftText;
 
     return {
       ok: true,
       reply: parsed.reply,
       readyToSpecify: parsed.readyToSpecify,
       ...(parsed.draftText !== undefined ? { draftText: parsed.draftText } : {}),
+    };
+  }
+
+  /**
+   * Liest den zuletzt bekannten Finalize-Gate-Zustand einer Session (idea-specify-chat
+   * AC6) — `POST .../specify/finalize` sendet nur `{ sessionId }`, kein
+   * `draftText`/`readyToSpecify`; der Router prüft das Gate + baut den
+   * `requirement`-Prompt über DIESE serverseitig gehaltene Historie.
+   *
+   * @param {unknown} sessionId
+   * @returns {{ readyToSpecify: boolean, draftText?: string } | undefined}
+   *   `undefined` bei unbekannter/abgelaufener Session (AC4-Analog).
+   */
+  getSessionState(sessionId) {
+    if (!this.hasSession(sessionId)) return undefined;
+    const session = this.#sessions.get(sessionId);
+    return {
+      readyToSpecify: session.readyToSpecify === true,
+      ...(session.draftText !== undefined ? { draftText: session.draftText } : {}),
     };
   }
 }

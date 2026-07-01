@@ -1,8 +1,8 @@
 /**
  * @file ideaSpecifyRouter.test.js — HTTP-level tests for the Idea-Specify Chat
- * endpoints (docs/specs/idea-specify-chat.md AC3, AC4, AC5, AC13).
+ * endpoints (docs/specs/idea-specify-chat.md AC3, AC4, AC5, AC6, AC7, AC8, AC13).
  *
- * Covers (idea-specify-chat): AC3, AC4, AC5, AC13
+ * Covers (idea-specify-chat): AC3, AC4, AC5, AC6, AC7, AC8, AC13
  *
  *   AC3  — POST .../specify/start → 201 { sessionId, reply }; seedet mit Titel+Notes;
  *          404 bei unbekanntem Projekt/Slug-Format/Idee; 400 { field:'status' }
@@ -16,13 +16,25 @@
  *          (secret-frei); kein Audit bei 400/404-Ablehnung.
  *          AccessGuard-Verdrahtung: per server.js-Inspektion (`app.use('/api',
  *          accessGuard)`), kein separater Middleware-Test.
+ *   AC6  — POST .../specify/finalize { sessionId } → 202 { jobId, status:'running' }
+ *          NUR wenn `readyToSpecify` (gelesen via `chatService.getSessionState()`,
+ *          NICHT aus dem Body) — sonst 400 { field:'readyToSpecify' }; 404 bei
+ *          unbekanntem Projekt/Idee/Session/Slug-Format; 409 bei Finalizer-Lock;
+ *          genau EIN Audit-Eintrag je akzeptiertem Finalize-Start; `finalizer.start()`
+ *          erhält `{ draftText, ideaStoryId, projectSlug }` aus Session/URL.
+ *   AC7  — GET .../specify/finalize/:jobId → 200 { status, result?, error? }
+ *          1:1 wie `reconcileRouter`; 404 bei unbekannter jobId.
+ *   AC8  — der an `finalizer.start()` übergebene `draftText` stammt aus der
+ *          serverseitig gehaltenen Session (`getSessionState().draftText`).
  *   AC13 — Multi-Turn-Kontext ohne Verlust — auf HTTP-Ebene verifiziert über
  *          mehrere aufeinanderfolgende /message-Aufrufe derselben Session.
  *
  * Pattern: express + node:http createServer auf Port 0 (127.0.0.1), kein
  * supertest (Muster reconcileRouter.test.js/assistRefineRouter.test.js). Der
  * echte `IdeaSpecifyChatService` wird verwendet, mit injiziertem `runClaude`
- * (Stub) — kein echter `claude`-Prozess, kein PTY-Pfad.
+ * (Stub) — kein echter `claude`-Prozess, kein PTY-Pfad. Der `finalizer` (AC6/AC7)
+ * ist ein reiner Test-Stub ({start, getJob}) — `IdeaSpecifyFinalizer.test.js`
+ * deckt den echten Orchestrator ab.
  */
 
 import { describe, it, expect, jest } from '@jest/globals';
@@ -63,6 +75,26 @@ function httpPost(server, path, body) {
   });
 }
 
+function httpGet(server, path) {
+  return new Promise((resolvePromise, reject) => {
+    const port = server.address().port;
+    const req = httpRequest(
+      { hostname: '127.0.0.1', port, path, method: 'GET' },
+      (res) => {
+        let raw = '';
+        res.on('data', (chunk) => { raw += chunk; });
+        res.on('end', () => {
+          let data;
+          try { data = JSON.parse(raw); } catch { data = raw; }
+          resolvePromise({ status: res.statusCode, body: data });
+        });
+      },
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}
+
 function startServer(app) {
   return new Promise((resolvePromise, reject) => {
     const srv = createServer(app);
@@ -87,7 +119,18 @@ function makeProject({ slug = 'demo', storyId = 'S-900', storyStatus = 'Idee', t
   };
 }
 
-function makeApp({ projects, runClaude, identity = { email: 'owner@example.com' }, auditStore } = {}) {
+/** Test-Stub für `IdeaSpecifyFinalizer` (AC6/AC7) — der echte Orchestrator wird
+ *  in `IdeaSpecifyFinalizer.test.js` getestet, hier nur die Router-Verdrahtung. */
+function makeFinalizerStub({ startResult = { ok: true, jobId: 'job-1' }, jobs = {} } = {}) {
+  const jobsMap = new Map(Object.entries(jobs));
+  return {
+    start: jest.fn(() => startResult),
+    getJob: jest.fn(async (jobId) => jobsMap.get(jobId)),
+    _jobsMap: jobsMap,
+  };
+}
+
+function makeApp({ projects, runClaude, identity = { email: 'owner@example.com' }, auditStore, finalizer } = {}) {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
@@ -100,10 +143,11 @@ function makeApp({ projects, runClaude, identity = { email: 'owner@example.com' 
   };
   const store = auditStore ?? new AuditStore();
   const chatService = new IdeaSpecifyChatService({ runClaude: runClaude ?? jest.fn(async () => NOT_READY_RAW) });
+  const finalizerStub = finalizer ?? makeFinalizerStub();
 
-  app.use(ideaSpecifyRouter({ boardAggregator, chatService, auditStore: store }));
+  app.use(ideaSpecifyRouter({ boardAggregator, chatService, finalizer: finalizerStub, auditStore: store }));
 
-  return { app, auditStore: store, chatService };
+  return { app, auditStore: store, chatService, finalizer: finalizerStub };
 }
 
 // ── AC3: POST .../specify/start ──────────────────────────────────────────────
@@ -403,6 +447,203 @@ describe('POST .../specify/message — AC5: Audit-First + 502 bei claude-Fehler'
       });
       expect(status).toBe(502);
       expect(body.error).not.toMatch(/PATH|secret|token|password/i);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+});
+
+// ── AC6/AC7/AC8: POST .../specify/finalize + GET .../specify/finalize/:jobId ──
+
+/** Treibt eine Session bis readyToSpecify:true (start + ein message-Turn). */
+async function makeReadySession(srv, { projectSlug = 'demo', storyId = 'S-900' } = {}) {
+  const { body: startBody } = await httpPost(srv, `/api/board/projects/${projectSlug}/ideas/${storyId}/specify/start`, {});
+  await httpPost(srv, `/api/board/projects/${projectSlug}/ideas/${storyId}/specify/message`, {
+    sessionId: startBody.sessionId,
+    message: 'Only premium users.',
+  });
+  return startBody.sessionId;
+}
+
+describe('POST .../specify/finalize — AC6: happy path (202)', () => {
+  it('202 { jobId, status:"running" }; finalizer.start() erhält repo_path + draftText + ideaStoryId + projectSlug', async () => {
+    const runClaude = jest.fn()
+      .mockResolvedValueOnce(NOT_READY_RAW)
+      .mockResolvedValueOnce(READY_RAW);
+    const finalizer = makeFinalizerStub({ startResult: { ok: true, jobId: 'job-abc' } });
+    const { app } = makeApp({ runClaude, finalizer });
+    const srv = await startServer(app);
+
+    try {
+      const sessionId = await makeReadySession(srv);
+      const { status, body } = await httpPost(srv, '/api/board/projects/demo/ideas/S-900/specify/finalize', { sessionId });
+
+      expect(status).toBe(202);
+      expect(body).toEqual({ jobId: 'job-abc', status: 'running' });
+
+      expect(finalizer.start).toHaveBeenCalledTimes(1);
+      const [projectPath, params] = finalizer.start.mock.calls[0];
+      expect(projectPath).toBe('/workspace/demo');
+      expect(params.draftText).toBe('Draft text.');
+      expect(params.ideaStoryId).toBe('S-900');
+      expect(params.projectSlug).toBe('demo');
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('genau EIN Audit-Eintrag je akzeptiertem Finalize-Start', async () => {
+    const runClaude = jest.fn()
+      .mockResolvedValueOnce(NOT_READY_RAW)
+      .mockResolvedValueOnce(READY_RAW);
+    const { app, auditStore } = makeApp({ runClaude });
+    const srv = await startServer(app);
+
+    try {
+      const sessionId = await makeReadySession(srv);
+      await httpPost(srv, '/api/board/projects/demo/ideas/S-900/specify/finalize', { sessionId });
+
+      const entries = auditStore.getAll();
+      expect(entries).toHaveLength(3); // start, message, finalize
+      expect(entries[2].command).toBe('board:idea:specify:finalize:demo:S-900');
+      expect(entries[2].identity).toBe('owner@example.com');
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+});
+
+describe('POST .../specify/finalize — AC6: Gate + Validierungs-Ablehnungen (400/404)', () => {
+  it('400 { field:"sessionId" } bei fehlender sessionId', async () => {
+    const { app } = makeApp({});
+    const srv = await startServer(app);
+    try {
+      const { status, body } = await httpPost(srv, '/api/board/projects/demo/ideas/S-900/specify/finalize', {});
+      expect(status).toBe(400);
+      expect(body.field).toBe('sessionId');
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('404 bei ungültigem Slug-Format (führender Punkt)', async () => {
+    const { app } = makeApp({});
+    const srv = await startServer(app);
+    try {
+      const { status } = await httpPost(srv, '/api/board/projects/.bad/ideas/S-900/specify/finalize', { sessionId: 'x' });
+      expect(status).toBe(404);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('404 bei unbekannter sessionId', async () => {
+    const { app } = makeApp({});
+    const srv = await startServer(app);
+    try {
+      const { status, body } = await httpPost(srv, '/api/board/projects/demo/ideas/S-900/specify/finalize', {
+        sessionId: 'does-not-exist',
+      });
+      expect(status).toBe(404);
+      expect(typeof body.error).toBe('string');
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('404 bei unbekanntem Projekt-Slug', async () => {
+    const { app } = makeApp({ projects: [] });
+    const srv = await startServer(app);
+    try {
+      const { status } = await httpPost(srv, '/api/board/projects/does-not-exist/ideas/S-900/specify/finalize', {
+        sessionId: 'irrelevant',
+      });
+      expect(status).toBe(404);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('400 { field:"readyToSpecify" } wenn die Session noch nicht readyToSpecify gemeldet hat (kein Job-Start)', async () => {
+    const runClaude = jest.fn(async () => NOT_READY_RAW);
+    const finalizer = makeFinalizerStub();
+    const { app, auditStore } = makeApp({ runClaude, finalizer });
+    const srv = await startServer(app);
+
+    try {
+      const { body: startBody } = await httpPost(srv, '/api/board/projects/demo/ideas/S-900/specify/start', {});
+      const { status, body } = await httpPost(srv, '/api/board/projects/demo/ideas/S-900/specify/finalize', {
+        sessionId: startBody.sessionId,
+      });
+
+      expect(status).toBe(400);
+      expect(body.field).toBe('readyToSpecify');
+      expect(finalizer.start).not.toHaveBeenCalled();
+      // Kein Audit bei einer abgelehnten Eingabe (Audit-First-Konvention) —
+      // nur der 'start'-Eintrag zählt, kein 'finalize'-Eintrag.
+      expect(auditStore.getAll().filter((e) => e.command.includes('finalize'))).toHaveLength(0);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+});
+
+describe('POST .../specify/finalize — AC6: 409 bei Finalizer-Lock', () => {
+  it('409 wenn finalizer.start() { ok:false, reason:"locked" } liefert', async () => {
+    const runClaude = jest.fn()
+      .mockResolvedValueOnce(NOT_READY_RAW)
+      .mockResolvedValueOnce(READY_RAW);
+    const finalizer = makeFinalizerStub({ startResult: { ok: false, reason: 'locked' } });
+    const { app } = makeApp({ runClaude, finalizer });
+    const srv = await startServer(app);
+
+    try {
+      const sessionId = await makeReadySession(srv);
+      const { status, body } = await httpPost(srv, '/api/board/projects/demo/ideas/S-900/specify/finalize', { sessionId });
+      expect(status).toBe(409);
+      expect(typeof body.error).toBe('string');
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+});
+
+describe('GET .../specify/finalize/:jobId — AC7: Job-Status', () => {
+  it('200 { status: "done", result } für einen bekannten Job', async () => {
+    const finalizer = makeFinalizerStub({ jobs: { 'job-1': { status: 'done', result: 'Flow abgeschlossen' } } });
+    const { app } = makeApp({ finalizer });
+    const srv = await startServer(app);
+
+    try {
+      const { status, body } = await httpGet(srv, '/api/board/projects/demo/ideas/S-900/specify/finalize/job-1');
+      expect(status).toBe(200);
+      expect(body).toEqual({ status: 'done', result: 'Flow abgeschlossen' });
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('200 { status: "failed", error } — secret-frei durchgereicht', async () => {
+    const finalizer = makeFinalizerStub({ jobs: { 'job-2': { status: 'failed', error: 'Flow-Lauf fehlgeschlagen' } } });
+    const { app } = makeApp({ finalizer });
+    const srv = await startServer(app);
+
+    try {
+      const { status, body } = await httpGet(srv, '/api/board/projects/demo/ideas/S-900/specify/finalize/job-2');
+      expect(status).toBe(200);
+      expect(body).toEqual({ status: 'failed', error: 'Flow-Lauf fehlgeschlagen' });
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('404 bei unbekannter jobId', async () => {
+    const { app } = makeApp({});
+    const srv = await startServer(app);
+    try {
+      const { status, body } = await httpGet(srv, '/api/board/projects/demo/ideas/S-900/specify/finalize/unknown-job');
+      expect(status).toBe(404);
+      expect(typeof body.error).toBe('string');
     } finally {
       await new Promise((r) => srv.close(r));
     }
