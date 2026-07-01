@@ -1,12 +1,18 @@
 #!/bin/bash
 # docker-entrypoint.sh — dev-gui container entrypoint
 #
-# AC6: auto-provisions the agent-flow plugin on first boot, then starts the server.
+# AC6: auto-provisions the agent-flow plugin on first boot.
+# plugin-auto-update (AC1-AC5): on EVERY boot the factory tooling is brought
+# up to date — first-boot install path unchanged; on subsequent boots (plugin
+# already installed) marketplace + plugin are updated instead of being left
+# pinned to whatever version was installed first.
 #
 # Shell safety: errexit + nounset + pipefail.
-# IMPORTANT: the plugin-install block is guarded with its own error handling so
-# that a failed install does NOT abort the container — the server still starts
-# and GUI/status work without the plugin; only /agent-flow:* commands won't resolve.
+# IMPORTANT: the plugin-install/update block is guarded with its own error
+# handling so that a failed install/update does NOT abort the container —
+# the server still starts and GUI/status work without it; only
+# /agent-flow:* commands won't resolve (install failure) or may be
+# outdated (update failure).
 
 set -euo pipefail
 
@@ -38,9 +44,11 @@ if [ -n "${GH_TOKEN:-}" ]; then
   git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
 fi
 
-# ── AC6: agent-flow plugin auto-provision (best-effort) ──────────────────────
+# ── AC6/plugin-auto-update: agent-flow plugin auto-provision + auto-update ───
+# (best-effort, idempotent — see docs/specs/plugin-auto-update.md AC1-AC5)
 # Check without -e (nounset safe: 2>/dev/null swallows errors from `claude`).
 if ! claude plugin list 2>/dev/null | grep -q agent-flow; then
+  # Not installed yet (first boot) → install path, unchanged.
   echo "[entrypoint] agent-flow plugin not found — installing..."
   if claude plugin marketplace add Studis-Softwareschmiede/agent-flow \
      && claude plugin install agent-flow@agent-flow; then
@@ -50,7 +58,17 @@ if ! claude plugin list 2>/dev/null | grep -q agent-flow; then
     echo "[entrypoint] WARNING: /agent-flow:* commands will not resolve until the plugin is installed." >&2
   fi
 else
-  echo "[entrypoint] agent-flow plugin already installed."
+  # Already installed → bring marketplace + plugin up to the latest
+  # published version on every boot instead of staying pinned (AC1).
+  # Idempotent: an already-current marketplace/plugin is not a hard error (AC3).
+  echo "[entrypoint] agent-flow plugin already installed — checking for updates..."
+  if claude plugin marketplace update \
+     && claude plugin update agent-flow@agent-flow; then
+    echo "[entrypoint] agent-flow plugin updated successfully."
+  else
+    echo "[entrypoint] WARNING: agent-flow plugin update failed — continuing with the currently installed version." >&2
+    echo "[entrypoint] WARNING: /agent-flow:* commands may be outdated until the plugin update succeeds." >&2
+  fi
 fi
 
 # ── gh-Auth-Bootstrap: frischen GitHub-App-Token minten ──────────────────────

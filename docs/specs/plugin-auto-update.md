@@ -16,7 +16,7 @@ Der dev-gui-Container installiert das agent-flow-Plugin heute **einmalig** beim 
 ## Verhalten
 1. Bei **jedem** Container-Boot bringt `docker-entrypoint.sh` das agent-flow-Plugin auf den aktuellen Stand:
    - Ist das Plugin **noch nicht** installiert → Marketplace hinzufügen + Plugin **installieren** (bisheriges Verhalten, unverändert).
-   - Ist das Plugin **bereits** installiert → Marketplace **aktualisieren** (`claude plugin marketplace update`) **und** Plugin **aktualisieren** (`claude plugin update agent-flow` bzw. das äquivalente CLI-Kommando), sodass die neueste veröffentlichte Version aktiv ist.
+   - Ist das Plugin **bereits** installiert → Marketplace **aktualisieren** (`claude plugin marketplace update`) **und** Plugin **aktualisieren** (`claude plugin update agent-flow@agent-flow` — **qualifizierter** Name, analog zum Install-Kommando; der bloße Name `agent-flow` schlägt live mit Exit 1 „not found" fehl, siehe Verträge) bzw. das äquivalente CLI-Kommando, sodass die neueste veröffentlichte Version aktiv ist.
 2. Der Aktualisierungs-/Installationsblock ist **guarded/best-effort** analog zum bestehenden Install-Block: schlägt ein Schritt fehl, **bricht der Container nicht ab** (`set -e`-sicher). Der Server startet, GUI und Status funktionieren; nur `/agent-flow:*` sind dann ggf. veraltet.
 3. Der Block ist **idempotent**: mehrfache Boots konvergieren zum selben Zustand; ein bereits hinzugefügter Marketplace oder eine bereits aktuelle Version führen **nicht** zu einem harten Fehler/Abbruch.
 4. Erfolg und Misserfolg sind im Boot-Log **unterscheidbar** markiert (Erfolgs-Marker vs. Warnung auf stderr).
@@ -33,7 +33,7 @@ Der dev-gui-Container installiert das agent-flow-Plugin heute **einmalig** beim 
 - **Datei:** `docker-entrypoint.sh`, Abschnitt „agent-flow plugin auto-provision" (aktuell ~Zeile 43, `if ! claude plugin list … grep -q agent-flow; then <install>; else echo "already installed"; fi`).
 - **CLI-Kommandos (best-effort, jeweils Exit-Code abgefangen):**
   - Erstinstallation: `claude plugin marketplace add Studis-Softwareschmiede/agent-flow` + `claude plugin install agent-flow@agent-flow` (unverändert).
-  - Aktualisierung: `claude plugin marketplace update` + `claude plugin update agent-flow` (oder das äquivalente, vom installierten Claude-CLI unterstützte Update-Kommando).
+  - Aktualisierung: `claude plugin marketplace update` + `claude plugin update agent-flow@agent-flow` (**qualifizierter** Name — live verifiziert: der bloße Name `agent-flow` scheitert in allen Scopes mit Exit 1 „Plugin \"agent-flow\" not found"; oder das äquivalente, vom installierten Claude-CLI unterstützte Update-Kommando).
 - **Shell-Kontext:** `set -euo pipefail` ist global aktiv; der Block muss seine Fehler **lokal** neutralisieren (bestehendes Muster: `2>/dev/null`, `if … then … else <warn> fi`, kein nacktes fehlschlagendes Kommando unter `set -e`).
 - **Reihenfolge:** Der Update-/Install-Block läuft **vor** dem gh-Auth-Bootstrap (der `PLUGIN_ROOT` unter `$HOME/.claude/plugins/cache/agent-flow` sucht) — die bestehende Reihenfolge bleibt erhalten, damit ein frisch aktualisiertes Plugin auch die aktuelle `ensure-gh-auth.sh` liefert.
 
