@@ -2,7 +2,7 @@ id: S-219
 parent: F-040
 title: 'Core-Fix: HeadlessRunnerCore setzt command+args zu EINEM -p-argv-Element zusammen
   (Argumentverlust behoben) + Regressionstest fuer nicht-leere args'
-status: To Do
+status: Done
 priority: P1
 spec: docs/specs/headless-arg-finalize-safety.md
 implements:
@@ -16,20 +16,20 @@ labels:
 - security
 size_est: M
 dispo_est: '5.0'
-dispo_act: null
-dispo_forecast: null
+dispo_act: '3'
+dispo_forecast: '.6666'
 estimate_note: 'M-Heuristik: n_ac=4 (AC1,AC2,AC3,AC8), n_comp~2 (HeadlessRunnerCore.js
   Fix + HeadlessRunnerCore.test.js Regressionstest; Reconcile/Flow-Delegation nur
   read-only geprueft), label_bump+1 (security) -> score 7 -> M. S/M-Pfad kein estimator.
   baseline.json js|balanced|M ep=5.0 (n=8) -> dispo_est 5.0. confidence medium (n>=3).
   Hinweis: chirurgischer Ein-Zeilen-Kernfix, real eher am unteren M-Rand.'
 confidence: medium
-branch: null
+branch: feat/S-219-headless-argv-core-fix
 pr: null
 blocked_reason: null
 created_at: '2026-07-01T19:37:10Z'
-updated_at: '2026-07-01T19:38:18Z'
-done_at: null
+updated_at: '2026-07-01T19:56:10Z'
+done_at: '2026-07-01T19:56:10Z'
 notes: 'Spec: docs/specs/headless-arg-finalize-safety.md AC1,AC2,AC3,AC8. HAUPTBUG
   (RC1), zentral. Prioritaet P1 -- muss zuerst landen (ist DER Fix).
 
@@ -55,3 +55,4 @@ notes: 'Spec: docs/specs/headless-arg-finalize-safety.md AC1,AC2,AC3,AC8. HAUPTB
 
   Child-Env-Floor unveraendert: kein ANTHROPIC_API_KEY/OPENAI_API_KEY, kein Secret/Host-Pfad-Leak
   (AC8).'
+tok: null
