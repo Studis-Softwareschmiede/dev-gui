@@ -18,6 +18,13 @@
  *   Error tolerance: fehlende Felder / Crashes → ready=false, kein Absturz.
  *
  *   Endpoint-Shape: _readBoard liefert stories mit ready/ready_reason-Feldern.
+ *
+ * Covers (ideen-inbox):
+ *   AC2 — Ein Idee-Item ist nie ready: computeStoryReadyStatus liefert für
+ *          status: Idee bereits ready=false/ready_reason=null (Rule (1), status ≠
+ *          To Do — kein neuer Code, nur Verifikation der bestehenden Regel gegen
+ *          den neuen kanonischen Status). Zusätzlich End-to-End via BoardAggregator
+ *          (_readBoard/scan): kein Crash, korrekte ready/ready_reason-Felder.
  */
 
 import { describe, it, expect } from '@jest/globals';
@@ -142,6 +149,21 @@ describe('computeStoryReadyStatus — rule (1): status must be To Do', () => {
     // here status is "Blocked" so rule 1 fires first (status ≠ To Do → not relevant).
     const story = readyStory({ status: 'Blocked', blocked_reason: 'waiting on owner' });
     const fsDeps = makeFsDeps({ specContent: VALID_SPEC });
+    const result = await computeStoryReadyStatus(story, fsDeps, REPO_PATH, makeStoriesMap());
+    expect(result.ready).toBe(false);
+    expect(result.ready_reason).toBeNull();
+  });
+
+  it('ideen-inbox AC2: returns ready=false, ready_reason=null for Idee stories (rule 1 — status ≠ To Do), even without spec/implements', async () => {
+    // Idee-Items haben laut Schema weder spec noch implements gesetzt — die Regel
+    // greift bereits bei Rule (1), bevor spec/implements überhaupt geprüft würden.
+    const story = readyStory({
+      status: 'Idee',
+      spec: null,
+      implements: [],
+      blocked_reason: null,
+    });
+    const fsDeps = makeFsDeps({ throwOnRead: true });
     const result = await computeStoryReadyStatus(story, fsDeps, REPO_PATH, makeStoriesMap());
     expect(result.ready).toBe(false);
     expect(result.ready_reason).toBeNull();
@@ -408,6 +430,30 @@ labels: []
     expect(stories[0].ready).toBe(false);
     expect(stories[0].ready_reason).toBeTruthy();
     expect(stories[0].ready_reason).toMatch(/nicht gefunden|missing/i);
+  });
+
+  it('ideen-inbox AC2: Idee story gets ready=false, ready_reason=null through BoardAggregator (no crash)', async () => {
+    const fsDeps = buildIntegrationFsDeps({
+      '/fake/repos/test-repo/board/stories/S-005.yaml': `id: S-005
+parent: F-001
+title: Rohe Notiz
+status: Idee
+priority: null
+notes: Stichworte zu einer vagen Idee
+labels: []
+`,
+    });
+    const agg = new BoardAggregator({
+      boardRootsEnv: '/fake/repos',
+      fsDeps,
+    });
+    const index = await agg.getIndex();
+    expect(index[0].error).toBeUndefined();
+    const stories = index[0].features[0].stories;
+    expect(stories).toHaveLength(1);
+    expect(stories[0].status).toBe('Idee');
+    expect(stories[0].ready).toBe(false);
+    expect(stories[0].ready_reason).toBeNull();
   });
 
   it('blocked story gets ready=false with blocked reason', async () => {

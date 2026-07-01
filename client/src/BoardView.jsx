@@ -3,7 +3,7 @@
  *
  * dev-gui-board-aggregator:
  *   AC4  — Dreistufige Übersicht Projekt → Feature → Story mit Status-Spalten
- *           (To Do / In Progress / Blocked / In Review / Done), aggregiert über
+ *           (Idee / To Do / In Progress / Blocked / In Review / Done), aggregiert über
  *           alle gescannten Projekte. Lädt GET /api/board/projects beim Mount.
  *           Ladezustand (aria-busy/aria-live); Fehlerzustand; Leerzustand.
  *   AC5  — Rollup-Anzeige je Feature: vorhandenes progress-Feld nutzen; fehlt/stale
@@ -13,10 +13,10 @@
  *
  * studis-kanban-board-ux:
  *   AC1  — Umbenennung: View-Titel + aria-label = „Studis-Kanban-Board". Route-id bleibt `board`.
- *   AC2  — Status-Filter-Default: alle 5 Status vorausgewählt (alles sichtbar);
- *           Deselektieren blendet aus.
+ *   AC2  — Status-Filter-Default: alle Status vorausgewählt (alles sichtbar);
+ *           Deselektieren blendet aus. (Seit ideen-inbox AC1: 6 Status inkl. „Idee".)
  *   AC3  — Alle Status deselektiert → keine Stories + role=status „Kein Status gewählt".
- *   AC4  — Status-Filter als Popover: Button „Status (n/5) ▾", Klick-Toggle,
+ *   AC4  — Status-Filter als Popover: Button „Status (n/N) ▾", Klick-Toggle,
  *           schließt bei Außenklick + Esc; aria-expanded/-controls.
  *   AC5  — GET /api/board/projects/list (leicht) + GET /api/board/projects/:slug (voll).
  *   AC6  — Standalone: öffnet mit Projektliste, Klick lädt ein Projekt (lazy).
@@ -55,6 +55,15 @@
  *           „ready"-Badge (grün); Blocked-Stories zeigen ihren blocked_reason als
  *           Hinweiszeile unter dem Titel. Kontrast WCAG AA; aria-label an Badges.
  *
+ * ideen-inbox:
+ *   AC1  — Status „Idee" ist erstes Element von STATUS_LIFECYCLE (ganz links vor
+ *           „To Do"); „Idee"-Spalte rendert links von „To Do"; Status-Filter führt
+ *           „Idee" (Default ausgewählt, wie alle Status).
+ *   AC2  — Idee-Items sind nie ready: computeStoryReadyStatus (src/BoardAggregator.js)
+ *           liefert für status ≠ To Do bereits ready=false/ready_reason=null; die
+ *           Ready-Badge-Bedingung bleibt auf story.status === 'To Do' beschränkt →
+ *           „Idee"-Karten zeigen kein ready-Badge (kein neuer Code nötig, nur Test-Beleg).
+ *
  * board-feature-collapse:
  *   AC1  — Jede Feature-Zeile hat einen Auf-/Zu-Schalter (Collapse-Button mit Chevron);
  *           eingeklappt sind Story-Spalten ausgeblendet; ausgeklappt wie bisher sichtbar.
@@ -72,8 +81,8 @@
  *           Tastatur (Enter/Space); Fokusring erhalten; Chevron aria-hidden.
  *   AC8  — Kein dangerouslySetInnerHTML; kein neuer API-Aufruf; keine Secrets.
  *
- * Story-Status-Lebenszyklus (board-subsystem §9.3):
- *   To Do | In Progress | Blocked | In Review | Done
+ * Story-Status-Lebenszyklus (board-subsystem §9.3, erweitert um ideen-inbox AC1):
+ *   Idee | To Do | In Progress | Blocked | In Review | Done
  *
  * A11y (WCAG 2.1 AA):
  *   - <main> mit aria-label „Studis-Kanban-Board".
@@ -100,8 +109,13 @@ import { parseEntityLabel } from './icons/parseEntityLabel.js';
 
 // ── Status-Lebensyklus (board-subsystem §9.3) ─────────────────────────────────
 
-/** Canonical story-status lifecycle values. */
-const STATUS_LIFECYCLE = ['To Do', 'In Progress', 'Blocked', 'In Review', 'Done'];
+/**
+ * Canonical story-status lifecycle values.
+ * ideen-inbox AC1: „Idee" ist GANZ LINKS einsortiert (vor „To Do") — Front-of-Funnel
+ * vor dem eigentlichen Drain-Modell; Reihenfolge bestimmt sowohl Spalten-Rendering
+ * (STATUS_LIFECYCLE.map in FeatureRow) als auch die Filter-Checkbox-Reihenfolge.
+ */
+const STATUS_LIFECYCLE = ['Idee', 'To Do', 'In Progress', 'Blocked', 'In Review', 'Done'];
 
 /**
  * "Done" story-statuses for rollup calculation (AC5).
@@ -282,7 +296,7 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
   const [projects, setProjects] = useState([]);
 
   // ─── Filter state (AC2, AC3, AC4) ───────────────────────────────────────────
-  // AC2: default = all 5 status selected (new Set(STATUS_LIFECYCLE))
+  // AC2: default = all status selected (new Set(STATUS_LIFECYCLE), now 6 incl. „Idee")
   const [filterProject, setFilterProject] = useState(lockedProject ?? '');
   const [filterStatus, setFilterStatus]   = useState(() => new Set(STATUS_LIFECYCLE)); // AC2: alle vorausgewählt
   const [filterLabel, setFilterLabel]     = useState('');
@@ -338,7 +352,7 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
 
   /**
    * Whether ANY filter is restricting the view — used for AC6 filter-wechselwirkung.
-   * A restricting filter = status filter not all-5, OR label filter active.
+   * A restricting filter = status filter not all-selected, OR label filter active.
    */
   const hasRestrictingFilter = useMemo(() => {
     return filterStatus.size < STATUS_LIFECYCLE.length || Boolean(filterLabel);
@@ -545,7 +559,7 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
         if (p.error) return p;
         const filteredFeatures = (p.features ?? []).map((f) => {
           const filteredStories = (f.stories ?? []).filter((s) => {
-            // AC2/AC3: filterStatus is always a non-empty Set (all 5 by default);
+            // AC2/AC3: filterStatus is always a non-empty Set (all STATUS_LIFECYCLE by default);
             // empty Set = AC3 scenario → no stories shown
             if (!filterStatus.has(s.status)) return false;
             if (filterLabel && !(s.labels ?? []).includes(filterLabel)) return false;
@@ -804,10 +818,11 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
  * Also contains Alle-ein-/ausklappen-Schalter (AC4 board-feature-collapse).
  *
  * AC4 (studis-kanban-board-ux): Status-Filter as click-toggle popover.
- *   Button "Status (n/5) ▾" opens a floating panel with checkboxes.
+ *   Button "Status (n/N) ▾" opens a floating panel with checkboxes.
  *   Closes on outside click and Esc. Button carries aria-expanded/aria-controls.
  *
- * AC2 (studis-kanban-board-ux): default = all 5 selected (passed in from parent).
+ * AC2 (studis-kanban-board-ux): default = all selected (passed in from parent);
+ *   N = statusOptions.length (6 incl. „Idee", ideen-inbox AC1).
  *
  * AC4 (board-feature-collapse): "Alle einklappen" / "Alle ausklappen" Schalter.
  *
@@ -895,13 +910,13 @@ function FilterBar({
     onStatusChange(next);
   }
 
-  // AC4: button label "Status (n/5) ▾"
+  // AC4: button label "Status (n/N) ▾"
   const checkedCount = filterStatus.size;
   const totalCount   = statusOptions.length;
   const statusLabel  = `Status (${checkedCount}/${totalCount}) ▾`;
 
   // "Any filter active" determines whether reset button appears.
-  // AC2: all 5 selected is NOT a "filter active" state; fewer than 5 OR label/project IS active.
+  // AC2: all selected is NOT a "filter active" state; fewer than all OR label/project IS active.
   const allSelected = checkedCount === totalCount;
   const anyFilterActive =
     (!hideProjectFilter && filterProject) ||
@@ -1884,6 +1899,8 @@ function StatusBadge({ status }) {
 }
 
 const STATUS_BADGE_STYLES = {
+  // ideen-inbox AC1: eigener Farbton für „Idee" (Contrast: #67e8f9 on #0f2a2a ≈ 10.5:1 — WCAG AA).
+  'Idee':        { background: '#0f2a2a', color: '#67e8f9', borderColor: '#164e4e' },
   'To Do':       { background: '#1e293b', color: '#93c5fd', borderColor: '#334155' },
   'In Progress': { background: '#2a1a1a', color: '#fde68a', borderColor: '#78350f' },
   'Blocked':     { background: '#2a1a1a', color: '#f87171', borderColor: '#7f1d1d' },
@@ -2019,7 +2036,7 @@ const styles = {
     position: 'relative',
     display: 'inline-block',
   },
-  // AC4: button "Status (n/5) ▾"
+  // AC4: button "Status (n/N) ▾"
   statusPopoverBtn: {
     background: '#1a1a1a',
     border: '1px solid #333',
@@ -2282,9 +2299,11 @@ const styles = {
   },
 
   // ── Status columns (AC4 — Kanban-style)
+  // gridTemplateColumns folgt STATUS_LIFECYCLE.length dynamisch (ideen-inbox AC1
+  // fügt „Idee" hinzu — 6 statt 5 Spalten; kein hartcodiertes repeat(5,...) mehr).
   statusColumns: {
     display: 'grid',
-    gridTemplateColumns: 'repeat(5, minmax(0, 1fr))',
+    gridTemplateColumns: `repeat(${STATUS_LIFECYCLE.length}, minmax(0, 1fr))`,
     gap: 8,
   },
 

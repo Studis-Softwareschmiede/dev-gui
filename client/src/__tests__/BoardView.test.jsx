@@ -48,6 +48,14 @@
  * Covers (projekt-spezifikation-anzeige):
  *   AC5 — Story-Spec-Bezug ist klickbar (onOpenSpec-Prop) und ruft onOpenSpec(relPath) auf.
  *
+ * Covers (ideen-inbox):
+ *   AC1 — „Idee" ist erstes Element von STATUS_LIFECYCLE; „Idee"-Spalte rendert links
+ *          von „To Do" (DOM-Reihenfolge); Status-Filter führt „Idee"-Checkbox, Default
+ *          angehakt (Teil der „alle 6 vorausgewählt"-Zusicherung).
+ *   AC2 — Idee-Story trägt kein ready-Badge (ready-Badge-Bedingung bleibt auf
+ *          status === 'To Do' beschränkt; Cross-Ref zur Backend-Zusicherung in
+ *          test/boardReadyStatus.test.js).
+ *
  * NOTE (jsdom-Limitation): jsdom hat keine Layout-Engine — Style-Property-Asserts beweisen
  * kein Scroll-/Layout-Verhalten; getestet werden Verhalten, Struktur, Rollen und aria.
  *
@@ -124,6 +132,36 @@ const STORY_IN_REVIEW = {
   priority: 'low',
   labels: ['backend'],
   spec: null,
+};
+
+// ideen-inbox AC1/AC2 fixtures — isolated feature/project so existing rollup/count
+// assertions on FEATURE_WITH_PROGRESS/FEATURE_NO_PROGRESS stay unaffected.
+const STORY_IDEE = {
+  id: 'S-006',
+  parent: 'F-010',
+  title: 'Rohe Notiz: Dark-Mode-Toggle',
+  status: 'Idee',
+  priority: null,
+  labels: [],
+  spec: null,
+  ready: false,
+  ready_reason: null,
+};
+
+const FEATURE_IDEE = {
+  id: 'F-010',
+  title: 'Inbox',
+  status: null,
+  priority: null,
+  stories: [STORY_IDEE, STORY_TODO],
+};
+
+const PROJECT_IDEE = {
+  slug: 'project-idee',
+  repo_path: '/home/user/Git/idee',
+  project_slug: 'project-idee',
+  schema_version: 1,
+  features: [FEATURE_IDEE],
 };
 
 const FEATURE_WITH_PROGRESS = {
@@ -564,7 +602,7 @@ describe('studis-kanban-board-ux — AC5: Backend endpoint URLs', () => {
 // ── AC2 (studis-kanban-board-ux) — Status-Filter Default alle gewählt ─────────
 
 describe('studis-kanban-board-ux — AC2: Status-Filter Default alle ausgewählt', () => {
-  it('all 5 status checkboxes are checked by default (cockpit)', async () => {
+  it('all 6 status checkboxes are checked by default (cockpit; ideen-inbox AC1 „Idee" hinzu)', async () => {
     globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
     const { container } = renderCockpit('project-alpha');
 
@@ -579,7 +617,7 @@ describe('studis-kanban-board-ux — AC2: Status-Filter Default alle ausgewählt
 
     await waitFor(() => {
       const checkboxes = container.querySelectorAll('#board-filter-status-group input[type="checkbox"]');
-      expect(checkboxes).toHaveLength(5);
+      expect(checkboxes).toHaveLength(6);
       for (const cb of checkboxes) {
         expect(cb.checked).toBe(true);
       }
@@ -623,7 +661,7 @@ describe('studis-kanban-board-ux — AC2: Status-Filter Default alle ausgewählt
     });
   });
 
-  it('status button label shows "Status (5/5) ▾" by default (cockpit)', async () => {
+  it('status button label shows "Status (6/6) ▾" by default (cockpit; ideen-inbox AC1 6 statuses)', async () => {
     globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
     const { container } = renderCockpit('project-alpha');
 
@@ -633,10 +671,10 @@ describe('studis-kanban-board-ux — AC2: Status-Filter Default alle ausgewählt
 
     const btn = container.querySelector('[data-testid="status-filter-btn"]');
     expect(btn).toBeTruthy();
-    expect(btn.textContent).toMatch(/Status \(5\/5\)/);
+    expect(btn.textContent).toMatch(/Status \(6\/6\)/);
   });
 
-  it('status button label shows "Status (n/5) ▾" after deselect', async () => {
+  it('status button label shows "Status (n/6) ▾" after deselect', async () => {
     globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
     const { container } = renderCockpit('project-alpha');
 
@@ -654,7 +692,24 @@ describe('studis-kanban-board-ux — AC2: Status-Filter Default alle ausgewählt
     });
 
     const btn = container.querySelector('[data-testid="status-filter-btn"]');
-    expect(btn.textContent).toMatch(/Status \(4\/5\)/);
+    expect(btn.textContent).toMatch(/Status \(5\/6\)/);
+  });
+
+  it('ideen-inbox AC1: Status-Filter führt „Idee"-Checkbox, Default angehakt', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="status-filter-btn"]'));
+    });
+
+    const ideeCheckbox = container.querySelector('#board-filter-status-idee');
+    expect(ideeCheckbox).toBeTruthy();
+    expect(ideeCheckbox.checked).toBe(true);
   });
 });
 
@@ -675,7 +730,7 @@ describe('studis-kanban-board-ux — AC3: Alle Status deselektiert → Hinweis',
     });
 
     // Uncheck all 5
-    const statuses = ['to-do', 'in-progress', 'blocked', 'in-review', 'done'];
+    const statuses = ['idee', 'to-do', 'in-progress', 'blocked', 'in-review', 'done'];
     for (const s of statuses) {
       await act(async () => {
         const cb = container.querySelector(`#board-filter-status-${s}`);
@@ -704,7 +759,7 @@ describe('studis-kanban-board-ux — AC3: Alle Status deselektiert → Hinweis',
       fireEvent.click(container.querySelector('[data-testid="status-filter-btn"]'));
     });
 
-    const statuses = ['to-do', 'in-progress', 'blocked', 'in-review', 'done'];
+    const statuses = ['idee', 'to-do', 'in-progress', 'blocked', 'in-review', 'done'];
     for (const s of statuses) {
       await act(async () => {
         fireEvent.click(container.querySelector(`#board-filter-status-${s}`));
@@ -751,7 +806,7 @@ describe('studis-kanban-board-ux — AC4: Status-Filter als Popover', () => {
     expect(container.querySelector('[data-testid="status-popover"]')).toBeTruthy();
 
     const checkboxes = container.querySelectorAll('#board-filter-status-group input[type="checkbox"]');
-    expect(checkboxes).toHaveLength(5);
+    expect(checkboxes).toHaveLength(6);
   });
 
   it('second click closes popover (aria-expanded=false)', async () => {
@@ -916,17 +971,49 @@ describe('dev-gui-board-aggregator — AC4: Mount loads project in cockpit', () 
     });
   });
 
-  it('renders all five status columns for a feature (AC4 status columns, cockpit)', async () => {
+  it('renders all six status columns for a feature (AC4 status columns, cockpit; ideen-inbox AC1)', async () => {
     globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
     const { container } = renderCockpit('project-alpha');
 
     await waitFor(() => {
       const feature = container.querySelector('[data-feature="F-001"]');
+      expect(feature.querySelector('[data-status="Idee"]')).toBeTruthy();
       expect(feature.querySelector('[data-status="To Do"]')).toBeTruthy();
       expect(feature.querySelector('[data-status="In Progress"]')).toBeTruthy();
       expect(feature.querySelector('[data-status="Blocked"]')).toBeTruthy();
       expect(feature.querySelector('[data-status="In Review"]')).toBeTruthy();
       expect(feature.querySelector('[data-status="Done"]')).toBeTruthy();
+    });
+  });
+
+  it('ideen-inbox AC1: „Idee"-Spalte rendert als erste Spalte, links von „To Do"', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+
+    await waitFor(() => {
+      const feature = container.querySelector('[data-feature="F-001"]');
+      expect(feature).toBeTruthy();
+      const columnsList = feature.querySelector('[role="list"][aria-label="Stories nach Status"]');
+      expect(columnsList).toBeTruthy();
+      const columns = Array.from(columnsList.querySelectorAll('[data-status]'));
+      expect(columns.map((c) => c.getAttribute('data-status'))).toEqual([
+        'Idee', 'To Do', 'In Progress', 'Blocked', 'In Review', 'Done',
+      ]);
+    });
+  });
+
+  it('ideen-inbox AC1: eine Story mit status:Idee wird in die „Idee"-Spalte einsortiert (nicht in „To Do")', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_IDEE] });
+    const { container } = renderCockpit('project-idee');
+
+    await waitFor(() => {
+      const ideeCol = container.querySelector('[data-status="Idee"]');
+      expect(ideeCol).toBeTruthy();
+      expect(ideeCol.querySelector(`[data-story="${STORY_IDEE.id}"]`)).toBeTruthy();
+
+      const toDoCol = container.querySelector('[data-status="To Do"]');
+      expect(toDoCol.querySelector(`[data-story="${STORY_IDEE.id}"]`)).toBeNull();
+      expect(toDoCol.querySelector(`[data-story="${STORY_TODO.id}"]`)).toBeTruthy();
     });
   });
 
