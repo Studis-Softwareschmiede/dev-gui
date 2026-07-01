@@ -1,0 +1,23 @@
+id: F-038
+title: Audit-Spec-Logbuch in die Haupt-Inhaltsflaeche verlagern
+goal: 'Der Button ''Audit-Spec anzeigen'' (S-203) rendert docs/spec-audit.md heute
+  in der schmalen linken Sidebar (gequetscht), waehrend die grosse rechte Haupt-Inhaltsflaeche
+  leer daneben steht. Ziel: die gerenderte Ausgabe wandert in die rechte Haupt-Inhaltsflaeche
+  (dieselbe Flaeche wie ein per Navigation gewaehltes Dokument, via MarkdownLite,
+  gleiche Breite/Padding/Scroll). Der Button bleibt als kleiner Sekundaer-Button in
+  der Sidebar. Umschalten Audit <-> Navigations-Dokument in einer Quelle; 404/Lade-/Fehlerzustaende
+  + Auto-Reload (S-205) + PR-Bezug bleiben erhalten, jetzt in der Hauptflaeche.'
+status: Backlog
+priority: P2
+spec: docs/specs/audit-spec-main-pane.md
+definition_of_done: null
+labels:
+- ui
+- reconcile
+depends:
+- F-033
+owner: null
+stories: null
+progress: null
+created_at: '2026-07-01T11:06:40Z'
+updated_at: '2026-07-01T11:06:40Z'
