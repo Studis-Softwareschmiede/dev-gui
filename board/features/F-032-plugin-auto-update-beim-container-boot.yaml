@@ -1,0 +1,24 @@
+id: F-032
+title: Plugin-Auto-Update beim Container-Boot
+goal: 'docker-entrypoint.sh installiert das agent-flow-Plugin heute nur EINMALIG beim
+  ersten Boot und aktualisiert es nie (''already installed''-Zweig) — die im Container
+  installierte Version (Stand erster Boot) kennt neue/umbenannte Fabrik-Befehle wie
+  /agent-flow:reconcile nicht, sie loesen im Panel nicht auf. Ziel: bei JEDEM Boot
+  die Fabrik-Werkzeuge best-effort/guarded auf den aktuellen Stand bringen (Marketplace-Update
+  + Plugin-Update, bzw. Install falls fehlend), nicht-fatal (Server startet auch bei
+  Update-Fehler), idempotent, mit Boot-Log-Marker. Nach dem Boot loest /agent-flow:reconcile
+  auf.'
+status: Backlog
+priority: P2
+spec: docs/specs/plugin-auto-update.md
+definition_of_done: null
+labels:
+- infra
+- reconcile
+depends: null
+owner: null
+stories:
+- S-202
+progress: 0/1 done
+created_at: '2026-07-01T04:46:56Z'
+updated_at: '2026-07-01T04:48:50Z'
