@@ -3,6 +3,7 @@
  * runner with a configurable command (Default `/agent-flow:flow`).
  *
  * Covers (headless-parallel-drain): AC1, AC2, AC3, AC13
+ * Covers (headless-arg-finalize-safety): AC1, AC2, AC3
  *
  *   AC1 — spawn args are an array (no shell string): ['-p', <command>,
  *         '--dangerously-skip-permissions', ...extraArgs]; default command is
@@ -16,6 +17,13 @@
  *   AC3 — own, much more generous configurable timeout (FLOW_HEADLESS_TIMEOUT_MS),
  *         independent of DEFAULT_RECONCILE_TIMEOUT_MS; timeout → SIGTERM + failed.
  *   AC13 — gate = unit tests with a mocked spawnFn (no real `claude -p` run).
+ *
+ *   headless-arg-finalize-safety AC1/AC2/AC3 — non-empty `args` (constructor
+ *   default AND per-start override) are joined into the SAME single `-p` argv
+ *   element as `command` (`<command> <args.join(' ')>`), never as separate argv
+ *   elements — the argument-loss bug this spec fixes centrally in the shared
+ *   `HeadlessRunnerCore` (see below, dedicated `HeadlessRunnerCore.test.js` for
+ *   the core-level regression gate).
  *
  * Pattern: injectable `spawnFn` returning a fake EventEmitter-based child
  * process (stdout/stderr sub-emitters + kill() spy) — no real `claude` spawn.
@@ -70,7 +78,7 @@ describe('HeadlessFlowRunner — AC1: configurable command, default /agent-flow:
     expect(typeof opts.env).toBe('object');
   });
 
-  it('appends configurable extra args (e.g. --cost <mode>) from the constructor default', () => {
+  it('appends configurable extra args (e.g. --cost <mode>) joined into the SAME -p argv element as the command (headless-arg-finalize-safety AC1)', () => {
     const child = makeFakeChild();
     const spawnFn = jest.fn(() => child);
     const runner = new HeadlessFlowRunner({ spawnFn, timeoutMs: 10_000, args: ['--cost', 'balanced'] });
@@ -78,10 +86,13 @@ describe('HeadlessFlowRunner — AC1: configurable command, default /agent-flow:
     runner.start('/workspace/my-project');
 
     const [, args] = spawnFn.mock.calls[0];
-    expect(args).toEqual(['-p', '/agent-flow:flow', '--dangerously-skip-permissions', '--cost', 'balanced']);
+    // command + args are ONE argv element after '-p' — `claude -p` only accepts a
+    // single prompt argument; anything passed as a separate argv element would be
+    // silently dropped (docs/specs/headless-arg-finalize-safety.md AC1).
+    expect(args).toEqual(['-p', '/agent-flow:flow --cost balanced', '--dangerously-skip-permissions']);
   });
 
-  it('allows overriding command + args per start() call (not just constructor default)', () => {
+  it('allows overriding command + args per start() call (not just constructor default) — still joined into one -p argv element', () => {
     const child = makeFakeChild();
     const spawnFn = jest.fn(() => child);
     const runner = new HeadlessFlowRunner({ spawnFn, timeoutMs: 10_000 });
@@ -89,7 +100,7 @@ describe('HeadlessFlowRunner — AC1: configurable command, default /agent-flow:
     runner.start('/workspace/my-project', { command: '/agent-flow:other', args: ['--cost', 'economical'] });
 
     const [, args] = spawnFn.mock.calls[0];
-    expect(args).toEqual(['-p', '/agent-flow:other', '--dangerously-skip-permissions', '--cost', 'economical']);
+    expect(args).toEqual(['-p', '/agent-flow:other --cost economical', '--dangerously-skip-permissions']);
   });
 });
 

@@ -10,9 +10,14 @@
  * spawn/env/timeout/lock/close semantics instead of re-implementing them.
  *
  * Design (1:1 taken from HeadlessReconcileRunner, generalised):
- *   - Kindprozess: `claude -p '<command>' --dangerously-skip-permissions [...extraArgs]`
- *     as Array-argv (kein Shell-String, security/R03), `cwd` = aufgelöster
+ *   - Kindprozess: `claude -p '<command> <args.join(" ")>' --dangerously-skip-permissions`
+ *     als Array-argv (kein Shell-String, security/R03), `cwd` = aufgelöster
  *     Projekt-Pfad (Aufrufer löst Slug→Pfad auf, BEVOR `start()` aufgerufen wird).
+ *     `command` und `args` werden zu EINEM zusammenhängenden `-p`-argv-Element
+ *     zusammengesetzt (docs/specs/headless-arg-finalize-safety.md AC1) — `claude -p`
+ *     nimmt nur ein Argument nach `-p` als Prompt entgegen, alles danach ginge sonst
+ *     verloren. Bei `args: []` bleibt das Verhalten bit-identisch zum bisherigen
+ *     Reconcile-/Flow-/Nacht-Drain-Pfad.
  *   - Spawn-Env: minimale Allowlist (Shell-/Locale-Plumbing) + `CLAUDE_CODE_OAUTH_TOKEN`
  *     sofern im Server-Prozess gesetzt; `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` werden
  *     NIE in die Child-Env übernommen (Trust-Boundary).
@@ -242,7 +247,14 @@ export class HeadlessRunnerCore {
         };
 
         try {
-          child = this.#spawnFn('claude', ['-p', command, '--dangerously-skip-permissions', ...args], {
+          // Bugfix (docs/specs/headless-arg-finalize-safety.md AC1): `claude -p`
+          // nimmt nur EIN Argument nach `-p` als Prompt entgegen — command + args
+          // werden daher zu EINEM zusammenhängenden argv-Element zusammengesetzt
+          // (nicht als getrennte argv-Elemente, sonst verpufft alles nach `command`).
+          // Weiterhin Array-Übergabe an spawn() (kein Shell-String) — die
+          // Command-Injection-Schutzeigenschaft (security/R03) bleibt unverändert.
+          const promptArg = args.length > 0 ? `${command} ${args.join(' ')}` : command;
+          child = this.#spawnFn('claude', ['-p', promptArg, '--dangerously-skip-permissions'], {
             cwd: projectPath,
             env: buildChildEnv(),
           });
