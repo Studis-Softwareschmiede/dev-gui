@@ -29,6 +29,19 @@
  * AC7 — Netzwerkfehler/500 → sichtbare Fehleranzeige mit Reset, kein onNavigate.
  * Gespiegelt vom „Board abarbeiten"-Muster (CockpitView.jsx FactoryWorkspace).
  *
+ * spec-audit-view (S-203) — Sekundär-Button „Audit-Spec anzeigen" direkt
+ * unterhalb des ReconcileTrigger-Buttons:
+ * AC1 — Sekundär-Button „Audit-Spec anzeigen" direkt unterhalb des
+ *        ReconcileTrigger-Buttons; Touch-Target ≥ 44 px, Zustand per Text
+ *        erkennbar (nicht nur Farbe).
+ * AC2 — Klick löst genau einen GET .../docs/raw?path=docs/spec-audit.md aus;
+ *        Markdown wird über MarkdownLite gerendert und ist sichtbar.
+ * AC3 — 404 (Datei fehlt) → freundlicher Hinweis „noch kein Reconcile-Lauf"
+ *        (role="status"), keine rohe Fehlermeldung, kein Crash.
+ * AC4 — Zugänglicher Lade-Zustand während des Ladens; Netzwerkfehler/500/
+ *        unerwarteter Status → sichtbare, neutrale Fehleranzeige (role="alert"),
+ *        kein Crash, übriger Reiter bleibt bedienbar.
+ *
  * Security (Floor):
  *   - Kein dangerouslySetInnerHTML / kein innerHTML.
  *   - Nur /api/board/projects/:slug/docs Endpunkte (hinter AccessGuard).
@@ -36,15 +49,20 @@
  *   - Markdown via vorhandenen markdownLite-Renderer (kein fremder Parser).
  *   - reconcile-trigger: kein neuer Endpunkt — bestehender allowlisted/sanitisierter
  *     /api/command-Kanal; Bestätigungsdialog verhindert versehentliches Auslösen.
+ *   - spec-audit-view: kein neuer Endpunkt — wiederverwendet den bestehenden
+ *     docs/raw-Endpunkt mit festem, nicht nutzergesteuertem Pfad
+ *     (docs/spec-audit.md — kein Traversal-Vektor).
  *
  * A11y (WCAG 2.1 AA):
  *   - Navigation als <nav> mit aria-label.
  *   - Aktives Dokument mit aria-current="page".
  *   - Ladezustand aria-busy auf dem Inhalts-Container.
  *   - Fokusring nie unterdrückt.
- *   - Touch-Targets ≥ 44 px für Nav-Buttons und den Reconcile-Button.
+ *   - Touch-Targets ≥ 44 px für Nav-Buttons, den Reconcile-Button und den
+ *     Audit-Spec-Button.
  *
  * Covers (reconcile-trigger): AC1, AC2, AC3, AC4, AC5, AC6, AC7
+ * Covers (spec-audit-view): AC1, AC2, AC3, AC4
  *
  * @param {{
  *   projectSlug: string,
@@ -56,8 +74,9 @@
  *   initialPath   — optional: direkt zu öffnende Datei (AC5, z.B. via Story-Klick)
  *   onNavigate    — (reconcile-trigger AC5) navigiert nach erfolgreichem Auslösen
  *                    in den Terminal-/Arbeiten-Bereich ('factory').
- *   fetchFn       — injectable für Tests (default: globalThis.fetch); nur vom
- *                    Reconcile-Trigger genutzt (Doku-Laden bleibt unverändert).
+ *   fetchFn       — injectable für Tests (default: globalThis.fetch); vom
+ *                    Reconcile-Trigger UND vom Audit-Spec-Button genutzt
+ *                    (Doku-Laden im Nav-Baum bleibt unverändert).
  */
 
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
@@ -228,6 +247,12 @@ export function SpecView({ projectSlug, initialPath, onNavigate, fetchFn }) {
           projectSlug={projectSlug}
           fetchFn={fetchFn}
           onNavigate={onNavigate}
+        />
+
+        {/* spec-audit-view (S-203): „Audit-Spec anzeigen"-Button, direkt unterhalb */}
+        <AuditSpecView
+          projectSlug={projectSlug}
+          fetchFn={fetchFn}
         />
 
         {/* Filter (AC6) */}
@@ -522,6 +547,148 @@ function ReconcileTrigger({ projectSlug, fetchFn, onNavigate, pollInterval = REC
           >
             Zurücksetzen
           </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── AuditSpecView (spec-audit-view AC1–AC4) ───────────────────────────────────
+
+/**
+ * AuditSpecView — „Audit-Spec anzeigen"-Sekundär-Button, direkt unterhalb des
+ * ReconcileTrigger-Buttons (spec-audit-view AC1–AC4).
+ *
+ * Klick lädt `docs/spec-audit.md` des aktiven Projekts über die bestehende
+ * Doku-Lese-API und rendert den Inhalt über MarkdownLite. 404 (kein
+ * Reconcile-Lauf) → freundlicher Hinweis statt Fehleranzeige. Netzwerkfehler
+ * oder unerwarteter Status → sichtbare, neutrale Fehleranzeige. Ein
+ * `requestId`-Zähler stellt sicher, dass bei überlappenden Anfragen nur die
+ * zuletzt gestartete Antwort den State setzt („letzte Ladung gewinnt"); ein
+ * synchroner `loadingRef`-Flag (statt eines State-Reads) verhindert, dass
+ * mehrere synchron aufeinanderfolgende Klicks (Doppelklick, bevor React den
+ * `disabled`-State neu gerendert hat) einen zweiten konkurrierenden Request
+ * auslösen. Der Button ist zusätzlich während einer aktiven Ladung
+ * deaktiviert (State-basiert, für den sichtbaren/zugänglichen Zustand).
+ *
+ * @param {{
+ *   projectSlug: string,
+ *   fetchFn?: Function,
+ * }} props
+ *   fetchFn — injectable für Tests (default: globalThis.fetch), analog zum
+ *             ReconcileTrigger.
+ */
+function AuditSpecView({ projectSlug, fetchFn }) {
+  const fetchFnRef = useRef(fetchFn ?? globalThis.fetch.bind(globalThis));
+  useEffect(() => {
+    fetchFnRef.current = fetchFn ?? globalThis.fetch.bind(globalThis);
+  }, [fetchFn]);
+
+  /** 'idle' | 'loading' | 'ok' | 'notfound' | 'error' */
+  const [auditState, setAuditState] = useState('idle');
+  const [auditContent, setAuditContent] = useState('');
+  const [auditError, setAuditError] = useState('');
+
+  // Monotonic request id — guards against overlapping loads (double-click,
+  // repeat click while a previous request is still in flight).
+  const requestIdRef = useRef(0);
+  // Synchronous in-flight flag — checked BEFORE any `await`, so two
+  // `fireEvent.click()` calls fired back-to-back in the same synchronous
+  // event-handler batch (before React re-renders the `disabled` attribute)
+  // still only start one request.
+  const loadingRef = useRef(false);
+
+  const hasProjectSlug = typeof projectSlug === 'string' && projectSlug.trim().length > 0;
+  const isBtnDisabled = !hasProjectSlug || auditState === 'loading';
+
+  const handleClick = useCallback(async () => {
+    // Edge-case: fehlender projectSlug → kein Request mit leerem Slug.
+    if (!hasProjectSlug) return;
+    // Doppelklick-Guard: nur eine aktive Ladung (synchron geprüft).
+    if (loadingRef.current) return;
+    loadingRef.current = true;
+
+    const myRequestId = ++requestIdRef.current;
+    setAuditState('loading');
+    setAuditError('');
+
+    const url = `/api/board/projects/${encodeURIComponent(projectSlug)}/docs/raw?path=${encodeURIComponent('docs/spec-audit.md')}`;
+
+    let res;
+    try {
+      res = await fetchFnRef.current(url);
+    } catch {
+      loadingRef.current = false;
+      if (requestIdRef.current !== myRequestId) return; // stale — a newer load already won
+      setAuditState('error');
+      setAuditError('Netzwerkfehler — bitte erneut versuchen.');
+      return;
+    }
+    loadingRef.current = false;
+    if (requestIdRef.current !== myRequestId) return; // stale
+
+    if (res.status === 404) {
+      // AC3: freundlicher Hinweis statt roher Fehlermeldung.
+      setAuditState('notfound');
+      return;
+    }
+    if (!res.ok) {
+      // AC4: 500/unerwarteter Status → sichtbare, neutrale Fehleranzeige.
+      setAuditState('error');
+      setAuditError(`Fehler beim Laden (HTTP ${res.status}).`);
+      return;
+    }
+
+    const text = await res.text();
+    if (requestIdRef.current !== myRequestId) return; // stale
+    setAuditContent(text);
+    setAuditState('ok');
+  }, [projectSlug, hasProjectSlug]);
+
+  return (
+    <div style={styles.auditBox} data-testid="audit-spec-box">
+      <button
+        type="button"
+        style={isBtnDisabled ? styles.btnAuditSpecDisabled : styles.btnAuditSpec}
+        disabled={isBtnDisabled}
+        aria-disabled={isBtnDisabled}
+        onClick={isBtnDisabled ? undefined : handleClick}
+        aria-label="Audit-Spec anzeigen — zeigt die letzten Reconcile-Aktionen"
+        data-testid="audit-spec-btn"
+      >
+        Audit-Spec anzeigen
+      </button>
+
+      {/* AC4: zugänglicher Lade-Zustand (Text, nicht nur Farbe) */}
+      {auditState === 'loading' && (
+        <div
+          role="status"
+          aria-live="polite"
+          style={styles.auditHint}
+          data-testid="audit-spec-loading"
+        >
+          Lade Audit-Spec…
+        </div>
+      )}
+
+      {/* AC3: 404 → freundlicher Hinweis, kein Fehler-Look */}
+      {auditState === 'notfound' && (
+        <div role="status" style={styles.auditHint} data-testid="audit-spec-notfound">
+          Noch kein Reconcile-Lauf.
+        </div>
+      )}
+
+      {/* AC4: Netzwerkfehler/500/unerwarteter Status → sichtbare Fehleranzeige */}
+      {auditState === 'error' && (
+        <div role="alert" style={styles.auditError} data-testid="audit-spec-error">
+          {auditError}
+        </div>
+      )}
+
+      {/* AC2: geladener Markdown-Inhalt über MarkdownLite */}
+      {auditState === 'ok' && (
+        <div style={styles.auditContentWrapper} data-testid="audit-spec-content">
+          <MarkdownLite markdown={auditContent} style={styles.auditMarkdown} />
         </div>
       )}
     </div>
@@ -963,5 +1130,67 @@ const styles = {
     fontSize: 11,
     cursor: 'pointer',
     minHeight: 32,
+  },
+
+  // ── Audit-Spec-Button (spec-audit-view AC1–AC4) ──
+  auditBox: {
+    padding: '10px 12px',
+    borderBottom: '1px solid #1e1e1e',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 6,
+  },
+
+  btnAuditSpec: {
+    alignSelf: 'flex-start',
+    background: 'transparent',
+    color: '#93c5fd',
+    border: '1px solid #334155',
+    borderRadius: 4,
+    padding: '6px 10px',
+    fontSize: 12,
+    fontWeight: 600,
+    cursor: 'pointer',
+    minHeight: 44,
+    // Focus ring preserved (no outline:none)
+  },
+
+  btnAuditSpecDisabled: {
+    alignSelf: 'flex-start',
+    background: 'transparent',
+    color: '#4b5563',
+    border: '1px solid #262626',
+    borderRadius: 4,
+    padding: '6px 10px',
+    fontSize: 12,
+    fontWeight: 600,
+    cursor: 'not-allowed',
+    minHeight: 44,
+  },
+
+  auditHint: {
+    fontSize: 11,
+    color: '#9ca3af',
+    fontStyle: 'italic',
+  },
+
+  auditError: {
+    fontSize: 11,
+    color: '#f87171',
+  },
+
+  auditContentWrapper: {
+    maxHeight: 300,
+    overflowY: 'auto',
+    border: '1px solid #1e1e1e',
+    borderRadius: 4,
+    padding: '8px 10px',
+    background: '#0d0d0d',
+  },
+
+  auditMarkdown: {
+    fontSize: 12,
+    lineHeight: 1.6,
+    color: '#d1d5db',
   },
 };
