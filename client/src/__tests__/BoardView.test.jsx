@@ -28,6 +28,10 @@
  *          GET /api/board/projects/:slug (cockpit) on mount.
  *   AC6 — Standalone: öffnet mit Projektliste; Klick lädt Projekt (lazy, aria-busy);
  *          Rückweg zur Liste; Cockpit-Modus (lockedProject): direkt ohne Liste.
+ *   AC7 — „Alle/Keine"-Toggle oberhalb der Status-Checkboxen (DOM-Order, im Popover);
+ *          alle ausgewählt → Klick wählt alle ab (greift V3-Hinweis), Label „Keine"/aria-pressed=true;
+ *          keiner/teilweise → Klick wählt alle aus, Label „Alle"/aria-pressed=false; aria-label nennt Aktion.
+ *          Optischer Links-Versatz (marginLeft) in Quelle dokumentiert — nicht per jsdom testbar.
  *
  * Covers (story-detail-ansicht):
  *   AC3, AC4, AC5 — Story-Klick, Soll-Ist, Vorab-Badge; fehlende Schätzung; null-Fälle.
@@ -828,6 +832,105 @@ describe('studis-kanban-board-ux — AC3: Alle Status deselektiert → Hinweis',
       // No story cards visible
       expect(container.querySelector('[data-story]')).toBeNull();
     });
+  });
+});
+
+// ── AC7 (studis-kanban-board-ux) — „Alle/Keine"-Toggle im Popover ────────────
+
+describe('studis-kanban-board-ux — AC7: „Alle/Keine"-Toggle', () => {
+  it('toggle button sits inside the popover above the checkboxes (DOM order)', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="status-filter-btn"]'));
+    });
+
+    const popover = container.querySelector('[data-testid="status-popover"]');
+    const toggle = container.querySelector('[data-testid="status-toggle-all-btn"]');
+    const firstCheckbox = container.querySelector('#board-filter-status-group input[type="checkbox"]');
+    expect(popover).toBeTruthy();
+    expect(toggle).toBeTruthy();
+    expect(popover.contains(toggle)).toBe(true);
+    // Toggle precedes the first checkbox in document order (steht ganz oben).
+    // 0x04 = DOCUMENT_POSITION_FOLLOWING (firstCheckbox follows toggle).
+    expect(toggle.compareDocumentPosition(firstCheckbox) & 0x04).toBeTruthy();
+  });
+
+  it('default (all selected): label „Keine", aria-pressed=true; click deselects all → V3-Hinweis', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="status-filter-btn"]'));
+    });
+
+    const toggle = container.querySelector('[data-testid="status-toggle-all-btn"]');
+    expect(toggle.textContent).toBe('Keine');
+    expect(toggle.getAttribute('aria-pressed')).toBe('true');
+    expect(toggle.getAttribute('aria-label')).toMatch(/abwählen/i);
+
+    await act(async () => {
+      fireEvent.click(toggle);
+    });
+
+    await waitFor(() => {
+      const checkboxes = container.querySelectorAll('#board-filter-status-group input[type="checkbox"]');
+      for (const cb of checkboxes) {
+        expect(cb.checked).toBe(false);
+      }
+      // V3-Leer-Hinweis greift
+      const hint = container.querySelector('[data-testid="no-status-hint"]');
+      expect(hint).toBeTruthy();
+    });
+    // Button label + status flips to „Alle"
+    expect(container.querySelector('[data-testid="status-toggle-all-btn"]').textContent).toBe('Alle');
+    expect(container.querySelector('[data-testid="status-toggle-all-btn"]').getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('partial selection: label „Alle", aria-pressed=false; click selects all', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="status-filter-btn"]'));
+    });
+
+    // Deselect one → partial state
+    await act(async () => {
+      fireEvent.click(container.querySelector('#board-filter-status-done'));
+    });
+
+    const toggle = container.querySelector('[data-testid="status-toggle-all-btn"]');
+    expect(toggle.textContent).toBe('Alle');
+    expect(toggle.getAttribute('aria-pressed')).toBe('false');
+    expect(toggle.getAttribute('aria-label')).toMatch(/auswählen/i);
+
+    // Click selects all again (back to default)
+    await act(async () => {
+      fireEvent.click(toggle);
+    });
+
+    await waitFor(() => {
+      const checkboxes = container.querySelectorAll('#board-filter-status-group input[type="checkbox"]');
+      expect(checkboxes).toHaveLength(6);
+      for (const cb of checkboxes) {
+        expect(cb.checked).toBe(true);
+      }
+    });
+    expect(container.querySelector('[data-testid="status-filter-btn"]').textContent).toMatch(/Status \(6\/6\)/);
   });
 });
 

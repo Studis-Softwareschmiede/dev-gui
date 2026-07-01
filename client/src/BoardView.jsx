@@ -21,6 +21,9 @@
  *   AC5  — GET /api/board/projects/list (leicht) + GET /api/board/projects/:slug (voll).
  *   AC6  — Standalone: öffnet mit Projektliste, Klick lädt ein Projekt (lazy).
  *           Cockpit-Modus (lockedProject): direktes Anzeigen, keine Liste.
+ *   AC7  — „Alle/Keine"-Toggle im Status-Popover, oberhalb der Checkboxen, optisch
+ *           leicht nach links versetzt: alle ausgewählt → alle abwählen (greift AC3),
+ *           sonst → alle auswählen. aria-pressed + aria-label (Aktion), tastaturbedienbar.
  *
  * team-entity-icons:
  *   AC12 — StoryCard zeigt ein <EntityIcon> (size=14) vor story.id wenn
@@ -1060,6 +1063,22 @@ function FilterBar({
               aria-label="Nach Status filtern"
             >
               <legend style={{ ...styles.filterLabel, marginBottom: 6 }}>Status</legend>
+              {/* AC7 (studis-kanban-board-ux): „Alle/Keine"-Toggle als übergeordnete
+                  Aktion oberhalb der Checkboxen, leicht nach links versetzt.
+                  Logik: alle ausgewählt → alle abwählen (greift V3-Leer-Hinweis),
+                  sonst (keiner/teilweise) → alle auswählen. Reine Frontend-Umschaltung. */}
+              <button
+                type="button"
+                style={styles.statusToggleAllBtn}
+                onClick={() =>
+                  onStatusChange(allSelected ? new Set() : new Set(statusOptions))
+                }
+                aria-pressed={allSelected}
+                aria-label={allSelected ? 'Alle Status abwählen' : 'Alle Status auswählen'}
+                data-testid="status-toggle-all-btn"
+              >
+                {allSelected ? 'Keine' : 'Alle'}
+              </button>
               <div style={styles.statusCheckboxCol}>
                 {statusOptions.map((s) => {
                   const checked = filterStatus.has(s);
@@ -2181,6 +2200,22 @@ const styles = {
     padding: '12px 16px',
     minWidth: 160,
     boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
+  },
+  // AC7: „Alle/Keine"-Toggle — übergeordnete Aktion, optisch leicht nach links
+  // versetzt gegenüber den Checkbox-Einträgen. Focus ring bleibt erhalten (kein outline:none).
+  statusToggleAllBtn: {
+    alignSelf: 'flex-start',
+    marginLeft: -6,
+    marginBottom: 6,
+    background: 'transparent',
+    border: '1px solid #444',
+    color: '#93c5fd',
+    borderRadius: 4,
+    padding: '4px 10px',
+    fontSize: 12,
+    fontWeight: 600,
+    cursor: 'pointer',
+    minHeight: 28,
   },
   statusCheckboxCol: {
     display: 'flex',
