@@ -70,6 +70,8 @@
  *   POST   /api/board/projects/:slug/ideas/:id/discuss              → { sessionId } — interaktive PTY-Besprechung + Gesprächs-Seed (ideen-inbox S-200 AC5)
  *   POST   /api/board/projects/:slug/ideas/:id/resolve              → { storyId } — Idee → Done + resolved_at/resolved_story_ids (ideen-inbox S-200 AC6)
  *   POST   /api/assist/refine                                      → { refinedText, openQuestions[], notes? } (fabric-intake-dialog AC5,AC7,AC10)
+ *   POST   /api/reconcile                                          → { jobId, status:"running" } | 409 (busy) | 400 (invalid slug) — Headless-Reconcile-Runner (headless-reconcile-runner AC8)
+ *   GET    /api/reconcile/:jobId                                   → { status, result?, error?, prHint? } | 404 (headless-reconcile-runner AC9)
  *   POST   /api/assist/knowledge-sources                          → { ok, suggestedPackId, suggestedType, sources[], notes? } (team-knowledge-add AC3,AC6,AC11-AC15)
  *   GET    /api/settings/notifications                             → Settings inkl. has_token (push-notifications S-183 AC2)
  *   PUT    /api/settings/notifications                             → Settings speichern mit Validierung (push-notifications S-183 AC2)
@@ -116,6 +118,7 @@ import { DocsReader } from './src/DocsReader.js';
 import { StoryMetricReader } from './src/StoryMetricReader.js';
 import { WorkspaceHealthChecker } from './src/WorkspaceHealthChecker.js';
 import { AssistService } from './src/AssistService.js';
+import { HeadlessReconcileRunner } from './src/HeadlessReconcileRunner.js';
 import { KnowledgeSourceService } from './src/KnowledgeSourceService.js';
 import { read as readNotificationSettings } from './src/NotificationSettingsStore.js';
 import { read as readTickerSettings } from './src/TickerSettingsStore.js';
@@ -342,6 +345,11 @@ const storyMetricReader = new StoryMetricReader();
 // Kein JobLock — unabhängig von laufendem Flow-Command (AC5, AC7).
 const assistService = new AssistService();
 
+// ── HeadlessReconcileRunner (getrennter claude -p-Kindprozess, headless-reconcile-runner AC1–AC7) ──
+// Bewusst vom interaktiven PTY-Pfad (CommandService/PtyManager/PtySessionRegistry)
+// getrennt (AC7) — eigene ProjectJobLock-Instanz, kein Idle-/Rate-Timer.
+const reconcileRunner = new HeadlessReconcileRunner();
+
 // ── KnowledgeSourceService (web-fähiger Quellen-Such-Helfer, team-knowledge-add AC11) ──
 // Bewusste zweite headless-Ausnahme (Doktrin A1/A2): eigene Boundary,
 // claude -p mit --allowedTools WebSearch exklusiv (A3), kein JobLock, auditiert (A6).
@@ -383,6 +391,9 @@ const deps = {
   storyMetricReader,
   assistService,
   knowledgeSourceService,
+  // headless-reconcile-runner AC1-AC9: getrennter claude -p-Kindprozess-Runner
+  // für POST /api/reconcile + GET /api/reconcile/:jobId (reconcile.js Router).
+  reconcileRunner,
   // S-183 AC1/AC2: NotificationSettingsStore als Config-Provider für notificationSettings-Router (AC5).
   // Ersetzt den Default-Provider (enabled=false/leer) — der Test-Endpunkt liest jetzt echte Settings.
   getNotificationConfig: readNotificationSettings,
