@@ -38,6 +38,24 @@
  *          busy). Der /flow-Lauf selbst bleibt weiterhin über CommandService
  *          im Projekt-Terminal sichtbar (kein neuer Completion-Kanal nötig).
  *
+ * headless-manual-drain (S-224):
+ *   AC5 — Cost-Mode-Dropdown (4-Wege low-cost|balanced|max-quality|frontier,
+ *          Default balanced, grobe Tier-/Kosten-Orientierung + Abo-Disclaimer,
+ *          geteilt via costMode.js) sitzt DIREKT beim „Board abarbeiten"-Knopf
+ *          und wird als `{ costMode }` im JSON-Body an POST …/drain gesendet.
+ *   AC6 — Da der Drain seit ADR-017 HEADLESS läuft (kein PTY, keine Live-
+ *          Terminal-Ausgabe), navigiert der 202-Pfad NICHT mehr in den Terminal-
+ *          Pane (supersedes fabric-intake-dialog AC8 / taktgeber-nachtwaechter
+ *          AC12 „onNavigate('factory')" für DIESEN Knopf). Stattdessen pollt das
+ *          Panel GET …/drain/:drainId und zeigt den Status INLINE neben dem Knopf
+ *          („läuft…" | „fertig" | „fehlgeschlagen", nie nur Farbe). Bei `done`
+ *          triggert es ein Board-Re-Fetch (Re-Key der BoardView via
+ *          onBoardRefresh → frischer Mount beim nächsten Öffnen des Board-Reiters;
+ *          KEIN erzwungener Tab-Wechsel — konsistent mit der S-205-Inline-Feedback-
+ *          Doktrin, der „fertig"-Status bleibt sichtbar). Ein sichtbarer HINWEIS
+ *          stellt klar, dass keine Live-Terminal-Ausgabe erscheint. Bestätigungs-
+ *          dialog + Busy-Deaktivierung bleiben (fabric-intake-dialog AC8).
+ *
  * new-story-chat (S-227):
  *   AC1 — Die frühere „Änderung erfassen"-Box (IntakeDialog mode="change") ist
  *          ERSETZT durch eine „Neue Story"-Box (rechte Sidebar, Reiter
@@ -101,6 +119,7 @@ import { SpecView } from './SpecView.jsx';
 import { IdeaCaptureModal } from './IdeaCaptureModal.jsx';
 import { CostModeDriftNotice } from './CostModeDriftNotice.jsx';
 import { IdeaSpecifyChatModal } from './IdeaSpecifyChatModal.jsx';
+import { COST_MODES, COST_MODE_INFO } from './costMode.js';
 
 /** @type {Array<{ id: string, label: string }>} */
 const TABS = [
@@ -128,6 +147,17 @@ export function CockpitView({ activeRepo, navigateFactory, onNavigate: _onNaviga
   const openSpec = useCallback((relPath) => {
     setPendingSpecPath(relPath);
     setActiveTab('spec');
+  }, []);
+
+  // headless-manual-drain AC6: Board-Re-Fetch-Token. Ein abgeschlossener
+  // Headless-Drain (kein Live-Terminal) hat das Board serverseitig verändert;
+  // FactoryWorkspace ruft nach `done` `refreshBoard()` → der Token wechselt →
+  // BoardView bekommt einen neuen `key` → frischer Mount + Board-Fetch beim
+  // nächsten Öffnen des Board-Reiters (KEIN erzwungener Tab-Wechsel, damit der
+  // „fertig"-Status neben dem Knopf sichtbar bleibt — S-205-Inline-Doktrin).
+  const [boardRefreshToken, setBoardRefreshToken] = useState(0);
+  const refreshBoard = useCallback(() => {
+    setBoardRefreshToken((t) => t + 1);
   }, []);
 
   return (
@@ -184,8 +214,8 @@ export function CockpitView({ activeRepo, navigateFactory, onNavigate: _onNaviga
         >
           <FactoryWorkspace
             activeRepo={activeRepo}
-            onNavigate={_onNavigate}
             onShowBoard={() => setActiveTab('board')}
+            onBoardRefresh={refreshBoard}
           />
         </div>
       )}
@@ -198,7 +228,7 @@ export function CockpitView({ activeRepo, navigateFactory, onNavigate: _onNaviga
           aria-labelledby="cockpit-tab-board"
           style={styles.tabPanel}
         >
-          <BoardView lockedProject={activeRepo} onOpenSpec={openSpec} />
+          <BoardView key={`board-${boardRefreshToken}`} lockedProject={activeRepo} onOpenSpec={openSpec} />
         </div>
       )}
 
@@ -225,6 +255,9 @@ export function CockpitView({ activeRepo, navigateFactory, onNavigate: _onNaviga
 
 /** Session poll interval in ms — matches TriggerPanel default (AC8). */
 const SESSION_POLL_MS = 3_000;
+
+/** Drain-Job-Status poll interval in ms (headless-manual-drain AC6). */
+const DRAIN_POLL_MS = 2_500;
 
 /**
  * FactoryWorkspace — the original FactoryView inner content:
@@ -258,13 +291,33 @@ const SESSION_POLL_MS = 3_000;
  * modal calls `onSpecified` → `onShowBoard()` switches to the board tab so the
  * new feature + To-Do-Story appear immediately (board re-fetch on mount).
  *
- * @param {{ activeRepo: string, fetchFn?: Function, onNavigate?: Function,
- *           onShowBoard?: () => void, pollInterval?: number }} props
- *   fetchFn      — injectable for tests (default: globalThis.fetch)
- *   onShowBoard  — switch the cockpit to the board tab (new-story-chat AC6)
- *   pollInterval — session poll interval in ms (default: SESSION_POLL_MS, override for tests)
+ * Extended for headless-manual-drain AC5/AC6 (S-224):
+ * The „Board abarbeiten"-Knopf now runs the drain HEADLESS (ADR-017, no PTY /
+ * no live terminal). A Cost-Mode dropdown sits right at the button (AC5) and is
+ * sent as `{ costMode }` in the POST body. After 202 the panel POLLS
+ * GET …/drain/:drainId and shows the status INLINE next to the button
+ * („läuft…" | „fertig" | „fehlgeschlagen") instead of navigating to the terminal
+ * pane (supersedes the AC8/AC12 onNavigate('factory') for this button). On
+ * `done` it calls onBoardRefresh (board re-fetch) and a persistent hint makes
+ * clear that no live terminal output appears.
+ *
+ * @param {{ activeRepo: string, fetchFn?: Function,
+ *           onShowBoard?: () => void, onBoardRefresh?: () => void,
+ *           pollInterval?: number, drainPollInterval?: number }} props
+ *   fetchFn           — injectable for tests (default: globalThis.fetch)
+ *   onShowBoard       — switch the cockpit to the board tab (new-story-chat AC6)
+ *   onBoardRefresh    — trigger a BoardView re-fetch after a done drain (AC6)
+ *   pollInterval      — session poll interval in ms (default: SESSION_POLL_MS)
+ *   drainPollInterval — drain-status poll interval in ms (default: DRAIN_POLL_MS)
  */
-function FactoryWorkspace({ activeRepo, fetchFn, onNavigate, onShowBoard, pollInterval = SESSION_POLL_MS }) {
+function FactoryWorkspace({
+  activeRepo,
+  fetchFn,
+  onShowBoard,
+  onBoardRefresh,
+  pollInterval = SESSION_POLL_MS,
+  drainPollInterval = DRAIN_POLL_MS,
+}) {
   // Build project-scoped WS URL: /ws/terminal?project=<encoded-path>
   // Terminal already resolves the protocol (ws/wss) from window.location —
   // we pass a full URL here so it is testable without DOM.
@@ -336,6 +389,14 @@ function FactoryWorkspace({ activeRepo, fetchFn, onNavigate, onShowBoard, pollIn
   const [flowState, setFlowState] = useState('idle');
   const [flowError, setFlowError] = useState(null);
 
+  // ── Headless-Drain Cost-Mode + Job-Status (headless-manual-drain AC5/AC6) ──
+  /** Cost-Mode am „Board abarbeiten"-Knopf (4-Wege, Default balanced) — AC5. */
+  const [costMode, setCostMode] = useState('balanced');
+  /** drainId der laufenden Headless-Drain-Session (aus der 202-Antwort) — AC6. */
+  const [drainId, setDrainId] = useState(null);
+  /** null | 'running' | 'done' | 'failed' — gepollter Drain-Job-Status (AC6). */
+  const [drainStatus, setDrainStatus] = useState(null);
+
   // ── Cost-Mode-Drift-Meldung (cost-mode-model-check AC4/AC5, S-228) ──
   // checkId aus der Drain-Antwort (`costModeCheckId`), falls der Dispatch eine
   // Drift erkannt hat → CostModeDriftNotice pollt den Status-Endpunkt und zeigt
@@ -360,11 +421,15 @@ function FactoryWorkspace({ activeRepo, fetchFn, onNavigate, onShowBoard, pollIn
   const handleFlowConfirm = useCallback(async () => {
     setFlowState('starting');
     setFlowError(null);
+    // headless-manual-drain AC6: frischer Lauf → alten Drain-Status/Poll fallen
+    // lassen (der Poll-Effect ist auf `drainId` gekeyt und stoppt beim Wechsel).
+    setDrainId(null);
+    setDrainStatus(null);
+    setCostModeCheckId(null);
 
-    // taktgeber-nachtwaechter AC12: der Knopf ruft die ProjectDrain-Engine über
-    // POST /api/projects/:slug/drain auf (statt vormals direkt /api/command mit
-    // einem einzelnen /agent-flow:flow-Schuss) — draint das aktive Projekt
-    // sofort, bis das Board keine offene Drain-Ziel-Story mehr hat. CockpitView
+    // taktgeber-nachtwaechter AC12 / headless-manual-drain AC1: der Knopf ruft die
+    // ProjectDrain-Engine über POST /api/projects/:slug/drain auf — seit ADR-017
+    // läuft der Drain HEADLESS (kein PTY, keine Live-Terminal-Ausgabe). CockpitView
     // wird nur mit aktivem Projekt gerendert (FactoryView), activeRepo ist hier
     // erwartungsgemäß immer gesetzt; defensiver Guard falls doch leer.
     const slug = activeRepo && typeof activeRepo === 'string' ? activeRepo.trim() : '';
@@ -377,8 +442,13 @@ function FactoryWorkspace({ activeRepo, fetchFn, onNavigate, onShowBoard, pollIn
     const _fetch = fetchFnRef.current;
     let res;
     try {
+      // headless-manual-drain AC5: Cost-Mode als JSON-Body mitschicken. `balanced`
+      // (Default) wird serverseitig ohne Flag verarbeitet — wir senden es dennoch
+      // explizit (Server lässt das Flag weg, AC5/AC3).
       res = await _fetch(`/api/projects/${encodeURIComponent(slug)}/drain`, {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ costMode }),
       });
     } catch {
       setFlowState('error');
@@ -387,25 +457,29 @@ function FactoryWorkspace({ activeRepo, fetchFn, onNavigate, onShowBoard, pollIn
     }
 
     if (res.status === 202) {
-      // AC8 (fabric-intake-dialog): navigate to terminal pane so run is visible.
-      // Consistent with IntakeDialog/AC4 pattern (onNavigate('factory')).
+      // headless-manual-drain AC6: KEIN onNavigate('factory') mehr — der Drain
+      // läuft headless (kein Live-Terminal). Stattdessen Drain-Status inline
+      // pollen (s. Poll-Effect unten). Dialog schließen, Knopf optimistisch als
+      // busy markieren (der Session-Poll bestätigt es).
       setFlowState('idle');
       setSessionRunState('running'); // optimistic update — poll will confirm
       // cost-mode-model-check AC4/AC5: bei Dispatch-Drift trägt die Antwort ein
       // `costModeCheckId` → nicht-modale Drift-Meldung + Vorher/Nachher-Übersicht
-      // (CostModeDriftNotice, im Board-abarbeiten-Kasten). Best-effort: ein
-      // fehlendes/unlesbares Feld unterdrückt nur die Meldung (kein Fehler, der
-      // Drain läuft ohnehin bereits). onNavigate('factory') bleibt auf demselben
-      // Factory-View (CockpitView bleibt montiert), die Meldung überlebt.
+      // (CostModeDriftNotice). Zusätzlich trägt die Antwort die `drainId` für den
+      // Status-Poll (AC6). Best-effort: ein fehlendes/unlesbares Feld unterdrückt
+      // nur die jeweilige Anzeige (kein Fehler — der Drain läuft ohnehin bereits).
       try {
         const body = await res.json();
         if (body && typeof body.costModeCheckId === 'string' && body.costModeCheckId) {
           setCostModeCheckId(body.costModeCheckId);
         }
+        if (body && typeof body.drainId === 'string' && body.drainId) {
+          setDrainStatus('running');
+          setDrainId(body.drainId); // startet den Poll-Effect (AC6)
+        }
       } catch {
-        // best-effort — keine Drift-Meldung, kein Crash
+        // best-effort — kein Status-Poll/keine Drift-Meldung, kein Crash
       }
-      if (onNavigate) onNavigate('factory');
       return;
     }
     if (res.status === 409) {
@@ -417,7 +491,74 @@ function FactoryWorkspace({ activeRepo, fetchFn, onNavigate, onShowBoard, pollIn
     }
     setFlowState('error');
     setFlowError(`Fehler beim Starten (HTTP ${res.status}).`);
-  }, [activeRepo, onNavigate]);
+  }, [activeRepo, costMode]);
+
+  // ── Drain-Job-Status-Poll (headless-manual-drain AC6) ─────────────────────
+  // Nach 202 pollt das Panel GET …/drain/:drainId, bis der Job nicht mehr
+  // `running` ist. `done` → Board-Re-Fetch (onBoardRefresh) + „fertig" inline;
+  // `failed` → „fehlgeschlagen" inline. Poll-Robustheit (coder-Lesson
+  // 2026-07-01): ein Nicht-200 (z.B. 404 nach Registry-Verlust/Neustart) ODER
+  // ein 200 mit unbekanntem/fehlendem Status wird NICHT wie „noch running"
+  // behandelt — der Loop endet dann als `failed` statt endlos still zu pollen.
+  useEffect(() => {
+    if (!drainId) return undefined;
+    const slug = activeRepo && typeof activeRepo === 'string' ? activeRepo.trim() : '';
+    if (!slug) return undefined;
+
+    let cancelled = false;
+    let timer = null;
+
+    async function pollDrain() {
+      let res;
+      try {
+        res = await fetchFnRef.current(
+          `/api/projects/${encodeURIComponent(slug)}/drain/${encodeURIComponent(drainId)}`,
+        );
+      } catch {
+        // Netzwerkfehler — später erneut versuchen (kein Endzustand).
+        if (!cancelled) timer = setTimeout(pollDrain, drainPollInterval);
+        return;
+      }
+      if (cancelled) return;
+
+      if (res.status !== 200) {
+        // 404 (unbekannte drainId, z.B. nach Neustart) o.ä. → Endzustand, NICHT
+        // endlos weiterpollen (coder-Lesson: 404 ≠ „noch running").
+        setDrainStatus('failed');
+        setSessionRunState('idle');
+        return;
+      }
+
+      let data;
+      try {
+        data = await res.json();
+      } catch {
+        data = null;
+      }
+      if (cancelled) return;
+
+      const status = data && typeof data.status === 'string' ? data.status : null;
+      if (status === 'running') {
+        timer = setTimeout(pollDrain, drainPollInterval);
+        return;
+      }
+      if (status === 'done') {
+        setDrainStatus('done');
+        setSessionRunState('idle');
+        if (onBoardRefresh) onBoardRefresh(); // Board-Re-Fetch (AC6)
+        return;
+      }
+      // 'failed' ODER unbekannter/fehlender Status im 200 → Endzustand failed.
+      setDrainStatus('failed');
+      setSessionRunState('idle');
+    }
+
+    pollDrain();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [drainId, activeRepo, drainPollInterval, onBoardRefresh]);
 
   return (
     <div style={styles.factory}>
@@ -432,9 +573,43 @@ function FactoryWorkspace({ activeRepo, fetchFn, onNavigate, onShowBoard, pollIn
         <div style={styles.flowTriggerBox}>
           <div style={styles.flowTriggerHeader}>Board abarbeiten</div>
           <p style={styles.flowTriggerHint}>
-            Startet <code style={styles.code}>/agent-flow:flow</code> im Projekt-Terminal.
+            Startet <code style={styles.code}>/agent-flow:flow</code> headless im Hintergrund.
             Offene Fragen oder Spec-Lücken → Story auf <strong>Blocked</strong> (statt raten).
           </p>
+
+          {/* headless-manual-drain AC6: Hinweis — der Lauf ist headless, es gibt
+              KEINE Live-Terminal-Ausgabe (Erwartungsmanagement). */}
+          <div style={styles.noLiveHint} data-testid="drain-no-live-terminal-hint">
+            ℹ Läuft <strong>headless</strong> im Hintergrund — es erscheint{' '}
+            <strong>keine</strong> Live-Ausgabe im Terminal. Fortschritt siehst du hier
+            am Status und auf dem Board.
+          </div>
+
+          {/* headless-manual-drain AC5: Cost-Mode-Dropdown direkt am Knopf
+              (geteilt via costMode.js — 4-Wege, Default balanced). Wird als
+              `{ costMode }` an POST …/drain gesendet. */}
+          <label style={styles.costLabel} htmlFor="drain-cost-mode">
+            Cost-Mode <span style={styles.costOptional}>(Token-Hebel)</span>
+          </label>
+          <select
+            id="drain-cost-mode"
+            style={styles.costSelect}
+            value={costMode}
+            disabled={isBoardBtnDisabled}
+            aria-disabled={isBoardBtnDisabled}
+            onChange={(e) => setCostMode(e.target.value)}
+            data-testid="drain-cost-mode-select"
+          >
+            {COST_MODES.map((m) => (
+              <option key={m} value={m}>{m}</option>
+            ))}
+          </select>
+          <div style={styles.costInfo} aria-live="polite" data-testid="drain-cost-info">
+            <span>{COST_MODE_INFO[costMode].models} · {COST_MODE_INFO[costMode].price} /MTok</span>
+            <span style={styles.costDisclaimer}>
+              ⚠ Abo-Betrieb — keine Direktkosten pro Token; Werte nur relative Tier-Schwere.
+            </span>
+          </div>
 
           {flowState === 'idle' && (
             <button
@@ -531,6 +706,29 @@ function FactoryWorkspace({ activeRepo, fetchFn, onNavigate, onShowBoard, pollIn
               >
                 Zurücksetzen
               </button>
+            </div>
+          )}
+
+          {/* headless-manual-drain AC6: gepollter Drain-Job-Status INLINE neben
+              dem Knopf. Bedeutung immer TEXTLICH (nicht nur Farbe, WCAG 2.1 AA);
+              `failed` als role=alert, sonst role=status. */}
+          {drainStatus && (
+            <div
+              role={drainStatus === 'failed' ? 'alert' : 'status'}
+              aria-live="polite"
+              style={
+                drainStatus === 'done'
+                  ? styles.drainStatusDone
+                  : drainStatus === 'failed'
+                    ? styles.drainStatusFailed
+                    : styles.drainStatusRunning
+              }
+              data-testid="drain-job-status"
+              data-status={drainStatus}
+            >
+              {drainStatus === 'running' && '⏳ Drain läuft… (headless, kein Terminal-Output)'}
+              {drainStatus === 'done' && '✓ Drain fertig — Board aktualisiert.'}
+              {drainStatus === 'failed' && '✗ Drain fehlgeschlagen — siehe Server-Log/Board.'}
             </div>
           )}
 
@@ -916,6 +1114,77 @@ const styles = {
     marginTop: 4,
     minHeight: 44,
     display: 'block',
+  },
+
+  // ── headless-manual-drain AC6: Kein-Live-Terminal-Hinweis ─────────────────
+  noLiveHint: {
+    // #93a3b8 on #0d0d0d ≈ 6.5:1 — WCAG AA for 11px text
+    fontSize: 11,
+    color: '#93a3b8',
+    background: '#0f1620',
+    border: '1px solid #1e293b',
+    borderRadius: 4,
+    padding: '6px 8px',
+    lineHeight: 1.5,
+  },
+
+  // ── headless-manual-drain AC5: Cost-Mode am Knopf (analog TriggerPanel) ────
+  costLabel: {
+    fontSize: 12,
+    color: '#9ca3af',
+    marginTop: 2,
+  },
+
+  costOptional: {
+    fontSize: 11,
+    color: '#9ca3af',
+  },
+
+  costSelect: {
+    background: '#1e1e1e',
+    color: '#d4d4d4',
+    border: '1px solid #333',
+    borderRadius: 4,
+    padding: '6px 8px',
+    fontSize: 13,
+    width: '100%',
+    boxSizing: 'border-box',
+    cursor: 'pointer',
+    minHeight: 44,
+  },
+
+  costInfo: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 1,
+    marginTop: 2,
+    fontSize: 11,
+    color: '#9ca3af',
+  },
+
+  costDisclaimer: {
+    fontSize: 10,
+    color: '#93a3b8',
+    fontStyle: 'italic',
+  },
+
+  // ── headless-manual-drain AC6: Drain-Job-Status inline ────────────────────
+  drainStatusRunning: {
+    fontSize: 12,
+    color: '#9ca3af',
+    fontStyle: 'italic',
+  },
+
+  drainStatusDone: {
+    fontSize: 12,
+    color: '#86efac',
+    fontWeight: 600,
+  },
+
+  drainStatusFailed: {
+    fontSize: 12,
+    color: '#f87171',
+    fontWeight: 600,
   },
 
   flowStatus: {

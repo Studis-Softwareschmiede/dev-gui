@@ -16,8 +16,13 @@
  *   AC8 — Button „Board abarbeiten" ist bei aktivem Job (Session state:"busy")
  *          deaktiviert (disabled-Attribut + Label — nie nur Farbe); Kill-Switch
  *          bleibt wirksam (TriggerPanel ist gemockt — Kill-Switch lebt dort,
- *          unberührt); 202 → onNavigate('factory') (Terminal-Pane-Wechsel,
- *          AC4-Muster); 409 → Fehler-Info im UI, kein Crash.
+ *          unberührt); 409 → Fehler-Info im UI, kein Crash.
+ *          HINWEIS (headless-manual-drain AC6, S-224): das frühere „202 →
+ *          onNavigate('factory')"-Verhalten (Terminal-Pane-Wechsel) ist
+ *          SUPERSEDED — der Drain läuft seit ADR-017 headless (kein Live-
+ *          Terminal). Der 202-Pfad pollt jetzt den Drain-Status INLINE (kein
+ *          Navigate mehr). Die Cost-Mode-/Status-/Hinweis-Details (AC5/AC6)
+ *          leben in CockpitDrainCostModeStatus.test.jsx.
  *
  * Covers (taktgeber-nachtwaechter):
  *   AC12 — Der bestätigte Klick löst POST /api/projects/:slug/drain aus (die
@@ -79,22 +84,34 @@ afterEach(() => {
   window.location.hash = '';
 });
 
-/** Matches the drain endpoint for any slug (AC12 taktgeber-nachtwaechter). */
+/** Matches the drain POST endpoint for any slug (AC12 taktgeber-nachtwaechter). */
 const DRAIN_URL_RE = /^\/api\/projects\/[^/]+\/drain$/;
+/** Matches the drain-status GET endpoint for any slug (headless-manual-drain AC6). */
+const DRAIN_STATUS_URL_RE = /^\/api\/projects\/[^/]+\/drain\/[^/]+$/;
 
 /**
- * Build a fetch mock that handles /api/session and POST /api/projects/:slug/drain
- * (AC12 taktgeber-nachtwaechter — replaces the former direct /api/command POST).
+ * Build a fetch mock that handles /api/session, POST /api/projects/:slug/drain
+ * and GET /api/projects/:slug/drain/:drainId (headless-manual-drain AC6 status
+ * poll).
  *
  * @param {object} opts
  * @param {'busy'|'ready'} [opts.sessionState='ready'] — state returned by /api/session
  * @param {number}         [opts.commandStatus=202]    — HTTP status for the drain POST
  * @param {object}         [opts.commandBody={drainId:'test-drain-id'}] — body for the drain POST
+ * @param {string}         [opts.drainJobStatus='running'] — status returned by the GET status poll
  */
-function makeFetchFn({ sessionState = 'ready', commandStatus = 202, commandBody = { drainId: 'test-drain-id' } } = {}) {
+function makeFetchFn({
+  sessionState = 'ready',
+  commandStatus = 202,
+  commandBody = { drainId: 'test-drain-id' },
+  drainJobStatus = 'running',
+} = {}) {
   return jest.fn(async (url, opts) => {
     if (url === '/api/session') {
       return { ok: true, status: 200, json: async () => ({ state: sessionState, restarts: 0 }) };
+    }
+    if (DRAIN_STATUS_URL_RE.test(url)) {
+      return { ok: true, status: 200, json: async () => ({ status: drainJobStatus }) };
     }
     if (DRAIN_URL_RE.test(url) && opts?.method === 'POST') {
       return { ok: commandStatus === 202, status: commandStatus, json: async () => commandBody };
@@ -299,7 +316,9 @@ describe('CockpitView — AC8 (fabric-intake-dialog): Board abarbeiten mit Sessi
     expect(drainCalls).toHaveLength(0);
   });
 
-  it('202 → onNavigate("factory") called (Terminal-Pane-Wechsel, AC4-Muster)', async () => {
+  it('202 → onNavigate NOT called (headless-manual-drain AC6 supersedes the terminal-pane switch)', async () => {
+    // Since ADR-017 the drain runs HEADLESS (no live terminal) → the panel no
+    // longer navigates to the terminal pane; it polls the drain status inline.
     const fetchFn = makeFetchFn({ sessionState: 'ready', commandStatus: 202 });
     const { onNavigateSpy } = renderCockpit(fetchFn);
 
@@ -312,12 +331,15 @@ describe('CockpitView — AC8 (fabric-intake-dialog): Board abarbeiten mit Sessi
       fireEvent.click(document.querySelector('[data-testid="flow-confirm-yes"]'));
     });
 
+    // The inline drain status appears (AC6) …
     await waitFor(() => {
-      expect(onNavigateSpy).toHaveBeenCalledWith('factory');
+      expect(document.querySelector('[data-testid="drain-job-status"]')).toBeTruthy();
     });
+    // … and no terminal-pane navigation happens anymore.
+    expect(onNavigateSpy).not.toHaveBeenCalled();
   });
 
-  it('202 → no "started" status element remains in UI (navigate replaces it)', async () => {
+  it('202 → no "started" status element remains in UI (inline drain status replaces it)', async () => {
     const fetchFn = makeFetchFn({ sessionState: 'ready', commandStatus: 202 });
     renderCockpit(fetchFn);
 
@@ -329,7 +351,7 @@ describe('CockpitView — AC8 (fabric-intake-dialog): Board abarbeiten mit Sessi
     });
 
     await waitFor(() => {
-      // No stale "started" badge — we navigate away instead
+      // No stale "started" badge — the inline drain status (AC6) is shown instead
       expect(document.querySelector('[data-testid="flow-started"]')).toBeNull();
     });
   });
