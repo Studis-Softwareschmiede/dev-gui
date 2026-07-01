@@ -38,6 +38,19 @@
  *          busy). Der /flow-Lauf selbst bleibt weiterhin über CommandService
  *          im Projekt-Terminal sichtbar (kein neuer Completion-Kanal nötig).
  *
+ * new-story-chat (S-227):
+ *   AC1 — Die frühere „Änderung erfassen"-Box (IntakeDialog mode="change") ist
+ *          ERSETZT durch eine „Neue Story"-Box (rechte Sidebar, Reiter
+ *          „Arbeiten"): der Button öffnet `IdeaSpecifyChatModal` im
+ *          „scratch"-Modus (Spezifizier-Chat von Grund auf, ohne Idee-Karte).
+ *          Der IntakeDialog-change-Trigger (Öffnen/Schließen-State + Render)
+ *          ist entfernt.
+ *   AC6 — Bei Finalize `done` → onSpecified → Wechsel in den Board-Reiter
+ *          (BoardView remountet → Board-Re-Fetch); neues Feature + To-Do-Story
+ *          erscheinen sofort.
+ *   AC7 — Fehler-/Randpfade (inline-Fehler, Retry, „Story anlegen" ohne
+ *          readyToSpecify deaktiviert) leben im Overlay (IdeaSpecifyChatModal).
+ *
  * ideen-inbox (S-199):
  *   AC4 — Sichtbarer Button „Idee" im Reiter „Arbeiten" (eigene Box, neben
  *          „Board abarbeiten") öffnet `IdeaCaptureModal` (eigene Komponente,
@@ -85,8 +98,8 @@ import { Dashboard } from './Dashboard.jsx';
 import { TriggerPanel } from './TriggerPanel.jsx';
 import { BoardView } from './BoardView.jsx';
 import { SpecView } from './SpecView.jsx';
-import { IntakeDialog } from './IntakeDialog.jsx';
 import { IdeaCaptureModal } from './IdeaCaptureModal.jsx';
+import { IdeaSpecifyChatModal } from './IdeaSpecifyChatModal.jsx';
 
 /** @type {Array<{ id: string, label: string }>} */
 const TABS = [
@@ -168,7 +181,11 @@ export function CockpitView({ activeRepo, navigateFactory, onNavigate: _onNaviga
           aria-labelledby="cockpit-tab-arbeiten"
           style={styles.tabPanel}
         >
-          <FactoryWorkspace activeRepo={activeRepo} onNavigate={_onNavigate} />
+          <FactoryWorkspace
+            activeRepo={activeRepo}
+            onNavigate={_onNavigate}
+            onShowBoard={() => setActiveTab('board')}
+          />
         </div>
       )}
 
@@ -233,30 +250,42 @@ const SESSION_POLL_MS = 3_000;
  * response contract (202 {drainId} → onNavigate('factory'); 409 → error) and
  * the busy-poll/disable behaviour (AC8 above) are unchanged.
  *
- * @param {{ activeRepo: string, fetchFn?: Function, pollInterval?: number }} props
+ * Extended for new-story-chat AC1/AC6/AC7 (S-227):
+ * The former „Änderung erfassen"-Box (IntakeDialog mode="change") is REPLACED
+ * by a „Neue Story"-Box that opens `IdeaSpecifyChatModal` in `mode="scratch"`
+ * (Spezifizier-Chat von Grund auf, ohne Idee-Karte). On finalize `done` the
+ * modal calls `onSpecified` → `onShowBoard()` switches to the board tab so the
+ * new feature + To-Do-Story appear immediately (board re-fetch on mount).
+ *
+ * @param {{ activeRepo: string, fetchFn?: Function, onNavigate?: Function,
+ *           onShowBoard?: () => void, pollInterval?: number }} props
  *   fetchFn      — injectable for tests (default: globalThis.fetch)
+ *   onShowBoard  — switch the cockpit to the board tab (new-story-chat AC6)
  *   pollInterval — session poll interval in ms (default: SESSION_POLL_MS, override for tests)
  */
-function FactoryWorkspace({ activeRepo, fetchFn, onNavigate, pollInterval = SESSION_POLL_MS }) {
+function FactoryWorkspace({ activeRepo, fetchFn, onNavigate, onShowBoard, pollInterval = SESSION_POLL_MS }) {
   // Build project-scoped WS URL: /ws/terminal?project=<encoded-path>
   // Terminal already resolves the protocol (ws/wss) from window.location —
   // we pass a full URL here so it is testable without DOM.
   const wsUrl = buildTerminalWsUrl(activeRepo);
 
-  // ── Intake-Dialog state (C1 — fabric-intake-dialog AC1) ──────────────────
-  /** Whether the change-intake dialog is open */
-  const [intakeOpen, setIntakeOpen] = useState(false);
+  // ── Neue-Story-Chat state (new-story-chat AC1 — ersetzt „Änderung erfassen") ─
+  /** Whether the „Neue Story"-Chat-Overlay (IdeaSpecifyChatModal, scratch) is open */
+  const [newStoryOpen, setNewStoryOpen] = useState(false);
+  const newStoryBtnRef = useRef(null);
 
-  const handleIntakeClose = useCallback(() => {
-    setIntakeOpen(false);
+  const handleNewStoryClose = useCallback(() => {
+    setNewStoryOpen(false);
   }, []);
 
-  // AC4: after successful submit, navigate to factory (terminal pane)
-  // and close the intake panel
-  const handleIntakeNavigate = useCallback((view) => {
-    setIntakeOpen(false);
-    if (onNavigate) onNavigate(view);
-  }, [onNavigate]);
+  // new-story-chat AC6: bei Finalize done → Board-Re-Fetch. Der Board-Reiter
+  // remountet BoardView (frischer Fetch) → das neue Feature + die To-Do-Story
+  // erscheinen sofort. (Der „kein Tab-Wechsel"-Zwang aus AC1 gilt der Chat-
+  // Phase; nach dem Schließen bei done ist der Wechsel die AC6-Erfüllung.)
+  const handleNewStorySpecified = useCallback(() => {
+    setNewStoryOpen(false);
+    if (onShowBoard) onShowBoard();
+  }, [onShowBoard]);
 
   // ── Session busy state (AC8 fabric-intake-dialog) ─────────────────────────
   // Polls GET /api/session (state:"busy") to derive isRunning — same pattern
@@ -502,45 +531,26 @@ function FactoryWorkspace({ activeRepo, fetchFn, onNavigate, pollInterval = SESS
           </button>
         </div>
 
-        {/* Intake-Dialog trigger (AC1 — fabric-intake-dialog, change mode) */}
+        {/* Neue-Story-Trigger (new-story-chat AC1 — ersetzt „Änderung erfassen"):
+            öffnet den Spezifizier-Chat von Grund auf (IdeaSpecifyChatModal,
+            scratch-Modus). Der frühere IntakeDialog mode="change"-Trigger
+            (Öffnen/Schließen-State + Render) ist entfernt. */}
         <div style={styles.intakeTriggerBox}>
-          <div style={styles.flowTriggerHeader}>Änderung erfassen</div>
+          <div style={styles.flowTriggerHeader}>Neue Story</div>
           <p style={styles.flowTriggerHint}>
-            Beschreibe eine gewünschte Änderung — wird als{' '}
-            <code style={styles.code}>/agent-flow:requirement</code> an den Agenten übergeben.
+            Neue Story von Grund auf spezifizieren — Chat mit Claude, am Ende legt{' '}
+            <code style={styles.code}>/agent-flow:requirement</code> Feature + Story an.
           </p>
-          {!intakeOpen ? (
-            <button
-              type="button"
-              style={styles.btnIntakeTrigger}
-              onClick={() => setIntakeOpen(true)}
-              aria-label="Änderungswunsch erfassen — öffnet Intake-Dialog"
-              data-testid="intake-change-btn"
-            >
-              Änderung erfassen
-            </button>
-          ) : (
-            <div style={styles.intakeDialogWrapper}>
-              <div style={styles.intakeDialogHeader}>
-                <span style={styles.intakeDialogTitle}>Änderungswunsch</span>
-                <button
-                  type="button"
-                  style={styles.btnIntakeClose}
-                  onClick={handleIntakeClose}
-                  aria-label="Intake-Dialog schließen"
-                  data-testid="intake-close-btn"
-                >
-                  ✕
-                </button>
-              </div>
-              <IntakeDialog
-                mode="change"
-                projectPath={activeRepo}
-                fetchFn={fetchFn}
-                onNavigate={handleIntakeNavigate}
-              />
-            </div>
-          )}
+          <button
+            type="button"
+            ref={newStoryBtnRef}
+            style={styles.btnIntakeTrigger}
+            onClick={() => setNewStoryOpen(true)}
+            aria-label="Neue Story spezifizieren — öffnet den Chat"
+            data-testid="new-story-btn"
+          >
+            Neue Story
+          </button>
         </div>
 
         {/* Flow-Trigger-Panel — fire slash-commands in the active project session */}
@@ -556,6 +566,18 @@ function FactoryWorkspace({ activeRepo, fetchFn, onNavigate, pollInterval = SESS
           projectSlug={activeRepo}
           onClose={() => setIdeaModalOpen(false)}
           triggerRef={ideaBtnRef}
+          fetchFn={fetchFn}
+        />
+      )}
+
+      {/* new-story-chat AC1/AC6/AC7: „Neue Story"-Chat-Overlay (scratch-Modus) */}
+      {newStoryOpen && (
+        <IdeaSpecifyChatModal
+          mode="scratch"
+          projectSlug={activeRepo}
+          onClose={handleNewStoryClose}
+          onSpecified={handleNewStorySpecified}
+          triggerRef={newStoryBtnRef}
           fetchFn={fetchFn}
         />
       )}
@@ -734,37 +756,6 @@ const styles = {
     fontWeight: 600,
     cursor: 'pointer',
     minHeight: 44,
-    // Focus ring preserved (no outline:none)
-  },
-
-  intakeDialogWrapper: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 0,
-  },
-
-  intakeDialogHeader: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 4,
-  },
-
-  intakeDialogTitle: {
-    fontSize: 12,
-    fontWeight: 600,
-    color: '#9ca3af',
-  },
-
-  btnIntakeClose: {
-    background: 'transparent',
-    border: '1px solid #374151',
-    color: '#9ca3af',
-    borderRadius: 4,
-    padding: '2px 8px',
-    fontSize: 11,
-    cursor: 'pointer',
-    minHeight: 28,
     // Focus ring preserved (no outline:none)
   },
 

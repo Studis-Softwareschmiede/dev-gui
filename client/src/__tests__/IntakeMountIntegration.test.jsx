@@ -3,7 +3,11 @@
  *
  * Covers (fabric-intake-dialog): AC1, AC2, AC4
  *   AC1 — IntakeDialog is reachable from the normal user flow:
- *          (a) CockpitView (Arbeiten tab) has „Änderung erfassen"-Button (mode=change);
+ *          (a) CockpitView (Arbeiten tab): der frühere „Änderung erfassen"-
+ *              Trigger (mode=change) ist SUPERSEDED durch new-story-chat AC1
+ *              (S-227) — die Box heißt jetzt „Neue Story" und öffnet den
+ *              scratch-Chat (IdeaSpecifyChatModal); der change-mode-Trigger ist
+ *              entfernt (siehe Block unten + CockpitNewStory.test.jsx).
  *          (b) RepoOverview has „Neues Projekt / Idee erfassen"-Button (mode=new).
  *          Trigger opens the dialog, mode is correct, dialog can be closed.
  *   AC2 — new-mode two-trigger sequence (S-133):
@@ -74,53 +78,19 @@ function makeCommandFetch(status, body = {}) {
   });
 }
 
-// ── CockpitView mount: mode=change ────────────────────────────────────────────
+// ── CockpitView mount: „Neue Story" ersetzt „Änderung erfassen" ───────────────
+// new-story-chat AC1 (S-227): der frühere IntakeDialog mode="change"-Trigger
+// dieser Sidebar-Box ist ENTFERNT; an seiner Stelle steht der „Neue Story"-
+// Button, der den scratch-Chat (IdeaSpecifyChatModal) öffnet. Das Verhalten
+// des scratch-Overlays selbst ist in NewStoryChatScratch.test.jsx /
+// CockpitNewStory.test.jsx abgedeckt — hier nur die Supersession-Invariante.
 
-describe('IntakeMountIntegration — CockpitView: Änderung erfassen (mode=change)', () => {
+describe('IntakeMountIntegration — CockpitView: „Neue Story" ersetzt „Änderung erfassen" (new-story-chat AC1)', () => {
   beforeEach(() => {
-    // IntakeDialog uses globalThis.fetch as fallback when no fetchFn prop is passed.
-    // Provide a no-op stub so the component can initialize (tests that need specific
-    // responses override globalThis.fetch before rendering).
     globalThis.fetch = makeCommandFetch(200);
   });
 
-  it('AC1: renders "Änderung erfassen" trigger button in CockpitView Arbeiten tab', () => {
-    const onNavigate = jest.fn();
-    render(
-      React.createElement(CockpitView, {
-        activeRepo: 'my-project',
-        navigateFactory: jest.fn(),
-        onNavigate,
-      }),
-    );
-
-    const btn = document.querySelector('[data-testid="intake-change-btn"]');
-    expect(btn).toBeTruthy();
-    expect(btn.textContent).toMatch(/änderung erfassen/i);
-  });
-
-  it('AC1: clicking trigger opens IntakeDialog (change badge visible)', async () => {
-    const onNavigate = jest.fn();
-    render(
-      React.createElement(CockpitView, {
-        activeRepo: 'my-project',
-        navigateFactory: jest.fn(),
-        onNavigate,
-      }),
-    );
-
-    const btn = document.querySelector('[data-testid="intake-change-btn"]');
-    await act(async () => { fireEvent.click(btn); });
-
-    // The dialog is now open — close button should appear
-    const closeBtn = document.querySelector('[data-testid="intake-close-btn"]');
-    expect(closeBtn).toBeTruthy();
-
-    // mode=change: badge text "change" is visible inside the dialog
-    expect(document.body.textContent).toMatch(/change/);
-  });
-
-  it('AC1: close button hides IntakeDialog (trigger-button reappears)', async () => {
+  it('AC1: der change-mode-Intake-Trigger ist entfernt; stattdessen ist der „Neue Story"-Button da', () => {
     render(
       React.createElement(CockpitView, {
         activeRepo: 'my-project',
@@ -129,53 +99,14 @@ describe('IntakeMountIntegration — CockpitView: Änderung erfassen (mode=chang
       }),
     );
 
-    // Open
-    const openBtn = document.querySelector('[data-testid="intake-change-btn"]');
-    await act(async () => { fireEvent.click(openBtn); });
-    expect(document.querySelector('[data-testid="intake-close-btn"]')).toBeTruthy();
-
-    // Close
-    const closeBtn = document.querySelector('[data-testid="intake-close-btn"]');
-    await act(async () => { fireEvent.click(closeBtn); });
-
-    // Trigger button reappears
-    expect(document.querySelector('[data-testid="intake-change-btn"]')).toBeTruthy();
-    // Close button gone
+    // Alter change-mode-Trigger + kein IntakeDialog-change mehr in dieser Box.
+    expect(document.querySelector('[data-testid="intake-change-btn"]')).toBeNull();
     expect(document.querySelector('[data-testid="intake-close-btn"]')).toBeNull();
-  });
 
-  it('AC4: 202 response closes dialog and calls onNavigate("factory") (change mode — one trigger)', async () => {
-    const onNavigate = jest.fn();
-    globalThis.fetch = makeCommandFetch(202, { commandId: 'c1', status: 'running' });
-
-    render(
-      React.createElement(CockpitView, {
-        activeRepo: 'my-project',
-        navigateFactory: jest.fn(),
-        onNavigate,
-      }),
-    );
-
-    // Open dialog
-    const openBtn = document.querySelector('[data-testid="intake-change-btn"]');
-    await act(async () => { fireEvent.click(openBtn); });
-
-    // Fill in text
-    const textarea = document.querySelector('#intake-idea');
-    await act(async () => {
-      fireEvent.change(textarea, { target: { value: 'Dark-Mode einbauen' } });
-    });
-
-    // Submit
-    const submitBtn = document.querySelector('[aria-label*="Änderung erfassen"]');
-    await act(async () => { fireEvent.click(submitBtn); });
-
-    await waitFor(() => {
-      expect(onNavigate).toHaveBeenCalledWith('factory');
-    });
-
-    // Dialog closed after navigation (change mode: single trigger, closes immediately)
-    expect(document.querySelector('[data-testid="intake-close-btn"]')).toBeNull();
+    // Neuer Trigger vorhanden.
+    const btn = document.querySelector('[data-testid="new-story-btn"]');
+    expect(btn).toBeTruthy();
+    expect(btn.textContent).toMatch(/neue story/i);
   });
 });
 
