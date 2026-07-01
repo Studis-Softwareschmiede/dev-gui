@@ -69,6 +69,8 @@
  *   POST   /api/board/projects/:slug/ideas                         → { storyId } — Quick-Capture, status: Idee (ideen-inbox S-199 AC3)
  *   POST   /api/board/projects/:slug/ideas/:id/discuss              → { sessionId } — interaktive PTY-Besprechung + Gesprächs-Seed (ideen-inbox S-200 AC5)
  *   POST   /api/board/projects/:slug/ideas/:id/resolve              → { storyId } — Idee → Done + resolved_at/resolved_story_ids (ideen-inbox S-200 AC6)
+ *   POST   /api/board/projects/:slug/ideas/:id/specify/start        → { sessionId, reply } — Chat-Session-Start, mit Titel/Notes geseedet (idea-specify-chat S-215 AC3)
+ *   POST   /api/board/projects/:slug/ideas/:id/specify/message      → { reply, readyToSpecify, draftText? } — nächster Chat-Turn (idea-specify-chat S-215 AC4,AC13)
  *   POST   /api/assist/refine                                      → { refinedText, openQuestions[], notes? } (fabric-intake-dialog AC5,AC7,AC10)
  *   POST   /api/reconcile                                          → { jobId, status:"running" } | 409 (busy) | 400 (invalid slug) — Headless-Reconcile-Runner (headless-reconcile-runner AC8)
  *   GET    /api/reconcile/:jobId                                   → { status, result?, error?, prHint? } | 404 (headless-reconcile-runner AC9)
@@ -118,6 +120,7 @@ import { DocsReader } from './src/DocsReader.js';
 import { StoryMetricReader } from './src/StoryMetricReader.js';
 import { WorkspaceHealthChecker } from './src/WorkspaceHealthChecker.js';
 import { AssistService } from './src/AssistService.js';
+import { IdeaSpecifyChatService } from './src/IdeaSpecifyChatService.js';
 import { HeadlessReconcileRunner } from './src/HeadlessReconcileRunner.js';
 import { ClaudeAuthHealthService } from './src/ClaudeAuthHealthService.js';
 import { KnowledgeSourceService } from './src/KnowledgeSourceService.js';
@@ -388,6 +391,12 @@ const storyMetricReader = new StoryMetricReader();
 // Kein JobLock — unabhängig von laufendem Flow-Command (AC5, AC7).
 const assistService = new AssistService();
 
+// ── IdeaSpecifyChatService (zustandsloser Multi-Turn claude -p-Chat, idea-specify-chat AC5) ──
+// Eigene, schmale Boundary (analog AssistService/KnowledgeSourceService) — TOOL-LOS,
+// kein ProjectJobLock, belegt den PTY-Job-Lock NICHT. Session-Historie lebt in-memory
+// in dieser einen Instanz (Map sessionId -> turns[], AC13).
+const ideaSpecifyChatService = new IdeaSpecifyChatService();
+
 // ── HeadlessReconcileRunner (getrennter claude -p-Kindprozess, headless-reconcile-runner AC1–AC7) ──
 // Bewusst vom interaktiven PTY-Pfad (CommandService/PtyManager/PtySessionRegistry)
 // getrennt (AC7) — eigene ProjectJobLock-Instanz, kein Idle-/Rate-Timer.
@@ -468,6 +477,9 @@ const deps = {
   // Router-Auto-Loader zusätzlich an boardRouter (POST .../discuss, .../resolve)
   // durchgereicht — keine neue Instanz, keine zusätzliche server.js-Verdrahtung.
   boardWriter,
+  // S-215 (idea-specify-chat AC3/AC4/AC5/AC13): IdeaSpecifyChatService für den
+  // Multi-Turn-Chat-Router (ideaSpecify.js, POST .../specify/start + .../specify/message).
+  ideaSpecifyChatService,
 };
 
 // ── AC1/AC2: Auto-Discovery + Mount aller API-Router ─────────────────────────

@@ -2,7 +2,7 @@ id: S-215
 parent: F-039
 title: 'Backend: IdeaSpecifyChatService + Router (Multi-Turn claude -p Chat, start/message,
   In-Memory-Session)'
-status: To Do
+status: In Progress
 priority: P1
 spec: docs/specs/idea-specify-chat.md
 implements:
@@ -24,11 +24,11 @@ estimate_note: 'L-Heuristik: n_ac=4 (AC3,AC4,AC5,AC13), n_comp~4 (IdeaSpecifyCha
   baseline.json js|balanced|L ep=5.0 (n=5) als Proxy. confidence medium; neue zustandslose
   claude -p Multi-Turn-Boundary, ggf. Service/Router splitten falls zu gross.'
 confidence: medium
-branch: null
+branch: feat/S-215-idea-specify-chat-service
 pr: null
 blocked_reason: null
 created_at: '2026-07-01T15:25:43Z'
-updated_at: '2026-07-01T15:28:22Z'
+updated_at: '2026-07-01T15:55:42Z'
 done_at: null
 notes: 'Spec: docs/specs/idea-specify-chat.md AC3,AC4,AC5,AC13. Depends: keine (parallel
   zu S-214, aber S-214 sollte vorher landen). Setzt Doktrin-Lockerung (S-214) voraus,
