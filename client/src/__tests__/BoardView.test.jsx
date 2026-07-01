@@ -110,6 +110,20 @@
  *          Fokusfalle (Tab-Zyklus) in Quelle umgesetzt — jsdom hat keine
  *          Layout-Engine, daher Fokus-Zyklus/Fokusring nur strukturell belegt.
  *
+ * Covers (board-feature-archive, S-234 — „Archiv anzeigen"-Schalter):
+ *   AC6 — „Archiv anzeigen"-Toggle (Default aus): initial werden KEINE
+ *          archivierten Features geladen (kein `includeArchived`-Query); ein Klick
+ *          lädt mit `?includeArchived=true` neu → archivierte Features erscheinen,
+ *          erneuter Klick blendet sie wieder aus (Standardansicht). Archivierte
+ *          Features/Stories sind READ-ONLY: kein Karten-Button (`story-card-btn-*`
+ *          fehlt), stattdessen read-only <article>; klar per Text „Archiviert"
+ *          markiert (Feature-Badge + Story-Marker). Toggle-Zustand lokal
+ *          (localStorage `boardview.showArchived`); wird pro Test geleert.
+ *   AC7 — A11y: Der Schalter ist ein echter <button> mit `aria-pressed`
+ *          (false↔true) und sprechendem aria-label (anzeigen/ausblenden);
+ *          Bedeutung „Archiviert" per Text, nicht allein über Farbe.
+ *          (Opazität/Fokusring in Quelle — jsdom hat keine Layout-Engine.)
+ *
  * NOTE (jsdom-Limitation): jsdom hat keine Layout-Engine — Style-Property-Asserts beweisen
  * kein Scroll-/Layout-Verhalten; getestet werden Verhalten, Struktur, Rollen und aria.
  *
@@ -392,6 +406,65 @@ async function renderArchiveCockpit(fetchMock) {
     expect(utils.container.querySelector('[data-testid="archive-done-btn"]')).toBeTruthy();
   });
   return utils;
+}
+
+// ── board-feature-archive (S-234) fixtures — „Archiv anzeigen"-Schalter ────────
+// Ein archiviertes Feature (status bleibt Done, archived:true) samt archivierter
+// Story. Wird vom Backend NUR mit includeArchived=true geliefert (V3).
+const ARCHIVED_FEATURE = {
+  id: 'F-950',
+  title: 'Altes Feature',
+  status: 'Done',
+  priority: 'low',
+  archived: true,
+  archived_at: '2026-06-01T10:00:00Z',
+  stories: [
+    {
+      id: 'S-950', parent: 'F-950', title: 'Alt-Teil', status: 'Done',
+      priority: 'low', labels: [], spec: null,
+      archived: true, archived_at: '2026-06-01T10:00:00Z',
+    },
+  ],
+};
+// Standardansicht (ohne includeArchived): nur das sichtbare, gemischte Feature.
+const PROJECT_ARCHVIEW_STANDARD = {
+  slug: 'proj-arcv',
+  repo_path: '/home/user/Git/arcv',
+  project_slug: 'proj-arcv',
+  schema_version: 1,
+  features: [FEATURE_MIXED],
+};
+// Erweiterte Ansicht (includeArchived=true): zusätzlich das archivierte Feature.
+const PROJECT_ARCHVIEW_FULL = {
+  slug: 'proj-arcv',
+  repo_path: '/home/user/Git/arcv',
+  project_slug: 'proj-arcv',
+  schema_version: 1,
+  features: [FEATURE_MIXED, ARCHIVED_FEATURE],
+};
+
+/**
+ * Fetch-Mock, der die Standard- vs. Archiv-Ansicht anhand des includeArchived-
+ * Query-Signals unterscheidet (simuliert das Backend V3-Verhalten).
+ * - GET …/:slug              → Standardansicht (ohne Archivierte)
+ * - GET …/:slug?includeArchived=true → mit Archivierten (markiert)
+ * - GET …/:slug/specify/jobs → { jobs: {} }
+ * Zeichnet die abgefragten URLs in `calls` auf.
+ */
+function makeArchViewFetch() {
+  const fn = jest.fn(async (url) => {
+    if (url.endsWith('/specify/jobs')) {
+      return { ok: true, status: 200, json: async () => ({ jobs: {} }) };
+    }
+    const m = url.match(/^\/api\/board\/projects\/([^/?]+)(\?[^/]*)?$/);
+    if (m) {
+      const includeArchived = (m[2] || '').includes('includeArchived=true');
+      const proj = includeArchived ? PROJECT_ARCHVIEW_FULL : PROJECT_ARCHVIEW_STANDARD;
+      return { ok: true, status: 200, json: async () => ({ project: proj }) };
+    }
+    return { ok: false, status: 404, json: async () => ({}) };
+  });
+  return fn;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -3392,5 +3465,133 @@ describe('board-feature-archive — AC5/AC7: Archiv-Button + Bestätigungsabfrag
       (c) => typeof c[0] === 'string' && c[0].endsWith('/archive-done') && c[1]?.method === 'POST',
     );
     expect(postCalls).toHaveLength(0);
+  });
+});
+
+// ── board-feature-archive (S-234) — „Archiv anzeigen"-Schalter (AC6/AC7) ───────
+
+describe('board-feature-archive — AC6/AC7: „Archiv anzeigen"-Schalter (read-only)', () => {
+  // Toggle-Zustand liegt in localStorage (boardview.showArchived) — zwischen
+  // Tests leeren, damit kein Zustand nachwirkt (Default aus je Test).
+  beforeEach(() => {
+    try { window.localStorage.clear(); } catch { /* jsdom always has it */ }
+  });
+
+  /** Render cockpit for the archive-view project + wait for the toggle button. */
+  async function renderArchViewCockpit() {
+    const fetchMock = makeArchViewFetch();
+    globalThis.fetch = fetchMock;
+    const utils = renderCockpit('proj-arcv');
+    await waitFor(() => {
+      expect(utils.container.querySelector('[data-testid="archive-toggle-btn"]')).toBeTruthy();
+    });
+    return { utils, fetchMock };
+  }
+
+  it('AC7: Toggle ist echter <button> mit aria-pressed=false + sprechendem aria-label (Default aus)', async () => {
+    const { utils } = await renderArchViewCockpit();
+    const toggle = utils.container.querySelector('[data-testid="archive-toggle-btn"]');
+    expect(toggle).toBeTruthy();
+    expect(toggle.tagName).toBe('BUTTON');
+    expect(toggle.getAttribute('aria-pressed')).toBe('false');
+    expect(toggle.getAttribute('aria-label')).toMatch(/anzeigen/i);
+  });
+
+  it('AC6: Default aus → keine archivierten Features geladen (kein includeArchived-Query)', async () => {
+    const { utils, fetchMock } = await renderArchViewCockpit();
+    // Archiviertes Feature NICHT sichtbar
+    expect(utils.container.querySelector('[data-feature="F-950"]')).toBeFalsy();
+    // sichtbares Feature aber schon da
+    expect(utils.container.querySelector('[data-feature="F-901"]')).toBeTruthy();
+    // KEINE Projekt-Fetch-URL trug includeArchived
+    const withArchived = fetchMock.mock.calls.filter(
+      (c) => typeof c[0] === 'string'
+        && /\/api\/board\/projects\//.test(c[0])
+        && c[0].includes('includeArchived=true'),
+    );
+    expect(withArchived).toHaveLength(0);
+  });
+
+  it('AC6: Klick lädt mit includeArchived=true neu → archiviertes Feature erscheint', async () => {
+    const { utils, fetchMock } = await renderArchViewCockpit();
+    await act(async () => {
+      fireEvent.click(utils.container.querySelector('[data-testid="archive-toggle-btn"]'));
+    });
+    // Re-Fetch mit includeArchived=true erfolgte
+    await waitFor(() => {
+      const withArchived = fetchMock.mock.calls.filter(
+        (c) => typeof c[0] === 'string' && c[0].includes('includeArchived=true'),
+      );
+      expect(withArchived.length).toBeGreaterThanOrEqual(1);
+    });
+    // Archiviertes Feature erscheint + aria-pressed=true
+    await waitFor(() => {
+      expect(utils.container.querySelector('[data-feature="F-950"]')).toBeTruthy();
+    });
+    const toggle = utils.container.querySelector('[data-testid="archive-toggle-btn"]');
+    expect(toggle.getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('AC6/AC7: archiviertes Feature ist klar per Text „Archiviert" markiert (Feature-Badge)', async () => {
+    const { utils } = await renderArchViewCockpit();
+    await act(async () => {
+      fireEvent.click(utils.container.querySelector('[data-testid="archive-toggle-btn"]'));
+    });
+    await waitFor(() => {
+      expect(utils.container.querySelector('[data-testid="archived-badge-F-950"]')).toBeTruthy();
+    });
+    const badge = utils.container.querySelector('[data-testid="archived-badge-F-950"]');
+    // Bedeutung per Text (nicht nur Farbe)
+    expect(badge.textContent).toMatch(/Archiviert/i);
+    expect(badge.getAttribute('aria-label')).toMatch(/Archiviert/i);
+    // Feature-Container trägt Read-only-Markierung
+    const feat = utils.container.querySelector('[data-feature="F-950"]');
+    expect(feat.getAttribute('data-archived')).toBe('true');
+  });
+
+  it('AC6: archivierte Story ist READ-ONLY — kein Karten-Button, read-only <article> + „Archiviert"-Marker', async () => {
+    const { utils } = await renderArchViewCockpit();
+    await act(async () => {
+      fireEvent.click(utils.container.querySelector('[data-testid="archive-toggle-btn"]'));
+    });
+    await waitFor(() => {
+      expect(utils.container.querySelector('[data-feature="F-950"]')).toBeTruthy();
+    });
+    // Feature ist als „Done" per Default eingeklappt → zuerst ausklappen.
+    const collapseBtn = utils.container.querySelector('[data-testid="feature-collapse-btn-F-950"]');
+    expect(collapseBtn).toBeTruthy();
+    if (collapseBtn.getAttribute('aria-expanded') === 'false') {
+      await act(async () => { fireEvent.click(collapseBtn); });
+    }
+    // KEINE Klick-/Aktions-Affordance (kein Karten-Button für die archivierte Story)
+    expect(utils.container.querySelector('[data-testid="story-card-btn-S-950"]')).toBeFalsy();
+    // Read-only <article> mit „Archiviert"-Marker (Text, nicht nur Farbe)
+    const marker = utils.container.querySelector('[data-testid="story-archived-S-950"]');
+    expect(marker).toBeTruthy();
+    expect(marker.textContent).toMatch(/Archiviert/i);
+    const card = utils.container.querySelector('[data-story="S-950"]');
+    expect(card.tagName).toBe('ARTICLE');
+    expect(card.getAttribute('data-archived')).toBe('true');
+    expect(card.getAttribute('aria-label')).toMatch(/archiviert/i);
+  });
+
+  it('AC6: erneuter Klick blendet Archivierte wieder aus (Standardansicht, aria-pressed=false)', async () => {
+    const { utils } = await renderArchViewCockpit();
+    // an
+    await act(async () => {
+      fireEvent.click(utils.container.querySelector('[data-testid="archive-toggle-btn"]'));
+    });
+    await waitFor(() => {
+      expect(utils.container.querySelector('[data-feature="F-950"]')).toBeTruthy();
+    });
+    // wieder aus
+    await act(async () => {
+      fireEvent.click(utils.container.querySelector('[data-testid="archive-toggle-btn"]'));
+    });
+    await waitFor(() => {
+      expect(utils.container.querySelector('[data-feature="F-950"]')).toBeFalsy();
+    });
+    const toggle = utils.container.querySelector('[data-testid="archive-toggle-btn"]');
+    expect(toggle.getAttribute('aria-pressed')).toBe('false');
   });
 });

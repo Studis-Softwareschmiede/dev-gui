@@ -249,8 +249,13 @@ export function boardRouter({
    *   ]
    * }
    */
-  router.get('/api/board/projects', async (_req, res) => {
-    const projects = await boardAggregator.getIndex();
+  router.get('/api/board/projects', async (req, res) => {
+    // board-feature-archive AC3/AC6 (V3): explizites `includeArchived`-Query-
+    // Signal liefert archivierte Features/Stories zusätzlich (Default aus =
+    // Standardansicht). Frontend „Archiv anzeigen"-Schalter (S-234) sendet
+    // `?includeArchived=true`.
+    const includeArchived = req.query.includeArchived === 'true';
+    const projects = await boardAggregator.getIndex({ includeArchived });
     return res.json({ projects });
   });
 
@@ -296,6 +301,11 @@ export function boardRouter({
    *
    * Response: { project: { slug, repo_path, project_slug, schema_version, features: [...] } }
    * 404 if slug unknown or invalid.
+   *
+   * board-feature-archive AC3/AC6 (V3): mit `?includeArchived=true` werden
+   * archivierte Features/Stories des Projekts zusätzlich, als `archived` markiert,
+   * geliefert (Default aus = Standardansicht ohne Archivierte). Das Frontend
+   * „Archiv anzeigen"-Schalter (S-234) nutzt dieses Signal read-only.
    */
   router.get('/api/board/projects/:slug', async (req, res) => {
     const { slug } = req.params;
@@ -305,7 +315,8 @@ export function boardRouter({
       return res.status(404).json({ error: 'Projekt nicht gefunden.' });
     }
 
-    const projects = await boardAggregator.getIndex();
+    const includeArchived = req.query.includeArchived === 'true';
+    const projects = await boardAggregator.getIndex({ includeArchived });
     const project = projects.find((p) => p.slug === slug);
 
     if (!project) {

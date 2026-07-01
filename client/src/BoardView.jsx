@@ -122,6 +122,18 @@
  *           Tastatur (Enter/Space); Fokusring erhalten; Chevron aria-hidden.
  *   AC8  — Kein dangerouslySetInnerHTML; kein neuer API-Aufruf; keine Secrets.
  *
+ * board-feature-archive:
+ *   AC5/AC7 (S-233) — Button „Erledigte Features archivieren" + Bestätigungs-
+ *           abfrage (FilterBar + ArchiveConfirmDialog).
+ *   AC6/AC7 (S-234) — „Archiv anzeigen"-Schalter (Default aus, echter Toggle-
+ *           Button mit aria-pressed) in der FilterBar. Ist er an, laden die
+ *           Board-Fetches mit `?includeArchived=true` (V3) neu; archivierte
+ *           Features/Stories erscheinen READ-ONLY (keine Klick-/Aktions-
+ *           Affordance: kein Karten-Button, kein Spezifizieren) und klar per
+ *           Text „Archiviert" markiert (nicht nur farblich). Toggle-Zustand
+ *           lokal in localStorage (`boardview.showArchived`); defektes
+ *           localStorage → stiller Default (aus), kein Crash.
+ *
  * Story-Status-Lebenszyklus (board-subsystem §9.3, erweitert um ideen-inbox AC1):
  *   Idee | To Do | In Progress | Blocked | In Review | Done
  *
@@ -215,6 +227,45 @@ function saveCollapsedSet(slug, collapsedSet) {
     );
   } catch {
     // Silently ignore — AC5: kein Crash bei defektem localStorage
+  }
+}
+
+// ── „Archiv anzeigen"-Schalter (board-feature-archive AC6/V6) ─────────────────
+
+/**
+ * localStorage key for the board-wide „Archiv anzeigen"-toggle.
+ * Purely local display state (Nicht-Ziel: teamweite/serverseitige Persistenz).
+ */
+const SHOW_ARCHIVED_KEY = 'boardview.showArchived';
+
+/**
+ * Load the persisted „Archiv anzeigen"-toggle state.
+ * Default: `false` (Standardansicht). Falls back silently to `false` on any
+ * error (Edge-Case: defektes localStorage → stiller Default (aus), kein Crash).
+ *
+ * @returns {boolean}
+ */
+function loadShowArchived() {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return false;
+    return window.localStorage.getItem(SHOW_ARCHIVED_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Persist the „Archiv anzeigen"-toggle state. Silently ignores errors
+ * (quota/security) — reiner Anzeige-Zustand, kein Crash bei defektem localStorage.
+ *
+ * @param {boolean} value
+ */
+function saveShowArchived(value) {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return;
+    window.localStorage.setItem(SHOW_ARCHIVED_KEY, value ? 'true' : 'false');
+  } catch {
+    // Silently ignore — kein Crash bei defektem localStorage.
   }
 }
 
@@ -379,6 +430,20 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
   // re-fetched stattdessen direkt über handleProjectSelect (imperativ).
   const [reloadToken, setReloadToken] = useState(0);
 
+  // ─── „Archiv anzeigen"-Schalter (board-feature-archive AC6/V6) ───────────────
+  // showArchived: Default aus (Standardansicht). Ist er an, fetchen die Board-
+  // Loads mit `?includeArchived=true` (V3) und archivierte Features/Stories
+  // erscheinen read-only + klar markiert. Reiner Anzeige-Zustand, lokal in
+  // localStorage gemerkt (Edge-Case: defektes localStorage → stiller Default aus).
+  const [showArchived, setShowArchived] = useState(loadShowArchived);
+  const handleToggleArchived = useCallback(() => {
+    setShowArchived((prev) => {
+      const next = !prev;
+      saveShowArchived(next);
+      return next;
+    });
+  }, []);
+
   // ─── Filter state (AC2, AC3, AC4) ───────────────────────────────────────────
   // AC2: default = all status selected (new Set(STATUS_LIFECYCLE), now 6 incl. „Idee")
   const [filterProject, setFilterProject] = useState(lockedProject ?? '');
@@ -478,7 +543,7 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
     setLoadState('loading');
     setLoadError('');
 
-    fetch(`/api/board/projects/${encodeURIComponent(lockedProject)}`)
+    fetch(`/api/board/projects/${encodeURIComponent(lockedProject)}${showArchived ? '?includeArchived=true' : ''}`)
       .then((res) => {
         if (!res.ok) return Promise.reject(new Error(`HTTP ${res.status}`));
         return res.json();
@@ -499,7 +564,7 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
         if (cancelled) return;
         // Fallback: try the full list endpoint so Cockpit doesn't break
         // if the slug doesn't match (e.g. lockedProject = repo path not slug)
-        fetch('/api/board/projects')
+        fetch(`/api/board/projects${showArchived ? '?includeArchived=true' : ''}`)
           .then((r) => {
             if (!r.ok) return Promise.reject(new Error(`HTTP ${r.status}`));
             return r.json();
@@ -530,7 +595,7 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
 
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lockedProject, reloadToken]); // re-run if locked project changes OR a reload was requested (AC10)
+  }, [lockedProject, reloadToken, showArchived]); // re-run if locked project changes, a reload was requested (AC10), OR the „Archiv anzeigen"-toggle flips (AC6)
 
   // ─── STANDALONE: load single project when user clicks (AC6) ─────────────────
   const handleProjectSelect = useCallback((slug) => {
@@ -540,7 +605,7 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
     setProjects([]);
     setCollapsedIds(new Set()); // reset while loading
 
-    fetch(`/api/board/projects/${encodeURIComponent(slug)}`)
+    fetch(`/api/board/projects/${encodeURIComponent(slug)}${showArchived ? '?includeArchived=true' : ''}`)
       .then((res) => {
         if (!res.ok) return Promise.reject(new Error(`HTTP ${res.status}`));
         return res.json();
@@ -559,7 +624,21 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
         setLoadError(err.message || 'Netzwerkfehler');
         setLoadState('error');
       });
-  }, []);
+  }, [showArchived]);
+
+  // ─── „Archiv anzeigen"-Toggle → aktuelles Projekt neu laden (AC6) ────────────
+  // Cockpit re-fetcht bereits über den Load-Effect (showArchived in dessen Deps).
+  // Standalone lädt imperativ über handleProjectSelect — daher hier ein separater
+  // Effect, der beim Umschalten (nicht beim Mount) das aktuell gewählte Projekt
+  // mit dem neuen includeArchived-Signal neu holt.
+  const archivedToggleMountRef = useRef(false);
+  useEffect(() => {
+    if (!archivedToggleMountRef.current) { archivedToggleMountRef.current = true; return; }
+    if (isStandalone && selectedSlug) {
+      handleProjectSelect(selectedSlug);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showArchived]);
 
   // ─── STANDALONE: back to project list ────────────────────────────────────────
   const handleBackToList = useCallback(() => {
@@ -914,6 +993,8 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
               archivableFeatureCount={archivable.featureCount}
               archivableStoryCount={archivable.storyCount}
               onArchiveDone={handleArchiveDone}
+              showArchived={showArchived}
+              onToggleArchived={handleToggleArchived}
             />
           )}
 
@@ -999,6 +1080,8 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
               archivableFeatureCount={archivable.featureCount}
               archivableStoryCount={archivable.storyCount}
               onArchiveDone={handleArchiveDone}
+              showArchived={showArchived}
+              onToggleArchived={handleToggleArchived}
             />
           )}
 
@@ -1109,7 +1192,14 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
  *   archivableFeatureCount?: number,
  *   archivableStoryCount?: number,
  *   onArchiveDone?: () => Promise<void>,
+ *   showArchived?: boolean,
+ *   onToggleArchived?: () => void,
  * }} props
+ *
+ * AC6/AC7 (board-feature-archive): „Archiv anzeigen"-Schalter — echter Toggle-
+ *   Button (`aria-pressed`), Default aus. Umschalten lädt die Board-Daten mit
+ *   `includeArchived=true` neu; archivierte Features erscheinen dann read-only +
+ *   klar per Text „Archiviert" markiert (nicht nur farblich).
  */
 function FilterBar({
   projects,
@@ -1129,6 +1219,8 @@ function FilterBar({
   archivableFeatureCount = 0,
   archivableStoryCount = 0,
   onArchiveDone,
+  showArchived = false,
+  onToggleArchived,
 }) {
   // AC5 (board-feature-archive): Zustand der Archiv-Bestätigungsabfrage.
   //   archiveConfirmOpen — Dialog sichtbar?
@@ -1395,6 +1487,26 @@ function FilterBar({
           data-testid="archive-done-btn"
         >
           Erledigte Features archivieren
+        </button>
+      )}
+
+      {/* AC6/AC7 (board-feature-archive): „Archiv anzeigen"-Schalter — echter
+          Toggle-Button (aria-pressed), Default aus. Umschalten lädt die Board-
+          Daten mit includeArchived neu; archivierte Features werden read-only +
+          per Text klar markiert eingeblendet. Zustand nicht allein über Farbe:
+          Text „Archiv anzeigen" + ☑/☐-Glyphe + aria-pressed. */}
+      {onToggleArchived && (
+        <button
+          type="button"
+          style={styles.archiveToggleBtn}
+          onClick={onToggleArchived}
+          aria-pressed={showArchived}
+          aria-label={showArchived
+            ? 'Archivierte Features ausblenden'
+            : 'Archivierte Features anzeigen'}
+          data-testid="archive-toggle-btn"
+        >
+          <span aria-hidden="true">{showArchived ? '☑' : '☐'}</span> Archiv anzeigen
         </button>
       )}
 
@@ -1667,6 +1779,10 @@ function FeatureRow({ feature, onOpenSpec, onStoryClick, onSpecifyIdea, isCollap
   // AC2: separate detail-panel open/close state (entkoppelt vom Einklappen)
   const [detailOpen, setDetailOpen] = useState(false);
   const rollup = computeRollup(feature);
+  // board-feature-archive AC6/V6: archivierte Features werden read-only + klar
+  // per Text „Archiviert" markiert eingeblendet (nur wenn der „Archiv anzeigen"-
+  // Schalter an ist, liefert das Backend sie via includeArchived überhaupt aus).
+  const isArchivedFeature = feature.archived === true;
   // stories prop contains FILTERED stories (from filteredProjects — only matching filter)
   const stories = Array.isArray(feature.stories) ? feature.stories : [];
 
@@ -1706,9 +1822,12 @@ function FeatureRow({ feature, onOpenSpec, onStoryClick, onSpecifyIdea, isCollap
 
   return (
     <div
-      style={styles.featureRow}
+      style={isArchivedFeature ? { ...styles.featureRow, ...styles.featureRowArchived } : styles.featureRow}
       data-feature={feature.id}
-      aria-label={`Feature: ${feature.title || feature.id}`}
+      data-archived={isArchivedFeature ? 'true' : undefined}
+      aria-label={isArchivedFeature
+        ? `Feature (archiviert, schreibgeschützt): ${feature.title || feature.id}`
+        : `Feature: ${feature.title || feature.id}`}
     >
       {/* Feature header */}
       <div style={styles.featureHeader}>
@@ -1733,6 +1852,17 @@ function FeatureRow({ feature, onOpenSpec, onStoryClick, onSpecifyIdea, isCollap
 
         {feature.status && (
           <StatusBadge status={feature.status} />
+        )}
+        {/* AC6/AC7 (board-feature-archive): „Archiviert"-Badge — Bedeutung per
+            Text (nicht nur Farbe), sprechendes aria-label. */}
+        {isArchivedFeature && (
+          <span
+            style={styles.archivedBadge}
+            aria-label="Archiviert (schreibgeschützt)"
+            data-testid={`archived-badge-${feature.id}`}
+          >
+            Archiviert
+          </span>
         )}
         {/* Rollup bar (AC5) */}
         <RollupBar done={rollup.done} total={rollup.total} />
@@ -1979,8 +2109,24 @@ function StoryCard({ story, onOpenSpec, onStoryClick, onSpecifyIdea, specifyJob 
   const specifyRunning = isIdea && specifyJob?.status === 'running';
   const specifyFailed  = isIdea && (specifyJob?.status === 'failed' || specifyJob?.status === 'auth-expired');
 
+  // board-feature-archive AC6/V6: archivierte Stories werden read-only + klar
+  // per Text „Archiviert" markiert dargestellt und tragen KEINE Klick-/Aktions-
+  // Affordance (kein Karten-Button, kein Spezifizieren). Deckt auch den Randfall
+  // einer einzeln archivierten Story (deren Feature sichtbar bliebe) ab.
+  const isArchived = story.archived === true;
+
   const cardContent = (
     <>
+      {/* AC6/AC7: „Archiviert"-Marker — Bedeutung per Text (nicht nur Farbe). */}
+      {isArchived && (
+        <p
+          style={styles.storyArchivedMarker}
+          aria-label="Archiviert (schreibgeschützt)"
+          data-testid={`story-archived-${story.id}`}
+        >
+          Archiviert
+        </p>
+      )}
       <div style={styles.storyHeader}>
         {entityRef && (
           <EntityIcon kind={entityRef.kind} id={entityRef.id} size={14} />
@@ -2088,7 +2234,9 @@ function StoryCard({ story, onOpenSpec, onStoryClick, onSpecifyIdea, specifyJob 
   // idea-specify-chat AC1 (S-218): for status === 'Idee', the click opens the
   // Spezifizieren-Chat-Overlay instead of the detail view — reflected in the
   // aria-label for screen-reader clarity.
-  if (onStoryClick) {
+  // board-feature-archive AC6/V6: archivierte Stories bekommen KEINE Klick-/
+  // Aktions-Affordance — sie fallen auf die read-only <article>-Darstellung durch.
+  if (onStoryClick && !isArchived) {
     const cardButton = (
       <button
         type="button"
@@ -2126,9 +2274,12 @@ function StoryCard({ story, onOpenSpec, onStoryClick, onSpecifyIdea, specifyJob 
 
   return (
     <article
-      style={styles.storyCard}
-      aria-label={`Story: ${story.title || story.id}`}
+      style={isArchived ? { ...styles.storyCard, ...styles.storyCardArchived } : styles.storyCard}
+      aria-label={isArchived
+        ? `Story (archiviert, schreibgeschützt): ${story.title || story.id}`
+        : `Story: ${story.title || story.id}`}
       data-story={story.id}
+      data-archived={isArchived ? 'true' : undefined}
     >
       {cardContent}
     </article>
@@ -2905,6 +3056,56 @@ const styles = {
     cursor: 'pointer',
     minHeight: 40,
     // Focus ring preserved (no outline:none)
+  },
+
+  // ── „Archiv anzeigen"-Schalter + Read-only-Markierung (board-feature-archive AC6/AC7) ──
+  // Toggle-Button in der FilterBar — echter <button> mit aria-pressed.
+  archiveToggleBtn: {
+    background: 'transparent',
+    border: '1px solid #334155',
+    color: '#9ca3af',
+    borderRadius: 4,
+    padding: '6px 12px',
+    fontSize: 12,
+    cursor: 'pointer',
+    minHeight: 36,
+    whiteSpace: 'nowrap',
+    // Focus ring preserved (no outline:none)
+  },
+  // „Archiviert"-Badge am Feature-Header — Bedeutung per Text, nicht nur Farbe.
+  // #fcd34d on #292018 ≈ 10:1 — WCAG AA (Kontrast in Quelle dokumentiert; jsdom
+  // hat keine Layout-Engine, Kontrast daher nicht per Test belegbar).
+  archivedBadge: {
+    display: 'inline-block',
+    padding: '2px 8px',
+    fontSize: 11,
+    fontWeight: 600,
+    borderRadius: 10,
+    background: '#292018',
+    color: '#fcd34d',
+    border: '1px solid #78561f',
+    flexShrink: 0,
+    letterSpacing: '0.02em',
+  },
+  // Read-only-Feature-Container — reduzierte Opazität (rein visuell, Bedeutung
+  // trägt das Text-Badge, nicht die Farbe/Deckkraft).
+  featureRowArchived: {
+    opacity: 0.72,
+  },
+  // Read-only-Story-Karte — dezent abgesetzt (visuell); Marker-Text trägt Bedeutung.
+  storyCardArchived: {
+    opacity: 0.78,
+    borderStyle: 'dashed',
+    borderColor: '#3a3320',
+  },
+  // „Archiviert"-Marker an der Story-Karte (Randfall einzeln archivierter Story).
+  storyArchivedMarker: {
+    margin: '0 0 4px',
+    fontSize: 10,
+    fontWeight: 700,
+    color: '#fcd34d',
+    letterSpacing: '0.04em',
+    textTransform: 'uppercase',
   },
 
   // Feature detail panel (goal, DoD, priority, depends, labels)
