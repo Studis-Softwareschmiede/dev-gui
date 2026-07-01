@@ -17,6 +17,14 @@
  *          des einzelnen Router-Moduls, analog notifications.js/notificationSettings.js).
  *   AC16 — enabled=false wird unverändert gespeichert/gelesen (Roundtrip-Test); die
  *          Scheduler-Idle-Entscheidung selbst liegt bei S-195 (Nicht-Ziel dieser Story).
+ *   AC17 — GET /api/settings/ticker/status (S-197, Statusanzeige Fabrik-Übersicht):
+ *          200 { enabled, window, withinWindow, activeDrains }; activeDrains 0 ohne
+ *          verdrahteten nightWatchScheduler (graceful degradation) und bei einem
+ *          werfenden getStatus() (best-effort, kein Crash); activeDrains spiegelt
+ *          nightWatchScheduler.getStatus().activeDrainProjectPaths.length; withinWindow
+ *          spiegelt PUT-gespeicherte enabled/window-Werte (Roundtrip, Wiederverwendung
+ *          isWithinWindow aus NightWatchScheduler.js — nicht separat re-getestet, s.
+ *          NightWatchScheduler.test.js AC10).
  */
 
 import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals';
@@ -571,5 +579,115 @@ describe('AC15/AC16 — GET/PUT /api/settings/ticker (HTTP-Ebene)', () => {
     const getRes = await httpGet(port, '/api/settings/ticker');
     expect(getRes.body.enabled).toBe(true);
     expect(getRes.body.intervalMinutes).toBe(20);
+  });
+});
+
+// ── AC17: ticker-Router GET /api/settings/ticker/status (HTTP-Ebene, S-197) ─────
+
+describe('AC17 — GET /api/settings/ticker/status (HTTP-Ebene, S-197 Statusanzeige)', () => {
+  let server;
+  let port;
+  let tmpDir;
+  let origCredStoreDir;
+
+  beforeEach(async () => {
+    tmpDir = join(tmpdir(), `ticker-status-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(tmpDir, { recursive: true });
+    origCredStoreDir = process.env.CRED_STORE_DIR;
+    process.env.CRED_STORE_DIR = tmpDir;
+    jest.resetModules();
+  });
+
+  afterEach(async () => {
+    if (server) await closeServer(server);
+    server = null;
+    if (origCredStoreDir !== undefined) {
+      process.env.CRED_STORE_DIR = origCredStoreDir;
+    } else {
+      delete process.env.CRED_STORE_DIR;
+    }
+    await rm(tmpDir, { recursive: true, force: true });
+    jest.resetModules();
+  });
+
+  /**
+   * @param {{ nightWatchScheduler?: { getStatus: () => object } }} [opts]
+   */
+  async function makeStatusApp({ nightWatchScheduler } = {}) {
+    const { create } = await import('../src/routers/ticker.js');
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => { req.identity = { email: 'test@example.com' }; next(); });
+    app.use(create({ nightWatchScheduler }));
+    return app;
+  }
+
+  it('enabled=false (Default) → { enabled:false, window, withinWindow, activeDrains:0 }', async () => {
+    const app = await makeStatusApp();
+    const s = await startServer(app);
+    server = s.server;
+    port = s.port;
+
+    const res = await httpGet(port, '/api/settings/ticker/status');
+    expect(res.status).toBe(200);
+    expect(res.body.enabled).toBe(false);
+    expect(res.body.window).toEqual({ start: '23:00', end: '07:00', timezone: 'Europe/Zurich' });
+    expect(typeof res.body.withinWindow).toBe('boolean');
+    expect(res.body.activeDrains).toBe(0);
+  });
+
+  it('ohne nightWatchScheduler-Dep (nicht verdrahtet) → activeDrains 0 (graceful degradation), kein Crash', async () => {
+    const app = await makeStatusApp({ nightWatchScheduler: undefined });
+    const s = await startServer(app);
+    server = s.server;
+    port = s.port;
+
+    const res = await httpGet(port, '/api/settings/ticker/status');
+    expect(res.status).toBe(200);
+    expect(res.body.activeDrains).toBe(0);
+  });
+
+  it('mit nightWatchScheduler-Dep → activeDrains spiegelt getStatus().activeDrainProjectPaths.length', async () => {
+    const nightWatchScheduler = {
+      getStatus: () => ({ activeDrainProjectPaths: ['/workspace/proj-a', '/workspace/proj-b'] }),
+    };
+    const app = await makeStatusApp({ nightWatchScheduler });
+    const s = await startServer(app);
+    server = s.server;
+    port = s.port;
+
+    const res = await httpGet(port, '/api/settings/ticker/status');
+    expect(res.status).toBe(200);
+    expect(res.body.activeDrains).toBe(2);
+  });
+
+  it('nightWatchScheduler.getStatus() wirft → activeDrains 0 (best-effort, kein Crash)', async () => {
+    const nightWatchScheduler = { getStatus: () => { throw new Error('boom'); } };
+    const app = await makeStatusApp({ nightWatchScheduler });
+    const s = await startServer(app);
+    server = s.server;
+    port = s.port;
+
+    const res = await httpGet(port, '/api/settings/ticker/status');
+    expect(res.status).toBe(200);
+    expect(res.body.activeDrains).toBe(0);
+  });
+
+  it('withinWindow spiegelt PUT-gespeicherte enabled/window-Werte (Roundtrip)', async () => {
+    const app = await makeStatusApp();
+    const s = await startServer(app);
+    server = s.server;
+    port = s.port;
+
+    // Ein Fenster, das die gesamte Wanduhr abdeckt (00:00–23:59) → immer im Fenster.
+    await httpPut(port, '/api/settings/ticker', {
+      enabled: true,
+      window: { start: '00:00', end: '23:59', timezone: 'Europe/Zurich' },
+    });
+
+    const res = await httpGet(port, '/api/settings/ticker/status');
+    expect(res.status).toBe(200);
+    expect(res.body.enabled).toBe(true);
+    expect(res.body.withinWindow).toBe(true);
   });
 });

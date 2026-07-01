@@ -30,22 +30,30 @@
  *   - Nur /api/workspace/repos (hinter AccessGuard).
  *   - Keine Secrets im Bundle.
  *
+ * taktgeber-nachtwaechter (S-197 — AC17):
+ *   Kompakte Statusanzeige (`NightWatchStatusBadge`, eigenständige Komponente, additiv
+ *   eingebunden) in der Header-Zeile: aktiv/pausiert, im/außerhalb Fenster, aktuell
+ *   laufende Drains.
+ *
  * @param {{
  *   navigateFactory: (repo: string | null) => void,
  *   onNavigate?: (view: string) => void,
+ *   fetchFn?: typeof fetch,
  * }} props
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { IntakeDialog } from './IntakeDialog.jsx';
+import { NightWatchStatusBadge } from './NightWatchStatusBadge.jsx';
 
 /**
  * @param {{
  *   navigateFactory: (repo: string | null) => void,
  *   onNavigate?: (view: string) => void,
+ *   fetchFn?: typeof fetch,
  * }} props
  */
-export function RepoOverview({ navigateFactory, onNavigate }) {
+export function RepoOverview({ navigateFactory, onNavigate, fetchFn }) {
   const [loadState, setLoadState] = useState('idle'); // 'idle'|'loading'|'ok'|'error'
   const [loadError, setLoadError] = useState('');
   const [repos, setRepos] = useState([]);
@@ -164,6 +172,8 @@ export function RepoOverview({ navigateFactory, onNavigate }) {
     <main style={styles.main} aria-label="Repo-Übersicht">
       <div style={styles.headerRow}>
         <h1 style={styles.h1}>Fabrik — Projekt wählen</h1>
+        {/* taktgeber-nachtwaechter S-197 AC17: kompakte Statusanzeige */}
+        <NightWatchStatusBadge fetchFn={fetchFn} />
         {/* AC1 fabric-intake-dialog: new-mode trigger */}
         {!intakeNewOpen ? (
           <button

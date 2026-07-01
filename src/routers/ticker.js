@@ -1,11 +1,17 @@
 /**
- * Router: Ticker(Nachtwächter)-Settings CRUD (taktgeber-nachtwaechter AC15/AC16).
+ * Router: Ticker(Nachtwächter)-Settings CRUD (taktgeber-nachtwaechter AC15/AC16/AC17).
  *
  * AC15 — Persistenz + API:
  *   GET  /api/settings/ticker → gespeicherte Settings (oder Defaults).
  *   PUT  /api/settings/ticker → Validierung + Speicherung; 400 bei ungültiger Eingabe.
  * AC16 — enabled=false wird unverändert gespeichert/gelesen (Scheduler-Idle-Entscheidung
  *   liegt beim Scheduler selbst, S-195 — dieser Router liefert nur den Wert).
+ * AC17 — kompakte Statusanzeige (Fabrik-Übersicht, S-197 NightWatchStatusBadge):
+ *   GET /api/settings/ticker/status → abgeleiteter Status, kombiniert die persistierten
+ *   Settings (enabled/window) mit `isWithinWindow` (Wiederverwendung aus NightWatchScheduler.js,
+ *   S-195 — keine Duplizierung der TZ-/über-Mitternacht-Logik) und der Anzahl aktuell
+ *   laufender Drains (`NightWatchScheduler#getStatus()`, optionaler Dep — 0 wenn der
+ *   Scheduler nicht verdrahtet ist, graceful degradation, analog `_resolveKnownSlugs`).
  *
  * Keine Secrets (Floor) — die Ticker-Settings enthalten ausschließlich Nachtfenster-/
  * Parallelitäts-/Projekt-Konfiguration.
@@ -17,6 +23,7 @@
 
 import { Router } from 'express';
 import { read, write, validate } from '../TickerSettingsStore.js';
+import { isWithinWindow } from '../NightWatchScheduler.js';
 
 export const order = 54;
 
@@ -42,10 +49,11 @@ async function _resolveKnownSlugs(boardAggregator) {
 /**
  * @param {{
  *   boardAggregator?: import('../BoardAggregator.js').BoardAggregator,
+ *   nightWatchScheduler?: import('../NightWatchScheduler.js').NightWatchScheduler,
  * }} deps
  * @returns {import('express').Router}
  */
-export function create({ boardAggregator } = {}) {
+export function create({ boardAggregator, nightWatchScheduler } = {}) {
   const router = Router();
 
   /**
@@ -63,6 +71,48 @@ export function create({ boardAggregator } = {}) {
       return res.status(500).json({ error: 'Ticker-Settings konnten nicht geladen werden.' });
     }
     return res.json(settings);
+  });
+
+  /**
+   * GET /api/settings/ticker/status
+   *
+   * AC17 — abgeleiteter Status für die kompakte Statusanzeige (Fabrik-Übersicht).
+   * Registriert VOR der generischen `/api/settings/ticker`-Route unschädlich, da Express
+   * exakte Pfad-Segmente matcht (`/status` matcht nie den `/api/settings/ticker`-Handler).
+   *
+   * Response 200: { enabled, window:{start,end,timezone}, withinWindow, activeDrains }
+   *   - withinWindow: `isWithinWindow(Date.now(), settings.window)` (Wiederverwendung
+   *     NightWatchScheduler.js, AC10 — keine eigene TZ-/über-Mitternacht-Logik hier).
+   *   - activeDrains: Anzahl aktuell laufender Drains (`nightWatchScheduler.getStatus()`),
+   *     0 wenn der Scheduler nicht verdrahtet ist (graceful degradation).
+   */
+  router.get('/api/settings/ticker/status', async (_req, res) => {
+    let settings;
+    try {
+      settings = await read();
+    } catch (err) {
+      console.error('[ticker] status read fehlgeschlagen:', err.message);
+      return res.status(500).json({ error: 'Ticker-Status konnte nicht geladen werden.' });
+    }
+
+    let activeDrains = 0;
+    if (nightWatchScheduler && typeof nightWatchScheduler.getStatus === 'function') {
+      try {
+        const schedulerStatus = nightWatchScheduler.getStatus();
+        activeDrains = Array.isArray(schedulerStatus?.activeDrainProjectPaths)
+          ? schedulerStatus.activeDrainProjectPaths.length
+          : 0;
+      } catch {
+        activeDrains = 0; // best-effort — ein Scheduler-Status-Fehler darf die Anzeige nie crashen
+      }
+    }
+
+    return res.json({
+      enabled: settings.enabled,
+      window: settings.window,
+      withinWindow: isWithinWindow(Date.now(), settings.window),
+      activeDrains,
+    });
   });
 
   /**

@@ -8,6 +8,12 @@
  *   AC1 — Repo-Übersicht rendert lokale Klone (Name/Branch/dirty/letzter Commit)
  *          robust, auch wenn lastCommit ein Objekt oder null ist (kein Crash).
  *
+ * Covers (taktgeber-nachtwaechter):
+ *   AC17 — kompakte Statusanzeige (NightWatchStatusBadge) in der Header-Zeile:
+ *          aktiv+Fenster+im/außerhalb-Fenster-Text, pausiert-Text, laufende
+ *          Drains angehängt; unsichtbar bei Fehler/unerwarteter Antwortform
+ *          (graceful degradation, kein Crash).
+ *
  * @jest-environment jsdom
  */
 
@@ -62,5 +68,97 @@ describe('RepoOverview — lastCommit-Objekt/null robust (kein Crash)', () => {
     const commitLabels = queryAllByLabelText(/Letzter Commit:/);
     expect(commitLabels.length).toBe(2);
     expect(commitLabels.some((el) => el.getAttribute('aria-label') === 'Letzter Commit: —')).toBe(true);
+  });
+});
+
+// ── AC17 (taktgeber-nachtwaechter): NightWatchStatusBadge in der Header-Zeile ────
+
+/**
+ * URL-routender Fetch-Mock: /api/workspace/repos → REPOS; /api/settings/ticker/status →
+ * `statusResponse` (injizierbar je Test).
+ */
+function makeFetch(statusResponse) {
+  return jest.fn(async (url) => {
+    if (url === '/api/settings/ticker/status') {
+      if (statusResponse === 'reject') throw new Error('Netzwerkfehler');
+      if (statusResponse === 'malformed') {
+        return { ok: true, status: 200, json: async () => ({ repos: [] }) };
+      }
+      return { ok: true, status: 200, json: async () => statusResponse };
+    }
+    return { ok: true, status: 200, json: async () => ({ repos: REPOS }) };
+  });
+}
+
+describe('RepoOverview — AC17: NightWatchStatusBadge (taktgeber-nachtwaechter)', () => {
+  afterEach(() => { jest.restoreAllMocks(); });
+
+  it('enabled=true, im Fenster, keine aktiven Drains → Text zeigt Fenster + "im Fenster"', async () => {
+    globalThis.fetch = makeFetch({
+      enabled: true,
+      window: { start: '23:00', end: '07:00', timezone: 'Europe/Zurich' },
+      withinWindow: true,
+      activeDrains: 0,
+    });
+    const { getByRole } = render(
+      React.createElement(RepoOverview, { navigateFactory: () => {} }),
+    );
+    await waitFor(() => {
+      const badge = getByRole('status', { name: /nachtwächter: aktiv/i });
+      expect(badge.textContent).toMatch(/23:00–07:00/);
+      expect(badge.textContent).toMatch(/im Fenster/);
+      expect(badge.textContent).not.toMatch(/Drain/);
+    });
+  });
+
+  it('enabled=true, außerhalb Fenster + 2 laufende Drains → Text zeigt "außerhalb Fenster" + Drain-Anzahl', async () => {
+    globalThis.fetch = makeFetch({
+      enabled: true,
+      window: { start: '23:00', end: '07:00', timezone: 'Europe/Zurich' },
+      withinWindow: false,
+      activeDrains: 2,
+    });
+    const { getByRole } = render(
+      React.createElement(RepoOverview, { navigateFactory: () => {} }),
+    );
+    await waitFor(() => {
+      const badge = getByRole('status', { name: /nachtwächter: aktiv/i });
+      expect(badge.textContent).toMatch(/außerhalb Fenster/);
+      expect(badge.textContent).toMatch(/2 Drains aktiv/);
+    });
+  });
+
+  it('enabled=false → Text "Nachtwächter: pausiert" (kein Fenster-Detail)', async () => {
+    globalThis.fetch = makeFetch({
+      enabled: false,
+      window: { start: '23:00', end: '07:00', timezone: 'Europe/Zurich' },
+      withinWindow: false,
+      activeDrains: 0,
+    });
+    const { getByRole } = render(
+      React.createElement(RepoOverview, { navigateFactory: () => {} }),
+    );
+    await waitFor(() => {
+      expect(getByRole('status', { name: /nachtwächter: pausiert/i })).toBeTruthy();
+    });
+  });
+
+  it('Status-Endpunkt nicht erreichbar (Netzwerkfehler) → keine Badge, kein Crash', async () => {
+    globalThis.fetch = makeFetch('reject');
+    const { getByText, queryByRole } = render(
+      React.createElement(RepoOverview, { navigateFactory: () => {} }),
+    );
+    // Restliche Ansicht bleibt funktionsfähig (Repos laden weiterhin — separater fetch-Call).
+    await waitFor(() => expect(getByText('dev-gui')).toBeTruthy());
+    expect(queryByRole('status', { name: /nachtwächter/i })).toBeNull();
+  });
+
+  it('unerwartete Antwortform (kein enabled-Feld) → keine Badge, kein Crash', async () => {
+    globalThis.fetch = makeFetch('malformed');
+    const { getByText, queryByRole } = render(
+      React.createElement(RepoOverview, { navigateFactory: () => {} }),
+    );
+    await waitFor(() => expect(getByText('dev-gui')).toBeTruthy());
+    expect(queryByRole('status', { name: /nachtwächter/i })).toBeNull();
   });
 });

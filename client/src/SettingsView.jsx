@@ -92,10 +92,15 @@
  *           aria-describedby, role=status / role=alert, role=img auf Stufen-Icons.
  *           Status-Kachel zeigt NUR Metadaten — kein Key/Secret/Klartext.
  *
+ * Nachtwächter (taktgeber-nachtwaechter S-197 — AC17):
+ *   Abschnitt „Nachtwächter" bindet die eigenständige Komponente `NightWatchSettings.jsx`
+ *   ein (additiv, kein Umbau bestehender Sektionen — s. dortige Modul-Doku für Felder/AC17).
+ *
  * @param {{ onNavigate: (view: string) => void }} props
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { NightWatchSettings } from './NightWatchSettings.jsx';
 
 // ── Konstanten ────────────────────────────────────────────────────────────────
 
@@ -4714,6 +4719,16 @@ export function SettingsView({ onNavigate, fetchFn }) {
             onCredSaved={load}
             fetchFn={fetchFn}
           />
+        </section>
+
+        {/* Nachtwächter — taktgeber-nachtwaechter S-197 AC17 */}
+        <section aria-labelledby="settings-section-nightwatch" style={styles.section}>
+          <h2 id="settings-section-nightwatch" style={styles.sectionHeading}>Nachtwächter</h2>
+          <p style={styles.sectionDesc}>
+            Automatisches, nächtliches Leerziehen offener Boards (Nachtfenster, Parallelität,
+            Eskalation, Projekt-Auswahl). Liest/schreibt GET/PUT /api/settings/ticker.
+          </p>
+          <NightWatchSettings fetchFn={fetchFn} />
         </section>
 
         <button
