@@ -33,6 +33,16 @@
  *          keiner/teilweise → Klick wählt alle aus, Label „Alle"/aria-pressed=false; aria-label nennt Aktion.
  *          Optischer Links-Versatz (marginLeft) in Quelle dokumentiert — nicht per jsdom testbar.
  *
+ * Covers (idea-specify-background-status, S-230):
+ *   AC3 — running-Job rendert an der Idee-Karte ein Lauf-Badge „wird
+ *          spezifiziert…" (Text + aria-busy/role=status/aria-live, nicht nur Farbe).
+ *   AC4 — failed/auth-expired → nicht-blockierender Fehler-Hinweis, Karte bleibt
+ *          anklickbar; done/kein Job → kein Badge.
+ *   AC5 — Hydration aus GET …/specify/jobs beim Board-Load; Re-Hydration beim
+ *          Schließen des Overlays (gerade gestarteter Lauf erscheint); Polling nur
+ *          solange ≥1 running-Job (fake timers); running→done → GENAU EIN
+ *          Board-Re-Fetch; danach kein Poll (Ruhezustand). Kein Poll ohne aktive Jobs.
+ *
  * Covers (story-detail-ansicht):
  *   AC3, AC4, AC5 — Story-Klick, Soll-Ist, Vorab-Badge; fehlende Schätzung; null-Fälle.
  *   AC3 — Story-Klick öffnet Detail-Ansicht; drei Blöcke sichtbar.
@@ -1338,6 +1348,218 @@ describe('idea-specify-chat AC1/AC2 (S-218) — Chat-Overlay ersetzt discuss/res
       fireEvent.click(container.querySelector('[data-testid="idea-specify-mock-close-btn"]'));
     });
     expect(container.querySelector('[data-testid="idea-specify-chat-modal-mock"]')).toBeNull();
+  });
+});
+
+// ── idea-specify-background-status (S-230): AC3/AC4/AC5 ────────────────────────
+
+/**
+ * Fetch-Mock für S-230: reicht die Board-Endpunkte durch UND bedient den
+ * idea-keyed Status-Endpunkt GET …/specify/jobs (vor dem generischen :slug-
+ * Matcher!). `getJobs()` liefert die aktuelle Jobs-Map (mutierbar über Closure),
+ * sodass ein Test den Übergang running→done modellieren kann.
+ *
+ * @param {{ fullProjects?: object[], getJobs?: () => object }} opts
+ */
+function makeSpecifyFetch({ fullProjects = [], getJobs = () => ({}) } = {}) {
+  return jest.fn(async (url) => {
+    // MUSS vor dem /:slug-Matcher stehen (sonst als Slug fehlinterpretiert).
+    if (/^\/api\/board\/projects\/[^/]+\/specify\/jobs$/.test(url)) {
+      return { ok: true, status: 200, json: async () => ({ jobs: getJobs() }) };
+    }
+    if (url === '/api/board/projects/list') {
+      const list = fullProjects.map((p) => (p.error ? { slug: p.slug, error: p.error } : {
+        slug: p.slug,
+        feature_count: (p.features ?? []).length,
+        story_count: (p.features ?? []).reduce((a, f) => a + (f.stories ?? []).length, 0),
+      }));
+      return { ok: true, status: 200, json: async () => ({ projects: list }) };
+    }
+    if (url === '/api/board/projects') {
+      return { ok: true, status: 200, json: async () => ({ projects: fullProjects }) };
+    }
+    const slugMatch = url.match(/^\/api\/board\/projects\/(.+)$/);
+    if (slugMatch) {
+      const slug = decodeURIComponent(slugMatch[1]);
+      const proj = fullProjects.find((p) => p.slug === slug);
+      if (proj) return { ok: true, status: 200, json: async () => ({ project: proj }) };
+      return { ok: false, status: 404, json: async () => ({ error: 'nicht gefunden' }) };
+    }
+    return { ok: false, status: 404, json: async () => ({}) };
+  });
+}
+
+describe('idea-specify-background-status (S-230) — AC3/AC4: Idee-Karten-Badge', () => {
+  it('AC3 — running-Job rendert Lauf-Badge „wird spezifiziert…" (Text + aria-busy/role=status)', async () => {
+    globalThis.fetch = makeSpecifyFetch({
+      fullProjects: [PROJECT_IDEE],
+      getJobs: () => ({ [STORY_IDEE.id]: { status: 'running', jobId: 'j1' } }),
+    });
+    const { container } = renderCockpit('project-idee');
+
+    await waitFor(() => {
+      expect(container.querySelector(`[data-testid="specify-running-badge-${STORY_IDEE.id}"]`)).toBeTruthy();
+    });
+    const badge = container.querySelector(`[data-testid="specify-running-badge-${STORY_IDEE.id}"]`);
+    expect(badge.getAttribute('role')).toBe('status');
+    expect(badge.getAttribute('aria-busy')).toBe('true');
+    expect(badge.getAttribute('aria-live')).toBe('polite');
+    expect(badge.textContent).toMatch(/wird spezifiziert/i);
+    // Kein Fehler-Badge gleichzeitig.
+    expect(container.querySelector(`[data-testid="specify-error-badge-${STORY_IDEE.id}"]`)).toBeNull();
+  });
+
+  it('AC4 — failed-Job rendert nicht-blockierenden Fehler-Hinweis; Karte bleibt anklickbar', async () => {
+    globalThis.fetch = makeSpecifyFetch({
+      fullProjects: [PROJECT_IDEE],
+      getJobs: () => ({ [STORY_IDEE.id]: { status: 'failed', jobId: 'j1' } }),
+    });
+    const { container } = renderCockpit('project-idee');
+
+    await waitFor(() => {
+      expect(container.querySelector(`[data-testid="specify-error-badge-${STORY_IDEE.id}"]`)).toBeTruthy();
+    });
+    const badge = container.querySelector(`[data-testid="specify-error-badge-${STORY_IDEE.id}"]`);
+    expect(badge.getAttribute('role')).toBe('status');
+    expect(badge.textContent).toMatch(/fehlgeschlagen — erneut versuchen/i);
+    // Karte bleibt klickbar (Story-Card-Button + Spezifizieren-Trigger vorhanden).
+    expect(container.querySelector(`[data-testid="story-card-btn-${STORY_IDEE.id}"]`)).toBeTruthy();
+    expect(container.querySelector(`[data-testid="idea-specify-btn-${STORY_IDEE.id}"]`)).toBeTruthy();
+  });
+
+  it('AC4 — auth-expired-Job rendert denselben Fehler-Hinweis', async () => {
+    globalThis.fetch = makeSpecifyFetch({
+      fullProjects: [PROJECT_IDEE],
+      getJobs: () => ({ [STORY_IDEE.id]: { status: 'auth-expired', jobId: 'j1' } }),
+    });
+    const { container } = renderCockpit('project-idee');
+    await waitFor(() => {
+      expect(container.querySelector(`[data-testid="specify-error-badge-${STORY_IDEE.id}"]`)).toBeTruthy();
+    });
+  });
+
+  it('AC4 — kein Job (done → aus dem Snapshot entfernt) → kein Badge', async () => {
+    globalThis.fetch = makeSpecifyFetch({ fullProjects: [PROJECT_IDEE], getJobs: () => ({}) });
+    const { container } = renderCockpit('project-idee');
+    await waitFor(() => {
+      expect(container.querySelector(`[data-testid="story-card-btn-${STORY_IDEE.id}"]`)).toBeTruthy();
+    });
+    // Nach Hydration (specify/jobs) bleibt kein Badge.
+    await waitFor(() => {
+      const jobsCalls = globalThis.fetch.mock.calls.filter(([u]) => /\/specify\/jobs$/.test(u));
+      expect(jobsCalls.length).toBeGreaterThanOrEqual(1);
+    });
+    expect(container.querySelector(`[data-testid="specify-running-badge-${STORY_IDEE.id}"]`)).toBeNull();
+    expect(container.querySelector(`[data-testid="specify-error-badge-${STORY_IDEE.id}"]`)).toBeNull();
+  });
+});
+
+describe('idea-specify-background-status (S-230) — AC5: Hydratisieren + Polling + Re-Fetch', () => {
+  it('AC5 — hydratisiert die Idee-Badges aus GET …/specify/jobs beim Board-Load', async () => {
+    const fetchMock = makeSpecifyFetch({
+      fullProjects: [PROJECT_IDEE],
+      getJobs: () => ({ [STORY_IDEE.id]: { status: 'running', jobId: 'j1' } }),
+    });
+    globalThis.fetch = fetchMock;
+    renderCockpit('project-idee');
+    await waitFor(() => {
+      const jobsCalls = fetchMock.mock.calls.filter(([u]) =>
+        u === '/api/board/projects/project-idee/specify/jobs');
+      expect(jobsCalls.length).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  it('AC5 — Schließen des Chat-Overlays re-hydratisiert die Badges (gerade gestarteter Lauf erscheint)', async () => {
+    let jobs = {};
+    const fetchMock = makeSpecifyFetch({ fullProjects: [PROJECT_IDEE], getJobs: () => jobs });
+    globalThis.fetch = fetchMock;
+    const { container } = renderCockpit('project-idee');
+
+    await waitFor(() => {
+      expect(container.querySelector(`[data-testid="idea-specify-btn-${STORY_IDEE.id}"]`)).toBeTruthy();
+    });
+    // Overlay öffnen.
+    await act(async () => {
+      fireEvent.click(container.querySelector(`[data-testid="idea-specify-btn-${STORY_IDEE.id}"]`));
+    });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="idea-specify-chat-modal-mock"]')).toBeTruthy();
+    });
+
+    // Simuliert: „Story anlegen" hat serverseitig einen running-Job registriert.
+    jobs = { [STORY_IDEE.id]: { status: 'running', jobId: 'j1' } };
+
+    // Fire-and-forget-Schließen → Re-Hydration → Badge erscheint (AC5).
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="idea-specify-mock-close-btn"]'));
+    });
+    await waitFor(() => {
+      expect(container.querySelector(`[data-testid="specify-running-badge-${STORY_IDEE.id}"]`)).toBeTruthy();
+    });
+  });
+
+  it('AC5 — pollt solange running, löst bei running→done GENAU EIN Board-Re-Fetch aus, danach kein Poll (Ruhezustand)', async () => {
+    jest.useFakeTimers();
+    try {
+      let jobs = { [STORY_IDEE.id]: { status: 'running', jobId: 'j1' } };
+      const fetchMock = makeSpecifyFetch({ fullProjects: [PROJECT_IDEE], getJobs: () => jobs });
+      globalThis.fetch = fetchMock;
+      const countJobs = () =>
+        fetchMock.mock.calls.filter(([u]) => u === '/api/board/projects/project-idee/specify/jobs').length;
+      const countBoard = () =>
+        fetchMock.mock.calls.filter(([u]) => u === '/api/board/projects/project-idee').length;
+
+      let container;
+      await act(async () => { ({ container } = renderCockpit('project-idee')); });
+      // Mount-Load + Hydration durchflushen.
+      await act(async () => { await jest.advanceTimersByTimeAsync(0); });
+      await act(async () => { await jest.advanceTimersByTimeAsync(0); });
+
+      expect(countJobs()).toBeGreaterThanOrEqual(1);
+      const jobsAfterHydrate = countJobs();
+
+      // Ein Poll-Intervall → weiterer specify/jobs-Poll (noch running).
+      await act(async () => { await jest.advanceTimersByTimeAsync(4000); });
+      expect(countJobs()).toBeGreaterThan(jobsAfterHydrate);
+
+      // Job terminiert → Endpoint liefert leeren Snapshot (done entfernt).
+      jobs = {};
+      const boardBefore = countBoard();
+      await act(async () => { await jest.advanceTimersByTimeAsync(4000); });
+      await act(async () => { await jest.advanceTimersByTimeAsync(0); });
+      // running→weg erkannt → GENAU EIN Board-Re-Fetch.
+      expect(countBoard()).toBe(boardBefore + 1);
+
+      // Ruhezustand: kein running mehr → Intervall geräumt → kein weiterer Poll.
+      const jobsAfterDone = countJobs();
+      await act(async () => { await jest.advanceTimersByTimeAsync(12000); });
+      expect(countJobs()).toBe(jobsAfterDone);
+      // Und kein weiterer Re-Fetch (genau EINER blieb es).
+      expect(countBoard()).toBe(boardBefore + 1);
+      expect(container).toBeTruthy();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('AC5 — ohne aktive Jobs findet KEIN Polling statt (kein Dauer-Poll im Ruhezustand)', async () => {
+    jest.useFakeTimers();
+    try {
+      const fetchMock = makeSpecifyFetch({ fullProjects: [PROJECT_IDEE], getJobs: () => ({}) });
+      globalThis.fetch = fetchMock;
+      const countJobs = () =>
+        fetchMock.mock.calls.filter(([u]) => u === '/api/board/projects/project-idee/specify/jobs').length;
+
+      await act(async () => { renderCockpit('project-idee'); });
+      await act(async () => { await jest.advanceTimersByTimeAsync(0); });
+      await act(async () => { await jest.advanceTimersByTimeAsync(0); });
+
+      const afterHydrate = countJobs(); // genau die Hydration
+      await act(async () => { await jest.advanceTimersByTimeAsync(20000); });
+      expect(countJobs()).toBe(afterHydrate); // kein Intervall-Poll
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });
 

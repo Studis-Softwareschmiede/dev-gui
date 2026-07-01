@@ -89,6 +89,16 @@
  *   AC7 (idea-specify-chat, Status-Endpunkt) — der GET-Status-Poll entfällt
  *          im Overlay mit fire-and-forget; im Modal nicht mehr aufgerufen.
  *
+ * Covers (idea-specify-background-status, S-230):
+ *   AC6  — Reopen zeigt letzten Status inline: beim Öffnen fragt das Overlay
+ *          GET …/ideas/:id/specify/status ab und zieht den letzten bekannten
+ *          Finalize-Job nach: `running` → Status-Banner „Ein Spezifizieren-Lauf
+ *          läuft noch…" UND „Story anlegen" deaktiviert (kein zweiter Lauf);
+ *          `failed`/`auth-expired` → Fehler-Banner + Retry über den normalen
+ *          „Story anlegen"-Pfad; `null`/`done` → normaler Chat-Einstieg (kein
+ *          Banner). Status-Fetch degradiert bei Netz-/Parse-Fehlern still.
+ *          Secret-/pfad-frei (Banner-Texte fix, kein job.error gerendert).
+ *
  * Nicht-Ziele (spiegelt Spec):
  *   Kein Tab-Wechsel-Code, keine BoardView-Verdrahtung (S-218).
  *   Keine Anzeige von `draftText` (nicht von der Spec verlangt — nur Server-
@@ -138,6 +148,16 @@ export function IdeaSpecifyChatModal({
   // 'error'   — synchroner Start-Fehlschlag (non-202); Overlay bleibt offen
   const [finalizeState, setFinalizeState] = useState('idle');
   const [finalizeError, setFinalizeError] = useState('');
+
+  // ── Reopen-Status (idea-specify-background-status AC6, S-230) ──────────────
+  // Beim (Wieder-)Öffnen den letzten bekannten Finalize-Job DIESER Idee abfragen
+  // (GET …/ideas/:id/specify/status). Der Status wird inline nachgezogen:
+  //   running        → Status-Banner + „Story anlegen" deaktiviert (kein 2. Lauf)
+  //   failed/auth-…  → Fehler-Banner + Retry über normalen „Story anlegen"-Pfad
+  //   null/done      → normaler Chat-Einstieg (kein Banner). Degradiert still.
+  const [reopenJob, setReopenJob] = useState(null); // { status, jobId, error? } | null
+  const reopenRunning = reopenJob?.status === 'running';
+  const reopenFailed  = reopenJob?.status === 'failed' || reopenJob?.status === 'auth-expired';
 
   const dialogRef = useRef(null);
 
@@ -217,6 +237,31 @@ export function IdeaSpecifyChatModal({
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectSlug, storyId, initRetryToken]);
+
+  // AC6: beim Öffnen den letzten bekannten Finalize-Job dieser Idee laden und
+  // inline nachziehen (running/failed-Banner + Finalize-Sperre bei running).
+  // Läuft parallel zum Chat-Init und blockiert den Chat NICHT; degradiert bei
+  // Netz-/Parse-Fehlern still (kein Banner, normaler Chat-Einstieg).
+  useEffect(() => {
+    let cancelled = false;
+    async function fetchReopenStatus() {
+      let res;
+      try {
+        res = await fetch_(
+          `/api/board/projects/${encodeURIComponent(projectSlug)}/ideas/${encodeURIComponent(storyId)}/specify/status`,
+        );
+      } catch {
+        return; // still degradieren — kein Banner
+      }
+      if (cancelled || res.status !== 200) return;
+      let data;
+      try { data = await res.json(); } catch { return; }
+      if (!cancelled) setReopenJob(data.job ?? null);
+    }
+    fetchReopenStatus();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectSlug, storyId]);
 
   async function handleSend() {
     const text = inputText.trim();
@@ -305,7 +350,11 @@ export function IdeaSpecifyChatModal({
   }
 
   const titleId = 'idea-specify-chat-modal-title';
-  const finalizeDisabled = !readyToSpecify || finalizeState === 'submitting' || initState !== 'ready';
+  // AC6: „Story anlegen" zusätzlich deaktiviert, solange für DIESE Idee bereits
+  // ein Finalize-Lauf `running` ist (kein zweiter Lauf — Server lehnte ihn mit
+  // 409 ohnehin ab, wir verhindern ihn proaktiv).
+  const finalizeDisabled =
+    !readyToSpecify || finalizeState === 'submitting' || initState !== 'ready' || reopenRunning;
 
   return (
     <>
@@ -322,6 +371,30 @@ export function IdeaSpecifyChatModal({
       >
         <h2 id={titleId} style={styles.heading}>Idee spezifizieren</h2>
         {story?.title && <p style={styles.hint}>„{story.title}"</p>}
+
+        {/* AC6: Reopen-Status-Banner — läuft-noch (running) bzw. zuletzt
+            fehlgeschlagen (failed/auth-expired). Overlay-unabhängig aus der
+            Server-Registry (GET …/specify/status), unabhängig vom Chat-Init. */}
+        {reopenRunning && (
+          <div
+            role="status"
+            aria-live="polite"
+            style={styles.reopenRunning}
+            data-testid="idea-specify-reopen-running"
+          >
+            Ein Spezifizieren-Lauf läuft noch…
+          </div>
+        )}
+        {reopenFailed && (
+          <div
+            role="status"
+            aria-live="polite"
+            style={styles.reopenFailed}
+            data-testid="idea-specify-reopen-failed"
+          >
+            Der letzte Spezifizieren-Lauf ist fehlgeschlagen — du kannst es erneut versuchen.
+          </div>
+        )}
 
         {initState === 'loading' && (
           <p style={styles.hint} data-testid="idea-specify-init-loading">Chat wird gestartet…</p>
@@ -557,6 +630,32 @@ const styles = {
   error: {
     color: '#f87171',
     fontSize: 13,
+    padding: '8px 10px',
+    background: '#2a1a1a',
+    borderRadius: 6,
+    border: '1px solid #7f1d1d',
+    marginBottom: 12,
+  },
+
+  // idea-specify-background-status AC6: Reopen-Status-Banner (running).
+  // #67e8f9 on #0f2a2a ≈ 10.5:1 — WCAG AA.
+  reopenRunning: {
+    color: '#67e8f9',
+    fontSize: 13,
+    fontWeight: 600,
+    padding: '8px 10px',
+    background: '#0f2a2a',
+    borderRadius: 6,
+    border: '1px solid #164e4e',
+    marginBottom: 12,
+  },
+
+  // idea-specify-background-status AC6: Reopen-Fehler-Banner (failed/auth-expired).
+  // #fca5a5 on #2a1a1a ≈ 6.2:1 — WCAG AA.
+  reopenFailed: {
+    color: '#fca5a5',
+    fontSize: 13,
+    fontWeight: 600,
     padding: '8px 10px',
     background: '#2a1a1a',
     borderRadius: 6,

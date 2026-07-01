@@ -30,6 +30,13 @@
  *          auflaufender in-flight-Fetch (message/finalize) löst KEINEN
  *          State-Update und KEIN (doppeltes) onClose mehr aus (mountedRef-Guard).
  *
+ * Covers (idea-specify-background-status, S-230):
+ *   AC6  — Reopen-Inline-Status: beim Öffnen wird GET …/ideas/:id/specify/status
+ *          abgefragt; running → Banner „läuft noch…" + „Story anlegen" deaktiviert
+ *          (auch bei readyToSpecify); failed/auth-expired → Fehler-Banner + Retry
+ *          über den normalen „Story anlegen"-Pfad; null/done → kein Banner,
+ *          normaler Chat-Einstieg; Status-GET-Netzwerkfehler degradiert still.
+ *
  *   Teilweise/nicht unit-testbar hier:
  *          - AC3/AC4/AC6 (Backend-Contract): Statuscodes, Validierung, Audit
  *            sind in `test/ideaSpecifyRouter.test.js` abgedeckt (S-215/S-216);
@@ -62,6 +69,8 @@ const START_RE = /\/specify\/start$/;
 const MESSAGE_RE = /\/specify\/message$/;
 const FINALIZE_RE = /\/specify\/finalize$/;
 const FINALIZE_STATUS_RE = /\/specify\/finalize\/([^/]+)$/;
+// idea-specify-background-status AC6 (S-230): Reopen-Status-GET (idea-keyed).
+const STATUS_RE = /\/specify\/status$/;
 
 /** Externally-resolvable promise, für in-flight-Fetch-Szenarien (AC14). */
 function deferred() {
@@ -91,6 +100,9 @@ function makeFetchFn({
   messageBody = { reply: 'Verstanden.', readyToSpecify: false },
   finalizeStatus = 202,
   finalizeBody = { jobId: 'job-1', status: 'running' },
+  // idea-specify-background-status AC6 (S-230): letzter Finalize-Job dieser Idee,
+  // den der Reopen-Status-GET liefert (null/done → normaler Chat-Einstieg).
+  statusJob = null,
 } = {}) {
   return jest.fn(async (url, opts) => {
     if (START_RE.test(url) && opts?.method === 'POST') {
@@ -101,6 +113,10 @@ function makeFetchFn({
     }
     if (FINALIZE_RE.test(url) && opts?.method === 'POST') {
       return { status: finalizeStatus, json: async () => finalizeBody };
+    }
+    // GET .../specify/status (AC6) — kein method (default GET).
+    if (STATUS_RE.test(url) && (!opts || !opts.method || opts.method === 'GET')) {
+      return { status: 200, json: async () => ({ job: statusJob }) };
     }
     return { status: 200, json: async () => ({}) };
   });
@@ -622,5 +638,112 @@ describe('IdeaSpecifyChatModal — Init-Fehlerpfad (.../specify/start)', () => {
     const bubbles = document.querySelectorAll('[data-testid="idea-specify-message"]');
     expect(bubbles).toHaveLength(1);
     expect(bubbles[0].textContent).toMatch(/los geht/i);
+  });
+});
+
+// ── AC6 (idea-specify-background-status, S-230): Reopen zeigt letzten Status inline ─
+
+describe('IdeaSpecifyChatModal — AC6 (S-230): Reopen-Inline-Status', () => {
+  it('fragt beim Öffnen GET …/specify/status ab', async () => {
+    const { fetchFn } = await renderModal();
+    await waitForReady();
+    const statusCall = fetchFn.mock.calls.find(
+      ([u, o]) => STATUS_RE.test(u) && (!o || !o.method || o.method === 'GET'),
+    );
+    expect(statusCall).toBeTruthy();
+  });
+
+  it('running-Job → Status-Banner „läuft noch…" UND „Story anlegen" deaktiviert (kein zweiter Lauf), auch bei readyToSpecify', async () => {
+    const fetchFn = makeFetchFn({
+      statusJob: { status: 'running', jobId: 'j1' },
+      messageBody: READY_MSG,
+    });
+    await renderModal({ fetchFn });
+    await waitForReady();
+
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="idea-specify-reopen-running"]')).toBeTruthy();
+    });
+    const banner = document.querySelector('[data-testid="idea-specify-reopen-running"]');
+    expect(banner.getAttribute('role')).toBe('status');
+    expect(banner.getAttribute('aria-live')).toBe('polite');
+    expect(banner.textContent).toMatch(/läuft noch/i);
+
+    // Chat bis readyToSpecify treiben …
+    await act(async () => {
+      fireEvent.change(document.querySelector('[data-testid="idea-specify-input"]'), {
+        target: { value: 'fertig' },
+      });
+    });
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="idea-specify-send-btn"]'));
+    });
+    await waitFor(() => {
+      expect(document.querySelectorAll('[data-testid="idea-specify-message"]').length).toBeGreaterThanOrEqual(3);
+    });
+    // … trotzdem bleibt „Story anlegen" wegen laufendem Job deaktiviert (AC6).
+    expect(document.querySelector('[data-testid="idea-specify-finalize-btn"]').disabled).toBe(true);
+  });
+
+  it('failed-Job → Fehler-Banner + Retry über normalen „Story anlegen"-Pfad (nach Ready enabled, 202 schließt)', async () => {
+    const fetchFn = makeFetchFn({
+      statusJob: { status: 'failed', jobId: 'j1' },
+      messageBody: READY_MSG,
+    });
+    const { onClose } = await makeReady({ fetchFn });
+
+    const banner = document.querySelector('[data-testid="idea-specify-reopen-failed"]');
+    expect(banner).toBeTruthy();
+    expect(banner.getAttribute('role')).toBe('status');
+    expect(banner.textContent).toMatch(/fehlgeschlagen/i);
+
+    // Retry ist möglich: „Story anlegen" ist bei failed NICHT gesperrt.
+    const finalizeBtn = document.querySelector('[data-testid="idea-specify-finalize-btn"]');
+    expect(finalizeBtn.disabled).toBe(false);
+
+    await act(async () => { fireEvent.click(finalizeBtn); });
+    await waitFor(() => { expect(onClose).toHaveBeenCalled(); });
+  });
+
+  it('auth-expired-Job → derselbe Fehler-Banner', async () => {
+    const fetchFn = makeFetchFn({ statusJob: { status: 'auth-expired', jobId: 'j1' } });
+    await renderModal({ fetchFn });
+    await waitForReady();
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="idea-specify-reopen-failed"]')).toBeTruthy();
+    });
+  });
+
+  it('null-Job → kein Banner, normaler Chat-Einstieg (Finalize nach Ready nutzbar)', async () => {
+    const fetchFn = makeFetchFn({ statusJob: null, messageBody: READY_MSG });
+    await makeReady({ fetchFn });
+    expect(document.querySelector('[data-testid="idea-specify-reopen-running"]')).toBeNull();
+    expect(document.querySelector('[data-testid="idea-specify-reopen-failed"]')).toBeNull();
+    expect(document.querySelector('[data-testid="idea-specify-finalize-btn"]').disabled).toBe(false);
+  });
+
+  it('done-Job → kein Banner (normaler Chat-Einstieg, Finalize nicht gesperrt)', async () => {
+    const fetchFn = makeFetchFn({ statusJob: { status: 'done', jobId: 'j1' }, messageBody: READY_MSG });
+    await makeReady({ fetchFn });
+    expect(document.querySelector('[data-testid="idea-specify-reopen-running"]')).toBeNull();
+    expect(document.querySelector('[data-testid="idea-specify-reopen-failed"]')).toBeNull();
+    expect(document.querySelector('[data-testid="idea-specify-finalize-btn"]').disabled).toBe(false);
+  });
+
+  it('Status-GET-Netzwerkfehler degradiert still (kein Banner, Chat nutzbar)', async () => {
+    const fetchFn = jest.fn(async (url, opts) => {
+      if (STATUS_RE.test(url) && (!opts || !opts.method || opts.method === 'GET')) {
+        throw new Error('network');
+      }
+      if (START_RE.test(url)) {
+        return { status: 201, json: async () => ({ sessionId: 'sess-1', reply: 'Los.' }) };
+      }
+      return { status: 200, json: async () => ({}) };
+    });
+    await renderModal({ fetchFn });
+    await waitForReady();
+    expect(document.querySelector('[data-testid="idea-specify-reopen-running"]')).toBeNull();
+    expect(document.querySelector('[data-testid="idea-specify-reopen-failed"]')).toBeNull();
+    expect(document.querySelector('[data-testid="idea-specify-message-list"]')).toBeTruthy();
   });
 });

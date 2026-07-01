@@ -88,6 +88,23 @@
  *           Re-Fetch der Board-Daten aus (Wiederverwendung des bestehenden
  *           Cockpit-/Standalone-Lade-Mechanismus über `reloadToken`).
  *
+ * idea-specify-background-status (S-230):
+ *   AC3  — Lauf-Indikator auf der Idee-Karte: solange ein Finalize-Job für die
+ *           Idee `running` ist, rendert `StoryCard` ein sichtbares Badge
+ *           „wird spezifiziert…" (Text + ⟳-Icon + aria-busy/role=status/aria-live),
+ *           nicht nur farblich. Job-Status kommt aus `specifyJobs` (Map ideaId→Job),
+ *           durchgereicht ProjectSection→FeatureRow→StatusColumn→StoryCard.
+ *   AC4  — Bei failed/auth-expired zeigt die Karte einen nicht-blockierenden,
+ *           secret-freien Fehler-Hinweis („Spezifizieren fehlgeschlagen — erneut
+ *           versuchen"); die Karte bleibt anklickbar (Retry via Overlay-Reopen).
+ *           Bei `done` liefert der Endpunkt keinen Job → kein Badge.
+ *   AC5  — Hydratisieren + Polling + Re-Fetch: `fetchSpecifyJobs` liest
+ *           GET …/specify/jobs beim Board-Load und nach Overlay-Schließen
+ *           (specifyCloseToken). Gepollt wird NUR solange ≥1 running-Job existiert
+ *           (setInterval, sonst kein Poll — Ruhezustand). Verschwindet ein zuvor
+ *           running-Job (→ done) → GENAU EIN Board-Re-Fetch über handleSpecified
+ *           (reloadToken/handleProjectSelect). Reload-fest (Server-Registry).
+ *
  * board-feature-collapse:
  *   AC1  — Jede Feature-Zeile hat einen Auf-/Zu-Schalter (Collapse-Button mit Chevron);
  *           eingeklappt sind Story-Spalten ausgeblendet; ausgeklappt wie bisher sichtbar.
@@ -304,6 +321,21 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
   const [specifyingIdea, setSpecifyingIdea] = useState(null);
   const specifyTriggerRef = useRef(null);
 
+  // ─── Idee-Finalize-Status (idea-specify-background-status AC3/AC4/AC5, S-230) ─
+  // specifyJobs: { [ideaStoryId]: { status: 'running'|'failed'|'auth-expired', jobId, error? } }
+  // Hydratisiert + gepollt aus GET …/specify/jobs (nur nicht-`done` Jobs). Speist
+  // die Idee-Karten-Badges (AC3 running „wird spezifiziert…", AC4 Fehler-Hinweis).
+  const [specifyJobs, setSpecifyJobs] = useState({});
+  // Merkt sich die ideaStoryIds, die im letzten Snapshot `running` waren — um den
+  // Übergang running→weg (→ `done`) zu erkennen und GENAU EIN Board-Re-Fetch
+  // auszulösen (AC5), damit die neue To-Do-Story ohne manuellen Reload erscheint.
+  const prevRunningIdeasRef = useRef(new Set());
+  // Erhöht sich beim Schließen des Chat-Overlays → triggert eine sofortige
+  // Re-Hydration der Idee-Badges (AC5: „direkt nachdem Story anlegen ausgelöst
+  // wurde"). Der Server registriert den running-Job synchron VOR dem
+  // fire-and-forget-Schließen (AC1), sodass der Badge sofort erscheint.
+  const [specifyCloseToken, setSpecifyCloseToken] = useState(0);
+
   const handleOpenSpecifyChat = useCallback((slug, story, triggerEl) => {
     specifyTriggerRef.current = triggerEl ?? null;
     setSpecifyingIdea({ slug, story });
@@ -311,6 +343,10 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
 
   const handleCloseSpecifyChat = useCallback(() => {
     setSpecifyingIdea(null);
+    // AC5: nach dem Schließen (insb. fire-and-forget nach „Story anlegen") den
+    // Idee-Finalize-Status neu abfragen — ein gerade registrierter running-Job
+    // erscheint so sofort als Badge und startet das Polling.
+    setSpecifyCloseToken((t) => t + 1);
   }, []);
 
   // ─── Story Detail (AC3/AC4 story-detail-ansicht) ─────────────────────────────
@@ -591,6 +627,77 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
   // In standalone: selectedSlug; in cockpit: lockedProject
   const currentProjectSlug = isStandalone ? selectedSlug : (lockedProject ?? null);
 
+  // ─── Idee-Finalize-Status: Hydratisieren + Polling + Re-Fetch (AC3/AC4/AC5) ──
+  // Liest GET …/specify/jobs (nur nicht-`done` Jobs, idea-keyed). Erkennt den
+  // Übergang running→weg (→ `done`) und löst GENAU EIN Board-Re-Fetch aus
+  // (bestehender reloadToken-/onSpecified-Mechanismus über handleSpecified).
+  // Degradiert still bei Netz-/Parse-Fehlern (Robustheit-NFR) — kein Crash.
+  const fetchSpecifyJobs = useCallback(async () => {
+    const slug = currentProjectSlug;
+    if (!slug) return;
+    let res;
+    try {
+      res = await fetch(`/api/board/projects/${encodeURIComponent(slug)}/specify/jobs`);
+    } catch {
+      return; // Netzwerkfehler → still degradieren (Badge bleibt beim letzten Stand)
+    }
+    if (!res.ok) return;
+    let data;
+    try { data = await res.json(); } catch { return; }
+    const jobs = (data && typeof data.jobs === 'object' && data.jobs) ? data.jobs : {};
+
+    // running→weg-Erkennung: war eine Idee zuvor `running` und ist jetzt nicht
+    // mehr im Snapshot (→ `done`), genau EIN Re-Fetch der Board-Daten (AC5).
+    const currentRunning = new Set(
+      Object.entries(jobs)
+        .filter(([, job]) => job && job.status === 'running')
+        .map(([ideaId]) => ideaId),
+    );
+    let anyDisappeared = false;
+    for (const ideaId of prevRunningIdeasRef.current) {
+      if (!currentRunning.has(ideaId)) { anyDisappeared = true; break; }
+    }
+    prevRunningIdeasRef.current = currentRunning;
+
+    setSpecifyJobs(jobs);
+
+    if (anyDisappeared) {
+      // Bestehender Re-Fetch-Mechanismus (Cockpit: reloadToken++, Standalone:
+      // handleProjectSelect) → neue To-Do-Story erscheint ohne manuellen Reload.
+      handleSpecified(slug);
+    }
+  }, [currentProjectSlug, handleSpecified]);
+
+  // AC5: Board hat ≥1 Idee mit aktivem (running) Finalize-Job?
+  const hasRunningSpecifyJob = useMemo(
+    () => Object.values(specifyJobs).some((job) => job && job.status === 'running'),
+    [specifyJobs],
+  );
+
+  // Hydratisieren: bei geladenem Projekt (Board-Load) sowie nach dem Schließen
+  // des Chat-Overlays (specifyCloseToken) den Idee-Finalize-Status abfragen.
+  useEffect(() => {
+    if (!currentProjectSlug || loadState !== 'ok') return;
+    fetchSpecifyJobs();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentProjectSlug, loadState, reloadToken, specifyCloseToken]);
+
+  // Polling: NUR solange ≥1 Idee einen running-Job trägt (AC5 — kein Dauer-Poll
+  // im Ruhezustand). Sobald alle Jobs terminal sind, wird das Intervall geräumt.
+  useEffect(() => {
+    if (!hasRunningSpecifyJob) return; // Ruhezustand → kein Poll
+    const POLL_MS = 4000;
+    const intervalId = setInterval(() => { fetchSpecifyJobs(); }, POLL_MS);
+    return () => clearInterval(intervalId);
+  }, [hasRunningSpecifyJob, fetchSpecifyJobs]);
+
+  // Beim Projektwechsel den Badge-Status + running-Merker zurücksetzen (kein
+  // Nachwirken alter Idee-Jobs auf ein anderes Projekt).
+  useEffect(() => {
+    setSpecifyJobs({});
+    prevRunningIdeasRef.current = new Set();
+  }, [currentProjectSlug]);
+
   // ─── Derived: project options for filter dropdown (only in cockpit mode) ─────
   const projectOptions = useMemo(() => {
     return projects
@@ -791,6 +898,7 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
                   collapsedIds={collapsedIds}
                   onCollapseToggle={handleCollapseToggle}
                   hasRestrictingFilter={hasRestrictingFilter}
+                  specifyJobs={specifyJobs}
                 />
               ))}
               {filteredProjects.length === 0 && (filterProject || filterStatus.size > 0 || filterLabel) && (
@@ -876,6 +984,7 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
                   collapsedIds={collapsedIds}
                   onCollapseToggle={handleCollapseToggle}
                   hasRestrictingFilter={hasRestrictingFilter}
+                  specifyJobs={specifyJobs}
                 />
               ))}
               {filteredProjects.length === 0 && (filterProject || filterStatus.size > 0 || filterLabel) && (
@@ -1212,9 +1321,10 @@ function ProjectListItem({ item, onSelect }) {
  *   collapsedIds?: Set<string>,
  *   onCollapseToggle?: (featureId: string) => void,
  *   hasRestrictingFilter?: boolean,
+ *   specifyJobs?: object,
  * }} props
  */
-function ProjectSection({ project, onOpenSpec, onStoryClick, onSpecifyIdea, collapsedIds, onCollapseToggle, hasRestrictingFilter }) {
+function ProjectSection({ project, onOpenSpec, onStoryClick, onSpecifyIdea, collapsedIds, onCollapseToggle, hasRestrictingFilter, specifyJobs }) {
   const slug = project.slug || project.project_slug || project.repo_path || '?';
 
   return (
@@ -1254,6 +1364,7 @@ function ProjectSection({ project, onOpenSpec, onStoryClick, onSpecifyIdea, coll
           isCollapsed={collapsedIds ? collapsedIds.has(feature.id) : false}
           onCollapseToggle={onCollapseToggle}
           hasRestrictingFilter={hasRestrictingFilter ?? false}
+          specifyJobs={specifyJobs}
         />
       ))}
     </section>
@@ -1279,9 +1390,10 @@ function ProjectSection({ project, onOpenSpec, onStoryClick, onSpecifyIdea, coll
  *   isCollapsed?: boolean,
  *   onCollapseToggle?: (featureId: string) => void,
  *   hasRestrictingFilter?: boolean,
+ *   specifyJobs?: object,
  * }} props
  */
-function FeatureRow({ feature, onOpenSpec, onStoryClick, onSpecifyIdea, isCollapsed = false, onCollapseToggle, hasRestrictingFilter = false }) {
+function FeatureRow({ feature, onOpenSpec, onStoryClick, onSpecifyIdea, isCollapsed = false, onCollapseToggle, hasRestrictingFilter = false, specifyJobs }) {
   // AC2: separate detail-panel open/close state (entkoppelt vom Einklappen)
   const [detailOpen, setDetailOpen] = useState(false);
   const rollup = computeRollup(feature);
@@ -1397,6 +1509,7 @@ function FeatureRow({ feature, onOpenSpec, onStoryClick, onSpecifyIdea, isCollap
                   onOpenSpec={onOpenSpec}
                   onStoryClick={onStoryClick}
                   onSpecifyIdea={onSpecifyIdea}
+                  specifyJobs={specifyJobs}
                 />
               ))}
             </div>
@@ -1521,9 +1634,10 @@ function RollupBar({ done, total }) {
  *   onOpenSpec?: (relPath: string) => void,
  *   onStoryClick?: (story: object) => void,
  *   onSpecifyIdea?: (story: object, triggerEl: HTMLElement) => void,
+ *   specifyJobs?: object,
  * }} props
  */
-function StatusColumn({ status, stories, onOpenSpec, onStoryClick, onSpecifyIdea }) {
+function StatusColumn({ status, stories, onOpenSpec, onStoryClick, onSpecifyIdea, specifyJobs }) {
   return (
     <div
       role="listitem"
@@ -1547,6 +1661,7 @@ function StatusColumn({ status, stories, onOpenSpec, onStoryClick, onSpecifyIdea
           onOpenSpec={onOpenSpec}
           onStoryClick={onStoryClick}
           onSpecifyIdea={onSpecifyIdea}
+          specifyJob={specifyJobs ? specifyJobs[story.id] : undefined}
         />
       ))}
     </div>
@@ -1569,16 +1684,30 @@ function StatusColumn({ status, stories, onOpenSpec, onStoryClick, onSpecifyIdea
  * verschachteltes `<button>`-in-`<button>` (ungültiges HTML). Beide Auslöser
  * (Karte, Button) rufen dieselbe Handler-Signatur `(story, triggerEl)` auf.
  *
+ * idea-specify-background-status AC3/AC4 (S-230) — für `status === 'Idee'` mit
+ * einem laufenden bzw. fehlgeschlagenen Finalize-Job (`specifyJob`) rendert die
+ * Karte einen sichtbaren, nicht nur farblichen Lauf-/Fehler-Indikator
+ * (Text + Icon + `aria-busy`/`role=status`/`aria-live`). Bei `done` liefert der
+ * Endpunkt keinen Job mehr → kein Badge.
+ *
  * @param {{
  *   story: object,
  *   onOpenSpec?: (relPath: string) => void,
  *   onStoryClick?: (story: object) => void,
  *   onSpecifyIdea?: (story: object, triggerEl: HTMLElement) => void,
+ *   specifyJob?: { status: 'running'|'failed'|'auth-expired', jobId: string, error?: string },
  * }} props
  */
-function StoryCard({ story, onOpenSpec, onStoryClick, onSpecifyIdea }) {
+function StoryCard({ story, onOpenSpec, onStoryClick, onSpecifyIdea, specifyJob }) {
   // AC12 — derive entity reference from story labels for icon display.
   const entityRef = parseEntityLabel(story.labels ?? []);
+
+  // idea-specify-background-status AC3/AC4 (S-230): Lauf-/Fehler-Indikator nur an
+  // Idee-Karten mit bekanntem Finalize-Job. `done` ist im Endpunkt entfernt →
+  // kein Badge (Karte übernommen/archiviert).
+  const isIdea = story.status === 'Idee';
+  const specifyRunning = isIdea && specifyJob?.status === 'running';
+  const specifyFailed  = isIdea && (specifyJob?.status === 'failed' || specifyJob?.status === 'auth-expired');
 
   const cardContent = (
     <>
@@ -1607,6 +1736,37 @@ function StoryCard({ story, onOpenSpec, onStoryClick, onSpecifyIdea }) {
 
       {story.title && (
         <p style={styles.storyTitle}>{story.title}</p>
+      )}
+
+      {/* AC3 (idea-specify-background-status): Lauf-Indikator „wird spezifiziert…"
+          solange ein Finalize-Job für diese Idee `running` ist — nicht nur
+          farblich (Text + Icon + aria-busy/role=status/aria-live). */}
+      {specifyRunning && (
+        <p
+          style={styles.specifyRunningBadge}
+          role="status"
+          aria-live="polite"
+          aria-busy="true"
+          data-testid={`specify-running-badge-${story.id}`}
+        >
+          <span style={styles.specifySpinner} aria-hidden="true">⟳</span>
+          wird spezifiziert…
+        </p>
+      )}
+
+      {/* AC4 (idea-specify-background-status): nicht-blockierender, secret-freier
+          Fehler-Hinweis bei failed/auth-expired; die Karte bleibt anklickbar
+          (Retry via Overlay-Reopen). */}
+      {specifyFailed && (
+        <p
+          style={styles.specifyErrorBadge}
+          role="status"
+          aria-live="polite"
+          data-testid={`specify-error-badge-${story.id}`}
+        >
+          <span aria-hidden="true">⚠ </span>
+          Spezifizieren fehlgeschlagen — erneut versuchen
+        </p>
       )}
 
       {/* AC4: blocked_reason hint for Blocked stories */}
@@ -1659,7 +1819,6 @@ function StoryCard({ story, onOpenSpec, onStoryClick, onSpecifyIdea }) {
   // Spezifizieren-Chat-Overlay instead of the detail view — reflected in the
   // aria-label for screen-reader clarity.
   if (onStoryClick) {
-    const isIdea = story.status === 'Idee';
     const cardButton = (
       <button
         type="button"
@@ -2542,6 +2701,44 @@ const styles = {
     flexShrink: 0,
     letterSpacing: '0.04em',
     textTransform: 'uppercase',
+  },
+
+  // idea-specify-background-status AC3: Lauf-Indikator „wird spezifiziert…"
+  // #67e8f9 on #0f2a2a ≈ 10.5:1 — WCAG AA (Farbton wie Idee-Status-Badge).
+  specifyRunningBadge: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 4,
+    margin: '4px 0',
+    fontSize: 11,
+    fontWeight: 600,
+    color: '#67e8f9',
+    background: '#0f2a2a',
+    border: '1px solid #164e4e',
+    borderRadius: 4,
+    padding: '2px 6px',
+    lineHeight: 1.4,
+  },
+  specifySpinner: {
+    fontSize: 12,
+    lineHeight: 1,
+  },
+
+  // idea-specify-background-status AC4: nicht-blockierender Fehler-Hinweis.
+  // #fca5a5 on #2a1a1a ≈ 6.2:1 — WCAG AA. Nicht nur farblich (Text + ⚠-Icon).
+  specifyErrorBadge: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 2,
+    margin: '4px 0',
+    fontSize: 11,
+    fontWeight: 600,
+    color: '#fca5a5',
+    background: '#2a1a1a',
+    border: '1px solid #7f1d1d',
+    borderRadius: 4,
+    padding: '2px 6px',
+    lineHeight: 1.4,
   },
 
   // AC4: blocked_reason display for Blocked stories
