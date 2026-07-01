@@ -44,6 +44,15 @@ if [ -n "${GH_TOKEN:-}" ]; then
   git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
 fi
 
+# ── Claude-Code-OAuth-Token (AC4 — claude-code-oauth-token) ──────────────────
+# Best-effort Boot-Warnung: fehlt CLAUDE_CODE_OAUTH_TOKEN, scheitern headless
+# claude-Läufe (/agent-flow:*, reconcile, Nachtwächter) mit 401, sobald die
+# interaktive OAuth-Datei abläuft. Keine Boot-Blockade (Muster wie der
+# gh-Auth-Bootstrap unten). Der Token-Wert selbst wird NIE geloggt.
+if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+  echo "[entrypoint] WARNING: CLAUDE_CODE_OAUTH_TOKEN nicht gesetzt — /agent-flow:*-Läufe schlagen mit 401 fehl." >&2
+fi
+
 # ── AC6/plugin-auto-update: agent-flow plugin auto-provision + auto-update ───
 # (best-effort, idempotent — see docs/specs/plugin-auto-update.md AC1-AC5)
 # Check without -e (nounset safe: 2>/dev/null swallows errors from `claude`).

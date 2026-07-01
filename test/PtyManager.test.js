@@ -3,6 +3,25 @@
  *
  * All tests use stub commands — never launch real claude.
  * Tests are deterministic and self-contained.
+ *
+ * Covers (terminal-bridge, docs/specs/terminal-bridge.md):
+ *   AC1 — session reaches "ready" without input (stub instead of real claude)
+ *   AC2 — input written to the PTY round-trips through 'output' events
+ *   AC3 — spawn config has no -p/--print; child env is built from an
+ *         explicit allowlist (no ANTHROPIC_API_KEY/OPENAI_API_KEY/arbitrary
+ *         secrets leak from the parent process)
+ *   AC4 — restart cap: N restarts within window M → "failed", no further
+ *         restart afterwards
+ *   AC5 — resize(cols, rows) is validated and forwarded to the PTY
+ *   AC6 — scrollback ring buffer stays within the byte limit
+ *
+ * Covers (claude-code-oauth-token, docs/specs/claude-code-oauth-token.md):
+ *   AC2 — CLAUDE_CODE_OAUTH_TOKEN is on ALLOWED_ENV_KEYS; set in the server
+ *         process it appears in the PTY child env, unset it is absent from
+ *         the child env (no empty key)
+ *   AC3 — Trust boundary: with both CLAUDE_CODE_OAUTH_TOKEN and
+ *         ANTHROPIC_API_KEY set in the server process at the same time, the
+ *         child env contains the former but never the latter
  */
 
 import { describe, it, afterEach, expect } from '@jest/globals';
@@ -77,6 +96,14 @@ describe('AC3 — spawn config does not include -p/--print or ANTHROPIC_API_KEY'
     expect(allowedKeys).not.toContain('OPENAI_API_KEY');
   });
 
+  it('CLAUDE_CODE_OAUTH_TOKEN IS in the env allowlist (claude-code-oauth-token AC2, structural assertion)', () => {
+    const src = readFileSync(path.join(__dirname, '../src/PtyManager.js'), 'utf8');
+    const match = src.match(/ALLOWED_ENV_KEYS\s*=\s*\[([^\]]*)\]/s);
+    expect(match).not.toBeNull();
+    const allowedKeys = match[1].replace(/\/\/[^\n]*/g, '').match(/'([^']+)'/g)?.map((s) => s.replace(/'/g, '')) ?? [];
+    expect(allowedKeys).toContain('CLAUDE_CODE_OAUTH_TOKEN');
+  });
+
   it('ANTHROPIC_API_KEY and arbitrary secrets are not present in the child env (integration)', async () => {
     // Plant two dummy secrets in the parent env to make the test meaningful.
     // The child env must NOT contain either (allowlist-based env construction).
@@ -121,6 +148,65 @@ describe('AC3 — spawn config does not include -p/--print or ANTHROPIC_API_KEY'
     // Cleanup
     delete process.env.ANTHROPIC_API_KEY;
     delete process.env.FAKE_SECRET;
+  }, 10000);
+});
+
+// ── claude-code-oauth-token AC2/AC3 tests (env passthrough vs. trust boundary) ─
+
+describe('claude-code-oauth-token AC2/AC3 — CLAUDE_CODE_OAUTH_TOKEN passthrough, ANTHROPIC_API_KEY stays blocked', () => {
+  it('AC2: set in the server process, CLAUDE_CODE_OAUTH_TOKEN appears in the PTY child env; ' +
+     'AC3: set alongside ANTHROPIC_API_KEY, the latter never appears', async () => {
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = 'sk-ant-oat01-test-token-should-appear';
+    process.env.ANTHROPIC_API_KEY = 'test-secret-should-not-appear';
+
+    const pty = new PtyManager({
+      cmd: '/bin/sh',
+      args: ['-c', 'env; exit 0'],
+      restartMax: 0,
+      restartWindowMs: 1000,
+    });
+
+    const outputChunks = [];
+    pty.on('output', (d) => outputChunks.push(d));
+
+    pty.start();
+    await waitForState(pty, SESSION_STATES.FAILED, 8000);
+    await new Promise((r) => setTimeout(r, 0));
+    pty.destroy();
+
+    const allOutput = outputChunks.join('');
+
+    // AC2: token is present in the child env
+    expect(allOutput).toContain('CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-test-token-should-appear');
+
+    // AC3: ANTHROPIC_API_KEY remains blocked even though the OAuth token is allowed
+    expect(allOutput).not.toContain('test-secret-should-not-appear');
+    expect(allOutput).not.toContain('ANTHROPIC_API_KEY=');
+
+    delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    delete process.env.ANTHROPIC_API_KEY;
+  }, 10000);
+
+  it('AC2: unset in the server process, CLAUDE_CODE_OAUTH_TOKEN is absent from the child env (no empty key)', async () => {
+    delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+
+    const pty = new PtyManager({
+      cmd: '/bin/sh',
+      args: ['-c', 'env; exit 0'],
+      restartMax: 0,
+      restartWindowMs: 1000,
+    });
+
+    const outputChunks = [];
+    pty.on('output', (d) => outputChunks.push(d));
+
+    pty.start();
+    await waitForState(pty, SESSION_STATES.FAILED, 8000);
+    await new Promise((r) => setTimeout(r, 0));
+    pty.destroy();
+
+    const allOutput = outputChunks.join('');
+    expect(allOutput).not.toContain('CLAUDE_CODE_OAUTH_TOKEN=');
   }, 10000);
 });
 
