@@ -7,7 +7,7 @@ goal: 'Behebt den per Produktions-Transcript bestaetigten Bug, dass HeadlessRunn
   Finalize-Sicherheitsnetz blind auf Exit 0 vertraut und eine unbearbeitete Idee faelschlich
   archiviert. Zentraler argv-Fix im gemeinsamen Core + Ergebnis-Verifikation vor Archivierung
   + sichtbarer no-op-Status. Spec: docs/specs/headless-arg-finalize-safety.md'
-status: Backlog
+status: Done
 priority: P1
 spec: docs/specs/headless-arg-finalize-safety.md
 definition_of_done: null
@@ -20,6 +20,7 @@ owner: null
 stories:
 - S-219
 - S-220
-progress: 0/2 done
+progress: 2/2 done
 created_at: '2026-07-01T19:37:05Z'
-updated_at: '2026-07-01T19:38:57Z'
+updated_at: '2026-07-01T20:26:27Z'
+done_at: '2026-07-01T20:26:27Z'
