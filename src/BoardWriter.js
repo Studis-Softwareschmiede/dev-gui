@@ -49,6 +49,28 @@
  *   `requirement`-Agent hat die Platzhalter-Idee bereits selbst übernommen/
  *   aufgelöst, best effort AC8, kein zweiter Write nötig).
  *
+ *   `archiveDoneFeatures()` (In-place-Feature-Archiv, S-236, board-feature-archive
+ *   AC1/AC2/AC8) archiviert ALLE aktuell archivierbaren Features eines Projekts.
+ *   Ein Feature ist archivierbar (V1), wenn es ≥1 Story hat, JEDE seiner Stories
+ *   `status: Done` trägt UND es nicht bereits `archived: true` ist (das Pseudo-
+ *   Feature `_orphaned` ist per Definition keine Datei und daher nie betroffen).
+ *   Für jedes solche Feature patcht die Methode `archived: true` + `archived_at`
+ *   (+ aktualisiertes `updated_at`) in das Feature-YAML UND in jede zugehörige
+ *   Story-YAML — der Story-`status` bleibt UNVERÄNDERT `Done`. Alle übrigen
+ *   Zeilen bleiben byte-genau erhalten (Line-Patch via
+ *   `patchTopLevelFields({ allowAppend: true })` — `archived`/`archived_at`
+ *   existieren in Bestandsdateien i.d.R. noch nicht und werden angehängt).
+ *   `board/board.yaml` wird NICHT verändert. Der Vorgang ist idempotent: bereits
+ *   archivierte Features werden von V1 ausgeschlossen, bereits archivierte
+ *   Einzel-Stories werden übersprungen (kein zweites `archived_at`). Innerhalb
+ *   eines Features werden ZUERST die Stories geschrieben, DANN das Feature-YAML —
+ *   so bleibt ein Feature bei einem Abbruch mitten im Lauf NICHT als `archived`
+ *   markiert, während einzelne Stories es noch nicht sind; ein Re-Run holt die
+ *   Rest-Stories nach und markiert das Feature erst zum Schluss. Fehler beim
+ *   Patchen EINES Features (z.B. `duplicate-key`) überspringen nur dieses eine
+ *   Feature (best effort, kein Gesamt-Abbruch — Edge-Case-Vorgabe der Spec) und
+ *   fließen nicht in die Zähler ein.
+ *
  *   **Cross-Prozess-Risiko (KORRIGIERT, S-199 Iteration 2):** `board/board.yaml`
  *   und `board/stories/` werden NICHT nur von dieser `BoardWriter`-Instanz
  *   geschrieben — das externe `board`-CLI (agent-flow, Bash+PyYAML,
@@ -125,6 +147,12 @@ export const ALLOWED_FIELDS = Object.freeze([
   'resolved_at',
   'resolved_story_ids',
   'resolved_note',
+  // board-feature-archive AC2/AC8 (S-236) — zusätzlich erlaubte Felder für
+  // `archiveDoneFeatures()`. Wieder nur eine Erweiterung der Allowlist; die
+  // bestehenden Methoden übergeben diese Felder nie, ihr Verhalten bleibt
+  // unverändert.
+  'archived',
+  'archived_at',
 ]);
 
 /** Story-ID-Format (z.B. "S-191") — eng gefasst, kein Pfad-Zeichen erlaubt. */
@@ -235,17 +263,20 @@ function _yamlSingleQuote(value) {
  * `status` ist immer eine kontrollierte Konstante ("Blocked"/"Done", keine
  * Sonderzeichen, unquoted). `resolved_story_ids` wird als bereits vorformatierter
  * YAML-Flow-Sequence-String übergeben (`_formatResolvedStoryIds()`, z.B.
- * `[S-201, S-202]`) — ebenfalls unquoted geschrieben. Alle übrigen Felder
- * (`blocked_reason`/`updated_at`/`resolved_at`/`resolved_note`) werden —
- * konsistent mit bestehenden gequoteten Feldern wie `created_at` im Schema —
- * single-quoted geschrieben.
+ * `[S-201, S-202]`) — ebenfalls unquoted geschrieben. `archived` ist ein
+ * kontrollierter YAML-Boolean (immer die Konstante "true", board-feature-archive
+ * AC2) — ebenfalls unquoted, damit `BoardAggregator.parseYaml` es als echten
+ * Boolean statt als String "'true'" liest. Alle übrigen Felder
+ * (`blocked_reason`/`updated_at`/`resolved_at`/`resolved_note`/`archived_at`)
+ * werden — konsistent mit bestehenden gequoteten Feldern wie `created_at` im
+ * Schema — single-quoted geschrieben.
  *
  * @param {string} key
  * @param {string} value
  * @returns {string}
  */
 function _formatFieldValue(key, value) {
-  if (key === 'status' || key === 'resolved_story_ids') return String(value);
+  if (key === 'status' || key === 'resolved_story_ids' || key === 'archived') return String(value);
   return _yamlSingleQuote(value);
 }
 
@@ -646,6 +677,190 @@ export class BoardWriter {
     await this._atomicWrite(filePath, patched);
 
     return { filePath };
+  }
+
+  /**
+   * Archiviert ALLE aktuell archivierbaren Features eines Projekts in-place
+   * (board-feature-archive AC1/AC2/AC8, S-236). Kein Hard-Delete, kein
+   * Verschieben — nur ein additives Flag (`archived: true` + `archived_at`) im
+   * Feature-YAML UND in jeder zugehörigen Story-YAML; der Story-`status` bleibt
+   * `Done`, `board/board.yaml` bleibt unangetastet. Einziger Schreibpfad
+   * (nutzt `_resolveProjectPath`/`patchTopLevelFields`/`_atomicWrite`).
+   *
+   * Archivierbarkeits-Kriterium (V1) je Feature: ≥1 Story UND jede Story
+   * `status: Done` UND Feature nicht bereits `archived: true`. Nicht archiviert
+   * werden daher Features mit ≥1 nicht-Done-Story, Features ohne Stories, das
+   * Pseudo-Feature `_orphaned` (existiert nur im Aggregator, nie als Datei) und
+   * bereits archivierte Features. Idempotent: bereits archivierte Einzel-Stories
+   * werden übersprungen (kein zweites `archived_at`).
+   *
+   * Best effort (Edge-Case-Vorgabe der Spec): schlägt das Patchen EINES Features
+   * fehl (z.B. `duplicate-key`), wird nur dieses Feature übersprungen und geloggt
+   * (ohne Secrets) — die übrigen werden dennoch archiviert, kein Gesamt-Abbruch.
+   * Reihenfolge je Feature: erst alle Stories, dann das Feature-YAML (Re-Run-
+   * sicher — siehe Modul-Doku).
+   *
+   * @param {object} params
+   * @param {string} params.projectSlug  Repo-Verzeichnisname unter einem
+   *   BOARD_ROOTS-Eintrag (kein Pfad — siehe Modul-Doku Pfad-Sicherheit).
+   * @param {string} [params.now]  ISO-8601-Zeitstempel für `archived_at`/`updated_at`
+   *   (Default: `new Date().toISOString()`; injizierbar für deterministische Tests).
+   * @returns {Promise<{ archivedFeatureCount: number, archivedStoryCount: number, archivedFeatureIds: string[] }>}
+   * @throws {BoardWriterError} bei ungültigem Zeitstempel/Slug oder unbekanntem Projekt.
+   */
+  async archiveDoneFeatures({ projectSlug, now }) {
+    const timestamp = now ?? new Date().toISOString();
+    if (typeof timestamp !== 'string' || !ISO_TIMESTAMP_RE.test(timestamp)) {
+      throw new BoardWriterError(`Ungültiges Zeitstempel-Format: '${timestamp}'`, 'invalid-value');
+    }
+
+    const repoPath = await this._resolveProjectPath(projectSlug);
+    const featuresDir = join(repoPath, 'board', 'features');
+    const storiesDir = join(repoPath, 'board', 'stories');
+
+    const featureFiles = await this._listBoardYamlFiles(featuresDir);
+    const storyFiles = await this._listBoardYamlFiles(storiesDir);
+
+    // Stories nach ihrem parent-Feature gruppieren. Stories ohne (auflösbares)
+    // parent-Feld sind verwaist (Pseudo-Feature `_orphaned`) und werden nie
+    // archiviert (V1).
+    /** @type {Map<string, Array<{ filePath: string, raw: string }>>} */
+    const storiesByParent = new Map();
+    for (const sf of storyFiles) {
+      const parent = _extractTopLevelField(sf.raw, 'parent');
+      if (!parent) continue;
+      if (!storiesByParent.has(parent)) storiesByParent.set(parent, []);
+      storiesByParent.get(parent).push(sf);
+    }
+
+    let archivedFeatureCount = 0;
+    let archivedStoryCount = 0;
+    /** @type {string[]} */
+    const archivedFeatureIds = [];
+
+    for (const feature of featureFiles) {
+      // Defensive: ein Feature namens `_orphaned` wäre nur eine Datei mit exakt
+      // dieser id — das Pseudo-Feature des Aggregators ist es nie. Trotzdem
+      // konsistent mit V1 explizit ausschließen.
+      if (feature.id === '_orphaned') continue;
+
+      // V1: nicht bereits archiviert.
+      if (_extractTopLevelField(feature.raw, 'archived') === 'true') continue;
+
+      const stories = storiesByParent.get(feature.id) ?? [];
+      // V1: mindestens eine Story.
+      if (stories.length === 0) continue;
+      // V1: jede Story ist Done (Kriterium stützt sich auf den tatsächlichen
+      // Story-Status, nicht auf feature.status).
+      const allDone = stories.every((s) => _extractTopLevelField(s.raw, 'status') === 'Done');
+      if (!allDone) continue;
+
+      // Archivierbar → Schreibpfad (best effort je Feature).
+      try {
+        let patchedStoriesInFeature = 0;
+        // Stories ZUERST (Re-Run-sichere Reihenfolge — siehe Modul-Doku).
+        for (const s of stories) {
+          // Idempotenz: bereits archivierte Einzel-Story überspringen (kein
+          // zweites archived_at).
+          if (_extractTopLevelField(s.raw, 'archived') === 'true') continue;
+          await this._writeArchiveFlag(s.filePath, s.raw, timestamp);
+          patchedStoriesInFeature++;
+        }
+        // Feature-YAML zum Schluss markieren.
+        await this._writeArchiveFlag(feature.filePath, feature.raw, timestamp);
+
+        archivedStoryCount += patchedStoriesInFeature;
+        archivedFeatureCount++;
+        archivedFeatureIds.push(feature.id);
+      } catch (err) {
+        // Best effort: nur dieses Feature überspringen, kein Gesamt-Abbruch
+        // (Edge-Case-Vorgabe). Kein Secret im Log — nur Feature-id + errorClass.
+        console.warn(
+          `archiveDoneFeatures: Feature '${feature.id}' übersprungen ` +
+            `(${err instanceof BoardWriterError ? err.errorClass : 'unbekannter Fehler'})`,
+        );
+      }
+    }
+
+    return { archivedFeatureCount, archivedStoryCount, archivedFeatureIds };
+  }
+
+  /**
+   * Patcht `archived: true` + `archived_at` + aktualisiertes `updated_at` in den
+   * übergebenen (bereits gelesenen) YAML-Inhalt und schreibt die Datei atomar
+   * (board-feature-archive AC2). `allowAppend`, weil `archived`/`archived_at` in
+   * Bestandsdateien i.d.R. noch nicht als Top-Level-Schlüssel existieren.
+   *
+   * @param {string} filePath
+   * @param {string} raw  Bereits gelesener YAML-Inhalt der Datei.
+   * @param {string} timestamp  ISO-8601 (bereits validiert).
+   * @returns {Promise<void>}
+   * @throws {BoardWriterError} (z.B. `duplicate-key`) — vom Aufrufer best-effort behandelt.
+   * @private
+   */
+  async _writeArchiveFlag(filePath, raw, timestamp) {
+    const patched = patchTopLevelFields(
+      raw,
+      { archived: 'true', archived_at: timestamp, updated_at: timestamp },
+      { allowAppend: true },
+    );
+    await this._atomicWrite(filePath, patched);
+  }
+
+  /**
+   * Listet alle `*.yaml`-Dateien eines Board-Verzeichnisses (features/ oder
+   * stories/), liest ihren Inhalt und extrahiert die `id`. Jede Datei wird per
+   * `realpath()` gegen die Verzeichnis-Schranke geprüft (Symlink-Schutz, analog
+   * `_findStoryFile`). Ein fehlendes Verzeichnis (z.B. features/ nicht angelegt)
+   * liefert eine leere Liste (kein Fehler). Dateien ohne `id` oder außerhalb der
+   * Schranke werden still übersprungen.
+   *
+   * @param {string} dir  Absoluter Pfad (board/features oder board/stories).
+   * @returns {Promise<Array<{ filePath: string, raw: string, id: string }>>}
+   * @private
+   */
+  async _listBoardYamlFiles(dir) {
+    let entries;
+    try {
+      entries = await this.#fsDeps.readdir(dir, { withFileTypes: true });
+    } catch {
+      return []; // Verzeichnis fehlt (z.B. features/ nicht angelegt) → leer.
+    }
+
+    let realDir;
+    try {
+      realDir = await this.#fsDeps.realpath(dir);
+    } catch {
+      return [];
+    }
+    const prefix = realDir.endsWith(sep) ? realDir : realDir + sep;
+
+    /** @type {Array<{ filePath: string, raw: string, id: string }>} */
+    const out = [];
+    for (const entry of entries) {
+      if (typeof entry.isFile === 'function' && !entry.isFile()) continue;
+      if (!entry.name.endsWith('.yaml')) continue;
+
+      const candidate = join(dir, entry.name);
+      let realFile;
+      try {
+        realFile = await this.#fsDeps.realpath(candidate);
+      } catch {
+        continue;
+      }
+      if (!realFile.startsWith(prefix)) continue; // Symlink-Flucht → überspringen.
+
+      let raw;
+      try {
+        raw = await this.#fsDeps.readFile(realFile, 'utf8');
+      } catch {
+        continue;
+      }
+      const id = _extractTopLevelId(raw);
+      if (!id) continue;
+      out.push({ filePath: realFile, raw, id });
+    }
+    return out;
   }
 
   /**

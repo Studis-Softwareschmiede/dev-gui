@@ -1,5 +1,5 @@
 /**
- * BoardWriter.test.js — Unit-/Integrationstests für BoardWriter (S-191, erweitert S-199, S-200).
+ * BoardWriter.test.js — Unit-/Integrationstests für BoardWriter (S-191, erweitert S-199, S-200, S-216, S-236).
  *
  * Covers (taktgeber-nachtwaechter):
  *   AC8 — Schmale Schreib-Boundary in board/stories/<id>.yaml: setzt
@@ -51,6 +51,25 @@
  *          'superseded-by-specify'` (`SUPERSEDED_BY_SPECIFY_NOTE`) statt
  *          optionaler Nutzer-Eingabe. Atomar (tmp+rename); übrige Felder
  *          byte-genau erhalten; Round-Trip über `BoardAggregator.parseYaml`.
+ *
+ * Covers (board-feature-archive, S-236 — In-place-Feature-Archiv):
+ *   AC1 — `archiveDoneFeatures()` bestimmt die archivierbaren Features exakt nach
+ *          V1: ≥1 Story UND alle Stories `Done` UND nicht bereits `archived`.
+ *          Features mit ≥1 nicht-Done-Story, Features ohne Stories und verwaiste
+ *          Stories (`_orphaned`) werden NICHT archiviert.
+ *   AC2 — Setzt `archived: true` (unquoted YAML-Boolean) + `archived_at`
+ *          (+ aktualisiertes `updated_at`) in Feature-YAML UND jeder zugehörigen
+ *          Story-YAML; Story-`status` bleibt `Done`; übrige Zeilen byte-genau
+ *          erhalten; atomar (tmp+rename, keine .tmp-Reste); `board/board.yaml`
+ *          unverändert; wiederholter Aufruf idempotent (kein zweites
+ *          `archived_at`, Zähler 0/0 im Re-Run); Round-Trip über
+ *          `BoardAggregator.parseYaml` (archived === Boolean true).
+ *   AC8 — Security/Robustheit: einziger Schreibpfad `BoardWriter`; Pfad-/Slug-
+ *          Sicherheit (Traversal `..` → invalid-slug, unbekanntes Projekt →
+ *          project-not-found, Symlink-Flucht der Verzeichnis-Schranke);
+ *          ungültiger Zeitstempel → invalid-value; best-effort bei einem nicht
+ *          patchbaren Feature (duplicate-key) → übrige dennoch archiviert, kein
+ *          Crash.
  *
  * Strategy:
  *   - `patchTopLevelFields` (reine Funktion, kein IO) wird direkt mit String-
@@ -194,7 +213,7 @@ describe('AC8 — patchTopLevelFields (pure)', () => {
     }
   });
 
-  it('ALLOWED_FIELDS enthält exakt status, blocked_reason, updated_at, resolved_at, resolved_story_ids, resolved_note (ideen-inbox AC6/AC8, S-200)', () => {
+  it('ALLOWED_FIELDS enthält exakt status, blocked_reason, updated_at, resolved_at, resolved_story_ids, resolved_note, archived, archived_at (ideen-inbox AC6/AC8, S-200; board-feature-archive AC2, S-236)', () => {
     expect(ALLOWED_FIELDS).toEqual([
       'status',
       'blocked_reason',
@@ -202,6 +221,8 @@ describe('AC8 — patchTopLevelFields (pure)', () => {
       'resolved_at',
       'resolved_story_ids',
       'resolved_note',
+      'archived',
+      'archived_at',
     ]);
   });
 
@@ -1247,5 +1268,338 @@ describe('idea-specify-chat AC9 — BoardWriter.archiveSupersededIdea (real fs)'
     expect(parsed.status).toBe('Done');
     expect(parsed.resolved_note).toBe(SUPERSEDED_BY_SPECIFY_NOTE);
     expect(parsed.resolved_at).toBe('2026-07-01T12:00:00.000Z');
+  });
+});
+
+// ── board-feature-archive AC1/AC2/AC8 — archiveDoneFeatures (real fs) ──────────
+
+describe('board-feature-archive AC1/AC2/AC8 — BoardWriter.archiveDoneFeatures (real fs)', () => {
+  let boardRootsDir;
+  let projectDir;
+  let boardDir;
+  let featuresDir;
+  let storiesDir;
+  let boardYamlPath;
+
+  const BOARD_YAML =
+    'schema_version: 1\nproject_slug: myproject\nnext_feature_id: 9\nnext_story_id: 99\n';
+
+  beforeEach(async () => {
+    boardRootsDir = await mkdtemp(join(tmpdir(), 'boardwriter-featarchive-test-'));
+    projectDir = join(boardRootsDir, 'myproject');
+    boardDir = join(projectDir, 'board');
+    featuresDir = join(boardDir, 'features');
+    storiesDir = join(boardDir, 'stories');
+    boardYamlPath = join(boardDir, 'board.yaml');
+    await mkdir(featuresDir, { recursive: true });
+    await mkdir(storiesDir, { recursive: true });
+    await writeFile(boardYamlPath, BOARD_YAML, 'utf8');
+  });
+
+  afterEach(async () => {
+    await rm(boardRootsDir, { recursive: true, force: true });
+  });
+
+  function makeWriter() {
+    return new BoardWriter({ boardRootsEnv: boardRootsDir });
+  }
+
+  /**
+   * Legt ein Feature-YAML an. Extra-Zeilen (z.B. ein bereits vorhandenes
+   * `archived: true` oder ein Duplicate-Key) werden als roher Zeilen-Array
+   * `extraLines` durchgereicht.
+   */
+  async function writeFeature(id, { status = 'Done', extraLines = [] } = {}) {
+    const filePath = join(featuresDir, `${id}.yaml`);
+    await writeFile(
+      filePath,
+      [
+        `id: ${id}`,
+        `title: 'Feature ${id}'`,
+        `status: ${status}`,
+        'priority: P1',
+        "created_at: '2026-06-01T00:00:00Z'",
+        "updated_at: '2026-06-01T00:00:00Z'",
+        ...extraLines,
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    return filePath;
+  }
+
+  async function writeStory(id, { parent, status = 'Done', extraLines = [] } = {}) {
+    const filePath = join(storiesDir, `${id}.yaml`);
+    await writeFile(
+      filePath,
+      [
+        `id: ${id}`,
+        ...(parent != null ? [`parent: ${parent}`] : []),
+        `title: 'Story ${id}'`,
+        `status: ${status}`,
+        'priority: P2',
+        "created_at: '2026-06-01T00:00:00Z'",
+        "updated_at: '2026-06-01T00:00:00Z'",
+        ...extraLines,
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    return filePath;
+  }
+
+  const NOW = '2026-07-01T12:00:00.000Z';
+
+  // ── AC1 — Archivierbarkeits-Kriterium ──────────────────────────────────────
+
+  it('AC1: Feature mit ≥1 Story, alle Done, nicht archiviert → wird archiviert', async () => {
+    await writeFeature('F-1');
+    await writeStory('S-1', { parent: 'F-1' });
+    await writeStory('S-2', { parent: 'F-1' });
+
+    const res = await makeWriter().archiveDoneFeatures({ projectSlug: 'myproject', now: NOW });
+
+    expect(res.archivedFeatureCount).toBe(1);
+    expect(res.archivedStoryCount).toBe(2);
+    expect(res.archivedFeatureIds).toEqual(['F-1']);
+  });
+
+  it('AC1: Feature mit ≥1 nicht-Done-Story → NICHT archiviert', async () => {
+    const fPath = await writeFeature('F-1');
+    const s1 = await writeStory('S-1', { parent: 'F-1', status: 'Done' });
+    const s2 = await writeStory('S-2', { parent: 'F-1', status: 'In Progress' });
+
+    const res = await makeWriter().archiveDoneFeatures({ projectSlug: 'myproject', now: NOW });
+
+    expect(res.archivedFeatureCount).toBe(0);
+    expect(res.archivedStoryCount).toBe(0);
+    // Keine Datei angefasst.
+    expect(await readFile(fPath, 'utf8')).not.toContain('archived:');
+    expect(await readFile(s1, 'utf8')).not.toContain('archived:');
+    expect(await readFile(s2, 'utf8')).not.toContain('archived:');
+  });
+
+  it('AC1: Feature OHNE Stories → NICHT archiviert', async () => {
+    const fPath = await writeFeature('F-1');
+
+    const res = await makeWriter().archiveDoneFeatures({ projectSlug: 'myproject', now: NOW });
+
+    expect(res.archivedFeatureCount).toBe(0);
+    expect(await readFile(fPath, 'utf8')).not.toContain('archived:');
+  });
+
+  it('AC1: verwaiste Story (parent zeigt auf nicht existierendes Feature) → NICHT archiviert', async () => {
+    const s1 = await writeStory('S-1', { parent: 'F-999', status: 'Done' });
+
+    const res = await makeWriter().archiveDoneFeatures({ projectSlug: 'myproject', now: NOW });
+
+    expect(res.archivedFeatureCount).toBe(0);
+    expect(res.archivedStoryCount).toBe(0);
+    expect(await readFile(s1, 'utf8')).not.toContain('archived:');
+  });
+
+  it('AC1: bereits archiviertes Feature → übersprungen (0/0)', async () => {
+    await writeFeature('F-1', { extraLines: ['archived: true', `archived_at: '${NOW}'`] });
+    await writeStory('S-1', { parent: 'F-1', status: 'Done' });
+
+    const res = await makeWriter().archiveDoneFeatures({ projectSlug: 'myproject', now: NOW });
+
+    expect(res.archivedFeatureCount).toBe(0);
+    expect(res.archivedStoryCount).toBe(0);
+    expect(res.archivedFeatureIds).toEqual([]);
+  });
+
+  it('AC1: mehrere Features gleichzeitig — nur die vollständig erledigten werden gezählt', async () => {
+    await writeFeature('F-1'); // alle Done
+    await writeStory('S-1', { parent: 'F-1', status: 'Done' });
+    await writeFeature('F-2'); // eine offene Story
+    await writeStory('S-2', { parent: 'F-2', status: 'Done' });
+    await writeStory('S-3', { parent: 'F-2', status: 'To Do' });
+    await writeFeature('F-3'); // alle Done
+    await writeStory('S-4', { parent: 'F-3', status: 'Done' });
+    await writeStory('S-5', { parent: 'F-3', status: 'Done' });
+
+    const res = await makeWriter().archiveDoneFeatures({ projectSlug: 'myproject', now: NOW });
+
+    expect(res.archivedFeatureCount).toBe(2);
+    expect(res.archivedStoryCount).toBe(3);
+    expect(res.archivedFeatureIds.sort()).toEqual(['F-1', 'F-3']);
+  });
+
+  // ── AC2 — Schreibpfad (in-place, atomar, byte-genau, idempotent) ───────────
+
+  it('AC2: setzt archived:true + archived_at + updated_at in Feature UND Stories, status bleibt Done, übrige Zeilen byte-genau', async () => {
+    const fPath = await writeFeature('F-1');
+    const sPath = await writeStory('S-1', { parent: 'F-1', status: 'Done' });
+
+    await makeWriter().archiveDoneFeatures({ projectSlug: 'myproject', now: NOW });
+
+    const fRaw = await readFile(fPath, 'utf8');
+    expect(fRaw).toContain('archived: true');
+    expect(fRaw).toContain(`archived_at: '${NOW}'`);
+    expect(fRaw).toContain(`updated_at: '${NOW}'`);
+    // Unveränderte Felder byte-genau.
+    expect(fRaw).toContain('id: F-1');
+    expect(fRaw).toContain("title: 'Feature F-1'");
+    expect(fRaw).toContain("created_at: '2026-06-01T00:00:00Z'");
+
+    const sRaw = await readFile(sPath, 'utf8');
+    expect(sRaw).toContain('archived: true');
+    expect(sRaw).toContain(`archived_at: '${NOW}'`);
+    expect(sRaw).toContain(`updated_at: '${NOW}'`);
+    // Story-status bleibt UNVERÄNDERT Done.
+    expect(sRaw).toContain('status: Done');
+    expect(sRaw).toContain('id: S-1');
+    expect(sRaw).toContain("parent: F-1");
+    expect(sRaw).toContain("title: 'Story S-1'");
+  });
+
+  it('AC2: board/board.yaml wird NICHT verändert', async () => {
+    await writeFeature('F-1');
+    await writeStory('S-1', { parent: 'F-1', status: 'Done' });
+
+    await makeWriter().archiveDoneFeatures({ projectSlug: 'myproject', now: NOW });
+
+    expect(await readFile(boardYamlPath, 'utf8')).toBe(BOARD_YAML);
+  });
+
+  it('AC2: atomar — keine .tmp-Reste in features/ oder stories/', async () => {
+    await writeFeature('F-1');
+    await writeStory('S-1', { parent: 'F-1', status: 'Done' });
+
+    await makeWriter().archiveDoneFeatures({ projectSlug: 'myproject', now: NOW });
+
+    expect((await readdir(featuresDir)).filter((n) => n.includes('.tmp.'))).toEqual([]);
+    expect((await readdir(storiesDir)).filter((n) => n.includes('.tmp.'))).toEqual([]);
+  });
+
+  it('AC2: geschriebene Dateien haben Mode 0600', async () => {
+    const fPath = await writeFeature('F-1');
+    const sPath = await writeStory('S-1', { parent: 'F-1', status: 'Done' });
+
+    await makeWriter().archiveDoneFeatures({ projectSlug: 'myproject', now: NOW });
+
+    expect((await stat(fPath)).mode & 0o777).toBe(0o600);
+    expect((await stat(sPath)).mode & 0o777).toBe(0o600);
+  });
+
+  it('AC2: idempotent — zweiter Aufruf archiviert nichts (0/0), kein zweites archived_at', async () => {
+    const fPath = await writeFeature('F-1');
+    const sPath = await writeStory('S-1', { parent: 'F-1', status: 'Done' });
+    const writer = makeWriter();
+
+    await writer.archiveDoneFeatures({ projectSlug: 'myproject', now: NOW });
+    const fAfterFirst = await readFile(fPath, 'utf8');
+    const sAfterFirst = await readFile(sPath, 'utf8');
+
+    const res2 = await writer.archiveDoneFeatures({
+      projectSlug: 'myproject',
+      now: '2026-07-02T00:00:00.000Z',
+    });
+
+    expect(res2.archivedFeatureCount).toBe(0);
+    expect(res2.archivedStoryCount).toBe(0);
+    // Dateien unverändert — kein zweites archived_at, alter Zeitstempel bleibt.
+    expect(await readFile(fPath, 'utf8')).toBe(fAfterFirst);
+    expect(await readFile(sPath, 'utf8')).toBe(sAfterFirst);
+  });
+
+  it('AC2: einzelne bereits archivierte Story wird übersprungen (kein zweites archived_at), Feature dennoch archiviert', async () => {
+    await writeFeature('F-1');
+    const s1 = await writeStory('S-1', { parent: 'F-1', status: 'Done' });
+    const s2 = await writeStory('S-2', {
+      parent: 'F-1',
+      status: 'Done',
+      extraLines: ['archived: true', "archived_at: '2026-06-15T00:00:00Z'"],
+    });
+
+    const res = await makeWriter().archiveDoneFeatures({ projectSlug: 'myproject', now: NOW });
+
+    expect(res.archivedFeatureCount).toBe(1);
+    // Nur S-1 frisch archiviert — S-2 war bereits archiviert.
+    expect(res.archivedStoryCount).toBe(1);
+    expect(await readFile(s1, 'utf8')).toContain(`archived_at: '${NOW}'`);
+    // S-2 behält seinen ursprünglichen archived_at (kein zweites).
+    const s2Raw = await readFile(s2, 'utf8');
+    expect(s2Raw).toContain("archived_at: '2026-06-15T00:00:00Z'");
+    expect(s2Raw).not.toContain(NOW);
+  });
+
+  it('AC2: Round-Trip über BoardAggregator.parseYaml — archived ist Boolean true, status Done', async () => {
+    const fPath = await writeFeature('F-1');
+    const sPath = await writeStory('S-1', { parent: 'F-1', status: 'Done' });
+
+    await makeWriter().archiveDoneFeatures({ projectSlug: 'myproject', now: NOW });
+
+    const f = parseYaml(await readFile(fPath, 'utf8'));
+    expect(f.archived).toBe(true);
+    expect(f.archived_at).toBe(NOW);
+    const s = parseYaml(await readFile(sPath, 'utf8'));
+    expect(s.archived).toBe(true);
+    expect(s.status).toBe('Done');
+    expect(s.archived_at).toBe(NOW);
+  });
+
+  // ── AC8 — Security / Robustheit ────────────────────────────────────────────
+
+  it('AC8: Pfad-Traversal im projectSlug ("..") → invalid-slug', async () => {
+    try {
+      await makeWriter().archiveDoneFeatures({ projectSlug: '../evil', now: NOW });
+      throw new Error('sollte werfen');
+    } catch (err) {
+      expect(err).toBeInstanceOf(BoardWriterError);
+      expect(err.errorClass).toBe('invalid-slug');
+    }
+  });
+
+  it('AC8: unbekanntes Projekt → project-not-found', async () => {
+    try {
+      await makeWriter().archiveDoneFeatures({ projectSlug: 'does-not-exist', now: NOW });
+      throw new Error('sollte werfen');
+    } catch (err) {
+      expect(err.errorClass).toBe('project-not-found');
+    }
+  });
+
+  it('AC8: ungültiger Zeitstempel → invalid-value (kein Schreiben)', async () => {
+    const fPath = await writeFeature('F-1');
+    await writeStory('S-1', { parent: 'F-1', status: 'Done' });
+
+    try {
+      await makeWriter().archiveDoneFeatures({ projectSlug: 'myproject', now: 'nicht-iso' });
+      throw new Error('sollte werfen');
+    } catch (err) {
+      expect(err.errorClass).toBe('invalid-value');
+    }
+    expect(await readFile(fPath, 'utf8')).not.toContain('archived:');
+  });
+
+  it('AC8: best-effort — ein nicht patchbares Feature (duplicate archived-Key) wird übersprungen, übrige dennoch archiviert, kein Crash', async () => {
+    // F-1: valide, wird archiviert.
+    const f1 = await writeFeature('F-1');
+    await writeStory('S-1', { parent: 'F-1', status: 'Done' });
+    // F-2: enthält den Ziel-Schlüssel `archived` doppelt (aber nicht 'true') →
+    // patchTopLevelFields wirft `duplicate-key` → Feature übersprungen.
+    const f2 = await writeFeature('F-2', { extraLines: ['archived: false', 'archived: false'] });
+    await writeStory('S-2', { parent: 'F-2', status: 'Done' });
+
+    const res = await makeWriter().archiveDoneFeatures({ projectSlug: 'myproject', now: NOW });
+
+    // F-1 wurde archiviert, F-2 nicht.
+    expect(res.archivedFeatureIds).toContain('F-1');
+    expect(res.archivedFeatureIds).not.toContain('F-2');
+    expect(await readFile(f1, 'utf8')).toContain('archived: true');
+    // F-2 bleibt un-markiert (kein `archived: true`).
+    expect(await readFile(f2, 'utf8')).not.toContain('archived: true');
+  });
+
+  it('AC8: fehlendes features/-Verzeichnis → kein Crash, 0/0', async () => {
+    await rm(featuresDir, { recursive: true, force: true });
+    await writeStory('S-1', { parent: 'F-1', status: 'Done' });
+
+    const res = await makeWriter().archiveDoneFeatures({ projectSlug: 'myproject', now: NOW });
+
+    expect(res.archivedFeatureCount).toBe(0);
+    expect(res.archivedStoryCount).toBe(0);
   });
 });
