@@ -11,6 +11,7 @@
  *   GET /api/board/projects/:slug                    → { project: {...} }  (ein Projekt voll, on-demand — AC5)
  *   POST /api/board/projects/rescan                  → { ok: true }  (on-demand re-scan, AC9)
  *   GET /api/board/projects/:slug/stories/:id/detail → { detail: StoryDetail }  (read-only, lazy — AC2)
+ *   POST /api/board/projects/:slug/ideas             → { storyId }  (Quick-Capture-Create, ideen-inbox AC3)
  *
  * AC5 (story-detail-ansicht — Vorab-Schätzungs-Fallback):
  *   Wenn items.jsonl für die Story kein ep_est/tok_est liefert, fällt die Soll-Ist-Ansicht
@@ -24,11 +25,28 @@
  *          started_at/duration bleiben null ohne Ledger (nicht aus YAML ableitbar).
  *   AC4 — Neue Felder branch, pr, status aus dem Story-Index werden durchgereicht.
  *
+ * ideen-inbox (AC3, AC4, AC7, AC8 — Quick-Capture):
+ *   AC3 — POST /api/board/projects/:slug/ideas { title, body? } → 201 { storyId } legt
+ *          über `BoardWriter.createIdea()` (Create-Pfad, S-199) ein Item mit
+ *          `status: Idee` an — OHNE spec, OHNE implements. Token-frei (kein Agent).
+ *          400 { field, message } bei leerem/zu langem Titel/Body. 404 bei unbekanntem
+ *          Projekt-Slug (Format ODER nicht unter BOARD_ROOTS gefunden).
+ *   AC7 — GENAU EIN Audit-Eintrag je Anlage — Audit-First (nach Validierung, VOR dem
+ *          eigentlichen `createIdea()`-Aufruf), analog `assistRefineRouter` — eine
+ *          400-Validierungsablehnung wird NIE auditiert (keine versuchte Aktion).
+ *   AC8 — Einziger Schreibpfad ist `BoardWriter` (atomar, tmp+rename, Pfad-/Slug-
+ *          Sicherheit siehe BoardWriter.js-Moduldoku); dieser Router selbst schreibt
+ *          nichts. `BoardAggregator` bleibt unverändert read-only.
+ *
  * Security:
- *   - Read-only: no writes to board/ files (AC7).
+ *   - Read-only für alle GET-Routen (AC7 studis-kanban-board-ux).
  *   - :slug and :id parameters validated against regex before use as index lookup.
  *     slug is compared to in-memory index only (never used as filesystem path).
  *     id is compared as value only (never used as filesystem path — no traversal).
+ *   - POST .../ideas: title/body werden ausschließlich über `BoardWriter.createIdea()`
+ *     validiert/sanitisiert (Steuerzeichen-Schutz, Längenlimits) — kein Roh-Schreiben
+ *     im Router; projectSlug läuft durch dieselbe BOARD_ROOTS-Realpath-Schranke wie
+ *     `setBlocked` (siehe BoardWriter.js).
  *   - Behind existing /api AccessGuard via server.js registration.
  *   - No secrets in output; no new authentication surface.
  *
@@ -36,6 +54,7 @@
  */
 
 import { Router } from 'express';
+import { BoardWriterError, validateIdeaInput } from './BoardWriter.js';
 
 /** Valid slug characters: alphanumeric, dash, underscore, dot. No leading slash. */
 const SLUG_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
@@ -47,15 +66,27 @@ const SLUG_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
 const STORY_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
 
 /**
+ * Extrahiert identity-String aus req.identity (AccessGuard-Claim) — analog
+ * `assistRefineRouter`/`githubRepoCloneRouter`.
+ * @param {object|null} identity
+ * @returns {string|null}
+ */
+function _resolveIdentity(identity) {
+  return identity?.email ?? null;
+}
+
+/**
  * Create the board router.
  *
  * @param {object} options
  * @param {import('./BoardAggregator.js').BoardAggregator} options.boardAggregator
  * @param {import('./StoryMetricReader.js').StoryMetricReader} options.storyMetricReader
  * @param {import('./NotificationWatcher.js').NotificationWatcher} [options.notificationWatcher]
+ * @param {import('./BoardWriter.js').BoardWriter} [options.boardWriter]  Create-Pfad (ideen-inbox AC3).
+ * @param {import('./AuditStore.js').AuditStore} [options.auditStore]  Audit je Anlage (ideen-inbox AC7).
  * @returns {import('express').Router}
  */
-export function boardRouter({ boardAggregator, storyMetricReader, notificationWatcher }) {
+export function boardRouter({ boardAggregator, storyMetricReader, notificationWatcher, boardWriter, auditStore }) {
   const router = Router();
 
   /**
@@ -300,6 +331,89 @@ export function boardRouter({ boardAggregator, storyMetricReader, notificationWa
     };
 
     return res.json({ detail: enrichedDetail });
+  });
+
+  /**
+   * POST /api/board/projects/:slug/ideas
+   *
+   * Quick-Capture-Create (ideen-inbox AC3/AC4/AC7/AC8): legt eine neue Story mit
+   * `status: Idee` an — token-frei (kein Agent). Reihenfolge: Slug-Format-Prüfung →
+   * Eingabe-Validierung (400, KEIN Audit — keine versuchte Aktion) → Audit-First
+   * (genau EIN Eintrag, AC7) → `BoardWriter.createIdea()` (einziger Schreibpfad, AC8).
+   *
+   * Body: { title: string, body?: string }
+   * Response 201: { storyId }
+   * Response 400: { field, message }  (leerer/zu langer Titel oder Body)
+   * Response 404: { error }           (Slug-Format ungültig ODER Projekt nicht unter BOARD_ROOTS)
+   * Response 500: { error }           (Audit-/Schreibfehler — kein Secret-Leak, AC8 Edge-Case)
+   */
+  router.post('/api/board/projects/:slug/ideas', async (req, res) => {
+    const { slug } = req.params;
+
+    if (!slug || !SLUG_RE.test(slug)) {
+      return res.status(404).json({ error: 'Projekt nicht gefunden.' });
+    }
+
+    if (!boardWriter) {
+      console.error('[boardRouter] POST .../ideas: boardWriter nicht verdrahtet');
+      return res.status(500).json({ error: 'Idee konnte nicht angelegt werden.' });
+    }
+
+    const { title, body } = req.body ?? {};
+
+    // Validierung VOR dem Audit-Eintrag — eine abgelehnte Eingabe ist KEINE
+    // versuchte Aktion und wird nicht auditiert. Dieselbe reine Funktion wie
+    // `BoardWriter#createIdea` (Defense-in-Depth, kein doppelter Code).
+    let validated;
+    try {
+      validated = validateIdeaInput({ title, body });
+    } catch (err) {
+      if (err instanceof BoardWriterError) {
+        const field = err.errorClass === 'invalid-body' ? 'body' : 'title';
+        return res.status(400).json({ field, message: err.message });
+      }
+      throw err;
+    }
+
+    // Audit-First (AC7 — GENAU EIN Eintrag je Anlage): schlägt record() fehl,
+    // wird createIdea() NICHT aufgerufen (analog assistRefineRouter).
+    if (auditStore) {
+      try {
+        auditStore.record({
+          identity: _resolveIdentity(req.identity ?? null),
+          command: `board:idea:create:${slug}`,
+        });
+      } catch (auditErr) {
+        console.error('[boardRouter] Audit-Write fehlgeschlagen (POST .../ideas):', auditErr.message);
+        return res.status(500).json({ error: 'Audit-Write fehlgeschlagen — Aktion abgebrochen' });
+      }
+    }
+
+    let result;
+    try {
+      result = await boardWriter.createIdea({
+        projectSlug: slug,
+        title: validated.trimmedTitle,
+        body: validated.normalizedBody,
+      });
+    } catch (err) {
+      if (err instanceof BoardWriterError) {
+        if (err.errorClass === 'invalid-title' || err.errorClass === 'invalid-body') {
+          // Sollte durch die Vorab-Validierung bereits abgefangen sein — Defense-in-Depth.
+          const field = err.errorClass === 'invalid-body' ? 'body' : 'title';
+          return res.status(400).json({ field, message: err.message });
+        }
+        if (err.errorClass === 'invalid-slug' || err.errorClass === 'project-not-found') {
+          return res.status(404).json({ error: 'Projekt nicht gefunden.' });
+        }
+        console.error('[boardRouter] createIdea fehlgeschlagen:', err.errorClass, err.message);
+        return res.status(500).json({ error: 'Idee konnte nicht angelegt werden.' });
+      }
+      console.error('[boardRouter] createIdea unerwarteter Fehler:', err.message);
+      return res.status(500).json({ error: 'Idee konnte nicht angelegt werden.' });
+    }
+
+    return res.status(201).json({ storyId: result.storyId });
   });
 
   return router;

@@ -38,6 +38,12 @@
  *          busy). Der /flow-Lauf selbst bleibt weiterhin über CommandService
  *          im Projekt-Terminal sichtbar (kein neuer Completion-Kanal nötig).
  *
+ * ideen-inbox (S-199):
+ *   AC4 — Sichtbarer Button „Idee" im Reiter „Arbeiten" (eigene Box, neben
+ *          „Board abarbeiten") öffnet `IdeaCaptureModal` (eigene Komponente,
+ *          Quick-Capture: Titel + optionaler Stichwort-Body → POST
+ *          .../ideas). Token-frei — kein Agent, kein /flow-Trigger.
+ *
  * reconcile-trigger (S-201) / reconcile-inline-feedback (S-205):
  *   SpecView erhält onNavigate weiterhin als Prop (Signatur-Kompatibilität),
  *   ruft sie aber NICHT mehr auf: der „Konzept/Spec nachziehen"-Button (siehe
@@ -72,6 +78,7 @@ import { TriggerPanel } from './TriggerPanel.jsx';
 import { BoardView } from './BoardView.jsx';
 import { SpecView } from './SpecView.jsx';
 import { IntakeDialog } from './IntakeDialog.jsx';
+import { IdeaCaptureModal } from './IdeaCaptureModal.jsx';
 
 /** @type {Array<{ id: string, label: string }>} */
 const TABS = [
@@ -281,6 +288,11 @@ function FactoryWorkspace({ activeRepo, fetchFn, onNavigate, pollInterval = SESS
 
   const isSessionBusy = sessionRunState === 'running';
 
+  // ── Idee-Quick-Capture state (ideen-inbox AC4) — eigene Komponente (IdeaCaptureModal),
+  // hier nur Trigger-Button + Open/Close-State (kein Agent, kein /flow-Trigger, token-frei).
+  const [ideaModalOpen, setIdeaModalOpen] = useState(false);
+  const ideaBtnRef = useRef(null);
+
   // ── Board-abarbeiten state (AC2 autonome-board-abarbeitung / AC8 fabric-intake-dialog) ──
   /** 'idle' | 'confirm' | 'starting' | 'started' | 'error' */
   const [flowState, setFlowState] = useState('idle');
@@ -464,6 +476,24 @@ function FactoryWorkspace({ activeRepo, fetchFn, onNavigate, pollInterval = SESS
           )}
         </div>
 
+        {/* AC4 (ideen-inbox): „Idee"-Button — Quick-Capture-Modal (IdeaCaptureModal.jsx) */}
+        <div style={styles.flowTriggerBox}>
+          <div style={styles.flowTriggerHeader}>Idee</div>
+          <p style={styles.flowTriggerHint}>
+            Stichworte in Sekunden ins Board werfen — landet in der Spalte „Idee".
+          </p>
+          <button
+            type="button"
+            ref={ideaBtnRef}
+            style={styles.btnFlowTrigger}
+            onClick={() => setIdeaModalOpen(true)}
+            aria-label="Idee erfassen — öffnet Quick-Capture-Modal"
+            data-testid="idea-capture-btn"
+          >
+            Idee
+          </button>
+        </div>
+
         {/* Intake-Dialog trigger (AC1 — fabric-intake-dialog, change mode) */}
         <div style={styles.intakeTriggerBox}>
           <div style={styles.flowTriggerHeader}>Änderung erfassen</div>
@@ -511,6 +541,16 @@ function FactoryWorkspace({ activeRepo, fetchFn, onNavigate, pollInterval = SESS
         {/* Dashboard — project status cards */}
         <Dashboard />
       </div>
+
+      {/* AC4 (ideen-inbox): Quick-Capture-Modal, eigene Komponente */}
+      {ideaModalOpen && (
+        <IdeaCaptureModal
+          projectSlug={activeRepo}
+          onClose={() => setIdeaModalOpen(false)}
+          triggerRef={ideaBtnRef}
+          fetchFn={fetchFn}
+        />
+      )}
     </div>
   );
 }

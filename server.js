@@ -66,6 +66,7 @@
  *   GET    /api/board/projects/:slug/docs                         → { docs:[…] } (projekt-spezifikation-anzeige AC1,AC2)
  *   GET    /api/board/projects/:slug/docs/raw?path=<relpfad>      → Roh-Markdown (projekt-spezifikation-anzeige AC2,AC3)
  *   GET    /api/board/projects/:slug/stories/:id/detail            → { detail: StoryDetail } (story-detail-ansicht AC2)
+ *   POST   /api/board/projects/:slug/ideas                         → { storyId } — Quick-Capture, status: Idee (ideen-inbox S-199 AC3)
  *   POST   /api/assist/refine                                      → { refinedText, openQuestions[], notes? } (fabric-intake-dialog AC5,AC7,AC10)
  *   POST   /api/assist/knowledge-sources                          → { ok, suggestedPackId, suggestedType, sources[], notes? } (team-knowledge-add AC3,AC6,AC11-AC15)
  *   GET    /api/settings/notifications                             → Settings inkl. has_token (push-notifications S-183 AC2)
@@ -394,6 +395,10 @@ const deps = {
   // den manuellen „Board abarbeiten"-Knopf-Endpunkt (projectDrainRouter).
   projectDrain,
   sessionRegistry: ptyRegistry,
+  // S-199 (ideen-inbox AC3/AC7/AC8): BoardWriter-Create-Pfad für den
+  // Quick-Capture-Endpunkt (boardRouter POST .../ideas). Instanz existiert
+  // bereits (S-191, oben) — hier zusätzlich für den Router-Auto-Loader verdrahtet.
+  boardWriter,
 };
 
 // ── AC1/AC2: Auto-Discovery + Mount aller API-Router ─────────────────────────

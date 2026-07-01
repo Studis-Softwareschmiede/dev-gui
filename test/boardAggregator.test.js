@@ -43,6 +43,16 @@
  *          fehlt) — Quelle für ProjectDrain's "verwaiste In-Progress"-Stale-Erkennung
  *          (vollständige ProjectDrain-Coverage in test/ProjectDrain.test.js).
  *
+ * Covers (ideen-inbox, HTTP-Ebene — Unit-Coverage der Validierung/Atomarität in
+ * test/BoardWriter.test.js):
+ *   AC3 — POST /api/board/projects/:slug/ideas { title, body? } → 201 { storyId };
+ *          400 { field, message } bei leerem/zu langem Titel/Body; 404 bei
+ *          ungültigem/unbekanntem Slug.
+ *   AC7 — genau EIN AuditStore.record()-Aufruf je erfolgreicher Anlage; KEIN
+ *          Audit-Eintrag bei 400-Validierungsablehnung.
+ *   AC8 — boardWriter fehlt in den Deps → 500 (kein Crash); Response enthält
+ *          keine Pfade/Secrets.
+ *
  * AccessGuard:
  *   POST /api/board/projects/rescan (Schreib-Trigger) liegt hinter
  *   app.use('/api', accessGuard) in server.js — kein separater Middleware-Test
@@ -1049,13 +1059,25 @@ describe('Feature extended fields — goal, definition_of_done, depends, labels'
 import express from 'express';
 import { createServer } from 'node:http';
 import { request as httpRequest } from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { mkdir, mkdtemp, rm, readFile, readdir, writeFile } from 'node:fs/promises';
 import { boardRouter } from '../src/boardRouter.js';
+import { BoardWriter } from '../src/BoardWriter.js';
+import { AuditStore } from '../src/AuditStore.js';
 
-function httpFetch(server, path, method = 'GET') {
+function httpFetch(server, path, method = 'GET', body) {
   return new Promise((resolve, reject) => {
     const port = server.address().port;
+    const payload = body !== undefined ? JSON.stringify(body) : undefined;
     const req = httpRequest(
-      { hostname: '127.0.0.1', port, path, method },
+      {
+        hostname: '127.0.0.1',
+        port,
+        path,
+        method,
+        headers: payload !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+      },
       (res) => {
         let raw = '';
         res.on('data', (c) => { raw += c; });
@@ -1067,14 +1089,15 @@ function httpFetch(server, path, method = 'GET') {
       },
     );
     req.on('error', reject);
+    if (payload !== undefined) req.write(payload);
     req.end();
   });
 }
 
-function startServer(boardAggregator, storyMetricReader) {
+function startServer(boardAggregator, storyMetricReader, { notificationWatcher, boardWriter, auditStore } = {}) {
   const app = express();
   app.use(express.json());
-  app.use(boardRouter({ boardAggregator, storyMetricReader }));
+  app.use(boardRouter({ boardAggregator, storyMetricReader, notificationWatcher, boardWriter, auditStore }));
   const server = createServer(app);
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server)));
 }
@@ -1631,6 +1654,160 @@ done_at: '2026-06-14T12:00:00Z'
       const { data } = await httpFetch(server, '/api/board/projects/my-repo/stories/S-002/detail');
       expect(data.detail.ended_at).toBeNull();
       expect(data.detail.ended_at_source).toBeNull();
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+});
+
+// ── boardRouter HTTP — POST /api/board/projects/:slug/ideas (ideen-inbox AC3/AC7/AC8) ──
+//
+// Reale BoardWriter-Instanz gegen ein echtes tmp-Verzeichnis (kein Mock) — die
+// Pfad-/Atomarität-Garantien sind nur gegen ein echtes Filesystem aussagekräftig
+// (analog test/BoardWriter.test.js). storyMetricReader wird hier nicht gebraucht.
+
+describe('boardRouter HTTP — POST /api/board/projects/:slug/ideas (ideen-inbox AC3/AC7/AC8)', () => {
+  let boardRootsDir;
+  let storiesDir;
+  let boardYamlPath;
+
+  beforeEach(async () => {
+    boardRootsDir = await mkdtemp(join(tmpdir(), 'boardrouter-ideas-test-'));
+    const boardDir = join(boardRootsDir, 'my-repo', 'board');
+    storiesDir = join(boardDir, 'stories');
+    boardYamlPath = join(boardDir, 'board.yaml');
+    await mkdir(storiesDir, { recursive: true });
+    await writeFile(
+      boardYamlPath,
+      'schema_version: 1\nproject_slug: my-repo\nnext_feature_id: 1\nnext_story_id: 42\n',
+      'utf8',
+    );
+  });
+
+  afterEach(async () => {
+    await rm(boardRootsDir, { recursive: true, force: true });
+  });
+
+  function makeBoardWriter() {
+    return new BoardWriter({ boardRootsEnv: boardRootsDir });
+  }
+
+  it('201 happy path: legt die Idee an, gibt { storyId } zurück, schreibt GENAU EINEN Audit-Eintrag', async () => {
+    const boardWriter = makeBoardWriter();
+    const auditStore = new AuditStore();
+    const server = await startServer(null, null, { boardWriter, auditStore });
+    try {
+      const { status, data } = await httpFetch(
+        server,
+        '/api/board/projects/my-repo/ideas',
+        'POST',
+        { title: 'Eine schnelle Idee', body: 'Stichwort 1\nStichwort 2' },
+      );
+      expect(status).toBe(201);
+      expect(data).toEqual({ storyId: 'S-42' });
+
+      const raw = await readFile(join(storiesDir, 'S-42.yaml'), 'utf8');
+      expect(raw).toContain('status: Idee');
+      expect(raw).toContain("title: 'Eine schnelle Idee'");
+      expect(raw).toContain('notes: |\n  Stichwort 1\n  Stichwort 2');
+
+      const entries = auditStore.getAll();
+      expect(entries.length).toBe(1);
+      expect(entries[0].command).toBe('board:idea:create:my-repo');
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('400 bei leerem Titel: { field: "title", message }, KEIN Audit-Eintrag, keine Story-Datei', async () => {
+    const boardWriter = makeBoardWriter();
+    const auditStore = new AuditStore();
+    const server = await startServer(null, null, { boardWriter, auditStore });
+    try {
+      const { status, data } = await httpFetch(server, '/api/board/projects/my-repo/ideas', 'POST', { title: '   ' });
+      expect(status).toBe(400);
+      expect(data.field).toBe('title');
+      expect(typeof data.message).toBe('string');
+      expect(auditStore.getAll()).toEqual([]);
+
+      const entries = await readdir(storiesDir);
+      expect(entries).toEqual([]);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('400 bei zu langem Titel: field "title"', async () => {
+    const boardWriter = makeBoardWriter();
+    const server = await startServer(null, null, { boardWriter, auditStore: new AuditStore() });
+    try {
+      const { status, data } = await httpFetch(server, '/api/board/projects/my-repo/ideas', 'POST', {
+        title: 'x'.repeat(300),
+      });
+      expect(status).toBe(400);
+      expect(data.field).toBe('title');
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('400 bei Body mit Steuerzeichen: field "body"', async () => {
+    const boardWriter = makeBoardWriter();
+    const server = await startServer(null, null, { boardWriter, auditStore: new AuditStore() });
+    try {
+      const { status, data } = await httpFetch(server, '/api/board/projects/my-repo/ideas', 'POST', {
+        title: 'Idee',
+        body: 'Zeile1\x00Zeile2',
+      });
+      expect(status).toBe(400);
+      expect(data.field).toBe('body');
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('404 bei ungültigem Slug-Format (führendes Sonderzeichen, kein Alnum-Start)', async () => {
+    const boardWriter = makeBoardWriter();
+    const server = await startServer(null, null, { boardWriter, auditStore: new AuditStore() });
+    try {
+      const { status } = await httpFetch(server, '/api/board/projects/-badslug/ideas', 'POST', { title: 'Idee' });
+      expect(status).toBe(404);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('404 bei unbekanntem Projekt-Slug (nicht unter BOARD_ROOTS)', async () => {
+    const boardWriter = makeBoardWriter();
+    const server = await startServer(null, null, { boardWriter, auditStore: new AuditStore() });
+    try {
+      const { status } = await httpFetch(server, '/api/board/projects/does-not-exist/ideas', 'POST', {
+        title: 'Idee',
+      });
+      expect(status).toBe(404);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('500 wenn boardWriter nicht verdrahtet ist (kein Crash)', async () => {
+    const server = await startServer(null, null, { auditStore: new AuditStore() });
+    try {
+      const { status } = await httpFetch(server, '/api/board/projects/my-repo/ideas', 'POST', { title: 'Idee' });
+      expect(status).toBe(500);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('zwei aufeinanderfolgende Anlagen über HTTP erhalten unterschiedliche storyIds', async () => {
+    const boardWriter = makeBoardWriter();
+    const server = await startServer(null, null, { boardWriter, auditStore: new AuditStore() });
+    try {
+      const first = await httpFetch(server, '/api/board/projects/my-repo/ideas', 'POST', { title: 'Erste' });
+      const second = await httpFetch(server, '/api/board/projects/my-repo/ideas', 'POST', { title: 'Zweite' });
+      expect(first.data.storyId).toBe('S-42');
+      expect(second.data.storyId).toBe('S-43');
     } finally {
       await new Promise((r) => server.close(r));
     }
