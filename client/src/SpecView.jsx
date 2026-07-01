@@ -24,10 +24,36 @@
  *        an /api/command; „Abbrechen" schließt ohne POST.
  * AC4 — Bei `GET /api/session` state:"busy" ist der Button deaktiviert
  *        (disabled-Attribut + Text-Label, nie Farbe allein); kein Dialog/POST bei Klick.
- * AC5 — 202 → onNavigate('factory'); kein stehengebliebenes Element im Reiter.
+ * AC5 — **überschrieben durch reconcile-inline-feedback (S-205) AC1** — kein
+ *        `onNavigate` mehr nach 202; siehe unten.
  * AC6 — 409 → sichtbare Fehleranzeige, kein onNavigate, kein Crash.
  * AC7 — Netzwerkfehler/500 → sichtbare Fehleranzeige mit Reset, kein onNavigate.
  * Gespiegelt vom „Board abarbeiten"-Muster (CockpitView.jsx FactoryWorkspace).
+ *
+ * reconcile-inline-feedback (S-205) — bleibt auf dem Spezifikation-Reiter, hält
+ * den Lauf, meldet Fortschritt inline, refresht die Audit-Anzeige automatisch:
+ * AC1 — Nach 202 wird `onNavigate` NICHT mehr aufgerufen (überschreibt
+ *        reconcile-trigger AC5); stattdessen inline „Reconcile läuft…"
+ *        (role="status"), Button deaktiviert (disabled + Text-Label).
+ * AC2 — Solange `GET /api/session` `state:"busy"` liefert, bleibt „Reconcile
+ *        läuft…" sichtbar, Button deaktiviert (bestehendes Poll-Muster,
+ *        kein zusätzliches Dauer-Polling).
+ * AC3 — Erstmaliges nicht-`busy` nach `busy` (bzw. sofort bei sehr kurzem Lauf,
+ *        Edge-Case) → „Fertig" (role="status"), Button wieder auslösbar.
+ * AC4 — Beim Übergang auf „Fertig" wird `AuditSpecView` automatisch genau
+ *        einmal neu geladen (Reload-Signal-Zähler, kein manueller Klick nötig).
+ * AC5 — Erkennbarer PR-Bezug (URL oder `#<nummer>`) im Audit-Inhalt → dezenter
+ *        Link/Hinweis; sonst kein Element (graceful absence, best-effort).
+ * AC6 — Backend: `GET /api/session` meldet `busy` solange ein Reconcile-Job
+ *        in Flight ist (CommandService/JobLock-Zustand sichtbar gemacht).
+ * AC7 — Backend: `PtySessionRegistry` verwirft eine Session mit aktivem Job
+ *        nicht idle — auch ohne WebSocket-Zuschauer.
+ * AC8 — Bestätigt der Poll den Abschluss nicht innerhalb eines beschränkten
+ *        Sicherheitsfensters (Session flippt nie zurück / Poll schlägt
+ *        wiederholt fehl) → neutraler Text-Hinweis statt Endlos-Spinner;
+ *        „Audit-Spec anzeigen" bleibt manuell bedienbar.
+ * AC9 — 409/500/Netzwerkfehler weiterhin inline Fehleranzeige mit Reset, ohne
+ *        `onNavigate`, ohne Crash (Regression zu reconcile-trigger AC6/AC7).
  *
  * spec-audit-view (S-203) — Sekundär-Button „Audit-Spec anzeigen" direkt
  * unterhalb des ReconcileTrigger-Buttons:
@@ -52,6 +78,9 @@
  *   - spec-audit-view: kein neuer Endpunkt — wiederverwendet den bestehenden
  *     docs/raw-Endpunkt mit festem, nicht nutzergesteuertem Pfad
  *     (docs/spec-audit.md — kein Traversal-Vektor).
+ *   - reconcile-inline-feedback: PR-Link nur aus dem gerenderten Audit-Inhalt
+ *     (fester https?://-Präfix), `target="_blank"` stets mit
+ *     `rel="noopener noreferrer"` (kein offener Redirect).
  *
  * A11y (WCAG 2.1 AA):
  *   - Navigation als <nav> mit aria-label.
@@ -60,23 +89,33 @@
  *   - Fokusring nie unterdrückt.
  *   - Touch-Targets ≥ 44 px für Nav-Buttons, den Reconcile-Button und den
  *     Audit-Spec-Button.
+ *   - Lauf-/Fertig-/Degraded-Zustände (S-205) als Text (role="status",
+ *     aria-live="polite"), nicht nur Farbe.
  *
- * Covers (reconcile-trigger): AC1, AC2, AC3, AC4, AC5, AC6, AC7
+ * Covers (reconcile-trigger): AC1, AC2, AC3, AC4, AC6, AC7 (AC5 überschrieben — siehe reconcile-inline-feedback AC1)
  * Covers (spec-audit-view): AC1, AC2, AC3, AC4
+ * Covers (reconcile-inline-feedback): AC1, AC2, AC3, AC4, AC5, AC8, AC9 (AC6/AC7 sind Backend — siehe src/routers/session.js, src/PtySessionRegistry.js)
  *
  * @param {{
  *   projectSlug: string,
  *   initialPath?: string | null,
  *   onNavigate?: (view: string) => void,
  *   fetchFn?: Function,
+ *   reconcilePollInterval?: number,
+ *   reconcileSafetyWindowMs?: number,
+ *   reconcileMaxConsecutiveFailures?: number,
  * }} props
  *   projectSlug   — Slug des aktiven Projekts (aus CockpitView/BoardAggregator)
  *   initialPath   — optional: direkt zu öffnende Datei (AC5, z.B. via Story-Klick)
- *   onNavigate    — (reconcile-trigger AC5) navigiert nach erfolgreichem Auslösen
- *                    in den Terminal-/Arbeiten-Bereich ('factory').
+ *   onNavigate    — nicht mehr genutzt vom Reconcile-Trigger (S-205 AC1 überschreibt
+ *                    reconcile-trigger AC5); Prop bleibt für Signatur-Kompatibilität
+ *                    mit CockpitView erhalten, aber ungenutzt.
  *   fetchFn       — injectable für Tests (default: globalThis.fetch); vom
  *                    Reconcile-Trigger UND vom Audit-Spec-Button genutzt
  *                    (Doku-Laden im Nav-Baum bleibt unverändert).
+ *   reconcilePollInterval, reconcileSafetyWindowMs, reconcileMaxConsecutiveFailures —
+ *                    injectable Test-Overrides für den Reconcile-Session-Poll
+ *                    (S-205 AC2/AC8; Defaults siehe ReconcileTrigger unten).
  */
 
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
@@ -106,9 +145,21 @@ const ALL_SPEC_STATUSES = ['draft', 'active', 'superseded'];
  *   initialPath?: string | null,
  *   onNavigate?: (view: string) => void,
  *   fetchFn?: Function,
+ *   reconcilePollInterval?: number,
+ *   reconcileSafetyWindowMs?: number,
+ *   reconcileMaxConsecutiveFailures?: number,
  * }} props
  */
-export function SpecView({ projectSlug, initialPath, onNavigate, fetchFn }) {
+export function SpecView({
+  projectSlug,
+  initialPath,
+  // Kept for CockpitView signature compat — no longer called (S-205 AC1 überschreibt reconcile-trigger AC5).
+  onNavigate: _onNavigate,
+  fetchFn,
+  reconcilePollInterval,
+  reconcileSafetyWindowMs,
+  reconcileMaxConsecutiveFailures,
+}) {
   // ── Doku-Struktur (Navigation) ─────────────────────────────────────────────
   const [docsState, setDocsState] = useState('idle');  // 'idle'|'loading'|'ok'|'error'
   const [docsError, setDocsError] = useState('');
@@ -126,6 +177,15 @@ export function SpecView({ projectSlug, initialPath, onNavigate, fetchFn }) {
   const [filterTypes, setFilterTypes]     = useState(() => new Set(ALL_DOC_TYPES));
   /** @type {[Set<string>, Function]} */
   const [filterStatuses, setFilterStatuses] = useState(() => new Set(ALL_SPEC_STATUSES));
+
+  // ── reconcile-inline-feedback (S-205) AC4: Audit-Reload-Signal ────────────
+  // Zähler, der bei jedem Reconcile-Abschluss ("Fertig") hochgezählt wird.
+  // AuditSpecView beobachtet die Änderung (reloadSignal-Prop) und lädt
+  // daraufhin automatisch genau einmal neu (Edge-Case „Doppel-Reload").
+  const [auditReloadSignal, setAuditReloadSignal] = useState(0);
+  const handleReconcileDone = useCallback(() => {
+    setAuditReloadSignal((n) => n + 1);
+  }, []);
 
   // ── Doku-Struktur laden (beim Mount + wenn Slug wechselt) ─────────────────
   useEffect(() => {
@@ -242,17 +302,24 @@ export function SpecView({ projectSlug, initialPath, onNavigate, fetchFn }) {
     <div style={styles.container}>
       {/* Linke Spalte: Reconcile-Trigger + Filter + Navigation */}
       <div style={styles.sidebar}>
-        {/* reconcile-trigger (S-201): „Konzept/Spec nachziehen"-Button */}
+        {/* reconcile-trigger (S-201) + reconcile-inline-feedback (S-205):
+            „Konzept/Spec nachziehen"-Button, bleibt auf dem Reiter (kein
+            onNavigate mehr), meldet Lauf/Fertig inline. */}
         <ReconcileTrigger
           projectSlug={projectSlug}
           fetchFn={fetchFn}
-          onNavigate={onNavigate}
+          onDone={handleReconcileDone}
+          pollInterval={reconcilePollInterval}
+          safetyWindowMs={reconcileSafetyWindowMs}
+          maxConsecutiveFailures={reconcileMaxConsecutiveFailures}
         />
 
-        {/* spec-audit-view (S-203): „Audit-Spec anzeigen"-Button, direkt unterhalb */}
+        {/* spec-audit-view (S-203): „Audit-Spec anzeigen"-Button, direkt unterhalb.
+            reloadSignal (S-205 AC4): automatischer Reload nach Reconcile-Abschluss. */}
         <AuditSpecView
           projectSlug={projectSlug}
           fetchFn={fetchFn}
+          reloadSignal={auditReloadSignal}
         />
 
         {/* Filter (AC6) */}
@@ -327,52 +394,162 @@ export function SpecView({ projectSlug, initialPath, onNavigate, fetchFn }) {
   );
 }
 
-// ── ReconcileTrigger (reconcile-trigger AC1–AC7) ──────────────────────────────
+// ── ReconcileTrigger (reconcile-trigger AC1–AC4/AC6/AC7 + reconcile-inline-feedback AC1–AC3/AC8/AC9) ──
 
 /** Session poll interval in ms — matches CockpitView/FactoryWorkspace default. */
 const RECONCILE_SESSION_POLL_MS = 3_000;
 
 /**
- * ReconcileTrigger — „Konzept/Spec nachziehen"-Button (reconcile-trigger AC1–AC7).
+ * reconcile-inline-feedback (S-205) AC8: bounded safety window against an
+ * endless spinner — if the session never flips back to non-busy (or the poll
+ * fails repeatedly) within this window, the UI degrades to a neutral hint.
+ */
+const RECONCILE_SAFETY_WINDOW_MS = 5 * 60 * 1000; // 5 min
+
+/** AC8: max consecutive /api/session poll failures before degrading. */
+const RECONCILE_MAX_CONSECUTIVE_FAILURES = 5;
+
+/**
+ * ReconcileTrigger — „Konzept/Spec nachziehen"-Button
+ * (reconcile-trigger AC1–AC4/AC6/AC7 + reconcile-inline-feedback AC1–AC3/AC8/AC9).
  *
  * Gespiegelt vom „Board abarbeiten"-Knopf (CockpitView.jsx FactoryWorkspace):
  * Bestätigungsdialog vor dem doku-ändernden Lauf, Busy-Guard via GET /api/session,
- * POST /api/command {command:'/agent-flow:reconcile', projectPath}, 202→onNavigate,
- * 409/500/Netzfehler→sichtbare Fehleranzeige mit Reset.
+ * POST /api/command {command:'/agent-flow:reconcile', projectPath}.
+ *
+ * reconcile-inline-feedback (S-205): nach 202 bleibt die Ansicht auf dem Reiter
+ * (kein onNavigate mehr, überschreibt reconcile-trigger AC5) — stattdessen
+ * inline „Reconcile läuft…" (AC1), abgeleitet aus demselben Busy-Poll, der
+ * bereits für AC4 läuft (kein zusätzliches Dauer-Polling, NFR Performance).
+ * Kippt der Poll von busy → nicht-busy (oder ist der allererste Poll nach dem
+ * Start bereits nicht-busy — Edge-Case „Race busy→ready sofort"), wechselt
+ * die Anzeige auf „Fertig" (AC3) und `onDone()` wird genau einmal aufgerufen
+ * (AuditSpecView-Reload-Signal, AC4). Ein `reconcileStateRef` hält den
+ * aktuellen Phasen-Wert synchron zum State, damit der Poll-Handler (der aus
+ * einem einmalig registrierten Effect heraus läuft) nie mit einem veralteten
+ * Closure-Wert vergleicht — das verhindert sowohl den Doppel-Reload
+ * (Edge-Case) als auch verpasste Übergänge.
+ *
+ * AC8 (robuste Degradierung): `runStartRef` verankert den Start-Zeitpunkt des
+ * eigenen Laufs; `consecutiveFailRef` zählt aufeinanderfolgende Poll-Fehler
+ * (Netzwerkfehler oder !res.ok). Überschreitet die verstrichene Zeit das
+ * Sicherheitsfenster ODER die Fehlerzahl den Schwellwert, während der Lauf
+ * noch als „running" geführt wird, degradiert die Anzeige neutral (kein
+ * Endlos-Spinner, kein Crash) — der separate „Audit-Spec anzeigen"-Button
+ * (AuditSpecView) bleibt unabhängig davon manuell bedienbar.
  *
  * @param {{
  *   projectSlug: string,
  *   fetchFn?: Function,
- *   onNavigate?: (view: string) => void,
+ *   onDone?: () => void,
  *   pollInterval?: number,
+ *   safetyWindowMs?: number,
+ *   maxConsecutiveFailures?: number,
  * }} props
- *   fetchFn      — injectable for tests (default: globalThis.fetch)
- *   pollInterval — session poll interval in ms (default: RECONCILE_SESSION_POLL_MS)
+ *   fetchFn                — injectable for tests (default: globalThis.fetch)
+ *   onDone                 — (AC4) aufgerufen genau einmal beim Übergang auf „Fertig"
+ *   pollInterval           — session poll interval in ms (default: RECONCILE_SESSION_POLL_MS)
+ *   safetyWindowMs         — (AC8) Sicherheitsfenster in ms (default: RECONCILE_SAFETY_WINDOW_MS)
+ *   maxConsecutiveFailures — (AC8) max. aufeinanderfolgende Poll-Fehler (default: RECONCILE_MAX_CONSECUTIVE_FAILURES)
  */
-function ReconcileTrigger({ projectSlug, fetchFn, onNavigate, pollInterval = RECONCILE_SESSION_POLL_MS }) {
+function ReconcileTrigger({
+  projectSlug,
+  fetchFn,
+  onDone,
+  pollInterval = RECONCILE_SESSION_POLL_MS,
+  safetyWindowMs = RECONCILE_SAFETY_WINDOW_MS,
+  maxConsecutiveFailures = RECONCILE_MAX_CONSECUTIVE_FAILURES,
+}) {
   // Stable ref so the poll effect doesn't re-register on every render.
   const fetchFnRef = useRef(fetchFn ?? globalThis.fetch.bind(globalThis));
   useEffect(() => {
     fetchFnRef.current = fetchFn ?? globalThis.fetch.bind(globalThis);
   }, [fetchFn]);
 
+  const onDoneRef = useRef(onDone);
+  useEffect(() => {
+    onDoneRef.current = onDone;
+  }, [onDone]);
+
   // ── Session busy state (AC4) ──────────────────────────────────────────────
   /** 'idle' | 'running' — derived from GET /api/session state */
   const [sessionRunState, setSessionRunState] = useState('idle');
 
+  // ── Trigger state (AC2, AC3, AC6, AC7 + reconcile-inline-feedback AC1–AC3, AC8, AC9) ──
+  /** 'idle' | 'confirm' | 'starting' | 'running' | 'done' | 'degraded' | 'error' */
+  const [reconcileState, setReconcileState] = useState('idle');
+  const [reconcileError, setReconcileError] = useState(null);
+
+  // Kept in sync with reconcileState so the poll-effect closure (registered
+  // once) always reads the CURRENT phase, not a stale one (avoids the
+  // Doppel-Reload edge-case and missed running→done/degraded transitions).
+  const reconcileStateRef = useRef('idle');
+  const runStartRef = useRef(null);
+  const consecutiveFailRef = useRef(0);
+
+  /** Transition helper — keeps state + ref in lockstep. */
+  const setPhase = useCallback((next) => {
+    reconcileStateRef.current = next;
+    setReconcileState(next);
+  }, []);
+
+  /** AC3/AC8: end this trigger's own run, transitioning to 'done' or 'degraded'. */
+  const finishRun = useCallback((nextPhase) => {
+    setPhase(nextPhase);
+    runStartRef.current = null;
+    consecutiveFailRef.current = 0;
+    if (nextPhase === 'done') {
+      onDoneRef.current?.(); // AC4 — exactly once per completion
+    }
+  }, [setPhase]);
+
+  // ── Poll /api/session — single continuous poll (NFR: kein zusätzliches
+  // Dauer-Polling über den bestehenden Busy-Poll hinaus) serves BOTH the
+  // generic busy-guard (reconcile-trigger AC4) AND this trigger's own
+  // running→done/degraded tracking (AC2/AC3/AC8). ────────────────────────
   useEffect(() => {
     let cancelled = false;
 
     async function pollSession() {
+      let ok = false;
+      let busy = false;
       try {
         const res = await fetchFnRef.current('/api/session');
-        if (!res.ok) return;
-        const json = await res.json();
-        if (!cancelled) {
-          setSessionRunState(json.state === 'busy' ? 'running' : 'idle');
+        if (res.ok) {
+          const json = await res.json();
+          ok = true;
+          busy = json.state === 'busy';
         }
       } catch {
-        // network error — keep current state
+        ok = false; // network error — handled below (AC8)
+      }
+
+      if (cancelled) return;
+
+      if (ok) {
+        setSessionRunState(busy ? 'running' : 'idle');
+      }
+
+      // AC2/AC3/AC8: track this trigger's own run.
+      if (reconcileStateRef.current === 'running') {
+        if (ok) {
+          consecutiveFailRef.current = 0;
+          if (!busy) {
+            // AC3 (+ Edge-Case „Race busy→ready sofort"): Übergang zu „Fertig".
+            finishRun('done');
+            return;
+          }
+        } else {
+          consecutiveFailRef.current += 1;
+        }
+
+        const elapsed = Date.now() - (runStartRef.current ?? Date.now());
+        const timedOut = elapsed >= safetyWindowMs;
+        const tooManyFailures = consecutiveFailRef.current >= maxConsecutiveFailures;
+        if (timedOut || tooManyFailures) {
+          // AC8: robuste Degradierung — kein Endlos-Spinner, kein Crash.
+          finishRun('degraded');
+        }
       }
     }
 
@@ -382,34 +559,36 @@ function ReconcileTrigger({ projectSlug, fetchFn, onNavigate, pollInterval = REC
       cancelled = true;
       clearInterval(timer);
     };
-  }, [pollInterval]);
+  }, [pollInterval, safetyWindowMs, maxConsecutiveFailures, finishRun]);
 
   const isSessionBusy = sessionRunState === 'running';
+  const isOwnRunActive = reconcileState === 'running';
 
-  // ── Trigger state (AC2, AC3, AC6, AC7) ────────────────────────────────────
-  /** 'idle' | 'confirm' | 'starting' | 'error' */
-  const [reconcileState, setReconcileState] = useState('idle');
-  const [reconcileError, setReconcileError] = useState(null);
+  // AC1/AC4: button disabled when session busy, a start is in flight, or this
+  // trigger's own run is active.
+  const isBtnDisabled = isSessionBusy || reconcileState === 'starting' || isOwnRunActive;
 
-  // AC4: button disabled when session busy or a start is already in flight.
-  const isBtnDisabled = isSessionBusy || reconcileState === 'starting';
+  // Button remains visible (and re-enables) across idle/running/done/degraded —
+  // only hidden during the brief 'starting' POST-in-flight window and during
+  // 'error' (replaced by the error alert + reset, unchanged AC6/AC7/AC9 behaviour).
+  const showButton = ['idle', 'running', 'done', 'degraded'].includes(reconcileState);
 
   const handleClick = useCallback(() => {
-    setReconcileState('confirm');
+    setPhase('confirm');
     setReconcileError(null);
-  }, []);
+  }, [setPhase]);
 
   const handleCancel = useCallback(() => {
-    setReconcileState('idle');
+    setPhase('idle');
     setReconcileError(null);
-  }, []);
+  }, [setPhase]);
 
   const handleConfirm = useCallback(async () => {
-    setReconcileState('starting');
+    setPhase('starting');
     setReconcileError(null);
 
-    // AC3: include projectPath when an active project is set (backwards-compat
-    // with the global session when absent, per Edge-Cases in the spec).
+    // AC3 (reconcile-trigger): include projectPath when an active project is set
+    // (backwards-compat with the global session when absent, per Edge-Cases).
     const body = { command: '/agent-flow:reconcile' };
     if (projectSlug && typeof projectSlug === 'string' && projectSlug.trim()) {
       body.projectPath = projectSlug.trim();
@@ -423,30 +602,34 @@ function ReconcileTrigger({ projectSlug, fetchFn, onNavigate, pollInterval = REC
         body: JSON.stringify(body),
       });
     } catch {
-      // AC7: network error → visible error, no onNavigate
-      setReconcileState('error');
+      // AC9: network error → visible error, no onNavigate
+      setPhase('error');
       setReconcileError('Netzwerkfehler — bitte erneut versuchen.');
       return;
     }
 
     if (res.status === 202) {
-      // AC5: success → navigate to terminal pane, no stale element left behind
-      setReconcileState('idle');
+      // reconcile-inline-feedback AC1: bleibt auf dem Reiter — kein onNavigate
+      // mehr (überschreibt reconcile-trigger AC5). Inline „Reconcile läuft…".
+      runStartRef.current = Date.now();
+      consecutiveFailRef.current = 0;
+      setPhase('running');
       setSessionRunState('running'); // optimistic update — poll will confirm
-      if (onNavigate) onNavigate('factory');
       return;
     }
     if (res.status === 409) {
-      // AC6: job already running → visible error, no onNavigate
+      // AC6 (reconcile-trigger) / AC9 (reconcile-inline-feedback): job already
+      // running → visible error, no onNavigate
       setSessionRunState('running');
-      setReconcileState('error');
+      setPhase('error');
       setReconcileError('Ein Job läuft bereits — bitte warten.');
       return;
     }
-    // AC7: 500/unexpected status → visible error, no onNavigate
-    setReconcileState('error');
+    // AC7 (reconcile-trigger) / AC9 (reconcile-inline-feedback): 500/unexpected
+    // status → visible error, no onNavigate
+    setPhase('error');
     setReconcileError(`Fehler beim Starten (HTTP ${res.status}).`);
-  }, [projectSlug, onNavigate]);
+  }, [projectSlug, setPhase]);
 
   return (
     <div style={styles.reconcileBox} data-testid="reconcile-box">
@@ -457,7 +640,7 @@ function ReconcileTrigger({ projectSlug, fetchFn, onNavigate, pollInterval = REC
         Konzept, Architektur und Specs wieder mit Vorlage und Code ab.
       </p>
 
-      {reconcileState === 'idle' && (
+      {showButton && (
         <button
           type="button"
           style={isBtnDisabled ? styles.btnReconcileDisabled : styles.btnReconcile}
@@ -465,18 +648,24 @@ function ReconcileTrigger({ projectSlug, fetchFn, onNavigate, pollInterval = REC
           aria-disabled={isBtnDisabled}
           onClick={isBtnDisabled ? undefined : handleClick}
           aria-label={
-            isSessionBusy
+            isOwnRunActive
+              ? 'Konzept/Spec nachziehen — läuft'
+              : isSessionBusy
               ? 'Konzept/Spec nachziehen — gesperrt (Job läuft)'
               : 'Konzept/Spec nachziehen starten — öffnet Bestätigungsdialog'
           }
           data-testid="reconcile-btn"
         >
-          {isSessionBusy ? 'Konzept/Spec nachziehen — gesperrt' : 'Konzept/Spec nachziehen'}
+          {isOwnRunActive
+            ? 'Konzept/Spec nachziehen — läuft'
+            : isSessionBusy
+            ? 'Konzept/Spec nachziehen — gesperrt'
+            : 'Konzept/Spec nachziehen'}
         </button>
       )}
 
-      {/* AC4: Lock-Hinweis (Text, nicht nur Farbe) */}
-      {isSessionBusy && reconcileState === 'idle' && (
+      {/* AC4 (reconcile-trigger): Lock-Hinweis für Fremd-Busy (Text, nicht nur Farbe) */}
+      {isSessionBusy && !isOwnRunActive && reconcileState === 'idle' && (
         <div
           role="status"
           aria-live="polite"
@@ -484,6 +673,42 @@ function ReconcileTrigger({ projectSlug, fetchFn, onNavigate, pollInterval = REC
           data-testid="reconcile-lock-notice"
         >
           Ein Job läuft — Trigger gesperrt.
+        </div>
+      )}
+
+      {/* reconcile-inline-feedback AC1/AC2: eigener Lauf aktiv */}
+      {reconcileState === 'running' && (
+        <div
+          role="status"
+          aria-live="polite"
+          style={styles.reconcileStatus}
+          data-testid="reconcile-running"
+        >
+          Reconcile läuft…
+        </div>
+      )}
+
+      {/* reconcile-inline-feedback AC3: eigener Lauf abgeschlossen */}
+      {reconcileState === 'done' && (
+        <div
+          role="status"
+          aria-live="polite"
+          style={styles.reconcileStatus}
+          data-testid="reconcile-done"
+        >
+          Fertig
+        </div>
+      )}
+
+      {/* reconcile-inline-feedback AC8: robuste Degradierung — kein Endlos-Spinner */}
+      {reconcileState === 'degraded' && (
+        <div
+          role="status"
+          aria-live="polite"
+          style={styles.reconcileDegraded}
+          data-testid="reconcile-degraded"
+        >
+          Status unklar — bitte „Audit-Spec anzeigen" manuell aktualisieren.
         </div>
       )}
 
@@ -534,14 +759,14 @@ function ReconcileTrigger({ projectSlug, fetchFn, onNavigate, pollInterval = REC
         </div>
       )}
 
-      {/* AC6/AC7: Fehleranzeige mit Reset-Möglichkeit */}
+      {/* AC6/AC7 (reconcile-trigger) / AC9 (reconcile-inline-feedback): Fehleranzeige mit Reset */}
       {reconcileState === 'error' && (
         <div role="alert" style={styles.reconcileStatusError} data-testid="reconcile-error">
           {reconcileError}
           <button
             type="button"
             style={styles.btnReconcileReset}
-            onClick={() => setReconcileState('idle')}
+            onClick={() => setPhase('idle')}
             aria-label="Fehlerstatus zurücksetzen"
             data-testid="reconcile-error-reset"
           >
@@ -553,7 +778,35 @@ function ReconcileTrigger({ projectSlug, fetchFn, onNavigate, pollInterval = REC
   );
 }
 
-// ── AuditSpecView (spec-audit-view AC1–AC4) ───────────────────────────────────
+// ── AuditSpecView (spec-audit-view AC1–AC4 + reconcile-inline-feedback AC4/AC5) ──
+
+/**
+ * PR-URL-Muster: `.../pull/<n>[...]` (GitHub-Pull-Request-Link).
+ * Bare-Hash-Muster: `#<n>` (nicht gefolgt von einem weiteren Wortzeichen —
+ * schließt z.B. `#123abc` als Nicht-Treffer aus).
+ */
+const PR_URL_RE = /https?:\/\/\S*\/pull\/(\d+)\S*/i;
+const PR_HASH_RE = /#(\d+)(?!\w)/;
+
+/**
+ * Sucht im geladenen Audit-Markdown nach einem erkennbaren PR-Bezug
+ * (reconcile-inline-feedback AC5, best-effort/SHOULD).
+ *
+ * @param {string} markdown
+ * @returns {{ url: string|null, label: string }|null}
+ */
+function extractPrReference(markdown) {
+  if (typeof markdown !== 'string' || !markdown.trim()) return null;
+  const urlMatch = markdown.match(PR_URL_RE);
+  if (urlMatch) {
+    return { url: urlMatch[0], label: `PR #${urlMatch[1]}` };
+  }
+  const hashMatch = markdown.match(PR_HASH_RE);
+  if (hashMatch) {
+    return { url: null, label: `PR #${hashMatch[1]}` };
+  }
+  return null;
+}
 
 /**
  * AuditSpecView — „Audit-Spec anzeigen"-Sekundär-Button, direkt unterhalb des
@@ -571,14 +824,31 @@ function ReconcileTrigger({ projectSlug, fetchFn, onNavigate, pollInterval = REC
  * auslösen. Der Button ist zusätzlich während einer aktiven Ladung
  * deaktiviert (State-basiert, für den sichtbaren/zugänglichen Zustand).
  *
+ * reconcile-inline-feedback (S-205):
+ * AC4 — `reloadSignal` (ein monoton hochgezählter Zähler von SpecView, bei
+ *        jedem Reconcile-Abschluss +1) triggert programmatisch genau EIN
+ *        `load()` — derselbe Lade-Pfad wie der manuelle Klick, inkl.
+ *        `hasProjectSlug`-Guard (Edge-Case „Kein projectSlug") und
+ *        Doppelklick-/Doppel-Reload-Guard (`loadingRef`). Der `lastReloadSignalRef`
+ *        vergleicht gegen den beim Mount erfassten Startwert, damit der
+ *        Effect NICHT beim initialen Mount feuert (nur bei einer echten
+ *        Änderung, d.h. einem tatsächlichen Reconcile-Abschluss).
+ * AC5 — erkennbarer PR-Bezug im geladenen Inhalt (PR-URL oder `#<nummer>`)
+ *        → dezenter Link (echte URL, `target="_blank" rel="noopener noreferrer"`)
+ *        bzw. reiner Text-Hinweis (Bare-Hash ohne Domain); sonst kein Element
+ *        (graceful absence, kein Platzhalter, kein Crash).
+ *
  * @param {{
  *   projectSlug: string,
  *   fetchFn?: Function,
+ *   reloadSignal?: number,
  * }} props
- *   fetchFn — injectable für Tests (default: globalThis.fetch), analog zum
- *             ReconcileTrigger.
+ *   fetchFn      — injectable für Tests (default: globalThis.fetch), analog zum
+ *                  ReconcileTrigger.
+ *   reloadSignal — (S-205 AC4) monoton hochgezählter Zähler; jede Änderung ab
+ *                  dem Mount-Wert löst genau einen automatischen Reload aus.
  */
-function AuditSpecView({ projectSlug, fetchFn }) {
+function AuditSpecView({ projectSlug, fetchFn, reloadSignal }) {
   const fetchFnRef = useRef(fetchFn ?? globalThis.fetch.bind(globalThis));
   useEffect(() => {
     fetchFnRef.current = fetchFn ?? globalThis.fetch.bind(globalThis);
@@ -601,10 +871,11 @@ function AuditSpecView({ projectSlug, fetchFn }) {
   const hasProjectSlug = typeof projectSlug === 'string' && projectSlug.trim().length > 0;
   const isBtnDisabled = !hasProjectSlug || auditState === 'loading';
 
-  const handleClick = useCallback(async () => {
-    // Edge-case: fehlender projectSlug → kein Request mit leerem Slug.
+  const load = useCallback(async () => {
+    // Edge-case: fehlender projectSlug → kein Request mit leerem Slug
+    // (gilt für Klick UND automatischen Reload, S-205 Edge-Cases).
     if (!hasProjectSlug) return;
-    // Doppelklick-Guard: nur eine aktive Ladung (synchron geprüft).
+    // Doppelklick-/Doppel-Reload-Guard: nur eine aktive Ladung (synchron geprüft).
     if (loadingRef.current) return;
     loadingRef.current = true;
 
@@ -644,6 +915,27 @@ function AuditSpecView({ projectSlug, fetchFn }) {
     setAuditContent(text);
     setAuditState('ok');
   }, [projectSlug, hasProjectSlug]);
+
+  const handleClick = useCallback(() => {
+    load();
+  }, [load]);
+
+  // reconcile-inline-feedback (S-205) AC4: automatischer Reload nach Reconcile-
+  // Abschluss. Der Ref erfasst den Startwert beim Mount, damit der Effect NICHT
+  // beim initialen Mount feuert — nur bei einer echten Änderung (= Abschluss).
+  const lastReloadSignalRef = useRef(reloadSignal);
+  useEffect(() => {
+    if (reloadSignal === undefined || reloadSignal === null) return;
+    if (reloadSignal === lastReloadSignalRef.current) return; // kein neuer Abschluss
+    lastReloadSignalRef.current = reloadSignal;
+    load();
+  }, [reloadSignal, load]);
+
+  // AC5: PR-Bezug aus dem geladenen Inhalt (best-effort, nur wenn geladen).
+  const prReference = useMemo(() => {
+    if (auditState !== 'ok') return null;
+    return extractPrReference(auditContent);
+  }, [auditState, auditContent]);
 
   return (
     <div style={styles.auditBox} data-testid="audit-spec-box">
@@ -689,6 +981,24 @@ function AuditSpecView({ projectSlug, fetchFn }) {
       {auditState === 'ok' && (
         <div style={styles.auditContentWrapper} data-testid="audit-spec-content">
           <MarkdownLite markdown={auditContent} style={styles.auditMarkdown} />
+          {/* reconcile-inline-feedback AC5: dezenter PR-Bezug (graceful absence) */}
+          {prReference && (
+            prReference.url ? (
+              <a
+                href={prReference.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={styles.auditPrLink}
+                data-testid="audit-spec-pr-link"
+              >
+                {prReference.label}
+              </a>
+            ) : (
+              <span style={styles.auditPrHint} data-testid="audit-spec-pr-hint">
+                {prReference.label}
+              </span>
+            )
+          )}
         </div>
       )}
     </div>
@@ -1112,6 +1422,13 @@ const styles = {
     fontStyle: 'italic',
   },
 
+  // reconcile-inline-feedback (S-205) AC8: neutrale Degradierung — kein Fehler-Look
+  reconcileDegraded: {
+    fontSize: 12,
+    color: '#9ca3af',
+    fontStyle: 'italic',
+  },
+
   reconcileStatusError: {
     fontSize: 12,
     color: '#f87171',
@@ -1192,5 +1509,22 @@ const styles = {
     fontSize: 12,
     lineHeight: 1.6,
     color: '#d1d5db',
+  },
+
+  // reconcile-inline-feedback (S-205) AC5: dezenter PR-Bezug
+  auditPrLink: {
+    display: 'inline-block',
+    marginTop: 8,
+    fontSize: 11,
+    color: '#93c5fd',
+    textDecoration: 'underline',
+  },
+
+  auditPrHint: {
+    display: 'inline-block',
+    marginTop: 8,
+    fontSize: 11,
+    color: '#6b7280',
+    fontStyle: 'italic',
   },
 };

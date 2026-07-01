@@ -38,10 +38,12 @@
  *          busy). Der /flow-Lauf selbst bleibt weiterhin über CommandService
  *          im Projekt-Terminal sichtbar (kein neuer Completion-Kanal nötig).
  *
- * reconcile-trigger (S-201):
- *   onNavigate wird zusätzlich an SpecView durchgereicht — der dortige
- *   „Konzept/Spec nachziehen"-Button (siehe SpecView.jsx) navigiert nach
- *   erfolgreichem Auslösen (202) ebenfalls in den „Arbeiten"-Bereich (AC5).
+ * reconcile-trigger (S-201) / reconcile-inline-feedback (S-205):
+ *   SpecView erhält onNavigate weiterhin als Prop (Signatur-Kompatibilität),
+ *   ruft sie aber NICHT mehr auf: der „Konzept/Spec nachziehen"-Button (siehe
+ *   SpecView.jsx) bleibt seit S-205 nach erfolgreichem Auslösen (202) auf dem
+ *   Spezifikation-Reiter (inline „Reconcile läuft…" → „Fertig" statt
+ *   Navigate — überschreibt reconcile-trigger AC5).
  *
  * A11y (WCAG 2.1 AA):
  *   - Reiter-Leiste als <nav role="tablist"> mit aria-selected.
