@@ -1,23 +1,31 @@
 /**
- * CockpitFlowTrigger.test.jsx — Tests für AC2+AC3 (autonome-board-abarbeitung)
- * und AC8 (fabric-intake-dialog): „Board abarbeiten"-Knopf im Cockpit-Reiter „Arbeiten".
+ * CockpitFlowTrigger.test.jsx — Tests für AC2+AC3 (autonome-board-abarbeitung),
+ * AC8 (fabric-intake-dialog) und AC12 (taktgeber-nachtwaechter): „Board
+ * abarbeiten"-Knopf im Cockpit-Reiter „Arbeiten".
  *
  * Covers (autonome-board-abarbeitung):
  *   AC2 — Im Reiter „Arbeiten" Knopf „Board abarbeiten" vorhanden;
  *          Klick öffnet Bestätigungsdialog (role=dialog);
- *          Bestätigen POSTet /agent-flow:flow an /api/command mit projectPath;
+ *          Bestätigen POSTet an POST /api/projects/:slug/drain (AC12, s.u.);
  *          Abbrechen schließt Dialog ohne POST;
  *          202 → onNavigate('factory') aufgerufen (AC8-konsistent).
  *          409 → Fehler-Info im UI.
  *   AC3 — Hinweistext im „Arbeiten"-Bereich erwähnt „Blocked" / offene Fragen.
  *
  * Covers (fabric-intake-dialog):
- *   AC8 — Button „Board abarbeiten" löst /agent-flow:flow über POST /api/command aus;
- *          bei aktivem Job (Session state:"busy") ist der Button deaktiviert
- *          (disabled-Attribut + Label — nie nur Farbe); Kill-Switch bleibt wirksam
- *          (TriggerPanel ist gemockt — Kill-Switch lebt dort, unberührt);
- *          202 → onNavigate('factory') (Terminal-Pane-Wechsel, AC4-Muster);
- *          409 → Fehler-Info im UI, kein Crash.
+ *   AC8 — Button „Board abarbeiten" ist bei aktivem Job (Session state:"busy")
+ *          deaktiviert (disabled-Attribut + Label — nie nur Farbe); Kill-Switch
+ *          bleibt wirksam (TriggerPanel ist gemockt — Kill-Switch lebt dort,
+ *          unberührt); 202 → onNavigate('factory') (Terminal-Pane-Wechsel,
+ *          AC4-Muster); 409 → Fehler-Info im UI, kein Crash.
+ *
+ * Covers (taktgeber-nachtwaechter):
+ *   AC12 — Der bestätigte Klick löst POST /api/projects/:slug/drain aus (die
+ *          ProjectDrain-Engine, S-192) statt vormals direkt POST /api/command
+ *          mit einem einzelnen /agent-flow:flow-Schuss. Response-Vertrag
+ *          (202 {drainId} → onNavigate('factory'); 409 → Fehler-Info) und das
+ *          Busy-Disable-Verhalten (AC8) bleiben unverändert — nur der
+ *          Auslöse-Mechanismus wechselt.
  *
  * Terminal, Dashboard, TriggerPanel, BoardView, SpecView sind gemockt
  * (WS/DOM-Komplexität vermeiden).
@@ -63,20 +71,24 @@ afterEach(() => {
   window.location.hash = '';
 });
 
+/** Matches the drain endpoint for any slug (AC12 taktgeber-nachtwaechter). */
+const DRAIN_URL_RE = /^\/api\/projects\/[^/]+\/drain$/;
+
 /**
- * Build a fetch mock that handles /api/session and /api/command.
+ * Build a fetch mock that handles /api/session and POST /api/projects/:slug/drain
+ * (AC12 taktgeber-nachtwaechter — replaces the former direct /api/command POST).
  *
  * @param {object} opts
  * @param {'busy'|'ready'} [opts.sessionState='ready'] — state returned by /api/session
- * @param {number}         [opts.commandStatus=202]    — HTTP status for /api/command POST
- * @param {object}         [opts.commandBody={}]       — body for /api/command POST
+ * @param {number}         [opts.commandStatus=202]    — HTTP status for the drain POST
+ * @param {object}         [opts.commandBody={drainId:'test-drain-id'}] — body for the drain POST
  */
-function makeFetchFn({ sessionState = 'ready', commandStatus = 202, commandBody = {} } = {}) {
+function makeFetchFn({ sessionState = 'ready', commandStatus = 202, commandBody = { drainId: 'test-drain-id' } } = {}) {
   return jest.fn(async (url, opts) => {
     if (url === '/api/session') {
       return { ok: true, status: 200, json: async () => ({ state: sessionState, restarts: 0 }) };
     }
-    if (url === '/api/command' && opts?.method === 'POST') {
+    if (DRAIN_URL_RE.test(url) && opts?.method === 'POST') {
       return { ok: commandStatus === 202, status: commandStatus, json: async () => commandBody };
     }
     return { ok: true, status: 200, json: async () => ({}) };
@@ -155,14 +167,14 @@ describe('CockpitView — AC2 (autonome-board-abarbeitung): Board abarbeiten Kno
       fireEvent.click(document.querySelector('[data-testid="flow-confirm-no"]'));
     });
     expect(document.querySelector('[data-testid="flow-confirm-dialog"]')).toBeNull();
-    // No POST made to /api/command
-    const commandCalls = fetchFn.mock.calls.filter(
-      (c) => c[0] === '/api/command' && c[1]?.method === 'POST',
+    // No POST made to the drain endpoint
+    const drainCalls = fetchFn.mock.calls.filter(
+      (c) => DRAIN_URL_RE.test(c[0]) && c[1]?.method === 'POST',
     );
-    expect(commandCalls).toHaveLength(0);
+    expect(drainCalls).toHaveLength(0);
   });
 
-  it('clicking Starten POSTs /agent-flow:flow to /api/command with projectPath', async () => {
+  it('clicking Starten POSTs to /api/projects/:slug/drain (AC12 taktgeber-nachtwaechter)', async () => {
     const fetchFn = makeFetchFn({ sessionState: 'ready', commandStatus: 202 });
     renderCockpit(fetchFn);
 
@@ -174,11 +186,9 @@ describe('CockpitView — AC2 (autonome-board-abarbeitung): Board abarbeiten Kno
     });
 
     await waitFor(() => {
-      const call = fetchFn.mock.calls.find((c) => c[0] === '/api/command' && c[1]?.method === 'POST');
+      const call = fetchFn.mock.calls.find((c) => DRAIN_URL_RE.test(c[0]) && c[1]?.method === 'POST');
       expect(call).toBeTruthy();
-      const body = JSON.parse(call[1].body);
-      expect(body.command).toBe('/agent-flow:flow');
-      expect(body.projectPath).toBe('my-project');
+      expect(call[0]).toBe('/api/projects/my-project/drain');
     });
   });
 
@@ -274,11 +284,11 @@ describe('CockpitView — AC8 (fabric-intake-dialog): Board abarbeiten mit Sessi
     // No confirm dialog should appear
     expect(document.querySelector('[data-testid="flow-confirm-dialog"]')).toBeNull();
 
-    // No POST to /api/command
-    const commandCalls = fetchFn.mock.calls.filter(
-      (c) => c[0] === '/api/command' && c[1]?.method === 'POST',
+    // No POST to the drain endpoint
+    const drainCalls = fetchFn.mock.calls.filter(
+      (c) => DRAIN_URL_RE.test(c[0]) && c[1]?.method === 'POST',
     );
-    expect(commandCalls).toHaveLength(0);
+    expect(drainCalls).toHaveLength(0);
   });
 
   it('202 → onNavigate("factory") called (Terminal-Pane-Wechsel, AC4-Muster)', async () => {

@@ -261,7 +261,7 @@ describe('routerLoader — Echte src/routers/ Module (AC1/AC3)', () => {
     }
   });
 
-  it('genau 30 Router-Module in src/routers/ — Smoke-Assertion gegen versehentliche Löschung (AC1)', async () => {
+  it('genau 32 Router-Module in src/routers/ — Smoke-Assertion gegen versehentliche Löschung (AC1)', async () => {
     // Diese Assertion schreibt die aktuelle Router-Anzahl fest.
     // Sinkt die Zahl (Router gelöscht/umbenannt), schlägt der Test sofort an.
     // Steigt die Zahl (neuer Router hinzugefügt), muss dieser Wert bewusst erhöht werden.
@@ -284,8 +284,10 @@ describe('routerLoader — Echte src/routers/ Module (AC1/AC3)', () => {
     //   (GET/PUT /api/settings/notifications — Settings-Persistenz AC1/AC2) → 30.
     // ticker.js wurde mit taktgeber-nachtwaechter (S-194) hinzugefügt
     //   (GET/PUT /api/settings/ticker — Settings-Persistenz AC15/AC16) → 31.
+    // projectDrain.js wurde mit taktgeber-nachtwaechter (S-196) hinzugefügt
+    //   (POST /api/projects/:slug/drain — manueller Knopf-Umbau AC12) → 32.
     const entries = await readdir(ROUTERS_DIR);
     const mountedCount = entries.filter((f) => f.endsWith('.js')).length;
-    expect(mountedCount).toBe(31);
+    expect(mountedCount).toBe(32);
   });
 });
