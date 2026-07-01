@@ -112,6 +112,7 @@ import { WorkspaceHealthChecker } from './src/WorkspaceHealthChecker.js';
 import { AssistService } from './src/AssistService.js';
 import { KnowledgeSourceService } from './src/KnowledgeSourceService.js';
 import { read as readNotificationSettings } from './src/NotificationSettingsStore.js';
+import { read as readTickerSettings } from './src/TickerSettingsStore.js';
 import { NotificationWatcher } from './src/NotificationWatcher.js';
 import { sendNotification } from './src/NotifyService.js';
 import { mountRouters } from './src/routerLoader.js';
@@ -350,6 +351,9 @@ const deps = {
   getNotificationConfig: readNotificationSettings,
   // S-184 AC6–AC9: NotificationWatcher für rescan-Router (nach explizitem Rescan sofort prüfen).
   notificationWatcher,
+  // S-194 AC15/AC16: TickerSettingsStore-Reader als Konfig-Quelle für künftige Konsumenten
+  // (S-195 NightWatchScheduler, S-192 Status-Widget) — analog readNotificationSettings.
+  readTickerSettings,
 };
 
 // ── AC1/AC2: Auto-Discovery + Mount aller API-Router ─────────────────────────
