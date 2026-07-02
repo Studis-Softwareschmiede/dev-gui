@@ -2,7 +2,7 @@
 id: feature-status-derivation
 title: Board — Feature-Status live aus Kind-Stories ableiten (kein manuell gepflegtes Feld mehr)
 status: draft
-version: 1
+version: 2
 ---
 
 # Spec: Feature-Status live aus Kind-Stories ableiten  (`feature-status-derivation`)
@@ -48,7 +48,20 @@ Hat ein Feature **gar keine** Stories **oder nur Idee-Stories** (die nach V1 aus
 Der `BoardAggregator` setzt den ausgegebenen `feature.status` **immer** auf den nach V1–V4 abgeleiteten Wert — **unabhängig** vom persistierten `status:`-Feld im Feature-YAML. Das persistierte Feld wird **nicht** gelesen (für die Anzeige), **nicht** geschrieben und **nicht** entfernt; es bleibt byte-genau in der Datei (read-only-Aggregator) und ist damit obsolet. Die bestehende Progress-Rollup („X/Y done") bleibt **unverändert**.
 
 ### V6 — Unbekannter Story-Status
-Trägt eine (nicht-Idee-)Story einen Status **außerhalb** der bekannten Skala `{To Do, In Progress, Blocked, In Review, Done}`, wird er in der weakest-wins-Ordnung als **schwächste** bekannte Stufe (`To Do`) behandelt — konsistent mit dem Frontend, das unbekannte Story-Status im `byStatus`-Fallback der `To Do`-Spalte zuordnet. So verschwindet ein unerwarteter Status nie fälschlich als „Done".
+Trägt eine (nicht-Idee-)Story einen Status **außerhalb** der bekannten Skala `{To Do, In Progress, Blocked, In Review, Done, Verworfen}`, wird er in der weakest-wins-Ordnung als **schwächste** bekannte Stufe (`To Do`) behandelt — konsistent mit dem Frontend, das unbekannte Story-Status im `byStatus`-Fallback der `To Do`-Spalte zuordnet. So verschwindet ein unerwarteter Status nie fälschlich als „Done". *(`Verworfen` ist ab V7 ein **bekannter** terminaler Wert und fällt nicht in diesen Fallback.)*
+
+### V7 — Story-Status „Verworfen" ist terminal (Done-äquivalent) — fortgeschrieben v2
+Der terminale Story-Status **`Verworfen`** (Won't-Do/obsolet, siehe [[board-status-verworfen]]) zählt in der Ableitung **wie `Done`** — er ist die **stärkste/terminale** Stufe der Fortschritts-Skala. Konkret:
+- `Verworfen` wird **nicht** ausgeschlossen (anders als `Idee`), sondern als **`Done`-äquivalent** (gleicher, höchster Fortschrittsindex) in die weakest-wins-Ordnung eingerechnet.
+- **Blocked-Priorität (V2) bleibt unberührt:** eine `Blocked`-Story gewinnt weiterhin über alles.
+- **Ergebnis-Label:** Kollabiert die Ableitung auf die terminale Stufe (alle verbleibenden Stories sind `Done` und/oder `Verworfen`), ist der Feature-Status **`Done`** — `Verworfen` erscheint **nie** als abgeleiteter Feature-Status.
+
+Folgerungen (bindend, für Tests):
+- Feature mit **nur** `Verworfen`-Stories (kein `Done`) → **`Done`** (alle terminal).
+- Feature mit **`Done` + `Verworfen`** → **`Done`**.
+- Feature mit **`To Do` + `Verworfen`** → **`To Do`** (weakest-wins; die nicht-terminale Stufe gewinnt).
+- Feature mit **`Idee` + `Verworfen`** → Idee ausgeschlossen (V1), bleibt nur terminal → **`Done`**.
+- Feature mit **`Blocked` + `Verworfen`** → **`Blocked`** (V2-Priorität).
 
 ## Acceptance-Kriterien
 
@@ -57,14 +70,15 @@ Trägt eine (nicht-Idee-)Story einen Status **außerhalb** der bekannten Skala `
 - **AC3** — Ohne Blocked-Story ist der abgeleitete Status der schwächste vorkommende in der Reihenfolge To Do < In Progress < In Review < Done: gibt es eine `To Do` → `To Do`; sonst eine `In Progress` → `In Progress`; sonst eine `In Review` → `In Review`; sonst (alle verbleibenden `Done`) → `Done`. *(V3)*
 - **AC4** — Hat ein Feature keine Stories oder nur Idee-Stories (keine verbleibende zählbare Story), ist der abgeleitete Status `Backlog`. *(V4)*
 - **AC5** — Der vom Aggregator ausgegebene `feature.status` entspricht IMMER dem abgeleiteten Wert (V1–V4) und ignoriert das persistierte `status:`-Feld im Feature-YAML; es findet KEIN Schreiben/Ändern/Entfernen von `board/`-Dateien statt (read-only-Garantie unverändert), und die Progress-Rollup „X/Y done" bleibt unverändert. *(V5)*
-- **AC6** — Eine nicht-Idee-Story mit einem Status außerhalb `{To Do, In Progress, Blocked, In Review, Done}` wird in der Ableitung als schwächste Stufe (`To Do`) behandelt (nie fälschlich als `Done`). *(V6)*
+- **AC6** — Eine nicht-Idee-Story mit einem Status außerhalb `{To Do, In Progress, Blocked, In Review, Done, Verworfen}` wird in der Ableitung als schwächste Stufe (`To Do`) behandelt (nie fälschlich als `Done`). *(V6)*
 - **AC7** — Das Pseudo-Feature `_orphaned` (verwaiste Stories/Ideen) ist von der Ableitung ausgenommen und behält `status: null` (die Regel gilt nur für echte Features). *(Edge-Case)*
+- **AC8** — `Verworfen`-Stories zählen in der Ableitung als terminal (`Done`-äquivalent, höchster Fortschrittsindex), werden NICHT wie `Idee` ausgeschlossen, und ändern die Blocked-Priorität nicht. Folge: nur `Verworfen` → `Done`; `Done`+`Verworfen` → `Done`; `To Do`+`Verworfen` → `To Do`; `Blocked`+`Verworfen` → `Blocked`. Der abgeleitete Feature-Status ist nie `Verworfen` (kollabiert auf `Done`). *(V7)*
 
 ## Verträge
 
 - **Keine API-/Schema-Änderung.** Die bestehende Board-Liste (`/api/board/projects…`) liefert weiterhin je Feature `status` + `progress`; neu ist nur, dass `status` ein **abgeleiteter** Wert ist. Der Wertebereich von `feature.status` ist `{Backlog, To Do, In Progress, Blocked, In Review, Done}` (`null` nur für `_orphaned`).
 - **Ort:** neue reine Ableitungs-Funktion (z.B. `computeFeatureStatus(stories)`) in `src/BoardAggregator.js`, angewandt in `_readBoard` unmittelbar bei/nach der bestehenden `computeRollup`-Berechnung; überschreibt das aus dem YAML gelesene `feature.status` bedingungslos.
-- **Ordnungs-Skala (bindend, für Tests):** `Blocked` (Sonderfall, höchste Priorität) — sonst `To Do`(0) < `In Progress`(1) < `In Review`(2) < `Done`(3); Ergebnis = Status mit **kleinstem** Index unter den verbleibenden Stories.
+- **Ordnungs-Skala (bindend, für Tests):** `Blocked` (Sonderfall, höchste Priorität) — sonst `To Do`(0) < `In Progress`(1) < `In Review`(2) < `Done`(3); **`Verworfen` wird auf denselben terminalen Index wie `Done`(3) abgebildet** (Done-äquivalent, V7). Ergebnis = Status mit **kleinstem** Index unter den verbleibenden Stories; kollabiert der kleinste Index auf die terminale Stufe (3), ist das Ergebnis-Label **`Done`** (nie `Verworfen`).
 - **Frontend:** unverändert. `client/src/BoardView.jsx` rendert `feature.status` bereits via `StatusBadge` und nutzt ihn in `isFeatureDone` (Collapse-Default); beides profitiert automatisch vom korrigierten Wert, ohne Codeänderung.
 
 ## Edge-Cases & Fehlerverhalten
@@ -73,6 +87,9 @@ Trägt eine (nicht-Idee-)Story einen Status **außerhalb** der bekannten Skala `
 - **Feature nur mit Idee-Stories** → `Backlog` (Ideen ausgeschlossen, dann keine verbleibende → V4).
 - **Idee + Done gemischt** → Idee ausgeschlossen; bleibt nur `Done` → `Done`.
 - **Blocked + Done + Idee** → Idee raus, Blocked gewinnt → `Blocked`.
+- **Nur Verworfen** (kein Done) → alle terminal → `Done` (V7/AC8).
+- **Done + Verworfen** → beide terminal → `Done` (V7/AC8).
+- **To Do + Verworfen** → weakest-wins, nicht-terminale Stufe gewinnt → `To Do` (V7/AC8).
 - **`_orphaned`-Pseudo-Feature** → `status: null`, nicht abgeleitet (AC7).
 - **Story mit fehlendem/`null`-Status** → wie unbekannter Status behandelt (schwächste Stufe `To Do`, V6/AC6) — kein Crash.
 - **Archivierte Features** ([[board-feature-archive]]) → die Ableitung ist orthogonal zum `archived`-Flag/Filter; im „Archiv anzeigen"-Modus leitet ein voll-erledigtes Feature korrekt `Done` ab. Der `archived`-Filter bleibt unverändert.
@@ -95,6 +112,6 @@ Trägt eine (nicht-Idee-)Story einen Status **außerhalb** der bekannten Skala `
 ## Abhängigkeiten
 
 - **dev-gui:** `src/BoardAggregator.js` (`computeFeatureStatus()` + Anwendung in `_readBoard`).
-- **Specs:** [[studis-kanban-board-ux]] (Board-Übersicht/Aggregator-Basis), [[board-feature-collapse]] (nutzt `feature.status` im Collapse-Default), [[board-feature-archive]] (orthogonaler `archived`-Filter), [[ideen-inbox]] (Story-Status `Idee`).
+- **Specs:** [[studis-kanban-board-ux]] (Board-Übersicht/Aggregator-Basis), [[board-feature-collapse]] (nutzt `feature.status` im Collapse-Default), [[board-feature-archive]] (orthogonaler `archived`-Filter), [[ideen-inbox]] (Story-Status `Idee`), [[board-status-verworfen]] (führt den terminalen Status `Verworfen` ein; V7/AC8 dieser Spec setzt die Ableitungs-Semantik dafür um).
 </content>
 </invoke>

@@ -1,0 +1,57 @@
+id: S-243
+parent: F-049
+title: 'BoardAggregator: Feature-Status-Ableitung um „Verworfen" (terminal, Done-aequivalent)
+  erweitern'
+status: To Do
+priority: P2
+spec: docs/specs/feature-status-derivation.md
+implements:
+- AC8
+depends: null
+labels:
+- backend
+size_est: S
+dispo_est: '2.0'
+dispo_act: null
+dispo_forecast: null
+estimate_note: 'Heuristik: n_ac=1 (AC8), n_comp=1 (src/BoardAggregator.js — computeFeatureStatus/FEATURE_STATUS_ORDER),
+  label_bump 0 (backend) -> score 2 -> S. baseline.json js|balanced|S ep=2.0 (n=3)
+  -> dispo_est 2.0, confidence medium. Kleine, rein lesende Aenderung an einer bestehenden
+  Pure-Function (S-238 bereits Done) + Unit-Tests.'
+confidence: medium
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-07-02T05:05:10Z'
+updated_at: '2026-07-02T05:05:10Z'
+done_at: null
+notes: 'Spec: docs/specs/feature-status-derivation.md — implements AC8 (V7).
+
+
+  Erweitert die BEREITS ausgelieferte Ableitung (S-238 Done, src/BoardAggregator.js:
+  computeFeatureStatus + FEATURE_STATUS_ORDER). Reine read-only Backend-Aenderung,
+  KEIN Endpunkt, KEINE Schreibvorgaenge, KEINE Frontend-Aenderung (BoardView rendert
+  feature.status via StatusBadge/isFeatureDone und profitiert automatisch).
+
+
+  Regel (V7/AC8): ''Verworfen'' zaehlt terminal wie ''Done'' (hoechster Fortschrittsindex),
+  wird NICHT wie Idee ausgeschlossen, aendert Blocked-Prioritaet (V2) nicht. Der abgeleitete
+  Feature-Status ist NIE ''Verworfen'' — kollabiert die terminale Stufe, ist das Label
+  ''Done''.
+
+
+  Umsetzung: ''Verworfen'' im Ordnungs-Vertrag auf denselben Index wie ''Done''(3)
+  abbilden (z.B. Verworfen -> Done normalisieren vor der Index-Berechnung, oder terminale
+  Menge {Done, Verworfen}). Ergebnis-Label der terminalen Stufe bleibt ''Done''. V6-Fallback
+  (unbekannter Status -> To Do) bleibt fuer ECHTE unbekannte Werte; Verworfen ist
+  ab jetzt bekannt.
+
+
+  Folgerungen (Tests): nur Verworfen -> Done; Done+Verworfen -> Done; To Do+Verworfen
+  -> To Do; Idee+Verworfen -> Done (Idee raus); Blocked+Verworfen -> Blocked. Bestehende
+  AC1-AC7-Tests bleiben gruen.
+
+
+  Nicht-Ziele: Progress-Rollup ''X/Y done'' (unveraendert); persistiertes status-Feld;
+  Frontend/Badge.'
+tok: null

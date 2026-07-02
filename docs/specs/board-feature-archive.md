@@ -2,7 +2,7 @@
 id: board-feature-archive
 title: Board — erledigte Features archivieren (aus Standardansicht entfernen, Dateien erhalten)
 status: draft
-version: 1
+version: 2
 ---
 
 # Spec: Board — erledigte Features archivieren  (`board-feature-archive`)
@@ -28,12 +28,14 @@ Das Studis-Kanban-Board wächst mit der Zeit unübersichtlich, weil abgeschlosse
 ## Verhalten
 
 ### V1 — Archivierbarkeits-Kriterium („vollständig erledigt")
+> **Ab v2 (V7/AC9) auf „terminal" erweitert:** wo hier „jede Story `Done`" steht, gilt effektiv „jede Story **terminal** (`Done` **oder** `Verworfen`)". Die folgende Formulierung bleibt als historische Baseline (AC1) erhalten; die aktuelle Regel ist V7/AC9.
+
 Ein Feature ist **archivierbar** genau dann, wenn **alle** folgenden Bedingungen gelten:
 - es hat **mindestens eine** zugeordnete Story, **und**
-- **jede** seiner Stories hat `status: Done`, **und**
+- **jede** seiner Stories hat `status: Done` (→ ab V7/AC9: `Done` **oder** `Verworfen`), **und**
 - es ist **nicht bereits** archiviert (`archived` nicht `true`).
 
-Nicht archivierbar sind daher: Features mit **mindestens einer nicht-Done-Story** (bleiben unangetastet — Owner-Vorgabe), Features **ohne** Stories, sowie das Pseudo-Feature `_orphaned` (verwaiste Stories/Ideen). Das Kriterium stützt sich auf die tatsächlichen Story-Status, **nicht** allein auf das (potenziell veraltete) `feature.status`-Feld.
+Nicht archivierbar sind daher: Features mit **mindestens einer nicht-terminalen Story** (bleiben unangetastet — Owner-Vorgabe), Features **ohne** Stories, sowie das Pseudo-Feature `_orphaned` (verwaiste Stories/Ideen). Das Kriterium stützt sich auf die tatsächlichen Story-Status, **nicht** allein auf das (potenziell veraltete) `feature.status`-Feld.
 
 ### V2 — Archiv-Schreibpfad (in-place, atomar)
 Eine neue Methode der bestehenden Schreib-Boundary (`BoardWriter`) archiviert **alle aktuell archivierbaren Features** eines Projekts. Für jedes solche Feature:
@@ -62,6 +64,16 @@ In der Board-Kopfleiste (dort, wo „Alle einklappen"/Filter sitzen) erscheint e
 ### V6 — Archiv-Ansicht (Frontend-Schalter)
 Ein Schalter **„Archiv anzeigen"** im Board (Default: aus) blendet archivierte Features **read-only** wieder ein (nutzt `includeArchived`, V3). Archivierte Features/Stories sind dabei visuell klar als „Archiviert" gekennzeichnet und tragen keine Schreib-/Aktions-Affordances. Ist der Schalter aus, gilt die Standardansicht (V3).
 
+### V7 — Archivierbarkeit auf terminale Stories erweitert (Done ODER Verworfen) — fortgeschrieben v2
+Das Archivierbarkeits-Kriterium (V1) rechnet den terminalen Story-Status **`Verworfen`** (Won't-Do, siehe [[board-status-verworfen]]) **wie `Done`**: Ein Feature ist archivierbar, wenn es **≥1 Story** hat, **jede** seiner Stories **terminal** ist (`status` ∈ `{Done, Verworfen}`) und es **nicht bereits** archiviert ist. Eine `Verworfen`-Story blockiert das Archivieren **nicht** mehr (bisher galt sie als „nicht Done" → Feature blieb sichtbar).
+
+Diese Erweiterung gilt an **allen** drei Stellen, die das Kriterium auswerten, damit sie konsistent bleiben:
+- der **Backend-Schreibpfad** (`BoardWriter.archiveDoneFeatures` — Auswahl der zu archivierenden Features),
+- die **Frontend-Archivierbarkeitsprüfung** (Aktivierung des Buttons + Bestätigungs-Zählung „N Features / M Stories"),
+- (implizit) die **Zähl-/Anzeigelogik**, die daraus folgt.
+
+Beim Archivieren bleibt der Story-`status` **unverändert** — `Done` bleibt `Done`, `Verworfen` bleibt `Verworfen`; ergänzt werden nur `archived: true` + `archived_at` (V2, byte-genau, atomar, idempotent). `estimator`/`retro` lesen `Verworfen`-Stories weiterhin am Ort (sie filtern auf `status: Done`; eine archivierte `Verworfen`-Story taucht dort schlicht nicht als Done-Referenz auf — kein Datenverlust).
+
 ## Acceptance-Kriterien
 
 - **AC1** — `BoardWriter` bestimmt die archivierbaren Features eines Projekts exakt nach V1: ≥1 Story UND alle Stories `Done` UND nicht bereits archiviert; Features mit ≥1 nicht-Done-Story, Features ohne Stories und verwaiste Stories werden NICHT archiviert. *(V1)*
@@ -72,6 +84,7 @@ Ein Schalter **„Archiv anzeigen"** im Board (Default: aus) blendet archivierte
 - **AC6** — Ein „Archiv anzeigen"-Schalter (Default aus) blendet archivierte Features read-only + klar markiert ein (via `includeArchived`); ausgeschaltet gilt die Standardansicht. *(V6)*
 - **AC7** — A11y (WCAG 2.1 AA): Button + Schalter sind echte `button`/Toggle-Elemente mit sprechendem `aria-label`; die Bestätigungsabfrage ist ein fokussiertes Dialog-Muster (`role="dialog"`, Fokusfalle/Esc-Abbruch, sichtbarer Fokusring); Bedeutung nicht allein über Farbe. *(V5, V6)*
 - **AC8** — Security/Robustheit: kein neuer Schreibpfad außer `BoardWriter` (Pfad-/Slug-Sicherheit per BOARD_ROOTS-Realpath-Schranke, Muster `setBlocked`/`resolveIdea`); kein `dangerouslySetInnerHTML`; keine Secrets in Ausgabe/Log; ungültige Eingaben werden sauber abgewiesen (kein Crash). *(alle)*
+- **AC9** — Das Archivierbarkeits-Kriterium (Backend `BoardWriter.archiveDoneFeatures` UND Frontend-Buttonaktivierung/Bestätigungs-Zählung) behandelt `Verworfen` wie `Done` als terminal: ein Feature mit ≥1 Story, dessen Stories ALLE `Done` oder `Verworfen` sind und das nicht bereits archiviert ist, IST archivierbar; ein Feature mit ≥1 nicht-terminaler Story (To Do/In Progress/Blocked/In Review/Idee) ist es NICHT. Beim Archivieren bleibt der Story-`status` unverändert (`Verworfen` bleibt `Verworfen`), nur `archived`/`archived_at` werden ergänzt; Idempotenz und byte-genaues/atomares Schreiben (AC2) gelten unverändert. *(V7)*
 
 ## Verträge
 
@@ -87,6 +100,9 @@ Ein Schalter **„Archiv anzeigen"** im Board (Default: aus) blendet archivierte
 
 - **Kein archivierbares Feature** → Button deaktiviert; Endpoint (falls dennoch aufgerufen) antwortet `200 { 0, 0 }`, kein Fehler.
 - **Feature Done, aber mit einer Blocked/In-Progress-Story** → nicht archivierbar, bleibt vollständig sichtbar (Owner-Vorgabe).
+- **Feature mit Done + Verworfen (alle terminal)** → archivierbar (V7/AC9); Story-Status bleiben unverändert.
+- **Feature mit nur Verworfen-Stories** → archivierbar (alle terminal, V7/AC9); nach Archivierung aus der Standardansicht entfernt.
+- **Feature mit ≥1 Verworfen + ≥1 To Do/In Progress** → nicht archivierbar (nicht alle terminal).
 - **Feature ohne Stories** → nicht archivierbar (nichts „vollständig erledigt").
 - **Bereits archiviert** → übersprungen (idempotent), zählt nicht erneut.
 - **Paralleler Taktgeber/Drain hält ProjectJobLock** → `409`, keine Teil-Archivierung; Client zeigt nicht-blockierenden Hinweis.
@@ -110,4 +126,4 @@ Ein Schalter **„Archiv anzeigen"** im Board (Default: aus) blendet archivierte
 ## Abhängigkeiten
 
 - **dev-gui:** `src/BoardWriter.js` (neue `archiveDoneFeatures()`-Methode + Feature-Datei-Finder), `src/BoardAggregator.js` (`includeArchived`-Filter), `src/boardRouter.js` (`POST .../archive-done`), `server.js` (Wiring), `client/src/BoardView.jsx` (Button + Bestätigungsabfrage + Archiv-Schalter).
-- **Specs:** [[studis-kanban-board-ux]] (Board-Übersicht), [[board-feature-collapse]] (Kopfleiste), [[ideen-inbox]] (`BoardWriter`-Schreib-Boundary/Audit-Muster).
+- **Specs:** [[studis-kanban-board-ux]] (Board-Übersicht), [[board-feature-collapse]] (Kopfleiste), [[ideen-inbox]] (`BoardWriter`-Schreib-Boundary/Audit-Muster), [[board-status-verworfen]] (führt den terminalen Status `Verworfen` ein; V7/AC9 dieser Spec rechnet ihn im Archiv-Kriterium wie `Done`).
