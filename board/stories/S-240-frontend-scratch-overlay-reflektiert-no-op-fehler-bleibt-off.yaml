@@ -2,7 +2,7 @@ id: S-240
 parent: F-047
 title: 'Frontend: scratch-Overlay reflektiert No-Op/Fehler (bleibt offen + Retry,
   kein Erfolgs-Close) + Reopen-Hydration + nicht-blockierender Board-Hinweis'
-status: To Do
+status: Done
 priority: P1
 spec: docs/specs/story-specify-finalize-visibility.md
 implements:
@@ -26,8 +26,8 @@ branch: null
 pr: null
 blocked_reason: null
 created_at: '2026-07-02T05:07:43Z'
-updated_at: '2026-07-02T05:09:00Z'
-done_at: null
+updated_at: '2026-07-02T10:26:42Z'
+done_at: '2026-07-02T10:26:42Z'
 notes: 'Spec: docs/specs/story-specify-finalize-visibility.md — implements AC5,AC6.
   Priority P1. depends: S-239 (Backend-Endpunkt + No-Op-Status). Frontend-Teil (Befund
   1). AC5 scratch-Modus: schliesst NUR bei echtem done; bei no-op/failed/auth-expired

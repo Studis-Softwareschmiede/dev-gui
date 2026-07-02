@@ -43,6 +43,14 @@
  *          solange ≥1 running-Job (fake timers); running→done → GENAU EIN
  *          Board-Re-Fetch; danach kein Poll (Ruhezustand). Kein Poll ohne aktive Jobs.
  *
+ * Covers (story-specify-finalize-visibility, S-240):
+ *   AC6 — Nicht-blockierender Board-Hinweis (Text + ⚠-Icon, role=status/aria-live)
+ *          bei letztem projekt-keyed Finalize no-op/failed/auth-expired (GET
+ *          …/story-specify/finalize); KEIN Hinweis bei running/done/null;
+ *          quittierbar (✕, verschwindet); Polling nur solange running (fake
+ *          timers), im Ruhezustand kein Poll; degradiert still bei Netzfehler.
+ *          (AC5 Overlay-Verhalten lebt in IdeaSpecifyChatModal + NewStoryChatScratch.test.jsx.)
+ *
  * Covers (story-detail-ansicht):
  *   AC3, AC4, AC5 — Story-Klick, Soll-Ist, Vorab-Badge; fehlende Schätzung; null-Fälle.
  *   AC3 — Story-Klick öffnet Detail-Ansicht; drei Blöcke sichtbar.
@@ -1741,6 +1749,179 @@ describe('idea-specify-background-status (S-230) — AC5: Hydratisieren + Pollin
     } finally {
       jest.useRealTimers();
     }
+  });
+});
+
+// ── story-specify-finalize-visibility (S-240): AC6 Board-Hinweis ──────────────
+
+/**
+ * Fetch-Mock für S-240 AC6: reicht die Board-Endpunkte durch UND bedient den
+ * projekt-keyed GET …/story-specify/finalize (vor dem generischen :slug-Matcher!)
+ * sowie GET …/specify/jobs (leere Idee-Jobs). `getFinalize()` liefert den
+ * aktuellen projekt-keyed Job (mutierbar über Closure), sodass ein Test den
+ * Übergang running→terminal modellieren kann.
+ *
+ * @param {{ fullProjects?: object[], getFinalize?: () => object|null }} opts
+ */
+function makeFinalizeFetch({ fullProjects = [], getFinalize = () => null } = {}) {
+  return jest.fn(async (url) => {
+    // MÜSSEN vor dem /:slug-Matcher stehen (sonst als Slug fehlinterpretiert).
+    if (/^\/api\/board\/projects\/[^/]+\/story-specify\/finalize$/.test(url)) {
+      return { ok: true, status: 200, json: async () => ({ job: getFinalize() }) };
+    }
+    if (/^\/api\/board\/projects\/[^/]+\/specify\/jobs$/.test(url)) {
+      return { ok: true, status: 200, json: async () => ({ jobs: {} }) };
+    }
+    if (url === '/api/board/projects/list') {
+      const list = fullProjects.map((p) => (p.error ? { slug: p.slug, error: p.error } : {
+        slug: p.slug,
+        feature_count: (p.features ?? []).length,
+        story_count: (p.features ?? []).reduce((a, f) => a + (f.stories ?? []).length, 0),
+      }));
+      return { ok: true, status: 200, json: async () => ({ projects: list }) };
+    }
+    if (url === '/api/board/projects') {
+      return { ok: true, status: 200, json: async () => ({ projects: fullProjects }) };
+    }
+    const slugMatch = url.match(/^\/api\/board\/projects\/(.+)$/);
+    if (slugMatch) {
+      const slug = decodeURIComponent(slugMatch[1]);
+      const proj = fullProjects.find((p) => p.slug === slug);
+      if (proj) return { ok: true, status: 200, json: async () => ({ project: proj }) };
+      return { ok: false, status: 404, json: async () => ({ error: 'nicht gefunden' }) };
+    }
+    return { ok: false, status: 404, json: async () => ({}) };
+  });
+}
+
+describe('story-specify-finalize-visibility (S-240) — AC6: Board-Hinweis', () => {
+  it('AC6 — zeigt den nicht-blockierenden Hinweis (Text + ⚠-Icon, role=status/aria-live) bei letztem no-op', async () => {
+    globalThis.fetch = makeFinalizeFetch({
+      fullProjects: [PROJECT_A],
+      getFinalize: () => ({ status: 'no-op', jobId: 'f1' }),
+    });
+    const { container } = renderCockpit('project-alpha');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="board-finalize-hint"]')).toBeTruthy();
+    });
+    const hint = container.querySelector('[data-testid="board-finalize-hint"]');
+    expect(hint.getAttribute('role')).toBe('status');
+    expect(hint.getAttribute('aria-live')).toBe('polite');
+    expect(hint.textContent).toMatch(/Story-Erstellung fehlgeschlagen — erneut versuchen/);
+    // Nicht nur Farbe: ⚠-Icon (aria-hidden) neben dem Text.
+    expect(hint.textContent).toContain('⚠');
+    // Board bleibt nutzbar: die Projekt-Spalten sind weiterhin gerendert.
+    expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
+    // Secret-frei: keine jobId im sichtbaren Text.
+    expect(hint.textContent).not.toMatch(/f1/);
+  });
+
+  it('AC6 — zeigt den Hinweis auch bei failed und auth-expired', async () => {
+    for (const status of ['failed', 'auth-expired']) {
+      globalThis.fetch = makeFinalizeFetch({
+        fullProjects: [PROJECT_A],
+        getFinalize: () => ({ status, jobId: 'f2' }),
+      });
+      const { container, unmount } = renderCockpit('project-alpha');
+      await waitFor(() => {
+        expect(container.querySelector('[data-testid="board-finalize-hint"]')).toBeTruthy();
+      });
+      unmount();
+    }
+  });
+
+  it('AC6 — KEIN Hinweis bei running/done/null (kein Fehlausgang)', async () => {
+    for (const job of [{ status: 'running', jobId: 'f3' }, { status: 'done', jobId: 'f4' }, null]) {
+      globalThis.fetch = makeFinalizeFetch({
+        fullProjects: [PROJECT_A],
+        getFinalize: () => job,
+      });
+      const { container, unmount } = renderCockpit('project-alpha');
+      await waitFor(() => {
+        expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
+      });
+      // Nach Hydration bleibt kein Hinweis (running blendet ihn NICHT ein).
+      await waitFor(() => {
+        const calls = globalThis.fetch.mock.calls.filter(([u]) => /\/story-specify\/finalize$/.test(u));
+        expect(calls.length).toBeGreaterThanOrEqual(1);
+      });
+      expect(container.querySelector('[data-testid="board-finalize-hint"]')).toBeNull();
+      unmount();
+    }
+  });
+
+  it('AC6 — der Hinweis ist quittierbar (✕) und verschwindet nach dem Ausblenden', async () => {
+    globalThis.fetch = makeFinalizeFetch({
+      fullProjects: [PROJECT_A],
+      getFinalize: () => ({ status: 'failed', jobId: 'f5' }),
+    });
+    const { container } = renderCockpit('project-alpha');
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="board-finalize-hint"]')).toBeTruthy();
+    });
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="board-finalize-hint-dismiss"]'));
+    });
+    expect(container.querySelector('[data-testid="board-finalize-hint"]')).toBeNull();
+  });
+
+  it('AC6 — pollt NUR solange der letzte Finalize running ist; im Ruhezustand kein Poll', async () => {
+    jest.useFakeTimers();
+    try {
+      let job = { status: 'running', jobId: 'f6' };
+      const fetchMock = makeFinalizeFetch({
+        fullProjects: [PROJECT_A],
+        getFinalize: () => job,
+      });
+      globalThis.fetch = fetchMock;
+      const { container } = renderCockpit('project-alpha');
+
+      await act(async () => { await jest.advanceTimersByTimeAsync(0); });
+      await act(async () => { await jest.advanceTimersByTimeAsync(0); });
+
+      const countFinalize = () =>
+        fetchMock.mock.calls.filter(([u]) => /\/story-specify\/finalize$/.test(u)).length;
+      const afterHydrate = countFinalize();
+      expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
+
+      // running → ein Poll-Intervall (4000ms) löst einen weiteren Read aus.
+      job = { status: 'no-op', jobId: 'f6' };
+      await act(async () => { await jest.advanceTimersByTimeAsync(4000); });
+      await act(async () => { await jest.advanceTimersByTimeAsync(0); });
+      const afterOnePoll = countFinalize();
+      expect(afterOnePoll).toBeGreaterThan(afterHydrate);
+
+      // Jetzt terminal (no-op) → Hinweis erscheint, Polling stoppt (Ruhezustand).
+      await waitFor(() => {
+        expect(container.querySelector('[data-testid="board-finalize-hint"]')).toBeTruthy();
+      });
+      const settled = countFinalize();
+      await act(async () => { await jest.advanceTimersByTimeAsync(20000); });
+      expect(countFinalize()).toBe(settled); // kein weiterer Poll
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('AC6 — degradiert still bei Netzwerkfehler des Finalize-Reads (kein Hinweis, kein Crash)', async () => {
+    globalThis.fetch = jest.fn(async (url) => {
+      if (/\/story-specify\/finalize$/.test(url)) throw new Error('network');
+      if (/\/specify\/jobs$/.test(url)) return { ok: true, status: 200, json: async () => ({ jobs: {} }) };
+      const slugMatch = url.match(/^\/api\/board\/projects\/(.+)$/);
+      if (url === '/api/board/projects') return { ok: true, status: 200, json: async () => ({ projects: [PROJECT_A] }) };
+      if (slugMatch) {
+        const slug = decodeURIComponent(slugMatch[1]);
+        if (slug === 'project-alpha') return { ok: true, status: 200, json: async () => ({ project: PROJECT_A }) };
+        return { ok: false, status: 404, json: async () => ({}) };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+    const { container } = renderCockpit('project-alpha');
+    await waitFor(() => {
+      expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
+    });
+    expect(container.querySelector('[data-testid="board-finalize-hint"]')).toBeNull();
   });
 });
 

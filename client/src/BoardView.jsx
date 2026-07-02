@@ -105,6 +105,18 @@
  *           running-Job (→ done) → GENAU EIN Board-Re-Fetch über handleSpecified
  *           (reloadToken/handleProjectSelect). Reload-fest (Server-Registry).
  *
+ * story-specify-finalize-visibility (S-240):
+ *   AC6  — Nicht-blockierender Board-Hinweis: trägt der letzte PROJEKT-keyed
+ *           Finalize-Lauf des aktuellen Projekts `no-op`/`failed`/`auth-expired`
+ *           (GET .../story-specify/finalize), zeigt das Board einen nicht-
+ *           blockierenden, secret-freien Hinweis („Story-Erstellung fehlgeschlagen
+ *           — erneut versuchen") mit Text + ⚠-Icon (nicht nur Farbe;
+ *           role=status/aria-live), der die Board-Nutzung nicht blockiert und
+ *           quittierbar ist (✕) bzw. verschwindet, sobald ein neuer Lauf
+ *           running/done erreicht. `fetchFinalizeJob` hydratisiert beim Board-Load
+ *           (reload-fest über die Server-Registry, S-239) und pollt NUR, solange
+ *           der letzte Job `running` ist (kein Dauer-Poll im Ruhezustand).
+ *
  * board-feature-collapse:
  *   AC1  — Jede Feature-Zeile hat einen Auf-/Zu-Schalter (Collapse-Button mit Chevron);
  *           eingeklappt sind Story-Spalten ausgeblendet; ausgeklappt wie bisher sichtbar.
@@ -386,6 +398,17 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
   // wurde"). Der Server registriert den running-Job synchron VOR dem
   // fire-and-forget-Schließen (AC1), sodass der Badge sofort erscheint.
   const [specifyCloseToken, setSpecifyCloseToken] = useState(0);
+
+  // ─── „Neue Story"-Finalize-Status (story-specify-finalize-visibility AC6, S-240) ─
+  // finalizeJob: der PROJEKT-keyed letzte Finalize-Job des aktuellen Projekts
+  // ({ status, jobId, error? } | null), gelesen aus GET .../story-specify/finalize.
+  // Trägt er no-op/failed/auth-expired, zeigt das Board einen nicht-blockierenden
+  // Hinweis. Reload-fest über die Server-Registry (S-239).
+  const [finalizeJob, setFinalizeJob] = useState(null);
+  // jobId des vom Owner quittierten (ausgeblendeten) Hinweises. Ein NEUER Job
+  // (andere jobId) zeigt den Hinweis wieder; ein running/done fällt ohnehin aus
+  // dem Fehler-Set → Hinweis verschwindet automatisch.
+  const [dismissedFinalizeJobId, setDismissedFinalizeJobId] = useState(null);
 
   const handleOpenSpecifyChat = useCallback((slug, story, triggerEl) => {
     specifyTriggerRef.current = triggerEl ?? null;
@@ -771,11 +794,67 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
   }, [hasRunningSpecifyJob, fetchSpecifyJobs]);
 
   // Beim Projektwechsel den Badge-Status + running-Merker zurücksetzen (kein
-  // Nachwirken alter Idee-Jobs auf ein anderes Projekt).
+  // Nachwirken alter Idee-Jobs auf ein anderes Projekt). Ebenso den projekt-keyed
+  // „Neue Story"-Finalize-Status + Dismiss-Merker (AC6, S-240).
   useEffect(() => {
     setSpecifyJobs({});
     prevRunningIdeasRef.current = new Set();
+    setFinalizeJob(null);
+    setDismissedFinalizeJobId(null);
   }, [currentProjectSlug]);
+
+  // ─── „Neue Story"-Finalize-Hinweis: Hydratisieren + Polling (AC6, S-240) ─────
+  // Liest den PROJEKT-keyed letzten Finalize-Job (GET .../story-specify/finalize).
+  // Reload-fest über die Server-Registry (S-239): auch ein no-op/failed aus einer
+  // früheren Session/Tab wird beim Board-Load sichtbar. Degradiert bei Netz-/
+  // Parse-Fehlern still (kein Crash, kein Hinweis).
+  const fetchFinalizeJob = useCallback(async () => {
+    const slug = currentProjectSlug;
+    if (!slug) return;
+    let res;
+    try {
+      res = await fetch(`/api/board/projects/${encodeURIComponent(slug)}/story-specify/finalize`);
+    } catch {
+      return; // Netzwerkfehler → still degradieren
+    }
+    if (!res.ok) return;
+    let data;
+    try { data = await res.json(); } catch { return; }
+    const job = (data && typeof data.job === 'object') ? data.job : null;
+    setFinalizeJob(job);
+  }, [currentProjectSlug]);
+
+  // Der letzte Finalize läuft noch → gepollt werden (AC6). Ist er terminal, wird
+  // nicht mehr gepollt (Ruhezustand).
+  const hasRunningFinalizeJob = finalizeJob?.status === 'running';
+
+  // Hinweis-Status: no-op/failed/auth-expired = retry-würdiger Fehlausgang; alles
+  // andere (running/done/null) zeigt keinen Hinweis. Der Hinweis erscheint nur,
+  // solange der Owner ihn nicht für GENAU diesen Job quittiert hat.
+  const finalizeHintStatus =
+    finalizeJob && ['no-op', 'failed', 'auth-expired'].includes(finalizeJob.status)
+      ? finalizeJob.status
+      : null;
+  const showFinalizeHint =
+    finalizeHintStatus !== null && finalizeJob.jobId !== dismissedFinalizeJobId;
+
+  // Hydratisieren: bei geladenem Projekt (Board-Load / Re-Fetch) den projekt-keyed
+  // Finalize-Status abfragen.
+  useEffect(() => {
+    if (!currentProjectSlug || loadState !== 'ok') return;
+    fetchFinalizeJob();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentProjectSlug, loadState, reloadToken]);
+
+  // Polling: NUR solange der letzte Finalize-Job `running` ist (AC6 — kein
+  // Dauer-Poll im Ruhezustand). Sobald er terminal ist, wird das Intervall
+  // geräumt.
+  useEffect(() => {
+    if (!hasRunningFinalizeJob) return; // Ruhezustand → kein Poll
+    const POLL_MS = 4000;
+    const intervalId = setInterval(() => { fetchFinalizeJob(); }, POLL_MS);
+    return () => clearInterval(intervalId);
+  }, [hasRunningFinalizeJob, fetchFinalizeJob]);
 
   // ─── Archivierbarkeit + Archiv-Schreibpfad (board-feature-archive AC5/V5) ────
   // Zählt die aktuell archivierbaren Features + deren Stories NACH V1 aus den
@@ -925,6 +1004,34 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
           onSpecified={handleSpecified}
           triggerRef={specifyTriggerRef}
         />
+      )}
+
+      {/* story-specify-finalize-visibility AC6 (S-240): nicht-blockierender,
+          secret-freier Board-Hinweis, wenn der letzte projekt-keyed „Neue Story"-
+          Finalize-Lauf no-op/failed/auth-expired trägt. Text + ⚠-Icon (nicht nur
+          Farbe), role=status/aria-live; quittierbar (✕). Blockiert die
+          Board-Nutzung nicht (reines Banner über den Spalten). */}
+      {showFinalizeHint && (
+        <div
+          role="status"
+          aria-live="polite"
+          style={styles.finalizeHint}
+          data-testid="board-finalize-hint"
+        >
+          <span style={styles.finalizeHintIcon} aria-hidden="true">⚠</span>
+          <span style={styles.finalizeHintText}>
+            Story-Erstellung fehlgeschlagen — erneut versuchen.
+          </span>
+          <button
+            type="button"
+            style={styles.finalizeHintDismiss}
+            onClick={() => setDismissedFinalizeJobId(finalizeJob.jobId)}
+            aria-label="Hinweis ausblenden"
+            data-testid="board-finalize-hint-dismiss"
+          >
+            ✕
+          </button>
+        </div>
       )}
 
       {/* ── STANDALONE: Project list (AC6) ─────────────────────────── */}
@@ -2665,6 +2772,44 @@ const styles = {
     borderRadius: 6,
     border: '1px solid #7f1d1d',
     marginBottom: 16,
+  },
+
+  // story-specify-finalize-visibility AC6 (S-240): nicht-blockierender Board-
+  // Hinweis (letzter Finalize no-op/failed/auth-expired). Nicht nur Farbe:
+  // ⚠-Icon + Text. #fca5a5 on #2a1a1a ≈ 6.2:1 — WCAG AA.
+  finalizeHint: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 10,
+    color: '#fca5a5',
+    fontSize: 13,
+    fontWeight: 600,
+    padding: '10px 14px',
+    background: '#2a1a1a',
+    borderRadius: 6,
+    border: '1px solid #7f1d1d',
+    marginBottom: 16,
+    flexShrink: 0,
+  },
+  finalizeHintIcon: {
+    fontSize: 16,
+    lineHeight: 1,
+  },
+  finalizeHintText: {
+    flex: 1,
+  },
+  finalizeHintDismiss: {
+    minWidth: 32,
+    minHeight: 32,
+    padding: '4px 8px',
+    background: 'transparent',
+    color: '#fca5a5',
+    border: '1px solid #7f1d1d',
+    borderRadius: 6,
+    fontSize: 13,
+    fontWeight: 700,
+    cursor: 'pointer',
+    flexShrink: 0,
   },
   hintMsg: {
     color: '#6b7280',

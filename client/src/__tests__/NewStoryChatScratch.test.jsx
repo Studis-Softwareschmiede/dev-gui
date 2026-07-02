@@ -21,6 +21,16 @@
  *          „Story anlegen" ohne readyToSpecify ist deaktiviert; ein Chat-`502`
  *          zeigt einen secret-freien Fehler, Overlay bleibt nutzbar.
  *
+ * Covers (story-specify-finalize-visibility, S-240):
+ *   AC5 — no-op im scratch-Finalize-Poll hält das Overlay OFFEN (kein
+ *          onSpecified/onClose, kein Erfolgs-Banner), zeigt einen inline-Fehler
+ *          + Retry; no-op ohne error-Feld fällt auf eine fixe, secret-freie
+ *          Meldung zurück. Reopen fragt den PROJEKT-keyed Status
+ *          (GET .../story-specify/finalize) ab: running → Story-Erstellungs-
+ *          Banner; no-op/failed → Fehler-Banner (secret-frei, kein job.error);
+ *          null/done → kein Banner; Endpunkt-Fehler → still degradiert.
+ *          (AC6 Board-Hinweis lebt in BoardView + BoardView.test.jsx.)
+ *
  *   Teilweise/nicht hier unit-getestet:
  *          - AC2–AC5 (Backend-Contract: Statuscodes, Validierung, Audit, Lock,
  *            Job-Registry) leben in test/storySpecifyRouter.test.js /
@@ -59,6 +69,7 @@ function makeScratchFetch({
   finalizeStatus = 202,
   finalizeBody = { jobId: 'job-1', status: 'running' },
   statusSequence = [{ status: 'done' }],
+  reopenJob = null, // GET .../story-specify/finalize (projekt-keyed Reopen, S-240)
 } = {}) {
   let statusIdx = 0;
   return jest.fn(async (url, opts) => {
@@ -75,6 +86,10 @@ function makeScratchFetch({
     }
     if (FINALIZE_RE.test(url) && opts?.method === 'POST') {
       return { status: finalizeStatus, json: async () => finalizeBody };
+    }
+    // GET .../story-specify/finalize (projekt-keyed Reopen-Status, S-240 AC5).
+    if (FINALIZE_RE.test(url) && (!opts || opts.method === undefined)) {
+      return { status: 200, json: async () => ({ job: reopenJob }) };
     }
     return { status: 200, json: async () => ({}) };
   });
@@ -287,5 +302,101 @@ describe('scratch — AC7: Fehler-/Randpfade', () => {
       const starts = helpers.fetchFn.mock.calls.filter((c) => START_RE.test(c[0]));
       expect(starts.length).toBeGreaterThanOrEqual(2);
     });
+  });
+});
+
+// ── story-specify-finalize-visibility AC5 (S-240): no-op + Reopen-Hydration ────
+
+const REOPEN_RE = /\/story-specify\/finalize$/; // GET (projekt-keyed) — kein jobId
+
+describe('story-specify-finalize-visibility AC5 — no-op darf NICHT schließen', () => {
+  it('a no-op terminal status keeps the overlay OPEN (no onSpecified/onClose), shows an inline error, retry possible', async () => {
+    const fetchFn = makeScratchFetch({
+      messageBody: { reply: 'Alles klar.', readyToSpecify: true },
+      statusSequence: [{ status: 'running' }, { status: 'no-op', error: 'Der Lauf hat keine Story angelegt — bitte erneut versuchen.' }],
+    });
+    const helpers = await driveReady(fetchFn);
+
+    await act(async () => { fireEvent.click(q('idea-specify-finalize-btn')); });
+
+    // no-op → inline-Fehler, Overlay bleibt OFFEN, KEIN Erfolgs-/Schließ-Pfad.
+    await waitFor(() => expect(q('idea-specify-finalize-error')).toBeTruthy());
+    expect(q('idea-specify-finalize-error').textContent).toMatch(/keine Story angelegt/);
+    expect(helpers.onSpecified).not.toHaveBeenCalled();
+    expect(helpers.onClose).not.toHaveBeenCalled();
+    expect(q('idea-specify-chat-modal')).toBeTruthy();
+    // Kein Erfolgs-Banner (no-op ist KEIN done).
+    expect(q('new-story-finalize-success')).toBeFalsy();
+
+    // Retry: Button wieder enabled → erneuter Finalize-POST.
+    await waitFor(() => expect(q('idea-specify-finalize-btn').disabled).toBe(false));
+    await act(async () => { fireEvent.click(q('idea-specify-finalize-btn')); });
+    await waitFor(() => {
+      const posts = fetchFn.mock.calls.filter((c) => FINALIZE_RE.test(c[0]) && c[1]?.method === 'POST');
+      expect(posts.length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  it('a no-op without an error message falls back to a fixed, secret-free message', async () => {
+    const fetchFn = makeScratchFetch({
+      messageBody: { reply: 'Alles klar.', readyToSpecify: true },
+      statusSequence: [{ status: 'no-op' }],
+    });
+    const helpers = await driveReady(fetchFn);
+    await act(async () => { fireEvent.click(q('idea-specify-finalize-btn')); });
+    await waitFor(() => expect(q('idea-specify-finalize-error')).toBeTruthy());
+    expect(q('idea-specify-finalize-error').textContent).toMatch(/keine Story angelegt/);
+    expect(helpers.onClose).not.toHaveBeenCalled();
+  });
+});
+
+describe('story-specify-finalize-visibility AC5 — Reopen zieht projekt-keyed Status inline nach', () => {
+  it('reopen with a running job shows the running banner AND fetches the projekt-keyed endpoint', async () => {
+    const fetchFn = makeScratchFetch({ reopenJob: { status: 'running', jobId: 'job-9' } });
+    renderScratch({ fetchFn });
+    await waitFor(() => expect(q('idea-specify-reopen-running')).toBeTruthy());
+    expect(q('idea-specify-reopen-running').textContent).toMatch(/Story-Erstellungs-Lauf läuft noch/);
+    // Der PROJEKT-keyed Endpunkt (ohne jobId) wurde abgefragt.
+    const reopenGets = fetchFn.mock.calls.filter(
+      (c) => REOPEN_RE.test(c[0]) && (!c[1] || c[1].method === undefined),
+    );
+    expect(reopenGets.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('reopen with a no-op job shows the failed banner (retry-würdiger Fehlausgang)', async () => {
+    const fetchFn = makeScratchFetch({ reopenJob: { status: 'no-op', jobId: 'job-8' } });
+    renderScratch({ fetchFn });
+    await waitFor(() => expect(q('idea-specify-reopen-failed')).toBeTruthy());
+    expect(q('idea-specify-reopen-failed').textContent).toMatch(/Story-Erstellung ist fehlgeschlagen/);
+    // Kein job.error gerendert (secret-frei — fixer Banner-Text).
+    expect(q('idea-specify-reopen-failed').textContent).not.toMatch(/job-8/);
+  });
+
+  it('reopen with a failed job shows the failed banner', async () => {
+    const fetchFn = makeScratchFetch({ reopenJob: { status: 'failed', jobId: 'job-7' } });
+    renderScratch({ fetchFn });
+    await waitFor(() => expect(q('idea-specify-reopen-failed')).toBeTruthy());
+  });
+
+  it('reopen with null/done shows NO banner (frischer Einstieg)', async () => {
+    const fetchFn = makeScratchFetch({ reopenJob: null });
+    renderScratch({ fetchFn });
+    // Compose-Feld ist da; kein Reopen-Banner.
+    await waitFor(() => expect(q('new-story-compose')).toBeTruthy());
+    expect(q('idea-specify-reopen-running')).toBeFalsy();
+    expect(q('idea-specify-reopen-failed')).toBeFalsy();
+  });
+
+  it('degrades silently when the reopen status endpoint errors (no banner, compose usable)', async () => {
+    const fetchFn = jest.fn(async (url, opts) => {
+      if (REOPEN_RE.test(url) && (!opts || opts.method === undefined)) {
+        throw new Error('network');
+      }
+      return { status: 200, json: async () => ({}) };
+    });
+    renderScratch({ fetchFn });
+    await waitFor(() => expect(q('new-story-compose')).toBeTruthy());
+    expect(q('idea-specify-reopen-running')).toBeFalsy();
+    expect(q('idea-specify-reopen-failed')).toBeFalsy();
   });
 });

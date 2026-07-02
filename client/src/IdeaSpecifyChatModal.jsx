@@ -140,6 +140,18 @@
  *          Banner). Status-Fetch degradiert bei Netz-/Parse-Fehlern still.
  *          Secret-/pfad-frei (Banner-Texte fix, kein job.error gerendert).
  *
+ * Covers (story-specify-finalize-visibility, S-240) — nur im `mode="scratch"`:
+ *   AC5  — Overlay reflektiert den Ausgang: der scratch-Finalize-Poll behandelt
+ *          `no-op` (durchgelaufen, aber KEINE Story angelegt) wie einen retry-
+ *          würdigen Fehlausgang — Overlay bleibt OFFEN, inline-Fehler, Retry;
+ *          `no-op` löst NICHT den Erfolgs-/Schließ-Pfad aus (kein onSpecified,
+ *          kein Close). Nur echtes `done` schließt. Beim Wieder-Öffnen zieht das
+ *          Overlay den PROJEKT-keyed Status (GET .../story-specify/finalize)
+ *          inline nach: running → „Ein Story-Erstellungs-Lauf läuft noch…" +
+ *          „Story anlegen" deaktiviert; no-op/failed/auth-expired → Fehler-Banner
+ *          + Retry; null/done → frischer Einstieg. Degradiert bei Netz-/Parse-
+ *          Fehlern still. Secret-/pfad-frei (fixe Banner-Texte).
+ *
  * Nicht-Ziele (spiegelt Spec):
  *   Kein Tab-Wechsel-Code, keine BoardView-Verdrahtung (S-218).
  *   Keine Anzeige von `draftText` (nicht von der Spec verlangt — nur Server-
@@ -233,7 +245,13 @@ export function IdeaSpecifyChatModal({
   //   null/done      → normaler Chat-Einstieg (kein Banner). Degradiert still.
   const [reopenJob, setReopenJob] = useState(null); // { status, jobId, error? } | null
   const reopenRunning = reopenJob?.status === 'running';
-  const reopenFailed  = reopenJob?.status === 'failed' || reopenJob?.status === 'auth-expired';
+  // story-specify-finalize-visibility AC5: im scratch-Modus zählt `no-op` (Lauf
+  // durchgelaufen, aber keine Story angelegt) als retry-würdiger Fehlausgang und
+  // triggert das Fehler-Banner beim Wieder-Öffnen (analog failed/auth-expired).
+  const reopenFailed  =
+    reopenJob?.status === 'failed' ||
+    reopenJob?.status === 'auth-expired' ||
+    reopenJob?.status === 'no-op';
 
   const dialogRef = useRef(null);
 
@@ -394,6 +412,37 @@ export function IdeaSpecifyChatModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectSlug, storyId, isScratch]);
 
+  // AC5 (story-specify-finalize-visibility, scratch): beim (Wieder-)Öffnen der
+  // „Neue Story" den letzten PROJEKT-keyed Finalize-Job abfragen
+  // (GET .../story-specify/finalize) und inline nachziehen:
+  //   running                → Status-Banner + „Story anlegen" deaktiviert (kein 2. Lauf)
+  //   no-op/failed/auth-…     → Fehler-Banner + Retry (normaler compose→chat→finalize-Pfad)
+  //   null/done              → frischer Einstieg (kein Banner)
+  // Reload-fest über die server-seitige Registry (S-239). Degradiert bei Netz-/
+  // Parse-Fehlern still (kein Banner, normaler Einstieg). Gegenstück zum idea-
+  // Modus-Reopen oben — dort idea-keyed, hier projekt-keyed (kein story.id).
+  useEffect(() => {
+    if (!isScratch) return;
+    let cancelled = false;
+    async function fetchReopenStatus() {
+      let res;
+      try {
+        res = await fetch_(
+          `/api/board/projects/${encodeURIComponent(projectSlug)}/story-specify/finalize`,
+        );
+      } catch {
+        return; // still degradieren — kein Banner
+      }
+      if (cancelled || res.status !== 200) return;
+      let data;
+      try { data = await res.json(); } catch { return; }
+      if (!cancelled) setReopenJob(data.job ?? null);
+    }
+    fetchReopenStatus();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectSlug, isScratch]);
+
   async function handleSend() {
     const text = inputText.trim();
     if (!text || sending || !sessionId) return;
@@ -520,13 +569,23 @@ export function IdeaSpecifyChatModal({
 
       if (data.status === 'done') {
         setFinalizeState('done');
-      } else if (data.status === 'failed' || data.status === 'auth-expired') {
+      } else if (
+        data.status === 'no-op' ||
+        data.status === 'failed' ||
+        data.status === 'auth-expired'
+      ) {
+        // story-specify-finalize-visibility AC5: `no-op` (durchgelaufen, aber
+        // KEINE Story angelegt) löst NICHT den Erfolgs-/Schließ-Pfad aus, sondern
+        // wird wie ein Fehlausgang behandelt — Overlay bleibt offen, inline-Fehler,
+        // Retry. failed/auth-expired wie bisher (AC7 new-story-chat).
         setFinalizeState('error');
         setFinalizeError(
           data.error ??
             (data.status === 'auth-expired'
               ? 'Anmeldung abgelaufen — bitte erneut versuchen.'
-              : 'Story-Anlage fehlgeschlagen — bitte erneut versuchen.'),
+              : data.status === 'no-op'
+                ? 'Der Lauf hat keine Story angelegt — bitte erneut versuchen.'
+                : 'Story-Anlage fehlgeschlagen — bitte erneut versuchen.'),
         );
       }
       // 'running' → weiterpollen (Intervall)
@@ -636,7 +695,9 @@ export function IdeaSpecifyChatModal({
             style={styles.reopenRunning}
             data-testid="idea-specify-reopen-running"
           >
-            Ein Spezifizieren-Lauf läuft noch…
+            {isScratch
+              ? 'Ein Story-Erstellungs-Lauf läuft noch…'
+              : 'Ein Spezifizieren-Lauf läuft noch…'}
           </div>
         )}
         {reopenFailed && (
@@ -646,7 +707,9 @@ export function IdeaSpecifyChatModal({
             style={styles.reopenFailed}
             data-testid="idea-specify-reopen-failed"
           >
-            Der letzte Spezifizieren-Lauf ist fehlgeschlagen — du kannst es erneut versuchen.
+            {isScratch
+              ? 'Die letzte Story-Erstellung ist fehlgeschlagen — du kannst es erneut versuchen.'
+              : 'Der letzte Spezifizieren-Lauf ist fehlgeschlagen — du kannst es erneut versuchen.'}
           </div>
         )}
 
