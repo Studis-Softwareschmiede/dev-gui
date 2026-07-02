@@ -2,7 +2,7 @@ id: S-242
 parent: F-049
 title: 'Frontend: Story-Status „Verworfen" als 7. Status darstellen (Kanban-Spalte
   rechts neben Done + gedaempfter Badge + Filter-Checkbox default an)'
-status: To Do
+status: In Progress
 priority: P1
 spec: docs/specs/board-status-verworfen.md
 implements:
@@ -29,11 +29,11 @@ estimate_note: 'Heuristik: n_ac=5 (AC1-AC5), n_comp~2-3 (client/src/BoardView.js
   ep=5.0 (n=5) als Proxy -> confidence medium. Reine Frontend-Anzeige, kein Backend-Delta,
   kein Schreibpfad.'
 confidence: medium
-branch: null
+branch: feat/S-242-verworfen-status
 pr: null
 blocked_reason: null
 created_at: '2026-07-02T05:05:10Z'
-updated_at: '2026-07-02T05:05:10Z'
+updated_at: '2026-07-02T18:31:06Z'
 done_at: null
 notes: 'Spec: docs/specs/board-status-verworfen.md — implements AC1–AC5.
 
@@ -43,8 +43,8 @@ notes: 'Spec: docs/specs/board-status-verworfen.md — implements AC1–AC5.
   (parallele Story) — dev-gui spiegelt den Status-String nur.
 
 
-  Kern: ''Verworfen'' als 7. Element ans zentrale STATUS_LIFECYCLE-Array anfuegen (nach
-  ''Done''). Dieses eine Array speist Spalten (gridTemplateColumns: repeat(STATUS_LIFECYCLE.length,
+  Kern: ''Verworfen'' als 7. Element ans zentrale STATUS_LIFECYCLE-Array anfuegen
+  (nach ''Done''). Dieses eine Array speist Spalten (gridTemplateColumns: repeat(STATUS_LIFECYCLE.length,
   …) -> 7 Spalten, Verworfen rechts neben Done), die Spalten-Gruppierung (byStatus)
   und die Filter-Checkbox-Liste (statusOptions) — eine Aenderung, drei Wirkungen (AC1/AC3/AC4).
 

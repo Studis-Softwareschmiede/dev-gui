@@ -25,6 +25,12 @@
  *          To Do — kein neuer Code, nur Verifikation der bestehenden Regel gegen
  *          den neuen kanonischen Status). Zusätzlich End-to-End via BoardAggregator
  *          (_readBoard/scan): kein Crash, korrekte ready/ready_reason-Felder.
+ *
+ * Covers (board-status-verworfen):
+ *   AC5 — Regressions-Invariante: eine Verworfen-Story ist nie ready
+ *          (computeStoryReadyStatus liefert ready=false/ready_reason=null,
+ *          Rule (1), status ≠ To Do) — kein neuer Code, nur Regressions-Beleg
+ *          gegen den neuen kanonischen Statuswert.
  */
 
 import { describe, it, expect } from '@jest/globals';
@@ -164,6 +170,17 @@ describe('computeStoryReadyStatus — rule (1): status must be To Do', () => {
       blocked_reason: null,
     });
     const fsDeps = makeFsDeps({ throwOnRead: true });
+    const result = await computeStoryReadyStatus(story, fsDeps, REPO_PATH, makeStoriesMap());
+    expect(result.ready).toBe(false);
+    expect(result.ready_reason).toBeNull();
+  });
+
+  it('board-status-verworfen AC5: returns ready=false, ready_reason=null for Verworfen stories (rule 1 — status ≠ To Do)', async () => {
+    // Regressions-Invariante (S-242): eine Verworfen-Story wird wie Blocked/
+    // Idee/Done von Rule (1) abgefangen — kein neuer Code, nur Beleg dass die
+    // Invariante für den neuen Statuswert weiterhin gilt.
+    const story = readyStory({ status: 'Verworfen' });
+    const fsDeps = makeFsDeps({ specContent: VALID_SPEC });
     const result = await computeStoryReadyStatus(story, fsDeps, REPO_PATH, makeStoriesMap());
     expect(result.ready).toBe(false);
     expect(result.ready_reason).toBeNull();

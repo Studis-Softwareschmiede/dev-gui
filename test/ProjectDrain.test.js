@@ -86,6 +86,14 @@
  *          reale headless-Verdrahtung (dedizierte Instanz + eigener Lock, AC1/AC2)
  *          in server.js.
  *
+ * Covers (board-status-verworfen):
+ *   AC5 — Regressions-Invariante: eine Story mit status 'Verworfen' ist nie
+ *          "lebendig" (computeAliveStoryIds) und nie ein Drain-Ziel
+ *          (computeDrainState) — wird wie Blocked/Idee übersprungen. Kein
+ *          Code-Delta in src/ProjectDrain.js für diese Story; der Test belegt
+ *          nur die bereits bestehende `status !== 'To Do' && status !== 'In
+ *          Progress'`-Invariante bleibt für den neuen Statuswert gültig.
+ *
  * Strategy:
  *   - Pure Helper-Funktionen (flattenProjectStories, isStaleInProgress,
  *     computeAliveStoryIds, couldBecomeReadyViaDepends, computeDrainState,
@@ -354,6 +362,19 @@ describe('couldBecomeReadyViaDepends (AC2 Konvergenz-Regel)', () => {
     expect(couldBecomeReadyViaDepends(story, byId(dep, story))).toBe(false);
   });
 
+  // board-status-verworfen AC5 (S-242): 'Verworfen' ist wie Blocked/Idee ein
+  // dauerhafter Sackgassen-Status — kein neuer Code, nur Regressions-Beleg.
+  it('is false when the unmet depend is Verworfen (dead end, board-status-verworfen AC5)', () => {
+    const dep = makeStory({ id: 'S-1', status: 'Verworfen' });
+    const story = makeStory({
+      id: 'S-2',
+      status: 'To Do',
+      ready_reason: 'abhängige Story nicht Done: S-1',
+      depends: ['S-1'],
+    });
+    expect(couldBecomeReadyViaDepends(story, byId(dep, story))).toBe(false);
+  });
+
   it('is false when the unmet depend does not exist (dead end)', () => {
     const story = makeStory({
       id: 'S-2',
@@ -570,6 +591,18 @@ describe('computeDrainState (AC1/AC2/AC3)', () => {
     expect(targets).toEqual([]);
     expect(couldBecomeReady).toBe(false);
     expect(snapshot.size).toBe(0);
+  });
+
+  // board-status-verworfen AC5 (S-242): Regressions-Invariante — eine
+  // 'Verworfen'-Story ist nie ein Drain-Ziel, genau wie Blocked/Idee/Done.
+  it('AC5 (board-status-verworfen): excludes a Verworfen story from targets, same as Blocked/Idee/Done', () => {
+    const verworfen = makeStory({ id: 'S-8', status: 'Verworfen' });
+    const readyTodo = makeStory({ id: 'S-1', status: 'To Do', ready: true });
+    const project = makeProject('p', '/p', [verworfen, readyTodo]);
+
+    const { targets } = computeDrainState(project, NOW_MS, 4);
+
+    expect(targets.map((s) => s.id)).toEqual(['S-1']);
   });
 });
 

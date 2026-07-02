@@ -132,6 +132,26 @@
  *          Bedeutung „Archiviert" per Text, nicht allein über Farbe.
  *          (Opazität/Fokusring in Quelle — jsdom hat keine Layout-Engine.)
  *
+ * Covers (board-status-verworfen, S-242):
+ *   AC1 — „Verworfen" rendert als 7. (letzte) Kanban-Spalte rechts neben „Done"
+ *          (DOM-Reihenfolge Idee → … → Done → Verworfen); die Spalte ist auch
+ *          bei 0 Verworfen-Stories im Feature vorhanden (Grid folgt
+ *          STATUS_LIFECYCLE.length = 7).
+ *   AC2 — `StatusBadge` für „Verworfen" trägt einen eigenen, gedämpft-
+ *          neutralen Grauton (background/color), der sich vom grünen
+ *          „Done"-Ton unterscheidet; Bedeutung steht als sichtbarer Text
+ *          „Verworfen" im Badge (nicht nur Farbe).
+ *   AC3 — „Verworfen" ist die 7. Filter-Checkbox, beim Öffnen des Popovers
+ *          vorausgewählt (Default alle 7 an); Button-Zähler „Status (7/7) ▾"
+ *          bzw. „(n/7)" nach Deselektion; Deselektieren blendet die
+ *          Verworfen-Karten aus, erneutes Selektieren zeigt sie wieder — ohne
+ *          Status-spezifische Sonderlogik (rein über STATUS_LIFECYCLE).
+ *   AC4 — Eine Story mit status:'Verworfen' landet in der Verworfen-Spalte,
+ *          NICHT im To-Do-Fallback-Bucket; der Fallback bleibt für echte
+ *          unbekannte Status unverändert.
+ *   AC5 — Regressions-Invariante (kein Frontend-Code-Delta, kein Test in
+ *          dieser Datei): siehe test/ProjectDrain.test.js + test/boardReadyStatus.test.js.
+ *
  * NOTE (jsdom-Limitation): jsdom hat keine Layout-Engine — Style-Property-Asserts beweisen
  * kein Scroll-/Layout-Verhalten; getestet werden Verhalten, Struktur, Rollen und aria.
  *
@@ -273,6 +293,37 @@ const PROJECT_IDEE = {
   project_slug: 'project-idee',
   schema_version: 1,
   features: [FEATURE_IDEE],
+};
+
+// board-status-verworfen AC4 fixtures — isolated feature/project (analog zu
+// PROJECT_IDEE), damit bestehende rollup/count-Assertions auf
+// FEATURE_WITH_PROGRESS/FEATURE_NO_PROGRESS unverändert bleiben.
+const STORY_VERWORFEN = {
+  id: 'S-007',
+  parent: 'F-011',
+  title: 'Verworfene Idee: Dunkles Overlay-Theme',
+  status: 'Verworfen',
+  priority: null,
+  labels: [],
+  spec: null,
+  ready: false,
+  ready_reason: null,
+};
+
+const FEATURE_VERWORFEN = {
+  id: 'F-011',
+  title: 'Verworfen-Feature',
+  status: null,
+  priority: null,
+  stories: [STORY_VERWORFEN, STORY_TODO],
+};
+
+const PROJECT_VERWORFEN = {
+  slug: 'project-verworfen',
+  repo_path: '/home/user/Git/verworfen',
+  project_slug: 'project-verworfen',
+  schema_version: 1,
+  features: [FEATURE_VERWORFEN],
 };
 
 const FEATURE_WITH_PROGRESS = {
@@ -863,7 +914,7 @@ describe('studis-kanban-board-ux — AC5: Backend endpoint URLs', () => {
 // ── AC2 (studis-kanban-board-ux) — Status-Filter Default alle gewählt ─────────
 
 describe('studis-kanban-board-ux — AC2: Status-Filter Default alle ausgewählt', () => {
-  it('all 6 status checkboxes are checked by default (cockpit; ideen-inbox AC1 „Idee" hinzu)', async () => {
+  it('all 7 status checkboxes are checked by default (cockpit; ideen-inbox AC1 „Idee" + board-status-verworfen AC3 „Verworfen" hinzu)', async () => {
     globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
     const { container } = renderCockpit('project-alpha');
 
@@ -878,7 +929,7 @@ describe('studis-kanban-board-ux — AC2: Status-Filter Default alle ausgewählt
 
     await waitFor(() => {
       const checkboxes = container.querySelectorAll('#board-filter-status-group input[type="checkbox"]');
-      expect(checkboxes).toHaveLength(6);
+      expect(checkboxes).toHaveLength(7);
       for (const cb of checkboxes) {
         expect(cb.checked).toBe(true);
       }
@@ -922,7 +973,7 @@ describe('studis-kanban-board-ux — AC2: Status-Filter Default alle ausgewählt
     });
   });
 
-  it('status button label shows "Status (6/6) ▾" by default (cockpit; ideen-inbox AC1 6 statuses)', async () => {
+  it('status button label shows "Status (7/7) ▾" by default (cockpit; ideen-inbox AC1 + board-status-verworfen AC3, 7 statuses)', async () => {
     globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
     const { container } = renderCockpit('project-alpha');
 
@@ -932,10 +983,10 @@ describe('studis-kanban-board-ux — AC2: Status-Filter Default alle ausgewählt
 
     const btn = container.querySelector('[data-testid="status-filter-btn"]');
     expect(btn).toBeTruthy();
-    expect(btn.textContent).toMatch(/Status \(6\/6\)/);
+    expect(btn.textContent).toMatch(/Status \(7\/7\)/);
   });
 
-  it('status button label shows "Status (n/6) ▾" after deselect', async () => {
+  it('status button label shows "Status (n/7) ▾" after deselect', async () => {
     globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
     const { container } = renderCockpit('project-alpha');
 
@@ -953,7 +1004,7 @@ describe('studis-kanban-board-ux — AC2: Status-Filter Default alle ausgewählt
     });
 
     const btn = container.querySelector('[data-testid="status-filter-btn"]');
-    expect(btn.textContent).toMatch(/Status \(5\/6\)/);
+    expect(btn.textContent).toMatch(/Status \(6\/7\)/);
   });
 
   it('ideen-inbox AC1: Status-Filter führt „Idee"-Checkbox, Default angehakt', async () => {
@@ -971,6 +1022,61 @@ describe('studis-kanban-board-ux — AC2: Status-Filter Default alle ausgewählt
     const ideeCheckbox = container.querySelector('#board-filter-status-idee');
     expect(ideeCheckbox).toBeTruthy();
     expect(ideeCheckbox.checked).toBe(true);
+  });
+
+  it('board-status-verworfen AC3: Status-Filter führt „Verworfen"-Checkbox als 7. Checkbox, Default angehakt', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="status-filter-btn"]'));
+    });
+
+    const checkboxes = Array.from(
+      container.querySelectorAll('#board-filter-status-group input[type="checkbox"]')
+    );
+    expect(checkboxes[checkboxes.length - 1].id).toBe('board-filter-status-verworfen');
+
+    const verworfenCheckbox = container.querySelector('#board-filter-status-verworfen');
+    expect(verworfenCheckbox).toBeTruthy();
+    expect(verworfenCheckbox.checked).toBe(true);
+  });
+
+  it('board-status-verworfen AC3: Deselektieren von „Verworfen" blendet die Verworfen-Spalte/-Karten aus, Selektieren zeigt sie wieder', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_VERWORFEN] });
+    const { container } = renderCockpit('project-verworfen');
+
+    await waitFor(() => {
+      expect(container.querySelector(`[data-story="${STORY_VERWORFEN.id}"]`)).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('[data-testid="status-filter-btn"]'));
+    });
+    await act(async () => {
+      const verworfenCheckbox = container.querySelector('#board-filter-status-verworfen');
+      expect(verworfenCheckbox).toBeTruthy();
+      fireEvent.click(verworfenCheckbox);
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector(`[data-story="${STORY_VERWORFEN.id}"]`)).toBeNull();
+      expect(container.querySelector(`[data-story="${STORY_TODO.id}"]`)).toBeTruthy(); // andere Status weiter sichtbar
+    });
+
+    // Wieder selektieren zeigt die Verworfen-Story erneut.
+    await act(async () => {
+      const verworfenCheckbox = container.querySelector('#board-filter-status-verworfen');
+      fireEvent.click(verworfenCheckbox);
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector(`[data-story="${STORY_VERWORFEN.id}"]`)).toBeTruthy();
+    });
   });
 });
 
@@ -990,8 +1096,8 @@ describe('studis-kanban-board-ux — AC3: Alle Status deselektiert → Hinweis',
       fireEvent.click(container.querySelector('[data-testid="status-filter-btn"]'));
     });
 
-    // Uncheck all 5
-    const statuses = ['idee', 'to-do', 'in-progress', 'blocked', 'in-review', 'done'];
+    // Uncheck all 7
+    const statuses = ['idee', 'to-do', 'in-progress', 'blocked', 'in-review', 'done', 'verworfen'];
     for (const s of statuses) {
       await act(async () => {
         const cb = container.querySelector(`#board-filter-status-${s}`);
@@ -1124,12 +1230,12 @@ describe('studis-kanban-board-ux — AC7: „Alle/Keine"-Toggle', () => {
 
     await waitFor(() => {
       const checkboxes = container.querySelectorAll('#board-filter-status-group input[type="checkbox"]');
-      expect(checkboxes).toHaveLength(6);
+      expect(checkboxes).toHaveLength(7);
       for (const cb of checkboxes) {
         expect(cb.checked).toBe(true);
       }
     });
-    expect(container.querySelector('[data-testid="status-filter-btn"]').textContent).toMatch(/Status \(6\/6\)/);
+    expect(container.querySelector('[data-testid="status-filter-btn"]').textContent).toMatch(/Status \(7\/7\)/);
   });
 });
 
@@ -1166,7 +1272,7 @@ describe('studis-kanban-board-ux — AC4: Status-Filter als Popover', () => {
     expect(container.querySelector('[data-testid="status-popover"]')).toBeTruthy();
 
     const checkboxes = container.querySelectorAll('#board-filter-status-group input[type="checkbox"]');
-    expect(checkboxes).toHaveLength(6);
+    expect(checkboxes).toHaveLength(7);
   });
 
   it('second click closes popover (aria-expanded=false)', async () => {
@@ -1331,7 +1437,7 @@ describe('dev-gui-board-aggregator — AC4: Mount loads project in cockpit', () 
     });
   });
 
-  it('renders all six status columns for a feature (AC4 status columns, cockpit; ideen-inbox AC1)', async () => {
+  it('renders all seven status columns for a feature (AC4 status columns, cockpit; ideen-inbox AC1; board-status-verworfen AC1)', async () => {
     globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
     const { container } = renderCockpit('project-alpha');
 
@@ -1343,10 +1449,13 @@ describe('dev-gui-board-aggregator — AC4: Mount loads project in cockpit', () 
       expect(feature.querySelector('[data-status="Blocked"]')).toBeTruthy();
       expect(feature.querySelector('[data-status="In Review"]')).toBeTruthy();
       expect(feature.querySelector('[data-status="Done"]')).toBeTruthy();
+      // board-status-verworfen AC1: 7. Spalte rendert auch ohne eine einzige
+      // Verworfen-Story im Feature (leere Spalte, kein Crash).
+      expect(feature.querySelector('[data-status="Verworfen"]')).toBeTruthy();
     });
   });
 
-  it('ideen-inbox AC1: „Idee"-Spalte rendert als erste Spalte, links von „To Do"', async () => {
+  it('ideen-inbox AC1 + board-status-verworfen AC1: „Idee"-Spalte rendert als erste, „Verworfen" als letzte (7.) Spalte rechts von „Done"', async () => {
     globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
     const { container } = renderCockpit('project-alpha');
 
@@ -1357,7 +1466,7 @@ describe('dev-gui-board-aggregator — AC4: Mount loads project in cockpit', () 
       expect(columnsList).toBeTruthy();
       const columns = Array.from(columnsList.querySelectorAll('[data-status]'));
       expect(columns.map((c) => c.getAttribute('data-status'))).toEqual([
-        'Idee', 'To Do', 'In Progress', 'Blocked', 'In Review', 'Done',
+        'Idee', 'To Do', 'In Progress', 'Blocked', 'In Review', 'Done', 'Verworfen',
       ]);
     });
   });
@@ -1373,6 +1482,21 @@ describe('dev-gui-board-aggregator — AC4: Mount loads project in cockpit', () 
 
       const toDoCol = container.querySelector('[data-status="To Do"]');
       expect(toDoCol.querySelector(`[data-story="${STORY_IDEE.id}"]`)).toBeNull();
+      expect(toDoCol.querySelector(`[data-story="${STORY_TODO.id}"]`)).toBeTruthy();
+    });
+  });
+
+  it('board-status-verworfen AC4: eine Story mit status:Verworfen wird in die „Verworfen"-Spalte einsortiert (nicht in den „To Do"-Fallback)', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_VERWORFEN] });
+    const { container } = renderCockpit('project-verworfen');
+
+    await waitFor(() => {
+      const verworfenCol = container.querySelector('[data-status="Verworfen"]');
+      expect(verworfenCol).toBeTruthy();
+      expect(verworfenCol.querySelector(`[data-story="${STORY_VERWORFEN.id}"]`)).toBeTruthy();
+
+      const toDoCol = container.querySelector('[data-status="To Do"]');
+      expect(toDoCol.querySelector(`[data-story="${STORY_VERWORFEN.id}"]`)).toBeNull();
       expect(toDoCol.querySelector(`[data-story="${STORY_TODO.id}"]`)).toBeTruthy();
     });
   });
@@ -2278,6 +2402,32 @@ describe('dev-gui-board-aggregator — AC4/A11y: Status badges have text labels'
       const section = container.querySelector('[data-project="project-alpha"]');
       expect(section.getAttribute('aria-label')).toMatch(/projekt/i);
     });
+  });
+
+  it('board-status-verworfen AC2: Verworfen-Badge zeigt Text „Verworfen" mit einem vom Done-Grünton abgesetzten Hintergrund', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container: doneContainer } = renderCockpit('project-alpha');
+    let doneBadge;
+    await waitFor(() => {
+      doneBadge = doneContainer.querySelector('[data-status="Done"] [aria-label="Status: Done"]');
+      expect(doneBadge).toBeTruthy();
+    });
+
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_VERWORFEN] });
+    const { container: verworfenContainer } = renderCockpit('project-verworfen');
+    let verworfenBadge;
+    await waitFor(() => {
+      verworfenBadge = verworfenContainer.querySelector(
+        '[data-status="Verworfen"] [aria-label="Status: Verworfen"]'
+      );
+      expect(verworfenBadge).toBeTruthy();
+    });
+
+    // Bedeutung über Text, nicht nur Farbe (WCAG 2.1 AA):
+    expect(verworfenBadge.textContent.trim()).toBe('Verworfen');
+    // gedämpft-neutraler Ton, klar vom grünen Done-Ton abgesetzt:
+    expect(verworfenBadge.style.background).not.toBe(doneBadge.style.background);
+    expect(verworfenBadge.style.color).not.toBe(doneBadge.style.color);
   });
 
   it('story cards have aria-label with story title', async () => {

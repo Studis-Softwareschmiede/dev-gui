@@ -14,7 +14,8 @@
  * studis-kanban-board-ux:
  *   AC1  — Umbenennung: View-Titel + aria-label = „Studis-Kanban-Board". Route-id bleibt `board`.
  *   AC2  — Status-Filter-Default: alle Status vorausgewählt (alles sichtbar);
- *           Deselektieren blendet aus. (Seit ideen-inbox AC1: 6 Status inkl. „Idee".)
+ *           Deselektieren blendet aus. (Seit board-status-verworfen AC3: 7 Status
+ *           inkl. „Idee" und „Verworfen".)
  *   AC3  — Alle Status deselektiert → keine Stories + role=status „Kein Status gewählt".
  *   AC4  — Status-Filter als Popover: Button „Status (n/N) ▾", Klick-Toggle,
  *           schließt bei Außenklick + Esc; aria-expanded/-controls.
@@ -146,8 +147,29 @@
  *           lokal in localStorage (`boardview.showArchived`); defektes
  *           localStorage → stiller Default (aus), kein Crash.
  *
- * Story-Status-Lebenszyklus (board-subsystem §9.3, erweitert um ideen-inbox AC1):
- *   Idee | To Do | In Progress | Blocked | In Review | Done
+ * board-status-verworfen (S-242):
+ *   AC1  — „Verworfen" ist das 7. (letzte) Element von STATUS_LIFECYCLE, rendert
+ *           als 7. Kanban-Spalte rechts neben „Done"; Spalte immer gerendert
+ *           (auch bei 0 Stories in ihr), Grid folgt STATUS_LIFECYCLE.length.
+ *   AC2  — STATUS_BADGE_STYLES['Verworfen'] trägt einen eigenen, gedämpft-
+ *           neutralen Grauton, klar vom grünen „Done"-Ton abgesetzt; Bedeutung
+ *           via sichtbaren Text „Verworfen" (nicht nur Farbe), Kontrast AA.
+ *   AC3  — „Verworfen" ist 7. Filter-Checkbox, beim Öffnen vorausgewählt
+ *           (Default alle an, wie alle STATUS_LIFECYCLE-Werte); n/N-Zähler
+ *           zählt bis 7; „Alle/Keine"-Toggle bezieht „Verworfen" automatisch
+ *           ein — keine Status-spezifische Sonderlogik.
+ *   AC4  — Eine Story mit status „Verworfen" landet in der Verworfen-Spalte
+ *           (byStatus['Verworfen']), NICHT im To-Do-Fallback-Bucket; der
+ *           Fallback bleibt für echte unbekannte Status erhalten.
+ *   AC5  — Regressions-Invariante (kein Code-Delta in src/ erwartet): dev-gui
+ *           hat keinen Verworfen-Schreibpfad; ProjectDrain (nur To Do/In
+ *           Progress lebendig) + Ready-Berechnung (status === 'To Do') greifen
+ *           Verworfen-Stories nicht auf — Test lebt in test/ProjectDrain.test.js
+ *           + test/boardReadyStatus.test.js, nicht in dieser Datei.
+ *
+ * Story-Status-Lebenszyklus (board-subsystem §9.3, erweitert um ideen-inbox AC1
+ * + board-status-verworfen AC1):
+ *   Idee | To Do | In Progress | Blocked | In Review | Done | Verworfen
  *
  * A11y (WCAG 2.1 AA):
  *   - <main> mit aria-label „Studis-Kanban-Board".
@@ -181,7 +203,11 @@ import { IdeaSpecifyChatModal }   from './IdeaSpecifyChatModal.jsx';
  * vor dem eigentlichen Drain-Modell; Reihenfolge bestimmt sowohl Spalten-Rendering
  * (STATUS_LIFECYCLE.map in FeatureRow) als auch die Filter-Checkbox-Reihenfolge.
  */
-const STATUS_LIFECYCLE = ['Idee', 'To Do', 'In Progress', 'Blocked', 'In Review', 'Done'];
+// board-status-verworfen AC1/AC3/AC4 (S-242): „Verworfen" ist das 7. (letzte)
+// Element — rechts neben „Done" als eigene Spalte + Filter-Checkbox; speist
+// automatisch Spalten (gridTemplateColumns), Spalten-Gruppierung (byStatus)
+// und Filter-Checkbox-Liste (statusOptions) — eine Änderung, drei Wirkungen.
+const STATUS_LIFECYCLE = ['Idee', 'To Do', 'In Progress', 'Blocked', 'In Review', 'Done', 'Verworfen'];
 
 /**
  * "Done" story-statuses for rollup calculation (AC5).
@@ -1269,7 +1295,8 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
  *   Closes on outside click and Esc. Button carries aria-expanded/aria-controls.
  *
  * AC2 (studis-kanban-board-ux): default = all selected (passed in from parent);
- *   N = statusOptions.length (6 incl. „Idee", ideen-inbox AC1).
+ *   N = statusOptions.length (7 incl. „Idee" [ideen-inbox AC1] + „Verworfen"
+ *   [board-status-verworfen AC3]).
  *
  * AC4 (board-feature-collapse): "Alle einklappen" / "Alle ausklappen" Schalter.
  *
@@ -2732,6 +2759,10 @@ const STATUS_BADGE_STYLES = {
   'Blocked':     { background: '#2a1a1a', color: '#f87171', borderColor: '#7f1d1d' },
   'In Review':   { background: '#2a1a2a', color: '#d8b4fe', borderColor: '#581c87' },
   'Done':        { background: '#1a2a1a', color: '#86efac', borderColor: '#14532d' },
+  // board-status-verworfen AC2 (S-242): gedämpft-neutraler Grauton, klar vom
+  // grünen „Done"-Ton abgesetzt; Bedeutung trägt der sichtbare Text „Verworfen".
+  // Contrast: #d1d5db on #262626 ≈ 10.3:1 — WCAG AA.
+  'Verworfen':   { background: '#262626', color: '#d1d5db', borderColor: '#3f3f46' },
   _default:      { background: '#2a2a2a', color: '#9ca3af', borderColor: '#4b5563' },
 };
 
@@ -3320,7 +3351,8 @@ const styles = {
 
   // ── Status columns (AC4 — Kanban-style)
   // gridTemplateColumns folgt STATUS_LIFECYCLE.length dynamisch (ideen-inbox AC1
-  // fügt „Idee" hinzu — 6 statt 5 Spalten; kein hartcodiertes repeat(5,...) mehr).
+  // fügt „Idee" hinzu, board-status-verworfen AC1 fügt „Verworfen" hinzu — 7
+  // Spalten; kein hartcodiertes repeat(N,...) mehr).
   statusColumns: {
     display: 'grid',
     gridTemplateColumns: `repeat(${STATUS_LIFECYCLE.length}, minmax(0, 1fr))`,
