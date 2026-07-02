@@ -17,10 +17,11 @@ export const order = 21;
  *   sessionRegistry: import('../PtySessionRegistry.js').PtySessionRegistry,
  *   manualDrainLock: import('../ProjectJobLock.js').ProjectJobLock,
  *   costModeModelCheck: import('../CostModeModelCheck.js').CostModeModelCheck,
+ *   drainReportStore: import('../DrainReportStore.js').DrainReportStore,
  * }} deps
  * @returns {import('express').Router}
  */
-export function create({ projectDrain, commandService, sessionRegistry, manualDrainLock, costModeModelCheck }) {
+export function create({ projectDrain, commandService, sessionRegistry, manualDrainLock, costModeModelCheck, drainReportStore }) {
   // headless-manual-drain AC2: die isProjectBusy-Prüfung MUSS gegen dieselbe
   // ProjectJobLock-Instanz laufen, die die dedizierte manuelle ProjectDrain-
   // Instanz als Session-Lock hält (via server.js injiziert) — sonst sieht der
@@ -30,8 +31,12 @@ export function create({ projectDrain, commandService, sessionRegistry, manualDr
   // Instanz, in server.js verdrahtet) wird zusätzlich injiziert — der Router
   // stößt bei der Cost-Mode-Übergabe die Dispatch-Frische-Prüfung an (nicht-
   // blockierend) und reicht bei Drift die checkId ans Frontend durch.
+  //
+  // drain-completion-report AC5: `drainReportStore` (geteilte Instanz mit dem
+  // Nacht-Drain, in server.js verdrahtet) — der Router schreibt bei Drain-
+  // Abschluss best-effort GENAU EINEN Bericht (`trigger:'manual'`).
   return projectDrainRouter(
-    { projectDrain, commandService, sessionRegistry, costModeModelCheck },
+    { projectDrain, commandService, sessionRegistry, costModeModelCheck, drainReportStore },
     { lock: manualDrainLock },
   );
 }

@@ -10,6 +10,7 @@
  *   POST /api/command                             → inject slash-command into PTY session
  *   POST /api/command/cancel                      → send Ctrl-C, cancel running command
  *   POST /api/projects/:slug/drain                 → { drainId } | 400 (costMode) | 409 (busy) — manueller „Board abarbeiten"-Knopf: HEADLESS via dedizierter ProjectDrain-Instanz + Cost-Mode (headless-manual-drain AC1/AC2/AC3, ADR-017)
+ *   GET  /api/drain-reports[?project=<slug>]       → { reports: [...] } — Drain-Abschlussberichte, absteigend nach finishedAt (drain-completion-report AC4)
  *   GET/PUT /api/settings/ticker                   → Nachtwächter-Settings (taktgeber-nachtwaechter S-194 AC15/AC16)
  *   GET  /api/settings/ticker/status               → { enabled, window, withinWindow, activeDrains } — Statusanzeige (taktgeber-nachtwaechter S-197 AC17)
  *   GET/PUT/DELETE /api/settings/credentials*     → Credential-Verwaltung (settings-credentials)
@@ -138,6 +139,7 @@ import { ProjectDrain } from './src/ProjectDrain.js';
 import { BoardWriter } from './src/BoardWriter.js';
 import { TokenLimitWatcher } from './src/TokenLimitWatcher.js';
 import { NightWatchScheduler } from './src/NightWatchScheduler.js';
+import { DrainReportStore } from './src/DrainReportStore.js';
 import { HeadlessFlowRunner } from './src/HeadlessFlowRunner.js';
 import { HeadlessFlowRunnerAdapter } from './src/FlowRunner.js';
 import { ProjectJobLock } from './src/ProjectJobLock.js';
@@ -389,6 +391,13 @@ const costModeModelCheck = new CostModeModelCheck({
   flowRunner: new HeadlessFlowRunner(),
   auditStore,
 });
+// ── DrainReportStore (drain-completion-report AC3/AC5/AC6) ───────────────────
+// Persistente, größenbegrenzte Abschlussbericht-Ablage (letzte 30 je Projekt,
+// ${CRED_STORE_DIR}/drain-reports.json, atomarer Schreibzugriff). EINE geteilte
+// Instanz für BEIDE Auslöser: Nacht-Drain (NightWatchScheduler, trigger:'night')
+// UND manueller Drain (projectDrainRouter via deps, trigger:'manual') — sowie
+// read-only für GET /api/drain-reports (drainReports.js Router).
+const drainReportStore = new DrainReportStore();
 const nightWatchScheduler = new NightWatchScheduler({
   readSettings: readTickerSettings,
   boardAggregator,
@@ -398,6 +407,7 @@ const nightWatchScheduler = new NightWatchScheduler({
   auditStore,
   claudeAuthHealthService, // S-213 AC9: Auth-Vorabprüfung vor jedem Nacht-Tick
   costModeModelCheck, // cost-mode-model-check AC4/AC5: Dispatch-Frische-Prüfung vor jedem Nacht-Drain-Start
+  drainReportStore, // drain-completion-report AC6: je Nacht-Drain genau ein Bericht (trigger:'night')
 });
 // Immer gestartet — tick() selbst prüft `enabled` (AC16: enabled=false → idle,
 // analog NotificationWatcher.start(), das ebenfalls unbedingt läuft).
@@ -567,6 +577,10 @@ const deps = {
   // hält — sonst sieht der Router-Busy-Read den laufenden Drain nicht (AC2).
   projectDrain,
   manualDrainLock,
+  // drain-completion-report AC4/AC5: geteilte DrainReportStore-Instanz —
+  // read-only für GET /api/drain-reports (drainReports.js) UND Schreibpfad für
+  // den manuellen Drain (projectDrain.js Router, trigger:'manual').
+  drainReportStore,
   sessionRegistry: ptyRegistry,
   // S-199 (ideen-inbox AC3/AC7/AC8): BoardWriter-Create-Pfad für den
   // Quick-Capture-Endpunkt (boardRouter POST .../ideas). Instanz existiert

@@ -67,6 +67,18 @@
  *         Drain-Start NIE (drainProject wird trotzdem aufgerufen). Kein
  *         injizierter `costModeModelCheck` → Scheduler läuft unverändert (No-op).
  *
+ * Covers (drain-completion-report, S-254):
+ *   AC6 — je abgeschlossenem Nacht-Drain wird GENAU EIN Bericht (`trigger:'night'`)
+ *         in die geteilte DrainReportStore-Instanz geschrieben: der Slug (kein
+ *         Pfad), Start-/Endzeit (injizierte Uhr), reason/flowRuns sowie die
+ *         completed/blocked-Stories aus dem Drain-Ergebnis. Ein rejecteter Drain
+ *         crasht den Scheduler NICHT und schreibt einen secret-freien
+ *         `reason:'drain-failed'`-Bericht (kein Roh-Fehlertext). Ein werfender
+ *         Store (`record` rejected/throws) crasht den Scheduler ebenfalls nicht
+ *         (best-effort). Kein injizierter Store → Scheduler läuft unverändert
+ *         (No-op). Der DrainReportStore-Baustein selbst ist zusätzlich unit-
+ *         getestet in test/DrainReportStore.test.js.
+ *
  * Strategy:
  *   - Pure Helper (`parseHHMM`, `isWithinWindow`, `computeWindowEndMs`,
  *     `clampMaxParallel`, `selectCandidateProjects`) direkt mit
@@ -168,6 +180,7 @@ function makeScheduler(overrides = {}) {
     auditStore,
     claudeAuthHealthService: overrides.claudeAuthHealthService,
     costModeModelCheck: overrides.costModeModelCheck,
+    drainReportStore: overrides.drainReportStore,
     now: () => nowMs,
     sleepFn: overrides.sleepFn ?? (() => Promise.resolve()),
   });
@@ -843,5 +856,117 @@ describe('NightWatchScheduler.getStatus() (S-197 AC17)', () => {
     projectDrain.resolve('/workspace/proj-a');
     await flush();
     expect(scheduler.getStatus().activeDrainProjectPaths).toEqual(['/workspace/proj-b']);
+  });
+});
+
+// ── Nacht-Abschlussbericht (drain-completion-report S-254 AC6) ──────────────────
+
+describe('NightWatchScheduler — Abschlussbericht je Nacht-Drain (drain-completion-report AC6)', () => {
+  function makeReportStore() {
+    const records = [];
+    return {
+      records,
+      record: jest.fn(async (r) => {
+        records.push(r);
+        return { ...r, reportId: 'rep-' + records.length };
+      }),
+    };
+  }
+
+  it('schreibt bei Abschluss GENAU EINEN Bericht (trigger:night) mit Slug + completed/blocked', async () => {
+    const drainReportStore = makeReportStore();
+    const projectDrain = makeControllableProjectDrain();
+    const { scheduler } = makeScheduler({
+      projectDrain,
+      drainReportStore,
+      settings: makeSettings({ maxParallel: 1, projects: ['proj-a'] }),
+    });
+
+    await scheduler.tick();
+    // Noch kein Bericht, solange der Drain läuft.
+    expect(drainReportStore.record).not.toHaveBeenCalled();
+
+    projectDrain.resolve('/workspace/proj-a', {
+      stopped: true,
+      reason: 'no-drain-target',
+      flowRuns: 3,
+      escalated: ['S-9'],
+      completed: [{ id: 'S-1', title: 'Story eins' }],
+      blocked: [{ id: 'S-9', title: 'Story neun' }],
+    });
+    await flush();
+
+    expect(drainReportStore.record).toHaveBeenCalledTimes(1);
+    const report = drainReportStore.records[0];
+    expect(report.project).toBe('proj-a');
+    expect(report.trigger).toBe('night');
+    expect(report.reason).toBe('no-drain-target');
+    expect(report.flowRuns).toBe(3);
+    expect(report.completed).toEqual([{ id: 'S-1', title: 'Story eins' }]);
+    expect(report.blocked).toEqual([{ id: 'S-9', title: 'Story neun' }]);
+    expect(typeof report.startedAt).toBe('string');
+    expect(typeof report.finishedAt).toBe('string');
+    // Security-Floor: kein absoluter Pfad im Bericht.
+    expect(JSON.stringify(report)).not.toContain('/workspace/');
+  });
+
+  it('ein rejecteter Drain crasht den Scheduler NICHT und schreibt einen secret-freien drain-failed-Bericht', async () => {
+    const drainReportStore = makeReportStore();
+    const drainProject = {
+      drainProject: jest.fn(async () => {
+        throw new Error('geheimer /pfad/mit/secret Fehler');
+      }),
+    };
+    const { scheduler } = makeScheduler({
+      projectDrain: drainProject,
+      drainReportStore,
+      settings: makeSettings({ maxParallel: 1, projects: ['proj-a'] }),
+    });
+
+    await expect(scheduler.tick()).resolves.toBeTruthy();
+    await flush();
+
+    expect(drainReportStore.record).toHaveBeenCalledTimes(1);
+    const report = drainReportStore.records[0];
+    expect(report.project).toBe('proj-a');
+    expect(report.trigger).toBe('night');
+    expect(report.reason).toBe('drain-failed');
+    expect(report.completed).toEqual([]);
+    expect(report.blocked).toEqual([]);
+    // Kein Roh-Fehlertext/Secret im Bericht.
+    expect(JSON.stringify(report)).not.toContain('secret');
+    expect(JSON.stringify(report)).not.toContain('/pfad/');
+  });
+
+  it('ein werfender/rejectender Store crasht den Scheduler NICHT (best-effort)', async () => {
+    const drainReportStore = {
+      record: jest.fn(async () => {
+        throw new Error('Store kaputt');
+      }),
+    };
+    const projectDrain = makeControllableProjectDrain();
+    const { scheduler } = makeScheduler({
+      projectDrain,
+      drainReportStore,
+      settings: makeSettings({ maxParallel: 1, projects: ['proj-a'] }),
+    });
+
+    await scheduler.tick();
+    projectDrain.resolve('/workspace/proj-a');
+    // Der Drain-Eintrag verschwindet trotz Store-Fehler sauber (kein unhandled reject).
+    await flush();
+    expect(scheduler.getStatus().activeDrainProjectPaths).toEqual([]);
+  });
+
+  it('ohne injizierten Store läuft der Scheduler unverändert (No-op)', async () => {
+    const projectDrain = makeControllableProjectDrain();
+    const { scheduler } = makeScheduler({
+      projectDrain,
+      settings: makeSettings({ maxParallel: 1, projects: ['proj-a'] }),
+    });
+    await scheduler.tick();
+    projectDrain.resolve('/workspace/proj-a');
+    await flush();
+    expect(scheduler.getStatus().activeDrainProjectPaths).toEqual([]);
   });
 });

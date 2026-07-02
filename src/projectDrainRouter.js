@@ -110,6 +110,11 @@ import { DrainJobRegistry } from './DrainJobRegistry.js';
  *   Cost-Mode-Frische-Prüfung beim Dispatch (cost-mode-model-check AC4/AC5,
  *   Wiederverwendung der S-211-Boundary). Optional — ohne sie läuft der Drain
  *   unverändert (kein `costModeCheckId` in der Antwort).
+ * @param {{ record: (r: object) => Promise<object> }} [deps.drainReportStore]
+ *   Abschlussbericht-Ablage (drain-completion-report AC5, geteilte Instanz mit
+ *   dem Nacht-Drain). Optional — bei Drain-Abschluss wird best-effort GENAU EIN
+ *   Bericht (`trigger:'manual'`) geschrieben; ein Store-Fehler ist non-fatal und
+ *   berührt weder die 202-Antwort noch den `DrainJobRegistry`-Status.
  * @param {object} [options]
  * @param {(path: string) => Promise<{ resolvedPath: string }>} [options.pathValidator]
  *   Injectable path validator (default: validateProjectPath). Inject a stub in tests.
@@ -123,12 +128,42 @@ import { DrainJobRegistry } from './DrainJobRegistry.js';
  * @returns {import('express').Router}
  */
 export function projectDrainRouter(deps = {}, options = {}) {
-  const { projectDrain, commandService, sessionRegistry, costModeModelCheck } = deps;
+  const { projectDrain, commandService, sessionRegistry, costModeModelCheck, drainReportStore } = deps;
   const _pathValidator = options.pathValidator ?? validateProjectPath;
   const _slugResolver = options.slugResolver ?? resolveProjectSlug;
   const _lock = options.lock;
   const _jobRegistry = options.jobRegistry ?? new DrainJobRegistry();
   const router = Router();
+
+  /**
+   * Schreibt best-effort GENAU EINEN manuellen Abschlussbericht in die geteilte
+   * DrainReportStore-Instanz (drain-completion-report AC5). No-op ohne Store.
+   * Ein Store-/Schreibfehler ist non-fatal — er berührt weder die bereits
+   * gesendete 202-Antwort noch den DrainJobRegistry-Status. `slug` ist der
+   * (bereits form-validierte) Projekt-Slug aus der Route, kein Pfad/Secret.
+   *
+   * @param {string} slug
+   * @param {{ reason?: string, flowRuns?: number, completed?: object[], blocked?: object[] }} result
+   * @param {string} startedAt  ISO-8601 Startzeitpunkt des Drains
+   */
+  function _writeManualReport(slug, result, startedAt) {
+    if (!drainReportStore || typeof drainReportStore.record !== 'function') return;
+    try {
+      const p = drainReportStore.record({
+        project: slug,
+        trigger: 'manual',
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        reason: typeof result.reason === 'string' ? result.reason : '',
+        flowRuns: Number.isFinite(result.flowRuns) ? result.flowRuns : 0,
+        completed: Array.isArray(result.completed) ? result.completed : [],
+        blocked: Array.isArray(result.blocked) ? result.blocked : [],
+      });
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    } catch {
+      // best-effort — die Bericht-Erfassung darf den Drain-Abschluss nie stören.
+    }
+  }
 
   /**
    * POST /api/projects/:slug/drain  { costMode?: 'low-cost'|'balanced'|'max-quality'|'frontier' }
@@ -188,6 +223,10 @@ export function projectDrainRouter(deps = {}, options = {}) {
     // `GET …/drain/:drainId` den Job garantiert sieht (kein Registrierungs-Race).
     _jobRegistry.register(drainId);
 
+    // drain-completion-report AC5: Startzeitpunkt des Drains erfassen (für den
+    // Abschlussbericht `startedAt`). Nur ein Zeitstempel — kein Secret/Pfad.
+    const startedAt = new Date().toISOString();
+
     // Fire-and-forget (Modul-Doku): der Drain läuft potenziell lange; die
     // HTTP-Antwort wartet nicht auf sein Ende. ProjectDrain.drainProject()
     // erwirbt/gibt das ProjectJobLock intern selbst frei (try/finally) — kein
@@ -196,13 +235,20 @@ export function projectDrainRouter(deps = {}, options = {}) {
     // Registry-Status (AC4): resolved → `done` (mit secret-freier
     // Ergebnis-Zusammenfassung), rejected → `failed` (generischer Text; die
     // konkrete Fehlermeldung bleibt im Server-Log, nie in der Response).
+    // Zusätzlich (AC5): bei Abschluss wird best-effort GENAU EIN Bericht
+    // (`trigger:'manual'`) in die geteilte DrainReportStore-Instanz geschrieben
+    // — resolved mit den erledigten/blockierten Stories, rejected mit einem
+    // secret-freien `reason:'drain-failed'` (KEIN Roh-Fehlertext). Ein
+    // Store-/Schreibfehler ist non-fatal (best-effort, s. #writeManualReport).
     projectDrain.drainProject(resolvedPath, { identity, args: drainArgs })
       .then((result) => {
         _jobRegistry.markDone(drainId, result ?? {});
+        _writeManualReport(rawSlug, result ?? {}, startedAt);
       })
       .catch((err) => {
         _jobRegistry.markFailed(drainId);
         console.error(`[projectDrain] Drain fehlgeschlagen (drainId=${drainId}):`, err.message);
+        _writeManualReport(rawSlug, { reason: 'drain-failed', flowRuns: 0, completed: [], blocked: [] }, startedAt);
       });
 
     // AC4/AC5 (cost-mode-model-check): Dispatch-Frische-Prüfung NACH dem bereits

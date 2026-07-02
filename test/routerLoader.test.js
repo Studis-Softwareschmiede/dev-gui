@@ -262,7 +262,7 @@ describe('routerLoader — Echte src/routers/ Module (AC1/AC3)', () => {
     }
   });
 
-  it('genau 37 Router-Module in src/routers/ — Smoke-Assertion gegen versehentliche Löschung (AC1)', async () => {
+  it('genau 38 Router-Module in src/routers/ — Smoke-Assertion gegen versehentliche Löschung (AC1)', async () => {
     // Diese Assertion schreibt die aktuelle Router-Anzahl fest.
     // Sinkt die Zahl (Router gelöscht/umbenannt), schlägt der Test sofort an.
     // Steigt die Zahl (neuer Router hinzugefügt), muss dieser Wert bewusst erhöht werden.
@@ -298,8 +298,10 @@ describe('routerLoader — Echte src/routers/ Module (AC1/AC3)', () => {
     //    Neue-Story-Chat „from scratch" AC2/AC3/AC4/AC5/AC8) → 36.
     // obsidianVaultPath.js wurde mit obsidian-vault-config (S-245) hinzugefügt
     //   (GET/PUT/DELETE /api/settings/obsidian-vault-path — Vault-Pfad-Config AC1–AC4/AC6/AC7) → 37.
+    // drainReports.js wurde mit drain-completion-report (S-254) hinzugefügt
+    //   (GET /api/drain-reports — Drain-Abschlussberichte AC4) → 38.
     const entries = await readdir(ROUTERS_DIR);
     const mountedCount = entries.filter((f) => f.endsWith('.js')).length;
-    expect(mountedCount).toBe(37);
+    expect(mountedCount).toBe(38);
   });
 });
