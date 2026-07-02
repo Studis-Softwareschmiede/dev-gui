@@ -1,0 +1,21 @@
+id: F-048
+title: 'Board-Status-Filter: Feature-Badge + Leer-Features konsistent mit gefilterter
+  Story-Menge'
+goal: 'Der Feature-Status-Badge und die Feature-Sichtbarkeit im Board sind konsistent
+  mit der aktuell sichtbaren (gefilterten) Story-Menge: kein ''Blocked''-Etikett mehr,
+  wenn nach dem Filtern keine blockierte Story sichtbar ist; leer gefilterte Features
+  werden ausgeblendet; _orphaned korrekt behandelt.'
+status: Backlog
+priority: P2
+spec: docs/specs/board-filter-feature-status-consistency.md
+definition_of_done: null
+labels:
+- bug
+- frontend
+depends: null
+owner: null
+stories:
+- S-241
+progress: 0/1 done
+created_at: '2026-07-02T05:07:51Z'
+updated_at: '2026-07-02T05:10:14Z'

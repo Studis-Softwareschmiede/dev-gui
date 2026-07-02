@@ -24,7 +24,7 @@ branch: feat/S-214-doktrin-update-claude-p
 pr: null
 blocked_reason: null
 created_at: '2026-07-01T15:25:42Z'
-updated_at: '2026-07-01T15:53:22Z'
+updated_at: '2026-07-02T03:22:17.133Z'
 done_at: '2026-07-01T15:53:22Z'
 notes: 'Spec: docs/specs/idea-specify-chat.md AC12 (Doktrin-Anpassung, Drift-Gate).
   NUR docs/.claude, KEIN Laufzeitcode.
@@ -48,3 +48,5 @@ notes: 'Spec: docs/specs/idea-specify-chat.md AC12 (Doktrin-Anpassung, Drift-Gat
   Sollte ZUERST gemergt werden, damit die claude -p Code-Stories (S-215/S-216) nicht
   am reviewer-Drift-Gate scheitern.'
 tok: '853052'
+archived: true
+archived_at: '2026-07-02T03:22:17.133Z'

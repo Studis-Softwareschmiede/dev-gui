@@ -1,0 +1,22 @@
+id: F-047
+title: 'Neue-Story-Chat: Finalize-Lauf sichtbar machen (No-Op-Erkennung + Status-Rückmeldung)'
+goal: 'Der ''Neue Story''-Chat-Finalize-Lauf darf nicht mehr unsichtbar ergebnislos
+  scheitern: ''durchgelaufen, aber nichts erzeugt'' (No-Op) wird erkannt und dem Owner
+  zuverlässig zurückgemeldet (Overlay-inline + reload-fester, projekt-keyed Board-Hinweis),
+  sodass jeder Fehlausgang bemerkt + wiederholbar ist.'
+status: Backlog
+priority: P1
+spec: docs/specs/story-specify-finalize-visibility.md
+definition_of_done: null
+labels:
+- bug
+- backend
+- frontend
+depends: null
+owner: null
+stories:
+- S-239
+- S-240
+progress: 0/2 done
+created_at: '2026-07-02T05:07:34Z'
+updated_at: '2026-07-02T05:10:12Z'

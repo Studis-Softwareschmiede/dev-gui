@@ -27,7 +27,7 @@ branch: feat/S-229-modal-close-fire-and-forget
 pr: null
 blocked_reason: null
 created_at: '2026-07-01T20:44:01Z'
-updated_at: '2026-07-01T21:47:41Z'
+updated_at: '2026-07-02T03:22:17.133Z'
 done_at: '2026-07-01T21:47:41Z'
 notes: 'Spec: docs/specs/idea-specify-chat.md AC10,AC11,AC14 (v2-Amendment, Owner-Live-Test
   2026-07-01). Behebt zwei UX-Fehler im Idee-Specify-Overlay (Screenshot + Code-Analyse
@@ -69,3 +69,5 @@ notes: 'Spec: docs/specs/idea-specify-chat.md AC10,AC11,AC14 (v2-Amendment, Owne
   bei 202, non-202 haelt offen + Retry, kein State-Update nach Unmount). Kein Backend-Change.
   Kein Regress an Bubble-/A11y-/readyToSpecify-Gating-Verhalten.'
 tok: null
+archived: true
+archived_at: '2026-07-02T03:22:17.133Z'

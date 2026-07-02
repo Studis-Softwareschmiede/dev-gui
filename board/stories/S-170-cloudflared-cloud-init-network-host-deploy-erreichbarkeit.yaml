@@ -38,4 +38,6 @@ estimate_note: 'Kleiner, fokussierter Fix im CloudInitBuilder (src/vps/CloudInit
   === 5. Bestehende CloudInitBuilder-Tests fuer den cloudflared-Block (AC12/AC13)
   entsprechend anpassen. ~S, ~1 EP.'
 created_at: '2026-06-18T00:00:00Z'
-updated_at: '2026-06-18T14:20:00Z'
+updated_at: '2026-07-02T03:22:17.133Z'
+archived: true
+archived_at: '2026-07-02T03:22:17.133Z'

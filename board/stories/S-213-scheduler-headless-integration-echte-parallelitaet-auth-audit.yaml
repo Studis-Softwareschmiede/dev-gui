@@ -31,7 +31,7 @@ branch: feat/S-213-scheduler-headless
 pr: null
 blocked_reason: null
 created_at: '2026-07-01T12:00:00Z'
-updated_at: '2026-07-01T13:07:56Z'
+updated_at: '2026-07-02T03:22:17.133Z'
 done_at: '2026-07-01T13:07:56Z'
 notes: 'Story 3 von 3 des headless-parallel-drain-Epics (Spec: docs/specs/headless-parallel-drain.md).
 
@@ -56,3 +56,5 @@ notes: 'Story 3 von 3 des headless-parallel-drain-Epics (Spec: docs/specs/headle
   Gate: Unit-/Integrationstests mit gemocktem spawn/Runner (AC13). KEIN echter claude
   -p Live-Lauf - reale Naht erst im ersten Nacht-Einsatz (Restrisiko, Spec). Depends:
   S-212 (FlowRunner-Injection), S-209 (Auth-Health), S-195 (Scheduler).'
+archived: true
+archived_at: '2026-07-02T03:22:17.133Z'

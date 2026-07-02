@@ -1,0 +1,26 @@
+id: F-049
+title: Story-Status „Verworfen" (Won't-Do) in der Board-GUI
+goal: 'Neuer terminaler Story-Status „Verworfen" (bewusst-nicht-gemacht, loest die
+  informelle [DEFERRED]-Titel-Konvention ab) wird auf der dev-gui-Seite dargestellt
+  und ueberall erkannt, wo dev-gui den Status hart auflistet: eigene 7. Kanban-Spalte
+  rechts neben Done + gedaempfter Badge + 7. Filter-Checkbox (Anzeige); Feature-Status-Ableitung
+  behandelt Verworfen terminal wie Done; Archiv-Kriterium rechnet Verworfen wie Done.
+  Das Board-SCHEMA-Enum selbst besitzt agent-flow (parallele Story) — diese Feature
+  ist NUR die GUI-Seite.'
+status: To Do
+priority: P1
+spec: docs/specs/board-status-verworfen.md
+definition_of_done: null
+labels:
+- ui
+- backend
+depends: null
+owner: null
+stories:
+- S-242
+- S-243
+- S-244
+progress: 0/3 done
+created_at: '2026-07-02T05:05:10Z'
+updated_at: '2026-07-02T05:05:10Z'
+done_at: null

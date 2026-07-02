@@ -19,5 +19,7 @@ branch: null
 pr: 311
 blocked_reason: null
 created_at: '2026-06-17T00:00:00Z'
-updated_at: '2026-06-17T22:13:47Z'
+updated_at: '2026-07-02T03:22:17.133Z'
 done_at: '2026-06-17T22:13:47Z'
+archived: true
+archived_at: '2026-07-02T03:22:17.133Z'

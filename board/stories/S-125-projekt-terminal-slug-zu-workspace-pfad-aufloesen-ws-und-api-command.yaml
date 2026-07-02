@@ -20,5 +20,7 @@ branch: feat/S-125-slug-to-workspace-path
 pr: https://github.com/Studis-Softwareschmiede/dev-gui/pull/261
 blocked_reason: null
 created_at: '2026-06-15T00:00:00Z'
-updated_at: '2026-06-15T19:42:25Z'
+updated_at: '2026-07-02T03:22:17.133Z'
 done_at: '2026-06-15T19:42:25Z'
+archived: true
+archived_at: '2026-07-02T03:22:17.133Z'

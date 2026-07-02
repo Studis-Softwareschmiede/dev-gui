@@ -18,5 +18,7 @@ branch: feature/S-118-board-ready
 pr: agent-flow#154
 blocked_reason: null
 created_at: '2026-06-15T10:30:27Z'
-updated_at: '2026-06-15T14:30:00Z'
+updated_at: '2026-07-02T03:22:17.133Z'
 done_at: '2026-06-15T14:30:00Z'
+archived: true
+archived_at: '2026-07-02T03:22:17.133Z'

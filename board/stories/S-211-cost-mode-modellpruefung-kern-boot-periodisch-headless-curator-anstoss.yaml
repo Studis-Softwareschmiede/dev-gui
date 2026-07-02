@@ -30,7 +30,7 @@ branch: feat/S-211-cost-mode-model-check-kern
 pr: null
 blocked_reason: null
 created_at: '2026-07-01T11:17:07.556Z'
-updated_at: '2026-07-01T22:16:14Z'
+updated_at: '2026-07-02T03:22:17.133Z'
 done_at: '2026-07-01T22:16:14Z'
 notes: 'Ehemalige Idee (Owner): "Cost Mode überprüfen — Modelle ändern sich im Hintergrund
 
@@ -75,3 +75,5 @@ notes: 'Ehemalige Idee (Owner): "Cost Mode überprüfen — Modelle ändern sich
 
   '
 tok: null
+archived: true
+archived_at: '2026-07-02T03:22:17.133Z'

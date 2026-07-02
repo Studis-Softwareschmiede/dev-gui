@@ -47,8 +47,10 @@ branch: feat/S-179-vps-probe-deploy-gate
 pr: null
 blocked_reason: null
 created_at: '2026-06-19T00:00:00Z'
-updated_at: '2026-06-19T16:11:47Z'
+updated_at: '2026-07-02T03:22:17.133Z'
 done_at: '2026-06-19T16:09:54Z'
 dispo_act: '7'
 tok: '5736917'
 dispo_forecast: -.2857
+archived: true
+archived_at: '2026-07-02T03:22:17.133Z'

@@ -35,4 +35,6 @@ estimate_note: 'Backend-Erweiterung des Options-Pfads aus S-161 (GET /api/vps/pr
   weg, restliche Optionen unveraendert (kein 500); KEIN Token in Response/Log; Grep: keine Hetzner-URL ausserhalb
   des Adapters. S (~2 EP) — eine Adapter-Methode + Map-Aggregation + Degradation, haengt an S-161.'
 created_at: '2026-06-19T00:00:00Z'
-updated_at: '2026-06-19T00:00:00Z'
+updated_at: '2026-07-02T03:22:17.133Z'
+archived: true
+archived_at: '2026-07-02T03:22:17.133Z'

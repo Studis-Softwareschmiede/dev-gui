@@ -35,4 +35,6 @@ estimate_note: 'Frontend-Fortschreibung der S-162-Logik in client/src/VpsView.js
   Region+Typ-Kombi fuehrt nicht mehr zu unsupported location. S (~2 EP) — fokussierte Filter-/Reset-Logik in
   bestehender View, haengt an S-162 + S-177.'
 created_at: '2026-06-19T00:00:00Z'
-updated_at: '2026-06-19T00:00:00Z'
+updated_at: '2026-07-02T03:22:17.133Z'
+archived: true
+archived_at: '2026-07-02T03:22:17.133Z'

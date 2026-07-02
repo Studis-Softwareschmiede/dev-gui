@@ -1,0 +1,45 @@
+id: S-239
+parent: F-047
+title: 'Backend: No-Op-Erkennung im StorySpecifyFinalizer (read-only Snapshot-Diff)
+  + projekt-keyed Last-Finalize-Registry + Read-Endpunkt'
+status: To Do
+priority: P1
+spec: docs/specs/story-specify-finalize-visibility.md
+implements:
+- AC1
+- AC2
+- AC3
+- AC4
+depends: null
+labels:
+- backend
+- security
+size_est: L
+dispo_est: '5.0'
+dispo_act: null
+dispo_forecast: null
+estimate_note: 'Heuristik: n_ac=4 (AC1-AC4), n_comp~3 (StorySpecifyFinalizer.js Snapshot-Diff+projekt-keyed
+  Registry, storySpecifyRouter.js neuer Read-Endpunkt+synchrone running-Registrierung,
+  Board-Read/scan via BoardAggregator; +server.js-Wiring), label_bump+1 (security)
+  -> score 8 -> L. estimator nicht dispatchbar im requirement-Agent-Kontext (kein
+  Task-Tool, vgl. S-238/S-237); Fallback baseline.json js|balanced|L ep=5.0 (n=5)
+  -> confidence medium.'
+confidence: medium
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-07-02T05:07:42Z'
+updated_at: '2026-07-02T05:08:40Z'
+done_at: null
+notes: 'Spec: docs/specs/story-specify-finalize-visibility.md — implements AC1-AC4.
+  Priority P1. depends: keine. Backend-Teil der Sichtbarkeit des Neue-Story-Finalize-Laufs
+  (Befund 1, Owner-Live-Test 2026-07-01). Root-Cause: StorySpecifyFinalizer reicht
+  Runner-Status 1:1 durch; ein requirement-Lauf, der nur Text ausgibt und exit 0 endet,
+  meldet done, obwohl nichts entstand -> scratch-Overlay wertet done als Erfolg ->
+  still. AC1 No-Op read-only Snapshot-Diff (Story-IDs vor/nach; keine neue Story ->
+  no-op; KEIN BoardWriter; revidiert new-story-chat AC5/AC8 ''kein no-op-Mapping'').
+  AC2 Terminal-Status {running,done,no-op,failed,auth-expired}, done nur bei angelegter
+  Story. AC3 projekt-keyed Last-Job-Registry, synchrone running-Registrierung VOR
+  Spawn. AC4 GET /api/board/projects/:slug/story-specify/finalize -> {job|null}, token-/secret-frei,
+  hinter AccessGuard. Der ensure-gh-auth.sh-Retry ist ein Folge-Hinweis fuer das agent-flow-Repo
+  (KEIN Board-Item hier).'

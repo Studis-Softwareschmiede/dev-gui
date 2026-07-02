@@ -26,6 +26,8 @@ branch: feat/S-183-notification-settings
 pr: null
 blocked_reason: null
 created_at: '2026-06-19T15:39:12Z'
-updated_at: '2026-06-19T17:47:13Z'
+updated_at: '2026-07-02T03:22:17.133Z'
 done_at: '2026-06-19T17:46:24Z'
 tok: '41967037'
+archived: true
+archived_at: '2026-07-02T03:22:17.133Z'

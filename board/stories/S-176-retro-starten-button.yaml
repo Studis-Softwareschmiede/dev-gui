@@ -28,5 +28,7 @@ estimate_note: 'Frontend (client/src/RetroView.jsx): in der Reiter-Leiste (neben
 pr: null
 blocked_reason: null
 created_at: '2026-06-19T00:00:00Z'
-updated_at: '2026-06-19T00:00:00Z'
+updated_at: '2026-07-02T03:22:17.133Z'
 done_at: '2026-06-19T00:00:00Z'
+archived: true
+archived_at: '2026-07-02T03:22:17.133Z'

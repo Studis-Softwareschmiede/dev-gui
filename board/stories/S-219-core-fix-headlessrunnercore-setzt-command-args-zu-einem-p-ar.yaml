@@ -28,7 +28,7 @@ branch: feat/S-219-headless-argv-core-fix
 pr: null
 blocked_reason: null
 created_at: '2026-07-01T19:37:10Z'
-updated_at: '2026-07-01T19:56:10Z'
+updated_at: '2026-07-02T03:22:17.133Z'
 done_at: '2026-07-01T19:56:10Z'
 notes: 'Spec: docs/specs/headless-arg-finalize-safety.md AC1,AC2,AC3,AC8. HAUPTBUG
   (RC1), zentral. Prioritaet P1 -- muss zuerst landen (ist DER Fix).
@@ -56,3 +56,5 @@ notes: 'Spec: docs/specs/headless-arg-finalize-safety.md AC1,AC2,AC3,AC8. HAUPTB
   Child-Env-Floor unveraendert: kein ANTHROPIC_API_KEY/OPENAI_API_KEY, kein Secret/Host-Pfad-Leak
   (AC8).'
 tok: null
+archived: true
+archived_at: '2026-07-02T03:22:17.133Z'

@@ -22,7 +22,7 @@ branch: feat/S-197-nightwatch-ui
 pr: null
 blocked_reason: null
 created_at: '2026-06-30T20:09:55Z'
-updated_at: '2026-07-01T06:57:58Z'
+updated_at: '2026-07-02T03:22:17.133Z'
 done_at: '2026-07-01T06:57:58Z'
 notes: 'UI-Abschnitt "Nachtwaechter" auf der globalen Settings-Seite (Muster
 
@@ -37,3 +37,5 @@ notes: 'UI-Abschnitt "Nachtwaechter" auf der globalen Settings-Seite (Muster
   im/ausserhalb Fenster, aktuell laufende Drains. Kein Secret im Frontend.
 
   '
+archived: true
+archived_at: '2026-07-02T03:22:17.133Z'

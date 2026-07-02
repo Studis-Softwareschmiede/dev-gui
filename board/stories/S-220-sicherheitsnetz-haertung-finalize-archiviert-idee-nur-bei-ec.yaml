@@ -32,7 +32,7 @@ branch: feat/S-220-finalize-safety-net-hardening
 pr: null
 blocked_reason: null
 created_at: '2026-07-01T19:37:15Z'
-updated_at: '2026-07-01T20:26:26Z'
+updated_at: '2026-07-02T03:22:17.133Z'
 done_at: '2026-07-01T20:26:26Z'
 notes: 'Spec: docs/specs/headless-arg-finalize-safety.md AC4,AC5,AC6,AC7,AC8. Depends:
   S-219 (Core-Fix zuerst -- ohne ihn produziert der Lauf ohnehin nur no-op). SEKUNDAERBUG
@@ -63,3 +63,5 @@ notes: 'Spec: docs/specs/headless-arg-finalize-safety.md AC4,AC5,AC6,AC7,AC8. De
   Gate: Unit-Tests (Verifikations-Faelle a/b/c mit gestubtem Runner + FS-Reader; no-op-Mapping;
   Audit) + Modal-Test (fetchFn-Sequenz running->no-op) + kein Regress an IdeaSpecifyFinalizer/BoardWriter/Modal.'
 tok: null
+archived: true
+archived_at: '2026-07-02T03:22:17.133Z'
