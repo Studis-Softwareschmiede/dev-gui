@@ -272,7 +272,14 @@ describe('Headless-Nacht-Drain — Selbst-Blockade-Vermeidung (S-212/S-213 kriti
 
     // Der allererste /flow-Versuch scheitert bereits — obwohl NICHTS anderes
     // läuft und die Drain-Ziel-Story völlig gesund ist.
-    expect(result).toEqual({ stopped: true, reason: 'command-channel-busy', flowRuns: 1, escalated: [] });
+    expect(result).toEqual({
+      stopped: true,
+      reason: 'command-channel-busy',
+      flowRuns: 1,
+      escalated: [],
+      completed: [],
+      blocked: [],
+    });
     // Kein einziger Kindprozess wurde je gespawnt (HeadlessRunnerCore prüft
     // das Lock VOR dem Spawn) — der Bug verhindert den Lauf vollständig.
     expect(spawnFn).not.toHaveBeenCalled();
@@ -306,7 +313,14 @@ describe('Headless-Nacht-Drain — Selbst-Blockade-Vermeidung (S-212/S-213 kriti
     child.emit('close', 0);
 
     const result = await drainPromise;
-    expect(result).toEqual({ stopped: true, reason: 'no-drain-target', flowRuns: 1, escalated: [] });
+    expect(result).toEqual({
+      stopped: true,
+      reason: 'no-drain-target',
+      flowRuns: 1,
+      escalated: [],
+      completed: [{ id: 'S-1', title: '' }],
+      blocked: [],
+    });
     expect(spawnFn).toHaveBeenCalledTimes(1);
   });
 });
@@ -368,8 +382,22 @@ describe('Headless-Nacht-Drain — echte Parallelität (AC7) + kein command-chan
 
     const [resultA, resultB] = await Promise.all([drainA, drainB]);
 
-    expect(resultA).toEqual({ stopped: true, reason: 'no-drain-target', flowRuns: 1, escalated: [] });
-    expect(resultB).toEqual({ stopped: true, reason: 'no-drain-target', flowRuns: 1, escalated: [] });
+    expect(resultA).toEqual({
+      stopped: true,
+      reason: 'no-drain-target',
+      flowRuns: 1,
+      escalated: [],
+      completed: [{ id: 'S-1', title: '' }],
+      blocked: [],
+    });
+    expect(resultB).toEqual({
+      stopped: true,
+      reason: 'no-drain-target',
+      flowRuns: 1,
+      escalated: [],
+      completed: [{ id: 'S-1', title: '' }],
+      blocked: [],
+    });
     // AC8: command-channel-busy tritt für keines der beiden Projekte auf.
     expect(resultA.reason).not.toBe('command-channel-busy');
     expect(resultB.reason).not.toBe('command-channel-busy');
