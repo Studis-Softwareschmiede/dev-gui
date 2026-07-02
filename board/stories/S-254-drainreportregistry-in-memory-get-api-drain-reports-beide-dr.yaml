@@ -1,7 +1,7 @@
 id: S-254
 parent: F-051
-title: DrainReportRegistry (In-Memory) + GET /api/drain-reports + beide Drain-Auslöser
-  schreiben Bericht
+title: DrainReportStore (persistiert, letzte 30 je Projekt) + GET /api/drain-reports
+  + beide Drain-Auslöser schreiben Bericht
 status: To Do
 priority: P1
 spec: docs/specs/drain-completion-report.md
