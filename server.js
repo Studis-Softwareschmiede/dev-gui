@@ -144,6 +144,8 @@ import { HeadlessFlowRunner } from './src/HeadlessFlowRunner.js';
 import { HeadlessFlowRunnerAdapter } from './src/FlowRunner.js';
 import { ProjectJobLock } from './src/ProjectJobLock.js';
 import { CostModeModelCheck } from './src/CostModeModelCheck.js';
+import { HeadlessRetroRunner } from './src/HeadlessRetroRunner.js';
+import { RetroAutoQueue } from './src/RetroAutoQueue.js';
 import { mountRouters } from './src/routerLoader.js';
 
 const PORT = Number(process.env.PORT ?? 8080);
@@ -494,6 +496,25 @@ const storySpecifyFinalizer = new StorySpecifyFinalizer();
 // Bewusst vom interaktiven PTY-Pfad (CommandService/PtyManager/PtySessionRegistry)
 // getrennt (AC7) — eigene ProjectJobLock-Instanz, kein Idle-/Rate-Timer.
 const reconcileRunner = new HeadlessReconcileRunner();
+
+// ── Auto-Retro: serielle Queue + headless Runner (retro-auto-queue AC5/AC6, S-257) ──
+// Composition-Root der seriellen Auto-Retro-Warteschlange: EIN Worker, global
+// serialisiert (schützt die geteilte Lern-Ablage `LEARNINGS.md`/globale Packs vor
+// konkurrierenden Läufen/PRs). Der `HeadlessRetroRunner` kapselt die headless-
+// Ausführung (`claude -p '/agent-flow:retro --force'`) über eine EIGENE
+// `HeadlessFlowRunner`-Instanz mit EIGENER, frischer `ProjectJobLock`-Instanz
+// (Konstruktor-Default in HeadlessRetroRunner.js/HeadlessFlowRunner.js) — bewusst
+// getrennt von ALLEN anderen headless-Locks (Nacht-Drain, manueller Drain,
+// Reconcile, ideaSpecifyFinalizer, storySpecifyFinalizer, costModeModelCheck),
+// sonst würde ein paralleler Lauf für dasselbe Projekt fälschlich blockiert
+// (Fremd-/Selbstblockade-Vermeidung, analog den Runner-Kommentaren oben).
+// `auditStore` injiziert (AC6: Start/Ende(Erfolg)/Fehler je Lauf, secret-frei).
+// Das Einreihen an der Drain-Naht (isRetroDue → enqueue) ist S-261 (nicht hier);
+// `retroAutoQueue` wird für die spätere Injektion exportiert.
+export const retroAutoQueue = new RetroAutoQueue({
+  retroRunner: new HeadlessRetroRunner({ auditStore }),
+  auditStore,
+});
 
 // ── CostModeModelCheck starten (cost-mode-model-check AC1–AC3/AC6/AC7) ──
 // Die Instanz wurde bereits weiter oben (im Taktgeber-Block, vor dem

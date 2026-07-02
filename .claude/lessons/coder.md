@@ -1,5 +1,16 @@
 # Coder Lessons — dev-gui (newest first)
 
+## 2026-07-03 — Jeder neue `process.env.X`-Timeout/Config-Wert gehört in `.env.example`, auch wenn Analog-Vorbilder (`FLOW_HEADLESS_TIMEOUT_MS`) es versäumt haben
+Die bestehende Lektion zu `CRED_ENV_PATH` (2026-06-14, unten) gilt nicht nur für Secrets,
+sondern für JEDE neu eingeführte `process.env.X` — auch reine Timeout-/Config-Werte ohne
+Secret-Charakter (z.B. `RETRO_HEADLESS_TIMEOUT_MS`). `.env.example` ist die Single-Source-
+of-Truth-Referenz für alle konfigurierbaren Env-Variablen (analog `RECONCILE_TIMEOUT_MS`,
+Zeile ~88). Dass ein Vorbild-Runner (`FLOW_HEADLESS_TIMEOUT_MS`, headless-parallel-drain)
+diese Doku versäumt hat, ist selbst ein Altlast-Fund, keine Rechtfertigung, es erneut zu
+versäumen. Checkliste: nach jedem neuen `process.env.NEW_VAR` grep nach `NEW_VAR` in
+`.env.example`; fehlt → Kommentarblock nach dem Muster der Nachbar-Sektionen ergänzen.
+*[seen-in: S-257 HeadlessRetroRunner.js `RETRO_HEADLESS_TIMEOUT_MS` fehlt in `.env.example`; promoted: 2026-07-03]*
+
 ## 2026-07-02 — Confinement-Check gilt auch für den Listing-ROOT selbst, nicht nur für seine Einträge
 Beim Bauen eines confined Directory-Listings (z.B. `<vault>/Projekte`-Unterordner) wird der
 Confinement-Check (`realpath` + Trailing-Slash-Prefix) typischerweise korrekt auf JEDEN
