@@ -6,8 +6,9 @@
  * Montiert:
  *   POST /api/board/projects/:slug/story-specify/start          (new-story-chat AC2)
  *   POST /api/board/projects/:slug/story-specify/message        (new-story-chat AC3)
- *   POST /api/board/projects/:slug/story-specify/finalize       (new-story-chat AC4)
- *   GET  /api/board/projects/:slug/story-specify/finalize/:jobId (new-story-chat AC5)
+ *   POST /api/board/projects/:slug/story-specify/finalize       (new-story-chat AC4; + projekt-keyed running-Registrierung, story-specify-finalize-visibility AC3)
+ *   GET  /api/board/projects/:slug/story-specify/finalize       (story-specify-finalize-visibility AC4 — projekt-keyed Last-Finalize-Job)
+ *   GET  /api/board/projects/:slug/story-specify/finalize/:jobId (new-story-chat AC5; + no-op im Wertebereich, story-specify-finalize-visibility AC1/AC2)
  *
  * order: 183 — nach board.js (180) und ideaSpecify.js (182), die verwandte
  * `:slug`-Präfixe nutzen (Ordering hier irrelevant für Express-Routing-
@@ -20,7 +21,9 @@
  * `StorySpecifyFinalizer` (eigener `HeadlessFlowRunner` + eigenes
  * `ProjectJobLock`, „from scratch"-Prompt ohne Idee-Hinweis).
  *
- * Spec: docs/specs/new-story-chat.md AC2, AC3, AC4, AC5, AC8.
+ * Spec: docs/specs/new-story-chat.md AC2, AC3, AC4, AC5, AC8;
+ *       docs/specs/story-specify-finalize-visibility.md AC1, AC2, AC3, AC4
+ *       (No-Op-Erkennung + projekt-keyed Last-Finalize-Registry + Read-Endpunkt).
  */
 import { storySpecifyRouter } from '../storySpecifyRouter.js';
 

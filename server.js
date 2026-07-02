@@ -470,8 +470,12 @@ const ideaSpecifyFinalizer = new IdeaSpecifyFinalizer({ boardWriter, auditStore 
 // (Selbstblockade-Vermeidung, analog dem ideaSpecifyFinalizer-Kommentar oben).
 // Unterschied zum ideaSpecifyFinalizer (new-story-chat AC8): „from scratch"-
 // Prompt OHNE Idee-Übernahme-Hinweis + KEIN archiveSupersededIdea-Netz — daher
-// KEIN boardWriter nötig. Kein Audit hier (der Router auditiert den Job-Start;
-// es gibt keinen no-op-Sicherheitsnetz-Pfad, der hier auditieren müsste).
+// KEIN boardWriter nötig. Kein Audit hier (der Router auditiert den Job-Start).
+// Finalize-Sichtbarkeit (story-specify-finalize-visibility.md AC1-AC3): der
+// Finalizer erkennt read-only per Snapshot-Diff einen „durchgelaufen, aber
+// nichts angelegt"-Lauf (→ Terminalstatus `no-op`, KEIN BoardWriter) und hält
+// eine projekt-keyed Last-Finalize-Registry (synchrone `running`-Registrierung
+// vor dem Spawn) für den Read-Endpunkt `GET .../story-specify/finalize` (AC4).
 const storySpecifyFinalizer = new StorySpecifyFinalizer();
 
 // ── HeadlessReconcileRunner (getrennter claude -p-Kindprozess, headless-reconcile-runner AC1–AC7) ──
@@ -576,9 +580,10 @@ const deps = {
   // S-216 (idea-specify-chat AC6/AC7/AC8/AC9): IdeaSpecifyFinalizer für
   // POST .../specify/finalize + GET .../specify/finalize/:jobId (ideaSpecify.js).
   ideaSpecifyFinalizer,
-  // S-226 (new-story-chat AC4/AC5/AC8): StorySpecifyFinalizer für den
-  // Neue-Story-Chat „from scratch" — POST .../story-specify/finalize +
-  // GET .../story-specify/finalize/:jobId (storySpecify.js). Der Chat-Router
+  // S-226 (new-story-chat AC4/AC5/AC8) + S-239 (story-specify-finalize-visibility
+  // AC1-AC4): StorySpecifyFinalizer für den Neue-Story-Chat „from scratch" —
+  // POST .../story-specify/finalize + GET .../story-specify/finalize (projekt-keyed)
+  // + GET .../story-specify/finalize/:jobId (storySpecify.js). Der Chat-Router
   // (storySpecify.js start/message) nutzt DIESELBE ideaSpecifyChatService-Instanz
   // (oben) — kein neuer Chat-Service (AC8).
   storySpecifyFinalizer,

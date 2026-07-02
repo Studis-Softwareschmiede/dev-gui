@@ -2,7 +2,7 @@ id: S-239
 parent: F-047
 title: 'Backend: No-Op-Erkennung im StorySpecifyFinalizer (read-only Snapshot-Diff)
   + projekt-keyed Last-Finalize-Registry + Read-Endpunkt'
-status: To Do
+status: Done
 priority: P1
 spec: docs/specs/story-specify-finalize-visibility.md
 implements:
@@ -29,8 +29,8 @@ branch: null
 pr: null
 blocked_reason: null
 created_at: '2026-07-02T05:07:42Z'
-updated_at: '2026-07-02T05:08:40Z'
-done_at: null
+updated_at: '2026-07-02T09:55:43Z'
+done_at: '2026-07-02T09:55:43Z'
 notes: 'Spec: docs/specs/story-specify-finalize-visibility.md — implements AC1-AC4.
   Priority P1. depends: keine. Backend-Teil der Sichtbarkeit des Neue-Story-Finalize-Laufs
   (Befund 1, Owner-Live-Test 2026-07-01). Root-Cause: StorySpecifyFinalizer reicht

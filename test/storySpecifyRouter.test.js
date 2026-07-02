@@ -1,7 +1,8 @@
 /**
  * @file storySpecifyRouter.test.js — HTTP-level tests for the Neue-Story-Chat
  * („from scratch", ohne Idee-Karte) endpoints — docs/specs/new-story-chat.md
- * AC2, AC3, AC4, AC5, AC8.
+ * AC2, AC3, AC4, AC5, AC8 — plus the finalize-visibility extension
+ * (docs/specs/story-specify-finalize-visibility.md AC2, AC3, AC4).
  *
  * Covers (new-story-chat): AC2, AC3, AC4, AC5, AC8
  *
@@ -30,12 +31,23 @@
  *         AccessGuard-Verdrahtung: per server.js-Inspektion (`app.use('/api',
  *         accessGuard)`), kein separater Middleware-Test.
  *
+ * Covers (story-specify-finalize-visibility): AC2, AC3, AC4
+ *
+ *   AC2 — der per-Job-Endpunkt (`GET .../finalize/:jobId`) reicht den neuen
+ *         `no-op`-Statuswert korrekt durch (200 { status:'no-op', error }).
+ *   AC3 — POST .../finalize reicht den (SLUG_RE-validierten) `projectSlug` an
+ *         `finalizer.start()` durch (Registry-Schlüssel für die projekt-keyed
+ *         `running`-Registrierung).
+ *   AC4 — GET .../story-specify/finalize (projekt-keyed) → 200 { job | null };
+ *         liefert `lastForProject(slug)`; 404 bei unbekanntem Projekt/ungültigem
+ *         Slug-Format; token-/secret-frei (kein Agenten-Dispatch, kein Audit).
+ *
  * Pattern: express + node:http createServer auf Port 0 (127.0.0.1), kein
  * supertest (Muster ideaSpecifyRouter.test.js). Der echte
  * `IdeaSpecifyChatService` wird verwendet, mit injiziertem `runClaude` (Stub) —
  * kein echter `claude`-Prozess, kein PTY-Pfad. Der `finalizer` (AC4/AC5) ist ein
- * reiner Test-Stub ({start, getJob}) — `StorySpecifyFinalizer.test.js` deckt den
- * echten Orchestrator ab.
+ * reiner Test-Stub ({start, getJob, lastForProject}) —
+ * `StorySpecifyFinalizer.test.js` deckt den echten Orchestrator ab.
  */
 
 import { describe, it, expect, jest } from '@jest/globals';
@@ -111,13 +123,15 @@ function makeProject({ slug = 'demo' } = {}) {
   return { slug, repo_path: `/workspace/${slug}`, features: [] };
 }
 
-/** Test-Stub für `StorySpecifyFinalizer` (AC4/AC5) — der echte Orchestrator wird
- *  in `StorySpecifyFinalizer.test.js` getestet, hier nur die Router-Verdrahtung. */
-function makeFinalizerStub({ startResult = { ok: true, jobId: 'job-1' }, jobs = {} } = {}) {
+/** Test-Stub für `StorySpecifyFinalizer` (AC4/AC5 + finalize-visibility AC2/AC3/AC4)
+ *  — der echte Orchestrator wird in `StorySpecifyFinalizer.test.js` getestet, hier
+ *  nur die Router-Verdrahtung. `start()` ist async (der Router awaited es). */
+function makeFinalizerStub({ startResult = { ok: true, jobId: 'job-1' }, jobs = {}, lastJob = null } = {}) {
   const jobsMap = new Map(Object.entries(jobs));
   return {
-    start: jest.fn(() => startResult),
+    start: jest.fn(async () => startResult),
     getJob: jest.fn(async (jobId) => jobsMap.get(jobId)),
+    lastForProject: jest.fn(async () => lastJob),
     _jobsMap: jobsMap,
   };
 }
@@ -385,6 +399,8 @@ describe('POST .../story-specify/finalize — AC4', () => {
       expect(projectPath).toBe('/workspace/demo');
       expect(params.draftText).toBe('Draft text.'); // aus getSessionState(), AC8
       expect(params.ideaStoryId).toBeUndefined(); // „from scratch": kein Idee-Bezug
+      // finalize-visibility AC3: der SLUG_RE-validierte Slug ist der Registry-Schlüssel.
+      expect(params.projectSlug).toBe('demo');
 
       // genau EIN zusätzlicher Audit-Eintrag für den Finalize-Start
       const finalizeEntries = auditStore.getAll().slice(auditBefore);
@@ -516,6 +532,96 @@ describe('GET .../story-specify/finalize/:jobId — AC5', () => {
     try {
       const { status } = await httpGet(srv, '/api/board/projects/demo/story-specify/finalize/nope');
       expect(status).toBe(404);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('finalize-visibility AC2: 200 { status:"no-op", error } wird korrekt durchgereicht', async () => {
+    const finalizer = makeFinalizerStub({
+      jobs: { 'job-3': { status: 'no-op', error: 'Der Lauf hat keine Story angelegt — bitte erneut versuchen.' } },
+    });
+    const { app } = makeApp({ finalizer });
+    const srv = await startServer(app);
+    try {
+      const { status, body } = await httpGet(srv, '/api/board/projects/demo/story-specify/finalize/job-3');
+      expect(status).toBe(200);
+      expect(body.status).toBe('no-op');
+      expect(body.error).toContain('keine Story');
+      expect(body.error).not.toMatch(/\/workspace|token/);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+});
+
+// ── AC4 (finalize-visibility): GET .../story-specify/finalize (projekt-keyed) ──
+
+describe('GET .../story-specify/finalize — story-specify-finalize-visibility AC4', () => {
+  it('200 { job } mit dem letzten Finalize-Job dieses Projekts (lastForProject)', async () => {
+    const lastJob = { status: 'no-op', jobId: 'job-9', error: 'Der Lauf hat keine Story angelegt — bitte erneut versuchen.' };
+    const finalizer = makeFinalizerStub({ lastJob });
+    const { app } = makeApp({ finalizer });
+    const srv = await startServer(app);
+    try {
+      const { status, body } = await httpGet(srv, '/api/board/projects/demo/story-specify/finalize');
+      expect(status).toBe(200);
+      expect(body).toEqual({ job: lastJob });
+      expect(finalizer.lastForProject).toHaveBeenCalledWith('demo');
+      // Token-frei: kein Agenten-Dispatch (start/getJob nicht angefasst).
+      expect(finalizer.start).not.toHaveBeenCalled();
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('200 { job: null } wenn (noch) kein Finalize für dieses Projekt lief', async () => {
+    const finalizer = makeFinalizerStub({ lastJob: null });
+    const { app } = makeApp({ finalizer });
+    const srv = await startServer(app);
+    try {
+      const { status, body } = await httpGet(srv, '/api/board/projects/demo/story-specify/finalize');
+      expect(status).toBe(200);
+      expect(body).toEqual({ job: null });
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('200 { job } für einen laufenden Job (running)', async () => {
+    const finalizer = makeFinalizerStub({ lastJob: { status: 'running', jobId: 'job-run' } });
+    const { app } = makeApp({ finalizer });
+    const srv = await startServer(app);
+    try {
+      const { status, body } = await httpGet(srv, '/api/board/projects/demo/story-specify/finalize');
+      expect(status).toBe(200);
+      expect(body.job).toEqual({ status: 'running', jobId: 'job-run' });
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('404 bei unbekanntem Projekt-Slug (kein lastForProject-Aufruf)', async () => {
+    const finalizer = makeFinalizerStub({ lastJob: { status: 'running', jobId: 'x' } });
+    const { app } = makeApp({ projects: [], finalizer });
+    const srv = await startServer(app);
+    try {
+      const { status } = await httpGet(srv, '/api/board/projects/nope/story-specify/finalize');
+      expect(status).toBe(404);
+      expect(finalizer.lastForProject).not.toHaveBeenCalled();
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('404 bei ungültigem Slug-Format (führender Punkt)', async () => {
+    const finalizer = makeFinalizerStub();
+    const { app } = makeApp({ finalizer });
+    const srv = await startServer(app);
+    try {
+      const { status } = await httpGet(srv, '/api/board/projects/.bad/story-specify/finalize');
+      expect(status).toBe(404);
+      expect(finalizer.lastForProject).not.toHaveBeenCalled();
     } finally {
       await new Promise((r) => srv.close(r));
     }
