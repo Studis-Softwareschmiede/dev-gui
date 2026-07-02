@@ -45,6 +45,17 @@
  *          (drainProject() aufgerufen, auch wenn runCheck wirft/hängt); ein
  *          Fehler in runCheck verhindert die 202-Antwort NIE (best-effort).
  *
+ * Covers (drain-completion-report, S-254):
+ *   AC5 — der manuelle Drain schreibt bei Abschluss (resolve) GENAU EINEN
+ *          Bericht (`trigger:'manual'`) in die geteilte DrainReportStore-Instanz
+ *          — mit dem Slug (kein Pfad), completed/blocked aus dem Ergebnis. Ein
+ *          rejecteter Drain schreibt einen secret-freien `reason:'drain-failed'`-
+ *          Bericht (kein Roh-Fehlertext). Der DrainJobRegistry-Status (AC4)
+ *          bleibt davon unberührt. Ein werfender/rejectender Store berührt weder
+ *          die 202-Antwort noch den Registry-Status (best-effort). Ohne Store →
+ *          kein Schreibpfad (No-op). Der DrainReportStore selbst ist unit-
+ *          getestet in test/DrainReportStore.test.js.
+ *
  * Strategy: echter Express-App + echter HTTP-Server (Muster
  * test/slugResolver.test.js "commandRouter integration" + test/tickerSettings.test.js
  * HTTP-Helpers) — injizierbarer slugResolver/pathValidator/lock (kein echtes
@@ -174,6 +185,7 @@ function makeApp({
   pathValidator = identityPathValidator(),
   identity = { email: 'test@example.com' },
   costModeModelCheck,
+  drainReportStore,
 } = {}) {
   const app = express();
   app.use(express.json());
@@ -183,7 +195,7 @@ function makeApp({
   });
   app.use(
     projectDrainRouter(
-      { projectDrain, commandService, sessionRegistry, costModeModelCheck },
+      { projectDrain, commandService, sessionRegistry, costModeModelCheck, drainReportStore },
       { slugResolver, pathValidator, lock },
     ),
   );
@@ -679,5 +691,104 @@ describe('GET /api/projects/:slug/drain/:drainId (headless-manual-drain AC4)', (
     expect(res.status).toBe(200);
     expect(res.body.status).toBe('done');
     expect(res.body.result.reason).toBe('already-busy');
+  });
+});
+
+describe('POST /api/projects/:slug/drain — Abschlussbericht (drain-completion-report AC5)', () => {
+  let server;
+  let consoleErrorSpy;
+
+  beforeEach(() => {
+    consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+  });
+  afterEach(async () => {
+    if (server) await closeServer(server);
+    server = null;
+    consoleErrorSpy.mockRestore();
+  });
+
+  function makeReportStore() {
+    const records = [];
+    return { records, record: jest.fn(async (r) => { records.push(r); return { ...r, reportId: 'x' }; }) };
+  }
+
+  it('schreibt bei resolve GENAU EINEN Bericht (trigger:manual) mit Slug + completed/blocked', async () => {
+    const drainReportStore = makeReportStore();
+    const drainProject = jest.fn(async () => ({
+      stopped: true, reason: 'no-drain-target', flowRuns: 2, escalated: ['S-9'],
+      completed: [{ id: 'S-1', title: 'Eins' }],
+      blocked: [{ id: 'S-9', title: 'Neun' }],
+    }));
+    const app = makeApp({ projectDrain: { drainProject }, drainReportStore });
+    const s = await startServer(app);
+    server = s.server;
+
+    const res = await postNoBody(s.port, '/api/projects/dev-gui/drain');
+    expect(res.status).toBe(202);
+    await flushAsync();
+
+    expect(drainReportStore.record).toHaveBeenCalledTimes(1);
+    const report = drainReportStore.records[0];
+    expect(report.project).toBe('dev-gui');
+    expect(report.trigger).toBe('manual');
+    expect(report.reason).toBe('no-drain-target');
+    expect(report.flowRuns).toBe(2);
+    expect(report.completed).toEqual([{ id: 'S-1', title: 'Eins' }]);
+    expect(report.blocked).toEqual([{ id: 'S-9', title: 'Neun' }]);
+    // Security-Floor: kein absoluter Pfad im Bericht.
+    expect(JSON.stringify(report)).not.toContain('/workspace/');
+  });
+
+  it('ein rejecteter Drain schreibt einen secret-freien drain-failed-Bericht (Registry unberührt)', async () => {
+    const drainReportStore = makeReportStore();
+    const drainProject = jest.fn(async () => { throw new Error('geheimer /workspace/secret Fehler'); });
+    const app = makeApp({ projectDrain: { drainProject }, drainReportStore });
+    const s = await startServer(app);
+    server = s.server;
+
+    const post = await postNoBody(s.port, '/api/projects/dev-gui/drain');
+    expect(post.status).toBe(202);
+    await flushAsync();
+
+    expect(drainReportStore.record).toHaveBeenCalledTimes(1);
+    const report = drainReportStore.records[0];
+    expect(report.trigger).toBe('manual');
+    expect(report.reason).toBe('drain-failed');
+    expect(report.completed).toEqual([]);
+    expect(JSON.stringify(report)).not.toContain('secret');
+    expect(JSON.stringify(report)).not.toContain('/workspace/');
+
+    // Der DrainJobRegistry-Status bleibt korrekt 'failed' (unberührt vom Bericht).
+    const status = await getJson(s.port, `/api/projects/dev-gui/drain/${post.body.drainId}`);
+    expect(status.body.status).toBe('failed');
+  });
+
+  it('ein werfender/rejectender Store berührt weder die 202-Antwort noch den Registry-Status (best-effort)', async () => {
+    const drainReportStore = { record: jest.fn(async () => { throw new Error('Store kaputt'); }) };
+    const drainProject = jest.fn(async () => ({ stopped: true, reason: 'no-drain-target', flowRuns: 0, escalated: [] }));
+    const app = makeApp({ projectDrain: { drainProject }, drainReportStore });
+    const s = await startServer(app);
+    server = s.server;
+
+    const post = await postNoBody(s.port, '/api/projects/dev-gui/drain');
+    expect(post.status).toBe(202);
+    await flushAsync();
+
+    const status = await getJson(s.port, `/api/projects/dev-gui/drain/${post.body.drainId}`);
+    expect(status.status).toBe(200);
+    expect(status.body.status).toBe('done');
+  });
+
+  it('ohne verdrahteten Store → kein Schreibpfad, Drain läuft unverändert (No-op)', async () => {
+    const drainProject = jest.fn(async () => ({ stopped: true, reason: 'no-drain-target', flowRuns: 0, escalated: [] }));
+    const app = makeApp({ projectDrain: { drainProject } });
+    const s = await startServer(app);
+    server = s.server;
+
+    const post = await postNoBody(s.port, '/api/projects/dev-gui/drain');
+    expect(post.status).toBe(202);
+    await flushAsync();
+    const status = await getJson(s.port, `/api/projects/dev-gui/drain/${post.body.drainId}`);
+    expect(status.body.status).toBe('done');
   });
 });

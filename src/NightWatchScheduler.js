@@ -290,6 +290,13 @@ export function selectCandidateProjects(index, projectsSetting) {
  *   Wiederverwendung der S-211-Boundary). Optional — vor jedem Nacht-Drain-Start
  *   wird `runCheck('dispatch')` fire-and-forget angestoßen (blockiert den
  *   Drain-Start NIE, AC5). Ohne ihn läuft der Scheduler unverändert.
+ * @param {{ record: (r: object) => Promise<object> }} [deps.drainReportStore]
+ *   Abschlussbericht-Ablage (drain-completion-report AC6, geteilte Instanz mit
+ *   dem manuellen Drain). Optional — bei jedem abgeschlossenen Nacht-Drain wird
+ *   best-effort GENAU EIN Bericht (`trigger:'night'`) geschrieben. Ersetzt den
+ *   früheren `.catch(() => null)`-Ergebnisverlust: das (erfolgreiche wie
+ *   fehlgeschlagene) Drain-Ergebnis wird ERFASST statt verworfen; ein
+ *   Store-/Drain-Fehler crasht den Scheduler weiterhin NICHT (best-effort).
  * @param {string|null} [deps.identity]  auslösende Identität (Audit + ProjectDrain-Weiterreichung).
  * @param {() => number} [deps.now]  injizierbare Uhr (ms epoch), Default `Date.now`.
  * @param {(ms: number) => Promise<void>} [deps.sleepFn]  injizierbares Sleep (für `waitForReset`), Default echtes `setTimeout`.
@@ -305,6 +312,7 @@ export class NightWatchScheduler {
   #auditStore;
   #claudeAuthHealthService;
   #costModeModelCheck;
+  #drainReportStore;
   #identity;
   #now;
   #sleepFn;
@@ -335,6 +343,7 @@ export class NightWatchScheduler {
     auditStore,
     claudeAuthHealthService,
     costModeModelCheck,
+    drainReportStore,
     identity = null,
     now,
     sleepFn,
@@ -349,6 +358,7 @@ export class NightWatchScheduler {
     this.#auditStore = auditStore ?? null;
     this.#claudeAuthHealthService = claudeAuthHealthService ?? null;
     this.#costModeModelCheck = costModeModelCheck ?? null;
+    this.#drainReportStore = drainReportStore ?? null;
     this.#identity = identity;
     this.#now = now ?? (() => Date.now());
     this.#sleepFn = sleepFn ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -475,7 +485,11 @@ export class NightWatchScheduler {
     const started = [];
     for (const project of candidates) {
       if (started.length >= freeSlots) break;
-      this.#startDrain(project.repo_path);
+      // drain-completion-report AC6: der Projekt-Slug (kein Pfad) wird an
+      // #startDrain gereicht, damit der Abschlussbericht ihn als `project`
+      // führt. Fällt der Slug im Index (defensiv) weg → null, der Bericht wird
+      // dann übersprungen (best-effort), ohne den Drain zu beeinträchtigen.
+      this.#startDrain(project.repo_path, project.project_slug ?? project.slug ?? null);
       started.push(project.repo_path);
     }
 
@@ -551,8 +565,9 @@ export class NightWatchScheduler {
    * S-190/S-192) — kein Doppel-Trigger-Check hier nötig.
    *
    * @param {string} projectPath
+   * @param {string|null} [projectSlug]  Projekt-Slug für den Abschlussbericht (AC6).
    */
-  #startDrain(projectPath) {
+  #startDrain(projectPath, projectSlug = null) {
     this.#attachTokenWatcher(projectPath);
     // cost-mode-model-check AC4/AC5: Dispatch-Frische-Prüfung unmittelbar vor der
     // Cost-Mode-Übergabe an den Nacht-Drain — fire-and-forget, blockiert den
@@ -560,11 +575,55 @@ export class NightWatchScheduler {
     // Curator-Anstoß in runCheck ist asynchron/best-effort mit eigener Runner-/
     // Lock-Instanz (getrennt vom Nacht-Drain-Lock, keine Selbst-/Fremdblockade).
     this.#runCostModeDispatchCheck();
+    // drain-completion-report AC6: Startzeitpunkt für den Bericht erfassen
+    // (injizierbare Uhr, testbar). Nur ein Zeitstempel — kein Secret/Pfad.
+    const startedAt = new Date(this.#now()).toISOString();
     const promise = this.#projectDrain
       .drainProject(projectPath, { identity: this.#identity })
-      .catch(() => null) // ein Drain-Fehler darf den Scheduler nie crashen (Robustheit-NFR)
+      // AC6: das (erfolgreiche wie fehlgeschlagene) Drain-Ergebnis wird ERFASST
+      // statt — wie früher via `.catch(() => null)` — verworfen; danach best-
+      // effort GENAU EIN Bericht (`trigger:'night'`). Ein Drain-Fehler darf den
+      // Scheduler NIE crashen: onRejected schreibt einen secret-freien
+      // `reason:'drain-failed'`-Bericht; das abschließende `.catch(() => null)`
+      // schluckt einen etwaigen Fehler der Bericht-Erfassung selbst.
+      .then(
+        (result) => this.#recordNightReport(projectSlug, result ?? {}, startedAt),
+        () => this.#recordNightReport(projectSlug, { reason: 'drain-failed', flowRuns: 0, completed: [], blocked: [] }, startedAt),
+      )
+      .catch(() => null)
       .finally(() => this.#activeDrains.delete(projectPath));
     this.#activeDrains.set(projectPath, promise);
+  }
+
+  /**
+   * Schreibt best-effort GENAU EINEN Nacht-Abschlussbericht in die geteilte
+   * DrainReportStore-Instanz (drain-completion-report AC6). No-op ohne Store
+   * oder ohne gültigen Slug. Ein Store-/Schreibfehler ist non-fatal — er darf
+   * den Scheduler nie crashen (best-effort, Robustheit-NFR).
+   *
+   * @param {string|null} projectSlug  Projekt-Slug (kein Pfad); null → übersprungen.
+   * @param {{ reason?: string, flowRuns?: number, completed?: object[], blocked?: object[] }} result
+   * @param {string} startedAt  ISO-8601 Startzeitpunkt des Drains
+   */
+  #recordNightReport(projectSlug, result, startedAt) {
+    if (!this.#drainReportStore || typeof this.#drainReportStore.record !== 'function') return;
+    if (typeof projectSlug !== 'string' || projectSlug === '') return;
+    const r = result ?? {};
+    try {
+      const p = this.#drainReportStore.record({
+        project: projectSlug,
+        trigger: 'night',
+        startedAt,
+        finishedAt: new Date(this.#now()).toISOString(),
+        reason: typeof r.reason === 'string' ? r.reason : '',
+        flowRuns: Number.isFinite(r.flowRuns) ? r.flowRuns : 0,
+        completed: Array.isArray(r.completed) ? r.completed : [],
+        blocked: Array.isArray(r.blocked) ? r.blocked : [],
+      });
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    } catch {
+      // best-effort — die Bericht-Erfassung darf den Scheduler nie crashen.
+    }
   }
 
   /**
