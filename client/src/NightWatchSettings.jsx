@@ -25,6 +25,13 @@
  * A11y: label/htmlFor, role=status/alert, aria-describedby, aria-busy,
  *   Touch-Target ≥ 44 px (Muster NotificationSection in SettingsView.jsx).
  *
+ * retro-auto-trigger AC3 — zusätzlich (bei denselben Nachtwächter-Einstellungen) ein
+ *   eigenständiger Schalter „Danach automatisch Retro durchführen" (an/aus), der
+ *   GET /api/settings/retro-auto liest (Initialzustand) und bei Änderung sofort per
+ *   PUT /api/settings/retro-auto schreibt (unabhängig vom Ticker-„Einstellungen speichern"-
+ *   Knopf). Status textlich (an/aus); kurzer Hilfetext zum Wochen-Cooldown-Bypass. Der
+ *   bestehende Nachtwächter-`enabled`-Schalter bleibt unverändert.
+ *
  * @param {{ fetchFn?: typeof fetch }} props
  */
 
@@ -50,6 +57,40 @@ async function putTickerSettings(settings, fetchFn) {
   const data = await res.json();
   if (!res.ok) {
     throw Object.assign(new Error(data.message ?? `Speichern fehlgeschlagen (${res.status})`), { field: data.field });
+  }
+  return data;
+}
+
+/**
+ * Liest den globalen Auto-Retro-Schalter (retro-auto-trigger AC3, GET /api/settings/retro-auto).
+ *
+ * @param {typeof fetch} [fetchFn]
+ * @returns {Promise<{ enabled: boolean }>}
+ */
+async function fetchRetroAutoSettings(fetchFn) {
+  const fn = fetchFn ?? globalThis.fetch.bind(globalThis);
+  const res = await fn('/api/settings/retro-auto');
+  if (!res.ok) throw new Error(`Auto-Retro-Einstellung laden fehlgeschlagen (${res.status})`);
+  return res.json();
+}
+
+/**
+ * Schreibt den globalen Auto-Retro-Schalter (retro-auto-trigger AC3, PUT /api/settings/retro-auto).
+ *
+ * @param {boolean} enabled
+ * @param {typeof fetch} [fetchFn]
+ * @returns {Promise<{ enabled: boolean }>}
+ */
+async function putRetroAutoSettings(enabled, fetchFn) {
+  const fn = fetchFn ?? globalThis.fetch.bind(globalThis);
+  const res = await fn('/api/settings/retro-auto', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.message ?? `Speichern fehlgeschlagen (${res.status})`);
   }
   return data;
 }
@@ -96,7 +137,14 @@ export function NightWatchSettings({ fetchFn }) {
   const [saveFieldError, setSaveFieldError] = useState(null); // { field, message }
   const [saved, setSaved] = useState(false);
 
+  // Auto-Retro-Schalter (retro-auto-trigger AC3) — eigenständig, schreibt sofort bei Änderung.
+  const [retroAutoEnabled, setRetroAutoEnabled] = useState(false);
+  const [retroAutoSaving, setRetroAutoSaving] = useState(false);
+  const [retroAutoError, setRetroAutoError] = useState(null);
+  const [retroAutoSaved, setRetroAutoSaved] = useState(false);
+
   const SAVE_ERROR_ID = 'nightwatch-save-error';
+  const RETRO_AUTO_HELP_ID = 'retro-auto-help';
 
   const loadSettings = useCallback(async () => {
     setLoading(true);
@@ -130,10 +178,41 @@ export function NightWatchSettings({ fetchFn }) {
     setAvailableProjects(slugs);
   }, [fetchFn]);
 
+  // Auto-Retro-Schalter (AC3) — best-effort laden; Fehler blockiert die Nachtwächter-Sektion nicht.
+  const loadRetroAuto = useCallback(async () => {
+    setRetroAutoError(null);
+    try {
+      const data = await fetchRetroAutoSettings(fetchFn);
+      setRetroAutoEnabled(Boolean(data.enabled));
+    } catch (err) {
+      setRetroAutoError(err.message ?? 'Auto-Retro-Einstellung konnte nicht geladen werden');
+    }
+  }, [fetchFn]);
+
   useEffect(() => {
     loadSettings();
     loadProjectSlugs();
-  }, [loadSettings, loadProjectSlugs]);
+    loadRetroAuto();
+  }, [loadSettings, loadProjectSlugs, loadRetroAuto]);
+
+  // Sofort-Schreiben bei Änderung (unabhängig vom Ticker-Speichern-Knopf); Revert bei Fehler.
+  const handleRetroAutoChange = useCallback(async (next) => {
+    const previous = retroAutoEnabled;
+    setRetroAutoEnabled(next);
+    setRetroAutoError(null);
+    setRetroAutoSaved(false);
+    setRetroAutoSaving(true);
+    try {
+      const data = await putRetroAutoSettings(next, fetchFn);
+      setRetroAutoEnabled(Boolean(data.enabled));
+      setRetroAutoSaved(true);
+    } catch (err) {
+      setRetroAutoEnabled(previous); // Revert — Persistenz fehlgeschlagen
+      setRetroAutoError(err.message ?? 'Speichern fehlgeschlagen');
+    } finally {
+      setRetroAutoSaving(false);
+    }
+  }, [retroAutoEnabled, fetchFn]);
 
   const handleProjectToggle = useCallback((slug, checked) => {
     setSelectedProjects((prev) =>
@@ -380,6 +459,44 @@ export function NightWatchSettings({ fetchFn }) {
           {saving ? 'Wird gespeichert…' : 'Einstellungen speichern'}
         </button>
       </div>
+
+      {/* Auto-Retro-Schalter (retro-auto-trigger AC3) — eigenständig, schreibt sofort. */}
+      <div style={styles.retroAutoSection}>
+        <div style={styles.fieldRow}>
+          <label htmlFor="retro-auto-enabled" style={styles.label}>Danach automatisch Retro durchführen:</label>
+          <select
+            id="retro-auto-enabled"
+            value={retroAutoEnabled ? 'true' : 'false'}
+            onChange={(e) => handleRetroAutoChange(e.target.value === 'true')}
+            disabled={retroAutoSaving}
+            aria-busy={retroAutoSaving}
+            aria-describedby={RETRO_AUTO_HELP_ID}
+            style={styles.select}
+          >
+            <option value="false">Aus</option>
+            <option value="true">An</option>
+          </select>
+          <span style={styles.retroAutoStatus} data-testid="retro-auto-status">
+            {retroAutoSaving ? 'Wird gespeichert…' : (retroAutoEnabled ? 'An' : 'Aus')}
+          </span>
+        </div>
+        <p id={RETRO_AUTO_HELP_ID} style={styles.hint}>
+          Ist der Schalter <strong>an</strong>, läuft nach jedem abgeschlossenen Board-Lauf (Nachtwächter oder
+          manuelles „Board abarbeiten") ggf. automatisch ein Retro — der Wochen-Cooldown wird dabei umgangen.
+          Ist er <strong>aus</strong>, bleibt es beim manuellen „Retro starten"-Klick (Cooldown aktiv).
+          Änderungen werden sofort gespeichert.
+        </p>
+        {retroAutoError && (
+          <p role="alert" style={styles.errorBox}>
+            Auto-Retro-Einstellung: {retroAutoError}
+          </p>
+        )}
+        {retroAutoSaved && !retroAutoError && (
+          <p role="status" style={styles.successMsg}>
+            Auto-Retro-Einstellung gespeichert.
+          </p>
+        )}
+      </div>
     </div>
   );
 }
@@ -481,5 +598,15 @@ const styles = {
     fontWeight: 600,
     minHeight: 44,
     padding: '8px 16px',
+  },
+  retroAutoSection: {
+    marginTop: 20,
+    paddingTop: 16,
+    borderTop: '1px solid #2a2a2a',
+  },
+  retroAutoStatus: {
+    color: '#9ca3af',
+    fontSize: 13,
+    fontWeight: 600,
   },
 };
