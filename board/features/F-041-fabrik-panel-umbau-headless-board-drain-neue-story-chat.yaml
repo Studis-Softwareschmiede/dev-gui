@@ -8,7 +8,7 @@ goal: 'Fabrik-Panel (Arbeiten-Tab, rechte Sidebar) auf die projektweit erlaubten
   wie Idee-Spezifizieren, aber OHNE Idee-Karte -> requirement legt Feature+Story in
   To Do an. (3) Idee-Button bleibt unveraendert. Generischer TRIGGER-Bereich verschlankt.
   Braucht Doktrin-Update (ADR-017: manueller Knopf nicht mehr interaktiv-only).'
-status: Backlog
+status: Done
 priority: P1
 spec: null
 definition_of_done: null
@@ -24,6 +24,7 @@ stories:
 - S-225
 - S-226
 - S-227
-progress: 0/7 done
+progress: 7/7 done
 created_at: '2026-07-01T20:06:40Z'
-updated_at: '2026-07-01T20:09:38Z'
+updated_at: '2026-07-02T00:29:47Z'
+done_at: '2026-07-02T00:29:47Z'

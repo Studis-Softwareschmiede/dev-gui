@@ -4,9 +4,9 @@ goal: Offene Boards (To Do / verwaiste In Progress) werden automatisch leergezog
   — über eine zentrale ProjectDrain-Engine mit zustandsbasierter Abbruch-Regel (jede
   Story Done ODER Blocked) und Eskalation-auf-Blocked. Zwei Auslöser, gleiche Engine
   manueller Knopf "Board abarbeiten" + automatischer Nachtwächter (Fenster 23:00-07:00
-  Europe/Zurich, bis 3 parallel, sanftes Ende, Token-Limit-Pause). Nutzt bezahlte Tokens
-  nachts produktiv.
-status: To Do
+  Europe/Zurich, bis 3 parallel, sanftes Ende, Token-Limit-Pause). Nutzt bezahlte
+  Tokens nachts produktiv.
+status: Done
 priority: P1
 spec: docs/specs/taktgeber-nachtwaechter.md
 definition_of_done: null
@@ -28,7 +28,7 @@ stories:
 - S-204
 - S-212
 - S-213
-progress: 8/11 done
+progress: 11/11 done
 created_at: '2026-06-30T20:09:55Z'
-updated_at: '2026-07-01T12:00:00Z'
-done_at: null
+updated_at: '2026-07-02T00:29:13Z'
+done_at: '2026-07-02T00:29:13Z'

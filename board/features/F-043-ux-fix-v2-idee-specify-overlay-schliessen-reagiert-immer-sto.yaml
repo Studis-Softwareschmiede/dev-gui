@@ -7,12 +7,13 @@ goal: 'Owner-Live-Test (Screenshot + Code-Analyse) hat zwei UX-Fehler im Idee-Sp
   aufgehaengt; (2) der Owner erwartet fire-and-forget: ''Story anlegen'' soll das
   Overlay sofort schliessen, der Finalize-Lauf laeuft detached weiter, die Idee bleibt
   sichtbar status:Idee bis der Lauf fertig ist. Revidiert AC10/AC11 + ergaenzt AC14-AC17
-  in docs/specs/idea-specify-chat.md (v2). Spec: docs/specs/idea-specify-chat.md. ERGAENZT
-  2026-07-01 (Owner-Antwort auf "wo sehe ich den Status?"): der detachte Hintergrund-Lauf
-  wird sichtbar gemacht (kombinierte Variante -- Idee-Karten-Badge running/Fehler UND
-  Reopen-Inline-Status, reload-fest ueber idea-keyed Read-Endpunkte). Durable Spec dafuer:
-  docs/specs/idea-specify-background-status.md (realisiert den bisherigen AC17-Stub).'
-status: Backlog
+  in docs/specs/idea-specify-chat.md (v2). Spec: docs/specs/idea-specify-chat.md.
+  ERGAENZT 2026-07-01 (Owner-Antwort auf "wo sehe ich den Status?"): der detachte
+  Hintergrund-Lauf wird sichtbar gemacht (kombinierte Variante -- Idee-Karten-Badge
+  running/Fehler UND Reopen-Inline-Status, reload-fest ueber idea-keyed Read-Endpunkte).
+  Durable Spec dafuer: docs/specs/idea-specify-background-status.md (realisiert den
+  bisherigen AC17-Stub).'
+status: Done
 priority: P1
 spec: docs/specs/idea-specify-chat.md
 definition_of_done: null
@@ -26,6 +27,7 @@ stories:
 - S-229
 - S-230
 - S-237
-progress: 0/3 done
+progress: 3/3 done
 created_at: '2026-07-01T20:43:56Z'
-updated_at: '2026-07-01T21:05:00Z'
+updated_at: '2026-07-02T00:29:49Z'
+done_at: '2026-07-02T00:29:49Z'

@@ -5,7 +5,7 @@ goal: 'Feature-Status im Studis-Kanban-Board wird nicht mehr unabhaengig gepfleg
   X/Y-done-Rollup): Idee-Stories ausgeschlossen; Blocked gewinnt; sonst schwaechste
   Stufe To Do<In Progress<In Review<Done; keine Stories -> Backlog. Beseitigt die
   gemeldete Drift (Feature Backlog, Story Done).'
-status: Backlog
+status: Done
 priority: P2
 spec: docs/specs/feature-status-derivation.md
 definition_of_done: null
@@ -15,6 +15,7 @@ depends: null
 owner: null
 stories:
 - S-238
-progress: 0/1 done
+progress: 1/1 done
 created_at: '2026-07-01T21:10:17Z'
-updated_at: '2026-07-01T21:11:57Z'
+updated_at: '2026-07-02T00:29:50Z'
+done_at: '2026-07-02T00:29:50Z'
