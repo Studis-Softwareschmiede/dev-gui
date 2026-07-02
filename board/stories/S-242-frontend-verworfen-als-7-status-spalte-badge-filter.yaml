@@ -2,7 +2,7 @@ id: S-242
 parent: F-049
 title: 'Frontend: Story-Status „Verworfen" als 7. Status darstellen (Kanban-Spalte
   rechts neben Done + gedaempfter Badge + Filter-Checkbox default an)'
-status: In Progress
+status: Done
 priority: P1
 spec: docs/specs/board-status-verworfen.md
 implements:
@@ -16,8 +16,8 @@ labels:
 - ui
 size_est: L
 dispo_est: '5.0'
-dispo_act: null
-dispo_forecast: null
+dispo_act: '5.5'
+dispo_forecast: -.0909
 estimate_note: 'Heuristik: n_ac=5 (AC1-AC5), n_comp~2-3 (client/src/BoardView.jsx
   fuer STATUS_LIFECYCLE+STATUS_BADGE_STYLES+Spalten/Filter/Gruppierung; AC5-Regressionstest
   referenziert src/ProjectDrain.js + src/BoardAggregator.js, aber OHNE Code-Aenderung
@@ -33,8 +33,8 @@ branch: feat/S-242-verworfen-status
 pr: null
 blocked_reason: null
 created_at: '2026-07-02T05:05:10Z'
-updated_at: '2026-07-02T18:31:06Z'
-done_at: null
+updated_at: '2026-07-02T18:59:17Z'
+done_at: '2026-07-02T18:57:31Z'
 notes: 'Spec: docs/specs/board-status-verworfen.md — implements AC1–AC5.
 
 
