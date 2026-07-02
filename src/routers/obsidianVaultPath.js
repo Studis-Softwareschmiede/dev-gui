@@ -1,7 +1,8 @@
 /**
- * Router-Wrapper: Obsidian-Vault-Pfad-Konfiguration (obsidian-vault-config AC1–AC4, AC6, AC7).
+ * Router-Wrapper: Obsidian-Vault-Pfad-Konfiguration (obsidian-vault-config AC1–AC7).
  * Factory-Signatur: create(deps) → Express Router
  * Montiert: GET/PUT/DELETE /api/settings/obsidian-vault-path
+ *           GET            /api/settings/obsidian-vault/projects (AC5)
  */
 import { obsidianVaultPathRouter } from '../obsidianVaultPathRouter.js';
 

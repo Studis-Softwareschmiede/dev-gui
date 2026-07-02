@@ -1,25 +1,31 @@
 /**
- * obsidianVaultPath.test.js — Tests für obsidian-vault-config (S-245, AC1–AC4, AC6, AC7)
+ * obsidianVaultPath.test.js — Tests für obsidian-vault-config (S-245: AC1–AC4/AC6/AC7; S-246: AC3/AC5)
  *
  * Covers (obsidian-vault-config):
  *   AC1 — GET liefert konfigurierten Pfad + Zustand (configured/not); PUT setzt/ändert,
  *         DELETE setzt zurück (HTTP-Ebene).
  *   AC2 — Beim Setzen wird geprüft: existiert / Verzeichnis / lesbar / enthält „Projekte";
  *         Fehler → 422 mit feldzugeordneter Meldung, bisher konfigurierter Wert unverändert.
- *   AC3 — Traversal-/Symlink-Schutz: ist OBSIDIAN_VAULT_DIR gesetzt, wird ein Pfad außerhalb
- *         (absoluter Pfad, `/vault-evil`-Prefix, Symlink-Flucht) mit outside-boundary abgewiesen,
- *         ohne wirksam zu werden; ohne gesetzte Env → kein Containment-Fehler.
+ *   AC3 — Traversal-/Symlink-Schutz: (a) beim SETZEN — ist OBSIDIAN_VAULT_DIR gesetzt, wird ein
+ *         Pfad außerhalb (absoluter Pfad, `/vault-evil`-Prefix, Symlink-Flucht) mit outside-boundary
+ *         abgewiesen; ohne gesetzte Env → kein Containment-Fehler. (b) beim AUFLISTEN (S-246) —
+ *         `listVaultProjects` ist strikt auf `<vault>/Projekte` confined: ein Symlink, der aus dem
+ *         Vault heraus zeigt, wird NICHT gelistet; ein Symlink-Escape des Projekte-Ordners → 4xx.
  *   AC4 — Persistenz im meta-Block (Klartext), NICHT in entries; überlebt Neustart-Simulation.
+ *   AC5 — Projekt-Auflistung (S-246): `listVaultProjects` liefert direkte Unterordner unter
+ *         `<vault>/Projekte` als [{name,path}] (nur Verzeichnisse, keine Dot-Ordner/Dateien, stabil
+ *         sortiert). HTTP-Ebene `GET .../obsidian-vault/projects`: 200 Body-Shape, 409 nicht
+ *         konfiguriert, 422 fehlendes/entferntes „Projekte" (Race), AC7 kein Rollencheck.
  *   AC6 — Audit-First (Intent vor Mutation; Audit-Write-Fehler blockiert Mutation; alt→neu).
- *   AC7 — 403 ohne CRED_ADMIN_EMAILS-Berechtigung; GET (read-only) kein zusätzlicher Rollencheck.
- *   AC5 — Projekt-Auflistung `GET .../obsidian-vault/projects` — NICHT in diesem Item (S-246);
- *         hier bewusst nicht getestet (baut auf dieser Config-Boundary auf).
+ *   AC7 — 403 ohne CRED_ADMIN_EMAILS-Berechtigung; GET (read-only, inkl. projects) kein Rollencheck.
  *
  * Strategy:
  *   - CredentialStore.read/write/deleteObsidianVaultPath: Unit-Tests mit echtem CredentialStore
  *     (tmp-Dir, kein Master-Key nötig da meta-only).
  *   - validateObsidianVaultPath: Unit-Tests — Happy/Sad-Paths mit echtem fs (tmp-Vault) +
  *     Traversal/Symlink/Boundary mit injizierten fsDeps.
+ *   - listVaultProjects (S-246): Unit-Tests mit echtem fs (tmp-Vault, echte Symlinks) für
+ *     Confinement/Dot-Filter/Sortierung/Race + injizierte deps für gezielte Fälle.
  *   - obsidianVaultPathRouter: HTTP-Integration via Express + AccessGuard-Dev-Bypass (DEV_NO_ACCESS).
  */
 
@@ -35,6 +41,8 @@ import { CredentialStore } from '../src/CredentialStore.js';
 import {
   validateObsidianVaultPath,
   ObsidianVaultPathError,
+  listVaultProjects,
+  ObsidianVaultProjectsError,
   resolveMountRoot,
   PROJEKTE_SUBDIR,
 } from '../src/obsidianVaultPath.js';
@@ -669,6 +677,270 @@ describe('E2E — echter CredentialStore + realer Vault (AC2/AC3/AC4)', () => {
       expect(await store.readObsidianVaultPath()).toBeNull();
     } finally {
       await rm(outsideTarget, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── Unit tests: listVaultProjects (S-246, AC5/AC3 — echtes fs + echte Symlinks) ──
+
+describe('listVaultProjects — AC5 Auflistung + AC3 Confinement (echtes fs)', () => {
+  let vaultDir, projekteDir;
+
+  beforeEach(async () => {
+    vaultDir = join(tmpdir(), `obs-list-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    projekteDir = join(vaultDir, PROJEKTE_SUBDIR);
+    await mkdir(projekteDir, { recursive: true });
+  });
+
+  afterEach(async () => {
+    await rm(vaultDir, { recursive: true, force: true });
+  });
+
+  it('AC5 — direkte Unterordner → [{ name, path }], nur Verzeichnisse', async () => {
+    await mkdir(join(projekteDir, 'idee-alpha'));
+    await mkdir(join(projekteDir, 'idee-beta'));
+    await writeFile(join(projekteDir, 'lose-notiz.md'), '# note'); // Datei → NICHT gelistet
+
+    const projects = await listVaultProjects(vaultDir);
+    expect(projects.map((p) => p.name)).toEqual(['idee-alpha', 'idee-beta']);
+    // path ist der kanonische, confinte Ordnerpfad (endsWith Ordnername)
+    for (const p of projects) {
+      expect(p.path.endsWith(p.name)).toBe(true);
+      expect(typeof p.path).toBe('string');
+    }
+  });
+
+  it('AC5 — leerer „Projekte"-Ordner → []', async () => {
+    const projects = await listVaultProjects(vaultDir);
+    expect(projects).toEqual([]);
+  });
+
+  it('AC5 — versteckte/Dot-Ordner werden NICHT gelistet', async () => {
+    await mkdir(join(projekteDir, '.obsidian'));
+    await mkdir(join(projekteDir, '.trash'));
+    await mkdir(join(projekteDir, 'sichtbar'));
+    const projects = await listVaultProjects(vaultDir);
+    expect(projects.map((p) => p.name)).toEqual(['sichtbar']);
+  });
+
+  it('AC5 — stabil (aufsteigend nach name) sortiert', async () => {
+    for (const n of ['zulu', 'alpha', 'mike', 'bravo']) await mkdir(join(projekteDir, n));
+    const projects = await listVaultProjects(vaultDir);
+    expect(projects.map((p) => p.name)).toEqual(['alpha', 'bravo', 'mike', 'zulu']);
+  });
+
+  it('AC5 — kein Vault-Pfad (leer) → ObsidianVaultProjectsError not-configured', async () => {
+    await expect(listVaultProjects('')).rejects.toMatchObject({ errorClass: 'not-configured' });
+    await expect(listVaultProjects('   ')).rejects.toMatchObject({ errorClass: 'not-configured' });
+  });
+
+  it('AC5 — „Projekte" fehlt trotz Vault → ObsidianVaultProjectsError missing-projekte', async () => {
+    const bareVault = join(tmpdir(), `obs-bare-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(bareVault, { recursive: true });
+    try {
+      await expect(listVaultProjects(bareVault))
+        .rejects.toMatchObject({ errorClass: 'missing-projekte' });
+    } finally {
+      await rm(bareVault, { recursive: true, force: true });
+    }
+  });
+
+  it('AC5 — Race: Vault nach Setzen entfernt → ObsidianVaultProjectsError not-exists (kein Crash)', async () => {
+    const gone = join(tmpdir(), `obs-gone-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await expect(listVaultProjects(gone)).rejects.toMatchObject({ errorClass: 'not-exists' });
+  });
+
+  it('AC3 — Symlink in „Projekte", der AUS dem Vault zeigt → NICHT gelistet', async () => {
+    const outside = join(tmpdir(), `obs-ext-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(outside, { recursive: true });
+    await mkdir(join(projekteDir, 'echt'));
+    await symlink(outside, join(projekteDir, 'escape-link')); // zeigt aus dem Vault heraus
+    try {
+      const projects = await listVaultProjects(vaultDir);
+      expect(projects.map((p) => p.name)).toEqual(['echt']); // escape-link ausgeschlossen
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('AC3 — Symlink innerhalb des Vaults, aber AUSSERHALB „Projekte" → NICHT gelistet', async () => {
+    const insideVaultOutsideProjekte = join(vaultDir, 'anderswo');
+    await mkdir(insideVaultOutsideProjekte);
+    await symlink(insideVaultOutsideProjekte, join(projekteDir, 'confine-link'));
+    await mkdir(join(projekteDir, 'echt'));
+    const projects = await listVaultProjects(vaultDir);
+    expect(projects.map((p) => p.name)).toEqual(['echt']);
+  });
+
+  it('AC3 — Symlink innerhalb „Projekte" (bleibt confined) → gelistet', async () => {
+    await mkdir(join(projekteDir, 'ziel'));
+    await symlink(join(projekteDir, 'ziel'), join(projekteDir, 'alias'));
+    const projects = await listVaultProjects(vaultDir);
+    // alias → realpath bleibt innerhalb Projekte → confined → gelistet; ziel ebenfalls
+    expect(projects.map((p) => p.name).sort()).toEqual(['alias', 'ziel']);
+  });
+
+  it('AC5 — kaputter Symlink (Ziel fehlt) → übersprungen, kein Crash', async () => {
+    await symlink(join(tmpdir(), `nonexistent-${Date.now()}`), join(projekteDir, 'broken-link'));
+    await mkdir(join(projekteDir, 'gut'));
+    const projects = await listVaultProjects(vaultDir);
+    expect(projects.map((p) => p.name)).toEqual(['gut']);
+  });
+
+  it('AC3 — Escape des „Projekte"-Ordners selbst (Symlink) → outside-boundary', async () => {
+    // Vault ohne echten Projekte-Ordner; „Projekte" ist ein Symlink aus dem Vault heraus.
+    const escVault = join(tmpdir(), `obs-escvault-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    const escTarget = join(tmpdir(), `obs-esctarget-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(escVault, { recursive: true });
+    await mkdir(escTarget, { recursive: true });
+    await symlink(escTarget, join(escVault, PROJEKTE_SUBDIR));
+    try {
+      await expect(listVaultProjects(escVault))
+        .rejects.toMatchObject({ errorClass: 'outside-boundary' });
+    } finally {
+      await rm(escVault, { recursive: true, force: true });
+      await rm(escTarget, { recursive: true, force: true });
+    }
+  });
+
+  it('AC5 — „Projekte" ist eine Datei (kein Verzeichnis) → missing-projekte', async () => {
+    const fileVault = join(tmpdir(), `obs-filevault-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(fileVault, { recursive: true });
+    await writeFile(join(fileVault, PROJEKTE_SUBDIR), 'not a dir');
+    try {
+      await expect(listVaultProjects(fileVault))
+        .rejects.toMatchObject({ errorClass: 'missing-projekte' });
+    } finally {
+      await rm(fileVault, { recursive: true, force: true });
+    }
+  });
+
+  it('ObsidianVaultProjectsError trägt name + errorClass', async () => {
+    const err = await listVaultProjects('').catch((e) => e);
+    expect(err).toBeInstanceOf(ObsidianVaultProjectsError);
+    expect(err.name).toBe('ObsidianVaultProjectsError');
+  });
+});
+
+// ── Integration: GET /api/settings/obsidian-vault/projects (S-246, AC5/AC3/AC7) ──
+
+describe('GET /api/settings/obsidian-vault/projects (AC5/AC3/AC7)', () => {
+  let server, port;
+
+  beforeEach(() => { process.env.DEV_NO_ACCESS = '1'; });
+  afterEach(async () => {
+    if (server) await closeServer(server);
+    server = null;
+    delete process.env.DEV_NO_ACCESS;
+    delete process.env.CRED_ADMIN_EMAILS;
+  });
+
+  it('AC5 — nicht konfiguriert → 409 { configured: false }', async () => {
+    ({ server, port } = await startServer(makeApp(makeFakeCredStore(null), new AuditStore())));
+    const res = await get(port, '/api/settings/obsidian-vault/projects');
+    expect(res.status).toBe(409);
+    expect(res.body.configured).toBe(false);
+  });
+
+  it('AC5 — konfiguriert + Projekte vorhanden → 200 { projects: [{ name, path }] }', async () => {
+    const listProjects = async () => [
+      { name: 'idee-a', path: '/vault/Projekte/idee-a' },
+      { name: 'idee-b', path: '/vault/Projekte/idee-b' },
+    ];
+    ({ server, port } = await startServer(
+      makeApp(makeFakeCredStore('/vault'), new AuditStore(), { listProjects }),
+    ));
+    const res = await get(port, '/api/settings/obsidian-vault/projects');
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body.projects)).toBe(true);
+    expect(res.body.projects).toEqual([
+      { name: 'idee-a', path: '/vault/Projekte/idee-a' },
+      { name: 'idee-b', path: '/vault/Projekte/idee-b' },
+    ]);
+  });
+
+  it('AC5 — leere Projekt-Liste → 200 { projects: [] }', async () => {
+    ({ server, port } = await startServer(
+      makeApp(makeFakeCredStore('/vault'), new AuditStore(), { listProjects: async () => [] }),
+    ));
+    const res = await get(port, '/api/settings/obsidian-vault/projects');
+    expect(res.status).toBe(200);
+    expect(res.body.projects).toEqual([]);
+  });
+
+  it('AC5 — „Projekte" fehlt / Race (ObsidianVaultProjectsError) → 422 mit klarer Meldung', async () => {
+    const listProjects = async () => {
+      throw new ObsidianVaultProjectsError("Vault enthält keinen Unterordner 'Projekte' (mehr)", 'missing-projekte');
+    };
+    ({ server, port } = await startServer(
+      makeApp(makeFakeCredStore('/vault'), new AuditStore(), { listProjects }),
+    ));
+    const res = await get(port, '/api/settings/obsidian-vault/projects');
+    expect(res.status).toBe(422);
+    expect(res.body.error).toMatch(/Projekte/);
+  });
+
+  it('AC5 — unerwarteter Fehler → 500, kein Crash', async () => {
+    const listProjects = async () => { throw new Error('boom'); };
+    ({ server, port } = await startServer(
+      makeApp(makeFakeCredStore('/vault'), new AuditStore(), { listProjects }),
+    ));
+    const res = await get(port, '/api/settings/obsidian-vault/projects');
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBeTruthy();
+  });
+
+  it('AC7 — projects-GET ist hinter AccessGuard, aber NICHT zusätzlich rollengeschützt', async () => {
+    process.env.CRED_ADMIN_EMAILS = 'admin@example.com'; // dev@local nicht in Liste
+    ({ server, port } = await startServer(
+      makeApp(makeFakeCredStore('/vault'), new AuditStore(), { listProjects: async () => [] }),
+    ));
+    const res = await get(port, '/api/settings/obsidian-vault/projects');
+    expect(res.status).toBe(200); // kein 403 für read-only GET
+  });
+});
+
+// ── E2E: echter CredentialStore + realer Vault + Symlink-Escape (S-246, AC5/AC3) ──
+
+describe('E2E — GET projects mit echtem Store + realem Vault (AC5/AC3)', () => {
+  let server, port, storeDir, vaultDir, projekteDir, store;
+
+  beforeEach(async () => {
+    process.env.DEV_NO_ACCESS = '1';
+    storeDir = join(tmpdir(), `obs-pe2e-cred-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    vaultDir = join(tmpdir(), `obs-pe2e-vault-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    projekteDir = join(vaultDir, PROJEKTE_SUBDIR);
+    await mkdir(projekteDir, { recursive: true });
+    store = new CredentialStore({ dir: storeDir, masterKey: null });
+  });
+
+  afterEach(async () => {
+    if (server) await closeServer(server);
+    server = null;
+    delete process.env.DEV_NO_ACCESS;
+    await rm(storeDir, { recursive: true, force: true });
+    await rm(vaultDir, { recursive: true, force: true });
+  });
+
+  it('AC5/AC3 — realer Vault: gelistet werden nur confinte Verzeichnisse, Symlink-Escape ausgeschlossen', async () => {
+    const outside = join(tmpdir(), `obs-pe2e-ext-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(outside, { recursive: true });
+    await mkdir(join(projekteDir, 'projekt-eins'));
+    await mkdir(join(projekteDir, 'projekt-zwei'));
+    await writeFile(join(projekteDir, 'README.md'), '# ignore me');
+    await symlink(outside, join(projekteDir, 'escape'));
+    try {
+      await store.writeObsidianVaultPath(vaultDir); // persistieren wie im echten Flow
+      ({ server, port } = await startServer(makeApp(store, new AuditStore())));
+      const res = await get(port, '/api/settings/obsidian-vault/projects');
+      expect(res.status).toBe(200);
+      expect(res.body.projects.map((p) => p.name)).toEqual(['projekt-eins', 'projekt-zwei']);
+      // jeder path liegt real innerhalb <vault>/Projekte (Confinement, AC3)
+      for (const p of res.body.projects) {
+        expect(p.path.includes(PROJEKTE_SUBDIR)).toBe(true);
+      }
+    } finally {
+      await rm(outside, { recursive: true, force: true });
     }
   });
 });

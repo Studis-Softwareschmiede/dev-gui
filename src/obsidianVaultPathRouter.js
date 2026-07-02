@@ -6,6 +6,11 @@
  *   GET    /api/settings/obsidian-vault-path
  *     → 200 { vaultPath: string|null, configured: boolean, mountRoot?: string }
  *       Read-only; hinter Access-Mauer, kein zusätzlicher Rollencheck (AC7).
+ *   GET    /api/settings/obsidian-vault/projects
+ *     → 200 { projects: [{ name, path }] }  — confinte Projekt-Unterordner (AC5/AC3)
+ *     → 409 { configured: false }           — kein Vault konfiguriert
+ *     → 422 { error }                        — Vault/„Projekte" (mehr) nicht erreichbar / Confinement
+ *       Read-only; hinter Access-Mauer, kein zusätzlicher Rollencheck (AC7).
  *   PUT    /api/settings/obsidian-vault-path
  *     Body { path: string }
  *     → 200 { vaultPath, configured: true }   — Erfolg (AC1)
@@ -34,6 +39,8 @@ import { Router } from 'express';
 import {
   validateObsidianVaultPath,
   ObsidianVaultPathError,
+  listVaultProjects,
+  ObsidianVaultProjectsError,
   resolveMountRoot,
 } from './obsidianVaultPath.js';
 import { toExternalBackup } from './CredentialStore.js';
@@ -85,10 +92,12 @@ function buildStateBody(vaultPath) {
  * @param {import('./AuditStore.js').AuditStore} auditStore
  * @param {object} [deps]  Injectable dependencies für Tests.
  * @param {Function} [deps.validatePath]  Override für validateObsidianVaultPath (Tests).
+ * @param {Function} [deps.listProjects]  Override für listVaultProjects (Tests).
  * @returns {import('express').Router}
  */
 export function obsidianVaultPathRouter(credentialStore, auditStore, deps = {}) {
   const _validatePath = deps.validatePath ?? validateObsidianVaultPath;
+  const _listProjects = deps.listProjects ?? listVaultProjects;
   const router = Router();
 
   /**
@@ -102,6 +111,42 @@ export function obsidianVaultPathRouter(credentialStore, auditStore, deps = {}) 
     } catch (err) {
       console.error('[obsidianVaultPathRouter] GET failed:', err.message);
       return res.status(500).json({ error: 'Obsidian-Vault-Konfiguration nicht erreichbar' });
+    }
+  });
+
+  /**
+   * GET /api/settings/obsidian-vault/projects — direkte Projekt-Unterordner unter
+   * `<vault>/Projekte` (AC5). Read-only; hinter Access-Mauer, kein Rollencheck (AC7).
+   *
+   *   → 200 { projects: [{ name, path }] }  — stabil sortiert, nur confinte Verzeichnisse (AC5/AC3)
+   *   → 409 { configured: false }           — kein Vault konfiguriert (s. Verträge)
+   *   → 422 { error }                        — Vault/„Projekte" (mehr) nicht erreichbar (Race/Confinement)
+   *   → 500 { error }                        — unerwarteter Fehler
+   */
+  router.get('/api/settings/obsidian-vault/projects', async (_req, res) => {
+    let vaultPath;
+    try {
+      vaultPath = await credentialStore.readObsidianVaultPath();
+    } catch (err) {
+      console.error('[obsidianVaultPathRouter] GET projects readVaultPath failed:', err.message);
+      return res.status(500).json({ error: 'Obsidian-Vault-Konfiguration nicht erreichbar' });
+    }
+
+    // Kein Vault konfiguriert → definierte Antwort, kein Crash (AC5 / Verträge).
+    if (!vaultPath || !vaultPath.trim()) {
+      return res.status(409).json({ configured: false });
+    }
+
+    try {
+      const projects = await _listProjects(vaultPath);
+      return res.json({ projects });
+    } catch (err) {
+      // Confinement/„Projekte"-fehlt/Race → 4xx mit klarer Meldung (AC5 / Verträge).
+      if (err instanceof ObsidianVaultProjectsError) {
+        return res.status(422).json({ error: err.message });
+      }
+      console.error('[obsidianVaultPathRouter] GET projects unexpected error:', err.message);
+      return res.status(500).json({ error: 'Projekt-Liste nicht erreichbar' });
     }
   });
 
