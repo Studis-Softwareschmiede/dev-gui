@@ -96,6 +96,14 @@
  *   Abschnitt „Nachtwächter" bindet die eigenständige Komponente `NightWatchSettings.jsx`
  *   ein (additiv, kein Umbau bestehender Sektionen — s. dortige Modul-Doku für Felder/AC17).
  *
+ * Obsidian-Vault-Pfad (obsidian-vault-config S-247 — AC1):
+ *   Eigene Sektion „Obsidian-Vault" (A2) mit `ObsidianVaultPathSection`: zeigt den
+ *   konfigurierten Vault-Pfad + Zustand (konfiguriert / nicht konfiguriert) und erlaubt
+ *   setzen/ändern (PUT) und löschen (DELETE, zurücksetzen). Read-Endpunkt
+ *   GET /api/settings/obsidian-vault-path → { vaultPath, configured, mountRoot? }.
+ *   AC2/AC3-UI-Anteil: 4xx/422 beim Setzen → feldzugeordnete Fehlermeldung (role=alert),
+ *   der bisher konfigurierte Wert bleibt sichtbar (kein Reload bei Fehler).
+ *
  * @param {{ onNavigate: (view: string) => void }} props
  */
 
@@ -295,6 +303,51 @@ async function fetchWorkspaceHealth(fetchImpl) {
   const res = await fn('/api/settings/workspace-health');
   if (!res.ok) throw new Error(`Workspace-Health laden fehlgeschlagen (${res.status})`);
   return res.json();
+}
+
+// ── Obsidian-Vault-Path-API-Helfer (obsidian-vault-config AC1) ────────────────
+
+/**
+ * GET /api/settings/obsidian-vault-path
+ * @param {typeof fetch} [fetchImpl]
+ * @returns {Promise<{ vaultPath: string|null, configured: boolean, mountRoot?: string }>}
+ */
+async function fetchObsidianVaultPath(fetchImpl) {
+  const fn = fetchImpl ?? globalThis.fetch.bind(globalThis);
+  const res = await fn('/api/settings/obsidian-vault-path');
+  if (!res.ok) throw new Error(`Obsidian-Vault-Pfad laden fehlgeschlagen (${res.status})`);
+  return res.json();
+}
+
+/**
+ * PUT /api/settings/obsidian-vault-path
+ * @param {string} path
+ * @param {typeof fetch} [fetchImpl]
+ * @returns {Promise<{ vaultPath: string, configured: true }>}
+ */
+async function putObsidianVaultPath(path, fetchImpl) {
+  const fn = fetchImpl ?? globalThis.fetch.bind(globalThis);
+  const res = await fn('/api/settings/obsidian-vault-path', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error ?? `Speichern fehlgeschlagen (${res.status})`);
+  return data;
+}
+
+/**
+ * DELETE /api/settings/obsidian-vault-path
+ * @param {typeof fetch} [fetchImpl]
+ * @returns {Promise<{ vaultPath: null, configured: false }>}
+ */
+async function deleteObsidianVaultPath(fetchImpl) {
+  const fn = fetchImpl ?? globalThis.fetch.bind(globalThis);
+  const res = await fn('/api/settings/obsidian-vault-path', { method: 'DELETE' });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error ?? `Zurücksetzen fehlgeschlagen (${res.status})`);
+  return data;
 }
 
 // ── SSH-Key-API-Helfer ────────────────────────────────────────────────────────
@@ -1793,6 +1846,217 @@ function WorkspacePathSection({ effectivePath, source, mountRoot, onReload, fetc
               disabled={resetting}
               style={wsPathStyles.btnDanger}
               aria-label="Workspace-Pfad auf Env-Default zurücksetzen"
+              aria-busy={resetting}
+            >
+              {resetting ? 'Zurücksetzen…' : 'Zurücksetzen'}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── ObsidianVaultPathSection (obsidian-vault-config AC1) ──────────────────────
+
+/**
+ * Sektion „Obsidian-Vault-Pfad" — zeigt den konfigurierten Vault-Pfad inkl. Zustand
+ * (konfiguriert / nicht konfiguriert) und erlaubt setzen/ändern (PUT) und löschen (DELETE).
+ * Platziert in einer eigenen „Obsidian"-Sektion der Einstellungen (A2).
+ *
+ * AC1: Anzeige konfigurierter Pfad + Zustand; Setzen/Ändern/Löschen (zurücksetzen).
+ *      Read-Endpunkt liefert `{ vaultPath, configured, mountRoot? }`.
+ * AC2/AC3 (UI-Anteil): schlägt ein PUT fehl (422/4xx) → feldzugeordnete Fehlermeldung
+ *      (role=alert); der bisher konfigurierte Wert bleibt sichtbar (kein Reload bei Fehler).
+ * A11y: label/htmlFor, aria-describedby, role=status/alert, aria-busy, Fokusführung;
+ *      Zustand als Text sichtbar (nicht nur Farbe).
+ *
+ * @param {{
+ *   vaultPath: string|null,
+ *   configured: boolean,
+ *   mountRoot?: string,
+ *   onReload: () => Promise<void>,
+ *   fetchFn?: typeof fetch,
+ * }} props
+ */
+function ObsidianVaultPathSection({ vaultPath, configured, mountRoot, onReload, fetchFn }) {
+  const [editing, setEditing] = useState(false);
+  const [inputVal, setInputVal] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [resetting, setResetting] = useState(false);
+  const [error, setError] = useState(null);
+  const [successMsg, setSuccessMsg] = useState(null);
+  const inputRef = useRef(null);
+  const successRef = useRef(null);
+  const ERROR_ID = 'obsidian-vault-path-error';
+  const SUCCESS_ID = 'obsidian-vault-path-success';
+
+  // Fokus auf Input wenn Bearbeiten-Modus öffnet
+  useEffect(() => {
+    if (editing && inputRef.current) {
+      inputRef.current.focus();
+    }
+  }, [editing]);
+
+  // Fokus auf Erfolgsmeldung sobald sie gerendert wird (nach State-Update + Re-render)
+  const [pendingFocusSuccess, setPendingFocusSuccess] = useState(false);
+  useEffect(() => {
+    if (pendingFocusSuccess && successRef.current) {
+      successRef.current.focus();
+      setPendingFocusSuccess(false);
+    }
+  });
+
+  const handleSave = useCallback(async () => {
+    setError(null);
+    setSuccessMsg(null);
+
+    const trimmed = inputVal.trim();
+    if (!trimmed) {
+      setError('Obsidian-Vault-Pfad darf nicht leer sein.');
+      inputRef.current?.focus();
+      return;
+    }
+
+    setSaving(true);
+    try {
+      await putObsidianVaultPath(trimmed, fetchFn);
+      setInputVal('');
+      setEditing(false);
+      await onReload();
+      setSuccessMsg('Obsidian-Vault-Pfad gespeichert.');
+      setPendingFocusSuccess(true);
+    } catch (err) {
+      // AC2/AC3 (UI): feldzugeordnete Fehlermeldung; alter Wert bleibt sichtbar (kein Reload)
+      setError(err.message);
+      inputRef.current?.focus();
+    } finally {
+      setSaving(false);
+    }
+  }, [inputVal, onReload, fetchFn]);
+
+  const handleReset = useCallback(async () => {
+    setError(null);
+    setSuccessMsg(null);
+    setResetting(true);
+    try {
+      await deleteObsidianVaultPath(fetchFn);
+      await onReload();
+      setSuccessMsg('Obsidian-Vault-Pfad zurückgesetzt (nicht konfiguriert).');
+      setPendingFocusSuccess(true);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setResetting(false);
+    }
+  }, [onReload, fetchFn]);
+
+  const handleCancel = useCallback(() => {
+    setInputVal('');
+    setError(null);
+    setEditing(false);
+  }, []);
+
+  const stateLabel = configured ? 'konfiguriert' : 'nicht konfiguriert';
+
+  return (
+    <div style={wsPathStyles.wrapper}>
+      {/* Konfigurierter Vault-Pfad + Zustand */}
+      <div style={wsPathStyles.pathRow}>
+        <span style={wsPathStyles.pathLabel}>Aktueller Vault-Pfad:</span>
+        <code style={wsPathStyles.pathValue}>
+          {vaultPath ?? '(nicht konfiguriert)'}
+        </code>
+      </div>
+      <div style={wsPathStyles.sourceRow}>
+        <span style={wsPathStyles.sourceText}>
+          Zustand: <strong>{stateLabel}</strong>
+        </span>
+        {mountRoot && (
+          <span style={wsPathStyles.mountHint}>
+            Mount-Schranke: <code style={wsPathStyles.mountCode}>{mountRoot}</code>
+          </span>
+        )}
+      </div>
+
+      {/* Erfolgs-Feedback */}
+      {successMsg && (
+        <p
+          id={SUCCESS_ID}
+          ref={successRef}
+          style={wsPathStyles.success}
+          role="status"
+          tabIndex={-1}
+        >
+          {successMsg}
+        </p>
+      )}
+
+      {/* Fehler-Feedback (feldzugeordnet) */}
+      {error && (
+        <p
+          id={ERROR_ID}
+          style={wsPathStyles.error}
+          role="alert"
+        >
+          {error}
+        </p>
+      )}
+
+      {editing ? (
+        <div style={wsPathStyles.editArea}>
+          <label htmlFor="obsidian-vault-path-input" style={wsPathStyles.fieldLabel}>
+            Neuer Obsidian-Vault-Pfad
+          </label>
+          <input
+            id="obsidian-vault-path-input"
+            ref={inputRef}
+            type="text"
+            value={inputVal}
+            onChange={(e) => setInputVal(e.target.value)}
+            placeholder={mountRoot ? `z.B. ${mountRoot}/MeinVault` : '/vault/MeinVault'}
+            style={{ ...wsPathStyles.input, color: '#e5e7eb', caretColor: '#e5e7eb' }}
+            aria-describedby={error ? ERROR_ID : undefined}
+            autoComplete="off"
+            disabled={saving}
+          />
+          <div style={wsPathStyles.actionRow}>
+            <button
+              type="button"
+              onClick={handleSave}
+              disabled={saving}
+              style={wsPathStyles.btnPrimary}
+              aria-busy={saving}
+            >
+              {saving ? 'Speichern…' : 'Speichern'}
+            </button>
+            <button
+              type="button"
+              onClick={handleCancel}
+              disabled={saving}
+              style={wsPathStyles.btnSecondary}
+            >
+              Abbrechen
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div style={wsPathStyles.actionRow}>
+          <button
+            type="button"
+            onClick={() => { setError(null); setSuccessMsg(null); setInputVal(''); setEditing(true); }}
+            style={wsPathStyles.btnSmall}
+            aria-label={configured ? 'Obsidian-Vault-Pfad ändern' : 'Obsidian-Vault-Pfad setzen'}
+          >
+            {configured ? 'Ändern' : 'Setzen'}
+          </button>
+          {configured && (
+            <button
+              type="button"
+              onClick={handleReset}
+              disabled={resetting}
+              style={wsPathStyles.btnDanger}
+              aria-label="Obsidian-Vault-Pfad zurücksetzen"
               aria-busy={resetting}
             >
               {resetting ? 'Zurücksetzen…' : 'Zurücksetzen'}
@@ -4467,6 +4731,9 @@ export function SettingsView({ onNavigate, fetchFn }) {
   const [workspacePathError, setWorkspacePathError] = useState(null);
   // AC3 (workspace-health-hinweis): health state
   const [workspaceHealth, setWorkspaceHealth] = useState(null);
+  // obsidian-vault-config AC1: Obsidian-Vault-Pfad state
+  const [obsidianVaultPath, setObsidianVaultPath] = useState(null);
+  const [obsidianVaultPathError, setObsidianVaultPathError] = useState(null);
   // credential-unlock-dialog #185: Bitwarden-Unlock-Status + Dialog
   const [credentialStatus, setCredentialStatus] = useState(null); // null = noch nicht geladen
   const [showUnlockDialog, setShowUnlockDialog] = useState(false);
@@ -4528,12 +4795,29 @@ export function SettingsView({ onNavigate, fetchFn }) {
     }
   }, [fetchFn]);
 
+  /**
+   * obsidian-vault-config AC1: Fetches Obsidian-Vault-Pfad und aktualisiert State.
+   * Fehler werden in der Obsidian-Sektion sichtbar (nicht verschluckt — Pfad wird hier
+   * aktiv konfiguriert).
+   */
+  const reloadObsidianVaultPath = useCallback(async () => {
+    try {
+      const data = await fetchObsidianVaultPath(fetchFn);
+      setObsidianVaultPath(data);
+      setObsidianVaultPathError(null);
+    } catch (err) {
+      setObsidianVaultPath(null);
+      setObsidianVaultPathError(err.message ?? 'Unbekannter Fehler');
+    }
+  }, [fetchFn]);
+
   useEffect(() => {
     load();
     reloadWorkspacePath();
     reloadWorkspaceHealth();
+    reloadObsidianVaultPath();
     reloadCredentialStatus();
-  }, [load, reloadWorkspacePath, reloadWorkspaceHealth, reloadCredentialStatus]);
+  }, [load, reloadWorkspacePath, reloadWorkspaceHealth, reloadObsidianVaultPath, reloadCredentialStatus]);
 
   /** Hilfsfunktion: Metadaten eines bestimmten Felds aus der Liste. */
   const getMeta = useCallback((integration, name) => {
@@ -4641,6 +4925,29 @@ export function SettingsView({ onNavigate, fetchFn }) {
               />
             )}
           </div>
+        </section>
+
+        {/* Obsidian-Vault (obsidian-vault-config AC1) — eigene Sektion (A2) */}
+        <section aria-labelledby="settings-section-obsidian" style={styles.section}>
+          <h2 id="settings-section-obsidian" style={styles.sectionHeading}>Obsidian-Vault</h2>
+          <p style={styles.sectionDesc}>
+            Pfad zum lokalen Obsidian-Vault (dem Ordner mit einem Unterordner „Projekte").
+            Grundlage für den Anlage-Weg aus lokalen Notizen. Kein Geheimnis.
+          </p>
+          {obsidianVaultPathError && (
+            <p style={styles.loadError} role="alert" aria-live="polite">
+              Obsidian-Vault-Pfad konnte nicht geladen werden: {obsidianVaultPathError}
+            </p>
+          )}
+          {obsidianVaultPath && (
+            <ObsidianVaultPathSection
+              vaultPath={obsidianVaultPath.vaultPath}
+              configured={obsidianVaultPath.configured}
+              mountRoot={obsidianVaultPath.mountRoot}
+              onReload={reloadObsidianVaultPath}
+              fetchFn={fetchFn}
+            />
+          )}
         </section>
 
         {/* Cloudflare */}

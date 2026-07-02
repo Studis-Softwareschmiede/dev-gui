@@ -39,6 +39,18 @@
  *   A11y — Touch-Targets ≥ 44 px (Display- + Editier-Modus); Fokusführung via activeElement;
  *           role=status bei Erfolg, role=alert bei Fehler; Kontrast #9ca3af.
  *
+ * Covers (obsidian-vault-config AC1 — S-247, Frontend-UI-Anteil):
+ *   AC1  — Eigene Sektion „Obsidian-Vault": zeigt konfigurierten Vault-Pfad (bzw.
+ *           „nicht konfiguriert") + Zustand als Text; Buttons Setzen (unkonfiguriert) bzw.
+ *           Ändern + Zurücksetzen (konfiguriert). GET liefert { vaultPath, configured, mountRoot? }.
+ *           Setzen feuert PUT, Zustand wechselt auf konfiguriert; Zurücksetzen feuert DELETE.
+ *   AC2/AC3 (UI-Anteil) — 422 beim Setzen → role=alert mit Backend-Meldung, alter Wert bleibt
+ *           sichtbar; leeres Feld → Frontend-Fehlermeldung, kein PUT; aria-describedby gesetzt.
+ *   A11y — label/htmlFor auf Input; role=status bei Erfolg, role=alert bei Fehler;
+ *           Touch-Targets ≥ 44 px; Zustand als Text (nicht nur Farbe).
+ *   Hinweis: Backend-ACs (AC2 Validierung, AC3 Traversal/Symlink, AC4 Persistenz, AC5 Projekt-Liste,
+ *           AC6 Audit, AC7 Authz) sind in obsidianVaultPath*.test.js abgedeckt, nicht hier.
+ *
  * Covers (ssh-key-generation AC1/AC3/AC4/AC6/AC7/AC8 — #116):
  *   GEN-AC1 — „Keypair erzeugen"-Button je Rollen-Label root|alex vorhanden und auslösbar.
  *   GEN-AC3 — Public-Key nach Generierung vollständig angezeigt + kopierbar;
@@ -206,6 +218,20 @@ const CONFIGURED_WORKSPACE_PATH = {
   mountRoot: '/workspace',
 };
 
+/** Obsidian-Vault-Path-Antwort: nicht konfiguriert (mit optionaler Mount-Schranke). */
+const UNCONFIGURED_OBSIDIAN_VAULT_PATH = {
+  vaultPath: null,
+  configured: false,
+  mountRoot: '/vault',
+};
+
+/** Obsidian-Vault-Path-Antwort: konfiguriert. */
+const CONFIGURED_OBSIDIAN_VAULT_PATH = {
+  vaultPath: '/vault/MeinVault',
+  configured: true,
+  mountRoot: '/vault',
+};
+
 /**
  * Erstellt einen jest.fn() fetch, der auf verschiedene Requests antwortet.
  * Unterstützt SSH-Key-Endpoints (/api/settings/ssh-keys*),
@@ -309,6 +335,10 @@ function makeFetch({
   getWorkspacePath   = { ok: true, status: 200, data: DEFAULT_WORKSPACE_PATH },
   putWorkspacePath   = { ok: true, status: 200, data: { effectivePath: '/workspace/projekt', source: 'configured' } },
   deleteWorkspacePath = { ok: true, status: 200, data: { effectivePath: '/workspace', source: 'env-default' } },
+  // obsidian-vault-config AC1: obsidian-vault-path endpoints (GET/PUT/DELETE)
+  getObsidianVaultPath = { ok: true, status: 200, data: UNCONFIGURED_OBSIDIAN_VAULT_PATH },
+  putObsidianVaultPath = { ok: true, status: 200, data: { vaultPath: '/vault/MeinVault', configured: true } },
+  deleteObsidianVaultPath = { ok: true, status: 200, data: { vaultPath: null, configured: false } },
   // S-143 AC12: backup-status endpoint (I1-Fix: kein backupDir)
   getBackupStatus = { ok: true, status: 200, data: DEFAULT_BACKUP_STATUS_NO_OFFHOST },
   // S-143 Architekt-Entscheid: backup-config endpoint (GET/PUT)
@@ -423,6 +453,20 @@ function makeFetch({
       }
       if (method === 'DELETE') {
         return { ok: deleteWorkspacePath.ok, status: deleteWorkspacePath.status, json: async () => deleteWorkspacePath.data };
+      }
+    }
+
+    // obsidian-vault-config AC1: Obsidian-Vault-Path-Endpunkte
+    if (url === '/api/settings/obsidian-vault-path') {
+      if (method === 'GET') {
+        if (getObsidianVaultPath === 'reject') throw new Error('obsidian-vault-path endpoint unreachable');
+        return { ok: getObsidianVaultPath.ok, status: getObsidianVaultPath.status, json: async () => getObsidianVaultPath.data };
+      }
+      if (method === 'PUT') {
+        return { ok: putObsidianVaultPath.ok, status: putObsidianVaultPath.status, json: async () => putObsidianVaultPath.data };
+      }
+      if (method === 'DELETE') {
+        return { ok: deleteObsidianVaultPath.ok, status: deleteObsidianVaultPath.status, json: async () => deleteObsidianVaultPath.data };
       }
     }
 
@@ -2497,6 +2541,433 @@ describe('SettingsView — WS-A11y: Touch-Target + Fokusführung', () => {
         el.textContent.match(/workspace-pfad konnte nicht geladen werden/i),
       );
       expect(hasWsError).toBe(true);
+    });
+  });
+});
+
+// ── obsidian-vault-config AC1 — Obsidian-Vault-Sektion (S-247) ───────────────
+
+describe('SettingsView — Obsidian AC1: Sektion-Grundstruktur', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('AC1 — rendert h2 "Obsidian-Vault" als eigene Sektion', async () => {
+    const { getByRole } = renderView(makeFetch());
+    await waitFor(() => {
+      expect(getByRole('heading', { name: /^obsidian-vault$/i })).toBeTruthy();
+    });
+  });
+
+  it('AC1 — zeigt "(nicht konfiguriert)" + Zustand-Text wenn nicht konfiguriert', async () => {
+    const { getByRole } = renderView(makeFetch({
+      getObsidianVaultPath: { ok: true, status: 200, data: UNCONFIGURED_OBSIDIAN_VAULT_PATH },
+    }));
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      expect(main.textContent).toContain('(nicht konfiguriert)');
+      // Zustand als Text sichtbar (nicht nur Farbe)
+      expect(main.textContent).toMatch(/zustand:\s*nicht konfiguriert/i);
+    });
+  });
+
+  it('AC1 — zeigt konfigurierten Vault-Pfad + Zustand "konfiguriert"', async () => {
+    const { getByRole } = renderView(makeFetch({
+      getObsidianVaultPath: { ok: true, status: 200, data: CONFIGURED_OBSIDIAN_VAULT_PATH },
+    }));
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      expect(main.textContent).toContain('/vault/MeinVault');
+      expect(main.textContent).toMatch(/zustand:\s*konfiguriert/i);
+    });
+  });
+
+  it('AC1 — zeigt "Setzen"-Button wenn nicht konfiguriert', async () => {
+    const { getAllByRole } = renderView(makeFetch({
+      getObsidianVaultPath: { ok: true, status: 200, data: UNCONFIGURED_OBSIDIAN_VAULT_PATH },
+    }));
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/obsidian-vault-pfad setzen/i))).toBe(true);
+      // Kein Zurücksetzen-Button solange nicht konfiguriert
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/obsidian-vault-pfad zurücksetzen/i))).toBe(false);
+    });
+  });
+
+  it('AC1 — zeigt "Ändern"- und "Zurücksetzen"-Button wenn konfiguriert', async () => {
+    const { getAllByRole } = renderView(makeFetch({
+      getObsidianVaultPath: { ok: true, status: 200, data: CONFIGURED_OBSIDIAN_VAULT_PATH },
+    }));
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/obsidian-vault-pfad ändern/i))).toBe(true);
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/obsidian-vault-pfad zurücksetzen/i))).toBe(true);
+    });
+  });
+});
+
+describe('SettingsView — Obsidian AC1: Setzen (PUT)', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('AC1 — Klick auf "Setzen" öffnet Eingabefeld mit label/htmlFor', async () => {
+    const { getAllByRole } = renderView(makeFetch({
+      getObsidianVaultPath: { ok: true, status: 200, data: UNCONFIGURED_OBSIDIAN_VAULT_PATH },
+    }));
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/obsidian-vault-pfad setzen/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const setzenBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/obsidian-vault-pfad setzen/i),
+      );
+      fireEvent.click(setzenBtn);
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('obsidian-vault-path-input')).toBeTruthy();
+      expect(document.querySelector('label[for="obsidian-vault-path-input"]')).toBeTruthy();
+    });
+  });
+
+  it('AC1 — erfolgreiches Setzen: PUT abgefeuert, Zustand wechselt auf "konfiguriert"', async () => {
+    let callCount = 0;
+    const fetchFn = jest.fn(async (url, opts = {}) => {
+      const method = opts.method ?? 'GET';
+      if (url === '/api/settings/obsidian-vault-path') {
+        if (method === 'PUT') {
+          return { ok: true, status: 200, json: async () => ({ vaultPath: '/vault/MeinVault', configured: true }) };
+        }
+        if (method === 'GET') {
+          callCount++;
+          const data = callCount > 1 ? CONFIGURED_OBSIDIAN_VAULT_PATH : UNCONFIGURED_OBSIDIAN_VAULT_PATH;
+          return { ok: true, status: 200, json: async () => data };
+        }
+      }
+      return { ok: true, status: 200, json: async () => EMPTY_CREDS };
+    });
+    globalThis.fetch = fetchFn;
+    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/obsidian-vault-pfad setzen/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const setzenBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/obsidian-vault-pfad setzen/i),
+      );
+      fireEvent.click(setzenBtn);
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('obsidian-vault-path-input')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.change(document.getElementById('obsidian-vault-path-input'), {
+        target: { value: '/vault/MeinVault' },
+      });
+    });
+
+    await act(async () => {
+      const saveBtns = Array.from(document.querySelectorAll('button')).filter(
+        (b) => b.textContent.trim() === 'Speichern',
+      );
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    await waitFor(() => {
+      const putCalls = fetchFn.mock.calls.filter(
+        ([u, o]) => (o?.method ?? 'GET') === 'PUT' && u === '/api/settings/obsidian-vault-path',
+      );
+      expect(putCalls.length).toBeGreaterThan(0);
+    });
+
+    // Zustand wechselt nach Reload auf "konfiguriert" mit dem neuen Pfad
+    await waitFor(() => {
+      const main = document.querySelector('main');
+      expect(main.textContent).toContain('/vault/MeinVault');
+      expect(main.textContent).toMatch(/zustand:\s*konfiguriert/i);
+    });
+  });
+
+  it('AC1 — Erfolg zeigt role=status Meldung', async () => {
+    const fetchFn = makeFetch({
+      getObsidianVaultPath: { ok: true, status: 200, data: UNCONFIGURED_OBSIDIAN_VAULT_PATH },
+    });
+    globalThis.fetch = fetchFn;
+    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/obsidian-vault-pfad setzen/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const setzenBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/obsidian-vault-pfad setzen/i),
+      );
+      fireEvent.click(setzenBtn);
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('obsidian-vault-path-input')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.change(document.getElementById('obsidian-vault-path-input'), {
+        target: { value: '/vault/MeinVault' },
+      });
+    });
+
+    await act(async () => {
+      const saveBtns = Array.from(document.querySelectorAll('button')).filter(
+        (b) => b.textContent.trim() === 'Speichern',
+      );
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    await waitFor(() => {
+      const statusEls = Array.from(document.querySelectorAll('[role="status"]'));
+      expect(statusEls.some((el) => el.textContent.match(/obsidian-vault-pfad gespeichert/i))).toBe(true);
+    });
+  });
+});
+
+describe('SettingsView — Obsidian AC1: Zurücksetzen (DELETE)', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('AC1 — Zurücksetzen: DELETE abgefeuert, Zustand wechselt auf "nicht konfiguriert"', async () => {
+    let callCount = 0;
+    const fetchFn = jest.fn(async (url, opts = {}) => {
+      const method = opts.method ?? 'GET';
+      if (url === '/api/settings/obsidian-vault-path') {
+        if (method === 'DELETE') {
+          return { ok: true, status: 200, json: async () => ({ vaultPath: null, configured: false }) };
+        }
+        if (method === 'GET') {
+          callCount++;
+          const data = callCount > 1 ? UNCONFIGURED_OBSIDIAN_VAULT_PATH : CONFIGURED_OBSIDIAN_VAULT_PATH;
+          return { ok: true, status: 200, json: async () => data };
+        }
+      }
+      return { ok: true, status: 200, json: async () => EMPTY_CREDS };
+    });
+    globalThis.fetch = fetchFn;
+    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/obsidian-vault-pfad zurücksetzen/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const resetBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/obsidian-vault-pfad zurücksetzen/i),
+      );
+      fireEvent.click(resetBtn);
+    });
+
+    await waitFor(() => {
+      const deleteCalls = fetchFn.mock.calls.filter(
+        ([u, o]) => (o?.method ?? 'GET') === 'DELETE' && u === '/api/settings/obsidian-vault-path',
+      );
+      expect(deleteCalls.length).toBeGreaterThan(0);
+    });
+
+    await waitFor(() => {
+      const main = document.querySelector('main');
+      expect(main.textContent).toMatch(/zustand:\s*nicht konfiguriert/i);
+    });
+  });
+});
+
+describe('SettingsView — Obsidian AC2/AC3 (UI): Validierungsfehler beim Setzen', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('AC2/AC3 — 422 beim Setzen: role=alert mit Backend-Meldung, alter Wert bleibt sichtbar', async () => {
+    const fetchFn = makeFetch({
+      getObsidianVaultPath: { ok: true, status: 200, data: CONFIGURED_OBSIDIAN_VAULT_PATH },
+      putObsidianVaultPath: { ok: false, status: 422, data: { error: 'Unterordner "Projekte" fehlt im angegebenen Vault' } },
+    });
+    globalThis.fetch = fetchFn;
+    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/obsidian-vault-pfad ändern/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const changeBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/obsidian-vault-pfad ändern/i),
+      );
+      fireEvent.click(changeBtn);
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('obsidian-vault-path-input')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.change(document.getElementById('obsidian-vault-path-input'), {
+        target: { value: '/vault/OhneProjekte' },
+      });
+    });
+
+    await act(async () => {
+      const saveBtns = Array.from(document.querySelectorAll('button')).filter(
+        (b) => b.textContent.trim() === 'Speichern',
+      );
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    await waitFor(() => {
+      const alert = document.getElementById('obsidian-vault-path-error');
+      expect(alert).toBeTruthy();
+      expect(alert.getAttribute('role')).toBe('alert');
+      expect(alert.textContent).toMatch(/projekte.*fehlt/i);
+      // Alter, konfigurierter Wert bleibt sichtbar (kein Reload bei Fehler)
+      const main = document.querySelector('main');
+      expect(main.textContent).toContain('/vault/MeinVault');
+      // aria-describedby verknüpft Input mit Fehler
+      const input = document.getElementById('obsidian-vault-path-input');
+      expect(input.getAttribute('aria-describedby')).toBe('obsidian-vault-path-error');
+    });
+  });
+
+  it('AC1 — leeres Feld → Frontend-Fehlermeldung, kein PUT abgefeuert', async () => {
+    const fetchFn = makeFetch({
+      getObsidianVaultPath: { ok: true, status: 200, data: UNCONFIGURED_OBSIDIAN_VAULT_PATH },
+    });
+    globalThis.fetch = fetchFn;
+    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/obsidian-vault-pfad setzen/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const setzenBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/obsidian-vault-pfad setzen/i),
+      );
+      fireEvent.click(setzenBtn);
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('obsidian-vault-path-input')).toBeTruthy();
+    });
+
+    await act(async () => {
+      // Feld leer lassen und speichern
+      const saveBtns = Array.from(document.querySelectorAll('button')).filter(
+        (b) => b.textContent.trim() === 'Speichern',
+      );
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    await waitFor(() => {
+      const alert = document.getElementById('obsidian-vault-path-error');
+      expect(alert).toBeTruthy();
+      expect(alert.textContent).toMatch(/darf nicht leer sein/i);
+    });
+
+    const putCalls = fetchFn.mock.calls.filter(
+      ([u, o]) => (o?.method ?? 'GET') === 'PUT' && u === '/api/settings/obsidian-vault-path',
+    );
+    expect(putCalls.length).toBe(0);
+  });
+});
+
+describe('SettingsView — Obsidian A11y', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('A11y — Obsidian-Buttons (Ändern/Zurücksetzen) haben minHeight ≥ 44 px', async () => {
+    const fetchFn = makeFetch({
+      getObsidianVaultPath: { ok: true, status: 200, data: CONFIGURED_OBSIDIAN_VAULT_PATH },
+    });
+    globalThis.fetch = fetchFn;
+    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+
+    await waitFor(() => {
+      const btns = getAllByRole('button').filter((b) =>
+        (b.getAttribute('aria-label') ?? '').match(/obsidian-vault-pfad/i),
+      );
+      expect(btns.length).toBeGreaterThan(0);
+      for (const btn of btns) {
+        expect(parseInt(btn.style.minHeight ?? '0', 10)).toBeGreaterThanOrEqual(44);
+      }
+    });
+  });
+
+  it('A11y — Fokus landet nach 422-Fehler auf dem Input (activeElement)', async () => {
+    const fetchFn = makeFetch({
+      getObsidianVaultPath: { ok: true, status: 200, data: UNCONFIGURED_OBSIDIAN_VAULT_PATH },
+      putObsidianVaultPath: { ok: false, status: 422, data: { error: 'Pfad existiert nicht oder ist kein Verzeichnis' } },
+    });
+    globalThis.fetch = fetchFn;
+    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/obsidian-vault-pfad setzen/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const setzenBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/obsidian-vault-pfad setzen/i),
+      );
+      fireEvent.click(setzenBtn);
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('obsidian-vault-path-input')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.change(document.getElementById('obsidian-vault-path-input'), {
+        target: { value: '/nicht/vorhanden' },
+      });
+    });
+
+    await act(async () => {
+      const saveBtns = Array.from(document.querySelectorAll('button')).filter(
+        (b) => b.textContent.trim() === 'Speichern',
+      );
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('obsidian-vault-path-error')).toBeTruthy();
+      expect(document.activeElement).toBe(document.getElementById('obsidian-vault-path-input'));
+    });
+  });
+
+  it('A11y — Obsidian-Vault-Pfad-Ladefehler zeigt role=alert', async () => {
+    const fetchFn = makeFetch({ getObsidianVaultPath: 'reject' });
+    globalThis.fetch = fetchFn;
+    const { getByRole } = render(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      const alerts = main.querySelectorAll('[role="alert"]');
+      const hasErr = Array.from(alerts).some((el) =>
+        el.textContent.match(/obsidian-vault-pfad konnte nicht geladen werden/i),
+      );
+      expect(hasErr).toBe(true);
     });
   });
 });
