@@ -418,6 +418,53 @@ export function pickLongestUnmovedTarget(targets, lastChangeRound) {
   return best;
 }
 
+/**
+ * Leitet aus dem Anfangs-Status-Snapshot (Status je Story-ID VOR der ersten
+ * `/flow`-Runde) und dem End-Snapshot-Projekt (letzter Board-Scan) die während
+ * des Drains erledigten bzw. blockierten Stories ab (docs/specs/
+ * drain-completion-report.md AC1/AC2):
+ *   - `completed` — Stories, die von einem Nicht-`Done`-Status (`To Do`/
+ *     `In Progress`) nach `Done` übergingen.
+ *   - `blocked`   — Stories, die nach `Blocked` übergingen (Obermenge der
+ *     Taktgeber-`escalated`-Liste: Eskalationen durch den Taktgeber PLUS
+ *     durch `/flow` selbst gesetzte `Blocked`).
+ *
+ * Je Eintrag `{ id, title }`; `title` stammt aus dem End-Snapshot-Board-
+ * Eintrag (`BoardAggregator`-Story) — fehlt er oder ist kein String → `''`.
+ * **KEINE** Pfade/Secrets: nur Board-Story-`id` + Board-`title` + der
+ * abgeleitete Übergang (NFR-Floor der Spec). Ohne End-Projekt (Board-Scan
+ * fehlgeschlagen / Projekt ohne Board / kein Lauf) sind beide Listen **leer**
+ * (AC2, kein Crash). Eine Story, die während des Drains nur `To Do →
+ * In Progress` (aber **nicht** `Done`) wechselte, erscheint in **keiner**
+ * Liste (AC2). Nur Stories, die im Anfangs-Snapshot bereits bekannt waren,
+ * gelten als "übergegangen" (eine im Endzustand neu erschienene Story ist
+ * keine beobachtbare Transition dieses Drains).
+ *
+ * @param {Map<string, string|null>} initialStatuses  storyId → Status VOR der ersten Runde
+ * @param {import('./BoardAggregator.js').ProjectEntry|null} endProject  letzter Board-Scan (oder null)
+ * @returns {{
+ *   completed: { id: string, title: string }[],
+ *   blocked: { id: string, title: string }[]
+ * }}
+ */
+export function computeCompletedBlocked(initialStatuses, endProject) {
+  const completed = [];
+  const blocked = [];
+  if (!endProject) return { completed, blocked };
+  for (const story of flattenProjectStories(endProject)) {
+    const before = initialStatuses.get(story.id);
+    if (before === undefined) continue; // beim Start unbekannt → keine beobachtbare Transition
+    const endStatus = story.status ?? null;
+    const title = typeof story.title === 'string' ? story.title : '';
+    if (before !== 'Done' && endStatus === 'Done') {
+      completed.push({ id: story.id, title });
+    } else if (before !== 'Blocked' && endStatus === 'Blocked') {
+      blocked.push({ id: story.id, title });
+    }
+  }
+  return { completed, blocked };
+}
+
 // ── ProjectDrain ───────────────────────────────────────────────────────────────
 
 /**
@@ -517,8 +564,16 @@ export class ProjectDrain {
    *   stopped: true,
    *   reason: 'no-drain-target'|'already-busy'|'command-channel-busy'|'safety-stop-no-progress'|'scan-failed',
    *   flowRuns: number,
-   *   escalated: string[]
+   *   escalated: string[],
+   *   completed: { id: string, title: string }[],
+   *   blocked: { id: string, title: string }[]
    * }>}
+   *   `completed`/`blocked` (docs/specs/drain-completion-report.md AC1/AC2):
+   *   während dieses Drains nach `Done` bzw. `Blocked` übergegangene Stories
+   *   (Anfangs-/End-Snapshot-Diff, `computeCompletedBlocked`). Bei
+   *   `already-busy`/`scan-failed`/`command-channel-busy` oder `flowRuns==0`
+   *   sind beide Listen leer (kein Crash). `blocked` ist eine Obermenge von
+   *   `escalated`. Kein Pfad/Secret in `title`.
    */
   async drainProject(projectPath, opts = {}) {
     const identity = opts.identity ?? null;
@@ -535,10 +590,10 @@ export class ProjectDrain {
         sessionRegistry: this.#sessionRegistry,
       })
     ) {
-      return { stopped: true, reason: 'already-busy', flowRuns: 0, escalated: [] };
+      return { stopped: true, reason: 'already-busy', flowRuns: 0, escalated: [], completed: [], blocked: [] };
     }
     if (!this.#lock.tryAcquire(projectPath)) {
-      return { stopped: true, reason: 'already-busy', flowRuns: 0, escalated: [] };
+      return { stopped: true, reason: 'already-busy', flowRuns: 0, escalated: [], completed: [], blocked: [] };
     }
 
     try {
@@ -561,12 +616,21 @@ export class ProjectDrain {
    *   stopped: true,
    *   reason: 'no-drain-target'|'command-channel-busy'|'safety-stop-no-progress'|'scan-failed',
    *   flowRuns: number,
-   *   escalated: string[]
+   *   escalated: string[],
+   *   completed: { id: string, title: string }[],
+   *   blocked: { id: string, title: string }[]
    * }>}
    */
   async #runLoop(projectPath, identity, args = []) {
     let flowRuns = 0;
     let consecutiveNoProgress = 0;
+    // AC1/AC2 (drain-completion-report): Anfangs-Status-Snapshot (Status je
+    // Story-ID VOR der ersten Flow-Runde), einmalig beim ersten Scan erfasst.
+    // Der End-Snapshot ist der jeweils letzte Board-Scan am Return-Punkt; der
+    // Diff (`computeCompletedBlocked`) liefert completed/blocked. Additive
+    // Erfassung — keine Änderung an Ziel-Auswahl/Konvergenz/Eskalation.
+    /** @type {Map<string, string|null>|null} */
+    let initialStatuses = null;
     // Sicherheitsgürtel-Zähler (Defense-in-Depth, S-192 Iteration 2):
     // unabhängig von couldBecomeReady/Eskalation, NIE durch die Eskalations-
     // Logik zurückgesetzt — nur durch echten beobachteten Fortschritt.
@@ -588,9 +652,27 @@ export class ProjectDrain {
       const { project, scanFailed } = await this.#findProject(projectPath);
       const state = computeDrainState(project, this.#now(), this.#staleInProgressHours);
 
+      // AC1/AC2: Anfangs-Status-Snapshot genau einmal erfassen — der erste
+      // Scan ist der Zustand VOR der ersten Flow-Runde.
+      if (initialStatuses === null) {
+        initialStatuses = new Map();
+        for (const [id, snap] of state.snapshot) initialStatuses.set(id, snap.status);
+      }
+
       // AC2: Abbruch-/Konvergenz-Regel
       if (state.targets.length === 0 && !state.couldBecomeReady) {
-        return { stopped: true, reason: scanFailed ? 'scan-failed' : 'no-drain-target', flowRuns, escalated };
+        // AC1/AC2: End-Snapshot = dieser (letzte) Scan. Bei scan-failed ist
+        // `project` null → leere Bilanz (AC2). `no-drain-target` liefert die
+        // während des Drains erledigten/blockierten Stories.
+        const { completed, blocked } = computeCompletedBlocked(initialStatuses, scanFailed ? null : project);
+        return {
+          stopped: true,
+          reason: scanFailed ? 'scan-failed' : 'no-drain-target',
+          flowRuns,
+          escalated,
+          completed,
+          blocked,
+        };
       }
 
       round += 1;
@@ -620,7 +702,10 @@ export class ProjectDrain {
       // keine Zustandsänderung an der Story. Das Projekt bleibt Kandidat für
       // den nächsten Scheduler-Tick.
       if (startResult && !startResult.ok && (startResult.reason === 'locked' || startResult.reason === 'busy')) {
-        return { stopped: true, reason: 'command-channel-busy', flowRuns, escalated };
+        // AC2 (drain-completion-report): Kontention = für DIESES Projekt fand
+        // gar kein echter /flow-Lauf statt → leere completed/blocked-Bilanz
+        // (Spec-mandatiert, kein Diff über einen unveränderten Board-Zustand).
+        return { stopped: true, reason: 'command-channel-busy', flowRuns, escalated, completed: [], blocked: [] };
       }
 
       if (startResult && startResult.ok) {
@@ -681,7 +766,9 @@ export class ProjectDrain {
         // schützt aber gegen unvorhergesehene künftige Logikfehler (z.B.
         // fehlender boardWriter, sodass Eskalationen nie Fortschritt machen).
         if (totalNoProgressRounds >= this.#safetyMaxNoProgressRounds) {
-          return { stopped: true, reason: 'safety-stop-no-progress', flowRuns, escalated };
+          // AC1/AC2: End-Snapshot = letzter Post-Flow-Scan (`projectAfter`).
+          const { completed, blocked } = computeCompletedBlocked(initialStatuses, projectAfter);
+          return { stopped: true, reason: 'safety-stop-no-progress', flowRuns, escalated, completed, blocked };
         }
       }
     }
