@@ -1,5 +1,8 @@
 # Coder Lessons — dev-gui (newest first)
 
+## 2026-07-03 — Self-Report an den Reviewer: Testanzahl der eigenen neuen Testdatei vor dem Melden mit `grep -c "  it("` gegenzählen
+Der Handoff-Report an den Reviewer nannte „39 Tests" für eine neu angelegte Testdatei, tatsächlich enthielt sie 23 `it(...)`-Blöcke (die 39 stammte vermutlich aus der zeitgleich gemeldeten Router-Modul-Anzahl 38→39 und wurde verwechselt). Kein funktionaler Fehler, aber ein unbelegter Zahlen-Claim, der bei jedem Review neu verifiziert werden muss (Zeitverlust) und das Vertrauen in andere Self-Test-Angaben (z.B. Gesamt-Suite grün) unnötig schwächt. Checkliste vor dem Melden: `grep -c "  it("` bzw. `grep -c "^\s*it("` auf die geänderte/neue Testdatei laufen lassen und den Wert 1:1 übernehmen, nicht aus dem Gedächtnis schätzen. *[seen-in: S-259 retroAutoSettings.test.js — Report "39 Tests", tatsächlich 23; promoted: 2026-07-03]*
+
 ## 2026-07-03 — Jeder neue `process.env.X`-Timeout/Config-Wert gehört in `.env.example`, auch wenn Analog-Vorbilder (`FLOW_HEADLESS_TIMEOUT_MS`) es versäumt haben
 Die bestehende Lektion zu `CRED_ENV_PATH` (2026-06-14, unten) gilt nicht nur für Secrets,
 sondern für JEDE neu eingeführte `process.env.X` — auch reine Timeout-/Config-Werte ohne

@@ -11,6 +11,7 @@
  *   POST /api/command/cancel                      → send Ctrl-C, cancel running command
  *   POST /api/projects/:slug/drain                 → { drainId } | 400 (costMode) | 409 (busy) — manueller „Board abarbeiten"-Knopf: HEADLESS via dedizierter ProjectDrain-Instanz + Cost-Mode (headless-manual-drain AC1/AC2/AC3, ADR-017)
  *   GET  /api/drain-reports[?project=<slug>]       → { reports: [...] } — Drain-Abschlussberichte, absteigend nach finishedAt (drain-completion-report AC4)
+ *   GET/PUT /api/settings/retro-auto                → { enabled } — globaler Auto-Retro-Schalter (retro-auto-trigger S-259 AC1/AC2)
  *   GET/PUT /api/settings/ticker                   → Nachtwächter-Settings (taktgeber-nachtwaechter S-194 AC15/AC16)
  *   GET  /api/settings/ticker/status               → { enabled, window, withinWindow, activeDrains } — Statusanzeige (taktgeber-nachtwaechter S-197 AC17)
  *   GET/PUT/DELETE /api/settings/credentials*     → Credential-Verwaltung (settings-credentials)
