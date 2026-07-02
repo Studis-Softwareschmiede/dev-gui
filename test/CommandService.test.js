@@ -13,6 +13,10 @@
  *   AC3  (reconcile-trigger/S-201) — /agent-flow:reconcile in DEFAULT_ALLOWED_COMMANDS,
  *          bare command (auch mit leerem projectPath) akzeptiert → 202, PTY-write
  *          ohne Argument; siehe reconcile-trigger.md Verträge.
+ *   AC4  (obsidian-project-intake/S-248) — /agent-flow:from-notes in
+ *          DEFAULT_ALLOWED_COMMANDS; Trigger mit Ordner-Pfad-Argument akzeptiert
+ *          → 202, volle Zeile an PTY; unveränderte Sanitisierung (flow-trigger AC2);
+ *          Backwards-Compat aller pre-existing Prefixe bleibt (isAllowed + HTTP).
  *   AC5  — cancel → interrupt sent + status cancelled + lock released → next cmd accepted
  *   AC6  — audit record() throws → command not run + lock released (failure path)
  *
@@ -208,6 +212,13 @@ describe('isAllowed()', () => {
   it('AC3 (fabric-intake-dialog) — /agent-flow:new-project is in DEFAULT_ALLOWED_COMMANDS', () => {
     expect(DEFAULT_ALLOWED_COMMANDS).toContain('/agent-flow:new-project');
     expect(isAllowed('/agent-flow:new-project', DEFAULT_ALLOWED_COMMANDS)).toBe(true);
+  });
+
+  it('AC4 (obsidian-project-intake/S-248) — /agent-flow:from-notes is in DEFAULT_ALLOWED_COMMANDS, with folder-path argument', () => {
+    expect(DEFAULT_ALLOWED_COMMANDS).toContain('/agent-flow:from-notes');
+    expect(isAllowed('/agent-flow:from-notes', DEFAULT_ALLOWED_COMMANDS)).toBe(true);
+    // First token drives the allowlist; the vault-confined path argument passes through.
+    expect(isAllowed('/agent-flow:from-notes Projekte/Mein-Projekt', DEFAULT_ALLOWED_COMMANDS)).toBe(true);
   });
 
   it('returns false for un-namespaced commands that were previously allowed', () => {
@@ -634,10 +645,17 @@ describe('POST /api/command — HTTP integration', () => {
     expect(ptyStub.written[0]).toBe('/agent-flow:reconcile\n');
   });
 
+  it('AC4 (obsidian-project-intake/S-248) — /agent-flow:from-notes <path> → 202 and full line written to PTY', async () => {
+    const res = await post(port, '/api/command', { command: '/agent-flow:from-notes Projekte/Mein-Projekt' });
+    expect(res.status).toBe(202);
+    expect(ptyStub.written[0]).toBe('/agent-flow:from-notes Projekte/Mein-Projekt\n');
+  });
+
   it('AC3 (fabric-intake-dialog) — backwards-compat: all pre-existing prefixes still accepted (202)', async () => {
     const legacyPrefixes = [
       '/agent-flow:flow',
       '/agent-flow:adopt octocat/Hello-World',
+      '/agent-flow:from-notes Projekte/Mein-Projekt',
       '/agent-flow:preview list',
       '/agent-flow:reconcile',
       '/agent-flow:requirement some text',
