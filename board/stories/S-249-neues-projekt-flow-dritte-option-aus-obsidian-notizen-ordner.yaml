@@ -2,7 +2,7 @@ id: S-249
 parent: F-050
 title: 'Neues-Projekt-Flow: dritte Option "Aus Obsidian-Notizen" + Ordner-Auswahl
   + Trigger'
-status: To Do
+status: In Progress
 priority: P1
 spec: docs/specs/obsidian-project-intake.md
 implements:
@@ -25,9 +25,9 @@ dispo_forecast: null
 estimate_note: Heuristik score 10 -> L; estimator nicht dispatchbar, baseline js|balanced|L
   (ep 5.0) als Naeherung
 confidence: low
-branch: null
+branch: feat/S-249-obsidian-intake-option
 pr: null
 blocked_reason: null
 created_at: '2026-07-02T05:42:14Z'
-updated_at: '2026-07-02T05:44:28Z'
+updated_at: '2026-07-02T20:34:58Z'
 done_at: null
