@@ -62,10 +62,17 @@ import { jobLock } from './JobLock.js';
  * `/agent-flow:reconcile` (reconcile-trigger AC3/S-201): bare command, no
  * sub-args/cost-mode — fired by the „Konzept/Spec nachziehen"-Button in the
  * Spezifikation-Reiter. Mirrors `/agent-flow:flow` (no cost flag).
+ *
+ * `/agent-flow:from-notes` (obsidian-project-intake AC4/S-248): takes a single
+ * vault-confined folder path argument (from the server-confined vault listing,
+ * never free text) — fired by the „Aus Obsidian-Notizen"-Option in the
+ * Neues-Projekt-Flow. The unchanged sanitization (flow-trigger AC2) stays the
+ * enforcement boundary; the path passes it as one control-char-free line.
  */
 export const DEFAULT_ALLOWED_COMMANDS = [
   '/agent-flow:flow',
   '/agent-flow:adopt',
+  '/agent-flow:from-notes',
   '/agent-flow:new-project',
   '/agent-flow:preview',
   '/agent-flow:reconcile',
