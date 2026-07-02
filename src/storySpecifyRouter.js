@@ -6,7 +6,18 @@
  *   POST /api/board/projects/:slug/story-specify/start          → 201 { sessionId, reply }
  *   POST /api/board/projects/:slug/story-specify/message        → 200 { reply, readyToSpecify, draftText? }
  *   POST /api/board/projects/:slug/story-specify/finalize       → 202 { jobId, status: 'running' }
+ *   GET  /api/board/projects/:slug/story-specify/finalize       → 200 { job | null }
  *   GET  /api/board/projects/:slug/story-specify/finalize/:jobId → 200 { status, result?, error? }
+ *
+ * Finalize-Sichtbarkeit (docs/specs/story-specify-finalize-visibility.md AC2/AC3/AC4):
+ *   - der per-Job-Status (`.../finalize/:jobId`) trägt jetzt zusätzlich `no-op`
+ *     im Wertebereich (der `StorySpecifyFinalizer` erkennt read-only per
+ *     Snapshot-Diff einen „durchgelaufen, aber nichts angelegt"-Lauf);
+ *   - der neue projekt-keyed Read (`GET .../finalize`) liefert den ZULETZT
+ *     bekannten Finalize-Job DIESES Projekts (token-/secret-frei) für das
+ *     Overlay-Reopen + den Board-Hinweis;
+ *   - der POST `.../finalize` registriert den Job projekt-keyed SYNCHRON mit
+ *     `running` vor dem Kindprozess-Spawn (reload-fest, im `StorySpecifyFinalizer`).
  *
  * Verhältnis zu `ideaSpecifyRouter` (new-story-chat AC8 — Wiederverwendung, kein
  * Fork): dieselbe Chat-Boundary (`IdeaSpecifyChatService`, unverändert), aber
@@ -281,8 +292,13 @@ export function storySpecifyRouter({ boardAggregator, chatService, finalizer, au
       }
     }
 
-    const result = finalizer.start(project.repo_path, {
+    // AC3 (story-specify-finalize-visibility): der Finalizer registriert den Job
+    // projekt-keyed SYNCHRON mit `running` vor dem Spawn — dafür braucht er den
+    // (bereits SLUG_RE-validierten) `slug` als Registry-Schlüssel. `start()` ist
+    // async (read-only Baseline-Snapshot vor dem Spawn, AC1) → hier awaiten.
+    const result = await finalizer.start(project.repo_path, {
       draftText: sessionState.draftText,
+      projectSlug: slug,
     });
 
     if (!result.ok) {
@@ -295,11 +311,49 @@ export function storySpecifyRouter({ boardAggregator, chatService, finalizer, au
   });
 
   /**
+   * GET /api/board/projects/:slug/story-specify/finalize
+   *
+   * Letzter bekannter Finalize-Job DIESES Projekts (projekt-keyed) — für das
+   * Overlay-Reopen + den Board-Hinweis (story-specify-finalize-visibility AC4).
+   * Token-frei (KEIN Agenten-Dispatch, KEINE Board-Schreibaktion, KEIN Audit),
+   * secret-/token-/host-pfad-frei. Der Status wird im Finalizer LIVE aufgelöst
+   * (inkl. `no-op`-Mapping), damit ein terminaler Job nicht als stale `running`
+   * erscheint.
+   *
+   * Response 200: { job: { status: 'running'|'done'|'no-op'|'failed'|'auth-expired', jobId, error? } | null }
+   * Response 404: { error }  (Projekt unbekannt / ungültiges Slug-Format)
+   */
+  router.get('/api/board/projects/:slug/story-specify/finalize', async (req, res) => {
+    const { slug } = req.params;
+
+    if (!slug || !SLUG_RE.test(slug)) {
+      return res.status(404).json({ error: 'Projekt nicht gefunden.' });
+    }
+
+    if (!finalizer) {
+      console.error('[storySpecifyRouter] GET .../story-specify/finalize: finalizer nicht verdrahtet');
+      return res.status(500).json({ error: 'Status konnte nicht gelesen werden.' });
+    }
+
+    const projects = await boardAggregator.getIndex();
+    const project = projects.find((p) => p.slug === slug);
+    if (!project || project.error) {
+      return res.status(404).json({ error: 'Projekt nicht gefunden.' });
+    }
+
+    const job = await finalizer.lastForProject(slug);
+    return res.status(200).json({ job });
+  });
+
+  /**
    * GET /api/board/projects/:slug/story-specify/finalize/:jobId
    *
-   * Liest den Job-Status (AC5) — Format 1:1 wie der idea-specify-/Reconcile-
-   * Status-Endpunkt (status ∈ {running,done,failed,auth-expired}). KEIN
-   * `no-op` (kein Sicherheitsnetz — es gibt keine Idee, die verwaisen könnte).
+   * Liest den Job-Status (AC2) — Format 1:1 wie der idea-specify-/Reconcile-
+   * Status-Endpunkt. Der Wertebereich ist um `no-op` ergänzt (status ∈
+   * {running,done,no-op,failed,auth-expired}): der `StorySpecifyFinalizer`
+   * erkennt read-only per Snapshot-Diff einen „durchgelaufen, aber nichts
+   * angelegt"-Lauf und mappt ihn auf `no-op` (story-specify-finalize-visibility
+   * AC1/AC2). `done` ausschließlich bei tatsächlich angelegter Story.
    *
    * Response 200: { status, result?, error? }
    * Response 404: { error }  (unbekannte jobId, auch nach Server-Neustart)
