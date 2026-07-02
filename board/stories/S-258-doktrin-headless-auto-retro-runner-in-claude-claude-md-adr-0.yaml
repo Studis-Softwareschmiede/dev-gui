@@ -2,7 +2,7 @@ id: S-258
 parent: F-051
 title: 'Doktrin: headless Auto-Retro-Runner in .claude/CLAUDE.md + ADR-018 in docs/architecture.md
   (docs-only)'
-status: To Do
+status: In Progress
 priority: P1
 spec: docs/specs/retro-auto-queue.md
 implements:
@@ -16,9 +16,9 @@ dispo_act: null
 dispo_forecast: null
 estimate_note: Heuristik score 3 -> S; baseline js|balanced|S (ep 2.0)
 confidence: medium
-branch: null
+branch: docs/S-258-retro-doktrin
 pr: null
 blocked_reason: null
 created_at: '2026-07-02T06:05:19Z'
-updated_at: '2026-07-02T06:07:30Z'
+updated_at: '2026-07-02T22:52:53Z'
 done_at: null
