@@ -56,6 +56,17 @@
  *          stellt klar, dass keine Live-Terminal-Ausgabe erscheint. Bestätigungs-
  *          dialog + Busy-Deaktivierung bleiben (fabric-intake-dialog AC8).
  *
+ * drain-completion-report (S-255):
+ *   AC7a — Die manuelle Inline-Status-Fläche (headless-manual-drain AC6, s.o.)
+ *          zeigt bei `done` ZUSÄTZLICH „X erledigt / Y blockiert" + eine
+ *          aufklappbare Liste (`<details>`) der erledigten/blockierten
+ *          Story-IDs + Titel. Datenquelle: das `result.completed`/
+ *          `result.blocked` aus derselben GET …/drain/:drainId-Poll-Antwort
+ *          (DrainJobRegistry reicht die Felder seit S-255 durch, s.
+ *          src/DrainJobRegistry.js). Der bestehende läuft/fertig/fehlgeschlagen-
+ *          Status und das Board-Re-Fetch-Verhalten (AC6 oben) bleiben
+ *          UNVERÄNDERT — rein additiv unterhalb davon gerendert.
+ *
  * new-story-chat (S-227):
  *   AC1 — Die frühere „Änderung erfassen"-Box (IntakeDialog mode="change") ist
  *          ERSETZT durch eine „Neue Story"-Box (rechte Sidebar, Reiter
@@ -396,6 +407,13 @@ function FactoryWorkspace({
   const [drainId, setDrainId] = useState(null);
   /** null | 'running' | 'done' | 'failed' — gepollter Drain-Job-Status (AC6). */
   const [drainStatus, setDrainStatus] = useState(null);
+  /**
+   * drain-completion-report AC7a: `{ completed: [{id,title}], blocked: [{id,title}] }`,
+   * gesetzt aus `result.completed`/`result.blocked` sobald der Poll `done`
+   * liefert; sonst `null` (kein Rendering). Fehlende/ungültige Felder werden
+   * defensiv auf leere Arrays normalisiert (kein Crash).
+   */
+  const [drainReport, setDrainReport] = useState(null);
 
   // ── Cost-Mode-Drift-Meldung (cost-mode-model-check AC4/AC5, S-228) ──
   // checkId aus der Drain-Antwort (`costModeCheckId`), falls der Dispatch eine
@@ -425,6 +443,7 @@ function FactoryWorkspace({
     // lassen (der Poll-Effect ist auf `drainId` gekeyt und stoppt beim Wechsel).
     setDrainId(null);
     setDrainStatus(null);
+    setDrainReport(null); // drain-completion-report AC7a: alter Bericht fällt weg
     setCostModeCheckId(null);
 
     // taktgeber-nachtwaechter AC12 / headless-manual-drain AC1: der Knopf ruft die
@@ -545,6 +564,14 @@ function FactoryWorkspace({
       if (status === 'done') {
         setDrainStatus('done');
         setSessionRunState('idle');
+        // drain-completion-report AC7a: completed/blocked aus derselben
+        // Poll-Antwort übernehmen (defensiv normalisiert, kein Crash bei
+        // fehlendem/ungültigem result — dann 0/0 statt Absturz).
+        const result = data && typeof data.result === 'object' && data.result !== null ? data.result : {};
+        setDrainReport({
+          completed: Array.isArray(result.completed) ? result.completed : [],
+          blocked: Array.isArray(result.blocked) ? result.blocked : [],
+        });
         if (onBoardRefresh) onBoardRefresh(); // Board-Re-Fetch (AC6)
         return;
       }
@@ -729,6 +756,31 @@ function FactoryWorkspace({
               {drainStatus === 'running' && '⏳ Drain läuft… (headless, kein Terminal-Output)'}
               {drainStatus === 'done' && '✓ Drain fertig — Board aktualisiert.'}
               {drainStatus === 'failed' && '✗ Drain fehlgeschlagen — siehe Server-Log/Board.'}
+            </div>
+          )}
+
+          {/* drain-completion-report AC7a: kompakter Abschlussbericht bei `done`,
+              additiv unterhalb des bestehenden Status — läuft/fertig/fehlgeschlagen
+              und Board-Re-Fetch (oben) bleiben unverändert. Zahlen/Status IMMER
+              textlich (WCAG 2.1 AA), aufklappbare Story-Liste via <details>. */}
+          {drainStatus === 'done' && drainReport && (
+            <div style={styles.drainReportBox} data-testid="drain-report-summary">
+              <span>
+                {drainReport.completed.length} erledigt / {drainReport.blocked.length} blockiert
+              </span>
+              {(drainReport.completed.length > 0 || drainReport.blocked.length > 0) && (
+                <details style={styles.drainReportDetails} data-testid="drain-report-details">
+                  <summary style={styles.drainReportSummary}>Story-Liste anzeigen</summary>
+                  <ul style={styles.drainReportList}>
+                    {drainReport.completed.map((s) => (
+                      <li key={`done-${s?.id}`}>✓ {s?.id} — {s?.title || '—'}</li>
+                    ))}
+                    {drainReport.blocked.map((s) => (
+                      <li key={`blocked-${s?.id}`}>✗ {s?.id} — {s?.title || '—'}</li>
+                    ))}
+                  </ul>
+                </details>
+              )}
             </div>
           )}
 
@@ -1185,6 +1237,34 @@ const styles = {
     fontSize: 12,
     color: '#f87171',
     fontWeight: 600,
+  },
+
+  // ── drain-completion-report AC7a: Abschlussbericht inline (manueller Drain) ──
+  drainReportBox: {
+    fontSize: 12,
+    // #d1d5db on #0d0d0d ≈ 11.9:1 — WCAG AA
+    color: '#d1d5db',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 4,
+  },
+
+  drainReportDetails: {
+    fontSize: 11,
+  },
+
+  drainReportSummary: {
+    // #93c5fd on #0d0d0d ≈ 8.9:1 — WCAG AA
+    color: '#93c5fd',
+    cursor: 'pointer',
+    minHeight: 24,
+  },
+
+  drainReportList: {
+    margin: '4px 0 0',
+    paddingLeft: 18,
+    color: '#9ca3af',
+    lineHeight: 1.6,
   },
 
   flowStatus: {

@@ -40,6 +40,13 @@
  *   in derselben Header-Zeile: „Claude-Auth: ok/abgelaufen/unbekannt", bei
  *   abgelaufen mit Erneuerungs-Hinweis (`claude setup-token`).
  *
+ * drain-completion-report (S-255 — AC7b):
+ *   Nacht-Läufe-Sektion (`NightRunsSection`, eigenständige Komponente, additiv
+ *   eingebunden) direkt unterhalb der Header-Zeile, bei der bestehenden
+ *   Nachtwächter-Statusanzeige: listet die letzten Drain-Abschlussberichte des
+ *   Nachtwächters (`GET /api/drain-reports`, `trigger:'night'`) — Projekt,
+ *   Zeitpunkt, X erledigt/Y blockiert, aufklappbare Story-Liste.
+ *
  * @param {{
  *   navigateFactory: (repo: string | null) => void,
  *   onNavigate?: (view: string) => void,
@@ -51,6 +58,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { IntakeDialog } from './IntakeDialog.jsx';
 import { NightWatchStatusBadge } from './NightWatchStatusBadge.jsx';
 import { ClaudeAuthBadge } from './ClaudeAuthBadge.jsx';
+import { NightRunsSection } from './NightRunsSection.jsx';
 
 /**
  * @param {{
@@ -205,6 +213,10 @@ export function RepoOverview({ navigateFactory, onNavigate, fetchFn }) {
           </button>
         )}
       </div>
+
+      {/* drain-completion-report S-255 AC7b: Nacht-Läufe-Sektion, bei der
+          Nachtwächter-Statusanzeige (headerRow oben) */}
+      <NightRunsSection fetchFn={fetchFn} />
 
       {/* Intake-Dialog (new mode) — visible when intakeNewOpen.
           AC2 (S-133): newStep and heldIdeaText are held here (parent) so they

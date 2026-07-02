@@ -7,6 +7,12 @@
  *          Zusammenfassung, markFailed→failed+generischer Text, getJob→undefined
  *          für unbekannte drainId). Die HTTP-Naht (GET/POST, Status-Codes) ist
  *          zusätzlich in test/projectDrainRouter.test.js abgedeckt.
+ *
+ * Covers (drain-completion-report):
+ *   AC7 — markDone() reicht `completed`/`blocked` (AC1-Felder aus
+ *          `ProjectDrain.drainProject()`) unverändert im `result` durch, damit
+ *          die manuelle Inline-Status-Fläche (CockpitView) sie ohne
+ *          Zusatz-Request zeigen kann; fehlend/ungültig → `[]` (kein Crash).
  */
 
 import { describe, it, expect } from '@jest/globals';
@@ -30,7 +36,7 @@ describe('DrainJobRegistry (headless-manual-drain AC4)', () => {
     reg.markDone('d1', { stopped: true, reason: 'no-drain-target', flowRuns: 3, escalated: ['S-7'] });
     expect(reg.getJob('d1')).toEqual({
       status: 'done',
-      result: { reason: 'no-drain-target', flowRuns: 3, escalated: ['S-7'] },
+      result: { reason: 'no-drain-target', flowRuns: 3, escalated: ['S-7'], completed: [], blocked: [] },
     });
   });
 
@@ -40,7 +46,7 @@ describe('DrainJobRegistry (headless-manual-drain AC4)', () => {
     reg.markDone('d1', {});
     expect(reg.getJob('d1')).toEqual({
       status: 'done',
-      result: { reason: 'stopped', flowRuns: 0, escalated: [] },
+      result: { reason: 'stopped', flowRuns: 0, escalated: [], completed: [], blocked: [] },
     });
   });
 
@@ -50,8 +56,32 @@ describe('DrainJobRegistry (headless-manual-drain AC4)', () => {
     reg.markDone('d1');
     expect(reg.getJob('d1')).toEqual({
       status: 'done',
-      result: { reason: 'stopped', flowRuns: 0, escalated: [] },
+      result: { reason: 'stopped', flowRuns: 0, escalated: [], completed: [], blocked: [] },
     });
+  });
+
+  // ── drain-completion-report AC7: completed/blocked durchgereicht ───────────
+
+  it('markDone() reicht completed/blocked (drain-completion-report AC1) unverändert durch', () => {
+    const reg = new DrainJobRegistry();
+    reg.register('d1');
+    reg.markDone('d1', {
+      reason: 'no-drain-target',
+      flowRuns: 2,
+      escalated: [],
+      completed: [{ id: 'S-1', title: 'Eins' }],
+      blocked: [{ id: 'S-9', title: 'Neun' }],
+    });
+    expect(reg.getJob('d1').result.completed).toEqual([{ id: 'S-1', title: 'Eins' }]);
+    expect(reg.getJob('d1').result.blocked).toEqual([{ id: 'S-9', title: 'Neun' }]);
+  });
+
+  it('markDone() normalisiert ungültige completed/blocked (kein Array) auf []', () => {
+    const reg = new DrainJobRegistry();
+    reg.register('d1');
+    reg.markDone('d1', { reason: 'x', flowRuns: 0, completed: 'not-an-array', blocked: null });
+    expect(reg.getJob('d1').result.completed).toEqual([]);
+    expect(reg.getJob('d1').result.blocked).toEqual([]);
   });
 
   it('markFailed() → status "failed" mit generischem Default-Text (kein Roh-Fehler)', () => {

@@ -40,7 +40,13 @@ export const DRAIN_FAILURE_MESSAGE = 'Drain-Lauf fehlgeschlagen';
 /**
  * @typedef {object} DrainJobState
  * @property {'running'|'done'|'failed'} status
- * @property {{ reason: string, flowRuns: number, escalated: string[] }} [result]  nur bei `done`
+ * @property {{ reason: string, flowRuns: number, escalated: string[],
+ *              completed: Array<{id:string,title:string}>,
+ *              blocked: Array<{id:string,title:string}> }} [result]  nur bei `done`
+ *   `completed`/`blocked` (drain-completion-report AC1/AC7): Stories, die während
+ *   des Drains nach `Done` bzw. `Blocked` übergingen — durchgereicht aus dem
+ *   `ProjectDrain.drainProject()`-Ergebnis, damit die manuelle Inline-Status-
+ *   Fläche (CockpitView, AC7a) sie ohne Zusatz-Request anzeigen kann.
  * @property {string} [error]  generischer, secret-freier Text, nur bei `failed`
  */
 
@@ -62,9 +68,13 @@ export class DrainJobRegistry {
    * (defensiv — sollte nach `register()` nie vorkommen).
    *
    * @param {string} drainId
-   * @param {{ reason?: string, flowRuns?: number, escalated?: string[] }} [result]
+   * @param {{ reason?: string, flowRuns?: number, escalated?: string[],
+   *           completed?: Array<{id:string,title:string}>,
+   *           blocked?: Array<{id:string,title:string}> }} [result]
    *   Drain-Ergebnis (`ProjectDrain.drainProject()`-Rückgabe). Nur die
-   *   secret-freien Felder werden übernommen.
+   *   secret-freien Felder werden übernommen. `completed`/`blocked`
+   *   (drain-completion-report AC1) werden defensiv auf Arrays normalisiert
+   *   (fehlend/ungültig → `[]`, kein Crash).
    */
   markDone(drainId, result = {}) {
     if (!this.#jobs.has(drainId)) return;
@@ -74,6 +84,8 @@ export class DrainJobRegistry {
         reason: typeof result.reason === 'string' ? result.reason : 'stopped',
         flowRuns: Number.isFinite(result.flowRuns) ? result.flowRuns : 0,
         escalated: Array.isArray(result.escalated) ? result.escalated : [],
+        completed: Array.isArray(result.completed) ? result.completed : [],
+        blocked: Array.isArray(result.blocked) ? result.blocked : [],
       },
     });
   }

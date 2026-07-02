@@ -45,7 +45,7 @@
  *          (drainProject() aufgerufen, auch wenn runCheck wirft/hängt); ein
  *          Fehler in runCheck verhindert die 202-Antwort NIE (best-effort).
  *
- * Covers (drain-completion-report, S-254):
+ * Covers (drain-completion-report, S-254/S-255):
  *   AC5 — der manuelle Drain schreibt bei Abschluss (resolve) GENAU EINEN
  *          Bericht (`trigger:'manual'`) in die geteilte DrainReportStore-Instanz
  *          — mit dem Slug (kein Pfad), completed/blocked aus dem Ergebnis. Ein
@@ -55,6 +55,11 @@
  *          die 202-Antwort noch den Registry-Status (best-effort). Ohne Store →
  *          kein Schreibpfad (No-op). Der DrainReportStore selbst ist unit-
  *          getestet in test/DrainReportStore.test.js.
+ *   AC7 — Datenquellen-Wiring für die CockpitView-Inline-Bericht-Fläche: der
+ *          `result` im `GET …/drain/:drainId`-Body (AC4) trägt seit S-255 auch
+ *          `completed`/`blocked` (durchgereicht bis in die DrainJobRegistry, s.
+ *          test/DrainJobRegistry.test.js) — der Test „200 { status:'done', result }"
+ *          unten prüft das mit.
  *
  * Strategy: echter Express-App + echter HTTP-Server (Muster
  * test/slugResolver.test.js "commandRouter integration" + test/tickerSettings.test.js
@@ -632,7 +637,9 @@ describe('GET /api/projects/:slug/drain/:drainId (headless-manual-drain AC4)', (
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
       status: 'done',
-      result: { reason: 'no-drain-target', flowRuns: 2, escalated: ['S-5'] },
+      // drain-completion-report AC7: completed/blocked reichen bis zur
+      // DrainJobRegistry durch (hier leer, da der Mock sie nicht liefert).
+      result: { reason: 'no-drain-target', flowRuns: 2, escalated: ['S-5'], completed: [], blocked: [] },
     });
   });
 
