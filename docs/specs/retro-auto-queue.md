@@ -48,6 +48,7 @@ Diese Spec führt eine **serielle Warteschlange** (`RetroAutoQueue`) mit **einem
 - `isPendingOrActive(projectPath) → boolean` — Dedup-Abfrage für den Auslöser ([[retro-auto-trigger]] AC5c).
 - `getStatus() → { active: string|null, pending: string[] }` — read-only.
 - Konstruktor injizierbar: `retroRunner` (headless Retro-Runner, s.u.), `auditStore`, optional `identity`.
+- **Queue↔Runner-Naht** (Grenze S-256 ⇄ S-257): die Queue ruft am injizierten `retroRunner` **ausschließlich** `run(projectPath) → Promise` auf — **resolved** bei Erfolg (echtes Lauf-Ende), **rejected** bei Fehlschlag (Timeout/Non-Zero/`auth-expired`/`spawn`-Fehler). Die konkrete headless-Ausführung (`HeadlessFlowRunner.start()`/`getJob()`, `close`-Event, Per-Lauf-Audit AC6, `ProjectJobLock`-Freigabe im `finally`) lebt **innerhalb** dieses `run()` (Folge-Story S-257, AC5/AC6) — **nicht** in der Queue. Die Queue behandelt eine Rejection als Degradation (AC3): secret-freies Queue-Audit (Repo-Slug, kein Host-Pfad), dann nächstes Repo. Bei Erfolg auditiert die Queue **nicht** (das Per-Lauf-Audit liegt im Runner, AC6).
 
 ### Headless Retro-Runner (Wiederverwendung)
 - `HeadlessFlowRunner` (`src/HeadlessFlowRunner.js`) — bereits befehl-injizierbar ([[headless-parallel-drain]] AC1/AC2). Instanz mit **eigenem** `ProjectJobLock`; Aufruf `start(projectPath, { command: '/agent-flow:retro', args: ['--force'] })`; `getJob(jobId) → { status: 'running'|'done'|'failed'|'auth-expired', … }`; Ende = `close`-Event.
