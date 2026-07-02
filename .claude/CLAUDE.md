@@ -28,6 +28,12 @@ Für Kontexte ohne Glob-Auflösung (z.B. manuelles Ausführen in einer Shell, di
 
 Das Skript mintet den App-Token aus `.env.gpg`, loggt `gh` persistent ein (`~/.config/gh`) und konfiguriert git via `gh auth setup-git`. Idempotent — bei gültiger Auth passiert nichts. Gleicher Mechanismus läuft im Container über `docker-entrypoint.sh`.
 
+## Parallelbetrieb: mehrere Cloud-Sessions
+
+Der Owner arbeitet an diesem Repo häufig mit mehreren Cloud-Sessions gleichzeitig. Fremde, session-fremde Änderungen im Working Tree/Board sind normal — kein Hinweis an den Owner nötig. Jede Session arbeitet standardmäßig NUR an ihrer eigenen Aufgabe (kein Übernehmen/Einarbeiten fremder Änderungen) und IMMER über einen eigenen Feature-/Fix-Branch, um parallele Sessions nicht zu stören.
+
+Ausnahme: Beauftragt der Owner explizit eine Board-weite Abarbeitung (z. B. `/agent-flow:flow`, Nachtwächter-Modus), darf übergreifend über mehrere Stories hinweg gearbeitet werden.
+
 ## Kommunikation mit dem Owner
 
 Diese Vorgaben gelten für die **Haupt-Session im Dialog mit dem Owner** — nicht für die Arbeits-Agenten (coder/reviewer/tester/…), die ihren Handoff-Verträgen folgen.
