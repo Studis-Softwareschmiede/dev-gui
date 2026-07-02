@@ -1,7 +1,7 @@
 ---
 id: retro-auto-queue
 title: Serielle Warteschlange + headless Ausführung für automatisch ausgelöste Retro-Läufe
-status: draft
+status: active
 version: 1
 ---
 

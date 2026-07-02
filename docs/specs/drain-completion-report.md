@@ -1,7 +1,7 @@
 ---
 id: drain-completion-report
 title: Abschlussbericht nach Board-Drain (Nachtwächter + manueller „Board abarbeiten"-Lauf)
-status: draft
+status: active
 version: 1
 ---
 

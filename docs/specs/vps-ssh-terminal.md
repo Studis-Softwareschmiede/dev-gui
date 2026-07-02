@@ -1,7 +1,7 @@
 ---
 id: vps-ssh-terminal
 title: SSH-Terminal je VPS/User (root/alex) im VPS-Panel — direkt auf dem Server arbeiten
-status: draft
+status: active
 version: 1
 spec_format: use-case-2.0
 ---

@@ -1,7 +1,7 @@
 ---
 id: board-status-verworfen
 title: Board — Story-Status „Verworfen" (Won't-Do) in der GUI darstellen
-status: draft
+status: active
 version: 1
 ---
 

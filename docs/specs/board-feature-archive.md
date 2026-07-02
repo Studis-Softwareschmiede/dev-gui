@@ -1,7 +1,7 @@
 ---
 id: board-feature-archive
 title: Board — erledigte Features archivieren (aus Standardansicht entfernen, Dateien erhalten)
-status: draft
+status: active
 version: 2
 ---
 

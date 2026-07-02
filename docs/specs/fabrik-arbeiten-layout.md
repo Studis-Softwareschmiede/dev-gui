@@ -1,7 +1,7 @@
 ---
 id: fabrik-arbeiten-layout
 title: Fabrik „Arbeiten"-Tab — eingebettetes Claude-Terminal entfernen + Button-Spalte neu anordnen
-status: draft
+status: active
 version: 1
 spec_format: use-case-2.0
 ---

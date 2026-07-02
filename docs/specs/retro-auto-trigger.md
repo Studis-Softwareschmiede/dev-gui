@@ -1,7 +1,7 @@
 ---
 id: retro-auto-trigger
 title: Automatischer Retro-Trigger nach Board-Läufen + globaler Ein/Aus-Schalter
-status: draft
+status: active
 version: 1
 ---
 
