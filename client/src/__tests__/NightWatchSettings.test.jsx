@@ -10,6 +10,14 @@
  *          Absturz; "Auswahl"-Modus rendert Checkboxen aus GET /api/workspace/repos
  *          (best-effort — Fehler dort blockiert das Speichern im "all"-Modus nicht).
  *
+ * Covers (retro-auto-trigger):
+ *   AC3 —  Schalter „Danach automatisch Retro durchführen" liest GET /api/settings/retro-auto
+ *          (Initialzustand), schreibt bei Änderung sofort PUT /api/settings/retro-auto
+ *          (unabhängig vom Ticker-Speichern-Knopf); Status textlich (An/Aus); Fehler beim
+ *          Schreiben rollt den Schalter zurück + role=alert; der Ticker-`enabled`-Schalter
+ *          bleibt unverändert. Cooldown-Bypass-Hilfetext ist im Quelltext dokumentiert
+ *          (aria-describedby) — visuell/Text-Assert unten.
+ *
  * @jest-environment jsdom
  */
 
@@ -39,6 +47,8 @@ function makeFetch({
   putResponse = null, // null = Erfolg (Echo der PUT-Body gemergt mit Defaults); 'invalid-window-start' = 400
   workspaceRepos = { repos: [{ name: 'dev-gui' }, { name: 'agent-flow' }] },
   getFails = false,
+  retroAuto = { enabled: false }, // Initialzustand des Auto-Retro-Schalters (retro-auto-trigger AC3)
+  retroAutoPutFails = false, // simuliert Persistenz-Fehler beim PUT /api/settings/retro-auto
 } = {}) {
   return jest.fn(async (url, opts) => {
     const method = opts?.method ?? 'GET';
@@ -58,6 +68,18 @@ function makeFetch({
         };
       }
       return { ok: true, status: 200, json: async () => ({ ...DEFAULT_SETTINGS, ...body }) };
+    }
+
+    if (url === '/api/settings/retro-auto' && method === 'GET') {
+      return { ok: true, status: 200, json: async () => retroAuto };
+    }
+
+    if (url === '/api/settings/retro-auto' && method === 'PUT') {
+      const body = JSON.parse(opts.body);
+      if (retroAutoPutFails) {
+        return { ok: false, status: 500, json: async () => ({ error: 'kaputt' }) };
+      }
+      return { ok: true, status: 200, json: async () => ({ enabled: body.enabled }) };
     }
 
     if (url === '/api/workspace/repos' && method === 'GET') {
@@ -260,5 +282,108 @@ describe('NightWatchSettings — AC17: PUT mit geänderten Werten', () => {
     const { getByLabelText } = renderComp(fetchFn);
     // Rendert weiterhin normal (kein Absturz durch die ungefangene Rejection).
     await waitFor(() => expect(getByLabelText(/nachtwächter:/i).value).toBe('false'));
+  });
+});
+
+describe('NightWatchSettings — retro-auto-trigger AC3: Auto-Retro-Schalter', () => {
+  it('liest GET /api/settings/retro-auto und zeigt den Initialzustand (An) im Schalter', async () => {
+    const fetchFn = makeFetch({ retroAuto: { enabled: true } });
+    const { getByLabelText } = renderComp(fetchFn);
+    await waitFor(() => {
+      expect(getByLabelText(/automatisch retro durchführen/i).value).toBe('true');
+    });
+    const getCall = fetchFn.mock.calls.find(([url, opts]) => url === '/api/settings/retro-auto' && (opts?.method ?? 'GET') === 'GET');
+    expect(getCall).toBeDefined();
+  });
+
+  it('Default (enabled:false) → Schalter steht auf "Aus", Status-Text zeigt "Aus"', async () => {
+    const { getByLabelText, getByText } = renderComp();
+    await waitFor(() => {
+      expect(getByLabelText(/automatisch retro durchführen/i).value).toBe('false');
+    });
+    expect(getByText('Aus', { selector: 'span' })).toBeTruthy();
+  });
+
+  it('Umschalten auf "An" schreibt sofort PUT /api/settings/retro-auto {enabled:true}', async () => {
+    const fetchFn = makeFetch();
+    const { getByLabelText, getByText } = renderComp(fetchFn);
+
+    await waitFor(() => expect(getByLabelText(/automatisch retro durchführen/i).value).toBe('false'));
+    fireEvent.change(getByLabelText(/automatisch retro durchführen/i), { target: { value: 'true' } });
+
+    await waitFor(() => {
+      const putCall = fetchFn.mock.calls.find(([url, opts]) => url === '/api/settings/retro-auto' && opts?.method === 'PUT');
+      expect(putCall).toBeDefined();
+      expect(JSON.parse(putCall[1].body)).toEqual({ enabled: true });
+    });
+    // Schalter bleibt auf dem persistierten Wert (An) + Erfolgs-Status erscheint.
+    await waitFor(() => {
+      expect(getByLabelText(/automatisch retro durchführen/i).value).toBe('true');
+      expect(getByText(/auto-retro-einstellung gespeichert/i)).toBeTruthy();
+    });
+  });
+
+  it('PUT ohne Ticker-Speichern-Knopf: Schalter-Änderung löst KEINEN PUT /api/settings/ticker aus', async () => {
+    const fetchFn = makeFetch();
+    const { getByLabelText } = renderComp(fetchFn);
+
+    await waitFor(() => expect(getByLabelText(/automatisch retro durchführen/i).value).toBe('false'));
+    fireEvent.change(getByLabelText(/automatisch retro durchführen/i), { target: { value: 'true' } });
+
+    await waitFor(() => {
+      const retroPut = fetchFn.mock.calls.find(([url, opts]) => url === '/api/settings/retro-auto' && opts?.method === 'PUT');
+      expect(retroPut).toBeDefined();
+    });
+    const tickerPut = fetchFn.mock.calls.filter(([url, opts]) => url === '/api/settings/ticker' && opts?.method === 'PUT');
+    expect(tickerPut.length).toBe(0);
+  });
+
+  it('PUT-Fehler → Schalter rollt auf vorherigen Wert zurück + role=alert', async () => {
+    const fetchFn = makeFetch({ retroAuto: { enabled: false }, retroAutoPutFails: true });
+    const { getByLabelText, getByRole } = renderComp(fetchFn);
+
+    await waitFor(() => expect(getByLabelText(/automatisch retro durchführen/i).value).toBe('false'));
+    fireEvent.change(getByLabelText(/automatisch retro durchführen/i), { target: { value: 'true' } });
+
+    await waitFor(() => {
+      expect(getByRole('alert').textContent).toMatch(/auto-retro/i);
+    });
+    // Revert: Schalter steht wieder auf dem persistierten Vorwert.
+    expect(getByLabelText(/automatisch retro durchführen/i).value).toBe('false');
+  });
+
+  it('Hilfetext erklärt den Cooldown-Bypass (aria-describedby verknüpft)', async () => {
+    const { getByLabelText, getByText } = renderComp();
+    await waitFor(() => expect(getByLabelText(/automatisch retro durchführen/i)).toBeTruthy());
+    const help = getByText(/wochen-cooldown wird dabei umgangen/i);
+    expect(help).toBeTruthy();
+    expect(getByLabelText(/automatisch retro durchführen/i).getAttribute('aria-describedby')).toBe(help.id);
+  });
+
+  it('GET /api/settings/retro-auto schlägt fehl → Nachtwächter-Sektion bleibt nutzbar (graceful), role=alert für Auto-Retro', async () => {
+    const fetchFn = jest.fn(async (url, opts) => {
+      const method = opts?.method ?? 'GET';
+      if (url === '/api/settings/ticker' && method === 'GET') {
+        return { ok: true, status: 200, json: async () => DEFAULT_SETTINGS };
+      }
+      if (url === '/api/settings/retro-auto') {
+        return { ok: false, status: 500, json: async () => ({ error: 'kaputt' }) };
+      }
+      if (url === '/api/workspace/repos') {
+        return { ok: true, status: 200, json: async () => ({ repos: [] }) };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+    const { getByLabelText, getByRole } = renderComp(fetchFn);
+    // Nachtwächter-Felder rendern trotz Auto-Retro-Ladefehler.
+    await waitFor(() => expect(getByLabelText(/nachtwächter:/i).value).toBe('false'));
+    await waitFor(() => expect(getByRole('alert').textContent).toMatch(/auto-retro/i));
+  });
+
+  it('bestehender Nachtwächter-enabled-Schalter bleibt unverändert (Regression)', async () => {
+    const { getByLabelText } = renderComp();
+    await waitFor(() => expect(getByLabelText(/nachtwächter:/i).value).toBe('false'));
+    // Der Auto-Retro-Schalter ist ein SEPARATES Control (eigenes Label).
+    expect(getByLabelText(/automatisch retro durchführen/i)).not.toBe(getByLabelText(/nachtwächter:/i));
   });
 });
