@@ -25,10 +25,21 @@
  *     (Symlink-/`..`-Flucht wird erkannt und abgewiesen, AC3).
  *   - Kein hartkodiertes Secret; der Pfad wird als Klartext-Betreiber-Info behandelt.
  *
+ * `listObsidianVaultProjects` (obsidian-vault-config AC5, S-246) listet die direkten
+ * Unterordner unter `<vault>/Projekte` — strikt auf diesen Ordner confined (AC3):
+ *   - Jeder Eintrag wird per `realpath` aufgelöst und gegen die `<vault>/Projekte`-Schranke
+ *     geprüft (gleiche Trailing-Slash-Prefix-Technik wie oben) — ein Symlink, der aus dem
+ *     Vault hinausführt, wird NICHT gelistet (still übersprungen, kein Fehler).
+ *   - Nur Verzeichnisse (nach Symlink-Auflösung); keine Dateien, keine versteckten/Dot-Einträge.
+ *   - Race-sicher: verschwindet der Vault/„Projekte"-Ordner zwischen Config-Read und Listing
+ *     (extern entfernt/unmounted), wird ein definierter Fehler geworfen (`vault-unreachable` /
+ *     `missing-projekte`) — kein Crash. Ein einzelner Eintrag, der währenddessen verschwindet
+ *     oder ein kaputter Symlink ist, wird übersprungen statt die ganze Liste scheitern zu lassen.
+ *
  * @module obsidianVaultPath
  */
 
-import { realpath, stat, access, constants } from 'node:fs/promises';
+import { realpath, stat, access, constants, readdir } from 'node:fs/promises';
 import { resolve, join, sep } from 'node:path';
 
 /** Name des geforderten Unterordners im Vault (obsidian-vault-config AC2c). */
@@ -42,7 +53,7 @@ export const PROJEKTE_SUBDIR = 'Projekte';
 export const OBSIDIAN_VAULT_MOUNT_ENV = 'OBSIDIAN_VAULT_DIR';
 
 /**
- * @typedef {'empty-path'|'outside-boundary'|'not-exists'|'not-directory'|'not-readable'|'missing-projekte'} ObsidianVaultPathErrorClass
+ * @typedef {'empty-path'|'outside-boundary'|'not-exists'|'not-directory'|'not-readable'|'missing-projekte'|'vault-unreachable'} ObsidianVaultPathErrorClass
  */
 
 /**
@@ -188,4 +199,144 @@ export async function validateObsidianVaultPath(inputPath, deps = {}) {
   }
 
   return { resolvedPath: pathToCheck };
+}
+
+/**
+ * Listet die direkten Unterordner unter `<vault>/Projekte` (obsidian-vault-config AC5, S-246).
+ *
+ * Confinement (AC3, hart): ZWEI Ebenen —
+ *   (1) `<vault>/Projekte` selbst wird nach `realpath`-Auflösung gegen `vaultRoot` geprüft
+ *       (Trailing-Slash-Prefix, wie in `validateObsidianVaultPath`) — ist „Projekte" SELBST
+ *       ein Symlink, der aus dem Vault hinausführt (Race/externe Manipulation NACH dem Setzen),
+ *       wird die gesamte Auflistung mit `missing-projekte` abgewiesen, BEVOR `readdir` je
+ *       aufgerufen wird (sonst würde der komplette externe Zielordner gelistet).
+ *   (2) jeder Eintrag UNTER `<vault>/Projekte` wird per `realpath` aufgelöst und MUSS innerhalb
+ *       der (bereits confinierten) `<vault>/Projekte`-Schranke liegen. Ein Symlink, der aus dem
+ *       Vault hinausführt, wird still übersprungen (nicht gelistet) — kein Fehler für die
+ *       gesamte Liste.
+ *
+ * Filter (AC5): nur Verzeichnisse (nach Symlink-Auflösung); keine `.md`-Dateien, keine
+ * versteckten/Dot-Ordner (Name beginnt mit `.`); stabil sortiert (nach `name`).
+ *
+ * Race-Sicherheit (Edge-Case): verschwindet der Vault selbst zwischen Config-Read und Listing
+ * → `vault-unreachable`. Fehlt/ist-keine-Verzeichnis „Projekte" (auch race, nach dem Setzen
+ * extern entfernt) → `missing-projekte`. Ein einzelner Eintrag, der währenddessen verschwindet
+ * oder ein kaputter Symlink ist, wird übersprungen statt die ganze Auflistung zu werfen.
+ *
+ * @param {string} vaultPath  Der konfigurierte (bereits validierte/persistierte) Vault-Pfad.
+ * @param {object} [deps]     Injectable dependencies für Tests.
+ * @param {Function} [deps.realpath]  default: node:fs/promises.realpath
+ * @param {Function} [deps.stat]      default: node:fs/promises.stat
+ * @param {Function} [deps.readdir]   default: node:fs/promises.readdir
+ * @returns {Promise<Array<{ name: string, path: string }>>}
+ * @throws {ObsidianVaultPathError} `vault-unreachable` | `missing-projekte`
+ */
+export async function listObsidianVaultProjects(vaultPath, deps = {}) {
+  const _realpath = deps.realpath ?? realpath;
+  const _stat = deps.stat ?? stat;
+  const _readdir = deps.readdir ?? readdir;
+
+  // Vault selbst muss (noch) erreichbar sein — Race: extern entfernt/unmounted.
+  let vaultRoot;
+  try {
+    vaultRoot = await _realpath(vaultPath);
+  } catch {
+    throw new ObsidianVaultPathError(
+      `Obsidian-Vault '${vaultPath}' ist nicht mehr erreichbar`,
+      'vault-unreachable',
+    );
+  }
+
+  // „Projekte"-Unterordner muss existieren und ein Verzeichnis sein.
+  const projektePath = join(vaultRoot, PROJEKTE_SUBDIR);
+  let projekteRoot;
+  try {
+    projekteRoot = await _realpath(projektePath);
+  } catch {
+    throw new ObsidianVaultPathError(
+      `Vault enthält keinen Unterordner '${PROJEKTE_SUBDIR}'`,
+      'missing-projekte',
+    );
+  }
+
+  // Confinement (AC3, hart): „Projekte" selbst kann ein Symlink sein, der aus dem Vault
+  // hinausführt (Race/externe Manipulation NACH dem Setzen) — projekteRoot MUSS innerhalb
+  // vaultRoot liegen, sonst würde der komplette externe Zielordner gelistet (security/R02).
+  const vaultPrefix = vaultRoot.endsWith(sep) ? vaultRoot : vaultRoot + sep;
+  const projekteConfined = projekteRoot === vaultRoot || projekteRoot.startsWith(vaultPrefix);
+  if (!projekteConfined) {
+    throw new ObsidianVaultPathError(
+      `Vault enthält keinen Unterordner '${PROJEKTE_SUBDIR}'`,
+      'missing-projekte',
+    );
+  }
+
+  let projekteStat;
+  try {
+    projekteStat = await _stat(projekteRoot);
+  } catch {
+    throw new ObsidianVaultPathError(
+      `Vault enthält keinen Unterordner '${PROJEKTE_SUBDIR}'`,
+      'missing-projekte',
+    );
+  }
+  if (!projekteStat.isDirectory()) {
+    throw new ObsidianVaultPathError(
+      `'${PROJEKTE_SUBDIR}' im Vault ist kein Verzeichnis`,
+      'missing-projekte',
+    );
+  }
+
+  let dirents;
+  try {
+    dirents = await _readdir(projekteRoot, { withFileTypes: true });
+  } catch {
+    // Race: „Projekte" zwischen stat() und readdir() entfernt.
+    throw new ObsidianVaultPathError(
+      `Vault enthält keinen Unterordner '${PROJEKTE_SUBDIR}'`,
+      'missing-projekte',
+    );
+  }
+
+  const projektePrefix = projekteRoot.endsWith(sep) ? projekteRoot : projekteRoot + sep;
+  const results = [];
+
+  for (const dirent of dirents) {
+    const name = dirent.name;
+
+    // Keine versteckten/Dot-Ordner (auch keine Dot-Dateien) — AC5.
+    if (name.startsWith('.')) continue;
+
+    const entryPath = join(projekteRoot, name);
+
+    // realpath auflösen — fängt Symlinks ab (Confinement) UND kaputte Symlinks/Races
+    // (Eintrag wird zwischen readdir() und hier entfernt) → übersprungen, kein Fehler.
+    let resolvedEntry;
+    try {
+      resolvedEntry = await _realpath(entryPath);
+    } catch {
+      continue;
+    }
+
+    // Confinement (AC3, hart): Eintrag muss innerhalb <vault>/Projekte liegen —
+    // ein Symlink, der aus dem Vault hinausführt, wird NICHT gelistet.
+    const isConfined = resolvedEntry === projekteRoot || resolvedEntry.startsWith(projektePrefix);
+    if (!isConfined) continue;
+
+    // Nur Verzeichnisse (nach Symlink-Auflösung); keine .md-Dateien.
+    let entryStat;
+    try {
+      entryStat = await _stat(resolvedEntry);
+    } catch {
+      continue;
+    }
+    if (!entryStat.isDirectory()) continue;
+
+    results.push({ name, path: resolvedEntry });
+  }
+
+  // Stabil sortiert (nach Name).
+  results.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+
+  return results;
 }

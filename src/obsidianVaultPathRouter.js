@@ -16,6 +16,12 @@
  *     → 200 { vaultPath: null, configured: false }  — zurückgesetzt (AC1)
  *     → 403 { error }                               — keine Berechtigung (AC7)
  *     → 500 { error }                               — Audit/Store-Fehler
+ *   GET    /api/settings/obsidian-vault/projects  (obsidian-vault-config AC5, S-246)
+ *     → 200 { projects: Array<{ name, path }> }  — direkte Unterordner unter <vault>/Projekte,
+ *       nur Verzeichnisse, keine Dot-Ordner, stabil sortiert; jeder `path` vault-confined (AC3).
+ *     → 409 { configured: false }                — kein Vault konfiguriert
+ *     → 404 { error }                             — Vault/„Projekte" (mehr) nicht erreichbar (Race/AC2)
+ *       Read-only; hinter Access-Mauer, kein zusätzlicher Rollencheck (AC7).
  *
  * Muster: bewusst analog zu `workspacePathRouter.js` (workspace-path-config), aber:
  *   - Response-Shape `{ vaultPath, configured, mountRoot? }` (kein Env-Default-Effektivwert).
@@ -26,6 +32,7 @@
  *   - Mutierende Endpunkte hinter AccessGuard + CRED_ADMIN_EMAILS-Linie (AC7 / ADR-007).
  *   - Audit-First: Intent-Eintrag VOR Mutation; Audit-Write-Fehler → Mutation unterbleibt (AC6).
  *   - Pfad wird als Klartext-Betreiber-Info behandelt (kein Secret in Log/Audit/Response).
+ *   - Projekt-Auflistung strikt auf `<vault>/Projekte` confined (Symlink-/Race-sicher, AC3/AC5).
  *
  * @module obsidianVaultPathRouter
  */
@@ -35,6 +42,7 @@ import {
   validateObsidianVaultPath,
   ObsidianVaultPathError,
   resolveMountRoot,
+  listObsidianVaultProjects,
 } from './obsidianVaultPath.js';
 import { toExternalBackup } from './CredentialStore.js';
 
@@ -84,11 +92,13 @@ function buildStateBody(vaultPath) {
  * @param {import('./CredentialStore.js').CredentialStore} credentialStore
  * @param {import('./AuditStore.js').AuditStore} auditStore
  * @param {object} [deps]  Injectable dependencies für Tests.
- * @param {Function} [deps.validatePath]  Override für validateObsidianVaultPath (Tests).
+ * @param {Function} [deps.validatePath]   Override für validateObsidianVaultPath (Tests).
+ * @param {Function} [deps.listProjects]   Override für listObsidianVaultProjects (Tests).
  * @returns {import('express').Router}
  */
 export function obsidianVaultPathRouter(credentialStore, auditStore, deps = {}) {
   const _validatePath = deps.validatePath ?? validateObsidianVaultPath;
+  const _listProjects = deps.listProjects ?? listObsidianVaultProjects;
   const router = Router();
 
   /**
@@ -102,6 +112,38 @@ export function obsidianVaultPathRouter(credentialStore, auditStore, deps = {}) 
     } catch (err) {
       console.error('[obsidianVaultPathRouter] GET failed:', err.message);
       return res.status(500).json({ error: 'Obsidian-Vault-Konfiguration nicht erreichbar' });
+    }
+  });
+
+  /**
+   * GET /api/settings/obsidian-vault/projects — Projekt-Unterordner unter <vault>/Projekte
+   * (obsidian-vault-config AC5, S-246). Hinter Access-Mauer, kein zusätzlicher Rollencheck (AC7).
+   * Read-only, keine Mutation, kein Audit nötig.
+   */
+  router.get('/api/settings/obsidian-vault/projects', async (_req, res) => {
+    let vaultPath;
+    try {
+      vaultPath = await credentialStore.readObsidianVaultPath();
+    } catch (err) {
+      console.error('[obsidianVaultPathRouter] GET projects — Konfiguration nicht lesbar:', err.message);
+      return res.status(500).json({ error: 'Obsidian-Vault-Konfiguration nicht erreichbar' });
+    }
+
+    if (!vaultPath || !vaultPath.trim()) {
+      return res.status(409).json({ configured: false });
+    }
+
+    try {
+      const projects = await _listProjects(vaultPath.trim());
+      return res.json({ projects });
+    } catch (err) {
+      if (err instanceof ObsidianVaultPathError) {
+        // vault-unreachable / missing-projekte: Vault bzw. „Projekte" (mehr) nicht erreichbar
+        // (auch Race — extern entfernt/unmounted nach dem Setzen) → klarer 4xx, kein Crash.
+        return res.status(404).json({ error: err.message });
+      }
+      console.error('[obsidianVaultPathRouter] GET projects unexpected error:', err.message);
+      return res.status(500).json({ error: 'Projekt-Auflistung fehlgeschlagen' });
     }
   });
 

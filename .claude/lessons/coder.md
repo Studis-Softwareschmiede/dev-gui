@@ -1,5 +1,18 @@
 # Coder Lessons — dev-gui (newest first)
 
+## 2026-07-02 — Confinement-Check gilt auch für den Listing-ROOT selbst, nicht nur für seine Einträge
+Beim Bauen eines confined Directory-Listings (z.B. `<vault>/Projekte`-Unterordner) wird der
+Confinement-Check (`realpath` + Trailing-Slash-Prefix) typischerweise korrekt auf JEDEN
+Eintrag angewendet — aber der Zwischenordner selbst (hier: `Projekte`), der über einen
+zweiten `realpath`-Aufruf relativ zum Vault-Root aufgelöst wird, wird oft NICHT gegen den
+Vault-Root re-validiert. Ist dieser Zwischenordner (zum Zeitpunkt des Listings, z.B. durch
+Race/externe Manipulation) selbst ein Symlink, der aus dem Vault hinauszeigt, wird die gesamte
+Confinement-Logik dadurch trivial umgangen — jeder Eintrag „ist confined" relativ zu einem
+bereits nach außen zeigenden Root. Checkliste: bei JEDER mehrstufigen Pfadauflösung
+(`vaultRoot` → `subRoot` → Einträge) muss JEDE Zwischenstufe gegen die ursprüngliche
+harte Schranke (hier: `vaultRoot`) geprüft werden, nicht nur die Blattknoten.
+*[seen-in: S-246 `listObsidianVaultProjects` — `Projekte`-Symlink-Escape via PoC bestätigt (Review #S-246 Iter.1); promoted: 2026-07-02]*
+
 ## 2026-07-02 — Router-Test mit real gemountetem AccessGuard: „ohne Access-Token → 403" MUSS getestet werden, nicht nur CRED_ADMIN_EMAILS-403
 Mountet ein `*Router.test.js` den ECHTEN `createAccessGuard()` direkt in `makeApp()` (nicht nur simuliert/gemockt) — z.B. `app.use('/api', createAccessGuard())` — ist der „kein Access-Token → 403"-Pfad (AC „ohne Access → 403") TATSÄCHLICH unit-testbar (anders als der `deploymentsRouter`-Fall, wo AccessGuard nur in `server.js` sitzt — dort reicht die Begründungs-Note, reviewer/R03). Ein Test-Setup, das in JEDEM `beforeEach` `process.env.DEV_NO_ACCESS = '1'` setzt, deckt NUR den CRED_ADMIN_EMAILS-403-Zweig ab, nie den echten Access-Mauer-403-Zweig — obwohl das Referenzmuster (`workspacePathRouter`/`workspacePath.test.js`, explizit als "Muster: bewusst analog zu" zitiert) genau dafür einen eigenen Test hat (`delete process.env.DEV_NO_ACCESS` + `ACCESS_TEAM_DOMAIN`/`ACCESS_AUD` leeren → PUT/DELETE → `expect(res.status).toBe(403)`). Checkliste: sobald ein neuer Router-Test-Setup ein Referenzmuster mit `createAccessGuard()` real mountet UND das Referenzmuster einen "ohne Access-Token"-403-Test hat, MUSS der neue Test densel­ben Test übernehmen (oder eine explizite Begründungs-Note ins Covers-Block schreiben, warum bewusst weggelassen). *[seen-in: S-245 obsidianVaultPath.test.js — DEV_NO_ACCESS=1 in jedem beforeEach, "ohne Access → 403"-Hälfte von AC7 weder getestet noch als Note vermerkt, obwohl workspacePath.test.js (Zeilen 915–954) genau das test; promoted: 2026-07-02]*
 

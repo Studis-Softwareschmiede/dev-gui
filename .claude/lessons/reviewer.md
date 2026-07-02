@@ -1,5 +1,14 @@
 # Reviewer Lessons — dev-gui (newest first)
 
+## 2026-07-02 — Confined-Listing-Reviews: den Zwischenordner-Realpath immer PoC-prüfen, nicht nur Blatt-Einträge
+Bei jedem confined Directory-Listing (Vault/Workspace/o.ä.) reicht es NICHT, nur zu prüfen,
+ob jeder gelistete Eintrag gegen die Schranke geprüft wird — auch jede Zwischenstufe der
+Pfadauflösung (z.B. `<root>/<subdir>` bevor `readdir` läuft) muss gegen dieselbe Schranke
+geprüft sein. Ein schneller PoC-Test (Symlink auf den Zwischenordner selbst legen, Funktion
+aufrufen, Ergebnis inspizieren) deckt das in Sekunden auf und ist belastbarer als reines
+Code-Lesen. *[seen-in: S-246 `listObsidianVaultProjects` — Projekte-Symlink-Escape per PoC
+bestätigt: `path`-Werte lagen vollständig außerhalb des Vaults; promoted: 2026-07-02]*
+
 ## 2026-07-01 — Neuer Router-Test kopiert AC-Text, aber vergisst die etablierte AccessGuard-Begründungs-Note im Covers-Block
 Auch wenn ein neuer Router-Test (`ideaSpecifyRouter.test.js`) den AC-Wortlaut "hinter (simuliertem) AccessGuard" ins Covers-Block schreibt, fehlt oft die etablierte explizite Note aus dem Referenzmuster (`assistRefineRouter.test.js`): "AccessGuard-Verdrahtung: per server.js-Inspektion, kein separater Middleware-Test". Ohne diese Note ist unklar, ob der Autor wusste, dass die reale 401/403-Durchsetzung außerhalb des Routers liegt und hier bewusst nicht unit-getestet wird. Prüfmethode: bei jedem neuen `*Router.test.js` das Referenzmuster (`assistRefineRouter.test.js`/`deploymentsRouter.test.js`) danebenlegen und die AccessGuard-Notiz Wort für Wort suchen — Fehlen → Important (reviewer/R03). *[seen-in: S-215 ideaSpecifyRouter.test.js; promoted: 2026-07-01]*
 
