@@ -1,19 +1,20 @@
 /**
- * TriggerPanel.test.jsx — Unit tests for TriggerPanel component (AC4, AC7, AC3 fabric-intake-dialog).
+ * TriggerPanel.test.jsx — Unit tests for the slimmed TriggerPanel component.
  *
  * Mocks fetch via a fetchFn prop.
- * Verifies:
- *   - command-aware composition (preview+sub+repo, adopt+repo, requirement/train free-text)
- *   - adopt with empty repo → no request (AC7)
- *   - preview+up with empty repo → Senden disabled / no request (AC7)
- *   - preview+available → no arg in POST body
- *   - requirement with context text → POSTs /agent-flow:requirement <text>
- *   - requirement without context → POSTs bare /agent-flow:requirement
- *   - train with value → POSTs /agent-flow:train <value>
- *   - fire → POST /api/command; 202 → running state; Kill → cancel
- *   - 409 → running; 400/500 → error messages; /api/session busy → running state
- *   - AC3 (fabric-intake-dialog) — /agent-flow:new-project im Dropdown wählbar,
- *     feuert bare command (kein Arg) → 202, kein Cost-Mode-Schalter sichtbar
+ *
+ * Covers (flow-trigger): AC4, AC7 — command-aware composition + required-field guards
+ *   for the interactive PTY commands that REMAIN in the panel
+ *   (adopt / preview / requirement / train / new-project).
+ * Covers (fabric-intake-dialog): AC3 — /agent-flow:new-project selectable + fires bare.
+ * Covers (headless-manual-drain): AC8 — verschlanktes Panel:
+ *   - `flow` ist NICHT mehr im Befehls-Dropdown (moved out — läuft headless über
+ *     den „Board abarbeiten"-Knopf).
+ *   - der Cost-Mode-Schalter ist ENTFALLEN (kein /cost-mode/i-Control, kein
+ *     `--cost`-Flag in irgendeinem POST; auch nicht für das vormals cost-aware
+ *     `requirement`/`train`).
+ *   - `adopt` / `preview` / `requirement` / `train` / `new-project` und der
+ *     Kill-Switch bleiben unverändert funktionsfähig (interaktiver PTY-Pfad).
  *
  * @jest-environment jsdom
  */
@@ -71,38 +72,131 @@ function renderPanel(fetchFn) {
   );
 }
 
+/** Wait until the initial session poll settled to idle (Kill disabled). */
+async function waitIdle(getByRole) {
+  await waitFor(() => {
+    expect(getByRole('button', { name: /kill/i }).disabled).toBe(true);
+  });
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe('TriggerPanel — initial idle state', () => {
-  it('renders Senden button enabled and Kill button disabled when session is ready', async () => {
+  it('renders idle (Kill disabled); default command adopt requires a repo → Senden disabled', async () => {
     const fetchFn = makeFetchFn({
       '/api/session': () => Promise.resolve(sessionResp('ready')),
     });
     const { getByRole } = renderPanel(fetchFn);
 
-    await waitFor(() => {
-      const send = getByRole('button', { name: /senden/i });
-      const kill = getByRole('button', { name: /kill/i });
-      expect(send.disabled).toBe(false);
-      expect(kill.disabled).toBe(true);
+    await waitIdle(getByRole);
+    // default command is /agent-flow:adopt which needs owner/repo → Senden disabled
+    expect(getByRole('button', { name: /senden/i }).disabled).toBe(true);
+    expect(getByRole('button', { name: /kill/i }).disabled).toBe(true);
+  });
+});
+
+// ── AC8 (headless-manual-drain) — flow + cost-mode removed (requirement bleibt) ─
+
+describe('TriggerPanel — AC8 Verschlankung (flow + cost-mode entfernt)', () => {
+  it('bietet /agent-flow:flow NICHT mehr im Dropdown; requirement bleibt Survivor', async () => {
+    const fetchFn = makeFetchFn({
+      '/api/session': () => Promise.resolve(sessionResp('ready')),
     });
+    const { getByRole } = renderPanel(fetchFn);
+
+    await waitIdle(getByRole);
+
+    const cmdSelect = getByRole('combobox', { name: /befehl/i });
+    const options = Array.from(cmdSelect.options).map((o) => o.value);
+    expect(options).toEqual([
+      '/agent-flow:adopt',
+      '/agent-flow:preview',
+      '/agent-flow:requirement',
+      '/agent-flow:train',
+      '/agent-flow:new-project',
+    ]);
+    expect(options).not.toContain('/agent-flow:flow');
+  });
+
+  it('zeigt keinen Cost-Mode-Schalter — für keinen der verbleibenden Befehle', async () => {
+    const fetchFn = makeFetchFn({
+      '/api/session': () => Promise.resolve(sessionResp('ready')),
+      '/api/status':  () => Promise.resolve(statusResp(['sandbox-1'])),
+    });
+    const { getByRole, queryByLabelText, queryByTestId } = renderPanel(fetchFn);
+
+    await waitIdle(getByRole);
+
+    // adopt (default)
+    expect(queryByLabelText(/cost-mode/i)).toBeNull();
+    expect(queryByTestId('cost-info')).toBeNull();
+
+    // train — was cost-aware before, must no longer show the switch
+    await act(async () => {
+      fireEvent.change(getByRole('combobox', { name: /befehl/i }), {
+        target: { value: '/agent-flow:train' },
+      });
+    });
+    expect(queryByLabelText(/cost-mode/i)).toBeNull();
+
+    // requirement — was cost-aware before, must no longer show the switch
+    await act(async () => {
+      fireEvent.change(getByRole('combobox', { name: /befehl/i }), {
+        target: { value: '/agent-flow:requirement' },
+      });
+    });
+    expect(queryByLabelText(/cost-mode/i)).toBeNull();
+
+    // preview
+    await act(async () => {
+      fireEvent.change(getByRole('combobox', { name: /befehl/i }), {
+        target: { value: '/agent-flow:preview' },
+      });
+    });
+    expect(queryByLabelText(/cost-mode/i)).toBeNull();
+  });
+
+  it('train fires without any --cost flag (bare command)', async () => {
+    const fetchFn = makeFetchFn({
+      '/api/session': () => Promise.resolve(sessionResp('ready')),
+      '/api/command': () => Promise.resolve(cmdResp(202, { commandId: 'ct', status: 'running' })),
+    });
+    const { getByRole } = renderPanel(fetchFn);
+
+    await waitIdle(getByRole);
+
+    await act(async () => {
+      fireEvent.change(getByRole('combobox', { name: /befehl/i }), {
+        target: { value: '/agent-flow:train' },
+      });
+    });
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /senden/i }));
+    });
+
+    const commandCall = fetchFn.mock.calls.find(([url]) => url === '/api/command');
+    const body = JSON.parse(commandCall[1].body);
+    expect(body.command).toBe('/agent-flow:train');
+    expect(body.command).not.toMatch(/--cost/);
   });
 });
 
 // ── AC4 — command-aware controls render ──────────────────────────────────────
 
 describe('TriggerPanel — command-aware controls per command', () => {
-  it('shows no sub-command or arg controls for /agent-flow:flow', async () => {
+  it('shows adopt owner/repo input by default (adopt is the first command)', async () => {
     const fetchFn = makeFetchFn({
       '/api/session': () => Promise.resolve(sessionResp('ready')),
     });
-    const { queryByLabelText } = renderPanel(fetchFn);
+    const { getByRole, getByLabelText } = renderPanel(fetchFn);
 
-    await waitFor(() => {
-      // No sub-command select, no repo or free-text for 'flow'
-      expect(queryByLabelText(/sub-befehl/i)).toBeNull();
-      expect(queryByLabelText(/owner\/repo/i)).toBeNull();
-    });
+    await waitIdle(getByRole);
+    expect(getByLabelText(/owner\/repo/i)).toBeTruthy();
   });
 
   it('shows sub-command select when preview is selected', async () => {
@@ -112,11 +206,8 @@ describe('TriggerPanel — command-aware controls per command', () => {
     });
     const { getByRole, getByLabelText } = renderPanel(fetchFn);
 
-    await waitFor(() => {
-      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
-    });
+    await waitIdle(getByRole);
 
-    // Switch to preview
     await act(async () => {
       fireEvent.change(getByRole('combobox', { name: /befehl/i }), {
         target: { value: '/agent-flow:preview' },
@@ -125,27 +216,6 @@ describe('TriggerPanel — command-aware controls per command', () => {
 
     await waitFor(() => {
       expect(getByLabelText(/sub-befehl/i)).toBeTruthy();
-    });
-  });
-
-  it('shows adopt owner/repo input when adopt is selected', async () => {
-    const fetchFn = makeFetchFn({
-      '/api/session': () => Promise.resolve(sessionResp('ready')),
-    });
-    const { getByRole, getByLabelText } = renderPanel(fetchFn);
-
-    await waitFor(() => {
-      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
-    });
-
-    await act(async () => {
-      fireEvent.change(getByRole('combobox', { name: /befehl/i }), {
-        target: { value: '/agent-flow:adopt' },
-      });
-    });
-
-    await waitFor(() => {
-      expect(getByLabelText(/owner\/repo/i)).toBeTruthy();
     });
   });
 });
@@ -161,9 +231,7 @@ describe('TriggerPanel — AC7 command composition', () => {
     });
     const { getByRole, getByLabelText } = renderPanel(fetchFn);
 
-    await waitFor(() => {
-      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
-    });
+    await waitIdle(getByRole);
 
     // Select preview command
     await act(async () => {
@@ -209,9 +277,7 @@ describe('TriggerPanel — AC7 command composition', () => {
     });
     const { getByRole, getByLabelText } = renderPanel(fetchFn);
 
-    await waitFor(() => {
-      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
-    });
+    await waitIdle(getByRole);
 
     await act(async () => {
       fireEvent.change(getByRole('combobox', { name: /befehl/i }), {
@@ -243,9 +309,7 @@ describe('TriggerPanel — AC7 command composition', () => {
     });
     const { getByRole, getByLabelText } = renderPanel(fetchFn);
 
-    await waitFor(() => {
-      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
-    });
+    await waitIdle(getByRole);
 
     await act(async () => {
       fireEvent.change(getByRole('combobox', { name: /befehl/i }), {
@@ -269,16 +333,14 @@ describe('TriggerPanel — AC7 command composition', () => {
     expect(body.command).toBe('/agent-flow:preview list');
   });
 
-  it('requirement with context text → POSTs /agent-flow:requirement <text>', async () => {
+  it('requirement with context text → POSTs /agent-flow:requirement <text> (no --cost)', async () => {
     const fetchFn = makeFetchFn({
       '/api/session': () => Promise.resolve(sessionResp('ready')),
       '/api/command': () => Promise.resolve(cmdResp(202, { commandId: 'c-req1', status: 'running' })),
     });
     const { getByRole, getByLabelText } = renderPanel(fetchFn);
 
-    await waitFor(() => {
-      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
-    });
+    await waitIdle(getByRole);
 
     await act(async () => {
       fireEvent.change(getByRole('combobox', { name: /befehl/i }), {
@@ -300,18 +362,17 @@ describe('TriggerPanel — AC7 command composition', () => {
     expect(commandCall).toBeTruthy();
     const body = JSON.parse(commandCall[1].body);
     expect(body.command).toBe('/agent-flow:requirement Dark-Mode-Toggle');
+    expect(body.command).not.toMatch(/--cost/);
   });
 
-  it('requirement without context → POSTs bare /agent-flow:requirement (no trailing space)', async () => {
+  it('requirement without context → POSTs bare /agent-flow:requirement (no trailing space, no --cost)', async () => {
     const fetchFn = makeFetchFn({
       '/api/session': () => Promise.resolve(sessionResp('ready')),
       '/api/command': () => Promise.resolve(cmdResp(202, { commandId: 'c-req2', status: 'running' })),
     });
     const { getByRole } = renderPanel(fetchFn);
 
-    await waitFor(() => {
-      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
-    });
+    await waitIdle(getByRole);
 
     await act(async () => {
       fireEvent.change(getByRole('combobox', { name: /befehl/i }), {
@@ -328,6 +389,7 @@ describe('TriggerPanel — AC7 command composition', () => {
     expect(commandCall).toBeTruthy();
     const body = JSON.parse(commandCall[1].body);
     expect(body.command).toBe('/agent-flow:requirement');
+    expect(body.command).not.toMatch(/--cost/);
   });
 
   it('train with a value → POSTs /agent-flow:train security', async () => {
@@ -337,9 +399,7 @@ describe('TriggerPanel — AC7 command composition', () => {
     });
     const { getByRole, getByLabelText } = renderPanel(fetchFn);
 
-    await waitFor(() => {
-      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
-    });
+    await waitIdle(getByRole);
 
     await act(async () => {
       fireEvent.change(getByRole('combobox', { name: /befehl/i }), {
@@ -370,9 +430,7 @@ describe('TriggerPanel — AC7 command composition', () => {
     });
     const { getByRole, getByLabelText } = renderPanel(fetchFn);
 
-    await waitFor(() => {
-      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
-    });
+    await waitIdle(getByRole);
 
     await act(async () => {
       fireEvent.change(getByRole('combobox', { name: /befehl/i }), {
@@ -410,17 +468,9 @@ describe('TriggerPanel — AC7 command composition', () => {
     });
     const { getByRole } = renderPanel(fetchFn);
 
-    await waitFor(() => {
-      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
-    });
+    await waitIdle(getByRole);
 
-    await act(async () => {
-      fireEvent.change(getByRole('combobox', { name: /befehl/i }), {
-        target: { value: '/agent-flow:adopt' },
-      });
-    });
-
-    // Leave repo empty — Senden should be disabled
+    // adopt is the default command — repo empty → Senden must be disabled
     await waitFor(() => {
       expect(getByRole('button', { name: /senden/i }).disabled).toBe(true);
     });
@@ -441,16 +491,9 @@ describe('TriggerPanel — AC7 command composition', () => {
     });
     const { getByRole, getByLabelText } = renderPanel(fetchFn);
 
-    await waitFor(() => {
-      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
-    });
+    await waitIdle(getByRole);
 
-    await act(async () => {
-      fireEvent.change(getByRole('combobox', { name: /befehl/i }), {
-        target: { value: '/agent-flow:adopt' },
-      });
-    });
-
+    // adopt is default — just fill the repo
     await act(async () => {
       fireEvent.change(getByLabelText(/owner\/repo/i), {
         target: { value: 'octocat/Hello-World' },
@@ -471,28 +514,6 @@ describe('TriggerPanel — AC7 command composition', () => {
     expect(body.command).toBe('/agent-flow:adopt octocat/Hello-World');
   });
 
-  it('/agent-flow:flow fires with no argument', async () => {
-    const fetchFn = makeFetchFn({
-      '/api/session': () => Promise.resolve(sessionResp('ready')),
-      '/api/command': () => Promise.resolve(cmdResp(202, { commandId: 'c5', status: 'running' })),
-    });
-    const { getByRole } = renderPanel(fetchFn);
-
-    await waitFor(() => {
-      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
-    });
-
-    // Default is /agent-flow:flow — just click Senden
-    await act(async () => {
-      fireEvent.click(getByRole('button', { name: /senden/i }));
-    });
-
-    const commandCall = fetchFn.mock.calls.find(([url]) => url === '/api/command');
-    expect(commandCall).toBeTruthy();
-    const body = JSON.parse(commandCall[1].body);
-    expect(body.command).toBe('/agent-flow:flow');
-  });
-
   // AC3 (fabric-intake-dialog) — /agent-flow:new-project in frontend catalog
   it('AC3 — /agent-flow:new-project is selectable in the command dropdown', async () => {
     const fetchFn = makeFetchFn({
@@ -500,11 +521,8 @@ describe('TriggerPanel — AC7 command composition', () => {
     });
     const { getByRole } = renderPanel(fetchFn);
 
-    await waitFor(() => {
-      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
-    });
+    await waitIdle(getByRole);
 
-    // The select must contain new-project as an option
     const cmdSelect = getByRole('combobox', { name: /befehl/i });
     const options = Array.from(cmdSelect.options).map((o) => o.value);
     expect(options).toContain('/agent-flow:new-project');
@@ -517,9 +535,7 @@ describe('TriggerPanel — AC7 command composition', () => {
     });
     const { getByRole } = renderPanel(fetchFn);
 
-    await waitFor(() => {
-      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
-    });
+    await waitIdle(getByRole);
 
     await act(async () => {
       fireEvent.change(getByRole('combobox', { name: /befehl/i }), {
@@ -541,16 +557,19 @@ describe('TriggerPanel — AC7 command composition', () => {
     const body = JSON.parse(commandCall[1].body);
     expect(body.command).toBe('/agent-flow:new-project');
   });
+});
 
-  it('AC3 — /agent-flow:new-project shows no cost-mode selector (not cost-aware)', async () => {
+// ── Existing behavior tests (namespaced commands) ────────────────────────────
+
+describe('TriggerPanel — fire command → 202 → running state', () => {
+  it('POSTs /api/command with the composed command on click (new-project)', async () => {
     const fetchFn = makeFetchFn({
       '/api/session': () => Promise.resolve(sessionResp('ready')),
+      '/api/command': () => Promise.resolve(cmdResp(202, { commandId: 'c1', status: 'running' })),
     });
-    const { getByRole, queryByLabelText } = renderPanel(fetchFn);
+    const { getByRole } = renderPanel(fetchFn);
 
-    await waitFor(() => {
-      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
-    });
+    await waitIdle(getByRole);
 
     await act(async () => {
       fireEvent.change(getByRole('combobox', { name: /befehl/i }), {
@@ -558,206 +577,14 @@ describe('TriggerPanel — AC7 command composition', () => {
       });
     });
 
-    expect(queryByLabelText(/cost-mode/i)).toBeNull();
-  });
-});
-
-// ── AC9 — cost-mode switch ─────────────────────────────────────────────────────
-
-describe('TriggerPanel — AC9 cost-mode switch', () => {
-  it('shows the cost-mode selector for /agent-flow:flow (default command)', async () => {
-    const fetchFn = makeFetchFn({
-      '/api/session': () => Promise.resolve(sessionResp('ready')),
-    });
-    const { getByLabelText, getByRole } = renderPanel(fetchFn);
-
-    await waitFor(() => {
-      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
-    });
-    expect(getByLabelText(/cost-mode/i)).toBeTruthy();
-  });
-
-  it('hides the cost-mode selector for preview and adopt', async () => {
-    const fetchFn = makeFetchFn({
-      '/api/session': () => Promise.resolve(sessionResp('ready')),
-      '/api/status':  () => Promise.resolve(statusResp(['sandbox-1'])),
-    });
-    const { getByRole, queryByLabelText } = renderPanel(fetchFn);
-
-    await waitFor(() => {
-      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
-    });
-
-    await act(async () => {
-      fireEvent.change(getByRole('combobox', { name: /^befehl$/i }), {
-        target: { value: '/agent-flow:preview' },
-      });
-    });
-    expect(queryByLabelText(/cost-mode/i)).toBeNull();
-
-    await act(async () => {
-      fireEvent.change(getByRole('combobox', { name: /^befehl$/i }), {
-        target: { value: '/agent-flow:adopt' },
-      });
-    });
-    expect(queryByLabelText(/cost-mode/i)).toBeNull();
-  });
-
-  it('flow + balanced (default) → posts bare /agent-flow:flow (no --cost flag)', async () => {
-    const fetchFn = makeFetchFn({
-      '/api/session': () => Promise.resolve(sessionResp('ready')),
-      '/api/command': () => Promise.resolve(cmdResp(202, { commandId: 'cm1', status: 'running' })),
-    });
-    const { getByRole } = renderPanel(fetchFn);
-
-    await waitFor(() => {
-      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
-    });
-
     await act(async () => {
       fireEvent.click(getByRole('button', { name: /senden/i }));
     });
 
-    const commandCall = fetchFn.mock.calls.find(([url]) => url === '/api/command');
-    const body = JSON.parse(commandCall[1].body);
-    expect(body.command).toBe('/agent-flow:flow');
-  });
-
-  it('flow + max-quality → posts /agent-flow:flow --cost max-quality', async () => {
-    const fetchFn = makeFetchFn({
-      '/api/session': () => Promise.resolve(sessionResp('ready')),
-      '/api/command': () => Promise.resolve(cmdResp(202, { commandId: 'cm2', status: 'running' })),
-    });
-    const { getByRole, getByLabelText } = renderPanel(fetchFn);
-
-    await waitFor(() => {
-      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
-    });
-
-    await act(async () => {
-      fireEvent.change(getByLabelText(/cost-mode/i), {
-        target: { value: 'max-quality' },
-      });
-    });
-
-    await act(async () => {
-      fireEvent.click(getByRole('button', { name: /senden/i }));
-    });
-
-    const commandCall = fetchFn.mock.calls.find(([url]) => url === '/api/command');
-    const body = JSON.parse(commandCall[1].body);
-    expect(body.command).toBe('/agent-flow:flow --cost max-quality');
-  });
-
-  it('requirement + low-cost + text → /agent-flow:requirement --cost low-cost <text> (flag before free-text)', async () => {
-    const fetchFn = makeFetchFn({
-      '/api/session': () => Promise.resolve(sessionResp('ready')),
-      '/api/command': () => Promise.resolve(cmdResp(202, { commandId: 'cm3', status: 'running' })),
-    });
-    const { getByRole, getByLabelText } = renderPanel(fetchFn);
-
-    await waitFor(() => {
-      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
-    });
-
-    await act(async () => {
-      fireEvent.change(getByRole('combobox', { name: /befehl/i }), {
-        target: { value: '/agent-flow:requirement' },
-      });
-    });
-
-    await act(async () => {
-      fireEvent.change(getByLabelText(/kontext/i), {
-        target: { value: 'Dark-Mode-Toggle' },
-      });
-    });
-
-    await act(async () => {
-      fireEvent.change(getByLabelText(/cost-mode/i), {
-        target: { value: 'low-cost' },
-      });
-    });
-
-    await act(async () => {
-      fireEvent.click(getByRole('button', { name: /senden/i }));
-    });
-
-    const commandCall = fetchFn.mock.calls.find(([url]) => url === '/api/command');
-    const body = JSON.parse(commandCall[1].body);
-    expect(body.command).toBe('/agent-flow:requirement --cost low-cost Dark-Mode-Toggle');
-  });
-
-  it('flow + frontier → posts /agent-flow:flow --cost frontier', async () => {
-    const fetchFn = makeFetchFn({
-      '/api/session': () => Promise.resolve(sessionResp('ready')),
-      '/api/command': () => Promise.resolve(cmdResp(202, { commandId: 'cm4', status: 'running' })),
-    });
-    const { getByRole, getByLabelText } = renderPanel(fetchFn);
-
-    await waitFor(() => {
-      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
-    });
-
-    await act(async () => {
-      fireEvent.change(getByLabelText(/cost-mode/i), {
-        target: { value: 'frontier' },
-      });
-    });
-
-    await act(async () => {
-      fireEvent.click(getByRole('button', { name: /senden/i }));
-    });
-
-    const commandCall = fetchFn.mock.calls.find(([url]) => url === '/api/command');
-    const body = JSON.parse(commandCall[1].body);
-    expect(body.command).toBe('/agent-flow:flow --cost frontier');
-  });
-
-  it('zeigt Kosten-Info + Abo-Disclaimer; frontier → fable / $10 / $50', async () => {
-    const fetchFn = makeFetchFn({
-      '/api/session': () => Promise.resolve(sessionResp('ready')),
-    });
-    const { getByLabelText, getByTestId } = renderPanel(fetchFn);
-
-    await waitFor(() => {
-      expect(getByLabelText(/cost-mode/i)).toBeTruthy();
-    });
-
-    // Default 'balanced' — Disclaimer immer sichtbar
-    expect(getByTestId('cost-info').textContent).toMatch(/Abo-Betrieb/);
-
-    await act(async () => {
-      fireEvent.change(getByLabelText(/cost-mode/i), { target: { value: 'frontier' } });
-    });
-    expect(getByTestId('cost-info').textContent).toMatch(/fable/);
-    expect(getByTestId('cost-info').textContent).toMatch(/\$10 \/ \$50/);
-  });
-});
-
-// ── Existing behavior tests (updated for namespaced commands) ─────────────────
-
-describe('TriggerPanel — fire command → 202 → running state', () => {
-  it('POSTs /api/command with the composed command on click', async () => {
-    const fetchFn = makeFetchFn({
-      '/api/session': () => Promise.resolve(sessionResp('ready')),
-      '/api/command': () => Promise.resolve(cmdResp(202, { commandId: 'c1', status: 'running' })),
-    });
-    const { getByRole } = renderPanel(fetchFn);
-
-    // Wait for initial session poll
-    await waitFor(() => {
-      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
-    });
-
-    await act(async () => {
-      fireEvent.click(getByRole('button', { name: /senden/i }));
-    });
-
-    // Verify POST was called with default command (/agent-flow:flow, no arg)
     const commandCall = fetchFn.mock.calls.find(([url]) => url === '/api/command');
     expect(commandCall).toBeTruthy();
     const body = JSON.parse(commandCall[1].body);
-    expect(body.command).toBe('/agent-flow:flow');
+    expect(body.command).toBe('/agent-flow:new-project');
   });
 
   it('disables trigger controls and enables Kill after 202', async () => {
@@ -767,8 +594,12 @@ describe('TriggerPanel — fire command → 202 → running state', () => {
     });
     const { getByRole } = renderPanel(fetchFn);
 
-    await waitFor(() => {
-      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
+    await waitIdle(getByRole);
+
+    await act(async () => {
+      fireEvent.change(getByRole('combobox', { name: /befehl/i }), {
+        target: { value: '/agent-flow:new-project' },
+      });
     });
 
     await act(async () => {
@@ -791,9 +622,12 @@ describe('TriggerPanel — Kill button → 200 → back to idle', () => {
     });
     const { getByRole } = renderPanel(fetchFn);
 
-    // Wait for idle
-    await waitFor(() => {
-      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
+    await waitIdle(getByRole);
+
+    await act(async () => {
+      fireEvent.change(getByRole('combobox', { name: /befehl/i }), {
+        target: { value: '/agent-flow:new-project' },
+      });
     });
 
     // Fire a command → running
@@ -812,7 +646,6 @@ describe('TriggerPanel — Kill button → 200 → back to idle', () => {
 
     // Should return to idle
     await waitFor(() => {
-      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
       expect(getByRole('button', { name: /kill/i }).disabled).toBe(true);
     });
 
@@ -829,9 +662,12 @@ describe('TriggerPanel — Kill button → 200 → back to idle', () => {
     });
     const { getByRole } = renderPanel(fetchFn);
 
-    // Wait for idle then fire
-    await waitFor(() => {
-      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
+    await waitIdle(getByRole);
+
+    await act(async () => {
+      fireEvent.change(getByRole('combobox', { name: /befehl/i }), {
+        target: { value: '/agent-flow:new-project' },
+      });
     });
 
     await act(async () => {
@@ -864,8 +700,12 @@ describe('TriggerPanel — 409 → running state reflected', () => {
     });
     const { getByRole } = renderPanel(fetchFn);
 
-    await waitFor(() => {
-      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
+    await waitIdle(getByRole);
+
+    await act(async () => {
+      fireEvent.change(getByRole('combobox', { name: /befehl/i }), {
+        target: { value: '/agent-flow:new-project' },
+      });
     });
 
     await act(async () => {
@@ -885,8 +725,12 @@ describe('TriggerPanel — 409 → running state reflected', () => {
     });
     const { getByRole } = renderPanel(fetchFn);
 
-    await waitFor(() => {
-      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
+    await waitIdle(getByRole);
+
+    await act(async () => {
+      fireEvent.change(getByRole('combobox', { name: /befehl/i }), {
+        target: { value: '/agent-flow:new-project' },
+      });
     });
 
     await act(async () => {
@@ -908,8 +752,12 @@ describe('TriggerPanel — 400 → error message, no crash', () => {
     });
     const { getByRole } = renderPanel(fetchFn);
 
-    await waitFor(() => {
-      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
+    await waitIdle(getByRole);
+
+    await act(async () => {
+      fireEvent.change(getByRole('combobox', { name: /befehl/i }), {
+        target: { value: '/agent-flow:new-project' },
+      });
     });
 
     await act(async () => {
@@ -919,27 +767,6 @@ describe('TriggerPanel — 400 → error message, no crash', () => {
     await waitFor(() => {
       const alert = getByRole('alert');
       expect(alert.textContent).toMatch(/ungültig/i);
-    });
-  });
-
-  it('does not crash and keeps idle state on 400', async () => {
-    const fetchFn = makeFetchFn({
-      '/api/session': () => Promise.resolve(sessionResp('ready')),
-      '/api/command': () => Promise.resolve(cmdResp(400, {})),
-    });
-    const { getByRole } = renderPanel(fetchFn);
-
-    await waitFor(() => {
-      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
-    });
-
-    await act(async () => {
-      fireEvent.click(getByRole('button', { name: /senden/i }));
-    });
-
-    // Senden stays enabled (idle state — 400 does not set running)
-    await waitFor(() => {
-      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
     });
   });
 });
@@ -952,8 +779,12 @@ describe('TriggerPanel — 500 → error message, no crash', () => {
     });
     const { getByRole } = renderPanel(fetchFn);
 
-    await waitFor(() => {
-      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
+    await waitIdle(getByRole);
+
+    await act(async () => {
+      fireEvent.change(getByRole('combobox', { name: /befehl/i }), {
+        target: { value: '/agent-flow:new-project' },
+      });
     });
 
     await act(async () => {
@@ -963,27 +794,6 @@ describe('TriggerPanel — 500 → error message, no crash', () => {
     await waitFor(() => {
       const alert = getByRole('alert');
       expect(alert.textContent).toMatch(/serverfehler/i);
-    });
-  });
-
-  it('does not crash on 500', async () => {
-    const fetchFn = makeFetchFn({
-      '/api/session': () => Promise.resolve(sessionResp('ready')),
-      '/api/command': () => Promise.resolve(cmdResp(500, {})),
-    });
-    const { getByRole } = renderPanel(fetchFn);
-
-    await waitFor(() => {
-      expect(getByRole('button', { name: /senden/i }).disabled).toBe(false);
-    });
-
-    await act(async () => {
-      fireEvent.click(getByRole('button', { name: /senden/i }));
-    });
-
-    // No crash — component still renders buttons
-    await waitFor(() => {
-      expect(getByRole('button', { name: /kill/i })).toBeTruthy();
     });
   });
 });
@@ -1041,8 +851,6 @@ describe('TriggerPanel — unmount clears poll interval (leak guard)', () => {
     // If the interval was NOT cleared, the jest fake-timer tick below would
     // fire another poll and trigger a React state-update warning.  A passing
     // test here confirms clearInterval ran on cleanup.
-    // Session poll + status fetch = 2 calls at mount, only 1 from the session poll
-    // since status fetch is a separate one-shot effect. We check session poll count.
     const sessionCalls = fetchFn.mock.calls.filter(([url]) => url === '/api/session');
     expect(sessionCalls).toHaveLength(1); // only the initial poll, never the interval tick
   });

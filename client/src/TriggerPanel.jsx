@@ -1,9 +1,18 @@
 /**
- * TriggerPanel.jsx — Flow-Trigger-Panel component (AC4, AC7).
+ * TriggerPanel.jsx — verschlanktes Befehls-Trigger-Panel (AC4, AC7; AC8 headless-manual-drain).
  *
  * Lets the user compose and fire an allowlisted slash-command via
  * POST /api/command {command}. Derives running/idle state from
  * GET /api/session (state:"busy") and from 202/409 responses.
+ *
+ * Verschlankung (headless-manual-drain AC8):
+ *   `flow` (der Board-Drain) und der Cost-Mode-Schalter sind hier ENTFALLEN —
+ *   der Board-Lauf läuft seit ADR-017 headless über den dedizierten
+ *   „Board abarbeiten"-Knopf (CockpitView, mit eigenem Cost-Mode). Die
+ *   verbleibenden interaktiven PTY-Befehle `adopt` / `preview` /
+ *   `requirement` / `train` / `new-project` plus der Kill-Switch bleiben
+ *   unverändert; sie laufen ohne `--cost`-Flag (der Token-Hebel lebt nur
+ *   noch am „Board abarbeiten"-Knopf).
  *
  * Command-aware composition (AC4, AC7):
  *   Each `/agent-flow:*` command exposes only the valid sub-commands/args
@@ -32,7 +41,6 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { COST_MODES, COST_MODE_INFO, COST_AWARE_COMMANDS, costFlag } from './costMode.js';
 
 // ── Fetch with timeout helper ─────────────────────────────────────────────────
 
@@ -58,15 +66,19 @@ function fetchWithTimeout(fetchFn, url, opts = {}, ms = 5_000) {
 
 /**
  * Plugin-namespaced allowlist (mirrors server AC2; server is authoritative).
+ *
+ * Verschlankt (headless-manual-drain AC8): `flow` ist hier NICHT mehr enthalten —
+ * der Board-Lauf läuft headless über den „Board abarbeiten"-Knopf. Der
+ * Cost-Mode-Schalter entfällt ebenfalls; die verbleibenden Befehle laufen ohne
+ * `--cost` über den interaktiven PTY-Pfad.
  * @type {string[]}
  */
 const ALLOWED_COMMANDS = [
-  '/agent-flow:flow',
   '/agent-flow:adopt',
-  '/agent-flow:new-project',
   '/agent-flow:preview',
   '/agent-flow:requirement',
   '/agent-flow:train',
+  '/agent-flow:new-project',
 ];
 
 /** Sub-commands for `preview` that require a <repo> argument. */
@@ -83,23 +95,20 @@ const SESSION_POLL_MS = 3_000;
  * Build the full command string from the current UI selections.
  * Returns null when a required field is missing (caller must not fire).
  *
+ * Cost-Mode ist hier ENTFALLEN (headless-manual-drain AC8) — der Token-Hebel
+ * lebt ausschließlich am „Board abarbeiten"-Knopf. Die verbleibenden Befehle
+ * laufen ohne `--cost`-Flag über den interaktiven PTY-Pfad.
+ *
  * @param {string}      cmd       Selected command, e.g. '/agent-flow:preview'
  * @param {string}      subCmd    Selected sub-command (preview only)
  * @param {string}      repoArg   Selected/typed repo (preview up/down or adopt)
- * @param {string}      freeArg   Free-text argument (requirement/train)
- * @param {string}      costMode  Selected cost-mode (flow/requirement/train)
+ * @param {string}      freeArg   Free-text argument (requirement / train)
  * @returns {string|null}
  */
-function composeCommand(cmd, subCmd, repoArg, freeArg, costMode) {
-  // Cost flag sits directly after the prefix, before any sub/arg/free-text (AC9).
-  const cost = costFlag(cmd, costMode);
-
+function composeCommand(cmd, subCmd, repoArg, freeArg) {
   switch (cmd) {
-    case '/agent-flow:flow':
-      return `${cmd}${cost}`;
-
     case '/agent-flow:new-project':
-      // No argument, no cost-mode (analogous to adopt — not cost-aware). AC3/AC9.
+      // No argument (analogous to adopt). AC3.
       return cmd;
 
     case '/agent-flow:adopt': {
@@ -120,13 +129,14 @@ function composeCommand(cmd, subCmd, repoArg, freeArg, costMode) {
     }
 
     case '/agent-flow:requirement': {
+      // No cost-mode (headless-manual-drain AC8 — cost lever moved to the button).
       const text = freeArg.trim();
-      return text ? `${cmd}${cost} ${text}` : `${cmd}${cost}`;
+      return text ? `${cmd} ${text}` : cmd;
     }
 
     case '/agent-flow:train': {
       const text = freeArg.trim();
-      return text ? `${cmd}${cost} ${text}` : `${cmd}${cost}`;
+      return text ? `${cmd} ${text}` : cmd;
     }
 
     default:
@@ -161,8 +171,6 @@ export function TriggerPanel({ pollInterval = SESSION_POLL_MS, fetchFn, projectP
   const [repoArg, setRepoArg]       = useState('');
   /** Free-text argument (requirement / train) */
   const [freeArg, setFreeArg]       = useState('');
-  /** Cost-mode for agent-dispatching commands (flow/requirement/train) — AC9 */
-  const [costMode, setCostMode]     = useState('balanced');
   /** Project list from /api/status for repo selects */
   const [projects, setProjects]     = useState(null); // null = loading / unavailable
   /** UI message for validation errors or status */
@@ -230,16 +238,13 @@ export function TriggerPanel({ pollInterval = SESSION_POLL_MS, fetchFn, projectP
     (cmd === '/agent-flow:preview' && PREVIEW_REPO_SUBS.includes(previewSub)) ||
     cmd === '/agent-flow:adopt';
 
-  // Whether the current command supports the cost-mode switch (AC9)
-  const isCostAware = COST_AWARE_COMMANDS.includes(cmd);
-
   // Composed command line — null means "required field missing → Senden disabled"
-  const composed = composeCommand(cmd, previewSub, repoArg, freeArg, costMode);
+  const composed = composeCommand(cmd, previewSub, repoArg, freeArg);
   const canFire  = !isRunning && composed !== null;
 
   // ── Fire command ─────────────────────────────────────────────────────────
   const handleFire = useCallback(async () => {
-    const command = composeCommand(cmd, previewSub, repoArg, freeArg, costMode);
+    const command = composeCommand(cmd, previewSub, repoArg, freeArg);
     if (!command) return; // AC7: guard — required field missing
     setMessage(null);
     setMsgType(null);
@@ -293,7 +298,7 @@ export function TriggerPanel({ pollInterval = SESSION_POLL_MS, fetchFn, projectP
     // 500 or unexpected
     setMessage('Serverfehler. Bitte erneut versuchen.');
     setMsgType('error');
-  }, [cmd, previewSub, repoArg, freeArg, costMode, projectPath]);
+  }, [cmd, previewSub, repoArg, freeArg, projectPath]);
 
   // ── Kill ─────────────────────────────────────────────────────────────────
   const handleKill = useCallback(async () => {
@@ -361,33 +366,6 @@ export function TriggerPanel({ pollInterval = SESSION_POLL_MS, fetchFn, projectP
             <option key={c} value={c}>{c}</option>
           ))}
         </select>
-
-        {/* Cost-mode switch — only for agent-dispatching commands (AC9) */}
-        {isCostAware && (
-          <>
-            <label style={styles.label} htmlFor="trigger-cost">
-              Cost-Mode <span style={styles.optional}>(Token-Hebel)</span>
-            </label>
-            <select
-              id="trigger-cost"
-              style={styles.select}
-              value={costMode}
-              disabled={isRunning}
-              aria-disabled={isRunning}
-              onChange={(e) => setCostMode(e.target.value)}
-            >
-              {COST_MODES.map((m) => (
-                <option key={m} value={m}>{m}</option>
-              ))}
-            </select>
-            <div style={styles.costInfo} aria-live="polite" data-testid="cost-info">
-              <span>{COST_MODE_INFO[costMode].models} · {COST_MODE_INFO[costMode].price} /MTok</span>
-              <span style={styles.costDisclaimer}>
-                ⚠ Abo-Betrieb — keine Direktkosten pro Token; Werte nur relative Tier-Schwere.
-              </span>
-            </div>
-          </>
-        )}
 
         {/* ── Command-aware controls (AC4) ─────────────────────────────── */}
 
@@ -469,7 +447,7 @@ export function TriggerPanel({ pollInterval = SESSION_POLL_MS, fetchFn, projectP
           </>
         )}
 
-        {/* requirement — optional free-text */}
+        {/* requirement — optional free-text (interactive PTY path; no cost-mode) */}
         {cmd === '/agent-flow:requirement' && (
           <>
             <label style={styles.label} htmlFor="trigger-free-arg">
@@ -615,20 +593,6 @@ const styles = {
   required: {
     fontSize: 11,
     color: '#f87171',
-  },
-  costInfo: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 1,
-    marginTop: 4,
-    marginBottom: 2,
-    fontSize: 11,
-    color: '#9ca3af',
-  },
-  costDisclaimer: {
-    fontSize: 10,
-    color: '#6b7280',
-    fontStyle: 'italic',
   },
   select: {
     background: '#1e1e1e',
