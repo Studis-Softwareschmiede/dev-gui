@@ -70,6 +70,9 @@ const MAX_VALUE_BYTES = 65536; // 64 KiB
 /** meta-Block-Schlüssel für den konfigurierten Workspace-Root (workspace-path-config, AC4/AC6). */
 const WORKSPACE_PATH_META_KEY = 'settings/workspace-path';
 
+/** meta-Block-Schlüssel für den konfigurierten Obsidian-Vault-Pfad (obsidian-vault-config, AC4). */
+const OBSIDIAN_VAULT_PATH_META_KEY = 'settings/obsidian-vault-path';
+
 /** Erlaubte Zeichen für misc-Schlüsselnamen. */
 const MISC_NAME_RE = /^[a-zA-Z0-9_\-.:@]+$/;
 
@@ -1160,6 +1163,60 @@ export class CredentialStore {
       const storeData = await this.#readStore();
       if (!storeData?.meta?.[WORKSPACE_PATH_META_KEY]) return {};
       delete storeData.meta[WORKSPACE_PATH_META_KEY];
+      const storeBlob = await this.#writeStore(storeData);
+      const backup = await this.#runBackupHook(storeBlob);
+      return { backup };
+    });
+  }
+
+  // ── Obsidian-Vault-Pfad-API (obsidian-vault-config — nicht-geheime Betreiber-Konfiguration) ─
+
+  /**
+   * Gibt den konfigurierten Obsidian-Vault-Pfad zurück (Klartext-Metadatum, AC4).
+   * Gibt null zurück wenn nicht konfiguriert.
+   *
+   * @returns {Promise<string|null>}
+   */
+  async readObsidianVaultPath() {
+    const storeData = await this.#readStore();
+    return storeData?.meta?.[OBSIDIAN_VAULT_PATH_META_KEY]?.value ?? null;
+  }
+
+  /**
+   * Persistiert den konfigurierten Obsidian-Vault-Pfad (Klartext-Metadatum, nicht geheim, AC4).
+   * Der Wert lebt im `meta`-Block, NIE im verschlüsselten `entries`-Secret-Block.
+   *
+   * @param {string} absPath  Bereits validierter absoluter Pfad.
+   * @returns {Promise<{ updatedAt: string, backup: BackupResult }>}
+   */
+  async writeObsidianVaultPath(absPath) {
+    if (typeof absPath !== 'string' || absPath.trim() === '') {
+      throw new Error('[CredentialStore] writeObsidianVaultPath: absPath darf nicht leer sein');
+    }
+    const updatedAt = new Date().toISOString();
+    return this.#withWriteLock(async () => {
+      let storeData = await this.#readStore();
+      if (!storeData) {
+        storeData = { version: 1, entries: {}, meta: {} };
+      }
+      if (!storeData.meta) storeData.meta = {};
+      storeData.meta[OBSIDIAN_VAULT_PATH_META_KEY] = { value: absPath.trim(), updatedAt };
+      const storeBlob = await this.#writeStore(storeData);
+      const backup = await this.#runBackupHook(storeBlob);
+      return { updatedAt, backup };
+    });
+  }
+
+  /**
+   * Löscht den konfigurierten Obsidian-Vault-Pfad. Idempotent (AC1 — zurücksetzen).
+   *
+   * @returns {Promise<{ backup?: BackupResult }>}
+   */
+  async deleteObsidianVaultPath() {
+    return this.#withWriteLock(async () => {
+      const storeData = await this.#readStore();
+      if (!storeData?.meta?.[OBSIDIAN_VAULT_PATH_META_KEY]) return {};
+      delete storeData.meta[OBSIDIAN_VAULT_PATH_META_KEY];
       const storeBlob = await this.#writeStore(storeData);
       const backup = await this.#runBackupHook(storeBlob);
       return { backup };

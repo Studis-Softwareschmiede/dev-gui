@@ -2,7 +2,7 @@ id: S-245
 parent: F-050
 title: 'Obsidian-Vault-Pfad: Backend-Config (setzen/lesen/löschen + Validierung +
   Persistenz)'
-status: To Do
+status: Done
 priority: P1
 spec: docs/specs/obsidian-vault-config.md
 implements:
@@ -26,5 +26,5 @@ branch: null
 pr: null
 blocked_reason: null
 created_at: '2026-07-02T05:42:02Z'
-updated_at: '2026-07-02T05:43:21Z'
-done_at: null
+updated_at: '2026-07-02T10:14:53Z'
+done_at: '2026-07-02T10:14:53Z'
