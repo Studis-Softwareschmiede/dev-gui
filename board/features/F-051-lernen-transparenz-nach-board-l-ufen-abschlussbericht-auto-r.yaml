@@ -1,0 +1,29 @@
+id: F-051
+title: 'Lernen & Transparenz nach Board-Läufen: Abschlussbericht + Auto-Retro'
+goal: 'Nach jedem Nachtwächter- und manuellen Board-Drain (1) einen Abschlussbericht
+  der erledigten/blockierten Stories erzeugen und in der GUI zeigen; (2) optional
+  (globaler Ein/Aus-Schalter bei den Nachtwächter-Einstellungen) automatisch einen
+  Retro-Lauf auslösen (Wochen-Cooldown G3 per --force umgangen, G1 unverändert); (3)
+  automatisch ausgelöste Retro-Läufe seriell in einer Warteschlange abarbeiten (Race-Schutz
+  für die geteilte Lern-Ablage). Specs: drain-completion-report, retro-auto-trigger,
+  retro-auto-queue.'
+status: Backlog
+priority: P1
+spec: null
+definition_of_done: null
+labels: null
+depends: null
+owner: null
+stories:
+- S-253
+- S-254
+- S-255
+- S-256
+- S-257
+- S-258
+- S-259
+- S-260
+- S-261
+progress: 0/9 done
+created_at: '2026-07-02T06:04:51Z'
+updated_at: '2026-07-02T06:09:06Z'
