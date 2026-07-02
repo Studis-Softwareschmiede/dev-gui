@@ -1,0 +1,25 @@
+id: S-246
+parent: F-050
+title: 'Obsidian-Vault: Projekt-Unterordner unter /Projekte auflisten (confined)'
+status: To Do
+priority: P1
+spec: docs/specs/obsidian-vault-config.md
+implements:
+- AC3
+- AC5
+depends:
+- S-245
+labels:
+- security
+size_est: M
+dispo_est: '5.0'
+dispo_act: null
+dispo_forecast: null
+estimate_note: S/M-Heuristik score 5 -> M; baseline js|balanced|M (ep 5.0, n=8)
+confidence: medium
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-07-02T05:42:03Z'
+updated_at: '2026-07-02T05:43:23Z'
+done_at: null
