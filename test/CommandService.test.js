@@ -15,6 +15,10 @@
  *          ohne Argument; siehe reconcile-trigger.md Verträge.
  *   AC5  — cancel → interrupt sent + status cancelled + lock released → next cmd accepted
  *   AC6  — audit record() throws → command not run + lock released (failure path)
+ * Covers (obsidian-project-intake): AC4 — /agent-flow:from-notes in DEFAULT_ALLOWED_COMMANDS,
+ *          Trigger mit Ordner-Argument akzeptiert → 202, PTY-write inkl. Argument;
+ *          Backwards-Compat der bisherigen Präfixe unverändert (isAllowed unit-level
+ *          Schleife über DEFAULT_ALLOWED_COMMANDS + je-Prefix HTTP-Tests bleiben grün).
  *
  * Strategy:
  *   - Stub PtyManager (EventEmitter-based fake — no real PTY spawned)
@@ -210,6 +214,12 @@ describe('isAllowed()', () => {
     expect(isAllowed('/agent-flow:new-project', DEFAULT_ALLOWED_COMMANDS)).toBe(true);
   });
 
+  it('AC4 (obsidian-project-intake) — /agent-flow:from-notes is in DEFAULT_ALLOWED_COMMANDS', () => {
+    expect(DEFAULT_ALLOWED_COMMANDS).toContain('/agent-flow:from-notes');
+    expect(isAllowed('/agent-flow:from-notes', DEFAULT_ALLOWED_COMMANDS)).toBe(true);
+    expect(isAllowed('/agent-flow:from-notes Projekte/Mein-Projekt', DEFAULT_ALLOWED_COMMANDS)).toBe(true);
+  });
+
   it('returns false for un-namespaced commands that were previously allowed', () => {
     expect(isAllowed('/flow', DEFAULT_ALLOWED_COMMANDS)).toBe(false);
     expect(isAllowed('/preview', DEFAULT_ALLOWED_COMMANDS)).toBe(false);
@@ -290,6 +300,14 @@ describe('CommandService.tryRun() — unit (no HTTP)', () => {
     expect(res.status).toBe('running');
     expect(pty.written).toHaveLength(1);
     expect(pty.written[0]).toBe('/agent-flow:new-project\n');
+  });
+
+  it('AC4 (obsidian-project-intake) — /agent-flow:from-notes with folder-path argument accepted: written to PTY with argument', () => {
+    const res = svc.tryRun({ command: '/agent-flow:from-notes Projekte/Mein-Projekt', identity: { email: 'alice@test.com' } });
+    expect(res.ok).toBe(true);
+    expect(res.status).toBe('running');
+    expect(pty.written).toHaveLength(1);
+    expect(pty.written[0]).toBe('/agent-flow:from-notes Projekte/Mein-Projekt\n');
   });
 
   it('AC1 — accepted command with sub-command: writes full line to PTY', () => {
@@ -634,14 +652,24 @@ describe('POST /api/command — HTTP integration', () => {
     expect(ptyStub.written[0]).toBe('/agent-flow:reconcile\n');
   });
 
-  it('AC3 (fabric-intake-dialog) — backwards-compat: all pre-existing prefixes still accepted (202)', async () => {
+  it('AC4 (obsidian-project-intake) — /agent-flow:from-notes <path> → 202 and full line written to PTY', async () => {
+    const res = await post(port, '/api/command', { command: '/agent-flow:from-notes Projekte/Mein-Projekt' });
+    expect(res.status).toBe(202);
+    expect(typeof res.body.commandId).toBe('string');
+    expect(res.body.status).toBe('running');
+    expect(ptyStub.written[0]).toBe('/agent-flow:from-notes Projekte/Mein-Projekt\n');
+  });
+
+  it('AC4 (obsidian-project-intake) — backwards-compat: all pre-existing prefixes (incl. new-project) still accepted (202) after from-notes addition', async () => {
     const legacyPrefixes = [
       '/agent-flow:flow',
       '/agent-flow:adopt octocat/Hello-World',
+      '/agent-flow:new-project',
       '/agent-flow:preview list',
       '/agent-flow:reconcile',
       '/agent-flow:requirement some text',
       '/agent-flow:train security',
+      '/agent-flow:from-notes Projekte/Mein-Projekt',
     ];
     // Each command needs a fresh server (lock is held after 202); use unit-level
     // isAllowed() to verify allowlist membership without consuming the lock.
