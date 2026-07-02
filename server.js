@@ -21,6 +21,7 @@
  *   GET  /api/settings/ssh-keys/:user/private-key/export → Private-Key-Export (ssh-key-generation AC4, #115)
  *   POST /api/settings/ssh-keys/:user/rotate           → vollautomatische additive SSH-Key-Rotation (ssh-key-rotation AC1–AC8, #118)
  *   GET/PUT/DELETE /api/settings/workspace-path   → Workspace-Pfad-Konfiguration (workspace-path-config #85)
+ *   GET/PUT/DELETE /api/settings/obsidian-vault-path → Obsidian-Vault-Pfad-Konfiguration (obsidian-vault-config S-245)
  *   GET  /api/settings/workspace-health           → { overall, checks, counts } (workspace-health-hinweis AC2)
  *   POST /api/github/repos                        → Org-Repo anlegen (github-repo-create #59)
  *   GET  /api/workspace/repos                     → { repos: [...] } — live WORKSPACE_DIR scan (workspace-repos AC1, AC2)

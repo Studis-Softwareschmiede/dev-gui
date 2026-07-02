@@ -38,7 +38,7 @@ dev-gui läuft im Container (ADR-006). Ein auf dem **Host** liegender Obsidian-V
 ## Verträge
 > Persistenz-Detail (Andockpunkt `meta`-Block des `CredentialStore`, ggf. eigener Resolver) = Architektur-Entscheidung `architekt`; bindend: **eine** Quelle der Wahrheit für den konfigurierten Vault-Pfad, nicht-geheim.
 
-- **GET `/api/settings/obsidian-vault-path`** (read-only, hinter AccessGuard) → **200** `{ vaultPath: string|null, configured: boolean, mountRoot?: string }`. `mountRoot` = die Mount-Schranke (falls per Env gesetzt), zur UI-Orientierung.
+- **GET `/api/settings/obsidian-vault-path`** (read-only, hinter AccessGuard) → **200** `{ vaultPath: string|null, configured: boolean, mountRoot?: string }`. `mountRoot` = die Mount-Schranke (falls per Env gesetzt), zur UI-Orientierung. **Präzisierung (S-245):** die optionale Schranke wird aus der Env **`OBSIDIAN_VAULT_DIR`** gelesen (analog `WORKSPACE_DIR`); ist sie leer/ungesetzt, entfällt `mountRoot` und es gilt allein „lesbar aus Backend-Sicht" (AC3). Der konkrete Volume-Mount dahinter bleibt Deploy-Detail (A1).
 - **PUT `/api/settings/obsidian-vault-path`** (mutierend) — Body `{ path: string }` → validiert (AC2/AC3), persistiert (AC4).
   - **200** `{ vaultPath, configured: true }` bei Erfolg.
   - **4xx/422** bei nicht-existent / kein-Verzeichnis / nicht-lesbar / fehlendem „Projekte"-Unterordner (AC2) bzw. Traversal/außerhalb-Schranke (AC3) — konfigurierter Wert unverändert.
