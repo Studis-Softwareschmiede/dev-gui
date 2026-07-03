@@ -24,10 +24,13 @@
  * Live-Ausgabe im Terminal-Pane. Fortschritt/Ergebnis werden über den
  * Board-Re-Fetch (Karten-Updates) + das Audit-Log sichtbar; zusätzlich über den
  * Drain-Job-Status (AC4): jeder gestartete Drain wird unter seiner `drainId` in
- * einer In-Memory-`DrainJobRegistry` geführt (`running`→`done`|`failed`);
- * `GET /api/projects/:slug/drain/:drainId` liest den Status (secret-/pfad-frei,
- * Format analog zum headless-Reconcile-Status). So sieht der Owner „läuft /
- * fertig / fehlgeschlagen" trotz fehlender Live-Ausgabe.
+ * der `DrainJobRegistry` geführt (`running`→`done`|`failed`) — seit
+ * docs/specs/drain-restart-robustness.md AC1/AC2 datei-basiert persistiert
+ * (überlebt einen Server-Neustart; ohne `CRED_STORE_DIR` weiterhin reiner
+ * In-Memory-Betrieb, kein Crash); `GET /api/projects/:slug/drain/:drainId`
+ * liest den Status (secret-/pfad-frei, Format analog zum headless-Reconcile-
+ * Status). So sieht der Owner „läuft / fertig / fehlgeschlagen" trotz
+ * fehlender Live-Ausgabe.
  *
  * Cost-Mode (headless-manual-drain AC3): der Endpunkt akzeptiert optional
  * `{ costMode }` (Enum `low-cost|balanced|max-quality|frontier`, geteilt mit
@@ -139,8 +142,9 @@ import { DrainJobRegistry } from './DrainJobRegistry.js';
  * @param {import('./ProjectJobLock.js').ProjectJobLock} [options.lock]
  *   Injectable lock for isProjectBusy (default: module singleton via isProjectBusy).
  * @param {import('./DrainJobRegistry.js').DrainJobRegistry} [options.jobRegistry]
- *   Injectable Drain-Job-Status-Registry (AC4). Default: eine eigene, router-
- *   interne In-Memory-Instanz — POST und GET teilen dieselbe Instanz.
+ *   Injectable Drain-Job-Status-Registry (AC4; datei-basiert persistiert seit
+ *   drain-restart-robustness AC1/AC2). Default: eine eigene, router-interne
+ *   Instanz — POST und GET teilen dieselbe Instanz.
  * @returns {import('express').Router}
  */
 export function projectDrainRouter(deps = {}, options = {}) {
@@ -277,14 +281,19 @@ export function projectDrainRouter(deps = {}, options = {}) {
     }
 
     const drainId = randomUUID();
-    // AC4: Drain sofort als `running` in der Job-Registry führen — noch VOR dem
-    // fire-and-forget-Start, damit ein direkt danach eintreffender
-    // `GET …/drain/:drainId` den Job garantiert sieht (kein Registrierungs-Race).
-    _jobRegistry.register(drainId);
 
-    // drain-completion-report AC5: Startzeitpunkt des Drains erfassen (für den
-    // Abschlussbericht `startedAt`). Nur ein Zeitstempel — kein Secret/Pfad.
+    // drain-completion-report AC5 / drain-restart-robustness AC2: Startzeitpunkt
+    // des Drains erfassen (für den Abschlussbericht `startedAt` UND den
+    // persistenten Registry-Eintrag). Nur ein Zeitstempel — kein Secret/Pfad.
     const startedAt = new Date().toISOString();
+
+    // AC4 (headless-manual-drain) / AC2 (drain-restart-robustness): Drain sofort
+    // als `running` in der (jetzt datei-persistierten) Job-Registry führen — noch
+    // VOR dem fire-and-forget-Start, damit ein direkt danach eintreffender
+    // `GET …/drain/:drainId` den Job garantiert sieht (kein Registrierungs-Race).
+    // `project`/`trigger`/`args`/`startedAt` sind secret-/pfad-frei (Slug, fixes
+    // Enum, Cost-Mode-Flag, Zeitstempel) und werden für die Persistenz mitgegeben.
+    _jobRegistry.register(drainId, { project: rawSlug, trigger: 'manual', args: drainArgs, startedAt });
 
     // Fire-and-forget (Modul-Doku): der Drain läuft potenziell lange; die
     // HTTP-Antwort wartet nicht auf sein Ende. ProjectDrain.drainProject()

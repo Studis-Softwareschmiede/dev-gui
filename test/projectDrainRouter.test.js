@@ -84,6 +84,16 @@
  *          unit-getestet (kein zweiter Codepfad — dieselbe Instanz wie der
  *          Nacht-Drain, server.js-Verdrahtung).
  *
+ * Covers (drain-restart-robustness, S-281):
+ *   AC2 — der Router ruft `jobRegistry.register(drainId, {project,trigger,
+ *          args,startedAt})` mit dem Route-Slug (rawSlug, kein Pfad),
+ *          `trigger:'manual'`, den validierten Cost-Mode-`args` und einem
+ *          ISO-8601-Zeitstempel auf (statt der alten `register(drainId)`-
+ *          Signatur ohne Metadaten) — die eigentliche Persistenz ist in
+ *          test/DrainJobRegistry.test.js abgedeckt. Das GET-Vertragsformat
+ *          (`200 {status,result?,error?}` | `404` | `400`) bleibt dabei
+ *          unverändert (bereits oben durch die AC4-Tests abgedeckt).
+ *
  * Strategy: echter Express-App + echter HTTP-Server (Muster
  * test/slugResolver.test.js "commandRouter integration" + test/tickerSettings.test.js
  * HTTP-Helpers) — injizierbarer slugResolver/pathValidator/lock (kein echtes
@@ -985,5 +995,81 @@ describe('POST /api/projects/:slug/drain — Drain-Fertig-Push (drain-done-notif
     await flushAsync();
     const status = await getJson(s.port, `/api/projects/dev-gui/drain/${post.body.drainId}`);
     expect(status.body.status).toBe('done');
+  });
+});
+
+// ── Persistente Job-Registry-Wiring (drain-restart-robustness S-281 AC2) ──────
+
+describe('POST /api/projects/:slug/drain — Job-Registry-Wiring (drain-restart-robustness AC2)', () => {
+  let server;
+  let consoleErrorSpy;
+
+  beforeEach(() => {
+    consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+  });
+  afterEach(async () => {
+    if (server) await closeServer(server);
+    server = null;
+    consoleErrorSpy.mockRestore();
+  });
+
+  function makeSpyRegistry() {
+    return {
+      register: jest.fn(),
+      markDone: jest.fn(),
+      markFailed: jest.fn(),
+      getJob: jest.fn(() => undefined),
+    };
+  }
+
+  it('register() erhält {project,trigger,args,startedAt} statt der alten No-Meta-Signatur', async () => {
+    const jobRegistry = makeSpyRegistry();
+    const drainProject = jest.fn(async () => ({ stopped: true, reason: 'no-drain-target', flowRuns: 0, escalated: [] }));
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => { req.identity = { email: 'test@example.com' }; next(); });
+    app.use(projectDrainRouter(
+      { projectDrain: { drainProject } },
+      { slugResolver: makeSlugResolver(), pathValidator: identityPathValidator(), jobRegistry },
+    ));
+    const s = await startServer(app);
+    server = s.server;
+
+    const res = await postJson(s.port, '/api/projects/dev-gui/drain', { costMode: 'frontier' });
+    expect(res.status).toBe(202);
+
+    expect(jobRegistry.register).toHaveBeenCalledTimes(1);
+    const [drainId, meta] = jobRegistry.register.mock.calls[0];
+    expect(typeof drainId).toBe('string');
+    expect(meta).toEqual({
+      project: 'dev-gui',
+      trigger: 'manual',
+      args: ['--cost', 'frontier'],
+      startedAt: expect.any(String),
+    });
+    // ISO-8601-Zeitstempel, kein Pfad/Secret.
+    expect(() => new Date(meta.startedAt).toISOString()).not.toThrow();
+  });
+
+  it('register() mit costMode balanced/fehlend → args: []', async () => {
+    const jobRegistry = makeSpyRegistry();
+    const drainProject = jest.fn(async () => ({ stopped: true, reason: 'no-drain-target', flowRuns: 0, escalated: [] }));
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => { req.identity = { email: 'test@example.com' }; next(); });
+    app.use(projectDrainRouter(
+      { projectDrain: { drainProject } },
+      { slugResolver: makeSlugResolver(), pathValidator: identityPathValidator(), jobRegistry },
+    ));
+    const s = await startServer(app);
+    server = s.server;
+
+    const res = await postNoBody(s.port, '/api/projects/dev-gui/drain');
+    expect(res.status).toBe(202);
+
+    const [, meta] = jobRegistry.register.mock.calls[0];
+    expect(meta.args).toEqual([]);
+    expect(meta.trigger).toBe('manual');
+    expect(meta.project).toBe('dev-gui');
   });
 });
