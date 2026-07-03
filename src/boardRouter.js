@@ -9,6 +9,8 @@
  *   GET /api/board/projects/list                     → { projects: [{slug,feature_count,story_count}] }
  *                                                      (leicht, KEIN Story-Scan — AC5)
  *   GET /api/board/projects/:slug                    → { project: {...} }  (ein Projekt voll, on-demand — AC5)
+ *   GET /api/board/projects/:slug/areas              → { areas: [...] }  (Bereichsliste, read-only,
+ *                                                      bereichs-modell AC1/AC2/V6, S-288)
  *   POST /api/board/projects/rescan                  → { ok: true }  (on-demand re-scan, AC9)
  *   GET /api/board/projects/:slug/stories/:id/detail → { detail: StoryDetail }  (read-only, lazy — AC2)
  *   POST /api/board/projects/:slug/ideas             → { storyId }  (Quick-Capture-Create, ideen-inbox AC3)
@@ -92,6 +94,17 @@
  *          schreibt nichts. Slug wird gegen SLUG_RE geprüft und nur als Index-Lookup
  *          verwendet (nie als Pfad). Kein Secret in Ausgabe/Log; ungültige Eingaben
  *          werden sauber abgewiesen (kein Crash).
+ *
+ * bereichs-modell (S-288, Lese-Teil — AC1, AC2, GET-Vertrag aus V6):
+ *   GET /api/board/projects/:slug/areas → 200 { areas: [{ id, name, order,
+ *   description, storyCount }] } sortiert nach `order` (Sortierung + Roll-up
+ *   kommen bereits so aus `BoardAggregator.getIndex()` — der Router liest nur
+ *   read-only aus dem In-Memory-Index, kein zusätzlicher Scan/Schreibpfad). 404
+ *   bei ungültigem Format ODER unbekanntem Slug (dieselbe SLUG_RE + Index-Lookup-
+ *   Prüfung wie GET /api/board/projects/:slug). Rein lesend — kein accessGuard-
+ *   mutierender Pfad nötig (wie alle übrigen GET-Board-Routen). `AreaWriter`/
+ *   mutierende Endpunkte (POST/PATCH/DELETE/reorder) sind NICHT Teil dieser
+ *   Story (Folge-Stories, [[bereichs-modell]] V3-V6).
  *
  * Security:
  *   - Read-only für alle GET-Routen (AC7 studis-kanban-board-ux).
@@ -324,6 +337,43 @@ export function boardRouter({
     }
 
     return res.json({ project });
+  });
+
+  /**
+   * GET /api/board/projects/:slug/areas
+   *
+   * Returns the project's area list (bereichs-modell AC1/AC2, GET-Vertrag V6,
+   * S-288) — read-only, from the already-scanned in-memory index (no extra
+   * scan triggered). Sorted by `order` (BoardAggregator already sorts).
+   *
+   * Response: { areas: [{ id, name, order, description, storyCount }] }.
+   * 404 if slug format is invalid or the project is unknown (same SLUG_RE +
+   * index-lookup validation as GET /api/board/projects/:slug — slug is never
+   * used as a filesystem path).
+   */
+  router.get('/api/board/projects/:slug/areas', async (req, res) => {
+    const { slug } = req.params;
+
+    if (!slug || !SLUG_RE.test(slug)) {
+      return res.status(404).json({ error: 'Projekt nicht gefunden.' });
+    }
+
+    const projects = await boardAggregator.getIndex();
+    const project = projects.find((p) => p.slug === slug);
+
+    if (!project) {
+      return res.status(404).json({ error: 'Projekt nicht gefunden.' });
+    }
+
+    const areas = (project.areas ?? []).map((a) => ({
+      id: a.id,
+      name: a.name,
+      order: a.order,
+      description: a.description,
+      storyCount: a.storyCount,
+    }));
+
+    return res.json({ areas });
   });
 
   /**

@@ -5,7 +5,8 @@
  *   includeArchived-Filter + POST .../archive-done, board-feature-archive S-232;
  *   Feature-Status-Ableitung, feature-status-derivation S-238;
  *   FSWatcher-Crash-Härtung (error-Handler, Re-Arm/Backoff, ENOENT-Regression),
- *   fswatcher-crash-hardening S-280).
+ *   fswatcher-crash-hardening S-280;
+ *   areas.yaml lesen + Roll-up + GET /areas, bereichs-modell S-288 — Lese-Teil).
  *
  * Covers (dev-gui-board-aggregator backend):
  *   AC1 — Scant konfigurierte Repo-Wurzeln read-only nach board/-Ordnern;
@@ -146,6 +147,29 @@
  *          invalidiert den Index erneut (`getIndex()` OHNE expliziten `scan()`-Aufruf
  *          liest die neue Struktur).
  *
+ * Covers (bereichs-modell, S-288 — Lese-Teil: BoardAggregator liest areas.yaml +
+ * Read-Model + GET-Endpunkt; describe-Blöcke "BoardAggregator — areas.yaml lesen
+ * (bereichs-modell AC1)", "BoardAggregator — areas Roll-up (bereichs-modell AC2)",
+ * "boardRouter HTTP — GET /api/board/projects/:slug/areas (bereichs-modell AC1/AC2, V6)",
+ * "parseAreasYamlList (bereichs-modell AC1)"):
+ *   AC1 — `board/areas.yaml` (root-level YAML-Liste von Mappings) wird gelesen und
+ *          als `id`/`name`/`order`/`description?` sortiert nach `order` am
+ *          Projekt-Index (`areas`) geliefert; fehlende/leere Datei → `areas: []`
+ *          (kein Crash); defekte Einzel-Einträge (fehlendes id/name, `order` kein
+ *          Integer) werden übersprungen, übrige Einträge bleiben erhalten.
+ *   AC2 — Jeder Bereich trägt `storyCount` (Roll-up): eine Story zählt für den
+ *          Bereich ihres eigenen `area`-Felds; hat sie keins, zählt sie für das
+ *          `area` ihres Eltern-Features (Fallback); ein eigenes Story-`area`
+ *          gewinnt, wenn Story UND Eltern-Feature unterschiedliche `area` tragen;
+ *          ein unbekannter `area`-Wert wird nicht gezählt (kein Crash); ein
+ *          Bereich ohne Treffer bleibt sichtbar mit `storyCount: 0`.
+ *   V6/GET — `GET /api/board/projects/:slug/areas` → `200 { areas: [...] }`
+ *          sortiert nach `order` (bekannter Slug, inkl. Projekt ohne areas.yaml
+ *          → `{ areas: [] }`); `404` bei unbekanntem Slug ODER ungültigem
+ *          Slug-Format (dieselbe SLUG_RE + Index-Lookup-Prüfung wie
+ *          GET /api/board/projects/:slug). Rein lesend, kein AccessGuard-Test
+ *          nötig (Read-Route, analog allen übrigen GET-Board-Routen).
+ *
  * AccessGuard:
  *   POST /api/board/projects/rescan (Schreib-Trigger) liegt hinter
  *   app.use('/api', accessGuard) in server.js — kein separater Middleware-Test
@@ -163,6 +187,7 @@ import {
   parseYaml,
   parseBoardRoots,
   computeFeatureStatus,
+  parseAreasYamlList,
 } from '../src/BoardAggregator.js';
 
 // ── parseYaml unit tests ──────────────────────────────────────────────────────
@@ -336,6 +361,51 @@ describe('parseBoardRoots', () => {
     expect(roots.length).toBe(1);
     expect(roots[0]).not.toContain('~');
     expect(roots[0]).toMatch(/\/Git\/Studis-Softwareschmiede$/);
+  });
+});
+
+// ── parseAreasYamlList unit tests (bereichs-modell AC1) ───────────────────────
+
+describe('parseAreasYamlList (bereichs-modell AC1)', () => {
+  it('returns [] for empty string', () => {
+    expect(parseAreasYamlList('')).toEqual([]);
+  });
+
+  it('returns [] for null/undefined', () => {
+    expect(parseAreasYamlList(null)).toEqual([]);
+    expect(parseAreasYamlList(undefined)).toEqual([]);
+  });
+
+  it('returns [] for whitespace-only content', () => {
+    expect(parseAreasYamlList('   \n  \n')).toEqual([]);
+  });
+
+  it('parses a list of mappings with id, name, order, description', () => {
+    const content = `- id: board
+  name: Board
+  order: 1
+  description: Schema, board-CLI, Lint.
+- id: fabrik-arbeiten
+  name: Fabrik Arbeiten
+  order: 2
+`;
+    const result = parseAreasYamlList(content);
+    expect(result).toEqual([
+      { id: 'board', name: 'Board', order: 1, description: 'Schema, board-CLI, Lint.' },
+      { id: 'fabrik-arbeiten', name: 'Fabrik Arbeiten', order: 2 },
+    ]);
+  });
+
+  it('parses items without a description field (optional)', () => {
+    const content = '- id: board\n  name: Board\n  order: 1\n';
+    const result = parseAreasYamlList(content);
+    expect(result[0].description).toBeUndefined();
+  });
+
+  it('handles quoted string values inside items', () => {
+    const content = "- id: board\n  name: 'Board & Struktur'\n  order: 1\n";
+    const result = parseAreasYamlList(content);
+    expect(result[0].name).toBe('Board & Struktur');
   });
 });
 
@@ -1772,6 +1842,312 @@ describe('boardRouter HTTP — GET /api/board/projects/:slug (AC5)', () => {
       expect(status).toBe(200);
       expect(Array.isArray(data.projects)).toBe(true);
       expect(data.projects[0].slug).toBe('my-repo');
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+});
+
+// ── bereichs-modell AC1/AC2 (S-288) — BoardAggregator liest areas.yaml + Roll-up ──
+
+const AREAS_YAML = `- id: board
+  name: Board
+  order: 2
+  description: Board-Schema, Kanban, Bereiche.
+- id: fabrik-arbeiten
+  name: Fabrik Arbeiten
+  order: 1
+`;
+
+describe('BoardAggregator — areas.yaml lesen (bereichs-modell AC1)', () => {
+  it('project entry has empty areas: [] when areas.yaml is missing', async () => {
+    const { aggregator } = makeAggregator();
+    const index = await aggregator.getIndex();
+    expect(index[0]).toHaveProperty('areas');
+    expect(index[0].areas).toEqual([]);
+  });
+
+  it('project entry has empty areas: [] when areas.yaml is empty', async () => {
+    const { aggregator } = makeAggregator({
+      fileOverrides: { [`${BOARD_ROOT}/my-repo/board/areas.yaml`]: '' },
+    });
+    const index = await aggregator.getIndex();
+    expect(index[0].areas).toEqual([]);
+  });
+
+  it('reads areas.yaml and returns id/name/order/description sorted by order', async () => {
+    const { aggregator } = makeAggregator({
+      fileOverrides: { [`${BOARD_ROOT}/my-repo/board/areas.yaml`]: AREAS_YAML },
+    });
+    const index = await aggregator.getIndex();
+    const areas = index[0].areas;
+    expect(areas.map((a) => a.id)).toEqual(['fabrik-arbeiten', 'board']); // sorted by order (1, 2)
+    expect(areas[0]).toMatchObject({ id: 'fabrik-arbeiten', name: 'Fabrik Arbeiten', order: 1 });
+    expect(areas[1]).toMatchObject({
+      id: 'board',
+      name: 'Board',
+      order: 2,
+      description: 'Board-Schema, Kanban, Bereiche.',
+    });
+  });
+
+  it('defect entries (missing id/name, non-integer order) are skipped without destroying the rest', async () => {
+    const brokenAreasYaml = `- id: board
+  name: Board
+  order: 1
+- name: Kein id-Feld
+  order: 2
+- id: kein-name
+  order: 3
+- id: bad-order
+  name: Kaputte Reihenfolge
+  order: not-a-number
+- id: float-order
+  name: Kommazahl-Reihenfolge
+  order: 1.5
+- id: ok-area
+  name: OK Bereich
+  order: 4
+`;
+    const { aggregator } = makeAggregator({
+      fileOverrides: { [`${BOARD_ROOT}/my-repo/board/areas.yaml`]: brokenAreasYaml },
+    });
+    const index = await aggregator.getIndex();
+    const areas = index[0].areas;
+    // "float-order" (order: 1.5) is a valid finite number but not an integer —
+    // must be skipped just like the string case (AC1 JSDoc: "non-integer order").
+    expect(areas.map((a) => a.id)).toEqual(['board', 'ok-area']);
+  });
+
+  it('does not read/crash on other projects and does not write anywhere (read-only)', async () => {
+    const fsDeps = buildFakeFsDeps({
+      fileOverrides: { [`${BOARD_ROOT}/my-repo/board/areas.yaml`]: AREAS_YAML },
+    });
+    const aggregator = new BoardAggregator({ boardRootsEnv: BOARD_ROOT, fsDeps });
+    await aggregator.getIndex();
+    // No write-equivalent method exists on fsDeps (readFile/readdir/watch only) —
+    // the aggregator can only have called those, never a write.
+    expect(fsDeps.writeFile).toBeUndefined();
+  });
+});
+
+describe('BoardAggregator — areas Roll-up (bereichs-modell AC2)', () => {
+  it('area without any matching story/feature stays visible with storyCount: 0', async () => {
+    const { aggregator } = makeAggregator({
+      fileOverrides: { [`${BOARD_ROOT}/my-repo/board/areas.yaml`]: AREAS_YAML },
+    });
+    const index = await aggregator.getIndex();
+    const areas = index[0].areas;
+    // Fixture stories/features (F-001/F-002/S-001/S-002) carry no `area` field
+    // at all → both areas stay visible with storyCount 0 (AC2 "leer erkennbar").
+    expect(areas.every((a) => a.storyCount === 0)).toBe(true);
+  });
+
+  it('counts a story with its own area field directly', async () => {
+    const storyWithArea = `id: S-001
+parent: F-001
+title: IONOS-Adapter
+status: Done
+priority: P0
+spec: docs/specs/provisioning.md
+implements: [AC1]
+labels: []
+dispo_est: null
+dispo_act: null
+area: board
+`;
+    const { aggregator } = makeAggregator({
+      fileOverrides: {
+        [`${BOARD_ROOT}/my-repo/board/areas.yaml`]: AREAS_YAML,
+        [`${BOARD_ROOT}/my-repo/board/stories/S-001-ionos-adapter.yaml`]: storyWithArea,
+      },
+    });
+    const index = await aggregator.getIndex();
+    const areas = index[0].areas;
+    const board = areas.find((a) => a.id === 'board');
+    const fabrik = areas.find((a) => a.id === 'fabrik-arbeiten');
+    expect(board.storyCount).toBe(1);
+    expect(fabrik.storyCount).toBe(0);
+  });
+
+  it('falls back to the parent feature.area when the story has no own area field', async () => {
+    const featureWithArea = `id: F-001
+title: Server-Provisioning
+status: Active
+priority: P1
+spec: docs/specs/provisioning.md
+labels: [infra]
+stories:
+- S-001
+- S-002
+progress: null
+area: fabrik-arbeiten
+`;
+    const { aggregator } = makeAggregator({
+      fileOverrides: {
+        [`${BOARD_ROOT}/my-repo/board/areas.yaml`]: AREAS_YAML,
+        [`${BOARD_ROOT}/my-repo/board/features/F-001-server-provisioning.yaml`]: featureWithArea,
+      },
+    });
+    const index = await aggregator.getIndex();
+    const areas = index[0].areas;
+    const fabrik = areas.find((a) => a.id === 'fabrik-arbeiten');
+    // Both S-001 and S-002 hang under F-001 (area: fabrik-arbeiten), neither
+    // story carries its own area field → both fall back to the feature's area.
+    expect(fabrik.storyCount).toBe(2);
+  });
+
+  it('a story-level area wins over the parent feature.area when both are set', async () => {
+    const featureWithArea = `id: F-001
+title: Server-Provisioning
+status: Active
+priority: P1
+spec: docs/specs/provisioning.md
+labels: [infra]
+stories:
+- S-001
+- S-002
+progress: null
+area: fabrik-arbeiten
+`;
+    const storyOwnArea = `id: S-001
+parent: F-001
+title: IONOS-Adapter
+status: Done
+priority: P0
+spec: docs/specs/provisioning.md
+implements: [AC1]
+labels: []
+dispo_est: null
+dispo_act: null
+area: board
+`;
+    const { aggregator } = makeAggregator({
+      fileOverrides: {
+        [`${BOARD_ROOT}/my-repo/board/areas.yaml`]: AREAS_YAML,
+        [`${BOARD_ROOT}/my-repo/board/features/F-001-server-provisioning.yaml`]: featureWithArea,
+        [`${BOARD_ROOT}/my-repo/board/stories/S-001-ionos-adapter.yaml`]: storyOwnArea,
+      },
+    });
+    const index = await aggregator.getIndex();
+    const areas = index[0].areas;
+    const board = areas.find((a) => a.id === 'board');
+    const fabrik = areas.find((a) => a.id === 'fabrik-arbeiten');
+    // S-001 has its own area:board → counted for "board", NOT for "fabrik-arbeiten"
+    // (even though its parent feature is area:fabrik-arbeiten).
+    expect(board.storyCount).toBe(1);
+    // S-002 has no own area → falls back to the feature's area:fabrik-arbeiten.
+    expect(fabrik.storyCount).toBe(1);
+  });
+
+  it('an unknown area referenced by a story/feature is simply not counted (no crash)', async () => {
+    const storyUnknownArea = `id: S-001
+parent: F-001
+title: IONOS-Adapter
+status: Done
+priority: P0
+spec: docs/specs/provisioning.md
+implements: [AC1]
+labels: []
+dispo_est: null
+dispo_act: null
+area: nicht-in-areas-yaml
+`;
+    const { aggregator } = makeAggregator({
+      fileOverrides: {
+        [`${BOARD_ROOT}/my-repo/board/areas.yaml`]: AREAS_YAML,
+        [`${BOARD_ROOT}/my-repo/board/stories/S-001-ionos-adapter.yaml`]: storyUnknownArea,
+      },
+    });
+    const index = await aggregator.getIndex();
+    const areas = index[0].areas;
+    expect(areas.every((a) => a.storyCount === 0)).toBe(true);
+  });
+
+  it('storyCount excludes archived stories in the standard view (AC2 "leer erkennbar"), includes them with includeArchived', async () => {
+    const archivedStoryWithArea = `id: S-001
+parent: F-001
+title: IONOS-Adapter
+status: Done
+priority: P0
+spec: docs/specs/provisioning.md
+implements: [AC1]
+labels: []
+dispo_est: null
+dispo_act: null
+area: board
+archived: true
+`;
+    const { aggregator } = makeAggregator({
+      fileOverrides: {
+        [`${BOARD_ROOT}/my-repo/board/areas.yaml`]: AREAS_YAML,
+        [`${BOARD_ROOT}/my-repo/board/stories/S-001-ionos-adapter.yaml`]: archivedStoryWithArea,
+      },
+    });
+    // Standard view (no includeArchived): the area's only assigned story is
+    // archived → storyCount must be 0, otherwise the area would not be
+    // recognizable as empty (AC2).
+    const standardIndex = await aggregator.getIndex();
+    const boardStandard = standardIndex[0].areas.find((a) => a.id === 'board');
+    expect(boardStandard.storyCount).toBe(0);
+
+    // With includeArchived: true the full index (incl. archived stories) is
+    // returned unfiltered — storyCount reflects the archived story.
+    const fullIndex = await aggregator.getIndex({ includeArchived: true });
+    const boardFull = fullIndex[0].areas.find((a) => a.id === 'board');
+    expect(boardFull.storyCount).toBe(1);
+  });
+});
+
+// ── boardRouter HTTP — GET /api/board/projects/:slug/areas (bereichs-modell V6/S-288) ──
+
+describe('boardRouter HTTP — GET /api/board/projects/:slug/areas (bereichs-modell AC1/AC2, V6)', () => {
+  it('returns 200 with { areas: [...] } sorted by order for a known slug', async () => {
+    const { aggregator } = makeAggregator({
+      fileOverrides: { [`${BOARD_ROOT}/my-repo/board/areas.yaml`]: AREAS_YAML },
+    });
+    const server = await startServer(aggregator);
+    try {
+      const { status, data } = await httpFetch(server, '/api/board/projects/my-repo/areas');
+      expect(status).toBe(200);
+      expect(Array.isArray(data.areas)).toBe(true);
+      expect(data.areas.map((a) => a.id)).toEqual(['fabrik-arbeiten', 'board']);
+      expect(data.areas[0]).toMatchObject({ id: 'fabrik-arbeiten', name: 'Fabrik Arbeiten', order: 1, storyCount: 0 });
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('returns 200 with { areas: [] } when the project has no areas.yaml', async () => {
+    const { aggregator } = makeAggregator();
+    const server = await startServer(aggregator);
+    try {
+      const { status, data } = await httpFetch(server, '/api/board/projects/my-repo/areas');
+      expect(status).toBe(200);
+      expect(data.areas).toEqual([]);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('returns 404 for unknown slug', async () => {
+    const { aggregator } = makeAggregator();
+    const server = await startServer(aggregator);
+    try {
+      const { status, data } = await httpFetch(server, '/api/board/projects/nonexistent-slug/areas');
+      expect(status).toBe(404);
+      expect(data).toHaveProperty('error');
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('returns 404 for invalid slug format (leading dot)', async () => {
+    const { aggregator } = makeAggregator();
+    const server = await startServer(aggregator);
+    try {
+      const { status } = await httpFetch(server, '/api/board/projects/.hidden/areas');
+      expect(status).toBe(404);
     } finally {
       await new Promise((r) => server.close(r));
     }

@@ -23,6 +23,18 @@
  *   AC5 — stopWatchers() bricht anstehende Re-Arm-/Backoff-Timer ab; danach kein
  *   weiterer watch()-Aufruf mehr.
  *
+ * bereichs-modell (S-288, Lese-Teil):
+ *   AC1 — Liest je Projekt zusätzlich `board/areas.yaml` (Liste von
+ *   { id, name, order, description? }), sortiert nach `order`, als `areas` am
+ *   Projekt-Index. Fehlende/leere Datei → leere Liste (kein Crash). Defekte
+ *   Einzel-Einträge (fehlendes id/name, order kein Integer) werden übersprungen
+ *   (best effort, geloggt via console.warn — secret-frei), ohne den restlichen
+ *   Index zu zerstören. `BoardAggregator` bleibt read-only (kein Schreibpfad).
+ *   AC2 — Jeder Bereich trägt zusätzlich `storyCount` (Roll-up/Anzahl aller
+ *   Stories, deren `area` — oder, falls die Story selbst kein `area` trägt, das
+ *   `area` des Eltern-Features — auf den Bereich zeigt). Ein Bereich ohne
+ *   zugeordnete Storys bleibt sichtbar (`storyCount: 0`).
+ *
  * Scannt die konfigurierten Repo-Wurzeln (BOARD_ROOTS env-Variable) read-only nach
  * board/-Ordnern und liest je Repo:
  *   - board/board.yaml               (Projekt-Meta)
@@ -405,6 +417,123 @@ function _parseScalar(s) {
   return t;
 }
 
+// ── areas.yaml-Parser (bereichs-modell AC1) ───────────────────────────────────
+// `board/areas.yaml` ist — anders als board.yaml/features/*.yaml/stories/*.yaml —
+// ein ROOT-LEVEL YAML-Liste von Mappings (`- id: ...\n  name: ...`), kein einzelnes
+// Top-Level-Mapping-Dokument. `_parseYamlDoc()`/`parseYaml()` decken nur Letzteres
+// ab — deshalb ein eigener, kleiner Parser, der pro Listen-Item denselben
+// Scalar-/Kommentar-/Quoting-Regelsatz (`_parseYamlDoc`) wiederverwendet.
+
+/**
+ * Parse a root-level YAML list of mappings, e.g. `board/areas.yaml`:
+ *   - id: board
+ *     name: Board
+ *     order: 1
+ *     description: ...
+ *   - id: fabrik-arbeiten
+ *     ...
+ *
+ * Returns [] on any parse error or empty/blank input (never throws —
+ * bereichs-modell AC1 Fehlertoleranz).
+ *
+ * @param {string} content
+ * @returns {Array<Record<string, unknown>>}
+ */
+export function parseAreasYamlList(content) {
+  if (!content || typeof content !== 'string') return [];
+  const trimmed = content.trim();
+  if (!trimmed) return [];
+  try {
+    return _parseYamlMappingList(trimmed);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Internal: parse the trimmed body of a root-level YAML list-of-mappings.
+ * @param {string} text
+ * @returns {Array<Record<string, unknown>>}
+ */
+function _parseYamlMappingList(text) {
+  const lines = text.split('\n');
+  const items = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+    const trimmedLine = line.trim();
+
+    if (!trimmedLine || trimmedLine.startsWith('#') || trimmedLine === '---') {
+      i++;
+      continue;
+    }
+
+    const leadingSpaces = line.length - line.trimStart().length;
+    const stripped = line.trimStart();
+
+    if (!stripped.startsWith('- ') && stripped !== '-') {
+      // Not a list item at this level — skip (defensive; malformed input).
+      i++;
+      continue;
+    }
+
+    const firstFieldRaw = stripped.startsWith('- ') ? stripped.slice(2) : '';
+    const itemIndent = leadingSpaces + 2;
+    const itemLines = [firstFieldRaw];
+    i++;
+
+    while (i < lines.length) {
+      const l = lines[i];
+      if (!l.trim()) { i++; continue; } // blank line inside an item — ignore
+      const lLeading = l.length - l.trimStart().length;
+      if (lLeading < itemIndent) break; // next item (or dedent) → this item ends
+      itemLines.push(l.slice(itemIndent));
+      i++;
+    }
+
+    items.push(_parseYamlDoc(itemLines.join('\n')));
+  }
+
+  return items;
+}
+
+/**
+ * Validate + normalize raw `areas.yaml` list entries into area objects
+ * (bereichs-modell AC1). Entries missing a non-empty `id`/`name` or with a
+ * non-integer `order` are skipped (best effort, logged — AC1). `storyCount`
+ * starts at 0 and is filled in by the caller (roll-up, AC2). Result is sorted
+ * by `order` ascending.
+ *
+ * @param {Array<Record<string, unknown>>} rawList
+ * @returns {Array<{id: string, name: string, order: number, description: string|null, storyCount: number}>}
+ */
+function _buildAreaEntries(rawList) {
+  const areas = [];
+  for (const raw of rawList) {
+    if (!raw || typeof raw !== 'object') {
+      console.warn('[BoardAggregator] Ungültiger areas.yaml-Eintrag übersprungen (kein Objekt).');
+      continue;
+    }
+    const id = raw.id != null ? String(raw.id).trim() : '';
+    const name = raw.name != null ? String(raw.name).trim() : '';
+    const order = raw.order;
+    if (!id || !name || typeof order !== 'number' || !Number.isInteger(order)) {
+      console.warn(`[BoardAggregator] Ungültiger areas.yaml-Eintrag übersprungen (id="${id}").`);
+      continue;
+    }
+    areas.push({
+      id,
+      name,
+      order,
+      description: raw.description != null ? String(raw.description) : null,
+      storyCount: 0,
+    });
+  }
+  areas.sort((a, b) => a.order - b.order);
+  return areas;
+}
+
 // ── Rollup-Berechnung (read-only, Anzeige) ────────────────────────────────────
 
 /** Story-Status-Werte die als "done" gelten */
@@ -598,8 +727,22 @@ export class BoardAggregator {
         repo_path: repoPath,
         error: `board.yaml fehlt oder ungültig: ${err.message}`,
         features: [],
+        areas: [],
       };
     }
+
+    // ── areas.yaml (bereichs-modell AC1) ─────────────────────────────────────
+    // Fehlende/leere Datei → leere Liste, kein Crash (Abwärtskompatibilität mit
+    // Projekten ohne Bereiche).
+    const areasYamlPath = join(boardDir, 'areas.yaml');
+    let areasRawList;
+    try {
+      const areasRaw = await this.#fsDeps.readFile(areasYamlPath, 'utf8');
+      areasRawList = parseAreasYamlList(areasRaw);
+    } catch {
+      areasRawList = []; // missing/unreadable file → empty list, no crash (AC1)
+    }
+    const areas = _buildAreaEntries(areasRawList);
 
     // ── features/*.yaml ───────────────────────────────────────────────────────
     const featuresDir = join(boardDir, 'features');
@@ -634,6 +777,10 @@ export class BoardAggregator {
           // (getIndex ohne includeArchived) blendet archived===true aus.
           archived: data.archived === true,
           archived_at: data.archived_at != null ? String(data.archived_at) : null,
+          // bereichs-modell AC2: additiv-optionale Bereichs-Zuordnung des Features
+          // (agent-flow-Schema `feature.area`) — Fallback für Stories ohne eigenes
+          // `area`-Feld beim Roll-up. null wenn nicht gesetzt.
+          area: data.area != null ? String(data.area) : null,
           stories: [],
         });
       } catch {
@@ -694,6 +841,10 @@ export class BoardAggregator {
           // archived===true aus (auch einzeln-archivierte Stories — Randfall V3).
           archived: data.archived === true,
           archived_at: data.archived_at != null ? String(data.archived_at) : null,
+          // bereichs-modell AC2: additiv-optionale Bereichs-Zuordnung der Story
+          // (agent-flow-Schema `story.area`). null wenn nicht gesetzt — dann fällt
+          // der Roll-up auf das `area` des Eltern-Features zurück (siehe unten).
+          area: data.area != null ? String(data.area) : null,
           // ready/ready_reason computed below after all stories are parsed
           ready: false,
           ready_reason: null,
@@ -741,6 +892,26 @@ export class BoardAggregator {
       feature.status = computeFeatureStatus(feature.stories);
     }
 
+    // ── bereichs-modell AC2 — Roll-up: storyCount je Bereich ─────────────────
+    // Ein Bereich zählt jede Story, deren eigenes `area`-Feld auf ihn zeigt;
+    // hat die Story kein eigenes `area`, fällt der Roll-up auf das `area` des
+    // Eltern-Features zurück (`feature.area`). Ohne Treffer bleibt der Bereich
+    // sichtbar mit `storyCount: 0` (leerer, aber dauerhafter Bereich).
+    if (areas.length > 0) {
+      const areaIds = new Set(areas.map((a) => a.id));
+      const counts = new Map();
+      for (const story of allStoriesList) {
+        const parentFeature = story.parent ? featuresMap.get(story.parent) : null;
+        const effectiveArea = story.area ?? parentFeature?.area ?? null;
+        if (effectiveArea && areaIds.has(effectiveArea)) {
+          counts.set(effectiveArea, (counts.get(effectiveArea) ?? 0) + 1);
+        }
+      }
+      for (const area of areas) {
+        area.storyCount = counts.get(area.id) ?? 0;
+      }
+    }
+
     // ── Orphaned stories: add as a pseudo-feature if any ─────────────────────
     const features = [...featuresMap.values()];
     if (orphanedStories.length > 0) {
@@ -765,6 +936,7 @@ export class BoardAggregator {
       project_slug: boardMeta.project_slug ?? slug,
       schema_version: boardMeta.schema_version ?? null,
       features,
+      areas,
     };
   }
 
@@ -835,7 +1007,28 @@ export class BoardAggregator {
         });
       }
     }
-    return { ...project, features };
+
+    // bereichs-modell AC2: `storyCount` je Bereich analog zu feature.progress
+    // aus den sichtbaren (nicht-archivierten) Stories neu berechnen — sonst
+    // zählt die Standardansicht auch archivierte Stories mit (leerer Bereich
+    // wäre dann nicht als leer erkennbar, siehe AC2).
+    const areasList = project.areas ?? [];
+    let areas = areasList;
+    if (areasList.length > 0) {
+      const areaIds = new Set(areasList.map((a) => a.id));
+      const counts = new Map();
+      for (const feature of features) {
+        for (const story of feature.stories ?? []) {
+          const effectiveArea = story.area ?? feature.area ?? null;
+          if (effectiveArea && areaIds.has(effectiveArea)) {
+            counts.set(effectiveArea, (counts.get(effectiveArea) ?? 0) + 1);
+          }
+        }
+      }
+      areas = areasList.map((area) => ({ ...area, storyCount: counts.get(area.id) ?? 0 }));
+    }
+
+    return { ...project, features, areas };
   }
 
   /**
@@ -1063,14 +1256,16 @@ export class BoardAggregator {
  *   repo_path: string,
  *   project_slug: string,
  *   schema_version: number|null,
- *   features: FeatureEntry[]
+ *   features: FeatureEntry[],
+ *   areas: AreaEntry[]
  * }} ProjectEntry
  *
  * @typedef {{
  *   slug: string,
  *   repo_path: string,
  *   error: string,
- *   features: []
+ *   features: [],
+ *   areas: []
  * }} ErrorEntry
  *
  * @typedef {{
@@ -1085,6 +1280,7 @@ export class BoardAggregator {
  *   labels: string[]|null,
  *   archived: boolean,
  *   archived_at: string|null,
+ *   area: string|null,
  *   stories: StoryEntry[]
  * }} FeatureEntry
  *
@@ -1107,7 +1303,16 @@ export class BoardAggregator {
  *   pr: string|null,
  *   archived: boolean,
  *   archived_at: string|null,
+ *   area: string|null,
  *   ready: boolean,
  *   ready_reason: string|null
  * }} StoryEntry
+ *
+ * @typedef {{
+ *   id: string,
+ *   name: string,
+ *   order: number,
+ *   description: string|null,
+ *   storyCount: number
+ * }} AreaEntry
  */
