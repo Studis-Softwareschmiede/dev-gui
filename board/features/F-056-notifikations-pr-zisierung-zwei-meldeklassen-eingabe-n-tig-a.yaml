@@ -1,0 +1,20 @@
+id: F-056
+title: 'Notifikations-Präzisierung: zwei Meldeklassen (Eingabe nötig / Arbeit fertig)'
+goal: 'Genau zwei Meldeklassen statt Push-Flut: EIN drain_done-Push je Drain-Ende
+  mit Bilanz, EIN questions_pending-Push bei needs-answers; Default-Events auf {drain_done,tunnel_missing}
+  reduziert + Bestands-Settings einmalig migriert; story_done/blocked/feature_done
+  bleiben verfuegbar, default AUS.'
+status: Backlog
+priority: P1
+spec: docs/specs/notification-event-defaults.md
+definition_of_done: null
+labels:
+- notifications
+- settings
+- ui
+depends: null
+owner: null
+stories: null
+progress: null
+created_at: '2026-07-03T06:48:38Z'
+updated_at: '2026-07-03T06:48:38Z'
