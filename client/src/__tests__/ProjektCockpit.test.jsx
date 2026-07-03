@@ -1,5 +1,6 @@
 /**
- * ProjektCockpit.test.jsx — Tests für projekt-cockpit-navigation AC1–AC3.
+ * ProjektCockpit.test.jsx — Tests für projekt-cockpit-navigation AC1–AC3 +
+ * fabrik-arbeiten-layout AC1/AC2/AC4 (S-265, „Arbeiten"-Terminal per Checkbox).
  *
  * Covers (projekt-cockpit-navigation):
  *   AC1 — RepoOverview rendert lokale Klone (Name/Branch/dirty/letzter Commit);
@@ -9,10 +10,12 @@
  *          Rückweg zur Übersicht (navigateFactory(null) → #/factory);
  *          parseHashFull parst #/factory/<repo> korrekt.
  *   AC3 — CockpitView zeigt Reiter-Leiste Arbeiten/Studis-Kanban-Board/Spezifikation;
- *          „Arbeiten" zeigt Terminal (FactoryWorkspace);
+ *          „Arbeiten" zeigt FactoryWorkspace (Terminal per Checkbox, s. fabrik-
+ *          arbeiten-layout AC1/AC2 unten — Regress dokumentiert);
  *          Reiter-Umschaltung wechselt Panel.
  *   AC4 — Terminal-WS-URL enthält ?project=<encoded-activeRepo> (S-111);
- *          buildTerminalWsUrl gibt absolute WS-URL zurück.
+ *          buildTerminalWsUrl gibt absolute WS-URL zurück (nach Einblenden
+ *          der Terminal-Checkbox, s. fabrik-arbeiten-layout AC2).
  *   AC5 — TriggerPanel erhält projectPath=activeRepo via FactoryWorkspace-Prop.
  *   AC6 — Board-Reiter bettet BoardView mit lockedProject=activeRepo ein;
  *          kein eigener Projekt-Selektor im Cockpit (S-113).
@@ -26,6 +29,24 @@
  *          CockpitView übergibt onOpenSpec-Callback an BoardView (AC5).
  *   AC5 — AccessGuard-Verdrahtung: per server.js-Inspektion, kein separater Middleware-Test.
  *          AC5 (nicht unit-testbar ohne echte SpecView) — dokumentiert im Covers-Block.
+ *
+ * Covers (fabrik-arbeiten-layout, S-265):
+ *   AC1 — „Arbeiten"-Reiter zeigt im Standardzustand KEIN dominantes Terminal-
+ *          Pane mehr; die Aktions-/Button-Boxen (Board abarbeiten etc., via
+ *          data-testid geprüft in CockpitFlowTrigger.test.jsx u.a.) sind sofort
+ *          sichtbar. REGRESS: die früheren AC3/AC4-Tests dieser Datei, die
+ *          „Arbeiten"-Reiter default = Terminal sichtbar annahmen, sind
+ *          entsprechend angepasst (Checkbox zuerst aktivieren).
+ *   AC2 — Checkbox „Terminal einblenden" (data-testid="show-terminal-checkbox")
+ *          ist per Default UNCHECKED; erst nach Aktivierung erscheint
+ *          main[aria-label="Terminal"] (inkl. WS-URL-Test AC4 oben).
+ *   AC3 — nicht unit-testbar (reine Anordnung/Optik) — dokumentiert in
+ *          docs/design.md „Arbeiten"-Layout; Button-Handler-Unverändertheit
+ *          wird in CockpitFlowTrigger/-DrainCostModeStatus/-DrainReportInline/
+ *          -NewStory-Test-Dateien geprüft (dieselben data-testids weiterhin grün).
+ *   AC4 — Touch-Target/Fokus der Checkbox: s. „Checkbox hat Touch-Target ≥44px"
+ *          unten; Kontrast/Statusfarben unverändert aus dem bestehenden Design.
+ *   AC5 — kein Backend-Diff (reiner Client-Test).
  *
  * Terminal, Dashboard, TriggerPanel, BoardView, SpecView gemockt (WS/DOM-Komplexität vermeiden).
  *
@@ -459,8 +480,8 @@ describe('CockpitView — AC3: Reiter-Leiste und Reiter-Umschaltung', () => {
     expect(arbeitenTab.getAttribute('aria-selected')).toBe('true');
   });
 
-  it('"Arbeiten"-Reiter zeigt Terminal (FactoryWorkspace mit main[aria-label="Terminal"])', () => {
-    const { getByRole } = render(
+  it('"Arbeiten"-Reiter zeigt im Standardzustand KEIN Terminal-Pane, Buttons sind sichtbar (fabrik-arbeiten-layout AC1)', () => {
+    const { queryByRole, getByTestId } = render(
       React.createElement(CockpitView, {
         activeRepo: 'dev-gui',
         navigateFactory: jest.fn(),
@@ -468,8 +489,110 @@ describe('CockpitView — AC3: Reiter-Leiste und Reiter-Umschaltung', () => {
       })
     );
 
-    // Terminal landmark is rendered in the Arbeiten tab
+    // fabrik-arbeiten-layout AC1: no dominant Terminal pane in the default layout —
+    // the action/button column is the primary content instead.
+    expect(queryByRole('main', { name: /^terminal$/i })).toBeNull();
+    expect(getByTestId('flow-board-btn')).toBeTruthy();
+    expect(getByTestId('idea-capture-btn')).toBeTruthy();
+    expect(getByTestId('new-story-btn')).toBeTruthy();
+  });
+
+  it('"Arbeiten"-Reiter zeigt „Terminal einblenden"-Checkbox, Default AUS (fabrik-arbeiten-layout AC2)', () => {
+    render(
+      React.createElement(CockpitView, {
+        activeRepo: 'dev-gui',
+        navigateFactory: jest.fn(),
+        onNavigate: jest.fn(),
+      })
+    );
+
+    const checkbox = document.querySelector('[data-testid="show-terminal-checkbox"]');
+    expect(checkbox).toBeTruthy();
+    expect(checkbox.checked).toBe(false);
+  });
+
+  it('Checkbox „Terminal einblenden" aktivieren zeigt main[aria-label="Terminal"] (fabrik-arbeiten-layout AC2)', async () => {
+    const { getByRole, queryByRole } = render(
+      React.createElement(CockpitView, {
+        activeRepo: 'dev-gui',
+        navigateFactory: jest.fn(),
+        onNavigate: jest.fn(),
+      })
+    );
+
+    expect(queryByRole('main', { name: /^terminal$/i })).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="show-terminal-checkbox"]'));
+    });
+
     expect(getByRole('main', { name: /^terminal$/i })).toBeTruthy();
+  });
+
+  it('Checkbox „Terminal einblenden" wieder ausschalten entfernt das Terminal-Pane (fabrik-arbeiten-layout AC2)', async () => {
+    const { queryByRole } = render(
+      React.createElement(CockpitView, {
+        activeRepo: 'dev-gui',
+        navigateFactory: jest.fn(),
+        onNavigate: jest.fn(),
+      })
+    );
+
+    const checkbox = document.querySelector('[data-testid="show-terminal-checkbox"]');
+    await act(async () => {
+      fireEvent.click(checkbox);
+    });
+    expect(queryByRole('main', { name: /^terminal$/i })).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.click(checkbox);
+    });
+    expect(queryByRole('main', { name: /^terminal$/i })).toBeNull();
+  });
+
+  it('Checkbox-Toggle löst KEINEN Session-Kill aus (kein Fetch gegen /api/command/cancel, fabrik-arbeiten-layout AC2)', async () => {
+    // fabrik-arbeiten-layout AC2: hiding the checkbox only unmounts the client
+    // <Terminal> — it must NEVER trigger an explicit kill/cancel call. Terminal
+    // itself is mocked here (WS/DOM complexity avoided, see module doc); this
+    // asserts the toggle path in CockpitView/FactoryWorkspace never fires the
+    // kill endpoint itself (handler-spy on the shared fetch mock).
+    const fetchSpy = jest.fn(() => Promise.resolve({ ok: true, json: async () => [] }));
+    globalThis.fetch = fetchSpy;
+
+    render(
+      React.createElement(CockpitView, {
+        activeRepo: 'dev-gui',
+        navigateFactory: jest.fn(),
+        onNavigate: jest.fn(),
+      })
+    );
+
+    const checkbox = document.querySelector('[data-testid="show-terminal-checkbox"]');
+    await act(async () => {
+      fireEvent.click(checkbox); // ein
+    });
+    await act(async () => {
+      fireEvent.click(checkbox); // aus
+    });
+
+    const cancelCalls = fetchSpy.mock.calls.filter(([url]) => url === '/api/command/cancel');
+    expect(cancelCalls.length).toBe(0);
+  });
+
+  it('„Terminal einblenden"-Label hat Touch-Target minHeight >= 44px (fabrik-arbeiten-layout AC4)', () => {
+    render(
+      React.createElement(CockpitView, {
+        activeRepo: 'dev-gui',
+        navigateFactory: jest.fn(),
+        onNavigate: jest.fn(),
+      })
+    );
+
+    const checkbox = document.querySelector('[data-testid="show-terminal-checkbox"]');
+    const label = checkbox.closest('label');
+    expect(label).toBeTruthy();
+    const minH = parseInt(label.style.minHeight, 10);
+    expect(minH).toBeGreaterThanOrEqual(44);
   });
 
   it('"Studis-Kanban-Board"-Reiter ist initial nicht aktiv', () => {
@@ -570,8 +693,8 @@ describe('CockpitView — AC3: Reiter-Leiste und Reiter-Umschaltung', () => {
     });
   });
 
-  it('Klick zurück auf "Arbeiten" zeigt wieder Terminal', async () => {
-    const { getByRole } = render(
+  it('Klick zurück auf "Arbeiten" zeigt wieder die Aktions-/Button-Spalte (Terminal bleibt AUS, fabrik-arbeiten-layout AC1)', async () => {
+    const { getByRole, queryByRole } = render(
       React.createElement(CockpitView, {
         activeRepo: 'dev-gui',
         navigateFactory: jest.fn(),
@@ -590,7 +713,12 @@ describe('CockpitView — AC3: Reiter-Leiste und Reiter-Umschaltung', () => {
     });
 
     await waitFor(() => {
-      expect(getByRole('main', { name: /^terminal$/i })).toBeTruthy();
+      // fabrik-arbeiten-layout AC1: the Arbeiten tab remounts with the
+      // action/button column visible again — but NO Terminal pane (Default
+      // AUS, the FactoryWorkspace remounts and resets showTerminal to false).
+      expect(getByRole('tabpanel', { name: /arbeiten/i })).toBeTruthy();
+      expect(document.querySelector('[data-testid="show-terminal-checkbox"]')).toBeTruthy();
+      expect(queryByRole('main', { name: /^terminal$/i })).toBeNull();
     });
   });
 
@@ -681,7 +809,7 @@ describe('CockpitView — AC6/S-113: Board-Reiter zeigt aktives Projekt (kein ei
     });
   });
 
-  it('Terminal-WS-URL trägt ?project=<activeRepo> (AC4/S-111 client-side)', () => {
+  it('Terminal-WS-URL trägt ?project=<activeRepo> (AC4/S-111 client-side)', async () => {
     // Terminal mock records the wsUrl prop; in jsdom window.location.protocol is 'about:',
     // so we can't rely on ws/wss — just check the project param is encoded in the URL.
     render(
@@ -692,7 +820,12 @@ describe('CockpitView — AC6/S-113: Board-Reiter zeigt aktives Projekt (kein ei
       })
     );
 
-    // Arbeiten tab is active by default — Terminal is mounted
+    // fabrik-arbeiten-layout AC2: Terminal is no longer mounted by default —
+    // activate the „Terminal einblenden"-checkbox first.
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="show-terminal-checkbox"]'));
+    });
+
     expect(_terminalLastWsUrl).toBeTruthy();
     expect(_terminalLastWsUrl).toContain('project=');
     expect(_terminalLastWsUrl).toContain(encodeURIComponent('/home/user/agent-flow'));
@@ -735,11 +868,22 @@ describe('AppShell — AC3: Cockpit in App via Deep-Link', () => {
     });
   });
 
-  it('#/factory/dev-gui zeigt Terminal im Arbeiten-Reiter', async () => {
+  it('#/factory/dev-gui: „Terminal einblenden" aktivieren zeigt Terminal im Arbeiten-Reiter (fabrik-arbeiten-layout AC2)', async () => {
     window.location.hash = '#/factory/dev-gui';
     window.dispatchEvent(new HashChangeEvent('hashchange'));
 
-    const { getByRole } = render(React.createElement(AppShell));
+    const { getByRole, queryByRole } = render(React.createElement(AppShell));
+
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="show-terminal-checkbox"]')).toBeTruthy();
+    });
+
+    // fabrik-arbeiten-layout AC1: no dominant Terminal pane by default.
+    expect(queryByRole('main', { name: /^terminal$/i })).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="show-terminal-checkbox"]'));
+    });
 
     await waitFor(() => {
       expect(getByRole('main', { name: /^terminal$/i })).toBeTruthy();

@@ -18,6 +18,8 @@ version: 2
 - **Aktiver-Projekt-Kontext** in URL + State (`#/factory/<repo>`), den die Reiter erben.
 - **Terminal = eine Session PRO Projekt** (Multi-Session). PtyManager wird von Single-Session auf keyed-by-Projekt umgebaut; cwd = Projekt-Pfad. Projektwechsel verliert die andere Session nicht. *(Owner — der größte Umbau)*
 - **Reiter im Cockpit:** Arbeiten (Terminal + Flow-Trigger) · Board (Studis-Kanban, dieses Projekt) · Spezifikation (Repo-Doku, dieses Projekt).
+
+  > **⟶ Superseded für das Terminal-Pane (S-265, [[fabrik-arbeiten-layout]]):** Das dominante Terminal-Pane ist entfernt; Terminal nur noch per Checkbox (Default aus) am unteren Rand. Übrige Navigation/Reiter-Struktur unverändert gültig.
 - **Global bleibt global:** GitHub · VPS · Cloudflare · Team · Deployments bleiben eigene Kacheln (org-weit, nicht projektgebunden).
 - **Vereinheitlichung:** Board ([[studis-kanban-board-ux]]) + Spezifikation ([[projekt-spezifikation-anzeige]]) bekommen das Projekt aus dem Cockpit-Kontext, statt je eine eigene Projekt-Auswahl.
 

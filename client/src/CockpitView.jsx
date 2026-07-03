@@ -3,8 +3,10 @@
  *
  * projekt-cockpit-navigation:
  *   AC3 — Reiter-Leiste „Arbeiten | Studis-Kanban-Board | Spezifikation" mit aktivem Projekt-Kontext.
- *          „Arbeiten" zeigt den bisherigen FactoryView-Inhalt (Terminal + TriggerPanel +
- *          Dashboard) — unverändert eingebettet.
+ *          „Arbeiten" zeigt den FactoryWorkspace-Inhalt (Aktions-/Button-Spalte + TriggerPanel +
+ *          Dashboard + optionale Terminal-Fläche) — SUPERSEDED für das Terminal-Pane durch
+ *          fabrik-arbeiten-layout AC1 (s.u.): kein dominantes eingebettetes Terminal mehr im
+ *          Standard-Layout.
  *          Reiter erben den Projekt-Kontext (activeRepo).
  *   AC2 — Rückweg zur Übersicht (#/factory) über den Back-Button.
  *
@@ -66,6 +68,28 @@
  *          src/DrainJobRegistry.js). Der bestehende läuft/fertig/fehlgeschlagen-
  *          Status und das Board-Re-Fetch-Verhalten (AC6 oben) bleiben
  *          UNVERÄNDERT — rein additiv unterhalb davon gerendert.
+ *
+ * fabrik-arbeiten-layout (S-265):
+ *   AC1 — Das dominante eingebettete Claude-Terminal-Pane ist aus dem Standard-
+ *          Layout des „Arbeiten"-Reiters ENTFERNT (supersedes projekt-cockpit-
+ *          navigation AC3-Formulierung „Terminal ... unverändert eingebettet",
+ *          s.o.). Die Aktions-/Button-Spalte (Board abarbeiten, Idee, Neue
+ *          Story, TriggerPanel, Dashboard) ist primärer Inhalt (`actionGrid`).
+ *   AC2 — Checkbox „Terminal einblenden" (Default AUS, `showTerminal`-State)
+ *          blendet am unteren Rand eine Terminal-Fläche mit `<Terminal>` ein/
+ *          aus. Aus-/Einblenden mountet/unmountet NUR die Client-Komponente —
+ *          die PTY-Session lebt serverseitig unverändert weiter (WsGateway/
+ *          PtySessionRegistry sind vom WS-Close unabhängig, s. WsGateway.js
+ *          `#onConnectionMulti` `ws.on('close', ...)` — entfernt nur die
+ *          Output-Listener, killt keine Session). Beim erneuten Einblenden
+ *          zeigt der serverseitige Scrollback-Replay den Verlauf. PtyManager/
+ *          CommandService/WsGateway bleiben unverändert (AC5).
+ *   AC3 — Die Button-Spalte ist gemäß dem in `docs/design.md` (Abschnitt
+ *          „Arbeiten"-Layout) dokumentierten Designer-Vorschlag als
+ *          responsives Karten-Grid (statt vertikaler Einzelspalte) neu
+ *          angeordnet; Funktion/Verhalten jedes Buttons unverändert (gleiche
+ *          Handler/Endpunkte).
+ *   AC4/AC5 — s. A11y- und Security-Abschnitte unten.
  *
  * new-story-chat (S-227):
  *   AC1 — Die frühere „Änderung erfassen"-Box (IntakeDialog mode="change") ist
@@ -312,6 +336,21 @@ const DRAIN_POLL_MS = 2_500;
  * `done` it calls onBoardRefresh (board re-fetch) and a persistent hint makes
  * clear that no live terminal output appears.
  *
+ * Extended for fabrik-arbeiten-layout AC1/AC2/AC3 (S-265):
+ * The dominant embedded Terminal pane is REMOVED from the standard layout —
+ * the action/button boxes (Board abarbeiten, Idee, Neue Story, TriggerPanel,
+ * Dashboard) render in a responsive card grid (`actionGrid`) as the PRIMARY
+ * content (AC1/AC3). A „Terminal einblenden"-checkbox (default OFF,
+ * `showTerminal` state) toggles a Terminal pane at the BOTTOM of the tab
+ * (AC2) — showing the live output of the remaining interactive PTY commands
+ * (adopt/preview/train/new-project + Kill, fired via TriggerPanel). Hiding
+ * the checkbox only unmounts the client `<Terminal>` component; the
+ * server-side PTY session (PtySessionRegistry, via WsGateway) is unaffected
+ * (a WS close only detaches the per-connection output listeners — the
+ * session itself keeps running, see WsGateway.js `#onConnectionMulti`).
+ * Re-showing replays the session's scrollback. No functional change to
+ * PtyManager/CommandService/WsGateway (AC5).
+ *
  * @param {{ activeRepo: string, fetchFn?: Function,
  *           onShowBoard?: () => void, onBoardRefresh?: () => void,
  *           pollInterval?: number, drainPollInterval?: number }} props
@@ -333,6 +372,11 @@ function FactoryWorkspace({
   // Terminal already resolves the protocol (ws/wss) from window.location —
   // we pass a full URL here so it is testable without DOM.
   const wsUrl = buildTerminalWsUrl(activeRepo);
+
+  // fabrik-arbeiten-layout AC2: „Terminal einblenden"-Checkbox, Default AUS.
+  // Toggling only mounts/unmounts the client <Terminal> — the server-side PTY
+  // session is unaffected (see module-doc note above / WsGateway.js).
+  const [showTerminal, setShowTerminal] = useState(false);
 
   // ── Neue-Story-Chat state (new-story-chat AC1 — ersetzt „Änderung erfassen") ─
   /** Whether the „Neue Story"-Chat-Overlay (IdeaSpecifyChatModal, scratch) is open */
@@ -589,13 +633,10 @@ function FactoryWorkspace({
 
   return (
     <div style={styles.factory}>
-      {/* Terminal pane — dominant, scrollable xterm.js */}
-      <main style={styles.terminalPane} aria-label="Terminal">
-        <Terminal wsUrl={wsUrl} />
-      </main>
-
-      {/* Right sidebar — TriggerPanel + Dashboard stacked */}
-      <div style={styles.sidebar}>
+      {/* fabrik-arbeiten-layout AC1/AC3: Aktions-/Button-Spalte als responsives
+          Karten-Grid — primärer Inhalt (kein dominantes Terminal-Pane mehr). */}
+      <div style={styles.actionArea}>
+        <div style={styles.actionGrid}>
         {/* AC2 (autonome-board-abarbeitung): Board-abarbeiten Knopf */}
         <div style={styles.flowTriggerBox}>
           <div style={styles.flowTriggerHeader}>Board abarbeiten</div>
@@ -837,7 +878,34 @@ function FactoryWorkspace({
 
         {/* Dashboard — project status cards */}
         <Dashboard />
+        </div>
       </div>
+
+      {/* fabrik-arbeiten-layout AC2: Checkbox „Terminal einblenden" (Default AUS) —
+          Kontrollzeile am unteren Rand, IMMER sichtbar (auch bei scrollendem
+          Aktions-Grid darüber). Touch-Target ≥44px, Fokusring erhalten. */}
+      <div style={styles.terminalToggleBar}>
+        <label style={styles.terminalToggleLabel} htmlFor="show-terminal-checkbox">
+          <input
+            id="show-terminal-checkbox"
+            type="checkbox"
+            checked={showTerminal}
+            onChange={(e) => setShowTerminal(e.target.checked)}
+            style={styles.terminalCheckbox}
+            data-testid="show-terminal-checkbox"
+          />
+          Terminal einblenden
+        </label>
+      </div>
+
+      {/* fabrik-arbeiten-layout AC2: Terminal-Fläche am unteren Rand, nur bei
+          aktivierter Checkbox gemountet. Unmount killt die serverseitige PTY-
+          Session NICHT (s. Modul-Doku oben) — nur die Client-Ansicht verschwindet. */}
+      {showTerminal && (
+        <main style={styles.terminalBottomPane} aria-label="Terminal">
+          <Terminal wsUrl={wsUrl} />
+        </main>
+      )}
 
       {/* AC4 (ideen-inbox): Quick-Capture-Modal, eigene Komponente */}
       {ideaModalOpen && (
@@ -984,40 +1052,84 @@ const styles = {
     margin: 0,
   },
 
-  // ── FactoryWorkspace inner layout (same as former FactoryView) ────────────
+  // ── FactoryWorkspace inner layout (fabrik-arbeiten-layout AC1–AC3, S-265) ──
+  // Designer-Vorschlag dokumentiert in docs/design.md „Arbeiten"-Layout:
+  // Aktions-Karten-Grid (primär, scrollbar) oben + Terminal-Toggle-Leiste +
+  // optionale Terminal-Fläche unten (statt vormals dominantem Terminal-Pane
+  // links + vertikaler Sidebar-Spalte rechts).
 
   factory: {
     display: 'flex',
-    flexDirection: 'row',
+    flexDirection: 'column',
     flex: 1,
+    minHeight: 0,
     overflow: 'hidden',
     background: '#1a1a1a',
-    flexWrap: 'wrap',
   },
 
-  terminalPane: {
-    flex: '1 1 400px',
-    minWidth: 0,
+  // AC1/AC3: primärer, scrollbarer Bereich für das Aktions-Karten-Grid.
+  actionArea: {
+    flex: 1,
+    minHeight: 0,
+    overflowY: 'auto',
+  },
+
+  // AC3: responsives Karten-Grid — wrapped je nach Breite (Desktop mehrspaltig,
+  // < ~768 px durch flexWrap natürlich einspaltig, s. design.md).
+  actionGrid: {
+    display: 'flex',
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignContent: 'flex-start',
+    gap: 16,
+    padding: 16,
+  },
+
+  // AC2: Kontrollzeile mit der „Terminal einblenden"-Checkbox, unterer Rand,
+  // immer sichtbar (flexShrink:0 — bleibt unterhalb des scrollenden Grids).
+  terminalToggleBar: {
+    flexShrink: 0,
+    borderTop: '1px solid #2a2a2a',
+    background: '#0d0d0d',
+    padding: '4px 16px',
+  },
+
+  terminalToggleLabel: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 8,
+    minHeight: 44,
+    fontSize: 13,
+    color: '#d1d5db',
+    cursor: 'pointer',
+    // Focus ring preserved (no outline:none) — native checkbox focus ring.
+  },
+
+  terminalCheckbox: {
+    width: 18,
+    height: 18,
+    cursor: 'pointer',
+  },
+
+  // AC2: Terminal-Fläche am unteren Rand — feste Höhe statt dominant/full-height.
+  terminalBottomPane: {
+    flexShrink: 0,
+    height: 280,
     display: 'flex',
     flexDirection: 'column',
     overflow: 'hidden',
-    order: 1,
-  },
-
-  sidebar: {
-    display: 'flex',
-    flexDirection: 'column',
-    overflowY: 'auto',
-    flex: '0 0 auto',
-    order: 2,
+    borderTop: '1px solid #2a2a2a',
   },
 
   // ── Intake-Dialog trigger box (AC1 fabric-intake-dialog) ────────────────
+  // AC3 fabrik-arbeiten-layout: als Karte im actionGrid (voller Rahmen statt
+  // nur borderBottom — Funktion/Verhalten unverändert, nur Optik).
 
   intakeTriggerBox: {
     padding: '12px 16px',
     background: '#0d0d0d',
-    borderBottom: '1px solid #2a2a2a',
+    border: '1px solid #2a2a2a',
+    borderRadius: 6,
     minWidth: 240,
     maxWidth: 300,
     display: 'flex',
@@ -1039,11 +1151,14 @@ const styles = {
   },
 
   // ── Board abarbeiten box (AC2 autonome-board-abarbeitung) ─────────────────
+  // AC3 fabrik-arbeiten-layout: als Karte im actionGrid (voller Rahmen statt
+  // nur borderBottom — Funktion/Verhalten unverändert, nur Optik).
 
   flowTriggerBox: {
     padding: '12px 16px',
     background: '#0d0d0d',
-    borderBottom: '1px solid #2a2a2a',
+    border: '1px solid #2a2a2a',
+    borderRadius: 6,
     minWidth: 240,
     maxWidth: 300,
     display: 'flex',
