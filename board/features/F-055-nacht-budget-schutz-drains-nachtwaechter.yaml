@@ -1,0 +1,29 @@
+id: F-055
+title: 'Nacht-Budget-Schutz für Drains/Nachtwächter (reaktiv + proaktiv, Eskalations-Schutz)'
+goal: 'Token-Budget-Schutz für nächtliche/manuelle Board-Drains (Owner-Entscheidung
+  2026-07-02, Kombi-Variante V3): (1) REAKTIV — HeadlessRunnerCore erkennt Claudes
+  Session-Limit-Meldung im Kindprozess-Output, parst die Reset-Zeit, Drain pausiert
+  (budget-paused) und setzt ~5 Min nach Reset fort (Fensterende beachtet); (2) PROAKTIV
+  — Verbrauchsmessung der Output-Tokens aus den Claude-Session-Transcripts, Owner-konfigurierbares
+  Nacht-Budget + Schwelle (Default 85 %) in den Nachtwächter-Settings, Pause zwischen
+  zwei Flow-Runden bis Reset; (3) ESKALATIONS-SCHUTZ (kritisch) — limit-/budget-bedingte
+  Pausen/Fehlläufe erhöhen NIE den Eskalations-Zähler, keine Story landet wegen Token-Mangel
+  auf Blocked; (4) BERICHT — Budget-Pausen (von–bis, Grund) im Drain-Abschlussbericht.
+  Specs: headless-budget-limit-detection, token-usage-meter, night-budget-guard.'
+status: Backlog
+priority: P1
+spec: null
+definition_of_done: null
+labels: null
+depends: null
+owner: null
+stories:
+- S-270
+- S-271
+- S-272
+- S-273
+- S-274
+- S-275
+progress: 0/6 done
+created_at: '2026-07-03T06:36:03Z'
+updated_at: '2026-07-03T06:36:03Z'
