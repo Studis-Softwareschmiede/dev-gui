@@ -1,14 +1,19 @@
 /**
  * Router-Wrapper: Board-Aggregator (read-only Multi-Repo-Scan) + Story-Detail
  * + Quick-Capture-Create (ideen-inbox AC3/AC4/AC7/AC8, S-199) + Besprechung/
- * Auflösung (ideen-inbox AC5/AC6/AC7/AC8, S-200).
+ * Auflösung (ideen-inbox AC5/AC6/AC7/AC8, S-200) + Bereichs-Schreibpfad
+ * (bereichs-modell AC3-AC7, S-289).
  * Factory-Signatur: create(deps) → Express Router
  * Montiert:
  *   GET /api/board/projects, POST /api/board/projects/rescan,
  *   GET /api/board/projects/:slug/stories/:id/detail (AC2 story-detail-ansicht),
  *   POST /api/board/projects/:slug/ideas (ideen-inbox AC3 — Quick-Capture),
  *   POST /api/board/projects/:slug/ideas/:id/discuss (ideen-inbox AC5, S-200),
- *   POST /api/board/projects/:slug/ideas/:id/resolve (ideen-inbox AC6, S-200)
+ *   POST /api/board/projects/:slug/ideas/:id/resolve (ideen-inbox AC6, S-200),
+ *   POST /api/board/projects/:slug/areas (bereichs-modell AC3, S-289),
+ *   PATCH /api/board/projects/:slug/areas/:id (bereichs-modell AC4, S-289),
+ *   POST /api/board/projects/:slug/areas/reorder (bereichs-modell AC4, S-289),
+ *   DELETE /api/board/projects/:slug/areas/:id (bereichs-modell AC5, S-289)
  *
  * commandService/sessionRegistry (S-200 AC5): bereits im server.js-deps-Objekt
  * vorhanden (CommandService/PtySessionRegistry-Composition-Root für den
@@ -25,6 +30,7 @@ export const order = 180;
  *   storyMetricReader: import('../StoryMetricReader.js').StoryMetricReader,
  *   notificationWatcher?: import('../NotificationWatcher.js').NotificationWatcher,
  *   boardWriter?: import('../BoardWriter.js').BoardWriter,
+ *   areaWriter?: import('../AreaWriter.js').AreaWriter,
  *   auditStore?: import('../AuditStore.js').AuditStore,
  *   commandService?: import('../CommandService.js').CommandService,
  *   sessionRegistry?: import('../PtySessionRegistry.js').PtySessionRegistry,
@@ -36,6 +42,7 @@ export function create({
   storyMetricReader,
   notificationWatcher,
   boardWriter,
+  areaWriter,
   auditStore,
   commandService,
   sessionRegistry,
@@ -45,6 +52,7 @@ export function create({
     storyMetricReader,
     notificationWatcher,
     boardWriter,
+    areaWriter,
     auditStore,
     commandService,
     sessionRegistry,

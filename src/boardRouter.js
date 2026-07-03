@@ -11,6 +11,10 @@
  *   GET /api/board/projects/:slug                    → { project: {...} }  (ein Projekt voll, on-demand — AC5)
  *   GET /api/board/projects/:slug/areas              → { areas: [...] }  (Bereichsliste, read-only,
  *                                                      bereichs-modell AC1/AC2/V6, S-288)
+ *   POST /api/board/projects/:slug/areas             → { id }  (Bereich anlegen, bereichs-modell AC3/AC6, S-289)
+ *   PATCH /api/board/projects/:slug/areas/:id        → { id }  (Bereich umbenennen, bereichs-modell AC4/AC6, S-289)
+ *   POST /api/board/projects/:slug/areas/reorder     → { areas }  (Bereiche umsortieren, bereichs-modell AC4/AC6, S-289)
+ *   DELETE /api/board/projects/:slug/areas/:id       → { deleted }  (Bereich löschen mit Leer-Guard, bereichs-modell AC5/AC6, S-289)
  *   POST /api/board/projects/rescan                  → { ok: true }  (on-demand re-scan, AC9)
  *   GET /api/board/projects/:slug/stories/:id/detail → { detail: StoryDetail }  (read-only, lazy — AC2)
  *   POST /api/board/projects/:slug/ideas             → { storyId }  (Quick-Capture-Create, ideen-inbox AC3)
@@ -102,9 +106,37 @@
  *   read-only aus dem In-Memory-Index, kein zusätzlicher Scan/Schreibpfad). 404
  *   bei ungültigem Format ODER unbekanntem Slug (dieselbe SLUG_RE + Index-Lookup-
  *   Prüfung wie GET /api/board/projects/:slug). Rein lesend — kein accessGuard-
- *   mutierender Pfad nötig (wie alle übrigen GET-Board-Routen). `AreaWriter`/
- *   mutierende Endpunkte (POST/PATCH/DELETE/reorder) sind NICHT Teil dieser
- *   Story (Folge-Stories, [[bereichs-modell]] V3-V6).
+ *   mutierender Pfad nötig (wie alle übrigen GET-Board-Routen). Die
+ *   mutierenden `AreaWriter`-Endpunkte (POST/PATCH/DELETE/reorder) sind
+ *   inzwischen gelandet — siehe den folgenden Block (S-289, Schreib-Teil).
+ *
+ * bereichs-modell (S-289, Schreib-Teil — AC3-AC7, V3-V6):
+ *   POST /api/board/projects/:slug/areas { name, description? } → 201 { id }
+ *          legt über `AreaWriter.createArea()` (einziger Schreibpfad) einen
+ *          neuen Bereich an (stabile kebab-case-`id`, `order` ans Ende).
+ *          400 { field, message } bei leerem/zu langem/doppeltem `name`.
+ *   PATCH /api/board/projects/:slug/areas/:id { name } → 200 { id } ändert
+ *          über `AreaWriter.renameArea()` NUR den `name` (id bleibt stabil).
+ *          400 bei ungültigem/doppeltem `name`. 404 bei unbekanntem Bereich.
+ *   POST /api/board/projects/:slug/areas/reorder { orderedIds } → 200 { areas }
+ *          setzt über `AreaWriter.reorderAreas()` die `order`-Werte gemäß
+ *          `orderedIds` — MUSS genau die vorhandene ID-Menge sein, sonst
+ *          400 (kein Teil-Schreiben).
+ *   DELETE /api/board/projects/:slug/areas/:id → 200 { deleted: id } löscht
+ *          über `AreaWriter.deleteArea()` NUR, wenn kein Feature/keine Story
+ *          (aktiv ODER archiviert) und keine Spec mehr am Bereich hängen;
+ *          sonst 409 { error: 'area-not-empty', storyCount, specCount }
+ *          (keine Teil-Löschung).
+ *   Alle vier mutierenden Endpunkte: hinter dem bestehenden `/api`-AccessGuard
+ *   (server.js-Registrierung, wie alle Board-Routen), Audit-First (GENAU EIN
+ *   Eintrag je akzeptiertem Aufruf, VOR dem Schreiben — analog POST .../ideas),
+ *   kurz gehaltenes `ProjectJobLock` (409 bei Belegung — dieselbe geteilte
+ *   Lock-Instanz wie .../discuss/.../archive-done). Slug-/ID-Validierung wie
+ *   die übrigen Board-Routen (SLUG_RE + Index-Lookup → 404; `:id` gegen
+ *   `AREA_ID_RE` → 404 bei ungültigem Format, konsistent mit dem bestehenden
+ *   "Format-Fehler ⇒ 404"-Muster von `:slug`/Story-`:id` oben). Einziger
+ *   Schreibpfad bleibt `AreaWriter` (atomar, BOARD_ROOTS-Realpath-Schranke);
+ *   `BoardAggregator` bleibt read-only.
  *
  * Security:
  *   - Read-only für alle GET-Routen (AC7 studis-kanban-board-ux).
@@ -126,6 +158,12 @@
  *     `BoardWriter.archiveDoneFeatures()` (atomar, BOARD_ROOTS-Realpath-Schranke).
  *     projectSlug läuft durch dieselbe SLUG_RE-Prüfung + In-Memory-Index-Auflösung
  *     wie die übrigen Routen (nie als Pfad). Kurzzeitiges ProjectJobLock (409).
+ *   - POST/PATCH/DELETE .../areas[...]: name/description/orderedIds werden
+ *     ausschließlich über `AreaWriter.validateAreaName()`/`validateAreaDescription()`/
+ *     `validateOrderedIds()` validiert/sanitisiert — kein Roh-Schreiben im
+ *     Router. Einziger Schreibpfad ist `AreaWriter` (atomar, BOARD_ROOTS-
+ *     Realpath-Schranke, kein Traversal aus name/id). Kurzzeitiges
+ *     ProjectJobLock (409, geteilt mit .../discuss/.../archive-done).
  *   - Behind existing /api AccessGuard via server.js registration.
  *   - No secrets in output; no new authentication surface.
  *
@@ -134,6 +172,13 @@
 
 import { Router } from 'express';
 import { BoardWriterError, validateIdeaInput, validateResolveInput } from './BoardWriter.js';
+import {
+  AreaWriterError,
+  AREA_ID_RE,
+  validateAreaName,
+  validateAreaDescription,
+  validateOrderedIds,
+} from './AreaWriter.js';
 import { projectJobLock } from './ProjectJobLock.js';
 
 /** Valid slug characters: alphanumeric, dash, underscore, dot. No leading slash. */
@@ -211,6 +256,8 @@ function _resolveIdentity(identity) {
  * @param {import('./NotificationWatcher.js').NotificationWatcher} [options.notificationWatcher]
  * @param {import('./BoardWriter.js').BoardWriter} [options.boardWriter]  Create-/Resolve-Pfad
  *   (ideen-inbox AC3/AC6).
+ * @param {import('./AreaWriter.js').AreaWriter} [options.areaWriter]  Einziger Schreibpfad für
+ *   `board/areas.yaml` (bereichs-modell AC3-AC5, S-289).
  * @param {import('./AuditStore.js').AuditStore} [options.auditStore]  Audit je Anlage/Besprechung/
  *   Auflösung (ideen-inbox AC7).
  * @param {{ tryRun: Function, getStatus: () => { status: string|null } }} [options.commandService]
@@ -232,6 +279,7 @@ export function boardRouter({
   storyMetricReader,
   notificationWatcher,
   boardWriter,
+  areaWriter,
   auditStore,
   commandService,
   sessionRegistry,
@@ -890,6 +938,362 @@ export function boardRouter({
       });
     } finally {
       // Lock nur kurz halten (Check+Schreiben) — analog .../discuss, kein Deadlock.
+      lock.release(repoPath);
+    }
+  });
+
+  /**
+   * POST /api/board/projects/:slug/areas
+   *
+   * Legt einen neuen Bereich an (bereichs-modell AC3/AC6, S-289) über den
+   * einzigen Schreibpfad `AreaWriter.createArea()`. Reihenfolge: Slug-Format
+   * (404) → Eingabe-Validierung (400, KEIN Audit) → Projekt-Auflösung gegen
+   * den In-Memory-Index (404) → ProjectJobLock kurz halten (409 wenn belegt)
+   * → Audit-First (GENAU EIN Eintrag) → `createArea()` → 201.
+   *
+   * Body: { name: string, description?: string }
+   * Response 201: { id }
+   * Response 400: { field, message }  (leerer/zu langer/doppelter name, ungültige description)
+   * Response 404: { error }           (Slug-Format ungültig ODER Projekt nicht unter BOARD_ROOTS)
+   * Response 409: { error }           (ProjectJobLock belegt)
+   * Response 500: { error }           (Wiring fehlt / Audit-/Schreibfehler)
+   */
+  router.post('/api/board/projects/:slug/areas', async (req, res) => {
+    const { slug } = req.params;
+
+    if (!slug || !SLUG_RE.test(slug)) {
+      return res.status(404).json({ error: 'Projekt nicht gefunden.' });
+    }
+    if (!areaWriter) {
+      console.error('[boardRouter] POST .../areas: areaWriter nicht verdrahtet');
+      return res.status(500).json({ error: 'Bereich konnte nicht angelegt werden.' });
+    }
+
+    const { name, description } = req.body ?? {};
+
+    // Validierung VOR dem Audit-Eintrag — eine abgelehnte Eingabe ist KEINE
+    // versuchte Aktion (Audit-First-Muster, analog POST .../ideas).
+    let trimmedName;
+    let normalizedDescription;
+    try {
+      trimmedName = validateAreaName(name);
+      normalizedDescription = validateAreaDescription(description);
+    } catch (err) {
+      if (err instanceof AreaWriterError) {
+        const field = err.errorClass === 'invalid-description' ? 'description' : 'name';
+        return res.status(400).json({ field, message: err.message });
+      }
+      throw err;
+    }
+
+    const projects = await boardAggregator.getIndex();
+    const project = projects.find((p) => p.slug === slug);
+    if (!project || project.error) {
+      return res.status(404).json({ error: 'Projekt nicht gefunden.' });
+    }
+    const repoPath = project.repo_path;
+
+    if (!lock.tryAcquire(repoPath)) {
+      return res.status(409).json({ error: 'Projekt wird gerade vom Taktgeber oder einer anderen Board-Aktion bearbeitet.' });
+    }
+
+    try {
+      // Audit-First (AC6 — GENAU EIN Eintrag je Anlage): schlägt record() fehl,
+      // wird createArea() NICHT aufgerufen.
+      if (auditStore) {
+        try {
+          auditStore.record({
+            identity: _resolveIdentity(req.identity ?? null),
+            command: `board:area:create:${slug}`,
+          });
+        } catch (auditErr) {
+          console.error('[boardRouter] Audit-Write fehlgeschlagen (POST .../areas):', auditErr.message);
+          return res.status(500).json({ error: 'Audit-Write fehlgeschlagen — Aktion abgebrochen' });
+        }
+      }
+
+      let result;
+      try {
+        result = await areaWriter.createArea({
+          projectSlug: slug,
+          name: trimmedName,
+          description: normalizedDescription,
+        });
+      } catch (err) {
+        if (err instanceof AreaWriterError) {
+          if (err.errorClass === 'invalid-name' || err.errorClass === 'duplicate-name') {
+            return res.status(400).json({ field: 'name', message: err.message });
+          }
+          if (err.errorClass === 'invalid-slug' || err.errorClass === 'project-not-found') {
+            return res.status(404).json({ error: 'Projekt nicht gefunden.' });
+          }
+          console.error('[boardRouter] createArea fehlgeschlagen:', err.errorClass, err.message);
+          return res.status(500).json({ error: 'Bereich konnte nicht angelegt werden.' });
+        }
+        console.error('[boardRouter] createArea unerwarteter Fehler:', err.message);
+        return res.status(500).json({ error: 'Bereich konnte nicht angelegt werden.' });
+      }
+
+      return res.status(201).json({ id: result.id });
+    } finally {
+      lock.release(repoPath);
+    }
+  });
+
+  /**
+   * PATCH /api/board/projects/:slug/areas/:id
+   *
+   * Benennt einen bestehenden Bereich um (bereichs-modell AC4/AC6, S-289) —
+   * NUR `name` ändert sich (`id` bleibt stabil). Gleiche Reihenfolge wie
+   * POST .../areas.
+   *
+   * Body: { name: string }
+   * Response 200: { id }
+   * Response 400: { field, message }  (leerer/zu langer/doppelter name)
+   * Response 404: { error }  (Slug/Bereichs-ID ungültig oder unbekannt)
+   * Response 409: { error }  (ProjectJobLock belegt)
+   * Response 500: { error }  (Wiring fehlt / Audit-/Schreibfehler)
+   */
+  router.patch('/api/board/projects/:slug/areas/:id', async (req, res) => {
+    const { slug, id } = req.params;
+
+    if (!slug || !SLUG_RE.test(slug)) {
+      return res.status(404).json({ error: 'Projekt nicht gefunden.' });
+    }
+    if (!id || !AREA_ID_RE.test(id)) {
+      return res.status(404).json({ error: 'Bereich nicht gefunden.' });
+    }
+    if (!areaWriter) {
+      console.error('[boardRouter] PATCH .../areas/:id: areaWriter nicht verdrahtet');
+      return res.status(500).json({ error: 'Bereich konnte nicht umbenannt werden.' });
+    }
+
+    const { name } = req.body ?? {};
+
+    let trimmedName;
+    try {
+      trimmedName = validateAreaName(name);
+    } catch (err) {
+      if (err instanceof AreaWriterError) {
+        return res.status(400).json({ field: 'name', message: err.message });
+      }
+      throw err;
+    }
+
+    const projects = await boardAggregator.getIndex();
+    const project = projects.find((p) => p.slug === slug);
+    if (!project || project.error) {
+      return res.status(404).json({ error: 'Projekt nicht gefunden.' });
+    }
+    const repoPath = project.repo_path;
+
+    if (!lock.tryAcquire(repoPath)) {
+      return res.status(409).json({ error: 'Projekt wird gerade vom Taktgeber oder einer anderen Board-Aktion bearbeitet.' });
+    }
+
+    try {
+      if (auditStore) {
+        try {
+          auditStore.record({
+            identity: _resolveIdentity(req.identity ?? null),
+            command: `board:area:rename:${slug}:${id}`,
+          });
+        } catch (auditErr) {
+          console.error('[boardRouter] Audit-Write fehlgeschlagen (PATCH .../areas/:id):', auditErr.message);
+          return res.status(500).json({ error: 'Audit-Write fehlgeschlagen — Aktion abgebrochen' });
+        }
+      }
+
+      let result;
+      try {
+        result = await areaWriter.renameArea({ projectSlug: slug, id, name: trimmedName });
+      } catch (err) {
+        if (err instanceof AreaWriterError) {
+          if (err.errorClass === 'invalid-name' || err.errorClass === 'duplicate-name') {
+            return res.status(400).json({ field: 'name', message: err.message });
+          }
+          if (err.errorClass === 'invalid-slug' || err.errorClass === 'project-not-found') {
+            return res.status(404).json({ error: 'Projekt nicht gefunden.' });
+          }
+          if (err.errorClass === 'area-not-found' || err.errorClass === 'invalid-id') {
+            return res.status(404).json({ error: 'Bereich nicht gefunden.' });
+          }
+          console.error('[boardRouter] renameArea fehlgeschlagen:', err.errorClass, err.message);
+          return res.status(500).json({ error: 'Bereich konnte nicht umbenannt werden.' });
+        }
+        console.error('[boardRouter] renameArea unerwarteter Fehler:', err.message);
+        return res.status(500).json({ error: 'Bereich konnte nicht umbenannt werden.' });
+      }
+
+      return res.status(200).json({ id: result.id });
+    } finally {
+      lock.release(repoPath);
+    }
+  });
+
+  /**
+   * POST /api/board/projects/:slug/areas/reorder
+   *
+   * Setzt die Reihenfolge aller Bereiche gemäß `orderedIds` (bereichs-modell
+   * AC4/AC6, S-289). `orderedIds` MUSS genau die Menge der vorhandenen
+   * Bereichs-IDs sein — sonst 400, kein Teil-Schreiben.
+   *
+   * Body: { orderedIds: string[] }
+   * Response 200: { areas }
+   * Response 400: { field, message }  (Form ungültig ODER ID-Menge ≠ vorhandene)
+   * Response 404: { error }  (Slug ungültig oder unbekannt)
+   * Response 409: { error }  (ProjectJobLock belegt)
+   * Response 500: { error }  (Wiring fehlt / Audit-/Schreibfehler)
+   */
+  router.post('/api/board/projects/:slug/areas/reorder', async (req, res) => {
+    const { slug } = req.params;
+
+    if (!slug || !SLUG_RE.test(slug)) {
+      return res.status(404).json({ error: 'Projekt nicht gefunden.' });
+    }
+    if (!areaWriter) {
+      console.error('[boardRouter] POST .../areas/reorder: areaWriter nicht verdrahtet');
+      return res.status(500).json({ error: 'Bereiche konnten nicht umsortiert werden.' });
+    }
+
+    const { orderedIds } = req.body ?? {};
+
+    let normalizedOrderedIds;
+    try {
+      normalizedOrderedIds = validateOrderedIds(orderedIds);
+    } catch (err) {
+      if (err instanceof AreaWriterError) {
+        return res.status(400).json({ field: 'orderedIds', message: err.message });
+      }
+      throw err;
+    }
+
+    const projects = await boardAggregator.getIndex();
+    const project = projects.find((p) => p.slug === slug);
+    if (!project || project.error) {
+      return res.status(404).json({ error: 'Projekt nicht gefunden.' });
+    }
+    const repoPath = project.repo_path;
+
+    if (!lock.tryAcquire(repoPath)) {
+      return res.status(409).json({ error: 'Projekt wird gerade vom Taktgeber oder einer anderen Board-Aktion bearbeitet.' });
+    }
+
+    try {
+      if (auditStore) {
+        try {
+          auditStore.record({
+            identity: _resolveIdentity(req.identity ?? null),
+            command: `board:area:reorder:${slug}`,
+          });
+        } catch (auditErr) {
+          console.error('[boardRouter] Audit-Write fehlgeschlagen (POST .../areas/reorder):', auditErr.message);
+          return res.status(500).json({ error: 'Audit-Write fehlgeschlagen — Aktion abgebrochen' });
+        }
+      }
+
+      let result;
+      try {
+        result = await areaWriter.reorderAreas({ projectSlug: slug, orderedIds: normalizedOrderedIds });
+      } catch (err) {
+        if (err instanceof AreaWriterError) {
+          if (err.errorClass === 'invalid-order-ids') {
+            return res.status(400).json({ field: 'orderedIds', message: err.message });
+          }
+          if (err.errorClass === 'invalid-slug' || err.errorClass === 'project-not-found') {
+            return res.status(404).json({ error: 'Projekt nicht gefunden.' });
+          }
+          console.error('[boardRouter] reorderAreas fehlgeschlagen:', err.errorClass, err.message);
+          return res.status(500).json({ error: 'Bereiche konnten nicht umsortiert werden.' });
+        }
+        console.error('[boardRouter] reorderAreas unerwarteter Fehler:', err.message);
+        return res.status(500).json({ error: 'Bereiche konnten nicht umsortiert werden.' });
+      }
+
+      return res.status(200).json({ areas: result.areas });
+    } finally {
+      lock.release(repoPath);
+    }
+  });
+
+  /**
+   * DELETE /api/board/projects/:slug/areas/:id
+   *
+   * Löscht einen Bereich (bereichs-modell AC5/AC6, S-289) — NUR wenn kein
+   * Feature/keine Story (aktiv ODER archiviert) und keine Spec mehr am
+   * Bereich hängen (`AreaWriter.deleteArea()`-Guard). Kein Request-Body.
+   *
+   * Response 200: { deleted: id }
+   * Response 404: { error }  (Slug/Bereichs-ID ungültig oder unbekannt)
+   * Response 409: { error: 'area-not-empty', storyCount, specCount }  (noch belegt)
+   *               | { error }  (ProjectJobLock belegt)
+   * Response 500: { error }  (Wiring fehlt / Audit-/Schreibfehler)
+   */
+  router.delete('/api/board/projects/:slug/areas/:id', async (req, res) => {
+    const { slug, id } = req.params;
+
+    if (!slug || !SLUG_RE.test(slug)) {
+      return res.status(404).json({ error: 'Projekt nicht gefunden.' });
+    }
+    if (!id || !AREA_ID_RE.test(id)) {
+      return res.status(404).json({ error: 'Bereich nicht gefunden.' });
+    }
+    if (!areaWriter) {
+      console.error('[boardRouter] DELETE .../areas/:id: areaWriter nicht verdrahtet');
+      return res.status(500).json({ error: 'Bereich konnte nicht gelöscht werden.' });
+    }
+
+    const projects = await boardAggregator.getIndex();
+    const project = projects.find((p) => p.slug === slug);
+    if (!project || project.error) {
+      return res.status(404).json({ error: 'Projekt nicht gefunden.' });
+    }
+    const repoPath = project.repo_path;
+
+    if (!lock.tryAcquire(repoPath)) {
+      return res.status(409).json({ error: 'Projekt wird gerade vom Taktgeber oder einer anderen Board-Aktion bearbeitet.' });
+    }
+
+    try {
+      if (auditStore) {
+        try {
+          auditStore.record({
+            identity: _resolveIdentity(req.identity ?? null),
+            command: `board:area:delete:${slug}:${id}`,
+          });
+        } catch (auditErr) {
+          console.error('[boardRouter] Audit-Write fehlgeschlagen (DELETE .../areas/:id):', auditErr.message);
+          return res.status(500).json({ error: 'Audit-Write fehlgeschlagen — Aktion abgebrochen' });
+        }
+      }
+
+      let result;
+      try {
+        result = await areaWriter.deleteArea({ projectSlug: slug, id });
+      } catch (err) {
+        if (err instanceof AreaWriterError) {
+          if (err.errorClass === 'area-not-empty') {
+            return res.status(409).json({
+              error: 'area-not-empty',
+              storyCount: err.details?.storyCount ?? 0,
+              specCount: err.details?.specCount ?? 0,
+            });
+          }
+          if (err.errorClass === 'invalid-slug' || err.errorClass === 'project-not-found') {
+            return res.status(404).json({ error: 'Projekt nicht gefunden.' });
+          }
+          if (err.errorClass === 'area-not-found' || err.errorClass === 'invalid-id') {
+            return res.status(404).json({ error: 'Bereich nicht gefunden.' });
+          }
+          console.error('[boardRouter] deleteArea fehlgeschlagen:', err.errorClass, err.message);
+          return res.status(500).json({ error: 'Bereich konnte nicht gelöscht werden.' });
+        }
+        console.error('[boardRouter] deleteArea unerwarteter Fehler:', err.message);
+        return res.status(500).json({ error: 'Bereich konnte nicht gelöscht werden.' });
+      }
+
+      return res.status(200).json({ deleted: result.id });
+    } finally {
       lock.release(repoPath);
     }
   });

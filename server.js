@@ -147,6 +147,7 @@ import { sendNotification } from './src/NotifyService.js';
 import { DrainNotifier } from './src/DrainNotifier.js';
 import { ProjectDrain } from './src/ProjectDrain.js';
 import { BoardWriter } from './src/BoardWriter.js';
+import { AreaWriter } from './src/AreaWriter.js';
 import { TokenLimitWatcher } from './src/TokenLimitWatcher.js';
 import { NightWatchScheduler } from './src/NightWatchScheduler.js';
 import { DrainReportStore } from './src/DrainReportStore.js';
@@ -343,6 +344,11 @@ const claudeAuthHealthService = new ClaudeAuthHealthService();
 // deckt sowohl die Busy-Erkennung (AC7, ProjectDrain) als auch den
 // Token-Limit-Watcher-Attach je Projekt-Session ab (S-195, konto-weit).
 const boardWriter = new BoardWriter();
+// bereichs-modell AC3-AC7 (S-289): einziger Schreibpfad für board/areas.yaml
+// (create/rename/reorder/delete) — dieselbe BOARD_ROOTS-Realpath-Schranke wie
+// BoardWriter, aber eine eigene, schmalere Boundary-Klasse (kein Story-Datei-
+// Zugriff nötig).
+const areaWriter = new AreaWriter();
 // ── Manueller „Board abarbeiten"-Knopf: HEADLESS (ADR-017, docs/specs/headless-manual-drain.md AC1/AC2/AC3) ──
 // Seit ADR-017 (Owner-Entscheidung 2026-07-01) läuft der manuelle Knopf NICHT
 // mehr interaktiv über den PTY-`CommandService`, sondern headless — analog zum
@@ -769,6 +775,10 @@ const deps = {
   // Router-Auto-Loader zusätzlich an boardRouter (POST .../discuss, .../resolve)
   // durchgereicht — keine neue Instanz, keine zusätzliche server.js-Verdrahtung.
   boardWriter,
+  // bereichs-modell AC3-AC7 (S-289): AreaWriter für die mutierenden Bereichs-
+  // Endpunkte (boardRouter POST/PATCH/DELETE .../areas[...]) — einziger
+  // Schreibpfad für board/areas.yaml, BoardAggregator bleibt read-only.
+  areaWriter,
   // S-215 (idea-specify-chat AC3/AC4/AC5/AC13): IdeaSpecifyChatService für den
   // Multi-Turn-Chat-Router (ideaSpecify.js, POST .../specify/start + .../specify/message).
   ideaSpecifyChatService,
