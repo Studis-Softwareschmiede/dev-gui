@@ -91,6 +91,20 @@
  *         test/AutoRetroTrigger.test.js unit-getestet (kein zweiter Codepfad:
  *         dieselbe Instanz wie der manuelle Drain — server.js-Verdrahtung).
  *
+ * Covers (drain-restart-robustness, S-282):
+ *   AC3 — je gestartetem Nacht-Drain wird GENAU EIN `register(drainId,
+ *         {project,trigger:'night',startedAt})` an die geteilte
+ *         `DrainJobRegistry` gerufen (neue `drainId` je Drain); bei Abschluss
+ *         (resolve/reject) `markDone`/`markFailed` mit DERSELBEN `drainId`.
+ *         `#activeDrains` bleibt davon vollständig unberührt (additiv). Ein
+ *         werfender/rejectender Registry-Aufruf crasht den Scheduler NICHT
+ *         (Drain-Eintrag wird sauber abgeräumt). Ohne Slug → keine
+ *         Registrierung (kein leerer/ungültiger Slug in der Persistenz). Kein
+ *         injizierter `drainJobRegistry` → Scheduler läuft unverändert (No-op).
+ *         Der `DrainJobRegistry`-Baustein selbst (Persistenz, `reconcileOrphans`,
+ *         AC1/AC2/AC4) ist zusätzlich unit-getestet in
+ *         test/DrainJobRegistry.test.js.
+ *
  * Covers (drain-done-notification, S-277):
  *   AC4 — je abgeschlossenem Projekt-Drain (resolve UND reject, symmetrisch
  *         zu `#recordNightReport`/`#notifyAutoRetro`) wird best-effort
@@ -206,6 +220,7 @@ function makeScheduler(overrides = {}) {
     drainReportStore: overrides.drainReportStore,
     autoRetroTrigger: overrides.autoRetroTrigger,
     drainNotifier: overrides.drainNotifier,
+    drainJobRegistry: overrides.drainJobRegistry,
     now: () => nowMs,
     sleepFn: overrides.sleepFn ?? (() => Promise.resolve()),
   });
@@ -1178,5 +1193,195 @@ describe('NightWatchScheduler — Drain-Fertig-Push an der Drain-Abschluss-Naht 
     projectDrain.resolve('/workspace/proj-a', { stopped: true, reason: 'no-drain-target', flowRuns: 1 });
     await flush();
     expect(scheduler.getStatus().activeDrainProjectPaths).toEqual([]);
+  });
+});
+
+// ── Nacht-Drain-Registrierung in der geteilten persistenten Registry (drain-restart-robustness AC3, S-282) ──
+
+describe('NightWatchScheduler — Registrierung in der geteilten DrainJobRegistry (drain-restart-robustness AC3)', () => {
+  function makeJobRegistry() {
+    const jobs = new Map();
+    return {
+      jobs,
+      register: jest.fn((drainId, meta) => {
+        jobs.set(drainId, { ...meta, status: 'running' });
+      }),
+      markDone: jest.fn((drainId, result) => {
+        const existing = jobs.get(drainId);
+        jobs.set(drainId, { ...existing, status: 'done', result });
+      }),
+      markFailed: jest.fn((drainId) => {
+        const existing = jobs.get(drainId);
+        jobs.set(drainId, { ...existing, status: 'failed' });
+      }),
+    };
+  }
+
+  it('registriert einen gestarteten Nacht-Drain mit trigger:night + Projekt-Slug, VOR dem Abschluss', async () => {
+    const drainJobRegistry = makeJobRegistry();
+    const projectDrain = makeControllableProjectDrain();
+    const { scheduler } = makeScheduler({
+      projectDrain,
+      drainJobRegistry,
+      settings: makeSettings({ maxParallel: 1, projects: ['proj-a'] }),
+    });
+
+    await scheduler.tick();
+
+    expect(drainJobRegistry.register).toHaveBeenCalledTimes(1);
+    const [drainId, meta] = drainJobRegistry.register.mock.calls[0];
+    expect(typeof drainId).toBe('string');
+    expect(drainId.length).toBeGreaterThan(0);
+    expect(meta.project).toBe('proj-a');
+    expect(meta.trigger).toBe('night');
+    expect(typeof meta.startedAt).toBe('string');
+    // Noch kein terminaler Aufruf, solange der Drain läuft.
+    expect(drainJobRegistry.markDone).not.toHaveBeenCalled();
+    expect(drainJobRegistry.markFailed).not.toHaveBeenCalled();
+
+    projectDrain.resolve('/workspace/proj-a', { stopped: true, reason: 'no-drain-target', flowRuns: 1 });
+    await flush();
+  });
+
+  it('markiert den Registry-Eintrag bei erfolgreichem Abschluss als done, mit derselben drainId', async () => {
+    const drainJobRegistry = makeJobRegistry();
+    const projectDrain = makeControllableProjectDrain();
+    const { scheduler } = makeScheduler({
+      projectDrain,
+      drainJobRegistry,
+      settings: makeSettings({ maxParallel: 1, projects: ['proj-a'] }),
+    });
+
+    await scheduler.tick();
+    const [drainId] = drainJobRegistry.register.mock.calls[0];
+
+    projectDrain.resolve('/workspace/proj-a', { stopped: true, reason: 'no-drain-target', flowRuns: 2, escalated: [] });
+    await flush();
+
+    expect(drainJobRegistry.markDone).toHaveBeenCalledTimes(1);
+    const [doneDrainId, result] = drainJobRegistry.markDone.mock.calls[0];
+    expect(doneDrainId).toBe(drainId);
+    expect(result.flowRuns).toBe(2);
+    expect(drainJobRegistry.markFailed).not.toHaveBeenCalled();
+  });
+
+  it('markiert den Registry-Eintrag bei rejectetem Drain als failed, mit derselben drainId', async () => {
+    const drainJobRegistry = makeJobRegistry();
+    const projectDrain = {
+      drainProject: jest.fn(async () => {
+        throw new Error('drain kaputt');
+      }),
+    };
+    const { scheduler } = makeScheduler({
+      projectDrain,
+      drainJobRegistry,
+      settings: makeSettings({ maxParallel: 1, projects: ['proj-a'] }),
+    });
+
+    await expect(scheduler.tick()).resolves.toBeTruthy();
+    const [drainId] = drainJobRegistry.register.mock.calls[0];
+    await flush();
+
+    expect(drainJobRegistry.markFailed).toHaveBeenCalledTimes(1);
+    const [failedDrainId] = drainJobRegistry.markFailed.mock.calls[0];
+    expect(failedDrainId).toBe(drainId);
+    expect(drainJobRegistry.markDone).not.toHaveBeenCalled();
+  });
+
+  it('#activeDrains bleibt von der Registrierung unberührt (rein additive Erfassung)', async () => {
+    const drainJobRegistry = makeJobRegistry();
+    const projectDrain = makeControllableProjectDrain();
+    const { scheduler } = makeScheduler({
+      projectDrain,
+      drainJobRegistry,
+      settings: makeSettings({ maxParallel: 1, projects: ['proj-a'] }),
+    });
+
+    await scheduler.tick();
+    expect(scheduler.getStatus().activeDrainProjectPaths).toEqual(['/workspace/proj-a']);
+
+    projectDrain.resolve('/workspace/proj-a', { stopped: true, reason: 'no-drain-target', flowRuns: 1 });
+    await flush();
+    expect(scheduler.getStatus().activeDrainProjectPaths).toEqual([]);
+  });
+
+  it('ein werfender register()/markDone() crasht den Scheduler NICHT (best-effort)', async () => {
+    const drainJobRegistry = {
+      register: jest.fn(() => {
+        throw new Error('registry kaputt');
+      }),
+      markDone: jest.fn(() => {
+        throw new Error('registry kaputt');
+      }),
+      markFailed: jest.fn(() => {
+        throw new Error('registry kaputt');
+      }),
+    };
+    const projectDrain = makeControllableProjectDrain();
+    const { scheduler } = makeScheduler({
+      projectDrain,
+      drainJobRegistry,
+      settings: makeSettings({ maxParallel: 1, projects: ['proj-a'] }),
+    });
+
+    await expect(scheduler.tick()).resolves.toBeTruthy();
+    projectDrain.resolve('/workspace/proj-a', { stopped: true, reason: 'no-drain-target', flowRuns: 1 });
+    await expect(flush()).resolves.not.toThrow();
+
+    expect(scheduler.getStatus().activeDrainProjectPaths).toEqual([]);
+  });
+
+  it('ohne Projekt-Slug wird NICHT registriert (kein leerer/ungültiger Slug in der Persistenz)', async () => {
+    const drainJobRegistry = makeJobRegistry();
+    const projectDrain = makeControllableProjectDrain();
+    // Fixture-Projekt ohne project_slug/slug (defensiv — s. #startDrain-Aufrufer).
+    const index = [{ repo_path: '/workspace/no-slug-proj', error: undefined }];
+    const { scheduler } = makeScheduler({
+      projectDrain,
+      drainJobRegistry,
+      index,
+      settings: makeSettings({ maxParallel: 1, projects: 'all' }),
+    });
+
+    await scheduler.tick();
+
+    expect(drainJobRegistry.register).not.toHaveBeenCalled();
+
+    projectDrain.resolve('/workspace/no-slug-proj', { stopped: true, reason: 'no-drain-target', flowRuns: 0 });
+    await flush();
+  });
+
+  it('ohne injizierten drainJobRegistry läuft der Scheduler unverändert (No-op, kein Crash)', async () => {
+    const projectDrain = makeControllableProjectDrain();
+    const { scheduler } = makeScheduler({
+      projectDrain,
+      settings: makeSettings({ maxParallel: 1, projects: ['proj-a'] }),
+    });
+
+    await expect(scheduler.tick()).resolves.toBeTruthy();
+    projectDrain.resolve('/workspace/proj-a', { stopped: true, reason: 'no-drain-target', flowRuns: 1 });
+    await expect(flush()).resolves.not.toThrow();
+    expect(scheduler.getStatus().activeDrainProjectPaths).toEqual([]);
+  });
+
+  it('zwei parallele Nacht-Drains bekommen je EINE eigene, unterschiedliche drainId', async () => {
+    const drainJobRegistry = makeJobRegistry();
+    const projectDrain = makeControllableProjectDrain();
+    const { scheduler } = makeScheduler({
+      projectDrain,
+      drainJobRegistry,
+      settings: makeSettings({ maxParallel: 2, projects: ['proj-a', 'proj-b'] }),
+    });
+
+    await scheduler.tick();
+
+    expect(drainJobRegistry.register).toHaveBeenCalledTimes(2);
+    const [drainIdA] = drainJobRegistry.register.mock.calls[0];
+    const [drainIdB] = drainJobRegistry.register.mock.calls[1];
+    expect(drainIdA).not.toBe(drainIdB);
+
+    projectDrain.resolve('/workspace/proj-a', { stopped: true, reason: 'no-drain-target', flowRuns: 0 });
+    projectDrain.resolve('/workspace/proj-b', { stopped: true, reason: 'no-drain-target', flowRuns: 0 });
+    await flush();
   });
 });

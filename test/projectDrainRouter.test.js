@@ -24,12 +24,16 @@
  *          `['--cost', <mode>]` an drainProject; `balanced`/fehlend → args `[]`
  *          (kein Flag); ungültiger costMode → 400, KEIN Drain-Start.
  *   AC4 — Drain-Job-Status: jeder gestartete Drain wird unter seiner `drainId`
- *          in der In-Memory-Registry geführt; `GET …/drain/:drainId` liefert
- *          `200 { status: 'running'|'done'|'failed', … }` (secret-/pfad-frei) |
- *          `404` (unbekannte drainId) | `400` (ungültiger Slug). `running` vor
- *          Auflösung, `done` (mit Ergebnis-Zusammenfassung) nach resolve,
- *          `failed` (generischer Text) nach reject. Der DrainJobRegistry-Baustein
- *          selbst ist zusätzlich unit-getestet in test/DrainJobRegistry.test.js.
+ *          in der (seit drain-restart-robustness AC1/AC2 datei-persistierten)
+ *          Registry geführt; `GET …/drain/:drainId` liefert
+ *          `200 { status: 'running'|'done'|'failed'|'aborted', … }` (secret-/
+ *          pfad-frei) | `404` (unbekannte drainId) | `400` (ungültiger Slug).
+ *          `running` vor Auflösung, `done` (mit Ergebnis-Zusammenfassung) nach
+ *          resolve, `failed` (generischer Text) nach reject, `aborted` für
+ *          einen von der Registry als verwaist markierten Eintrag (Boot-Orphan,
+ *          drain-restart-robustness AC4 — eigener Test unten). Der
+ *          DrainJobRegistry-Baustein selbst ist zusätzlich unit-getestet in
+ *          test/DrainJobRegistry.test.js.
  *   Slug-/Pfad-Validierung — 400 bei ungültigem Slug (Traversal-Token) oder
  *          wenn der Pfad-Validator eine Boundary-Verletzung meldet.
  *          500, wenn die ProjectDrain-Engine nicht verdrahtet ist
@@ -84,7 +88,7 @@
  *          unit-getestet (kein zweiter Codepfad — dieselbe Instanz wie der
  *          Nacht-Drain, server.js-Verdrahtung).
  *
- * Covers (drain-restart-robustness, S-281):
+ * Covers (drain-restart-robustness, S-281/S-282):
  *   AC2 — der Router ruft `jobRegistry.register(drainId, {project,trigger,
  *          args,startedAt})` mit dem Route-Slug (rawSlug, kein Pfad),
  *          `trigger:'manual'`, den validierten Cost-Mode-`args` und einem
@@ -93,6 +97,15 @@
  *          test/DrainJobRegistry.test.js abgedeckt. Das GET-Vertragsformat
  *          (`200 {status,result?,error?}` | `404` | `400`) bleibt dabei
  *          unverändert (bereits oben durch die AC4-Tests abgedeckt).
+ *   AC4 — HTTP-Vertrag für einen von der Registry als verwaist markierten
+ *          Eintrag: liefert `getJob(drainId)` `{status:'aborted'}` (z.B. nach
+ *          `DrainJobRegistry.reconcileOrphans()` beim Boot, unit-getestet in
+ *          test/DrainJobRegistry.test.js), antwortet `GET …/drain/:drainId`
+ *          mit `200 {status:'aborted'}` — NICHT `404` (Monitoring bleibt nach
+ *          einem Server-Neustart nicht blind). Eigener Test unten (gemockte
+ *          `jobRegistry.getJob()`, kein echter `reconcileOrphans()`-Lauf nötig
+ *          — der Router selbst behandelt `aborted` transparent wie jeden
+ *          anderen Status, keine Sonderfall-Logik im Router-Code).
  *
  * Strategy: echter Express-App + echter HTTP-Server (Muster
  * test/slugResolver.test.js "commandRouter integration" + test/tickerSettings.test.js
@@ -733,6 +746,44 @@ describe('GET /api/projects/:slug/drain/:drainId (headless-manual-drain AC4)', (
     expect(res.status).toBe(200);
     expect(res.body.status).toBe('done');
     expect(res.body.result.reason).toBe('already-busy');
+  });
+});
+
+describe('GET /api/projects/:slug/drain/:drainId — verwaiste Drains (drain-restart-robustness AC4)', () => {
+  let server;
+
+  afterEach(async () => {
+    if (server) await closeServer(server);
+    server = null;
+  });
+
+  it('200 { status: "aborted" } statt 404 — Registry liefert einen als verwaist markierten Eintrag (Boot-Orphan)', async () => {
+    const jobRegistry = {
+      register: jest.fn(),
+      markDone: jest.fn(),
+      markFailed: jest.fn(),
+      // Simuliert das Ergebnis von DrainJobRegistry.reconcileOrphans() (unit-
+      // getestet in test/DrainJobRegistry.test.js) — hier NUR die HTTP-Naht.
+      getJob: jest.fn((drainId) => (drainId === 'orphan-1' ? { status: 'aborted' } : undefined)),
+    };
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => { req.identity = { email: 'test@example.com' }; next(); });
+    app.use(projectDrainRouter(
+      { projectDrain: { drainProject: jest.fn() } },
+      { slugResolver: makeSlugResolver(), pathValidator: identityPathValidator(), jobRegistry },
+    ));
+    const s = await startServer(app);
+    server = s.server;
+
+    const res = await getJson(s.port, '/api/projects/dev-gui/drain/orphan-1');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ status: 'aborted' });
+
+    // Kontrolle: eine unbekannte drainId bleibt weiterhin 404 (Router behandelt
+    // 'aborted' transparent — keine Sonderfall-Logik, s. Modul-Doku Covers-Block).
+    const missing = await getJson(s.port, '/api/projects/dev-gui/drain/does-not-exist');
+    expect(missing.status).toBe(404);
   });
 });
 

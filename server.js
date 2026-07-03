@@ -150,6 +150,7 @@ import { BoardWriter } from './src/BoardWriter.js';
 import { TokenLimitWatcher } from './src/TokenLimitWatcher.js';
 import { NightWatchScheduler } from './src/NightWatchScheduler.js';
 import { DrainReportStore } from './src/DrainReportStore.js';
+import { DrainJobRegistry } from './src/DrainJobRegistry.js';
 import { HeadlessFlowRunner } from './src/HeadlessFlowRunner.js';
 import { HeadlessFlowRunnerAdapter } from './src/FlowRunner.js';
 import { ProjectJobLock } from './src/ProjectJobLock.js';
@@ -431,6 +432,26 @@ const costModeModelCheck = new CostModeModelCheck({
 // read-only für GET /api/drain-reports (drainReports.js Router).
 const drainReportStore = new DrainReportStore();
 
+// ── DrainJobRegistry (drain-restart-robustness AC1–AC4, S-281/S-282) ────────
+// EINE geteilte, datei-persistierte Instanz (${CRED_STORE_DIR}/drain-jobs.json)
+// für BEIDE Auslöser: manueller Drain (projectDrain.js Router, trigger:'manual',
+// AC1/AC2) UND Nacht-Drain (NightWatchScheduler unten, trigger:'night', AC3) —
+// kein zweiter Datei-/Config-Pfad. Boot-Orphan-Markierung (AC4): unmittelbar
+// nach dem Konstruieren wird JEDER noch-`running`-Eintrag (aus einem früheren
+// Prozess-Leben — sein `claude -p`-Kindprozess starb mit dem alten Prozess) auf
+// `aborted` gesetzt und persistiert; `GET .../drain/:drainId` liefert danach
+// `200 {status:'aborted'}` statt `404` (Monitoring nicht mehr blind). Idempotent
+// (ein zweiter Aufruf/Boot lässt bereits-terminale Einträge unangetastet).
+// Best-effort — ein Fehler hier darf den Server-Boot NIE crashen; der Boot-
+// Wiederanlauf selbst (Konsum der zurückgegebenen Orphans) ist NICHT Teil
+// dieser Story (S-283, docs/specs/drain-restart-robustness.md AC5–AC8).
+const drainJobRegistry = new DrainJobRegistry();
+try {
+  drainJobRegistry.reconcileOrphans();
+} catch (err) {
+  console.error('[server] DrainJobRegistry-Boot-Reconcile fehlgeschlagen:', err.message);
+}
+
 // ── Auto-Retro: serielle Queue + headless Runner + Auslöse-Trigger ────────────
 // (retro-auto-queue AC5/AC6 S-256/S-257 + retro-auto-trigger AC4–AC7 S-261).
 // VOR dem NightWatchScheduler konstruiert, weil dieser den `autoRetroTrigger` für
@@ -490,6 +511,7 @@ const nightWatchScheduler = new NightWatchScheduler({
   drainReportStore, // drain-completion-report AC6: je Nacht-Drain genau ein Bericht (trigger:'night')
   autoRetroTrigger, // retro-auto-trigger AC4/AC6: nach jedem Nacht-Drain isRetroDue → ggf. enqueue
   drainNotifier, // drain-done-notification AC4/AC6: je Nacht-Drain best-effort GENAU EIN Push
+  drainJobRegistry, // drain-restart-robustness AC3: je Nacht-Drain in der geteilten Registry geführt (trigger:'night')
 });
 // Immer gestartet — tick() selbst prüft `enabled` (AC16: enabled=false → idle,
 // analog NotificationWatcher.start(), das ebenfalls unbedingt läuft).
@@ -703,6 +725,12 @@ const deps = {
   // Drain-Abschluss best-effort GENAU EINEN Drain-Fertig-Push an. Kein zweiter
   // Config-/Token-Pfad.
   drainNotifier,
+  // drain-restart-robustness AC2/AC3/AC4 (S-282): GETEILTE DrainJobRegistry-
+  // Instanz (dieselbe wie der Nacht-Drain oben) — der manuelle projectDrain.js
+  // Router führt seine Job-Status-Einträge darüber statt einer eigenen,
+  // router-internen Default-Instanz (kein zweiter Datei-Pfad; der Boot-Orphan-
+  // Reconcile oben wirkt dadurch auf BEIDE Trigger).
+  drainJobRegistry,
   sessionRegistry: ptyRegistry,
   // S-199 (ideen-inbox AC3/AC7/AC8): BoardWriter-Create-Pfad für den
   // Quick-Capture-Endpunkt (boardRouter POST .../ideas). Instanz existiert

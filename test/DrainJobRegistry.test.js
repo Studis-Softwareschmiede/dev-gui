@@ -26,6 +26,17 @@
  *          `running`; `markDone`/`markFailed` persistieren den terminalen
  *          Status; `getJob()` liest weiterhin nur `{status,result?,error?}`
  *          (Vertragsformat unverändert, s. auch test/projectDrainRouter.test.js).
+ *   AC4 — `reconcileOrphans()`: markiert jeden noch-`running`-Eintrag als
+ *          `aborted` (+ `finishedAt`) und persistiert; `getJob()` liefert
+ *          danach `{status:'aborted'}` statt `undefined`/`running`. Idempotent
+ *          — ein zweiter Aufruf lässt bereits-terminale Einträge unangetastet
+ *          (kein erneutes `finishedAt`-Stempeln) und liefert `[]`. Überlebt
+ *          einen Neustart (zweite Instanz liest die bereits markierten
+ *          `aborted`-Einträge aus der Datei). Die HTTP-Naht (`GET …/drain/:drainId`
+ *          → `200 {status:'aborted'}` statt `404`) ist SEPARAT — mit gemockter
+ *          `jobRegistry.getJob()` — getestet in test/projectDrainRouter.test.js,
+ *          describe „GET /api/projects/:slug/drain/:drainId — verwaiste Drains
+ *          (drain-restart-robustness AC4)".
  */
 
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
@@ -279,4 +290,99 @@ describe('DrainJobRegistry — Persistenz (drain-restart-robustness AC1/AC2)', (
     // In-Memory bleibt trotz Schreibfehler korrekt.
     expect(reg.getJob('d1')).toEqual({ status: 'running' });
   });
+
+  // ── AC4: Boot-Orphan-Markierung ────────────────────────────────────────────
+
+  it('reconcileOrphans() markiert jeden running-Eintrag als aborted (+finishedAt), persistiert, liefert die Orphans — terminale Einträge bleiben unangetastet', async () => {
+    const reg = new DrainJobRegistry();
+    await reg.register('done-1', { project: 'proj-a', trigger: 'manual', startedAt: '2026-07-03T10:00:00.000Z' });
+    await reg.markDone('done-1', { reason: 'x' }); // bereits terminal — darf NICHT angefasst werden
+    await reg.register('running-2', { project: 'proj-b', trigger: 'night', startedAt: '2026-07-03T10:00:01.000Z' });
+    await reg.register('running-3', { project: 'proj-c', trigger: 'night', startedAt: '2026-07-03T10:00:02.000Z' });
+
+    const orphans = reg.reconcileOrphans();
+
+    expect(orphans.map((o) => o.drainId).sort()).toEqual(['running-2', 'running-3']);
+    for (const o of orphans) {
+      expect(o.status).toBe('aborted');
+      expect(typeof o.finishedAt).toBe('string');
+      expect(o.finishedAt.length).toBeGreaterThan(0);
+    }
+
+    // 'done' bleibt unangetastet.
+    expect(reg.getJob('done-1').status).toBe('done');
+    // Beide echten Orphans sind jetzt aborted (GET-Vertrag: 200 {status:'aborted'} statt 404/running).
+    expect(reg.getJob('running-2')).toEqual({ status: 'aborted' });
+    expect(reg.getJob('running-3')).toEqual({ status: 'aborted' });
+
+    // Persistiert (fire-and-forget) — eine frische Instanz auf demselben Store
+    // liest denselben Zustand, sobald das reale Schreiben (mehrere echte I/O-
+    // awaits: mkdir/writeFile/chmod/rename) durchgelaufen ist.
+    await waitForPersistedStatus('running-2', 'aborted');
+    const reg2 = new DrainJobRegistry();
+    expect(reg2.getJob('running-2')).toEqual({ status: 'aborted' });
+    expect(reg2.getJob('running-3')).toEqual({ status: 'aborted' });
+  });
+
+  it('reconcileOrphans() ist idempotent — zweiter Aufruf lässt bereits-aborted Einträge unangetastet und liefert []', async () => {
+    const reg = new DrainJobRegistry();
+    await reg.register('d1', { project: 'proj-a', trigger: 'night', startedAt: '2026-07-03T10:00:00.000Z' });
+
+    const first = reg.reconcileOrphans();
+    expect(first).toHaveLength(1);
+    expect(first[0].finishedAt).toEqual(expect.any(String));
+
+    const second = reg.reconcileOrphans();
+    expect(second).toEqual([]); // idempotent: bereits-aborted Eintrag wird nicht erneut zurückgeliefert
+    expect(reg.getJob('d1').status).toBe('aborted');
+  });
+
+  it('reconcileOrphans() ohne running-Einträge liefert [] und schreibt nicht erneut', async () => {
+    const reg = new DrainJobRegistry();
+    await reg.register('d1', { project: 'proj-a', trigger: 'manual', startedAt: '2026-07-03T10:00:00.000Z' });
+    await reg.markDone('d1', { reason: 'x' });
+
+    const orphans = reg.reconcileOrphans();
+    expect(orphans).toEqual([]);
+    expect(reg.getJob('d1').status).toBe('done');
+  });
+
+  it('reconcileOrphans() über einen simulierten Neustart: zweite Instanz markiert den running-Eintrag der ersten', async () => {
+    const reg1 = new DrainJobRegistry();
+    await reg1.register('d1', { project: 'proj-a', trigger: 'night', startedAt: '2026-07-03T10:00:00.000Z' });
+
+    // Simuliert Server-Neustart: frische Instanz liest die persistierte Datei.
+    const reg2 = new DrainJobRegistry();
+    expect(reg2.getJob('d1')).toEqual({ status: 'running' });
+
+    const orphans = reg2.reconcileOrphans();
+    expect(orphans).toHaveLength(1);
+    expect(orphans[0].drainId).toBe('d1');
+    expect(reg2.getJob('d1')).toEqual({ status: 'aborted' });
+  });
 });
+
+/**
+ * Pollt die persistierte Datei, bis der übergebene `drainId`-Eintrag den
+ * erwarteten Status trägt (oder ein Timeout erreicht ist) — nötig, weil
+ * `reconcileOrphans()` das Schreiben fire-and-forget im Hintergrund anstößt
+ * (mehrere echte I/O-`await`s: mkdir/writeFile/chmod/rename), nicht synchron.
+ */
+async function waitForPersistedStatus(drainId, expectedStatus, timeoutMs = 2000) {
+  const filePath = resolveDrainJobsFilePath();
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      const raw = await readFile(filePath, 'utf8');
+      const parsed = JSON.parse(raw);
+      const entry = (parsed.jobs ?? []).find((j) => j.drainId === drainId);
+      if (entry?.status === expectedStatus) return;
+    } catch {
+      // Datei evtl. gerade mitten im tmp+rename — einfach weiter pollen.
+    }
+    if (Date.now() > deadline) {
+      throw new Error(`waitForPersistedStatus: Timeout — ${drainId} nie auf ${expectedStatus} persistiert`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}

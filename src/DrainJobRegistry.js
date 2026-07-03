@@ -1,7 +1,8 @@
 /**
  * DrainJobRegistry — persistente Status-Registry für Headless-Drains
  * (docs/specs/headless-manual-drain.md AC4; datei-basiert persistiert seit
- * docs/specs/drain-restart-robustness.md AC1/AC2).
+ * docs/specs/drain-restart-robustness.md AC1/AC2; Nacht-Drain-Registrierung
+ * AC3 + Boot-Orphan-Markierung AC4 — S-282).
  *
  * Der manuelle „Board abarbeiten"-Knopf startet den Drain fire-and-forget
  * (`POST /api/projects/:slug/drain`, headless-manual-drain AC1) und erhält
@@ -37,11 +38,9 @@
  * absoluten Host-Pfade/Tokens/Roh-Fehlertexte. `result`/`error` sind bereits
  * secret-/pfad-frei (s.u.) und werden mitpersistiert, damit `getJob()` nach
  * einem Neustart weiterhin den vollständigen Status eines bereits terminalen
- * Drains liefert. `status:'aborted'` ist Teil des Enums (additiv für die
- * Boot-Orphan-Markierung einer Folge-Story, docs/specs/drain-restart-robustness.md
- * AC4/AC5 — hier NICHT implementiert, nur das Schema lässt den Wert bereits zu).
+ * Drains liefert.
  *
- * Status-Modell (headless-manual-drain AC4):
+ * Status-Modell (headless-manual-drain AC4; `aborted` seit drain-restart-robustness AC4):
  *   - `running` — Drain gestartet, `drainProject()`-Promise noch offen.
  *   - `done`    — `drainProject()` resolved (Drain sauber konvergiert/gestoppt);
  *                 `result` trägt eine kompakte, secret-/pfad-freie Zusammenfassung
@@ -50,8 +49,14 @@
  *   - `failed`  — `drainProject()` rejected; `error` ist ein GENERISCHER,
  *                 secret-/pfad-freier Text (die konkrete Fehlermeldung bleibt im
  *                 Server-Log, landet NIE in der Response).
- *   - `aborted` — verwaister Eintrag (Boot-Wiederanlauf-Folge-Story, hier nur
- *                 Schema-seitig vorgesehen, keine Erzeugung in dieser Story).
+ *   - `aborted` — verwaister Eintrag: war beim ersten Registry-Load nach einem
+ *                 Server-Neustart noch `running` (sein `claude -p`-Kindprozess
+ *                 starb mit dem alten Prozess) — `reconcileOrphans()` markiert
+ *                 solche Einträge einmalig beim Boot (drain-restart-robustness
+ *                 AC4, Aufruf in `server.js`). `GET .../drain/:drainId` liefert
+ *                 danach `200 {status:'aborted'}` statt `404` (Monitoring nicht
+ *                 mehr blind). Ein Boot-Wiederanlauf (Konsum dieser Orphans) ist
+ *                 NICHT Teil dieser Story (S-283).
  *
  * Vertragsformat `GET /api/projects/:slug/drain/:drainId` bleibt UNVERÄNDERT
  * (`200 {status,result?,error?}` | `404` | `400`, drain-restart-robustness AC2) —
@@ -75,7 +80,7 @@ export const DRAIN_FAILURE_MESSAGE = 'Drain-Lauf fehlgeschlagen';
 /** Erlaubter Trigger-Wert (drain-restart-robustness AC1). */
 export const TRIGGERS = Object.freeze(['night', 'manual']);
 
-/** Erlaubte Status-Werte (drain-restart-robustness AC1; 'aborted' additiv für Folge-Story). */
+/** Erlaubte Status-Werte (drain-restart-robustness AC1; 'aborted' seit AC4 aktiv erzeugt — s. `reconcileOrphans()`). */
 export const STATUSES = Object.freeze(['running', 'done', 'failed', 'aborted']);
 
 /** Erlaubter Projekt-Slug: nur Buchstaben, Ziffern, `-` und `_` (analog DrainReportStore). */
@@ -303,6 +308,45 @@ export class DrainJobRegistry {
     if (entry.result !== undefined) state.result = entry.result;
     if (entry.error !== undefined) state.error = entry.error;
     return state;
+  }
+
+  /**
+   * Markiert jeden noch-`running`-Eintrag als verwaist (`status:'aborted'`,
+   * `finishedAt`-Stempel) und persistiert das Ergebnis (drain-restart-robustness
+   * AC4). Gedacht für EINEN einmaligen Aufruf beim Server-Boot (Composition-Root,
+   * `server.js`), NACH dem Konstruieren dieser Instanz — unmittelbar nach dem
+   * Neustart kann kein Drain mehr wirklich laufen (sein `claude -p`-Kindprozess
+   * starb mit dem alten Prozess).
+   *
+   * IDEMPOTENT: nur Einträge mit `status:'running'` werden angefasst — ein
+   * zweiter Aufruf (oder ein zweiter Boot/Load) lässt bereits-terminale
+   * Einträge (`done`/`failed`/bereits `aborted`) unverändert und liefert dann
+   * eine leere Liste.
+   *
+   * Best-effort: das Persistieren läuft (wie bei `register`/`markDone`/
+   * `markFailed`) asynchron/fire-and-forget im Hintergrund über dieselbe
+   * Serialisierungs-Kette — ein Schreibfehler ist non-fatal und wird hier
+   * nicht geworfen (der Boot darf nie crashen).
+   *
+   * @returns {DrainJobEntry[]}  Kopien der gerade als verwaist markierten
+   *   Einträge (für den Boot-Wiederanlauf einer Folge-Story — hier NICHT
+   *   konsumiert, drain-restart-robustness AC5+).
+   */
+  reconcileOrphans() {
+    /** @type {DrainJobEntry[]} */
+    const orphaned = [];
+    const finishedAt = new Date().toISOString();
+    for (const [drainId, entry] of this.#jobs) {
+      if (entry.status !== 'running') continue;
+      const updated = { ...entry, status: 'aborted', finishedAt };
+      this.#jobs.set(drainId, updated);
+      orphaned.push({ ...updated });
+    }
+    if (orphaned.length > 0) {
+      const p = this.#persist();
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    }
+    return orphaned;
   }
 
   /**

@@ -1,7 +1,24 @@
 /**
  * NightWatchScheduler — Nachtfenster-Scheduler für den Taktgeber/Nachtwächter
  * (docs/specs/taktgeber-nachtwaechter.md AC9, AC10, AC11; erweitert um
- * docs/specs/headless-parallel-drain.md AC7, AC8, AC9, AC11, AC12, S-213).
+ * docs/specs/headless-parallel-drain.md AC7, AC8, AC9, AC11, AC12, S-213;
+ * Registrierung in der geteilten persistenten Drain-Job-Registry —
+ * docs/specs/drain-restart-robustness.md AC3, S-282).
+ *
+ * Nacht-Drain-Registrierung (drain-restart-robustness AC3, S-282):
+ *   `#startDrain` registriert jeden in-flight Nacht-Drain ZUSÄTZLICH in der
+ *   geteilten, datei-persistierten `DrainJobRegistry` (`trigger:'night'`, eine
+ *   frisch generierte `drainId`, Projekt-Slug — kein absoluter Pfad) und
+ *   markiert ihn beim Abschluss terminal (`markDone`/`markFailed`). Das
+ *   bestehende `#activeDrains`-Concurrency-Tracking bleibt davon vollständig
+ *   UNVERÄNDERT — rein additive Erfassung, damit ein neugestarteter/
+ *   abgestürzter Nacht-Drain nach einem Server-Neustart einen wiederauffindbaren
+ *   `running`-Eintrag hinterlässt (statt still verloren zu gehen, s. Vorfall
+ *   2026-07-02 in der Spec-Einleitung). Optional/best-effort — ohne injizierte
+ *   `drainJobRegistry` läuft der Scheduler unverändert (No-op, Degradation);
+ *   ein Registrierungs-/Markierungs-Fehler crasht den Scheduler NIE (analog
+ *   `#recordNightReport`). Ohne gültigen Projekt-Slug wird NICHT registriert
+ *   (kein leerer/ungültiger Slug in der Persistenz).
  *
  * Fügt die bereits gebauten Bausteine (ProjectDrain S-192, ProjectJobLock
  * S-190, TokenLimitWatcher S-193, TickerSettingsStore S-194) zu einem
@@ -138,6 +155,7 @@
  * @module NightWatchScheduler
  */
 
+import { randomUUID } from 'node:crypto';
 import { getZonedParts, zonedWallTimeToUtc, addCalendarDays } from './TokenLimitWatcher.js';
 
 /** Default Poll-Intervall (Minuten) — mirrors TickerSettingsStore-Default, falls Settings nicht lesbar sind. */
@@ -312,6 +330,14 @@ export function selectCandidateProjects(index, projectsSetting) {
  *   (`notifyDrainDone({ slug, result })`, `slug` = der bereits abgeleitete
  *   Projekt-Slug). `notifyDrainDone` wirft selbst nie (best-effort,
  *   drain-done-notification AC4/AC5/AC7); ohne ihn läuft der Scheduler unverändert.
+ * @param {{ register: Function, markDone: Function, markFailed: Function }} [deps.drainJobRegistry]
+ *   Geteilte, datei-persistierte Drain-Job-Registry (drain-restart-robustness AC1–AC3,
+ *   `DrainJobRegistry`, GETEILTE Instanz mit dem manuellen `projectDrainRouter` —
+ *   kein zweiter Config-/Datei-Pfad). Optional — bei jedem gestarteten Nacht-Drain
+ *   wird best-effort GENAU EIN `register(drainId,{project,trigger:'night',startedAt})`
+ *   aufgerufen (neue `drainId` je Drain), bei Abschluss `markDone`/`markFailed`
+ *   mit derselben `drainId`. Ohne ihn läuft der Scheduler unverändert (No-op,
+ *   Degradation); ein Registry-Fehler crasht den Scheduler NIE.
  * @param {string|null} [deps.identity]  auslösende Identität (Audit + ProjectDrain-Weiterreichung).
  * @param {() => number} [deps.now]  injizierbare Uhr (ms epoch), Default `Date.now`.
  * @param {(ms: number) => Promise<void>} [deps.sleepFn]  injizierbares Sleep (für `waitForReset`), Default echtes `setTimeout`.
@@ -330,6 +356,7 @@ export class NightWatchScheduler {
   #drainReportStore;
   #autoRetroTrigger;
   #drainNotifier;
+  #drainJobRegistry;
   #identity;
   #now;
   #sleepFn;
@@ -363,6 +390,7 @@ export class NightWatchScheduler {
     drainReportStore,
     autoRetroTrigger,
     drainNotifier,
+    drainJobRegistry,
     identity = null,
     now,
     sleepFn,
@@ -380,6 +408,7 @@ export class NightWatchScheduler {
     this.#drainReportStore = drainReportStore ?? null;
     this.#autoRetroTrigger = autoRetroTrigger ?? null;
     this.#drainNotifier = drainNotifier ?? null;
+    this.#drainJobRegistry = drainJobRegistry ?? null;
     this.#identity = identity;
     this.#now = now ?? (() => Date.now());
     this.#sleepFn = sleepFn ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -599,6 +628,10 @@ export class NightWatchScheduler {
     // drain-completion-report AC6: Startzeitpunkt für den Bericht erfassen
     // (injizierbare Uhr, testbar). Nur ein Zeitstempel — kein Secret/Pfad.
     const startedAt = new Date(this.#now()).toISOString();
+    // drain-restart-robustness AC3: Nacht-Drain zusätzlich in der geteilten
+    // persistenten Registry führen (best-effort, additiv — #activeDrains bleibt
+    // unverändert die maßgebliche Concurrency-Buchführung dieser Klasse).
+    const drainId = this.#registerNightDrain(projectSlug, startedAt);
     const promise = this.#projectDrain
       .drainProject(projectPath, { identity: this.#identity })
       // AC6: das (erfolgreiche wie fehlgeschlagene) Drain-Ergebnis wird ERFASST
@@ -609,6 +642,7 @@ export class NightWatchScheduler {
       // schluckt einen etwaigen Fehler der Bericht-Erfassung selbst.
       .then(
         (result) => {
+          this.#markNightDrainDone(drainId, result ?? {});
           this.#recordNightReport(projectSlug, result ?? {}, startedAt);
           // retro-auto-trigger AC4/AC6: nach dem abgeschlossenen Nacht-Drain den
           // Auto-Retro-Check best-effort/fire-and-forget anstoßen (isRetroDue →
@@ -621,6 +655,7 @@ export class NightWatchScheduler {
           this.#notifyDrainDone(projectSlug, result ?? {});
         },
         () => {
+          this.#markNightDrainFailed(drainId);
           this.#recordNightReport(projectSlug, { reason: 'drain-failed', flowRuns: 0, completed: [], blocked: [] }, startedAt);
           // Fehlgeschlagener Drain: flowRuns:0 → isRetroDue == false (kein Enqueue).
           // Der Aufruf bleibt dennoch symmetrisch (AC4: „nach JEDEM Drain").
@@ -634,6 +669,67 @@ export class NightWatchScheduler {
       .catch(() => null)
       .finally(() => this.#activeDrains.delete(projectPath));
     this.#activeDrains.set(projectPath, promise);
+  }
+
+  /**
+   * Registriert den in-flight Nacht-Drain best-effort in der geteilten
+   * persistenten `DrainJobRegistry` (drain-restart-robustness AC3). No-op ohne
+   * injizierte Registry oder ohne gültigen Projekt-Slug (analog
+   * `#recordNightReport`s Slug-Guard — kein leerer/ungültiger Slug in der
+   * Persistenz). Ein Registrierungsfehler crasht den Scheduler NIE.
+   *
+   * @param {string|null} projectSlug
+   * @param {string} startedAt  ISO-8601
+   * @returns {string|null}  die generierte `drainId`, oder `null` wenn NICHT
+   *   registriert wurde (kein Store injiziert / kein gültiger Slug / Fehler).
+   */
+  #registerNightDrain(projectSlug, startedAt) {
+    if (!this.#drainJobRegistry || typeof this.#drainJobRegistry.register !== 'function') return null;
+    if (typeof projectSlug !== 'string' || projectSlug === '') return null;
+    try {
+      const drainId = randomUUID();
+      const p = this.#drainJobRegistry.register(drainId, { project: projectSlug, trigger: 'night', startedAt });
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+      return drainId;
+    } catch {
+      // best-effort — die Registrierung darf den Scheduler nie crashen.
+      return null;
+    }
+  }
+
+  /**
+   * Markiert den Nacht-Drain-Registry-Eintrag terminal als `done` (drain-restart-
+   * robustness AC3). No-op ohne `drainId` (nicht registriert) oder ohne Registry.
+   * Ein Markierungsfehler crasht den Scheduler NIE.
+   *
+   * @param {string|null} drainId
+   * @param {object} result
+   */
+  #markNightDrainDone(drainId, result) {
+    if (!drainId || !this.#drainJobRegistry || typeof this.#drainJobRegistry.markDone !== 'function') return;
+    try {
+      const p = this.#drainJobRegistry.markDone(drainId, result ?? {});
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    } catch {
+      // best-effort — die Markierung darf den Scheduler nie crashen.
+    }
+  }
+
+  /**
+   * Markiert den Nacht-Drain-Registry-Eintrag terminal als `failed` (drain-restart-
+   * robustness AC3). No-op ohne `drainId` (nicht registriert) oder ohne Registry.
+   * Ein Markierungsfehler crasht den Scheduler NIE.
+   *
+   * @param {string|null} drainId
+   */
+  #markNightDrainFailed(drainId) {
+    if (!drainId || !this.#drainJobRegistry || typeof this.#drainJobRegistry.markFailed !== 'function') return;
+    try {
+      const p = this.#drainJobRegistry.markFailed(drainId);
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    } catch {
+      // best-effort — die Markierung darf den Scheduler nie crashen.
+    }
   }
 
   /**

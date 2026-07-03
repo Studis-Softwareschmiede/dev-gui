@@ -224,3 +224,6 @@ Wenn eine Provision-Route Audit-First verwendet UND die Spec „Hash im Audit-Ei
 ## 2026-06-07 — WS-Spy-Claim im Header braucht echten WS-Spy-Test
 Wenn ein Test-Datei-Header "no WS call" als abgedeckt deklariert, muss ein `globalThis.WebSocket`-Spy-Test existieren — auch wenn die Komponente trivial ist und offensichtlich keinen WS-Aufruf macht. Die Regel (`coder.md 2026-05-27: Test-Header-Claim muss alle beworbenen Fälle abdecken`) gilt unabhängig von der Trivialitat der Komponente. Erst wenn der Test existiert, ist der Claim belegt. Ohne Test ist es eine Important-Finding.
 
+
+## 2026-07-03 — Covers-Header „s. test/X.test.js“-Verweis bei jeder AC4/AC-Erweiterung tatsächlich im Ziel-File verifizieren (nicht nur im Quell-File)
+Ein Test-Header-Covers-Block, der auf eine HTTP-/Router-Ebenen-Verifikation in einer ANDEREN Testdatei verweist (z.B. „HTTP-Ebene: 200 {status:'aborted'} statt 404, s. test/projectDrainRouter.test.js"), muss per `grep` GEGENGEPRÜFT werden — der Verweis kann stale sein (Ziel-Datei im Diff gar nicht angefasst). *[seen-in: S-282, drain-restart-robustness AC4; promoted: 2026-07-03]*
