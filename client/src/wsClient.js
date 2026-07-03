@@ -12,6 +12,12 @@
  * Server message protocol (consumed):
  *   { type: "output", data: string }
  *   { type: "state",  state: string }
+ *   { type: "error",  errorClass: string, reason: string }  (vps-ssh-terminal AC4/AC9)
+ *
+ * Optional `openPayload` (vps-ssh-terminal AC2/AC5): if provided, sent as the
+ * FIRST message on the socket as soon as it reaches OPEN — before any other
+ * traffic (e.g. the resize event Terminal.jsx sends on 'connected' status).
+ * `/ws/terminal` (Claude-Terminal) never passes this — behavior unchanged there.
  *
  * Security: no secrets baked in; WS URL derived from window.location (or
  * injected via constructor for testing). Input data is stringified — no
@@ -53,15 +59,22 @@ export class TerminalConnection {
   /** @type {Set<(msg: object) => void>} */
   #messageListeners = new Set();
 
+  /** @type {object|null} sent verbatim (JSON-stringified) as the first message on open. */
+  #openPayload;
+
   /**
    * @param {string} url  WS URL, e.g. 'ws://localhost:8080/ws/terminal'
    *                      or relative path '/ws/terminal' (will be resolved).
-   * @param {{ WebSocket?: typeof WebSocket }} [opts]  Injection point for tests.
+   * @param {{ WebSocket?: typeof WebSocket, openPayload?: object }} [opts]
+   *   `WebSocket` — injection point for tests.
+   *   `openPayload` (vps-ssh-terminal AC2/AC5) — optional handshake object sent as the
+   *   first message once the socket opens (e.g. `{type:"open",provider,serverId,user}`).
    */
   constructor(url, opts = {}) {
     this.#url = url;
     // Allow injecting a fake WebSocket class for unit tests
     this._WS = opts.WebSocket ?? globalThis.WebSocket;
+    this.#openPayload = opts.openPayload ?? null;
   }
 
   // ── Public API ──────────────────────────────────────────────────────────
@@ -148,6 +161,12 @@ export class TerminalConnection {
 
     ws.onopen = () => {
       this.#retryCount = 0;
+      // AC2/AC5 (vps-ssh-terminal): the open-handshake MUST be the very first message on
+      // the wire — sent before the status flips to CONNECTED (which triggers Terminal.jsx's
+      // own onStatus → sendResize call).
+      if (this.#openPayload) {
+        ws.send(JSON.stringify(this.#openPayload));
+      }
       this.#setStatus(WS_STATUS.CONNECTED);
     };
 

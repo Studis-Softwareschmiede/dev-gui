@@ -44,6 +44,22 @@
  *   AC6 — Managed-Remove: type-to-confirm (Hostname); voller Undeploy.
  *   AC7 — Unmanaged-Remove: type-to-confirm (ContainerId); nur docker rm.
  *
+ * Implements: vps-ssh-terminal AC1–AC4 (Frontend, S-264 — Backend S-262/S-263 gelandet)
+ *   AC1 — Jede VPS-Karte zeigt zwei klein übereinander angeordnete, beschriftete
+ *          Buttons „root"/„alex" (aria-label je Rolle), zusätzlich zu den bestehenden Aktionen.
+ *   AC2 — Klick öffnet unterhalb GENAU dieser Karte ein Terminal-Fenster (Terminal.jsx
+ *          wiederverwendet mit überschriebener WS-URL `/ws/vps-terminal` + `openPayload`
+ *          `{type:"open",provider,serverId,user}`, erste Nachricht); zweiter Klick auf
+ *          denselben Button (oder Schließen) beendet die Sitzung.
+ *   AC3 — Verbindungs-Status als Label+Icon (Terminal.jsx, unverändert); „Schließen"-Knopf;
+ *          mehrere Karten dürfen gleichzeitig je ein eigenes Terminal offen haben (jede
+ *          Zeile hat unabhängigen State + eine eigene WS) — das Claude-Terminal-Pane
+ *          bleibt unberührt (separater WS-Endpunkt/Boundary).
+ *   AC4 — `{type:"error",errorClass,reason}` → geheimnisfreie Meldung IN diesem Fenster
+ *          (Terminal.jsx schreibt sie in die Terminal-Ausgabe); 403 beim WS-Upgrade →
+ *          „Keine Berechtigung"-Meldung ohne Crash (Terminal.jsx, einmalig); übrige
+ *          Kartenliste bleibt unberührt (Fehler ist auf die jeweilige Zeile beschränkt).
+ *
  * Security (Floor):
  *   - Nur Label-Referenzen werden an das Backend gesendet (sshKeyAssignment),
  *     niemals rohe Key-Material-Strings vom Client.
@@ -60,6 +76,26 @@
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { Terminal } from './Terminal.jsx';
+
+/**
+ * Build a WS URL from a relative path such as '/ws/vps-terminal'. Handles http→ws
+ * and https→wss. Intentionally a local copy of Terminal.jsx's identical private
+ * helper (not imported) — several test files fully replace `../Terminal.jsx` via
+ * `jest.unstable_mockModule(..., () => ({ Terminal: () => null }))`; keeping
+ * Terminal.jsx's export surface unchanged avoids breaking those mocks (vps-ssh-terminal AC2).
+ *
+ * Keep-in-sync note: this is a byte-for-byte duplicate of the private `resolveWsUrl`
+ * in `client/src/Terminal.jsx`. Changes the logic there (e.g. protocol/host resolution)
+ * must be mirrored here manually — there is no shared import between the two on purpose
+ * (see note above).
+ * @param {string} path
+ * @returns {string}
+ */
+function resolveWsUrl(path) {
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${proto}//${window.location.host}${path}`;
+}
 
 // ── API-Helfer ────────────────────────────────────────────────────────────────
 
@@ -1392,6 +1428,49 @@ function VpsDeleteConfirm({ vpsName, onConfirm, onCancel, pending }) {
   );
 }
 
+// ── VpsTerminalPanel (vps-ssh-terminal AC2/AC3/AC4) ────────────────────────────
+
+/**
+ * SSH-Terminal-Fenster unterhalb einer VPS-Karte — wiederverwendet `Terminal.jsx`
+ * (xterm.js + WS-Bridge) mit überschriebener WS-URL `/ws/vps-terminal` und einem
+ * `openPayload`, das als erste Nachricht den Open-Handshake sendet
+ * (`{type:"open",provider,serverId,user}`, vps-ssh-terminal Verträge).
+ *
+ * Verhalten/Status/Fehler-Anzeige kommen unverändert aus `Terminal.jsx` (AC3/AC4) —
+ * diese Komponente liefert nur den Rahmen (Titel + „Schließen"-Knopf, AC2/AC3).
+ *
+ * @param {{
+ *   provider: string,
+ *   serverId: string,
+ *   user: 'root'|'alex',
+ *   machineName: string,
+ *   onClose: () => void,
+ * }} props
+ */
+function VpsTerminalPanel({ provider, serverId, user, machineName, onClose }) {
+  const wsUrl = resolveWsUrl('/ws/vps-terminal');
+  const openPayload = { type: 'open', provider, serverId, user };
+
+  return (
+    <div style={sshTerminalStyles.panel} aria-label={`SSH-Terminal (${user}) — ${machineName}`}>
+      <div style={sshTerminalStyles.header}>
+        <span style={sshTerminalStyles.title}>SSH-Terminal: {machineName} ({user})</span>
+        <button
+          type="button"
+          onClick={onClose}
+          style={sshTerminalStyles.btnClose}
+          aria-label={`SSH-Terminal (${user}) für ${machineName} schließen`}
+        >
+          Schließen
+        </button>
+      </div>
+      <div style={sshTerminalStyles.terminalWrap}>
+        <Terminal wsUrl={wsUrl} openPayload={openPayload} />
+      </div>
+    </div>
+  );
+}
+
 /**
  * Eine einzelne Maschinen-Zeile mit Start/Stop/Löschen/Container-Buttons (AC6/AC8–AC10, vps-container-overview AC1).
  *
@@ -1409,8 +1488,19 @@ function VpsMachineRow({ machine: m, providerCapabilities, onAction, onDelete })
   const [deletePending, setDeletePending] = useState(false);
   // AC1 (vps-container-overview): Container-Übersicht ein-/ausklappen
   const [showContainerOverview, setShowContainerOverview] = useState(false);
+  // vps-ssh-terminal AC2/AC3: welches SSH-Terminal ist unterhalb dieser Karte offen
+  // (null | 'root' | 'alex') — je Zeile eigenständiger State (AC3: mehrere Karten
+  // dürfen gleichzeitig je ein eigenes Terminal offen haben).
+  const [openSshUser, setOpenSshUser] = useState(null);
 
   const caps = providerCapabilities ?? { start: true, stop: true, delete: false };
+
+  // vps-ssh-terminal AC2: Klick auf denselben Button schließt (zweiter Klick);
+  // Klick auf den jeweils anderen Button wechselt die Sitzung (schließt die alte,
+  // öffnet eine neue — der `key`-Wechsel unten erzwingt einen frischen Terminal-Mount).
+  const toggleSshTerminal = useCallback((user) => {
+    setOpenSshUser((prev) => (prev === user ? null : user));
+  }, []);
 
   const startDisabled = !caps.start || actionState === 'pending' || deletePending;
   const stopDisabled = !caps.stop || actionState === 'pending' || deletePending;
@@ -1550,6 +1640,32 @@ function VpsMachineRow({ machine: m, providerCapabilities, onAction, onDelete })
         </button>
       </div>
 
+      {/* vps-ssh-terminal AC1: root/alex-Buttons — klein übereinander angeordnet */}
+      <div style={listStyles.sshButtons}>
+        <button
+          type="button"
+          style={openSshUser === 'root'
+            ? { ...listStyles.sshBtn, ...listStyles.sshBtnActive }
+            : listStyles.sshBtn}
+          aria-label={`SSH-Terminal als root für ${m.name} ${openSshUser === 'root' ? 'schließen' : 'öffnen'}`}
+          aria-pressed={openSshUser === 'root'}
+          onClick={() => toggleSshTerminal('root')}
+        >
+          root
+        </button>
+        <button
+          type="button"
+          style={openSshUser === 'alex'
+            ? { ...listStyles.sshBtn, ...listStyles.sshBtnActive }
+            : listStyles.sshBtn}
+          aria-label={`SSH-Terminal als alex für ${m.name} ${openSshUser === 'alex' ? 'schließen' : 'öffnen'}`}
+          aria-pressed={openSshUser === 'alex'}
+          onClick={() => toggleSshTerminal('alex')}
+        >
+          alex
+        </button>
+      </div>
+
       {/* type-to-confirm-Dialog (AC9, vps-delete) */}
       {showDeleteConfirm && (
         <div style={listStyles.deleteConfirmContainer}>
@@ -1589,6 +1705,26 @@ function VpsMachineRow({ machine: m, providerCapabilities, onAction, onDelete })
             serverId={m.serverId}
             machineName={m.name}
             onClose={() => setShowContainerOverview(false)}
+          />
+        </div>
+      )}
+
+      {/* vps-ssh-terminal AC2/AC3: SSH-Terminal-Fenster — unterhalb GENAU dieser Karte.
+          `key` enthält den User, damit ein Wechsel root↔alex einen frischen Terminal.jsx-
+          Mount erzwingt (neue WS-Verbindung + neuer Open-Handshake, statt die alte
+          Sitzung weiterzuverwenden). */}
+      {openSshUser && (
+        <div
+          style={listStyles.sshTerminalWrapper}
+          id={`ssh-terminal-${m.provider}-${m.serverId}`.replace(/[^a-zA-Z0-9-]/g, '-')}
+        >
+          <VpsTerminalPanel
+            key={`${m.provider}-${m.serverId}-${openSshUser}`}
+            provider={m.provider}
+            serverId={m.serverId}
+            user={openSshUser}
+            machineName={m.name}
+            onClose={() => setOpenSshUser(null)}
           />
         </div>
       )}
@@ -2239,6 +2375,78 @@ const listStyles = {
   containerOverviewWrapper: {
     width: '100%',
     marginTop: 8,
+  },
+  // vps-ssh-terminal AC1: root/alex-Buttons — klein, übereinander (Spalte)
+  sshButtons: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 4,
+  },
+  sshBtn: {
+    // "klein" (Spec AC1) = kompakte Breite/Schrift, gestapelt — Touch-Target-Höhe
+    // bleibt bei 44px (NFR A11y, WCAG 2.1 AA, analog übrigen Aktions-Buttons dieser Datei).
+    padding: '2px 10px',
+    background: '#141414',
+    color: '#a5b4fc',
+    border: '1px solid #3730a3',
+    borderRadius: 4,
+    fontSize: 11,
+    cursor: 'pointer',
+    minHeight: 44,
+    minWidth: 44,
+  },
+  sshBtnActive: {
+    background: '#312e81',
+    color: '#e0e7ff',
+    border: '1px solid #4f46e5',
+  },
+  // vps-ssh-terminal AC2/AC3: SSH-Terminal-Fenster-Wrapper — unterhalb der Karte
+  sshTerminalWrapper: {
+    width: '100%',
+    marginTop: 8,
+  },
+};
+
+// ── SSH-Terminal-Styles (vps-ssh-terminal AC2/AC3) ──────────────────────────────
+
+const sshTerminalStyles = {
+  panel: {
+    background: '#0d1117',
+    border: '1px solid #3730a3',
+    borderRadius: 6,
+    marginTop: 2,
+    width: '100%',
+    height: 360,
+    display: 'flex',
+    flexDirection: 'column',
+    overflow: 'hidden',
+  },
+  header: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: '6px 12px',
+    background: '#111827',
+    borderBottom: '1px solid #3730a3',
+  },
+  title: {
+    fontSize: 13,
+    color: '#c7d2fe',
+    fontWeight: 600,
+  },
+  btnClose: {
+    padding: '4px 10px',
+    background: '#1f1f1f',
+    color: '#e5e7eb',
+    border: '1px solid #3a3a3a',
+    borderRadius: 4,
+    fontSize: 12,
+    cursor: 'pointer',
+    minHeight: 44,
+  },
+  terminalWrap: {
+    flex: 1,
+    minHeight: 0,
   },
 };
 

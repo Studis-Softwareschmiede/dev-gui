@@ -6,6 +6,12 @@
  *        socket close → disconnected → reconnect → connected;
  *        destroy() prevents reconnect.
  *
+ * Covers (vps-ssh-terminal AC2/AC5):
+ *   openPayload — sent verbatim as the FIRST message on open, before any other
+ *   traffic (e.g. a resize call issued right after by a caller's own onStatus
+ *   listener). Absent by default — `/ws/terminal` (Claude-Terminal) callers that
+ *   never pass `openPayload` see no behavior change (regression guard).
+ *
  * @jest-environment jsdom
  */
 
@@ -271,6 +277,66 @@ describe('TerminalConnection — destroy() prevents further reconnects', () => {
     jest.advanceTimersByTime(30_000);
 
     expect(FakeWebSocket.instances.length).toBe(instancesBefore);
+  });
+});
+
+describe('TerminalConnection — openPayload (vps-ssh-terminal AC2/AC5)', () => {
+  it('sends openPayload as the very first message on open', () => {
+    const conn = new TerminalConnection('ws://localhost:8080/ws/vps-terminal', {
+      WebSocket: FakeWebSocket,
+      openPayload: { type: 'open', provider: 'hetzner', serverId: '1', user: 'root' },
+    });
+    conn.connect();
+    FakeWebSocket.last.simulateOpen();
+
+    expect(FakeWebSocket.last.sent).toHaveLength(1);
+    expect(JSON.parse(FakeWebSocket.last.sent[0])).toEqual({
+      type: 'open', provider: 'hetzner', serverId: '1', user: 'root',
+    });
+  });
+
+  it('sends openPayload before a resize triggered by a status listener', () => {
+    const conn = new TerminalConnection('ws://localhost:8080/ws/vps-terminal', {
+      WebSocket: FakeWebSocket,
+      openPayload: { type: 'open', provider: 'hetzner', serverId: '1', user: 'alex' },
+    });
+    // Mimic Terminal.jsx: sendResize() on the CONNECTED status transition.
+    conn.onStatus((s) => {
+      if (s === WS_STATUS.CONNECTED) conn.sendResize(80, 24);
+    });
+    conn.connect();
+    FakeWebSocket.last.simulateOpen();
+
+    expect(FakeWebSocket.last.sent).toHaveLength(2);
+    expect(JSON.parse(FakeWebSocket.last.sent[0])).toEqual({
+      type: 'open', provider: 'hetzner', serverId: '1', user: 'alex',
+    });
+    expect(JSON.parse(FakeWebSocket.last.sent[1])).toEqual({ type: 'resize', cols: 80, rows: 24 });
+  });
+
+  it('does not send anything extra when openPayload is absent (Claude-Terminal regression guard)', () => {
+    const conn = makeConn(); // no openPayload
+    conn.connect();
+    FakeWebSocket.last.simulateOpen();
+
+    expect(FakeWebSocket.last.sent).toHaveLength(0);
+  });
+
+  it('sends openPayload again after a reconnect (each new socket gets its own open-handshake)', () => {
+    const conn = new TerminalConnection('ws://localhost:8080/ws/vps-terminal', {
+      WebSocket: FakeWebSocket,
+      openPayload: { type: 'open', provider: 'hetzner', serverId: '1', user: 'root' },
+    });
+    conn.connect();
+    FakeWebSocket.last.simulateOpen();
+    FakeWebSocket.last.simulateClose();
+
+    jest.advanceTimersByTime(1000);
+    const ws2 = FakeWebSocket.last;
+    ws2.simulateOpen();
+
+    expect(ws2.sent).toHaveLength(1);
+    expect(JSON.parse(ws2.sent[0])).toEqual({ type: 'open', provider: 'hetzner', serverId: '1', user: 'root' });
   });
 });
 

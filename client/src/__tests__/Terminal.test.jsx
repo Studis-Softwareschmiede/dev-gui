@@ -7,6 +7,14 @@
  * All imports are dynamic (after mock declarations), required by
  * --experimental-vm-modules.
  *
+ * Covers (vps-ssh-terminal AC2/AC4 — reused, opt-in Terminal.jsx capabilities):
+ *   AC2 — `openPayload` prop is passed through verbatim to `TerminalConnection`.
+ *   AC4 — `{type:"error"}` messages are written into the terminal output; a
+ *          first-ever-disconnect (never reached CONNECTED) while `openPayload`
+ *          is set shows a "Keine Berechtigung" message exactly once (WS-upgrade
+ *          403 case, vps-ssh-terminal AC4) — absent for the default Claude-Terminal
+ *          usage (no `openPayload`), regression-guarded explicitly below.
+ *
  * @jest-environment jsdom
  */
 
@@ -19,6 +27,7 @@ let mockOnMessageFn = null;
 const mockConnectFn    = jest.fn();
 const mockDestroyFn    = jest.fn();
 const mockSendResizeFn = jest.fn();
+const mockTerminalConnectionCtor = jest.fn();
 
 jest.unstable_mockModule('../wsClient.js', () => ({
   WS_STATUS: {
@@ -26,14 +35,17 @@ jest.unstable_mockModule('../wsClient.js', () => ({
     CONNECTED:    'connected',
     DISCONNECTED: 'disconnected',
   },
-  TerminalConnection: jest.fn().mockImplementation(() => ({
-    onStatus:   (fn) => { mockOnStatusFn  = fn; return () => {}; },
-    onMessage:  (fn) => { mockOnMessageFn = fn; return () => {}; },
-    connect:    mockConnectFn,
-    send:       jest.fn(),
-    sendResize: mockSendResizeFn,
-    destroy:    mockDestroyFn,
-  })),
+  TerminalConnection: jest.fn().mockImplementation((url, opts) => {
+    mockTerminalConnectionCtor(url, opts);
+    return {
+      onStatus:   (fn) => { mockOnStatusFn  = fn; return () => {}; },
+      onMessage:  (fn) => { mockOnMessageFn = fn; return () => {}; },
+      connect:    mockConnectFn,
+      send:       jest.fn(),
+      sendResize: mockSendResizeFn,
+      destroy:    mockDestroyFn,
+    };
+  }),
 }));
 
 // Dynamic imports AFTER mock declarations (ESM VM-modules requirement)
@@ -50,6 +62,7 @@ beforeEach(() => {
   mockConnectFn.mockClear();
   mockDestroyFn.mockClear();
   mockSendResizeFn.mockClear();
+  mockTerminalConnectionCtor.mockClear();
   XTermStub._reset();
 });
 
@@ -161,5 +174,167 @@ describe('Terminal component — AC5 resize propagation', () => {
     act(() => { mockOnStatusFn('disconnected'); });
 
     expect(mockSendResizeFn).not.toHaveBeenCalled();
+  });
+});
+
+describe('Terminal component — openPayload (vps-ssh-terminal AC2)', () => {
+  it('passes openPayload through to TerminalConnection verbatim', () => {
+    const openPayload = { type: 'open', provider: 'hetzner', serverId: '1', user: 'root' };
+    render(React.createElement(Terminal, { wsUrl: 'ws://localhost:8080/ws/vps-terminal', openPayload }));
+
+    expect(mockTerminalConnectionCtor).toHaveBeenCalledWith(
+      'ws://localhost:8080/ws/vps-terminal',
+      expect.objectContaining({ openPayload }),
+    );
+  });
+
+  it('passes openPayload: undefined for the default (Claude-Terminal) usage', () => {
+    render(React.createElement(Terminal, { wsUrl: 'ws://localhost:8080/ws/terminal' }));
+
+    expect(mockTerminalConnectionCtor).toHaveBeenCalledWith(
+      'ws://localhost:8080/ws/terminal',
+      expect.objectContaining({ openPayload: undefined }),
+    );
+  });
+});
+
+describe('Terminal component — {type:"error"} messages (vps-ssh-terminal AC4)', () => {
+  it('writes a geheimnisfreie error message into the terminal output', () => {
+    render(React.createElement(Terminal, {
+      wsUrl: 'ws://localhost:8080/ws/vps-terminal',
+      openPayload: { type: 'open', provider: 'hetzner', serverId: '1', user: 'root' },
+    }));
+    const xterm = XTermStub._lastInstance;
+
+    act(() => {
+      mockOnMessageFn({ type: 'error', errorClass: 'auth-failed', reason: 'SSH-Authentifizierung fehlgeschlagen' });
+    });
+
+    expect(xterm.write).toHaveBeenCalledWith(expect.stringContaining('SSH-Authentifizierung fehlgeschlagen'));
+    expect(xterm.write).toHaveBeenCalledWith(expect.stringContaining('auth-failed'));
+  });
+
+  it('also renders the error text in a role="alert" element (WCAG AA — xterm canvas is not AT-accessible)', () => {
+    const { getByRole } = render(React.createElement(Terminal, {
+      wsUrl: 'ws://localhost:8080/ws/vps-terminal',
+      openPayload: { type: 'open', provider: 'hetzner', serverId: '1', user: 'root' },
+    }));
+
+    act(() => {
+      mockOnMessageFn({ type: 'error', errorClass: 'auth-failed', reason: 'SSH-Authentifizierung fehlgeschlagen' });
+    });
+
+    const alert = getByRole('alert');
+    expect(alert.textContent).toContain('SSH-Authentifizierung fehlgeschlagen');
+    expect(alert.style.display).not.toBe('none');
+  });
+
+  it('does not affect output-message handling', () => {
+    render(React.createElement(Terminal, {
+      wsUrl: 'ws://localhost:8080/ws/vps-terminal',
+      openPayload: { type: 'open', provider: 'hetzner', serverId: '1', user: 'root' },
+    }));
+    const xterm = XTermStub._lastInstance;
+
+    act(() => { mockOnMessageFn({ type: 'output', data: 'hello' }); });
+
+    expect(xterm.write).toHaveBeenCalledWith('hello');
+  });
+});
+
+describe('Terminal component — first-connect-never-succeeded ⇒ "Keine Berechtigung" (vps-ssh-terminal AC4, 403)', () => {
+  it('writes a "Keine Berechtigung" message once, when openPayload is set and the connection never reached connected', () => {
+    render(React.createElement(Terminal, {
+      wsUrl: 'ws://localhost:8080/ws/vps-terminal',
+      openPayload: { type: 'open', provider: 'hetzner', serverId: '1', user: 'root' },
+    }));
+    const xterm = XTermStub._lastInstance;
+
+    act(() => { mockOnStatusFn('disconnected'); }); // never was 'connected' before this
+
+    expect(xterm.write).toHaveBeenCalledWith(expect.stringContaining('Keine Berechtigung'));
+  });
+
+  it('also renders "Keine Berechtigung" in a role="alert" element (WCAG AA)', () => {
+    const { getByRole } = render(React.createElement(Terminal, {
+      wsUrl: 'ws://localhost:8080/ws/vps-terminal',
+      openPayload: { type: 'open', provider: 'hetzner', serverId: '1', user: 'root' },
+    }));
+
+    act(() => { mockOnStatusFn('disconnected'); });
+
+    const alert = getByRole('alert');
+    expect(alert.textContent).toContain('Keine Berechtigung');
+    expect(alert.style.display).not.toBe('none');
+  });
+
+  it('shows the message only once even across repeated retry-disconnects', () => {
+    render(React.createElement(Terminal, {
+      wsUrl: 'ws://localhost:8080/ws/vps-terminal',
+      openPayload: { type: 'open', provider: 'hetzner', serverId: '1', user: 'root' },
+    }));
+    const xterm = XTermStub._lastInstance;
+
+    act(() => { mockOnStatusFn('disconnected'); });
+    act(() => { mockOnStatusFn('connecting'); });
+    act(() => { mockOnStatusFn('disconnected'); });
+
+    const forbiddenWrites = xterm.write.mock.calls.filter(
+      (call) => typeof call[0] === 'string' && call[0].includes('Keine Berechtigung'),
+    );
+    expect(forbiddenWrites).toHaveLength(1);
+  });
+
+  it('does NOT show the message once the connection has already succeeded before disconnecting', () => {
+    render(React.createElement(Terminal, {
+      wsUrl: 'ws://localhost:8080/ws/vps-terminal',
+      openPayload: { type: 'open', provider: 'hetzner', serverId: '1', user: 'root' },
+    }));
+    const xterm = XTermStub._lastInstance;
+
+    act(() => { mockOnStatusFn('connected'); });
+    act(() => { mockOnStatusFn('disconnected'); }); // normal drop after a real session
+
+    const forbiddenWrites = xterm.write.mock.calls.filter(
+      (call) => typeof call[0] === 'string' && call[0].includes('Keine Berechtigung'),
+    );
+    expect(forbiddenWrites).toHaveLength(0);
+  });
+
+  it('does NOT show the message for the default Claude-Terminal usage (no openPayload) — regression guard', () => {
+    render(React.createElement(Terminal, { wsUrl: 'ws://localhost:8080/ws/terminal' }));
+    const xterm = XTermStub._lastInstance;
+
+    act(() => { mockOnStatusFn('disconnected'); });
+
+    const forbiddenWrites = xterm.write.mock.calls.filter(
+      (call) => typeof call[0] === 'string' && call[0].includes('Keine Berechtigung'),
+    );
+    expect(forbiddenWrites).toHaveLength(0);
+  });
+});
+
+describe('Terminal component — role="alert" element (WCAG AA, vps-ssh-terminal AC4) — regression guards', () => {
+  it('the alert element is present but empty/hidden by default (no error yet)', () => {
+    const { getByRole, queryByRole } = render(React.createElement(Terminal, {
+      wsUrl: 'ws://localhost:8080/ws/vps-terminal',
+      openPayload: { type: 'open', provider: 'hetzner', serverId: '1', user: 'root' },
+    }));
+
+    // testing-library excludes display:none elements from role queries — hidden by default
+    expect(queryByRole('alert')).toBeNull();
+    // ...but present in the DOM (via container fallback query, ignoring visibility)
+    act(() => { mockOnMessageFn({ type: 'error', errorClass: 'error', reason: 'x' }); });
+    expect(getByRole('alert')).toBeDefined();
+  });
+
+  it('stays empty/hidden for the default Claude-Terminal usage (no openPayload, no error ever sent)', () => {
+    const { queryByRole } = render(React.createElement(Terminal, { wsUrl: 'ws://localhost:8080/ws/terminal' }));
+
+    act(() => { mockOnStatusFn('connecting'); });
+    act(() => { mockOnStatusFn('disconnected'); }); // repeated backoff-retry disconnects too
+
+    // Claude-Terminal never sends {type:"error"}; the alert node stays hidden/empty
+    expect(queryByRole('alert')).toBeNull();
   });
 });
