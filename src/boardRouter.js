@@ -22,6 +22,8 @@
  *   POST /api/board/projects/:slug/ideas/:id/resolve → { storyId }  (explizite Auflösung, ideen-inbox AC6, S-200)
  *   POST /api/board/projects/:slug/archive-done      → { archivedFeatureCount, archivedStoryCount }
  *                                                      (erledigte Features archivieren, board-feature-archive AC4, S-232)
+ *   POST /api/board/projects/:slug/archive-done-stories → { archivedStoryCount }
+ *                                                      (erledigte Storys archivieren, board-storys-archivieren AC4, S-293)
  *
  * AC5 (story-detail-ansicht — Vorab-Schätzungs-Fallback):
  *   Wenn items.jsonl für die Story kein ep_est/tok_est liefert, fällt die Soll-Ist-Ansicht
@@ -99,6 +101,24 @@
  *          verwendet (nie als Pfad). Kein Secret in Ausgabe/Log; ungültige Eingaben
  *          werden sauber abgewiesen (kein Crash).
  *
+ * board-storys-archivieren (AC1, AC2, AC4, AC9 — erledigte Storys archivieren, S-293):
+ *   AC4 — POST /api/board/projects/:slug/archive-done-stories archiviert alle
+ *          aktuell archivierbaren Storys (AC1: `status` ∈ {Done, Verworfen} UND
+ *          nicht bereits `archived`) über `BoardWriter.archiveDoneStories()`
+ *          (einziger Schreibpfad, AC2/AC9) — Bereichs-Kacheln (Features) werden
+ *          NIE angetastet. Reihenfolge 1:1 wie POST .../archive-done: Slug-Format
+ *          (404) → Projekt-Auflösung gegen den In-Memory-Index (404) →
+ *          `ProjectJobLock.tryAcquire(repoPath)` (409 wenn belegt, geteilte
+ *          Lock-Instanz) → Audit-First (GENAU EIN Eintrag) →
+ *          `archiveDoneStories()` → 200 { archivedStoryCount } (0 ohne Fehler,
+ *          wenn nichts archivierbar). Das Lock wird nur kurz (Check+Schreiben)
+ *          gehalten und im finally wieder freigegeben.
+ *   AC9 — Einziger Schreibpfad bleibt `BoardWriter` (atomar, Pfad-/Slug-Sicherheit
+ *          per BOARD_ROOTS-Realpath-Schranke); der Router selbst schreibt nichts.
+ *          Slug wird gegen SLUG_RE geprüft und nur als Index-Lookup verwendet
+ *          (nie als Pfad). Kein Secret in Ausgabe/Log; ungültige Eingaben werden
+ *          sauber abgewiesen (kein Crash).
+ *
  * bereichs-modell (S-288, Lese-Teil — AC1, AC2, GET-Vertrag aus V6):
  *   GET /api/board/projects/:slug/areas → 200 { areas: [{ id, name, order,
  *   description, storyCount }] } sortiert nach `order` (Sortierung + Roll-up
@@ -158,6 +178,11 @@
  *     `BoardWriter.archiveDoneFeatures()` (atomar, BOARD_ROOTS-Realpath-Schranke).
  *     projectSlug läuft durch dieselbe SLUG_RE-Prüfung + In-Memory-Index-Auflösung
  *     wie die übrigen Routen (nie als Pfad). Kurzzeitiges ProjectJobLock (409).
+ *   - POST .../archive-done-stories: kein Request-Body; einziger Schreibpfad ist
+ *     `BoardWriter.archiveDoneStories()` (atomar, BOARD_ROOTS-Realpath-Schranke).
+ *     projectSlug läuft durch dieselbe SLUG_RE-Prüfung + In-Memory-Index-Auflösung
+ *     wie die übrigen Routen (nie als Pfad). Kurzzeitiges ProjectJobLock (409,
+ *     geteilt mit .../discuss/.../archive-done/.../areas[...]).
  *   - POST/PATCH/DELETE .../areas[...]: name/description/orderedIds werden
  *     ausschließlich über `AreaWriter.validateAreaName()`/`validateAreaDescription()`/
  *     `validateOrderedIds()` validiert/sanitisiert — kein Roh-Schreiben im
@@ -938,6 +963,91 @@ export function boardRouter({
       });
     } finally {
       // Lock nur kurz halten (Check+Schreiben) — analog .../discuss, kein Deadlock.
+      lock.release(repoPath);
+    }
+  });
+
+  /**
+   * POST /api/board/projects/:slug/archive-done-stories
+   *
+   * Archiviert alle aktuell archivierbaren Storys des Projekts (board-storys-
+   * archivieren V1/V4, S-293) über den einzigen Schreibpfad
+   * `BoardWriter.archiveDoneStories()`. Bereichs-Kacheln (Features) werden NIE
+   * angetastet — nur Story-YAMLs. Reihenfolge 1:1 wie POST .../archive-done:
+   * Slug-Format (404) → Projekt-Auflösung gegen den In-Memory-Index (404 wenn
+   * nicht unter BOARD_ROOTS) → ProjectJobLock kurz halten (409 wenn belegt) →
+   * Audit-First (GENAU EIN Eintrag, nach Slug-/Busy-Prüfung, vor dem Schreiben) →
+   * archiveDoneStories() → 200. Kein Request-Body.
+   *
+   * Response 200: { archivedStoryCount }  (0 wenn nichts archivierbar war — kein Fehler)
+   * Response 404: { error }  (Slug-Format ungültig ODER Projekt nicht unter BOARD_ROOTS)
+   * Response 409: { error }  (ProjectJobLock belegt — Taktgeber/Drain/andere Schreibaktion)
+   * Response 500: { error }  (Wiring fehlt / Audit-/Schreibfehler — kein Secret-Leak)
+   */
+  router.post('/api/board/projects/:slug/archive-done-stories', async (req, res) => {
+    const { slug } = req.params;
+
+    if (!slug || !SLUG_RE.test(slug)) {
+      return res.status(404).json({ error: 'Projekt nicht gefunden.' });
+    }
+
+    if (!boardWriter) {
+      console.error('[boardRouter] POST .../archive-done-stories: boardWriter nicht verdrahtet');
+      return res.status(500).json({ error: 'Storys konnten nicht archiviert werden.' });
+    }
+
+    // Slug nur gegen den In-Memory-Index auflösen (nie als Pfad, AC9) — ein Slug,
+    // der nicht (mehr) unter BOARD_ROOTS gescannt wurde, ist unbekannt → 404.
+    const projects = await boardAggregator.getIndex();
+    const project = projects.find((p) => p.slug === slug);
+    if (!project || project.error) {
+      return res.status(404).json({ error: 'Projekt nicht gefunden.' });
+    }
+
+    const repoPath = project.repo_path;
+
+    // Concurrency-Schutz (V4): ProjectJobLock kurz (Check+Schreiben) um repoPath
+    // halten — 409, wenn der Taktgeber/Drain oder eine andere Board-Schreibaktion
+    // (z.B. discuss/archive-done) es bereits hält. Dieselbe Lock-Instanz.
+    if (!lock.tryAcquire(repoPath)) {
+      return res.status(409).json({ error: 'Projekt wird gerade vom Taktgeber oder einer anderen Board-Aktion bearbeitet.' });
+    }
+
+    try {
+      // Audit-First (AC4 — GENAU EIN Eintrag je Aufruf, nach Slug-/Busy-Prüfung,
+      // VOR dem Schreiben): schlägt record() fehl, wird NICHT archiviert.
+      if (auditStore) {
+        try {
+          auditStore.record({
+            identity: _resolveIdentity(req.identity ?? null),
+            command: `board:archive-done-stories:${slug}`,
+          });
+        } catch (auditErr) {
+          console.error('[boardRouter] Audit-Write fehlgeschlagen (POST .../archive-done-stories):', auditErr.message);
+          return res.status(500).json({ error: 'Audit-Write fehlgeschlagen — Aktion abgebrochen' });
+        }
+      }
+
+      let result;
+      try {
+        result = await boardWriter.archiveDoneStories({ projectSlug: slug });
+      } catch (err) {
+        if (err instanceof BoardWriterError) {
+          if (err.errorClass === 'invalid-slug' || err.errorClass === 'project-not-found') {
+            return res.status(404).json({ error: 'Projekt nicht gefunden.' });
+          }
+          console.error('[boardRouter] archiveDoneStories fehlgeschlagen:', err.errorClass, err.message);
+          return res.status(500).json({ error: 'Storys konnten nicht archiviert werden.' });
+        }
+        console.error('[boardRouter] archiveDoneStories unerwarteter Fehler:', err.message);
+        return res.status(500).json({ error: 'Storys konnten nicht archiviert werden.' });
+      }
+
+      return res.status(200).json({
+        archivedStoryCount: result.archivedStoryCount,
+      });
+    } finally {
+      // Lock nur kurz halten (Check+Schreiben) — analog .../archive-done, kein Deadlock.
       lock.release(repoPath);
     }
   });

@@ -1,7 +1,8 @@
 id: S-293
 parent: F-062
-title: Story-Archiv (Backend) — BoardWriter.archiveDoneStories + Aggregator (Story-archived, Kacheln bleiben) + Endpoint + Abwärtskompat
-status: To Do
+title: Story-Archiv (Backend) — BoardWriter.archiveDoneStories + Aggregator (Story-archived,
+  Kacheln bleiben) + Endpoint + Abwärtskompat
+status: In Progress
 priority: P1
 spec: docs/specs/board-storys-archivieren.md
 implements:
@@ -24,10 +25,10 @@ estimate_note: 'estimator nicht dispatchbar (Subagent); Heuristik score 11 (6 AC
   4 Komponenten: BoardWriter/BoardAggregator/boardRouter/server.js + 1 label security)
   -> L; baseline js|balanced|L ep 5.0 (n=5); keine Baseline-Tokens'
 confidence: low
-branch: null
+branch: feat/S-293-story-archiv-backend
 pr: null
 blocked_reason: null
 created_at: '2026-07-03T12:53:27Z'
-updated_at: '2026-07-03T12:53:27Z'
+updated_at: '2026-07-03T14:41:51Z'
 done_at: null
 tok_est: null

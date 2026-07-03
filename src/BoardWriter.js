@@ -73,6 +73,25 @@
  *   Feature (best effort, kein Gesamt-Abbruch — Edge-Case-Vorgabe der Spec) und
  *   fließen nicht in die Zähler ein.
  *
+ *   `archiveDoneStories()` (Story-Ebenen-Archiv, S-293, board-storys-archivieren
+ *   AC1/AC2/AC9) archiviert ALLE aktuell archivierbaren Storys eines Projekts —
+ *   supersedet den Feature-Ebenen-Archivpfad aus [[board-feature-archive]] als
+ *   Standard-Archivknopf (dessen Schreib-Primitive werden 1:1 wiederverwendet,
+ *   `archiveDoneFeatures()` bleibt unverändert bestehen für Abwärtskompatibilität,
+ *   S-293/V5). Eine Story ist archivierbar, wenn ihr `status` **terminal** ist
+ *   (`Done` ODER `Verworfen`) UND sie nicht bereits `archived: true` ist — UNABHÄNGIG
+ *   vom Zustand ihres Eltern-Features/-Bereichs (Bereichs-Kacheln werden NIE
+ *   archiviert). Patcht je archivierbarer Story `archived: true` + `archived_at`
+ *   (+ aktualisiertes `updated_at`) — der Story-`status` bleibt UNVERÄNDERT.
+ *   Alle übrigen Zeilen bleiben byte-genau erhalten (`patchTopLevelFields({
+ *   allowAppend: true })`, wiederverwendet aus `_writeArchiveFlag()`).
+ *   **Feature-YAMLs und `board/board.yaml` werden NICHT verändert** (anders als
+ *   `archiveDoneFeatures()` — auf Story-Ebene gibt es kein Feature-Flag zu setzen).
+ *   Idempotent: bereits archivierte Storys werden übersprungen (kein zweites
+ *   `archived_at`). Best effort: schlägt das Patchen EINER Story fehl (z.B.
+ *   `duplicate-key`), wird nur diese Story übersprungen + geloggt (secret-frei) —
+ *   die übrigen werden dennoch archiviert, kein Gesamt-Abbruch.
+ *
  *   **Cross-Prozess-Risiko (KORRIGIERT, S-199 Iteration 2):** `board/board.yaml`
  *   und `board/stories/` werden NICHT nur von dieser `BoardWriter`-Instanz
  *   geschrieben — das externe `board`-CLI (agent-flow, Bash+PyYAML,
@@ -795,10 +814,81 @@ export class BoardWriter {
   }
 
   /**
+   * Archiviert ALLE aktuell archivierbaren Storys eines Projekts in-place
+   * (board-storys-archivieren AC1/AC2/AC9, S-293). Kein Hard-Delete, kein
+   * Verschieben — nur ein additives Flag (`archived: true` + `archived_at`) je
+   * Story-YAML; der Story-`status` bleibt unverändert (`Done` bleibt `Done`,
+   * `Verworfen` bleibt `Verworfen`). **Feature-YAMLs und `board/board.yaml`
+   * werden NICHT verändert** (im Unterschied zu `archiveDoneFeatures()`) —
+   * Bereichs-Kacheln (Features) werden auf diesem Pfad nie archiviert (V1).
+   * Einziger Schreibpfad (nutzt `_resolveProjectPath`/`_listBoardYamlFiles`/
+   * `_writeArchiveFlag`, dieselben Primitive wie `archiveDoneFeatures()`).
+   *
+   * Archivierbarkeits-Kriterium (V1) je Story: `status` terminal (`Done` ODER
+   * `Verworfen`) UND nicht bereits `archived: true`. Nicht-terminale und
+   * bereits archivierte Storys werden nicht angefasst — unabhängig vom
+   * Zustand ihres Eltern-Features/-Bereichs.
+   *
+   * Best effort (Edge-Case-Vorgabe der Spec): schlägt das Patchen EINER Story
+   * fehl (z.B. `duplicate-key`), wird nur diese Story übersprungen und geloggt
+   * (ohne Secrets) — die übrigen werden dennoch archiviert, kein Gesamt-Abbruch.
+   *
+   * @param {object} params
+   * @param {string} params.projectSlug  Repo-Verzeichnisname unter einem
+   *   BOARD_ROOTS-Eintrag (kein Pfad — siehe Modul-Doku Pfad-Sicherheit).
+   * @param {string} [params.now]  ISO-8601-Zeitstempel für `archived_at`/`updated_at`
+   *   (Default: `new Date().toISOString()`; injizierbar für deterministische Tests).
+   * @returns {Promise<{ archivedStoryCount: number, archivedStoryIds: string[] }>}
+   * @throws {BoardWriterError} bei ungültigem Zeitstempel/Slug oder unbekanntem Projekt.
+   */
+  async archiveDoneStories({ projectSlug, now }) {
+    const timestamp = now ?? new Date().toISOString();
+    if (typeof timestamp !== 'string' || !ISO_TIMESTAMP_RE.test(timestamp)) {
+      throw new BoardWriterError(`Ungültiges Zeitstempel-Format: '${timestamp}'`, 'invalid-value');
+    }
+
+    const repoPath = await this._resolveProjectPath(projectSlug);
+    const storiesDir = join(repoPath, 'board', 'stories');
+
+    const storyFiles = await this._listBoardYamlFiles(storiesDir);
+
+    let archivedStoryCount = 0;
+    /** @type {string[]} */
+    const archivedStoryIds = [];
+
+    for (const story of storyFiles) {
+      // V1: nicht bereits archiviert.
+      if (_extractTopLevelField(story.raw, 'archived') === 'true') continue;
+      // V1: status terminal (Done ODER Verworfen, konsistent mit
+      // archiveDoneFeatures()/board-status-verworfen).
+      const status = _extractTopLevelField(story.raw, 'status');
+      if (status !== 'Done' && status !== 'Verworfen') continue;
+
+      try {
+        await this._writeArchiveFlag(story.filePath, story.raw, timestamp);
+        archivedStoryCount++;
+        archivedStoryIds.push(story.id);
+      } catch (err) {
+        // Best effort: nur diese Story überspringen, kein Gesamt-Abbruch
+        // (Edge-Case-Vorgabe). Kein Secret im Log — nur Story-id + errorClass.
+        console.warn(
+          `archiveDoneStories: Story '${story.id}' übersprungen ` +
+            `(${err instanceof BoardWriterError ? err.errorClass : 'unbekannter Fehler'})`,
+        );
+      }
+    }
+
+    return { archivedStoryCount, archivedStoryIds };
+  }
+
+  /**
    * Patcht `archived: true` + `archived_at` + aktualisiertes `updated_at` in den
    * übergebenen (bereits gelesenen) YAML-Inhalt und schreibt die Datei atomar
-   * (board-feature-archive AC2). `allowAppend`, weil `archived`/`archived_at` in
-   * Bestandsdateien i.d.R. noch nicht als Top-Level-Schlüssel existieren.
+   * (board-feature-archive AC2; wiederverwendet von `archiveDoneStories()`,
+   * board-storys-archivieren AC2, S-293 — geteilte Schreib-Primitive über
+   * Feature- UND Story-YAMLs hinweg). `allowAppend`, weil `archived`/
+   * `archived_at` in Bestandsdateien i.d.R. noch nicht als Top-Level-Schlüssel
+   * existieren.
    *
    * @param {string} filePath
    * @param {string} raw  Bereits gelesener YAML-Inhalt der Datei.
