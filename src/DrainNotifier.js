@@ -2,6 +2,16 @@
  * DrainNotifier — genau EIN ntfy-Push je abgeschlossenem Board-Drain mit
  * kompakter Bilanz (docs/specs/drain-done-notification.md, S-277: AC1–AC7).
  *
+ * Erweitert um `notifyQuestionsPending()` (docs/specs/questions-pending-notification.md,
+ * S-279: AC1–AC6) — GETEILTER Notifier-Baustein (derselbe Config-/Token-/
+ * Versand-Pfad wie `notifyDrainDone`, kein zweiter Codepfad). Sendet best-effort
+ * GENAU EINEN Push je Eintritt des `ObsidianIngestRunner` in den Interrupt-
+ * Zustand `needs-answers` (Meldeklasse „Eingabe zwingend nötig", A2/AC3: Label
+ * = Basename des Projektpfads, NIE der volle Host-Pfad). Gating (AC2): No-op
+ * wenn Config `enabled=false` ODER `questions_pending` nicht in `events`.
+ * Best-effort/non-fatal wie `notifyDrainDone` (AC4): jeder Fehler wird
+ * gefangen und secret-frei geloggt, `notifyQuestionsPending()` wirft NIE.
+ *
  * Zweck (Spec §Zweck): statt vieler Einzel-Story-Pushes erhält der Owner
  * **genau einen** Push je qualifiziertem Drain-Ende — für BEIDE Drain-Auslöser
  * (manueller „Board abarbeiten"-Knopf UND Nachtwächter-Drain). Ein eigener
@@ -40,6 +50,12 @@
 /** ntfy-Tag für Drain-Fertig-Pushes (Implementierungswahl, s. Spec §Verträge). */
 const DRAIN_DONE_TAGS = ['checkered_flag'];
 
+/** ntfy-Tag für Fragen-offen-Pushes (questions-pending-notification §Verträge). */
+const QUESTIONS_PENDING_TAGS = ['question'];
+
+/** Fallback-Label, falls kein verwertbarer Basename ermittelt werden kann (AC6, Edge-Case). */
+const QUESTIONS_PENDING_FALLBACK_LABEL = 'Projekt';
+
 /**
  * Baut den Bilanz-Payload für einen qualifizierten Drain-Abschluss (AC2).
  *
@@ -63,6 +79,28 @@ export function buildDrainDonePayload(slug, result) {
   }
 
   return { title, message, tags: [...DRAIN_DONE_TAGS] };
+}
+
+/**
+ * Baut den Fragen-offen-Payload (questions-pending-notification AC3).
+ * Secret-/pfad-frei: `label` ist bereits der Basename (nie ein Pfad), ein
+ * leeres/fehlendes Label fällt defensiv auf einen generischen Platzhalter
+ * zurück (AC6, Edge-Case „kein verwertbarer Basename").
+ *
+ * @param {string} label - Basename des Projektpfads (A2, nie der volle Pfad).
+ * @param {number} [questionCount] - Anzahl offener Fragen (`catalog.length`, optional).
+ * @returns {{ title: string, message: string, tags: string[] }}
+ */
+export function buildQuestionsPendingPayload(label, questionCount) {
+  const safeLabel = typeof label === 'string' && label.trim() !== '' ? label.trim() : QUESTIONS_PENDING_FALLBACK_LABEL;
+  const hasCount = Number.isFinite(questionCount) && questionCount > 0;
+
+  const title = `❓ ${safeLabel}: Fragen offen`;
+  const message = hasCount
+    ? `${safeLabel}: ${questionCount} offene Frage(n) warten auf Antwort.`
+    : `${safeLabel}: Ein Fragenkatalog wartet auf Antwort.`;
+
+  return { title, message, tags: [...QUESTIONS_PENDING_TAGS] };
 }
 
 export class DrainNotifier {
@@ -147,6 +185,66 @@ export class DrainNotifier {
       }
     } catch (err) {
       // Tiefenverteidigung: darf den Drain-Abschluss/Scheduler NIE crashen (AC3/AC4/AC5).
+      console.error('[DrainNotifier] Unerwarteter Fehler (best-effort, kein Crash):', err?.message ?? String(err));
+    }
+  }
+
+  /**
+   * Sendet best-effort GENAU EINEN Fragen-offen-Push, wenn ein
+   * `ObsidianIngestRunner`-Job in `needs-answers` wechselt
+   * (questions-pending-notification AC1/AC2/AC3/AC4). No-op wenn Config
+   * `enabled=false` ODER `questions_pending` nicht in `events` (AC2) ODER die
+   * Boundary (`getNotificationConfig`/`sendNotificationFn`) nicht injiziert
+   * ist (AC5, Default-Regress). Wirft NIE — jeder Fehler wird gefangen und
+   * secret-frei geloggt (AC4/AC6).
+   *
+   * @param {{ label: string, questionCount?: number }} args
+   * @returns {Promise<void>}
+   */
+  async notifyQuestionsPending({ label, questionCount } = {}) {
+    try {
+      if (typeof this.#getNotificationConfig !== 'function' || typeof this.#sendNotificationFn !== 'function') {
+        return; // AC5: fehlende Boundary → No-op (Default-Regress)
+      }
+
+      let config;
+      try {
+        config = await this.#getNotificationConfig();
+      } catch (err) {
+        console.error('[DrainNotifier] Config lesen fehlgeschlagen (best-effort, kein Push):', err.message);
+        return;
+      }
+
+      if (!config?.enabled) return; // Gating (AC2)
+      if (!Array.isArray(config.events) || !config.events.includes('questions_pending')) return; // Gating (AC2)
+
+      let token = null;
+      if (typeof this.#getToken === 'function') {
+        try {
+          token = await this.#getToken();
+        } catch (err) {
+          // Token-Lese-Fehler → kein Hard-Stop, Versand ohne Token (analog notifyDrainDone).
+          console.error('[DrainNotifier] Token-Lesen fehlgeschlagen:', err.message);
+        }
+      }
+
+      const payload = buildQuestionsPendingPayload(label, questionCount);
+
+      try {
+        await this.#sendNotificationFn(
+          {
+            server: config.server,
+            topic: config.topic,
+            priority: config.priority,
+            token, // AC6: Token NIE im Log
+          },
+          payload,
+        );
+      } catch (err) {
+        console.error('[DrainNotifier] Versand fehlgeschlagen (best-effort):', err.message);
+      }
+    } catch (err) {
+      // Tiefenverteidigung: darf den ObsidianIngestRunner NIE crashen (AC4).
       console.error('[DrainNotifier] Unerwarteter Fehler (best-effort, kein Crash):', err?.message ?? String(err));
     }
   }

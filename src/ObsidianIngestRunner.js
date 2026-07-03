@@ -46,11 +46,22 @@
  * Test benötigt einen echten `claude`-Lauf; der Default-Adapter
  * (`defaultRunClaude`) kapselt spawn/env/session-id/auth-Erkennung.
  *
+ * Fragen-offen-Push (docs/specs/questions-pending-notification.md, S-279:
+ * AC1/AC2/AC3/AC4/AC5): optionaler injizierter `notifier` (Muster `auditStore`
+ * — Default `null` → No-op, AC5 Default-Regress). An der `needs-answers`-
+ * Setzstelle in `#runRound` — NACH dem Setzen von `status`/`catalog` — wird
+ * best-effort GENAU EIN `notifier.notifyQuestionsPending({ label, questionCount })`
+ * ausgelöst (try/catch, non-fatal, AC4); ein Fehler/fehlender Notifier beeinflusst
+ * weder den `needs-answers`-Zustand noch das Lock. `label` ist der Basename des
+ * Projektpfads (NIE der volle Host-Pfad, AC6) mit defensivem Fallback bei
+ * fehlendem Basename.
+ *
  * @module ObsidianIngestRunner
  */
 
 import { spawn as nodeSpawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { basename } from 'node:path';
 import { ProjectJobLock } from './ProjectJobLock.js';
 import { buildChildEnv, isAuthError, AUTH_EXPIRED_MESSAGE } from './HeadlessRunnerCore.js';
 
@@ -76,6 +87,10 @@ const NOT_AVAILABLE_MESSAGE = 'claude nicht verfügbar';
 const UNPARSABLE_MESSAGE = 'Fragenkatalog konnte nicht gelesen werden';
 const NO_SESSION_MESSAGE = 'Obsidian-Ingest-Lauf kann nicht fortgesetzt werden';
 const DONE_RESULT_MESSAGE = 'Obsidian-Ingest abgeschlossen';
+
+/** Fallback-Label für den Fragen-offen-Push, falls kein verwertbarer Basename
+ * ermittelt werden kann (questions-pending-notification AC6, Edge-Case). */
+const QUESTIONS_PENDING_FALLBACK_LABEL = 'Projekt';
 
 // ── Reine Parser (testbar ohne Prozess) ───────────────────────────────────────
 
@@ -320,6 +335,8 @@ export class ObsidianIngestRunner {
   #timeoutMs;
   /** @type {import('./AuditStore.js').AuditStore|null} */
   #auditStore;
+  /** @type {{ notifyQuestionsPending: (args: { label: string, questionCount?: number }) => Promise<void> }|null} */
+  #notifier;
   /**
    * @type {Map<string, {
    *   status: 'running'|'needs-answers'|'done'|'failed'|'auth-expired',
@@ -337,13 +354,17 @@ export class ObsidianIngestRunner {
    * @param {import('./AuditStore.js').AuditStore} [params.auditStore] - optional (AC6: Ende/Fehler-Audit).
    * @param {Function} [params.spawnFn] - nur wirksam wenn `runClaude` NICHT übergeben wird
    *   (durchgereicht an den intern erzeugten Default-Adapter — Test-Entkopplung).
+   * @param {{ notifyQuestionsPending: Function }} [params.notifier] - optional
+   *   (questions-pending-notification AC1/AC5, Default `null` → No-op, kein
+   *   Einfluss auf Lock/Zustandsmaschine).
    */
-  constructor({ runClaude, lock, timeoutMs, auditStore, spawnFn } = {}) {
+  constructor({ runClaude, lock, timeoutMs, auditStore, spawnFn, notifier } = {}) {
     this.#timeoutMs = timeoutMs ?? (Number(process.env.INGEST_TIMEOUT_MS) || DEFAULT_INGEST_TIMEOUT_MS);
     this.#runClaude =
       runClaude ?? ((params) => defaultRunClaude({ ...params, timeoutMs: this.#timeoutMs, spawnFn }));
     this.#lock = lock ?? new ProjectJobLock();
     this.#auditStore = auditStore ?? null;
+    this.#notifier = notifier ?? null;
   }
 
   /**
@@ -490,6 +511,20 @@ export class ObsidianIngestRunner {
       current.error = undefined;
       // session-id für die nächste Resume-Runde merken (falls der Adapter eine liefert).
       if (res.sessionId) current.sessionId = res.sessionId;
+
+      // questions-pending-notification AC1/AC4: best-effort GENAU EIN Push je
+      // Eintritt in needs-answers — NACH dem Setzen von status/catalog, sodass
+      // der Push-Ausgang den Zustand/das Lock NIE beeinflusst. No-op ohne
+      // injizierten Notifier (AC5).
+      try {
+        await this.#notifier?.notifyQuestionsPending({
+          label: this.#safeLabel(current.projectPath),
+          questionCount: outcome.catalog.length,
+        });
+      } catch (err) {
+        // Best-effort — crasht die Interrupt-Zustandsmaschine nie (AC4). Secret-frei.
+        console.error('[ObsidianIngestRunner] questions_pending-Push fehlgeschlagen (best-effort):', err?.message ?? String(err));
+      }
       return;
     }
 
@@ -521,6 +556,24 @@ export class ObsidianIngestRunner {
     } else {
       this.#audit(job.identity, `obsidian:ingest:error:${jobId}:${status}`);
     }
+  }
+
+  /**
+   * Ermittelt das secret-/pfad-freie Push-Label (questions-pending-notification
+   * AC3/AC6): Basename des Projektpfads, NIE der volle Host-Pfad. Fällt bei
+   * einem nicht-verwertbaren Basename (leer, kaputter Pfad) defensiv auf einen
+   * generischen Platzhalter zurück — der volle Pfad wird NIE zurückgegeben.
+   * @param {string} projectPath
+   * @returns {string}
+   */
+  #safeLabel(projectPath) {
+    let label;
+    try {
+      label = basename(String(projectPath ?? ''));
+    } catch {
+      label = '';
+    }
+    return label || QUESTIONS_PENDING_FALLBACK_LABEL;
   }
 
   /**

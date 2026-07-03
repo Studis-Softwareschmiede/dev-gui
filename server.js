@@ -666,8 +666,12 @@ const reconcileRunner = new HeadlessReconcileRunner();
 // NUR die state machine (Interrupt `needs-answers` + `--resume`-Fortsetzung via
 // STDIN) ist neu, weil `HeadlessFlowRunner` (fire-and-forget bis `done`) dafür
 // keine Naht bietet (docs/specs/obsidian-question-catalog.md §Nicht-Ziele).
-// `auditStore` injiziert (AC6: Job-Ende/-Fehler, secret-frei).
-const obsidianIngestRunner = new ObsidianIngestRunner({ auditStore });
+// `auditStore` injiziert (AC6: Job-Ende/-Fehler, secret-frei). `notifier:
+// drainNotifier` (questions-pending-notification AC1–AC5, S-279): GETEILTE
+// Instanz mit derselben Config-/Token-/Versand-Boundary wie `drain_done`
+// (bereits weiter oben, vor dem NightWatchScheduler, konstruiert) — best-effort
+// GENAU EIN Push je Eintritt in `needs-answers`, kein zweiter Notifier-Codepfad.
+const obsidianIngestRunner = new ObsidianIngestRunner({ auditStore, notifier: drainNotifier });
 
 // ── Auto-Retro-Boundaries (retro-auto-queue S-256/S-257 + retro-auto-trigger
 // S-261) sind bereits weiter oben (vor dem NightWatchScheduler, der den

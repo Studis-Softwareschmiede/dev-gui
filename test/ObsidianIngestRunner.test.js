@@ -1,7 +1,7 @@
 /**
  * @file ObsidianIngestRunner.test.js — unit tests for the headless
  * Obsidian-Ingest runner + its pure parsers + default claude adapter
- * (docs/specs/obsidian-question-catalog.md).
+ * (docs/specs/obsidian-question-catalog.md, docs/specs/questions-pending-notification.md).
  *
  * Covers (obsidian-question-catalog): AC1, AC2, AC4, AC5, AC6, AC7
  *
@@ -25,6 +25,20 @@
  *         with identity + action.
  *   AC7 — error paths: runner error / unparsable catalog → secret-free `failed`
  *         error, no crash; answers on a non-waiting/unknown job → reason.
+ *
+ * Covers (questions-pending-notification): AC1, AC2 (gating itself in
+ * test/DrainNotifier.test.js), AC4, AC5, AC6
+ *
+ *   AC1 — a needs-answers entry fires exactly one `notifier.notifyQuestionsPending`
+ *         call; a NEW needs-answers entry after a resume fires a SECOND call; a
+ *         run that goes straight to `done` never calls the notifier.
+ *   AC4 — a throwing/rejecting injected notifier never crashes the runner — the
+ *         job still reaches `needs-answers` with its catalog/lock intact.
+ *   AC5 — no injected notifier (default `null`) → No-op, byte-identical behavior
+ *         to the pre-S-279 runner (no crash, no call attempted).
+ *   AC6 — the `label` passed to the notifier is the basename of the project path
+ *         (never the full path); a path without a usable basename falls back to
+ *         a generic placeholder, never an empty string / the raw path.
  *
  * The runner is exercised with an INJECTED runClaude adapter — no real `claude`
  * process (NFR „Entkopplung"). The default adapter's spawn/env/stdin/argv
@@ -486,5 +500,116 @@ describe('defaultRunClaude — security floor (AC6)', () => {
     const res = await promise;
     expect(res.authError).toBe(true);
     expect(res.output).not.toMatch(/secret\/path/);
+  });
+});
+
+// ── Fragen-offen-Push (questions-pending-notification AC1/AC4/AC5/AC6) ──────
+
+describe('ObsidianIngestRunner — notifyQuestionsPending wiring (AC1/AC4/AC5/AC6)', () => {
+  it('AC1: fires exactly one notify call on needs-answers, with basename label + catalog length', async () => {
+    const notifyQuestionsPending = jest.fn(async () => {});
+    const runClaude = makeSequencedRunClaude([
+      { exitCode: 0, output: CATALOG_OUTPUT, sessionId: 'sess-1', authError: false },
+    ]);
+    const runner = new ObsidianIngestRunner({ runClaude, notifier: { notifyQuestionsPending } });
+
+    runner.start('/workspace/proj-a');
+    await flush();
+
+    expect(notifyQuestionsPending).toHaveBeenCalledTimes(1);
+    expect(notifyQuestionsPending).toHaveBeenCalledWith({ label: 'proj-a', questionCount: 2 });
+  });
+
+  it('AC1: a run that goes straight to done never calls the notifier', async () => {
+    const notifyQuestionsPending = jest.fn(async () => {});
+    const runClaude = makeSequencedRunClaude([
+      { exitCode: 0, output: '{"status":"done"}', authError: false },
+    ]);
+    const runner = new ObsidianIngestRunner({ runClaude, notifier: { notifyQuestionsPending } });
+
+    runner.start('/workspace/proj-a');
+    await flush();
+
+    expect(notifyQuestionsPending).not.toHaveBeenCalled();
+  });
+
+  it('AC1: a resume that surfaces a NEW needs-answers catalog fires a SECOND notify call', async () => {
+    const notifyQuestionsPending = jest.fn(async () => {});
+    const runClaude = makeSequencedRunClaude([
+      { exitCode: 0, output: CATALOG_OUTPUT, sessionId: 'sess-1', authError: false },
+      { exitCode: 0, output: CATALOG_OUTPUT, sessionId: 'sess-1', authError: false },
+    ]);
+    const runner = new ObsidianIngestRunner({ runClaude, notifier: { notifyQuestionsPending } });
+
+    const { jobId } = runner.start('/workspace/proj-a');
+    await flush();
+    expect(notifyQuestionsPending).toHaveBeenCalledTimes(1);
+
+    runner.answers(jobId, [{ id: 'q1', answer: 'a' }]);
+    await flush();
+    expect(notifyQuestionsPending).toHaveBeenCalledTimes(2);
+  });
+
+  it('AC4: a throwing/rejecting notifier never crashes the runner — needs-answers still reached, lock held', async () => {
+    const lock = new ProjectJobLock();
+    const notifyQuestionsPending = jest.fn(async () => { throw new Error('ntfy kaputt'); });
+    const runClaude = makeSequencedRunClaude([
+      { exitCode: 0, output: CATALOG_OUTPUT, sessionId: 'sess-1', authError: false },
+    ]);
+    const runner = new ObsidianIngestRunner({ runClaude, lock, notifier: { notifyQuestionsPending } });
+
+    const { jobId } = runner.start('/workspace/proj-a');
+    await flush();
+
+    const job = runner.getJob(jobId);
+    expect(job.status).toBe('needs-answers');
+    expect(job.catalog).toHaveLength(2);
+    expect(lock.isHeld('/workspace/proj-a')).toBe(true);
+    expect(notifyQuestionsPending).toHaveBeenCalledTimes(1);
+  });
+
+  it('AC5: no injected notifier (default) → No-op, no crash, needs-answers unaffected', async () => {
+    const runClaude = makeSequencedRunClaude([
+      { exitCode: 0, output: CATALOG_OUTPUT, sessionId: 'sess-1', authError: false },
+    ]);
+    const runner = new ObsidianIngestRunner({ runClaude });
+
+    const { jobId } = runner.start('/workspace/proj-a');
+    await flush();
+
+    expect(runner.getJob(jobId).status).toBe('needs-answers');
+  });
+
+  it('AC6: passes the basename, never the full project path, as the label', async () => {
+    const notifyQuestionsPending = jest.fn(async () => {});
+    const runClaude = makeSequencedRunClaude([
+      { exitCode: 0, output: CATALOG_OUTPUT, sessionId: 'sess-1', authError: false },
+    ]);
+    const runner = new ObsidianIngestRunner({ runClaude, notifier: { notifyQuestionsPending } });
+
+    runner.start('/workspace/secret-owner/my-project');
+    await flush();
+
+    const [args] = notifyQuestionsPending.mock.calls[0];
+    expect(args.label).toBe('my-project');
+    expect(args.label).not.toMatch(/secret-owner/);
+    expect(args.label).not.toMatch(/\//);
+  });
+
+  it('AC6: a path without a usable basename falls back to a generic placeholder (never empty/raw path)', async () => {
+    const notifyQuestionsPending = jest.fn(async () => {});
+    const runClaude = makeSequencedRunClaude([
+      { exitCode: 0, output: CATALOG_OUTPUT, sessionId: 'sess-1', authError: false },
+    ]);
+    const runner = new ObsidianIngestRunner({ runClaude, notifier: { notifyQuestionsPending } });
+
+    // A trailing-slash-only path has no usable basename segment.
+    runner.start('/');
+    await flush();
+
+    const [args] = notifyQuestionsPending.mock.calls[0];
+    expect(args.label).toBeTruthy();
+    expect(args.label).not.toBe('');
+    expect(args.label).not.toBe('/');
   });
 });
