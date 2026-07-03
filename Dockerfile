@@ -42,6 +42,12 @@ FROM node:20-slim AS runtime
 #   - jq: used by the agent-flow factory skill scripts
 #   - openssl: used by gh-app-token.sh (JWT signing: openssl dgst + openssl base64)
 #   - python3: used by gh-app-token.sh to parse the GitHub API JSON response
+#   - openssh-client: needed by SshPtyManager (docs/specs/vps-ssh-terminal.md
+#     AC7/AC8/AC10, ADR-019) — spawns the real `ssh` binary via node-pty for
+#     interactive VPS terminal sessions. NOTE: VpsProvisioner (ADR-008,
+#     non-interactive authorized_keys automation) deliberately does NOT use
+#     this binary — it stays on the Node-lib `ssh2` transport documented
+#     there. Both SSH lines are intentionally separate (ADR-019).
 # No secrets baked in — credentials are mounted at runtime via env / volume.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
@@ -50,6 +56,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gnupg \
     jq \
     openssl \
+    openssh-client \
     python3 \
   && rm -rf /var/lib/apt/lists/*
 

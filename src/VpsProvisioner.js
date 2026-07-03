@@ -8,8 +8,12 @@
  * NIEMALS Richtung HTTP/Log/Audit.
  *
  * Transport: Node-Lib `ssh2` (kein Shell-Out, kein System-ssh-Binary erforderlich).
- * Begründung: Das Container-Image enthält KEINEN openssh-client (nur openssl, curl, git, jq).
- * `ssh2` ist self-contained, mockbar und provider-unabhängig.
+ * Begründung: Das Container-Image enthielt zum Zeitpunkt dieser Entscheidung KEINEN
+ * openssh-client (nur openssl, curl, git, jq). `ssh2` ist self-contained, mockbar und
+ * provider-unabhängig.
+ * (ADR-019 / S-262: das Image enthält inzwischen `openssh-client` — aber AUSSCHLIESSLICH
+ * für die separate `SshPtyManager`-Boundary (interaktive PTY-Sitzungen). VpsProvisioner
+ * bleibt bewusst bei `ssh2`, keine Migration — zwei getrennte, je einzweckige SSH-Linien.)
  *
  * Host-Key-Verifikation (Policy — dokumentiert, kein stilles Ignorieren):
  *   Der SSH-Host-Key wird per SHA256-Fingerprint (Base64, wie ssh-keygen -l) geprüft,

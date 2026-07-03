@@ -111,6 +111,8 @@ import { WorkspaceMutator } from './src/WorkspaceMutator.js';
 import { GitHubCloner } from './src/GitHubCloner.js';
 import { buildWorkspaceRootResolver } from './src/workspacePath.js';
 import { VpsProviderRegistry } from './src/vps/VpsProviderRegistry.js';
+import { resolveVpsTarget } from './src/vpsContainerRouter.js';
+import { SshPtyManager } from './src/SshPtyManager.js';
 import { CloudflareApi } from './src/cloudflare/CloudflareApi.js';
 import { LockoutGuard } from './src/cloudflare/LockoutGuard.js';
 import { VpsDockerControl } from './src/deploy/VpsDockerControl.js';
@@ -239,6 +241,17 @@ const deployOrchestrator = new DeployOrchestrator({
   vpsRegistry,
 });
 const vpsTargets = buildVpsTargetsFromEnv(process.env.VPS_TARGETS);
+
+// ── SSH-PTY-Bridge (vps-ssh-terminal AC7/AC8/AC10, S-262, ADR-019) ─────────────
+// Geschwister-Boundary von VpsProvisioner (ADR-008): interaktive ssh-PTY-Sitzungen
+// statt nicht-interaktiver ssh2-Kommandos. `resolveVpsTarget` (dieselbe Auflösung
+// wie das Deploy-/Container-Übersicht-Ziel, S-167) wird als Adapter injiziert —
+// der `targetUser` des aufgelösten Ziels wird NICHT verwendet, der SSH-User kommt
+// ausschließlich aus dem WS-Handshake (AC6, S-263 — kein WS-Routing hier).
+const sshPtyManager = new SshPtyManager({
+  credentialStore,
+  resolveTarget: (provider, serverId) => resolveVpsTarget(provider, serverId, vpsRegistry, vpsTargets),
+});
 
 // ── ReconciliationJob (Capability C, ADR-013) ─────────────────────────────
 // S-167 AC6: Vereinigung dynamischer Target-Records (aus persistierten Create-Datensätzen)
@@ -605,6 +618,9 @@ const deps = {
   deployOrchestrator,
   vpsDockerControl,
   vpsTargets,
+  // vps-ssh-terminal AC7/AC8/AC10 (S-262): Boundary-Instanz für die künftige
+  // WS-Route (S-263) — hier NUR verdrahtet, kein Router mountet sie bislang.
+  sshPtyManager,
   reconciliationJob,
   localDockerControl,
   tunnelHealService,

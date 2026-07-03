@@ -194,7 +194,10 @@ function sanitizeMsg(msg) {
  * @param {Map<string, { host: string, port?: number, targetUser: string }>} vpsTargets
  * @returns {Promise<{ host: string, port: number, targetUser: string } | null>}
  */
-async function resolveVpsTarget(provider, serverId, vpsRegistry, vpsTargets) {
+// Exportiert (statt module-private): SshPtyManager (vps-ssh-terminal AC7/AC8/AC10, S-262)
+// nutzt dieselbe Auflösung als injizierten `resolveTarget`-Adapter (server.js-Wiring) —
+// keine zweite Ziel-Auflösungs-Wahrheit (docs/specs/vps-dynamic-ssh-targets.md).
+export async function resolveVpsTarget(provider, serverId, vpsRegistry, vpsTargets) {
   // ── 1. Dynamische Quelle: exakter {provider, serverId}-Match (S-167 AC4) ──
   // Suche zuerst im persistierten Target-Record-Speicher.
   // Env-Override: wenn vpsTargets einen Eintrag mit passender IP enthält, gewinnt die Env.

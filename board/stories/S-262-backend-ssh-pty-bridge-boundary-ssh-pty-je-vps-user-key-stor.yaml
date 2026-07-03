@@ -2,7 +2,7 @@ id: S-262
 parent: F-052
 title: 'Backend: SSH-PTY-Bridge-Boundary (ssh-PTY je VPS/User, Key store-intern ohne
   Leak, Host-Key-Policy, Lifecycle/Cap/Cleanup)'
-status: To Do
+status: In Progress
 priority: P2
 spec: docs/specs/vps-ssh-terminal.md
 implements:
@@ -19,9 +19,9 @@ dispo_forecast: null
 estimate_note: Heuristik score ~10 -> L; estimator nicht dispatchbar (kein Task-Tool
   im requirement-Subagent), baseline js|balanced|L (ep 5.0) als Naeherung
 confidence: low
-branch: null
+branch: feat/S-262-ssh-pty-bridge
 pr: null
 blocked_reason: null
 created_at: '2026-07-02T06:35:42Z'
-updated_at: '2026-07-02T06:36:17Z'
+updated_at: '2026-07-03T02:16:33Z'
 done_at: null
