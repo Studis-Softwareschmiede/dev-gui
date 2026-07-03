@@ -2,7 +2,7 @@ id: S-284
 parent: F-058
 title: 'Doku/ADR-020: persistente Drain-Registry + Boot-Wiederanlauf + Detached-Spawn-Ablehnung;
   supersede-Vermerke + CLAUDE.md + concept.md'
-status: In Progress
+status: Done
 priority: P2
 spec: docs/specs/drain-restart-robustness.md
 implements:
@@ -12,8 +12,8 @@ depends: null
 labels: null
 size_est: M
 dispo_est: '5.0'
-dispo_act: null
-dispo_forecast: null
+dispo_act: '2'
+dispo_forecast: '1.5000'
 estimate_note: 'doc-only; estimator nicht dispatchbar (Subagent); Heuristik score
   7 (2 AC + 5 Doku-Dateien: architecture.md/CLAUDE.md/concept.md/headless-parallel-drain.md/headless-manual-drain.md)
   -> M; baseline js|balanced|M ep 5.0 (n=8); keine Baseline-Tokens'
@@ -22,6 +22,6 @@ branch: feat/S-284-adr-020-drain-restart-doku
 pr: null
 blocked_reason: null
 created_at: '2026-07-03T07:15:36Z'
-updated_at: '2026-07-03T18:04:23Z'
-done_at: null
+updated_at: '2026-07-03T18:25:24Z'
+done_at: '2026-07-03T18:23:51Z'
 tok_est: null
