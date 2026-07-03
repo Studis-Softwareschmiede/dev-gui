@@ -61,6 +61,31 @@
  *   Edge — GitHubView ist org-weit (kein Projekt-Kontext) → projectPath wird nie gesendet
  *          (analog reconcile-trigger „fehlt projectSlug/activeRepo → weglassen").
  *
+ * Covers (obsidian-question-catalog, S-251 — UI-Anteile, Backend S-250 bereits gelandet):
+ *   AC3/AC4/AC5/AC7 — ZWEITER, primär gestylter Button „Strukturiert starten"
+ *          innerhalb `ObsidianImportSection` öffnet `ObsidianIngestOverlay.jsx`
+ *          (eigene Datei — Fragenkatalog-Overlay, Resume-Zyklus, Fehler-/
+ *          Wiedereinstiegs-Logik: alle vier ACs dort dokumentiert/getestet).
+ *          Der bestehende PTY-„Auslösen"-Button (obsidian-project-intake AC3)
+ *          bleibt als Fallback bestehen — Logik/Verhalten UNVERÄNDERT
+ *          (derselbe `POST /api/command`-Pfad, dieselben Guards), nur
+ *          visuell auf Sekundär-Button demotet (btnSecondary statt
+ *          btnPrimary), seit „Strukturiert starten" der primäre Einstieg
+ *          ist. Beide Pfade nutzen dieselbe Projekt-Auswahl (`selectedPath`),
+ *          aber getrennte Endpunkte/Runner/Locks (Begründung: Modul-Kommentar
+ *          in `ObsidianIngestOverlay.jsx`). Review-Fix (Iteration 2,
+ *          Important reviewer/R06): der gemerkte Wiedereinstiegs-Job
+ *          (`ingestJob = {jobId, projectFolderPath}`) wird verworfen, sobald
+ *          `selectedPath` auf ein ANDERES Projekt wechselt — sonst würde
+ *          „Fortsetzen" lautlos den falschen Job für das neu gewählte Projekt
+ *          resumen (kein `start()`-Aufruf, keine Fehlermeldung). Zwei
+ *          Sicherungen: Reset im `<select>`-onChange + defensive Prüfung in
+ *          `handleOpenIngestOverlay` vor dem Öffnen. `onIngestComplete`
+ *          navigiert wie der bestehende PTY-Erfolgspfad zu
+ *          `onNavigate('factory')` (GitHubView
+ *          hat keinen eigenen Board-Store — Board-/Docs-Re-Fetch geschieht
+ *          beim Mount der Factory-Ansicht, analog AC6 obsidian-project-intake).
+ *
  * State-Design-Entscheidung (#68):
  *   workspaceRepos wird zentral in RepoList gehalten (volle Array-Form statt nur Set<string>).
  *   Das Set<string> für Badge-Vergleiche wird daraus abgeleitet (localRepoNames).
@@ -89,6 +114,7 @@
 
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { collapseToLine } from './costMode.js';
+import { ObsidianIngestOverlay } from './ObsidianIngestOverlay.jsx';
 
 // ── obsidian-project-intake constants (S-249) ────────────────────────────────
 
@@ -333,6 +359,26 @@ function ObsidianImportSection({ fetchFn, onNavigate }) {
   const [errorMsg, setErrorMsg]           = useState(null);
   const [busy, setBusy]                   = useState(false);
 
+  // obsidian-question-catalog (S-251): headless Katalog-Overlay-Pfad — eigener
+  // Zustand, unabhängig vom PTY-Busy-Guard oben (eigenes Lock/eigener Runner,
+  // s. Modul-Kommentar in ObsidianIngestOverlay.jsx). `ingestJob` erlaubt den
+  // Wiedereinstieg (AC7), solange diese Section selbst gemountet bleibt.
+  //
+  // Review-Fix (Iteration 2, Important reviewer/R06): `jobId` wird ZUSAMMEN
+  // mit dem `projectFolderPath` gehalten, für den der Job gestartet wurde
+  // (statt einer isolierten `ingestJobId`). Ohne diese Kopplung würde ein
+  // Auswahlwechsel (Projekt A → Projekt B, während Job A noch detached
+  // läuft) den „Fortsetzen"-Button weiter anzeigen und beim Öffnen den
+  // FALSCHEN Job (A) für das NEU gewählte Projekt (B) resumen — lautlos,
+  // ohne dass ein neuer `start()`-Call für B stattfindet. Zwei Sicherungen:
+  // (1) der `<select>`-onChange setzt `ingestJob` zurück, sobald der neue
+  // Pfad vom gemerkten Job-Pfad abweicht; (2) `handleOpenIngestOverlay`
+  // prüft defensiv NOCHMAL vor dem Öffnen (defense in depth, falls „(1)"
+  // je umgangen wird).
+  const [showIngestOverlay, setShowIngestOverlay] = useState(false);
+  const [ingestJob, setIngestJob]                  = useState(/** @type {{jobId:string, projectFolderPath:string}|null} */(null));
+  const ingestTriggerRef = useRef(null);
+
   const fetchFnRef = useRef(fetchFn ?? globalThis.fetch.bind(globalThis));
   useEffect(() => {
     fetchFnRef.current = fetchFn ?? globalThis.fetch.bind(globalThis);
@@ -441,14 +487,35 @@ function ObsidianImportSection({ fetchFn, onNavigate }) {
     setErrorMsg(null);
   }, []);
 
+  // obsidian-question-catalog AC3/AC4/AC5/AC7 (S-251): öffnet das Fragenkatalog-
+  // Overlay — primärer, „richerer" Einstieg für die dritte Option (strukturierte
+  // Rückfragen statt reinem Terminal-Text). Ein Wiedereinstieg (kein erneuter
+  // `start()`) findet NUR statt, wenn der gemerkte Job zum AKTUELL gewählten
+  // Projekt-Pfad gehört (Review-Fix Iteration 2) — sonst wird eine Auswahl
+  // verlangt wie beim PTY-Fallback-Button.
+  const ingestJobMatchesSelection = Boolean(ingestJob) && ingestJob.projectFolderPath === selectedPath;
+  const canStartIngest = Boolean(selectedPath) && !showIngestOverlay;
+  const handleOpenIngestOverlay = useCallback(() => {
+    if (!selectedPath) return;
+    // Defense in depth (reviewer/R06): ein gemerkter Job für ein ANDERES
+    // Projekt darf niemals stillschweigend resumed werden.
+    if (ingestJob && ingestJob.projectFolderPath !== selectedPath) {
+      setIngestJob(null);
+    }
+    setShowIngestOverlay(true);
+  }, [selectedPath, ingestJob]);
+
   return (
     <section style={styles.section} aria-labelledby="obsidian-import-heading">
       <h2 id="obsidian-import-heading" style={styles.sectionHeading}>
         Aus Obsidian-Notizen
       </h2>
       <p style={styles.sectionDesc}>
-        Wählt einen Projekt-Unterordner aus dem konfigurierten Vault und löst{' '}
-        <code style={styles.obsidianInlineCode}>/agent-flow:from-notes</code> aus.
+        Wählt einen Projekt-Unterordner aus dem konfigurierten Vault. „Strukturiert
+        starten" zeigt Rückfragen als Fragenkatalog-Overlay (empfohlen); „Auslösen"
+        löst stattdessen direkt{' '}
+        <code style={styles.obsidianInlineCode}>/agent-flow:from-notes</code> im
+        Terminal aus (unstrukturiert, Fallback).
       </p>
 
       {/* AC2: Lade-Indikator */}
@@ -484,7 +551,15 @@ function ObsidianImportSection({ fetchFn, onNavigate }) {
             value={selectedPath}
             disabled={isStarting}
             aria-disabled={isStarting}
-            onChange={(e) => setSelectedPath(e.target.value)}
+            onChange={(e) => {
+              const next = e.target.value;
+              setSelectedPath(next);
+              // Review-Fix (Iteration 2, Important reviewer/R06): ein Auswahl-
+              // wechsel verwirft einen gemerkten Ingest-Job für das ALTE
+              // Projekt sofort — sonst zeigt der Button weiter "Fortsetzen"
+              // und würde beim Öffnen lautlos den falschen Job resumen.
+              setIngestJob((prev) => (prev && prev.projectFolderPath !== next ? null : prev));
+            }}
           >
             <option value="">— wählen —</option>
             {projects.map((p) => (
@@ -517,9 +592,38 @@ function ObsidianImportSection({ fetchFn, onNavigate }) {
       )}
 
       <div style={styles.actionRow}>
+        {/* obsidian-question-catalog AC3/AC4/AC5/AC7 (S-251): primärer,
+            „richerer" Einstieg — öffnet das Fragenkatalog-Overlay statt direkt
+            in den PTY-Terminal-Stream zu schreiben. Eigener aria-label-Text
+            (kein „Auslösen"-Substring), damit Tests, die per Name „auslösen"
+            matchen, weiterhin eindeutig den bestehenden PTY-Button treffen. */}
+        <button
+          ref={ingestTriggerRef}
+          type="button"
+          style={canStartIngest ? styles.btnPrimary : styles.btnPrimaryDisabled}
+          disabled={!canStartIngest}
+          aria-disabled={!canStartIngest}
+          aria-label={
+            !selectedPath
+              ? 'Strukturiert starten — Projekt-Ordner fehlt'
+              : ingestJobMatchesSelection
+              ? 'Strukturiert starten — Fragenkatalog-Lauf fortsetzen'
+              : 'Strukturiert starten — mit Fragenkatalog'
+          }
+          onClick={handleOpenIngestOverlay}
+          data-testid="obsidian-ingest-open-btn"
+        >
+          {ingestJobMatchesSelection ? 'Fortsetzen' : 'Strukturiert starten'}
+        </button>
+
+        {/* obsidian-project-intake AC3 (S-249) — PTY-Fallback: Logik/Verhalten
+            UNVERÄNDERT (derselbe POST /api/command-Pfad, dieselben Guards),
+            nur visuell auf Sekundär-Button demotet (btnSecondary statt
+            btnPrimary), seit der neue Strukturiert-starten-Button (oben) der
+            primäre Einstieg ist. */}
         <button
           type="button"
-          style={canTrigger ? styles.btnPrimary : styles.btnPrimaryDisabled}
+          style={canTrigger ? styles.btnSecondary : styles.btnPrimaryDisabled}
           disabled={!canTrigger}
           aria-disabled={!canTrigger}
           aria-busy={isStarting}
@@ -537,6 +641,24 @@ function ObsidianImportSection({ fetchFn, onNavigate }) {
           {isStarting ? 'Wird ausgelöst…' : 'Auslösen'}
         </button>
       </div>
+
+      {/* obsidian-question-catalog AC3/AC4/AC5/AC7 (S-251): Fragenkatalog-
+          Overlay — eigene Datei, eigene State-Machine (s. Modul-Kommentar
+          dort). Schließen bricht den headless Lauf NICHT ab (AC7); jobId +
+          projectFolderPath bleiben zusammen in dieser Section gemerkt
+          (Wiedereinstieg NUR bei unverändertem selectedPath, s.o.). */}
+      {showIngestOverlay && (
+        <ObsidianIngestOverlay
+          projectFolderPath={selectedPath}
+          initialJobId={ingestJobMatchesSelection ? ingestJob.jobId : null}
+          fetchFn={fetchFnRef.current}
+          triggerRef={ingestTriggerRef}
+          onClose={() => setShowIngestOverlay(false)}
+          onJobStarted={(jobId) => setIngestJob({ jobId, projectFolderPath: selectedPath })}
+          onJobEnded={() => setIngestJob(null)}
+          onIngestComplete={() => onNavigate('factory')}
+        />
+      )}
     </section>
   );
 }

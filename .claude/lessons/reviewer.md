@@ -1,5 +1,8 @@
 # Reviewer Lessons — dev-gui (newest first)
 
+## 2026-07-03 — Wiedereinstieg-States ("initialXId") immer gegen einen Auswahlwechsel des identitätsstiftenden Inputs durchspielen
+Bei jedem "Wiedereinstieg ohne neuen Start"-Pattern (eine gemerkte `jobId`/`sessionId` im Aufrufer-State wird als `initialXId` an ein Overlay/Modal gereicht, das dann `POST .../start` überspringt) explizit prüfen: was passiert, wenn der Nutzer NACH dem Start (und vor dem nächsten Klick auf den Trigger-Button) die identitätsstiftende Auswahl ändert (z.B. ein anderes Projekt/einen anderen Datensatz im selben Dropdown wählt)? Wird die gemerkte ID beim `onChange`-Handler der Auswahl NICHT zurückgesetzt, resumt ein Klick lautlos die ALTE Entität, während UI-Label/Button suggerieren, es handle sich um die neu ausgewählte. `grep -n "setSelectedX\|onChange"` auf den Auswahl-Handler prüfen, ob er den Wiedereinstieg-State mitzurücksetzen — Fehlen ist ein Important-Befund (kein Security-/Crash-Risiko, aber ein echter Silent-Wrong-Target-Bug), auch wenn alle vorhandenen Tests grün sind (sie prüfen typischerweise nur "Wiedereinstieg ohne Auswahlwechsel"). *[seen-in: S-251 ObsidianIngestOverlay-Andockung in GitHubView.jsx — `ingestJobId` übersteht einen `selectedPath`-Wechsel unverändert; promoted: 2026-07-03]*
+
 ## 2026-07-02 — Confined-Listing-Reviews: den Zwischenordner-Realpath immer PoC-prüfen, nicht nur Blatt-Einträge
 Bei jedem confined Directory-Listing (Vault/Workspace/o.ä.) reicht es NICHT, nur zu prüfen,
 ob jeder gelistete Eintrag gegen die Schranke geprüft wird — auch jede Zwischenstufe der

@@ -2,7 +2,7 @@ id: S-251
 parent: F-050
 title: 'Fragenkatalog-Overlay: stage/id/frage/quelle/optionen anzeigen, Antworten
   gebündelt + Resume'
-status: To Do
+status: In Progress
 priority: P2
 spec: docs/specs/obsidian-question-catalog.md
 implements:
@@ -21,9 +21,9 @@ dispo_forecast: null
 estimate_note: 'Heuristik score 9 -> L; estimator nicht dispatchbar, baseline-L-Naeherung;
   Kopplung an agent-flow Rueckgabeformat (PR #217)'
 confidence: low
-branch: null
+branch: feat/S-251-question-catalog-overlay
 pr: null
 blocked_reason: null
 created_at: '2026-07-02T05:42:15Z'
-updated_at: '2026-07-02T05:44:50Z'
+updated_at: '2026-07-03T01:02:27Z'
 done_at: null
