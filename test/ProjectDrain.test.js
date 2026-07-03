@@ -1,7 +1,8 @@
 /**
  * ProjectDrain.test.js — Unit-/Integrationstests für die ProjectDrain-Engine
  * (docs/specs/taktgeber-nachtwaechter.md, docs/specs/headless-parallel-drain.md,
- * docs/specs/headless-manual-drain.md, docs/specs/drain-completion-report.md).
+ * docs/specs/headless-manual-drain.md, docs/specs/drain-completion-report.md,
+ * docs/specs/night-budget-guard.md).
  *
  * Covers (taktgeber-nachtwaechter):
  *   AC1 — drainProject() stößt /agent-flow:flow wiederholt an, solange mind.
@@ -114,6 +115,52 @@
  *          "computeCompletedBlocked (drain-completion-report AC1/AC2)" +
  *          "drainProject — completed/blocked Snapshot-Diff (AC1/AC2)".
  *
+ * Covers (night-budget-guard, S-273 Drain-Kern — reaktiv/proaktiv/Eskalations-Schutz):
+ *   AC4 — Reaktiv: ein FlowRunner-Ergebnis status:'budget-limited' (mit
+ *          resetAt) gilt NIE als fortschrittsloser Lauf; eine Budget-Pause
+ *          (reason:'reactive-limit') wird erfasst, der Drain wartet (via
+ *          injizierbarem sleepFn) bis resetAt+budgetResumeBufferMs (nie
+ *          negativ — Edge-Case "Reset in der Vergangenheit") und setzt
+ *          danach fort. budget-limited OHNE resetAt (Edge-Case, sollte laut
+ *          S-270 AC3 nicht auftreten) wird defensiv ohne Warten und OHNE
+ *          Eskalation übersprungen.
+ *   AC5 — Proaktiv: ein injizierter budgetGuard wird vor JEDER Flow-Runde
+ *          über checkProactive({nowMs}) gefragt; bei pause:true startet
+ *          KEINE Flow-Runde (kein flowRuns-Increment), eine Budget-Pause
+ *          (reason:'proactive-threshold') wird erfasst und über
+ *          budgetGuard.awaitResume(...) gewartet/sanft beendet. Ohne
+ *          injizierten budgetGuard ist die proaktive Prüfung ein No-op.
+ *   AC6 — Sanftes Ende: reaktiv, wenn resetAt+Puffer hinter opts.windowEndMs
+ *          liegt (reason:'budget-window-end', kein Warten); proaktiv, wenn
+ *          budgetGuard.awaitResume() {resumed:false, reason} liefert
+ *          (reason:'budget-window-end'|'budget-stop' — 1:1 durchgereicht).
+ *          windowEndMs=null ⇒ die reaktive Pause wartet immer regulär (nie
+ *          budget-window-end).
+ *   AC7 — Eskalations-Schutz (kritisch): budget-limited-Ergebnisse und
+ *          Budget-Pausen/-Stops erhöhen NIE consecutiveNoProgress/
+ *          totalNoProgressRounds und lösen NIE boardWriter.setBlocked aus —
+ *          explizit erzwungen über viele aufeinanderfolgende budget-limited-
+ *          Runden, weit über escalationAttempts hinaus (Test "never
+ *          escalates ... no matter how many consecutive budget-limited
+ *          rounds").
+ *   AC8 — Kein Regress: ein injizierter budgetGuard, der IMMER pause:false
+ *          liefert (nie budget-limited im Spiel), liefert dasselbe Ergebnis
+ *          wie ohne Guard (Ziel-Auswahl/Konvergenz/Eskalation/Snapshot-Diff
+ *          unverändert) — plus `budgetPauses:[]` additiv auf JEDEM
+ *          Rückgabepfad (siehe die 85 bestehenden `toEqual(...)`-Assertions
+ *          oben, jetzt additiv um `budgetPauses: []` erweitert — kein
+ *          Bruch an bestehenden Feldern).
+ *   Robustheit (NFR, Guard-/Meter-Fehler dürfen nicht crashen): ein
+ *          werfender checkProactive()/awaitResume()/noteReset() degradiert
+ *          (im Zweifel nicht pausieren bzw. sofort fortsetzen) statt den
+ *          Drain abstürzen zu lassen.
+ *   Mehrere Budget-Pausen in einem Drain (proaktiv + reaktiv kombiniert)
+ *          erscheinen chronologisch als getrennte `budgetPauses`-Einträge.
+ *   Bewusst NICHT hier getestet (andere Stories, docs/specs/night-budget-
+ *          guard.md AC1-AC3/AC9-AC13): TickerSettingsStore-Felder (S-272,
+ *          Done), der konkrete BudgetGuard + server.js/Scheduler-Wiring
+ *          (S-274), DrainReportStore/UI-Bericht (S-275).
+ *
  * Strategy:
  *   - Pure Helper-Funktionen (flattenProjectStories, isStaleInProgress,
  *     computeAliveStoryIds, couldBecomeReadyViaDepends, computeDrainState,
@@ -140,6 +187,7 @@ import {
   DEFAULT_STALE_IN_PROGRESS_HOURS,
   DEFAULT_ESCALATION_ATTEMPTS,
   DEFAULT_SAFETY_MAX_NO_PROGRESS_ROUNDS,
+  BUDGET_RESUME_BUFFER_MS,
   flattenProjectStories,
   isStaleInProgress,
   computeAliveStoryIds,
@@ -879,7 +927,7 @@ describe('ProjectDrain.drainProject — AC1/AC2: drains until empty', () => {
 
     const result = await drain.drainProject(PROJECT_PATH);
 
-    expect(result).toEqual({ stopped: true, reason: 'no-drain-target', flowRuns: 2, escalated: [], completed: [{ id: 'S-1', title: 'S-1' }, { id: 'S-2', title: 'S-2' }], blocked: [] });
+    expect(result).toEqual({ stopped: true, reason: 'no-drain-target', flowRuns: 2, escalated: [], completed: [{ id: 'S-1', title: 'S-1' }, { id: 'S-2', title: 'S-2' }], blocked: [], budgetPauses: [] });
     expect(commandService.calls).toEqual([
       { command: FLOW_COMMAND, identity: null, projectPath: PROJECT_PATH },
       { command: FLOW_COMMAND, identity: null, projectPath: PROJECT_PATH },
@@ -898,7 +946,7 @@ describe('ProjectDrain.drainProject — AC1/AC2: drains until empty', () => {
 
     const result = await drain.drainProject(PROJECT_PATH);
 
-    expect(result).toEqual({ stopped: true, reason: 'no-drain-target', flowRuns: 0, escalated: [], completed: [], blocked: [] });
+    expect(result).toEqual({ stopped: true, reason: 'no-drain-target', flowRuns: 0, escalated: [], completed: [], blocked: [], budgetPauses: [] });
     expect(commandService.calls).toHaveLength(0);
   });
 
@@ -958,7 +1006,7 @@ describe('ProjectDrain.drainProject — AC1/AC2: drains until empty', () => {
 
     const result = await drain.drainProject(PROJECT_PATH);
 
-    expect(result).toEqual({ stopped: true, reason: 'no-drain-target', flowRuns: 2, escalated: [], completed: [{ id: 'S-1', title: 'S-1' }, { id: 'S-2', title: 'S-2' }], blocked: [] });
+    expect(result).toEqual({ stopped: true, reason: 'no-drain-target', flowRuns: 2, escalated: [], completed: [{ id: 'S-1', title: 'S-1' }, { id: 'S-2', title: 'S-2' }], blocked: [], budgetPauses: [] });
   });
 
   it('AC2 Konvergenz: never loops forever when the only waiter depends on a dead-end (Blocked) predecessor', async () => {
@@ -977,7 +1025,7 @@ describe('ProjectDrain.drainProject — AC1/AC2: drains until empty', () => {
 
     const result = await drain.drainProject(PROJECT_PATH);
 
-    expect(result).toEqual({ stopped: true, reason: 'no-drain-target', flowRuns: 0, escalated: [], completed: [], blocked: [] });
+    expect(result).toEqual({ stopped: true, reason: 'no-drain-target', flowRuns: 0, escalated: [], completed: [], blocked: [], budgetPauses: [] });
     expect(commandService.calls).toHaveLength(0);
   });
 
@@ -1007,7 +1055,7 @@ describe('ProjectDrain.drainProject — AC1/AC2: drains until empty', () => {
 
       const result = await drain.drainProject(PROJECT_PATH);
 
-      expect(result).toEqual({ stopped: true, reason: 'no-drain-target', flowRuns: 0, escalated: [], completed: [], blocked: [] });
+      expect(result).toEqual({ stopped: true, reason: 'no-drain-target', flowRuns: 0, escalated: [], completed: [], blocked: [], budgetPauses: [] });
       expect(commandService.calls).toHaveLength(0);
       expect(lock.isHeld(PROJECT_PATH)).toBe(false);
     },
@@ -1039,7 +1087,7 @@ describe('ProjectDrain.drainProject — AC1/AC2: drains until empty', () => {
 
       const result = await drain.drainProject(PROJECT_PATH);
 
-      expect(result).toEqual({ stopped: true, reason: 'no-drain-target', flowRuns: 0, escalated: [], completed: [], blocked: [] });
+      expect(result).toEqual({ stopped: true, reason: 'no-drain-target', flowRuns: 0, escalated: [], completed: [], blocked: [], budgetPauses: [] });
       expect(commandService.calls).toHaveLength(0);
       expect(lock.isHeld(PROJECT_PATH)).toBe(false);
     },
@@ -1062,7 +1110,7 @@ describe('ProjectDrain.drainProject — AC1/AC2: drains until empty', () => {
     });
 
     const result = await drain.drainProject(PROJECT_PATH);
-    expect(result).toEqual({ stopped: true, reason: 'no-drain-target', flowRuns: 1, escalated: [], completed: [{ id: 'S-1', title: 'S-1' }], blocked: [] });
+    expect(result).toEqual({ stopped: true, reason: 'no-drain-target', flowRuns: 1, escalated: [], completed: [{ id: 'S-1', title: 'S-1' }], blocked: [], budgetPauses: [] });
   });
 
   it('a fresh (non-stale) In Progress story is never targeted', async () => {
@@ -1079,7 +1127,7 @@ describe('ProjectDrain.drainProject — AC1/AC2: drains until empty', () => {
     });
 
     const result = await drain.drainProject(PROJECT_PATH);
-    expect(result).toEqual({ stopped: true, reason: 'no-drain-target', flowRuns: 0, escalated: [], completed: [], blocked: [] });
+    expect(result).toEqual({ stopped: true, reason: 'no-drain-target', flowRuns: 0, escalated: [], completed: [], blocked: [], budgetPauses: [] });
   });
 });
 
@@ -1101,7 +1149,7 @@ describe('ProjectDrain.drainProject — AC4/AC5: escalation after consecutive no
 
     const result = await drain.drainProject(PROJECT_PATH, { identity: 'alex@example.com' });
 
-    expect(result).toEqual({ stopped: true, reason: 'no-drain-target', flowRuns: 2, escalated: ['S-1'], completed: [], blocked: [{ id: 'S-1', title: 'S-1' }] });
+    expect(result).toEqual({ stopped: true, reason: 'no-drain-target', flowRuns: 2, escalated: ['S-1'], completed: [], blocked: [{ id: 'S-1', title: 'S-1' }], budgetPauses: [] });
     expect(boardWriter.calls).toEqual([
       { projectSlug: PROJECT_SLUG, storyId: 'S-1', blockedReason: 'Taktgeber: 2x kein Fortschritt' },
     ]);
@@ -1294,7 +1342,7 @@ describe('ProjectDrain.drainProject — AC6/AC7: concurrency + lock discipline',
 
     const result = await drain.drainProject(PROJECT_PATH);
 
-    expect(result).toEqual({ stopped: true, reason: 'already-busy', flowRuns: 0, escalated: [], completed: [], blocked: [] });
+    expect(result).toEqual({ stopped: true, reason: 'already-busy', flowRuns: 0, escalated: [], completed: [], blocked: [], budgetPauses: [] });
     expect(commandService.calls).toHaveLength(0);
     lock.release(PROJECT_PATH);
   });
@@ -1332,7 +1380,7 @@ describe('ProjectDrain.drainProject — AC6/AC7: concurrency + lock discipline',
     // flag so a later scheduler (S-195) can retry instead of treating the
     // project as permanently empty (see ProjectDrain module doc + spec
     // taktgeber-nachtwaechter.md "Engine-Schnittstelle").
-    expect(result).toEqual({ stopped: true, reason: 'scan-failed', flowRuns: 0, escalated: [], completed: [], blocked: [] });
+    expect(result).toEqual({ stopped: true, reason: 'scan-failed', flowRuns: 0, escalated: [], completed: [], blocked: [], budgetPauses: [] });
     expect(lock.isHeld(PROJECT_PATH)).toBe(false);
     // Lock is acquirable again immediately afterwards
     expect(lock.tryAcquire(PROJECT_PATH)).toBe(true);
@@ -1390,7 +1438,7 @@ describe(
 
       const result = await drain.drainProject(PROJECT_PATH);
 
-      expect(result).toEqual({ stopped: true, reason: 'command-channel-busy', flowRuns: 1, escalated: [], completed: [], blocked: [] });
+      expect(result).toEqual({ stopped: true, reason: 'command-channel-busy', flowRuns: 1, escalated: [], completed: [], blocked: [], budgetPauses: [] });
       // The healthy, unchanged ready story must NEVER be escalated to Blocked —
       // this is exactly the corruption the reviewer live-reproduced.
       expect(boardWriter.calls).toEqual([]);
@@ -1515,6 +1563,7 @@ describe('ProjectDrain.drainProject — AC18: audit', () => {
       escalated: [],
       completed: [],
       blocked: [],
+      budgetPauses: [],
     });
   });
 });
@@ -1663,7 +1712,7 @@ describe('ProjectDrain — FlowRunner-Injection (headless-parallel-drain AC5/AC6
 
     const result = await drain.drainProject(PROJECT_PATH);
 
-    expect(result).toEqual({ stopped: true, reason: 'no-drain-target', flowRuns: 2, escalated: [], completed: [{ id: 'S-1', title: 'S-1' }, { id: 'S-2', title: 'S-2' }], blocked: [] });
+    expect(result).toEqual({ stopped: true, reason: 'no-drain-target', flowRuns: 2, escalated: [], completed: [{ id: 'S-1', title: 'S-1' }, { id: 'S-2', title: 'S-2' }], blocked: [], budgetPauses: [] });
     expect(flowRunner.calls).toEqual([
       { projectPath: PROJECT_PATH, command: FLOW_COMMAND, identity: null },
       { projectPath: PROJECT_PATH, command: FLOW_COMMAND, identity: null },
@@ -1694,7 +1743,7 @@ describe('ProjectDrain — FlowRunner-Injection (headless-parallel-drain AC5/AC6
 
     const result = await drain.drainProject(PROJECT_PATH, { identity: 'alex@example.com', args: ['--cost', 'low-cost'] });
 
-    expect(result).toEqual({ stopped: true, reason: 'no-drain-target', flowRuns: 2, escalated: [], completed: [{ id: 'S-1', title: 'S-1' }, { id: 'S-2', title: 'S-2' }], blocked: [] });
+    expect(result).toEqual({ stopped: true, reason: 'no-drain-target', flowRuns: 2, escalated: [], completed: [{ id: 'S-1', title: 'S-1' }, { id: 'S-2', title: 'S-2' }], blocked: [], budgetPauses: [] });
     // AC3: JEDE Flow-Runde erhält dieselben per-Drain-args.
     expect(capturedCalls).toEqual([
       { projectPath: PROJECT_PATH, command: FLOW_COMMAND, identity: 'alex@example.com', args: ['--cost', 'low-cost'] },
@@ -1739,7 +1788,7 @@ describe('ProjectDrain — FlowRunner-Injection (headless-parallel-drain AC5/AC6
 
     const result = await drain.drainProject(PROJECT_PATH);
 
-    expect(result).toEqual({ stopped: true, reason: 'no-drain-target', flowRuns: 2, escalated: ['S-1'], completed: [], blocked: [{ id: 'S-1', title: 'S-1' }] });
+    expect(result).toEqual({ stopped: true, reason: 'no-drain-target', flowRuns: 2, escalated: ['S-1'], completed: [], blocked: [{ id: 'S-1', title: 'S-1' }], budgetPauses: [] });
     expect(findStory(state.projects[0], 'S-1').status).toBe('Blocked');
   });
 
@@ -1758,7 +1807,7 @@ describe('ProjectDrain — FlowRunner-Injection (headless-parallel-drain AC5/AC6
 
     const result = await drain.drainProject(PROJECT_PATH);
 
-    expect(result).toEqual({ stopped: true, reason: 'command-channel-busy', flowRuns: 1, escalated: [], completed: [], blocked: [] });
+    expect(result).toEqual({ stopped: true, reason: 'command-channel-busy', flowRuns: 1, escalated: [], completed: [], blocked: [], budgetPauses: [] });
     expect(boardWriter.calls).toEqual([]);
   });
 
@@ -1791,7 +1840,7 @@ describe('ProjectDrain — FlowRunner-Injection (headless-parallel-drain AC5/AC6
 
     const result = await drain.drainProject(PROJECT_PATH);
 
-    expect(result).toEqual({ stopped: true, reason: 'no-drain-target', flowRuns: 2, escalated: [], completed: [{ id: 'S-1', title: 'S-1' }, { id: 'S-2', title: 'S-2' }], blocked: [] });
+    expect(result).toEqual({ stopped: true, reason: 'no-drain-target', flowRuns: 2, escalated: [], completed: [{ id: 'S-1', title: 'S-1' }, { id: 'S-2', title: 'S-2' }], blocked: [], budgetPauses: [] });
     // drainProject() ohne `args` reicht per Default `args: []` durch (headless-manual-drain
     // AC3) — verhaltensgleich zu „kein Flag" (HeadlessRunnerCore behandelt [] wie ohne args).
     expect(headlessRunner.calls).toEqual([
@@ -1817,7 +1866,7 @@ describe('ProjectDrain — FlowRunner-Injection (headless-parallel-drain AC5/AC6
 
     const result = await drain.drainProject(PROJECT_PATH);
 
-    expect(result).toEqual({ stopped: true, reason: 'no-drain-target', flowRuns: 0, escalated: [], completed: [], blocked: [] });
+    expect(result).toEqual({ stopped: true, reason: 'no-drain-target', flowRuns: 0, escalated: [], completed: [], blocked: [], budgetPauses: [] });
     expect(headlessRunner.calls).toHaveLength(0);
   });
 
@@ -1832,7 +1881,487 @@ describe('ProjectDrain — FlowRunner-Injection (headless-parallel-drain AC5/AC6
     // isProjectBusy() sees commandService.getStatus().status==='running' and
     // rejects before the execution step is ever reached (AC7 busy-check is
     // untouched by the FlowRunner-Injection, exactly as documented).
-    expect(result).toEqual({ stopped: true, reason: 'already-busy', flowRuns: 0, escalated: [], completed: [], blocked: [] });
+    expect(result).toEqual({ stopped: true, reason: 'already-busy', flowRuns: 0, escalated: [], completed: [], blocked: [], budgetPauses: [] });
     expect(commandService.calls).toHaveLength(0);
+  });
+});
+
+// ── night-budget-guard (S-273 Drain-Kern: reaktiv/proaktiv/Eskalations-Schutz) ─
+
+describe('ProjectDrain — night-budget-guard AC4/AC5/AC6/AC7/AC8 (Budget-Pause-Kern)', () => {
+  it('exposes the documented default reactive resume buffer constant', () => {
+    expect(BUDGET_RESUME_BUFFER_MS).toBe(5 * 60 * 1000);
+  });
+
+  describe('AC4 — reactive: budget-limited FlowRunner result', () => {
+    it('waits until resetAt+budgetResumeBufferMs, records a reactive-limit pause, and never counts the round as no-progress', async () => {
+      const { state, boardAggregator } = makeBoard([makeStory({ id: 'S-1', status: 'To Do', ready: true })]);
+      let clockMs = NOW_MS;
+      const sleepCalls = [];
+      const sleepFn = async (ms) => {
+        sleepCalls.push(ms);
+        clockMs += ms;
+      };
+      let calls = 0;
+      const resetAt = NOW_MS + 60_000; // 1 min in the future
+      const flowRunner = {
+        startRun() {
+          calls += 1;
+          return { ok: true, handle: { run: calls } };
+        },
+        async awaitCompletion() {
+          if (calls === 1) return { status: 'budget-limited', resetAt };
+          // Second round: the board is drained for real.
+          findStory(state.projects[0], 'S-1').status = 'Done';
+          findStory(state.projects[0], 'S-1').ready = false;
+          return { status: 'done' };
+        },
+      };
+      const boardWriter = new FakeBoardWriter(state);
+      const drain = new ProjectDrain({
+        boardAggregator,
+        flowRunner,
+        boardWriter,
+        lock: new ProjectJobLock(),
+        escalationAttempts: 1, // deliberately low — a regression would escalate immediately
+        budgetResumeBufferMs: 5000,
+        sleepFn,
+        now: () => clockMs,
+      });
+
+      const result = await drain.drainProject(PROJECT_PATH);
+
+      expect(result).toEqual({
+        stopped: true,
+        reason: 'no-drain-target',
+        flowRuns: 2,
+        escalated: [],
+        completed: [{ id: 'S-1', title: 'S-1' }],
+        blocked: [],
+        budgetPauses: [{ from: NOW_MS, to: NOW_MS + 65_000, reason: 'reactive-limit' }],
+      });
+      expect(sleepCalls).toEqual([65_000]); // resetAt(+60s) + buffer(5s) - pauseFrom(NOW_MS)
+      expect(boardWriter.calls).toEqual([]); // AC7: never escalated despite the budget-limited round
+    });
+
+    it('clamps the wait to 0 when resetAt already lies in the past (never a negative setTimeout)', async () => {
+      const { state, boardAggregator } = makeBoard([makeStory({ id: 'S-1', status: 'To Do', ready: true })]);
+      const sleepCalls = [];
+      let calls = 0;
+      const resetAt = NOW_MS - 100_000; // already in the past
+      const flowRunner = {
+        startRun() {
+          calls += 1;
+          return { ok: true, handle: { run: calls } };
+        },
+        async awaitCompletion() {
+          if (calls === 1) return { status: 'budget-limited', resetAt };
+          findStory(state.projects[0], 'S-1').status = 'Done';
+          findStory(state.projects[0], 'S-1').ready = false;
+          return { status: 'done' };
+        },
+      };
+      const drain = new ProjectDrain({
+        boardAggregator,
+        flowRunner,
+        lock: new ProjectJobLock(),
+        budgetResumeBufferMs: 1000, // resumeAt still well before NOW_MS
+        sleepFn: async (ms) => sleepCalls.push(ms),
+        now: () => NOW_MS,
+      });
+
+      const result = await drain.drainProject(PROJECT_PATH);
+
+      expect(result.reason).toBe('no-drain-target');
+      expect(sleepCalls).toEqual([0]); // clamped, never negative
+      expect(result.budgetPauses).toEqual([{ from: NOW_MS, to: NOW_MS, reason: 'reactive-limit' }]);
+    });
+
+    it('AC7: budget-limited WITHOUT resetAt (defensive edge case) never waits, never escalates, and drain continues', async () => {
+      const { state, boardAggregator } = makeBoard([makeStory({ id: 'S-1', status: 'To Do', ready: true })]);
+      const sleepCalls = [];
+      let calls = 0;
+      const flowRunner = {
+        startRun() {
+          calls += 1;
+          return { ok: true, handle: { run: calls } };
+        },
+        async awaitCompletion() {
+          if (calls === 1) return { status: 'budget-limited' }; // no resetAt at all
+          findStory(state.projects[0], 'S-1').status = 'Done';
+          findStory(state.projects[0], 'S-1').ready = false;
+          return { status: 'done' };
+        },
+      };
+      const boardWriter = new FakeBoardWriter(state);
+      const drain = new ProjectDrain({
+        boardAggregator,
+        flowRunner,
+        boardWriter,
+        lock: new ProjectJobLock(),
+        escalationAttempts: 1,
+        sleepFn: async (ms) => sleepCalls.push(ms),
+        now: () => NOW_MS,
+      });
+
+      const result = await drain.drainProject(PROJECT_PATH);
+
+      expect(result.reason).toBe('no-drain-target');
+      expect(result.flowRuns).toBe(2);
+      expect(result.escalated).toEqual([]);
+      expect(result.budgetPauses).toEqual([]); // no known window → not reported as a pause
+      expect(sleepCalls).toEqual([]); // never waited
+      expect(boardWriter.calls).toEqual([]);
+    });
+  });
+
+  describe('AC6 — sanftes Ende (reactive path, windowEndMs exceeded)', () => {
+    it('stops with budget-window-end (no wait) when resetAt+buffer lies behind windowEndMs', async () => {
+      const { boardAggregator } = makeBoard([makeStory({ id: 'S-1', status: 'To Do', ready: true })]);
+      const sleepCalls = [];
+      const resetAt = NOW_MS + 5000;
+      const flowRunner = {
+        startRun: () => ({ ok: true, handle: {} }),
+        awaitCompletion: async () => ({ status: 'budget-limited', resetAt }),
+      };
+      const lock = new ProjectJobLock();
+      const drain = new ProjectDrain({
+        boardAggregator,
+        flowRunner,
+        lock,
+        budgetResumeBufferMs: 1000, // resumeAt = NOW_MS + 6000
+        sleepFn: async (ms) => sleepCalls.push(ms),
+        now: () => NOW_MS,
+      });
+
+      const result = await drain.drainProject(PROJECT_PATH, { windowEndMs: NOW_MS + 1000 }); // window ends before resumeAt
+
+      expect(result).toEqual({
+        stopped: true,
+        reason: 'budget-window-end',
+        flowRuns: 1,
+        escalated: [],
+        completed: [],
+        blocked: [],
+        budgetPauses: [{ from: NOW_MS, to: null, reason: 'reactive-limit' }],
+      });
+      expect(sleepCalls).toEqual([]); // never waits when the window has already passed
+      expect(lock.isHeld(PROJECT_PATH)).toBe(false); // clean release, no running job killed
+    });
+
+    it('windowEndMs=null (no window, manual drain) → the reactive pause always waits regularly, never budget-window-end', async () => {
+      const { state, boardAggregator } = makeBoard([makeStory({ id: 'S-1', status: 'To Do', ready: true })]);
+      let calls = 0;
+      const resetAt = NOW_MS + 10 * 24 * 60 * 60 * 1000; // far in the future — would exceed any real window
+      const flowRunner = {
+        startRun() {
+          calls += 1;
+          return { ok: true, handle: {} };
+        },
+        async awaitCompletion() {
+          if (calls === 1) return { status: 'budget-limited', resetAt };
+          findStory(state.projects[0], 'S-1').status = 'Done';
+          findStory(state.projects[0], 'S-1').ready = false;
+          return { status: 'done' };
+        },
+      };
+      const drain = new ProjectDrain({
+        boardAggregator,
+        flowRunner,
+        lock: new ProjectJobLock(),
+        sleepFn: async () => {},
+        now: () => NOW_MS,
+      });
+
+      const result = await drain.drainProject(PROJECT_PATH); // opts.windowEndMs omitted → null
+
+      expect(result.reason).toBe('no-drain-target'); // waited (mocked), never budget-window-end
+      expect(result.budgetPauses[0].reason).toBe('reactive-limit');
+      expect(result.budgetPauses[0].to).not.toBeNull();
+    });
+  });
+
+  describe('AC5 — proactive: injected budgetGuard consulted before every flow round', () => {
+    it('pauses before starting a flow round (no flowRuns increment), then resumes and drains normally', async () => {
+      const { state, boardAggregator } = makeBoard([makeStory({ id: 'S-1', status: 'To Do', ready: true })]);
+      const checkCalls = [];
+      let checkCount = 0;
+      const budgetGuard = {
+        async checkProactive({ nowMs }) {
+          checkCalls.push(nowMs);
+          checkCount += 1;
+          if (checkCount === 1) return { pause: true, reason: 'proactive-threshold', resumeAt: NOW_MS + 30_000 };
+          return { pause: false };
+        },
+        noteReset() {},
+        async awaitResume({ resumeAt, windowEndMs, nowMs }) {
+          expect(resumeAt).toBe(NOW_MS + 30_000);
+          expect(windowEndMs).toBeNull();
+          expect(nowMs).toBe(NOW_MS);
+          return { resumed: true, from: nowMs, to: NOW_MS + 30_000 };
+        },
+      };
+      let calls = 0;
+      const flowRunner = {
+        startRun() {
+          calls += 1;
+          return { ok: true, handle: { run: calls } };
+        },
+        async awaitCompletion() {
+          findStory(state.projects[0], 'S-1').status = 'Done';
+          findStory(state.projects[0], 'S-1').ready = false;
+          return { status: 'done' };
+        },
+      };
+      const drain = new ProjectDrain({
+        boardAggregator,
+        flowRunner,
+        budgetGuard,
+        lock: new ProjectJobLock(),
+        now: () => NOW_MS,
+      });
+
+      const result = await drain.drainProject(PROJECT_PATH);
+
+      // The paused round never called startRun() — checkCount reached 2
+      // (paused once, then re-checked before the round that actually ran).
+      expect(checkCalls.length).toBeGreaterThanOrEqual(2);
+      expect(calls).toBe(1); // exactly one real flow round — the paused round never started one
+      expect(result.reason).toBe('no-drain-target');
+      expect(result.budgetPauses).toEqual([{ from: NOW_MS, to: NOW_MS + 30_000, reason: 'proactive-threshold' }]);
+    });
+
+    it('stops sanft (budget-window-end / budget-stop) when the guard reports resumed:false — no flow round ever starts', async () => {
+      const { boardAggregator } = makeBoard([makeStory({ id: 'S-1', status: 'To Do', ready: true })]);
+      const budgetGuard = {
+        checkProactive: async () => ({ pause: true, reason: 'proactive-threshold', resumeAt: null }), // A1: kein Reset bekannt
+        noteReset: () => {},
+        awaitResume: async () => ({ resumed: false, reason: 'budget-stop', from: NOW_MS }),
+      };
+      const flowRunner = { startRun: () => ({ ok: true, handle: {} }), awaitCompletion: async () => ({ status: 'done' }) };
+      const lock = new ProjectJobLock();
+      const drain = new ProjectDrain({ boardAggregator, flowRunner, budgetGuard, lock, now: () => NOW_MS });
+
+      const result = await drain.drainProject(PROJECT_PATH); // no window (manual drain)
+
+      expect(result).toEqual({
+        stopped: true,
+        reason: 'budget-stop',
+        flowRuns: 0,
+        escalated: [],
+        completed: [],
+        blocked: [],
+        budgetPauses: [{ from: NOW_MS, to: null, reason: 'proactive-threshold' }],
+      });
+      expect(lock.isHeld(PROJECT_PATH)).toBe(false);
+    });
+
+    it('without an injected budgetGuard, the proactive check is a complete no-op (AC8/A4)', async () => {
+      const { state, boardAggregator } = makeBoard([makeStory({ id: 'S-1', status: 'To Do', ready: true })]);
+      const commandService = new FakeCommandService(() => {
+        findStory(state.projects[0], 'S-1').status = 'Done';
+        findStory(state.projects[0], 'S-1').ready = false;
+      });
+      const drain = new ProjectDrain({ boardAggregator, commandService, lock: new ProjectJobLock(), now: () => NOW_MS });
+
+      const result = await drain.drainProject(PROJECT_PATH);
+
+      expect(result.reason).toBe('no-drain-target');
+      expect(result.budgetPauses).toEqual([]);
+      expect(commandService.calls).toHaveLength(1); // a real round DID start — proactive check never intervened
+    });
+  });
+
+  describe('AC7 — Eskalations-Schutz (kritisch): never escalates no matter how many consecutive budget-limited rounds', () => {
+    it('never sets a story to Blocked, even far beyond escalationAttempts consecutive budget-limited runs', async () => {
+      const { state, boardAggregator } = makeBoard([makeStory({ id: 'S-1', status: 'To Do', ready: true })]);
+      let calls = 0;
+      const BUDGET_LIMITED_ROUNDS = 8; // well beyond escalationAttempts below
+      const flowRunner = {
+        startRun() {
+          calls += 1;
+          return { ok: true, handle: { run: calls } };
+        },
+        async awaitCompletion() {
+          if (calls <= BUDGET_LIMITED_ROUNDS) return { status: 'budget-limited', resetAt: NOW_MS };
+          findStory(state.projects[0], 'S-1').status = 'Done';
+          findStory(state.projects[0], 'S-1').ready = false;
+          return { status: 'done' };
+        },
+      };
+      const boardWriter = new FakeBoardWriter(state);
+      const drain = new ProjectDrain({
+        boardAggregator,
+        flowRunner,
+        boardWriter,
+        lock: new ProjectJobLock(),
+        escalationAttempts: 2, // deliberately low — a regression would escalate long before round 8
+        budgetResumeBufferMs: 0,
+        sleepFn: async () => {},
+        now: () => NOW_MS,
+      });
+
+      const result = await drain.drainProject(PROJECT_PATH);
+
+      expect(result.reason).toBe('no-drain-target');
+      expect(result.flowRuns).toBe(BUDGET_LIMITED_ROUNDS + 1);
+      expect(result.escalated).toEqual([]);
+      expect(boardWriter.calls).toEqual([]); // setBlocked() was NEVER called
+      expect(findStory(state.projects[0], 'S-1').status).toBe('Done');
+    });
+  });
+
+  describe('AC8 — kein Regress: an injected budgetGuard that never pauses behaves identically to no guard at all', () => {
+    it('produces the exact same result as the default (no budgetGuard) drain, plus budgetPauses:[]', async () => {
+      const budgetGuard = {
+        checkProactive: async () => ({ pause: false }),
+        noteReset: () => {},
+        awaitResume: async () => ({ resumed: true, from: 0, to: 0 }),
+      };
+      // Reuse the same mutation pattern as the plain AC1/AC2 tests for a 1:1 comparison.
+      const makeDrain = (guard) => {
+        const { state: st, boardAggregator: ba } = makeBoard([
+          makeStory({ id: 'S-1', status: 'To Do', ready: true }),
+          makeStory({ id: 'S-2', status: 'To Do', ready: true }),
+        ]);
+        const cs = new FakeCommandService((callIndex) => {
+          const id = callIndex === 1 ? 'S-1' : 'S-2';
+          findStory(st.projects[0], id).status = 'Done';
+          findStory(st.projects[0], id).ready = false;
+        });
+        return new ProjectDrain({
+          boardAggregator: ba,
+          commandService: cs,
+          budgetGuard: guard,
+          lock: new ProjectJobLock(),
+          now: () => NOW_MS,
+        });
+      };
+
+      const withGuard = await makeDrain(budgetGuard).drainProject(PROJECT_PATH);
+      const withoutGuard = await makeDrain(undefined).drainProject(PROJECT_PATH);
+
+      expect(withGuard).toEqual(withoutGuard);
+      expect(withGuard).toEqual({
+        stopped: true,
+        reason: 'no-drain-target',
+        flowRuns: 2,
+        escalated: [],
+        completed: [{ id: 'S-1', title: 'S-1' }, { id: 'S-2', title: 'S-2' }],
+        blocked: [],
+        budgetPauses: [],
+      });
+    });
+  });
+
+  describe('Robustheit (NFR): ein werfender budgetGuard darf den Drain nicht crashen', () => {
+    it('checkProactive() throwing is treated as "no pause" — the drain proceeds normally', async () => {
+      const { state, boardAggregator } = makeBoard([makeStory({ id: 'S-1', status: 'To Do', ready: true })]);
+      const budgetGuard = {
+        checkProactive: async () => {
+          throw new Error('meter unavailable');
+        },
+        noteReset: () => {},
+        awaitResume: async () => ({ resumed: true, from: 0, to: 0 }),
+      };
+      const commandService = new FakeCommandService(() => {
+        findStory(state.projects[0], 'S-1').status = 'Done';
+        findStory(state.projects[0], 'S-1').ready = false;
+      });
+      const drain = new ProjectDrain({
+        boardAggregator,
+        commandService,
+        budgetGuard,
+        lock: new ProjectJobLock(),
+        now: () => NOW_MS,
+      });
+
+      const result = await drain.drainProject(PROJECT_PATH);
+
+      expect(result.reason).toBe('no-drain-target');
+      expect(result.budgetPauses).toEqual([]);
+      expect(commandService.calls).toHaveLength(1); // the round genuinely ran, no crash
+    });
+
+    it('a throwing noteReset() on a reactive limit does not crash the drain (best-effort)', async () => {
+      const { state, boardAggregator } = makeBoard([makeStory({ id: 'S-1', status: 'To Do', ready: true })]);
+      let calls = 0;
+      const budgetGuard = {
+        checkProactive: async () => ({ pause: false }),
+        noteReset: () => {
+          throw new Error('guard write failed');
+        },
+        awaitResume: async () => ({ resumed: true, from: 0, to: 0 }),
+      };
+      const flowRunner = {
+        startRun() {
+          calls += 1;
+          return { ok: true, handle: {} };
+        },
+        async awaitCompletion() {
+          if (calls === 1) return { status: 'budget-limited', resetAt: NOW_MS };
+          findStory(state.projects[0], 'S-1').status = 'Done';
+          findStory(state.projects[0], 'S-1').ready = false;
+          return { status: 'done' };
+        },
+      };
+      const drain = new ProjectDrain({
+        boardAggregator,
+        flowRunner,
+        budgetGuard,
+        lock: new ProjectJobLock(),
+        budgetResumeBufferMs: 0,
+        sleepFn: async () => {},
+        now: () => NOW_MS,
+      });
+
+      await expect(drain.drainProject(PROJECT_PATH)).resolves.toMatchObject({ reason: 'no-drain-target' });
+    });
+  });
+
+  describe('Mehrere Budget-Pausen in einem Drain (proaktiv + reaktiv kombiniert, chronologisch)', () => {
+    it('records both a proactive and a subsequent reactive pause as separate chronological entries', async () => {
+      const { state, boardAggregator } = makeBoard([makeStory({ id: 'S-1', status: 'To Do', ready: true })]);
+      let checkCount = 0;
+      const budgetGuard = {
+        async checkProactive() {
+          checkCount += 1;
+          if (checkCount === 1) return { pause: true, reason: 'proactive-threshold', resumeAt: NOW_MS + 1000 };
+          return { pause: false };
+        },
+        noteReset: () => {},
+        awaitResume: async ({ nowMs }) => ({ resumed: true, from: nowMs, to: NOW_MS + 1000 }),
+      };
+      let calls = 0;
+      const flowRunner = {
+        startRun() {
+          calls += 1;
+          return { ok: true, handle: {} };
+        },
+        async awaitCompletion() {
+          if (calls === 1) return { status: 'budget-limited', resetAt: NOW_MS };
+          findStory(state.projects[0], 'S-1').status = 'Done';
+          findStory(state.projects[0], 'S-1').ready = false;
+          return { status: 'done' };
+        },
+      };
+      const drain = new ProjectDrain({
+        boardAggregator,
+        flowRunner,
+        budgetGuard,
+        lock: new ProjectJobLock(),
+        budgetResumeBufferMs: 0,
+        sleepFn: async () => {},
+        now: () => NOW_MS,
+      });
+
+      const result = await drain.drainProject(PROJECT_PATH);
+
+      expect(result.reason).toBe('no-drain-target');
+      expect(result.budgetPauses).toEqual([
+        { from: NOW_MS, to: NOW_MS + 1000, reason: 'proactive-threshold' },
+        { from: NOW_MS, to: NOW_MS, reason: 'reactive-limit' },
+      ]);
+    });
   });
 });

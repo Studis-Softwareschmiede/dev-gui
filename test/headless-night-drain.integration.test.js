@@ -279,6 +279,7 @@ describe('Headless-Nacht-Drain — Selbst-Blockade-Vermeidung (S-212/S-213 kriti
       escalated: [],
       completed: [],
       blocked: [],
+      budgetPauses: [],
     });
     // Kein einziger Kindprozess wurde je gespawnt (HeadlessRunnerCore prüft
     // das Lock VOR dem Spawn) — der Bug verhindert den Lauf vollständig.
@@ -320,6 +321,7 @@ describe('Headless-Nacht-Drain — Selbst-Blockade-Vermeidung (S-212/S-213 kriti
       escalated: [],
       completed: [{ id: 'S-1', title: '' }],
       blocked: [],
+      budgetPauses: [],
     });
     expect(spawnFn).toHaveBeenCalledTimes(1);
   });
@@ -389,6 +391,7 @@ describe('Headless-Nacht-Drain — echte Parallelität (AC7) + kein command-chan
       escalated: [],
       completed: [{ id: 'S-1', title: '' }],
       blocked: [],
+      budgetPauses: [],
     });
     expect(resultB).toEqual({
       stopped: true,
@@ -397,6 +400,7 @@ describe('Headless-Nacht-Drain — echte Parallelität (AC7) + kein command-chan
       escalated: [],
       completed: [{ id: 'S-1', title: '' }],
       blocked: [],
+      budgetPauses: [],
     });
     // AC8: command-channel-busy tritt für keines der beiden Projekte auf.
     expect(resultA.reason).not.toBe('command-channel-busy');

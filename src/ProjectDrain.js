@@ -111,13 +111,47 @@
  *   TOCTOU-Lücke). Das Lock wird IMMER in `finally` freigegeben (Edge-Case
  *   "Projekt-Lock bei Crash").
  *
+ * Nacht-Budget-Schutz (S-273, docs/specs/night-budget-guard.md AC4-AC8):
+ *   `drainProject()` behandelt zwei Budget-Signale zusätzlich zur normalen
+ *   Ziel-Auswahl/Konvergenz/Eskalation, OHNE deren Logik zu verändern (AC8,
+ *   Default-Regress bit-identisch ohne injizierten `budgetGuard` und ohne
+ *   `budget-limited`-Status):
+ *   - REAKTIV (AC4): liefert `flowRunner.awaitCompletion()` den Status
+ *     `'budget-limited'` (S-270, mit `resetAt`), gilt der Lauf NICHT als
+ *     fortschrittslos — der Drain merkt sich `resetAt` (ruft `budgetGuard
+ *     .noteReset(resetAt)`, falls injiziert), erfasst eine Budget-Pause
+ *     (`reason:'reactive-limit'`) und wartet bis `resetAt +
+ *     budgetResumeBufferMs` (Default `BUDGET_RESUME_BUFFER_MS`, ~5 min),
+ *     sofern das nicht hinter `opts.windowEndMs` liegt — dieser reaktive
+ *     Pfad braucht KEINEN injizierten `budgetGuard` (immer aktiv, AC11).
+ *   - PROAKTIV (AC5): ist ein `budgetGuard` injiziert, fragt der Drain
+ *     dessen `checkProactive({nowMs})` VOR jeder Flow-Runde (Story-Grenze);
+ *     bei Pause startet keine Runde (kein `flowRuns`-Increment), eine
+ *     Budget-Pause (`reason:'proactive-threshold'`) wird erfasst und über
+ *     `budgetGuard.awaitResume({resumeAt, windowEndMs, nowMs})` gewartet
+ *     bzw. sanft geendet.
+ *   - SANFTES ENDE (AC6): liegt der Fortsetzungs-Zeitpunkt hinter
+ *     `opts.windowEndMs` (reaktiv) bzw. liefert der Guard `resumed:false`
+ *     (proaktiv, `reason:'budget-window-end'|'budget-stop'`), stoppt der
+ *     Drain sauber (kein Kill laufender Läufe, Lock-Freigabe wie immer via
+ *     `finally`) — `drainProject()` liefert dann zusätzlich zu den
+ *     bisherigen `reason`-Werten (`'no-drain-target'|'already-busy'|
+ *     'command-channel-busy'|'safety-stop-no-progress'|'scan-failed'`) auch
+ *     `'budget-window-end'|'budget-stop'`.
+ *   - ESKALATIONS-SCHUTZ (AC7, kritisch): `budget-limited`-Ergebnisse,
+ *     Budget-Pausen und Budget-Stops erhöhen NIE `consecutiveNoProgress`/
+ *     `totalNoProgressRounds` und lösen NIE `boardWriter.setBlocked` aus.
+ *   - Rückgabe additiv um `budgetPauses: [{from,to,reason}]` (`to=null` bei
+ *     sanftem Ende), auf JEDEM Rückgabepfad vorhanden (leer `[]`, wenn keine
+ *     Budget-Pause auftrat — kein Regress an bestehenden Feldern, AC8).
+ *   Der konkrete `BudgetGuard` (kapselt [[token-usage-meter]] + Settings +
+ *   Reset-Merken) sowie die Scheduler-/`server.js`-Verdrahtung (`windowEndMs`
+ *   via `computeWindowEndMs`) sind NICHT Teil dieser Story (S-274) — hier
+ *   wird nur das injizierbare `budgetGuard`-Interface konsumiert.
+ *
  * Nicht in dieser Story (bewusst NICHT gebaut, siehe Spec "Nicht-Ziele" +
  * Story-Scope-Hinweis):
  *   - Nachtfenster-Scheduler / `maxParallel` (S-195 NightWatchScheduler)
- *   - Token-Limit-Erkennung/-Pause (S-193 TokenLimitWatcher) — daher gibt
- *     `drainProject()` hier nie `reason: 'token-limit-stop'|'window-end'`
- *     zurück (nur `'no-drain-target'|'already-busy'|'command-channel-busy'
- *     |'safety-stop-no-progress'|'scan-failed'`, AC1/AC2/AC4/AC6/AC7).
  *   - "Board abarbeiten"-Knopf-Umbau (S-196) / Settings-Store (S-194) / UI (S-197)
  *
  * Lock-Contention gegen den GLOBALEN CommandService/JobLock (S-195 Review-
@@ -204,6 +238,16 @@ export const DEFAULT_POLL_INTERVAL_MS = 500;
  * unvorhergesehenen Logikfehlern (z.B. fehlender `boardWriter`).
  */
 export const DEFAULT_SAFETY_MAX_NO_PROGRESS_ROUNDS = 50;
+
+/**
+ * Default Fortsetzungs-Puffer (ms) NACH einem reaktiv erkannten
+ * `resetAt`-Zeitpunkt (docs/specs/night-budget-guard.md A3, AC4) — bewusst
+ * großzügiger als der 1-Min-Puffer des interaktiven `TokenLimitWatcher`-
+ * Pfads (headless-Prozesse starten träger, Reset-Zeit ist gerundet).
+ * Injizierbar über `budgetResumeBufferMs` (NFR Testbarkeit, kein echtes
+ * Warten in Tests nötig).
+ */
+export const BUDGET_RESUME_BUFFER_MS = 5 * 60 * 1000;
 
 // ── Pure Helpers (kein IO — direkt unit-testbar) ──────────────────────────────
 
@@ -486,13 +530,23 @@ export function computeCompletedBlocked(initialStatuses, endProject) {
  * @param {import('./ProjectJobLock.js').ProjectJobLock} [deps.lock]  default: Singleton `projectJobLock`
  * @param {{ hasSession: (p: string) => boolean }} [deps.sessionRegistry]  für Busy-Erkennung (AC7)
  * @param {{ record: Function }} [deps.auditStore]  Drain-Start + Eskalation (AC18)
+ * @param {{
+ *   checkProactive: (p: { nowMs: number }) => Promise<{ pause: boolean, reason?: string, resumeAt?: number|null }>,
+ *   noteReset: (resetAt: number) => void,
+ *   awaitResume: (p: { resumeAt: number|null, windowEndMs: number|null, nowMs: number }) =>
+ *     Promise<{ resumed: true, from: number, to: number } | { resumed: false, reason: 'budget-window-end'|'budget-stop', from: number }>,
+ * }} [deps.budgetGuard]  optional (docs/specs/night-budget-guard.md AC5/AC9-AC11, konkrete
+ *   Implementierung S-274) — proaktive Schwellen-Prüfung VOR jeder Flow-Runde. Ohne ihn ist
+ *   der proaktive Schutz ein No-op (AC8/A4); der reaktive Schutz (AC4) ist davon unabhängig.
  * @param {number} [deps.staleInProgressHours]  default: DEFAULT_STALE_IN_PROGRESS_HOURS (4)
  * @param {number} [deps.escalationAttempts]    default: DEFAULT_ESCALATION_ATTEMPTS (3)
  * @param {number} [deps.pollIntervalMs]        Poll-Intervall des Default-`InteractiveFlowRunner`s
  * @param {number} [deps.safetyMaxNoProgressRounds]  Sicherheitsgürtel-Obergrenze
  *   (Defense-in-Depth, S-192 Review-Iteration 2), default:
  *   DEFAULT_SAFETY_MAX_NO_PROGRESS_ROUNDS (50)
- * @param {(ms: number) => Promise<void>} [deps.sleepFn]  injectable für Tests (Default-`InteractiveFlowRunner`)
+ * @param {number} [deps.budgetResumeBufferMs]  Fortsetzungs-Puffer nach einem reaktiv
+ *   erkannten `resetAt` (night-budget-guard A3/AC4), default: BUDGET_RESUME_BUFFER_MS (~5 min)
+ * @param {(ms: number) => Promise<void>} [deps.sleepFn]  injectable für Tests (Default-`InteractiveFlowRunner` UND das reaktive Budget-Warten)
  * @param {() => number} [deps.now]  injectable Uhr (ms epoch) für Tests
  */
 export class ProjectDrain {
@@ -503,9 +557,12 @@ export class ProjectDrain {
   #lock;
   #sessionRegistry;
   #auditStore;
+  #budgetGuard;
   #staleInProgressHours;
   #escalationAttempts;
   #safetyMaxNoProgressRounds;
+  #budgetResumeBufferMs;
+  #sleepFn;
   #now;
 
   constructor({
@@ -516,10 +573,12 @@ export class ProjectDrain {
     lock = projectJobLock,
     sessionRegistry,
     auditStore,
+    budgetGuard,
     staleInProgressHours = DEFAULT_STALE_IN_PROGRESS_HOURS,
     escalationAttempts = DEFAULT_ESCALATION_ATTEMPTS,
     pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
     safetyMaxNoProgressRounds = DEFAULT_SAFETY_MAX_NO_PROGRESS_ROUNDS,
+    budgetResumeBufferMs = BUDGET_RESUME_BUFFER_MS,
     sleepFn,
     now,
   } = {}) {
@@ -536,10 +595,19 @@ export class ProjectDrain {
     this.#lock = lock;
     this.#sessionRegistry = sessionRegistry ?? null;
     this.#auditStore = auditStore ?? null;
+    // night-budget-guard AC5/AC9-AC11: optional — ohne ihn ist die
+    // proaktive Prüfung ein No-op (AC8, kein Regress). Der reaktive Schutz
+    // (AC4) braucht keinen budgetGuard (immer aktiv, AC11).
+    this.#budgetGuard = budgetGuard ?? null;
     this.#staleInProgressHours = staleInProgressHours > 0 ? staleInProgressHours : DEFAULT_STALE_IN_PROGRESS_HOURS;
     this.#escalationAttempts = escalationAttempts > 0 ? escalationAttempts : DEFAULT_ESCALATION_ATTEMPTS;
     this.#safetyMaxNoProgressRounds =
       safetyMaxNoProgressRounds > 0 ? safetyMaxNoProgressRounds : DEFAULT_SAFETY_MAX_NO_PROGRESS_ROUNDS;
+    this.#budgetResumeBufferMs = budgetResumeBufferMs >= 0 ? budgetResumeBufferMs : BUDGET_RESUME_BUFFER_MS;
+    // Eigenständig gehalten (nicht nur an InteractiveFlowRunner durchgereicht) —
+    // das reaktive Budget-Warten (AC4) läuft IM Drain selbst, unabhängig vom
+    // injizierten FlowRunner-Adapter.
+    this.#sleepFn = sleepFn ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.#now = now ?? (() => Date.now());
   }
 
@@ -560,26 +628,38 @@ export class ProjectDrain {
    *   `InteractiveFlowRunner` ignoriert `args` (interaktiver Pfad kennt keinen
    *   `--cost`-Hebel); der `HeadlessFlowRunnerAdapter` reicht sie an den
    *   `claude -p '/agent-flow:flow …'`-Kindprozess durch. Default: `[]`.
+   * @param {number|null} [opts.windowEndMs]  vom Scheduler übergebenes Nacht-
+   *   Fenster-Ende (ms epoch, docs/specs/night-budget-guard.md AC6/A2). `null`
+   *   (Default) = kein Fenster (manueller Drain) — eine reaktive Budget-Pause
+   *   wartet dann regulär, eine proaktive ohne bekannten Reset endet sanft
+   *   (`reason:'budget-stop'`).
    * @returns {Promise<{
    *   stopped: true,
-   *   reason: 'no-drain-target'|'already-busy'|'command-channel-busy'|'safety-stop-no-progress'|'scan-failed',
+   *   reason: 'no-drain-target'|'already-busy'|'command-channel-busy'|'safety-stop-no-progress'|'scan-failed'|'budget-window-end'|'budget-stop',
    *   flowRuns: number,
    *   escalated: string[],
    *   completed: { id: string, title: string }[],
-   *   blocked: { id: string, title: string }[]
+   *   blocked: { id: string, title: string }[],
+   *   budgetPauses: { from: number, to: number|null, reason: 'reactive-limit'|'proactive-threshold' }[]
    * }>}
    *   `completed`/`blocked` (docs/specs/drain-completion-report.md AC1/AC2):
    *   während dieses Drains nach `Done` bzw. `Blocked` übergegangene Stories
    *   (Anfangs-/End-Snapshot-Diff, `computeCompletedBlocked`). Bei
    *   `already-busy`/`scan-failed`/`command-channel-busy` oder `flowRuns==0`
    *   sind beide Listen leer (kein Crash). `blocked` ist eine Obermenge von
-   *   `escalated`. Kein Pfad/Secret in `title`.
+   *   `escalated`. Kein Pfad/Secret in `title`. `budgetPauses`
+   *   (docs/specs/night-budget-guard.md AC4/AC5/AC6, chronologisch, additiv
+   *   auf JEDEM Rückgabepfad — leer `[]`, wenn keine Budget-Pause auftrat):
+   *   `to=null` bedeutet, die Pause hat den Drain sanft beendet
+   *   (`reason:'budget-window-end'|'budget-stop'`).
    */
   async drainProject(projectPath, opts = {}) {
     const identity = opts.identity ?? null;
     // AC3: per-Drain durchgereichte argv (z.B. ['--cost', <mode>]) — gilt für
     // ALLE Flow-Runden dieses Drains. Defensiv auf ein Array normalisiert.
     const args = Array.isArray(opts.args) ? opts.args : [];
+    // night-budget-guard AC6/A2: null = kein Fenster (manueller Drain).
+    const windowEndMs = typeof opts.windowEndMs === 'number' ? opts.windowEndMs : null;
 
     // AC6/AC7: Busy-Check + eigenes Lock — KEIN await dazwischen (Node
     // Single-Thread-Event-Loop ⇒ atomar, kein Doppel-Trigger-Race).
@@ -590,15 +670,31 @@ export class ProjectDrain {
         sessionRegistry: this.#sessionRegistry,
       })
     ) {
-      return { stopped: true, reason: 'already-busy', flowRuns: 0, escalated: [], completed: [], blocked: [] };
+      return {
+        stopped: true,
+        reason: 'already-busy',
+        flowRuns: 0,
+        escalated: [],
+        completed: [],
+        blocked: [],
+        budgetPauses: [],
+      };
     }
     if (!this.#lock.tryAcquire(projectPath)) {
-      return { stopped: true, reason: 'already-busy', flowRuns: 0, escalated: [], completed: [], blocked: [] };
+      return {
+        stopped: true,
+        reason: 'already-busy',
+        flowRuns: 0,
+        escalated: [],
+        completed: [],
+        blocked: [],
+        budgetPauses: [],
+      };
     }
 
     try {
       this.#auditRecord(identity, `taktgeber:drain-start project=${projectPath}`);
-      return await this.#runLoop(projectPath, identity, args);
+      return await this.#runLoop(projectPath, identity, args, windowEndMs);
     } finally {
       // Edge-Case "Projekt-Lock bei Crash": Lock wird IMMER freigegeben,
       // auch bei einem Fehler irgendwo in #runLoop (kein Dauer-Lock).
@@ -612,16 +708,18 @@ export class ProjectDrain {
    * @param {string} projectPath
    * @param {string|null} identity
    * @param {string[]} [args]  per-Drain durchgereichte argv (AC3, s. drainProject).
+   * @param {number|null} [windowEndMs]  Nacht-Fenster-Ende (night-budget-guard AC6, s. drainProject).
    * @returns {Promise<{
    *   stopped: true,
-   *   reason: 'no-drain-target'|'command-channel-busy'|'safety-stop-no-progress'|'scan-failed',
+   *   reason: 'no-drain-target'|'command-channel-busy'|'safety-stop-no-progress'|'scan-failed'|'budget-window-end'|'budget-stop',
    *   flowRuns: number,
    *   escalated: string[],
    *   completed: { id: string, title: string }[],
-   *   blocked: { id: string, title: string }[]
+   *   blocked: { id: string, title: string }[],
+   *   budgetPauses: { from: number, to: number|null, reason: 'reactive-limit'|'proactive-threshold' }[]
    * }>}
    */
-  async #runLoop(projectPath, identity, args = []) {
+  async #runLoop(projectPath, identity, args = [], windowEndMs = null) {
     let flowRuns = 0;
     let consecutiveNoProgress = 0;
     // AC1/AC2 (drain-completion-report): Anfangs-Status-Snapshot (Status je
@@ -640,6 +738,10 @@ export class ProjectDrain {
     const lastChangeRound = new Map();
     /** @type {string[]} */
     const escalated = [];
+    // night-budget-guard AC4/AC5/AC6: additiv auf JEDEM Rückgabepfad (leer,
+    // wenn nie eine Budget-Pause auftrat — kein Regress an bestehenden Feldern).
+    /** @type {{ from: number, to: number|null, reason: 'reactive-limit'|'proactive-threshold' }[]} */
+    const budgetPauses = [];
 
     for (;;) {
       // Event-Loop-Yield (Defense-in-Depth gegen 100%-CPU-Spin, s. Modul-
@@ -672,7 +774,47 @@ export class ProjectDrain {
           escalated,
           completed,
           blocked,
+          budgetPauses,
         };
+      }
+
+      // night-budget-guard AC5: proaktive Prüfung VOR jeder Flow-Runde
+      // (Story-Grenze) — nur, wenn ein budgetGuard injiziert ist (sonst No-op,
+      // AC8/A4). Bei Pause startet KEINE Flow-Runde (kein flowRuns-Increment,
+      // kein round-Increment) und es wird KEIN Eskalations-Zähler berührt (AC7).
+      if (this.#budgetGuard) {
+        let proactive = null;
+        try {
+          proactive = await this.#budgetGuard.checkProactive({ nowMs: this.#now() });
+        } catch {
+          // Robustheit (NFR): ein Guard-/Meter-Fehler darf den Drain nicht
+          // crashen — im Zweifel NICHT pausieren (proactive bleibt null).
+        }
+        if (proactive && proactive.pause) {
+          const pauseFrom = this.#now();
+          const outcome = await this.#awaitBudgetResume({
+            resumeAt: typeof proactive.resumeAt === 'number' ? proactive.resumeAt : null,
+            windowEndMs,
+          });
+          budgetPauses.push({
+            from: pauseFrom,
+            to: outcome.resumed ? outcome.to : null,
+            reason: 'proactive-threshold',
+          });
+          if (!outcome.resumed) {
+            const { completed, blocked } = computeCompletedBlocked(initialStatuses, scanFailed ? null : project);
+            return {
+              stopped: true,
+              reason: outcome.reason,
+              flowRuns,
+              escalated,
+              completed,
+              blocked,
+              budgetPauses,
+            };
+          }
+          continue; // resumed → frischer Board-Scan am Schleifenanfang
+        }
       }
 
       round += 1;
@@ -705,11 +847,63 @@ export class ProjectDrain {
         // AC2 (drain-completion-report): Kontention = für DIESES Projekt fand
         // gar kein echter /flow-Lauf statt → leere completed/blocked-Bilanz
         // (Spec-mandatiert, kein Diff über einen unveränderten Board-Zustand).
-        return { stopped: true, reason: 'command-channel-busy', flowRuns, escalated, completed: [], blocked: [] };
+        return {
+          stopped: true,
+          reason: 'command-channel-busy',
+          flowRuns,
+          escalated,
+          completed: [],
+          blocked: [],
+          budgetPauses,
+        };
       }
 
+      let awaitResult = { status: 'done' };
       if (startResult && startResult.ok) {
-        await this.#flowRunner.awaitCompletion(startResult.handle);
+        awaitResult = await this.#flowRunner.awaitCompletion(startResult.handle);
+      }
+
+      // night-budget-guard AC4/AC7: reaktive Limit-Meldung — gilt NIE als
+      // fortschrittsloser Lauf (weder consecutiveNoProgress/totalNoProgressRounds
+      // noch setBlocked werden berührt). Braucht KEINEN injizierten budgetGuard
+      // (immer aktiv, AC11) — `noteReset` wird nur aufgerufen, falls einer da ist.
+      if (awaitResult && awaitResult.status === 'budget-limited') {
+        const resetAt = typeof awaitResult.resetAt === 'number' ? awaitResult.resetAt : null;
+        if (resetAt !== null) {
+          if (this.#budgetGuard && typeof this.#budgetGuard.noteReset === 'function') {
+            try {
+              this.#budgetGuard.noteReset(resetAt);
+            } catch {
+              // best-effort — kein Crash (Robustheits-NFR)
+            }
+          }
+          const pauseFrom = this.#now();
+          const resumeAt = resetAt + this.#budgetResumeBufferMs;
+          if (windowEndMs !== null && resumeAt > windowEndMs) {
+            // A2: Fortsetzungs-Zeitpunkt liegt hinter dem Fenster-Ende → sanftes
+            // Ende statt zu warten (AC6).
+            budgetPauses.push({ from: pauseFrom, to: null, reason: 'reactive-limit' });
+            const { project: projectAfterLimit } = await this.#findProject(projectPath);
+            const { completed, blocked } = computeCompletedBlocked(initialStatuses, projectAfterLimit);
+            return {
+              stopped: true,
+              reason: 'budget-window-end',
+              flowRuns,
+              escalated,
+              completed,
+              blocked,
+              budgetPauses,
+            };
+          }
+          // Edge-Case "Reset-Zeit in der Vergangenheit": Wartezeit nie negativ.
+          const waitMs = Math.max(resumeAt - pauseFrom, 0);
+          await this.#sleepFn(waitMs);
+          budgetPauses.push({ from: pauseFrom, to: this.#now(), reason: 'reactive-limit' });
+        }
+        // Edge-Case "budget-limited ohne resetAt" (dürfte laut S-270 AC3 nicht
+        // auftreten): kein Warten (kein bekannter Reset), aber AC7 hat Vorrang —
+        // KEIN Eskalations-Zähler-Increment, `continue` unten überspringt ihn.
+        continue; // frischer Board-Scan am Schleifenanfang, nie fortschrittslos gezählt
       }
 
       const { project: projectAfter } = await this.#findProject(projectPath);
@@ -768,9 +962,49 @@ export class ProjectDrain {
         if (totalNoProgressRounds >= this.#safetyMaxNoProgressRounds) {
           // AC1/AC2: End-Snapshot = letzter Post-Flow-Scan (`projectAfter`).
           const { completed, blocked } = computeCompletedBlocked(initialStatuses, projectAfter);
-          return { stopped: true, reason: 'safety-stop-no-progress', flowRuns, escalated, completed, blocked };
+          return {
+            stopped: true,
+            reason: 'safety-stop-no-progress',
+            flowRuns,
+            escalated,
+            completed,
+            blocked,
+            budgetPauses,
+          };
         }
       }
+    }
+  }
+
+  /**
+   * Wartet auf die Fortsetzung nach einer PROAKTIVEN Budget-Pause (night-
+   * budget-guard AC5/AC6) — delegiert an den injizierten `budgetGuard`
+   * (`awaitResume`, konkrete Wartelogik + A1/A2-Entscheidung liegt dort,
+   * S-274). Ein Guard-Fehler ist degradierend (Robustheits-NFR): im Zweifel
+   * wird NICHT weiter pausiert, sondern sofort fortgesetzt (kein Crash, kein
+   * unbegrenztes Hängen).
+   *
+   * @param {{ resumeAt: number|null, windowEndMs: number|null }} params
+   * @returns {Promise<{ resumed: true, to: number } | { resumed: false, reason: 'budget-window-end'|'budget-stop' }>}
+   */
+  async #awaitBudgetResume({ resumeAt, windowEndMs }) {
+    try {
+      const outcome = await this.#budgetGuard.awaitResume({ resumeAt, windowEndMs, nowMs: this.#now() });
+      if (outcome && outcome.resumed) {
+        return { resumed: true, to: typeof outcome.to === 'number' ? outcome.to : this.#now() };
+      }
+      // Defensiver Fallback, falls ein Guard `reason` nicht (korrekt) setzt:
+      // A2 — kein Fenster ⇒ 'budget-stop', sonst 'budget-window-end' (AC6).
+      const fallbackReason = windowEndMs === null ? 'budget-stop' : 'budget-window-end';
+      const reason =
+        outcome && (outcome.reason === 'budget-stop' || outcome.reason === 'budget-window-end')
+          ? outcome.reason
+          : fallbackReason;
+      return { resumed: false, reason };
+    } catch {
+      // Robustheit (NFR): ein Fehler im budgetGuard darf den Drain nicht
+      // crashen — im Zweifel NICHT pausieren (sofort fortsetzen).
+      return { resumed: true, to: this.#now() };
     }
   }
 
