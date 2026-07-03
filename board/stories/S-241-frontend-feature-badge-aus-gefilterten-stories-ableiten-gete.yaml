@@ -3,7 +3,7 @@ parent: F-048
 title: 'Frontend: Feature-Badge aus gefilterten Stories ableiten (geteilte computeFeatureStatus)
   + leere Features unter aktivem Filter ausblenden + Leer-Hinweis für Status-Filter
   + _orphaned-Sonderfall'
-status: In Progress
+status: Done
 priority: P2
 spec: docs/specs/board-filter-feature-status-consistency.md
 implements:
@@ -19,8 +19,8 @@ labels:
 - ui
 size_est: L
 dispo_est: '5.0'
-dispo_act: null
-dispo_forecast: null
+dispo_act: '4'
+dispo_forecast: '.2500'
 estimate_note: 'Heuristik: n_ac=6 (AC1-AC6), n_comp~2 (BoardView.jsx filteredProjects+FeatureRow,
   geteilte/gespiegelte computeFeatureStatus aus src/BoardAggregator.js), label_bump+1
   (ui) -> score 9 -> L. estimator nicht dispatchbar (kein Task-Tool im requirement-Lauf);
@@ -31,8 +31,8 @@ branch: feat/S-241-filter-status-consistency
 pr: null
 blocked_reason: null
 created_at: '2026-07-02T05:07:52Z'
-updated_at: '2026-07-03T01:45:51Z'
-done_at: null
+updated_at: '2026-07-03T02:16:13Z'
+done_at: '2026-07-03T02:15:24Z'
 notes: 'Spec: docs/specs/board-filter-feature-status-consistency.md — implements AC1-AC6.
   Priority P2. depends: keine. Befund 2 (Owner-Live-Test 2026-07-01): Status-Filter
   filtert nur f.stories, server-berechnetes f.status (Blocked-Prio ueber ALLE Stories,
