@@ -150,6 +150,8 @@ import { BoardWriter } from './src/BoardWriter.js';
 import { AreaWriter } from './src/AreaWriter.js';
 import { TokenLimitWatcher } from './src/TokenLimitWatcher.js';
 import { NightWatchScheduler } from './src/NightWatchScheduler.js';
+import { TokenUsageMeter } from './src/TokenUsageMeter.js';
+import { BudgetGuard, BUDGET_RESUME_BUFFER_MS } from './src/BudgetGuard.js';
 import { DrainReportStore } from './src/DrainReportStore.js';
 import { DrainJobRegistry } from './src/DrainJobRegistry.js';
 import { BootDrainRecovery } from './src/BootDrainRecovery.js';
@@ -402,6 +404,21 @@ const headlessFlowRunnerAdapter = new HeadlessFlowRunnerAdapter({
   headlessRunner: headlessFlowRunner,
   auditStore, // AC11: Start/Ende(Erfolg)/Fehler je headless-Lauf
 });
+// ── BudgetGuard (night-budget-guard AC9–AC11, S-274) ─────────────────────────
+// Nacht-Budget-Schutz — NUR in die Nacht-Drain-`ProjectDrain`-Instanz
+// injiziert (Story-Scope AC9: "in die Nacht-Drain-ProjectDrain-Instanz"; der
+// manuelle Drain bleibt unberührt, kein zweiter Config-Pfad in dieser Story).
+// `budgetResumeBufferMs` per Env konfigurierbar (AC10), entkoppelt vom
+// 1-Min-`TokenLimitWatcher`-Puffer — DIESELBE env-abgeleitete Zahl wird
+// unten AUCH an `nightProjectDrain` (`deps.budgetResumeBufferMs`, reaktiver
+// Pfad) gereicht, damit reaktiver und proaktiver Pfad nicht auseinanderdriften
+// (siehe BudgetGuard.js Modul-Doku).
+const budgetResumeBufferMs = Number(process.env.BUDGET_RESUME_BUFFER_MS) || BUDGET_RESUME_BUFFER_MS;
+const budgetGuard = new BudgetGuard({
+  tokenUsageMeter: new TokenUsageMeter(),
+  readSettings: readTickerSettings,
+  budgetResumeBufferMs,
+});
 // SEPARATE ProjectDrain-Instanz ausschließlich für den Nachtwächter — nutzt
 // denselben commandService NUR für die bestehende `isProjectBusy()`-Erkennung
 // (AC6/AC7 taktgeber-nachtwaechter, unverändert), der Ausführungs-Schritt
@@ -413,6 +430,8 @@ const nightProjectDrain = new ProjectDrain({
   sessionRegistry: ptyRegistry,
   auditStore,
   flowRunner: headlessFlowRunnerAdapter,
+  budgetGuard, // night-budget-guard AC9: proaktive Schwellen-Prüfung vor jeder Flow-Runde
+  budgetResumeBufferMs, // night-budget-guard AC10: reaktiver Puffer, dieselbe env-Zahl wie budgetGuard
 });
 const tokenLimitWatcher = new TokenLimitWatcher();
 // ── CostModeModelCheck (Boot + periodische + Dispatch-Cost-Mode-Modellprüfung,

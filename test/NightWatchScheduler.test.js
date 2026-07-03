@@ -105,6 +105,15 @@
  *         AC1/AC2/AC4) ist zusätzlich unit-getestet in
  *         test/DrainJobRegistry.test.js.
  *
+ * Covers (night-budget-guard, S-274):
+ *   AC10 — `#runTick` bestimmt je Tick `computeWindowEndMs(nowMs, window)`
+ *          und reicht das Ergebnis als `opts.windowEndMs` an JEDEN in diesem
+ *          Tick frisch gestarteten `projectDrain.drainProject()`-Aufruf
+ *          weiter (über-Mitternacht- UND normales Fenster geprüft) — die
+ *          konkrete `BudgetGuard`-Injektion selbst (server.js-Verdrahtung)
+ *          lebt außerhalb dieser Unit-Test-Datei (kein `claude`-Lauf/IO
+ *          hier nötig, Testbarkeits-NFR der Spec).
+ *
  * Covers (drain-done-notification, S-277):
  *   AC4 — je abgeschlossenem Projekt-Drain (resolve UND reject, symmetrisch
  *         zu `#recordNightReport`/`#notifyAutoRetro`) wird best-effort
@@ -620,6 +629,54 @@ describe('NightWatchScheduler — Cost-Mode-Frische-Prüfung vor dem Nacht-Drain
     const result = await scheduler.tick();
     expect(result.started).toHaveLength(2);
     expect(projectDrain.drainProject).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ── windowEndMs-Weiterreichung (night-budget-guard AC10, S-274) ────────────────
+
+describe('NightWatchScheduler — windowEndMs-Weiterreichung an drainProject (night-budget-guard AC10)', () => {
+  it('über-Mitternacht-Fenster: jeder gestartete Drain erhält das für "jetzt" gültige windowEndMs', async () => {
+    // 15. Jan 2026, 23:30 UTC = 00:30 CET, 16. Jan → Morgen-Hälfte des
+    // 23:00–07:00-Fensters → Fensterende liegt noch "heute" (16. Jan, 07:00 CET).
+    const nowMs = Date.UTC(2026, 0, 15, 23, 30);
+    const window = makeWindow(); // 23:00–07:00, Europe/Zurich
+    const expectedWindowEndMs = computeWindowEndMs(nowMs, window);
+    expect(expectedWindowEndMs).not.toBeNull();
+
+    const { scheduler, projectDrain } = makeScheduler({
+      nowMs,
+      settings: makeSettings({ window, maxParallel: 2 }),
+    });
+    const result = await scheduler.tick();
+
+    expect(result.started).toHaveLength(2);
+    expect(projectDrain.drainProject).toHaveBeenCalledWith(
+      '/workspace/proj-a',
+      expect.objectContaining({ windowEndMs: expectedWindowEndMs }),
+    );
+    expect(projectDrain.drainProject).toHaveBeenCalledWith(
+      '/workspace/proj-b',
+      expect.objectContaining({ windowEndMs: expectedWindowEndMs }),
+    );
+  });
+
+  it('normales (nicht über-Mitternacht) Fenster: windowEndMs weiterhin korrekt durchgereicht', async () => {
+    const nowMs = Date.UTC(2026, 0, 15, 11, 0); // 12:00 CET
+    const window = makeWindow({ start: '08:00', end: '17:00' });
+    const expectedWindowEndMs = computeWindowEndMs(nowMs, window);
+    expect(expectedWindowEndMs).not.toBeNull();
+
+    const { scheduler, projectDrain } = makeScheduler({
+      nowMs,
+      settings: makeSettings({ window, maxParallel: 1 }),
+    });
+    const result = await scheduler.tick();
+
+    expect(result.started).toHaveLength(1);
+    expect(projectDrain.drainProject).toHaveBeenCalledWith(
+      '/workspace/proj-a',
+      expect.objectContaining({ windowEndMs: expectedWindowEndMs }),
+    );
   });
 });
 

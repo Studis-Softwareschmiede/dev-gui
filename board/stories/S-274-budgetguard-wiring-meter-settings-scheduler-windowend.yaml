@@ -2,7 +2,7 @@ id: S-274
 parent: F-055
 title: 'BudgetGuard-Wiring: Meter + Settings + Reset-/Puffer-Logik in den Nacht-Drain
   injizieren, windowEndMs vom Scheduler (server.js, NightWatchScheduler)'
-status: To Do
+status: In Progress
 priority: P2
 spec: docs/specs/night-budget-guard.md
 implements:
@@ -21,9 +21,10 @@ dispo_forecast: null
 estimate_note: 'S/M-Heuristik score 6 (3 AC + 3 Komponenten: BudgetGuard neu/server.js/NightWatchScheduler
   + 0 label) -> M; baseline js|balanced|M ep 5.0 (n=8); keine Baseline-Tokens'
 confidence: medium
-branch: null
+branch: feat/S-274-budgetguard-wiring
 pr: null
 blocked_reason: null
 created_at: '2026-07-03T06:36:03Z'
-updated_at: '2026-07-03T06:36:03Z'
+updated_at: '2026-07-03T16:16:45Z'
 tok_est: null
+done_at: null

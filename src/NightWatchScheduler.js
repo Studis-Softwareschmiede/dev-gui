@@ -3,7 +3,20 @@
  * (docs/specs/taktgeber-nachtwaechter.md AC9, AC10, AC11; erweitert um
  * docs/specs/headless-parallel-drain.md AC7, AC8, AC9, AC11, AC12, S-213;
  * Registrierung in der geteilten persistenten Drain-Job-Registry —
- * docs/specs/drain-restart-robustness.md AC3, S-282).
+ * docs/specs/drain-restart-robustness.md AC3, S-282;
+ * `windowEndMs`-Weiterreichung an den Nacht-Drain —
+ * docs/specs/night-budget-guard.md AC10, S-274).
+ *
+ * windowEndMs-Weiterreichung (night-budget-guard AC10, S-274):
+ *   `#runTick` bestimmt je Tick das für "jetzt" GÜLTIGE Fensterende
+ *   (`computeWindowEndMs(nowMs, window)` — dieselbe bereits vorhandene
+ *   TZ-Wandzeit-Logik, keine eigene) und reicht es an jeden in diesem Tick
+ *   frisch gestarteten Nacht-Drain (`#startDrain` → `opts.windowEndMs`)
+ *   weiter, damit dessen Budget-Pausen (`server.js` injiziert den
+ *   konkreten `BudgetGuard` in `nightProjectDrain`, S-274) das sanfte
+ *   Fensterende ehren (A2/AC6) statt darüber hinaus zu warten. Der `null`-
+ *   Fall (nicht-parsebare Fenster-Konfig) wird unverändert durchgereicht —
+ *   `ProjectDrain` behandelt `windowEndMs:null` als "kein Fenster" (A2).
  *
  * Nacht-Drain-Registrierung (drain-restart-robustness AC3, S-282):
  *   `#startDrain` registriert jeden in-flight Nacht-Drain ZUSÄTZLICH in der
@@ -532,6 +545,12 @@ export class NightWatchScheduler {
       (p) => !this.#activeDrains.has(p.repo_path),
     );
 
+    // night-budget-guard AC10: das für "jetzt" GÜLTIGE Fensterende (Wieder-
+    // verwendung von `computeWindowEndMs`, keine eigene TZ-Logik) wird an
+    // JEDEN in diesem Tick gestarteten Nacht-Drain gereicht, damit dessen
+    // Budget-Pausen das sanfte Fensterende ehren können (A2, AC6).
+    const windowEndMs = computeWindowEndMs(nowMs, window);
+
     const started = [];
     for (const project of candidates) {
       if (started.length >= freeSlots) break;
@@ -539,7 +558,7 @@ export class NightWatchScheduler {
       // #startDrain gereicht, damit der Abschlussbericht ihn als `project`
       // führt. Fällt der Slug im Index (defensiv) weg → null, der Bericht wird
       // dann übersprungen (best-effort), ohne den Drain zu beeinträchtigen.
-      this.#startDrain(project.repo_path, project.project_slug ?? project.slug ?? null);
+      this.#startDrain(project.repo_path, project.project_slug ?? project.slug ?? null, windowEndMs);
       started.push(project.repo_path);
     }
 
@@ -616,8 +635,11 @@ export class NightWatchScheduler {
    *
    * @param {string} projectPath
    * @param {string|null} [projectSlug]  Projekt-Slug für den Abschlussbericht (AC6).
+   * @param {number|null} [windowEndMs]  night-budget-guard AC10: das für "jetzt"
+   *   gültige Nachtfenster-Ende (`computeWindowEndMs`), an `ProjectDrain.drainProject()`
+   *   gereicht, damit Budget-Pausen das sanfte Fensterende ehren (A2, AC6).
    */
-  #startDrain(projectPath, projectSlug = null) {
+  #startDrain(projectPath, projectSlug = null, windowEndMs = null) {
     this.#attachTokenWatcher(projectPath);
     // cost-mode-model-check AC4/AC5: Dispatch-Frische-Prüfung unmittelbar vor der
     // Cost-Mode-Übergabe an den Nacht-Drain — fire-and-forget, blockiert den
@@ -633,7 +655,7 @@ export class NightWatchScheduler {
     // unverändert die maßgebliche Concurrency-Buchführung dieser Klasse).
     const drainId = this.#registerNightDrain(projectSlug, startedAt);
     const promise = this.#projectDrain
-      .drainProject(projectPath, { identity: this.#identity })
+      .drainProject(projectPath, { identity: this.#identity, windowEndMs })
       // AC6: das (erfolgreiche wie fehlgeschlagene) Drain-Ergebnis wird ERFASST
       // statt — wie früher via `.catch(() => null)` — verworfen; danach best-
       // effort GENAU EIN Bericht (`trigger:'night'`). Ein Drain-Fehler darf den
