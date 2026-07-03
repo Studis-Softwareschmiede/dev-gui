@@ -2,7 +2,7 @@ id: S-283
 parent: F-058
 title: 'Boot-Wiederanlauf: verwaiste Drains erkennen + je Projekt genau einen idempotenten
   Wiederanlauf anstossen (manuell auto+args-replay; nacht fenster-/auth-gated; best-effort)'
-status: To Do
+status: In Progress
 priority: P1
 spec: docs/specs/drain-restart-robustness.md
 implements:
@@ -23,10 +23,10 @@ estimate_note: 'estimator nicht dispatchbar (Subagent); Heuristik score 9 (4 AC 
   ProjectDrain + 1 label security) -> L; baseline js|balanced|L ep 5.0 (n=5); keine
   Baseline-Tokens'
 confidence: low
-branch: null
+branch: feat/S-283-boot-orphan-restart
 pr: null
 blocked_reason: null
 created_at: '2026-07-03T07:15:34Z'
-updated_at: '2026-07-03T07:17:24Z'
+updated_at: '2026-07-03T12:50:05Z'
 done_at: null
 tok_est: null

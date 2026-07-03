@@ -55,8 +55,10 @@
  *                 solche Einträge einmalig beim Boot (drain-restart-robustness
  *                 AC4, Aufruf in `server.js`). `GET .../drain/:drainId` liefert
  *                 danach `200 {status:'aborted'}` statt `404` (Monitoring nicht
- *                 mehr blind). Ein Boot-Wiederanlauf (Konsum dieser Orphans) ist
- *                 NICHT Teil dieser Story (S-283).
+ *                 mehr blind). Der Boot-Wiederanlauf (Konsum dieser Orphans,
+ *                 `src/BootDrainRecovery.js`, drain-restart-robustness AC5–AC8)
+ *                 ist seit S-283 verdrahtet — ein evtl. frischer `running`-
+ *                 Eintrag desselben Projekts stammt dann von diesem Wiederanlauf.
  *
  * Vertragsformat `GET /api/projects/:slug/drain/:drainId` bleibt UNVERÄNDERT
  * (`200 {status,result?,error?}` | `404` | `400`, drain-restart-robustness AC2) —
@@ -329,8 +331,8 @@ export class DrainJobRegistry {
    * nicht geworfen (der Boot darf nie crashen).
    *
    * @returns {DrainJobEntry[]}  Kopien der gerade als verwaist markierten
-   *   Einträge (für den Boot-Wiederanlauf einer Folge-Story — hier NICHT
-   *   konsumiert, drain-restart-robustness AC5+).
+   *   Einträge — konsumiert vom Boot-Wiederanlauf (`BootDrainRecovery`,
+   *   drain-restart-robustness AC5–AC8, S-283, Aufruf in `server.js`).
    */
   reconcileOrphans() {
     /** @type {DrainJobEntry[]} */

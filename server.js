@@ -151,6 +151,7 @@ import { TokenLimitWatcher } from './src/TokenLimitWatcher.js';
 import { NightWatchScheduler } from './src/NightWatchScheduler.js';
 import { DrainReportStore } from './src/DrainReportStore.js';
 import { DrainJobRegistry } from './src/DrainJobRegistry.js';
+import { BootDrainRecovery } from './src/BootDrainRecovery.js';
 import { HeadlessFlowRunner } from './src/HeadlessFlowRunner.js';
 import { HeadlessFlowRunnerAdapter } from './src/FlowRunner.js';
 import { ProjectJobLock } from './src/ProjectJobLock.js';
@@ -442,12 +443,14 @@ const drainReportStore = new DrainReportStore();
 // `aborted` gesetzt und persistiert; `GET .../drain/:drainId` liefert danach
 // `200 {status:'aborted'}` statt `404` (Monitoring nicht mehr blind). Idempotent
 // (ein zweiter Aufruf/Boot lässt bereits-terminale Einträge unangetastet).
-// Best-effort — ein Fehler hier darf den Server-Boot NIE crashen; der Boot-
-// Wiederanlauf selbst (Konsum der zurückgegebenen Orphans) ist NICHT Teil
-// dieser Story (S-283, docs/specs/drain-restart-robustness.md AC5–AC8).
+// Best-effort — ein Fehler hier darf den Server-Boot NIE crashen. Die
+// zurückgegebenen Orphan-Einträge werden unten (nach Konstruktion von
+// manualProjectDrain/nightProjectDrain/nightWatchScheduler) an
+// `BootDrainRecovery` (drain-restart-robustness AC5–AC8, S-283) übergeben.
 const drainJobRegistry = new DrainJobRegistry();
+let orphanedDrains = [];
 try {
-  drainJobRegistry.reconcileOrphans();
+  orphanedDrains = drainJobRegistry.reconcileOrphans();
 } catch (err) {
   console.error('[server] DrainJobRegistry-Boot-Reconcile fehlgeschlagen:', err.message);
 }
@@ -516,6 +519,32 @@ const nightWatchScheduler = new NightWatchScheduler({
 // Immer gestartet — tick() selbst prüft `enabled` (AC16: enabled=false → idle,
 // analog NotificationWatcher.start(), das ebenfalls unbedingt läuft).
 nightWatchScheduler.start();
+
+// ── Boot-Wiederanlauf verwaister Drains (drain-restart-robustness AC5–AC8, S-283) ──
+// Konsumiert die von `drainJobRegistry.reconcileOrphans()` oben (BEIM Boot,
+// vor der Konstruktion dieser Boundaries) zurückgegebenen, bereits als
+// `aborted` markierten Einträge (AC4, S-282) — EINMALIG, HIER (nach
+// manualProjectDrain/nightProjectDrain/nightWatchScheduler/drainJobRegistry).
+// Je distinktem Projekt+Trigger GENAU EIN idempotenter Wiederanlauf-Drain:
+// manuelle Orphans automatisch (args/costMode-Replay, AC6) über `projectDrain`
+// (dieselbe DEDIZIERTE manuelle Instanz + `manualDrainLock` für die lesende
+// isProjectBusy-Vorabprüfung); Nacht-Orphans NUR fenster-/nacht-modus-/
+// auth-gated (AC7) über `nightProjectDrain`. Best-effort/degradierend (AC8) —
+// `run()` wirft nie; NICHT awaited (fire-and-forget, blockiert den Boot nie).
+const bootDrainRecovery = new BootDrainRecovery({
+  drainJobRegistry,
+  manualProjectDrain: projectDrain,
+  nightProjectDrain,
+  manualDrainLock,
+  commandService,
+  sessionRegistry: ptyRegistry,
+  readSettings: readTickerSettings,
+  claudeAuthHealthService,
+  auditStore,
+});
+bootDrainRecovery.run(orphanedDrains).catch((err) => {
+  console.error('[server] Boot-Drain-Wiederanlauf fehlgeschlagen:', err.message);
+});
 
 // ── NotificationWatcher (push-notifications S-184 AC6–AC9) ───────────────────
 // Hängt am Board-Scan-Ergebnis; check() wird periodisch aufgerufen.
