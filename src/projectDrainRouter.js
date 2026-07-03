@@ -124,6 +124,13 @@ import { DrainJobRegistry } from './DrainJobRegistry.js';
  *   best-effort: `notifyDrainComplete` gibt sofort synchron zurück und wirft nie —
  *   die (bereits gesendete) 202-Antwort + der Drain-Abschluss bleiben bei jedem
  *   Check-Fehler unberührt (AC4). Ohne ihn läuft der Drain unverändert.
+ * @param {{ notifyDrainDone: (args: { slug: string, result: object }) => Promise<void> }} [deps.drainNotifier]
+ *   Drain-Fertig-Push (drain-done-notification AC3/AC6, `DrainNotifier`, GETEILTE
+ *   Instanz mit dem Nacht-Drain — kein zweiter Config-Pfad). Optional — bei
+ *   Drain-Abschluss (resolve) wird best-effort zusätzlich zu `_writeManualReport`/
+ *   `_notifyAutoRetro` `notifyDrainDone({ slug, result })` aufgerufen (`slug` =
+ *   form-validierter Route-Slug). `notifyDrainDone` wirft selbst nie (best-effort,
+ *   drain-done-notification AC3/AC5/AC7); ohne injizierten Notifier → No-op.
  * @param {object} [options]
  * @param {(path: string) => Promise<{ resolvedPath: string }>} [options.pathValidator]
  *   Injectable path validator (default: validateProjectPath). Inject a stub in tests.
@@ -137,7 +144,7 @@ import { DrainJobRegistry } from './DrainJobRegistry.js';
  * @returns {import('express').Router}
  */
 export function projectDrainRouter(deps = {}, options = {}) {
-  const { projectDrain, commandService, sessionRegistry, costModeModelCheck, drainReportStore, autoRetroTrigger } = deps;
+  const { projectDrain, commandService, sessionRegistry, costModeModelCheck, drainReportStore, autoRetroTrigger, drainNotifier } = deps;
   const _pathValidator = options.pathValidator ?? validateProjectPath;
   const _slugResolver = options.slugResolver ?? resolveProjectSlug;
   const _lock = options.lock;
@@ -192,6 +199,28 @@ export function projectDrainRouter(deps = {}, options = {}) {
       autoRetroTrigger.notifyDrainComplete(resolvedPath, result ?? {});
     } catch {
       // best-effort — der Auto-Retro-Check darf den Drain-Abschluss nie crashen (AC4).
+    }
+  }
+
+  /**
+   * Stößt best-effort GENAU EINEN Drain-Fertig-Push an der manuellen
+   * Drain-Abschluss-Naht an (drain-done-notification AC3, GETEILTE
+   * `DrainNotifier`-Instanz mit dem Nacht-Drain). No-op ohne injizierten
+   * `drainNotifier`. `notifyDrainDone` selbst wirft nie (best-effort,
+   * drain-done-notification AC3/AC5/AC7) — das try/catch ist reine
+   * Tiefenverteidigung, damit der Drain-Abschluss unter keinen Umständen
+   * beeinträchtigt wird.
+   *
+   * @param {string} slug  form-validierter Route-Slug (kein Pfad).
+   * @param {object} result  Drain-Ergebnis (flowRuns/completed/blocked/budgetPauses relevant).
+   */
+  function _notifyDrainDone(slug, result) {
+    if (!drainNotifier || typeof drainNotifier.notifyDrainDone !== 'function') return;
+    try {
+      const p = drainNotifier.notifyDrainDone({ slug, result: result ?? {} });
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    } catch {
+      // best-effort — der Drain-Fertig-Push darf den Drain-Abschluss nie crashen.
     }
   }
 
@@ -278,6 +307,10 @@ export function projectDrainRouter(deps = {}, options = {}) {
         // Auto-Retro-Check best-effort/fire-and-forget anstoßen (isRetroDue → ggf.
         // enqueue). Dedup-/Runner-Schlüssel ist der absolute Repo-Pfad (resolvedPath).
         _notifyAutoRetro(resolvedPath, result ?? {});
+        // drain-done-notification AC3: best-effort GENAU EIN Drain-Fertig-Push
+        // (slug = form-validierter Route-Slug, kein Pfad). No-op ohne Notifier
+        // / bei flowRuns<=0 / Gating (Gating lebt komplett im DrainNotifier selbst).
+        _notifyDrainDone(rawSlug, result ?? {});
       })
       .catch((err) => {
         _jobRegistry.markFailed(drainId);

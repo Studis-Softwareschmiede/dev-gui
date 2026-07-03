@@ -91,6 +91,17 @@
  *         test/AutoRetroTrigger.test.js unit-getestet (kein zweiter Codepfad:
  *         dieselbe Instanz wie der manuelle Drain — server.js-Verdrahtung).
  *
+ * Covers (drain-done-notification, S-277):
+ *   AC4 — je abgeschlossenem Projekt-Drain (resolve UND reject, symmetrisch
+ *         zu `#recordNightReport`/`#notifyAutoRetro`) wird best-effort
+ *         `drainNotifier.notifyDrainDone({ slug, result })` mit dem bereits
+ *         abgeleiteten Projekt-Slug (kein Pfad) aufgerufen; ein werfender
+ *         Notifier crasht den Scheduler NICHT (Drain-Eintrag wird sauber
+ *         abgeräumt). Kein injizierter `drainNotifier` → Scheduler läuft
+ *         unverändert (No-op). Das Gating selbst (flowRuns/enabled/events) ist
+ *         in test/DrainNotifier.test.js unit-getestet (kein zweiter Codepfad —
+ *         dieselbe Instanz wie der manuelle Drain, server.js-Verdrahtung).
+ *
  * Strategy:
  *   - Pure Helper (`parseHHMM`, `isWithinWindow`, `computeWindowEndMs`,
  *     `clampMaxParallel`, `selectCandidateProjects`) direkt mit
@@ -194,6 +205,7 @@ function makeScheduler(overrides = {}) {
     costModeModelCheck: overrides.costModeModelCheck,
     drainReportStore: overrides.drainReportStore,
     autoRetroTrigger: overrides.autoRetroTrigger,
+    drainNotifier: overrides.drainNotifier,
     now: () => nowMs,
     sleepFn: overrides.sleepFn ?? (() => Promise.resolve()),
   });
@@ -1065,6 +1077,98 @@ describe('NightWatchScheduler — Auto-Retro-Auslösung an der Drain-Abschluss-N
   });
 
   it('AC4 — ohne injizierten autoRetroTrigger läuft der Scheduler unverändert (No-op, kein Crash)', async () => {
+    const projectDrain = makeControllableProjectDrain();
+    const { scheduler } = makeScheduler({
+      projectDrain,
+      settings: makeSettings({ maxParallel: 1, projects: ['proj-a'] }),
+    });
+    await scheduler.tick();
+    projectDrain.resolve('/workspace/proj-a', { stopped: true, reason: 'no-drain-target', flowRuns: 1 });
+    await flush();
+    expect(scheduler.getStatus().activeDrainProjectPaths).toEqual([]);
+  });
+});
+
+// ── Drain-Fertig-Push an der Nacht-Drain-Abschluss-Naht (drain-done-notification S-277 AC4) ──
+
+describe('NightWatchScheduler — Drain-Fertig-Push an der Drain-Abschluss-Naht (drain-done-notification AC4)', () => {
+  function makeDrainNotifier() {
+    return { notifyDrainDone: jest.fn(async () => {}) };
+  }
+
+  it('AC4 — nach dem abgeschlossenen Drain wird notifyDrainDone mit Slug + echtem Ergebnis angestoßen', async () => {
+    const drainNotifier = makeDrainNotifier();
+    const projectDrain = makeControllableProjectDrain();
+    const { scheduler } = makeScheduler({
+      projectDrain,
+      drainNotifier,
+      settings: makeSettings({ maxParallel: 1, projects: ['proj-a'] }),
+    });
+
+    await scheduler.tick();
+    expect(drainNotifier.notifyDrainDone).not.toHaveBeenCalled();
+
+    projectDrain.resolve('/workspace/proj-a', {
+      stopped: true,
+      reason: 'no-drain-target',
+      flowRuns: 2,
+      escalated: [],
+      completed: [{ id: 'S-1' }],
+      blocked: [],
+    });
+    await flush();
+
+    expect(drainNotifier.notifyDrainDone).toHaveBeenCalledTimes(1);
+    const [args] = drainNotifier.notifyDrainDone.mock.calls[0];
+    expect(args.slug).toBe('proj-a'); // der bereits abgeleitete Projekt-Slug, KEIN Pfad
+    expect(args.result.flowRuns).toBe(2);
+    expect(args.result.completed).toEqual([{ id: 'S-1' }]);
+  });
+
+  it('AC4 — ein rejecteter Drain stößt notifyDrainDone mit flowRuns:0 an (symmetrisch, Gating lebt im Notifier)', async () => {
+    const drainNotifier = makeDrainNotifier();
+    const projectDrain = {
+      drainProject: jest.fn(async () => {
+        throw new Error('drain kaputt');
+      }),
+    };
+    const { scheduler } = makeScheduler({
+      projectDrain,
+      drainNotifier,
+      settings: makeSettings({ maxParallel: 1, projects: ['proj-a'] }),
+    });
+
+    await expect(scheduler.tick()).resolves.toBeTruthy();
+    await flush();
+
+    expect(drainNotifier.notifyDrainDone).toHaveBeenCalledTimes(1);
+    const [args] = drainNotifier.notifyDrainDone.mock.calls[0];
+    expect(args.slug).toBe('proj-a');
+    expect(args.result.flowRuns).toBe(0);
+  });
+
+  it('AC4 — ein werfender drainNotifier crasht den Scheduler NICHT (best-effort, Drain-Eintrag sauber abgeräumt)', async () => {
+    const drainNotifier = {
+      notifyDrainDone: jest.fn(() => {
+        throw new Error('notifier kaputt');
+      }),
+    };
+    const projectDrain = makeControllableProjectDrain();
+    const { scheduler } = makeScheduler({
+      projectDrain,
+      drainNotifier,
+      settings: makeSettings({ maxParallel: 1, projects: ['proj-a'] }),
+    });
+
+    await scheduler.tick();
+    projectDrain.resolve('/workspace/proj-a', { stopped: true, reason: 'no-drain-target', flowRuns: 1 });
+    await flush();
+
+    expect(drainNotifier.notifyDrainDone).toHaveBeenCalledTimes(1);
+    expect(scheduler.getStatus().activeDrainProjectPaths).toEqual([]);
+  });
+
+  it('AC4 — ohne injizierten drainNotifier läuft der Scheduler unverändert (No-op, kein Crash)', async () => {
     const projectDrain = makeControllableProjectDrain();
     const { scheduler } = makeScheduler({
       projectDrain,

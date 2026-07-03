@@ -73,6 +73,17 @@
  *          test/AutoRetroTrigger.test.js unit-getestet (kein zweiter Codepfad:
  *          dieselbe Instanz wie der Nacht-Drain — server.js-Verdrahtung).
  *
+ * Covers (drain-done-notification, S-277):
+ *   AC3 — im `.then(result)`-Pfad wird zusätzlich zu `_writeManualReport`/
+ *          `_notifyAutoRetro` best-effort `drainNotifier.notifyDrainDone({
+ *          slug, result })` mit dem form-validierten Route-Slug (rawSlug,
+ *          KEIN Pfad) aufgerufen; ein werfender/rejectender Notifier crasht
+ *          weder die 202-Antwort noch den Registry-Status. Ohne injizierten
+ *          `drainNotifier` läuft der Drain unverändert (No-op). Das Gating
+ *          selbst (flowRuns/enabled/events) ist in test/DrainNotifier.test.js
+ *          unit-getestet (kein zweiter Codepfad — dieselbe Instanz wie der
+ *          Nacht-Drain, server.js-Verdrahtung).
+ *
  * Strategy: echter Express-App + echter HTTP-Server (Muster
  * test/slugResolver.test.js "commandRouter integration" + test/tickerSettings.test.js
  * HTTP-Helpers) — injizierbarer slugResolver/pathValidator/lock (kein echtes
@@ -204,6 +215,7 @@ function makeApp({
   costModeModelCheck,
   drainReportStore,
   autoRetroTrigger,
+  drainNotifier,
 } = {}) {
   const app = express();
   app.use(express.json());
@@ -213,7 +225,7 @@ function makeApp({
   });
   app.use(
     projectDrainRouter(
-      { projectDrain, commandService, sessionRegistry, costModeModelCheck, drainReportStore, autoRetroTrigger },
+      { projectDrain, commandService, sessionRegistry, costModeModelCheck, drainReportStore, autoRetroTrigger, drainNotifier },
       { slugResolver, pathValidator, lock },
     ),
   );
@@ -888,6 +900,81 @@ describe('POST /api/projects/:slug/drain — Auto-Retro-Auslösung an der Drain-
   });
 
   it('AC4 — ohne verdrahteten Trigger läuft der Drain unverändert (No-op)', async () => {
+    const drainProject = jest.fn(async () => ({ stopped: true, reason: 'no-drain-target', flowRuns: 2, escalated: [] }));
+    const app = makeApp({ projectDrain: { drainProject } });
+    const s = await startServer(app);
+    server = s.server;
+
+    const post = await postNoBody(s.port, '/api/projects/dev-gui/drain');
+    expect(post.status).toBe(202);
+    await flushAsync();
+    const status = await getJson(s.port, `/api/projects/dev-gui/drain/${post.body.drainId}`);
+    expect(status.body.status).toBe('done');
+  });
+});
+
+// ── Drain-Fertig-Push an der manuellen Drain-Abschluss-Naht (drain-done-notification S-277 AC3) ──
+
+describe('POST /api/projects/:slug/drain — Drain-Fertig-Push (drain-done-notification AC3)', () => {
+  let server;
+  let consoleErrorSpy;
+
+  beforeEach(() => {
+    consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+  });
+  afterEach(async () => {
+    if (server) await closeServer(server);
+    server = null;
+    consoleErrorSpy.mockRestore();
+  });
+
+  function makeNotifier() {
+    return { notifyDrainDone: jest.fn(async () => {}) };
+  }
+
+  it('AC3 — bei resolve wird notifyDrainDone mit dem Route-Slug (kein Pfad) + echtem Ergebnis angestoßen', async () => {
+    const drainNotifier = makeNotifier();
+    const drainProject = jest.fn(async () => ({
+      stopped: true,
+      reason: 'no-drain-target',
+      flowRuns: 3,
+      escalated: [],
+      completed: [{ id: 'S-1' }],
+      blocked: [],
+    }));
+    const app = makeApp({ projectDrain: { drainProject }, drainNotifier });
+    const s = await startServer(app);
+    server = s.server;
+
+    const res = await postNoBody(s.port, '/api/projects/dev-gui/drain');
+    expect(res.status).toBe(202);
+    await flushAsync();
+
+    expect(drainNotifier.notifyDrainDone).toHaveBeenCalledTimes(1);
+    const [args] = drainNotifier.notifyDrainDone.mock.calls[0];
+    expect(args.slug).toBe('dev-gui'); // Route-Slug, KEIN aufgelöster absoluter Pfad
+    expect(args.result.flowRuns).toBe(3);
+    expect(args.result.completed).toEqual([{ id: 'S-1' }]);
+  });
+
+  it('AC3 — ein werfender/rejectender drainNotifier berührt weder die 202-Antwort noch den Registry-Status (best-effort)', async () => {
+    const drainNotifier = { notifyDrainDone: jest.fn(() => { throw new Error('notifier kaputt'); }) };
+    const drainProject = jest.fn(async () => ({ stopped: true, reason: 'no-drain-target', flowRuns: 1, escalated: [] }));
+    const app = makeApp({ projectDrain: { drainProject }, drainNotifier });
+    const s = await startServer(app);
+    server = s.server;
+
+    const post = await postNoBody(s.port, '/api/projects/dev-gui/drain');
+    expect(post.status).toBe(202);
+    await flushAsync();
+
+    expect(drainNotifier.notifyDrainDone).toHaveBeenCalledTimes(1);
+    const status = await getJson(s.port, `/api/projects/dev-gui/drain/${post.body.drainId}`);
+    expect(status.status).toBe(200);
+    expect(status.body.status).toBe('done');
+  });
+
+  it('AC3 — ohne verdrahteten drainNotifier läuft der Drain unverändert (No-op)', async () => {
     const drainProject = jest.fn(async () => ({ stopped: true, reason: 'no-drain-target', flowRuns: 2, escalated: [] }));
     const app = makeApp({ projectDrain: { drainProject } });
     const s = await startServer(app);

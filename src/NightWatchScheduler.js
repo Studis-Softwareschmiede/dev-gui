@@ -305,6 +305,13 @@ export function selectCandidateProjects(index, projectsSetting) {
  *   `RetroAutoQueue`). Strikt best-effort: `notifyDrainComplete` gibt sofort
  *   synchron zurück und wirft nie — der Nacht-Tick/Drain-Abschluss bleibt bei
  *   jedem Check-Fehler unberührt (AC4). Ohne ihn läuft der Scheduler unverändert.
+ * @param {{ notifyDrainDone: (args: { slug: string, result: object }) => Promise<void> }} [deps.drainNotifier]
+ *   Drain-Fertig-Push (drain-done-notification AC4/AC6, `DrainNotifier`, geteilte
+ *   Instanz mit dem manuellen Drain — kein zweiter Config-Pfad). Optional — bei
+ *   jedem abgeschlossenen Nacht-Drain wird best-effort GENAU EIN Push angestoßen
+ *   (`notifyDrainDone({ slug, result })`, `slug` = der bereits abgeleitete
+ *   Projekt-Slug). `notifyDrainDone` wirft selbst nie (best-effort,
+ *   drain-done-notification AC4/AC5/AC7); ohne ihn läuft der Scheduler unverändert.
  * @param {string|null} [deps.identity]  auslösende Identität (Audit + ProjectDrain-Weiterreichung).
  * @param {() => number} [deps.now]  injizierbare Uhr (ms epoch), Default `Date.now`.
  * @param {(ms: number) => Promise<void>} [deps.sleepFn]  injizierbares Sleep (für `waitForReset`), Default echtes `setTimeout`.
@@ -322,6 +329,7 @@ export class NightWatchScheduler {
   #costModeModelCheck;
   #drainReportStore;
   #autoRetroTrigger;
+  #drainNotifier;
   #identity;
   #now;
   #sleepFn;
@@ -354,6 +362,7 @@ export class NightWatchScheduler {
     costModeModelCheck,
     drainReportStore,
     autoRetroTrigger,
+    drainNotifier,
     identity = null,
     now,
     sleepFn,
@@ -370,6 +379,7 @@ export class NightWatchScheduler {
     this.#costModeModelCheck = costModeModelCheck ?? null;
     this.#drainReportStore = drainReportStore ?? null;
     this.#autoRetroTrigger = autoRetroTrigger ?? null;
+    this.#drainNotifier = drainNotifier ?? null;
     this.#identity = identity;
     this.#now = now ?? (() => Date.now());
     this.#sleepFn = sleepFn ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -605,12 +615,20 @@ export class NightWatchScheduler {
           // ggf. enqueue). `notifyDrainComplete` gibt sofort synchron zurück und
           // wirft nie — der Nacht-Drain-Abschluss bleibt bei Check-Fehler unberührt.
           this.#notifyAutoRetro(projectPath, result ?? {});
+          // drain-done-notification AC4: best-effort GENAU EIN Drain-Fertig-Push
+          // (slug = der bereits abgeleitete Projekt-Slug). Gating lebt komplett
+          // im DrainNotifier selbst (flowRuns<=0/enabled=false/Event-Gating).
+          this.#notifyDrainDone(projectSlug, result ?? {});
         },
         () => {
           this.#recordNightReport(projectSlug, { reason: 'drain-failed', flowRuns: 0, completed: [], blocked: [] }, startedAt);
           // Fehlgeschlagener Drain: flowRuns:0 → isRetroDue == false (kein Enqueue).
           // Der Aufruf bleibt dennoch symmetrisch (AC4: „nach JEDEM Drain").
           this.#notifyAutoRetro(projectPath, { reason: 'drain-failed', flowRuns: 0 });
+          // drain-done-notification AC4: symmetrischer Aufruf ("je abgeschlossenem
+          // Projekt-Drain") — flowRuns:0 → DrainNotifier selbst gated auf kein
+          // Push (A1), kein zusätzliches Verhalten hier.
+          this.#notifyDrainDone(projectSlug, { reason: 'drain-failed', flowRuns: 0 });
         },
       )
       .catch(() => null)
@@ -665,6 +683,28 @@ export class NightWatchScheduler {
       this.#autoRetroTrigger.notifyDrainComplete(projectPath, result ?? {});
     } catch {
       // best-effort — der Auto-Retro-Check darf den Drain-Abschluss nie crashen (AC4).
+    }
+  }
+
+  /**
+   * Stößt best-effort GENAU EINEN Drain-Fertig-Push an der Nacht-Drain-
+   * Abschluss-Naht an (drain-done-notification AC4, GETEILTE `DrainNotifier`-
+   * Instanz mit dem manuellen Drain). No-op ohne injizierten `drainNotifier`.
+   * `notifyDrainDone` selbst wirft nie (best-effort, drain-done-notification
+   * AC4/AC5/AC7) — das try/catch ist reine Tiefenverteidigung, damit der
+   * Nacht-Drain-Abschluss/Scheduler unter keinen Umständen crasht.
+   *
+   * @param {string|null} projectSlug  der bereits abgeleitete Projekt-Slug (kein Pfad).
+   * @param {object} result  Drain-Ergebnis (flowRuns/completed/blocked/budgetPauses relevant).
+   */
+  #notifyDrainDone(projectSlug, result) {
+    if (!this.#drainNotifier || typeof this.#drainNotifier.notifyDrainDone !== 'function') return;
+    if (typeof projectSlug !== 'string' || projectSlug === '') return;
+    try {
+      const p = this.#drainNotifier.notifyDrainDone({ slug: projectSlug, result: result ?? {} });
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    } catch {
+      // best-effort — der Drain-Fertig-Push darf den Scheduler nie crashen.
     }
   }
 

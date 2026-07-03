@@ -105,7 +105,7 @@ import { GitHubReader } from './src/GitHubReader.js';
 import { GitHubAppTokenProvider } from './src/GitHubAppTokenProvider.js';
 import { GitHubPackagesReader } from './src/GitHubPackagesReader.js';
 import { DockerReader } from './src/DockerReader.js';
-import { CredentialStore } from './src/CredentialStore.js';
+import { CredentialStore, catalogKey } from './src/CredentialStore.js';
 import { GitHubWriter } from './src/GitHubWriter.js';
 import { WorkspaceScanner } from './src/WorkspaceScanner.js';
 import { WorkspaceMutator } from './src/WorkspaceMutator.js';
@@ -144,6 +144,7 @@ import { read as readNotificationSettings, migrateEventDefaults } from './src/No
 import { read as readTickerSettings } from './src/TickerSettingsStore.js';
 import { NotificationWatcher } from './src/NotificationWatcher.js';
 import { sendNotification } from './src/NotifyService.js';
+import { DrainNotifier } from './src/DrainNotifier.js';
 import { ProjectDrain } from './src/ProjectDrain.js';
 import { BoardWriter } from './src/BoardWriter.js';
 import { TokenLimitWatcher } from './src/TokenLimitWatcher.js';
@@ -464,6 +465,19 @@ const autoRetroTrigger = new AutoRetroTrigger({
   auditStore, // AC6: secret-freier Enqueue-Audit (nur Repo-Slug)
 });
 
+// ── DrainNotifier (drain-done-notification AC1–AC7, S-277) ──────────────────
+// EIN Produzent für BEIDE Drain-Nähte (Nacht + manuell) — GETEILTE Instanz,
+// kein zweiter Config-/Token-Pfad. Dieselbe Config-/Token-Quelle wie der
+// `NotificationWatcher` (`readNotificationSettings` + CredentialStore-Token
+// unter demselben Integration/Name-Paar) — nur der Versand-Weg ist neu.
+// VOR dem NightWatchScheduler konstruiert, da dieser die Instanz für seine
+// Drain-Abschluss-Naht (AC4) braucht.
+const drainNotifier = new DrainNotifier({
+  getNotificationConfig: readNotificationSettings,
+  getToken: () => credentialStore.getPlaintext(catalogKey('notifications', 'ntfy_token')),
+  sendNotificationFn: sendNotification,
+});
+
 const nightWatchScheduler = new NightWatchScheduler({
   readSettings: readTickerSettings,
   boardAggregator,
@@ -475,6 +489,7 @@ const nightWatchScheduler = new NightWatchScheduler({
   costModeModelCheck, // cost-mode-model-check AC4/AC5: Dispatch-Frische-Prüfung vor jedem Nacht-Drain-Start
   drainReportStore, // drain-completion-report AC6: je Nacht-Drain genau ein Bericht (trigger:'night')
   autoRetroTrigger, // retro-auto-trigger AC4/AC6: nach jedem Nacht-Drain isRetroDue → ggf. enqueue
+  drainNotifier, // drain-done-notification AC4/AC6: je Nacht-Drain best-effort GENAU EIN Push
 });
 // Immer gestartet — tick() selbst prüft `enabled` (AC16: enabled=false → idle,
 // analog NotificationWatcher.start(), das ebenfalls unbedingt läuft).
@@ -683,6 +698,11 @@ const deps = {
   // Drain-Abschluss best-effort den Auto-Retro-Check an (isRetroDue → ggf.
   // enqueue in die geteilte retroAutoQueue). Kein zweiter Codepfad (AC6/AC7).
   autoRetroTrigger,
+  // drain-done-notification AC3/AC6: GETEILTE DrainNotifier-Instanz (dieselbe wie
+  // der Nacht-Drain oben) — der manuelle projectDrain.js Router stößt bei
+  // Drain-Abschluss best-effort GENAU EINEN Drain-Fertig-Push an. Kein zweiter
+  // Config-/Token-Pfad.
+  drainNotifier,
   sessionRegistry: ptyRegistry,
   // S-199 (ideen-inbox AC3/AC7/AC8): BoardWriter-Create-Pfad für den
   // Quick-Capture-Endpunkt (boardRouter POST .../ideas). Instanz existiert

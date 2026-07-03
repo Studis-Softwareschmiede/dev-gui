@@ -19,10 +19,11 @@ export const order = 21;
  *   costModeModelCheck: import('../CostModeModelCheck.js').CostModeModelCheck,
  *   drainReportStore: import('../DrainReportStore.js').DrainReportStore,
  *   autoRetroTrigger: import('../AutoRetroTrigger.js').AutoRetroTrigger,
+ *   drainNotifier: import('../DrainNotifier.js').DrainNotifier,
  * }} deps
  * @returns {import('express').Router}
  */
-export function create({ projectDrain, commandService, sessionRegistry, manualDrainLock, costModeModelCheck, drainReportStore, autoRetroTrigger }) {
+export function create({ projectDrain, commandService, sessionRegistry, manualDrainLock, costModeModelCheck, drainReportStore, autoRetroTrigger, drainNotifier }) {
   // headless-manual-drain AC2: die isProjectBusy-Prüfung MUSS gegen dieselbe
   // ProjectJobLock-Instanz laufen, die die dedizierte manuelle ProjectDrain-
   // Instanz als Session-Lock hält (via server.js injiziert) — sonst sieht der
@@ -42,8 +43,13 @@ export function create({ projectDrain, commandService, sessionRegistry, manualDr
   // best-effort/fire-and-forget den Auto-Retro-Check an (isRetroDue → ggf. enqueue
   // in die geteilte RetroAutoQueue). Derselbe Check + dieselbe Queue wie nachts
   // (kein zweiter Codepfad, AC6/AC7).
+  //
+  // drain-done-notification AC3/AC6: `drainNotifier` (GETEILTE Instanz mit dem
+  // Nacht-Drain, in server.js verdrahtet) — der Router stößt bei Drain-Abschluss
+  // (resolve) best-effort GENAU EINEN Drain-Fertig-Push an (kein zweiter
+  // Config-Pfad).
   return projectDrainRouter(
-    { projectDrain, commandService, sessionRegistry, costModeModelCheck, drainReportStore, autoRetroTrigger },
+    { projectDrain, commandService, sessionRegistry, costModeModelCheck, drainReportStore, autoRetroTrigger, drainNotifier },
     { lock: manualDrainLock },
   );
 }
