@@ -167,6 +167,36 @@
  *           Verworfen-Stories nicht auf — Test lebt in test/ProjectDrain.test.js
  *           + test/boardReadyStatus.test.js, nicht in dieser Datei.
  *
+ * board-filter-feature-status-consistency (S-241):
+ *   AC1  — Bei aktivem einschränkendem Filter (hasRestrictingFilter) wird der
+ *           angezeigte Feature-Status-Badge aus der GEFILTERTEN Story-Menge
+ *           abgeleitet (computeFeatureStatus aus ../../src/featureStatus.js,
+ *           EINE geteilte Regel-Quelle mit src/BoardAggregator.js — Cross-Build-
+ *           Import via Vite verifiziert, siehe AC3) statt aus dem server-
+ *           berechneten feature.status.
+ *   AC2  — Ohne aktiven Filter ist die sichtbare Menge = alle Stories → das
+ *           Ergebnis ist identisch zum server-feature.status; in diesem Fall
+ *           wird feature.status direkt weiterverwendet (keine doppelte
+ *           Berechnung, siehe filteredProjects-useMemo).
+ *   AC3  — Drift-Gate: computeFeatureStatus lebt EINMAL in ../../src/featureStatus.js
+ *           (dependency-frei, kein fs/path/os-Import) und wird SOWOHL von
+ *           src/BoardAggregator.js ALS AUCH von dieser Datei importiert — kein
+ *           Client-Duplikat nötig (Cross-Build-Import ist praktikabel: die
+ *           Vite-Workspace-Root-Erkennung findet den repo-weiten package-lock.json
+ *           oberhalb von client/, dadurch ist src/ innerhalb des Vite-fs-Zugriffs;
+ *           featureStatus.js selbst importiert nichts Node-/Browser-Spezifisches
+ *           → verifiziert per `npm run build`).
+ *   AC4  — Das Pseudo-Feature `_orphaned` bekommt nie einen abgeleiteten Badge
+ *           (status bleibt null, unangetastet von der AC1-Ableitung).
+ *   AC5  — Bei aktivem einschränkendem Filter werden Features (echt ODER
+ *           `_orphaned`) mit 0 sichtbaren Stories NICHT gerendert; ohne Filter
+ *           unverändert (leere echte Features rendern weiter).
+ *   AC6  — Der bestehende „Keine Stories passen zum aktiven Filter."-Hinweis
+ *           (totalFilteredStories === 0) greift jetzt auch für den Status-Filter,
+ *           nicht mehr nur für den Label-Filter (hasRestrictingFilter statt
+ *           filterLabel als Bedingung). „Kein Status gewählt"-Hinweis (AC3
+ *           studis-kanban-board-ux) unverändert.
+ *
  * Story-Status-Lebenszyklus (board-subsystem §9.3, erweitert um ideen-inbox AC1
  * + board-status-verworfen AC1):
  *   Idee | To Do | In Progress | Blocked | In Review | Done | Verworfen
@@ -194,6 +224,10 @@ import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { EntityIcon }             from './icons/EntityIcon.jsx';
 import { parseEntityLabel }       from './icons/parseEntityLabel.js';
 import { IdeaSpecifyChatModal }   from './IdeaSpecifyChatModal.jsx';
+// board-filter-feature-status-consistency AC3 (S-241): geteilte, dependency-freie
+// Pure-Funktion — EINE Regel-Quelle mit src/BoardAggregator.js (Cross-Build-Import,
+// kein Client-Duplikat).
+import { computeFeatureStatus }   from '../../src/featureStatus.js';
 
 // ── Status-Lebensyklus (board-subsystem §9.3) ─────────────────────────────────
 
@@ -973,19 +1007,34 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
       })
       .map((p) => {
         if (p.error) return p;
-        const filteredFeatures = (p.features ?? []).map((f) => {
-          const filteredStories = (f.stories ?? []).filter((s) => {
-            // AC2/AC3: filterStatus is always a non-empty Set (all STATUS_LIFECYCLE by default);
-            // empty Set = AC3 scenario → no stories shown
-            if (!filterStatus.has(s.status)) return false;
-            if (filterLabel && !(s.labels ?? []).includes(filterLabel)) return false;
-            return true;
-          });
-          return { ...f, stories: filteredStories };
-        });
+        const filteredFeatures = (p.features ?? [])
+          .map((f) => {
+            const filteredStories = (f.stories ?? []).filter((s) => {
+              // AC2/AC3: filterStatus is always a non-empty Set (all STATUS_LIFECYCLE by default);
+              // empty Set = AC3 scenario → no stories shown
+              if (!filterStatus.has(s.status)) return false;
+              if (filterLabel && !(s.labels ?? []).includes(filterLabel)) return false;
+              return true;
+            });
+            // board-filter-feature-status-consistency AC1/AC2/AC4 (S-241): Badge aus
+            // der SICHTBAREN (gefilterten) Story-Menge ableiten, sobald ein
+            // einschränkender Filter aktiv ist — ausser für `_orphaned` (bleibt
+            // status:null, AC4). Ohne aktiven Filter ist die sichtbare Menge = alle
+            // Stories -> feature.status (server-Wert) direkt weiterverwenden
+            // (identisches Ergebnis, AC2 — keine doppelte Berechnung).
+            const isOrphaned = f._orphaned === true || f.id === '_orphaned';
+            const status = !isOrphaned && hasRestrictingFilter
+              ? computeFeatureStatus(filteredStories)
+              : f.status;
+            return { ...f, stories: filteredStories, status };
+          })
+          // AC5: bei aktivem einschränkendem Filter Features (echt oder `_orphaned`)
+          // ohne sichtbare Story ausblenden; ohne Filter unverändert (leere echte
+          // Features rendern weiter).
+          .filter((f) => !hasRestrictingFilter || (f.stories ?? []).length > 0);
         return { ...p, features: filteredFeatures };
       });
-  }, [projects, filterProject, filterStatus, filterLabel]);
+  }, [projects, filterProject, filterStatus, filterLabel, hasRestrictingFilter]);
 
   // Total stories after filtering — used to detect "filter eliminates all" or AC3 empty-set
   const totalFilteredStories = useMemo(() => {
@@ -1180,7 +1229,7 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
                   Keine Projekte / Stories passen zum aktuellen Filter.
                 </div>
               )}
-              {filteredProjects.length > 0 && totalFilteredStories === 0 && filterLabel && (
+              {filteredProjects.length > 0 && totalFilteredStories === 0 && hasRestrictingFilter && (
                 <div role="status" style={styles.statusMsg}>
                   Keine Stories passen zum aktiven Filter.
                 </div>
@@ -1271,7 +1320,7 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
                   Keine Projekte / Stories passen zum aktuellen Filter.
                 </div>
               )}
-              {filteredProjects.length > 0 && totalFilteredStories === 0 && filterLabel && (
+              {filteredProjects.length > 0 && totalFilteredStories === 0 && hasRestrictingFilter && (
                 <div role="status" style={styles.statusMsg}>
                   Keine Stories passen zum aktiven Filter.
                 </div>

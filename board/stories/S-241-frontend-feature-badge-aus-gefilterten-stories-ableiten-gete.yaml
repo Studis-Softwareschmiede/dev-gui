@@ -3,7 +3,7 @@ parent: F-048
 title: 'Frontend: Feature-Badge aus gefilterten Stories ableiten (geteilte computeFeatureStatus)
   + leere Features unter aktivem Filter ausblenden + Leer-Hinweis für Status-Filter
   + _orphaned-Sonderfall'
-status: To Do
+status: In Progress
 priority: P2
 spec: docs/specs/board-filter-feature-status-consistency.md
 implements:
@@ -27,11 +27,11 @@ estimate_note: 'Heuristik: n_ac=6 (AC1-AC6), n_comp~2 (BoardView.jsx filteredPro
   baseline.json js|balanced|L ep=5.0 (n=5) -> confidence medium. Hinweis: rein client-seitig
   + evtl. Pure-Funktions-Extraktion -> Heuristik neigt hier zum oberen Rand.'
 confidence: medium
-branch: null
+branch: feat/S-241-filter-status-consistency
 pr: null
 blocked_reason: null
 created_at: '2026-07-02T05:07:52Z'
-updated_at: '2026-07-02T05:09:33Z'
+updated_at: '2026-07-03T01:45:51Z'
 done_at: null
 notes: 'Spec: docs/specs/board-filter-feature-status-consistency.md — implements AC1-AC6.
   Priority P2. depends: keine. Befund 2 (Owner-Live-Test 2026-07-01): Status-Filter

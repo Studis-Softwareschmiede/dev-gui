@@ -152,6 +152,20 @@
  *   AC5 — Regressions-Invariante (kein Frontend-Code-Delta, kein Test in
  *          dieser Datei): siehe test/ProjectDrain.test.js + test/boardReadyStatus.test.js.
  *
+ * Covers (board-filter-feature-status-consistency, S-241):
+ *   AC1 — Feature [To Do, Blocked], Filter „nur To Do" → Badge „To Do" statt
+ *          server-„Blocked" (wörtliches Spec-Beispiel).
+ *   AC2 — Ohne aktiven Filter entspricht der Badge exakt dem server-feature.status.
+ *   AC3 — Client verwendet dieselbe computeFeatureStatus-Funktion wie der Server
+ *          (Identität + Vektor-Tabelle in test/featureStatus.test.js; hier
+ *          integrationsnah über das gerenderte Badge geprüft).
+ *   AC4 — `_orphaned` bekommt nie einen Badge (gefiltert + ungefiltert).
+ *   AC5 — Feature (echt oder `_orphaned`) mit 0 sichtbaren Stories wird bei
+ *          aktivem Filter ausgeblendet; ohne Filter rendert ein leeres echtes
+ *          Feature weiterhin (Regression).
+ *   AC6 — Leer-Hinweis („Keine Stories passen zum aktiven Filter.") greift jetzt
+ *          auch bei einem reinen Status-Filter, nicht mehr nur beim Label-Filter.
+ *
  * NOTE (jsdom-Limitation): jsdom hat keine Layout-Engine — Style-Property-Asserts beweisen
  * kein Scroll-/Layout-Verhalten; getestet werden Verhalten, Struktur, Rollen und aria.
  *
@@ -524,6 +538,112 @@ function makeArchViewFetch() {
     return { ok: false, status: 404, json: async () => ({}) };
   });
   return fn;
+}
+
+// ── board-filter-feature-status-consistency (S-241) fixtures ──────────────────
+// AC1-Beispiel (wörtlich aus der Spec): Feature mit Stories [To Do, Blocked] →
+// server-status "Blocked" (Blocked-Prio, feature-status-derivation V2). Bei
+// aktivem Filter "nur To Do" ist die sichtbare Menge [To Do] → Badge muss
+// "To Do" zeigen (nicht mehr "Blocked").
+const STORY_FSC_TODO = {
+  id: 'S-100', parent: 'F-100', title: 'Sichtbar nach Filter', status: 'To Do',
+  priority: 'high', labels: [], spec: null,
+};
+const STORY_FSC_BLOCKED = {
+  id: 'S-101', parent: 'F-100', title: 'Ausgeblendet nach Filter', status: 'Blocked',
+  priority: 'high', labels: [], spec: null,
+};
+const FEATURE_FSC_MIXED = {
+  id: 'F-100',
+  title: 'Gemischtes Feature',
+  status: 'Blocked', // server-berechnet über ALLE Kind-Stories (unverändert, AC2)
+  priority: 'high',
+  stories: [STORY_FSC_TODO, STORY_FSC_BLOCKED],
+};
+
+// AC5: Feature mit ausschließlich einer Blocked-Story → bei Filter "nur To Do"
+// hat es 0 sichtbare Stories und muss komplett ausgeblendet werden (nicht nur
+// mit leerem/irreführendem Badge weiterhin gerendert werden).
+const STORY_FSC_ONLY_BLOCKED = {
+  id: 'S-102', parent: 'F-101', title: 'Nur Blocked', status: 'Blocked',
+  priority: 'high', labels: [], spec: null,
+};
+const FEATURE_FSC_ONLY_BLOCKED = {
+  id: 'F-101',
+  title: 'Nur-Blocked-Feature',
+  status: 'Blocked',
+  priority: 'high',
+  stories: [STORY_FSC_ONLY_BLOCKED],
+};
+
+// AC4/AC5: `_orphaned`-Pseudo-Feature — status bleibt IMMER null (kein
+// abgeleiteter Badge, unabhängig vom Filter); wird bei leerer gefilterter
+// Story-Menge unter aktivem Filter ebenfalls ausgeblendet (Entscheidung C).
+const STORY_FSC_ORPHANED_TODO = {
+  id: 'S-103', parent: null, title: 'Verwaist (To Do)', status: 'To Do',
+  priority: null, labels: [], spec: null,
+};
+const STORY_FSC_ORPHANED_BLOCKED = {
+  id: 'S-104', parent: null, title: 'Verwaist (Blocked)', status: 'Blocked',
+  priority: null, labels: [], spec: null,
+};
+const FEATURE_FSC_ORPHANED = {
+  id: '_orphaned',
+  title: 'Verwaiste Stories',
+  status: null,
+  priority: null,
+  stories: [STORY_FSC_ORPHANED_TODO, STORY_FSC_ORPHANED_BLOCKED],
+  _orphaned: true,
+};
+
+const PROJECT_FSC = {
+  slug: 'project-fsc',
+  repo_path: '/home/user/Git/fsc',
+  project_slug: 'project-fsc',
+  schema_version: 1,
+  features: [FEATURE_FSC_MIXED, FEATURE_FSC_ONLY_BLOCKED, FEATURE_FSC_ORPHANED],
+};
+
+// AC6: Projekt mit genau einer To-Do-Story → Filter auf "nur Done" eliminiert
+// ALLE Stories rein über den Status-Filter (kein Label beteiligt) →
+// totalFilteredStories === 0 → der bestehende Leer-Hinweis muss trotzdem
+// erscheinen (bisher nur für den Label-Filter verdrahtet).
+const STORY_FSC_SINGLE_TODO = {
+  id: 'S-105', parent: 'F-102', title: 'Einzelne To-Do-Story', status: 'To Do',
+  priority: 'low', labels: [], spec: null,
+};
+const FEATURE_FSC_SINGLE = {
+  id: 'F-102',
+  title: 'Einzel-Feature',
+  status: 'To Do',
+  priority: 'low',
+  stories: [STORY_FSC_SINGLE_TODO],
+};
+const PROJECT_FSC_SINGLE = {
+  slug: 'project-fsc-single',
+  repo_path: '/home/user/Git/fsc-single',
+  project_slug: 'project-fsc-single',
+  schema_version: 1,
+  features: [FEATURE_FSC_SINGLE],
+};
+
+/**
+ * Öffnet das Status-Popover, deselektiert per "Alle/Keine"-Toggle ALLE Status
+ * und selektiert danach ausschließlich `onlyStatus` (z.B. 'To Do' → id-Suffix
+ * "to-do"). Ergebnis: `filterStatus = {onlyStatus}` (hasRestrictingFilter=true,
+ * allStatusDeselected=false) — unabhängig vom 7er-Status-Lebenszyklus-Default.
+ */
+async function selectOnlyStatus(container, onlyStatus) {
+  await act(async () => {
+    fireEvent.click(container.querySelector('[data-testid="status-filter-btn"]'));
+  });
+  await act(async () => {
+    fireEvent.click(container.querySelector('[data-testid="status-toggle-all-btn"]'));
+  });
+  const inputId = `board-filter-status-${onlyStatus.replace(/\s+/g, '-').toLowerCase()}`;
+  await act(async () => {
+    fireEvent.click(container.querySelector(`#${inputId}`));
+  });
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -3924,5 +4044,145 @@ describe('board-feature-archive — AC6/AC7: „Archiv anzeigen"-Schalter (read-
     });
     const toggle = utils.container.querySelector('[data-testid="archive-toggle-btn"]');
     expect(toggle.getAttribute('aria-pressed')).toBe('false');
+  });
+});
+
+// ── board-filter-feature-status-consistency (S-241) ───────────────────────────
+//
+// Covers (board-filter-feature-status-consistency):
+//   AC1 — Bei aktivem einschränkendem Filter zeigt der Feature-Badge den aus der
+//          gefilterten Story-Menge abgeleiteten Status (Spec-Beispiel wörtlich:
+//          [To Do, Blocked], Filter nur To Do → Badge „To Do").
+//   AC2 — Ohne einschränkenden Filter entspricht der Badge exakt dem
+//          server-`feature.status` (identisches Ergebnis, keine Regression).
+//   AC3 — Eine geteilte Regel-Quelle: Identität + Vektor-Tabelle in
+//          test/featureStatus.test.js; hier zusätzlich integrationsnah über das
+//          tatsächlich gerenderte Badge geprüft (client verwendet dieselbe
+//          computeFeatureStatus-Funktion wie der Server).
+//   AC4 — `_orphaned` bekommt nie einen Badge — weder gefiltert noch ungefiltert.
+//   AC5 — Feature (echt oder `_orphaned`) mit 0 sichtbaren Stories wird bei
+//          aktivem Filter ausgeblendet; ohne Filter rendert ein leeres echtes
+//          Feature weiterhin (Regression, FEATURE_EMPTY/PROJECT_B).
+//   AC6 — Der bestehende „Keine Stories passen zum aktiven Filter."-Hinweis
+//          greift jetzt auch bei einem reinen Status-Filter (kein Label nötig).
+describe('board-filter-feature-status-consistency (S-241)', () => {
+  it('AC1: Feature [To Do, Blocked] zeigt bei Filter "nur To Do" den Badge "To Do" (nicht mehr "Blocked")', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_FSC] });
+    const { container } = renderCockpit('project-fsc');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-story="S-100"]')).toBeTruthy();
+    });
+
+    // Vor dem Filtern: server-Wert "Blocked" (ungefiltert, AC2-Ausgangslage).
+    expect(
+      container.querySelector('[data-feature="F-100"] > div > [aria-label^="Status:"]').textContent,
+    ).toBe('Blocked');
+
+    await selectOnlyStatus(container, 'To Do');
+
+    await waitFor(() => {
+      // Blocked-Story nicht mehr sichtbar, To-Do-Story weiterhin sichtbar.
+      expect(container.querySelector('[data-story="S-101"]')).toBeNull();
+      expect(container.querySelector('[data-story="S-100"]')).toBeTruthy();
+      // Badge jetzt aus der gefilterten Menge abgeleitet: "To Do".
+      expect(
+        container.querySelector('[data-feature="F-100"] > div > [aria-label^="Status:"]').textContent,
+      ).toBe('To Do');
+    });
+  });
+
+  it('AC2: ohne aktiven Filter entspricht der Badge exakt dem server-feature.status', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_FSC] });
+    const { container } = renderCockpit('project-fsc');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-story="S-100"]')).toBeTruthy();
+    });
+
+    // Kein Filter angerührt → Default (alle 7 Status an, kein Label).
+    expect(
+      container.querySelector('[data-feature="F-100"] > div > [aria-label^="Status:"]').textContent,
+    ).toBe('Blocked');
+    expect(
+      container.querySelector('[data-feature="F-101"] > div > [aria-label^="Status:"]').textContent,
+    ).toBe('Blocked');
+  });
+
+  it('AC4: `_orphaned` bekommt nie einen Badge — weder gefiltert noch ungefiltert', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_FSC] });
+    const { container } = renderCockpit('project-fsc');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-feature="_orphaned"]')).toBeTruthy();
+    });
+
+    // Ungefiltert: kein Badge.
+    expect(
+      container.querySelector('[data-feature="_orphaned"] > div > [aria-label^="Status:"]'),
+    ).toBeNull();
+
+    await selectOnlyStatus(container, 'To Do');
+
+    await waitFor(() => {
+      // Orphaned-Feature bleibt sichtbar (S-103 „To Do" passt zum Filter) —
+      // aber weiterhin ohne Badge.
+      expect(container.querySelector('[data-story="S-103"]')).toBeTruthy();
+      expect(
+        container.querySelector('[data-feature="_orphaned"] > div > [aria-label^="Status:"]'),
+      ).toBeNull();
+    });
+  });
+
+  it('AC5: Feature mit 0 sichtbaren Stories wird bei aktivem Filter ausgeblendet (echt + _orphaned)', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_FSC] });
+    const { container } = renderCockpit('project-fsc');
+
+    await waitFor(() => {
+      // Vor dem Filtern: alle drei Features sichtbar.
+      expect(container.querySelector('[data-feature="F-100"]')).toBeTruthy();
+      expect(container.querySelector('[data-feature="F-101"]')).toBeTruthy();
+      expect(container.querySelector('[data-feature="_orphaned"]')).toBeTruthy();
+    });
+
+    // Filter auf "In Review" — keine der PROJECT_FSC-Stories hat diesen Status
+    // → alle drei Features haben 0 sichtbare Stories.
+    await selectOnlyStatus(container, 'In Review');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-feature="F-100"]')).toBeNull();
+      expect(container.querySelector('[data-feature="F-101"]')).toBeNull();
+      expect(container.querySelector('[data-feature="_orphaned"]')).toBeNull();
+    });
+  });
+
+  it('AC5: ohne aktiven Filter rendert ein leeres echtes Feature weiterhin (Regression, keine Verhaltensänderung)', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_B] });
+    const { container } = renderCockpit('project-beta');
+
+    await waitFor(() => {
+      // FEATURE_EMPTY (F-003, 0 Stories) rendert unverändert ohne aktiven Filter.
+      expect(container.querySelector('[data-feature="F-003"]')).toBeTruthy();
+    });
+  });
+
+  it('AC6: reiner Status-Filter (kein Label) der alle Stories eliminiert zeigt den Leer-Hinweis', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_FSC_SINGLE] });
+    const { container } = renderCockpit('project-fsc-single');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-story="S-105"]')).toBeTruthy();
+    });
+
+    // Filter auf "Done" — die einzige Story ist "To Do" → totalFilteredStories===0,
+    // rein über den Status-Filter (kein Label beteiligt).
+    await selectOnlyStatus(container, 'Done');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-story="S-105"]')).toBeNull();
+      const hints = Array.from(container.querySelectorAll('[role="status"]'))
+        .map((el) => el.textContent);
+      expect(hints.some((t) => t.includes('Keine Stories passen zum aktiven Filter.'))).toBe(true);
+    });
   });
 });
