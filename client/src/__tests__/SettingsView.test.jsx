@@ -145,6 +145,17 @@
  *           (bestehender Credential-Pfad, kein Klartext in DOM nach Speichern).
  *           Responsiv/Theme: jsdom nicht testbar — visuell verifiziert via Styles.
  *
+ * Covers (notification-event-defaults S-278) — Frontend AC6:
+ *   AC6  — Ereignis-Auswahl listet alle 6 ALLOWED_EVENTS (story_done, story_blocked,
+ *           feature_done, tunnel_missing, drain_done, questions_pending) mit deutschsprachigen
+ *           Labels; zwei gruppierte Abschnitte „Eingabe zwingend nötig"
+ *           (questions_pending, tunnel_missing) und „Arbeit fertig" (drain_done, story_done,
+ *           story_blocked, feature_done), jeweils role=group/aria-labelledby; die zwei
+ *           default-aktiven Ereignisse (drain_done, tunnel_missing) tragen einen textlichen
+ *           „Standard"-Badge, die übrigen vier nicht; gespeicherte Auswahl (inkl. neuer
+ *           Schlüssel) wird beim Laden korrekt vorbelegt (Checkbox-Zustand); An-/Abwählen +
+ *           Speichern unverändert über PUT /api/settings/notifications (bestehende AC3-Tests).
+ *
  * Covers (obsidian-vault-config S-247) — Frontend, UI-Anteil:
  *   AC1  — Eigene „Obsidian"-Sektion (Spec-Entscheidung A2) zeigt konfigurierten Vault-Pfad
  *          + Zustand (konfiguriert/nicht konfiguriert, nicht nur Farbe — Text „konfiguriert"/
@@ -6803,6 +6814,142 @@ describe('push-notifications S-183 — AC3: Benachrichtigungs-Sektion', () => {
         const body = typeof opts?.body === 'string' ? opts.body : '';
         expect(body).not.toContain('my-secret-token');
       }
+    });
+  });
+});
+
+// ── notification-event-defaults S-278 — AC6: zwei Meldeklassen in der Ereignis-Auswahl ──
+
+describe('notification-event-defaults S-278 — AC6: Ereignis-Auswahl mit Meldeklassen', () => {
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  const ALL_EVENT_KEYS = [
+    'story_done',
+    'story_blocked',
+    'feature_done',
+    'tunnel_missing',
+    'drain_done',
+    'questions_pending',
+  ];
+
+  it('AC6: listet alle 6 Katalog-Ereignisse (inkl. drain_done/questions_pending) als Checkboxen', async () => {
+    const { container } = renderView(makeFetch());
+    await waitFor(() => {
+      for (const key of ALL_EVENT_KEYS) {
+        expect(container.querySelector(`#notif-event-${key}`)).toBeTruthy();
+      }
+    });
+  });
+
+  it('AC6: gruppiert die Ereignisse in zwei Meldeklassen-Abschnitte mit deutschsprachigen Überschriften', async () => {
+    const { container } = renderView(makeFetch());
+    await waitFor(() => {
+      const groups = Array.from(container.querySelectorAll('[role="group"]'));
+      const inputGroup = groups.find((g) => /Eingabe zwingend nötig/i.test(g.textContent));
+      const doneGroup = groups.find((g) => /^Arbeit fertig/i.test(g.textContent.trim()) || /Arbeit fertig/i.test(g.textContent));
+      expect(inputGroup).toBeTruthy();
+      expect(doneGroup).toBeTruthy();
+
+      // "Eingabe zwingend nötig" enthält questions_pending + tunnel_missing
+      expect(inputGroup.querySelector('#notif-event-questions_pending')).toBeTruthy();
+      expect(inputGroup.querySelector('#notif-event-tunnel_missing')).toBeTruthy();
+
+      // "Arbeit fertig" enthält drain_done + die Einzel-Story-Ereignisse
+      expect(doneGroup.querySelector('#notif-event-drain_done')).toBeTruthy();
+      expect(doneGroup.querySelector('#notif-event-story_done')).toBeTruthy();
+      expect(doneGroup.querySelector('#notif-event-story_blocked')).toBeTruthy();
+      expect(doneGroup.querySelector('#notif-event-feature_done')).toBeTruthy();
+    });
+  });
+
+  it('AC6: jede Gruppe ist per role=group + aria-labelledby auf ihre Überschrift verdrahtet', async () => {
+    const { container } = renderView(makeFetch());
+    await waitFor(() => {
+      const groups = Array.from(container.querySelectorAll('[role="group"]')).filter((g) =>
+        g.querySelector('input[type="checkbox"]'),
+      );
+      expect(groups.length).toBe(2);
+      for (const group of groups) {
+        const labelledBy = group.getAttribute('aria-labelledby');
+        expect(labelledBy).toBeTruthy();
+        const heading = container.querySelector(`#${labelledBy}`);
+        expect(heading).toBeTruthy();
+        expect(heading.textContent.trim().length).toBeGreaterThan(0);
+      }
+    });
+  });
+
+  it('AC6: die zwei default-aktiven Ereignisse (drain_done, tunnel_missing) tragen einen textlichen "Standard"-Badge', async () => {
+    const { container } = renderView(makeFetch());
+    await waitFor(() => {
+      const drainLabel = container.querySelector('#notif-event-drain_done').closest('label');
+      const tunnelLabel = container.querySelector('#notif-event-tunnel_missing').closest('label');
+      expect(drainLabel.textContent).toMatch(/Standard/);
+      expect(tunnelLabel.textContent).toMatch(/Standard/);
+
+      // Die übrigen vier Ereignisse tragen KEINEN "Standard"-Badge
+      for (const key of ['story_done', 'story_blocked', 'feature_done', 'questions_pending']) {
+        const label = container.querySelector(`#notif-event-${key}`).closest('label');
+        expect(label.textContent).not.toMatch(/Standard/);
+      }
+    });
+  });
+
+  it('AC6: gespeicherte Auswahl (inkl. drain_done/questions_pending) wird beim Laden korrekt vorbelegt', async () => {
+    const fetchMock = makeFetch({
+      getNotificationSettings: {
+        ok: true,
+        status: 200,
+        data: {
+          enabled: true,
+          server: 'https://ntfy.sh',
+          topic: 'board',
+          priority: null,
+          events: ['drain_done', 'questions_pending'],
+          has_token: false,
+        },
+      },
+    });
+    const { container } = renderView(fetchMock);
+    await waitFor(() => {
+      expect(container.querySelector('#notif-event-drain_done').checked).toBe(true);
+      expect(container.querySelector('#notif-event-questions_pending').checked).toBe(true);
+      expect(container.querySelector('#notif-event-tunnel_missing').checked).toBe(false);
+      expect(container.querySelector('#notif-event-story_done').checked).toBe(false);
+      expect(container.querySelector('#notif-event-story_blocked').checked).toBe(false);
+      expect(container.querySelector('#notif-event-feature_done').checked).toBe(false);
+    });
+  });
+
+  it('AC6: An-/Abwählen von questions_pending wird über PUT /api/settings/notifications gespeichert', async () => {
+    const fetchMock = makeFetch();
+    const { container } = renderView(fetchMock);
+
+    await waitFor(() => {
+      expect(container.querySelector('#notif-event-questions_pending')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('#notif-event-questions_pending'));
+    });
+
+    const saveBtn = Array.from(container.querySelectorAll('button')).find((b) =>
+      /Einstellungen speichern/i.test(b.textContent),
+    );
+    await act(async () => {
+      fireEvent.click(saveBtn);
+    });
+
+    await waitFor(() => {
+      const putCalls = fetchMock.mock.calls.filter(
+        ([url, opts]) => url === '/api/settings/notifications' && opts?.method === 'PUT',
+      );
+      expect(putCalls.length).toBeGreaterThanOrEqual(1);
+      const [, opts] = putCalls[putCalls.length - 1];
+      const body = JSON.parse(opts.body);
+      expect(body.events).toContain('questions_pending');
     });
   });
 });

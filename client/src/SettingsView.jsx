@@ -4164,11 +4164,43 @@ async function postNotificationTest(fetchImpl) {
   return res.json();
 }
 
-/** Erlaubte Ereignis-Schlüssel (sync mit Backend ALLOWED_EVENTS). */
-const NOTIFICATION_EVENTS = [
-  { key: 'story_done', label: 'Story fertig (→ Done)' },
-  { key: 'story_blocked', label: 'Story blockiert (→ Blocked)' },
-  { key: 'feature_done', label: 'Feature komplett (alle Stories Done)' },
+/**
+ * Ereignis-Katalog, gruppiert nach Meldeklasse (notification-event-defaults AC6).
+ * Sync mit Backend `ALLOWED_EVENTS` (src/NotificationSettingsStore.js).
+ *
+ * Meldeklassen-Zuordnung (Spec-Konzeptteil „Meldeklassen", notification-event-defaults
+ * Zeilen 30-37 — die einzige Stelle, die Klassen-Zugehörigkeit definiert):
+ *   „Eingabe zwingend nötig" — questions_pending (primär, wartende Owner-Eingabe) +
+ *     tunnel_missing (verwandte „Aktion nötig"-Infrastruktur-Meldung, Spec-Zeile 33f.).
+ *   „Arbeit fertig" — drain_done (primär, Lauf abgeschlossen mit Bilanz) + die dort
+ *     genannten feingranularen story_done/feature_done.
+ *   ANNAHME zu story_blocked: die Spec-Definition (Zeilen 30-37) erwähnt story_blocked
+ *     NICHT explizit — hier wird es der Story-Lifecycle-Familie (push-notifications AC8,
+ *     notification-event-defaults Nicht-Ziele/A3: story_done/story_blocked/feature_done
+ *     bleiben als Gruppe verfügbar) unter „Arbeit fertig" zugeordnet. Eine alternative
+ *     Lesart („Eingabe zwingend nötig", da ein blockierter Lauf konzeptionell nicht
+ *     abgeschlossen ist) ist denkbar — offene Klärung beim Owner, keine Spec-gedeckte
+ *     Tatsache.
+ */
+const NOTIFICATION_EVENT_GROUPS = [
+  {
+    id: 'input-required',
+    heading: 'Eingabe zwingend nötig',
+    events: [
+      { key: 'questions_pending', label: 'Rückfragen offen (Import wartet auf Antwort)', isDefault: false },
+      { key: 'tunnel_missing', label: 'Tunnel fehlt (Cloudflare-Verbindung gestört)', isDefault: true },
+    ],
+  },
+  {
+    id: 'work-done',
+    heading: 'Arbeit fertig',
+    events: [
+      { key: 'drain_done', label: 'Board-Durchlauf abgeschlossen (Bilanz)', isDefault: true },
+      { key: 'story_done', label: 'Story fertig (→ Done)', isDefault: false },
+      { key: 'story_blocked', label: 'Story blockiert (→ Blocked)', isDefault: false },
+      { key: 'feature_done', label: 'Feature komplett (alle Stories Done)', isDefault: false },
+    ],
+  },
 ];
 
 /**
@@ -4524,21 +4556,34 @@ function NotificationSection({ notificationsCredMeta, onCredSaved, fetchFn }) {
         )}
       </div>
 
-      {/* Ereignis-Auswahl */}
+      {/* Ereignis-Auswahl, gruppiert nach Meldeklasse (notification-event-defaults AC6) */}
       <fieldset style={notifStyles.fieldset}>
         <legend style={notifStyles.legend}>Ereignisse</legend>
-        {NOTIFICATION_EVENTS.map(({ key, label }) => (
-          <div key={key} style={notifStyles.checkboxRow}>
-            <label htmlFor={`notif-event-${key}`} style={notifStyles.checkboxLabel}>
-              <input
-                id={`notif-event-${key}`}
-                type="checkbox"
-                checked={events.includes(key)}
-                onChange={(e) => { handleEventChange(key, e.target.checked); setSaved(false); }}
-                style={notifStyles.checkbox}
-              />
-              {' '}{label}
-            </label>
+        {NOTIFICATION_EVENT_GROUPS.map((group) => (
+          <div
+            key={group.id}
+            role="group"
+            aria-labelledby={`notif-group-${group.id}`}
+            style={notifStyles.eventGroup}
+          >
+            <p id={`notif-group-${group.id}`} style={notifStyles.groupHeading}>
+              {group.heading}
+            </p>
+            {group.events.map(({ key, label, isDefault }) => (
+              <div key={key} style={notifStyles.checkboxRow}>
+                <label htmlFor={`notif-event-${key}`} style={notifStyles.checkboxLabel}>
+                  <input
+                    id={`notif-event-${key}`}
+                    type="checkbox"
+                    checked={events.includes(key)}
+                    onChange={(e) => { handleEventChange(key, e.target.checked); setSaved(false); }}
+                    style={notifStyles.checkbox}
+                  />
+                  {' '}{label}
+                  {isDefault && <span style={notifStyles.defaultBadge}>Standard</span>}
+                </label>
+              </div>
+            ))}
           </div>
         ))}
       </fieldset>
@@ -4648,6 +4693,17 @@ const notifStyles = {
     fontSize: 13,
     padding: '0 4px',
   },
+  eventGroup: {
+    marginBottom: 12,
+  },
+  groupHeading: {
+    color: '#9ca3af',
+    fontSize: 12,
+    fontWeight: 600,
+    textTransform: 'uppercase',
+    letterSpacing: '0.03em',
+    margin: '4px 0 6px',
+  },
   checkboxRow: {
     marginBottom: 6,
   },
@@ -4660,6 +4716,16 @@ const notifStyles = {
     cursor: 'pointer',
     lineHeight: 1.4,
     minHeight: 32,
+  },
+  defaultBadge: {
+    marginLeft: 6,
+    padding: '1px 6px',
+    fontSize: 11,
+    fontWeight: 600,
+    color: '#93c5fd',
+    background: '#1e3a5f',
+    border: '1px solid #2563eb',
+    borderRadius: 999,
   },
   checkbox: {
     minWidth: 16,
