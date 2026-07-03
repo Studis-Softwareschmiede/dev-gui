@@ -136,8 +136,13 @@
  *   AC8  — Kein dangerouslySetInnerHTML; kein neuer API-Aufruf; keine Secrets.
  *
  * board-feature-archive:
- *   AC5/AC7 (S-233) — Button „Erledigte Features archivieren" + Bestätigungs-
- *           abfrage (FilterBar + ArchiveConfirmDialog).
+ *   > **⟶ Superseded für den Archiv-Knopf + Endpoint ([[board-storys-archivieren]],
+ *   > S-294):** der Knopf heißt jetzt „Erledigte Storys archivieren" und ruft
+ *   > `POST …/archive-done-stories` auf (Archivierbarkeit pro STORY, nicht mehr
+ *   > pro Feature — siehe unten). Die Feature-Ebenen-Variante (`archive-done`)
+ *   > bleibt Backend-seitig für Altbestände erhalten, hat aber keinen Frontend-
+ *   > Trigger mehr.
+ *   AC5/AC7 (S-233) — SUPERSEDED, siehe oben.
  *   AC6/AC7 (S-234) — „Archiv anzeigen"-Schalter (Default aus, echter Toggle-
  *           Button mit aria-pressed) in der FilterBar. Ist er an, laden die
  *           Board-Fetches mit `?includeArchived=true` (V3) neu; archivierte
@@ -145,7 +150,28 @@
  *           Affordance: kein Karten-Button, kein Spezifizieren) und klar per
  *           Text „Archiviert" markiert (nicht nur farblich). Toggle-Zustand
  *           lokal in localStorage (`boardview.showArchived`); defektes
- *           localStorage → stiller Default (aus), kein Crash.
+ *           localStorage → stiller Default (aus), kein Crash. Bleibt UNVERÄNDERT
+ *           in Kraft (board-storys-archivieren AC7 wiederverwendet dieselbe
+ *           Implementierung 1:1).
+ *
+ * board-storys-archivieren (S-294):
+ *   AC6 — Knopf „Erledigte Storys archivieren" (FilterBar): deaktiviert, wenn
+ *           keine Story archivierbar ist (V1: status ∈ {Done, Verworfen} UND
+ *           nicht bereits `archived` — pro STORY berechnet, unabhängig vom
+ *           Geschwister-Status im selben Feature); sonst öffnet ein Klick eine
+ *           Bestätigungsabfrage (`ArchiveConfirmDialog`) mit der Anzahl
+ *           betroffener Storys + Hinweis, dass die Bereichs-Kacheln sichtbar
+ *           bleiben. Abbrechen ändert nichts. Bestätigen setzt
+ *           `POST …/archive-done-stories` ab und lädt die Übersicht neu
+ *           (archivierte Storys verschwinden, Kacheln bleiben). Endpoint-Fehler
+ *           (409/5xx) erscheinen nicht-blockierend (role=alert) im Dialog.
+ *   AC7 — „Archiv anzeigen"-Schalter unverändert wiederverwendet (siehe
+ *           board-feature-archive AC6/AC7 oben) — zeigt archivierte Storys
+ *           read-only + klar markiert.
+ *   AC8 — A11y: Knopf + Schalter sind echte `button`-Elemente mit sprechendem
+ *           `aria-label`; Bestätigungsabfrage bleibt das fokussierte
+ *           Dialog-Muster (role="dialog", Fokusfalle/Esc, sichtbarer
+ *           Fokusring); Bedeutung nicht allein über Farbe (Text).
  *
  * board-status-verworfen (S-242):
  *   AC1  — „Verworfen" ist das 7. (letzte) Element von STATUS_LIFECYCLE, rendert
@@ -926,46 +952,46 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
     return () => clearInterval(intervalId);
   }, [hasRunningFinalizeJob, fetchFinalizeJob]);
 
-  // ─── Archivierbarkeit + Archiv-Schreibpfad (board-feature-archive AC5/V5, ─────
-  // ─── terminal-Erweiterung V7/AC9, S-244) ──────────────────────────────────────
-  // Zählt die aktuell archivierbaren Features + deren Stories NACH V1/V7 aus den
-  // bereits geladenen (UNGEFILTERTEN) Board-Daten: ein Feature ist archivierbar,
-  // wenn es ≥1 Story hat, JEDE seiner Stories terminal ist (`Done` ODER
-  // `Verworfen` — AC9), es NICHT bereits archiviert ist und es NICHT das
-  // Pseudo-Feature `_orphaned` ist. Der Zähler speist sowohl den Disabled-
-  // Zustand des Buttons als auch die Bestätigungsabfrage (V5: „N Features mit
-  // M Stories werden archiviert"). Bewusst aus `projects` (roh) statt
-  // `filteredProjects`, damit ein aktiver Status-/Label-Filter die Zählung
-  // nicht verfälscht.
+  // ─── Archivierbarkeit + Archiv-Schreibpfad (board-storys-archivieren AC6/V1, ──
+  // ─── S-294 — löst die feature-basierte Zählung aus board-feature-archive ab) ──
+  // Zählt die aktuell archivierbaren STORYS (nicht mehr Features) NACH V1 aus
+  // den bereits geladenen (UNGEFILTERTEN) Board-Daten: eine Story ist
+  // archivierbar, wenn ihr status terminal ist (`Done` ODER `Verworfen`) UND
+  // sie NICHT bereits archiviert ist (`archived !== true`) — UNABHÄNGIG vom
+  // Status der Geschwister-Storys im selben Feature (anders als die
+  // superseded Feature-Ebenen-Regel: dort musste JEDE Story eines Features
+  // terminal sein). Deckungsgleich mit dem Backend-Kriterium
+  // `BoardWriter.archiveDoneStories()` (src/BoardWriter.js), das ebenfalls
+  // rein pro Story-YAML entscheidet, unabhängig vom Eltern-Feature. Bewusst
+  // aus `projects` (roh) statt `filteredProjects`, damit ein aktiver Status-/
+  // Label-Filter die Zählung nicht verfälscht.
   const archivable = useMemo(() => {
-    let featureCount = 0;
     let storyCount = 0;
     for (const p of projects) {
       if (p.error) continue;
       for (const f of p.features ?? []) {
-        if (f._orphaned || f.id === '_orphaned') continue; // Pseudo-Feature (V1)
-        if (f.archived === true) continue;                 // bereits archiviert (V1)
         const st = Array.isArray(f.stories) ? f.stories : [];
-        if (st.length === 0) continue;                     // ohne Stories → nicht archivierbar
-        if (!st.every((s) => ARCHIVABLE_TERMINAL_STATUSES.has(s.status))) continue; // ≥1 nicht-terminal → nein (AC9)
-        featureCount += 1;
-        storyCount += st.length;
+        for (const s of st) {
+          if (s.archived === true) continue; // V1: bereits archiviert
+          if (!ARCHIVABLE_TERMINAL_STATUSES.has(s.status)) continue; // V1: nicht terminal
+          storyCount += 1;
+        }
       }
     }
-    return { featureCount, storyCount };
+    return { storyCount };
   }, [projects]);
 
-  // Archiv-Schreibpfad (V5-Bestätigen): POST .../archive-done und danach die
-  // Übersicht neu laden (Rescan — bestehender handleSpecified-Re-Fetch-Weg).
-  // Wirft bei Fehler (409/5xx/Netz) eine secret-freie, nutzerlesbare Meldung —
-  // die FilterBar zeigt sie nicht-blockierend im Dialog, ohne die Ansicht zu
-  // zerstören (AC5).
+  // Archiv-Schreibpfad (AC6-Bestätigen): POST .../archive-done-stories und
+  // danach die Übersicht neu laden (Rescan — bestehender handleSpecified-
+  // Re-Fetch-Weg). Wirft bei Fehler (409/5xx/Netz) eine secret-freie,
+  // nutzerlesbare Meldung — die FilterBar zeigt sie nicht-blockierend im
+  // Dialog, ohne die Ansicht zu zerstören (AC6).
   const handleArchiveDone = useCallback(async () => {
     const slug = currentProjectSlug;
     if (!slug) throw new Error('Kein Projekt geladen.');
     let res;
     try {
-      res = await fetch(`/api/board/projects/${encodeURIComponent(slug)}/archive-done`, {
+      res = await fetch(`/api/board/projects/${encodeURIComponent(slug)}/archive-done-stories`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({}),
@@ -979,9 +1005,10 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
       }
       throw new Error(`Archivieren fehlgeschlagen (HTTP ${res.status}).`);
     }
-    // Erfolg → Übersicht neu laden (Rescan); die archivierten Features
-    // verschwinden aus der Standardansicht. handleSpecified ist der generische
-    // Board-Re-Fetch (Cockpit: reloadToken++, Standalone: handleProjectSelect).
+    // Erfolg → Übersicht neu laden (Rescan); die archivierten Storys
+    // verschwinden aus der Standardansicht, die Bereichs-Kacheln (Features)
+    // bleiben unangetastet. handleSpecified ist der generische Board-Re-Fetch
+    // (Cockpit: reloadToken++, Standalone: handleProjectSelect).
     handleSpecified(slug);
   }, [currentProjectSlug, handleSpecified]);
 
@@ -1184,7 +1211,6 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
               allFeatureIds={(projects[0]?.features ?? []).map((f) => f.id)}
               onCollapseAll={handleCollapseAll}
               onExpandAll={handleExpandAll}
-              archivableFeatureCount={archivable.featureCount}
               archivableStoryCount={archivable.storyCount}
               onArchiveDone={handleArchiveDone}
               showArchived={showArchived}
@@ -1272,7 +1298,6 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
               allFeatureIds={(projects[0]?.features ?? []).map((f) => f.id)}
               onCollapseAll={handleCollapseAll}
               onExpandAll={handleExpandAll}
-              archivableFeatureCount={archivable.featureCount}
               archivableStoryCount={archivable.storyCount}
               onArchiveDone={handleArchiveDone}
               showArchived={showArchived}
@@ -1363,13 +1388,16 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
  *
  * AC4 (board-feature-collapse): "Alle einklappen" / "Alle ausklappen" Schalter.
  *
- * AC5/AC7 (board-feature-archive): Button „Erledigte Features archivieren" +
- *   Bestätigungsabfrage. Der Button ist deaktiviert, wenn nichts archivierbar ist
- *   (`archivableFeatureCount === 0`); sonst öffnet ein Klick einen fokussierten
+ * AC6 (board-storys-archivieren, S-294 — löst AC5/AC7 aus board-feature-archive
+ *   ab): Button „Erledigte Storys archivieren" + Bestätigungsabfrage. Der
+ *   Button ist deaktiviert, wenn keine Story archivierbar ist
+ *   (`archivableStoryCount === 0`); sonst öffnet ein Klick einen fokussierten
  *   Bestätigungsdialog (`role="dialog"`, Fokusfalle/Esc), der die Anzahl
- *   betroffener Features UND Stories nennt. Bestätigen ruft `onArchiveDone()`
- *   (POST + Rescan, wirft bei Fehler eine secret-freie Meldung), Abbrechen
- *   ändert nichts. Endpoint-Fehler erscheinen nicht-blockierend im Dialog.
+ *   betroffener Storys nennt + darauf hinweist, dass die Bereichs-Kacheln
+ *   sichtbar bleiben. Bestätigen ruft `onArchiveDone()` (POST
+ *   `.../archive-done-stories` + Rescan, wirft bei Fehler eine secret-freie
+ *   Meldung), Abbrechen ändert nichts. Endpoint-Fehler erscheinen
+ *   nicht-blockierend im Dialog.
  *
  * @param {{
  *   projects: string[],
@@ -1386,7 +1414,6 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
  *   allFeatureIds?: string[],
  *   onCollapseAll?: () => void,
  *   onExpandAll?: () => void,
- *   archivableFeatureCount?: number,
  *   archivableStoryCount?: number,
  *   onArchiveDone?: () => Promise<void>,
  *   showArchived?: boolean,
@@ -1419,14 +1446,13 @@ function FilterBar({
   allFeatureIds,
   onCollapseAll,
   onExpandAll,
-  archivableFeatureCount = 0,
   archivableStoryCount = 0,
   onArchiveDone,
   showArchived = false,
   onToggleArchived,
   projectSlug = null,
 }) {
-  // AC5 (board-feature-archive): Zustand der Archiv-Bestätigungsabfrage.
+  // AC6 (board-storys-archivieren): Zustand der Archiv-Bestätigungsabfrage.
   //   archiveConfirmOpen — Dialog sichtbar?
   //   archiveState        — 'idle' | 'submitting' | 'error' (POST-Fortschritt)
   //   archiveError        — nicht-blockierende, secret-freie Fehlermeldung
@@ -1435,7 +1461,7 @@ function FilterBar({
   const [archiveState, setArchiveState] = useState('idle');
   const [archiveError, setArchiveError] = useState('');
   const archiveTriggerRef = useRef(null);
-  const hasArchivable = archivableFeatureCount > 0;
+  const hasArchivable = archivableStoryCount > 0;
 
   const handleOpenArchiveConfirm = useCallback(() => {
     setArchiveState('idle');
@@ -1686,9 +1712,9 @@ function FilterBar({
         </button>
       )}
 
-      {/* AC5/AC7 (board-feature-archive): „Erledigte Features archivieren" —
-          deaktiviert wenn nichts archivierbar; sonst öffnet ein Klick die
-          Bestätigungsabfrage. Echter <button> mit sprechendem aria-label,
+      {/* AC6 (board-storys-archivieren): „Erledigte Storys archivieren" —
+          deaktiviert wenn keine Story archivierbar ist; sonst öffnet ein Klick
+          die Bestätigungsabfrage. Echter <button> mit sprechendem aria-label,
           Bedeutung nicht allein über Farbe (Text). */}
       {onArchiveDone && (
         <button
@@ -1698,12 +1724,12 @@ function FilterBar({
           disabled={!hasArchivable}
           onClick={handleOpenArchiveConfirm}
           aria-label={hasArchivable
-            ? `Erledigte Features archivieren: ${archivableFeatureCount} Features mit ${archivableStoryCount} Stories`
-            : 'Erledigte Features archivieren — keine erledigten Features vorhanden'}
-          title={hasArchivable ? undefined : 'Keine erledigten Features'}
+            ? `Erledigte Storys archivieren: ${archivableStoryCount} ${archivableStoryCount === 1 ? 'Story' : 'Storys'}`
+            : 'Erledigte Storys archivieren — keine erledigten Storys vorhanden'}
+          title={hasArchivable ? undefined : 'Keine erledigten Storys'}
           data-testid="archive-done-btn"
         >
-          Erledigte Features archivieren
+          Erledigte Storys archivieren
         </button>
       )}
 
@@ -1743,10 +1769,9 @@ function FilterBar({
         </button>
       )}
 
-      {/* AC5/AC7: Bestätigungsabfrage (fokussiertes Dialog-Muster). */}
+      {/* AC6/AC8: Bestätigungsabfrage (fokussiertes Dialog-Muster). */}
       {archiveConfirmOpen && (
         <ArchiveConfirmDialog
-          featureCount={archivableFeatureCount}
           storyCount={archivableStoryCount}
           state={archiveState}
           error={archiveError}
@@ -1767,23 +1792,23 @@ function FilterBar({
   );
 }
 
-// ── ArchiveConfirmDialog (board-feature-archive AC5/AC7) ──────────────────────
+// ── ArchiveConfirmDialog (board-storys-archivieren AC6/AC8) ───────────────────
 
 /**
- * Bestätigungsabfrage für „Erledigte Features archivieren" (V5).
+ * Bestätigungsabfrage für „Erledigte Storys archivieren" (V4, S-294 — löst die
+ * frühere Feature-Ebenen-Fassung aus board-feature-archive V5/AC5 ab).
  *
- * AC5: nennt die Anzahl betroffener Features UND Stories; Abbrechen ändert
- *   nichts; Bestätigen ruft `onConfirm`; ein Endpoint-Fehler wird
- *   nicht-blockierend (role=alert) im Dialog gezeigt, ohne die Ansicht zu
- *   zerstören.
- * AC7: fokussiertes Dialog-Muster — `role="dialog"`, `aria-modal`,
+ * AC6: nennt die Anzahl betroffener Storys + Hinweis, dass die Bereichs-
+ *   Kacheln sichtbar bleiben; Abbrechen ändert nichts; Bestätigen ruft
+ *   `onConfirm`; ein Endpoint-Fehler wird nicht-blockierend (role=alert) im
+ *   Dialog gezeigt, ohne die Ansicht zu zerstören.
+ * AC8: fokussiertes Dialog-Muster — `role="dialog"`, `aria-modal`,
  *   `aria-labelledby`; Fokus beim Öffnen auf das erste Bedienelement;
  *   Fokusfalle (Tab/Shift+Tab zyklisch); Esc bricht ab (außer während des
  *   laufenden POST); sichtbarer Fokusring (kein outline:none); Bedeutung nicht
  *   allein über Farbe (Text).
  *
  * @param {{
- *   featureCount: number,
  *   storyCount: number,
  *   state: 'idle'|'submitting'|'error',
  *   error?: string,
@@ -1791,7 +1816,7 @@ function FilterBar({
  *   onConfirm: () => void,
  * }} props
  */
-function ArchiveConfirmDialog({ featureCount, storyCount, state, error, onCancel, onConfirm }) {
+function ArchiveConfirmDialog({ storyCount, state, error, onCancel, onConfirm }) {
   const dialogRef = useRef(null);
   const titleId = 'archive-confirm-title';
   const submitting = state === 'submitting';
@@ -1826,8 +1851,8 @@ function ArchiveConfirmDialog({ featureCount, storyCount, state, error, onCancel
     return () => dialog.removeEventListener('keydown', handleKeyDown);
   }, [onCancel, submitting]);
 
-  const featureWord = featureCount === 1 ? 'Feature' : 'Features';
-  const storyWord   = storyCount === 1 ? 'Story' : 'Stories';
+  const storyWord = storyCount === 1 ? 'Story' : 'Storys';
+  const verb      = storyCount === 1 ? 'wird' : 'werden';
 
   return (
     <>
@@ -1846,10 +1871,11 @@ function ArchiveConfirmDialog({ featureCount, storyCount, state, error, onCancel
         style={styles.archiveDialog}
         data-testid="archive-confirm-dialog"
       >
-        <h2 id={titleId} style={styles.archiveHeading}>Erledigte Features archivieren</h2>
+        <h2 id={titleId} style={styles.archiveHeading}>Erledigte Storys archivieren</h2>
         <p style={styles.archiveBody} data-testid="archive-confirm-summary">
-          {featureCount} {featureWord} mit {storyCount} {storyWord} {featureCount === 1 ? 'wird' : 'werden'} archiviert.
+          {storyCount} erledigte {storyWord} {verb} archiviert.
           Sie verschwinden aus der Übersicht, bleiben aber gespeichert.
+          Die Bereichs-Kacheln bleiben sichtbar.
         </p>
 
         {state === 'error' && error && (

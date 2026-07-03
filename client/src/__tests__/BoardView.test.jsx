@@ -101,32 +101,38 @@
  *          (`GET /api/board/projects/:slug` erneut) — Wiederverwendung des
  *          bestehenden Cockpit-Lade-Mechanismus (`reloadToken`).
  *
- * Covers (board-feature-archive, S-233):
- *   AC5 — Button „Erledigte Features archivieren" ist deaktiviert, wenn nichts
- *          archivierbar ist (V1: kein Feature mit ≥1 Story, alle Done, nicht
- *          archiviert); sonst öffnet ein Klick eine Bestätigungsabfrage mit der
- *          Anzahl betroffener Features UND Stories (aus den geladenen Board-Daten
- *          nach V1 berechnet, ungefiltert). Abbrechen ändert nichts + setzt kein
- *          POST ab; Bestätigen setzt genau EIN POST .../archive-done ab und lädt
- *          die Übersicht neu (archivierte Features verschwinden → Button wieder
- *          deaktiviert). Endpoint-Fehler (409/5xx) erscheinen nicht-blockierend
- *          (role=alert) im Dialog, ohne die Ansicht zu zerstören (Board bleibt).
- *   AC7 — A11y: Button ist echter <button> mit sprechendem aria-label; die
+ * Covers (board-feature-archive, S-233/S-244):
+ *   AC5/AC7/AC9 — SUPERSEDED durch board-storys-archivieren (S-294), siehe
+ *          unten: derselbe physische Button/Dialog heißt jetzt „Erledigte
+ *          Storys archivieren" und rechnet Archivierbarkeit pro STORY statt
+ *          pro Feature. Die alten feature-basierten Tests dafür sind entfernt
+ *          und durch die AC6/AC8-Tests unten ersetzt.
+ *
+ * Covers (board-storys-archivieren, S-294):
+ *   AC6 — Button „Erledigte Storys archivieren" ist deaktiviert, wenn keine
+ *          Story archivierbar ist (V1: status ∈ {Done, Verworfen} UND nicht
+ *          bereits `archived` — pro STORY, unabhängig vom Geschwister-Status
+ *          im selben Feature); sonst öffnet ein Klick eine Bestätigungsabfrage
+ *          mit der Anzahl betroffener Storys (aus den geladenen Board-Daten
+ *          nach V1 berechnet, ungefiltert) + Hinweis, dass die Bereichs-
+ *          Kacheln sichtbar bleiben. Abbrechen ändert nichts + setzt kein POST
+ *          ab; Bestätigen setzt genau EIN POST .../archive-done-stories ab und
+ *          lädt die Übersicht neu (archivierte Storys verschwinden, die
+ *          Bereichs-Kachel bleibt → Button ggf. wieder deaktiviert). Endpoint-
+ *          Fehler (409/5xx) erscheinen nicht-blockierend (role=alert) im
+ *          Dialog, ohne die Ansicht zu zerstören (Board bleibt). `Verworfen`
+ *          zählt wie `Done` als terminal (Backend-Kriterium
+ *          `BoardWriter.archiveDoneStories` separat in test/BoardWriter.test.js
+ *          abgedeckt).
+ *   AC7 — „Archiv anzeigen"-Schalter unverändert wiederverwendet — siehe
+ *          „Covers (board-feature-archive, S-234)" unten (dieselbe
+ *          Implementierung, keine neuen Tests nötig).
+ *   AC8 — A11y: Button ist echter <button> mit sprechendem aria-label; die
  *          Bestätigungsabfrage ist ein fokussiertes Dialog-Muster
  *          (role="dialog" + aria-modal + aria-labelledby, Esc-Abbruch). Bedeutung
  *          nicht allein über Farbe (Text-Zusammenfassung). Sichtbarer Fokusring +
  *          Fokusfalle (Tab-Zyklus) in Quelle umgesetzt — jsdom hat keine
  *          Layout-Engine, daher Fokus-Zyklus/Fokusring nur strukturell belegt.
- *
- * Covers (board-feature-archive, S-244 — AC9: Verworfen terminal wie Done):
- *   AC9 — Archivierbarkeitsprüfung (Buttonaktivierung + Bestätigungs-Zählung)
- *          behandelt `Verworfen` wie `Done` als terminal: ein Feature mit nur
- *          Verworfen-Stories ODER Done+Verworfen-Stories ist archivierbar; ein
- *          Feature mit ≥1 nicht-terminaler Story (z.B. Verworfen+To Do) bleibt
- *          es NICHT. Nach Bestätigen bleibt das nicht-terminale Feature
- *          sichtbar; die terminalen verschwinden (Button wieder deaktiviert).
- *          Backend-Kriterium (`BoardWriter.archiveDoneFeatures`) separat in
- *          test/BoardWriter.test.js abgedeckt.
  *
  * Covers (board-feature-archive, S-234 — „Archiv anzeigen"-Schalter):
  *   AC6 — „Archiv anzeigen"-Toggle (Default aus): initial werden KEINE
@@ -463,6 +469,9 @@ const FEATURE_MIXED = {
   ],
 };
 // Vor dem Archivieren: 1 archivierbares Feature (F-900) mit 2 Stories + 1 gemischtes.
+// (Nur noch als generische Board-Fixtures für die „Bereiche verwalten"-Tests
+// unten benötigt — die Story-Ebenen-Archivierbarkeit selbst wird mit eigenen,
+// dediziert benannten Fixtures weiter unten getestet.)
 const PROJECT_ARCHIVE_BEFORE = {
   slug: 'proj-arch',
   repo_path: '/home/user/Git/arch',
@@ -478,71 +487,12 @@ const PROJECT_ARCHIVE_AFTER = {
   schema_version: 1,
   features: [FEATURE_MIXED],
 };
-// Kein archivierbares Feature (nur gemischt) → Button deaktiviert.
-const PROJECT_NO_ARCHIVABLE = {
-  slug: 'proj-arch',
-  repo_path: '/home/user/Git/arch',
-  project_slug: 'proj-arch',
-  schema_version: 1,
-  features: [FEATURE_MIXED],
-};
-
-// ── board-feature-archive AC9 (S-244) fixtures — Verworfen als terminal ────────
-// FEATURE_ONLY_VERWORFEN: alle Stories Verworfen → archivierbar (AC9, alle terminal).
-const FEATURE_ONLY_VERWORFEN = {
-  id: 'F-910',
-  title: 'Komplett verworfenes Feature',
-  status: 'Verworfen',
-  priority: 'low',
-  stories: [
-    { id: 'S-910', parent: 'F-910', title: 'Teil E', status: 'Verworfen', priority: 'low', labels: [], spec: null },
-  ],
-};
-// FEATURE_DONE_AND_VERWORFEN: Done + Verworfen (beide terminal) → archivierbar (AC9).
-const FEATURE_DONE_AND_VERWORFEN = {
-  id: 'F-911',
-  title: 'Gemischt-terminales Feature',
-  status: 'Done',
-  priority: 'medium',
-  stories: [
-    { id: 'S-911', parent: 'F-911', title: 'Teil F', status: 'Done', priority: 'low', labels: [], spec: null },
-    { id: 'S-912', parent: 'F-911', title: 'Teil G', status: 'Verworfen', priority: 'low', labels: [], spec: null },
-  ],
-};
-// FEATURE_TODO_AND_VERWORFEN: Verworfen + To Do (nicht alle terminal) → NICHT archivierbar (AC9).
-const FEATURE_TODO_AND_VERWORFEN = {
-  id: 'F-912',
-  title: 'Verworfen + offene Story',
-  status: 'To Do',
-  priority: 'high',
-  stories: [
-    { id: 'S-913', parent: 'F-912', title: 'Teil H', status: 'Verworfen', priority: 'low', labels: [], spec: null },
-    { id: 'S-914', parent: 'F-912', title: 'Teil I', status: 'To Do', priority: 'low', labels: [], spec: null },
-  ],
-};
-// Vor dem Archivieren: 2 archivierbare Features (nur-Verworfen + Done+Verworfen)
-// mit zusammen 3 Stories + 1 nicht-archivierbares (Verworfen+To Do).
-const PROJECT_ARCHIVE_TERMINAL_BEFORE = {
-  slug: 'proj-arch',
-  repo_path: '/home/user/Git/arch',
-  project_slug: 'proj-arch',
-  schema_version: 1,
-  features: [FEATURE_ONLY_VERWORFEN, FEATURE_DONE_AND_VERWORFEN, FEATURE_TODO_AND_VERWORFEN],
-};
-// Nach dem Archivieren: nur das nicht-terminale Feature bleibt sichtbar (V3).
-const PROJECT_ARCHIVE_TERMINAL_AFTER = {
-  slug: 'proj-arch',
-  repo_path: '/home/user/Git/arch',
-  project_slug: 'proj-arch',
-  schema_version: 1,
-  features: [FEATURE_TODO_AND_VERWORFEN],
-};
 
 /**
  * Stateful fetch mock for the archive flow (cockpit mode).
- * - GET /api/board/projects/:slug     → projectBefore (or projectAfter after archive)
- * - GET …/:slug/specify/jobs          → { jobs: {} } (no running jobs)
- * - POST …/:slug/archive-done         → archiveResult; on success flips to projectAfter
+ * - GET /api/board/projects/:slug        → projectBefore (or projectAfter after archive)
+ * - GET …/:slug/specify/jobs             → { jobs: {} } (no running jobs)
+ * - POST …/:slug/archive-done-stories    → archiveResult; on success flips to projectAfter
  *
  * @param {{ projectBefore: object, projectAfter: object,
  *           archiveResult?: { ok: boolean, status: number, body?: object } }} opts
@@ -550,19 +500,19 @@ const PROJECT_ARCHIVE_TERMINAL_AFTER = {
 function makeArchiveFetch({
   projectBefore,
   projectAfter,
-  archiveResult = { ok: true, status: 200, body: { archivedFeatureCount: 1, archivedStoryCount: 2 } },
+  archiveResult = { ok: true, status: 200, body: { archivedStoryCount: 2 } },
 }) {
   let archived = false;
   return jest.fn(async (url, opts) => {
     const method = opts?.method ?? 'GET';
-    if (url.endsWith('/archive-done') && method === 'POST') {
+    if (url.endsWith('/archive-done-stories') && method === 'POST') {
       if (archiveResult.ok) archived = true;
       return { ok: archiveResult.ok, status: archiveResult.status, json: async () => archiveResult.body ?? {} };
     }
     if (url.endsWith('/specify/jobs')) {
       return { ok: true, status: 200, json: async () => ({ jobs: {} }) };
     }
-    const slugMatch = url.match(/^\/api\/board\/projects\/([^/]+)$/);
+    const slugMatch = url.match(/^\/api\/board\/projects\/([^/?]+)(?:\?.*)?$/);
     if (slugMatch) {
       const proj = archived ? projectAfter : projectBefore;
       return { ok: true, status: 200, json: async () => ({ project: proj }) };
@@ -571,15 +521,76 @@ function makeArchiveFetch({
   });
 }
 
-/** Render cockpit for the archive project and wait for the archive button. */
-async function renderArchiveCockpit(fetchMock) {
+/** Render cockpit for the given archive project (default 'proj-arch') and wait for the archive button. */
+async function renderArchiveCockpit(fetchMock, slug = 'proj-arch') {
   globalThis.fetch = fetchMock;
-  const utils = renderCockpit('proj-arch');
+  const utils = renderCockpit(slug);
   await waitFor(() => {
     expect(utils.container.querySelector('[data-testid="archive-done-btn"]')).toBeTruthy();
   });
   return utils;
 }
+
+// ── board-storys-archivieren (S-294) fixtures — Story-Ebenen-Archivierbarkeit ──
+// V1: eine Story ist archivierbar, wenn status ∈ {Done, Verworfen} UND nicht
+// bereits archiviert — UNABHÄNGIG vom Geschwister-Status im selben Feature
+// (anders als die superseded Feature-Ebenen-Regel aus [[board-feature-archive]],
+// die JEDE Story eines Features terminal verlangte).
+
+// Feature ganz ohne terminale Story → 0 archivierbare Storys (Button-disabled-Fall).
+const FEATURE_ALL_OPEN = {
+  id: 'F-920',
+  title: 'Offenes Feature',
+  status: 'To Do',
+  priority: 'medium',
+  stories: [
+    { id: 'S-920', parent: 'F-920', title: 'Teil A', status: 'To Do', priority: 'low', labels: [], spec: null },
+    { id: 'S-921', parent: 'F-920', title: 'Teil B', status: 'In Progress', priority: 'low', labels: [], spec: null },
+  ],
+};
+// Feature mit gemischten Storys: Done + Verworfen (beide terminal, archivierbar)
+// + To Do (nicht terminal, bleibt unangetastet + sichtbar).
+const FEATURE_STORY_MIXED = {
+  id: 'F-921',
+  title: 'Gemischtes Feature',
+  status: 'In Progress',
+  priority: 'high',
+  stories: [
+    { id: 'S-922', parent: 'F-921', title: 'Teil C', status: 'Done', priority: 'low', labels: [], spec: null },
+    { id: 'S-923', parent: 'F-921', title: 'Teil D', status: 'Verworfen', priority: 'low', labels: [], spec: null },
+    { id: 'S-924', parent: 'F-921', title: 'Teil E', status: 'To Do', priority: 'low', labels: [], spec: null },
+  ],
+};
+// Vor dem Archivieren: 0 archivierbare Storys in F-920 + 2 archivierbare (Done,
+// Verworfen) in F-921 = 2 archivierbare Storys insgesamt.
+const PROJECT_STORY_ARCHIVE_BEFORE = {
+  slug: 'proj-arch2',
+  repo_path: '/home/user/Git/arch2',
+  project_slug: 'proj-arch2',
+  schema_version: 1,
+  features: [FEATURE_ALL_OPEN, FEATURE_STORY_MIXED],
+};
+// Nach dem Archivieren: S-922/S-923 sind aus der Standardansicht raus; die
+// Bereichs-Kachel F-921 UND die offene Story S-924 bleiben sichtbar; die leere
+// Kachel F-920 bleibt ebenfalls sichtbar (dauerhaftes Bereichs-Feature, V3).
+const PROJECT_STORY_ARCHIVE_AFTER = {
+  slug: 'proj-arch2',
+  repo_path: '/home/user/Git/arch2',
+  project_slug: 'proj-arch2',
+  schema_version: 1,
+  features: [
+    FEATURE_ALL_OPEN,
+    { ...FEATURE_STORY_MIXED, stories: [FEATURE_STORY_MIXED.stories[2]] },
+  ],
+};
+// Nichts archivierbar (nur offene/nicht-terminale Storys) → Button deaktiviert.
+const PROJECT_STORY_NO_ARCHIVABLE = {
+  slug: 'proj-arch2',
+  repo_path: '/home/user/Git/arch2',
+  project_slug: 'proj-arch2',
+  schema_version: 1,
+  features: [FEATURE_ALL_OPEN],
+};
 
 // ── board-feature-archive (S-234) fixtures — „Archiv anzeigen"-Schalter ────────
 // Ein archiviertes Feature (status bleibt Done, archived:true) samt archivierter
@@ -3874,54 +3885,57 @@ describe('story-detail-yaml-fallback — AC6: Block Verknüpfungen (Branch + PR)
   });
 });
 
-// ── board-feature-archive (S-233) — Button + Bestätigungsabfrage ──────────────
+// ── board-storys-archivieren (S-294) — Story-Archiv-Button + Bestätigungsabfrage
 
-describe('board-feature-archive — AC5/AC7: Archiv-Button + Bestätigungsabfrage', () => {
-  it('AC5: Button ist deaktiviert, wenn nichts archivierbar ist', async () => {
+describe('board-storys-archivieren — AC6/AC8: Story-Archiv-Button + Bestätigungsabfrage', () => {
+  it('AC6: Button ist deaktiviert, wenn keine Story archivierbar ist', async () => {
     const fetchMock = makeArchiveFetch({
-      projectBefore: PROJECT_NO_ARCHIVABLE,
-      projectAfter: PROJECT_NO_ARCHIVABLE,
+      projectBefore: PROJECT_STORY_NO_ARCHIVABLE,
+      projectAfter: PROJECT_STORY_NO_ARCHIVABLE,
     });
-    const utils = await renderArchiveCockpit(fetchMock);
+    const utils = await renderArchiveCockpit(fetchMock, 'proj-arch2');
     const btn = utils.container.querySelector('[data-testid="archive-done-btn"]');
     expect(btn).toBeTruthy();
     expect(btn.disabled).toBe(true);
-    // AC7: echter <button> mit sprechendem aria-label (Zustand nicht nur Farbe)
+    // AC8: echter <button> mit sprechendem aria-label (Zustand nicht nur Farbe)
     expect(btn.tagName).toBe('BUTTON');
-    expect(btn.getAttribute('aria-label')).toMatch(/keine erledigten Features/i);
+    expect(btn.getAttribute('aria-label')).toMatch(/keine erledigten Storys/i);
   });
 
-  it('AC5: Klick öffnet Bestätigungsabfrage mit Anzahl Features UND Stories', async () => {
+  it('AC6: Klick öffnet Bestätigungsabfrage mit Anzahl Storys (Done+Verworfen zählen, To-Do-Geschwister nicht)', async () => {
     const fetchMock = makeArchiveFetch({
-      projectBefore: PROJECT_ARCHIVE_BEFORE,
-      projectAfter: PROJECT_ARCHIVE_AFTER,
+      projectBefore: PROJECT_STORY_ARCHIVE_BEFORE,
+      projectAfter: PROJECT_STORY_ARCHIVE_AFTER,
     });
-    const utils = await renderArchiveCockpit(fetchMock);
+    const utils = await renderArchiveCockpit(fetchMock, 'proj-arch2');
     const btn = utils.container.querySelector('[data-testid="archive-done-btn"]');
     expect(btn.disabled).toBe(false);
-    // sprechendes aria-label nennt die Anzahl (AC7)
-    expect(btn.getAttribute('aria-label')).toMatch(/1 Features mit 2 Stories/);
+    // sprechendes aria-label nennt die Anzahl (AC8): 2 archivierbare Storys
+    // (S-922 Done + S-923 Verworfen aus F-921) — S-924 (To Do) zählt nicht mit,
+    // F-920 (komplett offen) trägt 0 bei.
+    expect(btn.getAttribute('aria-label')).toMatch(/2 Storys/);
 
     await act(async () => { fireEvent.click(btn); });
 
     const dialog = utils.container.querySelector('[data-testid="archive-confirm-dialog"]');
     expect(dialog).toBeTruthy();
-    // AC7: fokussiertes Dialog-Muster
+    // AC8: fokussiertes Dialog-Muster
     expect(dialog.getAttribute('role')).toBe('dialog');
     expect(dialog.getAttribute('aria-modal')).toBe('true');
     expect(dialog.getAttribute('aria-labelledby')).toBe('archive-confirm-title');
-    // AC5: Anzahl Features UND Stories genannt (Text, nicht nur Farbe)
+    // AC6: Anzahl Storys genannt + Hinweis, dass die Bereichs-Kacheln sichtbar
+    // bleiben (Text, nicht nur Farbe).
     const summary = utils.container.querySelector('[data-testid="archive-confirm-summary"]');
-    expect(summary.textContent).toMatch(/1 Feature/);
-    expect(summary.textContent).toMatch(/2 Stories/);
+    expect(summary.textContent).toMatch(/2 erledigte Storys/);
+    expect(summary.textContent).toMatch(/Bereichs-Kacheln bleiben sichtbar/);
   });
 
-  it('AC5: Abbrechen schließt den Dialog ohne POST', async () => {
+  it('AC6: Abbrechen schließt den Dialog ohne POST', async () => {
     const fetchMock = makeArchiveFetch({
-      projectBefore: PROJECT_ARCHIVE_BEFORE,
-      projectAfter: PROJECT_ARCHIVE_AFTER,
+      projectBefore: PROJECT_STORY_ARCHIVE_BEFORE,
+      projectAfter: PROJECT_STORY_ARCHIVE_AFTER,
     });
-    const utils = await renderArchiveCockpit(fetchMock);
+    const utils = await renderArchiveCockpit(fetchMock, 'proj-arch2');
     await act(async () => {
       fireEvent.click(utils.container.querySelector('[data-testid="archive-done-btn"]'));
     });
@@ -3934,17 +3948,17 @@ describe('board-feature-archive — AC5/AC7: Archiv-Button + Bestätigungsabfrag
     // Dialog geschlossen; kein POST abgesetzt
     expect(utils.container.querySelector('[data-testid="archive-confirm-dialog"]')).toBeFalsy();
     const postCalls = fetchMock.mock.calls.filter(
-      (c) => typeof c[0] === 'string' && c[0].endsWith('/archive-done') && c[1]?.method === 'POST',
+      (c) => typeof c[0] === 'string' && c[0].endsWith('/archive-done-stories') && c[1]?.method === 'POST',
     );
     expect(postCalls).toHaveLength(0);
   });
 
-  it('AC5: Bestätigen setzt EIN POST .../archive-done ab und lädt neu (archivierte verschwinden)', async () => {
+  it('AC6: Bestätigen setzt EIN POST .../archive-done-stories ab und lädt neu (Kachel + offene Story bleiben)', async () => {
     const fetchMock = makeArchiveFetch({
-      projectBefore: PROJECT_ARCHIVE_BEFORE,
-      projectAfter: PROJECT_ARCHIVE_AFTER,
+      projectBefore: PROJECT_STORY_ARCHIVE_BEFORE,
+      projectAfter: PROJECT_STORY_ARCHIVE_AFTER,
     });
-    const utils = await renderArchiveCockpit(fetchMock);
+    const utils = await renderArchiveCockpit(fetchMock, 'proj-arch2');
     await act(async () => {
       fireEvent.click(utils.container.querySelector('[data-testid="archive-done-btn"]'));
     });
@@ -3955,27 +3969,30 @@ describe('board-feature-archive — AC5/AC7: Archiv-Button + Bestätigungsabfrag
     // genau EIN POST an den Endpoint
     await waitFor(() => {
       const postCalls = fetchMock.mock.calls.filter(
-        (c) => typeof c[0] === 'string' && c[0].endsWith('/archive-done') && c[1]?.method === 'POST',
+        (c) => typeof c[0] === 'string' && c[0].endsWith('/archive-done-stories') && c[1]?.method === 'POST',
       );
       expect(postCalls).toHaveLength(1);
     });
 
-    // Nach dem Rescan ist das erledigte Feature weg → Button wieder deaktiviert
+    // Nach dem Rescan sind keine terminalen Storys mehr übrig → Button
+    // wieder deaktiviert; die Bereichs-Kacheln (F-920, F-921) bleiben sichtbar.
     await waitFor(() => {
       const btn = utils.container.querySelector('[data-testid="archive-done-btn"]');
       expect(btn.disabled).toBe(true);
     });
+    expect(utils.container.querySelector('[data-feature="F-920"]')).toBeTruthy();
+    expect(utils.container.querySelector('[data-feature="F-921"]')).toBeTruthy();
     // Dialog geschlossen
     expect(utils.container.querySelector('[data-testid="archive-confirm-dialog"]')).toBeFalsy();
   });
 
-  it('AC5: Endpoint-Fehler (409) wird nicht-blockierend gezeigt, Dialog + Ansicht bleiben', async () => {
+  it('AC6: Endpoint-Fehler (409) wird nicht-blockierend gezeigt, Dialog + Ansicht bleiben', async () => {
     const fetchMock = makeArchiveFetch({
-      projectBefore: PROJECT_ARCHIVE_BEFORE,
-      projectAfter: PROJECT_ARCHIVE_AFTER,
+      projectBefore: PROJECT_STORY_ARCHIVE_BEFORE,
+      projectAfter: PROJECT_STORY_ARCHIVE_AFTER,
       archiveResult: { ok: false, status: 409 },
     });
-    const utils = await renderArchiveCockpit(fetchMock);
+    const utils = await renderArchiveCockpit(fetchMock, 'proj-arch2');
     await act(async () => {
       fireEvent.click(utils.container.querySelector('[data-testid="archive-done-btn"]'));
     });
@@ -3991,15 +4008,15 @@ describe('board-feature-archive — AC5/AC7: Archiv-Button + Bestätigungsabfrag
     });
     expect(utils.container.querySelector('[data-testid="archive-confirm-dialog"]')).toBeTruthy();
     // Ansicht bleibt intakt (Board weiterhin sichtbar)
-    expect(utils.container.querySelector('[data-project="proj-arch"]')).toBeTruthy();
+    expect(utils.container.querySelector('[data-project="proj-arch2"]')).toBeTruthy();
   });
 
-  it('AC7: Esc bricht die Bestätigungsabfrage ab (Fokus-Dialog-Muster)', async () => {
+  it('AC8: Esc bricht die Bestätigungsabfrage ab (Fokus-Dialog-Muster)', async () => {
     const fetchMock = makeArchiveFetch({
-      projectBefore: PROJECT_ARCHIVE_BEFORE,
-      projectAfter: PROJECT_ARCHIVE_AFTER,
+      projectBefore: PROJECT_STORY_ARCHIVE_BEFORE,
+      projectAfter: PROJECT_STORY_ARCHIVE_AFTER,
     });
-    const utils = await renderArchiveCockpit(fetchMock);
+    const utils = await renderArchiveCockpit(fetchMock, 'proj-arch2');
     await act(async () => {
       fireEvent.click(utils.container.querySelector('[data-testid="archive-done-btn"]'));
     });
@@ -4013,9 +4030,35 @@ describe('board-feature-archive — AC5/AC7: Archiv-Button + Bestätigungsabfrag
     expect(utils.container.querySelector('[data-testid="archive-confirm-dialog"]')).toBeFalsy();
     // kein POST bei Esc-Abbruch
     const postCalls = fetchMock.mock.calls.filter(
-      (c) => typeof c[0] === 'string' && c[0].endsWith('/archive-done') && c[1]?.method === 'POST',
+      (c) => typeof c[0] === 'string' && c[0].endsWith('/archive-done-stories') && c[1]?.method === 'POST',
     );
     expect(postCalls).toHaveLength(0);
+  });
+
+  it('V1: eine einzeln-Verworfene Story ohne terminale Geschwister ist bereits archivierbar', async () => {
+    const projectOnlyVerworfen = {
+      slug: 'proj-arch2',
+      repo_path: '/home/user/Git/arch2',
+      project_slug: 'proj-arch2',
+      schema_version: 1,
+      features: [{
+        id: 'F-922',
+        title: 'Nur eine verworfene Story',
+        status: 'Verworfen',
+        priority: 'low',
+        stories: [
+          { id: 'S-925', parent: 'F-922', title: 'Teil F', status: 'Verworfen', priority: 'low', labels: [], spec: null },
+        ],
+      }],
+    };
+    const fetchMock = makeArchiveFetch({
+      projectBefore: projectOnlyVerworfen,
+      projectAfter: { ...projectOnlyVerworfen, features: [{ ...projectOnlyVerworfen.features[0], stories: [] }] },
+    });
+    const utils = await renderArchiveCockpit(fetchMock, 'proj-arch2');
+    const btn = utils.container.querySelector('[data-testid="archive-done-btn"]');
+    expect(btn.disabled).toBe(false);
+    expect(btn.getAttribute('aria-label')).toMatch(/1 Story\b/);
   });
 });
 
@@ -4063,69 +4106,6 @@ describe('bereichs-modell — AC8/AC10: „Bereiche verwalten"-Button + Dialog-W
     });
 
     expect(utils.container.querySelector('[data-testid="areas-manage-dialog-mock"]')).toBeFalsy();
-  });
-});
-
-// ── board-feature-archive (S-244) — AC9: Verworfen terminal wie Done ───────────
-
-describe('board-feature-archive — AC9: Verworfen zählt wie Done als terminal (Buttonaktivierung/Zählung)', () => {
-  it('nur-Verworfen-Feature + Done+Verworfen-Feature sind archivierbar; Verworfen+To-Do-Feature NICHT — Button aktiv, korrekte Zählung', async () => {
-    const fetchMock = makeArchiveFetch({
-      projectBefore: PROJECT_ARCHIVE_TERMINAL_BEFORE,
-      projectAfter: PROJECT_ARCHIVE_TERMINAL_AFTER,
-      archiveResult: { ok: true, status: 200, body: { archivedFeatureCount: 2, archivedStoryCount: 3 } },
-    });
-    const utils = await renderArchiveCockpit(fetchMock);
-    const btn = utils.container.querySelector('[data-testid="archive-done-btn"]');
-    expect(btn.disabled).toBe(false);
-    // 2 archivierbare Features (F-910 nur-Verworfen, F-911 Done+Verworfen) mit
-    // zusammen 3 Stories; F-912 (Verworfen+To Do) zählt NICHT mit.
-    expect(btn.getAttribute('aria-label')).toMatch(/2 Features mit 3 Stories/);
-
-    await act(async () => { fireEvent.click(btn); });
-    const summary = utils.container.querySelector('[data-testid="archive-confirm-summary"]');
-    expect(summary.textContent).toMatch(/2 Feature/);
-    expect(summary.textContent).toMatch(/3 Stories/);
-  });
-
-  it('Bestätigen archiviert die terminalen Features; das Verworfen+To-Do-Feature bleibt sichtbar', async () => {
-    const fetchMock = makeArchiveFetch({
-      projectBefore: PROJECT_ARCHIVE_TERMINAL_BEFORE,
-      projectAfter: PROJECT_ARCHIVE_TERMINAL_AFTER,
-      archiveResult: { ok: true, status: 200, body: { archivedFeatureCount: 2, archivedStoryCount: 3 } },
-    });
-    const utils = await renderArchiveCockpit(fetchMock);
-    await act(async () => {
-      fireEvent.click(utils.container.querySelector('[data-testid="archive-done-btn"]'));
-    });
-    await act(async () => {
-      fireEvent.click(utils.container.querySelector('[data-testid="archive-confirm-btn"]'));
-    });
-
-    await waitFor(() => {
-      const btn = utils.container.querySelector('[data-testid="archive-done-btn"]');
-      expect(btn.disabled).toBe(true);
-    });
-    // Das nicht-terminale Feature (Verworfen+To Do) ist weiterhin sichtbar.
-    expect(utils.container.querySelector('[data-feature="F-912"]')).toBeTruthy();
-  });
-
-  it('reines Verworfen-Feature (keine Done-Story) ist allein bereits archivierbar', async () => {
-    const projectOnlyVerworfen = {
-      slug: 'proj-arch',
-      repo_path: '/home/user/Git/arch',
-      project_slug: 'proj-arch',
-      schema_version: 1,
-      features: [FEATURE_ONLY_VERWORFEN],
-    };
-    const fetchMock = makeArchiveFetch({
-      projectBefore: projectOnlyVerworfen,
-      projectAfter: { ...projectOnlyVerworfen, features: [] },
-    });
-    const utils = await renderArchiveCockpit(fetchMock);
-    const btn = utils.container.querySelector('[data-testid="archive-done-btn"]');
-    expect(btn.disabled).toBe(false);
-    expect(btn.getAttribute('aria-label')).toMatch(/1 Features mit 1 Stories/);
   });
 });
 
