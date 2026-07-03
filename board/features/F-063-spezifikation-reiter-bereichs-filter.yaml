@@ -1,0 +1,19 @@
+id: F-063
+title: Spezifikation-Reiter — Bereichs-Filter über das Spec-Frontmatter-Feld area
+goal: Der Spezifikation-Reiter filtert Specs über das neue area-Frontmatter-Feld — DocsReader liest
+  area je Spec, ein Bereichs-Filter (Mehrfachauswahl aus areas.yaml plus „ohne Bereich") schränkt die
+  Spec-Liste ein, konjunktiv mit den bestehenden Doku-Typ-/Status-Filtern. Degradiert ohne Bereiche/area.
+  Erweitert projekt-spezifikation-anzeige (read-only). Schema vom agent-flow-Schema definiert (textueller Verweis).
+status: Backlog
+priority: P2
+spec: docs/specs/spec-bereich-filter.md
+definition_of_done: null
+labels: null
+depends: null
+owner: null
+area: spezifikation
+stories:
+- S-295
+progress: 0/1 done
+created_at: '2026-07-03T12:53:27Z'
+updated_at: '2026-07-03T12:53:27Z'

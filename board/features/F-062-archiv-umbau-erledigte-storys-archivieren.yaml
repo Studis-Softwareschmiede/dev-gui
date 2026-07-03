@@ -1,0 +1,21 @@
+id: F-062
+title: Archiv-Umbau — „Erledigte Storys archivieren" (Story-Ebene), Bereichs-Kacheln bleiben sichtbar
+goal: Der Knopf „Erledigte Features archivieren" wird auf „Erledigte Storys archivieren" umgestellt
+  (Story-Ebenen-archived-Flag; terminale Storys Done/Verworfen). Bereichs-Kacheln (Bereichs-Features)
+  bleiben immer sichtbar; bestehende feature-archivierte Bestände bleiben kompatibel. Supersedet den
+  Feature-Archivpfad aus board-feature-archive; wiederverwendet dessen atomare Schreib-Primitive + includeArchived.
+status: Backlog
+priority: P1
+spec: docs/specs/board-storys-archivieren.md
+definition_of_done: null
+labels:
+- security
+depends: null
+owner: null
+area: board
+stories:
+- S-293
+- S-294
+progress: 0/2 done
+created_at: '2026-07-03T12:53:27Z'
+updated_at: '2026-07-03T12:53:27Z'

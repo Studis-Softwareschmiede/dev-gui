@@ -1,0 +1,28 @@
+id: S-292
+parent: F-061
+title: Bereichszuordnung persistieren — area am Idee-Create (BoardWriter) + area an story-specify/start durchreichen
+status: To Do
+priority: P2
+spec: docs/specs/story-idee-bereich-zuordnung.md
+implements:
+- AC4
+- AC5
+- AC6
+depends:
+- S-289
+labels: null
+area: board
+size_est: M
+dispo_est: '5.0'
+dispo_act: null
+dispo_forecast: null
+estimate_note: 'Heuristik score 6 (3 AC + 3 Komponenten: BoardWriter/boardRouter/ideaSpecifyRouter)
+  -> M; baseline js|balanced|M ep 5.0 (n=8); keine Baseline-Tokens'
+confidence: medium
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-07-03T12:53:27Z'
+updated_at: '2026-07-03T12:53:27Z'
+done_at: null
+tok_est: null

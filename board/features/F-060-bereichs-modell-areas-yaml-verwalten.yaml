@@ -1,0 +1,23 @@
+id: F-060
+title: Bereichs-Modell — board/areas.yaml lesen/schreiben + „Bereiche verwalten"-Dialog
+goal: Das Board zeigt Bereiche aus board/areas.yaml als dauerhafte Kacheln (Bereichs-Features);
+  ein „Bereiche verwalten"-Dialog legt an/benennt um/sortiert um, Löschen nur wenn keine
+  Storys/Specs mehr am Bereich hängen. Schreibpfad über schmale, atomare, auditierte
+  AreaWriter-Boundary; BoardAggregator bleibt read-only. Schema (areas.yaml + area-Feld)
+  vom agent-flow-Schema definiert — dev-gui konsumiert/fläche es nur (textueller Verweis, kein cross-repo depends).
+status: Backlog
+priority: P1
+spec: docs/specs/bereichs-modell.md
+definition_of_done: null
+labels:
+- security
+depends: null
+owner: null
+area: board
+stories:
+- S-288
+- S-289
+- S-290
+progress: 0/3 done
+created_at: '2026-07-03T12:53:27Z'
+updated_at: '2026-07-03T12:53:27Z'

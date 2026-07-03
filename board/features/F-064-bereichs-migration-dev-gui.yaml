@@ -1,0 +1,19 @@
+id: F-064
+title: Bereichs-Migration dev-gui — 59 Features → 11 Bereiche, Storys umhängen, erledigte archivieren, 124 Specs area-stempeln
+goal: Einmalige idempotente Daten-Migration — areas.yaml mit der 11er-Bereichsliste seeden, 59 Bestands-Features
+  auf die Bereiche mappen (feature.area), Storys umhängen (story.area aus Parent), erledigte (terminale) Storys
+  archivieren, 124 Bestands-Specs area-stempeln. Als EIN PR zur Owner-Freigabe; unklare Zuordnungen als
+  Fragenkatalog statt Raten (bleiben bereichslos bis Owner-Entscheidung). Reversibel/additiv, kein Datenverlust.
+status: Backlog
+priority: P2
+spec: docs/specs/bereichs-migration-dev-gui.md
+definition_of_done: null
+labels: null
+depends: null
+owner: null
+area: board
+stories:
+- S-296
+progress: 0/1 done
+created_at: '2026-07-03T12:53:27Z'
+updated_at: '2026-07-03T12:53:27Z'
