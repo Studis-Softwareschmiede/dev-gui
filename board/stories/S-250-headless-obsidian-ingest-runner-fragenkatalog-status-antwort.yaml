@@ -1,7 +1,7 @@
 id: S-250
 parent: F-050
 title: 'Headless Obsidian-Ingest-Runner: Fragenkatalog-Status + Antworten-Resume-Endpunkte'
-status: To Do
+status: In Progress
 priority: P2
 spec: docs/specs/obsidian-question-catalog.md
 implements:
@@ -22,9 +22,9 @@ dispo_forecast: null
 estimate_note: 'Heuristik score 12 -> L; estimator nicht dispatchbar, baseline-L-Naeherung;
   zusaetzliche Unsicherheit durch lose Kopplung an agent-flow PR #217'
 confidence: low
-branch: null
+branch: feat/S-250-obsidian-ingest-runner
 pr: null
 blocked_reason: null
 created_at: '2026-07-02T05:42:15Z'
-updated_at: '2026-07-02T05:44:50Z'
+updated_at: '2026-07-03T00:30:31Z'
 done_at: null

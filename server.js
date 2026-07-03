@@ -25,6 +25,9 @@
  *   GET/PUT/DELETE /api/settings/workspace-path   → Workspace-Pfad-Konfiguration (workspace-path-config #85)
  *   GET/PUT/DELETE /api/settings/obsidian-vault-path → Obsidian-Vault-Pfad-Konfiguration (obsidian-vault-config S-245)
  *   GET  /api/settings/obsidian-vault/projects     → { projects: [{name,path}] } — Projekt-Unterordner (obsidian-vault-config AC5, S-246)
+ *   POST /api/obsidian-ingest/start                → { jobId, status } | 400/404/409 — headless from-notes-Katalog-Lauf (obsidian-question-catalog AC1, S-250)
+ *   GET  /api/obsidian-ingest/:jobId               → { status, catalog?, result?, error? } | 404 — Status + Fragenkatalog (obsidian-question-catalog AC2/AC5, S-250)
+ *   POST /api/obsidian-ingest/:jobId/answers       → { status } | 400/404/409 — Antworten zurück, Resume (obsidian-question-catalog AC4, S-250)
  *   GET  /api/settings/workspace-health           → { overall, checks, counts } (workspace-health-hinweis AC2)
  *   POST /api/github/repos                        → Org-Repo anlegen (github-repo-create #59)
  *   GET  /api/workspace/repos                     → { repos: [...] } — live WORKSPACE_DIR scan (workspace-repos AC1, AC2)
@@ -130,6 +133,7 @@ import { IdeaSpecifyChatService } from './src/IdeaSpecifyChatService.js';
 import { IdeaSpecifyFinalizer } from './src/IdeaSpecifyFinalizer.js';
 import { StorySpecifyFinalizer } from './src/StorySpecifyFinalizer.js';
 import { HeadlessReconcileRunner } from './src/HeadlessReconcileRunner.js';
+import { ObsidianIngestRunner } from './src/ObsidianIngestRunner.js';
 import { ClaudeAuthHealthService } from './src/ClaudeAuthHealthService.js';
 import { KnowledgeSourceService } from './src/KnowledgeSourceService.js';
 import { read as readNotificationSettings } from './src/NotificationSettingsStore.js';
@@ -536,6 +540,22 @@ const storySpecifyFinalizer = new StorySpecifyFinalizer();
 // getrennt (AC7) — eigene ProjectJobLock-Instanz, kein Idle-/Rate-Timer.
 const reconcileRunner = new HeadlessReconcileRunner();
 
+// ── ObsidianIngestRunner (headless from-notes-Katalog-Lauf mit Interrupt/Resume,
+// docs/specs/obsidian-question-catalog.md AC1, AC2, AC4, AC5, AC6, AC7) ──
+// EIGENE, isolierte ProjectJobLock-Instanz (Konstruktor-Default `new ProjectJobLock()`
+// in ObsidianIngestRunner.js) — bewusst getrennt von ALLEN anderen headless-Locks
+// (Nacht-Drain, manueller Drain, Reconcile, Finalizer, CostModeModelCheck,
+// Auto-Retro), sonst würde ein paralleler Lauf für dasselbe Projekt fälschlich
+// blockiert (Selbstblockade-Vermeidung, analog dem Nacht-Drain-Kommentar oben).
+// KEIN neuer Runner-TYP im Sinne einer neuen Kindprozess-/Env-/Lock-Disziplin —
+// wiederverwendet dieselben `HeadlessRunnerCore.js`-Primitive (buildChildEnv/
+// isAuthError/AUTH_EXPIRED_MESSAGE, ProjectJobLock) wie `HeadlessFlowRunner`;
+// NUR die state machine (Interrupt `needs-answers` + `--resume`-Fortsetzung via
+// STDIN) ist neu, weil `HeadlessFlowRunner` (fire-and-forget bis `done`) dafür
+// keine Naht bietet (docs/specs/obsidian-question-catalog.md §Nicht-Ziele).
+// `auditStore` injiziert (AC6: Job-Ende/-Fehler, secret-frei).
+const obsidianIngestRunner = new ObsidianIngestRunner({ auditStore });
+
 // ── Auto-Retro-Boundaries (retro-auto-queue S-256/S-257 + retro-auto-trigger
 // S-261) sind bereits weiter oben (vor dem NightWatchScheduler, der den
 // `autoRetroTrigger` für seine Drain-Abschluss-Naht AC4 braucht) konstruiert:
@@ -600,6 +620,12 @@ const deps = {
   // headless-reconcile-runner AC1-AC9: getrennter claude -p-Kindprozess-Runner
   // für POST /api/reconcile + GET /api/reconcile/:jobId (reconcile.js Router).
   reconcileRunner,
+  // obsidian-question-catalog AC1/AC2/AC4-AC7: headless from-notes-Katalog-Runner
+  // mit Interrupt(needs-answers)/Resume-Protokoll für POST .../obsidian-ingest/start
+  // + GET .../obsidian-ingest/:jobId + POST .../obsidian-ingest/:jobId/answers
+  // (obsidianIngest.js Router). credentialStore (oben) liest den konfigurierten
+  // Vault-Pfad für die vault-confined Pfad-Auflösung (obsidian-vault-config AC5).
+  obsidianIngestRunner,
   // cost-mode-model-check AC7: CostModeModelCheck-Registry für den Status-
   // Endpunkt GET /api/cost-mode/check/:checkId (costModeCheck.js Router).
   costModeModelCheck,

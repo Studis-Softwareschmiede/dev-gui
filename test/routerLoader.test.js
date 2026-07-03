@@ -241,6 +241,7 @@ describe('routerLoader — Echte src/routers/ Module (AC1/AC3)', () => {
       'workspacePath.js',
       'workspaceRepos.js',
       'obsidianVaultPath.js',
+      'obsidianIngest.js',
     ];
 
     for (const name of expected) {
@@ -302,8 +303,12 @@ describe('routerLoader — Echte src/routers/ Module (AC1/AC3)', () => {
     //   (GET /api/drain-reports — Drain-Abschlussberichte AC4) → 38.
     // retroAutoSettings.js wurde mit retro-auto-trigger (S-259) hinzugefügt
     //   (GET/PUT /api/settings/retro-auto — Auto-Retro-Schalter AC1/AC2) → 39.
+    // obsidianIngest.js wurde mit obsidian-question-catalog (S-250) hinzugefügt
+    //   (POST .../obsidian-ingest/start + GET .../obsidian-ingest/:jobId +
+    //    POST .../obsidian-ingest/:jobId/answers — headless from-notes mit
+    //    Fragenkatalog-Interrupt/Resume, Backend-Anteil AC1/AC2/AC4-AC7) → 40.
     const entries = await readdir(ROUTERS_DIR);
     const mountedCount = entries.filter((f) => f.endsWith('.js')).length;
-    expect(mountedCount).toBe(39);
+    expect(mountedCount).toBe(40);
   });
 });

@@ -45,8 +45,8 @@ Wird die from-notes-Pipeline ([[obsidian-project-intake]]) durch **Widersprüche
 ## Verträge
 > Endpunkt-Basis/Feldnamen sind **an das agent-flow-Rückgabeformat (PR #217) gekoppelt** und bis zu dessen Merge als **Annahme** zu behandeln (A1). Die dev-gui-Boundaries (Runner-Instanz, Job-/Session-Registry, Status-Endpunkt-Muster) sind aus [[idea-specify-chat]]/[[new-story-chat]]/[[headless-reconcile-runner]] **wiederverwendet**, nicht neu erfunden.
 
-- **`POST …/obsidian-ingest/start`** `{ projectFolderPath }` → `202 { jobId, status: 'running' }` | `409` (Projekt-Lock belegt) | `400`/`404`. Startet den headless from-notes-Lauf (eigene Runner-/Lock-Instanz).
-- **`GET …/obsidian-ingest/:jobId`** → `200 { status: 'running'|'needs-answers'|'done'|'failed'|'auth-expired', catalog?: Array<{ stage, id, frage, quelle, optionen? }>, result?, error? }` | `404`. Format-Muster 1:1 wie der headless-Reconcile-/Idee-Specify-Status-Endpunkt; `catalog` nur bei `needs-answers`. Secret-frei.
+- **`POST …/obsidian-ingest/start`** `{ projectFolderPath }` → `202 { jobId, status: 'running' }` | `409` (Projekt-Lock belegt) | `400`/`404`. Startet den headless from-notes-Lauf (eigene Runner-/Lock-Instanz). `projectFolderPath` wird **vault-confined** validiert (Wiederverwendung, kein neuer Confinement-Mechanismus): der konfigurierte Obsidian-Vault-Pfad wird gelesen und `listObsidianVaultProjects()` ([[obsidian-vault-config]] AC5) liefert die aktuell gültigen `<vault>/Projekte`-Unterordner (bereits realpath-/Symlink-sicher confined); der eingereichte Pfad muss nach `realpath`-Auflösung exakt einem gelisteten Eintrag entsprechen — kein Freitext-Pfad gelangt ungeprüft in cwd/argv (analog dem PTY-Trigger `/agent-flow:from-notes`, [[obsidian-project-intake]] AC4). Kein Vault konfiguriert oder „Projekte" (mehr) nicht erreichbar → `404`.
+- **`GET …/obsidian-ingest/:jobId`** → `200 { status: 'running'|'needs-answers'|'done'|'failed'|'auth-expired', catalog?: Array<{ stage, id, frage, quelle, optionen?, pflicht? }>, result?, error? }` | `404`. Format-Muster 1:1 wie der headless-Reconcile-/Idee-Specify-Status-Endpunkt; `catalog` nur bei `needs-answers`. Secret-frei. `pflicht?` (optionaler Bool je Frage, **Default `true`**) markiert Pflicht- vs. optionale Fragen: eine Frage gilt als Pflicht, außer der Katalog liefert ausdrücklich `pflicht: false` **oder** `optional: true` — Grundlage der server-seitigen `answers`-Validierung (AC4).
 - **`POST …/obsidian-ingest/:jobId/answers`** `{ answers: Array<{ id, answer }> }` → `202 { status: 'running' }` | `400` (Pflicht-Frage fehlt / unbekannte `id`) | `404`/`409`. Reicht die gebündelten Antworten in den laufenden/unterbrochenen Lauf zurück (Resume).
 - **Chat-/Runner-Boundary:** eigene, schmale Service-Boundary mit **injizierbarem** Claude-/Runner-Adapter (testbar ohne echten `claude`-Lauf); In-Memory-Job-Registry (Verlust bei Neustart = Nicht-Ziel, wie bestehende Runner).
 - **Cross-Repo (SR3):** Der Fragenkatalog + das Resume-Protokoll sind der **Vertrag mit agent-flow** (`obsidian-ingest-subsystem.md`, PR #217, Felder `stage/id/frage/quelle/optionen`); dev-gui rendert/sammelt nur, erfindet **keine** Ingest-Logik.
@@ -57,7 +57,7 @@ Wird die from-notes-Pipeline ([[obsidian-project-intake]]) durch **Widersprüche
 - Katalog mit ausschließlich optionalen Fragen → „Antworten senden" sofort aktiv.
 - Nicht-parsbarer/kaputter Katalog-Ausgang → `502`/Fehlerzustand, secret-frei, Retry.
 - Server-Neustart während Lauf → In-Memory-Job/-Session verloren (Nicht-Ziel); ein laufender `claude -p`-Subprozess wird ggf. verwaist (Timeout/OS bereinigt).
-- Parallel-Start fürs selbe Projekt → eigenes `ProjectJobLock` verhindert Doppel-Läufe (`409`), ohne andere Pfade zu berühren.
+- Parallel-Start fürs selbe Projekt → eigenes `ProjectJobLock` verhindert Doppel-Läufe (`409`), ohne andere Pfade zu berühren. Das Lock wird bei `start()` erworben und erst bei einem **terminalen** Zustand (`done`/`failed`/`auth-expired`) freigegeben — während `running` UND während des pausierten `needs-answers`-Zustands (offener, noch nicht beantworteter Katalog) bleibt es gehalten (ein zweiter Start fürs selbe Projekt → `409`, bis der Lauf terminal wird oder der Server neu startet).
 - `answers` mit unbekannter `id` / fehlender Pflicht-`id` → `400`, kein Resume.
 
 ## NFRs
@@ -69,7 +69,7 @@ Wird die from-notes-Pipeline ([[obsidian-project-intake]]) durch **Widersprüche
 ## Nicht-Ziele
 - Die **Ingest-Logik** (Widerspruchserkennung, Katalog-Erzeugung, 3 Stufen) — liegt in agent-flow (`obsidian-ingest-subsystem.md`, PR #217).
 - **Persistente** Chat-/Job-/Katalog-Historie (In-Memory, Verlust bei Neustart).
-- **Kein** neuer Runner-Typ (nutzt `HeadlessFlowRunner`), **kein** neues Spec-Format-Wissen in dev-gui (Board/Specs legt der Fabrik-Agent an).
+- **Kein** neuer Kindprozess-/Env-/Lock-Mechanismus (wiederverwendet dieselben `HeadlessRunnerCore`-Primitive — argv-Array, `buildChildEnv()`-API-Key-Block, `ProjectJobLock` — wie `HeadlessFlowRunner`/`HeadlessReconcileRunner`), **kein** neues Spec-Format-Wissen in dev-gui (Board/Specs legt der Fabrik-Agent an). Die konkrete `HeadlessFlowRunner`-Klasse selbst ist fire-and-forget bis `done`/`failed`/`auth-expired` und bietet keine Interrupt/Resume-Naht — die in AC1/AC2/AC4/AC5 geforderte `needs-answers`/`--resume`-state-machine ist daher der **einzige** neue Baustein (`ObsidianIngestRunner`, dünne Schwester-Boundary analog `StorySpecifyFinalizer`/`IdeaSpecifyFinalizer`, gleiche Sicherheits-/Audit-Disziplin).
 - Der **Terminal-Handoff-Happy-Path** (rein PTY, ohne strukturierten Katalog) bleibt in [[obsidian-project-intake]]; diese Spec ist die richere, headless Variante.
 - Die **Sync-Widerspruchsanzeige** ([[obsidian-sync-trigger]]) — eigener Trigger/eigene Anzeige.
 
