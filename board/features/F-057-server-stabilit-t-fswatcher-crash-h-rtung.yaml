@@ -1,0 +1,21 @@
+id: F-057
+title: 'Server-Stabilität: FSWatcher-Crash-Härtung'
+goal: 'Ein unbehandelter Dateisystem-Watcher-Fehler (Vorfall 2026-07-02: ENOENT scandir
+  node_modules/.bin durch npm install einer Flow-Session) darf den Node-Server nie
+  beenden. Alle fs.watch-Verwender (Bestandsaufnahme: einzig BoardAggregator._watchRoot,
+  recursive über BOARD_ROOTS=/workspace) härten: error-Handler Pflicht, verschwindende/wiederauftauchende
+  Pfade via sauberem Schließen + Re-Arm mit Backoff tolerieren, Workspace-Mutationen
+  (npm install, Worktrees) folgenlos für die Prozess-Lebensdauer. Spec: fswatcher-crash-hardening.'
+status: Backlog
+priority: P1
+spec: docs/specs/fswatcher-crash-hardening.md
+definition_of_done: null
+labels:
+- stability
+depends: null
+owner: null
+stories:
+- S-280
+progress: 0/1 done
+created_at: '2026-07-03T07:00:15Z'
+updated_at: '2026-07-03T07:01:11Z'
