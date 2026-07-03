@@ -1,0 +1,20 @@
+id: F-059
+title: Board-Live-Aktualisierung per Server-Push (SSE) — kein UI-Polling
+goal: Board-Ansicht aktualisiert sich ohne F5 innerhalb ~1 min nach einer Story-Statusaenderung
+  — via SSE-Invalidierungssignal {slug}, ohne Dauer-Polling.
+status: Backlog
+priority: P2
+spec: docs/specs/board-live-sse.md
+definition_of_done: null
+labels:
+- board
+- sse
+depends: null
+owner: null
+stories:
+- S-285
+- S-286
+- S-287
+progress: 0/3 done
+created_at: '2026-07-03T07:26:55Z'
+updated_at: '2026-07-03T07:29:47Z'
