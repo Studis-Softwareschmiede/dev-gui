@@ -113,6 +113,10 @@
  *          Stufe `To Do` (nie fälschlich `Done`); auch fehlender/null-Status.
  *   AC7 — `_orphaned`-Pseudo-Feature (verwaiste Stories/Ideen) behält `status: null`
  *          (von der Ableitung ausgenommen).
+ *   AC8 — `Verworfen`-Stories zählen als terminal (`Done`-äquivalent, höchster
+ *          Fortschrittsindex), werden NICHT wie `Idee` ausgeschlossen, ändern die
+ *          Blocked-Priorität nicht; abgeleiteter Feature-Status ist nie `Verworfen`
+ *          (kollabiert auf `Done`). (S-243, V7)
  *
  * AccessGuard:
  *   POST /api/board/projects/rescan (Schreib-Trigger) liegt hinter
@@ -2756,6 +2760,32 @@ describe('computeFeatureStatus (feature-status-derivation)', () => {
     const snapshot = JSON.parse(JSON.stringify(input));
     computeFeatureStatus(input);
     expect(input).toEqual(snapshot);
+  });
+
+  // AC8 / V7 — Verworfen zählt terminal (Done-äquivalent), nicht wie Idee ausgeschlossen.
+  it('AC8: nur Verworfen-Stories (kein Done) → Done (alle terminal)', () => {
+    expect(computeFeatureStatus([story('Verworfen'), story('Verworfen')])).toBe('Done');
+  });
+
+  it('AC8: Done + Verworfen → Done (beide terminal)', () => {
+    expect(computeFeatureStatus([story('Done'), story('Verworfen')])).toBe('Done');
+  });
+
+  it('AC8: To Do + Verworfen → To Do (weakest-wins, nicht-terminale Stufe gewinnt)', () => {
+    expect(computeFeatureStatus([story('To Do'), story('Verworfen')])).toBe('To Do');
+  });
+
+  it('AC8: Blocked + Verworfen → Blocked (V2-Priorität bleibt unberührt)', () => {
+    expect(computeFeatureStatus([story('Blocked'), story('Verworfen')])).toBe('Blocked');
+  });
+
+  it('AC8: Idee + Verworfen → Idee ausgeschlossen, bleibt nur terminal → Done', () => {
+    expect(computeFeatureStatus([story('Idee'), story('Verworfen')])).toBe('Done');
+  });
+
+  it('AC8: der abgeleitete Feature-Status ist nie "Verworfen" (kollabiert auf Done)', () => {
+    expect(computeFeatureStatus([story('Verworfen')])).not.toBe('Verworfen');
+    expect(computeFeatureStatus([story('Verworfen'), story('In Progress')])).not.toBe('Verworfen');
   });
 });
 

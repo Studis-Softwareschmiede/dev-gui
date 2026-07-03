@@ -2,7 +2,7 @@ id: S-243
 parent: F-049
 title: 'BoardAggregator: Feature-Status-Ableitung um „Verworfen" (terminal, Done-aequivalent)
   erweitern'
-status: To Do
+status: In Progress
 priority: P2
 spec: docs/specs/feature-status-derivation.md
 implements:
@@ -19,11 +19,11 @@ estimate_note: 'Heuristik: n_ac=1 (AC8), n_comp=1 (src/BoardAggregator.js — co
   -> dispo_est 2.0, confidence medium. Kleine, rein lesende Aenderung an einer bestehenden
   Pure-Function (S-238 bereits Done) + Unit-Tests.'
 confidence: medium
-branch: null
+branch: feat/S-243-verworfen-derivation
 pr: null
 blocked_reason: null
 created_at: '2026-07-02T05:05:10Z'
-updated_at: '2026-07-02T05:05:10Z'
+updated_at: '2026-07-03T00:11:52Z'
 done_at: null
 notes: 'Spec: docs/specs/feature-status-derivation.md — implements AC8 (V7).
 

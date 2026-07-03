@@ -394,6 +394,8 @@ function computeRollup(stories) {
 /**
  * Weakest-wins Fortschritts-Ordnung: kleinster Index = schwächste Stufe.
  * `Blocked` ist ein Sonderfall mit höchster Priorität (nicht Teil dieser Skala).
+ * `Verworfen` ist KEIN eigener Eintrag dieser Skala — er wird auf denselben
+ * (terminalen) Index wie `Done` abgebildet (Done-äquivalent, V7/AC8).
  * (feature-status-derivation, Vertrag „Ordnungs-Skala").
  */
 const FEATURE_STATUS_ORDER = ['To Do', 'In Progress', 'In Review', 'Done'];
@@ -402,12 +404,15 @@ const FEATURE_STATUS_ORDER = ['To Do', 'In Progress', 'In Review', 'Done'];
  * Derive a feature status live from its child stories (read-only display value).
  * Reine Funktion — kein Filesystem-Zugriff, keine Mutation der Eingabe.
  *
- * Ableitungsregel (Priorität von oben nach unten, feature-status-derivation V1–V6):
+ * Ableitungsregel (Priorität von oben nach unten, feature-status-derivation V1–V7):
  *   1. V1 — Stories mit `status: Idee` vollständig ausschließen (noch nicht committet).
  *   2. V2 — bleibt ≥1 verbleibende Story `Blocked` → `Blocked` (höchste Priorität).
  *   3. V3 — sonst schwächste vorkommende Stufe in
  *           To Do < In Progress < In Review < Done (kleinster Index gewinnt);
  *      V6 — unbekannter/fehlender Story-Status zählt als schwächste Stufe `To Do`.
+ *      V7 — `Verworfen` zählt NICHT als unbekannt, sondern als Done-äquivalent
+ *           (terminal, gleicher Index wie `Done`); Ergebnis-Label bleibt `Done`
+ *           (nie `Verworfen`).
  *   4. V4 — keine verbleibende (nicht-Idee-)Story → `Backlog` (Default).
  *
  * @param {Array<{ status: string|null }>} stories
@@ -421,11 +426,18 @@ export function computeFeatureStatus(stories) {
   if (counted.length === 0) return 'Backlog';
   // V2: Blocked gewinnt (höchste Priorität), überschreibt jede andere Ableitung.
   if (counted.some((s) => s.status === 'Blocked')) return 'Blocked';
-  // V3 + V6: schwächste Stufe; unbekannter/fehlender Status → schwächste Stufe (To Do).
-  let minIdx = FEATURE_STATUS_ORDER.length - 1; // Startwert: 'Done' (stärkste Stufe)
+  // V3 + V6 + V7: schwächste Stufe; unbekannter/fehlender Status → schwächste Stufe
+  // (To Do); `Verworfen` → terminale Stufe (Done-äquivalent, V7).
+  const doneIdx = FEATURE_STATUS_ORDER.indexOf('Done');
+  let minIdx = doneIdx; // Startwert: 'Done' (stärkste Stufe)
   for (const s of counted) {
-    const idx = FEATURE_STATUS_ORDER.indexOf(s.status);
-    const rank = idx === -1 ? 0 : idx; // unbekannt/fehlend → schwächste Stufe (To Do)
+    let rank;
+    if (s.status === 'Verworfen') {
+      rank = doneIdx; // V7: Done-äquivalent, terminal
+    } else {
+      const idx = FEATURE_STATUS_ORDER.indexOf(s.status);
+      rank = idx === -1 ? 0 : idx; // unbekannt/fehlend → schwächste Stufe (To Do)
+    }
     if (rank < minIdx) minIdx = rank;
   }
   return FEATURE_STATUS_ORDER[minIdx];
