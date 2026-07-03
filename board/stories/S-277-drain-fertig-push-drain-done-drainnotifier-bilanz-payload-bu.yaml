@@ -2,7 +2,7 @@ id: S-277
 parent: F-056
 title: 'Drain-Fertig-Push (drain_done): DrainNotifier + Bilanz-Payload (budget-pausen-bereit)
   + Wiring in manuelle & Nacht-Drain-Abschlussnaht, best-effort/gegated'
-status: In Progress
+status: Done
 priority: P1
 spec: docs/specs/drain-done-notification.md
 implements:
@@ -20,8 +20,8 @@ labels:
 - security
 size_est: L
 dispo_est: '5.0'
-dispo_act: null
-dispo_forecast: null
+dispo_act: '4'
+dispo_forecast: '.2500'
 estimate_note: 'estimator nicht dispatchbar; Heuristik score 12 (7 AC + 4 Komponenten:
   DrainNotifier/projectDrainRouter/NightWatchScheduler/server.js + 1 label security)
   -> L; baseline js|balanced|L ep 5.0 (n=5); keine Baseline-Tokens'
@@ -30,6 +30,6 @@ branch: feat/S-277-drain-done-push
 pr: null
 blocked_reason: null
 created_at: '2026-07-03T06:48:52Z'
-updated_at: '2026-07-03T10:22:21Z'
-done_at: null
+updated_at: '2026-07-03T10:51:35Z'
+done_at: '2026-07-03T10:50:22Z'
 tok_est: null
