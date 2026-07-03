@@ -1,0 +1,19 @@
+id: F-054
+title: 'Settings-Panel Neustrukturierung: linke Menü-Navigation (Kategorien statt
+  Scroll-Monolith)'
+goal: 'SettingsView.jsx (~5700 Zeilen) auf linke Kategorie-Menü-Navigation umstellen:
+  links klickbares/deep-linkbares Kategorie-Menü, rechts Parameterbereich der gewählten
+  Kategorie; reine Umverpackung bestehender Sektionen + Tastatur/ARIA/Deep-Link gemäß
+  docs/design.md D1-D20.'
+status: Backlog
+priority: P2
+spec: docs/specs/settings-panel-navigation.md
+definition_of_done: null
+labels:
+- ui
+depends: null
+owner: null
+stories: null
+progress: null
+created_at: '2026-07-03T06:21:56Z'
+updated_at: '2026-07-03T06:21:56Z'

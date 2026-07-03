@@ -1,0 +1,27 @@
+id: S-269
+parent: F-054
+title: 'Settings-Nav Tastatur-Navigation: Pfeiltasten/Home/End + Roving Tabindex (automatic
+  activation)'
+status: To Do
+priority: P2
+spec: docs/specs/settings-panel-navigation.md
+implements:
+- AC12
+depends:
+- S-267
+labels:
+- ui
+size_est: S
+dispo_est: '2.0'
+dispo_act: null
+dispo_forecast: null
+estimate_note: Heuristik score ~3 -> S (1 AC + SettingsNav); S/M ohne estimator; baseline
+  js|balanced|S ep 2.0 (n=3); keine Baseline-Tokens
+confidence: medium
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-07-03T06:22:17Z'
+updated_at: '2026-07-03T06:23:22Z'
+done_at: null
+tok_est: null
