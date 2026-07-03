@@ -3,7 +3,9 @@
  *   computeFeatureStatus +
  *   boardRouter HTTP-Ebene (inkl. `buildDiscussSeed()` Unit-Tests, ideen-inbox S-200;
  *   includeArchived-Filter + POST .../archive-done, board-feature-archive S-232;
- *   Feature-Status-Ableitung, feature-status-derivation S-238).
+ *   Feature-Status-Ableitung, feature-status-derivation S-238;
+ *   FSWatcher-Crash-Härtung (error-Handler, Re-Arm/Backoff, ENOENT-Regression),
+ *   fswatcher-crash-hardening S-280).
  *
  * Covers (dev-gui-board-aggregator backend):
  *   AC1 — Scant konfigurierte Repo-Wurzeln read-only nach board/-Ordnern;
@@ -117,6 +119,32 @@
  *          Fortschrittsindex), werden NICHT wie `Idee` ausgeschlossen, ändern die
  *          Blocked-Priorität nicht; abgeleiteter Feature-Status ist nie `Verworfen`
  *          (kollabiert auf `Done`). (S-243, V7)
+ *
+ * Covers (fswatcher-crash-hardening, S-280 — error-Handler + Re-Arm mit Backoff +
+ * ENOENT-Regression; describe-Blöcke "fswatcher-crash-hardening AC1–AC5" (deterministisch,
+ * injizierter watch/Timer) + "BoardAggregator — echter FSWatcher (... AC6/AC7, Integration)"):
+ *   AC1 — Jeder Watcher-Fehler (Bewaffnung synchron ODER während des Iterierens via
+ *          #fsDeps.watch) wird abgefangen; kein unbehandelter Reject/`unhandledRejection`.
+ *   AC2 — ENOENT/scandir während des Beobachtens: `_watchRoot()` kehrt kontrolliert
+ *          zurück ({ armed: true, aborted: false }), kein Prozess-Crash.
+ *   AC3 — Verschwindende Wurzel → sauberes Schließen: Debounce-Timer wird im
+ *          finally-Block gecleart (kein Leak, kein hängender Async-Iterator).
+ *   AC4 — Re-Arm mit exponentiellem, begrenztem Backoff (feste Konstanten
+ *          REARM_INITIAL_DELAY_MS=500/REARM_BACKOFF_FACTOR=2/REARM_MAX_DELAY_MS=30000,
+ *          injizierte Fake-Timer-Queue); Backoff wächst je Fehlschlag, verweilt an der
+ *          Obergrenze bei dauerhaft fehlendem Pfad (kein Busy-Loop); bei erfolgreicher
+ *          Neu-Bewaffnung Backoff-Reset + Index EINMAL invalidiert (nächster getIndex()
+ *          re-scant); höchstens EIN ausstehender Re-Arm-Timer je Wurzel.
+ *   AC5 — `stopWatchers()` bricht einen anstehenden Backoff-/Re-Arm-Timer ab
+ *          (`clearTimeout` beobachtet); danach erfolgt kein weiterer `watch()`-Aufruf.
+ *   AC6 — Integration mit ECHTEM `fs/promises.watch()` auf einem mkdtemp-Verzeichnis:
+ *          npm-install-/Worktree-artige Anlage/Löschung von Unterverzeichnissen crasht
+ *          den Prozess nie (kein `unhandledRejection`); scan()/getIndex() bleiben danach
+ *          funktionsfähig.
+ *   AC7 — Regressionstest des Vorfalls 2026-07-02 (Integration, ECHTER Watcher): Wurzel
+ *          löschen → neu erzeugen → Watcher re-armt; eine Änderung NACH der Neu-Erzeugung
+ *          invalidiert den Index erneut (`getIndex()` OHNE expliziten `scan()`-Aufruf
+ *          liest die neue Struktur).
  *
  * AccessGuard:
  *   POST /api/board/projects/rescan (Schreib-Trigger) liegt hinter
@@ -1024,6 +1052,327 @@ describe('AC9 — On-demand re-scan updates the index', () => {
     const aggregator = new BoardAggregator({ boardRootsEnv: BOARD_ROOT, fsDeps });
     expect(() => aggregator.startWatchers()).not.toThrow();
     expect(() => aggregator.stopWatchers()).not.toThrow();
+  });
+});
+
+// ── fswatcher-crash-hardening: AC1–AC5 (deterministisch, injizierter watch/Timer) ──
+//
+// Covers (fswatcher-crash-hardening):
+//   AC1 — Jeder Watcher-Fehler (Bewaffnung synchron ODER während des Iterierens) wird
+//         abgefangen; kein unbehandelter Reject / kein 'unhandledRejection'.
+//   AC2 — ENOENT/scandir während des Beobachtens: _watchRoot() kehrt sauber zurück
+//         ({ armed: true, aborted: false }), kein Reject.
+//   AC3 — Verschwindende Wurzel: der Debounce-Timer wird beim Schließen gecleart
+//         (kein Leak, kein hängender Iterator).
+//   AC4 — Re-Arm mit festen, benannten Backoff-Konstanten (500ms/Faktor 2/Cap 30s);
+//         bei Erfolg Backoff-Reset + Index EINMAL invalidiert (nächster getIndex()
+//         re-scant). Höchstens ein ausstehender Re-Arm-Timer je Wurzel.
+//   AC5 — stopWatchers() bricht einen anstehenden Backoff-/Re-Arm-Timer ab; danach
+//         erfolgt kein weiterer watch()-Aufruf mehr.
+//
+// Strategy: #fsDeps.watch/setTimeout/clearTimeout/pathExists werden injiziert (kein
+// echtes Filesystem, kein jest.useFakeTimers() — eigene deterministische Fake-Timer-
+// Queue, analog zum bestehenden fsDeps-Injektionsmuster).
+
+/** Deterministic fake timer queue for injected fsDeps.setTimeout/clearTimeout. */
+function makeFakeTimers() {
+  let idCounter = 0;
+  const pending = new Map(); // id → { fn, delay }
+  const clearCalls = [];
+  return {
+    setTimeout: (fn, delay) => {
+      const id = ++idCounter;
+      pending.set(id, { fn, delay });
+      return id;
+    },
+    clearTimeout: (id) => {
+      clearCalls.push(id);
+      pending.delete(id);
+    },
+    pending,
+    clearCalls,
+    /** Fire the single earliest pending timer, then flush microtasks. */
+    async fireNext() {
+      const entries = [...pending.entries()];
+      if (entries.length === 0) return false;
+      const [id, entry] = entries[0];
+      pending.delete(id);
+      entry.fn();
+      await flushMicrotasks();
+      return true;
+    },
+  };
+}
+
+/** Flush pending microtasks (several rounds — enough for a few chained awaits). */
+function flushMicrotasks(rounds = 8) {
+  let p = Promise.resolve();
+  for (let i = 0; i < rounds; i++) p = p.then(() => {});
+  return p;
+}
+
+/**
+ * A minimal async-iterable whose first `next()` call rejects with `err` — used to
+ * simulate a watch()-Iterator that throws during iteration without needing an
+ * (empty, lint-flagged) `async function*` generator.
+ */
+function rejectingAsyncIterable(err) {
+  return {
+    [Symbol.asyncIterator]() {
+      return { next: () => Promise.reject(err) };
+    },
+  };
+}
+
+describe('fswatcher-crash-hardening AC1 — Watcher-Fehler eskalieren nie', () => {
+  it('watch() wirft synchron bei der Bewaffnung → kein unbehandelter Reject, kein Crash', async () => {
+    const rejections = [];
+    const onRejection = (reason) => rejections.push(reason);
+    process.on('unhandledRejection', onRejection);
+    try {
+      const aggregator = new BoardAggregator({
+        boardRootsEnv: '/tmp/does-not-matter-ac1a',
+        fsDeps: {
+          readdir: async () => [],
+          readFile: async () => '',
+          watch: () => { throw new Error('sync boom'); },
+        },
+      });
+      expect(() => aggregator.startWatchers()).not.toThrow();
+      await flushMicrotasks();
+      expect(rejections).toEqual([]);
+      aggregator.stopWatchers();
+    } finally {
+      process.off('unhandledRejection', onRejection);
+    }
+  });
+
+  it('watch()-Iterator wirft während des Iterierens → kein unbehandelter Reject, kein Crash', async () => {
+    const rejections = [];
+    const onRejection = (reason) => rejections.push(reason);
+    process.on('unhandledRejection', onRejection);
+    try {
+      const aggregator = new BoardAggregator({
+        boardRootsEnv: '/tmp/does-not-matter-ac1b',
+        fsDeps: {
+          readdir: async () => [],
+          readFile: async () => '',
+          watch: () => rejectingAsyncIterable(new Error('iterator boom')),
+        },
+      });
+      expect(() => aggregator.startWatchers()).not.toThrow();
+      await flushMicrotasks();
+      expect(rejections).toEqual([]);
+      aggregator.stopWatchers();
+    } finally {
+      process.off('unhandledRejection', onRejection);
+    }
+  });
+});
+
+describe('fswatcher-crash-hardening AC2 — Kein Crash bei ENOENT/scandir', () => {
+  it('_watchRoot() kehrt bei ENOENT/scandir-Fehler sauber zurück (kein Reject)', async () => {
+    const rejections = [];
+    const onRejection = (reason) => rejections.push(reason);
+    process.on('unhandledRejection', onRejection);
+    try {
+      const aggregator = new BoardAggregator({
+        boardRootsEnv: '/tmp/does-not-matter-ac2',
+        fsDeps: {
+          readdir: async () => [],
+          readFile: async () => '',
+          watch: () => {
+            const err = new Error(
+              "ENOENT: no such file or directory, scandir '/workspace/dev-gui/node_modules/.bin'",
+            );
+            err.code = 'ENOENT';
+            return rejectingAsyncIterable(err);
+          },
+        },
+      });
+      const ac = new AbortController();
+      await expect(aggregator._watchRoot('/tmp/does-not-matter-ac2', ac.signal)).resolves.toEqual({
+        armed: true,
+        aborted: false,
+      });
+      expect(rejections).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onRejection);
+    }
+  });
+});
+
+describe('fswatcher-crash-hardening AC3 — Verschwindender Pfad: sauberes Schließen', () => {
+  it('Debounce-Timer wird beim Schließen (Fehler nach Event) gecleart', async () => {
+    const timers = makeFakeTimers();
+    const aggregator = new BoardAggregator({
+      boardRootsEnv: '/tmp/does-not-matter-ac3',
+      fsDeps: {
+        readdir: async () => [],
+        readFile: async () => '',
+        watch: () => (async function* () {
+          yield { eventType: 'rename', filename: 'node_modules' };
+          const err = new Error('ENOENT: scandir');
+          err.code = 'ENOENT';
+          throw err;
+        })(),
+        setTimeout: timers.setTimeout,
+        clearTimeout: timers.clearTimeout,
+        pathExists: async () => false,
+      },
+    });
+
+    aggregator.startWatchers();
+    await flushMicrotasks();
+
+    // Debounce-Timer (id 1) wurde beim Event gesetzt und im finally-Block des
+    // Watcher-Loops gecleart, sobald der Fehler die Schleife beendet.
+    expect(timers.clearCalls).toContain(1);
+    aggregator.stopWatchers();
+  });
+});
+
+describe('fswatcher-crash-hardening AC4 — Re-Arm mit exponentiellem, begrenztem Backoff', () => {
+  it('Backoff wächst 500 → 1000 → 2000ms; bei Erfolg Reset + Index-Invalidierung EINMAL', async () => {
+    const timers = makeFakeTimers();
+    let watchCallCount = 0;
+    let readdirCalls = 0;
+
+    const watchFn = () => {
+      watchCallCount++;
+      if (watchCallCount <= 3) {
+        const err = new Error('ENOENT: scandir');
+        err.code = 'ENOENT';
+        throw err;
+      }
+      // 4. Versuch: Bewaffnung gelingt, Iterator endet sofort (kein Event).
+      return (async function* () {})();
+    };
+
+    const aggregator = new BoardAggregator({
+      boardRootsEnv: '/tmp/does-not-matter-ac4',
+      fsDeps: {
+        readdir: async () => { readdirCalls++; return []; },
+        readFile: async () => '',
+        watch: watchFn,
+        setTimeout: timers.setTimeout,
+        clearTimeout: timers.clearTimeout,
+        pathExists: async () => true,
+      },
+    });
+
+    // Baseline-Scan (Index nicht mehr null).
+    await aggregator.getIndex();
+    expect(readdirCalls).toBe(1);
+
+    aggregator.startWatchers();
+    await flushMicrotasks();
+    expect(watchCallCount).toBe(1); // initialer Arm-Versuch fehlgeschlagen
+
+    expect([...timers.pending.values()][0].delay).toBe(500); // REARM_INITIAL_DELAY_MS
+    await timers.fireNext();
+    expect(watchCallCount).toBe(2);
+
+    expect([...timers.pending.values()][0].delay).toBe(1000); // 500 * 2
+    await timers.fireNext();
+    expect(watchCallCount).toBe(3);
+
+    expect([...timers.pending.values()][0].delay).toBe(2000); // 500 * 2^2
+    await timers.fireNext();
+    expect(watchCallCount).toBe(4); // erfolgreiche Neu-Bewaffnung
+
+    // AC4: Index wurde bei der erfolgreichen Neu-Bewaffnung invalidiert — ein
+    // weiterer getIndex()-Aufruf triggert einen frischen Scan (readdir erneut).
+    await aggregator.getIndex();
+    expect(readdirCalls).toBe(2);
+
+    aggregator.stopWatchers();
+  });
+
+  it('Pfad dauerhaft nicht vorhanden: Backoff verweilt an der Obergrenze (30s), kein Busy-Loop', async () => {
+    const timers = makeFakeTimers();
+    let existsCalls = 0;
+
+    const aggregator = new BoardAggregator({
+      boardRootsEnv: '/tmp/does-not-matter-ac4b',
+      fsDeps: {
+        readdir: async () => [],
+        readFile: async () => '',
+        watch: () => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); },
+        setTimeout: timers.setTimeout,
+        clearTimeout: timers.clearTimeout,
+        pathExists: async () => { existsCalls++; return false; },
+      },
+    });
+
+    aggregator.startWatchers();
+    await flushMicrotasks();
+
+    // Mehrere Runden abwarten, bis der Cap erreicht ist: 500,1000,2000,4000,8000,16000,30000(cap),30000…
+    const expectedDelays = [500, 1000, 2000, 4000, 8000, 16000, 30000, 30000, 30000];
+    for (const expected of expectedDelays) {
+      expect([...timers.pending.values()][0].delay).toBe(expected);
+      await timers.fireNext();
+    }
+
+    // pathExists wurde für jede Backoff-Runde geprüft, watch() aber nie erneut
+    // erfolgreich aufgerufen (Pfad bleibt weg) — kein Busy-Loop (Delays wachsen,
+    // stauen sich nicht auf ein Vielfaches).
+    expect(existsCalls).toBe(expectedDelays.length);
+    aggregator.stopWatchers();
+  });
+
+  it('höchstens EIN ausstehender Re-Arm-Timer je Wurzel', async () => {
+    const timers = makeFakeTimers();
+    const aggregator = new BoardAggregator({
+      boardRootsEnv: '/tmp/does-not-matter-ac4c',
+      fsDeps: {
+        readdir: async () => [],
+        readFile: async () => '',
+        watch: () => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); },
+        setTimeout: timers.setTimeout,
+        clearTimeout: timers.clearTimeout,
+        pathExists: async () => false,
+      },
+    });
+
+    aggregator.startWatchers();
+    await flushMicrotasks();
+    expect(timers.pending.size).toBe(1);
+
+    aggregator.stopWatchers();
+  });
+});
+
+describe('fswatcher-crash-hardening AC5 — stopWatchers() bricht Re-Arm ab', () => {
+  it('bricht einen anstehenden Backoff-Timer ab; danach kein weiterer watch()-Aufruf', async () => {
+    const timers = makeFakeTimers();
+    let watchCallCount = 0;
+
+    const aggregator = new BoardAggregator({
+      boardRootsEnv: '/tmp/does-not-matter-ac5',
+      fsDeps: {
+        readdir: async () => [],
+        readFile: async () => '',
+        watch: () => { watchCallCount++; throw new Error('generic failure, no code'); },
+        setTimeout: timers.setTimeout,
+        clearTimeout: timers.clearTimeout,
+        pathExists: async () => true,
+      },
+    });
+
+    aggregator.startWatchers();
+    await flushMicrotasks();
+    expect(watchCallCount).toBe(1);
+    expect(timers.pending.size).toBe(1);
+
+    aggregator.stopWatchers();
+    expect(timers.pending.size).toBe(0);
+    expect(timers.clearCalls.length).toBeGreaterThan(0);
+
+    // Selbst nach vollständigem Flush darf kein weiterer watch()-Aufruf erfolgen.
+    await flushMicrotasks();
+    expect(watchCallCount).toBe(1);
   });
 });
 
@@ -2963,4 +3312,121 @@ describe('BoardAggregator — Feature-Status-Ableitung (feature-status-derivatio
     expect(after).toBe(before); // persistiertes status: Backlog bleibt in der Datei
     expect(after).toContain('status: Backlog');
   });
+});
+
+// ── fswatcher-crash-hardening: AC6 + AC7 (Integration, ECHTER Watcher) ─────────
+//
+// Covers (fswatcher-crash-hardening):
+//   AC6 — Ein echter Watcher auf ein temp-Verzeichnis überlebt Anlegen/Löschen von
+//         Unterverzeichnissen (npm-install-/Worktree-artig): kein 'unhandledRejection',
+//         der Watcher-Baustein bleibt funktionsfähig (scan()/getIndex() weiterhin ok).
+//   AC7 — Regressionstest des Vorfalls 2026-07-02: Wurzel löschen → neu erzeugen →
+//         Watcher re-armt; eine Änderung NACH der Neu-Erzeugung invalidiert den Index
+//         erneut (getIndex() OHNE expliziten scan()-Aufruf liest neu).
+//
+// Strategy: echter fs/promises.watch() (kein injizierter fsDeps) auf einem mkdtemp-
+// Verzeichnis; reale (kurze) Timer statt Fake-Queue, da das reale OS-Watcher-Timing
+// (FSEvents/inotify) plattformnah abgebildet werden soll (Spec-Annahme A5).
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+describe('BoardAggregator — echter FSWatcher (fswatcher-crash-hardening AC6/AC7, Integration)', () => {
+  let tmpRoot;
+  let aggregator;
+
+  beforeEach(async () => {
+    tmpRoot = await mkdtemp(join(tmpdir(), 'fswatch-crash-hardening-'));
+    aggregator = new BoardAggregator({ boardRootsEnv: tmpRoot });
+  });
+
+  afterEach(async () => {
+    aggregator.stopWatchers();
+    await rm(tmpRoot, { recursive: true, force: true }).catch(() => {});
+  });
+
+  it(
+    'AC6 — Anlegen/Löschen von Unterverzeichnissen (npm-install-/Worktree-artig) crasht nie',
+    async () => {
+      const rejections = [];
+      const onRejection = (reason) => rejections.push(reason);
+      process.on('unhandledRejection', onRejection);
+      try {
+        aggregator.startWatchers();
+
+        // npm-install-artige Churn: node_modules/.bin mehrfach anlegen + löschen.
+        for (let i = 0; i < 5; i++) {
+          const binDir = join(tmpRoot, 'node_modules', '.bin');
+          await mkdir(binDir, { recursive: true });
+          await writeFile(join(binDir, `tool-${i}`), '#!/bin/sh\n', 'utf8');
+          await rm(join(tmpRoot, 'node_modules'), { recursive: true, force: true });
+        }
+
+        // Worktree-artige Anlage + Entfernung.
+        const worktreeDir = join(tmpRoot, '.claude', 'worktrees', 'S-999');
+        await mkdir(worktreeDir, { recursive: true });
+        await rm(join(tmpRoot, '.claude'), { recursive: true, force: true });
+
+        await sleep(500);
+
+        expect(rejections).toEqual([]); // kein Crash, kein unhandledRejection
+
+        // Watcher-Baustein bleibt funktionsfähig: scan()/getIndex() laufen weiterhin.
+        await expect(aggregator.scan()).resolves.not.toThrow();
+        const index = await aggregator.getIndex();
+        expect(Array.isArray(index)).toBe(true);
+      } finally {
+        process.off('unhandledRejection', onRejection);
+      }
+    },
+    20000,
+  );
+
+  it(
+    'AC7 — löschen → neu erzeugen → re-armt (Regressionstest Vorfall 2026-07-02)',
+    async () => {
+      const rejections = [];
+      const onRejection = (reason) => rejections.push(reason);
+      process.on('unhandledRejection', onRejection);
+      try {
+        // Baseline: leerer Index (kein Repo unter der Wurzel).
+        const before = await aggregator.getIndex();
+        expect(before).toEqual([]);
+
+        aggregator.startWatchers();
+
+        // Wurzel komplett löschen — genau der Vorfall-Vektor (ENOENT scandir beim
+        // internen Nach-Bewaffnen des rekursiven Watchers).
+        await rm(tmpRoot, { recursive: true, force: true });
+        await sleep(300);
+
+        expect(rejections).toEqual([]); // (a) kein Prozess-Exit / keine uncaught exception
+
+        // Wurzel neu erzeugen — der Watcher soll re-armen, sobald sie wieder existiert.
+        await mkdir(tmpRoot, { recursive: true });
+        // Re-Arm-Backoff-Fenster abwarten (>= REARM_INITIAL_DELAY_MS, mit Puffer für
+        // reale FSEvents-/inotify-Latenz).
+        await sleep(900);
+
+        // (b) Änderung NACH der Neu-Erzeugung: neues Repo mit board/-Ordner anlegen.
+        const repoBoardDir = join(tmpRoot, 'probe-repo', 'board');
+        await mkdir(repoBoardDir, { recursive: true });
+        await writeFile(
+          join(repoBoardDir, 'board.yaml'),
+          'schema_version: 1\nproject_slug: probe-repo\n',
+          'utf8',
+        );
+        // Watcher-Debounce (200ms) + Puffer für reale Event-Latenz.
+        await sleep(500);
+
+        // getIndex() OHNE expliziten scan()-Aufruf muss die neue Struktur sehen —
+        // Beleg, dass der Watcher re-armt hat und den Index (erneut) invalidiert hat.
+        const after = await aggregator.getIndex();
+        expect(after.some((p) => p.slug === 'probe-repo')).toBe(true);
+        expect(rejections).toEqual([]);
+      } finally {
+        process.off('unhandledRejection', onRejection);
+      }
+    },
+    20000,
+  );
 });

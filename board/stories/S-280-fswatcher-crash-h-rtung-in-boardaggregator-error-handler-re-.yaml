@@ -2,7 +2,7 @@ id: S-280
 parent: F-057
 title: 'FSWatcher-Crash-Härtung in BoardAggregator: error-Handler + Re-Arm mit Backoff
   + ENOENT-Regressionstest'
-status: To Do
+status: In Progress
 priority: P1
 spec: docs/specs/fswatcher-crash-hardening.md
 implements:
@@ -24,10 +24,10 @@ estimate_note: Heuristik score 8 (7 AC + 1 Komponente BoardAggregator.js) -> L; 
   im headless requirement-Kontext nicht dispatcht, baseline js|balanced|L ep=5.0 als
   Naeherung; tok_est null (keine Baseline-Tokens); single-file Haertung + Regressionstest
 confidence: low
-branch: null
+branch: feat/S-280-fswatcher-crash-hardening
 pr: null
 blocked_reason: null
 created_at: '2026-07-03T07:00:23Z'
-updated_at: '2026-07-03T07:01:11Z'
+updated_at: '2026-07-03T10:55:15Z'
 done_at: null
 tok_est: null

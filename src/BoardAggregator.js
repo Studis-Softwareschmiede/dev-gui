@@ -10,6 +10,19 @@
  *   AC1 — Story-Index enthält zusätzlich updated_at (null wenn YAML-Feld fehlt) — Quelle für
  *   ProjectDrain's "verwaiste In-Progress"-Stale-Erkennung (src/ProjectDrain.js).
  *
+ * fswatcher-crash-hardening:
+ *   AC1 — startWatchers()/_watchRoot() fängt JEDEN Watcher-Fehler ab (Bewaffnung UND
+ *   Iteration) — kein Watcher-Fehler eskaliert zu einer uncaughtException.
+ *   AC2 — ENOENT/scandir während des Beobachtens beendet den Watcher-Loop kontrolliert;
+ *   der Prozess bleibt am Leben.
+ *   AC3 — Verschwindende Wurzel → sauberes Schließen (Debounce-Timer gecleart, kein
+ *   hängender Async-Iterator).
+ *   AC4 — Re-Arm mit exponentiellem, begrenztem Backoff (REARM_INITIAL_DELAY_MS,
+ *   REARM_BACKOFF_FACTOR, REARM_MAX_DELAY_MS); bei erfolgreicher Neu-Bewaffnung Backoff-
+ *   Reset + Index EINMAL invalidiert (_armRoot()/_scheduleRearm()/_attemptRearm()).
+ *   AC5 — stopWatchers() bricht anstehende Re-Arm-/Backoff-Timer ab; danach kein
+ *   weiterer watch()-Aufruf mehr.
+ *
  * Scannt die konfigurierten Repo-Wurzeln (BOARD_ROOTS env-Variable) read-only nach
  * board/-Ordnern und liest je Repo:
  *   - board/board.yaml               (Projekt-Meta)
@@ -40,7 +53,7 @@
  * @module BoardAggregator
  */
 
-import { readdir, readFile, watch } from 'node:fs/promises';
+import { readdir, readFile, watch, stat } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
 import { computeFeatureStatus } from './featureStatus.js';
@@ -162,7 +175,24 @@ export async function computeStoryReadyStatus(story, fsDeps, repoPath, allStorie
 }
 
 /** Default FS dependencies (real node:fs/promises). */
-const defaultFsDeps = { readdir, readFile, watch };
+const defaultFsDeps = {
+  readdir,
+  readFile,
+  watch,
+  // fswatcher-crash-hardening: injizierbare Timer + Existenz-Prüfer (analog zum
+  // fsDeps-Muster) für deterministische Re-Arm-/Backoff-Tests (AC4/AC5). Defaults
+  // nutzen echte Timer bzw. node:fs/promises.stat.
+  setTimeout: (...args) => globalThis.setTimeout(...args),
+  clearTimeout: (...args) => globalThis.clearTimeout(...args),
+  pathExists: async (path) => {
+    try {
+      await stat(path);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+};
 
 // ── Simple YAML parser für Board-Dateien ─────────────────────────────────────
 // Die board/-YAMLs sind einfach strukturiert (Schlüssel-Wert, Inline-Arrays,
@@ -433,6 +463,18 @@ export function parseBoardRoots(envValue) {
     .map((p) => resolve(expandTilde(p)));
 }
 
+// ── Watcher-Re-Arm-Backoff (fswatcher-crash-hardening AC4) ────────────────────
+// Feste, benannte Backoff-Parameter für den Watcher-Re-Arm nach Fehler/
+// Verschwinden einer Wurzel: exponentiell wachsend, nach oben begrenzt (kein
+// Busy-Loop, keine unbeschränkte Wiederholfrequenz).
+const REARM_INITIAL_DELAY_MS = 500;
+const REARM_BACKOFF_FACTOR = 2;
+const REARM_MAX_DELAY_MS = 30_000;
+
+// Bestehendes Debounce-Intervall der Index-Invalidierung bei Watcher-Events
+// (unverändert, jetzt als benannte Konstante statt Magic Number).
+const WATCH_DEBOUNCE_MS = 200;
+
 // ── BoardAggregator ───────────────────────────────────────────────────────────
 
 /**
@@ -443,8 +485,13 @@ export function parseBoardRoots(envValue) {
  * @param {string} [options.boardRootsEnv]
  *   Override for the BOARD_ROOTS env variable value (for tests).
  * @param {object} [options.fsDeps]
- *   Injectable filesystem helpers: { readdir, readFile, watch }.
- *   Defaults to real node:fs/promises.
+ *   Injectable filesystem helpers: { readdir, readFile, watch, setTimeout,
+ *   clearTimeout, pathExists }. `setTimeout`/`clearTimeout`/`pathExists`
+ *   (fswatcher-crash-hardening) drive the watcher re-arm/backoff and are
+ *   injectable for deterministic tests, analog to `watch`. Merged over the
+ *   real defaults (node:fs/promises + real timers) — a partial override (e.g.
+ *   just { readdir, readFile, watch }, the pre-existing pattern) keeps real
+ *   timers/pathExists for the fields it omits.
  */
 export class BoardAggregator {
   /** @type {string[]} */
@@ -464,13 +511,21 @@ export class BoardAggregator {
    * @type {Array<ProjectEntry|ErrorEntry>|null}
    */
   #standardIndex = null;
-  /** Active watchers (AbortController per watched path). */
+  /**
+   * Active watcher states, one per watched board root (fswatcher-crash-hardening).
+   * Each entry: { root, ac: AbortController, backoffDelay: number,
+   *               rearmTimerId: *|null, stopped: boolean }.
+   * @type {Array<object>}
+   */
   #watchers = [];
 
   constructor({ boardRootsEnv, fsDeps } = {}) {
     const envVal = boardRootsEnv ?? process.env.BOARD_ROOTS ?? '';
     this.#boardRoots = parseBoardRoots(envVal);
-    this.#fsDeps = fsDeps ?? defaultFsDeps;
+    // Merge (not replace): callers/tests overriding just { readdir, readFile, watch }
+    // (pre-existing pattern) automatically keep real timers/pathExists for the new
+    // re-arm/backoff machinery — no silent breakage of existing fsDeps overrides.
+    this.#fsDeps = { ...defaultFsDeps, ...(fsDeps ?? {}) };
   }
 
   /**
@@ -788,6 +843,11 @@ export class BoardAggregator {
    * On any change inside a watched board root, the index is invalidated and
    * will be re-scanned on the next getIndex() call (AC9 — lazy re-scan).
    *
+   * Hardening (fswatcher-crash-hardening AC1–AC5): every watcher error — whether
+   * thrown synchronously at arm-time or during iteration (e.g. ENOENT/scandir on
+   * a disappearing root) — is caught. The watcher is then re-armed once the root
+   * exists again, using an exponential, capped backoff (never a busy-loop).
+   *
    * Note: fs.watch() is used with a debounce to avoid thrashing on rapid file saves.
    * The injected fsDeps.watch must match the node:fs/promises.watch signature.
    *
@@ -799,59 +859,199 @@ export class BoardAggregator {
     this.stopWatchers();
 
     for (const root of this.#boardRoots) {
-      const ac = new AbortController();
-      this.#watchers.push(ac);
-
-      // Start watcher in background — errors are caught and ignored (AC8)
-      this._watchRoot(root, ac.signal).catch(() => {});
+      const state = {
+        root,
+        ac: new AbortController(),
+        backoffDelay: REARM_INITIAL_DELAY_MS,
+        rearmTimerId: null,
+        stopped: false,
+      };
+      this.#watchers.push(state);
+      this._armRoot(state, /* isRearm */ false);
     }
+  }
+
+  /**
+   * Arm (or re-arm) the watcher for a single root's watcher state.
+   * Fire-and-forget — never throws / never leaves an unhandled rejection (AC1).
+   *
+   * On a successful RE-arm (isRearm === true), the backoff is reset and the
+   * index is invalidated exactly once (AC4). When the watch loop subsequently
+   * ends (error, disappearance, or a clean abort from stopWatchers()), either
+   * schedules the next backoff re-arm or — on AbortError — does nothing (AC5).
+   *
+   * @param {object} state  Watcher state (see #watchers doc).
+   * @param {boolean} isRearm  Whether this is a re-arm attempt after a failure.
+   * @returns {void}
+   */
+  _armRoot(state, isRearm) {
+    if (state.stopped) return;
+
+    if (isRearm) {
+      console.warn(`[BoardAggregator] Re-Arm-Versuch für Watcher-Wurzel "${state.root}"`);
+    }
+
+    const onArmed = () => {
+      if (state.stopped) return;
+      if (isRearm) {
+        // AC4: erfolgreiche Neu-Bewaffnung → Backoff zurücksetzen + Index EINMAL
+        // invalidieren (nächster getIndex()/scan() liest neu).
+        state.backoffDelay = REARM_INITIAL_DELAY_MS;
+        this.#index = null;
+        this.#standardIndex = null;
+      }
+    };
+
+    this._watchRoot(state.root, state.ac.signal, onArmed)
+      .then((outcome) => {
+        if (state.stopped) return;
+        if (outcome.aborted) return; // AC5: sauberer Stop via stopWatchers() — kein Re-Arm
+        this._scheduleRearm(state);
+      })
+      .catch(() => {
+        // Defensiv — _watchRoot() wirft nie, aber AC1 verlangt: kein Watcher-Fehler
+        // eskaliert, unter keinen Umständen.
+      });
+  }
+
+  /**
+   * Schedule the next re-arm attempt for a root, honoring the exponential,
+   * capped backoff (AC4). At most one pending re-arm timer per root (Edge-Case:
+   * schnelle Lösch-/Neuanlege-Zyklen stauen keine parallelen Timer auf).
+   *
+   * @param {object} state
+   * @returns {void}
+   */
+  _scheduleRearm(state) {
+    if (state.stopped) return;
+    if (state.rearmTimerId !== null) return; // höchstens ein ausstehender Timer je Wurzel
+
+    const delay = state.backoffDelay;
+    state.backoffDelay = Math.min(state.backoffDelay * REARM_BACKOFF_FACTOR, REARM_MAX_DELAY_MS);
+
+    state.rearmTimerId = this.#fsDeps.setTimeout(() => {
+      state.rearmTimerId = null;
+      this._attemptRearm(state).catch(() => { /* defensiv, AC1 */ });
+    }, delay);
+  }
+
+  /**
+   * Fires when a backoff delay elapses: checks whether the root exists again
+   * and either re-arms the watcher or schedules the next (grown) backoff round.
+   *
+   * @param {object} state
+   * @returns {Promise<void>}
+   */
+  async _attemptRearm(state) {
+    if (state.stopped) return;
+
+    let exists;
+    try {
+      exists = await this.#fsDeps.pathExists(state.root);
+    } catch {
+      exists = false;
+    }
+    if (state.stopped) return;
+
+    if (!exists) {
+      // Pfad weiterhin nicht da (Edge-Case: dauerhaft fehlende Wurzel) — Backoff
+      // läuft bis zur Obergrenze und verweilt dort, kein Busy-Loop.
+      this._scheduleRearm(state);
+      return;
+    }
+
+    this._armRoot(state, /* isRearm */ true);
   }
 
   /**
    * Watch a single root directory for changes.
    * On change: invalidate the index (next getIndex() will re-scan).
    *
+   * Every error is caught here — both a synchronous throw at arm-time
+   * (`this.#fsDeps.watch(...)`) and an error thrown while iterating (AC1/AC2).
+   * A disappearing root closes the watcher cleanly: the debounce timer is
+   * cleared and the async iterator ends (AC3) — no process exit, no hang.
+   *
    * @param {string} root
    * @param {AbortSignal} signal
-   * @returns {Promise<void>}
+   * @param {() => void} [onArmed]  Called synchronously right after a
+   *   successful `fsDeps.watch()` call (before the async iterator is consumed).
+   * @returns {Promise<{armed: boolean, aborted: boolean}>}
+   *   `armed` — whether `fsDeps.watch()` succeeded (constructed an iterator).
+   *   `aborted` — whether the loop ended via the expected AbortError from
+   *   `stopWatchers()` (clean stop, no re-arm).
    */
-  async _watchRoot(root, signal) {
+  async _watchRoot(root, signal, onArmed) {
     let watcher;
     try {
       watcher = this.#fsDeps.watch(root, { recursive: true, signal });
-    } catch {
-      return;
+    } catch (err) {
+      if (err && err.name === 'AbortError') return { armed: false, aborted: true };
+      this._logWatchIssue(root, err, 'Bewaffnung fehlgeschlagen');
+      return { armed: false, aborted: false };
     }
+
+    if (typeof onArmed === 'function') onArmed();
 
     let debounceTimer = null;
     try {
       for await (const fsEvent of watcher) {
         void fsEvent; // consume event — only the change signal matters
         // Invalidate index — will be re-scanned on next getIndex()
-        if (debounceTimer !== null) clearTimeout(debounceTimer);
-        debounceTimer = setTimeout(() => {
+        if (debounceTimer !== null) this.#fsDeps.clearTimeout(debounceTimer);
+        debounceTimer = this.#fsDeps.setTimeout(() => {
           this.#index = null;
           this.#standardIndex = null;
           debounceTimer = null;
-        }, 200);
+        }, WATCH_DEBOUNCE_MS);
       }
+      // Iterator ended without throwing (e.g. a finite test double) — treat like
+      // a disappearance: close cleanly, let the caller decide on re-arm (AC3).
+      return { armed: true, aborted: false };
     } catch (err) {
-      // AbortError is expected on stopWatchers() — any other error: silently stop
-      if (err && err.name !== 'AbortError') {
-        // ignore
+      // AbortError is the expected, clean stop from stopWatchers() (AC5). Any
+      // other error (ENOENT/scandir on a disappearing root, or a generic error
+      // without a `code`) is re-armable — never rethrown to the process (AC2).
+      if (err && err.name === 'AbortError') {
+        return { armed: true, aborted: true };
       }
+      this._logWatchIssue(root, err, 'Watcher beendet');
+      return { armed: true, aborted: false };
     } finally {
-      if (debounceTimer !== null) clearTimeout(debounceTimer);
+      if (debounceTimer !== null) this.#fsDeps.clearTimeout(debounceTimer);
     }
   }
 
   /**
-   * Stop all active filesystem watchers.
+   * Knapp, secret-freies Logging für Watcher-Fehler (NFR Beobachtbarkeit).
+   * Wird nur je tatsächlichem Fehler-/Beendigungs-Ereignis aufgerufen — nicht
+   * pro Backoff-Tick — um einen Log-Sturm zu vermeiden.
+   *
+   * @param {string} root
+   * @param {unknown} err
+   * @param {string} context
+   * @returns {void}
+   */
+  _logWatchIssue(root, err, context) {
+    const code = err && err.code ? ` (${err.code})` : '';
+    const message = err && err.message ? err.message : String(err);
+    console.warn(`[BoardAggregator] Watcher ${context} für "${root}"${code}: ${message}`);
+  }
+
+  /**
+   * Stop all active filesystem watchers — including any pending backoff/re-arm
+   * timers (AC5). After this call, no further `watch()` call and no re-arm
+   * happens for any previously started root.
    * @returns {void}
    */
   stopWatchers() {
-    for (const ac of this.#watchers) {
-      try { ac.abort(); } catch { /* ignore */ }
+    for (const state of this.#watchers) {
+      state.stopped = true;
+      if (state.rearmTimerId !== null) {
+        this.#fsDeps.clearTimeout(state.rearmTimerId);
+        state.rearmTimerId = null;
+      }
+      try { state.ac.abort(); } catch { /* ignore */ }
     }
     this.#watchers = [];
   }
