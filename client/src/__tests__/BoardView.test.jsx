@@ -118,6 +118,16 @@
  *          Fokusfalle (Tab-Zyklus) in Quelle umgesetzt — jsdom hat keine
  *          Layout-Engine, daher Fokus-Zyklus/Fokusring nur strukturell belegt.
  *
+ * Covers (board-feature-archive, S-244 — AC9: Verworfen terminal wie Done):
+ *   AC9 — Archivierbarkeitsprüfung (Buttonaktivierung + Bestätigungs-Zählung)
+ *          behandelt `Verworfen` wie `Done` als terminal: ein Feature mit nur
+ *          Verworfen-Stories ODER Done+Verworfen-Stories ist archivierbar; ein
+ *          Feature mit ≥1 nicht-terminaler Story (z.B. Verworfen+To Do) bleibt
+ *          es NICHT. Nach Bestätigen bleibt das nicht-terminale Feature
+ *          sichtbar; die terminalen verschwinden (Button wieder deaktiviert).
+ *          Backend-Kriterium (`BoardWriter.archiveDoneFeatures`) separat in
+ *          test/BoardWriter.test.js abgedeckt.
+ *
  * Covers (board-feature-archive, S-234 — „Archiv anzeigen"-Schalter):
  *   AC6 — „Archiv anzeigen"-Toggle (Default aus): initial werden KEINE
  *          archivierten Features geladen (kein `includeArchived`-Query); ein Klick
@@ -436,6 +446,57 @@ const PROJECT_NO_ARCHIVABLE = {
   project_slug: 'proj-arch',
   schema_version: 1,
   features: [FEATURE_MIXED],
+};
+
+// ── board-feature-archive AC9 (S-244) fixtures — Verworfen als terminal ────────
+// FEATURE_ONLY_VERWORFEN: alle Stories Verworfen → archivierbar (AC9, alle terminal).
+const FEATURE_ONLY_VERWORFEN = {
+  id: 'F-910',
+  title: 'Komplett verworfenes Feature',
+  status: 'Verworfen',
+  priority: 'low',
+  stories: [
+    { id: 'S-910', parent: 'F-910', title: 'Teil E', status: 'Verworfen', priority: 'low', labels: [], spec: null },
+  ],
+};
+// FEATURE_DONE_AND_VERWORFEN: Done + Verworfen (beide terminal) → archivierbar (AC9).
+const FEATURE_DONE_AND_VERWORFEN = {
+  id: 'F-911',
+  title: 'Gemischt-terminales Feature',
+  status: 'Done',
+  priority: 'medium',
+  stories: [
+    { id: 'S-911', parent: 'F-911', title: 'Teil F', status: 'Done', priority: 'low', labels: [], spec: null },
+    { id: 'S-912', parent: 'F-911', title: 'Teil G', status: 'Verworfen', priority: 'low', labels: [], spec: null },
+  ],
+};
+// FEATURE_TODO_AND_VERWORFEN: Verworfen + To Do (nicht alle terminal) → NICHT archivierbar (AC9).
+const FEATURE_TODO_AND_VERWORFEN = {
+  id: 'F-912',
+  title: 'Verworfen + offene Story',
+  status: 'To Do',
+  priority: 'high',
+  stories: [
+    { id: 'S-913', parent: 'F-912', title: 'Teil H', status: 'Verworfen', priority: 'low', labels: [], spec: null },
+    { id: 'S-914', parent: 'F-912', title: 'Teil I', status: 'To Do', priority: 'low', labels: [], spec: null },
+  ],
+};
+// Vor dem Archivieren: 2 archivierbare Features (nur-Verworfen + Done+Verworfen)
+// mit zusammen 3 Stories + 1 nicht-archivierbares (Verworfen+To Do).
+const PROJECT_ARCHIVE_TERMINAL_BEFORE = {
+  slug: 'proj-arch',
+  repo_path: '/home/user/Git/arch',
+  project_slug: 'proj-arch',
+  schema_version: 1,
+  features: [FEATURE_ONLY_VERWORFEN, FEATURE_DONE_AND_VERWORFEN, FEATURE_TODO_AND_VERWORFEN],
+};
+// Nach dem Archivieren: nur das nicht-terminale Feature bleibt sichtbar (V3).
+const PROJECT_ARCHIVE_TERMINAL_AFTER = {
+  slug: 'proj-arch',
+  repo_path: '/home/user/Git/arch',
+  project_slug: 'proj-arch',
+  schema_version: 1,
+  features: [FEATURE_TODO_AND_VERWORFEN],
 };
 
 /**
@@ -3916,6 +3977,69 @@ describe('board-feature-archive — AC5/AC7: Archiv-Button + Bestätigungsabfrag
       (c) => typeof c[0] === 'string' && c[0].endsWith('/archive-done') && c[1]?.method === 'POST',
     );
     expect(postCalls).toHaveLength(0);
+  });
+});
+
+// ── board-feature-archive (S-244) — AC9: Verworfen terminal wie Done ───────────
+
+describe('board-feature-archive — AC9: Verworfen zählt wie Done als terminal (Buttonaktivierung/Zählung)', () => {
+  it('nur-Verworfen-Feature + Done+Verworfen-Feature sind archivierbar; Verworfen+To-Do-Feature NICHT — Button aktiv, korrekte Zählung', async () => {
+    const fetchMock = makeArchiveFetch({
+      projectBefore: PROJECT_ARCHIVE_TERMINAL_BEFORE,
+      projectAfter: PROJECT_ARCHIVE_TERMINAL_AFTER,
+      archiveResult: { ok: true, status: 200, body: { archivedFeatureCount: 2, archivedStoryCount: 3 } },
+    });
+    const utils = await renderArchiveCockpit(fetchMock);
+    const btn = utils.container.querySelector('[data-testid="archive-done-btn"]');
+    expect(btn.disabled).toBe(false);
+    // 2 archivierbare Features (F-910 nur-Verworfen, F-911 Done+Verworfen) mit
+    // zusammen 3 Stories; F-912 (Verworfen+To Do) zählt NICHT mit.
+    expect(btn.getAttribute('aria-label')).toMatch(/2 Features mit 3 Stories/);
+
+    await act(async () => { fireEvent.click(btn); });
+    const summary = utils.container.querySelector('[data-testid="archive-confirm-summary"]');
+    expect(summary.textContent).toMatch(/2 Feature/);
+    expect(summary.textContent).toMatch(/3 Stories/);
+  });
+
+  it('Bestätigen archiviert die terminalen Features; das Verworfen+To-Do-Feature bleibt sichtbar', async () => {
+    const fetchMock = makeArchiveFetch({
+      projectBefore: PROJECT_ARCHIVE_TERMINAL_BEFORE,
+      projectAfter: PROJECT_ARCHIVE_TERMINAL_AFTER,
+      archiveResult: { ok: true, status: 200, body: { archivedFeatureCount: 2, archivedStoryCount: 3 } },
+    });
+    const utils = await renderArchiveCockpit(fetchMock);
+    await act(async () => {
+      fireEvent.click(utils.container.querySelector('[data-testid="archive-done-btn"]'));
+    });
+    await act(async () => {
+      fireEvent.click(utils.container.querySelector('[data-testid="archive-confirm-btn"]'));
+    });
+
+    await waitFor(() => {
+      const btn = utils.container.querySelector('[data-testid="archive-done-btn"]');
+      expect(btn.disabled).toBe(true);
+    });
+    // Das nicht-terminale Feature (Verworfen+To Do) ist weiterhin sichtbar.
+    expect(utils.container.querySelector('[data-feature="F-912"]')).toBeTruthy();
+  });
+
+  it('reines Verworfen-Feature (keine Done-Story) ist allein bereits archivierbar', async () => {
+    const projectOnlyVerworfen = {
+      slug: 'proj-arch',
+      repo_path: '/home/user/Git/arch',
+      project_slug: 'proj-arch',
+      schema_version: 1,
+      features: [FEATURE_ONLY_VERWORFEN],
+    };
+    const fetchMock = makeArchiveFetch({
+      projectBefore: projectOnlyVerworfen,
+      projectAfter: { ...projectOnlyVerworfen, features: [] },
+    });
+    const utils = await renderArchiveCockpit(fetchMock);
+    const btn = utils.container.querySelector('[data-testid="archive-done-btn"]');
+    expect(btn.disabled).toBe(false);
+    expect(btn.getAttribute('aria-label')).toMatch(/1 Features mit 1 Stories/);
   });
 });
 

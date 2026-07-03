@@ -49,14 +49,16 @@
  *   `requirement`-Agent hat die Platzhalter-Idee bereits selbst übernommen/
  *   aufgelöst, best effort AC8, kein zweiter Write nötig).
  *
- *   `archiveDoneFeatures()` (In-place-Feature-Archiv, S-236, board-feature-archive
- *   AC1/AC2/AC8) archiviert ALLE aktuell archivierbaren Features eines Projekts.
- *   Ein Feature ist archivierbar (V1), wenn es ≥1 Story hat, JEDE seiner Stories
- *   `status: Done` trägt UND es nicht bereits `archived: true` ist (das Pseudo-
+ *   `archiveDoneFeatures()` (In-place-Feature-Archiv, S-236/S-244, board-feature-archive
+ *   AC1/AC2/AC8/AC9) archiviert ALLE aktuell archivierbaren Features eines Projekts.
+ *   Ein Feature ist archivierbar (V1, ab V7/AC9 auf terminal erweitert), wenn es
+ *   ≥1 Story hat, JEDE seiner Stories **terminal** ist (`status: Done` ODER
+ *   `status: Verworfen`) UND es nicht bereits `archived: true` ist (das Pseudo-
  *   Feature `_orphaned` ist per Definition keine Datei und daher nie betroffen).
  *   Für jedes solche Feature patcht die Methode `archived: true` + `archived_at`
  *   (+ aktualisiertes `updated_at`) in das Feature-YAML UND in jede zugehörige
- *   Story-YAML — der Story-`status` bleibt UNVERÄNDERT `Done`. Alle übrigen
+ *   Story-YAML — der Story-`status` bleibt UNVERÄNDERT (`Done` bleibt `Done`,
+ *   `Verworfen` bleibt `Verworfen`). Alle übrigen
  *   Zeilen bleiben byte-genau erhalten (Line-Patch via
  *   `patchTopLevelFields({ allowAppend: true })` — `archived`/`archived_at`
  *   existieren in Bestandsdateien i.d.R. noch nicht und werden angehängt).
@@ -681,17 +683,20 @@ export class BoardWriter {
 
   /**
    * Archiviert ALLE aktuell archivierbaren Features eines Projekts in-place
-   * (board-feature-archive AC1/AC2/AC8, S-236). Kein Hard-Delete, kein
+   * (board-feature-archive AC1/AC2/AC8/AC9, S-236/S-244). Kein Hard-Delete, kein
    * Verschieben — nur ein additives Flag (`archived: true` + `archived_at`) im
    * Feature-YAML UND in jeder zugehörigen Story-YAML; der Story-`status` bleibt
-   * `Done`, `board/board.yaml` bleibt unangetastet. Einziger Schreibpfad
-   * (nutzt `_resolveProjectPath`/`patchTopLevelFields`/`_atomicWrite`).
+   * unverändert (`Done` bleibt `Done`, `Verworfen` bleibt `Verworfen`),
+   * `board/board.yaml` bleibt unangetastet. Einziger Schreibpfad (nutzt
+   * `_resolveProjectPath`/`patchTopLevelFields`/`_atomicWrite`).
    *
-   * Archivierbarkeits-Kriterium (V1) je Feature: ≥1 Story UND jede Story
-   * `status: Done` UND Feature nicht bereits `archived: true`. Nicht archiviert
-   * werden daher Features mit ≥1 nicht-Done-Story, Features ohne Stories, das
-   * Pseudo-Feature `_orphaned` (existiert nur im Aggregator, nie als Datei) und
-   * bereits archivierte Features. Idempotent: bereits archivierte Einzel-Stories
+   * Archivierbarkeits-Kriterium (V1, ab V7/AC9 auf terminal erweitert) je
+   * Feature: ≥1 Story UND jede Story **terminal** (`status: Done` ODER
+   * `status: Verworfen`) UND Feature nicht bereits `archived: true`. Nicht
+   * archiviert werden daher Features mit ≥1 nicht-terminaler Story, Features
+   * ohne Stories, das Pseudo-Feature `_orphaned` (existiert nur im Aggregator,
+   * nie als Datei) und bereits archivierte Features. Idempotent: bereits
+   * archivierte Einzel-Stories
    * werden übersprungen (kein zweites `archived_at`).
    *
    * Best effort (Edge-Case-Vorgabe der Spec): schlägt das Patchen EINES Features
@@ -750,10 +755,14 @@ export class BoardWriter {
       const stories = storiesByParent.get(feature.id) ?? [];
       // V1: mindestens eine Story.
       if (stories.length === 0) continue;
-      // V1: jede Story ist Done (Kriterium stützt sich auf den tatsächlichen
-      // Story-Status, nicht auf feature.status).
-      const allDone = stories.every((s) => _extractTopLevelField(s.raw, 'status') === 'Done');
-      if (!allDone) continue;
+      // V1/V7 (AC9): jede Story ist terminal (`Done` ODER `Verworfen` — Won't-Do
+      // zählt wie erledigt, siehe board-status-verworfen). Kriterium stützt sich
+      // auf den tatsächlichen Story-Status, nicht auf feature.status.
+      const allTerminal = stories.every((s) => {
+        const status = _extractTopLevelField(s.raw, 'status');
+        return status === 'Done' || status === 'Verworfen';
+      });
+      if (!allTerminal) continue;
 
       // Archivierbar → Schreibpfad (best effort je Feature).
       try {

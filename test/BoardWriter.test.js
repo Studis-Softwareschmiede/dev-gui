@@ -71,6 +71,16 @@
  *          patchbaren Feature (duplicate-key) → übrige dennoch archiviert, kein
  *          Crash.
  *
+ * Covers (board-feature-archive, S-244 — AC9: Verworfen terminal wie Done):
+ *   AC9 — `archiveDoneFeatures()`-Kriterium erweitert (V7): jede Story
+ *          `Done` ODER `Verworfen` (terminal) gilt wie zuvor nur `Done`. Ein
+ *          Feature mit NUR Verworfen-Stories ODER Done+Verworfen ist
+ *          archivierbar; ein Feature mit ≥1 nicht-terminaler Story (z.B.
+ *          To Do+Verworfen) bleibt es NICHT. Story-`status` bleibt nach
+ *          Archivierung unverändert (`Verworfen` bleibt `Verworfen`);
+ *          Idempotenz gilt unverändert (Regressionstest gegen erneutes
+ *          Archivieren eines Done+Verworfen-Features).
+ *
  * Strategy:
  *   - `patchTopLevelFields` (reine Funktion, kein IO) wird direkt mit String-
  *     Fixtures getestet — deckt Quoting, Block-Skalare, Schlüssel-Reihenfolge,
@@ -1601,5 +1611,148 @@ describe('board-feature-archive AC1/AC2/AC8 — BoardWriter.archiveDoneFeatures 
 
     expect(res.archivedFeatureCount).toBe(0);
     expect(res.archivedStoryCount).toBe(0);
+  });
+});
+
+// ── board-feature-archive AC9 (S-244) — Verworfen terminal wie Done ────────────
+
+describe('board-feature-archive AC9 — BoardWriter.archiveDoneFeatures behandelt Verworfen wie Done als terminal (real fs)', () => {
+  let boardRootsDir;
+  let projectDir;
+  let boardDir;
+  let featuresDir;
+  let storiesDir;
+
+  beforeEach(async () => {
+    boardRootsDir = await mkdtemp(join(tmpdir(), 'boardwriter-featarchive-ac9-test-'));
+    projectDir = join(boardRootsDir, 'myproject');
+    boardDir = join(projectDir, 'board');
+    featuresDir = join(boardDir, 'features');
+    storiesDir = join(boardDir, 'stories');
+    await mkdir(featuresDir, { recursive: true });
+    await mkdir(storiesDir, { recursive: true });
+    await writeFile(
+      join(boardDir, 'board.yaml'),
+      'schema_version: 1\nproject_slug: myproject\nnext_feature_id: 9\nnext_story_id: 99\n',
+      'utf8',
+    );
+  });
+
+  afterEach(async () => {
+    await rm(boardRootsDir, { recursive: true, force: true });
+  });
+
+  function makeWriter() {
+    return new BoardWriter({ boardRootsEnv: boardRootsDir });
+  }
+
+  async function writeFeature(id, { status = 'Done', extraLines = [] } = {}) {
+    const filePath = join(featuresDir, `${id}.yaml`);
+    await writeFile(
+      filePath,
+      [
+        `id: ${id}`,
+        `title: 'Feature ${id}'`,
+        `status: ${status}`,
+        'priority: P1',
+        "created_at: '2026-06-01T00:00:00Z'",
+        "updated_at: '2026-06-01T00:00:00Z'",
+        ...extraLines,
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    return filePath;
+  }
+
+  async function writeStory(id, { parent, status = 'Done', extraLines = [] } = {}) {
+    const filePath = join(storiesDir, `${id}.yaml`);
+    await writeFile(
+      filePath,
+      [
+        `id: ${id}`,
+        ...(parent != null ? [`parent: ${parent}`] : []),
+        `title: 'Story ${id}'`,
+        `status: ${status}`,
+        'priority: P2',
+        "created_at: '2026-06-01T00:00:00Z'",
+        "updated_at: '2026-06-01T00:00:00Z'",
+        ...extraLines,
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    return filePath;
+  }
+
+  const NOW = '2026-07-01T12:00:00.000Z';
+
+  it('Feature mit NUR Verworfen-Stories (kein Done) ist archivierbar (alle terminal)', async () => {
+    await writeFeature('F-1', { status: 'Verworfen' });
+    await writeStory('S-1', { parent: 'F-1', status: 'Verworfen' });
+    await writeStory('S-2', { parent: 'F-1', status: 'Verworfen' });
+
+    const res = await makeWriter().archiveDoneFeatures({ projectSlug: 'myproject', now: NOW });
+
+    expect(res.archivedFeatureCount).toBe(1);
+    expect(res.archivedStoryCount).toBe(2);
+    expect(res.archivedFeatureIds).toEqual(['F-1']);
+  });
+
+  it('Feature mit Done + Verworfen (beide terminal) ist archivierbar', async () => {
+    await writeFeature('F-1');
+    await writeStory('S-1', { parent: 'F-1', status: 'Done' });
+    await writeStory('S-2', { parent: 'F-1', status: 'Verworfen' });
+
+    const res = await makeWriter().archiveDoneFeatures({ projectSlug: 'myproject', now: NOW });
+
+    expect(res.archivedFeatureCount).toBe(1);
+    expect(res.archivedStoryCount).toBe(2);
+  });
+
+  it('Feature mit To Do + Verworfen (nicht alle terminal) ist NICHT archivierbar', async () => {
+    const fPath = await writeFeature('F-1', { status: 'To Do' });
+    const s1 = await writeStory('S-1', { parent: 'F-1', status: 'Verworfen' });
+    const s2 = await writeStory('S-2', { parent: 'F-1', status: 'To Do' });
+
+    const res = await makeWriter().archiveDoneFeatures({ projectSlug: 'myproject', now: NOW });
+
+    expect(res.archivedFeatureCount).toBe(0);
+    expect(res.archivedStoryCount).toBe(0);
+    expect(await readFile(fPath, 'utf8')).not.toContain('archived:');
+    expect(await readFile(s1, 'utf8')).not.toContain('archived:');
+    expect(await readFile(s2, 'utf8')).not.toContain('archived:');
+  });
+
+  it('Story-status bleibt nach Archivierung unverändert: Verworfen bleibt Verworfen', async () => {
+    await writeFeature('F-1', { status: 'Verworfen' });
+    const sPath = await writeStory('S-1', { parent: 'F-1', status: 'Verworfen' });
+
+    await makeWriter().archiveDoneFeatures({ projectSlug: 'myproject', now: NOW });
+
+    const sRaw = await readFile(sPath, 'utf8');
+    expect(sRaw).toContain('status: Verworfen');
+    expect(sRaw).toContain('archived: true');
+    expect(sRaw).toContain(`archived_at: '${NOW}'`);
+  });
+
+  it('Idempotenz-Regress: zweiter Aufruf auf ein Done+Verworfen-Feature archiviert nichts erneut (0/0)', async () => {
+    const fPath = await writeFeature('F-1');
+    const sPath = await writeStory('S-1', { parent: 'F-1', status: 'Verworfen' });
+    const writer = makeWriter();
+
+    await writer.archiveDoneFeatures({ projectSlug: 'myproject', now: NOW });
+    const fAfterFirst = await readFile(fPath, 'utf8');
+    const sAfterFirst = await readFile(sPath, 'utf8');
+
+    const res2 = await writer.archiveDoneFeatures({
+      projectSlug: 'myproject',
+      now: '2026-07-02T00:00:00.000Z',
+    });
+
+    expect(res2.archivedFeatureCount).toBe(0);
+    expect(res2.archivedStoryCount).toBe(0);
+    expect(await readFile(fPath, 'utf8')).toBe(fAfterFirst);
+    expect(await readFile(sPath, 'utf8')).toBe(sAfterFirst);
   });
 });

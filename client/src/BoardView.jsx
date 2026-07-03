@@ -249,6 +249,15 @@ const STATUS_LIFECYCLE = ['Idee', 'To Do', 'In Progress', 'Blocked', 'In Review'
  */
 const DONE_STATUSES = new Set(['Done', 'done']);
 
+/**
+ * Terminal story-statuses for the archive-criterion (board-feature-archive
+ * V7/AC9, S-244): `Verworfen` (Won't-Do) zählt wie `Done` als terminal — eine
+ * Verworfen-Story blockiert das Archivieren eines Features nicht mehr. NICHT
+ * für die "Done"-Rollup-Zählung (AC5, Zeile ~420) verwenden — dort bleibt nur
+ * `Done` gemeint.
+ */
+const ARCHIVABLE_TERMINAL_STATUSES = new Set(['Done', 'done', 'Verworfen', 'verworfen']);
+
 // ── Feature-collapse helpers (board-feature-collapse) ─────────────────────────
 
 /**
@@ -916,15 +925,17 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
     return () => clearInterval(intervalId);
   }, [hasRunningFinalizeJob, fetchFinalizeJob]);
 
-  // ─── Archivierbarkeit + Archiv-Schreibpfad (board-feature-archive AC5/V5) ────
-  // Zählt die aktuell archivierbaren Features + deren Stories NACH V1 aus den
+  // ─── Archivierbarkeit + Archiv-Schreibpfad (board-feature-archive AC5/V5, ─────
+  // ─── terminal-Erweiterung V7/AC9, S-244) ──────────────────────────────────────
+  // Zählt die aktuell archivierbaren Features + deren Stories NACH V1/V7 aus den
   // bereits geladenen (UNGEFILTERTEN) Board-Daten: ein Feature ist archivierbar,
-  // wenn es ≥1 Story hat, JEDE seiner Stories `Done` ist, es NICHT bereits
-  // archiviert ist und es NICHT das Pseudo-Feature `_orphaned` ist. Der Zähler
-  // speist sowohl den Disabled-Zustand des Buttons als auch die Bestätigungs-
-  // abfrage (V5: „N Features mit M Stories werden archiviert"). Bewusst aus
-  // `projects` (roh) statt `filteredProjects`, damit ein aktiver Status-/Label-
-  // Filter die Zählung nicht verfälscht.
+  // wenn es ≥1 Story hat, JEDE seiner Stories terminal ist (`Done` ODER
+  // `Verworfen` — AC9), es NICHT bereits archiviert ist und es NICHT das
+  // Pseudo-Feature `_orphaned` ist. Der Zähler speist sowohl den Disabled-
+  // Zustand des Buttons als auch die Bestätigungsabfrage (V5: „N Features mit
+  // M Stories werden archiviert"). Bewusst aus `projects` (roh) statt
+  // `filteredProjects`, damit ein aktiver Status-/Label-Filter die Zählung
+  // nicht verfälscht.
   const archivable = useMemo(() => {
     let featureCount = 0;
     let storyCount = 0;
@@ -935,7 +946,7 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
         if (f.archived === true) continue;                 // bereits archiviert (V1)
         const st = Array.isArray(f.stories) ? f.stories : [];
         if (st.length === 0) continue;                     // ohne Stories → nicht archivierbar
-        if (!st.every((s) => DONE_STATUSES.has(s.status))) continue; // ≥1 nicht-Done → nein
+        if (!st.every((s) => ARCHIVABLE_TERMINAL_STATUSES.has(s.status))) continue; // ≥1 nicht-terminal → nein (AC9)
         featureCount += 1;
         storyCount += st.length;
       }

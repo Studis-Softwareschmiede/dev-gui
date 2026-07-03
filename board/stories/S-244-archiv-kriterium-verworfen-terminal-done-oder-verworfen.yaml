@@ -1,8 +1,8 @@
 id: S-244
 parent: F-049
-title: 'Archiv-Kriterium auf terminal (Done ODER Verworfen) erweitern (BoardWriter
-  + Frontend-Buttonaktivierung/Bestaetigungs-Zaehlung)'
-status: To Do
+title: Archiv-Kriterium auf terminal (Done ODER Verworfen) erweitern (BoardWriter
+  + Frontend-Buttonaktivierung/Bestaetigungs-Zaehlung)
+status: In Progress
 priority: P3
 spec: docs/specs/board-feature-archive.md
 implements:
@@ -23,11 +23,11 @@ estimate_note: 'Heuristik: n_ac=1 (AC9), n_comp=2 (src/BoardWriter.js archiveDon
   5 „falls relevant" — kann im Cut-PR verworfen werden, dann bleibt Verworfen ein
   Archiv-Blocker.'
 confidence: medium
-branch: null
+branch: feat/S-244-archiv-terminal
 pr: null
 blocked_reason: null
 created_at: '2026-07-02T05:05:10Z'
-updated_at: '2026-07-02T05:05:10Z'
+updated_at: '2026-07-03T04:42:55Z'
 done_at: null
 notes: 'Spec: docs/specs/board-feature-archive.md — implements AC9 (V7).
 
