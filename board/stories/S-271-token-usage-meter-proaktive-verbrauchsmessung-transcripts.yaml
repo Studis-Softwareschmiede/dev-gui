@@ -2,7 +2,7 @@ id: S-271
 parent: F-055
 title: 'TokenUsageMeter: proaktive Output-Token-Verbrauchsmessung aus den Claude-Session-Transcripts
   (~/.claude/projects/*/*.jsonl, read-only)'
-status: To Do
+status: In Progress
 priority: P1
 spec: docs/specs/token-usage-meter.md
 implements:
@@ -21,9 +21,10 @@ dispo_forecast: null
 estimate_note: 'S/M-Heuristik score 7 (6 AC + 1 Komponente: src/TokenUsageMeter.js
   neu + 0 label) -> M; baseline js|balanced|M ep 5.0 (n=8); keine Baseline-Tokens'
 confidence: medium
-branch: null
+branch: feat/S-271-token-usage-meter
 pr: null
 blocked_reason: null
 created_at: '2026-07-03T06:36:03Z'
-updated_at: '2026-07-03T06:36:03Z'
+updated_at: '2026-07-03T08:18:34Z'
 tok_est: null
+done_at: null
