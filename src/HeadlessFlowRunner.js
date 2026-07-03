@@ -23,6 +23,12 @@
  *   - Prozess-Exit = fertig: `close`-Event ist die einzige Fertig-Quelle.
  *   - 401-Erkennung hat Vorrang vor "sauberem" Exit-Code 0 → `auth-expired`.
  *   - Sperre pro Projekt (`ProjectJobLock`, finally-Freigabe).
+ *   - Session-/Usage-Limit-Erkennung (S-270, docs/specs/headless-budget-limit-
+ *     detection.md): terminaler Status `budget-limited` samt `resetAt`/
+ *     `rawMatch`, Vorrang nach `auth-expired` aber vor `done`/`failed`
+ *     (Details/Wiederverwendung von `parseTokenLimitMessage()` in
+ *     `HeadlessRunnerCore.js`, dort implementiert — dieser Wrapper reicht sie
+ *     nur unverändert durch).
  *
  * Eigener, viel großzügigerer Timeout (AC3): ein `/flow`-Lauf über ein ganzes
  * Board dauert lange (viele Subagenten, CI, IO) — der 15-min-Reconcile-Default
@@ -139,7 +145,7 @@ export class HeadlessFlowRunner {
    * Liest den aktuellen Status eines Jobs.
    *
    * @param {string} jobId
-   * @returns {{ status: 'running'|'done'|'failed'|'auth-expired', result?: string, error?: string, prHint?: string } | undefined}
+   * @returns {{ status: 'running'|'done'|'failed'|'auth-expired'|'budget-limited', result?: string, error?: string, prHint?: string, resetAt?: number, rawMatch?: string } | undefined}
    */
   getJob(jobId) {
     return this.#core.getJob(jobId);

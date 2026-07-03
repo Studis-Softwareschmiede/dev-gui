@@ -32,6 +32,16 @@
  *          Naht (ProjectDrain + HeadlessFlowRunner, echte Parallelität,
  *          Selbst-Blockade-Vermeidung, Sanftes Fensterende) lebt in
  *          test/headless-night-drain.integration.test.js.
+ *
+ * Covers (headless-budget-limit-detection, S-270):
+ *   AC4 — `awaitCompletion()` reicht einen `'budget-limited'`-Job-Status
+ *         samt `resetAt` 1:1 durch; für alle anderen Status bleibt `resetAt`
+ *         `undefined` (kein Regress am `handle`-Vertrag/an done/failed/
+ *         auth-expired-Durchreichung, S-212/S-213).
+ *   AC5 — bei `budget-limited` erzeugt der Adapter GENAU EINEN secret-/pfad-
+ *         freien Ende-`AuditEntry` (`status=budget-limited`, Reset-Zeit
+ *         ISO-8601, Projekt-Basename statt absolutem Pfad) — analog zum
+ *         bestehenden `headless-flow-failed`-Audit.
  */
 
 import { describe, it, expect, jest } from '@jest/globals';
@@ -252,6 +262,31 @@ describe('HeadlessFlowRunnerAdapter (AC4 — headless adapter, real close-event 
 
     expect(result.status).toBe('failed');
   });
+
+  it('AC4 (headless-budget-limit-detection, S-270): awaitCompletion() maps a "budget-limited" terminal job through unchanged, incl. resetAt', async () => {
+    const headlessRunner = {
+      start: () => ({ ok: true, jobId: 'job-1' }),
+      getJob: () => ({ status: 'budget-limited', resetAt: 1783126800000, rawMatch: 'resets 3am' }),
+    };
+    const adapter = new HeadlessFlowRunnerAdapter({ headlessRunner, sleepFn: async () => {} });
+
+    const result = await adapter.awaitCompletion({ jobId: 'job-1' });
+
+    expect(result.status).toBe('budget-limited');
+    expect(result.resetAt).toBe(1783126800000);
+  });
+
+  it('AC4: resetAt stays undefined for done/failed/auth-expired (only set for budget-limited)', async () => {
+    for (const status of ['done', 'failed', 'auth-expired']) {
+      const headlessRunner = { start: () => ({ ok: true, jobId: `job-${status}` }), getJob: () => ({ status }) };
+      const adapter = new HeadlessFlowRunnerAdapter({ headlessRunner, sleepFn: async () => {} });
+
+      const { handle } = adapter.startRun({ projectPath: PROJECT_PATH, command: '/agent-flow:flow' });
+      const result = await adapter.awaitCompletion(handle);
+
+      expect(result.resetAt).toBeUndefined();
+    }
+  });
 });
 
 describe('HeadlessFlowRunnerAdapter — Audit je headless-Lauf (headless-parallel-drain AC11)', () => {
@@ -316,6 +351,31 @@ describe('HeadlessFlowRunnerAdapter — Audit je headless-Lauf (headless-paralle
       expect(entry.command).toContain('taktgeber:headless-flow-failed');
       expect(entry.command).toContain(`status=${status}`);
     }
+  });
+
+  it('AC5 (headless-budget-limit-detection, S-270): awaitCompletion() status "budget-limited" → genau EIN Ende-AuditEntry mit status + ISO-8601 Reset-Zeit + Projekt-Basename (kein absoluter Pfad)', async () => {
+    const headlessRunner = {
+      start: () => ({ ok: true, jobId: 'job-1' }),
+      getJob: () => ({ status: 'budget-limited', resetAt: 1783126800000, rawMatch: 'resets 3am' }),
+    };
+    const auditStore = { record: jest.fn() };
+    const adapter = new HeadlessFlowRunnerAdapter({ headlessRunner, auditStore, sleepFn: async () => {} });
+
+    const { handle } = adapter.startRun({ projectPath: '/workspace/my-project', command: '/agent-flow:flow', identity: 'a@b.c' });
+    auditStore.record.mockClear(); // nur das awaitCompletion()-Audit prüfen
+
+    await adapter.awaitCompletion(handle);
+
+    expect(auditStore.record).toHaveBeenCalledTimes(1);
+    const entry = auditStore.record.mock.calls[0][0];
+    expect(entry.identity).toBe('a@b.c');
+    expect(entry.command).toContain('taktgeber:headless-flow-budget-limited');
+    expect(entry.command).toContain('jobId=job-1');
+    expect(entry.command).toContain('project=my-project');
+    expect(entry.command).toContain('status=budget-limited');
+    expect(entry.command).not.toContain('/workspace/my-project');
+    expect(entry.command).toContain(`resetAt=${new Date(1783126800000).toISOString()}`);
+    expect(entry.command).not.toMatch(/sk-|token=|Bearer /i);
   });
 
   it('ohne injizierten auditStore: kein Crash, kein Audit-Aufruf (Rückwärtskompatibilität S-212)', async () => {

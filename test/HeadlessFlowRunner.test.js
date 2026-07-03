@@ -4,6 +4,7 @@
  *
  * Covers (headless-parallel-drain): AC1, AC2, AC3, AC13
  * Covers (headless-arg-finalize-safety): AC1, AC2, AC3
+ * Covers (headless-budget-limit-detection): AC1, AC2, AC3
  *
  *   AC1 — spawn args are an array (no shell string): ['-p', <command>,
  *         '--dangerously-skip-permissions', ...extraArgs]; default command is
@@ -24,6 +25,16 @@
  *   elements — the argument-loss bug this spec fixes centrally in the shared
  *   `HeadlessRunnerCore` (see below, dedicated `HeadlessRunnerCore.test.js` for
  *   the core-level regression gate).
+ *
+ *   headless-budget-limit-detection AC1/AC2/AC3 (S-270) — a session-/usage-
+ *   limit message WITH a parsable reset time in the captured `close`-event
+ *   output sets the job terminal to `budget-limited` (`{status, resetAt,
+ *   rawMatch}`), with precedence AFTER `auth-expired` but BEFORE `done`/
+ *   `failed` (independent of exit code); a limit message WITHOUT a parsable
+ *   reset time, or plain text without the limit keyword, never triggers
+ *   `budget-limited` (no false positive, falls back to the pre-existing
+ *   `done`/`failed` behaviour). See `describe('HeadlessFlowRunner —
+ *   budget-limited detection ...')` below.
  *
  * Pattern: injectable `spawnFn` returning a fake EventEmitter-based child
  * process (stdout/stderr sub-emitters + kill() spy) — no real `claude` spawn.
@@ -192,6 +203,115 @@ describe('HeadlessFlowRunner — close-event = only completion source (AC1)', ()
     await tick();
 
     expect(runner.getJob(jobId).status).toBe('done');
+  });
+});
+
+describe('HeadlessFlowRunner — budget-limited detection (headless-budget-limit-detection AC1/AC2/AC3, S-270)', () => {
+  it('AC1: a session-limit message with a parsable reset time → status "budget-limited" with resetAt (ms epoch) + rawMatch', async () => {
+    const child = makeFakeChild();
+    const spawnFn = jest.fn(() => child);
+    const runner = new HeadlessFlowRunner({ spawnFn, timeoutMs: 10_000 });
+
+    const { jobId } = runner.start('/workspace/proj-budget');
+    child.stdout.emit('data', 'hit your session limit · resets 3am\n');
+    child.emit('close', 1);
+    await tick();
+
+    const job = runner.getJob(jobId);
+    expect(job.status).toBe('budget-limited');
+    expect(typeof job.resetAt).toBe('number');
+    expect(job.resetAt).toBeGreaterThan(Date.now());
+    expect(job.rawMatch).toMatch(/resets 3am/i);
+  });
+
+  it('AC2: budget-limited wins over a CLEAN exit (0) — a limit message is more meaningful than the exit code', async () => {
+    const child = makeFakeChild();
+    const spawnFn = jest.fn(() => child);
+    const runner = new HeadlessFlowRunner({ spawnFn, timeoutMs: 10_000 });
+
+    const { jobId } = runner.start('/workspace/proj-budget-exit0');
+    child.stdout.emit('data', 'usage limit reached, resets at 15:45\n');
+    child.emit('close', 0);
+    await tick();
+
+    const job = runner.getJob(jobId);
+    expect(job.status).toBe('budget-limited');
+    expect(job.status).not.toBe('done');
+  });
+
+  it('AC2: auth-expired (401) still wins over a budget-limit message in the same output (highest precedence unchanged)', async () => {
+    const child = makeFakeChild();
+    const spawnFn = jest.fn(() => child);
+    const runner = new HeadlessFlowRunner({ spawnFn, timeoutMs: 10_000 });
+
+    const { jobId } = runner.start('/workspace/proj-401-vs-budget');
+    child.stdout.emit('data', 'Error: request failed with status 401 — also hit your session limit · resets 3am\n');
+    child.emit('close', 1);
+    await tick();
+
+    const job = runner.getJob(jobId);
+    expect(job.status).toBe('auth-expired');
+    expect(job.status).not.toBe('budget-limited');
+  });
+
+  it('AC3: a limit message WITHOUT a parsable reset time falls back to "failed" (non-zero exit) — no false positive', async () => {
+    const child = makeFakeChild();
+    const spawnFn = jest.fn(() => child);
+    const runner = new HeadlessFlowRunner({ spawnFn, timeoutMs: 10_000 });
+
+    const { jobId } = runner.start('/workspace/proj-budget-unparsable');
+    child.stdout.emit('data', 'you hit your session limit, please try again later\n');
+    child.emit('close', 1);
+    await tick();
+
+    const job = runner.getJob(jobId);
+    expect(job.status).toBe('failed');
+    expect(job.status).not.toBe('budget-limited');
+  });
+
+  it('AC3: a limit message WITHOUT a parsable reset time + clean exit (0) falls back to "done" — no false positive', async () => {
+    const child = makeFakeChild();
+    const spawnFn = jest.fn(() => child);
+    const runner = new HeadlessFlowRunner({ spawnFn, timeoutMs: 10_000 });
+
+    const { jobId } = runner.start('/workspace/proj-budget-unparsable-done');
+    child.stdout.emit('data', 'you hit your session limit, please try again later\n');
+    child.emit('close', 0);
+    await tick();
+
+    const job = runner.getJob(jobId);
+    expect(job.status).toBe('done');
+  });
+
+  it('AC3: plain output WITHOUT the limit keyword never triggers "budget-limited" (regression guard for done/failed)', async () => {
+    const child = makeFakeChild();
+    const spawnFn = jest.fn(() => child);
+    const runner = new HeadlessFlowRunner({ spawnFn, timeoutMs: 10_000 });
+
+    const { jobId } = runner.start('/workspace/proj-no-limit-keyword');
+    child.stderr.emit('data', 'some unrelated error, no path or secret here\n');
+    child.emit('close', 1);
+    await tick();
+
+    const job = runner.getJob(jobId);
+    expect(job.status).toBe('failed');
+    expect(job.status).not.toBe('budget-limited');
+  });
+
+  it('the lock is released after a budget-limited terminal state — a subsequent start() for the same project succeeds', async () => {
+    const child = makeFakeChild();
+    const spawnFn = jest.fn(() => child);
+    const runner = new HeadlessFlowRunner({ spawnFn, timeoutMs: 10_000 });
+
+    const first = runner.start('/workspace/proj-budget-lock-release');
+    child.stdout.emit('data', 'hit your session limit · resets 3am\n');
+    child.emit('close', 1);
+    await tick();
+
+    expect(runner.getJob(first.jobId).status).toBe('budget-limited');
+
+    const second = runner.start('/workspace/proj-budget-lock-release');
+    expect(second.ok).toBe(true);
   });
 });
 

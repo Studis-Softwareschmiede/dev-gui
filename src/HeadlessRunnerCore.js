@@ -30,6 +30,17 @@
  *     Projekt-Pfad; Freigabe in try/finally (Crash/Exception-sicher).
  *   - 401-Erkennung: 401-Signatur in Exit-Code ODER erfasstem stdout/stderr hat
  *     Vorrang vor "sauberem" Exit-Code 0 → Status `auth-expired`.
+ *   - Session-/Usage-Limit-Erkennung (docs/specs/headless-budget-limit-detection.md
+ *     AC1-AC3): die bereits erfasste `combined`-Ausgabe (stdout+stderr) wird beim
+ *     `close`-Event zusätzlich mit der bestehenden, fehlalarm-robusten
+ *     `parseTokenLimitMessage()` (`src/TokenLimitWatcher.js`, Keyword-Proximity,
+ *     ANSI-Stripping, TZ-/Rollover-Logik — WIEDERVERWENDET, kein neuer Parser)
+ *     geprüft. Meldung MIT parsebarem Reset-Zeitpunkt → terminaler Status
+ *     `budget-limited` (`{status, resetAt, rawMatch}`), Vorrang nach `auth-expired`
+ *     aber VOR `done`/`failed` (unabhängig vom Exit-Code). Ein Parser-Fehler oder
+ *     eine Meldung ohne robust parsebare Reset-Zeit fällt auf das bisherige
+ *     Verhalten zurück (kein Fehlalarm, kein Crash) — rein additiv, kein neuer
+ *     IO-/PTY-Pfad (die Ausgabe wird ohnehin schon für die 401-Erkennung erfasst).
  *
  * Job-Registry: In-Memory (Map jobId → JobState), geht bei Server-Neustart
  * verloren (Nicht-Ziel: keine persistente Job-Historie).
@@ -48,6 +59,7 @@
 import { spawn as nodeSpawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { ProjectJobLock } from './ProjectJobLock.js';
+import { parseTokenLimitMessage } from './TokenLimitWatcher.js';
 
 /** Klartext-Hinweis bei erkanntem Auth-Fehler (Erneuerungs-Hinweis) — geteilt
  * zwischen allen headless-Runnern, da der Hinweistext runner-unabhängig ist. */
@@ -119,6 +131,34 @@ export function extractPrHint(combinedOutput) {
   const numberMatch = combinedOutput.match(/#\d+/);
   if (numberMatch) return numberMatch[0];
   return undefined;
+}
+
+/**
+ * Prüft die erfasste kombinierte Ausgabe auf eine Session-/Usage-Limit-
+ * Meldung MIT robust parsebarem Reset-Zeitpunkt (docs/specs/
+ * headless-budget-limit-detection.md AC1/AC3). Wiederverwendung der
+ * bestehenden, fehlalarm-robusten `parseTokenLimitMessage()`
+ * (`src/TokenLimitWatcher.js`) — kein neuer Parser, kein neuer IO-Pfad.
+ *
+ * Robustheit (NFR): ein Parser-Fehler darf den Runner nicht crashen —
+ * `try/catch` mit Fallback `null` (= "keine Limit-Meldung erkannt", der
+ * Aufrufer fällt dann auf das bisherige `done`/`failed`-Verhalten zurück).
+ *
+ * @param {string} combinedOutput - stdout + stderr, wie bereits für die
+ *   401-Erkennung erfasst.
+ * @returns {{ resetAt: number, rawMatch: string } | null}
+ */
+export function detectBudgetLimit(combinedOutput) {
+  try {
+    const result = parseTokenLimitMessage(combinedOutput);
+    if (result.matched && typeof result.resetAt === 'number') {
+      return { resetAt: result.resetAt, rawMatch: result.rawMatch };
+    }
+  } catch {
+    // Parser-Fehler → kein Fehlalarm, kein Crash (Fallback: bisheriges
+    // done/failed-Verhalten im Aufrufer greift unverändert).
+  }
+  return null;
 }
 
 /**
@@ -213,7 +253,7 @@ export class HeadlessRunnerCore {
    * Liest den aktuellen Status eines Jobs.
    *
    * @param {string} jobId
-   * @returns {{ status: string, result?: string, error?: string, prHint?: string } | undefined}
+   * @returns {{ status: string, result?: string, error?: string, prHint?: string, resetAt?: number, rawMatch?: string } | undefined}
    */
   getJob(jobId) {
     return this.#jobs.get(jobId);
@@ -280,16 +320,25 @@ export class HeadlessRunnerCore {
         child.on('close', (code) => {
           const combined = `${stdout}\n${stderr}`;
           if (isAuthError(code, combined)) {
-            // 401 hat Vorrang vor "sauberem" Exit (Edge-Case „401 + Exit 0").
+            // 401 hat weiterhin HÖCHSTEN Vorrang (unverändert, headless-budget-
+            // limit-detection AC2) — auch vor einer erkannten Limit-Meldung.
             finish('auth-expired', { error: AUTH_EXPIRED_MESSAGE });
+            return;
+          }
+          const budgetLimit = detectBudgetLimit(combined);
+          if (budgetLimit) {
+            // Vorrang VOR done/failed (headless-budget-limit-detection AC2) —
+            // unabhängig vom Exit-Code: die Limit-Meldung ist aussagekräftiger
+            // als der Exit-Code selbst.
+            finish('budget-limited', { resetAt: budgetLimit.resetAt, rawMatch: budgetLimit.rawMatch });
             return;
           }
           if (code === 0) {
             finish('done', { result: this.#messages.doneResult, prHint: extractPrHint(combined) });
             return;
           }
-          // Nicht-null Exit ohne 401 → generischer, secret-freier Grund
-          // (kein stderr-Leak von Pfaden/Env in der Fehlermeldung).
+          // Nicht-null Exit ohne 401/Limit-Meldung → generischer, secret-freier
+          // Grund (kein stderr-Leak von Pfaden/Env in der Fehlermeldung).
           finish('failed', { error: this.#messages.genericFailure });
         });
 

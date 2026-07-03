@@ -61,6 +61,16 @@
  * `auditStore` ist optional — ohne ihn verhält sich der Adapter identisch zu
  * S-212 (kein Audit, kein Crash).
  *
+ * `budget-limited` (S-270, docs/specs/headless-budget-limit-detection.md
+ * AC4/AC5): `HeadlessFlowRunner.getJob()` kann jetzt zusätzlich zu
+ * `'done'|'failed'|'auth-expired'` auch `'budget-limited'` liefern (Session-/
+ * Usage-Limit-Meldung mit parsebarem Reset-Zeitpunkt erkannt). Der Adapter
+ * reicht diesen Status samt `resetAt` (ms epoch) 1:1 durch — für alle anderen
+ * Status bleibt `resetAt` `undefined`. Analog zum bestehenden
+ * `headless-flow-failed`-Audit erzeugt der Adapter bei `budget-limited`
+ * **genau einen** Ende-`AuditEntry` (`taktgeber:headless-flow-budget-limited`,
+ * Reset-Zeit als ISO-8601, Projekt-Basename statt absolutem Pfad).
+ *
  * @module FlowRunner
  */
 
@@ -206,20 +216,28 @@ export class HeadlessFlowRunnerAdapter {
    * Terminal-Status wird 1:1 durchgereicht (`'done'|'failed'|'auth-expired'`).
    *
    * @param {{ jobId: string }} handle
-   * @returns {Promise<{ status: 'done'|'failed'|'auth-expired', result?: string, error?: string, prHint?: string }>}
+   * @returns {Promise<{ status: 'done'|'failed'|'auth-expired'|'budget-limited', result?: string, error?: string, prHint?: string, resetAt?: number }>}
    */
   async awaitCompletion(handle) {
     for (;;) {
       const job = this.#headlessRunner.getJob(handle.jobId);
       if (!job || job.status !== 'running') {
         const status = job?.status ?? 'failed';
-        // AC11: Ende(Erfolg)/Fehler-Audit je headless-Lauf — genau EIN
-        // AuditEntry, Korrelation über die beim startRun() hinterlegte
-        // Meta (Identität + secret-/pfad-freies Projekt-Label).
+        // AC11/S-270 AC5: Ende(Erfolg)/Fehler/Budget-Limit-Audit je headless-
+        // Lauf — genau EIN AuditEntry, Korrelation über die beim startRun()
+        // hinterlegte Meta (Identität + secret-/pfad-freies Projekt-Label).
         const meta = this.#jobAuditMeta.get(handle.jobId) ?? { identity: null, projectLabel: 'unknown' };
         this.#jobAuditMeta.delete(handle.jobId);
         if (status === 'done') {
           this.#audit(meta.identity, `taktgeber:headless-flow-done project=${meta.projectLabel} jobId=${handle.jobId}`);
+        } else if (status === 'budget-limited') {
+          // S-270 AC5: eigener, secret-/pfad-freier Audit-Zweig — Reset-Zeit
+          // ISO-8601, kein absoluter Host-Pfad (Basename bereits in projectLabel).
+          const resetAtIso = typeof job?.resetAt === 'number' ? new Date(job.resetAt).toISOString() : 'unknown';
+          this.#audit(
+            meta.identity,
+            `taktgeber:headless-flow-budget-limited project=${meta.projectLabel} jobId=${handle.jobId} status=budget-limited resetAt=${resetAtIso}`,
+          );
         } else {
           this.#audit(
             meta.identity,
@@ -231,6 +249,7 @@ export class HeadlessFlowRunnerAdapter {
           result: job?.result,
           error: job?.error,
           prHint: job?.prHint,
+          resetAt: job?.resetAt,
         };
       }
       await this.#sleepFn(this.#pollIntervalMs);
