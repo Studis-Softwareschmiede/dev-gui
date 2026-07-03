@@ -176,6 +176,16 @@
  *   AC6 — Leer-Hinweis („Keine Stories passen zum aktiven Filter.") greift jetzt
  *          auch bei einem reinen Status-Filter, nicht mehr nur beim Label-Filter.
  *
+ * Covers (bereichs-modell, S-290 — nur die BoardView/FilterBar-WIRING; das
+ * Dialog-Verhalten selbst [Liste/Anlegen/Umbenennen/Umsortieren/Löschen/A11y]
+ * ist eigenständig in `AreasManageDialog.test.jsx` unit-getestet, hier gemockt):
+ *   AC8 — Button „Bereiche verwalten" ist sichtbar, sobald ein Projekt geladen
+ *          ist (`projectSlug` gesetzt), UND ist im DOM importiert/gemountet
+ *          (Mount-Punkt, kein toter Code); ein Klick öffnet `AreasManageDialog`
+ *          mit dem korrekten `projectSlug` des aktuell geladenen Projekts.
+ *   AC10 — Schließen des Dialogs gibt den Fokus an den auslösenden Button
+ *          zurück (`triggerRef`).
+ *
  * NOTE (jsdom-Limitation): jsdom hat keine Layout-Engine — Style-Property-Asserts beweisen
  * kein Scroll-/Layout-Verhalten; getestet werden Verhalten, Struktur, Rollen und aria.
  *
@@ -226,6 +236,35 @@ jest.unstable_mockModule('../IdeaSpecifyChatModal.jsx', async () => {
           'data-testid': 'idea-specify-mock-specified-btn',
           onClick: () => props.onSpecified(props.projectSlug),
         }, 'Specified'),
+      );
+    },
+  };
+});
+
+// Mock AreasManageDialog (bereichs-modell, S-290) — this file only asserts on
+// BoardView's/FilterBar's WIRING (Button sichtbar sobald ein Projekt geladen
+// ist, Klick öffnet den Dialog mit dem korrekten projectSlug, Schließen gibt
+// den Fokus zurück); das Dialog-Verhalten selbst ist in
+// `AreasManageDialog.test.jsx` unit-getestet.
+let lastAreasManageProps = null;
+jest.unstable_mockModule('../AreasManageDialog.jsx', async () => {
+  const R = (await import('react')).default;
+  return {
+    AreasManageDialog: (props) => {
+      lastAreasManageProps = props;
+      return R.createElement(
+        'div',
+        {
+          role: 'dialog',
+          'aria-label': 'Bereiche verwalten',
+          'data-testid': 'areas-manage-dialog-mock',
+          'data-project-slug': props.projectSlug ?? '',
+        },
+        R.createElement('button', {
+          type: 'button',
+          'data-testid': 'areas-manage-mock-close-btn',
+          onClick: props.onClose,
+        }, 'Schließen'),
       );
     },
   };
@@ -3977,6 +4016,53 @@ describe('board-feature-archive — AC5/AC7: Archiv-Button + Bestätigungsabfrag
       (c) => typeof c[0] === 'string' && c[0].endsWith('/archive-done') && c[1]?.method === 'POST',
     );
     expect(postCalls).toHaveLength(0);
+  });
+});
+
+// ── bereichs-modell (S-290) — AC8/AC10: „Bereiche verwalten"-Wiring ────────────
+
+describe('bereichs-modell — AC8/AC10: „Bereiche verwalten"-Button + Dialog-Wiring', () => {
+  beforeEach(() => { lastAreasManageProps = null; });
+
+  it('AC8: Button ist sichtbar, sobald ein Projekt geladen ist; Klick öffnet den Dialog mit korrektem projectSlug', async () => {
+    const fetchMock = makeArchiveFetch({
+      projectBefore: PROJECT_ARCHIVE_BEFORE,
+      projectAfter: PROJECT_ARCHIVE_AFTER,
+    });
+    const utils = await renderArchiveCockpit(fetchMock);
+
+    const btn = utils.container.querySelector('[data-testid="areas-manage-btn"]');
+    expect(btn).toBeTruthy();
+    expect(btn.tagName).toBe('BUTTON');
+    expect(btn.getAttribute('aria-label')).toBe('Bereiche verwalten');
+
+    // Dialog noch nicht gemountet, solange nicht geklickt (kein unnötiger Fetch)
+    expect(utils.container.querySelector('[data-testid="areas-manage-dialog-mock"]')).toBeFalsy();
+
+    await act(async () => { fireEvent.click(btn); });
+
+    const dialog = utils.container.querySelector('[data-testid="areas-manage-dialog-mock"]');
+    expect(dialog).toBeTruthy();
+    expect(dialog.getAttribute('data-project-slug')).toBe('proj-arch');
+    expect(lastAreasManageProps.projectSlug).toBe('proj-arch');
+  });
+
+  it('AC10 (Wiring): `onClose` des Dialogs entfernt ihn aus der FilterBar (Fokus-Rückgabe-Details — triggerRef.current.focus() nach Esc/Backdrop — sind in AreasManageDialog.test.jsx mit der echten Komponente belegt, hier gemockt)', async () => {
+    const fetchMock = makeArchiveFetch({
+      projectBefore: PROJECT_ARCHIVE_BEFORE,
+      projectAfter: PROJECT_ARCHIVE_AFTER,
+    });
+    const utils = await renderArchiveCockpit(fetchMock);
+    const btn = utils.container.querySelector('[data-testid="areas-manage-btn"]');
+
+    await act(async () => { fireEvent.click(btn); });
+    expect(utils.container.querySelector('[data-testid="areas-manage-dialog-mock"]')).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.click(utils.container.querySelector('[data-testid="areas-manage-mock-close-btn"]'));
+    });
+
+    expect(utils.container.querySelector('[data-testid="areas-manage-dialog-mock"]')).toBeFalsy();
   });
 });
 

@@ -224,6 +224,7 @@ import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { EntityIcon }             from './icons/EntityIcon.jsx';
 import { parseEntityLabel }       from './icons/parseEntityLabel.js';
 import { IdeaSpecifyChatModal }   from './IdeaSpecifyChatModal.jsx';
+import { AreasManageDialog }      from './AreasManageDialog.jsx';
 // board-filter-feature-status-consistency AC3 (S-241): geteilte, dependency-freie
 // Pure-Funktion — EINE Regel-Quelle mit src/BoardAggregator.js (Cross-Build-Import,
 // kein Client-Duplikat).
@@ -1188,6 +1189,7 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
               onArchiveDone={handleArchiveDone}
               showArchived={showArchived}
               onToggleArchived={handleToggleArchived}
+              projectSlug={currentProjectSlug}
             />
           )}
 
@@ -1275,6 +1277,7 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
               onArchiveDone={handleArchiveDone}
               showArchived={showArchived}
               onToggleArchived={handleToggleArchived}
+              projectSlug={currentProjectSlug}
             />
           )}
 
@@ -1388,12 +1391,18 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
  *   onArchiveDone?: () => Promise<void>,
  *   showArchived?: boolean,
  *   onToggleArchived?: () => void,
+ *   projectSlug?: string|null,
  * }} props
  *
  * AC6/AC7 (board-feature-archive): „Archiv anzeigen"-Schalter — echter Toggle-
  *   Button (`aria-pressed`), Default aus. Umschalten lädt die Board-Daten mit
  *   `includeArchived=true` neu; archivierte Features erscheinen dann read-only +
  *   klar per Text „Archiviert" markiert (nicht nur farblich).
+ *
+ * AC8/AC9/AC10 (bereichs-modell, S-290): Button „Bereiche verwalten" — sichtbar
+ *   sobald ein Projekt geladen ist (`projectSlug` gesetzt); öffnet das modale
+ *   `AreasManageDialog` (Anlegen/Umbenennen/Umsortieren/Löschen der
+ *   Bereichsliste des Projekts, fokussiertes Dialog-Muster).
  */
 function FilterBar({
   projects,
@@ -1415,6 +1424,7 @@ function FilterBar({
   onArchiveDone,
   showArchived = false,
   onToggleArchived,
+  projectSlug = null,
 }) {
   // AC5 (board-feature-archive): Zustand der Archiv-Bestätigungsabfrage.
   //   archiveConfirmOpen — Dialog sichtbar?
@@ -1431,6 +1441,19 @@ function FilterBar({
     setArchiveState('idle');
     setArchiveError('');
     setArchiveConfirmOpen(true);
+  }, []);
+
+  // AC8/AC9/AC10 (bereichs-modell, S-290): Zustand des „Bereiche verwalten"-Dialogs.
+  // areasTriggerRef merkt den auslösenden Button für die Fokus-Rückgabe (A11y).
+  const [areasManageOpen, setAreasManageOpen] = useState(false);
+  const areasTriggerRef = useRef(null);
+
+  const handleOpenAreasManage = useCallback(() => {
+    setAreasManageOpen(true);
+  }, []);
+
+  const handleCloseAreasManage = useCallback(() => {
+    setAreasManageOpen(false);
   }, []);
 
   const handleCancelArchive = useCallback(() => {
@@ -1704,6 +1727,22 @@ function FilterBar({
         </button>
       )}
 
+      {/* AC8/AC9/AC10 (bereichs-modell, S-290): „Bereiche verwalten" — nur
+          sichtbar, sobald ein konkretes Projekt geladen ist (die Bereichsliste
+          ist projekt-gebunden). Öffnet das modale AreasManageDialog. */}
+      {projectSlug && (
+        <button
+          ref={areasTriggerRef}
+          type="button"
+          style={styles.areasManageBtn}
+          onClick={handleOpenAreasManage}
+          aria-label="Bereiche verwalten"
+          data-testid="areas-manage-btn"
+        >
+          Bereiche verwalten
+        </button>
+      )}
+
       {/* AC5/AC7: Bestätigungsabfrage (fokussiertes Dialog-Muster). */}
       {archiveConfirmOpen && (
         <ArchiveConfirmDialog
@@ -1713,6 +1752,15 @@ function FilterBar({
           error={archiveError}
           onCancel={handleCancelArchive}
           onConfirm={handleConfirmArchive}
+        />
+      )}
+
+      {/* AC8/AC9/AC10 (bereichs-modell, S-290): „Bereiche verwalten"-Dialog. */}
+      {areasManageOpen && projectSlug && (
+        <AreasManageDialog
+          projectSlug={projectSlug}
+          onClose={handleCloseAreasManage}
+          triggerRef={areasTriggerRef}
         />
       )}
     </div>
@@ -3300,6 +3348,20 @@ const styles = {
     background: 'transparent',
     border: '1px solid #334155',
     color: '#9ca3af',
+    borderRadius: 4,
+    padding: '6px 12px',
+    fontSize: 12,
+    cursor: 'pointer',
+    minHeight: 36,
+    whiteSpace: 'nowrap',
+    // Focus ring preserved (no outline:none)
+  },
+
+  // AC8 (bereichs-modell, S-290): „Bereiche verwalten"-Button in der FilterBar.
+  areasManageBtn: {
+    background: 'transparent',
+    border: '1px solid #4b5563',
+    color: '#e5e7eb',
     borderRadius: 4,
     padding: '6px 12px',
     fontSize: 12,
