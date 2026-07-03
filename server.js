@@ -147,6 +147,8 @@ import { ProjectJobLock } from './src/ProjectJobLock.js';
 import { CostModeModelCheck } from './src/CostModeModelCheck.js';
 import { HeadlessRetroRunner } from './src/HeadlessRetroRunner.js';
 import { RetroAutoQueue } from './src/RetroAutoQueue.js';
+import { AutoRetroTrigger } from './src/AutoRetroTrigger.js';
+import { read as readRetroAutoSettings } from './src/RetroAutoSettingsStore.js';
 import { mountRouters } from './src/routerLoader.js';
 
 const PORT = Number(process.env.PORT ?? 8080);
@@ -401,6 +403,41 @@ const costModeModelCheck = new CostModeModelCheck({
 // UND manueller Drain (projectDrainRouter via deps, trigger:'manual') — sowie
 // read-only für GET /api/drain-reports (drainReports.js Router).
 const drainReportStore = new DrainReportStore();
+
+// ── Auto-Retro: serielle Queue + headless Runner + Auslöse-Trigger ────────────
+// (retro-auto-queue AC5/AC6 S-256/S-257 + retro-auto-trigger AC4–AC7 S-261).
+// VOR dem NightWatchScheduler konstruiert, weil dieser den `autoRetroTrigger` für
+// seine Drain-Abschluss-Naht (AC4) braucht — dieselbe Instanz wird zusätzlich in
+// den manuellen projectDrainRouter injiziert (deps unten), sodass BEIDE Auslöser
+// denselben `isRetroDue`-Check gegen dieselbe `RetroAutoQueue` fahren (AC6/AC7,
+// kein zweiter Codepfad).
+//
+// `retroAutoQueue`: EIN Worker, global serialisiert (schützt die geteilte
+// Lern-Ablage `LEARNINGS.md`/globale Packs vor konkurrierenden Läufen/PRs). Der
+// `HeadlessRetroRunner` kapselt die headless-Ausführung
+// (`claude -p '/agent-flow:retro --force'`) über eine EIGENE `HeadlessFlowRunner`-
+// Instanz mit EIGENER, frischer `ProjectJobLock`-Instanz (Konstruktor-Default in
+// HeadlessRetroRunner.js/HeadlessFlowRunner.js) — bewusst getrennt von ALLEN
+// anderen headless-Locks (Nacht-Drain, manueller Drain, Reconcile, Finalizer,
+// costModeModelCheck), sonst würde ein paralleler Lauf für dasselbe Projekt
+// fälschlich blockiert. `auditStore` injiziert (AC6: Start/Ende/Fehler je Lauf,
+// secret-frei). `retroAutoQueue` wird zusätzlich exportiert (Boundary-Referenz).
+//
+// `autoRetroTrigger` (S-261): reine Policy — `isRetroDue` (Schalter AN +
+// flowRuns≥1 + Dedup) + best-effort/fire-and-forget `enqueue`. `readSettings` ist
+// `RetroAutoSettingsStore.read` (nicht-geheimer `enabled`-Bool, Default false =
+// heutiges Verhalten). KEINE Ausführungs-/Serialisierungslogik hier (die liegt in
+// der Queue); `--force`/G3-Bypass sitzt fest im Runner. G1 bleibt unberührt.
+export const retroAutoQueue = new RetroAutoQueue({
+  retroRunner: new HeadlessRetroRunner({ auditStore }),
+  auditStore,
+});
+const autoRetroTrigger = new AutoRetroTrigger({
+  readSettings: readRetroAutoSettings,
+  queue: retroAutoQueue,
+  auditStore, // AC6: secret-freier Enqueue-Audit (nur Repo-Slug)
+});
+
 const nightWatchScheduler = new NightWatchScheduler({
   readSettings: readTickerSettings,
   boardAggregator,
@@ -411,6 +448,7 @@ const nightWatchScheduler = new NightWatchScheduler({
   claudeAuthHealthService, // S-213 AC9: Auth-Vorabprüfung vor jedem Nacht-Tick
   costModeModelCheck, // cost-mode-model-check AC4/AC5: Dispatch-Frische-Prüfung vor jedem Nacht-Drain-Start
   drainReportStore, // drain-completion-report AC6: je Nacht-Drain genau ein Bericht (trigger:'night')
+  autoRetroTrigger, // retro-auto-trigger AC4/AC6: nach jedem Nacht-Drain isRetroDue → ggf. enqueue
 });
 // Immer gestartet — tick() selbst prüft `enabled` (AC16: enabled=false → idle,
 // analog NotificationWatcher.start(), das ebenfalls unbedingt läuft).
@@ -498,24 +536,10 @@ const storySpecifyFinalizer = new StorySpecifyFinalizer();
 // getrennt (AC7) — eigene ProjectJobLock-Instanz, kein Idle-/Rate-Timer.
 const reconcileRunner = new HeadlessReconcileRunner();
 
-// ── Auto-Retro: serielle Queue + headless Runner (retro-auto-queue AC5/AC6, S-257) ──
-// Composition-Root der seriellen Auto-Retro-Warteschlange: EIN Worker, global
-// serialisiert (schützt die geteilte Lern-Ablage `LEARNINGS.md`/globale Packs vor
-// konkurrierenden Läufen/PRs). Der `HeadlessRetroRunner` kapselt die headless-
-// Ausführung (`claude -p '/agent-flow:retro --force'`) über eine EIGENE
-// `HeadlessFlowRunner`-Instanz mit EIGENER, frischer `ProjectJobLock`-Instanz
-// (Konstruktor-Default in HeadlessRetroRunner.js/HeadlessFlowRunner.js) — bewusst
-// getrennt von ALLEN anderen headless-Locks (Nacht-Drain, manueller Drain,
-// Reconcile, ideaSpecifyFinalizer, storySpecifyFinalizer, costModeModelCheck),
-// sonst würde ein paralleler Lauf für dasselbe Projekt fälschlich blockiert
-// (Fremd-/Selbstblockade-Vermeidung, analog den Runner-Kommentaren oben).
-// `auditStore` injiziert (AC6: Start/Ende(Erfolg)/Fehler je Lauf, secret-frei).
-// Das Einreihen an der Drain-Naht (isRetroDue → enqueue) ist S-261 (nicht hier);
-// `retroAutoQueue` wird für die spätere Injektion exportiert.
-export const retroAutoQueue = new RetroAutoQueue({
-  retroRunner: new HeadlessRetroRunner({ auditStore }),
-  auditStore,
-});
+// ── Auto-Retro-Boundaries (retro-auto-queue S-256/S-257 + retro-auto-trigger
+// S-261) sind bereits weiter oben (vor dem NightWatchScheduler, der den
+// `autoRetroTrigger` für seine Drain-Abschluss-Naht AC4 braucht) konstruiert:
+// `retroAutoQueue` (export) + `autoRetroTrigger`. Hier keine erneute Konstruktion.
 
 // ── CostModeModelCheck starten (cost-mode-model-check AC1–AC3/AC6/AC7) ──
 // Die Instanz wurde bereits weiter oben (im Taktgeber-Block, vor dem
@@ -603,6 +627,11 @@ const deps = {
   // read-only für GET /api/drain-reports (drainReports.js) UND Schreibpfad für
   // den manuellen Drain (projectDrain.js Router, trigger:'manual').
   drainReportStore,
+  // retro-auto-trigger AC4–AC7: GETEILTE AutoRetroTrigger-Instanz (dieselbe wie
+  // der Nacht-Drain oben) — der manuelle projectDrain.js Router stößt bei
+  // Drain-Abschluss best-effort den Auto-Retro-Check an (isRetroDue → ggf.
+  // enqueue in die geteilte retroAutoQueue). Kein zweiter Codepfad (AC6/AC7).
+  autoRetroTrigger,
   sessionRegistry: ptyRegistry,
   // S-199 (ideen-inbox AC3/AC7/AC8): BoardWriter-Create-Pfad für den
   // Quick-Capture-Endpunkt (boardRouter POST .../ideas). Instanz existiert

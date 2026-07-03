@@ -115,6 +115,15 @@ import { DrainJobRegistry } from './DrainJobRegistry.js';
  *   dem Nacht-Drain). Optional — bei Drain-Abschluss wird best-effort GENAU EIN
  *   Bericht (`trigger:'manual'`) geschrieben; ein Store-Fehler ist non-fatal und
  *   berührt weder die 202-Antwort noch den `DrainJobRegistry`-Status.
+ * @param {{ notifyDrainComplete: (projectPath: string, drainResult: object) => void }} [deps.autoRetroTrigger]
+ *   Auto-Retro-Auslöser an der Drain-Abschluss-Naht (retro-auto-trigger AC4–AC7,
+ *   `AutoRetroTrigger`, GETEILTE Instanz mit dem Nacht-Drain — derselbe
+ *   `isRetroDue`-Check, dieselbe `RetroAutoQueue`, kein zweiter Codepfad, AC6/AC7).
+ *   Optional — bei Drain-Abschluss wird best-effort/fire-and-forget der
+ *   Auto-Retro-Check angestoßen (`isRetroDue` → ggf. `enqueue`). Strikt
+ *   best-effort: `notifyDrainComplete` gibt sofort synchron zurück und wirft nie —
+ *   die (bereits gesendete) 202-Antwort + der Drain-Abschluss bleiben bei jedem
+ *   Check-Fehler unberührt (AC4). Ohne ihn läuft der Drain unverändert.
  * @param {object} [options]
  * @param {(path: string) => Promise<{ resolvedPath: string }>} [options.pathValidator]
  *   Injectable path validator (default: validateProjectPath). Inject a stub in tests.
@@ -128,7 +137,7 @@ import { DrainJobRegistry } from './DrainJobRegistry.js';
  * @returns {import('express').Router}
  */
 export function projectDrainRouter(deps = {}, options = {}) {
-  const { projectDrain, commandService, sessionRegistry, costModeModelCheck, drainReportStore } = deps;
+  const { projectDrain, commandService, sessionRegistry, costModeModelCheck, drainReportStore, autoRetroTrigger } = deps;
   const _pathValidator = options.pathValidator ?? validateProjectPath;
   const _slugResolver = options.slugResolver ?? resolveProjectSlug;
   const _lock = options.lock;
@@ -162,6 +171,27 @@ export function projectDrainRouter(deps = {}, options = {}) {
       if (p && typeof p.catch === 'function') p.catch(() => {});
     } catch {
       // best-effort — die Bericht-Erfassung darf den Drain-Abschluss nie stören.
+    }
+  }
+
+  /**
+   * Stößt den Auto-Retro-Check an der (manuellen) Drain-Abschluss-Naht an
+   * (retro-auto-trigger AC4/AC5/AC6). No-op ohne injizierten `autoRetroTrigger`.
+   * Strikt best-effort: `notifyDrainComplete` gibt selbst sofort synchron zurück
+   * und wirft nie — das zusätzliche try/catch ist reine Tiefenverteidigung. Der
+   * Check darf die (bereits gesendete) 202-Antwort + den Drain-Abschluss nie
+   * crashen (AC4). `resolvedPath` (der realpath-validierte absolute Repo-Pfad,
+   * KEIN Slug) ist der Queue-Dedup-/Runner-Cwd-Schlüssel.
+   *
+   * @param {string} resolvedPath  aufgelöster absoluter Projekt-Repo-Pfad.
+   * @param {{ flowRuns?: number }} result  Drain-Ergebnis (nur `flowRuns` relevant).
+   */
+  function _notifyAutoRetro(resolvedPath, result) {
+    if (!autoRetroTrigger || typeof autoRetroTrigger.notifyDrainComplete !== 'function') return;
+    try {
+      autoRetroTrigger.notifyDrainComplete(resolvedPath, result ?? {});
+    } catch {
+      // best-effort — der Auto-Retro-Check darf den Drain-Abschluss nie crashen (AC4).
     }
   }
 
@@ -244,11 +274,18 @@ export function projectDrainRouter(deps = {}, options = {}) {
       .then((result) => {
         _jobRegistry.markDone(drainId, result ?? {});
         _writeManualReport(rawSlug, result ?? {}, startedAt);
+        // retro-auto-trigger AC4/AC6: nach dem abgeschlossenen manuellen Drain den
+        // Auto-Retro-Check best-effort/fire-and-forget anstoßen (isRetroDue → ggf.
+        // enqueue). Dedup-/Runner-Schlüssel ist der absolute Repo-Pfad (resolvedPath).
+        _notifyAutoRetro(resolvedPath, result ?? {});
       })
       .catch((err) => {
         _jobRegistry.markFailed(drainId);
         console.error(`[projectDrain] Drain fehlgeschlagen (drainId=${drainId}):`, err.message);
         _writeManualReport(rawSlug, { reason: 'drain-failed', flowRuns: 0, completed: [], blocked: [] }, startedAt);
+        // Fehlgeschlagener Drain: flowRuns:0 → isRetroDue == false (kein Enqueue).
+        // Der Aufruf bleibt dennoch symmetrisch (AC4: „nach JEDEM Drain").
+        _notifyAutoRetro(resolvedPath, { reason: 'drain-failed', flowRuns: 0 });
       });
 
     // AC4/AC5 (cost-mode-model-check): Dispatch-Frische-Prüfung NACH dem bereits

@@ -79,6 +79,18 @@
  *         (No-op). Der DrainReportStore-Baustein selbst ist zusätzlich unit-
  *         getestet in test/DrainReportStore.test.js.
  *
+ * Covers (retro-auto-trigger, S-261):
+ *   AC4 — nach JEDEM abgeschlossenen Nacht-Drain wird der Auto-Retro-Check an der
+ *         Drain-Abschluss-Naht best-effort/fire-and-forget angestoßen
+ *         (`autoRetroTrigger.notifyDrainComplete(projectPath, drainResult)`) —
+ *         mit dem echten Drain-Ergebnis (inkl. `flowRuns`); ein werfender Trigger
+ *         crasht den Scheduler NICHT (Drain-Eintrag wird sauber abgeräumt). Kein
+ *         injizierter `autoRetroTrigger` → Scheduler läuft unverändert (No-op).
+ *   AC6 — der Auslöser erhält den absoluten Repo-Pfad als Dedup-/Runner-Schlüssel;
+ *         die eigentliche Fälligkeits-/Enqueue-Logik (isRetroDue) ist in
+ *         test/AutoRetroTrigger.test.js unit-getestet (kein zweiter Codepfad:
+ *         dieselbe Instanz wie der manuelle Drain — server.js-Verdrahtung).
+ *
  * Strategy:
  *   - Pure Helper (`parseHHMM`, `isWithinWindow`, `computeWindowEndMs`,
  *     `clampMaxParallel`, `selectCandidateProjects`) direkt mit
@@ -181,6 +193,7 @@ function makeScheduler(overrides = {}) {
     claudeAuthHealthService: overrides.claudeAuthHealthService,
     costModeModelCheck: overrides.costModeModelCheck,
     drainReportStore: overrides.drainReportStore,
+    autoRetroTrigger: overrides.autoRetroTrigger,
     now: () => nowMs,
     sleepFn: overrides.sleepFn ?? (() => Promise.resolve()),
   });
@@ -966,6 +979,99 @@ describe('NightWatchScheduler — Abschlussbericht je Nacht-Drain (drain-complet
     });
     await scheduler.tick();
     projectDrain.resolve('/workspace/proj-a');
+    await flush();
+    expect(scheduler.getStatus().activeDrainProjectPaths).toEqual([]);
+  });
+});
+
+// ── Auto-Retro-Auslösung an der Nacht-Drain-Abschluss-Naht (retro-auto-trigger S-261 AC4/AC6) ──
+
+describe('NightWatchScheduler — Auto-Retro-Auslösung an der Drain-Abschluss-Naht (retro-auto-trigger AC4/AC6)', () => {
+  function makeAutoRetroTrigger() {
+    return { notifyDrainComplete: jest.fn() };
+  }
+
+  it('AC4/AC6 — nach dem abgeschlossenen Drain wird notifyDrainComplete mit Pfad + echtem Ergebnis (flowRuns) angestoßen', async () => {
+    const autoRetroTrigger = makeAutoRetroTrigger();
+    const projectDrain = makeControllableProjectDrain();
+    const { scheduler } = makeScheduler({
+      projectDrain,
+      autoRetroTrigger,
+      settings: makeSettings({ maxParallel: 1, projects: ['proj-a'] }),
+    });
+
+    await scheduler.tick();
+    // Solange der Drain läuft, wird der Auto-Retro-Check NICHT angestoßen.
+    expect(autoRetroTrigger.notifyDrainComplete).not.toHaveBeenCalled();
+
+    projectDrain.resolve('/workspace/proj-a', {
+      stopped: true,
+      reason: 'no-drain-target',
+      flowRuns: 2,
+      escalated: [],
+      completed: [{ id: 'S-1' }],
+      blocked: [],
+    });
+    await flush();
+
+    expect(autoRetroTrigger.notifyDrainComplete).toHaveBeenCalledTimes(1);
+    const [projectPath, drainResult] = autoRetroTrigger.notifyDrainComplete.mock.calls[0];
+    expect(projectPath).toBe('/workspace/proj-a');
+    expect(drainResult.flowRuns).toBe(2);
+  });
+
+  it('AC4 — ein rejecteter Drain stößt notifyDrainComplete mit flowRuns:0 an (symmetrisch, kein Enqueue nachgelagert)', async () => {
+    const autoRetroTrigger = makeAutoRetroTrigger();
+    const drainProject = {
+      drainProject: jest.fn(async () => {
+        throw new Error('drain kaputt');
+      }),
+    };
+    const { scheduler } = makeScheduler({
+      projectDrain: drainProject,
+      autoRetroTrigger,
+      settings: makeSettings({ maxParallel: 1, projects: ['proj-a'] }),
+    });
+
+    await expect(scheduler.tick()).resolves.toBeTruthy();
+    await flush();
+
+    expect(autoRetroTrigger.notifyDrainComplete).toHaveBeenCalledTimes(1);
+    const [projectPath, drainResult] = autoRetroTrigger.notifyDrainComplete.mock.calls[0];
+    expect(projectPath).toBe('/workspace/proj-a');
+    expect(drainResult.flowRuns).toBe(0);
+  });
+
+  it('AC4 — ein werfender autoRetroTrigger crasht den Scheduler NICHT (best-effort, Drain-Eintrag sauber abgeräumt)', async () => {
+    const autoRetroTrigger = {
+      notifyDrainComplete: jest.fn(() => {
+        throw new Error('trigger kaputt');
+      }),
+    };
+    const projectDrain = makeControllableProjectDrain();
+    const { scheduler } = makeScheduler({
+      projectDrain,
+      autoRetroTrigger,
+      settings: makeSettings({ maxParallel: 1, projects: ['proj-a'] }),
+    });
+
+    await scheduler.tick();
+    projectDrain.resolve('/workspace/proj-a', { stopped: true, reason: 'no-drain-target', flowRuns: 1 });
+    await flush();
+
+    expect(autoRetroTrigger.notifyDrainComplete).toHaveBeenCalledTimes(1);
+    // Trotz Trigger-Fehler: der Drain-Eintrag verschwindet sauber (kein unhandled reject, kein Crash).
+    expect(scheduler.getStatus().activeDrainProjectPaths).toEqual([]);
+  });
+
+  it('AC4 — ohne injizierten autoRetroTrigger läuft der Scheduler unverändert (No-op, kein Crash)', async () => {
+    const projectDrain = makeControllableProjectDrain();
+    const { scheduler } = makeScheduler({
+      projectDrain,
+      settings: makeSettings({ maxParallel: 1, projects: ['proj-a'] }),
+    });
+    await scheduler.tick();
+    projectDrain.resolve('/workspace/proj-a', { stopped: true, reason: 'no-drain-target', flowRuns: 1 });
     await flush();
     expect(scheduler.getStatus().activeDrainProjectPaths).toEqual([]);
   });

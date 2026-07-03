@@ -61,6 +61,18 @@
  *          test/DrainJobRegistry.test.js) — der Test „200 { status:'done', result }"
  *          unten prüft das mit.
  *
+ * Covers (retro-auto-trigger, S-261):
+ *   AC4/AC6 — der manuelle Drain stößt bei Abschluss (resolve UND reject) den
+ *          Auto-Retro-Check best-effort/fire-and-forget an
+ *          (`autoRetroTrigger.notifyDrainComplete(resolvedPath, drainResult)`) —
+ *          mit dem aufgelösten absoluten Repo-Pfad + dem echten Drain-Ergebnis
+ *          (inkl. `flowRuns`); die 202-Antwort + der Registry-Status bleiben
+ *          davon unberührt. Ein werfender Trigger crasht den Handler NICHT
+ *          (best-effort). Ohne injizierten Trigger läuft der Drain unverändert
+ *          (No-op). Die Fälligkeits-/Enqueue-Logik (`isRetroDue`) selbst ist in
+ *          test/AutoRetroTrigger.test.js unit-getestet (kein zweiter Codepfad:
+ *          dieselbe Instanz wie der Nacht-Drain — server.js-Verdrahtung).
+ *
  * Strategy: echter Express-App + echter HTTP-Server (Muster
  * test/slugResolver.test.js "commandRouter integration" + test/tickerSettings.test.js
  * HTTP-Helpers) — injizierbarer slugResolver/pathValidator/lock (kein echtes
@@ -191,6 +203,7 @@ function makeApp({
   identity = { email: 'test@example.com' },
   costModeModelCheck,
   drainReportStore,
+  autoRetroTrigger,
 } = {}) {
   const app = express();
   app.use(express.json());
@@ -200,7 +213,7 @@ function makeApp({
   });
   app.use(
     projectDrainRouter(
-      { projectDrain, commandService, sessionRegistry, costModeModelCheck, drainReportStore },
+      { projectDrain, commandService, sessionRegistry, costModeModelCheck, drainReportStore, autoRetroTrigger },
       { slugResolver, pathValidator, lock },
     ),
   );
@@ -788,6 +801,94 @@ describe('POST /api/projects/:slug/drain — Abschlussbericht (drain-completion-
 
   it('ohne verdrahteten Store → kein Schreibpfad, Drain läuft unverändert (No-op)', async () => {
     const drainProject = jest.fn(async () => ({ stopped: true, reason: 'no-drain-target', flowRuns: 0, escalated: [] }));
+    const app = makeApp({ projectDrain: { drainProject } });
+    const s = await startServer(app);
+    server = s.server;
+
+    const post = await postNoBody(s.port, '/api/projects/dev-gui/drain');
+    expect(post.status).toBe(202);
+    await flushAsync();
+    const status = await getJson(s.port, `/api/projects/dev-gui/drain/${post.body.drainId}`);
+    expect(status.body.status).toBe('done');
+  });
+});
+
+// ── Auto-Retro-Auslösung an der manuellen Drain-Abschluss-Naht (retro-auto-trigger S-261 AC4/AC6) ──
+
+describe('POST /api/projects/:slug/drain — Auto-Retro-Auslösung an der Drain-Abschluss-Naht (retro-auto-trigger AC4/AC6)', () => {
+  let server;
+  let consoleErrorSpy;
+
+  beforeEach(() => {
+    consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+  });
+  afterEach(async () => {
+    if (server) await closeServer(server);
+    server = null;
+    consoleErrorSpy.mockRestore();
+  });
+
+  function makeTrigger() {
+    return { notifyDrainComplete: jest.fn() };
+  }
+
+  it('AC4/AC6 — bei resolve wird notifyDrainComplete mit aufgelöstem Pfad + echtem Ergebnis (flowRuns) angestoßen', async () => {
+    const autoRetroTrigger = makeTrigger();
+    const drainProject = jest.fn(async () => ({ stopped: true, reason: 'no-drain-target', flowRuns: 3, escalated: [] }));
+    const app = makeApp({ projectDrain: { drainProject }, autoRetroTrigger });
+    const s = await startServer(app);
+    server = s.server;
+
+    const res = await postNoBody(s.port, '/api/projects/dev-gui/drain');
+    expect(res.status).toBe(202);
+    await flushAsync();
+
+    expect(autoRetroTrigger.notifyDrainComplete).toHaveBeenCalledTimes(1);
+    const [projectPath, drainResult] = autoRetroTrigger.notifyDrainComplete.mock.calls[0];
+    // resolvedPath (absoluter Repo-Pfad), NICHT der Slug — Queue-Dedup-/Runner-Schlüssel.
+    expect(projectPath).toBe('/workspace/dev-gui');
+    expect(drainResult.flowRuns).toBe(3);
+  });
+
+  it('AC4 — bei reject wird notifyDrainComplete mit flowRuns:0 angestoßen (symmetrisch); Registry-Status bleibt failed', async () => {
+    const autoRetroTrigger = makeTrigger();
+    const drainProject = jest.fn(async () => { throw new Error('boom'); });
+    const app = makeApp({ projectDrain: { drainProject }, autoRetroTrigger });
+    const s = await startServer(app);
+    server = s.server;
+
+    const post = await postNoBody(s.port, '/api/projects/dev-gui/drain');
+    expect(post.status).toBe(202);
+    await flushAsync();
+
+    expect(autoRetroTrigger.notifyDrainComplete).toHaveBeenCalledTimes(1);
+    const [projectPath, drainResult] = autoRetroTrigger.notifyDrainComplete.mock.calls[0];
+    expect(projectPath).toBe('/workspace/dev-gui');
+    expect(drainResult.flowRuns).toBe(0);
+
+    const status = await getJson(s.port, `/api/projects/dev-gui/drain/${post.body.drainId}`);
+    expect(status.body.status).toBe('failed');
+  });
+
+  it('AC4 — ein werfender autoRetroTrigger berührt weder die 202-Antwort noch den Registry-Status (best-effort)', async () => {
+    const autoRetroTrigger = { notifyDrainComplete: jest.fn(() => { throw new Error('trigger kaputt'); }) };
+    const drainProject = jest.fn(async () => ({ stopped: true, reason: 'no-drain-target', flowRuns: 1, escalated: [] }));
+    const app = makeApp({ projectDrain: { drainProject }, autoRetroTrigger });
+    const s = await startServer(app);
+    server = s.server;
+
+    const post = await postNoBody(s.port, '/api/projects/dev-gui/drain');
+    expect(post.status).toBe(202);
+    await flushAsync();
+
+    expect(autoRetroTrigger.notifyDrainComplete).toHaveBeenCalledTimes(1);
+    const status = await getJson(s.port, `/api/projects/dev-gui/drain/${post.body.drainId}`);
+    expect(status.status).toBe(200);
+    expect(status.body.status).toBe('done');
+  });
+
+  it('AC4 — ohne verdrahteten Trigger läuft der Drain unverändert (No-op)', async () => {
+    const drainProject = jest.fn(async () => ({ stopped: true, reason: 'no-drain-target', flowRuns: 2, escalated: [] }));
     const app = makeApp({ projectDrain: { drainProject } });
     const s = await startServer(app);
     server = s.server;

@@ -297,6 +297,14 @@ export function selectCandidateProjects(index, projectsSetting) {
  *   früheren `.catch(() => null)`-Ergebnisverlust: das (erfolgreiche wie
  *   fehlgeschlagene) Drain-Ergebnis wird ERFASST statt verworfen; ein
  *   Store-/Drain-Fehler crasht den Scheduler weiterhin NICHT (best-effort).
+ * @param {{ notifyDrainComplete: (projectPath: string, drainResult: object) => void }} [deps.autoRetroTrigger]
+ *   Auto-Retro-Auslöser an der Drain-Abschluss-Naht (retro-auto-trigger AC4–AC7,
+ *   `AutoRetroTrigger`, geteilte Instanz mit dem manuellen Drain). Optional —
+ *   bei jedem abgeschlossenen Nacht-Drain wird best-effort/fire-and-forget der
+ *   Auto-Retro-Check angestoßen (`isRetroDue` → ggf. `enqueue` in die geteilte
+ *   `RetroAutoQueue`). Strikt best-effort: `notifyDrainComplete` gibt sofort
+ *   synchron zurück und wirft nie — der Nacht-Tick/Drain-Abschluss bleibt bei
+ *   jedem Check-Fehler unberührt (AC4). Ohne ihn läuft der Scheduler unverändert.
  * @param {string|null} [deps.identity]  auslösende Identität (Audit + ProjectDrain-Weiterreichung).
  * @param {() => number} [deps.now]  injizierbare Uhr (ms epoch), Default `Date.now`.
  * @param {(ms: number) => Promise<void>} [deps.sleepFn]  injizierbares Sleep (für `waitForReset`), Default echtes `setTimeout`.
@@ -313,6 +321,7 @@ export class NightWatchScheduler {
   #claudeAuthHealthService;
   #costModeModelCheck;
   #drainReportStore;
+  #autoRetroTrigger;
   #identity;
   #now;
   #sleepFn;
@@ -344,6 +353,7 @@ export class NightWatchScheduler {
     claudeAuthHealthService,
     costModeModelCheck,
     drainReportStore,
+    autoRetroTrigger,
     identity = null,
     now,
     sleepFn,
@@ -359,6 +369,7 @@ export class NightWatchScheduler {
     this.#claudeAuthHealthService = claudeAuthHealthService ?? null;
     this.#costModeModelCheck = costModeModelCheck ?? null;
     this.#drainReportStore = drainReportStore ?? null;
+    this.#autoRetroTrigger = autoRetroTrigger ?? null;
     this.#identity = identity;
     this.#now = now ?? (() => Date.now());
     this.#sleepFn = sleepFn ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -587,8 +598,20 @@ export class NightWatchScheduler {
       // `reason:'drain-failed'`-Bericht; das abschließende `.catch(() => null)`
       // schluckt einen etwaigen Fehler der Bericht-Erfassung selbst.
       .then(
-        (result) => this.#recordNightReport(projectSlug, result ?? {}, startedAt),
-        () => this.#recordNightReport(projectSlug, { reason: 'drain-failed', flowRuns: 0, completed: [], blocked: [] }, startedAt),
+        (result) => {
+          this.#recordNightReport(projectSlug, result ?? {}, startedAt);
+          // retro-auto-trigger AC4/AC6: nach dem abgeschlossenen Nacht-Drain den
+          // Auto-Retro-Check best-effort/fire-and-forget anstoßen (isRetroDue →
+          // ggf. enqueue). `notifyDrainComplete` gibt sofort synchron zurück und
+          // wirft nie — der Nacht-Drain-Abschluss bleibt bei Check-Fehler unberührt.
+          this.#notifyAutoRetro(projectPath, result ?? {});
+        },
+        () => {
+          this.#recordNightReport(projectSlug, { reason: 'drain-failed', flowRuns: 0, completed: [], blocked: [] }, startedAt);
+          // Fehlgeschlagener Drain: flowRuns:0 → isRetroDue == false (kein Enqueue).
+          // Der Aufruf bleibt dennoch symmetrisch (AC4: „nach JEDEM Drain").
+          this.#notifyAutoRetro(projectPath, { reason: 'drain-failed', flowRuns: 0 });
+        },
       )
       .catch(() => null)
       .finally(() => this.#activeDrains.delete(projectPath));
@@ -623,6 +646,25 @@ export class NightWatchScheduler {
       if (p && typeof p.catch === 'function') p.catch(() => {});
     } catch {
       // best-effort — die Bericht-Erfassung darf den Scheduler nie crashen.
+    }
+  }
+
+  /**
+   * Stößt den Auto-Retro-Check an der Drain-Abschluss-Naht an (retro-auto-trigger
+   * AC4/AC5/AC6). No-op ohne injizierten `autoRetroTrigger`. Strikt best-effort:
+   * `notifyDrainComplete` gibt selbst sofort synchron zurück und wirft nie — das
+   * zusätzliche try/catch ist reine Tiefenverteidigung, damit der Nacht-Drain-
+   * Abschluss unter keinen Umständen crasht (AC4).
+   *
+   * @param {string} projectPath  gerade gedrainter Projekt-Repo-Pfad (Queue-Dedup-Schlüssel).
+   * @param {{ flowRuns?: number }} result  Drain-Ergebnis (nur `flowRuns` relevant).
+   */
+  #notifyAutoRetro(projectPath, result) {
+    if (!this.#autoRetroTrigger || typeof this.#autoRetroTrigger.notifyDrainComplete !== 'function') return;
+    try {
+      this.#autoRetroTrigger.notifyDrainComplete(projectPath, result ?? {});
+    } catch {
+      // best-effort — der Auto-Retro-Check darf den Drain-Abschluss nie crashen (AC4).
     }
   }
 
