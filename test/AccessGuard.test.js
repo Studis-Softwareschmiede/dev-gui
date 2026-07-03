@@ -1,15 +1,20 @@
 /**
- * AccessGuard tests (AC1, AC2, AC5 + fail-closed + dev-bypass)
+ * AccessGuard tests (AC1, AC2, AC5 + fail-closed + dev-bypass + WS postAuthCheck).
  *
  * Uses an in-process RSA keypair generated with jose — no network calls.
  * All JWT signing/verification is done against the injected keyset.
+ *
+ * Covers (vps-ssh-terminal, S-263): AC9 — createWsAccessGuard()'s new optional
+ * `postAuthCheck` option (role-403 for /ws/vps-terminal, enforced BEFORE
+ * handleUpgrade, both via the dev-bypass and the real-JWT branch); backward-compat
+ * for the existing /ws/terminal caller (no postAuthCheck → unaffected).
  */
 
-import { describe, it, beforeAll, afterEach, expect } from '@jest/globals';
+import { describe, it, beforeAll, afterEach, expect, jest } from '@jest/globals';
 import { generateKeyPair, exportJWK, SignJWT, createLocalJWKSet } from 'jose';
 import express from 'express';
 import { createServer } from 'node:http';
-import { createAccessGuard, assertAccessConfig } from '../src/AccessGuard.js';
+import { createAccessGuard, createWsAccessGuard, assertAccessConfig } from '../src/AccessGuard.js';
 import { AuditStore, auditRouter } from '../src/AuditStore.js';
 
 // ── Key setup ──────────────────────────────────────────────────────────────
@@ -378,4 +383,102 @@ describe('AC2 — server refuses to start in production without Access config', 
 
     expect(exitCode).not.toBe(0);
   }, 10000);
+});
+
+// ── createWsAccessGuard — postAuthCheck (AC9 Rolle-403, vps-ssh-terminal S-263) ──
+// Fake wss/socket (no live HTTP server needed — createWsAccessGuard operates purely
+// on req/socket/head + wss.handleUpgrade/emit).
+
+function makeFakeWss() {
+  return {
+    handleUpgrade: jest.fn((_req, _socket, _head, cb) => cb({ fakeWs: true })),
+    emit: jest.fn(),
+  };
+}
+
+function makeFakeSocket() {
+  return { write: jest.fn(), destroy: jest.fn() };
+}
+
+describe('createWsAccessGuard — postAuthCheck (AC9 Rolle-403, S-263)', () => {
+  afterEach(() => {
+    delete process.env.DEV_NO_ACCESS;
+    delete process.env.NODE_ENV;
+  });
+
+  it('backward-compat: no postAuthCheck option → existing /ws/terminal behavior unaffected', async () => {
+    const token = await buildToken({ email: 'user@example.com' });
+    const wss = makeFakeWss();
+    const socket = makeFakeSocket();
+    const guard = createWsAccessGuard(wss, { aud: AUD, keySet });
+    await guard({ headers: { 'cf-access-jwt-assertion': token } }, socket, Buffer.alloc(0));
+    expect(wss.handleUpgrade).toHaveBeenCalledTimes(1);
+    expect(socket.destroy).not.toHaveBeenCalled();
+  });
+
+  it('valid JWT + postAuthCheck() returns false → 403 + destroy, handleUpgrade NOT called', async () => {
+    const token = await buildToken({ email: 'notadmin@example.com' });
+    const wss = makeFakeWss();
+    const socket = makeFakeSocket();
+    const guard = createWsAccessGuard(wss, {
+      aud: AUD,
+      keySet,
+      postAuthCheck: (req) => req.identity?.email === 'admin@example.com',
+    });
+    await guard({ headers: { 'cf-access-jwt-assertion': token } }, socket, Buffer.alloc(0));
+    expect(socket.write).toHaveBeenCalledWith(expect.stringContaining('403'));
+    expect(socket.destroy).toHaveBeenCalledTimes(1);
+    expect(wss.handleUpgrade).not.toHaveBeenCalled();
+  });
+
+  it('valid JWT + postAuthCheck() returns true → handleUpgrade called, identity already set', async () => {
+    const token = await buildToken({ email: 'admin@example.com' });
+    const wss = makeFakeWss();
+    const socket = makeFakeSocket();
+    let seenIdentity;
+    const guard = createWsAccessGuard(wss, {
+      aud: AUD,
+      keySet,
+      postAuthCheck: (req) => {
+        seenIdentity = req.identity;
+        return true;
+      },
+    });
+    await guard({ headers: { 'cf-access-jwt-assertion': token } }, socket, Buffer.alloc(0));
+    expect(wss.handleUpgrade).toHaveBeenCalledTimes(1);
+    expect(seenIdentity).toEqual({ email: 'admin@example.com' });
+  });
+
+  it('missing token → 403 regardless of postAuthCheck (AccessGuard-403 still takes precedence)', async () => {
+    const wss = makeFakeWss();
+    const socket = makeFakeSocket();
+    const postAuthCheck = jest.fn(() => true);
+    const guard = createWsAccessGuard(wss, { aud: AUD, keySet, postAuthCheck });
+    await guard({ headers: {} }, socket, Buffer.alloc(0));
+    expect(socket.destroy).toHaveBeenCalledTimes(1);
+    expect(wss.handleUpgrade).not.toHaveBeenCalled();
+    // postAuthCheck must never even run — the Access-Mauer rejects before role check.
+    expect(postAuthCheck).not.toHaveBeenCalled();
+  });
+
+  it('dev-bypass (DEV_NO_ACCESS=1) + postAuthCheck() returns false → 403, no bypass of the role check', async () => {
+    process.env.DEV_NO_ACCESS = '1';
+    delete process.env.NODE_ENV;
+    const wss = makeFakeWss();
+    const socket = makeFakeSocket();
+    const guard = createWsAccessGuard(wss, { postAuthCheck: () => false });
+    await guard({ headers: {} }, socket, Buffer.alloc(0));
+    expect(socket.destroy).toHaveBeenCalledTimes(1);
+    expect(wss.handleUpgrade).not.toHaveBeenCalled();
+  });
+
+  it('dev-bypass (DEV_NO_ACCESS=1) + postAuthCheck() returns true → handleUpgrade called', async () => {
+    process.env.DEV_NO_ACCESS = '1';
+    delete process.env.NODE_ENV;
+    const wss = makeFakeWss();
+    const socket = makeFakeSocket();
+    const guard = createWsAccessGuard(wss, { postAuthCheck: () => true });
+    await guard({ headers: {} }, socket, Buffer.alloc(0));
+    expect(wss.handleUpgrade).toHaveBeenCalledTimes(1);
+  });
 });

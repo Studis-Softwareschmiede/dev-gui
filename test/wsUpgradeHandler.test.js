@@ -1,11 +1,14 @@
 /**
  * @file wsUpgradeHandler.test.js
  *
- * Unit tests for the WS-upgrade pathname-match logic (S-124, AC8).
+ * Unit tests for the WS-upgrade pathname-match logic (S-124, AC8 + vps-ssh-terminal
+ * AC5/AC9, S-263).
  *
  * The upgrade handler in server.js now uses:
  *   const { pathname } = new URL(req.url, 'ws://localhost');
- *   if (pathname === '/ws/terminal') { wsGuard(...) } else { socket.destroy() }
+ *   if (pathname === '/ws/terminal') { wsGuard(...) }
+ *   else if (pathname === '/ws/vps-terminal') { wsVpsTerminalGuard(...) }
+ *   else { socket.destroy() }
  *
  * These tests verify the extraction logic directly (the exact same expression
  * used in server.js) — no live HTTP server needed.
@@ -16,6 +19,12 @@
  *   AC8 — /ws/terminal without query also passes (backward compat)
  *   AC8 — a different pathname (e.g. /ws/other) is rejected
  *   AC8 — malformed req.url (new URL throws) → graceful destroy, no unhandled throw
+ *
+ * Covers (vps-ssh-terminal, S-263):
+ *   AC5/AC9 — /ws/vps-terminal reaches its OWN guard (wsVpsTerminalGuard), distinct
+ *             from /ws/terminal's wsGuard — verifies the three-way pathname dispatch
+ *             (Verdrahtung only; the guard's own AccessGuard/Rollen-403-Verhalten ist
+ *             in test/AccessGuard.test.js abgedeckt, kein Doppel-Test hier).
  */
 
 import { describe, it, expect } from '@jest/globals';
@@ -24,10 +33,12 @@ import { describe, it, expect } from '@jest/globals';
  * Mirrors the exact logic from server.js upgrade handler:
  *   try { pathname = new URL(req.url, 'ws://localhost').pathname }
  *   catch { socket.destroy(); return; }
- *   if (pathname === '/ws/terminal') { wsGuard(...) } else { socket.destroy() }
+ *   if (pathname === '/ws/terminal') { wsGuard(...) }
+ *   else if (pathname === '/ws/vps-terminal') { wsVpsTerminalGuard(...) }
+ *   else { socket.destroy() }
  *
- * Returns 'guard' when the connection should be forwarded to the WS guard,
- * 'destroy' when it should be destroyed.
+ * Returns 'guard' for /ws/terminal, 'vps-guard' for /ws/vps-terminal,
+ * 'destroy' for everything else (or a malformed URL).
  */
 function simulateUpgradeDecision(reqUrl) {
   let pathname;
@@ -36,7 +47,9 @@ function simulateUpgradeDecision(reqUrl) {
   } catch {
     return 'destroy';
   }
-  return pathname === '/ws/terminal' ? 'guard' : 'destroy';
+  if (pathname === '/ws/terminal') return 'guard';
+  if (pathname === '/ws/vps-terminal') return 'vps-guard';
+  return 'destroy';
 }
 
 describe('WS-upgrade handler — AC8: pathname-match (S-124)', () => {
@@ -56,6 +69,16 @@ describe('WS-upgrade handler — AC8: pathname-match (S-124)', () => {
 
     it('/ws/terminal?project=x&extra=y → guard (multiple query params)', () => {
       expect(simulateUpgradeDecision('/ws/terminal?project=x&extra=y')).toBe('guard');
+    });
+  });
+
+  describe('vps-ssh-terminal AC5/AC9 — /ws/vps-terminal reaches its own guard (S-263)', () => {
+    it('/ws/vps-terminal → vps-guard (distinct from /ws/terminal)', () => {
+      expect(simulateUpgradeDecision('/ws/vps-terminal')).toBe('vps-guard');
+    });
+
+    it('/ws/vps-terminal never routes to the Claude-terminal guard', () => {
+      expect(simulateUpgradeDecision('/ws/vps-terminal')).not.toBe('guard');
     });
   });
 

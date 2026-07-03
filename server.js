@@ -88,6 +88,7 @@
  *   PUT    /api/settings/notifications                             → Settings speichern mit Validierung (push-notifications S-183 AC2)
  *   POST   /api/settings/notifications/test                        → { ok, error? } Test-Versand (push-notifications S-182 AC5)
  *   WS   /ws/terminal                             → PtyManager bridge (guarded by AccessGuard)
+ *   WS   /ws/vps-terminal                         → SshPtyManager bridge — {type:"open",provider,serverId,user} Handshake, root|alex-only, AccessGuard + CRED_ADMIN_EMAILS-Rollenschutz + Audit-First (vps-ssh-terminal AC5/AC6/AC9, S-263)
  */
 
 import { createServer } from 'node:http';
@@ -113,6 +114,7 @@ import { buildWorkspaceRootResolver } from './src/workspacePath.js';
 import { VpsProviderRegistry } from './src/vps/VpsProviderRegistry.js';
 import { resolveVpsTarget } from './src/vpsContainerRouter.js';
 import { SshPtyManager } from './src/SshPtyManager.js';
+import { VpsTerminalGateway, checkVpsTerminalAuthz } from './src/VpsTerminalGateway.js';
 import { CloudflareApi } from './src/cloudflare/CloudflareApi.js';
 import { LockoutGuard } from './src/cloudflare/LockoutGuard.js';
 import { VpsDockerControl } from './src/deploy/VpsDockerControl.js';
@@ -726,6 +728,19 @@ new WsGateway(wss, ptyRegistry);
 
 const wsGuard = createWsAccessGuard(wss);
 
+// ── WS /ws/vps-terminal (vps-ssh-terminal AC5/AC6/AC9, S-263) ────────────────
+// Getrennte WebSocketServer-Instanz (eigener noServer-Server, kein geteilter
+// Broadcast mit dem Claude-Terminal — jede WS = genau eine SSH-Sitzung, Isolation
+// von PtyManager/WsGateway laut Spec-NFR). Rollenschutz (CRED_ADMIN_EMAILS,
+// checkVpsTerminalAuthz) läuft im Upgrade-Interceptor VOR dem Handshake
+// (postAuthCheck) — eine unautorisierte Verbindung erreicht die Gateway-Ebene nie.
+const wssVpsTerminal = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
+new VpsTerminalGateway(wssVpsTerminal, sshPtyManager, { auditStore });
+
+const wsVpsTerminalGuard = createWsAccessGuard(wssVpsTerminal, {
+  postAuthCheck: (req) => checkVpsTerminalAuthz(req.identity).allowed,
+});
+
 server.on('upgrade', (req, socket, head) => {
   // AC8 (S-124): match on pathname only, not the full URL including query-string.
   // A request to /ws/terminal?project=<x> must not be rejected before the handshake.
@@ -739,6 +754,8 @@ server.on('upgrade', (req, socket, head) => {
   }
   if (pathname === '/ws/terminal') {
     wsGuard(req, socket, head);
+  } else if (pathname === '/ws/vps-terminal') {
+    wsVpsTerminalGuard(req, socket, head);
   } else {
     socket.destroy();
   }

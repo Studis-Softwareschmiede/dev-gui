@@ -104,17 +104,32 @@ export function createAccessGuard(options = {}) {
  * It calls `wsServer.handleUpgrade` on success, destroys the socket on failure.
  *
  * @param {import('ws').WebSocketServer} wss
- * @param {AccessGuardOptions} [options]
+ * @param {AccessGuardOptions & { postAuthCheck?: (req: import('http').IncomingMessage) => boolean }} [options]
+ *   `postAuthCheck` (vps-ssh-terminal AC9, S-263) — optional additional identity-/role-check
+ *   evaluated AFTER `req.identity` is set (both the dev-bypass and the verified-JWT branch),
+ *   but BEFORE `handleUpgrade` is called. Returning `false` rejects the upgrade with the same
+ *   fail-closed 403 response as a missing/invalid Access token — no WS connection is ever
+ *   established for a caller that fails the role check. Endpoints that don't pass this option
+ *   (e.g. the existing `/ws/terminal`) are unaffected (backward-compatible default: always `true`).
  * @returns {(req: import('http').IncomingMessage, socket: import('net').Socket, head: Buffer) => void}
  */
 export function createWsAccessGuard(wss, options = {}) {
   const aud = options.aud ?? process.env.ACCESS_AUD;
   const keySet = buildKeySet(options);
+  const postAuthCheck = typeof options.postAuthCheck === 'function' ? options.postAuthCheck : null;
+
+  const rejectForbidden = (socket) => {
+    socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+    socket.destroy();
+  };
 
   return async function wsAccessGuard(req, socket, head) {
     // Dev bypass
     if (process.env.DEV_NO_ACCESS === '1' && process.env.NODE_ENV !== 'production') {
       req.identity = { email: 'dev@local' };
+      if (postAuthCheck && !postAuthCheck(req)) {
+        return rejectForbidden(socket);
+      }
       wss.handleUpgrade(req, socket, head, (ws) => {
         wss.emit('connection', ws, req);
       });
@@ -124,15 +139,11 @@ export function createWsAccessGuard(wss, options = {}) {
     const token = req.headers['cf-access-jwt-assertion'];
 
     if (!token || typeof token !== 'string' || token.trim() === '') {
-      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-      socket.destroy();
-      return;
+      return rejectForbidden(socket);
     }
 
     if (!keySet) {
-      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-      socket.destroy();
-      return;
+      return rejectForbidden(socket);
     }
 
     try {
@@ -143,13 +154,15 @@ export function createWsAccessGuard(wss, options = {}) {
 
       const email = typeof payload.email === 'string' ? payload.email : null;
       req.identity = { email };
+      if (postAuthCheck && !postAuthCheck(req)) {
+        return rejectForbidden(socket);
+      }
       wss.handleUpgrade(req, socket, head, (ws) => {
         wss.emit('connection', ws, req);
       });
     } catch {
       // Fail-closed: any error → reject upgrade (AC1, fail-closed)
-      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-      socket.destroy();
+      rejectForbidden(socket);
     }
   };
 }
