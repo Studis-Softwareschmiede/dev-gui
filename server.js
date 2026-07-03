@@ -140,7 +140,7 @@ import { HeadlessReconcileRunner } from './src/HeadlessReconcileRunner.js';
 import { ObsidianIngestRunner } from './src/ObsidianIngestRunner.js';
 import { ClaudeAuthHealthService } from './src/ClaudeAuthHealthService.js';
 import { KnowledgeSourceService } from './src/KnowledgeSourceService.js';
-import { read as readNotificationSettings } from './src/NotificationSettingsStore.js';
+import { read as readNotificationSettings, migrateEventDefaults } from './src/NotificationSettingsStore.js';
 import { read as readTickerSettings } from './src/TickerSettingsStore.js';
 import { NotificationWatcher } from './src/NotificationWatcher.js';
 import { sendNotification } from './src/NotifyService.js';
@@ -174,6 +174,13 @@ const credentialStore = new CredentialStore();
 await credentialStore.assertCredentialConfig().catch((err) => {
   console.error(err.message);
   process.exit(1);
+});
+
+// ── Notification-Event-Defaults-Migration (notification-event-defaults AC3/AC4) ──
+// Genau einmal beim Server-Start, VOR jedem Lesen/Verwenden der Notification-Settings.
+// Best-effort — migrateEventDefaults() wirft nie nach außen (kein Boot-Abbruch möglich).
+await migrateEventDefaults().catch((err) => {
+  console.error('[server] migrateEventDefaults fehlgeschlagen (best-effort, kein Boot-Abbruch):', err.message);
 });
 
 const app = express();

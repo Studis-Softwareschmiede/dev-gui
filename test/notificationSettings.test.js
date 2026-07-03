@@ -1,5 +1,6 @@
 /**
- * notificationSettings.test.js — Tests für NotificationSettingsStore + notifications-Router (S-183).
+ * notificationSettings.test.js — Tests für NotificationSettingsStore + notifications-Router
+ * (S-183 push-notifications + notification-event-defaults).
  *
  * Covers (push-notifications S-183):
  *   AC1  — Persistenz: Store-Roundtrip (write→read); überleben Neustart (Dateipersistenz);
@@ -13,6 +14,24 @@
  *           AWS EC2 IPv6 IMDS [fd00:ec2::254] + bare [::1] (security/R05-Fix Iter.3);
  *           keine Teilspeicherung bei Validierungsfehler (400 → read() liefert alten Stand).
  *   AC10 — Response enthält NIE Token-Klartext; has_token ist Bool (kein String/Klartext).
+ *
+ * Covers (notification-event-defaults):
+ *   AC1  — ALLOWED_EVENTS additiv um drain_done/questions_pending; DEFAULT_SETTINGS.events
+ *           = ['drain_done','tunnel_missing']; frische Installation (kein persistiertes
+ *           File) liefert über read()/GET genau diesen Default-Satz.
+ *   AC2  — PUT akzeptiert drain_done/questions_pending (⊆ ALLOWED_EVENTS) → 200,
+ *           persistiert (HTTP-Ebene, Roundtrip); Nicht-Katalog-Schlüssel weiterhin
+ *           400 { field: 'events' } (bereits über die bestehende AC2-Validierungs-Suite
+ *           abgedeckt, Konstante ist die einzige Änderung).
+ *   AC3  — migrateEventDefaults(): einmalige Migration ohne Marker, idempotent bei
+ *           zweitem Lauf (Marker gesetzt), Marker überlebt read()/write()
+ *           (_mergeWithDefaults verwirft ihn nicht), Alt-Datei ohne events-Feld gilt
+ *           als nicht migriert.
+ *   AC4  — Migration ändert ausschließlich events + Marker (enabled/server/topic/priority
+ *           byte-identisch); best-effort bei CRED_STORE_DIR fehlend / Datei fehlt (ENOENT) /
+ *           kaputtes JSON — nie ein Crash.
+ *   AC5  — story_done/story_blocked/feature_done bleiben über PUT setzbar (HTTP-Ebene) —
+ *           nur nicht mehr Default.
  */
 
 import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals';
@@ -20,7 +39,7 @@ import express from 'express';
 import { createServer, request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { mkdir, rm, readFile } from 'node:fs/promises';
+import { mkdir, rm, readFile, writeFile } from 'node:fs/promises';
 
 // ── HTTP-Helpers ──────────────────────────────────────────────────────────────
 
@@ -112,7 +131,8 @@ describe('AC1 — NotificationSettingsStore Persistenz', () => {
     expect(settings.server).toBe('https://ntfy.sh');
     expect(settings.topic).toBe('');
     expect(settings.priority).toBeNull();
-    expect(settings.events).toEqual([]);
+    // AC1 notification-event-defaults: frische Installation → neue Default-Events.
+    expect(settings.events).toEqual(['drain_done', 'tunnel_missing']);
   });
 
   it('write→read Roundtrip: gespeicherte Werte werden zurückgeliefert', async () => {
@@ -161,6 +181,172 @@ describe('AC1 — NotificationSettingsStore Persistenz', () => {
     jest.resetModules();
     const { write } = await import('../src/NotificationSettingsStore.js');
     await expect(write({ enabled: false })).rejects.toThrow(/CRED_STORE_DIR/);
+  });
+});
+
+// ── AC3/AC4: migrateEventDefaults() — einmalige, idempotente Migration ────────
+
+describe('AC3/AC4 — migrateEventDefaults() Migration (notification-event-defaults)', () => {
+  let tmpDir;
+  let filePath;
+  let origCredStoreDir;
+
+  beforeEach(async () => {
+    tmpDir = join(tmpdir(), `notif-migrate-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(tmpDir, { recursive: true });
+    filePath = join(tmpDir, 'notification-settings.json');
+    origCredStoreDir = process.env.CRED_STORE_DIR;
+    process.env.CRED_STORE_DIR = tmpDir;
+    jest.resetModules();
+  });
+
+  afterEach(async () => {
+    if (origCredStoreDir !== undefined) {
+      process.env.CRED_STORE_DIR = origCredStoreDir;
+    } else {
+      delete process.env.CRED_STORE_DIR;
+    }
+    await rm(tmpDir, { recursive: true, force: true });
+    jest.resetModules();
+  });
+
+  it('AC3: Alt-Datei ohne Marker → events wird auf [drain_done, tunnel_missing] gesetzt + Marker gesetzt', async () => {
+    // Alt-Datei simulieren: alter Event-Satz, kein eventsDefaultsVersion-Marker.
+    await writeFile(filePath, JSON.stringify({
+      enabled: true,
+      server: 'https://my-ntfy.example.com',
+      topic: 'alerts',
+      priority: 4,
+      events: ['story_done', 'story_blocked'],
+    }, null, 2), 'utf8');
+
+    const { migrateEventDefaults } = await import('../src/NotificationSettingsStore.js');
+    await migrateEventDefaults();
+
+    const raw = JSON.parse(await readFile(filePath, 'utf8'));
+    expect(raw.events).toEqual(['drain_done', 'tunnel_missing']);
+    expect(raw.eventsDefaultsVersion).toBe(2);
+  });
+
+  it('AC4: Migration ändert AUSSCHLIESSLICH events + Marker — enabled/server/topic/priority bleiben byte-identisch', async () => {
+    const original = {
+      enabled: true,
+      server: 'https://my-ntfy.example.com',
+      topic: 'alerts',
+      priority: 4,
+      events: ['story_done'],
+    };
+    await writeFile(filePath, JSON.stringify(original, null, 2), 'utf8');
+
+    const { migrateEventDefaults } = await import('../src/NotificationSettingsStore.js');
+    await migrateEventDefaults();
+
+    const raw = JSON.parse(await readFile(filePath, 'utf8'));
+    expect(raw.enabled).toBe(original.enabled);
+    expect(raw.server).toBe(original.server);
+    expect(raw.topic).toBe(original.topic);
+    expect(raw.priority).toBe(original.priority);
+  });
+
+  it('AC3: Alt-Datei ohne events-Feld gilt als nicht migriert → wird migriert', async () => {
+    await writeFile(filePath, JSON.stringify({
+      enabled: false,
+      server: 'https://ntfy.sh',
+      topic: '',
+      priority: null,
+    }, null, 2), 'utf8');
+
+    const { migrateEventDefaults } = await import('../src/NotificationSettingsStore.js');
+    await migrateEventDefaults();
+
+    const raw = JSON.parse(await readFile(filePath, 'utf8'));
+    expect(raw.events).toEqual(['drain_done', 'tunnel_missing']);
+    expect(raw.eventsDefaultsVersion).toBe(2);
+  });
+
+  it('AC3: zweiter Migrations-Lauf (Marker vorhanden) lässt events unverändert (idempotent, kein erneuter Reset)', async () => {
+    await writeFile(filePath, JSON.stringify({
+      enabled: false,
+      server: 'https://ntfy.sh',
+      topic: '',
+      priority: null,
+      events: ['story_done', 'story_blocked'],
+    }, null, 2), 'utf8');
+
+    const { migrateEventDefaults, write, read } = await import('../src/NotificationSettingsStore.js');
+
+    // Erster Lauf: migriert auf die neuen Defaults.
+    await migrateEventDefaults();
+    let settings = await read();
+    expect(settings.events).toEqual(['drain_done', 'tunnel_missing']);
+
+    // Owner wählt danach in der GUI eigene Ereignisse (PUT → write()).
+    await write({ events: ['story_done'] });
+
+    // Zweiter Migrations-Lauf (z.B. nächster Server-Neustart): Marker bereits gesetzt → No-op.
+    await migrateEventDefaults();
+    settings = await read();
+    expect(settings.events).toEqual(['story_done']);
+  });
+
+  it('AC3: Marker überlebt read()/write() (wird nicht durch Feld-Whitelisting verworfen)', async () => {
+    await writeFile(filePath, JSON.stringify({
+      enabled: false,
+      server: 'https://ntfy.sh',
+      topic: '',
+      priority: null,
+      events: [],
+    }, null, 2), 'utf8');
+
+    const { migrateEventDefaults, write } = await import('../src/NotificationSettingsStore.js');
+    await migrateEventDefaults();
+
+    // write() liest intern read() (mergt mit Defaults) — Marker muss danach noch auf der Platte stehen.
+    await write({ enabled: true });
+    const raw = JSON.parse(await readFile(filePath, 'utf8'));
+    expect(raw.eventsDefaultsVersion).toBe(2);
+  });
+
+  it('Edge-Case: events: [] nach Migration bleibt [] über Neustarts (Marker verhindert Re-Reset)', async () => {
+    await writeFile(filePath, JSON.stringify({
+      enabled: false,
+      server: 'https://ntfy.sh',
+      topic: '',
+      priority: null,
+      events: ['story_done'],
+    }, null, 2), 'utf8');
+
+    const { migrateEventDefaults, write } = await import('../src/NotificationSettingsStore.js');
+    await migrateEventDefaults();
+    await write({ events: [] });
+
+    // Simuliertes Neustart-Reload:
+    jest.resetModules();
+    const { migrateEventDefaults: migrateAgain, read: readAgain } = await import('../src/NotificationSettingsStore.js');
+    await migrateAgain();
+    const settings = await readAgain();
+    expect(settings.events).toEqual([]);
+  });
+
+  it('Edge-Case: CRED_STORE_DIR nicht gesetzt → No-op, kein Crash', async () => {
+    delete process.env.CRED_STORE_DIR;
+    jest.resetModules();
+    const { migrateEventDefaults } = await import('../src/NotificationSettingsStore.js');
+    await expect(migrateEventDefaults()).resolves.toBeUndefined();
+  });
+
+  it('Best-effort: keine persistierte Datei (ENOENT) → No-op, kein Crash', async () => {
+    // tmpDir existiert, aber notification-settings.json wurde nie geschrieben.
+    const { migrateEventDefaults } = await import('../src/NotificationSettingsStore.js');
+    await expect(migrateEventDefaults()).resolves.toBeUndefined();
+  });
+
+  it('Best-effort: kaputte JSON-Datei → No-op, kein Crash (degradierend geloggt)', async () => {
+    await writeFile(filePath, '{ this is not valid json', 'utf8');
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const { migrateEventDefaults } = await import('../src/NotificationSettingsStore.js');
+    await expect(migrateEventDefaults()).resolves.toBeUndefined();
+    errSpy.mockRestore();
   });
 });
 
@@ -322,6 +508,16 @@ describe('AC2 — validate() Feldvalidierung', () => {
     expect(result.ok).toBe(true);
   });
 
+  it('AC2/AC5 notification-event-defaults: neue Schlüssel drain_done/questions_pending → ok', () => {
+    const result = validate({
+      enabled: false,
+      server: 'https://ntfy.sh',
+      topic: '',
+      events: ['drain_done', 'questions_pending', 'tunnel_missing'],
+    });
+    expect(result.ok).toBe(true);
+  });
+
   it('priority: 0 (unter Min) → 400 field=priority', () => {
     const result = validate({ enabled: false, server: 'https://ntfy.sh', topic: '', events: [], priority: 0 });
     expect(result.ok).toBe(false);
@@ -404,7 +600,8 @@ describe('AC2 — GET/PUT /api/settings/notifications (HTTP-Ebene)', () => {
     expect(res.body.enabled).toBe(false);
     expect(res.body.server).toBe('https://ntfy.sh');
     expect(res.body.topic).toBe('');
-    expect(res.body.events).toEqual([]);
+    // AC1 notification-event-defaults: frische Installation → neue Default-Events.
+    expect(res.body.events).toEqual(['drain_done', 'tunnel_missing']);
     expect(res.body.has_token).toBe(false);
   });
 
@@ -452,6 +649,41 @@ describe('AC2 — GET/PUT /api/settings/notifications (HTTP-Ebene)', () => {
     expect(res.body.topic).toBe('alerts');
     expect(res.body.priority).toBe(3);
     expect(res.body.events).toEqual(['story_done']);
+  });
+
+  it('AC2 notification-event-defaults: PUT mit drain_done/questions_pending → 200, persistiert', async () => {
+    const app = await makeApp();
+    const s = await startServer(app);
+    server = s.server;
+    port = s.port;
+
+    const res = await httpPut(port, '/api/settings/notifications', {
+      enabled: true,
+      server: 'https://ntfy.sh',
+      topic: 'alerts',
+      events: ['drain_done', 'questions_pending', 'tunnel_missing'],
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.events).toEqual(['drain_done', 'questions_pending', 'tunnel_missing']);
+
+    const getRes = await httpGet(port, '/api/settings/notifications');
+    expect(getRes.body.events).toEqual(['drain_done', 'questions_pending', 'tunnel_missing']);
+  });
+
+  it('AC5 notification-event-defaults: PUT mit story_done/story_blocked/feature_done bleibt gültig (nur nicht mehr Default)', async () => {
+    const app = await makeApp();
+    const s = await startServer(app);
+    server = s.server;
+    port = s.port;
+
+    const res = await httpPut(port, '/api/settings/notifications', {
+      enabled: true,
+      server: 'https://ntfy.sh',
+      topic: 'alerts',
+      events: ['story_done', 'story_blocked', 'feature_done'],
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.events).toEqual(['story_done', 'story_blocked', 'feature_done']);
   });
 
   it('PUT → GET Roundtrip: gespeicherte Werte werden zurückgeliefert', async () => {

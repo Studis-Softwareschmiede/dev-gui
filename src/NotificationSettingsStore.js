@@ -27,8 +27,31 @@ import { randomBytes } from 'node:crypto';
 export const NTFY_PRIORITY_MIN = 1;
 export const NTFY_PRIORITY_MAX = 5;
 
-/** Erlaubte Ereignis-Schlüssel (AC2 push-notifications; AC7 vps-tunnel-drift-notify). */
-export const ALLOWED_EVENTS = ['story_done', 'story_blocked', 'feature_done', 'tunnel_missing'];
+/**
+ * Erlaubte Ereignis-Schlüssel (AC2 push-notifications; AC7 vps-tunnel-drift-notify;
+ * AC1 notification-event-defaults: additiv um 'drain_done' + 'questions_pending' erweitert).
+ */
+export const ALLOWED_EVENTS = [
+  'story_done',
+  'story_blocked',
+  'feature_done',
+  'tunnel_missing',
+  'drain_done',
+  'questions_pending',
+];
+
+/**
+ * Feld-Name des Migrations-Markers (persistiert, überlebt read()/write() —
+ * notification-event-defaults AC3). Aktueller Versionsstand: 2 (Default-Reset
+ * auf ['drain_done','tunnel_missing']).
+ */
+export const EVENTS_DEFAULTS_VERSION_FIELD = 'eventsDefaultsVersion';
+
+/** Aktuelle Migrations-Version (notification-event-defaults AC3). */
+export const EVENTS_DEFAULTS_VERSION = 2;
+
+/** Neue Default-Events nach der einmaligen Migration (notification-event-defaults AC1/AC3). */
+const MIGRATED_DEFAULT_EVENTS = ['drain_done', 'tunnel_missing'];
 
 /**
  * Erlaubtes ntfy-Topic-Format: nur Buchstaben, Ziffern, `-` und `_`, 1–64 Zeichen.
@@ -47,13 +70,17 @@ export const NTFY_TOPIC_RE = /^[A-Za-z0-9_-]{1,64}$/;
  * @property {string[]} events   - Teilmenge von ALLOWED_EVENTS
  */
 
-/** Default-Konfiguration (überschrieben durch gespeicherte JSON). */
+/**
+ * Default-Konfiguration (überschrieben durch gespeicherte JSON).
+ * events: ['drain_done','tunnel_missing'] (notification-event-defaults AC1) —
+ * gilt für frische Installationen ohne persistierte Datei.
+ */
 const DEFAULT_SETTINGS = {
   enabled: false,
   server: 'https://ntfy.sh',
   topic: '',
   priority: null,
-  events: [],
+  events: [...MIGRATED_DEFAULT_EVENTS],
 };
 
 /**
@@ -235,6 +262,82 @@ export function validate(body) {
   return { ok: true };
 }
 
+/**
+ * Einmalige, idempotente Migration der Bestands-Events (notification-event-defaults
+ * AC3/AC4). Beim Server-Start (server.js) genau einmal aufgerufen, bevor Settings
+ * gelesen/verwendet werden.
+ *
+ * Verhalten:
+ *   - `CRED_STORE_DIR` nicht gesetzt → No-op (keine persistierte Datei, Code-Defaults
+ *     greifen bereits, AC4 Edge-Case).
+ *   - Persistierte Datei existiert nicht (ENOENT) → No-op (Code-Defaults sind bereits
+ *     der neue Satz, kein Schreib-Bedarf).
+ *   - Datei existiert, Marker (`eventsDefaultsVersion`) fehlt → `events` wird auf
+ *     `['drain_done','tunnel_missing']` **gesetzt** (überschrieben, A1), der Marker
+ *     gesetzt, atomar geschrieben (tmp+rename). Ändert AUSSCHLIESSLICH `events` +
+ *     Marker — alle anderen Felder bleiben byte-identisch (AC4).
+ *   - Marker bereits vorhanden → No-op (kein erneuter Reset, idempotent, AC3).
+ *
+ * Best-effort: wirft NIE nach außen — jeder Fehler (Lesen/Parsen/Schreiben) wird
+ * degradierend geloggt (kein Secret im Log), der Server-Boot darf nie daran scheitern.
+ *
+ * @returns {Promise<void>}
+ */
+export async function migrateEventDefaults() {
+  const filePath = resolveSettingsFilePath();
+  if (!filePath) {
+    // CRED_STORE_DIR nicht gesetzt — keine persistierte Datei, Code-Defaults greifen.
+    return;
+  }
+
+  let raw;
+  try {
+    raw = await readFile(filePath, 'utf8');
+  } catch (err) {
+    if (err.code === 'ENOENT') {
+      // Noch keine Datei — frische Installation, Code-Defaults sind bereits der neue Satz.
+      return;
+    }
+    console.error('[NotificationSettingsStore] migrateEventDefaults: Lesen fehlgeschlagen (best-effort, kein Boot-Abbruch):', err.message);
+    return;
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    console.error('[NotificationSettingsStore] migrateEventDefaults: Parsen fehlgeschlagen (best-effort, kein Boot-Abbruch):', err.message);
+    return;
+  }
+
+  // Marker bereits gesetzt → bereits migriert, No-op (A1: kein erneuter Reset).
+  if (parsed?.[EVENTS_DEFAULTS_VERSION_FIELD] === EVENTS_DEFAULTS_VERSION) {
+    return;
+  }
+
+  // AC4: ausschließlich events + Marker ändern — alle anderen Felder byte-identisch
+  // durchreichen (kein Routing über _mergeWithDefaults, das würde normalisieren).
+  const migrated = {
+    ...parsed,
+    events: [...MIGRATED_DEFAULT_EVENTS],
+    [EVENTS_DEFAULTS_VERSION_FIELD]: EVENTS_DEFAULTS_VERSION,
+  };
+
+  const json = JSON.stringify(migrated, null, 2);
+  const tmpPath = filePath + '.tmp.' + randomBytes(4).toString('hex');
+
+  try {
+    await mkdir(dirname(filePath), { recursive: true });
+    await writeFile(tmpPath, json, { encoding: 'utf8', mode: 0o600 });
+    await chmod(tmpPath, 0o600);
+    await rename(tmpPath, filePath);
+    await chmod(filePath, 0o600).catch(() => {});
+  } catch (err) {
+    await unlink(tmpPath).catch(() => {});
+    console.error('[NotificationSettingsStore] migrateEventDefaults: Schreiben fehlgeschlagen (best-effort, kein Boot-Abbruch):', err.message);
+  }
+}
+
 // ── Private Helpers ──────────────────────────────────────────────────────────
 
 /**
@@ -300,7 +403,7 @@ function _isInternalHost(host) {
  * @private
  */
 function _mergeWithDefaults(parsed) {
-  return {
+  const merged = {
     enabled: typeof parsed.enabled === 'boolean' ? parsed.enabled : DEFAULT_SETTINGS.enabled,
     server: typeof parsed.server === 'string' && parsed.server.trim()
       ? parsed.server.trim()
@@ -313,4 +416,13 @@ function _mergeWithDefaults(parsed) {
       ? parsed.events.filter((e) => ALLOWED_EVENTS.includes(e))
       : DEFAULT_SETTINGS.events,
   };
+
+  // Migrations-Marker durchreichen (notification-event-defaults AC3): darf NICHT
+  // durch dieses Feld-Whitelisting verworfen werden, sonst wäre migrateEventDefaults()
+  // nicht idempotent (jeder read()/write()-Zyklus würde ihn sonst stillschweigend löschen).
+  if (parsed[EVENTS_DEFAULTS_VERSION_FIELD] !== undefined) {
+    merged[EVENTS_DEFAULTS_VERSION_FIELD] = parsed[EVENTS_DEFAULTS_VERSION_FIELD];
+  }
+
+  return merged;
 }

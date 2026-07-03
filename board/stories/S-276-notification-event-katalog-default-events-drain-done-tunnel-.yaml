@@ -2,7 +2,7 @@ id: S-276
 parent: F-056
 title: Notification-Event-Katalog + Default-Events {drain_done,tunnel_missing} + einmalige
   Bestands-Migration (NotificationSettingsStore, PUT-Validierung, server.js-Wiring)
-status: To Do
+status: In Progress
 priority: P1
 spec: docs/specs/notification-event-defaults.md
 implements:
@@ -23,10 +23,10 @@ estimate_note: 'estimator nicht dispatchbar (kein Task-Tool im requirement-Subag
   Heuristik score 8 (5 AC + 3 Komponenten: NotificationSettingsStore/PUT-Validierung/server.js
   + 0 label) -> L; baseline js|balanced|L ep 5.0 (n=5); keine Baseline-Tokens'
 confidence: low
-branch: null
+branch: feat/S-276-notification-event-defaults
 pr: null
 blocked_reason: null
 created_at: '2026-07-03T06:48:51Z'
-updated_at: '2026-07-03T06:50:13Z'
+updated_at: '2026-07-03T09:51:54Z'
 done_at: null
 tok_est: null
