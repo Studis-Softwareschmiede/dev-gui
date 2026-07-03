@@ -2,7 +2,7 @@ id: S-252
 parent: F-050
 title: Obsidian-Sync-Knopf im Spezifikation-Reiter (/agent-flow:from-notes --sync,
   kein Blind-Overwrite)
-status: To Do
+status: In Progress
 priority: P3
 spec: docs/specs/obsidian-sync-trigger.md
 implements:
@@ -25,9 +25,9 @@ dispo_forecast: null
 estimate_note: Heuristik score 11 -> L; estimator nicht dispatchbar, baseline-L-Naeherung;
   spiegelt reconcile-trigger-Muster
 confidence: low
-branch: null
+branch: feat/S-252-obsidian-sync-trigger
 pr: null
 blocked_reason: null
 created_at: '2026-07-02T05:42:16Z'
-updated_at: '2026-07-02T05:45:07Z'
+updated_at: '2026-07-03T05:02:27Z'
 done_at: null

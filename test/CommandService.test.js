@@ -19,6 +19,10 @@
  *          Trigger mit Ordner-Argument akzeptiert → 202, PTY-write inkl. Argument;
  *          Backwards-Compat der bisherigen Präfixe unverändert (isAllowed unit-level
  *          Schleife über DEFAULT_ALLOWED_COMMANDS + je-Prefix HTTP-Tests bleiben grün).
+ * Covers (obsidian-sync-trigger): AC4 — /agent-flow:from-notes --sync <path> (die
+ *          --sync-Variante) passiert dieselbe, unveränderte Allowlist/Sanitisierung
+ *          (Präfix-Match auf Token 1) → 202, volle Zeile inkl. --sync-Flag+Pfad
+ *          an die PTY geschrieben.
  *
  * Strategy:
  *   - Stub PtyManager (EventEmitter-based fake — no real PTY spawned)
@@ -658,6 +662,14 @@ describe('POST /api/command — HTTP integration', () => {
     expect(typeof res.body.commandId).toBe('string');
     expect(res.body.status).toBe('running');
     expect(ptyStub.written[0]).toBe('/agent-flow:from-notes Projekte/Mein-Projekt\n');
+  });
+
+  it('AC4 (obsidian-sync-trigger) — /agent-flow:from-notes --sync <path> → 202 and full line (incl. --sync flag) written to PTY', async () => {
+    const res = await post(port, '/api/command', { command: '/agent-flow:from-notes --sync Projekte/Mein-Projekt' });
+    expect(res.status).toBe(202);
+    expect(typeof res.body.commandId).toBe('string');
+    expect(res.body.status).toBe('running');
+    expect(ptyStub.written[0]).toBe('/agent-flow:from-notes --sync Projekte/Mein-Projekt\n');
   });
 
   it('AC4 (obsidian-project-intake) — backwards-compat: all pre-existing prefixes (incl. new-project) still accepted (202) after from-notes addition', async () => {

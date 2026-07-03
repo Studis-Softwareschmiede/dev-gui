@@ -140,6 +140,47 @@
  * AC7 — `useAuditSpec`-Hook bleibt über injizierbaren `fetchFn` entkoppelt
  *        testbar (kein Test hängt an einem realen Reconcile-Lauf).
  *
+ * obsidian-sync-trigger (S-252) — Button „Notizen-Stand abgleichen" (Obsidian-
+ * Sync), direkt unterhalb des Audit-Spec-Buttons (im selben Reiter neben/
+ * analog zum ReconcileTrigger, s. Render unten). Spiegelt dessen
+ * Dialog-/Busy-Guard-/Fehler-Muster (AC1/AC2/AC4/reconcile-trigger); anders
+ * als der (mittlerweile headless umgehängte) ReconcileTrigger POSTet dieser
+ * Trigger weiterhin **unverändert** über `POST /api/command` (Muster
+ * [[obsidian-project-intake]]/[[flow-trigger]]):
+ * AC1 — Button + Hinweistext (nennt `/agent-flow:from-notes --sync`, „zeigt
+ *        Widersprüche an, überschreibt nicht blind"); Touch-Target ≥ 44 px.
+ *        Ohne konfigurierten Vault (`GET /api/settings/obsidian-vault-path`
+ *        → `configured:false`) disabled + Text-Hinweis.
+ * AC2 — Klick (freie Session + konfigurierter Vault) öffnet einen
+ *        Bestätigungsdialog (`role="dialog"`); noch kein POST.
+ * AC3 — **Präzisierung (löst A1, s. Spec „Offene Annahmen"):** der Dialog
+ *        lädt `GET /api/settings/obsidian-vault/projects` und lässt den
+ *        Nutzer den passenden Vault-Projektordner explizit auswählen
+ *        (kein persistiertes Projekt↔Ordner-Mapping vorhanden). „Starten"
+ *        bleibt deaktiviert, bis ein Ordner gewählt ist; POSTet dann **genau
+ *        einmal** `{ command: '/agent-flow:from-notes --sync <path>',
+ *        projectPath }` an `/api/command`. „Abbrechen" schließt ohne POST.
+ * AC4 — Backend-Allowlist: `/agent-flow:from-notes` (inkl. `--sync`) bereits
+ *        zulässig (S-248) — siehe `test/CommandService.test.js`.
+ * AC5 — Bei `GET /api/session` → `busy` ist der Button deaktiviert (Text +
+ *        disabled); Klick öffnet keinen Dialog, kein POST.
+ * AC6 — **Präzisierung (Iteration 2, löst einen live nachgewiesenen Bug):**
+ *        `202` → Wechsel in den „Arbeiten"-Reiter über den dedizierten
+ *        `onShowArbeiten`-Callback (CockpitView `handleShowArbeiten`,
+ *        gespiegelt vom openSpec-/onShowBoard-Muster) — NICHT über das
+ *        generische App-Level `onNavigate('factory')`
+ *        (`useHashRouter.navigate`): das hätte den Hash von
+ *        `#/factory/<repo>` auf das bare `#/factory` zurückgesetzt
+ *        (`viewToHash` kennt kein Repo-Segment) und den Projekt-Kontext
+ *        verloren (Nutzer landet auf der Repo-Übersicht statt im Cockpit —
+ *        live per App-Integrationstest nachgewiesen). Kein stehengebliebenes
+ *        Element (Phase wird auf `idle` zurückgesetzt, SpecView/Spec-Reiter
+ *        unmountet beim Tab-Wechsel).
+ * AC7 — `409`/`400`/`500`/Netzwerkfehler → sichtbare Fehleranzeige mit
+ *        Reset, kein Tab-Wechsel, kein Crash.
+ * Edge-Case (A1, „kann nicht bestimmt werden"): leere/fehlerhafte
+ * Projektordner-Liste → Fehlerhinweis im Dialog, „Starten" bleibt deaktiviert.
+ *
  * Security (Floor):
  *   - Kein dangerouslySetInnerHTML / kein innerHTML.
  *   - Nur /api/board/projects/:slug/docs Endpunkte (hinter AccessGuard).
@@ -157,6 +198,11 @@
  *   - reconcile-inline-feedback: PR-Link nur aus dem gerenderten Audit-Inhalt
  *     (fester https?://-Präfix), `target="_blank"` stets mit
  *     `rel="noopener noreferrer"` (kein offener Redirect).
+ *   - obsidian-sync-trigger: kein neuer Backend-Endpunkt, keine neue Trust-
+ *     Boundary — der `<path>` stammt ausschließlich aus der server-confined
+ *     Vault-Projekt-Liste (kein Freitext); Bestätigungsdialog verhindert
+ *     versehentliches Auslösen; Befehl durchläuft die unveränderte
+ *     Sanitisierung/Allowlist ([[flow-trigger]] AC2).
  *
  * A11y (WCAG 2.1 AA):
  *   - Navigation als <nav> mit aria-label.
@@ -176,27 +222,38 @@
  *   — siehe headless-reconcile-runner; AC6/AC7 sind Backend — siehe src/routers/session.js, src/PtySessionRegistry.js)
  * Covers (headless-reconcile-runner): AC10, AC11, AC12, AC13, AC14, AC15
  * Covers (audit-spec-main-pane): AC1, AC2, AC3, AC4, AC5, AC6, AC7
+ * Covers (obsidian-sync-trigger): AC1, AC2, AC3, AC5, AC6, AC7 (AC4 — Backend-
+ *   Allowlist — siehe test/CommandService.test.js)
  *
  * @param {{
  *   projectSlug: string,
  *   initialPath?: string | null,
  *   onNavigate?: (view: string) => void,
+ *   onShowArbeiten?: () => void,
  *   fetchFn?: Function,
  *   reconcilePollInterval?: number,
  *   reconcileSafetyWindowMs?: number,
  *   reconcileMaxConsecutiveFailures?: number,
+ *   obsidianSyncPollInterval?: number,
  * }} props
  *   projectSlug   — Slug des aktiven Projekts (aus CockpitView/BoardAggregator)
  *   initialPath   — optional: direkt zu öffnende Datei (AC5, z.B. via Story-Klick)
- *   onNavigate    — nicht mehr genutzt vom Reconcile-Trigger (S-205 AC1 überschreibt
- *                    reconcile-trigger AC5); Prop bleibt für Signatur-Kompatibilität
- *                    mit CockpitView erhalten, aber ungenutzt.
+ *   onNavigate    — nicht mehr genutzt (weder vom Reconcile-Trigger seit S-205
+ *                    AC1, noch vom ObsidianSyncTrigger — s. onShowArbeiten
+ *                    unten); Prop bleibt für Signatur-Kompatibilität mit
+ *                    CockpitView erhalten, aber ungenutzt.
+ *   onShowArbeiten — (obsidian-sync-trigger AC6, Präzisierung Iteration 2)
+ *                    aufgerufen nach `202` — schaltet CockpitView auf den
+ *                    „Arbeiten"-Reiter (lokaler Tab-Wechsel, kein Hash-/App-
+ *                    Level-Navigate, s. ObsidianSyncTrigger unten).
  *   fetchFn       — injectable für Tests (default: globalThis.fetch); vom
- *                    Reconcile-Trigger UND vom Audit-Spec-Button genutzt
- *                    (Doku-Laden im Nav-Baum bleibt unverändert).
+ *                    Reconcile-Trigger, Audit-Spec-Button UND ObsidianSyncTrigger
+ *                    genutzt (Doku-Laden im Nav-Baum bleibt unverändert).
  *   reconcilePollInterval, reconcileSafetyWindowMs, reconcileMaxConsecutiveFailures —
  *                    injectable Test-Overrides für den Reconcile-Session-Poll
  *                    (S-205 AC2/AC8; Defaults siehe ReconcileTrigger unten).
+ *   obsidianSyncPollInterval — injectable Test-Override für den Busy-Guard-Poll
+ *                    des ObsidianSyncTrigger (obsidian-sync-trigger AC5).
  */
 
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
@@ -225,21 +282,26 @@ const ALL_SPEC_STATUSES = ['draft', 'active', 'superseded'];
  *   projectSlug: string,
  *   initialPath?: string | null,
  *   onNavigate?: (view: string) => void,
+ *   onShowArbeiten?: () => void,
  *   fetchFn?: Function,
  *   reconcilePollInterval?: number,
  *   reconcileSafetyWindowMs?: number,
  *   reconcileMaxConsecutiveFailures?: number,
+ *   obsidianSyncPollInterval?: number,
  * }} props
  */
 export function SpecView({
   projectSlug,
   initialPath,
-  // Kept for CockpitView signature compat — no longer called (S-205 AC1 überschreibt reconcile-trigger AC5).
+  // Nicht mehr genutzt (weder ReconcileTrigger seit S-205 AC1, noch
+  // ObsidianSyncTrigger — s. onShowArbeiten); Signatur-Kompatibilität.
   onNavigate: _onNavigate,
+  onShowArbeiten,
   fetchFn,
   reconcilePollInterval,
   reconcileSafetyWindowMs,
   reconcileMaxConsecutiveFailures,
+  obsidianSyncPollInterval,
 }) {
   // ── Doku-Struktur (Navigation) ─────────────────────────────────────────────
   const [docsState, setDocsState] = useState('idle');  // 'idle'|'loading'|'ok'|'error'
@@ -441,6 +503,15 @@ export function SpecView({
         <AuditSpecButton
           disabled={audit.isBtnDisabled}
           onClick={handleAuditClick}
+        />
+
+        {/* obsidian-sync-trigger (S-252): „Notizen-Stand abgleichen"-Button,
+            im selben Reiter neben/analog zum Reconcile-Trigger. */}
+        <ObsidianSyncTrigger
+          projectSlug={projectSlug}
+          fetchFn={fetchFn}
+          onShowArbeiten={onShowArbeiten}
+          pollInterval={obsidianSyncPollInterval}
         />
 
         {/* Filter (AC6) */}
@@ -1052,6 +1123,378 @@ function ReconcileTrigger({
             onClick={() => setPhase('idle')}
             aria-label="Fehlerstatus zurücksetzen"
             data-testid="reconcile-error-reset"
+          >
+            Zurücksetzen
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── ObsidianSyncTrigger (obsidian-sync-trigger AC1–AC7) ──────────────────────
+
+/** Busy-guard poll interval in ms (GET /api/session) — matches ReconcileTrigger default. */
+const OBSIDIAN_SYNC_SESSION_POLL_MS = 3_000;
+
+/**
+ * ObsidianSyncTrigger — „Notizen-Stand abgleichen"-Button (Obsidian-Sync),
+ * direkt unterhalb des Audit-Spec-Buttons (obsidian-sync-trigger AC1–AC7).
+ * Gespiegelt vom ReconcileTrigger-Muster (Bestätigungsdialog,
+ * Busy-Guard via `GET /api/session`, Fehler-/Reset-Handling) — POSTet aber
+ * weiterhin **unverändert** über `POST /api/command` (kein Headless-Runner-
+ * Umbau wie bei [[headless-reconcile-runner]] — diese Story ändert daran
+ * nichts, s. Spec-Verträge).
+ *
+ * `<path>` (obsidian-sync-trigger AC3, löst Annahme A1): der Bestätigungs-
+ * dialog lädt `GET /api/settings/obsidian-vault/projects`, sobald der Vault
+ * als konfiguriert erkannt ist, und lässt den Nutzer den passenden Vault-
+ * Projektordner explizit auswählen (kein persistiertes Projekt↔Ordner-
+ * Mapping vorhanden — s. Spec „Offene Annahmen" A1-Präzisierung). „Starten"
+ * bleibt deaktiviert, bis ein Ordner gewählt ist; eine leere/fehlerhafte
+ * Ordner-Liste zeigt einen Fehlerhinweis im Dialog (Edge-Case „kann nicht
+ * bestimmt werden", kein POST).
+ *
+ * AC6 — **Präzisierung (Iteration 2):** nach `202` wird `onShowArbeiten()`
+ * aufgerufen (lokaler Tab-Wechsel in CockpitView), NICHT das generische
+ * App-Level `onNavigate('factory')`. Live nachgewiesener Bug: `onNavigate`
+ * ist `useHashRouter().navigate`, dessen `viewToHash('factory')` IMMER das
+ * bare `#/factory` erzeugt (kein Repo-Segment) — von innerhalb des bereits
+ * gemounteten Cockpits (`#/factory/<repo>`) aufgerufen, hätte das den
+ * Projekt-Kontext verworfen und den Nutzer auf die Repo-Übersicht geworfen,
+ * statt den Lauf live im Terminal zu zeigen. `onShowArbeiten` schaltet
+ * stattdessen nur den internen `activeTab`-State von CockpitView um (Muster:
+ * `openSpec`/`onShowBoard`).
+ *
+ * @param {{
+ *   projectSlug: string,
+ *   fetchFn?: Function,
+ *   onShowArbeiten?: () => void,
+ *   pollInterval?: number,
+ * }} props
+ *   fetchFn        — injectable für Tests (default: globalThis.fetch)
+ *   onShowArbeiten — (AC6) aufgerufen nach 202 — schaltet CockpitView auf den
+ *                    „Arbeiten"-Reiter
+ *   pollInterval   — Poll-Intervall in ms für den Busy-Guard-Poll (default:
+ *                    OBSIDIAN_SYNC_SESSION_POLL_MS)
+ */
+function ObsidianSyncTrigger({
+  projectSlug,
+  fetchFn,
+  onShowArbeiten,
+  pollInterval = OBSIDIAN_SYNC_SESSION_POLL_MS,
+}) {
+  const fetchFnRef = useRef(fetchFn ?? globalThis.fetch.bind(globalThis));
+  useEffect(() => {
+    fetchFnRef.current = fetchFn ?? globalThis.fetch.bind(globalThis);
+  }, [fetchFn]);
+
+  const onShowArbeitenRef = useRef(onShowArbeiten);
+  useEffect(() => {
+    onShowArbeitenRef.current = onShowArbeiten;
+  }, [onShowArbeiten]);
+
+  // ── AC1: Vault-konfiguriert-Zustand ────────────────────────────────────────
+  /** 'loading' | 'configured' | 'unconfigured' */
+  const [vaultState, setVaultState] = useState('loading');
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetchFnRef.current('/api/settings/obsidian-vault-path');
+        if (cancelled) return;
+        if (!res.ok) { setVaultState('unconfigured'); return; }
+        const json = await res.json().catch(() => ({}));
+        if (cancelled) return;
+        setVaultState(json?.configured ? 'configured' : 'unconfigured');
+      } catch {
+        if (!cancelled) setVaultState('unconfigured');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // ── AC3 (löst A1): Vault-Projektordner-Liste, sobald Vault konfiguriert ───
+  /** 'idle' | 'loading' | 'ok' | 'empty' | 'error' */
+  const [folderState, setFolderState] = useState('idle');
+  const [folders, setFolders] = useState([]);
+  const [selectedPath, setSelectedPath] = useState('');
+
+  useEffect(() => {
+    if (vaultState !== 'configured') return undefined;
+    let cancelled = false;
+    setFolderState('loading');
+    (async () => {
+      let res;
+      try {
+        res = await fetchFnRef.current('/api/settings/obsidian-vault/projects');
+      } catch {
+        if (!cancelled) setFolderState('error');
+        return;
+      }
+      if (cancelled) return;
+      if (!res.ok) { setFolderState('error'); return; }
+      let json;
+      try {
+        json = await res.json();
+      } catch {
+        json = {};
+      }
+      if (cancelled) return;
+      const list = Array.isArray(json?.projects) ? json.projects : [];
+      if (list.length === 0) { setFolderState('empty'); return; }
+      setFolders(list);
+      setFolderState('ok');
+    })();
+    return () => { cancelled = true; };
+  }, [vaultState]);
+
+  // ── AC5: Fremd-Busy-Guard (GET /api/session, Polling-Muster wie ReconcileTrigger) ──
+  /** 'idle' | 'running' */
+  const [sessionRunState, setSessionRunState] = useState('idle');
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function pollSession() {
+      try {
+        const res = await fetchFnRef.current('/api/session');
+        if (cancelled) return;
+        if (res.ok) {
+          const json = await res.json();
+          if (cancelled) return;
+          setSessionRunState(json.state === 'busy' ? 'running' : 'idle');
+        }
+      } catch {
+        // Netzwerkfehler beim Busy-Guard-Poll — Zustand bleibt unverändert (kein Crash).
+      }
+    }
+
+    pollSession();
+    const timer = setInterval(pollSession, pollInterval);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [pollInterval]);
+
+  // ── Trigger-Zustand (AC2/AC3/AC6/AC7) ──────────────────────────────────────
+  /** 'idle' | 'confirm' | 'starting' | 'error' */
+  const [phase, setPhase] = useState('idle');
+  const [syncError, setSyncError] = useState(null);
+
+  const isVaultConfigured = vaultState === 'configured';
+  const isSessionBusy = sessionRunState === 'running';
+  const isBtnDisabled = !isVaultConfigured || isSessionBusy || phase === 'starting';
+  const showButton = phase === 'idle';
+
+  const handleClick = useCallback(() => {
+    if (isBtnDisabled) return; // AC5: Klick auf deaktivierten Button ist ein no-op
+    setPhase('confirm');
+    setSyncError(null);
+  }, [isBtnDisabled]);
+
+  const handleCancel = useCallback(() => {
+    setPhase('idle');
+    setSelectedPath('');
+    setSyncError(null);
+  }, []);
+
+  const handleConfirm = useCallback(async () => {
+    if (!selectedPath) return; // Starten ist ohne Auswahl deaktiviert (Guard bleibt defensiv)
+    setPhase('starting');
+    setSyncError(null);
+
+    const body = {
+      command: `/agent-flow:from-notes --sync ${selectedPath}`,
+      ...(projectSlug ? { projectPath: projectSlug } : {}),
+    };
+
+    let res;
+    try {
+      res = await fetchFnRef.current('/api/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    } catch {
+      setPhase('error');
+      setSyncError('Netzwerkfehler — bitte erneut versuchen.');
+      return;
+    }
+
+    if (res.status === 202) {
+      // AC6: kein stehengebliebenes Element — zurück auf idle, dann Tab-Wechsel.
+      setSelectedPath('');
+      setPhase('idle');
+      onShowArbeitenRef.current?.();
+      return;
+    }
+    if (res.status === 409) {
+      setPhase('error');
+      setSyncError('Ein Job läuft bereits — bitte warten.');
+      return;
+    }
+    if (res.status === 400) {
+      setPhase('error');
+      setSyncError('Abgleich konnte nicht gestartet werden (ungültige Anfrage).');
+      return;
+    }
+    setPhase('error');
+    setSyncError(`Fehler beim Starten (HTTP ${res.status}).`);
+  }, [selectedPath, projectSlug]);
+
+  return (
+    <div style={styles.reconcileBox} data-testid="obsidian-sync-box">
+      <div style={styles.reconcileHeader}>Notizen-Stand abgleichen</div>
+      {/* AC1: Hinweistext nennt den Befehl und stellt „kein Blind-Overwrite" klar */}
+      <p style={styles.reconcileHint}>
+        Startet <code style={styles.code}>/agent-flow:from-notes --sync</code> —
+        zeigt Widersprüche zwischen Notizen und Konzept/Spec an, überschreibt
+        nicht blind.
+      </p>
+
+      {showButton && (
+        <button
+          type="button"
+          style={isBtnDisabled ? styles.btnReconcileDisabled : styles.btnReconcile}
+          disabled={isBtnDisabled}
+          aria-disabled={isBtnDisabled}
+          onClick={handleClick}
+          aria-label={
+            isSessionBusy
+              ? 'Notizen-Stand abgleichen — gesperrt (Job läuft)'
+              : !isVaultConfigured
+              ? 'Notizen-Stand abgleichen — kein Vault konfiguriert'
+              : 'Notizen-Stand abgleichen starten — öffnet Bestätigungsdialog'
+          }
+          data-testid="obsidian-sync-btn"
+        >
+          Notizen-Stand abgleichen
+        </button>
+      )}
+
+      {/* AC1: Text-Hinweis, wenn kein Vault konfiguriert (nicht nur Farbe) */}
+      {showButton && !isVaultConfigured && !isSessionBusy && (
+        <div style={styles.reconcileLockNotice} data-testid="obsidian-sync-vault-hint">
+          Kein Obsidian-Vault konfiguriert — zuerst in den Einstellungen setzen.
+        </div>
+      )}
+
+      {/* AC5: Lock-Hinweis für Fremd-Busy (Text, nicht nur Farbe) */}
+      {showButton && isSessionBusy && (
+        <div
+          role="status"
+          aria-live="polite"
+          style={styles.reconcileLockNotice}
+          data-testid="obsidian-sync-lock-notice"
+        >
+          Ein Job läuft — Trigger gesperrt.
+        </div>
+      )}
+
+      {/* AC2/AC3: Bestätigungsdialog — verhindert versehentlichen Start,
+          enthält die Ordner-Auswahl (löst A1). */}
+      {phase === 'confirm' && (
+        <div
+          role="dialog"
+          aria-modal="false"
+          aria-label="Notizen-Stand abgleichen bestätigen"
+          style={styles.reconcileConfirmBox}
+          data-testid="obsidian-sync-confirm-dialog"
+        >
+          <p style={styles.reconcileConfirmText}>
+            Startet einen Abgleich-Lauf: Widersprüche zwischen Notizen und
+            Konzept/Spec werden angezeigt — nichts wird blind überschrieben.
+          </p>
+
+          {folderState === 'loading' && (
+            <div
+              role="status"
+              aria-live="polite"
+              style={styles.reconcileHint}
+              data-testid="obsidian-sync-folders-loading"
+            >
+              Lade Vault-Projektordner…
+            </div>
+          )}
+          {folderState === 'empty' && (
+            <div role="alert" style={styles.reconcileStatusError} data-testid="obsidian-sync-folders-empty">
+              Kein Vault-Projektordner gefunden — Abgleich kann nicht gestartet werden.
+            </div>
+          )}
+          {folderState === 'error' && (
+            <div role="alert" style={styles.reconcileStatusError} data-testid="obsidian-sync-folders-error">
+              Vault-Projektordner konnten nicht geladen werden — Abgleich kann nicht gestartet werden.
+            </div>
+          )}
+          {folderState === 'ok' && (
+            <div style={styles.obsidianFolderField}>
+              <label htmlFor="obsidian-sync-folder-select" style={styles.reconcileHint}>
+                Vault-Projektordner
+              </label>
+              <select
+                id="obsidian-sync-folder-select"
+                value={selectedPath}
+                onChange={(e) => setSelectedPath(e.target.value)}
+                style={styles.obsidianFolderSelect}
+                data-testid="obsidian-sync-folder-select"
+              >
+                <option value="">— auswählen —</option>
+                {folders.map((f) => (
+                  <option key={f.path} value={f.path}>{f.name}</option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          <div style={styles.reconcileConfirmBtns}>
+            <button
+              type="button"
+              style={selectedPath ? styles.btnReconcileConfirm : styles.btnReconcileDisabled}
+              disabled={!selectedPath}
+              aria-disabled={!selectedPath}
+              onClick={handleConfirm}
+              aria-label="Bestätigen — Notizen-Stand abgleichen starten"
+              data-testid="obsidian-sync-confirm-yes"
+            >
+              Starten
+            </button>
+            <button
+              type="button"
+              style={styles.btnReconcileCancel}
+              onClick={handleCancel}
+              aria-label="Abbrechen — kein Start"
+              data-testid="obsidian-sync-confirm-no"
+            >
+              Abbrechen
+            </button>
+          </div>
+        </div>
+      )}
+
+      {phase === 'starting' && (
+        <div
+          role="status"
+          aria-live="polite"
+          style={styles.reconcileStatus}
+          data-testid="obsidian-sync-starting"
+        >
+          Starte…
+        </div>
+      )}
+
+      {/* AC7: 409/400/500/Netzwerkfehler → Fehleranzeige mit Reset */}
+      {phase === 'error' && (
+        <div role="alert" style={styles.reconcileStatusError} data-testid="obsidian-sync-error">
+          {syncError}
+          <button
+            type="button"
+            style={styles.btnReconcileReset}
+            onClick={() => { setPhase('idle'); setSyncError(null); }}
+            aria-label="Fehlerstatus zurücksetzen"
+            data-testid="obsidian-sync-error-reset"
           >
             Zurücksetzen
           </button>
@@ -1698,6 +2141,23 @@ const styles = {
     fontSize: 11,
     cursor: 'pointer',
     minHeight: 32,
+  },
+
+  // ── ObsidianSyncTrigger (obsidian-sync-trigger AC1–AC7) — Ordner-Auswahl im Dialog ──
+  obsidianFolderField: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 4,
+  },
+
+  obsidianFolderSelect: {
+    background: '#1a1a1a',
+    color: '#e5e7eb',
+    border: '1px solid #374151',
+    borderRadius: 4,
+    padding: '8px 10px',
+    fontSize: 12,
+    minHeight: 44,
   },
 
   // ── Audit-Spec-Button (spec-audit-view AC1–AC4) ──

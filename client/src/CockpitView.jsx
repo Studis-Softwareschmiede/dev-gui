@@ -125,6 +125,22 @@
  *   Spezifikation-Reiter (inline „Reconcile läuft…" → „Fertig" statt
  *   Navigate — überschreibt reconcile-trigger AC5).
  *
+ * obsidian-sync-trigger (S-252):
+ *   Der „Notizen-Stand abgleichen"-Button (SpecView.jsx, ObsidianSyncTrigger)
+ *   wechselt nach erfolgreichem Auslösen (202) in den „Arbeiten"-Reiter, damit
+ *   der Lauf live im Terminal sichtbar ist (AC6). **Präzisierung (Iteration
+ *   2):** NICHT über das generische App-Level `onNavigate('factory')`
+ *   (useHashRouter.navigate) — das würde den Hash von `#/factory/<repo>` auf
+ *   das bare `#/factory` zurücksetzen und den Projekt-Kontext verlieren
+ *   (`viewToHash('factory')` kennt kein Repo-Segment; Bug live im
+ *   App-Integrationstest nachgewiesen). Stattdessen ein neuer, dedizierter
+ *   `onShowArbeiten`-Callback (`handleShowArbeiten`, gespiegelt vom
+ *   openSpec-/onShowBoard-Muster), der NUR den internen `activeTab`-State
+ *   auf `'arbeiten'` umschaltet — CockpitView bleibt im selben Projekt-
+ *   Kontext gemountet, kein Hash-Wechsel nötig. `onNavigate` selbst bleibt
+ *   für SpecView weiterhin ungenutzte Signatur-Kompatibilität (wie schon bei
+ *   reconcile-trigger/S-205).
+ *
  * A11y (WCAG 2.1 AA):
  *   - Reiter-Leiste als <nav role="tablist"> mit aria-selected.
  *   - Aktive Reiter-Panel mit role="tabpanel".
@@ -182,6 +198,40 @@ export function CockpitView({ activeRepo, navigateFactory, onNavigate: _onNaviga
   const openSpec = useCallback((relPath) => {
     setPendingSpecPath(relPath);
     setActiveTab('spec');
+  }, []);
+
+  // obsidian-sync-trigger (S-252) AC6 — Präzisierung (Iteration 2, s. Spec):
+  // schaltet NUR den internen Reiter auf „Arbeiten" um (kein Hash-/App-Level-
+  // Navigate). Gespiegelt vom openSpec-/onShowBoard-Muster oben. Der
+  // ursprüngliche Plan „onNavigate('factory')" (generisches App-Level-
+  // useHashRouter.navigate) hätte den Hash von `#/factory/<repo>` auf das
+  // bare `#/factory` zurückgesetzt (viewToHash('factory') kennt kein Repo-
+  // Segment) — der Projekt-Kontext wäre verloren gegangen (Nutzer landet auf
+  // der Repo-Übersicht statt im Cockpit). Da CockpitView bereits im richtigen
+  // Projekt-Kontext gemountet ist, genügt ein lokaler Tab-Wechsel.
+  //
+  // obsidian-sync-trigger AC6 — Präzisierung (Iteration 3): der Tab-Wechsel
+  // allein reicht NICHT — FactoryWorkspace zeigt das Terminal nur bei
+  // showTerminal===true (Checkbox, Default AUS, fabrik-arbeiten-layout AC2/
+  // S-265); ohne Auto-Einblenden landet der Nutzer im „Arbeiten"-Reiter, sieht
+  // aber nur die Button-Spalte — der Lauf ist NICHT live sichtbar (AC6
+  // verlangt das ausdrücklich). `autoShowTerminalToken` ist ein Zähler
+  // (Muster `boardRefreshToken` oben) — FactoryWorkspace liest ihn NUR als
+  // Lazy-Initial-Wert seines eigenen `showTerminal`-State beim (garantiert
+  // frischen — s. conditional rendering unten) Mount und meldet den Konsum
+  // sofort über `onAutoShowTerminalConsumed` zurück, worauf der Zähler wieder
+  // auf 0 fällt. Das verhindert, dass ein SPÄTERER, unabhängiger manueller
+  // Tab-Wechsel (weg von/zurück zu „Arbeiten") die Checkbox erneut automatisch
+  // einschaltet — nur EIN Mount pro `onShowArbeiten()`-Aufruf profitiert
+  // davon. Danach bleibt die Checkbox normal bedienbar (kein Lock) — kein
+  // Konflikt mit fabrik-arbeiten-layout AC2, das nur den DEFAULT regelt.
+  const [autoShowTerminalToken, setAutoShowTerminalToken] = useState(0);
+  const handleShowArbeiten = useCallback(() => {
+    setAutoShowTerminalToken((t) => t + 1);
+    setActiveTab('arbeiten');
+  }, []);
+  const handleAutoShowTerminalConsumed = useCallback(() => {
+    setAutoShowTerminalToken(0);
   }, []);
 
   // headless-manual-drain AC6: Board-Re-Fetch-Token. Ein abgeschlossener
@@ -251,6 +301,8 @@ export function CockpitView({ activeRepo, navigateFactory, onNavigate: _onNaviga
             activeRepo={activeRepo}
             onShowBoard={() => setActiveTab('board')}
             onBoardRefresh={refreshBoard}
+            autoShowTerminalToken={autoShowTerminalToken}
+            onAutoShowTerminalConsumed={handleAutoShowTerminalConsumed}
           />
         </div>
       )}
@@ -279,6 +331,7 @@ export function CockpitView({ activeRepo, navigateFactory, onNavigate: _onNaviga
             projectSlug={activeRepo}
             initialPath={pendingSpecPath}
             onNavigate={_onNavigate}
+            onShowArbeiten={handleShowArbeiten}
           />
         </div>
       )}
@@ -353,10 +406,22 @@ const DRAIN_POLL_MS = 2_500;
  *
  * @param {{ activeRepo: string, fetchFn?: Function,
  *           onShowBoard?: () => void, onBoardRefresh?: () => void,
+ *           autoShowTerminalToken?: number, onAutoShowTerminalConsumed?: () => void,
  *           pollInterval?: number, drainPollInterval?: number }} props
  *   fetchFn           — injectable for tests (default: globalThis.fetch)
  *   onShowBoard       — switch the cockpit to the board tab (new-story-chat AC6)
  *   onBoardRefresh    — trigger a BoardView re-fetch after a done drain (AC6)
+ *   autoShowTerminalToken — (obsidian-sync-trigger AC6, S-252 Iteration 3)
+ *                     counter; > 0 at mount time → Terminal-Checkbox startet
+ *                     eingeschaltet statt dem sonstigen Default AUS (fabrik-
+ *                     arbeiten-layout AC2 bleibt für alle anderen Mounts
+ *                     unverändert). Nur als Lazy-Initial-Wert gelesen — kein
+ *                     erzwungenes Wieder-Einschalten bei späteren Renders.
+ *   onAutoShowTerminalConsumed — aufgerufen einmalig beim Mount, wenn
+ *                     autoShowTerminalToken > 0 war (CockpitView setzt den
+ *                     Zähler danach zurück, damit ein späterer, unabhängiger
+ *                     Tab-Wechsel die Checkbox nicht erneut automatisch
+ *                     einschaltet).
  *   pollInterval      — session poll interval in ms (default: SESSION_POLL_MS)
  *   drainPollInterval — drain-status poll interval in ms (default: DRAIN_POLL_MS)
  */
@@ -365,6 +430,8 @@ function FactoryWorkspace({
   fetchFn,
   onShowBoard,
   onBoardRefresh,
+  autoShowTerminalToken = 0,
+  onAutoShowTerminalConsumed,
   pollInterval = SESSION_POLL_MS,
   drainPollInterval = DRAIN_POLL_MS,
 }) {
@@ -376,7 +443,21 @@ function FactoryWorkspace({
   // fabrik-arbeiten-layout AC2: „Terminal einblenden"-Checkbox, Default AUS.
   // Toggling only mounts/unmounts the client <Terminal> — the server-side PTY
   // session is unaffected (see module-doc note above / WsGateway.js).
-  const [showTerminal, setShowTerminal] = useState(false);
+  // obsidian-sync-trigger AC6 (S-252, Iteration 3): startet eingeschaltet,
+  // wenn dieser (garantiert frische, s. conditional rendering in CockpitView)
+  // Mount von onShowArbeiten() ausgelöst wurde (autoShowTerminalToken > 0).
+  const [showTerminal, setShowTerminal] = useState(() => autoShowTerminalToken > 0);
+
+  // Konsum sofort nach dem Mount melden — CockpitView setzt den Zähler dann
+  // auf 0 zurück, damit ein SPÄTERER, unabhängiger Tab-Wechsel (weg von/
+  // zurück zu „Arbeiten") die Checkbox nicht erneut automatisch einschaltet.
+  // Nur einmal pro Mount (bewusst leeres Dependency-Array).
+  useEffect(() => {
+    if (autoShowTerminalToken > 0) {
+      onAutoShowTerminalConsumed?.();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── Neue-Story-Chat state (new-story-chat AC1 — ersetzt „Änderung erfassen") ─
   /** Whether the „Neue Story"-Chat-Overlay (IdeaSpecifyChatModal, scratch) is open */
