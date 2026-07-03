@@ -25,6 +25,16 @@
  *          spiegelt PUT-gespeicherte enabled/window-Werte (Roundtrip, Wiederverwendung
  *          isWithinWindow aus NightWatchScheduler.js — nicht separat re-getestet, s.
  *          NightWatchScheduler.test.js AC10).
+ *
+ * Covers (night-budget-guard, S-272):
+ *   AC1 — TickerSettingsStore erhält zwei additive Felder `nightBudgetTokens` (int ≥ 0,
+ *         Default 0) und `budgetThresholdPercent` (int 1–100, Default 85). Default-Merge
+ *         (ENOENT + Datei ohne die neuen Felder), write→read-Roundtrip, validate()
+ *         Grenzfälle (< 0 / nicht-ganzzahlig / außerhalb 1–100 → 400 { field }),
+ *         GET/PUT /api/settings/ticker geben/nehmen beide Felder durch (HTTP-Ebene).
+ *   AC3 —  `nightBudgetTokens = 0` (Default) ⇒ rein additive Konfiguration: eine
+ *         bestehende `ticker-settings.json` ohne die neuen Felder liest sauber auf die
+ *         Defaults (Default-Merge-Test gegen eine von Hand vorab geschriebene Alt-Datei).
  */
 
 import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals';
@@ -32,7 +42,7 @@ import express from 'express';
 import { createServer, request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { mkdir, rm, readFile } from 'node:fs/promises';
+import { mkdir, rm, readFile, writeFile } from 'node:fs/promises';
 
 // ── HTTP-Helpers ──────────────────────────────────────────────────────────────
 
@@ -126,6 +136,8 @@ describe('AC15 — TickerSettingsStore Persistenz', () => {
     expect(settings.staleInProgressHours).toBe(4);
     expect(settings.escalationAttempts).toBe(3);
     expect(settings.projects).toBe('all');
+    expect(settings.nightBudgetTokens).toBe(0);
+    expect(settings.budgetThresholdPercent).toBe(85);
   });
 
   it('write→read Roundtrip: gespeicherte Werte werden zurückgeliefert', async () => {
@@ -138,6 +150,8 @@ describe('AC15 — TickerSettingsStore Persistenz', () => {
       staleInProgressHours: 6,
       escalationAttempts: 5,
       projects: ['dev-gui', 'agent-flow'],
+      nightBudgetTokens: 500000,
+      budgetThresholdPercent: 90,
     });
     const result = await read();
     expect(result.enabled).toBe(true);
@@ -147,6 +161,33 @@ describe('AC15 — TickerSettingsStore Persistenz', () => {
     expect(result.staleInProgressHours).toBe(6);
     expect(result.escalationAttempts).toBe(5);
     expect(result.projects).toEqual(['dev-gui', 'agent-flow']);
+    expect(result.nightBudgetTokens).toBe(500000);
+    expect(result.budgetThresholdPercent).toBe(90);
+  });
+
+  it('night-budget-guard AC3: bestehende ticker-settings.json OHNE die neuen Felder liest sauber auf die Defaults', async () => {
+    // Simuliert eine Alt-Datei aus einer Zeit vor S-272 (kein nightBudgetTokens/budgetThresholdPercent).
+    const filePath = join(tmpDir, 'ticker-settings.json');
+    const legacyContent = JSON.stringify({
+      enabled: true,
+      window: { start: '22:00', end: '06:00', timezone: 'Europe/Zurich' },
+      intervalMinutes: 15,
+      maxParallel: 3,
+      staleInProgressHours: 4,
+      escalationAttempts: 3,
+      projects: 'all',
+    });
+    await mkdir(tmpDir, { recursive: true });
+    await writeFile(filePath, legacyContent, 'utf8');
+
+    const { read } = await import('../src/TickerSettingsStore.js');
+    const settings = await read();
+    // Bestehende Felder bleiben wie in der Alt-Datei.
+    expect(settings.enabled).toBe(true);
+    expect(settings.window).toEqual({ start: '22:00', end: '06:00', timezone: 'Europe/Zurich' });
+    // Neue Felder fehlen in der Alt-Datei → Defaults (rein additiv, kein Fehler).
+    expect(settings.nightBudgetTokens).toBe(0);
+    expect(settings.budgetThresholdPercent).toBe(85);
   });
 
   it('write erstellt Datei in CRED_STORE_DIR', async () => {
@@ -306,6 +347,55 @@ describe('AC15 — validate() Feldvalidierung', () => {
     expect(result.field).toBe('escalationAttempts');
   });
 
+  // ── night-budget-guard AC1: nightBudgetTokens / budgetThresholdPercent ──────
+
+  it('nightBudgetTokens: 0 (Default-Wert) → ok', () => {
+    expect(validate({ nightBudgetTokens: 0 }).ok).toBe(true);
+  });
+
+  it('nightBudgetTokens: positiver Wert → ok', () => {
+    expect(validate({ nightBudgetTokens: 1000000 }).ok).toBe(true);
+  });
+
+  it('nightBudgetTokens: negativ (-1) → 400 field=nightBudgetTokens', () => {
+    const result = validate({ nightBudgetTokens: -1 });
+    expect(result.ok).toBe(false);
+    expect(result.field).toBe('nightBudgetTokens');
+  });
+
+  it('nightBudgetTokens: nicht-ganzzahlig (1.5) → 400 field=nightBudgetTokens', () => {
+    const result = validate({ nightBudgetTokens: 1.5 });
+    expect(result.ok).toBe(false);
+    expect(result.field).toBe('nightBudgetTokens');
+  });
+
+  it('budgetThresholdPercent: 85 (Default-Wert) → ok', () => {
+    expect(validate({ budgetThresholdPercent: 85 }).ok).toBe(true);
+  });
+
+  it('budgetThresholdPercent: Grenzfälle 1 und 100 → ok', () => {
+    expect(validate({ budgetThresholdPercent: 1 }).ok).toBe(true);
+    expect(validate({ budgetThresholdPercent: 100 }).ok).toBe(true);
+  });
+
+  it('budgetThresholdPercent: 0 → 400 field=budgetThresholdPercent', () => {
+    const result = validate({ budgetThresholdPercent: 0 });
+    expect(result.ok).toBe(false);
+    expect(result.field).toBe('budgetThresholdPercent');
+  });
+
+  it('budgetThresholdPercent: 101 → 400 field=budgetThresholdPercent', () => {
+    const result = validate({ budgetThresholdPercent: 101 });
+    expect(result.ok).toBe(false);
+    expect(result.field).toBe('budgetThresholdPercent');
+  });
+
+  it('budgetThresholdPercent: nicht-ganzzahlig (50.5) → 400 field=budgetThresholdPercent', () => {
+    const result = validate({ budgetThresholdPercent: 50.5 });
+    expect(result.ok).toBe(false);
+    expect(result.field).toBe('budgetThresholdPercent');
+  });
+
   it('projects: "all" → ok', () => {
     expect(validate({ projects: 'all' }).ok).toBe(true);
   });
@@ -404,6 +494,8 @@ describe('AC15/AC16 — GET/PUT /api/settings/ticker (HTTP-Ebene)', () => {
     expect(res.body.staleInProgressHours).toBe(4);
     expect(res.body.escalationAttempts).toBe(3);
     expect(res.body.projects).toBe('all');
+    expect(res.body.nightBudgetTokens).toBe(0);
+    expect(res.body.budgetThresholdPercent).toBe(85);
   });
 
   it('PUT /api/settings/ticker → 200 mit gespeicherten Werten', async () => {
@@ -420,6 +512,8 @@ describe('AC15/AC16 — GET/PUT /api/settings/ticker (HTTP-Ebene)', () => {
       staleInProgressHours: 2,
       escalationAttempts: 4,
       projects: ['dev-gui'],
+      nightBudgetTokens: 200000,
+      budgetThresholdPercent: 75,
     });
     expect(res.status).toBe(200);
     expect(res.body.enabled).toBe(true);
@@ -427,6 +521,8 @@ describe('AC15/AC16 — GET/PUT /api/settings/ticker (HTTP-Ebene)', () => {
     expect(res.body.intervalMinutes).toBe(5);
     expect(res.body.maxParallel).toBe(2);
     expect(res.body.projects).toEqual(['dev-gui']);
+    expect(res.body.nightBudgetTokens).toBe(200000);
+    expect(res.body.budgetThresholdPercent).toBe(75);
   });
 
   it('PUT → GET Roundtrip: gespeicherte Werte werden zurückgeliefert', async () => {
@@ -530,6 +626,39 @@ describe('AC15/AC16 — GET/PUT /api/settings/ticker (HTTP-Ebene)', () => {
     const res = await httpPut(port, '/api/settings/ticker', { escalationAttempts: 0 });
     expect(res.status).toBe(400);
     expect(res.body.field).toBe('escalationAttempts');
+  });
+
+  it('PUT: nightBudgetTokens < 0 → 400 { field: "nightBudgetTokens" } (night-budget-guard AC1)', async () => {
+    const app = await makeApp();
+    const s = await startServer(app);
+    server = s.server;
+    port = s.port;
+
+    const res = await httpPut(port, '/api/settings/ticker', { nightBudgetTokens: -1 });
+    expect(res.status).toBe(400);
+    expect(res.body.field).toBe('nightBudgetTokens');
+  });
+
+  it('PUT: budgetThresholdPercent außerhalb 1–100 (0) → 400 { field: "budgetThresholdPercent" } (night-budget-guard AC1)', async () => {
+    const app = await makeApp();
+    const s = await startServer(app);
+    server = s.server;
+    port = s.port;
+
+    const res = await httpPut(port, '/api/settings/ticker', { budgetThresholdPercent: 0 });
+    expect(res.status).toBe(400);
+    expect(res.body.field).toBe('budgetThresholdPercent');
+  });
+
+  it('PUT: budgetThresholdPercent außerhalb 1–100 (101) → 400 { field: "budgetThresholdPercent" } (night-budget-guard AC1)', async () => {
+    const app = await makeApp();
+    const s = await startServer(app);
+    server = s.server;
+    port = s.port;
+
+    const res = await httpPut(port, '/api/settings/ticker', { budgetThresholdPercent: 101 });
+    expect(res.status).toBe(400);
+    expect(res.body.field).toBe('budgetThresholdPercent');
   });
 
   it('PUT: projects weder "all" noch Array → 400 { field: "projects" }', async () => {

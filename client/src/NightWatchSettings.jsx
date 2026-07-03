@@ -25,6 +25,13 @@
  * A11y: label/htmlFor, role=status/alert, aria-describedby, aria-busy,
  *   Touch-Target ≥ 44 px (Muster NotificationSection in SettingsView.jsx).
  *
+ * night-budget-guard AC2 — zusätzlich zwei additive Felder `nightBudgetTokens`
+ *   (Nacht-Budget in Output-Tokens, Default 0 = proaktiver Schutz aus) und
+ *   `budgetThresholdPercent` (Schwelle in %, Default 85), mit leichter Client-
+ *   Vorabprüfung (Ganzzahl-/Bereichsprüfung) analog zu window.start/end — 4xx-Antworten
+ *   ({field,message}) werden über dasselbe feldzugeordnete Fehler-Muster angezeigt.
+ *   Bestehende Sektions-Felder bleiben unverändert.
+ *
  * retro-auto-trigger AC3 — zusätzlich (bei denselben Nachtwächter-Einstellungen) ein
  *   eigenständiger Schalter „Danach automatisch Retro durchführen" (an/aus), der
  *   GET /api/settings/retro-auto liest (Initialzustand) und bei Änderung sofort per
@@ -128,6 +135,8 @@ export function NightWatchSettings({ fetchFn }) {
   const [projectsMode, setProjectsMode] = useState('all'); // 'all' | 'selection'
   const [selectedProjects, setSelectedProjects] = useState([]);
   const [availableProjects, setAvailableProjects] = useState([]);
+  const [nightBudgetTokens, setNightBudgetTokens] = useState(0);
+  const [budgetThresholdPercent, setBudgetThresholdPercent] = useState(85);
 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
@@ -159,6 +168,8 @@ export function NightWatchSettings({ fetchFn }) {
       setMaxParallel(Number.isInteger(data.maxParallel) ? data.maxParallel : 3);
       setStaleInProgressHours(Number.isInteger(data.staleInProgressHours) ? data.staleInProgressHours : 4);
       setEscalationAttempts(Number.isInteger(data.escalationAttempts) ? data.escalationAttempts : 3);
+      setNightBudgetTokens(Number.isInteger(data.nightBudgetTokens) ? data.nightBudgetTokens : 0);
+      setBudgetThresholdPercent(Number.isInteger(data.budgetThresholdPercent) ? data.budgetThresholdPercent : 85);
       if (Array.isArray(data.projects)) {
         setProjectsMode('selection');
         setSelectedProjects(data.projects);
@@ -234,6 +245,18 @@ export function NightWatchSettings({ fetchFn }) {
       setSaveFieldError({ field: 'window.end', message: 'window.end muss im 24h-Format "HH:MM" sein.' });
       return;
     }
+    // night-budget-guard AC2 — leichte Client-Vorabprüfung (keine Duplizierung der
+    // vollständigen Backend-Validierung, Muster analog window.start/end).
+    const nightBudgetTokensNum = Number(nightBudgetTokens);
+    if (!Number.isInteger(nightBudgetTokensNum) || nightBudgetTokensNum < 0) {
+      setSaveFieldError({ field: 'nightBudgetTokens', message: 'nightBudgetTokens muss eine ganze Zahl ≥ 0 sein.' });
+      return;
+    }
+    const budgetThresholdPercentNum = Number(budgetThresholdPercent);
+    if (!Number.isInteger(budgetThresholdPercentNum) || budgetThresholdPercentNum < 1 || budgetThresholdPercentNum > 100) {
+      setSaveFieldError({ field: 'budgetThresholdPercent', message: 'budgetThresholdPercent muss eine ganze Zahl zwischen 1 und 100 sein.' });
+      return;
+    }
 
     setSaving(true);
     try {
@@ -245,6 +268,8 @@ export function NightWatchSettings({ fetchFn }) {
         staleInProgressHours: Number(staleInProgressHours),
         escalationAttempts: Number(escalationAttempts),
         projects: projectsMode === 'all' ? 'all' : selectedProjects,
+        nightBudgetTokens: nightBudgetTokensNum,
+        budgetThresholdPercent: budgetThresholdPercentNum,
       }, fetchFn);
       setSaved(true);
     } catch (err) {
@@ -256,7 +281,7 @@ export function NightWatchSettings({ fetchFn }) {
     } finally {
       setSaving(false);
     }
-  }, [enabled, windowStart, windowEnd, timezone, intervalMinutes, maxParallel, staleInProgressHours, escalationAttempts, projectsMode, selectedProjects, fetchFn]);
+  }, [enabled, windowStart, windowEnd, timezone, intervalMinutes, maxParallel, staleInProgressHours, escalationAttempts, projectsMode, selectedProjects, nightBudgetTokens, budgetThresholdPercent, fetchFn]);
 
   if (loading) {
     return <p style={styles.hint} aria-busy="true">Einstellungen werden geladen…</p>;
@@ -391,6 +416,37 @@ export function NightWatchSettings({ fetchFn }) {
           style={{ ...styles.input, width: 90 }}
           aria-describedby={saveFieldError?.field === 'escalationAttempts' ? SAVE_ERROR_ID : undefined}
           aria-invalid={saveFieldError?.field === 'escalationAttempts' ? 'true' : undefined}
+        />
+      </div>
+
+      {/* nightBudgetTokens (night-budget-guard AC2) */}
+      <div style={styles.fieldRow}>
+        <label htmlFor="nightwatch-budget-tokens" style={styles.label}>Nacht-Budget (Tokens):</label>
+        <input
+          id="nightwatch-budget-tokens"
+          type="number"
+          min={0}
+          value={nightBudgetTokens}
+          onChange={(e) => { setNightBudgetTokens(e.target.value); setSaved(false); }}
+          style={{ ...styles.input, width: 120 }}
+          aria-describedby={saveFieldError?.field === 'nightBudgetTokens' ? SAVE_ERROR_ID : undefined}
+          aria-invalid={saveFieldError?.field === 'nightBudgetTokens' ? 'true' : undefined}
+        />
+      </div>
+
+      {/* budgetThresholdPercent (night-budget-guard AC2) */}
+      <div style={styles.fieldRow}>
+        <label htmlFor="nightwatch-budget-threshold" style={styles.label}>Budget-Schwelle (%):</label>
+        <input
+          id="nightwatch-budget-threshold"
+          type="number"
+          min={1}
+          max={100}
+          value={budgetThresholdPercent}
+          onChange={(e) => { setBudgetThresholdPercent(e.target.value); setSaved(false); }}
+          style={{ ...styles.input, width: 90 }}
+          aria-describedby={saveFieldError?.field === 'budgetThresholdPercent' ? SAVE_ERROR_ID : undefined}
+          aria-invalid={saveFieldError?.field === 'budgetThresholdPercent' ? 'true' : undefined}
         />
       </div>
 

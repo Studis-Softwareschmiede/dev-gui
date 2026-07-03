@@ -60,7 +60,9 @@ export function create({ boardAggregator, nightWatchScheduler } = {}) {
    * GET /api/settings/ticker
    *
    * Response 200: { enabled, window:{start,end,timezone}, intervalMinutes, maxParallel,
-   *   staleInProgressHours, escalationAttempts, projects }
+   *   staleInProgressHours, escalationAttempts, projects, nightBudgetTokens,
+   *   budgetThresholdPercent } (nightBudgetTokens/budgetThresholdPercent additiv,
+   *   night-budget-guard AC1)
    */
   router.get('/api/settings/ticker', async (_req, res) => {
     let settings;
@@ -120,7 +122,8 @@ export function create({ boardAggregator, nightWatchScheduler } = {}) {
    *
    * Validierung: window.start/end (HH:MM), window.timezone (IANA), intervalMinutes ≥ 1,
    * staleInProgressHours ≥ 1, escalationAttempts ≥ 1, projects "all"|Slug-Array (Format +
-   * Existenz gegen BoardAggregator-Index, falls verfügbar). maxParallel wird auf 1–3
+   * Existenz gegen BoardAggregator-Index, falls verfügbar), nightBudgetTokens ≥ 0 (int),
+   * budgetThresholdPercent 1–100 (int) — night-budget-guard AC1. maxParallel wird auf 1–3
    * geklemmt statt abgelehnt (Edge-Case Account-Überlast-Schutz).
    * Keine Teilspeicherung bei Validierungsfehler.
    *

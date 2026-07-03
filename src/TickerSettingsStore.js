@@ -11,8 +11,15 @@
  *
  * Gespeicherte Felder (Settings-Schema-Tabelle, Spec-Vertrag, verbindlich):
  *   enabled, window.{start,end,timezone}, intervalMinutes, maxParallel,
- *   staleInProgressHours, escalationAttempts, projects.
+ *   staleInProgressHours, escalationAttempts, projects, nightBudgetTokens,
+ *   budgetThresholdPercent.
  * NICHT gespeichert: keine Secrets (AC15).
+ *
+ * `nightBudgetTokens`/`budgetThresholdPercent` (night-budget-guard AC1) — additive
+ * Erweiterung um den Nacht-Budget-Schutz: Nacht-Budget in Output-Tokens (Default 0 =
+ * proaktiver Schutz aus) und die Schwelle in Prozent, ab der proaktiv pausiert wird
+ * (Default 85). Rein additiv — bestehende `ticker-settings.json`-Dateien ohne diese
+ * Felder lesen sauber auf die Defaults (AC3).
  *
  * Security (Floor):
  *   - Keine Secrets in dieser Datei.
@@ -45,6 +52,8 @@ export const PROJECT_SLUG_RE = /^[A-Za-z0-9_-]+$/;
  * @property {number}   staleInProgressHours
  * @property {number}   escalationAttempts
  * @property {"all"|string[]} projects
+ * @property {number}   nightBudgetTokens - Nacht-Budget in Output-Tokens (0 = proaktiver Schutz aus, night-budget-guard AC1)
+ * @property {number}   budgetThresholdPercent - Schwelle in % (1–100), ab der proaktiv pausiert wird (night-budget-guard AC1)
  */
 
 /** Default-Konfiguration (Settings-Schema-Tabelle, Spec-Vertrag). */
@@ -60,6 +69,8 @@ const DEFAULT_SETTINGS = {
   staleInProgressHours: 4,
   escalationAttempts: 3,
   projects: 'all',
+  nightBudgetTokens: 0,
+  budgetThresholdPercent: 85,
 };
 
 /**
@@ -163,7 +174,10 @@ export async function write(settings) {
  * @returns {{ ok: boolean, field?: string, message?: string }}
  */
 export function validate(body, context = {}) {
-  const { enabled, window, intervalMinutes, maxParallel, staleInProgressHours, escalationAttempts, projects } = body ?? {};
+  const {
+    enabled, window, intervalMinutes, maxParallel, staleInProgressHours, escalationAttempts, projects,
+    nightBudgetTokens, budgetThresholdPercent,
+  } = body ?? {};
   const { knownSlugs } = context;
 
   if (enabled !== undefined && typeof enabled !== 'boolean') {
@@ -212,6 +226,20 @@ export function validate(body, context = {}) {
     const n = Number(escalationAttempts);
     if (!Number.isInteger(n) || n < 1) {
       return { ok: false, field: 'escalationAttempts', message: 'escalationAttempts muss eine ganze Zahl ≥ 1 sein.' };
+    }
+  }
+
+  if (nightBudgetTokens !== undefined) {
+    const n = Number(nightBudgetTokens);
+    if (!Number.isInteger(n) || n < 0) {
+      return { ok: false, field: 'nightBudgetTokens', message: 'nightBudgetTokens muss eine ganze Zahl ≥ 0 sein.' };
+    }
+  }
+
+  if (budgetThresholdPercent !== undefined) {
+    const n = Number(budgetThresholdPercent);
+    if (!Number.isInteger(n) || n < 1 || n > 100) {
+      return { ok: false, field: 'budgetThresholdPercent', message: 'budgetThresholdPercent muss eine ganze Zahl zwischen 1 und 100 sein.' };
     }
   }
 
@@ -279,6 +307,8 @@ function _mergeWithDefaults(parsed) {
   const staleInProgressHours = Number(parsed.staleInProgressHours);
   const escalationAttempts = Number(parsed.escalationAttempts);
   const maxParallelRaw = Number(parsed.maxParallel);
+  const nightBudgetTokens = Number(parsed.nightBudgetTokens);
+  const budgetThresholdPercent = Number(parsed.budgetThresholdPercent);
 
   return {
     enabled: typeof parsed.enabled === 'boolean' ? parsed.enabled : DEFAULT_SETTINGS.enabled,
@@ -306,5 +336,11 @@ function _mergeWithDefaults(parsed) {
       : Array.isArray(parsed.projects)
         ? parsed.projects.filter((s) => typeof s === 'string' && PROJECT_SLUG_RE.test(s))
         : DEFAULT_SETTINGS.projects,
+    nightBudgetTokens: Number.isInteger(nightBudgetTokens) && nightBudgetTokens >= 0
+      ? nightBudgetTokens
+      : DEFAULT_SETTINGS.nightBudgetTokens,
+    budgetThresholdPercent: Number.isInteger(budgetThresholdPercent) && budgetThresholdPercent >= 1 && budgetThresholdPercent <= 100
+      ? budgetThresholdPercent
+      : DEFAULT_SETTINGS.budgetThresholdPercent,
   };
 }

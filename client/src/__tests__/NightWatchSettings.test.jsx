@@ -18,6 +18,16 @@
  *          bleibt unverändert. Cooldown-Bypass-Hilfetext ist im Quelltext dokumentiert
  *          (aria-describedby) — visuell/Text-Assert unten.
  *
+ * Covers (night-budget-guard, S-272):
+ *   AC2 —  Felder „Nacht-Budget (Tokens)" (`nightBudgetTokens`) und „Budget-Schwelle (%)"
+ *          (`budgetThresholdPercent`) rendern die aus GET /api/settings/ticker geladenen
+ *          Werte (inkl. Default 0/85); Speichern-Klick sendet beide Felder im PUT-Body;
+ *          Client-Vorabprüfung (negativ / außerhalb 1–100 / nicht-ganzzahlig) verhindert
+ *          den PUT und zeigt eine feldzugeordnete Fehleranzeige (role=alert,
+ *          aria-describedby/aria-invalid, Muster wie window.start/end); eine 400-Antwort
+ *          vom Backend ({field:'nightBudgetTokens'|'budgetThresholdPercent', message})
+ *          wird über dasselbe feldzugeordnete Fehler-Muster anzeigt.
+ *
  * @jest-environment jsdom
  */
 
@@ -35,6 +45,8 @@ const DEFAULT_SETTINGS = {
   staleInProgressHours: 4,
   escalationAttempts: 3,
   projects: 'all',
+  nightBudgetTokens: 0,
+  budgetThresholdPercent: 85,
 };
 
 /**
@@ -137,6 +149,25 @@ describe('NightWatchSettings — AC17: Felder aus GET /api/settings/ticker', () 
     });
   });
 
+  it('night-budget-guard AC2: rendert nightBudgetTokens/budgetThresholdPercent (Default 0/85)', async () => {
+    const { getByLabelText } = renderComp();
+    await waitFor(() => {
+      expect(String(getByLabelText(/nacht-budget \(tokens\)/i).value)).toBe('0');
+      expect(String(getByLabelText(/budget-schwelle/i).value)).toBe('85');
+    });
+  });
+
+  it('night-budget-guard AC2: rendert geladene nightBudgetTokens/budgetThresholdPercent-Werte', async () => {
+    const fetchFn = makeFetch({
+      getResponse: { ...DEFAULT_SETTINGS, nightBudgetTokens: 500000, budgetThresholdPercent: 70 },
+    });
+    const { getByLabelText } = renderComp(fetchFn);
+    await waitFor(() => {
+      expect(String(getByLabelText(/nacht-budget \(tokens\)/i).value)).toBe('500000');
+      expect(String(getByLabelText(/budget-schwelle/i).value)).toBe('70');
+    });
+  });
+
   it('projects="all" (Default) → Projekte-Select zeigt "Alle Projekte", keine Checkboxen', async () => {
     const { getByLabelText, queryByText } = renderComp();
     await waitFor(() => {
@@ -190,6 +221,91 @@ describe('NightWatchSettings — AC17: PUT mit geänderten Werten', () => {
 
     await waitFor(() => {
       expect(getByRole('status').textContent).toMatch(/gespeichert/i);
+    });
+  });
+
+  it('night-budget-guard AC2: Speichern-Button sendet geänderte nightBudgetTokens/budgetThresholdPercent im PUT-Body', async () => {
+    const fetchFn = makeFetch();
+    const { getByLabelText, getByRole } = renderComp(fetchFn);
+
+    await waitFor(() => expect(String(getByLabelText(/nacht-budget \(tokens\)/i).value)).toBe('0'));
+
+    fireEvent.change(getByLabelText(/nacht-budget \(tokens\)/i), { target: { value: '250000' } });
+    fireEvent.change(getByLabelText(/budget-schwelle/i), { target: { value: '90' } });
+
+    fireEvent.click(getByRole('button', { name: /einstellungen speichern/i }));
+
+    await waitFor(() => {
+      const putCall = fetchFn.mock.calls.find(([url, opts]) => url === '/api/settings/ticker' && opts?.method === 'PUT');
+      expect(putCall).toBeDefined();
+      const body = JSON.parse(putCall[1].body);
+      expect(body.nightBudgetTokens).toBe(250000);
+      expect(body.budgetThresholdPercent).toBe(90);
+    });
+  });
+
+  it('night-budget-guard AC2: Client-Vorabprüfung — negatives nightBudgetTokens verhindert PUT + zeigt feldzugeordneten Fehler', async () => {
+    const fetchFn = makeFetch();
+    const { getByLabelText, getByRole } = renderComp(fetchFn);
+
+    await waitFor(() => expect(String(getByLabelText(/nacht-budget \(tokens\)/i).value)).toBe('0'));
+    fireEvent.change(getByLabelText(/nacht-budget \(tokens\)/i), { target: { value: '-1' } });
+    fireEvent.click(getByRole('button', { name: /einstellungen speichern/i }));
+
+    await waitFor(() => {
+      const alert = getByRole('alert');
+      expect(alert.textContent).toMatch(/nightBudgetTokens/);
+    });
+    expect(getByLabelText(/nacht-budget \(tokens\)/i).getAttribute('aria-invalid')).toBe('true');
+    const putCalls = fetchFn.mock.calls.filter(([url, opts]) => url === '/api/settings/ticker' && opts?.method === 'PUT');
+    expect(putCalls.length).toBe(0);
+  });
+
+  it('night-budget-guard AC2: Client-Vorabprüfung — budgetThresholdPercent außerhalb 1–100 verhindert PUT + zeigt feldzugeordneten Fehler', async () => {
+    const fetchFn = makeFetch();
+    const { getByLabelText, getByRole } = renderComp(fetchFn);
+
+    await waitFor(() => expect(String(getByLabelText(/budget-schwelle/i).value)).toBe('85'));
+    fireEvent.change(getByLabelText(/budget-schwelle/i), { target: { value: '101' } });
+    fireEvent.click(getByRole('button', { name: /einstellungen speichern/i }));
+
+    await waitFor(() => {
+      const alert = getByRole('alert');
+      expect(alert.textContent).toMatch(/budgetThresholdPercent/);
+    });
+    const putCalls = fetchFn.mock.calls.filter(([url, opts]) => url === '/api/settings/ticker' && opts?.method === 'PUT');
+    expect(putCalls.length).toBe(0);
+  });
+
+  it('night-budget-guard AC2: 400-Antwort ({field:"budgetThresholdPercent"}) → feldzugeordnete Fehleranzeige (role=alert)', async () => {
+    const fetchFn = jest.fn(async (url, opts) => {
+      const method = opts?.method ?? 'GET';
+      if (url === '/api/settings/ticker' && method === 'GET') {
+        return { ok: true, status: 200, json: async () => DEFAULT_SETTINGS };
+      }
+      if (url === '/api/settings/ticker' && method === 'PUT') {
+        return {
+          ok: false,
+          status: 400,
+          json: async () => ({ field: 'budgetThresholdPercent', message: 'budgetThresholdPercent muss eine ganze Zahl zwischen 1 und 100 sein.' }),
+        };
+      }
+      if (url === '/api/settings/retro-auto' && method === 'GET') {
+        return { ok: true, status: 200, json: async () => ({ enabled: false }) };
+      }
+      if (url === '/api/workspace/repos') {
+        return { ok: true, status: 200, json: async () => ({ repos: [] }) };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+    const { getByLabelText, getByRole } = renderComp(fetchFn);
+
+    await waitFor(() => expect(String(getByLabelText(/budget-schwelle/i).value)).toBe('85'));
+    fireEvent.click(getByRole('button', { name: /einstellungen speichern/i }));
+
+    await waitFor(() => {
+      const alert = getByRole('alert');
+      expect(alert.textContent).toMatch(/budgetThresholdPercent/);
     });
   });
 
