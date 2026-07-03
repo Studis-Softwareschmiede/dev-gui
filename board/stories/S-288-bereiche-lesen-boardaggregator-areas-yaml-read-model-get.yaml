@@ -1,7 +1,8 @@
 id: S-288
 parent: F-060
-title: Bereiche lesen — BoardAggregator liest areas.yaml + Read-Model (Kacheln, Roll-up) + GET /areas
-status: To Do
+title: Bereiche lesen — BoardAggregator liest areas.yaml + Read-Model (Kacheln, Roll-up)
+  + GET /areas
+status: Done
 priority: P1
 spec: docs/specs/bereichs-modell.md
 implements:
@@ -12,15 +13,15 @@ labels: null
 area: board
 size_est: M
 dispo_est: '5.0'
-dispo_act: null
-dispo_forecast: null
-estimate_note: 'Heuristik score 4 (2 AC + 2 Komponenten: BoardAggregator/boardRouter GET)
-  -> M; baseline js|balanced|M ep 5.0 (n=8); keine Baseline-Tokens'
+dispo_act: '7.0'
+dispo_forecast: -.2857
+estimate_note: 'Heuristik score 4 (2 AC + 2 Komponenten: BoardAggregator/boardRouter
+  GET) -> M; baseline js|balanced|M ep 5.0 (n=8); keine Baseline-Tokens'
 confidence: medium
-branch: null
+branch: feat/S-288-bereiche-lesen
 pr: null
 blocked_reason: null
 created_at: '2026-07-03T12:53:27Z'
-updated_at: '2026-07-03T12:53:27Z'
-done_at: null
+updated_at: '2026-07-03T13:57:59Z'
+done_at: '2026-07-03T13:57:47Z'
 tok_est: null
