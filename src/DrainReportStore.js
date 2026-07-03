@@ -13,12 +13,18 @@
  * Rechte: 0600 (konsistent restriktiv, obwohl nicht-geheim)
  * Schreiben: atomar (tmp + rename)
  *
- * Bericht-Schema (AC3/AC4, verbindlich):
+ * Bericht-Schema (AC3/AC4, verbindlich; `budgetPauses` additiv seit
+ * docs/specs/night-budget-guard.md AC12):
  *   { reportId, project, trigger, startedAt, finishedAt, reason, flowRuns,
- *     completed:[{id,title}], blocked:[{id,title}] }
+ *     completed:[{id,title}], blocked:[{id,title}],
+ *     budgetPauses:[{from,to,reason}] }
  *   - trigger ∈ { 'night', 'manual' }
  *   - project = Projekt-Slug (KEIN absoluter Pfad)
  *   - completed/blocked = { id, title } je Story (kein Pfad/Secret)
+ *   - budgetPauses = { from: number, to: number|null, reason } je Budget-Pause
+ *     (night-budget-guard AC12); `reason` ∈ 'reactive-limit'|'proactive-threshold';
+ *     `to = null` bei sanftem Drain-Ende. Fehlt das Feld (Alt-Berichte vor
+ *     S-275) → `[]` (rückwärtskompatibel, kein Crash).
  *
  * Pro-Projekt-Grenze: je Projekt-Slug werden höchstens
  * `MAX_REPORTS_PER_PROJECT` (30) Berichte gehalten — beim `record()` fallen die
@@ -54,6 +60,9 @@ export const MAX_REPORTS_PER_PROJECT = 30;
 /** Erlaubter Trigger-Wert (AC3). */
 export const TRIGGERS = Object.freeze(['night', 'manual']);
 
+/** Erlaubter Budget-Pausen-Grund (night-budget-guard AC12). */
+export const BUDGET_PAUSE_REASONS = Object.freeze(['reactive-limit', 'proactive-threshold']);
+
 /** Erlaubter Projekt-Slug: nur Buchstaben, Ziffern, `-` und `_` (analog TickerSettingsStore). */
 export const PROJECT_SLUG_RE = /^[A-Za-z0-9_-]+$/;
 
@@ -61,6 +70,11 @@ export const PROJECT_SLUG_RE = /^[A-Za-z0-9_-]+$/;
  * @typedef {object} DrainStory
  * @property {string} id
  * @property {string} title
+ *
+ * @typedef {object} BudgetPause
+ * @property {number} from
+ * @property {number|null} to
+ * @property {'reactive-limit'|'proactive-threshold'} reason
  *
  * @typedef {object} DrainReport
  * @property {string} reportId
@@ -72,6 +86,8 @@ export const PROJECT_SLUG_RE = /^[A-Za-z0-9_-]+$/;
  * @property {number} flowRuns
  * @property {DrainStory[]} completed
  * @property {DrainStory[]} blocked
+ * @property {BudgetPause[]} budgetPauses  night-budget-guard AC12; `[]` bei
+ *   Alt-Berichten ohne das Feld (rückwärtskompatibel).
  */
 
 /**
@@ -100,6 +116,27 @@ function _normalizeStories(list) {
     .map((s) => ({
       id: typeof s.id === 'string' ? s.id : String(s.id ?? ''),
       title: typeof s.title === 'string' ? s.title : '',
+    }));
+}
+
+/**
+ * Normalisiert eine Budget-Pausen-Liste auf ausschließlich
+ * `{ from, to, reason }` (night-budget-guard AC12) — kein Durchreichen
+ * beliebiger Felder. Ein fehlendes/ungültiges `list` (Alt-Berichte ohne das
+ * Feld, oder korrupte Daten) → `[]` (rückwärtskompatibel, kein Crash). Ein
+ * Eintrag mit ungültigem `reason` wird verworfen (Security-/Daten-Hygiene).
+ *
+ * @param {unknown} list
+ * @returns {import('./DrainReportStore.js').BudgetPause[]}
+ */
+function _normalizeBudgetPauses(list) {
+  if (!Array.isArray(list)) return [];
+  return list
+    .filter((p) => p && typeof p === 'object' && BUDGET_PAUSE_REASONS.includes(p.reason))
+    .map((p) => ({
+      from: typeof p.from === 'number' ? p.from : 0,
+      to: typeof p.to === 'number' ? p.to : null,
+      reason: p.reason,
     }));
 }
 
@@ -148,6 +185,7 @@ export class DrainReportStore {
           flowRuns: Number.isFinite(r.flowRuns) ? r.flowRuns : 0,
           completed: _normalizeStories(r.completed),
           blocked: _normalizeStories(r.blocked),
+          budgetPauses: _normalizeBudgetPauses(r.budgetPauses),
         }));
     } catch (err) {
       if (err.code !== 'ENOENT') {
@@ -171,6 +209,8 @@ export class DrainReportStore {
    * @param {number} [input.flowRuns]
    * @param {DrainStory[]} [input.completed]
    * @param {DrainStory[]} [input.blocked]
+   * @param {import('./DrainReportStore.js').BudgetPause[]} [input.budgetPauses]
+   *   night-budget-guard AC12; fehlend/ungültig → `[]`.
    * @returns {Promise<DrainReport>} der geschriebene Bericht.
    * @throws {Error} wenn `project` kein gültiger Slug oder `trigger` ungültig ist.
    */
@@ -208,6 +248,7 @@ export class DrainReportStore {
       flowRuns: Number.isFinite(input.flowRuns) ? input.flowRuns : 0,
       completed: _normalizeStories(input.completed),
       blocked: _normalizeStories(input.blocked),
+      budgetPauses: _normalizeBudgetPauses(input.budgetPauses),
     };
 
     this.#reports.push(report);
@@ -243,7 +284,12 @@ export class DrainReportStore {
     // Absteigend nach finishedAt (ISO-8601 → lexikografisch = chronologisch).
     return [...out]
       .sort((a, b) => (a.finishedAt < b.finishedAt ? 1 : a.finishedAt > b.finishedAt ? -1 : 0))
-      .map((r) => ({ ...r, completed: [...r.completed], blocked: [...r.blocked] }));
+      .map((r) => ({
+        ...r,
+        completed: [...r.completed],
+        blocked: [...r.blocked],
+        budgetPauses: [...r.budgetPauses],
+      }));
   }
 
   /**

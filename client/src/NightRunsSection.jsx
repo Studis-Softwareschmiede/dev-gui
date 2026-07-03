@@ -18,12 +18,23 @@
  * aufklappbare Story-Liste (`<details>`, ID + Titel). Leere Liste dezent
  * (kurzer Hinweistext statt leerer Fläche).
  *
+ * night-budget-guard AC13 (Bericht-Anzeige):
+ *   Je Bericht wird zusätzlich `report.budgetPauses` (`{from,to,reason}[]`,
+ *   docs/specs/night-budget-guard.md AC12) textlich gerendert — von/bis
+ *   (lokal formatiert; `to === null` → „Nacht-Ende") + Grund
+ *   (`reactive-limit` → „Session-Limit erreicht", `proactive-threshold` →
+ *   „Budget-Schwelle erreicht"). Ein leeres/fehlendes Array (Alt-Berichte vor
+ *   S-275) → nichts gerendert (dezent, kein leerer Block). NICHT unit-testbar
+ *   ist die reale Zeitzonen-Formatierung (`toLocaleString`, jsdom-Umgebungs-
+ *   abhängig) — verifiziert über feste Textteile statt exaktem Format.
+ *
  * Graceful degradation: bei Netzwerkfehler oder unerwarteter Antwortform
  * bleibt die Sektion unsichtbar (kein Crash, kein irreführender Platzhalter) —
  * analog `NightWatchStatusBadge.jsx`.
  *
  * Security (Floor): keine Secrets — DrainReportStore hält ausschließlich
- * Slug + Story-ID/Titel + Zähler (s. src/DrainReportStore.js).
+ * Slug + Story-ID/Titel + Zähler + Budget-Pausen-Zeitstempel/Grund (s.
+ * src/DrainReportStore.js).
  *
  * A11y: <section aria-label>, Zahlen/Status textlich, <details>/<summary>
  * nativ tastaturbedienbar, Touch-Targets ≥ 44px wo interaktiv.
@@ -49,6 +60,33 @@ function formatWhen(iso) {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return '—';
   return d.toLocaleString();
+}
+
+/**
+ * night-budget-guard AC12/AC13: `budgetPauses[].from`/`.to` sind Epoch-ms
+ * (kein ISO-String, s. DrainReportStore-Schema) — eigener Formatter.
+ *
+ * @param {unknown} ms
+ * @returns {string}  lokal formatierter Zeitpunkt, oder '—' bei ungültigem Wert
+ */
+function formatPauseMs(ms) {
+  if (typeof ms !== 'number' || Number.isNaN(ms)) return '—';
+  const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleString();
+}
+
+/**
+ * night-budget-guard AC13: textliche Übersetzung des Budget-Pausen-Grunds
+ * (nie nur ein Code, WCAG 2.1 AA — Zahlen/Status immer textlich).
+ *
+ * @param {unknown} reason
+ * @returns {string}
+ */
+function formatPauseReason(reason) {
+  if (reason === 'reactive-limit') return 'Session-Limit erreicht';
+  if (reason === 'proactive-threshold') return 'Budget-Schwelle erreicht';
+  return typeof reason === 'string' && reason ? reason : '—';
 }
 
 export function NightRunsSection({ fetchFn }) {
@@ -99,11 +137,14 @@ export function NightRunsSection({ fetchFn }) {
  *   reportId?: string, project?: string, finishedAt?: string,
  *   completed?: Array<{id:string,title:string}>,
  *   blocked?: Array<{id:string,title:string}>,
+ *   budgetPauses?: Array<{from:number,to:number|null,reason:string}>,
  * } }} props
  */
 function NightRunItem({ report }) {
   const completed = Array.isArray(report?.completed) ? report.completed : [];
   const blocked = Array.isArray(report?.blocked) ? report.blocked : [];
+  // night-budget-guard AC12/AC13: fehlendes Feld (Alt-Berichte) → [] (kein Crash).
+  const budgetPauses = Array.isArray(report?.budgetPauses) ? report.budgetPauses : [];
   const project = typeof report?.project === 'string' && report.project ? report.project : '—';
   const when = formatWhen(report?.finishedAt);
   const summary = `${completed.length} erledigt / ${blocked.length} blockiert`;
@@ -127,6 +168,21 @@ function NightRunItem({ report }) {
             ))}
           </ul>
         </details>
+      )}
+      {/* night-budget-guard AC13: Budget-Pausen textlich, leeres Array → nichts (dezent). */}
+      {budgetPauses.length > 0 && (
+        <div style={styles.budgetPauses} data-testid="night-run-budget-pauses">
+          <span style={styles.budgetPausesLabel}>Budget-Pausen:</span>
+          <ul style={styles.budgetPauseList}>
+            {budgetPauses.map((p, i) => (
+              <li key={i}>
+                {formatPauseMs(p?.from)} – {typeof p?.to === 'number' ? formatPauseMs(p.to) : 'Nacht-Ende'}
+                {' — '}
+                {formatPauseReason(p?.reason)}
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
     </li>
   );
@@ -214,6 +270,23 @@ const styles = {
   },
 
   storyList: {
+    margin: '4px 0 0',
+    paddingLeft: 18,
+    color: '#9ca3af',
+    lineHeight: 1.6,
+  },
+
+  budgetPauses: {
+    marginTop: 4,
+    fontSize: 11,
+  },
+
+  budgetPausesLabel: {
+    color: '#fbbf24',
+    fontWeight: 700,
+  },
+
+  budgetPauseList: {
     margin: '4px 0 0',
     paddingLeft: 18,
     color: '#9ca3af',

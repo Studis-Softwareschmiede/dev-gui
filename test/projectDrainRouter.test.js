@@ -107,6 +107,13 @@
  *          — der Router selbst behandelt `aborted` transparent wie jeden
  *          anderen Status, keine Sonderfall-Logik im Router-Code).
  *
+ * Covers (night-budget-guard, S-275):
+ *   AC12 — `_writeManualReport` reicht `result.budgetPauses` additiv an
+ *          `DrainReportStore.record()` durch (manueller Drain persistiert die
+ *          Budget-Pausen genau wie der Nacht-Drain); fehlt das Feld im
+ *          Drain-Ergebnis (z.B. der `drain-failed`-Zweig) → `[]` (kein Crash,
+ *          kein Regress an den bestehenden Report-Feldern).
+ *
  * Strategy: echter Express-App + echter HTTP-Server (Muster
  * test/slugResolver.test.js "commandRouter integration" + test/tickerSettings.test.js
  * HTTP-Helpers) — injizierbarer slugResolver/pathValidator/lock (kein echtes
@@ -883,6 +890,42 @@ describe('POST /api/projects/:slug/drain — Abschlussbericht (drain-completion-
     await flushAsync();
     const status = await getJson(s.port, `/api/projects/dev-gui/drain/${post.body.drainId}`);
     expect(status.body.status).toBe('done');
+  });
+
+  it('night-budget-guard AC12 — reicht budgetPauses aus dem Drain-Ergebnis additiv an den Bericht durch', async () => {
+    const drainReportStore = makeReportStore();
+    const drainProject = jest.fn(async () => ({
+      stopped: true, reason: 'budget-stop', flowRuns: 1, escalated: [],
+      completed: [], blocked: [],
+      budgetPauses: [{ from: 1000, to: null, reason: 'proactive-threshold' }],
+    }));
+    const app = makeApp({ projectDrain: { drainProject }, drainReportStore });
+    const s = await startServer(app);
+    server = s.server;
+
+    const res = await postNoBody(s.port, '/api/projects/dev-gui/drain');
+    expect(res.status).toBe(202);
+    await flushAsync();
+
+    expect(drainReportStore.record).toHaveBeenCalledTimes(1);
+    const report = drainReportStore.records[0];
+    expect(report.budgetPauses).toEqual([{ from: 1000, to: null, reason: 'proactive-threshold' }]);
+  });
+
+  it('night-budget-guard AC12 — fehlendes budgetPauses im Drain-Ergebnis (drain-failed) → [] im Bericht', async () => {
+    const drainReportStore = makeReportStore();
+    const drainProject = jest.fn(async () => { throw new Error('geheimer /workspace/secret Fehler'); });
+    const app = makeApp({ projectDrain: { drainProject }, drainReportStore });
+    const s = await startServer(app);
+    server = s.server;
+
+    const post = await postNoBody(s.port, '/api/projects/dev-gui/drain');
+    expect(post.status).toBe(202);
+    await flushAsync();
+
+    expect(drainReportStore.record).toHaveBeenCalledTimes(1);
+    const report = drainReportStore.records[0];
+    expect(report.budgetPauses).toEqual([]);
   });
 });
 

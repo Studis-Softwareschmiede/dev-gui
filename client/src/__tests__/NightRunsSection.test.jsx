@@ -12,6 +12,12 @@
  *          Netzwerkfehler/unerwartete Antwortform → Sektion unsichtbar
  *          (graceful degradation, kein Crash — analog NightWatchStatusBadge).
  *
+ * Covers (night-budget-guard):
+ *   AC13 — je Bericht werden `budgetPauses` (`{from,to,reason}[]`) textlich
+ *          gerendert (von/bis lokal formatiert, `to===null` → „Nacht-Ende",
+ *          Grund als Klartext); ein leeres/fehlendes Array (Alt-Bericht vor
+ *          S-275) → kein Budget-Pausen-Block gerendert (dezent).
+ *
  * @jest-environment jsdom
  */
 
@@ -153,5 +159,65 @@ describe('drain-completion-report AC7b — Nacht-Läufe-Sektion', () => {
       expect(fetchFn).toHaveBeenCalled();
     });
     expect(container.querySelector('section')).toBeFalsy();
+  });
+});
+
+describe('night-budget-guard AC13 — Budget-Pausen je Bericht', () => {
+  it('zeigt Budget-Pausen textlich (von–bis, Grund) je Bericht', async () => {
+    const fetchFn = makeFetch({
+      reports: [
+        {
+          reportId: 'r-1', project: 'dev-gui', trigger: 'night',
+          finishedAt: '2026-07-02T02:00:00Z',
+          completed: [], blocked: [],
+          budgetPauses: [
+            { from: Date.UTC(2026, 6, 2, 1, 0, 0), to: Date.UTC(2026, 6, 2, 1, 5, 0), reason: 'reactive-limit' },
+            { from: Date.UTC(2026, 6, 2, 1, 30, 0), to: null, reason: 'proactive-threshold' },
+          ],
+        },
+      ],
+    });
+    render(React.createElement(NightRunsSection, { fetchFn }));
+    await waitFor(() => {
+      const block = document.querySelector('[data-testid="night-run-budget-pauses"]');
+      expect(block).toBeTruthy();
+      expect(block.textContent).toMatch(/Session-Limit erreicht/);
+      expect(block.textContent).toMatch(/Budget-Schwelle erreicht/);
+      // Sanftes Ende (`to === null`) wird textlich als „Nacht-Ende" angezeigt.
+      expect(block.textContent).toMatch(/Nacht-Ende/);
+    });
+  });
+
+  it('leeres budgetPauses-Array → kein Budget-Pausen-Block (dezent, nichts)', async () => {
+    const fetchFn = makeFetch({
+      reports: [
+        {
+          reportId: 'r-1', project: 'dev-gui', trigger: 'night',
+          finishedAt: '2026-07-02T02:00:00Z', completed: [], blocked: [], budgetPauses: [],
+        },
+      ],
+    });
+    render(React.createElement(NightRunsSection, { fetchFn }));
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="night-run-item"]')).toBeTruthy();
+    });
+    expect(document.querySelector('[data-testid="night-run-budget-pauses"]')).toBeFalsy();
+  });
+
+  it('fehlendes budgetPauses-Feld (Alt-Bericht) → kein Crash, kein Budget-Pausen-Block', async () => {
+    const fetchFn = makeFetch({
+      reports: [
+        {
+          reportId: 'r-1', project: 'dev-gui', trigger: 'night',
+          finishedAt: '2026-07-02T02:00:00Z', completed: [], blocked: [],
+          // KEIN budgetPauses-Feld — simuliert einen Alt-Bericht vor S-275.
+        },
+      ],
+    });
+    render(React.createElement(NightRunsSection, { fetchFn }));
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="night-run-item"]')).toBeTruthy();
+    });
+    expect(document.querySelector('[data-testid="night-run-budget-pauses"]')).toBeFalsy();
   });
 });

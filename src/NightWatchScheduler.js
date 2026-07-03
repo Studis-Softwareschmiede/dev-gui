@@ -761,7 +761,7 @@ export class NightWatchScheduler {
    * den Scheduler nie crashen (best-effort, Robustheits-NFR).
    *
    * @param {string|null} projectSlug  Projekt-Slug (kein Pfad); null → übersprungen.
-   * @param {{ reason?: string, flowRuns?: number, completed?: object[], blocked?: object[] }} result
+   * @param {{ reason?: string, flowRuns?: number, completed?: object[], blocked?: object[], budgetPauses?: object[] }} result
    * @param {string} startedAt  ISO-8601 Startzeitpunkt des Drains
    */
   #recordNightReport(projectSlug, result, startedAt) {
@@ -778,6 +778,9 @@ export class NightWatchScheduler {
         flowRuns: Number.isFinite(r.flowRuns) ? r.flowRuns : 0,
         completed: Array.isArray(r.completed) ? r.completed : [],
         blocked: Array.isArray(r.blocked) ? r.blocked : [],
+        // night-budget-guard AC12: additiv durchgereicht — Alt-Aufrufe ohne
+        // das Feld (z.B. der drain-failed-Zweig unten) → [] (kein Regress).
+        budgetPauses: Array.isArray(r.budgetPauses) ? r.budgetPauses : [],
       });
       if (p && typeof p.catch === 'function') p.catch(() => {});
     } catch {

@@ -163,7 +163,7 @@ export function projectDrainRouter(deps = {}, options = {}) {
    * (bereits form-validierte) Projekt-Slug aus der Route, kein Pfad/Secret.
    *
    * @param {string} slug
-   * @param {{ reason?: string, flowRuns?: number, completed?: object[], blocked?: object[] }} result
+   * @param {{ reason?: string, flowRuns?: number, completed?: object[], blocked?: object[], budgetPauses?: object[] }} result
    * @param {string} startedAt  ISO-8601 Startzeitpunkt des Drains
    */
   function _writeManualReport(slug, result, startedAt) {
@@ -178,6 +178,9 @@ export function projectDrainRouter(deps = {}, options = {}) {
         flowRuns: Number.isFinite(result.flowRuns) ? result.flowRuns : 0,
         completed: Array.isArray(result.completed) ? result.completed : [],
         blocked: Array.isArray(result.blocked) ? result.blocked : [],
+        // night-budget-guard AC12: additiv durchgereicht — der drain-failed-Zweig
+        // unten liefert kein `budgetPauses` → normalisiert auf [] (kein Regress).
+        budgetPauses: Array.isArray(result.budgetPauses) ? result.budgetPauses : [],
       });
       if (p && typeof p.catch === 'function') p.catch(() => {});
     } catch {

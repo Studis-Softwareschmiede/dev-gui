@@ -14,6 +14,10 @@
  *          globale AccessGuard auf /api/* ist server.js-seitig (nicht Teil des
  *          Router-Moduls, analog tickerSettings.test.js).
  *
+ * Covers (night-budget-guard, S-275):
+ *   AC12 — `budgetPauses` (vom Store geliefert) erscheint unverändert in der
+ *          Response (der Router serialisiert nur, ohne Feld-Filterung).
+ *
  * Strategy: echter Express-App + echter HTTP-Server (Muster tickerSettings.test.js)
  * mit einem Fake-drainReportStore (jest.fn) — kein echtes fs/CRED_STORE_DIR nötig.
  */
@@ -112,6 +116,21 @@ describe('GET /api/drain-reports (AC4)', () => {
       expect(res.status).toBe(500);
       expect(res.body.error).toBeDefined();
       expect(JSON.stringify(res.body)).not.toContain('/secret/');
+    });
+  });
+
+  it('night-budget-guard AC12 — budgetPauses aus dem Store erscheint unverändert in der Response', async () => {
+    const withPauses = {
+      ...SAMPLE[0],
+      budgetPauses: [{ from: 1000, to: 2000, reason: 'reactive-limit' }],
+    };
+    const drainReportStore = { list: jest.fn(async () => [withPauses]) };
+    await withServer({ drainReportStore }, async (port) => {
+      const res = await httpGet(port, '/api/drain-reports');
+      expect(res.status).toBe(200);
+      expect(res.body.reports[0].budgetPauses).toEqual([
+        { from: 1000, to: 2000, reason: 'reactive-limit' },
+      ]);
     });
   });
 });

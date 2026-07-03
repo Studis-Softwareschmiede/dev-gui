@@ -17,6 +17,13 @@
  *          Feldern); kein absoluter Pfad in der Datei. Degradiert ohne
  *          CRED_STORE_DIR auf reinen In-Memory-Betrieb (kein Crash).
  *
+ * Covers (night-budget-guard):
+ *   AC12 — `record()` nimmt additiv `budgetPauses:[{from,to,reason}]` entgegen,
+ *          persistiert sie (Neustart-fest, tmp+rename) und `list()` reicht sie
+ *          durch. Fehlendes Feld (Alt-Bericht) → `[]` (rückwärtskompatibel).
+ *          Ein Eintrag mit ungültigem `reason` wird verworfen (Security-/
+ *          Daten-Hygiene, kein Durchreichen beliebiger Felder).
+ *
  * Strategy: echtes fs gegen ein frisches tmp-CRED_STORE_DIR je Test; je Test
  * eine frische DrainReportStore-Instanz (der In-Memory-Cache ist instanz-lokal,
  * ein Neustart wird durch eine zweite Instanz simuliert).
@@ -25,7 +32,7 @@
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { mkdir, rm, readFile, readdir } from 'node:fs/promises';
+import { mkdir, rm, readFile, readdir, writeFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import {
   DrainReportStore,
@@ -212,5 +219,93 @@ describe('DrainReportStore — Degradation ohne CRED_STORE_DIR', () => {
     await expect(store.record(base())).resolves.toBeTruthy();
     const reports = await store.list();
     expect(reports).toHaveLength(1);
+  });
+});
+
+describe('DrainReportStore — budgetPauses (night-budget-guard AC12)', () => {
+  it('record() persistiert budgetPauses und list() reicht sie durch', async () => {
+    const store = new DrainReportStore();
+    const budgetPauses = [
+      { from: 1000, to: 2000, reason: 'reactive-limit' },
+      { from: 3000, to: null, reason: 'proactive-threshold' },
+    ];
+    await store.record(base({ budgetPauses }));
+
+    const [report] = await store.list();
+    expect(report.budgetPauses).toEqual(budgetPauses);
+  });
+
+  it('fehlendes budgetPauses-Feld (Alt-Bericht) → [] (rückwärtskompatibel)', async () => {
+    const store = new DrainReportStore();
+    await store.record(base()); // kein budgetPauses im Input
+
+    const [report] = await store.list();
+    expect(report.budgetPauses).toEqual([]);
+  });
+
+  it('ein Eintrag mit ungültigem reason wird verworfen (Security-/Daten-Hygiene)', async () => {
+    const store = new DrainReportStore();
+    await store.record(
+      base({
+        budgetPauses: [
+          { from: 1000, to: 2000, reason: 'reactive-limit' },
+          { from: 4000, to: null, reason: 'weekly-quota' }, // ungültig
+        ],
+      }),
+    );
+
+    const [report] = await store.list();
+    expect(report.budgetPauses).toEqual([{ from: 1000, to: 2000, reason: 'reactive-limit' }]);
+  });
+
+  it('budgetPauses übersteht einen Neustart (Persistenz, tmp+rename)', async () => {
+    const store1 = new DrainReportStore();
+    await store1.record(base({ budgetPauses: [{ from: 5000, to: null, reason: 'proactive-threshold' }] }));
+
+    const store2 = new DrainReportStore();
+    const [report] = await store2.list();
+    expect(report.budgetPauses).toEqual([{ from: 5000, to: null, reason: 'proactive-threshold' }]);
+  });
+
+  it('eine Alt-Bericht-Datei OHNE budgetPauses-Feld lädt sauber auf [] (rückwärtskompatibel)', async () => {
+    // Simuliert eine vor S-275 geschriebene Bericht-Datei — kein budgetPauses-Feld.
+    const filePath = resolveReportFilePath();
+    await writeFile(
+      filePath,
+      JSON.stringify({
+        reports: [
+          {
+            reportId: 'legacy-1',
+            project: 'proj-a',
+            trigger: 'manual',
+            startedAt: '2026-06-01T00:00:00.000Z',
+            finishedAt: '2026-06-01T00:05:00.000Z',
+            reason: 'no-drain-target',
+            flowRuns: 1,
+            completed: [],
+            blocked: [],
+            // KEIN budgetPauses-Feld.
+          },
+        ],
+      }),
+      'utf8',
+    );
+
+    const store = new DrainReportStore();
+    const [report] = await store.list();
+    expect(report.budgetPauses).toEqual([]);
+  });
+
+  it('kein Regress an den bestehenden Report-Feldern durch die budgetPauses-Erweiterung', async () => {
+    const store = new DrainReportStore();
+    const written = await store.record(base({ budgetPauses: [{ from: 1, to: 2, reason: 'reactive-limit' }] }));
+    expect(written).toMatchObject({
+      project: 'proj-a',
+      trigger: 'manual',
+      reason: 'no-drain-target',
+      flowRuns: 2,
+      completed: [{ id: 'S-1', title: 'Eins' }],
+      blocked: [],
+    });
   });
 });

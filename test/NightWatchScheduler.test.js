@@ -105,7 +105,7 @@
  *         AC1/AC2/AC4) ist zusätzlich unit-getestet in
  *         test/DrainJobRegistry.test.js.
  *
- * Covers (night-budget-guard, S-274):
+ * Covers (night-budget-guard, S-274/S-275):
  *   AC10 — `#runTick` bestimmt je Tick `computeWindowEndMs(nowMs, window)`
  *          und reicht das Ergebnis als `opts.windowEndMs` an JEDEN in diesem
  *          Tick frisch gestarteten `projectDrain.drainProject()`-Aufruf
@@ -113,6 +113,11 @@
  *          konkrete `BudgetGuard`-Injektion selbst (server.js-Verdrahtung)
  *          lebt außerhalb dieser Unit-Test-Datei (kein `claude`-Lauf/IO
  *          hier nötig, Testbarkeits-NFR der Spec).
+ *   AC12 — `#recordNightReport` reicht `result.budgetPauses` additiv an
+ *          `DrainReportStore.record()` durch (Nacht-Drain persistiert die
+ *          Budget-Pausen); fehlt das Feld im Drain-Ergebnis (z.B. der
+ *          `drain-failed`-Zweig) → `[]` (kein Crash, kein Regress an den
+ *          bestehenden Report-Feldern).
  *
  * Covers (drain-done-notification, S-277):
  *   AC4 — je abgeschlossenem Projekt-Drain (resolve UND reject, symmetrisch
@@ -1065,6 +1070,53 @@ describe('NightWatchScheduler — Abschlussbericht je Nacht-Drain (drain-complet
     projectDrain.resolve('/workspace/proj-a');
     await flush();
     expect(scheduler.getStatus().activeDrainProjectPaths).toEqual([]);
+  });
+
+  it('night-budget-guard AC12 — reicht budgetPauses aus dem Drain-Ergebnis additiv an den Bericht durch', async () => {
+    const drainReportStore = makeReportStore();
+    const projectDrain = makeControllableProjectDrain();
+    const { scheduler } = makeScheduler({
+      projectDrain,
+      drainReportStore,
+      settings: makeSettings({ maxParallel: 1, projects: ['proj-a'] }),
+    });
+
+    await scheduler.tick();
+    projectDrain.resolve('/workspace/proj-a', {
+      stopped: true,
+      reason: 'budget-window-end',
+      flowRuns: 1,
+      escalated: [],
+      completed: [],
+      blocked: [],
+      budgetPauses: [{ from: 1000, to: null, reason: 'proactive-threshold' }],
+    });
+    await flush();
+
+    expect(drainReportStore.record).toHaveBeenCalledTimes(1);
+    const report = drainReportStore.records[0];
+    expect(report.budgetPauses).toEqual([{ from: 1000, to: null, reason: 'proactive-threshold' }]);
+  });
+
+  it('night-budget-guard AC12 — fehlendes budgetPauses im Drain-Ergebnis (drain-failed) → [] im Bericht', async () => {
+    const drainReportStore = makeReportStore();
+    const drainProject = {
+      drainProject: jest.fn(async () => {
+        throw new Error('geheimer /pfad/mit/secret Fehler');
+      }),
+    };
+    const { scheduler } = makeScheduler({
+      projectDrain: drainProject,
+      drainReportStore,
+      settings: makeSettings({ maxParallel: 1, projects: ['proj-a'] }),
+    });
+
+    await scheduler.tick();
+    await flush();
+
+    expect(drainReportStore.record).toHaveBeenCalledTimes(1);
+    const report = drainReportStore.records[0];
+    expect(report.budgetPauses).toEqual([]);
   });
 });
 
