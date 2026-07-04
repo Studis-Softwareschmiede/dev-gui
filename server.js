@@ -163,6 +163,7 @@ import { HeadlessRetroRunner } from './src/HeadlessRetroRunner.js';
 import { RetroAutoQueue } from './src/RetroAutoQueue.js';
 import { AutoRetroTrigger } from './src/AutoRetroTrigger.js';
 import { read as readRetroAutoSettings } from './src/RetroAutoSettingsStore.js';
+import { BoardEventHub } from './src/BoardEventHub.js';
 import { mountRouters } from './src/routerLoader.js';
 
 const PORT = Number(process.env.PORT ?? 8080);
@@ -571,6 +572,12 @@ bootDrainRecovery.run(orphanedDrains).catch((err) => {
   console.error('[server] Boot-Drain-Wiederanlauf fehlgeschlagen:', err.message);
 });
 
+// ── BoardEventHub (board-live-sse AC1-AC7) ────────────────────────────────────
+// In-process Pub/Sub für SSE-Invalidierungs-Events. Wird vom boardEventsRouter
+// (GET /api/board/events) als dep injiziert. Der NotificationWatcher wird in
+// Story 2 optional als Producer an diese Instanz ankoppelt (AC12: null-tolerant).
+const boardEventHub = new BoardEventHub();
+
 // ── NotificationWatcher (push-notifications S-184 AC6–AC9) ───────────────────
 // Hängt am Board-Scan-Ergebnis; check() wird periodisch aufgerufen.
 // rescan-Router ruft notificationWatcher.check() nach boardAggregator.scan() auf
@@ -762,6 +769,10 @@ const deps = {
   readTickerSettings,
   // S-195 AC9–AC11: NightWatchScheduler-Instanz für künftige Statusanzeige (S-197).
   nightWatchScheduler,
+  // board-live-sse AC1-AC7 (S-285): BoardEventHub für GET /api/board/events (boardEventsRouter).
+  // In-process Pub/Sub für SSE-Invalidierungs-Events (Slug-Signals). Der NotificationWatcher
+  // wird in Story 2 optional als Producer verdrahtet (AC12: null-tolerant).
+  boardEventHub,
   // headless-manual-drain AC1/AC2/AC3 (ADR-017): DEDIZIERTE headless ProjectDrain-
   // Instanz + ihre EIGENE Session-Lock-Instanz (manualDrainLock) + sessionRegistry
   // (Busy-Erkennung) für den manuellen „Board abarbeiten"-Knopf (projectDrainRouter).
@@ -1015,6 +1026,7 @@ function shutdown() {
   claudeAuthHealthService.stop();
   boardAggregator.stopWatchers();
   notificationWatcher.stop();
+  boardEventHub.shutdown();
   ptyRegistry.destroy(); // destroy all sessions (global + project sessions)
   server.close(() => process.exit(0));
 }

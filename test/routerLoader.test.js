@@ -307,8 +307,10 @@ describe('routerLoader — Echte src/routers/ Module (AC1/AC3)', () => {
     //   (POST .../obsidian-ingest/start + GET .../obsidian-ingest/:jobId +
     //    POST .../obsidian-ingest/:jobId/answers — headless from-notes mit
     //    Fragenkatalog-Interrupt/Resume, Backend-Anteil AC1/AC2/AC4-AC7) → 40.
+    // boardEvents.js wurde mit board-live-sse (S-285) hinzugefügt
+    //   (GET /api/board/events — SSE-Endpunkt für Board-Live-Aktualisierung AC1–AC7) → 41.
     const entries = await readdir(ROUTERS_DIR);
     const mountedCount = entries.filter((f) => f.endsWith('.js')).length;
-    expect(mountedCount).toBe(40);
+    expect(mountedCount).toBe(41);
   });
 });
