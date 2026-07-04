@@ -26,5 +26,8 @@ branch: feat/S-250-obsidian-ingest-runner
 pr: null
 blocked_reason: null
 created_at: '2026-07-02T05:42:15Z'
-updated_at: '2026-07-03T01:02:12Z'
+updated_at: '2026-07-04T10:07:07.700Z'
 done_at: '2026-07-03T01:01:25Z'
+area: '''obsidian'''
+archived: true
+archived_at: '2026-07-04T10:07:07.700Z'

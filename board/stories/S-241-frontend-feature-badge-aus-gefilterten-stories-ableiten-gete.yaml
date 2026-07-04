@@ -31,7 +31,7 @@ branch: feat/S-241-filter-status-consistency
 pr: null
 blocked_reason: null
 created_at: '2026-07-02T05:07:52Z'
-updated_at: '2026-07-03T02:16:13Z'
+updated_at: '2026-07-04T10:07:07.700Z'
 done_at: '2026-07-03T02:15:24Z'
 notes: 'Spec: docs/specs/board-filter-feature-status-consistency.md — implements AC1-AC6.
   Priority P2. depends: keine. Befund 2 (Owner-Live-Test 2026-07-01): Status-Filter
@@ -44,3 +44,6 @@ notes: 'Spec: docs/specs/board-filter-feature-status-consistency.md — implemen
   kein Badge. AC5 leer gefilterte Features unter hasRestrictingFilter ausblenden (echt
   + _orphaned). AC6 Leer-Hinweis auch fuer Status-Filter (bisher nur Label). Keine
   API-/Schema-Aenderung.'
+area: '''board'''
+archived: true
+archived_at: '2026-07-04T10:07:07.700Z'

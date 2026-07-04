@@ -2,6 +2,7 @@
 id: vps-tunnel-provisioning
 title: VPS Cloudflare-Tunnel-Provisionierung (1 Tunnel/VPS, cloudflared)
 status: draft
+area: deployment
 version: 1
 ---
 

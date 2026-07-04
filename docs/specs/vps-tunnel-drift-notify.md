@@ -2,6 +2,7 @@
 id: vps-tunnel-drift-notify
 title: "Tunnel-Drift-Push — Reconciliation erkennt fehlenden Tunnel → ntfy-Push (Capability C)"
 status: draft
+area: deployment
 version: 1
 ---
 

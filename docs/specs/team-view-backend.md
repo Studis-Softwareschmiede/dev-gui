@@ -2,6 +2,7 @@
 id: team-view-backend
 title: Team-Ansicht — Backend-Boundary (AgentFlowReader + /api/team)
 status: draft
+area: retro-lernen
 version: 1
 ---
 

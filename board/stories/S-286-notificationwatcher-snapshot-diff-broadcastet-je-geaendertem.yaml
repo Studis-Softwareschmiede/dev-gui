@@ -28,6 +28,9 @@ branch: feat/S-286-sse-producer-naht
 pr: null
 blocked_reason: null
 created_at: '2026-07-03T07:27:07Z'
-updated_at: '2026-07-04T03:10:04Z'
+updated_at: '2026-07-04T10:07:07.700Z'
 done_at: '2026-07-04T03:09:10Z'
 tok_est: null
+area: '''board'''
+archived: true
+archived_at: '2026-07-04T10:07:07.700Z'

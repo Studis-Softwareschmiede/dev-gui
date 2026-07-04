@@ -2,6 +2,7 @@
 id: cloudflare-reconciliation
 title: Reconciliation-Cron — beidseitig selbst-heilender Container ↔ Tunnel-Route Abgleich (Capability C)
 status: draft
+area: deployment
 version: 2
 ---
 

@@ -2,6 +2,7 @@
 id: credential-bootstrap-status
 title: Locked-Zustand-Erkennung + Bootstrap-Status-Endpunkt
 status: draft
+area: einstellungen
 version: 1
 ---
 

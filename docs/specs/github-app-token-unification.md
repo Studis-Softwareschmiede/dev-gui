@@ -2,6 +2,7 @@
 id: github-app-token-unification
 title: GitHub-Auth vereinheitlichen auf das App-Token-Modell (Cache-Provider, Lese-Pfad)
 status: draft
+area: einstellungen
 version: 1
 ---
 

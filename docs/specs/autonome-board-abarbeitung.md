@@ -2,6 +2,7 @@
 id: autonome-board-abarbeitung
 title: Autonome Board-Abarbeitung — agent-ready Items, /flow aus dev-gui, Blocked statt Raten
 status: active
+area: board
 version: 1
 ---
 

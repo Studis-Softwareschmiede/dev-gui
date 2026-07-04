@@ -2,6 +2,7 @@
 id: credential-key-rotation
 title: Master-Key-Rotation des Credential-Stores (atomare Re-Encryption + rollendes Bitwarden-Fenster)
 status: draft
+area: einstellungen
 version: 1
 ---
 

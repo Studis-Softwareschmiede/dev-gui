@@ -2,6 +2,7 @@
 id: access-and-guardrails
 title: Access-Gate + Sicherheits-Leitplanken
 status: draft
+area: deployment
 version: 1
 ---
 

@@ -2,6 +2,7 @@
 id: obsidian-vault-config
 title: Obsidian-Vault-Pfad konfigurierbar + Projekt-Ordner auflisten
 status: active
+area: obsidian
 version: 1
 spec_format: use-case-2.0
 ---

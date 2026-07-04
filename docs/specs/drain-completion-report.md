@@ -2,6 +2,7 @@
 id: drain-completion-report
 title: Abschlussbericht nach Board-Drain (Nachtwächter + manueller „Board abarbeiten"-Lauf)
 status: active
+area: fabrik-arbeiten
 version: 1
 ---
 

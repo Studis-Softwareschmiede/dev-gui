@@ -2,6 +2,7 @@
 id: ssh-key-generation
 title: SSH-Keypair-Generierung im Panel (root/alex) + auditierter Private-Key-Export
 status: draft
+area: vps
 version: 1
 ---
 

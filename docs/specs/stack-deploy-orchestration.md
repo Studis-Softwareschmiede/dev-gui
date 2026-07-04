@@ -2,6 +2,7 @@
 id: stack-deploy-orchestration
 title: Stack-Deploy-Orchestrierung — Registry, .env-Generierung auf VPS, Stack-Deploy/Undeploy, UI-Modus, stack-aware Reconciliation (Etappe 1b)
 status: draft
+area: deployment
 version: 1
 ---
 

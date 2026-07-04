@@ -1,0 +1,44 @@
+- id: board
+  name: 'Board'
+  order: 1
+  description: 'Kanban, Storys, Filter, Archiv, Live-Push'
+- id: fabrik-arbeiten
+  name: 'Fabrik/Arbeiten'
+  order: 2
+  description: 'Cockpit, Drains, Befehls-Ausloesung, Abschlussberichte'
+- id: nachtwaechter
+  name: 'Nachtwaechter'
+  order: 3
+  description: 'Nacht-Drain, Auto-Retro, Budget-Schutz'
+- id: einstellungen
+  name: 'Einstellungen'
+  order: 4
+  description: 'Settings-Panel, Credentials, Workspace-Pfad'
+- id: vps
+  name: 'VPS'
+  order: 5
+  description: 'Server-Verwaltung, SSH-Keys/-Terminal'
+- id: deployment
+  name: 'Deployment'
+  order: 6
+  description: 'Deploy-Orchestrierung, Cloudflare, Container'
+- id: benachrichtigungen
+  name: 'Benachrichtigungen'
+  order: 7
+  description: 'ntfy, Events, Meldeklassen'
+- id: obsidian
+  name: 'Obsidian'
+  order: 8
+  description: 'Vault, Ingest, Sync, Fragenkatalog'
+- id: sicherung
+  name: 'Sicherung'
+  order: 9
+  description: 'Backup, Restore'
+- id: spezifikation
+  name: 'Spezifikation'
+  order: 10
+  description: 'Doku-Ansicht, Reconcile'
+- id: retro-lernen
+  name: 'Retro/Lernen'
+  order: 11
+  description: 'RetroView, Trends, Verbesserungs-Board'

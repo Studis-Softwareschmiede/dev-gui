@@ -2,6 +2,7 @@
 id: app-stack-alexstuder-webpage
 title: App-Stack alexstuderWebpage — Pilot-Compose (nur web_hauptseite + Label) (Etappe 2)
 status: draft
+area: deployment
 version: 1
 ---
 

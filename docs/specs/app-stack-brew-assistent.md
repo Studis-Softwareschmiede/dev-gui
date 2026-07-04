@@ -2,6 +2,7 @@
 id: app-stack-brew-assistent
 title: App-Stack brew_assistent — Compose (web_assistent + api_proxy[assistent] + Lean-Supabase + db-init + Labels, KEIN SSO) (Etappe 4)
 status: draft
+area: deployment
 version: 1
 ---
 

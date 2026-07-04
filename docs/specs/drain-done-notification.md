@@ -2,6 +2,7 @@
 id: drain-done-notification
 title: "Drain-Fertig-Push (drain_done) — genau ein ntfy-Push je Drain-Ende mit Bilanz"
 status: active
+area: benachrichtigungen
 version: 1
 ---
 

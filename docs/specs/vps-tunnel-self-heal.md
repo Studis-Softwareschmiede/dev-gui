@@ -2,6 +2,7 @@
 id: vps-tunnel-self-heal
 title: "Tunnel neu anlegen & bestücken — Ein-Klick-Selbstheilung pro VPS (Capability B)"
 status: draft
+area: deployment
 version: 1
 ---
 

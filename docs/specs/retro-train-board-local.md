@@ -2,6 +2,7 @@
 id: retro-train-board-local
 title: Retro/Train-Verbesserungs-Board lokal im dev-gui (Quelle LEARNINGS.md)
 status: active
+area: retro-lernen
 version: 1
 ---
 

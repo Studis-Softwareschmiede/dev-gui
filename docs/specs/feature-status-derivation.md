@@ -2,6 +2,7 @@
 id: feature-status-derivation
 title: Board — Feature-Status live aus Kind-Stories ableiten (kein manuell gepflegtes Feld mehr)
 status: active
+area: board
 version: 2
 ---
 

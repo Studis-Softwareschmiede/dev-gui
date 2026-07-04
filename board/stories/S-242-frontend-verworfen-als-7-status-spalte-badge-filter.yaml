@@ -33,7 +33,7 @@ branch: feat/S-242-verworfen-status
 pr: null
 blocked_reason: null
 created_at: '2026-07-02T05:05:10Z'
-updated_at: '2026-07-02T18:59:17Z'
+updated_at: '2026-07-04T10:07:07.700Z'
 done_at: '2026-07-02T18:57:31Z'
 notes: 'Spec: docs/specs/board-status-verworfen.md — implements AC1–AC5.
 
@@ -78,3 +78,6 @@ notes: 'Spec: docs/specs/board-status-verworfen.md — implements AC1–AC5.
   Nicht-Ziele: Schema/Enum-Definition (agent-flow); Feature-Status-Ableitung (S-243);
   Archiv-Kriterium (S-244); Rollup-Aenderung; Verworfen-Schreibpfad aus der GUI.'
 tok: null
+area: '''board'''
+archived: true
+archived_at: '2026-07-04T10:07:07.700Z'

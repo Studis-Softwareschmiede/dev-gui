@@ -2,6 +2,7 @@
 id: retro-view-backend
 title: Retro-Sichtbarkeit — Backend-Boundary (RetroReader + /api/retro)
 status: draft
+area: retro-lernen
 version: 1
 ---
 

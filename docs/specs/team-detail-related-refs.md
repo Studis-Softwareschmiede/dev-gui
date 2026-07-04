@@ -2,6 +2,7 @@
 id: team-detail-related-refs
 title: Team-Ansicht — zugehörige Skills/Knowledge eines Agenten (verlinkt)
 status: draft
+area: retro-lernen
 version: 1
 ---
 

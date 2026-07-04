@@ -1,0 +1,102 @@
+# Bereichs-Migration — offene Zuordnungen
+
+Folgende Eintraege blieben bewusst OHNE Bereichs-Stempel (kein Raten, AC6):
+
+- **feature F-001** — Initial _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **feature F-010** — Korrekturen _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **feature F-012** — Credential-Persistenz & verschlüsseltes Backup/DR _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-001** — Terminal-Bridge: PTY ↔ interaktive Claude-Session (Backend) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-002** — Access-Gate + Sicherheits-Leitplanken _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-003** — Flow-Trigger API + Concurrency-Guard + Kill-Switch _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-004** — Fabrik-Status API (live aus GitHub + Docker) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-005** — Terminal-Frontend (xterm.js Live-Pane) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-006** — Status-Dashboard (Frontend) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-007** — Flow-Trigger-Panels (Frontend) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-008** — Deployment (Docker + Cloudflare devgui + Bootstrap) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-009** — Terminal: PTY-Resize + Scrollback-Replay (Darstellung zerschossen) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-010** — Flow-Trigger: Plugin-Namespace /agent-flow: in Allowlist + Dropdown _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-011** — Voll-funktionales Image: docker-CLI + agent-flow-Plugin-Auto-Provisionierung _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-012** — Härtung: Non-Root-Container → unbeaufsichtigt (skip-permissions) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-013** — Härtung: docker-socket-proxy statt rohem Socket _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-014** — Non-Root: /home/node/.claude im Image node-owned vor-anlegen (persistentes _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-015** — App-Shell: Einstiegs-Panel (4 Kacheln) + Navigation _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-016** — GitHub-Ansicht: Platzhalter-View (Grundgerüst) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-017** — VPS-Ansicht: Platzhalter-View (Grundgerüst) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-018** — Cloudflare-Ansicht: Platzhalter-View (Grundgerüst) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-019** — Settings-Ansicht: Zahnrad-Einstieg + Integrations-Sektionen (Grundgerüst) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-020** — Credential-Verwaltung: write-only Credentials je Integration (Backend + UI) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-021** — SSH-Key-Verwaltung: Public/Private-Keys je VPS-Benutzer hinterlegen (Stufe _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-022** — VPS-Provisionierung: Public-Key idempotent in authorized_keys (Stufe B) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-023** — GitHub-Repo anlegen: GitHubWriter-Backend (POST /api/github/repos) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-024** — GitHub-Repo anlegen: Frontend-Formular in der GitHub-Ansicht _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-025** — GitHub-Repo klonen: Backend (POST /api/github/repos/clone, WORKSPACE_DIR) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-026** — GitHub-Repo klonen: Frontend-Formular in der GitHub-Ansicht _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-027** — GitHub-Repo-Übersicht: Backend GET /api/github/repos (read-only, GitHubReader) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-028** — Workspace-Übersicht: Backend GET /api/workspace/repos (Scan WORKSPACE_DIR, _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-029** — GitHub-Repo-Übersicht: Frontend-Liste + Aktions-Andockpunkte in der GitHub-Ansicht _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-030** — Workspace-Übersicht: Backend Pull (POST /api/workspace/repos/pull, Token-Mint _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-031** — Workspace-Übersicht: Backend Löschen (POST /api/workspace/repos/delete, Path-/Symlink-Schutz) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-032** — Workspace-Übersicht: Frontend-Liste + Pull/Löschen mit Bestätigungs-Dialog _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-033** — GitHub-Repo-Übersicht: Verzahnungs-Badge ''lokal vorhanden'' (Org-Liste ↔ _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-034** — GitHubCloner auf gemeinsamen githubAppToken.js-Helper migrieren _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-035** — Workspace-Pfad: Backend (Persistenz + Effektivwert-Auflösung + Validierung) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-036** — Workspace-Pfad: Frontend (Settings-Sektion Workspace) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-037** — Workspace-Pfad-Konfiguration in die GitHub-Ansicht verschieben _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-038** — Workspace-Pfad-Eintrag in die GitHub-Sektion der Einstellungen (Korrektur _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-039** — VPS-Credentials: API-Token je Provider (Hetzner, IONOS, Hostinger) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-040** — VPS-Provider-Boundary + Hetzner-Adapter (list/start/stop/create) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-041** — VPS-Provider-Adapter: IONOS (list/start/stop/create) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-042** — VPS-Provider-Adapter: Hostinger (list/start/stop/create) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-043** — VPS Default-Setup-Pipeline via cloud-init (Update + Docker + User root/alex) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-044** — VPS-Create: SSH-Key-Zuordnung root/alex aus settings-ssh-keys-Labels _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-045** — VPS-Ansicht: Maschinen-Übersicht + Lifecycle-UI (Create/Start/Stop, Multi-Provider) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-046** — Settings: Cloudflare-Credential-Sektion (api_token + account_id, write-only) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-047** — CloudflareApi-Boundary (Read) + LockoutGuard (SDK-frei via fetch, fail-closed) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-048** — view-cloudflare v2: Inventar + Löschen (Zones/Tunnel/Routen, LockoutGuard _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-049** — VpsDockerControl-Boundary: Docker-on-VPS via SSH (pull/run/rm/ps, Label-Konvention) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-050** — DeployOrchestrator + Deployments-Panel: Container+Route als atomare Einheit _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-051** — ReconciliationJob (Capability C): beidseitig selbst-heilender Container↔Route-Abgleich _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-052** — SSH-Key-Generierung: ed25519-Keypair im Panel erzeugen + auditierter Export _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-053** — SSH-Key-Generierung + Export: UI in der SSH-Keys-Settings-Sektion (Frontend) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-054** — VpsProvisioner-Erweiterung: Public-Key entfernen + Verbindungstest mit Key _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-055** — SSH-Key-Rotation: vollautomatische, additive Rotation auf laufendem VPS (Backend-Orchestrierung) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-056** — SSH-Key-Rotation: UI in der SSH-Keys-Settings-Sektion (Frontend) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-057** — Team-Ansicht — Backend-Boundary: AgentFlowReader + /api/team _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-058** — Team-Ansicht — Frontend: TeamView + markdownLite + Team-Kachel/Route _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-059** — Team-Ansicht: Detail-Pane bei langen Inhalten scrollbar machen (UX-Bugfix) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-060** — Team-Ansicht: Agent→Skills/Knowledge-Referenzen im Backend auflösen (relatedSkills/relatedKnowledge _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-061** — Team-Ansicht: zugehörige Skills/Knowledge als klickbare Chips im Agent-Detail _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-062** — Deployment als gleichwertige Einstiegs-Kachel (statt Extra-Nav-Link) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-063** — Etappe 1a: VpsComposeControl — Compose-Stack-Steuerung auf VPS via SSH _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-064** — Etappe 1b/A: Stack-Registry (Backend) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-065** — Etappe 1b/B: .env-Materialisierung/-Generierung auf dem VPS (Backend) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-066** — Etappe 1b/C: Stack-Deploy/Undeploy-Orchestrierung + API (Backend) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-067** — Etappe 1b/D: UI-Modus-Umschalter Single-Image | Compose-Stack (Frontend) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-068** — Etappe 1b/E: Stack-aware Reconciliation (Backend, Erweiterung ADR-013) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-069** — Etappe 2: App-Stack alexstuderWebpage — Pilot-Compose (nur web_hauptseite _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-070** — Etappe 3: App-Stack rapt_dashboard — Compose (web_rapt + api_proxy[rapt] + _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-071** — Etappe 4: App-Stack brew_assistent — Compose (web_assistent + api_proxy[assistent] _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-072** — Etappe 5: webPage_infra abwickeln — Bausteine in App-Repos/dev-gui, Repo deprecaten _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-073** — Retro-Sichtbarkeit: Backend-Boundary (RetroReader + /api/retro) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-074** — Retro-Sichtbarkeit: Frontend (RetroView + #/retro + Link im TeamView-Header) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-075** — Bug: Retro-Kategorie-Counts immer 0 — Pack/Skill-Tokenizer matcht echtes LEARNINGS.md-Format _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-076** — Credential-Store: Runtime-Unlock-Zustandsmodell (locked→unlocked) + .env-Persistenz _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-077** — Bitwarden-Beschaffung des Master-Keys: Login, Item-Lesen, Key-Erstellen (Backend-Boundary) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-078** — Locked-Zustand-Erkennung + Bootstrap-Status-Endpunkt (GET /api/settings/credential-status) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-079** — Bitwarden-Unlock-Dialog auf der Einstellungsseite + Unlock-Endpunkt _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-080** — Store-Master-Key entkoppeln + umbenennen (DEVGUI_CRED_MASTER_KEY) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-081** — Key-Quelle-Transparenz: credential-status keySource + immer sichtbarer Store-Status _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-082** — Key-Flow-Doku (credential-key-flow.md + Mermaid) + ADR-014-Ergänzung _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-083** — [DEFERRED] Master-Key-Rotation des Credential-Stores (Spec only) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-084** — Retro-Trend Backend: Momentum-Aggregation + GET /api/retro/trend _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-085** — Retro-Trend Frontend: Momentum-Board (SVG) + #/retro-trend + TeamView-Link _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-086** — Bitwarden New-Device-Verification (E-Mail-OTP) im Unlock-Dialog _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-087** — Backend-Router-Auto-Registry: server.js → src/routers/ Auto-Discovery _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-088** — Frontend-View-Registry: AppShell-View-Switch → Manifest/Konventions-Registrierung _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-089** — jest-Worktree-Isolation härten + verriegeln (Regression-Schutz) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-090** — CI-Test-Gate ergänzen + Branch-Protection required-checks (lint+test+secret-scan) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-091** — Entity-Icons Etappe 1: Icon-Primitive (lucide-react + iconRegistry + EntityIcon _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-092** — Entity-Icons Etappe 2: Einbau in TeamView (NavItem + DetailPane-Kopf + related-Chips) _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-093** — Entity-Icons Etappe 3 (Ausblick): Story-Card-Icons auf Boards via Label-Konvention _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **story S-126** — gh-Auth: absoluten ensure-gh-auth.sh-Pfad in CLAUDE.md hinterlegen _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_
+- **spec hardening** _(Grund: Zuordnung mehrdeutig (Tabelle: UNKLAR))_

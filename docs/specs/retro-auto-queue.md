@@ -2,6 +2,7 @@
 id: retro-auto-queue
 title: Serielle Warteschlange + headless Ausführung für automatisch ausgelöste Retro-Läufe
 status: active
+area: fabrik-arbeiten
 version: 1
 ---
 

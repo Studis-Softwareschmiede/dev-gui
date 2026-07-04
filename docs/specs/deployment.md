@@ -2,6 +2,7 @@
 id: deployment
 title: Deployment (Docker + Cloudflare devgui + Bootstrap)
 status: draft
+area: deployment
 version: 2
 ---
 

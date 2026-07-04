@@ -2,6 +2,7 @@
 id: vps-provider-boundary
 title: VPS-Provider-Boundary + Multi-Provider-Adapter (Hetzner, IONOS, Hostinger)
 status: draft
+area: vps
 version: 1
 ---
 

@@ -2,6 +2,7 @@
 id: view-cloudflare
 title: Cloudflare-Ansicht — Inventar + Lösch-Werkzeug (Zones / Tunnel / Routen)
 status: draft
+area: deployment
 version: 3
 ---
 

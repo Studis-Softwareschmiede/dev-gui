@@ -2,6 +2,7 @@
 id: app-shell-navigation
 title: App-Shell — Einstiegs-Panel & Navigation
 status: draft
+area: fabrik-arbeiten
 version: 1
 ---
 

@@ -2,6 +2,7 @@
 id: vps-tunnel-existence-gate
 title: Tunnel-Existenz-Gate + VPS↔Tunnel-Formular-Kopplung (Capability A)
 status: draft
+area: deployment
 version: 1
 ---
 

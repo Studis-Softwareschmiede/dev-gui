@@ -2,6 +2,7 @@
 id: team-knowledge-add
 title: Team-Train — neuen Knowledge Space anlegen (Beschreibung → Quellen-Suche → Bestätigen → train --bootstrap)
 status: draft
+area: retro-lernen
 version: 3
 ---
 

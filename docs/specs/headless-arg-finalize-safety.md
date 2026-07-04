@@ -2,6 +2,7 @@
 id: headless-arg-finalize-safety
 title: Headless-`claude -p`-Argumentübergabe + Finalize-Sicherheitsnetz (kein stiller Idee-Verlust)
 status: draft
+area: fabrik-arbeiten
 version: 1
 ---
 

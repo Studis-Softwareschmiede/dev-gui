@@ -2,6 +2,7 @@
 id: obsidian-question-catalog
 title: Obsidian-Ingest — strukturierter Fragenkatalog in der GUI (Interrupt/Resume)
 status: active
+area: obsidian
 version: 1
 spec_format: use-case-2.0
 ---

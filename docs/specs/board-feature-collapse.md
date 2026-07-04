@@ -2,6 +2,7 @@
 id: board-feature-collapse
 title: Board — Features ein-/ausklappen (Stories verstecken, Alle-Toggle, Zustand merken)
 status: draft
+area: board
 version: 1
 ---
 

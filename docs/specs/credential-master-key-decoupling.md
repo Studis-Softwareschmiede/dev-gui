@@ -2,6 +2,7 @@
 id: credential-master-key-decoupling
 title: Store-Master-Key entkoppeln + umbenennen (DEVGUI_CRED_MASTER_KEY)
 status: draft
+area: einstellungen
 version: 1
 ---
 

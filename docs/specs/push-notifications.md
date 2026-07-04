@@ -2,6 +2,7 @@
 id: push-notifications
 title: Push-Benachrichtigungen (ntfy) bei Board-Ereignissen
 status: draft
+area: benachrichtigungen
 version: 1
 ---
 

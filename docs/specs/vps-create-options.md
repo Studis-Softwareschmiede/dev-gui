@@ -2,6 +2,7 @@
 id: vps-create-options
 title: VPS-Create-Formular — Live-Dropdowns (Typ/Region/Image) mit Kosten + Tunnel-Rollback
 status: draft
+area: vps
 version: 2
 ---
 

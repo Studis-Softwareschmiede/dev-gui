@@ -2,6 +2,7 @@
 id: bitwarden-master-key-unlock
 title: Bitwarden-Beschaffung des Master-Keys (Login, Item-Lesen, Key-Erstellen)
 status: draft
+area: einstellungen
 version: 2
 ---
 

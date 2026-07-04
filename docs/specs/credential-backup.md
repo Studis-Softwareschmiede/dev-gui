@@ -2,6 +2,7 @@
 id: credential-backup
 title: Verschlüsseltes Off-Host-Backup & Restore des Credential-Stores
 status: draft
+area: deployment
 version: 2
 ---
 

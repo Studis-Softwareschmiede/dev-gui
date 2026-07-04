@@ -2,6 +2,7 @@
 id: token-usage-meter
 title: Proaktive Token-Verbrauchsmessung aus Claude-Session-Transcripts
 status: active
+area: nachtwaechter
 version: 1
 ---
 

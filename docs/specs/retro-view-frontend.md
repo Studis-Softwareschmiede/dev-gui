@@ -2,6 +2,7 @@
 id: retro-view-frontend
 title: Retro-Sichtbarkeit — Frontend (RetroView + #/retro + Link im TeamView-Header)
 status: draft
+area: retro-lernen
 version: 1
 ---
 

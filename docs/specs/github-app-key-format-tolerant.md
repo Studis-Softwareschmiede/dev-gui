@@ -2,6 +2,7 @@
 id: github-app-key-format-tolerant
 title: GitHub-App-Private-Key format-tolerant + newline-robust laden (PKCS#1 ⊕ PKCS#8) + Textarea-Eingabe
 status: draft
+area: deployment
 version: 1
 ---
 

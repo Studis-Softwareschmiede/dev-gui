@@ -2,6 +2,7 @@
 id: dashboard-deployment-tile
 title: Deployment als gleichwertige Einstiegs-Kachel (statt Extra-Nav-Link)
 status: draft
+area: fabrik-arbeiten
 version: 1
 ---
 

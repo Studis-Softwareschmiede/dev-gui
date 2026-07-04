@@ -2,6 +2,7 @@
 id: bitwarden-new-device-otp
 title: Bitwarden New-Device-Verification (E-Mail-OTP) im Credential-Unlock
 status: draft
+area: einstellungen
 version: 2
 ---
 

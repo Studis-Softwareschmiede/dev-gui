@@ -2,6 +2,7 @@
 id: headless-budget-limit-detection
 title: Reaktive Session-Limit-Erkennung im headless `claude -p`-Kindprozess
 status: active
+area: nachtwaechter
 version: 1
 ---
 

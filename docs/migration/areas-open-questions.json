@@ -1,0 +1,590 @@
+[
+ {
+  "kind": "feature",
+  "id": "F-001",
+  "title": "Initial",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "feature",
+  "id": "F-010",
+  "title": "Korrekturen",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "feature",
+  "id": "F-012",
+  "title": "Credential-Persistenz & verschlüsseltes Backup/DR",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-001",
+  "title": "Terminal-Bridge: PTY ↔ interaktive Claude-Session (Backend)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-002",
+  "title": "Access-Gate + Sicherheits-Leitplanken",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-003",
+  "title": "Flow-Trigger API + Concurrency-Guard + Kill-Switch",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-004",
+  "title": "Fabrik-Status API (live aus GitHub + Docker)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-005",
+  "title": "Terminal-Frontend (xterm.js Live-Pane)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-006",
+  "title": "Status-Dashboard (Frontend)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-007",
+  "title": "Flow-Trigger-Panels (Frontend)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-008",
+  "title": "Deployment (Docker + Cloudflare devgui + Bootstrap)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-009",
+  "title": "Terminal: PTY-Resize + Scrollback-Replay (Darstellung zerschossen)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-010",
+  "title": "Flow-Trigger: Plugin-Namespace /agent-flow: in Allowlist + Dropdown",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-011",
+  "title": "Voll-funktionales Image: docker-CLI + agent-flow-Plugin-Auto-Provisionierung",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-012",
+  "title": "Härtung: Non-Root-Container → unbeaufsichtigt (skip-permissions)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-013",
+  "title": "Härtung: docker-socket-proxy statt rohem Socket",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-014",
+  "title": "Non-Root: /home/node/.claude im Image node-owned vor-anlegen (persistentes",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-015",
+  "title": "App-Shell: Einstiegs-Panel (4 Kacheln) + Navigation",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-016",
+  "title": "GitHub-Ansicht: Platzhalter-View (Grundgerüst)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-017",
+  "title": "VPS-Ansicht: Platzhalter-View (Grundgerüst)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-018",
+  "title": "Cloudflare-Ansicht: Platzhalter-View (Grundgerüst)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-019",
+  "title": "Settings-Ansicht: Zahnrad-Einstieg + Integrations-Sektionen (Grundgerüst)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-020",
+  "title": "Credential-Verwaltung: write-only Credentials je Integration (Backend + UI)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-021",
+  "title": "SSH-Key-Verwaltung: Public/Private-Keys je VPS-Benutzer hinterlegen (Stufe",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-022",
+  "title": "VPS-Provisionierung: Public-Key idempotent in authorized_keys (Stufe B)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-023",
+  "title": "GitHub-Repo anlegen: GitHubWriter-Backend (POST /api/github/repos)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-024",
+  "title": "GitHub-Repo anlegen: Frontend-Formular in der GitHub-Ansicht",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-025",
+  "title": "GitHub-Repo klonen: Backend (POST /api/github/repos/clone, WORKSPACE_DIR)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-026",
+  "title": "GitHub-Repo klonen: Frontend-Formular in der GitHub-Ansicht",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-027",
+  "title": "GitHub-Repo-Übersicht: Backend GET /api/github/repos (read-only, GitHubReader)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-028",
+  "title": "Workspace-Übersicht: Backend GET /api/workspace/repos (Scan WORKSPACE_DIR,",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-029",
+  "title": "GitHub-Repo-Übersicht: Frontend-Liste + Aktions-Andockpunkte in der GitHub-Ansicht",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-030",
+  "title": "Workspace-Übersicht: Backend Pull (POST /api/workspace/repos/pull, Token-Mint",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-031",
+  "title": "Workspace-Übersicht: Backend Löschen (POST /api/workspace/repos/delete, Path-/Symlink-Schutz)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-032",
+  "title": "Workspace-Übersicht: Frontend-Liste + Pull/Löschen mit Bestätigungs-Dialog",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-033",
+  "title": "GitHub-Repo-Übersicht: Verzahnungs-Badge ''lokal vorhanden'' (Org-Liste ↔",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-034",
+  "title": "GitHubCloner auf gemeinsamen githubAppToken.js-Helper migrieren",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-035",
+  "title": "Workspace-Pfad: Backend (Persistenz + Effektivwert-Auflösung + Validierung)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-036",
+  "title": "Workspace-Pfad: Frontend (Settings-Sektion Workspace)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-037",
+  "title": "Workspace-Pfad-Konfiguration in die GitHub-Ansicht verschieben",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-038",
+  "title": "Workspace-Pfad-Eintrag in die GitHub-Sektion der Einstellungen (Korrektur",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-039",
+  "title": "VPS-Credentials: API-Token je Provider (Hetzner, IONOS, Hostinger)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-040",
+  "title": "VPS-Provider-Boundary + Hetzner-Adapter (list/start/stop/create)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-041",
+  "title": "VPS-Provider-Adapter: IONOS (list/start/stop/create)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-042",
+  "title": "VPS-Provider-Adapter: Hostinger (list/start/stop/create)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-043",
+  "title": "VPS Default-Setup-Pipeline via cloud-init (Update + Docker + User root/alex)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-044",
+  "title": "VPS-Create: SSH-Key-Zuordnung root/alex aus settings-ssh-keys-Labels",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-045",
+  "title": "VPS-Ansicht: Maschinen-Übersicht + Lifecycle-UI (Create/Start/Stop, Multi-Provider)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-046",
+  "title": "Settings: Cloudflare-Credential-Sektion (api_token + account_id, write-only)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-047",
+  "title": "CloudflareApi-Boundary (Read) + LockoutGuard (SDK-frei via fetch, fail-closed)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-048",
+  "title": "view-cloudflare v2: Inventar + Löschen (Zones/Tunnel/Routen, LockoutGuard",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-049",
+  "title": "VpsDockerControl-Boundary: Docker-on-VPS via SSH (pull/run/rm/ps, Label-Konvention)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-050",
+  "title": "DeployOrchestrator + Deployments-Panel: Container+Route als atomare Einheit",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-051",
+  "title": "ReconciliationJob (Capability C): beidseitig selbst-heilender Container↔Route-Abgleich",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-052",
+  "title": "SSH-Key-Generierung: ed25519-Keypair im Panel erzeugen + auditierter Export",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-053",
+  "title": "SSH-Key-Generierung + Export: UI in der SSH-Keys-Settings-Sektion (Frontend)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-054",
+  "title": "VpsProvisioner-Erweiterung: Public-Key entfernen + Verbindungstest mit Key",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-055",
+  "title": "SSH-Key-Rotation: vollautomatische, additive Rotation auf laufendem VPS (Backend-Orchestrierung)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-056",
+  "title": "SSH-Key-Rotation: UI in der SSH-Keys-Settings-Sektion (Frontend)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-057",
+  "title": "Team-Ansicht — Backend-Boundary: AgentFlowReader + /api/team",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-058",
+  "title": "Team-Ansicht — Frontend: TeamView + markdownLite + Team-Kachel/Route",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-059",
+  "title": "Team-Ansicht: Detail-Pane bei langen Inhalten scrollbar machen (UX-Bugfix)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-060",
+  "title": "Team-Ansicht: Agent→Skills/Knowledge-Referenzen im Backend auflösen (relatedSkills/relatedKnowledge",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-061",
+  "title": "Team-Ansicht: zugehörige Skills/Knowledge als klickbare Chips im Agent-Detail",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-062",
+  "title": "Deployment als gleichwertige Einstiegs-Kachel (statt Extra-Nav-Link)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-063",
+  "title": "Etappe 1a: VpsComposeControl — Compose-Stack-Steuerung auf VPS via SSH",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-064",
+  "title": "Etappe 1b/A: Stack-Registry (Backend)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-065",
+  "title": "Etappe 1b/B: .env-Materialisierung/-Generierung auf dem VPS (Backend)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-066",
+  "title": "Etappe 1b/C: Stack-Deploy/Undeploy-Orchestrierung + API (Backend)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-067",
+  "title": "Etappe 1b/D: UI-Modus-Umschalter Single-Image | Compose-Stack (Frontend)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-068",
+  "title": "Etappe 1b/E: Stack-aware Reconciliation (Backend, Erweiterung ADR-013)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-069",
+  "title": "Etappe 2: App-Stack alexstuderWebpage — Pilot-Compose (nur web_hauptseite",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-070",
+  "title": "Etappe 3: App-Stack rapt_dashboard — Compose (web_rapt + api_proxy[rapt] +",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-071",
+  "title": "Etappe 4: App-Stack brew_assistent — Compose (web_assistent + api_proxy[assistent]",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-072",
+  "title": "Etappe 5: webPage_infra abwickeln — Bausteine in App-Repos/dev-gui, Repo deprecaten",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-073",
+  "title": "Retro-Sichtbarkeit: Backend-Boundary (RetroReader + /api/retro)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-074",
+  "title": "Retro-Sichtbarkeit: Frontend (RetroView + #/retro + Link im TeamView-Header)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-075",
+  "title": "Bug: Retro-Kategorie-Counts immer 0 — Pack/Skill-Tokenizer matcht echtes LEARNINGS.md-Format",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-076",
+  "title": "Credential-Store: Runtime-Unlock-Zustandsmodell (locked→unlocked) + .env-Persistenz",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-077",
+  "title": "Bitwarden-Beschaffung des Master-Keys: Login, Item-Lesen, Key-Erstellen (Backend-Boundary)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-078",
+  "title": "Locked-Zustand-Erkennung + Bootstrap-Status-Endpunkt (GET /api/settings/credential-status)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-079",
+  "title": "Bitwarden-Unlock-Dialog auf der Einstellungsseite + Unlock-Endpunkt",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-080",
+  "title": "Store-Master-Key entkoppeln + umbenennen (DEVGUI_CRED_MASTER_KEY)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-081",
+  "title": "Key-Quelle-Transparenz: credential-status keySource + immer sichtbarer Store-Status",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-082",
+  "title": "Key-Flow-Doku (credential-key-flow.md + Mermaid) + ADR-014-Ergänzung",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-083",
+  "title": "[DEFERRED] Master-Key-Rotation des Credential-Stores (Spec only)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-084",
+  "title": "Retro-Trend Backend: Momentum-Aggregation + GET /api/retro/trend",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-085",
+  "title": "Retro-Trend Frontend: Momentum-Board (SVG) + #/retro-trend + TeamView-Link",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-086",
+  "title": "Bitwarden New-Device-Verification (E-Mail-OTP) im Unlock-Dialog",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-087",
+  "title": "Backend-Router-Auto-Registry: server.js → src/routers/ Auto-Discovery",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-088",
+  "title": "Frontend-View-Registry: AppShell-View-Switch → Manifest/Konventions-Registrierung",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-089",
+  "title": "jest-Worktree-Isolation härten + verriegeln (Regression-Schutz)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-090",
+  "title": "CI-Test-Gate ergänzen + Branch-Protection required-checks (lint+test+secret-scan)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-091",
+  "title": "Entity-Icons Etappe 1: Icon-Primitive (lucide-react + iconRegistry + EntityIcon",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-092",
+  "title": "Entity-Icons Etappe 2: Einbau in TeamView (NavItem + DetailPane-Kopf + related-Chips)",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-093",
+  "title": "Entity-Icons Etappe 3 (Ausblick): Story-Card-Icons auf Boards via Label-Konvention",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "story",
+  "id": "S-126",
+  "title": "gh-Auth: absoluten ensure-gh-auth.sh-Pfad in CLAUDE.md hinterlegen",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ },
+ {
+  "kind": "spec",
+  "id": "hardening",
+  "title": "hardening",
+  "grund": "Zuordnung mehrdeutig (Tabelle: UNKLAR)"
+ }
+]

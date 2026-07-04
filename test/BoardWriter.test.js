@@ -127,6 +127,7 @@ import {
   RESOLVED_NOTE_MAX_LENGTH,
   RESOLVE_STORY_IDS_MAX_COUNT,
   SUPERSEDED_BY_SPECIFY_NOTE,
+  sanitizeAreaId,
 } from '../src/BoardWriter.js';
 import { parseYaml } from '../src/BoardAggregator.js';
 
@@ -250,6 +251,7 @@ describe('AC8 — patchTopLevelFields (pure)', () => {
       'resolved_note',
       'archived',
       'archived_at',
+      'area',
     ]);
   });
 
@@ -893,6 +895,109 @@ describe('ideen-inbox AC3/AC8 — BoardWriter.createIdea (real fs)', () => {
     // Aber über den TATSÄCHLICHEN Read-Parser zurückgelesen: unescaped.
     const parsed = parseYaml(raw);
     expect(parsed.title).toBe("Nutzer's Idee");
+  });
+
+  // ── story-idee-bereich-zuordnung AC4: Bereichs-Zuordnung im Create-Pfad ──
+
+  it('AC4 (story-idee-bereich-zuordnung): mit area → neue Story-YAML enthält area: <id> (unquoted)', async () => {
+    const writer = makeWriter();
+    const { filePath } = await writer.createIdea({
+      projectSlug: 'myproject',
+      title: 'Idee im Backend-Bereich',
+      area: 'backend',
+      now: '2026-07-01T10:00:00.000Z',
+    });
+
+    const raw = await readFile(filePath, 'utf8');
+    expect(raw).toContain('area: backend');
+    // Bereich muss sich VOR created_at befinden (nach notes falls vorhanden).
+    expect(raw.indexOf('area: backend')).toBeLessThan(raw.indexOf('created_at'));
+  });
+
+  it('AC4 (story-idee-bereich-zuordnung): ohne area → neue Story-YAML hat KEIN area-Feld (Alt-Verhalten)', async () => {
+    const writer = makeWriter();
+    const { filePath } = await writer.createIdea({
+      projectSlug: 'myproject',
+      title: 'Idee ohne Bereich',
+      now: '2026-07-01T10:00:00.000Z',
+    });
+
+    const raw = await readFile(filePath, 'utf8');
+    expect(raw).not.toContain('area:');
+  });
+
+  it('AC4 (story-idee-bereich-zuordnung): mit area=null → wie ohne area (kein area-Feld)', async () => {
+    const writer = makeWriter();
+    const { filePath } = await writer.createIdea({
+      projectSlug: 'myproject',
+      title: 'Idee mit explizit null area',
+      area: null,
+      now: '2026-07-01T10:00:00.000Z',
+    });
+
+    const raw = await readFile(filePath, 'utf8');
+    expect(raw).not.toContain('area:');
+  });
+
+  it('AC4 (story-idee-bereich-zuordnung): mit area und notes → area nach notes, vor created_at', async () => {
+    const writer = makeWriter();
+    const { filePath } = await writer.createIdea({
+      projectSlug: 'myproject',
+      title: 'Idee mit Bereich und Body',
+      body: 'Erste Zeile\nZweite Zeile',
+      area: 'frontend-team',
+      now: '2026-07-01T10:00:00.000Z',
+    });
+
+    const raw = await readFile(filePath, 'utf8');
+    expect(raw).toContain('notes: |');
+    expect(raw).toContain('area: frontend-team');
+    expect(raw).toContain('created_at:');
+
+    // Reihenfolge: notes → area → created_at
+    expect(raw.indexOf('notes: |')).toBeLessThan(raw.indexOf('area: frontend-team'));
+    expect(raw.indexOf('area: frontend-team')).toBeLessThan(raw.indexOf('created_at'));
+  });
+
+  it('AC4 (story-idee-bereich-zuordnung): ungültiges area-Format → invalid-area, kein Schreiben', async () => {
+    const writer = makeWriter();
+    await expect(
+      writer.createIdea({
+        projectSlug: 'myproject',
+        title: 'Idee mit ungültigem Bereich',
+        area: 'backend/frontend',  // Slash nicht erlaubt
+      }),
+    ).rejects.toMatchObject({ errorClass: 'invalid-area' });
+
+    const entries = await readdir(storiesDir);
+    expect(entries).toEqual([]);
+    const boardRaw = await readFile(boardYamlPath, 'utf8');
+    expect(boardRaw).toContain('next_story_id: 42'); // unverändert
+  });
+
+  it('AC4 (story-idee-bereich-zuordnung): area mit Steuerzeichen → invalid-area', async () => {
+    const writer = makeWriter();
+    await expect(
+      writer.createIdea({
+        projectSlug: 'myproject',
+        title: 'Idee',
+        area: 'backend\nfrontend',  // Zeilenumbruch
+      }),
+    ).rejects.toMatchObject({ errorClass: 'invalid-area' });
+  });
+
+  it('AC4 (story-idee-bereich-zuordnung): area wird über parseYaml korrekt gelesen (Round-Trip)', async () => {
+    const writer = makeWriter();
+    const { filePath } = await writer.createIdea({
+      projectSlug: 'myproject',
+      title: 'Idee mit Bereich',
+      area: 'security-team',
+      now: '2026-07-01T10:00:00.000Z',
+    });
+
+    const raw = await readFile(filePath, 'utf8');
+    const parsed = parseYaml(raw);
+    expect(parsed.area).toBe('security-team');
   });
 });
 
@@ -2069,3 +2174,51 @@ describe('board-storys-archivieren AC1/AC2/AC9 — BoardWriter.archiveDoneStorie
     expect(res.archivedStoryIds).toEqual([]);
   });
 });
+
+// ── sanitizeAreaId (story-idee-bereich-zuordnung AC6) ────────────────────────
+
+describe('AC6 — sanitizeAreaId', () => {
+  it('akzeptiert und gibt zurück gültige area-ids (alphanumeric + dash/underscore)', () => {
+    expect(sanitizeAreaId('backend')).toBe('backend');
+    expect(sanitizeAreaId('frontend-team')).toBe('frontend-team');
+    expect(sanitizeAreaId('auth_service')).toBe('auth_service');
+    expect(sanitizeAreaId('  spaced  ')).toBe('spaced');
+  });
+
+  it('gibt null für null/leere String zurück', () => {
+    expect(sanitizeAreaId(null)).toBe(null);
+    expect(sanitizeAreaId('')).toBe(null);
+    expect(sanitizeAreaId('  ')).toBe(null);
+  });
+
+  it('lehnt nicht-String ab (invalid-area)', () => {
+    try {
+      sanitizeAreaId(123);
+      throw new Error('sollte werfen');
+    } catch (err) {
+      expect(err).toBeInstanceOf(BoardWriterError);
+      expect(err.errorClass).toBe('invalid-area');
+    }
+  });
+
+  it('lehnt Steuerzeichen ab (invalid-area)', () => {
+    try {
+      sanitizeAreaId('backend\nfrontend');
+      throw new Error('sollte werfen');
+    } catch (err) {
+      expect(err).toBeInstanceOf(BoardWriterError);
+      expect(err.errorClass).toBe('invalid-area');
+    }
+  });
+
+  it('lehnt ungültiges Format ab (invalid-area)', () => {
+    try {
+      sanitizeAreaId('backend/frontend');
+      throw new Error('sollte werfen');
+    } catch (err) {
+      expect(err).toBeInstanceOf(BoardWriterError);
+      expect(err.errorClass).toBe('invalid-area');
+    }
+  });
+});
+

@@ -2,6 +2,7 @@
 id: credential-unlock-dialog
 title: Bitwarden-Unlock-Dialog auf der Einstellungsseite + Unlock-Endpunkte
 status: draft
+area: einstellungen
 version: 2
 ---
 

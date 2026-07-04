@@ -2,6 +2,7 @@
 id: ghcr-image-list
 title: GHCR-Image-Liste — verfügbare Org-Container-Images + Tags aus GitHub Packages (Backend)
 status: draft
+area: deployment
 version: 1
 ---
 

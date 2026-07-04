@@ -26,7 +26,7 @@ branch: null
 pr: null
 blocked_reason: null
 created_at: '2026-07-02T05:07:43Z'
-updated_at: '2026-07-02T10:26:42Z'
+updated_at: '2026-07-04T10:07:07.700Z'
 done_at: '2026-07-02T10:26:42Z'
 notes: 'Spec: docs/specs/story-specify-finalize-visibility.md — implements AC5,AC6.
   Priority P1. depends: S-239 (Backend-Endpunkt + No-Op-Status). Frontend-Teil (Befund
@@ -37,3 +37,6 @@ notes: 'Spec: docs/specs/story-specify-finalize-visibility.md — implements AC5
   Board-Hinweis bei letztem no-op/failed/auth-expired (role=status/aria-live, nicht
   nur Farbe), leichtgewichtiges Polling nur bei aktivem Job. Reload-fest ueber server-seitige
   Registry (S-239).'
+area: '''fabrik-arbeiten'''
+archived: true
+archived_at: '2026-07-04T10:07:07.700Z'

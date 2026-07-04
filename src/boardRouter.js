@@ -630,20 +630,40 @@ export function boardRouter({
       return res.status(500).json({ error: 'Idee konnte nicht angelegt werden.' });
     }
 
-    const { title, body } = req.body ?? {};
+    const { title, body, area } = req.body ?? {};
 
     // Validierung VOR dem Audit-Eintrag — eine abgelehnte Eingabe ist KEINE
     // versuchte Aktion und wird nicht auditiert. Dieselbe reine Funktion wie
     // `BoardWriter#createIdea` (Defense-in-Depth, kein doppelter Code).
+    // Mit area durchreichen, das wird auch in createIdea() validiert.
     let validated;
     try {
-      validated = validateIdeaInput({ title, body });
+      validated = validateIdeaInput({ title, body, area });
     } catch (err) {
       if (err instanceof BoardWriterError) {
+        if (err.errorClass === 'invalid-area') {
+          return res.status(400).json({ field: 'area', message: err.message });
+        }
         const field = err.errorClass === 'invalid-body' ? 'body' : 'title';
         return res.status(400).json({ field, message: err.message });
       }
       throw err;
+    }
+
+    // AC6: Zusätzlich gegen board/areas.yaml validieren
+    // (die Format-Validierung erfolgt in validateIdeaInput).
+    if (validated.sanitizedArea) {
+      const projects = await boardAggregator.getIndex();
+      const project = projects.find((p) => p.slug === slug);
+      if (project && !project.error) {
+        const areaExists = (project.areas ?? []).some((a) => a.id === validated.sanitizedArea);
+        if (!areaExists) {
+          return res.status(400).json({
+            field: 'area',
+            message: `Bereich '${validated.sanitizedArea}' existiert nicht.`,
+          });
+        }
+      }
     }
 
     // Audit-First (AC7 — GENAU EIN Eintrag je Anlage): schlägt record() fehl,
@@ -666,6 +686,7 @@ export function boardRouter({
         projectSlug: slug,
         title: validated.trimmedTitle,
         body: validated.normalizedBody,
+        area: validated.sanitizedArea,
       });
     } catch (err) {
       if (err instanceof BoardWriterError) {

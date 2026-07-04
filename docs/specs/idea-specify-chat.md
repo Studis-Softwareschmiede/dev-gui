@@ -2,6 +2,7 @@
 id: idea-specify-chat
 title: Idee spezifizieren — Chat-Overlay statt Tab-Sprung, Feature+Story automatisch
 status: draft
+area: fabrik-arbeiten
 version: 2
 ---
 

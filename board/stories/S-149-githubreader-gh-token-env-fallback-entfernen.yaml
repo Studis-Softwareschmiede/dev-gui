@@ -22,5 +22,8 @@ pr: 308
 blocked_reason: null
 estimate_note: 'DR-Test-Befund (verifiziert): S-146 sollte den GH_TOKEN-PAT als Lese-Pfad entfernen (AC6), aber der Konstruktor-Default () => process.env.GH_TOKEN in src/GitHubReader.js (Z.76) ist noch wirksam — im DR-Test (leerer CredentialStore) las der Reader trotzdem 6 Repos via das vom Entrypoint gemintete Env-GH_TOKEN. Fix: Default entfernen; ohne tokenProvider liefert der Reader kein Token → graceful degradation (leer/unknown). server.js injiziert den Provider ohnehin (AC5). Der gh-CLI-Auth-Pfad (ensure-gh-auth.sh, Entrypoint-Minting) bleibt UNVERÄNDERT — nur der Reader darf Env-GH_TOKEN nicht mehr als Lese-Quelle nutzen. Minimal-invasiv (1 Zeile + Doc-Kommentar); Test: Reader ohne Provider + gesetztem process.env.GH_TOKEN liefert KEINE Repos, fetchFn sieht keinen Bearer-Header. ~S (~2 EP).'
 created_at: '2026-06-17T00:00:00Z'
-updated_at: '2026-06-17T18:37:57Z'
+updated_at: '2026-07-04T10:07:07.700Z'
 done_at: '2026-06-17T18:37:57Z'
+archived: true
+archived_at: '2026-07-04T10:07:07.700Z'
+area: 'einstellungen'

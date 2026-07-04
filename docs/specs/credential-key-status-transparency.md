@@ -2,6 +2,7 @@
 id: credential-key-status-transparency
 title: Key-Quelle-Transparenz (credential-status keySource + immer sichtbarer Store-Status)
 status: draft
+area: einstellungen
 version: 1
 ---
 

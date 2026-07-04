@@ -2,6 +2,7 @@
 id: cost-mode-model-check
 title: Automatische periodische Cost-Mode-Modellprüfung (Boot + Dispatch) mit Auto-Reparametrisierung via agent-flow-Curator
 status: draft
+area: fabrik-arbeiten
 version: 1
 spec_format: use-case-2.0
 ---

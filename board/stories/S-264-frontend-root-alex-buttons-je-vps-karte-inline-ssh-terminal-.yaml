@@ -25,5 +25,8 @@ branch: feat/S-264-vps-terminal-ui
 pr: null
 blocked_reason: null
 created_at: '2026-07-02T06:35:48Z'
-updated_at: '2026-07-03T04:11:05Z'
+updated_at: '2026-07-04T10:07:07.700Z'
 done_at: '2026-07-03T04:10:18Z'
+area: '''vps'''
+archived: true
+archived_at: '2026-07-04T10:07:07.700Z'

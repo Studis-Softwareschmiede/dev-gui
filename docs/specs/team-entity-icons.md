@@ -2,6 +2,7 @@
 id: team-entity-icons
 title: Entity-Icons — Icon-System für Agenten/Skills/Knowledge (TeamView + Boards-Ausblick)
 status: draft
+area: retro-lernen
 version: 1
 ---
 

@@ -2,6 +2,7 @@
 id: retro-trend-backend
 title: Retro-Trend — Backend-Boundary (Momentum-Aggregation + /api/retro/trend)
 status: draft
+area: retro-lernen
 version: 1
 ---
 

@@ -2,6 +2,7 @@
 id: vps-compose-control
 title: VpsComposeControl — Compose-Stack-Steuerung auf einem VPS via SSH (Etappe 1a)
 status: draft
+area: vps
 version: 1
 ---
 

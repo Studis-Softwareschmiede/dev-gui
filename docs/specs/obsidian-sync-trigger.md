@@ -2,6 +2,7 @@
 id: obsidian-sync-trigger
 title: Obsidian-Sync-Trigger — Button „Notizen-Stand abgleichen" im Spezifikation-Reiter
 status: active
+area: obsidian
 version: 1
 spec_format: use-case-2.0
 ---

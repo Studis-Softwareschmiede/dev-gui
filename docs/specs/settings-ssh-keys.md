@@ -2,6 +2,7 @@
 id: settings-ssh-keys
 title: SSH-Key-Verwaltung + VPS-Provisionierung
 status: draft
+area: einstellungen
 version: 1
 ---
 

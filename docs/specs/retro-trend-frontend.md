@@ -2,6 +2,7 @@
 id: retro-trend-frontend
 title: Retro-Trend — Frontend (Momentum-Board + #/retro-trend + Link im TeamView-Header)
 status: draft
+area: retro-lernen
 version: 1
 ---
 

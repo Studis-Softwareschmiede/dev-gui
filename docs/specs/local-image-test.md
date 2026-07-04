@@ -2,6 +2,7 @@
 id: local-image-test
 title: Lokaler Image-Test — gewähltes ghcr-Image+Tag vor VPS-Deploy lokal probestarten
 status: draft
+area: deployment
 version: 1
 ---
 

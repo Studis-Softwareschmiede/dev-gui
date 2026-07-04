@@ -2,6 +2,7 @@
 id: vps-dynamic-ssh-targets
 title: Dynamisch angelegte VPS als SSH-Ziel — Persistenz + Auflösung für Deploy/Container-Übersicht/Reconcile
 status: draft
+area: deployment
 version: 2
 ---
 

@@ -2,6 +2,7 @@
 id: board-filter-feature-status-consistency
 title: Board-Status-Filter — Feature-Badge + Leer-Features konsistent mit der gefilterten Story-Menge
 status: active
+area: board
 version: 1
 spec_format: use-case-2.0
 ---
