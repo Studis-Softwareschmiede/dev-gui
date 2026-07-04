@@ -62,6 +62,12 @@ function makeFetchFn({ ideaStatus = 201, ideaBody = { storyId: 'S-42' } } = {}) 
     if (url === '/api/session') {
       return { ok: true, status: 200, json: async () => ({ state: 'ready', restarts: 0 }) };
     }
+    // story-idee-bereich-zuordnung S-291: AreaSelect lädt GET …/areas — Default-Mock
+    // liefert eine kleine Bereichsliste (Vorbelegung 'board'), damit die Speichern-
+    // Gates (AC5) wie in einem migrierten Projekt reagieren.
+    if (/\/areas$/.test(url) && (!opts || !opts.method || opts.method === 'GET')) {
+      return { ok: true, status: 200, json: async () => ({ areas: [{ id: 'board', name: 'Board', order: 1 }] }) };
+    }
     if (IDEAS_URL_RE.test(url) && opts?.method === 'POST') {
       return { ok: ideaStatus === 201, status: ideaStatus, json: async () => ideaBody };
     }
@@ -201,7 +207,7 @@ describe('CockpitView — AC4 (ideen-inbox): Speichern ruft POST .../ideas', () 
       expect(call).toBeTruthy();
       expect(call[0]).toBe('/api/board/projects/my-project/ideas');
       const body = JSON.parse(call[1].body);
-      expect(body).toEqual({ title: 'Dark-Mode für die Übersicht' });
+      expect(body).toEqual({ title: 'Dark-Mode für die Übersicht', area: 'board' });
     });
   });
 
@@ -227,7 +233,7 @@ describe('CockpitView — AC4 (ideen-inbox): Speichern ruft POST .../ideas', () 
     await waitFor(() => {
       const call = fetchFn.mock.calls.find((c) => IDEAS_URL_RE.test(c[0]) && c[1]?.method === 'POST');
       const body = JSON.parse(call[1].body);
-      expect(body).toEqual({ title: 'Idee mit Stichworten', body: 'Stichwort 1\nStichwort 2' });
+      expect(body).toEqual({ title: 'Idee mit Stichworten', body: 'Stichwort 1\nStichwort 2', area: 'board' });
     });
   });
 

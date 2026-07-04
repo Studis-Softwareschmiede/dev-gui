@@ -166,6 +166,7 @@
  *     bereits secret-freien Backend-Contract (`ideaSpecifyRouter.js`).
  */
 
+import { AreaSelect } from './AreaSelect.jsx';
 import { useState, useEffect, useRef, useCallback } from 'react';
 
 /**
@@ -215,6 +216,11 @@ export function IdeaSpecifyChatModal({
   // seedet. `composedInitialText` hält den zuletzt abgesendeten Seed, damit ein
   // „Erneut versuchen" nach Start-Fehler denselben Text erneut sendet (AC7).
   const [composeTitle, setComposeTitle] = useState('');
+  // story-idee-bereich-zuordnung AC1/AC2/AC5 (S-291): Bereichs-Auswahl im
+  // scratch-Start-Formular; areaReady=false (Load fehlgeschlagen) -> Bestands-
+  // Verhalten ohne Pflichtfeld (stille Degradation).
+  const [scratchArea, setScratchArea] = useState(null);
+  const [scratchAreaReady, setScratchAreaReady] = useState(false);
   const [composeBody, setComposeBody] = useState('');
   const [composedInitialText, setComposedInitialText] = useState('');
 
@@ -346,7 +352,7 @@ export function IdeaSpecifyChatModal({
     try {
       res = await fetch_(
         `${endpointBase}/start`,
-        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initialText }) },
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initialText, ...(scratchArea ? { area: scratchArea } : {}) }) },
       );
     } catch {
       if (!mountedRef.current) return;
@@ -648,6 +654,15 @@ export function IdeaSpecifyChatModal({
               Titel + Stichworte eingeben — Claude spezifiziert daraus im Chat
               eine neue Story von Grund auf (ohne Idee-Karte).
             </p>
+            {/* AC1: Bereichs-Dropdown OBERHALB des Titelfelds */}
+            <AreaSelect
+              projectSlug={projectSlug}
+              value={scratchArea}
+              onChange={setScratchArea}
+              onReady={setScratchAreaReady}
+              idPrefix="new-story-area"
+              fetchFn={fetchFn}
+            />
             <label style={styles.label} htmlFor="new-story-title-input">Titel</label>
             <input
               id="new-story-title-input"
@@ -673,9 +688,9 @@ export function IdeaSpecifyChatModal({
             <div style={styles.buttonRow}>
               <button
                 type="button"
-                style={!composeTitle.trim() ? styles.btnDisabled : styles.btnPrimary}
-                disabled={!composeTitle.trim()}
-                aria-disabled={!composeTitle.trim()}
+                style={(!composeTitle.trim() || (scratchAreaReady && scratchArea == null)) ? styles.btnDisabled : styles.btnPrimary}
+                disabled={!composeTitle.trim() || (scratchAreaReady && scratchArea == null)}
+                aria-disabled={!composeTitle.trim() || (scratchAreaReady && scratchArea == null)}
                 onClick={handleComposeStart}
                 data-testid="new-story-start-btn"
               >
