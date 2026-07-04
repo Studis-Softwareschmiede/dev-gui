@@ -48,6 +48,18 @@ import { BenachrichtigungenCategory } from './settings/BenachrichtigungenCategor
 import { AutomatisierungCategory } from './settings/AutomatisierungCategory.jsx';
 import { IntegrationenCategory } from './settings/IntegrationenCategory.jsx';
 import { DiversesCategory } from './settings/DiversesCategory.jsx';
+
+// ── Kategorien-Navigation (settings-panel-navigation D1/D13, S-267) ───────────
+// Feste Reihenfolge + Slugs gemäß docs/design.md „Settings-Panel Navigation".
+export const SETTINGS_CATEGORIES = [
+  { slug: 'workspace',          label: 'Workspace' },
+  { slug: 'zugaenge',           label: 'Zugänge & Schlüssel' },
+  { slug: 'sicherung',          label: 'Sicherung' },
+  { slug: 'benachrichtigungen', label: 'Benachrichtigungen' },
+  { slug: 'automatisierung',    label: 'Automatisierung' },
+  { slug: 'integrationen',      label: 'Integrationen' },
+  { slug: 'diverses',           label: 'Diverses' },
+];
 import {
   fetchCredentialStatus,
   postCredentialUnlock,
@@ -565,6 +577,8 @@ export function SettingsView({ onNavigate, fetchFn }) {
   // credential-unlock-dialog #185: Bitwarden-Unlock-Status + Dialog
   const [credentialStatus, setCredentialStatus] = useState(null); // null = noch nicht geladen
   const [showUnlockDialog, setShowUnlockDialog] = useState(false);
+  // S-267 (D11): genau EINE sichtbare Kategorie; Default workspace (D13).
+  const [activeCategory, setActiveCategory] = useState('workspace');
 
   // AC1/AC10: Credential-Status laden (Sichtbarkeits-Steuerung für Unlock-Bereich)
   const reloadCredentialStatus = useCallback(async () => {
@@ -726,58 +740,92 @@ export function SettingsView({ onNavigate, fetchFn }) {
           </p>
         )}
 
-        {/* AC15: 7 Kategorie-Wrapper, gestapelt untereinander (zunächst, später mit Nav + Routing) */}
-
-        {/* 1. Workspace */}
+        {/* S-267 (D4–D11, D18): linke Kategorien-Nav + genau EIN sichtbares Tabpanel.
+            Layout/Zustände (220px-Spalte ab 1024px, horizontale Tab-Leiste darunter,
+            Hover/Fokus) leben als CSS-Klassen in client/index.html (D9/D20-Muster). */}
+        <div className="settings-layout">
+          <nav aria-label="Einstellungs-Kategorien" className="settings-nav">
+            <div role="tablist" aria-orientation="vertical" className="settings-tablist">
+              {SETTINGS_CATEGORIES.map(({ slug, label }) => {
+                const selected = activeCategory === slug;
+                return (
+                  <button
+                    key={slug}
+                    type="button"
+                    role="tab"
+                    id={`settings-tab-${slug}`}
+                    aria-selected={selected}
+                    aria-controls={`settings-panel-${slug}`}
+                    tabIndex={selected ? 0 : -1}
+                    className={`settings-nav-item${selected ? ' active' : ''}`}
+                    onClick={() => setActiveCategory(slug)}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+          </nav>
+          <div
+            role="tabpanel"
+            id={`settings-panel-${activeCategory}`}
+            aria-labelledby={`settings-tab-${activeCategory}`}
+            tabIndex={0}
+            className="settings-panel"
+          >
+            {activeCategory === 'workspace' && (
         <WorkspaceCategory
-          workspacePath={workspacePath}
-          workspacePathError={workspacePathError}
-          workspaceHealth={workspaceHealth}
-          onReload={async () => { await reloadWorkspacePath(); await reloadWorkspaceHealth(); }}
-          fetchFn={fetchFn}
-        />
-
-        {/* 2. Zugänge & Schlüssel */}
+                workspacePath={workspacePath}
+                workspacePathError={workspacePathError}
+                workspaceHealth={workspaceHealth}
+                onReload={async () => { await reloadWorkspacePath(); await reloadWorkspaceHealth(); }}
+                fetchFn={fetchFn}
+              />
+            )}
+            {activeCategory === 'zugaenge' && (
         <ZugaengeCategory
-          sshKeys={sshKeys}
-          sshLoadError={sshLoadError}
-          setSshKeys={setSshKeys}
-          onLoad={load}
-          getMeta={getMeta}
-        />
-
-        {/* 3. Sicherung */}
+                sshKeys={sshKeys}
+                sshLoadError={sshLoadError}
+                setSshKeys={setSshKeys}
+                onLoad={load}
+                getMeta={getMeta}
+              />
+            )}
+            {activeCategory === 'sicherung' && (
         <SicherungCategory
-          credentials={credentials}
-          onLoad={load}
-          fetchFn={fetchFn}
-        />
-
-        {/* 4. Benachrichtigungen */}
+                credentials={credentials}
+                onLoad={load}
+                fetchFn={fetchFn}
+              />
+            )}
+            {activeCategory === 'benachrichtigungen' && (
         <BenachrichtigungenCategory
-          notificationsCredMeta={getMeta('notifications', 'ntfy_token') ?? null}
-          onCredSaved={load}
-          fetchFn={fetchFn}
-        />
-
-        {/* 5. Automatisierung */}
+                notificationsCredMeta={getMeta('notifications', 'ntfy_token') ?? null}
+                onCredSaved={load}
+                fetchFn={fetchFn}
+              />
+            )}
+            {activeCategory === 'automatisierung' && (
         <AutomatisierungCategory
-          fetchFn={fetchFn}
-        />
-
-        {/* 6. Integrationen */}
+                fetchFn={fetchFn}
+              />
+            )}
+            {activeCategory === 'integrationen' && (
         <IntegrationenCategory
-          obsidianVaultPath={obsidianVaultPath}
-          obsidianVaultPathError={obsidianVaultPathError}
-          onReload={reloadObsidianVaultPath}
-          fetchFn={fetchFn}
-        />
-
-        {/* 7. Diverses */}
+                obsidianVaultPath={obsidianVaultPath}
+                obsidianVaultPathError={obsidianVaultPathError}
+                onReload={reloadObsidianVaultPath}
+                fetchFn={fetchFn}
+              />
+            )}
+            {activeCategory === 'diverses' && (
         <DiversesCategory
-          miscItems={miscItems}
-          onLoad={load}
-        />
+                miscItems={miscItems}
+                onLoad={load}
+              />
+            )}
+          </div>
+        </div>
       </div>
     </main>
   );
@@ -799,7 +847,7 @@ const styles = {
   },
   inner: {
     width: '100%',
-    maxWidth: 720,
+    maxWidth: 1000,
   },
   header: {
     display: 'flex',

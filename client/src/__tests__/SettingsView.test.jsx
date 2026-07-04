@@ -654,11 +654,31 @@ function makeFetch({
   });
 }
 
+// S-267: SettingsView zeigt genau EINE Kategorie (D11). Tests aktivieren die
+// Kategorie ihrer Ziel-Sektion über testCategory (je describe via beforeEach);
+// null = Default 'workspace'. renderView klickt den Tab nach dem Mount.
+let testCategory = null;
+afterEach(() => { testCategory = null; });
+
+/** Rendert SettingsView und aktiviert danach die testCategory-Kategorie (S-267). */
+function renderSettingsWithCategory(el) {
+  const utils = render(el);
+  if (testCategory) {
+    const tab = document.getElementById(`settings-tab-${testCategory}`);
+    if (tab) fireEvent.click(tab);
+  }
+  return utils;
+}
+
 function renderView(fetchImpl) {
   const onNavigate = jest.fn();
   const fetchFn = fetchImpl ?? makeFetch();
   globalThis.fetch = fetchFn;
-  const utils = render(React.createElement(SettingsView, { onNavigate, fetchFn }));
+  const utils = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate, fetchFn }));
+  if (testCategory) {
+    const tab = document.getElementById(`settings-tab-${testCategory}`);
+    if (tab) fireEvent.click(tab);
+  }
   return { ...utils, onNavigate };
 }
 
@@ -684,16 +704,26 @@ describe('SettingsView — Grundstruktur', () => {
     });
   });
 
-  it('rendert mindestens 5 h2-Sektions-Überschriften (GitHub, Cloudflare, Hetzner, Weitere, SSH-Keys)', async () => {
+  it('rendert die 7 Kategorien-Tabs (S-267 D1/D10) und genau ein Tabpanel', async () => {
+    const { getByRole } = renderView();
+    await waitFor(() => {
+      expect(getByRole('tab', { name: /workspace/i })).toBeTruthy();
+    });
+    expect(document.querySelectorAll('[role="tab"]').length).toBe(7);
+    expect(document.querySelectorAll('[role="tabpanel"]').length).toBe(1);
+  });
+
+  it('Zugänge-Kategorie: mindestens 4 h2-Sektionen (GitHub, Cloudflare, VPS-Provider, SSH-Keys)', async () => {
+    testCategory = 'zugaenge';
     const { getByRole } = renderView();
     await waitFor(() => {
       const main = getByRole('main', { name: /einstellungen-ansicht/i });
-      const h2s = main.querySelectorAll('h2');
-      expect(h2s.length).toBeGreaterThanOrEqual(5);
+      expect(main.querySelectorAll('h2').length).toBeGreaterThanOrEqual(4);
     });
   });
 
   it('rendert GitHub-Sektion als h2', async () => {
+    testCategory = 'zugaenge';
     const { getByRole } = renderView();
     await waitFor(() => {
       expect(getByRole('heading', { name: /^github$/i })).toBeTruthy();
@@ -701,6 +731,7 @@ describe('SettingsView — Grundstruktur', () => {
   });
 
   it('rendert Cloudflare-Sektion als h2', async () => {
+    testCategory = 'zugaenge';
     const { getByRole } = renderView();
     await waitFor(() => {
       expect(getByRole('heading', { name: /^cloudflare$/i })).toBeTruthy();
@@ -708,6 +739,7 @@ describe('SettingsView — Grundstruktur', () => {
   });
 
   it('rendert VPS-Provider-Sektion als h2', async () => {
+    testCategory = 'zugaenge';
     const { getByRole } = renderView();
     await waitFor(() => {
       expect(getByRole('heading', { name: /vps-provider/i })).toBeTruthy();
@@ -715,6 +747,7 @@ describe('SettingsView — Grundstruktur', () => {
   });
 
   it('rendert SSH-Keys-Sektion mit h2-Überschrift und Inhalt (nicht mehr Platzhalter)', async () => {
+    testCategory = 'zugaenge';
     const { getByRole } = renderView();
     await waitFor(() => {
       expect(getByRole('heading', { name: /ssh-keys/i })).toBeTruthy();
@@ -725,6 +758,7 @@ describe('SettingsView — Grundstruktur', () => {
 // ── AC1 — Status-Anzeige ──────────────────────────────────────────────────────
 
 describe('SettingsView — AC1: Status-Anzeige', () => {
+  beforeEach(() => { testCategory = 'zugaenge'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -764,6 +798,7 @@ describe('SettingsView — AC1: Status-Anzeige', () => {
 // ── AC2 — Setzen/Ändern ────────────────────────────────────────────────────────
 
 describe('SettingsView — AC2: Setzen/Ändern', () => {
+  beforeEach(() => { testCategory = 'zugaenge'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -803,7 +838,7 @@ describe('SettingsView — AC2: Setzen/Ändern', () => {
     globalThis.fetch = fetchMock;
 
     const onNavigate = jest.fn();
-    const { getAllByRole, getByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    const { getAllByRole, getByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
 
     // Warten bis Setzen-Buttons da sind
     await waitFor(() => {
@@ -847,6 +882,7 @@ describe('SettingsView — AC2: Setzen/Ändern', () => {
 // ── AC3 — Löschen ─────────────────────────────────────────────────────────────
 
 describe('SettingsView — AC3: Löschen', () => {
+  beforeEach(() => { testCategory = 'zugaenge'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -873,6 +909,7 @@ describe('SettingsView — AC3: Löschen', () => {
 // ── AC5 — Misc-Sektion ────────────────────────────────────────────────────────
 
 describe('SettingsView — AC5: Weitere Credentials (misc)', () => {
+  beforeEach(() => { testCategory = 'diverses'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -924,6 +961,7 @@ describe('SettingsView — AC5: Weitere Credentials (misc)', () => {
 // ── AC5 (github-app-key-format-tolerant S-168) — Textarea für github/private_key ──────────────
 
 describe('SettingsView — S-168 AC5: github/private_key Eingabe ist eine Textarea', () => {
+  beforeEach(() => { testCategory = 'zugaenge'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -1013,7 +1051,7 @@ describe('SettingsView — S-168 AC5: github/private_key Eingabe ist eine Textar
     globalThis.fetch = fetchMock;
 
     const onNavigate = jest.fn();
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate, fetchFn: fetchMock }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate, fetchFn: fetchMock }));
 
     // Setzen-Button für private_key klicken
     await waitFor(() => {
@@ -1086,7 +1124,7 @@ describe('SettingsView — S-168 AC5: github/private_key Eingabe ist eine Textar
     globalThis.fetch = fetchMock;
 
     const onNavigate = jest.fn();
-    const { getAllByRole, getByRole } = render(React.createElement(SettingsView, { onNavigate, fetchFn: fetchMock }));
+    const { getAllByRole, getByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate, fetchFn: fetchMock }));
 
     await waitFor(() => {
       const btns = getAllByRole('button');
@@ -1124,6 +1162,7 @@ describe('SettingsView — S-168 AC5: github/private_key Eingabe ist eine Textar
 // ── AC6 — Navigation ──────────────────────────────────────────────────────────
 
 describe('SettingsView — AC6: Navigation', () => {
+  beforeEach(() => { testCategory = 'zugaenge'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -1170,6 +1209,7 @@ describe('SettingsView — AC6: Navigation', () => {
 // ── AC8 — Frontend-Validierung ────────────────────────────────────────────────
 
 describe('SettingsView — AC8: Frontend-Validierung', () => {
+  beforeEach(() => { testCategory = 'zugaenge'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -1179,7 +1219,7 @@ describe('SettingsView — AC8: Frontend-Validierung', () => {
     globalThis.fetch = fetchMock;
 
     const onNavigate = jest.fn();
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
 
     // Warten auf Setzen-Button
     await waitFor(() => {
@@ -1211,11 +1251,12 @@ describe('SettingsView — AC8: Frontend-Validierung', () => {
   });
 
   it('AC8 — misc: leerer Schlüsselname → Fehlermeldung, kein PUT', async () => {
+    testCategory = 'diverses';
     const fetchMock = makeFetch({ getResponse: EMPTY_CREDS });
     globalThis.fetch = fetchMock;
 
     const onNavigate = jest.fn();
-    render(React.createElement(SettingsView, { onNavigate }));
+    renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
 
     // Warten auf Hinzufügen-Button
     await waitFor(() => {
@@ -1253,6 +1294,7 @@ describe('SettingsView — AC8: Frontend-Validierung', () => {
 // ── NFR A11y — aria-describedby Misc-Fehler ───────────────────────────────────
 
 describe('SettingsView — NFR A11y: aria-describedby auf Misc-Inputs', () => {
+  beforeEach(() => { testCategory = 'diverses'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -1262,7 +1304,7 @@ describe('SettingsView — NFR A11y: aria-describedby auf Misc-Inputs', () => {
     globalThis.fetch = fetchMock;
 
     const onNavigate = jest.fn();
-    render(React.createElement(SettingsView, { onNavigate }));
+    renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
 
     // Formular öffnen
     await waitFor(() => {
@@ -1305,7 +1347,7 @@ describe('SettingsView — NFR A11y: aria-describedby auf Misc-Inputs', () => {
     globalThis.fetch = fetchMock;
 
     const onNavigate = jest.fn();
-    render(React.createElement(SettingsView, { onNavigate }));
+    renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
 
     await waitFor(() => {
       expect(document.querySelector('[aria-label="Weiteres Credential hinzufügen"]')).toBeTruthy();
@@ -1331,6 +1373,7 @@ describe('SettingsView — NFR A11y: aria-describedby auf Misc-Inputs', () => {
 // ── NFR A11y — Touch-Targets ──────────────────────────────────────────────────
 
 describe('SettingsView — NFR A11y: Touch-Targets ≥ 44 px', () => {
+  beforeEach(() => { testCategory = 'zugaenge'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -1351,6 +1394,7 @@ describe('SettingsView — NFR A11y: Touch-Targets ≥ 44 px', () => {
 // ── SSH-Keys — SSH-AC1: Public-Key anzeigen ───────────────────────────────────
 
 describe('SettingsView — SSH-AC1: Public-Key anzeigen', () => {
+  beforeEach(() => { testCategory = 'zugaenge'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -1398,6 +1442,7 @@ describe('SettingsView — SSH-AC1: Public-Key anzeigen', () => {
 // ── SSH-Keys — SSH-AC2: Private-Key write-only/maskiert ──────────────────────
 
 describe('SettingsView — SSH-AC2: Private-Key write-only', () => {
+  beforeEach(() => { testCategory = 'zugaenge'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -1416,7 +1461,7 @@ describe('SettingsView — SSH-AC2: Private-Key write-only', () => {
     const fetchMock = makeFetch({ sshGetResponse: SSH_KEYS_WITH_ROOT });
     globalThis.fetch = fetchMock;
     const onNavigate = jest.fn();
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
 
     // Warten bis SSH-Benutzer root geladen ist
     await waitFor(() => {
@@ -1456,7 +1501,7 @@ describe('SettingsView — SSH-AC2: Private-Key write-only', () => {
     globalThis.fetch = fetchMock;
 
     const onNavigate = jest.fn();
-    const { getAllByRole, getByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    const { getAllByRole, getByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
 
     await waitFor(() => {
       const btns = getAllByRole('button');
@@ -1496,6 +1541,7 @@ describe('SettingsView — SSH-AC2: Private-Key write-only', () => {
 // ── SSH-Keys — SSH-AC3: Löschen ───────────────────────────────────────────────
 
 describe('SettingsView — SSH-AC3: Löschen', () => {
+  beforeEach(() => { testCategory = 'zugaenge'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -1545,7 +1591,7 @@ describe('SettingsView — SSH-AC3: Löschen', () => {
     globalThis.fetch = fetchMock;
 
     const onNavigate = jest.fn();
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
 
     await waitFor(() => {
       const btns = getAllByRole('button');
@@ -1569,6 +1615,7 @@ describe('SettingsView — SSH-AC3: Löschen', () => {
 // ── SSH-Keys — SSH-AC4: Public-Key-Format-Validierung ────────────────────────
 
 describe('SettingsView — SSH-AC4: Public-Key-Format-Validierung', () => {
+  beforeEach(() => { testCategory = 'zugaenge'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -1587,7 +1634,7 @@ describe('SettingsView — SSH-AC4: Public-Key-Format-Validierung', () => {
     globalThis.fetch = fetchMock;
 
     const onNavigate = jest.fn();
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
 
     // Warten auf Benutzer "testuser" mit Setzen-Button
     await waitFor(() => {
@@ -1646,7 +1693,7 @@ describe('SettingsView — SSH-AC4: Public-Key-Format-Validierung', () => {
     globalThis.fetch = fetchMock;
 
     const onNavigate = jest.fn();
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
 
     await waitFor(() => {
       const btns = getAllByRole('button');
@@ -1694,7 +1741,7 @@ describe('SettingsView — SSH-AC4: Public-Key-Format-Validierung', () => {
     globalThis.fetch = fetchMock;
 
     const onNavigate = jest.fn();
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
 
     await waitFor(() => {
       const btns = getAllByRole('button');
@@ -1736,6 +1783,7 @@ describe('SettingsView — SSH-AC4: Public-Key-Format-Validierung', () => {
 // ── SSH-Keys — SSH-AC5: Private-Key-Klartext nie sichtbar ────────────────────
 
 describe('SettingsView — SSH-AC5: Private-Key-Klartext nie sichtbar', () => {
+  beforeEach(() => { testCategory = 'zugaenge'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -1756,6 +1804,7 @@ describe('SettingsView — SSH-AC5: Private-Key-Klartext nie sichtbar', () => {
 // ── SSH-Keys — SSH-AC1: Public-Key ändern (Ändern-Button) ────────────────────
 
 describe('SettingsView — SSH-AC1: Public-Key ändern', () => {
+  beforeEach(() => { testCategory = 'zugaenge'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -1772,7 +1821,7 @@ describe('SettingsView — SSH-AC1: Public-Key ändern', () => {
     const fetchMock = makeFetch({ sshGetResponse: SSH_KEYS_WITH_ROOT });
     globalThis.fetch = fetchMock;
     const onNavigate = jest.fn();
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
 
     await waitFor(() => {
       const btns = getAllByRole('button');
@@ -1797,6 +1846,7 @@ describe('SettingsView — SSH-AC1: Public-Key ändern', () => {
 // ── S1: Ladefehler-Sichtbarkeit ───────────────────────────────────────────────
 
 describe('SettingsView — S1: Ladefehler-Sichtbarkeit', () => {
+  beforeEach(() => { testCategory = 'zugaenge'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -1815,7 +1865,7 @@ describe('SettingsView — S1: Ladefehler-Sichtbarkeit', () => {
     globalThis.fetch = fetchMock;
 
     const onNavigate = jest.fn();
-    const { getByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    const { getByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
 
     await waitFor(() => {
       const alerts = document.querySelectorAll('[role="alert"]');
@@ -1844,7 +1894,7 @@ describe('SettingsView — S1: Ladefehler-Sichtbarkeit', () => {
     globalThis.fetch = fetchMock;
 
     const onNavigate = jest.fn();
-    render(React.createElement(SettingsView, { onNavigate }));
+    renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
 
     await waitFor(() => {
       const alerts = document.querySelectorAll('[role="alert"]');
@@ -1859,6 +1909,7 @@ describe('SettingsView — S1: Ladefehler-Sichtbarkeit', () => {
 // ── SSH-Keys — S1: In-Memory-Stub beim Hinzufügen eines Benutzers ─────────────
 
 describe('SettingsView — S1: Neuer Benutzer erscheint als In-Memory-Stub (kein Server-Roundtrip)', () => {
+  beforeEach(() => { testCategory = 'zugaenge'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -1868,7 +1919,7 @@ describe('SettingsView — S1: Neuer Benutzer erscheint als In-Memory-Stub (kein
     globalThis.fetch = fetchMock;
 
     const onNavigate = jest.fn();
-    const { getByRole, getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    const { getByRole, getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
 
     // Warten bis SSH-Sektion geladen
     await waitFor(() => {
@@ -1914,6 +1965,7 @@ describe('SettingsView — S1: Neuer Benutzer erscheint als In-Memory-Stub (kein
 // ── Workspace-Path (WS-AC1 + UI-Anteil WS-AC3) — verschoben von GitHubView #92 ──
 
 describe('SettingsView — WS-AC1: Workspace-Sektion Grundstruktur', () => {
+  beforeEach(() => { testCategory = 'workspace'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -1988,6 +2040,7 @@ describe('SettingsView — WS-AC1: Workspace-Sektion Grundstruktur', () => {
 });
 
 describe('SettingsView — WS-AC1: Setzen (PUT)', () => {
+  beforeEach(() => { testCategory = 'workspace'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -2033,7 +2086,7 @@ describe('SettingsView — WS-AC1: Setzen (PUT)', () => {
       return { ok: true, status: 200, json: async () => EMPTY_CREDS };
     });
     globalThis.fetch = fetchFn;
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
 
     await waitFor(() => {
       const btns = getAllByRole('button');
@@ -2077,7 +2130,7 @@ describe('SettingsView — WS-AC1: Setzen (PUT)', () => {
       getWorkspacePath: { ok: true, status: 200, data: DEFAULT_WORKSPACE_PATH },
     });
     globalThis.fetch = fetchFn;
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
 
     await waitFor(() => {
       const btns = getAllByRole('button');
@@ -2117,6 +2170,7 @@ describe('SettingsView — WS-AC1: Setzen (PUT)', () => {
 });
 
 describe('SettingsView — WS-AC1: Zurücksetzen (DELETE)', () => {
+  beforeEach(() => { testCategory = 'workspace'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -2136,7 +2190,7 @@ describe('SettingsView — WS-AC1: Zurücksetzen (DELETE)', () => {
       return { ok: true, status: 200, json: async () => EMPTY_CREDS };
     });
     globalThis.fetch = fetchFn;
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
 
     await waitFor(() => {
       const btns = getAllByRole('button');
@@ -2160,6 +2214,7 @@ describe('SettingsView — WS-AC1: Zurücksetzen (DELETE)', () => {
 });
 
 describe('SettingsView — WS-AC3 (UI): Validierungsfehler', () => {
+  beforeEach(() => { testCategory = 'workspace'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -2170,7 +2225,7 @@ describe('SettingsView — WS-AC3 (UI): Validierungsfehler', () => {
       putWorkspacePath: { ok: false, status: 422, data: { error: 'Pfad existiert nicht oder ist kein Verzeichnis' } },
     });
     globalThis.fetch = fetchFn;
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
 
     await waitFor(() => {
       const btns = getAllByRole('button');
@@ -2214,7 +2269,7 @@ describe('SettingsView — WS-AC3 (UI): Validierungsfehler', () => {
       putWorkspacePath: { ok: false, status: 422, data: { error: 'Pfad außerhalb der Mount-Schranke' } },
     });
     globalThis.fetch = fetchFn;
-    const { getAllByRole, getByRole } = render(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+    const { getAllByRole, getByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
 
     await waitFor(() => {
       const main = getByRole('main', { name: /einstellungen-ansicht/i });
@@ -2262,7 +2317,7 @@ describe('SettingsView — WS-AC3 (UI): Validierungsfehler', () => {
       getWorkspacePath: { ok: true, status: 200, data: DEFAULT_WORKSPACE_PATH },
     });
     globalThis.fetch = fetchFn;
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
 
     await waitFor(() => {
       const btns = getAllByRole('button');
@@ -2307,7 +2362,7 @@ describe('SettingsView — WS-AC3 (UI): Validierungsfehler', () => {
       putWorkspacePath: { ok: false, status: 422, data: { error: 'Pfad außerhalb der Schranke' } },
     });
     globalThis.fetch = fetchFn;
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
 
     await waitFor(() => {
       const btns = getAllByRole('button');
@@ -2348,6 +2403,7 @@ describe('SettingsView — WS-AC3 (UI): Validierungsfehler', () => {
 });
 
 describe('SettingsView — WS-Loading: aria-busy + Mehrfachklick-Schutz', () => {
+  beforeEach(() => { testCategory = 'workspace'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -2368,7 +2424,7 @@ describe('SettingsView — WS-Loading: aria-busy + Mehrfachklick-Schutz', () => 
       return { ok: true, status: 200, json: async () => EMPTY_CREDS };
     });
     globalThis.fetch = fetchFn;
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
 
     await waitFor(() => {
       const btns = getAllByRole('button');
@@ -2414,6 +2470,7 @@ describe('SettingsView — WS-Loading: aria-busy + Mehrfachklick-Schutz', () => 
 });
 
 describe('SettingsView — WS-A11y: Touch-Target + Fokusführung', () => {
+  beforeEach(() => { testCategory = 'workspace'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -2424,7 +2481,7 @@ describe('SettingsView — WS-A11y: Touch-Target + Fokusführung', () => {
       getWorkspacePath: { ok: true, status: 200, data: CONFIGURED_WORKSPACE_PATH },
     });
     globalThis.fetch = fetchFn;
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
 
     await waitFor(() => {
       const btns = getAllByRole('button');
@@ -2463,7 +2520,7 @@ describe('SettingsView — WS-A11y: Touch-Target + Fokusführung', () => {
       putWorkspacePath: { ok: false, status: 422, data: { error: 'Pfad existiert nicht oder ist kein Verzeichnis' } },
     });
     globalThis.fetch = fetchFn;
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
 
     await waitFor(() => {
       const btns = getAllByRole('button');
@@ -2506,7 +2563,7 @@ describe('SettingsView — WS-A11y: Touch-Target + Fokusführung', () => {
       getWorkspacePath: { ok: true, status: 200, data: DEFAULT_WORKSPACE_PATH },
     });
     globalThis.fetch = fetchFn;
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
 
     await waitFor(() => {
       const btns = getAllByRole('button');
@@ -2550,7 +2607,7 @@ describe('SettingsView — WS-A11y: Touch-Target + Fokusführung', () => {
       getWorkspacePath: 'reject',
     });
     globalThis.fetch = fetchFn;
-    const { getByRole } = render(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+    const { getByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
 
     await waitFor(() => {
       const main = getByRole('main', { name: /einstellungen-ansicht/i });
@@ -2566,6 +2623,7 @@ describe('SettingsView — WS-A11y: Touch-Target + Fokusführung', () => {
 // ── obsidian-vault-config AC1 (UI-Anteil, S-247) ──────────────────────────────
 
 describe('SettingsView — OBS-AC1: Anzeige Obsidian-Vault-Pfad', () => {
+  beforeEach(() => { testCategory = 'integrationen'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -2611,6 +2669,7 @@ describe('SettingsView — OBS-AC1: Anzeige Obsidian-Vault-Pfad', () => {
 });
 
 describe('SettingsView — OBS-AC1: Setzen (PUT)', () => {
+  beforeEach(() => { testCategory = 'integrationen'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -2630,7 +2689,7 @@ describe('SettingsView — OBS-AC1: Setzen (PUT)', () => {
       return { ok: true, status: 200, json: async () => EMPTY_CREDS };
     });
     globalThis.fetch = fetchFn;
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
 
     await waitFor(() => {
       const btns = getAllByRole('button');
@@ -2679,7 +2738,7 @@ describe('SettingsView — OBS-AC1: Setzen (PUT)', () => {
       getObsidianVaultPath: { ok: true, status: 200, data: DEFAULT_OBSIDIAN_VAULT_PATH },
     });
     globalThis.fetch = fetchFn;
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
 
     await waitFor(() => {
       const btns = getAllByRole('button');
@@ -2719,6 +2778,7 @@ describe('SettingsView — OBS-AC1: Setzen (PUT)', () => {
 });
 
 describe('SettingsView — OBS-AC1: Validierungsfehler (422) + Berechtigung (403)', () => {
+  beforeEach(() => { testCategory = 'integrationen'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -2729,7 +2789,7 @@ describe('SettingsView — OBS-AC1: Validierungsfehler (422) + Berechtigung (403
       putObsidianVaultPath: { ok: false, status: 422, data: { error: 'Pfad enthält keinen Unterordner "Projekte"' } },
     });
     globalThis.fetch = fetchFn;
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
 
     await waitFor(() => {
       const btns = getAllByRole('button');
@@ -2780,7 +2840,7 @@ describe('SettingsView — OBS-AC1: Validierungsfehler (422) + Berechtigung (403
       putObsidianVaultPath: { ok: false, status: 403, data: { error: 'Keine Berechtigung für diese Aktion' } },
     });
     globalThis.fetch = fetchFn;
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
 
     await waitFor(() => {
       const btns = getAllByRole('button');
@@ -2823,7 +2883,7 @@ describe('SettingsView — OBS-AC1: Validierungsfehler (422) + Berechtigung (403
       getObsidianVaultPath: { ok: true, status: 200, data: DEFAULT_OBSIDIAN_VAULT_PATH },
     });
     globalThis.fetch = fetchFn;
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
 
     await waitFor(() => {
       const btns = getAllByRole('button');
@@ -2862,6 +2922,7 @@ describe('SettingsView — OBS-AC1: Validierungsfehler (422) + Berechtigung (403
 });
 
 describe('SettingsView — OBS-AC1: Zurücksetzen (DELETE)', () => {
+  beforeEach(() => { testCategory = 'integrationen'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -2881,7 +2942,7 @@ describe('SettingsView — OBS-AC1: Zurücksetzen (DELETE)', () => {
       return { ok: true, status: 200, json: async () => EMPTY_CREDS };
     });
     globalThis.fetch = fetchFn;
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
 
     await waitFor(() => {
       const btns = getAllByRole('button');
@@ -2910,6 +2971,7 @@ describe('SettingsView — OBS-AC1: Zurücksetzen (DELETE)', () => {
 });
 
 describe('SettingsView — OBS-A11y: label/htmlFor + Fokusführung + Touch-Target', () => {
+  beforeEach(() => { testCategory = 'integrationen'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -2945,7 +3007,7 @@ describe('SettingsView — OBS-A11y: label/htmlFor + Fokusführung + Touch-Targe
       putObsidianVaultPath: { ok: false, status: 422, data: { error: 'Pfad ist kein Verzeichnis' } },
     });
     globalThis.fetch = fetchFn;
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
 
     await waitFor(() => {
       const btns = getAllByRole('button');
@@ -2987,7 +3049,7 @@ describe('SettingsView — OBS-A11y: label/htmlFor + Fokusführung + Touch-Targe
       getObsidianVaultPath: { ok: true, status: 200, data: DEFAULT_OBSIDIAN_VAULT_PATH },
     });
     globalThis.fetch = fetchFn;
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
 
     await waitFor(() => {
       const btns = getAllByRole('button');
@@ -3045,7 +3107,7 @@ describe('SettingsView — OBS-A11y: label/htmlFor + Fokusführung + Touch-Targe
       getObsidianVaultPath: 'reject',
     });
     globalThis.fetch = fetchFn;
-    const { getByRole } = render(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+    const { getByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
 
     await waitFor(() => {
       const main = getByRole('main', { name: /einstellungen-ansicht/i });
@@ -3061,6 +3123,7 @@ describe('SettingsView — OBS-A11y: label/htmlFor + Fokusführung + Touch-Targe
 // ── AC9 — VPS-Provider: je Provider ein eigener API-Token ────────────────────
 
 describe('SettingsView — AC9: VPS-Provider-Sektion mit drei Token-Feldern', () => {
+  beforeEach(() => { testCategory = 'zugaenge'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -3118,7 +3181,7 @@ describe('SettingsView — AC9: VPS-Provider-Sektion mit drei Token-Feldern', ()
     const fetchMock = makeFetch({ getResponse: EMPTY_CREDS });
     globalThis.fetch = fetchMock;
     const onNavigate = jest.fn();
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
 
     await waitFor(() => {
       const btns = getAllByRole('button');
@@ -3167,6 +3230,7 @@ describe('SettingsView — AC9: VPS-Provider-Sektion mit drei Token-Feldern', ()
 // ── ssh-key-generation — GEN-AC1: „Keypair erzeugen"-Button vorhanden ────────
 
 describe('SettingsView — GEN-AC1: Keypair-Generieren-Button vorhanden', () => {
+  beforeEach(() => { testCategory = 'zugaenge'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -3209,7 +3273,7 @@ describe('SettingsView — GEN-AC1: Keypair-Generieren-Button vorhanden', () => 
     const fetchMock = makeFetch({ sshGetResponse: SSH_KEYS_WITH_ROOT });
     globalThis.fetch = fetchMock;
     const onNavigate = jest.fn();
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
 
     await waitFor(() => {
       const btns = getAllByRole('button');
@@ -3235,6 +3299,7 @@ describe('SettingsView — GEN-AC1: Keypair-Generieren-Button vorhanden', () => 
 // ── ssh-key-generation — GEN-AC3: Public-Key anzeigen + kopieren; Private-Key NIE ──
 
 describe('SettingsView — GEN-AC3: Public-Key nach Generierung anzeigen; Private-Key nie sichtbar', () => {
+  beforeEach(() => { testCategory = 'zugaenge'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -3243,7 +3308,7 @@ describe('SettingsView — GEN-AC3: Public-Key nach Generierung anzeigen; Privat
     const fetchMock = makeFetch({ sshGetResponse: [{ user: 'root', privateKeyStatus: 'unset' }] });
     globalThis.fetch = fetchMock;
     const onNavigate = jest.fn();
-    const { getAllByRole, getByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    const { getAllByRole, getByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
 
     await waitFor(() => {
       const btns = getAllByRole('button');
@@ -3268,7 +3333,7 @@ describe('SettingsView — GEN-AC3: Public-Key nach Generierung anzeigen; Privat
     const fetchMock = makeFetch({ sshGetResponse: [{ user: 'root', privateKeyStatus: 'unset' }] });
     globalThis.fetch = fetchMock;
     const onNavigate = jest.fn();
-    const { getAllByRole, getByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    const { getAllByRole, getByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
 
     await waitFor(() => {
       const btns = getAllByRole('button');
@@ -3294,7 +3359,7 @@ describe('SettingsView — GEN-AC3: Public-Key nach Generierung anzeigen; Privat
     const fetchMock = makeFetch({ sshGetResponse: [{ user: 'root', privateKeyStatus: 'unset' }] });
     globalThis.fetch = fetchMock;
     const onNavigate = jest.fn();
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
 
     await waitFor(() => {
       const btns = getAllByRole('button');
@@ -3320,6 +3385,7 @@ describe('SettingsView — GEN-AC3: Public-Key nach Generierung anzeigen; Privat
 // ── ssh-key-generation — GEN-AC4: Private-Key-Export (dauerhaft wiederholbar) ─
 
 describe('SettingsView — GEN-AC4: Private-Key-Export-Button', () => {
+  beforeEach(() => { testCategory = 'zugaenge'; });
   afterEach(() => {
     delete globalThis.fetch;
     delete globalThis.URL.createObjectURL;
@@ -3336,7 +3402,7 @@ describe('SettingsView — GEN-AC4: Private-Key-Export-Button', () => {
     const fetchMock = makeFetch({ sshGetResponse: [{ user: 'root', privateKeyStatus: 'unset' }] });
     globalThis.fetch = fetchMock;
     const onNavigate = jest.fn();
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
 
     await waitFor(() => {
       const btns = getAllByRole('button');
@@ -3376,7 +3442,7 @@ describe('SettingsView — GEN-AC4: Private-Key-Export-Button', () => {
     const fetchMock = makeFetch({ sshGetResponse: sshWithPrivKey });
     globalThis.fetch = fetchMock;
     const onNavigate = jest.fn();
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
 
     await waitFor(() => {
       const btns = getAllByRole('button');
@@ -3404,7 +3470,7 @@ describe('SettingsView — GEN-AC4: Private-Key-Export-Button', () => {
     const fetchMock = makeFetch({ sshGetResponse: sshWithPrivKey });
     globalThis.fetch = fetchMock;
     const onNavigate = jest.fn();
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
 
     await waitFor(() => {
       expect(getAllByRole('button').some((b) => b.getAttribute('aria-label')?.match(/private-key.*root.*herunterladen|private-key.*herunterladen/i))).toBe(true);
@@ -3447,7 +3513,7 @@ describe('SettingsView — GEN-AC4: Private-Key-Export-Button', () => {
     const fetchMock = makeFetch({ sshGetResponse: sshWithPrivKey, sshExportResponse: 'error' });
     globalThis.fetch = fetchMock;
     const onNavigate = jest.fn();
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
 
     await waitFor(() => {
       expect(getAllByRole('button').some((b) => b.getAttribute('aria-label')?.match(/private-key.*root.*herunterladen|private-key.*herunterladen/i))).toBe(true);
@@ -3471,6 +3537,7 @@ describe('SettingsView — GEN-AC4: Private-Key-Export-Button', () => {
 // ── ssh-key-generation — GEN-AC6: 403-Fehler korrekt behandeln ───────────────
 
 describe('SettingsView — GEN-AC6: 403-Fehler beim Generieren', () => {
+  beforeEach(() => { testCategory = 'zugaenge'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -3482,7 +3549,7 @@ describe('SettingsView — GEN-AC6: 403-Fehler beim Generieren', () => {
     });
     globalThis.fetch = fetchMock;
     const onNavigate = jest.fn();
-    const { getAllByRole, getByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    const { getAllByRole, getByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
 
     await waitFor(() => {
       expect(getAllByRole('button').some((b) => b.getAttribute('aria-label')?.match(/ed25519.*keypair.*root|keypair.*root.*erzeugen|ed25519.*root.*erzeugen/i))).toBe(true);
@@ -3510,6 +3577,7 @@ describe('SettingsView — GEN-AC6: 403-Fehler beim Generieren', () => {
 // ── ssh-key-generation — GEN-AC7: Overwrite-Bestätigung bei 409 ──────────────
 
 describe('SettingsView — GEN-AC7: Overwrite-Bestätigung bei belegtem Label', () => {
+  beforeEach(() => { testCategory = 'zugaenge'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -3521,7 +3589,7 @@ describe('SettingsView — GEN-AC7: Overwrite-Bestätigung bei belegtem Label', 
     });
     globalThis.fetch = fetchMock;
     const onNavigate = jest.fn();
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
 
     await waitFor(() => {
       expect(getAllByRole('button').some((b) => b.getAttribute('aria-label')?.match(/ed25519.*keypair.*root|keypair.*root.*erzeugen|ed25519.*root.*erzeugen/i))).toBe(true);
@@ -3547,7 +3615,7 @@ describe('SettingsView — GEN-AC7: Overwrite-Bestätigung bei belegtem Label', 
     });
     globalThis.fetch = fetchMock;
     const onNavigate = jest.fn();
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
 
     await waitFor(() => {
       expect(getAllByRole('button').some((b) => b.getAttribute('aria-label')?.match(/ed25519.*keypair.*root|keypair.*root.*erzeugen|ed25519.*root.*erzeugen/i))).toBe(true);
@@ -3584,7 +3652,7 @@ describe('SettingsView — GEN-AC7: Overwrite-Bestätigung bei belegtem Label', 
     });
     globalThis.fetch = fetchMock;
     const onNavigate = jest.fn();
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
 
     await waitFor(() => {
       expect(getAllByRole('button').some((b) => b.getAttribute('aria-label')?.match(/ed25519.*keypair.*root|keypair.*root.*erzeugen|ed25519.*root.*erzeugen/i))).toBe(true);
@@ -3648,7 +3716,7 @@ describe('SettingsView — GEN-AC7: Overwrite-Bestätigung bei belegtem Label', 
     });
     globalThis.fetch = fetchMock;
     const onNavigate = jest.fn();
-    const { getAllByRole, getByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    const { getAllByRole, getByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
 
     await waitFor(() => {
       expect(getAllByRole('button').some((b) => b.getAttribute('aria-label')?.match(/ed25519.*keypair.*root|keypair.*root.*erzeugen|ed25519.*root.*erzeugen/i))).toBe(true);
@@ -3695,6 +3763,7 @@ describe('SettingsView — GEN-AC7: Overwrite-Bestätigung bei belegtem Label', 
 // ── ssh-key-generation — GEN-AC8: Label-Liste nach Generierung neu laden ─────
 
 describe('SettingsView — GEN-AC8: Label-Reload nach Generierung', () => {
+  beforeEach(() => { testCategory = 'zugaenge'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -3723,7 +3792,7 @@ describe('SettingsView — GEN-AC8: Label-Reload nach Generierung', () => {
     });
     globalThis.fetch = fetchMock;
     const onNavigate = jest.fn();
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
 
     // Warten bis initial geladen
     await waitFor(() => {
@@ -3750,6 +3819,7 @@ describe('SettingsView — GEN-AC8: Label-Reload nach Generierung', () => {
 // ── ssh-key-generation — GEN-A11y: Overwrite-Dialog-Barrierefreiheit ─────────
 
 describe('SettingsView — GEN-A11y: Overwrite-Dialog A11y', () => {
+  beforeEach(() => { testCategory = 'zugaenge'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -3761,7 +3831,7 @@ describe('SettingsView — GEN-A11y: Overwrite-Dialog A11y', () => {
     });
     globalThis.fetch = fetchMock;
     const onNavigate = jest.fn();
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
 
     await waitFor(() => {
       expect(getAllByRole('button').some((b) => b.getAttribute('aria-label')?.match(/ed25519.*keypair.*root|keypair.*root.*erzeugen|ed25519.*root.*erzeugen/i))).toBe(true);
@@ -3794,7 +3864,7 @@ describe('SettingsView — GEN-A11y: Overwrite-Dialog A11y', () => {
     });
     globalThis.fetch = fetchMock;
     const onNavigate = jest.fn();
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
 
     await waitFor(() => {
       expect(getAllByRole('button').some((b) => b.getAttribute('aria-label')?.match(/ed25519.*keypair.*root|keypair.*root.*erzeugen|ed25519.*root.*erzeugen/i))).toBe(true);
@@ -3841,6 +3911,7 @@ describe('SettingsView — GEN-A11y: Overwrite-Dialog A11y', () => {
 // ── ssh-key-rotation — ROT-AC1: Rotations-Button + Formular vorhanden ────────
 
 describe('SettingsView — ROT-AC1: Rotation auslösen (Formular + POST)', () => {
+  beforeEach(() => { testCategory = 'zugaenge'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -3898,7 +3969,7 @@ describe('SettingsView — ROT-AC1: Rotation auslösen (Formular + POST)', () =>
     const fetchMock = makeFetch({ sshGetResponse: SSH_KEYS_WITH_ROOT });
     globalThis.fetch = fetchMock;
     const onNavigate = jest.fn();
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
     await openRotationForm(getAllByRole);
 
     // Host-Feld mit label
@@ -3923,7 +3994,7 @@ describe('SettingsView — ROT-AC1: Rotation auslösen (Formular + POST)', () =>
     const fetchMock = makeFetch({ sshGetResponse: SSH_KEYS_WITH_ROOT });
     globalThis.fetch = fetchMock;
     const onNavigate = jest.fn();
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
     await openRotationForm(getAllByRole);
 
     // Host + targetUser ausfüllen
@@ -3952,7 +4023,7 @@ describe('SettingsView — ROT-AC1: Rotation auslösen (Formular + POST)', () =>
     const fetchMock = makeFetch({ sshGetResponse: SSH_KEYS_WITH_ROOT });
     globalThis.fetch = fetchMock;
     const onNavigate = jest.fn();
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
     await openRotationForm(getAllByRole);
 
     // Ohne Host: auf „Jetzt rotieren" klicken
@@ -4006,7 +4077,7 @@ describe('SettingsView — ROT-AC1: Rotation auslösen (Formular + POST)', () =>
     });
     globalThis.fetch = fetchMock;
     const onNavigate = jest.fn();
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
     await openRotationForm(getAllByRole);
 
     await act(async () => {
@@ -4039,6 +4110,7 @@ describe('SettingsView — ROT-AC1: Rotation auslösen (Formular + POST)', () =>
 // ── ssh-key-rotation — ROT-AC5: Ergebnis anzeigen ────────────────────────────
 
 describe('SettingsView — ROT-AC5: Ergebnis-Anzeige (Erfolg + Fehler)', () => {
+  beforeEach(() => { testCategory = 'zugaenge'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -4046,7 +4118,7 @@ describe('SettingsView — ROT-AC5: Ergebnis-Anzeige (Erfolg + Fehler)', () => {
   /** Öffnet RotationForm und sendet das Formular mit host + targetUser. */
   async function submitRotationForm(fetchMock, host = '1.2.3.4', tu = 'root') {
     const onNavigate = jest.fn();
-    const { getAllByRole, getByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    const { getAllByRole, getByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
 
     await waitFor(() => {
       expect(getAllByRole('button').some((b) => b.getAttribute('aria-label')?.match(/ssh-key für root rotieren/i))).toBe(true);
@@ -4157,6 +4229,7 @@ describe('SettingsView — ROT-AC5: Ergebnis-Anzeige (Erfolg + Fehler)', () => {
 // ── ssh-key-rotation — ROT-AC7: kein Private-Key in Anzeige + A11y ───────────
 
 describe('SettingsView — ROT-AC7: Kein Private-Key in Rotation-Anzeige; A11y', () => {
+  beforeEach(() => { testCategory = 'zugaenge'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -4165,7 +4238,7 @@ describe('SettingsView — ROT-AC7: Kein Private-Key in Rotation-Anzeige; A11y',
     const fetchMock = makeFetch({ sshGetResponse: SSH_KEYS_WITH_ROOT });
     globalThis.fetch = fetchMock;
     const onNavigate = jest.fn();
-    const { getAllByRole, getByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    const { getAllByRole, getByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
 
     await waitFor(() => {
       expect(getAllByRole('button').some((b) => b.getAttribute('aria-label')?.match(/ssh-key für root rotieren/i))).toBe(true);
@@ -4211,7 +4284,7 @@ describe('SettingsView — ROT-AC7: Kein Private-Key in Rotation-Anzeige; A11y',
     const fetchMock = makeFetch({ sshGetResponse: SSH_KEYS_WITH_ROOT });
     globalThis.fetch = fetchMock;
     const onNavigate = jest.fn();
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
 
     await waitFor(() => {
       expect(getAllByRole('button').some((b) => b.getAttribute('aria-label')?.match(/ssh-key für root rotieren/i))).toBe(true);
@@ -4241,7 +4314,7 @@ describe('SettingsView — ROT-AC7: Kein Private-Key in Rotation-Anzeige; A11y',
     const fetchMock = makeFetch({ sshGetResponse: SSH_KEYS_WITH_ROOT });
     globalThis.fetch = fetchMock;
     const onNavigate = jest.fn();
-    const { getAllByRole } = render(React.createElement(SettingsView, { onNavigate }));
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
 
     await waitFor(() => {
       expect(getAllByRole('button').some((b) => b.getAttribute('aria-label')?.match(/ssh-key für root rotieren/i))).toBe(true);
@@ -4761,6 +4834,7 @@ describe('SettingsView — Bitwarden-Unlock-Dialog (AC1, AC2, AC4, AC5, AC9, AC1
 // ── credential-key-status-transparency #192 — AC5, AC6 (SettingsView) ───────
 
 describe('SettingsView — #192 Key-Quelle-Transparenz (AC5/AC6)', () => {
+  beforeEach(() => { testCategory = 'zugaenge'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -5178,6 +5252,7 @@ describe('SettingsView — bitwarden-new-device-otp (New-Device-Verification E-M
 // ── describe: workspace-health-hinweis AC3 — Frontend ────────────────────────
 
 describe('SettingsView — workspace-health-hinweis AC3: Health-Status-Block in WorkspacePathSection', () => {
+  beforeEach(() => { testCategory = 'workspace'; });
   afterEach(() => {
     delete globalThis.fetch;
     delete globalThis.navigator;
@@ -5516,6 +5591,7 @@ describe('SettingsView — Bitwarden-Unlock-Dialog AC12 (Show/Hide-Toggle) #268'
 // ── AC12 (#276/S-130): showPassword-Reset beim Phasenwechsel (Create-Offer) ──
 
 describe('SettingsView — AC12 showPassword-Reset beim Phasenwechsel (S-130 #276)', () => {
+  beforeEach(() => { testCategory = 'zugaenge'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -5598,6 +5674,7 @@ describe('SettingsView — AC12 showPassword-Reset beim Phasenwechsel (S-130 #27
 // ── AC11 — Zweistufige Backup-Quittung ────────────────────────────────────────
 
 describe('SettingsView — credential-backup S-143 AC11: Zweistufige Quittung', () => {
+  beforeEach(() => { testCategory = 'zugaenge'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -5874,6 +5951,7 @@ describe('SettingsView — credential-backup S-143 AC11: Zweistufige Quittung', 
 // ── AC12 — Settings-Abschnitt „Backup / Sicherung" ───────────────────────────
 
 describe('SettingsView — credential-backup S-143 AC12: Backup-Abschnitt + Status-Kachel', () => {
+  beforeEach(() => { testCategory = 'sicherung'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -6318,6 +6396,7 @@ describe('SettingsView — credential-backup S-143 AC12: Backup-Abschnitt + Stat
 // ── RestoreSection (S-142 AC13–AC16) ─────────────────────────────────────────
 
 describe('SettingsView — S-142 AC13/AC14: Restore-UI rendert Upload + Confirm', () => {
+  beforeEach(() => { testCategory = 'sicherung'; });
   afterEach(() => { delete globalThis.fetch; });
 
   it('AC13/A11y: Restore-Bereich rendert mit Upload-Input (type=file) + Label + Confirm-Checkbox', async () => {
@@ -6419,6 +6498,7 @@ describe('SettingsView — S-142 AC13/AC14: Restore-UI rendert Upload + Confirm'
 });
 
 describe('SettingsView — S-142 AC15: Fehlerfall Restore (Klassifizierter Fehler)', () => {
+  beforeEach(() => { testCategory = 'sicherung'; });
   afterEach(() => { delete globalThis.fetch; });
 
   it('AC15: gpg-decrypt-failed → role=alert mit errorClass im DOM, kein Key/Klartext', async () => {
@@ -6496,6 +6576,7 @@ describe('SettingsView — S-142 AC15: Fehlerfall Restore (Klassifizierter Fehle
 });
 
 describe('SettingsView — S-142 A11y: Restore-UI (NFR WCAG 2.1 AA)', () => {
+  beforeEach(() => { testCategory = 'sicherung'; });
   afterEach(() => { delete globalThis.fetch; });
 
   it('A11y: Restore-Button hat aria-busy=true während des Restore-Vorgangs', async () => {
@@ -6574,6 +6655,7 @@ describe('SettingsView — S-142 A11y: Restore-UI (NFR WCAG 2.1 AA)', () => {
 // ── push-notifications S-183 AC3/AC10 — NotificationSection ──────────────────
 
 describe('push-notifications S-183 — AC3: Benachrichtigungs-Sektion', () => {
+  beforeEach(() => { testCategory = 'benachrichtigungen'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
@@ -6821,6 +6903,7 @@ describe('push-notifications S-183 — AC3: Benachrichtigungs-Sektion', () => {
 // ── notification-event-defaults S-278 — AC6: zwei Meldeklassen in der Ereignis-Auswahl ──
 
 describe('notification-event-defaults S-278 — AC6: Ereignis-Auswahl mit Meldeklassen', () => {
+  beforeEach(() => { testCategory = 'benachrichtigungen'; });
   afterEach(() => {
     delete globalThis.fetch;
   });
