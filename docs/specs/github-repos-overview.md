@@ -2,6 +2,7 @@
 id: github-repos-overview
 title: GitHub-Repo-Übersicht (Org, read-only)
 status: draft
+area: fabrik-arbeiten
 version: 1
 ---
 

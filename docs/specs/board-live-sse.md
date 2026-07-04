@@ -2,6 +2,7 @@
 id: board-live-sse
 title: "Board-Live-Aktualisierung per Server-Push (SSE) — kein UI-Polling"
 status: active
+area: board
 version: 1
 ---
 

@@ -2,6 +2,7 @@
 id: new-story-chat
 title: „Neue Story" — Spezifizier-Chat von Grund auf (ohne Idee-Karte), Feature+Story automatisch
 status: draft
+area: fabrik-arbeiten
 version: 1
 spec_format: use-case-2.0
 ---

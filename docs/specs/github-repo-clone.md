@@ -2,6 +2,7 @@
 id: github-repo-clone
 title: GitHub-Repository lokal klonen (Workspace)
 status: draft
+area: fabrik-arbeiten
 version: 1
 ---
 

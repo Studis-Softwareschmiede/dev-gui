@@ -2,6 +2,7 @@
 id: vps-readiness-gate
 title: VPS-Bereitschafts-Gate vor dem Deploy (Readiness-Probe + Deploy-Gate + Status-Badge)
 status: draft
+area: deployment
 version: 1
 ---
 

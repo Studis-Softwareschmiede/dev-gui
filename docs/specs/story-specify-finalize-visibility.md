@@ -2,6 +2,7 @@
 id: story-specify-finalize-visibility
 title: „Neue Story"-Chat — Finalize-Lauf sichtbar machen (No-Op-Erkennung + Status-Rückmeldung)
 status: active
+area: fabrik-arbeiten
 version: 1
 spec_format: use-case-2.0
 ---

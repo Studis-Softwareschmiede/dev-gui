@@ -2,6 +2,7 @@
 id: team-train-trigger
 title: Train-Button in der Teamsicht + Retro-Start in der Retro-Sicht (Self-Improvement aus der GUI)
 status: draft
+area: retro-lernen
 version: 3
 ---
 

@@ -2,6 +2,7 @@
 id: reconcile-trigger
 title: Reconcile-Trigger — Button „Konzept/Spec nachziehen" im Spezifikation-Reiter
 status: draft
+area: spezifikation
 version: 2
 ---
 

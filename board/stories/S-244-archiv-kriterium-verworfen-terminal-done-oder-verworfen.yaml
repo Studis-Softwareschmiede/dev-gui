@@ -27,7 +27,7 @@ branch: feat/S-244-archiv-terminal
 pr: null
 blocked_reason: null
 created_at: '2026-07-02T05:05:10Z'
-updated_at: '2026-07-03T05:02:06Z'
+updated_at: '2026-07-04T10:07:07.700Z'
 done_at: '2026-07-03T05:01:23Z'
 notes: 'Spec: docs/specs/board-feature-archive.md — implements AC9 (V7).
 
@@ -62,3 +62,6 @@ notes: 'Spec: docs/specs/board-feature-archive.md — implements AC9 (V7).
   (konsistent mit S-243). Wird diese Story verworfen, bleibt eine Verworfen-Story
   ein Archiv-Blocker — dann board-feature-archive V7/AC9 zuruecknehmen.'
 tok: null
+area: '''board'''
+archived: true
+archived_at: '2026-07-04T10:07:07.700Z'

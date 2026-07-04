@@ -2,6 +2,7 @@
 id: credential-key-flow
 title: Key-Flow-Doku (credential-key-flow.md + Mermaid) + ADR-014-Ergänzung
 status: draft
+area: einstellungen
 version: 1
 ---
 

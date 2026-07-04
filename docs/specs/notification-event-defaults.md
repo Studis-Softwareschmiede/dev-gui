@@ -2,6 +2,7 @@
 id: notification-event-defaults
 title: "Notifikations-Präzisierung: zwei Meldeklassen — neuer Event-Katalog, Default-Events + einmalige Migration"
 status: active
+area: benachrichtigungen
 version: 1
 ---
 

@@ -20,5 +20,8 @@ branch: feat/S-253-drain-completion-snapshot
 pr: null
 blocked_reason: null
 created_at: '2026-07-02T06:05:04Z'
-updated_at: '2026-07-02T21:23:52Z'
+updated_at: '2026-07-04T10:07:07.700Z'
 done_at: '2026-07-02T21:23:06Z'
+area: '''fabrik-arbeiten'''
+archived: true
+archived_at: '2026-07-04T10:07:07.700Z'

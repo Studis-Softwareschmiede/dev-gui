@@ -29,6 +29,8 @@ branch: feat/S-293-story-archiv-backend
 pr: null
 blocked_reason: null
 created_at: '2026-07-03T12:53:27Z'
-updated_at: '2026-07-03T15:07:35Z'
+updated_at: '2026-07-04T10:07:07.700Z'
 done_at: '2026-07-03T15:07:23Z'
 tok_est: null
+archived: true
+archived_at: '2026-07-04T10:07:07.700Z'

@@ -2,6 +2,7 @@
 id: drain-restart-robustness
 title: Drain-Robustheit gegen Server-Neustart — persistente Job-Registry + Boot-Wiederanlauf
 status: active
+area: fabrik-arbeiten
 version: 1
 spec_format: use-case-2.0
 ---

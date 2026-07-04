@@ -2,6 +2,7 @@
 id: factory-status
 title: Fabrik-Status (Dashboard live aus GitHub + Docker)
 status: draft
+area: fabrik-arbeiten
 version: 1
 ---
 

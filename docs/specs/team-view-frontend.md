@@ -2,6 +2,7 @@
 id: team-view-frontend
 title: Team-Ansicht — Frontend (TeamView + markdownLite + 6. Kachel)
 status: draft
+area: retro-lernen
 version: 1
 ---
 

@@ -2,6 +2,7 @@
 id: settings-credentials
 title: Credential-Verwaltung (write-only, maskiert, je Integration)
 status: draft
+area: einstellungen
 version: 1
 ---
 

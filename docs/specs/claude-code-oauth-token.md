@@ -2,6 +2,7 @@
 id: claude-code-oauth-token
 title: Claude-Code-OAuth-Token durchreichen (Container-Auth für Agent-Sessions)
 status: draft
+area: einstellungen
 version: 1
 ---
 

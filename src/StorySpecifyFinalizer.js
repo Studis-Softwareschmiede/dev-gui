@@ -156,19 +156,24 @@ function _hasNewArtifact(baseline, after) {
 }
 
 /**
- * Baut den `requirement`-Prompt: `draftText` + GENAU EIN angehängter Hinweis
- * (der „nicht-nachfragen"-Hinweis, AC4/Regel 6). KEIN Idee-Bezug (AC8) —
- * kein weiteres Spec-Format-Wissen wird hier hinzugefügt (Nicht-Ziel: Feature/
- * Story/Spec legt ausschließlich der `requirement`-Agent an).
+ * Baut den `requirement`-Prompt: `draftText` + angehängte Hinweise
+ * (der „nicht-nachfragen"-Hinweis, AC4/Regel 6 + optionaler Bereichs-Hinweis AC5).
+ * KEIN Idee-Bezug (AC8) — kein weiteres Spec-Format-Wissen wird hier hinzugefügt
+ * (Nicht-Ziel: Feature/Story/Spec legt ausschließlich der `requirement`-Agent an).
  *
  * @param {object} params
  * @param {unknown} params.draftText  Der vom Chat gelieferte, bereits vom
  *   Owner-Gespräch geschärfte Anforderungstext (idea-specify-chat AC5/AC13).
+ * @param {string|null} [params.area]  Optionale Bereichs-ID (story-idee-bereich-zuordnung AC5).
  * @returns {string}
  */
-export function buildRequirementPrompt({ draftText }) {
+export function buildRequirementPrompt({ draftText, area }) {
   const trimmedDraft = typeof draftText === 'string' ? draftText.trim() : '';
-  return [trimmedDraft, NO_QUESTIONS_HINT].filter((part) => part !== '').join('\n\n');
+  const hints = [trimmedDraft, NO_QUESTIONS_HINT];
+  if (area) {
+    hints.push(`Ordne die anzulegende Story/das Feature dem Bereich \`${area}\` zu.`);
+  }
+  return hints.filter((part) => part !== '').join('\n\n');
 }
 
 /**
@@ -242,9 +247,10 @@ export class StorySpecifyFinalizer {
    * @param {unknown} params.draftText
    * @param {string} [params.projectSlug] - Registry-Schlüssel (AC3). Ohne Slug
    *   wird nur die jobId-Registry gefüllt (kein projekt-keyed Eintrag).
+   * @param {string|null} [params.area] - Optionale Bereichs-ID (story-idee-bereich-zuordnung AC5).
    * @returns {Promise<{ ok: true, jobId: string } | { ok: false, reason: 'locked' }>}
    */
-  async start(projectPath, { draftText, projectSlug }) {
+  async start(projectPath, { draftText, projectSlug, area }) {
     // AC1: read-only Baseline-Snapshot VOR dem Spawn. Schlägt er fehl, wird der
     // Job als `baselineFailed` markiert → der No-Op-Diff degradiert später
     // sicher zu `done` (KEIN Crash, KEIN blockierter Lauf).
@@ -257,7 +263,7 @@ export class StorySpecifyFinalizer {
       console.error('[StorySpecifyFinalizer] Baseline-Snapshot fehlgeschlagen (degradiert zu done):', err.message);
     }
 
-    const prompt = buildRequirementPrompt({ draftText });
+    const prompt = buildRequirementPrompt({ draftText, area });
     const result = this.#runner.start(projectPath, { command: REQUIREMENT_COMMAND, args: [prompt] });
     if (result.ok) {
       this.#jobMeta.set(result.jobId, { projectPath, baselineSnapshot, baselineFailed });

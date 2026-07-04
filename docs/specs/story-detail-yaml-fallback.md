@@ -2,6 +2,7 @@
 id: story-detail-yaml-fallback
 title: Story-Detail — Fallback aus Board-YAML, robustes ID-Matching, klarer Leer-Zustand
 status: draft
+area: board
 version: 1
 ---
 

@@ -2,6 +2,7 @@
 id: plugin-auto-update
 title: Plugin-Auto-Update beim Container-Boot — Fabrik-Werkzeuge bei jedem Start aktualisieren
 status: draft
+area: deployment
 version: 1
 ---
 

@@ -2,6 +2,7 @@
 id: headless-parallel-drain
 title: Headless-Parallel-Drain — Nacht-/flow-Läufe als parallele `claude -p`-Prozesse
 status: active
+area: nachtwaechter
 version: 1
 ---
 

@@ -2,6 +2,7 @@
 id: headless-reconcile-runner
 title: Headless-Reconcile-Runner — echter `claude -p`-Job statt geratenes PTY-Ende
 status: draft
+area: spezifikation
 version: 1
 ---
 

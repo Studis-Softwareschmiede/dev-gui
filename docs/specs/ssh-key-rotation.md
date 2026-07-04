@@ -2,6 +2,7 @@
 id: ssh-key-rotation
 title: Vollautomatische, additive SSH-Key-Rotation auf laufendem VPS (rollback-sicher)
 status: draft
+area: vps
 version: 1
 ---
 

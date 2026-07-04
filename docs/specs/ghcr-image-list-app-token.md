@@ -2,6 +2,7 @@
 id: ghcr-image-list-app-token
 title: GHCR-Image-Liste zuverlässig unter dem GitHub-App-Token (Listen-Pfad reparieren)
 status: draft
+area: deployment
 version: 1
 ---
 

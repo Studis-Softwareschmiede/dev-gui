@@ -51,6 +51,7 @@
  */
 
 import { Router } from 'express';
+import { sanitizeAreaId, BoardWriterError } from './BoardWriter.js';
 
 /** Valid slug characters: alphanumeric, dash, underscore, dot. No leading slash. */
 const SLUG_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
@@ -61,6 +62,14 @@ const SLUG_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
  * typischerweise wenige Sätze), aber hart begrenzt.
  */
 const MAX_TEXT_LENGTH = 10_000;
+
+/**
+ * In-Memory-Store für area-Zuordnungen pro Chat-Session
+ * (story-idee-bereich-zuordnung AC5) — für die Durchreichung des area-Hinweises
+ * vom start zum finalize.
+ * @type {Map<string, string|null>} sessionId → area-id (or null if not set)
+ */
+const sessionAreaMap = new Map();
 
 /**
  * Extrahiert identity-String aus req.identity (AccessGuard-Claim) — analog
@@ -111,7 +120,7 @@ export function storySpecifyRouter({ boardAggregator, chatService, finalizer, au
       return res.status(500).json({ error: 'Chat konnte nicht gestartet werden.' });
     }
 
-    const { initialText } = req.body ?? {};
+    const { initialText, area } = req.body ?? {};
 
     // Validierung VOR dem Audit-Eintrag (Audit-First-Konvention).
     if (typeof initialText !== 'string' || initialText.trim() === '') {
@@ -121,10 +130,34 @@ export function storySpecifyRouter({ boardAggregator, chatService, finalizer, au
       return res.status(400).json({ field: 'initialText', message: `initialText must be at most ${MAX_TEXT_LENGTH} characters` });
     }
 
+    // AC5: Bereichs-Validierung (story-idee-bereich-zuordnung AC5, AC6)
+    let sanitizedArea = null;
+    if (area != null) {
+      try {
+        sanitizedArea = sanitizeAreaId(area);
+      } catch (err) {
+        if (err instanceof BoardWriterError) {
+          return res.status(400).json({ field: 'area', message: err.message });
+        }
+        throw err;
+      }
+    }
+
     const projects = await boardAggregator.getIndex();
     const project = projects.find((p) => p.slug === slug);
     if (!project || project.error) {
       return res.status(404).json({ error: 'Projekt nicht gefunden.' });
+    }
+
+    // AC6: Zusätzliche Validierung gegen board/areas.yaml (wenn area gesetzt ist)
+    if (sanitizedArea) {
+      const areaExists = (project.areas ?? []).some((a) => a.id === sanitizedArea);
+      if (!areaExists) {
+        return res.status(400).json({
+          field: 'area',
+          message: `Bereich '${sanitizedArea}' existiert nicht.`,
+        });
+      }
     }
 
     // Audit-First (genau EIN Eintrag je akzeptiertem Turn): schlägt record()
@@ -150,6 +183,11 @@ export function storySpecifyRouter({ boardAggregator, chatService, finalizer, au
     if (!result.ok) {
       // 502 — claude -p nicht verfügbar oder Fehler (secret-frei, kein stderr-Leak)
       return res.status(502).json({ error: result.message ?? 'claude -p unavailable or failed' });
+    }
+
+    // AC5: area im sessionAreaMap speichern für später (beim finalize)
+    if (sanitizedArea) {
+      sessionAreaMap.set(result.sessionId, sanitizedArea);
     }
 
     return res.status(201).json({ sessionId: result.sessionId, reply: result.reply });
@@ -296,9 +334,12 @@ export function storySpecifyRouter({ boardAggregator, chatService, finalizer, au
     // projekt-keyed SYNCHRON mit `running` vor dem Spawn — dafür braucht er den
     // (bereits SLUG_RE-validierten) `slug` als Registry-Schlüssel. `start()` ist
     // async (read-only Baseline-Snapshot vor dem Spawn, AC1) → hier awaiten.
+    // AC5: area aus sessionAreaMap lesen (gespeichert beim start)
+    const area = sessionAreaMap.get(sessionId);
     const result = await finalizer.start(project.repo_path, {
       draftText: sessionState.draftText,
       projectSlug: slug,
+      area,
     });
 
     if (!result.ok) {

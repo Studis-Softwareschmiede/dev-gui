@@ -2,6 +2,7 @@
 id: story-detail-ansicht
 title: Story-Detail-Ansicht — Zeiten, Agenten-Flow, Schätzung vs. Ist
 status: draft
+area: board
 version: 1
 ---
 

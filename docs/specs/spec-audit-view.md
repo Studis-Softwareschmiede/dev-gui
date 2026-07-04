@@ -2,6 +2,7 @@
 id: spec-audit-view
 title: Audit-Spec-Anzeige — Button „Audit-Spec anzeigen" + Anzeige der spec-audit.md
 status: draft
+area: spezifikation
 version: 1
 ---
 

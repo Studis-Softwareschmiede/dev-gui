@@ -2,6 +2,7 @@
 id: fswatcher-crash-hardening
 title: FSWatcher-Crash-Härtung (Server-Stabilität)
 status: active
+area: fabrik-arbeiten
 version: 1
 ---
 

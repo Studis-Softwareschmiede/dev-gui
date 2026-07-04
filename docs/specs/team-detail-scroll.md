@@ -2,6 +2,7 @@
 id: team-detail-scroll
 title: Team-Ansicht — Detail-Pane scrollbar (UX-Bugfix)
 status: draft
+area: retro-lernen
 version: 2
 ---
 

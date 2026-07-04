@@ -2,6 +2,7 @@
 id: view-vps
 title: VPS-Ansicht — Maschinen-Übersicht + Lifecycle-UI (Multi-Provider)
 status: draft
+area: vps
 version: 2
 ---
 

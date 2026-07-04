@@ -2,6 +2,7 @@
 id: headless-manual-drain
 title: Manueller „Board abarbeiten"-Knopf läuft headless (claude -p) + Cost-Mode am Button
 status: draft
+area: fabrik-arbeiten
 version: 1
 spec_format: use-case-2.0
 ---

@@ -2,6 +2,7 @@
 id: terminal-frontend
 title: Terminal-Frontend (xterm.js Live-Pane)
 status: draft
+area: fabrik-arbeiten
 version: 1
 ---
 

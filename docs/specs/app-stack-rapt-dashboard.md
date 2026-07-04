@@ -2,6 +2,7 @@
 id: app-stack-rapt-dashboard
 title: App-Stack rapt_dashboard — Compose (web_rapt + api_proxy[rapt] + Lean-Supabase + db-init + Labels) (Etappe 3)
 status: draft
+area: deployment
 version: 1
 ---
 

@@ -2,6 +2,7 @@
 id: reconcile-inline-feedback
 title: Reconcile inline — auf dem Spezifikation-Reiter bleiben, Lauf halten, Fortschritt + Audit-Refresh
 status: draft
+area: spezifikation
 version: 1
 ---
 

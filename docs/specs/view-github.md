@@ -2,6 +2,7 @@
 id: view-github
 title: GitHub-Ansicht (Grundgerüst)
 status: draft
+area: fabrik-arbeiten
 version: 1
 ---
 

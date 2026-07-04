@@ -2,6 +2,7 @@
 id: questions-pending-notification
 title: "Fragen-offen-Push (questions_pending) — ein ntfy-Push bei needs-answers eines Obsidian-Ingest-Laufs"
 status: active
+area: benachrichtigungen
 version: 1
 ---
 

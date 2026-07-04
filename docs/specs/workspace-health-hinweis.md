@@ -2,6 +2,7 @@
 id: workspace-health-hinweis
 title: Workspace-Health — Deploy-Diagnose & Hinweis bei Fehlkonfiguration
 status: active
+area: deployment
 version: 1
 ---
 

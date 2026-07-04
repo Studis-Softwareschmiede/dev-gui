@@ -2,6 +2,7 @@
 id: projekt-cockpit-navigation
 title: Projekt-Cockpit — projekt-zentrierte Fabrik-Navigation (Repo-Übersicht → Projekt → Aktion)
 status: active
+area: fabrik-arbeiten
 version: 2
 ---
 

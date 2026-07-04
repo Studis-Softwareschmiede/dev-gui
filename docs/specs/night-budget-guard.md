@@ -2,6 +2,7 @@
 id: night-budget-guard
 title: Nacht-Budget-Schutz — Drain pausiert statt zu eskalieren bei Token-Limit/Budget
 status: active
+area: nachtwaechter
 version: 1
 ---
 

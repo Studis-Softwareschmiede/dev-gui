@@ -2,6 +2,7 @@
 id: board-abarbeitungs-strategie
 title: Board-Abarbeitungs-Strategie — Vorab-Analyse, Parallelität, Feature-Branches
 status: draft
+area: fabrik-arbeiten
 version: 1
 ---
 

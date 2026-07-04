@@ -2,6 +2,7 @@
 id: claude-auth-health
 title: Claude-Auth-Health — Ablauf der Container-Anmeldung erkennen, bevor ein Job startet
 status: draft
+area: einstellungen
 version: 1
 ---
 

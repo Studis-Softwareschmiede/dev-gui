@@ -2,6 +2,7 @@
 id: obsidian-project-intake
 title: „Aus Obsidian-Notizen" — dritte Option im Neues-Projekt-Flow, Trigger /agent-flow:from-notes
 status: active
+area: obsidian
 version: 1
 spec_format: use-case-2.0
 ---

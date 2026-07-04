@@ -2,6 +2,7 @@
 id: workspace-repos
 title: Workspace-Übersicht (lokale Klone — Listing, Pull, Löschen)
 status: draft
+area: einstellungen
 version: 1
 ---
 

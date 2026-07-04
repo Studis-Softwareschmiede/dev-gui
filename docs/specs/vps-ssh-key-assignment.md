@@ -2,6 +2,7 @@
 id: vps-ssh-key-assignment
 title: SSH-Key-Zuordnung root/alex für VPS-Create (aus settings-ssh-keys)
 status: draft
+area: vps
 version: 2
 ---
 

@@ -2,6 +2,7 @@
 id: credential-runtime-unlock
 title: Runtime-Unlock-Zustandsmodell des Credential-Stores (gesperrt → entsperrt)
 status: draft
+area: einstellungen
 version: 3
 ---
 

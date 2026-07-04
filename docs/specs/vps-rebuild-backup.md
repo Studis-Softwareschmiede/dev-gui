@@ -2,6 +2,7 @@
 id: vps-rebuild-backup
 title: VPS Rebuild + Backup (Platzhalter / Folge-Capability)
 status: draft
+area: vps
 version: 1
 ---
 

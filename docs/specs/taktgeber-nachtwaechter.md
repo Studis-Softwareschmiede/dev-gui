@@ -2,6 +2,7 @@
 id: taktgeber-nachtwaechter
 title: Taktgeber / Nachtwächter — Boards automatisch leerziehen (ProjectDrain-Engine + Nachtfenster)
 status: active
+area: nachtwaechter
 version: 3
 ---
 

@@ -2,6 +2,7 @@
 id: flow-trigger
 title: Flow-Trigger (Slash-Befehl in die Session injizieren)
 status: draft
+area: fabrik-arbeiten
 version: 4
 ---
 

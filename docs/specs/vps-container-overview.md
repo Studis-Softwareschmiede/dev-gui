@@ -2,6 +2,7 @@
 id: vps-container-overview
 title: Container-Übersicht pro VPS — laufende Container in dev-gui sehen + steuern (ersetzt Portainer)
 status: draft
+area: deployment
 version: 1
 ---
 

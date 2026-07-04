@@ -30,6 +30,9 @@ branch: feat/S-277-drain-done-push
 pr: null
 blocked_reason: null
 created_at: '2026-07-03T06:48:52Z'
-updated_at: '2026-07-03T10:51:35Z'
+updated_at: '2026-07-04T10:07:07.700Z'
 done_at: '2026-07-03T10:50:22Z'
 tok_est: null
+area: '''benachrichtigungen'''
+archived: true
+archived_at: '2026-07-04T10:07:07.700Z'

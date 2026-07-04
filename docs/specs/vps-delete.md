@@ -2,6 +2,7 @@
 id: vps-delete
 title: VPS löschen (DELETE + Tunnel-Cleanup + UI)
 status: draft
+area: deployment
 version: 2
 ---
 

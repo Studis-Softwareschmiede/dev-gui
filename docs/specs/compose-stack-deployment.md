@@ -2,6 +2,7 @@
 id: compose-stack-deployment
 title: Compose-Stack-Deployment — Ablösung von webPage_infra durch lose gekoppelte, pro-App deploybare Stacks
 status: draft
+area: deployment
 version: 1
 ---
 

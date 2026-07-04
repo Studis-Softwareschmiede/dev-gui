@@ -2,6 +2,7 @@
 id: retro-auto-trigger
 title: Automatischer Retro-Trigger nach Board-Läufen + globaler Ein/Aus-Schalter
 status: active
+area: fabrik-arbeiten
 version: 1
 ---
 

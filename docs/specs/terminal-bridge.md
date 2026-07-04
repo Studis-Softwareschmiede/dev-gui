@@ -2,6 +2,7 @@
 id: terminal-bridge
 title: Terminal-Bridge (PTY ↔ interaktive Claude-Session)
 status: draft
+area: fabrik-arbeiten
 version: 2
 ---
 

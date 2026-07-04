@@ -2,6 +2,7 @@
 id: ideen-inbox
 title: Ideen-Inbox / Status „Idee" — Quick-Capture + interaktive Besprechung zur Anforderung
 status: active
+area: board
 version: 2
 ---
 

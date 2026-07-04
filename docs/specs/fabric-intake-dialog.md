@@ -2,6 +2,7 @@
 id: fabric-intake-dialog
 title: Fabric-Intake-Dialog (Idee/Änderung erfassen → Spec/Board → Board abarbeiten)
 status: draft
+area: fabrik-arbeiten
 version: 2
 ---
 

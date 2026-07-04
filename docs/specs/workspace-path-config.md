@@ -2,6 +2,7 @@
 id: workspace-path-config
 title: Workspace-Pfad konfigurierbar (Settings-getriebener Workspace-Root)
 status: draft
+area: einstellungen
 version: 1
 ---
 

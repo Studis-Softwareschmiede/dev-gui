@@ -2,6 +2,7 @@
 id: settings-shell
 title: Settings-Ansicht — Zahnrad-Einstieg & Integrations-Sektionen (Grundgerüst)
 status: draft
+area: einstellungen
 version: 1
 ---
 

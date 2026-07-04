@@ -2,6 +2,7 @@
 id: audit-spec-main-pane
 title: Audit-Spec-Logbuch in der Haupt-Inhaltsfläche (statt in der schmalen Sidebar)
 status: draft
+area: spezifikation
 version: 1
 ---
 

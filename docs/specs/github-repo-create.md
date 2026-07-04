@@ -2,6 +2,7 @@
 id: github-repo-create
 title: GitHub-Repository anlegen (Schreibpfad, GitHubWriter)
 status: draft
+area: fabrik-arbeiten
 version: 1
 ---
 

@@ -2,6 +2,7 @@
 id: webpage-infra-decommission
 title: webPage_infra abwickeln — Bausteine in App-Repos/dev-gui überführen, Repo deprecaten (Etappe 5)
 status: draft
+area: deployment
 version: 1
 ---
 

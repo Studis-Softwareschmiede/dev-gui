@@ -2,6 +2,7 @@
 id: idea-specify-background-status
 title: Idee spezifizieren — sichtbarer Status des Hintergrund-Laufs (Karten-Badge + Reopen-Inline)
 status: draft
+area: fabrik-arbeiten
 version: 1
 ---
 

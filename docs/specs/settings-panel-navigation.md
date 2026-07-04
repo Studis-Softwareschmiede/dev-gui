@@ -2,6 +2,7 @@
 id: settings-panel-navigation
 title: Settings-Panel — linke Menü-Navigation (Kategorien statt Scroll-Monolith)
 status: active
+area: einstellungen
 version: 1
 ---
 

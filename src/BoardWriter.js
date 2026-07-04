@@ -174,6 +174,10 @@ export const ALLOWED_FIELDS = Object.freeze([
   // unverändert.
   'archived',
   'archived_at',
+  // bereichs-migration-dev-gui AC2/AC3 (S-296) — Bereichs-Stempel für das
+  // Migrations-Skript scripts/migrate-areas.mjs (byte-schonender area-Patch
+  // auf Feature-/Story-YAMLs; Create-Pfad createIdea() schreibt area separat).
+  'area',
 ]);
 
 /** Story-ID-Format (z.B. "S-191") — eng gefasst, kein Pfad-Zeichen erlaubt. */
@@ -218,6 +222,11 @@ const BODY_CONTROL_CHAR_RE = /[\x00-\x09\x0b\x0c\x0e-\x1f\x7f\u2028\u2029]/;
  * `next_story_id`-Zähler.
  */
 const MAX_ID_ALLOCATION_RETRIES = 10;
+
+/**
+ * Bereichs-ID-Format (story-idee-bereich-zuordnung AC6): alphanumeric + dash/underscore.
+ */
+const AREA_ID_RE = /^[a-z0-9][a-z0-9_-]*$/i;
 
 /** Längenlimit für `resolved_note` (ideen-inbox AC6/AC8, S-200) — optionaler,
  *  einzeiliger Verweis auf Spec/Kontext der Auflösung. */
@@ -963,9 +972,9 @@ export class BoardWriter {
   }
 
   /**
-   * Quick-Capture-Create-Pfad (ideen-inbox AC3/AC4/AC7/AC8): legt eine neue
-   * `board/stories/S-<n>.yaml` mit `status: Idee`, `title` und optional `notes`
-   * (Body) an — OHNE `spec`, OHNE `implements`. Die Story-ID wird atomar aus
+   * Quick-Capture-Create-Pfad (idien-inbox AC3/AC4/AC7/AC8, story-idee-bereich-zuordnung AC4):
+   * legt eine neue `board/stories/S-<n>.yaml` mit `status: Idee`, `title` und optional `notes`
+   * (Body) und `area` (Bereichs-Zuordnung) an — OHNE `spec`, OHNE `implements`. Die Story-ID wird atomar aus
    * `board/board.yaml` (`next_story_id`) allokiert + hochgezählt. Token-frei
    * (kein Agenten-Aufruf).
    *
@@ -986,21 +995,24 @@ export class BoardWriter {
    *   ≤ `IDEA_TITLE_MAX_LENGTH`, keine Steuerzeichen/Zeilenumbrüche.
    * @param {string} [params.body]  Optionaler mehrzeiliger Stichwort-Body
    *   (→ `notes`), ≤ `IDEA_BODY_MAX_LENGTH`, keine Steuerzeichen außer `\n`.
+   * @param {string} [params.area]  Optionale Bereichs-ID (story-idee-bereich-zuordnung AC4),
+   *   bereits sanitisiert. Wenn gesetzt, wird das neue Story-YAML das Feld `area: <area-id>`
+   *   tragen; ohne `area` bleibt das Feld leer (kein Feld oder `null`-Konsistenz).
    * @param {string} [params.now]  ISO-8601-Zeitstempel für `created_at`/`updated_at`
    *   (Default: `new Date().toISOString()`; injizierbar für deterministische Tests).
    * @returns {Promise<{ storyId: string, filePath: string }>}
    * @throws {BoardWriterError}
    */
-  async createIdea({ projectSlug, title, body, now }) {
+  async createIdea({ projectSlug, title, body, area, now }) {
     // Eingabe-Validierung VOR der Mutex-Warteschlange (billig, kein IO — schnell
     // scheitern statt einen invaliden Aufruf in die Warteschlange zu stellen).
     // Reine Funktion (siehe unten) — der Router nutzt dieselbe Funktion VOR dem
     // Audit-Eintrag, damit ungültige Eingaben nie auditiert werden (Audit-First
     // gilt nur für tatsächlich versuchte Aktionen, nicht für 400-Validierung).
-    const { trimmedTitle, normalizedBody, timestamp } = validateIdeaInput({ title, body, now });
+    const { trimmedTitle, normalizedBody, sanitizedArea, timestamp } = validateIdeaInput({ title, body, area, now });
 
     const run = this.#createIdeaLock.then(() =>
-      this._createIdeaLocked({ projectSlug, trimmedTitle, normalizedBody, timestamp }),
+      this._createIdeaLocked({ projectSlug, trimmedTitle, normalizedBody, sanitizedArea, timestamp }),
     );
     // Lock-Chain läuft immer weiter, auch wenn dieser Aufruf scheitert — sonst
     // blockiert ein Fehlschlag alle folgenden createIdea()-Aufrufe für immer.
@@ -1019,12 +1031,13 @@ export class BoardWriter {
    * @param {string} params.projectSlug
    * @param {string} params.trimmedTitle
    * @param {string|null} params.normalizedBody
+   * @param {string|null} params.sanitizedArea
    * @param {string} params.timestamp
    * @returns {Promise<{ storyId: string, filePath: string }>}
    * @throws {BoardWriterError}
    * @private
    */
-  async _createIdeaLocked({ projectSlug, trimmedTitle, normalizedBody, timestamp }) {
+  async _createIdeaLocked({ projectSlug, trimmedTitle, normalizedBody, sanitizedArea, timestamp }) {
     const repoPath = await this._resolveProjectPath(projectSlug);
     const boardDir = join(repoPath, 'board');
     const storiesDir = join(boardDir, 'stories');
@@ -1064,6 +1077,7 @@ export class BoardWriter {
         storyId,
         title: trimmedTitle,
         notes: normalizedBody,
+        area: sanitizedArea,
         timestamp,
       });
 
@@ -1318,11 +1332,12 @@ export class BoardWriter {
  * @param {object} params
  * @param {unknown} params.title
  * @param {unknown} [params.body]
+ * @param {unknown} [params.area]  Optionale Bereichs-ID (story-idie-bereich-zuordnung AC4)
  * @param {unknown} [params.now]
- * @returns {{ trimmedTitle: string, normalizedBody: string|null, timestamp: string }}
+ * @returns {{ trimmedTitle: string, normalizedBody: string|null, sanitizedArea: string|null, timestamp: string }}
  * @throws {BoardWriterError}
  */
-export function validateIdeaInput({ title, body, now }) {
+export function validateIdeaInput({ title, body, area, now }) {
   if (typeof title !== 'string' || title.trim() === '') {
     throw new BoardWriterError('title darf nicht leer sein', 'invalid-title');
   }
@@ -1364,7 +1379,14 @@ export function validateIdeaInput({ title, body, now }) {
     throw new BoardWriterError(`Ungültiges Zeitstempel-Format: '${timestamp}'`, 'invalid-value');
   }
 
-  return { trimmedTitle, normalizedBody, timestamp };
+  // Bereichs-ID validieren (story-idee-bereich-zuordnung AC4). Der Router hat bereits
+  // gegen board/areas.yaml geprüft, wir sanitisieren nur das Format hier.
+  let sanitizedArea = null;
+  if (area != null) {
+    sanitizedArea = sanitizeAreaId(area);
+  }
+
+  return { trimmedTitle, normalizedBody, sanitizedArea, timestamp };
 }
 
 /**
@@ -1429,17 +1451,19 @@ export function validateResolveInput({ resolvedStoryIds, resolvedNote } = {}) {
 /**
  * Formatiert den Inhalt einer neuen `Idee`-Story-Datei (ideen-inbox AC3, Story-
  * Schema-Tabelle): `id`, `status: Idee`, `title` (single-quoted), optional
- * `notes` (Literal-Block-Skalar `|`) und `created_at`/`updated_at`. Bewusst
+ * `notes` (Literal-Block-Skalar `|`), optional `area` (Bereichs-Zuordnung,
+ * story-idee-bereich-zuordnung AC4) und `created_at`/`updated_at`. Bewusst
  * OHNE `spec`/`implements` (Contract: "nicht gesetzt").
  *
  * @param {object} params
  * @param {string} params.storyId
  * @param {string} params.title  Bereits getrimmt + validiert (kein Steuerzeichen).
  * @param {string|null} params.notes  Bereits normalisiert + validiert, oder null.
+ * @param {string|null} params.area  Optionale Bereichs-ID, bereits sanitisiert, oder null.
  * @param {string} params.timestamp  ISO-8601, für created_at UND updated_at.
  * @returns {string}
  */
-function _formatIdeaStoryYaml({ storyId, title, notes, timestamp }) {
+function _formatIdeaStoryYaml({ storyId, title, notes, area, timestamp }) {
   const lines = [`id: ${storyId}`, 'status: Idee', `title: ${_yamlSingleQuote(title)}`];
 
   if (notes) {
@@ -1449,8 +1473,42 @@ function _formatIdeaStoryYaml({ storyId, title, notes, timestamp }) {
     }
   }
 
+  // Bereichs-Zuordnung (story-idee-bereich-zuordnung AC4): additiv-optional,
+  // byte-schonend (keine area wenn null). Unquoted (analog zu story-Status).
+  if (area) {
+    lines.push(`area: ${area}`);
+  }
+
   lines.push(`created_at: ${_yamlSingleQuote(timestamp)}`);
   lines.push(`updated_at: ${_yamlSingleQuote(timestamp)}`);
 
   return `${lines.join('\n')}\n`;
+}
+
+/**
+ * Sanitisiert und validiert eine Bereichs-ID (story-idee-bereich-zuordnung AC6).
+ * Prüft Format, aber NICHT gegen board/areas.yaml (das macht der Router).
+ *
+ * @param {unknown} areaId
+ * @returns {string|null}  sanitized areaId, oder null wenn leer
+ * @throws {BoardWriterError} bei ungültigem Format
+ */
+export function sanitizeAreaId(areaId) {
+  if (areaId == null || areaId === '') {
+    return null;
+  }
+  if (typeof areaId !== 'string') {
+    throw new BoardWriterError('area muss ein String sein', 'invalid-area');
+  }
+  const trimmed = areaId.trim();
+  if (trimmed === '') {
+    return null;
+  }
+  if (!AREA_ID_RE.test(trimmed)) {
+    throw new BoardWriterError(
+      'area ID hat ungültiges Format (alphanumeric + dash/underscore)',
+      'invalid-area',
+    );
+  }
+  return trimmed;
 }
