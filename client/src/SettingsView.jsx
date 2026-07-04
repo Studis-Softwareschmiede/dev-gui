@@ -770,7 +770,28 @@ export function SettingsView({ onNavigate, fetchFn }) {
             Hover/Fokus) leben als CSS-Klassen in client/index.html (D9/D20-Muster). */}
         <div className="settings-layout">
           <nav aria-label="Einstellungs-Kategorien" className="settings-nav">
-            <div role="tablist" aria-orientation="vertical" className="settings-tablist">
+            <div
+              role="tablist"
+              aria-orientation="vertical"
+              className="settings-tablist"
+              onKeyDown={(e) => {
+                // D12 (S-269): Pfeiltasten bewegen UND aktivieren sofort (automatic
+                // activation); Home/End springen zum ersten/letzten Eintrag. Beide
+                // Achsen akzeptiert (vertikale Nav ab 1024px, horizontale Leiste
+                // darunter — aria-orientation wechselt nicht dynamisch).
+                const idx = SETTINGS_CATEGORIES.findIndex((c) => c.slug === activeCategory);
+                let next = null;
+                if (e.key === 'ArrowDown' || e.key === 'ArrowRight') next = (idx + 1) % SETTINGS_CATEGORIES.length;
+                else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') next = (idx - 1 + SETTINGS_CATEGORIES.length) % SETTINGS_CATEGORIES.length;
+                else if (e.key === 'Home') next = 0;
+                else if (e.key === 'End') next = SETTINGS_CATEGORIES.length - 1;
+                if (next === null) return;
+                e.preventDefault();
+                const slug = SETTINGS_CATEGORIES[next].slug;
+                setActiveCategory(slug); // aktiviert sofort (+ Deep-Link-Hash, S-268)
+                document.getElementById(`settings-tab-${slug}`)?.focus(); // Roving-Fokus
+              }}
+            >
               {SETTINGS_CATEGORIES.map(({ slug, label }) => {
                 const selected = activeCategory === slug;
                 return (

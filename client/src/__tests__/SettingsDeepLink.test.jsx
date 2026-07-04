@@ -18,7 +18,7 @@ const { parseHashFull } = await import('../useHashRouter.js');
 function makeFetch() {
   // Minimal-Mock: Credentials-Liste ist ein Array, alles andere ein Objekt.
   return jest.fn(async (url) => {
-    const isList = /\/api\/settings\/credentials(\?|$)/.test(String(url));
+    const isList = /\/api\/settings\/(credentials|ssh-keys)(\?|$)/.test(String(url));
     return { ok: true, status: 200, json: async () => (isList ? [] : {}) };
   });
 }
