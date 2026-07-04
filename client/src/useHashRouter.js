@@ -77,6 +77,14 @@ export function parseHashFull(hash) {
     return { view: 'factory', factoryRepo: repo };
   }
 
+  // Settings route with optional category segment: settings/<slug>
+  // (settings-panel-navigation D13/D14, S-268 — analog zur factory-Route).
+  if (lower === 'settings' || lower.startsWith('settings/')) {
+    const rest = raw.slice('settings'.length);
+    const category = rest.startsWith('/') && rest.length > 1 ? rest.slice(1).toLowerCase() : null;
+    return { view: 'settings', factoryRepo: null, settingsCategory: category };
+  }
+
   // Standard routes
   if (VIEWS.includes(lower)) {
     return { view: lower, factoryRepo: null };

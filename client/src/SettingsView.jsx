@@ -60,6 +60,13 @@ export const SETTINGS_CATEGORIES = [
   { slug: 'integrationen',      label: 'Integrationen' },
   { slug: 'diverses',           label: 'Diverses' },
 ];
+
+/** #/settings/<slug> -> gültiger Kategorie-Slug; sonst 'workspace' (D13). */
+export function parseSettingsHash(hash) {
+  const m = /^#\/settings\/([a-z-]+)\/?$/.exec(String(hash ?? '').toLowerCase());
+  const slug = m?.[1] ?? null;
+  return SETTINGS_CATEGORIES.some((c) => c.slug === slug) ? slug : 'workspace';
+}
 import {
   fetchCredentialStatus,
   postCredentialUnlock,
@@ -578,7 +585,25 @@ export function SettingsView({ onNavigate, fetchFn }) {
   const [credentialStatus, setCredentialStatus] = useState(null); // null = noch nicht geladen
   const [showUnlockDialog, setShowUnlockDialog] = useState(false);
   // S-267 (D11): genau EINE sichtbare Kategorie; Default workspace (D13).
-  const [activeCategory, setActiveCategory] = useState('workspace');
+  // S-268 (D13/D14): Deep-Link #/settings/<slug> — Initial aus dem Hash,
+  // Tab-Klick schreibt den Hash (Browser-Historie -> Vor/Zurück wechselt die
+  // Kategorie), hashchange synct den State; unbekanntes Segment -> workspace.
+  const [activeCategory, setActiveCategoryState] = useState(() => parseSettingsHash(window.location.hash));
+  const setActiveCategory = useCallback((slug) => {
+    const next = SETTINGS_CATEGORIES.some((c) => c.slug === slug) ? slug : 'workspace';
+    setActiveCategoryState(next);
+    const hash = `#/settings/${next}`;
+    if (window.location.hash !== hash) window.location.hash = hash; // D14: echte Historie
+  }, []);
+  useEffect(() => {
+    const onHash = () => {
+      const h = window.location.hash;
+      if (!/^#\/settings(\/|$)/.test(h)) return; // fremde Views nicht anfassen
+      setActiveCategoryState(parseSettingsHash(h));
+    };
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
 
   // AC1/AC10: Credential-Status laden (Sichtbarkeits-Steuerung für Unlock-Bereich)
   const reloadCredentialStatus = useCallback(async () => {
