@@ -759,6 +759,60 @@ export function BoardView({ onNavigate: _onNavigate, lockedProject, onOpenSpec }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showArchived]);
 
+  // ─── LIVE: SSE-Abonnent GET /api/board/events (board-live-sse AC13–AC17) ─────
+  // Genau EINE EventSource pro Mount (AC13) — der Mount-Effekt hat bewusst KEINE
+  // Abhängigkeiten; alles Veränderliche (angezeigter Slug, Modus, Re-Fetch-
+  // Callback) fließt über Refs hinein, damit Re-Render nie eine zweite
+  // Verbindung öffnet. Ein Event für das AKTUELL angezeigte Projekt löst GENAU
+  // EINEN Re-Fetch über den BESTEHENDEN Ladepfad aus (Cockpit: reloadToken-
+  // Bump; Standalone: handleProjectSelect) — AC14. Fremde Slugs oder keine
+  // Auswahl → kein Re-Fetch (AC15). Verbindungsfehler degradieren still
+  // (Reconnect ist EventSource-Standard, manueller Refresh bleibt Fallback —
+  // AC16). Überlappende Ladevorgänge verhindert der bestehende cancelled-Guard
+  // des Ladepfads (AC17).
+  const sseDisplayedSlugRef = useRef(null);
+  const sseStandaloneRef = useRef(isStandalone);
+  const sseSelectRef = useRef(handleProjectSelect);
+  useEffect(() => {
+    sseDisplayedSlugRef.current = isStandalone
+      ? selectedSlug
+      : (projects[0]?.slug ?? projects[0]?.project_slug ?? lockedProject ?? null);
+    sseStandaloneRef.current = isStandalone;
+    sseSelectRef.current = handleProjectSelect;
+  }, [isStandalone, selectedSlug, projects, lockedProject, handleProjectSelect]);
+  // Verbindungs-Schlüssel: nur wenn ein Projekt ANGEZEIGT wird, existiert eine
+  // Verbindung (Standalone-Projektliste ohne Auswahl → keine EventSource, AC15);
+  // Projektwechsel schließt die alte und öffnet eine neue (AC13).
+  const sseKey = isStandalone ? selectedSlug : lockedProject;
+  useEffect(() => {
+    if (!sseKey) return undefined; // kein angezeigtes Projekt → keine Verbindung (AC15)
+    if (typeof EventSource === 'undefined') return undefined; // Umgebung ohne SSE → still degradieren (AC16)
+    let es;
+    try {
+      es = new EventSource('/api/board/events');
+    } catch {
+      return undefined; // AC16: keine Fehlermauer — Board bleibt über manuellen Refresh nutzbar
+    }
+    es.onmessage = (event) => {
+      let slug;
+      try {
+        slug = JSON.parse(event.data)?.slug;
+      } catch {
+        return; // malformte Frames still ignorieren
+      }
+      if (!slug || slug !== sseDisplayedSlugRef.current) return; // AC15
+      if (sseStandaloneRef.current) {
+        sseSelectRef.current(slug); // Standalone: bestehender imperativer Ladepfad
+      } else {
+        setReloadToken((t) => t + 1); // Cockpit: bestehender Load-Effect (AC10-Mechanik)
+      }
+    };
+    // Best-effort-Handler: Fehler nie eskalieren, Verbindung NICHT schließen —
+    // Reconnect übernimmt der EventSource-Standard (AC16).
+    es.onerror = () => {};
+    return () => { es.close(); };
+  }, [sseKey]);
+
   // ─── STANDALONE: back to project list ────────────────────────────────────────
   const handleBackToList = useCallback(() => {
     setSelectedSlug(null);
