@@ -21,6 +21,29 @@
         outline: 2px solid #3b82f6;
         outline-offset: 1px;
       }
+      /* ── Settings-Kategorien-Nav (settings-panel-navigation D4–D9/D18/D20, S-267) ── */
+      .settings-layout { display: flex; flex-direction: column; gap: 16px; }
+      .settings-nav { flex-shrink: 0; }
+      .settings-tablist { display: flex; flex-direction: row; overflow-x: auto; gap: 2px; }
+      .settings-nav-item {
+        display: block; min-height: 44px; padding: 10px 16px;
+        background: transparent; color: #9ca3af;
+        border: none; border-left: 3px solid transparent; border-radius: 6px;
+        font-size: 14px; text-align: left; cursor: pointer; white-space: nowrap;
+      }
+      .settings-nav-item:hover { background: #1e293b; }
+      .settings-nav-item.active {
+        background: #1e293b; color: #e5e7eb; font-weight: 700;
+        border-left: 3px solid #3b82f6;
+      }
+      .settings-nav-item:focus-visible { outline: 2px solid #3b82f6; outline-offset: 1px; }
+      .settings-panel { flex: 1; min-width: 0; }
+      .settings-panel:focus-visible { outline: 2px solid #3b82f6; outline-offset: 1px; }
+      @media (min-width: 1024px) {
+        .settings-layout { flex-direction: row; gap: 24px; }
+        .settings-nav { width: 220px; }
+        .settings-tablist { flex-direction: column; overflow-x: visible; }
+      }
     </style>
   </head>
   <body>

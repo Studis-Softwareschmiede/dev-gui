@@ -741,11 +741,21 @@ describe('settings-shell — AC3: Deep-link and unknown-route fallback', () => {
 
 // ── settings-shell AC4 — Exactly four sections in Settings view ───────────────
 
+
+// S-267: Sektionen leben jetzt in Kategorien — Helfer aktiviert 'Zugänge & Schlüssel'.
+async function openZugaenge(getByRole) {
+  await waitFor(() => {
+    expect(getByRole('main', { name: /einstellungen-ansicht/i })).toBeTruthy();
+  });
+  fireEvent.click(document.getElementById('settings-tab-zugaenge'));
+}
+
 describe('settings-shell — AC4: Settings view sections', () => {
   it('Settings view shows at least four section headings', async () => {
     window.location.hash = '#/settings';
     globalThis.fetch = jest.fn(() => Promise.resolve({ ok: true, json: async () => [] }));
     const { getByRole } = render(React.createElement(AppShell));
+    await openZugaenge(getByRole);
     // h2 section headings — settings-credentials adds sections; expect ≥4
     await waitFor(() => {
       const main = getByRole('main', { name: /einstellungen-ansicht/i });
@@ -759,6 +769,7 @@ describe('settings-shell — AC4: Settings view sections', () => {
     window.location.hash = '#/settings';
     globalThis.fetch = jest.fn(() => Promise.resolve({ ok: true, json: async () => [] }));
     const { getByRole } = render(React.createElement(AppShell));
+    await openZugaenge(getByRole);
     await waitFor(() => {
       const main = getByRole('main', { name: /einstellungen-ansicht/i });
       expect(main.textContent).toMatch(/github/i);
@@ -770,6 +781,7 @@ describe('settings-shell — AC4: Settings view sections', () => {
     window.location.hash = '#/settings';
     globalThis.fetch = jest.fn(() => Promise.resolve({ ok: true, json: async () => [] }));
     const { getByRole } = render(React.createElement(AppShell));
+    await openZugaenge(getByRole);
     await waitFor(() => {
       const main = getByRole('main', { name: /einstellungen-ansicht/i });
       expect(main.textContent).toMatch(/cloudflare/i);
@@ -781,6 +793,7 @@ describe('settings-shell — AC4: Settings view sections', () => {
     window.location.hash = '#/settings';
     globalThis.fetch = jest.fn(() => Promise.resolve({ ok: true, json: async () => [] }));
     const { getByRole } = render(React.createElement(AppShell));
+    await openZugaenge(getByRole);
     await waitFor(() => {
       const main = getByRole('main', { name: /einstellungen-ansicht/i });
       expect(main.textContent).toMatch(/hetzner/i);
@@ -793,6 +806,11 @@ describe('settings-shell — AC4: Settings view sections', () => {
     globalThis.fetch = jest.fn(() => Promise.resolve({ ok: true, json: async () => [] }));
     const { getByRole } = render(React.createElement(AppShell));
     await waitFor(() => {
+      expect(getByRole('main', { name: /einstellungen-ansicht/i })).toBeTruthy();
+    });
+    // S-267: SSH-Keys liegt in der Kategorie „Zugänge & Schlüssel" — Tab aktivieren
+    fireEvent.click(document.getElementById('settings-tab-zugaenge'));
+    await waitFor(() => {
       const main = getByRole('main', { name: /einstellungen-ansicht/i });
       expect(main.textContent).toMatch(/ssh-keys/i);
     });
@@ -803,6 +821,10 @@ describe('settings-shell — AC4: Settings view sections', () => {
     window.location.hash = '#/settings';
     globalThis.fetch = jest.fn(() => Promise.resolve({ ok: true, json: async () => [] }));
     const { getByRole } = render(React.createElement(AppShell));
+    await waitFor(() => {
+      expect(getByRole('main', { name: /einstellungen-ansicht/i })).toBeTruthy();
+    });
+    fireEvent.click(document.getElementById('settings-tab-zugaenge')); // S-267
     await waitFor(() => {
       const main = getByRole('main', { name: /einstellungen-ansicht/i });
       // SSH-Keys section now shows real UI (settings-ssh-keys AC1–AC6 implemented in #46)
