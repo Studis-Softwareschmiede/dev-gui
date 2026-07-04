@@ -53,7 +53,7 @@ describe('AreaSelect (S-291)', () => {
 
   it('AC2 — defaultAreaId gewinnt; leere Liste erzwingt Neuanlage', async () => {
     const onChange = jest.fn();
-    const { container, unmount } = render(React.createElement(AreaSelect, {
+    const { unmount } = render(React.createElement(AreaSelect, {
       projectSlug: 'dev-gui', value: null, onChange, fetchFn: makeFetch(), defaultAreaId: 'vps', idPrefix: 't2',
     }));
     await waitFor(() => { expect(onChange).toHaveBeenCalledWith('vps'); });
