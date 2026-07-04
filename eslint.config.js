@@ -64,6 +64,7 @@ export default [
       },
       globals: {
         window: 'readonly',
+        EventSource: 'readonly',
         document: 'readonly',
         ResizeObserver: 'readonly',
         globalThis: 'readonly',
