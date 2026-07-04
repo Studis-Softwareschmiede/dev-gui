@@ -334,3 +334,32 @@ describe('DocsReader.getRaw — AC3: Pfad-Sicherheit', () => {
     expect(result.error).toBeUndefined();
   });
 });
+
+
+// ── spec-bereichs-filter AC1 (S-295): area-Frontmatter-Durchreichung ──────────
+describe('DocsReader area-Frontmatter (spec-bereichs-filter AC1, S-295)', () => {
+  it('reicht area aus dem Spec-Frontmatter durch; fehlend -> null', async () => {
+    const files = {
+      '/repo/docs/specs/mit-area.md': "---\nid: mit-area\ntitle: Mit\nstatus: active\narea: board\n---\n# x\n",
+      '/repo/docs/specs/ohne-area.md': "---\nid: ohne-area\ntitle: Ohne\nstatus: active\n---\n# y\n",
+    };
+    const reader = new DocsReader({
+      readdir: async (dir, _o) => {
+        if (String(dir).endsWith('docs/specs')) {
+          return Object.keys(files).map((p) => ({ name: p.split('/').pop(), isFile: () => true, isDirectory: () => false }));
+        }
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      },
+      readFile: async (p) => {
+        const hit = files[String(p)];
+        if (hit == null) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+        return hit;
+      },
+    });
+    const entries = await reader.getDocs('/repo');
+    const mit = entries.find((e) => e.id === 'mit-area');
+    const ohne = entries.find((e) => e.id === 'ohne-area');
+    expect(mit.area).toBe('board');
+    expect(ohne.area).toBeNull();
+  });
+});

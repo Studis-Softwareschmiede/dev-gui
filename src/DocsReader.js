@@ -173,6 +173,7 @@ export class DocsReader {
         title: 'README',
         type: 'readme',
         status: null,
+        area: null,
         id: null,
         version: null,
       });
@@ -192,6 +193,7 @@ export class DocsReader {
           title: filenameToTitle(e.name),
           type: inferType(relPath),
           status: null,
+          area: null,
           id: null,
           version: null,
         });
@@ -220,6 +222,8 @@ export class DocsReader {
           title: (typeof fm.title === 'string' && fm.title) ? fm.title : filenameToTitle(e.name),
           type: 'spec',
           status: (typeof fm.status === 'string' && fm.status) ? fm.status : null,
+          // spec-bereichs-filter AC1 (S-295): area-Frontmatter durchreichen; fehlt es -> null.
+          area: (typeof fm.area === 'string' && fm.area) ? fm.area : null,
           id: (typeof fm.id === 'string' && fm.id) ? fm.id : null,
           version: (typeof fm.version === 'number') ? fm.version : null,
         });
@@ -240,6 +244,7 @@ export class DocsReader {
           title: filenameToTitle(e.name),
           type: 'architektur',
           status: null,
+          area: null,
           id: null,
           version: null,
         });

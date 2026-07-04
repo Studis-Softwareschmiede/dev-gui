@@ -274,6 +274,8 @@ const TYPE_LABELS = {
 
 /** Alle Spec-Status-Werte (AC6 Filter). */
 const ALL_SPEC_STATUSES = ['draft', 'active', 'superseded'];
+// spec-bereichs-filter AC2 (S-295): Sentinel fuer „ohne Bereich" im Bereichs-Filter.
+const AREA_NONE = '__ohne_bereich__';
 
 // ── SpecView ──────────────────────────────────────────────────────────────────
 
@@ -320,6 +322,13 @@ export function SpecView({
   const [filterTypes, setFilterTypes]     = useState(() => new Set(ALL_DOC_TYPES));
   /** @type {[Set<string>, Function]} */
   const [filterStatuses, setFilterStatuses] = useState(() => new Set(ALL_SPEC_STATUSES));
+  // ── Bereichs-Filter (spec-bereichs-filter AC2/AC3, S-295) ────────────────────
+  // areas: aus GET …/areas (sortiert nach order); Fehler/leer -> [] und der
+  // Bereichs-Filter bleibt ausgeblendet (AC3-Degradation, Reiter voll nutzbar).
+  // filterAreas: Mehrfachauswahl über area-ids + AREA_NONE („ohne Bereich");
+  // leere Auswahl == alle (AC2).
+  const [areas, setAreas] = useState([]);
+  const [filterAreas, setFilterAreas] = useState(() => new Set());
 
   // ── reconcile-inline-feedback (S-205) AC4: Audit-Reload-Signal ────────────
   // Zähler, der bei jedem Reconcile-Abschluss ("Fertig") hochgezählt wird.
@@ -436,13 +445,18 @@ export function SpecView({
     return docs.filter((d) => {
       // Typ-Filter
       if (!filterTypes.has(d.type)) return false;
+      // Bereichs-Filter (AC2): nur bei Specs, nur wenn Bereiche existieren;
+      // leere Auswahl == alle. Specs ohne area zaehlen als AREA_NONE.
+      if (d.type === 'spec' && areas.length > 0 && filterAreas.size > 0) {
+        if (!filterAreas.has(d.area ?? AREA_NONE)) return false;
+      }
       // Status-Filter: nur bei Specs; andere Typen werden nicht nach Status gefiltert
       if (d.type === 'spec' && d.status) {
         if (!filterStatuses.has(d.status)) return false;
       }
       return true;
     });
-  }, [docs, filterTypes, filterStatuses]);
+  }, [docs, filterTypes, filterStatuses, areas, filterAreas]);
 
   // Gruppierung nach Typ (für Navigation)
   const groupedDocs = useMemo(() => {
@@ -475,6 +489,34 @@ export function SpecView({
     setFilterStatuses((prev) => {
       const next = new Set(prev);
       if (next.has(status)) { next.delete(status); } else { next.add(status); }
+      return next;
+    });
+  }, []);
+
+  // spec-bereichs-filter AC2 (S-295): Bereichsliste laden (read-only, best-effort).
+  useEffect(() => {
+    let cancelled = false;
+    // fetchFn ist optional (Bestands-Konvention: Docs-Load nutzt global fetch).
+    const doFetch = fetchFn ?? (typeof fetch !== 'undefined' ? fetch : null);
+    if (!doFetch) return undefined;
+    doFetch(`/api/board/projects/${encodeURIComponent(projectSlug)}/areas`)
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
+      .then((data) => {
+        if (cancelled) return;
+        const list = Array.isArray(data?.areas) ? data.areas : [];
+        setAreas(list);
+        // Default: alle Bereiche + „ohne Bereich" aktiv (AC2).
+        setFilterAreas(new Set([...list.map((a) => a.id), AREA_NONE]));
+      })
+      .catch(() => { /* AC3: still degradieren — kein Bereichs-Filter, Reiter unverändert */ });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectSlug]);
+
+  const toggleArea = useCallback((areaId) => {
+    setFilterAreas((prev) => {
+      const next = new Set(prev);
+      if (next.has(areaId)) next.delete(areaId); else next.add(areaId);
       return next;
     });
   }, []);
@@ -520,6 +562,9 @@ export function SpecView({
           filterStatuses={filterStatuses}
           onToggleType={toggleType}
           onToggleStatus={toggleStatus}
+          areas={areas}
+          filterAreas={filterAreas}
+          onToggleArea={toggleArea}
         />
 
         {/* Navigations-Baum */}
@@ -1758,7 +1803,7 @@ function NavGroup({ label, entries, activePath, onSelect }) {
  *   onToggleStatus: (status: string) => void,
  * }} props
  */
-function SpecFilterBar({ filterTypes, filterStatuses, onToggleType, onToggleStatus }) {
+function SpecFilterBar({ filterTypes, filterStatuses, onToggleType, onToggleStatus, areas = [], filterAreas = new Set(), onToggleArea = () => {} }) {
   return (
     <div style={styles.filterBar} role="search" aria-label="Doku-Filter">
       {/* Typ-Filter */}
@@ -1808,6 +1853,32 @@ function SpecFilterBar({ filterTypes, filterStatuses, onToggleType, onToggleStat
           })}
         </div>
       </fieldset>
+
+      {/* Bereichs-Filter (spec-bereichs-filter AC2/AC3/AC4, S-295) — nur wenn Bereiche existieren */}
+      {areas.length > 0 && (
+        <fieldset style={styles.filterFieldset}>
+          <legend style={styles.filterLegend}>Bereich</legend>
+          <div style={styles.filterCheckboxRow}>
+            {[...areas.map((a) => ({ key: a.id, label: a.name })), { key: AREA_NONE, label: 'ohne Bereich' }].map(({ key, label }) => {
+              const checked = filterAreas.has(key);
+              const id = `spec-filter-area-${key}`;
+              return (
+                <label key={key} style={styles.filterCheckboxLabel} htmlFor={id}>
+                  <input
+                    id={id}
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => onToggleArea(key)}
+                    aria-label={`Bereich ${label} ${checked ? 'aktiv' : 'inaktiv'}`}
+                    style={styles.filterCheckbox}
+                  />
+                  {label}
+                </label>
+              );
+            })}
+          </div>
+        </fieldset>
+      )}
     </div>
   );
 }
