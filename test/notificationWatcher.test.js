@@ -1,5 +1,5 @@
 /**
- * notificationWatcher.test.js — Tests für NotificationWatcher (S-184, AC6–AC9).
+ * notificationWatcher.test.js — Tests für NotificationWatcher (S-184, AC6–AC9 + S-286, AC8–AC12).
  *
  * Covers (push-notifications S-184):
  *   AC6  — Übergangs-Erkennung: Done-Übergang feuert; unverändert feuert nicht;
@@ -10,6 +10,13 @@
  *           enabled=false → kein Versand (aber Snapshot-Update);
  *           Ereignis nicht in settings.events → kein Versand
  *   AC9  — Nachrichteninhalt: Projekt-Slug, Item-ID, Titel, Ereignistyp (Emoji/Titel)
+ *
+ * Covers (board-live-sse S-286):
+ *   AC8  — Projekt-Slugs mit verändertem Story-Status-Abbild erkennen + broadcast je Projekt
+ *   AC9  — Baseline-Scan löst KEIN SSE-Event aus
+ *   AC10 — SSE-Invalidierung unabhängig vom ntfy-Gating (auch bei enabled=false)
+ *   AC11 — Broadcast läuft auch nach explizitem rescan über denselben Codepfad
+ *   AC12 — boardEventHub optional injiziert; null-tolerant degradation
  */
 
 import { describe, it, expect, jest } from '@jest/globals';
@@ -17,6 +24,7 @@ import {
   buildBaseline,
   buildNotificationPayload,
   detectTransitions,
+  detectChangedProjects,
   NotificationWatcher,
   readSnapshot,
   resolveSnapshotFilePath,
@@ -870,5 +878,537 @@ describe('writeSnapshot', () => {
         process.env.CRED_STORE_DIR = origCredStoreDir;
       }
     }
+  });
+});
+
+// ── AC8–AC12: SSE-Producer-Naht (board-live-sse S-286) ───────────────────────
+
+describe('AC8–AC12 — SSE-Producer-Naht (board-live-sse)', () => {
+  // ── AC8: detectChangedProjects ────────────────────────────────────────────
+
+  describe('AC8 — detectChangedProjects: Projekt-Slugs mit verändertem Abbild', () => {
+    it('erkennt Projekt mit geändertem Story-Status', () => {
+      const index = makeIndex([
+        makeProject({
+          slug: 'dev-gui',
+          features: [makeFeature({
+            stories: [makeStory({ id: 'S-1', status: 'Done' })],
+          })],
+        }),
+      ]);
+      const oldSnapshot = { stories: { 'dev-gui::S-1': 'To Do' }, features: {} };
+
+      const changed = detectChangedProjects(index, oldSnapshot);
+
+      expect(changed.has('dev-gui')).toBe(true);
+      expect(changed.size).toBe(1);
+    });
+
+    it('ignoriert Projekte ohne Veränderung', () => {
+      const index = makeIndex([
+        makeProject({
+          slug: 'dev-gui',
+          features: [makeFeature({
+            stories: [makeStory({ id: 'S-1', status: 'Done' })],
+          })],
+        }),
+      ]);
+      const oldSnapshot = { stories: { 'dev-gui::S-1': 'Done' }, features: {} };
+
+      const changed = detectChangedProjects(index, oldSnapshot);
+
+      expect(changed.size).toBe(0);
+    });
+
+    it('erkennt Projekt mit hinzugefügter Story', () => {
+      const index = makeIndex([
+        makeProject({
+          slug: 'dev-gui',
+          features: [makeFeature({
+            stories: [
+              makeStory({ id: 'S-1', status: 'To Do' }),
+              makeStory({ id: 'S-2', status: 'To Do' }), // neue Story
+            ],
+          })],
+        }),
+      ]);
+      const oldSnapshot = { stories: { 'dev-gui::S-1': 'To Do' }, features: {} };
+
+      const changed = detectChangedProjects(index, oldSnapshot);
+
+      expect(changed.has('dev-gui')).toBe(true);
+    });
+
+    it('erkennt Projekt mit entfernter Story', () => {
+      const index = makeIndex([
+        makeProject({
+          slug: 'dev-gui',
+          features: [makeFeature({
+            stories: [makeStory({ id: 'S-1', status: 'To Do' })],
+          })],
+        }),
+      ]);
+      // S-2 war im Snapshot, ist jetzt weg
+      const oldSnapshot = { stories: {
+        'dev-gui::S-1': 'To Do',
+        'dev-gui::S-2': 'Done',
+      }, features: {} };
+
+      const changed = detectChangedProjects(index, oldSnapshot);
+
+      expect(changed.has('dev-gui')).toBe(true);
+    });
+
+    it('behandelt mehrere Projekte korrekt', () => {
+      const index = makeIndex([
+        makeProject({
+          slug: 'dev-gui',
+          features: [makeFeature({
+            stories: [makeStory({ id: 'S-1', status: 'Done' })],
+          })],
+        }),
+        makeProject({
+          slug: 'agent-flow',
+          features: [makeFeature({
+            stories: [makeStory({ id: 'S-1', status: 'To Do' })],
+          })],
+        }),
+      ]);
+      const oldSnapshot = { stories: {
+        'dev-gui::S-1': 'To Do',     // changed
+        'agent-flow::S-1': 'To Do',  // unchanged
+      }, features: {} };
+
+      const changed = detectChangedProjects(index, oldSnapshot);
+
+      expect(changed.has('dev-gui')).toBe(true);
+      expect(changed.has('agent-flow')).toBe(false);
+      expect(changed.size).toBe(1);
+    });
+  });
+
+  // ── AC9: Baseline-Scan löst KEIN SSE-Event aus ──────────────────────────
+
+  describe('AC9 — Baseline-Scan löst KEIN SSE-Event aus', () => {
+    it('erster check() broadcastet nichts', async () => {
+      const mockBoardAggregator = {
+        getIndex: jest.fn(async () =>
+          makeIndex([
+            makeProject({
+              features: [makeFeature({
+                stories: [makeStory({ id: 'S-1', status: 'Done' })],
+              })],
+            }),
+          ])
+        ),
+      };
+
+      const mockHub = { broadcast: jest.fn() };
+      const fsDeps = {
+        readFile: jest.fn(async () => {
+          throw new Error('ENOENT');
+        }),
+        writeFile: jest.fn(async () => {}),
+        rename: jest.fn(async () => {}),
+        mkdir: jest.fn(async () => {}),
+        chmod: jest.fn(async () => {}),
+        unlink: jest.fn(async () => {}),
+      };
+
+      const origCredStoreDir = process.env.CRED_STORE_DIR;
+      process.env.CRED_STORE_DIR = '/tmp';
+      try {
+        const watcher = new NotificationWatcher({
+          boardAggregator: mockBoardAggregator,
+          credentialStore: null,
+          readNotificationSettings: jest.fn(async () => ({
+            enabled: true,
+            events: [],
+          })),
+          boardEventHub: mockHub,
+          fsDeps,
+        });
+
+        await watcher.check();
+
+        // Hub sollte NICHT aufgerufen werden (Baseline)
+        expect(mockHub.broadcast).toHaveBeenCalledTimes(0);
+      } finally {
+        if (origCredStoreDir !== undefined) {
+          process.env.CRED_STORE_DIR = origCredStoreDir;
+        } else {
+          delete process.env.CRED_STORE_DIR;
+        }
+      }
+    });
+  });
+
+  // ── AC10: SSE-Invalidierung unabhängig vom ntfy-Gating ──────────────────
+
+  describe('AC10 — SSE-Invalidierung unabhängig vom ntfy-Gating', () => {
+    it('broadcastet auch wenn enabled=false', async () => {
+      // Setup: Baseline mit To Do; dann geändert zu Done
+      const mockBoardAggregator = {
+        getIndex: jest
+          .fn()
+          .mockImplementationOnce(async () =>
+            // Erster check(): Baseline-Scan → Index mit To Do
+            makeIndex([
+              makeProject({
+                features: [makeFeature({
+                  stories: [makeStory({ id: 'S-1', status: 'To Do' })],
+                })],
+              }),
+            ])
+          )
+          .mockImplementationOnce(async () =>
+            // Zweiter check(): Index mit Done → Change erkannt
+            makeIndex([
+              makeProject({
+                features: [makeFeature({
+                  stories: [makeStory({ id: 'S-1', status: 'Done' })],
+                })],
+              }),
+            ])
+          ),
+      };
+
+      const mockHub = { broadcast: jest.fn() };
+      const fsDeps = {
+        readFile: jest
+          .fn()
+          .mockImplementationOnce(async () => {
+            // Erster check(): kein Snapshot auf Disk → ENOENT
+            throw new Error('ENOENT');
+          }),
+        writeFile: jest.fn(async () => {}),
+        rename: jest.fn(async () => {}),
+        mkdir: jest.fn(async () => {}),
+        chmod: jest.fn(async () => {}),
+        unlink: jest.fn(async () => {}),
+      };
+
+      const origCredStoreDir = process.env.CRED_STORE_DIR;
+      process.env.CRED_STORE_DIR = '/tmp';
+      try {
+        const watcher = new NotificationWatcher({
+          boardAggregator: mockBoardAggregator,
+          credentialStore: null,
+          readNotificationSettings: jest.fn(async () => ({
+            enabled: false, // ← ntfy disabled
+            server: 'https://ntfy.sh',
+            topic: 'alerts',
+            events: ['story_done'],
+          })),
+          sendNotificationFn: jest.fn(),
+          boardEventHub: mockHub,
+          fsDeps,
+        });
+
+        // First check to establish baseline
+        await watcher.check();
+        mockHub.broadcast.mockClear();
+
+        // Second check with change
+        await watcher.check();
+
+        // SSE sollte trotzdem gebroadcasted werden (AC10)
+        expect(mockHub.broadcast).toHaveBeenCalledTimes(1);
+        expect(mockHub.broadcast).toHaveBeenCalledWith({ slug: 'dev-gui' });
+      } finally {
+        if (origCredStoreDir !== undefined) {
+          process.env.CRED_STORE_DIR = origCredStoreDir;
+        } else {
+          delete process.env.CRED_STORE_DIR;
+        }
+      }
+    });
+
+    it('SSE-Fehler crasht nicht den check()', async () => {
+      const mockBoardAggregator = {
+        getIndex: jest
+          .fn()
+          .mockImplementationOnce(async () =>
+            // Erster check(): Baseline-Scan → Index mit To Do
+            makeIndex([
+              makeProject({
+                features: [makeFeature({
+                  stories: [makeStory({ id: 'S-1', status: 'To Do' })],
+                })],
+              }),
+            ])
+          )
+          .mockImplementationOnce(async () =>
+            // Zweiter check(): Index mit Done → Change erkannt
+            makeIndex([
+              makeProject({
+                features: [makeFeature({
+                  stories: [makeStory({ id: 'S-1', status: 'Done' })],
+                })],
+              }),
+            ])
+          ),
+      };
+
+      const mockHub = {
+        broadcast: jest.fn(() => {
+          throw new Error('Broadcast failed');
+        }),
+      };
+
+      const fsDeps = {
+        readFile: jest
+          .fn()
+          .mockImplementationOnce(async () => {
+            // Erster check(): kein Snapshot auf Disk → ENOENT
+            throw new Error('ENOENT');
+          }),
+        writeFile: jest.fn(async () => {}),
+        rename: jest.fn(async () => {}),
+        mkdir: jest.fn(async () => {}),
+        chmod: jest.fn(async () => {}),
+        unlink: jest.fn(async () => {}),
+      };
+
+      const origCredStoreDir = process.env.CRED_STORE_DIR;
+      process.env.CRED_STORE_DIR = '/tmp';
+      try {
+        const watcher = new NotificationWatcher({
+          boardAggregator: mockBoardAggregator,
+          credentialStore: null,
+          readNotificationSettings: jest.fn(async () => ({
+            enabled: true,
+            events: [],
+          })),
+          boardEventHub: mockHub,
+          fsDeps,
+        });
+
+        // First check to establish baseline
+        await watcher.check();
+        mockHub.broadcast.mockClear();
+
+        // Second check: SSE wird versucht, aber sollte nicht crashen
+        let threw = false;
+        try {
+          await watcher.check();
+        } catch {
+          threw = true;
+        }
+
+        expect(threw).toBe(false);
+        expect(mockHub.broadcast).toHaveBeenCalled();
+      } finally {
+        if (origCredStoreDir !== undefined) {
+          process.env.CRED_STORE_DIR = origCredStoreDir;
+        } else {
+          delete process.env.CRED_STORE_DIR;
+        }
+      }
+    });
+  });
+
+  // ── AC11: Broadcast läuft auch nach explizitem rescan ──────────────────
+
+  describe('AC11 — Broadcast läuft auch nach explizitem rescan über denselben Codepfad', () => {
+    it('check() kann manuell aufgerufen werden (z.B. nach rescan)', async () => {
+      const mockBoardAggregator = {
+        getIndex: jest
+          .fn()
+          .mockImplementationOnce(async () =>
+            // Erster check(): Baseline-Scan → Index mit To Do
+            makeIndex([
+              makeProject({
+                features: [makeFeature({
+                  stories: [makeStory({ id: 'S-1', status: 'To Do' })],
+                })],
+              }),
+            ])
+          )
+          .mockImplementationOnce(async () =>
+            // Zweiter check(): Index mit Done → Change erkannt
+            makeIndex([
+              makeProject({
+                features: [makeFeature({
+                  stories: [makeStory({ id: 'S-1', status: 'Done' })],
+                })],
+              }),
+            ])
+          ),
+      };
+
+      const mockHub = { broadcast: jest.fn() };
+      const fsDeps = {
+        readFile: jest
+          .fn()
+          .mockImplementationOnce(async () => {
+            // Erster check(): kein Snapshot auf Disk → ENOENT
+            throw new Error('ENOENT');
+          }),
+        writeFile: jest.fn(async () => {}),
+        rename: jest.fn(async () => {}),
+        mkdir: jest.fn(async () => {}),
+        chmod: jest.fn(async () => {}),
+        unlink: jest.fn(async () => {}),
+      };
+
+      const origCredStoreDir = process.env.CRED_STORE_DIR;
+      process.env.CRED_STORE_DIR = '/tmp';
+      try {
+        const watcher = new NotificationWatcher({
+          boardAggregator: mockBoardAggregator,
+          credentialStore: null,
+          readNotificationSettings: jest.fn(async () => ({
+            enabled: true,
+            events: [],
+          })),
+          boardEventHub: mockHub,
+          fsDeps,
+        });
+
+        // First check to establish baseline
+        await watcher.check();
+        mockHub.broadcast.mockClear();
+
+        // Manual check() call (simulating rescan)
+        await watcher.check();
+
+        expect(mockHub.broadcast).toHaveBeenCalledWith({ slug: 'dev-gui' });
+      } finally {
+        if (origCredStoreDir !== undefined) {
+          process.env.CRED_STORE_DIR = origCredStoreDir;
+        } else {
+          delete process.env.CRED_STORE_DIR;
+        }
+      }
+    });
+  });
+
+  // ── AC12: boardEventHub optional injiziert ───────────────────────────────
+
+  describe('AC12 — boardEventHub optional injiziert; null-tolerant', () => {
+    it('funktioniert ohne boardEventHub (null)', async () => {
+      const existingSnapshot = {
+        stories: { 'dev-gui::S-1': 'To Do' },
+        features: {},
+      };
+
+      const mockBoardAggregator = {
+        getIndex: jest.fn(async () =>
+          makeIndex([
+            makeProject({
+              features: [makeFeature({
+                stories: [makeStory({ id: 'S-1', status: 'Done' })],
+              })],
+            }),
+          ])
+        ),
+      };
+
+      const fsDeps = {
+        readFile: jest.fn(async () => JSON.stringify(existingSnapshot)),
+        writeFile: jest.fn(async () => {}),
+        rename: jest.fn(async () => {}),
+        mkdir: jest.fn(async () => {}),
+        chmod: jest.fn(async () => {}),
+        unlink: jest.fn(async () => {}),
+      };
+
+      const origCredStoreDir = process.env.CRED_STORE_DIR;
+      process.env.CRED_STORE_DIR = '/tmp';
+      try {
+        const watcher = new NotificationWatcher({
+          boardAggregator: mockBoardAggregator,
+          credentialStore: null,
+          readNotificationSettings: jest.fn(async () => ({
+            enabled: true,
+            events: [],
+          })),
+          boardEventHub: null, // ← null (AC12)
+          fsDeps,
+        });
+
+        // First check to establish baseline
+        await watcher.check();
+
+        // Second check: sollte nicht crashen, auch ohne Hub
+        let threw = false;
+        try {
+          await watcher.check();
+        } catch {
+          threw = true;
+        }
+
+        expect(threw).toBe(false);
+      } finally {
+        if (origCredStoreDir !== undefined) {
+          process.env.CRED_STORE_DIR = origCredStoreDir;
+        } else {
+          delete process.env.CRED_STORE_DIR;
+        }
+      }
+    });
+
+    it('funktioniert ohne boardEventHub (undefined)', async () => {
+      const existingSnapshot = {
+        stories: { 'dev-gui::S-1': 'To Do' },
+        features: {},
+      };
+
+      const mockBoardAggregator = {
+        getIndex: jest.fn(async () =>
+          makeIndex([
+            makeProject({
+              features: [makeFeature({
+                stories: [makeStory({ id: 'S-1', status: 'Done' })],
+              })],
+            }),
+          ])
+        ),
+      };
+
+      const fsDeps = {
+        readFile: jest.fn(async () => JSON.stringify(existingSnapshot)),
+        writeFile: jest.fn(async () => {}),
+        rename: jest.fn(async () => {}),
+        mkdir: jest.fn(async () => {}),
+        chmod: jest.fn(async () => {}),
+        unlink: jest.fn(async () => {}),
+      };
+
+      const origCredStoreDir = process.env.CRED_STORE_DIR;
+      process.env.CRED_STORE_DIR = '/tmp';
+      try {
+        const watcher = new NotificationWatcher({
+          boardAggregator: mockBoardAggregator,
+          credentialStore: null,
+          readNotificationSettings: jest.fn(async () => ({
+            enabled: true,
+            events: [],
+          })),
+          // boardEventHub omitted (undefined)
+          fsDeps,
+        });
+
+        // First check to establish baseline
+        await watcher.check();
+
+        // Second check: sollte nicht crashen, auch ohne Hub
+        let threw = false;
+        try {
+          await watcher.check();
+        } catch {
+          threw = true;
+        }
+
+        expect(threw).toBe(false);
+      } finally {
+        if (origCredStoreDir !== undefined) {
+          process.env.CRED_STORE_DIR = origCredStoreDir;
+        } else {
+          delete process.env.CRED_STORE_DIR;
+        }
+      }
+    });
   });
 });

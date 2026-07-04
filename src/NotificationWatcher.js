@@ -1,5 +1,5 @@
 /**
- * NotificationWatcher — Board-Übergangserkennung + ntfy-Versand (S-184, AC6–AC9).
+ * NotificationWatcher — Board-Übergangserkennung + ntfy-Versand + SSE-Producer (S-184, S-286, AC6–AC9, AC8–AC12).
  *
  * Beobachtet aufeinanderfolgende Board-Scans (via BoardAggregator) und erkennt
  * Statuswechsel je Story. Feuert Notifications via NotifyService nur bei echten
@@ -25,17 +25,29 @@
  *   - story_blocked: Titel „⛔ <project-slug> · <id> blockiert" Body = Story-Titel
  *   - feature_done:  Titel „✅ <project-slug> · <id> komplett"  Body = Feature-Titel
  *
+ * SSE-Producer-Naht (board-live-sse S-286, AC8–AC12):
+ *   Der Snapshot-Diff wird zusätzlich zur ntfy-Logik dazu genutzt, die Menge der
+ *   Projekt-Slugs mit verändertem Story-Status-Abbild zu bestimmen (AC8). Für jedes
+ *   solche Projekt wird genau ein `hub.broadcast({ slug })` aufgerufen (AC8).
+ *   - AC9: Baseline-Scan (erster check) löst KEIN SSE-Event aus (AC9).
+ *   - AC10: SSE-Invalidierung unabhängig vom ntfy-Gating (auch bei enabled=false).
+ *   - AC11: Broadcast läuft auch über denselben Codepfad wie der periodische Check
+ *           (auch nach explizitem rescan via POST /api/board/projects/rescan).
+ *   - AC12: boardEventHub wird optional injiziert; fehlt er (null/undefined),
+ *           degradiert der Watcher still (ntfy-Pfad unverändert, kein Crash).
+ *
  * Edge-Cases (Spec §Edge-Cases):
- *   - enabled=false  → Snapshot WEITER AKTUALISIEREN, KEIN Versand (damit nach
- *     Einschalten keine alten Übergänge nachfeuern)
+ *   - enabled=false  → Snapshot WEITER AKTUALISIEREN, KEIN ntfy-Versand (aber SSE-Broadcast!)
  *   - Done→To Do→Done → erneuter Übergang feuert erneut (gewollt)
  *   - Mehrere Übergänge im selben Scan → je Übergang eine Notification (kein Verschlucken)
  *   - NotifyService-Fehler crasht den Watcher NICHT (best-effort, AC7)
  *   - Board-Scan-Fehler → kein Snapshot-Update für betroffene Items (AC7)
+ *   - Broadcast-Fehler crasht weder check() noch den ntfy-Pfad (best-effort, AC10).
  *
  * Security (AC10 / security/R01):
  *   - Token NIE im Log oder in Output.
  *   - readNotificationSettings() / CredentialStore.getPlaintext() je check().
+ *   - Broadcast enthält NUR { slug }, keine Board-Inhalte.
  *
  * @module NotificationWatcher
  */
@@ -181,6 +193,64 @@ export function buildNotificationPayload(eventType, slug, itemId, title) {
 // ── Übergangs-Erkennung ────────────────────────────────────────────────────────
 
 /**
+ * Erkennt Projekt-Slugs mit verändertem Story-Status-Abbild (für SSE-Invalidierung, AC8).
+ *
+ * AC8: Je check() bestimmt der Snapshot-Diff zusätzlich die Menge der Projekt-Slugs,
+ * deren Story-Status-Abbild sich gegenüber dem vorherigen Snapshot geändert hat —
+ * mindestens eine Story mit prev != curr ODER eine hinzugekommene/entfernte Story.
+ *
+ * @param {Array<import('./BoardAggregator.js').ProjectEntry|import('./BoardAggregator.js').ErrorEntry>} index
+ * @param {{ stories: Record<string,string>, features: Record<string,boolean> }} oldSnapshot
+ * @returns {Set<string>} — Set der Projekt-Slugs mit verändertem Abbild
+ */
+export function detectChangedProjects(index, oldSnapshot) {
+  const changedSlugs = new Set();
+
+  for (const project of index) {
+    // Fehler-Boards nicht processieren
+    if (project.error) continue;
+
+    const slug = project.project_slug ?? project.slug;
+    if (!slug) continue;
+
+    // Sammle alle Stories für dieses Projekt im aktuellen Index
+    const currentStories = new Set();
+    for (const feature of project.features ?? []) {
+      for (const story of feature.stories ?? []) {
+        const storyKey = snapKey(slug, story.id);
+        currentStories.add(storyKey);
+
+        // Prüfe ob dieser Story-Status sich geändert hat
+        const prevStatus = oldSnapshot.stories[storyKey];
+        const currStatus = story.status;
+
+        // Änderung erkannt?
+        if (prevStatus !== currStatus) {
+          changedSlugs.add(slug);
+          break; // Ein Change pro Projekt genügt
+        }
+      }
+      if (changedSlugs.has(slug)) break; // Schnell raus, wenn bereits geändert
+    }
+
+    // Falls Projekt im alten Snapshot Stories hatte, aber jetzt nicht mehr → Projekt hat sich geändert
+    if (!changedSlugs.has(slug)) {
+      for (const oldKey in oldSnapshot.stories) {
+        if (oldKey.startsWith(`${slug}::`)) {
+          if (!currentStories.has(oldKey)) {
+            // Story wurde entfernt
+            changedSlugs.add(slug);
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  return changedSlugs;
+}
+
+/**
  * Erkennt Übergänge zwischen dem alten Snapshot und dem aktuellen Board-Index.
  * Gibt eine Liste von Ereignissen zurück (noch KEIN Versand; kein Gating hier).
  *
@@ -302,7 +372,7 @@ export function buildBaseline(index) {
 // ── NotificationWatcher ───────────────────────────────────────────────────────
 
 /**
- * NotificationWatcher — Board-Beobachter mit Übergangs-Erkennung + Versand.
+ * NotificationWatcher — Board-Beobachter mit Übergangs-Erkennung + Versand + SSE-Producer.
  *
  * @param {object} deps
  * @param {import('./BoardAggregator.js').BoardAggregator} deps.boardAggregator
@@ -311,6 +381,7 @@ export function buildBaseline(index) {
  * @param {typeof sendNotification} [deps.sendNotificationFn] - Injectable für Tests
  * @param {object} [deps.fsDeps] - Injectable: { readFile, writeFile, rename, mkdir, chmod, unlink }
  * @param {number} [deps.intervalMs] - Check-Intervall in ms (default: 60 000)
+ * @param {import('./BoardEventHub.js').BoardEventHub|null} [deps.boardEventHub] - Optional SSE-Producer (AC12); null-tolerant
  */
 export class NotificationWatcher {
   #boardAggregator;
@@ -319,6 +390,7 @@ export class NotificationWatcher {
   #sendNotificationFn;
   #fsDeps;
   #intervalMs;
+  #boardEventHub;
   #intervalHandle = null;
   /**
    * Gibt an ob ein Snapshot von Disk geladen wurde (true = Baseline bereits établiert).
@@ -335,6 +407,7 @@ export class NotificationWatcher {
     sendNotificationFn,
     fsDeps,
     intervalMs,
+    boardEventHub,
   }) {
     this.#boardAggregator = boardAggregator;
     this.#credentialStore = credentialStore;
@@ -342,6 +415,7 @@ export class NotificationWatcher {
     this.#sendNotificationFn = sendNotificationFn ?? sendNotification;
     this.#fsDeps = fsDeps ?? { readFile, writeFile, rename, mkdir, chmod, unlink };
     this.#intervalMs = intervalMs ?? WATCHER_INTERVAL_MS;
+    this.#boardEventHub = boardEventHub; // AC12: optional, null-tolerant
   }
 
   /**
@@ -374,9 +448,10 @@ export class NotificationWatcher {
    * Führt einen einmaligen Watcher-Check durch.
    * Kann auch manuell aufgerufen werden (z.B. nach einem expliziten rescan).
    *
-   * - Erster Aufruf (kein Snapshot auf Disk): Baseline erstellen, KEIN Versand (AC7).
+   * - Erster Aufruf (kein Snapshot auf Disk): Baseline erstellen, KEIN Versand + KEIN SSE-Broadcast (AC7/AC9).
    * - Folgeaufrufe: Übergänge erkennen, Snapshot aktualisieren, Notifications senden (AC6/AC8/AC9).
-   * - enabled=false: Snapshot wird aktualisiert, aber KEIN Versand (Edge-Case Spec §Edge-Cases).
+   * - SSE-Invalidierung: nach Baseline unabhängig vom ntfy-Gating (AC10/AC12).
+   * - enabled=false: Snapshot wird aktualisiert, ntfy NICHT versendet, aber SSE wird gebroadcasted (AC10).
    *
    * @returns {Promise<void>}
    */
@@ -400,21 +475,38 @@ export class NotificationWatcher {
     }
 
     if (!this.#baselineEstablished) {
-      // AC7: Erster Scan (kein Snapshot auf Disk) → Baseline ohne Versand
+      // AC9: Erster Scan (kein Snapshot auf Disk) → Baseline ohne Versand und OHNE SSE-Broadcast
       const baseline = buildBaseline(index);
       this.#snapshot = baseline;
       this.#baselineEstablished = true;
       await writeSnapshot(baseline, this.#fsDeps);
-      return;
+      return; // KEIN SSE-Event auf Baseline
     }
 
-    // Übergänge erkennen
+    // Übergänge erkennen (ntfy-relevante Ereignisse)
     const { events, newSnapshot } = detectTransitions(index, this.#snapshot);
+
+    // AC8: Projekte mit verändertem Story-Status-Abbild erkennen (für SSE-Producer)
+    const changedProjects = detectChangedProjects(index, this.#snapshot);
 
     // Snapshot immer persistieren (auch bei enabled=false — Edge-Case Spec)
     this.#snapshot = newSnapshot;
     await writeSnapshot(newSnapshot, this.#fsDeps);
 
+    // ── AC10/AC12: SSE-Invalidierung (unabhängig vom ntfy-Gating, best-effort) ──────
+    // Der SSE-Broadcast-Pfad ist vollständig entkoppelt vom ntfy-Pfad.
+    if (this.#boardEventHub && changedProjects.size > 0) {
+      for (const slug of changedProjects) {
+        try {
+          this.#boardEventHub.broadcast({ slug });
+        } catch (err) {
+          // AC10: Broadcast-Fehler crasht weder check() noch den ntfy-Pfad
+          console.error('[NotificationWatcher] SSE-Broadcast fehlgeschlagen (best-effort):', err.message);
+        }
+      }
+    }
+
+    // ── ntfy-Pfad (unverändert) ──────────────────────────────────────────────────────
     // Wenn keine Übergänge → nichts weiter zu tun
     if (events.length === 0) return;
 
@@ -427,7 +519,8 @@ export class NotificationWatcher {
       return; // Gating fehlgeschlagen → kein Versand
     }
 
-    // AC8: enabled=false → Snapshot ist bereits aktuell, aber kein Versand
+    // AC8: enabled=false → Snapshot ist bereits aktuell, aber kein ntfy-Versand
+    // (SSE wurde aber bereits oben gebroadcasted — AC10)
     if (!settings.enabled) return;
 
     // Token aus CredentialStore (NIE im Log)

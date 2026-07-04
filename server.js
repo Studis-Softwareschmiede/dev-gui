@@ -578,14 +578,16 @@ bootDrainRecovery.run(orphanedDrains).catch((err) => {
 // Story 2 optional als Producer an diese Instanz ankoppelt (AC12: null-tolerant).
 const boardEventHub = new BoardEventHub();
 
-// ── NotificationWatcher (push-notifications S-184 AC6–AC9) ───────────────────
+// ── NotificationWatcher (push-notifications S-184 AC6–AC9 + board-live-sse S-286 AC8–AC12) ────
 // Hängt am Board-Scan-Ergebnis; check() wird periodisch aufgerufen.
 // rescan-Router ruft notificationWatcher.check() nach boardAggregator.scan() auf
 // (via deps — kein separates Polling, nutzt vorhandenen Scan).
+// AC12: boardEventHub wird optional injiziert (null-tolerant degradation).
 const notificationWatcher = new NotificationWatcher({
   boardAggregator,
   credentialStore,
   readNotificationSettings,
+  boardEventHub, // AC12: Optional SSE-Producer
 });
 
 // ── AC4 (workspace-health-hinweis): Start-Log-Warnung bei Fehlkonfiguration ──
