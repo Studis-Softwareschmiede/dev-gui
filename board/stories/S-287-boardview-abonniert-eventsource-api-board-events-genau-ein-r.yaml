@@ -2,7 +2,7 @@ id: S-287
 parent: F-059
 title: BoardView abonniert EventSource /api/board/events + genau ein Re-Fetch ueber
   bestehenden Ladepfad beim Treffer
-status: To Do
+status: Blocked
 priority: P2
 spec: docs/specs/board-live-sse.md
 implements:
@@ -24,10 +24,12 @@ estimate_note: 'estimator nicht dispatchbar (kein Task-Tool im requirement-Subag
   Heuristik score 7 (5 AC + 1 Komponente: BoardView.jsx + 1 label ui) -> M; baseline
   js|balanced|M ep 5.0 (n=8); keine Baseline-Tokens'
 confidence: medium
-branch: null
+branch: feat/S-287-boardview-eventsource
 pr: null
-blocked_reason: null
+blocked_reason: Loop-Schutz N=3 — Iteration-3-coder verlor per git reset den uncommitteten
+  EventSource-Produktivcode in BoardView.jsx (Worktree S-287); nur Testdatei vorhanden,
+  10/11 Tests rot. Story braucht Neu-Implementierung (AC13–AC17).
 created_at: '2026-07-03T07:27:07Z'
-updated_at: '2026-07-03T07:28:57Z'
+updated_at: '2026-07-04T02:54:28Z'
 done_at: null
 tok_est: null
