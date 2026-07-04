@@ -222,11 +222,11 @@ describe('SFTP-5 — ssh2 bleibt in VpsDockerControl.js, kein global entfernt', 
 // ── SFTP-1 — Frontend: BACKUP_REMOTE_FIELDS ohne SFTP ────────────────────────
 
 describe('SFTP-1 — Frontend BACKUP_REMOTE_FIELDS (Modulanalyse, kein DOM)', () => {
-  it('SFTP-1: BACKUP_REMOTE_FIELDS in SettingsView enthält keine sftp_* Felder (Source-Grep)', async () => {
-    // Source-Grep-Ansatz: Da SettingsView.jsx eine JSX-Komponente ist (kein Node-Import ohne Transform),
+  it('SFTP-1: BACKUP_REMOTE_FIELDS in BackupSection enthält keine sftp_* Felder (Source-Grep)', async () => {
+    // Source-Grep-Ansatz: Da BackupSection.jsx eine JSX-Komponente ist (kein Node-Import ohne Transform),
     // prüfen wir den Quelltext direkt — konsistent mit SFTP-2-Spec (Testbar/Grep).
     const { readFile } = await import('node:fs/promises');
-    const src = await readFile(new URL('../client/src/SettingsView.jsx', import.meta.url), 'utf8');
+    const src = await readFile(new URL('../client/src/BackupSection.jsx', import.meta.url), 'utf8');
 
     // SFTP-1: Dropdown hat keine <option value="sftp">
     expect(src).not.toContain('option value="sftp"');
