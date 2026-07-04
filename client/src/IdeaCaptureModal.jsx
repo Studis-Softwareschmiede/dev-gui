@@ -37,12 +37,17 @@
  * }} props
  */
 
+import { AreaSelect } from './AreaSelect.jsx';
 import { useState, useEffect, useRef, useCallback } from 'react';
 
 export function IdeaCaptureModal({ projectSlug, onClose, triggerRef, fetchFn }) {
   const fetch_ = fetchFn ?? globalThis.fetch.bind(globalThis);
 
   const [title, setTitle] = useState('');
+  // story-idee-bereich-zuordnung AC1/AC2 (S-291): Bereichs-Auswahl oberhalb des Titels.
+  // areaReady=false (Load fehlgeschlagen) -> Bestands-Verhalten ohne Pflichtfeld.
+  const [area, setArea] = useState(null);
+  const [areaReady, setAreaReady] = useState(false);
   const [body, setBody] = useState('');
   const [saving, setSaving] = useState(false);
   /** @type {[{ field?: string, message: string }|null, Function]} */
@@ -70,7 +75,8 @@ export function IdeaCaptureModal({ projectSlug, onClose, triggerRef, fetchFn }) 
     return () => dialog.removeEventListener('keydown', handleKeyDown);
   }, [handleClose]);
 
-  const canSave = title.trim() !== '' && !saving;
+  // AC5-Anteil: mit funktionierender Bereichsliste ist Speichern ohne Bereich deaktiviert.
+  const canSave = title.trim() !== '' && !saving && (!areaReady || area != null);
 
   async function handleSave() {
     if (!canSave) return;
@@ -82,7 +88,7 @@ export function IdeaCaptureModal({ projectSlug, onClose, triggerRef, fetchFn }) 
       res = await fetch_(`/api/board/projects/${encodeURIComponent(projectSlug)}/ideas`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title, ...(body.trim() ? { body } : {}) }),
+        body: JSON.stringify({ title, ...(body.trim() ? { body } : {}), ...(area ? { area } : {}) }),
       });
     } catch {
       setSaving(false);
@@ -132,6 +138,16 @@ export function IdeaCaptureModal({ projectSlug, onClose, triggerRef, fetchFn }) 
         <p style={styles.hint}>
           Stichworte in Sekunden ins Board werfen — kein Spec-/AC-Zwang.
         </p>
+
+        {/* AC1: Bereichs-Dropdown OBERHALB des Titelfelds */}
+        <AreaSelect
+          projectSlug={projectSlug}
+          value={area}
+          onChange={setArea}
+          onReady={setAreaReady}
+          idPrefix="idea-capture-area"
+          fetchFn={fetchFn}
+        />
 
         <label style={styles.label} htmlFor="idea-capture-title-input">
           Titel
