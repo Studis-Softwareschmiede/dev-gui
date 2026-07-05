@@ -1,0 +1,22 @@
+id: F-065
+title: Repo-Größen-Anzeige in der Fabrik-Übersicht (Größen-Badge + Aufschlüsselung
+  + .git-Frühwarnung)
+goal: Jede Projekt-Karte der Fabrik-Übersicht zeigt ein menschenlesbares Größen-Badge
+  (MB/GB) mit Drei-Bucket-Aufschlüsselung (Arbeitsstand | .git | Abhängigkeiten/Artefakte),
+  gemessen lokal per pfad-confined Verzeichnis-Scan des Workspace-Mounts — asynchron,
+  gecacht/zeitgestempelt (nie blockierend), plus dezente .git-Blähungs-Frühwarnung
+  über konfigurierbare Grenze (Default 500 MB).
+status: Backlog
+priority: P2
+spec: docs/specs/repo-size-badge.md
+definition_of_done: null
+labels:
+- ui
+- security
+depends: null
+owner: null
+stories: null
+progress: '0/3 done'
+created_at: '2026-07-05T21:28:01Z'
+updated_at: '2026-07-05T21:28:12Z'
+area: fabrik-arbeiten
