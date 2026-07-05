@@ -72,6 +72,7 @@
 import { useState, useEffect } from 'react';
 import { useHashRouter } from './useHashRouter.js';
 import { VIEW_REGISTRY, TILE_VIEWS } from './viewRegistry.js';
+import { UsageCoinButton } from './UsageOverlay.jsx';
 
 // ── NavBar ────────────────────────────────────────────────────────────────────
 
@@ -125,6 +126,9 @@ function NavBar({ currentView, onNavigate }) {
 
       {/* Spacer pushes gear to the right */}
       <span style={styles.navSpacer} aria-hidden="true" />
+
+      {/* Token-Nutzungs-Münze — links vom Zahnrad (Owner-Ko-Design 2026-07-03/05) */}
+      <UsageCoinButton />
 
       {/* Gear / Settings button — always visible (settings-shell AC1) */}
       <button
