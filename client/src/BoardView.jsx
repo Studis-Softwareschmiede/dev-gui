@@ -251,6 +251,7 @@ import { EntityIcon }             from './icons/EntityIcon.jsx';
 import { parseEntityLabel }       from './icons/parseEntityLabel.js';
 import { IdeaSpecifyChatModal }   from './IdeaSpecifyChatModal.jsx';
 import { AreasManageDialog }      from './AreasManageDialog.jsx';
+import { FeatureBatchButton }     from './FeatureBatchButton.jsx';
 // board-filter-feature-status-consistency AC3 (S-241): geteilte, dependency-freie
 // Pure-Funktion — EINE Regel-Quelle mit src/BoardAggregator.js (Cross-Build-Import,
 // kein Client-Duplikat).
@@ -2062,6 +2063,7 @@ function ProjectSection({ project, onOpenSpec, onStoryClick, onSpecifyIdea, coll
         <FeatureRow
           key={feature.id}
           feature={feature}
+          projectSlug={slug}
           onOpenSpec={onOpenSpec}
           onStoryClick={onStoryClick}
           onSpecifyIdea={onSpecifyIdea}
@@ -2088,6 +2090,7 @@ function ProjectSection({ project, onOpenSpec, onStoryClick, onSpecifyIdea, coll
  *
  * @param {{
  *   feature: object,
+ *   projectSlug?: string,
  *   onOpenSpec?: (relPath: string) => void,
  *   onStoryClick?: (story: object) => void,
  *   onSpecifyIdea?: (story: object, triggerEl: HTMLElement) => void,
@@ -2097,7 +2100,7 @@ function ProjectSection({ project, onOpenSpec, onStoryClick, onSpecifyIdea, coll
  *   specifyJobs?: object,
  * }} props
  */
-function FeatureRow({ feature, onOpenSpec, onStoryClick, onSpecifyIdea, isCollapsed = false, onCollapseToggle, hasRestrictingFilter = false, specifyJobs }) {
+function FeatureRow({ feature, projectSlug, onOpenSpec, onStoryClick, onSpecifyIdea, isCollapsed = false, onCollapseToggle, hasRestrictingFilter = false, specifyJobs }) {
   // AC2: separate detail-panel open/close state (entkoppelt vom Einklappen)
   const [detailOpen, setDetailOpen] = useState(false);
   const rollup = computeRollup(feature);
@@ -2186,6 +2189,12 @@ function FeatureRow({ feature, onOpenSpec, onStoryClick, onSpecifyIdea, isCollap
             Archiviert
           </span>
         )}
+        {/* feature-umsetzen-button D1/D2: nach StatusBadge/Archiviert-Badge, vor RollupBar;
+            kein Button bei archiviert oder 0 Storys (design.md Abschnitt 1). */}
+        {!isArchivedFeature && rollup.total > 0 && (
+          <FeatureBatchButton feature={feature} projectSlug={projectSlug} />
+        )}
+
         {/* Rollup bar (AC5) */}
         <RollupBar done={rollup.done} total={rollup.total} />
 

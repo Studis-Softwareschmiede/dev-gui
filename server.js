@@ -154,6 +154,8 @@ import { TokenUsageMeter } from './src/TokenUsageMeter.js';
 import { BudgetGuard, BUDGET_RESUME_BUFFER_MS } from './src/BudgetGuard.js';
 import { DrainReportStore } from './src/DrainReportStore.js';
 import { DrainJobRegistry } from './src/DrainJobRegistry.js';
+import { FeatureDrainRegistry } from './src/FeatureDrainRegistry.js';
+import { FeatureDrainRunner } from './src/FeatureDrainRunner.js';
 import { BootDrainRecovery } from './src/BootDrainRecovery.js';
 import { HeadlessFlowRunner } from './src/HeadlessFlowRunner.js';
 import { HeadlessFlowRunnerAdapter } from './src/FlowRunner.js';
@@ -483,6 +485,17 @@ const drainReportStore = new DrainReportStore();
 // manualProjectDrain/nightProjectDrain/nightWatchScheduler) an
 // `BootDrainRecovery` (drain-restart-robustness AC5–AC8, S-283) übergeben.
 const drainJobRegistry = new DrainJobRegistry();
+
+// ── Feature-Umsetzen-Button (feature-umsetzen-button, Owner-Auftrag 2026-07-06) ──
+// Eigene Registry + eigener ProjectJobLock (Dedup je Projekt+Feature) —
+// getrennt von allen anderen headless-Boundaries (kein zweiter Codepfad in
+// einer bestehenden Registry). FeatureDrainRunner spawnt
+// scripts/board-feature-drain.sh aus dem agent-flow-Plugin (agentFlowReader,
+// bereits oben instanziiert) direkt als Kindprozess — kein claude-p-Runner,
+// das Skript selbst spawnt intern je Story `claude -p /agent-flow:flow`.
+const featureDrainRegistry = new FeatureDrainRegistry();
+const featureDrainLock = new ProjectJobLock();
+const featureDrainRunner = new FeatureDrainRunner({ registry: featureDrainRegistry, lock: featureDrainLock, auditStore });
 let orphanedDrains = [];
 try {
   orphanedDrains = drainJobRegistry.reconcileOrphans();
@@ -756,6 +769,9 @@ const deps = {
   repoSizeScanner,
   repoSizeStore,
   repoSizeRefreshLock,
+  featureDrainRegistry,
+  featureDrainRunner,
+  featureDrainLock,
   assistService,
   knowledgeSourceService,
   // headless-reconcile-runner AC1-AC9: getrennter claude -p-Kindprozess-Runner
