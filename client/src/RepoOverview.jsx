@@ -10,6 +10,11 @@
  * fabric-intake-dialog:
  *   AC1 — „Neues Projekt / Idee erfassen"-Button öffnet IntakeDialog (mode="new").
  *          onNavigate('factory') nach erfolgreichem Submit (AC4).
+ *          SUPERSEDED für den Einstiegspunkt selbst durch neues-projekt-
+ *          auswahl-dialog AC1 (S-302): der Button öffnet jetzt zuerst den
+ *          `NewProjectChooserDialog` (drei Wege); die Option „Neues Projekt"
+ *          rendert darin diesen `IntakeDialog`-`new`-Modus UNVERÄNDERT (AC2 —
+ *          gleiche Props/Sequenz/Handler wie zuvor direkt hier).
  *   AC2 — new-mode zwei-Trigger-Sequenz: newStep und heldIdeaText werden im Parent
  *          gehalten (nicht nur lokal im Dialog), damit sie den Pane-Wechsel nach
  *          Terminal (onNavigate('factory')) überleben. IntakeDialog nimmt diese Props
@@ -17,6 +22,17 @@
  *          Nach Abschluss von Trigger 2 (und bei explizitem Schließen) wird der
  *          Sequenz-State zurückgesetzt (resetNewSequence), damit ein erneutes Öffnen
  *          sauber in Schritt 1 startet (kein Bootstrap-Skip bei Wiedereröffnung).
+ *
+ * neues-projekt-auswahl-dialog (S-302 — AC1, AC2, AC8):
+ *   AC1 — Der Einstiegs-Button öffnet jetzt den `NewProjectChooserDialog`
+ *          (drei gleichwertige Optionen: „Neues Projekt", „Aus Obsidian
+ *          übernehmen", „Adopt"), statt direkt den IntakeDialog zu zeigen.
+ *   AC2 — Die Option „Neues Projekt" im Chooser rendert exakt denselben
+ *          IntakeDialog-`new`-Modus mit denselben Props/Handlern, die zuvor
+ *          direkt hier gerendert wurden (newStep/heldIdeaText-State bleibt
+ *          unverändert im Parent gehalten).
+ *   AC8 — Reiner Frontend-Change: keine neuen Endpunkte, nutzt bestehende
+ *          Komponenten (ObsidianImportSection, AdoptSection) unverändert.
  *
  * A11y (WCAG 2.1 AA):
  *   - <main> mit aria-label.
@@ -56,6 +72,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { IntakeDialog } from './IntakeDialog.jsx';
+import { NewProjectChooserDialog } from './NewProjectChooserDialog.jsx';
 import { NightWatchStatusBadge } from './NightWatchStatusBadge.jsx';
 import { ClaudeAuthBadge } from './ClaudeAuthBadge.jsx';
 import { NightRunsSection } from './NightRunsSection.jsx';
@@ -72,6 +89,10 @@ export function RepoOverview({ navigateFactory, onNavigate, fetchFn }) {
   const [loadState, setLoadState] = useState('idle'); // 'idle'|'loading'|'ok'|'error'
   const [loadError, setLoadError] = useState('');
   const [repos, setRepos] = useState([]);
+
+  // ── Auswahl-Dialog state (AC1 — neues-projekt-auswahl-dialog, S-302) ───────
+  const [chooserOpen, setChooserOpen] = useState(false);
+  const chooserTriggerRef = useRef(null);
 
   // ── Intake-Dialog state (AC1, AC2 — fabric-intake-dialog, new mode) ────────
   const [intakeNewOpen, setIntakeNewOpen] = useState(false);
@@ -97,6 +118,14 @@ export function RepoOverview({ navigateFactory, onNavigate, fetchFn }) {
   }, []);
 
   /**
+   * AC1 (neues-projekt-auswahl-dialog, S-302): Einstiegs-Button öffnet jetzt
+   * zuerst den Drei-Wege-Auswahl-Dialog statt direkt den IntakeDialog.
+   */
+  const handleChooserOpen = useCallback(() => {
+    setChooserOpen(true);
+  }, []);
+
+  /**
    * Reset the new-mode sequence state to its initial values.
    * Called after Trigger 2 completes (dialog closes) and on explicit close,
    * so a re-opened dialog always starts clean in step 1 with an empty field
@@ -107,11 +136,19 @@ export function RepoOverview({ navigateFactory, onNavigate, fetchFn }) {
     setHeldIdeaText('');
   }, []);
 
-  const handleIntakeNewClose = useCallback(() => {
-    setIntakeNewOpen(false);
-    // Reset sequence so a future re-open starts in step 1 (AC2, I1).
-    resetNewSequence();
-  }, [resetNewSequence]);
+  /**
+   * AC1: Schließen-Affordanz (Button/Escape) schließt den Auswahl-Dialog,
+   * ohne einen Weg auszulösen. Ist die „Neues Projekt"-Option gerade offen,
+   * wird deren Sequenz-State ebenfalls zurückgesetzt (gleiches Verhalten wie
+   * das bisherige explizite Schließen des IntakeDialog selbst).
+   */
+  const handleChooserClose = useCallback(() => {
+    setChooserOpen(false);
+    if (intakeNewOpen) {
+      setIntakeNewOpen(false);
+      resetNewSequence();
+    }
+  }, [intakeNewOpen, resetNewSequence]);
 
   /**
    * AC2 (S-133): signals that the step just advanced (Trigger 1 → Trigger 2).
@@ -148,6 +185,10 @@ export function RepoOverview({ navigateFactory, onNavigate, fetchFn }) {
       // Trigger 2 (requirement) completed → close dialog and reset sequence.
       setIntakeNewOpen(false);
       resetNewSequence();
+      // AC1 (neues-projekt-auswahl-dialog, S-302): der komplette Auswahl-Dialog
+      // schließt mit, sobald die „Neues Projekt"-Sequenz abgeschlossen ist —
+      // sonst bliebe die (jetzt leere) Chooser-Shell sichtbar offen.
+      setChooserOpen(false);
     }
     // For Trigger 1: dialog stays open (justAdvanced=true), user sees step 2.
     if (onNavigate) onNavigate(view);
@@ -191,50 +232,50 @@ export function RepoOverview({ navigateFactory, onNavigate, fetchFn }) {
         <NightWatchStatusBadge fetchFn={fetchFn} />
         {/* claude-auth-health S-209 AC5: Panel-Badge Claude-Auth ok/abgelaufen/unbekannt */}
         <ClaudeAuthBadge fetchFn={fetchFn} />
-        {/* AC1 fabric-intake-dialog: new-mode trigger */}
-        {!intakeNewOpen ? (
-          <button
-            type="button"
-            style={styles.btnNewProject}
-            onClick={handleIntakeNewOpen}
-            aria-label="Neues Projekt / Idee erfassen — öffnet Intake-Dialog"
-            data-testid="intake-new-btn"
-          >
-            + Neues Projekt / Idee erfassen
-          </button>
-        ) : (
-          <button
-            type="button"
-            style={styles.btnNewProjectClose}
-            onClick={handleIntakeNewClose}
-            aria-label="Intake-Dialog schließen"
-            data-testid="intake-new-close-btn"
-          >
-            ✕ Schließen
-          </button>
-        )}
+        {/* AC1 neues-projekt-auswahl-dialog: Einstieg öffnet den Auswahl-Dialog
+            (ersetzt den vorherigen direkten Sprung in den IntakeDialog). */}
+        <button
+          ref={chooserTriggerRef}
+          type="button"
+          style={styles.btnNewProject}
+          onClick={handleChooserOpen}
+          aria-label="Projekt in die Fabrik holen — öffnet Auswahl-Dialog"
+          data-testid="intake-new-btn"
+        >
+          + Neues Projekt / Idee erfassen
+        </button>
       </div>
 
       {/* drain-completion-report S-255 AC7b: Nacht-Läufe-Sektion, bei der
           Nachtwächter-Statusanzeige (headerRow oben) */}
       <NightRunsSection fetchFn={fetchFn} />
 
-      {/* Intake-Dialog (new mode) — visible when intakeNewOpen.
-          AC2 (S-133): newStep and heldIdeaText are held here (parent) so they
-          survive when IntakeDialog unmounts/remounts during navigation.
-          onNewStepChange and onIdeaTextChange lift state back to parent. */}
-      {intakeNewOpen && (
-        <div style={styles.intakeNewWrapper} data-testid="intake-new-dialog-wrapper">
-          <IntakeDialog
-            mode="new"
-            onNavigate={handleIntakeNewNavigate}
-            newStep={newStep}
-            onNewStepChange={handleIntakeNewStepChange}
-            heldIdeaText={heldIdeaText}
-            onIdeaTextChange={setHeldIdeaText}
-          />
-        </div>
-      )}
+      {/* AC1 neues-projekt-auswahl-dialog (S-302): Drei-Wege-Auswahl-Dialog.
+          Die Option „Neues Projekt" rendert den bestehenden IntakeDialog
+          new-Modus unverändert (AC2) über den renderNewProject-Render-Prop —
+          newStep/heldIdeaText bleiben hier (Parent) gehalten, unverändert
+          gegenüber dem bisherigen direkten Mount. Auswahl der Option öffnet
+          den IntakeDialog sofort (kein zusätzlicher Zwischenklick nötig). */}
+      <NewProjectChooserDialog
+        open={chooserOpen}
+        onClose={handleChooserClose}
+        onSelectNewProject={handleIntakeNewOpen}
+        fetchFn={fetchFn}
+        onNavigate={onNavigate}
+        triggerRef={chooserTriggerRef}
+        renderNewProject={() => (
+          <div style={styles.intakeNewWrapper} data-testid="intake-new-dialog-wrapper">
+            <IntakeDialog
+              mode="new"
+              onNavigate={handleIntakeNewNavigate}
+              newStep={newStep}
+              onNewStepChange={handleIntakeNewStepChange}
+              heldIdeaText={heldIdeaText}
+              onIdeaTextChange={setHeldIdeaText}
+            />
+          </div>
+        )}
+      />
 
       {/* Loading */}
       {loadState === 'loading' && (
@@ -385,18 +426,6 @@ const styles = {
     minHeight: 44,
     flexShrink: 0,
     // Focus ring preserved (no outline:none)
-  },
-
-  btnNewProjectClose: {
-    background: 'transparent',
-    color: '#9ca3af',
-    border: '1px solid #374151',
-    borderRadius: 4,
-    padding: '8px 16px',
-    fontSize: 13,
-    cursor: 'pointer',
-    minHeight: 44,
-    flexShrink: 0,
   },
 
   intakeNewWrapper: {

@@ -10,6 +10,12 @@
  *              entfernt (siehe Block unten + CockpitNewStory.test.jsx).
  *          (b) RepoOverview has „Neues Projekt / Idee erfassen"-Button (mode=new).
  *          Trigger opens the dialog, mode is correct, dialog can be closed.
+ *          SUPERSEDED für den Mount-Weg selbst durch neues-projekt-auswahl-dialog
+ *          AC1/AC2 (S-302): der Button öffnet jetzt zuerst den
+ *          `NewProjectChooserDialog` (drei Optionen); die Tests hier klicken
+ *          daher zusätzlich die „Neues Projekt"-Option im Chooser, bevor der
+ *          IntakeDialog selbst sichtbar wird. Das dahinterliegende IntakeDialog-
+ *          Verhalten (Sequenz, Props, Handler) bleibt unverändert (AC2).
  *   AC2 — new-mode two-trigger sequence (S-133):
  *          Trigger 1 (/agent-flow:new-project) 202 → onNewStepChange('trigger2') + navigate;
  *          dialog stays open (dialog does NOT close after Trigger 1).
@@ -78,6 +84,21 @@ function makeCommandFetch(status, body = {}) {
   });
 }
 
+/**
+ * neues-projekt-auswahl-dialog AC1/AC2 (S-302): der Haupt-Button öffnet jetzt
+ * zuerst den Drei-Wege-Auswahl-Dialog; erst die Auswahl „Neues Projekt" zeigt
+ * den IntakeDialog. Diese Helper-Funktion kapselt beide Klicks, damit die
+ * bestehenden IntakeDialog-Verhaltens-Tests unverändert bleiben können.
+ */
+async function openIntakeDialogViaChooser() {
+  const mainBtn = document.querySelector('[data-testid="intake-new-btn"]');
+  await act(async () => { fireEvent.click(mainBtn); });
+
+  const chooserOption = document.querySelector('[data-testid="chooser-option-new"]');
+  expect(chooserOption).toBeTruthy();
+  await act(async () => { fireEvent.click(chooserOption); });
+}
+
 // ── CockpitView mount: „Neue Story" ersetzt „Änderung erfassen" ───────────────
 // new-story-chat AC1 (S-227): der frühere IntakeDialog mode="change"-Trigger
 // dieser Sidebar-Box ist ENTFERNT; an seiner Stelle steht der „Neue Story"-
@@ -133,7 +154,7 @@ describe('IntakeMountIntegration — RepoOverview: Neues Projekt (mode=new)', ()
     });
   });
 
-  it('AC1: clicking trigger opens IntakeDialog in new mode (sequence status indicator visible)', async () => {
+  it('AC1: clicking trigger opens the chooser, selecting "Neues Projekt" opens IntakeDialog in new mode (sequence status indicator visible)', async () => {
     render(
       React.createElement(RepoOverview, {
         navigateFactory: jest.fn(),
@@ -146,8 +167,7 @@ describe('IntakeMountIntegration — RepoOverview: Neues Projekt (mode=new)', ()
       expect(document.querySelector('[data-testid="intake-new-btn"]')).toBeTruthy();
     });
 
-    const openBtn = document.querySelector('[data-testid="intake-new-btn"]');
-    await act(async () => { fireEvent.click(openBtn); });
+    await openIntakeDialogViaChooser();
 
     // Dialog wrapper visible
     const wrapper = document.querySelector('[data-testid="intake-new-dialog-wrapper"]');
@@ -160,7 +180,7 @@ describe('IntakeMountIntegration — RepoOverview: Neues Projekt (mode=new)', ()
     expect(seqStatus.textContent).toMatch(/schritt 1 von 2/i);
   });
 
-  it('AC1: close button hides IntakeDialog (trigger-button reappears)', async () => {
+  it('AC1: chooser close button hides the chooser + IntakeDialog (trigger-button reappears)', async () => {
     render(
       React.createElement(RepoOverview, {
         navigateFactory: jest.fn(),
@@ -173,12 +193,11 @@ describe('IntakeMountIntegration — RepoOverview: Neues Projekt (mode=new)', ()
     });
 
     // Open
-    const openBtn = document.querySelector('[data-testid="intake-new-btn"]');
-    await act(async () => { fireEvent.click(openBtn); });
+    await openIntakeDialogViaChooser();
     expect(document.querySelector('[data-testid="intake-new-dialog-wrapper"]')).toBeTruthy();
 
-    // Close
-    const closeBtn = document.querySelector('[data-testid="intake-new-close-btn"]');
+    // Close (chooser-level close button — AC1 neues-projekt-auswahl-dialog)
+    const closeBtn = document.querySelector('[data-testid="chooser-close-btn"]');
     await act(async () => { fireEvent.click(closeBtn); });
 
     // Wrapper gone, open-button reappears
@@ -216,9 +235,8 @@ describe('IntakeMountIntegration — RepoOverview: Neues Projekt (mode=new)', ()
       expect(document.querySelector('[data-testid="intake-new-btn"]')).toBeTruthy();
     });
 
-    // Open dialog
-    const openBtn = document.querySelector('[data-testid="intake-new-btn"]');
-    await act(async () => { fireEvent.click(openBtn); });
+    // Open dialog (via chooser — AC1 neues-projekt-auswahl-dialog)
+    await openIntakeDialogViaChooser();
 
     // Fill idea text (pre-captured for step 2)
     const textarea = document.querySelector('#intake-idea');
@@ -273,9 +291,8 @@ describe('IntakeMountIntegration — RepoOverview: Neues Projekt (mode=new)', ()
       expect(document.querySelector('[data-testid="intake-new-btn"]')).toBeTruthy();
     });
 
-    // Open dialog
-    const openBtn = document.querySelector('[data-testid="intake-new-btn"]');
-    await act(async () => { fireEvent.click(openBtn); });
+    // Open dialog (via chooser — AC1 neues-projekt-auswahl-dialog)
+    await openIntakeDialogViaChooser();
 
     // Enter idea text
     const textarea = document.querySelector('#intake-idea');
@@ -337,8 +354,8 @@ describe('IntakeMountIntegration — RepoOverview: Neues Projekt (mode=new)', ()
       expect(document.querySelector('[data-testid="intake-new-btn"]')).toBeTruthy();
     });
 
-    // Open dialog and enter idea
-    await act(async () => { fireEvent.click(document.querySelector('[data-testid="intake-new-btn"]')); });
+    // Open dialog (via chooser — AC1 neues-projekt-auswahl-dialog) and enter idea
+    await openIntakeDialogViaChooser();
     const textarea = document.querySelector('#intake-idea');
     await act(async () => {
       fireEvent.change(textarea, { target: { value: 'Gespeicherte Idee' } });
@@ -387,8 +404,8 @@ describe('IntakeMountIntegration — RepoOverview: Neues Projekt (mode=new)', ()
       expect(document.querySelector('[data-testid="intake-new-btn"]')).toBeTruthy();
     });
 
-    // Open dialog
-    await act(async () => { fireEvent.click(document.querySelector('[data-testid="intake-new-btn"]')); });
+    // Open dialog (via chooser — AC1 neues-projekt-auswahl-dialog)
+    await openIntakeDialogViaChooser();
 
     // Fill primary text
     const textarea = document.querySelector('#intake-idea');
@@ -444,8 +461,8 @@ describe('IntakeMountIntegration — RepoOverview: Neues Projekt (mode=new)', ()
 
     // ── First complete sequence ────────────────────────────────────────────────
 
-    // Open dialog
-    await act(async () => { fireEvent.click(document.querySelector('[data-testid="intake-new-btn"]')); });
+    // Open dialog (via chooser — AC1 neues-projekt-auswahl-dialog)
+    await openIntakeDialogViaChooser();
 
     // Enter idea text
     const textarea = document.querySelector('#intake-idea');
@@ -468,9 +485,7 @@ describe('IntakeMountIntegration — RepoOverview: Neues Projekt (mode=new)', ()
 
     // ── Re-open: must start in step 1, not stale step 2 ──────────────────────
 
-    const reopenBtn = document.querySelector('[data-testid="intake-new-btn"]');
-    expect(reopenBtn).toBeTruthy();
-    await act(async () => { fireEvent.click(reopenBtn); });
+    await openIntakeDialogViaChooser();
 
     // Dialog wrapper visible again
     expect(document.querySelector('[data-testid="intake-new-dialog-wrapper"]')).toBeTruthy();
