@@ -13,6 +13,8 @@ import { FeatureDrainRunner } from '../src/FeatureDrainRunner.js';
 
 function makeChild() {
   const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
   return child;
 }
 
@@ -87,5 +89,24 @@ describe('FeatureDrainRunner', () => {
     spawned.child.emit('error', new Error('ENOENT'));
     expect(registry.markFailed).toHaveBeenCalledWith('dev-gui', 'F-001', expect.stringContaining('ENOENT'));
     expect(lock.release).toHaveBeenCalledWith('dev-gui:F-001');
+  });
+
+  it('close(1) mit stderr-Ausgabe -> markFailed enthält den Ausgabe-Ausschnitt (2026-07-06-Vorfall)', () => {
+    const { registry, lock, spawnFn, spawned } = makeDeps();
+    const runner = new FeatureDrainRunner({ registry, lock, spawnFn });
+    runner.start({ projectSlug: 'dev-gui', repoPath: '/repo', featureId: 'F-001', agentFlowScriptsDir: '/s' });
+    spawned.child.stderr.emit('data', Buffer.from('ModuleNotFoundError: No module named \'yaml\'\n'));
+    spawned.child.emit('close', 1);
+    expect(registry.markFailed).toHaveBeenCalledWith('dev-gui', 'F-001', expect.stringContaining('ModuleNotFoundError'));
+  });
+
+  it('Ausgabe-Ausschnitt wird auf 2000 Zeichen gedeckelt (kein unbegrenzter Speicherverbrauch)', () => {
+    const { registry, lock, spawnFn, spawned } = makeDeps();
+    const runner = new FeatureDrainRunner({ registry, lock, spawnFn });
+    runner.start({ projectSlug: 'dev-gui', repoPath: '/repo', featureId: 'F-001', agentFlowScriptsDir: '/s' });
+    spawned.child.stdout.emit('data', Buffer.from('x'.repeat(5000)));
+    spawned.child.emit('close', 1);
+    const [, , message] = registry.markFailed.mock.calls[0];
+    expect(message.length).toBeLessThanOrEqual(2000 + 'Exit-Code 1 — '.length);
   });
 });
