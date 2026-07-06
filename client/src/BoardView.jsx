@@ -2190,12 +2190,10 @@ function FeatureRow({ feature, projectSlug, onOpenSpec, onStoryClick, onSpecifyI
           </span>
         )}
         {/* feature-umsetzen-button D1/D2: nach StatusBadge/Archiviert-Badge, vor RollupBar;
-            kein Button bei archiviert, 0 Storys oder nur 1 Story (2026-07-06-Owner-Feedback:
-            Bündelung bringt bei nur 1 Story keinen Vorteil — der Server lehnt das ohnehin ab
-            (board-feature-drain.sh-Schwelle); der Button erschien bisher trotzdem und zeigte
-            nach Klick nur eine Ablehnungs-Fehlermeldung. Statt diese Fehlermeldung anzuzeigen,
-            erscheint der Button für Features mit <2 Storys jetzt gar nicht erst.). */}
-        {!isArchivedFeature && rollup.total > 1 && (
+            kein Button bei archiviert oder 0 Storys (design.md Abschnitt 1). Owner-Entscheidung
+            2026-07-06 (zweite Korrektur): der Button erscheint unabhängig von der Story-Anzahl —
+            1 Story oder 30, immer klickbar, kein Ablehnungs-Check. */}
+        {!isArchivedFeature && rollup.total > 0 && (
           <FeatureBatchButton feature={feature} projectSlug={projectSlug} />
         )}
 

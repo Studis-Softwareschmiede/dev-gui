@@ -107,10 +107,8 @@ export function create({ boardAggregator, featureDrainRegistry, featureDrainRunn
     if (!feature) return res.status(404).json({ error: 'Feature nicht gefunden' });
 
     const stories = await readAllFeatureStories(project.repo_path, featureId);
-    if (stories.length < 2) {
-      return res.status(400).json({
-        error: 'Feature hat weniger als 2 Storys — Bündelung bringt hier keinen Vorteil. Bitte einzeln über "Board abarbeiten" verarbeiten.',
-      });
+    if (stories.length === 0) {
+      return res.status(400).json({ error: 'Feature hat keine Storys' });
     }
 
     const lockKey = `${slug}:${featureId}`;

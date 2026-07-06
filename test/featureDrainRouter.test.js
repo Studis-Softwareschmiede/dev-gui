@@ -119,13 +119,21 @@ describe('GET/POST /api/board/projects/:slug/features/:featureId/batch', () => {
     expect(body.state).toBe('running');
   });
 
-  it('POST: <2 Storys -> 400, kein Runner-Start', async () => {
-    const { app, repoPath: rp, featureDrainRunner } = makeApp();
-    writeStory(rp(), 'S-001', 'F-001', 'To Do');
+  it('POST: 0 Storys -> 400, kein Runner-Start', async () => {
+    const { app, featureDrainRunner } = makeApp();
     const { status, body } = await request(app, 'POST', '/api/board/projects/demo/features/F-001/batch');
     expect(status).toBe(400);
-    expect(body.error).toMatch(/weniger als 2/);
+    expect(body.error).toMatch(/keine Storys/);
     expect(featureDrainRunner.start).not.toHaveBeenCalled();
+  });
+
+  it('POST: genau 1 Story -> 202, Runner gestartet (Owner-Entscheidung 2026-07-06: keine Mindestanzahl mehr)', async () => {
+    const { app, repoPath: rp, featureDrainRunner } = makeApp({ pluginRoot: '/plugin-root' });
+    writeStory(rp(), 'S-001', 'F-001', 'To Do');
+    const { status, body } = await request(app, 'POST', '/api/board/projects/demo/features/F-001/batch');
+    expect(status).toBe(202);
+    expect(body.state).toBe('running');
+    expect(featureDrainRunner.start).toHaveBeenCalled();
   });
 
   it('POST: ≥2 Storys -> 202, Runner gestartet mit korrektem scriptsDir', async () => {
