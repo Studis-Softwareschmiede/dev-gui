@@ -31,6 +31,15 @@ export function FeatureBatchButton({ feature, projectSlug, fetchFn }) {
       if (!res.ok) return;
       const data = await res.json();
       if (data?.state) setState(data.state);
+      // 2026-07-06 (dritte Runde, Owner-Feedback): der Server liefert bei
+      // einem asynchron beendeten Lauf (z.B. Exit 3 — Depends-Gate/Blockade)
+      // eine konkrete Erklärung im GET-Response mit — vorher wurde NUR
+      // `state` gelesen, `error` nie, wodurch der Button beim Polling
+      // lautlos von "In Progress" auf "Umsetzen" zurückfiel, ohne den Grund
+      // zu zeigen. Nur SETZEN, nie hier löschen — das würde eine gerade erst
+      // von einem direkten POST-Fehlschlag gesetzte Meldung sofort wieder
+      // überschreiben (loadState() wird auch dort im Anschluss aufgerufen).
+      if (data?.error) setError(data.error);
     } catch {
       // best-effort — Zustand bleibt unverändert bei Netzwerkfehler
     }
