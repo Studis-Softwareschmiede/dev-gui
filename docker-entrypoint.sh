@@ -40,8 +40,22 @@ ln -sf "$HOME/.claude/state.json" "$HOME/.claude.json"
 # ── AC6: git credential helper for private repo clone ────────────────────────
 # If GH_TOKEN is set, configure git so the private agent-flow repo can be cloned.
 # The resolved URL contains the token — do NOT log it.
+#
+# SCOPED to the agent-flow repo only (2026-07-06-Vorfall): eine frühere,
+# unscoped Regel ("https://github.com/" -> insteadOf für ALLE github.com-URLs)
+# hat dauerhaft den zum Boot-Zeitpunkt gültigen GH_TOKEN in JEDEN Git-Zugriff
+# eingebaut — auch in den von /workspace/*-Projekten (z.B. dev-guis eigenes
+# Repo). Der eigentlich korrekt und regelmäßig erneuerte `gh`-Login
+# (ensure-gh-auth.sh, "gh auth setup-git") wurde dadurch für ALLE
+# github.com-Zugriffe von diesem einen, nach ~1h ablaufenden Token
+# überstimmt — Git-Pushes aus länger laufenden Containern schlugen dann mit
+# "Invalid username or token" fehl, obwohl `gh auth status` einen gültigen,
+# aktiven Login zeigte. Die Regel jetzt exakt auf die eine Adresse begrenzt,
+# die für den (chicken-and-egg) Erst-Bootstrap des privaten agent-flow-Plugins
+# gebraucht wird — alle anderen github.com-Zugriffe nutzen den echten,
+# sich selbst erneuernden gh-Login.
 if [ -n "${GH_TOKEN:-}" ]; then
-  git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
+  git config --global url."https://x-access-token:${GH_TOKEN}@github.com/Studis-Softwareschmiede/agent-flow".insteadOf "https://github.com/Studis-Softwareschmiede/agent-flow"
 fi
 
 # ── Claude-Code-OAuth-Token (AC4 — claude-code-oauth-token) ──────────────────
