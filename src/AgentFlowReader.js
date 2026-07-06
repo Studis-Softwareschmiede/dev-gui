@@ -22,12 +22,12 @@
  * @module AgentFlowReader
  */
 
-import { readdir, readFile, stat } from 'node:fs/promises';
+import { readdir, readFile, stat, access } from 'node:fs/promises';
 import { join, basename, relative, sep, resolve } from 'node:path';
 import { homedir } from 'node:os';
 
 /** Default FS dependencies (real node:fs/promises). */
-const defaultFsDeps = { readdir, readFile, stat };
+const defaultFsDeps = { readdir, readFile, stat, access };
 
 /**
  * Parse YAML-like frontmatter from a Markdown file.
@@ -289,15 +289,63 @@ export class AgentFlowReader {
       return envOverride.trim();
     }
 
-    // 2. Find newest version dir under $HOME/.claude/plugins/cache/agent-flow
-    // Structure: $HOME/.claude/plugins/cache/agent-flow/<slug>/<version>/
-    // mindepth=2, maxdepth=2  →  we list depth 1 then depth 2
+    const candidates = await this.#gatherCandidates();
+    if (candidates.length === 0) return null;
+    // Return the newest (latest mtime)
+    candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    return candidates[0].path;
+  }
+
+  /**
+   * Wie `resolvePluginRoot()`, aber verlangt zusätzlich, dass eine bestimmte
+   * Datei relativ zum Plugin-Root existiert (feature-umsetzen-button,
+   * 2026-07-06 — Vorfall: zwei Plugin-Versionsverzeichnisse mit IDENTISCHEM
+   * `mtimeMs` — beide während desselben Container-Boot-Update-Laufs
+   * geschrieben — machten `resolvePluginRoot()`s reine mtime-Sortierung
+   * nicht-deterministisch; das ältere Verzeichnis (ohne die gesuchte Datei)
+   * gewann den Tiebreak und ein Spawn schlug mit "ENOENT"/Exit 127 fehl).
+   *
+   * Statt eine einzelne Kandidatur blind zu vertrauen, werden alle
+   * Versionsverzeichnisse (neueste zuerst) auf Vorhandensein der Datei
+   * geprüft — das erste Verzeichnis, das sie tatsächlich enthält, gewinnt.
+   * Bei einem echten mtime-Gleichstand zwischen zwei Versionen, die BEIDE
+   * die Datei enthalten, bleibt die Reihenfolge zwar weiterhin technisch
+   * unbestimmt, aber funktional gleichwertig (die Datei existiert so oder so).
+   *
+   * @param {string} relativeFilePath  z.B. "scripts/board-feature-drain.sh"
+   * @returns {Promise<string|null>}
+   */
+  async resolvePluginRootContaining(relativeFilePath) {
+    const envOverride = process.env.AGENT_FLOW_PLUGIN_ROOT;
+    if (envOverride && envOverride.trim()) {
+      return envOverride.trim();
+    }
+
+    const candidates = await this.#gatherCandidates();
+    candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    for (const candidate of candidates) {
+      try {
+        await this.#fsDeps.access(join(candidate.path, relativeFilePath));
+        return candidate.path;
+      } catch {
+        // diese Version hat die Datei nicht — nächstjüngere prüfen
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Sammelt alle Plugin-Versionsverzeichnisse unter
+   * $HOME/.claude/plugins/cache/agent-flow/<slug>/<version>/ mit ihrem mtime.
+   * @returns {Promise<Array<{path: string, mtimeMs: number}>>}
+   */
+  async #gatherCandidates() {
     const cacheBase = join(homedir(), '.claude', 'plugins', 'cache', 'agent-flow');
     let depth1Entries;
     try {
       depth1Entries = await this.#fsDeps.readdir(cacheBase, { withFileTypes: true });
     } catch {
-      return null;
+      return [];
     }
 
     const candidates = [];
@@ -321,11 +369,7 @@ export class AgentFlowReader {
         }
       }
     }
-
-    if (candidates.length === 0) return null;
-    // Return the newest (latest mtime)
-    candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
-    return candidates[0].path;
+    return candidates;
   }
 
   /**

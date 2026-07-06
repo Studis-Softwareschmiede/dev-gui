@@ -113,13 +113,19 @@ export function create({ boardAggregator, featureDrainRegistry, featureDrainRunn
 
     let pluginRoot;
     try {
-      pluginRoot = await agentFlowReader.resolvePluginRoot();
+      // 2026-07-06-Vorfall: resolvePluginRoot() allein kann bei einem mtime-
+      // Gleichstand zweier Plugin-Versionsverzeichnisse (z.B. beide während
+      // desselben Container-Boot-Updates geschrieben) eine ÄLTERE Version
+      // ohne dieses Skript liefern -> Exit 127. resolvePluginRootContaining()
+      // verlangt zusätzlich, dass board-feature-drain.sh in der gewählten
+      // Version tatsächlich existiert.
+      pluginRoot = await agentFlowReader.resolvePluginRootContaining('scripts/board-feature-drain.sh');
     } catch {
       pluginRoot = null;
     }
     if (!pluginRoot) {
       featureDrainLock.release(lockKey);
-      return res.status(503).json({ error: 'agent-flow-Plugin nicht gefunden' });
+      return res.status(503).json({ error: 'agent-flow-Plugin nicht gefunden (board-feature-drain.sh fehlt in allen installierten Versionen)' });
     }
 
     featureDrainRunner.start({
