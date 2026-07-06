@@ -2448,13 +2448,11 @@ describe('dev-gui-board-aggregator — AC5: Rollup display (cockpit)', () => {
   });
 });
 
-// ── feature-umsetzen-button — kein Button bei nur 1 Story (Owner-Feedback 2026-07-06) ──
-// Vorher erschien der Button auch bei genau 1 Story, ein Klick wurde vom Server
-// aber immer mit "Feature hat weniger als 2 Storys" abgelehnt (board-feature-
-// drain.sh-Schwelle) — verwirrende, unnötige Fehlermeldung. Der Button
-// erscheint jetzt gar nicht erst, wenn Bündelung keinen Vorteil bringt.
-describe('feature-umsetzen-button — kein Button bei <2 Storys (Owner-Feedback 2026-07-06)', () => {
-  it('genau 1 Story -> KEIN "Umsetzen"-Button', async () => {
+// ── feature-umsetzen-button — Button unabhängig von der Story-Anzahl (Owner-Entscheidung 2026-07-06, zweite Korrektur) ──
+// Der Button erscheint bei JEDER Story-Anzahl ≥1 (egal ob 1 oder 30) — keine
+// Mindestanzahl-Sonderregel mehr.
+describe('feature-umsetzen-button — erscheint unabhängig von der Story-Anzahl (Owner-Entscheidung 2026-07-06)', () => {
+  it('genau 1 Story -> Button erscheint trotzdem', async () => {
     const featureSingleStory = {
       id: 'F-single',
       title: 'Nur eine Story',
@@ -2467,10 +2465,8 @@ describe('feature-umsetzen-button — kein Button bei <2 Storys (Owner-Feedback 
     const { container } = renderCockpit('project-single');
 
     await waitFor(() => {
-      const rollup = container.querySelector('[data-testid="rollup-bar"]');
-      expect(rollup).toBeTruthy();
+      expect(container.textContent).toMatch(/Umsetzen/);
     });
-    expect(container.textContent).not.toMatch(/Umsetzen/);
   });
 
   it('2 Storys -> Button erscheint weiterhin', async () => {
