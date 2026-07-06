@@ -97,6 +97,37 @@ describe('FeatureBatchButton — 3 Zustände', () => {
     await waitFor(() => expect(btn.textContent).toContain('Umsetzen')); // zurück auf autoritativ 'ready'
   });
 
+  it('Polling erkennt asynchronen Wartezustand (Exit 3) und zeigt die konkrete Server-Meldung (2026-07-06, dritte Runde)', async () => {
+    jest.useFakeTimers();
+    let getCount = 0;
+    const fetchFn = jest.fn(async (url, opts) => {
+      if (opts?.method === 'POST') {
+        return { ok: true, status: 202, json: async () => ({ state: 'running' }) };
+      }
+      getCount += 1;
+      // Erster GET (initial mount): ready. Der ERSTE Poll nach dem Start
+      // (asynchron beendet, Exit 3) meldet konkret, worauf gewartet wird —
+      // vorher wurde diese Information nie gelesen.
+      if (getCount === 1) return { ok: true, status: 200, json: async () => ({ state: 'ready' }) };
+      return {
+        ok: true, status: 200,
+        json: async () => ({ state: 'ready', error: 'WARTET: S-901 wartet auf S-800 (To Do, gehört zu F-002)' }),
+      };
+    });
+    const { getByTestId, getByText } = render(React.createElement(FeatureBatchButton, {
+      feature: { id: 'F-042', title: 'X' }, projectSlug: 'demo', fetchFn,
+    }));
+    const btn = await waitFor(() => getByTestId('feature-batch-btn-F-042'));
+    fireEvent.click(btn);
+    fireEvent.click(getByText('Ja, starten'));
+    await waitFor(() => expect(btn.textContent).toContain('In Progress'));
+
+    await jest.advanceTimersByTimeAsync(4000);
+
+    await waitFor(() => expect(getByText(/S-901 wartet auf S-800/)).toBeTruthy());
+    expect(btn.textContent).toContain('Umsetzen');
+  });
+
   it('Live-Region-Wrapper trägt role=status/aria-live=polite (nicht am Button selbst)', async () => {
     const fetchFn = makeFetch('ready');
     const { container } = render(React.createElement(FeatureBatchButton, {

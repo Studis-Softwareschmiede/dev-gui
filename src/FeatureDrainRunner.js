@@ -87,9 +87,15 @@ export class FeatureDrainRunner {
       if (code === 0) {
         this.#registry.markDone(projectSlug, featureId);
       } else if (code === 3) {
-        // board-feature-drain.sh Exit 3 — Feature wartet auf eine blockierte
-        // Story (Owner-Entscheidung 2026-07-06: kein Fehler, echtes Warten).
-        this.#registry.markFailed(projectSlug, featureId, 'Feature wartet auf eine blockierte Story');
+        // board-feature-drain.sh Exit 3 — Feature wartet (kein Fehler im
+        // engeren Sinn: entweder eine echte Blockade oder ein noch offenes
+        // Depends-Gate). Owner-Feedback 2026-07-06 (dritte Runde): der Button
+        // sprang zuvor lautlos zurück auf "Umsetzen" mit einer generischen
+        // Meldung, ohne zu erklären, WORAUF genau gewartet wird — jetzt wird
+        // die tatsächliche Skript-Ausgabe (z.B. "WARTET: S-901 wartet auf
+        // S-800 (To Do, gehört zu F-002)") durchgereicht.
+        const tail = outputTail.trim();
+        this.#registry.markFailed(projectSlug, featureId, tail || 'Feature wartet');
       } else {
         const tail = outputTail.trim();
         this.#registry.markFailed(projectSlug, featureId, `Exit-Code ${code}${tail ? ` — ${tail}` : ''}`);

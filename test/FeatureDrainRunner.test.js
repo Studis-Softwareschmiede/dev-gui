@@ -64,12 +64,22 @@ describe('FeatureDrainRunner', () => {
     expect(lock.release).toHaveBeenCalledWith('dev-gui:F-001');
   });
 
-  it('close(3) -> markFailed mit Blockade-Text + Lock-Release (kein Fehlschlag im engeren Sinn)', () => {
+  it('close(3) mit WARTET-Ausgabe -> markFailed enthält die konkrete Skript-Meldung (2026-07-06, dritte Runde)', () => {
+    const { registry, lock, spawnFn, spawned } = makeDeps();
+    const runner = new FeatureDrainRunner({ registry, lock, spawnFn });
+    runner.start({ projectSlug: 'dev-gui', repoPath: '/repo', featureId: 'F-001', agentFlowScriptsDir: '/s' });
+    spawned.child.stdout.emit('data', Buffer.from('WARTET: S-901 wartet auf S-800 (To Do, gehört zu F-002)\n'));
+    spawned.child.emit('close', 3);
+    expect(registry.markFailed).toHaveBeenCalledWith('dev-gui', 'F-001', expect.stringContaining('S-901 wartet auf S-800'));
+    expect(lock.release).toHaveBeenCalledWith('dev-gui:F-001');
+  });
+
+  it('close(3) ohne Ausgabe -> markFailed mit generischem Wartetext + Lock-Release', () => {
     const { registry, lock, spawnFn, spawned } = makeDeps();
     const runner = new FeatureDrainRunner({ registry, lock, spawnFn });
     runner.start({ projectSlug: 'dev-gui', repoPath: '/repo', featureId: 'F-001', agentFlowScriptsDir: '/s' });
     spawned.child.emit('close', 3);
-    expect(registry.markFailed).toHaveBeenCalledWith('dev-gui', 'F-001', expect.stringContaining('blockiert'));
+    expect(registry.markFailed).toHaveBeenCalledWith('dev-gui', 'F-001', 'Feature wartet');
     expect(lock.release).toHaveBeenCalledWith('dev-gui:F-001');
   });
 
