@@ -1,7 +1,7 @@
 id: S-300
 parent: F-066
 title: ObsidianImportSection aus GitHubView extrahieren/verschieben (Verhalten unveraendert)
-status: In Progress
+status: Done
 priority: P2
 spec: docs/specs/neues-projekt-auswahl-dialog.md
 implements:
@@ -21,7 +21,7 @@ branch: feat/S-300-obsidian-import-section-extract
 pr: null
 blocked_reason: null
 created_at: '2026-07-05T22:17:04Z'
-updated_at: '2026-07-06T05:57:56Z'
-done_at: null
+updated_at: '2026-07-06T06:39:27Z'
+done_at: '2026-07-06T06:39:27Z'
 tok_est: null
 area: fabrik-arbeiten
