@@ -64,6 +64,20 @@ export class FeatureDrainRunner {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
+    // 2026-07-06-Vorfall: ein Exit-Code allein (z.B. "Exit-Code 1") reichte
+    // dem Owner nicht, um die Ursache zu verstehen — manuelles Debugging im
+    // Container war nötig, um "ModuleNotFoundError: yaml" zu finden. Jetzt
+    // wird der letzte Ausgabe-Ausschnitt (stdout+stderr, gedeckelt) mit
+    // erfasst, damit ein Fehlschlag ohne Container-Zugriff diagnostizierbar
+    // ist. Secret-frei: das Skript selbst gibt keine Secrets aus (Bash/Git/
+    // gh-Meldungen), aber vorsorglich gedeckelt (letzte 2000 Zeichen).
+    let outputTail = '';
+    const appendOutput = (chunk) => {
+      outputTail = (outputTail + chunk.toString('utf8')).slice(-2000);
+    };
+    child.stdout?.on('data', appendOutput);
+    child.stderr?.on('data', appendOutput);
+
     const lockKey = `${projectSlug}:${featureId}`;
     child.on('error', (err) => {
       this.#registry.markFailed(projectSlug, featureId, `Start fehlgeschlagen: ${err.message}`);
@@ -77,7 +91,8 @@ export class FeatureDrainRunner {
         // Story (Owner-Entscheidung 2026-07-06: kein Fehler, echtes Warten).
         this.#registry.markFailed(projectSlug, featureId, 'Feature wartet auf eine blockierte Story');
       } else {
-        this.#registry.markFailed(projectSlug, featureId, `Exit-Code ${code}`);
+        const tail = outputTail.trim();
+        this.#registry.markFailed(projectSlug, featureId, `Exit-Code ${code}${tail ? ` — ${tail}` : ''}`);
       }
       this.#lock.release(lockKey);
     });

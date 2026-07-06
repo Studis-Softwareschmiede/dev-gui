@@ -42,6 +42,14 @@ FROM node:20-slim AS runtime
 #   - jq: used by the agent-flow factory skill scripts
 #   - openssl: used by gh-app-token.sh (JWT signing: openssl dgst + openssl base64)
 #   - python3: used by gh-app-token.sh to parse the GitHub API JSON response
+#   - python3-yaml: 2026-07-06-Vorfall (feature-umsetzen-button) — agent-flows
+#     `scripts/board` + `scripts/board-feature-drain.sh` (im Plugin-Cache,
+#     nicht in diesem Image gebaut, aber von FeatureDrainRunner als Kindprozess
+#     gestartet) nutzen durchgehend `python3 -c "import yaml"`. Ohne dieses
+#     Paket schlägt jeder Feature-Batch-Trigger mit "ModuleNotFoundError" fehl
+#     (Exit 1) — reiner apt-Paket statt pip, damit kein Netzwerkzugriff beim
+#     Image-Build nötig ist und die Umgebung mit agent-flows eigener
+#     Erwartung übereinstimmt.
 #   - openssh-client: needed by SshPtyManager (docs/specs/vps-ssh-terminal.md
 #     AC7/AC8/AC10, ADR-019) — spawns the real `ssh` binary via node-pty for
 #     interactive VPS terminal sessions. NOTE: VpsProvisioner (ADR-008,
@@ -58,6 +66,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     openssl \
     openssh-client \
     python3 \
+    python3-yaml \
   && rm -rf /var/lib/apt/lists/*
 
 # AC6 — GitHub CLI (gh): needed by ensure-gh-auth.sh + skill scripts.
