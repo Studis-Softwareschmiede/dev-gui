@@ -1178,3 +1178,79 @@ describe('AC1 — Knowledge stable sort: group-first, then name within same grou
     expect(knowledge.map((k) => k.name)).toEqual(['Alpha Framework', 'Zebra Framework']);
   });
 });
+
+// ── resolvePluginRootContaining — 2026-07-06-Vorfall (feature-umsetzen-button) ──
+// Zwei Plugin-Versionsverzeichnisse mit IDENTISCHEM mtime (beide während
+// desselben Container-Boot-Updates geschrieben) machten resolvePluginRoot()s
+// reine mtime-Sortierung nicht-deterministisch — das ältere Verzeichnis (ohne
+// das gesuchte Skript) gewann den Tiebreak, ein Spawn schlug mit Exit 127 fehl.
+
+import { homedir as _homedir } from 'node:os';
+import { join as _join } from 'node:path';
+
+describe('resolvePluginRootContaining — Tiebreak-Vorfall 2026-07-06', () => {
+  const CACHE_BASE = _join(_homedir(), '.claude', 'plugins', 'cache', 'agent-flow');
+  const OLD_VERSION = _join(CACHE_BASE, 'agent-flow', 'old111111111');
+  const NEW_VERSION = _join(CACHE_BASE, 'agent-flow', 'new222222222');
+
+  function buildTieFsDeps({ scriptInOld = false, scriptInNew = true, tieMtimes = true } = {}) {
+    const dirMap = {
+      [CACHE_BASE]: [dirEntry('agent-flow')],
+      [_join(CACHE_BASE, 'agent-flow')]: [dirEntry('old111111111'), dirEntry('new222222222')],
+    };
+    const scriptFiles = new Set();
+    if (scriptInOld) scriptFiles.add(_join(OLD_VERSION, 'scripts', 'board-feature-drain.sh'));
+    if (scriptInNew) scriptFiles.add(_join(NEW_VERSION, 'scripts', 'board-feature-drain.sh'));
+
+    return {
+      readdir: async (dir) => {
+        if (dir in dirMap) return dirMap[dir];
+        const err = new Error(`ENOENT: ${dir}`); err.code = 'ENOENT'; throw err;
+      },
+      stat: async (path) => {
+        if (path === OLD_VERSION) return { mtimeMs: tieMtimes ? 5000 : 4000 };
+        if (path === NEW_VERSION) return { mtimeMs: 5000 };
+        const err = new Error(`ENOENT: ${path}`); err.code = 'ENOENT'; throw err;
+      },
+      access: async (path) => {
+        if (scriptFiles.has(path)) return undefined;
+        const err = new Error(`ENOENT: ${path}`); err.code = 'ENOENT'; throw err;
+      },
+      readFile: async () => { throw new Error('nicht relevant für diesen Test'); },
+    };
+  }
+
+  it('mtime-Gleichstand + Skript nur in der neuen Version -> wählt trotzdem die neue Version', async () => {
+    const fsDeps = buildTieFsDeps({ scriptInOld: false, scriptInNew: true, tieMtimes: true });
+    const reader = new AgentFlowReader({ fsDeps });
+    const root = await reader.resolvePluginRootContaining('scripts/board-feature-drain.sh');
+    expect(root).toBe(NEW_VERSION);
+  });
+
+  it('Skript in KEINER Version vorhanden -> null (kein Crash)', async () => {
+    const fsDeps = buildTieFsDeps({ scriptInOld: false, scriptInNew: false, tieMtimes: true });
+    const reader = new AgentFlowReader({ fsDeps });
+    const root = await reader.resolvePluginRootContaining('scripts/board-feature-drain.sh');
+    expect(root).toBeNull();
+  });
+
+  it('Skript in beiden Versionen -> wählt die per mtime neuere', async () => {
+    const fsDeps = buildTieFsDeps({ scriptInOld: true, scriptInNew: true, tieMtimes: false });
+    const reader = new AgentFlowReader({ fsDeps });
+    const root = await reader.resolvePluginRootContaining('scripts/board-feature-drain.sh');
+    expect(root).toBe(NEW_VERSION);
+  });
+
+  it('AGENT_FLOW_PLUGIN_ROOT-Override hat Vorrang (unverändert zu resolvePluginRoot)', async () => {
+    const prev = process.env.AGENT_FLOW_PLUGIN_ROOT;
+    process.env.AGENT_FLOW_PLUGIN_ROOT = '/override/path';
+    try {
+      const reader = new AgentFlowReader({ fsDeps: buildTieFsDeps() });
+      const root = await reader.resolvePluginRootContaining('scripts/board-feature-drain.sh');
+      expect(root).toBe('/override/path');
+    } finally {
+      if (prev === undefined) delete process.env.AGENT_FLOW_PLUGIN_ROOT;
+      else process.env.AGENT_FLOW_PLUGIN_ROOT = prev;
+    }
+  });
+});

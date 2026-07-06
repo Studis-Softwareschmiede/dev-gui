@@ -62,7 +62,7 @@ describe('GET/POST /api/board/projects/:slug/features/:featureId/batch', () => {
     };
     const featureDrainRunner = { start: jest.fn() };
     const featureDrainLock = new ProjectJobLock();
-    const agentFlowReader = { resolvePluginRoot: async () => pluginRoot };
+    const agentFlowReader = { resolvePluginRootContaining: async () => pluginRoot };
 
     const app = express();
     app.use(express.json());
