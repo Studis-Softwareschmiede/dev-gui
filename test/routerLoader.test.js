@@ -263,7 +263,7 @@ describe('routerLoader — Echte src/routers/ Module (AC1/AC3)', () => {
     }
   });
 
-  it('genau 42 Router-Module in src/routers/ — Smoke-Assertion gegen versehentliche Löschung (AC1)', async () => {
+  it('genau 43 Router-Module in src/routers/ — Smoke-Assertion gegen versehentliche Löschung (AC1)', async () => {
     // Diese Assertion schreibt die aktuelle Router-Anzahl fest.
     // Sinkt die Zahl (Router gelöscht/umbenannt), schlägt der Test sofort an.
     // Steigt die Zahl (neuer Router hinzugefügt), muss dieser Wert bewusst erhöht werden.
@@ -311,8 +311,10 @@ describe('routerLoader — Echte src/routers/ Module (AC1/AC3)', () => {
     //   (GET /api/board/events — SSE-Endpunkt für Board-Live-Aktualisierung AC1–AC7) → 41.
     // usage.js wurde mit der Token-Nutzungs-Anzeige ("goldene Münze") hinzugefügt
     //   (GET /api/usage — geschätzter Output-Token-Verbrauch Session/Woche) → 42.
+    // repoSize.js wurde mit repo-size-badge (S-298) hinzugefügt
+    //   (GET /api/workspace/repo-sizes + POST .../refresh — Read/Refresh AC6/AC7) → 43.
     const entries = await readdir(ROUTERS_DIR);
     const mountedCount = entries.filter((f) => f.endsWith('.js')).length;
-    expect(mountedCount).toBe(42);
+    expect(mountedCount).toBe(43);
   });
 });
