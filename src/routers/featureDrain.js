@@ -88,7 +88,14 @@ export function create({ boardAggregator, featureDrainRegistry, featureDrainRunn
     const stories = await readAllFeatureStories(project.repo_path, featureId);
     const state = deriveState({ featureDrainRegistry, projectSlug: slug, featureId, stories });
     const job = featureDrainRegistry.getJob(slug, featureId);
-    return res.status(200).json({ state, error: job?.status === 'failed' ? job.error : undefined });
+    // 2026-07-06-Vorfall: der abgeleitete Zustand basiert auf dem AKTUELLEN
+    // Story-Bestand (Quelle der Wahrheit) — steht der jetzt auf "done", darf
+    // eine veraltete Fehlermeldung aus einem FRÜHEREN, fehlgeschlagenen Lauf
+    // nicht mehr angezeigt werden (verwirrend: "done" + alter Fehlertext
+    // gleichzeitig, obwohl der eigentliche Batch inzwischen — z.B. über einen
+    // parallelen "Board abarbeiten"-Lauf — sauber fertig wurde).
+    const showError = state !== 'done' && job?.status === 'failed';
+    return res.status(200).json({ state, error: showError ? job.error : undefined });
   });
 
   router.post('/api/board/projects/:slug/features/:featureId/batch', async (req, res) => {

@@ -49,7 +49,7 @@ describe('GET/POST /api/board/projects/:slug/features/:featureId/batch', () => {
     if (repoPath) rmSync(repoPath, { recursive: true, force: true });
   });
 
-  function makeApp({ running = false, pluginRoot = '/plugin' } = {}) {
+  function makeApp({ running = false, pluginRoot = '/plugin', failedJob = null } = {}) {
     repoPath = mkdtempSync(join(tmpdir(), 'feature-drain-router-'));
     mkdirSync(join(repoPath, 'board', 'stories'), { recursive: true });
 
@@ -58,7 +58,7 @@ describe('GET/POST /api/board/projects/:slug/features/:featureId/batch', () => {
     };
     const featureDrainRegistry = {
       isRunning: jest.fn(() => running),
-      getJob: jest.fn(() => null),
+      getJob: jest.fn(() => failedJob),
     };
     const featureDrainRunner = { start: jest.fn() };
     const featureDrainLock = new ProjectJobLock();
@@ -83,6 +83,24 @@ describe('GET/POST /api/board/projects/:slug/features/:featureId/batch', () => {
     writeStory(rp(), 'S-002', 'F-001', 'Verworfen');
     const { body } = await request(app, 'GET', '/api/board/projects/demo/features/F-001/batch');
     expect(body.state).toBe('done');
+  });
+
+  it('GET: state=done -> eine veraltete Fehlermeldung aus einem früheren Lauf wird NICHT mehr angezeigt (2026-07-06-Vorfall)', async () => {
+    const { app, repoPath: rp } = makeApp({ failedJob: { status: 'failed', error: 'Exit-Code 1 — alter Fehler' } });
+    writeStory(rp(), 'S-001', 'F-001', 'Done');
+    writeStory(rp(), 'S-002', 'F-001', 'Done');
+    const { body } = await request(app, 'GET', '/api/board/projects/demo/features/F-001/batch');
+    expect(body.state).toBe('done');
+    expect(body.error).toBeUndefined();
+  });
+
+  it('GET: state=ready + registrierter Fehlschlag -> Fehlermeldung wird weiterhin angezeigt', async () => {
+    const { app, repoPath: rp } = makeApp({ failedJob: { status: 'failed', error: 'Exit-Code 1 — echter, aktueller Fehler' } });
+    writeStory(rp(), 'S-001', 'F-001', 'Done');
+    writeStory(rp(), 'S-002', 'F-001', 'To Do');
+    const { body } = await request(app, 'GET', '/api/board/projects/demo/features/F-001/batch');
+    expect(body.state).toBe('ready');
+    expect(body.error).toBe('Exit-Code 1 — echter, aktueller Fehler');
   });
 
   it('GET: mindestens eine nicht-terminale Story -> ready', async () => {
