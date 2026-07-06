@@ -521,3 +521,230 @@ AC7a — s. `CockpitView.jsx`):
 - Kein neuer Icon-Font/keine neue Icon-Bibliothek — „⏳"/„✓"/„✗" als
   Unicode-Zeichen, identisch zur bestehenden Praxis in `CockpitView.jsx`
   (`drainStatus`-Texte).
+
+## Feature-Umsetzen-Button (3 Zustände) (feature-umsetzen-button, Owner-Auftrag 2026-07-06)
+
+Designer-Vorgabe für einen neuen Tri-State-Button/Badge auf **jeder
+Feature-Karte** im Studis-Kanban-Board (`BoardView.jsx`, `FeatureRow`) — löst
+ein neues Feature-Batch-Skript aus (verarbeitet alle Storys des Features
+nacheinander, merged + deployt am Ende gebündelt einmal). Die drei
+Zustände (Text, Farbe, Klickbarkeit) sind vom Owner **explizit und
+verbindlich** festgelegt — inkl. der bewussten Abweichung von der üblichen
+Ampel-Konvention (Rot = „Fertig/Erfolg" statt „Fehler"). Bindend für
+`coder`; Konformität prüft `reviewer`. **Keine neuen Farbwerte** — alle drei
+Zustände reusen 1:1 bereits im Repo etablierte, filled Button-Tokens
+(`btnConfirm`/CockpitView.jsx, `archiveConfirmBtn`/BoardView.jsx,
+`btnOverwriteConfirm`/SshKeysSection.jsx).
+
+### 1. Platzierung
+
+In `styles.featureHeader` (flex-row, `flexWrap:wrap`, `alignItems:center`,
+`gap:8`), zwischen dem Feature-Status-Badge (`StatusBadge`) und der
+`RollupBar` — Reihenfolge im Header:
+
+1. Collapse-Button (Titel, `flex:1`)
+2. `StatusBadge` (Feature-Status, falls vorhanden)
+3. „Archiviert"-Badge (falls `isArchivedFeature`)
+4. **Umsetzen-Button (neu)**
+5. `RollupBar`
+6. Detail-Schalter (ⓘ)
+
+Beide Status-Indikatoren (Feature-Status-Badge + neuer Tri-State-Button)
+bilden so einen zusammenhängenden Block, bevor die Fortschrittsanzeige folgt.
+
+**Nicht gerendert, wenn:**
+- `isArchivedFeature === true` — archivierte Features sind read-only, keine
+  Aktions-Affordance (bestehende Regel, board-feature-archive AC6/AC7).
+- Das Feature hat **0 Storys** (`rollup.total === 0`) — keiner der drei
+  Zustände ist sinnvoll definiert (kein „Fertig" bei 0 Storys, kein
+  „Bereit" ohne Arbeit). Kein Button, keine Badge-Attrappe.
+
+### 2. Die drei Zustände (Owner-Vorgabe, unverändert)
+
+| # | Bedingung | Text | Farbe (Hintergrund/Text) | Reused Token (Quelle) | Klickbar |
+|---|---|---|---|---|---|
+| 1 | Feature hat mind. eine nicht-terminale Story (Status ∉ {Done, Verworfen}) UND kein Batch-Lauf aktiv | **„Umsetzen"** | `#15803d` / `#fff` | `btnConfirm` (`CockpitView.jsx`) | Ja |
+| 2 | Ein Feature-Batch-Lauf verarbeitet aktuell Storys dieses Features | **„In Progress"** | `#b45309` / `#fff` | `archiveConfirmBtn` (`BoardView.jsx`) | Nein |
+| 3 | Alle Storys terminal (Done/Verworfen) UND finaler Merge+Deploy durch | **„Done"** | `#7f1d1d` / `#fecaca` | `btnOverwriteConfirm` (`SshKeysSection.jsx`) | Nein |
+
+**Kontrast (berechnet, WCAG 2.1 AA, ≥ 4.5:1 für Text):**
+- `#fff` auf `#15803d` ≈ **5.0:1** (relative Luminanz Hintergrund ≈ 0.159).
+- `#fff` auf `#b45309` ≈ **5.0:1** (relative Luminanz Hintergrund ≈ 0.159,
+  nahezu identisch zu Zustand 1 — Zufall der beiden Referenzfarben, kein
+  Bug).
+- `#fecaca` auf `#7f1d1d` ≈ **6.9:1** (relative Luminanz Hintergrund ≈
+  0.055, Text ≈ 0.676).
+- Alle drei ≥ 4.5:1 — konform, keine Ausnahme für „große Schrift" nötig.
+
+**Icon + Text + Farbe (nie Farbe allein)** — Bedeutung trägt bereits der
+Text als zweiter Kanal (Owner-Feststellung); zusätzlich ein `aria-hidden`
+Unicode-Icon vor dem Text, identisch zur etablierten Praxis
+(„Fabrik-Panel Regressionstests" oben, `drainStatus`-Texte in
+`CockpitView.jsx`):
+- Zustand 1: `▶ Umsetzen`
+- Zustand 2: `⏳ In Progress`
+- Zustand 3: `✓ Done`
+
+### 3. Zustands-Ableitung (Datenquelle — Grenze zur Architektur)
+
+Bindend ist NUR: genau **ein** autoritativer Zustandswert je Feature
+(`ready` | `running` | `done`), niemals unabhängig berechnete Booleans (kein
+`isRunning && isDone` gleichzeitig möglich — Vermeidung von
+Zustands-Kombinationsfehlern). Die konkrete Datenquelle (neues Backend-Feld,
+z. B. `feature.batchState`, Polling vs. SSE-Push) ist Architektur-/
+Coder-Entscheidung, **außerhalb** des Design-Scopes — s. Annahmen.
+
+**Wichtig — ungefilterter Story-Bestand:** Die Zustandsableitung MUSS auf dem
+**vollständigen** Story-Bestand des Features basieren, nicht auf der im
+Board ggf. gefilterten Teilmenge (`feature.stories`-Prop in `FeatureRow` ist
+laut bestehendem Kommentar bereits die GEFILTERTE Menge). Ein Klick auf
+„Umsetzen" verarbeitet ALLE Storys des Features, unabhängig vom aktuell
+aktiven Board-Filter — die Sichtbarkeits-Filterung (board-filter-
+feature-status-consistency AC1, gilt für den `StatusBadge`) und die
+Aktions-Zustandsableitung (dieser Abschnitt) sind bewusst **unterschiedliche
+Datenquellen**, keine Regression von AC1.
+
+### 4. Bestätigungsdialog vor „Umsetzen"
+
+Analog zum bestehenden „Board abarbeiten"-Muster (`CockpitView.jsx`,
+`flowState === 'confirm'`) — ein Klick auf „Umsetzen" (Zustand 1) öffnet
+zuerst einen Bestätigungsdialog (`role="dialog" aria-modal="false"`,
+reuse `confirmBox`/`btnConfirm`/`btnCancel`-Token 1:1), Text z. B.: „Startet
+die Batch-Verarbeitung aller Storys dieses Features: ein Agent schreibt
+Code, mergt am Ende gebündelt und deployt einmal. Fortfahren?" Erst nach
+Bestätigen wird der Batch-Trigger abgesetzt. Kein neuer Dialog-Stil — reine
+Wiederverwendung des etablierten Bestätigungsmusters.
+
+Nach Bestätigen wechselt der Button **sofort optimistisch** auf Zustand 2
+(„In Progress", gesperrt) — verhindert Doppel-Trigger während der
+Server-Antwort aussteht; der autoritative Zustand (Abschnitt 3) überschreibt
+das optimistische Bild, sobald er eintrifft (SSE/Re-Fetch, s. Abschnitt 5).
+
+### 5. Übergangsverhalten
+
+- Zustandswechsel (Farbe + Text + Icon) mit sanftem CSS-`transition:
+  'background-color 150ms ease, color 150ms ease'` — kein hartes Umspringen.
+- Gleiche Button-Abmessungen (Padding, `minHeight:44`) in allen drei
+  Zuständen — kein Layout-Sprung beim Wechsel.
+- Datenquelle für automatische Wechsel: reuse des bestehenden
+  `board-live-sse`-Kanals (EventSource, AC13–AC17 oben in dieser Datei) —
+  ein Server-Event für das angezeigte Projekt löst den bestehenden
+  Re-Fetch-Pfad aus, der Button zeigt danach den neuen Zustand. Reicht die
+  SSE-Granularität nicht (z. B. kein Event bei reinem Zustandswechsel ohne
+  Datenänderung), ist ein zusätzlicher Poll-Mechanismus eine additive
+  Architektur-Entscheidung, kein Widerspruch zu dieser Vorgabe.
+- Kein eigenes Hover-Styling — konsistent mit ALLEN bestehenden gefüllten
+  Buttons in diesem Repo (`btnConfirm`, `btnFlowTrigger`,
+  `archiveConfirmBtn`, `btnOverwriteConfirm`: keiner definiert `:hover`,
+  reiner nativer Browser-Standard). `cursor:'pointer'` nur in Zustand 1.
+
+### 6. Accessibility (WCAG 2.1 AA)
+
+- **Live-Region:** Der Button ist von einem Wrapper `<div role="status"
+  aria-live="polite" aria-atomic="true">` umschlossen — NICHT `role="status"`
+  direkt am `<button>` (würde dessen Button-Semantik für AT überschreiben).
+  Der sichtbare Text-Wechsel („Umsetzen" → „In Progress" → „Done") innerhalb
+  des Wrappers löst die Ansage aus — automatischer Wechsel ohne
+  Nutzer-Interaktion wird so vorgelesen (Owner-Anforderung).
+- **Kein doppeltes „alert":** `aria-live="polite"` in allen drei Zuständen
+  (kein Fehlerfall, kein `role="alert"` nötig — Zustand 3 „Done" ist Erfolg,
+  keine Störung).
+- **Disabled-Semantik (Zustand 2 + 3):** natives `disabled`-Attribut +
+  `aria-disabled={true}` (redundant, aber konsistent mit dem bestehenden
+  „Board abarbeiten"-Lock-Muster, `isBoardBtnDisabled` in `CockpitView.jsx`),
+  `cursor:'not-allowed'`. Kein `outline:none` (Fokusring bleibt sichtbar,
+  auch wenn der Button aktuell nicht aktivierbar ist).
+- **aria-label je Zustand** (screenreader-eindeutig, Feature-Titel
+  eingebettet):
+  - Zustand 1: `Feature „<Titel>" umsetzen — verarbeitet alle Storys
+    nacheinander`
+  - Zustand 2: `Feature „<Titel>" — Umsetzung läuft`
+  - Zustand 3: `Feature „<Titel>" — abgeschlossen (Done)`
+- **Touch-Target:** `minHeight:44` in allen drei Zuständen (auch
+  disabled — verhindert Layout-Sprung, hält die Fläche für einen späteren
+  Zustandswechsel bereit).
+- **Tastatur:** natives `<button type="button">`, Tab-Reihenfolge = DOM-
+  Reihenfolge (nach Feature-Status-Badge, vor RollupBar). Disabled-Buttons
+  werden von nativer Tab-Navigation übersprungen (Standardverhalten) — kein
+  zusätzlicher Handling-Bedarf.
+- **Nie Farbe allein:** Text + Icon + Farbe immer zusammen (Abschnitt 2).
+
+### 7. Design-Entscheidungen (testbar)
+
+- **D1** — Platzierung im `featureHeader`: nach `StatusBadge`/„Archiviert"-
+  Badge, vor `RollupBar`.
+- **D2** — Kein Button, wenn `isArchivedFeature === true` ODER
+  `rollup.total === 0` (keiner der drei Zustände zutreffend).
+- **D3** — Zustand 1 „Bereit": Text „▶ Umsetzen", `background:'#15803d'`,
+  `color:'#fff'` (reuse `btnConfirm`-Token), klickbar, öffnet
+  Bestätigungsdialog.
+- **D4** — Zustand 2 „Läuft": Text „⏳ In Progress", `background:'#b45309'`,
+  `color:'#fff'` (reuse `archiveConfirmBtn`-Token), `disabled` + `aria-
+  disabled`, `cursor:'not-allowed'`.
+- **D5** — Zustand 3 „Fertig": Text „✓ Done", `background:'#7f1d1d'`,
+  `color:'#fecaca'` (reuse `btnOverwriteConfirm`-Token), `disabled` +
+  `aria-disabled`.
+- **D6** — Kontrastwerte (berechnet): `#fff`/`#15803d` ≈ 5.0:1,
+  `#fff`/`#b45309` ≈ 5.0:1, `#fecaca`/`#7f1d1d` ≈ 6.9:1 — alle ≥ 4.5:1.
+- **D7** — Genau EIN autoritativer Zustandswert je Feature (`ready`|
+  `running`|`done`) treibt Text/Farbe/Klickbarkeit — keine unabhängig
+  berechneten, potenziell widersprüchlichen Booleans.
+- **D8** — Zustandsableitung nutzt den UNGEFILTERTEN Story-Bestand des
+  Features, nicht die im Board aktuell gefilterte Teilmenge.
+- **D9** — Klick in Zustand 1 öffnet zuerst einen Bestätigungsdialog (reuse
+  `confirmBox`/`btnConfirm`/`btnCancel`-Token 1:1, analog „Board
+  abarbeiten"); erst nach Bestätigen wird der Batch-Trigger abgesetzt.
+- **D10** — Nach Bestätigen wechselt der Button sofort optimistisch auf
+  Zustand 2, bis der autoritative Zustand eintrifft.
+- **D11** — `transition:'background-color 150ms ease, color 150ms ease'`;
+  identische Abmessungen (`minHeight:44`, gleiches Padding) in allen drei
+  Zuständen — kein Layout-Sprung.
+- **D12** — Kein eigenes `:hover`-Styling (konsistent mit allen bestehenden
+  gefüllten Buttons im Repo).
+- **D13** — Live-Region: Wrapper `<div role="status" aria-live="polite"
+  aria-atomic="true">` um den `<button>` — nicht `role="status"` direkt am
+  Button.
+- **D14** — `aria-live="polite"` in allen drei Zuständen (kein
+  `role="alert"`).
+- **D15** — Zustand 2/3: natives `disabled` + `aria-disabled={true}` +
+  `cursor:'not-allowed'`, kein `outline:none`.
+- **D16** — `aria-label` je Zustand wie in Abschnitt 6 spezifiziert (inkl.
+  Feature-Titel).
+- **D17** — Touch-Target `minHeight:44` in allen drei Zuständen.
+- **D18** — Icon (aria-hidden) + Text + Farbe je Zustand: `▶`/`⏳`/`✓` vor
+  dem jeweiligen Text.
+- **D19** — Keine neuen Farbwerte: alle drei Hex-Paare (`#15803d`/`#fff`,
+  `#b45309`/`#fff`, `#7f1d1d`/`#fecaca`) sind im Repo bereits an anderer
+  Stelle als gefüllte Buttons im Einsatz (`btnConfirm`, `archiveConfirmBtn`,
+  `btnOverwriteConfirm`).
+- **D20** — `data-testid`-Konvention: `feature-umsetzen-btn-<featureId>`
+  (Button), `feature-umsetzen-status-<featureId>` (Live-Region-Wrapper).
+
+### Annahmen
+
+- Die exakte Datenquelle des autoritativen Zustandswerts (neues Backend-Feld
+  am Feature, Polling vs. SSE-Push, Name/Schema des neuen
+  Feature-Batch-Endpunkts) ist eine Architektur-/Coder-Entscheidung außerhalb
+  des Design-Scopes — bindend ist nur der EINE Zustandswert (D7) und die
+  Ungefiltert-Regel (D8).
+- Bestätigungsdialog vor dem Trigger (Abschnitt 4/D9) ist eine
+  Designer-Ergänzung, vom Owner nicht explizit gefordert, aber konsistent
+  mit dem bestehenden „Board abarbeiten"-Muster für folgenreiche
+  Mehr-Storys-Batch-Aktionen (Code-Änderung + Merge + Deploy). Falls der
+  Owner das für „Umsetzen" nicht wünscht, ist der Wegfall von D9/D10 eine
+  isolierte, additive Änderung ohne Auswirkung auf D1–D8/D11–D20.
+  (Zusammen-erarbeiten-Doktrin: falls Ko-Design-Signale zu dieser
+  Ergänzung kommen, vor Umsetzung mit dem Owner klären.)
+- Owners „nicht klickbar (oder Klick zeigt nur Status)" für Zustand 2 wurde
+  als **natives `disabled`** entschieden (nicht „Klick zeigt Status-Tooltip"
+  bei weiterhin aktivem Button) — einfachere, mit dem bestehenden
+  „Board abarbeiten"-Lock-Muster konsistente Variante.
+- Feature ohne Storys (`rollup.total === 0`) zeigt keinen der drei Zustände
+  (D2) — vom Owner nicht spezifizierter Randfall, analog zur bestehenden
+  Praxis, dass leere Features keine falschen Status-Signale erhalten.
+- Icon-Ergänzung (`▶`/`⏳`/`✓`, D18) ist eine Verstärkung des ohnehin bereits
+  vorhandenen Text-Kanals (Owner-Feststellung „Text ist ja schon da als
+  zweiter Kanal") — keine Owner-Vorgabe, aber konsistent mit dem etablierten
+  Icon+Text+Farbe-Muster der „Fabrik-Panel Regressionstests"-Sektion oben.
+- Kein Board-Story-Bezug (S-Nummer) bekannt — Abschnitt referenziert das
+  Owner-Auftragsdatum (2026-07-06).
