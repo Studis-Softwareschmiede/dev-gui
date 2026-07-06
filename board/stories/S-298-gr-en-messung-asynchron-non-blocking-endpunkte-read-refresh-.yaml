@@ -2,7 +2,7 @@ id: S-298
 parent: F-065
 title: Größen-Messung asynchron/non-blocking + Endpunkte (Read + Refresh) + Auto-Trigger
   beim Workspace-Scan + .git-Schwellwert-Flag
-status: To Do
+status: Blocked
 priority: P2
 spec: docs/specs/repo-size-badge.md
 implements:
@@ -24,11 +24,14 @@ estimate_note: estimator nicht dispatchbar (Subagent); Heuristik score 9 (5 AC +
   baseline js|balanced|L ep 5.0 (n=5); keine Baseline-Tokens (tok_total null) -> tok_est
   null
 confidence: low
-branch: null
+branch: feat/S-298-repo-size-async-endpoints
 pr: null
-blocked_reason: null
+blocked_reason: 'Loop-Schutz N=3 — dritter Review-Zyklus liefert erneut CHANGES-REQUIRED
+  (Critical: cloneExistsImpl destructured resolveWorkspaceRoot()-Rueckgabe {path,source}
+  fälschlich als String, TypeError wird verschluckt, refresh-Endpunkt liefert dauerhaft
+  404 statt 202/200)'
 created_at: '2026-07-05T21:28:12Z'
-updated_at: '2026-07-05T21:29:05Z'
+updated_at: '2026-07-06T05:52:23Z'
 done_at: null
 area: fabrik-arbeiten
 tok_est: null
