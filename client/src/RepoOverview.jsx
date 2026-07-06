@@ -59,6 +59,7 @@ import { IntakeDialog } from './IntakeDialog.jsx';
 import { NightWatchStatusBadge } from './NightWatchStatusBadge.jsx';
 import { ClaudeAuthBadge } from './ClaudeAuthBadge.jsx';
 import { NightRunsSection } from './NightRunsSection.jsx';
+import { RepoSizeBadge } from './RepoSizeBadge.jsx';
 
 /**
  * @param {{
@@ -264,6 +265,7 @@ export function RepoOverview({ navigateFactory, onNavigate, fetchFn }) {
               key={repo.name}
               repo={repo}
               onSelect={() => navigateFactory(repo.name)}
+              fetchFn={fetchFn}
             />
           ))}
         </ul>
@@ -277,6 +279,11 @@ export function RepoOverview({ navigateFactory, onNavigate, fetchFn }) {
 /**
  * Single repo row — activatable via click and keyboard (AC1 + AC2).
  *
+ * repo-size-badge AC9/AC10/AC11: rendert zusätzlich das Größen-Badge
+ * (`RepoSizeBadge`) — als GESCHWISTER des Auswahl-Buttons (nicht verschachtelt
+ * darin), weil das Badge eine eigene interaktive „Aktualisieren"-Aktion trägt
+ * (verschachtelte <button>-Elemente sind ungültiges HTML/nicht a11y-konform).
+ *
  * @param {{
  *   repo: {
  *     name: string,
@@ -285,9 +292,10 @@ export function RepoOverview({ navigateFactory, onNavigate, fetchFn }) {
  *     lastCommit: { hash: string, subject: string, date: string } | null,
  *   },
  *   onSelect: () => void,
+ *   fetchFn?: typeof fetch,
  * }} props
  */
-function RepoItem({ repo, onSelect }) {
+function RepoItem({ repo, onSelect, fetchFn }) {
   const { name, branch, dirty, lastCommit } = repo;
 
   // lastCommit ist ein Objekt {hash, subject, date} oder null (Worktrees/leere
@@ -326,6 +334,9 @@ function RepoItem({ repo, onSelect }) {
           {commitText}
         </span>
       </button>
+
+      {/* repo-size-badge AC9/AC10/AC11: Größen-Badge + Aufschlüsselung + Aktualisieren + Warnhinweis */}
+      <RepoSizeBadge repo={name} fetchFn={fetchFn} />
     </li>
   );
 }
@@ -419,7 +430,10 @@ const styles = {
   },
 
   repoItem: {
-    // semantic list-item wrapper
+    // semantic list-item wrapper; repo-size-badge AC9: Badge unterhalb des Auswahl-Buttons
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 4,
   },
 
   repoBtn: {
