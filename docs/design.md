@@ -309,3 +309,215 @@ Tabpanel-Inhalts.
   categories/*.jsx` vs. eine andere Verzeichnisstruktur) ist ein
   Implementierungsdetail des `coder` — bindend ist nur: eine Datei je
   Kategorie, bestehende Sektions-Komponenten unverändert wiederverwendet.
+
+## Fabrik-Panel Regressionstests (fabrik-panel-regressionstests, Owner-Ko-Design 2026-07-03, beauftragt 2026-07-06)
+
+Designer-Vorgabe für einen neuen, eigenständigen Bereich „Regressionstests" im
+Fabrik-„Arbeiten"-Reiter (`CockpitView.jsx`, `actionGrid` im
+`FactoryWorkspace`-Bereich, s. Abschnitt „„Arbeiten"-Layout" oben). Genau zwei
+Buttons untereinander: „Regressionstest ausführen" (primär) und
+„Regressionstest definieren" (sekundär). Konsistent zum bestehenden
+Kartenmuster der Nachbarkarten „Board abarbeiten" / „Idee" / „Neue Story" —
+**keine neuen Farbwerte**, ausschließlich bereits im Repo verwendete Tokens
+(`flowTriggerBox`/`intakeTriggerBox`, `btnFlowTrigger`/`btnFlowTriggerDisabled`,
+`btnCancel`-Outline-Familie, `drainStatusDone`/`drainStatusFailed`/
+`drainStatusRunning`, `lockNotice`). Bindend für `coder`/`requirement`;
+Konformität prüft `reviewer`.
+
+### 1. Platzierung
+
+Neue Karte **„Regressionstests"** im `actionGrid` des Arbeiten-Reiters, direkt
+**nach** der „Neue Story"-Karte und **vor** `TriggerPanel`/Status-Dashboard —
+sie gehört fachlich zur Gruppe der einfachen Aktions-Karten (Titel + Button(s))
+statt zur Gruppe der komplexeren, breiteren Panels. Resultierende Grid-Reihenfolge:
+
+1. Board abarbeiten
+2. Idee
+3. Neue Story
+4. **Regressionstests** *(neu)*
+5. TriggerPanel (adopt/preview/train/new-project + Kill)
+6. Status-Dashboard
+
+Das Grid selbst (`display:flex; flexWrap:wrap; gap:16; padding:16`) ist
+unverändert — die neue Karte reiht sich als fünftes Flex-Item ein und
+umbricht unter ~768 px identisch zu den bestehenden Karten (s. „„Arbeiten"-
+Layout" oben, keine neue Breakpoint-Logik).
+
+### 2. Kartengestaltung
+
+**Kartenrahmen** — identisch zum bestehenden `flowTriggerBox`/
+`intakeTriggerBox`-Token, keine neue Variante:
+- `padding: '12px 16px'`, `background: '#0d0d0d'`, `border: '1px solid
+  #2a2a2a'`, `borderRadius: 6`, `minWidth: 240`, `maxWidth: 300`,
+  `display:'flex'`, `flexDirection:'column'`, `gap: 8`.
+
+**Kartenkopf** — Titel „Regressionstests" im bestehenden
+`flowTriggerHeader`-Stil (identisch zu den Nachbarkarten, kein neuer
+Header-Stil): `fontSize:12`, `fontWeight:700`, `color:'#9ca3af'`,
+`textTransform:'uppercase'`, `letterSpacing:'0.05em'`.
+
+**Kurzbeschreibung** — ein Satz im bestehenden `flowTriggerHint`-Stil
+(`fontSize:11`, `color:'#6b7280'`) direkt unter dem Titel, z.B. „Führt die
+hinterlegte Regressionstest-Suite aus bzw. öffnet ihre Definition."
+
+**Zwei Buttons UNTEREINANDER**, `gap: 8` (identischer Innenabstand wie der
+restliche Karten-Inhalt), volle Kartenbreite je Button, feste Reihenfolge
+(oben → unten):
+
+1. **„Regressionstest ausführen" — PRIMÄR.** Reuse `btnFlowTrigger`-Token
+   1:1: `background:'#1d4ed8'`, `color:'#fff'`, `border:'none'`,
+   `borderRadius:4`, `padding:'8px 12px'`, `fontSize:13`, `fontWeight:600`,
+   `minHeight:44`, `cursor:'pointer'`. Gesperrt-Zustand (Lauf bereits aktiv):
+   reuse `btnFlowTriggerDisabled` 1:1 (`background:'#1e293b'`,
+   `color:'#64748b'`, sonst identisch).
+2. **„Regressionstest definieren" — SEKUNDÄR.** Reuse die bestehende
+   Outline-Sekundär-Familie (`btnCancel`/`btnFlowReset`): `background:
+   'transparent'` (zeigt den Kartenhintergrund `#0d0d0d` durch),
+   `border:'1px solid #374151'`, `color:'#9ca3af'`, `borderRadius:4`,
+   `padding:'8px 12px'` (an die Primär-Button-Höhe/-Breite angeglichen, nicht
+   die kompaktere `6px 10px`-Variante aus dem Confirm-Dialog-Button-Paar, da
+   hier ein Standalone-Button statt ein Dialog-Button-Paar), `fontSize:13`,
+   `fontWeight:400` (bewusst **nicht** fett), `minHeight:44`,
+   `cursor:'pointer'`.
+
+**Visuelle Hierarchie (Empfehlung):** Primär = gefüllte Fläche (`#1d4ed8`) +
+Fettdruck (600); Sekundär = Outline (transparent + `#374151`-Rahmen) +
+Normalgewicht (400). Dieses Unterscheidungsmuster ist im Projekt bereits
+etabliert (`btnConfirm` gefüllt vs. `btnCancel` outline im
+Bestätigungsdialog; Aktiv/Inaktiv-Unterscheidung in der Settings-Navigation
+oben, D6/D7) — keine neue Konvention, reine Wiederanwendung.
+
+### 3. Zustände (Kurz-Status inline)
+
+Direkt unterhalb der beiden Buttons, analog zum bestehenden
+Drain-Abschlussbericht-Muster (`drainStatusDone`/`drainStatusFailed`/
+`drainStatusRunning`, headless-manual-drain AC6 + drain-completion-report
+AC7a — s. `CockpitView.jsx`):
+
+| Zustand | Text | Stil (Token) | Rolle |
+|---|---|---|---|
+| Noch kein Lauf | „Noch kein Regressionstest gelaufen." | `flowTriggerHint` (`fontSize:11`, `color:'#6b7280'`) | reiner Hinweistext, kein `role` |
+| Läuft | „⏳ Regressionstest läuft…" | `drainStatusRunning` (`fontSize:12`, `color:'#9ca3af'`, `fontStyle:'italic'`) | `role="status" aria-live="polite"` |
+| Letzter Lauf erfolgreich | „✓ Erfolgreich — `<Zeitstempel>`" | `drainStatusDone` (`fontSize:12`, `color:'#86efac'`, `fontWeight:600`) | `role="status" aria-live="polite"` |
+| Letzter Lauf fehlgeschlagen | „✗ Fehlgeschlagen — `<Zeitstempel>`" | `drainStatusFailed` (`fontSize:12`, `color:'#f87171'`, `fontWeight:600`) | `role="alert"` |
+
+- **Zeitstempel-Format:** `new Date(ts).toLocaleString('de-DE', {
+  dateStyle: 'short', timeStyle: 'medium' })` — identisch zum bestehenden
+  Muster in `BackupSection.jsx` (kein neues Datumsformat).
+- **Icon + Text + Farbe immer zusammen** (nie Farbe allein) — WCAG 2.1 AA,
+  identisch zur bestehenden Board-abarbeiten-Statuszeile.
+- Während eines aktiven Regressionstest-Laufs ist **nur** „Regressionstest
+  ausführen" gesperrt (verhindert Doppel-Trigger); „Regressionstest
+  definieren" bleibt bedienbar — Definieren steht in keinem Konflikt zu einem
+  laufenden Testlauf. Der Sperr-Hinweistext reuse `lockNotice` 1:1
+  (`fontSize:11`, `color:'#fbbf24'`, `fontStyle:'italic'`), Wortlaut „Ein
+  Regressionstest läuft — Ausführen gesperrt."
+
+### 4. Accessibility (WCAG 2.1 AA)
+
+- **Touch-Targets:** beide Buttons `minHeight:44` bei voller Kartenbreite
+  (kein horizontaler Engpass) — erfüllt ≥ 44 px in beiden Dimensionen.
+- **aria-labels:**
+  - Primär: `aria-label="Regressionstest ausführen — startet die
+    Regressionstest-Suite"`; gesperrt: `aria-label="Regressionstest
+    ausführen — gesperrt (Lauf aktiv)"` (analog zum bestehenden
+    „Board abarbeiten — gesperrt"-Muster).
+  - Sekundär: `aria-label="Regressionstest definieren — öffnet die
+    Definitionsansicht"`.
+- **Tastaturbedienbarkeit:** beide als natives `<button type="button">`
+  (fokussierbar/aktivierbar per Tab + Enter/Space), Fokusring **nicht**
+  entfernt (kein `outline:none`, wie alle bestehenden Buttons im Panel).
+  Tab-Reihenfolge = DOM-Reihenfolge = visuelle Reihenfolge (ausführen vor
+  definieren).
+- **Kontrast** (keine neuen Werte — bereits im Repo an anderer Stelle in
+  exakt dieser Bedeutung im Einsatz und dort geprüft):
+  - `#fff` auf `#1d4ed8` (Primär-Button) ≈ 6.7:1.
+  - `#9ca3af` auf `#0d0d0d` (Sekundär-Button-Text, Kartenhintergrund) ≈
+    7.7:1.
+  - `#86efac` / `#f87171` / `#9ca3af` auf `#0d0d0d` (Statuszeilen) — bereits
+    an anderer Stelle im selben Panel als ≥ 4.5:1 dokumentiert (s.
+    `noLiveHint`/`drainReportBox`-Kommentare in `CockpitView.jsx`).
+  - Alle Werte ≥ 4.5:1 für Text bzw. ≥ 3:1 für den blauen Fokusring
+    (`#3b82f6`, projektweiter Fokus-Token).
+- **Statusfarbe nie alleinige Bedeutung:** jeder Zustand trägt Icon + Text
+  zusätzlich zur Farbe (s. Tabelle oben).
+
+### 5. Design-Entscheidungen (testbar)
+
+- **D1** — Neue Karte „Regressionstests" im `actionGrid`, Position: nach
+  „Neue Story", vor `TriggerPanel`/Status-Dashboard (Reihenfolge: Board
+  abarbeiten, Idee, Neue Story, Regressionstests, TriggerPanel,
+  Status-Dashboard).
+- **D2** — Kartenrahmen identisch zum bestehenden `flowTriggerBox`/
+  `intakeTriggerBox`-Token (`padding:'12px 16px'`, `background:'#0d0d0d'`,
+  `border:'1px solid #2a2a2a'`, `borderRadius:6`, `minWidth:240`,
+  `maxWidth:300`, `gap:8`) — keine neue Kartenvariante.
+- **D3** — Kartenkopf „Regressionstests" im bestehenden
+  `flowTriggerHeader`-Stil (uppercase, 12px, 700, `#9ca3af`, letterSpacing
+  0.05em), identisch zu den Nachbarkarten.
+- **D4** — Kurzbeschreibung im bestehenden `flowTriggerHint`-Stil (11px,
+  `#6b7280`) direkt unter dem Titel.
+- **D5** — Genau zwei Buttons untereinander, `gap:8`, volle Kartenbreite je
+  Button, feste Reihenfolge: 1) „Regressionstest ausführen", 2)
+  „Regressionstest definieren".
+- **D6** — Primär-Button „Regressionstest ausführen": exakt
+  `btnFlowTrigger`-Token (`#1d4ed8`/`#fff`/`borderRadius:4`/`padding:'8px
+  12px'`/`fontSize:13`/`fontWeight:600`/`minHeight:44`). Gesperrt-Zustand:
+  exakt `btnFlowTriggerDisabled`-Token (`#1e293b`/`#64748b`).
+- **D7** — Sekundär-Button „Regressionstest definieren": Outline-Stil
+  (`background:'transparent'`, `border:'1px solid #374151'`,
+  `color:'#9ca3af'`, `borderRadius:4`, `padding:'8px 12px'`, `fontSize:13`,
+  `fontWeight:400`, `minHeight:44`) — reuse der bestehenden
+  `btnCancel`/`btnFlowReset`-Familie, keine neue Farbe.
+- **D8** — Visuelle Hierarchie ausschließlich über Fläche (gefüllt vs.
+  Outline) + Fettdruck (600 vs. 400), nicht über eine neue Farbe — reuse des
+  bereits etablierten `btnConfirm`/`btnCancel`-Unterscheidungsmusters.
+- **D9** — Status-Zustände inline unterhalb der Buttons: „kein Lauf" /
+  „läuft" / „erfolgreich + Zeitstempel" / „fehlgeschlagen + Zeitstempel",
+  Stile 1:1 aus `drainStatusRunning`/`drainStatusDone`/`drainStatusFailed`
+  übernommen; `role="status"` außer bei fehlgeschlagen (`role="alert"`).
+- **D10** — Zeitstempel-Format `toLocaleString('de-DE', {dateStyle:'short',
+  timeStyle:'medium'})`, identisch zu `BackupSection.jsx`.
+- **D11** — Während eines aktiven Laufs ist ausschließlich der
+  „ausführen"-Button gesperrt (`aria-disabled` + D6-Disabled-Token +
+  `lockNotice`-Hinweistext „Ein Regressionstest läuft — Ausführen
+  gesperrt."); „definieren" bleibt bedienbar.
+- **D12** — Touch-Targets: beide Buttons `minHeight:44`, volle
+  Kartenbreite.
+- **D13** — aria-labels wie in Abschnitt 4 spezifiziert (inkl.
+  Gesperrt-Variante am Primär-Button).
+- **D14** — Beide Buttons `<button type="button">`, kein `outline:none`,
+  Tab-Reihenfolge = visuelle Reihenfolge.
+- **D15** — Keine neuen Farbwerte: alle verwendeten Hex-Werte (`#0d0d0d`,
+  `#2a2a2a`, `#9ca3af`, `#6b7280`, `#1d4ed8`, `#fff`, `#1e293b`, `#64748b`,
+  `#374151`, `#86efac`, `#f87171`, `#fbbf24`) sind im Repo bereits an anderer
+  Stelle in exakt dieser Bedeutung im Einsatz (`CockpitView.jsx`,
+  `TriggerPanel.jsx`).
+- **D16** — `data-testid`-Konvention (kebab-case, Präfix `regression-`):
+  `regression-card`, `regression-run-btn`, `regression-define-btn`,
+  `regression-status`.
+
+### Annahmen
+
+- Kein Board-Story-Bezug (S-Nummer) für diese Design-Erweiterung bekannt —
+  Abschnitt referenziert das Ko-Design-Datum (2026-07-03) und das
+  Beauftragungsdatum (2026-07-06) des Owners.
+- Das genaue Ziel des „Regressionstest definieren"-Klicks (eigenständige
+  View, Modal/Overlay analog `IdeaCaptureModal`, oder Navigation in einen
+  Editor) ist eine Architektur-/Implementierungsentscheidung außerhalb des
+  Design-Scopes — bindend ist hier nur die visuelle Sekundär-Affordance
+  (Outline-Button), nicht das konkrete Ziel-Artefakt.
+- Die genaue Quelle/Trigger-Mechanik der Statuszeile (Polling wie beim
+  Drain-Job-Status, WebSocket-Push, oder rein lokaler State) ist ebenfalls
+  Architektur-/Implementierungssache — bindend ist nur die visuelle
+  Zustandsdarstellung (Tabelle in Abschnitt 3) und dass „läuft" nur den
+  „ausführen"-Button sperrt (D11).
+- Angenommen: „Regressionstest ausführen" und „Board abarbeiten" laufen in
+  **getrennten** Concurrency-Domänen (kein automatisches gegenseitiges
+  Sperren) — folgt der etablierten Linie, dass jede Aktions-Karte ihren
+  eigenen Lock-Zustand zeigt (s. bestehende Karten); falls der `architekt`
+  eine gemeinsame Sperre für nötig hält, ist das eine additive Ergänzung zu
+  D11, kein Widerspruch.
+- Kein neuer Icon-Font/keine neue Icon-Bibliothek — „⏳"/„✓"/„✗" als
+  Unicode-Zeichen, identisch zur bestehenden Praxis in `CockpitView.jsx`
+  (`drainStatus`-Texte).
