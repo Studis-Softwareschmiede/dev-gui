@@ -51,7 +51,7 @@
  *   - AC2: #/factory/<repo> Deep-Link und Rückweg; vollständige Tests in ProjektCockpit.test.jsx.
  *   - AC3: Cockpit mit Reitern; vollständige Tests in ProjektCockpit.test.jsx.
  *
- * Terminal, TriggerPanel and Dashboard are mocked to avoid WS/DOM complexity.
+ * Terminal and Dashboard are mocked to avoid WS/DOM complexity.
  *
  * @jest-environment jsdom
  */
@@ -59,15 +59,12 @@
 import { describe, it, expect, jest, beforeEach, afterEach } from '@jest/globals';
 import { act, fireEvent, waitFor } from '@testing-library/react';
 
-// ── Mock heavy sub-components (Terminal needs WS + xterm; Dashboard/TriggerPanel need fetch)
+// ── Mock heavy sub-components (Terminal needs WS + xterm; Dashboard needs fetch)
 jest.unstable_mockModule('../Terminal.jsx', () => ({
   Terminal: () => null,
 }));
 jest.unstable_mockModule('../Dashboard.jsx', () => ({
   Dashboard: () => null,
-}));
-jest.unstable_mockModule('../TriggerPanel.jsx', () => ({
-  TriggerPanel: () => null,
 }));
 // TeamView mocked to avoid /api/team fetch in AppShell tests (TeamView tests are separate)
 jest.unstable_mockModule('../TeamView.jsx', async () => {

@@ -14,9 +14,8 @@
  *
  * Covers (fabric-intake-dialog):
  *   AC8 — Button „Board abarbeiten" ist bei aktivem Job (Session state:"busy")
- *          deaktiviert (disabled-Attribut + Label — nie nur Farbe); Kill-Switch
- *          bleibt wirksam (TriggerPanel ist gemockt — Kill-Switch lebt dort,
- *          unberührt); 409 → Fehler-Info im UI, kein Crash.
+ *          deaktiviert (disabled-Attribut + Label — nie nur Farbe);
+ *          409 → Fehler-Info im UI, kein Crash.
  *          HINWEIS (headless-manual-drain AC6, S-224): das frühere „202 →
  *          onNavigate('factory')"-Verhalten (Terminal-Pane-Wechsel) ist
  *          SUPERSEDED — der Drain läuft seit ADR-017 headless (kein Live-
@@ -40,7 +39,7 @@
  *          (stiller Normalfall). Rein additiv — der bestehende 202→navigate-
  *          Vertrag (AC12/AC8) bleibt unberührt.
  *
- * Terminal, Dashboard, TriggerPanel, BoardView, SpecView sind gemockt
+ * Terminal, Dashboard, BoardView, SpecView sind gemockt
  * (WS/DOM-Komplexität vermeiden).
  *
  * @jest-environment jsdom
@@ -53,7 +52,6 @@ import { act, fireEvent, waitFor } from '@testing-library/react';
 
 jest.unstable_mockModule('../Terminal.jsx', () => ({ Terminal: () => null }));
 jest.unstable_mockModule('../Dashboard.jsx', () => ({ Dashboard: () => null }));
-jest.unstable_mockModule('../TriggerPanel.jsx', () => ({ TriggerPanel: () => null }));
 jest.unstable_mockModule('../BoardView.jsx', async () => {
   const R = (await import('react')).default;
   return {
@@ -373,18 +371,6 @@ describe('CockpitView — AC8 (fabric-intake-dialog): Board abarbeiten mit Sessi
     expect(onNavigateSpy).not.toHaveBeenCalled();
   });
 
-  it('Kill-Switch (TriggerPanel) is rendered — unberührt vom AC8-Button (AC8)', () => {
-    // TriggerPanel is mocked — we verify it is still present in the sidebar.
-    // The Kill-Switch lives inside TriggerPanel; the mock renders null but the
-    // TriggerPanel import path remains wired (not removed by AC8). This is a
-    // structural test: TriggerPanel is still imported and rendered.
-    renderCockpit();
-    // TriggerPanel mock renders null — but CockpitView must still render it.
-    // We verify by checking that the sidebar contains the "Board abarbeiten"
-    // section AND the TriggerPanel slot (even when mocked to null).
-    // The board button and sidebar coexist — TriggerPanel is not removed.
-    expect(document.querySelector('[data-testid="flow-board-btn"]')).toBeTruthy();
-  });
 });
 
 // ── S-228 (cost-mode-model-check AC4/AC5): Drift-Meldung nach Dispatch-Drift ───

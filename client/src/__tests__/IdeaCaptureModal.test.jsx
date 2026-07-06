@@ -11,7 +11,7 @@
  *          (Owner kann korrigieren). Esc schließt das Modal.
  *
  * CockpitView-Integration wird gegen echte Sub-Komponenten der Sidebar getestet
- * (IdeaCaptureModal selbst), Terminal/Dashboard/TriggerPanel/BoardView/SpecView
+ * (IdeaCaptureModal selbst), Terminal/Dashboard/BoardView/SpecView
  * bleiben gemockt (WS/DOM-Komplexität vermeiden, analog CockpitFlowTrigger.test.jsx).
  *
  * @jest-environment jsdom
@@ -24,7 +24,6 @@ import { act, fireEvent, waitFor } from '@testing-library/react';
 
 jest.unstable_mockModule('../Terminal.jsx', () => ({ Terminal: () => null }));
 jest.unstable_mockModule('../Dashboard.jsx', () => ({ Dashboard: () => null }));
-jest.unstable_mockModule('../TriggerPanel.jsx', () => ({ TriggerPanel: () => null }));
 jest.unstable_mockModule('../BoardView.jsx', async () => {
   const R = (await import('react')).default;
   return {

@@ -19,7 +19,6 @@ import { waitFor } from '@testing-library/react';
 // Mock AppShell dependencies not used here
 jest.unstable_mockModule('../Terminal.jsx', () => ({ Terminal: () => null }));
 jest.unstable_mockModule('../Dashboard.jsx', () => ({ Dashboard: () => null }));
-jest.unstable_mockModule('../TriggerPanel.jsx', () => ({ TriggerPanel: () => null }));
 
 const { render }    = await import('@testing-library/react');
 const React         = (await import('react')).default;

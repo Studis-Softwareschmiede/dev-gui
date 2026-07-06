@@ -3,10 +3,10 @@
  *
  * projekt-cockpit-navigation:
  *   AC3 — Reiter-Leiste „Arbeiten | Studis-Kanban-Board | Spezifikation" mit aktivem Projekt-Kontext.
- *          „Arbeiten" zeigt den FactoryWorkspace-Inhalt (Aktions-/Button-Spalte + TriggerPanel +
- *          Dashboard + optionale Terminal-Fläche) — SUPERSEDED für das Terminal-Pane durch
+ *          „Arbeiten" zeigt den FactoryWorkspace-Inhalt (Aktions-/Button-Spalte + Dashboard +
+ *          optionale Terminal-Fläche) — SUPERSEDED für das Terminal-Pane durch
  *          fabrik-arbeiten-layout AC1 (s.u.): kein dominantes eingebettetes Terminal mehr im
- *          Standard-Layout.
+ *          Standard-Layout. TriggerPanel entfernt (cockpit-declutter AC1, S-303).
  *          Reiter erben den Projekt-Kontext (activeRepo).
  *   AC2 — Rückweg zur Übersicht (#/factory) über den Back-Button.
  *
@@ -24,9 +24,9 @@
  *
  * fabric-intake-dialog:
  *   AC8 — „Board abarbeiten"-Button (Phase B) ist bei aktivem Job (Session
- *          state:"busy") deaktiviert (globales Lock-Modell, analog
- *          TriggerPanel). Nach erfolgreichem Auslösen (202) → onNavigate('factory')
- *          damit der Lauf live im Terminal sichtbar ist.
+ *          state:"busy") deaktiviert (globales Lock-Modell). Nach erfolgreichem
+ *          Auslösen (202) → onNavigate('factory') damit der Lauf live im
+ *          Terminal sichtbar ist.
  *
  * taktgeber-nachtwaechter (S-196):
  *   AC12 — Umbau: der Knopf ruft nicht mehr direkt POST /api/command mit
@@ -74,7 +74,7 @@
  *          Layout des „Arbeiten"-Reiters ENTFERNT (supersedes projekt-cockpit-
  *          navigation AC3-Formulierung „Terminal ... unverändert eingebettet",
  *          s.o.). Die Aktions-/Button-Spalte (Board abarbeiten, Idee, Neue
- *          Story, TriggerPanel, Dashboard) ist primärer Inhalt (`actionGrid`).
+ *          Story, Dashboard) ist primärer Inhalt (`actionGrid`).
  *   AC2 — Checkbox „Terminal einblenden" (Default AUS, `showTerminal`-State)
  *          blendet am unteren Rand eine Terminal-Fläche mit `<Terminal>` ein/
  *          aus. Aus-/Einblenden mountet/unmountet NUR die Client-Komponente —
@@ -164,7 +164,6 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { Terminal } from './Terminal.jsx';
 import { Dashboard } from './Dashboard.jsx';
-import { TriggerPanel } from './TriggerPanel.jsx';
 import { BoardView } from './BoardView.jsx';
 import { SpecView } from './SpecView.jsx';
 import { IdeaCaptureModal } from './IdeaCaptureModal.jsx';
@@ -341,7 +340,7 @@ export function CockpitView({ activeRepo, navigateFactory, onNavigate: _onNaviga
 
 // ── FactoryWorkspace ──────────────────────────────────────────────────────────
 
-/** Session poll interval in ms — matches TriggerPanel default (AC8). */
+/** Session poll interval in ms (AC8). */
 const SESSION_POLL_MS = 3_000;
 
 /** Drain-Job-Status poll interval in ms (headless-manual-drain AC6). */
@@ -349,10 +348,10 @@ const DRAIN_POLL_MS = 2_500;
 
 /**
  * FactoryWorkspace — the original FactoryView inner content:
- * Terminal + TriggerPanel + Dashboard.
+ * Terminal + Dashboard. (TriggerPanel entfernt — cockpit-declutter AC1, S-303.)
  *
- * Extended for AC4/S-111: passes project-scoped wsUrl to Terminal and
- * projectPath to TriggerPanel so commands run in the active project session.
+ * Extended for AC4/S-111: passes project-scoped wsUrl to Terminal so commands
+ * run in the active project session.
  *
  * Extended for autonome-board-abarbeitung AC2/S-119:
  * Adds „Board abarbeiten"-Knopf with confirmation dialog.
@@ -391,12 +390,12 @@ const DRAIN_POLL_MS = 2_500;
  *
  * Extended for fabrik-arbeiten-layout AC1/AC2/AC3 (S-265):
  * The dominant embedded Terminal pane is REMOVED from the standard layout —
- * the action/button boxes (Board abarbeiten, Idee, Neue Story, TriggerPanel,
- * Dashboard) render in a responsive card grid (`actionGrid`) as the PRIMARY
+ * the action/button boxes (Board abarbeiten, Idee, Neue Story, Dashboard)
+ * render in a responsive card grid (`actionGrid`) as the PRIMARY
  * content (AC1/AC3). A „Terminal einblenden"-checkbox (default OFF,
  * `showTerminal` state) toggles a Terminal pane at the BOTTOM of the tab
  * (AC2) — showing the live output of the remaining interactive PTY commands
- * (adopt/preview/train/new-project + Kill, fired via TriggerPanel). Hiding
+ * (adopt/preview/train/new-project + Kill). Hiding
  * the checkbox only unmounts the client `<Terminal>` component; the
  * server-side PTY session (PtySessionRegistry, via WsGateway) is unaffected
  * (a WS close only detaches the per-connection output listeners — the
@@ -478,8 +477,8 @@ function FactoryWorkspace({
   }, [onShowBoard]);
 
   // ── Session busy state (AC8 fabric-intake-dialog) ─────────────────────────
-  // Polls GET /api/session (state:"busy") to derive isRunning — same pattern
-  // as TriggerPanel. Used to disable the „Board abarbeiten"-Button (AC8).
+  // Polls GET /api/session (state:"busy") to derive isRunning.
+  // Used to disable the „Board abarbeiten"-Button (AC8).
   /** 'idle' | 'running' — derived from GET /api/session state */
   const [sessionRunState, setSessionRunState] = useState('idle');
 
@@ -954,9 +953,6 @@ function FactoryWorkspace({
           </button>
         </div>
 
-        {/* Flow-Trigger-Panel — fire slash-commands in the active project session */}
-        <TriggerPanel projectPath={activeRepo} />
-
         {/* Dashboard — project status cards */}
         <Dashboard />
         </div>
@@ -1376,7 +1372,7 @@ const styles = {
     lineHeight: 1.5,
   },
 
-  // ── headless-manual-drain AC5: Cost-Mode am Knopf (analog TriggerPanel) ────
+  // ── headless-manual-drain AC5: Cost-Mode am Knopf ──────────────────────────
   costLabel: {
     fontSize: 12,
     color: '#9ca3af',

@@ -16,7 +16,6 @@
  *   AC4 — Terminal-WS-URL enthält ?project=<encoded-activeRepo> (S-111);
  *          buildTerminalWsUrl gibt absolute WS-URL zurück (nach Einblenden
  *          der Terminal-Checkbox, s. fabrik-arbeiten-layout AC2).
- *   AC5 — TriggerPanel erhält projectPath=activeRepo via FactoryWorkspace-Prop.
  *   AC6 — Board-Reiter bettet BoardView mit lockedProject=activeRepo ein;
  *          kein eigener Projekt-Selektor im Cockpit (S-113).
  *
@@ -48,7 +47,7 @@
  *          unten; Kontrast/Statusfarben unverändert aus dem bestehenden Design.
  *   AC5 — kein Backend-Diff (reiner Client-Test).
  *
- * Terminal, Dashboard, TriggerPanel, BoardView, SpecView gemockt (WS/DOM-Komplexität vermeiden).
+ * Terminal, Dashboard, BoardView, SpecView gemockt (WS/DOM-Komplexität vermeiden).
  *
  * @jest-environment jsdom
  */
@@ -68,9 +67,6 @@ jest.unstable_mockModule('../Terminal.jsx', () => ({
 }));
 jest.unstable_mockModule('../Dashboard.jsx', () => ({
   Dashboard: () => null,
-}));
-jest.unstable_mockModule('../TriggerPanel.jsx', () => ({
-  TriggerPanel: () => null,
 }));
 
 // Mock BoardView — AC6/S-113: board tab embeds BoardView.

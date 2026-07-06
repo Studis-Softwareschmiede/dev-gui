@@ -16,7 +16,7 @@
  *            (IdeaSpecifyChatModal, scratch-Modus) abgedeckt; hier nur die
  *            Verdrahtung Button → Overlay.
  *
- * Terminal, Dashboard, TriggerPanel, BoardView, SpecView sind gemockt
+ * Terminal, Dashboard, BoardView, SpecView sind gemockt
  * (WS/DOM-Komplexität vermeiden); IdeaSpecifyChatModal bleibt real (scratch-
  * Start-Feld ruft beim Öffnen KEIN fetch auf).
  *
@@ -28,7 +28,6 @@ import { act, fireEvent } from '@testing-library/react';
 
 jest.unstable_mockModule('../Terminal.jsx', () => ({ Terminal: () => null }));
 jest.unstable_mockModule('../Dashboard.jsx', () => ({ Dashboard: () => null }));
-jest.unstable_mockModule('../TriggerPanel.jsx', () => ({ TriggerPanel: () => null }));
 jest.unstable_mockModule('../BoardView.jsx', async () => {
   const R = (await import('react')).default;
   return {

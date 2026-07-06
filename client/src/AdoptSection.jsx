@@ -56,7 +56,7 @@ import { collapseToLine } from './costMode.js';
 /** Der Adopt-Trigger-Befehlspräfix (bereits Allowlist-gelistet, [[flow-trigger]] AC2). */
 const ADOPT_CMD = '/agent-flow:adopt';
 
-/** Busy-Guard-Poll-Intervall (analog TriggerPanel/ObsidianImportSection, AC7). */
+/** Busy-Guard-Poll-Intervall (analog ObsidianImportSection, AC7). */
 const ADOPT_SESSION_POLL_MS = 3_000;
 
 /**
@@ -122,7 +122,7 @@ async function fetchOwnOrg(fetchImpl) {
 }
 
 /**
- * GET /api/session — Busy-Guard-Poll (AC7, spiegelt TriggerPanel.jsx/ObsidianImportSection.jsx).
+ * GET /api/session — Busy-Guard-Poll (AC7, spiegelt ObsidianImportSection.jsx).
  *
  * @param {typeof fetch} fetchImpl
  * @returns {Promise<boolean|null>} true=busy, false=ready, null=unbekannt (Zustand halten)
@@ -179,7 +179,7 @@ export function AdoptSection({ fetchFn }) {
     return () => { cancelled = true; };
   }, []);
 
-  // AC7: Busy-Guard-Poll (analog TriggerPanel/ObsidianImportSection).
+  // AC7: Busy-Guard-Poll (analog ObsidianImportSection).
   useEffect(() => {
     let cancelled = false;
     async function poll() {

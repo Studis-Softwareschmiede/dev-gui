@@ -25,7 +25,7 @@
  *         Leer-Guard: leerer/whitespace-only Text → Button disabled (kein Request).
  *         Ladetindikator während des Requests; 400/502 → klare Fehlermeldung, Text unverändert.
  *         Proof-Pfad ist UNABHÄNGIG vom Submit (kein Lock, keine Submit-Logik-Änderung).
- * AC9  — Cost-Mode-Schalter für `requirement` analog zu TriggerPanel (4-Wege
+ * AC9  — Cost-Mode-Schalter für `requirement` (4-Wege
  *         low-cost|balanced|max-quality|frontier, Default balanced → kein --cost-Flag).
  *         Shared via costMode.js (keine Duplikation).
  *         `new-project` (wie `adopt`) bietet keinen Cost-Mode (nicht cost-aware).

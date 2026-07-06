@@ -2,7 +2,7 @@ id: S-303
 parent: F-066
 title: TriggerPanel restlos aus dem Cockpit entfernen (Komponente/Styles/Tests/Importe);
   Backend-Endpunkte behalten
-status: To Do
+status: In Progress
 priority: P2
 spec: docs/specs/cockpit-declutter.md
 implements:
@@ -22,11 +22,11 @@ estimate_note: Heuristik score 7 (4 AC + 2 Komp TriggerPanel/CockpitView + ui-La
   -> M; Loeschung; baseline js|balanced|M ep 5.0 (n=8); keine Baseline-Tokens -> tok_est
   null
 confidence: medium
-branch: null
+branch: feat/S-303-triggerpanel-entfernen
 pr: null
 blocked_reason: null
 created_at: '2026-07-05T22:17:16Z'
-updated_at: '2026-07-05T22:21:22Z'
+updated_at: '2026-07-06T19:54:37Z'
 done_at: null
 tok_est: null
 area: fabrik-arbeiten

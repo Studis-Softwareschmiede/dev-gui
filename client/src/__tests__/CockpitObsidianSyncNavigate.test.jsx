@@ -33,7 +33,7 @@
  * dabei NICHT aufgerufen). Die Checkbox bleibt danach normal abwählbar
  * (kein Lock).
  *
- * Dashboard/TriggerPanel/BoardView sind gemockt (WS/DOM-Komplexität
+ * Dashboard/BoardView sind gemockt (WS/DOM-Komplexität
  * vermeiden, wie im übrigen Cockpit-Test-Bestand) — SpecView bleibt bewusst
  * UNGEMOCKT, das ist genau die zu prüfende Naht.
  *
@@ -48,7 +48,7 @@
 import { describe, it, expect, jest, beforeEach, afterEach } from '@jest/globals';
 import { act, fireEvent, waitFor } from '@testing-library/react';
 
-// ── Mock heavy sub-components (Dashboard/TriggerPanel/BoardView) ───────────────
+// ── Mock heavy sub-components (Dashboard/BoardView) ───────────────
 // SpecView bleibt bewusst UNGEMOCKT — das ist die zu prüfende Naht (AC6).
 // Terminal rendert (anders als in Iteration 2) einen sichtbaren Platzhalter
 // statt null, damit „Terminal-Fläche live sichtbar" tatsächlich beweisbar ist.
@@ -61,7 +61,6 @@ jest.unstable_mockModule('../Terminal.jsx', async () => {
   };
 });
 jest.unstable_mockModule('../Dashboard.jsx', () => ({ Dashboard: () => null }));
-jest.unstable_mockModule('../TriggerPanel.jsx', () => ({ TriggerPanel: () => null }));
 jest.unstable_mockModule('../BoardView.jsx', async () => {
   const R = (await import('react')).default;
   return {

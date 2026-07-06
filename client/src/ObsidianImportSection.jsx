@@ -40,7 +40,7 @@ async function fetchObsidianProjects(fetchImpl) {
 }
 
 /**
- * GET /api/session — Busy-Guard-Poll (AC5, spiegelt TriggerPanel.jsx).
+ * GET /api/session — Busy-Guard-Poll (AC5).
  *
  * @param {typeof fetch} fetchImpl
  * @returns {Promise<boolean|null>} true=busy, false=ready, null=unbekannt (Zustand halten)
@@ -65,8 +65,7 @@ async function fetchObsidianSessionBusy(fetchImpl) {
  * (obsidian-project-intake AC2, AC3, AC5, AC6, AC7).
  *
  * State machine (submitState): 'idle' | 'starting' | 'error'.
- * Busy-Guard (AC5) wird unabhängig per Poll auf GET /api/session gehalten
- * (Muster wie TriggerPanel.jsx).
+ * Busy-Guard (AC5) wird unabhängig per Poll auf GET /api/session gehalten.
  *
  * @param {{ fetchFn?: typeof fetch, onNavigate: (view: string) => void }} props
  */
@@ -123,7 +122,7 @@ export function ObsidianImportSection({ fetchFn, onNavigate }) {
     return () => { cancelled = true; };
   }, []);
 
-  // AC5: Busy-Guard-Poll (analog TriggerPanel — GET /api/session).
+  // AC5: Busy-Guard-Poll (GET /api/session).
   useEffect(() => {
     let cancelled = false;
     async function poll() {

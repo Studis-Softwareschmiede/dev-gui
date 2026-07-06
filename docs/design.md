@@ -10,8 +10,12 @@
 ## Komponenten-Patterns
 - **Terminal-Pane** — dominanter, scrollbarer xterm.js-Bereich; Verbindungs-Status sichtbar.
 - **Status-Dashboard** — Karten je Projekt (offene Items, letzter CI-Lauf, Preview-Container mit klickbarer URL).
-- **Flow-Trigger-Panel** — Projekt/Item wählen → eindeutiger Aktions-Button; bei aktivem Job sind Trigger **deaktiviert** (Lock sichtbar) + **Kill-Button** aktiv.
 - **Audit-Ansicht** — chronologische Liste (Zeit · Identität · Befehl).
+
+> **Trigger-Panel entfernt (cockpit-declutter AC1, S-303):** das generische
+> Befehls-Trigger-Panel (Projekt/Item wählen → Aktions-Button + Kill) ist aus
+> dem „Arbeiten"-Reiter entfernt. Der einzige weiterhin benötigte interaktive
+> Weg (Adopt) lebt jetzt auf der Fabrik-Übersicht ([[neues-projekt-auswahl-dialog]]).
 
 ## Responsive / Breakpoints
 Desktop-zuerst (Admin-Tool). Mind. lesbar/bedienbar ab ~1024 px; unter ~768 px Panels über das Terminal stapeln.
@@ -33,15 +37,15 @@ unteren Rand und ist per Checkbox ein-/ausblendbar (Default: aus).
 **Anordnung (Desktop, ≥ ~768 px):**
 1. **Aktions-Karten-Grid** (oben, scrollbar, füllt den verfügbaren Platz):
    die bisherigen Boxen — „Board abarbeiten" (inkl. Cost-Mode-Dropdown +
-   Status/Bericht), „Idee", „Neue Story", das Trigger-Panel (adopt/preview/
-   train/new-project + Kill) und das Status-Dashboard — werden statt in einer
-   vertikalen Einzelspalte als **umbrechendes Karten-Grid** (`flex-wrap`,
-   8-pt-Abstand; „Board abarbeiten"/„Idee"/„Neue Story" mit vollem Rahmen
-   statt nur Unterlinie, Trigger-Panel/Dashboard behalten ihre bestehende
+   Status/Bericht), „Idee", „Neue Story" und das Status-Dashboard — werden
+   statt in einer vertikalen Einzelspalte als **umbrechendes Karten-Grid**
+   (`flex-wrap`, 8-pt-Abstand; „Board abarbeiten"/„Idee"/„Neue Story" mit
+   vollem Rahmen statt nur Unterlinie, Dashboard behält seine bestehende
    `borderLeft`-Randlinie) nebeneinander angeordnet. Hierarchie: „Board abarbeiten" bleibt die erste/
    prominenteste Karte (Primäraktion), die übrigen folgen in bestehender
    Reihenfolge. Funktion/Verhalten jedes Buttons bleibt unverändert (gleiche
-   Handler/Endpunkte) — nur Anordnung/Optik ändern sich.
+   Handler/Endpunkte) — nur Anordnung/Optik ändern sich. (Trigger-Panel
+   entfernt, cockpit-declutter AC1, S-303.)
 2. **Terminal-Kontrollzeile** (unterer Rand, immer sichtbar, auch wenn das
    Karten-Grid darüber scrollt): eine Checkbox „Terminal einblenden"
    (Default: **aus**), Touch-Target ≥ 44 px, mit sichtbarem Fokusring.
@@ -327,7 +331,8 @@ Konformität prüft `reviewer`.
 ### 1. Platzierung
 
 Neue Karte **„Regressionstests"** im `actionGrid` des Arbeiten-Reiters, direkt
-**nach** der „Neue Story"-Karte und **vor** `TriggerPanel`/Status-Dashboard —
+**nach** der „Neue Story"-Karte und **vor** dem Status-Dashboard (TriggerPanel
+ist entfernt, cockpit-declutter AC1, S-303) —
 sie gehört fachlich zur Gruppe der einfachen Aktions-Karten (Titel + Button(s))
 statt zur Gruppe der komplexeren, breiteren Panels. Resultierende Grid-Reihenfolge:
 
@@ -335,8 +340,7 @@ statt zur Gruppe der komplexeren, breiteren Panels. Resultierende Grid-Reihenfol
 2. Idee
 3. Neue Story
 4. **Regressionstests** *(neu)*
-5. TriggerPanel (adopt/preview/train/new-project + Kill)
-6. Status-Dashboard
+5. Status-Dashboard
 
 Das Grid selbst (`display:flex; flexWrap:wrap; gap:16; padding:16`) ist
 unverändert — die neue Karte reiht sich als fünftes Flex-Item ein und
@@ -445,9 +449,9 @@ AC7a — s. `CockpitView.jsx`):
 ### 5. Design-Entscheidungen (testbar)
 
 - **D1** — Neue Karte „Regressionstests" im `actionGrid`, Position: nach
-  „Neue Story", vor `TriggerPanel`/Status-Dashboard (Reihenfolge: Board
-  abarbeiten, Idee, Neue Story, Regressionstests, TriggerPanel,
-  Status-Dashboard).
+  „Neue Story", vor Status-Dashboard (Reihenfolge: Board
+  abarbeiten, Idee, Neue Story, Regressionstests,
+  Status-Dashboard; TriggerPanel entfernt, cockpit-declutter AC1, S-303).
 - **D2** — Kartenrahmen identisch zum bestehenden `flowTriggerBox`/
   `intakeTriggerBox`-Token (`padding:'12px 16px'`, `background:'#0d0d0d'`,
   `border:'1px solid #2a2a2a'`, `borderRadius:6`, `minWidth:240`,
@@ -491,8 +495,7 @@ AC7a — s. `CockpitView.jsx`):
 - **D15** — Keine neuen Farbwerte: alle verwendeten Hex-Werte (`#0d0d0d`,
   `#2a2a2a`, `#9ca3af`, `#6b7280`, `#1d4ed8`, `#fff`, `#1e293b`, `#64748b`,
   `#374151`, `#86efac`, `#f87171`, `#fbbf24`) sind im Repo bereits an anderer
-  Stelle in exakt dieser Bedeutung im Einsatz (`CockpitView.jsx`,
-  `TriggerPanel.jsx`).
+  Stelle in exakt dieser Bedeutung im Einsatz (`CockpitView.jsx`).
 - **D16** — `data-testid`-Konvention (kebab-case, Präfix `regression-`):
   `regression-card`, `regression-run-btn`, `regression-define-btn`,
   `regression-status`.

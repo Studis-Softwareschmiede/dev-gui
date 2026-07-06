@@ -208,9 +208,6 @@ jest.unstable_mockModule('../Terminal.jsx', () => ({
 jest.unstable_mockModule('../Dashboard.jsx', () => ({
   Dashboard: () => null,
 }));
-jest.unstable_mockModule('../TriggerPanel.jsx', () => ({
-  TriggerPanel: () => null,
-}));
 
 // Mock IdeaSpecifyChatModal (idea-specify-chat, S-217/S-218) — this file only
 // asserts on BoardView's WIRING (both triggers open the same overlay with the

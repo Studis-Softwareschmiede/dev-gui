@@ -1,7 +1,7 @@
 /**
  * costMode.js — Shared Cost-Mode constants and helpers (AC9).
  *
- * Extracted so TriggerPanel and IntakeDialog can share cost-mode logic
+ * Extracted so CockpitView and IntakeDialog can share cost-mode logic
  * without duplication.
  *
  * Covers: cost mode values, display info, the costFlag() helper.
