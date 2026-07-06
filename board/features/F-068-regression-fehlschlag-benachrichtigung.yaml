@@ -1,0 +1,20 @@
+id: F-068
+title: Regression-Fehlschlag-Benachrichtigung (Event regression_failed, Default an)
+goal: 'Ein roter Regressionslauf löst genau EINEN Push aus („🔴 <projekt>: Regression <suite>
+  fehlgeschlagen — X/Y rot"); grüne Läufe melden nie. Neuer Event-Typ regression_failed im
+  bestehenden Notify-Katalog + Settings, default an. Baut auf push-notifications/notification-event-defaults
+  auf (kein neuer Notify-Pfad). Owner-Ko-Design 2026-07-03, beauftragt 2026-07-06.'
+status: Backlog
+priority: P2
+spec: docs/specs/regression-failed-notification.md
+definition_of_done: null
+labels: null
+depends:
+- F-067
+owner: null
+stories:
+- S-315
+progress: 0/1 done
+created_at: '2026-07-06T05:04:40Z'
+updated_at: '2026-07-06T05:04:40Z'
+area: benachrichtigungen
