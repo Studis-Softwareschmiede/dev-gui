@@ -2,7 +2,7 @@ id: S-302
 parent: F-066
 title: Auswahl-Dialog-Shell (3 Wege) auf der Fabrik-Uebersicht + Neues-Projekt-Wiring
   + Obsidian/Adopt einbinden
-status: Blocked
+status: Done
 priority: P2
 spec: docs/specs/neues-projekt-auswahl-dialog.md
 implements:
@@ -24,13 +24,9 @@ estimate_note: Heuristik score 7 (3 AC + 3 Komp NewProjectChooser/RepoOverview/I
 confidence: medium
 branch: worktree-flow-drain
 pr: null
-blocked_reason: 'Code gemergt (main@3af1ea6), CI gruen, ghcr-Image gebaut+gepusht
-  — lokaler Docker-Rollout konnte in dieser Sandbox nicht ausgefuehrt/verifiziert
-  werden (kein Docker-Daemon erreichbar). Bitte auf einem Host mit Docker-Zugriff
-  abschliessen: docker pull ghcr.io/studis-softwareschmiede/dev-gui:latest + recreate,
-  danach Board auf Done setzen.'
+blocked_reason: null
 created_at: '2026-07-05T22:17:15Z'
-updated_at: '2026-07-06T19:30:11Z'
-done_at: null
+updated_at: '2026-07-06T19:48:27Z'
+done_at: '2026-07-06T19:48:27Z'
 tok_est: null
 area: fabrik-arbeiten
