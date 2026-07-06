@@ -376,3 +376,63 @@ export class RepoSizeScanner {
 
 // Export für Tests
 export { scanDirInternal as _scanDirInternal };
+
+/**
+ * Leichtgewichtige Existenz-/Confinement-Prüfung eines Klon-Ordners, ohne einen
+ * vollen rekursiven Scan anzustoßen (S-298 AC7 — Refresh-Endpunkt validiert den
+ * Slug, bevor er einen Hintergrund-Job triggert).
+ *
+ * WICHTIG (Fix S-298 CHANGES-REQUIRED, coder/R03-Vorfall 2026-07-06):
+ * `workspaceRootResolver()` liefert `{ path, source }` (S-047/RepoSizeScanner-
+ * Konvention, siehe `resolveWorkspaceRoot()`-Doku in workspacePath.js) — NIE das
+ * Rückgabeobjekt selbst als Pfad verwenden, sondern immer `.path` entnehmen.
+ *
+ * @param {{ slug: string, workspaceRootResolver?: Function, fsDeps?: { stat?: Function, realpath?: Function } }} params
+ * @returns {Promise<boolean>} true nur wenn der Klon-Ordner existiert UND strikt
+ *   innerhalb des aufgelösten Workspace-Roots liegt (realpath-Check, Symlink-sicher).
+ */
+export async function cloneExists({ slug, workspaceRootResolver, fsDeps = {} }) {
+  if (typeof slug !== 'string' || !slug.trim()) return false;
+  const cleanSlug = slug.trim();
+  if (cleanSlug.includes('/') || cleanSlug === '.' || cleanSlug === '..') return false;
+  if (!workspaceRootResolver) return false;
+
+  const doRealpath = fsDeps.realpath ?? realpath;
+  const doStat = fsDeps.stat ?? stat;
+
+  let workspaceRoot;
+  try {
+    // Fix: `.path` entnehmen — der Resolver liefert { path, source }, nicht den Pfad direkt.
+    const resolved = await workspaceRootResolver();
+    workspaceRoot = resolved?.path ?? '';
+  } catch {
+    return false;
+  }
+  if (!workspaceRoot.trim()) return false;
+
+  let resolvedRoot;
+  try {
+    resolvedRoot = await doRealpath(workspaceRoot.trim());
+  } catch {
+    return false;
+  }
+
+  const clonePath = join(workspaceRoot.trim(), cleanSlug);
+  let resolvedClone;
+  try {
+    resolvedClone = await doRealpath(clonePath);
+  } catch {
+    return false; // Klon existiert nicht
+  }
+
+  // Confinement: Klon muss strikt innerhalb des Roots liegen (Symlink-Flucht-Schutz).
+  const confinedRoot = resolvedRoot + sep;
+  if (!(resolvedClone + sep).startsWith(confinedRoot)) return false;
+
+  try {
+    const st = await doStat(resolvedClone);
+    return st.isDirectory();
+  } catch {
+    return false;
+  }
+}

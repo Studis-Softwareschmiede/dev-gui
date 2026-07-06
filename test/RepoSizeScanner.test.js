@@ -1,6 +1,6 @@
 /**
  * RepoSizeScanner.test.js — Unit-Tests für rekursiven Verzeichnis-Scan mit Bucket-Zuordnung
- * (docs/specs/repo-size-badge.md AC1, AC2)
+ * (docs/specs/repo-size-badge.md AC1, AC2, AC7-Anteil cloneExists)
  *
  * Covers:
  *   AC1  — Drei-Bucket-Aufteilung (git, artifacts, workspace) mit korrekter Größensumme
@@ -8,13 +8,17 @@
  *          werden vollständig dem artifacts-Bucket zugeordnet, keine Doppelzählung
  *   AC2  — Pfad-/Symlink-Schutz: realpath-Check auf WORKSPACE_DIR-Boundary,
  *          Symlinks nicht verfolgt, kein Dateisystem-Walk außerhalb des Mounts
+ *   AC7  — cloneExists(): leichtgewichtige Existenz-/Confinement-Prüfung für den
+ *          Refresh-Endpunkt (repoSizeRouter.test.js deckt den HTTP-Pfad ab); inkl.
+ *          Regressionstest für den S-298-Vorfall (Resolver-Rückgabe {path,source}
+ *          fälschlich als Pfad-String verwendet).
  */
 
 import { describe, it, beforeEach, afterEach, expect } from '@jest/globals';
 import { mkdtemp, mkdir, writeFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { RepoSizeScanner } from '../src/RepoSizeScanner.js';
+import { RepoSizeScanner, cloneExists } from '../src/RepoSizeScanner.js';
 
 // ── Hilfsfunktionen ──────────────────────────────────────────────────────
 
@@ -299,6 +303,57 @@ describe('RepoSizeScanner', () => {
       expect(result.total).toBeLessThan(100_000);
 
       await rm(outsideDir, { recursive: true, force: true });
+    });
+  });
+
+  describe('cloneExists (S-298 AC7 — Fix coder/R03-Vorfall 2026-07-06)', () => {
+    it('true für einen existierenden Klon innerhalb des Workspace-Roots', async () => {
+      const { workspaceRoot } = fixture;
+      const exists = await cloneExists({
+        slug: 'test-repo',
+        workspaceRootResolver: async () => ({ path: workspaceRoot, source: 'env-default' }),
+      });
+      expect(exists).toBe(true);
+    });
+
+    it('false für einen nicht existierenden Klon (kein Crash)', async () => {
+      const { workspaceRoot } = fixture;
+      const exists = await cloneExists({
+        slug: 'nicht-vorhanden',
+        workspaceRootResolver: async () => ({ path: workspaceRoot, source: 'env-default' }),
+      });
+      expect(exists).toBe(false);
+    });
+
+    it('Regressionstest für den ursprünglichen Bug: der Resolver liefert {path,source} — cloneExists darf NIE das Objekt selbst als Pfad verwenden (TypeError-Symptom)', async () => {
+      const { workspaceRoot } = fixture;
+      // Der ursprüngliche Bug: `workspaceRoot` (das ganze {path,source}-Objekt statt
+      // `resolved.path`) wurde direkt in `join()`/`realpath()` verwendet — das
+      // erzeugte einen stillen TypeError, der als "existiert nicht" (404) auftrat.
+      // Dieser Test stellt sicher, dass cloneExists() korrekt `.path` entnimmt und
+      // deshalb `true` liefert statt fälschlich `false`.
+      const exists = await cloneExists({
+        slug: 'test-repo',
+        workspaceRootResolver: async () => ({ path: workspaceRoot, source: 'configured' }),
+      });
+      expect(exists).toBe(true);
+    });
+
+    it('false bei Slug mit Pfad-Komponenten (Traversal-Schutz)', async () => {
+      const { workspaceRoot } = fixture;
+      const exists = await cloneExists({
+        slug: '../etc',
+        workspaceRootResolver: async () => ({ path: workspaceRoot, source: 'env-default' }),
+      });
+      expect(exists).toBe(false);
+    });
+
+    it('false wenn der Resolver fehlschlägt (kein Crash)', async () => {
+      const exists = await cloneExists({
+        slug: 'test-repo',
+        workspaceRootResolver: async () => { throw new Error('boom'); },
+      });
+      expect(exists).toBe(false);
     });
   });
 });

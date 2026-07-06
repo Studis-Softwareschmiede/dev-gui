@@ -164,6 +164,8 @@ import { RetroAutoQueue } from './src/RetroAutoQueue.js';
 import { AutoRetroTrigger } from './src/AutoRetroTrigger.js';
 import { read as readRetroAutoSettings } from './src/RetroAutoSettingsStore.js';
 import { BoardEventHub } from './src/BoardEventHub.js';
+import { RepoSizeScanner } from './src/RepoSizeScanner.js';
+import { RepoSizeStore } from './src/RepoSizeStore.js';
 import { mountRouters } from './src/routerLoader.js';
 
 const PORT = Number(process.env.PORT ?? 8080);
@@ -375,6 +377,13 @@ const areaWriter = new AreaWriter();
 //     Drain fürs selbe Projekt liefert `409` (AC2).
 // `commandService` wird NUR für die `isProjectBusy()`-Busy-Erkennung gehalten
 // (aktive PTY-Session/Command), NICHT für den Ausführungs-Schritt.
+// ── Repo-Größen-Anzeige (repo-size-badge AC4-AC8, S-298) ─────────────────────
+// Eigene ProjectJobLock-Instanz (Dedup je Klon-Slug, getrennt von allen anderen
+// Locks) — ein zweiter Refresh-Trigger während eines laufenden Scans koalesziert.
+const repoSizeScanner = new RepoSizeScanner({ workspaceRootResolver: resolveWorkspaceRoot });
+const repoSizeStore = new RepoSizeStore();
+const repoSizeRefreshLock = new ProjectJobLock();
+
 const manualDrainLock = new ProjectJobLock();
 const manualHeadlessFlowRunner = new HeadlessFlowRunner();
 const manualHeadlessFlowRunnerAdapter = new HeadlessFlowRunnerAdapter({
@@ -744,6 +753,9 @@ const deps = {
   boardAggregator,
   docsReader,
   storyMetricReader,
+  repoSizeScanner,
+  repoSizeStore,
+  repoSizeRefreshLock,
   assistService,
   knowledgeSourceService,
   // headless-reconcile-runner AC1-AC9: getrennter claude -p-Kindprozess-Runner
