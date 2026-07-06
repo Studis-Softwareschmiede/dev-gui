@@ -2448,6 +2448,42 @@ describe('dev-gui-board-aggregator — AC5: Rollup display (cockpit)', () => {
   });
 });
 
+// ── feature-umsetzen-button — kein Button bei nur 1 Story (Owner-Feedback 2026-07-06) ──
+// Vorher erschien der Button auch bei genau 1 Story, ein Klick wurde vom Server
+// aber immer mit "Feature hat weniger als 2 Storys" abgelehnt (board-feature-
+// drain.sh-Schwelle) — verwirrende, unnötige Fehlermeldung. Der Button
+// erscheint jetzt gar nicht erst, wenn Bündelung keinen Vorteil bringt.
+describe('feature-umsetzen-button — kein Button bei <2 Storys (Owner-Feedback 2026-07-06)', () => {
+  it('genau 1 Story -> KEIN "Umsetzen"-Button', async () => {
+    const featureSingleStory = {
+      id: 'F-single',
+      title: 'Nur eine Story',
+      status: 'In Progress',
+      priority: 'high',
+      stories: [{ id: 'S-single', parent: 'F-single', title: 'Einzige Story', status: 'To Do', labels: [] }],
+    };
+    const project = { slug: 'project-single', features: [featureSingleStory] };
+    globalThis.fetch = makeBoardFetch({ fullProjects: [project] });
+    const { container } = renderCockpit('project-single');
+
+    await waitFor(() => {
+      const rollup = container.querySelector('[data-testid="rollup-bar"]');
+      expect(rollup).toBeTruthy();
+    });
+    expect(container.textContent).not.toMatch(/Umsetzen/);
+  });
+
+  it('2 Storys -> Button erscheint weiterhin', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+
+    await waitFor(() => {
+      const feature = container.querySelector('[data-feature="F-002"]');
+      expect(feature.textContent).toMatch(/Umsetzen/);
+    });
+  });
+});
+
 // ── AC6 (dev-gui-board-aggregator) — Filter (cockpit) ─────────────────────────
 
 describe('dev-gui-board-aggregator — AC6: Filter (cockpit)', () => {
