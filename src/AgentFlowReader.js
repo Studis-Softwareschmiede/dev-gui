@@ -269,8 +269,13 @@ export class AgentFlowReader {
    *
    * Priority:
    *   1. ENV AGENT_FLOW_PLUGIN_ROOT (if set and non-empty)
-   *   2. Newest dir under $HOME/.claude/plugins/cache/agent-flow (mindepth=2 maxdepth=2)
-   *   3. null (degraded — no plugin installed)
+   *   2. installPath aus $HOME/.claude/plugins/installed_plugins.json (Schlüssel
+   *      "agent-flow@agent-flow") — die Quelle, die `claude plugin` SELBST als
+   *      aktuell installierte Version führt (s. `resolvePluginRootContaining`-
+   *      Kommentar für den Vorfall, der das nötig machte).
+   *   3. Fallback: Newest dir under $HOME/.claude/plugins/cache/agent-flow
+   *      (mindepth=2 maxdepth=2) — nur falls das Manifest fehlt/kaputt ist.
+   *   4. null (degraded — no plugin installed)
    *
    * @returns {Promise<string|null>}
    */
@@ -289,28 +294,40 @@ export class AgentFlowReader {
       return envOverride.trim();
     }
 
+    // 2. Manifest (autoritativ)
+    const fromManifest = await this.#resolveFromManifest();
+    if (fromManifest) return fromManifest;
+
+    // 3. Fallback: mtime-Scan
     const candidates = await this.#gatherCandidates();
     if (candidates.length === 0) return null;
-    // Return the newest (latest mtime)
     candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
     return candidates[0].path;
   }
 
   /**
    * Wie `resolvePluginRoot()`, aber verlangt zusätzlich, dass eine bestimmte
-   * Datei relativ zum Plugin-Root existiert (feature-umsetzen-button,
-   * 2026-07-06 — Vorfall: zwei Plugin-Versionsverzeichnisse mit IDENTISCHEM
-   * `mtimeMs` — beide während desselben Container-Boot-Update-Laufs
-   * geschrieben — machten `resolvePluginRoot()`s reine mtime-Sortierung
-   * nicht-deterministisch; das ältere Verzeichnis (ohne die gesuchte Datei)
-   * gewann den Tiebreak und ein Spawn schlug mit "ENOENT"/Exit 127 fehl).
+   * Datei relativ zum Plugin-Root existiert.
    *
-   * Statt eine einzelne Kandidatur blind zu vertrauen, werden alle
-   * Versionsverzeichnisse (neueste zuerst) auf Vorhandensein der Datei
-   * geprüft — das erste Verzeichnis, das sie tatsächlich enthält, gewinnt.
-   * Bei einem echten mtime-Gleichstand zwischen zwei Versionen, die BEIDE
-   * die Datei enthalten, bleibt die Reihenfolge zwar weiterhin technisch
-   * unbestimmt, aber funktional gleichwertig (die Datei existiert so oder so).
+   * 2026-07-06-Vorfall (feature-umsetzen-button), zwei Funde in derselben
+   * Testkette:
+   *   (a) Erst wurde ein reiner mtime-Vergleich verwendet — bei einem
+   *       (vermeintlichen) Gleichstand zwischen zwei Versionsverzeichnissen
+   *       gewann das ÄLTERE (ohne die gesuchte Datei), Spawn schlug mit
+   *       "ENOENT"/Exit 127 fehl.
+   *   (b) Nach einem Fix, der zusätzlich Vorhandensein prüfte, schlug es
+   *       WEITERHIN fehl — Grund: kein echter Gleichstand, sondern ein
+   *       ECHT FALSCHES mtime (das ÄLTERE Verzeichnis hatte, Millisekunden-
+   *       genau geprüft, ein SPÄTERES mtime als das neuere — vermutlich
+   *       Nebeneffekt von `claude plugin update`s interner Buchführung).
+   *       mtime ist damit grundsätzlich KEIN verlässliches Rezenz-Signal.
+   *
+   * Deshalb zuerst das von `claude plugin` selbst geführte Manifest
+   * (`installed_plugins.json`, `installPath`) — das ist dieselbe Quelle, die
+   * `claude plugin list` anzeigt. Nur wenn das Manifest fehlt, kaputt ist,
+   * oder die gesuchte Datei dort NICHT existiert, wird auf den alten
+   * mtime-Scan (neueste zuerst, erste Version mit der Datei gewinnt)
+   * zurückgefallen — als Sicherheitsnetz, nicht als Primärpfad.
    *
    * @param {string} relativeFilePath  z.B. "scripts/board-feature-drain.sh"
    * @returns {Promise<string|null>}
@@ -321,9 +338,20 @@ export class AgentFlowReader {
       return envOverride.trim();
     }
 
+    const fromManifest = await this.#resolveFromManifest();
+    if (fromManifest) {
+      try {
+        await this.#fsDeps.access(join(fromManifest, relativeFilePath));
+        return fromManifest;
+      } catch {
+        // Manifest zeigt auf eine Version ohne diese Datei — Fallback unten.
+      }
+    }
+
     const candidates = await this.#gatherCandidates();
     candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
     for (const candidate of candidates) {
+      if (candidate.path === fromManifest) continue; // schon geprüft
       try {
         await this.#fsDeps.access(join(candidate.path, relativeFilePath));
         return candidate.path;
@@ -332,6 +360,29 @@ export class AgentFlowReader {
       }
     }
     return null;
+  }
+
+  /**
+   * Liest die aktuell installierte agent-flow-Plugin-Version aus dem von
+   * `claude plugin` selbst geführten Manifest (autoritativ, s.o.).
+   * @returns {Promise<string|null>}
+   */
+  async #resolveFromManifest() {
+    const manifestPath = join(homedir(), '.claude', 'plugins', 'installed_plugins.json');
+    let raw;
+    try {
+      raw = await this.#fsDeps.readFile(manifestPath, 'utf8');
+    } catch {
+      return null;
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      const entries = parsed?.plugins?.['agent-flow@agent-flow'];
+      const installPath = Array.isArray(entries) ? entries[0]?.installPath : undefined;
+      return typeof installPath === 'string' && installPath.trim() ? installPath.trim() : null;
+    } catch {
+      return null;
+    }
   }
 
   /**

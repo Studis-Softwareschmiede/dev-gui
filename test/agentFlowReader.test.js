@@ -1254,3 +1254,88 @@ describe('resolvePluginRootContaining — Tiebreak-Vorfall 2026-07-06', () => {
     }
   });
 });
+
+// ── Manifest-Auflösung — Vorfall 2026-07-06 (Nachfolge-Fund): mtime ist KEIN
+// verlässliches Rezenz-Signal — im echten Container hatte die ÄLTERE Plugin-
+// Version (git-Commit-mäßig) ein SPÄTERES mtime als die neuere (vermutlich
+// Nebeneffekt der internen Buchführung von `claude plugin update`), OHNE
+// echten Gleichstand. `installed_plugins.json` (von `claude plugin` selbst
+// geführt, entspricht `claude plugin list`) ist die autoritative Quelle.
+describe('resolvePluginRoot(Containing) — Manifest-Vorrang vor mtime-Scan (Vorfall 2026-07-06)', () => {
+  const MANIFEST_PATH = _join(_homedir(), '.claude', 'plugins', 'installed_plugins.json');
+  const MANIFEST_VERSION = _join(_homedir(), '.claude', 'plugins', 'cache', 'agent-flow', 'agent-flow', 'a3993f27038f');
+  const STALE_BUT_NEWER_MTIME_VERSION = _join(_homedir(), '.claude', 'plugins', 'cache', 'agent-flow', 'agent-flow', 'd35c39cd04b6');
+
+  function buildManifestFsDeps({ manifestPresent = true, scriptInManifestVersion = true } = {}) {
+    const manifestJson = JSON.stringify({
+      plugins: { 'agent-flow@agent-flow': [{ installPath: MANIFEST_VERSION, version: 'a3993f27038f' }] },
+    });
+    const dirMap = {
+      [_join(_homedir(), '.claude', 'plugins', 'cache', 'agent-flow')]: [dirEntry('agent-flow')],
+      [_join(_homedir(), '.claude', 'plugins', 'cache', 'agent-flow', 'agent-flow')]: [
+        dirEntry('a3993f27038f'), dirEntry('d35c39cd04b6'),
+      ],
+    };
+    const scriptFiles = new Set([_join(STALE_BUT_NEWER_MTIME_VERSION, 'scripts', 'board-feature-drain.sh')]);
+    if (scriptInManifestVersion) scriptFiles.add(_join(MANIFEST_VERSION, 'scripts', 'board-feature-drain.sh'));
+
+    return {
+      readFile: async (path) => {
+        if (path === MANIFEST_PATH && manifestPresent) return manifestJson;
+        const err = new Error(`ENOENT: ${path}`); err.code = 'ENOENT'; throw err;
+      },
+      readdir: async (dir) => {
+        if (dir in dirMap) return dirMap[dir];
+        const err = new Error(`ENOENT: ${dir}`); err.code = 'ENOENT'; throw err;
+      },
+      // STALE_BUT_NEWER_MTIME_VERSION hat absichtlich das SPÄTERE mtime,
+      // obwohl es die (git-mäßig) ältere Version ist — reproduziert exakt
+      // den echten Container-Befund.
+      stat: async (path) => {
+        if (path === STALE_BUT_NEWER_MTIME_VERSION) return { mtimeMs: 5000 };
+        if (path === MANIFEST_VERSION) return { mtimeMs: 4000 };
+        const err = new Error(`ENOENT: ${path}`); err.code = 'ENOENT'; throw err;
+      },
+      access: async (path) => {
+        if (scriptFiles.has(path)) return undefined;
+        const err = new Error(`ENOENT: ${path}`); err.code = 'ENOENT'; throw err;
+      },
+    };
+  }
+
+  it('resolvePluginRoot(): Manifest-Version gewinnt, obwohl die andere Version ein späteres mtime hat', async () => {
+    const reader = new AgentFlowReader({ fsDeps: buildManifestFsDeps() });
+    const root = await reader.resolvePluginRoot();
+    expect(root).toBe(MANIFEST_VERSION);
+  });
+
+  it('resolvePluginRootContaining(): Manifest-Version gewinnt, obwohl die andere Version ein späteres mtime hat', async () => {
+    const reader = new AgentFlowReader({ fsDeps: buildManifestFsDeps() });
+    const root = await reader.resolvePluginRootContaining('scripts/board-feature-drain.sh');
+    expect(root).toBe(MANIFEST_VERSION);
+  });
+
+  it('resolvePluginRootContaining(): Manifest-Version hat die Datei NICHT -> Fallback auf mtime-Scan', async () => {
+    const reader = new AgentFlowReader({ fsDeps: buildManifestFsDeps({ scriptInManifestVersion: false }) });
+    const root = await reader.resolvePluginRootContaining('scripts/board-feature-drain.sh');
+    expect(root).toBe(STALE_BUT_NEWER_MTIME_VERSION);
+  });
+
+  it('resolvePluginRoot(): Manifest fehlt/kaputt -> Fallback auf mtime-Scan (Rückwärtskompatibilität)', async () => {
+    const reader = new AgentFlowReader({ fsDeps: buildManifestFsDeps({ manifestPresent: false }) });
+    const root = await reader.resolvePluginRoot();
+    expect(root).toBe(STALE_BUT_NEWER_MTIME_VERSION);
+  });
+
+  it('ENV-Override hat weiterhin Vorrang vor dem Manifest', async () => {
+    const prev = process.env.AGENT_FLOW_PLUGIN_ROOT;
+    process.env.AGENT_FLOW_PLUGIN_ROOT = '/override/path';
+    try {
+      const reader = new AgentFlowReader({ fsDeps: buildManifestFsDeps() });
+      expect(await reader.resolvePluginRoot()).toBe('/override/path');
+    } finally {
+      if (prev === undefined) delete process.env.AGENT_FLOW_PLUGIN_ROOT;
+      else process.env.AGENT_FLOW_PLUGIN_ROOT = prev;
+    }
+  });
+});
