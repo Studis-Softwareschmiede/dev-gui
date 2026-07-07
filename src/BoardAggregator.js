@@ -45,6 +45,18 @@
  *   `area` des Eltern-Features — auf den Bereich zeigt). Ein Bereich ohne
  *   zugeordnete Storys bleibt sichtbar (`storyCount: 0`).
  *
+ * run-state-live-view (S-316):
+ *   AC1 — Liest je Projekt zusätzlich `board/runs/F-###/state.yaml` (ephemer, vom
+ *   Feature-Drain geschrieben, `src/RunStateReader.js`) als `runs`-Liste am
+ *   Projekt-Index an. Read-only (kein Schreibpfad nach `board/runs/`). Fehlt
+ *   `board/runs/` → leere Liste, kein Crash.
+ *   AC2 — Feldnamen gemäß agent-flow `feature-batch-orchestration` v2 (hier NICHT
+ *   neu definiert, nur gemappt): feature, phase, currentStory, done/total, round,
+ *   startedAt, lastError, isLastRun. Fehlende Einzelfelder → null.
+ *   AC3 — Ein defektes/halb-geschriebenes state.yaml macht nur diesen einen
+ *   Feature-Lauf unsichtbar (übersprungen, best-effort geloggt) — der restliche
+ *   Run-State-Index UND der bestehende Board-Index bleiben intakt.
+ *
  * Scannt die konfigurierten Repo-Wurzeln (BOARD_ROOTS env-Variable) read-only nach
  * board/-Ordnern und liest je Repo:
  *   - board/board.yaml               (Projekt-Meta)
@@ -79,6 +91,7 @@ import { readdir, readFile, watch, stat } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
 import { computeFeatureStatus } from './featureStatus.js';
+import { readRunStates } from './RunStateReader.js';
 
 // Re-export: computeFeatureStatus lebt seit board-filter-feature-status-consistency
 // (S-241) als geteilte, dependency-freie Pure-Funktion in ./featureStatus.js (EINE
@@ -777,8 +790,14 @@ export class BoardAggregator {
         error: `board.yaml fehlt oder ungültig: ${err.message}`,
         features: [],
         areas: [],
+        runs: [],
       };
     }
+
+    // ── board/runs/F-###/state.yaml (run-state-live-view AC1/AC2/AC3) ────────
+    // Read-only, fehlertolerant (siehe RunStateReader.js — nie throw). Nutzt
+    // dieselbe fsDeps-Quelle (Working-Tree per Default, Git-Ref bei readProjectAt()).
+    const runs = await readRunStates(repoPath, fsDeps);
 
     // ── areas.yaml (bereichs-modell AC1) ─────────────────────────────────────
     // Fehlende/leere Datei → leere Liste, kein Crash (Abwärtskompatibilität mit
@@ -986,6 +1005,7 @@ export class BoardAggregator {
       schema_version: boardMeta.schema_version ?? null,
       features,
       areas,
+      runs,
     };
   }
 
@@ -1306,7 +1326,8 @@ export class BoardAggregator {
  *   project_slug: string,
  *   schema_version: number|null,
  *   features: FeatureEntry[],
- *   areas: AreaEntry[]
+ *   areas: AreaEntry[],
+ *   runs: RunEntry[]
  * }} ProjectEntry
  *
  * @typedef {{
@@ -1314,8 +1335,21 @@ export class BoardAggregator {
  *   repo_path: string,
  *   error: string,
  *   features: [],
- *   areas: []
+ *   areas: [],
+ *   runs: []
  * }} ErrorEntry
+ *
+ * @typedef {{
+ *   feature: string,
+ *   phase: string|null,
+ *   currentStory: string|null,
+ *   done: number|null,
+ *   total: number|null,
+ *   round: number|null,
+ *   startedAt: string|null,
+ *   lastError: string|null,
+ *   isLastRun: boolean
+ * }} RunEntry
  *
  * @typedef {{
  *   id: string,

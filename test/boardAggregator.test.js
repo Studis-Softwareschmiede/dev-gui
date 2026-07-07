@@ -202,6 +202,17 @@
  *          GET /api/board/projects/:slug). Rein lesend, kein AccessGuard-Test
  *          nötig (Read-Route, analog allen übrigen GET-Board-Routen).
  *
+ * Covers (run-state-live-view, S-316 — BoardAggregator liest board/runs/F-###/
+ * state.yaml über RunStateReader.js hinein, siehe test/RunStateReader.test.js für
+ * die Unit-Coverage des Readers selbst; describe-Block "BoardAggregator — runs
+ * (run-state-live-view AC1/AC2/AC3)" unten deckt nur die Integration in
+ * _readBoard()/getIndex() ab):
+ *   AC1 — Projekt-Index trägt zusätzlich `runs` (leer, wenn board/runs/ fehlt —
+ *          Standard-Fixture hat kein board/runs/, deckt also den Normalfall ab);
+ *          Fehler-Boards (board.yaml fehlt) tragen ebenfalls `runs: []`.
+ *   AC2/AC3 — vollständig in test/RunStateReader.test.js (Feld-Mapping,
+ *          Fehlertoleranz je Einzel-Lauf).
+ *
  * Covers (drain-origin-progress-sync, S-319 — injizierbare Datei-Quelle für
  * ProjectDrain's origin-basierte Aussensicht; describe-Block "drain-origin-
  * progress-sync AC2/AC7 — readProjectAt() (injizierbare Datei-Quelle)"; die
@@ -2079,6 +2090,72 @@ describe('BoardAggregator — areas.yaml lesen (bereichs-modell AC1)', () => {
     await aggregator.getIndex();
     // No write-equivalent method exists on fsDeps (readFile/readdir/watch only) —
     // the aggregator can only have called those, never a write.
+    expect(fsDeps.writeFile).toBeUndefined();
+  });
+});
+
+// ── BoardAggregator — runs (run-state-live-view AC1/AC2/AC3) ─────────────────
+// Nur die Integration in _readBoard()/getIndex() — Feld-Mapping + Fehlertoleranz
+// des Readers selbst sind in test/RunStateReader.test.js abgedeckt.
+
+describe('BoardAggregator — runs (run-state-live-view AC1)', () => {
+  it('project entry has empty runs: [] when board/runs/ is missing (Standard-Fixture)', async () => {
+    const { aggregator } = makeAggregator();
+    const index = await aggregator.getIndex();
+    expect(index[0]).toHaveProperty('runs');
+    expect(index[0].runs).toEqual([]);
+  });
+
+  it('error entry (missing board.yaml) also carries runs: []', async () => {
+    const { aggregator } = makeAggregator({ missingBoardYaml: true });
+    const index = await aggregator.getIndex();
+    expect(index[0].runs).toEqual([]);
+  });
+
+  it('reads board/runs/F-###/state.yaml and attaches mapped run entries', async () => {
+    // Overrides MUST happen BEFORE the BoardAggregator is constructed — the
+    // constructor spreads fsDeps into a new merged object (`{...defaultFsDeps,
+    // ...fsDeps}`), so mutating `fsDeps.readdir` on an already-constructed
+    // instance's outer reference has no effect (analog to the "no-board-repo"
+    // AC1 pattern above).
+    const fsDeps = buildFakeFsDeps();
+    const runsDir = `${BOARD_ROOT}/my-repo/board/runs`;
+    const origReaddir = fsDeps.readdir;
+    fsDeps.readdir = async (path, opts) => {
+      if (path === runsDir) {
+        return [{ name: 'F-069', isDirectory: () => true, isSymbolicLink: () => false, isFile: () => false }];
+      }
+      return origReaddir(path, opts);
+    };
+    const origReadFile = fsDeps.readFile;
+    fsDeps.readFile = async (path, enc) => {
+      if (path === `${runsDir}/F-069/state.yaml`) {
+        return 'phase: story\ncurrent_story: S-316\ndone: 4\ntotal: 7\nround: 2\nstarted_at: 2026-07-07T09:00:00Z\n';
+      }
+      return origReadFile(path, enc);
+    };
+    const aggregator = new BoardAggregator({ boardRootsEnv: BOARD_ROOT, fsDeps });
+
+    const index = await aggregator.getIndex();
+    expect(index[0].runs).toEqual([
+      {
+        feature: 'F-069',
+        phase: 'story',
+        currentStory: 'S-316',
+        done: 4,
+        total: 7,
+        round: 2,
+        startedAt: '2026-07-07T09:00:00Z',
+        lastError: null,
+        isLastRun: false,
+      },
+    ]);
+  });
+
+  it('does not write anywhere while reading runs (read-only)', async () => {
+    const fsDeps = buildFakeFsDeps();
+    const aggregator = new BoardAggregator({ boardRootsEnv: BOARD_ROOT, fsDeps });
+    await aggregator.getIndex();
     expect(fsDeps.writeFile).toBeUndefined();
   });
 });

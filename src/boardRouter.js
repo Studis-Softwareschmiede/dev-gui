@@ -385,13 +385,18 @@ export function boardRouter({
    * The slug is validated and matched against the in-memory index — never used as a
    * filesystem path (security: no path traversal possible).
    *
-   * Response: { project: { slug, repo_path, project_slug, schema_version, features: [...] } }
+   * Response: { project: { slug, repo_path, project_slug, schema_version, features: [...], areas: [...], runs: [...] } }
    * 404 if slug unknown or invalid.
    *
    * board-feature-archive AC3/AC6 (V3): mit `?includeArchived=true` werden
    * archivierte Features/Stories des Projekts zusätzlich, als `archived` markiert,
    * geliefert (Default aus = Standardansicht ohne Archivierte). Das Frontend
    * „Archiv anzeigen"-Schalter (S-234) nutzt dieses Signal read-only.
+   *
+   * run-state-live-view AC6 (S-316): `runs` (aktive/letzte Feature-Läufe aus
+   * `board/runs/F-###/state.yaml`, Felder gemäß AC2) ist bereits Teil des
+   * `BoardAggregator`-Projekt-Index (`src/RunStateReader.js`) — kein separater
+   * Endpunkt nötig, dieselbe Response liefert es mit.
    */
   router.get('/api/board/projects/:slug', async (req, res) => {
     const { slug } = req.params;

@@ -144,6 +144,7 @@ import { KnowledgeSourceService } from './src/KnowledgeSourceService.js';
 import { read as readNotificationSettings, migrateEventDefaults } from './src/NotificationSettingsStore.js';
 import { read as readTickerSettings } from './src/TickerSettingsStore.js';
 import { NotificationWatcher } from './src/NotificationWatcher.js';
+import { RunStateWatcher } from './src/RunStateWatcher.js';
 import { sendNotification } from './src/NotifyService.js';
 import { DrainNotifier } from './src/DrainNotifier.js';
 import { ProjectDrain } from './src/ProjectDrain.js';
@@ -613,6 +614,17 @@ const notificationWatcher = new NotificationWatcher({
   boardEventHub, // AC12: Optional SSE-Producer
 });
 
+// ── RunStateWatcher (run-state-live-view AC4/AC5, S-316) ─────────────────────
+// Eigener, von NotificationWatcher entkoppelter Producer: erkennt Änderungen an
+// `board/runs/F-###/state.yaml` (Feature-Drain-Fortschritt) — unabhängig von
+// Story-Status-Übergängen — und broadcastet je betroffenem Projekt genau EIN
+// `{ slug }`-Invalidierungs-Signal über dieselbe BoardEventHub-Instanz (kein
+// neuer Auth-/Transport-Weg, kein zweites Frame-Format).
+const runStateWatcher = new RunStateWatcher({
+  boardAggregator,
+  boardEventHub,
+});
+
 // ── AC4 (workspace-health-hinweis): Start-Log-Warnung bei Fehlkonfiguration ──
 // Einmalig beim Boot — nie Start-Abbruch (try/catch), kein Secret im Log.
 try {
@@ -891,6 +903,10 @@ await mountRouters(app, deps);
 // Erster check() etabliert Baseline (AC7).
 notificationWatcher.start();
 
+// ── RunStateWatcher starten (run-state-live-view AC4/AC5, S-316) ─────────────
+// Immer gestartet — der erste Check etabliert die Baseline ohne Broadcast (AC5).
+runStateWatcher.start();
+
 // ── AC5: SPA-Catch-All NACH allen API-Routern ─────────────────────────────────
 // Reihenfolge-Invariante: API-404 wird NICHT maskiert (AC5).
 // express 5 (path-to-regexp 8): Wildcards müssen benannt sein — '*' → '/*splat'.
@@ -1079,6 +1095,7 @@ function shutdown() {
   claudeAuthHealthService.stop();
   boardAggregator.stopWatchers();
   notificationWatcher.stop();
+  runStateWatcher.stop();
   boardEventHub.shutdown();
   ptyRegistry.destroy(); // destroy all sessions (global + project sessions)
   server.close(() => process.exit(0));

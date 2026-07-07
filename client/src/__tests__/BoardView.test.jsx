@@ -192,6 +192,19 @@
  *   AC10 — Schließen des Dialogs gibt den Fokus an den auslösenden Button
  *          zurück (`triggerRef`).
  *
+ * Covers (run-state-live-view, S-316 — Frontend-Anzeige; das Live-Re-Fetch über
+ * den bestehenden EventSource-Abonnenten [AC8] ist bereits vollständig in
+ * `BoardViewSSE.test.jsx` [board-live-sse AC13–AC17] abgedeckt — der Re-Fetch-
+ * Mechanismus selbst ist unverändert, hier wird nur das NEUE `runs`-Feld im
+ * bereits geladenen Projekt gerendert):
+ *   AC7 — Projekt mit aktiven Feature-Läufen (`project.runs`) zeigt je Lauf
+ *          Feature-ID, Phase (textlich, nie nur Farbe), aktuelle Story,
+ *          Fortschritt `done/total` und — falls gesetzt — den letzten Fehler.
+ *          Kein aktiver Lauf (`runs: []`/fehlend) → keine RunsSummary im DOM
+ *          (leer/unauffällig, kein Platzhalter-Rauschen).
+ *   AC10 — Dossier/Notizen werden nicht gerendert (RunsSummary zeigt nur die
+ *          AC2-Felder, kein dossier/notes-Text taucht je im DOM auf).
+ *
  * NOTE (jsdom-Limitation): jsdom hat keine Layout-Engine — Style-Property-Asserts beweisen
  * kein Scroll-/Layout-Verhalten; getestet werden Verhalten, Struktur, Rollen und aria.
  *
@@ -2442,6 +2455,150 @@ describe('dev-gui-board-aggregator — AC5: Rollup display (cockpit)', () => {
       const rollup = container.querySelector('[data-testid="rollup-bar"]');
       expect(rollup.textContent).toMatch(/2\/3/);
     });
+  });
+});
+
+// ── run-state-live-view (S-316) — AC7/AC10: RunsSummary rendering ────────────
+
+describe('run-state-live-view — AC7: aktive Feature-Läufe kompakt anzeigen', () => {
+  it('shows feature, phase (textual), current story, progress for an active run', async () => {
+    const projectWithRun = {
+      slug: 'project-run',
+      features: [FEATURE_EMPTY],
+      runs: [
+        {
+          feature: 'F-069',
+          phase: 'story',
+          currentStory: 'S-316',
+          done: 4,
+          total: 7,
+          round: 2,
+          startedAt: '2026-07-07T09:00:00Z',
+          lastError: null,
+          isLastRun: false,
+        },
+      ],
+    };
+    globalThis.fetch = makeBoardFetch({ fullProjects: [projectWithRun] });
+    const { container } = renderCockpit('project-run');
+
+    await waitFor(() => {
+      const item = container.querySelector('[data-testid="run-summary-F-069"]');
+      expect(item).toBeTruthy();
+      expect(item.textContent).toContain('F-069');
+      expect(item.textContent).toMatch(/Story/); // Phasen-Label ist textlich, nie nur Farbe
+      expect(item.textContent).toContain('S-316');
+      expect(item.textContent).toMatch(/4\/7/);
+    });
+  });
+
+  it('shows the last error when set', async () => {
+    const projectWithError = {
+      slug: 'project-run-err',
+      features: [FEATURE_EMPTY],
+      runs: [
+        {
+          feature: 'F-070',
+          phase: 'merge',
+          currentStory: null,
+          done: null,
+          total: null,
+          round: null,
+          startedAt: null,
+          lastError: 'PR-Merge fehlgeschlagen: Konflikt in server.js',
+          isLastRun: false,
+        },
+      ],
+    };
+    globalThis.fetch = makeBoardFetch({ fullProjects: [projectWithError] });
+    const { container } = renderCockpit('project-run-err');
+
+    await waitFor(() => {
+      const item = container.querySelector('[data-testid="run-summary-F-070"]');
+      expect(item.textContent).toContain('PR-Merge fehlgeschlagen: Konflikt in server.js');
+    });
+  });
+
+  it('renders nothing when there is no active run (runs: [])', async () => {
+    const projectNoRuns = { slug: 'project-norun', features: [FEATURE_EMPTY], runs: [] };
+    globalThis.fetch = makeBoardFetch({ fullProjects: [projectNoRuns] });
+    const { container } = renderCockpit('project-norun');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-project="project-norun"]')).toBeTruthy();
+    });
+    expect(container.querySelector('[role="list"][aria-label="Aktive Feature-Läufe"]')).toBeNull();
+  });
+
+  it('renders nothing when runs is missing (backward-compatible with projects without runs)', async () => {
+    globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] }); // PROJECT_A has no `runs` field
+    const { container } = renderCockpit('project-alpha');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-project="project-alpha"]')).toBeTruthy();
+    });
+    expect(container.querySelector('[role="list"][aria-label="Aktive Feature-Läufe"]')).toBeNull();
+  });
+
+  it('a last-run (compacted, isLastRun: true) entry is not shown as an active run', async () => {
+    const projectWithLastRun = {
+      slug: 'project-lastrun',
+      features: [FEATURE_EMPTY],
+      runs: [
+        {
+          feature: 'F-071',
+          phase: 'rollout',
+          currentStory: null,
+          done: 3,
+          total: 3,
+          round: 1,
+          startedAt: '2026-07-01T00:00:00Z',
+          lastError: null,
+          isLastRun: true,
+        },
+      ],
+    };
+    globalThis.fetch = makeBoardFetch({ fullProjects: [projectWithLastRun] });
+    const { container } = renderCockpit('project-lastrun');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-project="project-lastrun"]')).toBeTruthy();
+    });
+    expect(container.querySelector('[data-testid="run-summary-F-071"]')).toBeNull();
+  });
+});
+
+describe('run-state-live-view — AC10: Dossier/Notizen werden nicht gerendert (Nicht-Ziel)', () => {
+  it('does not render dossier/notes text even if present on the run entry (defensive — not part of the AC2 field set)', async () => {
+    const projectWithExtraFields = {
+      slug: 'project-extra',
+      features: [FEATURE_EMPTY],
+      runs: [
+        {
+          feature: 'F-072',
+          phase: 'dossier',
+          currentStory: null,
+          done: null,
+          total: null,
+          round: null,
+          startedAt: null,
+          lastError: null,
+          isLastRun: false,
+          // Defensive: even if a future backend accidentally attached these,
+          // RunsSummary must never render them (AC10 Nicht-Ziel).
+          dossier: 'GEHEIME DOSSIER-NOTIZEN',
+          notes: 'INTERNE NOTIZEN',
+        },
+      ],
+    };
+    globalThis.fetch = makeBoardFetch({ fullProjects: [projectWithExtraFields] });
+    const { container } = renderCockpit('project-extra');
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="run-summary-F-072"]')).toBeTruthy();
+    });
+    expect(container.textContent).not.toContain('GEHEIME DOSSIER-NOTIZEN');
+    expect(container.textContent).not.toContain('INTERNE NOTIZEN');
   });
 });
 

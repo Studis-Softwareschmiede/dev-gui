@@ -2054,6 +2054,12 @@ function ProjectSection({ project, onOpenSpec, onStoryClick, onSpecifyIdea, coll
         )}
       </div>
 
+      {/* run-state-live-view AC7/AC8/AC10: aktive Feature-Läufe kompakt anzeigen —
+          leer/unauffällig, wenn kein Lauf aktiv ist (kein Platzhalter-Rauschen).
+          Aktualisiert sich über denselben SSE-Re-Fetch wie der Rest des Projekts
+          (AC8) — kein eigener EventSource, kein eigenes Polling. */}
+      {!project.error && <RunsSummary runs={project.runs} />}
+
       {/* Features */}
       {!project.error && (project.features ?? []).length === 0 && (
         <p style={styles.hintMsg}>Keine Features in diesem Projekt.</p>
@@ -2074,6 +2080,62 @@ function ProjectSection({ project, onOpenSpec, onStoryClick, onSpecifyIdea, coll
         />
       ))}
     </section>
+  );
+}
+
+// ── RunsSummary (run-state-live-view AC7/AC8) ─────────────────────────────────
+
+/** Phasen-Label, textlich (nie nur über Farbe/Icon — AC7). */
+const RUN_PHASE_LABELS = {
+  dossier: 'Dossier',
+  story: 'Story',
+  merge: 'Merge',
+  rollout: 'Rollout',
+};
+
+/**
+ * Kompakte Anzeige der aktiven Feature-Läufe eines Projekts (run-state-live-view
+ * AC7): Feature-ID, Phase, aktuelle Story, Fortschritt (done/total) und —
+ * falls gesetzt — der letzte Fehler. Kein aktiver Lauf → nichts gerendert
+ * (leer/unauffällig, kein Platzhalter-Rauschen). Dossier/Notizen werden NICHT
+ * gerendert (Nicht-Ziel, AC8/AC10).
+ *
+ * @param {{ runs?: Array<object> }} props
+ */
+function RunsSummary({ runs }) {
+  const activeRuns = (runs ?? []).filter((r) => !r.isLastRun);
+  if (activeRuns.length === 0) return null;
+
+  return (
+    <div style={styles.runsSummary} role="list" aria-label="Aktive Feature-Läufe">
+      {activeRuns.map((run) => {
+        const phaseLabel = run.phase ? (RUN_PHASE_LABELS[run.phase] ?? run.phase) : 'Unbekannt';
+        const progressLabel =
+          run.done != null && run.total != null ? `${run.done}/${run.total}` : null;
+        return (
+          <div
+            key={run.feature}
+            role="listitem"
+            style={styles.runsSummaryItem}
+            data-testid={`run-summary-${run.feature}`}
+          >
+            <span style={styles.runsSummaryFeature}>{run.feature}</span>
+            <span style={styles.runsSummaryPhase}>Phase: {phaseLabel}</span>
+            {run.currentStory && (
+              <span style={styles.runsSummaryDetail}>Story: {run.currentStory}</span>
+            )}
+            {progressLabel && (
+              <span style={styles.runsSummaryDetail}>Fortschritt: {progressLabel}</span>
+            )}
+            {run.lastError && (
+              <span style={styles.runsSummaryError} role="status" aria-label="Letzter Fehler">
+                Fehler: {run.lastError}
+              </span>
+            )}
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -3263,6 +3325,44 @@ const styles = {
     background: '#2a1a1a',
     color: '#f87171',
     border: '1px solid #7f1d1d',
+  },
+
+  // ── run-state-live-view: RunsSummary (aktive Feature-Läufe)
+  runsSummary: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 6,
+    marginBottom: 14,
+  },
+
+  runsSummaryItem: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: 10,
+    padding: '6px 10px',
+    background: '#16202c',
+    border: '1px solid #23405c',
+    borderRadius: 6,
+    fontSize: 12,
+  },
+
+  runsSummaryFeature: {
+    fontWeight: 700,
+    color: '#93c5fd',
+  },
+
+  runsSummaryPhase: {
+    color: '#e5e7eb',
+  },
+
+  runsSummaryDetail: {
+    color: '#9ca3af',
+  },
+
+  runsSummaryError: {
+    color: '#f87171',
+    fontWeight: 600,
   },
 
   // ── Feature row
