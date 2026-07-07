@@ -1,7 +1,7 @@
 id: S-306
 parent: F-067
 title: Regressionstests-Karte im Arbeiten-Reiter — zwei Buttons + Inline-Status (Design D1–D16)
-status: To Do
+status: Blocked
 priority: P2
 spec: docs/specs/regression-panel.md
 implements:
@@ -26,9 +26,9 @@ estimate_note: 'L per Heuristik (n_ac=7, n_comp~2 CockpitView.jsx/actionGrid, la
 confidence: medium
 branch: null
 pr: null
-blocked_reason: null
+blocked_reason: 'Taktgeber: 3x kein Fortschritt'
 created_at: '2026-07-06T05:04:40Z'
-updated_at: '2026-07-06T05:04:40Z'
+updated_at: '2026-07-07T07:26:35.394Z'
 done_at: null
 tok_est: null
 area: fabrik-arbeiten
