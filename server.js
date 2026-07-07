@@ -164,6 +164,7 @@ import { FeatureDrainRunner } from './src/FeatureDrainRunner.js';
 import { BootDrainRecovery } from './src/BootDrainRecovery.js';
 import { HeadlessFlowRunner } from './src/HeadlessFlowRunner.js';
 import { HeadlessFlowRunnerAdapter } from './src/FlowRunner.js';
+import { FeatureDrainFlowRunner } from './src/FeatureDrainFlowRunner.js';
 import { ProjectJobLock } from './src/ProjectJobLock.js';
 import { CostModeModelCheck } from './src/CostModeModelCheck.js';
 import { HeadlessRetroRunner } from './src/HeadlessRetroRunner.js';
@@ -397,6 +398,32 @@ const manualHeadlessFlowRunnerAdapter = new HeadlessFlowRunnerAdapter({
   headlessRunner: manualHeadlessFlowRunner,
   auditStore, // AC1: Start/Ende(Erfolg)/Fehler je headless-Lauf (keine Secrets/Pfade)
 });
+// ── Feature-Umsetzen-Button: ProjectJobLock (vorgezogen — S-317 Review-
+// Iteration 2 braucht dieselbe Instanz bereits für die untenstehende
+// `FeatureDrainFlowRunner`-Konstruktion, s. Cross-Boundary-Lock-Kommentar). ──
+// Eigene Registry (`featureDrainRegistry`, weiter unten konstruiert, näher an
+// ihrem restlichen Feature-Umsetzen-Button-Kontext) — der Lock selbst muss
+// aber HIER schon existieren.
+const featureDrainLock = new ProjectJobLock();
+// ── Feature-Ebenen-Auswahl (docs/specs/feature-aware-drain.md AC1/AC4/AC5) ──
+// EINE geteilte `FeatureDrainFlowRunner`-Instanz für BEIDE Drain-Instanzen
+// (manuell + Nacht). Skript-Lokalisierung über denselben Plugin-Cache-Glob-
+// Mechanismus wie der Feature-Umsetzen-Button (AC5,
+// `agentFlowReader.resolvePluginRootContaining`) — fehlt das Skript in jeder
+// installierten Plugin-Version, liefert `startRun()`
+// `{ok:false, reason:'feature-drain-unavailable'}` und `ProjectDrain` fällt
+// pro Runde sauber auf den Einzel-/flow-Pfad zurück (kein Crash).
+// Cross-Boundary-Lock (S-317 Review-Iteration 2, .claude/lessons/coder.md
+// 2026-07-07): `featureDrainLock` ist DIESELBE Instanz, die
+// `src/routers/featureDrain.js` (Feature-Umsetzen-Button) für den
+// `${projectSlug}:${featureId}`-Lock nutzt — verhindert einen parallelen
+// Start von `board-feature-drain.sh F-###` für dasselbe Feature über beide
+// unabhängigen Wege (Button UND Taktgeber/manueller Drain).
+const featureDrainFlowRunner = new FeatureDrainFlowRunner({
+  pluginRootResolver: () => agentFlowReader.resolvePluginRootContaining('scripts/board-feature-drain.sh'),
+  auditStore,
+  featureDrainLock,
+});
 const projectDrain = new ProjectDrain({
   boardAggregator,
   commandService,
@@ -404,6 +431,7 @@ const projectDrain = new ProjectDrain({
   sessionRegistry: ptyRegistry,
   auditStore,
   flowRunner: manualHeadlessFlowRunnerAdapter,
+  featureDrainFlowRunner,
   lock: manualDrainLock,
 });
 
@@ -447,6 +475,7 @@ const nightProjectDrain = new ProjectDrain({
   sessionRegistry: ptyRegistry,
   auditStore,
   flowRunner: headlessFlowRunnerAdapter,
+  featureDrainFlowRunner, // feature-aware-drain AC1: geteilte Instanz, s.o.
   budgetGuard, // night-budget-guard AC9: proaktive Schwellen-Prüfung vor jeder Flow-Runde
   budgetResumeBufferMs, // night-budget-guard AC10: reaktiver Puffer, dieselbe env-Zahl wie budgetGuard
 });
@@ -501,14 +530,15 @@ const regressionResultStore = new RegressionResultStore();
 const drainJobRegistry = new DrainJobRegistry();
 
 // ── Feature-Umsetzen-Button (feature-umsetzen-button, Owner-Auftrag 2026-07-06) ──
-// Eigene Registry + eigener ProjectJobLock (Dedup je Projekt+Feature) —
-// getrennt von allen anderen headless-Boundaries (kein zweiter Codepfad in
-// einer bestehenden Registry). FeatureDrainRunner spawnt
-// scripts/board-feature-drain.sh aus dem agent-flow-Plugin (agentFlowReader,
-// bereits oben instanziiert) direkt als Kindprozess — kein claude-p-Runner,
-// das Skript selbst spawnt intern je Story `claude -p /agent-flow:flow`.
+// Eigene Registry — Dedup je Projekt+Feature über `featureDrainLock` (bereits
+// weiter oben konstruiert, s. Cross-Boundary-Lock-Kommentar bei
+// `featureDrainFlowRunner`) — getrennt von allen anderen headless-Boundaries
+// (kein zweiter Codepfad in einer bestehenden Registry). FeatureDrainRunner
+// spawnt scripts/board-feature-drain.sh aus dem agent-flow-Plugin
+// (agentFlowReader, bereits oben instanziiert) direkt als Kindprozess — kein
+// claude-p-Runner, das Skript selbst spawnt intern je Story
+// `claude -p /agent-flow:flow`.
 const featureDrainRegistry = new FeatureDrainRegistry();
-const featureDrainLock = new ProjectJobLock();
 const featureDrainRunner = new FeatureDrainRunner({ registry: featureDrainRegistry, lock: featureDrainLock, auditStore });
 let orphanedDrains = [];
 try {

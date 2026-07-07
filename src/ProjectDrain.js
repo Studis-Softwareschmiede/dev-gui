@@ -210,6 +210,21 @@
  * beiden Adaptern, da sie ausschließlich auf dem Board-Snapshot (nicht auf
  * dem FlowRunner-Ergebnis) operiert.
  *
+ * Feature-Ebenen-Auswahl (S-317, docs/specs/feature-aware-drain.md AC1-AC8):
+ * VOR jeder Runde entscheidet `selectDrainMode()` (pure Helper, s.u.), ob das
+ * Parent-Feature der nächsten bereiten `To Do`-Story (`pickNextReadyStory()`,
+ * identische Priorisierung wie `board next`) ≥2 bereite Storys hat. Ist das
+ * so UND ist ein `#featureDrainFlowRunner` injiziert (additiv, Default `null`
+ * — kein Regress ohne Injection), startet die Runde einen Feature-Drain
+ * (`board-feature-drain.sh F-###`, `src/FeatureDrainFlowRunner.js`) statt
+ * eines Einzel-`/flow`-Laufs — sonst (genau 1 bereite Story, keine `parent`,
+ * oder Skript aktuell nicht verfügbar) bleibt der bisherige Einzel-`/flow`-
+ * Pfad unverändert. Ein Feature-Drain zählt als GENAU EINE Drain-Runde (AC3)
+ * — die gesamte übrige Logik (Ziel-Auswahl, Konvergenz, Eskalation,
+ * Snapshot-Diff, Sicherheitsgürtel, Lock, Budget-Guard) bleibt unverändert,
+ * da sie ausschließlich auf dem Board-Snapshot VOR/NACH der Runde operiert,
+ * unabhängig davon, welcher Ausführungspfad die Runde befüllt hat.
+ *
  * @module ProjectDrain
  */
 
@@ -220,6 +235,17 @@ import { gitReadBoundary, createGitRefFsDeps } from './GitReadBoundary.js';
 
 /** Einziger /flow-Befehl, den der Drain anstößt (Nicht-Ziel: keine Modell-/Cost-Mode-Logik). */
 export const FLOW_COMMAND = '/agent-flow:flow';
+
+/**
+ * Striktes `F-###`-Muster (docs/specs/feature-aware-drain.md AC4) — Feature-
+ * Drain-Start ausschließlich mit einem so validierten, real existierenden
+ * Parent-Feature (kein Freitext, keine Argument-Injektion).
+ */
+export const FEATURE_ID_RE = /^F-\d+$/;
+
+/** Mindestanzahl bereiter Storys im Parent-Feature, ab der ein Feature-Drain
+ * statt eines Einzel-`/flow`-Laufs gestartet wird (docs/specs/feature-aware-drain.md AC1). */
+export const FEATURE_DRAIN_MIN_READY_STORIES = 2;
 
 /** Default `staleInProgressHours` (Settings-Schema-Default, S-194 übernimmt dies später aus dem Store). */
 export const DEFAULT_STALE_IN_PROGRESS_HOURS = 4;
@@ -267,6 +293,102 @@ export function flattenProjectStories(project) {
     for (const story of feature.stories ?? []) out.push(story);
   }
   return out;
+}
+
+/** Priority-Rang für den `board next`-Sortier-Tiebreak (kleinere Zahl = höhere Priorität). */
+const PRIORITY_ORDER = { P0: 0, P1: 1, P2: 2, P3: 3 };
+
+/**
+ * Priority-Rang für den `board next`-Sortier-Tiebreak — IDENTISCH zur
+ * Referenz-Implementierung `scripts/board` (agent-flow, `cmd_next`/`sort_key`:
+ * `PRIORITY_ORDER.get(str(data.get("priority","P3")), 9)`). Zwei Fälle:
+ * - Fehlendes Feld (`null`/`undefined`): das FELD selbst defaultet zuerst auf
+ *   `"P3"`, bevor die Rang-Lookup-Tabelle befragt wird → Rang 3.
+ * - Vorhandener, aber unbekannter String (z.B. Tippfehler `"P4"`): der
+ *   Feld-Default greift NICHT (das Feld ist ja vorhanden), der Wert geht
+ *   direkt in den Dict-Lookup, der dafür auf den äußeren Fallback 9 fällt
+ *   → Rang 9 (NICHT 3 — das wäre die in Review-Iteration 2 aufgedeckte
+ *   Divergenz zur Referenzsemantik, siehe .claude/lessons/coder.md).
+ * @param {string|null|undefined} priority
+ * @returns {number}
+ */
+function priorityRank(priority) {
+  return PRIORITY_ORDER[priority ?? 'P3'] ?? 9;
+}
+
+function idNum(id) {
+  const m = /^[FS]-(\d+)$/.exec(String(id ?? ''));
+  return m ? Number(m[1]) : Number.POSITIVE_INFINITY;
+}
+
+/**
+ * Bestimmt die nächste bereite `To Do`-Story genau nach der `board next`-
+ * Sortierung (agent-flow `scripts/board`, Verb `next`, s. Modul-Doku dieser
+ * Story-Referenz docs/specs/feature-aware-drain.md AC1) — Story-`priority`
+ * → Parent-Feature-`priority` → aufsteigende numerische ID. Nur `ready===true`
+ * `To Do`-Storys sind Kandidaten (identisch zur bestehenden Drain-Ziel-
+ * Definition, AC2 — verwaiste `In Progress`-Storys sind hier KEIN Kandidat,
+ * da `board next`/`/agent-flow:flow` selbst nie eine `In Progress`-Story
+ * erneut auswählt).
+ *
+ * @param {import('./BoardAggregator.js').ProjectEntry|null} project
+ * @returns {import('./BoardAggregator.js').StoryEntry|null}
+ */
+export function pickNextReadyStory(project) {
+  if (!project || !Array.isArray(project.features)) return null;
+  const featuresById = new Map(project.features.map((f) => [f.id, f]));
+  const candidates = flattenProjectStories(project).filter(
+    (s) => s && s.status === 'To Do' && s.ready === true,
+  );
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => {
+    const storyPrioDiff = priorityRank(a.priority) - priorityRank(b.priority);
+    if (storyPrioDiff !== 0) return storyPrioDiff;
+    const featPrioA = priorityRank(a.parent ? featuresById.get(a.parent)?.priority : undefined);
+    const featPrioB = priorityRank(b.parent ? featuresById.get(b.parent)?.priority : undefined);
+    if (featPrioA !== featPrioB) return featPrioA - featPrioB;
+    return idNum(a.id) - idNum(b.id);
+  });
+  return candidates[0];
+}
+
+/**
+ * Zählt die bereiten (`To Do` + `ready===true`) Storys eines Parent-Features
+ * (docs/specs/feature-aware-drain.md AC1/AC2). `Blocked`/`Idee`/`Done`/
+ * nicht-ready `To Do` zählen nicht mit.
+ *
+ * @param {import('./BoardAggregator.js').ProjectEntry|null} project
+ * @param {string} featureId
+ * @returns {number}
+ */
+export function countReadyStoriesInFeature(project, featureId) {
+  if (!project || !Array.isArray(project.features)) return 0;
+  const feature = project.features.find((f) => f.id === featureId);
+  if (!feature || !Array.isArray(feature.stories)) return 0;
+  return feature.stories.filter((s) => s && s.status === 'To Do' && s.ready === true).length;
+}
+
+/**
+ * Feature-Ebenen-Auswahl (docs/specs/feature-aware-drain.md AC1/AC2): ermittelt
+ * die nächste bereite `To Do`-Story und daraus, ob dieser Drain-Runde ein
+ * Feature-Drain (`board-feature-drain.sh F-###`) statt eines Einzel-`/flow`-
+ * Laufs gebührt. Storys OHNE `parent` sind immer Einzelgänger (kein
+ * Feature-Drain, AC1/AC2) — ebenso wenn das Parent-Feature aktuell nur GENAU
+ * eine bereite Story hat.
+ *
+ * @param {import('./BoardAggregator.js').ProjectEntry|null} project
+ * @returns {{ mode: 'feature-drain', featureId: string } | { mode: 'single-flow' }}
+ */
+export function selectDrainMode(project) {
+  const next = pickNextReadyStory(project);
+  if (!next || !next.parent || !FEATURE_ID_RE.test(next.parent)) {
+    return { mode: 'single-flow' };
+  }
+  const readyCount = countReadyStoriesInFeature(project, next.parent);
+  if (readyCount >= FEATURE_DRAIN_MIN_READY_STORIES) {
+    return { mode: 'feature-drain', featureId: next.parent };
+  }
+  return { mode: 'single-flow' };
 }
 
 /**
@@ -529,6 +651,14 @@ export function computeCompletedBlocked(initialStatuses, endProject) {
  *   für den Nacht-Drain injiziert werden (Verdrahtung selbst ist S-213,
  *   NICHT Teil dieser Story).
  * @param {{ setBlocked: Function }} [deps.boardWriter]  Eskalations-Schreibpfad (AC4/AC8)
+ * @param {{ startRun: Function, awaitCompletion: Function }} [deps.featureDrainFlowRunner]
+ *   optional (docs/specs/feature-aware-drain.md AC1/AC4/AC5) — startet
+ *   `board-feature-drain.sh F-###` statt eines Einzel-`/flow`-Laufs, sobald
+ *   die Feature-Ebenen-Auswahl (`selectDrainMode()`) `mode:'feature-drain'`
+ *   liefert (Parent-Feature der nächsten bereiten Story hat ≥2 bereite
+ *   Storys). Ohne ihn (nicht injiziert) bleibt der Drain bit-identisch zum
+ *   bisherigen Verhalten — IMMER Einzel-`/flow` (kein Regress, AC5-Rückfall
+ *   greift automatisch, da `#featureDrainFlowRunner` dann `null` ist).
  * @param {import('./ProjectJobLock.js').ProjectJobLock} [deps.lock]  default: Singleton `projectJobLock`
  * @param {{ hasSession: (p: string) => boolean }} [deps.sessionRegistry]  für Busy-Erkennung (AC7)
  * @param {{ record: Function }} [deps.auditStore]  Drain-Start + Eskalation (AC18)
@@ -560,6 +690,7 @@ export class ProjectDrain {
   #boardAggregator;
   #commandService;
   #flowRunner;
+  #featureDrainFlowRunner;
   #boardWriter;
   #lock;
   #sessionRegistry;
@@ -577,6 +708,7 @@ export class ProjectDrain {
     boardAggregator,
     commandService,
     flowRunner,
+    featureDrainFlowRunner,
     boardWriter,
     lock = projectJobLock,
     sessionRegistry,
@@ -600,6 +732,10 @@ export class ProjectDrain {
     // Ein injizierter `flowRunner` (z.B. HeadlessFlowRunnerAdapter, S-213)
     // ersetzt NUR den Ausführungs-Schritt, keine sonstige Logik.
     this.#flowRunner = flowRunner ?? new InteractiveFlowRunner({ commandService, sleepFn, pollIntervalMs });
+    // feature-aware-drain AC1/AC4/AC5: optional — ohne ihn entscheidet
+    // #runLoop nie auf 'feature-drain' (bit-identischer Einzel-/flow-Pfad,
+    // kein Regress an bestehenden Drain-Instanzen ohne diese Injection).
+    this.#featureDrainFlowRunner = featureDrainFlowRunner ?? null;
     this.#boardWriter = boardWriter ?? null;
     this.#lock = lock;
     this.#sessionRegistry = sessionRegistry ?? null;
@@ -836,14 +972,51 @@ export class ProjectDrain {
         if (!lastChangeRound.has(target.id)) lastChangeRound.set(target.id, round);
       }
 
-      // AC1: /agent-flow:flow anstoßen — über das injizierte FlowRunner-
-      // Interface (S-212 AC4/AC5; CommandService auditiert den akzeptierten
-      // interaktiven Aufruf bereits selbst — AC18 "jeder /flow-Anstoß").
+      // feature-aware-drain AC1/AC2: Feature-Ebenen-Auswahl — hat das Parent-
+      // Feature der nächsten bereiten Story ≥2 bereite Storys, gebührt dieser
+      // Runde ein Feature-Drain statt eines Einzel-/flow-Laufs. Ohne
+      // injizierten #featureDrainFlowRunner bleibt der Entscheid IMMER
+      // 'single-flow' (bit-identischer Default-Pfad, kein Regress, AC5).
+      const drainMode = this.#featureDrainFlowRunner ? selectDrainMode(scanFailed ? null : project) : { mode: 'single-flow' };
+
+      // AC1: /agent-flow:flow (oder Feature-Drain, AC1/AC4) anstoßen — über
+      // das injizierte FlowRunner-Interface (S-212 AC4/AC5; CommandService
+      // auditiert den akzeptierten interaktiven Aufruf bereits selbst — AC18
+      // "jeder /flow-Anstoß"). AC3: `args` (z.B. ['--cost', <mode>]) gilt nur
+      // für den Einzel-/flow-Pfad — ein Feature-Drain kennt keinen
+      // `--cost`-Hebel (Nicht-Ziel dieser Story).
       flowRuns += 1;
-      // AC3: `args` (z.B. ['--cost', <mode>]) an JEDEN Flow-Anstoß durchreichen.
-      // Der InteractiveFlowRunner ignoriert `args`; der HeadlessFlowRunnerAdapter
-      // hängt sie an den `claude -p '/agent-flow:flow …'`-Kindprozess (headless-manual-drain AC3).
-      const startResult = this.#flowRunner.startRun({ projectPath, command: FLOW_COMMAND, identity, args });
+      // Cross-Boundary-Lock (S-317 Review-Iteration 2, s. Modul-Doku +
+      // .claude/lessons/coder.md): `projectSlug` wird durchgereicht, damit
+      // FeatureDrainFlowRunner denselben feature-scoped Lock erwerben kann wie
+      // der Feature-Umsetzen-Button-Router (`featureDrainLock`, keyed by
+      // `${projectSlug}:${featureId}`) — verhindert einen parallelen Start
+      // desselben `board-feature-drain.sh F-###` über beide Wege.
+      //
+      // `windowEndMs` wird BEWUSST NICHT an `startRun()` durchgereicht (s.
+      // FeatureDrainFlowRunner Modul-Doku "BEWUSSTE Cross-Repo-Lücke") — das
+      // installierte `board-feature-drain.sh` akzeptiert aktuell keinen
+      // Parameter fürs Nachtfenster-Ende; Cross-Repo-Abhängigkeit, s.
+      // Spec-Kopf.
+      let startResult =
+        drainMode.mode === 'feature-drain'
+          ? await this.#featureDrainFlowRunner.startRun({
+              projectPath,
+              projectSlug: (scanFailed ? null : project)?.slug ?? null,
+              featureId: drainMode.featureId,
+              identity,
+            })
+          : this.#flowRunner.startRun({ projectPath, command: FLOW_COMMAND, identity, args });
+
+      // AC5: Feature-Drain-Skript in keiner installierten Plugin-Version
+      // vorhanden → graceful Rückfall auf Einzel-/flow FÜR DIESE RUNDE (kein
+      // Crash, kein verlorener Anstoß) — die nächste Runde versucht die
+      // Feature-Auswahl erneut (z.B. nach einem Plugin-Update).
+      let usedFlowRunner = drainMode.mode === 'feature-drain' ? this.#featureDrainFlowRunner : this.#flowRunner;
+      if (drainMode.mode === 'feature-drain' && startResult && !startResult.ok && startResult.reason === 'feature-drain-unavailable') {
+        startResult = this.#flowRunner.startRun({ projectPath, command: FLOW_COMMAND, identity, args });
+        usedFlowRunner = this.#flowRunner;
+      }
 
       // Lock-Contention-Fix (S-195 Review-Iteration 2, live verifiziert
       // critical — siehe Modul-Doku): `reason: 'locked'|'busy'` bedeutet, es
@@ -857,7 +1030,16 @@ export class ProjectDrain {
       // passiert wie immer in `finally` von `drainProject`), kein Spin,
       // keine Zustandsänderung an der Story. Das Projekt bleibt Kandidat für
       // den nächsten Scheduler-Tick.
-      if (startResult && !startResult.ok && (startResult.reason === 'locked' || startResult.reason === 'busy')) {
+      // `reason: 'feature-drain-locked'` (S-317 Review-Iteration 2, Cross-
+      // Boundary-Lock — s. FeatureDrainFlowRunner Modul-Doku): identische
+      // Behandlung — der Feature-Umsetzen-Button hält gerade denselben
+      // feature-scoped Lock für dieses Feature, es fand ebenfalls GAR KEIN
+      // Lauf statt (kein `awaitCompletion`, keine Eskalation).
+      if (
+        startResult &&
+        !startResult.ok &&
+        (startResult.reason === 'locked' || startResult.reason === 'busy' || startResult.reason === 'feature-drain-locked')
+      ) {
         // AC2 (drain-completion-report): Kontention = für DIESES Projekt fand
         // gar kein echter /flow-Lauf statt → leere completed/blocked-Bilanz
         // (Spec-mandatiert, kein Diff über einen unveränderten Board-Zustand).
@@ -874,7 +1056,7 @@ export class ProjectDrain {
 
       let awaitResult = { status: 'done' };
       if (startResult && startResult.ok) {
-        awaitResult = await this.#flowRunner.awaitCompletion(startResult.handle);
+        awaitResult = await usedFlowRunner.awaitCompletion(startResult.handle);
       }
 
       // night-budget-guard AC4/AC7: reaktive Limit-Meldung — gilt NIE als

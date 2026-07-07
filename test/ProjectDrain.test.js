@@ -202,6 +202,56 @@
  *          test bereits oben im AC18-Audit-Test integriert); ein übersprungener
  *          Eskalationsversuch erzeugt zusätzlich `taktgeber:escalation-skipped`.
  *
+ * Covers (feature-aware-drain, S-317 — Feature-Ebenen-Auswahl je Drain-Runde;
+ * describe-Blöcke "pickNextReadyStory/countReadyStoriesInFeature/
+ * selectDrainMode (AC1/AC2)" und "ProjectDrain.drainProject — feature-aware-
+ * drain (AC1/AC3/AC4/AC5/AC6)"; die konkrete `FeatureDrainFlowRunner`-Klasse
+ * (Kindprozess-Spawn/Env-Härtung/Plugin-Cache-Auflösung/Exit-Code-Mapping/
+ * Cross-Boundary-Lock) lebt eigenständig in test/FeatureDrainFlowRunner.test.js):
+ *   AC1 — `selectDrainMode()` liefert `mode:'feature-drain'` mit der
+ *          Parent-Feature-ID, sobald die nächste bereite `To Do`-Story (per
+ *          `pickNextReadyStory()`, identische Sortierung wie `board next`:
+ *          fehlendes `priority`-Feld defaultet auf Rang P3, ein VORHANDENER
+ *          aber unbekannter `priority`-String fällt auf Rang 9 (Review-
+ *          Iteration 3, siehe `priorityRank()`-Doc-Kommentar) — Story-
+ *          `priority` → Feature-`priority` → aufsteigende ID) ein
+ *          Parent-Feature mit ≥2 bereiten Storys hat;
+ *          genau 1 bereite Story (oder keine `parent`) → `mode:'single-flow'`.
+ *          `#runLoop` startet bei `mode:'feature-drain'` den injizierten
+ *          `featureDrainFlowRunner` statt des Einzel-`flowRunner`s und reicht
+ *          `projectSlug` (für den Cross-Boundary-Lock-Schlüssel,
+ *          FeatureDrainFlowRunner) durch.
+ *   AC2 — `countReadyStoriesInFeature()` zählt NUR `To Do` + `ready===true`
+ *          Storys mit; `Blocked`/`Idee`/`Done`/nicht-ready `To Do` zählen
+ *          weder zur ≥2-Schwelle noch werden sie je als `pickNextReadyStory()`-
+ *          Kandidat gewählt.
+ *   AC3 — Ein Feature-Drain zählt als EINE Drain-Runde (`flowRuns` +1, exakt
+ *          wie ein Einzel-`/flow`-Lauf); danach re-scannt `#runLoop` (nächste
+ *          Schleifen-Iteration) und entscheidet den Modus erneut — kein
+ *          Sonderzähler, keine geänderte Abbruch-/Konvergenz-Regel.
+ *   AC4 — Kein injizierter `featureDrainFlowRunner` → `selectDrainMode()`
+ *          wird NIE aufgerufen, der Drain bleibt bit-identisch beim
+ *          Einzel-`/flow`-Pfad (Default-Regress-Test, kein Verhaltens-
+ *          unterschied zu den bestehenden 105 Tests OHNE diese Injection).
+ *   AC5 — Liefert der injizierte `featureDrainFlowRunner.startRun()`
+ *          `{ok:false, reason:'feature-drain-unavailable'}` (Skript in
+ *          keiner Plugin-Version vorhanden), fällt `#runLoop` FÜR DIESE
+ *          RUNDE sauber auf den Einzel-`/flow`-Pfad zurück (kein Crash,
+ *          `flowRuns` bleibt korrekt, keine doppelte Runde).
+ *   AC6 — Lock-Verhalten unverändert: ein Feature-Drain hält dasselbe
+ *          projektweise `ProjectJobLock` wie ein Einzel-`/flow`-Lauf (kein
+ *          separater Lock-Pfad in `drainProject()`/`#runLoop` — bereits durch
+ *          die bestehenden AC6/AC7-Tests oben belegt, da die Lock-Erwerb-/
+ *          Freigabe-Logik in `drainProject()` unverändert vor/nach `#runLoop`
+ *          bleibt, unabhängig vom Modus-Entscheid innerhalb der Schleife).
+ *          ZUSÄTZLICH (Review-Iteration 2, Cross-Boundary-Lock): liefert
+ *          `featureDrainFlowRunner.startRun()` `reason:'feature-drain-locked'`
+ *          (der Feature-Umsetzen-Button-Router hält denselben feature-scoped
+ *          Lock für dieses Feature), behandelt `#runLoop` das IDENTISCH zu
+ *          `command-channel-busy` — sauberes Ende, `reason:'command-channel-
+ *          busy'`, KEIN Rückfall auf Einzel-`/flow` (anders als bei
+ *          `feature-drain-unavailable`), keine Eskalation, kein Crash.
+ *
  * Strategy:
  *   - Pure Helper-Funktionen (flattenProjectStories, isStaleInProgress,
  *     computeAliveStoryIds, couldBecomeReadyViaDepends, computeDrainState,
@@ -225,6 +275,8 @@ import { describe, it, expect } from '@jest/globals';
 import {
   ProjectDrain,
   FLOW_COMMAND,
+  FEATURE_ID_RE,
+  FEATURE_DRAIN_MIN_READY_STORIES,
   DEFAULT_STALE_IN_PROGRESS_HOURS,
   DEFAULT_ESCALATION_ATTEMPTS,
   DEFAULT_SAFETY_MAX_NO_PROGRESS_ROUNDS,
@@ -237,6 +289,9 @@ import {
   snapshotsEqual,
   pickLongestUnmovedTarget,
   computeCompletedBlocked,
+  pickNextReadyStory,
+  countReadyStoriesInFeature,
+  selectDrainMode,
 } from '../src/ProjectDrain.js';
 import { ProjectJobLock } from '../src/ProjectJobLock.js';
 import { HeadlessFlowRunnerAdapter } from '../src/FlowRunner.js';
@@ -252,7 +307,7 @@ function makeStory(overrides) {
     parent: 'F-001',
     title: overrides.id,
     status: overrides.status,
-    priority: 'P1',
+    priority: overrides.priority ?? 'P1',
     labels: [],
     spec: 'docs/specs/x.md',
     implements: ['AC1'],
@@ -936,6 +991,219 @@ describe('computeCompletedBlocked (drain-completion-report AC1/AC2)', () => {
       { id: 'S-4', title: 'S-4' },
     ]);
     expect(blocked).toEqual([{ id: 'S-2', title: 'S-2' }]);
+  });
+});
+
+describe('pickNextReadyStory / countReadyStoriesInFeature / selectDrainMode (feature-aware-drain AC1/AC2)', () => {
+  /** Baut ein Projekt mit MEHREREN Features (anders als das Standard-`makeProject`, das alles unter F-001 hängt). */
+  function makeMultiFeatureProject(featureDefs) {
+    return {
+      slug: PROJECT_SLUG,
+      repo_path: PROJECT_PATH,
+      features: featureDefs.map(({ id, priority = null, stories }) => ({
+        id,
+        title: id,
+        status: null,
+        priority,
+        progress: null,
+        stories: stories.map((s) => ({ ...makeStory(s), parent: id })),
+      })),
+    };
+  }
+
+  it('FEATURE_ID_RE akzeptiert nur F-<Ziffern>', () => {
+    expect(FEATURE_ID_RE.test('F-001')).toBe(true);
+    expect(FEATURE_ID_RE.test('F-42')).toBe(true);
+    expect(FEATURE_ID_RE.test('S-001')).toBe(false);
+    expect(FEATURE_ID_RE.test('F-abc')).toBe(false);
+    expect(FEATURE_ID_RE.test('F-')).toBe(false);
+  });
+
+  it('FEATURE_DRAIN_MIN_READY_STORIES ist 2 (AC1-Schwelle)', () => {
+    expect(FEATURE_DRAIN_MIN_READY_STORIES).toBe(2);
+  });
+
+  it('pickNextReadyStory: null ohne Projekt/ohne Kandidaten', () => {
+    expect(pickNextReadyStory(null)).toBeNull();
+    const project = makeMultiFeatureProject([
+      { id: 'F-001', stories: [{ id: 'S-1', status: 'Blocked' }, { id: 'S-2', status: 'Done' }] },
+    ]);
+    expect(pickNextReadyStory(project)).toBeNull();
+  });
+
+  it('pickNextReadyStory: nur ready===true To-Do-Storys sind Kandidaten (AC2)', () => {
+    const project = makeMultiFeatureProject([
+      {
+        id: 'F-001',
+        stories: [
+          { id: 'S-1', status: 'To Do', ready: false }, // nicht-ready → kein Kandidat
+          { id: 'S-2', status: 'Blocked', ready: false },
+          { id: 'S-3', status: 'Idee', ready: false },
+          { id: 'S-4', status: 'Done', ready: false },
+          { id: 'S-5', status: 'To Do', ready: true },
+        ],
+      },
+    ]);
+    expect(pickNextReadyStory(project)?.id).toBe('S-5');
+  });
+
+  it('pickNextReadyStory: sortiert nach Story-priority zuerst (P0 vor P2)', () => {
+    const project = makeMultiFeatureProject([
+      {
+        id: 'F-001',
+        stories: [
+          { id: 'S-1', status: 'To Do', ready: true, priority: 'P2' },
+          { id: 'S-2', status: 'To Do', ready: true, priority: 'P0' },
+        ],
+      },
+    ]);
+    expect(pickNextReadyStory(project)?.id).toBe('S-2');
+  });
+
+  it('pickNextReadyStory: bei Story-priority-Gleichstand entscheidet Feature-priority', () => {
+    const project = makeMultiFeatureProject([
+      { id: 'F-001', priority: 'P2', stories: [{ id: 'S-1', status: 'To Do', ready: true, priority: 'P1' }] },
+      { id: 'F-002', priority: 'P0', stories: [{ id: 'S-2', status: 'To Do', ready: true, priority: 'P1' }] },
+    ]);
+    expect(pickNextReadyStory(project)?.id).toBe('S-2');
+  });
+
+  it('pickNextReadyStory: bei vollem Gleichstand entscheidet aufsteigende numerische ID', () => {
+    const project = makeMultiFeatureProject([
+      { id: 'F-001', priority: 'P1', stories: [{ id: 'S-10', status: 'To Do', ready: true, priority: 'P1' }] },
+      { id: 'F-002', priority: 'P1', stories: [{ id: 'S-2', status: 'To Do', ready: true, priority: 'P1' }] },
+    ]);
+    expect(pickNextReadyStory(project)?.id).toBe('S-2');
+  });
+
+  it('pickNextReadyStory: fehlende Story-priority defaultet auf Rang P3 (identisch zu `board next`)', () => {
+    // Referenz `scripts/board` (agent-flow) `cmd_next`/`sort_key`:
+    // PRIORITY_ORDER.get(str(data.get("priority","P3")), 9) — das FELD selbst
+    // defaultet auf "P3", nicht das Lookup-Ergebnis auf 9. Eine Story mit
+    // FEHLENDER `priority` muss daher GENAU wie eine explizite P3-Story ranken
+    // — also VOR einer P3-Story mit größerer numerischer ID, aber NACH P0-P2.
+    // `makeMultiFeatureProject`/`makeStory` defaulten `priority` selbst auf
+    // 'P1' (`overrides.priority ?? 'P1'`) — um eine ECHT fehlende `priority`
+    // (wie eine handgepflegte YAML sie haben könnte) zu simulieren, wird das
+    // Feld nach dem Bau bewusst wieder auf `undefined` gesetzt.
+    const project = makeMultiFeatureProject([
+      {
+        id: 'F-001',
+        stories: [
+          { id: 'S-1', status: 'To Do', ready: true, priority: 'P2' },
+          { id: 'S-2', status: 'To Do', ready: true },
+        ],
+      },
+    ]);
+    delete project.features[0].stories[1].priority; // echt fehlend, kein 'P1'-Default
+    // P2 (Rang 2) schlägt fehlende priority (Rang 3) -> S-1 zuerst.
+    expect(pickNextReadyStory(project)?.id).toBe('S-1');
+  });
+
+  it('pickNextReadyStory: vorhandene, aber UNBEKANNTE Story-priority faellt auf Rang 9 (NICHT Rang 3)', () => {
+    // Divergenz-Fix Review-Iteration 2/3: nur das FEHLENDE Feld defaultet auf
+    // "P3" (Rang 3); ein VORHANDENER aber unbekannter String (Tippfehler wie
+    // "P4"/"invalid") durchlaeuft den Dict-Lookup direkt und trifft den
+    // aeusseren `.get(..., 9)`-Fallback -> Rang 9, identisch zur Referenz
+    // `scripts/board` `PRIORITY_ORDER.get(str(data.get("priority","P3")), 9)`.
+    const projectUnbekannt = makeMultiFeatureProject([
+      {
+        id: 'F-001',
+        stories: [
+          { id: 'S-3', status: 'To Do', ready: true, priority: 'P3' },
+          { id: 'S-4', status: 'To Do', ready: true, priority: 'unknown-value' }, // unbekannt -> Rang 9
+        ],
+      },
+    ]);
+    // P3 (Rang 3) schlaegt unbekannten String (Rang 9) -> S-3 zuerst.
+    expect(pickNextReadyStory(projectUnbekannt)?.id).toBe('S-3');
+
+    const projectBeideUnbekannt = makeMultiFeatureProject([
+      {
+        id: 'F-001',
+        stories: [
+          { id: 'S-5', status: 'To Do', ready: true, priority: 'P4' }, // unbekannt -> Rang 9
+          { id: 'S-6', status: 'To Do', ready: true, priority: 'invalid' }, // unbekannt -> Rang 9
+        ],
+      },
+    ]);
+    // Beide Rang 9 -> Tie-Break ueber aufsteigende numerische ID (S-5 < S-6).
+    expect(pickNextReadyStory(projectBeideUnbekannt)?.id).toBe('S-5');
+  });
+
+  it('countReadyStoriesInFeature: zählt nur To-Do+ready mit (AC2), Blocked/Idee/Done/nicht-ready nicht', () => {
+    const project = makeMultiFeatureProject([
+      {
+        id: 'F-001',
+        stories: [
+          { id: 'S-1', status: 'To Do', ready: true },
+          { id: 'S-2', status: 'To Do', ready: true },
+          { id: 'S-3', status: 'To Do', ready: false },
+          { id: 'S-4', status: 'Blocked', ready: false },
+          { id: 'S-5', status: 'Idee', ready: false },
+          { id: 'S-6', status: 'Done', ready: false },
+        ],
+      },
+    ]);
+    expect(countReadyStoriesInFeature(project, 'F-001')).toBe(2);
+    expect(countReadyStoriesInFeature(project, 'F-999')).toBe(0);
+    expect(countReadyStoriesInFeature(null, 'F-001')).toBe(0);
+  });
+
+  it('selectDrainMode: single-flow ohne Projekt/ohne Kandidaten', () => {
+    expect(selectDrainMode(null)).toEqual({ mode: 'single-flow' });
+  });
+
+  it('selectDrainMode: genau 1 bereite Story im Parent-Feature → single-flow (AC1)', () => {
+    const project = makeMultiFeatureProject([
+      { id: 'F-001', stories: [{ id: 'S-1', status: 'To Do', ready: true }] },
+    ]);
+    expect(selectDrainMode(project)).toEqual({ mode: 'single-flow' });
+  });
+
+  it('selectDrainMode: ≥2 bereite Storys im Parent-Feature → feature-drain mit der Feature-ID (AC1)', () => {
+    const project = makeMultiFeatureProject([
+      {
+        id: 'F-042',
+        stories: [
+          { id: 'S-1', status: 'To Do', ready: true },
+          { id: 'S-2', status: 'To Do', ready: true },
+        ],
+      },
+    ]);
+    expect(selectDrainMode(project)).toEqual({ mode: 'feature-drain', featureId: 'F-042' });
+  });
+
+  it('selectDrainMode: Story ohne parent ist immer Einzelgänger (AC1)', () => {
+    const project = {
+      slug: PROJECT_SLUG,
+      repo_path: PROJECT_PATH,
+      features: [],
+      // Orphaned-Pseudo-Feature-Fall: flattenProjectStories liest nur project.features,
+      // eine parentlose Story landet dort ausschließlich über das _orphaned-Feature.
+    };
+    project.features.push({
+      id: '_orphaned',
+      title: 'Verwaiste Stories',
+      status: null,
+      priority: null,
+      progress: null,
+      stories: [{ ...makeStory({ id: 'S-1', status: 'To Do', ready: true }), parent: null }],
+    });
+    expect(selectDrainMode(project)).toEqual({ mode: 'single-flow' });
+  });
+
+  it('selectDrainMode: nicht-ready To-Do-Storys im selben Feature zählen nicht zur ≥2-Schwelle (AC2)', () => {
+    const project = makeMultiFeatureProject([
+      {
+        id: 'F-001',
+        stories: [
+          { id: 'S-1', status: 'To Do', ready: true },
+          { id: 'S-2', status: 'To Do', ready: false }, // nicht bereit -> zaehlt nicht mit
+        ],
+      },
+    ]);
+    expect(selectDrainMode(project)).toEqual({ mode: 'single-flow' });
   });
 });
 
@@ -1997,6 +2265,277 @@ describe('ProjectDrain — FlowRunner-Injection (headless-parallel-drain AC5/AC6
     // untouched by the FlowRunner-Injection, exactly as documented).
     expect(result).toEqual({ stopped: true, reason: 'already-busy', flowRuns: 0, escalated: [], completed: [], blocked: [], budgetPauses: [] });
     expect(commandService.calls).toHaveLength(0);
+  });
+});
+
+describe('ProjectDrain.drainProject — feature-aware-drain (AC1/AC3/AC4/AC5/AC6)', () => {
+  /** Baut ein Projekt mit MEHREREN Features (Feature-Ebenen-Auswahl braucht ≥2 Storys IM SELBEN Feature). */
+  function makeMultiFeatureBoard(featureDefs) {
+    const project = {
+      slug: PROJECT_SLUG,
+      repo_path: PROJECT_PATH,
+      features: featureDefs.map(({ id, stories }) => ({
+        id,
+        title: id,
+        status: null,
+        priority: null,
+        progress: null,
+        stories: stories.map((s) => ({ ...makeStory(s), parent: id })),
+      })),
+    };
+    const state = { projects: [project] };
+    const boardAggregator = {
+      async scan() {},
+      async getIndex() {
+        return state.projects;
+      },
+    };
+    return { state, project, boardAggregator };
+  }
+
+  /** FakeFeatureDrainFlowRunner — duck-typed FlowRunner-Interface für den Feature-Drain-Ausführungsschritt. */
+  class FakeFeatureDrainFlowRunner {
+    constructor(onRun) {
+      this.onRun = onRun;
+      this.calls = [];
+    }
+
+    async startRun({ projectPath, projectSlug, featureId, identity }) {
+      this.calls.push({ projectPath, projectSlug, featureId, identity });
+      const result = this.onRun ? this.onRun(this.calls.length) : undefined;
+      if (result && result.ok === false) return result;
+      return { ok: true, handle: { jobId: `feature-job-${this.calls.length}` } };
+    }
+
+    async awaitCompletion() {
+      return { status: 'done' };
+    }
+  }
+
+  it('AC1: Parent-Feature mit ≥2 bereiten Storys -> startet featureDrainFlowRunner statt Einzel-flowRunner', async () => {
+    const { state, boardAggregator } = makeMultiFeatureBoard([
+      {
+        id: 'F-042',
+        stories: [
+          { id: 'S-1', status: 'To Do', ready: true },
+          { id: 'S-2', status: 'To Do', ready: true },
+        ],
+      },
+    ]);
+    const featureDrainFlowRunner = new FakeFeatureDrainFlowRunner(() => {
+      const project = state.projects[0];
+      findStory(project, 'S-1').status = 'Done';
+      findStory(project, 'S-1').ready = false;
+      findStory(project, 'S-2').status = 'Done';
+      findStory(project, 'S-2').ready = false;
+    });
+    const flowRunner = { startRun: () => { throw new Error('single-flow darf hier NICHT aufgerufen werden'); }, awaitCompletion: async () => ({ status: 'done' }) };
+    const drain = new ProjectDrain({
+      boardAggregator, flowRunner, featureDrainFlowRunner, lock: new ProjectJobLock(), now: () => NOW_MS,
+    });
+
+    const result = await drain.drainProject(PROJECT_PATH, { identity: 'alex@example.com' });
+
+    expect(result.reason).toBe('no-drain-target');
+    expect(result.flowRuns).toBe(1); // AC3: EIN Feature-Drain = eine Drain-Runde
+    // S-317 Review-Iteration 2: projectSlug wird durchgereicht (Cross-
+    // Boundary-Lock-Schlüssel `${projectSlug}:${featureId}` in FeatureDrainFlowRunner).
+    expect(featureDrainFlowRunner.calls).toEqual([
+      { projectPath: PROJECT_PATH, projectSlug: PROJECT_SLUG, featureId: 'F-042', identity: 'alex@example.com' },
+    ]);
+  });
+
+  it('AC1: genau 1 bereite Story im Parent-Feature -> single-flow wie bisher (featureDrainFlowRunner unbenutzt)', async () => {
+    const { state, boardAggregator } = makeMultiFeatureBoard([
+      { id: 'F-001', stories: [{ id: 'S-1', status: 'To Do', ready: true }] },
+    ]);
+    const featureDrainFlowRunner = new FakeFeatureDrainFlowRunner();
+    const flowRunner = {
+      startRun: () => {
+        findStory(state.projects[0], 'S-1').status = 'Done';
+        findStory(state.projects[0], 'S-1').ready = false;
+        return { ok: true, handle: { runId: 1 } };
+      },
+      awaitCompletion: async () => ({ status: 'done' }),
+    };
+    const drain = new ProjectDrain({ boardAggregator, flowRunner, featureDrainFlowRunner, lock: new ProjectJobLock(), now: () => NOW_MS });
+
+    const result = await drain.drainProject(PROJECT_PATH);
+
+    expect(result.reason).toBe('no-drain-target');
+    expect(featureDrainFlowRunner.calls).toEqual([]);
+  });
+
+  it('AC3: der Feature-Drain-Runde folgt ein frischer Re-Scan — bleibt nach dem Feature-Drain wieder ≥2 bereit, startet ERNEUT ein Feature-Drain', async () => {
+    const { state, boardAggregator } = makeMultiFeatureBoard([
+      {
+        id: 'F-042',
+        stories: [
+          { id: 'S-1', status: 'To Do', ready: true },
+          { id: 'S-2', status: 'To Do', ready: true },
+          { id: 'S-3', status: 'To Do', ready: true },
+        ],
+      },
+    ]);
+    const featureDrainFlowRunner = new FakeFeatureDrainFlowRunner((callIndex) => {
+      const project = state.projects[0];
+      if (callIndex === 1) {
+        // Erste Runde: nur EINE Story wird fertig — 2 bleiben bereit -> zweite Feature-Drain-Runde folgt.
+        findStory(project, 'S-1').status = 'Done';
+        findStory(project, 'S-1').ready = false;
+      } else {
+        findStory(project, 'S-2').status = 'Done';
+        findStory(project, 'S-2').ready = false;
+        findStory(project, 'S-3').status = 'Done';
+        findStory(project, 'S-3').ready = false;
+      }
+    });
+    const flowRunner = { startRun: () => { throw new Error('single-flow darf hier NICHT aufgerufen werden'); }, awaitCompletion: async () => ({ status: 'done' }) };
+    const drain = new ProjectDrain({ boardAggregator, flowRunner, featureDrainFlowRunner, lock: new ProjectJobLock(), now: () => NOW_MS });
+
+    const result = await drain.drainProject(PROJECT_PATH);
+
+    expect(result.reason).toBe('no-drain-target');
+    expect(result.flowRuns).toBe(2); // zwei Feature-Drain-Runden
+    expect(featureDrainFlowRunner.calls).toHaveLength(2);
+  });
+
+  it('AC4: ohne injizierten featureDrainFlowRunner bleibt der Drain bit-identisch beim Einzel-/flow-Pfad (kein Regress)', async () => {
+    const { state, boardAggregator } = makeMultiFeatureBoard([
+      {
+        id: 'F-042',
+        stories: [
+          { id: 'S-1', status: 'To Do', ready: true },
+          { id: 'S-2', status: 'To Do', ready: true },
+        ],
+      },
+    ]);
+    const flowRunner = {
+      startRun: () => {
+        const project = state.projects[0];
+        const target = findStory(project, 'S-1').status === 'Done' ? 'S-2' : 'S-1';
+        findStory(project, target).status = 'Done';
+        findStory(project, target).ready = false;
+        return { ok: true, handle: {} };
+      },
+      awaitCompletion: async () => ({ status: 'done' }),
+    };
+    // KEIN featureDrainFlowRunner injiziert.
+    const drain = new ProjectDrain({ boardAggregator, flowRunner, lock: new ProjectJobLock(), now: () => NOW_MS });
+
+    const result = await drain.drainProject(PROJECT_PATH);
+
+    expect(result.reason).toBe('no-drain-target');
+    expect(result.flowRuns).toBe(2); // zwei Einzel-/flow-Runden, kein Feature-Drain
+  });
+
+  it('AC5: featureDrainFlowRunner.startRun() liefert reason:"feature-drain-unavailable" -> Rückfall auf Einzel-/flow FÜR DIESE RUNDE (kein Crash)', async () => {
+    const { state, boardAggregator } = makeMultiFeatureBoard([
+      {
+        id: 'F-042',
+        stories: [
+          { id: 'S-1', status: 'To Do', ready: true },
+          { id: 'S-2', status: 'To Do', ready: true },
+        ],
+      },
+    ]);
+    const featureDrainFlowRunner = {
+      startRun: () => ({ ok: false, reason: 'feature-drain-unavailable' }),
+      awaitCompletion: async () => ({ status: 'done' }),
+    };
+    const fallbackCalls = [];
+    const flowRunner = {
+      startRun: (payload) => {
+        fallbackCalls.push(payload);
+        const project = state.projects[0];
+        const target = findStory(project, 'S-1').status === 'Done' ? 'S-2' : 'S-1';
+        findStory(project, target).status = 'Done';
+        findStory(project, target).ready = false;
+        return { ok: true, handle: {} };
+      },
+      awaitCompletion: async () => ({ status: 'done' }),
+    };
+    const drain = new ProjectDrain({ boardAggregator, flowRunner, featureDrainFlowRunner, lock: new ProjectJobLock(), now: () => NOW_MS });
+
+    const result = await drain.drainProject(PROJECT_PATH);
+
+    expect(result.reason).toBe('no-drain-target');
+    // Beide Storys wurden trotz nicht verfügbarem Feature-Drain fertig (Rückfall griff jede Runde).
+    expect(fallbackCalls).toHaveLength(2);
+    expect(fallbackCalls[0]).toEqual({ projectPath: PROJECT_PATH, command: FLOW_COMMAND, identity: null, args: [] });
+  });
+
+  it('Cross-Boundary-Lock (S-317 Review-Iteration 2): featureDrainFlowRunner.startRun() liefert reason:"feature-drain-locked" (Feature-Umsetzen-Button hält denselben feature-scoped Lock) -> sauberes Ende wie command-channel-busy, KEIN Crash, KEINE Eskalation', async () => {
+    const { boardAggregator } = makeMultiFeatureBoard([
+      {
+        id: 'F-042',
+        stories: [
+          { id: 'S-1', status: 'To Do', ready: true },
+          { id: 'S-2', status: 'To Do', ready: true },
+        ],
+      },
+    ]);
+    const featureDrainFlowRunner = {
+      // Simuliert: der Feature-Umsetzen-Button-Router hält bereits den
+      // feature-scoped Lock für dieses Feature -> FeatureDrainFlowRunner
+      // lehnt startRun() ab, OHNE zu spawnen.
+      startRun: () => ({ ok: false, reason: 'feature-drain-locked' }),
+      awaitCompletion: async () => ({ status: 'done' }),
+    };
+    const flowRunner = {
+      startRun: () => { throw new Error('single-flow darf hier NICHT als Rückfall aufgerufen werden — feature-drain-locked ist KEIN feature-drain-unavailable'); },
+      awaitCompletion: async () => ({ status: 'done' }),
+    };
+    const drain = new ProjectDrain({ boardAggregator, flowRunner, featureDrainFlowRunner, lock: new ProjectJobLock(), now: () => NOW_MS });
+
+    const result = await drain.drainProject(PROJECT_PATH);
+
+    expect(result).toEqual({
+      stopped: true,
+      reason: 'command-channel-busy',
+      flowRuns: 1,
+      escalated: [],
+      completed: [],
+      blocked: [],
+      budgetPauses: [],
+    });
+  });
+
+  it('AC6: Feature-Drain-Runde hält dasselbe projektweise ProjectJobLock — ein zweiter drainProject()-Aufruf fürs selbe Projekt liefert already-busy', async () => {
+    const { boardAggregator } = makeMultiFeatureBoard([
+      {
+        id: 'F-042',
+        stories: [
+          { id: 'S-1', status: 'To Do', ready: true },
+          { id: 'S-2', status: 'To Do', ready: true },
+        ],
+      },
+    ]);
+    let resolveStart;
+    const started = new Promise((resolve) => { resolveStart = resolve; });
+    const featureDrainFlowRunner = {
+      startRun: async () => {
+        resolveStart();
+        // hängt "für immer" (Lock bleibt gehalten) — der zweite Aufruf unten
+        // prüft NUR, dass der Lock bereits VOR awaitCompletion gehalten wird.
+        return new Promise(() => {});
+      },
+      awaitCompletion: async () => ({ status: 'done' }),
+    };
+    const flowRunner = { startRun: () => ({ ok: true, handle: {} }), awaitCompletion: async () => ({ status: 'done' }) };
+    const lock = new ProjectJobLock();
+    const drain = new ProjectDrain({ boardAggregator, flowRunner, featureDrainFlowRunner, lock, now: () => NOW_MS });
+
+    const firstDrainPromise = drain.drainProject(PROJECT_PATH);
+    await started;
+    const secondResult = await drain.drainProject(PROJECT_PATH);
+
+    expect(secondResult).toEqual({ stopped: true, reason: 'already-busy', flowRuns: 0, escalated: [], completed: [], blocked: [], budgetPauses: [] });
+
+    // Aufräumen: das erste, hängende drainProject() nie auflösen lassen —
+    // Test endet hier bewusst ohne await auf firstDrainPromise (bleibt pending,
+    // Jest beendet den Prozess ohnehin per --forceExit).
+    void firstDrainPromise;
   });
 });
 
