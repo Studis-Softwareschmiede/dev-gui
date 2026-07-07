@@ -120,6 +120,76 @@ else
   echo "[entrypoint] no ensure-gh-auth.sh found (plugin missing or path changed) — skipping gh-auth bootstrap." >&2
 fi
 
+# ── gh-Auth-Refresh-Schleife (headless-gh-token-refresh, AC1-AC7) ────────────
+# Der einmalige Bootstrap oben mintet einen App-Token, der nur ~60min gültig
+# ist. Mehrstündige headless-Drains (manueller "Board abarbeiten"-Knopf UND
+# Nachtwächter) überleben einen Token-Ablauf sonst nicht (Vorfall
+# 2026-07-07): claude -p-Kindprozesse können nicht re-minten, weil
+# buildChildEnv() (src/HeadlessRunnerCore.js) bewusst NUR eine Allowlist an
+# Env-Vars durchreicht — GPG_PASSPHRASE/GH_TOKEN werden gestrippt (Security,
+# NICHT geändert — siehe docs/specs/headless-gh-token-refresh.md Nicht-Ziele).
+#
+# Deshalb läuft der Refresh stattdessen HIER, im Entrypoint-Prozess selbst,
+# der GPG_PASSPHRASE ohnehin aus der Server-Env hat: eine Hintergrund-
+# Schleife, die in festem Intervall (default ~45min, strikt < ~60min
+# Token-Gültigkeit) erneut ensure-gh-auth.sh aufruft. Weil `gh`/git ihre
+# Konfiguration pro Aufruf neu aus $HOME/.config/gh bzw. der git-Credential-
+# Ablage lesen, profitieren bereits laufende Sessions automatisch — ohne
+# Neustart (AC2/AC3).
+#
+# Security (AC4/AC5): GPG_PASSPHRASE verlässt NIE diesen Prozess — die
+# Schleife ruft nur dasselbe ensure-gh-auth.sh auf, das GPG_PASSPHRASE aus
+# genau dieser (Entrypoint-)Shell-Env liest. Es wird KEINE neue,
+# session-lesbare Ablage angelegt (keine gpg.pass-Datei, keine Aufnahme in
+# buildChildEnv). Sessions sehen nur das Ergebnis: die frische, kurzlebige
+# gh/git-Auth in den bestehenden Ist-Ablagen.
+#
+# Robustheit (AC6): ein fehlgeschlagener Refresh (Netz weg, GPG-/Mint-Fehler,
+# Skript nicht gefunden) loggt nur eine klare, secret-freie Warnung und läuft
+# beim nächsten Intervall einfach weiter — kein Crash, kein Effekt auf
+# node server.js (läuft in einem separaten Hintergrundprozess).
+#
+# Fangnetz (AC7): die bestehende 401-Erkennung (isAuthError/
+# AUTH_ERROR_PATTERN, src/HeadlessRunnerCore.js) bleibt unverändert — falls
+# ein Refresh doch einmal zu spät kommt.
+#
+# Log-Ziel: eine eigene, secret-freie Log-Datei statt der geerbten
+# stdout/stderr-Filedeskriptoren des Entrypoint-Prozesses. Ein Hintergrund-
+# prozess, der (gewollt) bis in alle Ewigkeit weiterläuft, hält andernfalls
+# das Pipe-Ende von stdout/stderr für IMMER offen — jeder Aufrufer, der den
+# Entrypoint-Prozess per Pipe beobachtet und auf EOF wartet (z.B. Node
+# `child_process.spawnSync`, aber auch mancher Log-Collector), würde NIE ein
+# EOF sehen, selbst lange nachdem `exec node server.js` selbst geendet hat.
+# Ein reines FD-Duplikat (`exec 3>&1`) löst das NICHT — es zeigt auf dieselbe
+# zugrundeliegende Pipe. Die Log-Datei ist trotzdem "sichtbar genug": sie
+# liegt unter $HOME (persistentes Volume) und kann jederzeit inspiziert
+# werden (`tail -f`), ohne den Docker-Log-Stream zu blockieren.
+GH_TOKEN_REFRESH_INTERVAL_SECONDS="${GH_TOKEN_REFRESH_INTERVAL_SECONDS:-2700}"
+GH_TOKEN_REFRESH_LOG="$HOME/.claude/gh-token-refresh.log"
+
+gh_token_refresh_loop() {
+  while true; do
+    sleep "$GH_TOKEN_REFRESH_INTERVAL_SECONDS"
+    # Plugin-Root bei JEDEM Durchlauf neu auflösen (derselbe Mechanismus wie
+    # beim Boot-Bootstrap oben) — kein hartkodierter, versions-fixierter Pfad;
+    # überlebt auch ein zwischenzeitliches Plugin-Update.
+    local_plugin_root="$(find "$HOME/.claude/plugins/cache/agent-flow" -mindepth 2 -maxdepth 2 -type d -print -quit 2>/dev/null || true)"
+    if [ -n "${local_plugin_root:-}" ] && [ -x "$local_plugin_root/scripts/ensure-gh-auth.sh" ]; then
+      if "$local_plugin_root/scripts/ensure-gh-auth.sh" >/dev/null 2>&1; then
+        echo "[entrypoint] gh-auth refresh: fresh GitHub-App token minted — running sessions pick it up on their next gh/git call."
+      else
+        echo "[entrypoint] WARNING: gh-auth refresh failed this interval — will retry next interval (running sessions keep using the previous token/401-fallback)." >&2
+      fi
+    else
+      echo "[entrypoint] WARNING: gh-auth refresh skipped — ensure-gh-auth.sh not found (plugin missing or path changed). Will retry next interval." >&2
+    fi
+  done
+}
+
+echo "[entrypoint] starting background gh-auth refresh loop (interval: ${GH_TOKEN_REFRESH_INTERVAL_SECONDS}s, log: $GH_TOKEN_REFRESH_LOG)..."
+nohup bash -c "$(declare -f gh_token_refresh_loop); GH_TOKEN_REFRESH_INTERVAL_SECONDS='$GH_TOKEN_REFRESH_INTERVAL_SECONDS' HOME='$HOME' gh_token_refresh_loop" >>"$GH_TOKEN_REFRESH_LOG" 2>&1 < /dev/null &
+disown
+
 # ── Credential-Store Master-Key (AC4 — Entkopplung von GPG_PASSPHRASE) ────────
 # Der Master-Key für den Credential-Store (ADR-007 / credential-master-key-decoupling)
 # wird aus einem EIGENEN Bitwarden-Item beschafft (dev-gui-cred-master-key) und als
