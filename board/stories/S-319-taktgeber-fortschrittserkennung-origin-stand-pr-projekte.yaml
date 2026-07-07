@@ -2,7 +2,7 @@ id: S-319
 parent: F-070
 title: Taktgeber-Fortschrittserkennung auf origin-Stand bei merge_policy=pr — kein
   Blocked-Write auf stalem lokalem Checkout
-status: In Progress
+status: Blocked
 priority: P1
 spec: docs/specs/drain-origin-progress-sync.md
 implements:
@@ -30,9 +30,12 @@ estimate_note: 'L per Heuristik (n_ac=7, n_comp~5: ProjectDrain.js Fetch+Truth-R
 confidence: medium
 branch: feat/S-319-drain-origin-progress-sync
 pr: null
-blocked_reason: null
+blocked_reason: 'Code gemerged nach main (60e3d72), CI grün — lokaler Docker-Rollout
+  (board-ship.sh) konnte nicht verifiziert werden: kein Docker-Daemon in dieser Sandbox
+  erreichbar (docker.sock fehlt). Manueller Rollout auf einem Host mit Docker-Zugriff
+  nötig, danach Board manuell auf Done setzen.'
 created_at: '2026-07-07T15:30:00Z'
-updated_at: '2026-07-07T16:04:17Z'
+updated_at: '2026-07-07T16:55:13Z'
 done_at: null
 tok_est: null
 area: fabrik-arbeiten
