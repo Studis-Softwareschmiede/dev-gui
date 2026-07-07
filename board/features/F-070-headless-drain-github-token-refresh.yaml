@@ -1,0 +1,29 @@
+id: F-070
+title: Headless-Drain-Robustheit gegen GitHub-Token-Ablauf
+goal: 'Mehrstündige headless-Drains (manueller Knopf + Nachtwächter) sollen einen Ablauf
+  des GitHub-App-Tokens ohne manuellen Eingriff überleben. Der Container-Entrypoint mintet
+  den ~60-min-Token heute nur EINMAL beim Start; nach Ablauf können die claude -p-Sessions
+  nicht re-minten (buildChildEnv strippt GPG_PASSPHRASE/GH_TOKEN bewusst), Storys werden
+  implementiert aber nicht gelandet -> Eskalation auf Blocked (Vorfall 2026-07-07, 05:52-08:10
+  UTC, 10 flowRuns/0 completed). Lösung: periodische Refresh-Schleife im Entrypoint (~45 min
+  Intervall) ruft ensure-gh-auth.sh erneut auf und aktualisiert die von Sessions gelesenen
+  gh/git-Ablagen; gh liest Config pro Aufruf neu -> laufende Sessions profitieren ohne Neustart.
+  Sessions bekommen NIE die GPG-Passphrase, nur kurzlebige Tokens (Security-getrieben). Bewusst
+  verworfen: GPG_PASSPHRASE in Child-Env-Allowlist ODER gpg.pass an session-lesbare Pfade
+  mounten (Master-Secret ausserhalb der Session-Reichweite; --dangerously-skip-permissions).
+  Owner-Entscheidung FINAL freigegeben 2026-07-07.'
+status: Backlog
+priority: P1
+spec: docs/specs/headless-gh-token-refresh.md
+definition_of_done: null
+labels:
+- security
+- infra
+depends: null
+owner: null
+stories:
+- S-318
+progress: 0/1 done
+created_at: '2026-07-07T12:15:00Z'
+updated_at: '2026-07-07T12:15:00Z'
+area: fabrik-arbeiten
