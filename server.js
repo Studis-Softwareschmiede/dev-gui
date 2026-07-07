@@ -138,6 +138,7 @@ import { IdeaSpecifyFinalizer } from './src/IdeaSpecifyFinalizer.js';
 import { StorySpecifyFinalizer } from './src/StorySpecifyFinalizer.js';
 import { HeadlessReconcileRunner } from './src/HeadlessReconcileRunner.js';
 import { ObsidianIngestRunner } from './src/ObsidianIngestRunner.js';
+import { RegressionDefineRunner } from './src/RegressionDefineRunner.js';
 import { ClaudeAuthHealthService } from './src/ClaudeAuthHealthService.js';
 import { KnowledgeSourceService } from './src/KnowledgeSourceService.js';
 import { read as readNotificationSettings, migrateEventDefaults } from './src/NotificationSettingsStore.js';
@@ -704,6 +705,21 @@ const reconcileRunner = new HeadlessReconcileRunner();
 // GENAU EIN Push je Eintritt in `needs-answers`, kein zweiter Notifier-Codepfad.
 const obsidianIngestRunner = new ObsidianIngestRunner({ auditStore, notifier: drainNotifier });
 
+// ── RegressionDefineRunner (headless Regressionstest-Definier-Lauf mit
+// Interrupt/Resume, docs/specs/regression-define-dialog.md AC1-AC5, S-307) ──
+// EIGENE, isolierte ProjectJobLock-Instanz (Konstruktor-Default
+// `new ProjectJobLock()` in RegressionDefineRunner.js) — bewusst getrennt von
+// ALLEN anderen headless-Locks (Nacht-Drain, manueller Drain, Reconcile,
+// Finalizer, CostModeModelCheck, Auto-Retro, ObsidianIngestRunner), sonst
+// würde ein paralleler Lauf für dasselbe Projekt fälschlich blockiert
+// (Selbstblockade-Vermeidung, analog dem ObsidianIngestRunner-Kommentar oben).
+// KEIN neuer Runner-TYP — wiederverwendet dieselben `HeadlessRunnerCore.js`-
+// Primitive (buildChildEnv/isAuthError/AUTH_EXPIRED_MESSAGE, ProjectJobLock);
+// NUR die state machine (Interrupt `needs-review` + `--resume`-Fortsetzung via
+// STDIN) ist analog `ObsidianIngestRunner` neu. `auditStore` injiziert (AC5:
+// Job-Ende/-Fehler, secret-frei).
+const regressionDefineRunner = new RegressionDefineRunner({ auditStore });
+
 // ── Auto-Retro-Boundaries (retro-auto-queue S-256/S-257 + retro-auto-trigger
 // S-261) sind bereits weiter oben (vor dem NightWatchScheduler, der den
 // `autoRetroTrigger` für seine Drain-Abschluss-Naht AC4 braucht) konstruiert:
@@ -783,6 +799,13 @@ const deps = {
   // (obsidianIngest.js Router). credentialStore (oben) liest den konfigurierten
   // Vault-Pfad für die vault-confined Pfad-Auflösung (obsidian-vault-config AC5).
   obsidianIngestRunner,
+  // regression-define-dialog AC1-AC5 (S-307): headless Regressionstest-Definier-
+  // Runner mit Interrupt(needs-review)/Resume-Protokoll für
+  // POST /api/projects/:slug/regression-define +
+  // GET /api/projects/:slug/regression-define/:jobId +
+  // POST /api/projects/:slug/regression-define/:jobId/review
+  // (regressionDefine.js Router). Slug→Pfad-Auflösung analog projectDrainRouter.
+  regressionDefineRunner,
   // cost-mode-model-check AC7: CostModeModelCheck-Registry für den Status-
   // Endpunkt GET /api/cost-mode/check/:checkId (costModeCheck.js Router).
   costModeModelCheck,

@@ -315,8 +315,12 @@ describe('routerLoader — Echte src/routers/ Module (AC1/AC3)', () => {
     //   (GET /api/workspace/repo-sizes + POST .../refresh — Read/Refresh AC6/AC7) → 43.
     // featureDrain.js wurde mit feature-umsetzen-button hinzugefügt
     //   (GET/POST /api/board/projects/:slug/features/:featureId/batch) → 44.
+    // regressionDefine.js wurde mit regression-define-dialog (S-307) hinzugefügt
+    //   (POST /api/projects/:slug/regression-define + GET .../regression-define/:jobId +
+    //    POST .../regression-define/:jobId/review — headless Regressionstest-
+    //    Definier-Runner mit Interrupt(needs-review)/Resume AC1-AC5) → 45.
     const entries = await readdir(ROUTERS_DIR);
     const mountedCount = entries.filter((f) => f.endsWith('.js')).length;
-    expect(mountedCount).toBe(44);
+    expect(mountedCount).toBe(45);
   });
 });
