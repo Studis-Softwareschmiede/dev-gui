@@ -2,7 +2,7 @@ id: S-317
 parent: F-069
 title: Feature-bewusster ProjectDrain/Nachtwächter — board-feature-drain.sh statt
   Einzel-/flow bei Mehr-Story-Features
-status: Blocked
+status: Done
 priority: P2
 spec: docs/specs/feature-aware-drain.md
 implements:
@@ -34,8 +34,8 @@ blocked_reason: Rollout ohne Docker-Daemon nicht verifizierbar (Code bereits in 
   gemergt, CI gruen - board-ship.sh Schritt 4 do_rollout_or_die schlaegt in dieser
   Sandbox mangels Docker-Daemon fehl)
 created_at: '2026-07-07T09:58:50Z'
-updated_at: '2026-07-07T21:09:49Z'
-done_at: null
+updated_at: '2026-07-08T00:52:00Z'
+done_at: '2026-07-08T00:52:00Z'
 tok_est: null
 area: nachtwaechter
 notes: 'Neu B des Owner-Konzepts (FINAL 2026-07-07). Spec docs/specs/feature-aware-drain.md

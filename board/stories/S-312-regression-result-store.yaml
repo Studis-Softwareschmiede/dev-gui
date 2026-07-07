@@ -2,7 +2,7 @@ id: S-312
 parent: F-067
 title: Regressions-Ergebnis-Store — CTRF-JSON je Lauf, Retention 50, Debug-Artefakte
   nur bei Rot, Auto-Prune
-status: Blocked
+status: Done
 priority: P2
 spec: docs/specs/regression-result-store.md
 implements:
@@ -29,8 +29,8 @@ blocked_reason: Rollout ohne Docker-Daemon nicht verifizierbar (Code bereits in 
   mangels Docker-Daemon fehl — orphaned In Progress nach unterbrochener Vorgänger-Session
   aufgeräumt)
 created_at: '2026-07-06T05:04:40Z'
-updated_at: '2026-07-07T22:41:38Z'
-done_at: null
+updated_at: '2026-07-08T00:52:00Z'
+done_at: '2026-07-08T00:52:00Z'
 tok_est: null
 area: fabrik-arbeiten
 notes: CTRF-JSON + Metadaten je Lauf in der dev-gui-Datenablage unter ${CRED_STORE_DIR}
