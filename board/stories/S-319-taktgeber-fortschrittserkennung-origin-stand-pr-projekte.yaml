@@ -1,0 +1,71 @@
+id: S-319
+parent: F-070
+title: Taktgeber-Fortschrittserkennung auf origin-Stand bei merge_policy=pr — kein
+  Blocked-Write auf stalem lokalem Checkout
+status: To Do
+priority: P1
+spec: docs/specs/drain-origin-progress-sync.md
+implements:
+- AC1
+- AC2
+- AC3
+- AC4
+- AC5
+- AC6
+- AC7
+depends: null
+labels:
+- backend
+- scheduler
+size_est: L
+dispo_est: '5'
+dispo_act: null
+dispo_forecast: null
+estimate_note: 'L per Heuristik (n_ac=7, n_comp~5: ProjectDrain.js Fetch+Truth-Ref-Auswahl+Eskalations-Gate,
+  BoardAggregator.js injizierbare Datei-Quelle fs<->git-ref, BoardWriter verified-Gate,
+  Git-Lese-Boundary fetch/merge-base/show/ls-tree, ergänzt-Vermerk taktgeber-nachtwaechter;
+  label_bump 0 (backend/scheduler) -> score 12). estimator nicht dispatchbar (kein
+  Task-Tool); baseline.json js|balanced|L Median (ep 5.0, n=5) als Proxy; keine Baseline-Tokens
+  (tok_total null) -> tok_est null. confidence medium.'
+confidence: medium
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-07-07T15:30:00Z'
+updated_at: '2026-07-07T15:30:00Z'
+done_at: null
+tok_est: null
+area: fabrik-arbeiten
+notes: 'Verifizierter Vorfall 2026-07-07 ~15:00 UTC (agent-flow-Drain, merge_policy:
+  pr). Spec docs/specs/drain-origin-progress-sync.md (AC1–AC7). PROBLEM: /flow-Sessions
+  landen Board-Flips (Done) per PR auf origin/main; der lokale Checkout /workspace/<projekt>,
+  den ProjectDrain/BoardAggregator lesen, wird NICHT nachgezogen. Der Taktgeber sah
+  S-053/S-054/S-055 dauerhaft als To Do (real Done auf origin), wertete 3x kein Fortschritt
+  und schrieb fälschlich Blocked/blocked_reason lokal; der Abschlussbericht meldete
+  sie als escalated/blocked, obwohl alle 6 Storys auf origin Done waren. Nur die AUSSENSICHT
+  (Fortschritt/Eskalation/Abschlussbericht) war stal — der Lauf selbst lief korrekt
+  (Sessions fetchen in ihren Worktrees). Bei merge_policy: direct tritt es nicht auf.
+  GEWÄHLTE LÖSUNG = Variante (b) verfeinert, mutationsfrei: vor jeder Bewertung read-only
+  `git fetch origin` (berührt nur .git/refs, NIE den Working-Tree); Truth-Ref-Auswahl
+  ancestry-basiert — ist origin strikt voraus (lokaler HEAD echter Vorfahr von @{u}
+  via `git merge-base --is-ancestor`), wird der Board-Snapshot READ-ONLY aus origin/<default_branch>
+  gelesen (git show/ls-tree über board/stories, board/features, docs/specs), sonst
+  (kein Upstream / HEAD==origin / HEAD voraus / Fetch-Fehler) aus dem Working-Tree.
+  Diese Regel fixt pr und regressiert direct NIE (dort HEAD>=origin -> Working-Tree
+  bleibt Quelle). ESKALATION nur auf verifiziert-aktuellem Stand: setBlocked (BoardWriter)
+  greift nur bei erfolgreichem Fetch; Fetch-Fehler -> KEIN Blocked-Write, KEIN Zähler-Increment,
+  Log, Retry (AC4). LEITPLANKEN (Trauma Vorfall 2026-07-02): NIE pull/merge/checkout/reset/clean/stash;
+  dirty Working-Tree wird nie angetastet und löst nie Eskalation auf stalem Stand
+  aus (AC5). Abschlussbericht (drain-completion-report) erbt die origin-konsistente
+  Quelle -> keine Story als blocked/escalated gemeldet, die auf origin Done ist (AC6).
+  VARIANTE (a) fetch+ff-only-pull BEWUSST VERWORFEN: mutiert den geteilten Working-Tree
+  (Trauma), skippt bei dirty Tree und wertet dann weiter stal. Doku (AC7): ergänzt-Vermerk
+  in taktgeber-nachtwaechter.md (§ProjectDrain-Engine + AC4/AC5) auf diese Spec; secret-/pfad-freier
+  Runden-Audit (Snapshot-Quelle, Verifiziert-Status). Kein neuer Endpunkt, keine neue
+  Einstellung, keine Änderung der Drain-/Abbruch-/Eskalations-Logik über Snapshot-Quelle
+  + Eskalations-Gate hinaus. Tests: gemockte Git-Lese-Boundary (fetch/merge-base/show/ls-tree)
+  + injizierbare Datei-Quelle — pr-lokal-zurück -> origin-Snapshot/Done/keine Eskalation;
+  Fetch-Fehler -> keine Eskalation/kein Increment; direct/HEAD>=origin -> Working-Tree
+  unverändert; dirty Tree nie mutiert. Priority P1: verfälscht sonst jede Nachtwächter-Eskalation
+  bei pr-Projekten. Feature-Zuordnung F-070 (Headless-Drain-Robustheit-Umfeld, fabrik-arbeiten,
+  P1) — zweite Robustheits-Dimension neben Token-Ablauf (S-318).'
