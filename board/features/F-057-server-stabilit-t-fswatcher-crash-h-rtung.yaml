@@ -16,7 +16,8 @@ depends: null
 owner: null
 stories:
 - S-280
-progress: 0/1 done
+- S-320
+progress: 1/2 done
 created_at: '2026-07-03T07:00:15Z'
-updated_at: '2026-07-03T07:01:11Z'
+updated_at: '2026-07-07T22:50:18Z'
 area: 'fabrik-arbeiten'

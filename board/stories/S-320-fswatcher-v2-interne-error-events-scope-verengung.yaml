@@ -1,0 +1,29 @@
+id: S-320
+parent: F-057
+title: 'FSWatcher-Crash-Härtung V2: interne FSWatcher-''error''-Events + Scope-Verengung
+  (Vorfall 2026-07-07, S-280 unzureichend)'
+status: To Do
+priority: P1
+spec: docs/specs/fswatcher-crash-hardening.md
+implements:
+- AC8
+- AC9
+- AC10
+- AC11
+depends: null
+labels:
+- stability
+size_est: M
+dispo_est: '5.0'
+tok_est: null
+confidence: medium
+estimate_note: Heuristik score 6 (4 AC AC8-AC11 + 2 Komponenten BoardAggregator.js
+  + Integrationstest) -> M; estimator im headless requirement-Kontext nur bei L/XL,
+  hier nicht dispatcht; baseline js|balanced|M ep=5.0 als dispo_est; tok_est null (keine
+  Baseline-Tokens in js|balanced|M)
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-07-07T22:50:18Z'
+updated_at: '2026-07-07T22:50:18Z'
+area: 'fabrik-arbeiten'
