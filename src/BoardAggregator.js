@@ -10,6 +10,16 @@
  *   AC1 — Story-Index enthält zusätzlich updated_at (null wenn YAML-Feld fehlt) — Quelle für
  *   ProjectDrain's "verwaiste In-Progress"-Stale-Erkennung (src/ProjectDrain.js).
  *
+ * drain-origin-progress-sync:
+ *   AC2/AC7 — `readProjectAt(slug, repoPath, { fsDeps })` liest EIN Projekt read-only,
+ *   unabhängig vom In-Memory-`#index`, wahlweise aus einer alternativen Datei-Quelle
+ *   (Default Working-Tree via `this.#fsDeps`, injizierbar: Git-Ref-Quelle via
+ *   `createGitRefFsDeps`, `src/GitReadBoundary.js`). `_readBoard()`/`computeStoryReadyStatus()`
+ *   bleiben unverändert — nur `readdir`/`readFile` werden ausgetauscht. `ProjectDrain`
+ *   nutzt dies, um bei `merge_policy: pr`-Projekten mit verifiziert-vorauslaufendem
+ *   `origin` den Board-Snapshot aus dem `origin`-Ref statt dem stalen Working-Tree
+ *   abzuleiten (Truth-Ref-Auswahl, siehe dort).
+ *
  * fswatcher-crash-hardening:
  *   AC1 — startWatchers()/_watchRoot() fängt JEDEN Watcher-Fehler ab (Bewaffnung UND
  *   Iteration) — kein Watcher-Fehler eskaliert zu einer uncaughtException.
@@ -704,19 +714,58 @@ export class BoardAggregator {
   }
 
   /**
+   * Liest EIN Projekt read-only neu ein — unabhängig vom In-Memory-`#index`
+   * (kein Seiteneffekt auf `scan()`/`getIndex()`) — wahlweise aus einer
+   * ALTERNATIVEN Datei-Quelle (drain-origin-progress-sync AC2/AC7, Verträge
+   * §Snapshot-Schnittstelle "working-tree ↔ git-ref").
+   *
+   * Wiederverwendet dieselbe `_readBoard()`-Scan-/`computeStoryReadyStatus()`-
+   * Ready-Logik wie der reguläre Multi-Repo-Scan — NUR die `readdir`/
+   * `readFile`-Implementierung wird ausgetauscht (Default: `this.#fsDeps`,
+   * also der Working-Tree, bit-identisch zu `scan()`). `ProjectDrain` injiziert
+   * hier bei einem verifiziert-vorauslaufenden `origin` eine Git-Ref-Datei-
+   * Quelle (`createGitRefFsDeps`, `src/GitReadBoundary.js`) — read-only,
+   * berührt niemals den Working-Tree.
+   *
+   * @param {string} slug      Repo-Verzeichnisname (Projekt-Slug).
+   * @param {string} repoPath  Absoluter Projektpfad.
+   * @param {{ fsDeps?: { readdir: Function, readFile: Function } }} [options]
+   * @returns {Promise<ProjectEntry|ErrorEntry|null>}
+   *   `null`, wenn unter `repoPath` kein `board/`-Verzeichnis existiert (bzw.
+   *   bei der Git-Ref-Quelle: am gewählten Ref) — analog `scan()`s stillem
+   *   Überspringen ohne `board/`-Ordner, kein Crash.
+   */
+  async readProjectAt(slug, repoPath, { fsDeps } = {}) {
+    const effectiveFsDeps = fsDeps ?? this.#fsDeps;
+    const boardDir = join(repoPath, 'board');
+    try {
+      await effectiveFsDeps.readdir(boardDir, { withFileTypes: true });
+    } catch {
+      return null; // kein board/-Verzeichnis (an dieser Quelle) — kein Fehler.
+    }
+    return this._readBoard(slug, repoPath, boardDir, effectiveFsDeps);
+  }
+
+  /**
    * Read a single board directory and return a ProjectEntry or ErrorEntry.
    *
    * @param {string} slug      Repo directory name (used as project slug).
    * @param {string} repoPath  Absolute path to the repo root.
    * @param {string} boardDir  Absolute path to the board/ directory.
+   * @param {{ readdir: Function, readFile: Function }} [fsDeps]  Datei-Quelle
+   *   (drain-origin-progress-sync AC2/Verträge §Snapshot-Schnittstelle):
+   *   Default `this.#fsDeps` (Working-Tree). `readProjectAt()` kann hier eine
+   *   Git-Ref-Datei-Quelle (`createGitRefFsDeps`, `src/GitReadBoundary.js`)
+   *   injizieren — `_readBoard`/`computeStoryReadyStatus` bleiben dabei
+   *   UNVERÄNDERT (nur `readdir`/`readFile` werden ausgetauscht).
    * @returns {Promise<ProjectEntry|ErrorEntry>}
    */
-  async _readBoard(slug, repoPath, boardDir) {
+  async _readBoard(slug, repoPath, boardDir, fsDeps = this.#fsDeps) {
     // ── board.yaml ────────────────────────────────────────────────────────────
     const boardYamlPath = join(boardDir, 'board.yaml');
     let boardMeta;
     try {
-      const raw = await this.#fsDeps.readFile(boardYamlPath, 'utf8');
+      const raw = await fsDeps.readFile(boardYamlPath, 'utf8');
       boardMeta = parseYaml(raw);
       if (!boardMeta || typeof boardMeta !== 'object') {
         throw new Error('board.yaml parsed to non-object');
@@ -737,7 +786,7 @@ export class BoardAggregator {
     const areasYamlPath = join(boardDir, 'areas.yaml');
     let areasRawList;
     try {
-      const areasRaw = await this.#fsDeps.readFile(areasYamlPath, 'utf8');
+      const areasRaw = await fsDeps.readFile(areasYamlPath, 'utf8');
       areasRawList = parseAreasYamlList(areasRaw);
     } catch {
       areasRawList = []; // missing/unreadable file → empty list, no crash (AC1)
@@ -748,7 +797,7 @@ export class BoardAggregator {
     const featuresDir = join(boardDir, 'features');
     let featureFiles = [];
     try {
-      const fentries = await this.#fsDeps.readdir(featuresDir, { withFileTypes: true });
+      const fentries = await fsDeps.readdir(featuresDir, { withFileTypes: true });
       featureFiles = fentries
         .filter((e) => e.isFile() && e.name.endsWith('.yaml'))
         .map((e) => join(featuresDir, e.name));
@@ -759,7 +808,7 @@ export class BoardAggregator {
     const featuresMap = new Map(); // id → FeatureEntry
     for (const fp of featureFiles) {
       try {
-        const raw = await this.#fsDeps.readFile(fp, 'utf8');
+        const raw = await fsDeps.readFile(fp, 'utf8');
         const data = parseYaml(raw);
         if (!data || typeof data !== 'object' || !data.id) continue;
         featuresMap.set(String(data.id), {
@@ -792,7 +841,7 @@ export class BoardAggregator {
     const storiesDir = join(boardDir, 'stories');
     let storyFiles = [];
     try {
-      const sentries = await this.#fsDeps.readdir(storiesDir, { withFileTypes: true });
+      const sentries = await fsDeps.readdir(storiesDir, { withFileTypes: true });
       storyFiles = sentries
         .filter((e) => e.isFile() && e.name.endsWith('.yaml'))
         .map((e) => join(storiesDir, e.name));
@@ -807,7 +856,7 @@ export class BoardAggregator {
 
     for (const sp of storyFiles) {
       try {
-        const raw = await this.#fsDeps.readFile(sp, 'utf8');
+        const raw = await fsDeps.readFile(sp, 'utf8');
         const data = parseYaml(raw);
         if (!data || typeof data !== 'object' || !data.id) continue;
 
@@ -869,7 +918,7 @@ export class BoardAggregator {
     const allStoriesMap = new Map(allStoriesList.map((s) => [s.id, s]));
     for (const story of allStoriesList) {
       try {
-        const result = await computeStoryReadyStatus(story, this.#fsDeps, repoPath, allStoriesMap);
+        const result = await computeStoryReadyStatus(story, fsDeps, repoPath, allStoriesMap);
         story.ready = result.ready;
         story.ready_reason = result.ready_reason;
       } catch {

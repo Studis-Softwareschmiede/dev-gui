@@ -2,7 +2,7 @@ id: S-319
 parent: F-070
 title: Taktgeber-Fortschrittserkennung auf origin-Stand bei merge_policy=pr — kein
   Blocked-Write auf stalem lokalem Checkout
-status: To Do
+status: In Progress
 priority: P1
 spec: docs/specs/drain-origin-progress-sync.md
 implements:
@@ -28,11 +28,11 @@ estimate_note: 'L per Heuristik (n_ac=7, n_comp~5: ProjectDrain.js Fetch+Truth-R
   Task-Tool); baseline.json js|balanced|L Median (ep 5.0, n=5) als Proxy; keine Baseline-Tokens
   (tok_total null) -> tok_est null. confidence medium.'
 confidence: medium
-branch: null
+branch: feat/S-319-drain-origin-progress-sync
 pr: null
 blocked_reason: null
 created_at: '2026-07-07T15:30:00Z'
-updated_at: '2026-07-07T15:30:00Z'
+updated_at: '2026-07-07T16:04:17Z'
 done_at: null
 tok_est: null
 area: fabrik-arbeiten

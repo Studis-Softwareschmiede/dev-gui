@@ -213,8 +213,10 @@
  * @module ProjectDrain
  */
 
+import { basename } from 'node:path';
 import { projectJobLock, isProjectBusy } from './ProjectJobLock.js';
 import { InteractiveFlowRunner } from './FlowRunner.js';
+import { gitReadBoundary, createGitRefFsDeps } from './GitReadBoundary.js';
 
 /** Einziger /flow-Befehl, den der Drain anstößt (Nicht-Ziel: keine Modell-/Cost-Mode-Logik). */
 export const FLOW_COMMAND = '/agent-flow:flow';
@@ -538,6 +540,11 @@ export function computeCompletedBlocked(initialStatuses, endProject) {
  * }} [deps.budgetGuard]  optional (docs/specs/night-budget-guard.md AC5/AC9-AC11, konkrete
  *   Implementierung S-274) — proaktive Schwellen-Prüfung VOR jeder Flow-Runde. Ohne ihn ist
  *   der proaktive Schutz ein No-op (AC8/A4); der reaktive Schutz (AC4) ist davon unabhängig.
+ * @param {import('./GitReadBoundary.js').GitReadBoundary} [deps.gitReadBoundary]  read-only
+ *   Git-Lesezugriff (drain-origin-progress-sync AC1/AC2/AC7, `src/GitReadBoundary.js`) —
+ *   Fetch + Truth-Ref-Auswahl + Ref-Lese vor jeder Bewertung/dem Abschlussbericht. Default:
+ *   Singleton `gitReadBoundary` (echter `git`-Kindprozess); injizierbar für Tests
+ *   (gemockte fetch/merge-base/show/ls-tree).
  * @param {number} [deps.staleInProgressHours]  default: DEFAULT_STALE_IN_PROGRESS_HOURS (4)
  * @param {number} [deps.escalationAttempts]    default: DEFAULT_ESCALATION_ATTEMPTS (3)
  * @param {number} [deps.pollIntervalMs]        Poll-Intervall des Default-`InteractiveFlowRunner`s
@@ -558,6 +565,7 @@ export class ProjectDrain {
   #sessionRegistry;
   #auditStore;
   #budgetGuard;
+  #gitReadBoundary;
   #staleInProgressHours;
   #escalationAttempts;
   #safetyMaxNoProgressRounds;
@@ -574,6 +582,7 @@ export class ProjectDrain {
     sessionRegistry,
     auditStore,
     budgetGuard,
+    gitReadBoundary: injectedGitReadBoundary,
     staleInProgressHours = DEFAULT_STALE_IN_PROGRESS_HOURS,
     escalationAttempts = DEFAULT_ESCALATION_ATTEMPTS,
     pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
@@ -599,6 +608,11 @@ export class ProjectDrain {
     // proaktive Prüfung ein No-op (AC8, kein Regress). Der reaktive Schutz
     // (AC4) braucht keinen budgetGuard (immer aktiv, AC11).
     this.#budgetGuard = budgetGuard ?? null;
+    // drain-origin-progress-sync AC1/AC2: read-only Git-Lesezugriff (fetch +
+    // Truth-Ref-Auswahl + Ref-Lese) — Default echter `git`-Kindprozess
+    // (Singleton, analog anderen Boundaries), injizierbar für Tests (gemockte
+    // fetch/merge-base/show/ls-tree, NFR Testbarkeit).
+    this.#gitReadBoundary = injectedGitReadBoundary ?? gitReadBoundary;
     this.#staleInProgressHours = staleInProgressHours > 0 ? staleInProgressHours : DEFAULT_STALE_IN_PROGRESS_HOURS;
     this.#escalationAttempts = escalationAttempts > 0 ? escalationAttempts : DEFAULT_ESCALATION_ATTEMPTS;
     this.#safetyMaxNoProgressRounds =
@@ -751,7 +765,7 @@ export class ProjectDrain {
       // Event-Loop verhungern lässt (live beobachtet: >2 Min. 100% CPU).
       await this.#yieldTick();
 
-      const { project, scanFailed } = await this.#findProject(projectPath);
+      const { project, scanFailed } = await this.#findProject(projectPath, identity);
       const state = computeDrainState(project, this.#now(), this.#staleInProgressHours);
 
       // AC1/AC2: Anfangs-Status-Snapshot genau einmal erfassen — der erste
@@ -883,7 +897,7 @@ export class ProjectDrain {
             // A2: Fortsetzungs-Zeitpunkt liegt hinter dem Fenster-Ende → sanftes
             // Ende statt zu warten (AC6).
             budgetPauses.push({ from: pauseFrom, to: null, reason: 'reactive-limit' });
-            const { project: projectAfterLimit } = await this.#findProject(projectPath);
+            const { project: projectAfterLimit } = await this.#findProject(projectPath, identity);
             const { completed, blocked } = computeCompletedBlocked(initialStatuses, projectAfterLimit);
             return {
               stopped: true,
@@ -906,7 +920,7 @@ export class ProjectDrain {
         continue; // frischer Board-Scan am Schleifenanfang, nie fortschrittslos gezählt
       }
 
-      const { project: projectAfter } = await this.#findProject(projectPath);
+      const { project: projectAfter, verified: verifiedAfter } = await this.#findProject(projectPath, identity);
       const stateAfter = computeDrainState(projectAfter, this.#now(), this.#staleInProgressHours);
 
       // AC5: Fortschritt = jede Status-/Ready-Änderung zwischen zwei Scans
@@ -922,6 +936,13 @@ export class ProjectDrain {
       if (progressed) {
         consecutiveNoProgress = 0;
         totalNoProgressRounds = 0;
+      } else if (!verifiedAfter) {
+        // drain-origin-progress-sync AC4/AC5: der Post-Flow-Snapshot ist
+        // UNVERIFIZIERT (Fetch fehlgeschlagen) — kein Blocked-Write, KEIN
+        // Zähler-Increment (weder consecutiveNoProgress noch
+        // totalNoProgressRounds) auf stalem Stand. Log + Retry im nächsten
+        // Tick (nächste Runde versucht erneut zu fetchen).
+        this.#auditEscalationSkipped(identity, projectPath);
       } else {
         consecutiveNoProgress += 1;
         totalNoProgressRounds += 1;
@@ -1059,23 +1080,106 @@ export class ProjectDrain {
    * unverändert: Board-Scan-Fehler → `project: null` (Edge-Case
    * "Board-Scan-Fehler": Projekt wird in diesem Tick übersprungen, kein
    * Crash) — nur das `scanFailed`-Flag ist neu.
+   *
+   * drain-origin-progress-sync AC1/AC2/AC3/AC5/AC7 (origin-basierte,
+   * mutationsfreie Aussensicht): VOR dem Scan wird read-only `git fetch
+   * origin` versucht (`#gitReadBoundary.fetchOrigin`) — ein Fetch-Fehler ist
+   * non-fatal (Snapshot bleibt `verified:false`, Fallback Working-Tree, AC1).
+   * Bei erfolgreichem Fetch bestimmt die ancestry-basierte Truth-Ref-Auswahl
+   * (`#gitReadBoundary.resolveTruthRef`, AC2), ob `origin` strikt voraus ist
+   * (echter Vorfahr, `HEAD != ref`): dann wird der Snapshot READ-ONLY aus dem
+   * Remote-Tracking-Ref gelesen (`BoardAggregator.readProjectAt` mit einer
+   * Git-Ref-Datei-Quelle, `createGitRefFsDeps`) — niemals aus dem
+   * (ggf. dirty, AC5) Working-Tree. Sonst (kein Upstream/HEAD==origin/HEAD
+   * voraus) bleibt der reguläre Working-Tree-Scan (`scan()`+`getIndex()`) die
+   * Quelle — bit-identisches Verhalten zu vor dieser Story (`direct`-Projekte
+   * regressieren nie). `verified` = Fetch war erfolgreich (unabhängig davon,
+   * ob danach der `origin`-Ref oder der bestätigt-nicht-zurückliegende
+   * Working-Tree gelesen wird, AC1/AC4) — Voraussetzung für jede Eskalation
+   * (`#escalate`, s.u.). Jeder Fehlerpfad (kein Remote/kein Upstream/Fetch-
+   * Timeout/Ref-Lese-Fehler) fällt sauber auf den Working-Tree-Scan zurück,
+   * kein Crash (Edge-Cases der Spec).
+   *
    * @param {string} projectPath
+   * @param {string|null} [identity]  für den Runden-Audit (AC7), kein Gate.
    * @returns {Promise<{
    *   project: import('./BoardAggregator.js').ProjectEntry|null,
-   *   scanFailed: boolean
+   *   scanFailed: boolean,
+   *   verified: boolean,
+   *   source: 'origin-ref'|'working-tree'
    * }>}
    */
-  async #findProject(projectPath) {
+  async #findProject(projectPath, identity = null) {
+    const fetchResult = await this.#safeFetchOrigin(projectPath);
+    const verified = fetchResult.ok;
+
+    if (verified) {
+      const truthRef = await this.#safeResolveTruthRef(projectPath);
+      if (truthRef.ahead && truthRef.ref) {
+        const slug = basename(projectPath);
+        const fsDeps = createGitRefFsDeps(projectPath, truthRef.ref, this.#gitReadBoundary);
+        try {
+          const project = await this.#boardAggregator.readProjectAt(slug, projectPath, { fsDeps });
+          this.#auditRoundSnapshot(identity, { source: 'origin-ref', verified: true });
+          return { project, scanFailed: false, verified: true, source: 'origin-ref' };
+        } catch {
+          // Ref-Lese-Fehler (Edge-Case) → Fallback Working-Tree-Scan unten,
+          // Fetch war trotzdem erfolgreich (verified bleibt true, AC3-Verträge
+          // "Fehlerpfade: ... Ref-Lese-Fehler → Fallback Working-Tree-Snapshot").
+        }
+      }
+    }
+
     let index;
     try {
       await this.#boardAggregator.scan();
       index = await this.#boardAggregator.getIndex();
     } catch {
-      return { project: null, scanFailed: true };
+      this.#auditRoundSnapshot(identity, { source: 'working-tree', verified });
+      return { project: null, scanFailed: true, verified, source: 'working-tree' };
     }
-    if (!Array.isArray(index)) return { project: null, scanFailed: true };
+    if (!Array.isArray(index)) {
+      this.#auditRoundSnapshot(identity, { source: 'working-tree', verified });
+      return { project: null, scanFailed: true, verified, source: 'working-tree' };
+    }
     const project = index.find((p) => !p.error && p.repo_path === projectPath) ?? null;
-    return { project, scanFailed: false };
+    this.#auditRoundSnapshot(identity, { source: 'working-tree', verified });
+    return { project, scanFailed: false, verified, source: 'working-tree' };
+  }
+
+  /**
+   * Read-only `git fetch origin` — non-fatal (AC1): jeder Fehler (kein
+   * Remote, offline, Timeout, oder ein Fehler im injizierten
+   * `gitReadBoundary` selbst) liefert `{ ok:false }` statt zu werfen/den
+   * Drain zu crashen.
+   * @param {string} projectPath
+   * @returns {Promise<{ ok: boolean }>}
+   */
+  async #safeFetchOrigin(projectPath) {
+    try {
+      const result = await this.#gitReadBoundary.fetchOrigin(projectPath);
+      return { ok: !!(result && result.ok) };
+    } catch {
+      return { ok: false };
+    }
+  }
+
+  /**
+   * Ancestry-basierte Truth-Ref-Auswahl (AC2) — non-fatal: jeder Fehler
+   * fällt auf "nicht voraus" zurück (Working-Tree bleibt Quelle).
+   * @param {string} projectPath
+   * @returns {Promise<{ ahead: boolean, ref: string|null }>}
+   */
+  async #safeResolveTruthRef(projectPath) {
+    try {
+      const result = await this.#gitReadBoundary.resolveTruthRef(projectPath);
+      if (result && result.ahead && typeof result.ref === 'string' && result.ref) {
+        return { ahead: true, ref: result.ref };
+      }
+      return { ahead: false, ref: null };
+    } catch {
+      return { ahead: false, ref: null };
+    }
   }
 
   /**
@@ -1093,5 +1197,32 @@ export class ProjectDrain {
     } catch {
       // best-effort — kein Crash
     }
+  }
+
+  /**
+   * Runden-Audit (drain-origin-progress-sync AC7): secret-/pfad-freier
+   * Eintrag je Board-Snapshot-Lese — Snapshot-Quelle (`origin-ref`|
+   * `working-tree`) + Verifiziert-Status. Best-effort (analog
+   * `#auditRecord`), kein Sicherheits-Gate. Enthält bewusst KEINEN
+   * absoluten Pfad/Token — nur die beiden Enum-Werte.
+   * @param {string|null} identity
+   * @param {{ source: 'origin-ref'|'working-tree', verified: boolean }} params
+   */
+  #auditRoundSnapshot(identity, { source, verified }) {
+    this.#auditRecord(identity, `taktgeber:snapshot source=${source} verified=${verified}`);
+  }
+
+  /**
+   * Best-effort Audit-Eintrag (AC7): eine Eskalation wurde wegen eines
+   * UNVERIFIZIERTEN Snapshots (Fetch-Fehler) übersprungen — kein Blocked-
+   * Write, kein Zähler-Increment, Retry im nächsten Tick (AC4/AC5).
+   * @param {string|null} identity
+   * @param {string} projectPath
+   */
+  #auditEscalationSkipped(identity, projectPath) {
+    this.#auditRecord(
+      identity,
+      `taktgeber:escalation-skipped project=${basename(projectPath)} reason=unverified-snapshot`,
+    );
   }
 }

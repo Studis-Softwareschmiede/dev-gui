@@ -161,6 +161,47 @@
  *          Done), der konkrete BudgetGuard + server.js/Scheduler-Wiring
  *          (S-274), DrainReportStore/UI-Bericht (S-275).
  *
+ * Covers (drain-origin-progress-sync, S-319 — origin-basierte, mutationsfreie
+ * Aussensicht bei merge_policy=pr; describe-Block "ProjectDrain.drainProject —
+ * drain-origin-progress-sync (origin-basierte Aussensicht)"; die
+ * GitReadBoundary-Boundary selbst (fetchOrigin/resolveTruthRef/readFileAtRef/
+ * listFilesAtRef, gemockter gitExec) sowie createGitRefFsDeps() leben eigenständig
+ * in test/GitReadBoundary.test.js; BoardAggregator.readProjectAt() in
+ * test/boardAggregator.test.js):
+ *   AC1 — Vor jeder Bewertung/dem Abschlussbericht wird read-only
+ *          gitReadBoundary.fetchOrigin() aufgerufen; ein Fetch-Fehler ist
+ *          non-fatal (Fallback Working-Tree-Scan, Snapshot `verified:false`,
+ *          kein Crash).
+ *   AC2 — Truth-Ref-Auswahl (ancestry-basiert): `resolveTruthRef` liefert
+ *          `{ahead:true, ref}` → der Snapshot wird über
+ *          `boardAggregator.readProjectAt(slug, projectPath, {fsDeps})` mit
+ *          einer Git-Ref-Datei-Quelle gelesen (`createGitRefFsDeps`) statt
+ *          über `scan()`/`getIndex()`. Sonst (`ahead:false`) bleibt der
+ *          reguläre Working-Tree-Scan die Quelle.
+ *   AC3 — Kernfall (pr-Projekt lokal zurück): eine Story ist am `origin`-Ref
+ *          bereits `Done`, im (gemockten) Working-Tree-Scan noch `To Do` —
+ *          der Drain erkennt Fortschritt/Konvergenz über den `origin`-
+ *          Snapshot, eskaliert NICHT, schreibt KEIN Blocked für diese Story.
+ *   AC4 — Fetch-Fehler → KEIN Blocked-Write, KEIN Zähler-Increment
+ *          (consecutiveNoProgress/totalNoProgressRounds bleiben bei jedem
+ *          unverifizierten Snapshot unverändert), Log (`taktgeber:escalation-
+ *          skipped`) + Retry im nächsten Tick (kein Crash, kein Hang, kein
+ *          `safety-stop-no-progress` auf rein-unverifizierten Runden).
+ *   AC5 — Ein "kein Remote konfiguriert"-Ergebnis (`fetchOrigin` → `{ok:true,
+ *          fetched:false}`, Edge-Case: Working-Tree ist bereits Wahrheit) wird
+ *          wie ein verifizierter Working-Tree-Snapshot behandelt (bestehende
+ *          direct-Projekte/Alt-Fixtures regressieren nie — Regressionsschutz
+ *          bereits durch die 91 unveränderten Tests OBEN belegt, die keinen
+ *          gitReadBoundary injizieren).
+ *   AC6 — Abschlussbericht (`completed`/`blocked`) wird aus Anfangs-/End-
+ *          Snapshot DERSELBEN je-Runde gewählten Quelle abgeleitet — eine auf
+ *          `origin` bereits `Done` befindliche Story erscheint NICHT als
+ *          `blocked`/`escalated`.
+ *   AC7 — Runden-Audit: je `#findProject()`-Aufruf ein secret-/pfad-freier
+ *          `taktgeber:snapshot source=<...> verified=<...>`-Eintrag (Regressions-
+ *          test bereits oben im AC18-Audit-Test integriert); ein übersprungener
+ *          Eskalationsversuch erzeugt zusätzlich `taktgeber:escalation-skipped`.
+ *
  * Strategy:
  *   - Pure Helper-Funktionen (flattenProjectStories, isStaleInProgress,
  *     computeAliveStoryIds, couldBecomeReadyViaDepends, computeDrainState,
@@ -330,6 +371,65 @@ class FakeAuditStore {
     this.entries.push(entry);
     return entry;
   }
+}
+
+/**
+ * FakeGitReadBoundary (drain-origin-progress-sync) — skriptbares Test-Double
+ * für `src/GitReadBoundary.js`'s öffentliches Interface (fetchOrigin/
+ * resolveTruthRef), injizierbar in `ProjectDrain`. `readFileAtRef`/
+ * `listFilesAtRef` werden hier NICHT direkt aufgerufen (die trägt
+ * `createGitRefFsDeps` — echte Klasse, ungemockt, siehe
+ * test/GitReadBoundary.test.js) — stattdessen wird `boardAggregator` selbst
+ * so präpariert, dass `readProjectAt(..., { fsDeps })` den `refProject`
+ * liefert (Verifikation, dass ProjectDrain die Git-Ref-Datei-Quelle
+ * tatsächlich injiziert, nicht die konkrete Ref-Lese-Mechanik erneut).
+ */
+class FakeGitReadBoundary {
+  constructor({ fetchResult = { ok: true, fetched: true }, truthRef = { ahead: false, ref: null } } = {}) {
+    this.fetchResult = fetchResult;
+    this.truthRef = truthRef;
+    this.fetchCalls = [];
+    this.resolveTruthRefCalls = [];
+  }
+
+  async fetchOrigin(repoPath) {
+    this.fetchCalls.push(repoPath);
+    if (this.fetchResult instanceof Error) throw this.fetchResult;
+    return this.fetchResult;
+  }
+
+  async resolveTruthRef(repoPath) {
+    this.resolveTruthRefCalls.push(repoPath);
+    return this.truthRef;
+  }
+}
+
+/**
+ * Board-Aggregator-Fake mit ZWEI unabhängigen Snapshot-Quellen
+ * (drain-origin-progress-sync): `scan()`/`getIndex()` liefert weiterhin den
+ * (ggf. staleren) Working-Tree-Stand; `readProjectAt(slug, repoPath, {fsDeps})`
+ * liefert — NUR wenn ein `fsDeps` injiziert wird (das Signal, dass ProjectDrain
+ * den origin-Ref-Pfad gewählt hat) — den separaten `refState`. Ohne injizierten
+ * `fsDeps` verhält sich `readProjectAt` identisch zum Working-Tree-Scan
+ * (Default-Fallback-Pfad, AC2).
+ */
+function makeDualSourceBoard({ workingTreeStories, refStories }) {
+  const workingTreeProject = makeProject(PROJECT_SLUG, PROJECT_PATH, workingTreeStories);
+  const refProject = makeProject(PROJECT_SLUG, PROJECT_PATH, refStories);
+  const workingTreeState = { projects: [workingTreeProject] };
+  const readProjectAtCalls = [];
+  const boardAggregator = {
+    async scan() {},
+    async getIndex() {
+      return workingTreeState.projects;
+    },
+    async readProjectAt(slug, repoPath, opts = {}) {
+      readProjectAtCalls.push({ slug, repoPath, usedRefSource: !!opts.fsDeps });
+      if (opts.fsDeps) return refProject;
+      return workingTreeState.projects.find((p) => p.repo_path === repoPath) ?? null;
+    },
+  };
+  return { workingTreeState, workingTreeProject, refProject, boardAggregator, readProjectAtCalls };
 }
 
 const NOW_MS = Date.parse('2026-06-30T12:00:00Z');
@@ -1522,12 +1622,26 @@ describe('ProjectDrain.drainProject — AC18: audit', () => {
 
     await drain.drainProject(PROJECT_PATH, { identity: 'alex@example.com' });
 
-    expect(auditStore.entries).toHaveLength(2);
-    expect(auditStore.entries[0].identity).toBe('alex@example.com');
-    expect(auditStore.entries[0].command).toContain('drain-start');
-    expect(auditStore.entries[0].command).toContain(PROJECT_PATH);
-    expect(auditStore.entries[1].command).toContain('escalate');
-    expect(auditStore.entries[1].command).toContain('S-1');
+    // drain-origin-progress-sync AC7: JEDER Board-Snapshot-Scan (#findProject)
+    // erzeugt zusätzlich einen secret-/pfad-freien "taktgeber:snapshot"-Eintrag
+    // (Snapshot-Quelle + Verifiziert-Status) — additiv zu drain-start/escalate,
+    // kein Regress an deren Inhalt/Reihenfolge.
+    const nonSnapshotEntries = auditStore.entries.filter((e) => !e.command.startsWith('taktgeber:snapshot'));
+    expect(nonSnapshotEntries).toHaveLength(2);
+    expect(nonSnapshotEntries[0].identity).toBe('alex@example.com');
+    expect(nonSnapshotEntries[0].command).toContain('drain-start');
+    expect(nonSnapshotEntries[0].command).toContain(PROJECT_PATH);
+    expect(nonSnapshotEntries[1].command).toContain('escalate');
+    expect(nonSnapshotEntries[1].command).toContain('S-1');
+    // Jeder Snapshot-Eintrag ist secret-/pfad-frei: nur die beiden Enum-Werte
+    // (kein absoluter Pfad, kein Token) — hier: kein origin konfiguriert im
+    // Test-Fixture-Pfad → working-tree, verified=true (Edge-Case "kein Remote").
+    const snapshotEntries = auditStore.entries.filter((e) => e.command.startsWith('taktgeber:snapshot'));
+    expect(snapshotEntries.length).toBeGreaterThan(0);
+    for (const entry of snapshotEntries) {
+      expect(entry.command).toBe('taktgeber:snapshot source=working-tree verified=true');
+      expect(entry.command).not.toContain(PROJECT_PATH);
+    }
   });
 
   it('does not record a drain-start entry when rejected as already-busy', async () => {
@@ -2363,5 +2477,218 @@ describe('ProjectDrain — night-budget-guard AC4/AC5/AC6/AC7/AC8 (Budget-Pause-
         { from: NOW_MS, to: NOW_MS, reason: 'reactive-limit' },
       ]);
     });
+  });
+});
+
+// ── drain-origin-progress-sync AC1-AC7 (origin-basierte, mutationsfreie Aussensicht) ──
+
+describe('ProjectDrain.drainProject — drain-origin-progress-sync (origin-basierte Aussensicht)', () => {
+  it('AC2/AC3 — pr-Projekt lokal zurück: origin-Ref-Snapshot erkennt eine bereits Done-Story, keine Eskalation, kein Blocked-Write', async () => {
+    // Working-Tree ist stale (S-1 noch To Do); origin-Ref ist bereits weiter
+    // (S-1 Done) — die ancestry-basierte Truth-Ref-Auswahl meldet "ahead".
+    const { boardAggregator, readProjectAtCalls } = makeDualSourceBoard({
+      workingTreeStories: [makeStory({ id: 'S-1', status: 'To Do', ready: true })],
+      refStories: [makeStory({ id: 'S-1', status: 'Done', ready: false })],
+    });
+    const commandService = new FakeCommandService(); // never mutates the board itself
+    const boardWriter = new FakeBoardWriter({ projects: [] }); // must NEVER be called
+    const gitReadBoundary = new FakeGitReadBoundary({
+      fetchResult: { ok: true, fetched: true },
+      truthRef: { ahead: true, ref: 'origin/main' },
+    });
+    const drain = new ProjectDrain({
+      boardAggregator,
+      commandService,
+      boardWriter,
+      gitReadBoundary,
+      lock: new ProjectJobLock(),
+      escalationAttempts: 2,
+      now: () => NOW_MS,
+    });
+
+    const result = await drain.drainProject(PROJECT_PATH);
+
+    // origin-Ref sieht S-1 als bereits Done → sofortige Konvergenz, kein
+    // Drain-Ziel, kein /flow-Anstoß, keine Eskalation.
+    expect(result.stopped).toBe(true);
+    expect(result.reason).toBe('no-drain-target');
+    expect(result.flowRuns).toBe(0);
+    expect(result.escalated).toEqual([]);
+    expect(commandService.calls).toHaveLength(0);
+    expect(boardWriter.calls).toHaveLength(0);
+    // Jeder Board-Scan wählte tatsächlich die Git-Ref-Quelle (fsDeps injiziert).
+    expect(readProjectAtCalls.length).toBeGreaterThan(0);
+    expect(readProjectAtCalls.every((c) => c.usedRefSource === true)).toBe(true);
+    expect(gitReadBoundary.fetchCalls).toContain(PROJECT_PATH);
+  });
+
+  it('AC4 — Fetch-Fehler: kein Blocked-Write, kein Zähler-Increment über mehrere Runden, Retry statt Eskalation', async () => {
+    const { state, boardAggregator } = makeBoard([makeStory({ id: 'S-1', status: 'To Do', ready: true })]);
+    const commandService = new FakeCommandService(); // never progresses
+    const boardWriter = new FakeBoardWriter(state);
+    const auditStore = new FakeAuditStore();
+    // Jeder Fetch schlägt fehl (offline/transient) → jeder Snapshot bleibt
+    // unverifiziert.
+    const gitReadBoundary = new FakeGitReadBoundary({ fetchResult: { ok: false, reason: 'offline' } });
+    const drain = new ProjectDrain({
+      boardAggregator,
+      commandService,
+      boardWriter,
+      auditStore,
+      gitReadBoundary,
+      lock: new ProjectJobLock(),
+      escalationAttempts: 2,
+      // Kleiner Sicherheitsgürtel, um den Test schnell + deterministisch zu
+      // beenden — totalNoProgressRounds darf NIE inkrementieren (AC4), sonst
+      // würde der Backstop nach wenigen Runden fälschlich greifen.
+      safetyMaxNoProgressRounds: 5,
+      now: () => NOW_MS,
+    });
+
+    // Fährt mehrere Runden — deutlich über escalationAttempts hinaus — OHNE
+    // dass jemals eskaliert wird (der Drain würde bei verified:true längst
+    // eskaliert haben, s. das AC4/AC5-Pendant weiter oben mit
+    // escalationAttempts:2).
+    // Test-Terminierungs-Sicherheitsnetz (NICHT Teil des geprüften Verhaltens):
+    // da eine unverifizierte Runde NIE eskaliert (das ist ja genau AC4), würde
+    // dieser Fixture-Zustand ohne einen externen Eingriff endlos weiterlaufen
+    // (Working-Tree "To Do"+ready bleibt für immer ein Drain-Ziel). Nach 6
+    // Runden wird die Story DIREKT im Fixture (NICHT über boardWriter!) aus
+    // dem Ziel-Pool genommen, damit der Drain regulär konvergiert — die
+    // Assertion unten (`boardWriter.calls` hat Länge 0) bleibt aussagekräftig,
+    // weil dieser direkte Fixture-Eingriff bewusst NICHT über `boardWriter`
+    // läuft.
+    let callCount = 0;
+    const originalTryRun = commandService.tryRun.bind(commandService);
+    commandService.tryRun = (args) => {
+      callCount += 1;
+      if (callCount > 6) {
+        findStory(state.projects[0], 'S-1').status = 'Blocked';
+        findStory(state.projects[0], 'S-1').ready = false;
+      }
+      return originalTryRun(args);
+    };
+
+    const result = await drain.drainProject(PROJECT_PATH);
+
+    expect(boardWriter.calls).toHaveLength(0); // NIE Blocked geschrieben
+    expect(result.escalated).toEqual([]);
+    // Der Runden-Audit hält "Eskalation übersprungen"-Einträge fest (AC7).
+    const skipped = auditStore.entries.filter((e) => e.command.startsWith('taktgeber:escalation-skipped'));
+    expect(skipped.length).toBeGreaterThan(0);
+    for (const entry of skipped) {
+      expect(entry.command).toBe(`taktgeber:escalation-skipped project=${PROJECT_SLUG} reason=unverified-snapshot`);
+    }
+    // Jeder Snapshot-Audit-Eintrag ist secret-/pfad-frei UND meldet unverified.
+    const snapshots = auditStore.entries.filter((e) => e.command.startsWith('taktgeber:snapshot'));
+    expect(snapshots.length).toBeGreaterThan(0);
+    for (const entry of snapshots) {
+      expect(entry.command).toBe('taktgeber:snapshot source=working-tree verified=false');
+    }
+  });
+
+  it('AC2/AC5 — direct-Projekt (HEAD == origin, kein "ahead"): Working-Tree bleibt Quelle, bestehendes Verhalten unverändert', async () => {
+    const { state, boardAggregator } = makeBoard([makeStory({ id: 'S-1', status: 'To Do', ready: true })]);
+    const commandService = new FakeCommandService((callIndex) => {
+      if (callIndex === 1) {
+        findStory(state.projects[0], 'S-1').status = 'Done';
+        findStory(state.projects[0], 'S-1').ready = false;
+      }
+    });
+    const boardWriter = new FakeBoardWriter(state);
+    // origin ist NICHT strikt voraus (typisch für merge_policy:direct, wo der
+    // Flip lokal landet) → Truth-Ref-Auswahl meldet ahead:false.
+    const gitReadBoundary = new FakeGitReadBoundary({
+      fetchResult: { ok: true, fetched: true },
+      truthRef: { ahead: false, ref: null },
+    });
+    const drain = new ProjectDrain({
+      boardAggregator,
+      commandService,
+      boardWriter,
+      gitReadBoundary,
+      lock: new ProjectJobLock(),
+      now: () => NOW_MS,
+    });
+
+    const result = await drain.drainProject(PROJECT_PATH);
+
+    expect(result.reason).toBe('no-drain-target');
+    expect(result.completed).toEqual([{ id: 'S-1', title: 'S-1' }]);
+    expect(boardWriter.calls).toHaveLength(0); // nie eskaliert — echter Fortschritt erkannt
+  });
+
+  it('AC1 — ein GitReadBoundary, der beim fetchOrigin() wirft, ist non-fatal (Fallback Working-Tree, kein Crash)', async () => {
+    const { state, boardAggregator } = makeBoard([makeStory({ id: 'S-1', status: 'To Do', ready: true })]);
+    const commandService = new FakeCommandService((callIndex) => {
+      if (callIndex === 1) {
+        findStory(state.projects[0], 'S-1').status = 'Done';
+        findStory(state.projects[0], 'S-1').ready = false;
+      }
+    });
+    const boardWriter = new FakeBoardWriter(state);
+    const gitReadBoundary = new FakeGitReadBoundary({ fetchResult: new Error('boom — should never propagate') });
+    const drain = new ProjectDrain({
+      boardAggregator,
+      commandService,
+      boardWriter,
+      gitReadBoundary,
+      lock: new ProjectJobLock(),
+      now: () => NOW_MS,
+    });
+
+    await expect(drain.drainProject(PROJECT_PATH)).resolves.toMatchObject({ reason: 'no-drain-target' });
+  });
+
+  it('AC6 — Abschlussbericht: eine auf origin bereits Done-Story erscheint nicht als blocked/escalated (konsistente Quelle über den gesamten Drain)', async () => {
+    const { boardAggregator } = makeDualSourceBoard({
+      workingTreeStories: [makeStory({ id: 'S-1', status: 'To Do', ready: true })],
+      refStories: [makeStory({ id: 'S-1', status: 'Done', ready: false })],
+    });
+    const commandService = new FakeCommandService();
+    const boardWriter = new FakeBoardWriter({ projects: [] });
+    const gitReadBoundary = new FakeGitReadBoundary({
+      fetchResult: { ok: true, fetched: true },
+      truthRef: { ahead: true, ref: 'origin/main' },
+    });
+    const drain = new ProjectDrain({
+      boardAggregator,
+      commandService,
+      boardWriter,
+      gitReadBoundary,
+      lock: new ProjectJobLock(),
+      now: () => NOW_MS,
+    });
+
+    const result = await drain.drainProject(PROJECT_PATH);
+
+    expect(result.blocked).toEqual([]);
+    expect(result.escalated).toEqual([]);
+  });
+
+  it('AC5 — kein Remote konfiguriert (fetchOrigin liefert ok:true, fetched:false) wird wie ein verifizierter Working-Tree-Snapshot behandelt', async () => {
+    const { state, boardAggregator } = makeBoard([makeStory({ id: 'S-1', status: 'To Do', ready: true })]);
+    const commandService = new FakeCommandService(); // never progresses
+    const boardWriter = new FakeBoardWriter(state);
+    const gitReadBoundary = new FakeGitReadBoundary({
+      fetchResult: { ok: true, fetched: false }, // kein origin-Remote konfiguriert
+      truthRef: { ahead: false, ref: null },
+    });
+    const drain = new ProjectDrain({
+      boardAggregator,
+      commandService,
+      boardWriter,
+      gitReadBoundary,
+      lock: new ProjectJobLock(),
+      escalationAttempts: 2,
+      now: () => NOW_MS,
+    });
+
+    const result = await drain.drainProject(PROJECT_PATH);
+
+    // verified:true trotz "kein Remote" → Eskalation greift regulär (kein
+    // dauerhaftes "Retry ohne je zu eskalieren").
+    expect(result.escalated).toEqual(['S-1']);
+    expect(boardWriter.calls).toHaveLength(1);
   });
 });

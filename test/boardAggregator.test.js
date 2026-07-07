@@ -8,7 +8,8 @@
  *   fswatcher-crash-hardening S-280;
  *   areas.yaml lesen + Roll-up + GET /areas, bereichs-modell S-288 — Lese-Teil;
  *   Story-Ebenen-Archiv (Sichtbarkeit + POST .../archive-done-stories),
- *   board-storys-archivieren S-293).
+ *   board-storys-archivieren S-293;
+ *   readProjectAt() injizierbare Datei-Quelle, drain-origin-progress-sync S-319).
  *
  * Covers (dev-gui-board-aggregator backend):
  *   AC1 — Scant konfigurierte Repo-Wurzeln read-only nach board/-Ordnern;
@@ -200,6 +201,22 @@
  *          Slug-Format (dieselbe SLUG_RE + Index-Lookup-Prüfung wie
  *          GET /api/board/projects/:slug). Rein lesend, kein AccessGuard-Test
  *          nötig (Read-Route, analog allen übrigen GET-Board-Routen).
+ *
+ * Covers (drain-origin-progress-sync, S-319 — injizierbare Datei-Quelle für
+ * ProjectDrain's origin-basierte Aussensicht; describe-Block "drain-origin-
+ * progress-sync AC2/AC7 — readProjectAt() (injizierbare Datei-Quelle)"; die
+ * ProjectDrain-seitige Fetch-/Truth-Ref-/Eskalations-Gate-Logik lebt in
+ * test/ProjectDrain.test.js, die GitReadBoundary-Boundary selbst in
+ * test/GitReadBoundary.test.js):
+ *   AC2 — `readProjectAt(slug, repoPath, { fsDeps })` liest EIN Projekt aus
+ *          einer optional injizierten alternativen Datei-Quelle (Default:
+ *          Working-Tree via der Instanz-`fsDeps`) — `_readBoard()`/
+ *          `computeStoryReadyStatus()` bleiben dabei unverändert (identische
+ *          Story-/Feature-Felder), nur `readdir`/`readFile` werden
+ *          ausgetauscht. Fehlt `board/` an der gewählten Quelle → `null`
+ *          (kein Crash).
+ *   AC7 — `readProjectAt()` ist read-only und hat keinen Seiteneffekt auf den
+ *          In-Memory-`#index`/`getIndex()` (unabhängig von `scan()`).
  *
  * AccessGuard:
  *   POST /api/board/projects/rescan (Schreib-Trigger) liegt hinter
@@ -1153,6 +1170,110 @@ describe('AC9 — On-demand re-scan updates the index', () => {
     const aggregator = new BoardAggregator({ boardRootsEnv: BOARD_ROOT, fsDeps });
     expect(() => aggregator.startWatchers()).not.toThrow();
     expect(() => aggregator.stopWatchers()).not.toThrow();
+  });
+});
+
+// ── drain-origin-progress-sync AC2/AC7 — readProjectAt() (injizierbare Datei-Quelle) ──
+//
+// Covers (drain-origin-progress-sync):
+//   AC2 — BoardAggregator bietet eine injizierbare Datei-Quelle-Abstraktion
+//         (`readProjectAt(slug, repoPath, { fsDeps })`): mit einer alternativen
+//         `fsDeps` (hier: ein Fake, der eine Git-Ref-Datei-Quelle simuliert) liest
+//         _readBoard()/computeStoryReadyStatus() konsistent aus DIESER Quelle statt
+//         dem Working-Tree — Scan-/Ready-Logik selbst bleibt unverändert (identische
+//         Story-/Feature-Felder wie beim regulären Working-Tree-Scan).
+//   AC7 — readProjectAt() ist read-only (kein Schreibpfad) und hat KEINEN
+//         Seiteneffekt auf den In-Memory-`#index`/`getIndex()` — ein Aufruf
+//         verändert nicht, was ein nachfolgender scan()/getIndex() liefert.
+describe('drain-origin-progress-sync AC2/AC7 — readProjectAt() (injizierbare Datei-Quelle)', () => {
+  it('reads a project via the DEFAULT (working-tree) fsDeps when no override is given — bit-identical to scan()', async () => {
+    const { aggregator } = makeAggregator();
+
+    const project = await aggregator.readProjectAt('my-repo', `${BOARD_ROOT}/my-repo`);
+
+    expect(project.slug).toBe('my-repo');
+    expect(project.features.map((f) => f.id).sort()).toEqual(['F-001', 'F-002']);
+    const allStories = project.features.flatMap((f) => f.stories);
+    expect(allStories.map((s) => s.id).sort()).toEqual(['S-001', 'S-002']);
+  });
+
+  it('reads a project via an INJECTED alternative fsDeps (simulated git-ref source) instead of the working-tree', async () => {
+    const { aggregator } = makeAggregator();
+    // Alternative source: a completely disjoint in-memory "ref" snapshot with a
+    // DIFFERENT story status than the working-tree fixture (S-002 is 'In
+    // Progress' in the working-tree fixture but 'Done' at this simulated ref —
+    // proves the override is actually consulted, not the default fsDeps).
+    const refFiles = {
+      [`${BOARD_ROOT}/my-repo/board/board.yaml`]: BOARD_YAML,
+      [`${BOARD_ROOT}/my-repo/board/features/F-001-server-provisioning.yaml`]: FEATURE_F001,
+      [`${BOARD_ROOT}/my-repo/board/stories/S-002-hetzner-adapter.yaml`]: STORY_S002.replace(
+        'status: In Progress',
+        'status: Done',
+      ),
+    };
+    const refDirs = {
+      [`${BOARD_ROOT}/my-repo/board`]: [{ name: 'features' }, { name: 'stories' }].map((e) => ({
+        ...e,
+        isFile: () => false,
+        isDirectory: () => true,
+        isSymbolicLink: () => false,
+      })),
+      [`${BOARD_ROOT}/my-repo/board/features`]: [
+        { name: 'F-001-server-provisioning.yaml', isFile: () => true, isDirectory: () => false, isSymbolicLink: () => false },
+      ],
+      [`${BOARD_ROOT}/my-repo/board/stories`]: [
+        { name: 'S-002-hetzner-adapter.yaml', isFile: () => true, isDirectory: () => false, isSymbolicLink: () => false },
+      ],
+    };
+    const refFsDeps = {
+      readFile: async (p) => {
+        if (p in refFiles) return refFiles[p];
+        const err = new Error('ENOENT');
+        err.code = 'ENOENT';
+        throw err;
+      },
+      readdir: async (p) => {
+        if (p in refDirs) return refDirs[p];
+        const err = new Error('ENOENT');
+        err.code = 'ENOENT';
+        throw err;
+      },
+    };
+
+    const project = await aggregator.readProjectAt('my-repo', `${BOARD_ROOT}/my-repo`, { fsDeps: refFsDeps });
+
+    const s2 = project.features[0].stories.find((s) => s.id === 'S-002');
+    expect(s2.status).toBe('Done'); // from the injected ref source, not the working-tree fixture
+  });
+
+  it('returns null when no board/ directory exists at the given source (no crash)', async () => {
+    const { aggregator } = makeAggregator();
+    const emptyFsDeps = {
+      readdir: async () => {
+        const err = new Error('ENOENT');
+        err.code = 'ENOENT';
+        throw err;
+      },
+      readFile: async () => {
+        throw new Error('ENOENT');
+      },
+    };
+
+    const project = await aggregator.readProjectAt('ghost-repo', `${BOARD_ROOT}/ghost-repo`, {
+      fsDeps: emptyFsDeps,
+    });
+
+    expect(project).toBeNull();
+  });
+
+  it('has no side effect on the in-memory index / getIndex() (read-only, independent of scan())', async () => {
+    const { aggregator } = makeAggregator();
+    const before = await aggregator.getIndex();
+
+    await aggregator.readProjectAt('my-repo', `${BOARD_ROOT}/my-repo`);
+
+    const after = await aggregator.getIndex();
+    expect(after).toBe(before); // same memoized reference — readProjectAt() never invalidated the index
   });
 });
 
