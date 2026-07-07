@@ -148,7 +148,9 @@
  *          Kurzbeschreibung reusen `flowTriggerBox`/`flowTriggerHeader`/
  *          `flowTriggerHint` (keine neue Kartenvariante); zwei Buttons
  *          untereinander („ausführen" primär `btnFlowTrigger`, „definieren"
- *          sekundär Outline `btnCancel`).
+ *          sekundär Outline `btnRegressionDefine` — D7: eigener Token, an die
+ *          Primär-Button-Höhe/-Breite angeglichen, NICHT die kompaktere
+ *          `btnCancel`-Variante aus dem Confirm-Dialog-Button-Paar).
  *   AC3 — Klick-Ziele: die eigentlichen Dialoge ([[regression-run]] S-311,
  *          [[regression-define-dialog]] S-308) sind separate, zum Zeitpunkt
  *          dieser Story noch nicht abgeschlossene Items — hier nur der
@@ -1092,7 +1094,7 @@ function FactoryWorkspace({
 
           <button
             type="button"
-            style={styles.btnCancel}
+            style={styles.btnRegressionDefine}
             onClick={handleRegressionDefineOpen}
             aria-label="Regressionstest definieren — öffnet die Definitionsansicht"
             data-testid="regression-define-btn"
@@ -1512,6 +1514,22 @@ const styles = {
     fontSize: 11,
     color: '#fbbf24',
     fontStyle: 'italic',
+  },
+
+  // regression-panel D7: sekundärer Standalone-Button „Regressionstest
+  // definieren" — Outline-Familie wie btnCancel, aber an die Primär-Button-
+  // Höhe/-Breite angeglichen (padding/fontSize wie btnFlowTrigger), NICHT
+  // die kompaktere btnCancel-Variante aus dem Confirm-Dialog-Button-Paar.
+  btnRegressionDefine: {
+    background: 'transparent',
+    color: '#9ca3af',
+    border: '1px solid #374151',
+    borderRadius: 4,
+    padding: '8px 12px',
+    fontSize: 13,
+    fontWeight: 400,
+    cursor: 'pointer',
+    minHeight: 44,
   },
 
   confirmBox: {

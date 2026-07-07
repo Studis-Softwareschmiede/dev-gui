@@ -8,7 +8,10 @@
  *          (nach „Neue Story", vor Status-Dashboard); reuse der bestehenden
  *          `flowTriggerBox`/`flowTriggerHeader`/`flowTriggerHint`-Tokens.
  *   AC2 — Genau zwei Buttons untereinander, feste Reihenfolge „ausführen"
- *          (primär, btnFlowTrigger-Token) → „definieren" (sekundär, Outline).
+ *          (primär, btnFlowTrigger-Token) → „definieren" (sekundär, Outline,
+ *          D7-eigener Token `btnRegressionDefine`: padding '8px 12px',
+ *          fontSize 13, fontWeight 400 — NICHT die kompaktere btnCancel-
+ *          Dialog-Variante).
  *   AC3 — Klick-Ziele: „ausführen"/„definieren" schalten den lokalen
  *          Öffnen-State um (data-run-dialog-open/data-define-dialog-open) —
  *          die eigentlichen Dialoge (S-311/S-308) sind separate Stories und
@@ -161,6 +164,18 @@ describe('CockpitView — regression-panel AC2: Buttons & Hierarchie', () => {
     const btn = document.querySelector('[data-testid="regression-define-btn"]');
     expect(btn.style.background).toBe('transparent');
     expect(String(btn.style.fontWeight)).not.toBe('600');
+  });
+
+  // D7: Standalone-Button — an die Primär-Button-Höhe/-Breite angeglichen
+  // (padding '8px 12px', fontSize 13), NICHT die kompaktere btnCancel-
+  // Variante ('6px 10px', fontSize 12) aus dem Confirm-Dialog-Button-Paar.
+  it('secondary „definieren"-button uses the D7 standalone padding/fontSize (not the compact btnCancel dialog values)', () => {
+    renderCockpit();
+    const btn = document.querySelector('[data-testid="regression-define-btn"]');
+    expect(btn.style.padding).toBe('8px 12px');
+    expect(String(btn.style.fontSize)).toBe('13px');
+    expect(String(btn.style.fontWeight)).toBe('400');
+    expect(btn.style.border).toBe('1px solid rgb(55, 65, 81)'); // #374151
   });
 });
 
