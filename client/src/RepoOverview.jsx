@@ -63,6 +63,14 @@
  *   Nachtwächters (`GET /api/drain-reports`, `trigger:'night'`) — Projekt,
  *   Zeitpunkt, X erledigt/Y blockiert, aufklappbare Story-Liste.
  *
+ * cockpit-declutter (S-305 — AC7):
+ *   `PreviewSection`, eigenständige Komponente (analog `AdoptSection.jsx`),
+ *   neben den Projekt-Aktionen eingebunden: neues Zuhause für
+ *   `/agent-flow:preview` (up/down/list/available), nachdem `TriggerPanel`
+ *   restlos entfernt wurde (AC1, S-303). Nutzt denselben bestehenden
+ *   POST /api/command-Pfad + die unveränderte Backend-Allowlist — kein neuer
+ *   Endpunkt.
+ *
  * @param {{
  *   navigateFactory: (repo: string | null) => void,
  *   onNavigate?: (view: string) => void,
@@ -77,6 +85,7 @@ import { NightWatchStatusBadge } from './NightWatchStatusBadge.jsx';
 import { ClaudeAuthBadge } from './ClaudeAuthBadge.jsx';
 import { NightRunsSection } from './NightRunsSection.jsx';
 import { RepoSizeBadge } from './RepoSizeBadge.jsx';
+import { PreviewSection } from './PreviewSection.jsx';
 
 /**
  * @param {{
@@ -249,6 +258,10 @@ export function RepoOverview({ navigateFactory, onNavigate, fetchFn }) {
       {/* drain-completion-report S-255 AC7b: Nacht-Läufe-Sektion, bei der
           Nachtwächter-Statusanzeige (headerRow oben) */}
       <NightRunsSection fetchFn={fetchFn} />
+
+      {/* cockpit-declutter S-305 AC7: „Vorschau"-Bereich — neues Zuhause für
+          /agent-flow:preview, neben den Projekt-Aktionen. */}
+      <PreviewSection fetchFn={fetchFn} />
 
       {/* AC1 neues-projekt-auswahl-dialog (S-302): Drei-Wege-Auswahl-Dialog.
           Die Option „Neues Projekt" rendert den bestehenden IntakeDialog
