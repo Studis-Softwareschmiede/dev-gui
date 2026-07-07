@@ -141,6 +141,33 @@
  *   für SpecView weiterhin ungenutzte Signatur-Kompatibilität (wie schon bei
  *   reconcile-trigger/S-205).
  *
+ * regression-panel (S-306):
+ *   AC1/AC2 — Neue Karte „Regressionstests" im `actionGrid` (Position 5, nach
+ *          „Neue Story", vor Status-Dashboard) — bindend aus docs/design.md
+ *          Sektion „Fabrik-Panel Regressionstests" (D1–D16). Rahmen/Kopf/
+ *          Kurzbeschreibung reusen `flowTriggerBox`/`flowTriggerHeader`/
+ *          `flowTriggerHint` (keine neue Kartenvariante); zwei Buttons
+ *          untereinander („ausführen" primär `btnFlowTrigger`, „definieren"
+ *          sekundär Outline `btnRegressionDefine` — D7: eigener Token, an die
+ *          Primär-Button-Höhe/-Breite angeglichen, NICHT die kompaktere
+ *          `btnCancel`-Variante aus dem Confirm-Dialog-Button-Paar).
+ *   AC3 — Klick-Ziele: die eigentlichen Dialoge ([[regression-run]] S-311,
+ *          [[regression-define-dialog]] S-308) sind separate, zum Zeitpunkt
+ *          dieser Story noch nicht abgeschlossene Items — hier nur der
+ *          lokale Öffnen-State (`regressionRunOpen`/`regressionDefineOpen`)
+ *          als Anknüpfungspunkt; kein Dialog-UI (Nicht-Ziel dieser Spec).
+ *   AC4/AC6 — Inline-Statuszeile pollt `GET /api/projects/:slug/regression-runs`
+ *          (jüngster Lauf zuerst, s. [[regression-result-store]] AC4) und
+ *          bildet „kein Lauf"/„läuft"/„erfolgreich"/„fehlgeschlagen" ab
+ *          (Icon+Text+Farbe gemeinsam, WCAG 2.1 AA). Der Store/Endpunkt ist
+ *          Teil einer separaten, noch nicht abgeschlossenen Story (S-312) —
+ *          404/Netzwerkfehler/unerwartete Shape degradieren defensiv auf
+ *          „kein Lauf" (kein Karten-Crash, Edge-Case-Vorgabe der Spec).
+ *   AC5 — Während `status:"running"` ist NUR „ausführen" gesperrt
+ *          (Disabled-Token + `lockNotice`); „definieren" bleibt bedienbar.
+ *   AC6/AC7 — natives `<button type="button">`, `minHeight:44`, Fokusring
+ *          erhalten, `data-testid`-Präfix `regression-` (D16).
+ *
  * A11y (WCAG 2.1 AA):
  *   - Reiter-Leiste als <nav role="tablist"> mit aria-selected.
  *   - Aktive Reiter-Panel mit role="tabpanel".
@@ -346,6 +373,9 @@ const SESSION_POLL_MS = 3_000;
 /** Drain-Job-Status poll interval in ms (headless-manual-drain AC6). */
 const DRAIN_POLL_MS = 2_500;
 
+/** Regressionstest-Status poll interval in ms (regression-panel AC4/AC6). */
+const REGRESSION_STATUS_POLL_MS = 5_000;
+
 /**
  * FactoryWorkspace — the original FactoryView inner content:
  * Terminal + Dashboard. (TriggerPanel entfernt — cockpit-declutter AC1, S-303.)
@@ -538,6 +568,79 @@ function FactoryWorkspace({
    * defensiv auf leere Arrays normalisiert (kein Crash).
    */
   const [drainReport, setDrainReport] = useState(null);
+
+  // ── Regressionstests-Karte (regression-panel AC1–AC7) ──────────────────────
+  // Klick-Ziele: die eigentlichen Dialoge ([[regression-run]] S-311,
+  // [[regression-define-dialog]] S-308) sind separate, noch nicht
+  // abgeschlossene Stories — hier nur der Verdrahtungspunkt (lokaler
+  // Öffnen-State), kein Dialog-UI (Nicht-Ziel dieser Spec).
+  const [regressionRunOpen, setRegressionRunOpen] = useState(false);
+  const [regressionDefineOpen, setRegressionDefineOpen] = useState(false);
+  /** null | 'running' | 'passed' | 'failed' — letzter Lauf-Zustand (AC4). */
+  const [regressionLastStatus, setRegressionLastStatus] = useState(null);
+  /** ISO-Zeitstempel des letzten Laufs (nur bei passed/failed relevant, D10). */
+  const [regressionLastAt, setRegressionLastAt] = useState(null);
+
+  const handleRegressionRunOpen = useCallback(() => {
+    setRegressionRunOpen(true);
+  }, []);
+  const handleRegressionDefineOpen = useCallback(() => {
+    setRegressionDefineOpen(true);
+  }, []);
+
+  // AC4/AC6: letzter Lauf-Zustand wird aus dem Ergebnis-Store gespeist
+  // (GET /api/projects/:slug/regression-runs, jüngste zuerst — s.
+  // regression-result-store.md AC4/Verträge). Der Store/Endpunkt ist Teil
+  // einer separaten, noch nicht abgeschlossenen Story (S-312) — Polling
+  // degradiert defensiv: 404/Netzwerkfehler/unbekannte Shape → „kein Lauf"
+  // (kein Crash, Edge-Case-Vorgabe der Spec).
+  useEffect(() => {
+    let cancelled = false;
+    const slug = activeRepo && typeof activeRepo === 'string' ? activeRepo.trim() : '';
+    if (!slug) return undefined;
+    const _fetch = fetchFnRef.current;
+
+    // Repo-Wechsel: Zustand des VORHERIGEN Projekts sofort verwerfen, damit die
+    // Karte nicht bis zum ersten erfolgreichen Poll für das NEUE Projekt einen
+    // fremden Lauf-Zustand zeigt (Review-Finding Iteration 2).
+    setRegressionLastStatus(null);
+    setRegressionLastAt(null);
+
+    async function pollRegressionStatus() {
+      try {
+        const res = await _fetch(`/api/projects/${encodeURIComponent(slug)}/regression-runs`);
+        if (!res || !res.ok) {
+          if (!cancelled) {
+            setRegressionLastStatus(null);
+            setRegressionLastAt(null);
+          }
+          return;
+        }
+        const json = await res.json();
+        const runs = Array.isArray(json) ? json : Array.isArray(json?.runs) ? json.runs : [];
+        const latest = runs[0];
+        if (!cancelled) {
+          if (latest && (latest.status === 'passed' || latest.status === 'failed' || latest.status === 'running')) {
+            setRegressionLastStatus(latest.status);
+            setRegressionLastAt(latest.startedAt ?? null);
+          } else {
+            setRegressionLastStatus(null);
+            setRegressionLastAt(null);
+          }
+        }
+      } catch {
+        // Quelle nicht erreichbar → letzter bekannter Zustand bleibt stehen
+        // (Edge-Case-Vorgabe); kein Crash.
+      }
+    }
+
+    pollRegressionStatus();
+    const timer = setInterval(pollRegressionStatus, REGRESSION_STATUS_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [activeRepo]);
 
   // ── Cost-Mode-Drift-Meldung (cost-mode-model-check AC4/AC5, S-228) ──
   // checkId aus der Drain-Antwort (`costModeCheckId`), falls der Dispatch eine
@@ -953,6 +1056,106 @@ function FactoryWorkspace({
           </button>
         </div>
 
+        {/* regression-panel AC1/D1: Regressionstests-Karte — Position 5 (nach
+            „Neue Story", vor Status-Dashboard). Zwei Buttons untereinander;
+            die Klick-Ziele (Ausführen-/Definier-Dialog) sind separate,
+            noch nicht abgeschlossene Stories (S-311/S-308) — hier nur der
+            Öffnen-State als Anknüpfungspunkt. */}
+        <div
+          style={styles.flowTriggerBox}
+          data-testid="regression-card"
+          data-run-dialog-open={regressionRunOpen}
+          data-define-dialog-open={regressionDefineOpen}
+        >
+          <div style={styles.flowTriggerHeader}>Regressionstests</div>
+          <p style={styles.flowTriggerHint}>
+            Führt die hinterlegte Regressionstest-Suite aus bzw. öffnet ihre Definition.
+          </p>
+
+          <button
+            type="button"
+            style={
+              regressionLastStatus === 'running'
+                ? styles.btnFlowTriggerDisabled
+                : styles.btnFlowTrigger
+            }
+            disabled={regressionLastStatus === 'running'}
+            aria-disabled={regressionLastStatus === 'running'}
+            onClick={regressionLastStatus === 'running' ? undefined : handleRegressionRunOpen}
+            aria-label={
+              regressionLastStatus === 'running'
+                ? 'Regressionstest ausführen — gesperrt (Lauf aktiv)'
+                : 'Regressionstest ausführen — startet die Regressionstest-Suite'
+            }
+            data-testid="regression-run-btn"
+          >
+            Regressionstest ausführen
+          </button>
+
+          <button
+            type="button"
+            style={styles.btnRegressionDefine}
+            onClick={handleRegressionDefineOpen}
+            aria-label="Regressionstest definieren — öffnet die Definitionsansicht"
+            data-testid="regression-define-btn"
+          >
+            Regressionstest definieren
+          </button>
+
+          {/* AC5/D11: während eines aktiven Laufs ist NUR „ausführen" gesperrt.
+              DOM-Reihenfolge D3: nach BEIDEN Buttons, vor der Statuszeile. */}
+          {regressionLastStatus === 'running' && (
+            <div
+              role="status"
+              aria-live="polite"
+              style={styles.lockNotice}
+              data-testid="regression-lock-notice"
+            >
+              Ein Regressionstest läuft — Ausführen gesperrt.
+            </div>
+          )}
+
+          {/* AC4/D9: Inline-Statuszeile zum letzten Lauf. Icon + Text + Farbe
+              immer gemeinsam (nie Farbe allein, WCAG 2.1 AA). */}
+          {regressionLastStatus === 'running' && (
+            <div
+              role="status"
+              aria-live="polite"
+              style={styles.drainStatusRunning}
+              data-testid="regression-status"
+              data-status="running"
+            >
+              ⏳ Regressionstest läuft…
+            </div>
+          )}
+          {regressionLastStatus === 'passed' && (
+            <div
+              role="status"
+              aria-live="polite"
+              style={styles.drainStatusDone}
+              data-testid="regression-status"
+              data-status="passed"
+            >
+              ✓ Erfolgreich — {formatRegressionTimestamp(regressionLastAt)}
+            </div>
+          )}
+          {regressionLastStatus === 'failed' && (
+            <div
+              role="alert"
+              style={styles.drainStatusFailed}
+              data-testid="regression-status"
+              data-status="failed"
+            >
+              ✗ Fehlgeschlagen — {formatRegressionTimestamp(regressionLastAt)}
+            </div>
+          )}
+          {!regressionLastStatus && (
+            <p style={styles.flowTriggerHint} data-testid="regression-status" data-status="none">
+              Noch kein Regressionstest gelaufen.
+            </p>
+          )}
+        </div>
+
         {/* Dashboard — project status cards */}
         <Dashboard />
         </div>
@@ -1027,6 +1230,19 @@ function buildTerminalWsUrl(activeRepo) {
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const base = `${proto}//${window.location.host}/ws/terminal`;
   return `${base}?project=${encodeURIComponent(activeRepo)}`;
+}
+
+/**
+ * regression-panel D10: Zeitstempel-Format für die Inline-Statuszeile,
+ * identisch zum bestehenden Muster in BackupSection.jsx.
+ * @param {string|number|null|undefined} ts
+ * @returns {string} formatiertes Datum, oder '—' falls ts fehlt/ungültig.
+ */
+function formatRegressionTimestamp(ts) {
+  if (!ts) return '—';
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'medium' });
 }
 
 // ── Styles ────────────────────────────────────────────────────────────────────
@@ -1298,6 +1514,22 @@ const styles = {
     fontSize: 11,
     color: '#fbbf24',
     fontStyle: 'italic',
+  },
+
+  // regression-panel D7: sekundärer Standalone-Button „Regressionstest
+  // definieren" — Outline-Familie wie btnCancel, aber an die Primär-Button-
+  // Höhe/-Breite angeglichen (padding/fontSize wie btnFlowTrigger), NICHT
+  // die kompaktere btnCancel-Variante aus dem Confirm-Dialog-Button-Paar.
+  btnRegressionDefine: {
+    background: 'transparent',
+    color: '#9ca3af',
+    border: '1px solid #374151',
+    borderRadius: 4,
+    padding: '8px 12px',
+    fontSize: 13,
+    fontWeight: 400,
+    cursor: 'pointer',
+    minHeight: 44,
   },
 
   confirmBox: {
