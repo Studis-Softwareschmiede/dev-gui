@@ -1,7 +1,8 @@
 id: S-312
 parent: F-067
-title: 'Regressions-Ergebnis-Store — CTRF-JSON je Lauf, Retention 50, Debug-Artefakte nur bei Rot, Auto-Prune'
-status: To Do
+title: Regressions-Ergebnis-Store — CTRF-JSON je Lauf, Retention 50, Debug-Artefakte
+  nur bei Rot, Auto-Prune
+status: In Progress
 priority: P2
 spec: docs/specs/regression-result-store.md
 implements:
@@ -16,21 +17,22 @@ size_est: L
 dispo_est: '5'
 dispo_act: null
 dispo_forecast: null
-estimate_note: 'L per Heuristik (n_ac=5, n_comp~3 Store/CRED_STORE_DIR-Ablage/Auto-Prune,
+estimate_note: L per Heuristik (n_ac=5, n_comp~3 Store/CRED_STORE_DIR-Ablage/Auto-Prune,
   label_bump=0 -> score 8). estimator nicht dispatchbar (kein Task-Tool); baseline.json
-  js|balanced|L Median (ep 5.0, n=5) als Proxy; keine Baseline-Tokens (tok_total null) ->
-  tok_est null. confidence medium.'
+  js|balanced|L Median (ep 5.0, n=5) als Proxy; keine Baseline-Tokens (tok_total null)
+  -> tok_est null. confidence medium.
 confidence: medium
-branch: null
+branch: feat/S-312-regression-result-store
 pr: null
 blocked_reason: null
 created_at: '2026-07-06T05:04:40Z'
-updated_at: '2026-07-07T12:35:00Z'
+updated_at: '2026-07-07T18:39:58Z'
 done_at: null
 tok_est: null
 area: fabrik-arbeiten
-notes: 'CTRF-JSON + Metadaten je Lauf in der dev-gui-Datenablage unter ${CRED_STORE_DIR}
+notes: CTRF-JSON + Metadaten je Lauf in der dev-gui-Datenablage unter ${CRED_STORE_DIR}
   (Muster DrainReportStore, atomar tmp+rename, 0600; In-Memory-Degradation ohne CRED_STORE_DIR),
-  NICHT im Projekt-Git. Retention letzte 50 je Projekt (Auto-Prune). Debug-Artefakte (HTML-Report/Traces)
-  nur bei roten Läufen aufbewahren; geprunte Läufe -> Artefakte mitentfernen. Read-API für
-  Liste + Einzel-Lauf. Fundament für Runner-Handover (S-309) + Ansicht (S-313/S-314).'
+  NICHT im Projekt-Git. Retention letzte 50 je Projekt (Auto-Prune). Debug-Artefakte
+  (HTML-Report/Traces) nur bei roten Läufen aufbewahren; geprunte Läufe -> Artefakte
+  mitentfernen. Read-API für Liste + Einzel-Lauf. Fundament für Runner-Handover (S-309)
+  + Ansicht (S-313/S-314).

@@ -319,8 +319,11 @@ describe('routerLoader — Echte src/routers/ Module (AC1/AC3)', () => {
     //   (POST /api/projects/:slug/regression-define + GET .../regression-define/:jobId +
     //    POST .../regression-define/:jobId/review — headless Regressionstest-
     //    Definier-Runner mit Interrupt(needs-review)/Resume AC1-AC5) → 45.
+    // regressionRuns.js wurde mit regression-result-store (S-312) hinzugefügt
+    //   (GET /api/projects/:slug/regression-runs + GET .../regression-runs/:runId —
+    //    Regressionslauf-Ergebnisse: Liste + Einzel-Lauf inkl. Testfall-Details AC4) → 46.
     const entries = await readdir(ROUTERS_DIR);
     const mountedCount = entries.filter((f) => f.endsWith('.js')).length;
-    expect(mountedCount).toBe(45);
+    expect(mountedCount).toBe(46);
   });
 });

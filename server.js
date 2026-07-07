@@ -11,6 +11,8 @@
  *   POST /api/command/cancel                      → send Ctrl-C, cancel running command
  *   POST /api/projects/:slug/drain                 → { drainId } | 400 (costMode) | 409 (busy) — manueller „Board abarbeiten"-Knopf: HEADLESS via dedizierter ProjectDrain-Instanz + Cost-Mode (headless-manual-drain AC1/AC2/AC3, ADR-017)
  *   GET  /api/drain-reports[?project=<slug>]       → { reports: [...] } — Drain-Abschlussberichte, absteigend nach finishedAt (drain-completion-report AC4)
+ *   GET  /api/projects/:slug/regression-runs       → { runs: [...] } (ohne ctrf) — Regressionsläufe, absteigend nach startedAt (regression-result-store AC4, S-312)
+ *   GET  /api/projects/:slug/regression-runs/:runId → { run } | 404 — Einzel-Lauf inkl. ctrf + artifacts bei Rot (regression-result-store AC4, S-312)
  *   GET/PUT /api/settings/retro-auto                → { enabled } — globaler Auto-Retro-Schalter (retro-auto-trigger S-259 AC1/AC2)
  *   GET/PUT /api/settings/ticker                   → Nachtwächter-Settings (taktgeber-nachtwaechter S-194 AC15/AC16)
  *   GET  /api/settings/ticker/status               → { enabled, window, withinWindow, activeDrains } — Statusanzeige (taktgeber-nachtwaechter S-197 AC17)
@@ -155,6 +157,7 @@ import { NightWatchScheduler } from './src/NightWatchScheduler.js';
 import { TokenUsageMeter } from './src/TokenUsageMeter.js';
 import { BudgetGuard, BUDGET_RESUME_BUFFER_MS } from './src/BudgetGuard.js';
 import { DrainReportStore } from './src/DrainReportStore.js';
+import { RegressionResultStore } from './src/RegressionResultStore.js';
 import { DrainJobRegistry } from './src/DrainJobRegistry.js';
 import { FeatureDrainRegistry } from './src/FeatureDrainRegistry.js';
 import { FeatureDrainRunner } from './src/FeatureDrainRunner.js';
@@ -471,6 +474,15 @@ const costModeModelCheck = new CostModeModelCheck({
 // UND manueller Drain (projectDrainRouter via deps, trigger:'manual') — sowie
 // read-only für GET /api/drain-reports (drainReports.js Router).
 const drainReportStore = new DrainReportStore();
+
+// ── RegressionResultStore (regression-result-store AC1-AC5, S-312) ──────────
+// Persistente, größenbegrenzte Regressionslauf-Ablage (letzte 50 je Projekt,
+// ${CRED_STORE_DIR}/regression-runs/<projekt>/<runId>.json, atomarer
+// Schreibzugriff, Debug-Artefakte nur bei roten Läufen). Read-only für
+// GET /api/projects/:slug/regression-runs[/:runId] (regressionRuns.js Router).
+// Der Schreibpfad (record()) wird vom künftigen Regressionslauf-Runner
+// ([[regression-run]], S-309) aufgerufen — hier nur das Fundament.
+const regressionResultStore = new RegressionResultStore();
 
 // ── DrainJobRegistry (drain-restart-robustness AC1–AC4, S-281/S-282) ────────
 // EINE geteilte, datei-persistierte Instanz (${CRED_STORE_DIR}/drain-jobs.json)
@@ -849,6 +861,9 @@ const deps = {
   // read-only für GET /api/drain-reports (drainReports.js) UND Schreibpfad für
   // den manuellen Drain (projectDrain.js Router, trigger:'manual').
   drainReportStore,
+  // regression-result-store AC4 (S-312): RegressionResultStore für
+  // GET /api/projects/:slug/regression-runs[/:runId] (regressionRuns.js Router).
+  regressionResultStore,
   // retro-auto-trigger AC4–AC7: GETEILTE AutoRetroTrigger-Instanz (dieselbe wie
   // der Nacht-Drain oben) — der manuelle projectDrain.js Router stößt bei
   // Drain-Abschluss best-effort den Auto-Retro-Check an (isRetroDue → ggf.
