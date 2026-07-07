@@ -2,7 +2,7 @@ id: S-307
 parent: F-067
 title: RegressionDefineRunner — headless Definier-Runner (eigenes ProjectJobLock,
   needs-review-Interrupt, STDIN-Resume)
-status: In Progress
+status: Blocked
 priority: P2
 spec: docs/specs/regression-define-dialog.md
 implements:
@@ -26,9 +26,9 @@ estimate_note: L per Heuristik (n_ac=5, n_comp~5 RegressionDefineRunner/ProjectJ
 confidence: medium
 branch: feat/S-307-regression-define-runner
 pr: null
-blocked_reason: null
+blocked_reason: 'Taktgeber: 3x kein Fortschritt'
 created_at: '2026-07-06T05:04:40Z'
-updated_at: '2026-07-07T17:00:21Z'
+updated_at: '2026-07-07T21:29:45.568Z'
 done_at: null
 tok_est: null
 area: fabrik-arbeiten
