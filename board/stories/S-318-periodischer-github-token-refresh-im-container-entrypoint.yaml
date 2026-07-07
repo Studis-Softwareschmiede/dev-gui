@@ -2,7 +2,7 @@ id: S-318
 parent: F-070
 title: Periodischer GitHub-Token-Refresh im Container-Entrypoint — Hintergrund-Schleife
   statt Einmal-Mint
-status: Blocked
+status: Done
 priority: P1
 spec: docs/specs/headless-gh-token-refresh.md
 implements:
@@ -29,11 +29,10 @@ estimate_note: 'L per Heuristik (n_ac=7, n_comp~3: docker-entrypoint.sh Refresh-
 confidence: medium
 branch: feat/S-318-gh-token-refresh-loop
 pr: null
-blocked_reason: 'Rollout-Verifikation ausstehend — Code auf main gelandet (Host-Merge
-  nach Token-Ablauf-Henne-Ei, Review PASS + Test PASS aus Drain-Session 1107a8b)'
+blocked_reason: null
 created_at: '2026-07-07T12:15:00Z'
-updated_at: '2026-07-07T12:05:00Z'
-done_at: null
+updated_at: '2026-07-07T12:20:00Z'
+done_at: '2026-07-07T12:20:00Z'
 tok_est: null
 area: fabrik-arbeiten
 notes: 'Owner-Anforderung FINAL freigegeben 2026-07-07 (Vorfall Headless-GitHub-Token-Refresh).
