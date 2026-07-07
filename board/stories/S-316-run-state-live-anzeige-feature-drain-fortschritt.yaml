@@ -30,11 +30,9 @@ estimate_note: 'L per Heuristik (n_ac=8, n_comp~3: board/runs-Scan in BoardAggre
 confidence: medium
 branch: null
 pr: null
-blocked_reason: 'Cross-Repo-Gate: erst umsetzbar/verifizierbar wenn agent-flow feature-batch-orchestration
-  v2 (Run-State-Schreiben nach board/runs/F-###/state.yaml) gelandet ist. blocked_reason
-  entfernen, sobald der reale Run-State-Schreiber verfügbar ist -> Story wird ready.'
+blocked_reason: null
 created_at: '2026-07-07T09:58:50Z'
-updated_at: '2026-07-07T09:58:50Z'
+updated_at: '2026-07-07T15:15:00Z'
 done_at: null
 tok_est: null
 area: fabrik-arbeiten
