@@ -1,7 +1,7 @@
 /**
  * regressionDefineRouter — Express-Router für den Headless-
  * Regressionstest-Definier-Runner (docs/specs/regression-define-dialog.md
- * AC1, AC2, AC3, AC4, AC5).
+ * AC1, AC2, AC3, AC4, AC5, AC9, AC12).
  *
  * Routes (hinter dem AccessGuard, wie alle /api/*, s. server.js):
  *   POST /api/projects/:slug/regression-define             — startet den headless Definitions-Lauf
@@ -31,6 +31,9 @@
  * Security (Floor): keine Secrets in Response/Log; `jobId` ist eine reine
  * Korrelations-ID (`randomUUID()` im Runner), kein Secret; `vorschlag`/`error`/
  * `result` kommen ausschließlich aus dem Runner (bereits secret-/pfad-frei).
+ * v2 (AC9/AC12): `startedAt`/`lastActivityAt`/`phase` (Lebendigkeit) und
+ * `error_class`/`raw_output` (Fehler-Transparenz) sind ebenfalls bereits im
+ * Runner secret-gefiltert — der Router reicht sie nur unverändert durch.
  *
  * @module regressionDefineRouter
  */
@@ -141,9 +144,14 @@ export function regressionDefineRouter(runner, options = {}) {
    * GET /api/projects/:slug/regression-define/:jobId
    *
    * Responses:
-   *   200 { status, vorschlag?, result?, error? }
+   *   200 { status, vorschlag?, result?, error?, error_class?, raw_output?,
+   *         startedAt?, lastActivityAt?, phase? }
    *        status ∈ {running, needs-review, done, failed, auth-expired};
-   *        `vorschlag` nur bei needs-review (AC2). Secret-frei.
+   *        `vorschlag` nur bei needs-review (AC2). `startedAt`/`lastActivityAt`
+   *        (AC9, ISO-8601) sowie optional `phase` (AC9, feste Menge) sind
+   *        secret-frei. `error_class` (AC12, feste Menge) begleitet jeden
+   *        `failed`-Zustand; `raw_output` (AC12, serverseitig secret-gefiltert)
+   *        NUR im Parse-/Format-Fehlerpfad. Secret-frei.
    *   400 { error }  — ungültiger Slug/Pfad
    *   404 { error }  — unbekannte jobId (auch nach Server-Neustart)
    */
@@ -162,6 +170,11 @@ export function regressionDefineRouter(runner, options = {}) {
     if (job.vorschlag !== undefined) body.vorschlag = job.vorschlag;
     if (job.result !== undefined) body.result = job.result;
     if (job.error !== undefined) body.error = job.error;
+    if (job.error_class !== undefined) body.error_class = job.error_class;
+    if (job.raw_output !== undefined) body.raw_output = job.raw_output;
+    if (job.startedAt !== undefined) body.startedAt = job.startedAt;
+    if (job.lastActivityAt !== undefined) body.lastActivityAt = job.lastActivityAt;
+    if (job.phase !== undefined) body.phase = job.phase;
 
     return res.status(200).json(body);
   });

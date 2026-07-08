@@ -1,9 +1,9 @@
 /**
  * RegressionDefineDialog.test.jsx — Tests für den Regressionstest-Definier-
  * Dialog + Redaktions-Overlay (docs/specs/regression-define-dialog.md
- * AC6/AC7/AC8, S-308 — Backend `RegressionDefineRunner`/`regressionDefineRouter`
- * ist S-307, bereits gelandet, hier nur der Client-Konsum der dokumentierten
- * Response-Shapes).
+ * AC6/AC7/AC8/AC10/AC11/AC13, S-308/S-321 — Backend
+ * `RegressionDefineRunner`/`regressionDefineRouter` ist S-307/S-321, bereits
+ * gelandet, hier nur der Client-Konsum der dokumentierten Response-Shapes).
  *
  * Covers (regression-define-dialog):
  *   AC6 — Zustand `target`: Bereichs-Radiogruppe aus
@@ -27,6 +27,19 @@
  *          Dialog fällt zurück auf `target`. `failed`/`auth-expired`/E2 zeigen
  *          eine klare, secret-freie Fehlermeldung inline (kein leeres
  *          Overlay); „Erneut versuchen" führt zurück in den `target`-Zustand.
+ *   AC10 — Lebendige Wartefläche: während `running` zeigt das Overlay einen
+ *          animierten Indikator + die Laufzeit (mm:ss, aus `startedAt`
+ *          abgeleitet, fortlaufend aktualisiert) + — falls `phase` vorliegt —
+ *          die grobe Phase; ohne `phase` mindestens Laufzeit + letzter
+ *          Aktivitäts-Zeitstempel. Identischer Mechanismus für den initialen
+ *          Vorschlags-Lauf UND den uebersetzen-Lauf nach Resume.
+ *   AC11 — Schließen-Hinweistext + Button-Label stellen klar, dass Schließen
+ *          nur die Anzeige ausblendet und der Lauf serverseitig weiterläuft
+ *          (Wiedereinstieg über die Regressionstests-Karte).
+ *   AC13 — Bei `failed` zeigt das Overlay `error_class` (deutsches Label) +
+ *          die Kurzdiagnose, weiterhin „Erneut versuchen", und — falls
+ *          `raw_output` vorliegt — einen standardmäßig eingeklappten Bereich
+ *          mit der sanitisierten Roh-Ausgabe.
  *
  * @jest-environment jsdom
  */
@@ -112,6 +125,7 @@ function renderDialog({
   initialJobId = null,
   triggerRef,
   projectSlug = 'my-project',
+  livenessTickMs = 5,
 } = {}) {
   const fn = fetchFn ?? makeFetch().fetchFn;
   const close = onClose ?? jest.fn();
@@ -131,6 +145,7 @@ function renderDialog({
       triggerRef: trigger,
       pollMs: 5,
       successLingerMs: 5,
+      livenessTickMs,
     }),
   );
   return {
@@ -153,6 +168,7 @@ function renderDialog({
         triggerRef: trigger,
         pollMs: 5,
         successLingerMs: 5,
+        livenessTickMs,
         ...props,
       }),
     ),
@@ -422,5 +438,177 @@ describe('regression-define-dialog — Schließen/Esc/Backdrop reagieren immer',
     const { onClose } = await reachNeedsReview();
     fireEvent.click(q('regression-define-close-btn'));
     expect(onClose).toHaveBeenCalled();
+  });
+});
+
+// ── AC10: Lebendige Wartefläche (Indikator + Laufzeit + Phase/Zeitstempel) ──
+
+describe('regression-define-dialog AC10 — Lebendige Wartefläche', () => {
+  it('zeigt einen animierten Indikator + Laufzeit (mm:ss) + Phase, solange running (initialer Vorschlags-Lauf)', async () => {
+    const startedAt = new Date(Date.now() - 5000).toISOString();
+    const fetchFn = jest.fn(async (url, opts = {}) => {
+      const method = opts.method ?? 'GET';
+      if (AREAS_RE.test(url)) return { ok: true, status: 200, json: async () => ({ areas: AREAS }) };
+      if (START_RE.test(url) && method === 'POST') return { status: 202, json: async () => ({ jobId: 'job-1', status: 'running' }) };
+      if (STATUS_RE.test(url)) {
+        return {
+          status: 200,
+          json: async () => ({ status: 'running', startedAt, lastActivityAt: new Date().toISOString(), phase: 'reading-specs' }),
+        };
+      }
+      return { status: 404, json: async () => ({}) };
+    });
+    renderDialog({ fetchFn });
+    await waitFor(() => expect(q('regression-define-area-area-1')).toBeTruthy());
+    await act(async () => { fireEvent.click(q('regression-define-start-btn')); });
+
+    await waitFor(() => expect(q('regression-define-liveness-spinner')).toBeTruthy());
+    expect(q('regression-define-elapsed').textContent).toMatch(/^\d{2}:\d{2}$/);
+    await waitFor(() => expect(q('regression-define-phase')).toBeTruthy());
+    expect(q('regression-define-phase').textContent).toBeTruthy();
+  });
+
+  it('ohne phase zeigt die Wartefläche mindestens Laufzeit UND lastActivityAt', async () => {
+    const startedAt = new Date().toISOString();
+    const lastActivityAt = new Date().toISOString();
+    const fetchFn = jest.fn(async (url, opts = {}) => {
+      const method = opts.method ?? 'GET';
+      if (AREAS_RE.test(url)) return { ok: true, status: 200, json: async () => ({ areas: AREAS }) };
+      if (START_RE.test(url) && method === 'POST') return { status: 202, json: async () => ({ jobId: 'job-1', status: 'running' }) };
+      if (STATUS_RE.test(url)) {
+        return { status: 200, json: async () => ({ status: 'running', startedAt, lastActivityAt }) };
+      }
+      return { status: 404, json: async () => ({}) };
+    });
+    renderDialog({ fetchFn });
+    await waitFor(() => expect(q('regression-define-area-area-1')).toBeTruthy());
+    await act(async () => { fireEvent.click(q('regression-define-start-btn')); });
+
+    await waitFor(() => expect(q('regression-define-elapsed')).toBeTruthy());
+    expect(q('regression-define-phase')).toBeFalsy();
+    await waitFor(() => expect(q('regression-define-last-activity')).toBeTruthy());
+  });
+
+  it('identischer Mechanismus für den uebersetzen-Lauf nach Resume (running-Zustand nach review())', async () => {
+    const startedAt = new Date().toISOString();
+    // Nach der Bestätigung bleibt der Poll-Zustand `running` mit Lebendigkeits-
+    // Feldern (phase:'translating') für mehrere Runden, bevor `done` folgt —
+    // derselbe <LivenessIndicator>-Codepfad wie beim initialen Vorschlags-Lauf.
+    const { calls } = await reachNeedsReview({
+      statusSequence: [
+        { status: 'needs-review', vorschlag: VORSCHLAG },
+        { status: 'running', startedAt, lastActivityAt: startedAt, phase: 'translating' },
+        { status: 'running', startedAt, lastActivityAt: startedAt, phase: 'translating' },
+        { status: 'done' },
+      ],
+    });
+    void calls;
+
+    await act(async () => { fireEvent.click(q('regression-define-review-btn')); });
+    await waitFor(() => expect(q('regression-define-liveness-spinner')).toBeTruthy());
+    await waitFor(() => expect(q('regression-define-phase')).toBeTruthy());
+    expect(q('regression-define-phase').textContent).toBeTruthy();
+  });
+});
+
+// ── AC11: Klare Schließen-Semantik ───────────────────────────────────────────
+
+describe('regression-define-dialog AC11 — klare Schließen-Semantik', () => {
+  it('zeigt während running einen Hinweistext, dass Schließen den Lauf NICHT abbricht', async () => {
+    const fetchFn = jest.fn(async (url, opts = {}) => {
+      const method = opts.method ?? 'GET';
+      if (AREAS_RE.test(url)) return { ok: true, status: 200, json: async () => ({ areas: AREAS }) };
+      if (START_RE.test(url) && method === 'POST') return { status: 202, json: async () => ({ jobId: 'job-1', status: 'running' }) };
+      if (STATUS_RE.test(url)) {
+        return { status: 200, json: async () => ({ status: 'running', startedAt: new Date().toISOString(), lastActivityAt: new Date().toISOString() }) };
+      }
+      return { status: 404, json: async () => ({}) };
+    });
+    renderDialog({ fetchFn });
+    await waitFor(() => expect(q('regression-define-area-area-1')).toBeTruthy());
+    await act(async () => { fireEvent.click(q('regression-define-start-btn')); });
+    await waitFor(() => expect(q('regression-define-close-hint')).toBeTruthy());
+    expect(q('regression-define-close-hint').textContent).toMatch(/läuft im Hintergrund weiter/);
+    expect(q('regression-define-close-hint').textContent).toMatch(/Regressionstests-Karte/);
+  });
+
+  it('Schließen-Button trägt während running ein aria-label, das "läuft weiter" klarstellt (kein Abbrechen-Missverständnis)', async () => {
+    const fetchFn = jest.fn(async (url, opts = {}) => {
+      const method = opts.method ?? 'GET';
+      if (AREAS_RE.test(url)) return { ok: true, status: 200, json: async () => ({ areas: AREAS }) };
+      if (START_RE.test(url) && method === 'POST') return { status: 202, json: async () => ({ jobId: 'job-1', status: 'running' }) };
+      if (STATUS_RE.test(url)) {
+        return { status: 200, json: async () => ({ status: 'running', startedAt: new Date().toISOString(), lastActivityAt: new Date().toISOString() }) };
+      }
+      return { status: 404, json: async () => ({}) };
+    });
+    renderDialog({ fetchFn });
+    await waitFor(() => expect(q('regression-define-area-area-1')).toBeTruthy());
+    await act(async () => { fireEvent.click(q('regression-define-start-btn')); });
+    await waitFor(() => expect(q('regression-define-running')).toBeTruthy());
+    const closeBtn = q('regression-define-close-btn');
+    expect(closeBtn.getAttribute('aria-label')).toMatch(/läuft weiter/);
+  });
+});
+
+// ── AC13: Fehler-Transparenz (Fehlerklasse + Roh-Ausgabe einklappbar) ───────
+
+describe('regression-define-dialog AC13 — Fehler-Transparenz + Roh-Ausgabe', () => {
+  it('zeigt Fehlerklasse-Label + Kurzdiagnose bei failed (parse-error)', async () => {
+    const { fetchFn } = makeFetch({
+      statusSequence: [{ status: 'failed', error: 'Vorschlag konnte nicht gelesen werden', error_class: 'parse-error' }],
+    });
+    renderDialog({ fetchFn });
+    await waitFor(() => expect(q('regression-define-area-area-1')).toBeTruthy());
+    await act(async () => { fireEvent.click(q('regression-define-start-btn')); });
+    await waitFor(() => expect(q('regression-define-error')).toBeTruthy());
+    expect(q('regression-define-error-class')).toBeTruthy();
+    expect(q('regression-define-error').textContent).toMatch(/Vorschlag konnte nicht gelesen werden/);
+  });
+
+  it('zeigt einen standardmäßig eingeklappten Roh-Ausgabe-Bereich NUR wenn raw_output vorliegt', async () => {
+    const { fetchFn } = makeFetch({
+      statusSequence: [{
+        status: 'failed',
+        error: 'Vorschlag konnte nicht gelesen werden',
+        error_class: 'parse-error',
+        raw_output: 'kaputte Roh-Ausgabe hier',
+      }],
+    });
+    renderDialog({ fetchFn });
+    await waitFor(() => expect(q('regression-define-area-area-1')).toBeTruthy());
+    await act(async () => { fireEvent.click(q('regression-define-start-btn')); });
+    await waitFor(() => expect(q('regression-define-raw-output-details')).toBeTruthy());
+    expect(q('regression-define-raw-output-details').hasAttribute('open')).toBe(false);
+    expect(q('regression-define-raw-output-content').textContent).toBe('kaputte Roh-Ausgabe hier');
+  });
+
+  it('kein Roh-Ausgabe-Bereich wenn raw_output fehlt (z.B. agent-failed)', async () => {
+    const { fetchFn } = makeFetch({
+      statusSequence: [{ status: 'failed', error: 'Definitionslauf fehlgeschlagen', error_class: 'agent-failed' }],
+    });
+    renderDialog({ fetchFn });
+    await waitFor(() => expect(q('regression-define-area-area-1')).toBeTruthy());
+    await act(async () => { fireEvent.click(q('regression-define-start-btn')); });
+    await waitFor(() => expect(q('regression-define-error')).toBeTruthy());
+    expect(q('regression-define-raw-output-details')).toBeFalsy();
+  });
+
+  it('„Erneut versuchen" bleibt nach einem Fehler mit Roh-Ausgabe funktionsfähig (Zustand wird zurückgesetzt)', async () => {
+    const { fetchFn } = makeFetch({
+      statusSequence: [{
+        status: 'failed',
+        error: 'Vorschlag konnte nicht gelesen werden',
+        error_class: 'parse-error',
+        raw_output: 'kaputt',
+      }],
+    });
+    renderDialog({ fetchFn });
+    await waitFor(() => expect(q('regression-define-area-area-1')).toBeTruthy());
+    await act(async () => { fireEvent.click(q('regression-define-start-btn')); });
+    await waitFor(() => expect(q('regression-define-retry-btn')).toBeTruthy());
+    await act(async () => { fireEvent.click(q('regression-define-retry-btn')); });
+    expect(q('regression-define-start-btn')).toBeTruthy();
+    expect(q('regression-define-raw-output-details')).toBeFalsy();
   });
 });

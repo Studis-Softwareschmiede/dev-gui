@@ -49,6 +49,25 @@
  * echten `claude`-Lauf; der Default-Adapter (`defaultRunClaude`) kapselt
  * spawn/env/session-id/auth-Erkennung.
  *
+ * Lebendigkeits-Felder (v2, AC9): `startedAt` (Laufbeginn der aktuellen Runde,
+ * bei Resume neu gesetzt — „beide `running`-Phasen" AC10) und
+ * `lastActivityAt` (bei jedem Zustands-/Fortschritts-Update aktualisiert:
+ * Rundenstart, `needs-review`-Interrupt, terminaler Abschluss). `phase` ist
+ * best-effort und aus einer festen Menge (`session-start`|`reading-specs`|
+ * `drafting`|`translating`) — hier grob aus dem Runden-Typ abgeleitet (Initial-
+ * Runde: `session-start`→`drafting`; Resume-Runde: `translating`), NICHT aus
+ * echtem Agent-Fortschritt (kein Rateergebnis über die tatsächliche
+ * Fortschritts-Tiefe hinaus, s. `phase`-Zuweisung in `#runRound`).
+ *
+ * Fehlerklasse + sanitisierte Roh-Ausgabe (v2, AC12): jeder terminale `failed`-
+ * Zustand trägt `error_class` aus fester Menge (`parse-error`|`no-session`|
+ * `agent-failed`|`timeout`). NUR im Parse-/Format-Fehlerpfad der Finalausgabe
+ * (`parseRegressionDefineOutcome()`-Wurf) liefert der Job zusätzlich die
+ * serverseitig secret-gefilterte Roh-Finalausgabe (`raw_output`,
+ * `sanitizeRawOutput()`) — Trust-Boundary: Tokens/API-Keys/OAuth-Tokens/
+ * Host-Pfade werden VOR dem Ablegen im Job entfernt, bevor die Job-Sicht sie
+ * verlässt.
+ *
  * @module RegressionDefineRunner
  */
 
@@ -78,6 +97,41 @@ const NOT_AVAILABLE_MESSAGE = 'claude nicht verfügbar';
 const UNPARSABLE_MESSAGE = 'Vorschlag konnte nicht gelesen werden';
 const NO_SESSION_MESSAGE = 'Regressions-Definitionslauf kann nicht fortgesetzt werden';
 const DONE_RESULT_MESSAGE = 'Regressionstest-Definition abgeschlossen';
+
+// ── Fehlerklassen (AC12, feste Menge) ─────────────────────────────────────────
+export const ERROR_CLASS_PARSE = 'parse-error';
+export const ERROR_CLASS_NO_SESSION = 'no-session';
+export const ERROR_CLASS_AGENT_FAILED = 'agent-failed';
+export const ERROR_CLASS_TIMEOUT = 'timeout';
+
+// ── Phasen (AC9, feste Menge, best-effort) ────────────────────────────────────
+export const PHASE_SESSION_START = 'session-start';
+export const PHASE_READING_SPECS = 'reading-specs';
+export const PHASE_DRAFTING = 'drafting';
+export const PHASE_TRANSLATING = 'translating';
+
+/**
+ * Filtert die Roh-Finalausgabe secret-frei (AC12 Trust-Boundary): entfernt
+ * alles, was wie ein Token/API-Key/OAuth-Token oder ein absoluter Host-Pfad
+ * aussieht, BEVOR die Ausgabe im Job abgelegt wird (nie ungefiltert an die
+ * Job-Sicht durchgereicht). Muster analog `GitHubCloner.js#sanitizeErrorMessage`.
+ *
+ * @param {string} raw
+ * @returns {string}
+ */
+export function sanitizeRawOutput(raw) {
+  if (typeof raw !== 'string') return '';
+  return raw
+    .replace(/sk-ant-[A-Za-z0-9_-]{10,}/g, '[REDACTED]')
+    .replace(/ghp_[A-Za-z0-9]{30,}/g, '[REDACTED]')
+    .replace(/ghs_[A-Za-z0-9]{30,}/g, '[REDACTED]')
+    .replace(/gho_[A-Za-z0-9]{30,}/g, '[REDACTED]')
+    .replace(/Bearer\s+[A-Za-z0-9._-]{10,}/gi, 'Bearer [REDACTED]')
+    .replace(/https?:\/\/[^@\s]*@/g, 'https://[REDACTED]@')
+    .replace(/-----BEGIN[^-]*-----[\s\S]*?-----END[^-]*-----/g, '[REDACTED-PEM]')
+    .replace(/\/(?:home|Users|workspace)\/[^\s"'`)]+/g, '[REDACTED-PATH]')
+    .slice(0, 4000);
+}
 
 // ── Reine Parser (testbar ohne Prozess) ───────────────────────────────────────
 
@@ -336,11 +390,15 @@ export class RegressionDefineRunner {
   #timeoutMs;
   /** @type {import('./AuditStore.js').AuditStore|null} */
   #auditStore;
+  /** @type {() => number} injectable Uhr (Test-Entkopplung, default Date.now). */
+  #now;
   /**
    * @type {Map<string, {
    *   status: 'running'|'needs-review'|'done'|'failed'|'auth-expired',
-   *   vorschlag?: object, result?: string, error?: string,
+   *   vorschlag?: object, result?: string, error?: string, error_class?: string,
+   *   raw_output?: string, phase?: string,
    *   projectPath: string, projekt: string, sessionId?: string, identity: string|null,
+   *   startedAt: string, lastActivityAt: string,
    * }>}
    */
   #jobs = new Map();
@@ -353,13 +411,15 @@ export class RegressionDefineRunner {
    * @param {import('./AuditStore.js').AuditStore} [params.auditStore] - optional (AC5: Ende/Fehler-Audit).
    * @param {Function} [params.spawnFn] - nur wirksam wenn `runClaude` NICHT übergeben wird
    *   (durchgereicht an den intern erzeugten Default-Adapter — Test-Entkopplung).
+   * @param {() => number} [params.now] - injectable Uhr (AC9, default Date.now — Test-Entkopplung).
    */
-  constructor({ runClaude, lock, timeoutMs, auditStore, spawnFn } = {}) {
+  constructor({ runClaude, lock, timeoutMs, auditStore, spawnFn, now } = {}) {
     this.#timeoutMs = timeoutMs ?? (Number(process.env.REGRESSION_DEFINE_TIMEOUT_MS) || DEFAULT_REGRESSION_DEFINE_TIMEOUT_MS);
     this.#runClaude =
       runClaude ?? ((params) => defaultRunClaude({ ...params, timeoutMs: this.#timeoutMs, spawnFn }));
     this.#lock = lock ?? new ProjectJobLock();
     this.#auditStore = auditStore ?? null;
+    this.#now = now ?? (() => Date.now());
   }
 
   /**
@@ -380,12 +440,16 @@ export class RegressionDefineRunner {
       return { ok: false, reason: 'locked' };
     }
     const jobId = randomUUID();
+    const nowIso = new Date(this.#now()).toISOString();
     this.#jobs.set(jobId, {
       status: 'running',
       projectPath,
       projekt,
       identity: identity ?? null,
       sessionId: undefined,
+      startedAt: nowIso,
+      lastActivityAt: nowIso,
+      phase: PHASE_SESSION_START,
     });
 
     const zielArg = zielToArg(ziel);
@@ -402,12 +466,16 @@ export class RegressionDefineRunner {
   }
 
   /**
-   * Liest die ÖFFENTLICHE Sicht auf einen Job (AC1/AC2/AC5) — secret-frei, ohne
-   * interne Felder (`projectPath`/`sessionId`/`identity`). `vorschlag` nur bei
-   * `needs-review`.
+   * Liest die ÖFFENTLICHE Sicht auf einen Job (AC1/AC2/AC5/AC9/AC12) —
+   * secret-frei, ohne interne Felder (`projectPath`/`sessionId`/`identity`).
+   * `vorschlag` nur bei `needs-review`. `startedAt`/`lastActivityAt` immer
+   * (AC9); `phase` nur wenn ermittelbar (kein Rateergebnis). `error_class` bei
+   * jedem `failed`; `raw_output` NUR im Parse-/Format-Fehlerpfad (AC12).
    *
    * @param {string} jobId
-   * @returns {{ status: string, vorschlag?: object, result?: string, error?: string } | undefined}
+   * @returns {{ status: string, vorschlag?: object, result?: string, error?: string,
+   *   error_class?: string, raw_output?: string, startedAt?: string,
+   *   lastActivityAt?: string, phase?: string } | undefined}
    */
   getJob(jobId) {
     const job = this.#jobs.get(jobId);
@@ -416,6 +484,11 @@ export class RegressionDefineRunner {
     if (job.vorschlag !== undefined) view.vorschlag = job.vorschlag;
     if (job.result !== undefined) view.result = job.result;
     if (job.error !== undefined) view.error = job.error;
+    if (job.error_class !== undefined) view.error_class = job.error_class;
+    if (job.raw_output !== undefined) view.raw_output = job.raw_output;
+    if (job.startedAt !== undefined) view.startedAt = job.startedAt;
+    if (job.lastActivityAt !== undefined) view.lastActivityAt = job.lastActivityAt;
+    if (job.phase !== undefined) view.phase = job.phase;
     return view;
   }
 
@@ -438,9 +511,18 @@ export class RegressionDefineRunner {
     }
 
     // Resume: zurück auf `running`, Vorschlag/Fehler löschen, nächste Runde anstoßen.
+    // AC9/AC10: neue Runde → frischer `startedAt` (Laufzeitanzeige startet neu,
+    // "identisch für beide running-Phasen"), `lastActivityAt` sofort mitziehen,
+    // grobe Phase `translating` für die Resume-Runde.
+    const nowIso = new Date(this.#now()).toISOString();
     job.status = 'running';
     job.vorschlag = undefined;
     job.error = undefined;
+    job.error_class = undefined;
+    job.raw_output = undefined;
+    job.startedAt = nowIso;
+    job.lastActivityAt = nowIso;
+    job.phase = PHASE_TRANSLATING;
     this.#runRound(jobId, { resume: true, reviewed }).catch(() => {});
     return { ok: true };
   }
@@ -463,9 +545,14 @@ export class RegressionDefineRunner {
     // Rückkanal). Stattdessen definierter, secret-freier `failed`-Zustand
     // (Lock-Freigabe + Audit via #finish), Retry über einen neuen Lauf möglich.
     if (resume && !job.sessionId) {
-      this.#finish(jobId, 'failed', { error: NO_SESSION_MESSAGE });
+      this.#finish(jobId, 'failed', { error: NO_SESSION_MESSAGE, error_class: ERROR_CLASS_NO_SESSION });
       return;
     }
+
+    // AC9: sobald der Kindprozess tatsächlich läuft, grobe Phase auf
+    // "reading-specs" fortschreiben (Initial-Runde) — Resume-Runde bleibt bei
+    // `translating` (in review() bereits gesetzt).
+    this.#touch(jobId, { phase: resume ? PHASE_TRANSLATING : PHASE_READING_SPECS });
 
     let res;
     try {
@@ -476,7 +563,7 @@ export class RegressionDefineRunner {
         reviewed,
       });
     } catch {
-      this.#finish(jobId, 'failed', { error: INTERNAL_FAILURE_MESSAGE });
+      this.#finish(jobId, 'failed', { error: INTERNAL_FAILURE_MESSAGE, error_class: ERROR_CLASS_AGENT_FAILED });
       return;
     }
 
@@ -485,32 +572,41 @@ export class RegressionDefineRunner {
       return;
     }
     if (res?.spawnError) {
-      this.#finish(jobId, 'failed', { error: NOT_AVAILABLE_MESSAGE });
+      this.#finish(jobId, 'failed', { error: NOT_AVAILABLE_MESSAGE, error_class: ERROR_CLASS_AGENT_FAILED });
       return;
     }
     if (res?.timedOut) {
-      this.#finish(jobId, 'failed', { error: TIMEOUT_FAILURE_MESSAGE });
+      this.#finish(jobId, 'failed', { error: TIMEOUT_FAILURE_MESSAGE, error_class: ERROR_CLASS_TIMEOUT });
       return;
     }
     if (res?.exitCode !== 0) {
-      this.#finish(jobId, 'failed', { error: GENERIC_FAILURE_MESSAGE });
+      this.#finish(jobId, 'failed', { error: GENERIC_FAILURE_MESSAGE, error_class: ERROR_CLASS_AGENT_FAILED });
       return;
     }
+
+    // AC9: Ausgabe liegt vor, wird jetzt in ein Ergebnis übersetzt.
+    this.#touch(jobId, { phase: resume ? PHASE_TRANSLATING : PHASE_DRAFTING });
 
     let outcome;
     try {
       outcome = parseRegressionDefineOutcome(res.output);
     } catch {
       // Nicht-parsbarer/kaputter Vorschlags-Ausgang → definierter Fehlerzustand,
-      // secret-frei, Retry möglich (AC2). Kein Crash.
-      this.#finish(jobId, 'failed', { error: UNPARSABLE_MESSAGE });
+      // secret-frei, Retry möglich (AC2). AC12: Fehlerklasse `parse-error` +
+      // serverseitig secret-gefilterte Roh-Finalausgabe (falls vorhanden).
+      const sanitized = sanitizeRawOutput(res.output);
+      this.#finish(jobId, 'failed', {
+        error: UNPARSABLE_MESSAGE,
+        error_class: ERROR_CLASS_PARSE,
+        ...(sanitized !== '' ? { raw_output: sanitized } : {}),
+      });
       return;
     }
 
     if (outcome.status === 'failed') {
       // E2 — Bereich ohne deckende Specs (oder anderer agent-flow-seitiger
       // Abbruchgrund): klare Meldung statt eines leeren/erfundenen Vorschlags.
-      this.#finish(jobId, 'failed', { error: outcome.reason });
+      this.#finish(jobId, 'failed', { error: outcome.reason, error_class: ERROR_CLASS_AGENT_FAILED });
       return;
     }
 
@@ -522,6 +618,10 @@ export class RegressionDefineRunner {
       current.vorschlag = outcome.vorschlag;
       current.result = undefined;
       current.error = undefined;
+      current.error_class = undefined;
+      current.raw_output = undefined;
+      current.lastActivityAt = new Date(this.#now()).toISOString();
+      current.phase = undefined;
       // session-id für die nächste Resume-Runde merken (falls der Adapter eine liefert).
       if (res.sessionId) current.sessionId = res.sessionId;
       return;
@@ -532,12 +632,30 @@ export class RegressionDefineRunner {
   }
 
   /**
+   * Aktualisiert `lastActivityAt` (immer) und optional `phase` eines noch
+   * laufenden Jobs (AC9, best-effort Lebendigkeits-Update während einer
+   * Runde). No-op wenn der Job inzwischen verschwunden ist (defensive).
+   *
+   * @param {string} jobId
+   * @param {{ phase?: string }} [patch]
+   */
+  #touch(jobId, { phase } = {}) {
+    const job = this.#jobs.get(jobId);
+    if (!job) return;
+    job.lastActivityAt = new Date(this.#now()).toISOString();
+    if (phase !== undefined) job.phase = phase;
+  }
+
+  /**
    * Setzt einen Job terminal, gibt das projektweise Lock frei (immer) und
-   * schreibt genau EINEN Ende-/Fehler-Audit-Eintrag (AC5).
+   * schreibt genau EINEN Ende-/Fehler-Audit-Eintrag (AC5). AC9:
+   * `lastActivityAt` wird beim Abschluss mitgezogen, `phase` entfällt
+   * (terminal, keine laufende Phase mehr). AC12: `error_class`/`raw_output`
+   * werden 1:1 durchgereicht (nur bei `failed` gesetzt, s. Aufrufer).
    *
    * @param {string} jobId
    * @param {'done'|'failed'|'auth-expired'} status
-   * @param {{ result?: string, error?: string }} patch
+   * @param {{ result?: string, error?: string, error_class?: string, raw_output?: string }} patch
    */
   #finish(jobId, status, patch) {
     const job = this.#jobs.get(jobId);
@@ -546,6 +664,10 @@ export class RegressionDefineRunner {
     job.vorschlag = undefined;
     job.result = patch.result;
     job.error = patch.error;
+    job.error_class = patch.error_class;
+    job.raw_output = patch.raw_output;
+    job.lastActivityAt = new Date(this.#now()).toISOString();
+    job.phase = undefined;
 
     // Lock IMMER freigeben (terminaler Zustand).
     this.#lock.release(job.projectPath);

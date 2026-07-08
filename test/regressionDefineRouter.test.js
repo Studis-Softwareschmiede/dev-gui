@@ -2,7 +2,7 @@
  * @file regressionDefineRouter.test.js — HTTP-level tests for the headless
  * Regressionstest-Definier endpoints (docs/specs/regression-define-dialog.md).
  *
- * Covers (regression-define-dialog): AC1, AC2, AC3, AC4, AC5
+ * Covers (regression-define-dialog): AC1, AC2, AC3, AC4, AC5, AC9, AC12
  *
  *   AC1 — POST /api/projects/:slug/regression-define { ziel, stichworte? } →
  *         202 { jobId, status:"running" }; active project lock → 409;
@@ -20,6 +20,12 @@
  *         performed); error/vorschlag bodies are secret-free.
  *         AccessGuard-Verdrahtung: per server.js-Inspektion (`app.use('/api',
  *         accessGuard)`), kein separater Middleware-Test.
+ *   AC9 — GET .../:jobId passes startedAt/lastActivityAt/phase through 1:1 from
+ *         the runner's already secret-free job view (the runner itself is
+ *         covered in RegressionDefineRunner.test.js — this file only asserts
+ *         the HTTP body actually carries the fields).
+ *   AC12 — GET .../:jobId passes error_class/raw_output through on a failed
+ *         (parse-error) job; secret-free (asserted at the HTTP body level).
  *
  * Error paths: review on a non-waiting job → 409; unknown job → 404; malformed
  * body → 400.
@@ -262,6 +268,53 @@ describe('GET /api/projects/:slug/regression-define/:jobId — AC2', () => {
     server = await startServer(app);
     const res = await httpGet(server, '/api/projects/unknown-repo/regression-define/nope');
     expect(res.status).toBe(400);
+  });
+
+  it('AC9: carries startedAt/lastActivityAt (and phase, best-effort) while running', async () => {
+    const runner = new RegressionDefineRunner({ runClaude: sequencedRunClaude([{ exitCode: 0, output: VORSCHLAG_OUTPUT, sessionId: 's1', authError: false }]) });
+    const { app } = makeApp({ runner });
+    server = await startServer(app);
+
+    const started = await httpPost(server, '/api/projects/dev-gui/regression-define', { ziel: { typ: 'bereich', id: 'x' } });
+    const res = await httpGet(server, `/api/projects/dev-gui/regression-define/${started.body.jobId}`);
+    expect(res.status).toBe(200);
+    expect(res.body.startedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(res.body.lastActivityAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(JSON.stringify(res.body)).not.toMatch(/\/workspace\//);
+    await flush();
+  });
+
+  it('AC12: failed (parse-error) carries error_class + secret-filtered raw_output', async () => {
+    const runner = new RegressionDefineRunner({
+      runClaude: sequencedRunClaude([{ exitCode: 0, output: 'kaputte Ausgabe /workspace/dev-gui geheim', authError: false }]),
+    });
+    const { app } = makeApp({ runner });
+    server = await startServer(app);
+
+    const started = await httpPost(server, '/api/projects/dev-gui/regression-define', { ziel: { typ: 'bereich', id: 'x' } });
+    await flush();
+
+    const res = await httpGet(server, `/api/projects/dev-gui/regression-define/${started.body.jobId}`);
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('failed');
+    expect(res.body.error_class).toBe('parse-error');
+    expect(res.body.raw_output).toContain('kaputte Ausgabe');
+    expect(res.body.raw_output).not.toMatch(/\/workspace\//);
+  });
+
+  it('AC12: failed via a non-zero exit (agent-failed) carries NO raw_output', async () => {
+    const runner = new RegressionDefineRunner({
+      runClaude: sequencedRunClaude([{ exitCode: 2, output: '', authError: false }]),
+    });
+    const { app } = makeApp({ runner });
+    server = await startServer(app);
+
+    const started = await httpPost(server, '/api/projects/dev-gui/regression-define', { ziel: { typ: 'bereich', id: 'x' } });
+    await flush();
+
+    const res = await httpGet(server, `/api/projects/dev-gui/regression-define/${started.body.jobId}`);
+    expect(res.body.error_class).toBe('agent-failed');
+    expect(res.body.raw_output).toBeUndefined();
   });
 });
 

@@ -3,7 +3,7 @@
  * Regressionstest-Definier-Runner + its pure parsers + default claude adapter
  * (docs/specs/regression-define-dialog.md).
  *
- * Covers (regression-define-dialog): AC1, AC2, AC3, AC4, AC5
+ * Covers (regression-define-dialog): AC1, AC2, AC3, AC4, AC5, AC9, AC12
  *
  *   AC1 — start() runs headless via an OWN, isolated ProjectJobLock instance; a
  *         run round settles into a terminal `done`/`failed`/`auth-expired` OR the
@@ -25,6 +25,16 @@
  *         child env, review payload via STDIN (never argv); getJob() view is
  *         secret-free (no projectPath/sessionId/identity); job-end/error audited
  *         with identity + action.
+ *   AC9 — getJob() view carries `startedAt`/`lastActivityAt` (ISO-8601) always;
+ *         `phase` best-effort from a fixed set (session-start/reading-specs/
+ *         drafting/translating), absent when not determinable. Identical
+ *         mechanism for the initial vorschlag round AND the resume/translate
+ *         round (fresh `startedAt` + `phase:'translating'` on review()).
+ *   AC12 — a terminal `failed` always carries `error_class` from a fixed set
+ *         (parse-error/no-session/agent-failed/timeout). ONLY the parse-error
+ *         path (parseRegressionDefineOutcome throws) additionally carries the
+ *         server-side secret-filtered `raw_output`; absent otherwise (no leak,
+ *         no crash even when the filter empties the content).
  *
  * The runner is exercised with an INJECTED runClaude adapter — no real `claude`
  * process (NFR „Entkopplung"). The default adapter's spawn/env/stdin/argv
@@ -40,8 +50,13 @@ import {
   zielToArg,
   extractClaudeResult,
   defaultRunClaude,
+  sanitizeRawOutput,
   REGRESSION_DEFINE_COMMAND,
   AUTH_EXPIRED_MESSAGE,
+  ERROR_CLASS_PARSE,
+  ERROR_CLASS_NO_SESSION,
+  ERROR_CLASS_AGENT_FAILED,
+  ERROR_CLASS_TIMEOUT,
 } from '../src/RegressionDefineRunner.js';
 import { ProjectJobLock } from '../src/ProjectJobLock.js';
 
@@ -441,6 +456,191 @@ describe('RegressionDefineRunner — audit (AC5)', () => {
     await flush();
     expect(runner.getJob(jobId).status).toBe('failed'); // no crash despite audit throw
     expect(record).toHaveBeenCalled();
+  });
+});
+
+// ── Lebendigkeits-Felder (AC9) ────────────────────────────────────────────────
+
+describe('RegressionDefineRunner — AC9 Lebendigkeits-Felder (startedAt/lastActivityAt/phase)', () => {
+  it('exposes startedAt + lastActivityAt (ISO-8601) immediately after start(), while running', async () => {
+    const runClaude = jest.fn(() => new Promise(() => {})); // never resolves — stays "running"
+    const runner = new RegressionDefineRunner({ runClaude });
+    const { jobId } = runner.start('/workspace/proj', 'proj', { typ: 'bereich', id: 'x' });
+    const job = runner.getJob(jobId);
+    expect(job.status).toBe('running');
+    expect(job.startedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(job.lastActivityAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    // no internal fields leaked alongside the new v2 fields.
+    expect(job).not.toHaveProperty('projectPath');
+    expect(job).not.toHaveProperty('sessionId');
+  });
+
+  it('carries a phase from the fixed set while running the initial round, absent once terminal', async () => {
+    const runClaude = jest.fn(() => new Promise(() => {}));
+    const runner = new RegressionDefineRunner({ runClaude });
+    const { jobId } = runner.start('/workspace/proj', 'proj', { typ: 'bereich', id: 'x' });
+    await flush();
+    const job = runner.getJob(jobId);
+    expect(['session-start', 'reading-specs', 'drafting']).toContain(job.phase);
+  });
+
+  it('needs-review: lastActivityAt advances past startedAt, phase entfällt (kein Rateergebnis)', async () => {
+    let tick = 1000;
+    const now = () => { tick += 10; return tick; };
+    const runClaude = makeSequencedRunClaude([
+      { exitCode: 0, output: VORSCHLAG_OUTPUT, sessionId: 'sess-1', authError: false },
+    ]);
+    const runner = new RegressionDefineRunner({ runClaude, now });
+    const { jobId } = runner.start('/workspace/proj', 'proj', { typ: 'bereich', id: 'x' });
+    await flush();
+    const job = runner.getJob(jobId);
+    expect(job.status).toBe('needs-review');
+    expect(job.phase).toBeUndefined();
+    expect(new Date(job.lastActivityAt).getTime()).toBeGreaterThanOrEqual(new Date(job.startedAt).getTime());
+  });
+
+  it('AC9/AC10 consistency: review() resets startedAt + sets phase:translating for the resume round (identical mechanism as the initial round)', async () => {
+    const runClaude = makeSequencedRunClaude([
+      { exitCode: 0, output: VORSCHLAG_OUTPUT, sessionId: 'sess-1', authError: false },
+      { exitCode: 0, output: '{"status":"done"}', authError: false },
+    ]);
+    let tick = 5000;
+    const now = () => { tick += 10; return tick; };
+    const runner = new RegressionDefineRunner({ runClaude, now });
+    const { jobId } = runner.start('/workspace/proj', 'proj', { typ: 'bereich', id: 'x' });
+    await flush();
+    const startedAtBeforeReview = runner.getJob(jobId).startedAt;
+
+    runner.review(jobId, { vorschlag: [] });
+    // Immediately after review() (before the round settles): running, fresh
+    // startedAt, phase:'translating' — the SAME mechanism as the initial round.
+    const midJob = runner.getJob(jobId);
+    expect(midJob.status).toBe('running');
+    expect(midJob.phase).toBe('translating');
+    expect(typeof midJob.startedAt).toBe('string');
+    // "fresh" startedAt (AC9/AC10): the resume round re-stamps startedAt —
+    // it is NOT simply carried over unchanged from the initial round.
+    expect(new Date(midJob.startedAt).getTime()).toBeGreaterThan(new Date(startedAtBeforeReview).getTime());
+
+    await flush();
+    expect(runner.getJob(jobId).status).toBe('done');
+  });
+
+  it('startedAt/lastActivityAt are exposed on a terminal failed job too (no crash, no leak)', async () => {
+    const runClaude = makeSequencedRunClaude([{ exitCode: 2, output: '', authError: false }]);
+    const runner = new RegressionDefineRunner({ runClaude });
+    const { jobId } = runner.start('/workspace/secret-path', 'secret-path', { typ: 'bereich', id: 'x' });
+    await flush();
+    const job = runner.getJob(jobId);
+    expect(job.status).toBe('failed');
+    expect(job.startedAt).toBeTruthy();
+    expect(job.lastActivityAt).toBeTruthy();
+    expect(job.phase).toBeUndefined();
+    expect(JSON.stringify(job)).not.toMatch(/\/workspace\//);
+  });
+});
+
+// ── Fehlerklasse + sanitisierte Roh-Ausgabe (AC12) ───────────────────────────
+
+describe('RegressionDefineRunner — AC12 error_class + raw_output', () => {
+  it('parse-error: error_class + sanitized raw_output on an unparsable outcome', async () => {
+    const runClaude = makeSequencedRunClaude([
+      { exitCode: 0, output: 'this is not json at all, no fence either', authError: false },
+    ]);
+    const runner = new RegressionDefineRunner({ runClaude });
+    const { jobId } = runner.start('/workspace/proj', 'proj', { typ: 'bereich', id: 'x' });
+    await flush();
+    const job = runner.getJob(jobId);
+    expect(job.status).toBe('failed');
+    expect(job.error_class).toBe(ERROR_CLASS_PARSE);
+    expect(job.raw_output).toContain('this is not json at all');
+  });
+
+  it('parse-error: raw_output is secret-filtered (no token/host-path leak)', async () => {
+    const runClaude = makeSequencedRunClaude([
+      { exitCode: 0, output: 'oops sk-ant-api03-abcdefghijklmnop at /Users/alex/secret/repo', authError: false },
+    ]);
+    const runner = new RegressionDefineRunner({ runClaude });
+    const { jobId } = runner.start('/workspace/proj', 'proj', { typ: 'bereich', id: 'x' });
+    await flush();
+    const job = runner.getJob(jobId);
+    expect(job.raw_output).not.toMatch(/sk-ant-/);
+    expect(job.raw_output).not.toMatch(/\/Users\/alex/);
+  });
+
+  it('raw_output entfällt (kein Leak, kein Crash) when the filter empties the content entirely', async () => {
+    const runClaude = makeSequencedRunClaude([{ exitCode: 0, output: '', authError: false }]);
+    const runner = new RegressionDefineRunner({ runClaude });
+    const { jobId } = runner.start('/workspace/proj', 'proj', { typ: 'bereich', id: 'x' });
+    await flush();
+    const job = runner.getJob(jobId);
+    expect(job.status).toBe('failed');
+    expect(job.error_class).toBe(ERROR_CLASS_PARSE);
+    expect(job.raw_output).toBeUndefined();
+  });
+
+  it('no-session: error_class no-session, no raw_output', async () => {
+    const runClaude = makeSequencedRunClaude([
+      { exitCode: 0, output: VORSCHLAG_OUTPUT, sessionId: undefined, authError: false },
+    ]);
+    const runner = new RegressionDefineRunner({ runClaude });
+    const { jobId } = runner.start('/workspace/proj', 'proj', { typ: 'bereich', id: 'x' });
+    await flush();
+    runner.review(jobId, { vorschlag: [] });
+    await flush();
+    const job = runner.getJob(jobId);
+    expect(job.status).toBe('failed');
+    expect(job.error_class).toBe(ERROR_CLASS_NO_SESSION);
+    expect(job.raw_output).toBeUndefined();
+  });
+
+  it('timeout: error_class timeout, no raw_output', async () => {
+    const runClaude = makeSequencedRunClaude([{ timedOut: true, exitCode: -1, output: '', authError: false }]);
+    const runner = new RegressionDefineRunner({ runClaude });
+    const { jobId } = runner.start('/workspace/proj', 'proj', { typ: 'bereich', id: 'x' });
+    await flush();
+    const job = runner.getJob(jobId);
+    expect(job.error_class).toBe(ERROR_CLASS_TIMEOUT);
+    expect(job.raw_output).toBeUndefined();
+  });
+
+  it('agent-failed: error_class agent-failed on a generic non-zero exit / E2 / spawn error, no raw_output', async () => {
+    const runner1 = new RegressionDefineRunner({ runClaude: makeSequencedRunClaude([{ exitCode: 2, output: '', authError: false }]) });
+    const j1 = runner1.start('/workspace/p1', 'p1', { typ: 'bereich', id: 'x' });
+    await flush();
+    expect(runner1.getJob(j1.jobId).error_class).toBe(ERROR_CLASS_AGENT_FAILED);
+    expect(runner1.getJob(j1.jobId).raw_output).toBeUndefined();
+
+    const runner2 = new RegressionDefineRunner({
+      runClaude: makeSequencedRunClaude([{ exitCode: 0, output: JSON.stringify({ status: 'failed', reason: 'keine deckenden Specs im Bereich' }), authError: false }]),
+    });
+    const j2 = runner2.start('/workspace/p2', 'p2', { typ: 'bereich', id: 'x' });
+    await flush();
+    expect(runner2.getJob(j2.jobId).error_class).toBe(ERROR_CLASS_AGENT_FAILED);
+
+    const runner3 = new RegressionDefineRunner({ runClaude: makeSequencedRunClaude([{ spawnError: true, exitCode: -1, output: '', authError: false }]) });
+    const j3 = runner3.start('/workspace/p3', 'p3', { typ: 'bereich', id: 'x' });
+    await flush();
+    expect(runner3.getJob(j3.jobId).error_class).toBe(ERROR_CLASS_AGENT_FAILED);
+  });
+});
+
+// ── sanitizeRawOutput (pure, AC12) ───────────────────────────────────────────
+
+describe('sanitizeRawOutput — AC12 Trust-Boundary', () => {
+  it('redacts common token/secret shapes and host paths', () => {
+    const out = sanitizeRawOutput(
+      'token sk-ant-api03-abcdefghijklmnopqrstuvwxyz and ghp_ABCDEFGHIJ1234567890ABCDEFGHIJ1234 at /home/node/.secret and /Users/alex/repo',
+    );
+    expect(out).not.toMatch(/sk-ant-/);
+    expect(out).not.toMatch(/ghp_/);
+    expect(out).not.toMatch(/\/home\/node/);
+    expect(out).not.toMatch(/\/Users\/alex/);
+  });
+
+  it('handles non-string input gracefully (no crash)', () => {
+    expect(sanitizeRawOutput(undefined)).toBe('');
+    expect(sanitizeRawOutput(null)).toBe('');
   });
 });
 

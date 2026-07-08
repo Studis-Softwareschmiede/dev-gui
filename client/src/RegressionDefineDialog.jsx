@@ -1,8 +1,9 @@
 /**
  * RegressionDefineDialog.jsx — Definier-Dialog + Redaktions-Overlay für den
  * headless Regressionstest-Definitions-Lauf (docs/specs/regression-define-dialog.md
- * AC6, AC7, AC8 — Backend `RegressionDefineRunner`/`regressionDefineRouter` ist
- * S-307, bereits gelandet).
+ * AC6, AC7, AC8, AC10, AC11, AC13 — Backend `RegressionDefineRunner`/
+ * `regressionDefineRouter` (inkl. v2-Felder AC9/AC12) ist S-307/S-321,
+ * bereits gelandet).
  *
  * State-Machine + Poll-/Retry-Muster 1:1 aus `ObsidianIngestOverlay.jsx`
  * übernommen (Backdrop, `role="dialog"` + `aria-modal`, Fokus beim Öffnen,
@@ -62,6 +63,34 @@
  *         eine klare, secret-freie Fehlermeldung (Text 1:1 vom Backend-
  *         Contract) statt eines leeren Overlays; „Erneut versuchen" springt
  *         zurück in den `target`-Zustand (neuer Lauf möglich).
+ *   AC10 — Lebendige Wartefläche (v2): solange `phase === 'running'`, zeigt
+ *          die Wartefläche (a) einen animierten Aktivitäts-Indikator
+ *          (CSS-Keyframe-Spinner, kein externes Asset), (b) die verstrichene
+ *          Laufzeit als `mm:ss` (aus `startedAt` abgeleitet, per
+ *          `setInterval` fortlaufend aktualisiert — Intervall-Konstante
+ *          `LIVENESS_TICK_MS`, injectable via Prop für Tests), und (c) falls
+ *          `phase` (Backend-Feld) vorliegt, die grobe Phase (deutsches
+ *          Label-Mapping `PHASE_LABELS`); ohne `phase` mindestens Laufzeit
+ *          UND `lastActivityAt` (deutsch formatiert). Identischer Codepfad
+ *          (derselbe `<LivenessIndicator>`-Block) für BEIDE running-Phasen —
+ *          den initialen Vorschlags-Lauf UND den `uebersetzen`-Lauf nach
+ *          Resume (kein zweiter Renderpfad, Konsistenz-Anforderung).
+ *   AC11 — Klare Schließen-Semantik (v2): der Hinweistext unterhalb des
+ *          Lebendigkeits-Indikators (nur sichtbar während `running`) UND der
+ *          `aria-label`/Tooltip-Text des Schließen-Buttons stellen explizit
+ *          klar, dass Schließen (X/`Esc`/Backdrop) NUR die Anzeige ausblendet
+ *          und den serverseitig laufenden Lauf NICHT abbricht — Wiedereinstieg
+ *          über die Regressionstests-Karte ([[regression-panel]]), analog
+ *          `ObsidianIngestOverlay`. Kein Button, der als "Abbrechen" lesbar
+ *          wäre, ohne diese Klarstellung.
+ *   AC13 — Fehler-Transparenz (v2): bei `failed`/`auth-expired` zeigt das
+ *          Overlay — sofern vom Backend geliefert — `error_class` (deutsches
+ *          Label-Mapping `ERROR_CLASS_LABELS`) + die Kurzdiagnose (`error`)
+ *          statt nur der nackten Meldung, weiterhin „Erneut versuchen", und
+ *          — NUR falls `raw_output` vorliegt — einen standardmäßig
+ *          eingeklappten `<details>`-Bereich „Roh-Finalausgabe ansehen" mit
+ *          der bereits serverseitig sanitisierten `raw_output` 1:1 als
+ *          `<pre>`-Text (keine erneute Anreicherung/Verarbeitung im Frontend).
  *
  * ── Component-Props-Vertrag ─────────────────────────────────────────────────
  * @param {{
@@ -75,6 +104,7 @@
  *   onDefineComplete?: () => void,
  *   pollMs?: number,
  *   successLingerMs?: number,
+ *   livenessTickMs?: number,
  * }} props
  *
  * - `projectSlug` — das aktive Projekt (Cockpit-Kontext); Änderung während
@@ -94,6 +124,8 @@
  * - `pollMs` — Poll-Intervall (default 2000; in Tests überschreibbar).
  * - `successLingerMs` — Anzeigedauer der Erfolgsmeldung vor dem Schließen
  *   (default 1200; in Tests überschreibbar).
+ * - `livenessTickMs` — Aktualisierungsintervall der Laufzeitanzeige (AC10,
+ *   default 1000; in Tests überschreibbar).
  *
  * Security (Floor):
  *   - Kein `dangerouslySetInnerHTML` — Vorschlags-/Fehlertexte werden als
@@ -114,8 +146,53 @@ const REGRESSION_DEFINE_POLL_MS = 2000;
 /** Anzeigedauer der Erfolgsmeldung vor dem Schließen (überschreibbar). */
 const REGRESSION_DEFINE_SUCCESS_LINGER_MS = 1200;
 
+/** Aktualisierungsintervall der Laufzeitanzeige (AC10, überschreibbar). */
+const LIVENESS_TICK_MS = 1000;
+
 /** Radiogruppen-Sentinel für die "Verbund…"-Option (analog AreaSelect NEW_SENTINEL-Muster). */
 const VERBUND_SENTINEL = '__verbund__';
+
+/** Deutsches Label-Mapping für die Backend-Phase (AC10, feste Menge). */
+const PHASE_LABELS = {
+  'session-start': 'Sitzung wird gestartet…',
+  'reading-specs': 'Specs werden gelesen…',
+  drafting: 'Vorschlag wird entworfen…',
+  translating: 'Fassung wird übersetzt…',
+};
+
+/** Deutsches Label-Mapping für die Backend-Fehlerklasse (AC13, feste Menge). */
+const ERROR_CLASS_LABELS = {
+  'parse-error': 'Agent-Ausgabe war kein gültiges Rückgabeformat',
+  'no-session': 'Lauf kann nicht fortgesetzt werden (keine Sitzung bekannt)',
+  'agent-failed': 'Definitionslauf ist fehlgeschlagen',
+  timeout: 'Definitionslauf wurde wegen Zeitüberschreitung abgebrochen',
+};
+
+/**
+ * Formatiert eine verstrichene Millisekunden-Dauer als `mm:ss` (AC10).
+ * @param {number} elapsedMs
+ * @returns {string}
+ */
+function formatElapsed(elapsedMs) {
+  const totalSeconds = Math.max(0, Math.floor(elapsedMs / 1000));
+  const mm = Math.floor(totalSeconds / 60);
+  const ss = totalSeconds % 60;
+  return `${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
+}
+
+/**
+ * Formatiert einen ISO-8601-Zeitstempel als lokale Uhrzeit (AC10-Fallback
+ * „letzter Aktivitäts-Zeitstempel" wenn keine `phase` vorliegt). Ungültige/
+ * fehlende Eingabe → leerer String (kein Crash).
+ * @param {string|undefined} iso
+ * @returns {string}
+ */
+function formatTimestamp(iso) {
+  if (typeof iso !== 'string' || iso === '') return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleTimeString();
+}
 
 export function RegressionDefineDialog({
   projectSlug,
@@ -128,12 +205,22 @@ export function RegressionDefineDialog({
   onDefineComplete,
   pollMs = REGRESSION_DEFINE_POLL_MS,
   successLingerMs = REGRESSION_DEFINE_SUCCESS_LINGER_MS,
+  livenessTickMs = LIVENESS_TICK_MS,
 }) {
   const fetch_ = fetchFn ?? globalThis.fetch.bind(globalThis);
 
   // 'target' | 'starting' | 'running' | 'needs-review' | 'submitting' | 'done' | 'error'
   const [phase, setPhase] = useState(initialJobId ? 'running' : 'target');
   const [errorMsg, setErrorMsg] = useState('');
+  const [errorClass, setErrorClass] = useState(''); // AC13, best-effort
+  const [rawOutput, setRawOutput] = useState(''); // AC13, nur Parse-Fehlerpfad
+
+  // ── Lebendigkeits-Felder (AC9/AC10) — identischer Codepfad für BEIDE
+  // running-Phasen (initialer Vorschlags-Lauf + uebersetzen-Lauf nach Resume).
+  const [livenessStartedAt, setLivenessStartedAt] = useState(null);
+  const [livenessLastActivityAt, setLivenessLastActivityAt] = useState(null);
+  const [livenessPhase, setLivenessPhase] = useState(null);
+  const [nowTick, setNowTick] = useState(() => Date.now());
 
   // ── Zustand `target` (AC6) ────────────────────────────────────────────────
   const [areas, setAreas] = useState(null); // null = lädt/fehlgeschlagen, [] = leer
@@ -295,12 +382,14 @@ export function RegressionDefineDialog({
       clearInterval(timer);
     }
 
-    function terminalFailure(msg) {
+    function terminalFailure(msg, data = {}) {
       if (!mountedRef.current) return;
       jobIdRef.current = null;
       projectSlugAtJobStartRef.current = null;
       setPhase('error');
       setErrorMsg(msg);
+      setErrorClass(typeof data.error_class === 'string' ? data.error_class : '');
+      setRawOutput(typeof data.raw_output === 'string' ? data.raw_output : '');
       onJobEnded?.();
     }
 
@@ -327,6 +416,12 @@ export function RegressionDefineDialog({
       try { data = await res.json(); } catch { /* ignore */ }
       if (stopped || !mountedRef.current) return;
 
+      // AC9/AC10: Lebendigkeits-Felder bei JEDEM Poll mitziehen — identischer
+      // Codepfad für beide running-Phasen (Vorschlag + uebersetzen/Resume).
+      if (typeof data.startedAt === 'string') setLivenessStartedAt(data.startedAt);
+      if (typeof data.lastActivityAt === 'string') setLivenessLastActivityAt(data.lastActivityAt);
+      setLivenessPhase(typeof data.phase === 'string' ? data.phase : null);
+
       if (data.status === 'needs-review') {
         stop();
         setVorschlagText(JSON.stringify(data.vorschlag ?? {}, null, 2));
@@ -349,6 +444,7 @@ export function RegressionDefineDialog({
             (data.status === 'auth-expired'
               ? 'Anmeldung abgelaufen — bitte erneut versuchen.'
               : 'Definitionslauf fehlgeschlagen — bitte erneut versuchen.'),
+          data,
         );
         return;
       }
@@ -424,9 +520,28 @@ export function RegressionDefineDialog({
     setVorschlagText('');
     setReviewError('');
     setStartError('');
+    setErrorClass('');
+    setRawOutput('');
+    setLivenessStartedAt(null);
+    setLivenessLastActivityAt(null);
+    setLivenessPhase(null);
     setPollGeneration(0);
     setPhase('target');
   }, []);
+
+  // AC10: Laufzeitanzeige (mm:ss) fortlaufend aktualisieren, solange `running`.
+  useEffect(() => {
+    if (phase !== 'running') return;
+    setNowTick(Date.now());
+    const t = setInterval(() => setNowTick(Date.now()), livenessTickMs);
+    return () => clearInterval(t);
+  }, [phase, livenessTickMs]);
+
+  const elapsedLabel = livenessStartedAt
+    ? formatElapsed(nowTick - new Date(livenessStartedAt).getTime())
+    : '00:00';
+  const phaseLabel = livenessPhase ? PHASE_LABELS[livenessPhase] : null;
+  const lastActivityLabel = formatTimestamp(livenessLastActivityAt);
 
   const titleId = 'regression-define-dialog-title';
 
@@ -442,6 +557,10 @@ export function RegressionDefineDialog({
         style={styles.dialog}
         data-testid="regression-define-dialog"
       >
+        {/* AC10: kleine, scoped Keyframe-Animation für den Aktivitäts-Indikator
+            (kein externes Asset, kein globaler CSS-Import nötig). */}
+        <style>{'@keyframes regression-define-spin { to { transform: rotate(360deg); } }'}</style>
+
         <h2 id={titleId} style={styles.heading}>Regressionstest definieren</h2>
 
         {phase === 'target' && (
@@ -543,14 +662,40 @@ export function RegressionDefineDialog({
         )}
 
         {phase === 'running' && (
-          <p role="status" aria-live="polite" style={styles.hint} data-testid="regression-define-running">
-            Bereich wird analysiert — Vorschlag wird erstellt…
-          </p>
+          <div role="status" aria-live="polite" style={styles.hint} data-testid="regression-define-running">
+            <div style={styles.livenessRow}>
+              <span style={styles.spinner} aria-hidden="true" data-testid="regression-define-liveness-spinner" />
+              <span data-testid="regression-define-elapsed">{elapsedLabel}</span>
+              {phaseLabel && (
+                <span data-testid="regression-define-phase">{phaseLabel}</span>
+              )}
+              {!phaseLabel && lastActivityLabel && (
+                <span data-testid="regression-define-last-activity">
+                  Zuletzt aktiv: {lastActivityLabel}
+                </span>
+              )}
+            </div>
+            <p style={styles.hint} data-testid="regression-define-close-hint">
+              Schließen blendet die Anzeige nur aus — der Lauf läuft im Hintergrund
+              weiter. Wiedereinstieg jederzeit über die Regressionstests-Karte.
+            </p>
+          </div>
         )}
 
         {phase === 'error' && (
           <div role="alert" style={styles.error} data-testid="regression-define-error">
+            {errorClass && ERROR_CLASS_LABELS[errorClass] && (
+              <div style={styles.errorClassLabel} data-testid="regression-define-error-class">
+                {ERROR_CLASS_LABELS[errorClass]}
+              </div>
+            )}
             {errorMsg}
+            {rawOutput && (
+              <details style={styles.rawOutputDetails} data-testid="regression-define-raw-output-details">
+                <summary>Roh-Finalausgabe ansehen</summary>
+                <pre style={styles.rawOutputPre} data-testid="regression-define-raw-output-content">{rawOutput}</pre>
+              </details>
+            )}
             <div style={styles.buttonRow}>
               <button
                 type="button"
@@ -617,6 +762,16 @@ export function RegressionDefineDialog({
             style={styles.btnSecondary}
             onClick={handleClose}
             data-testid="regression-define-close-btn"
+            aria-label={
+              phase === 'running' || phase === 'needs-review' || phase === 'submitting'
+                ? 'Schließen (blendet nur die Anzeige aus, der Lauf läuft weiter)'
+                : 'Schließen'
+            }
+            title={
+              phase === 'running' || phase === 'needs-review' || phase === 'submitting'
+                ? 'Blendet nur die Anzeige aus — der Lauf läuft im Hintergrund weiter.'
+                : undefined
+            }
           >
             Schließen
           </button>
@@ -667,6 +822,45 @@ const styles = {
     fontSize: 13,
     color: '#9ca3af',
     lineHeight: 1.5,
+  },
+  livenessRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 10,
+    fontSize: 13,
+    color: '#e5e7eb',
+    marginBottom: 8,
+  },
+  spinner: {
+    display: 'inline-block',
+    width: 14,
+    height: 14,
+    borderRadius: '50%',
+    border: '2px solid #374151',
+    borderTopColor: '#93c5fd',
+    animation: 'regression-define-spin 0.8s linear infinite',
+  },
+  errorClassLabel: {
+    fontWeight: 700,
+    marginBottom: 4,
+  },
+  rawOutputDetails: {
+    marginTop: 8,
+    marginBottom: 8,
+    fontSize: 12,
+    color: '#9ca3af',
+  },
+  rawOutputPre: {
+    whiteSpace: 'pre-wrap',
+    wordBreak: 'break-word',
+    background: '#111',
+    border: '1px solid #374151',
+    borderRadius: 6,
+    padding: '8px 10px',
+    maxHeight: 240,
+    overflowY: 'auto',
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+    fontSize: 11,
   },
   label: {
     display: 'block',
