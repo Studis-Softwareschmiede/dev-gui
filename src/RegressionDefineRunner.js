@@ -61,39 +61,18 @@
  *
  * Fehlerklasse + sanitisierte Roh-Ausgabe (v2, AC12): jeder terminale `failed`-
  * Zustand trägt `error_class` aus fester Menge (`parse-error`|`no-session`|
- * `agent-failed`|`timeout`). NUR im Parse-/Format-Fehlerpfad liefert der Job
- * zusätzlich die serverseitig secret-gefilterte Roh-Finalausgabe (`raw_output`,
+ * `agent-failed`|`timeout`). NUR im Parse-/Format-Fehlerpfad der Finalausgabe
+ * (`parseRegressionDefineOutcome()`-Wurf) liefert der Job zusätzlich die
+ * serverseitig secret-gefilterte Roh-Finalausgabe (`raw_output`,
  * `sanitizeRawOutput()`) — Trust-Boundary: Tokens/API-Keys/OAuth-Tokens/
  * Host-Pfade werden VOR dem Ablegen im Job entfernt, bevor die Job-Sicht sie
  * verlässt.
- *
- * Ergebnis-Übergabe per Datei statt stdout (v3, AC14-AC17): die Ergebnisquelle
- * ist AB v3 NICHT MEHR die stdout-Finalausgabe des `claude -p`-Laufs, sondern
- * eine deterministische Ergebnis-Datei (`ergebnisDateiPath()`,
- * `<repo>/board/runs/regression-define/<jobId>.json`), die dem Aufruf als
- * `ergebnis_datei=<absoluter-pfad>`-Argument mitgegeben wird (identisch für
- * Initial- UND Resume-Runde, AC14). Grund: die ÄUSSERE `claude`-Session
- * dispatcht den Definier-Agenten als Sub-Agent und schreibt als Finalausgabe
- * teils eine Prosa-Zusammenfassung statt reinem JSON — der stdout-Parse
- * scheiterte dadurch strukturell (verifizierter Architektur-Bug, zwei
- * fehlgeschlagene E2E-Läufe). Der Runner legt das Zielverzeichnis idempotent
- * an, wartet auf Prozess-Ende (`close`), liest DIE DATEI (nicht stdout) und
- * parst deren Inhalt mit der UNVERÄNDERTEN `parseRegressionDefineOutcome()`
- * (AC15). Fehlt die Datei oder ist ihr Inhalt kein gültiges JSON, endet der
- * Job `failed`/`error_class:'parse-error'` mit differenzierter Kurzdiagnose
- * („Ergebnisdatei fehlt" vs. „Ergebnisdatei kein gültiges JSON", AC16); die
- * sanitisierte stdout-Prosa bleibt in beiden Fällen als `raw_output`-
- * Diagnosehilfe erhalten (AC12/AC16 unverändert). Nach erfolgreichem Konsum
- * räumt der Runner die Ergebnisdatei best-effort auf (AC17); der Schreib-
- * Vertrag selbst (atomar tmp+rename) ist normativ in agent-flow verortet.
  *
  * @module RegressionDefineRunner
  */
 
 import { spawn as nodeSpawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, unlink } from 'node:fs/promises';
-import path from 'node:path';
 import { ProjectJobLock } from './ProjectJobLock.js';
 import { buildChildEnv, isAuthError, AUTH_EXPIRED_MESSAGE } from './HeadlessRunnerCore.js';
 
@@ -115,11 +94,9 @@ const GENERIC_FAILURE_MESSAGE = 'Regressions-Definitionslauf fehlgeschlagen';
 const TIMEOUT_FAILURE_MESSAGE = 'Regressions-Definitionslauf abgebrochen (Timeout)';
 const INTERNAL_FAILURE_MESSAGE = 'Interner Fehler im Regressions-Definitions-Runner';
 const NOT_AVAILABLE_MESSAGE = 'claude nicht verfügbar';
+const UNPARSABLE_MESSAGE = 'Vorschlag konnte nicht gelesen werden';
 const NO_SESSION_MESSAGE = 'Regressions-Definitionslauf kann nicht fortgesetzt werden';
 const DONE_RESULT_MESSAGE = 'Regressionstest-Definition abgeschlossen';
-// AC16 — differenzierte Kurzdiagnosen (beide bleiben error_class:'parse-error').
-const RESULT_FILE_MISSING_MESSAGE = 'Ergebnisdatei fehlt';
-const RESULT_FILE_INVALID_JSON_MESSAGE = 'Ergebnisdatei kein gültiges JSON';
 
 // ── Fehlerklassen (AC12, feste Menge) ─────────────────────────────────────────
 export const ERROR_CLASS_PARSE = 'parse-error';
@@ -195,21 +172,6 @@ export function zielToArg(ziel) {
   if (ziel.typ === 'bereich') return `bereich=${ziel.id}`;
   if (ziel.typ === 'verbund') return `verbund=${ziel.id}`;
   throw new Error(`unknown ziel.typ: ${String(ziel?.typ)}`);
-}
-
-/**
- * Baut den absoluten Pfad der Ergebnis-Datei für einen Job (AC14, v3
- * Ergebnis-Übergabe per Datei statt stdout). Pfad-Konvention:
- * `<repo>/board/runs/regression-define/<jobId>.json`. Reine Funktion (kein
- * Seiteneffekt) — das Zielverzeichnis wird vom Aufrufer (`#runRound`)
- * idempotent angelegt, bevor der Kindprozess startet.
- *
- * @param {string} projectPath - aufgelöster, validierter absoluter Projekt-Pfad (Repo-Root).
- * @param {string} jobId
- * @returns {string}
- */
-export function ergebnisDateiPath(projectPath, jobId) {
-  return path.join(projectPath, 'board', 'runs', 'regression-define', `${jobId}.json`);
 }
 
 /**
@@ -342,10 +304,6 @@ export function parseRegressionDefineOutcome(raw) {
  *   argv-Element (`'<command> modus=vorschlag projekt=<repo> (bereich=<id>|verbund=<name>) [stichworte=...]'`).
  * @param {string} [params.resumeSessionId] - Resume-Runde: claude session-id.
  * @param {unknown} [params.reviewed] - redigierte Fassung (Resume via STDIN).
- * @param {string} [params.ergebnisDatei] - AC14: absoluter Ausgabe-Pfad, als
- *   `ergebnis_datei=<pfad>` an denselben argv-Prompt angehängt (identisch für
- *   Initial- UND Resume-Runde) — die agent-flow-Seite schreibt das
- *   Rückgabeformat-JSON atomar genau dorthin (normativ in agent-flow).
  * @param {number} [params.timeoutMs]
  * @param {Function} [params.spawnFn] - injectable (default node:child_process spawn).
  * @returns {Promise<{ exitCode: number|null, output: string, sessionId: string|undefined,
@@ -356,18 +314,13 @@ export function defaultRunClaude({
   promptArg,
   resumeSessionId,
   reviewed,
-  ergebnisDatei,
   timeoutMs = DEFAULT_REGRESSION_DEFINE_TIMEOUT_MS,
   spawnFn = nodeSpawn,
 }) {
   return new Promise((resolve) => {
     const isResume = typeof resumeSessionId === 'string' && resumeSessionId !== '';
-    const ergebnisDateiArg = typeof ergebnisDatei === 'string' && ergebnisDatei !== ''
-      ? ` ergebnis_datei=${ergebnisDatei}`
-      : '';
-    const resumePromptArg = `${REGRESSION_DEFINE_COMMAND} modus=${RESUME_PROMPT_MODE}${ergebnisDateiArg}`;
-    const initialPromptArg = `${String(promptArg ?? '')}${ergebnisDateiArg}`;
-    const argv = ['-p', isResume ? resumePromptArg : initialPromptArg];
+    const resumePromptArg = `${REGRESSION_DEFINE_COMMAND} modus=${RESUME_PROMPT_MODE}`;
+    const argv = ['-p', isResume ? resumePromptArg : String(promptArg ?? '')];
     if (isResume) argv.push('--resume', resumeSessionId);
     argv.push('--dangerously-skip-permissions', '--output-format', 'json');
 
@@ -596,17 +549,6 @@ export class RegressionDefineRunner {
       return;
     }
 
-    // AC14: Ergebnis-Datei-Pfad je Runde identisch (Initial- UND Resume-Runde) —
-    // Zielverzeichnis idempotent anlegen, BEVOR der Kindprozess startet.
-    const ergebnisDatei = ergebnisDateiPath(job.projectPath, jobId);
-    try {
-      await mkdir(path.dirname(ergebnisDatei), { recursive: true });
-    } catch {
-      // Verzeichnis-Anlage best-effort — schlägt sie fehl, wird das spätere
-      // Datei-Lesen ohnehin mit "Ergebnisdatei fehlt" terminal enden (kein
-      // separater Fehlerpfad nötig, kein Crash).
-    }
-
     // AC9: sobald der Kindprozess tatsächlich läuft, grobe Phase auf
     // "reading-specs" fortschreiben (Initial-Runde) — Resume-Runde bleibt bei
     // `translating` (in review() bereits gesetzt).
@@ -619,7 +561,6 @@ export class RegressionDefineRunner {
         promptArg: resume ? undefined : promptArg,
         resumeSessionId: resume ? job.sessionId : undefined,
         reviewed,
-        ergebnisDatei,
       });
     } catch {
       this.#finish(jobId, 'failed', { error: INTERNAL_FAILURE_MESSAGE, error_class: ERROR_CLASS_AGENT_FAILED });
@@ -646,45 +587,20 @@ export class RegressionDefineRunner {
     // AC9: Ausgabe liegt vor, wird jetzt in ein Ergebnis übersetzt.
     this.#touch(jobId, { phase: resume ? PHASE_TRANSLATING : PHASE_DRAFTING });
 
-    // AC15: Ergebnisquelle ist die Datei, NICHT mehr stdout (`res.output` dient
-    // nur noch als sanitisierte `raw_output`-Diagnose im Fehlerfall, AC12/AC16).
-    // AC16: zwei unterscheidbare Fehlerfälle, beide error_class:'parse-error'.
-    let fileContent;
-    try {
-      fileContent = await readFile(ergebnisDatei, 'utf8');
-    } catch {
-      const sanitized = sanitizeRawOutput(res.output);
-      this.#finish(jobId, 'failed', {
-        error: RESULT_FILE_MISSING_MESSAGE,
-        error_class: ERROR_CLASS_PARSE,
-        ...(sanitized !== '' ? { raw_output: sanitized } : {}),
-      });
-      return;
-    }
-
     let outcome;
     try {
-      outcome = parseRegressionDefineOutcome(fileContent);
+      outcome = parseRegressionDefineOutcome(res.output);
     } catch {
-      // Nicht-parsbarer/kaputter Datei-Inhalt → definierter Fehlerzustand,
-      // secret-frei, Retry möglich (AC2/AC16). AC12: Fehlerklasse `parse-error` +
-      // serverseitig secret-gefilterte Roh-Finalausgabe (stdout, nur Diagnose).
+      // Nicht-parsbarer/kaputter Vorschlags-Ausgang → definierter Fehlerzustand,
+      // secret-frei, Retry möglich (AC2). AC12: Fehlerklasse `parse-error` +
+      // serverseitig secret-gefilterte Roh-Finalausgabe (falls vorhanden).
       const sanitized = sanitizeRawOutput(res.output);
       this.#finish(jobId, 'failed', {
-        error: RESULT_FILE_INVALID_JSON_MESSAGE,
+        error: UNPARSABLE_MESSAGE,
         error_class: ERROR_CLASS_PARSE,
         ...(sanitized !== '' ? { raw_output: sanitized } : {}),
       });
       return;
-    }
-
-    // AC17: Ergebnisdatei nach erfolgreichem Konsum aufräumen (best-effort —
-    // ein Löschfehler ist kein terminaler Fehler, das Ergebnis ist bereits
-    // konsumiert).
-    try {
-      await unlink(ergebnisDatei);
-    } catch {
-      // best-effort, silently ignorieren (AC17).
     }
 
     if (outcome.status === 'failed') {
