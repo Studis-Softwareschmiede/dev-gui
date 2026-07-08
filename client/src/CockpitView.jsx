@@ -176,6 +176,20 @@
  *   AC6/AC7 — natives `<button type="button">`, `minHeight:44`, Fokusring
  *          erhalten, `data-testid`-Präfix `regression-` (D16).
  *
+ * regression-result-view (S-314):
+ *   AC3-AC6 — eigene Karte „Regressions-Ergebnisse" (`regression-result-card`,
+ *          eigener `regressionResultOpen`-Öffnen-State, EIN Button „Ergebnisse
+ *          ansehen") direkt NACH der regression-card platziert — bewusst NICHT
+ *          IN die regression-card selbst integriert, da regression-panel AC2
+ *          dort GENAU zwei Buttons verlangt und „Ergebnis-Ansicht/Drilldown"
+ *          dort explizit als Nicht-Ziel geführt ist. Öffnet `RegressionResultView`
+ *          (eigene Komponente, Dialog-Muster wie `RegressionRunDialog`): Lauf-
+ *          Liste (Datum/Suite/grün-rot/Dauer/Zähler, jüngste zuerst), einfacher
+ *          grün/rot-Trend je Suite, Drilldown in die CTRF-Testfälle, Debug-
+ *          Artefakt-Link nur bei roten Läufen. Konsumiert ausschließlich die
+ *          bereits gelandete Read-API (S-313, `src/routers/regressionRuns.js`)
+ *          — kein neuer Backend-Code.
+ *
  * A11y (WCAG 2.1 AA):
  *   - Reiter-Leiste als <nav role="tablist"> mit aria-selected.
  *   - Aktive Reiter-Panel mit role="tabpanel".
@@ -205,6 +219,7 @@ import { CostModeDriftNotice } from './CostModeDriftNotice.jsx';
 import { IdeaSpecifyChatModal } from './IdeaSpecifyChatModal.jsx';
 import { RegressionDefineDialog } from './RegressionDefineDialog.jsx';
 import { RegressionRunDialog } from './RegressionRunDialog.jsx';
+import { RegressionResultView } from './RegressionResultView.jsx';
 import { COST_MODES, COST_MODE_INFO } from './costMode.js';
 
 /** @type {Array<{ id: string, label: string }>} */
@@ -590,6 +605,12 @@ function FactoryWorkspace({
   const [regressionDefineOpen, setRegressionDefineOpen] = useState(false);
   const regressionDefineBtnRef = useRef(null);
   const regressionRunBtnRef = useRef(null);
+  // regression-result-view AC3-AC6 (S-314): eigene Karte + eigener
+  // Öffnen-State — bewusst NICHT in der regression-card selbst (die trägt
+  // laut regression-panel AC2 GENAU zwei Buttons, „Ergebnis-Ansicht/
+  // Drilldown" ist dort explizit Nicht-Ziel).
+  const [regressionResultOpen, setRegressionResultOpen] = useState(false);
+  const regressionResultBtnRef = useRef(null);
   /**
    * regression-define-dialog AC8/E1: der Wiedereinstiegs-Job wird ZUSAMMEN
    * mit dem Projekt gehalten, für das er gestartet wurde (Muster
@@ -620,6 +641,12 @@ function FactoryWorkspace({
   }, []);
   const handleRegressionDefineClose = useCallback(() => {
     setRegressionDefineOpen(false);
+  }, []);
+  const handleRegressionResultOpen = useCallback(() => {
+    setRegressionResultOpen(true);
+  }, []);
+  const handleRegressionResultClose = useCallback(() => {
+    setRegressionResultOpen(false);
   }, []);
   // regression-run AC4/AC6 (S-311): nach erfolgreichem Start best-effort
   // sofort auf "running" schalten — der reguläre Poll (unten) übernimmt
@@ -1201,6 +1228,32 @@ function FactoryWorkspace({
           )}
         </div>
 
+        {/* regression-result-view AC3-AC6 (S-314): eigene Karte — bewusst
+            NICHT in regression-card selbst (regression-panel AC2 verlangt
+            dort GENAU zwei Buttons; „Ergebnis-Ansicht/Drilldown" ist dort
+            explizit Nicht-Ziel). Read-only, konsumiert die bereits gelandete
+            Read-API aus S-313 (regressionRuns.js). */}
+        <div
+          style={styles.flowTriggerBox}
+          data-testid="regression-result-card"
+          data-result-view-open={regressionResultOpen}
+        >
+          <div style={styles.flowTriggerHeader}>Regressions-Ergebnisse</div>
+          <p style={styles.flowTriggerHint}>
+            Lauf-Liste, grün/rot-Trend je Suite, Testfall-Drilldown und Debug-Artefakte (bei Rot).
+          </p>
+          <button
+            type="button"
+            ref={regressionResultBtnRef}
+            style={styles.btnFlowTrigger}
+            onClick={handleRegressionResultOpen}
+            aria-label="Regressions-Ergebnisse ansehen — öffnet die Ergebnis-Ansicht"
+            data-testid="regression-result-open-btn"
+          >
+            Ergebnisse ansehen
+          </button>
+        </div>
+
         </div>
       </div>
 
@@ -1274,6 +1327,17 @@ function FactoryWorkspace({
           triggerRef={regressionRunBtnRef}
           fetchFn={fetchFn}
           onRunStarted={handleRegressionRunStarted}
+        />
+      )}
+
+      {/* regression-result-view AC3-AC6 (S-314): Lauf-Liste, grün/rot-Trend
+          je Suite, Drilldown, Debug-Artefakt-Zugriff (nur bei Rot). */}
+      {regressionResultOpen && (
+        <RegressionResultView
+          projectSlug={activeRepo}
+          onClose={handleRegressionResultClose}
+          triggerRef={regressionResultBtnRef}
+          fetchFn={fetchFn}
         />
       )}
     </div>

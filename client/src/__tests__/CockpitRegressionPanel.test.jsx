@@ -37,8 +37,18 @@
  *   - Lauf-Status-Quelle nicht erreichbar (404/Netzwerkfehler) → kein Crash,
  *     Karte bleibt bei „kein Lauf".
  *
+ * Covers (regression-result-view):
+ *   AC3-AC6 — Verdrahtung der „Regressions-Ergebnisse"-Karte
+ *          (`regression-result-card`): Klick auf `regression-result-open-btn`
+ *          schaltet den `regressionResultOpen`-Öffnen-State um
+ *          (`data-result-view-open`-Anker, analog `regression-card`) und
+ *          mountet `RegressionResultView` mit `projectSlug=activeRepo`. Die
+ *          Ansicht selbst (Lauf-Liste/Trend/Drilldown/Artefakt-Zugriff) ist
+ *          in `RegressionResultView.test.jsx` in Isolation abgedeckt —
+ *          `RegressionResultView` ist hier gemockt.
+ *
  * Terminal, BoardView, SpecView, IdeaCaptureModal,
- * IdeaSpecifyChatModal, CostModeDriftNotice sind gemockt.
+ * IdeaSpecifyChatModal, CostModeDriftNotice, RegressionResultView sind gemockt.
  *
  * @jest-environment jsdom
  */
@@ -52,6 +62,17 @@ jest.unstable_mockModule('../Terminal.jsx', () => ({ Terminal: () => null }));
 jest.unstable_mockModule('../IdeaCaptureModal.jsx', () => ({ IdeaCaptureModal: () => null }));
 jest.unstable_mockModule('../IdeaSpecifyChatModal.jsx', () => ({ IdeaSpecifyChatModal: () => null }));
 jest.unstable_mockModule('../CostModeDriftNotice.jsx', () => ({ CostModeDriftNotice: () => null }));
+jest.unstable_mockModule('../RegressionResultView.jsx', async () => {
+  const R = (await import('react')).default;
+  return {
+    RegressionResultView: ({ projectSlug }) =>
+      R.createElement(
+        'div',
+        { 'data-testid': 'regression-result-view-stub', 'data-project-slug': projectSlug ?? '' },
+        'RegressionResultView Mock',
+      ),
+  };
+});
 jest.unstable_mockModule('../BoardView.jsx', async () => {
   const R = (await import('react')).default;
   return {
@@ -201,6 +222,27 @@ describe('CockpitView — regression-panel AC3: Klick-Ziele', () => {
       fireEvent.click(document.querySelector('[data-testid="regression-define-btn"]'));
     });
     expect(card.getAttribute('data-define-dialog-open')).toBe('true');
+  });
+});
+
+// ── regression-result-view AC3-AC6: Verdrahtung „Regressions-Ergebnisse" ──────
+
+describe('CockpitView — regression-result-view AC3-AC6: Verdrahtung der Ergebnis-Karte', () => {
+  it('clicking „Ergebnisse ansehen" flips the result-view-open anchor and mounts RegressionResultView with the active project slug', async () => {
+    renderCockpit();
+    const card = document.querySelector('[data-testid="regression-result-card"]');
+    expect(card).toBeTruthy();
+    expect(card.getAttribute('data-result-view-open')).toBe('false');
+    expect(document.querySelector('[data-testid="regression-result-view-stub"]')).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="regression-result-open-btn"]'));
+    });
+
+    expect(card.getAttribute('data-result-view-open')).toBe('true');
+    const stub = document.querySelector('[data-testid="regression-result-view-stub"]');
+    expect(stub).toBeTruthy();
+    expect(stub.getAttribute('data-project-slug')).toBe('my-project');
   });
 });
 

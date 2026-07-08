@@ -1,0 +1,344 @@
+/**
+ * RegressionResultView.test.jsx — Tests für die Regressions-Ergebnis-Ansicht
+ * (docs/specs/regression-result-view.md AC3-AC6, S-314 — Backend Read-API
+ * `src/routers/regressionRuns.js` ist S-313, bereits gelandet, hier nur der
+ * Client-Konsum der dokumentierten Response-Shapes).
+ *
+ * Covers (regression-result-view):
+ *   AC3 — Lauf-Liste je Projekt (Datum, Suite, grün/rot, Dauer, Testfall-
+ *          Zähler `passed/total`), jüngste zuerst (Store-Reihenfolge
+ *          übernommen, nicht neu sortiert); grün/rot mit Icon + Text + Farbe
+ *          (nie Farbe allein, WCAG 2.1 AA).
+ *   AC4 — Einfacher grün/rot-Trend je Suite: Abfolge der letzten Läufe DIESER
+ *          Suite (aus der Liste gruppiert). Suite mit nur einem Lauf → Trend
+ *          zeigt genau diesen einen Zustand (Edge-Case).
+ *   AC5 — Drilldown: Klick auf einen Lauf lädt
+ *          `GET .../regression-runs/:runId` und zeigt die Testfälle aus
+ *          `ctrf.results.tests[]` (Name + grün/rot + Fehlermeldung bei Rot).
+ *          Unlesbares/unerwartetes CTRF-Format → degradierte Meldung statt
+ *          Crash.
+ *   AC6 — Debug-Artefakt-Link NUR wenn `status === 'failed'`; grüne Läufe
+ *          zeigen keinen Link (kein toter Link).
+ *
+ * Edge-Cases (Spec):
+ *   - Keine Läufe → „Noch kein Regressionstest gelaufen." (kein Fehler).
+ *   - CTRF-Details unlesbar/teilweise → Lauf bleibt in der Liste, Drilldown
+ *     zeigt degradierte Meldung statt Crash.
+ *
+ * @jest-environment jsdom
+ */
+
+import { describe, it, expect, jest, beforeEach, afterEach } from '@jest/globals';
+import { render, act, fireEvent, waitFor } from '@testing-library/react';
+
+const React = (await import('react')).default;
+const { RegressionResultView } = await import('../RegressionResultView.jsx');
+
+let origFetch;
+beforeEach(() => { origFetch = globalThis.fetch; });
+afterEach(() => { globalThis.fetch = origFetch; });
+
+const LIST_RE = /\/api\/projects\/[^/]+\/regression-runs$/;
+const RUN_RE = /\/api\/projects\/[^/]+\/regression-runs\/([^/]+)$/;
+
+const RUN_PASSED = {
+  runId: 'run-2',
+  suite: 'board',
+  scopeTyp: 'bereich',
+  status: 'passed',
+  startedAt: '2026-07-08T10:00:00.000Z',
+  durationMs: 4200,
+  counts: { passed: 5, failed: 0, total: 5 },
+};
+const RUN_FAILED = {
+  runId: 'run-1',
+  suite: 'board',
+  scopeTyp: 'bereich',
+  status: 'failed',
+  startedAt: '2026-07-07T10:00:00.000Z',
+  durationMs: 6100,
+  counts: { passed: 3, failed: 2, total: 5 },
+  artifacts: { htmlReport: 'playwright-report' },
+};
+
+/**
+ * @param {{ runs?: Array, listOk?: boolean, runDetails?: Record<string, object>, runOk?: boolean }} opts
+ */
+function makeFetch({
+  runs = [RUN_PASSED, RUN_FAILED],
+  listOk = true,
+  runDetails = {},
+  runOk = true,
+} = {}) {
+  const calls = [];
+  const fetchFn = jest.fn(async (url) => {
+    calls.push(url);
+    if (LIST_RE.test(url)) {
+      if (!listOk) return { ok: false, status: 500, json: async () => ({ error: 'boom' }) };
+      return { ok: true, status: 200, json: async () => ({ runs }) };
+    }
+    const runMatch = url.match(RUN_RE);
+    if (runMatch) {
+      if (!runOk) return { ok: false, status: 404, json: async () => ({ error: 'nicht gefunden' }) };
+      const runId = runMatch[1];
+      const run = runDetails[runId];
+      return { ok: true, status: 200, json: async () => ({ run }) };
+    }
+    return { ok: false, status: 404, json: async () => ({ error: 'unbekannt' }) };
+  });
+  fetchFn.calls = calls;
+  return fetchFn;
+}
+
+async function renderView(fetchFn, props = {}) {
+  const onClose = jest.fn();
+  render(
+    React.createElement(RegressionResultView, {
+      projectSlug: 'my-project',
+      onClose,
+      fetchFn,
+      ...props,
+    }),
+  );
+  await act(async () => { await Promise.resolve(); });
+  return { onClose };
+}
+
+// ── AC3: Lauf-Liste ─────────────────────────────────────────────────────────
+
+describe('RegressionResultView — AC3: Lauf-Liste', () => {
+  it('renders the run list with date, suite, status (icon+text), duration and passed/total', async () => {
+    const fetchFn = makeFetch();
+    await renderView(fetchFn);
+
+    const list = document.querySelector('[data-testid="regression-result-list"]');
+    expect(list).toBeTruthy();
+    const items = list.querySelectorAll('li');
+    expect(items).toHaveLength(2);
+
+    // jüngste zuerst — Store liefert bereits in dieser Reihenfolge, Liste übernimmt sie unverändert.
+    expect(items[0].textContent).toMatch(/board/);
+    expect(items[0].textContent).toMatch(/5\/5 bestanden/);
+    expect(items[1].textContent).toMatch(/3\/5 bestanden/);
+  });
+
+  it('status badge shows icon AND text (never color alone) for passed and failed', async () => {
+    const fetchFn = makeFetch();
+    await renderView(fetchFn);
+
+    const badges = document.querySelectorAll('[data-testid="regression-result-status-badge"]');
+    expect(badges.length).toBeGreaterThanOrEqual(2);
+    const passedBadge = Array.from(badges).find((b) => b.dataset.status === 'passed');
+    const failedBadge = Array.from(badges).find((b) => b.dataset.status === 'failed');
+    expect(passedBadge.textContent).toMatch(/✓/);
+    expect(passedBadge.textContent).toMatch(/Erfolgreich/);
+    expect(failedBadge.textContent).toMatch(/✗/);
+    expect(failedBadge.textContent).toMatch(/Fehlgeschlagen/);
+  });
+
+  it('shows duration formatted (seconds for >=1000ms)', async () => {
+    const fetchFn = makeFetch();
+    await renderView(fetchFn);
+    const list = document.querySelector('[data-testid="regression-result-list"]');
+    expect(list.textContent).toMatch(/4\.2 s/);
+    expect(list.textContent).toMatch(/6\.1 s/);
+  });
+
+  it('Edge-Case: keine Läufe → Hinweistext, kein Fehler', async () => {
+    const fetchFn = makeFetch({ runs: [] });
+    await renderView(fetchFn);
+    const empty = document.querySelector('[data-testid="regression-result-empty"]');
+    expect(empty).toBeTruthy();
+    expect(empty.textContent).toMatch(/Noch kein Regressionstest gelaufen\./);
+  });
+
+  it('Edge-Case: Liste nicht erreichbar (500) → degradiert auf leere Liste, kein Crash', async () => {
+    const fetchFn = makeFetch({ listOk: false });
+    await renderView(fetchFn);
+    const empty = document.querySelector('[data-testid="regression-result-empty"]');
+    expect(empty).toBeTruthy();
+  });
+});
+
+// ── AC4: grün/rot-Trend je Suite ────────────────────────────────────────────
+
+describe('RegressionResultView — AC4: grün/rot-Trend je Suite', () => {
+  it('renders one trend entry per suite with the sequence of that suite\'s runs', async () => {
+    const fetchFn = makeFetch();
+    await renderView(fetchFn);
+
+    const trend = document.querySelector('[data-testid="regression-result-trend-board"]');
+    expect(trend).toBeTruthy();
+    const dots = trend.querySelectorAll('[data-testid="regression-result-trend"] > span[aria-hidden="true"]');
+    expect(dots).toHaveLength(2);
+    // jüngster Lauf zuerst (RUN_PASSED), dann RUN_FAILED.
+    expect(dots[0].textContent).toBe('✓');
+    expect(dots[1].textContent).toBe('✗');
+  });
+
+  it('Edge-Case: Suite mit nur einem Lauf zeigt genau diesen einen Zustand', async () => {
+    const fetchFn = makeFetch({ runs: [RUN_PASSED] });
+    await renderView(fetchFn);
+    const trend = document.querySelector('[data-testid="regression-result-trend-board"]');
+    const dots = trend.querySelectorAll('[data-testid="regression-result-trend"] > span[aria-hidden="true"]');
+    expect(dots).toHaveLength(1);
+    expect(dots[0].textContent).toBe('✓');
+  });
+
+  it('groups distinct suites separately', async () => {
+    const otherSuiteRun = { ...RUN_PASSED, runId: 'run-3', suite: 'vps' };
+    const fetchFn = makeFetch({ runs: [otherSuiteRun, RUN_PASSED, RUN_FAILED] });
+    await renderView(fetchFn);
+    expect(document.querySelector('[data-testid="regression-result-trend-board"]')).toBeTruthy();
+    expect(document.querySelector('[data-testid="regression-result-trend-vps"]')).toBeTruthy();
+  });
+});
+
+// ── AC5: Drilldown ───────────────────────────────────────────────────────────
+
+describe('RegressionResultView — AC5: Drilldown', () => {
+  it('clicking a run loads and shows its test cases (name + status + message on failure)', async () => {
+    const fetchFn = makeFetch({
+      runDetails: {
+        'run-1': {
+          ...RUN_FAILED,
+          ctrf: {
+            results: {
+              tests: [
+                { name: 'login works', status: 'passed' },
+                { name: 'checkout fails', status: 'failed', message: 'Timeout waiting for selector' },
+              ],
+            },
+          },
+        },
+      },
+    });
+    await renderView(fetchFn);
+
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="regression-result-run-run-1"]'));
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="regression-result-testcases"]')).toBeTruthy();
+    });
+
+    const testcases = document.querySelector('[data-testid="regression-result-testcases"]');
+    expect(testcases.textContent).toMatch(/login works/);
+    expect(testcases.textContent).toMatch(/checkout fails/);
+    const message = document.querySelector('[data-testid="regression-result-testcase-message"]');
+    expect(message.textContent).toMatch(/Timeout waiting for selector/);
+  });
+
+  it('back button returns to the run list', async () => {
+    const fetchFn = makeFetch({
+      runDetails: {
+        'run-2': { ...RUN_PASSED, ctrf: { results: { tests: [{ name: 'a', status: 'passed' }] } } },
+      },
+    });
+    await renderView(fetchFn);
+
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="regression-result-run-run-2"]'));
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="regression-result-drilldown"]')).toBeTruthy();
+    });
+
+    fireEvent.click(document.querySelector('[data-testid="regression-result-drilldown-back"]'));
+    expect(document.querySelector('[data-testid="regression-result-list"]')).toBeTruthy();
+    expect(document.querySelector('[data-testid="regression-result-drilldown"]')).toBeNull();
+  });
+
+  it('Edge-Case: CTRF unlesbar/unerwartetes Format → degradierte Meldung statt Crash', async () => {
+    const fetchFn = makeFetch({
+      runDetails: {
+        'run-1': { ...RUN_FAILED, ctrf: { unexpected: 'shape' } },
+      },
+    });
+    await renderView(fetchFn);
+
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="regression-result-run-run-1"]'));
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="regression-result-ctrf-degraded"]')).toBeTruthy();
+    });
+    expect(document.querySelector('[data-testid="regression-result-testcases"]')).toBeNull();
+  });
+
+  it('Edge-Case: Einzel-Lauf-Fetch schlägt fehl (404/Netzwerk) → Inline-Fehler, kein Crash', async () => {
+    const fetchFn = makeFetch({ runOk: false });
+    await renderView(fetchFn);
+
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="regression-result-run-run-1"]'));
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="regression-result-drilldown-error"]')).toBeTruthy();
+    });
+  });
+});
+
+// ── AC6: Debug-Artefakt-Zugriff nur bei Rot ─────────────────────────────────
+
+describe('RegressionResultView — AC6: Debug-Artefakt-Zugriff nur bei Rot', () => {
+  it('shows the artifact link for a failed run', async () => {
+    const fetchFn = makeFetch({
+      runDetails: {
+        'run-1': { ...RUN_FAILED, ctrf: { results: { tests: [] } } },
+      },
+    });
+    await renderView(fetchFn);
+
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="regression-result-run-run-1"]'));
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      const link = document.querySelector('[data-testid="regression-result-artifact-link"]');
+      expect(link).toBeTruthy();
+      expect(link.getAttribute('href')).toMatch(/\/regression-runs\/run-1\/artifacts\//);
+    });
+  });
+
+  it('does NOT show the artifact link for a passed run (no dead link)', async () => {
+    const fetchFn = makeFetch({
+      runDetails: {
+        'run-2': { ...RUN_PASSED, ctrf: { results: { tests: [{ name: 'a', status: 'passed' }] } } },
+      },
+    });
+    await renderView(fetchFn);
+
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="regression-result-run-run-2"]'));
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="regression-result-testcases"]')).toBeTruthy();
+    });
+    expect(document.querySelector('[data-testid="regression-result-artifact-link"]')).toBeNull();
+  });
+});
+
+// ── Dialog-Grundverhalten (Muster RegressionRunDialog) ──────────────────────
+
+describe('RegressionResultView — Dialog-Grundverhalten', () => {
+  it('Esc closes the view', async () => {
+    const fetchFn = makeFetch();
+    const { onClose } = await renderView(fetchFn);
+    const dialog = document.querySelector('[data-testid="regression-result-view"]');
+    fireEvent.keyDown(dialog, { key: 'Escape' });
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it('close button closes the view', async () => {
+    const fetchFn = makeFetch();
+    const { onClose } = await renderView(fetchFn);
+    fireEvent.click(document.querySelector('[data-testid="regression-result-close-btn"]'));
+    expect(onClose).toHaveBeenCalled();
+  });
+});
