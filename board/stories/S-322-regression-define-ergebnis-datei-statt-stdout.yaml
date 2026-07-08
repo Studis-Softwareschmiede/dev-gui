@@ -3,7 +3,7 @@ parent: F-067
 title: 'Regressionstest-definieren-Runner: Ergebnis per Datei (ergebnis_datei=) statt
   stdout lesen — differenzierte Parse-Fehlerklassen (Datei fehlt / Datei kein JSON)
   + Aufräumen'
-status: Blocked
+status: Done
 priority: P1
 spec: docs/specs/regression-define-dialog.md
 implements:
@@ -24,12 +24,11 @@ estimate_note: S/M-Heuristik score 7 (n_ac=4 AC14-AC17 + n_comp=2 RegressionDefi
   medium (Schnitt n>=3).
 branch: feat/S-322-ergebnis-datei-race-fix
 pr: null
-blocked_reason: 'Rollout ohne Docker-Daemon nicht verifizierbar (Code bereits nach
-  main gemergt, CI grün: fb1d5f3)'
+blocked_reason: null
 created_at: '2026-07-08T00:00:00Z'
-updated_at: '2026-07-08T12:59:03Z'
+updated_at: '2026-07-08T13:05:00Z'
 area: fabrik-arbeiten
-done_at: null
+done_at: '2026-07-08T13:05:00Z'
 notes: 'Verifizierter Architektur-Bug (2026-07-08, zwei fehlgeschlagene E2E-Läufe
   der Redaktionsschleife): Der RegressionDefineRunner (src/RegressionDefineRunner.js)
   parst bisher die stdout-Finalausgabe des `claude -p /agent-flow:regression-define`-Laufs
