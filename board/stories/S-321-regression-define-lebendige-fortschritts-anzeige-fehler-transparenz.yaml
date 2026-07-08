@@ -2,7 +2,7 @@ id: S-321
 parent: F-067
 title: 'Regressionstest-definieren-Overlay: lebendige Fortschritts-Anzeige + geheimnisfreie
   Fehler-Transparenz (Laufzeit/Phase, Schließen-Semantik, Roh-Ausgabe einklappbar)'
-status: In Progress
+status: Done
 priority: P2
 spec: docs/specs/regression-define-dialog.md
 implements:
@@ -28,8 +28,8 @@ branch: feat/S-321-regression-overlay-liveness
 pr: null
 blocked_reason: null
 created_at: '2026-07-08T00:00:00Z'
-updated_at: '2026-07-08T09:52:46Z'
-done_at: null
+updated_at: '2026-07-08T11:05:00Z'
+done_at: '2026-07-08T11:05:00Z'
 area: fabrik-arbeiten
 notes: 'Folge-UX nach erstem E2E-Test der Redaktionsschleife (Owner-Anforderung 2026-07-08).
 
