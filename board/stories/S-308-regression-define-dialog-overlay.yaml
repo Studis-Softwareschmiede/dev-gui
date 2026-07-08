@@ -2,7 +2,7 @@ id: S-308
 parent: F-067
 title: Definier-Dialog + Redaktions-Overlay (Bereichs-/Verbund-Auswahl, editierbares
   Vorschlags-Textfeld)
-status: In Progress
+status: Done
 priority: P2
 spec: docs/specs/regression-define-dialog.md
 implements:
@@ -27,8 +27,8 @@ branch: feat/S-308-regression-define-dialog
 pr: null
 blocked_reason: null
 created_at: '2026-07-06T05:04:40Z'
-updated_at: '2026-07-08T01:33:49Z'
-done_at: null
+updated_at: '2026-07-08T03:22:39Z'
+done_at: '2026-07-08T03:22:39Z'
 tok_est: null
 area: fabrik-arbeiten
 notes: Dialog mit Bereichs-Auswahl aus board/areas.yaml + Option „Verbund…" (Namensfeld)
