@@ -1,0 +1,6 @@
+[
+  {
+    "provider": "hetzner",
+    "capability_stop": false
+  }
+]

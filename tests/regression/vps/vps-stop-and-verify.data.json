@@ -1,0 +1,8 @@
+[
+  {
+    "provider": "hetzner",
+    "name": "regression-test-vps",
+    "kontrollzeitraum_sekunden": 120,
+    "poll_intervall_sekunden": 10
+  }
+]

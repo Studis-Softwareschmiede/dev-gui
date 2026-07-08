@@ -1,0 +1,13 @@
+[
+  {
+    "provider": "hetzner",
+    "name": "regression-test-vps",
+    "region": "nbg1",
+    "serverType": "cx22",
+    "image": "ubuntu-24.04",
+    "ssh_key_label_root": "root-default",
+    "ssh_key_label_alex": "alex-default",
+    "kontrollzeitraum_sekunden": 120,
+    "poll_intervall_sekunden": 10
+  }
+]
