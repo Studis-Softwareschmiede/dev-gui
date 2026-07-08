@@ -2,7 +2,7 @@ id: S-315
 parent: F-068
 title: Event regression_failed — genau ein Push nur bei rotem Lauf (Default an) +
   Settings-UI
-status: Blocked
+status: Done
 priority: P2
 spec: docs/specs/regression-failed-notification.md
 implements:
@@ -26,12 +26,10 @@ estimate_note: L per Heuristik (n_ac=5, n_comp~4 NotificationSettingsStore/Notif
 confidence: medium
 branch: feat/S-315-regression-failed-notification
 pr: null
-blocked_reason: Rollout ohne Docker-Daemon nicht verifizierbar (Code bereits in main
-  gemergt (1cf9936), CI grün; board-ship.sh Schritt 4 do_rollout_or_die schlägt in
-  dieser Sandbox mangels Docker-Daemon fehl)
+blocked_reason: null
 created_at: '2026-07-06T05:04:40Z'
-updated_at: '2026-07-08T08:16:27Z'
-done_at: null
+updated_at: '2026-07-08T08:45:00Z'
+done_at: '2026-07-08T08:45:00Z'
 tok_est: null
 area: benachrichtigungen
 notes: 'Neuer Event-Typ regression_failed in NotificationSettingsStore.ALLOWED_EVENTS
