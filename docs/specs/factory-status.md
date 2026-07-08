@@ -22,6 +22,8 @@ Ein Statusüberblick der Fabrik in einer Ansicht — Projekte, offene Board-Item
 - **AC1** — `GET /api/status` liefert pro Projekt: `name`, `openItems` (`number|'unknown'` — Anzahl offener Issues des Repos, exkl. Pull Requests; `'unknown'` wenn die Quelle nicht erreichbar war), `lastCi` (`success|failure|in_progress|none|unknown`; `unknown` wenn die Quelle nicht erreichbar war), und global `previews` (Liste laufender Preview-Container mit `name`, `url`, `status`).
 - **AC2** — GitHub-Daten werden über den App-Token gelesen; Docker-Daten über die Docker-Engine (`ps`/`inspect`). Kein Wert stammt aus einem persistierten Store.
 - **AC3** — Das Frontend zeigt ein Dashboard mit je einer Karte pro Projekt (offene Items, letzter CI-Lauf, Preview-Container mit **klickbarer URL**) und aktualisiert sich automatisch (Intervall oder SSE).
+
+  > **⟶ Superseded (2026-07-08, [[cockpit-declutter]] AC2, S-304):** Die Frontend-Dashboard-Kachel (`client/src/Dashboard.jsx`) ist im „Arbeiten"-Reiter des Cockpits **restlos entfernt** — kein Frontend-Rendering dieses ACs mehr. `GET /api/status` (AC1/AC2/AC4 hier) bleibt unverändert bestehen, weil `ClaudeAuthBadge.jsx` weiterhin konsumiert (`claudeAuth`-Zustand). Ein neues Frontend-Dashboard existiert aktuell nicht — diese Spec bleibt `draft`, bis ein Nachfolge-Item ein neues Zuhause definiert (kein Bestandteil dieser Story).
 - **AC4** — Jede Antwort wird **live** ermittelt (kein Cache als Source of Truth); bei Nichterreichbarkeit einer Quelle wird das Feld als „unbekannt" markiert statt zu blockieren.
 
 ## Verträge

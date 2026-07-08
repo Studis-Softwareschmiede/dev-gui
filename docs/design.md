@@ -9,13 +9,18 @@
 
 ## Komponenten-Patterns
 - **Terminal-Pane** — dominanter, scrollbarer xterm.js-Bereich; Verbindungs-Status sichtbar.
-- **Status-Dashboard** — Karten je Projekt (offene Items, letzter CI-Lauf, Preview-Container mit klickbarer URL).
 - **Audit-Ansicht** — chronologische Liste (Zeit · Identität · Befehl).
 
 > **Trigger-Panel entfernt (cockpit-declutter AC1, S-303):** das generische
 > Befehls-Trigger-Panel (Projekt/Item wählen → Aktions-Button + Kill) ist aus
 > dem „Arbeiten"-Reiter entfernt. Der einzige weiterhin benötigte interaktive
 > Weg (Adopt) lebt jetzt auf der Fabrik-Übersicht ([[neues-projekt-auswahl-dialog]]).
+
+> **Status-Dashboard entfernt (cockpit-declutter AC2, S-304):** die
+> Status-Dashboard-Kachel (Karten je Projekt: offene Items, letzter CI-Lauf,
+> Preview-Container mit klickbarer URL) ist aus dem „Arbeiten"-Reiter
+> restlos entfernt (`client/src/Dashboard.jsx` gelöscht). `GET /api/status`
+> bleibt unverändert bestehen (weiterer Konsument: `ClaudeAuthBadge.jsx`).
 
 ## Responsive / Breakpoints
 Desktop-zuerst (Admin-Tool). Mind. lesbar/bedienbar ab ~1024 px; unter ~768 px Panels über das Terminal stapeln.
@@ -37,15 +42,15 @@ unteren Rand und ist per Checkbox ein-/ausblendbar (Default: aus).
 **Anordnung (Desktop, ≥ ~768 px):**
 1. **Aktions-Karten-Grid** (oben, scrollbar, füllt den verfügbaren Platz):
    die bisherigen Boxen — „Board abarbeiten" (inkl. Cost-Mode-Dropdown +
-   Status/Bericht), „Idee", „Neue Story" und das Status-Dashboard — werden
+   Status/Bericht), „Idee" und „Neue Story" — werden
    statt in einer vertikalen Einzelspalte als **umbrechendes Karten-Grid**
    (`flex-wrap`, 8-pt-Abstand; „Board abarbeiten"/„Idee"/„Neue Story" mit
-   vollem Rahmen statt nur Unterlinie, Dashboard behält seine bestehende
-   `borderLeft`-Randlinie) nebeneinander angeordnet. Hierarchie: „Board abarbeiten" bleibt die erste/
+   vollem Rahmen statt nur Unterlinie) nebeneinander angeordnet. Hierarchie: „Board abarbeiten" bleibt die erste/
    prominenteste Karte (Primäraktion), die übrigen folgen in bestehender
    Reihenfolge. Funktion/Verhalten jedes Buttons bleibt unverändert (gleiche
    Handler/Endpunkte) — nur Anordnung/Optik ändern sich. (Trigger-Panel
-   entfernt, cockpit-declutter AC1, S-303.)
+   entfernt, cockpit-declutter AC1, S-303; Status-Dashboard-Kachel entfernt,
+   cockpit-declutter AC2, S-304.)
 2. **Terminal-Kontrollzeile** (unterer Rand, immer sichtbar, auch wenn das
    Karten-Grid darüber scrollt): eine Checkbox „Terminal einblenden"
    (Default: **aus**), Touch-Target ≥ 44 px, mit sichtbarem Fokusring.
@@ -331,8 +336,10 @@ Konformität prüft `reviewer`.
 ### 1. Platzierung
 
 Neue Karte **„Regressionstests"** im `actionGrid` des Arbeiten-Reiters, direkt
-**nach** der „Neue Story"-Karte und **vor** dem Status-Dashboard (TriggerPanel
-ist entfernt, cockpit-declutter AC1, S-303) —
+**nach** der „Neue Story"-Karte (TriggerPanel
+ist entfernt, cockpit-declutter AC1, S-303; die zu diesem Zeitpunkt noch
+bestehende Status-Dashboard-Kachel danach ist seither ebenfalls entfernt,
+cockpit-declutter AC2, S-304) —
 sie gehört fachlich zur Gruppe der einfachen Aktions-Karten (Titel + Button(s))
 statt zur Gruppe der komplexeren, breiteren Panels. Resultierende Grid-Reihenfolge:
 
@@ -340,7 +347,6 @@ statt zur Gruppe der komplexeren, breiteren Panels. Resultierende Grid-Reihenfol
 2. Idee
 3. Neue Story
 4. **Regressionstests** *(neu)*
-5. Status-Dashboard
 
 Das Grid selbst (`display:flex; flexWrap:wrap; gap:16; padding:16`) ist
 unverändert — die neue Karte reiht sich als fünftes Flex-Item ein und
@@ -449,9 +455,10 @@ AC7a — s. `CockpitView.jsx`):
 ### 5. Design-Entscheidungen (testbar)
 
 - **D1** — Neue Karte „Regressionstests" im `actionGrid`, Position: nach
-  „Neue Story", vor Status-Dashboard (Reihenfolge: Board
-  abarbeiten, Idee, Neue Story, Regressionstests,
-  Status-Dashboard; TriggerPanel entfernt, cockpit-declutter AC1, S-303).
+  „Neue Story" (Reihenfolge: Board
+  abarbeiten, Idee, Neue Story, Regressionstests;
+  TriggerPanel entfernt, cockpit-declutter AC1, S-303; Status-Dashboard-
+  Kachel entfernt, cockpit-declutter AC2, S-304).
 - **D2** — Kartenrahmen identisch zum bestehenden `flowTriggerBox`/
   `intakeTriggerBox`-Token (`padding:'12px 16px'`, `background:'#0d0d0d'`,
   `border:'1px solid #2a2a2a'`, `borderRadius:6`, `minWidth:240`,

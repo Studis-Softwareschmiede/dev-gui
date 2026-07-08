@@ -74,7 +74,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { ObsidianImportSection } from './ObsidianImportSection.jsx';
 
-// ── CI-Status-Metadaten (analog Dashboard.jsx) ───────────────────────────────
+// ── CI-Status-Metadaten (vormals analog Dashboard.jsx — entfernt, cockpit-declutter AC2, S-304) ──
 
 /**
  * CI status metadata: label + icon (a11y) + color (supplemental only).

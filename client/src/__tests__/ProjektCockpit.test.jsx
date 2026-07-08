@@ -47,7 +47,7 @@
  *          unten; Kontrast/Statusfarben unverändert aus dem bestehenden Design.
  *   AC5 — kein Backend-Diff (reiner Client-Test).
  *
- * Terminal, Dashboard, BoardView, SpecView gemockt (WS/DOM-Komplexität vermeiden).
+ * Terminal, BoardView, SpecView gemockt (WS/DOM-Komplexität vermeiden).
  *
  * @jest-environment jsdom
  */
@@ -64,9 +64,6 @@ jest.unstable_mockModule('../Terminal.jsx', () => ({
     _terminalLastWsUrl = wsUrl ?? null;
     return null;
   },
-}));
-jest.unstable_mockModule('../Dashboard.jsx', () => ({
-  Dashboard: () => null,
 }));
 
 // Mock BoardView — AC6/S-113: board tab embeds BoardView.

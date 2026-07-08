@@ -218,9 +218,6 @@ import { act, fireEvent, waitFor } from '@testing-library/react';
 jest.unstable_mockModule('../Terminal.jsx', () => ({
   Terminal: () => null,
 }));
-jest.unstable_mockModule('../Dashboard.jsx', () => ({
-  Dashboard: () => null,
-}));
 
 // Mock IdeaSpecifyChatModal (idea-specify-chat, S-217/S-218) — this file only
 // asserts on BoardView's WIRING (both triggers open the same overlay with the

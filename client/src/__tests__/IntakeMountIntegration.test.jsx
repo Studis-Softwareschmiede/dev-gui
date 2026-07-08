@@ -38,7 +38,6 @@ import { act, fireEvent, waitFor } from '@testing-library/react';
 // ── Mock heavy sub-components ─────────────────────────────────────────────────
 
 jest.unstable_mockModule('../Terminal.jsx', () => ({ Terminal: () => null }));
-jest.unstable_mockModule('../Dashboard.jsx', () => ({ Dashboard: () => null }));
 jest.unstable_mockModule('../BoardView.jsx', async () => {
   const R = (await import('react')).default;
   return {

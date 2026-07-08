@@ -5,7 +5,9 @@
  *
  * Covers (regression-panel):
  *   AC1 — Karte „Regressionstests" rendert im `actionGrid` an Position 5
- *          (nach „Neue Story", vor Status-Dashboard); reuse der bestehenden
+ *          (nach „Neue Story"; die zu diesem Zeitpunkt noch bestehende
+ *          Status-Dashboard-Kachel danach ist seither entfernt,
+ *          cockpit-declutter AC2, S-304); reuse der bestehenden
  *          `flowTriggerBox`/`flowTriggerHeader`/`flowTriggerHint`-Tokens.
  *   AC2 — Genau zwei Buttons untereinander, feste Reihenfolge „ausführen"
  *          (primär, btnFlowTrigger-Token) → „definieren" (sekundär, Outline,
@@ -35,7 +37,7 @@
  *   - Lauf-Status-Quelle nicht erreichbar (404/Netzwerkfehler) → kein Crash,
  *     Karte bleibt bei „kein Lauf".
  *
- * Terminal, Dashboard, BoardView, SpecView, IdeaCaptureModal,
+ * Terminal, BoardView, SpecView, IdeaCaptureModal,
  * IdeaSpecifyChatModal, CostModeDriftNotice sind gemockt.
  *
  * @jest-environment jsdom
@@ -47,7 +49,6 @@ import { act, fireEvent, waitFor } from '@testing-library/react';
 // ── Mock heavy sub-components ─────────────────────────────────────────────────
 
 jest.unstable_mockModule('../Terminal.jsx', () => ({ Terminal: () => null }));
-jest.unstable_mockModule('../Dashboard.jsx', () => ({ Dashboard: () => null }));
 jest.unstable_mockModule('../IdeaCaptureModal.jsx', () => ({ IdeaCaptureModal: () => null }));
 jest.unstable_mockModule('../IdeaSpecifyChatModal.jsx', () => ({ IdeaSpecifyChatModal: () => null }));
 jest.unstable_mockModule('../CostModeDriftNotice.jsx', () => ({ CostModeDriftNotice: () => null }));
@@ -123,7 +124,7 @@ describe('CockpitView — regression-panel AC1: Platzierung & Gestaltung', () =>
     await waitFor(() => {}); // let pending effects settle
   });
 
-  it('card appears after „Neue Story" and before the Dashboard in DOM order', () => {
+  it('card appears after „Neue Story" in DOM order', () => {
     renderCockpit();
     const grid = document.querySelector('[data-testid="regression-card"]').parentElement;
     const children = Array.from(grid.children);

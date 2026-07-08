@@ -39,7 +39,7 @@
  *          (stiller Normalfall). Rein additiv — der bestehende 202→navigate-
  *          Vertrag (AC12/AC8) bleibt unberührt.
  *
- * Terminal, Dashboard, BoardView, SpecView sind gemockt
+ * Terminal, BoardView, SpecView sind gemockt
  * (WS/DOM-Komplexität vermeiden).
  *
  * @jest-environment jsdom
@@ -51,7 +51,6 @@ import { act, fireEvent, waitFor } from '@testing-library/react';
 // ── Mock heavy sub-components ─────────────────────────────────────────────────
 
 jest.unstable_mockModule('../Terminal.jsx', () => ({ Terminal: () => null }));
-jest.unstable_mockModule('../Dashboard.jsx', () => ({ Dashboard: () => null }));
 jest.unstable_mockModule('../BoardView.jsx', async () => {
   const R = (await import('react')).default;
   return {

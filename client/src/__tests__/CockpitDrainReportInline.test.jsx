@@ -17,7 +17,7 @@
  * separater Endpunkt/Zusatz-Request für den Bericht (AC7a: „Datenquelle: das
  * Drain-Job-Ergebnis").
  *
- * Terminal, Dashboard, BoardView, SpecView, IdeaCaptureModal,
+ * Terminal, BoardView, SpecView, IdeaCaptureModal,
  * IdeaSpecifyChatModal, CostModeDriftNotice sind gemockt.
  *
  * @jest-environment jsdom
@@ -29,7 +29,6 @@ import { act, fireEvent, waitFor } from '@testing-library/react';
 // ── Mock heavy sub-components ─────────────────────────────────────────────────
 
 jest.unstable_mockModule('../Terminal.jsx', () => ({ Terminal: () => null }));
-jest.unstable_mockModule('../Dashboard.jsx', () => ({ Dashboard: () => null }));
 jest.unstable_mockModule('../IdeaCaptureModal.jsx', () => ({ IdeaCaptureModal: () => null }));
 jest.unstable_mockModule('../IdeaSpecifyChatModal.jsx', () => ({ IdeaSpecifyChatModal: () => null }));
 jest.unstable_mockModule('../CostModeDriftNotice.jsx', () => ({ CostModeDriftNotice: () => null }));

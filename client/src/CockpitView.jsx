@@ -3,10 +3,11 @@
  *
  * projekt-cockpit-navigation:
  *   AC3 — Reiter-Leiste „Arbeiten | Studis-Kanban-Board | Spezifikation" mit aktivem Projekt-Kontext.
- *          „Arbeiten" zeigt den FactoryWorkspace-Inhalt (Aktions-/Button-Spalte + Dashboard +
+ *          „Arbeiten" zeigt den FactoryWorkspace-Inhalt (Aktions-/Button-Spalte +
  *          optionale Terminal-Fläche) — SUPERSEDED für das Terminal-Pane durch
  *          fabrik-arbeiten-layout AC1 (s.u.): kein dominantes eingebettetes Terminal mehr im
- *          Standard-Layout. TriggerPanel entfernt (cockpit-declutter AC1, S-303).
+ *          Standard-Layout. TriggerPanel entfernt (cockpit-declutter AC1, S-303); Status-
+ *          Dashboard-Kachel entfernt (cockpit-declutter AC2, S-304).
  *          Reiter erben den Projekt-Kontext (activeRepo).
  *   AC2 — Rückweg zur Übersicht (#/factory) über den Back-Button.
  *
@@ -74,7 +75,8 @@
  *          Layout des „Arbeiten"-Reiters ENTFERNT (supersedes projekt-cockpit-
  *          navigation AC3-Formulierung „Terminal ... unverändert eingebettet",
  *          s.o.). Die Aktions-/Button-Spalte (Board abarbeiten, Idee, Neue
- *          Story, Dashboard) ist primärer Inhalt (`actionGrid`).
+ *          Story) ist primärer Inhalt (`actionGrid`). (Status-Dashboard-Kachel
+ *          entfernt — cockpit-declutter AC2, S-304.)
  *   AC2 — Checkbox „Terminal einblenden" (Default AUS, `showTerminal`-State)
  *          blendet am unteren Rand eine Terminal-Fläche mit `<Terminal>` ein/
  *          aus. Aus-/Einblenden mountet/unmountet NUR die Client-Komponente —
@@ -143,7 +145,9 @@
  *
  * regression-panel (S-306):
  *   AC1/AC2 — Neue Karte „Regressionstests" im `actionGrid` (Position 5, nach
- *          „Neue Story", vor Status-Dashboard) — bindend aus docs/design.md
+ *          „Neue Story"; die zu diesem Zeitpunkt noch bestehende Status-
+ *          Dashboard-Kachel danach ist seither entfernt, cockpit-declutter AC2,
+ *          S-304) — bindend aus docs/design.md
  *          Sektion „Fabrik-Panel Regressionstests" (D1–D16). Rahmen/Kopf/
  *          Kurzbeschreibung reusen `flowTriggerBox`/`flowTriggerHeader`/
  *          `flowTriggerHint` (keine neue Kartenvariante); zwei Buttons
@@ -190,7 +194,6 @@
 
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { Terminal } from './Terminal.jsx';
-import { Dashboard } from './Dashboard.jsx';
 import { BoardView } from './BoardView.jsx';
 import { SpecView } from './SpecView.jsx';
 import { IdeaCaptureModal } from './IdeaCaptureModal.jsx';
@@ -377,8 +380,9 @@ const DRAIN_POLL_MS = 2_500;
 const REGRESSION_STATUS_POLL_MS = 5_000;
 
 /**
- * FactoryWorkspace — the original FactoryView inner content:
- * Terminal + Dashboard. (TriggerPanel entfernt — cockpit-declutter AC1, S-303.)
+ * FactoryWorkspace — the original FactoryView inner content: action cards +
+ * optional Terminal pane. (TriggerPanel entfernt — cockpit-declutter AC1,
+ * S-303; Status-Dashboard-Kachel entfernt — cockpit-declutter AC2, S-304.)
  *
  * Extended for AC4/S-111: passes project-scoped wsUrl to Terminal so commands
  * run in the active project session.
@@ -420,9 +424,10 @@ const REGRESSION_STATUS_POLL_MS = 5_000;
  *
  * Extended for fabrik-arbeiten-layout AC1/AC2/AC3 (S-265):
  * The dominant embedded Terminal pane is REMOVED from the standard layout —
- * the action/button boxes (Board abarbeiten, Idee, Neue Story, Dashboard)
- * render in a responsive card grid (`actionGrid`) as the PRIMARY
- * content (AC1/AC3). A „Terminal einblenden"-checkbox (default OFF,
+ * the action/button boxes (Board abarbeiten, Idee, Neue Story) render in a
+ * responsive card grid (`actionGrid`) as the PRIMARY content (AC1/AC3).
+ * (Status-Dashboard-Kachel entfernt — cockpit-declutter AC2, S-304.)
+ * A „Terminal einblenden"-checkbox (default OFF,
  * `showTerminal` state) toggles a Terminal pane at the BOTTOM of the tab
  * (AC2) — showing the live output of the remaining interactive PTY commands
  * (adopt/preview/train/new-project + Kill). Hiding
@@ -1057,7 +1062,9 @@ function FactoryWorkspace({
         </div>
 
         {/* regression-panel AC1/D1: Regressionstests-Karte — Position 5 (nach
-            „Neue Story", vor Status-Dashboard). Zwei Buttons untereinander;
+            „Neue Story"; die zu diesem Zeitpunkt noch bestehende Status-
+            Dashboard-Kachel danach ist seither entfernt, cockpit-declutter
+            AC2, S-304). Zwei Buttons untereinander;
             die Klick-Ziele (Ausführen-/Definier-Dialog) sind separate,
             noch nicht abgeschlossene Stories (S-311/S-308) — hier nur der
             Öffnen-State als Anknüpfungspunkt. */}
@@ -1156,8 +1163,6 @@ function FactoryWorkspace({
           )}
         </div>
 
-        {/* Dashboard — project status cards */}
-        <Dashboard />
         </div>
       </div>
 

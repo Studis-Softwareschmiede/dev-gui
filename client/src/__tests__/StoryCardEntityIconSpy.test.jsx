@@ -39,7 +39,6 @@ jest.unstable_mockModule('../icons/EntityIcon.jsx', () => ({
 
 // ── Mock AppShell peer-dependencies (not under test) ─────────────────────────
 jest.unstable_mockModule('../Terminal.jsx',     () => ({ Terminal:      () => null }));
-jest.unstable_mockModule('../Dashboard.jsx',    () => ({ Dashboard:     () => null }));
 
 // ── Dynamic imports (after mocks) ─────────────────────────────────────────────
 const { render }    = await import('@testing-library/react');

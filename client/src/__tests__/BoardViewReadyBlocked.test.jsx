@@ -21,7 +21,6 @@ import { waitFor } from '@testing-library/react';
 
 // Mock heavy sub-components
 jest.unstable_mockModule('../Terminal.jsx', () => ({ Terminal: () => null }));
-jest.unstable_mockModule('../Dashboard.jsx', () => ({ Dashboard: () => null }));
 
 const { render }    = await import('@testing-library/react');
 const React         = (await import('react')).default;
