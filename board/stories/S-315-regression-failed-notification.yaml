@@ -1,6 +1,7 @@
 id: S-315
 parent: F-068
-title: 'Event regression_failed — genau ein Push nur bei rotem Lauf (Default an) + Settings-UI'
+title: Event regression_failed — genau ein Push nur bei rotem Lauf (Default an) +
+  Settings-UI
 status: To Do
 priority: P2
 spec: docs/specs/regression-failed-notification.md
@@ -18,22 +19,22 @@ size_est: L
 dispo_est: '5'
 dispo_act: null
 dispo_forecast: null
-estimate_note: 'L per Heuristik (n_ac=5, n_comp~4 NotificationSettingsStore/NotifyService/SettingsView.jsx/Producer,
+estimate_note: L per Heuristik (n_ac=5, n_comp~4 NotificationSettingsStore/NotifyService/SettingsView.jsx/Producer,
   label_bump=0 -> score 9). estimator nicht dispatchbar (kein Task-Tool); baseline.json
-  js|balanced|L Median (ep 5.0, n=5) als Proxy; keine Baseline-Tokens (tok_total null) ->
-  tok_est null. confidence medium.'
+  js|balanced|L Median (ep 5.0, n=5) als Proxy; keine Baseline-Tokens (tok_total null)
+  -> tok_est null. confidence medium.
 confidence: medium
-branch: null
+branch: feat/S-315-regression-failed-notification
 pr: null
 blocked_reason: null
 created_at: '2026-07-06T05:04:40Z'
-updated_at: '2026-07-06T05:04:40Z'
+updated_at: '2026-07-08T07:31:13Z'
 done_at: null
 tok_est: null
 area: benachrichtigungen
-notes: 'Neuer Event-Typ regression_failed in NotificationSettingsStore.ALLOWED_EVENTS +
-  DEFAULT_SETTINGS.events (default an); bestehende Defaults drain_done/tunnel_missing unverändert.
-  Producer beim Lauf-Abschluss (status failed, aus S-309/S-312) -> NotifyService.notify:
-  genau EIN Push „🔴 <projekt>: Regression <suite> fehlgeschlagen — X/Y rot"; grüne Läufe/
-  Vorbedingungs-/Runner-Fehler feuern nie. Settings-UI in SettingsView.jsx (Meldeklasse,
-  default-markiert). Kein neuer Notify-Pfad (baut auf push-notifications/notification-event-defaults).'
+notes: 'Neuer Event-Typ regression_failed in NotificationSettingsStore.ALLOWED_EVENTS
+  + DEFAULT_SETTINGS.events (default an); bestehende Defaults drain_done/tunnel_missing
+  unverändert. Producer beim Lauf-Abschluss (status failed, aus S-309/S-312) -> NotifyService.notify:
+  genau EIN Push „🔴 <projekt>: Regression <suite> fehlgeschlagen — X/Y rot"; grüne
+  Läufe/ Vorbedingungs-/Runner-Fehler feuern nie. Settings-UI in SettingsView.jsx
+  (Meldeklasse, default-markiert). Kein neuer Notify-Pfad (baut auf push-notifications/notification-event-defaults).'
