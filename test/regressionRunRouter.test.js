@@ -2,7 +2,7 @@
  * @file regressionRunRouter.test.js — HTTP-level tests for the deterministic
  * Regressionstest-Ausführen endpoints (docs/specs/regression-run.md).
  *
- * Covers (regression-run): AC1, AC2, AC3, AC5, AC9
+ * Covers (regression-run): AC1, AC2, AC3, AC5, AC7, AC8, AC9
  *
  *   AC1 — POST /api/projects/:slug/regression-run { scope } → 202 { runId,
  *         status:"running" } startet den REALEN RegressionRunner (eigenes
@@ -18,6 +18,11 @@
  *   AC5 — (End-to-End über den Runner, hier nur die HTTP-Vertragsform):
  *         GET liefert `status`/`target`/`suite`/`counts`/`durationMs`/`reason`
  *         gemäß Vertrag; unbekannte runId → 404.
+ *   AC7/AC8 — `freshRollout` (Body) wird 1:1 an `runner.start()`
+ *         durchgereicht (`meta.freshRollout`); die eigentliche
+ *         Rollout-/Selbsttest-Entscheidung lebt im RegressionRunner selbst
+ *         (RegressionRunner.test.js AC7/AC8-Blöcke decken die Logik ab) —
+ *         hier nur der HTTP-Vertrags-Durchreiche-Beweis (`runner.start`-Spy).
  *   AC9 — Ungültiger `scope` (fehlendes/unbekanntes typ, fehlende id bei
  *         bereich/verbund) → 400, KEIN Runner-Start.
  *
@@ -379,6 +384,53 @@ describe('regressionRunRouter — regression-run.md', () => {
         expect(entry.identity).toBe('owner@example.com');
         expect(entry.command).toMatch(/^regression-run:start:/);
         expect(JSON.stringify(entry)).not.toMatch(/token|secret|password/i);
+        await flush();
+      } finally {
+        await closeServer(server);
+      }
+    });
+  });
+
+  // ── AC7/AC8: freshRollout wird 1:1 an runner.start() durchgereicht ───────
+  describe('AC7/AC8 — freshRollout-Durchreiche (Vertragsform)', () => {
+    it('freshRollout:true im Body -> runner.start() wird mit meta.freshRollout:true aufgerufen', async () => {
+      const runner = makeGreenRunner();
+      const startSpy = jest.spyOn(runner, 'start');
+      const router = regressionRunRouter(runner, {
+        slugResolver: makeSlugResolver(),
+        pathValidator: identityPathValidator(),
+      });
+      const server = await startServer(buildApp(router));
+      try {
+        await httpPost(server, '/api/projects/dev-gui/regression-run', { scope: { typ: 'gesamt' }, freshRollout: true });
+        expect(startSpy).toHaveBeenCalledWith(
+          expect.any(String),
+          'dev-gui',
+          expect.any(Object),
+          expect.objectContaining({ freshRollout: true }),
+        );
+        await flush();
+      } finally {
+        await closeServer(server);
+      }
+    });
+
+    it('freshRollout fehlt im Body -> runner.start() erhält meta.freshRollout:false (Default)', async () => {
+      const runner = makeGreenRunner();
+      const startSpy = jest.spyOn(runner, 'start');
+      const router = regressionRunRouter(runner, {
+        slugResolver: makeSlugResolver(),
+        pathValidator: identityPathValidator(),
+      });
+      const server = await startServer(buildApp(router));
+      try {
+        await httpPost(server, '/api/projects/dev-gui/regression-run', { scope: { typ: 'gesamt' } });
+        expect(startSpy).toHaveBeenCalledWith(
+          expect.any(String),
+          'dev-gui',
+          expect.any(Object),
+          expect.objectContaining({ freshRollout: false }),
+        );
         await flush();
       } finally {
         await closeServer(server);

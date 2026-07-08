@@ -1,7 +1,12 @@
 /**
  * regressionRunRouter — Express-Router für den deterministischen
  * Regressionstest-Ausführen-Runner (docs/specs/regression-run.md AC1, AC2,
- * AC3, AC5, AC9).
+ * AC3, AC5, AC7, AC8, AC9).
+ *
+ * Frisch-Ausrollen & Selbsttest (AC7, AC8, S-310): `freshRollout` (Body) wird
+ * 1:1 an `runner.start()` durchgereicht — die eigentliche Rollout-/
+ * Selbsttest-Logik lebt vollständig im `RegressionRunner` (kein zweiter
+ * Entscheidungsort für den Selbsttest-Skip).
  *
  * Routes (hinter dem AccessGuard, wie alle /api/*, s. server.js):
  *   POST /api/projects/:slug/regression-run             — startet einen Regressionslauf
@@ -129,11 +134,13 @@ export function regressionRunRouter(runner, options = {}) {
    * POST /api/projects/:slug/regression-run
    * Body: { scope: { typ: "bereich"|"verbund"|"gesamt", id?: string }, freshRollout?: boolean }
    *
-   * `freshRollout` wird bereits entgegengenommen (Vertrag), aber in dieser
-   * Story (S-309, AC1/AC2/AC3/AC5/AC9) NICHT ausgewertet — Frisch-Ausrollen
-   * ist AC7/AC8, eine spätere Story (S-310, s. Feature-Dossier). Der Runner
-   * führt daher unabhängig vom `freshRollout`-Wert immer die reine
-   * Erreichbarkeitsprüfung durch, ohne recreate.
+   * `freshRollout` (AC7, S-310, Default serverseitig `false` — der Dialog
+   * schickt explizit `true`, wenn die UI-Option "Neustes Image vor dem Lauf
+   * ausrollen" aktiv ist, Default AN im Dialog selbst): wird 1:1 an
+   * `runner.start()` durchgereicht. Der Runner selbst erzwingt den
+   * Selbsttest-Skip (AC8, dev-gui) — server-seitig, unabhängig vom hier
+   * übergebenen Wert (Edge-Case „Selbsttest mit aktivierter Option via
+   * direktem API-Aufruf").
    *
    * Responses:
    *   202 { runId, status: "running" }
@@ -157,7 +164,7 @@ export function regressionRunRouter(runner, options = {}) {
       return res.status(resolved.status).json({ error: resolved.error });
     }
 
-    const { scope } = req.body ?? {};
+    const { scope, freshRollout } = req.body ?? {};
     const validated = validateScope(scope);
     if (!validated.ok) {
       return res.status(400).json({ error: 'Invalid scope: erwartet { typ: "bereich"|"verbund"|"gesamt", id? }' });
@@ -190,7 +197,10 @@ export function regressionRunRouter(runner, options = {}) {
       }
     }
 
-    const result = runner.start(resolved.resolvedPath, rawSlug, validated.scope, { identity: identityStr });
+    const result = runner.start(resolved.resolvedPath, rawSlug, validated.scope, {
+      identity: identityStr,
+      freshRollout: Boolean(freshRollout),
+    });
     if (!result.ok) {
       // Aktuell einzige Ablehnungs-Ursache: 'locked' (Race zwischen Busy-Check
       // und start(), extrem selten dank TOCTOU-Freiheit oben).

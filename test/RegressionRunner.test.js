@@ -2,7 +2,7 @@
  * @file RegressionRunner.test.js — unit tests for the deterministic
  * Regressionstest-Runner + its pure helpers (docs/specs/regression-run.md).
  *
- * Covers (regression-run): AC1, AC2, AC5, AC9
+ * Covers (regression-run): AC1, AC2, AC5, AC7, AC8, AC9
  *
  *   AC1 — RegressionRunner is an own boundary with an OWN, isolated
  *         ProjectJobLock instance (never a `claude`/agent process — grep-
@@ -21,6 +21,24 @@
  *         `precondition-error` mit "Applikation lokal nicht gestartet"
  *         **statt** eines Playwright-Starts (runPlaywright wird NICHT
  *         aufgerufen).
+ *   AC7 — Frisch-Ausrollen: bei `freshRollout:true` + injizierter
+ *         `dockerControl` + auffindbarem `image` in `.claude/profile.md` wird
+ *         `dockerControl.pullAndRecreate()` VOR der Erreichbarkeitsprüfung
+ *         aufgerufen (pull+recreate, s. LocalDockerControl.test.js für die
+ *         "niemals restart"-Garantie); Pull-/Start-Fehler → `error`;
+ *         Readiness-Timeout → `precondition-error`; ohne `dockerControl`
+ *         oder ohne `image` degradiert der Runner auf die reine
+ *         Erreichbarkeitsprüfung (kein Crash). `containerName` wird per
+ *         `deriveContainerNameFromImage` aus dem letzten Segment von
+ *         `rolloutConfig.image` abgeleitet und lowercased (agent-flow
+ *         `/preview up`-Konvention, SKILL.md §Variablen) — NICHT aus dem
+ *         rohen, case-erhaltenden `job.projekt`-Slug (Review-Fix Iteration 2:
+ *         sonst trifft `pullAndRecreate` bei Repo-Namen mit Großbuchstaben am
+ *         laufenden Preview-Container vorbei).
+ *   AC8 — Selbsttest-Sonderfall (Projekt-Slug `dev-gui` via `isSelfProject`):
+ *         `freshRollout:true` wird server-seitig HART ignoriert, wenn
+ *         `projekt === 'dev-gui'` — `dockerControl.pullAndRecreate` wird NIE
+ *         aufgerufen, auch nicht bei explizit gesetztem `freshRollout`.
  *   AC9 — Ein Lauf führt `npx playwright test <scopePath>` aus (scopeToTestPath:
  *         bereich → tests/regression/<id>, verbund → tests/regression/verbund,
  *         gesamt → tests/regression); nach Abschluss wird GENAU EIN
@@ -46,6 +64,10 @@ import {
   validateScope,
   scopeToTestPath,
   readLocalPreviewPort,
+  readLocalRolloutConfig,
+  deriveContainerNameFromImage,
+  isSelfProject,
+  SELF_PROJECT_SLUG,
   probeLocalReachability,
   readCtrfResult,
   summarizeCtrf,
@@ -260,6 +282,270 @@ describe('RegressionRunner — regression-run.md', () => {
       expect(runPlaywright).toHaveBeenCalledTimes(1);
       const run = runner.getRun(runId);
       expect(run.status).toBe('passed');
+    });
+  });
+
+  // ── readLocalRolloutConfig + isSelfProject (pure) ──────────────────────────
+  describe('readLocalRolloutConfig', () => {
+    it('liest image + container_port aus .claude/profile.md', async () => {
+      const readFile = jest.fn(async () => 'image: ghcr.io/org/app\ncontainer_port: 8080\n');
+      const cfg = await readLocalRolloutConfig('/ws/proj', { readFile });
+      expect(cfg).toEqual({ image: 'ghcr.io/org/app', containerPort: 8080 });
+    });
+
+    it('liefert containerPort:null wenn container_port fehlt', async () => {
+      const readFile = jest.fn(async () => 'image: ghcr.io/org/app\n');
+      const cfg = await readLocalRolloutConfig('/ws/proj', { readFile });
+      expect(cfg).toEqual({ image: 'ghcr.io/org/app', containerPort: null });
+    });
+
+    it('liefert null wenn kein image auffindbar ist oder profile.md fehlt', async () => {
+      const readFileNoImage = jest.fn(async () => 'container_port: 8080\n');
+      expect(await readLocalRolloutConfig('/ws/proj', { readFile: readFileNoImage })).toBeNull();
+
+      const readFileMissing = jest.fn(async () => { throw Object.assign(new Error('enoent'), { code: 'ENOENT' }); });
+      expect(await readLocalRolloutConfig('/ws/proj', { readFile: readFileMissing })).toBeNull();
+    });
+  });
+
+  describe('deriveContainerNameFromImage (AC7 — /preview up-Konvention: letztes Segment, lowercase)', () => {
+    it('leitet das letzte Image-Segment lowercase ab (Großbuchstaben-Repo-Name)', () => {
+      expect(deriveContainerNameFromImage('ghcr.io/studis-softwareschmiede/Sandbox-2')).toBe('sandbox-2');
+    });
+
+    it('bereits-lowercase Image bleibt unverändert', () => {
+      expect(deriveContainerNameFromImage('ghcr.io/org/app')).toBe('app');
+    });
+
+    it('gemischter Case über mehrere Segmente — nur das letzte Segment zählt', () => {
+      expect(deriveContainerNameFromImage('ghcr.io/Studis-Softwareschmiede/Spoon-Knife')).toBe('spoon-knife');
+    });
+  });
+
+  describe('isSelfProject', () => {
+    it('true für den dev-gui-Slug, false für alle anderen', () => {
+      expect(isSelfProject(SELF_PROJECT_SLUG)).toBe(true);
+      expect(isSelfProject('dev-gui')).toBe(true);
+      expect(isSelfProject('some-other-project')).toBe(false);
+    });
+  });
+
+  // ── AC7: Frisch-Ausrollen (pull + recreate VOR der Erreichbarkeitsprüfung) ─
+  describe('AC7 — Frisch-Ausrollen', () => {
+    function readFileWithProfile({ image = 'ghcr.io/org/app', containerPort = 8080, previewPort = 8080 } = {}) {
+      return jest.fn(async (p) => {
+        if (String(p).endsWith('.claude/profile.md')) {
+          return `image: ${image}\ncontainer_port: ${containerPort}\npreview_port: ${previewPort}\n`;
+        }
+        if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
+        if (String(p).endsWith(CTRF_RESULT_PATH)) {
+          return JSON.stringify({ results: { summary: { tests: 1, passed: 1, failed: 0 } } });
+        }
+        throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+      });
+    }
+
+    it('freshRollout:true + dockerControl -> pullAndRecreate() wird VOR der Erreichbarkeitsprüfung aufgerufen', async () => {
+      const callOrder = [];
+      const pullAndRecreate = jest.fn(async ({ image, containerName, hostPort, containerPort }) => {
+        callOrder.push('pullAndRecreate');
+        expect(image).toBe('ghcr.io/org/app');
+        // containerName wird aus dem IMAGE abgeleitet (letztes Segment,
+        // lowercase — /preview up-Konvention), NICHT aus dem job.projekt-Slug
+        // ('dev-other'). Beide sind hier zufällig lowercase-only, s. eigener
+        // Testfall unten für den entscheidenden Großbuchstaben-Fall.
+        expect(containerName).toBe('app');
+        expect(hostPort).toBe(8080);
+        expect(containerPort).toBe(8080);
+        return { ready: true, durationMs: 10 };
+      });
+      const probeReachability = jest.fn(async () => {
+        callOrder.push('probeReachability');
+        return true;
+      });
+      const runPlaywright = jest.fn(async () => ({ exitCode: 0 }));
+      const runner = new RegressionRunner({
+        runPlaywright,
+        readFile: readFileWithProfile(),
+        probeReachability,
+        dockerControl: { pullAndRecreate },
+      });
+
+      const { runId } = runner.start('/ws/dev-other', 'dev-other', { typ: 'gesamt' }, { freshRollout: true });
+      await flush();
+
+      expect(pullAndRecreate).toHaveBeenCalledTimes(1);
+      expect(callOrder).toEqual(['pullAndRecreate', 'probeReachability']);
+      expect(runner.getRun(runId).status).toBe('passed');
+    });
+
+    it('containerName wird aus dem letzten Image-Segment lowercase abgeleitet — NICHT aus dem case-erhaltenden projekt-Slug (Review-Fix Iteration 2, /preview up-Konvention SKILL.md §Variablen)', async () => {
+      // Repo/Slug mit Großbuchstaben ("Sandbox-2") — job.projekt trägt den
+      // rohen, case-erhaltenden URL-/Board-Slug. Die Image-Referenz hat
+      // ebenfalls ein gemischtes letztes Segment ("Sandbox-2"). Der
+      // tatsächlich laufende Preview-Container heißt gemäß agent-flow
+      // `/preview up` IMMER "sandbox-2" (tr 'A-Z' 'a-z') — pullAndRecreate()
+      // MUSS also mit containerName:'sandbox-2' aufgerufen werden, sonst
+      // trifft `docker rm -f` den bestehenden Container nicht (No-Op) und
+      // `docker run --name` legt einen zweiten, parallelen Container an.
+      const pullAndRecreate = jest.fn(async ({ containerName }) => {
+        expect(containerName).toBe('sandbox-2');
+        return { ready: true, durationMs: 10 };
+      });
+      const readFile = readFileWithProfile({ image: 'ghcr.io/studis-softwareschmiede/Sandbox-2' });
+      const runner = new RegressionRunner({
+        runPlaywright: jest.fn(async () => ({ exitCode: 0 })),
+        readFile,
+        probeReachability: jest.fn(async () => true),
+        dockerControl: { pullAndRecreate },
+      });
+
+      // job.projekt ('Sandbox-2') bewusst NICHT lowercase — reproduziert den
+      // case-erhaltenden rawSlug aus regressionRunRouter.js.
+      const { runId } = runner.start('/ws/Sandbox-2', 'Sandbox-2', { typ: 'gesamt' }, { freshRollout: true });
+      await flush();
+
+      expect(pullAndRecreate).toHaveBeenCalledTimes(1);
+      expect(runner.getRun(runId).status).toBe('passed');
+    });
+
+    it('freshRollout:false (Default) -> pullAndRecreate() wird NICHT aufgerufen', async () => {
+      const pullAndRecreate = jest.fn(async () => ({ ready: true, durationMs: 1 }));
+      const runner = new RegressionRunner({
+        runPlaywright: jest.fn(async () => ({ exitCode: 0 })),
+        readFile: readFileWithProfile(),
+        probeReachability: jest.fn(async () => true),
+        dockerControl: { pullAndRecreate },
+      });
+
+      runner.start('/ws/dev-other', 'dev-other', { typ: 'gesamt' });
+      await flush();
+
+      expect(pullAndRecreate).not.toHaveBeenCalled();
+    });
+
+    it('kein image in profile.md -> Frisch-Ausrollen best-effort übersprungen (kein Fehler, Lauf läuft weiter)', async () => {
+      const pullAndRecreate = jest.fn();
+      const readFile = jest.fn(async (p) => {
+        if (String(p).endsWith('.claude/profile.md')) return 'preview_port: 8080\n'; // kein image
+        if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
+        if (String(p).endsWith(CTRF_RESULT_PATH)) return JSON.stringify({ results: { summary: { tests: 1, passed: 1, failed: 0 } } });
+        throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+      });
+      const runner = new RegressionRunner({
+        runPlaywright: jest.fn(async () => ({ exitCode: 0 })),
+        readFile,
+        probeReachability: jest.fn(async () => true),
+        dockerControl: { pullAndRecreate },
+      });
+
+      const { runId } = runner.start('/ws/dev-other', 'dev-other', { typ: 'gesamt' }, { freshRollout: true });
+      await flush();
+
+      expect(pullAndRecreate).not.toHaveBeenCalled();
+      expect(runner.getRun(runId).status).toBe('passed');
+    });
+
+    it('ohne injizierte dockerControl -> Frisch-Ausrollen übersprungen, kein Crash', async () => {
+      const runner = new RegressionRunner({
+        runPlaywright: jest.fn(async () => ({ exitCode: 0 })),
+        readFile: readFileWithProfile(),
+        probeReachability: jest.fn(async () => true),
+        // kein dockerControl injiziert
+      });
+
+      const { runId } = runner.start('/ws/dev-other', 'dev-other', { typ: 'gesamt' }, { freshRollout: true });
+      await flush();
+
+      expect(runner.getRun(runId).status).toBe('passed');
+    });
+
+    it('pullAndRecreate() wirft (Pull-/Start-Fehler) -> status error, KEIN Playwright-Start', async () => {
+      const pullAndRecreate = jest.fn(async () => {
+        const err = new Error('Pull fehlgeschlagen');
+        err.errorClass = 'pull-failed';
+        throw err;
+      });
+      const runPlaywright = jest.fn();
+      const runner = new RegressionRunner({
+        runPlaywright,
+        readFile: readFileWithProfile(),
+        dockerControl: { pullAndRecreate },
+      });
+
+      const { runId } = runner.start('/ws/dev-other', 'dev-other', { typ: 'gesamt' }, { freshRollout: true });
+      await flush();
+
+      const run = runner.getRun(runId);
+      expect(run.status).toBe('error');
+      expect(run.reason).toMatch(/Frisch-Ausrollen/);
+      expect(runPlaywright).not.toHaveBeenCalled();
+    });
+
+    it('pullAndRecreate() liefert ready:false (Readiness-Timeout) -> precondition-error, KEIN Playwright-Start (Edge-Case)', async () => {
+      const pullAndRecreate = jest.fn(async () => ({ ready: false, durationMs: 60000 }));
+      const runPlaywright = jest.fn();
+      const runner = new RegressionRunner({
+        runPlaywright,
+        readFile: readFileWithProfile(),
+        dockerControl: { pullAndRecreate },
+      });
+
+      const { runId } = runner.start('/ws/dev-other', 'dev-other', { typ: 'gesamt' }, { freshRollout: true });
+      await flush();
+
+      const run = runner.getRun(runId);
+      expect(run.status).toBe('precondition-error');
+      expect(runPlaywright).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── AC8: Selbsttest-Sonderfall (dev-gui) ───────────────────────────────────
+  describe('AC8 — Selbsttest-Sonderfall: Frisch-Ausrollen server-seitig hart übersprungen', () => {
+    it('projekt === "dev-gui" + freshRollout:true -> pullAndRecreate() wird NIE aufgerufen', async () => {
+      const pullAndRecreate = jest.fn(async () => ({ ready: true, durationMs: 1 }));
+      const readFile = jest.fn(async (p) => {
+        if (String(p).endsWith('.claude/profile.md')) return 'image: ghcr.io/studis-softwareschmiede/dev-gui\ncontainer_port: 8080\npreview_port: 8080\n';
+        if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
+        if (String(p).endsWith(CTRF_RESULT_PATH)) return JSON.stringify({ results: { summary: { tests: 1, passed: 1, failed: 0 } } });
+        throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+      });
+      const runner = new RegressionRunner({
+        runPlaywright: jest.fn(async () => ({ exitCode: 0 })),
+        readFile,
+        probeReachability: jest.fn(async () => true),
+        dockerControl: { pullAndRecreate },
+      });
+
+      // Edge-Case Spec §Edge-Cases: "Selbsttest mit aktivierter Frisch-
+      // Ausrollen-Option (z.B. über direkten API-Aufruf)" -> serverseitig
+      // ignoriert, unabhängig vom übergebenen freshRollout:true.
+      const { runId } = runner.start('/ws/dev-gui', SELF_PROJECT_SLUG, { typ: 'gesamt' }, { freshRollout: true });
+      await flush();
+
+      expect(pullAndRecreate).not.toHaveBeenCalled();
+      expect(runner.getRun(runId).status).toBe('passed'); // Lauf läuft trotzdem (gegen die laufende Instanz)
+    });
+
+    it('ein ANDERES Projekt mit demselben freshRollout:true ist NICHT betroffen (kein globaler Skip)', async () => {
+      const pullAndRecreate = jest.fn(async () => ({ ready: true, durationMs: 1 }));
+      const readFile = jest.fn(async (p) => {
+        if (String(p).endsWith('.claude/profile.md')) return 'image: ghcr.io/org/other\ncontainer_port: 8080\npreview_port: 8080\n';
+        if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
+        if (String(p).endsWith(CTRF_RESULT_PATH)) return JSON.stringify({ results: { summary: { tests: 1, passed: 1, failed: 0 } } });
+        throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+      });
+      const runner = new RegressionRunner({
+        runPlaywright: jest.fn(async () => ({ exitCode: 0 })),
+        readFile,
+        probeReachability: jest.fn(async () => true),
+        dockerControl: { pullAndRecreate },
+      });
+
+      runner.start('/ws/other-project', 'other-project', { typ: 'gesamt' }, { freshRollout: true });
+      await flush();
+
+      expect(pullAndRecreate).toHaveBeenCalledTimes(1);
     });
   });
 

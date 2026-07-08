@@ -515,7 +515,8 @@ const drainReportStore = new DrainReportStore();
 const regressionResultStore = new RegressionResultStore();
 
 // ── RegressionRunner (deterministischer `npx playwright test`-Runner,
-// docs/specs/regression-run.md AC1, AC2, AC3, AC5, AC9, S-309) ─────────────
+// docs/specs/regression-run.md AC1, AC2, AC3, AC5, AC9, S-309; AC7, AC8,
+// S-310) ─────────────────────────────────────────────────────────────────
 // EIGENE, isolierte `ProjectJobLock`-Instanz (Konstruktor-Default
 // `new ProjectJobLock()` in RegressionRunner.js) — bewusst getrennt von ALLEN
 // `claude -p`-Runnern (Nacht-Drain/manueller Drain/Reconcile/Finalizer/
@@ -523,8 +524,17 @@ const regressionResultStore = new RegressionResultStore();
 // Unterschied zu diesen: dieser Runner spawnt KEIN `claude` — ausschließlich
 // `npx playwright test` (Grep-prüfbar, kein API-Key). `auditStore` +
 // `resultStore` injiziert (Ende-/Fehler-Audit secret-frei; CTRF-Ergebnis-
-// Übergabe an die S-312-Ablage, AC9).
-const regressionRunner = new RegressionRunner({ auditStore, resultStore: regressionResultStore });
+// Übergabe an die S-312-Ablage, AC9). `dockerControl` = dieselbe
+// `LocalDockerControl`-Instanz wie die lokale Image-Test-Boundary (S-156) —
+// Frisch-Ausrollen (AC7) nutzt deren NEUE `pullAndRecreate()`-Methode, kein
+// zweiter Docker-Boundary-Pfad. Selbsttest-Skip (AC8, dev-gui) ist
+// server-seitig im Runner selbst erzwungen (SELF_PROJECT_SLUG), unabhängig
+// vom übergebenen `freshRollout`-Wert.
+const regressionRunner = new RegressionRunner({
+  auditStore,
+  resultStore: regressionResultStore,
+  dockerControl: localDockerControl,
+});
 
 // ── DrainJobRegistry (drain-restart-robustness AC1–AC4, S-281/S-282) ────────
 // EINE geteilte, datei-persistierte Instanz (${CRED_STORE_DIR}/drain-jobs.json)

@@ -20,6 +20,14 @@
  *   - Pull fehlgeschlagen → wirft ({ message, errorClass: 'pull-failed' })
  *   - Sonstige Exec-Fehler → errorClass: 'exec-error'
  *
+ * Frisch-Ausrollen (`pullAndRecreate`, docs/specs/regression-run.md AC7):
+ *   persistenter pull + recreate eines LAUFENDEN lokalen Preview-Containers
+ *   (KEIN Wegwerf-Container wie `runProbe`) — bildet dieselbe Sequenz wie das
+ *   agent-flow `/preview up`-Skill nach (`docker pull` → `docker rm -f` →
+ *   `docker run -d --label agent-flow.preview=<name> -p <preview>:<container>
+ *   <image>:latest`), **niemals** `docker restart`. Wartet anschließend per
+ *   Readiness-Polling (HTTP-Reachability) statt einer festen Sleep-Zeit.
+ *
  * @module LocalDockerControl
  */
 
@@ -41,6 +49,13 @@ const START_SETTLE_MS = 1_500;
 /** Label aller Probe-Container — Aufräum-Anker (AC1, AC4). */
 const TEST_LABEL_KEY = 'dev-gui.local-test';
 const TEST_LABEL_VALUE = '1';
+
+/** Label des recreate'ten Preview-Containers (agent-flow `/preview up`-Konvention, s. DockerReader). */
+const PREVIEW_LABEL_KEY = 'agent-flow.preview';
+
+/** Readiness-Polling nach dem recreate (AC7): Timeout + Intervall. */
+const READINESS_TIMEOUT_MS = 60_000;
+const READINESS_POLL_INTERVAL_MS = 2_000;
 
 /**
  * @typedef {object} LocalTestReport
@@ -202,6 +217,96 @@ export class LocalDockerControl {
       if (containerStarted) {
         await this.#removeContainer(containerName);
       }
+    }
+  }
+
+  /**
+   * Frisch-Ausrollen (docs/specs/regression-run.md AC7): pull + recreate eines
+   * PERSISTENTEN lokalen Preview-Containers — **niemals** `docker restart`.
+   * Bildet dieselbe Sequenz wie agent-flow `/preview up` nach (kein neuer
+   * Rollout-Pfad, Wiederverwendung der Konvention):
+   *   1. docker pull image:tag
+   *   2. docker rm -f <containerName>  (evtl. laufende Vorgänger-Instanz)
+   *   3. docker run -d --label agent-flow.preview=<containerName>
+   *        -p hostPort:containerPort --name <containerName> image:tag
+   *   4. Readiness-Polling (HTTP-Reachability gegen 127.0.0.1:hostPort,
+   *      Timeout 60s) statt fester Sleep-Zeit.
+   *
+   * @param {object} params
+   * @param {string} params.image - ghcr-Image-Referenz (ohne Tag).
+   * @param {string} [params.tag] - Tag, Default 'latest' (agent-flow `/preview up`-Konvention).
+   * @param {string} params.containerName - Name/Label-Wert des Preview-Containers (Projekt-Slug).
+   * @param {number} params.hostPort - Host-Port (`preview_port`).
+   * @param {number} params.containerPort - Container-Port (`container_port`).
+   * @returns {Promise<{ ready: boolean, durationMs: number }>}
+   * @throws {{ message: string, errorClass: string }} bei Pull-/Start-Fehler.
+   */
+  async pullAndRecreate({ image, tag = 'latest', containerName, hostPort, containerPort }) {
+    const start = Date.now();
+    const imageRef = `${image}:${tag}`;
+
+    // Phase 1: docker pull
+    try {
+      await this.#exec('docker', ['pull', imageRef], PULL_TIMEOUT_MS);
+    } catch (err) {
+      const pullError = new Error(`Pull fehlgeschlagen: ${sanitizeErrMsg(err?.message)}`);
+      pullError.errorClass = 'pull-failed';
+      pullError.durationMs = Date.now() - start;
+      throw pullError;
+    }
+
+    // Phase 2: bestehenden Container entfernen (recreate, NIEMALS restart) —
+    // Fehler hier ignorieren (kein Container vorhanden ist der Normalfall).
+    try {
+      await this.#exec('docker', ['rm', '-f', containerName], EXEC_TIMEOUT_MS);
+    } catch {
+      // kein Vorgänger-Container — kein Fehler.
+    }
+
+    // Phase 3: docker run -d --label agent-flow.preview=<containerName> -p hostPort:containerPort --name containerName image:tag
+    try {
+      await this.#exec(
+        'docker',
+        [
+          'run', '-d',
+          '--label', `${PREVIEW_LABEL_KEY}=${containerName}`,
+          '--name', containerName,
+          '--restart', 'unless-stopped',
+          '-p', `${hostPort}:${containerPort}`,
+          imageRef,
+        ],
+        EXEC_TIMEOUT_MS,
+      );
+    } catch (runErr) {
+      const startError = new Error(`Container-Start fehlgeschlagen: ${sanitizeErrMsg(runErr?.message)}`);
+      startError.errorClass = 'start-failed';
+      startError.durationMs = Date.now() - start;
+      throw startError;
+    }
+
+    // Phase 4: Readiness-Polling (HTTP-Reachability), statt fester Sleep-Zeit.
+    const ready = await this.#waitForReadiness(hostPort);
+    return { ready, durationMs: Date.now() - start };
+  }
+
+  /**
+   * Pollt die HTTP-Erreichbarkeit von `127.0.0.1:<hostPort>` bis Readiness
+   * oder Timeout (AC7, Edge-Case „local-Container nach Frisch-Ausrollen nicht
+   * readiness-bereit (Timeout)").
+   *
+   * @param {number} hostPort
+   * @returns {Promise<boolean>}
+   */
+  async #waitForReadiness(hostPort) {
+    const deadline = Date.now() + READINESS_TIMEOUT_MS;
+    // Erste kurze Pause — der Container braucht typischerweise einen Moment
+    // zum Initialisieren, bevor der erste Reachability-Poll sinnvoll ist.
+    await sleep(START_SETTLE_MS);
+    for (;;) {
+      const reachable = await this.#probeReachability(hostPort);
+      if (reachable) return true;
+      if (Date.now() >= deadline) return false;
+      await sleep(READINESS_POLL_INTERVAL_MS);
     }
   }
 

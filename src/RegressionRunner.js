@@ -1,8 +1,9 @@
 /**
  * RegressionRunner — deterministischer Regressionstest-Runner (`npx playwright
  * test`, KEIN Agent, KEIN `claude`-Kindprozess) mit eigenem `ProjectJobLock`,
- * Busy-Check, local-Erreichbarkeitsprüfung und Ergebnis-Übergabe an den
- * `RegressionResultStore` (docs/specs/regression-run.md AC1, AC2, AC3, AC5, AC9).
+ * Busy-Check, local-Erreichbarkeitsprüfung, Frisch-Ausrollen + Selbsttest-Skip
+ * und Ergebnis-Übergabe an den `RegressionResultStore`
+ * (docs/specs/regression-run.md AC1, AC2, AC3, AC5, AC7, AC8, AC9).
  *
  * Zentraler Unterschied zu ALLEN anderen Runnern in diesem Repo (Grep-prüfbar):
  * dieses Modul importiert/spawnt **kein** `claude` — es startet ausschließlich
@@ -43,9 +44,20 @@
  * Fallback `container_port`) des Projekt-Klons. Nicht erreichbar → sofortiger
  * `precondition-error` MIT Grund „Applikation lokal nicht gestartet" — KEIN
  * Playwright-Start (kein roter Testlauf für einen Vorbedingungsfehler).
- * Frisch-Ausrollen (AC7) und der Selbsttest-Sonderfall (AC8) sind bewusst
- * NICHT Teil dieser Story (S-310, s. Feature-Dossier) — dieser Runner führt
- * defensiv IMMER die reine Erreichbarkeitsprüfung durch, ohne recreate.
+ * Frisch-Ausrollen & Selbsttest (AC7, AC8, S-310): bei `target: local` UND
+ * `freshRollout: true` UND NICHT Selbsttest zieht der Runner VOR der
+ * Erreichbarkeitsprüfung das aktuelle ghcr-Image des Projekts und erstellt den
+ * lokalen Container NEU (pull + recreate, niemals `restart`) über die
+ * bestehende `LocalDockerControl#pullAndRecreate`-Methode (Wiederverwendung
+ * der cicd/preview-Rollout-Mechanik, kein neuer Rollout-Pfad) — danach erst
+ * die lauf-übliche Erreichbarkeitsprüfung (AC5). Selbsttest-Sonderfall (AC8):
+ * ist das Testobjekt-Projekt (`projekt`-Slug, s. `start()`) DIESES Projekt
+ * (dev-gui, Selbst-Erkennung über `SELF_PROJECT_SLUG`), wird Frisch-Ausrollen
+ * SERVERSEITIG hart übersprungen — unabhängig vom übergebenen `freshRollout`-
+ * Wert (Edge-Case „Selbsttest mit aktivierter Option via direktem API-Aufruf")
+ * — ein recreate würde den eigenen Runner-Prozess mitsamt Lauf beenden. Ohne
+ * injizierte `dockerControl` (Default: keine) wird Frisch-Ausrollen ebenfalls
+ * übersprungen (kein Crash, degradiert auf reine Erreichbarkeitsprüfung).
  *
  * Ausführung & Ergebnis-Übergabe (AC9): `npx playwright test <scopePath>` wird
  * als Array-argv gestartet (kein Shell-String, security/R03), `cwd` = der
@@ -97,6 +109,15 @@ export const CTRF_RESULT_PATH = 'test-results/ctrf-report.json';
 /** Relativer Pfad des HTML-Reports (nur referenziert, nicht geprüft — RegressionResultStore AC3). */
 export const HTML_REPORT_PATH = 'playwright-report';
 
+/**
+ * Selbsttest-Erkennung (AC8, Annahme A2 der Spec): Projekt-Slug, unter dem
+ * dieser Runner-Prozess selbst läuft (`package.json` `name`, s. `.claude/profile.md`
+ * dieses Repos). Ist das Testobjekt DIESER Slug, wird Frisch-Ausrollen
+ * server-seitig hart übersprungen (ein recreate würde den eigenen Prozess
+ * mitsamt Lauf beenden).
+ */
+export const SELF_PROJECT_SLUG = 'dev-gui';
+
 // ── Secret-freie Meldungstexte ────────────────────────────────────────────────
 const PRECONDITION_MESSAGE = 'Applikation lokal nicht gestartet';
 const NO_SCAFFOLD_MESSAGE = 'kein Regressions-Grundgerüst';
@@ -105,6 +126,8 @@ const TIMEOUT_FAILURE_MESSAGE = 'Regressionslauf abgebrochen (Timeout)';
 const NOT_AVAILABLE_MESSAGE = 'npx nicht verfügbar';
 const INTERNAL_FAILURE_MESSAGE = 'Interner Fehler im Regressions-Runner';
 const NO_CTRF_MESSAGE = 'Regressionslauf beendet, aber kein CTRF-Ergebnis gefunden';
+const ROLLOUT_FAILURE_MESSAGE = 'Frisch-Ausrollen fehlgeschlagen';
+const ROLLOUT_NOT_READY_MESSAGE = 'Applikation lokal nicht gestartet';
 
 /**
  * Validiert den Ausführen-Scope (Vertrag `regression-run.md` §Verträge).
@@ -166,6 +189,61 @@ export async function readLocalPreviewPort(projectPath, { readFile: readFileFn =
   const containerMatch = content.match(/^container_port:\s*(\d+)\s*$/m);
   if (containerMatch) return Number(containerMatch[1]);
   return null;
+}
+
+/**
+ * Liest `image` + `container_port` aus `.claude/profile.md` des Projekt-Klons
+ * (agent-flow `/preview up`-Konvention, s. Modul-Doku AC7) — für das
+ * Frisch-Ausrollen (`pullAndRecreate`). Liefert `null`, wenn `image` fehlt
+ * (kein Crash — Frisch-Ausrollen wird dann übersprungen).
+ *
+ * @param {string} projectPath - absoluter, validierter Projekt-Pfad.
+ * @param {{ readFile?: Function }} [deps] - injectable fs-Dep für Tests.
+ * @returns {Promise<{ image: string, containerPort: number } | null>}
+ */
+export async function readLocalRolloutConfig(projectPath, { readFile: readFileFn = readFile } = {}) {
+  let content;
+  try {
+    content = await readFileFn(join(projectPath, '.claude/profile.md'), 'utf8');
+  } catch {
+    return null;
+  }
+  const imageMatch = content.match(/^image:\s*(\S+)\s*$/m);
+  if (!imageMatch) return null;
+  const containerMatch = content.match(/^container_port:\s*(\d+)\s*$/m);
+  return {
+    image: imageMatch[1],
+    containerPort: containerMatch ? Number(containerMatch[1]) : null,
+  };
+}
+
+/**
+ * Selbsttest-Erkennung (AC8, Annahme A2): ist das Testobjekt-Projekt
+ * (`projekt`-Slug) DIESER Runner-Prozess selbst?
+ *
+ * @param {string} projekt - Projekt-Slug (s. `start()`).
+ * @returns {boolean}
+ */
+export function isSelfProject(projekt) {
+  return projekt === SELF_PROJECT_SLUG;
+}
+
+/**
+ * Leitet den Docker-Container-Namen aus einer Image-Referenz ab — exakt die
+ * agent-flow `/preview up`-Konvention (`skills/preview/SKILL.md` Abschnitt
+ * „Variablen": `app` ← letztes Segment der Image-Referenz, **kleingeschrieben**
+ * `tr 'A-Z' 'a-z'`; GitHub erlaubt Großbuchstaben im Repo-Namen, Docker NICHT
+ * — Beispiel `Spoon-Knife → spoon-knife`). MUSS für `pullAndRecreate()`
+ * verwendet werden statt des rohen, case-erhaltenden `projekt`-Slugs — sonst
+ * trifft `docker rm -f` keinen existierenden Preview-Container (No-Op) und
+ * `docker run --name` legt einen zweiten, parallelen Container an.
+ *
+ * @param {string} image - z.B. `ghcr.io/studis-softwareschmiede/Sandbox-2`.
+ * @returns {string} letztes `/`-Segment, lowercase — z.B. `sandbox-2`.
+ */
+export function deriveContainerNameFromImage(image) {
+  const lastSegment = String(image).split('/').pop();
+  return lastSegment.toLowerCase();
 }
 
 /**
@@ -335,6 +413,10 @@ export class RegressionRunner {
   #readCtrf;
   /** @type {Function} injectable readFile (fürs "kein Grundgerüst"-Vorprüfen) */
   #readFile;
+  /** @type {(projectPath: string, deps?: object) => Promise<{image:string,containerPort:number|null}|null>} */
+  #readRolloutConfig;
+  /** @type {import('./deploy/LocalDockerControl.js').LocalDockerControl|null} injectable (AC7, Default: kein Frisch-Ausrollen) */
+  #dockerControl;
   /**
    * @type {Map<string, {
    *   status: 'running'|'passed'|'failed'|'precondition-error'|'error',
@@ -342,6 +424,7 @@ export class RegressionRunner {
    *   counts?: { passed: number, failed: number, total: number },
    *   durationMs?: number, reason?: string,
    *   projectPath: string, projekt: string, identity: string|null,
+   *   freshRollout: boolean,
    * }>}
    */
   #jobs = new Map();
@@ -358,6 +441,8 @@ export class RegressionRunner {
    * @param {Function} [params.probeReachability] - injectable (default: probeLocalReachability).
    * @param {Function} [params.readCtrf] - injectable (default: readCtrfResult).
    * @param {Function} [params.readFile] - injectable fs.readFile (Grundgerüst-Vorprüfung).
+   * @param {Function} [params.readRolloutConfig] - injectable (default: readLocalRolloutConfig, AC7).
+   * @param {import('./deploy/LocalDockerControl.js').LocalDockerControl} [params.dockerControl] - injectable (AC7; ohne → kein Frisch-Ausrollen möglich, degradiert).
    */
   constructor({
     runPlaywright,
@@ -370,8 +455,12 @@ export class RegressionRunner {
     probeReachability,
     readCtrf,
     readFile: readFileFn,
+    readRolloutConfig,
+    dockerControl,
   } = {}) {
     this.#timeoutMs = timeoutMs ?? (Number(process.env.REGRESSION_RUN_TIMEOUT_MS) || DEFAULT_REGRESSION_RUN_TIMEOUT_MS);
+    this.#readRolloutConfig = readRolloutConfig ?? readLocalRolloutConfig;
+    this.#dockerControl = dockerControl ?? null;
     this.#runPlaywright =
       runPlaywright ?? ((params) => defaultRunPlaywright({ ...params, timeoutMs: this.#timeoutMs, spawnFn }));
     this.#lock = lock ?? new ProjectJobLock();
@@ -401,13 +490,15 @@ export class RegressionRunner {
    * terminalen Zustand.
    *
    * @param {string} projectPath - aufgelöster, validierter absoluter Projekt-Pfad.
-   * @param {string} projekt - Projekt-Slug (für den Ergebnis-Store, AC9).
+   * @param {string} projekt - Projekt-Slug (für den Ergebnis-Store, AC9; auch Selbsttest-Erkennung, AC8).
    * @param {{ typ: 'bereich'|'verbund'|'gesamt', id?: string }} scope - validierter Scope.
    * @param {object} [meta]
    * @param {string|null} [meta.identity] - für das Ende-/Fehler-Audit.
+   * @param {boolean} [meta.freshRollout] - AC7: pull+recreate vor der Suite (nur `target: local`,
+   *   server-seitig IGNORIERT bei Selbsttest — AC8).
    * @returns {{ ok: true, runId: string } | { ok: false, reason: 'locked' }}
    */
-  start(projectPath, projekt, scope, { identity = null } = {}) {
+  start(projectPath, projekt, scope, { identity = null, freshRollout = false } = {}) {
     if (!this.#lock.tryAcquire(projectPath)) {
       return { ok: false, reason: 'locked' };
     }
@@ -415,6 +506,10 @@ export class RegressionRunner {
     // A1: "Gesamt" (und ebenso bereich/verbund) = EIN Lauf-Datensatz;
     // `suite`-Label = gewählter Scope (bereich-id / verbund-name / "Gesamt").
     const suiteLabel = scope.typ === 'gesamt' ? 'Gesamt' : scope.id;
+    // AC8: Selbsttest-Sonderfall — Frisch-Ausrollen server-seitig hart
+    // übersprungen, UNABHÄNGIG vom übergebenen freshRollout-Wert (Edge-Case
+    // „Selbsttest mit aktivierter Option via direktem API-Aufruf").
+    const effectiveFreshRollout = Boolean(freshRollout) && !isSelfProject(projekt);
     this.#jobs.set(runId, {
       status: 'running',
       suite: suiteLabel,
@@ -422,6 +517,7 @@ export class RegressionRunner {
       projectPath,
       projekt,
       identity: identity ?? null,
+      freshRollout: effectiveFreshRollout,
     });
 
     // Fire-and-forget: der Lauf kann mehrere Minuten dauern; der Aufrufer
@@ -479,6 +575,23 @@ export class RegressionRunner {
     const port = await this.#readPort(job.projectPath, { readFile: this.#readFile });
     let baseUrl;
     if (port !== null) {
+      // AC7: Frisch-Ausrollen VOR der Erreichbarkeitsprüfung (pull + recreate,
+      // niemals restart) — nur wenn angefordert (start()-Aufrufer hat AC8
+      // bereits serverseitig erzwungen: job.freshRollout ist bei Selbsttest
+      // immer false) UND eine dockerControl injiziert ist (sonst degradiert
+      // auf die reine Erreichbarkeitsprüfung, kein Crash).
+      if (job.freshRollout && this.#dockerControl) {
+        const rolloutOutcome = await this.#performFreshRollout(job, port);
+        if (rolloutOutcome && !rolloutOutcome.ok) {
+          this.#finish(runId, rolloutOutcome.status, {
+            reason: rolloutOutcome.reason,
+            target: 'local',
+            durationMs: Date.now() - start,
+          });
+          return;
+        }
+      }
+
       const reachable = await this.#probeReachability(port);
       if (!reachable) {
         this.#finish(runId, 'precondition-error', { reason: PRECONDITION_MESSAGE, target: 'local', durationMs: Date.now() - start });
@@ -518,6 +631,47 @@ export class RegressionRunner {
     await this.#persistResult(job, { status, counts, ctrf, durationMs });
 
     this.#finish(runId, status, { counts, durationMs, target: baseUrl ? 'local' : undefined });
+  }
+
+  /**
+   * Frisch-Ausrollen (AC7): liest `image`/`container_port` aus dem
+   * Projekt-Profil und ruft `LocalDockerControl#pullAndRecreate` (bestehende
+   * cicd/preview-Rollout-Mechanik, kein neuer Rollout-Pfad). Kein `image`
+   * auffindbar → best-effort übersprungen (kein Fehler, degradiert auf reine
+   * Erreichbarkeitsprüfung — Edge-Case „kein Profil"). Pull-/Start-Fehler →
+   * `error` mit Grund; Readiness-Timeout → `precondition-error` (Edge-Cases
+   * §Spec). Der Container-Name wird NICHT aus dem rohen, case-erhaltenden
+   * `job.projekt`-Slug übernommen, sondern aus `rolloutConfig.image` exakt
+   * nach der `/preview up`-Konvention abgeleitet (`deriveContainerNameFromImage`,
+   * letztes Image-Segment, lowercase) — sonst greift `pullAndRecreate` bei
+   * Projekten mit Großbuchstaben im Repo-Namen am laufenden Preview-Container
+   * vorbei (Review-Fix S-310 Iteration 2).
+   *
+   * @param {{ projectPath: string, projekt: string }} job
+   * @param {number} port - `preview_port` (Host-Port).
+   * @returns {Promise<{ ok: true } | { ok: false, status: 'error'|'precondition-error', reason: string } | undefined>}
+   */
+  async #performFreshRollout(job, port) {
+    const rolloutConfig = await this.#readRolloutConfig(job.projectPath, { readFile: this.#readFile });
+    if (!rolloutConfig || !rolloutConfig.image) {
+      // Kein Profil/kein image auffindbar — best-effort übersprungen, kein Crash.
+      return undefined;
+    }
+    try {
+      const { ready } = await this.#dockerControl.pullAndRecreate({
+        image: rolloutConfig.image,
+        containerName: deriveContainerNameFromImage(rolloutConfig.image),
+        hostPort: port,
+        containerPort: rolloutConfig.containerPort ?? port,
+      });
+      if (!ready) {
+        return { ok: false, status: 'precondition-error', reason: ROLLOUT_NOT_READY_MESSAGE };
+      }
+      return { ok: true };
+    } catch (err) {
+      const reason = err?.errorClass ? `${ROLLOUT_FAILURE_MESSAGE}: ${err.errorClass}` : ROLLOUT_FAILURE_MESSAGE;
+      return { ok: false, status: 'error', reason };
+    }
   }
 
   /**
