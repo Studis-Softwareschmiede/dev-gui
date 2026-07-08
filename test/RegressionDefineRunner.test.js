@@ -220,6 +220,39 @@ describe('parseRegressionDefineOutcome — AC2 machine-readable vorschlag', () =
     expect(() => parseRegressionDefineOutcome('{"status":"weird"}')).toThrow();
   });
 
+  // Regression 2026-07-08 (Vertrags-Mismatch): das ECHTE agent-flow-Rückgabeformat
+  // für modus=vorschlag hat KEIN `status`-Feld — es ist das nackte Vorschlags-Objekt
+  // (projekt/ziel/quell_specs/vorschlag/hinweise/target_vorschlag). Der frühere
+  // Parser verlangte status:'needs-review' und lehnte das reale Format als
+  // "unknown status: undefined" ab (der GUI als "kein gültiges JSON" gemeldet,
+  // obwohl valide). Dieser Test benutzt bewusst das reale Format OHNE status.
+  it('parses the REAL agent Rückgabeformat WITHOUT a status field as needs-review', () => {
+    const realAgentOutput = JSON.stringify({
+      projekt: 'dev-gui',
+      ziel: { typ: 'bereich', id: 'vps' },
+      quell_specs: ['docs/specs/vps-create.md'],
+      target_vorschlag: 'local',
+      vorschlag: [
+        {
+          titel: 'Neuen Hetzner-VPS anlegen und in der Übersicht als vorhanden bestätigen',
+          schritte: ['VPS-Ansicht öffnen', 'Server anlegen'],
+          pruefpunkte: ['Server erscheint in der Übersicht'],
+          beispieldaten: [{ typ: 'cx22' }],
+        },
+      ],
+      hinweise: ['Das Löschen gehört fachlich zu „deployment", nicht „vps".'],
+    });
+    const out = parseRegressionDefineOutcome(realAgentOutput);
+    expect(out.status).toBe('needs-review');
+    expect(out.vorschlag.projekt).toBe('dev-gui');
+    expect(out.vorschlag.vorschlag).toHaveLength(1);
+    expect(out.vorschlag.vorschlag[0].titel).toContain('Hetzner-VPS');
+  });
+
+  it('unerwartete Struktur (kein status, kein vorschlag) → aussagekräftiger Fehler, nicht "kein JSON"', () => {
+    expect(() => parseRegressionDefineOutcome('{"projekt":"x"}')).toThrow(/unerwartete Struktur/);
+  });
+
   it('throws on needs-review with an empty/absent vorschlag', () => {
     expect(() => parseRegressionDefineOutcome('{"status":"needs-review","vorschlag":[]}')).toThrow();
     expect(() => parseRegressionDefineOutcome('{"status":"needs-review"}')).toThrow();

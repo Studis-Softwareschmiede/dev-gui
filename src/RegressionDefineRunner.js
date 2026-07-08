@@ -323,7 +323,16 @@ export function parseRegressionDefineOutcome(raw) {
       : 'Regressions-Definitionslauf ohne Ergebnis abgebrochen';
     return { status: 'failed', reason };
   }
-  if (status === 'needs-review') {
+  // Vertrags-Abgleich (Fix 2026-07-08): Das agent-flow-Rückgabeformat für
+  // `modus=vorschlag` ist das nackte Vorschlags-Objekt (projekt/ziel/vorschlag/
+  // hinweise/…) OHNE `status`-Feld. Die frühere Erwartung eines
+  // `status:'needs-review'`-Wrappers passte nicht zum tatsächlich gelieferten
+  // Format und ließ den Parser mit "unknown status: undefined" durchfallen —
+  // fälschlich der GUI als "kein gültiges JSON" gemeldet, obwohl das JSON valide
+  // war. Fehlt `status`, liegt aber ein nicht-leeres `vorschlag`-Array vor, ist
+  // das per Definition ein needs-review-Ergebnis.
+  if (status === 'needs-review'
+    || (status === undefined && Array.isArray(parsed.vorschlag) && parsed.vorschlag.length > 0)) {
     if (!Array.isArray(parsed.vorschlag) || parsed.vorschlag.length === 0) {
       throw new Error('needs-review without a non-empty vorschlag');
     }
@@ -336,7 +345,12 @@ export function parseRegressionDefineOutcome(raw) {
     };
     return { status: 'needs-review', vorschlag };
   }
-  throw new Error(`unknown regression-define status: ${String(status)}`);
+  // Aussagekräftige, nicht-irreführende Meldung: das JSON war parsebar, nur die
+  // Struktur passte nicht (kein bekannter `status`, kein `vorschlag`-Array).
+  throw new Error(
+    `regression-define output: unerwartete Struktur (status=${String(status)}, `
+    + `vorschlag=${Array.isArray(parsed.vorschlag) ? parsed.vorschlag.length + ' Einträge' : 'fehlt'})`,
+  );
 }
 
 // ── Default claude-Adapter ────────────────────────────────────────────────────
