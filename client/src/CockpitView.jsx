@@ -160,8 +160,10 @@
  *          lokale Öffnen-State (`regressionRunOpen`/`regressionDefineOpen`)
  *          bleibt der Anknüpfungspunkt; `regressionDefineOpen` mountet SEIT
  *          S-308 `RegressionDefineDialog` (regression-define-dialog AC6-AC8,
- *          s. dortiger Modul-Kommentar); `regressionRunOpen` ist weiterhin
- *          ohne Dialog-UI (S-311, Nicht-Ziel dieser Story).
+ *          s. dortiger Modul-Kommentar); `regressionRunOpen` mountet SEIT
+ *          S-311 `RegressionRunDialog` (regression-run AC4/AC6, Suite-Wahl
+ *          Bereich/Verbund/Gesamt + Testobjekt-Anzeige + Kosten-/Ressourcen-
+ *          Hinweis, s. dortiger Modul-Kommentar).
  *   AC4/AC6 — Inline-Statuszeile pollt `GET /api/projects/:slug/regression-runs`
  *          (jüngster Lauf zuerst, s. [[regression-result-store]] AC4) und
  *          bildet „kein Lauf"/„läuft"/„erfolgreich"/„fehlgeschlagen" ab
@@ -202,6 +204,7 @@ import { IdeaCaptureModal } from './IdeaCaptureModal.jsx';
 import { CostModeDriftNotice } from './CostModeDriftNotice.jsx';
 import { IdeaSpecifyChatModal } from './IdeaSpecifyChatModal.jsx';
 import { RegressionDefineDialog } from './RegressionDefineDialog.jsx';
+import { RegressionRunDialog } from './RegressionRunDialog.jsx';
 import { COST_MODES, COST_MODE_INFO } from './costMode.js';
 
 /** @type {Array<{ id: string, label: string }>} */
@@ -581,11 +584,12 @@ function FactoryWorkspace({
   // Klick-Ziele: die eigentlichen Dialoge ([[regression-run]] S-311,
   // [[regression-define-dialog]] S-308) sind separate Items — der lokale
   // Öffnen-State bleibt der Anknüpfungspunkt. Seit S-308 mountet
-  // `regressionDefineOpen` den `RegressionDefineDialog`; `regressionRunOpen`
-  // bleibt ohne Dialog-UI (S-311, Nicht-Ziel dieser Story).
+  // `regressionDefineOpen` den `RegressionDefineDialog`; seit S-311 mountet
+  // `regressionRunOpen` den `RegressionRunDialog` (regression-run AC4/AC6).
   const [regressionRunOpen, setRegressionRunOpen] = useState(false);
   const [regressionDefineOpen, setRegressionDefineOpen] = useState(false);
   const regressionDefineBtnRef = useRef(null);
+  const regressionRunBtnRef = useRef(null);
   /**
    * regression-define-dialog AC8/E1: der Wiedereinstiegs-Job wird ZUSAMMEN
    * mit dem Projekt gehalten, für das er gestartet wurde (Muster
@@ -608,11 +612,21 @@ function FactoryWorkspace({
   const handleRegressionRunOpen = useCallback(() => {
     setRegressionRunOpen(true);
   }, []);
+  const handleRegressionRunClose = useCallback(() => {
+    setRegressionRunOpen(false);
+  }, []);
   const handleRegressionDefineOpen = useCallback(() => {
     setRegressionDefineOpen(true);
   }, []);
   const handleRegressionDefineClose = useCallback(() => {
     setRegressionDefineOpen(false);
+  }, []);
+  // regression-run AC4/AC6 (S-311): nach erfolgreichem Start best-effort
+  // sofort auf "running" schalten — der reguläre Poll (unten) übernimmt
+  // danach ohnehin, das hier vermeidet nur die Wartezeit bis zum nächsten
+  // Poll-Tick (kein neuer Anzeige-Ort, Nicht-Ziel dieser Story).
+  const handleRegressionRunStarted = useCallback(() => {
+    setRegressionLastStatus('running');
   }, []);
 
   // AC4/AC6: letzter Lauf-Zustand wird aus dem Ergebnis-Store gespeist
@@ -1103,6 +1117,7 @@ function FactoryWorkspace({
 
           <button
             type="button"
+            ref={regressionRunBtnRef}
             style={
               regressionLastStatus === 'running'
                 ? styles.btnFlowTriggerDisabled
@@ -1247,6 +1262,18 @@ function FactoryWorkspace({
           initialJobId={regressionDefineJobMatchesSelection ? regressionDefineJob.jobId : null}
           onJobStarted={(jobId) => setRegressionDefineJob({ jobId, projectSlug: activeRepo })}
           onJobEnded={() => setRegressionDefineJob(null)}
+        />
+      )}
+
+      {/* regression-run AC4/AC6 (S-311): Ausführen-Dialog — Suite-Wahl
+          (Bereich/Verbund/Gesamt), Testobjekt-Anzeige, Kosten-/Ressourcen-Hinweis. */}
+      {regressionRunOpen && (
+        <RegressionRunDialog
+          projectSlug={activeRepo}
+          onClose={handleRegressionRunClose}
+          triggerRef={regressionRunBtnRef}
+          fetchFn={fetchFn}
+          onRunStarted={handleRegressionRunStarted}
         />
       )}
     </div>
