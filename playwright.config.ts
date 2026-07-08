@@ -48,21 +48,16 @@ export default defineConfig({
     trace: 'on-first-retry',
   },
 
-  /* Configure projects for major browsers */
+  /* Configure projects for major browsers.
+   * NUR Chromium: das Runtime-Image installiert bewusst nur chromium
+   * (Dockerfile: `npx playwright install --with-deps chromium`), um den
+   * Image-Zuwachs klein zu halten. firefox/webkit würden mit
+   * "Executable doesn't exist" fehlschlagen (Browser nicht im Image). Wer
+   * Cross-Browser braucht, ergänzt hier UND den Dockerfile-Install gemeinsam. */
   projects: [
     {
       name: 'chromium',
       use: { ...devices['Desktop Chrome'] },
-    },
-
-    {
-      name: 'firefox',
-      use: { ...devices['Desktop Firefox'] },
-    },
-
-    {
-      name: 'webkit',
-      use: { ...devices['Desktop Safari'] },
     },
 
     /* Test against mobile viewports. */
