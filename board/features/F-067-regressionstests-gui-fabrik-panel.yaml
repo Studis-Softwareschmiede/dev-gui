@@ -1,15 +1,16 @@
 id: F-067
 title: Regressionstests GUI — Fabrik-Panel (definieren · ausführen · Ergebnis-Ablage/-Ansicht)
-goal: 'Je Projekt bekommt der Fabrik-„Arbeiten"-Reiter einen gestalteten Bereich „Regressionstests"
-  (zwei Buttons + Inline-Status), eine Redaktionsschleife zum Definieren (headless Definier-Runner
-  mit needs-review/STDIN-Resume, Muster Obsidian-Ingest), einen deterministischen RegressionRunner
-  zum Ausführen (npx playwright test, kein Agent; Testobjekt-Anzeige local/ephemeral-infra/url,
-  local-Erreichbarkeitsprüfung, Frisch-Ausrollen mit Selbsttest-Skip, Busy-Check gegen Drains),
-  eine CTRF-Ergebnis-Ablage (Muster DrainReportStore, Retention 50, Debug-Artefakte nur bei Rot,
-  Auto-Prune) und eine Ergebnis-Ansicht (Liste, grün/rot-Trend, Drilldown, Artefakt-Zugriff).
-  Baut textuell auf den agent-flow-Regressions-Specs auf; Design-Grundlage docs/design.md
-  Sektion „Fabrik-Panel Regressionstests". Owner-Ko-Design 2026-07-03, beauftragt 2026-07-06.'
-status: Backlog
+goal: Je Projekt bekommt der Fabrik-„Arbeiten"-Reiter einen gestalteten Bereich „Regressionstests"
+  (zwei Buttons + Inline-Status), eine Redaktionsschleife zum Definieren (headless
+  Definier-Runner mit needs-review/STDIN-Resume, Muster Obsidian-Ingest), einen deterministischen
+  RegressionRunner zum Ausführen (npx playwright test, kein Agent; Testobjekt-Anzeige
+  local/ephemeral-infra/url, local-Erreichbarkeitsprüfung, Frisch-Ausrollen mit Selbsttest-Skip,
+  Busy-Check gegen Drains), eine CTRF-Ergebnis-Ablage (Muster DrainReportStore, Retention
+  50, Debug-Artefakte nur bei Rot, Auto-Prune) und eine Ergebnis-Ansicht (Liste, grün/rot-Trend,
+  Drilldown, Artefakt-Zugriff). Baut textuell auf den agent-flow-Regressions-Specs
+  auf; Design-Grundlage docs/design.md Sektion „Fabrik-Panel Regressionstests". Owner-Ko-Design
+  2026-07-03, beauftragt 2026-07-06.
+status: Done
 priority: P2
 spec: docs/specs/regression-panel.md
 definition_of_done: null
@@ -28,7 +29,8 @@ stories:
 - S-312
 - S-313
 - S-314
-progress: 0/9 done
+progress: 9/9 done
 created_at: '2026-07-06T05:04:40Z'
-updated_at: '2026-07-06T05:04:40Z'
+updated_at: '2026-07-08T07:29:57Z'
 area: fabrik-arbeiten
+done_at: '2026-07-08T07:29:57Z'
