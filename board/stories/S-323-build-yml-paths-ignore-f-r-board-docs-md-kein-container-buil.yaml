@@ -2,7 +2,7 @@ id: S-323
 parent: F-071
 title: 'build.yml: paths-ignore für board/**, docs/**, **.md (kein Container-Build
   bei reinen Board-/Doku-Commits)'
-status: In Progress
+status: Blocked
 priority: P2
 spec: docs/specs/ci-build-path-filter.md
 implements:
@@ -28,7 +28,9 @@ confidence: low
 tok_est: null
 branch: feat/S-323-ci-build-path-filter
 pr: null
-blocked_reason: null
+blocked_reason: Code gemergt in main (6b141d2), CI grün — Rollout-Verifikation ohne
+  Docker-Daemon in dieser Sandbox nicht möglich; bitte lokal/remote mit Docker-Zugriff
+  verifizieren oder Board manuell auf Done setzen
 created_at: '2026-07-08T15:42:26Z'
-updated_at: '2026-07-08T15:49:53Z'
+updated_at: '2026-07-08T16:05:12Z'
 done_at: null
