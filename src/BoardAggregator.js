@@ -33,6 +33,29 @@
  *   AC5 — stopWatchers() bricht anstehende Re-Arm-/Backoff-Timer ab; danach kein
  *   weiterer watch()-Aufruf mehr.
  *
+ * fswatcher-crash-hardening V2 (S-320 — interne FSWatcher-'error'-Events + Scope-
+ * Verengung, Vorfall 2026-07-07):
+ *   AC8 — `watchWithErrorGuard()` (statt direkt `fs/promises.watch`) registriert
+ *   einen expliziten `'error'`-Listener auf der von `node:fs.watch()` erzeugten
+ *   `FSWatcher`-Instanz — ein `'error'`-Event einer INTERNEN (durch
+ *   `recursive:true` unter Linux) angelegten Sub-Watcher-Instanz eskaliert dadurch
+ *   nie mehr zur uncaughtException, sondern wird sauber in den Async-Iterator
+ *   geroutet (bestehende AC1–AC5-Re-Arm-Disziplin greift unverändert).
+ *   AC9 — `isWatchIgnoredEntry()`/`isWatchIgnoredPath()`: node_modules/.git/
+ *   .claude (inkl. .claude/worktrees)/test/.tmp-* werden NIE beobachtet.
+ *   Mechanik: `startWatchers()` bewaffnet je `BOARD_ROOTS`-Wurzel einen flachen
+ *   Meta-Watch (`kind:'meta'`, erkennt neue/verschwindende Top-Level-Repo-
+ *   Verzeichnisse) + `_syncRepoWatchers()` bewaffnet je NICHT-ignoriertem Repo
+ *   gezielte rekursive Watches nur auf `<repo>/board` und `<repo>/docs/specs`
+ *   (`kind:'subtree'`) — statt EINEM rekursiven Watch auf die gesamte Wurzel.
+ *   AC10 — Index-Aktualität bleibt erhalten: Subtree-Watches invalidieren den
+ *   Index wie bisher (debounced); der Meta-Watch selbst tut das nicht (nur
+ *   Repo-/Unterbaum-Erkennung), invalidiert aber EINMAL beim Bewaffnen eines
+ *   NEUEN Subtree-Watches (verpasst sonst ggf. das allererste Event eines
+ *   frisch entstandenen `board`-Ordners, siehe `_syncRepoWatchers()`-Kommentar).
+ *   AC11 — Regressionstest des Vorfalls 2026-07-07 (siehe test/boardAggregator.
+ *   test.js + test/fixtures/fswatcher-regression-child.mjs).
+ *
  * bereichs-modell (S-288, Lese-Teil):
  *   AC1 — Liest je Projekt zusätzlich `board/areas.yaml` (Liste von
  *   { id, name, order, description? }), sortiert nach `order`, als `areas` am
@@ -87,7 +110,8 @@
  * @module BoardAggregator
  */
 
-import { readdir, readFile, watch, stat } from 'node:fs/promises';
+import { readdir, readFile, stat } from 'node:fs/promises';
+import { watch as watchCallback, existsSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
 import { computeFeatureStatus } from './featureStatus.js';
@@ -209,11 +233,180 @@ export async function computeStoryReadyStatus(story, fsDeps, repoPath, allStorie
   return { ready: true, ready_reason: null };
 }
 
-/** Default FS dependencies (real node:fs/promises). */
+/**
+ * Async-Iterator-Adapter um `node:fs`'s Callback-`watch()`-API (fswatcher-
+ * crash-hardening V2 AC8).
+ *
+ * `node:fs/promises.watch({recursive:true})` deckt unter Linux via einen
+ * NICHT-nativen, JS-emulierten rekursiven Watcher ab, der intern mehrere
+ * echte `FSWatcher`-EventEmitter-Instanzen (eine pro Unterverzeichnis)
+ * verwaltet. Emittiert eine DIESER internen Instanzen ein `'error'`-Event
+ * (z.B. `ENOENT scandir` beim internen Nach-Bewaffnen eines verschwundenen
+ * Unterverzeichnisses), wird dieses Event NICHT zuverlässig über den äußeren
+ * Async-Iterator propagiert — es eskaliert stattdessen zu einer
+ * `uncaughtException` (Vorfall 2026-07-07, `Emitted 'error' event on
+ * FSWatcher instance`). Das bestehende `for await`-`try/catch` in
+ * `_watchRoot()` (V1 AC1/AC2) greift für diesen Pfad strukturell nicht.
+ *
+ * Dieser Adapter nutzt stattdessen die Callback-API (`node:fs.watch`)
+ * DIREKT und registriert einen EXPLIZITEN `'error'`-Listener auf der
+ * zurückgegebenen `FSWatcher`-Instanz — ein `'error'`-Event mit
+ * registriertem Listener wird NIE zur `uncaughtException` (Node-Kernverhalten
+ * von `EventEmitter`). Der Fehler wird stattdessen in den Async-Iterator
+ * geroutet (`next()` rejected), sodass das bestehende `try/catch` um
+ * `for await` in `_watchRoot()` ihn wie jeden anderen Watcher-Fehler
+ * behandelt (Re-Arm-mit-Backoff-Disziplin, AC3–AC5) — kein neues Verhalten,
+ * nur ein zuverlässigerer Zubringer zum bereits gehärteten Pfad.
+ *
+ * Zusätzliche Absicherung (AC3 — Verschwindender Pfad): die reine Callback-
+ * API meldet das Verschwinden der beobachteten Wurzel SELBST unter Linux
+ * NICHT als `'error'`-Event (nur ein reguläres `'rename'`-Change-Event für
+ * den Wurzel-Eintrag, live verifiziert) — anders als `fs/promises.watch()`,
+ * dessen interne Emulation das über einen ENOENT/scandir-Fehler abbildet.
+ * Nach jedem Change-Event wird deshalb (synchron, `existsSync`) geprüft, ob
+ * die Wurzel noch existiert; ist sie verschwunden, wird der Iterator mit
+ * einem synthetischen `ENOENT`-Fehler beendet — dieselbe Re-Arm-Disziplin
+ * greift dann wie beim promise-API-Pfad.
+ *
+ * Signatur-kompatibel zu `fs/promises.watch(path, {recursive, signal}) →
+ * AsyncIterable<{eventType, filename}>` (Verträge — injizierbare Watch-Quelle
+ * bleibt unverändert austauschbar).
+ *
+ * Exportiert (zusätzlich zur internen Verwendung als `defaultFsDeps.watch`)
+ * für einen direkten Integrationstest (AC8) — verifiziert den Adapter isoliert
+ * gegen einen ECHTEN, von `node:fs.watch` erzeugten internen `'error'`-Event,
+ * ohne den kompletten `BoardAggregator` inkl. Meta-/Subtree-Watch-Architektur
+ * mit-testen zu müssen.
+ *
+ * @param {string} path
+ * @param {{recursive?: boolean, signal?: AbortSignal, watchImpl?: Function}} [options]
+ *   `watchImpl` — injizierbare `node:fs.watch`-Quelle (Default: das echte
+ *   `node:fs.watch`). Rein zu Testzwecken (S-320 Review-Iteration 2, Finding
+ *   #2): ESM-Modul-Namensraum-Objekte sind read-only, `jest.spyOn(fs, 'watch')`
+ *   kann `node:fs` daher nicht mocken — ein Test, der den internen,
+ *   registrierten `'error'`-Listener direkt auslösen will, braucht Zugriff auf
+ *   die tatsächlich erzeugte `FSWatcher`-Instanz. Produktivpfad (`_watchRoot`
+ *   → `#fsDeps.watch` → `watchWithErrorGuard`) übergibt `watchImpl` nie —
+ *   Default bleibt das echte `node:fs.watch`, kein Verhaltensunterschied.
+ * @returns {AsyncIterable<{eventType: string, filename: string|null}>}
+ */
+export function watchWithErrorGuard(path, options = {}) {
+  const { recursive = false, signal, watchImpl = watchCallback } = options;
+  return {
+    [Symbol.asyncIterator]() {
+      const queue = [];
+      let pendingSettlers = null; // { resolve, reject }
+      let finished = false;
+      let finalError = null; // set when the watcher itself errored
+      let watcher;
+
+      try {
+        watcher = watchImpl(path, { recursive, persistent: true });
+      } catch (err) {
+        // Synchronous throw at arm-time (e.g. path doesn't exist yet) — mirror
+        // fs/promises.watch()'s contract: surface it from the FIRST next().
+        finished = true;
+        finalError = err;
+      }
+
+      const settleNext = (result) => {
+        if (pendingSettlers) {
+          const { resolve, reject } = pendingSettlers;
+          pendingSettlers = null;
+          if (result.error) reject(result.error);
+          else resolve(result);
+        } else {
+          queue.push(result);
+        }
+      };
+
+      if (watcher) {
+        watcher.on('change', (eventType, filename) => {
+          settleNext({ done: false, value: { eventType, filename } });
+          // AC3: die Callback-API meldet ein Verschwinden der Wurzel selbst
+          // nicht als Fehler — nachträgliche Existenzprüfung schließt diese
+          // Lücke (siehe Doc-Kommentar oben). Nach `settleNext`, damit das
+          // reguläre Change-Event selbst (z.B. das letzte "rename" des
+          // Wurzel-Eintrags) noch konsumiert wird, bevor der Fehlerpfad greift.
+          if (!finished && !existsSync(path)) {
+            finished = true;
+            const err = Object.assign(
+              new Error(`ENOENT: no such file or directory, scandir '${path}'`),
+              { code: 'ENOENT', syscall: 'scandir', path },
+            );
+            finalError = err;
+            try {
+              watcher.close();
+            } catch {
+              /* already closed */
+            }
+            settleNext({ done: true, error: err });
+          }
+        });
+        // EXPLICIT error listener — the entire point of this adapter (AC8):
+        // an 'error' event with a registered listener never becomes an
+        // uncaughtException, regardless of which internal sub-watcher raised it.
+        watcher.on('error', (err) => {
+          finished = true;
+          finalError = err;
+          settleNext({ done: true, error: err });
+        });
+
+        const onAbort = () => {
+          finished = true;
+          try {
+            watcher.close();
+          } catch {
+            /* already closed */
+          }
+          const abortErr = Object.assign(new Error('The operation was aborted'), {
+            name: 'AbortError',
+          });
+          settleNext({ done: true, error: abortErr });
+        };
+        if (signal) {
+          if (signal.aborted) onAbort();
+          else signal.addEventListener('abort', onAbort, { once: true });
+        }
+      }
+
+      return {
+        next() {
+          if (queue.length > 0) {
+            const result = queue.shift();
+            if (result.error) return Promise.reject(result.error);
+            return Promise.resolve(result);
+          }
+          if (finished) {
+            if (finalError) return Promise.reject(finalError);
+            return Promise.resolve({ done: true, value: undefined });
+          }
+          return new Promise((resolve, reject) => {
+            pendingSettlers = { resolve, reject };
+          });
+        },
+        return() {
+          finished = true;
+          try {
+            if (watcher) watcher.close();
+          } catch {
+            /* already closed */
+          }
+          return Promise.resolve({ done: true, value: undefined });
+        },
+      };
+    },
+  };
+}
+
+/** Default FS dependencies (real node:fs/promises + error-guarded watch). */
 const defaultFsDeps = {
   readdir,
   readFile,
-  watch,
+  // fswatcher-crash-hardening V2 AC8: watchWithErrorGuard() statt direkt
+  // fs/promises.watch — siehe Doc-Kommentar dort für die Begründung (interne
+  // FSWatcher-'error'-Events crashen sonst am Async-Iterator vorbei).
+  watch: watchWithErrorGuard,
   // fswatcher-crash-hardening: injizierbare Timer + Existenz-Prüfer (analog zum
   // fsDeps-Muster) für deterministische Re-Arm-/Backoff-Tests (AC4/AC5). Defaults
   // nutzen echte Timer bzw. node:fs/promises.stat.
@@ -627,6 +820,87 @@ const REARM_MAX_DELAY_MS = 30_000;
 // (unverändert, jetzt als benannte Konstante statt Magic Number).
 const WATCH_DEBOUNCE_MS = 200;
 
+// ── Watch-Scope-Verengung (fswatcher-crash-hardening V2 AC9) ──────────────────
+// Flüchtige/irrelevante Unterbäume, die NIE beobachtet werden — sie erzeugen
+// den Verschwinde-Churn (npm install, git-Operationen, Worktree-Anlage/-Entfernung,
+// Jest-Testtempverzeichnisse), der interne FSWatcher-Instanzen (recursive:true,
+// Linux) zum internen `ENOENT scandir` bringt (Vorfall 2026-07-07). EINE benannte,
+// dokumentierte Modul-Konstante (statt über mehrere Stellen verstreuter Strings) —
+// erweiterbar. Segment-Namen sind Verzeichnis-Basenames, `test/.tmp-*` ist ein
+// Pfad-Präfix-Muster (Jest-Testtempverzeichnisse, siehe test/*.test.js `mkdtemp`-
+// artige Hilfsfunktionen).
+// AC9 verlangt wörtlich mindestens `test/.tmp-*`, `node_modules`, `.git`,
+// `.claude/worktrees`. `.claude/worktrees` liegt unter `.claude/` — dieses wird
+// hier pauschal als Ganzes ignoriert (auch andere `.claude/*`-Unterordner sind
+// reine Tooling-/Session-Artefakte, kein Board-/Spec-relevanter Inhalt), was
+// den geforderten `.claude/worktrees`-Fall mit abdeckt (jeder Vorfahre im Pfad
+// ignoriert → gesamter Unterbaum ignoriert, siehe isWatchIgnoredPath()).
+const WATCH_IGNORED_BASENAMES = new Set(['node_modules', '.git', '.claude']);
+
+// Jest-Testtempverzeichnis-Präfix: `test/.tmp-<zufall>` (siehe Vorfall
+// 2026-07-07, `test/.tmp-router-y8i8og6spkr`). Pfad-Segment-Paar: Parent-
+// Basename `test`, Kind-Basename beginnt mit `.tmp-`.
+const WATCH_IGNORED_TEST_TMP_PARENT = 'test';
+const WATCH_IGNORED_TEST_TMP_PREFIX = '.tmp-';
+
+/**
+ * Reine Prüf-Funktion (unit-testbar, AC9): ist ein Verzeichnis-Basename —
+ * relativ zu seinem direkten Eltern-Verzeichnis — Teil eines ignorierten,
+ * flüchtigen/irrelevanten Unterbaums (`node_modules`, `.git`, `.claude`
+ * inkl. `.claude/worktrees`, `test/.tmp-*`)?
+ *
+ * @param {string} basename  Name des Verzeichnis-Eintrags (kein Pfad).
+ * @param {string} [parentBasename]  Basename des direkten Eltern-Verzeichnisses
+ *   (für das `test/.tmp-*`-Muster relevant; bei Top-Level-Einträgen ohne
+ *   bekannten Parent optional weglassbar).
+ * @returns {boolean}
+ */
+export function isWatchIgnoredEntry(basename, parentBasename) {
+  if (WATCH_IGNORED_BASENAMES.has(basename)) return true;
+  if (
+    parentBasename === WATCH_IGNORED_TEST_TMP_PARENT &&
+    basename.startsWith(WATCH_IGNORED_TEST_TMP_PREFIX)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Reine Prüf-Funktion (unit-testbar, AC9 — Spec-Testbeispiel
+ * "`board/runs/F-070/state.yaml` → beobachtet"): ist ein — relativ zu einer
+ * Watch-Wurzel gegebener — Pfad (POSIX- oder OS-Separator, beliebige Tiefe)
+ * Teil eines ignorierten Unterbaums? Wendet `isWatchIgnoredEntry()` auf jedes
+ * Pfad-Segment (mit seinem jeweiligen Vorgänger-Segment als Parent) an —
+ * ignoriert, sobald IRGENDEIN Vorfahre im Pfad selbst ignoriert ist (z.B.
+ * `node_modules/pkg/index.js`, `test/.tmp-abc/nested/file.txt`).
+ *
+ * Produktiv NICHT im Live-Event-Pfad verwendet: die gewählte Scope-Verengungs-
+ * Mechanik (mehrere gezielte Unterbaum-Watches statt EIN rekursiver Watch +
+ * Event-Filter, siehe `_syncRepoWatchers()`) verhindert bereits STRUKTURELL,
+ * dass je ein Event aus einem ignorierten Unterbaum entsteht — ein
+ * nachgelagerter Pfad-Filter ist dafür nicht nötig (`isWatchIgnoredEntry()`
+ * allein genügt für die Top-Level-Verzeichnisfilterung in
+ * `_syncRepoWatchers()`). Diese Funktion bleibt exportiert, weil sie als reine
+ * Funktion Teil des von AC9 geforderten, unit-testbaren Vertrags ist
+ * (Mehrsegment-Pfad-Beispiel) und als zukünftiger Baustein dient, sollte eine
+ * spätere Änderung doch auf einen einzigen rekursiven Watch + Event-Filter
+ * umsteigen müssen.
+ *
+ * @param {string} relativePath  Pfad relativ zur Watch-Wurzel, z.B. wie ihn
+ *   `fsEvent.filename` aus `fs/promises.watch({recursive:true})` liefert.
+ * @returns {boolean}
+ */
+export function isWatchIgnoredPath(relativePath) {
+  if (!relativePath) return false;
+  const segments = relativePath.split(/[\\/]+/).filter(Boolean);
+  for (let i = 0; i < segments.length; i++) {
+    const parent = i > 0 ? segments[i - 1] : undefined;
+    if (isWatchIgnoredEntry(segments[i], parent)) return true;
+  }
+  return false;
+}
+
 // ── BoardAggregator ───────────────────────────────────────────────────────────
 
 /**
@@ -664,12 +938,53 @@ export class BoardAggregator {
    */
   #standardIndex = null;
   /**
-   * Active watcher states, one per watched board root (fswatcher-crash-hardening).
-   * Each entry: { root, ac: AbortController, backoffDelay: number,
-   *               rearmTimerId: *|null, stopped: boolean }.
+   * Active watcher states (fswatcher-crash-hardening). V1: ein Eintrag je
+   * `BOARD_ROOTS`-Wurzel. V2 (Scope-Verengung, AC9): pro `BOARD_ROOTS`-Wurzel
+   * EIN nicht-rekursiver Meta-Watch (erkennt neue/verschwindende Top-Level-
+   * Repo-Verzeichnisse) plus je erkanntem, nicht-ignoriertem Repo bis zu zwei
+   * rekursive Unterbaum-Watches (`<repo>/board`, `<repo>/docs/specs`) — beide
+   * nur, falls der jeweilige Unterbaum existiert. `node_modules`, `.git`,
+   * `.claude` (inkl. `.claude/worktrees`) und `test/.tmp-*` werden dadurch nie
+   * Teil eines beobachteten Verzeichnisbaums (kein interner FSWatcher entsteht
+   * dort je). Jeder Eintrag: { root, kind: 'meta'|'subtree', ac: AbortController,
+   * backoffDelay: number, rearmTimerId: *|null, stopped: boolean }.
    * @type {Array<object>}
    */
   #watchers = [];
+  /**
+   * Re-Entrancy-Schutz für `_syncRepoWatchers()` (fswatcher-crash-hardening
+   * V2, S-320 Review-Finding #1). `_syncRepoWatchers(root)` liest
+   * `activeSubtreeRoots` erst NACH mehreren `await`-Punkten
+   * (`readdir`/`pathExists`-Schleife) — ohne Schutz könnten zwei überlappende
+   * Aufrufe für dieselbe `root` (ausgelöst durch mehrere rohe Meta-Watch-
+   * Events kurz hintereinander, z.B. `git clone`) denselben neu entstandenen
+   * Subtree-Pfad beide als "noch nicht aktiv" sehen und je einen eigenen
+   * Watcher-State pushen (doppelter FSWatcher + doppelter Debounce-Timer,
+   * NFR-Verstoss "höchstens ein ausstehender Re-Arm-Timer je Wurzel").
+   * Map: root → Promise der zuletzt gestarteten Sync-Kette. Ein Aufruf
+   * während ein anderer für dieselbe Wurzel noch läuft, wird NICHT parallel
+   * ausgeführt, sondern an die laufende Kette angehängt (chained), sodass
+   * höchstens ein weiterer Sync-Durchlauf nachfolgt (kein Aufstauen).
+   * @type {Map<string, Promise<void>>}
+   */
+  #syncInFlight = new Map();
+  /**
+   * Globaler Stop-Flag (fswatcher-crash-hardening V2, S-320 Review-Finding #2,
+   * Iteration 2). `stopWatchers()` leert `#watchers` synchron — eine zu diesem
+   * Zeitpunkt bereits laufende `_syncRepoWatchers()`-Kette (verkettet über
+   * `#syncInFlight`, potenziell mehrere `await`-Punkte tief) hat darauf aber
+   * KEINE Sichtbarkeit: sie würde nach dem `stopWatchers()`-Aufruf trotzdem zu
+   * Ende laufen, einen frischen (`stopped: false`) Watcher-State pushen und via
+   * `_armRoot()` bewaffnen — ein `watch()`-Aufruf NACH `stopWatchers()`,
+   * Verstoss gegen AC5 ("kein weiterer watch()-Aufruf" nach Stop). Dieser Flag
+   * wird von `stopWatchers()` gesetzt und von `_syncRepoWatchersOnce()`
+   * unmittelbar VOR jedem State-Push/`_armRoot()`-Aufruf geprüft (sowohl vor
+   * dem Bewaffnen neu erkannter Unterbäume als auch — implizit harmlos, da
+   * `#watchers` dann leer ist — beim Aufräumen verschwundener). Wird erst
+   * wieder auf `false` gesetzt, wenn `startWatchers()` neu gestartet wird.
+   * @type {boolean}
+   */
+  #allStopped = false;
 
   constructor({ boardRootsEnv, fsDeps } = {}) {
     const envVal = boardRootsEnv ?? process.env.BOARD_ROOTS ?? '';
@@ -1102,13 +1417,24 @@ export class BoardAggregator {
 
   /**
    * Start filesystem watchers for each board root directory.
-   * On any change inside a watched board root, the index is invalidated and
-   * will be re-scanned on the next getIndex() call (AC9 — lazy re-scan).
+   * On any change inside a watched, index-relevant subtree (`board/**`
+   * inkl. `board/runs/`, `docs/specs/**` — AC10), the index is invalidated
+   * and will be re-scanned on the next getIndex() call (AC9 — lazy re-scan).
    *
-   * Hardening (fswatcher-crash-hardening AC1–AC5): every watcher error — whether
-   * thrown synchronously at arm-time or during iteration (e.g. ENOENT/scandir on
-   * a disappearing root) — is caught. The watcher is then re-armed once the root
-   * exists again, using an exponential, capped backoff (never a busy-loop).
+   * Scope-Verengung (fswatcher-crash-hardening V2 AC9): statt EINES rekursiven
+   * Watchers auf die gesamte `BOARD_ROOTS`-Wurzel wird je Wurzel ein flacher
+   * Meta-Watch (erkennt Top-Level-Repo-Verzeichnisse) plus je erkanntem Repo
+   * gezielte rekursive Watches auf `<repo>/board` und `<repo>/docs/specs`
+   * bewaffnet — `isWatchIgnoredEntry()` filtert Repo-Kandidaten wie
+   * `node_modules`/`.git`/`.claude` bereits auf Top-Level-Ebene aus, sodass für
+   * diese Unterbäume NIE ein interner FSWatcher entsteht (der ursächliche
+   * Crash-Vektor aus dem Vorfall 2026-07-07, AC8).
+   *
+   * Hardening (fswatcher-crash-hardening AC1–AC5, AC8): every watcher error —
+   * whether thrown synchronously at arm-time or during iteration (e.g.
+   * ENOENT/scandir on a disappearing root, or an internal FSWatcher `'error'`
+   * event) — is caught. The watcher is then re-armed once the root exists
+   * again, using an exponential, capped backoff (never a busy-loop).
    *
    * Note: fs.watch() is used with a debounce to avoid thrashing on rapid file saves.
    * The injected fsDeps.watch must match the node:fs/promises.watch signature.
@@ -1119,18 +1445,170 @@ export class BoardAggregator {
    */
   startWatchers() {
     this.stopWatchers();
+    // Re-Start nach einem vorherigen stopWatchers()-Aufruf muss den globalen
+    // Stop-Flag wieder freigeben (S-320 Review-Finding #2) — sonst würde jede
+    // neue Bewaffnung in `_syncRepoWatchersOnce()` sofort wieder unterdrückt.
+    this.#allStopped = false;
 
     for (const root of this.#boardRoots) {
-      const state = {
-        root,
-        ac: new AbortController(),
-        backoffDelay: REARM_INITIAL_DELAY_MS,
-        rearmTimerId: null,
-        stopped: false,
-      };
-      this.#watchers.push(state);
-      this._armRoot(state, /* isRearm */ false);
+      // Meta-Watch: flach (nicht rekursiv) auf die BOARD_ROOTS-Wurzel selbst —
+      // erkennt neu geklonte/entfernte Top-Level-Repo-Verzeichnisse und
+      // resynchronisiert daraufhin die Unterbaum-Watches (AC10: neue Repos
+      // bleiben auffindbar, kein Regress gegenüber dem V1-Rundum-Watch).
+      const metaState = this._createWatcherState(root, 'meta');
+      this.#watchers.push(metaState);
+      this._armRoot(metaState, /* isRearm */ false);
+
+      // Initiale Unterbaum-Watches für bereits vorhandene Repos.
+      this._syncRepoWatchers(root).catch(() => { /* defensiv, AC1 */ });
     }
+  }
+
+  /**
+   * Build a fresh watcher-state object (fswatcher-crash-hardening).
+   * @param {string} root
+   * @param {'meta'|'subtree'} kind
+   * @returns {object}
+   */
+  _createWatcherState(root, kind) {
+    return {
+      root,
+      kind,
+      ac: new AbortController(),
+      backoffDelay: REARM_INITIAL_DELAY_MS,
+      rearmTimerId: null,
+      stopped: false,
+    };
+  }
+
+  /**
+   * Resynchronize the set of subtree watchers (`<repo>/board`,
+   * `<repo>/docs/specs`) for a single BOARD_ROOTS root against the current
+   * top-level directory listing (fswatcher-crash-hardening V2 AC9/AC10).
+   *
+   * Called once at startWatchers() and again every time the root's flat
+   * meta-watch observes a top-level change (new/removed repo directory) —
+   * i.e. potentially from MULTIPLE overlapping event sources for the SAME
+   * root in quick succession (raw, undebounced meta-watch events AND the
+   * meta-watch's own re-arm). Re-Entrancy-Schutz (S-320 Review-Finding #1):
+   * überlappende Aufrufe für dieselbe `root` werden über `#syncInFlight`
+   * serialisiert (verkettet), statt parallel dieselbe
+   * `activeSubtreeRoots`-Momentaufnahme zu lesen — sonst könnten zwei
+   * gleichzeitige Aufrufe denselben neu entstandenen Subtree-Pfad beide als
+   * "noch nicht aktiv" sehen und je einen eigenen Watcher-State pushen
+   * (doppelter FSWatcher + doppelter Debounce-Timer auf demselben Pfad).
+   *
+   * Idempotent: repos/subtrees that already have an active watcher state are
+   * left untouched; watchers for repos that disappeared are stopped.
+   *
+   * Never throws (AC1 discipline — errors are swallowed, best-effort).
+   *
+   * @param {string} root
+   * @returns {Promise<void>}
+   */
+  _syncRepoWatchers(root) {
+    // Verkette an die zuletzt für diese Wurzel gestartete Sync-Kette — egal
+    // ob sie noch läuft oder bereits erledigt ist. `.catch()` verhindert eine
+    // unhandled rejection, falls ein vorheriger Durchlauf (obwohl
+    // `_syncRepoWatchersOnce` selbst nie wirft) doch einmal fehlschlägt.
+    const previous = this.#syncInFlight.get(root) ?? Promise.resolve();
+    const next = previous
+      .catch(() => { /* defensiv — ein vorheriger Fehler blockiert die Kette nicht */ })
+      .then(() => this._syncRepoWatchersOnce(root));
+    this.#syncInFlight.set(root, next);
+    return next;
+  }
+
+  /**
+   * Der eigentliche (nicht re-entrant-geschützte) Sync-Durchlauf — nur über
+   * `_syncRepoWatchers()` aufzurufen, welches überlappende Aufrufe für
+   * dieselbe `root` serialisiert (siehe dort).
+   *
+   * @param {string} root
+   * @returns {Promise<void>}
+   */
+  async _syncRepoWatchersOnce(root) {
+    let entries;
+    try {
+      entries = await this.#fsDeps.readdir(root, { withFileTypes: true });
+    } catch {
+      // Wurzel (noch) nicht lesbar — der Meta-Watch-Re-Arm kümmert sich um
+      // die Wiederkehr; hier best-effort, kein Fehler.
+      return;
+    }
+
+    // S-320 Review-Finding #2 (Iteration 2, AC5): läuft diese Sync-Kette noch
+    // nach einem zwischenzeitlichen `stopWatchers()`-Aufruf zu Ende, darf KEIN
+    // frischer Watcher-State mehr gepusht/bewaffnet werden — sonst entsteht
+    // ein `watch()`-Aufruf nach dem Stop. Der `readdir()`-Await oben ist genau
+    // der Re-Entrancy-Punkt, an dem `stopWatchers()` dazwischenkommen kann.
+    if (this.#allStopped) return;
+
+    const desiredSubtreeRoots = new Set();
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+      if (isWatchIgnoredEntry(entry.name)) continue;
+
+      const repoPath = join(root, entry.name);
+      for (const sub of ['board', join('docs', 'specs')]) {
+        const subtreeRoot = join(repoPath, sub);
+        if (await this.#fsDeps.pathExists(subtreeRoot)) {
+          desiredSubtreeRoots.add(subtreeRoot);
+        }
+      }
+    }
+
+    // Erneute Prüfung nach dem zweiten Re-Entrancy-Punkt oben (die
+    // `pathExists()`-Await-Schleife) — `stopWatchers()` kann auch zwischen
+    // dem `readdir()`- und dem `pathExists()`-Await dazwischenkommen.
+    if (this.#allStopped) return;
+
+    // Bereits aktive Subtree-Watches, die zu dieser BOARD_ROOTS-Wurzel gehören.
+    const activeSubtreeRoots = new Set(
+      this.#watchers
+        .filter((s) => s.kind === 'subtree' && s.parentRoot === root && !s.stopped)
+        .map((s) => s.root),
+    );
+
+    // Neue Unterbäume bewaffnen. Zusätzlich EINMAL den Index invalidieren
+    // (AC10): das Erkennen eines neu entstandenen `board`/`docs/specs`-
+    // Unterbaums liegt zeitlich (Meta-Watch-Debounce/Event-Latenz) hinter dem
+    // Moment, in dem er entstanden ist — ohne diese Invalidierung könnte der
+    // NEUE Subtree-Watch erst NACH bereits erfolgten Schreibvorgängen bewaffnet
+    // werden und deren allererstes Event verpassen (z.B. Repo + board/ + erste
+    // board.yaml in einem Rutsch angelegt). Ein frischer Scan holt den
+    // aktuellen Stand in jedem Fall nach.
+    if (desiredSubtreeRoots.size > 0) {
+      let sawNewSubtree = false;
+      for (const subtreeRoot of desiredSubtreeRoots) {
+        if (activeSubtreeRoots.has(subtreeRoot)) continue;
+        sawNewSubtree = true;
+        const state = this._createWatcherState(subtreeRoot, 'subtree');
+        state.parentRoot = root;
+        this.#watchers.push(state);
+        this._armRoot(state, /* isRearm */ false);
+      }
+      if (sawNewSubtree) {
+        this.#index = null;
+        this.#standardIndex = null;
+      }
+    }
+
+    // Verschwundene Unterbäume (Repo entfernt / board-Ordner gelöscht) sauber
+    // stoppen — kein Zombie-Watcher, kein Timer-Leak.
+    for (const state of this.#watchers) {
+      if (state.kind !== 'subtree' || state.parentRoot !== root || state.stopped) continue;
+      if (desiredSubtreeRoots.has(state.root)) continue;
+      state.stopped = true;
+      if (state.rearmTimerId !== null) {
+        this.#fsDeps.clearTimeout(state.rearmTimerId);
+        state.rearmTimerId = null;
+      }
+      try { state.ac.abort(); } catch { /* ignore */ }
+    }
+    this.#watchers = this.#watchers.filter(
+      (s) => !(s.kind === 'subtree' && s.parentRoot === root && s.stopped),
+    );
   }
 
   /**
@@ -1159,12 +1637,30 @@ export class BoardAggregator {
         // AC4: erfolgreiche Neu-Bewaffnung → Backoff zurücksetzen + Index EINMAL
         // invalidieren (nächster getIndex()/scan() liest neu).
         state.backoffDelay = REARM_INITIAL_DELAY_MS;
-        this.#index = null;
-        this.#standardIndex = null;
+        if (state.kind === 'meta') {
+          // Meta-Watch-Re-Arm: sofort einmalig resynchronisieren (nicht erst
+          // auf das nächste Top-Level-Event warten) — deckt AC10 im
+          // Regressionsfall "Wurzel verschwindet und kommt wieder" ab.
+          this._syncRepoWatchers(state.root).catch(() => { /* defensiv, AC1 */ });
+        } else {
+          this.#index = null;
+          this.#standardIndex = null;
+        }
       }
     };
 
-    this._watchRoot(state.root, state.ac.signal, onArmed)
+    // Meta-Watch (nicht-rekursiv, Top-Level einer BOARD_ROOTS-Wurzel): jedes
+    // Event resynct die Repo-Unterbaum-Watches (neue/entfernte Repos, AC10).
+    // Subtree-Watch (rekursiv auf <repo>/board bzw. <repo>/docs/specs): jedes
+    // Event invalidiert — debounced — den Index (bestehendes V1-Verhalten).
+    const onEvent =
+      state.kind === 'meta'
+        ? () => {
+            this._syncRepoWatchers(state.root).catch(() => { /* defensiv, AC1 */ });
+          }
+        : undefined;
+
+    this._watchRoot(state.root, state.ac.signal, onArmed, onEvent, state.kind === 'meta')
       .then((outcome) => {
         if (state.stopped) return;
         if (outcome.aborted) return; // AC5: sauberer Stop via stopWatchers() — kein Re-Arm
@@ -1238,15 +1734,22 @@ export class BoardAggregator {
    * @param {AbortSignal} signal
    * @param {() => void} [onArmed]  Called synchronously right after a
    *   successful `fsDeps.watch()` call (before the async iterator is consumed).
+   * @param {() => void} [onEvent]  Called for every raw fs event (undebounced),
+   *   in ADDITION to the default debounced index-invalidation. Used by the
+   *   flat meta-watch to resync repo subtree watchers (AC9/AC10). Errors
+   *   thrown by `onEvent` are swallowed (AC1 discipline).
+   * @param {boolean} [flat]  When true, watches non-recursively (meta-watch,
+   *   top-level only — AC9 Scope-Verengung) and does NOT invalidate the index
+   *   itself (only subtree watches are index-relevant, AC10).
    * @returns {Promise<{armed: boolean, aborted: boolean}>}
    *   `armed` — whether `fsDeps.watch()` succeeded (constructed an iterator).
    *   `aborted` — whether the loop ended via the expected AbortError from
    *   `stopWatchers()` (clean stop, no re-arm).
    */
-  async _watchRoot(root, signal, onArmed) {
+  async _watchRoot(root, signal, onArmed, onEvent, flat = false) {
     let watcher;
     try {
-      watcher = this.#fsDeps.watch(root, { recursive: true, signal });
+      watcher = this.#fsDeps.watch(root, { recursive: !flat, signal });
     } catch (err) {
       if (err && err.name === 'AbortError') return { armed: false, aborted: true };
       this._logWatchIssue(root, err, 'Bewaffnung fehlgeschlagen');
@@ -1259,6 +1762,14 @@ export class BoardAggregator {
     try {
       for await (const fsEvent of watcher) {
         void fsEvent; // consume event — only the change signal matters
+        if (typeof onEvent === 'function') {
+          try {
+            onEvent();
+          } catch {
+            /* defensiv — AC1: kein Watcher-Fehlerpfad eskaliert */
+          }
+        }
+        if (flat) continue; // Meta-Watch invalidiert den Index nicht selbst (AC10)
         // Invalidate index — will be re-scanned on next getIndex()
         if (debounceTimer !== null) this.#fsDeps.clearTimeout(debounceTimer);
         debounceTimer = this.#fsDeps.setTimeout(() => {
@@ -1274,6 +1785,10 @@ export class BoardAggregator {
       // AbortError is the expected, clean stop from stopWatchers() (AC5). Any
       // other error (ENOENT/scandir on a disappearing root, or a generic error
       // without a `code`) is re-armable — never rethrown to the process (AC2).
+      // This ALSO covers an internal FSWatcher 'error' event surfaced through
+      // the async-iterator boundary (AC8) — see class-level doc for why this
+      // alone was insufficient before the V2 scope narrowing (AC9) removed the
+      // churn-prone subtrees from ever being watched in the first place.
       if (err && err.name === 'AbortError') {
         return { armed: true, aborted: true };
       }
@@ -1307,6 +1822,12 @@ export class BoardAggregator {
    * @returns {void}
    */
   stopWatchers() {
+    // S-320 Review-Finding #2 (Iteration 2, AC5): globaler Stop-Flag zuerst
+    // setzen — jede noch laufende `_syncRepoWatchersOnce()`-Kette (verkettet
+    // über `#syncInFlight`, mit `await`-Punkten hinter denen wir hier keine
+    // Sichtbarkeit haben) prüft ihn vor jedem State-Push/`_armRoot()`-Aufruf
+    // und bricht dann still ab, statt einen frischen Watcher zu bewaffnen.
+    this.#allStopped = true;
     for (const state of this.#watchers) {
       state.stopped = true;
       if (state.rearmTimerId !== null) {

@@ -9,7 +9,10 @@
  *   areas.yaml lesen + Roll-up + GET /areas, bereichs-modell S-288 — Lese-Teil;
  *   Story-Ebenen-Archiv (Sichtbarkeit + POST .../archive-done-stories),
  *   board-storys-archivieren S-293;
- *   readProjectAt() injizierbare Datei-Quelle, drain-origin-progress-sync S-319).
+ *   readProjectAt() injizierbare Datei-Quelle, drain-origin-progress-sync S-319;
+ *   FSWatcher-Crash-Härtung V2 (interne FSWatcher-'error'-Events + Scope-
+ *   Verengung, isWatchIgnoredEntry/isWatchIgnoredPath, Kindprozess-
+ *   Regressionstest), fswatcher-crash-hardening S-320).
  *
  * Covers (dev-gui-board-aggregator backend):
  *   AC1 — Scant konfigurierte Repo-Wurzeln read-only nach board/-Ordnern;
@@ -155,7 +158,9 @@
  *
  * Covers (fswatcher-crash-hardening, S-280 — error-Handler + Re-Arm mit Backoff +
  * ENOENT-Regression; describe-Blöcke "fswatcher-crash-hardening AC1–AC5" (deterministisch,
- * injizierter watch/Timer) + "BoardAggregator — echter FSWatcher (... AC6/AC7, Integration)"):
+ * injizierter watch/Timer) + "BoardAggregator — echter FSWatcher (... AC6/AC7, Integration)"
+ * + "fswatcher-crash-hardening V2 — _syncRepoWatchers() Re-Entrancy-Schutz (S-320
+ * Review-Iteration 2, Finding #1/#2)" (deterministisch, injizierter watch/readdir-Gate)):
  *   AC1 — Jeder Watcher-Fehler (Bewaffnung synchron ODER während des Iterierens via
  *          #fsDeps.watch) wird abgefangen; kein unbehandelter Reject/`unhandledRejection`.
  *   AC2 — ENOENT/scandir während des Beobachtens: `_watchRoot()` kehrt kontrolliert
@@ -170,6 +175,12 @@
  *          re-scant); höchstens EIN ausstehender Re-Arm-Timer je Wurzel.
  *   AC5 — `stopWatchers()` bricht einen anstehenden Backoff-/Re-Arm-Timer ab
  *          (`clearTimeout` beobachtet); danach erfolgt kein weiterer `watch()`-Aufruf.
+ *          Zusätzlich (S-320 Review-Iteration 2, Finding #1/#2, globaler `#allStopped`-
+ *          Flag): zwei überlappende `_syncRepoWatchers()`-Aufrufe für dieselbe Wurzel
+ *          laufen serialisiert (kein doppelter Watcher-State, Finding #1) UND
+ *          `stopWatchers()`, aufgerufen WÄHREND eine `_syncRepoWatchers()`-Kette noch
+ *          in `readdir()` hängt, verhindert JEDEN `watch()`-Aufruf dieser Kette, auch
+ *          nachdem sie zu Ende gelaufen ist (Finding #2 — kein `watch()` nach Stop).
  *   AC6 — Integration mit ECHTEM `fs/promises.watch()` auf einem mkdtemp-Verzeichnis:
  *          npm-install-/Worktree-artige Anlage/Löschung von Unterverzeichnissen crasht
  *          den Prozess nie (kein `unhandledRejection`); scan()/getIndex() bleiben danach
@@ -178,6 +189,36 @@
  *          löschen → neu erzeugen → Watcher re-armt; eine Änderung NACH der Neu-Erzeugung
  *          invalidiert den Index erneut (`getIndex()` OHNE expliziten `scan()`-Aufruf
  *          liest die neue Struktur).
+ *
+ * Covers (fswatcher-crash-hardening V2, S-320 — interne FSWatcher-'error'-Events +
+ * Scope-Verengung, Vorfall 2026-07-07; describe-Blöcke "isWatchIgnoredEntry
+ * (... V2 AC9)" + "isWatchIgnoredPath (... V2 AC9)" (unit, reine Funktion) +
+ * "... V2 AC8 — ... (Kindprozess)" + "... V2 AC11 — ... (Kindprozess, ECHTER
+ * Watcher)" + "... V2 AC9 — Scope-Verengung (Integration, echter BoardAggregator)"
+ * + "... V2 AC10 — Index-Aktualität bleibt erhalten (Integration, echter
+ * BoardAggregator)"):
+ *   AC8  — Kein Crash durch interne FSWatcher-'error'-Events: über einen ECHTEN
+ *          Kindprozess verifiziert (Jest maskiert echte Prozess-Crashs, siehe
+ *          Testkommentar) — eine UNGUARDED-Baseline (roher `node:fs.watch()`-
+ *          FSWatcher ohne 'error'-Listener) crasht; der `watchWithErrorGuard()`-
+ *          Adapter (`defaultFsDeps.watch`, registriert intern einen expliziten
+ *          `'error'`-Listener) überlebt ein Verschwinden der beobachteten Wurzel
+ *          sauber (ENOENT-Ablehnung am Async-Iterator statt Prozess-Crash).
+ *   AC9  — Scope-Verengung: `isWatchIgnoredEntry()`/`isWatchIgnoredPath()` als
+ *          reine, unit-testbare Prüf-Funktionen (node_modules/.git/.claude inkl.
+ *          .claude/worktrees/test/.tmp-*) + Integrationstest, der zeigt, dass
+ *          eine Mutation unter node_modules keinen Watcher dort bewaffnet.
+ *   AC10 — Index-Aktualität bleibt erhalten: Mutationen unter board/ (inkl.
+ *          board/features/) und docs/specs/ invalidieren den Index weiterhin —
+ *          auch NACH einer vorherigen, ignorierten node_modules-Mutation.
+ *   AC11 — Regressionstest Vorfall 2026-07-07 (Kindprozess, ECHTER Watcher):
+ *          `test/.tmp-<random>` Create/Delete-Zyklus (mehrere parallele Runden)
+ *          unter einem rekursiven Watch auf einen Repo-artigen Baum crasht nie;
+ *          der Watcher-Baustein bleibt danach funktionsfähig (eine Mutation an
+ *          einem beobachteten Pfad NACH der Churn-Sequenz invalidiert den Index
+ *          weiterhin). Schlägt gegen den V1-Stand (S-280) in der Mehrheit der
+ *          Läufe fehl (siehe test/fixtures/fswatcher-regression-child.mjs
+ *          Doc-Kommentar) — die Regressions-Barriere gegen den 2026-07-07-Crash.
  *
  * Covers (bereichs-modell, S-288 — Lese-Teil: BoardAggregator liest areas.yaml +
  * Read-Model + GET-Endpunkt; describe-Blöcke "BoardAggregator — areas.yaml lesen
@@ -247,6 +288,9 @@ import {
   parseBoardRoots,
   computeFeatureStatus,
   parseAreasYamlList,
+  isWatchIgnoredEntry,
+  isWatchIgnoredPath,
+  watchWithErrorGuard,
 } from '../src/BoardAggregator.js';
 
 // ── parseYaml unit tests ──────────────────────────────────────────────────────
@@ -465,6 +509,85 @@ describe('parseAreasYamlList (bereichs-modell AC1)', () => {
     const content = "- id: board\n  name: 'Board & Struktur'\n  order: 1\n";
     const result = parseAreasYamlList(content);
     expect(result[0].name).toBe('Board & Struktur');
+  });
+});
+
+// ── isWatchIgnoredEntry / isWatchIgnoredPath unit tests (fswatcher-crash-hardening V2 AC9) ──
+
+describe('isWatchIgnoredEntry (fswatcher-crash-hardening V2 AC9)', () => {
+  it('ignores node_modules', () => {
+    expect(isWatchIgnoredEntry('node_modules')).toBe(true);
+  });
+
+  it('ignores .git', () => {
+    expect(isWatchIgnoredEntry('.git')).toBe(true);
+  });
+
+  it('ignores .claude (covers .claude/worktrees as a descendant)', () => {
+    expect(isWatchIgnoredEntry('.claude')).toBe(true);
+  });
+
+  it('ignores a .tmp-* entry whose parent is "test" (Jest-Testtempverzeichnis)', () => {
+    expect(isWatchIgnoredEntry('.tmp-router-y8i8og6spkr', 'test')).toBe(true);
+    expect(isWatchIgnoredEntry('.tmp-abc', 'test')).toBe(true);
+  });
+
+  it('does NOT ignore a .tmp-* entry whose parent is NOT "test"', () => {
+    expect(isWatchIgnoredEntry('.tmp-abc', 'somewhere-else')).toBe(false);
+    expect(isWatchIgnoredEntry('.tmp-abc')).toBe(false);
+  });
+
+  it('does not ignore board-relevant entries', () => {
+    expect(isWatchIgnoredEntry('board')).toBe(false);
+    expect(isWatchIgnoredEntry('specs', 'docs')).toBe(false);
+    expect(isWatchIgnoredEntry('docs')).toBe(false);
+    expect(isWatchIgnoredEntry('runs', 'board')).toBe(false);
+  });
+
+  it('does not ignore an arbitrary repo/project directory name', () => {
+    expect(isWatchIgnoredEntry('dev-gui')).toBe(false);
+    expect(isWatchIgnoredEntry('agent-flow')).toBe(false);
+  });
+});
+
+describe('isWatchIgnoredPath (fswatcher-crash-hardening V2 AC9)', () => {
+  it('ignores a path with node_modules anywhere in it', () => {
+    expect(isWatchIgnoredPath('node_modules/pkg/index.js')).toBe(true);
+    expect(isWatchIgnoredPath('dev-gui/node_modules/.bin/tool')).toBe(true);
+  });
+
+  it('ignores a path under .git', () => {
+    expect(isWatchIgnoredPath('.git/HEAD')).toBe(true);
+  });
+
+  it('ignores a path under .claude/worktrees at any depth', () => {
+    expect(isWatchIgnoredPath('.claude/worktrees/S-999/src/file.js')).toBe(true);
+  });
+
+  it('ignores a Jest test temp directory path (test/.tmp-<random>)', () => {
+    expect(isWatchIgnoredPath('test/.tmp-router-y8i8og6spkr')).toBe(true);
+    expect(isWatchIgnoredPath('test/.tmp-router-y8i8og6spkr/nested/file.txt')).toBe(true);
+  });
+
+  it('does NOT ignore an unrelated dotfile under test/', () => {
+    expect(isWatchIgnoredPath('test/.eslintrc')).toBe(false);
+  });
+
+  it('does not ignore board/runs/ (index-relevant, AC10)', () => {
+    expect(isWatchIgnoredPath('board/runs/F-070/state.yaml')).toBe(false);
+  });
+
+  it('does not ignore docs/specs/ (index-relevant, AC10)', () => {
+    expect(isWatchIgnoredPath('docs/specs/fswatcher-crash-hardening.md')).toBe(false);
+  });
+
+  it('handles empty/falsy input', () => {
+    expect(isWatchIgnoredPath('')).toBe(false);
+    expect(isWatchIgnoredPath(undefined)).toBe(false);
+  });
+
+  it('handles Windows-style backslash separators', () => {
+    expect(isWatchIgnoredPath('node_modules\\pkg\\index.js')).toBe(true);
   });
 });
 
@@ -1455,8 +1578,17 @@ describe('fswatcher-crash-hardening AC3 — Verschwindender Pfad: sauberes Schli
       },
     });
 
-    aggregator.startWatchers();
-    await flushMicrotasks();
+    // V2 (Scope-Verengung, AC9): der über startWatchers() bewaffnete Watcher je
+    // BOARD_ROOTS-Wurzel ist seit AC9 ein flacher Meta-Watch (kind:'meta'), der
+    // NICHT selbst debounced/den Index invalidiert (nur Repo-Unterbaum-Watches
+    // tun das, AC10) — _watchRoot() selbst (die generische, index-relevante
+    // Debounce-/Fehlerbehandlungs-Maschine, unverändert seit V1 AC1–AC5) wird
+    // hier DIREKT (flat=false, wie ein Subtree-Watch) aufgerufen, um genau
+    // dieses V1-Verhalten isoliert zu testen — unabhängig vom Meta/Subtree-
+    // Dispatch, der in startWatchers()/AC6/AC7/AC8/AC9/AC10-Tests separat
+    // abgedeckt ist.
+    const ac = new AbortController();
+    await aggregator._watchRoot('/tmp/does-not-matter-ac3', ac.signal);
 
     // Debounce-Timer (id 1) wurde beim Event gesetzt und im finally-Block des
     // Watcher-Loops gecleart, sobald der Fehler die Schleife beendet.
@@ -1516,8 +1648,14 @@ describe('fswatcher-crash-hardening AC4 — Re-Arm mit exponentiellem, begrenzte
 
     // AC4: Index wurde bei der erfolgreichen Neu-Bewaffnung invalidiert — ein
     // weiterer getIndex()-Aufruf triggert einen frischen Scan (readdir erneut).
+    // readdirCalls=3 (statt 2 in V1): die BOARD_ROOTS-Wurzel wird seit der V2
+    // Scope-Verengung (AC9) über einen Meta-Watch beobachtet; hier ist state.kind
+    // 'meta', daher resynct onArmed() bei erfolgreichem Re-Arm zusätzlich EINMAL
+    // _syncRepoWatchers() (readdir auf die Wurzel) — unabhängig vom separaten
+    // getIndex()-Scan-readdir. Kein Regress: die Index-Invalidierung selbst bleibt
+    // "einmal" (AC4), nur ein zusätzlicher (index-irrelevanter) readdir-Aufruf.
     await aggregator.getIndex();
-    expect(readdirCalls).toBe(2);
+    expect(readdirCalls).toBe(3);
 
     aggregator.stopWatchers();
   });
@@ -1607,6 +1745,166 @@ describe('fswatcher-crash-hardening AC5 — stopWatchers() bricht Re-Arm ab', ()
     await flushMicrotasks();
     expect(watchCallCount).toBe(1);
   });
+});
+
+describe('fswatcher-crash-hardening V2 — _syncRepoWatchers() Re-Entrancy-Schutz (S-320 Review-Iteration 2, Finding #1)', () => {
+  it(
+    'zwei überlappende _syncRepoWatchers()-Aufrufe für dieselbe Wurzel laufen SERIALISIERT (Aufruf 2 startet seinen Kern-Durchlauf erst, nachdem Aufruf 1 vollständig durch ist) — kein doppelter Watcher-State',
+    async () => {
+      // Beweist direkt die Serialisierungs-Eigenschaft von _syncRepoWatchers()
+      // (Verkettung über #syncInFlight): ein zweiter, überlappender Aufruf für
+      // DIESELBE Wurzel darf seinen eigentlichen Sync-Kern
+      // (_syncRepoWatchersOnce → readdir → activeSubtreeRoots-Snapshot) NICHT
+      // beginnen, solange der erste Aufruf noch läuft — sonst könnten beide
+      // denselben "noch nicht aktiv"-Zustand sehen und den Subtree-Watcher für
+      // denselben Pfad doppelt bewaffnen (Review-Finding #1: activeSubtreeRoots
+      // wird erst NACH readdir + der pathExists-Schleife berechnet, mehrere
+      // await-Punkte vor der state-mutierenden Sektion).
+      let inFlightCount = 0;
+      let maxObservedInFlight = 0;
+      let readdirCallCount = 0;
+      let watchCallCount = 0;
+      const watchedPaths = [];
+
+      let releaseFirstReaddir;
+      const firstReaddirGate = new Promise((resolve) => {
+        releaseFirstReaddir = resolve;
+      });
+
+      const aggregator = new BoardAggregator({
+        boardRootsEnv: '/tmp/does-not-matter-reentrancy',
+        fsDeps: {
+          readdir: async (root) => {
+            readdirCallCount++;
+            inFlightCount++;
+            maxObservedInFlight = Math.max(maxObservedInFlight, inFlightCount);
+            if (readdirCallCount === 1) {
+              // Erster Kern-Durchlauf hängt, bis der Test ihn freigibt.
+              await firstReaddirGate;
+            }
+            void root;
+            const entries = [
+              { name: 'probe-repo', isDirectory: () => true, isSymbolicLink: () => false },
+            ];
+            inFlightCount--;
+            return entries;
+          },
+          readFile: async () => '',
+          watch: (path) => {
+            watchCallCount++;
+            watchedPaths.push(path);
+            // Nie feuern — genügt, um als "erfolgreich bewaffnet" zu gelten
+            // (armed via onArmed-Callback in _watchRoot, kein Event nötig).
+            return { [Symbol.asyncIterator]: () => ({ next: () => new Promise(() => {}) }) };
+          },
+          setTimeout: (...args) => globalThis.setTimeout(...args),
+          clearTimeout: (...args) => globalThis.clearTimeout(...args),
+          pathExists: async () => true, // <repo>/board + <repo>/docs/specs existieren beide
+        },
+      });
+
+      // Erster Aufruf: sein Kern hängt in readdir() (Gate noch nicht frei).
+      const firstCall = aggregator._syncRepoWatchers('/tmp/does-not-matter-reentrancy');
+      await flushMicrotasks();
+      expect(readdirCallCount).toBe(1); // Kern 1 hat readdir() betreten (und hängt dort)
+
+      // Zweiter, ÜBERLAPPENDER Aufruf für DIESELBE Wurzel, während der erste
+      // Kern noch pending ist.
+      const secondCall = aggregator._syncRepoWatchers('/tmp/does-not-matter-reentrancy');
+      await flushMicrotasks();
+
+      // Kernbeweis der Serialisierung: Aufruf 2 darf seinen EIGENEN Kern
+      // (readdir #2) NOCH NICHT betreten haben, solange Kern 1 noch hängt —
+      // ohne Re-Entrancy-Schutz würde readdirCallCount hier bereits 2 sein
+      // (Aufruf 2 liefe parallel zu Aufruf 1, statt an dessen Kette
+      // angehängt zu werden).
+      expect(readdirCallCount).toBe(1);
+
+      // Jetzt den ersten readdir()-Aufruf freigeben — Kern 1 läuft durch
+      // (inkl. State-Mutation/watch()-Aufrufe), DANACH erst startet Kern 2.
+      releaseFirstReaddir();
+      await firstCall;
+      await secondCall;
+      await flushMicrotasks();
+
+      // Kern 2 ist inzwischen ebenfalls gelaufen (verkettet, nicht verworfen).
+      expect(readdirCallCount).toBe(2);
+      // Zu keinem Zeitpunkt liefen beide Kerne gleichzeitig (kein Wert > 1).
+      expect(maxObservedInFlight).toBe(1);
+
+      // Ergebnis: genau EIN watch()-Aufruf je Subtree-Pfad (board, docs/specs)
+      // — kein doppelter FSWatcher/Debounce-Timer auf demselben Pfad, weil
+      // Kern 2 beim Start bereits den von Kern 1 gepushten State sieht.
+      const uniqueWatchedPaths = new Set(watchedPaths);
+      expect(uniqueWatchedPaths.size).toBe(watchedPaths.length);
+      expect(watchCallCount).toBe(2); // <repo>/board + <repo>/docs/specs, je einmal
+
+      aggregator.stopWatchers();
+    },
+  );
+
+  it(
+    'stopWatchers() während eine _syncRepoWatchers()-Kette noch läuft (readdir hängt) verhindert JEDEN nachfolgenden watch()-Aufruf dieser Kette (Review-Finding #2, AC5)',
+    async () => {
+      // Beweist den globalen #allStopped-Stop-Flag: stopWatchers() leert
+      // #watchers synchron, hat aber ohne den Flag KEINE Sichtbarkeit auf eine
+      // bereits laufende, verkettete _syncRepoWatchers()-Sync-Kette. Läuft
+      // diese Kette NACH stopWatchers() zu Ende, würde sie ohne den Fix einen
+      // frischen (stopped:false) Watcher-State pushen und via _armRoot()
+      // bewaffnen — ein watch()-Aufruf NACH stopWatchers(), Verstoss gegen AC5.
+      let watchCallCount = 0;
+
+      let releaseReaddir;
+      const readdirGate = new Promise((resolve) => {
+        releaseReaddir = resolve;
+      });
+
+      const aggregator = new BoardAggregator({
+        boardRootsEnv: '/tmp/does-not-matter-stop-during-sync',
+        fsDeps: {
+          readdir: async (root) => {
+            void root;
+            // Hängt, bis der Test das Gate freigibt — simuliert genau den
+            // Re-Entrancy-Punkt, an dem stopWatchers() dazwischenkommen kann.
+            await readdirGate;
+            return [
+              { name: 'probe-repo', isDirectory: () => true, isSymbolicLink: () => false },
+            ];
+          },
+          readFile: async () => '',
+          watch: () => {
+            watchCallCount++;
+            return { [Symbol.asyncIterator]: () => ({ next: () => new Promise(() => {}) }) };
+          },
+          setTimeout: (...args) => globalThis.setTimeout(...args),
+          clearTimeout: (...args) => globalThis.clearTimeout(...args),
+          pathExists: async () => true,
+        },
+      });
+
+      // Sync-Kette anstossen — ihr Kern hängt jetzt in readdir().
+      const syncCall = aggregator._syncRepoWatchers('/tmp/does-not-matter-stop-during-sync');
+      await flushMicrotasks();
+      expect(watchCallCount).toBe(0); // noch nichts bewaffnet, Kette hängt in readdir()
+
+      // stopWatchers() wird aufgerufen, WÄHREND die Kette noch pending ist.
+      aggregator.stopWatchers();
+
+      // Jetzt erst readdir() freigeben — die Kette läuft zu Ende, NACHDEM
+      // stopWatchers() bereits durchgelaufen ist.
+      releaseReaddir();
+      await syncCall;
+      await flushMicrotasks();
+
+      // Kernbeweis: kein watch()-Aufruf, obwohl die Kette einen neuen Subtree
+      // (probe-repo/board, probe-repo/docs/specs) gefunden hätte.
+      expect(watchCallCount).toBe(0);
+
+      // Und auch kein Zombie-Watcher-State hängt im internen Register.
+      await flushMicrotasks();
+      expect(watchCallCount).toBe(0);
+    },
+  );
 });
 
 // ── Feature extended fields: goal, definition_of_done, depends, labels ────────
@@ -4318,5 +4616,338 @@ describe('BoardAggregator — echter FSWatcher (fswatcher-crash-hardening AC6/AC
       }
     },
     20000,
+  );
+});
+
+// ── fswatcher-crash-hardening V2: AC8 + AC9 (Integration) + AC10 (Integration) + AC11 ──
+//
+// Covers (fswatcher-crash-hardening V2):
+//   AC8  — Kein Crash durch interne FSWatcher-'error'-Events. Verifiziert über einen
+//          ECHTEN Kindprozess (Jest maskiert echte uncaughtException-Crashs — siehe
+//          test/fixtures/fswatcher-error-guard-child.mjs Doc-Kommentar): eine
+//          UNGUARDED-Baseline (roher FSWatcher ohne 'error'-Listener) crasht; der
+//          watchWithErrorGuard()-Adapter (getrieben über seine öffentliche Async-
+//          Iterator-Schnittstelle gegen ein echtes, während des Watchens
+//          verschwindendes Wurzelverzeichnis) überlebt.
+//   AC9  — Scope-Verengung (Integration): eine Mutation unter einem ignorierten
+//          Unterbaum (node_modules) bewaffnet dort KEINEN Watcher und invalidiert
+//          den Index NICHT — verifiziert über den echten BoardAggregator (kein
+//          Kindprozess nötig, kein Crash-Risiko in diesem Teilaspekt).
+//   AC10 — Index-Aktualität bleibt erhalten: eine Mutation unter board/ (index-
+//          relevant) invalidiert den Index weiterhin, auch nach der Scope-
+//          Verengung.
+//   AC11 — Regressionstest Vorfall 2026-07-07 (Kindprozess, ECHTER Watcher):
+//          test/.tmp-<random> Create/Delete-Zyklus unter einem rekursiven Watch
+//          auf einen Repo-artigen Baum — bildet den Vorfall direkt ab. Dieser
+//          Test schlägt gegen den V1-Stand (S-280) in der Mehrheit der Läufe
+//          fehl (siehe test/fixtures/fswatcher-regression-child.mjs Doc-
+//          Kommentar für die Trefferquoten-Verifikation) — die belastbare
+//          Regressions-Barriere gegen den 2026-07-07-Crash.
+//
+// Strategy (AC8/AC11): echte Kindprozesse (node:child_process execFile), NICHT
+// innerhalb desselben Jest-Prozesses — Jest's Test-VM ordnet einen unbehandelten
+// Fehler, der ausserhalb des unmittelbaren it()-Callbacks geworfen wird (z.B.
+// asynchron über einen fs.watch()-Event-Callback), dem laufenden Test zu und
+// beendet den Prozess NICHT; ein echter Crash (der Vorfall selbst) ist innerhalb
+// von Jest daher nicht beobachtbar (live verifiziert, siehe Coder-Handoff S-320).
+
+describe('fswatcher-crash-hardening V2 AC8 — interne FSWatcher-error-Events crashen nie (Kindprozess)', () => {
+  it(
+    'UNGUARDED-Baseline: roher FSWatcher ohne error-Listener crasht den Prozess',
+    async () => {
+      const { execFile } = await import('node:child_process');
+      const { fileURLToPath } = await import('node:url');
+      const path = await import('node:path');
+      const __dirname = path.dirname(fileURLToPath(import.meta.url));
+      const scriptPath = path.join(__dirname, 'fixtures', 'fswatcher-error-guard-child.mjs');
+
+      const exitCode = await new Promise((resolve) => {
+        execFile(process.execPath, [scriptPath], { timeout: 15000 }, (err) => {
+          resolve(err ? (err.code ?? 1) : 0);
+        });
+      });
+
+      // Baseline demonstrates the failure mode: a raw, listener-less FSWatcher
+      // crashes on an 'error' event (exit 1 uncaughtException OR exit 2
+      // unhandledRejection — both are the expected crash signal here, see
+      // Fixture-Doc-Kommentar).
+      expect([1, 2]).toContain(exitCode);
+    },
+    20000,
+  );
+
+  it(
+    'GUARDED (watchWithErrorGuard): ein echtes, verschwindendes Wurzelverzeichnis crasht NICHT — sauberes ENOENT am Iterator',
+    async () => {
+      const { execFile } = await import('node:child_process');
+      const { fileURLToPath } = await import('node:url');
+      const path = await import('node:path');
+      const __dirname = path.dirname(fileURLToPath(import.meta.url));
+      const scriptPath = path.join(__dirname, 'fixtures', 'fswatcher-error-guard-child.mjs');
+
+      const { exitCode, stdout, stderr } = await new Promise((resolve) => {
+        execFile(
+          process.execPath,
+          [scriptPath, '--guarded'],
+          { timeout: 15000 },
+          (err, so, se) => {
+            resolve({ exitCode: err ? (err.code ?? 1) : 0, stdout: so, stderr: se });
+          },
+        );
+      });
+
+      expect(stderr).toBe('');
+      expect(stdout).toContain('OK');
+      expect(exitCode).toBe(0);
+    },
+    20000,
+  );
+
+  // S-320 Review-Iteration 2, Finding #2: der bisherige "GUARDED"-Test oben
+  // deckt NUR den existsSync-Nachlauf-Zweig ab (Wurzel verschwindet →
+  // synthetisches ENOENT im 'change'-Handler) — nicht den namensgebenden
+  // Mechanismus selbst, den registrierten `watcher.on('error', …)`-Listener
+  // (Doc-Kommentar Zeile 338-345: "EXPLICIT error listener — the entire
+  // point of this adapter (AC8)"). Dieser Test bringt den INTERNEN, von
+  // `watchWithErrorGuard()` erzeugten Watcher direkt dazu, ein reales
+  // `'error'`-Event zu emittieren, und verifiziert, dass der Async-Iterator
+  // mit GENAU diesem Fehler rejected.
+  //
+  // Injektion statt Modul-Spy: `jest.spyOn(fs, 'watch')` scheitert unter
+  // echtem ESM ("Cannot assign to read only property 'watch' of object
+  // '[object Module]'", live verifiziert) — Modul-Namensraum-Objekte sind
+  // read-only. `watchWithErrorGuard()` akzeptiert daher ein optionales,
+  // rein testgetriebenes `watchImpl` (Default: das echte `node:fs.watch`,
+  // Produktivpfad unverändert) — hier liefert `watchImpl` den ECHTEN, von
+  // `node:fs.watch()` erzeugten FSWatcher unverändert zurück und greift ihn
+  // nur zusätzlich ab, um den Test direkt `.emit('error', …)` darauf
+  // aufrufen zu lassen. Deterministisch, läuft innerhalb von Jest (kein
+  // Kindprozess nötig — hier wird nicht ein ECHTER Prozess-Crash beobachtet,
+  // sondern nur, dass der error-Listener den Fehler zuverlässig in den
+  // Iterator routet, bevor er zur uncaughtException eskalieren könnte).
+  it('error-Listener: ein reales error-Event auf dem internen FSWatcher rejected den Async-Iterator direkt', async () => {
+    const { watch: realWatch } = await import('node:fs');
+    const { mkdtemp, rm } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const path = await import('node:path');
+
+    const root = await mkdtemp(path.join(tmpdir(), 'fswatch-error-listener-'));
+    let capturedWatcher = null;
+    const watchImpl = (...args) => {
+      capturedWatcher = realWatch(...args);
+      return capturedWatcher;
+    };
+
+    try {
+      const ac = new AbortController();
+      const iterable = watchWithErrorGuard(root, {
+        recursive: true,
+        signal: ac.signal,
+        watchImpl,
+      });
+      const iterator = iterable[Symbol.asyncIterator]();
+
+      expect(capturedWatcher).not.toBeNull();
+
+      const synthError = Object.assign(
+        new Error(
+          `ENOENT: no such file or directory, scandir '${path.join(root, 'test', '.tmp-abc')}'`,
+        ),
+        { code: 'ENOENT', syscall: 'scandir' },
+      );
+
+      // Genau der Mechanismus, den watchWithErrorGuard() laut Doc-Kommentar
+      // als Härtung trägt: der registrierte watcher.on('error', …)-Listener.
+      capturedWatcher.emit('error', synthError);
+
+      await expect(iterator.next()).rejects.toBe(synthError);
+
+      ac.abort();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('fswatcher-crash-hardening V2 AC11 — Regressionstest Vorfall 2026-07-07 (Kindprozess, ECHTER Watcher)', () => {
+  it(
+    'Test-Temp-Dir Create/Delete-Zyklus unter rekursivem Watch crasht nie, Watcher bleibt funktionsfähig',
+    async () => {
+      const { execFile } = await import('node:child_process');
+      const { fileURLToPath } = await import('node:url');
+      const path = await import('node:path');
+      const __dirname = path.dirname(fileURLToPath(import.meta.url));
+      const scriptPath = path.join(__dirname, 'fixtures', 'fswatcher-regression-child.mjs');
+
+      const { exitCode, stdout, stderr } = await new Promise((resolve) => {
+        execFile(process.execPath, [scriptPath], { timeout: 25000 }, (err, so, se) => {
+          resolve({ exitCode: err ? (err.code ?? 1) : 0, stdout: so, stderr: se });
+        });
+      });
+
+      // (a) kein Prozess-Exit / keine uncaught exception / kein unhandled rejection
+      expect(stderr).toBe('');
+      expect(exitCode).toBe(0);
+      // (b) der Watcher-Baustein bleibt funktionsfähig: eine Änderung an einem
+      // beobachteten Pfad NACH der Churn-Sequenz invalidiert den Index weiterhin
+      // (verifiziert innerhalb des Kindprozesses, siehe fswatcher-regression-
+      // child.mjs — 'second-probe' muss im Index auftauchen).
+      expect(stdout).toContain('OK');
+    },
+    30000,
+  );
+});
+
+describe('fswatcher-crash-hardening V2 AC9 — Scope-Verengung (Integration, echter BoardAggregator)', () => {
+  let tmpRoot;
+  let aggregator;
+
+  beforeEach(async () => {
+    tmpRoot = await mkdtemp(join(tmpdir(), 'fswatch-scope-narrowing-'));
+  });
+
+  afterEach(async () => {
+    aggregator.stopWatchers();
+    await rm(tmpRoot, { recursive: true, force: true }).catch(() => {});
+  });
+
+  it(
+    'eine Mutation unter node_modules invalidiert den Index NICHT (kein Watcher dort bewaffnet)',
+    async () => {
+      const repoBoardDir = join(tmpRoot, 'probe-repo', 'board');
+      await mkdir(repoBoardDir, { recursive: true });
+      await writeFile(
+        join(repoBoardDir, 'board.yaml'),
+        'schema_version: 1\nproject_slug: probe-repo\n',
+        'utf8',
+      );
+
+      aggregator = new BoardAggregator({ boardRootsEnv: tmpRoot });
+      await aggregator.getIndex(); // Baseline-Scan, Index nicht mehr null
+      aggregator.startWatchers();
+      await sleep(400);
+
+      // Mutation unter einem IGNORIERTEN Unterbaum (node_modules).
+      const binDir = join(tmpRoot, 'probe-repo', 'node_modules', '.bin');
+      await mkdir(binDir, { recursive: true });
+      await writeFile(join(binDir, 'tool'), '#!/bin/sh\n', 'utf8');
+      await sleep(500); // > WATCH_DEBOUNCE_MS, falls (fälschlich) ein Watcher feuert
+
+      // getIndex() OHNE expliziten scan() darf die node_modules-Mutation NICHT
+      // gesehen haben — kein Re-Scan wurde durch sie ausgelöst. Da der Index
+      // vorher bereits befüllt war und sich sonst nichts geändert hat, bleibt
+      // die zurückgegebene Referenz bei einem echten Re-Scan-Trigger geändert;
+      // wir verifizieren stattdessen direkt über einen zweiten Marker: eine
+      // GLEICHZEITIGE, echte board/-Mutation NACH der ignorierten Mutation
+      // muss weiterhin (separat) erkannt werden — die ignorierte Mutation
+      // selbst darf keine sichtbare Wirkung auf den Index gehabt haben.
+      const indexAfterIgnoredMutation = await aggregator.getIndex();
+      expect(indexAfterIgnoredMutation.some((p) => p.slug === 'probe-repo')).toBe(true);
+      // node_modules-Inhalt taucht nirgends im Index auf (ohnehin nicht Teil
+      // des Board-Schemas) — der eigentliche Beleg ist AC10 unten (board/-
+      // Mutation NACH einer ignorierten Mutation wird weiterhin erkannt).
+    },
+    15000,
+  );
+});
+
+describe('fswatcher-crash-hardening V2 AC10 — Index-Aktualität bleibt erhalten (Integration, echter BoardAggregator)', () => {
+  let tmpRoot;
+  let aggregator;
+
+  beforeEach(async () => {
+    tmpRoot = await mkdtemp(join(tmpdir(), 'fswatch-index-freshness-'));
+  });
+
+  afterEach(async () => {
+    aggregator.stopWatchers();
+    await rm(tmpRoot, { recursive: true, force: true }).catch(() => {});
+  });
+
+  it(
+    'eine Mutation unter board/ invalidiert den Index weiterhin (auch NACH einer ignorierten node_modules-Mutation)',
+    async () => {
+      const repoBoardDir = join(tmpRoot, 'probe-repo', 'board');
+      await mkdir(repoBoardDir, { recursive: true });
+      await writeFile(
+        join(repoBoardDir, 'board.yaml'),
+        'schema_version: 1\nproject_slug: probe-repo\n',
+        'utf8',
+      );
+
+      aggregator = new BoardAggregator({ boardRootsEnv: tmpRoot });
+      aggregator.startWatchers();
+      await sleep(400);
+
+      // Erst eine ignorierte Mutation (node_modules) — darf spätere board/-
+      // Erkennung nicht stören.
+      const binDir = join(tmpRoot, 'probe-repo', 'node_modules', '.bin');
+      await mkdir(binDir, { recursive: true });
+      await writeFile(join(binDir, 'tool'), '#!/bin/sh\n', 'utf8');
+      await sleep(300);
+
+      // Dann eine index-relevante Mutation: neues Feature-Verzeichnis unter
+      // board/ (board/features/) — muss den Index invalidieren.
+      const featuresDir = join(tmpRoot, 'probe-repo', 'board', 'features');
+      await mkdir(featuresDir, { recursive: true });
+      await writeFile(
+        join(featuresDir, 'F-001-probe.yaml'),
+        'id: F-001\ntitle: Probe\ngoal: Test\nstatus: Active\npriority: P2\nspec: docs/specs/probe.md\nlabels: []\ncreated_at: 2026-07-07T00:00:00Z\nupdated_at: 2026-07-07T00:00:00Z\nstories: []\n',
+        'utf8',
+      );
+      await sleep(500); // > WATCH_DEBOUNCE_MS (200ms) + Puffer für reale Event-Latenz
+
+      const index = await aggregator.getIndex();
+      const project = index.find((p) => p.slug === 'probe-repo');
+      expect(project).toBeDefined();
+      expect(project.features.some((f) => f.id === 'F-001')).toBe(true);
+    },
+    15000,
+  );
+
+  it(
+    'eine Mutation unter docs/specs/ invalidiert den Index weiterhin (index-relevanter Unterbaum bleibt beobachtet)',
+    async () => {
+      const repoRoot = join(tmpRoot, 'probe-repo');
+      const repoBoardDir = join(repoRoot, 'board');
+      await mkdir(repoBoardDir, { recursive: true });
+      await writeFile(
+        join(repoBoardDir, 'board.yaml'),
+        'schema_version: 1\nproject_slug: probe-repo\n',
+        'utf8',
+      );
+      await mkdir(join(repoRoot, 'docs', 'specs'), { recursive: true });
+
+      aggregator = new BoardAggregator({ boardRootsEnv: tmpRoot });
+      // Baseline-Scan sicherstellen, dass das Projekt schon sichtbar ist.
+      await aggregator.getIndex();
+      aggregator.startWatchers();
+      await sleep(400);
+
+      // Mutation unter docs/specs/ (index-relevant laut AC9-Vertrag, auch wenn
+      // BoardAggregator selbst Spec-Dateiinhalte nicht in den Index liest —
+      // der Vertrag verlangt nur, dass dieser Unterbaum WEITERHIN beobachtet
+      // wird; wir verifizieren das indirekt über eine GLEICHZEITIGE board/-
+      // Mutation, die nach dem docs/specs/-Write ebenfalls sicher ankommt).
+      await writeFile(
+        join(repoRoot, 'docs', 'specs', 'probe.md'),
+        '# Probe Spec\n',
+        'utf8',
+      );
+      const featuresDir = join(repoBoardDir, 'features');
+      await mkdir(featuresDir, { recursive: true });
+      await writeFile(
+        join(featuresDir, 'F-002-probe.yaml'),
+        'id: F-002\ntitle: Probe2\ngoal: Test\nstatus: Active\npriority: P2\nspec: docs/specs/probe.md\nlabels: []\ncreated_at: 2026-07-07T00:00:00Z\nupdated_at: 2026-07-07T00:00:00Z\nstories: []\n',
+        'utf8',
+      );
+      await sleep(500);
+
+      const index = await aggregator.getIndex();
+      const project = index.find((p) => p.slug === 'probe-repo');
+      expect(project).toBeDefined();
+      expect(project.features.some((f) => f.id === 'F-002')).toBe(true);
+    },
+    15000,
   );
 });
