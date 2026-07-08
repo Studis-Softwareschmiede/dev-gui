@@ -2,7 +2,7 @@ id: S-324
 parent: F-069
 title: 'feature-aware-drain: Bereichs-Container-Features nicht als Batch behandeln
   (Blocker-Story friert Geschwister ein)'
-status: Blocked
+status: Done
 priority: P1
 spec: docs/specs/feature-aware-drain.md
 implements:
@@ -20,12 +20,10 @@ estimate_note: M — Klassifikations-Heuristik in selectDrainMode + Test. Verifi
 confidence: medium
 branch: feat/S-324-feature-aware-drain-bereichs-container
 pr: null
-blocked_reason: Code gemergt in main (4583ec6), CI grün — Rollout-Verifikation ohne
-  Docker-Daemon in dieser Sandbox nicht möglich; bitte lokal/remote mit Docker-Zugriff
-  verifizieren oder Board manuell auf Done setzen
+blocked_reason: null
 created_at: '2026-07-08T16:20:00Z'
-updated_at: '2026-07-08T17:52:25Z'
-done_at: null
+updated_at: '2026-07-08T17:55:00Z'
+done_at: '2026-07-08T17:55:00Z'
 tok_est: null
 area: nachtwaechter
 befund_2026_07_08: 'Erster Live-Einsatz des feature-aware-drain (S-317) legte einen
