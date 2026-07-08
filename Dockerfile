@@ -107,6 +107,18 @@ COPY --chown=node:node --from=builder /build/client/dist ./client/dist
 # Copy package.json (needed for "type":"module" ESM resolution)
 COPY --chown=node:node --from=builder /build/package.json ./package.json
 
+# Playwright-Browser + System-Libs für den Regressions-Runner (RegressionRunner
+# startet `npx playwright test`). Ohne Browser-Binaries + Chromium-Systemabhängig-
+# keiten schlägt jeder Regressionslauf mit "browser not found" fehl (dev-gui hatte
+# die Playwright-Laufzeit nie eingerichtet). `@playwright/test` liegt bereits im
+# aus dem builder kopierten node_modules. Nur Chromium (nicht alle Engines) —
+# hält den Image-Zuwachs so klein wie möglich. Gemeinsamer, welt-lesbarer Pfad,
+# damit der `node`-User (USER node unten) die Browser findet.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN npx playwright install --with-deps chromium \
+  && chmod -R a+rX /ms-playwright \
+  && rm -rf /var/lib/apt/lists/*
+
 # AC6 — entrypoint: auto-provisions agent-flow plugin, then starts server.
 COPY --chown=node:node docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh

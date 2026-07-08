@@ -22,7 +22,7 @@ const config = {
   // Ignore parallel agent worktrees: they live under .claude/worktrees/ and would
   // otherwise be scanned by the global test run, pulling in foreign (possibly red)
   // tests from other branches and corrupting the test gate.
-  testPathIgnorePatterns: ['/node_modules/', '/\\.claude/worktrees/', '/test/\\.tmp-'],
+  testPathIgnorePatterns: ['/node_modules/', '/\\.claude/worktrees/', '/test/\\.tmp-', '/tests/regression/'],
 
   // Keep worktree module copies out of the haste map entirely: duplicate src/ copies
   // under .claude/worktrees/ pollute module resolution (duplicate manual mocks) and can

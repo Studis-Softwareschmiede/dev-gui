@@ -15,3 +15,6 @@ docker-compose.override.yml
 
 # Feature-Drain-Laufzeitstatus (board-feature-drain.sh, lokal je Sandbox)
 board/runs/
+playwright-report/
+test-results/
+.playwright/
