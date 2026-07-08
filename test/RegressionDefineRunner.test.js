@@ -249,8 +249,41 @@ describe('parseRegressionDefineOutcome — AC2 machine-readable vorschlag', () =
     expect(out.vorschlag.vorschlag[0].titel).toContain('Hetzner-VPS');
   });
 
-  it('unerwartete Struktur (kein status, kein vorschlag) → aussagekräftiger Fehler, nicht "kein JSON"', () => {
+  it('unerwartete Struktur (kein status, kein vorschlag, keine artefakte) → aussagekräftiger Fehler, nicht "kein JSON"', () => {
     expect(() => parseRegressionDefineOutcome('{"projekt":"x"}')).toThrow(/unerwartete Struktur/);
+  });
+
+  // Regression 2026-07-08 (Vertrags-Mismatch Teil 2): das ECHTE agent-flow-
+  // uebersetzen-Ergebnis-Objekt hat WEDER status NOCH vorschlag, sondern
+  // artefakte[]/pr — ein erfolgreicher Übersetzungslauf (Playwright-Tests als PR).
+  // Der Parser muss das als terminales `done` mit PR-Link erkennen, statt als
+  // "unerwartete Struktur" abzulehnen (die Lücke, die den zweiten roten Lauf
+  // verursachte, nachdem der vorschlag-Modus schon funktionierte).
+  it('parses the REAL uebersetzen result (artefakte + pr, no status) as done with PR link', () => {
+    const realUebersetzenOutput = JSON.stringify({
+      projekt: 'dev-gui',
+      ziel: { typ: 'bereich', id: 'vps' },
+      artefakte: ['tests/regression/vps/vps-lifecycle.spec.ts', 'tests/regression/vps/vps-lifecycle.data.json'],
+      secrets_ersetzt: ['HETZNER_API_TOKEN'],
+      nicht_datengetrieben: [],
+      abgelehnt: [],
+      pr: 'https://github.com/Studis-Softwareschmiede/dev-gui/pull/394',
+    });
+    const out = parseRegressionDefineOutcome(realUebersetzenOutput);
+    expect(out.status).toBe('done');
+    expect(out.pr).toBe('https://github.com/Studis-Softwareschmiede/dev-gui/pull/394');
+    expect(out.artefakte).toHaveLength(2);
+  });
+
+  it('parses a uebersetzen result with everything rejected (pr:null) as done', () => {
+    const out = parseRegressionDefineOutcome(JSON.stringify({
+      projekt: 'dev-gui',
+      artefakte: [],
+      abgelehnt: ['Testfall 1: Secret nicht ersetzbar'],
+      pr: null,
+    }));
+    expect(out.status).toBe('done');
+    expect(out.pr).toBeNull();
   });
 
   it('throws on needs-review with an empty/absent vorschlag', () => {

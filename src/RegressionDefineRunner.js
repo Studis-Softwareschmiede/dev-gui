@@ -345,11 +345,26 @@ export function parseRegressionDefineOutcome(raw) {
     };
     return { status: 'needs-review', vorschlag };
   }
+  // Vertrags-Abgleich Teil 2 (Fix 2026-07-08): Das `modus=uebersetzen`-Ergebnis-
+  // Objekt hat WEDER `status` NOCH `vorschlag`, sondern `artefakte[]`/`pr`
+  // (secrets_ersetzt/nicht_datengetrieben/abgelehnt optional) — ein erfolgreicher
+  // Übersetzungslauf, der die Playwright-Tests als PR ausgeliefert hat. Das ist
+  // ein terminales `done`. (Diese Form fehlte im ersten Fix — dieselbe Lücke wie
+  // beim vorschlag-Format, nur für den zweiten Modus.)
+  if (status === undefined && ('pr' in parsed || Array.isArray(parsed.artefakte))) {
+    return {
+      status: 'done',
+      pr: typeof parsed.pr === 'string' ? parsed.pr : null,
+      artefakte: Array.isArray(parsed.artefakte) ? parsed.artefakte.map((s) => String(s)) : [],
+    };
+  }
   // Aussagekräftige, nicht-irreführende Meldung: das JSON war parsebar, nur die
-  // Struktur passte nicht (kein bekannter `status`, kein `vorschlag`-Array).
+  // Struktur passte nicht (kein bekannter `status`, kein `vorschlag`-Array, kein
+  // uebersetzen-Ergebnis mit `artefakte`/`pr`).
   throw new Error(
     `regression-define output: unerwartete Struktur (status=${String(status)}, `
-    + `vorschlag=${Array.isArray(parsed.vorschlag) ? parsed.vorschlag.length + ' Einträge' : 'fehlt'})`,
+    + `vorschlag=${Array.isArray(parsed.vorschlag) ? parsed.vorschlag.length + ' Einträge' : 'fehlt'}, `
+    + `artefakte=${Array.isArray(parsed.artefakte) ? parsed.artefakte.length + ' Einträge' : 'fehlt'})`,
   );
 }
 
@@ -761,8 +776,12 @@ export class RegressionDefineRunner {
       return;
     }
 
-    // done — terminal.
-    this.#finish(jobId, 'done', { result: DONE_RESULT_MESSAGE });
+    // done — terminal. Bei uebersetzen-Ergebnis den PR-Link + Artefakte in die
+    // Erfolgsmeldung aufnehmen, damit die GUI dem Owner das echte Resultat zeigt.
+    const doneResult = outcome.pr
+      ? `${DONE_RESULT_MESSAGE} — PR: ${outcome.pr}`
+      : DONE_RESULT_MESSAGE;
+    this.#finish(jobId, 'done', { result: doneResult });
   }
 
   /**
