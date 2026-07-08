@@ -1,0 +1,28 @@
+id: S-326
+parent: F-069
+title: 'Regressions-Run (ephemeral-infra/VPS) scheitert still — kein Prozess/Log/Ergebnis/Diagnose'
+status: To Do
+priority: P2
+spec: docs/specs/regression-run.md
+implements:
+- AC1
+depends: null
+labels:
+- backend
+- bugfix
+- diagnostics
+size_est: M
+dispo_est: '5'
+dispo_act: null
+dispo_forecast: null
+estimate_note: 'M — Diagnose des ephemeral-infra-Ausführungspfads + Pflicht-Ergebnis/Fehlerprotokoll auch bei Frühausfall.'
+confidence: low
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-07-08T20:15:00Z'
+updated_at: '2026-07-08T20:15:00Z'
+done_at: null
+tok_est: null
+area: fabrik-arbeiten
+befund_2026_07_08: 'Owner startete die VPS-Suite (target ephemeral-infra) über „Regressionstest ausführen". Ergebnis: die GUI zeigte NICHTS — und serverseitig verifiziert: kein laufender Playwright-Prozess, keine Server-Log-Zeile, KEIN Ergebnis im Store, KEIN Hetzner-Server angelegt (machines: [] → keine Kosten entstanden). Der Lauf ist also ganz früh gescheitert (vor dem Provisionieren), OHNE dass irgendwo eine Diagnose abgelegt wurde. Credential-Store war unlocked, Hetzner-Token vorhanden, Playwright/Chromium im Container lauffähig (alles separat verifiziert) — es lag NICHT daran. ZWEI Arbeitspunkte: (1) DIAGNOSE-PFLICHT: Ein Regressions-Run MUSS auch bei einem Frühausfall (Precheck/Provisionierungs-Vorstufe) ein maschinenlesbares Ergebnis + secret-freie Fehlermeldung in den Ergebnis-Store schreiben, damit „Ergebnisse ansehen" den Fehlgrund zeigt statt der GUI „nichts". Aktuell bleibt der Fehlgrund nur im flüchtigen In-Memory-Run-Status (verloren, sobald der Dialog schließt). (2) URSACHE im ephemeral-infra-Ausführungspfad des RegressionRunner (S-309) + VpsProvisioner ermitteln (warum bricht der VPS-Lauf vor dem Provisionieren still ab). Reproduktion: dev-gui, Bereich vps, „Regressionstest ausführen". Der lokale Ausführungspfad (target local) ist über die parallel angelegte Smoke-Suite abgedeckt/funktioniert — dieses Item betrifft nur ephemeral-infra.'
