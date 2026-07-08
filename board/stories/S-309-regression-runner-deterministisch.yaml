@@ -2,7 +2,7 @@ id: S-309
 parent: F-067
 title: RegressionRunner — deterministischer Lauf (npx playwright test, eigenes Lock/Audit/Timeout,
   Busy-Check, local-Erreichbarkeit)
-status: In Progress
+status: Done
 priority: P2
 spec: docs/specs/regression-run.md
 implements:
@@ -28,8 +28,8 @@ branch: feat/S-309-regression-runner
 pr: null
 blocked_reason: null
 created_at: '2026-07-06T05:04:40Z'
-updated_at: '2026-07-08T03:32:08Z'
-done_at: null
+updated_at: '2026-07-08T04:01:27Z'
+done_at: '2026-07-08T04:01:27Z'
 tok_est: null
 area: fabrik-arbeiten
 notes: 'Eigener RegressionRunner-Boundary: KEIN claude/Agent je Lauf (Grep-prüfbar),
