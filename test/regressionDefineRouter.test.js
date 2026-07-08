@@ -2,7 +2,7 @@
  * @file regressionDefineRouter.test.js — HTTP-level tests for the headless
  * Regressionstest-Definier endpoints (docs/specs/regression-define-dialog.md).
  *
- * Covers (regression-define-dialog): AC1, AC2, AC3, AC4, AC5, AC9, AC12
+ * Covers (regression-define-dialog): AC1, AC2, AC3, AC4, AC5, AC9, AC12, AC14, AC15, AC16, AC17
  *
  *   AC1 — POST /api/projects/:slug/regression-define { ziel, stichworte? } →
  *         202 { jobId, status:"running" }; active project lock → 409;
@@ -26,6 +26,12 @@
  *         the HTTP body actually carries the fields).
  *   AC12 — GET .../:jobId passes error_class/raw_output through on a failed
  *         (parse-error) job; secret-free (asserted at the HTTP body level).
+ *   AC14/AC15/AC16/AC17 — the ergebnis_datei-Vertrag itself is exercised in
+ *         depth in RegressionDefineRunner.test.js; this file only re-confirms,
+ *         at the HTTP level, that a needs-review/done/failed(parse-error)
+ *         outcome sourced from the ergebnis-datei (not stdout) still surfaces
+ *         correctly through the router's pass-through view (no router-level
+ *         behaviour change — the runner already returns a secret-free view).
  *
  * Error paths: review on a non-waiting job → 409; unknown job → 404; malformed
  * body → 400.
@@ -35,13 +41,20 @@
  * injected runClaude adapter — no real `claude` process, no PTY path. Slug→Pfad-
  * Auflösung ist über injizierte `slugResolver`/`pathValidator`-Stubs entkoppelt
  * (kein echtes Filesystem nötig — workspacePath.test.js deckt die echten
- * Resolver bereits ab).
+ * Resolver bereits ab). Since the runner now reads/writes a real ergebnis-datei
+ * under `<projectPath>/board/runs/regression-define/` (AC14/AC15/AC17), the
+ * slug resolves to a REAL tmp directory (`mkdtemp`) instead of the literal
+ * `/workspace/dev-gui` — this test file must NOT write into the actual repo
+ * checkout.
  */
 
-import { describe, it, expect, jest } from '@jest/globals';
+import { describe, it, expect, jest, beforeEach, afterEach as afterEachHook } from '@jest/globals';
 import express from 'express';
 import { createServer } from 'node:http';
 import { request as httpRequest } from 'node:http';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { regressionDefineRouter } from '../src/regressionDefineRouter.js';
 import { RegressionDefineRunner } from '../src/RegressionDefineRunner.js';
 
@@ -104,13 +117,37 @@ function closeServer(srv) {
   return new Promise((resolvePromise) => srv.close(() => resolvePromise()));
 }
 
-function flush() {
-  return new Promise((r) => setImmediate(r));
+/**
+ * Resolve pending microtasks so a fire-and-forget round settles. AC14-AC17
+ * added real filesystem `await`s (mkdir/readFile/unlink) to the runner's
+ * round — loop generously (cheap, no fixed sleep; measured need ~30 ticks for
+ * the full mkdir+writeFile+readFile+unlink round-trip via libuv's threadpool).
+ */
+async function flush() {
+  for (let i = 0; i < 100; i += 1) {
+    await new Promise((r) => setImmediate(r));
+  }
 }
 
-/** Default slugResolver: 'dev-gui' → '/workspace/dev-gui', alles andere → null. */
-function makeSlugResolver(map = { 'dev-gui': '/workspace/dev-gui' }) {
-  return (slug) => (Object.prototype.hasOwnProperty.call(map, slug) ? map[slug] : null);
+/** @type {string} real tmp dir standing in for the resolved project path (AC14/AC15/AC17 need a real fs). */
+let tmpProjectDir;
+
+beforeEach(async () => {
+  tmpProjectDir = await mkdtemp(join(tmpdir(), 'regression-define-router-test-'));
+});
+
+afterEachHook(async () => {
+  await rm(tmpProjectDir, { recursive: true, force: true });
+});
+
+/** Default slugResolver: 'dev-gui' → the real tmp project dir, alles andere → null. */
+function makeSlugResolver(map) {
+  const resolved = map ?? { 'dev-gui': () => tmpProjectDir };
+  return (slug) => {
+    if (!Object.prototype.hasOwnProperty.call(resolved, slug)) return null;
+    const entry = resolved[slug];
+    return typeof entry === 'function' ? entry() : entry;
+  };
 }
 
 /** Default pathValidator: identity — resolviert den übergebenen Pfad unverändert. */
@@ -127,10 +164,24 @@ const VORSCHLAG_OUTPUT = JSON.stringify({
   target_vorschlag: null,
 });
 
-/** A runClaude adapter returning queued round results. */
+/**
+ * A runClaude adapter returning queued round results. AC14/AC15: each queued
+ * result may carry `fileContent` (written to `params.ergebnisDatei` before
+ * resolving, simulating the agent-flow-skill's atomic write) — mirrors
+ * `RegressionDefineRunner.test.js#makeSequencedRunClaude`.
+ */
 function sequencedRunClaude(results) {
   const queue = [...results];
-  return jest.fn(async () => queue.shift() ?? { exitCode: 0, output: '{"status":"done"}', authError: false });
+  return jest.fn(async (params) => {
+    const next = queue.shift() ?? { exitCode: 0, fileContent: '{"status":"done"}', output: '' };
+    if (typeof next.fileContent === 'string' && params.ergebnisDatei) {
+      const { mkdir, writeFile } = await import('node:fs/promises');
+      await mkdir(join(params.ergebnisDatei, '..'), { recursive: true });
+      await writeFile(params.ergebnisDatei, next.fileContent, 'utf8');
+    }
+    const { fileContent: _fileContent, ...rest } = next;
+    return { output: '', authError: false, ...rest };
+  });
 }
 
 function makeApp({
@@ -161,7 +212,7 @@ describe('POST /api/projects/:slug/regression-define — AC1/AC4', () => {
   });
 
   it('202 { jobId, status:"running" } for a valid bereich ziel', async () => {
-    const runner = new RegressionDefineRunner({ runClaude: sequencedRunClaude([{ exitCode: 0, output: VORSCHLAG_OUTPUT, sessionId: 's1', authError: false }]) });
+    const runner = new RegressionDefineRunner({ runClaude: sequencedRunClaude([{ exitCode: 0, fileContent: VORSCHLAG_OUTPUT, sessionId: 's1', authError: false }]) });
     const { app } = makeApp({ runner });
     server = await startServer(app);
 
@@ -175,7 +226,7 @@ describe('POST /api/projects/:slug/regression-define — AC1/AC4', () => {
   });
 
   it('202 for a valid verbund ziel with stichworte (A1)', async () => {
-    const runner = new RegressionDefineRunner({ runClaude: sequencedRunClaude([{ exitCode: 0, output: '{"status":"done"}', authError: false }]) });
+    const runner = new RegressionDefineRunner({ runClaude: sequencedRunClaude([{ exitCode: 0, fileContent: '{"status":"done"}', authError: false }]) });
     const { app } = makeApp({ runner });
     server = await startServer(app);
 
@@ -218,7 +269,7 @@ describe('POST /api/projects/:slug/regression-define — AC1/AC4', () => {
   });
 
   it('409 when a definition run is already active for the SAME project (lock held during needs-review)', async () => {
-    const runner = new RegressionDefineRunner({ runClaude: sequencedRunClaude([{ exitCode: 0, output: VORSCHLAG_OUTPUT, sessionId: 's1', authError: false }]) });
+    const runner = new RegressionDefineRunner({ runClaude: sequencedRunClaude([{ exitCode: 0, fileContent: VORSCHLAG_OUTPUT, sessionId: 's1', authError: false }]) });
     const { app } = makeApp({ runner });
     server = await startServer(app);
 
@@ -242,7 +293,7 @@ describe('GET /api/projects/:slug/regression-define/:jobId — AC2', () => {
   });
 
   it('200 with the vorschlag on needs-review, secret-free', async () => {
-    const runner = new RegressionDefineRunner({ runClaude: sequencedRunClaude([{ exitCode: 0, output: VORSCHLAG_OUTPUT, sessionId: 's1', authError: false }]) });
+    const runner = new RegressionDefineRunner({ runClaude: sequencedRunClaude([{ exitCode: 0, fileContent: VORSCHLAG_OUTPUT, sessionId: 's1', authError: false }]) });
     const { app } = makeApp({ runner });
     server = await startServer(app);
 
@@ -271,7 +322,7 @@ describe('GET /api/projects/:slug/regression-define/:jobId — AC2', () => {
   });
 
   it('AC9: carries startedAt/lastActivityAt (and phase, best-effort) while running', async () => {
-    const runner = new RegressionDefineRunner({ runClaude: sequencedRunClaude([{ exitCode: 0, output: VORSCHLAG_OUTPUT, sessionId: 's1', authError: false }]) });
+    const runner = new RegressionDefineRunner({ runClaude: sequencedRunClaude([{ exitCode: 0, fileContent: VORSCHLAG_OUTPUT, sessionId: 's1', authError: false }]) });
     const { app } = makeApp({ runner });
     server = await startServer(app);
 
@@ -300,6 +351,40 @@ describe('GET /api/projects/:slug/regression-define/:jobId — AC2', () => {
     expect(res.body.error_class).toBe('parse-error');
     expect(res.body.raw_output).toContain('kaputte Ausgabe');
     expect(res.body.raw_output).not.toMatch(/\/workspace\//);
+  });
+
+  it('AC16: differentiates "Ergebnisdatei fehlt" (no file written) vs "Ergebnisdatei kein gültiges JSON" (broken file content)', async () => {
+    const runnerMissing = new RegressionDefineRunner({
+      runClaude: sequencedRunClaude([{ exitCode: 0, output: 'stdout prosa, keine Datei geschrieben', authError: false }]),
+    });
+    const { app: appMissing } = makeApp({ runner: runnerMissing });
+    const serverMissing = await startServer(appMissing);
+    try {
+      const started = await httpPost(serverMissing, '/api/projects/dev-gui/regression-define', { ziel: { typ: 'bereich', id: 'x' } });
+      await flush();
+      const res = await httpGet(serverMissing, `/api/projects/dev-gui/regression-define/${started.body.jobId}`);
+      expect(res.body.status).toBe('failed');
+      expect(res.body.error_class).toBe('parse-error');
+      expect(res.body.error).toBe('Ergebnisdatei fehlt');
+    } finally {
+      await closeServer(serverMissing);
+    }
+
+    const runnerBroken = new RegressionDefineRunner({
+      runClaude: sequencedRunClaude([{ exitCode: 0, fileContent: 'not valid json {{{', output: '', authError: false }]),
+    });
+    const { app: appBroken } = makeApp({ runner: runnerBroken });
+    const serverBroken = await startServer(appBroken);
+    try {
+      const started = await httpPost(serverBroken, '/api/projects/dev-gui/regression-define', { ziel: { typ: 'bereich', id: 'x' } });
+      await flush();
+      const res = await httpGet(serverBroken, `/api/projects/dev-gui/regression-define/${started.body.jobId}`);
+      expect(res.body.status).toBe('failed');
+      expect(res.body.error_class).toBe('parse-error');
+      expect(res.body.error).toBe('Ergebnisdatei kein gültiges JSON');
+    } finally {
+      await closeServer(serverBroken);
+    }
   });
 
   it('AC12: failed via a non-zero exit (agent-failed) carries NO raw_output', async () => {
@@ -331,8 +416,8 @@ describe('POST /api/projects/:slug/regression-define/:jobId/review — AC3', () 
   it('202 { status:"running" } and reaches done after a valid review', async () => {
     const runner = new RegressionDefineRunner({
       runClaude: sequencedRunClaude([
-        { exitCode: 0, output: VORSCHLAG_OUTPUT, sessionId: 's1', authError: false },
-        { exitCode: 0, output: '{"status":"done"}', authError: false },
+        { exitCode: 0, fileContent: VORSCHLAG_OUTPUT, sessionId: 's1', authError: false },
+        { exitCode: 0, fileContent: '{"status":"done"}', authError: false },
       ]),
     });
     const { app } = makeApp({ runner });
@@ -354,7 +439,7 @@ describe('POST /api/projects/:slug/regression-define/:jobId/review — AC3', () 
 
   it('400 when reviewed is missing', async () => {
     const runner = new RegressionDefineRunner({
-      runClaude: sequencedRunClaude([{ exitCode: 0, output: VORSCHLAG_OUTPUT, sessionId: 's1', authError: false }]),
+      runClaude: sequencedRunClaude([{ exitCode: 0, fileContent: VORSCHLAG_OUTPUT, sessionId: 's1', authError: false }]),
     });
     const { app } = makeApp({ runner });
     server = await startServer(app);
@@ -375,7 +460,7 @@ describe('POST /api/projects/:slug/regression-define/:jobId/review — AC3', () 
 
   it('409 for review when the job is not awaiting a vorschlag', async () => {
     const runner = new RegressionDefineRunner({
-      runClaude: sequencedRunClaude([{ exitCode: 0, output: '{"status":"done"}', authError: false }]),
+      runClaude: sequencedRunClaude([{ exitCode: 0, fileContent: '{"status":"done"}', authError: false }]),
     });
     const { app } = makeApp({ runner });
     server = await startServer(app);
@@ -407,7 +492,7 @@ describe('Audit-First at the HTTP layer — AC5', () => {
 
   it('records exactly one start audit with the AccessGuard identity', async () => {
     const record = jest.fn();
-    const runner = new RegressionDefineRunner({ runClaude: sequencedRunClaude([{ exitCode: 0, output: '{"status":"done"}', authError: false }]) });
+    const runner = new RegressionDefineRunner({ runClaude: sequencedRunClaude([{ exitCode: 0, fileContent: '{"status":"done"}', authError: false }]) });
     const { app } = makeApp({ runner, auditStore: { record }, identity: { email: 'alex@x' } });
     server = await startServer(app);
 
@@ -434,8 +519,8 @@ describe('Audit-First at the HTTP layer — AC5', () => {
     const record = jest.fn();
     const runner = new RegressionDefineRunner({
       runClaude: sequencedRunClaude([
-        { exitCode: 0, output: VORSCHLAG_OUTPUT, sessionId: 's1', authError: false },
-        { exitCode: 0, output: '{"status":"done"}', authError: false },
+        { exitCode: 0, fileContent: VORSCHLAG_OUTPUT, sessionId: 's1', authError: false },
+        { exitCode: 0, fileContent: '{"status":"done"}', authError: false },
       ]),
     });
     const { app } = makeApp({ runner, auditStore: { record }, identity: { email: 'alex@x' } });
