@@ -30,7 +30,8 @@ stories:
 - S-313
 - S-314
 - S-321
-progress: 9/10 done
+- S-322
+progress: 9/11 done
 created_at: '2026-07-06T05:04:40Z'
 updated_at: '2026-07-08T00:00:00Z'
 area: fabrik-arbeiten
