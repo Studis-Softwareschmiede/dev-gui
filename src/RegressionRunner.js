@@ -5,6 +5,17 @@
  * und Ergebnis-Übergabe an den `RegressionResultStore`
  * (docs/specs/regression-run.md AC1, AC2, AC3, AC5, AC7, AC8, AC9).
  *
+ * Producer-Naht (docs/specs/regression-failed-notification.md AC1–AC4, S-315):
+ * bei Lauf-Abschluss mit `status:"failed"` (aus `summarizeCtrf()`, ECHTE rote
+ * Testfälle) stößt dieses Modul best-effort GENAU EINEN `regression_failed`-
+ * Push über den injizierten `notifier` (`DrainNotifier#notifyRegressionFailed`,
+ * GETEILTE Instanz — kein neuer Notify-Pfad) an. `precondition-error`/`error`
+ * (Vorbedingungs-/Runner-Fehler, keine Test-Regression) lösen NIE einen Push
+ * aus — diese Zustände erreichen den Notify-Aufruf strukturell nicht (nur der
+ * `summarizeCtrf()`-Pfad tut es, s. `#runLifecycle`). Ohne injizierten
+ * `notifier` degradiert der Runner auf reines Lauf-Ergebnis ohne Push (kein
+ * Crash, Default-Regress).
+ *
  * Zentraler Unterschied zu ALLEN anderen Runnern in diesem Repo (Grep-prüfbar):
  * dieses Modul importiert/spawnt **kein** `claude` — es startet ausschließlich
  * `npx playwright test` im Projekt-Klon. Kein API-Key, kein
@@ -417,6 +428,8 @@ export class RegressionRunner {
   #readRolloutConfig;
   /** @type {import('./deploy/LocalDockerControl.js').LocalDockerControl|null} injectable (AC7, Default: kein Frisch-Ausrollen) */
   #dockerControl;
+  /** @type {import('./DrainNotifier.js').DrainNotifier|null} injectable (regression-failed-notification AC1–AC4, Default: kein Push) */
+  #notifier;
   /**
    * @type {Map<string, {
    *   status: 'running'|'passed'|'failed'|'precondition-error'|'error',
@@ -443,6 +456,7 @@ export class RegressionRunner {
    * @param {Function} [params.readFile] - injectable fs.readFile (Grundgerüst-Vorprüfung).
    * @param {Function} [params.readRolloutConfig] - injectable (default: readLocalRolloutConfig, AC7).
    * @param {import('./deploy/LocalDockerControl.js').LocalDockerControl} [params.dockerControl] - injectable (AC7; ohne → kein Frisch-Ausrollen möglich, degradiert).
+   * @param {import('./DrainNotifier.js').DrainNotifier} [params.notifier] - injectable (regression-failed-notification AC1–AC4; ohne → kein Push, degradiert).
    */
   constructor({
     runPlaywright,
@@ -457,6 +471,7 @@ export class RegressionRunner {
     readFile: readFileFn,
     readRolloutConfig,
     dockerControl,
+    notifier,
   } = {}) {
     this.#timeoutMs = timeoutMs ?? (Number(process.env.REGRESSION_RUN_TIMEOUT_MS) || DEFAULT_REGRESSION_RUN_TIMEOUT_MS);
     this.#readRolloutConfig = readRolloutConfig ?? readLocalRolloutConfig;
@@ -470,6 +485,7 @@ export class RegressionRunner {
     this.#probeReachability = probeReachability ?? probeLocalReachability;
     this.#readCtrf = readCtrf ?? readCtrfResult;
     this.#readFile = readFileFn ?? readFile;
+    this.#notifier = notifier ?? null;
   }
 
   /**
@@ -630,7 +646,39 @@ export class RegressionRunner {
     // AC9: Ergebnis-Übergabe an den Store (S-312) — EIN aggregierter Datensatz.
     await this.#persistResult(job, { status, counts, ctrf, durationMs });
 
+    // regression-failed-notification AC2/AC3: NUR bei status:"failed" (echte
+    // rote Testfälle, aus summarizeCtrf()) — NIE bei precondition-error/error
+    // (die erreichen diesen Codepfad ohnehin nie, s. Modul-Doku #runLifecycle).
+    // Best-effort, non-fatal (DrainNotifier#notifyRegressionFailed wirft nie).
+    if (status === 'failed') {
+      this.#notifyRegressionFailed(job, counts);
+    }
+
     this.#finish(runId, status, { counts, durationMs, target: baseUrl ? 'local' : undefined });
+  }
+
+  /**
+   * Stößt best-effort GENAU EINEN `regression_failed`-Push an
+   * (regression-failed-notification AC1–AC4). No-op ohne injizierten
+   * `#notifier` (Default-Regress, degradiert auf reines Lauf-Ergebnis ohne
+   * Push). Fire-and-forget — ein Fehler des Notifiers darf den Lauf-Abschluss
+   * nie beeinträchtigen (der Notifier selbst fängt bereits alle Fehler,
+   * dieser Wrapper ist zusätzliche Tiefenverteidigung).
+   *
+   * @param {{ projekt: string, suite: string }} job
+   * @param {{ failed: number, total: number }} counts
+   */
+  #notifyRegressionFailed(job, counts) {
+    if (!this.#notifier || typeof this.#notifier.notifyRegressionFailed !== 'function') return;
+    try {
+      this.#notifier
+        .notifyRegressionFailed({ projekt: job.projekt, suite: job.suite, failed: counts.failed, total: counts.total })
+        .catch((err) => {
+          console.error('[RegressionRunner] regression_failed-Push fehlgeschlagen (best-effort):', err?.message ?? String(err));
+        });
+    } catch (err) {
+      console.error('[RegressionRunner] regression_failed-Push fehlgeschlagen (best-effort):', err?.message ?? String(err));
+    }
   }
 
   /**

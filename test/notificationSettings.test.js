@@ -1,6 +1,6 @@
 /**
  * notificationSettings.test.js — Tests für NotificationSettingsStore + notifications-Router
- * (S-183 push-notifications + notification-event-defaults).
+ * (S-183 push-notifications + notification-event-defaults + regression-failed-notification).
  *
  * Covers (push-notifications S-183):
  *   AC1  — Persistenz: Store-Roundtrip (write→read); überleben Neustart (Dateipersistenz);
@@ -32,6 +32,16 @@
  *           kaputtes JSON — nie ein Crash.
  *   AC5  — story_done/story_blocked/feature_done bleiben über PUT setzbar (HTTP-Ebene) —
  *           nur nicht mehr Default.
+ *
+ * Covers (regression-failed-notification S-315):
+ *   AC1  — ALLOWED_EVENTS additiv um regression_failed erweitert; DEFAULT_SETTINGS.events
+ *           (frische Installation, kein persistiertes File) enthält regression_failed
+ *           zusätzlich zu drain_done/tunnel_missing (unverändert); über GET
+ *           /api/settings/notifications sichtbar. Migration
+ *           (migrateEventDefaults()) bleibt UNVERÄNDERT auf ['drain_done','tunnel_missing']
+ *           — regression_failed wird für Bestandsinstallationen NICHT rückwirkend
+ *           reaktiviert (nur der Fresh-Install-Code-Default ändert sich, kein neuer
+ *           EVENTS_DEFAULTS_VERSION-Bump).
  */
 
 import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals';
@@ -131,8 +141,9 @@ describe('AC1 — NotificationSettingsStore Persistenz', () => {
     expect(settings.server).toBe('https://ntfy.sh');
     expect(settings.topic).toBe('');
     expect(settings.priority).toBeNull();
-    // AC1 notification-event-defaults: frische Installation → neue Default-Events.
-    expect(settings.events).toEqual(['drain_done', 'tunnel_missing']);
+    // AC1 notification-event-defaults + AC1 regression-failed-notification:
+    // frische Installation → neue Default-Events inkl. regression_failed.
+    expect(settings.events).toEqual(['drain_done', 'tunnel_missing', 'regression_failed']);
   });
 
   it('write→read Roundtrip: gespeicherte Werte werden zurückgeliefert', async () => {
@@ -287,6 +298,26 @@ describe('AC3/AC4 — migrateEventDefaults() Migration (notification-event-defau
     await migrateEventDefaults();
     settings = await read();
     expect(settings.events).toEqual(['story_done']);
+  });
+
+  it('AC1 regression-failed-notification: migrateEventDefaults() reaktiviert regression_failed NICHT rückwirkend für Bestandsinstallationen', async () => {
+    // Alt-Datei, wie sie eine Bestandsinstallation VOR S-315 hätte (kein regression_failed
+    // im Katalog, kein Marker).
+    await writeFile(filePath, JSON.stringify({
+      enabled: true,
+      server: 'https://ntfy.sh',
+      topic: 'alerts',
+      priority: null,
+      events: ['story_done'],
+    }, null, 2), 'utf8');
+
+    const { migrateEventDefaults, read } = await import('../src/NotificationSettingsStore.js');
+    await migrateEventDefaults();
+    const settings = await read();
+    // Migration setzt weiterhin GENAU ['drain_done','tunnel_missing'] — regression_failed
+    // ist NICHT Teil der Migrations-Menge (nur Fresh-Install-Code-Default betroffen).
+    expect(settings.events).toEqual(['drain_done', 'tunnel_missing']);
+    expect(settings.events).not.toContain('regression_failed');
   });
 
   it('AC3: Marker überlebt read()/write() (wird nicht durch Feld-Whitelisting verworfen)', async () => {
@@ -518,6 +549,16 @@ describe('AC2 — validate() Feldvalidierung', () => {
     expect(result.ok).toBe(true);
   });
 
+  it('AC1 regression-failed-notification: neuer Schlüssel regression_failed → ok', () => {
+    const result = validate({
+      enabled: false,
+      server: 'https://ntfy.sh',
+      topic: '',
+      events: ['regression_failed'],
+    });
+    expect(result.ok).toBe(true);
+  });
+
   it('priority: 0 (unter Min) → 400 field=priority', () => {
     const result = validate({ enabled: false, server: 'https://ntfy.sh', topic: '', events: [], priority: 0 });
     expect(result.ok).toBe(false);
@@ -600,8 +641,9 @@ describe('AC2 — GET/PUT /api/settings/notifications (HTTP-Ebene)', () => {
     expect(res.body.enabled).toBe(false);
     expect(res.body.server).toBe('https://ntfy.sh');
     expect(res.body.topic).toBe('');
-    // AC1 notification-event-defaults: frische Installation → neue Default-Events.
-    expect(res.body.events).toEqual(['drain_done', 'tunnel_missing']);
+    // AC1 notification-event-defaults + AC1 regression-failed-notification:
+    // frische Installation → neue Default-Events inkl. regression_failed.
+    expect(res.body.events).toEqual(['drain_done', 'tunnel_missing', 'regression_failed']);
     expect(res.body.has_token).toBe(false);
   });
 
@@ -668,6 +710,25 @@ describe('AC2 — GET/PUT /api/settings/notifications (HTTP-Ebene)', () => {
 
     const getRes = await httpGet(port, '/api/settings/notifications');
     expect(getRes.body.events).toEqual(['drain_done', 'questions_pending', 'tunnel_missing']);
+  });
+
+  it('AC1 regression-failed-notification: PUT mit regression_failed → 200, persistiert (Roundtrip)', async () => {
+    const app = await makeApp();
+    const s = await startServer(app);
+    server = s.server;
+    port = s.port;
+
+    const res = await httpPut(port, '/api/settings/notifications', {
+      enabled: true,
+      server: 'https://ntfy.sh',
+      topic: 'alerts',
+      events: ['regression_failed'],
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.events).toEqual(['regression_failed']);
+
+    const getRes = await httpGet(port, '/api/settings/notifications');
+    expect(getRes.body.events).toEqual(['regression_failed']);
   });
 
   it('AC5 notification-event-defaults: PUT mit story_done/story_blocked/feature_done bleibt gültig (nur nicht mehr Default)', async () => {

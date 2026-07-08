@@ -505,6 +505,21 @@ const costModeModelCheck = new CostModeModelCheck({
 // read-only für GET /api/drain-reports (drainReports.js Router).
 const drainReportStore = new DrainReportStore();
 
+// ── DrainNotifier (drain-done-notification AC1–AC7, S-277) ──────────────────
+// EIN Produzent für ALLE Notify-Nähte (Nacht-Drain/manueller Drain/
+// Regressionslauf-Abschluss) — GETEILTE Instanz, kein zweiter Config-/
+// Token-Pfad. Dieselbe Config-/Token-Quelle wie der `NotificationWatcher`
+// (`readNotificationSettings` + CredentialStore-Token unter demselben
+// Integration/Name-Paar) — nur der Versand-Weg ist neu. VOR dem
+// RegressionRunner UND dem NightWatchScheduler konstruiert, da beide die
+// Instanz für ihre jeweilige Abschluss-Naht brauchen (regression-failed-
+// notification AC1–AC4, S-315; drain-done-notification AC4/AC6).
+const drainNotifier = new DrainNotifier({
+  getNotificationConfig: readNotificationSettings,
+  getToken: () => credentialStore.getPlaintext(catalogKey('notifications', 'ntfy_token')),
+  sendNotificationFn: sendNotification,
+});
+
 // ── RegressionResultStore (regression-result-store AC1-AC5, S-312) ──────────
 // Persistente, größenbegrenzte Regressionslauf-Ablage (letzte 50 je Projekt,
 // ${CRED_STORE_DIR}/regression-runs/<projekt>/<runId>.json, atomarer
@@ -516,7 +531,7 @@ const regressionResultStore = new RegressionResultStore();
 
 // ── RegressionRunner (deterministischer `npx playwright test`-Runner,
 // docs/specs/regression-run.md AC1, AC2, AC3, AC5, AC9, S-309; AC7, AC8,
-// S-310) ─────────────────────────────────────────────────────────────────
+// S-310; regression-failed-notification AC1–AC4, S-315) ────────────────────
 // EIGENE, isolierte `ProjectJobLock`-Instanz (Konstruktor-Default
 // `new ProjectJobLock()` in RegressionRunner.js) — bewusst getrennt von ALLEN
 // `claude -p`-Runnern (Nacht-Drain/manueller Drain/Reconcile/Finalizer/
@@ -529,11 +544,14 @@ const regressionResultStore = new RegressionResultStore();
 // Frisch-Ausrollen (AC7) nutzt deren NEUE `pullAndRecreate()`-Methode, kein
 // zweiter Docker-Boundary-Pfad. Selbsttest-Skip (AC8, dev-gui) ist
 // server-seitig im Runner selbst erzwungen (SELF_PROJECT_SLUG), unabhängig
-// vom übergebenen `freshRollout`-Wert.
+// vom übergebenen `freshRollout`-Wert. `notifier` = GETEILTE `DrainNotifier`-
+// Instanz (s.o.) — bei Lauf-Abschluss mit status:"failed" best-effort GENAU
+// EIN `regression_failed`-Push (kein zweiter Notify-Pfad).
 const regressionRunner = new RegressionRunner({
   auditStore,
   resultStore: regressionResultStore,
   dockerControl: localDockerControl,
+  notifier: drainNotifier,
 });
 
 // ── DrainJobRegistry (drain-restart-robustness AC1–AC4, S-281/S-282) ────────
@@ -602,19 +620,6 @@ const autoRetroTrigger = new AutoRetroTrigger({
   readSettings: readRetroAutoSettings,
   queue: retroAutoQueue,
   auditStore, // AC6: secret-freier Enqueue-Audit (nur Repo-Slug)
-});
-
-// ── DrainNotifier (drain-done-notification AC1–AC7, S-277) ──────────────────
-// EIN Produzent für BEIDE Drain-Nähte (Nacht + manuell) — GETEILTE Instanz,
-// kein zweiter Config-/Token-Pfad. Dieselbe Config-/Token-Quelle wie der
-// `NotificationWatcher` (`readNotificationSettings` + CredentialStore-Token
-// unter demselben Integration/Name-Paar) — nur der Versand-Weg ist neu.
-// VOR dem NightWatchScheduler konstruiert, da dieser die Instanz für seine
-// Drain-Abschluss-Naht (AC4) braucht.
-const drainNotifier = new DrainNotifier({
-  getNotificationConfig: readNotificationSettings,
-  getToken: () => credentialStore.getPlaintext(catalogKey('notifications', 'ntfy_token')),
-  sendNotificationFn: sendNotification,
 });
 
 const nightWatchScheduler = new NightWatchScheduler({

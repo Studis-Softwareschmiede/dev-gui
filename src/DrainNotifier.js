@@ -12,6 +12,17 @@
  * Best-effort/non-fatal wie `notifyDrainDone` (AC4): jeder Fehler wird
  * gefangen und secret-frei geloggt, `notifyQuestionsPending()` wirft NIE.
  *
+ * Weiter erweitert um `notifyRegressionFailed()`
+ * (docs/specs/regression-failed-notification.md, S-315: AC1–AC5) — wieder
+ * GETEILTER Notifier-Baustein (derselbe Config-/Token-/Versand-Pfad, kein
+ * zweiter Codepfad). Sendet best-effort GENAU EINEN Push je abgeschlossenem
+ * Regressionslauf ([[regression-run]]) mit `status:"failed"` (mindestens ein
+ * roter Testfall). Gating (AC4): No-op wenn Config `enabled=false` ODER
+ * `regression_failed` nicht in `events`. Grüne Läufe (`status:"passed"`) UND
+ * Vorbedingungs-/Runner-Fehler (`precondition-error`/`error`, keine echte
+ * Test-Regression) rufen `notifyRegressionFailed()` gar nicht erst auf (AC2,
+ * Aufrufer-Verantwortung im `RegressionRunner`, s.d.).
+ *
  * Zweck (Spec §Zweck): statt vieler Einzel-Story-Pushes erhält der Owner
  * **genau einen** Push je qualifiziertem Drain-Ende — für BEIDE Drain-Auslöser
  * (manueller „Board abarbeiten"-Knopf UND Nachtwächter-Drain). Ein eigener
@@ -52,6 +63,9 @@ const DRAIN_DONE_TAGS = ['checkered_flag'];
 
 /** ntfy-Tag für Fragen-offen-Pushes (questions-pending-notification §Verträge). */
 const QUESTIONS_PENDING_TAGS = ['question'];
+
+/** ntfy-Tag für Regression-fehlgeschlagen-Pushes (regression-failed-notification §Verträge). */
+const REGRESSION_FAILED_TAGS = ['red_circle'];
 
 /** Fallback-Label, falls kein verwertbarer Basename ermittelt werden kann (AC6, Edge-Case). */
 const QUESTIONS_PENDING_FALLBACK_LABEL = 'Projekt';
@@ -101,6 +115,26 @@ export function buildQuestionsPendingPayload(label, questionCount) {
     : `${safeLabel}: Ein Fragenkatalog wartet auf Antwort.`;
 
   return { title, message, tags: [...QUESTIONS_PENDING_TAGS] };
+}
+
+/**
+ * Baut den Regression-fehlgeschlagen-Payload (regression-failed-notification
+ * AC3). Titel „🔴 <projekt>: Regression <suite> fehlgeschlagen — X/Y rot" mit
+ * `X = failed`, `Y = total` (aus `RegressionResultStore`-Zählern
+ * `counts.failed`/`counts.total`). Fehlende/nicht-finite Zähler werden
+ * defensiv als 0 behandelt (kein Crash, kein `NaN` im Push-Text).
+ *
+ * @param {string} projekt - Projekt-Slug (AC3, kein Pfad).
+ * @param {string} suite - Suite-/Scope-Label des Laufs (AC3).
+ * @param {number} failed - Anzahl fehlgeschlagener Testfälle.
+ * @param {number} total - Anzahl gesamter Testfälle.
+ * @returns {{ title: string, message: string, tags: string[] }}
+ */
+export function buildRegressionFailedPayload(projekt, suite, failed, total) {
+  const safeFailed = Number.isFinite(failed) ? failed : 0;
+  const safeTotal = Number.isFinite(total) ? total : 0;
+  const title = `🔴 ${projekt}: Regression ${suite} fehlgeschlagen — ${safeFailed}/${safeTotal} rot`;
+  return { title, message: title, tags: [...REGRESSION_FAILED_TAGS] };
 }
 
 export class DrainNotifier {
@@ -245,6 +279,71 @@ export class DrainNotifier {
       }
     } catch (err) {
       // Tiefenverteidigung: darf den ObsidianIngestRunner NIE crashen (AC4).
+      console.error('[DrainNotifier] Unerwarteter Fehler (best-effort, kein Crash):', err?.message ?? String(err));
+    }
+  }
+
+  /**
+   * Sendet best-effort GENAU EINEN Regression-fehlgeschlagen-Push, wenn ein
+   * Regressionslauf mit `status:"failed"` abgeschlossen wurde
+   * (regression-failed-notification AC1/AC2/AC3/AC4). No-op wenn Config
+   * `enabled=false` ODER `regression_failed` nicht in `events` (AC4) ODER die
+   * Boundary (`getNotificationConfig`/`sendNotificationFn`) nicht injiziert
+   * ist (Default-Regress, analog `notifyDrainDone`/`notifyQuestionsPending`).
+   * Wirft NIE — jeder Fehler wird gefangen und secret-frei geloggt.
+   *
+   * Aufrufer-Verantwortung (AC2, Edge-Case): NUR bei `status:"failed"`
+   * aufrufen — grüne Läufe (`status:"passed"`) und Vorbedingungs-/Runner-
+   * Fehler (`precondition-error`/`error`) dürfen diese Methode gar nicht erst
+   * erreichen (keine Test-Regression, kein Push).
+   *
+   * @param {{ projekt: string, suite: string, failed: number, total: number }} args
+   * @returns {Promise<void>}
+   */
+  async notifyRegressionFailed({ projekt, suite, failed, total } = {}) {
+    try {
+      if (typeof this.#getNotificationConfig !== 'function' || typeof this.#sendNotificationFn !== 'function') {
+        return; // fehlende Boundary → No-op (Default-Regress)
+      }
+
+      let config;
+      try {
+        config = await this.#getNotificationConfig();
+      } catch (err) {
+        console.error('[DrainNotifier] Config lesen fehlgeschlagen (best-effort, kein Push):', err.message);
+        return;
+      }
+
+      if (!config?.enabled) return; // Gating (AC4)
+      if (!Array.isArray(config.events) || !config.events.includes('regression_failed')) return; // Gating (AC4)
+
+      let token = null;
+      if (typeof this.#getToken === 'function') {
+        try {
+          token = await this.#getToken();
+        } catch (err) {
+          // Token-Lese-Fehler → kein Hard-Stop, Versand ohne Token (analog notifyDrainDone).
+          console.error('[DrainNotifier] Token-Lesen fehlgeschlagen:', err.message);
+        }
+      }
+
+      const payload = buildRegressionFailedPayload(projekt, suite, failed, total);
+
+      try {
+        await this.#sendNotificationFn(
+          {
+            server: config.server,
+            topic: config.topic,
+            priority: config.priority,
+            token, // Token NIE im Log
+          },
+          payload,
+        );
+      } catch (err) {
+        console.error('[DrainNotifier] Versand fehlgeschlagen (best-effort):', err.message);
+      }
+    } catch (err) {
+      // Tiefenverteidigung: darf den RegressionRunner NIE crashen.
       console.error('[DrainNotifier] Unerwarteter Fehler (best-effort, kein Crash):', err?.message ?? String(err));
     }
   }

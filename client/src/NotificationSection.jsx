@@ -25,7 +25,10 @@ import {
  * Meldeklassen-Zuordnung (Spec-Konzeptteil „Meldeklassen", notification-event-defaults
  * Zeilen 30-37 — die einzige Stelle, die Klassen-Zugehörigkeit definiert):
  *   „Eingabe zwingend nötig" — questions_pending (primär, wartende Owner-Eingabe) +
- *     tunnel_missing (verwandte „Aktion nötig"-Infrastruktur-Meldung, Spec-Zeile 33f.).
+ *     tunnel_missing (verwandte „Aktion nötig"-Infrastruktur-Meldung, Spec-Zeile 33f.) +
+ *     regression_failed (Meldeklasse „Aktion nötig — eine Regression will gesehen
+ *     werden", regression-failed-notification.md Zeile 19/33, S-315, analog tunnel_missing
+ *     derselben Gruppe zugeordnet).
  *   „Arbeit fertig" — drain_done (primär, Lauf abgeschlossen mit Bilanz) + die dort
  *     genannten feingranularen story_done/feature_done.
  *   ANNAHME zu story_blocked: die Spec-Definition (Zeilen 30-37) erwähnt story_blocked
@@ -43,6 +46,7 @@ const NOTIFICATION_EVENT_GROUPS = [
     events: [
       { key: 'questions_pending', label: 'Rückfragen offen (Import wartet auf Antwort)', isDefault: false },
       { key: 'tunnel_missing', label: 'Tunnel fehlt (Cloudflare-Verbindung gestört)', isDefault: true },
+      { key: 'regression_failed', label: 'Regressionslauf fehlgeschlagen (roter Testlauf)', isDefault: true },
     ],
   },
   {

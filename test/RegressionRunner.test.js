@@ -55,6 +55,19 @@
  * `HeadlessRunnerCore.js` und ruft nirgends `spawn('claude', ...)` auf — nur
  * `spawn('npx', ['playwright', 'test', ...], ...)`. Ein expliziter Test unten
  * liest den Quelltext und prüft das per grep-artigem String-Check.
+ *
+ * Covers (regression-failed-notification.md, S-315) — Producer-Naht:
+ *   AC2 — Ein injizierter `notifier.notifyRegressionFailed` wird GENAU EINMAL
+ *         aufgerufen, wenn der Lauf mit `status:"failed"` (echte rote
+ *         Testfälle, `summarizeCtrf()`) endet; bei `status:"passed"` NIE
+ *         aufgerufen; bei `precondition-error`/`error` (kein Grundgerüst,
+ *         kein CTRF, npx fehlt) NIE aufgerufen (diese Pfade erreichen
+ *         `summarizeCtrf()` strukturell nicht).
+ *   AC3 — `notifyRegressionFailed` wird mit `{projekt, suite, failed, total}`
+ *         aus den CTRF-Zählern + dem Lauf-Kontext aufgerufen.
+ *   Best-effort: ein werfender/rejectender `notifier.notifyRegressionFailed`
+ *         lässt den Lauf-Abschluss (`#finish`/Lock-Freigabe/Store-Record)
+ *         NICHT scheitern; ohne injizierten `notifier` (Default) kein Crash.
  */
 
 import { describe, it, expect, jest } from '@jest/globals';
@@ -679,6 +692,109 @@ describe('RegressionRunner — regression-run.md', () => {
       await flush();
 
       expect(runner.getRun(runId).status).toBe('passed'); // trotz Store-Fehler korrekt gesetzt
+    });
+  });
+
+  // ── regression-failed-notification AC2/AC3 (S-315): Producer-Naht ─────────
+  describe('regression-failed-notification AC2/AC3 — notifier.notifyRegressionFailed Producer-Naht', () => {
+    function makeRunner({ notifier, exitCode = 1, summary = { tests: 3, passed: 2, failed: 1 }, resultStore } = {}) {
+      const runPlaywright = jest.fn(async () => ({ exitCode }));
+      const readFile = jest.fn(async (p) => {
+        if (String(p).endsWith('.claude/profile.md')) throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+        if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
+        if (String(p).endsWith(CTRF_RESULT_PATH)) {
+          return JSON.stringify({ results: { summary } });
+        }
+        throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+      });
+      return new RegressionRunner({ runPlaywright, readFile, notifier, resultStore: resultStore ?? { record: jest.fn(async (i) => i) } });
+    }
+
+    it('roter Lauf (status:"failed") ruft notifier.notifyRegressionFailed GENAU EINMAL mit {projekt,suite,failed,total}', async () => {
+      const notifyRegressionFailed = jest.fn(async () => {});
+      const runner = makeRunner({ notifier: { notifyRegressionFailed } });
+
+      runner.start('/ws/dev-gui', 'dev-gui', { typ: 'bereich', id: 'fabrik-arbeiten' });
+      await flush();
+
+      expect(notifyRegressionFailed).toHaveBeenCalledTimes(1);
+      expect(notifyRegressionFailed).toHaveBeenCalledWith({
+        projekt: 'dev-gui',
+        suite: 'fabrik-arbeiten',
+        failed: 1,
+        total: 3,
+      });
+    });
+
+    it('grüner Lauf (status:"passed") ruft notifyRegressionFailed NIE auf', async () => {
+      const notifyRegressionFailed = jest.fn(async () => {});
+      const runner = makeRunner({
+        notifier: { notifyRegressionFailed },
+        exitCode: 0,
+        summary: { tests: 2, passed: 2, failed: 0 },
+      });
+
+      runner.start('/ws/dev-gui', 'dev-gui', { typ: 'gesamt' });
+      await flush();
+
+      expect(notifyRegressionFailed).not.toHaveBeenCalled();
+    });
+
+    it('precondition-error (Applikation lokal nicht gestartet) ruft notifyRegressionFailed NIE auf', async () => {
+      const notifyRegressionFailed = jest.fn(async () => {});
+      const readFile = jest.fn(async (p) => {
+        if (String(p).endsWith('.claude/profile.md')) return 'preview_port: 4173\n';
+        if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
+        throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+      });
+      const runPlaywright = jest.fn();
+      const probeReachability = jest.fn(async () => false);
+      const runner = new RegressionRunner({
+        runPlaywright,
+        readFile,
+        probeReachability,
+        notifier: { notifyRegressionFailed },
+      });
+
+      const { runId } = runner.start('/ws/proj', 'proj', { typ: 'gesamt' });
+      await flush();
+
+      expect(runner.getRun(runId).status).toBe('precondition-error');
+      expect(runPlaywright).not.toHaveBeenCalled();
+      expect(notifyRegressionFailed).not.toHaveBeenCalled();
+    });
+
+    it('error (kein Projekt-Grundgerüst) ruft notifyRegressionFailed NIE auf', async () => {
+      const notifyRegressionFailed = jest.fn(async () => {});
+      const readFile = jest.fn(async () => { throw Object.assign(new Error('enoent'), { code: 'ENOENT' }); });
+      const runner = new RegressionRunner({ runPlaywright: jest.fn(), readFile, notifier: { notifyRegressionFailed } });
+
+      const { runId } = runner.start('/ws/proj', 'proj', { typ: 'gesamt' });
+      await flush();
+
+      expect(runner.getRun(runId).status).toBe('error');
+      expect(notifyRegressionFailed).not.toHaveBeenCalled();
+    });
+
+    it('ein werfender/rejectender notifier.notifyRegressionFailed lässt den Lauf-Abschluss nicht scheitern', async () => {
+      const notifyRegressionFailed = jest.fn(async () => { throw new Error('push kaputt'); });
+      const record = jest.fn(async (i) => i);
+      const runner = makeRunner({ notifier: { notifyRegressionFailed }, resultStore: { record } });
+
+      const { runId } = runner.start('/ws/dev-gui', 'dev-gui', { typ: 'gesamt' });
+      await flush();
+
+      // Lauf schließt trotzdem korrekt ab (Lock frei, Store geschrieben, Status gesetzt).
+      expect(runner.getRun(runId).status).toBe('failed');
+      expect(record).toHaveBeenCalledTimes(1);
+      expect(runner.isRunning('/ws/dev-gui')).toBe(false);
+    });
+
+    it('ohne injizierten notifier (Default) kein Crash bei rotem Lauf', async () => {
+      const runner = makeRunner({}); // notifier undefined
+      const { runId } = runner.start('/ws/dev-gui', 'dev-gui', { typ: 'gesamt' });
+      await flush();
+      expect(runner.getRun(runId).status).toBe('failed');
     });
   });
 

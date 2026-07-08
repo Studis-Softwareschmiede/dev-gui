@@ -29,7 +29,7 @@
  *   - SshKeysSection.jsx   — settings-ssh-keys SSH-AC1–AC10; ssh-key-generation
  *     GEN-AC1/AC3/AC4/AC6/AC7/AC8 (#116); ssh-key-rotation ROT-AC1/AC5/AC7 (#119).
  *   - NotificationSection.jsx — push-notifications S-183 AC3/AC10; notification-event-defaults
- *     AC6.
+ *     AC6; regression-failed-notification AC5 (S-315).
  *   - settingsApi.js       — geteilte API-Helfer + Konstanten (einzige Quelle, kein Code
  *     doppelt gepflegt).
  *

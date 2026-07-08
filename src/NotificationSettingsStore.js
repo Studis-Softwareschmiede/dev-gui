@@ -29,7 +29,8 @@ export const NTFY_PRIORITY_MAX = 5;
 
 /**
  * Erlaubte Ereignis-Schlüssel (AC2 push-notifications; AC7 vps-tunnel-drift-notify;
- * AC1 notification-event-defaults: additiv um 'drain_done' + 'questions_pending' erweitert).
+ * AC1 notification-event-defaults: additiv um 'drain_done' + 'questions_pending' erweitert;
+ * AC1 regression-failed-notification: additiv um 'regression_failed' erweitert).
  */
 export const ALLOWED_EVENTS = [
   'story_done',
@@ -38,6 +39,7 @@ export const ALLOWED_EVENTS = [
   'tunnel_missing',
   'drain_done',
   'questions_pending',
+  'regression_failed',
 ];
 
 /**
@@ -50,8 +52,28 @@ export const EVENTS_DEFAULTS_VERSION_FIELD = 'eventsDefaultsVersion';
 /** Aktuelle Migrations-Version (notification-event-defaults AC3). */
 export const EVENTS_DEFAULTS_VERSION = 2;
 
-/** Neue Default-Events nach der einmaligen Migration (notification-event-defaults AC1/AC3). */
+/**
+ * Events, auf die `migrateEventDefaults()` einmalig zurücksetzt
+ * (notification-event-defaults AC1/AC3). BEWUSST UNVERÄNDERT seit
+ * EVENTS_DEFAULTS_VERSION 2 — `regression_failed` (regression-failed-notification
+ * AC1) ist NICHT Teil dieser Migrations-Menge: die Spec fordert den neuen
+ * Event-Typ nur für FRISCHE Installationen als aktiv, keinen erneuten
+ * Migrations-Reset für Bestandsinstallationen (kein Bump von
+ * EVENTS_DEFAULTS_VERSION nötig — dieser Event ist rein additiv zu
+ * DEFAULT_SETTINGS.events, s.u.).
+ */
 const MIGRATED_DEFAULT_EVENTS = ['drain_done', 'tunnel_missing'];
+
+/**
+ * Default-Events für FRISCHE Installationen (kein persistiertes File,
+ * regression-failed-notification AC1) — additiv um `regression_failed` zu
+ * `MIGRATED_DEFAULT_EVENTS` erweitert. Bewusst getrennt von
+ * `MIGRATED_DEFAULT_EVENTS`: eine Bestandsinstallation, die bereits über
+ * `migrateEventDefaults()` auf Version 2 migriert wurde, bekommt
+ * `regression_failed` NICHT rückwirkend automatisch aktiviert (keine zweite
+ * stille Migration) — nur der Code-Default für neue Stores ändert sich.
+ */
+const FRESH_INSTALL_DEFAULT_EVENTS = [...MIGRATED_DEFAULT_EVENTS, 'regression_failed'];
 
 /**
  * Erlaubtes ntfy-Topic-Format: nur Buchstaben, Ziffern, `-` und `_`, 1–64 Zeichen.
@@ -72,7 +94,8 @@ export const NTFY_TOPIC_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 /**
  * Default-Konfiguration (überschrieben durch gespeicherte JSON).
- * events: ['drain_done','tunnel_missing'] (notification-event-defaults AC1) —
+ * events: ['drain_done','tunnel_missing','regression_failed']
+ * (notification-event-defaults AC1 + regression-failed-notification AC1) —
  * gilt für frische Installationen ohne persistierte Datei.
  */
 const DEFAULT_SETTINGS = {
@@ -80,7 +103,7 @@ const DEFAULT_SETTINGS = {
   server: 'https://ntfy.sh',
   topic: '',
   priority: null,
-  events: [...MIGRATED_DEFAULT_EVENTS],
+  events: [...FRESH_INSTALL_DEFAULT_EVENTS],
 };
 
 /**

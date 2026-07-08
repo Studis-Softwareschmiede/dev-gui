@@ -146,15 +146,24 @@
  *           Responsiv/Theme: jsdom nicht testbar — visuell verifiziert via Styles.
  *
  * Covers (notification-event-defaults S-278) — Frontend AC6:
- *   AC6  — Ereignis-Auswahl listet alle 6 ALLOWED_EVENTS (story_done, story_blocked,
- *           feature_done, tunnel_missing, drain_done, questions_pending) mit deutschsprachigen
- *           Labels; zwei gruppierte Abschnitte „Eingabe zwingend nötig"
- *           (questions_pending, tunnel_missing) und „Arbeit fertig" (drain_done, story_done,
- *           story_blocked, feature_done), jeweils role=group/aria-labelledby; die zwei
- *           default-aktiven Ereignisse (drain_done, tunnel_missing) tragen einen textlichen
- *           „Standard"-Badge, die übrigen vier nicht; gespeicherte Auswahl (inkl. neuer
- *           Schlüssel) wird beim Laden korrekt vorbelegt (Checkbox-Zustand); An-/Abwählen +
- *           Speichern unverändert über PUT /api/settings/notifications (bestehende AC3-Tests).
+ *   AC6  — Ereignis-Auswahl listet alle 7 ALLOWED_EVENTS (story_done, story_blocked,
+ *           feature_done, tunnel_missing, drain_done, questions_pending, regression_failed)
+ *           mit deutschsprachigen Labels; zwei gruppierte Abschnitte „Eingabe zwingend nötig"
+ *           (questions_pending, tunnel_missing, regression_failed) und „Arbeit fertig"
+ *           (drain_done, story_done, story_blocked, feature_done), jeweils
+ *           role=group/aria-labelledby; die drei default-aktiven Ereignisse (drain_done,
+ *           tunnel_missing, regression_failed) tragen einen textlichen „Standard"-Badge, die
+ *           übrigen vier nicht; gespeicherte Auswahl (inkl. neuer Schlüssel) wird beim Laden
+ *           korrekt vorbelegt (Checkbox-Zustand); An-/Abwählen + Speichern unverändert über
+ *           PUT /api/settings/notifications (bestehende AC3-Tests).
+ *
+ * Covers (regression-failed-notification S-315) — Frontend AC5:
+ *   AC5  — `regression_failed` erscheint in der Ereignis-Auswahl mit deutschsprachigem Label
+ *           „Regressionslauf fehlgeschlagen (roter Testlauf)", ist der Meldeklasse „Eingabe
+ *           zwingend nötig" (Aktion nötig, analog tunnel_missing) zugeordnet und default-aktiv
+ *           markiert (Standard-Badge); An-/Abwählen + Speichern über PUT
+ *           /api/settings/notifications; gespeicherte Auswahl wird beim Laden korrekt
+ *           vorbelegt.
  *
  * Covers (obsidian-vault-config S-247) — Frontend, UI-Anteil:
  *   AC1  — Eigene „Obsidian"-Sektion (Spec-Entscheidung A2) zeigt konfigurierten Vault-Pfad
@@ -6915,9 +6924,10 @@ describe('notification-event-defaults S-278 — AC6: Ereignis-Auswahl mit Meldek
     'tunnel_missing',
     'drain_done',
     'questions_pending',
+    'regression_failed',
   ];
 
-  it('AC6: listet alle 6 Katalog-Ereignisse (inkl. drain_done/questions_pending) als Checkboxen', async () => {
+  it('AC6: listet alle 7 Katalog-Ereignisse (inkl. drain_done/questions_pending/regression_failed) als Checkboxen', async () => {
     const { container } = renderView(makeFetch());
     await waitFor(() => {
       for (const key of ALL_EVENT_KEYS) {
@@ -6935,9 +6945,10 @@ describe('notification-event-defaults S-278 — AC6: Ereignis-Auswahl mit Meldek
       expect(inputGroup).toBeTruthy();
       expect(doneGroup).toBeTruthy();
 
-      // "Eingabe zwingend nötig" enthält questions_pending + tunnel_missing
+      // "Eingabe zwingend nötig" enthält questions_pending + tunnel_missing + regression_failed
       expect(inputGroup.querySelector('#notif-event-questions_pending')).toBeTruthy();
       expect(inputGroup.querySelector('#notif-event-tunnel_missing')).toBeTruthy();
+      expect(inputGroup.querySelector('#notif-event-regression_failed')).toBeTruthy();
 
       // "Arbeit fertig" enthält drain_done + die Einzel-Story-Ereignisse
       expect(doneGroup.querySelector('#notif-event-drain_done')).toBeTruthy();
@@ -6964,13 +6975,15 @@ describe('notification-event-defaults S-278 — AC6: Ereignis-Auswahl mit Meldek
     });
   });
 
-  it('AC6: die zwei default-aktiven Ereignisse (drain_done, tunnel_missing) tragen einen textlichen "Standard"-Badge', async () => {
+  it('AC6: die drei default-aktiven Ereignisse (drain_done, tunnel_missing, regression_failed) tragen einen textlichen "Standard"-Badge', async () => {
     const { container } = renderView(makeFetch());
     await waitFor(() => {
       const drainLabel = container.querySelector('#notif-event-drain_done').closest('label');
       const tunnelLabel = container.querySelector('#notif-event-tunnel_missing').closest('label');
+      const regressionLabel = container.querySelector('#notif-event-regression_failed').closest('label');
       expect(drainLabel.textContent).toMatch(/Standard/);
       expect(tunnelLabel.textContent).toMatch(/Standard/);
+      expect(regressionLabel.textContent).toMatch(/Standard/);
 
       // Die übrigen vier Ereignisse tragen KEINEN "Standard"-Badge
       for (const key of ['story_done', 'story_blocked', 'feature_done', 'questions_pending']) {
@@ -6980,7 +6993,7 @@ describe('notification-event-defaults S-278 — AC6: Ereignis-Auswahl mit Meldek
     });
   });
 
-  it('AC6: gespeicherte Auswahl (inkl. drain_done/questions_pending) wird beim Laden korrekt vorbelegt', async () => {
+  it('AC6: gespeicherte Auswahl (inkl. drain_done/questions_pending/regression_failed) wird beim Laden korrekt vorbelegt', async () => {
     const fetchMock = makeFetch({
       getNotificationSettings: {
         ok: true,
@@ -6990,7 +7003,7 @@ describe('notification-event-defaults S-278 — AC6: Ereignis-Auswahl mit Meldek
           server: 'https://ntfy.sh',
           topic: 'board',
           priority: null,
-          events: ['drain_done', 'questions_pending'],
+          events: ['drain_done', 'questions_pending', 'regression_failed'],
           has_token: false,
         },
       },
@@ -6999,6 +7012,7 @@ describe('notification-event-defaults S-278 — AC6: Ereignis-Auswahl mit Meldek
     await waitFor(() => {
       expect(container.querySelector('#notif-event-drain_done').checked).toBe(true);
       expect(container.querySelector('#notif-event-questions_pending').checked).toBe(true);
+      expect(container.querySelector('#notif-event-regression_failed').checked).toBe(true);
       expect(container.querySelector('#notif-event-tunnel_missing').checked).toBe(false);
       expect(container.querySelector('#notif-event-story_done').checked).toBe(false);
       expect(container.querySelector('#notif-event-story_blocked').checked).toBe(false);
@@ -7033,6 +7047,74 @@ describe('notification-event-defaults S-278 — AC6: Ereignis-Auswahl mit Meldek
       const [, opts] = putCalls[putCalls.length - 1];
       const body = JSON.parse(opts.body);
       expect(body.events).toContain('questions_pending');
+    });
+  });
+});
+
+// ── regression-failed-notification S-315 — AC5: regression_failed-Event in der Settings-UI ──
+
+describe('regression-failed-notification S-315 — AC5: regression_failed in der Ereignis-Auswahl', () => {
+  beforeEach(() => { testCategory = 'benachrichtigungen'; });
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('AC5: deutschsprachiges Label „Regressionslauf fehlgeschlagen (roter Testlauf)"', async () => {
+    const { container } = renderView(makeFetch());
+    await waitFor(() => {
+      const label = container.querySelector('#notif-event-regression_failed').closest('label');
+      expect(label.textContent).toContain('Regressionslauf fehlgeschlagen (roter Testlauf)');
+    });
+  });
+
+  it('AC5: An-/Abwählen von regression_failed wird über PUT /api/settings/notifications gespeichert', async () => {
+    const fetchMock = makeFetch();
+    const { container } = renderView(fetchMock);
+
+    await waitFor(() => {
+      expect(container.querySelector('#notif-event-regression_failed')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.click(container.querySelector('#notif-event-regression_failed'));
+    });
+
+    const saveBtn = Array.from(container.querySelectorAll('button')).find((b) =>
+      /Einstellungen speichern/i.test(b.textContent),
+    );
+    await act(async () => {
+      fireEvent.click(saveBtn);
+    });
+
+    await waitFor(() => {
+      const putCalls = fetchMock.mock.calls.filter(
+        ([url, opts]) => url === '/api/settings/notifications' && opts?.method === 'PUT',
+      );
+      expect(putCalls.length).toBeGreaterThanOrEqual(1);
+      const [, opts] = putCalls[putCalls.length - 1];
+      const body = JSON.parse(opts.body);
+      expect(body.events).toContain('regression_failed');
+    });
+  });
+
+  it('AC5: gespeicherte Auswahl OHNE regression_failed wird beim Laden korrekt vorbelegt (unchecked)', async () => {
+    const fetchMock = makeFetch({
+      getNotificationSettings: {
+        ok: true,
+        status: 200,
+        data: {
+          enabled: true,
+          server: 'https://ntfy.sh',
+          topic: 'board',
+          priority: null,
+          events: ['drain_done'],
+          has_token: false,
+        },
+      },
+    });
+    const { container } = renderView(fetchMock);
+    await waitFor(() => {
+      expect(container.querySelector('#notif-event-regression_failed').checked).toBe(false);
     });
   });
 });
