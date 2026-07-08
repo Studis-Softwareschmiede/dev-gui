@@ -25,9 +25,11 @@
     "ws": "^8.17.1"
   },
   "devDependencies": {
+    "@babel/core": "^8.0.1",
     "@babel/preset-env": "^8.0.2",
     "@babel/preset-react": "^8.0.1",
     "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.61.1",
     "@testing-library/react": "^16.0.0",
     "@vitejs/plugin-react": "^6.0.2",
     "babel-jest": "^30.0.0",
@@ -35,8 +37,8 @@
     "eslint-plugin-react-hooks": "^7.1.1",
     "jest": "^30.4.2",
     "jest-environment-jsdom": "^30.4.1",
-    "vite": "^8.0.16",
-    "@babel/core": "^8.0.1"
+    "playwright-ctrf-json-reporter": "^0.0.29",
+    "vite": "^8.0.16"
   },
   "engines": {
     "node": ">=20"
