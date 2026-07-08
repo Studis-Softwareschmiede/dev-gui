@@ -10,7 +10,7 @@ goal: Je Projekt bekommt der Fabrik-„Arbeiten"-Reiter einen gestalteten Bereic
   Drilldown, Artefakt-Zugriff). Baut textuell auf den agent-flow-Regressions-Specs
   auf; Design-Grundlage docs/design.md Sektion „Fabrik-Panel Regressionstests". Owner-Ko-Design
   2026-07-03, beauftragt 2026-07-06.
-status: Done
+status: To Do
 priority: P2
 spec: docs/specs/regression-panel.md
 definition_of_done: null
@@ -29,8 +29,9 @@ stories:
 - S-312
 - S-313
 - S-314
-progress: 9/9 done
+- S-321
+progress: 9/10 done
 created_at: '2026-07-06T05:04:40Z'
-updated_at: '2026-07-08T07:29:57Z'
+updated_at: '2026-07-08T00:00:00Z'
 area: fabrik-arbeiten
-done_at: '2026-07-08T07:29:57Z'
+done_at: null

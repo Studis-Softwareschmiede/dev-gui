@@ -3,7 +3,7 @@ id: regression-define-dialog
 title: Regressionstest definieren — Redaktionsschleife (headless Definier-Runner + editierbares Vorschlags-Overlay)
 status: active
 area: fabrik-arbeiten
-version: 1
+version: 2
 spec_format: use-case-2.0
 ---
 
@@ -23,6 +23,8 @@ Der Owner definiert eine Regressionstest-Suite für einen Bereich (oder einen Ve
 - **Resume via STDIN, nie argv:** die redigierte, bestätigte Fassung wird gebündelt **via STDIN** (`--resume <session-id>`) in denselben `claude`-Session-Kontext zurückgereicht — Resume, kein neuer Lauf.
 - **Bereichs-Auswahl aus `board/areas.yaml`** plus Option „Verbund…" mit freiem Namensfeld (Infra-/Verbund-Suite). Bereichs-`id` bzw. Verbund-Name werden als Eingabe-Vertrag an den Agenten durchgereicht (agent-flow `regression-define` AC1).
 - **Editierbares Textfeld, Muster Fragenkatalog-Overlay:** der Owner redigiert den NL-Vorschlag direkt im Overlay (kein Sprung in einen externen Editor), analog `ObsidianIngestOverlay.jsx`.
+- **Lebendige Wartefläche statt statischer Text (v2, Owner-Anforderung 2026-07-08 nach erstem E2E-Test):** solange ein Lauf `running` ist, muss das Overlay *sichtbar machen, DASS gearbeitet wird* — animierter Indikator + verstrichene Laufzeit + (best-effort) grobe Phase / mindestens letzter Aktivitäts-Zeitstempel. Die Mechanik gilt **identisch** für beide `running`-Phasen: den initialen Vorschlags-Lauf **und** den `uebersetzen`-Lauf nach Resume (Schritt 7). Schließen darf nicht als Lauf-Abbruch missverstanden werden (Wiedereinstieg-Muster wie Obsidian-Ingest), und Fehler dürfen nicht als nackte Meldung ohne Diagnose enden.
+- **Geheimnisfreie Fehler-Transparenz (v2):** der Parse-/Format-Fehler der Finalausgabe (Agent-Ausgabe kein gültiges Rückgabeformat) wird als **Fehlerklasse + Kurzdiagnose** sichtbar; die **sanitisierte Roh-Finalausgabe** wird einklappbar angeboten, damit der Owner die Ursache beurteilen kann. Trust-Boundary: die Roh-Ausgabe wird **serverseitig** secret-gefiltert (keine Tokens/Keys/Host-Pfade), bevor sie die Job-Sicht verlässt — das Frontend rendert sie nur.
 
 ## Main Success Scenario
 1. Owner klickt „Regressionstest definieren" ([[regression-panel]]) → Dialog öffnet.
@@ -52,10 +54,17 @@ Der Owner definiert eine Regressionstest-Suite für einen Bereich (oder einen Ve
 - **AC7** — Bei `needs-review` zeigt das Overlay den NL-Vorschlag (Schritte, Prüfpunkte, Beispieldaten) in einem **editierbaren Textfeld** (Muster `ObsidianIngestOverlay.jsx`); der Owner redigiert direkt im Dialog. Bestätigen reicht die redigierte Fassung zum Resume (AC3) und pollt bis `done`/Fehler.
 - **AC8** — Der gemerkte Wiedereinstiegs-Job wird verworfen, sobald die Projekt-Auswahl auf ein anderes Projekt wechselt (E1); ein Bereich-ohne-Specs-Fall (E2) und `failed` werden als klare Meldung angezeigt (kein leeres Overlay).
 
+### Lebendige Wartefläche & Fehler-Transparenz (v2)
+- **AC9 (Backend — Lebendigkeits-Felder)** — Die öffentliche Job-Sicht (`GET .../:jobId`, AC-Vertrag unten) trägt zusätzlich **secret-freie** Lebendigkeits-Felder: `startedAt` (ISO-8601, Laufbeginn) und `lastActivityAt` (ISO-8601, Zeitstempel des letzten Zustands-/Fortschritts-Updates des Jobs). Sofern der Runner eine grobe Phase ermitteln kann, trägt die Sicht zusätzlich `phase` (Kennung aus fester Menge, z.B. `session-start`|`reading-specs`|`drafting`|`translating`); ist keine Phasen-Info verfügbar, **entfällt** `phase` (kein Rateergebnis). Keine internen Felder in dieser Sicht (kein Host-Pfad, kein Token, keine `sessionId`).
+- **AC10 (Frontend — Lebendigkeit, beide `running`-Phasen)** — Solange ein Lauf `running` ist, zeigt die Wartefläche (a) einen **animierten Aktivitäts-Indikator**, (b) die **verstrichene Laufzeit als `mm:ss`** (fortlaufend aktualisiert, abgeleitet aus `startedAt`) und (c) — falls `phase` vorliegt — die grobe Phase; liegt keine `phase` vor, zeigt sie **mindestens** Laufzeit **und** den letzten Aktivitäts-Zeitstempel (`lastActivityAt`). Diese Mechanik ist **identisch** für den initialen Vorschlags-Lauf **und** den `uebersetzen`-Lauf nach Resume (Konsistenz — Owner-Anforderung Punkt 4).
+- **AC11 (Frontend — klare Schließen-Semantik)** — Die Wartefläche beschriftet das Schließen eindeutig: Schließen (X / `Esc` / Backdrop) **blendet nur die Anzeige aus** und **bricht den serverseitig laufenden Job nicht ab**. Ein sichtbarer Hinweistext benennt den **Wiedereinstieg über die Regressionstests-Karte** ([[regression-panel]]), analog zum bestehenden `ObsidianIngestOverlay`-Muster (Wiedereinstieg an denselben laufenden Job, ohne neuen Lauf). Kein als „Abbrechen des Laufs" fehldeutbarer Button ohne diese Klarstellung.
+- **AC12 (Backend — Fehlerklasse + sanitisierte Roh-Ausgabe)** — Bei einem terminalen `failed` trägt die Job-Sicht neben `error` (geheimnisfreie Kurzdiagnose in Klartext, z.B. „Agent-Ausgabe war kein gültiges Rückgabeformat") eine **Fehlerklasse** `error_class` aus fester Menge (`parse-error`|`no-session`|`agent-failed`|`timeout`). **Nur** im Parse-/Format-Fehler-Fall der Finalausgabe (`#coerceOutcome`-Fehlerpfad) liefert die Sicht zusätzlich die **sanitisierte Roh-Finalausgabe** `raw_output` (serverseitig secret-gefiltert: keine Tokens/API-Keys/OAuth-Tokens/Host-Pfade). Ist keine Roh-Ausgabe verfügbar oder entfernt der Secret-Filter den gesamten Inhalt, **entfällt** `raw_output` (kein Leak, kein Crash).
+- **AC13 (Frontend — Fehler-Transparenz + Roh-Ausgabe einklappbar)** — Im Fehlerfall zeigt das Overlay die **Fehlerklasse + Kurzdiagnose** (statt der bisherigen nackten Meldung) und bietet **„Erneut versuchen"** sowie — **falls** `raw_output` vorliegt — einen **standardmäßig eingeklappten**, aufklappbaren Bereich „Roh-Finalausgabe ansehen". Das Overlay rendert **ausschließlich** die bereits serverseitig sanitisierte `raw_output` (keine erneute Anreicherung, keine Secrets in der Anzeige).
+
 ## Verträge
 - **Runner-Endpunkte (Muster Obsidian-Ingest):**
   - `POST /api/projects/:slug/regression-define` — Body `{ ziel: { typ: "bereich"|"verbund", id: <bereich-id|verbund-name> }, stichworte?: [] }` → `{ jobId, status: "running" }`.
-  - `GET /api/projects/:slug/regression-define/:jobId` → `{ status: "running"|"needs-review"|"done"|"failed", vorschlag?, sessionId?, reason? }`.
+  - `GET /api/projects/:slug/regression-define/:jobId` → `{ status: "running"|"needs-review"|"done"|"failed", vorschlag?, sessionId?, reason?, startedAt?, lastActivityAt?, phase?, error?, error_class?, raw_output? }` — die v2-Felder `startedAt`/`lastActivityAt`/`phase` (AC9), `error_class`/`raw_output` (AC12) sind secret-frei; `raw_output` erscheint **nur** im Parse-Fehler-Fall und ist serverseitig secret-gefiltert.
   - `POST /api/projects/:slug/regression-define/:jobId/review` — redigierte Fassung **via STDIN-Resume** (Body enthält die redigierte Struktur; Weitergabe an den Kindprozess ausschließlich über STDIN) → `{ status }`.
 - **Rückgabeformat NL-Vorschlag:** lose gekoppelt an agent-flow `regression-define` (`{ projekt, ziel, quell_specs, vorschlag:[{titel,schritte,pruefpunkte,beispieldaten}], target_vorschlag }`).
 - Alle mutierenden Endpunkte hinter AccessGuard, identitäts-/rollengeschützt (`CRED_ADMIN_EMAILS`-Linie), Audit-First.
@@ -67,7 +76,7 @@ Der Owner definiert eine Regressionstest-Suite für einen Bereich (oder einen Ve
 - Redigierte Fassung entfernt alle Beispieldaten → an den Agenten durchgereicht (nicht-datengetriebener Test, agent-flow `regression-define` Edge-Case), kein dev-gui-Fehler.
 
 ## NFRs
-- **Sicherheit (Floor, hart):** kein API-Key, kein globaler PTY-Lock, kein Secret in Response/Log/WS/Audit/argv; Resume-Nutzlast nur via STDIN. Hinter Access + rollengeschützt + Audit-First.
+- **Sicherheit (Floor, hart):** kein API-Key, kein globaler PTY-Lock, kein Secret in Response/Log/WS/Audit/argv; Resume-Nutzlast nur via STDIN. Hinter Access + rollengeschützt + Audit-First. **v2:** die sanitisierte Roh-Finalausgabe (`raw_output`, AC12/AC13) ist eine neue Trust-Boundary — sie wird **serverseitig** secret-gefiltert (Tokens/API-Keys/OAuth-Tokens/Host-Pfade entfernt), **bevor** sie die Job-Sicht verlässt; das Frontend reichert sie nicht an. Die Lebendigkeits-Felder (`startedAt`/`lastActivityAt`/`phase`) enthalten keine internen Pfade/Session-ids.
 - **Isolation:** eigene `ProjectJobLock`-Instanz (Fremd-/Selbstblockade-Vermeidung).
 
 ## Nicht-Ziele

@@ -1,0 +1,45 @@
+id: S-321
+parent: F-067
+title: 'Regressionstest-definieren-Overlay: lebendige Fortschritts-Anzeige + geheimnisfreie
+  Fehler-Transparenz (Laufzeit/Phase, Schließen-Semantik, Roh-Ausgabe einklappbar)'
+status: To Do
+priority: P2
+spec: docs/specs/regression-define-dialog.md
+implements:
+- AC9
+- AC10
+- AC11
+- AC12
+- AC13
+depends: null
+labels:
+- ui
+- security
+size_est: L
+dispo_est: '5.0'
+tok_est: null
+confidence: low
+estimate_note: 'Heuristik score 10 (n_ac=5 AC9-AC13 + n_comp~3 RegressionDefineRunner.js/regressionDefineRouter(GET)/RegressionDefineDialog.jsx
+  + label_bump=2 ui+security) -> L. estimator im headless requirement-Kontext bei L
+  vorgesehen, aber kein Task-Tool dispatchbar -> Fallback baseline js|balanced|L ep=5.0
+  als dispo_est, confidence low. tok_est null (keine Baseline-Tokens, tok_total null
+  in js|balanced|L).'
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-07-08T00:00:00Z'
+updated_at: '2026-07-08T00:00:00Z'
+done_at: null
+area: fabrik-arbeiten
+notes: |
+  Folge-UX nach erstem E2E-Test der Redaktionsschleife (Owner-Anforderung 2026-07-08).
+  Backend (RegressionDefineRunner.js + GET-Endpunkt regressionDefineRouter.js): Job-Sicht
+  um secret-freie Lebendigkeits-Felder startedAt/lastActivityAt/(optional phase) (AC9)
+  und im Fehlerfall error_class + sanitisierte raw_output (nur Parse-Fehler, serverseitig
+  secret-gefiltert) (AC12) erweitern.
+  Frontend (RegressionDefineDialog.jsx): animierter Indikator + Laufzeit mm:ss + Phase/
+  letzter Aktivitäts-Zeitstempel fuer BEIDE running-Phasen (Vorschlag + uebersetzen/Resume)
+  (AC10); eindeutige Schließen-Semantik "blendet nur aus, Lauf laeuft weiter, Wiedereinstieg
+  ueber die Karte" analog ObsidianIngestOverlay (AC11); Fehlerklasse+Kurzdiagnose statt
+  nackter Meldung + "Erneut versuchen" + einklappbare Roh-Finalausgabe, nur sanitisiert
+  gerendert (AC13). Trust-Boundary: kein Secret in raw_output.
