@@ -1,7 +1,7 @@
 id: S-311
 parent: F-067
 title: Ausführen-Dialog (Suite-Wahl Bereich/Verbund/Gesamt, Testobjekt-Anzeige, Kosten-/Ressourcen-Hinweis)
-status: In Progress
+status: Done
 priority: P2
 spec: docs/specs/regression-run.md
 implements:
@@ -25,8 +25,8 @@ branch: feat/S-311-ausfuehren-dialog
 pr: null
 blocked_reason: null
 created_at: '2026-07-06T05:04:40Z'
-updated_at: '2026-07-08T04:42:52Z'
-done_at: null
+updated_at: '2026-07-08T05:06:56Z'
+done_at: '2026-07-08T05:06:56Z'
 tok_est: null
 area: fabrik-arbeiten
 notes: Dialog mit Suite-Wahl Bereich/Verbund/Gesamt; zeigt je Suite ihr deklariertes
