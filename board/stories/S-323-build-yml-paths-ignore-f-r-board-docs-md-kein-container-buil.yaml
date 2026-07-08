@@ -2,7 +2,7 @@ id: S-323
 parent: F-071
 title: 'build.yml: paths-ignore für board/**, docs/**, **.md (kein Container-Build
   bei reinen Board-/Doku-Commits)'
-status: To Do
+status: In Progress
 priority: P2
 spec: docs/specs/ci-build-path-filter.md
 implements:
@@ -26,9 +26,9 @@ estimate_note: estimator-Dispatch nicht verfuegbar (kein Task-Tool im Lauf) -> F
   an build.yml; Referenz baseline js|balanced|L ep=5.0, tok_total=null
 confidence: low
 tok_est: null
-branch: null
+branch: feat/S-323-ci-build-path-filter
 pr: null
 blocked_reason: null
 created_at: '2026-07-08T15:42:26Z'
-updated_at: '2026-07-08T15:43:47Z'
+updated_at: '2026-07-08T15:49:53Z'
 done_at: null

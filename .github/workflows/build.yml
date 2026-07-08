@@ -6,6 +6,15 @@ name: build
 on:
   push:
     branches: [main]
+    # Pfad-Filter (S-323): reine Board-State-/Doku-/Markdown-Commits (board/**, docs/**, **.md)
+    # veraendern das Image nicht -> kein Lauf noetig. Sobald mindestens eine Datei ausserhalb
+    # dieser Pfade betroffen ist (auch gemischt), startet GitHub den vollen Workflow wie bisher.
+    # Sicherheitsnetz fuer die dadurch entfallende secret-scan-Abdeckung: .github/workflows/security.yml
+    # faehrt woechentlich einen tiefen History-Scan ueber den kompletten Baum (nicht anfassen).
+    paths-ignore:
+      - 'board/**'
+      - 'docs/**'
+      - '**.md'
 permissions:
   contents: read
   packages: write
