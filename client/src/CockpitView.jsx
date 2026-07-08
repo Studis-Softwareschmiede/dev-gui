@@ -156,10 +156,12 @@
  *          Primär-Button-Höhe/-Breite angeglichen, NICHT die kompaktere
  *          `btnCancel`-Variante aus dem Confirm-Dialog-Button-Paar).
  *   AC3 — Klick-Ziele: die eigentlichen Dialoge ([[regression-run]] S-311,
- *          [[regression-define-dialog]] S-308) sind separate, zum Zeitpunkt
- *          dieser Story noch nicht abgeschlossene Items — hier nur der
+ *          [[regression-define-dialog]] S-308) sind separate Items — der
  *          lokale Öffnen-State (`regressionRunOpen`/`regressionDefineOpen`)
- *          als Anknüpfungspunkt; kein Dialog-UI (Nicht-Ziel dieser Spec).
+ *          bleibt der Anknüpfungspunkt; `regressionDefineOpen` mountet SEIT
+ *          S-308 `RegressionDefineDialog` (regression-define-dialog AC6-AC8,
+ *          s. dortiger Modul-Kommentar); `regressionRunOpen` ist weiterhin
+ *          ohne Dialog-UI (S-311, Nicht-Ziel dieser Story).
  *   AC4/AC6 — Inline-Statuszeile pollt `GET /api/projects/:slug/regression-runs`
  *          (jüngster Lauf zuerst, s. [[regression-result-store]] AC4) und
  *          bildet „kein Lauf"/„läuft"/„erfolgreich"/„fehlgeschlagen" ab
@@ -199,6 +201,7 @@ import { SpecView } from './SpecView.jsx';
 import { IdeaCaptureModal } from './IdeaCaptureModal.jsx';
 import { CostModeDriftNotice } from './CostModeDriftNotice.jsx';
 import { IdeaSpecifyChatModal } from './IdeaSpecifyChatModal.jsx';
+import { RegressionDefineDialog } from './RegressionDefineDialog.jsx';
 import { COST_MODES, COST_MODE_INFO } from './costMode.js';
 
 /** @type {Array<{ id: string, label: string }>} */
@@ -576,11 +579,27 @@ function FactoryWorkspace({
 
   // ── Regressionstests-Karte (regression-panel AC1–AC7) ──────────────────────
   // Klick-Ziele: die eigentlichen Dialoge ([[regression-run]] S-311,
-  // [[regression-define-dialog]] S-308) sind separate, noch nicht
-  // abgeschlossene Stories — hier nur der Verdrahtungspunkt (lokaler
-  // Öffnen-State), kein Dialog-UI (Nicht-Ziel dieser Spec).
+  // [[regression-define-dialog]] S-308) sind separate Items — der lokale
+  // Öffnen-State bleibt der Anknüpfungspunkt. Seit S-308 mountet
+  // `regressionDefineOpen` den `RegressionDefineDialog`; `regressionRunOpen`
+  // bleibt ohne Dialog-UI (S-311, Nicht-Ziel dieser Story).
   const [regressionRunOpen, setRegressionRunOpen] = useState(false);
   const [regressionDefineOpen, setRegressionDefineOpen] = useState(false);
+  const regressionDefineBtnRef = useRef(null);
+  /**
+   * regression-define-dialog AC8/E1: der Wiedereinstiegs-Job wird ZUSAMMEN
+   * mit dem Projekt gehalten, für das er gestartet wurde (Muster
+   * `ObsidianImportSection` `ingestJob`/`ingestJobMatchesSelection`) — ein
+   * Repo-Wechsel verwirft ihn (kein stilles Resume des falschen Jobs).
+   */
+  const [regressionDefineJob, setRegressionDefineJob] = useState(
+    /** @type {{jobId:string, projectSlug:string}|null} */ (null),
+  );
+  useEffect(() => {
+    setRegressionDefineJob((prev) => (prev && prev.projectSlug !== activeRepo ? null : prev));
+  }, [activeRepo]);
+  const regressionDefineJobMatchesSelection =
+    Boolean(regressionDefineJob) && regressionDefineJob.projectSlug === activeRepo;
   /** null | 'running' | 'passed' | 'failed' — letzter Lauf-Zustand (AC4). */
   const [regressionLastStatus, setRegressionLastStatus] = useState(null);
   /** ISO-Zeitstempel des letzten Laufs (nur bei passed/failed relevant, D10). */
@@ -591,6 +610,9 @@ function FactoryWorkspace({
   }, []);
   const handleRegressionDefineOpen = useCallback(() => {
     setRegressionDefineOpen(true);
+  }, []);
+  const handleRegressionDefineClose = useCallback(() => {
+    setRegressionDefineOpen(false);
   }, []);
 
   // AC4/AC6: letzter Lauf-Zustand wird aus dem Ergebnis-Store gespeist
@@ -1101,6 +1123,7 @@ function FactoryWorkspace({
 
           <button
             type="button"
+            ref={regressionDefineBtnRef}
             style={styles.btnRegressionDefine}
             onClick={handleRegressionDefineOpen}
             aria-label="Regressionstest definieren — öffnet die Definitionsansicht"
@@ -1211,6 +1234,19 @@ function FactoryWorkspace({
           onSpecified={handleNewStorySpecified}
           triggerRef={newStoryBtnRef}
           fetchFn={fetchFn}
+        />
+      )}
+
+      {/* regression-define-dialog AC6/AC7/AC8: Definier-Dialog + Redaktions-Overlay */}
+      {regressionDefineOpen && (
+        <RegressionDefineDialog
+          projectSlug={activeRepo}
+          onClose={handleRegressionDefineClose}
+          triggerRef={regressionDefineBtnRef}
+          fetchFn={fetchFn}
+          initialJobId={regressionDefineJobMatchesSelection ? regressionDefineJob.jobId : null}
+          onJobStarted={(jobId) => setRegressionDefineJob({ jobId, projectSlug: activeRepo })}
+          onJobEnded={() => setRegressionDefineJob(null)}
         />
       )}
     </div>

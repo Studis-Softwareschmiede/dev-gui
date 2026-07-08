@@ -1,7 +1,8 @@
 id: S-308
 parent: F-067
-title: Definier-Dialog + Redaktions-Overlay (Bereichs-/Verbund-Auswahl, editierbares Vorschlags-Textfeld)
-status: To Do
+title: Definier-Dialog + Redaktions-Overlay (Bereichs-/Verbund-Auswahl, editierbares
+  Vorschlags-Textfeld)
+status: In Progress
 priority: P2
 spec: docs/specs/regression-define-dialog.md
 implements:
@@ -17,20 +18,21 @@ size_est: M
 dispo_est: '5.0'
 dispo_act: null
 dispo_forecast: null
-estimate_note: 'M per Heuristik (n_ac=3, n_comp~3 Dialog/ObsidianIngestOverlay-Muster/areas.yaml,
+estimate_note: M per Heuristik (n_ac=3, n_comp~3 Dialog/ObsidianIngestOverlay-Muster/areas.yaml,
   label_bump=1 ui -> score 7). estimator nicht dispatchbar (kein Task-Tool); baseline
-  js|balanced|M ep 5.0 (n=8); keine Baseline-Tokens (tok_total null) -> tok_est null. confidence
-  medium.'
+  js|balanced|M ep 5.0 (n=8); keine Baseline-Tokens (tok_total null) -> tok_est null.
+  confidence medium.
 confidence: medium
-branch: null
+branch: feat/S-308-regression-define-dialog
 pr: null
 blocked_reason: null
 created_at: '2026-07-06T05:04:40Z'
-updated_at: '2026-07-06T05:04:40Z'
+updated_at: '2026-07-08T01:33:49Z'
 done_at: null
 tok_est: null
 area: fabrik-arbeiten
-notes: 'Dialog mit Bereichs-Auswahl aus board/areas.yaml + Option „Verbund…" (Namensfeld) +
-  optionale Stichworte. Overlay zeigt bei needs-review den NL-Vorschlag in editierbarem Textfeld
-  (Muster ObsidianIngestOverlay.jsx), bestätigte Fassung -> Resume (S-307), pollt bis done/Fehler.
-  Projektwechsel verwirft Wiedereinstiegs-Job. Rein Frontend + Anbindung an S-307-Endpunkte.'
+notes: Dialog mit Bereichs-Auswahl aus board/areas.yaml + Option „Verbund…" (Namensfeld)
+  + optionale Stichworte. Overlay zeigt bei needs-review den NL-Vorschlag in editierbarem
+  Textfeld (Muster ObsidianIngestOverlay.jsx), bestätigte Fassung -> Resume (S-307),
+  pollt bis done/Fehler. Projektwechsel verwirft Wiedereinstiegs-Job. Rein Frontend
+  + Anbindung an S-307-Endpunkte.
