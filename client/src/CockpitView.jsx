@@ -156,10 +156,14 @@
  *          Primär-Button-Höhe/-Breite angeglichen, NICHT die kompaktere
  *          `btnCancel`-Variante aus dem Confirm-Dialog-Button-Paar).
  *   AC3 — Klick-Ziele: die eigentlichen Dialoge ([[regression-run]] S-311,
- *          [[regression-define-dialog]] S-308) sind separate, zum Zeitpunkt
- *          dieser Story noch nicht abgeschlossene Items — hier nur der
+ *          [[regression-define-dialog]] S-308) sind separate Items — der
  *          lokale Öffnen-State (`regressionRunOpen`/`regressionDefineOpen`)
- *          als Anknüpfungspunkt; kein Dialog-UI (Nicht-Ziel dieser Spec).
+ *          bleibt der Anknüpfungspunkt; `regressionDefineOpen` mountet SEIT
+ *          S-308 `RegressionDefineDialog` (regression-define-dialog AC6-AC8,
+ *          s. dortiger Modul-Kommentar); `regressionRunOpen` mountet SEIT
+ *          S-311 `RegressionRunDialog` (regression-run AC4/AC6, Suite-Wahl
+ *          Bereich/Verbund/Gesamt + Testobjekt-Anzeige + Kosten-/Ressourcen-
+ *          Hinweis, s. dortiger Modul-Kommentar).
  *   AC4/AC6 — Inline-Statuszeile pollt `GET /api/projects/:slug/regression-runs`
  *          (jüngster Lauf zuerst, s. [[regression-result-store]] AC4) und
  *          bildet „kein Lauf"/„läuft"/„erfolgreich"/„fehlgeschlagen" ab
@@ -171,6 +175,20 @@
  *          (Disabled-Token + `lockNotice`); „definieren" bleibt bedienbar.
  *   AC6/AC7 — natives `<button type="button">`, `minHeight:44`, Fokusring
  *          erhalten, `data-testid`-Präfix `regression-` (D16).
+ *
+ * regression-result-view (S-314):
+ *   AC3-AC6 — eigene Karte „Regressions-Ergebnisse" (`regression-result-card`,
+ *          eigener `regressionResultOpen`-Öffnen-State, EIN Button „Ergebnisse
+ *          ansehen") direkt NACH der regression-card platziert — bewusst NICHT
+ *          IN die regression-card selbst integriert, da regression-panel AC2
+ *          dort GENAU zwei Buttons verlangt und „Ergebnis-Ansicht/Drilldown"
+ *          dort explizit als Nicht-Ziel geführt ist. Öffnet `RegressionResultView`
+ *          (eigene Komponente, Dialog-Muster wie `RegressionRunDialog`): Lauf-
+ *          Liste (Datum/Suite/grün-rot/Dauer/Zähler, jüngste zuerst), einfacher
+ *          grün/rot-Trend je Suite, Drilldown in die CTRF-Testfälle, Debug-
+ *          Artefakt-Link nur bei roten Läufen. Konsumiert ausschließlich die
+ *          bereits gelandete Read-API (S-313, `src/routers/regressionRuns.js`)
+ *          — kein neuer Backend-Code.
  *
  * A11y (WCAG 2.1 AA):
  *   - Reiter-Leiste als <nav role="tablist"> mit aria-selected.
@@ -199,6 +217,9 @@ import { SpecView } from './SpecView.jsx';
 import { IdeaCaptureModal } from './IdeaCaptureModal.jsx';
 import { CostModeDriftNotice } from './CostModeDriftNotice.jsx';
 import { IdeaSpecifyChatModal } from './IdeaSpecifyChatModal.jsx';
+import { RegressionDefineDialog } from './RegressionDefineDialog.jsx';
+import { RegressionRunDialog } from './RegressionRunDialog.jsx';
+import { RegressionResultView } from './RegressionResultView.jsx';
 import { COST_MODES, COST_MODE_INFO } from './costMode.js';
 
 /** @type {Array<{ id: string, label: string }>} */
@@ -576,11 +597,34 @@ function FactoryWorkspace({
 
   // ── Regressionstests-Karte (regression-panel AC1–AC7) ──────────────────────
   // Klick-Ziele: die eigentlichen Dialoge ([[regression-run]] S-311,
-  // [[regression-define-dialog]] S-308) sind separate, noch nicht
-  // abgeschlossene Stories — hier nur der Verdrahtungspunkt (lokaler
-  // Öffnen-State), kein Dialog-UI (Nicht-Ziel dieser Spec).
+  // [[regression-define-dialog]] S-308) sind separate Items — der lokale
+  // Öffnen-State bleibt der Anknüpfungspunkt. Seit S-308 mountet
+  // `regressionDefineOpen` den `RegressionDefineDialog`; seit S-311 mountet
+  // `regressionRunOpen` den `RegressionRunDialog` (regression-run AC4/AC6).
   const [regressionRunOpen, setRegressionRunOpen] = useState(false);
   const [regressionDefineOpen, setRegressionDefineOpen] = useState(false);
+  const regressionDefineBtnRef = useRef(null);
+  const regressionRunBtnRef = useRef(null);
+  // regression-result-view AC3-AC6 (S-314): eigene Karte + eigener
+  // Öffnen-State — bewusst NICHT in der regression-card selbst (die trägt
+  // laut regression-panel AC2 GENAU zwei Buttons, „Ergebnis-Ansicht/
+  // Drilldown" ist dort explizit Nicht-Ziel).
+  const [regressionResultOpen, setRegressionResultOpen] = useState(false);
+  const regressionResultBtnRef = useRef(null);
+  /**
+   * regression-define-dialog AC8/E1: der Wiedereinstiegs-Job wird ZUSAMMEN
+   * mit dem Projekt gehalten, für das er gestartet wurde (Muster
+   * `ObsidianImportSection` `ingestJob`/`ingestJobMatchesSelection`) — ein
+   * Repo-Wechsel verwirft ihn (kein stilles Resume des falschen Jobs).
+   */
+  const [regressionDefineJob, setRegressionDefineJob] = useState(
+    /** @type {{jobId:string, projectSlug:string}|null} */ (null),
+  );
+  useEffect(() => {
+    setRegressionDefineJob((prev) => (prev && prev.projectSlug !== activeRepo ? null : prev));
+  }, [activeRepo]);
+  const regressionDefineJobMatchesSelection =
+    Boolean(regressionDefineJob) && regressionDefineJob.projectSlug === activeRepo;
   /** null | 'running' | 'passed' | 'failed' — letzter Lauf-Zustand (AC4). */
   const [regressionLastStatus, setRegressionLastStatus] = useState(null);
   /** ISO-Zeitstempel des letzten Laufs (nur bei passed/failed relevant, D10). */
@@ -589,8 +633,27 @@ function FactoryWorkspace({
   const handleRegressionRunOpen = useCallback(() => {
     setRegressionRunOpen(true);
   }, []);
+  const handleRegressionRunClose = useCallback(() => {
+    setRegressionRunOpen(false);
+  }, []);
   const handleRegressionDefineOpen = useCallback(() => {
     setRegressionDefineOpen(true);
+  }, []);
+  const handleRegressionDefineClose = useCallback(() => {
+    setRegressionDefineOpen(false);
+  }, []);
+  const handleRegressionResultOpen = useCallback(() => {
+    setRegressionResultOpen(true);
+  }, []);
+  const handleRegressionResultClose = useCallback(() => {
+    setRegressionResultOpen(false);
+  }, []);
+  // regression-run AC4/AC6 (S-311): nach erfolgreichem Start best-effort
+  // sofort auf "running" schalten — der reguläre Poll (unten) übernimmt
+  // danach ohnehin, das hier vermeidet nur die Wartezeit bis zum nächsten
+  // Poll-Tick (kein neuer Anzeige-Ort, Nicht-Ziel dieser Story).
+  const handleRegressionRunStarted = useCallback(() => {
+    setRegressionLastStatus('running');
   }, []);
 
   // AC4/AC6: letzter Lauf-Zustand wird aus dem Ergebnis-Store gespeist
@@ -1081,6 +1144,7 @@ function FactoryWorkspace({
 
           <button
             type="button"
+            ref={regressionRunBtnRef}
             style={
               regressionLastStatus === 'running'
                 ? styles.btnFlowTriggerDisabled
@@ -1101,6 +1165,7 @@ function FactoryWorkspace({
 
           <button
             type="button"
+            ref={regressionDefineBtnRef}
             style={styles.btnRegressionDefine}
             onClick={handleRegressionDefineOpen}
             aria-label="Regressionstest definieren — öffnet die Definitionsansicht"
@@ -1163,6 +1228,32 @@ function FactoryWorkspace({
           )}
         </div>
 
+        {/* regression-result-view AC3-AC6 (S-314): eigene Karte — bewusst
+            NICHT in regression-card selbst (regression-panel AC2 verlangt
+            dort GENAU zwei Buttons; „Ergebnis-Ansicht/Drilldown" ist dort
+            explizit Nicht-Ziel). Read-only, konsumiert die bereits gelandete
+            Read-API aus S-313 (regressionRuns.js). */}
+        <div
+          style={styles.flowTriggerBox}
+          data-testid="regression-result-card"
+          data-result-view-open={regressionResultOpen}
+        >
+          <div style={styles.flowTriggerHeader}>Regressions-Ergebnisse</div>
+          <p style={styles.flowTriggerHint}>
+            Lauf-Liste, grün/rot-Trend je Suite, Testfall-Drilldown und Debug-Artefakte (bei Rot).
+          </p>
+          <button
+            type="button"
+            ref={regressionResultBtnRef}
+            style={styles.btnFlowTrigger}
+            onClick={handleRegressionResultOpen}
+            aria-label="Regressions-Ergebnisse ansehen — öffnet die Ergebnis-Ansicht"
+            data-testid="regression-result-open-btn"
+          >
+            Ergebnisse ansehen
+          </button>
+        </div>
+
         </div>
       </div>
 
@@ -1210,6 +1301,42 @@ function FactoryWorkspace({
           onClose={handleNewStoryClose}
           onSpecified={handleNewStorySpecified}
           triggerRef={newStoryBtnRef}
+          fetchFn={fetchFn}
+        />
+      )}
+
+      {/* regression-define-dialog AC6/AC7/AC8: Definier-Dialog + Redaktions-Overlay */}
+      {regressionDefineOpen && (
+        <RegressionDefineDialog
+          projectSlug={activeRepo}
+          onClose={handleRegressionDefineClose}
+          triggerRef={regressionDefineBtnRef}
+          fetchFn={fetchFn}
+          initialJobId={regressionDefineJobMatchesSelection ? regressionDefineJob.jobId : null}
+          onJobStarted={(jobId) => setRegressionDefineJob({ jobId, projectSlug: activeRepo })}
+          onJobEnded={() => setRegressionDefineJob(null)}
+        />
+      )}
+
+      {/* regression-run AC4/AC6 (S-311): Ausführen-Dialog — Suite-Wahl
+          (Bereich/Verbund/Gesamt), Testobjekt-Anzeige, Kosten-/Ressourcen-Hinweis. */}
+      {regressionRunOpen && (
+        <RegressionRunDialog
+          projectSlug={activeRepo}
+          onClose={handleRegressionRunClose}
+          triggerRef={regressionRunBtnRef}
+          fetchFn={fetchFn}
+          onRunStarted={handleRegressionRunStarted}
+        />
+      )}
+
+      {/* regression-result-view AC3-AC6 (S-314): Lauf-Liste, grün/rot-Trend
+          je Suite, Drilldown, Debug-Artefakt-Zugriff (nur bei Rot). */}
+      {regressionResultOpen && (
+        <RegressionResultView
+          projectSlug={activeRepo}
+          onClose={handleRegressionResultClose}
+          triggerRef={regressionResultBtnRef}
           fetchFn={fetchFn}
         />
       )}

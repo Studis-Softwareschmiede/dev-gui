@@ -1,7 +1,8 @@
 id: S-314
 parent: F-067
-title: Ergebnis-Ansicht Frontend (Lauf-Liste, grün/rot-Trend je Suite, Drilldown, Artefakt-Links)
-status: To Do
+title: Ergebnis-Ansicht Frontend (Lauf-Liste, grün/rot-Trend je Suite, Drilldown,
+  Artefakt-Links)
+status: Done
 priority: P2
 spec: docs/specs/regression-result-view.md
 implements:
@@ -17,20 +18,21 @@ size_est: L
 dispo_est: '5'
 dispo_act: null
 dispo_forecast: null
-estimate_note: 'L per Heuristik (n_ac=4, n_comp~4 View/Trend/Drilldown/Artefakt-Links,
+estimate_note: L per Heuristik (n_ac=4, n_comp~4 View/Trend/Drilldown/Artefakt-Links,
   label_bump=1 ui -> score 9). estimator nicht dispatchbar (kein Task-Tool); baseline.json
-  js|balanced|L Median (ep 5.0, n=5) als Proxy; keine Baseline-Tokens (tok_total null) ->
-  tok_est null. confidence medium.'
+  js|balanced|L Median (ep 5.0, n=5) als Proxy; keine Baseline-Tokens (tok_total null)
+  -> tok_est null. confidence medium.
 confidence: medium
-branch: null
+branch: flow-F-067-session
 pr: null
 blocked_reason: null
 created_at: '2026-07-06T05:04:40Z'
-updated_at: '2026-07-06T05:04:40Z'
-done_at: null
+updated_at: '2026-07-08T06:22:27Z'
+done_at: '2026-07-08T06:22:18Z'
 tok_est: null
 area: fabrik-arbeiten
-notes: 'Ansicht je Projekt: Liste der letzten Läufe (Datum, Suite, grün/rot, Dauer, Testfall-Zähler
-  passed/total), jüngste zuerst; einfacher grün/rot-Trend je Suite; Drilldown in Testfälle
-  eines Laufs (Name + grün/rot + Fehlermeldung bei Rot); Debug-Artefakt-Zugriff nur bei Rot.
-  grün/rot mit Icon+Text+Farbe (nie Farbe allein, WCAG 2.1 AA). Konsumiert S-313-API. Rein Frontend.'
+notes: 'Ansicht je Projekt: Liste der letzten Läufe (Datum, Suite, grün/rot, Dauer,
+  Testfall-Zähler passed/total), jüngste zuerst; einfacher grün/rot-Trend je Suite;
+  Drilldown in Testfälle eines Laufs (Name + grün/rot + Fehlermeldung bei Rot); Debug-Artefakt-Zugriff
+  nur bei Rot. grün/rot mit Icon+Text+Farbe (nie Farbe allein, WCAG 2.1 AA). Konsumiert
+  S-313-API. Rein Frontend.'

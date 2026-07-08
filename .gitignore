@@ -12,3 +12,6 @@ docker-compose.override.yml
 # Metrik-Ledger (lokal, append-only; baseline.json wird separat gepflegt)
 .claude/metrics/dispatches.jsonl
 .claude/metrics/items.jsonl
+
+# Feature-Drain-Laufzeitstatus (board-feature-drain.sh, lokal je Sandbox)
+board/runs/

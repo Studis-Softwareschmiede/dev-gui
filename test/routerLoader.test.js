@@ -263,7 +263,7 @@ describe('routerLoader — Echte src/routers/ Module (AC1/AC3)', () => {
     }
   });
 
-  it('genau 44 Router-Module in src/routers/ — Smoke-Assertion gegen versehentliche Löschung (AC1)', async () => {
+  it('genau 48 Router-Module in src/routers/ — Smoke-Assertion gegen versehentliche Löschung (AC1)', async () => {
     // Diese Assertion schreibt die aktuelle Router-Anzahl fest.
     // Sinkt die Zahl (Router gelöscht/umbenannt), schlägt der Test sofort an.
     // Steigt die Zahl (neuer Router hinzugefügt), muss dieser Wert bewusst erhöht werden.
@@ -322,8 +322,16 @@ describe('routerLoader — Echte src/routers/ Module (AC1/AC3)', () => {
     // regressionRuns.js wurde mit regression-result-store (S-312) hinzugefügt
     //   (GET /api/projects/:slug/regression-runs + GET .../regression-runs/:runId —
     //    Regressionslauf-Ergebnisse: Liste + Einzel-Lauf inkl. Testfall-Details AC4) → 46.
+    // regressionRun.js wurde mit regression-run (S-309) hinzugefügt
+    //   (POST /api/projects/:slug/regression-run + GET .../regression-run/:runId —
+    //    deterministischer `npx playwright test`-Runner, KEIN claude/Agent,
+    //    Busy-Check/Access-Rolle/local-Erreichbarkeit AC1/AC2/AC3/AC5/AC9) → 47.
+    // regressionSuites.js wurde mit regression-run (S-311) hinzugefügt
+    //   (GET /api/projects/:slug/regression-suites — read-only Suite-Liste
+    //    (Bereich/Verbund/Gesamt) inkl. deklariertem target + Kosten-/
+    //    Ressourcen-Hinweis für den Ausführen-Dialog, AC4/AC6) → 48.
     const entries = await readdir(ROUTERS_DIR);
     const mountedCount = entries.filter((f) => f.endsWith('.js')).length;
-    expect(mountedCount).toBe(46);
+    expect(mountedCount).toBe(48);
   });
 });

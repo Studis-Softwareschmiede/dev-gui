@@ -1,7 +1,7 @@
 id: S-311
 parent: F-067
 title: Ausführen-Dialog (Suite-Wahl Bereich/Verbund/Gesamt, Testobjekt-Anzeige, Kosten-/Ressourcen-Hinweis)
-status: To Do
+status: Done
 priority: P2
 spec: docs/specs/regression-run.md
 implements:
@@ -16,20 +16,20 @@ size_est: M
 dispo_est: '5.0'
 dispo_act: null
 dispo_forecast: null
-estimate_note: 'M per Heuristik (n_ac=2, n_comp~3 Dialog/Testobjekt-Anzeige/Kosten-Hinweis,
+estimate_note: M per Heuristik (n_ac=2, n_comp~3 Dialog/Testobjekt-Anzeige/Kosten-Hinweis,
   label_bump=1 ui -> score 6). estimator nicht dispatchbar (kein Task-Tool); baseline
-  js|balanced|M ep 5.0 (n=8); keine Baseline-Tokens (tok_total null) -> tok_est null. confidence
-  medium.'
+  js|balanced|M ep 5.0 (n=8); keine Baseline-Tokens (tok_total null) -> tok_est null.
+  confidence medium.
 confidence: medium
-branch: null
+branch: feat/S-311-ausfuehren-dialog
 pr: null
 blocked_reason: null
 created_at: '2026-07-06T05:04:40Z'
-updated_at: '2026-07-06T05:04:40Z'
-done_at: null
+updated_at: '2026-07-08T05:06:56Z'
+done_at: '2026-07-08T05:06:56Z'
 tok_est: null
 area: fabrik-arbeiten
-notes: 'Dialog mit Suite-Wahl Bereich/Verbund/Gesamt; zeigt je Suite ihr deklariertes target
-  (local | ephemeral-infra | url) aus der Begleitbeschreibung; bei ephemeral-infra zusätzlich
-  den Kosten-/Ressourcen-Hinweis. Frisch-Ausrollen-Toggle (S-310) wird hier eingebunden.
-  Startet den Lauf über die S-309-Endpunkte. Rein Frontend + Anbindung.'
+notes: Dialog mit Suite-Wahl Bereich/Verbund/Gesamt; zeigt je Suite ihr deklariertes
+  target (local | ephemeral-infra | url) aus der Begleitbeschreibung; bei ephemeral-infra
+  zusätzlich den Kosten-/Ressourcen-Hinweis. Frisch-Ausrollen-Toggle (S-310) wird
+  hier eingebunden. Startet den Lauf über die S-309-Endpunkte. Rein Frontend + Anbindung.

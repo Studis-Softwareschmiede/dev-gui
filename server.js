@@ -141,6 +141,7 @@ import { StorySpecifyFinalizer } from './src/StorySpecifyFinalizer.js';
 import { HeadlessReconcileRunner } from './src/HeadlessReconcileRunner.js';
 import { ObsidianIngestRunner } from './src/ObsidianIngestRunner.js';
 import { RegressionDefineRunner } from './src/RegressionDefineRunner.js';
+import { RegressionRunner } from './src/RegressionRunner.js';
 import { ClaudeAuthHealthService } from './src/ClaudeAuthHealthService.js';
 import { KnowledgeSourceService } from './src/KnowledgeSourceService.js';
 import { read as readNotificationSettings, migrateEventDefaults } from './src/NotificationSettingsStore.js';
@@ -513,6 +514,28 @@ const drainReportStore = new DrainReportStore();
 // ([[regression-run]], S-309) aufgerufen — hier nur das Fundament.
 const regressionResultStore = new RegressionResultStore();
 
+// ── RegressionRunner (deterministischer `npx playwright test`-Runner,
+// docs/specs/regression-run.md AC1, AC2, AC3, AC5, AC9, S-309; AC7, AC8,
+// S-310) ─────────────────────────────────────────────────────────────────
+// EIGENE, isolierte `ProjectJobLock`-Instanz (Konstruktor-Default
+// `new ProjectJobLock()` in RegressionRunner.js) — bewusst getrennt von ALLEN
+// `claude -p`-Runnern (Nacht-Drain/manueller Drain/Reconcile/Finalizer/
+// Auto-Retro/ObsidianIngestRunner/RegressionDefineRunner). Zentraler
+// Unterschied zu diesen: dieser Runner spawnt KEIN `claude` — ausschließlich
+// `npx playwright test` (Grep-prüfbar, kein API-Key). `auditStore` +
+// `resultStore` injiziert (Ende-/Fehler-Audit secret-frei; CTRF-Ergebnis-
+// Übergabe an die S-312-Ablage, AC9). `dockerControl` = dieselbe
+// `LocalDockerControl`-Instanz wie die lokale Image-Test-Boundary (S-156) —
+// Frisch-Ausrollen (AC7) nutzt deren NEUE `pullAndRecreate()`-Methode, kein
+// zweiter Docker-Boundary-Pfad. Selbsttest-Skip (AC8, dev-gui) ist
+// server-seitig im Runner selbst erzwungen (SELF_PROJECT_SLUG), unabhängig
+// vom übergebenen `freshRollout`-Wert.
+const regressionRunner = new RegressionRunner({
+  auditStore,
+  resultStore: regressionResultStore,
+  dockerControl: localDockerControl,
+});
+
 // ── DrainJobRegistry (drain-restart-robustness AC1–AC4, S-281/S-282) ────────
 // EINE geteilte, datei-persistierte Instanz (${CRED_STORE_DIR}/drain-jobs.json)
 // für BEIDE Auslöser: manueller Drain (projectDrain.js Router, trigger:'manual',
@@ -860,6 +883,14 @@ const deps = {
   // POST /api/projects/:slug/regression-define/:jobId/review
   // (regressionDefine.js Router). Slug→Pfad-Auflösung analog projectDrainRouter.
   regressionDefineRunner,
+  // regression-run AC1-AC3/AC5/AC9 (S-309): deterministischer `npx playwright
+  // test`-Runner (KEIN claude/Agent, Grep-prüfbar) für
+  // POST /api/projects/:slug/regression-run +
+  // GET /api/projects/:slug/regression-run/:runId (regressionRun.js Router).
+  // Busy-Check (AC2) nutzt dieselben commandService/sessionRegistry/
+  // manualDrainLock-Instanzen wie projectDrain.js Router (bereits oben/unten
+  // als deps-Top-Level-Keys vorhanden) — kein zweiter Wiring-Pfad.
+  regressionRunner,
   // cost-mode-model-check AC7: CostModeModelCheck-Registry für den Status-
   // Endpunkt GET /api/cost-mode/check/:checkId (costModeCheck.js Router).
   costModeModelCheck,
