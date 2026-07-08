@@ -2,7 +2,7 @@ id: S-070
 parent: F-001
 title: 'Etappe 3: App-Stack rapt_dashboard — Compose (web_rapt + api_proxy[rapt] +
   Lean-Supabase + db-init + Labels)'
-status: Blocked
+status: Verworfen
 priority: P2
 spec: null
 implements: null
@@ -19,6 +19,7 @@ confidence: null
 branch: null
 pr: null
 blocked_reason: null
+resolution_note: 'Owner-Entscheidung 2026-07-08: App-Deployment läuft über Preview-/Deploy-Lifecycle-Weg statt App-Compose-Etappen; Blocker #159/#160 waren ohnehin längst erledigt'
 created_at: '2026-06-15T07:24:07Z'
-updated_at: '2026-06-15T07:24:07Z'
+updated_at: '2026-07-08T09:15:00Z'
 done_at: null
