@@ -213,13 +213,23 @@
  * Feature-Ebenen-Auswahl (S-317, docs/specs/feature-aware-drain.md AC1-AC8):
  * VOR jeder Runde entscheidet `selectDrainMode()` (pure Helper, s.u.), ob das
  * Parent-Feature der nächsten bereiten `To Do`-Story (`pickNextReadyStory()`,
- * identische Priorisierung wie `board next`) ≥2 bereite Storys hat. Ist das
- * so UND ist ein `#featureDrainFlowRunner` injiziert (additiv, Default `null`
+ * identische Priorisierung wie `board next`) ≥2 bereite Storys hat UND KEIN
+ * Bereichs-Container ist (`isAreaContainerFeature()`, S-324: ein Feature mit
+ * gesetztem `area`-Feld batcht NIE, unabhängig von der Story-Anzahl — ABER
+ * NUR wenn dieses `area`-Feld eine echte 1:1-Bereichs-Kopplung ist, d.h. KEIN
+ * anderes Feature des Projekts denselben `area`-Wert trägt; teilen sich
+ * mehrere Features einen `area`-Wert (reine Kachel-Kategorisierung, z.B.
+ * dev-gui vor der F-064-Migration), ist keines von ihnen ein Bereichs-
+ * Container. Ein Bereichs-Container ist per Design nie „alle-fertig", eine
+ * gebatchte Blocker-Story würde sonst fertige Geschwister-Storys vom Merge
+ * abhalten, verifizierter Vorfall F-019/S-062/S-061). Ist beides erfüllt UND
+ * ist ein `#featureDrainFlowRunner` injiziert (additiv, Default `null`
  * — kein Regress ohne Injection), startet die Runde einen Feature-Drain
  * (`board-feature-drain.sh F-###`, `src/FeatureDrainFlowRunner.js`) statt
  * eines Einzel-`/flow`-Laufs — sonst (genau 1 bereite Story, keine `parent`,
- * oder Skript aktuell nicht verfügbar) bleibt der bisherige Einzel-`/flow`-
- * Pfad unverändert. Ein Feature-Drain zählt als GENAU EINE Drain-Runde (AC3)
+ * Bereichs-Container, oder Skript aktuell nicht verfügbar) bleibt der
+ * bisherige Einzel-`/flow`-Pfad unverändert. Ein Feature-Drain zählt als
+ * GENAU EINE Drain-Runde (AC3)
  * — die gesamte übrige Logik (Ziel-Auswahl, Konvergenz, Eskalation,
  * Snapshot-Diff, Sicherheitsgürtel, Lock, Budget-Guard) bleibt unverändert,
  * da sie ausschließlich auf dem Board-Snapshot VOR/NACH der Runde operiert,
@@ -369,12 +379,56 @@ export function countReadyStoriesInFeature(project, featureId) {
 }
 
 /**
+ * Erkennt ein Bereichs-Container-Feature (docs/specs/feature-aware-drain.md
+ * AC1, S-324) über eine **1:1-Zählung** statt einer reinen Presence-Prüfung:
+ * ein Feature ist ein Bereichs-Container genau dann, wenn (a) sein `area`-Feld
+ * gesetzt ist, UND (b) es das **einzige** Feature des Projekts mit genau
+ * diesem `area`-Wert ist. Nur dann entspricht es 1:1 einem `areas.yaml`-
+ * Eintrag (`board/feature.schema.json`/[[board-areas]] AC2, agent-flow) —
+ * dauerhaft, nie automatisch `Done`/`Archived`, sammelt fortlaufend neue
+ * Storys, NIE „alle-fertig". Teilen sich **mehrere** Features denselben
+ * `area`-Wert (reine Kachel-Kategorisierung, z.B. dev-gui vor der
+ * F-064-Bereichs-Migration), ist **keines** von ihnen ein Bereichs-Container
+ * — das normale ≥2-Schwellen-Verhalten gilt unverändert (verifiziert gegen
+ * agent-flow: 10/10 Areas mit genau 1 Feature; dev-gui: z.B. `area:
+ * nachtwaechter` mit 3 Features F-029/F-055/F-069 — Zähler>1, kein
+ * Bereichs-Container).
+ *
+ * Ein Bereichs-Container darf NIE als Feature-Drain-Batch behandelt werden
+ * (eine einzige blockierte Geschwister-Story würde sonst den gesamten
+ * Feature-Branch einfrieren und bereits fertige Geschwister-Storys vom Merge
+ * nach main abhalten — verifizierter Vorfall F-019/S-062/S-061, PR #322).
+ * Ein Feature OHNE `area`-Feld (klassisches Auftrags-Container-Feature) ist
+ * von dieser Ausnahme nicht betroffen.
+ *
+ * Bekannter, akzeptierter Trade-off: ein Feature, das zufällig das einzige
+ * mit einem bestimmten `area`-Wert ist, ohne selbst ein echter
+ * Bereichs-Container zu sein, wird ebenfalls als Bereichs-Container
+ * eingestuft (False Positive) — sicher, weil es nur auf das alte
+ * Einzel-`/flow`-Verhalten zurückfällt (kein Risiko, s. Edge-Cases-Abschnitt
+ * der Spec).
+ *
+ * @param {import('./BoardAggregator.js').ProjectEntry|null} project
+ * @param {string} featureId
+ * @returns {boolean}
+ */
+export function isAreaContainerFeature(project, featureId) {
+  if (!project || !Array.isArray(project.features)) return false;
+  const feature = project.features.find((f) => f.id === featureId);
+  if (!feature || !feature.area) return false;
+  const sameAreaCount = project.features.filter((f) => f && f.area === feature.area).length;
+  return sameAreaCount === 1;
+}
+
+/**
  * Feature-Ebenen-Auswahl (docs/specs/feature-aware-drain.md AC1/AC2): ermittelt
  * die nächste bereite `To Do`-Story und daraus, ob dieser Drain-Runde ein
  * Feature-Drain (`board-feature-drain.sh F-###`) statt eines Einzel-`/flow`-
  * Laufs gebührt. Storys OHNE `parent` sind immer Einzelgänger (kein
  * Feature-Drain, AC1/AC2) — ebenso wenn das Parent-Feature aktuell nur GENAU
- * eine bereite Story hat.
+ * eine bereite Story hat, ODER wenn das Parent-Feature ein Bereichs-Container
+ * ist (1:1-Zählung über `area`, AC1 S-324 — Bereichs-Container batchen NIE,
+ * unabhängig von der Anzahl bereiter Storys, s. `isAreaContainerFeature()`).
  *
  * @param {import('./BoardAggregator.js').ProjectEntry|null} project
  * @returns {{ mode: 'feature-drain', featureId: string } | { mode: 'single-flow' }}
@@ -382,6 +436,9 @@ export function countReadyStoriesInFeature(project, featureId) {
 export function selectDrainMode(project) {
   const next = pickNextReadyStory(project);
   if (!next || !next.parent || !FEATURE_ID_RE.test(next.parent)) {
+    return { mode: 'single-flow' };
+  }
+  if (isAreaContainerFeature(project, next.parent)) {
     return { mode: 'single-flow' };
   }
   const readyCount = countReadyStoriesInFeature(project, next.parent);

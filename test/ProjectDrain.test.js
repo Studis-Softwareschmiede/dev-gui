@@ -252,6 +252,28 @@
  *          busy'`, KEIN Rückfall auf Einzel-`/flow` (anders als bei
  *          `feature-drain-unavailable`), keine Eskalation, kein Crash.
  *
+ * Covers (feature-aware-drain, S-324 — Bereichs-Container-Ausnahme, AC1/AC2):
+ * describe-Block "pickNextReadyStory/countReadyStoriesInFeature/
+ * selectDrainMode (AC1/AC2)", zusätzliche `isAreaContainerFeature`/
+ * `selectDrainMode`-Tests:
+ *   AC1 — Ein Feature ist ein Bereichs-Container GENAU DANN, wenn sein
+ *          `area`-Feld gesetzt ist UND es das EINZIGE Feature des Projekts
+ *          mit genau diesem `area`-Wert ist (1:1-Zählung gemäß
+ *          `board/feature.schema.json`/[[board-areas]] AC2, agent-flow —
+ *          NICHT reine Presence-Prüfung). Ein solches Feature wird NIE als
+ *          Feature-Drain-Batch gewählt, auch wenn es ≥2 bereite Storys hat
+ *          (`isAreaContainerFeature()` greift VOR der ≥2-Schwelle in
+ *          `selectDrainMode()`) — Regressionsschutz für den verifizierten
+ *          Vorfall F-019 (Batch fror die fertige Geschwister-Story S-062
+ *          hinter der blockierten S-061 ein, PR #322 rettete manuell).
+ *          Teilen sich MEHRERE Features denselben `area`-Wert (reine
+ *          Kachel-Kategorisierung, verifiziert gegen dev-gui F-069/
+ *          area:nachtwaechter mit 3 Geschwister-Features), ist KEINES von
+ *          ihnen ein Bereichs-Container — normales ≥2-Schwellen-Verhalten
+ *          gilt unverändert. Ein Feature OHNE `area`-Feld bleibt vom
+ *          bisherigen ≥2-Schwellenwert-Verhalten unberührt (Regressionsschutz
+ *          für die AC1-Tests oben).
+ *
  * Strategy:
  *   - Pure Helper-Funktionen (flattenProjectStories, isStaleInProgress,
  *     computeAliveStoryIds, couldBecomeReadyViaDepends, computeDrainState,
@@ -292,6 +314,7 @@ import {
   pickNextReadyStory,
   countReadyStoriesInFeature,
   selectDrainMode,
+  isAreaContainerFeature,
 } from '../src/ProjectDrain.js';
 import { ProjectJobLock } from '../src/ProjectJobLock.js';
 import { HeadlessFlowRunnerAdapter } from '../src/FlowRunner.js';
@@ -1000,11 +1023,12 @@ describe('pickNextReadyStory / countReadyStoriesInFeature / selectDrainMode (fea
     return {
       slug: PROJECT_SLUG,
       repo_path: PROJECT_PATH,
-      features: featureDefs.map(({ id, priority = null, stories }) => ({
+      features: featureDefs.map(({ id, priority = null, area = null, stories }) => ({
         id,
         title: id,
         status: null,
         priority,
+        area,
         progress: null,
         stories: stories.map((s) => ({ ...makeStory(s), parent: id })),
       })),
@@ -1204,6 +1228,72 @@ describe('pickNextReadyStory / countReadyStoriesInFeature / selectDrainMode (fea
       },
     ]);
     expect(selectDrainMode(project)).toEqual({ mode: 'single-flow' });
+  });
+
+  it('isAreaContainerFeature: true nur für ein Feature, das das EINZIGE mit seinem area-Wert ist (1:1-Zählung, AC1, S-324)', () => {
+    const project = makeMultiFeatureProject([
+      { id: 'F-019', area: 'rollen-agenten', stories: [{ id: 'S-1', status: 'To Do', ready: true }] },
+      { id: 'F-001', stories: [{ id: 'S-2', status: 'To Do', ready: true }] },
+    ]);
+    expect(isAreaContainerFeature(project, 'F-019')).toBe(true);
+    expect(isAreaContainerFeature(project, 'F-001')).toBe(false);
+    expect(isAreaContainerFeature(project, 'F-999')).toBe(false);
+    expect(isAreaContainerFeature(null, 'F-019')).toBe(false);
+  });
+
+  it('isAreaContainerFeature: false, wenn MEHRERE Features denselben area-Wert teilen (1:1-Zählung, AC1, S-324 — dev-gui-Verifikation F-069/area:nachtwaechter)', () => {
+    const project = makeMultiFeatureProject([
+      { id: 'F-069', area: 'nachtwaechter', stories: [{ id: 'S-1', status: 'To Do', ready: true }] },
+      { id: 'F-029', area: 'nachtwaechter', stories: [{ id: 'S-2', status: 'To Do', ready: true }] },
+      { id: 'F-055', area: 'nachtwaechter', stories: [{ id: 'S-3', status: 'To Do', ready: true }] },
+    ]);
+    expect(isAreaContainerFeature(project, 'F-069')).toBe(false);
+    expect(isAreaContainerFeature(project, 'F-029')).toBe(false);
+    expect(isAreaContainerFeature(project, 'F-055')).toBe(false);
+  });
+
+  it('selectDrainMode: Bereichs-Container-Feature (einziges Feature mit diesem area-Wert) batcht NIE, auch bei ≥2 bereiten Storys (AC1, S-324 — Regressionsschutz F-019/S-062/S-061)', () => {
+    const project = makeMultiFeatureProject([
+      {
+        id: 'F-019',
+        area: 'rollen-agenten',
+        stories: [
+          { id: 'S-1', status: 'To Do', ready: true },
+          { id: 'S-2', status: 'To Do', ready: true },
+          { id: 'S-3', status: 'To Do', ready: true },
+        ],
+      },
+    ]);
+    expect(selectDrainMode(project)).toEqual({ mode: 'single-flow' });
+  });
+
+  it('selectDrainMode: Feature mit area-Wert, den MEHRERE Features teilen, ist KEIN Bereichs-Container — normales ≥2-Schwellen-Verhalten gilt (AC1, S-324 — dev-gui-Verifikation F-069)', () => {
+    const project = makeMultiFeatureProject([
+      {
+        id: 'F-069',
+        area: 'nachtwaechter',
+        stories: [
+          { id: 'S-1', status: 'To Do', ready: true },
+          { id: 'S-2', status: 'To Do', ready: true },
+        ],
+      },
+      { id: 'F-029', area: 'nachtwaechter', stories: [{ id: 'S-3', status: 'Done', ready: false }] },
+      { id: 'F-055', area: 'nachtwaechter', stories: [{ id: 'S-4', status: 'Done', ready: false }] },
+    ]);
+    expect(selectDrainMode(project)).toEqual({ mode: 'feature-drain', featureId: 'F-069' });
+  });
+
+  it('selectDrainMode: Feature OHNE area-Feld bleibt vom ≥2-Schwellenwert-Verhalten unberührt (Regressionsschutz)', () => {
+    const project = makeMultiFeatureProject([
+      {
+        id: 'F-042',
+        stories: [
+          { id: 'S-1', status: 'To Do', ready: true },
+          { id: 'S-2', status: 'To Do', ready: true },
+        ],
+      },
+    ]);
+    expect(selectDrainMode(project)).toEqual({ mode: 'feature-drain', featureId: 'F-042' });
   });
 });
 
