@@ -2,7 +2,7 @@ id: S-304
 parent: F-066
 title: Status-Dashboard restlos aus dem Cockpit entfernen (Komponente/Styles/Tests/Importe);
   /api/status bleibt (ClaudeAuthBadge)
-status: In Progress
+status: Blocked
 priority: P2
 spec: docs/specs/cockpit-declutter.md
 implements:
@@ -24,9 +24,11 @@ estimate_note: Heuristik score 8 (5 AC + 2 Komp Dashboard/CockpitView + ui-Label
 confidence: low
 branch: feat/S-304-remove-status-dashboard
 pr: null
-blocked_reason: null
+blocked_reason: Rollout ohne Docker-Daemon nicht verifizierbar (Code bereits in main
+  gemergt (86b5b7a), CI grün; board-ship.sh Schritt 4 do_rollout_or_die schlägt in
+  dieser Sandbox mangels Docker-Daemon fehl)
 created_at: '2026-07-05T22:17:18Z'
-updated_at: '2026-07-08T01:01:11Z'
+updated_at: '2026-07-08T01:29:30Z'
 done_at: null
 tok_est: null
 area: fabrik-arbeiten
