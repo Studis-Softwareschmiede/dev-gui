@@ -2,7 +2,7 @@ id: S-313
 parent: F-067
 title: Ergebnis-Ansicht Read-API + Debug-Artefakt-Zugriff (pfad-confined, nur bei
   Rot)
-status: In Progress
+status: Done
 priority: P2
 spec: docs/specs/regression-result-view.md
 implements:
@@ -25,8 +25,8 @@ branch: feat/S-313-regression-result-view
 pr: null
 blocked_reason: null
 created_at: '2026-07-06T05:04:40Z'
-updated_at: '2026-07-08T05:11:46Z'
-done_at: null
+updated_at: '2026-07-08T05:31:11Z'
+done_at: '2026-07-08T05:31:11Z'
 tok_est: null
 area: fabrik-arbeiten
 notes: 'Read-only API: GET /api/projects/:slug/regression-runs (Liste, jüngste zuerst)
