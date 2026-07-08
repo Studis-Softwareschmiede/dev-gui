@@ -2,7 +2,7 @@ id: S-310
 parent: F-067
 title: Frisch-Ausrollen vor local-Lauf (pull+recreate, Default an) + Selbsttest-Skip
   (dev-gui)
-status: In Progress
+status: Done
 priority: P2
 spec: docs/specs/regression-run.md
 implements:
@@ -25,8 +25,8 @@ branch: feat/S-310-frisch-ausrollen-selbsttest
 pr: null
 blocked_reason: null
 created_at: '2026-07-06T05:04:40Z'
-updated_at: '2026-07-08T04:06:16Z'
-done_at: null
+updated_at: '2026-07-08T04:39:09Z'
+done_at: '2026-07-08T04:39:09Z'
 tok_est: null
 area: fabrik-arbeiten
 notes: 'Bei target local + Option „Neustes Image vor dem Lauf ausrollen" (Default
