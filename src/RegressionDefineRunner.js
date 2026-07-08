@@ -68,11 +68,51 @@
  * Host-Pfade werden VOR dem Ablegen im Job entfernt, bevor die Job-Sicht sie
  * verlässt.
  *
+ * Ergebnis-Übergabe per Datei statt stdout (v3, AC14-AC17): die Ergebnisquelle
+ * ist AB v3 NICHT MEHR die stdout-Finalausgabe des `claude -p`-Laufs, sondern
+ * eine deterministische Ergebnis-Datei (`ergebnisDateiPath()`,
+ * `<repo>/board/runs/regression-define/<jobId>.json`), die dem Aufruf als
+ * `ergebnis_datei=<absoluter-pfad>`-Argument mitgegeben wird (identisch für
+ * Initial- UND Resume-Runde, AC14). Grund: die ÄUSSERE `claude`-Session
+ * dispatcht den Definier-Agenten als Sub-Agent und schreibt als Finalausgabe
+ * teils eine Prosa-Zusammenfassung statt reinem JSON — der stdout-Parse
+ * scheiterte dadurch strukturell (verifizierter Architektur-Bug, zwei
+ * fehlgeschlagene E2E-Läufe). Der Runner legt das Zielverzeichnis idempotent
+ * an, wartet auf Prozess-Ende (`close`), liest DIE DATEI (nicht stdout) und
+ * parst deren Inhalt mit der UNVERÄNDERTEN `parseRegressionDefineOutcome()`
+ * (AC15). Fehlt die Datei oder ist ihr Inhalt kein gültiges JSON, endet der
+ * Job `failed`/`error_class:'parse-error'` mit differenzierter Kurzdiagnose
+ * („Ergebnisdatei fehlt" vs. „Ergebnisdatei kein gültiges JSON", AC16); die
+ * sanitisierte stdout-Prosa bleibt in beiden Fällen als `raw_output`-
+ * Diagnosehilfe erhalten (AC12/AC16 unverändert). Nach erfolgreichem Konsum
+ * räumt der Runner die Ergebnisdatei best-effort auf (AC17); der Schreib-
+ * Vertrag selbst (atomar tmp+rename) ist normativ in agent-flow verortet.
+ *
+ * Reihenfolge-Disziplin (AC15/AC17): der Datei-Lese-Schritt (`readFile`) UND
+ * der Aufräum-Schritt (`unlink`) werden VOLLSTÄNDIG AWAITED, BEVOR der Job auf
+ * einen Zustand (terminal ODER `needs-review`) übergeht — kein fire-and-forget
+ * dazwischen.
+ *
+ * fs-Injectable, KEIN echtes Dateisystem in Unit-Tests (Lehre aus zwei
+ * gescheiterten Umsetzungsversuchen, s. Board-Notizen S-322): `mkdirFn`/
+ * `readFileFn`/`unlinkFn` sind Konstruktor-Parameter (Default `node:fs/promises`,
+ * Muster `RegressionRunner.js#readFile`/`githubAppToken.js#writeAskpassScript`).
+ * Ein früherer Versuch ließ die Runner-Tests ECHTE Dateisystem-I/O ausführen
+ * (mkdtemp + reale mkdir/readFile/unlink) — auf dem lokalen Container schnell
+ * genug, auf der GitHub-Actions-CI (parallele Jest-Worker + libuv-Threadpool-
+ * Kontention) reproduzierbar zu langsam für das Test-Timing, selbst mit einer
+ * pollenden `flush()`-Hilfsfunktion (bis zu 500 `setImmediate`-Ticks). Die
+ * fs-Injection macht die Runner-Tests mit SYNCHRONEN In-Memory-Fakes
+ * deterministisch — keine reale Festplatten-/Threadpool-Latenz mehr im
+ * Testpfad, kein Timing-abhängiges Polling nötig.
+ *
  * @module RegressionDefineRunner
  */
 
 import { spawn as nodeSpawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { mkdir as fsMkdir, readFile as fsReadFile, unlink as fsUnlink } from 'node:fs/promises';
+import path from 'node:path';
 import { ProjectJobLock } from './ProjectJobLock.js';
 import { buildChildEnv, isAuthError, AUTH_EXPIRED_MESSAGE } from './HeadlessRunnerCore.js';
 
@@ -94,9 +134,11 @@ const GENERIC_FAILURE_MESSAGE = 'Regressions-Definitionslauf fehlgeschlagen';
 const TIMEOUT_FAILURE_MESSAGE = 'Regressions-Definitionslauf abgebrochen (Timeout)';
 const INTERNAL_FAILURE_MESSAGE = 'Interner Fehler im Regressions-Definitions-Runner';
 const NOT_AVAILABLE_MESSAGE = 'claude nicht verfügbar';
-const UNPARSABLE_MESSAGE = 'Vorschlag konnte nicht gelesen werden';
 const NO_SESSION_MESSAGE = 'Regressions-Definitionslauf kann nicht fortgesetzt werden';
 const DONE_RESULT_MESSAGE = 'Regressionstest-Definition abgeschlossen';
+// AC16 — differenzierte Kurzdiagnosen (beide bleiben error_class:'parse-error').
+const RESULT_FILE_MISSING_MESSAGE = 'Ergebnisdatei fehlt';
+const RESULT_FILE_INVALID_JSON_MESSAGE = 'Ergebnisdatei kein gültiges JSON';
 
 // ── Fehlerklassen (AC12, feste Menge) ─────────────────────────────────────────
 export const ERROR_CLASS_PARSE = 'parse-error';
@@ -172,6 +214,21 @@ export function zielToArg(ziel) {
   if (ziel.typ === 'bereich') return `bereich=${ziel.id}`;
   if (ziel.typ === 'verbund') return `verbund=${ziel.id}`;
   throw new Error(`unknown ziel.typ: ${String(ziel?.typ)}`);
+}
+
+/**
+ * Baut den absoluten Pfad der Ergebnis-Datei für einen Job (AC14, v3
+ * Ergebnis-Übergabe per Datei statt stdout). Pfad-Konvention:
+ * `<repo>/board/runs/regression-define/<jobId>.json`. Reine Funktion (kein
+ * Seiteneffekt) — das Zielverzeichnis wird vom Aufrufer (`#runRound`)
+ * idempotent angelegt, bevor der Kindprozess startet.
+ *
+ * @param {string} projectPath - aufgelöster, validierter absoluter Projekt-Pfad (Repo-Root).
+ * @param {string} jobId
+ * @returns {string}
+ */
+export function ergebnisDateiPath(projectPath, jobId) {
+  return path.join(projectPath, 'board', 'runs', 'regression-define', `${jobId}.json`);
 }
 
 /**
@@ -304,6 +361,10 @@ export function parseRegressionDefineOutcome(raw) {
  *   argv-Element (`'<command> modus=vorschlag projekt=<repo> (bereich=<id>|verbund=<name>) [stichworte=...]'`).
  * @param {string} [params.resumeSessionId] - Resume-Runde: claude session-id.
  * @param {unknown} [params.reviewed] - redigierte Fassung (Resume via STDIN).
+ * @param {string} [params.ergebnisDatei] - AC14: absoluter Ausgabe-Pfad, als
+ *   `ergebnis_datei=<pfad>` an denselben argv-Prompt angehängt (identisch für
+ *   Initial- UND Resume-Runde) — die agent-flow-Seite schreibt das
+ *   Rückgabeformat-JSON atomar genau dorthin (normativ in agent-flow).
  * @param {number} [params.timeoutMs]
  * @param {Function} [params.spawnFn] - injectable (default node:child_process spawn).
  * @returns {Promise<{ exitCode: number|null, output: string, sessionId: string|undefined,
@@ -314,13 +375,18 @@ export function defaultRunClaude({
   promptArg,
   resumeSessionId,
   reviewed,
+  ergebnisDatei,
   timeoutMs = DEFAULT_REGRESSION_DEFINE_TIMEOUT_MS,
   spawnFn = nodeSpawn,
 }) {
   return new Promise((resolve) => {
     const isResume = typeof resumeSessionId === 'string' && resumeSessionId !== '';
-    const resumePromptArg = `${REGRESSION_DEFINE_COMMAND} modus=${RESUME_PROMPT_MODE}`;
-    const argv = ['-p', isResume ? resumePromptArg : String(promptArg ?? '')];
+    const ergebnisDateiArg = typeof ergebnisDatei === 'string' && ergebnisDatei !== ''
+      ? ` ergebnis_datei=${ergebnisDatei}`
+      : '';
+    const resumePromptArg = `${REGRESSION_DEFINE_COMMAND} modus=${RESUME_PROMPT_MODE}${ergebnisDateiArg}`;
+    const initialPromptArg = `${String(promptArg ?? '')}${ergebnisDateiArg}`;
+    const argv = ['-p', isResume ? resumePromptArg : initialPromptArg];
     if (isResume) argv.push('--resume', resumeSessionId);
     argv.push('--dangerously-skip-permissions', '--output-format', 'json');
 
@@ -392,6 +458,12 @@ export class RegressionDefineRunner {
   #auditStore;
   /** @type {() => number} injectable Uhr (Test-Entkopplung, default Date.now). */
   #now;
+  /** @type {(dir: string, opts?: object) => Promise<unknown>} injectable fs.mkdir (AC14). */
+  #mkdir;
+  /** @type {(path: string, encoding: string) => Promise<string>} injectable fs.readFile (AC15). */
+  #readFile;
+  /** @type {(path: string) => Promise<void>} injectable fs.unlink (AC17). */
+  #unlink;
   /**
    * @type {Map<string, {
    *   status: 'running'|'needs-review'|'done'|'failed'|'auth-expired',
@@ -412,14 +484,21 @@ export class RegressionDefineRunner {
    * @param {Function} [params.spawnFn] - nur wirksam wenn `runClaude` NICHT übergeben wird
    *   (durchgereicht an den intern erzeugten Default-Adapter — Test-Entkopplung).
    * @param {() => number} [params.now] - injectable Uhr (AC9, default Date.now — Test-Entkopplung).
+   * @param {Function} [params.mkdir] - injectable fs.mkdir (AC14, default: node:fs/promises mkdir —
+   *   Test-Entkopplung: Tests injizieren einen SYNCHRONEN In-Memory-Fake statt echter Dateisystem-I/O).
+   * @param {Function} [params.readFile] - injectable fs.readFile (AC15, default: node:fs/promises readFile).
+   * @param {Function} [params.unlink] - injectable fs.unlink (AC17, default: node:fs/promises unlink).
    */
-  constructor({ runClaude, lock, timeoutMs, auditStore, spawnFn, now } = {}) {
+  constructor({ runClaude, lock, timeoutMs, auditStore, spawnFn, now, mkdir, readFile, unlink } = {}) {
     this.#timeoutMs = timeoutMs ?? (Number(process.env.REGRESSION_DEFINE_TIMEOUT_MS) || DEFAULT_REGRESSION_DEFINE_TIMEOUT_MS);
     this.#runClaude =
       runClaude ?? ((params) => defaultRunClaude({ ...params, timeoutMs: this.#timeoutMs, spawnFn }));
     this.#lock = lock ?? new ProjectJobLock();
     this.#auditStore = auditStore ?? null;
     this.#now = now ?? (() => Date.now());
+    this.#mkdir = mkdir ?? fsMkdir;
+    this.#readFile = readFile ?? fsReadFile;
+    this.#unlink = unlink ?? fsUnlink;
   }
 
   /**
@@ -549,6 +628,17 @@ export class RegressionDefineRunner {
       return;
     }
 
+    // AC14: Ergebnis-Datei-Pfad je Runde identisch (Initial- UND Resume-Runde) —
+    // Zielverzeichnis idempotent anlegen, BEVOR der Kindprozess startet.
+    const ergebnisDatei = ergebnisDateiPath(job.projectPath, jobId);
+    try {
+      await this.#mkdir(path.dirname(ergebnisDatei), { recursive: true });
+    } catch {
+      // Verzeichnis-Anlage best-effort — schlägt sie fehl, wird das spätere
+      // Datei-Lesen ohnehin mit "Ergebnisdatei fehlt" terminal enden (kein
+      // separater Fehlerpfad nötig, kein Crash).
+    }
+
     // AC9: sobald der Kindprozess tatsächlich läuft, grobe Phase auf
     // "reading-specs" fortschreiben (Initial-Runde) — Resume-Runde bleibt bei
     // `translating` (in review() bereits gesetzt).
@@ -561,6 +651,7 @@ export class RegressionDefineRunner {
         promptArg: resume ? undefined : promptArg,
         resumeSessionId: resume ? job.sessionId : undefined,
         reviewed,
+        ergebnisDatei,
       });
     } catch {
       this.#finish(jobId, 'failed', { error: INTERNAL_FAILURE_MESSAGE, error_class: ERROR_CLASS_AGENT_FAILED });
@@ -587,20 +678,49 @@ export class RegressionDefineRunner {
     // AC9: Ausgabe liegt vor, wird jetzt in ein Ergebnis übersetzt.
     this.#touch(jobId, { phase: resume ? PHASE_TRANSLATING : PHASE_DRAFTING });
 
-    let outcome;
+    // AC15: Ergebnisquelle ist die Datei, NICHT mehr stdout (`res.output` dient
+    // nur noch als sanitisierte `raw_output`-Diagnose im Fehlerfall, AC12/AC16).
+    // AC16: zwei unterscheidbare Fehlerfälle, beide error_class:'parse-error'.
+    // Reihenfolge-Disziplin: das Lesen wird VOLLSTÄNDIG AWAITED, BEVOR der Job
+    // terminal/`needs-review` gesetzt wird (kein fire-and-forget, sonst bliebe
+    // der Job sichtbar auf `running` hängen).
+    let fileContent;
     try {
-      outcome = parseRegressionDefineOutcome(res.output);
+      fileContent = await this.#readFile(ergebnisDatei, 'utf8');
     } catch {
-      // Nicht-parsbarer/kaputter Vorschlags-Ausgang → definierter Fehlerzustand,
-      // secret-frei, Retry möglich (AC2). AC12: Fehlerklasse `parse-error` +
-      // serverseitig secret-gefilterte Roh-Finalausgabe (falls vorhanden).
       const sanitized = sanitizeRawOutput(res.output);
       this.#finish(jobId, 'failed', {
-        error: UNPARSABLE_MESSAGE,
+        error: RESULT_FILE_MISSING_MESSAGE,
         error_class: ERROR_CLASS_PARSE,
         ...(sanitized !== '' ? { raw_output: sanitized } : {}),
       });
       return;
+    }
+
+    let outcome;
+    try {
+      outcome = parseRegressionDefineOutcome(fileContent);
+    } catch {
+      // Nicht-parsbarer/kaputter Datei-Inhalt → definierter Fehlerzustand,
+      // secret-frei, Retry möglich (AC2/AC16). AC12: Fehlerklasse `parse-error` +
+      // serverseitig secret-gefilterte Roh-Finalausgabe (stdout, nur Diagnose).
+      const sanitized = sanitizeRawOutput(res.output);
+      this.#finish(jobId, 'failed', {
+        error: RESULT_FILE_INVALID_JSON_MESSAGE,
+        error_class: ERROR_CLASS_PARSE,
+        ...(sanitized !== '' ? { raw_output: sanitized } : {}),
+      });
+      return;
+    }
+
+    // AC17: Ergebnisdatei nach erfolgreichem Konsum aufräumen (best-effort —
+    // ein Löschfehler ist kein terminaler Fehler, das Ergebnis ist bereits
+    // konsumiert). AWAITED, bevor der Job auf den nächsten Zustand übergeht
+    // (Reihenfolge-Disziplin, s.o.).
+    try {
+      await this.#unlink(ergebnisDatei);
+    } catch {
+      // best-effort, silently ignorieren (AC17).
     }
 
     if (outcome.status === 'failed') {

@@ -22,11 +22,11 @@ estimate_note: S/M-Heuristik score 7 (n_ac=4 AC14-AC17 + n_comp=2 RegressionDefi
   + label_bump=1 security) -> M. Kein estimator (M, token-frei). dispo_est baseline
   js|balanced|M ep=5.0 (n=8). tok_est null (tok_total null in js|balanced|M). confidence
   medium (Schnitt n>=3).
-branch: null
+branch: feat/S-322-ergebnis-datei-race-fix
 pr: null
 blocked_reason: null
 created_at: '2026-07-08T00:00:00Z'
-updated_at: '2026-07-08T12:06:51Z'
+updated_at: '2026-07-08T12:07:28Z'
 area: fabrik-arbeiten
 done_at: null
 notes: 'Verifizierter Architektur-Bug (2026-07-08, zwei fehlgeschlagene E2E-Läufe
@@ -79,4 +79,18 @@ befund_2026_07_08_v2: 'Zweiter Umsetzungsversuch verfehlt (Commit 5ddf82f revert
   vs parallel) statt sich auf einen einzelnen lokalen Lauf zu verlassen, und die tatsaechliche
   Ursache der Restrace im Runner-internen Event-Loop (Promise-Verkettung in #runRound)
   tiefer pruefen statt nur den zuvor benannten Await-Punkt zu fixen.'
-befund_2026_07_08: 'DREI Versuche rot (Host-Merge + 2 Drain-Merges, alle via Auto-Revert zurück, main blieb grün). WURZEL PRÄZISE DIAGNOSTIZIERT: Der PRODUKTIONSCODE ist korrekt (readFile/unlink sauber awaited vor #finish). Der Fehler ist TEST-SEITIG: die Runner-Tests machen ECHTE Dateisystem-I/O (mkdir/readFile über node:fs/promises). Der neue Datei-Pfad fügt echte I/O-Wartepunkte hinzu; die Tests warten nur mit Promise-Flush/Ticks, der NICHT mehr ausreicht → Job noch auf status:running wenn die Assertion prüft. Container (schnelle I/O) grün, CI (langsamer/anders) rot: Expected needs-review/failed, Received running (test/RegressionDefineRunner.test.js Zeilen ~296/344/383/406/423). PFLICHT-FIX (nicht optional): fs-Funktionen INJIZIERBAR machen wie spawnFn/nowFn/runClaude — Konstruktor-Params mkdirFn/readFileFn/unlinkFn (Default node:fs/promises), im #runRound verwenden. Die Tests injizieren SYNCHRONE Fakes (In-Memory-Map statt echter Dateien) — KEINE echte fs-I/O in RegressionDefineRunner-Tests. Damit ist der Datei-Lauf deterministisch, kein Timing-Race. ZUSÄTZLICH: unused var _fileContent in Test-Helfern entfernen (Destructuring anders lösen). tester MUSS volle npm test + npm run lint fahren, nicht nur die 2 Runner-Testdateien.'
+befund_2026_07_08: 'DREI Versuche rot (Host-Merge + 2 Drain-Merges, alle via Auto-Revert
+  zurück, main blieb grün). WURZEL PRÄZISE DIAGNOSTIZIERT: Der PRODUKTIONSCODE ist
+  korrekt (readFile/unlink sauber awaited vor #finish). Der Fehler ist TEST-SEITIG:
+  die Runner-Tests machen ECHTE Dateisystem-I/O (mkdir/readFile über node:fs/promises).
+  Der neue Datei-Pfad fügt echte I/O-Wartepunkte hinzu; die Tests warten nur mit Promise-Flush/Ticks,
+  der NICHT mehr ausreicht → Job noch auf status:running wenn die Assertion prüft.
+  Container (schnelle I/O) grün, CI (langsamer/anders) rot: Expected needs-review/failed,
+  Received running (test/RegressionDefineRunner.test.js Zeilen ~296/344/383/406/423).
+  PFLICHT-FIX (nicht optional): fs-Funktionen INJIZIERBAR machen wie spawnFn/nowFn/runClaude
+  — Konstruktor-Params mkdirFn/readFileFn/unlinkFn (Default node:fs/promises), im
+  #runRound verwenden. Die Tests injizieren SYNCHRONE Fakes (In-Memory-Map statt echter
+  Dateien) — KEINE echte fs-I/O in RegressionDefineRunner-Tests. Damit ist der Datei-Lauf
+  deterministisch, kein Timing-Race. ZUSÄTZLICH: unused var _fileContent in Test-Helfern
+  entfernen (Destructuring anders lösen). tester MUSS volle npm test + npm run lint
+  fahren, nicht nur die 2 Runner-Testdateien.'
