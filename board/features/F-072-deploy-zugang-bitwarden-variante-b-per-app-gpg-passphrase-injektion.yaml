@@ -5,7 +5,7 @@ goal: dev-gui holt beim Deployment fremder Apps deren per-App-GPG-Passphrase unb
   (Variante B, API-Key) wird einmalig über einen neuen Settings-Reiter hinterlegt und lebt
   in einem eigenen 0600-Speicher ausserhalb des CredentialStore (Henne-Ei). Deploy bricht
   vorab mit klarer Meldung ab, wenn der Zugang fehlt UND das Ziel ihn braucht.
-status: Backlog
+status: Done
 priority: P2
 spec: docs/specs/deploy-bitwarden-gpg-injection.md
 definition_of_done: null
