@@ -328,12 +328,29 @@ export class VpsDockerControl {
     // kein Shell-Command-Injection möglich (Single-Quote-Escaping schützt vor Injection).
     const escapedLabel = shellEscape(`cloudflare.tunnel-hostname=${hostname}`);
 
+    // deploy-bitwarden-gpg-injection (F-072/S-334): optionale Container-Env als `-e KEY=VALUE`.
+    // Genutzt für GPG_PASSPHRASE (per-App-Passphrase aus Bitwarden), die die Ziel-App an ihrem
+    // Entrypoint zur Entschlüsselung ihrer .env.gpg liest. Der gesamte KEY=VALUE-Block wird
+    // single-quote-escaped (kein Command-Injection). Der Wert landet bewusst in der Container-Env
+    // (das ist der Sinn) — er erscheint NICHT in dev-guis Log/Audit/Response (S1); Aufrufer
+    // reichen ihn nur hierher, nie nach außen.
+    const envArgs = [];
+    if (opts.containerEnv && typeof opts.containerEnv === 'object') {
+      for (const [key, value] of Object.entries(opts.containerEnv)) {
+        // Nur konventionelle Env-Var-Namen zulassen (kein Flag-Schmuggel via Key)
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+        if (typeof value !== 'string') continue;
+        envArgs.push('-e', shellEscape(`${key}=${value}`));
+      }
+    }
+
     // docker run -d --label cloudflare.tunnel-hostname=<hostname> --restart unless-stopped
-    //            -p <hostPort>:<containerPort> <image>
+    //            [-e KEY=VALUE …] -p <hostPort>:<containerPort> <image>
     const cmd = [
       'docker', 'run', '-d',
       '--label', escapedLabel,
       '--restart', 'unless-stopped',
+      ...envArgs,
       '-p', `${hostPort}:${containerPort}`,
       escapedImage,
     ].join(' ');

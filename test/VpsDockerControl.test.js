@@ -1809,3 +1809,44 @@ describe('VpsDockerControl — pushTunnelEnvFile() (S-187 AC3/AC4)', () => {
     expect(result.reason).not.toContain(FAKE_TUNNEL_TOKEN);
   });
 });
+
+// ── run() — Container-Env-Injektion (deploy-bitwarden-gpg-injection F-072/S-334) ──
+
+describe('VpsDockerControl — run() — containerEnv-Injektion (F-072/S-334)', () => {
+  let dir, store;
+  beforeEach(async () => { ({ store, dir } = await makeTmpStore()); });
+  afterEach(async () => { await rm(dir, { recursive: true, force: true }); });
+
+  it('AC14 — containerEnv landet als `-e KEY=VALUE` (single-quote-escaped) im docker run', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+    let capturedCmd = null;
+    await ctrl.run(TEST_VPS, 'ghcr.io/org/app:latest', 'app.example.com', {
+      containerEnv: { GPG_PASSPHRASE: 'p@ss w0rd' },
+      _sshClientFactory: makeMockSshClient({ stdout: 'cid123', exitCode: 0, onCommand: (c) => { capturedCmd = c; } }),
+    });
+    expect(capturedCmd).toContain("-e 'GPG_PASSPHRASE=p@ss w0rd'");
+  });
+
+  it('ohne containerEnv bleibt der Befehl unverändert (kein -e)', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+    let capturedCmd = null;
+    await ctrl.run(TEST_VPS, 'ghcr.io/org/app:latest', 'app.example.com', {
+      _sshClientFactory: makeMockSshClient({ stdout: 'cid123', exitCode: 0, onCommand: (c) => { capturedCmd = c; } }),
+    });
+    expect(capturedCmd).not.toContain('-e ');
+  });
+
+  it('ungültige Key-Namen werden verworfen (kein Flag-Schmuggel)', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+    let capturedCmd = null;
+    await ctrl.run(TEST_VPS, 'ghcr.io/org/app:latest', 'app.example.com', {
+      containerEnv: { '--privileged nope': 'x', GOOD_KEY: 'ok' },
+      _sshClientFactory: makeMockSshClient({ stdout: 'cid123', exitCode: 0, onCommand: (c) => { capturedCmd = c; } }),
+    });
+    expect(capturedCmd).toContain("-e 'GOOD_KEY=ok'");
+    expect(capturedCmd).not.toContain('privileged');
+  });
+});

@@ -140,7 +140,7 @@ function validateDeployBody(body) {
     return { ok: false, error: 'Request-Body ist Pflicht' };
   }
 
-  const { image, vps, hostname, tunnelId } = body;
+  const { image, vps, hostname, tunnelId, gpgBwItem } = body;
 
   if (typeof image !== 'string' || !image.trim()) {
     return { ok: false, error: 'image ist ein Pflichtfeld' };
@@ -170,6 +170,24 @@ function validateDeployBody(body) {
     return { ok: false, error: `tunnelId überschreitet Längenlimit` };
   }
 
+  // F-072/S-334: optionaler Bitwarden-Item-Name für die per-App-GPG-Passphrase.
+  // Gesetzt → dieser Deploy braucht die Passphrase (Guard + Injektion greifen).
+  // Zeichensatz wie Bitwarden-Item-Namen: Buchstaben/Ziffern/._:- (kein Shell-Metazeichen).
+  let gpgItem = null;
+  if (gpgBwItem !== undefined && gpgBwItem !== null && gpgBwItem !== '') {
+    if (typeof gpgBwItem !== 'string' || !gpgBwItem.trim()) {
+      return { ok: false, error: 'gpgBwItem muss ein nicht-leerer String sein' };
+    }
+    const trimmed = gpgBwItem.trim();
+    if (trimmed.length > MAX_FIELD_LEN) {
+      return { ok: false, error: 'gpgBwItem überschreitet Längenlimit' };
+    }
+    if (!/^[A-Za-z0-9._:-]+$/.test(trimmed)) {
+      return { ok: false, error: 'gpgBwItem enthält ungültige Zeichen (nur A-Z a-z 0-9 . _ : -)' };
+    }
+    gpgItem = trimmed;
+  }
+
   return {
     ok: true,
     params: {
@@ -177,6 +195,7 @@ function validateDeployBody(body) {
       vps: vps.trim(),
       hostname: hostname.trim(),
       tunnelId: tunnelId.trim(),
+      gpgBwItem: gpgItem,
     },
   };
 }
@@ -306,7 +325,7 @@ async function resolveVpsIdToTarget(vpsId, vpsTargets, vpsRegistry) {
  *   When provided, POST /api/deployments/vps/:vpsId/tunnel/recreate is active.
  * @returns {import('express').Router}
  */
-export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconciliationJob, localDockerControl, vpsRegistry, vpsDockerControl, cloudflareApi, tunnelHealService) {
+export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconciliationJob, localDockerControl, vpsRegistry, vpsDockerControl, cloudflareApi, tunnelHealService, deployAccessStore, deployLoginService) {
   const router = Router();
 
   // ── GET /api/deployments/vps-targets ────────────────────────────────────
@@ -570,7 +589,32 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconcil
     if (!bodyVal.ok) {
       return res.status(400).json({ error: bodyVal.error });
     }
-    const { image, vps: vpsId, hostname, tunnelId } = bodyVal.params;
+    const { image, vps: vpsId, hostname, tunnelId, gpgBwItem } = bodyVal.params;
+
+    // ── F-072/S-334: Deploy-Guard (VOR jeder Mutation, AC12) ──────────────────
+    // Braucht dieser Deploy eine per-App-GPG-Passphrase (gpgBwItem gesetzt) und ist
+    // der Bitwarden-Deploy-Zugang NICHT bereit → Abbruch mit klarem Hinweis, KEIN
+    // docker run, KEIN Teil-Deploy. Braucht das Ziel keine Passphrase (gpgBwItem
+    // fehlt) → Guard greift nicht, Deploy läuft unverändert (AC13).
+    if (gpgBwItem) {
+      if (!deployAccessStore || typeof deployAccessStore.getStatus !== 'function' ||
+          !deployLoginService || typeof deployLoginService.fetchItemPassword !== 'function') {
+        return res.status(503).json({ result: 'error', reason: 'deploy-access-unavailable' });
+      }
+      let accessStatus;
+      try {
+        accessStatus = await deployAccessStore.getStatus();
+      } catch {
+        accessStatus = { ready: false };
+      }
+      if (!accessStatus.ready) {
+        return res.status(422).json({
+          result: 'error',
+          errorClass: 'bitwarden-access-missing',
+          reason: 'Bitte zuerst den Deploy-Zugang zu Bitwarden in den Einstellungen hinterlegen.',
+        });
+      }
+    }
 
     // AC9: Vereinigte Auflösung (Env-Map ⊕ dynamische Records, Env gewinnt bei Kollision)
     const vpsTarget = await resolveVpsIdToTarget(vpsId, vpsTargets, vpsRegistry);
@@ -587,6 +631,40 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconcil
       return res.status(500).json({ error: 'Audit-Write fehlgeschlagen — Aktion abgebrochen' });
     }
 
+    // ── F-072/S-334: per-App-GPG-Passphrase aus Bitwarden holen (AC14/AC15) ────
+    // Erst NACH dem Audit-First, VOR dem eigentlichen Deploy. Der Wert wird NUR als
+    // containerEnv weitergereicht — nie geloggt/auditiert/zurückgegeben (S1). Der
+    // fetch-Audit (nur Item-Name, ohne Wert) erfolgt im Login-Dienst.
+    let containerEnv;
+    if (gpgBwItem) {
+      try {
+        const passphrase = await deployLoginService.fetchItemPassword(gpgBwItem, { identity: identity?.email ?? null });
+        containerEnv = { GPG_PASSPHRASE: passphrase };
+      } catch (err) {
+        const cls = err?.deployErrorClass ?? 'error';
+        if (cls === 'item-not-found') {
+          return res.status(422).json({
+            result: 'error',
+            errorClass: 'gpg-item-not-found',
+            reason: `Bitwarden-Item „${gpgBwItem}" nicht gefunden — bitte die per-App-Passphrase dort anlegen.`,
+          });
+        }
+        if (cls === 'access-incomplete') {
+          return res.status(422).json({
+            result: 'error',
+            errorClass: 'bitwarden-access-missing',
+            reason: 'Bitte zuerst den Deploy-Zugang zu Bitwarden in den Einstellungen hinterlegen.',
+          });
+        }
+        // auth-failed | unlock-failed | bw-unreachable | error
+        return res.status(502).json({
+          result: 'error',
+          errorClass: 'bitwarden-login-failed',
+          reason: 'Bitwarden-Zugriff für die Deploy-Passphrase fehlgeschlagen — Zugang prüfen.',
+        });
+      }
+    }
+
     // Execute deploy saga (zoneId resolved server-side in DeployOrchestrator)
     // vpsId is passed for tunnel-mismatch/-missing checks (S-185 AC5/AC6)
     let result;
@@ -597,6 +675,7 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconcil
         hostname,
         tunnelId,
         vpsId,
+        ...(containerEnv ? { containerEnv } : {}),
       });
     } catch (err) {
       const errorClass = err?.errorClass ?? 'error';

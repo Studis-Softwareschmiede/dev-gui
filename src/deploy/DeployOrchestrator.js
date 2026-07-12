@@ -116,10 +116,12 @@ export class DeployOrchestrator {
    * @param {string} params.hostname - target hostname (cloudflare tunnel route)
    * @param {string} params.tunnelId - Cloudflare tunnel ID to add the route to
    * @param {string} [params.vpsId]  - Sanitized VPS name used for tunnel-mismatch check (AC5/AC6)
+   * @param {object} [params.containerEnv] - zusätzliche Container-Env (z.B. { GPG_PASSPHRASE })
+   *   wird NUR beim run-Schritt gesetzt; erscheint nicht im Log/reason (F-072/S-334).
    * @param {object} [params.dockerOpts] - additional VpsDockerControl options
    * @returns {Promise<DeployResult>}
    */
-  async deploy({ image, vps, hostname, tunnelId, vpsId, dockerOpts = {} }) {
+  async deploy({ image, vps, hostname, tunnelId, vpsId, containerEnv, dockerOpts = {} }) {
     // (a) AC7: LockoutGuard-Hard-Block — before any step
     if (this.#lockoutGuard.isProtected(hostname)) {
       return {
@@ -302,6 +304,8 @@ export class DeployOrchestrator {
       ...dockerOpts,
       hostPort,
       containerPort,
+      // F-072/S-334: per-App-GPG-Passphrase o.ä. nur beim run-Schritt in die Container-Env
+      ...(containerEnv ? { containerEnv } : {}),
     });
     if (runResult.result !== 'ok') {
       return {

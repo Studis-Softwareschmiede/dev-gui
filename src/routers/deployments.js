@@ -21,7 +21,7 @@ export const order = 140;
  * @param {{ deployOrchestrator: import('../deploy/DeployOrchestrator.js').DeployOrchestrator, auditStore: import('../AuditStore.js').AuditStore, vpsTargets: Map, reconciliationJob: import('../deploy/ReconciliationJob.js').ReconciliationJob, stackRegistry: import('../StackRegistry.js').StackRegistry, stackDeployOrchestrator: import('../deploy/StackDeployOrchestrator.js').StackDeployOrchestrator, localDockerControl: import('../deploy/LocalDockerControl.js').LocalDockerControl, vpsRegistry: import('../vps/VpsProviderRegistry.js').VpsProviderRegistry, vpsDockerControl: import('../deploy/VpsDockerControl.js').VpsDockerControl, cloudflareApi: import('../cloudflare/CloudflareApi.js').CloudflareApi, tunnelHealService: import('../deploy/TunnelHealService.js').TunnelHealService }} deps
  * @returns {import('express').Router}
  */
-export function create({ deployOrchestrator, auditStore, vpsTargets, reconciliationJob, stackRegistry, stackDeployOrchestrator, localDockerControl, vpsRegistry, vpsDockerControl, cloudflareApi, tunnelHealService }) {
+export function create({ deployOrchestrator, auditStore, vpsTargets, reconciliationJob, stackRegistry, stackDeployOrchestrator, localDockerControl, vpsRegistry, vpsDockerControl, cloudflareApi, tunnelHealService, bitwardenDeployAccessStore, bitwardenDeployLoginService }) {
   const combined = Router();
   // Kein Pfad-Präfix nötig: `combined.use(router)` ohne Pfad-Argument streift KEINEN
   // Pfad-Prefix ab — Requests werden unverändert weitergereicht. Beide Sub-Router
@@ -33,7 +33,8 @@ export function create({ deployOrchestrator, auditStore, vpsTargets, reconciliat
   // S-180 AC7: vpsDockerControl wird weitergereicht für Readiness-Probe (read-only, kein Audit).
   // S-185 AC7: cloudflareApi wird weitergereicht für VPS-Tunnel-Read-Model (read-only, kein Audit).
   // S-187 AC1–5,11,12: tunnelHealService für Tunnel-Selbstheilung Phase 1+2.
-  combined.use(deploymentsRouter(deployOrchestrator, auditStore, vpsTargets, reconciliationJob, localDockerControl, vpsRegistry, vpsDockerControl, cloudflareApi, tunnelHealService));
+  // F-072/S-334: deploy-Zugangs-Store + Login-Dienst für Guard + per-App-GPG-Passphrase-Injektion.
+  combined.use(deploymentsRouter(deployOrchestrator, auditStore, vpsTargets, reconciliationJob, localDockerControl, vpsRegistry, vpsDockerControl, cloudflareApi, tunnelHealService, bitwardenDeployAccessStore, bitwardenDeployLoginService));
   combined.use(stacksRouter(stackRegistry, auditStore, { stackDeployOrchestrator, vpsTargets }));
   return combined;
 }
