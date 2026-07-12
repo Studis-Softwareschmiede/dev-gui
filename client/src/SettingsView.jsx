@@ -48,12 +48,14 @@ import { BenachrichtigungenCategory } from './settings/BenachrichtigungenCategor
 import { AutomatisierungCategory } from './settings/AutomatisierungCategory.jsx';
 import { IntegrationenCategory } from './settings/IntegrationenCategory.jsx';
 import { DiversesCategory } from './settings/DiversesCategory.jsx';
+import { DeployZugangCategory } from './settings/DeployZugangCategory.jsx';
 
 // ── Kategorien-Navigation (settings-panel-navigation D1/D13, S-267) ───────────
 // Feste Reihenfolge + Slugs gemäß docs/design.md „Settings-Panel Navigation".
 export const SETTINGS_CATEGORIES = [
   { slug: 'workspace',          label: 'Workspace' },
   { slug: 'zugaenge',           label: 'Zugänge & Schlüssel' },
+  { slug: 'deploy-zugang',      label: 'Deploy-Zugang' },
   { slug: 'sicherung',          label: 'Sicherung' },
   { slug: 'benachrichtigungen', label: 'Benachrichtigungen' },
   { slug: 'automatisierung',    label: 'Automatisierung' },
@@ -836,6 +838,9 @@ export function SettingsView({ onNavigate, fetchFn }) {
                 onLoad={load}
                 getMeta={getMeta}
               />
+            )}
+            {activeCategory === 'deploy-zugang' && (
+        <DeployZugangCategory fetchFn={fetchFn} />
             )}
             {activeCategory === 'sicherung' && (
         <SicherungCategory

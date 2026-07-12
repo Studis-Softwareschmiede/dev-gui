@@ -521,3 +521,78 @@ export async function postNotificationTest(fetchImpl) {
   });
   return res.json();
 }
+
+// ── Deploy-Zugang (Bitwarden Variante B) API-Helfer (F-072, S-333) ────────────
+
+/** Felder des Deploy-Zugangs (muss mit ACCESS_FIELDS im Backend übereinstimmen). */
+export const DEPLOY_ACCESS_FIELDS = [
+  { name: 'server_url', label: 'Bitwarden Server-URL', optional: true, placeholder: 'https://vault.bitwarden.com (Standard)' },
+  { name: 'client_id', label: 'API Client-ID', placeholder: 'user.xxxxxxxx' },
+  { name: 'client_secret', label: 'API Client-Secret' },
+  { name: 'master_password', label: 'Master-Passwort' },
+];
+
+/**
+ * GET /api/settings/deploy-access
+ * Write-only Status: je Feld { set, updatedAt } + ready + persisted. KEIN Klartext.
+ *
+ * @param {typeof fetch} [fetchImpl]
+ * @returns {Promise<{ persisted: boolean, ready: boolean, fields: Record<string, { set: boolean, updatedAt: string|null }> }>}
+ */
+export async function fetchDeployAccessStatus(fetchImpl) {
+  const fn = fetchImpl ?? globalThis.fetch.bind(globalThis);
+  const res = await fn('/api/settings/deploy-access');
+  if (!res.ok) throw new Error(`Deploy-Zugang laden fehlgeschlagen (${res.status})`);
+  return res.json();
+}
+
+/**
+ * PUT /api/settings/deploy-access/:field   Body: { value }
+ * @param {string} field
+ * @param {string} value
+ * @param {typeof fetch} [fetchImpl]
+ * @returns {Promise<{ field: string, set: boolean, updatedAt: string|null }>}
+ */
+export async function putDeployAccessField(field, value, fetchImpl) {
+  const fn = fetchImpl ?? globalThis.fetch.bind(globalThis);
+  const res = await fn(`/api/settings/deploy-access/${encodeURIComponent(field)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ value }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error ?? `Speichern fehlgeschlagen (${res.status})`);
+  return data;
+}
+
+/**
+ * DELETE /api/settings/deploy-access/:field
+ * @param {string} field
+ * @param {typeof fetch} [fetchImpl]
+ * @returns {Promise<{ field: string, set: boolean, updatedAt: null }>}
+ */
+export async function deleteDeployAccessField(field, fetchImpl) {
+  const fn = fetchImpl ?? globalThis.fetch.bind(globalThis);
+  const res = await fn(`/api/settings/deploy-access/${encodeURIComponent(field)}`, { method: 'DELETE' });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error ?? `Löschen fehlgeschlagen (${res.status})`);
+  return data;
+}
+
+/**
+ * POST /api/settings/deploy-access/validate
+ * Prüft den hinterlegten Zugang (Probe-Login). Kein Secret in Response.
+ *
+ * @param {typeof fetch} [fetchImpl]
+ * @returns {Promise<{ ok: boolean, errorClass?: string, error?: string, httpStatus: number }>}
+ */
+export async function validateDeployAccess(fetchImpl) {
+  const fn = fetchImpl ?? globalThis.fetch.bind(globalThis);
+  const res = await fn('/api/settings/deploy-access/validate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  });
+  const data = await res.json().catch(() => ({}));
+  return { ...data, httpStatus: res.status };
+}
