@@ -713,13 +713,15 @@ describe('SettingsView — Grundstruktur', () => {
     });
   });
 
-  it('rendert die 7 Kategorien-Tabs (S-267 D1/D10) und genau ein Tabpanel', async () => {
+  it('rendert die 8 Kategorien-Tabs (S-267 D1/D10 + F-072 Deploy-Zugang) und genau ein Tabpanel', async () => {
     const { getByRole } = renderView();
     await waitFor(() => {
       expect(getByRole('tab', { name: /workspace/i })).toBeTruthy();
     });
-    expect(document.querySelectorAll('[role="tab"]').length).toBe(7);
+    // 7 Ursprungs-Kategorien + „Deploy-Zugang" (deploy-bitwarden-gpg-injection F-072/S-333)
+    expect(document.querySelectorAll('[role="tab"]').length).toBe(8);
     expect(document.querySelectorAll('[role="tabpanel"]').length).toBe(1);
+    expect(getByRole('tab', { name: /deploy-zugang/i })).toBeTruthy();
   });
 
   it('Zugänge-Kategorie: mindestens 4 h2-Sektionen (GitHub, Cloudflare, VPS-Provider, SSH-Keys)', async () => {

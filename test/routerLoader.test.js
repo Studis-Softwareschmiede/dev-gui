@@ -263,7 +263,7 @@ describe('routerLoader — Echte src/routers/ Module (AC1/AC3)', () => {
     }
   });
 
-  it('genau 48 Router-Module in src/routers/ — Smoke-Assertion gegen versehentliche Löschung (AC1)', async () => {
+  it('genau 49 Router-Module in src/routers/ — Smoke-Assertion gegen versehentliche Löschung (AC1)', async () => {
     // Diese Assertion schreibt die aktuelle Router-Anzahl fest.
     // Sinkt die Zahl (Router gelöscht/umbenannt), schlägt der Test sofort an.
     // Steigt die Zahl (neuer Router hinzugefügt), muss dieser Wert bewusst erhöht werden.
@@ -330,8 +330,11 @@ describe('routerLoader — Echte src/routers/ Module (AC1/AC3)', () => {
     //   (GET /api/projects/:slug/regression-suites — read-only Suite-Liste
     //    (Bereich/Verbund/Gesamt) inkl. deklariertem target + Kosten-/
     //    Ressourcen-Hinweis für den Ausführen-Dialog, AC4/AC6) → 48.
+    // bitwardenDeployAccess.js wurde mit deploy-bitwarden-gpg-injection (F-072, S-331/S-332)
+    //   hinzugefügt (GET/PUT/DELETE /api/settings/deploy-access + POST .../validate —
+    //   unbeaufsichtigter Bitwarden-Deploy-Zugang Variante B) → 49.
     const entries = await readdir(ROUTERS_DIR);
     const mountedCount = entries.filter((f) => f.endsWith('.js')).length;
-    expect(mountedCount).toBe(48);
+    expect(mountedCount).toBe(49);
   });
 });
