@@ -69,12 +69,12 @@ let prevStoreDir;
 let prevAdmin;
 let ctx; // { server, port, auditRecord, identity }
 
-async function buildApp({ audit, identity }) {
+async function buildApp({ audit, identity, loginService }) {
   const store = new BitwardenDeployAccessStore();
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => { req.identity = identity ?? null; next(); });
-  app.use(bitwardenDeployAccessRouter(store, audit));
+  app.use(bitwardenDeployAccessRouter(store, audit, loginService));
   const { server, port } = await startServer(app);
   return { server, port, store };
 }
@@ -159,5 +159,41 @@ describe('bitwardenDeployAccessRouter — Status + Mutation', () => {
     ctx = await buildApp({ audit: { record: jest.fn() }, identity: { email: 'intruder@evil.ch' } });
     const r = await httpReq(ctx.port, 'PUT', '/api/settings/deploy-access/client_id', { value: 'cid' });
     expect(r.status).toBe(403);
+  });
+});
+
+describe('bitwardenDeployAccessRouter — validate (S-332, AC7/AC10)', () => {
+  it('ok=true bei gültigem Zugang', async () => {
+    const loginService = { validateAccess: jest.fn(async () => ({ ok: true })) };
+    ctx = await buildApp({ audit: { record: jest.fn() }, identity: { email: 'a@b.ch' }, loginService });
+    const r = await httpReq(ctx.port, 'POST', '/api/settings/deploy-access/validate');
+    expect(r.status).toBe(200);
+    expect(r.body).toEqual({ ok: true });
+    expect(loginService.validateAccess).toHaveBeenCalled();
+  });
+
+  it('ok=false mit klassifizierter, secret-freier Meldung', async () => {
+    const loginService = { validateAccess: jest.fn(async () => ({ ok: false, errorClass: 'unlock-failed' })) };
+    ctx = await buildApp({ audit: { record: jest.fn() }, identity: { email: 'a@b.ch' }, loginService });
+    const r = await httpReq(ctx.port, 'POST', '/api/settings/deploy-access/validate');
+    expect(r.status).toBe(200);
+    expect(r.body.ok).toBe(false);
+    expect(r.body.errorClass).toBe('unlock-failed');
+    expect(typeof r.body.error).toBe('string');
+  });
+
+  it('503 wenn Login-Dienst nicht verdrahtet', async () => {
+    ctx = await buildApp({ audit: { record: jest.fn() }, identity: { email: 'a@b.ch' } });
+    const r = await httpReq(ctx.port, 'POST', '/api/settings/deploy-access/validate');
+    expect(r.status).toBe(503);
+  });
+
+  it('403 für fremde Identität (Admin-Gate)', async () => {
+    process.env.CRED_ADMIN_EMAILS = 'admin@schmiede.ch';
+    const loginService = { validateAccess: jest.fn(async () => ({ ok: true })) };
+    ctx = await buildApp({ audit: { record: jest.fn() }, identity: { email: 'x@evil.ch' }, loginService });
+    const r = await httpReq(ctx.port, 'POST', '/api/settings/deploy-access/validate');
+    expect(r.status).toBe(403);
+    expect(loginService.validateAccess).not.toHaveBeenCalled();
   });
 });

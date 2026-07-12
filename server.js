@@ -159,6 +159,7 @@ import { TokenUsageMeter } from './src/TokenUsageMeter.js';
 import { BudgetGuard, BUDGET_RESUME_BUFFER_MS } from './src/BudgetGuard.js';
 import { DrainReportStore } from './src/DrainReportStore.js';
 import { BitwardenDeployAccessStore } from './src/BitwardenDeployAccessStore.js';
+import { BitwardenDeployLoginService } from './src/BitwardenDeployLoginService.js';
 import { RegressionResultStore } from './src/RegressionResultStore.js';
 import { DrainJobRegistry } from './src/DrainJobRegistry.js';
 import { FeatureDrainRegistry } from './src/FeatureDrainRegistry.js';
@@ -513,6 +514,15 @@ const drainReportStore = new DrainReportStore();
 // bezogenen Master-Key entsperrt — der Zugang zu Bitwarden kann daher nicht dort
 // liegen). Write-only nach außen; Klartext nur intern für den Login-Dienst (S-332).
 const bitwardenDeployAccessStore = new BitwardenDeployAccessStore();
+
+// ── BitwardenDeployLoginService (deploy-bitwarden-gpg-injection F-072, S-332) ──
+// Unbeaufsichtigter Bitwarden-Login (API-Key, kein OTP) + Item-Read. Nutzt den
+// Zugangs-Speicher oben; isoliert je Lauf via eigenem BITWARDENCLI_APPDATA_DIR.
+// Konsument: der Prüf-Endpunkt (POST .../validate) und der Deploy-Guard (S-334).
+const bitwardenDeployLoginService = new BitwardenDeployLoginService({
+  accessStore: bitwardenDeployAccessStore,
+  auditStore,
+});
 
 // ── DrainNotifier (drain-done-notification AC1–AC7, S-277) ──────────────────
 // EIN Produzent für ALLE Notify-Nähte (Nacht-Drain/manueller Drain/
@@ -940,6 +950,10 @@ const deps = {
   // unbeaufsichtigten Bitwarden-Deploy-Zugang (Variante B). Vom Auto-Loader an
   // bitwardenDeployAccess.js (GET/PUT/DELETE /api/settings/deploy-access) gereicht.
   bitwardenDeployAccessStore,
+  // deploy-bitwarden-gpg-injection F-072/S-332: unbeaufsichtigter Login-Dienst
+  // (API-Key + Unlock, Item-Read). Vom Auto-Loader an bitwardenDeployAccess.js
+  // (POST .../validate) und später an den Deploy-Guard (S-334) gereicht.
+  bitwardenDeployLoginService,
   // regression-result-store AC4 (S-312): RegressionResultStore für
   // GET /api/projects/:slug/regression-runs[/:runId] (regressionRuns.js Router).
   regressionResultStore,

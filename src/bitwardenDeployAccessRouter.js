@@ -6,9 +6,7 @@
  *   GET    /api/settings/deploy-access          → Status (write-only: set/updatedAt + ready)
  *   PUT    /api/settings/deploy-access/:field   → Feld setzen/überschreiben   [MUTATION]
  *   DELETE /api/settings/deploy-access/:field   → Feld entfernen (idempotent) [MUTATION]
- *
- * Der Prüf-/Validierungs-Endpunkt (POST .../validate) kommt in S-332 hinzu
- * (braucht den Login-Dienst).
+ *   POST   /api/settings/deploy-access/validate → Zugang prüfen (Probe-Login)  [S-332, AC7/AC10]
  *
  * Security (Spec S1/S4/S5):
  *   - Kein Klartext in Response/Log/Audit (write-only).
@@ -51,12 +49,23 @@ const FIELD_ERROR_MESSAGES = {
   'value-too-long': 'Wert überschreitet das zulässige Längenlimit',
 };
 
+/** Klartext-Meldungen je Login-Fehlerklasse (kein Secret-Leak, Spec AC10). */
+const VALIDATE_ERROR_MESSAGES = {
+  'access-incomplete': 'Zugang unvollständig — Client-ID, Client-Secret und Master-Passwort müssen gesetzt sein.',
+  'auth-failed': 'Bitwarden-Login fehlgeschlagen (Client-ID/Secret falsch).',
+  'unlock-failed': 'Entsperren fehlgeschlagen (Master-Passwort falsch).',
+  'bw-unreachable': 'Bitwarden nicht erreichbar — Verbindung/Server-URL prüfen.',
+  'error': 'Unbekannter Fehler bei der Zugangs-Prüfung.',
+};
+
 /**
  * @param {import('./BitwardenDeployAccessStore.js').BitwardenDeployAccessStore} accessStore
  * @param {import('./AuditStore.js').AuditStore} auditStore
+ * @param {import('./BitwardenDeployLoginService.js').BitwardenDeployLoginService} [loginService]
+ *   Optional; ohne ihn liefert POST .../validate 503 (Feature nicht verdrahtet).
  * @returns {import('express').Router}
  */
-export function bitwardenDeployAccessRouter(accessStore, auditStore) {
+export function bitwardenDeployAccessRouter(accessStore, auditStore, loginService) {
   const router = Router();
 
   /**
@@ -150,6 +159,40 @@ export function bitwardenDeployAccessRouter(accessStore, auditStore) {
       }
       console.error('[bitwardenDeployAccessRouter] DELETE failed:', err.message);
       return res.status(500).json({ error: 'Zugangs-Speicher nicht schreibbar' });
+    }
+  });
+
+  /**
+   * POST /api/settings/deploy-access/validate
+   * Prüft den hinterlegten Zugang durch einen Probe-Login+Unlock (Spec AC7/AC10).
+   * Response: 200 { ok:true } | 200 { ok:false, errorClass, error } | 503 wenn
+   * der Login-Dienst nicht verdrahtet ist. Kein Secret-Leak.
+   */
+  router.post('/api/settings/deploy-access/validate', async (req, res) => {
+    const identity = req.identity ?? null;
+
+    const authz = checkMutationAuthz(identity);
+    if (!authz.allowed) {
+      return res.status(403).json({ error: 'Keine Berechtigung für diese Aktion' });
+    }
+
+    if (!loginService || typeof loginService.validateAccess !== 'function') {
+      return res.status(503).json({ error: 'Prüf-Dienst nicht verfügbar' });
+    }
+
+    try {
+      // Audit erfolgt im Dienst (deploy-access:validate, ohne Werte).
+      const result = await loginService.validateAccess({ identity: identity?.email ?? null });
+      if (result.ok) return res.json({ ok: true });
+      const errorClass = result.errorClass ?? 'error';
+      return res.json({
+        ok: false,
+        errorClass,
+        error: VALIDATE_ERROR_MESSAGES[errorClass] ?? VALIDATE_ERROR_MESSAGES.error,
+      });
+    } catch (err) {
+      console.error('[bitwardenDeployAccessRouter] validate failed:', err.message);
+      return res.status(500).json({ error: 'Zugangs-Prüfung fehlgeschlagen' });
     }
   });
 
