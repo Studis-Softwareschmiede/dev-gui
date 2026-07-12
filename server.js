@@ -158,6 +158,7 @@ import { NightWatchScheduler } from './src/NightWatchScheduler.js';
 import { TokenUsageMeter } from './src/TokenUsageMeter.js';
 import { BudgetGuard, BUDGET_RESUME_BUFFER_MS } from './src/BudgetGuard.js';
 import { DrainReportStore } from './src/DrainReportStore.js';
+import { BitwardenDeployAccessStore } from './src/BitwardenDeployAccessStore.js';
 import { RegressionResultStore } from './src/RegressionResultStore.js';
 import { DrainJobRegistry } from './src/DrainJobRegistry.js';
 import { FeatureDrainRegistry } from './src/FeatureDrainRegistry.js';
@@ -504,6 +505,14 @@ const costModeModelCheck = new CostModeModelCheck({
 // UND manueller Drain (projectDrainRouter via deps, trigger:'manual') — sowie
 // read-only für GET /api/drain-reports (drainReports.js Router).
 const drainReportStore = new DrainReportStore();
+
+// ── BitwardenDeployAccessStore (deploy-bitwarden-gpg-injection F-072, S-331) ──
+// Eigener 0600-Speicher (${CRED_STORE_DIR}/bitwarden-deploy-access.json) für den
+// UNBEAUFSICHTIGTEN Bitwarden-Zugang der Deploy-Rolle (Variante B). Bewusst
+// AUSSERHALB des CredentialStore (Henne-Ei: der Store wird durch den aus Bitwarden
+// bezogenen Master-Key entsperrt — der Zugang zu Bitwarden kann daher nicht dort
+// liegen). Write-only nach außen; Klartext nur intern für den Login-Dienst (S-332).
+const bitwardenDeployAccessStore = new BitwardenDeployAccessStore();
 
 // ── DrainNotifier (drain-done-notification AC1–AC7, S-277) ──────────────────
 // EIN Produzent für ALLE Notify-Nähte (Nacht-Drain/manueller Drain/
@@ -927,6 +936,10 @@ const deps = {
   // read-only für GET /api/drain-reports (drainReports.js) UND Schreibpfad für
   // den manuellen Drain (projectDrain.js Router, trigger:'manual').
   drainReportStore,
+  // deploy-bitwarden-gpg-injection F-072/S-331: 0600-Zugangs-Speicher für den
+  // unbeaufsichtigten Bitwarden-Deploy-Zugang (Variante B). Vom Auto-Loader an
+  // bitwardenDeployAccess.js (GET/PUT/DELETE /api/settings/deploy-access) gereicht.
+  bitwardenDeployAccessStore,
   // regression-result-store AC4 (S-312): RegressionResultStore für
   // GET /api/projects/:slug/regression-runs[/:runId] (regressionRuns.js Router).
   regressionResultStore,

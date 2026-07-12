@@ -1,0 +1,22 @@
+id: F-072
+title: 'Deploy-Zugang zu Bitwarden (Variante B) + per-App-GPG-Passphrasen-Injektion'
+goal: dev-gui holt beim Deployment fremder Apps deren per-App-GPG-Passphrase unbeaufsichtigt
+  aus Bitwarden und injiziert sie als GPG_PASSPHRASE in den Ziel-Container. Der Bitwarden-Zugang
+  (Variante B, API-Key) wird einmalig über einen neuen Settings-Reiter hinterlegt und lebt
+  in einem eigenen 0600-Speicher ausserhalb des CredentialStore (Henne-Ei). Deploy bricht
+  vorab mit klarer Meldung ab, wenn der Zugang fehlt UND das Ziel ihn braucht.
+status: Backlog
+priority: P2
+spec: docs/specs/deploy-bitwarden-gpg-injection.md
+definition_of_done: null
+labels:
+- deploy
+- security
+- bitwarden
+depends: null
+owner: null
+stories: null
+progress: null
+created_at: '2026-07-12T00:00:00Z'
+updated_at: '2026-07-12T00:00:00Z'
+area: deployment
