@@ -6,8 +6,15 @@
  *       vps-readiness-gate.md AC9–AC12 (S-181)
  *       vps-tunnel-existence-gate.md AC8–AC11 (S-186)
  *       vps-tunnel-self-heal.md AC9–AC10 (S-188)
+ *       per-app-gpg-passphrase-provisioning.md AC7/AC8 (F-073/S-337)
  *
  * Responsibilities:
+ *   - GPG-Passphrasen-Provisionierung je App (per-app-gpg-passphrase-provisioning.md
+ *     AC7/AC8, F-073/S-337): Knopf je in GET /api/github/packages gelisteter App —
+ *     POST /api/deployments/:app/gpg-provision (bestehender AccessGuard+CRED_ADMIN-
+ *     Endpunkt, S-335). Quittung geheimnisfrei: nur `created`|`already-exists`|
+ *     `access-not-ready`|`failed` (+ Klartext-Hinweis) — NIE die Passphrase; die
+ *     Response enthält per Vertrag kein weiteres Feld.
  *   - Mode toggle: "Single-Image" | "Compose-Stack aus Repo" (AC12)
  *   - Single-Image mode (deploy-lifecycle.md AC10–AC14):
  *       List live deployments (Container↔Route as unit) — GET /api/deployments
@@ -181,6 +188,11 @@ export function DeploymentsView({ onNavigate }) {
   const [stackStatus, setStackStatus] = useState(null); // StackStatus | null
   const [stackStatusLoading, setStackStatusLoading] = useState(false);
   const [stackStatusError, setStackStatusError] = useState(null);
+
+  // ── F-073/S-337 AC7/AC8: Nach-Provisionierung GPG-Passphrase je App ──────
+  // Keyed by App-Slug (packages[].name). Response ist per Vertrag geheimnisfrei
+  // (nur { result, reason? }) — es wird NIE ein Passphrasen-Wert im State gehalten.
+  const [gpgProvisionState, setGpgProvisionState] = useState({}); // { [app]: { loading, result, reason, errorMsg } }
 
   // ── Load deployments
   const loadDeployments = useCallback(async () => {
@@ -494,6 +506,51 @@ export function DeploymentsView({ onNavigate }) {
     }
   }
 
+  // ── F-073/S-337 AC7: Nach-Provisionierung GPG-Passphrase je App ─────────
+  // Ruft POST /api/deployments/:app/gpg-provision auf (bestehender, hinter
+  // AccessGuard+CRED_ADMIN geschützter Endpunkt, S-335). AC8: nur { result,
+  // reason? } wird aus der Response übernommen — nie ein weiteres Feld (kein
+  // Passphrasen-Wert landet je im UI-State).
+  async function handleGpgProvision(appName) {
+    if (!appName || gpgProvisionState[appName]?.loading) return;
+    setGpgProvisionState((s) => ({
+      ...s,
+      [appName]: { loading: true, result: null, reason: null, errorMsg: null },
+    }));
+    try {
+      const res = await fetch(`/api/deployments/${encodeURIComponent(appName)}/gpg-provision`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const data = await res.json();
+      if (res.ok && typeof data?.result === 'string') {
+        setGpgProvisionState((s) => ({
+          ...s,
+          [appName]: {
+            loading: false,
+            result: data.result,
+            reason: typeof data.reason === 'string' ? data.reason : null,
+            errorMsg: null,
+          },
+        }));
+      } else {
+        const errorMsg =
+          typeof data?.error === 'string' ? data.error
+          : typeof data?.reason === 'string' ? data.reason
+          : 'GPG-Provisionierung fehlgeschlagen';
+        setGpgProvisionState((s) => ({
+          ...s,
+          [appName]: { loading: false, result: null, reason: null, errorMsg },
+        }));
+      }
+    } catch {
+      setGpgProvisionState((s) => ({
+        ...s,
+        [appName]: { loading: false, result: null, reason: null, errorMsg: 'Netzwerkfehler bei der GPG-Provisionierung' },
+      }));
+    }
+  }
+
   // ── AC12: Deploy handler ─────────────────────────────────────────────────
   async function handleDeploy(e) {
     e.preventDefault();
@@ -698,6 +755,56 @@ export function DeploymentsView({ onNavigate }) {
     <main style={styles.view} aria-label="Deployments-Ansicht">
       <div style={styles.inner}>
         <h1 style={styles.title}>Deployments</h1>
+
+        {/* ── F-073/S-337 AC7/AC8: Nach-Provisionierung GPG-Passphrase je App ── */}
+        {packages.length > 0 && (
+          <section style={styles.section} aria-label="GPG-Passphrasen provisionieren">
+            <h2 style={styles.sectionTitle}>GPG-Passphrasen (Bitwarden)</h2>
+            <p style={styles.hint}>
+              Legt je App eine eigene, zufällige GPG-Passphrase in Bitwarden an (Item „env.gpg-passphrase-&lt;app&gt;"). Eine bereits vorhandene Passphrase wird nie überschrieben.
+            </p>
+            <ul style={styles.gpgProvisionList}>
+              {packages.map((p) => {
+                const st = gpgProvisionState[p.name] ?? {};
+                const statusText = st.loading
+                  ? null
+                  : st.errorMsg
+                    ? st.errorMsg
+                    : st.result
+                      ? friendlyGpgProvisionResult(st.result, st.reason)
+                      : null;
+                return (
+                  <li key={p.name} style={styles.gpgProvisionRow}>
+                    <span style={styles.gpgProvisionAppName}>{p.name}</span>
+                    <button
+                      type="button"
+                      style={styles.btnSecondary}
+                      disabled={st.loading}
+                      aria-busy={st.loading}
+                      aria-label={`GPG-Passphrase für ${p.name} in Bitwarden anlegen`}
+                      onClick={() => handleGpgProvision(p.name)}
+                    >
+                      {st.loading ? 'Lege an…' : 'GPG-Passphrase in Bitwarden anlegen'}
+                    </button>
+                    {statusText && (
+                      <span
+                        role="alert"
+                        aria-live="polite"
+                        style={
+                          !st.errorMsg && ['created', 'already-exists'].includes(st.result ?? '')
+                            ? styles.successText
+                            : styles.errorText
+                        }
+                      >
+                        {statusText}
+                      </span>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+        )}
 
         {/* ── Mode toggle (AC12) ────────────────────────────────────────── */}
         <div
@@ -1556,6 +1663,31 @@ function formatTunnelHealError(data) {
   }
 }
 
+// ── F-073/S-337 AC7/AC8: geheimnisfreie Quittung der GPG-Provisionierung ────
+
+/**
+ * Formatiert das Ergebnis der Nach-Provisionierung (F-073/S-337 AC7/AC8) als
+ * geheimnisfreien Klartext-Hinweis. Zeigt NIE die Passphrase — sie ist schon
+ * per Vertrag nicht Teil der Response (nur `result`/`reason`).
+ * @param {'created'|'already-exists'|'access-not-ready'|'failed'} result
+ * @param {string|null} reason
+ * @returns {string}
+ */
+function friendlyGpgProvisionResult(result, reason) {
+  switch (result) {
+    case 'created':
+      return 'Angelegt — GPG-Passphrase wurde in Bitwarden hinterlegt.';
+    case 'already-exists':
+      return reason ?? 'Bereits vorhanden — keine Änderung.';
+    case 'access-not-ready':
+      return reason ?? 'Bitwarden-Deploy-Zugang ist noch nicht eingerichtet.';
+    case 'failed':
+      return reason ?? 'GPG-Provisionierung fehlgeschlagen.';
+    default:
+      return reason ?? 'Unbekanntes Ergebnis.';
+  }
+}
+
 // ── LocalTestReport component (S-156) ────────────────────────────────────────
 
 /**
@@ -1827,6 +1959,29 @@ const styles = {
   cellAction: {
     width: 110,
     flexShrink: 0,
+  },
+  // F-073/S-337 AC7/AC8: GPG-Provisionierung je App
+  gpgProvisionList: {
+    listStyle: 'none',
+    margin: 0,
+    padding: 0,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 4,
+  },
+  gpgProvisionRow: {
+    display: 'flex',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 12,
+    padding: '10px 0',
+    borderBottom: '1px solid #1e293b',
+  },
+  gpgProvisionAppName: {
+    flex: '0 0 180px',
+    fontSize: 13,
+    color: '#d4d4d4',
+    wordBreak: 'break-all',
   },
   // Local-Test (S-156)
   localTestSection: {
