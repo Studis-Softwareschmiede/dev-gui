@@ -8,6 +8,7 @@
  *       vps-tunnel-self-heal.md AC9–AC10 (S-188)
  *       per-app-gpg-passphrase-provisioning.md AC7/AC8 (F-073/S-337)
  *       per-app-gpg-passphrase-rotation.md AC8/AC9 (F-073/S-339)
+ *       deploy-bitwarden-gpg-injection.md AC16 (F-073/S-340)
  *
  * Responsibilities:
  *   - GPG-Passphrasen-Provisionierung je App (per-app-gpg-passphrase-provisioning.md
@@ -74,6 +75,13 @@
  * Security:
  *   - No token/key displayed or bundled (AC12 S-186: tunnelId is non-secret; tunnelToken never)
  *   - Error messages from backend are rendered as text (no innerHTML)
+ *
+ * GPG-Bitwarden-Item-Default (deploy-bitwarden-gpg-injection.md AC16, F-073/S-340):
+ *   - Deploy-Formular leitet gpgBwItem-Default als "env.gpg-passphrase-<selectedPackage>"
+ *     ab (deriveGpgBwItem) und sendet ihn im POST /api/deployments-Body mit.
+ *   - Feld ist überschreibbar; sobald der Nutzer manuell editiert (gpgBwItemTouched),
+ *     folgt der Wert dem Slug-Wechsel NICHT mehr (kein Default-Reset über die manuelle
+ *     Eingabe hinweg).
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
@@ -117,6 +125,19 @@ function deriveSubdomain(nameOrRef) {
   return parts[parts.length - 1] ?? '';
 }
 
+/**
+ * Derive the default Bitwarden-Item-Name for the per-App-GPG-Passphrase from the
+ * selected target slug (deploy-bitwarden-gpg-injection.md AC15/AC16).
+ * e.g. "brew-assistent" → "env.gpg-passphrase-brew-assistent"
+ *
+ * @param {string} slug
+ * @returns {string}
+ */
+function deriveGpgBwItem(slug) {
+  if (!slug) return '';
+  return `env.gpg-passphrase-${slug}`;
+}
+
 // ── DeploymentsView ───────────────────────────────────────────────────────────
 
 /**
@@ -154,6 +175,10 @@ export function DeploymentsView({ onNavigate }) {
   const [selectedZone, setSelectedZone] = useState('');        // zone name (e.g. "alexstuder.cloud")
   // Note: zone-based tunnel dropdown removed by S-186 AC8 — tunnelId now derived from VPS-linked Read-Model
   const [subdomain, setSubdomain] = useState('');              // AC11: editable subdomain
+  // F-073/S-340 AC16: gpgBwItem-Default "env.gpg-passphrase-<slug>", überschreibbar.
+  // gpgBwItemTouched: sobald true, überschreibt der Slug-Wechsel den Wert NICHT mehr.
+  const [gpgBwItem, setGpgBwItem] = useState('');
+  const [gpgBwItemTouched, setGpgBwItemTouched] = useState(false);
   const [deploying, setDeploying] = useState(false);
   const [deployResult, setDeployResult] = useState(null); // { ok, message, replaced? }
 
@@ -331,6 +356,14 @@ export function DeploymentsView({ onNavigate }) {
       setSubdomain('');
     }
   }, [selectedPackage]);
+
+  // ── F-073/S-340 AC16: Pre-fill gpgBwItem from selected target slug ───────
+  // Follows the slug only while untouched (gpgBwItemTouched === false); a manual
+  // edit is never overwritten by a subsequent slug change.
+  useEffect(() => {
+    if (gpgBwItemTouched) return;
+    setGpgBwItem(deriveGpgBwItem(selectedPackage));
+  }, [selectedPackage, gpgBwItemTouched]);
 
   // ── AC9/AC11: VPS Readiness polling ─────────────────────────────────────
   // Poll GET /api/deployments/readiness?vps=<selectedVps> periodically.
@@ -711,6 +744,8 @@ export function DeploymentsView({ onNavigate }) {
           // S-186 AC8: tunnelId derived from VPS↔Tunnel-Read-Model, not from zone-tunnel dropdown
           tunnelId: vpsLinkedTunnelId,
           // zoneId resolved server-side
+          // F-073/S-340 AC16: gpgBwItem-Default (env.gpg-passphrase-<slug>), überschreibbar
+          ...(gpgBwItem.trim() ? { gpgBwItem: gpgBwItem.trim() } : {}),
         }),
       });
       const data = await res.json();
@@ -731,6 +766,8 @@ export function DeploymentsView({ onNavigate }) {
         setSelectedVps('');
         setSelectedZone('');
         setSubdomain('');
+        setGpgBwItem('');
+        setGpgBwItemTouched(false);
         // Refresh list
         loadDeployments();
       } else {
@@ -1443,6 +1480,29 @@ export function DeploymentsView({ onNavigate }) {
                 {assembledHostname
                   ? `Hostname: ${assembledHostname}`
                   : 'Hostname: (Domäne + Subdomain wählen)'}
+              </span>
+            </div>
+
+            {/* F-073/S-340 AC16: GPG-Bitwarden-Item — Default env.gpg-passphrase-<slug>
+                abgeleitet, überschreibbar; ein manuell gesetzter Wert folgt dem Slug-Wechsel
+                nicht mehr. */}
+            <div style={styles.row}>
+              <label style={styles.label} htmlFor="deploy-gpg-bw-item">GPG-Bitwarden-Item</label>
+              <input
+                id="deploy-gpg-bw-item"
+                type="text"
+                style={styles.input}
+                value={gpgBwItem}
+                onChange={(e) => {
+                  setGpgBwItem(e.target.value);
+                  setGpgBwItemTouched(true);
+                }}
+                placeholder="env.gpg-passphrase-<app>"
+                aria-label="Bitwarden-Item für die GPG-Passphrase (editierbar)"
+                aria-describedby="deploy-gpg-bw-item-hint"
+              />
+              <span id="deploy-gpg-bw-item-hint" style={styles.inputHint}>
+                Automatisch aus dem gewählten Image abgeleitet; bei Bedarf überschreibbar.
               </span>
             </div>
 
