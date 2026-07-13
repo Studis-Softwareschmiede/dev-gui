@@ -1,7 +1,7 @@
 id: S-336
 parent: F-073
 title: Auto-Provisionierung nach new-project-Abschluss + GPG_PASS_FILE-Durchreichung
-status: Blocked
+status: To Do
 priority: P2
 spec: docs/specs/per-app-gpg-passphrase-provisioning.md
 implements:
@@ -25,17 +25,11 @@ estimate_note: 'L (Heuristik: 3 AC + Abschluss-Hook/temp-file/GPG_PASS_FILE-Kett
 confidence: low
 branch: feat/S-336-auto-provisioning-new-project
 pr: null
-blocked_reason: 'Spec unvollständig — /requirement nötig: AC4-Verdrahtung der drei
-  Anlage-Wege fehlt und ist von keiner F-073-Story gedeckt. ADR-021 verwirft den PTY-Pfad
-  als Naht; die Umstellung der Anlage-Wege (NewProjectChooserDialog) auf HeadlessNewProjectRunner
-  ist eine eigene Owner-/UX-Entscheidung (Slug-Vorab-Erfassung im Intake, headless
-  statt interaktiv — analog ADR-017). Fertiger, reviewter Backend-Unterbau (withScaffoldPassphrase,
-  HeadlessNewProjectRunner, HeadlessRunnerCore-Env-Override, Tests 7525/7525 grün)
-  liegt uncommittet im Worktree .claude/worktrees/S-336 (Branch feat/S-336-auto-provisioning-new-project).'
+blocked_reason: null
 github_issue: 399
 github_url: https://github.com/Studis-Softwareschmiede/dev-gui/issues/399
 created_at: '2026-07-13T00:00:00Z'
-updated_at: '2026-07-13T14:47:34Z'
+updated_at: '2026-07-13T00:00:00Z'
 done_at: null
 tok_est: null
 area: deployment

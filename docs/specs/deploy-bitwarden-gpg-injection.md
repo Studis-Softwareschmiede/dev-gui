@@ -1,3 +1,12 @@
+---
+id: deploy-bitwarden-gpg-injection
+title: Deploy-Zugang zu Bitwarden (Variante B) + per-App-GPG-Passphrasen-Injektion
+status: active
+area: deployment
+spec_format: use-case-2.0
+version: 2
+---
+
 # Deploy-Zugang zu Bitwarden (Variante B) + per-App-GPG-Passphrasen-Injektion
 
 **Schicht 3 (Spec).** Quelle für Schicht 1/2: `docs/concept.md`, `docs/architecture.md`.
