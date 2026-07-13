@@ -1,7 +1,7 @@
 id: S-339
 parent: F-073
 title: Per-App-Passphrase-Rotation UI (zweistufige Quittung + Rollback-Anker-Aufraeumknopf)
-status: In Progress
+status: Done
 priority: P2
 spec: docs/specs/per-app-gpg-passphrase-rotation.md
 implements:
@@ -26,7 +26,7 @@ blocked_reason: null
 github_issue: 402
 github_url: https://github.com/Studis-Softwareschmiede/dev-gui/issues/402
 created_at: '2026-07-13T00:00:00Z'
-updated_at: '2026-07-13T17:36:49Z'
-done_at: null
+updated_at: '2026-07-13T17:58:43Z'
+done_at: '2026-07-13T17:58:39Z'
 tok_est: null
 area: deployment
