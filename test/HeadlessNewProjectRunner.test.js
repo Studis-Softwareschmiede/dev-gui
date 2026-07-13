@@ -20,15 +20,31 @@
  *         Override bestehen.
  *   (Audit) Per-Lauf-Audit bei Start/Ende/Fehler — je GENAU EIN `AuditEntry`,
  *         secret-frei (nur sanitisierter Repo-Slug, kein Host-Pfad/Token).
+ *   AC4/AC15 — `runWithAutoProvisioning(app, projectPath, opts)`: die Naht
+ *         INNERHALB des Runners (ADR-021 „Der Runner … ruft an seinem
+ *         erfolgreichen Abschluss withScaffoldPassphrase … auf"). Komponiert
+ *         den ECHTEN `run()`-Pfad (echter Fake-Child, kein reiner Mock-Stub)
+ *         mit einem injizierten `provisioningService` — Scaffold-Erfolg löst
+ *         GENAU EINEN `withScaffoldPassphrase`-Aufruf mit korrektem `app` +
+ *         `GPG_PASS_FILE`-Env-Weiterreichung aus; Scaffold-Fehlschlag löst
+ *         KEINEN Aufruf aus. Fehlender `provisioningService` → `{result:
+ *         'failed'}` (Wiring-Fehler, kein Crash). **Scope-Hinweis:** kein
+ *         Produktivcode-Aufrufer dieser Methode in dieser Story (S-336) — die
+ *         Verdrahtung der drei Anlage-Wege ist die separate Folge-Story S-343
+ *         (AC12-AC14, siehe Modul-Header-Scope-Hinweis).
  *
  * Pattern: injizierbare `spawnFn`, die ein Fake-Child (EventEmitter mit
  * stdout/stderr-Sub-Emittern + `kill()`-Spy) liefert — der ECHTE
  * `HeadlessRunnerCore`-Pfad wird so ohne echten `claude`-Prozess geprüft
- * (run()-Ebenen-Test, coder/R06 — nicht nur eine Helper-Funktion).
+ * (run()-Ebenen-Test, coder/R06 — nicht nur eine Helper-Funktion). Für
+ * `runWithAutoProvisioning()` wird zusätzlich der ECHTE `run()`-Pfad (nicht
+ * gemockt) mit einem gemockten `provisioningService` komponiert — verifiziert
+ * die tatsächliche Naht zwischen Runner und Dienst, nicht nur je Seite isoliert.
  */
 
 import { describe, it, expect, jest, afterEach } from '@jest/globals';
 import { EventEmitter } from 'node:events';
+import { readFileSync, statSync } from 'node:fs';
 import {
   HeadlessNewProjectRunner,
   NEW_PROJECT_COMMAND,
@@ -38,6 +54,22 @@ import { DEFAULT_RECONCILE_TIMEOUT_MS } from '../src/HeadlessReconcileRunner.js'
 import { DEFAULT_FLOW_HEADLESS_TIMEOUT_MS } from '../src/HeadlessFlowRunner.js';
 import { DEFAULT_RETRO_HEADLESS_TIMEOUT_MS } from '../src/HeadlessRetroRunner.js';
 import { ProjectJobLock } from '../src/ProjectJobLock.js';
+import { PerAppGpgProvisioningService } from '../src/PerAppGpgProvisioningService.js';
+
+/**
+ * Pollt bis `conditionFn()` wahr wird (statt eines einzelnen `tick()`) — nötig für
+ * die End-zu-Ende-Komposition mit dem ECHTEN `PerAppGpgProvisioningService`, dessen
+ * `withScaffoldPassphrase()` mehrere echte async I/O-Schritte (Audit, `openSession()`,
+ * `itemExists()`, `mkdtemp`/`writeFile`/`chmod`) VOR dem `run()`-Aufruf durchläuft —
+ * ein einzelner `setImmediate`-Tick reicht dafür nicht zuverlässig.
+ */
+async function waitFor(conditionFn, { timeoutMs = 2000, intervalMs = 5 } = {}) {
+  const start = Date.now();
+  while (!conditionFn()) {
+    if (Date.now() - start > timeoutMs) throw new Error('[test] waitFor() Timeout');
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+}
 
 /** Fake-Child: EventEmitter mit stdout/stderr-Sub-Emittern + kill()-Spy. */
 function makeFakeChild() {
@@ -267,5 +299,222 @@ describe('HeadlessNewProjectRunner — Audit (Start/Ende/Fehler, secret-frei)', 
     await tick();
     child.emit('close', 0);
     await expect(p).resolves.toBeUndefined();
+  });
+});
+
+describe('HeadlessNewProjectRunner — runWithAutoProvisioning() — AC4/AC15 Naht INNERHALB des Runners (ADR-021)', () => {
+  it('Scaffold-Erfolg → withScaffoldPassphrase GENAU EINMAL mit korrektem app-Slug; fn reicht GPG_PASS_FILE additiv an den ECHTEN run()/spawnFn-Pfad durch', async () => {
+    const child = makeFakeChild();
+    const spawnFn = jest.fn(() => child);
+    const withScaffoldPassphrase = jest.fn(async (app, fn) => {
+      await fn({ gpgPassFilePath: '/tmp/gpg-pass-xyz/gpg-pass' });
+      return { result: 'created' };
+    });
+    const provisioningService = { withScaffoldPassphrase };
+    const runner = new HeadlessNewProjectRunner({ spawnFn, timeoutMs: 10_000, pollIntervalMs: 1, provisioningService });
+
+    const p = runner.runWithAutoProvisioning('myapp', PROJECT_PATH);
+    await tick();
+    child.emit('close', 0);
+    const result = await p;
+
+    expect(result).toEqual({ result: 'created' });
+    expect(withScaffoldPassphrase).toHaveBeenCalledTimes(1);
+    expect(withScaffoldPassphrase.mock.calls[0][0]).toBe('myapp');
+    expect(typeof withScaffoldPassphrase.mock.calls[0][1]).toBe('function');
+
+    // Der ECHTE run()-Pfad (kein Mock) hat GPG_PASS_FILE tatsächlich in die Child-Env gereicht.
+    expect(spawnFn).toHaveBeenCalledTimes(1);
+    const [, , opts] = spawnFn.mock.calls[0];
+    expect(opts.env.GPG_PASS_FILE).toBe('/tmp/gpg-pass-xyz/gpg-pass');
+    expect(opts.cwd).toBe(PROJECT_PATH);
+  });
+
+  it('Scaffold-Fehlschlag (Non-Zero-Exit) → der ECHTE run()-Reject propagiert bis zum provisioningService-Aufrufer, KEIN Erfolgs-Ergebnis', async () => {
+    const child = makeFakeChild();
+    const spawnFn = jest.fn(() => child);
+    let fnRejected = false;
+    const withScaffoldPassphrase = jest.fn(async (app, fn) => {
+      try {
+        await fn({ gpgPassFilePath: '/tmp/gpg-pass-fail/gpg-pass' });
+        return { result: 'created' };
+      } catch {
+        fnRejected = true;
+        return { result: 'failed', reason: 'Projekt-Scaffold fehlgeschlagen — keine Provisionierung.' };
+      }
+    });
+    const provisioningService = { withScaffoldPassphrase };
+    const runner = new HeadlessNewProjectRunner({ spawnFn, timeoutMs: 10_000, pollIntervalMs: 1, provisioningService });
+
+    const p = runner.runWithAutoProvisioning('myapp', PROJECT_PATH);
+    await tick();
+    child.emit('close', 1);
+    const result = await p;
+
+    expect(fnRejected).toBe(true);
+    expect(result.result).toBe('failed');
+  });
+
+  it('fn({}) OHNE gpgPassFilePath (Plugin-Fallback-Zweig von withScaffoldPassphrase, z.B. access-not-ready) — KEIN GPG_PASS_FILE in der Child-Env des ECHTEN run()-Laufs', async () => {
+    const child = makeFakeChild();
+    const spawnFn = jest.fn(() => child);
+    const withScaffoldPassphrase = jest.fn(async (app, fn) => {
+      await fn({});
+      return { result: 'access-not-ready', reason: 'Bitte zuerst den Deploy-Zugang hinterlegen.' };
+    });
+    const provisioningService = { withScaffoldPassphrase };
+    const runner = new HeadlessNewProjectRunner({ spawnFn, timeoutMs: 10_000, pollIntervalMs: 1, provisioningService });
+
+    const p = runner.runWithAutoProvisioning('myapp', PROJECT_PATH);
+    await tick();
+    child.emit('close', 0);
+    const result = await p;
+
+    expect(result.result).toBe('access-not-ready');
+    const [, , opts] = spawnFn.mock.calls[0];
+    expect('GPG_PASS_FILE' in opts.env).toBe(false);
+  });
+
+  it('ohne provisioningService konfiguriert → { result: "failed" }, KEIN run()/spawnFn-Aufruf (Wiring-Fehler, kein Crash)', async () => {
+    const spawnFn = jest.fn();
+    const runner = new HeadlessNewProjectRunner({ spawnFn, timeoutMs: 10_000, pollIntervalMs: 1 });
+
+    const result = await runner.runWithAutoProvisioning('myapp', PROJECT_PATH);
+
+    expect(result).toEqual({ result: 'failed', reason: expect.any(String) });
+    expect(spawnFn).not.toHaveBeenCalled();
+  });
+
+  it('identity wird an withScaffoldPassphrase durchgereicht — Default: Runner-eigene identity aus dem Konstruktor', async () => {
+    const child = makeFakeChild();
+    const spawnFn = jest.fn(() => child);
+    const withScaffoldPassphrase = jest.fn(async (app, fn) => {
+      await fn({});
+      return { result: 'created' };
+    });
+    const provisioningService = { withScaffoldPassphrase };
+    const runner = new HeadlessNewProjectRunner({
+      spawnFn,
+      timeoutMs: 10_000,
+      pollIntervalMs: 1,
+      provisioningService,
+      identity: 'owner@example.ch',
+    });
+
+    const p = runner.runWithAutoProvisioning('myapp', PROJECT_PATH);
+    await tick();
+    child.emit('close', 0);
+    await p;
+
+    expect(withScaffoldPassphrase.mock.calls[0][2]).toEqual({ identity: 'owner@example.ch' });
+  });
+
+  it('per-Aufruf-Override der identity gewinnt gegen die Runner-eigene identity', async () => {
+    const child = makeFakeChild();
+    const spawnFn = jest.fn(() => child);
+    const withScaffoldPassphrase = jest.fn(async (app, fn) => {
+      await fn({});
+      return { result: 'created' };
+    });
+    const provisioningService = { withScaffoldPassphrase };
+    const runner = new HeadlessNewProjectRunner({
+      spawnFn,
+      timeoutMs: 10_000,
+      pollIntervalMs: 1,
+      provisioningService,
+      identity: 'default@example.ch',
+    });
+
+    const p = runner.runWithAutoProvisioning('myapp', PROJECT_PATH, { identity: 'override@example.ch' });
+    await tick();
+    child.emit('close', 0);
+    await p;
+
+    expect(withScaffoldPassphrase.mock.calls[0][2]).toEqual({ identity: 'override@example.ch' });
+  });
+});
+
+describe('HeadlessNewProjectRunner — runWithAutoProvisioning() — End-zu-Ende mit dem ECHTEN PerAppGpgProvisioningService (AC4/AC5/AC6/AC15, keine Doppel-Mocks)', () => {
+  it('Scaffold-Erfolg: echter withScaffoldPassphrase() + echter run() — Passphrasen-Identität (AC6) über die komponierte Naht, temp-Datei 0600 (AC5) + danach entfernt', async () => {
+    const child = makeFakeChild();
+    const spawnFn = jest.fn();
+    let observedGpgPassFilePath;
+    let observedContentDuringSpawn;
+    let observedModeDuringSpawn;
+    spawnFn.mockImplementation((cmd, args, opts) => {
+      observedGpgPassFilePath = opts.env.GPG_PASS_FILE;
+      observedContentDuringSpawn = readFileSync(observedGpgPassFilePath, 'utf8');
+      observedModeDuringSpawn = statSync(observedGpgPassFilePath).mode & 0o777;
+      return child;
+    });
+
+    const calls = { itemExists: [], createItem: [] };
+    const session = {
+      itemExists: jest.fn(async (name) => {
+        calls.itemExists.push(name);
+        return false;
+      }),
+      createItem: jest.fn(async (name, pass) => {
+        calls.createItem.push({ name, pass });
+      }),
+      close: jest.fn(async () => {}),
+    };
+    const deployLoginService = { openSession: jest.fn(async () => session) };
+    const auditStore = { record: jest.fn() };
+    const provisioningService = new PerAppGpgProvisioningService({ deployLoginService, auditStore });
+
+    const runner = new HeadlessNewProjectRunner({ spawnFn, timeoutMs: 10_000, pollIntervalMs: 1, provisioningService });
+
+    const p = runner.runWithAutoProvisioning('myapp', PROJECT_PATH, { identity: 'a@b.ch' });
+    await waitFor(() => spawnFn.mock.calls.length > 0);
+    child.emit('close', 0);
+    const result = await p;
+
+    expect(result).toEqual({ result: 'created' });
+    // AC5: 0600, existierte WÄHREND des Scaffold-Laufs (Beobachtung im spawnFn-Callback).
+    expect(observedModeDuringSpawn).toBe(0o600);
+    // AC6: dieselbe Passphrase, mit der der Scaffold lief, steht im Bitwarden-createItem.
+    expect(calls.itemExists).toEqual(['env.gpg-passphrase-myapp']);
+    expect(calls.createItem.length).toBe(1);
+    expect(calls.createItem[0].name).toBe('env.gpg-passphrase-myapp');
+    expect(calls.createItem[0].pass).toBe(observedContentDuringSpawn);
+    // AC5: nach Abschluss (Erfolg) ist die temp-Datei garantiert entfernt.
+    expect(() => statSync(observedGpgPassFilePath)).toThrow();
+  });
+
+  it('Scaffold-Fehlschlag (Non-Zero-Exit): echter withScaffoldPassphrase() + echter run() — KEIN Bitwarden-Item, temp-Datei trotzdem entfernt (kein Teil-Zustand)', async () => {
+    const child = makeFakeChild();
+    const spawnFn = jest.fn();
+    let observedGpgPassFilePath;
+    spawnFn.mockImplementation((cmd, args, opts) => {
+      observedGpgPassFilePath = opts.env.GPG_PASS_FILE;
+      return child;
+    });
+
+    const calls = { itemExists: [], createItem: [] };
+    const session = {
+      itemExists: jest.fn(async (name) => {
+        calls.itemExists.push(name);
+        return false;
+      }),
+      createItem: jest.fn(async (name, pass) => {
+        calls.createItem.push({ name, pass });
+      }),
+      close: jest.fn(async () => {}),
+    };
+    const deployLoginService = { openSession: jest.fn(async () => session) };
+    const auditStore = { record: jest.fn() };
+    const provisioningService = new PerAppGpgProvisioningService({ deployLoginService, auditStore });
+
+    const runner = new HeadlessNewProjectRunner({ spawnFn, timeoutMs: 10_000, pollIntervalMs: 1, provisioningService });
+
+    const p = runner.runWithAutoProvisioning('myapp', PROJECT_PATH);
+    await waitFor(() => spawnFn.mock.calls.length > 0);
+    child.emit('close', 1);
+    const result = await p;
+
+    expect(result.result).toBe('failed');
+    expect(calls.createItem.length).toBe(0);
+    expect(() => statSync(observedGpgPassFilePath)).toThrow();
   });
 });

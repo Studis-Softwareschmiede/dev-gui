@@ -21,6 +21,23 @@
  *     (`HeadlessRunnerCore` AC-Erweiterung ADR-021) — der `PerAppGpgProvisioning
  *     Service#withScaffoldPassphrase`-Aufrufer mappt `fn({ gpgPassFilePath })`
  *     genau hierauf.
+ *   - **`runWithAutoProvisioning(app, projectPath, opts)` — die Naht INNERHALB
+ *     des Runners (AC4/AC15, ADR-021 „Der Runner … ruft an seinem erfolgreichen
+ *     Abschluss withScaffoldPassphrase … auf"):** kapselt exakt die Komposition
+ *     `provisioningService.withScaffoldPassphrase(app, (args) => this.run(...))`
+ *     — `fn` reicht ein evtl. `gpgPassFilePath` additiv als `GPG_PASS_FILE` an
+ *     `run()` durch. Die Bitwarden-Item-Anlage feuert dadurch genau EINMAL, NUR
+ *     wenn `run()` erfolgreich auflöst (Erfolgs-Hook); rejected `run()` → KEIN
+ *     Aufruf (kein Teil-Zustand, S-336-AC4/AC5/AC6 in
+ *     `PerAppGpgProvisioningService#withScaffoldPassphrase` bereits verifiziert).
+ *     `provisioningService` ist ein injizierter, optionaler Konstruktor-Dep —
+ *     ohne ihn liefert `runWithAutoProvisioning()` `{ result: 'failed' }`
+ *     (Wiring-Fehler, kein Crash). **Scope-Hinweis (S-336 vs. S-343):** diese
+ *     Methode ist die vollständige server-seitige Naht selbst — WER sie mit
+ *     welchem `app`/`projectPath` aufruft (die drei Anlage-Wege der
+ *     `NewProjectChooserDialog`, HTTP-Endpunkt, Frontend-Dialog-Vorab-Erfassung
+ *     des Slugs) ist die separate Folge-Story S-343 (AC12-AC14) — dort entsteht
+ *     der erste Produktivcode-Aufrufer dieser Methode.
  *
  * Getrennt vom interaktiven PTY-Pfad: dieses Modul importiert/mutiert WEDER
  * `PtyManager` NOCH `PtySessionRegistry` NOCH den `CommandService`-Schreibpfad
@@ -91,6 +108,8 @@ export class HeadlessNewProjectRunner {
   #identity;
   /** @type {number} */
   #pollIntervalMs;
+  /** @type {{ withScaffoldPassphrase: Function }|null} */
+  #provisioningService;
 
   /**
    * @param {object} [deps]
@@ -102,8 +121,19 @@ export class HeadlessNewProjectRunner {
    * @param {{ record: Function }} [deps.auditStore] - Per-Lauf-Audit, best-effort.
    * @param {string|null} [deps.identity] - Audit-Identity (Default `null` = System/auto).
    * @param {number} [deps.pollIntervalMs] - Poll-Intervall der Status-Abfrage (ms).
+   * @param {{ withScaffoldPassphrase: Function }} [deps.provisioningService] - injizierter
+   *   `PerAppGpgProvisioningService` (AC4/AC15-Naht, `runWithAutoProvisioning()`) — optional,
+   *   nur nötig wenn `runWithAutoProvisioning()` verwendet wird (Default `null`).
    */
-  constructor({ spawnFn = nodeSpawn, timeoutMs, lock = new ProjectJobLock(), auditStore, identity, pollIntervalMs } = {}) {
+  constructor({
+    spawnFn = nodeSpawn,
+    timeoutMs,
+    lock = new ProjectJobLock(),
+    auditStore,
+    identity,
+    pollIntervalMs,
+    provisioningService,
+  } = {}) {
     this.#core = new HeadlessRunnerCore({
       spawnFn,
       timeoutMs:
@@ -121,6 +151,7 @@ export class HeadlessNewProjectRunner {
     this.#auditStore = auditStore ?? null;
     this.#identity = identity ?? null;
     this.#pollIntervalMs = pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+    this.#provisioningService = provisioningService ?? null;
   }
 
   /**
@@ -171,6 +202,45 @@ export class HeadlessNewProjectRunner {
     // failed / auth-expired / budget-limited / unbekannt → Fehler-Audit, reject.
     this.#audit(`${AUDIT_FAILED} repo=${slug}`);
     throw new Error(`Scaffold-Lauf fehlgeschlagen (${slug}, status=${job.status})`);
+  }
+
+  /**
+   * Die AC4/AC15-Naht INNERHALB des Runners (ADR-021 „Der Runner … ruft an
+   * seinem erfolgreichen Abschluss `withScaffoldPassphrase` … auf"): führt
+   * EINEN `run()`-Lauf aus und löst — NUR bei dessen Erfolg — genau EINMAL die
+   * Auto-Provisionierung der per-App-GPG-Passphrase aus. Komponiert
+   * `provisioningService.withScaffoldPassphrase(app, fn)` (Passphrase VOR dem
+   * Scaffold, `GPG_PASS_FILE` additiv in die Child-Env, Bitwarden-Item NACH
+   * Scaffold-Erfolg) mit `run()` als `fn` — ein fehlgeschlagener/rejecteter
+   * `run()`-Lauf löst KEINEN Provisionierungs-Aufruf aus (kein Teil-Zustand,
+   * S-336-AC4/AC5/AC6 bereits in `PerAppGpgProvisioningService` verifiziert).
+   *
+   * **Scope-Hinweis (S-336 vs. S-343):** diese Methode IST die vollständige
+   * server-seitige Naht — sie hat aktuell noch KEINEN Produktivcode-Aufrufer;
+   * die Verdrahtung der drei Anlage-Wege (`NewProjectChooserDialog`: „Neues
+   * Projekt"/„Aus Obsidian"/„Adopt", inkl. Vorab-Erfassung des Ziel-Slugs im
+   * Dialog, AC13) auf diese Methode ist die separate Folge-Story S-343
+   * (AC12-AC14) — bewusster, von `architekt`/Owner gedeckter Zuschnitt.
+   *
+   * @param {string} app - Ziel-Slug (identisch zu `projectPath`s Repo-Slug —
+   *   Aufrufer-Verantwortung, analog `gpgBwItem`-Konvention).
+   * @param {string} projectPath - aufgelöster, validierter absoluter Projekt-Pfad.
+   * @param {object} [opts]
+   * @param {string[]} [opts.args] - Extra-argv für DIESEN `run()`-Lauf (Default: keine).
+   * @param {string|null} [opts.identity] - Audit-Identity für die Provisionierung
+   *   (Default: die Runner-eigene `identity` aus dem Konstruktor).
+   * @returns {Promise<{ result: 'created'|'already-exists'|'access-not-ready'|'failed', reason?: string }>}
+   */
+  async runWithAutoProvisioning(app, projectPath, { args, identity } = {}) {
+    if (!this.#provisioningService || typeof this.#provisioningService.withScaffoldPassphrase !== 'function') {
+      return { result: 'failed', reason: 'Interner Fehler — kein Provisionierungs-Dienst konfiguriert' };
+    }
+    return this.#provisioningService.withScaffoldPassphrase(
+      app,
+      ({ gpgPassFilePath } = {}) =>
+        this.run(projectPath, { env: gpgPassFilePath ? { GPG_PASS_FILE: gpgPassFilePath } : undefined, args }),
+      { identity: identity ?? this.#identity },
+    );
   }
 
   /**
