@@ -1,7 +1,7 @@
 id: S-335
 parent: F-073
 title: Per-App-Passphrase-Provisionierungs-Dienst (idempotent, Bitwarden env.gpg-passphrase-<app>)
-status: To Do
+status: Done
 priority: P2
 spec: docs/specs/per-app-gpg-passphrase-provisioning.md
 implements:
@@ -32,7 +32,7 @@ blocked_reason: null
 github_issue: 398
 github_url: https://github.com/Studis-Softwareschmiede/dev-gui/issues/398
 created_at: '2026-07-13T00:00:00Z'
-updated_at: '2026-07-13T14:05:14Z'
-done_at: null
+updated_at: '2026-07-13T14:07:55Z'
+done_at: '2026-07-13T14:07:55Z'
 tok_est: null
 area: deployment
