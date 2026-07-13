@@ -332,7 +332,7 @@ describe('DeploymentsView — Per-App-GPG-Passphrase-Rotation (F-073/S-339 AC8/A
   });
 
   it('Security-Floor: enthält eine Response ausnahmsweise ein Fremdfeld, landet dessen Wert NIE im DOM', async () => {
-    const FAKE_SECRET = 'xJ9k2q7ZpL8vN3wR5tY1uB6cD0eF4gH-nicht-anzeigen';
+    const FAKE_SECRET = 'TESTWERT-secret-darf-nie-im-dom-erscheinen';
     globalThis.fetch = makeGpgRotationFetch({
       startFn: () => ({
         ok: true,
