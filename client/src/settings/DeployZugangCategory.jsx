@@ -3,7 +3,7 @@
  *
  * Hinterlegt den UNBEAUFSICHTIGTEN Bitwarden-Zugang (Variante B), mit dem dev-gui
  * beim Deployment fremder Apps deren per-App-GPG-Passphrase aus Bitwarden liest
- * (Item `deploy-gpg-<app>`) und als GPG_PASSPHRASE in den Ziel-Container injiziert.
+ * (Item `env.gpg-passphrase-<app>`) und als GPG_PASSPHRASE in den Ziel-Container injiziert.
  *
  * Alle Felder sind WRITE-ONLY (Spec AC6): der Status zeigt nur „gesetzt/nicht
  * gesetzt", nie den Wert; Klartext wird nach dem Speichern sofort verworfen.
@@ -235,7 +235,8 @@ export function DeployZugangCategory({ fetchFn }) {
       <p style={styles.sectionDesc}>
         Zum <strong>unbeaufsichtigten Deployment fremder Apps</strong>: dev-gui meldet sich mit
         diesem Bitwarden-Zugang an (API-Key, kein 2FA/OTP) und liest daraus die GPG-Passphrase
-        der jeweiligen App (Item <code>deploy-gpg-&lt;app&gt;</code>), um sie beim Deploy in den
+        der jeweiligen App (Item <code>env.gpg-passphrase-&lt;app&gt;</code>, benannt nach der
+        <code>.env.gpg</code>, die sie entschlüsselt), um sie beim Deploy in den
         Container zu injizieren. Der Zugang liegt lokal in einer geschützten Datei (nicht im
         verschlüsselten Store) und verlässt dev-gui nie.
       </p>
