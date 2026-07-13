@@ -161,6 +161,7 @@ import { DrainReportStore } from './src/DrainReportStore.js';
 import { BitwardenDeployAccessStore } from './src/BitwardenDeployAccessStore.js';
 import { BitwardenDeployLoginService } from './src/BitwardenDeployLoginService.js';
 import { PerAppGpgProvisioningService } from './src/PerAppGpgProvisioningService.js';
+import { PerAppGpgRotationService } from './src/PerAppGpgRotationService.js';
 import { RegressionResultStore } from './src/RegressionResultStore.js';
 import { DrainJobRegistry } from './src/DrainJobRegistry.js';
 import { FeatureDrainRegistry } from './src/FeatureDrainRegistry.js';
@@ -533,6 +534,22 @@ const bitwardenDeployLoginService = new BitwardenDeployLoginService({
 const perAppGpgProvisioningService = new PerAppGpgProvisioningService({
   deployLoginService: bitwardenDeployLoginService,
   auditStore,
+});
+
+// ── PerAppGpgRotationService (per-app-gpg-passphrase-rotation F-073, S-338) ──
+// Zwei-Phasen-Rotation (Kandidat/Beweis-Runde → Umschalten) der per-App-GPG-
+// Passphrase. Nutzt AUSSCHLIESSLICH die Session des bestehenden
+// bitwardenDeployLoginService (kein zweiter bw-Login-/Spawn-Pfad) UND
+// AUSSCHLIESSLICH den bestehenden workspaceMutator (pullClone/commitAndPushFile,
+// kein zweiter git-Spawn-Pfad) — credentialStore fürs Token-Minting (Git-Push).
+// Konsument: POST /api/deployments/:app/gpg-rotate/{start,commit,discard-previous}
+// (deploymentsRouter, AC1-AC7/AC10-AC13).
+const perAppGpgRotationService = new PerAppGpgRotationService({
+  deployLoginService: bitwardenDeployLoginService,
+  auditStore,
+  workspaceMutator,
+  credentialStore,
+  workspaceRootResolver: resolveWorkspaceRoot,
 });
 
 // ── DrainNotifier (drain-done-notification AC1–AC7, S-277) ──────────────────
@@ -969,6 +986,10 @@ const deps = {
   // (idempotente env.gpg-passphrase-<app>-Anlage). Vom Auto-Loader an
   // deployments.js (POST /api/deployments/:app/gpg-provision, AC10) gereicht.
   perAppGpgProvisioningService,
+  // per-app-gpg-passphrase-rotation F-073/S-338: Zwei-Phasen-Rotations-Dienst
+  // (Kandidat/Beweis-Runde → Umschalten → manuelle Entsorgung). Vom Auto-Loader
+  // an deployments.js (POST /api/deployments/:app/gpg-rotate/*) gereicht.
+  perAppGpgRotationService,
   // regression-result-store AC4 (S-312): RegressionResultStore für
   // GET /api/projects/:slug/regression-runs[/:runId] (regressionRuns.js Router).
   regressionResultStore,

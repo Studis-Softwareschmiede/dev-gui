@@ -30,6 +30,16 @@
  *   Spawn-Pfad) — `createItem` nutzt dieselbe encode+create-Technik wie
  *   `BitwardenMasterKeyService#bwCreateItem` (Werte nur via stdin, nie Argv).
  *
+ * Feld-Lese/Schreib-Naht (per-app-gpg-passphrase-rotation, F-073/S-338):
+ *   Die Session bietet zusätzlich `readItemFields(itemName)` (liest aktives
+ *   Passwortfeld + die Custom-Felder `naechste`/`vorherige`) und
+ *   `updateItemFields(itemName, { password?, naechste?, vorherige? })`
+ *   (get-modify-encode-edit — `bw get item` → JSON mutieren → `bw encode`
+ *   (stdin) → `bw edit item <id>` (stdin)). `undefined` = Feld unverändert
+ *   lassen, `null` = Custom-Feld entfernen (Rollback/Entsorgung, AC5/AC13).
+ *   Genutzt vom `PerAppGpgRotationService` — dieselbe (einzige) bw-sprechende
+ *   Boundary, kein zweiter Spawn-Pfad.
+ *
  * @module BitwardenDeployLoginService
  */
 
@@ -49,6 +59,10 @@ export const DEPLOY_LOGIN_ERROR_CLASSES = Object.freeze([
   // BitwardenMasterKeyService#bwCreateItem) — Anlage-Fehler bekommt eine eigene
   // Klasse (kein Rohtext-Leak, S1).
   'item-create-failed',
+  // per-app-gpg-passphrase-rotation (F-073/S-338): get-modify-encode-edit einer
+  // BESTEHENDEN Item-Instanz (Feld-Lese-/Schreibfehler, ungültige JSON-Antwort,
+  // `bw edit item` fehlgeschlagen) — eigene Klasse (kein Rohtext-Leak, S1).
+  'item-update-failed',
   'error',
 ]);
 
@@ -271,6 +285,96 @@ export class BitwardenDeployLoginService {
           const createRes = await this.#spawnBw(['create', 'item'], { env, input: encodedItem });
           if (createRes.exitCode !== 0) {
             throw makeErr('item-create-failed');
+          }
+        },
+        // per-app-gpg-passphrase-rotation (F-073/S-338 AC1): liest das aktive
+        // Passwortfeld + die Custom-Felder `naechste`/`vorherige` einer
+        // BESTEHENDEN Item-Instanz. Rückgabe ist Klartext (Passphrasen!) — NUR
+        // an interne Aufrufer (PerAppGpgRotationService), NIE Richtung HTTP/Log.
+        readItemFields: async (itemName) => {
+          const env = { ...baseEnv, BW_SESSION: session };
+          const res = await this.#spawnBw(['get', 'item', itemName], { env });
+          if (res.exitCode !== 0) {
+            const s = ((res.stdout ?? '') + (res.stderr ?? '')).toLowerCase();
+            if (s.includes('not found') || s.includes('no item')) {
+              throw makeErr('item-not-found');
+            }
+            throw makeErr(classify(res.stdout + res.stderr, res.exitCode, 'get'));
+          }
+          let item;
+          try {
+            item = JSON.parse(res.stdout);
+          } catch {
+            throw makeErr('item-update-failed');
+          }
+          const fields = Array.isArray(item?.fields) ? item.fields : [];
+          const findField = (name) => fields.find((f) => f && f.name === name)?.value ?? null;
+          return {
+            id: typeof item?.id === 'string' ? item.id : null,
+            password: item?.login?.password ?? null,
+            naechste: findField('naechste'),
+            vorherige: findField('vorherige'),
+          };
+        },
+        // per-app-gpg-passphrase-rotation (F-073/S-338 AC1/AC4/AC5/AC13):
+        // get-modify-encode-edit einer BESTEHENDEN Item-Instanz — `bw get item`
+        // → JSON mutieren (Passwortfeld + Custom-Felder `naechste`/`vorherige`)
+        // → `bw encode` (stdin) → `bw edit item <id>` (stdin). Werte NIEMALS im
+        // Argv (S2). `mutations.<key> === undefined` → Feld unverändert lassen;
+        // `mutations.<key> === null` → Custom-Feld ENTFERNEN (Rollback/AC5/AC13).
+        // Unberührte Felder (inkl. fremde Custom-Felder) bleiben unverändert,
+        // weil das VOLLE Item-JSON gelesen, punktuell mutiert und zurückgeschrieben
+        // wird (kein Überschreiben mit einem Teil-Objekt).
+        updateItemFields: async (itemName, mutations = {}) => {
+          const env = { ...baseEnv, BW_SESSION: session };
+          const getRes = await this.#spawnBw(['get', 'item', itemName], { env });
+          if (getRes.exitCode !== 0) {
+            const s = ((getRes.stdout ?? '') + (getRes.stderr ?? '')).toLowerCase();
+            if (s.includes('not found') || s.includes('no item')) {
+              throw makeErr('item-not-found');
+            }
+            throw makeErr(classify(getRes.stdout + getRes.stderr, getRes.exitCode, 'get'));
+          }
+          let item;
+          try {
+            item = JSON.parse(getRes.stdout);
+          } catch {
+            throw makeErr('item-update-failed');
+          }
+          if (!item || typeof item.id !== 'string' || !item.id) {
+            throw makeErr('item-update-failed');
+          }
+
+          if (Object.prototype.hasOwnProperty.call(mutations, 'password') && mutations.password !== undefined) {
+            item.login = item.login ?? {};
+            item.login.password = mutations.password;
+          }
+
+          const fields = Array.isArray(item.fields) ? [...item.fields] : [];
+          for (const key of ['naechste', 'vorherige']) {
+            if (!Object.prototype.hasOwnProperty.call(mutations, key)) continue;
+            const value = mutations[key];
+            const idx = fields.findIndex((f) => f && f.name === key);
+            if (value === undefined) continue; // unverändert
+            if (value === null) {
+              if (idx >= 0) fields.splice(idx, 1); // Custom-Feld entfernen
+            } else if (idx >= 0) {
+              fields[idx] = { ...fields[idx], value, type: 1 };
+            } else {
+              fields.push({ name: key, value, type: 1 }); // type 1 = Hidden
+            }
+          }
+          item.fields = fields;
+
+          const itemJson = JSON.stringify(item);
+          const encodeRes = await this.#spawnBw(['encode'], { env, input: itemJson });
+          if (encodeRes.exitCode !== 0) {
+            throw makeErr('item-update-failed');
+          }
+          const encodedItem = encodeRes.stdout.trim();
+          const editRes = await this.#spawnBw(['edit', 'item', item.id], { env, input: encodedItem });
+          if (editRes.exitCode !== 0) {
+            throw makeErr('item-update-failed');
           }
         },
         close: cleanup,

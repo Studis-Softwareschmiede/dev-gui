@@ -19,6 +19,9 @@
  *   POST   /api/deployments/local-test               → { result, report? }               [MUTATION, S-156]
  *   POST   /api/deployments/vps/:vpsId/tunnel/recreate → { result, report } [MUTATION, S-187 AC1–5,11,12 + S-188 AC6–8]
  *   POST   /api/deployments/:app/gpg-provision        → { result, reason? } [MUTATION, F-073/S-335 AC10]
+ *   POST   /api/deployments/:app/gpg-rotate/start             → { ok, phase?, errorClass?, reason? } [MUTATION, F-073/S-338]
+ *   POST   /api/deployments/:app/gpg-rotate/commit            → { ok, errorClass?, reason? }         [MUTATION, F-073/S-338]
+ *   POST   /api/deployments/:app/gpg-rotate/discard-previous  → { ok, errorClass?, reason? }         [MUTATION, F-073/S-338]
  *
  * Security (AC7–AC9 / ADR-012):
  *   - Alle /api/deployments/* hinter AccessGuard (server.js — alle /api/* sind geschützt).
@@ -33,6 +36,9 @@
  *   - VPS-Tunnel-Read-Model (S-185 AC7): read-only, kein Audit, kein Tunnel-Token, nur tunnelId.
  *   - GPG-Provisionierung (F-073/S-335 AC10): hinter AccessGuard + CRED_ADMIN_EMAILS;
  *     Response geheimnisfrei ({ result, reason? }) — nie die Passphrase (AC8).
+ *   - GPG-Rotation (F-073/S-338 AC7): hinter AccessGuard + CRED_ADMIN_EMAILS;
+ *     Response geheimnisfrei ({ ok, phase?, errorClass?, reason? }) — nie alte/
+ *     neue Passphrase, nie .env.gpg-Klartext.
  *
  * VPS configuration: The router receives a pre-configured vpsConfig map
  * (vpsId → VpsTarget) from server.js. The client sends a vpsId string;
@@ -338,7 +344,7 @@ async function resolveVpsIdToTarget(vpsId, vpsTargets, vpsRegistry) {
  *   When provided, POST /api/deployments/:app/gpg-provision is active.
  * @returns {import('express').Router}
  */
-export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconciliationJob, localDockerControl, vpsRegistry, vpsDockerControl, cloudflareApi, tunnelHealService, deployAccessStore, deployLoginService, perAppGpgProvisioningService) {
+export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconciliationJob, localDockerControl, vpsRegistry, vpsDockerControl, cloudflareApi, tunnelHealService, deployAccessStore, deployLoginService, perAppGpgProvisioningService, perAppGpgRotationService) {
   const router = Router();
 
   // ── GET /api/deployments/vps-targets ────────────────────────────────────
@@ -1088,6 +1094,108 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconcil
     // AC1/AC8/AC9: Der Dienst übernimmt Audit-First, Zugangs-Gate, Existenz-Check
     // und Passphrasen-Erzeugung — Router reicht nur weiter, kein Secret in Sicht.
     const result = await perAppGpgProvisioningService.provision(app.trim(), { identity: identity?.email ?? null });
+    return res.status(200).json(result);
+  });
+
+  // ── POST /api/deployments/:app/gpg-rotate/{start,commit,discard-previous} ──
+  // per-app-gpg-passphrase-rotation (F-073/S-338, AC1-AC7/AC10-AC13): Zwei-Phasen-
+  // Rotation über DENSELBEN perAppGpgRotationService (Audit-First/Zugangs-Gate
+  // liegen im Dienst, nicht im Router). Response geheimnisfrei (AC7): nur
+  // { ok, phase?, errorClass?, reason? } — nie eine Passphrase, nie .env.gpg-Klartext.
+
+  /**
+   * POST /api/deployments/:app/gpg-rotate/start
+   * Phase (a)+(b): Kandidat hinterlegen + Beweis-Runde.
+   *
+   * Responses:
+   *   200 { ok: true, phase: "candidate-proved" }
+   *   200 { ok: false, phase: "aborted", errorClass, reason? }
+   *   400 { error }  — app-Parameter fehlt/ungültig
+   *   403 { error }  — nicht in CRED_ADMIN_EMAILS
+   *   503 { ok: false, reason }  — Dienst nicht konfiguriert
+   */
+  router.post('/api/deployments/:app/gpg-rotate/start', async (req, res) => {
+    const identity = req.identity ?? null;
+
+    const authz = checkMutationAuthz(identity);
+    if (!authz.allowed) {
+      return res.status(403).json({ error: 'Keine Berechtigung für diese Aktion' });
+    }
+
+    const { app } = req.params;
+    if (!app || typeof app !== 'string' || !app.trim() || app.trim().length > MAX_APP_SLUG_LEN || !APP_SLUG_PARAM_RE.test(app.trim())) {
+      return res.status(400).json({ error: 'app-Parameter fehlt oder enthält ungültige Zeichen' });
+    }
+
+    if (!perAppGpgRotationService || typeof perAppGpgRotationService.startRotation !== 'function') {
+      return res.status(503).json({ ok: false, reason: 'GPG-Rotationsdienst nicht konfiguriert' });
+    }
+
+    const result = await perAppGpgRotationService.startRotation(app.trim(), { identity: identity?.email ?? null });
+    return res.status(200).json(result);
+  });
+
+  /**
+   * POST /api/deployments/:app/gpg-rotate/commit
+   * Phase (c): Umschalten (Commit-Punkt) — zuerst Bitwarden, danach Commit + Push.
+   *
+   * Responses:
+   *   200 { ok: true }
+   *   200 { ok: false, errorClass, reason? }
+   *   400 { error }  — app-Parameter fehlt/ungültig
+   *   403 { error }  — nicht in CRED_ADMIN_EMAILS
+   *   503 { ok: false, reason }  — Dienst nicht konfiguriert
+   */
+  router.post('/api/deployments/:app/gpg-rotate/commit', async (req, res) => {
+    const identity = req.identity ?? null;
+
+    const authz = checkMutationAuthz(identity);
+    if (!authz.allowed) {
+      return res.status(403).json({ error: 'Keine Berechtigung für diese Aktion' });
+    }
+
+    const { app } = req.params;
+    if (!app || typeof app !== 'string' || !app.trim() || app.trim().length > MAX_APP_SLUG_LEN || !APP_SLUG_PARAM_RE.test(app.trim())) {
+      return res.status(400).json({ error: 'app-Parameter fehlt oder enthält ungültige Zeichen' });
+    }
+
+    if (!perAppGpgRotationService || typeof perAppGpgRotationService.commitRotation !== 'function') {
+      return res.status(503).json({ ok: false, reason: 'GPG-Rotationsdienst nicht konfiguriert' });
+    }
+
+    const result = await perAppGpgRotationService.commitRotation(app.trim(), { identity: identity?.email ?? null });
+    return res.status(200).json(result);
+  });
+
+  /**
+   * POST /api/deployments/:app/gpg-rotate/discard-previous
+   * Phase (d): manuelle Entsorgung des Rollback-Ankers `vorherige`.
+   *
+   * Responses:
+   *   200 { ok: true }
+   *   200 { ok: false, errorClass, reason? }
+   *   400 { error }  — app-Parameter fehlt/ungültig
+   *   403 { error }  — nicht in CRED_ADMIN_EMAILS
+   *   503 { ok: false, reason }  — Dienst nicht konfiguriert
+   */
+  router.post('/api/deployments/:app/gpg-rotate/discard-previous', async (req, res) => {
+    const identity = req.identity ?? null;
+
+    const authz = checkMutationAuthz(identity);
+    if (!authz.allowed) {
+      return res.status(403).json({ error: 'Keine Berechtigung für diese Aktion' });
+    }
+
+    const { app } = req.params;
+    if (!app || typeof app !== 'string' || !app.trim() || app.trim().length > MAX_APP_SLUG_LEN || !APP_SLUG_PARAM_RE.test(app.trim())) {
+      return res.status(400).json({ error: 'app-Parameter fehlt oder enthält ungültige Zeichen' });
+    }
+
+    if (!perAppGpgRotationService || typeof perAppGpgRotationService.discardPrevious !== 'function') {
+      return res.status(503).json({ ok: false, reason: 'GPG-Rotationsdienst nicht konfiguriert' });
+    }
+
+    const result = await perAppGpgRotationService.discardPrevious(app.trim(), { identity: identity?.email ?? null });
     return res.status(200).json(result);
   });
 
