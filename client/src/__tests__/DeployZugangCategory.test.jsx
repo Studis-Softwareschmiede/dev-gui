@@ -101,4 +101,14 @@ describe('DeployZugangCategory', () => {
     fireEvent.click(getByText('Speichern'));
     await waitFor(() => expect(putSpy).toHaveBeenCalledWith('/api/settings/deploy-access/client_id', { value: 'user.abc' }));
   });
+
+  it('jedes Feld hat eine aufklappbare Fundort-Hilfe „Wo finde ich das?"', async () => {
+    const fetchFn = makeFetch({ status: EMPTY_STATUS });
+    const { getByText, getAllByText } = render(React.createElement(DeployZugangCategory, { fetchFn }));
+    await waitFor(() => expect(getByText(/Zugang unvollständig/)).toBeTruthy());
+    // vier Felder → vier Hilfen
+    expect(getAllByText('Wo finde ich das?').length).toBe(4);
+    // Inhalt nennt den Fundort im Bitwarden-Web-Tresor (Client-ID/Secret)
+    expect(getAllByText(/API-Schlüssel anzeigen/).length).toBeGreaterThanOrEqual(2);
+  });
 });

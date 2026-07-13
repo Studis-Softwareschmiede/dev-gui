@@ -52,6 +52,32 @@ const styles = {
   validateOk: { color: '#86efac', fontSize: 13, fontWeight: 600 },
   validateErr: { color: '#fca5a5', fontSize: 13, fontWeight: 600 },
   hint: { margin: '2px 0 0', fontSize: 12, color: '#9ca3af', fontStyle: 'italic' },
+  help: { margin: '4px 0 8px', fontSize: 12, color: '#9ca3af' },
+  helpSummary: { cursor: 'pointer', color: '#93c5fd', fontWeight: 600, userSelect: 'none' },
+  helpBody: { margin: '6px 0 0 0', paddingLeft: 18, lineHeight: 1.6 },
+};
+
+/** Fundort-Hilfe je Feld — wo der Wert im Bitwarden-Konto zu finden ist. */
+const FIELD_HELP = {
+  server_url: [
+    'Bitwarden-App oder Browser-Erweiterung öffnen: auf dem Login-Bildschirm steht „Anmelden bei: …".',
+    'Steht dort bitwarden.com → Feld leer lassen (Standard).',
+    'Steht dort bitwarden.eu → https://vault.bitwarden.eu eintragen.',
+    'Eigener Server (self-hosted) → dessen Adresse eintragen.',
+  ],
+  client_id: [
+    'Web-Tresor öffnen (https://vault.bitwarden.com) und anmelden.',
+    'Oben rechts Profil-Symbol → Kontoeinstellungen → Sicherheit → Reiter „Schlüssel".',
+    '„API-Schlüssel anzeigen" klicken (Master-Passwort nötig).',
+    'Den Wert client_id komplett kopieren — er beginnt mit „user.".',
+  ],
+  client_secret: [
+    'Steht im selben Fenster wie die Client-ID (Web-Tresor → Kontoeinstellungen → Sicherheit → Schlüssel → „API-Schlüssel anzeigen").',
+    'Den zweiten Wert client_secret komplett kopieren.',
+  ],
+  master_password: [
+    'Das normale Master-Passwort des Bitwarden-Kontos — dasselbe, mit dem du dich in der App anmeldest.',
+  ],
 };
 
 /** Ein write-only Zugangs-Feld. */
@@ -114,6 +140,15 @@ function DeployAccessField({ field, label, optional, placeholder, meta, fetchFn,
           {isSet ? '•••• gesetzt' : 'nicht gesetzt'}
         </span>
       </div>
+
+      {FIELD_HELP[field] && (
+        <details style={styles.help}>
+          <summary style={styles.helpSummary}>Wo finde ich das?</summary>
+          <ul style={styles.helpBody}>
+            {FIELD_HELP[field].map((line, i) => <li key={i}>{line}</li>)}
+          </ul>
+        </details>
+      )}
 
       {editing ? (
         <div style={fieldStyles.editArea}>
