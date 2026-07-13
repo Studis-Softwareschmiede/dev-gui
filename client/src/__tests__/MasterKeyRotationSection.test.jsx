@@ -118,11 +118,13 @@ describe('MasterKeyRotationSection — Rotations-Formular', () => {
       data: { ok: true, swapped: true, backup: { local: 'ok', offHost: 'disabled' }, archive: { ok: false, errorClass: 'auth-failed' } },
     }));
 
-    const { getByLabelText, getByRole, getByText } = render(<MasterKeyRotationSection fetchFn={fetchFn} />);
+    const { container, getByLabelText, getByRole, getByText } = render(<MasterKeyRotationSection fetchFn={fetchFn} />);
 
     fireEvent.change(getByLabelText(/neuer master-key/i), { target: { value: 'a-new-secure-master-key-value' } });
     fireEvent.change(getByLabelText(/bitwarden e-mail \(optional/i), { target: { value: 'admin@example.com' } });
     fireEvent.change(getByLabelText(/bitwarden passwort \(optional/i), { target: { value: 'wrong-password' } });
+    // Zwischenzustand vor dem Request: Passwort steht noch im Feld (State hält es)
+    expect(getByLabelText(/bitwarden passwort \(optional/i).value).toBe('wrong-password');
     fireEvent.click(getByLabelText(/ich bestätige die master-key-rotation/i));
     fireEvent.click(getByRole('button', { name: /master-key rotieren/i }));
 
@@ -130,9 +132,10 @@ describe('MasterKeyRotationSection — Rotations-Formular', () => {
       expect(getByText(/stufe 1.*✓/i)).toBeTruthy();
     });
     expect(getByText(/stufe 2 — bitwarden umgeschaltet ⚠/i)).toBeTruthy();
-    // Keine Bitwarden-Werte im DOM
-    const { container } = render(<MasterKeyRotationSection fetchFn={fetchFn} />);
+    // Keine Bitwarden-Werte im DOM (echte Regression würde hier fehlschlagen, da
+    // derselbe container geprüft wird, der zuvor das Passwort im Feld hielt)
     expect(container.textContent).not.toContain('wrong-password');
+    expect(getByLabelText(/bitwarden passwort \(optional/i).value).toBe('');
   });
 
   it('persist-failed (swapped:true, ok:false): Stufe 1 grün + separate Warnung „Reboot-Risiko"', async () => {
