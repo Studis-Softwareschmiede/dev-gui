@@ -9,8 +9,14 @@
  *         bleibt zurück). Der ECHTE Verifikations-Fehlschlag (Schritt (c) weicht vom
  *         Klartext aus (a) ab) ist per Modul-Mock in einer eigenen Datei getestet:
  *         test/CredentialStoreRotateVerification.test.js.
- *   AC3 — Fehler vor dem Swap (manipuliertes Store / GCM-Tag in Schritt (a)) ⇒
- *         secrets.enc.json + .env bleiben unverändert, alter Key bleibt aktiv.
+ *   AC3 — Fehler vor dem Swap (manipuliertes Store / GCM-Tag in Schritt (a) — "Entschlüsseln")
+ *         ⇒ secrets.enc.json + .env bleiben unverändert, alter Key bleibt aktiv. Die
+ *         übrigen drei in AC3 genannten Vor-Swap-Fehlermomente ("Verschlüsseln"/Schritt (b),
+ *         "Verifikation"/Schritt (c), "Crash" beim Swap selbst/Schritt (d)) sind je per
+ *         Modul-Mock in eigenen Dateien getestet: test/CredentialStoreRotateEncryptFailure.test.js
+ *         (reason:'encrypt-failed'), test/CredentialStoreRotateVerification.test.js
+ *         (reason:'verification-failed'), test/CredentialStoreRotateSwapFailure.test.js
+ *         (reason:'swap-failed').
  *   AC7 — .env-Persistenz + Prozess-Übergabe ERST NACH grünem Swap (DEVGUI_CRED_MASTER_KEY=<neu>,
  *         atomar, 0600); vorher bleibt der alte .env-Wert aktiv.
  *   AC8 — (Guard/Audit-Verhalten wird auf Router-Ebene getestet, s. credentialRotate.test.js)
