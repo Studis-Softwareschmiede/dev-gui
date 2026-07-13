@@ -36,6 +36,18 @@
  *   - `_spawnBwPtySession` kann via opts injiziert werden (Mock für Two-Phase-PTY, AC10/AC11)
  *   - Kein echter Bitwarden-Netzwerkaufruf in Tests
  *
+ * Datiertes Schlüssel-Archiv (credential-key-rotation v2, AC4/AC5/AC11, S-342):
+ *   - `archiveRotatedKey({..., newKey})` schaltet den aktiven `login.password`-Wert
+ *     des Master-Key-Items auf `newKey` um UND hängt den BISHERIGEN Item-Wert
+ *     (Bitwarden bleibt Source of Truth — nicht der CredentialStore-interne Key)
+ *     datiert an das Custom-Feld „Schlüssel-Archiv" an (append, nie überschreiben,
+ *     get-modify-encode-edit-Technik analog `BitwardenDeployLoginService`).
+ *   - `discardArchivedKeys(...)` entfernt das Custom-Feld „Schlüssel-Archiv"
+ *     vollständig — NUR als bewusster, explizit bestätigter Kompromittierungs-
+ *     Schritt (AC5); wird NIE aus dem normalen Rotations-Flow heraus aufgerufen.
+ *   - Beide Methoden nutzen denselben `#bwLogin`-Pfad wie acquire/create (frischer
+ *     Login je Aufruf — KEINE Wiederverwendung der acquire→not-found-Sitzung).
+ *
  * @module BitwardenMasterKeyService
  */
 
@@ -46,6 +58,13 @@ const DEFAULT_ITEM_NAME = process.env.BW_ITEM_NAME ?? 'dev-gui-master-key';
 
 /** Mindest-Entropie für generierten Key (Bytes) — AC4 */
 const MIN_KEY_BYTES = 32;
+
+/**
+ * Custom-Feld-Name für das datierte Schlüssel-Archiv im Master-Key-Item
+ * (credential-key-rotation v2, AC11). Append-only — der Feld-Wert wird NIE
+ * überschrieben, nur um einen neuen datierten Eintrag ergänzt.
+ */
+const ARCHIVE_FIELD_NAME = 'Schlüssel-Archiv';
 
 /**
  * Timeout für PTY-Login in Millisekunden.
@@ -114,6 +133,10 @@ function sanitizeErrorReason(errorClass) {
       return 'Bitwarden-Item konnte nicht angelegt werden';
     case 'persist-failed':
       return 'Master-Key konnte nicht gespeichert werden — Persistenz-Pfad nicht beschreibbar (CRED_ENV_PATH/Volume prüfen)';
+    case 'item-not-found':
+      return 'Bitwarden-Master-Key-Item nicht gefunden';
+    case 'item-update-failed':
+      return 'Bitwarden-Item konnte nicht aktualisiert werden';
     default:
       return 'BitwardenMasterKeyService: unerwarteter Fehler';
   }
@@ -563,6 +586,144 @@ export class BitwardenMasterKeyService {
     return { status: 'created' };
   }
 
+  /**
+   * Archiviert den bisherigen Master-Key datiert und schaltet den neuen Key als
+   * aktiven Wert des Master-Key-Items um (credential-key-rotation v2, AC4/AC11).
+   *
+   * Ablauf:
+   *   1. Audit-First (bitwarden:key-archive) — AC8/Spec §Audit-First.
+   *   2. Login (identisch zu acquire/createMasterKey — eigener, frischer bw-Login,
+   *      KEINE Wiederverwendung der acquire→not-found-Sitzung — andere Aktion).
+   *   3. Item lesen (`bw get item`) — der AKTUELL im Item hinterlegte Passwort-Wert
+   *      gilt als "bisheriger Key" (Bitwarden bleibt Source of Truth, nicht der
+   *      CredentialStore-interne Laufzeit-Key — Boundary-Disziplin, kein Key
+   *      verlässt CredentialStore Richtung Bitwarden-Boundary).
+   *   4. Mutation: `login.password` ⇐ newKey; Custom-Feld „Schlüssel-Archiv" bekommt
+   *      EINEN neuen datierten Eintrag angehängt (append — der bisherige Feld-Inhalt
+   *      bleibt vollständig erhalten, AC11 "nie überschreiben").
+   *   5. Item schreiben (`bw encode` + `bw edit item`).
+   *   6. Sitzung beenden (bw logout) — AC9.
+   *
+   * AC9: Weder alter noch neuer Key erscheint im Rückgabewert.
+   *
+   * @param {object} params
+   * @param {string} params.email
+   * @param {string} params.password
+   * @param {string} [params.twofa]
+   * @param {string} [params.emailOtp]
+   * @param {string} params.newKey       - der bereits lokal aktivierte neue Key (wird NICHT geloggt)
+   * @param {string|null} params.identity
+   * @returns {Promise<{ status: 'archived' } | { status: 'error', errorClass: string, reason: string }>}
+   */
+  async archiveRotatedKey({ email, password, twofa, emailOtp, newKey, identity } = {}) {
+    if (!newKey || typeof newKey !== 'string' || !newKey.trim()) {
+      return { status: 'error', errorClass: 'error', reason: 'Kein neuer Key übergeben' };
+    }
+
+    // ── AC8: Audit-First (key-archive) — OHNE Werte ─────────────────────────
+    try {
+      this.#auditStore.record({
+        identity: identity ?? null,
+        command: `bitwarden:key-archive:${this.#itemName}`,
+      });
+    } catch {
+      return { status: 'error', errorClass: 'error', reason: 'Audit-Write fehlgeschlagen — Aktion abgebrochen' };
+    }
+
+    let sessionToken;
+    try {
+      sessionToken = await this.#bwLogin({ email, password, twofa, emailOtp, identity });
+    } catch (err) {
+      const errorClass = err.bwErrorClass ?? 'error';
+      return { status: 'error', errorClass, reason: sanitizeErrorReason(errorClass) };
+    }
+
+    try {
+      const item = await this.#bwGetItem(sessionToken, this.#itemName);
+      const oldKeyValue = item?.login?.password ?? null;
+      if (!oldKeyValue) {
+        await this.#bwLogout(sessionToken);
+        return { status: 'error', errorClass: 'item-not-found', reason: sanitizeErrorReason('item-not-found') };
+      }
+
+      const fields = Array.isArray(item.fields) ? [...item.fields] : [];
+      const archiveIdx = fields.findIndex((f) => f && f.name === ARCHIVE_FIELD_NAME);
+      const datedEntry = `${new Date().toISOString()}: ${oldKeyValue}`;
+      if (archiveIdx >= 0) {
+        // AC11: APPEND, nie überschreiben — bestehender Feld-Inhalt bleibt vollständig erhalten.
+        const existingValue = fields[archiveIdx].value ?? '';
+        fields[archiveIdx] = {
+          ...fields[archiveIdx],
+          value: existingValue ? `${existingValue}\n${datedEntry}` : datedEntry,
+          type: 1, // Hidden — enthält einen früheren Key-Wert
+        };
+      } else {
+        fields.push({ name: ARCHIVE_FIELD_NAME, value: datedEntry, type: 1 });
+      }
+
+      const mutatedItem = { ...item, fields, login: { ...item.login, password: newKey } };
+
+      await this.#bwEditItem(sessionToken, item.id, mutatedItem);
+      await this.#bwLogout(sessionToken);
+      return { status: 'archived' };
+    } catch (err) {
+      await this.#bwLogout(sessionToken);
+      const errorClass = err.bwErrorClass ?? 'item-update-failed';
+      return { status: 'error', errorClass, reason: sanitizeErrorReason(errorClass) };
+    }
+  }
+
+  /**
+   * Entsorgt PERMANENT den gesamten Inhalt des Custom-Felds „Schlüssel-Archiv"
+   * (credential-key-rotation v2, AC5) — NUR als bewusster, explizit bestätigter
+   * Kompromittierungs-Schritt; NIE automatisch im normalen Rotations-Flow (kein
+   * Aufrufer dieser Methode existiert im Rotations-Pfad selbst).
+   *
+   * Entfernt das Custom-Feld vollständig (kein Teil-Wipe einzelner datierter
+   * Einträge — v2-Präzisierung, s. Spec §Verträge „Permanente Entsorgung").
+   *
+   * @param {object} params
+   * @param {string} params.email
+   * @param {string} params.password
+   * @param {string} [params.twofa]
+   * @param {string} [params.emailOtp]
+   * @param {string|null} params.identity
+   * @returns {Promise<{ status: 'discarded' } | { status: 'error', errorClass: string, reason: string }>}
+   */
+  async discardArchivedKeys({ email, password, twofa, emailOtp, identity } = {}) {
+    // ── AC8: Audit-First (key-archive-discard) — OHNE Werte ─────────────────
+    try {
+      this.#auditStore.record({
+        identity: identity ?? null,
+        command: `bitwarden:key-archive-discard:${this.#itemName}`,
+      });
+    } catch {
+      return { status: 'error', errorClass: 'error', reason: 'Audit-Write fehlgeschlagen — Aktion abgebrochen' };
+    }
+
+    let sessionToken;
+    try {
+      sessionToken = await this.#bwLogin({ email, password, twofa, emailOtp, identity });
+    } catch (err) {
+      const errorClass = err.bwErrorClass ?? 'error';
+      return { status: 'error', errorClass, reason: sanitizeErrorReason(errorClass) };
+    }
+
+    try {
+      const item = await this.#bwGetItem(sessionToken, this.#itemName);
+      const fields = (Array.isArray(item.fields) ? item.fields : []).filter((f) => !(f && f.name === ARCHIVE_FIELD_NAME));
+      const mutatedItem = { ...item, fields };
+
+      await this.#bwEditItem(sessionToken, item.id, mutatedItem);
+      await this.#bwLogout(sessionToken);
+      return { status: 'discarded' };
+    } catch (err) {
+      await this.#bwLogout(sessionToken);
+      const errorClass = err.bwErrorClass ?? 'item-update-failed';
+      return { status: 'error', errorClass, reason: sanitizeErrorReason(errorClass) };
+    }
+  }
+
   // ── Private Bitwarden-CLI-Methoden ────────────────────────────────────────────
 
   /**
@@ -847,6 +1008,88 @@ export class BitwardenMasterKeyService {
     }
 
     return stdout.trim();
+  }
+
+  /**
+   * Liest ein vollständiges Bitwarden-Item als JSON (get-modify-encode-edit-Technik,
+   * analog `BitwardenDeployLoginService#openSession().readItemFields`).
+   *
+   * AC6: BW_SESSION via env. Wirft mit bwErrorClass='item-not-found' wenn das Item
+   * nicht existiert.
+   *
+   * @param {string} sessionToken
+   * @param {string} itemName
+   * @returns {Promise<object>} vollständiges Item-JSON (inkl. `id`, `login`, `fields`)
+   */
+  async #bwGetItem(sessionToken, itemName) {
+    const args = ['get', 'item', itemName];
+    const env = {
+      BW_SESSION: sessionToken,
+      HOME: process.env.HOME ?? '/home/node',
+      PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin',
+    };
+
+    const { stdout, stderr, exitCode } = await this.#spawnBw(args, { env });
+
+    if (exitCode !== 0) {
+      const s = (stderr ?? '').toLowerCase();
+      if (s.includes('not found') || s.includes('no item')) {
+        const err = new Error('Bitwarden-Item nicht gefunden');
+        err.bwErrorClass = 'item-not-found';
+        throw err;
+      }
+      const err = new Error(`bw get item fehlgeschlagen (exit ${exitCode})`);
+      err.bwErrorClass = 'error';
+      throw err;
+    }
+
+    let item;
+    try {
+      item = JSON.parse(stdout);
+    } catch {
+      const err = new Error('bw get item: ungültige JSON-Antwort');
+      err.bwErrorClass = 'item-update-failed';
+      throw err;
+    }
+    if (!item || typeof item.id !== 'string' || !item.id) {
+      const err = new Error('bw get item: Item ohne id');
+      err.bwErrorClass = 'item-update-failed';
+      throw err;
+    }
+    return item;
+  }
+
+  /**
+   * Schreibt ein mutiertes Item-JSON zurück (get-modify-encode-edit-Technik).
+   *
+   * AC6: BW_SESSION via env, Werte NUR via stdin (encode + edit) — nie Argv.
+   *
+   * @param {string} sessionToken
+   * @param {string} itemId
+   * @param {object} itemJson - vollständiges, mutiertes Item-Objekt
+   * @returns {Promise<void>}
+   */
+  async #bwEditItem(sessionToken, itemId, itemJson) {
+    const env = {
+      BW_SESSION: sessionToken,
+      HOME: process.env.HOME ?? '/home/node',
+      PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin',
+    };
+
+    const encodeResult = await this.#spawnBw(['encode'], { env, input: JSON.stringify(itemJson) });
+    if (encodeResult.exitCode !== 0) {
+      const err = new Error('bw encode fehlgeschlagen');
+      err.bwErrorClass = 'item-update-failed';
+      throw err;
+    }
+    const encodedItem = encodeResult.stdout.trim();
+
+    const editResult = await this.#spawnBw(['edit', 'item', itemId], { env, input: encodedItem });
+    if (editResult.exitCode !== 0) {
+      const err = new Error('bw edit item fehlgeschlagen');
+      err.bwErrorClass = 'item-update-failed';
+      throw err;
+    }
   }
 
   /**

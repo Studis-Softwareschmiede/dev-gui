@@ -117,6 +117,59 @@ export async function postCredentialUnlock({ email, password, twofa, emailOtp, c
   return { ...data, httpStatus: res.status };
 }
 
+// ── Master-Key-Rotation (credential-key-rotation v2, S-342) ──────────────────
+
+/**
+ * POST /api/settings/credential-rotate
+ * Body: { newKey, bwEmail?, bwPassword?, bwTwofa?, bwEmailOtp? }
+ * Stufe 1 (Re-Encryption + Round-trip-Verifikation + Swap) läuft immer; Stufe 2
+ * (Bitwarden-Archivierung, AC4/AC11) nur wenn bwEmail+bwPassword mitgeliefert werden.
+ * Weder Key- noch Bitwarden-Login-Werte erscheinen in der Response (AC9).
+ *
+ * @param {{ newKey: string, bwEmail?: string, bwPassword?: string, bwTwofa?: string, bwEmailOtp?: string }} params
+ * @param {typeof fetch} [fetchImpl]
+ * @returns {Promise<{ ok: boolean, swapped?: boolean, reason?: string, backup?: object, archive?: { ok: boolean, errorClass?: string }, httpStatus: number }>}
+ */
+export async function postCredentialRotate({ newKey, bwEmail, bwPassword, bwTwofa, bwEmailOtp }, fetchImpl) {
+  const fn = fetchImpl ?? globalThis.fetch.bind(globalThis);
+  const body = { newKey };
+  if (bwEmail && bwEmail.trim()) body.bwEmail = bwEmail.trim();
+  if (bwPassword) body.bwPassword = bwPassword;
+  if (bwTwofa && bwTwofa.trim()) body.bwTwofa = bwTwofa.trim();
+  if (bwEmailOtp && bwEmailOtp.trim()) body.bwEmailOtp = bwEmailOtp.trim();
+  const res = await fn('/api/settings/credential-rotate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  return { ...data, httpStatus: res.status };
+}
+
+/**
+ * POST /api/settings/credential-key-archive-discard
+ * Body: { bwEmail, bwPassword, bwTwofa?, bwEmailOtp?, confirm: true }
+ * Entsorgt PERMANENT das gesamte „Schlüssel-Archiv"-Feld — GETRENNTE, explizit
+ * bestätigte Aktion (AC5/AC13), niemals Teil des normalen Rotations-Flows.
+ *
+ * @param {{ bwEmail: string, bwPassword: string, bwTwofa?: string, bwEmailOtp?: string }} params
+ * @param {typeof fetch} [fetchImpl]
+ * @returns {Promise<{ ok: boolean, reason?: string, httpStatus: number }>}
+ */
+export async function postCredentialKeyArchiveDiscard({ bwEmail, bwPassword, bwTwofa, bwEmailOtp }, fetchImpl) {
+  const fn = fetchImpl ?? globalThis.fetch.bind(globalThis);
+  const body = { bwEmail, bwPassword, confirm: true };
+  if (bwTwofa && bwTwofa.trim()) body.bwTwofa = bwTwofa.trim();
+  if (bwEmailOtp && bwEmailOtp.trim()) body.bwEmailOtp = bwEmailOtp.trim();
+  const res = await fn('/api/settings/credential-key-archive-discard', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  return { ...data, httpStatus: res.status };
+}
+
 // ── API-Helfer ────────────────────────────────────────────────────────────────
 
 export async function fetchCredentials() {
