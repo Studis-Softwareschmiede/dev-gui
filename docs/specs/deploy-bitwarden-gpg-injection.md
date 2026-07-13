@@ -3,6 +3,8 @@
 **Schicht 3 (Spec).** Quelle für Schicht 1/2: `docs/concept.md`, `docs/architecture.md`.
 **Bereich:** `deployment`. **Feature:** F-072.
 
+> **v2 — Item-Namens-Konvention `env.gpg-passphrase-<app>` (Owner 2026-07-13).** Die Item-Namens-Konvention lautet jetzt **`env.gpg-passphrase-<app>`** (vormals `deploy-gpg-<app>`). Alle nachstehenden Erwähnungen von `deploy-gpg-<app>` (AC14/AC15) gelten als auf **`env.gpg-passphrase-<app>`** umgestellt; **AC16** verdrahtet den daraus abgeleiteten Frontend-Default. Die Anlage-/Rotations-Seite dieser Passphrasen ist in [[per-app-gpg-passphrase-provisioning]] + [[per-app-gpg-passphrase-rotation]] spezifiziert.
+
 ## 1. Ergebnis in einem Satz
 
 dev-gui ist der **einzige** Bitwarden-vertraute Knoten. Beim Deployment einer **fremden**
@@ -22,7 +24,7 @@ Bereits existierend (unverändert):
 - **R2/S3-GPG-Backup** — GPG-verschlüsselte Sicherung des Stores off-host.
 - **Bitwarden** hält (a) dev-guis eigenen **Master-Key** (Item `dev-gui-master-key`,
   via `BitwardenMasterKeyService`) **und** (b) die **per-App-GPG-Passphrasen**
-  (`env.gpg-passphrase-<app>`) für fremde Apps.
+  (`deploy-gpg-<app>`) für fremde Apps.
 
 **Henne-Ei-Kern (bindend):** Der Master-Key kommt aus Bitwarden. Der **Bitwarden-Zugang**
 selbst (API-Key + Master-Passwort) kann daher **nicht** im `CredentialStore` liegen (der
@@ -122,11 +124,19 @@ Unlock-Dialog). Diese Spec ergänzt den **unbeaufsichtigten** Weg (API-Key, kein
   Wert als Env `GPG_PASSPHRASE` in den `docker run`/compose-Aufruf injizieren (S2/S3).
   Der Wert erscheint nicht in Log/Audit/Response; das Audit hält nur
   `deploy:gpg-fetch:<app>` (ohne Wert, S4).
-- **AC15** — Item-Namens-Konvention: Default `env.gpg-passphrase-<app>` (`<app>` = Ziel-Slug;
-  benannt nach der `.env.gpg`, die die Passphrase entschlüsselt — Owner-Entscheidung
-  2026-07-13, vormals `deploy-gpg-<app>`);
-  überschreibbar per Ziel-Feld `gpg_bw_item`. Fehlt das Item in Bitwarden → Deploy-Abbruch
-  mit `reason: "gpg-item-not-found"` (klarer Hinweis, welches Item angelegt werden muss).
+- **AC15** — Item-Namens-Konvention: Default **`env.gpg-passphrase-<app>`** (`<app>` = Ziel-Slug;
+  vormals `deploy-gpg-<app>`); überschreibbar per Ziel-Feld `gpg_bw_item`. Fehlt das Item in
+  Bitwarden → Deploy-Abbruch mit `reason: "gpg-item-not-found"` (klarer Hinweis, welches Item
+  angelegt werden muss).
+- **AC16** — **Frontend-Default abgeleitet (Bonus-Lücke, Owner 2026-07-13):** Das Deploy-Formular
+  (`DeploymentsView`) leitet den `gpgBwItem`-Default automatisch als **`env.gpg-passphrase-<slug>`**
+  aus dem gewählten Ziel-Slug ab und sendet ihn im Deploy-Request mit (der AC15-Default war
+  bislang nie im Frontend verdrahtet). Der abgeleitete Wert ist im Formular **überschreibbar**;
+  ein vom Nutzer gesetzter Wert wird nicht überschrieben. Der Erklärtext im Settings-Reiter
+  „Deploy-Zugang" (`DeployZugangCategory`) nennt die Konvention `env.gpg-passphrase-<app>`
+  (nicht mehr `deploy-gpg-<app>`). (Testbar: bei gewähltem Ziel-Slug `foo` ist der
+  Formular-Default `env.gpg-passphrase-foo`; ein manuell gesetzter Wert bleibt erhalten und wird
+  gesendet.)
 
 ## 5. Tests (Pflicht)
 

@@ -1,16 +1,17 @@
 ---
 id: credential-key-rotation
-title: Master-Key-Rotation des Credential-Stores (atomare Re-Encryption + rollendes Bitwarden-Fenster)
-status: draft
+title: Master-Key-Rotation des Credential-Stores (atomare Re-Encryption + datiertes Schlüssel-Archiv)
+status: active
 area: einstellungen
-version: 1
+spec_format: use-case-2.0
+version: 2
 ---
 
 # Spec: Master-Key-Rotation des Credential-Stores (`credential-key-rotation`)
 
 > **Schicht 3 von 3.** Testbares Verhalten + Verträge, sprach-/paradigma-unabhängig.
 > **Source of Truth** für `coder`, `tester`, `reviewer`. Security-kritisch.
-> **STATUS: DEFERRED** — diese Spec wird **jetzt nur geschrieben**, **nicht** im aktuellen `/flow`-Lauf umgesetzt. Umsetzung als späteres Item.
+> **v2 — ENT-DEFERRED + Archiv-Modell (Owner 2026-07-13, löst S-083 / #194).** Der frühere DEFERRED-Status ist **aufgehoben** (Owner-Auftrag 2026-07-13); diese Spec wird jetzt umgesetzt. Das rollende **current/previous**-Item-Fenster aus v1 wird durch ein **datiertes Schlüssel-Archiv im Feld des Items `dev-gui-master-key`** präzisiert (AC11–AC13 unten): der alte Key wird **nicht gelöscht**, sondern **datiert archiviert**, solange alte S3/R2-GPG-Backups existieren, die ihn zum Entschlüsseln brauchen; unmittelbar nach der Rotation wird ein **frisches Off-Host-Backup mit dem neuen Key** erzeugt. Wo v1-Text (rollendes current/previous-Item-Fenster) und v2-Archiv-Modell abweichen, gilt **v2**.
 
 ## Zweck
 Den Master-Key des Credential-Stores (`DEVGUI_CRED_MASTER_KEY`, [[credential-master-key-decoupling]]) **sicher rotieren**: das gesamte `secrets.enc.json` wird vom alten auf einen neuen Master-Key re-verschlüsselt, der neue Key wird in Bitwarden als rollendes current/previous-Fenster geführt, und **jeder** Schritt ist umkehrbar bis zum atomaren Commit-Punkt. Goldenes Prinzip: **alten Key/Zustand nie wegwerfen, bis der neue verifiziert ist.** Nur `DEVGUI_CRED_MASTER_KEY` wird rotiert — **nie** `GPG_PASSPHRASE` (Entkopplung aus [[credential-master-key-decoupling]] ist Voraussetzung).
@@ -41,10 +42,15 @@ Den Master-Key des Credential-Stores (`DEVGUI_CRED_MASTER_KEY`, [[credential-mas
 - **AC9** — Weder alter noch neuer Key erscheint in Log/Audit/Response/WS/Argv/Frontend-Bundle (testbar: Werte tauchen nirgends auf).
 - **AC10** — Es wird **ausschließlich** `DEVGUI_CRED_MASTER_KEY` rotiert; `GPG_PASSPHRASE`/`.env.gpg` bleiben unberührt.
 
+### v2 — Datiertes Schlüssel-Archiv + frisches Backup + UI (Owner 2026-07-13, löst S-083)
+- **AC11** — **Datiertes Schlüssel-Archiv statt Löschen (präzisiert AC4/AC5):** Beim Umschalten wird der neue Key aktiv, und der bisherige Key wird **datiert archiviert** — als datierter Eintrag im Feld **„Schlüssel-Archiv"** des Bitwarden-Items **`dev-gui-master-key`** (der neue Key wird der aktive Wert des Items). Der alte Key wird **nicht** gelöscht, solange **alte S3/R2-GPG-Backups** existieren, die ihn zum Entschlüsseln brauchen. (Testbar: nach Rotation ist das aktive Item-Feld der neue Key; das Feld „Schlüssel-Archiv" enthält einen datierten Eintrag mit dem alten Key; kein Lösch-Call.)
+- **AC12** — **Frisches Off-Host-Backup mit neuem Key (verzahnt AC6 + [[credential-backup]]):** **Unmittelbar nach** grünem Swap wird ein **frisches** Off-Host-Backup erzeugt, das mit dem **neuen** Key lesbar ist; ältere Backups bleiben über den archivierten (previous) Key lesbar. Schlägt nur das frische Backup fehl, gilt die Rotation als erfolgreich (best-effort, geheimnisfreie Warnung) — der neue Key bleibt aktiv und über das Item recoverbar. (Testbar: nach Rotation existiert ein neues, mit dem neuen Key lesbares Off-Host-Artefakt; Backup-Fehler rollt die Rotation nicht zurück.)
+- **AC13** — **Zweistufige UI-Quittung (Muster Backup-Settings):** Die Rotation wird über eine **zweistufige Quittung** in den Einstellungen ausgelöst (Stufe 1 „Re-Encryption + Round-trip-Verifikation", Stufe 2 „umgeschaltet + Backup"); bleibt eine Stufe aus/fehlerhaft, erscheint eine **stufen-genaue, geheimnisfreie** Warnung statt grüner Quittung. Die permanente Entsorgung eines archivierten Keys (nur bei Kompromittierung, AC5) ist eine **getrennte, explizit bestätigte** Aktion. (Testbar über UI-State je Stufe; Entsorgung erfordert eigene Bestätigung.)
+
 ## Verträge
 - **Rotation-Operation (intern, neuer Service/Endpoint — später):** `POST /api/settings/credential-rotate` (hinter Access + `CRED_ADMIN_EMAILS`, Audit-First). Request liefert/triggert den neuen Key (aus Bitwarden-Beschaffung [[bitwarden-master-key-unlock]]); Response meldet nur Erfolg/Phase, **nie** einen Key.
 - **`CredentialStore`-Erweiterung (intern, später):** `rotate(newKey): Promise<{ ok: true } | { ok: false, reason }>` — führt (a)–(d) aus; gibt **nie** einen Key zurück; im Fehlerfall sanitisierter `reason` ohne Wert.
-- **Bitwarden-Fenster:** datierte Items, Bezeichner-Schema abgeleitet aus dem Basis-Item `dev-gui-cred-master-key` (z.B. `…-current` / `…-previous` oder datiert) — finale Benennung beim Umsetzungs-Item.
+- **Bitwarden-Archiv (v2, verbindlich):** Der neue Key wird der **aktive** Wert des Items `dev-gui-master-key`; der bisherige Key wird **datiert** ins Custom-Feld **„Schlüssel-Archiv"** desselben Items geschrieben (append, nie überschreiben) — kein Löschen, solange alte S3/R2-Backups ihn brauchen (AC11). (Der v1-Vorschlag `…-current`/`…-previous`-Items wird durch dieses Archiv-Feld ersetzt.)
 - **Backup-Artefakt:** frische, mit dem neuen Key lesbare Kopie von `secrets.enc.json`; Ablageort beim Umsetzungs-Item (Backup/Restore-Verzahnung war in ADR-014 bewusst out-of-scope und wird hier als Folge zusammengeführt).
 
 ## Edge-Cases & Fehlerverhalten
@@ -67,5 +73,6 @@ Den Master-Key des Credential-Stores (`DEVGUI_CRED_MASTER_KEY`, [[credential-mas
 ## Abhängigkeiten
 - [[credential-master-key-decoupling]] (Entkopplung ist **Voraussetzung** — nur `DEVGUI_CRED_MASTER_KEY` wird rotiert).
 - [[credential-runtime-unlock]] / ADR-007 (Krypto, scrypt/AES-GCM, atomares Schreiben, `.env`-Persistenz).
-- [[bitwarden-master-key-unlock]] (Key-Beschaffung/-Anlage in Bitwarden; current/previous-Fenster).
+- [[bitwarden-master-key-unlock]] (Key-Beschaffung/-Anlage in Bitwarden; `bw`-Item-/Feld-Update-Technik für das datierte Schlüssel-Archiv, AC11).
+- [[credential-backup]] (frisches Off-Host-Backup mit neuem Key nach der Rotation, AC12; UI-Muster zweistufige Quittung, AC13).
 - [[access-and-guardrails]] (Access-Mauer, `CRED_ADMIN_EMAILS`, Audit-First, Floor).
