@@ -27,6 +27,13 @@
  *         metacharacter injection surface); the hard `ANTHROPIC_API_KEY`/
  *         `OPENAI_API_KEY` child-env block is unaffected by the argv change.
  *
+ * Covers (per-app-gpg-passphrase-provisioning.md, ADR-021, S-336):
+ *   AC5/AC6 — `start(projectPath, { env })` merges a per-run env override
+ *         (e.g. `GPG_PASS_FILE`) additively on top of `buildChildEnv()`; the
+ *         hard `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` block survives the merge
+ *         (Defense in Depth — stripped again AFTER merging); omitting `env`
+ *         stays byte-identical to the pre-ADR-021 behaviour (no regression).
+ *
  * Pattern: injectable `spawnFn` returning a fake EventEmitter-based child
  * process (stdout/stderr sub-emitters + kill() spy) — no real `claude` spawn,
  * consistent with `HeadlessFlowRunner.test.js`/`HeadlessReconcileRunner.test.js`.
@@ -175,5 +182,64 @@ describe('HeadlessRunnerCore — AC8 (Security-Floor): child-env trust boundary 
 
     const job = core.getJob(jobId);
     expect(JSON.stringify(job)).not.toMatch(/sk-ant-oat01-should-not-leak-into-job-state/);
+  });
+});
+
+describe('HeadlessRunnerCore — ADR-021 (S-336): per-run env override (start(projectPath, { env }))', () => {
+  it('merges overrides.env additively on top of buildChildEnv() for THIS run only', () => {
+    const spawnFn = jest.fn(() => makeFakeChild());
+    const core = new HeadlessRunnerCore({
+      spawnFn,
+      timeoutMs: 10_000,
+      defaultCommand: '/agent-flow:new-project',
+      defaultArgs: [],
+    });
+
+    core.start('/workspace/proj-env', { env: { GPG_PASS_FILE: '/tmp/gpg-pass-abc/gpg-pass' } });
+
+    const [, , opts] = spawnFn.mock.calls[0];
+    expect(opts.env.GPG_PASS_FILE).toBe('/tmp/gpg-pass-abc/gpg-pass');
+    // Base allowlist (e.g. PATH, if set in process.env) is still present — additive merge.
+    if (process.env.PATH !== undefined) {
+      expect(opts.env.PATH).toBe(process.env.PATH);
+    }
+  });
+
+  it('a start() WITHOUT overrides.env stays byte-identical to buildChildEnv() (no regression)', () => {
+    const spawnFn = jest.fn(() => makeFakeChild());
+    const core = new HeadlessRunnerCore({
+      spawnFn,
+      timeoutMs: 10_000,
+      defaultCommand: '/agent-flow:reconcile',
+      defaultArgs: [],
+    });
+
+    core.start('/workspace/proj-no-env');
+
+    const [, , opts] = spawnFn.mock.calls[0];
+    expect(opts.env).toEqual(buildChildEnv());
+  });
+
+  it('overrides.env can NEVER smuggle ANTHROPIC_API_KEY/OPENAI_API_KEY into the child env (Defense in Depth)', () => {
+    const spawnFn = jest.fn(() => makeFakeChild());
+    const core = new HeadlessRunnerCore({
+      spawnFn,
+      timeoutMs: 10_000,
+      defaultCommand: '/agent-flow:new-project',
+      defaultArgs: [],
+    });
+
+    core.start('/workspace/proj-env-blocked', {
+      env: {
+        GPG_PASS_FILE: '/tmp/gpg-pass-xyz/gpg-pass',
+        ANTHROPIC_API_KEY: 'sk-ant-should-never-appear',
+        OPENAI_API_KEY: 'sk-openai-should-never-appear',
+      },
+    });
+
+    const [, , opts] = spawnFn.mock.calls[0];
+    expect(opts.env.GPG_PASS_FILE).toBe('/tmp/gpg-pass-xyz/gpg-pass');
+    expect('ANTHROPIC_API_KEY' in opts.env).toBe(false);
+    expect('OPENAI_API_KEY' in opts.env).toBe(false);
   });
 });

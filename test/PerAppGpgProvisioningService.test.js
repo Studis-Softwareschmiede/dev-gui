@@ -1,6 +1,7 @@
 /**
  * PerAppGpgProvisioningService.test.js — Unit-Tests für den Kern-Provisionierungs-
- * Dienst (docs/specs/per-app-gpg-passphrase-provisioning.md, F-073/S-335).
+ * Dienst (docs/specs/per-app-gpg-passphrase-provisioning.md, F-073/S-335/S-336;
+ * ADR-021 in docs/architecture.md).
  *
  * Covers (per-app-gpg-passphrase-provisioning.md):
  *   AC1 — kryptografisch starke Zufalls-Passphrase (>= 32 Byte, base64url — kein
@@ -9,16 +10,33 @@
  *         vorhandenes Item → No-Op (`already-exists`), KEIN createItem-Aufruf.
  *   AC3 — Zugang nicht ready → `access-not-ready`, KEIN bw-Aufruf (openSession()
  *         wirft `access-incomplete` VOR jeder Session — kein itemExists/createItem).
+ *   AC4 (S-336) — `withScaffoldPassphrase(app, fn)`: Scaffold-Erfolg → genau EIN
+ *         `createItem`-Aufruf (`created`); Scaffold-Fehlschlag (`fn()` rejected)
+ *         → `failed`, KEIN `createItem`-Aufruf (kein Teil-Zustand).
+ *   AC5 (S-336) — die Passphrase wird `fn({ gpgPassFilePath })` über eine
+ *         TEMPORÄRE `0600`-Datei gereicht (nicht Argv); die Datei existiert
+ *         WÄHREND `fn()` läuft und ist danach — AUCH bei Scaffold-Fehlschlag —
+ *         garantiert entfernt (`finally`, kein verwaistes Klartext-Artefakt).
+ *   AC6 (S-336) — dieselbe (in `withScaffoldPassphrase` erzeugte) Passphrase
+ *         steht in der `GPG_PASS_FILE`-Datei UND wird an `createItem` gereicht
+ *         (Wert-Identität, kein Delegieren an `provision()`s eigene Generierung).
  *   AC8 — Response ist geheimnisfrei: nur { result, reason? }, nie die Passphrase.
  *   AC9 — Audit-First: Audit-Eintrag `deploy:gpg-provision:<app>` VOR openSession();
  *         schlägt der Audit-Write fehl → `failed`, kein openSession()-Aufruf.
  *   (Security-Floor) Ungültiger App-Slug → `failed`, kein bw-Aufruf, kein Audit.
+ *   (Edge-Cases, ADR-021) Zugang unready / Slug-Kollision bei Vor-Prüfung →
+ *         `fn({})` (Plugin-Fallback-Scaffold OHNE `gpgPassFilePath`), KEINE
+ *         Datei, KEIN Item.
  *
  * Strategy: deployLoginService.openSession() wird gemockt und liefert eine
- * Session mit itemExists/createItem/close-Spies — kein echtes `bw`.
+ * Session mit itemExists/createItem/close-Spies — kein echtes `bw`. Für
+ * `withScaffoldPassphrase` wird zusätzlich `fsDeps` (mkdtemp/writeFile/chmod/rm)
+ * injiziert, um die Existenz/Löschung der temp-Datei real (echtes `os.tmpdir()`-
+ * Verzeichnis) zu verifizieren — kein reiner Mock-Stub ohne FS-Berührung.
  */
 
 import { describe, it, expect, jest } from '@jest/globals';
+import { readFile, stat } from 'node:fs/promises';
 
 import { PerAppGpgProvisioningService, gpgItemNameFor } from '../src/PerAppGpgProvisioningService.js';
 
@@ -200,5 +218,199 @@ describe('PerAppGpgProvisioningService — Konstruktor-Guards', () => {
 
   it('wirft ohne auditStore', () => {
     expect(() => new PerAppGpgProvisioningService({ deployLoginService: { openSession: async () => {} } })).toThrow();
+  });
+});
+
+describe('PerAppGpgProvisioningService — withScaffoldPassphrase() — AC4/AC5/AC6 (S-336)', () => {
+  it('Scaffold-Erfolg → created; GPG_PASS_FILE existiert WÄHREND fn() (0600), ist DANACH entfernt; createItem bekommt DIESELBE Passphrase (AC5/AC6)', async () => {
+    const { session, calls } = makeSession({ exists: false });
+    const openSession = jest.fn(async () => session);
+    const audit = auditSpy();
+    const svc = new PerAppGpgProvisioningService({ deployLoginService: { openSession }, auditStore: audit });
+
+    let observedPath;
+    let observedContentDuringRun;
+    const fn = jest.fn(async ({ gpgPassFilePath }) => {
+      observedPath = gpgPassFilePath;
+      expect(typeof gpgPassFilePath).toBe('string');
+      observedContentDuringRun = await readFile(gpgPassFilePath, 'utf8');
+      const st = await stat(gpgPassFilePath);
+      // AC5: 0600 (nur Owner lesbar/schreibbar).
+      expect(st.mode & 0o777).toBe(0o600);
+    });
+
+    const result = await svc.withScaffoldPassphrase('myapp', fn, { identity: 'a@b.ch' });
+
+    expect(result).toEqual({ result: 'created' });
+    expect(fn).toHaveBeenCalledTimes(1);
+    expect(calls.createItem.length).toBe(1);
+    expect(calls.createItem[0].name).toBe('env.gpg-passphrase-myapp');
+
+    // AC6: dieselbe Passphrase in Datei UND createItem.
+    expect(calls.createItem[0].pass).toBe(observedContentDuringRun);
+    expect(observedContentDuringRun.length).toBeGreaterThanOrEqual(40); // AC1: >= 32 Byte base64url
+    expect(observedContentDuringRun).not.toMatch(/[+/=]/);
+
+    // AC5: Datei ist NACH dem Lauf garantiert entfernt (kein verwaistes Klartext-Artefakt).
+    await expect(stat(observedPath)).rejects.toThrow();
+
+    // Passphrase erscheint nirgends im Response/Audit (AC8).
+    expect(JSON.stringify(result)).not.toContain(observedContentDuringRun);
+    expect(JSON.stringify(audit.calls)).not.toContain(observedContentDuringRun);
+  });
+
+  it('Scaffold-Fehlschlag (fn() rejected) → failed, KEIN createItem-Aufruf; temp-Datei TROTZDEM entfernt (AC5 Fehlerpfad)', async () => {
+    const { session, calls } = makeSession({ exists: false });
+    const openSession = jest.fn(async () => session);
+    const svc = new PerAppGpgProvisioningService({ deployLoginService: { openSession }, auditStore: auditSpy() });
+
+    let observedPath;
+    const fn = jest.fn(async ({ gpgPassFilePath }) => {
+      observedPath = gpgPassFilePath;
+      // Zum Zeitpunkt des Scaffold-Fehlschlags existiert die Datei noch.
+      await expect(stat(gpgPassFilePath)).resolves.toBeDefined();
+      throw new Error('scaffold boom');
+    });
+
+    const result = await svc.withScaffoldPassphrase('myapp', fn);
+
+    expect(result.result).toBe('failed');
+    expect(calls.createItem.length).toBe(0);
+    await expect(stat(observedPath)).rejects.toThrow();
+  });
+
+  it('bw-Fehler bei createItem NACH Scaffold-Erfolg → failed; temp-Datei trotzdem entfernt (kein Teil-Zustand)', async () => {
+    const { session } = makeSession({ exists: false, createFails: true });
+    const openSession = jest.fn(async () => session);
+    const svc = new PerAppGpgProvisioningService({ deployLoginService: { openSession }, auditStore: auditSpy() });
+
+    let observedPath;
+    const fn = jest.fn(async ({ gpgPassFilePath }) => {
+      observedPath = gpgPassFilePath;
+    });
+
+    const result = await svc.withScaffoldPassphrase('myapp', fn);
+
+    expect(result.result).toBe('failed');
+    await expect(stat(observedPath)).rejects.toThrow();
+  });
+
+  it('AC4: genau EIN Provisionierungs-Aufruf pro Scaffold-Erfolg (ein einziger createItem-Call)', async () => {
+    const { session, calls } = makeSession({ exists: false });
+    const openSession = jest.fn(async () => session);
+    const svc = new PerAppGpgProvisioningService({ deployLoginService: { openSession }, auditStore: auditSpy() });
+    const fn = jest.fn(async () => {});
+
+    await svc.withScaffoldPassphrase('myapp', fn);
+
+    expect(fn).toHaveBeenCalledTimes(1);
+    expect(calls.createItem.length).toBe(1);
+  });
+
+  it('Item existiert bereits (Slug-Kollision bei Vor-Prüfung) → already-exists; fn({}) OHNE gpgPassFilePath, KEIN createItem, kein Überschreiben', async () => {
+    const { session, calls } = makeSession({ exists: true });
+    const openSession = jest.fn(async () => session);
+    const svc = new PerAppGpgProvisioningService({ deployLoginService: { openSession }, auditStore: auditSpy() });
+
+    const fn = jest.fn(async (args) => {
+      expect(args).toEqual({});
+    });
+
+    const result = await svc.withScaffoldPassphrase('myapp', fn);
+
+    expect(result.result).toBe('already-exists');
+    expect(fn).toHaveBeenCalledTimes(1);
+    expect(calls.createItem.length).toBe(0);
+  });
+
+  it('Zugang nicht ready (Vor-Prüfung) → access-not-ready; fn({}) OHNE gpgPassFilePath (Plugin-Fallback), KEIN itemExists/createItem', async () => {
+    const openSession = jest.fn(async () => {
+      const err = new Error('Deploy-Zugang unvollständig');
+      err.deployErrorClass = 'access-incomplete';
+      throw err;
+    });
+    const svc = new PerAppGpgProvisioningService({ deployLoginService: { openSession }, auditStore: auditSpy() });
+
+    const fn = jest.fn(async (args) => {
+      expect(args).toEqual({});
+    });
+
+    const result = await svc.withScaffoldPassphrase('myapp', fn);
+
+    expect(result.result).toBe('access-not-ready');
+    expect(fn).toHaveBeenCalledTimes(1);
+    expect(openSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('Zugang wird ZWISCHEN Vor-Prüfung und Item-Anlage unready → access-not-ready (Scaffold bereits erfolgreich, kein Teil-Zustand behauptet)', async () => {
+    const { session: preSession } = makeSession({ exists: false });
+    let callCount = 0;
+    const openSession = jest.fn(async () => {
+      callCount += 1;
+      if (callCount === 1) return preSession;
+      const err = new Error('unready inzwischen');
+      err.deployErrorClass = 'access-incomplete';
+      throw err;
+    });
+    const svc = new PerAppGpgProvisioningService({ deployLoginService: { openSession }, auditStore: auditSpy() });
+    const fn = jest.fn(async () => {});
+
+    const result = await svc.withScaffoldPassphrase('myapp', fn);
+
+    expect(result.result).toBe('access-not-ready');
+    expect(fn).toHaveBeenCalledTimes(1);
+    expect(openSession).toHaveBeenCalledTimes(2);
+  });
+
+  it('ungültiger App-Slug → failed, fn() wird NICHT aufgerufen, kein bw-Aufruf', async () => {
+    const openSession = jest.fn();
+    const fn = jest.fn();
+    const svc = new PerAppGpgProvisioningService({ deployLoginService: { openSession }, auditStore: auditSpy() });
+
+    const result = await svc.withScaffoldPassphrase('inv@lid slug', fn);
+
+    expect(result.result).toBe('failed');
+    expect(fn).not.toHaveBeenCalled();
+    expect(openSession).not.toHaveBeenCalled();
+  });
+
+  it('Audit-Write fehlgeschlagen → failed, fn() wird NICHT aufgerufen (kein Scaffold ohne Audit-Beleg)', async () => {
+    const openSession = jest.fn();
+    const fn = jest.fn();
+    const svc = new PerAppGpgProvisioningService({ deployLoginService: { openSession }, auditStore: auditSpy(true) });
+
+    const result = await svc.withScaffoldPassphrase('myapp', fn);
+
+    expect(result.result).toBe('failed');
+    expect(fn).not.toHaveBeenCalled();
+    expect(openSession).not.toHaveBeenCalled();
+  });
+
+  it('fn ist Pflicht — ohne Scaffold-Aufrufer → failed (interner Vertragsfehler, kein Crash)', async () => {
+    const svc = new PerAppGpgProvisioningService({
+      deployLoginService: { openSession: jest.fn() },
+      auditStore: auditSpy(),
+    });
+
+    const result = await svc.withScaffoldPassphrase('myapp', undefined);
+
+    expect(result.result).toBe('failed');
+  });
+
+  it('Temp-Datei kann nicht angelegt werden (mkdtemp-Fehler) → failed, fn() wird NICHT aufgerufen', async () => {
+    const { session } = makeSession({ exists: false });
+    const openSession = jest.fn(async () => session);
+    const fsDeps = { mkdtemp: jest.fn(async () => { throw new Error('disk full'); }) };
+    const svc = new PerAppGpgProvisioningService({
+      deployLoginService: { openSession },
+      auditStore: auditSpy(),
+      fsDeps,
+    });
+    const fn = jest.fn();
+
+    const result = await svc.withScaffoldPassphrase('myapp', fn);
+
+    expect(result.result).toBe('failed');
+    expect(fn).not.toHaveBeenCalled();
   });
 });
