@@ -10,9 +10,15 @@
  *          unlock-failed/bw-unreachable) ohne Rohtext-Leak.
  *   AC11 — openSession erlaubt mehrere Item-Reads in EINEM Login; close() räumt auf.
  *
+ * Covers (docs/specs/per-app-gpg-passphrase-provisioning.md, F-073/S-335):
+ *   AC1/AC2 — Item-Anlage-Technik der Session (`itemExists`/`createItem`):
+ *             Existenz-Check via `bw get item` (kein Passwort-Read nötig);
+ *             Anlage via `bw encode` (stdin) + `bw create item` (stdin) — die
+ *             Passphrase erscheint NIEMALS im Argv (harte Assertion).
+ *
  * Strategy: injizierter _spawnBw-Mock, der je bw-Kommando ein kanonisches Ergebnis
- * liefert und ALLE Aufrufe (args+env) mitschneidet — so lässt sich beweisen, dass
- * kein Geheimnis je im Argv landet.
+ * liefert und ALLE Aufrufe (args+env+input) mitschneidet — so lässt sich beweisen,
+ * dass kein Geheimnis je im Argv landet.
  */
 
 import { describe, it, beforeEach, afterEach, expect } from '@jest/globals';
@@ -47,8 +53,8 @@ async function readyStore() {
 /** Erstellt einen bw-Spawn-Mock + Aufzeichnung. `plan` steuert Fehlschläge. */
 function makeSpawn(plan = {}) {
   const calls = [];
-  const spawn = async (args, { env } = {}) => {
-    calls.push({ args: [...args], env: { ...env } });
+  const spawn = async (args, { env, input } = {}) => {
+    calls.push({ args: [...args], env: { ...env }, input });
     const cmd = args[0];
     if (cmd === 'config') return { stdout: '', stderr: '', exitCode: 0 };
     if (cmd === 'login') {
@@ -61,11 +67,27 @@ function makeSpawn(plan = {}) {
       return { stdout: SESSION_TOKEN + '\n', stderr: '', exitCode: 0 };
     }
     if (cmd === 'get') {
+      const sub = args[1]; // 'password' | 'item'
       const item = args[2];
+      if (sub === 'item') {
+        // F-073/S-335 AC2: Existenz-Check — plan.existingItems: Set<string> steuert Treffer.
+        if (plan.existingItems instanceof Set && plan.existingItems.has(item)) {
+          return { stdout: JSON.stringify([{ id: 'fixture-id', name: item }]), stderr: '', exitCode: 0 };
+        }
+        return { stdout: '', stderr: 'Not found.', exitCode: 1 };
+      }
       if (plan.itemNotFound || item === 'deploy-gpg-missing') {
         return { stdout: '', stderr: 'Not found.', exitCode: 1 };
       }
       return { stdout: `passphrase-for-${item}\n`, stderr: '', exitCode: 0 };
+    }
+    if (cmd === 'encode') {
+      if (plan.encodeFail) return { stdout: '', stderr: 'encode failed', exitCode: 1 };
+      return { stdout: `ENCODED[${input}]\n`, stderr: '', exitCode: 0 };
+    }
+    if (cmd === 'create') {
+      if (plan.createFail) return { stdout: '', stderr: 'create failed', exitCode: 1 };
+      return { stdout: 'created ok\n', stderr: '', exitCode: 0 };
     }
     if (cmd === 'logout') return { stdout: '', stderr: '', exitCode: 0 };
     return { stdout: '', stderr: 'unexpected', exitCode: 1 };
@@ -197,5 +219,80 @@ describe('BitwardenDeployLoginService — Item-Read (AC9/AC11)', () => {
     expect(calls.filter((c) => c.args[0] === 'login').length).toBe(1);
     expect(calls.filter((c) => c.args[0] === 'unlock').length).toBe(1);
     expect(calls.filter((c) => c.args[0] === 'get').length).toBe(2);
+  });
+});
+
+describe('BitwardenDeployLoginService — Session-Item-Anlage (F-073/S-335 AC1/AC2)', () => {
+  it('itemExists: vorhandenes Item → true; kein zweiter Passwort-Read nötig', async () => {
+    const store = await readyStore();
+    const { spawn, calls } = makeSpawn({ existingItems: new Set(['env.gpg-passphrase-myapp']) });
+    const svc = new BitwardenDeployLoginService({ accessStore: store, auditStore: auditSpy(), _spawnBw: spawn });
+
+    const session = await svc.openSession({});
+    const exists = await session.itemExists('env.gpg-passphrase-myapp');
+    await session.close();
+
+    expect(exists).toBe(true);
+    const getCall = calls.find((c) => c.args[0] === 'get');
+    expect(getCall.args).toEqual(['get', 'item', 'env.gpg-passphrase-myapp']);
+  });
+
+  it('itemExists: fehlendes Item → false, kein create-Aufruf ausgelöst', async () => {
+    const store = await readyStore();
+    const { spawn, calls } = makeSpawn({ existingItems: new Set() });
+    const svc = new BitwardenDeployLoginService({ accessStore: store, auditStore: auditSpy(), _spawnBw: spawn });
+
+    const session = await svc.openSession({});
+    const exists = await session.itemExists('env.gpg-passphrase-neu');
+    await session.close();
+
+    expect(exists).toBe(false);
+    expect(calls.some((c) => c.args[0] === 'create')).toBe(false);
+    expect(calls.some((c) => c.args[0] === 'encode')).toBe(false);
+  });
+
+  it('createItem: encode (stdin) + create item (stdin) — Passphrase NIEMALS in Argv', async () => {
+    const store = await readyStore();
+    const { spawn, calls } = makeSpawn();
+    const svc = new BitwardenDeployLoginService({ accessStore: store, auditStore: auditSpy(), _spawnBw: spawn });
+    const passphrase = 'SUPER-SECRET-PASSPHRASE-VALUE';
+
+    const session = await svc.openSession({});
+    await session.createItem('env.gpg-passphrase-myapp', passphrase);
+    await session.close();
+
+    const encodeCall = calls.find((c) => c.args[0] === 'encode');
+    const createCall = calls.find((c) => c.args[0] === 'create');
+    expect(encodeCall).toBeDefined();
+    expect(createCall).toBeDefined();
+    expect(createCall.args).toEqual(['create', 'item']);
+    // Passphrase geht nur via stdin (input), nie über args (Argv)
+    expect(encodeCall.input).toContain(passphrase);
+    expect(encodeCall.input).toContain('env.gpg-passphrase-myapp');
+    for (const call of calls) {
+      expect(call.args.join(' ')).not.toContain(passphrase);
+    }
+  });
+
+  it('createItem: bw encode fehlgeschlagen → item-create-failed, kein create-Aufruf', async () => {
+    const store = await readyStore();
+    const { spawn, calls } = makeSpawn({ encodeFail: true });
+    const svc = new BitwardenDeployLoginService({ accessStore: store, auditStore: auditSpy(), _spawnBw: spawn });
+
+    const session = await svc.openSession({});
+    await expect(session.createItem('env.gpg-passphrase-x', 'p')).rejects.toMatchObject({ deployErrorClass: 'item-create-failed' });
+    await session.close();
+
+    expect(calls.some((c) => c.args[0] === 'create')).toBe(false);
+  });
+
+  it('createItem: bw create item fehlgeschlagen → item-create-failed', async () => {
+    const store = await readyStore();
+    const { spawn } = makeSpawn({ createFail: true });
+    const svc = new BitwardenDeployLoginService({ accessStore: store, auditStore: auditSpy(), _spawnBw: spawn });
+
+    const session = await svc.openSession({});
+    await expect(session.createItem('env.gpg-passphrase-x', 'p')).rejects.toMatchObject({ deployErrorClass: 'item-create-failed' });
+    await session.close();
   });
 });

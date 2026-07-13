@@ -22,6 +22,14 @@
  *     nur zur internen Fehlerklassifizierung gepuffert.
  *   - Audit-First vor validate/fetch (ohne Werte).
  *
+ * Item-Anlage (per-app-gpg-passphrase-provisioning, F-073/S-335):
+ *   Die Session (`openSession()`) bietet zusätzlich `itemExists(itemName)` und
+ *   `createItem(itemName, password)` — genutzt vom `PerAppGpgProvisioningService`
+ *   für die idempotente Anlage von `env.gpg-passphrase-<app>`-Items. Bleibt
+ *   dieselbe (einzige) Bitwarden-sprechende Boundary (kein zweiter Login-/
+ *   Spawn-Pfad) — `createItem` nutzt dieselbe encode+create-Technik wie
+ *   `BitwardenMasterKeyService#bwCreateItem` (Werte nur via stdin, nie Argv).
+ *
  * @module BitwardenDeployLoginService
  */
 
@@ -36,6 +44,11 @@ export const DEPLOY_LOGIN_ERROR_CLASSES = Object.freeze([
   'unlock-failed',
   'bw-unreachable',
   'item-not-found',
+  // per-app-gpg-passphrase-provisioning (F-073/S-335): idempotente Item-Anlage
+  // via `bw encode` + `bw create item` (Technik wiederverwendet aus
+  // BitwardenMasterKeyService#bwCreateItem) — Anlage-Fehler bekommt eine eigene
+  // Klasse (kein Rohtext-Leak, S1).
+  'item-create-failed',
   'error',
 ]);
 
@@ -119,7 +132,12 @@ export class BitwardenDeployLoginService {
    * Der fetch-Audit (mit Item-Name) liegt beim Aufrufer (fetchItemPassword bzw.
    * der Deploy-Guard S-334) — daher nimmt diese Methode keine identity entgegen.
    *
-   * @returns {Promise<{ readItemPassword(itemName: string): Promise<string>, close(): Promise<void> }>}
+   * @returns {Promise<{
+   *   readItemPassword(itemName: string): Promise<string>,
+   *   itemExists(itemName: string): Promise<boolean>,
+   *   createItem(itemName: string, password: string): Promise<void>,
+   *   close(): Promise<void>,
+   * }>}
    * @throws {Error} mit `deployErrorClass` (access-incomplete|auth-failed|unlock-failed|bw-unreachable)
    */
   async openSession() {
@@ -160,7 +178,12 @@ export class BitwardenDeployLoginService {
   /**
    * Etabliert eine isolierte bw-Session (eigenes APPDATA_DIR, config→login→unlock).
    * @param {{ serverUrl: string|null, clientId: string, clientSecret: string, masterPassword: string }} access
-   * @returns {Promise<{ readItemPassword(itemName: string): Promise<string>, close(): Promise<void> }>}
+   * @returns {Promise<{
+   *   readItemPassword(itemName: string): Promise<string>,
+   *   itemExists(itemName: string): Promise<boolean>,
+   *   createItem(itemName: string, password: string): Promise<void>,
+   *   close(): Promise<void>,
+   * }>}
    */
   async #openSession(access) {
     const appDataDir = await mkdtemp(join(tmpdir(), 'bw-deploy-'));
@@ -211,6 +234,44 @@ export class BitwardenDeployLoginService {
             throw makeErr(classify(res.stdout + res.stderr, res.exitCode, 'get'));
           }
           return res.stdout.trim();
+        },
+        // per-app-gpg-passphrase-provisioning (F-073/S-335 AC2): Existenz-Check VOR
+        // jeder Anlage — `bw get item <name>` statt `get password`, damit KEIN
+        // fremder Passphrasen-Wert transient gelesen werden muss. exitCode 0 → true;
+        // ein "not found"/"no item"-Muster → false (kein Item); jeder andere Fehler
+        // wird klassifiziert weitergeworfen (kein Rohtext, S1).
+        itemExists: async (itemName) => {
+          const env = { ...baseEnv, BW_SESSION: session };
+          const res = await this.#spawnBw(['get', 'item', itemName], { env });
+          if (res.exitCode === 0) return true;
+          const s = ((res.stdout ?? '') + (res.stderr ?? '')).toLowerCase();
+          if (s.includes('not found') || s.includes('no item')) {
+            return false;
+          }
+          throw makeErr(classify(res.stdout + res.stderr, res.exitCode, 'get'));
+        },
+        // per-app-gpg-passphrase-provisioning (F-073/S-335 AC1/AC2): idempotente
+        // Item-Anlage — Technik wiederverwendet aus BitwardenMasterKeyService
+        // #bwCreateItem (Item-Template → JSON → `bw encode` via stdin → `bw create
+        // item` via stdin). Der Passphrasen-Wert erscheint NIE im Argv (S2).
+        createItem: async (itemName, password) => {
+          const itemJson = JSON.stringify({
+            type: 1, // Login
+            name: itemName,
+            login: { username: '', password, uris: [] },
+            notes: null,
+            fields: [],
+          });
+          const env = { ...baseEnv, BW_SESSION: session };
+          const encodeRes = await this.#spawnBw(['encode'], { env, input: itemJson });
+          if (encodeRes.exitCode !== 0) {
+            throw makeErr('item-create-failed');
+          }
+          const encodedItem = encodeRes.stdout.trim();
+          const createRes = await this.#spawnBw(['create', 'item'], { env, input: encodedItem });
+          if (createRes.exitCode !== 0) {
+            throw makeErr('item-create-failed');
+          }
         },
         close: cleanup,
       };

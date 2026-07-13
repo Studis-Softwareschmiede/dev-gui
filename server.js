@@ -160,6 +160,7 @@ import { BudgetGuard, BUDGET_RESUME_BUFFER_MS } from './src/BudgetGuard.js';
 import { DrainReportStore } from './src/DrainReportStore.js';
 import { BitwardenDeployAccessStore } from './src/BitwardenDeployAccessStore.js';
 import { BitwardenDeployLoginService } from './src/BitwardenDeployLoginService.js';
+import { PerAppGpgProvisioningService } from './src/PerAppGpgProvisioningService.js';
 import { RegressionResultStore } from './src/RegressionResultStore.js';
 import { DrainJobRegistry } from './src/DrainJobRegistry.js';
 import { FeatureDrainRegistry } from './src/FeatureDrainRegistry.js';
@@ -521,6 +522,16 @@ const bitwardenDeployAccessStore = new BitwardenDeployAccessStore();
 // Konsument: der Prüf-Endpunkt (POST .../validate) und der Deploy-Guard (S-334).
 const bitwardenDeployLoginService = new BitwardenDeployLoginService({
   accessStore: bitwardenDeployAccessStore,
+  auditStore,
+});
+
+// ── PerAppGpgProvisioningService (per-app-gpg-passphrase-provisioning F-073, S-335) ──
+// Kern-Dienst der per-App-GPG-Passphrasen-Provisionierung: idempotente Anlage von
+// `env.gpg-passphrase-<app>` in Bitwarden. Nutzt AUSSCHLIESSLICH die Session des
+// bestehenden bitwardenDeployLoginService (kein zweiter bw-Login-/Spawn-Pfad) —
+// Konsument: POST /api/deployments/:app/gpg-provision (deploymentsRouter, AC10).
+const perAppGpgProvisioningService = new PerAppGpgProvisioningService({
+  deployLoginService: bitwardenDeployLoginService,
   auditStore,
 });
 
@@ -954,6 +965,10 @@ const deps = {
   // (API-Key + Unlock, Item-Read). Vom Auto-Loader an bitwardenDeployAccess.js
   // (POST .../validate) und später an den Deploy-Guard (S-334) gereicht.
   bitwardenDeployLoginService,
+  // per-app-gpg-passphrase-provisioning F-073/S-335: Kern-Provisionierungsdienst
+  // (idempotente env.gpg-passphrase-<app>-Anlage). Vom Auto-Loader an
+  // deployments.js (POST /api/deployments/:app/gpg-provision, AC10) gereicht.
+  perAppGpgProvisioningService,
   // regression-result-store AC4 (S-312): RegressionResultStore für
   // GET /api/projects/:slug/regression-runs[/:runId] (regressionRuns.js Router).
   regressionResultStore,

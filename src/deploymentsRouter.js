@@ -18,6 +18,7 @@
  *   GET    /api/deployments/reconcile/notices        → ReconcileNotice[]
  *   POST   /api/deployments/local-test               → { result, report? }               [MUTATION, S-156]
  *   POST   /api/deployments/vps/:vpsId/tunnel/recreate → { result, report } [MUTATION, S-187 AC1–5,11,12 + S-188 AC6–8]
+ *   POST   /api/deployments/:app/gpg-provision        → { result, reason? } [MUTATION, F-073/S-335 AC10]
  *
  * Security (AC7–AC9 / ADR-012):
  *   - Alle /api/deployments/* hinter AccessGuard (server.js — alle /api/* sind geschützt).
@@ -30,6 +31,8 @@
  *   - Untrusted Input (vps, hostname, image, confirm) wird validiert (security/R02/R03).
  *   - Readiness-Endpunkt (S-180): read-only, kein Audit, keine Mutation, kein Secret in Response.
  *   - VPS-Tunnel-Read-Model (S-185 AC7): read-only, kein Audit, kein Tunnel-Token, nur tunnelId.
+ *   - GPG-Provisionierung (F-073/S-335 AC10): hinter AccessGuard + CRED_ADMIN_EMAILS;
+ *     Response geheimnisfrei ({ result, reason? }) — nie die Passphrase (AC8).
  *
  * VPS configuration: The router receives a pre-configured vpsConfig map
  * (vpsId → VpsTarget) from server.js. The client sends a vpsId string;
@@ -46,6 +49,13 @@ const MAX_FIELD_LEN = 512;
 
 /** Hostname param: only DNS chars, no shell metacharacters. */
 const HOSTNAME_PARAM_RE = /^[a-zA-Z0-9._-]+$/;
+
+/**
+ * App-Slug-Param (F-073/S-335 :app): analog zur repo-weiten PROJECT_SLUG_RE-Konvention
+ * (DrainReportStore, DrainJobRegistry, RegressionResultStore, TickerSettingsStore).
+ */
+const APP_SLUG_PARAM_RE = /^[A-Za-z0-9_-]+$/;
+const MAX_APP_SLUG_LEN = 128;
 
 // ── Local-Test Validation (S-156, AC5) ────────────────────────────────────────
 
@@ -323,9 +333,12 @@ async function resolveVpsIdToTarget(vpsId, vpsTargets, vpsRegistry) {
  * @param {import('./deploy/TunnelHealService.js').TunnelHealService} [tunnelHealService]
  *   Optional injected for the Tunnel-Selbstheilung (S-187 AC1–AC5, AC11, AC12).
  *   When provided, POST /api/deployments/vps/:vpsId/tunnel/recreate is active.
+ * @param {import('./PerAppGpgProvisioningService.js').PerAppGpgProvisioningService} [perAppGpgProvisioningService]
+ *   Optional injected for the Nach-Provisionierungs-Endpunkt (F-073/S-335 AC10).
+ *   When provided, POST /api/deployments/:app/gpg-provision is active.
  * @returns {import('express').Router}
  */
-export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconciliationJob, localDockerControl, vpsRegistry, vpsDockerControl, cloudflareApi, tunnelHealService, deployAccessStore, deployLoginService) {
+export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconciliationJob, localDockerControl, vpsRegistry, vpsDockerControl, cloudflareApi, tunnelHealService, deployAccessStore, deployLoginService, perAppGpgProvisioningService) {
   const router = Router();
 
   // ── GET /api/deployments/vps-targets ────────────────────────────────────
@@ -1034,6 +1047,48 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconcil
     // Phase 1+2 erfolgreich; Phase 3 (S-188 AC8): report.result zeigt ok/partial
     const finalResult = report.result ?? 'ok'; // 'partial' wenn Phase-3-Teil-Fehler
     return res.status(200).json({ result: finalResult, report });
+  });
+
+  // ── POST /api/deployments/:app/gpg-provision ─────────────────────────────
+  // per-app-gpg-passphrase-provisioning (F-073/S-335 AC7/AC10): Nach-Provisionierung
+  // je App über DENSELBEN PerAppGpgProvisioningService wie die künftige Auto-
+  // Provisionierung (AC2/AC3-Garantien, idempotent — nie überschreiben).
+  // MUTATION: CRED_ADMIN_EMAILS + AccessGuard (server.js). Response geheimnisfrei
+  // (AC8): nur { result, reason? } — nie die Passphrase. Audit-First liegt im
+  // Dienst selbst (AC9), nicht im Router (Dienst ist der geteilte Einstiegspunkt).
+
+  /**
+   * POST /api/deployments/:app/gpg-provision
+   * Legt (falls nötig) die per-App-GPG-Passphrase in Bitwarden an (idempotent).
+   *
+   * Responses:
+   *   200 { result: "created"|"already-exists"|"access-not-ready"|"failed", reason? }
+   *   400 { error }  — app-Parameter fehlt/ungültig
+   *   403 { error }  — nicht in CRED_ADMIN_EMAILS
+   *   503 { result: "failed", reason }  — Dienst nicht konfiguriert
+   */
+  router.post('/api/deployments/:app/gpg-provision', async (req, res) => {
+    const identity = req.identity ?? null;
+
+    // AC10: Identitäts-/Rollenschutz — ohne Berechtigung 403, KEIN bw-Aufruf.
+    const authz = checkMutationAuthz(identity);
+    if (!authz.allowed) {
+      return res.status(403).json({ error: 'Keine Berechtigung für diese Aktion' });
+    }
+
+    const { app } = req.params;
+    if (!app || typeof app !== 'string' || !app.trim() || app.trim().length > MAX_APP_SLUG_LEN || !APP_SLUG_PARAM_RE.test(app.trim())) {
+      return res.status(400).json({ error: 'app-Parameter fehlt oder enthält ungültige Zeichen' });
+    }
+
+    if (!perAppGpgProvisioningService || typeof perAppGpgProvisioningService.provision !== 'function') {
+      return res.status(503).json({ result: 'failed', reason: 'GPG-Provisionierungsdienst nicht konfiguriert' });
+    }
+
+    // AC1/AC8/AC9: Der Dienst übernimmt Audit-First, Zugangs-Gate, Existenz-Check
+    // und Passphrasen-Erzeugung — Router reicht nur weiter, kein Secret in Sicht.
+    const result = await perAppGpgProvisioningService.provision(app.trim(), { identity: identity?.email ?? null });
+    return res.status(200).json(result);
   });
 
   // ── POST /api/deployments/reconcile ──────────────────────────────────────
