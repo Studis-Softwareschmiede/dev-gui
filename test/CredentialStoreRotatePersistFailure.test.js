@@ -71,7 +71,8 @@ describe('CredentialStore#rotate() — Edge-Case: .env-Persistenz scheitert NACH
 
     // (a) sanitisierte Fehlerklasse — swapped:true unterscheidet diesen Fall von
     // jedem Vor-Swap-Fehlschlag (verification-failed/decrypt-failed/... haben swapped:false)
-    expect(result).toEqual({ ok: false, reason: 'persist-failed', swapped: true });
+    // AC12 (v2, S-342): backup läuft NACH masterKeyRaw-Update, also auch im persist-failed-Zweig.
+    expect(result).toEqual({ ok: false, reason: 'persist-failed', swapped: true, backup: expect.any(Object) });
 
     // (b) secrets.enc.json wurde bereits ersetzt (Swap ist der Commit-Punkt VOR dem .env-Schritt)
     const afterStoreRaw = await realFsPromises.readFile(join(dir, 'secrets.enc.json'), 'utf8');

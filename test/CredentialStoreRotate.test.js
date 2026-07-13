@@ -1,6 +1,6 @@
 /**
  * CredentialStoreRotate.test.js — Unit-Tests für CredentialStore#rotate()
- * (credential-key-rotation, S-083 Kern — docs/specs/credential-key-rotation.md).
+ * (credential-key-rotation, S-083 Kern + v2 S-342 — docs/specs/credential-key-rotation.md).
  *
  * Covers (credential-key-rotation):
  *   AC1 — Happy Path: alle Einträge werden vom alten auf den neuen Key re-verschlüsselt
@@ -17,6 +17,9 @@
  *         (reason:'encrypt-failed'), test/CredentialStoreRotateVerification.test.js
  *         (reason:'verification-failed'), test/CredentialStoreRotateSwapFailure.test.js
  *         (reason:'swap-failed').
+ *   AC6/AC12 (v2, S-342) — Jede erfolgreiche Rotation erzeugt ein frisches Store-Backup,
+ *         lesbar mit dem NEUEN Key (`result.backup`, additiv zum S-083-Kern-Vertrag);
+ *         ein Backup-Fehlschlag rollt die Rotation NICHT zurück.
  *   AC7 — .env-Persistenz + Prozess-Übergabe ERST NACH grünem Swap (DEVGUI_CRED_MASTER_KEY=<neu>,
  *         atomar, 0600); vorher bleibt der alte .env-Wert aktiv.
  *   AC8 — (Guard/Audit-Verhalten wird auf Router-Ebene getestet, s. credentialRotate.test.js)
@@ -29,10 +32,11 @@
  *   Edge-Case — kein Master-Key geladen ⇒ 'no-master-key', kein Swap.
  *   Edge-Case — „.env-Persistenz scheitert NACH grünem Swap" (reason:'persist-failed',
  *               swapped:true; Store bereits mit neuem Key aktiv) ist per Modul-Mock in
- *               einer eigenen Datei getestet: test/CredentialStoreRotatePersistFailure.test.js.
+ *               einer eigenen Datei getestet: test/CredentialStoreRotatePersistFailure.test.js
+ *               (dort auch AC12 — backup läuft im persist-failed-Zweig ebenfalls).
  *
  * Strategie: CredentialStore mit tmpdir + injiziertem masterKey (kein Env nötig),
- * direkte Dateisystem-Assertions auf secrets.enc.json / .env / rotate-tmp.
+ * direkte Dateisystem-Assertions auf secrets.enc.json / .env / rotate-tmp / backups.
  */
 
 import { describe, it, afterEach, expect } from '@jest/globals';
@@ -41,6 +45,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { CredentialStore } from '../src/CredentialStore.js';
+import { decrypt, isGpgAvailable } from '../src/BackupCrypto.js';
 
 const OLD_KEY = 'old-master-key-for-unit-tests-not-a-real-secret';
 const NEW_KEY = 'new-master-key-for-unit-tests-not-a-real-secret';
@@ -74,7 +79,7 @@ describe('CredentialStore#rotate() (credential-key-rotation, S-083 Kern)', () =>
 
       const result = await store.rotate(NEW_KEY);
 
-      expect(result).toEqual({ ok: true, swapped: true });
+      expect(result).toEqual({ ok: true, swapped: true, backup: expect.any(Object) });
 
       // AC9: kein Key-Wert im Rückgabewert
       expect(JSON.stringify(result)).not.toContain(OLD_KEY);
@@ -112,7 +117,7 @@ describe('CredentialStore#rotate() (credential-key-rotation, S-083 Kern)', () =>
       const { store } = t;
 
       const result = await store.rotate(NEW_KEY);
-      expect(result).toEqual({ ok: true, swapped: true });
+      expect(result).toEqual({ ok: true, swapped: true, backup: expect.any(Object) });
 
       // Nach Rotation: unlock mit neuem Key funktioniert (Env wurde geschrieben)
       const envContent = await readFile(t.envPath, 'utf8');
@@ -151,7 +156,7 @@ describe('CredentialStore#rotate() (credential-key-rotation, S-083 Kern)', () =>
       const beforeRaw = await readFile(join(dir, 'secrets.enc.json'), 'utf8');
 
       const result = await store.rotate(NEW_KEY);
-      expect(result).toEqual({ ok: true, swapped: true });
+      expect(result).toEqual({ ok: true, swapped: true, backup: expect.any(Object) });
 
       await expect(stat(join(dir, 'secrets.enc.json.rotate-tmp'))).rejects.toThrow();
 
@@ -207,7 +212,7 @@ describe('CredentialStore#rotate() (credential-key-rotation, S-083 Kern)', () =>
 
       await store.set('credentials/misc/foo', 'value-a');
       const result = await store.rotate(NEW_KEY);
-      expect(result).toEqual({ ok: true, swapped: true });
+      expect(result).toEqual({ ok: true, swapped: true, backup: expect.any(Object) });
 
       const envContent = await readFile(envPath, 'utf8');
       expect(envContent).toContain(`DEVGUI_CRED_MASTER_KEY=${NEW_KEY}`);
@@ -240,6 +245,70 @@ describe('CredentialStore#rotate() (credential-key-rotation, S-083 Kern)', () =>
     });
   });
 
+  describe('AC6/AC12 (v2, S-342) — frisches Backup unmittelbar nach dem Swap', () => {
+    it('erzeugt ein Backup-Artefakt, das mit dem NEUEN Key lesbar ist und den re-verschlüsselten Blob enthält', async () => {
+      if (!(await isGpgAvailable())) return;
+
+      const t = await makeTmpStore();
+      dir = t.dir;
+      const { store } = t;
+
+      await store.set('credentials/misc/foo', 'plain-foo-value');
+
+      const result = await store.rotate(NEW_KEY);
+      expect(result.ok).toBe(true);
+      expect(result.backup).toBeDefined();
+      expect(result.backup.local).toBe('ok');
+      expect(typeof result.backup.localPath).toBe('string');
+
+      // Artefakt mit dem NEUEN Key entschlüsselbar (AC12: "mit dem neuen Key lesbar")
+      const cipherBuf = await readFile(result.backup.localPath);
+      const plainBuf = await decrypt(NEW_KEY, cipherBuf);
+      const parsed = JSON.parse(plainBuf.toString('utf8'));
+      expect(parsed.blob).toBeDefined();
+
+      // Der gesicherte Blob ist der bereits geswappte (neuer Key/Salt) Store-Inhalt
+      const storeRawAfterSwap = await readFile(join(dir, 'secrets.enc.json'), 'utf8');
+      expect(parsed.blob).toBe(storeRawAfterSwap);
+
+      // Mit dem ALTEN Key ist das Artefakt NICHT mehr entschlüsselbar
+      await expect(decrypt(OLD_KEY, cipherBuf)).rejects.toBeDefined();
+    });
+
+    it('erzeugt auch bei einer trivialen Rotation eines leeren Stores ein Backup-Ergebnis (best-effort)', async () => {
+      const t = await makeTmpStore();
+      dir = t.dir;
+      const { store } = t;
+
+      const result = await store.rotate(NEW_KEY);
+      expect(result.ok).toBe(true);
+      expect(result.backup).toBeDefined();
+    });
+
+    it('ein Backup-Fehlschlag (nicht beschreibbares Backup-Verzeichnis) rollt die Rotation NICHT zurück', async () => {
+      const dirPath = await mkdtemp(join(tmpdir(), 'credrotate-backupfail-'));
+      dir = dirPath;
+      const envPath = join(dirPath, '.env');
+      // backupDir zeigt auf einen Pfad UNTERHALB einer Datei (kein Verzeichnis anlegbar)
+      const blockerFile = join(dirPath, 'not-a-dir');
+      await writeFile(blockerFile, 'x', 'utf8');
+      const badBackupDir = join(blockerFile, 'backups');
+
+      const store = new CredentialStore({ dir: dirPath, masterKey: OLD_KEY, envPath, backupDir: badBackupDir });
+      await store.set('credentials/misc/foo', 'value-a');
+
+      const result = await store.rotate(NEW_KEY);
+      // Rotation selbst bleibt erfolgreich — Backup-Fehlschlag ist best-effort (AC12)
+      expect(result.ok).toBe(true);
+      expect(result.swapped).toBe(true);
+      expect(result.backup.local).toBe('failed');
+
+      // Neuer Key ist tatsächlich aktiv trotz Backup-Fehlschlag
+      const plaintext = await store.getPlaintext('credentials/misc/foo');
+      expect(plaintext).toBe('value-a');
+    });
+  });
+
   describe('AC10 — nur DEVGUI_CRED_MASTER_KEY wird rotiert', () => {
     it('rotate() schreibt/liest ausschließlich secrets.enc.json + DEVGUI_CRED_MASTER_KEY; keine GPG_PASSPHRASE-Zeile', async () => {
       const t = await makeTmpStore();
@@ -250,7 +319,7 @@ describe('CredentialStore#rotate() (credential-key-rotation, S-083 Kern)', () =>
       await store.set('credentials/misc/foo', 'value-a');
 
       const result = await store.rotate(NEW_KEY);
-      expect(result).toEqual({ ok: true, swapped: true });
+      expect(result).toEqual({ ok: true, swapped: true, backup: expect.any(Object) });
 
       const envContent = await readFile(envPath, 'utf8');
       expect(envContent).toContain('GPG_PASSPHRASE=some-unrelated-gpg-passphrase');
@@ -323,7 +392,7 @@ describe('CredentialStore#rotate() (credential-key-rotation, S-083 Kern)', () =>
       await writeFile(join(dir, 'secrets.enc.json.rotate-tmp'), '{"garbage": true}', 'utf8');
 
       const result = await store.rotate(NEW_KEY);
-      expect(result).toEqual({ ok: true, swapped: true });
+      expect(result).toEqual({ ok: true, swapped: true, backup: expect.any(Object) });
 
       // Nach erfolgreicher Rotation keine rotate-tmp-Datei mehr vorhanden
       await expect(stat(join(dir, 'secrets.enc.json.rotate-tmp'))).rejects.toThrow();

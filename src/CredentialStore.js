@@ -1620,12 +1620,21 @@ export class CredentialStore {
    * Rotiert AUSSCHLIESSLICH `DEVGUI_CRED_MASTER_KEY` — `GPG_PASSPHRASE`/`.env.gpg`
    * werden von dieser Methode nicht berührt (AC10).
    *
+   * AC6/AC12 (credential-key-rotation v2, S-342): UNMITTELBAR NACHDEM der neue Key
+   * aktiv geworden ist (Swap bzw. die datei-lose Aktivierung im 0-Einträge-Fall) wird
+   * ein frisches Store-Backup erzeugt — mit dem NEUEN Key lesbar (der Backup-Hook liest
+   * `this.#masterKeyRaw`, das an dieser Stelle bereits der neue Key ist). Ein Backup-
+   * Fehlschlag rollt die Rotation NICHT zurück (best-effort, wie bei allen anderen
+   * Schreibpfaden — S-140 AC4); das Ergebnis wird im `backup`-Feld zurückgegeben, rein
+   * additiv zum bestehenden `{ok, swapped}`-Vertrag (S-083 Kern bleibt unverändert, wenn
+   * kein Aufrufer das neue Feld liest).
+   *
    * @param {string} newKey - Der neue Master-Key-Rohwert (wird NICHT geloggt)
    * @returns {Promise<
-   *   { ok: true, swapped: true } |
+   *   { ok: true, swapped: true, backup: object } |
    *   { ok: false, reason: 'empty-key'|'invalid-key-format'|'no-master-key'|'same-key'|
    *       'decrypt-failed'|'encrypt-failed'|'verification-failed'|'swap-failed'|'persist-failed',
-   *     swapped: boolean }
+   *     swapped: boolean, backup?: object }
    * >}
    */
   async rotate(newKey) {
@@ -1763,11 +1772,18 @@ export class CredentialStore {
       // Runtime-Rotation (kein Boot-Reload) → keySource "manual" (analog unlock()).
       this.#keySource = 'manual';
 
+      // AC6/AC12 (S-342): frisches Backup UNMITTELBAR nach dem Aktivwerden des neuen
+      // Keys — #runBackupHook() nutzt this.#masterKeyRaw (bereits der neue Key) als
+      // GPG-Passphrase. Kein storeBlob übergeben: die Datei ist (im hasEntries-Fall)
+      // bereits geswappt, #runBackupHook liest sie frisch von der Platte.
+      // Best-effort: ein Fehlschlag rollt die Rotation NICHT zurück (S-140 AC4).
+      const backup = await this.#runBackupHook();
+
       if (!persistOk) {
-        return { ok: false, reason: 'persist-failed', swapped: true };
+        return { ok: false, reason: 'persist-failed', swapped: true, backup };
       }
 
-      return { ok: true, swapped: true };
+      return { ok: true, swapped: true, backup };
     });
   }
 }

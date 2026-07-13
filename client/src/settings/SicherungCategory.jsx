@@ -1,7 +1,8 @@
 /**
  * SicherungCategory.jsx — Kategorie-Wrapper für Sicherung.
  *
- * Enthält (unverändert): BackupSection (inkl. RestoreSection)
+ * Enthält: BackupSection (inkl. RestoreSection) + MasterKeyRotationSection
+ * (credential-key-rotation v2, S-342, AC13 — „Muster Backup-Settings").
  * AC16: Bestehende id/aria-labelledby-Wert bleibt unverändert:
  *   - settings-section-backup
  *
@@ -12,6 +13,7 @@
  */
 
 import { BackupSection } from '../BackupSection.jsx';
+import { MasterKeyRotationSection } from '../MasterKeyRotationSection.jsx';
 
 const styles = {
   section: {
@@ -48,6 +50,7 @@ export function SicherungCategory({
         Remote-Zugangsdaten werden write-only im Credential-Store hinterlegt.
       </p>
       <BackupSection credentials={credentials} onSaved={onLoad} fetchFn={fetchFn} />
+      <MasterKeyRotationSection fetchFn={fetchFn} />
     </section>
   );
 }
