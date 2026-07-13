@@ -219,7 +219,7 @@ describe('DeploymentsView — GPG-Passphrasen-Provisionierung je App (F-073/S-33
   });
 
   it('AC8: enthält die Response ausnahmsweise ein zusätzliches Secret-Feld, landet dessen Wert NIE im DOM (nur result/reason werden übernommen)', async () => {
-    const FAKE_SECRET = 'xJ9k2q7ZpL8vN3wR5tY1uB6cD0eF4gH-nicht-anzeigen';
+    const FAKE_SECRET = 'TESTWERT-secret-darf-nie-im-dom-erscheinen';
     globalThis.fetch = makeGpgProvisionFetch({
       gpgProvisionFn: () => ({
         ok: true,
