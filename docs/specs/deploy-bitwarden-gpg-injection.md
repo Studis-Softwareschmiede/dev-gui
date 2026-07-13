@@ -22,7 +22,7 @@ Bereits existierend (unverändert):
 - **R2/S3-GPG-Backup** — GPG-verschlüsselte Sicherung des Stores off-host.
 - **Bitwarden** hält (a) dev-guis eigenen **Master-Key** (Item `dev-gui-master-key`,
   via `BitwardenMasterKeyService`) **und** (b) die **per-App-GPG-Passphrasen**
-  (`deploy-gpg-<app>`) für fremde Apps.
+  (`env.gpg-passphrase-<app>`) für fremde Apps.
 
 **Henne-Ei-Kern (bindend):** Der Master-Key kommt aus Bitwarden. Der **Bitwarden-Zugang**
 selbst (API-Key + Master-Passwort) kann daher **nicht** im `CredentialStore` liegen (der
@@ -118,11 +118,13 @@ Unlock-Dialog). Diese Spec ergänzt den **unbeaufsichtigten** Weg (API-Key, kein
   Deploy **unverändert** durch — der Guard greift dann nicht (der fehlende Zugang ist dann
   kein Fehler).
 - **AC14** — **Abruf + Injektion:** Ist der Zugang `ready` und das Ziel braucht die
-  Passphrase → `BitwardenDeployLoginService` login+unlock → `deploy-gpg-<app>` lesen →
+  Passphrase → `BitwardenDeployLoginService` login+unlock → `env.gpg-passphrase-<app>` lesen →
   Wert als Env `GPG_PASSPHRASE` in den `docker run`/compose-Aufruf injizieren (S2/S3).
   Der Wert erscheint nicht in Log/Audit/Response; das Audit hält nur
   `deploy:gpg-fetch:<app>` (ohne Wert, S4).
-- **AC15** — Item-Namens-Konvention: Default `deploy-gpg-<app>` (`<app>` = Ziel-Slug);
+- **AC15** — Item-Namens-Konvention: Default `env.gpg-passphrase-<app>` (`<app>` = Ziel-Slug;
+  benannt nach der `.env.gpg`, die die Passphrase entschlüsselt — Owner-Entscheidung
+  2026-07-13, vormals `deploy-gpg-<app>`);
   überschreibbar per Ziel-Feld `gpg_bw_item`. Fehlt das Item in Bitwarden → Deploy-Abbruch
   mit `reason: "gpg-item-not-found"` (klarer Hinweis, welches Item angelegt werden muss).
 
