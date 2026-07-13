@@ -2,7 +2,7 @@ id: S-342
 parent: F-074
 title: 'Master-Key-Rotation: datiertes Schluessel-Archiv + frisches Backup + zweistufige
   UI'
-status: In Progress
+status: To Do
 priority: P2
 spec: docs/specs/credential-key-rotation.md
 implements:
@@ -34,7 +34,7 @@ blocked_reason: null
 github_issue: 405
 github_url: https://github.com/Studis-Softwareschmiede/dev-gui/issues/405
 created_at: '2026-07-13T00:00:00Z'
-updated_at: '2026-07-13T20:37:45Z'
+updated_at: '2026-07-13T21:23:59Z'
 done_at: null
 tok_est: null
 area: einstellungen
