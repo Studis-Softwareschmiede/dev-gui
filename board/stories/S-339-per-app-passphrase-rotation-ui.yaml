@@ -1,7 +1,7 @@
 id: S-339
 parent: F-073
-title: 'Per-App-Passphrase-Rotation UI (zweistufige Quittung + Rollback-Anker-Aufraeumknopf)'
-status: To Do
+title: Per-App-Passphrase-Rotation UI (zweistufige Quittung + Rollback-Anker-Aufraeumknopf)
+status: In Progress
 priority: P2
 spec: docs/specs/per-app-gpg-passphrase-rotation.md
 implements:
@@ -16,15 +16,17 @@ size_est: M
 dispo_est: '5'
 dispo_act: null
 dispo_forecast: null
-estimate_note: 'M (Heuristik: 2 AC + UI-Komponente/Endpunkte + ui). Zweistufige Quittung (Muster Backup-Settings); getrennter, explizit bestaetigter Aufraeum-Knopf fuer Feld vorherige; geheimnisfrei; A11y. Baseline-Lookup js|balanced|M=5.0.'
+estimate_note: 'M (Heuristik: 2 AC + UI-Komponente/Endpunkte + ui). Zweistufige Quittung
+  (Muster Backup-Settings); getrennter, explizit bestaetigter Aufraeum-Knopf fuer
+  Feld vorherige; geheimnisfrei; A11y. Baseline-Lookup js|balanced|M=5.0.'
 confidence: medium
-branch: null
+branch: feat/S-339-rotation-ui
 pr: null
 blocked_reason: null
 github_issue: 402
 github_url: https://github.com/Studis-Softwareschmiede/dev-gui/issues/402
 created_at: '2026-07-13T00:00:00Z'
-updated_at: '2026-07-13T00:00:00Z'
+updated_at: '2026-07-13T17:36:49Z'
 done_at: null
 tok_est: null
 area: deployment
