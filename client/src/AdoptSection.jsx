@@ -157,11 +157,17 @@ export function AdoptSection({ fetchFn }) {
   const [urlInput, setUrlInput] = useState('');
   /** 'input' | 'confirm' — AC5: Bestätigungs-Zusammenfassung erst nach Validierung. */
   const [phase, setPhase] = useState('input');
-  /** 'idle' | 'starting' | 'running' | 'error' */
+  /** 'idle' | 'starting' | 'running' | 'error' — PTY-Fallback-Pfad (AC14, unverändert). */
   const [submitState, setSubmitState] = useState('idle');
   const [errorMsg, setErrorMsg] = useState(null);
   const [busy, setBusy] = useState(false);
   const [ownOrg, setOwnOrg] = useState(OWN_ORG);
+
+  // ── Headless-Adopt-State (per-app-gpg-passphrase-provisioning AC12/AC14,
+  // F-073/S-343) — eigener, vom PTY-Fallback-Pfad getrennter Zustand.
+  /** 'idle' | 'starting' | 'started' | 'error' */
+  const [headlessState, setHeadlessState] = useState('idle');
+  const [headlessErrorMsg, setHeadlessErrorMsg] = useState(null);
 
   const fetchFnRef = useRef(fetchFn ?? globalThis.fetch.bind(globalThis));
   useEffect(() => {
@@ -280,6 +286,66 @@ export function AdoptSection({ fetchFn }) {
     setErrorMsg('Serverfehler. Bitte erneut versuchen.');
   }, [parsed, isStarting, isRunning, busy]);
 
+  // per-app-gpg-passphrase-provisioning AC12 (F-073/S-343): PRIMÄRER, headless
+  // Auslöser — POSTet GENAU EINMAL { ownerRepo } an POST /api/adopt/start
+  // (eigener HeadlessAdoptRunner, eigene ProjectJobLock-Instanz). Getrennt vom
+  // PTY-Fallback-Pfad (handleConfirm/handleKill, AC14, unverändert) — eigener
+  // Zustand (headlessState), kein Vermischen der Guards.
+  const isHeadlessStarting = headlessState === 'starting';
+  const handleHeadlessConfirm = useCallback(async () => {
+    if (!parsed || isHeadlessStarting || isRunning || busy) return;
+
+    const ownerRepo = collapseToLine(`${parsed.owner}/${parsed.repo}`);
+    if (!ownerRepo) return;
+
+    setHeadlessState('starting');
+    setHeadlessErrorMsg(null);
+
+    let res;
+    try {
+      res = await fetchFnRef.current('/api/adopt/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ownerRepo }),
+      });
+    } catch {
+      setHeadlessState('error');
+      setHeadlessErrorMsg('Netzwerkfehler beim Senden. Bitte erneut versuchen.');
+      return;
+    }
+
+    if (res.status === 202) {
+      setHeadlessState('started');
+      return;
+    }
+
+    if (res.status === 403) {
+      setHeadlessState('error');
+      setHeadlessErrorMsg('Keine Berechtigung für diese Aktion.');
+      return;
+    }
+
+    if (res.status === 409) {
+      setHeadlessState('error');
+      setHeadlessErrorMsg('Ein Adopt-Lauf läuft bereits.');
+      return;
+    }
+
+    if (res.status === 400) {
+      let detail = 'Ungültiger Befehl.';
+      try {
+        const json = await res.json();
+        if (json?.error) detail = json.error;
+      } catch { /* ignore parse error */ }
+      setHeadlessState('error');
+      setHeadlessErrorMsg(detail);
+      return;
+    }
+
+    setHeadlessState('error');
+    setHeadlessErrorMsg('Serverfehler. Bitte erneut versuchen.');
+  }, [parsed, isHeadlessStarting, isRunning, busy]);
+
   // AC7: Kill — POSTet /api/command/cancel, aktiv während des Laufs.
   const handleKill = useCallback(async () => {
     setErrorMsg(null);
@@ -385,6 +451,19 @@ export function AdoptSection({ fetchFn }) {
             </div>
           )}
 
+          {/* per-app-gpg-passphrase-provisioning AC12 (F-073/S-343): headless
+              Status-/Fehleranzeige — eigener Block, getrennt vom PTY-Fallback-Pfad. */}
+          {headlessState === 'started' && (
+            <div role="status" aria-live="polite" style={styles.runningNotice} data-testid="adopt-headless-started">
+              <span aria-hidden="true">⚙</span> Adopt gestartet (headless, im Hintergrund)…
+            </div>
+          )}
+          {headlessState === 'error' && headlessErrorMsg && (
+            <div role="alert" style={styles.formError} data-testid="adopt-headless-error">
+              {headlessErrorMsg}
+            </div>
+          )}
+
           <div style={styles.actionRow}>
             <button
               type="button"
@@ -397,10 +476,44 @@ export function AdoptSection({ fetchFn }) {
               Zurück
             </button>
 
-            {/* AC5/AC6: "Übernehmen" — Auslösung erst nach Bestätigung */}
+            {/* per-app-gpg-passphrase-provisioning AC12 (F-073/S-343): PRIMÄRER,
+                headless Auslöser — ersetzt "Übernehmen" als Standard-Weg. */}
             <button
               type="button"
-              style={canConfirm ? styles.btnPrimary : styles.btnPrimaryDisabled}
+              style={
+                Boolean(parsed) && !isHeadlessStarting && !isRunning && !busy
+                  ? styles.btnPrimary
+                  : styles.btnPrimaryDisabled
+              }
+              disabled={!parsed || isHeadlessStarting || isRunning || busy}
+              aria-disabled={!parsed || isHeadlessStarting || isRunning || busy}
+              aria-busy={isHeadlessStarting}
+              aria-label={
+                busy
+                  ? 'Adopt anlegen — gesperrt (Job läuft bereits)'
+                  : isHeadlessStarting
+                  ? 'Adopt anlegen — wird gestartet'
+                  : `Adopt anlegen: ${parsed.owner}/${parsed.repo}`
+              }
+              onClick={handleHeadlessConfirm}
+              data-testid="adopt-confirm-headless-btn"
+            >
+              {isHeadlessStarting ? 'Wird gestartet …' : 'Adopt anlegen'}
+            </button>
+          </div>
+
+          {/* AC14: PTY-Fallback — Logik/Guards/Endpunkt (handleConfirm, POST
+              /api/command) UNVERÄNDERT, nur als sekundärer, demoteter Weg
+              dargestellt (Muster S-251). Kill (AC7) betrifft ausschließlich
+              diesen PTY-Fallback-Lauf — daher hier statt in der primären
+              headless-Actionrow (reviewer-Suggestion S-343). */}
+          <div style={styles.hint}>
+            Technischer Fallback: startet interaktiv im Terminal.
+          </div>
+          <div style={styles.actionRow}>
+            <button
+              type="button"
+              style={styles.btnSecondary}
               disabled={!canConfirm}
               aria-disabled={!canConfirm}
               aria-busy={isStarting}
@@ -419,7 +532,7 @@ export function AdoptSection({ fetchFn }) {
               {isStarting ? 'Wird ausgelöst…' : 'Übernehmen'}
             </button>
 
-            {/* AC7: Kill — aktiv während des Laufs */}
+            {/* AC7: Kill — aktiv während des (PTY-Fallback-)Laufs */}
             <button
               type="button"
               style={isRunning ? styles.btnKill : styles.btnKillDisabled}
@@ -473,6 +586,13 @@ const styles = {
     fontSize: 13,
     color: '#9ca3af',
     lineHeight: 1.5,
+  },
+  /** AC14-Fallback-Hinweistext (Muster IntakeDialog.jsx `hint`). */
+  hint: {
+    fontSize: 11,
+    color: '#6b7280',
+    fontStyle: 'italic',
+    marginTop: 8,
   },
   fieldRow: {
     display: 'flex',

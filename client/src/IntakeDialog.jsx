@@ -79,6 +79,25 @@ const REQUIREMENT_CMD = '/agent-flow:requirement';
 /** The command for new-project bootstrap (NOT cost-aware; no Idee-Argument). */
 const NEW_PROJECT_CMD = '/agent-flow:new-project';
 
+/**
+ * Headless-Anlage-Endpunkt (per-app-gpg-passphrase-provisioning AC12/AC13,
+ * F-073/S-343) — der PRIMÄRE Weg, Schritt 1 (Bootstrap) auszulösen. Der
+ * bestehende `/agent-flow:new-project`-Trigger über POST /api/command (oben,
+ * `composeCommand`/`handleSubmit`) bleibt als technischer PTY-Fallback
+ * UNVERÄNDERT bestehen (AC14) — nur als Standard demotet (Muster S-251).
+ */
+const NEW_PROJECT_START_ENDPOINT = '/api/new-project/start';
+
+/**
+ * App-Slug-Validierung (AC13) — Zeichensatz/Länge identisch zu `gpgBwItem`/
+ * `APP_SLUG_RE` im Backend (`PerAppGpgProvisioningService`/`deploymentsRouter.js`/
+ * `newProjectHeadlessRouter.js`): nur alphanumerisch, `_`/`-`, max. 128 Zeichen.
+ * Defense in depth (Server bleibt autoritativ) — der Slug steht damit VOR dem
+ * Scaffold fest und versorgt die `GPG_PASS_FILE`-Kette (AC5) vor GE4.
+ */
+const APP_SLUG_CLIENT_RE = /^[A-Za-z0-9_-]+$/;
+const MAX_APP_SLUG_LEN = 128;
+
 // ── IntakeDialog component ────────────────────────────────────────────────────
 
 /**
@@ -281,6 +300,15 @@ export function IntakeDialog({
   /** Error message text */
   const [errorMsg, setErrorMsg]         = useState(null);
 
+  // ── Headless-Bootstrap-State (per-app-gpg-passphrase-provisioning AC12/AC13,
+  // F-073/S-343) — NUR in new-mode Schritt 1 relevant; unabhängig vom PTY-
+  // Fallback-Submit-State oben (getrennte Zustände, kein Vermischen). ────────
+  /** App-Name / Ziel-Slug (AC13, vorab erfasst — vor dem Scaffold). */
+  const [appSlug, setAppSlug]                     = useState('');
+  /** 'idle' | 'submitting' | 'error' */
+  const [headlessSubmitState, setHeadlessSubmitState] = useState('idle');
+  const [headlessErrorMsg, setHeadlessErrorMsg]       = useState(null);
+
   // ── Refs ─────────────────────────────────────────────────────────────────
   const primaryRef   = useRef(null); // primary textarea — receives focus on mount
   const fetchFnRef   = useRef(fetchFn ?? globalThis.fetch.bind(globalThis));
@@ -426,6 +454,77 @@ export function IntakeDialog({
     setErrorMsg('Serverfehler. Bitte erneut versuchen.');
   }, [composeCommand, isStep1, onNewStepChange, onNavigate, projectPath]);
 
+  // ── Headless-Bootstrap-Handler (per-app-gpg-passphrase-provisioning AC12/
+  // AC13/AC15, F-073/S-343) — PRIMÄRER Weg für Schritt 1. Erfasst/validiert
+  // den App-Slug VOR dem Scaffold (AC13) und startet den headless
+  // `HeadlessNewProjectRunner` (POST /api/new-project/start), der an seinem
+  // erfolgreichen Abschluss GENAU EINMAL die Auto-Provisionierung auslöst
+  // (AC15, server-seitig — s. `newProjectHeadlessRouter.js`). ────────────────
+
+  const appSlugTrimmed = appSlug.trim();
+  const appSlugValid =
+    appSlugTrimmed.length > 0 &&
+    appSlugTrimmed.length <= MAX_APP_SLUG_LEN &&
+    APP_SLUG_CLIENT_RE.test(appSlugTrimmed);
+
+  const isHeadlessSubmitting = headlessSubmitState === 'submitting';
+
+  const handleHeadlessBootstrap = useCallback(async () => {
+    if (!appSlugValid || isHeadlessSubmitting) return; // Guard: kein Doppel-POST
+
+    setHeadlessSubmitState('submitting');
+    setHeadlessErrorMsg(null);
+
+    let res;
+    try {
+      res = await fetchWithTimeout(fetchFnRef.current, NEW_PROJECT_START_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ app: appSlugTrimmed }),
+      });
+    } catch {
+      setHeadlessSubmitState('error');
+      setHeadlessErrorMsg('Netzwerkfehler beim Senden. Bitte erneut versuchen.');
+      return;
+    }
+
+    if (res.status === 202) {
+      setHeadlessSubmitState('idle');
+      // AC2/S-133-Muster: nach erfolgreichem Bootstrap-Start Schritt 2 freigeben
+      // + navigieren (identisch zum bisherigen PTY-Fallback-Verhalten, nur der
+      // Transport ist headless statt PTY).
+      if (onNewStepChange) onNewStepChange('trigger2');
+      onNavigate('factory');
+      return;
+    }
+
+    if (res.status === 403) {
+      setHeadlessSubmitState('error');
+      setHeadlessErrorMsg('Keine Berechtigung für diese Aktion.');
+      return;
+    }
+
+    if (res.status === 400) {
+      let detail = 'Ungültiger App-Name.';
+      try {
+        const json = await res.json();
+        if (json?.error) detail = json.error;
+      } catch { /* ignore parse error */ }
+      setHeadlessSubmitState('error');
+      setHeadlessErrorMsg(detail);
+      return;
+    }
+
+    if (res.status === 503) {
+      setHeadlessSubmitState('error');
+      setHeadlessErrorMsg('Headless-Anlage aktuell nicht verfügbar — bitte den Terminal-Fallback nutzen.');
+      return;
+    }
+
+    setHeadlessSubmitState('error');
+    setHeadlessErrorMsg('Serverfehler. Bitte erneut versuchen.');
+  }, [appSlugValid, appSlugTrimmed, isHeadlessSubmitting, onNewStepChange, onNavigate]);
+
   // ── Derived: can submit? ─────────────────────────────────────────────────
 
   const isSubmitting = submitState === 'submitting';
@@ -481,6 +580,40 @@ export function IntakeDialog({
               </>
             )}
           </div>
+        )}
+
+        {/* per-app-gpg-passphrase-provisioning AC13 (F-073/S-343): App-Name /
+            Ziel-Slug wird VORAB im Dialog erfasst + validiert, damit er vor
+            dem Scaffold feststeht (versorgt die GPG_PASS_FILE-Kette vor GE4).
+            NUR in Schritt 1 relevant — Schritt 2/change-mode brauchen keinen Slug. */}
+        {isStep1 && (
+          <>
+            <label style={styles.label} htmlFor="intake-app-slug">
+              App-Name / Ziel-Slug <span style={styles.required}>(Pflicht)</span>
+            </label>
+            <input
+              id="intake-app-slug"
+              type="text"
+              style={styles.textInput}
+              placeholder="z. B. mein-neues-projekt"
+              value={appSlug}
+              disabled={isHeadlessSubmitting}
+              aria-disabled={isHeadlessSubmitting}
+              aria-describedby="intake-app-slug-hint"
+              aria-invalid={appSlug.trim().length > 0 && !appSlugValid}
+              onChange={(e) => setAppSlug(e.target.value)}
+              data-testid="intake-app-slug-input"
+            />
+            <div id="intake-app-slug-hint" style={styles.hint}>
+              Nur Buchstaben/Ziffern/„_"/„-", max. {MAX_APP_SLUG_LEN} Zeichen — legt den
+              Ziel-Repo-Namen fest, bevor der Scaffold headless startet.
+            </div>
+            {appSlug.trim().length > 0 && !appSlugValid && (
+              <div role="alert" style={styles.errorMsg} data-testid="intake-app-slug-error">
+                Ungültiger App-Name — nur Buchstaben, Ziffern, „_" und „-", max. {MAX_APP_SLUG_LEN} Zeichen.
+              </div>
+            )}
+          </>
         )}
 
         {/* Primary textarea — receives focus on mount (A11y).
@@ -633,7 +766,22 @@ export function IntakeDialog({
           </div>
         )}
 
-        {/* Error message */}
+        {/* per-app-gpg-passphrase-provisioning AC12/AC13/AC15 (F-073/S-343):
+            headless Bootstrap — PRIMÄRER Weg für Schritt 1. Eigener,
+            getrennter Fehler-/Status-Block (nicht mit dem PTY-Fallback
+            unten vermischt). */}
+        {isStep1 && headlessSubmitState === 'error' && headlessErrorMsg && (
+          <div role="alert" id="intake-headless-error" style={styles.errorMsg} data-testid="intake-headless-error">
+            {headlessErrorMsg}
+          </div>
+        )}
+        {isStep1 && isHeadlessSubmitting && (
+          <div role="status" aria-live="polite" style={styles.statusMsg}>
+            Anlage wird headless gestartet …
+          </div>
+        )}
+
+        {/* Error message (PTY-Fallback-Pfad) */}
         {submitState === 'error' && errorMsg && (
           <div
             role="alert"
@@ -644,33 +792,81 @@ export function IntakeDialog({
           </div>
         )}
 
-        {/* Submitting indicator */}
+        {/* Submitting indicator (PTY-Fallback-Pfad) */}
         {isSubmitting && (
           <div role="status" aria-live="polite" style={styles.statusMsg}>
             Wird gesendet …
           </div>
         )}
 
-        {/* Submit button — label is step-dependent in new-mode (AC2).
-            In step 1: always enabled (no text required for new-project).
-            In step 2 / change-mode: disabled when ideaText collapses to empty (AC2b). */}
+        {/* Submit button(s) — label is step-dependent in new-mode (AC2).
+            In step 1: zwei Wege — PRIMÄR headless (AC12/AC13), sekundär der
+            unveränderte PTY-Fallback (AC14, Muster S-251). In step 2/change-mode:
+            unveränderter Einzel-Button (kein headless-Pfad für requirement/change). */}
         <div style={styles.buttonRow}>
-          <button
-            type="button"
-            style={canSubmit ? styles.btnSubmit : styles.btnSubmitDisabled}
-            disabled={!canSubmit}
-            aria-label={
-              isSubmitting
-                ? `${submitLabel} — wird gesendet`
-                : !command
-                ? `${submitLabel} — Idee/Text fehlt`
-                : submitLabel
-            }
-            onClick={handleSubmit}
-          >
-            {isSubmitting ? 'Wird gesendet …' : submitLabel}
-          </button>
+          {isStep1 ? (
+            <button
+              type="button"
+              style={appSlugValid && !isHeadlessSubmitting ? styles.btnSubmit : styles.btnSubmitDisabled}
+              disabled={!appSlugValid || isHeadlessSubmitting}
+              aria-label={
+                isHeadlessSubmitting
+                  ? 'Projekt anlegen — wird gestartet'
+                  : !appSlugValid
+                  ? 'Projekt anlegen — App-Name erforderlich'
+                  : 'Projekt anlegen'
+              }
+              onClick={handleHeadlessBootstrap}
+              data-testid="intake-headless-bootstrap-btn"
+            >
+              {isHeadlessSubmitting ? 'Wird gestartet …' : 'Projekt anlegen'}
+            </button>
+          ) : (
+            <button
+              type="button"
+              style={canSubmit ? styles.btnSubmit : styles.btnSubmitDisabled}
+              disabled={!canSubmit}
+              aria-label={
+                isSubmitting
+                  ? `${submitLabel} — wird gesendet`
+                  : !command
+                  ? `${submitLabel} — Idee/Text fehlt`
+                  : submitLabel
+              }
+              onClick={handleSubmit}
+            >
+              {isSubmitting ? 'Wird gesendet …' : submitLabel}
+            </button>
+          )}
         </div>
+
+        {/* AC14: PTY-Fallback für Schritt 1 — Logik/Guards/Endpunkt (handleSubmit,
+            POST /api/command, /agent-flow:new-project ohne Argument) UNVERÄNDERT,
+            nur als sekundärer, demoteter Weg dargestellt (Muster S-251). */}
+        {isStep1 && (
+          <>
+            <div style={styles.hint}>
+              Technischer Fallback: startet interaktiv im Terminal (Stack-Rückfragen dort).
+            </div>
+            <div style={styles.buttonRow}>
+              <button
+                type="button"
+                style={canSubmit ? styles.btnFallback : styles.btnSubmitDisabled}
+                disabled={!canSubmit}
+                aria-label={
+                  isSubmitting
+                    ? `${submitLabel} — wird gesendet`
+                    : !command
+                    ? `${submitLabel} — Idee/Text fehlt`
+                    : `${submitLabel} (Terminal-Fallback)`
+                }
+                onClick={handleSubmit}
+              >
+                {isSubmitting ? 'Wird gesendet …' : submitLabel}
+              </button>
+            </div>
+          </>
+        )}
       </div>
     </section>
   );
@@ -922,6 +1118,20 @@ const styles = {
     lineHeight: 1.5,
     // Focus ring preserved — no outline:none (design.md / coder lessons)
   },
+  /** App-Slug-Eingabefeld (AC13, per-app-gpg-passphrase-provisioning) — single-line. */
+  textInput: {
+    background: '#1e1e1e',
+    color: '#d4d4d4',
+    border: '1px solid #333',
+    borderRadius: 4,
+    padding: '8px',
+    fontSize: 13,
+    fontFamily: 'system-ui, sans-serif',
+    width: '100%',
+    boxSizing: 'border-box',
+    minHeight: 44,
+    // Focus ring preserved — no outline:none (design.md / coder lessons)
+  },
   hint: {
     fontSize: 11,
     color: '#6b7280',
@@ -1060,6 +1270,20 @@ const styles = {
     fontWeight: 600,
     cursor: 'not-allowed',
     minHeight: 44,
+  },
+  /** Demoteter PTY-Fallback-Button (AC14, Muster S-251 — sekundär, nicht mehr Standard). */
+  btnFallback: {
+    flex: 1,
+    padding: '10px 16px',
+    background: 'transparent',
+    color: '#93c5fd',
+    border: '1px solid #334155',
+    borderRadius: 4,
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: 'pointer',
+    minHeight: 44,
+    // Focus ring preserved — no outline:none (design.md)
   },
 
   // ── AC6 Proof styles ───────────────────────────────────────────────────────

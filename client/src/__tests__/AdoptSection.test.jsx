@@ -19,6 +19,15 @@
  *         GET /api/session, GET /api/github/repos (Eigene-Org-Ableitung); kein
  *         Backend-Test hier (reiner Frontend-Change).
  *
+ * Covers (per-app-gpg-passphrase-provisioning, F-073/S-343): AC12, AC14
+ *   AC12 — "Adopt anlegen" (headless, PRIMÄR) POSTet GENAU EINMAL
+ *          { ownerRepo: '<owner>/<repo>' } an POST /api/adopt/start (NICHT
+ *          /api/command); 202 → Hintergrund-Hinweis; 403/409/400/500/Netzwerk-
+ *          fehler → sichtbare Fehlermeldung, kein Crash.
+ *   AC14 — der bestehende PTY-Fallback-Button ("Übernehmen", identischer
+ *          Endpunkt POST /api/command, identisches Guard-/Kill-Verhalten)
+ *          bleibt unverändert erreichbar — s. bestehende AC6/AC7-Tests oben.
+ *
  * NFR A11y:
  *   - Buttons/Feld: Touch-Target ≥ 44 px (minHeight), disabled-Attribut + Text-Label.
  *   - Validierungs-/Status-/Fehlermeldungen: role=alert bzw. role=status, aria-live.
@@ -472,5 +481,154 @@ describe('neues-projekt-auswahl-dialog AC8 — reiner Frontend-Change', () => {
     for (const call of calls) {
       expect(allowedUrls.has(call.url)).toBe(true);
     }
+  });
+});
+
+// ── per-app-gpg-passphrase-provisioning AC12/AC14 (F-073/S-343) ─────────────
+
+/**
+ * Fetch-Helfer für den headless "Adopt anlegen"-Pfad — erweitert `makeFetchFn`
+ * um `/api/adopt/start` (der PTY-`/api/command`-Pfad bleibt unverändert
+ * mitbedient, da beide Buttons gleichzeitig gerendert werden — AC14).
+ */
+function makeHeadlessFetchFn({
+  repos = { status: 200, data: OWN_ORG_REPOS },
+  session = SESSION_READY,
+  adoptStart = { status: 202, data: { status: 'started', jobId: 'job-1' } },
+} = {}) {
+  const calls = [];
+  const fetchFn = jest.fn(async (url, opts = {}) => {
+    const method = opts.method ?? 'GET';
+    calls.push({ url, method, body: opts.body });
+
+    if (url === '/api/github/repos') {
+      return { ok: repos.status < 400, status: repos.status, json: async () => repos.data };
+    }
+    if (url === '/api/session') {
+      return { ok: true, status: 200, json: async () => session };
+    }
+    if (url === '/api/adopt/start' && method === 'POST') {
+      if (adoptStart === 'reject') throw new Error('network error');
+      return {
+        ok: adoptStart.status >= 200 && adoptStart.status < 300,
+        status: adoptStart.status,
+        json: async () => adoptStart.data,
+      };
+    }
+    throw new Error(`Unerwarteter fetch-Aufruf: ${method} ${url}`);
+  });
+  return { fetchFn, calls };
+}
+
+describe('per-app-gpg-passphrase-provisioning AC12 — "Adopt anlegen" (headless, primär)', () => {
+  it('202 → POSTet GENAU EINMAL { ownerRepo } an POST /api/adopt/start (nicht /api/command)', async () => {
+    const { fetchFn, calls } = makeHeadlessFetchFn();
+    const container = renderSection(fetchFn);
+    await enterUrlAndProceed(container, 'https://github.com/octocat/Hello-World');
+
+    const headlessBtn = await waitFor(() => container.getByTestId('adopt-confirm-headless-btn'));
+    await act(async () => {
+      fireEvent.click(headlessBtn);
+    });
+
+    await waitFor(() => expect(container.getByTestId('adopt-headless-started')).toBeTruthy());
+
+    const adoptCalls = calls.filter((c) => c.url === '/api/adopt/start');
+    expect(adoptCalls).toHaveLength(1);
+    expect(JSON.parse(adoptCalls[0].body)).toEqual({ ownerRepo: 'octocat/Hello-World' });
+
+    const commandCalls = calls.filter((c) => c.url === '/api/command');
+    expect(commandCalls).toHaveLength(0);
+  });
+
+  it('Doppelklick während "starting" → kein zweiter POST', async () => {
+    // Der Adopt-start-Aufruf hängt für immer — wir prüfen nur, dass ein zweiter
+    // Klick währenddessen keinen zweiten POST auslöst (Race-Guard).
+    const calls = [];
+    const hangingFetchFn = jest.fn(async (url, opts = {}) => {
+      const method = opts.method ?? 'GET';
+      calls.push({ url, method, body: opts.body });
+      if (url === '/api/github/repos') return { ok: true, status: 200, json: async () => OWN_ORG_REPOS };
+      if (url === '/api/session') return { ok: true, status: 200, json: async () => SESSION_READY };
+      if (url === '/api/adopt/start') return new Promise(() => {});
+      throw new Error(`Unerwarteter fetch-Aufruf: ${method} ${url}`);
+    });
+    const container = renderSection(hangingFetchFn);
+    await enterUrlAndProceed(container, 'https://github.com/octocat/Hello-World');
+
+    const headlessBtn = await waitFor(() => container.getByTestId('adopt-confirm-headless-btn'));
+    await act(async () => {
+      fireEvent.click(headlessBtn);
+    });
+    // Button muss nach dem ersten Klick disabled sein (Race-Schutz), BEVOR der
+    // zweite Klick erfolgt (Muster: bestehender "Übernehmen"-Doppelklick-Test).
+    await waitFor(() => expect(headlessBtn.disabled).toBe(true));
+    fireEvent.click(headlessBtn);
+
+    const adoptCalls = calls.filter((c) => c.url === '/api/adopt/start');
+    expect(adoptCalls).toHaveLength(1);
+  });
+
+  it('409 (Lauf läuft bereits) → sichtbare Fehlermeldung', async () => {
+    const { fetchFn } = makeHeadlessFetchFn({ adoptStart: { status: 409, data: { error: 'locked' } } });
+    const container = renderSection(fetchFn);
+    await enterUrlAndProceed(container, 'https://github.com/octocat/Hello-World');
+
+    const headlessBtn = await waitFor(() => container.getByTestId('adopt-confirm-headless-btn'));
+    await act(async () => {
+      fireEvent.click(headlessBtn);
+    });
+
+    await waitFor(() => {
+      expect(container.getByTestId('adopt-headless-error').textContent).toMatch(/läuft bereits/i);
+    });
+  });
+
+  it('403 (keine Berechtigung) → sichtbare Fehlermeldung', async () => {
+    const { fetchFn } = makeHeadlessFetchFn({ adoptStart: { status: 403, data: { error: 'nope' } } });
+    const container = renderSection(fetchFn);
+    await enterUrlAndProceed(container, 'https://github.com/octocat/Hello-World');
+
+    const headlessBtn = await waitFor(() => container.getByTestId('adopt-confirm-headless-btn'));
+    await act(async () => {
+      fireEvent.click(headlessBtn);
+    });
+
+    await waitFor(() => {
+      expect(container.getByTestId('adopt-headless-error').textContent).toMatch(/keine berechtigung/i);
+    });
+  });
+
+  it('Netzwerkfehler → sichtbare Fehlermeldung, kein Crash', async () => {
+    const { fetchFn } = makeHeadlessFetchFn({ adoptStart: 'reject' });
+    const container = renderSection(fetchFn);
+    await enterUrlAndProceed(container, 'https://github.com/octocat/Hello-World');
+
+    const headlessBtn = await waitFor(() => container.getByTestId('adopt-confirm-headless-btn'));
+    await act(async () => {
+      fireEvent.click(headlessBtn);
+    });
+
+    await waitFor(() => {
+      expect(container.getByTestId('adopt-headless-error').textContent).toMatch(/netzwerkfehler/i);
+    });
+  });
+});
+
+describe('per-app-gpg-passphrase-provisioning AC14 — PTY-Fallback bleibt unverändert erreichbar', () => {
+  it('"Übernehmen"-Fallback-Button ist weiterhin vorhanden und POSTet unverändert an /api/command', async () => {
+    const { fetchFn, calls } = makeFetchFn({ command: { status: 202, data: ADOPT_ACCEPTED } });
+    const container = renderSection(fetchFn);
+    await enterUrlAndProceed(container, 'https://github.com/octocat/Hello-World');
+
+    const confirmBtn = await waitFor(() => container.getByTestId('adopt-confirm-btn'));
+    expect(confirmBtn.disabled).toBe(false);
+    await act(async () => {
+      fireEvent.click(confirmBtn);
+    });
+
+    const commandCalls = calls.filter((c) => c.url === '/api/command');
+    expect(commandCalls).toHaveLength(1);
+    expect(JSON.parse(commandCalls[0].body).command).toBe('/agent-flow:adopt octocat/Hello-World');
   });
 });

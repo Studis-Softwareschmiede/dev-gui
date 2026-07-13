@@ -39,6 +39,16 @@
  *   - I3: optional textarea has aria-describedby pointing to hint div
  *   - S2: cost select has aria-describedby="intake-cost-info"
  *
+ * Covers (per-app-gpg-passphrase-provisioning, F-073/S-343): AC12, AC13, AC14
+ *   AC12/AC13 — new-mode Schritt 1 ("Neues Projekt"-Anlage-Weg) erfasst/validiert
+ *           den App-Slug VORAB und startet den headless-Bootstrap primär über
+ *           POST /api/new-project/start { app } — NICHT mehr standardmäßig über
+ *           POST /api/command. Invalider/leerer Slug → Button disabled, kein POST.
+ *   AC14  — der bestehende PTY-Fallback-Button (identisches Label "Bootstrap
+ *           starten", identischer POST /api/command-Aufruf mit
+ *           /agent-flow:new-project ohne Argument) bleibt unverändert erreichbar
+ *           (demotet, aber funktional identisch — s. bestehende AC2-Tests oben).
+ *
  * @jest-environment jsdom
  */
 
@@ -1660,5 +1670,103 @@ describe('IntakeDialog — AC6 "Let Claude proof" button', () => {
     await act(async () => {
       resolveRefine({ ok: true, status: 200, json: () => Promise.resolve({ refinedText: 'ok', openQuestions: [] }) });
     });
+  });
+});
+
+// ── per-app-gpg-passphrase-provisioning AC12/AC13/AC14 (F-073/S-343) ─────────
+
+describe('IntakeDialog — new-mode Schritt 1: headless Bootstrap (AC12/AC13)', () => {
+  it('AC13: "Projekt anlegen" (headless) ist disabled ohne gültigen App-Slug', () => {
+    const { getByTestId } = renderDialog({ mode: 'new', newStep: 'trigger1' });
+    expect(getByTestId('intake-headless-bootstrap-btn').disabled).toBe(true);
+  });
+
+  it('AC13: ungültiger Slug (Sonderzeichen) → Validierungsmeldung, Button bleibt disabled', () => {
+    const { getByTestId } = renderDialog({ mode: 'new', newStep: 'trigger1' });
+    fireEvent.change(getByTestId('intake-app-slug-input'), { target: { value: 'invalid slug!' } });
+    expect(getByTestId('intake-app-slug-error')).toBeTruthy();
+    expect(getByTestId('intake-headless-bootstrap-btn').disabled).toBe(true);
+  });
+
+  it('AC12/AC13: gültiger Slug → POST /api/new-project/start { app } (NICHT /api/command)', async () => {
+    const fetchFn = jest.fn((url) => {
+      if (url === '/api/new-project/start') return Promise.resolve(cmdResp(202, { status: 'started' }));
+      return Promise.resolve(cmdResp(202, {}));
+    });
+    const onNewStepChange = jest.fn();
+    const onNavigate = jest.fn();
+    const { getByTestId } = renderDialog({
+      mode: 'new',
+      newStep: 'trigger1',
+      fetchFn,
+      onNewStepChange,
+      onNavigate,
+    });
+
+    fireEvent.change(getByTestId('intake-app-slug-input'), { target: { value: 'mein-neues-projekt' } });
+
+    await act(async () => {
+      fireEvent.click(getByTestId('intake-headless-bootstrap-btn'));
+    });
+
+    await waitFor(() => {
+      expect(onNewStepChange).toHaveBeenCalledWith('trigger2');
+    });
+
+    const startCalls = fetchFn.mock.calls.filter(([url]) => url === '/api/new-project/start');
+    expect(startCalls).toHaveLength(1);
+    const body = JSON.parse(startCalls[0][1].body);
+    expect(body).toEqual({ app: 'mein-neues-projekt' });
+
+    // /api/command must NOT have been called by the headless path.
+    const commandCalls = fetchFn.mock.calls.filter(([url]) => url === '/api/command');
+    expect(commandCalls).toHaveLength(0);
+  });
+
+  it('403 → Berechtigungsfehler angezeigt, kein onNewStepChange/onNavigate', async () => {
+    const fetchFn = jest.fn(() => Promise.resolve(cmdResp(403, { error: 'nope' })));
+    const onNewStepChange = jest.fn();
+    const onNavigate = jest.fn();
+    const { getByTestId } = renderDialog({ mode: 'new', newStep: 'trigger1', fetchFn, onNewStepChange, onNavigate });
+
+    fireEvent.change(getByTestId('intake-app-slug-input'), { target: { value: 'mein-projekt' } });
+    await act(async () => {
+      fireEvent.click(getByTestId('intake-headless-bootstrap-btn'));
+    });
+
+    await waitFor(() => {
+      expect(getByTestId('intake-headless-error').textContent).toMatch(/keine berechtigung/i);
+    });
+    expect(onNewStepChange).not.toHaveBeenCalled();
+    expect(onNavigate).not.toHaveBeenCalled();
+  });
+});
+
+describe('IntakeDialog — AC14: PTY-Fallback in Schritt 1 bleibt unverändert erreichbar', () => {
+  it('"Bootstrap starten"-Fallback-Button fires POST /api/command WITHOUT argument (unverändert)', async () => {
+    const fetchFn = jest.fn(() => Promise.resolve(cmdResp(202, {})));
+    const onNewStepChange = jest.fn();
+    const { getByRole } = renderDialog({ mode: 'new', newStep: 'trigger1', fetchFn, onNewStepChange });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /bootstrap starten/i }));
+    });
+
+    await waitFor(() => {
+      expect(onNewStepChange).toHaveBeenCalledWith('trigger2');
+    });
+
+    const commandCalls = fetchFn.mock.calls.filter(([url]) => url === '/api/command');
+    expect(commandCalls).toHaveLength(1);
+    expect(JSON.parse(commandCalls[0][1].body).command).toBe('/agent-flow:new-project');
+
+    // The headless endpoint must NOT have been called by the fallback button.
+    const headlessCalls = fetchFn.mock.calls.filter(([url]) => url === '/api/new-project/start');
+    expect(headlessCalls).toHaveLength(0);
+  });
+
+  it('fallback button is enabled independently of the (possibly empty) app-slug field', () => {
+    const { getByRole } = renderDialog({ mode: 'new', newStep: 'trigger1' });
+    expect(getByRole('button', { name: /bootstrap starten/i }).disabled).toBe(false);
   });
 });
