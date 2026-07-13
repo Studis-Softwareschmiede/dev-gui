@@ -1,8 +1,10 @@
 /**
- * WorkspaceMutator — Workspace-FS Mutation Boundary (delete AC5; pull AC3, AC4).
+ * WorkspaceMutator — Workspace-FS Mutation Boundary (delete AC5; pull AC3, AC4;
+ * commitAndPushFile — per-app-gpg-passphrase-rotation, F-073/S-338, AC4/AC11).
  *
  * Architecture boundary: the ONLY place that performs mutating filesystem
- * operations on WORKSPACE_DIR (deleting local clones, pulling clones).
+ * operations on WORKSPACE_DIR (deleting local clones, pulling clones,
+ * committing + pushing a single file within a clone — direct push, no PR).
  * Complements WorkspaceScanner (read-only).
  *
  * Design:
@@ -55,7 +57,7 @@ const RM_TIMEOUT_MS = 15000;
 const PULL_TIMEOUT_MS = 60000;
 
 /**
- * @typedef {'traversal'|'not-found'|'rm-failed'|'workspace-unset'|'pull-failed'|'no-remote'|'credentials-missing'} MutatorErrorClass
+ * @typedef {'traversal'|'not-found'|'rm-failed'|'workspace-unset'|'pull-failed'|'no-remote'|'credentials-missing'|'commit-failed'|'push-failed'|'branch-mismatch'} MutatorErrorClass
  */
 
 /**
@@ -386,6 +388,287 @@ export class WorkspaceMutator {
         }
       }
     }
+  }
+
+  /**
+   * Commit + push a single file within a local clone directly to its
+   * Default-Branch — NO PR (per-app-gpg-passphrase-rotation, F-073/S-338,
+   * AC4/AC11; Review-Iteration 2 hardening — Finding 1 + Finding 2).
+   *
+   * Branch verification (Finding 2): the CURRENT branch (`git rev-parse
+   * --abbrev-ref HEAD`) is verified against the AUTHORITATIVE remote default
+   * (`git symbolic-ref --short refs/remotes/origin/HEAD`, set by `git clone`
+   * and NOT touched by anything in this codebase) BEFORE any mutation. A
+   * mismatch (e.g. a clone manually switched to a different branch via the
+   * Terminal feature) aborts hard with `branch-mismatch` — no silent push to
+   * a non-default branch.
+   *
+   * No-orphan-commit guarantee (Finding 1): the current `HEAD` sha is
+   * captured BEFORE `git add`/`git commit`. If ANY step from that point on
+   * fails (add/commit/push), the clone is rolled back to that sha via
+   * `git reset --hard <prevHead>` (best-effort) before the error is thrown —
+   * this also discards the uncommitted file write the caller already made
+   * (`PerAppGpgRotationService` overwrites `.env.gpg` before calling this),
+   * so a failed rotation never leaves the clone in a "kein Teil-/Misch-
+   * Zustand"-verletzenden Zwischenstand (dirty working tree or orphaned
+   * local commit that a plain `git pull` cannot clean up on retry).
+   *
+   * Steps:
+   *   1. Validate the target path (traversal/symlink-flucht prevention — same
+   *      guard as pullClone/deleteClone).
+   *   2. Capture `prevHead` (`git rev-parse HEAD`) for the rollback guarantee.
+   *   3. Verify the current branch equals the authoritative remote default.
+   *   4. `git add -- <relFilePath>`.
+   *   5. `git commit -m <commitMessage>` — a "nothing to commit" outcome is
+   *      NOT treated as an error (defensive: content already matches).
+   *   6. `git push origin HEAD:<verified-branch>` — token injected via
+   *      GIT_ASKPASS (same mechanism as pullClone, AC3-style: never in argv).
+   *
+   * @param {string} name              The clone folder name (e.g. "my-app").
+   * @param {string} relFilePath       Path relative to the clone root (e.g. ".env.gpg").
+   * @param {() => Promise<string>} mintTokenFn
+   *   Async function that mints a fresh Installation Token (transient).
+   * @param {{ commitMessage?: string }} [opts]
+   * @returns {Promise<{ summary: string }>} credential-free stdout snippet from git push.
+   * @throws {WorkspaceMutatorError} errorClass: traversal|not-found|credentials-missing|branch-mismatch|commit-failed|push-failed
+   */
+  async commitAndPushFile(name, relFilePath, mintTokenFn, { commitMessage } = {}) {
+    const wsDir = await this.#resolveWorkspaceDir();
+    const { workspaceDir, targetPath } = this.#validateTarget(name, wsDir);
+
+    // Check target exists — lstat does NOT follow symlinks.
+    try {
+      await this.#fsDeps.lstat(targetPath);
+    } catch {
+      throw new WorkspaceMutatorError(
+        `Klon "${name}" nicht gefunden in WORKSPACE_DIR`,
+        'not-found',
+      );
+    }
+
+    // Symlink-Flucht guard (identical to pullClone).
+    try {
+      const realWorkspace = await this.#fsDeps.realpath(workspaceDir);
+      const realTarget = await this.#fsDeps.realpath(targetPath);
+      const wsPrefix = realWorkspace.endsWith(sep) ? realWorkspace : realWorkspace + sep;
+      if (!realTarget.startsWith(wsPrefix)) {
+        throw new WorkspaceMutatorError(
+          `Symlink-Flucht erkannt: "${name}" zeigt außerhalb von WORKSPACE_DIR`,
+          'traversal',
+        );
+      }
+    } catch (err) {
+      if (err instanceof WorkspaceMutatorError) throw err;
+      throw new WorkspaceMutatorError(
+        `Klon "${name}" nicht auflösbar in WORKSPACE_DIR`,
+        'not-found',
+      );
+    }
+
+    // Mint token IMMEDIATELY before git push (transient, same discipline as pullClone).
+    let token;
+    try {
+      token = await mintTokenFn();
+    } catch {
+      throw new WorkspaceMutatorError(
+        'Installation-Token konnte nicht gemintet werden',
+        'credentials-missing',
+      );
+    }
+    if (typeof token !== 'string' || !token.trim()) {
+      throw new WorkspaceMutatorError(
+        'Installation-Token ist leer oder ungültig',
+        'credentials-missing',
+      );
+    }
+
+    const envVarName = `_GHTOKEN_${randomBytes(8).toString('hex').toUpperCase()}`;
+    const askpassScript = join(
+      tmpdir(),
+      `_git_askpass_${randomBytes(8).toString('hex')}.sh`,
+    );
+
+    let askpassCreated = false;
+    try {
+      await writeAskpassScript(askpassScript, envVarName, this.#fsDeps.writeFile);
+      askpassCreated = true;
+
+      const childEnv = minimalGitEnv({
+        GIT_ASKPASS: askpassScript,
+        GIT_TERMINAL_PROMPT: '0',
+        [envVarName]: token,
+      });
+
+      // Finding 1: capture the pre-mutation HEAD sha so ANY failure below can
+      // be rolled back — no orphaned local commit / dirty working tree survives
+      // a failed attempt.
+      let prevHead = null;
+      try {
+        const headResult = await this.#execFn('git', ['rev-parse', 'HEAD'], {
+          cwd: targetPath,
+          timeout: RM_TIMEOUT_MS,
+          env: childEnv,
+        });
+        const sha = String(headResult?.stdout ?? '').trim();
+        if (sha) prevHead = sha;
+      } catch {
+        // Very fresh/empty clone without a commit yet — no rollback anchor
+        // available; failures below simply cannot be rolled back (best-effort).
+        prevHead = null;
+      }
+
+      const rollbackToPrevHead = async () => {
+        if (!prevHead) return;
+        try {
+          await this.#execFn('git', ['reset', '--hard', prevHead], {
+            cwd: targetPath,
+            timeout: RM_TIMEOUT_MS,
+            env: childEnv,
+          });
+        } catch {
+          // Best-effort — the primary (already-classified) error stays authoritative.
+        }
+      };
+
+      // Finding 2: verify the checked-out branch against the AUTHORITATIVE
+      // remote default (refs/remotes/origin/HEAD, set by `git clone`) BEFORE
+      // any mutation — a manually-switched clone must never silently push to
+      // a non-default branch.
+      let branch;
+      try {
+        branch = await this.#verifyPushBranch(targetPath, childEnv, name);
+      } catch (err) {
+        await rollbackToPrevHead();
+        throw err;
+      }
+
+      try {
+        await this.#execFn('git', ['add', '--', relFilePath], {
+          cwd: targetPath,
+          timeout: RM_TIMEOUT_MS,
+          env: childEnv,
+        });
+      } catch (err) {
+        await rollbackToPrevHead();
+        const safeErr = String(err?.message ?? '').slice(0, 300);
+        throw new WorkspaceMutatorError(`git add fehlgeschlagen für "${name}": ${safeErr}`, 'commit-failed');
+      }
+
+      try {
+        await this.#execFn(
+          'git',
+          ['commit', '-m', commitMessage ?? `chore: rotate ${relFilePath}`],
+          { cwd: targetPath, timeout: RM_TIMEOUT_MS, env: childEnv },
+        );
+      } catch (err) {
+        const rawErr = String(err?.message ?? '');
+        if (!/nothing to commit/i.test(rawErr)) {
+          await rollbackToPrevHead();
+          const safeErr = rawErr.slice(0, 300);
+          throw new WorkspaceMutatorError(`git commit fehlgeschlagen für "${name}": ${safeErr}`, 'commit-failed');
+        }
+        // "nothing to commit" — working tree already matches the (unmodified)
+        // committed state — defensive no-op, not an error.
+      }
+
+      let pushResult;
+      try {
+        pushResult = await this.#execFn('git', ['push', 'origin', `HEAD:${branch}`], {
+          cwd: targetPath,
+          timeout: PULL_TIMEOUT_MS,
+          env: childEnv,
+        });
+      } catch (err) {
+        await rollbackToPrevHead();
+        const rawErr = String(err?.message ?? '');
+        const safeErr = rawErr
+          .replace(/x-access-token:[^\s@]*/gi, 'x-access-token:[REDACTED]')
+          .replace(/ghp_[A-Za-z0-9]{10,}/g, '[REDACTED]')
+          .replace(/ghs_[A-Za-z0-9]{10,}/g, '[REDACTED]')
+          .slice(0, 300);
+        throw new WorkspaceMutatorError(`git push fehlgeschlagen für "${name}": ${safeErr}`, 'push-failed');
+      } finally {
+        token = null; // allow GC
+      }
+
+      const rawSummary = String(pushResult?.stdout ?? '').slice(0, 2000);
+      const summary = rawSummary
+        .replace(/x-access-token:[^\s@]*/gi, 'x-access-token:[REDACTED]')
+        .replace(/ghp_[A-Za-z0-9]{10,}/g, '[REDACTED]')
+        .replace(/ghs_[A-Za-z0-9]{10,}/g, '[REDACTED]');
+
+      return { summary };
+    } finally {
+      if (askpassCreated) {
+        try {
+          await this.#fsDeps.unlink(askpassScript);
+        } catch {
+          // Best-effort cleanup.
+        }
+      }
+    }
+  }
+
+  /**
+   * Finding 2 (per-app-gpg-passphrase-rotation Review-Iteration 2): verifies
+   * the clone's checked-out branch against the AUTHORITATIVE remote default
+   * branch (`refs/remotes/origin/HEAD`, set once by `git clone` — never
+   * rewritten by WorkspaceMutator/GitHubCloner) BEFORE `commitAndPushFile`
+   * mutates or pushes anything. A clone that was manually switched to a
+   * different branch (e.g. via the Terminal feature) must hard-abort instead
+   * of silently pushing the rotated `.env.gpg` to a non-default branch.
+   *
+   * @param {string} targetPath
+   * @param {object} childEnv
+   * @param {string} name
+   * @returns {Promise<string>} the verified branch name (safe to push to).
+   * @throws {WorkspaceMutatorError} errorClass: push-failed|branch-mismatch
+   */
+  async #verifyPushBranch(targetPath, childEnv, name) {
+    let branchResult;
+    try {
+      branchResult = await this.#execFn('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+        cwd: targetPath,
+        timeout: RM_TIMEOUT_MS,
+        env: childEnv,
+      });
+    } catch (err) {
+      const safeErr = String(err?.message ?? '').slice(0, 300);
+      throw new WorkspaceMutatorError(`Branch-Ermittlung fehlgeschlagen für "${name}": ${safeErr}`, 'push-failed');
+    }
+    const branch = String(branchResult?.stdout ?? '').trim();
+    if (!branch || branch === 'HEAD') {
+      throw new WorkspaceMutatorError(`Branch-Ermittlung fehlgeschlagen für "${name}": leerer Branch-Name oder losgelöster HEAD`, 'push-failed');
+    }
+
+    let defaultRefResult;
+    try {
+      defaultRefResult = await this.#execFn('git', ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], {
+        cwd: targetPath,
+        timeout: RM_TIMEOUT_MS,
+        env: childEnv,
+      });
+    } catch (err) {
+      const safeErr = String(err?.message ?? '').slice(0, 300);
+      throw new WorkspaceMutatorError(
+        `Default-Branch-Ermittlung fehlgeschlagen für "${name}" (refs/remotes/origin/HEAD nicht gesetzt): ${safeErr}`,
+        'push-failed',
+      );
+    }
+    const defaultRef = String(defaultRefResult?.stdout ?? '').trim(); // e.g. "origin/main"
+    const defaultBranch = defaultRef.startsWith('origin/') ? defaultRef.slice('origin/'.length) : defaultRef;
+    if (!defaultBranch) {
+      throw new WorkspaceMutatorError(`Default-Branch-Ermittlung fehlgeschlagen für "${name}": leerer Wert`, 'push-failed');
+    }
+
+    if (branch !== defaultBranch) {
+      throw new WorkspaceMutatorError(
+        `Klon "${name}" ist auf Branch "${branch}" statt dem Default-Branch "${defaultBranch}" ausgecheckt — Push abgebrochen (kein stiller Push auf einen Nicht-Default-Branch)`,
+        'branch-mismatch',
+      );
+    }
+
+    return branch;
   }
 
   /**

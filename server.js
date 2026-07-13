@@ -160,6 +160,10 @@ import { BudgetGuard, BUDGET_RESUME_BUFFER_MS } from './src/BudgetGuard.js';
 import { DrainReportStore } from './src/DrainReportStore.js';
 import { BitwardenDeployAccessStore } from './src/BitwardenDeployAccessStore.js';
 import { BitwardenDeployLoginService } from './src/BitwardenDeployLoginService.js';
+import { PerAppGpgProvisioningService } from './src/PerAppGpgProvisioningService.js';
+import { PerAppGpgRotationService } from './src/PerAppGpgRotationService.js';
+import { HeadlessNewProjectRunner } from './src/HeadlessNewProjectRunner.js';
+import { HeadlessAdoptRunner } from './src/HeadlessAdoptRunner.js';
 import { RegressionResultStore } from './src/RegressionResultStore.js';
 import { DrainJobRegistry } from './src/DrainJobRegistry.js';
 import { FeatureDrainRegistry } from './src/FeatureDrainRegistry.js';
@@ -522,6 +526,52 @@ const bitwardenDeployAccessStore = new BitwardenDeployAccessStore();
 const bitwardenDeployLoginService = new BitwardenDeployLoginService({
   accessStore: bitwardenDeployAccessStore,
   auditStore,
+});
+
+// ── PerAppGpgProvisioningService (per-app-gpg-passphrase-provisioning F-073, S-335) ──
+// Kern-Dienst der per-App-GPG-Passphrasen-Provisionierung: idempotente Anlage von
+// `env.gpg-passphrase-<app>` in Bitwarden. Nutzt AUSSCHLIESSLICH die Session des
+// bestehenden bitwardenDeployLoginService (kein zweiter bw-Login-/Spawn-Pfad) —
+// Konsument: POST /api/deployments/:app/gpg-provision (deploymentsRouter, AC10).
+const perAppGpgProvisioningService = new PerAppGpgProvisioningService({
+  deployLoginService: bitwardenDeployLoginService,
+  auditStore,
+});
+
+// ── HeadlessNewProjectRunner (per-app-gpg-passphrase-provisioning F-073, S-336/S-343, ADR-021) ──
+// Headless-Scaffold-Ausführungsnaht für `/agent-flow:new-project <slug>` —
+// EIGENE ProjectJobLock-Instanz (Konstruktor-Default), getrennt von ALLEN
+// anderen headless-Runnern. Konsument: POST /api/new-project/start
+// (newProjectHeadless.js, AC12/AC13/AC15) — löst an seinem erfolgreichen
+// Abschluss GENAU EINMAL die Auto-Provisionierung über
+// perAppGpgProvisioningService.withScaffoldPassphrase aus (runWithAutoProvisioning).
+const newProjectRunner = new HeadlessNewProjectRunner({
+  auditStore,
+  provisioningService: perAppGpgProvisioningService,
+});
+
+// ── HeadlessAdoptRunner (per-app-gpg-passphrase-provisioning F-073, S-343 AC12/AC14) ──
+// Headless-Ausführungsnaht für `/agent-flow:adopt <owner/repo>` — EIGENE
+// ProjectJobLock-Instanz, getrennt von ALLEN anderen headless-Runnern. KEINE
+// Auto-Provisionierungs-Kopplung (adopt hat keinen deterministischen GE4-
+// Zeitpunkt — Nach-Provisionierung per Knopf, S-337, bleibt der Weg dafür).
+// Konsument: POST /api/adopt/start (newProjectHeadless.js, AC12/AC14).
+const adoptRunner = new HeadlessAdoptRunner();
+
+// ── PerAppGpgRotationService (per-app-gpg-passphrase-rotation F-073, S-338) ──
+// Zwei-Phasen-Rotation (Kandidat/Beweis-Runde → Umschalten) der per-App-GPG-
+// Passphrase. Nutzt AUSSCHLIESSLICH die Session des bestehenden
+// bitwardenDeployLoginService (kein zweiter bw-Login-/Spawn-Pfad) UND
+// AUSSCHLIESSLICH den bestehenden workspaceMutator (pullClone/commitAndPushFile,
+// kein zweiter git-Spawn-Pfad) — credentialStore fürs Token-Minting (Git-Push).
+// Konsument: POST /api/deployments/:app/gpg-rotate/{start,commit,discard-previous}
+// (deploymentsRouter, AC1-AC7/AC10-AC13).
+const perAppGpgRotationService = new PerAppGpgRotationService({
+  deployLoginService: bitwardenDeployLoginService,
+  auditStore,
+  workspaceMutator,
+  credentialStore,
+  workspaceRootResolver: resolveWorkspaceRoot,
 });
 
 // ── DrainNotifier (drain-done-notification AC1–AC7, S-277) ──────────────────
@@ -954,6 +1004,21 @@ const deps = {
   // (API-Key + Unlock, Item-Read). Vom Auto-Loader an bitwardenDeployAccess.js
   // (POST .../validate) und später an den Deploy-Guard (S-334) gereicht.
   bitwardenDeployLoginService,
+  // per-app-gpg-passphrase-provisioning F-073/S-335: Kern-Provisionierungsdienst
+  // (idempotente env.gpg-passphrase-<app>-Anlage). Vom Auto-Loader an
+  // deployments.js (POST /api/deployments/:app/gpg-provision, AC10) gereicht.
+  perAppGpgProvisioningService,
+  // per-app-gpg-passphrase-provisioning F-073/S-343 (AC12/AC13/AC15): headless
+  // new-project-Scaffold-Runner + Adopt-Runner für die Umstellung der drei
+  // Anlage-Wege auf headless (newProjectHeadless.js, POST /api/new-project/start,
+  // POST /api/adopt/start). Auto-Provisionierung hängt AUSSCHLIESSLICH am
+  // newProjectRunner (runWithAutoProvisioning) — adoptRunner koppelt NICHT.
+  newProjectRunner,
+  adoptRunner,
+  // per-app-gpg-passphrase-rotation F-073/S-338: Zwei-Phasen-Rotations-Dienst
+  // (Kandidat/Beweis-Runde → Umschalten → manuelle Entsorgung). Vom Auto-Loader
+  // an deployments.js (POST /api/deployments/:app/gpg-rotate/*) gereicht.
+  perAppGpgRotationService,
   // regression-result-store AC4 (S-312): RegressionResultStore für
   // GET /api/projects/:slug/regression-runs[/:runId] (regressionRuns.js Router).
   regressionResultStore,

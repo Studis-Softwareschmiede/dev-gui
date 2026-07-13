@@ -22,6 +22,24 @@
  *     nur zur internen Fehlerklassifizierung gepuffert.
  *   - Audit-First vor validate/fetch (ohne Werte).
  *
+ * Item-Anlage (per-app-gpg-passphrase-provisioning, F-073/S-335):
+ *   Die Session (`openSession()`) bietet zusätzlich `itemExists(itemName)` und
+ *   `createItem(itemName, password)` — genutzt vom `PerAppGpgProvisioningService`
+ *   für die idempotente Anlage von `env.gpg-passphrase-<app>`-Items. Bleibt
+ *   dieselbe (einzige) Bitwarden-sprechende Boundary (kein zweiter Login-/
+ *   Spawn-Pfad) — `createItem` nutzt dieselbe encode+create-Technik wie
+ *   `BitwardenMasterKeyService#bwCreateItem` (Werte nur via stdin, nie Argv).
+ *
+ * Feld-Lese/Schreib-Naht (per-app-gpg-passphrase-rotation, F-073/S-338):
+ *   Die Session bietet zusätzlich `readItemFields(itemName)` (liest aktives
+ *   Passwortfeld + die Custom-Felder `naechste`/`vorherige`) und
+ *   `updateItemFields(itemName, { password?, naechste?, vorherige? })`
+ *   (get-modify-encode-edit — `bw get item` → JSON mutieren → `bw encode`
+ *   (stdin) → `bw edit item <id>` (stdin)). `undefined` = Feld unverändert
+ *   lassen, `null` = Custom-Feld entfernen (Rollback/Entsorgung, AC5/AC13).
+ *   Genutzt vom `PerAppGpgRotationService` — dieselbe (einzige) bw-sprechende
+ *   Boundary, kein zweiter Spawn-Pfad.
+ *
  * @module BitwardenDeployLoginService
  */
 
@@ -36,6 +54,15 @@ export const DEPLOY_LOGIN_ERROR_CLASSES = Object.freeze([
   'unlock-failed',
   'bw-unreachable',
   'item-not-found',
+  // per-app-gpg-passphrase-provisioning (F-073/S-335): idempotente Item-Anlage
+  // via `bw encode` + `bw create item` (Technik wiederverwendet aus
+  // BitwardenMasterKeyService#bwCreateItem) — Anlage-Fehler bekommt eine eigene
+  // Klasse (kein Rohtext-Leak, S1).
+  'item-create-failed',
+  // per-app-gpg-passphrase-rotation (F-073/S-338): get-modify-encode-edit einer
+  // BESTEHENDEN Item-Instanz (Feld-Lese-/Schreibfehler, ungültige JSON-Antwort,
+  // `bw edit item` fehlgeschlagen) — eigene Klasse (kein Rohtext-Leak, S1).
+  'item-update-failed',
   'error',
 ]);
 
@@ -119,7 +146,12 @@ export class BitwardenDeployLoginService {
    * Der fetch-Audit (mit Item-Name) liegt beim Aufrufer (fetchItemPassword bzw.
    * der Deploy-Guard S-334) — daher nimmt diese Methode keine identity entgegen.
    *
-   * @returns {Promise<{ readItemPassword(itemName: string): Promise<string>, close(): Promise<void> }>}
+   * @returns {Promise<{
+   *   readItemPassword(itemName: string): Promise<string>,
+   *   itemExists(itemName: string): Promise<boolean>,
+   *   createItem(itemName: string, password: string): Promise<void>,
+   *   close(): Promise<void>,
+   * }>}
    * @throws {Error} mit `deployErrorClass` (access-incomplete|auth-failed|unlock-failed|bw-unreachable)
    */
   async openSession() {
@@ -160,7 +192,12 @@ export class BitwardenDeployLoginService {
   /**
    * Etabliert eine isolierte bw-Session (eigenes APPDATA_DIR, config→login→unlock).
    * @param {{ serverUrl: string|null, clientId: string, clientSecret: string, masterPassword: string }} access
-   * @returns {Promise<{ readItemPassword(itemName: string): Promise<string>, close(): Promise<void> }>}
+   * @returns {Promise<{
+   *   readItemPassword(itemName: string): Promise<string>,
+   *   itemExists(itemName: string): Promise<boolean>,
+   *   createItem(itemName: string, password: string): Promise<void>,
+   *   close(): Promise<void>,
+   * }>}
    */
   async #openSession(access) {
     const appDataDir = await mkdtemp(join(tmpdir(), 'bw-deploy-'));
@@ -211,6 +248,134 @@ export class BitwardenDeployLoginService {
             throw makeErr(classify(res.stdout + res.stderr, res.exitCode, 'get'));
           }
           return res.stdout.trim();
+        },
+        // per-app-gpg-passphrase-provisioning (F-073/S-335 AC2): Existenz-Check VOR
+        // jeder Anlage — `bw get item <name>` statt `get password`, damit KEIN
+        // fremder Passphrasen-Wert transient gelesen werden muss. exitCode 0 → true;
+        // ein "not found"/"no item"-Muster → false (kein Item); jeder andere Fehler
+        // wird klassifiziert weitergeworfen (kein Rohtext, S1).
+        itemExists: async (itemName) => {
+          const env = { ...baseEnv, BW_SESSION: session };
+          const res = await this.#spawnBw(['get', 'item', itemName], { env });
+          if (res.exitCode === 0) return true;
+          const s = ((res.stdout ?? '') + (res.stderr ?? '')).toLowerCase();
+          if (s.includes('not found') || s.includes('no item')) {
+            return false;
+          }
+          throw makeErr(classify(res.stdout + res.stderr, res.exitCode, 'get'));
+        },
+        // per-app-gpg-passphrase-provisioning (F-073/S-335 AC1/AC2): idempotente
+        // Item-Anlage — Technik wiederverwendet aus BitwardenMasterKeyService
+        // #bwCreateItem (Item-Template → JSON → `bw encode` via stdin → `bw create
+        // item` via stdin). Der Passphrasen-Wert erscheint NIE im Argv (S2).
+        createItem: async (itemName, password) => {
+          const itemJson = JSON.stringify({
+            type: 1, // Login
+            name: itemName,
+            login: { username: '', password, uris: [] },
+            notes: null,
+            fields: [],
+          });
+          const env = { ...baseEnv, BW_SESSION: session };
+          const encodeRes = await this.#spawnBw(['encode'], { env, input: itemJson });
+          if (encodeRes.exitCode !== 0) {
+            throw makeErr('item-create-failed');
+          }
+          const encodedItem = encodeRes.stdout.trim();
+          const createRes = await this.#spawnBw(['create', 'item'], { env, input: encodedItem });
+          if (createRes.exitCode !== 0) {
+            throw makeErr('item-create-failed');
+          }
+        },
+        // per-app-gpg-passphrase-rotation (F-073/S-338 AC1): liest das aktive
+        // Passwortfeld + die Custom-Felder `naechste`/`vorherige` einer
+        // BESTEHENDEN Item-Instanz. Rückgabe ist Klartext (Passphrasen!) — NUR
+        // an interne Aufrufer (PerAppGpgRotationService), NIE Richtung HTTP/Log.
+        readItemFields: async (itemName) => {
+          const env = { ...baseEnv, BW_SESSION: session };
+          const res = await this.#spawnBw(['get', 'item', itemName], { env });
+          if (res.exitCode !== 0) {
+            const s = ((res.stdout ?? '') + (res.stderr ?? '')).toLowerCase();
+            if (s.includes('not found') || s.includes('no item')) {
+              throw makeErr('item-not-found');
+            }
+            throw makeErr(classify(res.stdout + res.stderr, res.exitCode, 'get'));
+          }
+          let item;
+          try {
+            item = JSON.parse(res.stdout);
+          } catch {
+            throw makeErr('item-update-failed');
+          }
+          const fields = Array.isArray(item?.fields) ? item.fields : [];
+          const findField = (name) => fields.find((f) => f && f.name === name)?.value ?? null;
+          return {
+            id: typeof item?.id === 'string' ? item.id : null,
+            password: item?.login?.password ?? null,
+            naechste: findField('naechste'),
+            vorherige: findField('vorherige'),
+          };
+        },
+        // per-app-gpg-passphrase-rotation (F-073/S-338 AC1/AC4/AC5/AC13):
+        // get-modify-encode-edit einer BESTEHENDEN Item-Instanz — `bw get item`
+        // → JSON mutieren (Passwortfeld + Custom-Felder `naechste`/`vorherige`)
+        // → `bw encode` (stdin) → `bw edit item <id>` (stdin). Werte NIEMALS im
+        // Argv (S2). `mutations.<key> === undefined` → Feld unverändert lassen;
+        // `mutations.<key> === null` → Custom-Feld ENTFERNEN (Rollback/AC5/AC13).
+        // Unberührte Felder (inkl. fremde Custom-Felder) bleiben unverändert,
+        // weil das VOLLE Item-JSON gelesen, punktuell mutiert und zurückgeschrieben
+        // wird (kein Überschreiben mit einem Teil-Objekt).
+        updateItemFields: async (itemName, mutations = {}) => {
+          const env = { ...baseEnv, BW_SESSION: session };
+          const getRes = await this.#spawnBw(['get', 'item', itemName], { env });
+          if (getRes.exitCode !== 0) {
+            const s = ((getRes.stdout ?? '') + (getRes.stderr ?? '')).toLowerCase();
+            if (s.includes('not found') || s.includes('no item')) {
+              throw makeErr('item-not-found');
+            }
+            throw makeErr(classify(getRes.stdout + getRes.stderr, getRes.exitCode, 'get'));
+          }
+          let item;
+          try {
+            item = JSON.parse(getRes.stdout);
+          } catch {
+            throw makeErr('item-update-failed');
+          }
+          if (!item || typeof item.id !== 'string' || !item.id) {
+            throw makeErr('item-update-failed');
+          }
+
+          if (Object.prototype.hasOwnProperty.call(mutations, 'password') && mutations.password !== undefined) {
+            item.login = item.login ?? {};
+            item.login.password = mutations.password;
+          }
+
+          const fields = Array.isArray(item.fields) ? [...item.fields] : [];
+          for (const key of ['naechste', 'vorherige']) {
+            if (!Object.prototype.hasOwnProperty.call(mutations, key)) continue;
+            const value = mutations[key];
+            const idx = fields.findIndex((f) => f && f.name === key);
+            if (value === undefined) continue; // unverändert
+            if (value === null) {
+              if (idx >= 0) fields.splice(idx, 1); // Custom-Feld entfernen
+            } else if (idx >= 0) {
+              fields[idx] = { ...fields[idx], value, type: 1 };
+            } else {
+              fields.push({ name: key, value, type: 1 }); // type 1 = Hidden
+            }
+          }
+          item.fields = fields;
+
+          const itemJson = JSON.stringify(item);
+          const encodeRes = await this.#spawnBw(['encode'], { env, input: itemJson });
+          if (encodeRes.exitCode !== 0) {
+            throw makeErr('item-update-failed');
+          }
+          const encodedItem = encodeRes.stdout.trim();
+          const editRes = await this.#spawnBw(['edit', 'item', item.id], { env, input: encodedItem });
+          if (editRes.exitCode !== 0) {
+            throw makeErr('item-update-failed');
+          }
         },
         close: cleanup,
       };

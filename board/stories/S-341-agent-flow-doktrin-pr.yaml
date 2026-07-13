@@ -1,7 +1,8 @@
 id: S-341
 parent: F-073
-title: 'agent-flow-Doktrin-PR: secrets-subsystem.md + new-project GE4 (Passphrasen-Quelle dev-gui)'
-status: To Do
+title: 'agent-flow-Doktrin-PR: secrets-subsystem.md + new-project GE4 (Passphrasen-Quelle
+  dev-gui)'
+status: Done
 priority: P2
 spec: docs/specs/per-app-gpg-passphrase-provisioning.md
 implements:
@@ -12,17 +13,20 @@ labels:
 - coordination
 size_est: S
 dispo_est: '2'
-dispo_act: null
-dispo_forecast: null
-estimate_note: 'S (Heuristik: 1 AC + secrets-subsystem.md/new-project-SKILL). PR gegen agent-flow-Repo (Muster retro/train, nie Direkt-Edit): per-App-Passphrasen-Doktrin + Passphrasen-Quelle dev-gui via GPG_PASS_FILE. Cross-Repo -> confidence low. Baseline-Lookup js|balanced|S=2.0.'
+dispo_act: '5.5'
+dispo_forecast: '-0.6364'
+estimate_note: 'S (Heuristik: 1 AC + secrets-subsystem.md/new-project-SKILL). PR gegen
+  agent-flow-Repo (Muster retro/train, nie Direkt-Edit): per-App-Passphrasen-Doktrin
+  + Passphrasen-Quelle dev-gui via GPG_PASS_FILE. Cross-Repo -> confidence low. Baseline-Lookup
+  js|balanced|S=2.0.'
 confidence: low
-branch: null
-pr: null
+branch: feat/dev-gui-S-341-gpg-doktrin
+pr: https://github.com/Studis-Softwareschmiede/agent-flow/pull/334
 blocked_reason: null
 github_issue: 404
 github_url: https://github.com/Studis-Softwareschmiede/dev-gui/issues/404
 created_at: '2026-07-13T00:00:00Z'
-updated_at: '2026-07-13T00:00:00Z'
-done_at: null
+updated_at: '2026-07-13T15:51:00Z'
+done_at: '2026-07-13T15:51:00Z'
 tok_est: null
 area: deployment

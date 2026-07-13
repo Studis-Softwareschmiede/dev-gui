@@ -1,7 +1,7 @@
 id: S-335
 parent: F-073
-title: 'Per-App-Passphrase-Provisionierungs-Dienst (idempotent, Bitwarden env.gpg-passphrase-<app>)'
-status: To Do
+title: Per-App-Passphrase-Provisionierungs-Dienst (idempotent, Bitwarden env.gpg-passphrase-<app>)
+status: Done
 priority: P2
 spec: docs/specs/per-app-gpg-passphrase-provisioning.md
 implements:
@@ -20,15 +20,19 @@ size_est: L
 dispo_est: '5'
 dispo_act: null
 dispo_forecast: null
-estimate_note: 'L (Heuristik: 6 AC + Dienst/Login-Service/bw-create + security-Label). Neuer PerAppGpgProvisioningService: starke Passphrase erzeugen, Item-Existenz pruefen, idempotent anlegen (nie ueberschreiben), Zugang-Gate, Audit-First, AccessGuard+CRED_ADMIN. bw-create-Technik aus BitwardenMasterKeyService wiederverwendet. estimator nicht dispatchbar (kein Task-Tool im requirement-Lauf) -> Baseline-Lookup js|balanced|L=5.0.'
+estimate_note: 'L (Heuristik: 6 AC + Dienst/Login-Service/bw-create + security-Label).
+  Neuer PerAppGpgProvisioningService: starke Passphrase erzeugen, Item-Existenz pruefen,
+  idempotent anlegen (nie ueberschreiben), Zugang-Gate, Audit-First, AccessGuard+CRED_ADMIN.
+  bw-create-Technik aus BitwardenMasterKeyService wiederverwendet. estimator nicht
+  dispatchbar (kein Task-Tool im requirement-Lauf) -> Baseline-Lookup js|balanced|L=5.0.'
 confidence: low
-branch: null
+branch: feat/S-335-per-app-gpg-provisioning
 pr: null
 blocked_reason: null
 github_issue: 398
 github_url: https://github.com/Studis-Softwareschmiede/dev-gui/issues/398
 created_at: '2026-07-13T00:00:00Z'
-updated_at: '2026-07-13T00:00:00Z'
-done_at: null
+updated_at: '2026-07-13T14:07:55Z'
+done_at: '2026-07-13T14:07:55Z'
 tok_est: null
 area: deployment

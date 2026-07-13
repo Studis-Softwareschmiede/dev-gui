@@ -26,6 +26,14 @@
  *     keine Pipe-Blockade).
  *   - Timeout: der konstruktor-injizierte `timeoutMs` terminiert einen hängenden
  *     Kindprozess (SIGTERM) und setzt den Job auf `failed`.
+ *   - Pro-Lauf-Env-Override (ADR-021, docs/specs/per-app-gpg-passphrase-provisioning.md
+ *     AC4-AC6): `start(projectPath, { env })` erlaubt es einem Aufrufer, EINEN
+ *     zusätzlichen Env-Block für GENAU diesen Lauf in die Child-Env zu mischen
+ *     (additiv über `buildChildEnv()`, z.B. `GPG_PASS_FILE=<pfad>` für den
+ *     `HeadlessNewProjectRunner`). Die harte `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`-
+ *     Sperre bleibt dabei bestehen (Defense in Depth: auch nach dem Merge wird
+ *     erneut gestrippt) — der Override kann sie NICHT unterlaufen. Ohne `env` ist
+ *     das Verhalten bit-identisch zu vorher (kein Regress).
  *   - Sperre pro Projekt: `ProjectJobLock`-Instanz, Lock-Key = aufgelöster
  *     Projekt-Pfad; Freigabe in try/finally (Crash/Exception-sicher).
  *   - 401-Erkennung: 401-Signatur in Exit-Code ODER erfasstem stdout/stderr hat
@@ -224,6 +232,9 @@ export class HeadlessRunnerCore {
    * @param {object} [overrides]
    * @param {string} [overrides.command] - überschreibt den default-Befehl für DIESEN Lauf.
    * @param {string[]} [overrides.args] - überschreibt die default-Extra-Args für DIESEN Lauf.
+   * @param {Record<string,string>} [overrides.env] - zusätzliche Env-Einträge NUR für
+   *   DIESEN Lauf, additiv über `buildChildEnv()` gemischt (ADR-021, z.B. `GPG_PASS_FILE`).
+   *   `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` bleiben auch hier hart gesperrt.
    * @returns {{ ok: true, jobId: string } | { ok: false, reason: 'locked' }}
    */
   start(projectPath, overrides = {}) {
@@ -236,11 +247,12 @@ export class HeadlessRunnerCore {
 
     const command = overrides.command ?? this.#defaultCommand;
     const args = overrides.args ?? this.#defaultArgs;
+    const extraEnv = overrides.env;
 
     // Fire-and-forget: der Lauf kann lange dauern; der Aufrufer wartet nicht
     // darauf. Der interne try/finally übernimmt die Lock-Freigabe auch bei
     // einer unerwarteten Exception.
-    this.#runProcess(jobId, projectPath, command, args).catch(() => {
+    this.#runProcess(jobId, projectPath, command, args, extraEnv).catch(() => {
       // #runProcess() fängt selbst alle Fehler ab und setzt den Job-Status —
       // dieser catch ist nur ein zusätzliches Sicherheitsnetz gegen eine
       // unhandled rejection, falls doch etwas durchrutscht.
@@ -267,9 +279,10 @@ export class HeadlessRunnerCore {
    * @param {string} projectPath
    * @param {string} command
    * @param {string[]} args
+   * @param {Record<string,string>} [extraEnv] - additiver Pro-Lauf-Env-Override (ADR-021).
    * @returns {Promise<void>}
    */
-  async #runProcess(jobId, projectPath, command, args) {
+  async #runProcess(jobId, projectPath, command, args, extraEnv) {
     try {
       await new Promise((resolve) => {
         let settled = false;
@@ -294,9 +307,14 @@ export class HeadlessRunnerCore {
           // Weiterhin Array-Übergabe an spawn() (kein Shell-String) — die
           // Command-Injection-Schutzeigenschaft (security/R03) bleibt unverändert.
           const promptArg = args.length > 0 ? `${command} ${args.join(' ')}` : command;
+          // ADR-021: additiver Pro-Lauf-Env-Override (z.B. GPG_PASS_FILE) — nie
+          // die harte API-Key-Sperre unterlaufen (Defense in Depth: erneut strippen
+          // NACH dem Merge, falls extraEnv versehentlich einen Blocked-Key trüge).
+          const childEnv = extraEnv ? { ...buildChildEnv(), ...extraEnv } : buildChildEnv();
+          for (const blocked of BLOCKED_ENV_KEYS) delete childEnv[blocked];
           child = this.#spawnFn('claude', ['-p', promptArg, '--dangerously-skip-permissions'], {
             cwd: projectPath,
-            env: buildChildEnv(),
+            env: childEnv,
           });
         } catch {
           // Synchroner Spawn-Fehler (selten bei echtem Node-spawn, aber möglich bei
