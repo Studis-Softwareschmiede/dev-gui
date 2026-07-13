@@ -200,6 +200,14 @@ await credentialStore.assertCredentialConfig().catch((err) => {
   process.exit(1);
 });
 
+// credential-key-rotation Edge-Case: eine verwaiste `secrets.enc.json.rotate-tmp`
+// (Crash zwischen Re-Encryption und atomarem Swap einer vorherigen Rotation) wird
+// beim nächsten Start aufgeräumt — best-effort, kein Boot-Abbruch (Original bleibt
+// in jedem Fall intakt; rotate() selbst räumt zusätzlich vor jedem eigenen Lauf auf).
+await credentialStore.cleanupOrphanedRotateTmp().catch((err) => {
+  console.error('[server] cleanupOrphanedRotateTmp fehlgeschlagen (best-effort, kein Boot-Abbruch):', err.message);
+});
+
 // ── Notification-Event-Defaults-Migration (notification-event-defaults AC3/AC4) ──
 // Genau einmal beim Server-Start, VOR jedem Lesen/Verwenden der Notification-Settings.
 // Best-effort — migrateEventDefaults() wirft nie nach außen (kein Boot-Abbruch möglich).

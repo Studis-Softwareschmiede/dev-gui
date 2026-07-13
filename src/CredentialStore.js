@@ -42,7 +42,7 @@
 
 import { createCipheriv, createDecipheriv, randomBytes, scrypt } from 'node:crypto';
 import { promisify } from 'node:util';
-import { readFile, rename, mkdir, open, stat, chmod } from 'node:fs/promises';
+import { readFile, rename, mkdir, open, stat, chmod, unlink } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { decrypt as gpgDecrypt } from './BackupCrypto.js';
 import { readFileSync } from 'node:fs';
@@ -1514,7 +1514,6 @@ export class CredentialStore {
       } catch {
         // AC15: bei Schreib-Fehler den tmp aufräumen (best-effort)
         try {
-          const { unlink } = await import('node:fs/promises');
           await unlink(tmp);
         } catch { /* ignore */ }
 
@@ -1524,6 +1523,251 @@ export class CredentialStore {
           error: 'Schreiben des wiederhergestellten Stores fehlgeschlagen.',
         };
       }
+    });
+  }
+
+  // ── Master-Key-Rotation (credential-key-rotation, S-083 Kern — AC1-AC3/AC7-AC10) ────
+
+  /**
+   * Schreibt `data` atomar (tmp + fsync) in eine eigene Rotations-Zwischendatei
+   * (`secrets.enc.json.rotate-tmp`) — OHNE sie über das Original zu `rename()`n.
+   * Der Aufrufer (rotate()) entscheidet nach erfolgreicher Round-trip-Verifikation
+   * separat über den finalen atomaren Swap (AC1 Schritt (b)/(d)).
+   *
+   * @param {object} data
+   * @returns {Promise<string>} Pfad der geschriebenen Rotations-Zwischendatei
+   */
+  async #writeRotateTmp(data) {
+    const tmpPath = `${this.#filePath}.rotate-tmp`;
+    const dir = this.#filePath.replace(/\/[^/]+$/, '');
+
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+
+    const json = JSON.stringify(data, null, 2);
+
+    let fd;
+    try {
+      fd = await open(tmpPath, 'w', 0o600);
+      await fd.writeFile(json, 'utf8');
+      await fd.sync();
+    } finally {
+      if (fd) await fd.close();
+    }
+
+    return tmpPath;
+  }
+
+  /**
+   * Räumt eine verwaiste `secrets.enc.json.rotate-tmp`-Datei auf (best-effort).
+   * Edge-Case (Spec §Edge-Cases): Crash zwischen Schritt (b) und (d) einer
+   * vorherigen Rotation lässt eine solche Datei zurück, während das Original
+   * unangetastet bleibt. Fehlende Datei ist kein Fehler (ENOENT wird geschluckt).
+   *
+   * @returns {Promise<void>}
+   */
+  async #cleanupRotateTmp() {
+    const tmpPath = `${this.#filePath}.rotate-tmp`;
+    try {
+      await unlink(tmpPath);
+    } catch (err) {
+      if (err.code !== 'ENOENT') {
+        // AC9/Floor: keine Werte im Log — nur die Fehlerklasse
+        console.error('[CredentialStore] Aufräumen der verwaisten rotate-tmp-Datei fehlgeschlagen:', err.constructor?.name ?? 'Error');
+      }
+    }
+  }
+
+  /**
+   * Räumt eine verwaiste `secrets.enc.json.rotate-tmp`-Datei auf. Öffentlicher
+   * Boot-Hook (server.js ruft dies einmalig beim Start auf — Spec-Edge-Case
+   * "nächster Start/Lauf räumt die tmp-Datei auf"). rotate() selbst räumt vor
+   * jedem eigenen Lauf zusätzlich auf (Edge-Case "nächster ... Lauf").
+   *
+   * @returns {Promise<void>}
+   */
+  async cleanupOrphanedRotateTmp() {
+    await this.#cleanupRotateTmp();
+  }
+
+  /**
+   * Rotiert den Master-Key (credential-key-rotation AC1-AC3/AC7-AC10, S-083 Kern).
+   *
+   * Ablauf, strikt in dieser Reihenfolge:
+   *   (a) Entschlüsseln aller Einträge mit dem AKTUELL AKTIVEN (alten) Key (in-memory).
+   *   (b) Verschlüsseln aller Einträge mit dem NEUEN Key in eine NEUE Datei
+   *       (`secrets.enc.json.rotate-tmp`, frischer Salt/KDF-Block, frische IVs je Eintrag).
+   *   (c) Round-trip-Verifikation: die neue Datei wird mit dem NEUEN Key vollständig
+   *       zurückgelesen/entschlüsselt und jeder Eintrag wertgleich gegen den Klartext
+   *       aus (a) verglichen.
+   *   (d) Atomarer Swap: `rename()` der neuen Datei über das Original — ERST nach
+   *       grüner Verifikation (Commit-Punkt, ADR-007 tmp+fsync+rename-Linie).
+   *
+   * Scheitert (a)-(c) ⇒ KEIN Swap: `secrets.enc.json` und `.env` bleiben unverändert,
+   * der alte Key bleibt aktiv (AC3, vollständig umkehrbar).
+   *
+   * Hat der Store aktuell KEINE verschlüsselten Einträge, entfällt die Datei-Rotation
+   * (a)-(d) — es gibt nichts, das re-verschlüsselt werden müsste (AC1 "alle Einträge"
+   * ist mit 0 Einträgen trivial erfüllt); der neue Key wird trotzdem aktiviert.
+   *
+   * `.env`-Persistenz (AC7) geschieht ERST NACH einem grünen Swap (bzw. nach der
+   * datei-losen Aktivierung im 0-Einträge-Fall). Schlägt NUR die Persistenz fehl,
+   * ist der neue Key bereits in-memory aktiv (die Datei erwartet ab dem Swap
+   * ausschließlich den neuen Key — ein Rückfall auf den alten Key ist nicht mehr
+   * möglich) — der Aufrufer wird über `reason:'persist-failed'` informiert
+   * (kein stiller Verlust, Spec-Edge-Case).
+   *
+   * Gibt NIEMALS einen Key-Wert zurück (AC9); `reason` ist sanitisiert (Enum, kein Wert).
+   * Rotiert AUSSCHLIESSLICH `DEVGUI_CRED_MASTER_KEY` — `GPG_PASSPHRASE`/`.env.gpg`
+   * werden von dieser Methode nicht berührt (AC10).
+   *
+   * @param {string} newKey - Der neue Master-Key-Rohwert (wird NICHT geloggt)
+   * @returns {Promise<
+   *   { ok: true, swapped: true } |
+   *   { ok: false, reason: 'empty-key'|'invalid-key-format'|'no-master-key'|'same-key'|
+   *       'decrypt-failed'|'encrypt-failed'|'verification-failed'|'swap-failed'|'persist-failed',
+   *     swapped: boolean }
+   * >}
+   */
+  async rotate(newKey) {
+    if (!newKey || typeof newKey !== 'string' || !newKey.trim()) {
+      return { ok: false, reason: 'empty-key', swapped: false };
+    }
+    // Eingebettetes Newline/CR im Key würde die .env-Zeile korrumpieren (analog unlock()).
+    if (/[\r\n]/.test(newKey)) {
+      return { ok: false, reason: 'invalid-key-format', swapped: false };
+    }
+    const trimmedNew = newKey.trim();
+
+    // AC10: Rotation setzt einen aktiven Key voraus (nur DEVGUI_CRED_MASTER_KEY wird rotiert).
+    if (!this.#masterKeyRaw) {
+      return { ok: false, reason: 'no-master-key', swapped: false };
+    }
+    const oldKey = this.#masterKeyRaw;
+
+    // Edge-Case (Spec §Edge-Cases): neuer Key == alter Key ⇒ klare Ablehnung
+    // (keine sinnlose Re-Encryption).
+    if (trimmedNew === oldKey) {
+      return { ok: false, reason: 'same-key', swapped: false };
+    }
+
+    return this.#withWriteLock(async () => {
+      // Edge-Case: verwaiste rotate-tmp-Datei aus einem vorherigen, abgebrochenen
+      // Lauf VOR dieser Rotation aufräumen ("nächster ... Lauf räumt auf").
+      await this.#cleanupRotateTmp();
+
+      const storeData = await this.#readStore();
+      const hasEntries = storeData?.kdf != null && Object.keys(storeData?.entries ?? {}).length > 0;
+
+      if (hasEntries) {
+        // (a) Entschlüsseln aller Einträge mit dem alten Key
+        const oldSalt = Buffer.from(storeData.kdf.salt, 'base64');
+        let oldAesKey;
+        try {
+          oldAesKey = await this.#deriveKey(oldKey, oldSalt);
+        } catch {
+          return { ok: false, reason: 'decrypt-failed', swapped: false };
+        }
+
+        const plaintexts = {};
+        try {
+          for (const [entryKey, entry] of Object.entries(storeData.entries)) {
+            plaintexts[entryKey] = this.#decrypt(oldAesKey, entry);
+          }
+        } catch {
+          // Manipuliertes Store (GCM-Tag falsch) oder inkonsistenter aktiver Key
+          // ⇒ harter Fehler in (a), kein Swap (Spec §Edge-Cases).
+          return { ok: false, reason: 'decrypt-failed', swapped: false };
+        }
+
+        // (b) Verschlüsseln mit dem neuen Key in eine NEUE Datei — frischer Salt/KDF, frische IVs
+        const newSalt = randomBytes(32);
+        const newKdf = { algo: 'scrypt', salt: newSalt.toString('base64'), N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P };
+        let newAesKey;
+        try {
+          newAesKey = await this.#deriveKey(trimmedNew, newSalt);
+        } catch {
+          return { ok: false, reason: 'encrypt-failed', swapped: false };
+        }
+
+        const newEntries = {};
+        for (const [entryKey, plaintext] of Object.entries(plaintexts)) {
+          const encrypted = this.#encrypt(newAesKey, plaintext);
+          newEntries[entryKey] = { ...encrypted, updatedAt: storeData.entries[entryKey].updatedAt };
+        }
+
+        const newStoreData = {
+          version: storeData.version ?? 1,
+          kdf: newKdf,
+          entries: newEntries,
+          ...(storeData.meta ? { meta: storeData.meta } : {}),
+        };
+
+        let tmpPath;
+        try {
+          tmpPath = await this.#writeRotateTmp(newStoreData);
+        } catch {
+          await this.#cleanupRotateTmp();
+          return { ok: false, reason: 'encrypt-failed', swapped: false };
+        }
+
+        // (c) Round-trip-Verifikation: neue Datei mit neuem Key vollständig zurücklesen
+        let verifyOk = true;
+        try {
+          const verifyRaw = await readFile(tmpPath, 'utf8');
+          const verifyParsed = JSON.parse(verifyRaw);
+          const verifySalt = Buffer.from(verifyParsed.kdf.salt, 'base64');
+          const verifyAesKey = await this.#deriveKey(trimmedNew, verifySalt);
+          for (const [entryKey, expectedPlaintext] of Object.entries(plaintexts)) {
+            const verifyEntry = verifyParsed.entries?.[entryKey];
+            if (!verifyEntry) {
+              verifyOk = false;
+              break;
+            }
+            const decrypted = this.#decrypt(verifyAesKey, verifyEntry);
+            if (decrypted !== expectedPlaintext) {
+              verifyOk = false;
+              break;
+            }
+          }
+        } catch {
+          verifyOk = false;
+        }
+
+        if (!verifyOk) {
+          // Kein Swap — verwaiste tmp-Datei aufräumen, alter Zustand bleibt vollständig aktiv (AC2/AC3).
+          await this.#cleanupRotateTmp();
+          return { ok: false, reason: 'verification-failed', swapped: false };
+        }
+
+        // (d) Atomarer Swap — ERST nach grüner Verifikation (Commit-Punkt, ADR-007).
+        try {
+          await rename(tmpPath, this.#filePath);
+        } catch {
+          await this.#cleanupRotateTmp();
+          return { ok: false, reason: 'swap-failed', swapped: false };
+        }
+      }
+
+      // AC7: .env-Persistenz + Prozess-Übergabe ERST NACH grünem Swap (bzw. nach der
+      // datei-losen Aktivierung im 0-Einträge-Fall). Ab hier erwartet die Datei
+      // (falls hasEntries) ausschließlich den neuen Key — masterKeyRaw MUSS
+      // unabhängig vom Persistenz-Ausgang aktualisiert werden (kein Rückfall möglich).
+      let persistOk = true;
+      try {
+        await this.#persistKeyToEnv(trimmedNew);
+      } catch {
+        persistOk = false;
+      }
+
+      this.#masterKeyRaw = trimmedNew;
+      // Runtime-Rotation (kein Boot-Reload) → keySource "manual" (analog unlock()).
+      this.#keySource = 'manual';
+
+      if (!persistOk) {
+        return { ok: false, reason: 'persist-failed', swapped: true };
+      }
+
+      return { ok: true, swapped: true };
     });
   }
 }

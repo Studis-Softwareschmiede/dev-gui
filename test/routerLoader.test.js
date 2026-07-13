@@ -336,8 +336,11 @@ describe('routerLoader — Echte src/routers/ Module (AC1/AC3)', () => {
     // newProjectHeadless.js wurde mit per-app-gpg-passphrase-provisioning (F-073, S-343)
     //   hinzugefügt (POST /api/new-project/start + POST /api/adopt/start — headless
     //   Anlage-Auslöser der drei Fabrik-Übersichts-Wege, AC12/AC13/AC15) → 50.
+    // credentialRotate.js wurde mit credential-key-rotation (S-083 Kern) hinzugefügt
+    //   (POST /api/settings/credential-rotate — atomare Master-Key-Rotation,
+    //   AC1-AC3/AC7-AC10) → 51.
     const entries = await readdir(ROUTERS_DIR);
     const mountedCount = entries.filter((f) => f.endsWith('.js')).length;
-    expect(mountedCount).toBe(50);
+    expect(mountedCount).toBe(51);
   });
 });
