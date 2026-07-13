@@ -1,7 +1,7 @@
 id: S-336
 parent: F-073
 title: Auto-Provisionierung nach new-project-Abschluss + GPG_PASS_FILE-Durchreichung
-status: To Do
+status: In Progress
 priority: P2
 spec: docs/specs/per-app-gpg-passphrase-provisioning.md
 implements:
@@ -29,7 +29,7 @@ blocked_reason: null
 github_issue: 399
 github_url: https://github.com/Studis-Softwareschmiede/dev-gui/issues/399
 created_at: '2026-07-13T00:00:00Z'
-updated_at: '2026-07-13T00:00:00Z'
+updated_at: '2026-07-13T16:07:53Z'
 done_at: null
 tok_est: null
 area: deployment
