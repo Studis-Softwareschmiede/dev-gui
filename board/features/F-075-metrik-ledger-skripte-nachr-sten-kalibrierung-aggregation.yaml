@@ -1,0 +1,20 @@
+id: F-075
+title: Metrik-Ledger-Skripte nachrüsten (Kalibrierung/Aggregation)
+goal: 'Die vier Metrik-Ledger-Skripte (metrics-append-item/-append-dispatch/-aggregate/-collect)
+  einmalig aus dem agent-flow-Bestand nach dev-guis scripts/ nachrüsten, damit /flow
+  und /retro sie spec-konform über ${METRICS_ROOT}/scripts/ finden und die Ledger-Aggregation/Kalibrierung
+  (Retro-Modi C/D/E) wieder läuft. Spec: metrics-scripts-backfill (referenziert agent-flow
+  metrics-repo-anchor).'
+status: Backlog
+priority: P2
+spec: docs/specs/metrics-scripts-backfill.md
+definition_of_done: null
+labels: null
+depends: null
+owner: null
+stories:
+- S-344
+progress: 0/1 done
+created_at: '2026-07-14T04:57:46Z'
+updated_at: '2026-07-14T04:59:58Z'
+area: retro-lernen
