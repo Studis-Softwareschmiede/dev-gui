@@ -9,6 +9,16 @@
  *         token in original origin URL does NOT appear in the response body.
  *   Edge-cases — WORKSPACE_DIR unset/missing → repos: []; no crash.
  *
+ * Covers (docs/specs/workspace-mutator-credential-helper.md):
+ *   AC1 — `WorkspaceMutator.pullClone`s `git pull` trägt die zwei Command-
+ *         Scope-Flags (`-c credential.helper=` + `-c credential.https://
+ *         github.com.helper=`) in genau dieser Reihenfolge VOR dem Subkommando.
+ *   AC2 — die Flag-Werte sind leer (kein Secret in argv); der Token bleibt
+ *         ausschließlich im GIT_ASKPASS-Env-Var-Pfad (Bestandsmechanik,
+ *         unverändert getestet in den bestehenden AC3-Fällen weiter unten).
+ *   AC3 — nur im Container gegen einen aktiven ambienten Helfer reproduzierbar
+ *         (Container-only, siehe Spec „Edge-Cases") — hier nicht getestet.
+ *
  * Strategy:
  *   - WorkspaceScanner: inject fake execFn + fsDeps (no real git/FS calls).
  *   - workspaceReposRouter: wire through real Express with AccessGuard dev-bypass.
@@ -1230,8 +1240,14 @@ describe('WorkspaceMutator.pullClone — AC4: path traversal prevention (unit)',
     expect(pullIdx).toBeGreaterThan(mintIdx); // pull happens AFTER mint
     expect(mintOrder).toBeGreaterThanOrEqual(0);
 
-    // Token must NOT be in argv — git pull args must only be ['pull']
-    expect(execCalledWith.args).toEqual(['pull']);
+    // Token must NOT be in argv — git pull args carry only the Command-Scope
+    // credential-helper neutralization flags (workspace-mutator-credential-
+    // helper AC1) followed by the subcommand.
+    expect(execCalledWith.args).toEqual([
+      '-c', 'credential.helper=',
+      '-c', 'credential.https://github.com.helper=',
+      'pull',
+    ]);
 
     // GIT_ASKPASS must be set (points to temp script)
     expect(execCalledWith.env).toHaveProperty('GIT_ASKPASS');
@@ -1339,6 +1355,63 @@ describe('WorkspaceMutator.pullClone — AC4: path traversal prevention (unit)',
     expect(result).toHaveProperty('summary');
     expect(result.summary).not.toContain(TOKEN);
     expect(result.summary).toContain('Already up to date');
+  });
+});
+
+// ── workspace-mutator-credential-helper AC1/AC2: pullClone git pull ───────────
+
+describe('WorkspaceMutator.pullClone — workspace-mutator-credential-helper AC1/AC2', () => {
+  it('AC1 — git pull trägt die zwei Command-Scope-Flags in genau dieser Reihenfolge VOR dem Subkommando', async () => {
+    let capturedArgs = null;
+    const mutator = new WorkspaceMutator({
+      workspaceDir: '/workspace',
+      fsDeps: {
+        lstat: async () => ({}),
+        realpath: async (p) => p,
+        writeFile: async () => {},
+        unlink: async () => {},
+      },
+      execFn: async (_cmd, args) => {
+        capturedArgs = [...args];
+        return { stdout: 'Already up to date.\n', stderr: '' };
+      },
+    });
+
+    await mutator.pullClone('my-repo', async () => 'token');
+
+    expect(capturedArgs).toEqual([
+      '-c', 'credential.helper=',
+      '-c', 'credential.https://github.com.helper=',
+      'pull',
+    ]);
+  });
+
+  it('AC2 — die Flag-Werte sind leer (kein Secret in argv) und der Token erscheint in KEINEM argv-Element', async () => {
+    let capturedArgs = null;
+    const mutator = new WorkspaceMutator({
+      workspaceDir: '/workspace',
+      fsDeps: {
+        lstat: async () => ({}),
+        realpath: async (p) => p,
+        writeFile: async () => {},
+        unlink: async () => {},
+      },
+      execFn: async (_cmd, args) => {
+        capturedArgs = [...args];
+        return { stdout: 'Already up to date.\n', stderr: '' };
+      },
+    });
+
+    await mutator.pullClone('my-repo', async () => 'ULTRA-SECRET-PULL-TOKEN-99');
+
+    expect(capturedArgs[1]).toBe('credential.helper=');
+    expect(capturedArgs[3]).toBe('credential.https://github.com.helper=');
+    // Beide Flag-Werte nach dem letzten '=' sind leer.
+    expect(capturedArgs[1].split('=')[1] ?? '').toBe('');
+    expect(capturedArgs[3].split('=').pop()).toBe('');
+    for (const arg of capturedArgs) {
+      expect(arg).not.toContain('ULTRA-SECRET-PULL-TOKEN-99');
+    }
   });
 });
 
