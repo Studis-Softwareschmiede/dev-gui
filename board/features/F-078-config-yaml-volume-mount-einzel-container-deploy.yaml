@@ -1,0 +1,32 @@
+id: F-078
+title: config.yaml-Volume-Mount für den Einzel-Container-Deploy (Weg A)
+goal: >
+  Der Einzel-Image-Deploy (VpsDockerControl.run) startet Apps ohne jeden -v-Mount; eine
+  App wie flashrescue liest /app/config.yaml, die aber weder ins Image gebacken noch
+  gemountet wird → auf dem VPS fehlt sie. Dieses Feature stellt eine App-config.yaml als
+  editierbare Host-Datei (~/apps/<app>/config.yaml) bereit und mountet sie read-only nach
+  /app/config.yaml, sodass der Owner sie per SSH anpassen und mit docker restart neu laden
+  kann — ohne Image-Rebuild. Seed-once aus Payload (B) + editier-erhaltende Idempotenz (A)
+  + Abbruch bei fehlend-ohne-Seed (C-Fallback). Getrenntes Escaping der Mount-Pfade,
+  Seed-Inhalt nur via stdin (nie Argv), Host-Datei 0600.
+status: To Do
+priority: P2
+spec: docs/specs/deploy-config-volume-mount.md
+definition_of_done: >
+  AC1-AC10 grün: run() fügt bei requiresConfig genau einen -v <host>:/app/config.yaml:ro
+  zwischen envArgs und -p ein (getrenntes Escaping, Slug validiert); pushAppConfigFile
+  seedet 0600 atomar nur bei Nicht-Existenz (Inhalt via stdin); vorhandene Host-Datei bleibt
+  byte-identisch; fehlend+kein-Seed → config-file-missing vor jeder Mutation; Router-Params
+  + Client-Formularfeld verdrahtet; Floor (kein Argv-Leak, kein neues Secret/Endpoint) gewahrt.
+labels:
+- deploy
+- security
+depends: null
+owner: null
+stories:
+- S-347
+- S-348
+progress: 0/2 done
+created_at: '2026-07-15T00:00:00Z'
+updated_at: '2026-07-15T00:00:00Z'
+area: deployment
