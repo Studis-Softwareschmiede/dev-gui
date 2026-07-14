@@ -1,7 +1,7 @@
 id: S-348
 parent: F-078
 title: 'config.yaml-Mount Durchreichung: deploymentsRouter-Params + DeploymentsView-Formularfeld'
-status: To Do
+status: Done
 priority: P2
 spec: docs/specs/deploy-config-volume-mount.md
 implements:
@@ -19,20 +19,21 @@ size_est: M
 dispo_est: '5.0'
 dispo_act: null
 dispo_forecast: null
-estimate_note: >
-  Heuristik M (score=7: 4 AC + ~2 Komponenten deploymentsRouter (validateDeployBody +
-  Handler) + client/DeploymentsView.jsx + ui-Label). S/M-Pfad ohne estimator; dispo_est
+estimate_note: 'Heuristik M (score=7: 4 AC + ~2 Komponenten deploymentsRouter (validateDeployBody
+  + Handler) + client/DeploymentsView.jsx + ui-Label). S/M-Pfad ohne estimator; dispo_est
   aus Baseline js|balanced|M ep=5.0 (n=8), confidence medium. tok_est null (baseline
   tok_total null, Cold-Start). Kern: requiresConfig/configApp/configSeed validieren
   (Slug-Charset, configSeed-Längenlimit, kein Inhalt-Leak bei 400) + durch die Kette
   reichen (Audit nur deploy:config-seed:<app> ohne Wert) + Checkbox/Seed-Feld/Host-Pfad-
   Vorschau im Formular (Ableitung analog gpgBwItem/Subdomain). depends: S-347 (opts-Vertrag).
+
+  '
 confidence: medium
-branch: null
+branch: feat/S-348-config-mount-router-client
 pr: null
 blocked_reason: null
 created_at: '2026-07-15T00:00:00Z'
-updated_at: '2026-07-15T00:00:00Z'
-done_at: null
+updated_at: '2026-07-14T22:53:45Z'
+done_at: '2026-07-14T22:53:45Z'
 tok_est: null
 area: deployment
