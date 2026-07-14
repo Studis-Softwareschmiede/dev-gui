@@ -1,7 +1,8 @@
 id: S-347
 parent: F-078
-title: 'config.yaml-Mount Backend: run() -v ...:ro + pushAppConfigFile Seed/Guard im DeployOrchestrator'
-status: To Do
+title: 'config.yaml-Mount Backend: run() -v ...:ro + pushAppConfigFile Seed/Guard
+  im DeployOrchestrator'
+status: Done
 priority: P2
 spec: docs/specs/deploy-config-volume-mount.md
 implements:
@@ -21,20 +22,21 @@ size_est: L
 dispo_est: '5.0'
 dispo_act: null
 dispo_forecast: null
-estimate_note: >
-  Heuristik L (score=11: 7 AC + ~3 Komponenten VpsDockerControl.run/pushAppConfigFile +
-  DeployOrchestrator.deploy + security-Label). estimator (Task/agents/estimator.md) in
-  diesem Lauf nicht dispatchbar → dispo_est als Baseline-Fallback js|balanced|L ep=5.0
-  (n=5), confidence daher low. tok_est null (baseline tok_total null, Cold-Start). Kern:
-  neuer -v host:container:ro-Mount zwischen envArgs und -p mit GETRENNTEM Escaping der
-  Pfade (:ro nicht mit-gequotet), Slug-Validierung, pushAppConfigFile (bash -s + stdin,
-  0600 atomar, seed-once), config-Gate im Orchestrator vor pull/run/replace.
+estimate_note: 'Heuristik L (score=11: 7 AC + ~3 Komponenten VpsDockerControl.run/pushAppConfigFile
+  + DeployOrchestrator.deploy + security-Label). estimator (Task/agents/estimator.md)
+  in diesem Lauf nicht dispatchbar → dispo_est als Baseline-Fallback js|balanced|L
+  ep=5.0 (n=5), confidence daher low. tok_est null (baseline tok_total null, Cold-Start).
+  Kern: neuer -v host:container:ro-Mount zwischen envArgs und -p mit GETRENNTEM Escaping
+  der Pfade (:ro nicht mit-gequotet), Slug-Validierung, pushAppConfigFile (bash -s
+  + stdin, 0600 atomar, seed-once), config-Gate im Orchestrator vor pull/run/replace.
+
+  '
 confidence: low
-branch: null
+branch: feat/S-347-config-mount-backend
 pr: null
 blocked_reason: null
 created_at: '2026-07-15T00:00:00Z'
-updated_at: '2026-07-15T00:00:00Z'
-done_at: null
+updated_at: '2026-07-14T22:38:57Z'
+done_at: '2026-07-14T22:38:57Z'
 tok_est: null
 area: deployment
