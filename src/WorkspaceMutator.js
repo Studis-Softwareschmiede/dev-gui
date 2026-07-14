@@ -88,7 +88,7 @@ function gitArgs(subArgs) {
 }
 
 /**
- * @typedef {'traversal'|'not-found'|'rm-failed'|'workspace-unset'|'pull-failed'|'no-remote'|'credentials-missing'|'commit-failed'|'push-failed'|'branch-mismatch'} MutatorErrorClass
+ * @typedef {'traversal'|'not-found'|'rm-failed'|'workspace-unset'|'pull-failed'|'no-remote'|'credentials-missing'|'commit-failed'|'push-failed'|'branch-mismatch'|'default-branch-undetermined'} MutatorErrorClass
  */
 
 /**
@@ -653,7 +653,7 @@ export class WorkspaceMutator {
    * @param {object} childEnv
    * @param {string} name
    * @returns {Promise<string>} the verified branch name (safe to push to).
-   * @throws {WorkspaceMutatorError} errorClass: push-failed|branch-mismatch
+   * @throws {WorkspaceMutatorError} errorClass: push-failed|branch-mismatch|default-branch-undetermined
    */
   async #verifyPushBranch(targetPath, childEnv, name) {
     let branchResult;
@@ -679,12 +679,33 @@ export class WorkspaceMutator {
         timeout: RM_TIMEOUT_MS,
         env: childEnv,
       });
-    } catch (err) {
-      const safeErr = String(err?.message ?? '').slice(0, 300);
-      throw new WorkspaceMutatorError(
-        `Default-Branch-Ermittlung fehlgeschlagen für "${name}" (refs/remotes/origin/HEAD nicht gesetzt): ${safeErr}`,
-        'push-failed',
-      );
+    } catch {
+      // `refs/remotes/origin/HEAD` ist nicht gesetzt (Klon ohne `set-head`, oder manuell
+      // manipuliert — der häufige Realfall). Statt sofort zu scheitern: die Markierung aus
+      // dem Remote herstellen (`git remote set-head origin -a` fragt den Remote nach seinem
+      // Default-Branch und setzt die Ref lokal) und erneut lesen. So läuft die Rotation ohne
+      // manuelles Nachhelfen. Erst wenn AUCH das scheitert, ist der Default-Branch wirklich
+      // nicht ermittelbar → eigene, ehrliche Fehlerklasse `default-branch-undetermined`
+      // (NICHT `push-failed`: der Push hat nie stattgefunden — diese Fehlklassifizierung
+      // schickte Debugging fälschlich in Richtung Auth/Token, statt zur wahren Ursache).
+      try {
+        await this.#execFn('git', gitArgs(['remote', 'set-head', 'origin', '-a']), {
+          cwd: targetPath,
+          timeout: RM_TIMEOUT_MS,
+          env: childEnv,
+        });
+        defaultRefResult = await this.#execFn('git', gitArgs(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']), {
+          cwd: targetPath,
+          timeout: RM_TIMEOUT_MS,
+          env: childEnv,
+        });
+      } catch (err2) {
+        const safeErr = String(err2?.message ?? '').slice(0, 300);
+        throw new WorkspaceMutatorError(
+          `Default-Branch nicht ermittelbar für "${name}" (refs/remotes/origin/HEAD nicht gesetzt und via 'git remote set-head origin -a' nicht herstellbar): ${safeErr}`,
+          'default-branch-undetermined',
+        );
+      }
     }
     const defaultRef = String(defaultRefResult?.stdout ?? '').trim(); // e.g. "origin/main"
     const defaultBranch = defaultRef.startsWith('origin/') ? defaultRef.slice('origin/'.length) : defaultRef;

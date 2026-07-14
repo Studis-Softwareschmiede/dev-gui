@@ -307,13 +307,20 @@ export class PerAppGpgRotationService {
       // dokumentiert ist (commit-failed|push-failed|branch-mismatch — Finding 2,
       // Review-Iteration 2); jede andere (WorkspaceMutator-interne, hier praktisch
       // unerreichbare) Klasse fällt sicher auf push-failed zurück.
-      const KNOWN_CLASSES = new Set(['commit-failed', 'push-failed', 'branch-mismatch']);
+      const KNOWN_CLASSES = new Set(['commit-failed', 'push-failed', 'branch-mismatch', 'default-branch-undetermined']);
       const rawClass = (err instanceof WorkspaceMutatorError) ? err.errorClass : null;
       const errorClass = KNOWN_CLASSES.has(rawClass) ? rawClass : 'push-failed';
       await this.#rollbackBitwardenBestEffort(itemName, { oldPassphrase, candidate });
-      const reason = errorClass === 'branch-mismatch'
-        ? 'Workspace-Klon ist nicht auf dem Default-Branch — Rückschreiben abgebrochen, Bitwarden-Umschaltung zurückgerollt.'
-        : 'Rückschreiben des .env.gpg fehlgeschlagen — Bitwarden-Umschaltung zurückgerollt.';
+      let reason;
+      if (errorClass === 'branch-mismatch') {
+        reason = 'Workspace-Klon ist nicht auf dem Default-Branch — Rückschreiben abgebrochen, Bitwarden-Umschaltung zurückgerollt.';
+      } else if (errorClass === 'default-branch-undetermined') {
+        // Ehrliche Meldung statt „push-failed": der Push fand nie statt — der Default-Branch
+        // des Klons war nicht ermittelbar (origin/HEAD fehlt und liess sich nicht herstellen).
+        reason = 'Default-Branch des Workspace-Klons nicht ermittelbar (origin/HEAD nicht gesetzt) — Rückschreiben abgebrochen, Bitwarden-Umschaltung zurückgerollt.';
+      } else {
+        reason = 'Rückschreiben des .env.gpg fehlgeschlagen — Bitwarden-Umschaltung zurückgerollt.';
+      }
       return { ok: false, errorClass, reason };
     }
 

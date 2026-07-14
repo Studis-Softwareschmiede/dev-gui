@@ -92,6 +92,7 @@ function subCmd(args) {
  */
 function buildMutator({ workspaceDir = '/workspace', lstatExists = true, git = {} } = {}) {
   const calls = [];
+  let setHeadCalled = false; // Zustand für den origin/HEAD-Recovery-Pfad (set-head → retry)
   return {
     calls,
     mutator: new WorkspaceMutator({
@@ -124,8 +125,21 @@ function buildMutator({ workspaceDir = '/workspace', lstatExists = true, git = {
           if (git.headFail) throw new Error('rev-parse HEAD failed (fresh/empty clone)');
           return { stdout: `${git.prevHead ?? DEFAULT_PREV_HEAD}\n`, stderr: '' };
         }
+        if (sub === 'remote') {
+          // `git remote set-head origin -a` — Recovery, wenn origin/HEAD fehlt.
+          if (subArgs[1] === 'set-head') {
+            if (git.setHeadFail) throw new Error('git remote set-head failed: could not read remote HEAD');
+            setHeadCalled = true;
+            return { stdout: "origin/HEAD set to main\n", stderr: '' };
+          }
+          throw new Error(`unexpected remote subcommand: ${args.join(' ')}`);
+        }
         if (sub === 'symbolic-ref') {
+          // symbolicRefFail: symbolic-ref schlägt IMMER fehl (auch nach set-head) →
+          // Default-Branch bleibt unermittelbar. originHeadUnset: nur der ERSTE Aufruf
+          // schlägt fehl, nach erfolgreichem set-head liefert der zweite Aufruf den Wert.
           if (git.symbolicRefFail) throw new Error('symbolic-ref failed: refs/remotes/origin/HEAD not set');
+          if (git.originHeadUnset && !setHeadCalled) throw new Error('symbolic-ref failed: refs/remotes/origin/HEAD not set');
           return { stdout: `${git.defaultRef ?? 'origin/main'}\n`, stderr: '' };
         }
         if (sub === 'reset') {
@@ -323,11 +337,32 @@ describe('WorkspaceMutator.commitAndPushFile — Finding 2: Branch-Verifikation 
     ).rejects.toMatchObject({ errorClass: 'branch-mismatch', message: expect.stringContaining('feature-x') });
   });
 
-  it('symbolic-ref (refs/remotes/origin/HEAD) nicht gesetzt → push-failed, KEIN Push (fail-closed)', async () => {
+  it('origin/HEAD fehlt initial → wird via `git remote set-head origin -a` hergestellt, danach läuft der Push durch (Recovery, kein manuelles Nachhelfen)', async () => {
+    const { mutator, calls } = buildMutator({ git: { originHeadUnset: true } });
+    const res = await mutator.commitAndPushFile('my-app', '.env.gpg', async () => 'token');
+    expect(res).toBeDefined();
+    // set-head wurde aufgerufen (Recovery-Naht) …
+    const setHeadCall = calls.find((c) => subCmd(c.args) === 'remote' && c.args.includes('set-head'));
+    expect(setHeadCall).toBeDefined();
+    // set-head trägt ebenfalls die Credential-Helper-Neutralisierungs-Flags (AC1)
+    expect(setHeadCall.args.slice(0, 4)).toEqual(GIT_CRED_HELPER_PREFIX);
+    // … und der Push fand statt.
+    expect(calls.some((c) => subCmd(c.args) === 'push')).toBe(true);
+  });
+
+  it('origin/HEAD fehlt UND `git remote set-head` scheitert → eigene Fehlerklasse `default-branch-undetermined` (NICHT push-failed), KEIN Push (fail-closed)', async () => {
+    const { mutator, calls } = buildMutator({ git: { originHeadUnset: true, setHeadFail: true } });
+    await expect(
+      mutator.commitAndPushFile('my-app', '.env.gpg', async () => 'token'),
+    ).rejects.toMatchObject({ errorClass: 'default-branch-undetermined' });
+    expect(calls.some((c) => subCmd(c.args) === 'push')).toBe(false);
+  });
+
+  it('origin/HEAD auch nach set-head unlesbar → `default-branch-undetermined`, KEIN Push (fail-closed)', async () => {
     const { mutator, calls } = buildMutator({ git: { symbolicRefFail: true } });
     await expect(
       mutator.commitAndPushFile('my-app', '.env.gpg', async () => 'token'),
-    ).rejects.toMatchObject({ errorClass: 'push-failed' });
+    ).rejects.toMatchObject({ errorClass: 'default-branch-undetermined' });
     expect(calls.some((c) => subCmd(c.args) === 'push')).toBe(false);
   });
 
