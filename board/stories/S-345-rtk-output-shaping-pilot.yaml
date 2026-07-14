@@ -1,0 +1,34 @@
+id: S-345
+parent: F-076
+title: 'RTK-Ausgabe-Diät: Mess-Pilot (Baseline vs. RTK, Fidelity-Gegenprobe, Bericht)'
+status: To Do
+priority: P2
+spec: docs/specs/rtk-output-shaping-pilot.md
+implements:
+- AC1
+- AC2
+- AC3
+- AC4
+- AC5
+depends:
+- S-344
+labels:
+- spike
+- tokens
+size_est: L
+dispo_est: null
+dispo_act: null
+dispo_forecast: null
+estimate_note: 'Operativer Mess-Pilot (kein reiner Code-Task): rtk-Install + Hook-Konfiguration,
+  je N>=3 Baseline-/RTK-Läufe, Fidelity-Gegenprobe, Bericht. Cross-Repo-Rückkopplung
+  ans agent-flow-ADR. Grob L; depends auf S-344 (Ledger-Skripte für tok_total). Keine
+  Baseline für Spikes -> dispo_est offen.'
+confidence: low
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-07-14T06:56:08Z'
+updated_at: '2026-07-14T06:56:08Z'
+done_at: null
+tok_est: null
+area: retro-lernen
