@@ -55,6 +55,12 @@ const DEFAULT_CONTAINER_PORT = 8080;
 /** Default Host-Port-Start (preview-Konvention). */
 const DEFAULT_HOST_PORT_START = 8080;
 
+/** Container-seitiger Mount-Pfad der config.yaml (deploy-config-volume-mount, fix, kein opt-out des Ziels). */
+const CONFIG_CONTAINER_PATH = '/app/config.yaml';
+
+/** Zeichensatz für den config-App-Slug (deploy-config-volume-mount AC2/D3). */
+const CONFIG_APP_SLUG_RE = /^[a-z0-9][a-z0-9._-]*$/;
+
 /**
  * @typedef {object} VpsTarget
  * @property {string}  host        - Hostname oder IP-Adresse des VPS
@@ -301,6 +307,9 @@ export class VpsDockerControl {
    * @param {object}    [opts]
    * @param {number}    [opts.hostPort]           - Host-Port (Default: 8080)
    * @param {number}    [opts.containerPort]      - Container-Port (Default: 8080)
+   * @param {boolean}   [opts.requiresConfig]     - deploy-config-volume-mount AC1: config.yaml-Mount aktiv
+   * @param {string}    [opts.configApp]          - deploy-config-volume-mount AC2/AC3: validierter App-Slug
+   *   (Host-Pfad `$HOME/apps/<configApp>/config.yaml`); Pflicht wenn requiresConfig true.
    * @param {string}    [opts.hostFingerprint]    - SHA-256-Fingerprint für Host-Key-Verifikation
    * @param {Function}  [opts._sshClientFactory]
    * @returns {Promise<RunResult>}
@@ -312,6 +321,16 @@ export class VpsDockerControl {
         result: 'error',
         reason: 'Ungültiger Hostname (nur DNS-Zeichen erlaubt: a-z A-Z 0-9 . - _)',
         errorClass: 'error',
+      };
+    }
+
+    // deploy-config-volume-mount AC2: config-App-Slug validieren BEVOR irgendein
+    // SSH-/Docker-Schritt läuft (kein Docker-Schritt bei ungültigem Slug).
+    if (opts.requiresConfig && !isValidConfigAppSlug(opts.configApp)) {
+      return {
+        result: 'error',
+        reason: 'Ungültiger config-App-Slug (nur a-z 0-9 . _ - erlaubt, muss mit a-z0-9 beginnen)',
+        errorClass: 'config-app-invalid',
       };
     }
 
@@ -344,13 +363,27 @@ export class VpsDockerControl {
       }
     }
 
+    // deploy-config-volume-mount AC1/AC2/D3: bei requiresConfig genau EIN Bind-Mount
+    // `-v <hostConfigPath>:/app/config.yaml:ro` zwischen envArgs und -p. Host- und
+    // Container-Pfad werden GETRENNT abgesichert (buildConfigHostPath quotet NUR den
+    // Host-Pfad in Double-Quotes — $HOME bleibt remote-expandierbar; der `:`-Trenner
+    // und `:ro` bleiben literal/ungequotet, sonst parst Docker den Mount nicht).
+    // requiresConfig falsy/abwesend → configMountArgs bleibt leer → Kommando
+    // byte-identisch zum heutigen Verhalten (AC1).
+    const configMountArgs = [];
+    if (opts.requiresConfig) {
+      const hostConfigPath = buildConfigHostPath(opts.configApp);
+      configMountArgs.push('-v', `${hostConfigPath}:${CONFIG_CONTAINER_PATH}:ro`);
+    }
+
     // docker run -d --label cloudflare.tunnel-hostname=<hostname> --restart unless-stopped
-    //            [-e KEY=VALUE …] -p <hostPort>:<containerPort> <image>
+    //            [-e KEY=VALUE …] [-v <hostConfigPath>:/app/config.yaml:ro] -p <hostPort>:<containerPort> <image>
     const cmd = [
       'docker', 'run', '-d',
       '--label', escapedLabel,
       '--restart', 'unless-stopped',
       ...envArgs,
+      ...configMountArgs,
       '-p', `${hostPort}:${containerPort}`,
       escapedImage,
     ].join(' ');
@@ -810,6 +843,115 @@ export class VpsDockerControl {
     }
   }
 
+  /**
+   * Stellt die App-`config.yaml` als editierbare Host-Datei auf dem VPS bereit
+   * (deploy-config-volume-mount, D1/AC3–AC6).
+   *
+   * Idempotenz/Seed-once (D1, EINE SSH-Session, atomar):
+   *   - Existiert `$HOME/apps/<app>/config.yaml` bereits → sie bleibt byte-identisch
+   *     (kein Überschreiben), AUCH wenn `content` mitgegeben wird (AC5).
+   *   - Existiert sie NICHT und `content` ist gesetzt → atomar (tmp + rename) anlegen,
+   *     `chmod 600`, im Besitz des Ziel-Benutzers (AC4).
+   *   - Existiert sie NICHT und `content` ist NICHT gesetzt → Abbruch mit
+   *     `errorClass: 'config-file-missing'`, KEINE Mutation (AC6, D1.3).
+   *
+   * Security-Floor (D3/AC4/AC10, HART):
+   *   - `content` NIEMALS in Argv/Log/Audit/Response — nur als stdin-Body des
+   *     `bash -s`-Skripts (analog pushTunnelEnvFile()); der SSH-exec-Argv ist nur "bash -s".
+   *   - `app`-Slug wird VOR jeder Skript-Konstruktion validiert (kein Shell-Injection).
+   *
+   * @param {VpsTarget} vps
+   * @param {string}    app       - validierter config-App-Slug (`^[a-z0-9][a-z0-9._-]*$`)
+   * @param {string}    [content] - Seed-Inhalt (optional; NIE in Argv/Log/Audit/Response)
+   * @param {object}    [opts]
+   * @param {string}    [opts.hostFingerprint]    - SHA-256-Fingerprint für Host-Key-Verifikation
+   * @param {Function}  [opts._sshClientFactory]
+   * @returns {Promise<{ result: 'ok'|'error', seeded?: boolean, reason?: string, errorClass?: string }>}
+   */
+  async pushAppConfigFile(vps, app, content, opts = {}) {
+    // Security: app-Slug validieren BEVOR er in den Skript-Body eingebettet wird (AC2/D3).
+    if (!isValidConfigAppSlug(app)) {
+      return {
+        result: 'error',
+        reason: 'Ungültiger config-App-Slug (nur a-z 0-9 . _ - erlaubt, muss mit a-z0-9 beginnen)',
+        errorClass: 'config-app-invalid',
+      };
+    }
+
+    const privateKey = await this.#loadPrivateKey(vps.targetUser);
+    if (!privateKey.ok) return privateKey.error;
+
+    // $HOME bleibt remote shell-expandierbar — literal im Skript-Body, NICHT lokal
+    // gequotet/interpoliert (D3). app ist bereits gegen CONFIG_APP_SLUG_RE validiert.
+    const appDir = `$HOME/apps/${app}`;
+    const configPath = `${appDir}/config.yaml`;
+
+    const hasSeed = typeof content === 'string' && content.length > 0;
+
+    // Security-Floor: Inhalt NIEMALS in Argv — nur als stdin-Body (bash -s). Single-Quote-
+    // Escaping analog pushTunnelEnvFile(): ' → '\'' (der Skript-Body selbst ist stdin,
+    // kein Argv-Token für den SSH-exec-Aufruf).
+    const escapedContent = hasSeed ? content.replace(/'/g, "'\\''") : '';
+
+    // EIN Skript, EINE SSH-Session (D1, atomar):
+    //   1. Zielverzeichnis anlegen (AC3).
+    //   2. Existenz der Host-Datei prüfen — NUR Existenz, liest KEINEN Inhalt.
+    //   3. Existiert sie → No-op, byte-identisch belassen (AC5, "EXISTS").
+    //   4. Existiert sie nicht + Seed vorhanden → atomar (tmp + rename) anlegen,
+    //      chmod 600 (AC4, "SEEDED").
+    //   5. Existiert sie nicht + kein Seed → No-op, Aufrufer bricht ab (AC6, "MISSING").
+    const scriptLines = [
+      'set -e',
+      `mkdir -p "${appDir}"`,
+      `if [ -f "${configPath}" ]; then`,
+      '  echo EXISTS',
+      'else',
+    ];
+    if (hasSeed) {
+      scriptLines.push(
+        `  TMP="${configPath}.tmp.$$"`,
+        `  printf '%s' '${escapedContent}' > "$TMP"`,
+        '  chmod 600 "$TMP"',
+        `  mv "$TMP" "${configPath}"`,
+        '  echo SEEDED',
+      );
+    } else {
+      scriptLines.push('  echo MISSING');
+    }
+    scriptLines.push('fi');
+    const script = scriptLines.join('\n');
+
+    try {
+      const stdout = await runSshScript({
+        privateKey: privateKey.value,
+        host: vps.host,
+        port: vps.port ?? 22,
+        targetUser: vps.targetUser,
+        script,
+        timeoutMs: EXEC_TIMEOUT_MS,
+        hostFingerprint: opts.hostFingerprint ?? null,
+        sshClientFactory: opts._sshClientFactory,
+      });
+
+      const trimmed = stdout.trim();
+      if (trimmed === 'MISSING') {
+        return {
+          result: 'error',
+          reason: 'config.yaml fehlt auf dem VPS und kein Seed-Inhalt übergeben — Datei per SSH ablegen oder Seed-Inhalt mitgeben',
+          errorClass: 'config-file-missing',
+        };
+      }
+      return { result: 'ok', seeded: trimmed === 'SEEDED' };
+    } catch (err) {
+      const errorClass = classifyError(err);
+      return {
+        result: 'error',
+        reason: sanitizeErrorReason(errorClass),
+        errorClass,
+      };
+    }
+  }
+
   // ── Private Hilfsmethoden ──────────────────────────────────────────────────────
 
   /**
@@ -1245,6 +1387,33 @@ function shellEscape(value) {
  */
 function isValidContainerId(id) {
   return typeof id === 'string' && id.length > 0 && /^[a-zA-Z0-9_-]+$/.test(id);
+}
+
+/**
+ * Validiert den config-App-Slug (deploy-config-volume-mount AC2/AC3/D3): nur
+ * `^[a-z0-9][a-z0-9._-]*$` — verhindert Shell-Injection über den Host-Pfad
+ * `$HOME/apps/<app>/config.yaml`, bevor der Slug in einen Shell-Kommando-String
+ * eingebettet wird (run() und pushAppConfigFile()).
+ *
+ * @param {unknown} slug
+ * @returns {boolean}
+ */
+function isValidConfigAppSlug(slug) {
+  return typeof slug === 'string' && slug.length > 0 && slug.length <= 64 && CONFIG_APP_SLUG_RE.test(slug);
+}
+
+/**
+ * Baut den Host-Pfad der config.yaml für einen validierten config-App-Slug
+ * (deploy-config-volume-mount D3, Verträge): `$HOME` bleibt shell-expandierbar
+ * (kein Single-Quote-Escaping, das die Expansion unterdrücken würde); der Pfad wird
+ * in Double-Quotes eingebettet (schützt defensiv, erlaubt aber `$HOME`-Expansion).
+ * Der Aufrufer MUSS den Slug vorher via isValidConfigAppSlug() validiert haben.
+ *
+ * @param {string} configApp - validierter Slug
+ * @returns {string} - z.B. `"$HOME/apps/myapp/config.yaml"`
+ */
+function buildConfigHostPath(configApp) {
+  return `"$HOME/apps/${configApp}/config.yaml"`;
 }
 
 // ── Fehlerklassifizierung ──────────────────────────────────────────────────────

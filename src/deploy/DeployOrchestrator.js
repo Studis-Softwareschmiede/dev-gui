@@ -9,7 +9,10 @@
  *   - Deploy saga: (1) LockoutGuard-Check → (2) Tunnel-Mismatch/Missing-Gate
  *     (vps-tunnel-existence-gate AC5/AC6) → (3) Readiness-Probe (vps-readiness-gate AC4) →
  *     (4) Tunnel-Existenz-Gate via listTunnels (vps-tunnel-existence-gate AC1) →
- *     (5) pull image → (6) run container with label cloudflare.tunnel-hostname=<hostname> →
+ *     (4.5) Guard-/Seed-Gate config.yaml via pushAppConfigFile (deploy-config-volume-mount
+ *     D1/AC3–AC6, nur wenn requiresConfig) → (5) pull image →
+ *     (6) run container with label cloudflare.tunnel-hostname=<hostname>
+ *     (inkl. optionalem config.yaml-Mount, deploy-config-volume-mount AC1/AC2) →
  *     (7) add tunnel route + DNS CNAME. On failure at step 7 → rollback container (rm).
  *     On failure at step 6 → no route step. (AC3, AC4)
  *   - Undeploy: (1) LockoutGuard-Check → (2) confirm-token check → (3) remove
@@ -118,10 +121,15 @@ export class DeployOrchestrator {
    * @param {string} [params.vpsId]  - Sanitized VPS name used for tunnel-mismatch check (AC5/AC6)
    * @param {object} [params.containerEnv] - zusätzliche Container-Env (z.B. { GPG_PASSPHRASE })
    *   wird NUR beim run-Schritt gesetzt; erscheint nicht im Log/reason (F-072/S-334).
+   * @param {boolean} [params.requiresConfig] - deploy-config-volume-mount D1/AC1: config.yaml-Mount aktiv.
+   * @param {string}  [params.configApp]      - deploy-config-volume-mount AC2/AC3: config-App-Slug
+   *   (Host-Pfad `$HOME/apps/<configApp>/config.yaml`); wird an run() durchgereicht.
+   * @param {string}  [params.configSeed]     - deploy-config-volume-mount AC4: optionaler Seed-Inhalt
+   *   für die Erst-Provisionierung; NIE geloggt/auditiert/zurückgegeben (AC10).
    * @param {object} [params.dockerOpts] - additional VpsDockerControl options
    * @returns {Promise<DeployResult>}
    */
-  async deploy({ image, vps, hostname, tunnelId, vpsId, containerEnv, dockerOpts = {} }) {
+  async deploy({ image, vps, hostname, tunnelId, vpsId, containerEnv, requiresConfig, configApp, configSeed, dockerOpts = {} }) {
     // (a) AC7: LockoutGuard-Hard-Block — before any step
     if (this.#lockoutGuard.isProtected(hostname)) {
       return {
@@ -244,6 +252,25 @@ export class DeployOrchestrator {
       }
     }
 
+    // (f.5) Guard-/Seed-Gate (deploy-config-volume-mount D1/AC3–AC6): config.yaml-
+    // Bereitstellung auf dem VPS. Läuft NACH LockoutGuard/Hostname/Tunnel/Readiness,
+    // aber VOR dem Re-Deploy-Replace-Schritt und VOR pull/run (AC10 — Gates-Reihenfolge
+    // unverändert, das config-Gate reiht sich dahinter ein, nie davor).
+    // Nur aktiv wenn requiresConfig gesetzt; sonst No-op (AC1/AC8: Deploy-Pfad unverändert).
+    // pushAppConfigFile() kapselt Seed-once + editier-erhaltende Idempotenz + den
+    // fehlend-ohne-Seed-Abbruch (config-file-missing) atomar in EINER SSH-Session (D1).
+    if (requiresConfig) {
+      const pushResult = await this.#dockerControl.pushAppConfigFile(vps, configApp, configSeed, dockerOpts);
+      if (pushResult.result !== 'ok') {
+        // AC6: kein Docker-Schritt vor diesem Gate — pull/run/Re-Deploy-Replace laufen noch nicht.
+        return {
+          result: 'error',
+          reason: sanitizeReason(pushResult.reason ?? 'config.yaml-Bereitstellung auf dem VPS fehlgeschlagen'),
+          errorClass: pushResult.errorClass ?? 'error',
+        };
+      }
+    }
+
     // (g) AC14: Re-deploy = replace. Gates (a)–(f) have all passed; now check whether
     // an existing container with this hostname is running and remove it before starting
     // the new one. This is best-effort — if removal fails, we still attempt the new deploy.
@@ -306,6 +333,9 @@ export class DeployOrchestrator {
       containerPort,
       // F-072/S-334: per-App-GPG-Passphrase o.ä. nur beim run-Schritt in die Container-Env
       ...(containerEnv ? { containerEnv } : {}),
+      // deploy-config-volume-mount AC1/AC2: Mount-Parameter durchreichen (nur wenn aktiv,
+      // sonst bleibt run()-Aufruf byte-identisch zum heutigen Verhalten).
+      ...(requiresConfig ? { requiresConfig, configApp } : {}),
     });
     if (runResult.result !== 'ok') {
       return {

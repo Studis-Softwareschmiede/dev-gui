@@ -19,6 +19,20 @@
  *         Token NIE in SSH-exec-Argv; SSH-Fehler → errorClass korrekt
  *   AC4  (vps-tunnel-self-heal S-187) — Token NIE in Argv des SSH-exec-Aufrufs (kein Token in cmd)
  *
+ * Covers (deploy-config-volume-mount):
+ *   AC1  — run(): requiresConfig true → genau EIN `-v <host>:/app/config.yaml:ro` zwischen
+ *          envArgs und -p; requiresConfig falsy/abwesend → Kommando byte-identisch (kein -v)
+ *   AC2  — run()/pushAppConfigFile(): config-App-Slug-Validierung (^[a-z0-9][a-z0-9._-]*$);
+ *          ungültiger Slug → errorClass:config-app-invalid, KEIN Docker-/SSH-Schritt; Mount
+ *          quotet Host- und Container-Pfad GETRENNT (kein Single-Quote um host:container:ro)
+ *   AC3  — Host-Pfad-Konvention `$HOME/apps/<app>/config.yaml`; mkdir -p vor Existenz-Check
+ *   AC4  — pushAppConfigFile(): Seed-Inhalt NIE in Argv (nur "bash -s"), via stdin; atomar
+ *          (tmp + rename), chmod 600; Datei nur bei Nicht-Existenz geschrieben
+ *   AC5  — pushAppConfigFile(): existierende Host-Datei bleibt unangetastet (seeded:false),
+ *          auch wenn content mitgegeben wird (editier-erhaltende Idempotenz)
+ *   AC6  — pushAppConfigFile(): Datei fehlt + kein content → errorClass:config-file-missing
+ *   AC10 (Floor) — Seed-Inhalt nie im reason/Response bei Fehlerpfaden
+ *
  * Strategie:
  *   - CredentialStore mit tmpdir + injiziertem masterKey (echter Store für Boundary-Test)
  *   - SSH-Client durch _sshClientFactory gemockt (EventEmitter + exec/connect-Stubs)
@@ -1848,5 +1862,281 @@ describe('VpsDockerControl — run() — containerEnv-Injektion (F-072/S-334)', 
     });
     expect(capturedCmd).toContain("-e 'GOOD_KEY=ok'");
     expect(capturedCmd).not.toContain('privileged');
+  });
+});
+
+// ── deploy-config-volume-mount: run() Mount-Mechanik (AC1/AC2/AC3) ─────────────
+
+describe('VpsDockerControl — run() — config.yaml-Mount (deploy-config-volume-mount AC1/AC2/AC3)', () => {
+  let dir, store;
+  beforeEach(async () => { ({ store, dir } = await makeTmpStore()); });
+  afterEach(async () => { await rm(dir, { recursive: true, force: true }); });
+
+  it('AC1: requiresConfig true → -v "$HOME/apps/<app>/config.yaml":/app/config.yaml:ro zwischen envArgs und -p', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+    let capturedCmd = null;
+    await ctrl.run(TEST_VPS, 'ghcr.io/org/app:latest', 'app.example.com', {
+      requiresConfig: true,
+      configApp: 'myapp',
+      _sshClientFactory: makeMockSshClient({ stdout: 'cid123', exitCode: 0, onCommand: (c) => { capturedCmd = c; } }),
+    });
+    expect(capturedCmd).toContain('-v "$HOME/apps/myapp/config.yaml":/app/config.yaml:ro');
+    // AC3: Mount steht zwischen envArgs (hier keine) und -p
+    const mountIdx = capturedCmd.indexOf('-v "$HOME/apps/myapp/config.yaml"');
+    const portIdx = capturedCmd.indexOf('-p ');
+    expect(mountIdx).toBeGreaterThan(-1);
+    expect(mountIdx).toBeLessThan(portIdx);
+  });
+
+  it('AC1: requiresConfig falsy/abwesend → kein -v, Kommando byte-identisch zum Baseline-Fall', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+    let cmdWithout = null;
+    let cmdBaseline = null;
+    await ctrl.run(TEST_VPS, 'ghcr.io/org/app:latest', 'app.example.com', {
+      _sshClientFactory: makeMockSshClient({ stdout: 'cid123', exitCode: 0, onCommand: (c) => { cmdBaseline = c; } }),
+    });
+    await ctrl.run(TEST_VPS, 'ghcr.io/org/app:latest', 'app.example.com', {
+      requiresConfig: false,
+      _sshClientFactory: makeMockSshClient({ stdout: 'cid123', exitCode: 0, onCommand: (c) => { cmdWithout = c; } }),
+    });
+    expect(cmdWithout).not.toContain('-v ');
+    expect(cmdWithout).toBe(cmdBaseline);
+  });
+
+  it('AC2: ungültiger Slug (Leerzeichen) → errorClass:config-app-invalid, KEIN SSH-/Docker-Schritt', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+    let execCalled = false;
+    const result = await ctrl.run(TEST_VPS, 'ghcr.io/org/app:latest', 'app.example.com', {
+      requiresConfig: true,
+      configApp: 'my app',
+      _sshClientFactory: makeMockSshClient({ stdout: 'cid123', exitCode: 0, onCommand: () => { execCalled = true; } }),
+    });
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('config-app-invalid');
+    expect(execCalled).toBe(false);
+  });
+
+  it('AC2: ungültiger Slug (Shell-Metazeichen ; $() ) → errorClass:config-app-invalid, kein Docker-Schritt', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+    for (const badSlug of ['app;rm -rf /', 'app$(whoami)', '../etc', 'App', '', '-leading-dash']) {
+      let execCalled = false;
+      const result = await ctrl.run(TEST_VPS, 'ghcr.io/org/app:latest', 'app.example.com', {
+        requiresConfig: true,
+        configApp: badSlug,
+        _sshClientFactory: makeMockSshClient({ stdout: 'cid123', exitCode: 0, onCommand: () => { execCalled = true; } }),
+      });
+      expect(result.errorClass).toBe('config-app-invalid');
+      expect(execCalled).toBe(false);
+    }
+  });
+
+  it('AC2: gültiger Slug mit Punkt/Bindestrich/Ziffern wird akzeptiert', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+    let capturedCmd = null;
+    const result = await ctrl.run(TEST_VPS, 'ghcr.io/org/app:latest', 'app.example.com', {
+      requiresConfig: true,
+      configApp: 'my-app.2',
+      _sshClientFactory: makeMockSshClient({ stdout: 'cid123', exitCode: 0, onCommand: (c) => { capturedCmd = c; } }),
+    });
+    expect(result.result).toBe('ok');
+    expect(capturedCmd).toContain('-v "$HOME/apps/my-app.2/config.yaml":/app/config.yaml:ro');
+  });
+
+  it('D3 (Fallgrube): Mount quotet Host- und Container-Pfad GETRENNT — kein Single-Quote um host:container:ro', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+    let capturedCmd = null;
+    await ctrl.run(TEST_VPS, 'ghcr.io/org/app:latest', 'app.example.com', {
+      requiresConfig: true,
+      configApp: 'myapp',
+      _sshClientFactory: makeMockSshClient({ stdout: 'cid123', exitCode: 0, onCommand: (c) => { capturedCmd = c; } }),
+    });
+    // Der :-Trenner und :ro dürfen NICHT innerhalb von Single-Quotes stehen (sonst parst Docker
+    // den Mount nicht) — es darf KEIN "'...config.yaml:/app/config.yaml:ro'" (ganzer String
+    // single-quote-gequotet) im Kommando vorkommen.
+    expect(capturedCmd).not.toMatch(/'[^']*config\.yaml:\/app\/config\.yaml:ro'/);
+    // $HOME bleibt literal (remote-expandierbar) — NICHT in Single-Quotes (die würden die
+    // Shell-Expansion unterdrücken).
+    expect(capturedCmd).not.toContain("'$HOME");
+    // Container-Pfad + :ro literal/ungequotet
+    expect(capturedCmd).toContain(':/app/config.yaml:ro');
+  });
+});
+
+// ── deploy-config-volume-mount: pushAppConfigFile() (AC3/AC4/AC5/AC6/AC10) ─────
+
+/**
+ * Mock-SSH-Client für stdin-basierte Kommandos (bash -s) MIT simulierbarem stdout
+ * (simuliert die Remote-Skript-Ausgabe EXISTS/SEEDED/MISSING).
+ */
+function makeMockSshClientWithStdinOut({
+  exitCode = 0,
+  connectError = null,
+  onCommand = null,
+  onStdinWrite = null,
+  stdout = '',
+} = {}) {
+  return () => {
+    const client = new EventEmitter();
+
+    client.connect = (_config) => {
+      if (connectError) {
+        setTimeout(() => client.emit('error', connectError), 0);
+        return;
+      }
+      setTimeout(() => client.emit('ready'), 0);
+    };
+
+    client.exec = (cmd, _opts, callback) => {
+      if (onCommand) onCommand(cmd);
+
+      const stream = new EventEmitter();
+      stream.stderr = new EventEmitter();
+
+      let stdinContent = '';
+      stream.stdin = {
+        write: (data) => {
+          stdinContent += String(data);
+          if (onStdinWrite) onStdinWrite(stdinContent);
+        },
+        end: () => {
+          setTimeout(() => {
+            if (stdout) stream.emit('data', stdout);
+            stream.emit('close', exitCode);
+          }, 5);
+        },
+      };
+
+      setTimeout(() => callback(null, stream), 0);
+    };
+
+    client.end = () => {};
+
+    return client;
+  };
+}
+
+describe('VpsDockerControl — pushAppConfigFile() (deploy-config-volume-mount AC3/AC4/AC5/AC6/AC10)', () => {
+  const SEED_CONTENT = "foo: bar\nbaz: 'quoted value'\n";
+  let dir, store;
+
+  beforeEach(async () => { ({ store, dir } = await makeTmpStore()); });
+  afterEach(async () => { await rm(dir, { recursive: true, force: true }); });
+
+  it('AC2: ungültiger Slug → errorClass:config-app-invalid, KEIN SSH-Schritt (kein Private-Key-Lookup nötig)', async () => {
+    const ctrl = new VpsDockerControl(store);
+    const result = await ctrl.pushAppConfigFile(TEST_VPS, 'Invalid Slug', SEED_CONTENT);
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('config-app-invalid');
+  });
+
+  it('AC3: mkdir -p $HOME/apps/<app> läuft vor dem Existenz-Check', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+    let capturedStdin = '';
+    await ctrl.pushAppConfigFile(TEST_VPS, 'myapp', SEED_CONTENT, {
+      _sshClientFactory: makeMockSshClientWithStdinOut({
+        stdout: 'SEEDED',
+        onStdinWrite: (c) => { capturedStdin = c; },
+      }),
+    });
+    expect(capturedStdin).toContain('mkdir -p "$HOME/apps/myapp"');
+    const mkdirIdx = capturedStdin.indexOf('mkdir -p');
+    const testIdx = capturedStdin.indexOf('if [ -f');
+    expect(mkdirIdx).toBeGreaterThan(-1);
+    expect(mkdirIdx).toBeLessThan(testIdx);
+  });
+
+  it('AC4 (HART): Seed-Inhalt NIE im exec-Argv — exec-Kommando ist nur "bash -s"', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+    let capturedCmd = null;
+    await ctrl.pushAppConfigFile(TEST_VPS, 'myapp', SEED_CONTENT, {
+      _sshClientFactory: makeMockSshClientWithStdinOut({
+        stdout: 'SEEDED',
+        onCommand: (c) => { capturedCmd = c; },
+      }),
+    });
+    expect(capturedCmd).toBe('bash -s');
+    expect(capturedCmd).not.toContain(SEED_CONTENT);
+  });
+
+  it('AC4: Seed-Inhalt fließt via stdin, Datei wird atomar (tmp+rename) mit chmod 600 geschrieben', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+    let capturedStdin = '';
+    const result = await ctrl.pushAppConfigFile(TEST_VPS, 'myapp', SEED_CONTENT, {
+      _sshClientFactory: makeMockSshClientWithStdinOut({
+        stdout: 'SEEDED',
+        onStdinWrite: (c) => { capturedStdin = c; },
+      }),
+    });
+    expect(result).toEqual({ result: 'ok', seeded: true });
+    // Inhalt (single-quote-escaped) im stdin-Body enthalten
+    expect(capturedStdin).toContain('foo: bar');
+    expect(capturedStdin).toContain("baz: '\\''quoted value'\\''");
+    expect(capturedStdin).toContain('chmod 600 "$TMP"');
+    expect(capturedStdin).toMatch(/TMP="\$HOME\/apps\/myapp\/config\.yaml\.tmp\.\$\$"/);
+    expect(capturedStdin).toContain('mv "$TMP" "$HOME/apps/myapp/config.yaml"');
+  });
+
+  it('AC5: Host-Datei existiert bereits → seeded:false, Datei bleibt unangetastet (auch mit content)', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+    const result = await ctrl.pushAppConfigFile(TEST_VPS, 'myapp', SEED_CONTENT, {
+      _sshClientFactory: makeMockSshClientWithStdinOut({ stdout: 'EXISTS' }),
+    });
+    expect(result).toEqual({ result: 'ok', seeded: false });
+  });
+
+  it('AC6: Datei fehlt + kein content → errorClass:config-file-missing, kein Schreib-Kommando im Skript', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+    let capturedStdin = '';
+    const result = await ctrl.pushAppConfigFile(TEST_VPS, 'myapp', undefined, {
+      _sshClientFactory: makeMockSshClientWithStdinOut({
+        stdout: 'MISSING',
+        onStdinWrite: (c) => { capturedStdin = c; },
+      }),
+    });
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('config-file-missing');
+    // Kein Seed-Schreib-Kommando im Skript wenn kein content übergeben wurde
+    expect(capturedStdin).not.toContain('printf');
+    expect(capturedStdin).not.toContain('chmod 600');
+    expect(capturedStdin).toContain('echo MISSING');
+  });
+
+  it('AC6: leerer content-String verhält sich wie kein Seed → config-file-missing bei MISSING', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+    const result = await ctrl.pushAppConfigFile(TEST_VPS, 'myapp', '', {
+      _sshClientFactory: makeMockSshClientWithStdinOut({ stdout: 'MISSING' }),
+    });
+    expect(result.errorClass).toBe('config-file-missing');
+  });
+
+  it('AC10 (Floor): Seed-Inhalt erscheint nie im reason bei SSH-Fehler', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+    const connErr = Object.assign(new Error('Connection refused'), { code: 'ECONNREFUSED' });
+    const result = await ctrl.pushAppConfigFile(TEST_VPS, 'myapp', SEED_CONTENT, {
+      _sshClientFactory: makeMockSshClientWithStdinOut({ connectError: connErr }),
+    });
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('unreachable');
+    expect(result.reason).not.toContain(SEED_CONTENT);
+  });
+
+  it('kein Private-Key → errorClass:no-private-key', async () => {
+    const ctrl = new VpsDockerControl(store);
+    const result = await ctrl.pushAppConfigFile(TEST_VPS, 'myapp', SEED_CONTENT);
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('no-private-key');
   });
 });
