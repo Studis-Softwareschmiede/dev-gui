@@ -1,7 +1,7 @@
 id: S-345
 parent: F-076
 title: 'RTK-Ausgabe-Diät: Mess-Pilot (Baseline vs. RTK, Fidelity-Gegenprobe, Bericht)'
-status: To Do
+status: Done
 priority: P2
 spec: docs/specs/rtk-output-shaping-pilot.md
 implements:
@@ -24,11 +24,11 @@ estimate_note: 'Operativer Mess-Pilot (kein reiner Code-Task): rtk-Install + Hoo
   ans agent-flow-ADR. Grob L; depends auf S-344 (Ledger-Skripte für tok_total). Keine
   Baseline für Spikes -> dispo_est offen.'
 confidence: low
-branch: null
+branch: feat/S-345-rtk-pilot
 pr: null
 blocked_reason: null
 created_at: '2026-07-14T06:56:08Z'
-updated_at: '2026-07-14T06:56:08Z'
-done_at: null
+updated_at: '2026-07-14T08:06:05Z'
+done_at: '2026-07-14T08:06:05Z'
 tok_est: null
 area: retro-lernen
