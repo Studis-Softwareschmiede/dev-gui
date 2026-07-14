@@ -7,7 +7,7 @@ goal: 'Die messungs-vorbehaltliche Vorab-Empfehlung des agent-flow-Spikes output
   Liefert gemessene Token-Ersparnis + Übernahme-/Verwerf-Empfehlung zurück ans ADR.
 
   '
-status: Backlog
+status: Done
 priority: P2
 spec: docs/specs/rtk-output-shaping-pilot.md
 definition_of_done: 'Setup reproduzierbar dokumentiert (Telemetrie-aus verifiziert),
@@ -23,7 +23,7 @@ depends: null
 owner: null
 stories:
 - S-345
-progress: 0/1 done
+progress: 1/1 done
 created_at: '2026-07-14T06:56:08Z'
 updated_at: '2026-07-14T06:56:08Z'
 area: retro-lernen
