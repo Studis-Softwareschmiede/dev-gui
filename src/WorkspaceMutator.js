@@ -57,6 +57,37 @@ const RM_TIMEOUT_MS = 15000;
 const PULL_TIMEOUT_MS = 60000;
 
 /**
+ * Command-Scope credential-helper neutralization flags (workspace-mutator-
+ * credential-helper AC1/AC2). Prepended to EVERY mutating/auth-relevant git
+ * subcommand this module runs, so an ambient `credential.helper` (e.g. the
+ * container-wide `!gh auth git-credential` set by `gh auth setup-git` in
+ * docker-entrypoint.sh) is neutralized and git falls through to GIT_ASKPASS
+ * exclusively — a stale gh-CLI token can no longer shadow the freshly minted
+ * Installation Token. Command-Scope (`-c`) overrides system + global + all
+ * other config scopes. Values are intentionally EMPTY (no secret in argv);
+ * the token itself continues to flow exclusively via GIT_ASKPASS + a
+ * randomly-named env var (minimalGitEnv), never via argv.
+ * Flag-Kanon (order fixed, see docs/specs/workspace-mutator-credential-helper.md §Verträge):
+ *   git -c credential.helper= -c credential.https://github.com.helper= <subcommand> …
+ */
+const GIT_CRED_HELPER_NEUTRALIZE_ARGS = [
+  '-c', 'credential.helper=',
+  '-c', 'credential.https://github.com.helper=',
+];
+
+/**
+ * Prepends the Command-Scope credential-helper neutralization flags (see
+ * GIT_CRED_HELPER_NEUTRALIZE_ARGS) to a git subcommand's argv, in the fixed
+ * order the spec mandates — flags before the subcommand.
+ *
+ * @param {string[]} subArgs  e.g. ['pull'] or ['commit', '-m', msg]
+ * @returns {string[]}
+ */
+function gitArgs(subArgs) {
+  return [...GIT_CRED_HELPER_NEUTRALIZE_ARGS, ...subArgs];
+}
+
+/**
  * @typedef {'traversal'|'not-found'|'rm-failed'|'workspace-unset'|'pull-failed'|'no-remote'|'credentials-missing'|'commit-failed'|'push-failed'|'branch-mismatch'} MutatorErrorClass
  */
 
@@ -337,7 +368,7 @@ export class WorkspaceMutator {
       // Run git pull in the clone directory.
       let pullResult;
       try {
-        pullResult = await this.#execFn('git', ['pull'], {
+        pullResult = await this.#execFn('git', gitArgs(['pull']), {
           cwd: targetPath,
           timeout: PULL_TIMEOUT_MS,
           env: childEnv,
@@ -504,7 +535,7 @@ export class WorkspaceMutator {
       // a failed attempt.
       let prevHead = null;
       try {
-        const headResult = await this.#execFn('git', ['rev-parse', 'HEAD'], {
+        const headResult = await this.#execFn('git', gitArgs(['rev-parse', 'HEAD']), {
           cwd: targetPath,
           timeout: RM_TIMEOUT_MS,
           env: childEnv,
@@ -520,7 +551,7 @@ export class WorkspaceMutator {
       const rollbackToPrevHead = async () => {
         if (!prevHead) return;
         try {
-          await this.#execFn('git', ['reset', '--hard', prevHead], {
+          await this.#execFn('git', gitArgs(['reset', '--hard', prevHead]), {
             cwd: targetPath,
             timeout: RM_TIMEOUT_MS,
             env: childEnv,
@@ -543,7 +574,7 @@ export class WorkspaceMutator {
       }
 
       try {
-        await this.#execFn('git', ['add', '--', relFilePath], {
+        await this.#execFn('git', gitArgs(['add', '--', relFilePath]), {
           cwd: targetPath,
           timeout: RM_TIMEOUT_MS,
           env: childEnv,
@@ -557,7 +588,7 @@ export class WorkspaceMutator {
       try {
         await this.#execFn(
           'git',
-          ['commit', '-m', commitMessage ?? `chore: rotate ${relFilePath}`],
+          gitArgs(['commit', '-m', commitMessage ?? `chore: rotate ${relFilePath}`]),
           { cwd: targetPath, timeout: RM_TIMEOUT_MS, env: childEnv },
         );
       } catch (err) {
@@ -573,7 +604,7 @@ export class WorkspaceMutator {
 
       let pushResult;
       try {
-        pushResult = await this.#execFn('git', ['push', 'origin', `HEAD:${branch}`], {
+        pushResult = await this.#execFn('git', gitArgs(['push', 'origin', `HEAD:${branch}`]), {
           cwd: targetPath,
           timeout: PULL_TIMEOUT_MS,
           env: childEnv,
@@ -627,7 +658,7 @@ export class WorkspaceMutator {
   async #verifyPushBranch(targetPath, childEnv, name) {
     let branchResult;
     try {
-      branchResult = await this.#execFn('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+      branchResult = await this.#execFn('git', gitArgs(['rev-parse', '--abbrev-ref', 'HEAD']), {
         cwd: targetPath,
         timeout: RM_TIMEOUT_MS,
         env: childEnv,
@@ -643,7 +674,7 @@ export class WorkspaceMutator {
 
     let defaultRefResult;
     try {
-      defaultRefResult = await this.#execFn('git', ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], {
+      defaultRefResult = await this.#execFn('git', gitArgs(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']), {
         cwd: targetPath,
         timeout: RM_TIMEOUT_MS,
         env: childEnv,
