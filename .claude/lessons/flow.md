@@ -18,13 +18,21 @@ Newest-first. Regeln für die Orchestrator-Ebene (Landen/Konsolidieren/Recovery/
 
 **Ursache:** `.github/workflows/build.yml` triggert ausschliesslich auf `push: branches: [main]`, `security.yml` nur `schedule`/`workflow_dispatch`. Für `feature/**`-Branches existiert **strukturell keine CI**. Der Skript-Guard dagegen (`workflow_count == 0` → CI-Watch entfällt) greift nicht, weil das Repo sehr wohl Workflows hat — nur keinen, der auf diesem Branch triggert.
 
-**Regel:** Bei aktivem `--parent <F-###>` den Exit-Code von `board-ship.sh` **nicht** als Merge-Fehler lesen. Stattdessen mechanisch nachprüfen, statt zu raten:
-- `git merge-base --is-ancestor <story-sha> origin/feature/<F-###>` → gelandet?
-- `gh run list --branch feature/<F-###>` → leer (`[]`) = strukturell keine CI, **nicht** „noch nicht gestartet"?
-- Rollout entfällt bei `--target-branch` ohnehin per Skript-Design.
-Sind alle drei bestätigt, Schritt 5/6 deterministisch nachziehen: `BOARD_WRITER=flow board set <id> status Done` + `board set <id> branch <branch>`, `git add board/ && git commit && git push origin feature/<F-###>`. Die echte CI-Abdeckung entsteht beim finalen `board-ship.sh --merge-feature` (Push auf `main` → `build.yml` inkl. Secret-Gate) — für Feature-Zwischenstände gibt es sie per Design nicht.
+**Regel (geschärft 2026-07-15, S-353 — Fehlschlag überspringen statt reparieren):** Bei aktivem `--parent <F-###>` `board-ship.sh` **gar nicht erst fahren** — es kann Schritt 5/6 hier strukturell nie erreichen (Schritt 3 stirbt vorher), liefert also keinen Wert und kostet 10 Min. Es gibt **keinen** Env-Seam, der den CI-Watch überspringt (`BOARD_SHIP_SKIP_GH_AUTH` deckt nur die Auth). Stattdessen den Ablauf direkt deterministisch fahren — dieselben Schritte, dieselben mechanischen Prüfungen, ohne Leerlauf:
+1. Story-Branch `feat/<id>-<slug>` von `feature/<F-###>` anlegen, Code+Spec+Tests+`.claude/lessons/*` committen, pushen. *(Etabliertes Muster des Features — S-351/S-352 liegen so.)*
+2. `git status --porcelain` vor jedem git-Schritt (L6-Guard von Hand) → nur `board/` darf offen sein.
+3. `git checkout feature/<F-###> && git merge --no-ff` + push.
+4. **Mechanisch verifizieren, nie behaupten** (das ist der eigentliche Wert des Skripts):
+   - `git merge-base --is-ancestor <story-sha> feature/<F-###>` → gelandet?
+   - `gh run list --branch feature/<F-###>` → leer = strukturell keine CI, **nicht** „noch nicht gestartet"?
+   - Rollout entfällt bei Feature-Ziel per Skript-Design.
+5. Erst dann Schritt 5/6: `BOARD_WRITER=flow board set <id> status Done` + Dispo-Spiegel, `git add board/ && git commit && git push origin feature/<F-###>`.
+
+Die echte CI-Abdeckung entsteht beim finalen `board-ship.sh --merge-feature` (Push auf `main` → `build.yml` inkl. Secret-Gate) — für Feature-Zwischenstände gibt es sie per Design nicht. Der `tester` (volle Suite, §4) ist das Gate für die Einzel-Story.
 
 **Nicht tun:** Skript blind erneut starten (Schritt 1 erkennt „bereits gemergt", läuft in denselben 10-Min-Timeout, Board-Flip bleibt erneut aus) — oder `build.yml` auf `feature/**` erweitern, nur um das Skript zufriedenzustellen (kostet Actions-Minuten pro Story; die Bündelung am Feature-Ende ist Absicht, SR3).
+
+**Strukturelle Kur (offen, cross-repo — agent-flow, Owner-Entscheidung nötig):** Der Guard in `board-ship.sh:112` fragt „hat das *Repo* Workflows?" (`workflow_count`), müsste aber fragen „triggert ein Workflow auf *diesem Branch*?". Solange das so ist, tritt die Falle in **jedem** Projekt mit `main`-only-CI + Feature-Branch-Strategie (SR2) auf — die Lesson hier ist nur die lokale Umgehung. Drei Läufe (S-351, S-352, S-353) haben sie bestätigt.
 
 ## flow/L01 — DB-Trigger springt bei `docs/data-model.md` an, obwohl dev-gui keine DB hat
 
