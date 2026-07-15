@@ -1,26 +1,35 @@
 /**
- * vpsContainerRouter.test.js — Tests für Container-Übersicht + Aktionen (S-157, S-352, S-355).
+ * vpsContainerRouter.test.js — Tests für Container-Übersicht + Aktionen (S-157, S-352, S-355, S-359, S-360, S-361).
  *
  * Covers (vps-container-overview):
  *   AC8  — GET /api/vps/machines/:provider/*splat/containers → ContainerEntry[]; SSH-Fehler
  *          degradiert; `state` wird durchgereicht (gestoppter Container → state:'exited', v2, S-352)
  *   AC9  — VpsDockerControl.start/stop/restart/logs + Container-ID-Validierung + secret-freie Fehler
  *   AC10 — POST .../start|stop|restart → VpsDockerControl-Methode; GET .../logs → read-only
- *   AC11 — DELETE .../containers/:id: managed → undeploy; unmanaged → rm; protected → 422
+ *   AC11 — DELETE .../containers/:id: managed → undeploy; unmanaged → rm; protected → 422;
+ *          tunnelId für den managed-Undeploy-Pfad kommt seit S-359 additiv aus
+ *          resolveVpsTarget()/dem Target-Record (kein separater Host-basierter Lookup mehr)
+ *   AC11b — (S-360) managed-Remove ist fail-closed bzgl. Route: tunnelId nicht auflösbar (und
+ *          nicht protected) → 422 tunnel-not-found, rm-Mock NIE aufgerufen, kein undeploy;
+ *          kein stiller Rückfall auf reines VpsDockerControl.rm mehr (Alt-Verhalten entfernt);
+ *          auflösbare tunnelId → undeploy inkl. tunnelId-Weitergabe; unmanaged unverändert → rm.
+ *          Reihenfolge unverändert: LockoutGuard (C1) greift weiterhin VOR der tunnelId-Prüfung.
  *   AC12 — AccessGuard-403 (ohne Access); CRED_ADMIN_EMAILS-403 für Mutationen; Audit-First
  *   AC13 — Kein SSH-Key/Token in Response; Fehlertexte secret-frei
  *
- * Covers (container-image-update, S-355/S-356):
+ * Covers (container-image-update, S-355/S-356/S-359):
  *   AC1  — POST .../update: pull + recreate über DeployOrchestrator.deploy() mit unverändertem
  *          Image-Ref; Erfolg → { result:'ok', deployment }
  *   AC2  — Nie `docker restart`/VpsDockerControl.restart im Update-Pfad (grep-prüfbar)
  *   AC3  — Unmanaged Container (kein Hostname-Label) → 422 not-managed, keine Mutation
  *   AC4  — mitgesendetes Image/Tag im Body wird ignoriert — Bestands-Ref bestimmt den Deploy
  *   AC7  — Fail-closed vor jeder Mutation: inspectContainer-Fehler, Container-not-found,
- *          tunnelId nicht auflösbar, Run-Config ambiguous (update-unsafe) → kein pull/rm/run
- *          (die 404-container-not-found-Variante deckt zugleich den Spec-Edge-Case "zwei
- *          Updates gleichzeitig" ab: die zweite Anfrage trifft auf den bereits entfernten
- *          Altcontainer und endet hier, ohne dass deploy() erneut aufgerufen wird)
+ *          tunnelId nicht auflösbar (S-359: inkl. Edge-Case "VPS nur über Env-Ziele auflösbar",
+ *          kein Target-Record → tunnelId bleibt null), Run-Config ambiguous (update-unsafe)
+ *          → kein pull/rm/run (die 404-container-not-found-Variante deckt zugleich den
+ *          Spec-Edge-Case "zwei Updates gleichzeitig" ab: die zweite Anfrage trifft auf den
+ *          bereits entfernten Altcontainer und endet hier, ohne dass deploy() erneut
+ *          aufgerufen wird)
  *   AC8  — gestoppter Container (state:'exited'): Update ist zulässig, kein Block/Gate auf den
  *          Zustand, Ergebnis weist den laufenden Container aus (S-356; AC9/pull-"up to date"
  *          ist Saga-Verhalten und in test/DeployOrchestrator.test.js belegt, S-356)
@@ -29,6 +38,18 @@
  *          Mutation; abgelehnte Versuche wie unmanaged werden nicht auditiert, S-355 Iteration 2)
  *   AC11 — LockoutGuard: protected Hostname → 422 protected-resource, kein Schritt
  *   AC12 — Env-Werte aus inspectContainer erscheinen nie in Response/Audit
+ *   AC13 — (S-359, Kernfix) tunnelId wird server-seitig über `listTargetRecords({provider,
+ *          serverId})` aufgelöst (Target-Record derselben Registrierung wie Host/Port/User),
+ *          kein Host-basierter Lookup mehr — der tote `resolveTunnelId`-Hilfsfunktions-Pfad
+ *          ist ersatzlos entfernt (grep-prüfbar, AC15 aus der Spec).
+ *   AC14 — (S-359) `deploy()` erhält `vpsId` aus demselben Target-Record wie `tunnelId` — das
+ *          Tunnel-Mismatch/-Missing-Gate des DeployOrchestrator greift damit statt still
+ *          übersprungen zu werden.
+ *   AC15 — (S-361) Testvertrag: JEDES Registry-Double dieser Datei läuft über
+ *          `makeContractBoundRegistryFake()`, das jede bereitgestellte Methode gegen
+ *          `VpsProviderRegistry.prototype` prüft — eine erfundene Methode lässt den Aufbau des
+ *          Doubles fehlschlagen statt den Test still durchzuwinken. Negativ-Nachweis + Positiv-
+ *          Nachweis in der eigenen AC15-`describe`-Sektion am Dateiende.
  *
  * Strategie:
  *   - VpsDockerControl als Mock injiziert (kein SSH-I/O)
@@ -36,7 +57,11 @@
  *   - AuditStore real (in-memory)
  *   - AccessGuard mit DEV_NO_ACCESS=1 für Nicht-403-Tests
  *   - vpsTargets: Map mit einem Test-Eintrag
- *   - vpsRegistry: Mock (getMachineIp gibt IP zurück; getTunnelIdForHost für Update-Tests)
+ *   - vpsRegistry: Mock (getMachineIp gibt IP zurück für den Env-Match-Zweig; für tunnelId/
+ *     vpsId-Auflösung mockt `makeRegistryWithTargetRecord`/`makeRegistryWithTunnel` gezielt
+ *     `listTargetRecords({provider,serverId})` — die einzige reale Registry-Oberfläche, AC15).
+ *     ALLE Registry-Doubles (inkl. der beiden AC13/AC14-Inline-Doubles) laufen über den
+ *     gemeinsamen, vertragsgebundenen Helfer `makeContractBoundRegistryFake()` (AC15, S-361).
  */
 
 import { describe, it, afterEach, expect } from '@jest/globals';
@@ -47,6 +72,7 @@ import { request as httpRequest } from 'node:http';
 import { vpsContainerRouter } from '../src/vpsContainerRouter.js';
 import { AuditStore } from '../src/AuditStore.js';
 import { createAccessGuard } from '../src/AccessGuard.js';
+import { VpsProviderRegistry } from '../src/vps/VpsProviderRegistry.js';
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -162,12 +188,46 @@ function makeMockOrchestrator({
   };
 }
 
+/**
+ * Vertraglich an die ECHTE VpsProviderRegistry-Oberfläche gebundener Registry-Fake (AC15,
+ * container-image-update). Jede Methode, die `methods` bereitstellt, MUSS auf
+ * `VpsProviderRegistry.prototype` tatsächlich existieren — eine erfundene Methode (wie der
+ * inzwischen entfernte Host-Lookup-Platzhalter, der die tunnelId-Auflösung nie funktionsfähig
+ * gemacht hat) lässt den Aufbau des Doubles sofort fehlschlagen, statt den Test still
+ * durchzuwinken. Gemeinsamer Helfer für ALLE Registry-Doubles der tunnelId-Auflösung
+ * (Update- und Remove-Pfad) in dieser Datei — kein Double baut sich mehr am Vertrag vorbei.
+ */
+function makeContractBoundRegistryFake(methods = {}) {
+  for (const methodName of Object.keys(methods)) {
+    if (typeof VpsProviderRegistry.prototype[methodName] !== 'function') {
+      throw new Error(
+        `makeContractBoundRegistryFake: "${methodName}" existiert nicht auf VpsProviderRegistry.prototype — ` +
+        'ein Test-Double darf keine erfundene Registry-Methode bereitstellen (AC15, container-image-update).',
+      );
+    }
+  }
+  return { ...methods };
+}
+
 function makeMockRegistry({ machineIp = '1.2.3.4' } = {}) {
-  return {
+  return makeContractBoundRegistryFake({
     async getMachineIp(_provider, _serverId) {
       return machineIp;
     },
-  };
+  });
+}
+
+/**
+ * Registry-Mock mit auflösbarer tunnelId über den Target-Record-Weg (AC13, container-image-update)
+ * — bewusst KEIN getMachineIp, sonst würde der Env-Match-Zweig (Default-vpsTargets führen denselben
+ * Host) mit tunnelId:null gewinnen. Provider/serverId matchen die Standard-Testpfade `hetzner`/`1`.
+ */
+function makeRegistryWithTargetRecord({ tunnelId = 'tunnel-abc', vpsId = 'test-vps' } = {}) {
+  return makeContractBoundRegistryFake({
+    async listTargetRecords() {
+      return [{ provider: 'hetzner', serverId: '1', host: '1.2.3.4', port: 22, targetUser: 'root', tunnelId, _vpsId: vpsId }];
+    },
+  });
 }
 
 // ── Test-Server-Fabrik ─────────────────────────────────────────────────────────
@@ -546,10 +606,7 @@ describe('vpsContainerRouter — AC11: Container entfernen', () => {
       orchestrator: makeMockOrchestrator({
         onUndeploy: (params) => { undeployParams = params; },
       }),
-      registry: {
-        async getMachineIp() { return '1.2.3.4'; },
-        async getTunnelIdForHost() { return 'tunnel-abc'; },
-      },
+      registry: makeRegistryWithTargetRecord({ tunnelId: 'tunnel-abc' }),
     });
     const { status, body } = await server.doRequest({
       method: 'DELETE',
@@ -561,6 +618,7 @@ describe('vpsContainerRouter — AC11: Container entfernen', () => {
     expect(undeployParams).not.toBeNull();
     expect(undeployParams.hostname).toBe(MANAGED_CONTAINER.hostname);
     expect(undeployParams.confirm).toBe(MANAGED_CONTAINER.hostname);
+    expect(undeployParams.tunnelId).toBe('tunnel-abc'); // AC11b: undeploy inkl. Route-Abbau
   });
 
   it('protected Hostname → 422 protected-resource, kein Docker-Schritt', async () => {
@@ -574,10 +632,7 @@ describe('vpsContainerRouter — AC11: Container entfernen', () => {
       orchestrator: makeMockOrchestrator({
         undeployResult: { result: 'error', errorClass: 'protected-resource', reason: 'protected-resource' },
       }),
-      registry: {
-        async getMachineIp() { return '1.2.3.4'; },
-        async getTunnelIdForHost() { return 'tunnel-abc'; },
-      },
+      registry: makeRegistryWithTargetRecord({ tunnelId: 'tunnel-abc' }),
     });
     const { status, body } = await server.doRequest({
       method: 'DELETE',
@@ -590,9 +645,11 @@ describe('vpsContainerRouter — AC11: Container entfernen', () => {
   });
 
   it('C1 — managed Container, tunnelId=null, protected Hostname → 422 protected-resource, KEIN rm', async () => {
-    // Regression-Guard C1: wenn tunnelId=null bei managed Container, darf der Fallback
-    // NICHT am LockoutGuard vorbei vpsDockerControl.rm() aufrufen.
-    // Setup: Registry gibt keine tunnelId → tunnelId=null; DEVGUI_HOSTNAME = Hostname des Containers.
+    // Regression-Guard C1: bei tunnelId=null MUSS der LockoutGuard weiterhin VOR der
+    // tunnelId-Prüfung greifen (Reihenfolge unverändert durch S-360) — protected-resource
+    // gewinnt, nicht tunnel-not-found; kein rm/undeploy in beiden Fällen.
+    // Setup: Default-Registry (kein listTargetRecords) → Env-Match-Zweig liefert tunnelId:null
+    // (kein Target-Record, AC7-Edge-Case); DEVGUI_HOSTNAME = Hostname des Containers.
     let rmCalled = false;
     let undeployCalled = false;
     server = await makeTestServer({
@@ -604,11 +661,7 @@ describe('vpsContainerRouter — AC11: Container entfernen', () => {
       orchestrator: makeMockOrchestrator({
         onUndeploy: () => { undeployCalled = true; },
       }),
-      registry: {
-        async getMachineIp() { return '1.2.3.4'; },
-        // getTunnelIdForHost gibt null → kein Tunnel (Fallback-Pfad)
-        async getTunnelIdForHost() { return null; },
-      },
+      registry: makeMockRegistry(),
     });
     const { status, body } = await server.doRequest({
       method: 'DELETE',
@@ -618,6 +671,36 @@ describe('vpsContainerRouter — AC11: Container entfernen', () => {
     expect(status).toBe(422);
     expect(body.errorClass).toBe('protected-resource');
     // KEIN rm und KEIN undeploy darf aufgerufen worden sein (AC11 bedingungslos)
+    expect(rmCalled).toBe(false);
+    expect(undeployCalled).toBe(false);
+  });
+
+  it('AC11b — managed Container, tunnelId nicht auflösbar (nicht protected) → 422 tunnel-not-found, KEIN rm, KEIN undeploy', async () => {
+    // AC11b (vps-container-overview): fail-closed statt stillem Fallback auf reines
+    // VpsDockerControl.rm. Registry ohne listTargetRecords + Env-Match-Zweig ohne
+    // tunnelId → tunnelId bleibt null; Hostname ist NICHT protected (kein DEVGUI_HOSTNAME),
+    // damit dieser Test den tunnel-not-found-Pfad prüft und nicht den bereits von C1
+    // abgedeckten protected-resource-Pfad.
+    let rmCalled = false;
+    let undeployCalled = false;
+    server = await makeTestServer({
+      env: { DEV_NO_ACCESS: '1' },
+      dockerControl: makeMockDockerControl({
+        psAllResult: { result: 'ok', containers: [MANAGED_CONTAINER] },
+        onRm: () => { rmCalled = true; },
+      }),
+      orchestrator: makeMockOrchestrator({
+        onUndeploy: () => { undeployCalled = true; },
+      }),
+      registry: makeMockRegistry(),
+    });
+    const { status, body } = await server.doRequest({
+      method: 'DELETE',
+      path: `/api/vps/machines/hetzner/1/containers/${MANAGED_CONTAINER.containerId}`,
+      body: { confirm: MANAGED_CONTAINER.hostname },
+    });
+    expect(status).toBe(422);
+    expect(body.errorClass).toBe('tunnel-not-found');
     expect(rmCalled).toBe(false);
     expect(undeployCalled).toBe(false);
   });
@@ -932,12 +1015,9 @@ describe('vpsContainerRouter — AC9: Container-ID-Validierung + secret-freie Fe
 
 // ── container-image-update AC1/AC2/AC3/AC4/AC7/AC10/AC11/AC12 (S-355) ───────────
 
-/** Registry-Mock mit auflösbarer tunnelId (analog managed-Remove-Testmuster). */
-function makeRegistryWithTunnel(tunnelId = 'tunnel-abc') {
-  return {
-    async getMachineIp() { return '1.2.3.4'; },
-    async getTunnelIdForHost() { return tunnelId; },
-  };
+/** Alias auf makeRegistryWithTargetRecord (Update-Testsektion, historischer Name beibehalten). */
+function makeRegistryWithTunnel(tunnelId = 'tunnel-abc', vpsId = 'test-vps') {
+  return makeRegistryWithTargetRecord({ tunnelId, vpsId });
 }
 
 const SECRET_ENV_VALUE = 'GPG_PASSPHRASE_SHOULD_NOT_LEAK';
@@ -980,6 +1060,70 @@ describe('vpsContainerRouter — container-image-update: POST .../update', () =>
     expect(deployParams.image).toBe(MANAGED_CONTAINER.image); // unveränderter Bestands-Ref
     expect(deployParams.hostname).toBe(MANAGED_CONTAINER.hostname);
     expect(deployParams.tunnelId).toBe('tunnel-abc');
+    expect(deployParams.vpsId).toBe('test-vps'); // AC14: vpsId aus demselben Target-Record
+  });
+
+  // ── AC13/AC14: tunnelId + vpsId aus dem Target-Record durchgereicht (S-359) ──
+
+  it('AC13 — tunnelId wird über listTargetRecords({provider,serverId}) aufgelöst, kein Host-Lookup', async () => {
+    let deployParams = null;
+    let listTargetRecordsCalled = false;
+    server = await makeTestServer({
+      env: { DEV_NO_ACCESS: '1' },
+      dockerControl: makeMockDockerControl({
+        psAllResult: { result: 'ok', containers: [MANAGED_CONTAINER] },
+        inspectContainerResult: {
+          result: 'ok',
+          config: { image: MANAGED_CONTAINER.image, env: {}, binds: [], labels: { 'cloudflare.tunnel-hostname': MANAGED_CONTAINER.hostname } },
+        },
+      }),
+      orchestrator: makeMockOrchestrator({
+        onDeploy: (params) => { deployParams = params; },
+      }),
+      registry: makeContractBoundRegistryFake({
+        async listTargetRecords() {
+          listTargetRecordsCalled = true;
+          return [{ provider: 'hetzner', serverId: '1', host: '1.2.3.4', port: 22, targetUser: 'root', tunnelId: 'tunnel-xyz', _vpsId: 'vps-one' }];
+        },
+      }),
+    });
+
+    const { status } = await server.doRequest({
+      method: 'POST',
+      path: `/api/vps/machines/hetzner/1/containers/${MANAGED_CONTAINER.containerId}/update`,
+    });
+
+    expect(status).toBe(200);
+    expect(listTargetRecordsCalled).toBe(true);
+    expect(deployParams.tunnelId).toBe('tunnel-xyz');
+    expect(deployParams.vpsId).toBe('vps-one');
+  });
+
+  it('AC14 — Registrierung ohne tunnelId im Target-Record (tunnelId:null) → 422 tunnel-not-found, kein deploy()', async () => {
+    let deployCalled = false;
+    server = await makeTestServer({
+      env: { DEV_NO_ACCESS: '1' },
+      dockerControl: makeMockDockerControl({
+        psAllResult: { result: 'ok', containers: [MANAGED_CONTAINER] },
+      }),
+      orchestrator: makeMockOrchestrator({
+        onDeploy: () => { deployCalled = true; },
+      }),
+      registry: makeContractBoundRegistryFake({
+        async listTargetRecords() {
+          return [{ provider: 'hetzner', serverId: '1', host: '1.2.3.4', port: 22, targetUser: 'root', tunnelId: null, _vpsId: 'vps-one' }];
+        },
+      }),
+    });
+
+    const { status, body } = await server.doRequest({
+      method: 'POST',
+      path: `/api/vps/machines/hetzner/1/containers/${MANAGED_CONTAINER.containerId}/update`,
+    });
+
+    expect(status).toBe(422);
+    expect(body.errorClass).toBe('tunnel-not-found');
+    expect(deployCalled).toBe(false);
   });
 
   it('AC6/AC12 — Env des Bestands-Containers wird an deploy() als containerEnv durchgereicht, ohne in der Response zu erscheinen', async () => {
@@ -1187,7 +1331,7 @@ describe('vpsContainerRouter — container-image-update: POST .../update', () =>
     expect(deployCalled).toBe(false);
   });
 
-  it('AC7 — tunnelId nicht auflösbar (kein Tunnel registriert) → 422 tunnel-not-found, kein Fallback-Deploy', async () => {
+  it('AC7 — VPS nur über Env-Ziele auflösbar (kein Target-Record) → 422 tunnel-not-found, kein Fallback-Deploy', async () => {
     let deployCalled = false;
     server = await makeTestServer({
       env: { DEV_NO_ACCESS: '1' },
@@ -1197,7 +1341,8 @@ describe('vpsContainerRouter — container-image-update: POST .../update', () =>
       orchestrator: makeMockOrchestrator({
         onDeploy: () => { deployCalled = true; },
       }),
-      // Default-Registry hat KEIN getTunnelIdForHost → tunnelId bleibt null.
+      // Default-Registry hat KEIN listTargetRecords → Env-Match-Zweig greift, tunnelId bleibt
+      // null (AC7-Edge-Case: VPS nur über Env-Ziele auflösbar, kein Target-Record).
       registry: makeMockRegistry(),
     });
 
@@ -1457,5 +1602,37 @@ describe('vpsContainerRouter — container-image-update: POST .../update', () =>
     const bodyStr = JSON.stringify(body);
     expect(bodyStr).not.toContain(FAKE_KEY);
     expect(bodyStr).not.toContain(FAKE_CF_TOKEN);
+  });
+});
+
+// ── AC15 (container-image-update): Testvertrag — keine erfundenen Registry-Methoden ──
+
+describe('vpsContainerRouter — AC15: Registry-Fake ist vertraglich an die echte VpsProviderRegistry-Oberfläche gebunden', () => {
+  it('Negativ-Nachweis: ein Double mit einer auf VpsProviderRegistry nicht existierenden Methode lässt die Vertragsprüfung fehlschlagen', () => {
+    // Phantasiename, KEIN real existierender Aufruf und bewusst nicht der historische
+    // Platzhalter-Name aus dem Kernfix (der darf im Repo nicht mehr auftauchen, AC15-Grep-Kriterium).
+    expect(() => makeContractBoundRegistryFake({
+      async lookupTunnelIdByHostname(_host) {
+        return 'tunnel-abc';
+      },
+    })).toThrow(/lookupTunnelIdByHostname/);
+  });
+
+  it('akzeptiert ein Double, das ausschließlich real existierende Registry-Methoden bereitstellt', () => {
+    expect(() => makeContractBoundRegistryFake({
+      async listTargetRecords() {
+        return [];
+      },
+      async getMachineIp(_provider, _serverId) {
+        return '1.2.3.4';
+      },
+    })).not.toThrow();
+  });
+
+  it('makeRegistryWithTargetRecord/makeMockRegistry (Update + Remove) laufen selbst durch die Vertragsprüfung', () => {
+    // Regression-Guard: falls einer der beiden gemeinsamen Registry-Doubles jemals wieder eine
+    // erfundene Methode bereitstellt, schlägt bereits der Aufbau fehl — nicht erst ein späterer Test.
+    expect(() => makeRegistryWithTargetRecord({ tunnelId: 'tunnel-abc', vpsId: 'test-vps' })).not.toThrow();
+    expect(() => makeMockRegistry({ machineIp: '1.2.3.4' })).not.toThrow();
   });
 });

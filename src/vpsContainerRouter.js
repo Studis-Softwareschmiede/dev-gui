@@ -1,7 +1,7 @@
 /**
  * vpsContainerRouter — Express-Router für Container-Übersicht + Aktionen pro VPS.
  *
- * Implements: vps-container-overview AC8–AC12, container-image-update AC1–AC4/AC7/AC10–AC12
+ * Implements: vps-container-overview AC8–AC12/AC11b, container-image-update AC1–AC4/AC7/AC10–AC12
  *
  * Routes (alle hinter AccessGuard in server.js):
  *   GET    /api/vps/machines/:provider/*splat/containers
@@ -23,6 +23,9 @@
  *             Unmanaged → VpsDockerControl.rm
  *             Protected → 422 protected-resource
  *             Fehlender/falscher confirm → 422 confirmation-required
+ *             Managed + tunnelId nicht auflösbar → 422 tunnel-not-found, KEIN rm, KEIN
+ *             Cloudflare-Schritt, Container unangetastet (fail-closed, AC11b). Kein stiller
+ *             Rückfall auf reines VpsDockerControl.rm — sonst verwaiste Route+DNS.
  *   POST   /api/vps/machines/:provider/*splat/containers/:containerId/update
  *             Body: leer (kein Image/Tag/tunnelId vom Client — container-image-update AC4)
  *             → { result:'ok', deployment } | { result:'error', errorClass, reason }  [MUTATION]
@@ -196,13 +199,18 @@ function sanitizeMsg(msg) {
  * Rückgabe: null nur wenn weder dynamisch noch Env ein Ziel ergibt (AC4 garantiert
  * non-null für rein-dynamischen VPS bei leerem vpsTargets).
  *
- * Security: kein SSH-Key/Token erscheint in der Rückgabe (nur host/port/targetUser).
+ * tunnelId/vpsId (container-image-update AC13): additiv aus demselben Target-Record
+ * durchgereicht, der Host/Port/User liefert (dynamische Quelle, Zweig 1). Env-Ziele
+ * (Zweig 2/3) haben keinen Target-Record → tunnelId/vpsId sind dort `null` (AC7-Edge-Case,
+ * kein zu heilender Fall — der Update-Pfad endet dafür fail-closed in `tunnel-not-found`).
+ *
+ * Security: kein SSH-Key/Token erscheint in der Rückgabe (nur host/port/targetUser/tunnelId/vpsId).
  *
  * @param {string} provider
  * @param {string} serverId
  * @param {import('./vps/VpsProviderRegistry.js').VpsProviderRegistry} vpsRegistry
  * @param {Map<string, { host: string, port?: number, targetUser: string }>} vpsTargets
- * @returns {Promise<{ host: string, port: number, targetUser: string } | null>}
+ * @returns {Promise<{ host: string, port: number, targetUser: string, tunnelId: string|null, vpsId: string|null } | null>}
  */
 // Exportiert (statt module-private): SshPtyManager (vps-ssh-terminal AC7/AC8/AC10, S-262)
 // nutzt dieselbe Auflösung als injizierten `resolveTarget`-Adapter (server.js-Wiring) —
@@ -229,7 +237,15 @@ export async function resolveVpsTarget(provider, serverId, vpsRegistry, vpsTarge
           }
         }
         if (host) {
-          dynamicTarget = { host, port: match.port ?? 22, targetUser: match.targetUser ?? 'root' };
+          // AC13: tunnelId/vpsId aus demselben Target-Record additiv durchreichen —
+          // derselbe Record, aus dem Host/Port/User stammen (container-image-update AC13).
+          dynamicTarget = {
+            host,
+            port: match.port ?? 22,
+            targetUser: match.targetUser ?? 'root',
+            tunnelId: match.tunnelId ?? null,
+            vpsId: match._vpsId ?? null,
+          };
         }
       }
     } catch {
@@ -252,8 +268,10 @@ export async function resolveVpsTarget(provider, serverId, vpsRegistry, vpsTarge
   if (machineIp) {
     for (const target of vpsTargets.values()) {
       if (target.host === machineIp) {
-        // Env-Treffer gewinnt über dynamischen Datensatz (Override, Spec §Vereinigungs-Regel)
-        return { host: target.host, port: target.port ?? 22, targetUser: target.targetUser };
+        // Env-Treffer gewinnt über dynamischen Datensatz (Override, Spec §Vereinigungs-Regel).
+        // AC7-Edge-Case: Env-Ziele haben keinen Target-Record → tunnelId/vpsId bleiben null
+        // (erwartetes fail-closed-Verhalten am Update-Pfad, kein zu heilender Fall).
+        return { host: target.host, port: target.port ?? 22, targetUser: target.targetUser, tunnelId: null, vpsId: null };
       }
     }
   }
@@ -267,7 +285,8 @@ export async function resolveVpsTarget(provider, serverId, vpsRegistry, vpsTarge
   // Nur wenn vpsTargets nicht leer ist (bestehende Semantik erhalten).
   const first = vpsTargets.values().next().value;
   if (first) {
-    return { host: first.host, port: first.port ?? 22, targetUser: first.targetUser };
+    // AC7-Edge-Case: kein Target-Record im Single-VPS-Env-Fallback → tunnelId/vpsId null.
+    return { host: first.host, port: first.port ?? 22, targetUser: first.targetUser, tunnelId: null, vpsId: null };
   }
 
   return null;
@@ -520,26 +539,26 @@ export function vpsContainerRouter({ vpsDockerControl, deployOrchestrator, audit
       }
 
       // Managed: vollständiger Undeploy über DeployOrchestrator
-      // tunnelId muss bekannt sein — aus vpsTargets oder Registry-Konvention.
-      // Da tunnelId nicht per *splat mitkommt, nutzen wir psAll-Hostname als Bestätigung;
-      // DeployOrchestrator.undeploy benötigt tunnelId für removeRoute.
-      // Wir laden tunnelId aus dem CredentialStore (analog deploymentsRouter).
-      // Wenn kein tunnelId gefunden: Fallback auf reines rm (LockoutGuard wurde oben bereits geprüft).
-      const tunnelId = await resolveTunnelId(vpsTarget, vpsRegistry, vpsTargets);
-
-      let undeployResult;
-      if (tunnelId) {
-        undeployResult = await deployOrchestrator.undeploy({
-          vps: vpsTarget,
-          hostname: container.hostname,
-          confirm,
-          tunnelId,
+      // tunnelId (container-image-update AC13): server-seitig aus demselben Target-Record
+      // wie vpsTarget selbst — additiv von resolveVpsTarget durchgereicht, keine zweite
+      // Auflösung. AC11b (vps-container-overview): fail-closed — nicht auflösbar → 422
+      // tunnel-not-found, KEIN rm, KEIN Cloudflare-Schritt, Container bleibt unangetastet.
+      // Ein stiller Rückfall auf reines VpsDockerControl.rm ist untersagt (verwaiste Route+DNS).
+      const tunnelId = vpsTarget.tunnelId ?? null;
+      if (!tunnelId) {
+        return res.status(422).json({
+          result: 'error',
+          errorClass: 'tunnel-not-found',
+          reason: 'tunnel-not-found',
         });
-      } else {
-        // Kein Tunnel konfiguriert — nur Container entfernen (best-effort).
-        // LockoutGuard wurde bereits oben (vor diesem Block) geprüft — kein Bypass möglich.
-        undeployResult = await vpsDockerControl.rm(vpsTarget, containerId);
       }
+
+      const undeployResult = await deployOrchestrator.undeploy({
+        vps: vpsTarget,
+        hostname: container.hostname,
+        confirm,
+        tunnelId,
+      });
 
       if (undeployResult.result !== 'ok') {
         const httpStatus = undeployResult.errorClass === 'protected-resource' ? 422 : 502;
@@ -692,9 +711,11 @@ export function vpsContainerRouter({ vpsDockerControl, deployOrchestrator, audit
     }
     const config = inspectResult.config;
 
-    // (d) tunnelId server-seitig auflösen — derselbe Weg wie managed-Remove (AC11 vps-container-overview).
-    // AC7: kein Fallback auf einen Deploy ohne Route — nicht auflösbar → tunnel-not-found, kein Schritt.
-    const tunnelId = await resolveTunnelId(vpsTarget, vpsRegistry, vpsTargets);
+    // (d) tunnelId server-seitig auflösen (AC13) — derselbe Target-Record wie vpsTarget selbst,
+    // additiv von resolveVpsTarget durchgereicht (derselbe Weg wie managed-Remove, AC11
+    // vps-container-overview). AC7: kein Fallback auf einen Deploy ohne Route — nicht
+    // auflösbar (Env-Ziel ohne Target-Record oder Registrierung ohne Tunnel) → tunnel-not-found.
+    const tunnelId = vpsTarget.tunnelId ?? null;
     if (!tunnelId) {
       return res.status(422).json({
         result: 'error',
@@ -732,6 +753,7 @@ export function vpsContainerRouter({ vpsDockerControl, deployOrchestrator, audit
         vps: vpsTarget,
         hostname: container.hostname,
         tunnelId,
+        vpsId: vpsTarget.vpsId ?? null,
         containerEnv: mapping.containerEnv,
         ...(mapping.requiresConfig
           ? { requiresConfig: true, configApp: mapping.configApp, configMountPath: mapping.configMountPath }
@@ -832,35 +854,4 @@ export function vpsContainerRouter({ vpsDockerControl, deployOrchestrator, audit
   }
 
   return router;
-}
-
-// ── Hilfsfunktion: TunnelId aus CredentialStore-Konvention ────────────────────
-
-/**
- * Versucht eine tunnelId aus dem CredentialStore oder Registry-Metadaten zu laden.
- * Gibt null zurück wenn kein Tunnel konfiguriert (best-effort).
- *
- * Konvention (VpsProviderRegistry.js TUNNEL_ID_KEY):
- *   `credentials/misc/vps-<sanitized-vpsname>-tunnel-id`
- *
- * Da wir hier nur host/targetUser haben aber nicht den vpsName, iterieren wir
- * über die Registry-interne Methode — falls nicht verfügbar: null.
- *
- * @param {{ host: string, port: number, targetUser: string }} vpsTarget
- * @param {object} vpsRegistry
- * @param {Map} vpsTargets
- * @returns {Promise<string|null>}
- */
-async function resolveTunnelId(vpsTarget, vpsRegistry, _vpsTargets) {
-  // Versuche über Registry-Methode (falls vorhanden)
-  if (vpsRegistry && typeof vpsRegistry.getTunnelIdForHost === 'function') {
-    try {
-      const tid = await vpsRegistry.getTunnelIdForHost(vpsTarget.host);
-      if (tid) return tid;
-    } catch {
-      // best-effort
-    }
-  }
-  // Fallback: kein Tunnel — Caller muss ohne undeploy-Route auskommen
-  return null;
 }

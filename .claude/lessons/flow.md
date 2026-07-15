@@ -2,6 +2,19 @@
 
 Newest-first. Regeln für die Orchestrator-Ebene (Landen/Konsolidieren/Recovery/Dispatch-Ökonomie).
 
+## flow/L06 — Agent stirbt an einem API-Fehler: **fortsetzen, nicht neu dispatchen** (Kontext bleibt intakt)
+
+**Beobachtung (2026-07-15, S-359):** Der coder-Dispatch endete nach 32 Tool-Calls und ~118k Token mit `Agent terminated early due to an API error: Server error mid-response`. Der Handoff fehlte, der Auftrag war unfertig (Produktionscode geändert, Tests noch nicht umgestellt) — die Arbeit selbst war aber weder falsch noch verloren: der bereits geschriebene Diff stand vollständig im Working-Tree.
+
+**Regel:** Ein API-Abbruch ist ein **Transport**-Fehler, kein Agenten-Fehler. Nicht als „Iteration gescheitert" werten (zählt **nicht** zum Schleifenschutz N=3, es gab keinen Befund) und **nicht** frisch neu dispatchen — ein neuer Dispatch startet bei null und zahlt die verbrauchten Token ein zweites Mag. Stattdessen:
+1. **Ist-Stand aus dem Working-Tree erheben** (`git status --porcelain`, `git diff --shortstat`) — er ist die verlässliche Quelle, nicht der abgeschnittene Agent-Output. Der Agent editiert direkt, also überlebt jede fertige Datei den Abbruch.
+2. **Denselben Agenten via `SendMessage` an seine `agentId` fortsetzen** (aus dem Spawn-Ergebnis). Er wird aus seinem Transcript resumt — voller Kontext, kein Neuaufbau.
+3. Die Fortsetzungs-Nachricht **explizit machen**: dass der Abbruch technisch war (nicht seine Schuld — sonst „korrigiert" er funktionierende Arbeit), was laut git schon steht, welche Schritte noch offen sind, und dass er Erledigtes überspringen soll.
+
+**Ökonomie (der eigentliche Punkt):** Resume kostete hier ~37k Token für den Rest; ein Neu-Dispatch hätte die 118k komplett wiederholt. Bei einem coder mitten in einer L/XL-Story ist der Unterschied schnell sechsstellig.
+
+**Nicht tun:** Den Working-Tree „sicherheitshalber" zurücksetzen, um sauber neu zu starten — das ist genau der stille Datenverlust aus der `git reset`-Falle (vgl. CLAUDE.md „Parallelbetrieb", S-047-Vorfall). Ein halbfertiger Diff ist kein beschädigter Diff.
+
 ## flow/L05 — EINE kaputte Zeile in `dispatches.jsonl` vergiftet **alle** Rollups still (`iters=1`, `crit/imp=0`, `secs_total=0`)
 
 **Beobachtung (2026-07-15, S-355):** `metrics-append-item.sh` meldete `ep_act=4 iters=1 crit=0 imp=0` — obwohl die fünf Dispatch-Zeilen des Items korrekt `iter` bis 2, `imp=1` und Σ`secs`=1832 tragen. Die geschriebene `items.jsonl`-Zeile hatte zusätzlich `secs_total=0`. Kein Fehler, kein Hinweis, falsche Zahlen.
@@ -15,6 +28,12 @@ Newest-first. Regeln für die Orchestrator-Ebene (Landen/Konsolidieren/Recovery/
 jq -e . .claude/metrics/dispatches.jsonl >/dev/null || echo "Ledger korrupt — Rollups laufen auf Defaults"
 ```
 (`jq -e .` ohne `-s` prüft zeilenweise und nennt die erste kaputte Zeilennummer.)
+
+**Nachtrag (2026-07-15, S-360) — `iters`/`crit`/`imp` sind als Fingerabdruck UNZUVERLÄSSIG; `secs_total=0` ist der harte Marker.** S-360 lief mit genau 1 Iteration, Review-PASS ohne Befunde — die Defaults `iters=1`/`crit=0`/`imp=0` waren damit **zufällig identisch mit den echten Werten**. Der Defekt wäre über den oben genannten Abgleich unsichtbar geblieben. Eindeutig war allein **`secs_total=0`** bei drei Dispatches à ~200–330 s. Ein abgeschlossenes Item kann **nie** legitim `secs_total=0` haben — das ist der einzige Wert, der bei totgelaufenem `jq` mit Sicherheit falsch ist, unabhängig vom Verlauf der Story. Prüfe nach jedem `metrics-append-item.sh`:
+```bash
+grep '"item":"<S-###>"' .claude/metrics/items.jsonl | tail -1 | jq -c '{ep_act,iters,crit,imp,secs_total}'
+```
+`secs_total: 0` → Rollup lief auf Defaults, **alle** Aggregate der Zeile sind wertlos (auch die zufällig richtig aussehenden). Melden, nicht putzen (s.o.). Der Defekt ist damit weiterhin **jeden Lauf** aktiv — S-355 (Erstfund) und S-360 sind zwei bestätigte Fälle; die Fehlannahme „unauffällige Zahlen = Ledger heil" ist die eigentliche Falle.
 
 **Nicht tun:**
 - **Die kaputten Zeilen im Story-Drain eigenmächtig löschen/reparieren.** Die Ledger-Regel ist explizit append-only („historische Zeilen werden nie gelöscht oder umgeschrieben", Ausnahme nur der `tok`-Patch). Ein `/flow`-Lauf, der das Ledger zurechtbiegt, damit seine eigenen Zahlen schön aussehen, ist dasselbe verbotene Muster wie eine Spec eigenmächtig auf `active` zu heben (vgl. flow/L04). **Melden, nicht putzen** — die Entscheidung gehört dem Owner.
