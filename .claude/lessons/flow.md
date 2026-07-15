@@ -2,15 +2,27 @@
 
 Newest-first. Regeln für die Orchestrator-Ebene (Landen/Konsolidieren/Recovery/Dispatch-Ökonomie).
 
-## flow/L03 — `board`/`board-ship.sh` liegen nicht im PATH; `board-ship.sh` fehlt im Plugin-Cache
+## flow/L03 — `board`/`board-ship.sh` nicht im PATH — **beide** aus dem agent-flow-Arbeitsrepo, NIE aus dem Plugin-Cache
 
-**Beobachtung (2026-07-15, S-352):** `board next` scheitert zu Lauf-Beginn mit `command not found: board` — das CLI ist in diesem Repo **nicht** im PATH. Zusätzlich: `board-ship.sh` existiert im aktuellen Plugin-Cache (`082e800afc80`) **nicht**, wohl aber `board` selbst. Beides kostet sonst mehrere Such-Runden mitten im Lauf (einmal vor §1, einmal vor §5).
+> **KORRIGIERT 2026-07-15 (S-353).** Die ursprüngliche Fassung dieser Lesson empfahl für `board` den Plugin-Cache-Glob. **Das ist falsch und führt aktiv in die Irre** — Details unten. Wer die alte Fassung befolgt, verliert bei `--parent` still den Feature-Scope.
 
-**Auflösung — beide Pfade zu Beginn einmal setzen, statt zweimal zu suchen:**
-- `board`: `"$(ls -dt ~/.claude/plugins/cache/agent-flow/agent-flow/*/ | head -1)scripts/board"` (Glob = update-fest, s. CLAUDE.md).
-- `board-ship.sh`: **nur** im agent-flow-Arbeitsrepo — `/Users/alex/Git/Studis-Softwareschmiede/agent-flow/scripts/board-ship.sh`. Das ist zugleich das Verzeichnis, auf das `Base directory for this skill` zeigt; der Plugin-Cache ist hier **nicht** die Quelle.
+**Beobachtung (2026-07-15, S-352):** `board next` scheitert zu Lauf-Beginn mit `command not found: board` — das CLI ist in diesem Repo **nicht** im PATH. Zusätzlich: `board-ship.sh` existiert im Plugin-Cache **nicht**, wohl aber `board` selbst.
 
-**Nicht tun:** den in CLAUDE.md notierten absoluten Cache-Pfad (`1da6c7dfc966`) verwenden — der Cache rotiert (aktuell `082e800afc80`) und der Wert dort ist bereits veraltet. Ebenso wenig `board` als PATH-Kommando annehmen, nur weil die Skill-Doku es so schreibt.
+**Nachtrag (2026-07-15, S-353) — der eigentliche Befund:** Das Cache-`board` ist **inhaltlich veraltet**, nicht nur unvollständig. Konkret: sein `cmd_next()` parst **überhaupt keine Argumente** — `board next --parent F-080` schluckt das Flag stillschweigend und liefert die board-**weit** nächste Story. Kein Fehler, kein Hinweis, falsches Ergebnis. In diesem Lauf lieferte es `S-325` (`parent: F-069`) auf die Frage nach F-080; dass der erste Aufruf zufällig die richtige Story (S-353) traf, war **Glück über die Priority-Reihenfolge, nicht der Filter**. Das Arbeitsrepo-`board` hat den Parser (`--parent) shift; parent_filter="$1"`) und liefert korrekt S-354.
+
+**Auflösung — beide Pfade zu Beginn einmal setzen, beide aus dem Arbeitsrepo:**
+```bash
+BOARD=/Users/alex/Git/Studis-Softwareschmiede/agent-flow/scripts/board
+SHIP=/Users/alex/Git/Studis-Softwareschmiede/agent-flow/scripts/board-ship.sh
+```
+Das ist zugleich das Verzeichnis, auf das `Base directory for this skill` zeigt — die Skill-Doku und ihre Skripte stammen aus **derselben** Quelle. Der Plugin-Cache ist ein Deployment-Artefakt, das dahinter zurückhängt: die Skill-Doku beschreibt `--parent` „seit 2026-07-06", das Cache-`board` kann es bis heute nicht.
+
+**Nicht tun:**
+- **`board` aus dem Plugin-Cache** (`~/.claude/plugins/cache/…/scripts/board`) — kennt `--parent` nicht, Feature-Scope geht **still** verloren. Der Glob ist gegen Cache-*Rotation* robust, aber nicht gegen Cache-*Rückstand*; „update-fest" ≠ „aktuell".
+- Den in CLAUDE.md notierten absoluten Cache-Pfad (`1da6c7dfc966`) verwenden — der rotiert und ist bereits veraltet.
+- `board` als PATH-Kommando annehmen, nur weil die Skill-Doku es so schreibt.
+
+**Verifikations-Einzeiler bei Zweifel** (kostet nichts, deckt den stillen Fallback sofort auf): `"$BOARD" next --parent F-999` → liefert es trotz Phantasie-Feature eine Story, ist der Filter tot.
 
 ## flow/L02 — `board-ship.sh --target-branch feature/*` wartet hier 10 Min ins Leere (kein CI-Fehler)
 
