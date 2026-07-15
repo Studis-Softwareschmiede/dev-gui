@@ -50,6 +50,18 @@
  *   AC1/AC7 — requiresConfig/configApp/configMountPath werden unverändert an run() durchgereicht
  *             (nicht manipuliert); requiresConfig falsy/abwesend → run()-Opts enthalten weder
  *             requiresConfig noch configApp/configMountPath (Deploy-Pfad byte-identisch).
+ *
+ * Covers (container-image-update, S-356 — Update-Zustandsverhalten):
+ *   AC9 — pull() meldet einen unveränderten Stand ("Image is up to date") → deploy() gibt
+ *         dennoch { result:'ok' } zurück (Neuaufbau ohne Versionswechsel, kein Fehlerpfad).
+ *         AC8 (gestoppter Container läuft danach) ist KEIN eigener Test hier: deploy() prüft
+ *         den Vorzustand des Altcontainers nie (nur hostname-Match für den Ersetzungsschritt,
+ *         s. AC17-Block oben) — run() startet den neuen Container unabhängig vom Zustand
+ *         des Vorgängers immer. Belegt auf Endpunkt-Ebene in vpsContainerRouter.test.js
+ *         (Covers container-image-update AC8).
+ *   Edge-Case "zwei Updates gleichzeitig" (Spec §Edge-Cases) — kein eigener Test hier: die
+ *         zweite Anfrage scheitert bereits auf Router-Ebene an psAll() (container-not-found),
+ *         bevor deploy() überhaupt aufgerufen wird — s. vpsContainerRouter.test.js AC7.
  */
 
 import { describe, it, expect, jest } from '@jest/globals';
@@ -284,6 +296,29 @@ describe('DeployOrchestrator — deploy() — AC3: Happy Path', () => {
       DEPLOY_PARAMS.hostname,
       expect.any(Object),
     );
+  });
+});
+
+// ── deploy() — container-image-update AC9: unveränderter Tag ist kein Fehler ───
+
+describe('DeployOrchestrator — deploy() — container-image-update AC9: pull() meldet "up to date"', () => {
+  it('AC9: pull() meldet unveränderten Stand ("Image is up to date") → dennoch result:ok, regulärer Neuaufbau (kein Fehlerpfad)', async () => {
+    // pull() liefert result:'ok' unabhängig davon, ob docker pull tatsächlich einen neuen
+    // Layer gezogen hat oder den Bestand meldet — die Saga unterscheidet beide Fälle NICHT
+    // (container-image-update AC9: "Zeigt der Tag auf einen unveränderten Stand, ist das
+    // Ergebnis dennoch { result:'ok' }"). Dieser Test belegt genau diese Nicht-Unterscheidung.
+    const docker = makeDockerControl({
+      pullResult: { result: 'ok', reason: 'Image is up to date for ghcr.io/org/app:v1' },
+    });
+    const cf = makeCloudflareApi();
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(docker.pull).toHaveBeenCalled();
+    expect(docker.run).toHaveBeenCalled();
+    expect(result.result).toBe('ok');
+    expect(result.deployment).toBeDefined();
   });
 });
 

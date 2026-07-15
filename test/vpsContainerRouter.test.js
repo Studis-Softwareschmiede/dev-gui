@@ -10,7 +10,7 @@
  *   AC12 — AccessGuard-403 (ohne Access); CRED_ADMIN_EMAILS-403 für Mutationen; Audit-First
  *   AC13 — Kein SSH-Key/Token in Response; Fehlertexte secret-frei
  *
- * Covers (container-image-update, S-355):
+ * Covers (container-image-update, S-355/S-356):
  *   AC1  — POST .../update: pull + recreate über DeployOrchestrator.deploy() mit unverändertem
  *          Image-Ref; Erfolg → { result:'ok', deployment }
  *   AC2  — Nie `docker restart`/VpsDockerControl.restart im Update-Pfad (grep-prüfbar)
@@ -18,6 +18,12 @@
  *   AC4  — mitgesendetes Image/Tag im Body wird ignoriert — Bestands-Ref bestimmt den Deploy
  *   AC7  — Fail-closed vor jeder Mutation: inspectContainer-Fehler, Container-not-found,
  *          tunnelId nicht auflösbar, Run-Config ambiguous (update-unsafe) → kein pull/rm/run
+ *          (die 404-container-not-found-Variante deckt zugleich den Spec-Edge-Case "zwei
+ *          Updates gleichzeitig" ab: die zweite Anfrage trifft auf den bereits entfernten
+ *          Altcontainer und endet hier, ohne dass deploy() erneut aufgerufen wird)
+ *   AC8  — gestoppter Container (state:'exited'): Update ist zulässig, kein Block/Gate auf den
+ *          Zustand, Ergebnis weist den laufenden Container aus (S-356; AC9/pull-"up to date"
+ *          ist Saga-Verhalten und in test/DeployOrchestrator.test.js belegt, S-356)
  *   AC10 — 403 ohne Berechtigung; Audit-First inkl. hostname (Audit-Write folgt dem reinen
  *          Container-Read/psAll, da hostname erst dort bekannt wird; Audit-Fail → 500, keine
  *          Mutation; abgelehnte Versuche wie unmanaged werden nicht auditiert, S-355 Iteration 2)
@@ -1007,6 +1013,35 @@ describe('vpsContainerRouter — container-image-update: POST .../update', () =>
     expect(deployParams.containerEnv).toEqual({ GPG_PASSPHRASE: SECRET_ENV_VALUE });
     // AC12: Env-Wert erscheint NIE in der Response
     expect(JSON.stringify(body)).not.toContain(SECRET_ENV_VALUE);
+  });
+
+  // ── AC8 (container-image-update, S-356): gestoppter Container läuft danach ──
+
+  it('AC8 — gestoppter Container (state:"exited"): Update ist zulässig, deploy() wird aufgerufen, Ergebnis weist den laufenden Container aus', async () => {
+    // Der Update-Handler prüft container.state an keiner Stelle (kein Gate/Block für
+    // gestoppte Container) — die Saga (DeployOrchestrator.deploy → docker run) startet den
+    // neu aufgebauten Container unabhängig vom Vorzustand des Altcontainers immer.
+    let deployParams = null;
+    server = await makeTestServer({
+      env: { DEV_NO_ACCESS: '1' },
+      dockerControl: makeMockDockerControl({
+        psAllResult: { result: 'ok', containers: [STOPPED_MANAGED_CONTAINER] },
+      }),
+      orchestrator: makeMockOrchestrator({
+        onDeploy: (params) => { deployParams = params; },
+      }),
+      registry: makeRegistryWithTunnel(),
+    });
+
+    const { status, body } = await server.doRequest({
+      method: 'POST',
+      path: `/api/vps/machines/hetzner/1/containers/${STOPPED_MANAGED_CONTAINER.containerId}/update`,
+    });
+
+    expect(status).toBe(200);
+    expect(body.result).toBe('ok');
+    expect(deployParams).not.toBeNull(); // kein Block/Gate auf state:'exited'
+    expect(body.deployment.status).toBe('running'); // Saga startet den Container (AC8)
   });
 
   // ── AC2: Nie docker restart im Update-Pfad ───────────────────────────────────
