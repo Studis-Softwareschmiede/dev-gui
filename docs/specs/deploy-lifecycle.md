@@ -1,7 +1,7 @@
 ---
 id: deploy-lifecycle
 title: Deploy-Lifecycle — Container + Tunnel-Route als atomare Einheit (Capability B)
-status: draft
+status: active
 area: deployment
 version: 2
 ---

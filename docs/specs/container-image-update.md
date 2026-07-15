@@ -1,7 +1,7 @@
 ---
 id: container-image-update
 title: Image-Update je Container — neues Image ziehen + Container neu aufbauen (nie nur neu starten)
-status: draft
+status: active
 area: deployment
 version: 1
 ---
