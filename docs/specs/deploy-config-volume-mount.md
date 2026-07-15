@@ -1,191 +1,213 @@
 ---
 id: deploy-config-volume-mount
-title: config.yaml-Volume-Mount für den Einzel-Container-Deploy (Weg A)
+title: Persistenter rw-Verzeichnis-Mount für den Einzel-Container-Deploy
 status: active
 area: deployment
 spec_format: use-case-2.0
-version: 1
+version: 2
 ---
 
-# Spec: config.yaml-Volume-Mount für den Einzel-Container-Deploy (`deploy-config-volume-mount`)
+# Spec: Persistenter rw-Verzeichnis-Mount für den Einzel-Container-Deploy (`deploy-config-volume-mount`)
 
 > **Schicht 3 von 3.** Testbares Verhalten + Verträge.
 > **Source of Truth** für `coder`, `tester`, `reviewer` (hartes Drift-Gate).
-> **Security-relevant** (Shell-Escaping über Pfade, Seed-Inhalt via stdin nie in Argv, `0600`-Host-Datei).
-> **Bereich:** `deployment`. **Feature:** F-078.
+> **Security-relevant** (Shell-Escaping über Mount-Pfade, Slug-/Pfad-Validierung, defense-in-depth).
+> **Bereich:** `deployment`. **Feature:** F-078 (Erst-Auslieferung) + F-079 (Korrektur, diese Fassung).
 > Boundaries fixiert in **ADR-012** (`DeployOrchestrator` + `VpsDockerControl`), SSH-Linie **ADR-008**, LockoutGuard **ADR-011**.
 
 ## Zweck
 Der Einzel-Container-Deploy ([[deploy-lifecycle]]) startet eine App via `docker run` **ohne** jeglichen
-`-v`-Volume-Mount. Eine App wie flashrescue liest zur Laufzeit `/app/config.yaml`, die aber **weder ins
-Image gebacken noch gemountet** wird → auf dem VPS fehlt sie, die App kommt nicht sauber hoch. Diese Spec
-führt einen Mechanismus ein, der eine App-`config.yaml` als **editierbare Host-Datei** auf dem VPS
-bereitstellt und **read-only** nach `/app/config.yaml` in den Container mountet — sodass der Owner sie per
-SSH auf dem VPS-Host anpassen und mit `docker restart` neu laden kann, **ohne** das Image neu zu bauen.
+`-v`-Volume-Mount. Eine App wie flashrescue braucht zur Laufzeit ein **persistentes, beschreibbares
+Verzeichnis**, in dem sie ihre eigene `config.yaml` ablegt und der Operator sie per SSH editiert. Diese Spec
+gibt dem Einzel-Container-Deploy genau **einen generischen, persistenten, read-write Verzeichnis-Mount**: ein
+Host-Verzeichnis pro App wird angelegt (leer) und **read-write** an einen Container-Pfad (Default
+`/app/config`) gemountet. dev-gui **kennt keinen config-Inhalt, keinen Dateinamen, kein config-ENV** — es
+mountet nur ein persistentes rw-Verzeichnis. Die App bringt ihren Erst-Inhalt selbst mit (self-seeding aus
+einer ins Image gebackenen Vorlage).
+
+## Design-Entscheidung: Korrektur der F-078-Erst-Auslieferung (Owner-autorisiert)
+
+Die Erst-Auslieferung (F-078, Stories S-347/S-348, Spec v1) hatte die **falsche Verantwortungsebene**
+gewählt: dev-gui provisionierte eine **config-spezifische** Einzeldatei (`pushAppConfigFile`, `configSeed`-
+Payload, `config-file-missing`-Guard) und mountete sie **read-only** nach `/app/config.yaml`. Damit trug das
+generische Deploy-Tool config-Wissen (Dateiname, Erst-Inhalt), das ihm nicht gehört. Die App-Seite ist
+inzwischen umgesetzt (flashrescue F-025, gelandet): die App **self-seeded** ihre `config.yaml` beim
+Containerstart aus einer ins Image gebackenen Vorlage. dev-gui braucht daher nur noch den **Mount** — kein
+Seed, kein config-Wissen.
+
+**Mount-Vertrag** (Quelle: flashrescue `docs/specs/config-bereitstellung.md`, Abschnitt „Mount-Vertrag"):
+- **Container-Mount-Punkt:** `/app/config` — ein **Verzeichnis** (NICHT eine Einzeldatei; Volume-Constraint:
+  ein Bind-Mount auf eine nicht existierende Host-Einzeldatei ist unzuverlässig, ein Verzeichnis ist robust).
+- **Modus:** **read-write** — die App **seedet** hinein, der Operator **editiert** per SSH.
+- **Host-Seite:** ein **persistentes Verzeichnis pro App**, angelegt (`mkdir -p`), aber **NICHT befüllt**.
+- dev-gui setzt **KEINEN** Seed-Inhalt, **KEIN** config-ENV, **KENNT** den Dateinamen **nicht** — nur „mounte
+  ein persistentes rw-Verzeichnis an einen Container-Pfad".
 
 ## Abgrenzung
 - Betrifft **ausschließlich** den **Einzel-Image-Deploy-Modus** ([[deploy-lifecycle]] / `VpsDockerControl.run()`).
   Der **Compose-Stack-Modus** ([[compose-stack-deployment]]) hat mit `~/stacks/<name>/` bereits ein
-  App-Host-Verzeichnis und eine eigene `.env`-Materialisierung — **nicht** Teil dieser Spec.
-- Die App-Seite des Vertrags (die App **liest** `/app/config.yaml`) implementiert die jeweilige Ziel-App
-  selbst (eigenes Repo). dev-gui **stellt bereit + mountet** nur.
+  App-Host-Verzeichnis und eine eigene Materialisierung — **nicht** Teil dieser Spec.
+- Der **Inhalt** des gemounteten Verzeichnisses gehört **ausschließlich** der Ziel-App (self-seeding im
+  eigenen Repo) und dem Operator (SSH-Edits). dev-gui **stellt nur das leere, persistente rw-Verzeichnis
+  bereit + mountet es**.
 - Die `.env.gpg`-Behandlung (ins Image gebacken, per `GPG_PASSPHRASE` entschlüsselt,
-  [[deploy-bitwarden-gpg-injection]]) bleibt **unverändert** — die config.yaml ist ein **separater**,
+  [[deploy-bitwarden-gpg-injection]]) bleibt **unverändert** — der config-Mount ist ein **separater**,
   nicht-geheimer Mechanismus, orthogonal zur GPG-Passphrasen-Injektion.
 
-## Design-Entscheidung: Herkunft der INITIALEN config.yaml (Owner nicht erreichbar — begründet festgelegt)
+## Design-Entscheidungen (bindend)
 
-**Gewählt: Hybrid „Seed-once aus Payload (B) + editier-erhaltende Idempotenz (A) + Abbruch-bei-fehlend-ohne-Seed (C-Fallback)".**
+**D1 — Generischer persistenter rw-Verzeichnis-Mount (kein Seed, kein config-Wissen):**
+1. Ist der Mount aktiv (`requiresConfig: true`), legt der Deploy das Host-Verzeichnis `~/apps/<app>/config`
+   **idempotent** an (`mkdir -p`) und mountet es **read-write** an den Container-Pfad. Das Verzeichnis wird
+   **nie befüllt** — dev-gui schreibt keinen Inhalt hinein (die App seedet selbst).
+2. Es gibt **kein** Seed, **keine** `config-file-missing`-Prüfung, **keine** `pushAppConfigFile`-Provisionierung
+   mehr (die entfallen mit dieser Korrektur ersatzlos). Ein bereits vom Operator/der App befülltes
+   Host-Verzeichnis überlebt jeden Re-Deploy unverändert (persistentes Volume; dev-gui fasst den Inhalt nie an).
+3. Ist der Mount inaktiv/abwesend, bleibt das `docker run`-Kommando **byte-identisch** zu heute (kein `-v`,
+   kein `mkdir`).
 
-**D1 — Bereitstellung/Idempotenz (bindend):**
-1. Existiert die Host-Datei `~/apps/<app>/config.yaml` **noch nicht** und wird beim Deploy ein
-   **Seed-Inhalt** (`configSeed`) mitgegeben → dev-gui legt die Datei **einmalig** atomar an (Erst-Provisionierung).
-2. Existiert die Host-Datei **bereits** → sie bleibt **byte-identisch** (wird **nie** überschrieben), auch wenn
-   ein Seed-Inhalt mitgegeben wird. Die per-SSH-Edits des Owners überleben jeden Re-Deploy (analog der
-   `.env`-Regel „byte-identisch belassen" aus [[compose-stack-deployment]] E3 / dem `.env`-Vorbild).
-3. Verlangt der Deploy die config (`requiresConfig: true`), existiert die Host-Datei **nicht** **und** es
-   wird **kein** Seed-Inhalt mitgegeben → **klarer Deploy-Abbruch** (`config-file-missing`) mit Hinweis, die
-   Datei per SSH abzulegen oder einen Seed-Inhalt mitzugeben — **vor jeder Mutation**.
+**D2 — Read-write-Mount:** Der Mount ist **read-write** (kein `:ro`), damit die App ihre `config.yaml` beim
+Start hineinschreiben und der Operator sie per SSH editieren kann. Reload per `docker restart` (die App liest
+die Datei beim (Neu-)Start), ohne Image-Rebuild.
 
-**Begründung (warum nicht reines (A) „Template automatisch ablegen"):** Der Einzel-Image-Modus **klont das
-App-Repo nicht** (das ist Compose-Stack-Modus). dev-gui hat im Einzel-Image-Modus daher **keine** Quelle für
-eine `config.example.yaml` der Ziel-App, ohne eine **neue Repo-Clone-Abhängigkeit** einzuführen (Scope-Creep,
-falscher Modus). Der Payload-Seed (B) ist der **entkoppelte, abhängigkeits-freie** Weg, den Erst-Inhalt
-bereitzustellen; fehlt er, greift der sichere (C)-Abbruch statt eines rateenden Auto-Templates. Die
-editier-erhaltende Idempotenz (A) bleibt das Leitprinzip für Re-Deploys. Es gibt **kein** SFTP/scp — die
-Bereitstellung nutzt denselben `bash -s`+stdin-Baustein wie `pushTunnelEnvFile()` (Inhalt nie in Argv).
+**D3 — Container-Pfad (Default + optional konfigurierbar):** Der Container-Mount-Punkt ist per Default
+`/app/config`. Er ist über einen optionalen Parameter `configMountPath` überschreibbar (für Apps mit
+abweichender Konvention). Der Pfad wird **vor** Verwendung gegen einen strikten Zeichensatz validiert (absoluter
+Unix-Pfad, kein Shell-Metazeichen).
 
-**D2 — Read-only-Mount:** Der Mount ist `:ro`, damit der Container die Host-Datei nicht mutieren kann; der
-Owner ist der **einzige** Editor (per SSH). Reload per `docker restart` (die App liest die Datei beim
-(Neu-)Start), ohne Image-Rebuild.
-
-**D3 — Escaping (Fallgrube):** Der Mount `-v <host>:<container>:ro` darf **nicht** als **ein** Single-Quote-
-String gequotet werden (dann parst Docker den `:`-Separator nicht). Host- und Container-Pfad werden
-**getrennt** abgesichert; die `:`-Trenner und `:ro` bleiben **literal/ungequotet**. Der `<app>`-Slug wird
-**vor** Verwendung gegen einen strikten Zeichensatz validiert; `$HOME` (bzw. `~`) bleibt shell-expandierbar
-(kein Quoting, das die Tilde/`$HOME`-Expansion unterdrückt).
+**D4 — Escaping (Fallgrube, aus S-347 sinngemäß erhalten):** Der Mount `-v <host>:<container>` darf **nicht**
+als **ein** Single-Quote-String gequotet werden (dann parst Docker den `:`-Separator nicht). Host- und
+Container-Pfad werden **getrennt** abgesichert; der `:`-Trenner bleibt **literal/ungequotet**. Der `<app>`-Slug
+wird **vor** Verwendung gegen einen strikten Zeichensatz validiert; `$HOME` (bzw. `~`) bleibt shell-expandierbar
+(kein Quoting, das die Tilde/`$HOME`-Expansion unterdrückt). Der `configMountPath` wird getrennt validiert.
 
 ## Verhalten
-1. **Einfügepunkt (`VpsDockerControl.run()`):** Ist `requiresConfig` aktiv, fügt `run()` **genau einen**
-   Bind-Mount `-v <hostConfigPath>:/app/config.yaml:ro` **zwischen** `...envArgs` und `-p` ein. Ist
-   `requiresConfig` inaktiv/abwesend, bleibt das `docker run`-Kommando **byte-identisch** zu heute (kein `-v`).
-2. **Host-Ablage:** `~/apps/<app>/config.yaml` (`$HOME` des SSH-Ziel-Benutzers; `<app>` = validierter Slug).
-   Das Verzeichnis `~/apps/<app>` wird bei Bedarf angelegt.
-3. **Seed-Bereitstellung (`VpsDockerControl.pushAppConfigFile()`):** schreibt die Host-Datei **atomar**
-   (tmp + `rename`), `chmod 600`, im Besitz des Ziel-Benutzers, **nur wenn sie noch nicht existiert**; der
-   Inhalt wird via **stdin** (`bash -s`) übergeben, **nie** in Argv/Log/Audit (analog `pushTunnelEnvFile`).
-4. **Guard-/Seed-Gate (`DeployOrchestrator.deploy()`):** läuft **vor** dem Re-Deploy-Replace-Schritt und
-   **vor** `pull`/`run` (analog den Tunnel-/Readiness-Gates), aber **nach** LockoutGuard/Hostname/Tunnel/
-   Readiness. Prüft D1 (existiert/seedbar/fehlend) und bricht bei fehlend-ohne-Seed ab.
-5. **Durchreichung:** neuer Body-Param-Satz `requiresConfig`/`configApp`/`configSeed` fließt
-   `validateDeployBody()` → `POST /api/deployments`-Handler → `DeployOrchestrator.deploy()` →
-   `VpsDockerControl.run()`/`pushAppConfigFile()`. Plus Client-Formularfeld in `DeploymentsView.jsx`.
+1. **Einfügepunkt (`VpsDockerControl.run()`):** Ist `requiresConfig` aktiv, stellt `run()` in **einer** SSH-Session
+   sicher, dass das Host-Verzeichnis existiert (`mkdir -p <hostConfigDir>`), und fügt **genau einen** Bind-Mount
+   `-v <hostConfigDir>:<containerMountPath>` (read-write, **kein** `:ro`) **zwischen** `...envArgs` und `-p` in
+   das `docker run`-Kommando ein. Ist `requiresConfig` inaktiv/abwesend, bleibt das Kommando **byte-identisch**
+   zu heute (kein `mkdir`, kein `-v`).
+2. **Host-Ablage:** `~/apps/<app>/config` (Verzeichnis; `$HOME` des SSH-Ziel-Benutzers; `<app>` = validierter
+   Slug). Das Verzeichnis wird per `mkdir -p` angelegt, aber **nie befüllt**.
+3. **Container-Pfad:** Default `/app/config`, überschreibbar via `configMountPath` (validiert, absoluter Pfad).
+4. **Durchreichung:** reduzierter Body-Param-Satz `requiresConfig`/`configApp`/`configMountPath` (**kein**
+   `configSeed`) fließt `validateDeployBody()` → `POST /api/deployments`-Handler → `DeployOrchestrator.deploy()`
+   → `VpsDockerControl.run()`. Plus Client-Formular in `DeploymentsView.jsx` (Checkbox + Host-Pfad-Vorschau,
+   **kein** Seed-Feld). Es gibt **kein** separates Guard-/Seed-Gate im Orchestrator mehr.
 
 ## Acceptance-Kriterien
 
 ### Mount-Mechanik (`VpsDockerControl.run()`)
-- **AC1** — Bei `requiresConfig: true` enthält das von `run()` erzeugte `docker run`-Kommando **genau einen**
-  Bind-Mount `-v <hostConfigPath>:/app/config.yaml:ro`, eingefügt **zwischen** dem Env-Block (`...envArgs`)
-  und `-p <hostPort>:<containerPort>`. Bei `requiresConfig` falsy/abwesend enthält das Kommando **kein** `-v`
-  und ist **byte-identisch** zum heutigen Verhalten. (Testbar: Kommando-String-Capture via Spy.)
-- **AC2** (Escaping/Security, D3) — Host- und Container-Pfad werden **getrennt** abgesichert; die `:`-Trenner
-  und der `:ro`-Suffix bleiben **literal/ungequotet**, sodass Docker den Mount korrekt parst. Der `<app>`-Slug
-  wird **vor** Verwendung gegen `^[a-z0-9][a-z0-9._-]*$` validiert; ein ungültiger Slug bricht mit
-  `config-app-invalid` ab und führt **keinen** Docker-Schritt aus. **Kein** Shell-Injection über den
-  config-Pfad möglich. (Testbar: Slug mit `;`/Leerzeichen/`$()` wird abgelehnt; das assemblierte Kommando
-  quotet **nicht** die gesamte `host:container:ro`-Einheit als einen String.)
+- **AC1** — Bei `requiresConfig: true` (a) legt `run()` das Host-Verzeichnis via `mkdir -p <hostConfigDir>` an
+  (in **derselben** SSH-Session wie `docker run`) und (b) enthält das erzeugte `docker run`-Kommando **genau
+  einen** Bind-Mount `-v <hostConfigDir>:<containerMountPath>` **ohne** `:ro`-Suffix (read-write), eingefügt
+  **zwischen** dem Env-Block (`...envArgs`) und `-p <hostPort>:<containerPort>`. Bei `requiresConfig`
+  falsy/abwesend enthält das Kommando **kein** `mkdir`, **kein** `-v` und ist **byte-identisch** zum heutigen
+  Verhalten. (Testbar: Kommando-String-Capture via Spy.)
+- **AC2** (Escaping/Security, D4) — Host- und Container-Pfad werden **getrennt** abgesichert; der `:`-Trenner
+  bleibt **literal/ungequotet**, sodass Docker den Mount korrekt parst. Der `<app>`-Slug wird **vor**
+  Verwendung gegen `^[a-z0-9][a-z0-9._-]*$` validiert; ein ungültiger Slug bricht mit `config-app-invalid` ab
+  und führt **keinen** Docker-Schritt (und **kein** `mkdir`) aus. Ein ungültiger `configMountPath` (kein
+  absoluter Unix-Pfad `^/[A-Za-z0-9._/-]*$`) bricht mit `config-mount-path-invalid` ab und führt **keinen**
+  Docker-Schritt aus. **Kein** Shell-Injection über Slug oder Mount-Pfad möglich. (Testbar: Slug/Pfad mit
+  `;`/Leerzeichen/`$()` wird abgelehnt; das assemblierte Kommando quotet **nicht** die gesamte
+  `host:container`-Einheit als einen String.)
+- **AC3** — Host-Pfad-Konvention: `~/apps/<app>/config` (Verzeichnis; `$HOME` des SSH-Ziel-Benutzers; `<app>`
+  = validierter Slug). Das Verzeichnis wird per `mkdir -p` angelegt, falls es fehlt, und **nie** von dev-gui
+  **befüllt** (kein Schreib-Kommando in das Verzeichnis). Die Tilde/`$HOME`-Expansion wird durch das Escaping
+  **nicht** unterdrückt (D4).
+- **AC4** (read-write, D2) — Der Mount ist **read-write** (die App seedet, der Operator editiert); das
+  Kommando enthält **keinen** `:ro`-Suffix am config-Mount. (Testbar: Kommando-String enthält
+  `-v <hostConfigDir>:<containerMountPath>` ohne `:ro`.)
 
-### Host-Ablage & Idempotenz
-- **AC3** — Host-Pfad-Konvention: `~/apps/<app>/config.yaml` (`$HOME` des SSH-Ziel-Benutzers; `<app>` =
-  validierter Slug). Das Verzeichnis `~/apps/<app>` wird angelegt, falls es fehlt. Die Tilde/`$HOME`-Expansion
-  wird durch das Escaping **nicht** unterdrückt (D3).
-- **AC4** (Seed-once) — `VpsDockerControl.pushAppConfigFile(vps, app, content, opts?)` schreibt die Host-Datei
-  **atomar** (tmp + `rename`), `chmod 600`, im Besitz des Ziel-Benutzers, **nur wenn sie noch nicht existiert**.
-  Der Inhalt wird via **stdin** (`bash -s`) übergeben — **nie** in Argv/Log/Audit/Response (Muster
-  `pushTunnelEnvFile`). (Testbar: exec-Argv enthält den Inhalt nicht; Datei nur bei Nicht-Existenz geschrieben.)
-- **AC5** (editier-erhaltende Idempotenz, D1.2) — Existiert `~/apps/<app>/config.yaml` bereits, lässt ein
-  Re-Deploy sie **byte-identisch** (keine Überschreibung), **auch** wenn `configSeed` mitgegeben wird. (Testbar:
-  vorbestehende Datei + Re-Deploy mit Seed → Host-Datei-Inhalt unverändert; kein Schreib-Kommando.)
-- **AC6** (fehlend + kein Seed → Abbruch, D1.3) — Ist `requiresConfig` gesetzt, existiert die Host-Datei
-  **nicht** **und** wird **kein** `configSeed` mitgegeben → Deploy bricht **vor jeder Mutation** ab (kein
-  Re-Deploy-Replace, kein `pull`, kein `run`, kein Cloudflare-Schritt) mit `errorClass: "config-file-missing"`
-  + klarem Hinweis (Datei per SSH ablegen **oder** Seed-Inhalt mitgeben). (Testbar: Spy zeigt keinen
-  `pull`/`run`/Cloudflare-Call.)
+### Entfernung der F-078-config-Seed-Mechanik (Korrektur)
+- **AC5** (Rückbau, hart) — Die config-**spezifische** Seed-Mechanik der Erst-Auslieferung ist **vollständig
+  entfernt**: (a) `VpsDockerControl.pushAppConfigFile(...)` existiert **nicht** mehr; (b) das Guard-/Seed-Gate
+  in `DeployOrchestrator.deploy()` (Aufruf von `pushAppConfigFile`, `config-file-missing`-Abbruch) ist
+  **entfernt**; (c) der Body-Param `configSeed` wird **nicht** mehr akzeptiert/durchgereicht; (d) die
+  Fehlerklasse `config-file-missing` wird **nirgends** mehr erzeugt/gemappt; (e) das Seed-Textfeld in
+  `DeploymentsView.jsx` ist **entfernt**. Die zugehörigen Tests der Erst-Auslieferung werden entsprechend
+  angepasst/entfernt (kein Test referenziert noch `pushAppConfigFile`/`configSeed`/`config-file-missing`).
+  (Testbar: repo-weite Suche nach den Symbolen liefert außerhalb dieser Spec/Board-Historie **keine**
+  Produktions-Codestellen mehr.)
 
 ### Durchreichung (Router + Client)
-- **AC7** — `POST /api/deployments` akzeptiert die optionalen Body-Params `requiresConfig` (boolean),
+- **AC6** — `POST /api/deployments` akzeptiert die optionalen Body-Params `requiresConfig` (boolean),
   `configApp` (string-Slug; Default = aus dem Image-/Package-Namen abgeleiteter App-Slug, dieselbe Ableitung
-  wie beim `gpgBwItem`/Subdomain) und `configSeed` (optionaler string). `validateDeployBody()` validiert
-  Typen + Slug-Zeichensatz (`^[a-z0-9][a-z0-9._-]*$`) + ein Längenlimit auf `configSeed`; ungültig → `400`
-  **ohne** den `configSeed`-Inhalt zu leaken.
-- **AC8** — Bei `requiresConfig: true` reicht der Handler Mount + Seed durch die Kette
-  (`DeployOrchestrator.deploy` → `VpsDockerControl.run`/`pushAppConfigFile`); der `configSeed`-Inhalt wird
-  **nie** geloggt/auditiert/zurückgegeben — das Audit hält höchstens `deploy:config-seed:<app>` **ohne** Wert.
-  Bei `requiresConfig` false/abwesend ist der Deploy-Pfad **unverändert** (kein config-Schritt, AC1-Byte-Gleichheit).
-- **AC9** (Client) — `DeploymentsView.jsx` bietet eine Checkbox „config.yaml auf dem VPS bereitstellen
-  (read-only nach `/app/config.yaml` gemountet)". Ist sie aktiv, zeigt die View (a) ein optionales
-  mehrzeiliges Seed-Feld (Erst-Deploy-Inhalt) und (b) eine **read-only** Vorschau des Host-Pfads
-  `~/apps/<app>/config.yaml`. Der `configApp`-Default wird aus dem gewählten Image/Package abgeleitet
-  (gleiche Ableitung wie `gpgBwItem`/Subdomain), bleibt **editierbar**. Beim Absenden gehen
-  `requiresConfig`/`configApp`/`configSeed` im Deploy-Request mit; ist die Checkbox inaktiv, werden **keine**
-  config-Params gesendet (unveränderter Request).
+  wie beim `gpgBwItem`/Subdomain) und `configMountPath` (optionaler string; Default `/app/config`).
+  `validateDeployBody()` validiert Typen + Slug-Zeichensatz (`^[a-z0-9][a-z0-9._-]*$`) + Mount-Pfad-Zeichensatz
+  (absoluter Unix-Pfad); `configSeed` wird **nicht** mehr akzeptiert (unbekanntes Feld wird ignoriert, nie
+  durchgereicht). Ungültige Werte → `400`.
+- **AC7** — Bei `requiresConfig: true` reicht der Handler `requiresConfig`/`configApp`/`configMountPath` durch
+  die Kette (`DeployOrchestrator.deploy` → `VpsDockerControl.run`); es gibt **kein** separates Seed-/Guard-Gate
+  mehr und **keinen** `configSeed`-Fluss. Bei `requiresConfig` false/abwesend ist der Deploy-Pfad
+  **unverändert** (kein config-Schritt, AC1-Byte-Gleichheit).
+- **AC8** (Client) — `DeploymentsView.jsx` bietet eine Checkbox „persistentes config-Verzeichnis auf dem VPS
+  mounten (read-write nach `/app/config`)". Ist sie aktiv, zeigt die View eine **read-only** Vorschau des
+  Host-Pfads `~/apps/<app>/config` (Verzeichnis). Es gibt **kein** Seed-Textfeld mehr. Der `configApp`-Default
+  wird aus dem gewählten Image/Package abgeleitet (gleiche Ableitung wie `gpgBwItem`/Subdomain), bleibt
+  **editierbar**. Beim Absenden gehen `requiresConfig`/`configApp` (und `configMountPath` nur bei Abweichung
+  vom Default) im Deploy-Request mit; ist die Checkbox inaktiv, werden **keine** config-Params gesendet
+  (unveränderter Request).
 
 ### Sicherheit & Audit (Floor, hart)
-- **AC10** (Floor) — Der config-Mount führt **kein** neues Secret und **keinen** neuen Endpunkt ein; der
-  `configSeed`-Inhalt fließt zum VPS **ausschließlich** via stdin (nie Argv) und erscheint **nie** in
-  dev-guis Log/Audit/Response/WS-Stream; die Host-Datei ist `chmod 600` im Besitz des Ziel-Benutzers. Alle
-  bestehenden Floors bleiben **unverändert** in Kraft (Access, `CRED_ADMIN_EMAILS`, LockoutGuard-Hard-Block,
-  Audit-First, protected-Hostname → `422`); das config-Gate läuft **nie** vor LockoutGuard/Hostname/Tunnel/
-  Readiness-Gate ([[deploy-lifecycle]] AC7/AC8/AC9, [[vps-tunnel-existence-gate]], [[vps-readiness-gate]]).
+- **AC9** (Floor) — Der config-Mount führt **kein** neues Secret und **keinen** neuen Endpunkt ein; dev-gui
+  schreibt **keinen** Inhalt in das gemountete Verzeichnis (kein config-Wissen); Slug **und**
+  `configMountPath` werden strikt validiert (kein Shell-Injection, getrenntes Escaping der Mount-Einheit, D4).
+  Alle bestehenden Floors bleiben **unverändert** in Kraft (Access, `CRED_ADMIN_EMAILS`,
+  LockoutGuard-Hard-Block, Audit-First, protected-Hostname → `422`); der config-Mount-Schritt läuft **nie**
+  vor LockoutGuard/Hostname/Tunnel/Readiness-Gate ([[deploy-lifecycle]] AC7/AC8/AC9,
+  [[vps-tunnel-existence-gate]], [[vps-readiness-gate]]).
 
 ## Verträge
 - **POST `/api/deployments`** — Body additiv: `{ …bestehende Felder, requiresConfig?: boolean,
-  configApp?: string, configSeed?: string }` → unveränderte Response-Form (`{ result, deployment?, reason? }`).
-  Neue Fehlerklassen: `config-file-missing` (422), `config-app-invalid` (422/400).
+  configApp?: string, configMountPath?: string }` → unveränderte Response-Form (`{ result, deployment?,
+  reason? }`). Fehlerklassen: `config-app-invalid` (400/422), `config-mount-path-invalid` (400/422).
+  **Entfernt:** `configSeed` (Body-Param), `config-file-missing` (Fehlerklasse).
 - **`VpsDockerControl.run(vps, image, hostname, opts)`** — `opts` additiv:
-  `{ requiresConfig?: boolean, configApp?: string }` → fügt bei aktiv `-v $HOME/apps/<configApp>/config.yaml:/app/config.yaml:ro`
-  zwischen `envArgs` und `-p` ein. Container-Pfad-Konstante: `/app/config.yaml`.
-- **`VpsDockerControl.pushAppConfigFile(vps, app, content, opts?)`** →
-  `{ result: 'ok'|'error', seeded?: boolean, reason?, errorClass? }`. `seeded: false`, wenn die Datei bereits
-  existierte (keine Überschreibung). Inhalt via stdin, `0600`, atomar (tmp+rename). Fehlerklassen analog
-  bestehendem Katalog (`no-private-key`|`unreachable`|`auth-failed`|`host-key-mismatch`|`docker-failed`|`error`).
-- **`DeployOrchestrator.deploy({ …, requiresConfig?, configApp?, configSeed? })`** — führt das config-Gate
-  (D1) vor Re-Deploy-Replace/`pull`/`run` aus und reicht `requiresConfig`/`configApp` an `run()` durch.
-- **Host-Pfad-Konvention:** `~/apps/<app>/config.yaml`; Container-Pfad fix `/app/config.yaml`; Mount `:ro`.
+  `{ requiresConfig?: boolean, configApp?: string, configMountPath?: string }` → bei aktiv: `mkdir -p
+  $HOME/apps/<configApp>/config` (leer) **plus** `-v $HOME/apps/<configApp>/config:<containerMountPath>`
+  (read-write, kein `:ro`) zwischen `envArgs` und `-p`. Container-Pfad-Default: `/app/config`.
+- **`DeployOrchestrator.deploy({ …, requiresConfig?, configApp?, configMountPath? })`** — reicht
+  `requiresConfig`/`configApp`/`configMountPath` an `run()` durch; **kein** separates config-Gate, **kein**
+  `configSeed`.
+- **Host-Pfad-Konvention:** `~/apps/<app>/config` (Verzeichnis); Container-Pfad-Default `/app/config`; Mount
+  **read-write** (kein `:ro`).
+- **Entfernt:** `VpsDockerControl.pushAppConfigFile(...)` (ersatzlos).
 
 ## Edge-Cases & Fehlerverhalten
-- `requiresConfig` aktiv, Host-Datei fehlt, kein Seed → `422 config-file-missing`, **kein** Docker-/Cloudflare-Schritt (AC6).
-- `requiresConfig` aktiv, Host-Datei existiert (ggf. vom Owner editiert) → **nie** überschrieben; Deploy nutzt sie (AC5).
-- `requiresConfig` aktiv, Host-Datei fehlt, Seed vorhanden → atomar `0600` angelegt, dann Deploy (AC4).
-- Ungültiger `configApp`-Slug → `config-app-invalid`, kein Docker-Schritt (AC2).
-- Seed-Schreiben schlägt fehl (SSH/Disk) → `{ result: 'error', reason }` ohne Leak, **vor** `pull`/`run`;
-  eine bereits erfolgreich geseedete Datei braucht **keinen** Rollback (nicht-destruktiv, wird beim nächsten
-  Deploy wiederverwendet — editier-erhaltend).
-- `requiresConfig` false/abwesend → Deploy exakt wie heute (kein `-v`, keine neuen Schritte, AC1/AC8).
+- `requiresConfig` aktiv → `mkdir -p ~/apps/<app>/config` (idempotent, existiert schon → No-op), dann Mount
+  read-write; ein bereits befülltes Verzeichnis bleibt unangetastet (persistentes Volume, AC3).
+- Ungültiger `configApp`-Slug → `config-app-invalid`, kein `mkdir`, kein Docker-Schritt (AC2).
+- Ungültiger `configMountPath` → `config-mount-path-invalid`, kein Docker-Schritt (AC2).
+- `requiresConfig` false/abwesend → Deploy exakt wie heute (kein `mkdir`, kein `-v`, keine neuen Schritte,
+  AC1/AC7).
 - protected-Hostname / fehlender/mismatchter Tunnel / VPS nicht ready → bestehende Gates greifen **vor** dem
-  config-Gate (AC10) — kein config-Schritt.
+  config-Mount-Schritt (AC9) — kein config-Schritt.
 
 ## NFRs
-- **Sicherheit (Floor, hart):** Seed-Inhalt nur via stdin (nie Argv/Log/Audit/Response/WS); getrenntes
-  Escaping von Host-/Container-Pfad (D3); `<app>`-Slug strikt validiert (kein Shell-Injection); Host-Datei
-  `0600`; Mount `:ro`. Kein neues Secret, kein neuer Endpunkt, kein Frontend-Bundle-Secret.
-- **Idempotenz/Resilienz:** Re-Deploy überschreibt eine (editierte) Host-config.yaml **nie**; Seed nur bei
-  Nicht-Existenz; atomarer Schreibzugriff (tmp+rename) → nie eine halb-geschriebene config gemountet.
-- **ADR-Konformität:** kein neuer Deploy-State-Store; SSH via ADR-008-Linie; `run()`/`pushAppConfigFile()`
-  bleiben in der `VpsDockerControl`-Boundary (ADR-012); LockoutGuard (ADR-011) unangetastet.
+- **Sicherheit (Floor, hart):** getrenntes Escaping von Host-/Container-Pfad (D4); `<app>`-Slug **und**
+  `configMountPath` strikt validiert (kein Shell-Injection); dev-gui schreibt **keinen** Inhalt in das
+  Verzeichnis. Kein neues Secret, kein neuer Endpunkt, kein Frontend-Bundle-Secret.
+- **Idempotenz/Resilienz:** `mkdir -p` ist idempotent; das persistente Host-Verzeichnis (und sein von der
+  App/dem Operator gesetzter Inhalt) überlebt jeden Re-Deploy **unverändert** — dev-gui fasst den Inhalt nie an.
+- **ADR-Konformität:** kein neuer Deploy-State-Store; SSH via ADR-008-Linie; `run()` bleibt in der
+  `VpsDockerControl`-Boundary (ADR-012); LockoutGuard (ADR-011) unangetastet.
 
 ## Nicht-Ziele
-- **Compose-Stack-Modus** ([[compose-stack-deployment]]) — hat `~/stacks/<name>/` + eigene `.env`-Materialisierung.
-- **Automatisches Template aus dem App-Repo** (reines (A)): der Einzel-Image-Modus klont das Repo nicht;
-  Seed-Payload (B) + (C)-Fallback ersetzen das bewusst (Design-Entscheidung D1).
-- **Schreibbarer Mount / In-Container-Edit** der config.yaml (bewusst `:ro`, D2).
-- **Mehrere config-Dateien / beliebige Mount-Ziele** pro Deploy (Erst-Durchgang: genau `/app/config.yaml`).
-- **Secret-Behandlung der config.yaml** — sie ist nicht-geheim; Secrets bleiben in `.env.gpg`
+- **Compose-Stack-Modus** ([[compose-stack-deployment]]) — hat `~/stacks/<name>/` + eigene Materialisierung.
+- **Seed/Provisionierung des config-Inhalts durch dev-gui** — bewusst entfernt (Korrektur): die App seedet
+  selbst (flashrescue F-025), dev-gui mountet nur ein leeres persistentes rw-Verzeichnis (D1).
+- **Read-only-Mount** — bewusst read-write (D2), damit App-Seeding + Operator-Edit funktionieren.
+- **Mehrere Verzeichnisse / beliebige Mount-Ziele pro Deploy** — genau ein config-Verzeichnis-Mount
+  (Container-Pfad Default `/app/config`, optional via `configMountPath`).
+- **Secret-Behandlung** — der config-Mount ist nicht-geheim; Secrets bleiben in `.env.gpg`
   ([[deploy-bitwarden-gpg-injection]]), unverändert.
 
 ## Abhängigkeiten
 - [[deploy-lifecycle]] (Einzel-Image-Deploy-Saga, `VpsDockerControl.run()`, Gates-Reihenfolge).
-- [[deploy-bitwarden-gpg-injection]] (`containerEnv`/`envArgs`-Einfügepunkt; `pushTunnelEnvFile`-stdin-Muster als Vorbild).
-- [[compose-stack-deployment]] (`~/stacks`-Vorbild + `.env` „byte-identisch belassen"-Idempotenz-Regel).
-- [[vps-tunnel-existence-gate]], [[vps-readiness-gate]] (Gates, die **vor** dem config-Gate greifen).
+- [[deploy-bitwarden-gpg-injection]] (`containerEnv`/`envArgs`-Einfügepunkt).
+- [[compose-stack-deployment]] (`~/stacks`-Vorbild für App-Host-Verzeichnisse).
+- [[vps-tunnel-existence-gate]], [[vps-readiness-gate]] (Gates, die **vor** dem config-Mount-Schritt greifen).
+- flashrescue `docs/specs/config-bereitstellung.md` (Abschnitt „Mount-Vertrag" — die App-Seite dieses Vertrags).
 - `docs/architecture.md` — ADR-012 (`DeployOrchestrator`/`VpsDockerControl`), ADR-008 (SSH-Linie), ADR-011 (LockoutGuard).

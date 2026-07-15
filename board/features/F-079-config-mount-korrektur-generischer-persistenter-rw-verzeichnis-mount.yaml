@@ -1,0 +1,40 @@
+id: F-079
+title: 'config-Mount-Korrektur: config-Seed raus, generischer persistenter rw-Verzeichnis-Mount rein'
+goal: 'Korrektur der F-078-Erst-Auslieferung (S-347/S-348, auf main): dev-gui hatte
+  einen config-SPEZIFISCHEN Seed+read-only-Einzeldatei-Mount (/app/config.yaml) mit
+  pushAppConfigFile/configSeed/config-file-missing-Guard eingebaut — falsche Verantwortungsebene.
+  Die App-Seite ist umgesetzt (flashrescue F-025, gelandet): die App self-seeded ihre
+  config.yaml beim Containerstart aus einer ins Image gebackenen Vorlage. dev-gui braucht
+  nur noch einen generischen, persistenten, read-WRITE Verzeichnis-Mount: Host-Verzeichnis
+  ~/apps/<app>/config (mkdir -p, NICHT befüllt) read-write nach /app/config (Default,
+  optional configMountPath). KEIN Seed, KEIN config-Wissen, KEIN config-ENV. Die config-
+  Seed-Mechanik (pushAppConfigFile, configSeed-Payload, config-file-missing-Guard, ro-
+  Einzeldatei-Mount, Seed-Textfeld) wird ersatzlos entfernt. Escaping/Slug-Validierung
+  (defense-in-depth) aus S-347 bleibt sinngemäß erhalten; neu: configMountPath-Validierung.
+
+  '
+status: To Do
+priority: P2
+spec: docs/specs/deploy-config-volume-mount.md
+definition_of_done: 'AC1-AC9 grün: run() legt bei requiresConfig ~/apps/<app>/config
+  per mkdir -p an (leer, nie befüllt) und mountet es read-write (kein :ro) nach /app/config
+  (Default, optional configMountPath) zwischen envArgs und -p — getrenntes Escaping,
+  Slug + Mount-Pfad validiert; die F-078-config-Seed-Mechanik (pushAppConfigFile, configSeed,
+  config-file-missing-Guard, Seed-Textfeld) ist vollständig entfernt inkl. Tests; Router-
+  Params auf requiresConfig/configApp/configMountPath reduziert (kein configSeed); DeploymentsView
+  ohne Seed-Feld, Checkbox relabelt, Host-Pfad-Vorschau zeigt Verzeichnis; Floor gewahrt
+  (kein neues Secret/Endpoint, kein Inhalt von dev-gui geschrieben, kein Shell-Injection).
+
+  '
+labels:
+- deploy
+- security
+depends: null
+owner: null
+stories:
+- S-349
+- S-350
+progress: 0/2 done
+created_at: '2026-07-15T00:00:00Z'
+updated_at: '2026-07-15T00:00:00Z'
+area: deployment
