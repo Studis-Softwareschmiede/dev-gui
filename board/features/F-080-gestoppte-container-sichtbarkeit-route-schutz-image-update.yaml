@@ -1,0 +1,59 @@
+id: F-080
+title: 'Gestoppte Container: Sichtbarkeit, Route-Schutz und Image-Update in der VPS-Container-Übersicht'
+goal: 'Drückt der Betreiber in der VPS-Container-Übersicht „Stop", verschwindet der
+  Container aus der GUI und ist nicht mehr startbar — der Start-Endpunkt existiert,
+  ist aber unerreichbar, weil die Zeile weg ist. Der Stop-Handler selbst ist korrekt
+  und harmlos (docker stop, kein rm/rmi/--rm). Ursache ist durchgängig derselbe Lese-Fehler:
+  der Container-Read nutzt „docker ps" OHNE „-a" und blendet gestoppte Container aus.
+  Drei Folgen, nach Dringlichkeit: (1) DATENVERLUST — der Reconcile-Lauf (00:00 UTC)
+  wertet die Route eines über Nacht gestoppten Containers als verwaist und löscht
+  Tunnel-Route + DNS-CNAME; ein späteres „docker start" bringt den Container unerreichbar
+  hoch (still, ohne Zutun des Betreibers). (2) SICHTBARKEIT — gestoppte Container
+  fallen aus GUI und Deployment-Liste; Sackgasse ohne Start-Knopf. (3) ZOMBIE — der
+  Re-Deploy-Ersetzungsschritt sucht den Altcontainer nur unter den laufenden; ein
+  gestoppter Altcontainer bleibt mit demselben cloudflare.tunnel-hostname-Label als
+  unsichtbarer Zombie liegen. Zusätzlich fehlt in der Übersicht ein „Update"-Knopf
+  (Rollout auf neues Image geht nur über die Deployments-Ansicht; „docker restart"
+  aktiviert KEIN neues Image). Leitsatz: Stop ist ein reversibler Betriebszustand,
+  KEIN Undeploy — nur ausdrückliches Entfernen räumt Container und Route ab.
+
+  '
+status: To Do
+priority: P1
+spec: docs/specs/cloudflare-reconciliation.md
+definition_of_done: 'P1: der Reconcile-Lauf liest laufende UND gestoppte Container
+  (docker ps -a, maschinenlesbares state) und wertet die Route eines gestoppten managed
+  Containers NIE als verwaist — kein removeRoute, kein deleteDnsRecord; ein gestoppter
+  managed Container ohne Route wird nicht geheilt (stoppedSkipped, konservativ); ein
+  gestoppter Altcontainer neben einem laufenden blockiert die Heilung nicht als „ambiguous"
+  (AC7b). P2: gestoppte Container erscheinen bedingungslos in der Übersicht mit Badge
+  „gestoppt" und aktivem Start-Knopf (kein Filter/Umschalter); nach Stop bleibt die
+  Zeile stehen; der Re-Deploy-Ersetzungsschritt findet und entfernt auch gestoppte
+  Altcontainer (kein Zombie). P3: pro managed Container ein „Update"-Knopf, der denselben
+  Image-Ref neu zieht und den Container über die bestehende Deploy-Saga neu aufbaut
+  (pull + recreate, NIE docker restart) unter Erhalt von Env/Mount/Label — fail-closed,
+  wenn die Run-Config nicht eindeutig rekonstruierbar ist. Floor gewahrt: Access +
+  CRED_ADMIN_EMAILS + Audit-First + LockoutGuard; keine Secrets (inspizierte Env-Werte,
+  SSH-Key, Cloudflare-Token) in Response/Log/Audit/WS/Frontend.
+
+  '
+labels:
+- deploy
+- cloudflare
+- reconcile
+- security
+- ui
+depends: null
+owner: null
+stories:
+- S-351
+- S-352
+- S-353
+- S-354
+- S-355
+- S-356
+- S-357
+progress: 0/7 done
+created_at: '2026-07-15T00:00:00Z'
+updated_at: '2026-07-15T00:00:00Z'
+area: deployment

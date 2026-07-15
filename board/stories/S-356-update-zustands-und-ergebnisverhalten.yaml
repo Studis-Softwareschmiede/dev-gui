@@ -1,0 +1,44 @@
+id: S-356
+parent: F-080
+title: 'Update-Zustandsverhalten: gestoppter Container läuft danach, unveränderter
+  Tag ist kein Fehler'
+status: To Do
+priority: P3
+spec: docs/specs/container-image-update.md
+implements:
+- AC8
+- AC9
+depends: S-355
+labels:
+- backend
+- deploy
+size_est: M
+dispo_est: '5.0'
+dispo_act: null
+dispo_forecast: null
+estimate_note: 'Heuristik M (score=4: 2 AC + 2 Komponenten [src/vpsContainerRouter.js,
+  Tests]). estimator (Task/agents/estimator.md) in diesem Lauf nicht dispatchbar (Subagent
+  ohne Task-Tool) → dispo_est als Baseline-Fallback js|balanced|M ep=5.0 (n=8), confidence
+  daher low. tok_est null (baseline tok_total null, Cold-Start). Bewusst klein und
+  überwiegend absichernd: beide ACs sind emergentes Verhalten der in S-355 wiederverwendeten
+  Deploy-Saga und brauchen vor allem Tests + saubere Ergebnis-/Fehlerklassifikation,
+  wenig neuen Code. (AC8) Update auf einen GESTOPPTEN Container ist zulässig und führt
+  dazu, dass er danach LÄUFT — die Saga startet ihn; es gibt bewusst keinen „Update,
+  aber gestoppt lassen"-Pfad (Nicht-Ziel). Das Ergebnis weist den laufenden Container
+  aus. (AC9) zeigt der Tag auf einen unveränderten Stand (feste Version statt beweglichem
+  :latest), ist das Ergebnis dennoch result:ok — Neuaufbau ohne Versionswechsel ist
+  das ERWARTETE Ergebnis und darf NICHT als Fehler klassifiziert werden (pull meldet
+  „up to date" → Update läuft regulär durch). Ausserdem der Nebenläufigkeits-Edge-Case
+  aus der Spec: zwei gleichzeitige Updates auf denselben Container → der zweite trifft
+  auf einen bereits entfernten Altcontainer und endet geheimnisfrei in container-not-found/docker-failed,
+  OHNE den neuen Container zu beschädigen.
+
+  '
+confidence: low
+tok_est: null
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-07-15T00:00:00Z'
+updated_at: '2026-07-15T00:00:00Z'
+area: deployment

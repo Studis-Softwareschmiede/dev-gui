@@ -3,7 +3,7 @@ id: deploy-lifecycle
 title: Deploy-Lifecycle — Container + Tunnel-Route als atomare Einheit (Capability B)
 status: draft
 area: deployment
-version: 1
+version: 2
 ---
 
 # Spec: Deploy-Lifecycle (`deploy-lifecycle`)
@@ -11,6 +11,7 @@ version: 1
 > **Schicht 3 von 3.** Testbares Verhalten + Verträge.
 > **Source of Truth** für `coder`, `tester`, `reviewer` (Drift-Gate). Security-kritisch (SSH-on-VPS + Cloudflare-Mutation, Self-Lockout-Risiko).
 > Boundaries fixiert in **ADR-012** (`DeployOrchestrator` + `VpsDockerControl`), Cloudflare-Pfad in **ADR-010**, Self-Lockout-Schutz in **ADR-011**. Die produktive, panel-steuerbare Variante des heutigen `preview`-Skill-Mechanismus (ghcr-Image → Container → Tunnel-Route + DNS-CNAME).
+> **v2 (Betreiber-Korrektur 2026-07-15 — Zombie-Fix):** der **Re-Deploy-Ersetzungsschritt** (AC14) suchte den Altcontainer nur unter den **laufenden** Containern. Ein **gestoppter** Altcontainer wurde deshalb nicht entfernt und blieb mit demselben `cloudflare.tunnel-hostname`-Label als unsichtbarer **Zombie** liegen → zwei managed Container auf denselben Hostname. Der Ersetzungsschritt berücksichtigt ab v2 **laufende und gestoppte** Altcontainer (AC17).
 
 ## Zweck
 **Capability B des Cloudflare-Vorhabens:** ein ghcr-Image als Docker-Container auf einem laufenden VPS **plus** die zugehörige Cloudflare-Tunnel-Route zur Domäne als **eine atomare Einheit** anlegen (Deploy); das Entfernen des Containers entfernt auch Route + DNS (Undeploy). Bewusst eine **eigene** Komponente/View (`deployments`) — die Cloudflare-Ansicht ([[view-cloudflare]]) bleibt Inventar+Lösch-Werkzeug.
@@ -22,7 +23,8 @@ version: 1
 2. **Container↔Route-Bindung** erfolgt store-los über das Container-Label **`cloudflare.tunnel-hostname=<hostname>`** — die einzige Bindung zwischen Container und Tunnel-Route, von beiden Seiten live abgleichbar (kein eigener Deploy-Store, ADR-005-Linie).
 3. **Deploy** `{image, vps, hostname}`: (a) **LockoutGuard-Check** auf `hostname` (protected → abgelehnt, kein Schritt); (b) `VpsDockerControl` pullt das ghcr-Image und startet den Container auf dem VPS mit dem Bindungs-Label; (c) `CloudflareApi` legt die Tunnel-Route (`PUT …/configurations`) + DNS-CNAME `<hostname>` an. **Saga-Rollback:** schlägt (c) fehl, wird der Container aus (b) wieder entfernt (kein verwaister Container ohne Route); schlägt (b) fehl, wird (c) nicht versucht.
 4. **Undeploy** `{vps, hostname}`: (a) LockoutGuard-Check (protected → abgelehnt); (b) **type-to-confirm** (Hostname tippen); (c) Route + DNS-CNAME entfernen (`CloudflareApi`); (d) Container `rm` (`VpsDockerControl`). Reihenfolge Route-zuerst, damit kein Traffic auf einen entfernten Container zeigt.
-5. **Live-Bestand:** die Deploy-Liste wird live ermittelt — `VpsDockerControl` listet Container mit `cloudflare.tunnel-hostname`-Label je VPS, `CloudflareApi` listet die Routen; der Schnitt ist der gesunde Bestand, Drift (Container ohne Route / Route ohne Container) wird sichtbar gemacht (und vom Reconciliation-Cron, [[cloudflare-reconciliation]], **beidseitig geheilt**: verwaiste Route gelöscht, managed Container ohne Route → Route angelegt über genau diesen Anlege-Pfad).
+5. **Live-Bestand:** die Deploy-Liste wird live ermittelt — `VpsDockerControl` listet Container mit `cloudflare.tunnel-hostname`-Label je VPS (**laufende und gestoppte**, `docker ps -a`), `CloudflareApi` listet die Routen; der Schnitt ist der gesunde Bestand, Drift (Container ohne Route / Route ohne Container) wird sichtbar gemacht (und vom Reconciliation-Cron, [[cloudflare-reconciliation]], **beidseitig geheilt**: verwaiste Route gelöscht, **laufender** managed Container ohne Route → Route angelegt über genau diesen Anlege-Pfad). Ein **gestoppter** managed Container bleibt im Bestand sichtbar (`containerPresent: true`, `state !== 'running'`) — er ist **kein** Undeploy und seine Route bleibt stehen ([[cloudflare-reconciliation]] AC3b).
+5b. **Ersetzen findet auch gestoppte Altcontainer:** der Re-Deploy-Ersetzungsschritt (AC14/AC17) sucht den Altcontainer über das `hostname`-Label im **`docker ps -a`**-Bestand — ein gestoppter Altcontainer wird dadurch entfernt statt als Zombie liegen gelassen.
 6. Alle mutierenden Aktionen (Deploy/Undeploy) sind **hoch-privilegiert**: hinter Access, identitäts-/rollengeschützt (`CRED_ADMIN_EMAILS`-Logik), audit-first, LockoutGuard-Hard-Block.
 
 ## Acceptance-Kriterien
@@ -55,12 +57,16 @@ version: 1
 - **AC15** (Security/Floor) — Die UI führt **kein** neues Secret im Frontend-Bundle und **keinen** neuen Backend-Endpunkt ein; Cloudflare-Token/SSH-Key bleiben rein server-intern. Image-/Tag-/VPS-/Domänen-Auswahl stammen ausschließlich aus den genannten Read-Endpunkten (hinter Access); der zusammengesetzte `hostname` durchläuft serverseitig dieselbe Validierung + LockoutGuard (AC7) wie bisher (protected → 422, keine Mutation).
 - **AC16** (Paket ②, S-156 — UI-Verweis „Lokal testen") — Das Deployment-Menü bietet zum gewählten Image+Tag ein Bedienelement „Lokal testen", das den lokalen Probelauf ([[local-image-test]]) anstößt und dessen Ergebnis (Start-Status, Port, Erreichbarkeit) anzeigt, **bevor** „Deploy auf VPS" ausgelöst wird. Das **Verhalten + der Endpunkt** des Probelaufs ist in [[local-image-test]] spezifiziert; diese Spec deckt nur die Einbettung im Deployment-Menü (Sichtbarkeit/Aktivierung bei gewähltem Image+Tag, Ergebnis-Anzeige).
 
+### Ersetzungsschritt — Zombie-Fix (v2)
+- **AC17** *(v2 — Zombie-Fix)* — Der **Ersetzungsschritt** aus AC14 findet Altcontainer mit demselben `hostname`-Label **unabhängig von ihrem Zustand**: er liest **laufende und gestoppte** Container (`docker ps -a` / `psAll`-Read-Model mit `state`, **nicht** der auf laufende beschränkte Read) und entfernt **jeden** gefundenen Altcontainer (`docker rm -f`, auch mehrere) **vor** dem Start des neuen Containers. Nach einem Re-Deploy existiert auf dem VPS **kein** weiterer Container mit diesem Hostname-Label mehr. (Testbar: **gestoppter** Altcontainer mit passendem Label → `rm` wird aufgerufen und der neue Container startet; mehrere Altcontainer → alle entfernt; danach genau **ein** Container mit diesem Label. **Regressionstest** zum v1-Zombie: gestoppter Altcontainer blieb liegen.) Der Schritt bleibt **best-effort** und **nach** allen Tunnel-/Readiness-Gates (AC1/AC3/AC5/AC6 — kein Schritt vor dem Gate) sowie **nach** erfolgreichem `pull` (schlägt der Pull fehl, bleibt der bestehende Container unangetastet).
+
 ## Verträge
 > Pfade/Felder kanonisch; Boundary-Detail in **ADR-012** (`DeployOrchestrator`, `VpsDockerControl`), **ADR-010** (`CloudflareApi`), **ADR-008** (SSH/`VpsProvisioner`-Linie).
 
 > **Vertrags-Präzisierung (Spec-Gap-Resolution, analog O3):** `zoneId` wird server-seitig per Suffix-Match aus dem `hostname` aufgelöst (via `CloudflareApi.resolveZoneForHostname()` — längster Suffix-Match); der Client übergibt **keine** `zoneId`. `tunnelId` bleibt expliziter Parameter (pro Account können mehrere Tunnel existieren; eine eindeutige VPS→Tunnel-Bindung ist noch nicht spezifiziert — Frontend wählt per Dropdown/Auswahl aus den vorhandenen Tunneln). Kein Zone-Match → 422 `zone-not-found` (ohne Leak).
 
-- **`Deployment` (Read-Model, live):** `{ vps, hostname, image, containerId?, hostPort?, status, routePresent: boolean, containerPresent: boolean }`. `hostPort` ist der gemappte Host-Port (additiv, kann null sein). Drift sichtbar über `routePresent`/`containerPresent`.
+- **`Deployment` (Read-Model, live):** `{ vps, hostname, image, containerId?, hostPort?, state?, status, routePresent: boolean, containerPresent: boolean }`. `hostPort` ist der gemappte Host-Port (additiv, kann null sein). **`state`** (v2, additiv) = Container-Zustand aus dem geteilten `psAll`-Read-Model ([[vps-container-overview]]); ein **gestoppter** managed Container hat `containerPresent: true` und `state !== 'running'` — er zählt als vorhandenes Deployment. Drift sichtbar über `routePresent`/`containerPresent`.
+- **Altcontainer-Suche (v2, AC17):** der Ersetzungsschritt nutzt den **zustands-vollständigen** Container-Read (`psAll`, `docker ps -a`) und matcht auf `hostname`-Label — **nicht** den auf laufende Container beschränkten Read.
 - **GET `/api/deployments?vps=<vpsId>&tunnelId=<tunnelId>`** → `{ deployments: Deployment[], errors?: [{ scope, errorClass }] }` (degradiert pro VPS/Zone). Query-Parameter `vps` und `tunnelId` sind Pflicht.
 - **POST `/api/deployments`** — Body `{ image, vps, hostname, tunnelId }` → `{ result: "ok"|"error", deployment?, reason? }`. (`zoneId` server-seitig aufgelöst.)
 - **DELETE `/api/deployments/{vps}/{hostname}`** — Body `{ confirm: "<hostname>", tunnelId }` → `{ result: "ok"|"error", reason? }`. (`zoneId` server-seitig aufgelöst.)
@@ -76,6 +82,8 @@ version: 1
 - Route-Schritt schlägt nach erfolgreichem Container-Start fehl → Container-Rollback (AC4).
 - Undeploy ohne/falschen Confirm → 422 `confirmation-required`.
 - Doppel-Deploy desselben Hostname → idempotenz-/Konflikt-Verhalten: bestehender Deploy wird ersetzt **oder** mit klarer Konflikt-422 abgelehnt (`coder` finalisiert; Default-Empfehlung: ersetzen analog `preview up`, das eine laufende Instanz ersetzt).
+- **Re-Deploy bei gestopptem Altcontainer** → der gestoppte Altcontainer wird **entfernt** (AC17), kein Zombie; der neue Container startet regulär. *(v1: der gestoppte Altcontainer blieb liegen und teilte sich das Hostname-Label mit dem neuen → der Reconcile-Lauf hätte den Hostname als mehrdeutig blockiert; siehe [[cloudflare-reconciliation]] AC7b.)*
+- **Mehrere gestoppte Altcontainer** auf denselben Hostname (Altlast aus v1) → **alle** werden im Ersetzungsschritt entfernt (AC17); schlägt ein `rm` fehl, bleibt der Schritt best-effort und der Deploy läuft weiter — der verbleibende Zombie ist in der Container-Übersicht sichtbar ([[vps-container-overview]] AC14) und manuell entfernbar.
 - Drift (Container ohne Route / Route ohne Container) wird in der Liste sichtbar und vom Cron ([[cloudflare-reconciliation]]) behandelt.
 
 ## NFRs
@@ -86,6 +94,7 @@ version: 1
 ## Nicht-Ziele
 - **Server-Lifecycle** (Maschine starten/stoppen/erstellen) → [[vps-provider-boundary]] (nicht hier).
 - **Reconciliation-Cron** → [[cloudflare-reconciliation]].
+- **Image-Update eines bestehenden Containers aus der Container-Übersicht** → [[container-image-update]]; dieser Pfad **konsumiert** die hier spezifizierte Deploy-Saga (AC3/AC4/AC14/AC17) wieder und dupliziert sie **nicht**.
 - **Migration** der Bestands-Tunnel auf remote-managed → operativ (ADR-010 / O1).
 - Build/Push des Images (ghcr-Image ist Source of Truth, wie im `preview`-Skill) — diese Capability **konsumiert** ein vorhandenes Image.
 - Multi-Container-/Compose-Stacks pro Deploy (Erst-Durchgang: ein App-Container je Hostname).
@@ -94,6 +103,8 @@ version: 1
 - [[view-cloudflare]] (`CloudflareApi`-Boundary, Route-/DNS-Mutation; ADR-010).
 - [[vps-provider-boundary]] (welche VPS existieren — Maschinen-Read; Server-Lifecycle bleibt dort).
 - [[settings-credentials]] (Cloudflare-Token), [[settings-ssh-keys]] (SSH-Private-Key für VpsDockerControl, ADR-008).
-- [[cloudflare-reconciliation]] (fängt Drift; teilt `VpsDockerControl` + Label-Konvention).
+- [[cloudflare-reconciliation]] (fängt Drift; teilt `VpsDockerControl` + Label-Konvention; gestoppte managed Container behalten ihre Route, AC3b/AC7b).
+- [[vps-container-overview]] (geteiltes `psAll`-Read-Model inkl. `state`; zeigt Zombies sichtbar an).
+- [[container-image-update]] (konsument der Deploy-Saga für den Update-Knopf).
 - [[access-and-guardrails]] (Access-Mauer + Audit + Identität).
 - `docs/architecture.md` — **`DeployOrchestrator` + `VpsDockerControl` in ADR-012**; `LockoutGuard` in ADR-011; SSH-Linie ADR-008.
