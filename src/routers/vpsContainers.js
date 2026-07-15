@@ -9,8 +9,9 @@
  *   POST   /api/vps/machines/:provider/*splat/containers/:containerId/stop
  *   POST   /api/vps/machines/:provider/*splat/containers/:containerId/restart
  *   DELETE /api/vps/machines/:provider/*splat/containers/:containerId
+ *   POST   /api/vps/machines/:provider/*splat/containers/:containerId/update
  *
- * Implements: vps-container-overview AC8–AC12
+ * Implements: vps-container-overview AC8–AC12, container-image-update AC1–AC4/AC7/AC10–AC12
  */
 import { vpsContainerRouter } from '../vpsContainerRouter.js';
 
