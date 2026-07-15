@@ -105,7 +105,8 @@ export class DeployOrchestrator {
    *   (d) Tunnel-Mismatch/-Missing via VpsProviderRegistry (AC5/AC6, when vpsId + vpsRegistry set)
    *   (e) Tunnel-Existenz via CloudflareApi.listTunnels() (AC1–AC4)
    *   (f) Readiness-Probe via VpsDockerControl.probe() (vps-readiness-gate)
-   *   (g) Re-deploy: ps() → rm() existing container (AC14)
+   *   (g) Re-deploy: psAll() → rm() ALL existing containers with matching hostname
+   *       label, running or stopped (AC14/AC17)
    *
    * Gates (d)/(e) run BEFORE (g) so that a missing/mismatched tunnel aborts the deploy
    * without removing the existing container first (AC1/AC3/AC5/AC6: "no step before the gate").
@@ -255,19 +256,25 @@ export class DeployOrchestrator {
       }
     }
 
-    // (g) AC14: Re-deploy = replace. Gates (a)–(f) have all passed; now check whether
-    // an existing container with this hostname is running and remove it before starting
-    // the new one. This is best-effort — if removal fails, we still attempt the new deploy.
+    // (g) AC14/AC17: Re-deploy = replace. Gates (a)–(f) have all passed; now find ALL
+    // existing containers with this hostname label — running AND stopped (AC17 zombie
+    // fix) — and remove them before starting the new one. This is best-effort — if a
+    // removal fails, we still attempt the new deploy.
     // Placed AFTER all Tunnel/Readiness gates so a missing/mismatched tunnel never causes
     // the existing container to be removed (AC1/AC3/AC5/AC6: no step before the gate).
+    //
+    // AC17 (v2, zombie fix): uses psAll() (docker ps -a, state-complete read) instead of
+    // ps() (running-only) — a stopped legacy container with the same hostname label used
+    // to survive re-deploy undetected (v1 zombie). ALL matching containers are removed
+    // (not just the first) to also clean up pre-fix zombie accumulation.
     let replacingExisting = false;
     {
-      const existingPs = await this.#dockerControl.ps(vps, dockerOpts);
+      const existingPs = await this.#dockerControl.psAll(vps, dockerOpts);
       if (existingPs.result === 'ok') {
-        const existing = (existingPs.containers ?? []).find((c) => c.hostname === hostname);
-        if (existing) {
+        const existingMatches = (existingPs.containers ?? []).filter((c) => c.hostname === hostname);
+        for (const existing of existingMatches) {
           replacingExisting = true;
-          // Best-effort: remove old container before starting new one
+          // Best-effort: remove old container(s) before starting new one
           await this.#rollbackContainer(vps, existing.containerId, dockerOpts);
         }
       }
