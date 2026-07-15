@@ -1,7 +1,7 @@
 /**
  * vpsContainerRouter — Express-Router für Container-Übersicht + Aktionen pro VPS.
  *
- * Implements: vps-container-overview AC8–AC12
+ * Implements: vps-container-overview AC8–AC12, container-image-update AC1–AC4/AC7/AC10–AC12
  *
  * Routes (alle hinter AccessGuard in server.js):
  *   GET    /api/vps/machines/:provider/*splat/containers
@@ -23,6 +23,15 @@
  *             Unmanaged → VpsDockerControl.rm
  *             Protected → 422 protected-resource
  *             Fehlender/falscher confirm → 422 confirmation-required
+ *   POST   /api/vps/machines/:provider/*splat/containers/:containerId/update
+ *             Body: leer (kein Image/Tag/tunnelId vom Client — container-image-update AC4)
+ *             → { result:'ok', deployment } | { result:'error', errorClass, reason }  [MUTATION]
+ *             Nur managed (AC3) — pull + recreate über DeployOrchestrator.deploy() mit dem
+ *             UNVERÄNDERTEN Image-Ref + rekonstruierter Run-Config des Bestands-Containers
+ *             (VpsDockerControl.inspectContainer + RunConfigMapper, AC1/AC6). Fail-closed vor
+ *             jeder Mutation (AC7): inspect-Fehler, fehlendes Hostname-Label, nicht auflösbare
+ *             tunnelId, oder nicht eindeutig abbildbare Run-Config brechen ab — KEIN pull/rm/run.
+ *             Niemals docker restart (AC2). container-image-update.md AC1–AC4/AC7/AC10–AC12.
  *
  * ServerId-Routing (IONOS composite IDs):
  *   Express 5 *splat captures path-segments between :provider and /containers as array.
@@ -49,6 +58,7 @@
 
 import { Router } from 'express';
 import { LockoutGuard } from './cloudflare/LockoutGuard.js';
+import { mapRunConfigToDeployParams } from './deploy/RunConfigMapper.js';
 
 /** Erlaubte Provider-IDs (sync mit vpsRouter.js). */
 const KNOWN_PROVIDERS = ['hetzner', 'ionos', 'hostinger'];
@@ -552,6 +562,197 @@ export function vpsContainerRouter({ vpsDockerControl, deployOrchestrator, audit
       }
       return res.json({ result: 'ok' });
     }
+  });
+
+  // ── POST .../containers/:containerId/update ─────────────────────────────────
+
+  /**
+   * POST /api/vps/machines/:provider/*splat/containers/:containerId/update
+   * Zieht das UNVERÄNDERTE Image des Bestands-Containers neu (`docker pull`) und baut den
+   * Container über die bestehende Deploy-Saga (`DeployOrchestrator.deploy`) neu auf — unter
+   * Erhalt von Env/Mount/Hostname-Label (container-image-update AC1/AC4/AC6). Body ist LEER:
+   * ein mitgesendetes Image/Tag/tunnelId wird NICHT gelesen (AC4).
+   *
+   * Ablauf (container-image-update §Auslösen & Ablauf; Reihenfolge des Audit-Writes gegenüber
+   * der Spec-Prosa PRÄZISIERT, S-355 Iteration 2 — AC10 verlangt hostname im Audit-Eintrag,
+   * der erst nach dem Container-Read bekannt ist; psAll ist ein reiner Read, daher bleibt der
+   * Audit-Write weiterhin VOR jeder Mutation, "Audit-First" im Sinne der AC bleibt gewahrt):
+   *   (a) Access + Rolle
+   *   (b) Container-Read (psAll, reiner Read) — existiert? managed? Hostname aus dem Label
+   *   (a') Audit-First — jetzt inkl. hostname, VOR jedem weiteren (auch lesenden) Schritt und
+   *        insbesondere VOR LockoutGuard/deploy()
+   *   (c) Run-Config lesen (VpsDockerControl.inspectContainer)
+   *   (d) tunnelId server-seitig auflösen (derselbe Weg wie managed-Remove)
+   *   (e) LockoutGuard auf den Hostname
+   *   (f) Deploy-Saga mit demselben Image-Ref + rekonstruierter Run-Config
+   *
+   * Fail-closed (AC7): jeder Vor-Schritt-Fehler bricht VOR jeder Mutation ab — kein
+   * pull/rm/run. Niemals `docker restart` (AC2, grep-prüfbar: kein restart-Aufruf hier).
+   * Abgelehnte Versuche (container-not-found, not-managed) werden NICHT auditiert — AC10
+   * verlangt den Audit-Eintrag nur vor der Mutation, nicht für jeden abgelehnten Request.
+   *
+   * Responses:
+   *   200 { result:'ok', deployment }
+   *   403 { error }                                     — keine Berechtigung (AC10)
+   *   404 { result:'error', errorClass:'container-not-found' }
+   *   422 { result:'error', errorClass }                — not-managed | update-unsafe |
+   *                                                        tunnel-not-found | protected-resource
+   *   422 { error }                                      — Provider-/ServerId-/ContainerId-Validierung
+   *   500 { error }                                       — Audit-Write fehlgeschlagen (AC10)
+   *   502 { result:'error', errorClass, reason }          — Docker-/SSH-/Deploy-Fehler
+   */
+  router.post('/api/vps/machines/:provider/*splat/containers/:containerId/update', async (req, res) => {
+    const identity = req.identity ?? null;
+
+    // AC10: Identitäts-/Rollenschutz
+    const authz = checkMutationAuthz(identity);
+    if (!authz.allowed) {
+      return res.status(403).json({ error: 'Keine Berechtigung für diese Aktion' });
+    }
+
+    // Provider validieren
+    const providerVal = validateProvider(req.params.provider);
+    if (!providerVal.ok) {
+      return res.status(422).json({ error: providerVal.error });
+    }
+    const provider = req.params.provider;
+
+    // ServerId aus *splat
+    const serverIdResult = extractServerId(req.params.splat);
+    if (!serverIdResult.ok) {
+      return res.status(422).json({ error: serverIdResult.error });
+    }
+    const serverId = serverIdResult.serverId;
+
+    // ContainerId validieren
+    const containerIdVal = validateContainerId(req.params.containerId);
+    if (!containerIdVal.ok) {
+      return res.status(422).json({ error: containerIdVal.error });
+    }
+    const containerId = req.params.containerId.trim();
+
+    // VPS-Target auflösen (reiner Lookup, keine Mutation — vor Audit unkritisch)
+    const vpsTarget = await resolveVpsTarget(provider, serverId, vpsRegistry, vpsTargets);
+    if (!vpsTarget) {
+      return res.status(422).json({ result: 'error', errorClass: 'no-target', reason: 'VPS-Ziel nicht konfiguriert' });
+    }
+
+    // (b) Container-Read: existiert? managed? Hostname aus dem Label. Reiner Read (psAll) —
+    // läuft VOR dem Audit-Eintrag, weil AC10 explizit "hostname" im Audit-Eintrag fordert und
+    // der Hostname erst hier bekannt wird. Bleibt "Audit-First" im Sinne der AC: der Eintrag
+    // liegt weiterhin vor JEDER Mutation (inspectContainer ist ebenfalls nur Read).
+    const psResult = await vpsDockerControl.psAll(vpsTarget);
+    if (psResult.result !== 'ok') {
+      return res.status(502).json({
+        result: 'error',
+        errorClass: psResult.errorClass ?? 'error',
+        reason: psResult.reason ?? 'Container-Liste konnte nicht geladen werden',
+      });
+    }
+
+    const container = (psResult.containers ?? []).find((c) => c.containerId === containerId);
+    if (!container) {
+      return res.status(404).json({
+        result: 'error',
+        errorClass: 'container-not-found',
+        reason: 'Container nicht gefunden',
+      });
+    }
+
+    // AC3: nur managed — kein Hostname-Label → 422 not-managed, keine Mutation, kein Audit
+    // (AC10 verlangt den Audit-Eintrag nur vor der Mutation, nicht für abgelehnte Versuche).
+    if (!container.hostname) {
+      return res.status(422).json({
+        result: 'error',
+        errorClass: 'not-managed',
+        reason: 'not-managed',
+      });
+    }
+
+    // AC10: Audit-First — vor jeder Mutation, jetzt inkl. hostname (Container-Read oben hat ihn
+    // aufgelöst). Bewusste Divergenz zum managed-Remove-Pfad (Z. ~474 ff., vps-container-overview
+    // AC12): dessen Audit-Feldkatalog führt kein hostname — spec-getrieben, kein Versehen.
+    const auditServerId = serverId.replace(/\//g, ':');
+    const auditAction = `vps:container:update:${provider}:${auditServerId}:${containerId}:${container.hostname}`;
+    try {
+      auditStore.record({ identity: identity?.email ?? null, command: auditAction });
+    } catch (auditErr) {
+      console.error('[vpsContainerRouter] Audit-Write fehlgeschlagen (update):', sanitizeMsg(auditErr.message));
+      return res.status(500).json({ error: 'Audit-Write fehlgeschlagen — Aktion abgebrochen' });
+    }
+
+    // (c) Run-Config lesen — AC1/AC4: derselbe Image-Ref, AC6: Env/Binds/Labels erhalten.
+    const inspectResult = await vpsDockerControl.inspectContainer(vpsTarget, containerId);
+    if (inspectResult.result !== 'ok') {
+      return res.status(502).json({
+        result: 'error',
+        errorClass: inspectResult.errorClass ?? 'docker-failed',
+        reason: inspectResult.reason ?? 'Run-Config konnte nicht gelesen werden',
+      });
+    }
+    const config = inspectResult.config;
+
+    // (d) tunnelId server-seitig auflösen — derselbe Weg wie managed-Remove (AC11 vps-container-overview).
+    // AC7: kein Fallback auf einen Deploy ohne Route — nicht auflösbar → tunnel-not-found, kein Schritt.
+    const tunnelId = await resolveTunnelId(vpsTarget, vpsRegistry, vpsTargets);
+    if (!tunnelId) {
+      return res.status(422).json({
+        result: 'error',
+        errorClass: 'tunnel-not-found',
+        reason: 'tunnel-not-found',
+      });
+    }
+
+    // (e) LockoutGuard auf den Hostname — AC11, bedingungslos, vor jedem Docker-/Cloudflare-Schritt.
+    if (guard.isProtected(container.hostname)) {
+      return res.status(422).json({
+        result: 'error',
+        errorClass: 'protected-resource',
+        reason: 'protected-resource',
+      });
+    }
+
+    // (f) Run-Config-Rekonstruktion → Saga-Parameter (AC6). AC7: nicht eindeutig abbildbar
+    // (z.B. unbekannte/zusätzliche Binds) → update-unsafe, kein Schritt.
+    const mapping = mapRunConfigToDeployParams(config);
+    if (mapping.ambiguous) {
+      return res.status(422).json({
+        result: 'error',
+        errorClass: 'update-unsafe',
+        reason: 'update-unsafe',
+      });
+    }
+
+    // Deploy-Saga: pull (unveränderter Image-Ref) → rm Altcontainer → run → Route/DNS.
+    // Kein eigener pull/run/Route-Code — ausschließlich DeployOrchestrator.deploy() (Grep-prüfbar).
+    let deployResult;
+    try {
+      deployResult = await deployOrchestrator.deploy({
+        image: config.image,
+        vps: vpsTarget,
+        hostname: container.hostname,
+        tunnelId,
+        containerEnv: mapping.containerEnv,
+        ...(mapping.requiresConfig
+          ? { requiresConfig: true, configApp: mapping.configApp, configMountPath: mapping.configMountPath }
+          : {}),
+      });
+    } catch (err) {
+      console.error('[vpsContainerRouter] update Fehler:', sanitizeMsg(err?.message ?? ''));
+      return res.status(502).json({ result: 'error', errorClass: 'error', reason: 'Update fehlgeschlagen' });
+    }
+
+    if (deployResult.result !== 'ok') {
+      const validationErrorClasses = ['protected-resource', 'zone-not-found', 'tunnel-missing', 'tunnel-mismatch', 'validation-error'];
+      const httpStatus = validationErrorClasses.includes(deployResult.errorClass) ? 422 : 502;
+      return res.status(httpStatus).json({
+        result: 'error',
+        errorClass: deployResult.errorClass ?? 'error',
+        reason: deployResult.reason ?? 'Update fehlgeschlagen',
+      });
+    }
+
+    return res.json({ result: 'ok', deployment: deployResult.deployment });
   });
 
   // ── Shared Handler: start/stop/restart ────────────────────────────────────
