@@ -35,14 +35,26 @@
  *   AC20 — Graceful Fallback: fehlt availability ganz oder fehlt Eintrag für die Region →
  *           ungefiltert rendern (heutiges AC6/AC8-Verhalten, alle nicht-deprecated Typen).
  *
- * Implements: vps-container-overview AC1–AC7 (Container-Übersicht)
+ * Implements: vps-container-overview AC1–AC7, AC2/AC4b/AC14/AC15 (v2) (Container-Übersicht)
  *   AC1 — Container-Button je VPS-Zeile; Klick öffnet Übersicht + Listing-Fetch.
- *   AC2 — Listet je Container: Name, Status, Image, Port; managed vs. unmanaged.
+ *   AC2 — Listet je Container: Name, Status, Image, Port; managed vs. unmanaged;
+ *          Zustand-Textbadge „läuft"/„gestoppt" bedingungslos gerendert (v2, S-352).
  *   AC3 — Leer-Zustand; SSH-Fehler degradiert nur diese Übersicht.
  *   AC4 — Start/Stop/Neustart/Logs/Entfernen-Buttons; nach Erfolg Re-Fetch; 403 → Hinweis.
+ *   AC4b — Button-Aktivierung strikt nach `state`: state==='running' → Stop/Neustart aktiv,
+ *          Start disabled; sonst → Start aktiv, Stop/Neustart disabled; Logs/Entfernen
+ *          immer aktiv; disabled-Buttons mit title-Begründung (v2, S-352).
  *   AC5 — Logs lesen: render Log-Zeilen; kein SSH-Key/Token im Frontend.
  *   AC6 — Managed-Remove: type-to-confirm (Hostname); voller Undeploy.
  *   AC7 — Unmanaged-Remove: type-to-confirm (ContainerId); nur docker rm.
+ *   AC14 — Gestoppte Container bleiben nach Stop sichtbar (kein Verschwinden), kein
+ *          Filter/Umschalter; Start bleibt erreichbar (v2, S-352, Regressionstest zur
+ *          v1-Sackgasse „Container nach Stop unauffindbar/nicht startbar").
+ *   AC15 — „Update"-Knopf je MANAGED Container (POST …/containers/:containerId/update,
+ *          [[container-image-update]]); für unmanaged Container disabled mit Begründung;
+ *          Ergebnis/Fehler je Container sichtbar (geheimnisfreie errorClass-Anzeige);
+ *          nach Erfolg Re-Fetch; sichtbarer Hinweis VOR dem Auslösen, dass ein Update auf
+ *          einen gestoppten Container ihn startet (S-356/AC8-Abgrenzung, S-357).
  *
  * Implements: vps-ssh-terminal AC1–AC4 (Frontend, S-264 — Backend S-262/S-263 gelandet)
  *   AC1 — Jede VPS-Karte zeigt zwei klein übereinander angeordnete, beschriftete
@@ -191,11 +203,14 @@ async function fetchContainers({ provider, serverId }) {
 }
 
 /**
- * Führt eine Container-Aktion aus (start/stop/restart).
+ * Führt eine Container-Aktion aus (start/stop/restart/update).
  * POST /api/vps/machines/:provider/:serverId/containers/:containerId/:action
  *
- * @param {{ provider: string, serverId: string, containerId: string, action: 'start'|'stop'|'restart' }} params
- * @returns {Promise<{ result: string, reason?: string }>}
+ * `update` (AC15, [[container-image-update]]) nimmt — wie start/stop/restart — einen
+ * LEEREN Body: kein Image/Tag/tunnelId vom Client, der Server löst den Ref selbst auf.
+ *
+ * @param {{ provider: string, serverId: string, containerId: string, action: 'start'|'stop'|'restart'|'update' }} params
+ * @returns {Promise<{ result: string, reason?: string, deployment?: object }>}
  */
 async function postContainerAction({ provider, serverId, containerId, action }) {
   const url = `/api/vps/machines/${encodeURIComponent(provider)}/${serverId}/containers/${encodeURIComponent(containerId)}/${action}`;
@@ -207,9 +222,37 @@ async function postContainerAction({ provider, serverId, containerId, action }) 
     throw err;
   }
   if (!res.ok) {
-    throw new Error(data.reason ?? data.error ?? `${action} fehlgeschlagen (${res.status})`);
+    const err = new Error(data.reason ?? data.error ?? `${action} fehlgeschlagen (${res.status})`);
+    err.errorClass = data.errorClass;
+    throw err;
   }
   return data;
+}
+
+/**
+ * Formatiert eine Update-`errorClass` ([[container-image-update]] AC7/Verträge) geheimnisfrei
+ * für die Anzeige in ContainerRow (AC15, vps-container-overview). Fällt auf `reason` bzw.
+ * einen generischen Text zurück, wenn keine bekannte Klasse vorliegt.
+ *
+ * @param {string|undefined} errorClass
+ * @param {string|undefined} reason
+ * @returns {string}
+ */
+function friendlyUpdateError(errorClass, reason) {
+  switch (errorClass) {
+    case 'not-managed':
+      return 'Nur managed Container können aktualisiert werden.';
+    case 'update-unsafe':
+      return 'Update abgebrochen: Konfiguration nicht eindeutig rekonstruierbar (siehe Deployments-Ansicht).';
+    case 'tunnel-not-found':
+      return 'Update abgebrochen: Cloudflare-Tunnel nicht gefunden.';
+    case 'protected-resource':
+      return 'Dieser Container ist geschützt und kann nicht aktualisiert werden.';
+    case 'container-not-found':
+      return 'Container nicht (mehr) vorhanden.';
+    default:
+      return reason ?? 'Update fehlgeschlagen.';
+  }
 }
 
 /**
@@ -407,7 +450,7 @@ function ContainerRemoveConfirm({ container, onConfirm, onCancel, pending }) {
  *
  * @param {{
  *   container: { containerId: string, name: string, image: string, hostname: string|null,
- *                status: string, hostPort: number|null, managed: boolean },
+ *                state: string|null, status: string, hostPort: number|null, managed: boolean },
  *   provider: string,
  *   serverId: string,
  *   onAction: (provider: string, serverId: string, containerId: string, action: string) => Promise<void>,
@@ -420,6 +463,10 @@ function ContainerRow({ container: c, provider, serverId, onAction, onLogs, onRe
   const [actionMsg, setActionMsg] = useState(null);
 
   const isPending = actionState === 'pending';
+  // AC4b/AC9b: Laufend-Prädikat ist AUSSCHLIESSLICH state === 'running' — nie status parsen.
+  const isRunning = c.state === 'running';
+  const startDisabled = isPending || isRunning;
+  const stopRestartDisabled = isPending || !isRunning;
 
   const handleAction = useCallback(async (action) => {
     setActionState('pending');
@@ -432,6 +479,10 @@ function ContainerRow({ container: c, provider, serverId, onAction, onLogs, onRe
       if (err.is403) {
         setActionState('forbidden');
         setActionMsg('Keine Berechtigung für diese Aktion');
+      } else if (action === 'update') {
+        // AC15: geheimnisfreie errorClass-Anzeige statt Roh-Reason.
+        setActionState('error');
+        setActionMsg(friendlyUpdateError(err.errorClass, err.message));
       } else {
         setActionState('error');
         setActionMsg(err.message ?? 'Aktion fehlgeschlagen');
@@ -439,7 +490,15 @@ function ContainerRow({ container: c, provider, serverId, onAction, onLogs, onRe
     }
   }, [provider, serverId, c.containerId, onAction]);
 
+  // AC15: Update ist nur für managed Container aktiv (unmanaged → disabled mit Begründung).
+  const updateDisabled = isPending || !c.managed;
+
   const ACTION_MSG_ID = `ctr-action-${c.containerId}`.replace(/[^a-zA-Z0-9-]/g, '-');
+  const UPDATE_HINT_ID = `ctr-update-hint-${c.containerId}`.replace(/[^a-zA-Z0-9-]/g, '-');
+  const showUpdateHint = c.managed && !isRunning;
+  const updateDescribedBy = [showUpdateHint ? UPDATE_HINT_ID : null, actionMsg ? ACTION_MSG_ID : null]
+    .filter(Boolean)
+    .join(' ') || undefined;
 
   return (
     <li style={containerStyles.containerItem}>
@@ -451,6 +510,15 @@ function ContainerRow({ container: c, provider, serverId, onAction, onLogs, onRe
           title={c.managed ? `Managed: ${c.hostname}` : 'Unmanaged (kein cloudflare.tunnel-hostname-Label)'}
         >
           {c.managed ? 'M' : 'U'}
+        </span>
+        {/* Zustand-Textbadge — AC2/AC14/AC9b: bedingungslos gerendert, nicht allein über
+            Farbe/Dimmen kodiert (A11y WCAG 2.1 AA); state === 'running' → "läuft", sonst "gestoppt" */}
+        <span
+          style={isRunning ? containerStyles.runningBadge : containerStyles.stoppedBadge}
+          aria-label={isRunning ? 'Zustand: läuft' : 'Zustand: gestoppt'}
+          title={isRunning ? 'Container läuft' : 'Container ist gestoppt'}
+        >
+          {isRunning ? 'läuft' : 'gestoppt'}
         </span>
         <div style={containerStyles.containerMeta}>
           <span style={containerStyles.containerName}>{c.name}</span>
@@ -469,40 +537,57 @@ function ContainerRow({ container: c, provider, serverId, onAction, onLogs, onRe
       <div style={containerStyles.containerActions}>
         <button
           type="button"
-          style={isPending ? { ...containerStyles.actionSmall, opacity: 0.45, cursor: 'not-allowed' } : containerStyles.actionSmall}
-          disabled={isPending}
+          style={startDisabled ? { ...containerStyles.actionSmall, opacity: 0.45, cursor: 'not-allowed' } : containerStyles.actionSmall}
+          disabled={startDisabled}
           aria-label={`Container ${c.name} starten`}
           aria-describedby={actionMsg ? ACTION_MSG_ID : undefined}
           aria-busy={isPending}
+          title={!isPending && isRunning ? 'Container läuft bereits — Start nicht möglich' : undefined}
           onClick={() => handleAction('start')}
         >
           {isPending ? '…' : 'Start'}
         </button>
         <button
           type="button"
-          style={isPending
+          style={stopRestartDisabled
             ? { ...containerStyles.actionSmall, ...containerStyles.actionStop, opacity: 0.45, cursor: 'not-allowed' }
             : { ...containerStyles.actionSmall, ...containerStyles.actionStop }}
-          disabled={isPending}
+          disabled={stopRestartDisabled}
           aria-label={`Container ${c.name} stoppen`}
           aria-describedby={actionMsg ? ACTION_MSG_ID : undefined}
           aria-busy={isPending}
+          title={!isPending && !isRunning ? 'Container ist bereits gestoppt — Stop nicht möglich' : undefined}
           onClick={() => handleAction('stop')}
         >
           Stop
         </button>
         <button
           type="button"
-          style={isPending
+          style={stopRestartDisabled
             ? { ...containerStyles.actionSmall, ...containerStyles.actionRestart, opacity: 0.45, cursor: 'not-allowed' }
             : { ...containerStyles.actionSmall, ...containerStyles.actionRestart }}
-          disabled={isPending}
+          disabled={stopRestartDisabled}
           aria-label={`Container ${c.name} neu starten`}
           aria-describedby={actionMsg ? ACTION_MSG_ID : undefined}
           aria-busy={isPending}
+          title={!isPending && !isRunning ? 'Container ist gestoppt — Neustart nicht möglich, zuerst starten' : undefined}
           onClick={() => handleAction('restart')}
         >
           Neustart
+        </button>
+        <button
+          type="button"
+          style={updateDisabled
+            ? { ...containerStyles.actionSmall, ...containerStyles.actionUpdate, opacity: 0.45, cursor: 'not-allowed' }
+            : { ...containerStyles.actionSmall, ...containerStyles.actionUpdate }}
+          disabled={updateDisabled}
+          aria-label={`Container ${c.name} aktualisieren`}
+          aria-describedby={updateDescribedBy}
+          aria-busy={isPending}
+          title={!c.managed ? 'Nur managed Container können aktualisiert werden' : undefined}
+          onClick={() => handleAction('update')}
+        >
+          {isPending ? '…' : 'Update'}
         </button>
         <button
           type="button"
@@ -525,6 +610,16 @@ function ContainerRow({ container: c, provider, serverId, onAction, onLogs, onRe
           Entfernen
         </button>
       </div>
+
+      {/* AC15: sichtbarer Hinweis VOR dem Auslösen — ein Update startet einen gestoppten
+          Container (S-356/AC8-Abgrenzung). Immer sichtbar (kein reiner Hover-Tooltip) UND per
+          aria-describedby am Update-Knopf verankert, damit Screenreader-Fokus auf den Knopf
+          den Hinweis mitliest, bevor ausgelöst wird. */}
+      {showUpdateHint && (
+        <span id={UPDATE_HINT_ID} style={containerStyles.updateHint} role="note">
+          Hinweis: Ein Update startet diesen gestoppten Container.
+        </span>
+      )}
 
       {/* Aktions-Feedback (AC4) */}
       {actionMsg && (
@@ -550,7 +645,7 @@ function ContainerRow({ container: c, provider, serverId, onAction, onLogs, onRe
 /**
  * Container-Übersicht für einen VPS (AC1–AC7, vps-container-overview).
  *
- * Listet alle laufenden Container (managed + unmanaged) mit Aktionen.
+ * Listet alle Container (laufend + gestoppt, managed + unmanaged) mit Aktionen.
  * Degradiert je VPS — Fehler zeigt Fehlermarkierung ohne die übrige Liste zu zerstören.
  *
  * A11y: WCAG 2.1 AA — role=status für Lade-/Leer-Zustand, role=alert für Fehler.
@@ -695,13 +790,13 @@ function ContainerOverview({ provider, serverId, machineName, onClose }) {
       {/* Leer-Zustand (AC3) */}
       {!loading && !loadError && containers.length === 0 && (
         <p style={containerStyles.emptyText} role="status">
-          Keine Container laufend.
+          Keine Container vorhanden.
         </p>
       )}
 
-      {/* Container-Liste (AC2) */}
+      {/* Container-Liste (AC2) — enthält seit S-352 bedingungslos auch gestoppte Container. */}
       {!loading && !loadError && containers.length > 0 && (
-        <ul style={containerStyles.containerList} aria-label="Laufende Container">
+        <ul style={containerStyles.containerList} aria-label="Container">
           {containers.map((c) => (
             <ContainerRow
               key={c.containerId}
@@ -2571,6 +2666,33 @@ const containerStyles = {
     lineHeight: '18px',
     cursor: 'default',
   },
+  // AC2/AC14/A11y — Zustand als Textbadge (nicht allein über Farbe kodiert)
+  runningBadge: {
+    fontSize: 10,
+    fontWeight: 700,
+    padding: '1px 5px',
+    background: '#0f2022',
+    color: '#3fb950',
+    border: '1px solid #1b4332',
+    borderRadius: 3,
+    flexShrink: 0,
+    minHeight: 20,
+    lineHeight: '18px',
+    cursor: 'default',
+  },
+  stoppedBadge: {
+    fontSize: 10,
+    fontWeight: 700,
+    padding: '1px 5px',
+    background: '#1a1000',
+    color: '#e3b341',
+    border: '1px solid #9e6a03',
+    borderRadius: 3,
+    flexShrink: 0,
+    minHeight: 20,
+    lineHeight: '18px',
+    cursor: 'default',
+  },
   containerMeta: {
     display: 'flex',
     flexWrap: 'wrap',
@@ -2636,6 +2758,19 @@ const containerStyles = {
     background: '#1a0000',
     color: '#f85149',
     border: '1px solid #58131a',
+  },
+  // AC15 (vps-container-overview): Update-Knopf
+  actionUpdate: {
+    background: '#1a1300',
+    color: '#e3b341',
+    border: '1px solid #9e6a03',
+  },
+  updateHint: {
+    display: 'block',
+    width: '100%',
+    fontSize: 11,
+    color: '#e3b341',
+    marginTop: 2,
   },
   feedbackOk: {
     fontSize: 11,

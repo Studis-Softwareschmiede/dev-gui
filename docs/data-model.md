@@ -73,11 +73,12 @@ Read-Model der Deploy-Lifecycle-Boundary ([[deploy-lifecycle]], **ADR-012**) und
 | Modell | Felder |
 |---|---|
 | `Deployment` | `{ vps: string, hostname: string, image: string, containerId: string\|null, status: string, routePresent: boolean, containerPresent: boolean }` |
-| `ReconcileReport` | `{ ranAt: string (ISO-8601), trigger: "cron"\|"manual", perVps: [{ vps: string, provider?: string, checkedContainers: number, createdRoutes: string[], removedRoutes: string[], protectedSkipped: string[], reportedUnmanaged: string[], errors: [{ scope, errorClass }] }] }` |
+| `ReconcileReport` | `{ ranAt: string (ISO-8601), trigger: "cron"\|"manual", perVps: [{ vps: string, provider?: string, checkedContainers: number, createdRoutes: string[], removedRoutes: string[], protectedSkipped: string[], stoppedSkipped: string[], reportedUnmanaged: string[], errors: [{ scope, errorClass }] }] }` |
 | `ReconcileNotice` | `{ at: string (ISO-8601), kind: "route-created"\|"route-removed"\|"protected-skipped"\|"error", vps: string, hostname: string, detail?: string }` |
 
 - Container↔Route-Bindung = Label `cloudflare.tunnel-hostname=<hostname>` (ADR-012; Container-Label ist beim Reconcile der **autoritative Desired-State**).
 - **Beidseitige Konvergenz (ADR-013, Betreiber-Korrektur):** verwaiste Route (kein managed Container, nicht protected) → `removedRoutes`; **managed** Container ohne Route → Route angelegt → `createdRoutes` (über den atomaren ADR-012-Anlege-Pfad, nicht dupliziert); protected Hostname → nie angelegt/gelöscht → `protectedSkipped`; **unmanaged** Container (ohne Deployment-Label) → nicht geheilt → `reportedUnmanaged`.
 - `ReconcileReport` wird **nach jedem Lauf** (Cron **und** manuell) erzeugt und über die bestehende append-only **`AuditStore`**-Mechanik persistiert (eine Report-Zeile pro Lauf; **kein** neuer Store, ADR-005-Linie — O4 entschieden: JA). Abrufbar über `GET /api/deployments/reconcile/last` + `GET /api/deployments/reconcile/reports?limit=N`.
+- `stoppedSkipped` (v3, ADR-013-Ergänzung): Hostnames gestoppter, aber weiterhin gemanagter Container (`docker ps -a`-Sicht) — deren Route wird NICHT als verwaist entfernt (kein Zombie-Löschen bei bloss gestopptem Container, [[cloudflare-reconciliation]] AC7b). Additives Feld; ältere persistierte Reports ohne dieses Feld gelten als `stoppedSkipped: []`.
 - `ReconcileNotice` ist das Read-Model der im Cloudflare-Panel sichtbaren internen Reconciliation-Statusmeldungen ([[view-cloudflare]]); ebenfalls AuditStore-getragen (kein zweiter Persistenz-Pfad), abrufbar über `GET /api/deployments/reconcile/notices` (letzte N).
 - Drift sichtbar über `routePresent`/`containerPresent`; `ReconcileReport` und `ReconcileNotice` enthalten **keine** Secrets (weder SSH-Key noch Cloudflare-Token).

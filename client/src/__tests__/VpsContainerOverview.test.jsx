@@ -1,16 +1,28 @@
 /**
- * VpsContainerOverview.test.jsx — Tests für die Container-Übersicht (S-157).
+ * VpsContainerOverview.test.jsx — Tests für die Container-Übersicht (S-157, S-352).
  *
  * @jest-environment jsdom
  *
  * Covers (vps-container-overview):
  *   AC1  — Container-Button je VPS-Zeile; Klick öffnet Übersicht + Listing-Fetch
- *   AC2  — Listet Name, Status, Image, Port; managed vs. unmanaged markiert
+ *   AC2  — Listet Name, Status, Image, Port; managed vs. unmanaged markiert;
+ *          Zustand-Textbadge „läuft"/„gestoppt" bedingungslos gerendert (v2, S-352)
  *   AC3  — Leer-Zustand; Listing-Fehler degradiert nur diese Übersicht
  *   AC4  — Start/Stop/Neustart/Logs/Entfernen-Buttons; nach Erfolg Re-Fetch; 403 → Hinweis
+ *   AC4b — Button-Aktivierung strikt nach `state`: running → Stop/Neustart aktiv, Start
+ *          disabled; sonst → Start aktiv, Stop/Neustart disabled; Logs/Entfernen immer
+ *          aktiv; disabled-Buttons mit title-Begründung (v2, S-352)
  *   AC5  — Logs: rendert Zeilen; kein SSH-Key/Token im DOM
  *   AC6  — Managed-Remove: type-to-confirm (Hostname); Undeploy-Call; ohne Confirm deaktiviert
  *   AC7  — Unmanaged-Remove: type-to-confirm (ContainerId); kein Cloudflare-Step
+ *   AC14 — Pflicht-Regressionstest: Stop-Aktion → Re-Fetch mit state:'exited' → Zeile
+ *          bleibt sichtbar + Start wird aktiv (v2, S-352, Regressionstest zur v1-Sackgasse
+ *          „Container nach Stop unauffindbar/nicht startbar")
+ *   AC15 — Update-Knopf je managed Container (S-357): ruft POST .../update mit leerem
+ *          Body auf; nach Erfolg Re-Fetch; unmanaged Container → Knopf disabled mit
+ *          Begründung; geheimnisfreie errorClass-Anzeige (not-managed/update-unsafe/
+ *          tunnel-not-found/protected-resource); sichtbarer Hinweis auf gestoppten
+ *          Container, der durch das Update gestartet wird (S-356/AC8-Abgrenzung)
  */
 
 import { describe, it, expect, jest, afterEach } from '@jest/globals';
@@ -48,6 +60,7 @@ const MANAGED_CONTAINER = {
   name: 'abc123def456',
   image: 'ghcr.io/org/app:v1',
   hostname: 'app.example.com',
+  state: 'running',
   status: 'Up 2 hours',
   hostPort: 8080,
   managed: true,
@@ -58,8 +71,20 @@ const UNMANAGED_CONTAINER = {
   name: 'fff000eee111',
   image: 'nginx:latest',
   hostname: null,
+  state: 'running',
   status: 'Up 1 hour',
   hostPort: 80,
+  managed: false,
+};
+
+const STOPPED_UNMANAGED_CONTAINER = {
+  containerId: 'stopped999',
+  name: 'stopped999',
+  image: 'nginx:latest',
+  hostname: null,
+  state: 'exited',
+  status: 'Exited (0) 3 hours ago',
+  hostPort: null,
   managed: false,
 };
 
@@ -233,6 +258,100 @@ describe('VpsContainerOverview — AC2: Container-Felder + managed/unmanaged', (
   });
 });
 
+// ── AC2/AC14: Zustand-Textbadge „läuft"/„gestoppt" (v2, S-352) ─────────────────
+
+describe('VpsContainerOverview — AC2/AC14: Zustand-Textbadge', () => {
+  afterEach(() => { delete globalThis.fetch; });
+
+  it('laufender Container zeigt Badge "läuft", gestoppter Container Badge "gestoppt" (bedingungslos, kein Filter)', async () => {
+    const fetchMock = makeFetch({
+      containers: { result: 'ok', containers: [MANAGED_CONTAINER, STOPPED_UNMANAGED_CONTAINER] },
+    });
+    const { getByRole, getByText } = await renderVpsView(fetchMock);
+
+    await waitFor(() => expect(getByRole('button', { name: /Container/i })).toBeDefined());
+    await act(async () => { fireEvent.click(getByRole('button', { name: /Container/i })); });
+
+    await waitFor(() => {
+      // Beide Zeilen sind gerendert — kein Default-Filter blendet den gestoppten aus (AC14).
+      expect(getByText('läuft')).toBeDefined();
+      expect(getByText('gestoppt')).toBeDefined();
+    });
+  });
+});
+
+// ── AC4b: Button-Aktivierung strikt nach `state` (v2, S-352) ───────────────────
+
+describe('VpsContainerOverview — AC4b: Button-Aktivierung nach state', () => {
+  afterEach(() => { delete globalThis.fetch; });
+
+  it('state === "running" → Stop/Neustart aktiv, Start disabled (mit Begründung)', async () => {
+    const fetchMock = makeFetch({
+      containers: { result: 'ok', containers: [MANAGED_CONTAINER] },
+    });
+    const { getByRole } = await renderVpsView(fetchMock);
+
+    await waitFor(() => expect(getByRole('button', { name: /Container/i })).toBeDefined());
+    await act(async () => { fireEvent.click(getByRole('button', { name: /Container/i })); });
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /container abc123def456 starten/i })).toBeDefined();
+    });
+
+    const startBtn = getByRole('button', { name: /container abc123def456 starten/i });
+    const stopBtn = getByRole('button', { name: /container abc123def456 stoppen/i });
+    const restartBtn = getByRole('button', { name: /container abc123def456 neu starten/i });
+
+    expect(startBtn.disabled).toBe(true);
+    expect(startBtn.title).toBeTruthy();
+    expect(stopBtn.disabled).toBe(false);
+    expect(restartBtn.disabled).toBe(false);
+  });
+
+  it('state !== "running" (exited) → Start aktiv, Stop/Neustart disabled (mit Begründung)', async () => {
+    const fetchMock = makeFetch({
+      containers: { result: 'ok', containers: [STOPPED_UNMANAGED_CONTAINER] },
+    });
+    const { getByRole } = await renderVpsView(fetchMock);
+
+    await waitFor(() => expect(getByRole('button', { name: /Container/i })).toBeDefined());
+    await act(async () => { fireEvent.click(getByRole('button', { name: /Container/i })); });
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /container stopped999 starten/i })).toBeDefined();
+    });
+
+    const startBtn = getByRole('button', { name: /container stopped999 starten/i });
+    const stopBtn = getByRole('button', { name: /container stopped999 stoppen/i });
+    const restartBtn = getByRole('button', { name: /container stopped999 neu starten/i });
+
+    expect(startBtn.disabled).toBe(false);
+    expect(stopBtn.disabled).toBe(true);
+    expect(stopBtn.title).toBeTruthy();
+    expect(restartBtn.disabled).toBe(true);
+    expect(restartBtn.title).toBeTruthy();
+  });
+
+  it('Logs + Entfernen bleiben in BEIDEN Zuständen aktiv', async () => {
+    const fetchMock = makeFetch({
+      containers: { result: 'ok', containers: [STOPPED_UNMANAGED_CONTAINER] },
+    });
+    const { getByRole } = await renderVpsView(fetchMock);
+
+    await waitFor(() => expect(getByRole('button', { name: /Container/i })).toBeDefined());
+    await act(async () => { fireEvent.click(getByRole('button', { name: /Container/i })); });
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /logs von container stopped999/i })).toBeDefined();
+    });
+
+    const logsBtn = getByRole('button', { name: /logs von container stopped999/i });
+    const removeBtn = getByRole('button', { name: /container stopped999 entfernen/i });
+    expect(logsBtn.disabled).toBe(false);
+    expect(removeBtn.disabled).toBe(false);
+  });
+});
+
 // ── AC3: Leer-Zustand + Fehler-Degradierung ────────────────────────────────────
 
 describe('VpsContainerOverview — AC3: Leer-Zustand + Fehler-Degradierung', () => {
@@ -246,7 +365,7 @@ describe('VpsContainerOverview — AC3: Leer-Zustand + Fehler-Degradierung', () 
     await act(async () => { fireEvent.click(getByRole('button', { name: /Container/i })); });
 
     await waitFor(() => {
-      expect(getByText(/keine container laufend/i)).toBeDefined();
+      expect(getByText(/keine container vorhanden/i)).toBeDefined();
     });
   });
 
@@ -287,7 +406,10 @@ describe('VpsContainerOverview — AC4: Aktions-Buttons', () => {
   });
 
   it('nach erfolgreicher Start-Aktion wird Liste neu geladen (Re-Fetch)', async () => {
-    const fetchMock = makeFetch();
+    // AC4b: Start ist nur aktiv, wenn state !== 'running' — daher gestoppter Fixture-Container.
+    const fetchMock = makeFetch({
+      containers: { result: 'ok', containers: [{ ...MANAGED_CONTAINER, state: 'exited', status: 'Exited (0) 3 hours ago' }, UNMANAGED_CONTAINER] },
+    });
     const { getByRole } = await renderVpsView(fetchMock);
 
     await waitFor(() => expect(getByRole('button', { name: /Container/i })).toBeDefined());
@@ -310,7 +432,9 @@ describe('VpsContainerOverview — AC4: Aktions-Buttons', () => {
   });
 
   it('403-Antwort → Berechtigungs-Meldung ohne UI-Crash', async () => {
+    // AC4b: Start ist nur aktiv, wenn state !== 'running' — daher gestoppter Fixture-Container.
     const fetchMock = makeFetch({
+      containers: { result: 'ok', containers: [{ ...MANAGED_CONTAINER, state: 'exited', status: 'Exited (0) 3 hours ago' }, UNMANAGED_CONTAINER] },
       containerAction: { error: 'Keine Berechtigung' },
       containerActionStatus: 403,
     });
@@ -556,5 +680,203 @@ describe('VpsContainerOverview — AC7: Unmanaged-Remove', () => {
       // confirm-Wert = ContainerId (unmanaged — kein Hostname)
       expect(body.confirm).toBe('fff000eee111');
     });
+  });
+});
+
+// ── AC14: Pflicht-Regressionstest — Stop-Aktion → Zeile bleibt sichtbar (v2, S-352) ─
+
+describe('VpsContainerOverview — AC14: Regressionstest Stop → Container bleibt sichtbar + Start aktiv', () => {
+  afterEach(() => { delete globalThis.fetch; });
+
+  it('Stop-Aktion → Re-Fetch mit state:"exited" → Zeile weiterhin vorhanden + Start aktiv, Stop disabled', async () => {
+    // Regressionstest zur v1-Sackgasse: nach "Stop" verschwand die Zeile, Start-Endpunkt
+    // war unerreichbar. Simuliert: erster GET liefert state:'running', nach POST .../stop
+    // liefert der Re-Fetch state:'exited' — die Zeile MUSS bestehen bleiben.
+    let stopped = false;
+    const fetchMock = jest.fn(async (url, opts = {}) => {
+      if (url === '/api/settings/ssh-keys') return { ok: true, json: async () => SSH_LABELS_BOTH };
+      if (url === '/api/vps/providers') return { ok: true, json: async () => PROVIDERS };
+      if (url === '/api/vps/machines' && (!opts.method || opts.method === 'GET')) {
+        return { ok: true, json: async () => ({ machines: [MACHINE] }) };
+      }
+      if (url.endsWith('/containers') && (!opts?.method || opts.method === 'GET')) {
+        const state = stopped ? 'exited' : 'running';
+        const status = stopped ? 'Exited (0) 1 second ago' : 'Up 2 hours';
+        return {
+          ok: true,
+          json: async () => ({ result: 'ok', containers: [{ ...MANAGED_CONTAINER, state, status }] }),
+        };
+      }
+      if (opts?.method === 'POST' && url.endsWith('/containers/abc123def456/stop')) {
+        stopped = true;
+        return { ok: true, status: 200, json: async () => ({ result: 'ok' }) };
+      }
+      return { ok: false, status: 404, json: async () => ({ error: 'not found' }) };
+    });
+
+    const { getByRole } = await renderVpsView(fetchMock);
+
+    await waitFor(() => expect(getByRole('button', { name: /Container/i })).toBeDefined());
+    await act(async () => { fireEvent.click(getByRole('button', { name: /Container/i })); });
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /container abc123def456 stoppen/i })).toBeDefined();
+    });
+
+    const stopBtnBefore = getByRole('button', { name: /container abc123def456 stoppen/i });
+    expect(stopBtnBefore.disabled).toBe(false);
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /container abc123def456 stoppen/i }));
+    });
+
+    await waitFor(() => {
+      // Zeile MUSS weiterhin vorhanden sein (kein Verschwinden — Kern des Regressionstests).
+      const startBtn = getByRole('button', { name: /container abc123def456 starten/i });
+      expect(startBtn).toBeDefined();
+      expect(startBtn.disabled).toBe(false);
+      const stopBtn = getByRole('button', { name: /container abc123def456 stoppen/i });
+      expect(stopBtn.disabled).toBe(true);
+    });
+  });
+});
+
+// ── AC15: Update-Knopf je managed Container (S-357) ────────────────────────────
+
+describe('VpsContainerOverview — AC15: Update-Knopf', () => {
+  afterEach(() => { delete globalThis.fetch; });
+
+  it('managed Container: Update-Knopf ist aktiv und ruft POST .../update mit leerem Body', async () => {
+    const fetchMock = makeFetch({
+      containers: { result: 'ok', containers: [MANAGED_CONTAINER] },
+    });
+    const { getByRole } = await renderVpsView(fetchMock);
+
+    await waitFor(() => expect(getByRole('button', { name: /Container/i })).toBeDefined());
+    await act(async () => { fireEvent.click(getByRole('button', { name: /Container/i })); });
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /container abc123def456 aktualisieren/i })).toBeDefined();
+    });
+
+    const updateBtn = getByRole('button', { name: /container abc123def456 aktualisieren/i });
+    expect(updateBtn.disabled).toBe(false);
+
+    await act(async () => { fireEvent.click(updateBtn); });
+
+    await waitFor(() => {
+      const updateCalls = fetchMock.mock.calls.filter(
+        (c) => c[1]?.method === 'POST' && c[0].endsWith('/containers/abc123def456/update'),
+      );
+      expect(updateCalls.length).toBeGreaterThan(0);
+      // Leerer Body — kein Image/Tag/tunnelId vom Client (container-image-update AC4/Vertrag).
+      expect(updateCalls[0][1].body).toBeUndefined();
+    });
+  });
+
+  it('unmanaged Container: Update-Knopf ist disabled mit Begründung', async () => {
+    const fetchMock = makeFetch({
+      containers: { result: 'ok', containers: [UNMANAGED_CONTAINER] },
+    });
+    const { getByRole } = await renderVpsView(fetchMock);
+
+    await waitFor(() => expect(getByRole('button', { name: /Container/i })).toBeDefined());
+    await act(async () => { fireEvent.click(getByRole('button', { name: /Container/i })); });
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /container fff000eee111 aktualisieren/i })).toBeDefined();
+    });
+
+    const updateBtn = getByRole('button', { name: /container fff000eee111 aktualisieren/i });
+    expect(updateBtn.disabled).toBe(true);
+    expect(updateBtn.title).toBeTruthy();
+  });
+
+  it('nach erfolgreichem Update wird die Liste neu geladen (Re-Fetch)', async () => {
+    const fetchMock = makeFetch({
+      containers: { result: 'ok', containers: [MANAGED_CONTAINER] },
+    });
+    const { getByRole } = await renderVpsView(fetchMock);
+
+    await waitFor(() => expect(getByRole('button', { name: /Container/i })).toBeDefined());
+    await act(async () => { fireEvent.click(getByRole('button', { name: /Container/i })); });
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /container abc123def456 aktualisieren/i })).toBeDefined();
+    });
+
+    const listCallsBefore = fetchMock.mock.calls.filter((c) => c[0].endsWith('/containers')).length;
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /container abc123def456 aktualisieren/i }));
+    });
+
+    await waitFor(() => {
+      const listCallsAfter = fetchMock.mock.calls.filter((c) => c[0].endsWith('/containers')).length;
+      expect(listCallsAfter).toBeGreaterThan(listCallsBefore);
+    });
+  });
+
+  it('Update-Fehler mit errorClass "update-unsafe" → geheimnisfreie Meldung, kein Crash', async () => {
+    const fetchMock = makeFetch({
+      containers: { result: 'ok', containers: [MANAGED_CONTAINER] },
+      containerAction: { result: 'error', errorClass: 'update-unsafe', reason: 'binds nicht eindeutig abbildbar' },
+      containerActionStatus: 422,
+    });
+    const { getByRole, getByText } = await renderVpsView(fetchMock);
+
+    await waitFor(() => expect(getByRole('button', { name: /Container/i })).toBeDefined());
+    await act(async () => { fireEvent.click(getByRole('button', { name: /Container/i })); });
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /container abc123def456 aktualisieren/i })).toBeDefined();
+    });
+
+    await act(async () => {
+      fireEvent.click(getByRole('button', { name: /container abc123def456 aktualisieren/i }));
+    });
+
+    await waitFor(() => {
+      // Geheimnisfreie Klassen-basierte Meldung, NICHT der rohe reason-Text.
+      expect(getByText(/Konfiguration nicht eindeutig rekonstruierbar/i)).toBeDefined();
+    });
+    expect(() => getByText(/binds nicht eindeutig abbildbar/i)).toThrow();
+
+    // VPS-Zeile noch vorhanden (kein UI-Crash)
+    expect(getByText('web-server')).toBeDefined();
+  });
+
+  it('managed + gestoppter Container: sichtbarer Hinweis, dass Update ihn startet', async () => {
+    const fetchMock = makeFetch({
+      containers: { result: 'ok', containers: [{ ...MANAGED_CONTAINER, state: 'exited', status: 'Exited (0) 1 hour ago' }] },
+    });
+    const { getByRole, getByText } = await renderVpsView(fetchMock);
+
+    await waitFor(() => expect(getByRole('button', { name: /Container/i })).toBeDefined());
+    await act(async () => { fireEvent.click(getByRole('button', { name: /Container/i })); });
+
+    await waitFor(() => {
+      expect(getByText(/Update startet diesen gestoppten Container/i)).toBeDefined();
+    });
+
+    // Update bleibt trotz gestopptem Zustand aktiv (AC15/AC8: Update ist auch auf gestoppten Containern zulässig).
+    const updateBtn = getByRole('button', { name: /container abc123def456 aktualisieren/i });
+    expect(updateBtn.disabled).toBe(false);
+  });
+
+  it('managed + laufender Container: KEIN Stop-Hinweis sichtbar', async () => {
+    const fetchMock = makeFetch({
+      containers: { result: 'ok', containers: [MANAGED_CONTAINER] },
+    });
+    const { getByRole, queryByText } = await renderVpsView(fetchMock);
+
+    await waitFor(() => expect(getByRole('button', { name: /Container/i })).toBeDefined());
+    await act(async () => { fireEvent.click(getByRole('button', { name: /Container/i })); });
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /container abc123def456 aktualisieren/i })).toBeDefined();
+    });
+
+    expect(queryByText(/Update startet diesen gestoppten Container/i)).toBeNull();
   });
 });

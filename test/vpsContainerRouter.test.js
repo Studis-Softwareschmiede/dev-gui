@@ -1,13 +1,34 @@
 /**
- * vpsContainerRouter.test.js — Tests für Container-Übersicht + Aktionen (S-157).
+ * vpsContainerRouter.test.js — Tests für Container-Übersicht + Aktionen (S-157, S-352, S-355).
  *
  * Covers (vps-container-overview):
- *   AC8  — GET /api/vps/machines/:provider/*splat/containers → ContainerEntry[]; SSH-Fehler degradiert
+ *   AC8  — GET /api/vps/machines/:provider/*splat/containers → ContainerEntry[]; SSH-Fehler
+ *          degradiert; `state` wird durchgereicht (gestoppter Container → state:'exited', v2, S-352)
  *   AC9  — VpsDockerControl.start/stop/restart/logs + Container-ID-Validierung + secret-freie Fehler
  *   AC10 — POST .../start|stop|restart → VpsDockerControl-Methode; GET .../logs → read-only
  *   AC11 — DELETE .../containers/:id: managed → undeploy; unmanaged → rm; protected → 422
  *   AC12 — AccessGuard-403 (ohne Access); CRED_ADMIN_EMAILS-403 für Mutationen; Audit-First
  *   AC13 — Kein SSH-Key/Token in Response; Fehlertexte secret-frei
+ *
+ * Covers (container-image-update, S-355/S-356):
+ *   AC1  — POST .../update: pull + recreate über DeployOrchestrator.deploy() mit unverändertem
+ *          Image-Ref; Erfolg → { result:'ok', deployment }
+ *   AC2  — Nie `docker restart`/VpsDockerControl.restart im Update-Pfad (grep-prüfbar)
+ *   AC3  — Unmanaged Container (kein Hostname-Label) → 422 not-managed, keine Mutation
+ *   AC4  — mitgesendetes Image/Tag im Body wird ignoriert — Bestands-Ref bestimmt den Deploy
+ *   AC7  — Fail-closed vor jeder Mutation: inspectContainer-Fehler, Container-not-found,
+ *          tunnelId nicht auflösbar, Run-Config ambiguous (update-unsafe) → kein pull/rm/run
+ *          (die 404-container-not-found-Variante deckt zugleich den Spec-Edge-Case "zwei
+ *          Updates gleichzeitig" ab: die zweite Anfrage trifft auf den bereits entfernten
+ *          Altcontainer und endet hier, ohne dass deploy() erneut aufgerufen wird)
+ *   AC8  — gestoppter Container (state:'exited'): Update ist zulässig, kein Block/Gate auf den
+ *          Zustand, Ergebnis weist den laufenden Container aus (S-356; AC9/pull-"up to date"
+ *          ist Saga-Verhalten und in test/DeployOrchestrator.test.js belegt, S-356)
+ *   AC10 — 403 ohne Berechtigung; Audit-First inkl. hostname (Audit-Write folgt dem reinen
+ *          Container-Read/psAll, da hostname erst dort bekannt wird; Audit-Fail → 500, keine
+ *          Mutation; abgelehnte Versuche wie unmanaged werden nicht auditiert, S-355 Iteration 2)
+ *   AC11 — LockoutGuard: protected Hostname → 422 protected-resource, kein Schritt
+ *   AC12 — Env-Werte aus inspectContainer erscheinen nie in Response/Audit
  *
  * Strategie:
  *   - VpsDockerControl als Mock injiziert (kein SSH-I/O)
@@ -15,7 +36,7 @@
  *   - AuditStore real (in-memory)
  *   - AccessGuard mit DEV_NO_ACCESS=1 für Nicht-403-Tests
  *   - vpsTargets: Map mit einem Test-Eintrag
- *   - vpsRegistry: Mock (getMachineIp gibt IP zurück)
+ *   - vpsRegistry: Mock (getMachineIp gibt IP zurück; getTunnelIdForHost für Update-Tests)
  */
 
 import { describe, it, afterEach, expect } from '@jest/globals';
@@ -38,6 +59,7 @@ const MANAGED_CONTAINER = {
   containerId: 'abc123def456',
   image: 'ghcr.io/org/app:v1',
   hostname: 'app.example.com',
+  state: 'running',
   status: 'Up 2 hours',
   hostPort: 8080,
   composeProject: null,
@@ -48,10 +70,22 @@ const UNMANAGED_CONTAINER = {
   containerId: 'fff000eee111',
   image: 'nginx:latest',
   hostname: null,
+  state: 'running',
   status: 'Up 1 hour',
   hostPort: 80,
   composeProject: null,
   managed: false,
+};
+
+const STOPPED_MANAGED_CONTAINER = {
+  containerId: 'stopped777',
+  image: 'ghcr.io/org/app:v1',
+  hostname: 'app.example.com',
+  state: 'exited',
+  status: 'Exited (0) 3 hours ago',
+  hostPort: null,
+  composeProject: null,
+  managed: true,
 };
 
 // ── Mock-Factories ─────────────────────────────────────────────────────────────
@@ -63,12 +97,17 @@ function makeMockDockerControl({
   restartResult = { result: 'ok' },
   logsResult = { result: 'ok', lines: ['line1', 'line2'] },
   rmResult = { result: 'ok' },
+  inspectContainerResult = {
+    result: 'ok',
+    config: { image: MANAGED_CONTAINER.image, env: {}, binds: [], labels: { 'cloudflare.tunnel-hostname': MANAGED_CONTAINER.hostname } },
+  },
   onPsAll = null,
   onStart = null,
   onStop = null,
   onRestart = null,
   onLogs = null,
   onRm = null,
+  onInspectContainer = null,
 } = {}) {
   return {
     async psAll(_vps, _opts) {
@@ -95,17 +134,30 @@ function makeMockDockerControl({
       if (onRm) onRm(containerId);
       return rmResult;
     },
+    async inspectContainer(_vps, containerId, _opts) {
+      if (onInspectContainer) onInspectContainer(containerId);
+      return inspectContainerResult;
+    },
   };
 }
 
 function makeMockOrchestrator({
   undeployResult = { result: 'ok' },
+  deployResult = {
+    result: 'ok',
+    deployment: { vps: '1.2.3.4', hostname: MANAGED_CONTAINER.hostname, image: MANAGED_CONTAINER.image, containerId: 'new123', hostPort: 8080, containerPort: 8080, status: 'running', routePresent: true, containerPresent: true, replaced: true },
+  },
   onUndeploy = null,
+  onDeploy = null,
 } = {}) {
   return {
     async undeploy(params) {
       if (onUndeploy) onUndeploy(params);
       return undeployResult;
+    },
+    async deploy(params) {
+      if (onDeploy) onDeploy(params);
+      return deployResult;
     },
   };
 }
@@ -255,6 +307,29 @@ describe('vpsContainerRouter — AC8: Container-Listing', () => {
 
     const withoutName = body.containers.find((c) => c.containerId === UNMANAGED_CONTAINER.containerId);
     expect(withoutName.name).toBe(UNMANAGED_CONTAINER.containerId); // Fallback auf containerId
+  });
+
+  it('S-352 AC8 — state-Feld wird durchgereicht: gestoppter Container ist in der Antwort enthalten und trägt state:"exited"', async () => {
+    server = await makeTestServer({
+      env: { DEV_NO_ACCESS: '1' },
+      dockerControl: makeMockDockerControl({
+        psAllResult: { result: 'ok', containers: [MANAGED_CONTAINER, STOPPED_MANAGED_CONTAINER] },
+      }),
+    });
+    const { status, body } = await server.doRequest({
+      path: '/api/vps/machines/hetzner/1/containers',
+    });
+    expect(status).toBe(200);
+    expect(body.result).toBe('ok');
+    expect(body.containers).toHaveLength(2);
+
+    const running = body.containers.find((c) => c.containerId === MANAGED_CONTAINER.containerId);
+    expect(running.state).toBe('running');
+
+    const stopped = body.containers.find((c) => c.containerId === STOPPED_MANAGED_CONTAINER.containerId);
+    expect(stopped).toBeDefined(); // gestoppter Container ist enthalten (kein Verschwinden)
+    expect(stopped.state).toBe('exited');
+    expect(stopped.managed).toBe(true); // managed-Prädikat unabhängig vom state (AC9b)
   });
 
   it('IONOS composite serverId via *splat', async () => {
@@ -849,6 +924,536 @@ describe('vpsContainerRouter — AC9: Container-ID-Validierung + secret-freie Fe
       method: 'POST',
       path: '/api/vps/machines/hetzner/1/containers/abc123def456/start',
     });
+    const bodyStr = JSON.stringify(body);
+    expect(bodyStr).not.toContain(FAKE_KEY);
+    expect(bodyStr).not.toContain(FAKE_CF_TOKEN);
+  });
+});
+
+// ── container-image-update AC1/AC2/AC3/AC4/AC7/AC10/AC11/AC12 (S-355) ───────────
+
+/** Registry-Mock mit auflösbarer tunnelId (analog managed-Remove-Testmuster). */
+function makeRegistryWithTunnel(tunnelId = 'tunnel-abc') {
+  return {
+    async getMachineIp() { return '1.2.3.4'; },
+    async getTunnelIdForHost() { return tunnelId; },
+  };
+}
+
+const SECRET_ENV_VALUE = 'GPG_PASSPHRASE_SHOULD_NOT_LEAK';
+
+describe('vpsContainerRouter — container-image-update: POST .../update', () => {
+  let server;
+
+  afterEach(async () => {
+    if (server) await server.cleanup();
+  });
+
+  // ── AC1: Erfolg — pull + recreate über DeployOrchestrator.deploy() ──────────
+
+  it('AC1 — managed Container: deploy() wird mit unverändertem Image-Ref aufgerufen, Erfolg → { result:"ok", deployment }', async () => {
+    let deployParams = null;
+    server = await makeTestServer({
+      env: { DEV_NO_ACCESS: '1' },
+      dockerControl: makeMockDockerControl({
+        psAllResult: { result: 'ok', containers: [MANAGED_CONTAINER] },
+        inspectContainerResult: {
+          result: 'ok',
+          config: { image: MANAGED_CONTAINER.image, env: {}, binds: [], labels: { 'cloudflare.tunnel-hostname': MANAGED_CONTAINER.hostname } },
+        },
+      }),
+      orchestrator: makeMockOrchestrator({
+        onDeploy: (params) => { deployParams = params; },
+      }),
+      registry: makeRegistryWithTunnel(),
+    });
+
+    const { status, body } = await server.doRequest({
+      method: 'POST',
+      path: `/api/vps/machines/hetzner/1/containers/${MANAGED_CONTAINER.containerId}/update`,
+    });
+
+    expect(status).toBe(200);
+    expect(body.result).toBe('ok');
+    expect(body.deployment).toBeDefined();
+    expect(deployParams).not.toBeNull();
+    expect(deployParams.image).toBe(MANAGED_CONTAINER.image); // unveränderter Bestands-Ref
+    expect(deployParams.hostname).toBe(MANAGED_CONTAINER.hostname);
+    expect(deployParams.tunnelId).toBe('tunnel-abc');
+  });
+
+  it('AC6/AC12 — Env des Bestands-Containers wird an deploy() als containerEnv durchgereicht, ohne in der Response zu erscheinen', async () => {
+    let deployParams = null;
+    server = await makeTestServer({
+      env: { DEV_NO_ACCESS: '1' },
+      dockerControl: makeMockDockerControl({
+        psAllResult: { result: 'ok', containers: [MANAGED_CONTAINER] },
+        inspectContainerResult: {
+          result: 'ok',
+          config: {
+            image: MANAGED_CONTAINER.image,
+            env: { GPG_PASSPHRASE: SECRET_ENV_VALUE },
+            binds: [],
+            labels: { 'cloudflare.tunnel-hostname': MANAGED_CONTAINER.hostname },
+          },
+        },
+      }),
+      orchestrator: makeMockOrchestrator({
+        onDeploy: (params) => { deployParams = params; },
+      }),
+      registry: makeRegistryWithTunnel(),
+    });
+
+    const { status, body } = await server.doRequest({
+      method: 'POST',
+      path: `/api/vps/machines/hetzner/1/containers/${MANAGED_CONTAINER.containerId}/update`,
+    });
+
+    expect(status).toBe(200);
+    expect(deployParams.containerEnv).toEqual({ GPG_PASSPHRASE: SECRET_ENV_VALUE });
+    // AC12: Env-Wert erscheint NIE in der Response
+    expect(JSON.stringify(body)).not.toContain(SECRET_ENV_VALUE);
+  });
+
+  // ── AC8 (container-image-update, S-356): gestoppter Container läuft danach ──
+
+  it('AC8 — gestoppter Container (state:"exited"): Update ist zulässig, deploy() wird aufgerufen, Ergebnis weist den laufenden Container aus', async () => {
+    // Der Update-Handler prüft container.state an keiner Stelle (kein Gate/Block für
+    // gestoppte Container) — die Saga (DeployOrchestrator.deploy → docker run) startet den
+    // neu aufgebauten Container unabhängig vom Vorzustand des Altcontainers immer.
+    let deployParams = null;
+    server = await makeTestServer({
+      env: { DEV_NO_ACCESS: '1' },
+      dockerControl: makeMockDockerControl({
+        psAllResult: { result: 'ok', containers: [STOPPED_MANAGED_CONTAINER] },
+      }),
+      orchestrator: makeMockOrchestrator({
+        onDeploy: (params) => { deployParams = params; },
+      }),
+      registry: makeRegistryWithTunnel(),
+    });
+
+    const { status, body } = await server.doRequest({
+      method: 'POST',
+      path: `/api/vps/machines/hetzner/1/containers/${STOPPED_MANAGED_CONTAINER.containerId}/update`,
+    });
+
+    expect(status).toBe(200);
+    expect(body.result).toBe('ok');
+    expect(deployParams).not.toBeNull(); // kein Block/Gate auf state:'exited'
+    expect(body.deployment.status).toBe('running'); // Saga startet den Container (AC8)
+  });
+
+  // ── AC2: Nie docker restart im Update-Pfad ───────────────────────────────────
+
+  it('AC2 — VpsDockerControl.restart wird im Update-Pfad zu keinem Zeitpunkt aufgerufen', async () => {
+    let restartCalled = false;
+    server = await makeTestServer({
+      env: { DEV_NO_ACCESS: '1' },
+      dockerControl: makeMockDockerControl({
+        psAllResult: { result: 'ok', containers: [MANAGED_CONTAINER] },
+        onRestart: () => { restartCalled = true; },
+      }),
+      orchestrator: makeMockOrchestrator(),
+      registry: makeRegistryWithTunnel(),
+    });
+
+    await server.doRequest({
+      method: 'POST',
+      path: `/api/vps/machines/hetzner/1/containers/${MANAGED_CONTAINER.containerId}/update`,
+    });
+
+    expect(restartCalled).toBe(false);
+  });
+
+  it('AC2 — Grep-Beleg: der Update-Routen-Handler im Quelltext ruft nirgends .restart( auf', async () => {
+    // Grep-prüfbar (Spec-Wortlaut AC2): isoliert den Router-Handler-Block für die
+    // /update-Route und stellt sicher, dass darin kein `.restart(`-Aufruf vorkommt.
+    const fs = await import('node:fs');
+    const src = fs.readFileSync(new URL('../src/vpsContainerRouter.js', import.meta.url), 'utf8');
+    const startIdx = src.indexOf("router.post('/api/vps/machines/:provider/*splat/containers/:containerId/update'");
+    expect(startIdx).toBeGreaterThan(-1);
+    const endIdx = src.indexOf("// ── Shared Handler: start/stop/restart", startIdx);
+    expect(endIdx).toBeGreaterThan(startIdx);
+    const updateHandlerSrc = src.slice(startIdx, endIdx);
+    expect(updateHandlerSrc).not.toMatch(/\.restart\(/);
+  });
+
+  // ── AC3: Nur managed ──────────────────────────────────────────────────────────
+
+  it('AC3 — unmanaged Container (kein Hostname-Label) → 422 not-managed, keine Mutation', async () => {
+    let deployCalled = false;
+    let inspectCalled = false;
+    server = await makeTestServer({
+      env: { DEV_NO_ACCESS: '1' },
+      dockerControl: makeMockDockerControl({
+        psAllResult: { result: 'ok', containers: [UNMANAGED_CONTAINER] },
+        onInspectContainer: () => { inspectCalled = true; },
+      }),
+      orchestrator: makeMockOrchestrator({
+        onDeploy: () => { deployCalled = true; },
+      }),
+      registry: makeRegistryWithTunnel(),
+    });
+
+    const { status, body } = await server.doRequest({
+      method: 'POST',
+      path: `/api/vps/machines/hetzner/1/containers/${UNMANAGED_CONTAINER.containerId}/update`,
+    });
+
+    expect(status).toBe(422);
+    expect(body.errorClass).toBe('not-managed');
+    expect(inspectCalled).toBe(false);
+    expect(deployCalled).toBe(false);
+  });
+
+  // ── AC4: Client-Image/Tag wird ignoriert ─────────────────────────────────────
+
+  it('AC4 — im Body mitgesendetes Image/Tag wird ignoriert, deploy() erhält den Bestands-Ref', async () => {
+    let deployParams = null;
+    server = await makeTestServer({
+      env: { DEV_NO_ACCESS: '1' },
+      dockerControl: makeMockDockerControl({
+        psAllResult: { result: 'ok', containers: [MANAGED_CONTAINER] },
+        inspectContainerResult: {
+          result: 'ok',
+          config: { image: MANAGED_CONTAINER.image, env: {}, binds: [], labels: { 'cloudflare.tunnel-hostname': MANAGED_CONTAINER.hostname } },
+        },
+      }),
+      orchestrator: makeMockOrchestrator({
+        onDeploy: (params) => { deployParams = params; },
+      }),
+      registry: makeRegistryWithTunnel(),
+    });
+
+    const { status } = await server.doRequest({
+      method: 'POST',
+      path: `/api/vps/machines/hetzner/1/containers/${MANAGED_CONTAINER.containerId}/update`,
+      body: { image: 'ghcr.io/evil/other:latest', tag: 'latest', tunnelId: 'fremde-tunnel-id' },
+    });
+
+    expect(status).toBe(200);
+    expect(deployParams.image).toBe(MANAGED_CONTAINER.image);
+    expect(deployParams.image).not.toBe('ghcr.io/evil/other:latest');
+    expect(deployParams.tunnelId).not.toBe('fremde-tunnel-id');
+  });
+
+  // ── AC7: Fail-closed vor jeder Mutation ──────────────────────────────────────
+
+  it('AC7 — Container nicht (mehr) vorhanden → 404 container-not-found, keine Mutation', async () => {
+    let deployCalled = false;
+    server = await makeTestServer({
+      env: { DEV_NO_ACCESS: '1' },
+      dockerControl: makeMockDockerControl({
+        psAllResult: { result: 'ok', containers: [] }, // Container zwischenzeitlich weg
+      }),
+      orchestrator: makeMockOrchestrator({
+        onDeploy: () => { deployCalled = true; },
+      }),
+      registry: makeRegistryWithTunnel(),
+    });
+
+    const { status, body } = await server.doRequest({
+      method: 'POST',
+      path: `/api/vps/machines/hetzner/1/containers/${MANAGED_CONTAINER.containerId}/update`,
+    });
+
+    expect(status).toBe(404);
+    expect(body.errorClass).toBe('container-not-found');
+    expect(deployCalled).toBe(false);
+  });
+
+  it('AC7 — inspectContainer schlägt fehl → 502, keine Mutation (kein deploy())', async () => {
+    let deployCalled = false;
+    server = await makeTestServer({
+      env: { DEV_NO_ACCESS: '1' },
+      dockerControl: makeMockDockerControl({
+        psAllResult: { result: 'ok', containers: [MANAGED_CONTAINER] },
+        inspectContainerResult: { result: 'error', errorClass: 'docker-failed', reason: 'docker-Kommando fehlgeschlagen' },
+      }),
+      orchestrator: makeMockOrchestrator({
+        onDeploy: () => { deployCalled = true; },
+      }),
+      registry: makeRegistryWithTunnel(),
+    });
+
+    const { status, body } = await server.doRequest({
+      method: 'POST',
+      path: `/api/vps/machines/hetzner/1/containers/${MANAGED_CONTAINER.containerId}/update`,
+    });
+
+    expect(status).toBe(502);
+    expect(body.errorClass).toBe('docker-failed');
+    expect(deployCalled).toBe(false);
+  });
+
+  it('AC7 — tunnelId nicht auflösbar (kein Tunnel registriert) → 422 tunnel-not-found, kein Fallback-Deploy', async () => {
+    let deployCalled = false;
+    server = await makeTestServer({
+      env: { DEV_NO_ACCESS: '1' },
+      dockerControl: makeMockDockerControl({
+        psAllResult: { result: 'ok', containers: [MANAGED_CONTAINER] },
+      }),
+      orchestrator: makeMockOrchestrator({
+        onDeploy: () => { deployCalled = true; },
+      }),
+      // Default-Registry hat KEIN getTunnelIdForHost → tunnelId bleibt null.
+      registry: makeMockRegistry(),
+    });
+
+    const { status, body } = await server.doRequest({
+      method: 'POST',
+      path: `/api/vps/machines/hetzner/1/containers/${MANAGED_CONTAINER.containerId}/update`,
+    });
+
+    expect(status).toBe(422);
+    expect(body.errorClass).toBe('tunnel-not-found');
+    expect(deployCalled).toBe(false);
+  });
+
+  it('AC7 — Run-Config nicht eindeutig abbildbar (mehrere Binds) → 422 update-unsafe, kein deploy()', async () => {
+    let deployCalled = false;
+    server = await makeTestServer({
+      env: { DEV_NO_ACCESS: '1' },
+      dockerControl: makeMockDockerControl({
+        psAllResult: { result: 'ok', containers: [MANAGED_CONTAINER] },
+        inspectContainerResult: {
+          result: 'ok',
+          config: {
+            image: MANAGED_CONTAINER.image,
+            env: {},
+            binds: ['/home/user/apps/app1/config:/app/config', '/home/user/apps/app2/config:/app/config2'],
+            labels: { 'cloudflare.tunnel-hostname': MANAGED_CONTAINER.hostname },
+          },
+        },
+      }),
+      orchestrator: makeMockOrchestrator({
+        onDeploy: () => { deployCalled = true; },
+      }),
+      registry: makeRegistryWithTunnel(),
+    });
+
+    const { status, body } = await server.doRequest({
+      method: 'POST',
+      path: `/api/vps/machines/hetzner/1/containers/${MANAGED_CONTAINER.containerId}/update`,
+    });
+
+    expect(status).toBe(422);
+    expect(body.errorClass).toBe('update-unsafe');
+    expect(deployCalled).toBe(false);
+  });
+
+  // ── AC10: Authz + Audit-First ─────────────────────────────────────────────────
+
+  it('AC10 — ohne CRED_ADMIN_EMAILS-Berechtigung → 403, keine Mutation', async () => {
+    let deployCalled = false;
+    server = await makeTestServer({
+      env: { DEV_NO_ACCESS: '1', CRED_ADMIN_EMAILS: 'admin@example.com' },
+      dockerControl: makeMockDockerControl({
+        psAllResult: { result: 'ok', containers: [MANAGED_CONTAINER] },
+      }),
+      orchestrator: makeMockOrchestrator({
+        onDeploy: () => { deployCalled = true; },
+      }),
+      registry: makeRegistryWithTunnel(),
+    });
+
+    const { status } = await server.doRequest({
+      method: 'POST',
+      path: `/api/vps/machines/hetzner/1/containers/${MANAGED_CONTAINER.containerId}/update`,
+    });
+
+    expect(status).toBe(403);
+    expect(deployCalled).toBe(false);
+  });
+
+  it('AC10 — Audit-First: Audit-Eintrag enthält hostname und wird NACH psAll (Hostname-Auflösung, reiner Read) aber VOR inspectContainer/LockoutGuard/deploy geschrieben', async () => {
+    // Iteration-2-Fix: AC10 verlangt hostname im Audit-Eintrag — der ist erst nach dem
+    // Container-Read (psAll) bekannt. psAll ist ein reiner Read, "Audit-First" bleibt im
+    // Sinne der AC gewahrt: der Eintrag liegt weiterhin VOR jeder Mutation.
+    const auditStore = new AuditStore();
+    const entries = [];
+    const origRecord = auditStore.record.bind(auditStore);
+    let inspectCalled = false;
+    let deployCalled = false;
+
+    auditStore.record = (entry) => {
+      entries.push({ ...entry, inspectAlreadyCalled: inspectCalled, deployAlreadyCalled: deployCalled });
+      return origRecord(entry);
+    };
+
+    server = await makeTestServer({
+      env: { DEV_NO_ACCESS: '1' },
+      audit: auditStore,
+      dockerControl: makeMockDockerControl({
+        psAllResult: { result: 'ok', containers: [MANAGED_CONTAINER] },
+        onInspectContainer: () => { inspectCalled = true; },
+      }),
+      orchestrator: makeMockOrchestrator({
+        onDeploy: () => { deployCalled = true; },
+      }),
+      registry: makeRegistryWithTunnel(),
+    });
+
+    await server.doRequest({
+      method: 'POST',
+      path: `/api/vps/machines/hetzner/1/containers/${MANAGED_CONTAINER.containerId}/update`,
+    });
+
+    expect(entries.length).toBeGreaterThan(0);
+    const actionEntry = entries.find((e) => e.command?.includes('update'));
+    expect(actionEntry).toBeDefined();
+    expect(actionEntry.command).toContain(MANAGED_CONTAINER.hostname); // AC10: hostname im Audit-Eintrag
+    expect(actionEntry.inspectAlreadyCalled).toBe(false); // Audit VOR inspectContainer
+    expect(actionEntry.deployAlreadyCalled).toBe(false); // Audit VOR deploy() (VOR LockoutGuard)
+  });
+
+  it('AC10 — Audit-Fail → 500, keine Mutation (psAll bereits gelaufen — reiner Read; kein inspectContainer/deploy)', async () => {
+    const auditStore = new AuditStore();
+    auditStore.record = () => { throw new Error('Audit-Store-Fehler'); };
+
+    let psAllCalled = false;
+    let inspectCalled = false;
+    let deployCalled = false;
+    server = await makeTestServer({
+      env: { DEV_NO_ACCESS: '1' },
+      audit: auditStore,
+      dockerControl: makeMockDockerControl({
+        psAllResult: { result: 'ok', containers: [MANAGED_CONTAINER] },
+        onPsAll: () => { psAllCalled = true; },
+        onInspectContainer: () => { inspectCalled = true; },
+      }),
+      orchestrator: makeMockOrchestrator({
+        onDeploy: () => { deployCalled = true; },
+      }),
+      registry: makeRegistryWithTunnel(),
+    });
+
+    const { status } = await server.doRequest({
+      method: 'POST',
+      path: `/api/vps/machines/hetzner/1/containers/${MANAGED_CONTAINER.containerId}/update`,
+    });
+
+    expect(status).toBe(500);
+    expect(psAllCalled).toBe(true); // reiner Read, läuft VOR dem (fehlschlagenden) Audit-Write
+    expect(inspectCalled).toBe(false); // aber keine weitere Aktion danach
+    expect(deployCalled).toBe(false); // insbesondere keine Mutation
+  });
+
+  it('AC10 — Audit-Fail bei unmanaged Container: kein Audit-Write nötig (Ablehnung vor Audit), keine Mutation', async () => {
+    // unmanaged Container wird VOR dem Audit-Write abgelehnt (kein hostname zum Auditieren
+    // nötig) — der Audit-Store wird für diesen abgelehnten Versuch gar nicht aufgerufen.
+    const auditStore = new AuditStore();
+    let auditCalled = false;
+    const origRecord = auditStore.record.bind(auditStore);
+    auditStore.record = (entry) => { auditCalled = true; return origRecord(entry); };
+
+    let deployCalled = false;
+    server = await makeTestServer({
+      env: { DEV_NO_ACCESS: '1' },
+      audit: auditStore,
+      dockerControl: makeMockDockerControl({
+        psAllResult: { result: 'ok', containers: [UNMANAGED_CONTAINER] },
+      }),
+      orchestrator: makeMockOrchestrator({
+        onDeploy: () => { deployCalled = true; },
+      }),
+      registry: makeRegistryWithTunnel(),
+    });
+
+    const { status, body } = await server.doRequest({
+      method: 'POST',
+      path: `/api/vps/machines/hetzner/1/containers/${UNMANAGED_CONTAINER.containerId}/update`,
+    });
+
+    expect(status).toBe(422);
+    expect(body.errorClass).toBe('not-managed');
+    expect(auditCalled).toBe(false); // kein Audit-Eintrag für abgelehnten (nicht-mutierenden) Versuch
+    expect(deployCalled).toBe(false);
+  });
+
+  // ── AC11: LockoutGuard ────────────────────────────────────────────────────────
+
+  it('AC11 — protected Hostname (DEVGUI_HOSTNAME) → 422 protected-resource, kein deploy()', async () => {
+    let deployCalled = false;
+    server = await makeTestServer({
+      env: { DEV_NO_ACCESS: '1', DEVGUI_HOSTNAME: MANAGED_CONTAINER.hostname },
+      dockerControl: makeMockDockerControl({
+        psAllResult: { result: 'ok', containers: [MANAGED_CONTAINER] },
+      }),
+      orchestrator: makeMockOrchestrator({
+        onDeploy: () => { deployCalled = true; },
+      }),
+      registry: makeRegistryWithTunnel(),
+    });
+
+    const { status, body } = await server.doRequest({
+      method: 'POST',
+      path: `/api/vps/machines/hetzner/1/containers/${MANAGED_CONTAINER.containerId}/update`,
+    });
+
+    expect(status).toBe(422);
+    expect(body.errorClass).toBe('protected-resource');
+    expect(deployCalled).toBe(false);
+  });
+
+  // ── AC12: Kein Leak ───────────────────────────────────────────────────────────
+
+  it('AC12 — Env-Werte aus inspectContainer erscheinen nie im Audit-Eintrag', async () => {
+    const auditStore = new AuditStore();
+    const entries = [];
+    const origRecord = auditStore.record.bind(auditStore);
+    auditStore.record = (entry) => {
+      entries.push(entry);
+      return origRecord(entry);
+    };
+
+    server = await makeTestServer({
+      env: { DEV_NO_ACCESS: '1' },
+      audit: auditStore,
+      dockerControl: makeMockDockerControl({
+        psAllResult: { result: 'ok', containers: [MANAGED_CONTAINER] },
+        inspectContainerResult: {
+          result: 'ok',
+          config: {
+            image: MANAGED_CONTAINER.image,
+            env: { GPG_PASSPHRASE: SECRET_ENV_VALUE },
+            binds: [],
+            labels: { 'cloudflare.tunnel-hostname': MANAGED_CONTAINER.hostname },
+          },
+        },
+      }),
+      orchestrator: makeMockOrchestrator(),
+      registry: makeRegistryWithTunnel(),
+    });
+
+    await server.doRequest({
+      method: 'POST',
+      path: `/api/vps/machines/hetzner/1/containers/${MANAGED_CONTAINER.containerId}/update`,
+    });
+
+    expect(entries.length).toBeGreaterThan(0);
+    for (const entry of entries) {
+      expect(JSON.stringify(entry)).not.toContain(SECRET_ENV_VALUE);
+    }
+  });
+
+  it('AC12 — Fehler-Response bei inspectContainer-Fehlschlag enthält keinen SSH-Key/Token', async () => {
+    server = await makeTestServer({
+      env: { DEV_NO_ACCESS: '1' },
+      dockerControl: makeMockDockerControl({
+        psAllResult: { result: 'ok', containers: [MANAGED_CONTAINER] },
+        inspectContainerResult: { result: 'error', errorClass: 'auth-failed', reason: 'SSH-Auth fehlgeschlagen' },
+      }),
+      orchestrator: makeMockOrchestrator(),
+      registry: makeRegistryWithTunnel(),
+    });
+
+    const { body } = await server.doRequest({
+      method: 'POST',
+      path: `/api/vps/machines/hetzner/1/containers/${MANAGED_CONTAINER.containerId}/update`,
+    });
+
     const bodyStr = JSON.stringify(body);
     expect(bodyStr).not.toContain(FAKE_KEY);
     expect(bodyStr).not.toContain(FAKE_CF_TOKEN);

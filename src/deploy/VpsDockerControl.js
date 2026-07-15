@@ -13,7 +13,14 @@
  *   - run(vps, image, hostname, opts?) — docker run mit Bindungs-Label + --restart unless-stopped
  *   - rm(vps, containerId)     — docker rm -f auf dem VPS
  *   - ps(vps)                  — laufende Container mit cloudflare.tunnel-hostname-Label
- *   - psAll(vps)               — alle laufenden Container; managed (mit Label) + unmanaged (ohne Label, hostname: null)
+ *   - psAll(vps)               — ALLE Container (laufend + gestoppt, `docker ps -a`); managed
+ *                                 (mit Label) + unmanaged (ohne Label, hostname: null); je Eintrag
+ *                                 ein maschinenlesbares `state` (v3, `{{.State}}`; Vertrag geteilt mit
+ *                                 [[cloudflare-reconciliation]] AC3b und [[vps-container-overview]] AC9b)
+ *   - inspectContainer(vps, containerId, opts?) — Run-Config eines BESTEHENDEN Containers
+ *                                (container-image-update AC5): { image, env, binds, labels } via
+ *                                `docker inspect <containerId>`. GETRENNT von `inspect(vps, image)`
+ *                                (Image-ExposedPorts, deploy-lifecycle AC13) — ersetzt sie NICHT.
  *
  * SSH-Transport: ssh2 (analog VpsProvisioner — kein System-ssh binary nötig).
  *
@@ -92,7 +99,12 @@ const CONFIG_MOUNT_PATH_RE = /^\/[A-Za-z0-9._/-]*$/;
  * @property {string}      [name]        - Docker-Container-Name (aus {{.Names}}); nur in psAll() gefüllt
  * @property {string}      image         - Image-Name
  * @property {string|null} hostname      - cloudflare.tunnel-hostname-Label-Wert; null für unmanaged Container
- * @property {string}      status        - Container-Status (z.B. "Up 2 hours")
+ * @property {string}      status        - Container-Status, frei formatierter Menschen-Text (z.B. "Up 2 hours" /
+ *   "Exited (0) 3 hours ago") — **kein** Zustands-Prädikat, nie geparst (siehe `state`).
+ * @property {string}      [state]       - maschinenlesbares Zustands-Feld aus `{{.State}}` (v3, nur in psAll()
+ *   gefüllt): `running` | `exited` | `created` | `paused` | `restarting` | `dead`. Laufend-Prädikat:
+ *   `state === 'running'`. Vertrag geteilt mit [[cloudflare-reconciliation]] AC3b/AC7b und
+ *   [[vps-container-overview]] AC9b — EIN Read-Model für GUI und Reconcile-Cron.
  * @property {number|null} hostPort      - gemappter Host-Port (aus Port-Mapping)
  * @property {string|null} composeProject - com.docker.compose.project-Label-Wert; null für Non-Stack-Container.
  *   Nur in psAll() ausgefüllt (für stack-aware Reconciliation, AC13).
@@ -106,6 +118,25 @@ const CONFIG_MOUNT_PATH_RE = /^\/[A-Za-z0-9._/-]*$/;
  * @property {PsEntry[]}    [containers]  - laufende managed Container bei Erfolg
  * @property {string}       [reason]      - Fehlergrund ohne Geheim-Leak
  * @property {string}       [errorClass]  - maschinenlesbare Fehlerklasse
+ */
+
+/**
+ * @typedef {object} ContainerRunConfig
+ * @property {string} image - Image-Ref des Containers (inkl. Tag, exakt wie beim letzten `docker run`)
+ * @property {Record<string,string>} env - Container-Env als Key/Value (container-image-update AC5/AC6).
+ *   **Kann Secrets enthalten** (z.B. GPG_PASSPHRASE, [[deploy-bitwarden-gpg-injection]]) — server-intern/
+ *   transient, NIE in Response/Log/Audit/WS/Frontend weiterreichen (AC12, Floor).
+ * @property {string[]} binds - rohe `docker inspect .HostConfig.Binds`-Einträge (`host:container[:mode]`);
+ *   leeres Array wenn kein Bind-Mount vorhanden.
+ * @property {Record<string,string>} labels - Container-Labels (u.a. `cloudflare.tunnel-hostname`).
+ */
+
+/**
+ * @typedef {object} InspectContainerResult
+ * @property {'ok'|'error'} result
+ * @property {ContainerRunConfig} [config]
+ * @property {string} [reason]      - Fehlergrund ohne Geheim-Leak
+ * @property {string} [errorClass]  - maschinenlesbare Fehlerklasse
  */
 
 /**
@@ -259,6 +290,111 @@ export class VpsDockerControl {
       return {
         result: 'error',
         ports: [],
+        reason: sanitizeErrorReason(errorClass),
+        errorClass,
+      };
+    }
+  }
+
+  /**
+   * Liest die Run-Config eines BESTEHENDEN Containers — laufend oder gestoppt — via
+   * `docker inspect <containerId>` (container-image-update AC5): `{ image, env, binds, labels }`.
+   *
+   * **Strikt getrennt** von `inspect(vps, image)` (die inspiziert ein IMAGE auf ExposedPorts,
+   * deploy-lifecycle AC13) — diese Methode inspiziert einen CONTAINER und ersetzt `inspect()` nicht.
+   *
+   * Grundlage für die Run-Config-Rekonstruktion beim Container-Update (container-image-update
+   * AC6): es gibt keinen Deploy-State-Store (ADR-005) — der bestehende Container ist die einzige
+   * Quelle seiner eigenen Run-Config (Env, Mounts, Label).
+   *
+   * Ein einziger `docker inspect --format`-Aufruf liefert alle vier Felder als EIN JSON-Objekt
+   * (Go-Template `{{json .X}}` produziert je Feld valides JSON-Literal; zusammengesetzt ergibt das
+   * ein valides JSON-Gesamtobjekt — kein zweiter SSH-Roundtrip nötig).
+   *
+   * Security (Floor, AC12, HART): `config.env` kann Secrets enthalten (z.B. GPG_PASSPHRASE,
+   * [[deploy-bitwarden-gpg-injection]]). Der Aufrufer MUSS sie server-intern/transient behandeln —
+   * NIE in einer HTTP-Response, Log, Audit-Eintrag, WS-Stream oder Frontend-Bundle.
+   *
+   * @param {VpsTarget} vps
+   * @param {string}    containerId
+   * @param {object}    [opts]
+   * @param {string}    [opts.hostFingerprint]    - SHA-256-Fingerprint für Host-Key-Verifikation
+   * @param {Function}  [opts._sshClientFactory] - testbare SSH-Client-Fabrik (für Unit-Tests)
+   * @returns {Promise<InspectContainerResult>}
+   */
+  async inspectContainer(vps, containerId, opts = {}) {
+    const privateKey = await this.#loadPrivateKey(vps.targetUser);
+    if (!privateKey.ok) return { result: 'error', ...privateKey.error };
+
+    // Security: containerId validieren wie bei rm() (nur alphanumerische Zeichen + Bindestrich/
+    // Unterstrich) — BEVOR er in das Kommando eingebettet wird.
+    if (!isValidContainerId(containerId)) {
+      return {
+        result: 'error',
+        reason: 'Ungültige Container-ID (nur alphanumerische Zeichen erlaubt)',
+        errorClass: 'error',
+      };
+    }
+
+    // Format-String enthält Double-Quotes/Braces/Spaces — via shellEscape (Single-Quote-Escaping)
+    // absichern, analog escapedImage/formatStr in ps()/psAll().
+    const format = '{"image":{{json .Config.Image}},"env":{{json .Config.Env}},"binds":{{json .HostConfig.Binds}},"labels":{{json .Config.Labels}}}';
+    const cmd = `docker inspect --format ${shellEscape(format)} ${containerId}`;
+
+    try {
+      const stdout = await runSshCommand({
+        privateKey: privateKey.value,
+        host: vps.host,
+        port: vps.port ?? 22,
+        targetUser: vps.targetUser,
+        command: cmd,
+        timeoutMs: EXEC_TIMEOUT_MS,
+        hostFingerprint: opts.hostFingerprint ?? null,
+        sshClientFactory: opts._sshClientFactory,
+      });
+
+      let parsed;
+      try {
+        parsed = JSON.parse(stdout.trim());
+      } catch {
+        return {
+          result: 'error',
+          reason: 'Docker-Inspect-Ausgabe konnte nicht gelesen werden',
+          errorClass: 'docker-failed',
+        };
+      }
+      if (!parsed || typeof parsed !== 'object') {
+        return {
+          result: 'error',
+          reason: 'Docker-Inspect-Ausgabe konnte nicht gelesen werden',
+          errorClass: 'docker-failed',
+        };
+      }
+
+      const image = typeof parsed.image === 'string' ? parsed.image : '';
+
+      // .Config.Env ist ein Array von "KEY=VALUE"-Strings — in ein Record umwandeln.
+      // split auf das ERSTE '=' (Werte können selbst '=' enthalten, z.B. Base64-Padding).
+      const envList = Array.isArray(parsed.env) ? parsed.env : [];
+      const env = {};
+      for (const entry of envList) {
+        if (typeof entry !== 'string') continue;
+        const eqIdx = entry.indexOf('=');
+        if (eqIdx === -1) continue;
+        env[entry.slice(0, eqIdx)] = entry.slice(eqIdx + 1);
+      }
+
+      const binds = Array.isArray(parsed.binds)
+        ? parsed.binds.filter((b) => typeof b === 'string')
+        : [];
+
+      const labels = (parsed.labels && typeof parsed.labels === 'object') ? parsed.labels : {};
+
+      return { result: 'ok', config: { image, env, binds, labels } };
+    } catch (err) {
+      const errorClass = classifyError(err);
+      return {
+        result: 'error',
         reason: sanitizeErrorReason(errorClass),
         errorClass,
       };
@@ -740,11 +876,22 @@ export class VpsDockerControl {
   }
 
   /**
-   * Listet ALLE laufenden Container auf dem VPS — managed (mit cloudflare.tunnel-hostname-Label)
-   * und unmanaged (ohne das Label).
+   * Listet ALLE Container auf dem VPS — laufend UND gestoppt (`docker ps -a`, v3,
+   * Datenverlust-Fix) — managed (mit cloudflare.tunnel-hostname-Label) und unmanaged
+   * (ohne das Label).
    *
-   * Managed Container haben `hostname` gesetzt (aus dem Label).
+   * Managed Container haben `hostname` gesetzt (aus dem Label) — **unabhängig vom `state`**.
    * Unmanaged Container haben `hostname: null`.
+   *
+   * v3 (Datenverlust-Fix, cloudflare-reconciliation AC3b / vps-container-overview AC9b):
+   * liest `docker ps -a` (nicht `docker ps`) und liefert je Container ein maschinenlesbares
+   * `state` aus `{{.State}}` (`running`|`exited`|`created`|`paused`|`restarting`|`dead`).
+   * Laufend-Prädikat: `state === 'running'` — der frei formatierte `status`-Text
+   * ("Up 2 hours") wird NIE als Zustands-Prädikat geparst. Vorher (`docker ps` ohne `-a`)
+   * blendete der Read gestoppte Container komplett aus — ein Datenverlust-Bug (ein gestoppter
+   * managed Container erschien nicht mehr, seine Route wurde fälschlich als verwaist gewertet).
+   * Dieses Read-Model ist geteilt mit [[cloudflare-reconciliation]] (dortige AC3b/AC7b) und
+   * [[vps-container-overview]] (dortige AC8/AC9b) — EINE Boundary, EIN Read-Model.
    *
    * Stack-aware (AC13): gibt zusätzlich das `com.docker.compose.project`-Label aus
    * (`composeProject`-Feld in PsEntry). Interne Stack-Container (kein
@@ -764,14 +911,15 @@ export class VpsDockerControl {
     const privateKey = await this.#loadPrivateKey(vps.targetUser);
     if (!privateKey.ok) return { result: 'error', ...privateKey.error };
 
-    // docker ps ohne --filter gibt alle laufenden Container zurück.
-    // Format: ID, Names, Image, Ports, Status, Label cloudflare.tunnel-hostname, Label com.docker.compose.project
+    // docker ps -a (v3, Datenverlust-Fix): -a liest laufende UND gestoppte Container.
+    // Format: ID, Names, Image, Ports, Status, State, Label cloudflare.tunnel-hostname, Label com.docker.compose.project
     // Der Label-Wert ist leer ("") für Container ohne das jeweilige Label.
     // I1: {{.Names}} liefert den lesbaren Container-Namen (z.B. "my-app_web_1").
+    // {{.State}} (v3) liefert das maschinenlesbare Zustands-Feld — NIE den status-Text parsen.
     // AC13: com.docker.compose.project-Label für stack-aware Reconciliation mitgelesen.
-    const formatStr = shellEscape('{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Ports}}\t{{.Status}}\t{{.Label "cloudflare.tunnel-hostname"}}\t{{.Label "com.docker.compose.project"}}');
+    const formatStr = shellEscape('{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Ports}}\t{{.Status}}\t{{.State}}\t{{.Label "cloudflare.tunnel-hostname"}}\t{{.Label "com.docker.compose.project"}}');
     const cmd = [
-      'docker', 'ps',
+      'docker', 'ps', '-a',
       '--format', formatStr,
     ].join(' ');
 
@@ -1238,16 +1386,20 @@ function parsePsOutput(output) {
 }
 
 /**
- * Parst die Ausgabe von `docker ps --format '...'` für ALLE Container (kein Label-Filter).
- * Container mit cloudflare.tunnel-hostname-Label → hostname = Label-Wert (managed).
- * Container OHNE das Label → hostname = null (unmanaged).
+ * Parst die Ausgabe von `docker ps -a --format '...'` für ALLE Container (laufend UND
+ * gestoppt, kein Label-Filter). Container mit cloudflare.tunnel-hostname-Label →
+ * hostname = Label-Wert (managed). Container OHNE das Label → hostname = null (unmanaged).
+ * Das Managed-Prädikat ist unabhängig vom `state`.
  *
  * I1 (name-Feld): Format enthält {{.Names}} → lesbarer Container-Name in PsEntry.name.
+ * v3 (state-Feld, Datenverlust-Fix): Format enthält {{.State}} → maschinenlesbares
+ * `state` (`running`|`exited`|`created`|`paused`|`restarting`|`dead`). Laufend-Prädikat
+ * ist ausschließlich `state === 'running'` — der `status`-Text wird nie geparst.
  * AC13 (stack-aware): parst zusätzlich das com.docker.compose.project-Label.
  * Interne Stack-Container haben hostname: null (kein cloudflare.tunnel-hostname) aber
  * composeProject gesetzt — sie werden von ReconciliationJob nie geroutet/als verwaist gewertet.
  *
- * Format-Reihenfolge: ID\tNames\tImage\tPorts\tStatus\tCF-Label\tCompose-Label
+ * Format-Reihenfolge: ID\tNames\tImage\tPorts\tStatus\tState\tCF-Label\tCompose-Label
  *
  * @param {string} output
  * @returns {PsEntry[]}
@@ -1263,8 +1415,9 @@ function parsePsAllOutput(output) {
     const image = (parts[2] ?? '').trim();
     const ports = (parts[3] ?? '').trim();
     const status = (parts[4] ?? '').trim();
-    const cfLabelValue = (parts[5] ?? '').trim();
-    const composeProjValue = (parts[6] ?? '').trim();
+    const state = (parts[5] ?? '').trim() || undefined; // v3: maschinenlesbares Zustands-Feld
+    const cfLabelValue = (parts[6] ?? '').trim();
+    const composeProjValue = (parts[7] ?? '').trim();
 
     if (!containerId) continue;
 
@@ -1281,6 +1434,7 @@ function parsePsAllOutput(output) {
 
     const entry = { containerId, image, hostname, status, hostPort, composeProject };
     if (name) entry.name = name; // I1: nur setzen wenn vorhanden
+    if (state) entry.state = state; // v3: nur setzen wenn vorhanden
     containers.push(entry);
   }
 

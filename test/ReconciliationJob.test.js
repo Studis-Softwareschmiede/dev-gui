@@ -4,14 +4,24 @@
  * Covers (cloudflare-reconciliation):
  *   AC2  — reconcile() is deterministically callable; produces ReconcileReport for manual trigger.
  *   AC3  — orphaned (non-protected) route → removeRoute() called; idempotent (second run = no-op).
+ *   AC3b — (v3, Datenverlust-Fix) stopped (exited) managed container + route → no-op, no removeRoute/
+ *          addRouteOnly, no deleteDnsRecord — Regressionstest zum stillen Route-Verlust über Nacht.
  *   AC4  — protected route → never deleted (removeRoute NOT called).
  *   AC5  — managed container without route → addRouteOnly() called (shared ADR-012 path).
  *   AC5b — protected hostname on managed container → protectedSkipped, no addRouteOnly().
  *   AC5c — unmanaged containers → only reportedUnmanaged, no heal, no rm.
+ *   AC5d — (v3) stopped managed container without route → never healed, no addRouteOnly(),
+ *          hostname appears in `stoppedSkipped`, not in `errors`; checkedContainers counts it;
+ *          idempotent across repeated runs.
  *   AC6  — VPS failure (ps error) → other VPS continue; degraded VPS reported in errors.
  *   AC7  — ps() failure → fail-closed: no removeRoute, no addRouteOnly for that VPS.
- *   AC7  — ambiguous binding (two managed containers → same hostname) → ambiguous, not healed.
- *   AC8  — ReconcileReport produced; getLastReport()/getReports()/getNotices() work.
+ *   AC7  — ambiguous binding (two RUNNING managed containers → same hostname) → ambiguous, not healed.
+ *   AC7b — (v3) exactly one running + N stopped zombies on same hostname → NOT ambiguous; healing/
+ *          protection proceed via the running container; zombie-only (no running) hostname → also
+ *          not ambiguous, route stays protected (AC3b), no heal (AC5d); two RUNNING containers with
+ *          a zombie alongside → still ambiguous (regression guard: zombies must not mask real ambiguity).
+ *   AC8  — ReconcileReport produced; getLastReport()/getReports()/getNotices() work; `stoppedSkipped[]`
+ *          is additive (present, empty by default, populated for stopped-without-route hostnames).
  *   AC8b — ReconcileNotice produced per action; getNotices() returns them.
  *   AC9  — LockoutGuard-Hard-Block via DeployOrchestrator.addRouteOnly (protected → error).
  *   AC9  — Audit-First: AuditStore.record() called before any mutation.
@@ -42,6 +52,8 @@
  *
  * Covers (deploymentsRouter — reconcile endpoints):
  *   POST /api/deployments/reconcile — AC2: 200 { result: "ok", report }; 403 without auth.
+ *   POST /api/deployments/reconcile — AC8 (v3): `stoppedSkipped[]` round-trips through the HTTP
+ *          response body unchanged (HTTP-level regression guard for the new additive report field).
  *   GET  /api/deployments/reconcile/last — returns last report.
  *   GET  /api/deployments/reconcile/reports — returns reports array.
  *   GET  /api/deployments/reconcile/notices — returns notices array.
@@ -297,7 +309,7 @@ describe('ReconciliationJob', () => {
           psResult: {
             result: 'ok',
             containers: [
-              { hostname: 'app.example.com', containerId: 'abc123', image: 'img', status: 'Up', hostPort: 8080 },
+              { hostname: 'app.example.com', containerId: 'abc123', image: 'img', status: 'Up', state: 'running', hostPort: 8080 },
             ],
           },
           listRoutesResult: [], // No routes
@@ -313,7 +325,7 @@ describe('ReconciliationJob', () => {
 
     it('is idempotent: second run with route present does not call addRouteOnly again', async () => {
       const containers = [
-        { hostname: 'app.example.com', containerId: 'abc123', image: 'img', status: 'Up', hostPort: 8080 },
+        { hostname: 'app.example.com', containerId: 'abc123', image: 'img', status: 'Up', state: 'running', hostPort: 8080 },
       ];
       const { job, stubs } = makeJob({
         stubs: {
@@ -337,6 +349,220 @@ describe('ReconciliationJob', () => {
     });
   });
 
+  // ── AC3b (v3, Datenverlust-Fix): stopped managed container + route → no-op ────
+
+  describe('AC3b — stopped managed container with route is never treated as orphaned (Datenverlust-Regressionstest)', () => {
+    it('does NOT call removeRoute() for a stopped (exited) managed container that still has a route', async () => {
+      // Regressionstest zum v3-Datenverlust-Bug: vor v3 sah psAll() (docker ps ohne -a) diesen
+      // Container gar nicht → die Route galt fälschlich als verwaist und wurde gelöscht.
+      const { job, stubs } = makeJob({
+        stubs: {
+          psResult: {
+            result: 'ok',
+            containers: [
+              { hostname: 'stopped.example.com', containerId: 'abc', image: 'img', status: 'Exited (0) 3 hours ago', state: 'exited', hostPort: 8080 },
+            ],
+          },
+          listRoutesResult: [
+            { hostname: 'stopped.example.com', service: 'http://localhost:8080', tunnelId: 'tunnel-1', protected: false },
+          ],
+        },
+      });
+
+      const report = await job.reconcile('manual');
+      expect(stubs.cloudflareApi.removeRoute).not.toHaveBeenCalled();
+      expect(stubs.cloudflareApi.deleteDnsRecord).not.toHaveBeenCalled();
+      expect(report.perVps[0].removedRoutes).toHaveLength(0);
+      // Nicht in stoppedSkipped — die Route besteht bereits, es gibt nichts zu überspringen
+      expect(report.perVps[0].stoppedSkipped).not.toContain('stopped.example.com');
+    });
+
+    it('does NOT call addRouteOnly() either — a stopped container with an existing route is a pure no-op', async () => {
+      const { job, stubs } = makeJob({
+        stubs: {
+          psResult: {
+            result: 'ok',
+            containers: [
+              { hostname: 'stopped.example.com', containerId: 'abc', image: 'img', status: 'Exited (0)', state: 'exited', hostPort: 8080 },
+            ],
+          },
+          listRoutesResult: [
+            { hostname: 'stopped.example.com', service: 'http://localhost:8080', tunnelId: 'tunnel-1', protected: false },
+          ],
+        },
+      });
+
+      await job.reconcile('manual');
+      expect(stubs.orchestrator.addRouteOnly).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── AC5d (v3): stopped managed container WITHOUT route → never healed, stoppedSkipped ──
+
+  describe('AC5d — stopped managed container without route → not healed, stoppedSkipped', () => {
+    it('does NOT call addRouteOnly() for a stopped managed container without a route; records stoppedSkipped', async () => {
+      const { job, stubs } = makeJob({
+        stubs: {
+          psResult: {
+            result: 'ok',
+            containers: [
+              { hostname: 'stopped-new.example.com', containerId: 'abc', image: 'img', status: 'Exited (0)', state: 'exited', hostPort: 8080 },
+            ],
+          },
+          listRoutesResult: [], // no route
+        },
+      });
+
+      const report = await job.reconcile('manual');
+      expect(stubs.orchestrator.addRouteOnly).not.toHaveBeenCalled();
+      expect(report.perVps[0].stoppedSkipped).toContain('stopped-new.example.com');
+      expect(report.perVps[0].createdRoutes).toHaveLength(0);
+      // stoppedSkipped is not an error condition
+      expect(report.perVps[0].errors).toHaveLength(0);
+    });
+
+    it('checkedContainers counts a stopped managed container too (v3: laufend UND gestoppt)', async () => {
+      const { job } = makeJob({
+        stubs: {
+          psResult: {
+            result: 'ok',
+            containers: [
+              { hostname: 'stopped-new.example.com', containerId: 'abc', image: 'img', status: 'Exited (0)', state: 'exited', hostPort: 8080 },
+            ],
+          },
+          listRoutesResult: [],
+        },
+      });
+
+      const report = await job.reconcile('manual');
+      expect(report.perVps[0].checkedContainers).toBe(1);
+    });
+
+    it('is idempotent: a second run with no drift produces the same stoppedSkipped, no new mutation calls', async () => {
+      const { job, stubs } = makeJob({
+        stubs: {
+          psResult: {
+            result: 'ok',
+            containers: [
+              { hostname: 'stopped-new.example.com', containerId: 'abc', image: 'img', status: 'Exited (0)', state: 'exited', hostPort: 8080 },
+            ],
+          },
+          listRoutesResult: [],
+        },
+      });
+
+      const report1 = await job.reconcile('manual');
+      const report2 = await job.reconcile('manual');
+
+      expect(report1.perVps[0].stoppedSkipped).toContain('stopped-new.example.com');
+      expect(report2.perVps[0].stoppedSkipped).toContain('stopped-new.example.com');
+      expect(stubs.orchestrator.addRouteOnly).not.toHaveBeenCalled();
+      expect(stubs.cloudflareApi.removeRoute).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── AC7b (v3): running + stopped zombie on same hostname → NOT ambiguous ─────
+
+  describe('AC7b — one running + N stopped zombies on same hostname → not ambiguous', () => {
+    it('heals a missing route when exactly one running container coexists with a stopped zombie on the same hostname', async () => {
+      const { job, stubs } = makeJob({
+        stubs: {
+          psResult: {
+            result: 'ok',
+            containers: [
+              { hostname: 'app.example.com', containerId: 'running-1', image: 'img', status: 'Up', state: 'running', hostPort: 8080 },
+              { hostname: 'app.example.com', containerId: 'zombie-1', image: 'img-old', status: 'Exited (0)', state: 'exited', hostPort: 8080 },
+            ],
+          },
+          listRoutesResult: [], // no route yet → the running container must be healed
+        },
+      });
+
+      const report = await job.reconcile('manual');
+
+      // Not ambiguous: exactly one running container is authoritative
+      const ambig = report.perVps[0].errors.find((e) => e.errorClass === 'ambiguous');
+      expect(ambig).toBeUndefined();
+      // Healing proceeds via the running container
+      expect(stubs.orchestrator.addRouteOnly).toHaveBeenCalledWith(
+        expect.objectContaining({ hostname: 'app.example.com', tunnelId: 'tunnel-1' }),
+      );
+      expect(report.perVps[0].createdRoutes).toContain('app.example.com');
+      // The stopped zombie is never removed by the cron (no rm-like call exists on the stub,
+      // but we also assert it is not reported as an error/ambiguous)
+      expect(report.perVps[0].stoppedSkipped).not.toContain('app.example.com');
+    });
+
+    it('protects the route when exactly one running container coexists with a stopped zombie and a route already exists', async () => {
+      const { job, stubs } = makeJob({
+        stubs: {
+          psResult: {
+            result: 'ok',
+            containers: [
+              { hostname: 'app.example.com', containerId: 'running-1', image: 'img', status: 'Up', state: 'running', hostPort: 8080 },
+              { hostname: 'app.example.com', containerId: 'zombie-1', image: 'img-old', status: 'Exited (0)', state: 'exited', hostPort: 8080 },
+            ],
+          },
+          listRoutesResult: [
+            { hostname: 'app.example.com', service: 'http://localhost:8080', tunnelId: 'tunnel-1', protected: false },
+          ],
+        },
+      });
+
+      const report = await job.reconcile('manual');
+
+      expect(stubs.cloudflareApi.removeRoute).not.toHaveBeenCalled();
+      expect(stubs.orchestrator.addRouteOnly).not.toHaveBeenCalled();
+      const ambig = report.perVps[0].errors.find((e) => e.errorClass === 'ambiguous');
+      expect(ambig).toBeUndefined();
+    });
+
+    it('no running container, only stopped zombies on a hostname → NOT ambiguous, route stays protected (AC3b), no heal (AC5d)', async () => {
+      const { job, stubs } = makeJob({
+        stubs: {
+          psResult: {
+            result: 'ok',
+            containers: [
+              { hostname: 'app.example.com', containerId: 'zombie-1', image: 'img-old', status: 'Exited (0)', state: 'exited', hostPort: 8080 },
+              { hostname: 'app.example.com', containerId: 'zombie-2', image: 'img-older', status: 'Exited (1)', state: 'exited', hostPort: 8080 },
+            ],
+          },
+          listRoutesResult: [
+            { hostname: 'app.example.com', service: 'http://localhost:8080', tunnelId: 'tunnel-1', protected: false },
+          ],
+        },
+      });
+
+      const report = await job.reconcile('manual');
+
+      const ambig = report.perVps[0].errors.find((e) => e.errorClass === 'ambiguous');
+      expect(ambig).toBeUndefined();
+      expect(stubs.cloudflareApi.removeRoute).not.toHaveBeenCalled();
+      expect(stubs.orchestrator.addRouteOnly).not.toHaveBeenCalled();
+    });
+
+    it('two RUNNING containers on the same hostname → ambiguous, not healed (regression guard: zombies must not mask real ambiguity)', async () => {
+      const { job, stubs } = makeJob({
+        stubs: {
+          psResult: {
+            result: 'ok',
+            containers: [
+              { hostname: 'app.example.com', containerId: 'running-1', image: 'img', status: 'Up', state: 'running', hostPort: 8080 },
+              { hostname: 'app.example.com', containerId: 'running-2', image: 'img2', status: 'Up', state: 'running', hostPort: 8081 },
+              { hostname: 'app.example.com', containerId: 'zombie-1', image: 'img-old', status: 'Exited (0)', state: 'exited', hostPort: 8080 },
+            ],
+          },
+          listRoutesResult: [],
+        },
+      });
+
+      const report = await job.reconcile('manual');
+      expect(stubs.orchestrator.addRouteOnly).not.toHaveBeenCalled();
+      const ambig = report.perVps[0].errors.find((e) => e.errorClass === 'ambiguous');
+      expect(ambig).toBeTruthy();
+    });
+  });
+
   // ── AC5b: Protected hostname on managed container → protectedSkipped ────────
 
   describe('AC5b — protected managed container hostname → not healed', () => {
@@ -346,7 +572,7 @@ describe('ReconciliationJob', () => {
           psResult: {
             result: 'ok',
             containers: [
-              { hostname: 'devgui.example.com', containerId: 'abc', image: 'img', status: 'Up', hostPort: 8080 },
+              { hostname: 'devgui.example.com', containerId: 'abc', image: 'img', status: 'Up', state: 'running', hostPort: 8080 },
             ],
           },
           listRoutesResult: [], // No route for this hostname
@@ -527,8 +753,8 @@ describe('ReconciliationJob', () => {
           psResult: {
             result: 'ok',
             containers: [
-              { hostname: 'app.example.com', containerId: 'abc', image: 'img', status: 'Up', hostPort: 8080 },
-              { hostname: 'app.example.com', containerId: 'def', image: 'img2', status: 'Up', hostPort: 8081 },
+              { hostname: 'app.example.com', containerId: 'abc', image: 'img', status: 'Up', state: 'running', hostPort: 8080 },
+              { hostname: 'app.example.com', containerId: 'def', image: 'img2', status: 'Up', state: 'running', hostPort: 8081 },
             ],
           },
           listRoutesResult: [],
@@ -583,6 +809,13 @@ describe('ReconciliationJob', () => {
       expect(reports[1].trigger).toBe('manual');
     });
 
+    it('AC8 (v3) — stoppedSkipped is present as an array (additive field) even with no drift', async () => {
+      const { job } = makeJob();
+      const report = await job.reconcile('manual');
+      expect(Array.isArray(report.perVps[0].stoppedSkipped)).toBe(true);
+      expect(report.perVps[0].stoppedSkipped).toHaveLength(0);
+    });
+
     it('getLastReport() returns null when no reports exist', () => {
       const { job } = makeJob();
       expect(job.getLastReport()).toBeNull();
@@ -620,7 +853,7 @@ describe('ReconciliationJob', () => {
         stubs: {
           psResult: {
             result: 'ok',
-            containers: [{ hostname: 'new.example.com', containerId: 'abc', image: 'img', status: 'Up', hostPort: 8080 }],
+            containers: [{ hostname: 'new.example.com', containerId: 'abc', image: 'img', status: 'Up', state: 'running', hostPort: 8080 }],
           },
           listRoutesResult: [],
         },
@@ -640,7 +873,7 @@ describe('ReconciliationJob', () => {
         stubs: {
           psResult: {
             result: 'ok',
-            containers: [{ hostname: 'devgui.example.com', containerId: 'abc', image: 'img', status: 'Up', hostPort: 8080 }],
+            containers: [{ hostname: 'devgui.example.com', containerId: 'abc', image: 'img', status: 'Up', state: 'running', hostPort: 8080 }],
           },
           listRoutesResult: [],
           isProtected: true,
@@ -791,6 +1024,7 @@ describe('ReconciliationJob', () => {
                 image: 'myapp/web:latest',
                 hostname: 'web.example.com',
                 status: 'Up',
+                state: 'running',
                 hostPort: 8080,
                 composeProject: 'myapp', // stack container, but public
               },
@@ -923,6 +1157,7 @@ describe('ReconciliationJob', () => {
                 image: 'myapp/web:latest',
                 hostname: 'app.example.com',
                 status: 'Up',
+                state: 'running',
                 hostPort: 8080,
                 composeProject: 'myapp',
               },
@@ -931,6 +1166,7 @@ describe('ReconciliationJob', () => {
                 image: 'myapp/kong:latest',
                 hostname: 'db-app.example.com',
                 status: 'Up',
+                state: 'running',
                 hostPort: 8000,
                 composeProject: 'myapp',
               },
@@ -1010,6 +1246,7 @@ describe('ReconciliationJob', () => {
                 image: 'myapp/web:latest',
                 hostname: 'app.example.com',
                 status: 'Up',
+                state: 'running',
                 hostPort: 8080,
                 composeProject: 'myapp',
               },
@@ -1682,6 +1919,39 @@ describe('deploymentsRouter — reconcile endpoints', () => {
         expect(status).toBe(200);
         expect(body.result).toBe('ok');
         expect(body.report).toBeTruthy();
+      } finally {
+        delete process.env.CRED_ADMIN_EMAILS;
+      }
+    });
+
+    it('AC8 (v3) — round-trips stoppedSkipped[] through the HTTP response body unchanged', async () => {
+      const mockReport = {
+        ranAt: new Date().toISOString(),
+        trigger: 'manual',
+        perVps: [{
+          vps: 'vps-1',
+          checkedContainers: 1,
+          createdRoutes: [],
+          removedRoutes: [],
+          protectedSkipped: [],
+          stoppedSkipped: ['stopped.example.com'],
+          reportedUnmanaged: [],
+          errors: [],
+        }],
+      };
+      const reconciliationJobStub = {
+        reconcile: jest.fn().mockResolvedValue(mockReport),
+        getLastReport: jest.fn().mockReturnValue(null),
+        getReports: jest.fn().mockReturnValue([]),
+        getNotices: jest.fn().mockReturnValue([]),
+      };
+
+      const app = makeApp({ reconciliationJobStub });
+      process.env.CRED_ADMIN_EMAILS = 'admin@example.com';
+      try {
+        const { status, body } = await httpRequest(app, 'POST', '/api/deployments/reconcile', {});
+        expect(status).toBe(200);
+        expect(body.report.perVps[0].stoppedSkipped).toEqual(['stopped.example.com']);
       } finally {
         delete process.env.CRED_ADMIN_EMAILS;
       }

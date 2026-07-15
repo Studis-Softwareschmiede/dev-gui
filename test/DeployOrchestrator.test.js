@@ -16,11 +16,26 @@
  *   AC5  (vps-readiness-gate) — probe→ready → bestehende Saga unverändert (Gate ist No-op)
  *   AC13 (vps-readiness-gate) — kein SSH-Key/Token in result.reason bei vps-provisioning-Fehler
  *
+ * Covers (deploy-lifecycle AC14/AC17 — Re-Deploy = Ersetzen inkl. Zombie-Fix, S-353):
+ *   AC14 — Re-Deploy = ersetzen: bestehender Container mit passendem hostname-Label wird vor
+ *          dem neuen Deploy entfernt (replaced=true); kein bestehender Container → replaced=false
+ *   AC14 — Ersetzungsschritt nutzt psAll() (nicht ps()) für die Altcontainer-Suche
+ *   AC17 — REGRESSION (v1-Zombie): ein gestoppter Altcontainer (state:'exited'), der über ps()
+ *          (nur laufend) unsichtbar wäre, wird über psAll() gefunden und entfernt (rm), der neue
+ *          Container startet regulär
+ *   AC17 — mehrere Altcontainer (laufend + gestoppt) mit demselben hostname-Label → ALLE entfernt
+ *   AC17 — nach Re-Deploy existiert genau EIN Container mit diesem hostname-Label (unrelated
+ *          Container mit anderem Hostname bleibt unangetastet)
+ *   AC17 — best-effort: schlägt rm() für einen von mehreren Altcontainern fehl, läuft der Deploy
+ *          trotzdem weiter
+ *   AC17 — Platzierung unverändert: Ersetzungsschritt bleibt NACH allen Tunnel-/Readiness-Gates
+ *          (kein rm bei tunnel-missing) und VOR dem pull-Schritt (unverändert zu AC14/v1)
+ *
  * Covers (vps-tunnel-existence-gate S-185 AC1–AC6, AC12, AC13):
  *   AC1  — listTunnels-Gate: tunnelId nicht in Cloudflare → tunnel-missing, pull NIEMALS aufgerufen
  *   AC2  — listTunnels-Gate: tunnelId in Cloudflare → Gate ist No-op, Saga läuft weiter
  *   AC3  — Preflight-Reihenfolge: LockoutGuard → Tunnel-Mismatch/-Missing → listTunnels → Readiness
- *          → Re-Deploy-ps/rm → pull (Gate vor Re-Deploy-Replace, AC1/AC3/AC5/AC6)
+ *          → Re-Deploy-psAll/rm → pull (Gate vor Re-Deploy-Replace, AC1/AC3/AC5/AC6)
  *   AC4  — Cloudflare nicht konsultierbar (nicht konfiguriert/Auth/Netz) → fail-closed, kein Docker-Schritt
  *   AC5  — Tunnel-Mismatch: mitgegebene tunnelId ≠ registrierte → tunnel-mismatch, kein Schritt
  *          inkl. EXISTING container: dockerControl.rm wird NICHT aufgerufen (C1-Fix)
@@ -35,6 +50,18 @@
  *   AC1/AC7 — requiresConfig/configApp/configMountPath werden unverändert an run() durchgereicht
  *             (nicht manipuliert); requiresConfig falsy/abwesend → run()-Opts enthalten weder
  *             requiresConfig noch configApp/configMountPath (Deploy-Pfad byte-identisch).
+ *
+ * Covers (container-image-update, S-356 — Update-Zustandsverhalten):
+ *   AC9 — pull() meldet einen unveränderten Stand ("Image is up to date") → deploy() gibt
+ *         dennoch { result:'ok' } zurück (Neuaufbau ohne Versionswechsel, kein Fehlerpfad).
+ *         AC8 (gestoppter Container läuft danach) ist KEIN eigener Test hier: deploy() prüft
+ *         den Vorzustand des Altcontainers nie (nur hostname-Match für den Ersetzungsschritt,
+ *         s. AC17-Block oben) — run() startet den neuen Container unabhängig vom Zustand
+ *         des Vorgängers immer. Belegt auf Endpunkt-Ebene in vpsContainerRouter.test.js
+ *         (Covers container-image-update AC8).
+ *   Edge-Case "zwei Updates gleichzeitig" (Spec §Edge-Cases) — kein eigener Test hier: die
+ *         zweite Anfrage scheitert bereits auf Router-Ebene an psAll() (container-not-found),
+ *         bevor deploy() überhaupt aufgerufen wird — s. vpsContainerRouter.test.js AC7.
  */
 
 import { describe, it, expect, jest } from '@jest/globals';
@@ -53,6 +80,10 @@ function makeDockerControl({
   runResult = { result: 'ok', containerId: 'abc123', hostPort: 8080 },
   rmResult = { result: 'ok' },
   psResult = { result: 'ok', containers: [] },
+  // AC17: psAll() drives the re-deploy replacement lookup (state-complete, running+stopped);
+  // ps() remains used only for #selectFreeHostPort's port-selection. Defaults to mirroring
+  // psResult so existing tests that only set psResult keep working unchanged.
+  psAllResult = psResult,
   probeResult = { state: 'ready' }, // Default: probe meldet "ready" → Gate-No-op
 } = {}) {
   const ctrl = {
@@ -60,6 +91,7 @@ function makeDockerControl({
     run: jest.fn(async () => runResult),
     rm: jest.fn(async () => rmResult),
     ps: jest.fn(async () => psResult),
+    psAll: jest.fn(async () => psAllResult),
   };
   // probe() nur exponieren wenn probeResult !== null (null = Legacy ohne probe)
   if (probeResult !== null) {
@@ -264,6 +296,29 @@ describe('DeployOrchestrator — deploy() — AC3: Happy Path', () => {
       DEPLOY_PARAMS.hostname,
       expect.any(Object),
     );
+  });
+});
+
+// ── deploy() — container-image-update AC9: unveränderter Tag ist kein Fehler ───
+
+describe('DeployOrchestrator — deploy() — container-image-update AC9: pull() meldet "up to date"', () => {
+  it('AC9: pull() meldet unveränderten Stand ("Image is up to date") → dennoch result:ok, regulärer Neuaufbau (kein Fehlerpfad)', async () => {
+    // pull() liefert result:'ok' unabhängig davon, ob docker pull tatsächlich einen neuen
+    // Layer gezogen hat oder den Bestand meldet — die Saga unterscheidet beide Fälle NICHT
+    // (container-image-update AC9: "Zeigt der Tag auf einen unveränderten Stand, ist das
+    // Ergebnis dennoch { result:'ok' }"). Dieser Test belegt genau diese Nicht-Unterscheidung.
+    const docker = makeDockerControl({
+      pullResult: { result: 'ok', reason: 'Image is up to date for ghcr.io/org/app:v1' },
+    });
+    const cf = makeCloudflareApi();
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(docker.pull).toHaveBeenCalled();
+    expect(docker.run).toHaveBeenCalled();
+    expect(result.result).toBe('ok');
+    expect(result.deployment).toBeDefined();
   });
 });
 
@@ -729,6 +784,7 @@ describe('DeployOrchestrator — AC13: Container-Port via docker inspect', () =>
       run: jest.fn(async () => ({ result: 'ok', containerId: 'cnt-123', hostPort: 8080 })),
       rm: jest.fn(async () => ({ result: 'ok' })),
       ps: jest.fn(async () => ({ result: 'ok', containers: [] })),
+      psAll: jest.fn(async () => ({ result: 'ok', containers: [] })),
       inspect: jest.fn(async () => ({ result: 'ok', ports: ['3000/tcp'] })),
     };
     const cf = makeCloudflareApi();
@@ -751,6 +807,7 @@ describe('DeployOrchestrator — AC13: Container-Port via docker inspect', () =>
       run: jest.fn(async () => ({ result: 'ok', containerId: 'cnt-123', hostPort: 8080 })),
       rm: jest.fn(async () => ({ result: 'ok' })),
       ps: jest.fn(async () => ({ result: 'ok', containers: [] })),
+      psAll: jest.fn(async () => ({ result: 'ok', containers: [] })),
       inspect: jest.fn(async () => ({ result: 'ok', ports: ['8080/tcp', '3000/tcp', '5000/tcp'] })),
     };
     const cf = makeCloudflareApi();
@@ -772,6 +829,7 @@ describe('DeployOrchestrator — AC13: Container-Port via docker inspect', () =>
       run: jest.fn(async () => ({ result: 'ok', containerId: 'cnt-123', hostPort: 8080 })),
       rm: jest.fn(async () => ({ result: 'ok' })),
       ps: jest.fn(async () => ({ result: 'ok', containers: [] })),
+      psAll: jest.fn(async () => ({ result: 'ok', containers: [] })),
       inspect: jest.fn(async () => ({ result: 'ok', ports: [] })),
     };
     const cf = makeCloudflareApi();
@@ -806,6 +864,7 @@ describe('DeployOrchestrator — AC13: Container-Port via docker inspect', () =>
       run: jest.fn(async () => ({ result: 'ok', containerId: 'cnt-123', hostPort: 8080 })),
       rm: jest.fn(async () => ({ result: 'ok' })),
       ps: jest.fn(async () => ({ result: 'ok', containers: [] })),
+      psAll: jest.fn(async () => ({ result: 'ok', containers: [] })),
       inspect: jest.fn(async () => ({ result: 'error', ports: [], reason: 'docker-failed', errorClass: 'docker-failed' })),
     };
     const cf = makeCloudflareApi();
@@ -819,16 +878,17 @@ describe('DeployOrchestrator — AC13: Container-Port via docker inspect', () =>
   });
 });
 
-// ── AC14: Re-Deploy = Ersetzen ────────────────────────────────────────────────
+// ── AC14/AC17: Re-Deploy = Ersetzen (inkl. Zombie-Fix für gestoppte Altcontainer) ──
 
 describe('DeployOrchestrator — AC14: Re-Deploy = replace existing', () => {
   it('removes existing container with same hostname before deploying (replaced=true)', async () => {
-    const existingContainer = { containerId: 'old-cnt', hostname: 'app.example.com', image: 'old:v1', status: 'Up', hostPort: 8080 };
+    const existingContainer = { containerId: 'old-cnt', hostname: 'app.example.com', image: 'old:v1', status: 'Up', state: 'running', hostPort: 8080 };
     const docker = {
       pull: jest.fn(async () => ({ result: 'ok' })),
       run: jest.fn(async () => ({ result: 'ok', containerId: 'new-cnt', hostPort: 8081 })),
       rm: jest.fn(async () => ({ result: 'ok' })),
       ps: jest.fn(async () => ({ result: 'ok', containers: [existingContainer] })),
+      psAll: jest.fn(async () => ({ result: 'ok', containers: [existingContainer] })),
       inspect: jest.fn(async () => ({ result: 'ok', ports: ['8080/tcp'] })),
     };
     const cf = makeCloudflareApi();
@@ -853,6 +913,7 @@ describe('DeployOrchestrator — AC14: Re-Deploy = replace existing', () => {
       run: jest.fn(async () => ({ result: 'ok', containerId: 'new-cnt', hostPort: 8080 })),
       rm: jest.fn(async () => ({ result: 'ok' })),
       ps: jest.fn(async () => ({ result: 'ok', containers: [] })),
+      psAll: jest.fn(async () => ({ result: 'ok', containers: [] })),
       inspect: jest.fn(async () => ({ result: 'ok', ports: [] })),
     };
     const cf = makeCloudflareApi();
@@ -863,11 +924,157 @@ describe('DeployOrchestrator — AC14: Re-Deploy = replace existing', () => {
     expect(result.result).toBe('ok');
     expect(result.deployment.replaced).toBe(false);
     // rm() only called once for the re-deploy check (but no existing container found)
-    // The initial ps() for re-deploy check returns empty containers
+    // The initial psAll() for re-deploy check returns empty containers
     // No rm() call for re-deploy
     // (rm may still be called in rollback path, but here no rollback occurs)
     const rmCallsForReplace = docker.rm.mock.calls.filter((call) => call[1] === 'old-cnt');
     expect(rmCallsForReplace.length).toBe(0);
+  });
+
+  it('nutzt psAll() (state-vollständig), nicht ps() (nur laufend), für den Ersetzungsschritt', async () => {
+    const docker = makeDockerControl();
+    const cf = makeCloudflareApi();
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    await orch.deploy(DEPLOY_PARAMS);
+
+    expect(docker.psAll).toHaveBeenCalled();
+  });
+});
+
+// ── AC17 (v2, Zombie-Fix): Ersetzungsschritt findet auch gestoppte Altcontainer ──
+
+describe('DeployOrchestrator — AC17: Re-Deploy findet auch gestoppte Altcontainer (Zombie-Fix)', () => {
+  it('REGRESSION (v1-Zombie): gestoppter Altcontainer mit passendem Label wird über psAll() gefunden, entfernt (rm) — neuer Container startet', async () => {
+    // v1-Bug: der Ersetzungsschritt nutzte ps() (nur laufend) — ein gestoppter Altcontainer
+    // blieb dadurch unentdeckt und unentfernt liegen (Zombie). Dieser Test reproduziert genau
+    // diesen Fall: ps() (laufend) sieht NICHTS, psAll() (docker ps -a) sieht den gestoppten
+    // Altcontainer mit state:'exited'.
+    const stoppedZombie = { containerId: 'zombie-cnt', hostname: 'app.example.com', image: 'old:v0', status: 'Exited (0) 2 days ago', state: 'exited', hostPort: 8080 };
+    const docker = makeDockerControl({
+      psResult: { result: 'ok', containers: [] }, // ps() (laufend) sieht den Zombie NICHT
+      psAllResult: { result: 'ok', containers: [stoppedZombie] }, // psAll() (docker ps -a) sieht ihn
+      runResult: { result: 'ok', containerId: 'new-cnt', hostPort: 8081 },
+    });
+    const cf = makeCloudflareApi();
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.result).toBe('ok');
+    // der gestoppte Altcontainer wird trotz state:'exited' entfernt (AC17)
+    expect(docker.rm).toHaveBeenCalledWith(
+      expect.anything(),
+      'zombie-cnt',
+      expect.anything(),
+    );
+    // neuer Container startet regulär
+    expect(docker.run).toHaveBeenCalled();
+    expect(result.deployment.containerId).toBe('new-cnt');
+    expect(result.deployment.replaced).toBe(true);
+  });
+
+  it('mehrere Altcontainer (laufend + gestoppt) mit demselben Hostname-Label → ALLE werden entfernt', async () => {
+    const running = { containerId: 'old-running', hostname: 'app.example.com', image: 'old:v1', status: 'Up 2 hours', state: 'running', hostPort: 8080 };
+    const stopped1 = { containerId: 'old-stopped-1', hostname: 'app.example.com', image: 'old:v0', status: 'Exited (0) 3 days ago', state: 'exited', hostPort: null };
+    const stopped2 = { containerId: 'old-stopped-2', hostname: 'app.example.com', image: 'old:v0', status: 'Exited (1) 5 days ago', state: 'exited', hostPort: null };
+    const docker = makeDockerControl({
+      psAllResult: { result: 'ok', containers: [running, stopped1, stopped2] },
+      runResult: { result: 'ok', containerId: 'new-cnt', hostPort: 8081 },
+    });
+    const cf = makeCloudflareApi();
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.result).toBe('ok');
+    const removedIds = docker.rm.mock.calls.map((call) => call[1]);
+    expect(removedIds).toEqual(expect.arrayContaining(['old-running', 'old-stopped-1', 'old-stopped-2']));
+    // genau 3 rm-Aufrufe für die Altcontainer (kein Rollback-Pfad in diesem Happy-Path)
+    expect(docker.rm.mock.calls.length).toBe(3);
+    expect(result.deployment.replaced).toBe(true);
+  });
+
+  it('nach Re-Deploy existiert genau EIN Container mit diesem Hostname-Label (kein weiterer Zombie)', async () => {
+    // Zwei Altlast-Zombies aus der Zeit vor dem Fix, dazu ein unmanaged Container (anderes
+    // Label) — nur die zwei mit passendem hostname-Label dürfen entfernt werden.
+    const zombie1 = { containerId: 'zombie-1', hostname: 'app.example.com', image: 'old:v0', status: 'Exited (0) 10 days ago', state: 'exited', hostPort: null };
+    const zombie2 = { containerId: 'zombie-2', hostname: 'app.example.com', image: 'old:v0', status: 'Exited (137) 8 days ago', state: 'exited', hostPort: null };
+    const unrelated = { containerId: 'other-app', hostname: 'other.example.com', image: 'other:v1', status: 'Up 1 day', state: 'running', hostPort: 8090 };
+    const docker = makeDockerControl({
+      psAllResult: { result: 'ok', containers: [zombie1, zombie2, unrelated] },
+      runResult: { result: 'ok', containerId: 'new-cnt', hostPort: 8081 },
+    });
+    const cf = makeCloudflareApi();
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.result).toBe('ok');
+    const removedIds = docker.rm.mock.calls.map((call) => call[1]);
+    expect(removedIds).toContain('zombie-1');
+    expect(removedIds).toContain('zombie-2');
+    // der unmanaged Container mit anderem Hostname wird NICHT angefasst
+    expect(removedIds).not.toContain('other-app');
+  });
+
+  it('bleibt best-effort: schlägt rm() für einen der mehreren Altcontainer fehl, wird der Deploy trotzdem fortgesetzt', async () => {
+    const stopped1 = { containerId: 'old-stopped-1', hostname: 'app.example.com', image: 'old:v0', status: 'Exited (0)', state: 'exited', hostPort: null };
+    const stopped2 = { containerId: 'old-stopped-2', hostname: 'app.example.com', image: 'old:v0', status: 'Exited (0)', state: 'exited', hostPort: null };
+    const docker = makeDockerControl({
+      psAllResult: { result: 'ok', containers: [stopped1, stopped2] },
+      runResult: { result: 'ok', containerId: 'new-cnt', hostPort: 8081 },
+    });
+    docker.rm.mockImplementation(async (vps, containerId) => {
+      if (containerId === 'old-stopped-1') return { result: 'error', reason: 'SSH timeout', errorClass: 'unreachable' };
+      return { result: 'ok' };
+    });
+    const cf = makeCloudflareApi();
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    // best-effort: ein fehlgeschlagenes rm für EINEN Altcontainer blockiert den Deploy nicht
+    expect(result.result).toBe('ok');
+    expect(docker.rm.mock.calls.length).toBe(2);
+    expect(docker.run).toHaveBeenCalled();
+  });
+
+  it('bleibt NACH dem Tunnel-Existenz-Gate: gestoppter Altcontainer wird bei tunnel-missing NICHT entfernt', async () => {
+    const stoppedZombie = { containerId: 'zombie-cnt', hostname: 'app.example.com', image: 'old:v0', status: 'Exited (0)', state: 'exited', hostPort: 8080 };
+    const docker = makeDockerControl({
+      psAllResult: { result: 'ok', containers: [stoppedZombie] },
+    });
+    const cf = makeCloudflareApi({ listTunnelsResult: [] }); // Tunnel existiert nicht → tunnel-missing
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('tunnel-missing');
+    // Gate greift VOR dem Ersetzungsschritt — kein rm() für den Zombie
+    expect(docker.rm).not.toHaveBeenCalled();
+    expect(docker.psAll).not.toHaveBeenCalled();
+  });
+
+  it('Platzierung unverändert zu AC14/v1 (VOR pull): schlägt pull fehl, ist der Altcontainer bereits entfernt', async () => {
+    // Die Ersetzung lag schon vor dem Zombie-Fix VOR dem pull-Schritt (nicht danach) — dieses
+    // Verhalten bleibt durch S-353 unverändert (nur die Suchmethode/Mehrfach-Entfernung ändert
+    // sich, nicht die Platzierung). Dokumentiert die bestehende Reihenfolge: Ersetzung ist NACH
+    // den Gates, aber VOR pull.
+    const stoppedZombie = { containerId: 'zombie-cnt', hostname: 'app.example.com', image: 'old:v0', status: 'Exited (0)', state: 'exited', hostPort: 8080 };
+    const docker = makeDockerControl({
+      psAllResult: { result: 'ok', containers: [stoppedZombie] },
+      pullResult: { result: 'error', reason: 'Image nicht gefunden', errorClass: 'docker-failed' },
+    });
+    const cf = makeCloudflareApi();
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.result).toBe('error');
+    expect(docker.run).not.toHaveBeenCalled();
+    expect(docker.rm).toHaveBeenCalledWith(expect.anything(), 'zombie-cnt', expect.anything());
   });
 });
 
