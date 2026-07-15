@@ -29,6 +29,12 @@ jq -e . .claude/metrics/dispatches.jsonl >/dev/null || echo "Ledger korrupt — 
 ```
 (`jq -e .` ohne `-s` prüft zeilenweise und nennt die erste kaputte Zeilennummer.)
 
+**Nachtrag (2026-07-15, S-360) — `iters`/`crit`/`imp` sind als Fingerabdruck UNZUVERLÄSSIG; `secs_total=0` ist der harte Marker.** S-360 lief mit genau 1 Iteration, Review-PASS ohne Befunde — die Defaults `iters=1`/`crit=0`/`imp=0` waren damit **zufällig identisch mit den echten Werten**. Der Defekt wäre über den oben genannten Abgleich unsichtbar geblieben. Eindeutig war allein **`secs_total=0`** bei drei Dispatches à ~200–330 s. Ein abgeschlossenes Item kann **nie** legitim `secs_total=0` haben — das ist der einzige Wert, der bei totgelaufenem `jq` mit Sicherheit falsch ist, unabhängig vom Verlauf der Story. Prüfe nach jedem `metrics-append-item.sh`:
+```bash
+grep '"item":"<S-###>"' .claude/metrics/items.jsonl | tail -1 | jq -c '{ep_act,iters,crit,imp,secs_total}'
+```
+`secs_total: 0` → Rollup lief auf Defaults, **alle** Aggregate der Zeile sind wertlos (auch die zufällig richtig aussehenden). Melden, nicht putzen (s.o.). Der Defekt ist damit weiterhin **jeden Lauf** aktiv — S-355 (Erstfund) und S-360 sind zwei bestätigte Fälle; die Fehlannahme „unauffällige Zahlen = Ledger heil" ist die eigentliche Falle.
+
 **Nicht tun:**
 - **Die kaputten Zeilen im Story-Drain eigenmächtig löschen/reparieren.** Die Ledger-Regel ist explizit append-only („historische Zeilen werden nie gelöscht oder umgeschrieben", Ausnahme nur der `tok`-Patch). Ein `/flow`-Lauf, der das Ledger zurechtbiegt, damit seine eigenen Zahlen schön aussehen, ist dasselbe verbotene Muster wie eine Spec eigenmächtig auf `active` zu heben (vgl. flow/L04). **Melden, nicht putzen** — die Entscheidung gehört dem Owner.
 - Die falschen Aggregate in die Story-YAML „korrigieren". Der Dispo-Spiegel (§2b/AC6) spiegelt, was **im Ledger steht** — das Ledger bleibt Source of Truth, auch wenn es hier falsch liegt. Bei S-355 wurde daher bewusst `dispo_act=4` gespiegelt (statt des rechnerisch richtigen Werts aus iters=2/imp=1).
