@@ -1,15 +1,14 @@
 /**
  * DeploymentsView.configMount.test.jsx
  *
- * Covers (deploy-config-volume-mount.md): AC9
- *   AC9 — Checkbox „config.yaml auf dem VPS bereitstellen (read-only nach
- *         /app/config.yaml gemountet)". Aktiv → optionales mehrzeiliges Seed-Feld
- *         (Erst-Deploy-Inhalt) + read-only Vorschau des Host-Pfads
- *         `~/apps/<app>/config.yaml`. configApp-Default wird aus dem gewählten
- *         Image/Package abgeleitet (gleiche Ableitung wie gpgBwItem/Subdomain),
- *         bleibt editierbar. Beim Absenden gehen requiresConfig/configApp/configSeed
- *         im Deploy-Request mit; ist die Checkbox inaktiv, werden KEINE
- *         config-Params gesendet (unveränderter Request).
+ * Covers (deploy-config-volume-mount.md): AC8
+ *   AC8 — Checkbox „persistentes config-Verzeichnis auf dem VPS mounten (read-write nach
+ *         /app/config)". Aktiv → read-only Vorschau des Host-Pfads `~/apps/<app>/config`
+ *         (Verzeichnis). Kein Seed-Textfeld mehr. configApp-Default wird aus dem gewählten
+ *         Image/Package abgeleitet (gleiche Ableitung wie gpgBwItem/Subdomain), bleibt
+ *         editierbar. Beim Absenden gehen requiresConfig/configApp im Deploy-Request mit;
+ *         ist die Checkbox inaktiv, werden KEINE config-Params gesendet (unveränderter
+ *         Request).
  *
  * @jest-environment jsdom
  */
@@ -118,8 +117,8 @@ async function fillFullForm(container) {
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
-describe('DeploymentsView — config.yaml-Mount (deploy-config-volume-mount.md AC9)', () => {
-  it('AC9: Checkbox ist standardmäßig unchecked; Seed-Feld/config-App-Feld nicht sichtbar', async () => {
+describe('DeploymentsView — config-Verzeichnis-Mount (deploy-config-volume-mount.md AC8)', () => {
+  it('AC8: Checkbox ist standardmäßig unchecked; config-App-Feld/Seed-Feld nicht sichtbar', async () => {
     globalThis.fetch = makeFetch();
     const { container } = renderView();
 
@@ -132,7 +131,7 @@ describe('DeploymentsView — config.yaml-Mount (deploy-config-volume-mount.md A
     expect(container.querySelector('#deploy-config-seed')).toBeNull();
   });
 
-  it('AC9: Checkbox aktivieren zeigt config-App-Feld (mit Default aus Image-Slug) + Seed-Feld + Host-Pfad-Vorschau', async () => {
+  it('AC8: Checkbox aktivieren zeigt config-App-Feld (mit Default aus Image-Slug) + Host-Pfad-Vorschau, kein Seed-Feld', async () => {
     globalThis.fetch = makeFetch();
     const { container } = renderView();
 
@@ -144,11 +143,12 @@ describe('DeploymentsView — config.yaml-Mount (deploy-config-volume-mount.md A
     await waitFor(() => {
       expect(container.querySelector('#deploy-config-app').value).toBe('brew-assistent');
     });
-    expect(container.querySelector('#deploy-config-seed')).not.toBeNull();
-    expect(container.querySelector('#deploy-config-host-path-preview').textContent).toContain('~/apps/brew-assistent/config.yaml');
+    expect(container.querySelector('#deploy-config-seed')).toBeNull();
+    expect(container.querySelector('#deploy-config-host-path-preview').textContent).toContain('~/apps/brew-assistent/config');
+    expect(container.querySelector('#deploy-config-host-path-preview').textContent).not.toContain('config.yaml');
   });
 
-  it('AC9: config-App-Feld ist manuell überschreibbar; Host-Pfad-Vorschau folgt der Eingabe', async () => {
+  it('AC8: config-App-Feld ist manuell überschreibbar; Host-Pfad-Vorschau folgt der Eingabe', async () => {
     globalThis.fetch = makeFetch();
     const { container } = renderView();
 
@@ -164,10 +164,10 @@ describe('DeploymentsView — config.yaml-Mount (deploy-config-volume-mount.md A
       fireEvent.change(container.querySelector('#deploy-config-app'), { target: { value: 'custom-app-slug' } });
     });
     expect(container.querySelector('#deploy-config-app').value).toBe('custom-app-slug');
-    expect(container.querySelector('#deploy-config-host-path-preview').textContent).toContain('~/apps/custom-app-slug/config.yaml');
+    expect(container.querySelector('#deploy-config-host-path-preview').textContent).toContain('~/apps/custom-app-slug/config');
   });
 
-  it('AC9: ein manuell gesetzter configApp-Wert wird beim Slug-Wechsel NICHT überschrieben', async () => {
+  it('AC8: ein manuell gesetzter configApp-Wert wird beim Slug-Wechsel NICHT überschrieben', async () => {
     globalThis.fetch = makeFetch();
     const { container } = renderView();
 
@@ -187,7 +187,7 @@ describe('DeploymentsView — config.yaml-Mount (deploy-config-volume-mount.md A
     expect(container.querySelector('#deploy-config-app').value).toBe('custom-app-slug');
   });
 
-  it('AC9: Checkbox aktiv → requiresConfig/configApp/configSeed werden im Deploy-Request mitgesendet', async () => {
+  it('AC8: Checkbox aktiv → requiresConfig/configApp werden im Deploy-Request mitgesendet, kein configSeed', async () => {
     let capturedBody;
     globalThis.fetch = makeFetch({ onDeployCapture: (body) => { capturedBody = body; } });
     const { container, getByRole } = renderView();
@@ -198,9 +198,6 @@ describe('DeploymentsView — config.yaml-Mount (deploy-config-volume-mount.md A
     });
     await waitFor(() => {
       expect(container.querySelector('#deploy-config-app').value).toBe('brew-assistent');
-    });
-    await act(async () => {
-      fireEvent.change(container.querySelector('#deploy-config-seed'), { target: { value: 'key: value\n' } });
     });
 
     await waitFor(() => {
@@ -214,11 +211,11 @@ describe('DeploymentsView — config.yaml-Mount (deploy-config-volume-mount.md A
     expect(capturedBody).toMatchObject({
       requiresConfig: true,
       configApp: 'brew-assistent',
-      configSeed: 'key: value\n',
     });
+    expect(capturedBody).not.toHaveProperty('configSeed');
   });
 
-  it('AC9: Checkbox inaktiv → KEINE config-Params im Deploy-Request (unveränderter Request)', async () => {
+  it('AC8: Checkbox inaktiv → KEINE config-Params im Deploy-Request (unveränderter Request)', async () => {
     let capturedBody;
     globalThis.fetch = makeFetch({ onDeployCapture: (body) => { capturedBody = body; } });
     const { container, getByRole } = renderView();

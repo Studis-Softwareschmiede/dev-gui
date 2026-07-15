@@ -39,10 +39,10 @@
  *   - GPG-Rotation (F-073/S-338 AC7): hinter AccessGuard + CRED_ADMIN_EMAILS;
  *     Response geheimnisfrei ({ ok, phase?, errorClass?, reason? }) — nie alte/
  *     neue Passphrase, nie .env.gpg-Klartext.
- *   - config.yaml-Mount (deploy-config-volume-mount F-078/S-347/S-348 AC7/AC8/AC10):
- *     optionale Body-Params requiresConfig/configApp/configSeed; configSeed erscheint
- *     NIEMALS in Response/Log/Audit — bei Validierungsfehlern wird der Inhalt nicht
- *     gespiegelt (nur die Fehlerursache).
+ *   - config-Verzeichnis-Mount (deploy-config-volume-mount F-078/F-079/S-347/S-348/S-350
+ *     AC6/AC7/AC9): optionale Body-Params requiresConfig/configApp/configMountPath — dev-gui
+ *     kennt keinen config-Inhalt mehr (kein configSeed, kein Seed-/Guard-Gate); die App
+ *     seedet ihre config.yaml selbst.
  *
  * VPS configuration: The router receives a pre-configured vpsConfig map
  * (vpsId → VpsTarget) from server.js. The client sends a vpsId string;
@@ -67,8 +67,12 @@ const HOSTNAME_PARAM_RE = /^[a-zA-Z0-9._-]+$/;
 const CONFIG_APP_SLUG_RE = /^[a-z0-9][a-z0-9._-]*$/;
 const MAX_CONFIG_APP_LEN = 64;
 
-/** Längenlimit für den optionalen config.yaml-Seed-Inhalt (deploy-config-volume-mount AC7). */
-const MAX_CONFIG_SEED_LEN = 65536;
+/**
+ * config-Mount-Container-Pfad (deploy-config-volume-mount AC2/D3): identischer Zeichensatz
+ * wie VpsDockerControl#isValidConfigMountPath — absoluter Unix-Pfad, kein Shell-Metazeichen.
+ */
+const CONFIG_MOUNT_PATH_RE = /^\/[A-Za-z0-9._/-]*$/;
+const MAX_CONFIG_MOUNT_PATH_LEN = 255;
 
 /**
  * App-Slug-Param (F-073/S-335 :app): analog zur repo-weiten PROJECT_SLUG_RE-Konvention
@@ -170,7 +174,7 @@ function validateDeployBody(body) {
     return { ok: false, error: 'Request-Body ist Pflicht' };
   }
 
-  const { image, vps, hostname, tunnelId, gpgBwItem, requiresConfig, configApp, configSeed } = body;
+  const { image, vps, hostname, tunnelId, gpgBwItem, requiresConfig, configApp, configMountPath } = body;
 
   if (typeof image !== 'string' || !image.trim()) {
     return { ok: false, error: 'image ist ein Pflichtfeld' };
@@ -245,18 +249,22 @@ function validateDeployBody(body) {
     configAppVal = trimmedApp;
   }
 
-  // configSeed: optionaler Erst-Deploy-Inhalt der config.yaml. NIE in Fehlermeldungen
-  // spiegeln (AC7/AC10 — kein Leak bei 400); Typ + Längenlimit prüfen, Inhalt selbst
-  // bleibt unangetastet (kein trim() — der Seed-Inhalt ist Dateiinhalt, keine ID).
-  let configSeedVal = null;
-  if (configSeed !== undefined && configSeed !== null && configSeed !== '') {
-    if (typeof configSeed !== 'string') {
-      return { ok: false, error: 'configSeed muss ein String sein' };
+  // configMountPath (deploy-config-volume-mount AC2/AC6/D3): optionaler Container-Mount-Pfad
+  // (Default /app/config); Zeichensatz/Längenlimit identisch zur VpsDockerControl-seitigen
+  // Validierung (config-mount-path-invalid).
+  let configMountPathVal = null;
+  if (configMountPath !== undefined && configMountPath !== null && configMountPath !== '') {
+    if (typeof configMountPath !== 'string' || !configMountPath.trim()) {
+      return { ok: false, error: 'configMountPath muss ein nicht-leerer String sein' };
     }
-    if (configSeed.length > MAX_CONFIG_SEED_LEN) {
-      return { ok: false, error: `configSeed überschreitet Längenlimit (max. ${MAX_CONFIG_SEED_LEN} Zeichen)` };
+    const trimmedPath = configMountPath.trim();
+    if (trimmedPath.length > MAX_CONFIG_MOUNT_PATH_LEN) {
+      return { ok: false, error: `configMountPath überschreitet Längenlimit (max. ${MAX_CONFIG_MOUNT_PATH_LEN} Zeichen)` };
     }
-    configSeedVal = configSeed;
+    if (!CONFIG_MOUNT_PATH_RE.test(trimmedPath)) {
+      return { ok: false, error: 'configMountPath enthält ungültige Zeichen (nur absoluter Unix-Pfad ohne Shell-Metazeichen erlaubt)' };
+    }
+    configMountPathVal = trimmedPath;
   }
 
   return {
@@ -269,7 +277,7 @@ function validateDeployBody(body) {
       gpgBwItem: gpgItem,
       requiresConfig: requiresConfigVal,
       configApp: configAppVal,
-      configSeed: configSeedVal,
+      configMountPath: configMountPathVal,
     },
   };
 }
@@ -640,9 +648,10 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconcil
    * Deploy: ghcr-Image → Container + Tunnel-Route + DNS-CNAME (atomare Saga).
    * MUTATION: Audit-First + Identitäts-/Rollenschutz (AC8/AC9).
    *
-   * Body: { image, vps, hostname, tunnelId, gpgBwItem?, requiresConfig?, configApp?, configSeed? }
+   * Body: { image, vps, hostname, tunnelId, gpgBwItem?, requiresConfig?, configApp?, configMountPath? }
    *   — zoneId is resolved server-side from hostname (Spec-Gap-Resolution)
-   *   — requiresConfig/configApp/configSeed: deploy-config-volume-mount AC7/AC8 (F-078/S-347/S-348)
+   *   — requiresConfig/configApp/configMountPath: deploy-config-volume-mount AC6/AC7 (F-079/S-350);
+   *     kein configSeed mehr — die App seedet ihre config.yaml selbst.
    *
    * Responses:
    *   200 { result: "ok", deployment }
@@ -650,8 +659,8 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconcil
    *   403 { error }           — nicht in CRED_ADMIN_EMAILS
    *   422 { result: "error", reason: "protected-resource" }  — LockoutGuard (AC7)
    *   422 { result: "error", reason: "zone-not-found" }      — kein Zone-Match
-   *   422 { result: "error", errorClass: "config-file-missing" }  — config.yaml fehlt, kein Seed (deploy-config-volume-mount AC6)
-   *   422 { result: "error", errorClass: "config-app-invalid" }   — config-App-Slug ungültig (deploy-config-volume-mount AC2)
+   *   422 { result: "error", errorClass: "config-app-invalid" }        — config-App-Slug ungültig (deploy-config-volume-mount AC2)
+   *   422 { result: "error", errorClass: "config-mount-path-invalid" } — config-Mount-Pfad ungültig (deploy-config-volume-mount AC2)
    *   500 { error }           — Audit-Write fehlgeschlagen
    *   502 { result: "error", reason }  — SSH/Cloudflare-Fehler
    */
@@ -669,7 +678,7 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconcil
     if (!bodyVal.ok) {
       return res.status(400).json({ error: bodyVal.error });
     }
-    const { image, vps: vpsId, hostname, tunnelId, gpgBwItem, requiresConfig, configApp, configSeed } = bodyVal.params;
+    const { image, vps: vpsId, hostname, tunnelId, gpgBwItem, requiresConfig, configApp, configMountPath } = bodyVal.params;
 
     // ── F-072/S-334: Deploy-Guard (VOR jeder Mutation, AC12) ──────────────────
     // Braucht dieser Deploy eine per-App-GPG-Passphrase (gpgBwItem gesetzt) und ist
@@ -756,9 +765,9 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconcil
         tunnelId,
         vpsId,
         ...(containerEnv ? { containerEnv } : {}),
-        // deploy-config-volume-mount AC8: nur durchreichen, wenn requiresConfig aktiv —
+        // deploy-config-volume-mount AC7: nur durchreichen, wenn requiresConfig aktiv —
         // sonst bleibt der Deploy-Pfad byte-identisch zum bisherigen Verhalten (AC1).
-        ...(requiresConfig ? { requiresConfig, configApp, configSeed } : {}),
+        ...(requiresConfig ? { requiresConfig, configApp, configMountPath } : {}),
       });
     } catch (err) {
       const errorClass = err?.errorClass ?? 'error';
@@ -813,14 +822,13 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconcil
       if (errorClass === 'cloudflare-unavailable') {
         return res.status(502).json({ result: 'error', errorClass: 'cloudflare-unavailable', reason: sanitizeMsg(reason ?? 'Cloudflare nicht erreichbar') });
       }
-      if (errorClass === 'config-file-missing') {
-        // deploy-config-volume-mount AC6/D1.3: Host-config.yaml fehlt und kein Seed mitgegeben —
-        // Abbruch vor jeder Mutation.
-        return res.status(422).json({ result: 'error', errorClass: 'config-file-missing', reason: sanitizeMsg(reason ?? 'config.yaml fehlt auf dem VPS — bitte per SSH ablegen oder einen Seed-Inhalt mitgeben') });
-      }
       if (errorClass === 'config-app-invalid') {
         // deploy-config-volume-mount AC2/D3: config-App-Slug verletzt den Zeichensatz.
         return res.status(422).json({ result: 'error', errorClass: 'config-app-invalid', reason: sanitizeMsg(reason ?? 'Ungültiger config-App-Slug') });
+      }
+      if (errorClass === 'config-mount-path-invalid') {
+        // deploy-config-volume-mount AC2/D3: configMountPath verletzt den Zeichensatz.
+        return res.status(422).json({ result: 'error', errorClass: 'config-mount-path-invalid', reason: sanitizeMsg(reason ?? 'Ungültiger config-Mount-Pfad') });
       }
       if (errorClass === 'validation-error') {
         return res.status(400).json({ result: 'error', reason });

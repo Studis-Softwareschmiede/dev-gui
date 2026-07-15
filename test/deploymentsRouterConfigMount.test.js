@@ -1,18 +1,21 @@
 /**
- * deploymentsRouterConfigMount.test.js — HTTP-Router-Tests für die config.yaml-Mount-
- * Durchreichung (deploy-config-volume-mount.md AC7/AC8/AC10, F-078/S-347/S-348).
+ * deploymentsRouterConfigMount.test.js — HTTP-Router-Tests für die config-Verzeichnis-
+ * Mount-Durchreichung (deploy-config-volume-mount.md AC6/AC7/AC9, F-079/S-350).
  *
  * Covers (deploy-config-volume-mount):
- *   AC7  — POST /api/deployments akzeptiert optionale requiresConfig/configApp/configSeed;
+ *   AC6 — POST /api/deployments akzeptiert optionale requiresConfig/configApp/configMountPath;
  *          validateDeployBody() validiert Typen (requiresConfig: boolean), Slug-Zeichensatz
- *          (^[a-z0-9][a-z0-9._-]*$) + Längenlimit auf configApp/configSeed; ungültig → 400
- *          ohne den configSeed-Inhalt im Fehlertext zu leaken.
- *   AC8  — Bei requiresConfig:true reicht der Handler { requiresConfig, configApp, configSeed }
- *          an orchestrator.deploy() durch. Bei requiresConfig false/abwesend bleibt der
- *          orchestrator.deploy()-Aufruf unverändert (kein requiresConfig/configApp/configSeed-Key).
- *   AC10 (Floor) — configSeed erscheint nie in der 400-Fehlerantwort (kein Content-Leak).
- *          Neue Fehlerklassen config-file-missing/config-app-invalid werden auf HTTP 422
- *          mit passendem errorClass gemappt (Verträge-Sektion der Spec).
+ *          (^[a-z0-9][a-z0-9._-]*$) auf configApp und absoluten-Unix-Pfad-Zeichensatz auf
+ *          configMountPath; ungültig → 400. configSeed wird NICHT mehr akzeptiert/durchgereicht
+ *          (unbekanntes Feld wird ignoriert).
+ *   AC7  — Bei requiresConfig:true reicht der Handler { requiresConfig, configApp,
+ *          configMountPath } an orchestrator.deploy() durch — kein separates Seed-/Guard-Gate,
+ *          kein configSeed-Fluss. Bei requiresConfig false/abwesend bleibt der
+ *          orchestrator.deploy()-Aufruf unverändert (kein requiresConfig/configApp/
+ *          configMountPath-Key, AC1-Byte-Gleichheit).
+ *   AC9  (Floor) — kein neues Secret, kein neuer Endpunkt; Fehlerklassen config-app-invalid/
+ *          config-mount-path-invalid werden auf HTTP 422 mit passendem errorClass gemappt
+ *          (Verträge-Sektion der Spec). config-file-missing existiert nicht mehr.
  */
 
 import { describe, it, expect, jest } from '@jest/globals';
@@ -84,8 +87,8 @@ function build({ deployResult } = {}) {
   return { app, deploy };
 }
 
-describe('POST /api/deployments — config.yaml-Mount-Durchreichung (deploy-config-volume-mount AC7/AC8/AC10)', () => {
-  it('AC8: requiresConfig:false/abwesend → orchestrator.deploy() ohne requiresConfig/configApp/configSeed-Key (byte-identisch)', async () => {
+describe('POST /api/deployments — config-Verzeichnis-Mount-Durchreichung (deploy-config-volume-mount AC6/AC7/AC9)', () => {
+  it('AC7: requiresConfig:false/abwesend → orchestrator.deploy() ohne requiresConfig/configApp/configMountPath-Key (byte-identisch)', async () => {
     const { app, deploy } = build();
     const { server, port } = await startServer(app);
     try {
@@ -94,13 +97,103 @@ describe('POST /api/deployments — config.yaml-Mount-Durchreichung (deploy-conf
       const callArgs = deploy.mock.calls[0][0];
       expect(callArgs).not.toHaveProperty('requiresConfig');
       expect(callArgs).not.toHaveProperty('configApp');
-      expect(callArgs).not.toHaveProperty('configSeed');
+      expect(callArgs).not.toHaveProperty('configMountPath');
     } finally {
       await closeServer(server);
     }
   });
 
-  it('AC7/AC8: requiresConfig:true + gültiger configApp + configSeed → durchgereicht an orchestrator.deploy()', async () => {
+  it('AC6/AC7: requiresConfig:true + gültiger configApp → durchgereicht an orchestrator.deploy()', async () => {
+    const { app, deploy } = build();
+    const { server, port } = await startServer(app);
+    try {
+      const res = await httpPost(port, '/api/deployments', {
+        ...BASE_BODY,
+        requiresConfig: true,
+        configApp: 'my-app',
+      });
+      expect(res.status).toBe(200);
+      const callArgs = deploy.mock.calls[0][0];
+      expect(callArgs.requiresConfig).toBe(true);
+      expect(callArgs.configApp).toBe('my-app');
+      expect(callArgs.configMountPath).toBeNull();
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it('AC6: requiresConfig:true + configApp + gültiger configMountPath → durchgereicht an orchestrator.deploy()', async () => {
+    const { app, deploy } = build();
+    const { server, port } = await startServer(app);
+    try {
+      const res = await httpPost(port, '/api/deployments', {
+        ...BASE_BODY,
+        requiresConfig: true,
+        configApp: 'my-app',
+        configMountPath: '/data/config',
+      });
+      expect(res.status).toBe(200);
+      const callArgs = deploy.mock.calls[0][0];
+      expect(callArgs.requiresConfig).toBe(true);
+      expect(callArgs.configApp).toBe('my-app');
+      expect(callArgs.configMountPath).toBe('/data/config');
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it('AC6: configMountPath ohne führenden Slash (kein absoluter Pfad) → 400, kein Deploy-Aufruf', async () => {
+    const { app, deploy } = build();
+    const { server, port } = await startServer(app);
+    try {
+      const res = await httpPost(port, '/api/deployments', {
+        ...BASE_BODY,
+        requiresConfig: true,
+        configApp: 'my-app',
+        configMountPath: 'relative/path',
+      });
+      expect(res.status).toBe(400);
+      expect(deploy).not.toHaveBeenCalled();
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it('AC6: configMountPath mit Shell-Metazeichen (; und Leerzeichen) → 400, kein Deploy-Aufruf', async () => {
+    const { app, deploy } = build();
+    const { server, port } = await startServer(app);
+    try {
+      const res = await httpPost(port, '/api/deployments', {
+        ...BASE_BODY,
+        requiresConfig: true,
+        configApp: 'my-app',
+        configMountPath: '/app/config; rm -rf /',
+      });
+      expect(res.status).toBe(400);
+      expect(deploy).not.toHaveBeenCalled();
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it('AC6: configMountPath als non-string (Zahl) → 400', async () => {
+    const { app, deploy } = build();
+    const { server, port } = await startServer(app);
+    try {
+      const res = await httpPost(port, '/api/deployments', {
+        ...BASE_BODY,
+        requiresConfig: true,
+        configApp: 'my-app',
+        configMountPath: 12345,
+      });
+      expect(res.status).toBe(400);
+      expect(deploy).not.toHaveBeenCalled();
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it('AC6: configSeed wird nicht mehr akzeptiert — unbekanntes Feld wird ignoriert, nie durchgereicht', async () => {
     const { app, deploy } = build();
     const { server, port } = await startServer(app);
     try {
@@ -112,28 +205,7 @@ describe('POST /api/deployments — config.yaml-Mount-Durchreichung (deploy-conf
       });
       expect(res.status).toBe(200);
       const callArgs = deploy.mock.calls[0][0];
-      expect(callArgs.requiresConfig).toBe(true);
-      expect(callArgs.configApp).toBe('my-app');
-      expect(callArgs.configSeed).toBe('key: value\n');
-    } finally {
-      await closeServer(server);
-    }
-  });
-
-  it('AC7: requiresConfig:true ohne configSeed → configSeed bleibt null, requiresConfig/configApp durchgereicht', async () => {
-    const { app, deploy } = build();
-    const { server, port } = await startServer(app);
-    try {
-      const res = await httpPost(port, '/api/deployments', {
-        ...BASE_BODY,
-        requiresConfig: true,
-        configApp: 'my-app',
-      });
-      expect(res.status).toBe(200);
-      const callArgs = deploy.mock.calls[0][0];
-      expect(callArgs.requiresConfig).toBe(true);
-      expect(callArgs.configApp).toBe('my-app');
-      expect(callArgs.configSeed).toBeNull();
+      expect(callArgs).not.toHaveProperty('configSeed');
     } finally {
       await closeServer(server);
     }
@@ -151,7 +223,7 @@ describe('POST /api/deployments — config.yaml-Mount-Durchreichung (deploy-conf
     }
   });
 
-  it('AC7/D3: configApp mit ungültigen Zeichen (Großbuchstaben) → 400, kein Deploy-Aufruf', async () => {
+  it('AC6: configApp mit ungültigen Zeichen (Großbuchstaben) → 400, kein Deploy-Aufruf', async () => {
     const { app, deploy } = build();
     const { server, port } = await startServer(app);
     try {
@@ -167,7 +239,7 @@ describe('POST /api/deployments — config.yaml-Mount-Durchreichung (deploy-conf
     }
   });
 
-  it('AC7/D3: configApp mit Shell-Metazeichen (; und Leerzeichen) → 400, kein Deploy-Aufruf', async () => {
+  it('AC6: configApp mit Shell-Metazeichen (; und Leerzeichen) → 400, kein Deploy-Aufruf', async () => {
     const { app, deploy } = build();
     const { server, port } = await startServer(app);
     try {
@@ -183,7 +255,7 @@ describe('POST /api/deployments — config.yaml-Mount-Durchreichung (deploy-conf
     }
   });
 
-  it('AC7: configApp überschreitet Längenlimit (65 Zeichen) → 400', async () => {
+  it('AC6: configApp überschreitet Längenlimit (65 Zeichen) → 400', async () => {
     const { app, deploy } = build();
     const { server, port } = await startServer(app);
     try {
@@ -194,62 +266,6 @@ describe('POST /api/deployments — config.yaml-Mount-Durchreichung (deploy-conf
       });
       expect(res.status).toBe(400);
       expect(deploy).not.toHaveBeenCalled();
-    } finally {
-      await closeServer(server);
-    }
-  });
-
-  it('AC7/AC10: configSeed überschreitet Längenlimit → 400, Inhalt NICHT in der Fehlermeldung', async () => {
-    const { app, deploy } = build();
-    const { server, port } = await startServer(app);
-    try {
-      const marker = 'SECRET-MARKER-XYZ';
-      const oversized = marker + 'a'.repeat(70000);
-      const res = await httpPost(port, '/api/deployments', {
-        ...BASE_BODY,
-        requiresConfig: true,
-        configApp: 'my-app',
-        configSeed: oversized,
-      });
-      expect(res.status).toBe(400);
-      expect(deploy).not.toHaveBeenCalled();
-      expect(res.raw).not.toContain(marker);
-    } finally {
-      await closeServer(server);
-    }
-  });
-
-  it('AC7: configSeed als non-string (Zahl) → 400', async () => {
-    const { app, deploy } = build();
-    const { server, port } = await startServer(app);
-    try {
-      const res = await httpPost(port, '/api/deployments', {
-        ...BASE_BODY,
-        requiresConfig: true,
-        configApp: 'my-app',
-        configSeed: 12345,
-      });
-      expect(res.status).toBe(400);
-      expect(deploy).not.toHaveBeenCalled();
-    } finally {
-      await closeServer(server);
-    }
-  });
-
-  it('Verträge: orchestrator liefert errorClass config-file-missing → 422 mit errorClass im Body', async () => {
-    const { app } = build({
-      deployResult: { result: 'error', errorClass: 'config-file-missing', reason: 'config.yaml fehlt' },
-    });
-    const { server, port } = await startServer(app);
-    try {
-      const res = await httpPost(port, '/api/deployments', {
-        ...BASE_BODY,
-        requiresConfig: true,
-        configApp: 'my-app',
-      });
-      expect(res.status).toBe(422);
-      expect(res.body.errorClass).toBe('config-file-missing');
-      expect(res.body.result).toBe('error');
     } finally {
       await closeServer(server);
     }
@@ -268,6 +284,26 @@ describe('POST /api/deployments — config.yaml-Mount-Durchreichung (deploy-conf
       });
       expect(res.status).toBe(422);
       expect(res.body.errorClass).toBe('config-app-invalid');
+      expect(res.body.result).toBe('error');
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it('Verträge: orchestrator liefert errorClass config-mount-path-invalid → 422 mit errorClass im Body', async () => {
+    const { app } = build({
+      deployResult: { result: 'error', errorClass: 'config-mount-path-invalid', reason: 'Ungültiger Mount-Pfad' },
+    });
+    const { server, port } = await startServer(app);
+    try {
+      const res = await httpPost(port, '/api/deployments', {
+        ...BASE_BODY,
+        requiresConfig: true,
+        configApp: 'my-app',
+        configMountPath: '/data/config',
+      });
+      expect(res.status).toBe(422);
+      expect(res.body.errorClass).toBe('config-mount-path-invalid');
       expect(res.body.result).toBe('error');
     } finally {
       await closeServer(server);

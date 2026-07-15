@@ -84,15 +84,15 @@
  *     folgt der Wert dem Slug-Wechsel NICHT mehr (kein Default-Reset über die manuelle
  *     Eingabe hinweg).
  *
- * config.yaml-Mount (deploy-config-volume-mount.md AC9, F-078/S-348):
- *   - Checkbox „config.yaml auf dem VPS bereitstellen (read-only nach /app/config.yaml
- *     gemountet)"; aktiv → zusätzliches optionales mehrzeiliges Seed-Feld (Erst-Deploy-
- *     Inhalt) + read-only Vorschau des Host-Pfads `~/apps/<configApp>/config.yaml`.
+ * config-Verzeichnis-Mount (deploy-config-volume-mount.md AC8/AC9, F-079/S-350):
+ *   - Checkbox „persistentes config-Verzeichnis auf dem VPS mounten (read-write nach
+ *     /app/config)"; aktiv → read-only Vorschau des Host-Pfads `~/apps/<configApp>/config`
+ *     (Verzeichnis). Kein Seed-Feld — die App seedet ihre config.yaml selbst.
  *   - configApp-Default wird wie gpgBwItem/Subdomain aus dem gewählten Image/Package
  *     abgeleitet (deriveSubdomain), bleibt editierbar; folgt dem Slug-Wechsel nicht mehr,
  *     sobald manuell editiert (configAppTouched).
- *   - Checkbox inaktiv → requiresConfig/configApp/configSeed werden NICHT gesendet
- *     (unveränderter Request, AC9).
+ *   - Checkbox inaktiv → requiresConfig/configApp werden NICHT gesendet
+ *     (unveränderter Request, AC8).
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
@@ -190,12 +190,12 @@ export function DeploymentsView({ onNavigate }) {
   // gpgBwItemTouched: sobald true, überschreibt der Slug-Wechsel den Wert NICHT mehr.
   const [gpgBwItem, setGpgBwItem] = useState('');
   const [gpgBwItemTouched, setGpgBwItemTouched] = useState(false);
-  // deploy-config-volume-mount AC9 (F-078/S-348): config.yaml-Mount-Checkbox +
-  // Seed-Feld + configApp-Default (gleiche Ableitung wie gpgBwItem/Subdomain).
+  // deploy-config-volume-mount AC8/AC9 (F-079/S-350): config-Verzeichnis-Mount-Checkbox +
+  // configApp-Default (gleiche Ableitung wie gpgBwItem/Subdomain). Kein Seed-Feld mehr —
+  // die App seedet ihre config.yaml selbst.
   const [requiresConfig, setRequiresConfig] = useState(false);
   const [configApp, setConfigApp] = useState('');
   const [configAppTouched, setConfigAppTouched] = useState(false);
-  const [configSeed, setConfigSeed] = useState('');
   const [deploying, setDeploying] = useState(false);
   const [deployResult, setDeployResult] = useState(null); // { ok, message, replaced? }
 
@@ -382,7 +382,7 @@ export function DeploymentsView({ onNavigate }) {
     setGpgBwItem(deriveGpgBwItem(selectedPackage));
   }, [selectedPackage, gpgBwItemTouched]);
 
-  // ── deploy-config-volume-mount AC9 (F-078/S-348): Pre-fill configApp from the
+  // ── deploy-config-volume-mount AC8 (F-079/S-350): Pre-fill configApp from the
   // same slug as gpgBwItem/Subdomain. Follows the slug only while untouched.
   useEffect(() => {
     if (configAppTouched) return;
@@ -770,13 +770,12 @@ export function DeploymentsView({ onNavigate }) {
           // zoneId resolved server-side
           // F-073/S-340 AC16: gpgBwItem-Default (env.gpg-passphrase-<slug>), überschreibbar
           ...(gpgBwItem.trim() ? { gpgBwItem: gpgBwItem.trim() } : {}),
-          // deploy-config-volume-mount AC9 (F-078/S-348): nur senden, wenn die Checkbox
-          // aktiv ist — sonst unveränderter Request (AC9).
+          // deploy-config-volume-mount AC8 (F-079/S-350): nur senden, wenn die Checkbox
+          // aktiv ist — sonst unveränderter Request (AC8). Kein configSeed mehr.
           ...(requiresConfig
             ? {
                 requiresConfig: true,
                 ...(configApp.trim() ? { configApp: configApp.trim() } : {}),
-                ...(configSeed.trim() ? { configSeed } : {}),
               }
             : {}),
         }),
@@ -804,7 +803,6 @@ export function DeploymentsView({ onNavigate }) {
         setRequiresConfig(false);
         setConfigApp('');
         setConfigAppTouched(false);
-        setConfigSeed('');
         // Refresh list
         loadDeployments();
       } else {
@@ -1543,8 +1541,9 @@ export function DeploymentsView({ onNavigate }) {
               </span>
             </div>
 
-            {/* deploy-config-volume-mount AC9 (F-078/S-348): config.yaml-Mount-Checkbox
-                + optionales Seed-Feld + read-only Host-Pfad-Vorschau. */}
+            {/* deploy-config-volume-mount AC8 (F-079/S-350): config-Verzeichnis-Mount-
+                Checkbox + read-only Host-Pfad-Vorschau. Kein Seed-Feld — die App seedet
+                ihre config.yaml selbst. */}
             <div style={styles.row}>
               <label style={styles.gpgDiscardConfirmLabel} htmlFor="deploy-requires-config">
                 <input
@@ -1554,50 +1553,32 @@ export function DeploymentsView({ onNavigate }) {
                   onChange={(e) => setRequiresConfig(e.target.checked)}
                   style={styles.gpgDiscardCheckbox}
                 />
-                {' '}config.yaml auf dem VPS bereitstellen (read-only nach /app/config.yaml gemountet)
+                {' '}persistentes config-Verzeichnis auf dem VPS mounten (read-write nach /app/config)
               </label>
             </div>
 
             {requiresConfig && (
-              <>
-                <div style={styles.row}>
-                  <label style={styles.label} htmlFor="deploy-config-app">config-App-Slug</label>
-                  <input
-                    id="deploy-config-app"
-                    type="text"
-                    style={styles.input}
-                    value={configApp}
-                    onChange={(e) => {
-                      setConfigApp(e.target.value);
-                      setConfigAppTouched(true);
-                    }}
-                    placeholder="app-name"
-                    aria-label="config-App-Slug (editierbar)"
-                    aria-describedby="deploy-config-host-path-preview"
-                  />
-                  <span id="deploy-config-host-path-preview" style={styles.inputHint}>
-                    {configApp.trim()
-                      ? `Host-Pfad: ~/apps/${configApp.trim()}/config.yaml`
-                      : 'Host-Pfad: (config-App-Slug wählen)'}
-                  </span>
-                </div>
-
-                <div style={styles.row}>
-                  <label style={styles.label} htmlFor="deploy-config-seed">config.yaml-Seed (optional, Erst-Deploy)</label>
-                  <textarea
-                    id="deploy-config-seed"
-                    style={{ ...styles.input, minHeight: 120, fontFamily: 'monospace', resize: 'vertical' }}
-                    value={configSeed}
-                    onChange={(e) => setConfigSeed(e.target.value)}
-                    placeholder="# Erst-Inhalt der config.yaml — wird nur geschrieben, wenn die Host-Datei noch nicht existiert"
-                    aria-label="config.yaml-Seed-Inhalt (optional)"
-                    aria-describedby="deploy-config-seed-hint"
-                  />
-                  <span id="deploy-config-seed-hint" style={styles.inputHint}>
-                    Nur für die einmalige Erst-Provisionierung — eine bereits bestehende Host-config.yaml wird nie überschrieben.
-                  </span>
-                </div>
-              </>
+              <div style={styles.row}>
+                <label style={styles.label} htmlFor="deploy-config-app">config-App-Slug</label>
+                <input
+                  id="deploy-config-app"
+                  type="text"
+                  style={styles.input}
+                  value={configApp}
+                  onChange={(e) => {
+                    setConfigApp(e.target.value);
+                    setConfigAppTouched(true);
+                  }}
+                  placeholder="app-name"
+                  aria-label="config-App-Slug (editierbar)"
+                  aria-describedby="deploy-config-host-path-preview"
+                />
+                <span id="deploy-config-host-path-preview" style={styles.inputHint}>
+                  {configApp.trim()
+                    ? `Host-Pfad: ~/apps/${configApp.trim()}/config`
+                    : 'Host-Pfad: (config-App-Slug wählen)'}
+                </span>
+              </div>
             )}
 
             {/* ── S-156: Lokal testen (vor Deploy auf VPS) ──────────────── */}
@@ -2229,11 +2210,11 @@ function formatReason(reason, context = 'single') {
       return 'Tunnel fuer diesen VPS fehlt in Cloudflare – bitte ueber „Tunnel neu anlegen & bestuecken" wiederherstellen';
     case 'tunnel-mismatch':
       return 'Tunnel-ID stimmt nicht mit dem fuer diesen VPS registrierten Tunnel ueberein (Fehlverdrahtungs-Schutz) – VPS im Formular neu waehlen';
-    // deploy-config-volume-mount AC6/AC2 (F-078/S-348): freundliche Hinweise für das config-Gate
-    case 'config-file-missing':
-      return 'config.yaml fehlt auf dem VPS – bitte per SSH ablegen oder einen Seed-Inhalt mitgeben';
+    // deploy-config-volume-mount AC2 (F-079/S-350): freundliche Hinweise für den config-Mount
     case 'config-app-invalid':
       return 'Ungueltiger config-App-Slug (nur a-z 0-9 . _ - erlaubt, muss mit a-z0-9 beginnen)';
+    case 'config-mount-path-invalid':
+      return 'Ungueltiger config-Mount-Pfad (muss ein absoluter Unix-Pfad ohne Shell-Metazeichen sein)';
     default:
       // Strip anything that looks like a secret from the displayed message
       return String(reason)
