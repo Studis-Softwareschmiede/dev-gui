@@ -2,6 +2,28 @@
 
 Newest-first. Regeln für die Orchestrator-Ebene (Landen/Konsolidieren/Recovery/Dispatch-Ökonomie).
 
+## flow/L05 — EINE kaputte Zeile in `dispatches.jsonl` vergiftet **alle** Rollups still (`iters=1`, `crit/imp=0`, `secs_total=0`)
+
+**Beobachtung (2026-07-15, S-355):** `metrics-append-item.sh` meldete `ep_act=4 iters=1 crit=0 imp=0` — obwohl die fünf Dispatch-Zeilen des Items korrekt `iter` bis 2, `imp=1` und Σ`secs`=1832 tragen. Die geschriebene `items.jsonl`-Zeile hatte zusätzlich `secs_total=0`. Kein Fehler, kein Hinweis, falsche Zahlen.
+
+**Ursache (verifiziert, nicht vermutet):** Der Rollup liest die Datei mit **einem** `jq -s` über **alle** Zeilen (`scripts/metrics-append-item.sh` ~Z.105–116). `jq -s` ist **atomar**: eine einzige nicht-parsbare Zeile lässt den **gesamten** Aufruf mit Exit 5 sterben. Die Zeilen 375–378 (vom **2026-07-03**, Item S-289) sind korrupt — dort sind Positionsparameter in die JSON-Felder gerutscht: `{"ts":…,"item":"S-289","seq":1 coder 1 null 1018,"agent":"","iter":,…}`. Der Aufrufer hatte offenbar Env-Variablen als Argumente übergeben. Das `|| ITERS=1` hinter dem `jq` (K3-Absicherung: „Messen blockiert nie den Loop") **schluckt den Parse-Fehler** und lässt die Defaults greifen.
+
+**Tragweite:** Die Verunreinigung ist **12 Tage alt**. Seit dem 2026-07-03 sind damit **alle** `items.jsonl`-Zeilen dieses Repos mit `iters=1`/`crit=0`/`imp=0`/`secs_total=0` geschrieben worden — d.h. die gesamte EP-Historie seither ist Müll, und `retro` Modus C (EP-Kalibrierung) sowie der `baseline.json`-Lookup in §1a rechnen darauf. `ep_est` aus §1a ist entsprechend wertlos kalibriert.
+
+**Regel für den Orchestrator:** Der Rollup-Output ist **nicht** selbstvalidierend — `[metrics-append-item] OK: …` erscheint auch bei totgelaufenem `jq`. Wenn die gemeldeten `iters`/`crit`/`imp` **nicht zu den eigenen Dispatches dieses Laufs passen** (die du selbst gezählt hast), ist das der Fingerabdruck dieses Defekts. Verifikations-Einzeiler (kostet nichts):
+```bash
+jq -e . .claude/metrics/dispatches.jsonl >/dev/null || echo "Ledger korrupt — Rollups laufen auf Defaults"
+```
+(`jq -e .` ohne `-s` prüft zeilenweise und nennt die erste kaputte Zeilennummer.)
+
+**Nicht tun:**
+- **Die kaputten Zeilen im Story-Drain eigenmächtig löschen/reparieren.** Die Ledger-Regel ist explizit append-only („historische Zeilen werden nie gelöscht oder umgeschrieben", Ausnahme nur der `tok`-Patch). Ein `/flow`-Lauf, der das Ledger zurechtbiegt, damit seine eigenen Zahlen schön aussehen, ist dasselbe verbotene Muster wie eine Spec eigenmächtig auf `active` zu heben (vgl. flow/L04). **Melden, nicht putzen** — die Entscheidung gehört dem Owner.
+- Die falschen Aggregate in die Story-YAML „korrigieren". Der Dispo-Spiegel (§2b/AC6) spiegelt, was **im Ledger steht** — das Ledger bleibt Source of Truth, auch wenn es hier falsch liegt. Bei S-355 wurde daher bewusst `dispo_act=4` gespiegelt (statt des rechnerisch richtigen Werts aus iters=2/imp=1).
+
+**Strukturelle Kur (offen, cross-repo — agent-flow, Owner-Entscheidung nötig):** zwei unabhängige Defekte. (1) **Robustheit:** der Rollup sollte pro Zeile parsen und unparsbare Zeilen überspringen + zählen (`jq -R 'fromjson? // empty'` statt `jq -s`), statt an einer Zeile komplett zu sterben. (2) **Sichtbarkeit:** das `|| DEFAULT`-Muster darf einen **Parse**-Fehler nicht wie „keine Daten" behandeln — K3 verlangt, den Loop nicht zu blockieren, aber **nicht**, den Fehler zu verschweigen; ein `>&2`-Hinweis wäre K3-konform. Solange beides offen ist, tritt die Falle in **jedem** Projekt auf, dessen Ledger je eine kaputte Zeile bekommen hat — und sie ist selbstverstärkend, weil sie unsichtbar bleibt.
+
+**Für den Owner offen (bewusst nicht vom Orchestrator entschieden):** die vier Zeilen 375–378 lokal aus `.claude/metrics/dispatches.jsonl` entfernen (die Datei ist gitignored, also rein lokal, kein Repo-Eingriff). Danach rechnen künftige Rollups wieder korrekt; die zwischen 2026-07-03 und heute geschriebenen `items.jsonl`-Zeilen bleiben aber falsch und müssten für eine saubere Kalibrierung verworfen werden.
+
 ## flow/L04 — `board next` und `board ready` widersprechen sich (R2/spec-status) — `next` ist die Auswahlquelle, `ready` nur Diagnose
 
 **Beobachtung (2026-07-15, S-354):** `board next --parent F-080` liefert S-354, während `board ready --parent F-080` im selben Moment `NOT-READY S-354 — R2: spec status='draft' (erwartet 'active')` und `Summary: 0/4 To-Do-Stories ready` meldet. Kein Fehler auf beiden Seiten — die zwei Verben haben **unterschiedliche Regelsätze**.
