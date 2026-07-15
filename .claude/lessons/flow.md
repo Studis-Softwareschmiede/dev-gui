@@ -2,6 +2,20 @@
 
 Newest-first. Regeln für die Orchestrator-Ebene (Landen/Konsolidieren/Recovery/Dispatch-Ökonomie).
 
+## flow/L04 — `board next` und `board ready` widersprechen sich (R2/spec-status) — `next` ist die Auswahlquelle, `ready` nur Diagnose
+
+**Beobachtung (2026-07-15, S-354):** `board next --parent F-080` liefert S-354, während `board ready --parent F-080` im selben Moment `NOT-READY S-354 — R2: spec status='draft' (erwartet 'active')` und `Summary: 0/4 To-Do-Stories ready` meldet. Kein Fehler auf beiden Seiten — die zwei Verben haben **unterschiedliche Regelsätze**.
+
+**Ursache (verifiziert im Code, nicht vermutet):** `cmd_next()` (`scripts/board` ~Z.860–890) filtert **ausschliesslich** auf `status == "To Do"` + Depends-Gate (`{Done, Verworfen}`). Die Regel **R2** (spec gesetzt + Datei existiert + Frontmatter `status: active`) lebt **nur** in `cmd_ready()` (~Z.1843/1983–2010). `next` kennt sie nicht.
+
+**Regel:** Der `/flow`-Vertrag (§1) macht **`board next` zur Auswahlquelle**; `board ready` ist der **Diagnose**-Pfad und wird laut §1 nur konsultiert, wenn `next` **leer** ist (empty-drain-diagnostics AC3/AC4). Liefert `next` eine Story, wird sie abgearbeitet — auch wenn `ready` sie als NOT-READY führt. Konsistent mit der Praxis von F-080: S-351–S-353 sind gegen dieselben `draft`-Specs gelandet.
+
+**Nicht tun:**
+- Bei nicht-leerem `next` auf `ready` umschwenken und „nichts abarbeitbar" melden — das legt einen beauftragten Feature-Drain still, obwohl der Vertrag eine Story ausweist.
+- Die Spec eigenmächtig auf `status: active` heben, um die Kommandos zu versöhnen. Der Spec-Status ist eine Owner-/`requirement`-Entscheidung, keine Orchestrator-Aufräumarbeit — und ein `/flow`-Lauf, der Specs freigibt, um sich selbst zu entsperren, hat das Drift-Gate umgangen.
+
+**Für den Owner offen (bewusst nicht vom Orchestrator entschieden):** Ist `draft` bei F-080 Absicht (Specs gehen erst am Feature-Ende auf `active`), dann ist die `ready`-Warnung Rauschen. Ist es ein Versäumnis, sind vier Storys gegen unfreigegebene Specs gebaut. Beides plausibel — die Entscheidung gehört nicht in den Loop.
+
 ## flow/L03 — `board`/`board-ship.sh` nicht im PATH — **beide** aus dem agent-flow-Arbeitsrepo, NIE aus dem Plugin-Cache
 
 > **KORRIGIERT 2026-07-15 (S-353).** Die ursprüngliche Fassung dieser Lesson empfahl für `board` den Plugin-Cache-Glob. **Das ist falsch und führt aktiv in die Irre** — Details unten. Wer die alte Fassung befolgt, verliert bei `--parent` still den Feature-Scope.
