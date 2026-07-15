@@ -28,7 +28,7 @@ goal: 'Der „Update"-Knopf in der VPS-Container-Übersicht (F-080/S-355) scheit
   grüne Tests über einem Feature, das nie lief.
 
   '
-status: To Do
+status: Done
 priority: P1
 spec: docs/specs/container-image-update.md
 definition_of_done: 'Der Update-Knopf funktioniert für jeden managed Container auf
@@ -63,7 +63,8 @@ stories:
 - S-359
 - S-360
 - S-361
-progress: 0/3 done
+progress: 3/3 done
 created_at: '2026-07-15T00:00:00Z'
-updated_at: '2026-07-15T00:00:00Z'
+updated_at: '2026-07-15T23:05:00Z'
 area: deployment
+done_at: '2026-07-15T23:05:00Z'
