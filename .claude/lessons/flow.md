@@ -2,6 +2,16 @@
 
 Newest-first. Regeln für die Orchestrator-Ebene (Landen/Konsolidieren/Recovery/Dispatch-Ökonomie).
 
+## flow/L03 — `board`/`board-ship.sh` liegen nicht im PATH; `board-ship.sh` fehlt im Plugin-Cache
+
+**Beobachtung (2026-07-15, S-352):** `board next` scheitert zu Lauf-Beginn mit `command not found: board` — das CLI ist in diesem Repo **nicht** im PATH. Zusätzlich: `board-ship.sh` existiert im aktuellen Plugin-Cache (`082e800afc80`) **nicht**, wohl aber `board` selbst. Beides kostet sonst mehrere Such-Runden mitten im Lauf (einmal vor §1, einmal vor §5).
+
+**Auflösung — beide Pfade zu Beginn einmal setzen, statt zweimal zu suchen:**
+- `board`: `"$(ls -dt ~/.claude/plugins/cache/agent-flow/agent-flow/*/ | head -1)scripts/board"` (Glob = update-fest, s. CLAUDE.md).
+- `board-ship.sh`: **nur** im agent-flow-Arbeitsrepo — `/Users/alex/Git/Studis-Softwareschmiede/agent-flow/scripts/board-ship.sh`. Das ist zugleich das Verzeichnis, auf das `Base directory for this skill` zeigt; der Plugin-Cache ist hier **nicht** die Quelle.
+
+**Nicht tun:** den in CLAUDE.md notierten absoluten Cache-Pfad (`1da6c7dfc966`) verwenden — der Cache rotiert (aktuell `082e800afc80`) und der Wert dort ist bereits veraltet. Ebenso wenig `board` als PATH-Kommando annehmen, nur weil die Skill-Doku es so schreibt.
+
 ## flow/L02 — `board-ship.sh --target-branch feature/*` wartet hier 10 Min ins Leere (kein CI-Fehler)
 
 **Beobachtung (2026-07-15, S-351):** `board-ship.sh <id> --target-branch feature/F-080` merged und pusht korrekt, bleibt dann aber in `watch_ci_or_die` hängen und bricht nach 40×15s mit `CI nicht erfolgreich (conclusion='timeout/unbekannt')` ab — **obwohl nichts kaputt ist**. Der Board-Flip (Schritt 5/6) unterbleibt dadurch, der Merge ist zu dem Zeitpunkt aber bereits gelandet.
