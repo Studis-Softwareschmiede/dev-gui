@@ -1,7 +1,7 @@
 /**
  * vpsContainerRouter — Express-Router für Container-Übersicht + Aktionen pro VPS.
  *
- * Implements: vps-container-overview AC8–AC12, container-image-update AC1–AC4/AC7/AC10–AC12
+ * Implements: vps-container-overview AC8–AC12/AC11b, container-image-update AC1–AC4/AC7/AC10–AC12
  *
  * Routes (alle hinter AccessGuard in server.js):
  *   GET    /api/vps/machines/:provider/*splat/containers
@@ -23,6 +23,9 @@
  *             Unmanaged → VpsDockerControl.rm
  *             Protected → 422 protected-resource
  *             Fehlender/falscher confirm → 422 confirmation-required
+ *             Managed + tunnelId nicht auflösbar → 422 tunnel-not-found, KEIN rm, KEIN
+ *             Cloudflare-Schritt, Container unangetastet (fail-closed, AC11b). Kein stiller
+ *             Rückfall auf reines VpsDockerControl.rm — sonst verwaiste Route+DNS.
  *   POST   /api/vps/machines/:provider/*splat/containers/:containerId/update
  *             Body: leer (kein Image/Tag/tunnelId vom Client — container-image-update AC4)
  *             → { result:'ok', deployment } | { result:'error', errorClass, reason }  [MUTATION]
@@ -538,23 +541,24 @@ export function vpsContainerRouter({ vpsDockerControl, deployOrchestrator, audit
       // Managed: vollständiger Undeploy über DeployOrchestrator
       // tunnelId (container-image-update AC13): server-seitig aus demselben Target-Record
       // wie vpsTarget selbst — additiv von resolveVpsTarget durchgereicht, keine zweite
-      // Auflösung. Wenn kein tunnelId gefunden: Fallback auf reines rm (LockoutGuard wurde
-      // oben bereits geprüft). Remove-Verhalten selbst bleibt unverändert (Scope S-360).
+      // Auflösung. AC11b (vps-container-overview): fail-closed — nicht auflösbar → 422
+      // tunnel-not-found, KEIN rm, KEIN Cloudflare-Schritt, Container bleibt unangetastet.
+      // Ein stiller Rückfall auf reines VpsDockerControl.rm ist untersagt (verwaiste Route+DNS).
       const tunnelId = vpsTarget.tunnelId ?? null;
-
-      let undeployResult;
-      if (tunnelId) {
-        undeployResult = await deployOrchestrator.undeploy({
-          vps: vpsTarget,
-          hostname: container.hostname,
-          confirm,
-          tunnelId,
+      if (!tunnelId) {
+        return res.status(422).json({
+          result: 'error',
+          errorClass: 'tunnel-not-found',
+          reason: 'tunnel-not-found',
         });
-      } else {
-        // Kein Tunnel konfiguriert — nur Container entfernen (best-effort).
-        // LockoutGuard wurde bereits oben (vor diesem Block) geprüft — kein Bypass möglich.
-        undeployResult = await vpsDockerControl.rm(vpsTarget, containerId);
       }
+
+      const undeployResult = await deployOrchestrator.undeploy({
+        vps: vpsTarget,
+        hostname: container.hostname,
+        confirm,
+        tunnelId,
+      });
 
       if (undeployResult.result !== 'ok') {
         const httpStatus = undeployResult.errorClass === 'protected-resource' ? 422 : 502;

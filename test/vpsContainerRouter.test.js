@@ -1,5 +1,5 @@
 /**
- * vpsContainerRouter.test.js — Tests für Container-Übersicht + Aktionen (S-157, S-352, S-355, S-359).
+ * vpsContainerRouter.test.js — Tests für Container-Übersicht + Aktionen (S-157, S-352, S-355, S-359, S-360).
  *
  * Covers (vps-container-overview):
  *   AC8  — GET /api/vps/machines/:provider/*splat/containers → ContainerEntry[]; SSH-Fehler
@@ -9,6 +9,11 @@
  *   AC11 — DELETE .../containers/:id: managed → undeploy; unmanaged → rm; protected → 422;
  *          tunnelId für den managed-Undeploy-Pfad kommt seit S-359 additiv aus
  *          resolveVpsTarget()/dem Target-Record (kein separater Host-basierter Lookup mehr)
+ *   AC11b — (S-360) managed-Remove ist fail-closed bzgl. Route: tunnelId nicht auflösbar (und
+ *          nicht protected) → 422 tunnel-not-found, rm-Mock NIE aufgerufen, kein undeploy;
+ *          kein stiller Rückfall auf reines VpsDockerControl.rm mehr (Alt-Verhalten entfernt);
+ *          auflösbare tunnelId → undeploy inkl. tunnelId-Weitergabe; unmanaged unverändert → rm.
+ *          Reihenfolge unverändert: LockoutGuard (C1) greift weiterhin VOR der tunnelId-Prüfung.
  *   AC12 — AccessGuard-403 (ohne Access); CRED_ADMIN_EMAILS-403 für Mutationen; Audit-First
  *   AC13 — Kein SSH-Key/Token in Response; Fehlertexte secret-frei
  *
@@ -584,6 +589,7 @@ describe('vpsContainerRouter — AC11: Container entfernen', () => {
     expect(undeployParams).not.toBeNull();
     expect(undeployParams.hostname).toBe(MANAGED_CONTAINER.hostname);
     expect(undeployParams.confirm).toBe(MANAGED_CONTAINER.hostname);
+    expect(undeployParams.tunnelId).toBe('tunnel-abc'); // AC11b: undeploy inkl. Route-Abbau
   });
 
   it('protected Hostname → 422 protected-resource, kein Docker-Schritt', async () => {
@@ -610,8 +616,9 @@ describe('vpsContainerRouter — AC11: Container entfernen', () => {
   });
 
   it('C1 — managed Container, tunnelId=null, protected Hostname → 422 protected-resource, KEIN rm', async () => {
-    // Regression-Guard C1: wenn tunnelId=null bei managed Container, darf der Fallback
-    // NICHT am LockoutGuard vorbei vpsDockerControl.rm() aufrufen.
+    // Regression-Guard C1: bei tunnelId=null MUSS der LockoutGuard weiterhin VOR der
+    // tunnelId-Prüfung greifen (Reihenfolge unverändert durch S-360) — protected-resource
+    // gewinnt, nicht tunnel-not-found; kein rm/undeploy in beiden Fällen.
     // Setup: Default-Registry (kein listTargetRecords) → Env-Match-Zweig liefert tunnelId:null
     // (kein Target-Record, AC7-Edge-Case); DEVGUI_HOSTNAME = Hostname des Containers.
     let rmCalled = false;
@@ -635,6 +642,36 @@ describe('vpsContainerRouter — AC11: Container entfernen', () => {
     expect(status).toBe(422);
     expect(body.errorClass).toBe('protected-resource');
     // KEIN rm und KEIN undeploy darf aufgerufen worden sein (AC11 bedingungslos)
+    expect(rmCalled).toBe(false);
+    expect(undeployCalled).toBe(false);
+  });
+
+  it('AC11b — managed Container, tunnelId nicht auflösbar (nicht protected) → 422 tunnel-not-found, KEIN rm, KEIN undeploy', async () => {
+    // AC11b (vps-container-overview): fail-closed statt stillem Fallback auf reines
+    // VpsDockerControl.rm. Registry ohne listTargetRecords + Env-Match-Zweig ohne
+    // tunnelId → tunnelId bleibt null; Hostname ist NICHT protected (kein DEVGUI_HOSTNAME),
+    // damit dieser Test den tunnel-not-found-Pfad prüft und nicht den bereits von C1
+    // abgedeckten protected-resource-Pfad.
+    let rmCalled = false;
+    let undeployCalled = false;
+    server = await makeTestServer({
+      env: { DEV_NO_ACCESS: '1' },
+      dockerControl: makeMockDockerControl({
+        psAllResult: { result: 'ok', containers: [MANAGED_CONTAINER] },
+        onRm: () => { rmCalled = true; },
+      }),
+      orchestrator: makeMockOrchestrator({
+        onUndeploy: () => { undeployCalled = true; },
+      }),
+      registry: makeMockRegistry(),
+    });
+    const { status, body } = await server.doRequest({
+      method: 'DELETE',
+      path: `/api/vps/machines/hetzner/1/containers/${MANAGED_CONTAINER.containerId}`,
+      body: { confirm: MANAGED_CONTAINER.hostname },
+    });
+    expect(status).toBe(422);
+    expect(body.errorClass).toBe('tunnel-not-found');
     expect(rmCalled).toBe(false);
     expect(undeployCalled).toBe(false);
   });
