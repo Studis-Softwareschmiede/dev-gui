@@ -1,0 +1,54 @@
+id: S-351
+parent: F-080
+title: 'Reconcile-Datenverlust stoppen: Container-Read auf docker ps -a + state, gestoppte
+  managed Container behalten ihre Route'
+status: To Do
+priority: P1
+spec: docs/specs/cloudflare-reconciliation.md
+implements:
+- AC3
+- AC3b
+- AC5d
+- AC7b
+- AC8
+depends: null
+labels:
+- backend
+- deploy
+- cloudflare
+- reconcile
+- security
+size_est: L
+dispo_est: '5.0'
+dispo_act: null
+dispo_forecast: null
+estimate_note: 'Heuristik L (score=11: 5 AC + 5 Komponenten [VpsDockerControl.psAll,
+  parsePsAllOutput, ReconciliationJob, ReconcileReport-Shape, Tests] + security-Label).
+  estimator (Task/agents/estimator.md) in diesem Lauf nicht dispatchbar (Subagent ohne
+  Task-Tool) → dispo_est als Baseline-Fallback js|balanced|L ep=5.0 (n=5), confidence
+  daher low. tok_est null (baseline tok_total null, Cold-Start). DRINGENDSTE Story
+  des Features — frisst still Daten: der Cron (00:00 UTC) löscht Tunnel-Route + DNS-CNAME
+  jedes über Nacht gestoppten Containers. Kern: (1) VpsDockerControl.psAll auf „docker
+  ps -a" umstellen und {{.State}} als maschinenlesbares state-Feld mitlesen (running|exited|created|paused|restarting|dead),
+  parsePsAllOutput um das Feld erweitern — managed bleibt allein hostname!==null (state-unabhängig),
+  laufend ist ausschliesslich state===running (NIE den status-Text „Up …" parsen).
+  (2) ReconciliationJob: verwaist nur, wenn KEIN managed Container mit dem Hostname
+  existiert — weder laufend noch gestoppt (AC3/AC3b). (3) Heilung nur für laufende
+  managed Container; gestoppte ohne Route → stoppedSkipped, kein Anlege-Call (AC5d,
+  Resolution O5 konservativ). (4) AC7b ist Regressionsschutz und nicht optional: durch
+  „-a" werden bislang unsichtbare gestoppte Altcontainer sichtbar und würden den Hostname
+  sonst dauerhaft als „ambiguous" blockieren — genau ein running + n gestoppte → der
+  laufende ist maßgeblich, NICHT ambiguous; erst zwei running → ambiguous. (5) ReconcileReport
+  um additives stoppedSkipped[] erweitern (Altdaten ohne Feld → []). Das psAll-Read-Model
+  ist mit vps-container-overview (dortige AC9b) GETEILT — GUI und Cron müssen denselben
+  Bestand sehen; S-352/S-353 bauen darauf auf.
+
+  '
+confidence: low
+tok_est: null
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-07-15T00:00:00Z'
+updated_at: '2026-07-15T00:00:00Z'
+area: deployment

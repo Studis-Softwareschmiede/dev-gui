@@ -1,0 +1,60 @@
+id: S-355
+parent: F-080
+title: 'Update-Endpunkt: pull + recreate über die bestehende Deploy-Saga (nie restart),
+  fail-closed + Floor'
+status: To Do
+priority: P3
+spec: docs/specs/container-image-update.md
+implements:
+- AC1
+- AC2
+- AC3
+- AC4
+- AC7
+- AC10
+- AC11
+- AC12
+depends: S-354
+labels:
+- backend
+- deploy
+- cloudflare
+- security
+size_est: L
+dispo_est: '5.0'
+dispo_act: null
+dispo_forecast: null
+estimate_note: 'Heuristik L (score=11: 8 AC + 2 Komponenten [src/vpsContainerRouter.js,
+  Tests] + security-Label; DeployOrchestrator/VpsDockerControl werden unverändert
+  KONSUMIERT, nicht geändert). estimator (Task/agents/estimator.md) in diesem Lauf
+  nicht dispatchbar (Subagent ohne Task-Tool) → dispo_est als Baseline-Fallback js|balanced|L
+  ep=5.0 (n=5), confidence daher low. tok_est null (baseline tok_total null, Cold-Start).
+  Kern: POST …/containers/:containerId/update mit LEEREM Body — Image-Ref, Hostname
+  und tunnelId werden ausschliesslich server-seitig aufgelöst (Bestands-Container
+  via psAll/inspectContainer aus S-354; tunnelId via resolveTunnelId, derselbe Weg
+  wie der managed-Remove). Ablauf: Access+Rolle+Audit-First → Container-Read (managed?
+  Hostname aus Label) → inspectContainer → tunnelId → LockoutGuard → DeployOrchestrator.deploy
+  mit demselben Image-Ref + rekonstruierter Run-Config. HARTE Punkte: (AC2) NIE docker
+  restart im Update-Pfad, auch nicht als Fehler-Fallback — ein Neustart aktiviert
+  KEIN neues Image (bekannte Falle, knowledge/cicd.md); grep-prüfbar. (AC4) ein vom
+  Client mitgesendetes Image/Tag darf den Ziel-Ref NIE bestimmen (ignorieren oder
+  422) — Versionswechsel läuft über die Deployments-Ansicht. (AC3) unmanaged → 422
+  not-managed, keine Mutation. (AC7) fail-closed: inspect-Fehler / fehlendes Hostname-Label
+  / tunnelId nicht auflösbar / Run-Config nicht eindeutig abbildbar → Abbruch VOR
+  jeder Mutation, kein pull/rm/run, Bestands-Container unangetastet; KEIN Fallback
+  auf einen Deploy ohne Route (das Ergebnis wäre ein laufender, aber unerreichbarer
+  Container). (AC10-AC12) Floor untrennbar mit dem Endpunkt ausliefern: CRED_ADMIN_EMAILS
+  + Audit-First (Audit-Write-Fehler → keine Mutation) + LockoutGuard (protected →
+  422); Audit nennt nur containerId/hostname/Aktion, NIE Env-Inhalte; keine Env-Werte/SSH-Key/Cloudflare-Token
+  in Response/Log/Audit/WS/Frontend. Kein eigener pull/run/Route-Code neben der Saga
+  (grep-prüfbar).
+
+  '
+confidence: low
+tok_est: null
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-07-15T00:00:00Z'
+updated_at: '2026-07-15T00:00:00Z'
+area: deployment

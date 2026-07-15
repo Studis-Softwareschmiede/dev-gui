@@ -1,0 +1,45 @@
+id: S-353
+parent: F-080
+title: 'Zombie-Fix: Re-Deploy-Ersetzungsschritt findet und entfernt auch gestoppte
+  Altcontainer'
+status: To Do
+priority: P2
+spec: docs/specs/deploy-lifecycle.md
+implements:
+- AC14
+- AC17
+depends: S-351
+labels:
+- backend
+- deploy
+size_est: M
+dispo_est: '5.0'
+dispo_act: null
+dispo_forecast: null
+estimate_note: 'Heuristik M (score=4: 2 AC + 2 Komponenten [src/deploy/DeployOrchestrator.js,
+  Tests]). estimator (Task/agents/estimator.md) in diesem Lauf nicht dispatchbar (Subagent
+  ohne Task-Tool) → dispo_est als Baseline-Fallback js|balanced|M ep=5.0 (n=8), confidence
+  daher low. tok_est null (baseline tok_total null, Cold-Start). Kern: der Ersetzungsschritt
+  (AC14, DeployOrchestrator) sucht den Altcontainer heute via ps() — also NUR unter
+  den laufenden. Ein gestoppter Altcontainer bleibt dadurch mit demselben cloudflare.tunnel-hostname-Label
+  als unsichtbarer Zombie liegen. Umstellen auf den zustands-vollständigen Read (psAll
+  / docker ps -a, nach S-351 inkl. state) und ALLE gefundenen Altcontainer mit passendem
+  Hostname-Label entfernen (auch mehrere — Altlast aus der Zeit vor dem Fix), VOR dem
+  Start des neuen Containers. Reihenfolge/Platzierung unverändert lassen: der Schritt
+  bleibt best-effort und NACH allen Tunnel-/Readiness-Gates (AC1/AC3/AC5/AC6 — kein
+  Schritt vor dem Gate) und NACH erfolgreichem Pull (schlägt der Pull fehl, bleibt
+  der bestehende Container unangetastet). Nach einem Re-Deploy existiert genau ein
+  Container mit diesem Label. Regressionstest Pflicht: gestoppter Altcontainer mit
+  passendem Label → rm wird aufgerufen, neuer Container startet. Zusammenhang: ohne
+  diesen Fix sammeln sich Zombies, die S-351/AC7b zwar nicht mehr „ambiguous" werden
+  lässt, die aber in der Übersicht (S-352) sichtbar liegen bleiben.
+
+  '
+confidence: low
+tok_est: null
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-07-15T00:00:00Z'
+updated_at: '2026-07-15T00:00:00Z'
+area: deployment

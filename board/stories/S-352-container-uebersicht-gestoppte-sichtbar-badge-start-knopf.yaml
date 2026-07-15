@@ -1,0 +1,52 @@
+id: S-352
+parent: F-080
+title: 'Container-Übersicht: gestoppte Container sichtbar mit Badge „gestoppt" + erreichbarem
+  Start-Knopf (state durchreichen)'
+status: To Do
+priority: P2
+spec: docs/specs/vps-container-overview.md
+implements:
+- AC2
+- AC4b
+- AC8
+- AC14
+depends: S-351
+labels:
+- ui
+- frontend
+- backend
+- deploy
+- vps
+size_est: L
+dispo_est: '5.0'
+dispo_act: null
+dispo_forecast: null
+estimate_note: 'Heuristik L (score=8: 4 AC + 3 Komponenten [src/vpsContainerRouter.js,
+  client/src/VpsView.jsx ContainerRow, Tests] + ui-Label). estimator (Task/agents/estimator.md)
+  in diesem Lauf nicht dispatchbar (Subagent ohne Task-Tool) → dispo_est als Baseline-Fallback
+  js|balanced|L ep=5.0 (n=5), confidence daher low. tok_est null (baseline tok_total
+  null, Cold-Start). Behebt die Sackgasse: nach „Stop" verschwand die Zeile und der
+  vorhandene Start-Endpunkt (VpsDockerControl.start) war aus der GUI nicht mehr erreichbar.
+  Kern: (1) GET …/containers reicht das neue state-Feld je ContainerEntry durch (AC8;
+  psAll liefert es bereits nach S-351 — hier NICHT erneut umstellen). (2) VpsView-ContainerRow
+  rendert gestoppte Container bedingungslos mit Badge „gestoppt" (laufende: „läuft")
+  — KEIN Filter/Umschalter „auch gestoppte zeigen" (ein Default-Filter wäre genau
+  die Falle, die zum Problem geführt hat). (3) Button-Aktivierung strikt nach state:
+  running → Stop/Neustart aktiv, Start disabled; sonst → Start aktiv, Stop/Neustart
+  disabled; Logs + Entfernen in BEIDEN Zuständen aktiv (Logs eines gestoppten Containers
+  sind im Fehlerfall die wichtigste Quelle); disabled-Buttons mit lesbarer Begründung
+  (title/aria). (4) Zustand nicht allein über Farbe/Dimmen kodieren (A11y). Regressionstest
+  Pflicht: Stop-Aktion → Re-Fetch mit state:exited → Zeile weiterhin vorhanden + Start
+  aktiv. Randnotiz aus der Analyse (NICHT Scope dieser Story, nur Kontext): in VpsView.jsx
+  existieren zwei ähnlich beschriftete „Stop"-Knöpfe — Container-Stop und Maschinen-Poweroff
+  der ganzen VPS.
+
+  '
+confidence: low
+tok_est: null
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-07-15T00:00:00Z'
+updated_at: '2026-07-15T00:00:00Z'
+area: deployment
