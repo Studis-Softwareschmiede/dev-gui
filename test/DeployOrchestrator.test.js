@@ -29,16 +29,12 @@
  *   AC12 — Kein Token in result.reason bei tunnel-missing/tunnel-mismatch
  *   AC13 — Read-only Checks erzeugen keinen Audit-Eintrag (Orchestrator ist audit-frei → gilt via Router)
  *
- * Covers (deploy-config-volume-mount):
- *   AC4/D1  — Guard-/Seed-Gate ruft pushAppConfigFile() NACH Readiness-Gate, VOR Re-Deploy-
- *             Replace (ps/rm) und VOR pull/run; requiresConfig falsy/abwesend → pushAppConfigFile
- *             NIE aufgerufen (Deploy-Pfad AC1/AC8-byte-identisch)
- *   AC6     — pushAppConfigFile() liefert config-file-missing → deploy() bricht VOR jeder
- *             Mutation ab (kein pull/run/ps-Replace/Cloudflare-Call), Fehler wird durchgereicht
- *   AC5     — pushAppConfigFile() liefert seeded:false (Datei existiert bereits) → Deploy läuft
- *             unverändert weiter (Gate ist bei ok-Ergebnis ein No-op)
- *   AC1/AC2 — requiresConfig/configApp werden unverändert an run() durchgereicht (nicht
- *             manipuliert); configSeed wird nur an pushAppConfigFile() gereicht, NIE an run()
+ * Covers (deploy-config-volume-mount, v2/F-079-Korrektur — generischer rw-Verzeichnis-Mount):
+ *   AC5 (Rückbau, hart) — deploy() hat KEIN separates Guard-/Seed-Gate mehr; pushAppConfigFile()
+ *             wird auf keinem Mock mehr erwartet/aufgerufen (die Methode existiert nicht mehr).
+ *   AC1/AC7 — requiresConfig/configApp/configMountPath werden unverändert an run() durchgereicht
+ *             (nicht manipuliert); requiresConfig falsy/abwesend → run()-Opts enthalten weder
+ *             requiresConfig noch configApp/configMountPath (Deploy-Pfad byte-identisch).
  */
 
 import { describe, it, expect, jest } from '@jest/globals';
@@ -58,15 +54,12 @@ function makeDockerControl({
   rmResult = { result: 'ok' },
   psResult = { result: 'ok', containers: [] },
   probeResult = { state: 'ready' }, // Default: probe meldet "ready" → Gate-No-op
-  // deploy-config-volume-mount: Default-Erfolg (Datei existiert bereits, kein Seed nötig).
-  pushAppConfigFileResult = { result: 'ok', seeded: false },
 } = {}) {
   const ctrl = {
     pull: jest.fn(async () => pullResult),
     run: jest.fn(async () => runResult),
     rm: jest.fn(async () => rmResult),
     ps: jest.fn(async () => psResult),
-    pushAppConfigFile: jest.fn(async () => pushAppConfigFileResult),
   };
   // probe() nur exponieren wenn probeResult !== null (null = Legacy ohne probe)
   if (probeResult !== null) {
@@ -1450,110 +1443,44 @@ describe('DeployOrchestrator — deploy() — S-185 AC5/AC6: Fehlverdrahtungs-Sc
   });
 });
 
-// ── deploy() — deploy-config-volume-mount: Guard-/Seed-Gate (D1/AC1/AC2/AC4/AC5/AC6) ──
+// ── deploy() — deploy-config-volume-mount (F-079-Korrektur): generischer rw-Verzeichnis-Mount ──
+// AC5 (Rückbau, hart): kein separates Guard-/Seed-Gate mehr im Orchestrator — requiresConfig/
+// configApp/configMountPath werden unverändert an run() durchgereicht, das den Mount +
+// mkdir -p selbst übernimmt (VpsDockerControl-Verantwortung, siehe VpsDockerControl.test.js).
 
-describe('DeployOrchestrator — deploy() — config.yaml Guard-/Seed-Gate (deploy-config-volume-mount)', () => {
+describe('DeployOrchestrator — deploy() — config-Verzeichnis-Mount-Durchreichung (deploy-config-volume-mount)', () => {
   const CONFIG_DEPLOY_PARAMS = {
     ...DEPLOY_PARAMS,
     requiresConfig: true,
     configApp: 'myapp',
-    configSeed: 'foo: bar',
   };
 
-  it('requiresConfig falsy/abwesend → pushAppConfigFile NIE aufgerufen (AC1/AC8 Deploy-Pfad unverändert)', async () => {
+  it('AC5 (Rückbau, hart): der Mock kennt pushAppConfigFile nicht mehr — deploy() ruft es nicht auf', async () => {
     const docker = makeDockerControl();
-    const cf = makeCloudflareApi();
-    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
-
-    const result = await orch.deploy(DEPLOY_PARAMS);
-
-    expect(result.result).toBe('ok');
-    expect(docker.pushAppConfigFile).not.toHaveBeenCalled();
-  });
-
-  it('requiresConfig true → pushAppConfigFile wird mit vps/configApp/configSeed aufgerufen', async () => {
-    const docker = makeDockerControl();
+    expect(docker.pushAppConfigFile).toBeUndefined();
     const cf = makeCloudflareApi();
     const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
 
     const result = await orch.deploy(CONFIG_DEPLOY_PARAMS);
 
     expect(result.result).toBe('ok');
-    expect(docker.pushAppConfigFile).toHaveBeenCalledTimes(1);
-    const [calledVps, calledApp, calledContent] = docker.pushAppConfigFile.mock.calls[0];
-    expect(calledVps).toEqual(CONFIG_DEPLOY_PARAMS.vps);
-    expect(calledApp).toBe('myapp');
-    expect(calledContent).toBe('foo: bar');
   });
 
-  it('Gate-Reihenfolge: pushAppConfigFile läuft NACH Readiness-Probe, VOR Re-Deploy-Replace (ps/rm) und VOR pull/run', async () => {
-    const callOrder = [];
-    const docker = makeDockerControl();
-    docker.probe.mockImplementation(async () => { callOrder.push('probe'); return { state: 'ready' }; });
-    docker.pushAppConfigFile.mockImplementation(async () => { callOrder.push('pushAppConfigFile'); return { result: 'ok', seeded: true }; });
-    docker.ps.mockImplementation(async () => { callOrder.push('ps'); return { result: 'ok', containers: [] }; });
-    docker.pull.mockImplementation(async () => { callOrder.push('pull'); return { result: 'ok' }; });
-    docker.run.mockImplementation(async () => { callOrder.push('run'); return { result: 'ok', containerId: 'cid', hostPort: 8080 }; });
-    const cf = makeCloudflareApi();
-
-    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
-    const result = await orch.deploy(CONFIG_DEPLOY_PARAMS);
-
-    expect(result.result).toBe('ok');
-    expect(callOrder.indexOf('probe')).toBeLessThan(callOrder.indexOf('pushAppConfigFile'));
-    expect(callOrder.indexOf('pushAppConfigFile')).toBeLessThan(callOrder.indexOf('ps'));
-    expect(callOrder.indexOf('pushAppConfigFile')).toBeLessThan(callOrder.indexOf('pull'));
-    expect(callOrder.indexOf('pushAppConfigFile')).toBeLessThan(callOrder.indexOf('run'));
-  });
-
-  it('AC6: pushAppConfigFile → config-file-missing → deploy() bricht VOR jeder Mutation ab (kein pull/run/ps/addRoute)', async () => {
-    const docker = makeDockerControl({
-      pushAppConfigFileResult: {
-        result: 'error',
-        reason: 'config.yaml fehlt auf dem VPS und kein Seed-Inhalt übergeben',
-        errorClass: 'config-file-missing',
-      },
-    });
-    const cf = makeCloudflareApi();
-    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
-
-    const result = await orch.deploy(CONFIG_DEPLOY_PARAMS);
-
-    expect(result.result).toBe('error');
-    expect(result.errorClass).toBe('config-file-missing');
-    expect(docker.ps).not.toHaveBeenCalled();
-    expect(docker.pull).not.toHaveBeenCalled();
-    expect(docker.run).not.toHaveBeenCalled();
-    expect(cf.addRoute).not.toHaveBeenCalled();
-  });
-
-  it('AC5: pushAppConfigFile → seeded:false (Datei existiert bereits) → Deploy läuft unverändert weiter', async () => {
-    const docker = makeDockerControl({ pushAppConfigFileResult: { result: 'ok', seeded: false } });
-    const cf = makeCloudflareApi();
-    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
-
-    const result = await orch.deploy(CONFIG_DEPLOY_PARAMS);
-
-    expect(result.result).toBe('ok');
-    expect(docker.pull).toHaveBeenCalled();
-    expect(docker.run).toHaveBeenCalled();
-  });
-
-  it('AC1/AC2: requiresConfig/configApp werden an run() durchgereicht; configSeed NICHT an run()', async () => {
+  it('AC1/AC7: requiresConfig/configApp/configMountPath werden unverändert an run() durchgereicht', async () => {
     const docker = makeDockerControl();
     const cf = makeCloudflareApi();
     const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
 
-    await orch.deploy(CONFIG_DEPLOY_PARAMS);
+    await orch.deploy({ ...CONFIG_DEPLOY_PARAMS, configMountPath: '/data/config' });
 
     expect(docker.run).toHaveBeenCalledTimes(1);
     const runOpts = docker.run.mock.calls[0][3];
     expect(runOpts.requiresConfig).toBe(true);
     expect(runOpts.configApp).toBe('myapp');
-    expect(runOpts.configSeed).toBeUndefined();
+    expect(runOpts.configMountPath).toBe('/data/config');
   });
 
-  it('requiresConfig false → run()-Opts enthalten weder requiresConfig noch configApp (byte-identisch)', async () => {
+  it('requiresConfig false/abwesend → run()-Opts enthalten weder requiresConfig noch configApp/configMountPath (byte-identisch)', async () => {
     const docker = makeDockerControl();
     const cf = makeCloudflareApi();
     const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
@@ -1563,22 +1490,19 @@ describe('DeployOrchestrator — deploy() — config.yaml Guard-/Seed-Gate (depl
     const runOpts = docker.run.mock.calls[0][3];
     expect(runOpts).not.toHaveProperty('requiresConfig');
     expect(runOpts).not.toHaveProperty('configApp');
+    expect(runOpts).not.toHaveProperty('configMountPath');
   });
 
-  it('AC10 (Floor): configSeed erscheint nie im reason bei config-file-missing', async () => {
-    const secretishSeed = 'admin_token: super-secret-marker-XYZ';
-    const docker = makeDockerControl({
-      pushAppConfigFileResult: {
-        result: 'error',
-        reason: 'config.yaml fehlt auf dem VPS und kein Seed-Inhalt übergeben',
-        errorClass: 'config-file-missing',
-      },
-    });
+  it('requiresConfig true → deploy() läuft unverändert durch pull → run → addRoute (kein zusätzlicher Docker-/SSH-Schritt vom Orchestrator)', async () => {
+    const docker = makeDockerControl();
     const cf = makeCloudflareApi();
     const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
 
-    const result = await orch.deploy({ ...CONFIG_DEPLOY_PARAMS, configSeed: secretishSeed });
+    const result = await orch.deploy(CONFIG_DEPLOY_PARAMS);
 
-    expect(result.reason).not.toContain(secretishSeed);
+    expect(result.result).toBe('ok');
+    expect(docker.pull).toHaveBeenCalledTimes(1);
+    expect(docker.run).toHaveBeenCalledTimes(1);
+    expect(cf.addRoute).toHaveBeenCalledTimes(1);
   });
 });
