@@ -12,20 +12,32 @@
  *     0. [vps-tunnel-drift-notify] Tunnel-Existenz-Check (AC1): wenn tunnelId gesetzt und
  *        nicht in listTunnels() → VPS als tunnel-missing markieren; fail-closed für Route-
  *        Konvergenz; ntfy-Push best-effort beim Übergang (AC3/AC4/AC5/AC6/AC7/AC8).
- *     1. VpsDockerControl.psAll() → managed containers (with cloudflare.tunnel-hostname label)
- *        and unmanaged containers (without the label, only reported).
+ *     1. VpsDockerControl.psAll() → managed containers (with cloudflare.tunnel-hostname label,
+ *        laufend UND gestoppt, `docker ps -a`, v3 Datenverlust-Fix) and unmanaged containers
+ *        (without the label, only reported). Managed-Prädikat: `hostname !== null`,
+ *        unabhängig vom `state`. Laufend-Prädikat: `state === 'running'`.
  *        Stack-aware (AC13): psAll() also returns com.docker.compose.project label; internal
  *        stack containers (no cloudflare.tunnel-hostname) get hostname: null → reportedUnmanaged.
  *     2. CloudflareApi.listRoutes(tunnelId) → current routes.
- *     3. Orphaned routes (no managed container, not protected) → remove via CloudflareApi (Audit-First).
- *     4. Managed containers without route (not protected) → add route via DeployOrchestrator
- *        addRouteOnly() (Audit-First; reuses shared path, no new Cloudflare mutation code here).
+ *     3. Orphaned routes (AC3/AC3b) — a route is orphaned only if NO managed container
+ *        (running OR stopped) exists for that hostname AND it is not protected → remove via
+ *        CloudflareApi (Audit-First). A stopped managed container protects its route just like
+ *        a running one (v3 — stop is not undeploy).
+ *     4. Managed containers without route: only a RUNNING managed container is healed
+ *        (AC5, not protected) via DeployOrchestrator addRouteOnly() (Audit-First; shared path,
+ *        no new Cloudflare mutation code here). A hostname with ONLY stopped managed
+ *        containers and no route is NEVER healed (AC5d) — recorded as `stoppedSkipped`
+ *        instead (conservative: "schützen ja, anlegen nein").
+ *   - Ambiguity (AC7/AC7b) is decided by the count of RUNNING managed containers per hostname,
+ *     not by the count of all (running+stopped) entries: exactly one running (+ any number of
+ *     stopped zombies) is NOT ambiguous — the running one is authoritative, heal/protect proceed
+ *     normally; two or more running containers on the same hostname → ambiguous, not healed.
+ *     Stopped zombie containers are only reported, never auto-removed by the cron.
  *   - Stack-aware (AC13): public stack containers (with cloudflare.tunnel-hostname) are reconciled
  *     like single-image containers. Internal stack containers (without cloudflare.tunnel-hostname)
  *     always have hostname: null → they land in reportedUnmanaged, never routed, never orphaned.
  *     Multiple public hostnames per stack are each handled individually (one per container entry).
  *   - Fail-closed: if psAll() fails → skip that VPS entirely (neither delete nor heal).
- *   - Ambiguous binding (two managed containers → same hostname) → not healed, flagged ambiguous.
  *   - Degradation per VPS/provider: errors don't abort the overall run.
  *   - ReconcileReport + ReconcileNotice: persisted via AuditStore (kein neuer Store, ADR-005-Linie).
  *
@@ -44,14 +56,18 @@
  *
  * AC1  — node-internal scheduler, midnight UTC, no external cron/service.
  * AC2  — same reconcile() method invoked by cron and manual trigger; produces ReconcileReport.
- * AC3  — orphaned (non-protected) routes → removed; idempotent.
+ * AC3  — orphaned (no managed container, running or stopped, non-protected) routes → removed; idempotent.
+ * AC3b — (v3, Datenverlust-Fix) stopped managed container + route → no-op, route/CNAME survive.
  * AC4  — protected routes never deleted.
- * AC5  — managed container without route → healed via DeployOrchestrator addRouteOnly path.
+ * AC5  — running managed container without route → healed via DeployOrchestrator addRouteOnly path.
  * AC5b — protected hostname on managed container → protectedSkipped, not healed.
  * AC5c — unmanaged container → only reportedUnmanaged, never healed.
+ * AC5d — (v3) stopped managed container without route → never healed, `stoppedSkipped`.
  * AC6  — VPS/provider failures degrade, don't abort.
- * AC7  — psAll() failure → fail-closed; ambiguous binding → ambiguous, not healed.
- * AC8  — ReconcileReport per run; GET endpoints; Audit-First.
+ * AC7  — psAll() failure → fail-closed; ambiguous binding (2+ running same hostname) → ambiguous, not healed.
+ * AC7b — (v3) exactly one running + N stopped zombies on same hostname → not ambiguous, heal/protect
+ *         proceed normally; zombies only reported, never auto-removed.
+ * AC8  — ReconcileReport per run (incl. `stoppedSkipped[]`, additive); GET endpoints; Audit-First.
  * AC8b — ReconcileNotice per action; GET endpoint.
  * AC9  — LockoutGuard-Hard-Block + Audit-First via shared ADR-012 path.
  * AC13 — stack-aware: public stack containers (cloudflare.tunnel-hostname set) healed/deleted
@@ -169,10 +185,12 @@ async function writeTunnelDriftSnapshot(snapshot) {
  * @typedef {object} VpsReconcileResult
  * @property {string} vps
  * @property {string} [provider]
- * @property {number} checkedContainers
+ * @property {number} checkedContainers - zählt laufende UND gestoppte managed Container (v3, AC8)
  * @property {string[]} createdRoutes
  * @property {string[]} removedRoutes
  * @property {string[]} protectedSkipped
+ * @property {string[]} stoppedSkipped - (v3, additiv) Hostnames gestoppter managed Container ohne
+ *   Route, deren Heilung übersprungen wurde (AC5d)
  * @property {string[]} reportedUnmanaged
  * @property {Array<{ scope: string, errorClass: string }>} errors
  * @property {boolean} [tunnelMissing] - true wenn der Cloudflare-Tunnel dieses VPS fehlt (vps-tunnel-drift-notify AC3)
@@ -413,6 +431,7 @@ export class ReconciliationJob {
       createdRoutes: [],
       removedRoutes: [],
       protectedSkipped: [],
+      stoppedSkipped: [],
       reportedUnmanaged: [],
       errors: [],
     };
@@ -490,9 +509,12 @@ export class ReconciliationJob {
       result.reportedUnmanaged.push(sanitizeString(`${c.containerId}:${c.image}:${c.status}`));
     }
 
+    // checkedContainers counts ALL managed containers — running AND stopped (v3, AC8)
     result.checkedContainers = managedContainers.length;
 
-    // Detect ambiguous bindings: two managed containers on same VPS → same hostname (AC7)
+    // Group ALL managed containers (running + stopped) by hostname — used for AC3/AC3b
+    // (a stopped managed container still protects its route) and for picking the
+    // representative container to report/heal.
     const hostnameToContainers = new Map();
     for (const c of managedContainers) {
       if (!hostnameToContainers.has(c.hostname)) {
@@ -501,9 +523,23 @@ export class ReconciliationJob {
       hostnameToContainers.get(c.hostname).push(c);
     }
 
+    // Group only RUNNING managed containers by hostname — AC7b: ambiguity and healing are
+    // decided by the RUNNING count, not by the total (running+stopped) count. This prevents
+    // v3's `docker ps -a` read from turning a previously-invisible stopped zombie container
+    // into a false "ambiguous" verdict that would block healing/protection forever.
+    const hostnameToRunning = new Map();
+    for (const c of managedContainers) {
+      if (c.state !== 'running') continue;
+      if (!hostnameToRunning.has(c.hostname)) {
+        hostnameToRunning.set(c.hostname, []);
+      }
+      hostnameToRunning.get(c.hostname).push(c);
+    }
+
+    // AC7/AC7b: ambiguous only when TWO OR MORE running containers share the same hostname.
     const ambiguousHostnames = new Set();
-    for (const [hostname, containers] of hostnameToContainers) {
-      if (containers.length > 1) {
+    for (const [hostname, runningContainers] of hostnameToRunning) {
+      if (runningContainers.length > 1) {
         ambiguousHostnames.add(hostname);
         result.errors.push({
           scope: `vps:${vpsId}:hostname:${hostname}:ambiguous`,
@@ -545,17 +581,28 @@ export class ReconciliationJob {
       }
     }
 
-    // ── Step 4: Managed containers without routes (AC5/AC5b/AC5c) ─────────────
-    for (const [hostname, containers] of hostnameToContainers) {
-      // AC7: skip ambiguous bindings
+    // ── Step 4: Managed containers without routes (AC5/AC5b/AC5c/AC5d/AC7b) ────
+    for (const [hostname] of hostnameToContainers) {
+      // AC7/AC7b: skip ambiguous bindings (2+ RUNNING containers on same hostname)
       if (ambiguousHostnames.has(hostname)) {
         continue;
       }
 
-      if (!routeHostnames.has(hostname)) {
-        // Managed container without route — heal it
-        const container = containers[0];
-        await this.#healMissingRoute(vpsId, vps, tunnelId, hostname, container, result);
+      // Route already exists → no-op for this hostname (covers AC3b: a stopped managed
+      // container with a route is left untouched — handled by Step 3 above; nothing to do here).
+      if (routeHostnames.has(hostname)) {
+        continue;
+      }
+
+      const runningContainers = hostnameToRunning.get(hostname) ?? [];
+      if (runningContainers.length === 1) {
+        // AC5/AC7b: exactly one running managed container (any number of stopped zombies
+        // alongside it) without a route → heal via the running container.
+        await this.#healMissingRoute(vpsId, vps, tunnelId, hostname, runningContainers[0], result);
+      } else {
+        // AC5d: no running managed container for this hostname (only stopped ones) and no
+        // route → conservative, never healed. Recorded as stoppedSkipped, not an error.
+        result.stoppedSkipped.push(hostname);
       }
     }
 
@@ -979,6 +1026,7 @@ function sanitizeReport(report) {
       createdRoutes: v.createdRoutes ?? [],
       removedRoutes: v.removedRoutes ?? [],
       protectedSkipped: v.protectedSkipped ?? [],
+      stoppedSkipped: v.stoppedSkipped ?? [],
       reportedUnmanaged: v.reportedUnmanaged ?? [],
       errors: (v.errors ?? []).map((e) => ({
         scope: sanitizeString(e.scope),

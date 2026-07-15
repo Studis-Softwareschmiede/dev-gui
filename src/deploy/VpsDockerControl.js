@@ -13,7 +13,10 @@
  *   - run(vps, image, hostname, opts?) — docker run mit Bindungs-Label + --restart unless-stopped
  *   - rm(vps, containerId)     — docker rm -f auf dem VPS
  *   - ps(vps)                  — laufende Container mit cloudflare.tunnel-hostname-Label
- *   - psAll(vps)               — alle laufenden Container; managed (mit Label) + unmanaged (ohne Label, hostname: null)
+ *   - psAll(vps)               — ALLE Container (laufend + gestoppt, `docker ps -a`); managed
+ *                                 (mit Label) + unmanaged (ohne Label, hostname: null); je Eintrag
+ *                                 ein maschinenlesbares `state` (v3, `{{.State}}`; Vertrag geteilt mit
+ *                                 [[cloudflare-reconciliation]] AC3b und [[vps-container-overview]] AC9b)
  *
  * SSH-Transport: ssh2 (analog VpsProvisioner — kein System-ssh binary nötig).
  *
@@ -92,7 +95,12 @@ const CONFIG_MOUNT_PATH_RE = /^\/[A-Za-z0-9._/-]*$/;
  * @property {string}      [name]        - Docker-Container-Name (aus {{.Names}}); nur in psAll() gefüllt
  * @property {string}      image         - Image-Name
  * @property {string|null} hostname      - cloudflare.tunnel-hostname-Label-Wert; null für unmanaged Container
- * @property {string}      status        - Container-Status (z.B. "Up 2 hours")
+ * @property {string}      status        - Container-Status, frei formatierter Menschen-Text (z.B. "Up 2 hours" /
+ *   "Exited (0) 3 hours ago") — **kein** Zustands-Prädikat, nie geparst (siehe `state`).
+ * @property {string}      [state]       - maschinenlesbares Zustands-Feld aus `{{.State}}` (v3, nur in psAll()
+ *   gefüllt): `running` | `exited` | `created` | `paused` | `restarting` | `dead`. Laufend-Prädikat:
+ *   `state === 'running'`. Vertrag geteilt mit [[cloudflare-reconciliation]] AC3b/AC7b und
+ *   [[vps-container-overview]] AC9b — EIN Read-Model für GUI und Reconcile-Cron.
  * @property {number|null} hostPort      - gemappter Host-Port (aus Port-Mapping)
  * @property {string|null} composeProject - com.docker.compose.project-Label-Wert; null für Non-Stack-Container.
  *   Nur in psAll() ausgefüllt (für stack-aware Reconciliation, AC13).
@@ -740,11 +748,22 @@ export class VpsDockerControl {
   }
 
   /**
-   * Listet ALLE laufenden Container auf dem VPS — managed (mit cloudflare.tunnel-hostname-Label)
-   * und unmanaged (ohne das Label).
+   * Listet ALLE Container auf dem VPS — laufend UND gestoppt (`docker ps -a`, v3,
+   * Datenverlust-Fix) — managed (mit cloudflare.tunnel-hostname-Label) und unmanaged
+   * (ohne das Label).
    *
-   * Managed Container haben `hostname` gesetzt (aus dem Label).
+   * Managed Container haben `hostname` gesetzt (aus dem Label) — **unabhängig vom `state`**.
    * Unmanaged Container haben `hostname: null`.
+   *
+   * v3 (Datenverlust-Fix, cloudflare-reconciliation AC3b / vps-container-overview AC9b):
+   * liest `docker ps -a` (nicht `docker ps`) und liefert je Container ein maschinenlesbares
+   * `state` aus `{{.State}}` (`running`|`exited`|`created`|`paused`|`restarting`|`dead`).
+   * Laufend-Prädikat: `state === 'running'` — der frei formatierte `status`-Text
+   * ("Up 2 hours") wird NIE als Zustands-Prädikat geparst. Vorher (`docker ps` ohne `-a`)
+   * blendete der Read gestoppte Container komplett aus — ein Datenverlust-Bug (ein gestoppter
+   * managed Container erschien nicht mehr, seine Route wurde fälschlich als verwaist gewertet).
+   * Dieses Read-Model ist geteilt mit [[cloudflare-reconciliation]] (dortige AC3b/AC7b) und
+   * [[vps-container-overview]] (dortige AC8/AC9b) — EINE Boundary, EIN Read-Model.
    *
    * Stack-aware (AC13): gibt zusätzlich das `com.docker.compose.project`-Label aus
    * (`composeProject`-Feld in PsEntry). Interne Stack-Container (kein
@@ -764,14 +783,15 @@ export class VpsDockerControl {
     const privateKey = await this.#loadPrivateKey(vps.targetUser);
     if (!privateKey.ok) return { result: 'error', ...privateKey.error };
 
-    // docker ps ohne --filter gibt alle laufenden Container zurück.
-    // Format: ID, Names, Image, Ports, Status, Label cloudflare.tunnel-hostname, Label com.docker.compose.project
+    // docker ps -a (v3, Datenverlust-Fix): -a liest laufende UND gestoppte Container.
+    // Format: ID, Names, Image, Ports, Status, State, Label cloudflare.tunnel-hostname, Label com.docker.compose.project
     // Der Label-Wert ist leer ("") für Container ohne das jeweilige Label.
     // I1: {{.Names}} liefert den lesbaren Container-Namen (z.B. "my-app_web_1").
+    // {{.State}} (v3) liefert das maschinenlesbare Zustands-Feld — NIE den status-Text parsen.
     // AC13: com.docker.compose.project-Label für stack-aware Reconciliation mitgelesen.
-    const formatStr = shellEscape('{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Ports}}\t{{.Status}}\t{{.Label "cloudflare.tunnel-hostname"}}\t{{.Label "com.docker.compose.project"}}');
+    const formatStr = shellEscape('{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Ports}}\t{{.Status}}\t{{.State}}\t{{.Label "cloudflare.tunnel-hostname"}}\t{{.Label "com.docker.compose.project"}}');
     const cmd = [
-      'docker', 'ps',
+      'docker', 'ps', '-a',
       '--format', formatStr,
     ].join(' ');
 
@@ -1238,16 +1258,20 @@ function parsePsOutput(output) {
 }
 
 /**
- * Parst die Ausgabe von `docker ps --format '...'` für ALLE Container (kein Label-Filter).
- * Container mit cloudflare.tunnel-hostname-Label → hostname = Label-Wert (managed).
- * Container OHNE das Label → hostname = null (unmanaged).
+ * Parst die Ausgabe von `docker ps -a --format '...'` für ALLE Container (laufend UND
+ * gestoppt, kein Label-Filter). Container mit cloudflare.tunnel-hostname-Label →
+ * hostname = Label-Wert (managed). Container OHNE das Label → hostname = null (unmanaged).
+ * Das Managed-Prädikat ist unabhängig vom `state`.
  *
  * I1 (name-Feld): Format enthält {{.Names}} → lesbarer Container-Name in PsEntry.name.
+ * v3 (state-Feld, Datenverlust-Fix): Format enthält {{.State}} → maschinenlesbares
+ * `state` (`running`|`exited`|`created`|`paused`|`restarting`|`dead`). Laufend-Prädikat
+ * ist ausschließlich `state === 'running'` — der `status`-Text wird nie geparst.
  * AC13 (stack-aware): parst zusätzlich das com.docker.compose.project-Label.
  * Interne Stack-Container haben hostname: null (kein cloudflare.tunnel-hostname) aber
  * composeProject gesetzt — sie werden von ReconciliationJob nie geroutet/als verwaist gewertet.
  *
- * Format-Reihenfolge: ID\tNames\tImage\tPorts\tStatus\tCF-Label\tCompose-Label
+ * Format-Reihenfolge: ID\tNames\tImage\tPorts\tStatus\tState\tCF-Label\tCompose-Label
  *
  * @param {string} output
  * @returns {PsEntry[]}
@@ -1263,8 +1287,9 @@ function parsePsAllOutput(output) {
     const image = (parts[2] ?? '').trim();
     const ports = (parts[3] ?? '').trim();
     const status = (parts[4] ?? '').trim();
-    const cfLabelValue = (parts[5] ?? '').trim();
-    const composeProjValue = (parts[6] ?? '').trim();
+    const state = (parts[5] ?? '').trim() || undefined; // v3: maschinenlesbares Zustands-Feld
+    const cfLabelValue = (parts[6] ?? '').trim();
+    const composeProjValue = (parts[7] ?? '').trim();
 
     if (!containerId) continue;
 
@@ -1281,6 +1306,7 @@ function parsePsAllOutput(output) {
 
     const entry = { containerId, image, hostname, status, hostPort, composeProject };
     if (name) entry.name = name; // I1: nur setzen wenn vorhanden
+    if (state) entry.state = state; // v3: nur setzen wenn vorhanden
     containers.push(entry);
   }
 

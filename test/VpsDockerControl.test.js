@@ -33,6 +33,14 @@
  *   AC4  — read-write-Mount: kein `:ro`-Suffix am config-Mount
  *   AC5  — Rückbau (hart): pushAppConfigFile() existiert nicht mehr (kein Test mehr dafür)
  *
+ * Covers (cloudflare-reconciliation, v3 — gestoppte Container):
+ *   AC3b — psAll() liest `docker ps -a` (nicht `docker ps` ohne -a) — kein Datenverlust
+ *          bei gestoppten Containern
+ *
+ * Covers (vps-container-overview, v3 — Zustands-Feld):
+ *   AC9b — psAll() Format-String enthält {{.State}}; PsEntry führt `state`-Feld
+ *          (running/exited/…) für gestoppte wie laufende Container
+ *
  * Strategie:
  *   - CredentialStore mit tmpdir + injiziertem masterKey (echter Store für Boundary-Test)
  *   - SSH-Client durch _sshClientFactory gemockt (EventEmitter + exec/connect-Stubs)
@@ -695,13 +703,73 @@ describe('VpsDockerControl — psAll() — stack-aware (AC13)', () => {
     expect(capturedCmd).toContain('com.docker.compose.project');
   });
 
-  it('AC13 — psAll() gibt composeProject-Feld für Stack-Container zurück', async () => {
-    // A public stack container: both cloudflare.tunnel-hostname and com.docker.compose.project set.
-    // Format (I1): ID\tNames\tImage\tPorts\tStatus\tcloudflare.tunnel-hostname\tcom.docker.compose.project
+  it('AC3b/AC9b (v3, Datenverlust-Fix) — psAll() liest `docker ps -a` (nicht `docker ps` ohne -a)', async () => {
+    // Grep-prüfbar (Spec): ein Read, der gestoppte Container ausblendet (`docker ps` ohne `-a`),
+    // ist ein Datenverlust-Bug. psAll() muss die -a-Flagge im Kommando führen.
     await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
     const ctrl = new VpsDockerControl(store);
 
-    const mockOutput = 'abc123def\tmyapp_web_1\tmyapp/web:latest\t0.0.0.0:8080->8080/tcp\tUp 2h\tweb.example.com\tmyapp';
+    let capturedCmd = null;
+    await ctrl.psAll(TEST_VPS, {
+      _sshClientFactory: makeMockSshClient({
+        stdout: '',
+        exitCode: 0,
+        onCommand: (cmd) => { capturedCmd = cmd; },
+      }),
+    });
+
+    expect(capturedCmd).toMatch(/docker ps -a\b/);
+  });
+
+  it('AC3b/AC9b (v3) — psAll() Format-String enthält {{.State}}', async () => {
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    let capturedCmd = null;
+    await ctrl.psAll(TEST_VPS, {
+      _sshClientFactory: makeMockSshClient({
+        stdout: '',
+        exitCode: 0,
+        onCommand: (cmd) => { capturedCmd = cmd; },
+      }),
+    });
+
+    expect(capturedCmd).toContain('{{.State}}');
+  });
+
+  it('AC3b/AC9b (v3) — psAll() liefert state für gestoppte Container (exited) und läuft weiter für running', async () => {
+    // Regressionstest zum Datenverlust: ein gestoppter (exited) managed Container muss
+    // weiterhin in der Ergebnis-Liste erscheinen (nicht mehr ausgeblendet wie mit `docker ps`).
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    const mockOutput = [
+      'running-abc\trunning-app\tghcr.io/org/app:v1\t0.0.0.0:8080->8080/tcp\tUp 2 hours\trunning\tapp.example.com\t',
+      'stopped-def\tstopped-app\tghcr.io/org/app2:v1\t\tExited (0) 3 hours ago\texited\tstopped.example.com\t',
+    ].join('\n');
+
+    const result = await ctrl.psAll(TEST_VPS, {
+      _sshClientFactory: makeMockSshClient({ stdout: mockOutput, exitCode: 0 }),
+    });
+
+    expect(result.result).toBe('ok');
+    expect(result.containers).toHaveLength(2);
+    const running = result.containers.find((c) => c.containerId === 'running-abc');
+    const stopped = result.containers.find((c) => c.containerId === 'stopped-def');
+    expect(running.state).toBe('running');
+    expect(stopped.state).toBe('exited');
+    // Managed-Prädikat unabhängig vom state: beide haben hostname gesetzt
+    expect(running.hostname).toBe('app.example.com');
+    expect(stopped.hostname).toBe('stopped.example.com');
+  });
+
+  it('AC13 — psAll() gibt composeProject-Feld für Stack-Container zurück', async () => {
+    // A public stack container: both cloudflare.tunnel-hostname and com.docker.compose.project set.
+    // Format (v3): ID\tNames\tImage\tPorts\tStatus\tState\tcloudflare.tunnel-hostname\tcom.docker.compose.project
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+    const ctrl = new VpsDockerControl(store);
+
+    const mockOutput = 'abc123def\tmyapp_web_1\tmyapp/web:latest\t0.0.0.0:8080->8080/tcp\tUp 2h\trunning\tweb.example.com\tmyapp';
 
     const result = await ctrl.psAll(TEST_VPS, {
       _sshClientFactory: makeMockSshClient({ stdout: mockOutput, exitCode: 0 }),
@@ -715,6 +783,7 @@ describe('VpsDockerControl — psAll() — stack-aware (AC13)', () => {
     expect(c.hostname).toBe('web.example.com'); // public container → hostname set
     expect(c.composeProject).toBe('myapp');      // stack container → composeProject set
     expect(c.hostPort).toBe(8080);
+    expect(c.state).toBe('running');             // v3: maschinenlesbares Zustands-Feld
   });
 
   it('AC13 — psAll() gibt hostname:null und composeProject für interne Stack-Container', async () => {
@@ -723,8 +792,8 @@ describe('VpsDockerControl — psAll() — stack-aware (AC13)', () => {
     await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
     const ctrl = new VpsDockerControl(store);
 
-    // Format (I1): ID\tNames\tImage\tPorts\tStatus\t(empty cf label)\tcom.docker.compose.project
-    const mockOutput = 'db-xyz-001\tmyapp_db_1\tpostgres:15\t\tUp 5h\t\tmyapp';
+    // Format (v3): ID\tNames\tImage\tPorts\tStatus\tState\t(empty cf label)\tcom.docker.compose.project
+    const mockOutput = 'db-xyz-001\tmyapp_db_1\tpostgres:15\t\tUp 5h\trunning\t\tmyapp';
 
     const result = await ctrl.psAll(TEST_VPS, {
       _sshClientFactory: makeMockSshClient({ stdout: mockOutput, exitCode: 0 }),
@@ -744,8 +813,8 @@ describe('VpsDockerControl — psAll() — stack-aware (AC13)', () => {
     await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
     const ctrl = new VpsDockerControl(store);
 
-    // Format (I1): ID\tNames\tImage\tPorts\tStatus\tcloudflare.tunnel-hostname\t(empty compose label)
-    const mockOutput = 'single-abc\tmy-app\tghcr.io/org/app:v1\t0.0.0.0:8080->8080/tcp\tUp 3h\tapp.example.com\t';
+    // Format (v3): ID\tNames\tImage\tPorts\tStatus\tState\tcloudflare.tunnel-hostname\t(empty compose label)
+    const mockOutput = 'single-abc\tmy-app\tghcr.io/org/app:v1\t0.0.0.0:8080->8080/tcp\tUp 3h\trunning\tapp.example.com\t';
 
     const result = await ctrl.psAll(TEST_VPS, {
       _sshClientFactory: makeMockSshClient({ stdout: mockOutput, exitCode: 0 }),
@@ -764,12 +833,12 @@ describe('VpsDockerControl — psAll() — stack-aware (AC13)', () => {
     const ctrl = new VpsDockerControl(store);
 
     const mockOutput = [
-      // Single-image: hostname set, no compose project; Format: ID\tNames\tImage\tPorts\tStatus\tCF\tCompose
-      'single-abc\tmy-app\tghcr.io/org/app:v1\t0.0.0.0:8080->8080/tcp\tUp 3h\tapp.example.com\t',
+      // Single-image: hostname set, no compose project; Format: ID\tNames\tImage\tPorts\tStatus\tState\tCF\tCompose
+      'single-abc\tmy-app\tghcr.io/org/app:v1\t0.0.0.0:8080->8080/tcp\tUp 3h\trunning\tapp.example.com\t',
       // Stack-public: hostname set, compose project set
-      'web-def\tmyapp_web_1\tmyapp/web:latest\t0.0.0.0:8081->8080/tcp\tUp 2h\tweb.example.com\tmyapp',
+      'web-def\tmyapp_web_1\tmyapp/web:latest\t0.0.0.0:8081->8080/tcp\tUp 2h\trunning\tweb.example.com\tmyapp',
       // Stack-internal: no hostname, compose project set
-      'db-ghi\tmyapp_db_1\tpostgres:15\t\tUp 5h\t\tmyapp',
+      'db-ghi\tmyapp_db_1\tpostgres:15\t\tUp 5h\trunning\t\tmyapp',
     ].join('\n');
 
     const result = await ctrl.psAll(TEST_VPS, {
@@ -805,8 +874,8 @@ describe('VpsDockerControl — psAll() — stack-aware (AC13)', () => {
     const ctrl = new VpsDockerControl(store);
 
     let capturedCmd = null;
-    // Format (I1): ID\tNames\tImage\tPorts\tStatus\tCF-Label\tCompose-Label
-    const mockOutput = 'abc123def\tmy-app-name\tghcr.io/org/app:v1\t0.0.0.0:8080->8080/tcp\tUp 1h\tapp.example.com\t';
+    // Format (v3): ID\tNames\tImage\tPorts\tStatus\tState\tCF-Label\tCompose-Label
+    const mockOutput = 'abc123def\tmy-app-name\tghcr.io/org/app:v1\t0.0.0.0:8080->8080/tcp\tUp 1h\trunning\tapp.example.com\t';
 
     const result = await ctrl.psAll(TEST_VPS, {
       _sshClientFactory: makeMockSshClient({
@@ -833,8 +902,8 @@ describe('VpsDockerControl — psAll() — stack-aware (AC13)', () => {
     await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
     const ctrl = new VpsDockerControl(store);
 
-    // Format: ID\t(leer)\tImage\tPorts\tStatus\tCF-Label\tCompose-Label
-    const mockOutput = 'abc123def\t\tghcr.io/org/app:v1\t\tUp 1h\t\t';
+    // Format: ID\t(leer)\tImage\tPorts\tStatus\tState\tCF-Label\tCompose-Label
+    const mockOutput = 'abc123def\t\tghcr.io/org/app:v1\t\tUp 1h\trunning\t\t';
 
     const result = await ctrl.psAll(TEST_VPS, {
       _sshClientFactory: makeMockSshClient({ stdout: mockOutput, exitCode: 0 }),

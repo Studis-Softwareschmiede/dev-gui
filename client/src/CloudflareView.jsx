@@ -666,6 +666,16 @@ function ReconciliationSection() {
                           </dd>
                         </>
                       )}
+                      {(v.stoppedSkipped ?? []).length > 0 && (
+                        <>
+                          <dt style={reconcileStyles.dt}>Gestoppt, nicht angelegt</dt>
+                          <dd style={reconcileStyles.dd}>
+                            {v.stoppedSkipped.map((h) => (
+                              <span key={h} style={reconcileStyles.hostname}>{h}</span>
+                            ))}
+                          </dd>
+                        </>
+                      )}
                       {(v.reportedUnmanaged ?? []).length > 0 && (
                         <>
                           <dt style={reconcileStyles.dt}>Unmanaged gemeldet</dt>

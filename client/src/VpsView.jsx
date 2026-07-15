@@ -550,7 +550,7 @@ function ContainerRow({ container: c, provider, serverId, onAction, onLogs, onRe
 /**
  * Container-Übersicht für einen VPS (AC1–AC7, vps-container-overview).
  *
- * Listet alle laufenden Container (managed + unmanaged) mit Aktionen.
+ * Listet alle Container (laufend + gestoppt, managed + unmanaged) mit Aktionen.
  * Degradiert je VPS — Fehler zeigt Fehlermarkierung ohne die übrige Liste zu zerstören.
  *
  * A11y: WCAG 2.1 AA — role=status für Lade-/Leer-Zustand, role=alert für Fehler.
