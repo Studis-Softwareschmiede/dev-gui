@@ -2,7 +2,7 @@ id: S-361
 parent: F-082
 title: 'Testvertrag: Registry-Doubles an die echte VpsProviderRegistry-Oberfläche
   binden (kein Mock erfundener Methoden)'
-status: In Progress
+status: Done
 priority: P1
 spec: docs/specs/container-image-update.md
 implements:
@@ -53,7 +53,9 @@ branch: feat/S-361-registry-double-testvertrag
 pr: null
 blocked_reason: null
 created_at: '2026-07-15T00:00:00Z'
-updated_at: '2026-07-15T20:35:43Z'
+updated_at: '2026-07-15T20:54:46Z'
 area: deployment
 tok: null
-done_at: null
+done_at: '2026-07-15T20:53:05Z'
+dispo_act: '3'
+dispo_forecast: -.3333
