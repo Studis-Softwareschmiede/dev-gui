@@ -19,6 +19,12 @@
  *         Token NIE in SSH-exec-Argv; SSH-Fehler → errorClass korrekt
  *   AC4  (vps-tunnel-self-heal S-187) — Token NIE in Argv des SSH-exec-Aufrufs (kein Token in cmd)
  *
+ * Covers (container-image-update — Update-Boundary):
+ *   AC5  — inspectContainer(vps, containerId, opts?): { image, env, binds, labels } via
+ *          `docker inspect <containerId>`, GETRENNT von inspect(vps, image) (Image-ExposedPorts,
+ *          deploy-lifecycle AC13); Container-ID-Validierung wie rm(); geheimnisfrei klassifizierte
+ *          Fehler (docker-failed/no-private-key/unreachable/error); kein Private-Key-Leak im Kommando
+ *
  * Covers (deploy-config-volume-mount, v2/F-079-Korrektur — generischer rw-Verzeichnis-Mount):
  *   AC1  — run(): requiresConfig true → (a) `mkdir -p <hostConfigDir>` in DERSELBEN SSH-Session
  *          wie docker run, (b) genau EIN `-v <hostConfigDir>:<containerMountPath>` OHNE `:ro`
@@ -1234,6 +1240,184 @@ describe('VpsDockerControl.inspect() — AC13', () => {
 
     expect(result.result).toBe('error');
     expect(result.ports).toEqual([]);
+  });
+});
+
+// ── inspectContainer() (container-image-update AC5) ───────────────────────────
+
+describe('VpsDockerControl.inspectContainer() — container-image-update AC5', () => {
+  let store, dir;
+
+  beforeEach(async () => {
+    ({ store, dir } = await makeTmpStore());
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  function inspectOutput({ image = 'ghcr.io/org/app:v1', env = [], binds = null, labels = {} } = {}) {
+    return JSON.stringify({ image, env, binds, labels });
+  }
+
+  it('gibt result:ok + { image, env, binds, labels } bei erfolgreichem docker inspect zurück', async () => {
+    const ctrl = new VpsDockerControl(store);
+    const stdout = inspectOutput({
+      image: 'ghcr.io/org/app:v1',
+      env: ['GPG_PASSPHRASE=s3cr3t', 'PATH=/usr/bin'],
+      binds: ['/root/apps/myapp/config:/app/config'],
+      labels: { 'cloudflare.tunnel-hostname': 'app.example.com' },
+    });
+
+    const result = await ctrl.inspectContainer(TEST_VPS, 'abc123def456', {
+      _sshClientFactory: makeMockSshClient({ stdout, exitCode: 0 }),
+    });
+
+    expect(result.result).toBe('ok');
+    expect(result.config.image).toBe('ghcr.io/org/app:v1');
+    expect(result.config.env).toEqual({ GPG_PASSPHRASE: 's3cr3t', PATH: '/usr/bin' });
+    expect(result.config.binds).toEqual(['/root/apps/myapp/config:/app/config']);
+    expect(result.config.labels).toEqual({ 'cloudflare.tunnel-hostname': 'app.example.com' });
+  });
+
+  it('env-Werte mit "=" im Wert werden korrekt gesplittet (nur am ERSTEN "=")', async () => {
+    const ctrl = new VpsDockerControl(store);
+    const stdout = inspectOutput({ env: ['SOME_TOKEN=abc=def=='] });
+
+    const result = await ctrl.inspectContainer(TEST_VPS, 'abc123def456', {
+      _sshClientFactory: makeMockSshClient({ stdout, exitCode: 0 }),
+    });
+
+    expect(result.result).toBe('ok');
+    expect(result.config.env).toEqual({ SOME_TOKEN: 'abc=def==' });
+  });
+
+  it('binds:null (kein Mount) → binds: [] im Ergebnis', async () => {
+    const ctrl = new VpsDockerControl(store);
+    const stdout = inspectOutput({ binds: null });
+
+    const result = await ctrl.inspectContainer(TEST_VPS, 'abc123def456', {
+      _sshClientFactory: makeMockSshClient({ stdout, exitCode: 0 }),
+    });
+
+    expect(result.result).toBe('ok');
+    expect(result.config.binds).toEqual([]);
+  });
+
+  it('labels:null → labels: {} im Ergebnis (kein Label gesetzt)', async () => {
+    const ctrl = new VpsDockerControl(store);
+    const stdout = JSON.stringify({ image: 'ghcr.io/org/app:v1', env: [], binds: null, labels: null });
+
+    const result = await ctrl.inspectContainer(TEST_VPS, 'abc123def456', {
+      _sshClientFactory: makeMockSshClient({ stdout, exitCode: 0 }),
+    });
+
+    expect(result.result).toBe('ok');
+    expect(result.config.labels).toEqual({});
+  });
+
+  it('ungültige Container-ID (Shell-Metazeichen) → result:error, errorClass:error, KEIN SSH-Aufruf', async () => {
+    const ctrl = new VpsDockerControl(store);
+    let sshCalled = false;
+
+    const result = await ctrl.inspectContainer(TEST_VPS, 'abc; rm -rf /', {
+      _sshClientFactory: makeMockSshClient({
+        stdout: inspectOutput(),
+        exitCode: 0,
+        onCommand: () => { sshCalled = true; },
+      }),
+    });
+
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('error');
+    expect(sshCalled).toBe(false);
+  });
+
+  it('docker inspect exit != 0 (Container nicht gefunden) → result:error, errorClass:docker-failed', async () => {
+    const ctrl = new VpsDockerControl(store);
+
+    const result = await ctrl.inspectContainer(TEST_VPS, 'abc123def456', {
+      _sshClientFactory: makeMockSshClient({ stdout: '', exitCode: 1 }),
+    });
+
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('docker-failed');
+    expect(result.reason).not.toContain(FAKE_PRIVATE_KEY);
+  });
+
+  it('nicht-JSON stdout → result:error, errorClass:docker-failed (kein Crash)', async () => {
+    const ctrl = new VpsDockerControl(store);
+
+    const result = await ctrl.inspectContainer(TEST_VPS, 'abc123def456', {
+      _sshClientFactory: makeMockSshClient({ stdout: 'not-json', exitCode: 0 }),
+    });
+
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('docker-failed');
+  });
+
+  it('kein Private-Key → errorClass:no-private-key, KEIN SSH-Aufruf', async () => {
+    const { store: emptyStore, dir: emptyDir } = await makeTmpStore();
+    const ctrl = new VpsDockerControl(emptyStore);
+
+    const result = await ctrl.inspectContainer(TEST_VPS, 'abc123def456', {
+      _sshClientFactory: makeMockSshClient({ stdout: inspectOutput(), exitCode: 0 }),
+    });
+
+    await rm(emptyDir, { recursive: true, force: true });
+
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('no-private-key');
+  });
+
+  it('SSH unreachable → errorClass:unreachable', async () => {
+    const ctrl = new VpsDockerControl(store);
+    const connErr = new Error('Connection refused');
+    connErr.code = 'ECONNREFUSED';
+
+    const result = await ctrl.inspectContainer(TEST_VPS, 'abc123def456', {
+      _sshClientFactory: makeMockSshClient({ connectError: connErr }),
+    });
+
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('unreachable');
+  });
+
+  it('Kommando ruft docker inspect --format mit der Container-ID auf, GETRENNT von inspect(vps, image)', async () => {
+    const ctrl = new VpsDockerControl(store);
+    let capturedCmd = null;
+
+    await ctrl.inspectContainer(TEST_VPS, 'abc123def456', {
+      _sshClientFactory: makeMockSshClient({
+        stdout: inspectOutput(),
+        exitCode: 0,
+        onCommand: (cmd) => { capturedCmd = cmd; },
+      }),
+    });
+
+    expect(capturedCmd).toContain('docker inspect');
+    expect(capturedCmd).toContain('abc123def456');
+    // Format-String liest Container-Felder (Config.Image/.Env, HostConfig.Binds, Config.Labels) —
+    // NICHT Config.ExposedPorts (das ist die Format-Signatur von inspect(vps, image), AC13).
+    expect(capturedCmd).not.toContain('ExposedPorts');
+    expect(capturedCmd).toContain('.HostConfig.Binds');
+  });
+
+  it('AC12/Floor — SSH-Private-Key erscheint NICHT im Kommando', async () => {
+    const ctrl = new VpsDockerControl(store);
+    let capturedCmd = null;
+
+    await ctrl.inspectContainer(TEST_VPS, 'abc123def456', {
+      _sshClientFactory: makeMockSshClient({
+        stdout: inspectOutput(),
+        exitCode: 0,
+        onCommand: (cmd) => { capturedCmd = cmd; },
+      }),
+    });
+
+    expect(capturedCmd).not.toContain(FAKE_PRIVATE_KEY);
+    expect(capturedCmd).not.toContain('FAKEPRIVATE');
   });
 });
 

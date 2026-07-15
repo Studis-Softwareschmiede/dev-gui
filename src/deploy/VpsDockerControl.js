@@ -17,6 +17,10 @@
  *                                 (mit Label) + unmanaged (ohne Label, hostname: null); je Eintrag
  *                                 ein maschinenlesbares `state` (v3, `{{.State}}`; Vertrag geteilt mit
  *                                 [[cloudflare-reconciliation]] AC3b und [[vps-container-overview]] AC9b)
+ *   - inspectContainer(vps, containerId, opts?) — Run-Config eines BESTEHENDEN Containers
+ *                                (container-image-update AC5): { image, env, binds, labels } via
+ *                                `docker inspect <containerId>`. GETRENNT von `inspect(vps, image)`
+ *                                (Image-ExposedPorts, deploy-lifecycle AC13) — ersetzt sie NICHT.
  *
  * SSH-Transport: ssh2 (analog VpsProvisioner — kein System-ssh binary nötig).
  *
@@ -114,6 +118,25 @@ const CONFIG_MOUNT_PATH_RE = /^\/[A-Za-z0-9._/-]*$/;
  * @property {PsEntry[]}    [containers]  - laufende managed Container bei Erfolg
  * @property {string}       [reason]      - Fehlergrund ohne Geheim-Leak
  * @property {string}       [errorClass]  - maschinenlesbare Fehlerklasse
+ */
+
+/**
+ * @typedef {object} ContainerRunConfig
+ * @property {string} image - Image-Ref des Containers (inkl. Tag, exakt wie beim letzten `docker run`)
+ * @property {Record<string,string>} env - Container-Env als Key/Value (container-image-update AC5/AC6).
+ *   **Kann Secrets enthalten** (z.B. GPG_PASSPHRASE, [[deploy-bitwarden-gpg-injection]]) — server-intern/
+ *   transient, NIE in Response/Log/Audit/WS/Frontend weiterreichen (AC12, Floor).
+ * @property {string[]} binds - rohe `docker inspect .HostConfig.Binds`-Einträge (`host:container[:mode]`);
+ *   leeres Array wenn kein Bind-Mount vorhanden.
+ * @property {Record<string,string>} labels - Container-Labels (u.a. `cloudflare.tunnel-hostname`).
+ */
+
+/**
+ * @typedef {object} InspectContainerResult
+ * @property {'ok'|'error'} result
+ * @property {ContainerRunConfig} [config]
+ * @property {string} [reason]      - Fehlergrund ohne Geheim-Leak
+ * @property {string} [errorClass]  - maschinenlesbare Fehlerklasse
  */
 
 /**
@@ -267,6 +290,111 @@ export class VpsDockerControl {
       return {
         result: 'error',
         ports: [],
+        reason: sanitizeErrorReason(errorClass),
+        errorClass,
+      };
+    }
+  }
+
+  /**
+   * Liest die Run-Config eines BESTEHENDEN Containers — laufend oder gestoppt — via
+   * `docker inspect <containerId>` (container-image-update AC5): `{ image, env, binds, labels }`.
+   *
+   * **Strikt getrennt** von `inspect(vps, image)` (die inspiziert ein IMAGE auf ExposedPorts,
+   * deploy-lifecycle AC13) — diese Methode inspiziert einen CONTAINER und ersetzt `inspect()` nicht.
+   *
+   * Grundlage für die Run-Config-Rekonstruktion beim Container-Update (container-image-update
+   * AC6): es gibt keinen Deploy-State-Store (ADR-005) — der bestehende Container ist die einzige
+   * Quelle seiner eigenen Run-Config (Env, Mounts, Label).
+   *
+   * Ein einziger `docker inspect --format`-Aufruf liefert alle vier Felder als EIN JSON-Objekt
+   * (Go-Template `{{json .X}}` produziert je Feld valides JSON-Literal; zusammengesetzt ergibt das
+   * ein valides JSON-Gesamtobjekt — kein zweiter SSH-Roundtrip nötig).
+   *
+   * Security (Floor, AC12, HART): `config.env` kann Secrets enthalten (z.B. GPG_PASSPHRASE,
+   * [[deploy-bitwarden-gpg-injection]]). Der Aufrufer MUSS sie server-intern/transient behandeln —
+   * NIE in einer HTTP-Response, Log, Audit-Eintrag, WS-Stream oder Frontend-Bundle.
+   *
+   * @param {VpsTarget} vps
+   * @param {string}    containerId
+   * @param {object}    [opts]
+   * @param {string}    [opts.hostFingerprint]    - SHA-256-Fingerprint für Host-Key-Verifikation
+   * @param {Function}  [opts._sshClientFactory] - testbare SSH-Client-Fabrik (für Unit-Tests)
+   * @returns {Promise<InspectContainerResult>}
+   */
+  async inspectContainer(vps, containerId, opts = {}) {
+    const privateKey = await this.#loadPrivateKey(vps.targetUser);
+    if (!privateKey.ok) return { result: 'error', ...privateKey.error };
+
+    // Security: containerId validieren wie bei rm() (nur alphanumerische Zeichen + Bindestrich/
+    // Unterstrich) — BEVOR er in das Kommando eingebettet wird.
+    if (!isValidContainerId(containerId)) {
+      return {
+        result: 'error',
+        reason: 'Ungültige Container-ID (nur alphanumerische Zeichen erlaubt)',
+        errorClass: 'error',
+      };
+    }
+
+    // Format-String enthält Double-Quotes/Braces/Spaces — via shellEscape (Single-Quote-Escaping)
+    // absichern, analog escapedImage/formatStr in ps()/psAll().
+    const format = '{"image":{{json .Config.Image}},"env":{{json .Config.Env}},"binds":{{json .HostConfig.Binds}},"labels":{{json .Config.Labels}}}';
+    const cmd = `docker inspect --format ${shellEscape(format)} ${containerId}`;
+
+    try {
+      const stdout = await runSshCommand({
+        privateKey: privateKey.value,
+        host: vps.host,
+        port: vps.port ?? 22,
+        targetUser: vps.targetUser,
+        command: cmd,
+        timeoutMs: EXEC_TIMEOUT_MS,
+        hostFingerprint: opts.hostFingerprint ?? null,
+        sshClientFactory: opts._sshClientFactory,
+      });
+
+      let parsed;
+      try {
+        parsed = JSON.parse(stdout.trim());
+      } catch {
+        return {
+          result: 'error',
+          reason: 'Docker-Inspect-Ausgabe konnte nicht gelesen werden',
+          errorClass: 'docker-failed',
+        };
+      }
+      if (!parsed || typeof parsed !== 'object') {
+        return {
+          result: 'error',
+          reason: 'Docker-Inspect-Ausgabe konnte nicht gelesen werden',
+          errorClass: 'docker-failed',
+        };
+      }
+
+      const image = typeof parsed.image === 'string' ? parsed.image : '';
+
+      // .Config.Env ist ein Array von "KEY=VALUE"-Strings — in ein Record umwandeln.
+      // split auf das ERSTE '=' (Werte können selbst '=' enthalten, z.B. Base64-Padding).
+      const envList = Array.isArray(parsed.env) ? parsed.env : [];
+      const env = {};
+      for (const entry of envList) {
+        if (typeof entry !== 'string') continue;
+        const eqIdx = entry.indexOf('=');
+        if (eqIdx === -1) continue;
+        env[entry.slice(0, eqIdx)] = entry.slice(eqIdx + 1);
+      }
+
+      const binds = Array.isArray(parsed.binds)
+        ? parsed.binds.filter((b) => typeof b === 'string')
+        : [];
+
+      const labels = (parsed.labels && typeof parsed.labels === 'object') ? parsed.labels : {};
+
+      return { result: 'ok', config: { image, env, binds, labels } };
+    } catch (err) {
+      const errorClass = classifyError(err);
+      return {
+        result: 'error',
         reason: sanitizeErrorReason(errorClass),
         errorClass,
       };
