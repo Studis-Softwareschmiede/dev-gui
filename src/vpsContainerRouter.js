@@ -318,11 +318,14 @@ export function vpsContainerRouter({ vpsDockerControl, deployOrchestrator, audit
     }
 
     // ContainerEntry-Mapping (Spec §64): managed === (hostname !== null)
+    // S-352 (AC8): state durchreichen — gestoppte Container tragen state:'exited' u.a.,
+    // Laufend-Prädikat im Frontend ist ausschließlich state === 'running' (nie status parsen).
     const containers = (result.containers ?? []).map((c) => ({
       containerId: c.containerId,
       name: c.name ?? c.containerId, // I1: lesbarer Container-Name aus {{.Names}}, Fallback auf ID
       image: c.image,
       hostname: c.hostname,
+      state: c.state ?? null,
       status: c.status,
       hostPort: c.hostPort,
       managed: c.hostname !== null,

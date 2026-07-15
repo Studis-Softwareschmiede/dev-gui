@@ -1,8 +1,9 @@
 /**
- * vpsContainerRouter.test.js — Tests für Container-Übersicht + Aktionen (S-157).
+ * vpsContainerRouter.test.js — Tests für Container-Übersicht + Aktionen (S-157, S-352).
  *
  * Covers (vps-container-overview):
- *   AC8  — GET /api/vps/machines/:provider/*splat/containers → ContainerEntry[]; SSH-Fehler degradiert
+ *   AC8  — GET /api/vps/machines/:provider/*splat/containers → ContainerEntry[]; SSH-Fehler
+ *          degradiert; `state` wird durchgereicht (gestoppter Container → state:'exited', v2, S-352)
  *   AC9  — VpsDockerControl.start/stop/restart/logs + Container-ID-Validierung + secret-freie Fehler
  *   AC10 — POST .../start|stop|restart → VpsDockerControl-Methode; GET .../logs → read-only
  *   AC11 — DELETE .../containers/:id: managed → undeploy; unmanaged → rm; protected → 422
@@ -38,6 +39,7 @@ const MANAGED_CONTAINER = {
   containerId: 'abc123def456',
   image: 'ghcr.io/org/app:v1',
   hostname: 'app.example.com',
+  state: 'running',
   status: 'Up 2 hours',
   hostPort: 8080,
   composeProject: null,
@@ -48,10 +50,22 @@ const UNMANAGED_CONTAINER = {
   containerId: 'fff000eee111',
   image: 'nginx:latest',
   hostname: null,
+  state: 'running',
   status: 'Up 1 hour',
   hostPort: 80,
   composeProject: null,
   managed: false,
+};
+
+const STOPPED_MANAGED_CONTAINER = {
+  containerId: 'stopped777',
+  image: 'ghcr.io/org/app:v1',
+  hostname: 'app.example.com',
+  state: 'exited',
+  status: 'Exited (0) 3 hours ago',
+  hostPort: null,
+  composeProject: null,
+  managed: true,
 };
 
 // ── Mock-Factories ─────────────────────────────────────────────────────────────
@@ -255,6 +269,29 @@ describe('vpsContainerRouter — AC8: Container-Listing', () => {
 
     const withoutName = body.containers.find((c) => c.containerId === UNMANAGED_CONTAINER.containerId);
     expect(withoutName.name).toBe(UNMANAGED_CONTAINER.containerId); // Fallback auf containerId
+  });
+
+  it('S-352 AC8 — state-Feld wird durchgereicht: gestoppter Container ist in der Antwort enthalten und trägt state:"exited"', async () => {
+    server = await makeTestServer({
+      env: { DEV_NO_ACCESS: '1' },
+      dockerControl: makeMockDockerControl({
+        psAllResult: { result: 'ok', containers: [MANAGED_CONTAINER, STOPPED_MANAGED_CONTAINER] },
+      }),
+    });
+    const { status, body } = await server.doRequest({
+      path: '/api/vps/machines/hetzner/1/containers',
+    });
+    expect(status).toBe(200);
+    expect(body.result).toBe('ok');
+    expect(body.containers).toHaveLength(2);
+
+    const running = body.containers.find((c) => c.containerId === MANAGED_CONTAINER.containerId);
+    expect(running.state).toBe('running');
+
+    const stopped = body.containers.find((c) => c.containerId === STOPPED_MANAGED_CONTAINER.containerId);
+    expect(stopped).toBeDefined(); // gestoppter Container ist enthalten (kein Verschwinden)
+    expect(stopped.state).toBe('exited');
+    expect(stopped.managed).toBe(true); // managed-Prädikat unabhängig vom state (AC9b)
   });
 
   it('IONOS composite serverId via *splat', async () => {

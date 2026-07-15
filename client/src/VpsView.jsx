@@ -35,14 +35,21 @@
  *   AC20 — Graceful Fallback: fehlt availability ganz oder fehlt Eintrag für die Region →
  *           ungefiltert rendern (heutiges AC6/AC8-Verhalten, alle nicht-deprecated Typen).
  *
- * Implements: vps-container-overview AC1–AC7 (Container-Übersicht)
+ * Implements: vps-container-overview AC1–AC7, AC2/AC4b/AC14 (v2) (Container-Übersicht)
  *   AC1 — Container-Button je VPS-Zeile; Klick öffnet Übersicht + Listing-Fetch.
- *   AC2 — Listet je Container: Name, Status, Image, Port; managed vs. unmanaged.
+ *   AC2 — Listet je Container: Name, Status, Image, Port; managed vs. unmanaged;
+ *          Zustand-Textbadge „läuft"/„gestoppt" bedingungslos gerendert (v2, S-352).
  *   AC3 — Leer-Zustand; SSH-Fehler degradiert nur diese Übersicht.
  *   AC4 — Start/Stop/Neustart/Logs/Entfernen-Buttons; nach Erfolg Re-Fetch; 403 → Hinweis.
+ *   AC4b — Button-Aktivierung strikt nach `state`: state==='running' → Stop/Neustart aktiv,
+ *          Start disabled; sonst → Start aktiv, Stop/Neustart disabled; Logs/Entfernen
+ *          immer aktiv; disabled-Buttons mit title-Begründung (v2, S-352).
  *   AC5 — Logs lesen: render Log-Zeilen; kein SSH-Key/Token im Frontend.
  *   AC6 — Managed-Remove: type-to-confirm (Hostname); voller Undeploy.
  *   AC7 — Unmanaged-Remove: type-to-confirm (ContainerId); nur docker rm.
+ *   AC14 — Gestoppte Container bleiben nach Stop sichtbar (kein Verschwinden), kein
+ *          Filter/Umschalter; Start bleibt erreichbar (v2, S-352, Regressionstest zur
+ *          v1-Sackgasse „Container nach Stop unauffindbar/nicht startbar").
  *
  * Implements: vps-ssh-terminal AC1–AC4 (Frontend, S-264 — Backend S-262/S-263 gelandet)
  *   AC1 — Jede VPS-Karte zeigt zwei klein übereinander angeordnete, beschriftete
@@ -407,7 +414,7 @@ function ContainerRemoveConfirm({ container, onConfirm, onCancel, pending }) {
  *
  * @param {{
  *   container: { containerId: string, name: string, image: string, hostname: string|null,
- *                status: string, hostPort: number|null, managed: boolean },
+ *                state: string|null, status: string, hostPort: number|null, managed: boolean },
  *   provider: string,
  *   serverId: string,
  *   onAction: (provider: string, serverId: string, containerId: string, action: string) => Promise<void>,
@@ -420,6 +427,10 @@ function ContainerRow({ container: c, provider, serverId, onAction, onLogs, onRe
   const [actionMsg, setActionMsg] = useState(null);
 
   const isPending = actionState === 'pending';
+  // AC4b/AC9b: Laufend-Prädikat ist AUSSCHLIESSLICH state === 'running' — nie status parsen.
+  const isRunning = c.state === 'running';
+  const startDisabled = isPending || isRunning;
+  const stopRestartDisabled = isPending || !isRunning;
 
   const handleAction = useCallback(async (action) => {
     setActionState('pending');
@@ -452,6 +463,15 @@ function ContainerRow({ container: c, provider, serverId, onAction, onLogs, onRe
         >
           {c.managed ? 'M' : 'U'}
         </span>
+        {/* Zustand-Textbadge — AC2/AC14/AC9b: bedingungslos gerendert, nicht allein über
+            Farbe/Dimmen kodiert (A11y WCAG 2.1 AA); state === 'running' → "läuft", sonst "gestoppt" */}
+        <span
+          style={isRunning ? containerStyles.runningBadge : containerStyles.stoppedBadge}
+          aria-label={isRunning ? 'Zustand: läuft' : 'Zustand: gestoppt'}
+          title={isRunning ? 'Container läuft' : 'Container ist gestoppt'}
+        >
+          {isRunning ? 'läuft' : 'gestoppt'}
+        </span>
         <div style={containerStyles.containerMeta}>
           <span style={containerStyles.containerName}>{c.name}</span>
           {c.managed && c.hostname && (
@@ -469,37 +489,40 @@ function ContainerRow({ container: c, provider, serverId, onAction, onLogs, onRe
       <div style={containerStyles.containerActions}>
         <button
           type="button"
-          style={isPending ? { ...containerStyles.actionSmall, opacity: 0.45, cursor: 'not-allowed' } : containerStyles.actionSmall}
-          disabled={isPending}
+          style={startDisabled ? { ...containerStyles.actionSmall, opacity: 0.45, cursor: 'not-allowed' } : containerStyles.actionSmall}
+          disabled={startDisabled}
           aria-label={`Container ${c.name} starten`}
           aria-describedby={actionMsg ? ACTION_MSG_ID : undefined}
           aria-busy={isPending}
+          title={!isPending && isRunning ? 'Container läuft bereits — Start nicht möglich' : undefined}
           onClick={() => handleAction('start')}
         >
           {isPending ? '…' : 'Start'}
         </button>
         <button
           type="button"
-          style={isPending
+          style={stopRestartDisabled
             ? { ...containerStyles.actionSmall, ...containerStyles.actionStop, opacity: 0.45, cursor: 'not-allowed' }
             : { ...containerStyles.actionSmall, ...containerStyles.actionStop }}
-          disabled={isPending}
+          disabled={stopRestartDisabled}
           aria-label={`Container ${c.name} stoppen`}
           aria-describedby={actionMsg ? ACTION_MSG_ID : undefined}
           aria-busy={isPending}
+          title={!isPending && !isRunning ? 'Container ist bereits gestoppt — Stop nicht möglich' : undefined}
           onClick={() => handleAction('stop')}
         >
           Stop
         </button>
         <button
           type="button"
-          style={isPending
+          style={stopRestartDisabled
             ? { ...containerStyles.actionSmall, ...containerStyles.actionRestart, opacity: 0.45, cursor: 'not-allowed' }
             : { ...containerStyles.actionSmall, ...containerStyles.actionRestart }}
-          disabled={isPending}
+          disabled={stopRestartDisabled}
           aria-label={`Container ${c.name} neu starten`}
           aria-describedby={actionMsg ? ACTION_MSG_ID : undefined}
           aria-busy={isPending}
+          title={!isPending && !isRunning ? 'Container ist gestoppt — Neustart nicht möglich, zuerst starten' : undefined}
           onClick={() => handleAction('restart')}
         >
           Neustart
@@ -2565,6 +2588,33 @@ const containerStyles = {
     background: '#1a1a1a',
     color: '#8b949e',
     border: '1px solid #30363d',
+    borderRadius: 3,
+    flexShrink: 0,
+    minHeight: 20,
+    lineHeight: '18px',
+    cursor: 'default',
+  },
+  // AC2/AC14/A11y — Zustand als Textbadge (nicht allein über Farbe kodiert)
+  runningBadge: {
+    fontSize: 10,
+    fontWeight: 700,
+    padding: '1px 5px',
+    background: '#0f2022',
+    color: '#3fb950',
+    border: '1px solid #1b4332',
+    borderRadius: 3,
+    flexShrink: 0,
+    minHeight: 20,
+    lineHeight: '18px',
+    cursor: 'default',
+  },
+  stoppedBadge: {
+    fontSize: 10,
+    fontWeight: 700,
+    padding: '1px 5px',
+    background: '#1a1000',
+    color: '#e3b341',
+    border: '1px solid #9e6a03',
     borderRadius: 3,
     flexShrink: 0,
     minHeight: 20,
