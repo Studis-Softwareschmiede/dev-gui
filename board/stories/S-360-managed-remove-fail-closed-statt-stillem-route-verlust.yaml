@@ -1,0 +1,60 @@
+id: S-360
+parent: F-082
+title: 'managed-Remove: fail-closed statt stillem Fallback auf docker rm (Route + DNS
+  nie verwaist zurücklassen)'
+status: To Do
+priority: P1
+spec: docs/specs/vps-container-overview.md
+implements:
+- AC11b
+depends: S-359
+labels:
+- backend
+- deploy
+- cloudflare
+- security
+- bugfix
+size_est: M
+dispo_est: '5.0'
+tok_est: null
+confidence: medium
+estimate_note: 'Heuristik M (score=4: 1 AC + 2 Komponenten [src/vpsContainerRouter.js,
+  test/vpsContainerRouter.test.js] + security-Label). Kein estimator-Dispatch (nur
+  bei L/XL). dispo_est aus baseline.json js|balanced|M ep=5.0 (n=8) → confidence medium.
+  tok_est null (baseline tok_total null, Cold-Start).
+
+  ÄLTERER, UNABHÄNGIGER DEFEKT — nicht durch den Update-Knopf verursacht, aber gleiche
+  Wurzel: der managed-Remove (src/vpsContainerRouter.js:528) nutzt dieselbe tote resolveTunnelId
+  wie das Update, toleriert deren null-Rückgabe aber als Fallback auf reines VpsDockerControl.rm
+  (:539). Da die Auflösung in Produktion IMMER null lieferte, hat JEDER managed-Remove
+  über dev-gui den Container gelöscht und Cloudflare-Route + DNS-CNAME verwaist zurückgelassen
+  — ohne Fehlermeldung. Genau deshalb ist die Bruchstelle nie aufgefallen: der Remove
+  degradierte leise, das Update brach laut fail-closed ab. Datenverlust-nah.
+
+  UMSETZUNG: den null-Fallback-Zweig (:539) entfernen. Ist der Container managed (Hostname-Label
+  gesetzt) und die tunnelId nicht auflösbar → 422 { errorClass: ''tunnel-not-found''
+  }, KEIN rm, kein Cloudflare-Schritt, Container unangetastet. Unmanaged Container
+  (kein Label) bleiben UNVERÄNDERT beim reinen rm-Pfad — sie haben keine Route. Die
+  tunnelId-Auflösung ist exakt dieselbe wie beim Update (Target-Record aus S-359 via
+  resolveVpsTarget) — EINE Implementierung, kein zweiter Weg (grep-prüfbar).
+
+  BEWUSSTE VERSCHÄRFUNG gegenüber dem Alt-Verhalten (in der Spec als Edge-Case dokumentiert):
+  ein managed Container auf einem VPS ohne Target-Record bzw. ohne angelegten Tunnel
+  lässt sich über diesen Knopf danach NICHT mehr entfernen (vorher: stilles rm ohne
+  Route-Abbau). Sichtbarer Abbruch ist besser als ein leise verwaister DNS-Eintrag;
+  der Weg für solche Fälle bleibt die Deployments-Ansicht bzw. das Aufräumen der Registrierung.
+  Nach S-359 ist das ohnehin der echte Ausnahmefall, nicht mehr der Normalfall.
+
+  REIHENFOLGE unverändert lassen: LockoutGuard wird bereits VOR diesem Block geprüft
+  — kein Bypass durch die Änderung. type-to-confirm, Audit-First und CRED_ADMIN_EMAILS
+  bleiben unberührt. Erst nach S-359 umsetzbar (dort entsteht die Auflösung, auf der
+  dieses Gate aufsetzt).
+
+  '
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-07-15T00:00:00Z'
+updated_at: '2026-07-15T00:00:00Z'
+area: deployment
+tok: null

@@ -1,0 +1,72 @@
+id: S-359
+parent: F-082
+title: 'Kernfix: tunnelId + vpsId aus dem Target-Record durchreichen, tote resolveTunnelId
+  entfernen, vpsId an deploy()'
+status: To Do
+priority: P1
+spec: docs/specs/container-image-update.md
+implements:
+- AC13
+- AC14
+- AC7
+depends: null
+labels:
+- backend
+- deploy
+- cloudflare
+- security
+- bugfix
+size_est: M
+dispo_est: '5.0'
+tok_est: null
+confidence: medium
+estimate_note: 'Heuristik M (score=7: 3 AC + 3 Komponenten [src/vpsContainerRouter.js,
+  test/vpsContainerRouter.test.js, src/deploy/DeployOrchestrator.js (nur konsumiert)]
+  + security-Label). Kein estimator-Dispatch (nur bei L/XL). dispo_est aus baseline.json
+  js|balanced|M ep=5.0 (n=8) → confidence medium. tok_est null (baseline tok_total
+  null, Cold-Start).
+
+  KERN: resolveVpsTarget (src/vpsContainerRouter.js:215-238) liest den Target-Record
+  bereits über listTargetRecords() — und listTargetRecords liefert tunnelId UND _vpsId
+  bereits mit (VpsProviderRegistry.js:299 ff., Allowlist-Projektion). resolveVpsTarget
+  verwirft beide und gibt nur { host, port, targetUser } zurück. Fix: beide Felder
+  durchreichen (tunnelId aus match.tunnelId, vpsId aus match._vpsId) — additiv, bestehende
+  Aufrufer bleiben unberührt. Danach resolveTunnelId (:854-866) ERSATZLOS entfernen
+  (sie ist tot: getTunnelIdForHost existiert auf VpsProviderRegistry nicht, der typeof-Guard
+  ist in Produktion immer falsch, Rückgabe immer null) samt ihres irreführenden Docstrings
+  (:846-848) und beider Aufrufstellen (Update :697, Remove :528 — Remove-Verhalten
+  in S-360).
+
+  ACHTUNG Env-Fallback-Pfad: resolveVpsTarget hat eine zweite Quelle (vpsTargets/Env,
+  IP-Match). Diese Ziele haben KEINEN Target-Record und damit keine tunnelId/vpsId
+  → beide bleiben dort null → Update endet fail-closed in tunnel-not-found (AC7, Edge-Case
+  „VPS nur über Env-Ziele auflösbar" in der Spec). Das ist erwartetes Verhalten, KEIN
+  zu heilender Fall — kein Tunnel-Anlegen aus dem Update-Pfad heraus.
+
+  AC14 (stiller Schutzverlust): der deploy()-Aufruf des Update-Handlers (:730-738)
+  übergibt heute KEIN vpsId. Das Tunnel-Mismatch/-Missing-Gate in DeployOrchestrator.js:181
+  lautet `if (this.#vpsRegistry && vpsId && …)` — ohne vpsId wird es STILL übersprungen.
+  Fällt heute nicht auf, weil :697 vorher abbricht; nach dem Kernfix wäre es ein stiller
+  Schutzverlust. vpsId MUSS mit (Spec-Vertrag Zeile „Deploy-Wiederverwendung": vpsId
+  ist Pflicht).
+
+  NICHT ÄNDERN (bereits korrekt, Spec-Verhalten): die fail-closed-Reihenfolge des Endpunkts
+  (Authz 608 → resolveVpsTarget 634 → psAll 644 read → not-found 657/not-managed 665
+  → Audit 679 → inspectContainer 685 read → tunnel-Gate 697; einzige Mutation deploy
+  730 — 33 Zeilen später, kein Pfad fasst den Container vorher an); das Tunnel-Gate
+  selbst (kein Fallback auf Deploy ohne Route — das Ergebnis wäre ein laufender, aber
+  unerreichbarer Container); die 422/errorClass-Semantik; der UI-Text (client/src/VpsView.jsx:248).
+  Der Fehlerpfad war nie falsch — nur nie mit gültiger tunnelId erreichbar.
+
+  Bestehende Tests, die getTunnelIdForHost mocken (test/vpsContainerRouter.test.js
+  :551, :579, :609, :939, :1200), brechen durch diesen Fix und werden hier auf den
+  Target-Record-Weg umgestellt; die vertragliche Absicherung dagegen liefert S-361.
+
+  '
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-07-15T00:00:00Z'
+updated_at: '2026-07-15T00:00:00Z'
+area: deployment
+tok: null

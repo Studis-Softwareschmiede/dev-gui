@@ -1,0 +1,69 @@
+id: F-082
+title: 'Update-Knopf repariert: tunnelId-Auflösung über den Target-Record (plus leiser
+  Remove-Route-Verlust und Test-Vertrag)'
+goal: 'Der „Update"-Knopf in der VPS-Container-Übersicht (F-080/S-355) scheitert IMMER
+  mit „Cloudflare-Tunnel nicht gefunden" — das Feature hat nie funktioniert. Ursache
+  ist eine tote Methode: resolveTunnelId (src/vpsContainerRouter.js:854-866) ruft hinter
+  einem typeof-Guard vpsRegistry.getTunnelIdForHost(host) auf. Diese Methode wurde
+  auf VpsProviderRegistry NIE implementiert (Platzhalter des Autors; der Docstring
+  bei :846-848 verrät, dass er wusste, dass der Lookup per vpsName statt per host geht).
+  server.js:272 verdrahtet die echte Registry → der Guard ist in Produktion immer falsch
+  → resolveTunnelId liefert immer null → jedes Update jedes managed Containers auf
+  jedem VPS bricht bei :697-703 mit 422 tunnel-not-found ab. Der richtige Weg existiert
+  bereits: DeployOrchestrator.js:181-186 nutzt getTargetRecord(vpsId).tunnelId, VpsProviderRegistry.js:802-818
+  persistiert tunnelId im Target-Record, und resolveVpsTarget (:215-238) LIEST diesen
+  Record bereits — gibt aber nur { host, port, targetUser } zurück und wirft tunnelId
+  + vpsId weg (listTargetRecords liefert beide bereits mit: tunnelId + _vpsId). Der
+  Fix ist entsprechend klein. Zwei Folgefehler gehören mit: (1) der Update-Handler
+  (:730-738) übergibt KEIN vpsId an deploy() — das Tunnel-Mismatch/-Missing-Gate (DeployOrchestrator.js:181,
+  an vpsId gebunden) wird still übersprungen; fällt heute nicht auf, weil :697 vorher
+  abbricht, wäre nach dem Fix aber ein stiller Schutzverlust. (2) der managed-Remove
+  (:528) nutzt dieselbe kaputte Auflösung, toleriert null aber als Fallback auf reines
+  docker rm (:539) — JEDER managed-Remove über dev-gui löscht damit den Container und
+  lässt Cloudflare-Route + DNS-CNAME verwaist zurück, ohne Fehlermeldung. Genau das
+  hat die Bruchstelle verdeckt: Remove degradierte leise, Update brach laut ab. Dazu
+  der eigentliche Skandal: test/vpsContainerRouter.test.js (u.a. :1200) mockte genau
+  den nicht existierenden Platzhalter und grünte die Lücke zu — ein Test zementiert
+  die Fehlannahme ausdrücklich („Default-Registry hat KEIN getTunnelIdForHost"). 7849
+  grüne Tests über einem Feature, das nie lief.
+
+  '
+status: To Do
+priority: P1
+spec: docs/specs/container-image-update.md
+definition_of_done: 'Der Update-Knopf funktioniert für jeden managed Container auf
+  einem registrierten VPS: die tunnelId wird aus dem persistierten VPS-Target-Record
+  der {provider, serverId}-Registrierung aufgelöst (derselbe Record, aus dem Host/Port/User
+  stammen und den die Deploy-Saga über getTargetRecord(vpsId).tunnelId liest); resolveVpsTarget
+  reicht tunnelId + vpsId durch statt sie zu verwerfen; getTunnelIdForHost existiert
+  repo-weit nicht mehr — weder im Quellcode noch als Test-Mock (grep-prüfbar). Der
+  deploy()-Aufruf des Update-Pfads übergibt vpsId, sodass das Tunnel-Mismatch/-Missing-Gate
+  greift statt still übersprungen zu werden. Der managed-Remove löst die tunnelId über
+  DIESELBE Implementierung auf und ist fail-closed: keine tunnelId → 422 tunnel-not-found,
+  kein rm (kein stiller Fallback, der Route + DNS verwaist zurücklässt); unmanaged
+  Container bleiben unverändert beim reinen rm-Pfad. Tests der Tunnel-Auflösung laufen
+  gegen die echte VpsProviderRegistry-Oberfläche bzw. einen vertraglich daran gebundenen
+  Fake — ein Double, das eine auf der echten Klasse nicht existierende Methode bereitstellt,
+  lässt den Test fehlschlagen. UNVERÄNDERT bleibt das bereits Korrekte: die fail-closed-Reihenfolge
+  des Update-Endpunkts (Authz → resolveVpsTarget → psAll → not-found/not-managed →
+  Audit → inspectContainer → tunnel-Gate, einzige Mutation 33 Zeilen später), das Tunnel-Gate
+  selbst (kein Deploy ohne Route — sonst laufender, aber unerreichbarer Container),
+  der UI-Text und der Floor (Access + CRED_ADMIN_EMAILS + Audit-First + LockoutGuard,
+  keine Secrets in Response/Log/Audit/WS/Frontend).
+
+  '
+labels:
+- deploy
+- cloudflare
+- security
+- bugfix
+depends: null
+owner: null
+stories:
+- S-359
+- S-360
+- S-361
+progress: 0/3 done
+created_at: '2026-07-15T00:00:00Z'
+updated_at: '2026-07-15T00:00:00Z'
+area: deployment
