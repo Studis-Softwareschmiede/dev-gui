@@ -35,7 +35,7 @@
  *   AC20 — Graceful Fallback: fehlt availability ganz oder fehlt Eintrag für die Region →
  *           ungefiltert rendern (heutiges AC6/AC8-Verhalten, alle nicht-deprecated Typen).
  *
- * Implements: vps-container-overview AC1–AC7, AC2/AC4b/AC14 (v2) (Container-Übersicht)
+ * Implements: vps-container-overview AC1–AC7, AC2/AC4b/AC14/AC15 (v2) (Container-Übersicht)
  *   AC1 — Container-Button je VPS-Zeile; Klick öffnet Übersicht + Listing-Fetch.
  *   AC2 — Listet je Container: Name, Status, Image, Port; managed vs. unmanaged;
  *          Zustand-Textbadge „läuft"/„gestoppt" bedingungslos gerendert (v2, S-352).
@@ -50,6 +50,11 @@
  *   AC14 — Gestoppte Container bleiben nach Stop sichtbar (kein Verschwinden), kein
  *          Filter/Umschalter; Start bleibt erreichbar (v2, S-352, Regressionstest zur
  *          v1-Sackgasse „Container nach Stop unauffindbar/nicht startbar").
+ *   AC15 — „Update"-Knopf je MANAGED Container (POST …/containers/:containerId/update,
+ *          [[container-image-update]]); für unmanaged Container disabled mit Begründung;
+ *          Ergebnis/Fehler je Container sichtbar (geheimnisfreie errorClass-Anzeige);
+ *          nach Erfolg Re-Fetch; sichtbarer Hinweis VOR dem Auslösen, dass ein Update auf
+ *          einen gestoppten Container ihn startet (S-356/AC8-Abgrenzung, S-357).
  *
  * Implements: vps-ssh-terminal AC1–AC4 (Frontend, S-264 — Backend S-262/S-263 gelandet)
  *   AC1 — Jede VPS-Karte zeigt zwei klein übereinander angeordnete, beschriftete
@@ -198,11 +203,14 @@ async function fetchContainers({ provider, serverId }) {
 }
 
 /**
- * Führt eine Container-Aktion aus (start/stop/restart).
+ * Führt eine Container-Aktion aus (start/stop/restart/update).
  * POST /api/vps/machines/:provider/:serverId/containers/:containerId/:action
  *
- * @param {{ provider: string, serverId: string, containerId: string, action: 'start'|'stop'|'restart' }} params
- * @returns {Promise<{ result: string, reason?: string }>}
+ * `update` (AC15, [[container-image-update]]) nimmt — wie start/stop/restart — einen
+ * LEEREN Body: kein Image/Tag/tunnelId vom Client, der Server löst den Ref selbst auf.
+ *
+ * @param {{ provider: string, serverId: string, containerId: string, action: 'start'|'stop'|'restart'|'update' }} params
+ * @returns {Promise<{ result: string, reason?: string, deployment?: object }>}
  */
 async function postContainerAction({ provider, serverId, containerId, action }) {
   const url = `/api/vps/machines/${encodeURIComponent(provider)}/${serverId}/containers/${encodeURIComponent(containerId)}/${action}`;
@@ -214,9 +222,37 @@ async function postContainerAction({ provider, serverId, containerId, action }) 
     throw err;
   }
   if (!res.ok) {
-    throw new Error(data.reason ?? data.error ?? `${action} fehlgeschlagen (${res.status})`);
+    const err = new Error(data.reason ?? data.error ?? `${action} fehlgeschlagen (${res.status})`);
+    err.errorClass = data.errorClass;
+    throw err;
   }
   return data;
+}
+
+/**
+ * Formatiert eine Update-`errorClass` ([[container-image-update]] AC7/Verträge) geheimnisfrei
+ * für die Anzeige in ContainerRow (AC15, vps-container-overview). Fällt auf `reason` bzw.
+ * einen generischen Text zurück, wenn keine bekannte Klasse vorliegt.
+ *
+ * @param {string|undefined} errorClass
+ * @param {string|undefined} reason
+ * @returns {string}
+ */
+function friendlyUpdateError(errorClass, reason) {
+  switch (errorClass) {
+    case 'not-managed':
+      return 'Nur managed Container können aktualisiert werden.';
+    case 'update-unsafe':
+      return 'Update abgebrochen: Konfiguration nicht eindeutig rekonstruierbar (siehe Deployments-Ansicht).';
+    case 'tunnel-not-found':
+      return 'Update abgebrochen: Cloudflare-Tunnel nicht gefunden.';
+    case 'protected-resource':
+      return 'Dieser Container ist geschützt und kann nicht aktualisiert werden.';
+    case 'container-not-found':
+      return 'Container nicht (mehr) vorhanden.';
+    default:
+      return reason ?? 'Update fehlgeschlagen.';
+  }
 }
 
 /**
@@ -443,6 +479,10 @@ function ContainerRow({ container: c, provider, serverId, onAction, onLogs, onRe
       if (err.is403) {
         setActionState('forbidden');
         setActionMsg('Keine Berechtigung für diese Aktion');
+      } else if (action === 'update') {
+        // AC15: geheimnisfreie errorClass-Anzeige statt Roh-Reason.
+        setActionState('error');
+        setActionMsg(friendlyUpdateError(err.errorClass, err.message));
       } else {
         setActionState('error');
         setActionMsg(err.message ?? 'Aktion fehlgeschlagen');
@@ -450,7 +490,15 @@ function ContainerRow({ container: c, provider, serverId, onAction, onLogs, onRe
     }
   }, [provider, serverId, c.containerId, onAction]);
 
+  // AC15: Update ist nur für managed Container aktiv (unmanaged → disabled mit Begründung).
+  const updateDisabled = isPending || !c.managed;
+
   const ACTION_MSG_ID = `ctr-action-${c.containerId}`.replace(/[^a-zA-Z0-9-]/g, '-');
+  const UPDATE_HINT_ID = `ctr-update-hint-${c.containerId}`.replace(/[^a-zA-Z0-9-]/g, '-');
+  const showUpdateHint = c.managed && !isRunning;
+  const updateDescribedBy = [showUpdateHint ? UPDATE_HINT_ID : null, actionMsg ? ACTION_MSG_ID : null]
+    .filter(Boolean)
+    .join(' ') || undefined;
 
   return (
     <li style={containerStyles.containerItem}>
@@ -529,6 +577,20 @@ function ContainerRow({ container: c, provider, serverId, onAction, onLogs, onRe
         </button>
         <button
           type="button"
+          style={updateDisabled
+            ? { ...containerStyles.actionSmall, ...containerStyles.actionUpdate, opacity: 0.45, cursor: 'not-allowed' }
+            : { ...containerStyles.actionSmall, ...containerStyles.actionUpdate }}
+          disabled={updateDisabled}
+          aria-label={`Container ${c.name} aktualisieren`}
+          aria-describedby={updateDescribedBy}
+          aria-busy={isPending}
+          title={!c.managed ? 'Nur managed Container können aktualisiert werden' : undefined}
+          onClick={() => handleAction('update')}
+        >
+          {isPending ? '…' : 'Update'}
+        </button>
+        <button
+          type="button"
           style={containerStyles.actionSmall}
           disabled={isPending}
           aria-label={`Logs von Container ${c.name} anzeigen`}
@@ -548,6 +610,16 @@ function ContainerRow({ container: c, provider, serverId, onAction, onLogs, onRe
           Entfernen
         </button>
       </div>
+
+      {/* AC15: sichtbarer Hinweis VOR dem Auslösen — ein Update startet einen gestoppten
+          Container (S-356/AC8-Abgrenzung). Immer sichtbar (kein reiner Hover-Tooltip) UND per
+          aria-describedby am Update-Knopf verankert, damit Screenreader-Fokus auf den Knopf
+          den Hinweis mitliest, bevor ausgelöst wird. */}
+      {showUpdateHint && (
+        <span id={UPDATE_HINT_ID} style={containerStyles.updateHint} role="note">
+          Hinweis: Ein Update startet diesen gestoppten Container.
+        </span>
+      )}
 
       {/* Aktions-Feedback (AC4) */}
       {actionMsg && (
@@ -718,13 +790,13 @@ function ContainerOverview({ provider, serverId, machineName, onClose }) {
       {/* Leer-Zustand (AC3) */}
       {!loading && !loadError && containers.length === 0 && (
         <p style={containerStyles.emptyText} role="status">
-          Keine Container laufend.
+          Keine Container vorhanden.
         </p>
       )}
 
-      {/* Container-Liste (AC2) */}
+      {/* Container-Liste (AC2) — enthält seit S-352 bedingungslos auch gestoppte Container. */}
       {!loading && !loadError && containers.length > 0 && (
-        <ul style={containerStyles.containerList} aria-label="Laufende Container">
+        <ul style={containerStyles.containerList} aria-label="Container">
           {containers.map((c) => (
             <ContainerRow
               key={c.containerId}
@@ -2686,6 +2758,19 @@ const containerStyles = {
     background: '#1a0000',
     color: '#f85149',
     border: '1px solid #58131a',
+  },
+  // AC15 (vps-container-overview): Update-Knopf
+  actionUpdate: {
+    background: '#1a1300',
+    color: '#e3b341',
+    border: '1px solid #9e6a03',
+  },
+  updateHint: {
+    display: 'block',
+    width: '100%',
+    fontSize: 11,
+    color: '#e3b341',
+    marginTop: 2,
   },
   feedbackOk: {
     fontSize: 11,
