@@ -1,0 +1,44 @@
+id: F-081
+title: 'Deploy-Reihenfolge: Image ziehen, BEVOR der alte Container entfernt wird (Verfügbarkeitsdefekt)'
+goal: 'Behebt einen vorbestehenden Verfügbarkeitsdefekt der Deploy-Saga (seit der
+  Ur-Implementierung, NICHT von F-080 eingeführt — F-080/AC17 hat die Stelle nur angefasst
+  und die Reihenfolge unverändert gelassen): DeployOrchestrator.deploy() entfernt in
+  Schritt (g) den bestehenden Container per #rollbackContainer und fährt ERST DANACH
+  den docker pull. Schlägt der Pull fehl (falscher/nicht existierender Tag, Registry
+  nicht erreichbar, Auth abgelaufen, Netzwerkfehler), ist der alte Container bereits
+  weg — der Dienst ist offline, es gibt keinen automatischen Rückweg, der Nutzer steht
+  vor einem toten Hostname. Owner-Vorgabe: Reihenfolge umdrehen — erst pull, dann rm
+  der Altcontainer, dann run. Scheitert der Pull, bleibt der alte Container unangetastet
+  laufen und der Deploy bricht fail-closed mit klarer Meldung ab (kein Ausfall). Reine
+  Reihenfolge-Korrektur: kein Vertrag, kein Endpunkt, kein Rollback-Verhalten (AC4)
+  geändert; Gate-Ordnung (AC1/AC3/AC5/AC6 — kein Schritt vor dem Gate) sowie AC14/AC17
+  bleiben gültig. Der Container-Update-Weg aus F-080 (container-image-update, POST
+  .../containers/:id/update) nutzt dieselbe Saga und profitiert ohne eigene Änderung mit.
+  Befund vom reviewer-Agenten während F-080 (S-355), am Code verifiziert.
+
+  '
+status: To Do
+priority: P2
+spec: docs/specs/deploy-lifecycle.md
+definition_of_done: 'AC18+AC19 grün: DeployOrchestrator.deploy() ruft im Container-Schritt
+  pull → rm (Ersetzungsschritt) → run in genau dieser Reihenfolge auf, weiterhin
+  vollständig NACH allen Lockout-/Tunnel-/Readiness-Gates; pull-Fehler beendet die
+  Saga fail-closed mit {result:"error", reason, errorClass} OHNE rm/run/Cloudflare-Schritt,
+  der bestehende Container läuft unverändert weiter (Regressionstest zum Ausfall-Defekt
+  Pflicht); der Ersetzungsschritt bleibt VOR der Host-Port-Auswahl, sodass ein Re-Deploy
+  denselben Host-Port wiederverwendet (8080 → 8080, kein Port-Wandern); Erfolgsfall
+  unverändert {result:"ok", deployment} inkl. replaced:true; AC4-Rollback, AC13-Auto-Port,
+  AC14/AC17-Ersetzungsverhalten und der Floor unverändert grün.
+
+  '
+labels:
+- deploy
+- backend
+depends: null
+owner: null
+stories:
+- S-358
+progress: 0/1 done
+created_at: '2026-07-15T00:00:00Z'
+updated_at: '2026-07-15T00:00:00Z'
+area: deployment
