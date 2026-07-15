@@ -1,8 +1,8 @@
 id: S-361
 parent: F-082
-title: 'Testvertrag: Registry-Doubles an die echte VpsProviderRegistry-Oberfläche binden
-  (kein Mock erfundener Methoden)'
-status: To Do
+title: 'Testvertrag: Registry-Doubles an die echte VpsProviderRegistry-Oberfläche
+  binden (kein Mock erfundener Methoden)'
+status: In Progress
 priority: P1
 spec: docs/specs/container-image-update.md
 implements:
@@ -29,18 +29,18 @@ estimate_note: 'Heuristik S (score=3: 1 AC + 2 Komponenten [test/vpsContainerRou
   Ohne diese Story wiederholt sich exakt derselbe Fehler beim nächsten Registry-Aufruf.
 
   UMSETZUNG: einen gemeinsamen Registry-Fake-Helfer für die Tests bereitstellen, der
-  jede bereitgestellte Methode gegen die ECHTE Oberfläche von VpsProviderRegistry (src/vps/VpsProviderRegistry.js)
-  prüft — z.B. Abgleich der Keys gegen VpsProviderRegistry.prototype. Eine Methode,
-  die dort nicht existiert, lässt den Test FEHLSCHLAGEN statt still durchzuwinken.
-  Reale Oberfläche laut Spec-Vertrag: listProviders, listAllMachines, start, stop,
-  getMachineIp, listTargetRecords, getTargetRecord, delete, create, getProviderOptions.
+  jede bereitgestellte Methode gegen die ECHTE Oberfläche von VpsProviderRegistry
+  (src/vps/VpsProviderRegistry.js) prüft — z.B. Abgleich der Keys gegen VpsProviderRegistry.prototype.
+  Eine Methode, die dort nicht existiert, lässt den Test FEHLSCHLAGEN statt still
+  durchzuwinken. Reale Oberfläche laut Spec-Vertrag: listProviders, listAllMachines,
+  start, stop, getMachineIp, listTargetRecords, getTargetRecord, delete, create, getProviderOptions.
   Die Tests der tunnelId-Auflösung (Update + Remove) auf diesen Helfer umstellen.
 
-  NEGATIV-NACHWEIS (Teil des AC): ein Test, der belegt, dass ein Double mit einer erfundenen
-  Methode (z.B. getTunnelIdForHost) die Vertragsprüfung auslöst — sonst ist der Vertrag
-  selbst ungetestet. Zusätzlich grep-prüfbar: getTunnelIdForHost kommt repo-weit nicht
-  mehr vor (heute: 8 Treffer, 7 davon Mocks in test/vpsContainerRouter.test.js, einer
-  die typeof-Prüfung selbst — alle fallen mit S-359/S-360).
+  NEGATIV-NACHWEIS (Teil des AC): ein Test, der belegt, dass ein Double mit einer
+  erfundenen Methode (z.B. getTunnelIdForHost) die Vertragsprüfung auslöst — sonst
+  ist der Vertrag selbst ungetestet. Zusätzlich grep-prüfbar: getTunnelIdForHost kommt
+  repo-weit nicht mehr vor (heute: 8 Treffer, 7 davon Mocks in test/vpsContainerRouter.test.js,
+  einer die typeof-Prüfung selbst — alle fallen mit S-359/S-360).
 
   SCOPE-GRENZE: nur die Registry-Doubles im Umfeld der Tunnel-Auflösung. KEIN repo-weiter
   Umbau aller Test-Doubles auf Vertragsbindung und keine Erweiterung auf andere Boundaries
@@ -49,10 +49,11 @@ estimate_note: 'Heuristik S (score=3: 1 AC + 2 Komponenten [test/vpsContainerRou
   (vorher existieren die zu bindenden Aufrufe noch nicht in ihrer Zielform).
 
   '
-branch: null
+branch: feat/S-361-registry-double-testvertrag
 pr: null
 blocked_reason: null
 created_at: '2026-07-15T00:00:00Z'
-updated_at: '2026-07-15T00:00:00Z'
+updated_at: '2026-07-15T20:35:43Z'
 area: deployment
 tok: null
+done_at: null

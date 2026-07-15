@@ -1,5 +1,5 @@
 /**
- * vpsContainerRouter.test.js — Tests für Container-Übersicht + Aktionen (S-157, S-352, S-355, S-359, S-360).
+ * vpsContainerRouter.test.js — Tests für Container-Übersicht + Aktionen (S-157, S-352, S-355, S-359, S-360, S-361).
  *
  * Covers (vps-container-overview):
  *   AC8  — GET /api/vps/machines/:provider/*splat/containers → ContainerEntry[]; SSH-Fehler
@@ -45,6 +45,11 @@
  *   AC14 — (S-359) `deploy()` erhält `vpsId` aus demselben Target-Record wie `tunnelId` — das
  *          Tunnel-Mismatch/-Missing-Gate des DeployOrchestrator greift damit statt still
  *          übersprungen zu werden.
+ *   AC15 — (S-361) Testvertrag: JEDES Registry-Double dieser Datei läuft über
+ *          `makeContractBoundRegistryFake()`, das jede bereitgestellte Methode gegen
+ *          `VpsProviderRegistry.prototype` prüft — eine erfundene Methode lässt den Aufbau des
+ *          Doubles fehlschlagen statt den Test still durchzuwinken. Negativ-Nachweis + Positiv-
+ *          Nachweis in der eigenen AC15-`describe`-Sektion am Dateiende.
  *
  * Strategie:
  *   - VpsDockerControl als Mock injiziert (kein SSH-I/O)
@@ -54,7 +59,9 @@
  *   - vpsTargets: Map mit einem Test-Eintrag
  *   - vpsRegistry: Mock (getMachineIp gibt IP zurück für den Env-Match-Zweig; für tunnelId/
  *     vpsId-Auflösung mockt `makeRegistryWithTargetRecord`/`makeRegistryWithTunnel` gezielt
- *     `listTargetRecords({provider,serverId})` — die einzige reale Registry-Oberfläche, AC15)
+ *     `listTargetRecords({provider,serverId})` — die einzige reale Registry-Oberfläche, AC15).
+ *     ALLE Registry-Doubles (inkl. der beiden AC13/AC14-Inline-Doubles) laufen über den
+ *     gemeinsamen, vertragsgebundenen Helfer `makeContractBoundRegistryFake()` (AC15, S-361).
  */
 
 import { describe, it, afterEach, expect } from '@jest/globals';
@@ -65,6 +72,7 @@ import { request as httpRequest } from 'node:http';
 import { vpsContainerRouter } from '../src/vpsContainerRouter.js';
 import { AuditStore } from '../src/AuditStore.js';
 import { createAccessGuard } from '../src/AccessGuard.js';
+import { VpsProviderRegistry } from '../src/vps/VpsProviderRegistry.js';
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -180,12 +188,33 @@ function makeMockOrchestrator({
   };
 }
 
+/**
+ * Vertraglich an die ECHTE VpsProviderRegistry-Oberfläche gebundener Registry-Fake (AC15,
+ * container-image-update). Jede Methode, die `methods` bereitstellt, MUSS auf
+ * `VpsProviderRegistry.prototype` tatsächlich existieren — eine erfundene Methode (wie der
+ * inzwischen entfernte Host-Lookup-Platzhalter, der die tunnelId-Auflösung nie funktionsfähig
+ * gemacht hat) lässt den Aufbau des Doubles sofort fehlschlagen, statt den Test still
+ * durchzuwinken. Gemeinsamer Helfer für ALLE Registry-Doubles der tunnelId-Auflösung
+ * (Update- und Remove-Pfad) in dieser Datei — kein Double baut sich mehr am Vertrag vorbei.
+ */
+function makeContractBoundRegistryFake(methods = {}) {
+  for (const methodName of Object.keys(methods)) {
+    if (typeof VpsProviderRegistry.prototype[methodName] !== 'function') {
+      throw new Error(
+        `makeContractBoundRegistryFake: "${methodName}" existiert nicht auf VpsProviderRegistry.prototype — ` +
+        'ein Test-Double darf keine erfundene Registry-Methode bereitstellen (AC15, container-image-update).',
+      );
+    }
+  }
+  return { ...methods };
+}
+
 function makeMockRegistry({ machineIp = '1.2.3.4' } = {}) {
-  return {
+  return makeContractBoundRegistryFake({
     async getMachineIp(_provider, _serverId) {
       return machineIp;
     },
-  };
+  });
 }
 
 /**
@@ -194,11 +223,11 @@ function makeMockRegistry({ machineIp = '1.2.3.4' } = {}) {
  * Host) mit tunnelId:null gewinnen. Provider/serverId matchen die Standard-Testpfade `hetzner`/`1`.
  */
 function makeRegistryWithTargetRecord({ tunnelId = 'tunnel-abc', vpsId = 'test-vps' } = {}) {
-  return {
+  return makeContractBoundRegistryFake({
     async listTargetRecords() {
       return [{ provider: 'hetzner', serverId: '1', host: '1.2.3.4', port: 22, targetUser: 'root', tunnelId, _vpsId: vpsId }];
     },
-  };
+  });
 }
 
 // ── Test-Server-Fabrik ─────────────────────────────────────────────────────────
@@ -1051,12 +1080,12 @@ describe('vpsContainerRouter — container-image-update: POST .../update', () =>
       orchestrator: makeMockOrchestrator({
         onDeploy: (params) => { deployParams = params; },
       }),
-      registry: {
+      registry: makeContractBoundRegistryFake({
         async listTargetRecords() {
           listTargetRecordsCalled = true;
           return [{ provider: 'hetzner', serverId: '1', host: '1.2.3.4', port: 22, targetUser: 'root', tunnelId: 'tunnel-xyz', _vpsId: 'vps-one' }];
         },
-      },
+      }),
     });
 
     const { status } = await server.doRequest({
@@ -1080,11 +1109,11 @@ describe('vpsContainerRouter — container-image-update: POST .../update', () =>
       orchestrator: makeMockOrchestrator({
         onDeploy: () => { deployCalled = true; },
       }),
-      registry: {
+      registry: makeContractBoundRegistryFake({
         async listTargetRecords() {
           return [{ provider: 'hetzner', serverId: '1', host: '1.2.3.4', port: 22, targetUser: 'root', tunnelId: null, _vpsId: 'vps-one' }];
         },
-      },
+      }),
     });
 
     const { status, body } = await server.doRequest({
@@ -1573,5 +1602,37 @@ describe('vpsContainerRouter — container-image-update: POST .../update', () =>
     const bodyStr = JSON.stringify(body);
     expect(bodyStr).not.toContain(FAKE_KEY);
     expect(bodyStr).not.toContain(FAKE_CF_TOKEN);
+  });
+});
+
+// ── AC15 (container-image-update): Testvertrag — keine erfundenen Registry-Methoden ──
+
+describe('vpsContainerRouter — AC15: Registry-Fake ist vertraglich an die echte VpsProviderRegistry-Oberfläche gebunden', () => {
+  it('Negativ-Nachweis: ein Double mit einer auf VpsProviderRegistry nicht existierenden Methode lässt die Vertragsprüfung fehlschlagen', () => {
+    // Phantasiename, KEIN real existierender Aufruf und bewusst nicht der historische
+    // Platzhalter-Name aus dem Kernfix (der darf im Repo nicht mehr auftauchen, AC15-Grep-Kriterium).
+    expect(() => makeContractBoundRegistryFake({
+      async lookupTunnelIdByHostname(_host) {
+        return 'tunnel-abc';
+      },
+    })).toThrow(/lookupTunnelIdByHostname/);
+  });
+
+  it('akzeptiert ein Double, das ausschließlich real existierende Registry-Methoden bereitstellt', () => {
+    expect(() => makeContractBoundRegistryFake({
+      async listTargetRecords() {
+        return [];
+      },
+      async getMachineIp(_provider, _serverId) {
+        return '1.2.3.4';
+      },
+    })).not.toThrow();
+  });
+
+  it('makeRegistryWithTargetRecord/makeMockRegistry (Update + Remove) laufen selbst durch die Vertragsprüfung', () => {
+    // Regression-Guard: falls einer der beiden gemeinsamen Registry-Doubles jemals wieder eine
+    // erfundene Methode bereitstellt, schlägt bereits der Aufbau fehl — nicht erst ein späterer Test.
+    expect(() => makeRegistryWithTargetRecord({ tunnelId: 'tunnel-abc', vpsId: 'test-vps' })).not.toThrow();
+    expect(() => makeMockRegistry({ machineIp: '1.2.3.4' })).not.toThrow();
   });
 });
