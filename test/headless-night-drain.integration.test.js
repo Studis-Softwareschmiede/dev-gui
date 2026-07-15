@@ -82,6 +82,25 @@ function makeFakeChild() {
 /** Schnelles, aber echtes Sleep — kleine ms-Werte, kein Fake-Timer nötig (Muster nightwatch-lock-contention.integration.test.js). */
 const realSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * Pollt, bis `predicate()` wahr ist — oder wirft nach `timeoutMs`.
+ *
+ * Ein festes `realSleep` reicht für das Abräumen des Drains nicht: die Kette
+ * close-Event → finally → Lock-Freigabe braucht auf langsamen CI-Runnern mehr
+ * als die lokal genügenden ~20ms (Flake auf main, 2026-07-15: derselbe Test
+ * grün um 05:17, rot um 05:29 und 14:22, ohne Änderung am Nacht-Drain-Code).
+ * Der Timeout hält die Aussagekraft: bleibt der Drain wirklich hängen, schlägt
+ * der Test weiterhin fehl — nur eben nicht mehr zufällig.
+ */
+async function waitFor(predicate, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await realSleep(5);
+  }
+  throw new Error(`waitFor: Bedingung nach ${timeoutMs}ms nicht erfüllt`);
+}
+
 /** Baut einen minimalen, mutierbaren Board-Fake: eine Story je Projekt, extern auf 'Done' schaltbar. */
 function makeMutableBoard(entries) {
   // entries: [{ projectPath, slug, story }]
@@ -535,7 +554,7 @@ describe('Headless-Nacht-Drain — Sanftes Fensterende mit laufendem Subprozess 
     story.status = 'Done';
     story.ready = false;
     child.emit('close', 0);
-    await realSleep(20);
+    await waitFor(() => scheduler.getStatus().activeDrainProjectPaths.length === 0);
     expect(scheduler.getStatus().activeDrainProjectPaths).toEqual([]);
   });
 });
