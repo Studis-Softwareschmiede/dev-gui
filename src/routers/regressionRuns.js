@@ -17,38 +17,45 @@
  * Dateizugriff): der Store validiert den Slug ohnehin selbst, arbeitet aber
  * nur auf seinem In-Memory-Cache.
  *
- * GET /api/projects/:slug/regression-runs/:runId/artifacts/*splat
+ * GET /api/projects/:slug/regression-runs/:runId/artifacts/{*splat}
  *   (regression-result-view AC2/Verträge) — dient EINE Datei aus der
- *   Artefakt-Ablage des Laufs aus (z.B. `index.html`/Assets des Playwright-
- *   HTML-Reports). NUR verfügbar wenn:
+ *   Lauf-EIGENEN Artefakt-Ablage aus (z.B. `index.html`/Assets des
+ *   Playwright-HTML-Reports, oder eine per CTRF-Attachment referenzierte
+ *   Datei unter `test-results/…`). NUR verfügbar wenn:
  *     (a) der Lauf existiert UND `status === "failed"` (grüne/nicht-existente
- *         Läufe → 404, kein Leak, kein toter Link — Edge-Case §Spec),
- *     (b) der Lauf `artifacts.htmlReport` referenziert (relativer Pfad,
- *         RegressionRunner schreibt aktuell nur diesen; `artifacts.traces`
- *         ist im Schema vorgesehen, wird vom Runner aber (noch) nicht befüllt
- *         — kein Nutzungsfall dafür in diesem Item, kein Gold-Plating).
- *   Pfad-Auflösung (Security, Path-Traversal/Symlink-Härtung):
- *     `artifacts.htmlReport` ist ein RELATIVER Pfad, referenziert gegen den
- *     Projekt-Klon (`WORKSPACE_DIR/<slug>` — derselbe Ort, unter dem der
- *     `RegressionRunner` `npx playwright test` ausführt, s. RegressionRunner.js
- *     Modul-Doku). Der Store selbst validiert diesen String NICHT strukturell
- *     (Vertrauensgrenze, s. Store-Doku) — dieser Endpunkt härtet daher SELBST:
- *       1. `:slug` → Projekt-Pfad über `slugResolver`/`pathValidator`
- *          (Muster `regressionRunRouter.js`, realpath-Containment gegen
- *          `WORKSPACE_DIR`).
- *       2. Artefakt-Basisordner = `resolve(projectPath, run.artifacts.htmlReport)`,
- *          RE-geprüft gegen `projectPath` (Präfix-Check mit Trailing-Slash) —
- *          ein manipulierter/traversierender `artifacts.htmlReport`-String
- *          (z.B. `../../etc`) kann so NICHT aus dem Projekt-Klon ausbrechen.
- *       3. Das Wildcard-Segment (`*splat`, Datei INNERHALB des HTML-Reports)
- *          wird ebenso aufgelöst + gegen den Artefakt-Basisordner (Schritt 2)
- *          re-geprüft (Präfix-Check) — verhindert `..`-Traversal im
- *          Client-gelieferten Rest-Pfad selbst.
- *       4. `realpath()` auf die finale Datei löst Symlinks auf; das Ergebnis
- *          wird EIN drittes Mal gegen den Artefakt-Basisordner geprüft (kein
- *          Symlink-Ausbruch aus der Ablage heraus).
- *     Jede der drei Stufen schlägt bei Verletzung mit 404 fehl (kein Leak
- *     über unterschiedliche Fehlercodes).
+ *         Läufe → 404, kein Leak, kein toter Link — Edge-Case §Spec,
+ *         regression-result-view AC2 — Scope einer Folge-Story, hier
+ *         unverändert übernommen),
+ *     (b) der Lauf `artifacts.htmlReport` referenziert — fehlt das Feld
+ *         (z.B. geprunt, s. regression-result-store.md AC3), gibt es NICHTS
+ *         auszuliefern.
+ *   Pfad-Auflösung (Security, Path-Traversal/Symlink-Härtung — S-327: die
+ *   Basis ist seit dieser Story die STORE-EIGENE Lauf-Ablage
+ *   `${CRED_STORE_DIR}/regression-runs/<slug>/<runId>/`, NICHT mehr der
+ *   Projekt-Klon (der wird vom nächsten Lauf überschrieben — s. Store-Doku
+ *   „wesentlicher Befund"). CTRF-Attachment-Pfade sind bereits relativ zu
+ *   GENAU dieser Ablage (Store relativiert sie beim Ablegen), ein
+ *   Rest-Pfad-Segment (`*splat`) adressiert eine solche Datei daher OHNE
+ *   Umrechnung direkt. Die dreistufige Härtung bleibt inhaltlich erhalten,
+ *   jetzt gegen die neue Basis:
+ *     1. Artefakt-Basisordner = `regressionResultStore.resolveArtifactDir(slug, runId)`
+ *        — validiert `slug`/`runId` selbst (Slug-Form-Check), `null` ohne
+ *        CRED_STORE_DIR → 404 (kein Dateizugriff).
+ *     2. OHNE Rest-Pfad (Default, Rückwärtskompatibilität zum bisherigen
+ *        `/artifacts/`-Aufruf) wird der HTML-Report-Index angefordert
+ *        (`<htmlReport>/index.html`) — der Report-Unterordner selbst wird
+ *        VOR der Verwendung gegen den Artefakt-Basisordner re-geprüft: ein
+ *        korrupter/manipulierter `artifacts.htmlReport`-Datensatz (Store
+ *        validiert diesen String NICHT strukturell, Vertrauensgrenze) kann
+ *        so NICHT aus der Ablage ausbrechen. MIT explizitem Rest-Pfad wird
+ *        direkt gegen den Artefakt-Basisordner aufgelöst + re-geprüft
+ *        (Präfix-Check) — verhindert `..`-Traversal im Client-gelieferten
+ *        Rest-Pfad selbst.
+ *     3. `realpath()` auf die finale Datei löst Symlinks auf; das Ergebnis
+ *        wird EIN weiteres Mal gegen den (realen) Artefakt-Basisordner
+ *        geprüft (kein Symlink-Ausbruch aus der Ablage heraus).
+ *     Jede Stufe schlägt bei Verletzung mit 404 fehl (kein Leak über
+ *     unterschiedliche Fehlercodes).
  *   → 200 <Datei-Bytes>  (Content-Type via `res.sendFile`, extension-basiert)
  *   → 404 { error }  Lauf nicht gefunden, Lauf nicht rot, kein `htmlReport`,
  *                     Pfad außerhalb der Ablage, Datei existiert nicht.
@@ -67,7 +74,6 @@
 import { Router } from 'express';
 import { resolve as resolvePath, sep } from 'node:path';
 import { realpath as realpathFn, stat as statFn } from 'node:fs/promises';
-import { validateProjectPath, ProjectPathError, resolveProjectSlug } from '../workspacePath.js';
 
 export const order = 94;
 
@@ -87,8 +93,6 @@ function _isInside(candidate, baseDir) {
 /**
  * @param {{
  *   regressionResultStore?: import('../RegressionResultStore.js').RegressionResultStore,
- *   pathValidator?: (path: string) => Promise<{ resolvedPath: string }>,
- *   slugResolver?: (slug: string|null) => string|null,
  *   realpath?: (p: string) => Promise<string>,
  *   stat?: (p: string) => Promise<import('node:fs').Stats>,
  * }} deps
@@ -96,8 +100,6 @@ function _isInside(candidate, baseDir) {
  */
 export function create({
   regressionResultStore,
-  pathValidator = validateProjectPath,
-  slugResolver = resolveProjectSlug,
   realpath = realpathFn,
   stat = statFn,
 } = {}) {
@@ -158,19 +160,33 @@ export function create({
   });
 
   /**
-   * GET /api/projects/:slug/regression-runs/:runId/artifacts/*splat
+   * GET /api/projects/:slug/regression-runs/:runId/artifacts/{*splat}
    * (regression-result-view AC2 — Debug-Artefakt-Zugriff, nur bei roten Läufen)
+   *
+   * `{*splat}` (statt `*splat`) — S-327 Fix eines vorbestehenden, von dieser
+   * Story unabhängigen Latent-Bugs: in Express 5/path-to-regexp v8 matcht ein
+   * REQUIRED-Wildcard `*splat` KEINE Anfrage ohne Rest-Segment (weder mit noch
+   * ohne trailing slash) — der einzige echte Aufrufer (`RegressionResultView.jsx`,
+   * `href=".../artifacts/"` ohne Rest-Pfad) lief dadurch seit Express 5 IMMER
+   * ins Leere (404 direkt von Express, vor diesem Handler). `{*splat}` ist der
+   * OPTIONALE Wildcard (matcht auch `.../artifacts/` mit leerem Rest-Segment)
+   * — notwendig, damit der in dieser Story neu gebaute Default-Pfad (Schritt 2
+   * unten) überhaupt erreichbar ist.
    *
    * Responses:
    *   200 <Datei-Bytes>  — Content-Type via `res.sendFile` (extension-basiert)
    *   404 { error }      — Lauf nicht gefunden / nicht rot / kein htmlReport /
    *                         Slug ungültig / Pfad außerhalb der Ablage / Datei fehlt
    */
-  router.get('/api/projects/:slug/regression-runs/:runId/artifacts/*splat', async (req, res) => {
+  router.get('/api/projects/:slug/regression-runs/:runId/artifacts/{*splat}', async (req, res) => {
     const { slug, runId } = req.params;
     const notFound = () => res.status(404).json({ error: 'Artefakt nicht gefunden.' });
 
-    if (!regressionResultStore || typeof regressionResultStore.get !== 'function') {
+    if (
+      !regressionResultStore ||
+      typeof regressionResultStore.get !== 'function' ||
+      typeof regressionResultStore.resolveArtifactDir !== 'function'
+    ) {
       return notFound();
     }
 
@@ -182,43 +198,50 @@ export function create({
       return notFound();
     }
 
-    // AC2: nur rote Läufe haben Artefakte; unbekannter/grüner Lauf → 404 (kein Leak).
+    // AC2 (regression-result-view, unverändert Scope dieser Story): nur rote
+    // Läufe liefern Artefakte über diesen Endpunkt; unbekannter/grüner/
+    // geprunter Lauf → 404 (kein Leak, kein toter Link).
     if (!run || run.status !== 'failed' || !run.artifacts?.htmlReport) {
       return notFound();
     }
 
-    // Schritt 1: Slug → validierter, absoluter Projekt-Pfad (Muster regressionRunRouter.js).
-    let projectPath;
-    try {
-      const slugPath = slugResolver(slug);
-      if (slugPath === null) return notFound();
-      ({ resolvedPath: projectPath } = await pathValidator(slugPath));
-    } catch (err) {
-      if (!(err instanceof ProjectPathError)) {
-        console.error('[regressionRuns] artifact Projekt-Pfad-Auflösung fehlgeschlagen:', err.message);
-      }
+    // Schritt 1 (S-327): Artefakt-Basisordner ist die STORE-EIGENE Lauf-Ablage
+    // (nicht mehr der Projekt-Klon) — der Store validiert slug/runId selbst.
+    const artifactBaseDir = regressionResultStore.resolveArtifactDir(slug, runId);
+    if (!artifactBaseDir) {
       return notFound();
     }
 
-    // Schritt 2: Artefakt-Basisordner (run.artifacts.htmlReport, relativ) auflösen
-    // + gegen den Projekt-Pfad re-prüfen — verhindert Ausbruch via manipuliertem
-    // Store-Datensatz (Vertrauensgrenze, s. Modul-Doku).
-    const artifactBaseDir = resolvePath(projectPath, run.artifacts.htmlReport);
-    if (!_isInside(artifactBaseDir, projectPath)) {
-      return notFound();
-    }
-
-    // Schritt 3: Wildcard-Rest-Pfad (Datei INNERHALB des HTML-Reports) auflösen
-    // + gegen den Artefakt-Basisordner re-prüfen (verhindert `..` im Client-Pfad).
     const splatSegments = Array.isArray(req.params.splat) ? req.params.splat : [req.params.splat];
-    const requestedRelative = splatSegments.filter(Boolean).join('/') || 'index.html';
-    const candidatePath = resolvePath(artifactBaseDir, requestedRelative);
-    if (!_isInside(candidatePath, artifactBaseDir)) {
-      return notFound();
+    const requestedRelative = splatSegments.filter(Boolean).join('/');
+
+    let candidatePath;
+    if (requestedRelative) {
+      // Expliziter Rest-Pfad (z.B. eine CTRF-Attachment-Datei unter
+      // test-results/…) — bereits relativ zur Artefakt-Ablage selbst
+      // (s. Store-Doku „Artefakte kopieren"), gegen diese re-geprüft
+      // (verhindert `..`-Traversal im Client-Pfad).
+      candidatePath = resolvePath(artifactBaseDir, requestedRelative);
+      if (!_isInside(candidatePath, artifactBaseDir)) {
+        return notFound();
+      }
+    } else {
+      // Schritt 2: kein Rest-Pfad → Default ist der HTML-Report-Index
+      // (Rückwärtskompatibilität zum bisherigen `/artifacts/`-Aufruf). Der
+      // Report-Unterordner wird VOR der Verwendung re-geprüft — ein
+      // korrupter/manipulierter `artifacts.htmlReport`-Datensatz (Store
+      // validiert diesen String nicht strukturell, Vertrauensgrenze) kann so
+      // NICHT aus der Ablage ausbrechen.
+      const htmlReportDir = resolvePath(artifactBaseDir, run.artifacts.htmlReport);
+      if (!_isInside(htmlReportDir, artifactBaseDir)) {
+        return notFound();
+      }
+      candidatePath = resolvePath(htmlReportDir, 'index.html');
     }
 
-    // Schritt 4: realpath() löst Symlinks auf — Ergebnis EIN drittes Mal gegen
-    // den Artefakt-Basisordner geprüft (kein Symlink-Ausbruch aus der Ablage).
+    // Schritt 3: realpath() löst Symlinks auf — Ergebnis EIN weiteres Mal
+    // gegen den (realen) Artefakt-Basisordner geprüft (kein Symlink-Ausbruch
+    // aus der Ablage).
     let realFilePath;
     try {
       realFilePath = await realpath(candidatePath);

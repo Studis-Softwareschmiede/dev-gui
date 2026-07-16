@@ -3,7 +3,7 @@ id: regression-run
 title: Regressionstest ausführen — deterministischer RegressionRunner (Ausführen-Dialog, Testobjekt, Frisch-Ausrollen)
 status: active
 area: fabrik-arbeiten
-version: 1
+version: 2
 spec_format: use-case-2.0
 ---
 
@@ -63,7 +63,7 @@ Ein Regressionstest-Lauf läuft **deterministisch, ohne Agent** — `npx playwri
 - **AC8** — **Selbsttest-Sonderfall:** ist das Testobjekt das Projekt, in dem der Runner läuft (dev-gui), wird Frisch-Ausrollen **automatisch übersprungen** (Selbst-Erkennung), der Dialog zeigt einen Selbsttest-Hinweis und der Lauf läuft gegen die laufende Instanz — **kein** recreate des eigenen Containers.
 
 ### Ausführung & Ergebnis-Übergabe
-- **AC9** — Der Lauf führt `npx playwright test` für den gewählten Scope (Bereich / Verbund / Gesamt) aus; ein „Gesamt"-Lauf erzeugt **einen** aggregierten Lauf-Datensatz (Suite=„Gesamt", A1). Nach Abschluss werden CTRF-Ergebnis + (bei Rot) Debug-Artefakte an den Ergebnis-Store übergeben ([[regression-result-store]]).
+- **AC9** — Der Lauf führt `npx playwright test` für den gewählten Scope (Bereich / Verbund / Gesamt) aus; ein „Gesamt"-Lauf erzeugt **einen** aggregierten Lauf-Datensatz (Suite=„Gesamt", A1). Nach Abschluss werden CTRF-Ergebnis + der Projekt-Klon-Pfad (für die Artefakt-Übernahme) an den Ergebnis-Store übergeben — OB + welche Debug-Artefakte dabei tatsächlich aufbewahrt werden, entscheidet ausschließlich [[regression-result-store]] (Rot/Grün-Default, Retention).
 
 ### Diagnose-Pflicht bei Frühausfall (S-326)
 - **AC10** — **Jeder** Lauf, der einen terminalen Zustand erreicht, übergibt **genau einen** Datensatz an den Ergebnis-Store ([[regression-result-store]] AC1/AC1b) — **auch dann, wenn er vor oder ohne Testausführung endet** und folglich **kein CTRF-Ergebnis existiert**. Das gilt ausnahmslos für **alle** Frühausgänge: fehlendes Regressions-Grundgerüst, Vorbedingungs-Fehler (`local` nicht erreichbar), Frisch-Ausrollen-Fehler, Readiness-Timeout, Start-/Spawn-Fehler des Test-Kommandos, Runaway-Timeout, fehlendes/unlesbares CTRF nach dem Lauf sowie ein **noch nicht unterstütztes Testobjekt** (AC11). Der Datensatz trägt `status: "precondition-error"|"error"`, `ctrf: null`, `counts: {0,0,0}` und ein **secret-freies `reason`** aus einer festen Meldungs-Menge (**nie** roher Prozess-/Fehler-Output). Der flüchtige In-Memory-Lauf-Status (`GET …/regression-run/:runId`) ist damit **nicht mehr die einzige** Fehlgrund-Quelle — „Ergebnisse ansehen" ([[regression-result-view]]) zeigt den Fehlgrund auch nach dem Schliessen des Dialogs. Ein Fehler beim Ablegen selbst bleibt best-effort (er darf den Lauf-Abschluss/die Lock-Freigabe nie verhindern).

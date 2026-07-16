@@ -1,7 +1,8 @@
 id: S-327
 parent: F-067
-title: 'Regression: Playwright-Visual-Artefakte erfassen + auch bei grünen Läufen aufbewahren (Screenshot/Video/Trace)'
-status: To Do
+title: 'Regression: Playwright-Visual-Artefakte erfassen + auch bei grünen Läufen
+  aufbewahren (Screenshot/Video/Trace)'
+status: Done
 priority: P2
 spec: docs/specs/regression-result-store.md
 implements:
@@ -15,61 +16,68 @@ size_est: M
 dispo_est: '5'
 dispo_act: null
 dispo_forecast: null
-estimate_note: 'M — playwright.config Capture-Optionen + Ergebnis-Store-Retention-Policy + Artefakt-Pfade/Prune. Owner-Wunsch 2026-07-08.'
+estimate_note: M — playwright.config Capture-Optionen + Ergebnis-Store-Retention-Policy
+  + Artefakt-Pfade/Prune. Owner-Wunsch 2026-07-08.
 confidence: medium
-branch: null
+branch: feat/S-327-regression-visual-artefakte
 pr: null
 blocked_reason: null
 created_at: '2026-07-08T21:00:00Z'
-updated_at: '2026-07-16T00:00:00Z'
-done_at: null
+updated_at: '2026-07-16T11:50:52Z'
+done_at: '2026-07-16T11:50:52Z'
 tok_est: null
 area: fabrik-arbeiten
-owner_entscheid_2026_07_16: |
-  BINDENDE Owner-Entscheide (Vorklärung 2026-07-16) — vor der Umsetzung eingeholt,
-  weil die Story sie bewusst offenliess ("sinnvoller Default + konfigurierbar",
-  "Plattenbedarf im Blick behalten"):
-
-  (1) Capture-Default in playwright.config.ts (je Env überschreibbar):
-        screenshot: 'on'                 — Bild je Test, AUCH bei grün (Kern des Owner-Wunsches)
-        trace:      'on'                 — Trace + DOM-Snapshots, AUCH bei grün
-        video:      'retain-on-failure'  — nur bei Rot (grösstes Artefakt, Encoding-Kosten)
-      Env-Overrides: REGRESSION_SCREENSHOT / REGRESSION_VIDEO / REGRESSION_TRACE.
-      chromium-only bleibt unverändert (Image installiert nur chromium).
-
-  (2) Zwei GETRENNTE Retentions (Plattenbremse):
-        Lauf-Retention      50 (unverändert, Datensätze/CTRF-JSON — klein)
-        Artefakt-Retention  10 (NEU, REGRESSION_ARTIFACT_RETENTION — Bilder/Trace/Video)
-      Lauf 1–10 -> CTRF + Artefakte; Lauf 11–50 -> nur CTRF (Artefakte gepruned,
-      artifacts-Referenz entfällt); Lauf >50 -> ganz weg. Deckel: Artefakt-Retention
-      <= Lauf-Retention. Erwarteter Fussabdruck ~50–200 MB je Projekt.
-
-  (3) Artefakte bei grün: Default AN, abschaltbar via REGRESSION_KEEP_ARTIFACTS_ON_PASS=false.
-
-  BEFUND (Vorklärung, für die Umsetzung wesentlich): Artefakte werden heute NICHT
-  aufbewahrt, sondern nur REFERENZIERT — RegressionRunner#persistResult legt bei Rot
-  lediglich den relativen Pfad 'playwright-report' ab (HTML_REPORT_PATH), der in den
-  PROJEKT-KLON zeigt. Dort überschreibt sie der nächste Lauf. Eine blosse Pfad-Referenz
-  ist deshalb nach dem Folgelauf falsch (alle Läufe zeigten auf die Bilder des jüngsten)
-  und für einen Auto-Prune gar nicht greifbar. Der Store muss die Artefakte beim Ablegen
-  in seine EIGENE Lauf-Ablage KOPIEREN (${CRED_STORE_DIR}/regression-runs/<projekt>/<runId>/),
-  unter Beibehaltung der Klon-Ordnernamen (playwright-report/, test-results/) — dann ist ein
-  CTRF-Attachment-Pfad ohne Umrechnung der Rest-Pfad des Artefakt-Endpunkts (S-328).
-  Das CTRF-JSON listet je Testfall bereits attachments:[{name,contentType,path}] (Reporter
-  playwright-ctrf-json-reporter setzt das bedingungslos) — ABER mit ABSOLUTEN Pfaden:
-  beim Ablegen auf relativ umschreiben (kein Server-Pfad-Leak an die Ansicht, Security-Floor).
-
-  SPEC-KONFLIKT (zwingend mitziehen, sonst blockt das Drift-Gate zu Recht):
-  docs/specs/regression-result-store.md schreibt den heutigen Zustand als bindend fest —
-  Titel/Zweck, Kontext-Abschnitt ("Debug-Artefakte nur bei Rot"), Main Success Scenario
-  Schritt 1+3, AC3, AC4, Vertrag "artifacts nur bei failed", NFR "Artefakte nur bei Rot".
-  Alles konsistent nachziehen (kein AC-Rest, der noch "nur bei Rot" behauptet), version: 1 -> 2.
-  UNVERÄNDERT bindend bleibt: pfad-confinierter, access-geschützter Artefakt-Zugriff (kein
-  Traversal/Symlink-Ausbruch), 0600, atomar tmp+rename, In-Memory-Degradation ohne
-  CRED_STORE_DIR, keine Secrets, Ablage NIE im Projekt-Git. Nur die Rot/Grün-Bedingung fällt.
-
-  ABGRENZUNG zu S-328: Der Artefakt-Endpunkt (src/routers/regressionRuns.js) muss in DIESER
-  Story auf die neue Store-Ablage umgestellt werden (sonst zeigt er ins Leere) — der
-  Rot-Only-Check dort (regression-result-view AC2) bleibt aber S-328 überlassen, samt der
-  zugehörigen Spec-Änderung an regression-result-view.md.
-owner_wunsch_2026_07_08: 'Owner vermisst die visuellen Playwright-Ergebnisse (Screenshots der Testläufe). Ist-Zustand: playwright.config.ts erfasst nur trace:on-first-retry (kein screenshot, kein video); + der Ergebnis-Store (regression-result-store) bewahrt Debug-Artefakte BEWUSST nur bei ROTEN Läufen auf (grüne behalten nur CTRF-JSON+Metadaten). Deshalb erscheinen bei grünen Läufen keine Bilder. Ziel dieser Story (Erfassen+Aufbewahren): (1) playwright.config.ts Capture aktivieren — screenshot (mind. only-on-failure, konfigurierbar bis on), video (retain-on-failure oder on), trace:on (Trace mit Schritt-Screenshots + DOM-Snapshots). Abwägen: on-Vollcapture kostet Platz/Zeit — sinnvoller Default + konfigurierbar. (2) regression-result-store: Retention-Policy erweitern, sodass auch GRÜNE Läufe (mind. optional/konfigurierbar) Trace/Screenshots aufbewahren, nicht nur rote — heutige "nur bei Rot"-Regel ist die Ursache. Auto-Prune (Retention 50) auf die schwereren Artefakte anwenden, Platz im Blick behalten. Cross-Ref: playwright.config aktuell chromium-only (S-*, Image installiert nur chromium). Anzeige/Galerie ist die Schwester-Story S-328.'
+owner_entscheid_2026_07_16: "BINDENDE Owner-Entscheide (Vorklärung 2026-07-16) — vor\
+  \ der Umsetzung eingeholt,\nweil die Story sie bewusst offenliess (\"sinnvoller\
+  \ Default + konfigurierbar\",\n\"Plattenbedarf im Blick behalten\"):\n\n(1) Capture-Default\
+  \ in playwright.config.ts (je Env überschreibbar):\n      screenshot: 'on'     \
+  \            — Bild je Test, AUCH bei grün (Kern des Owner-Wunsches)\n      trace:\
+  \      'on'                 — Trace + DOM-Snapshots, AUCH bei grün\n      video:\
+  \      'retain-on-failure'  — nur bei Rot (grösstes Artefakt, Encoding-Kosten)\n\
+  \    Env-Overrides: REGRESSION_SCREENSHOT / REGRESSION_VIDEO / REGRESSION_TRACE.\n\
+  \    chromium-only bleibt unverändert (Image installiert nur chromium).\n\n(2) Zwei\
+  \ GETRENNTE Retentions (Plattenbremse):\n      Lauf-Retention      50 (unverändert,\
+  \ Datensätze/CTRF-JSON — klein)\n      Artefakt-Retention  10 (NEU, REGRESSION_ARTIFACT_RETENTION\
+  \ — Bilder/Trace/Video)\n    Lauf 1–10 -> CTRF + Artefakte; Lauf 11–50 -> nur CTRF\
+  \ (Artefakte gepruned,\n    artifacts-Referenz entfällt); Lauf >50 -> ganz weg.\
+  \ Deckel: Artefakt-Retention\n    <= Lauf-Retention. Erwarteter Fussabdruck ~50–200\
+  \ MB je Projekt.\n\n(3) Artefakte bei grün: Default AN, abschaltbar via REGRESSION_KEEP_ARTIFACTS_ON_PASS=false.\n\
+  \nBEFUND (Vorklärung, für die Umsetzung wesentlich): Artefakte werden heute NICHT\n\
+  aufbewahrt, sondern nur REFERENZIERT — RegressionRunner#persistResult legt bei Rot\n\
+  lediglich den relativen Pfad 'playwright-report' ab (HTML_REPORT_PATH), der in den\n\
+  PROJEKT-KLON zeigt. Dort überschreibt sie der nächste Lauf. Eine blosse Pfad-Referenz\n\
+  ist deshalb nach dem Folgelauf falsch (alle Läufe zeigten auf die Bilder des jüngsten)\n\
+  und für einen Auto-Prune gar nicht greifbar. Der Store muss die Artefakte beim Ablegen\n\
+  in seine EIGENE Lauf-Ablage KOPIEREN (${CRED_STORE_DIR}/regression-runs/<projekt>/<runId>/),\n\
+  unter Beibehaltung der Klon-Ordnernamen (playwright-report/, test-results/) — dann\
+  \ ist ein\nCTRF-Attachment-Pfad ohne Umrechnung der Rest-Pfad des Artefakt-Endpunkts\
+  \ (S-328).\nDas CTRF-JSON listet je Testfall bereits attachments:[{name,contentType,path}]\
+  \ (Reporter\nplaywright-ctrf-json-reporter setzt das bedingungslos) — ABER mit ABSOLUTEN\
+  \ Pfaden:\nbeim Ablegen auf relativ umschreiben (kein Server-Pfad-Leak an die Ansicht,\
+  \ Security-Floor).\n\nSPEC-KONFLIKT (zwingend mitziehen, sonst blockt das Drift-Gate\
+  \ zu Recht):\ndocs/specs/regression-result-store.md schreibt den heutigen Zustand\
+  \ als bindend fest —\nTitel/Zweck, Kontext-Abschnitt (\"Debug-Artefakte nur bei\
+  \ Rot\"), Main Success Scenario\nSchritt 1+3, AC3, AC4, Vertrag \"artifacts nur\
+  \ bei failed\", NFR \"Artefakte nur bei Rot\".\nAlles konsistent nachziehen (kein\
+  \ AC-Rest, der noch \"nur bei Rot\" behauptet), version: 1 -> 2.\nUNVERÄNDERT bindend\
+  \ bleibt: pfad-confinierter, access-geschützter Artefakt-Zugriff (kein\nTraversal/Symlink-Ausbruch),\
+  \ 0600, atomar tmp+rename, In-Memory-Degradation ohne\nCRED_STORE_DIR, keine Secrets,\
+  \ Ablage NIE im Projekt-Git. Nur die Rot/Grün-Bedingung fällt.\n\nABGRENZUNG zu\
+  \ S-328: Der Artefakt-Endpunkt (src/routers/regressionRuns.js) muss in DIESER\n\
+  Story auf die neue Store-Ablage umgestellt werden (sonst zeigt er ins Leere) — der\n\
+  Rot-Only-Check dort (regression-result-view AC2) bleibt aber S-328 überlassen, samt\
+  \ der\nzugehörigen Spec-Änderung an regression-result-view.md.\n"
+owner_wunsch_2026_07_08: 'Owner vermisst die visuellen Playwright-Ergebnisse (Screenshots
+  der Testläufe). Ist-Zustand: playwright.config.ts erfasst nur trace:on-first-retry
+  (kein screenshot, kein video); + der Ergebnis-Store (regression-result-store) bewahrt
+  Debug-Artefakte BEWUSST nur bei ROTEN Läufen auf (grüne behalten nur CTRF-JSON+Metadaten).
+  Deshalb erscheinen bei grünen Läufen keine Bilder. Ziel dieser Story (Erfassen+Aufbewahren):
+  (1) playwright.config.ts Capture aktivieren — screenshot (mind. only-on-failure,
+  konfigurierbar bis on), video (retain-on-failure oder on), trace:on (Trace mit Schritt-Screenshots
+  + DOM-Snapshots). Abwägen: on-Vollcapture kostet Platz/Zeit — sinnvoller Default
+  + konfigurierbar. (2) regression-result-store: Retention-Policy erweitern, sodass
+  auch GRÜNE Läufe (mind. optional/konfigurierbar) Trace/Screenshots aufbewahren,
+  nicht nur rote — heutige "nur bei Rot"-Regel ist die Ursache. Auto-Prune (Retention
+  50) auf die schwereren Artefakte anwenden, Platz im Blick behalten. Cross-Ref: playwright.config
+  aktuell chromium-only (S-*, Image installiert nur chromium). Anzeige/Galerie ist
+  die Schwester-Story S-328.'

@@ -1,4 +1,16 @@
 import { defineConfig, devices } from '@playwright/test';
+import type { ScreenshotMode, TraceMode, VideoMode } from '@playwright/test';
+
+/**
+ * Liest einen Env-Override gegen eine erlaubte Werteliste — ein Tippfehler in
+ * REGRESSION_SCREENSHOT/REGRESSION_TRACE/REGRESSION_VIDEO fällt auf den
+ * Default zurück statt Playwright mit einem unklaren Config-Fehler abstürzen
+ * zu lassen (docs/specs/regression-result-store.md, S-327).
+ */
+function envMode<T extends string>(name: string, allowed: readonly T[], fallback: T): T {
+  const raw = process.env[name];
+  return raw !== undefined && (allowed as readonly string[]).includes(raw) ? (raw as T) : fallback;
+}
 
 /**
  * Playwright configuration for Fabrik regression tests.
@@ -44,8 +56,28 @@ export default defineConfig({
      */
     baseURL: process.env.REGRESSION_BASE_URL,
 
-    /* Collect trace when retrying the failed test. See https://playwright.dev/docs/trace-viewer */
-    trace: 'on-first-retry',
+    /*
+     * Debug-Artefakt-Capture (docs/specs/regression-result-store.md, S-327,
+     * Owner-Entscheidung 2026-07-16): Screenshot + Trace je Test AUCH bei
+     * grün (Kern des Owner-Wunsches — bisher gab es keine sichtbaren
+     * Ergebnisse bei grünen Läufen); Video NUR bei Rot (grösstes Artefakt,
+     * Encoding-Kosten). Je Env überschreibbar.
+     */
+    screenshot: envMode<ScreenshotMode>(
+      'REGRESSION_SCREENSHOT',
+      ['off', 'on', 'only-on-failure', 'on-first-failure'],
+      'on',
+    ),
+    trace: envMode<TraceMode>(
+      'REGRESSION_TRACE',
+      ['off', 'on', 'retain-on-failure', 'on-first-retry', 'on-all-retries', 'retain-on-first-failure', 'retain-on-failure-and-retries'],
+      'on',
+    ),
+    video: envMode<VideoMode>(
+      'REGRESSION_VIDEO',
+      ['off', 'on', 'retain-on-failure', 'on-first-retry', 'on-all-retries', 'retain-on-first-failure', 'retain-on-failure-and-retries'],
+      'retain-on-failure',
+    ),
   },
 
   /* Configure projects for major browsers.

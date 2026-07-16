@@ -16,17 +16,36 @@
  *          `MAX_RUNS_PER_PROJECT` (50) Läufe behalten — beim `record()`
  *          fallen ältere automatisch heraus (Auto-Prune, idempotent); die
  *          Grenze ist PRO Projekt (andere Projekte bleiben unberührt).
- *   AC3 — Debug-Artefakte (`artifacts`) werden NUR bei `status:"failed"`
- *          gehalten; bei `status:"passed"` fehlt das Feld vollständig, auch
- *          wenn im Input mitgegeben. Wird ein Lauf geprunt, wird seine Datei
- *          mitentfernt (keine verwaisten Dateien).
+ *   AC3 — Debug-Artefakte kopiert, Grün+Rot, eigene Artefakt-Retention
+ *          (S-327): beim `record()` mit `artifactsSourceDir` kopiert der
+ *          Store `playwright-report/`+`test-results/` in seine eigene
+ *          Lauf-Ablage — bei `status:"failed"` IMMER, bei `status:"passed"`
+ *          per Default ebenfalls (abschaltbar via
+ *          `REGRESSION_KEEP_ARTIFACTS_ON_PASS=false`). CTRF-Attachment-Pfade
+ *          (absolut) werden relativ zur Lauf-Artefakt-Ablage umgeschrieben;
+ *          Attachments außerhalb `artifactsSourceDir` werden nicht
+ *          durchgereicht. Eine ZWEITE, engere Artefakt-Retention
+ *          (`REGRESSION_ARTIFACT_RETENTION`, Default 10, gedeckelt auf
+ *          `MAX_RUNS_PER_PROJECT`) entfernt bei jedem `record()` Artefakt-
+ *          Ordner + `artifacts`-Referenz jenseits dieses Fensters (Datensatz
+ *          bleibt). Wird ein Lauf komplett geprunt (Lauf-Retention), wird
+ *          auch sein Artefakt-Ordner entfernt (keine verwaisten Ordner).
  *   AC4 — `list(projekt)` liefert absteigend nach `startedAt` (jüngster
  *          zuerst), OHNE Dateizugriff bei ungültigem Slug (leere Liste).
  *          `get(projekt, runId)` liefert den Einzel-Lauf inkl. `ctrf`
- *          (Testfall-Details) + `artifacts`-Referenz bei roten Läufen, oder
- *          `null` wenn nicht gefunden/Slug ungültig.
- *   AC5 — Keine Secrets/Tokens in Datensatz/Datei; `ctrf` wird unverändert
- *          (deep) übernommen.
+ *          (Testfall-Details) + `artifacts`-Referenz (sofern vorhanden), oder
+ *          `null` wenn nicht gefunden/Slug ungültig. `resolveArtifactDir()`
+ *          liefert den absoluten Pfad der Lauf-eigenen Artefakt-Ablage für
+ *          den Artefakt-Endpunkt (`regressionRuns.js`), `null` bei
+ *          ungültigem Slug/`runId` oder ohne CRED_STORE_DIR.
+ *   AC5 — Keine Secrets/Tokens in Datensatz/Datei; `ctrf` wird inhaltlich
+ *          unverändert übernommen — NUR Attachment-Pfade werden relativiert
+ *          (keine absoluten Server-Pfade im persistierten Datensatz). HART
+ *          (Review-Fix Iteration 2, Critical): die Relativierung läuft IMMER,
+ *          sobald `artifactsSourceDir` vorliegt — UNABHÄNGIG von Status und
+ *          `REGRESSION_KEEP_ARTIFACTS_ON_PASS`; auch wenn KEINE Artefakte
+ *          kopiert werden (grüner Lauf + Flag aus), bleibt `ctrf` frei von
+ *          absoluten Server-Pfaden (sonst Leak über GET .../:runId).
  *   AC1b (S-326) — Frühausfall-Datensatz: bei `status:"precondition-error"|
  *          "error"` wird `ctrf:null` (KEIN synthetisches Ersatz-CTRF, auch
  *          wenn der Aufrufer fälschlich eines mitgibt), `counts:{0,0,0}` und
@@ -36,8 +55,10 @@
  *          Frühausfall-Datensätze nach einem Neustart korrekt zurück.
  *
  * Edge-Cases (spec):
- *   - Artefakte fehlen bei einem roten Lauf → Datensatz ohne `artifacts`,
+ *   - Kein `artifactsSourceDir` übergeben → Datensatz ohne `artifacts`,
  *     kein Fehler.
+ *   - Quellordner (`playwright-report`/`test-results`) fehlt im Klon →
+ *     der jeweilige `artifacts`-Schlüssel fehlt, kein Fehler.
  *   - Gleichzeitiges Ablegen zweier Läufe verschiedener Projekte → getrennte
  *     Projekt-Buckets, keine Kollision.
  *   - Korruptes/teilweises Datei-Set beim Laden → betroffener Datensatz wird
@@ -48,33 +69,42 @@
  * Strategy: echtes fs gegen ein frisches tmp-CRED_STORE_DIR je Test; je Test
  * eine frische RegressionResultStore-Instanz (der In-Memory-Cache ist
  * instanz-lokal, ein Neustart wird durch eine zweite Instanz simuliert).
+ * Für AC3 zusätzlich ein echtes tmp-"Projekt-Klon"-Verzeichnis
+ * (`makeSourceDir()`) mit echten `playwright-report/`/`test-results/`-Dateien
+ * (Muster AreaWriter.test.js — kein Mock-fs für die Kopier-Logik).
  */
 
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { mkdir, rm, readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, readFile, readdir, writeFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import {
   RegressionResultStore,
   resolveRegressionRunsDir,
   MAX_RUNS_PER_PROJECT,
+  DEFAULT_ARTIFACT_RETENTION,
+  HTML_REPORT_DIRNAME,
+  TEST_RESULTS_DIRNAME,
 } from '../src/RegressionResultStore.js';
 
 let storeDir;
 let prevEnv;
+let sourceDirs;
 
 beforeEach(async () => {
   prevEnv = process.env.CRED_STORE_DIR;
   storeDir = join(tmpdir(), 'regression-runs-test-' + randomBytes(6).toString('hex'));
   await mkdir(storeDir, { recursive: true });
   process.env.CRED_STORE_DIR = storeDir;
+  sourceDirs = [];
 });
 
 afterEach(async () => {
   if (prevEnv === undefined) delete process.env.CRED_STORE_DIR;
   else process.env.CRED_STORE_DIR = prevEnv;
   await rm(storeDir, { recursive: true, force: true }).catch(() => {});
+  await Promise.all(sourceDirs.map((d) => rm(d, { recursive: true, force: true }).catch(() => {})));
 });
 
 function base(overrides = {}) {
@@ -89,6 +119,22 @@ function base(overrides = {}) {
     ctrf: { results: { tool: { name: 'playwright' }, tests: [{ name: 'a', status: 'passed' }] } },
     ...overrides,
   };
+}
+
+/**
+ * Baut ein echtes tmp-"Projekt-Klon"-Verzeichnis mit `playwright-report/` +
+ * `test-results/` (Muster der echten Playwright-Ausgabe) — für die
+ * Kopier-Tests (AC3). Wird über `sourceDirs` am Testende aufgeräumt.
+ *
+ * @returns {Promise<string>}
+ */
+async function makeSourceDir() {
+  const dir = await mkdtemp(join(tmpdir(), 'regression-source-test-'));
+  await mkdir(join(dir, 'playwright-report'), { recursive: true });
+  await writeFile(join(dir, 'playwright-report', 'index.html'), '<html>report</html>', 'utf8');
+  await mkdir(join(dir, 'test-results', 'checkout-chromium'), { recursive: true });
+  await writeFile(join(dir, 'test-results', 'checkout-chromium', 'test-failed-1.png'), 'png-bytes', 'utf8');
+  return dir;
 }
 
 describe('RegressionResultStore.record() + list()/get() (AC1)', () => {
@@ -185,52 +231,226 @@ describe('RegressionResultStore.record() + list()/get() (AC1)', () => {
   });
 });
 
-describe('RegressionResultStore — Debug-Artefakte nur bei Rot (AC3)', () => {
-  it('status:"failed" hält artifacts; status:"passed" hält KEINE artifacts (auch wenn mitgegeben)', async () => {
+describe('RegressionResultStore — Artefakte kopieren, Grün+Rot (AC3, S-327)', () => {
+  it('status:"failed" kopiert playwright-report/+test-results/ aus artifactsSourceDir + relativiert CTRF-Attachment-Pfade', async () => {
+    const sourceDir = await makeSourceDir();
+    sourceDirs.push(sourceDir);
+    const attachmentAbs = join(sourceDir, 'test-results', 'checkout-chromium', 'test-failed-1.png');
+    const outsideAbs = join(tmpdir(), 'regression-outside-leak.png');
+    const ctrf = {
+      results: {
+        tests: [
+          {
+            name: 'a',
+            status: 'failed',
+            attachments: [
+              { name: 'screenshot', contentType: 'image/png', path: attachmentAbs },
+              { name: 'leak', contentType: 'image/png', path: outsideAbs },
+            ],
+          },
+        ],
+      },
+    };
     const store = new RegressionResultStore();
-    const redRun = await store.record(
-      base({
-        status: 'failed',
-        counts: { passed: 8, failed: 2, total: 10 },
-        artifacts: { htmlReport: 'report.html', traces: 'traces.zip' },
-      }),
+    const run = await store.record(
+      base({ status: 'failed', counts: { passed: 8, failed: 2, total: 10 }, ctrf, artifactsSourceDir: sourceDir }),
     );
-    expect(redRun.artifacts).toEqual({ htmlReport: 'report.html', traces: 'traces.zip' });
 
-    const greenRun = await store.record(
-      base({
-        status: 'passed',
-        artifacts: { htmlReport: 'should-not-appear.html' },
-      }),
+    expect(run.artifacts).toEqual({ htmlReport: HTML_REPORT_DIRNAME, testResults: TEST_RESULTS_DIRNAME });
+    // Nur das Attachment INNERHALB des Klons wird durchgereicht, relativ zur Lauf-Artefakt-Ablage.
+    expect(run.ctrf.results.tests[0].attachments).toEqual([
+      { name: 'screenshot', contentType: 'image/png', path: join('test-results', 'checkout-chromium', 'test-failed-1.png') },
+    ]);
+    // Security-Floor: kein absoluter Server-Pfad im persistierten Datensatz.
+    expect(JSON.stringify(run.ctrf)).not.toContain(sourceDir);
+
+    const artifactDir = join(storeDir, 'regression-runs', 'proj-a', run.runId);
+    expect(await readFile(join(artifactDir, 'playwright-report', 'index.html'), 'utf8')).toContain('report');
+    expect(await readFile(join(artifactDir, 'test-results', 'checkout-chromium', 'test-failed-1.png'), 'utf8')).toBe(
+      'png-bytes',
     );
-    expect(greenRun.artifacts).toBeUndefined();
-
-    const [fetchedGreen] = (await store.list('proj-a')).filter((r) => r.runId === greenRun.runId);
-    expect(fetchedGreen.artifacts).toBeUndefined();
   });
 
-  it('Artefakte fehlen bei einem roten Lauf → Datensatz ohne artifacts, kein Fehler (Edge-Case)', async () => {
+  it('status:"passed" kopiert Artefakte per Default ebenfalls (AC3 NEU, Owner-Entscheidung 2026-07-16)', async () => {
+    const sourceDir = await makeSourceDir();
+    sourceDirs.push(sourceDir);
     const store = new RegressionResultStore();
-    const run = await store.record(base({ status: 'failed', artifacts: undefined }));
+    const run = await store.record(base({ status: 'passed', artifactsSourceDir: sourceDir }));
+    expect(run.artifacts).toEqual({ htmlReport: HTML_REPORT_DIRNAME, testResults: TEST_RESULTS_DIRNAME });
+
+    const [fetched] = (await store.list('proj-a')).filter((r) => r.runId === run.runId);
+    expect(fetched.artifacts).toEqual({ htmlReport: HTML_REPORT_DIRNAME, testResults: TEST_RESULTS_DIRNAME });
+  });
+
+  it('REGRESSION_KEEP_ARTIFACTS_ON_PASS=false → grüner Lauf hält KEINE Artefakte, roter weiterhin', async () => {
+    process.env.REGRESSION_KEEP_ARTIFACTS_ON_PASS = 'false';
+    try {
+      const sourceDir = await makeSourceDir();
+      sourceDirs.push(sourceDir);
+      const store = new RegressionResultStore();
+      const green = await store.record(base({ status: 'passed', artifactsSourceDir: sourceDir }));
+      expect(green.artifacts).toBeUndefined();
+      const red = await store.record(base({ status: 'failed', suite: 'red', artifactsSourceDir: sourceDir }));
+      expect(red.artifacts).toEqual({ htmlReport: HTML_REPORT_DIRNAME, testResults: TEST_RESULTS_DIRNAME });
+    } finally {
+      delete process.env.REGRESSION_KEEP_ARTIFACTS_ON_PASS;
+    }
+  });
+
+  it('REGRESSION_KEEP_ARTIFACTS_ON_PASS=false + grüner Lauf → ctrf-Attachment-Pfade trotzdem relativiert (Security-Floor AC5, Review-Fix Iteration 2)', async () => {
+    process.env.REGRESSION_KEEP_ARTIFACTS_ON_PASS = 'false';
+    try {
+      const sourceDir = await makeSourceDir();
+      sourceDirs.push(sourceDir);
+      const attachmentAbs = join(sourceDir, 'test-results', 'checkout-chromium', 'test-failed-1.png');
+      const ctrf = {
+        results: {
+          tests: [
+            { name: 'a', status: 'passed', attachments: [{ name: 'shot', contentType: 'image/png', path: attachmentAbs }] },
+          ],
+        },
+      };
+      const store = new RegressionResultStore();
+      const green = await store.record(base({ status: 'passed', ctrf, artifactsSourceDir: sourceDir }));
+
+      // Keine Artefakte kopiert (Flag aus) — aber die Pfad-Relativierung lief
+      // trotzdem: KEIN führendes "/", KEIN absoluter Klon-Pfad im Ergebnis.
+      expect(green.artifacts).toBeUndefined();
+      const path = green.ctrf.results.tests[0].attachments[0].path;
+      expect(path).toBe(join('test-results', 'checkout-chromium', 'test-failed-1.png'));
+      expect(path.startsWith('/')).toBe(false);
+      expect(path).not.toContain(sourceDir);
+      expect(JSON.stringify(green.ctrf)).not.toContain(sourceDir);
+
+      // Auch über get()/list() (Read-API) bleibt der Pfad relativ (kein Leak).
+      const fetched = await store.get('proj-a', green.runId);
+      expect(fetched.ctrf.results.tests[0].attachments[0].path).toBe(path);
+    } finally {
+      delete process.env.REGRESSION_KEEP_ARTIFACTS_ON_PASS;
+    }
+  });
+
+  it('ohne artifactsSourceDir → Datensatz ohne artifacts, kein Fehler (Edge-Case)', async () => {
+    const store = new RegressionResultStore();
+    const run = await store.record(base({ status: 'failed' }));
     expect(run.artifacts).toBeUndefined();
     expect(await store.get('proj-a', run.runId)).not.toBeNull();
   });
 
-  it('geprunte Läufe entfernen ihre Datei mit (keine verwaisten Artefakte/Dateien)', async () => {
+  it('fehlt nur playwright-report/ im Klon → artifacts hat nur testResults, kein Fehler', async () => {
+    const sourceDir = await mkdtemp(join(tmpdir(), 'regression-source-partial-'));
+    sourceDirs.push(sourceDir);
+    await mkdir(join(sourceDir, 'test-results'), { recursive: true });
+    await writeFile(join(sourceDir, 'test-results', 'results.json'), '{}', 'utf8');
     const store = new RegressionResultStore();
-    const first = await store.record(base({ status: 'failed', artifacts: { htmlReport: 'r0.html' } }));
+    const run = await store.record(base({ status: 'failed', artifactsSourceDir: sourceDir }));
+    expect(run.artifacts).toEqual({ testResults: TEST_RESULTS_DIRNAME });
+  });
+
+  it('fehlen BEIDE Ordner im Klon → kein artifacts-Feld, kein Fehler', async () => {
+    const sourceDir = await mkdtemp(join(tmpdir(), 'regression-source-empty-'));
+    sourceDirs.push(sourceDir);
+    const store = new RegressionResultStore();
+    const run = await store.record(base({ status: 'failed', artifactsSourceDir: sourceDir }));
+    expect(run.artifacts).toBeUndefined();
+  });
+
+  it('geprunte Läufe (Lauf-Retention) entfernen Datensatz UND Artefakt-Ordner (keine verwaisten Ordner)', async () => {
+    const sourceDir = await makeSourceDir();
+    sourceDirs.push(sourceDir);
+    const store = new RegressionResultStore();
+    const first = await store.record(base({ status: 'failed', artifactsSourceDir: sourceDir }));
 
     const projectDir = join(storeDir, 'regression-runs', 'proj-a');
     const firstFile = join(projectDir, `${first.runId}.json`);
+    const firstArtifactIndex = join(projectDir, first.runId, 'playwright-report', 'index.html');
     expect(await readFile(firstFile, 'utf8')).toBeTruthy();
+    expect(await readFile(firstArtifactIndex, 'utf8')).toBeTruthy();
 
     for (let i = 0; i < MAX_RUNS_PER_PROJECT; i++) {
       await store.record(base({ suite: `s${i}` }));
     }
 
-    // Der erste (älteste) Lauf ist jetzt geprunt — seine Datei muss weg sein.
+    // Der erste (älteste) Lauf ist jetzt geprunt — Datei UND Artefakt-Ordner müssen weg sein.
     await expect(readFile(firstFile, 'utf8')).rejects.toThrow();
+    await expect(readFile(firstArtifactIndex, 'utf8')).rejects.toThrow();
     expect(await store.get('proj-a', first.runId)).toBeNull();
+  });
+});
+
+describe('RegressionResultStore — Artefakt-Retention (AC3, NEU, Owner-Entscheidung 2026-07-16)', () => {
+  it('hält Artefakte nur für die DEFAULT_ARTIFACT_RETENTION jüngsten Läufe — ältere behalten den Datensatz, verlieren aber artifacts + Ordner', async () => {
+    const sourceDir = await makeSourceDir();
+    sourceDirs.push(sourceDir);
+    const store = new RegressionResultStore();
+    const projectDir = join(storeDir, 'regression-runs', 'proj-a');
+
+    const first = await store.record(base({ status: 'failed', artifactsSourceDir: sourceDir }));
+    for (let i = 0; i < DEFAULT_ARTIFACT_RETENTION; i++) {
+      await store.record(base({ suite: `s${i}`, status: 'failed', artifactsSourceDir: sourceDir }));
+    }
+
+    const found = await store.get('proj-a', first.runId);
+    expect(found).not.toBeNull(); // Datensatz bleibt (Lauf-Retention 50 nicht erreicht).
+    expect(found.artifacts).toBeUndefined(); // Artefakte gepruned (Artefakt-Retention 10 überschritten).
+    await expect(
+      readFile(join(projectDir, first.runId, 'playwright-report', 'index.html'), 'utf8'),
+    ).rejects.toThrow();
+    expect(await readFile(join(projectDir, `${first.runId}.json`), 'utf8')).toBeTruthy();
+  });
+
+  it('REGRESSION_ARTIFACT_RETENTION überschreibt den Default', async () => {
+    process.env.REGRESSION_ARTIFACT_RETENTION = '2';
+    try {
+      const sourceDir = await makeSourceDir();
+      sourceDirs.push(sourceDir);
+      const store = new RegressionResultStore();
+      const first = await store.record(base({ status: 'failed', artifactsSourceDir: sourceDir }));
+      await store.record(base({ suite: 's1', status: 'failed', artifactsSourceDir: sourceDir }));
+      await store.record(base({ suite: 's2', status: 'failed', artifactsSourceDir: sourceDir }));
+
+      const found = await store.get('proj-a', first.runId);
+      expect(found.artifacts).toBeUndefined();
+    } finally {
+      delete process.env.REGRESSION_ARTIFACT_RETENTION;
+    }
+  });
+
+  it('Deckel: eine Artefakt-Retention grösser als die Lauf-Retention wird auf MAX_RUNS_PER_PROJECT begrenzt', async () => {
+    process.env.REGRESSION_ARTIFACT_RETENTION = String(MAX_RUNS_PER_PROJECT + 20);
+    try {
+      const sourceDir = await makeSourceDir();
+      sourceDirs.push(sourceDir);
+      const store = new RegressionResultStore();
+      for (let i = 0; i < MAX_RUNS_PER_PROJECT + 5; i++) {
+        await store.record(base({ suite: `s${i}`, status: 'failed', artifactsSourceDir: sourceDir }));
+      }
+      const runs = await store.list('proj-a');
+      expect(runs).toHaveLength(MAX_RUNS_PER_PROJECT);
+      expect(runs.every((r) => r.artifacts)).toBe(true);
+    } finally {
+      delete process.env.REGRESSION_ARTIFACT_RETENTION;
+    }
+  });
+});
+
+describe('RegressionResultStore.resolveArtifactDir() (AC3/AC4 — Router-Naht regressionRuns.js)', () => {
+  it('liefert den erwarteten Pfad für einen gültigen projekt-/runId-Slug', () => {
+    const store = new RegressionResultStore();
+    expect(store.resolveArtifactDir('proj-a', 'run-1')).toBe(join(storeDir, 'regression-runs', 'proj-a', 'run-1'));
+  });
+
+  it('liefert null bei ungültigem projekt- oder runId-Slug (kein Dateizugriff)', () => {
+    const store = new RegressionResultStore();
+    expect(store.resolveArtifactDir('../etc', 'run-1')).toBeNull();
+    expect(store.resolveArtifactDir('proj-a', '../../etc')).toBeNull();
+    expect(store.resolveArtifactDir('proj-a', 'a/b')).toBeNull();
+  });
+
+  it('liefert null ohne CRED_STORE_DIR', () => {
+    delete process.env.CRED_STORE_DIR;
+    const store = new RegressionResultStore();
+    expect(store.resolveArtifactDir('proj-a', 'run-1')).toBeNull();
   });
 });
 

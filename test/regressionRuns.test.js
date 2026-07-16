@@ -20,18 +20,25 @@
  * Covers (regression-result-view):
  *   AC2 — GET /api/projects/:slug/regression-runs/:runId/artifacts/*splat:
  *          nur bei `status:"failed"` verfügbar (grüner/unbekannter Lauf →
- *          404, kein Leak); dient eine Datei INNERHALB der Artefakt-Ablage
- *          des Laufs aus (200 + Bytes); Path-Traversal (`..` im Wildcard-Rest,
- *          manipulierter `artifacts.htmlReport`-String) UND Symlink-Ausbruch
- *          aus der Ablage → 404 (kein Escape). Slug-Auflösung über
- *          injizierte `slugResolver`/`pathValidator`-Stubs (Muster
- *          regressionRunRouter.test.js) — echtes Dateisystem nur für die
- *          Artefakt-Ablage selbst (mkdtemp, Muster AreaWriter.test.js).
+ *          404, kein Leak); dient eine Datei INNERHALB der Lauf-EIGENEN
+ *          Artefakt-Ablage aus (200 + Bytes) — S-327: die Basis ist die
+ *          Store-eigene Lauf-Ablage (`regressionResultStore.resolveArtifactDir()`),
+ *          NICHT mehr der Projekt-Klon. Ohne Rest-Pfad wird der
+ *          HTML-Report-Index ausgeliefert (Rückwärtskompatibilität); ein
+ *          expliziter Rest-Pfad (z.B. eine CTRF-Attachment-Datei unter
+ *          `test-results/…`) wird direkt gegen die Basis aufgelöst.
+ *          Path-Traversal (`..` im Wildcard-Rest, manipulierter
+ *          `artifacts.htmlReport`-String) UND Symlink-Ausbruch aus der
+ *          Ablage → 404 (kein Escape). `resolveArtifactDir` wird als
+ *          Store-Stub injiziert (Muster regressionRunRouter.test.js) —
+ *          echtes Dateisystem nur für die Artefakt-Ablage selbst (mkdtemp,
+ *          Muster AreaWriter.test.js).
  *
  * Strategy: echter Express-App + echter HTTP-Server (Muster drainReports.test.js)
  * mit einem Fake-regressionResultStore (jest.fn) — kein echtes fs/CRED_STORE_DIR nötig
  * für die Liste-/Einzel-Lauf-Endpunkte; der Artefakt-Block nutzt ein echtes
- * `mkdtemp`-Temp-Verzeichnis als "Projekt-Klon" (kein echter WORKSPACE_DIR nötig).
+ * `mkdtemp`-Temp-Verzeichnis als Lauf-eigene Artefakt-Ablage
+ * (`resolveArtifactDir` liefert diesen Pfad, kein echter CRED_STORE_DIR nötig).
  */
 
 import { describe, it, expect, jest, beforeEach, afterEach } from '@jest/globals';
@@ -195,34 +202,40 @@ describe('GET /api/projects/:slug/regression-runs/:runId (AC4)', () => {
 // ── AC2 (regression-result-view): Debug-Artefakt-Zugriff ────────────────────
 
 describe('GET /api/projects/:slug/regression-runs/:runId/artifacts/*splat (regression-result-view AC2)', () => {
-  let projectDir;
+  let outerDir;
+  let artifactDir;
 
-  /** Default slugResolver/pathValidator: 'proj-a' -> der Temp-"Projekt-Klon". */
-  function makeDeps(regressionResultStore) {
+  /**
+   * Store-Stub: `get()` liefert `run`, `resolveArtifactDir('proj-a', …)`
+   * liefert den Temp-Ordner (S-327: die Lauf-eigene Artefakt-Ablage, nicht
+   * mehr der Projekt-Klon).
+   */
+  function makeStore(getImpl, resolveArtifactDirImpl) {
     return {
-      regressionResultStore,
-      slugResolver: (slug) => (slug === 'proj-a' ? projectDir : null),
-      pathValidator: async (p) => ({ resolvedPath: p }),
+      get: jest.fn(getImpl),
+      resolveArtifactDir: jest.fn(resolveArtifactDirImpl ?? ((slug) => (slug === 'proj-a' ? artifactDir : null))),
     };
   }
 
   beforeEach(async () => {
-    projectDir = await mkdtemp(join(tmpdir(), 'regression-artifact-test-'));
-    await mkdir(join(projectDir, 'playwright-report'), { recursive: true });
-    await writeFile(join(projectDir, 'playwright-report', 'index.html'), '<html>report</html>', 'utf8');
-    await mkdir(join(projectDir, 'playwright-report', 'data'), { recursive: true });
-    await writeFile(join(projectDir, 'playwright-report', 'data', 'trace.zip'), 'zip-bytes', 'utf8');
+    outerDir = await mkdtemp(join(tmpdir(), 'regression-artifact-outer-'));
+    artifactDir = join(outerDir, 'run-red');
+    await mkdir(join(artifactDir, 'playwright-report', 'data'), { recursive: true });
+    await writeFile(join(artifactDir, 'playwright-report', 'index.html'), '<html>report</html>', 'utf8');
+    await writeFile(join(artifactDir, 'playwright-report', 'data', 'trace.zip'), 'zip-bytes', 'utf8');
+    await mkdir(join(artifactDir, 'test-results', 'checkout-chromium'), { recursive: true });
+    await writeFile(join(artifactDir, 'test-results', 'checkout-chromium', 'test-failed-1.png'), 'png-bytes', 'utf8');
   });
 
   afterEach(async () => {
-    await rm(projectDir, { recursive: true, force: true });
+    await rm(outerDir, { recursive: true, force: true });
   });
 
   const RED_RUN = {
     runId: 'run-red',
     projekt: 'proj-a',
     status: 'failed',
-    artifacts: { htmlReport: 'playwright-report' },
+    artifacts: { htmlReport: 'playwright-report', testResults: 'test-results' },
   };
   const GREEN_RUN = {
     runId: 'run-green',
@@ -230,75 +243,94 @@ describe('GET /api/projects/:slug/regression-runs/:runId/artifacts/*splat (regre
     status: 'passed',
   };
 
-  it('200 + Datei-Bytes für index.html eines roten Laufs', async () => {
-    const regressionResultStore = { get: jest.fn(async () => RED_RUN) };
-    await withServer(makeDeps(regressionResultStore), async (port) => {
-      const res = await httpGet(port, '/api/projects/proj-a/regression-runs/run-red/artifacts/index.html');
+  it('200 + Datei-Bytes für den HTML-Report-Index eines roten Laufs (Default, kein Rest-Pfad)', async () => {
+    const regressionResultStore = makeStore(async () => RED_RUN);
+    await withServer({ regressionResultStore }, async (port) => {
+      const res = await httpGet(port, '/api/projects/proj-a/regression-runs/run-red/artifacts/');
       expect(res.status).toBe(200);
       expect(String(res.body)).toContain('report');
     });
   });
 
-  it('200 + Datei-Bytes für eine verschachtelte Datei (Trace) eines roten Laufs', async () => {
-    const regressionResultStore = { get: jest.fn(async () => RED_RUN) };
-    await withServer(makeDeps(regressionResultStore), async (port) => {
-      const res = await httpGet(port, '/api/projects/proj-a/regression-runs/run-red/artifacts/data/trace.zip');
+  it('200 + Datei-Bytes für eine explizite Datei innerhalb des HTML-Reports (Rest-Pfad direkt gegen die Basis)', async () => {
+    const regressionResultStore = makeStore(async () => RED_RUN);
+    await withServer({ regressionResultStore }, async (port) => {
+      const res = await httpGet(
+        port,
+        '/api/projects/proj-a/regression-runs/run-red/artifacts/playwright-report/data/trace.zip',
+      );
       expect(res.status).toBe(200);
       expect(String(res.body)).toContain('zip-bytes');
     });
   });
 
+  it('200 + Datei-Bytes für eine CTRF-Attachment-Datei unter test-results/… (S-327, Naht für S-328)', async () => {
+    const regressionResultStore = makeStore(async () => RED_RUN);
+    await withServer({ regressionResultStore }, async (port) => {
+      const res = await httpGet(
+        port,
+        '/api/projects/proj-a/regression-runs/run-red/artifacts/test-results/checkout-chromium/test-failed-1.png',
+      );
+      expect(res.status).toBe(200);
+      expect(String(res.body)).toContain('png-bytes');
+    });
+  });
+
   it('404 bei grünem Lauf (kein Artefakt, kein toter Link)', async () => {
-    const regressionResultStore = { get: jest.fn(async () => GREEN_RUN) };
-    await withServer(makeDeps(regressionResultStore), async (port) => {
-      const res = await httpGet(port, '/api/projects/proj-a/regression-runs/run-green/artifacts/index.html');
+    const regressionResultStore = makeStore(async () => GREEN_RUN);
+    await withServer({ regressionResultStore }, async (port) => {
+      const res = await httpGet(port, '/api/projects/proj-a/regression-runs/run-green/artifacts/');
       expect(res.status).toBe(404);
       expect(res.body.error).toBeDefined();
     });
   });
 
   it('404 bei unbekanntem/geprunten Lauf (Store liefert null)', async () => {
-    const regressionResultStore = { get: jest.fn(async () => null) };
-    await withServer(makeDeps(regressionResultStore), async (port) => {
-      const res = await httpGet(port, '/api/projects/proj-a/regression-runs/unknown/artifacts/index.html');
+    const regressionResultStore = makeStore(async () => null);
+    await withServer({ regressionResultStore }, async (port) => {
+      const res = await httpGet(port, '/api/projects/proj-a/regression-runs/unknown/artifacts/');
       expect(res.status).toBe(404);
     });
   });
 
   it('kein verdrahteter Store → 404 (defensiv)', async () => {
-    await withServer(makeDeps(undefined), async (port) => {
-      const res = await httpGet(port, '/api/projects/proj-a/regression-runs/run-red/artifacts/index.html');
+    await withServer({}, async (port) => {
+      const res = await httpGet(port, '/api/projects/proj-a/regression-runs/run-red/artifacts/');
       expect(res.status).toBe(404);
     });
   });
 
-  it('404 bei ungültigem Slug (slugResolver liefert null)', async () => {
+  it('Store ohne resolveArtifactDir() → 404 (defensiv)', async () => {
     const regressionResultStore = { get: jest.fn(async () => RED_RUN) };
-    await withServer(
-      { regressionResultStore, slugResolver: () => null, pathValidator: async (p) => ({ resolvedPath: p }) },
-      async (port) => {
-        const res = await httpGet(port, '/api/projects/andere-projekt/regression-runs/run-red/artifacts/index.html');
-        expect(res.status).toBe(404);
-      },
-    );
+    await withServer({ regressionResultStore }, async (port) => {
+      const res = await httpGet(port, '/api/projects/proj-a/regression-runs/run-red/artifacts/');
+      expect(res.status).toBe(404);
+    });
   });
 
-  it('404 bei fehlendem artifacts.htmlReport im Lauf-Datensatz', async () => {
-    const regressionResultStore = {
-      get: jest.fn(async () => ({ runId: 'run-red', projekt: 'proj-a', status: 'failed' })),
-    };
-    await withServer(makeDeps(regressionResultStore), async (port) => {
-      const res = await httpGet(port, '/api/projects/proj-a/regression-runs/run-red/artifacts/index.html');
+  it('404 wenn resolveArtifactDir() null liefert (ungültiger Slug / kein CRED_STORE_DIR)', async () => {
+    const regressionResultStore = makeStore(async () => RED_RUN, () => null);
+    await withServer({ regressionResultStore }, async (port) => {
+      const res = await httpGet(port, '/api/projects/andere-projekt/regression-runs/run-red/artifacts/');
+      expect(res.status).toBe(404);
+    });
+  });
+
+  it('404 bei fehlendem artifacts.htmlReport im Lauf-Datensatz (z.B. bereits von der Artefakt-Retention gepruned)', async () => {
+    const regressionResultStore = makeStore(async () => ({ runId: 'run-red', projekt: 'proj-a', status: 'failed' }));
+    await withServer({ regressionResultStore }, async (port) => {
+      const res = await httpGet(port, '/api/projects/proj-a/regression-runs/run-red/artifacts/');
       expect(res.status).toBe(404);
     });
   });
 
   it('404 bei Path-Traversal im Wildcard-Rest-Pfad (`..`-Segmente)', async () => {
-    // Ein geheimes Secret AUSSERHALB der Artefakt-Ablage, das per Traversal
-    // erreichbar wäre, wenn der Endpunkt den `..`-Rest-Pfad nicht härtet.
-    await writeFile(join(projectDir, 'secret.txt'), 'top-secret', 'utf8');
-    const regressionResultStore = { get: jest.fn(async () => RED_RUN) };
-    await withServer(makeDeps(regressionResultStore), async (port) => {
+    // Ein geheimes Secret AUSSERHALB der Artefakt-Ablage (ein Verzeichnis über
+    // artifactDir), das per Traversal erreichbar wäre, wenn der Endpunkt den
+    // `..`-Rest-Pfad nicht härtet.
+    await writeFile(join(outerDir, 'secret.txt'), 'top-secret', 'utf8');
+    const regressionResultStore = makeStore(async () => RED_RUN);
+    await withServer({ regressionResultStore }, async (port) => {
       const res = await httpGet(
         port,
         '/api/projects/proj-a/regression-runs/run-red/artifacts/..%2f..%2fsecret.txt',
@@ -308,17 +340,16 @@ describe('GET /api/projects/:slug/regression-runs/:runId/artifacts/*splat (regre
     });
   });
 
-  it('404 bei manipuliertem artifacts.htmlReport, der aus dem Projekt-Klon ausbricht (`../../etc`)', async () => {
-    const regressionResultStore = {
-      get: jest.fn(async () => ({
-        runId: 'run-red',
-        projekt: 'proj-a',
-        status: 'failed',
-        artifacts: { htmlReport: '../../etc' },
-      })),
-    };
-    await withServer(makeDeps(regressionResultStore), async (port) => {
-      const res = await httpGet(port, '/api/projects/proj-a/regression-runs/run-red/artifacts/passwd');
+  it('404 bei manipuliertem artifacts.htmlReport, der aus der Artefakt-Ablage ausbricht (`../../etc`)', async () => {
+    const regressionResultStore = makeStore(async () => ({
+      runId: 'run-red',
+      projekt: 'proj-a',
+      status: 'failed',
+      artifacts: { htmlReport: '../../etc' },
+    }));
+    await withServer({ regressionResultStore }, async (port) => {
+      // Kein Rest-Pfad -> Default-Konstruktion nutzt den (manipulierten) htmlReport.
+      const res = await httpGet(port, '/api/projects/proj-a/regression-runs/run-red/artifacts/');
       expect(res.status).toBe(404);
     });
   });
@@ -326,15 +357,15 @@ describe('GET /api/projects/:slug/regression-runs/:runId/artifacts/*splat (regre
   it('404 bei Symlink-Ausbruch aus der Artefakt-Ablage heraus', async () => {
     const outsideDir = await mkdtemp(join(tmpdir(), 'regression-artifact-outside-'));
     await writeFile(join(outsideDir, 'secret.txt'), 'top-secret-symlink', 'utf8');
-    const linkPath = join(projectDir, 'playwright-report', 'escape-link');
+    const linkPath = join(artifactDir, 'playwright-report', 'escape-link');
     await symlink(outsideDir, linkPath, 'dir');
 
-    const regressionResultStore = { get: jest.fn(async () => RED_RUN) };
+    const regressionResultStore = makeStore(async () => RED_RUN);
     try {
-      await withServer(makeDeps(regressionResultStore), async (port) => {
+      await withServer({ regressionResultStore }, async (port) => {
         const res = await httpGet(
           port,
-          '/api/projects/proj-a/regression-runs/run-red/artifacts/escape-link/secret.txt',
+          '/api/projects/proj-a/regression-runs/run-red/artifacts/playwright-report/escape-link/secret.txt',
         );
         expect(res.status).toBe(404);
         expect(String(res.body)).not.toContain('top-secret-symlink');
@@ -345,9 +376,12 @@ describe('GET /api/projects/:slug/regression-runs/:runId/artifacts/*splat (regre
   });
 
   it('404 wenn die Artefakt-Datei nicht (mehr) existiert', async () => {
-    const regressionResultStore = { get: jest.fn(async () => RED_RUN) };
-    await withServer(makeDeps(regressionResultStore), async (port) => {
-      const res = await httpGet(port, '/api/projects/proj-a/regression-runs/run-red/artifacts/nicht-vorhanden.html');
+    const regressionResultStore = makeStore(async () => RED_RUN);
+    await withServer({ regressionResultStore }, async (port) => {
+      const res = await httpGet(
+        port,
+        '/api/projects/proj-a/regression-runs/run-red/artifacts/nicht-vorhanden.html',
+      );
       expect(res.status).toBe(404);
     });
   });

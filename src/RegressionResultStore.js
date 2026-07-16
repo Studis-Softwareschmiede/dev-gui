@@ -18,9 +18,9 @@
  *   { runId, projekt, suite, scopeTyp: "bereich"|"verbund"|"gesamt",
  *     status: "passed"|"failed"|"precondition-error"|"error", startedAt,
  *     durationMs, counts:{passed,failed,total}, ctrf: <CTRF-JSON>|null,
- *     reason?: string, artifacts?: { htmlReport, traces } }
- *   - `artifacts` NUR bei `status:"failed"` (AC3) — grüne Läufe halten nur
- *     CTRF-JSON + Metadaten (keine schweren Artefakte).
+ *     reason?: string, artifacts?: { htmlReport, testResults } }
+ *   - `artifacts` KANN bei JEDEM Status vorkommen (S-327 — die frühere
+ *     „nur bei Rot“-Regel ist aufgehoben, s. „Artefakte kopieren“ unten).
  *   - `projekt` = Projekt-Slug (kein absoluter Pfad).
  *   - Frühausfall-Datensatz (AC1b, S-326): bei `status:"precondition-error"|
  *     "error"` ist `ctrf: null` (KEIN synthetisches Ersatz-CTRF), `counts`
@@ -32,9 +32,49 @@
  * Rechte: 0600
  * Schreiben: atomar (tmp + rename)
  *
- * Retention (AC2): je Projekt werden höchstens `MAX_RUNS_PER_PROJECT` (50)
- * Läufe behalten — beim `record()` fallen ältere Läufe DIESES Projekts
- * automatisch heraus (Auto-Prune, idempotent), inkl. ihrer Dateien.
+ * Artefakte kopieren (S-327, wesentlicher Befund der Vorklärung 2026-07-16):
+ * Playwright-Debug-Artefakte (`playwright-report/`, `test-results/`) liegen im
+ * PROJEKT-KLON und werden dort vom NÄCHSTEN Lauf überschrieben — eine reine
+ * Pfad-REFERENZ (wie bis S-326) ist deshalb nach dem Folgelauf falsch. Dieser
+ * Store KOPIERT die Artefakte deshalb beim `record()` (best-effort, `fs.cp`
+ * rekursiv) aus dem übergebenen `artifactsSourceDir` (Projekt-Klon-Root) in
+ * seine EIGENE Lauf-Ablage `${CRED_STORE_DIR}/regression-runs/<projekt>/<runId>/`
+ * — unter Beibehaltung der Klon-Ordnernamen (`playwright-report/`,
+ * `test-results/`). Das im CTRF-JSON enthaltene `tests[].attachments[].path`
+ * (vom Reporter `playwright-ctrf-json-reporter` mit ABSOLUTEN Pfaden gesetzt)
+ * wird dabei auf einen zur Lauf-Artefakt-Ablage RELATIVEN Pfad umgeschrieben
+ * (Security-Floor: kein absoluter Server-Pfad in der Response) — DIESE
+ * Relativierung läuft IMMER, sobald `artifactsSourceDir` übergeben wird
+ * (unabhängig von Status und `REGRESSION_KEEP_ARTIFACTS_ON_PASS`); NUR die
+ * eigentliche Datei-Kopie ist an die Rot/Grün-Default-Entscheidung gekoppelt
+ * (Review-Fix Iteration 2 — sonst bliebe `ctrf` bei abgeschalteten
+ * Grün-Artefakten mit absoluten Pfaden stehen und würde über GET .../:runId
+ * geleakt). Da die
+ * Klon-Ordnernamen erhalten bleiben, ist der umgeschriebene Pfad ohne weitere
+ * Umrechnung der Rest-Pfad des Artefakt-Endpunkts (`regressionRuns.js`, Naht
+ * für [[regression-result-view]]/S-328). Attachments AUSSERHALB des
+ * Projekt-Klons (kein gültiger absoluter Pfad unter `artifactsSourceDir`)
+ * werden NICHT durchgereicht (gefiltert). Ein Kopier-Fehler (z.B. Quellordner
+ * fehlt) ist best-effort/non-fatal — der Lauf-Datensatz selbst geht dadurch
+ * NIE verloren, es fehlt lediglich der jeweilige `artifacts`-Schlüssel.
+ *
+ * Zwei getrennte Retentions (Owner-Entscheidung 2026-07-16, Plattenbremse):
+ *   - Lauf-Retention      `MAX_RUNS_PER_PROJECT` (50, AC2, unverändert) —
+ *     Datensätze (CTRF-JSON + Metadaten, klein).
+ *   - Artefakt-Retention  `REGRESSION_ARTIFACT_RETENTION` (Default 10, AC3) —
+ *     die schwereren Artefakt-Ordner. Gedeckelt auf höchstens die
+ *     Lauf-Retention (ein größerer Wert wird auf 50 begrenzt).
+ * Auto-Prune (idempotent, bei jedem `record()`):
+ *   - Lauf 1..Artefakt-Retention (jüngste): Datensatz + Artefakte.
+ *   - Lauf jenseits der Artefakt-Retention, aber innerhalb der Lauf-Retention:
+ *     Datensatz bleibt, der Artefakt-Ordner wird entfernt UND die
+ *     `artifacts`-Referenz aus dem Datensatz entfernt (keine toten
+ *     Referenzen, keine verwaisten Ordner).
+ *   - Lauf jenseits der Lauf-Retention: Datensatz + Artefakte komplett weg.
+ * Artefakte bei GRÜN (AC3): Default AN — abschaltbar via
+ * `REGRESSION_KEEP_ARTIFACTS_ON_PASS=false` (dann: Artefakte nur bei Rot,
+ * das frühere Verhalten). Bei `status:"failed"` werden Artefakte IMMER
+ * versucht (unabhängig von diesem Schalter).
  *
  * Nebenläufigkeit: `record()`-Aufrufe werden je Store-Instanz über eine
  * In-Process-Promise-Kette serialisiert (kein Read-Modify-Write-Race);
@@ -45,22 +85,33 @@
  * übersprungen (degradierend), der Rest bleibt lesbar (kein Crash der
  * gesamten Liste). Ist `CRED_STORE_DIR` NICHT gesetzt, degradiert der Store
  * auf reinen In-Memory-Betrieb (Läufe im Prozess sichtbar, aber nicht
- * persistiert) statt zu werfen.
+ * persistiert, KEINE Artefakt-Kopie möglich) statt zu werfen.
  *
  * Security (Floor): keine Secrets/Tokens in Datensatz/Response/Log; `projekt`
- * wird gegen einen Slug-Form-Check gehärtet (kein Pfad-Traversal); das
- * CTRF-JSON wird unverändert übernommen (Security-Verantwortung für dessen
- * Inhalt liegt beim Runner, agent-flow `regression-runner` AC9).
+ * wird gegen einen Slug-Form-Check gehärtet (kein Pfad-Traversal), `runId`
+ * ebenso vor jeder Artefakt-Ordner-Auflösung; das CTRF-JSON wird unverändert
+ * übernommen (Security-Verantwortung für dessen Inhalt liegt beim Runner,
+ * agent-flow `regression-runner` AC9) — NUR die Attachment-Pfade werden
+ * relativiert (s.o.), keine absoluten Server-Pfade in Response/Datei.
  *
  * @module RegressionResultStore
  */
 
-import { readFile, writeFile, rename, mkdir, chmod, unlink, readdir, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { readFile, writeFile, rename, mkdir, chmod, unlink, readdir, rm, cp } from 'node:fs/promises';
+import { join, isAbsolute, relative } from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
 
 /** Harte Pro-Projekt-Grenze (AC2): ältere Läufe fallen beim Schreiben heraus. */
 export const MAX_RUNS_PER_PROJECT = 50;
+
+/** Default Artefakt-Retention je Projekt (AC3, Owner-Entscheidung 2026-07-16). */
+export const DEFAULT_ARTIFACT_RETENTION = 10;
+
+/** Ordnername des HTML-Reports im Projekt-Klon (agent-flow `regression-playwright-conventions` AC6/Layout). */
+export const HTML_REPORT_DIRNAME = 'playwright-report';
+
+/** Ordnername der Testergebnis-/Attachment-Ablage im Projekt-Klon (CTRF-JSON + Screenshots/Traces/Videos je Test). */
+export const TEST_RESULTS_DIRNAME = 'test-results';
 
 /** Erlaubter Scope-Typ-Wert (Vertrag, spec §Verträge). */
 export const SCOPE_TYPES = Object.freeze(['bereich', 'verbund', 'gesamt']);
@@ -71,6 +122,9 @@ export const STATUSES = Object.freeze(['passed', 'failed', 'precondition-error',
 /** Erlaubter Projekt-Slug: nur Buchstaben, Ziffern, `-` und `_` (analog DrainReportStore). */
 export const PROJECT_SLUG_RE = /^[A-Za-z0-9_-]+$/;
 
+/** Erlaubte `runId`-Zeichen (defensiv vor jedem Pfad-Sink, das aus `runId` einen Ordner-/Dateinamen baut). */
+const RUN_ID_RE = /^[A-Za-z0-9_-]+$/;
+
 /**
  * @typedef {object} RegressionCounts
  * @property {number} passed
@@ -79,7 +133,7 @@ export const PROJECT_SLUG_RE = /^[A-Za-z0-9_-]+$/;
  *
  * @typedef {object} RegressionArtifacts
  * @property {string} [htmlReport]
- * @property {string} [traces]
+ * @property {string} [testResults]
  *
  * @typedef {object} RegressionRun
  * @property {string} runId
@@ -90,10 +144,10 @@ export const PROJECT_SLUG_RE = /^[A-Za-z0-9_-]+$/;
  * @property {string} startedAt ISO-8601
  * @property {number} durationMs
  * @property {RegressionCounts} counts
- * @property {*|null} ctrf CTRF-JSON, unverändert übernommen; `null` bei einem
- *   Frühausfall-Datensatz (AC1b, KEIN synthetisches Ersatz-CTRF)
+ * @property {*|null} ctrf CTRF-JSON, Attachment-Pfade relativiert (s. Modul-Doku);
+ *   `null` bei einem Frühausfall-Datensatz (AC1b, KEIN synthetisches Ersatz-CTRF)
  * @property {string} [reason] NUR bei status:"precondition-error"|"error" (AC1b)
- * @property {RegressionArtifacts} [artifacts] NUR bei status:"failed"
+ * @property {RegressionArtifacts} [artifacts] Referenz auf die Lauf-eigene Artefakt-Ablage (jeder Status, S-327)
  */
 
 /**
@@ -123,6 +177,33 @@ function _resolveProjectDir(projekt) {
 }
 
 /**
+ * Liest die konfigurierte Artefakt-Retention (AC3, `REGRESSION_ARTIFACT_RETENTION`,
+ * Default `DEFAULT_ARTIFACT_RETENTION`), gedeckelt auf höchstens die
+ * Lauf-Retention (`MAX_RUNS_PER_PROJECT`) — ein größerer/ungültiger Wert wird
+ * begrenzt bzw. verworfen (kein Crash durch Tippfehler in der Env).
+ *
+ * @returns {number}
+ */
+function _resolveArtifactRetention() {
+  const raw = Number(process.env.REGRESSION_ARTIFACT_RETENTION);
+  const value = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : DEFAULT_ARTIFACT_RETENTION;
+  return Math.min(value, MAX_RUNS_PER_PROJECT);
+}
+
+/**
+ * Entscheidet, ob für einen Lauf mit gegebenem Status Artefakte versucht
+ * werden sollen (AC3): bei `failed` IMMER; bei `passed` per Default AN,
+ * abschaltbar via `REGRESSION_KEEP_ARTIFACTS_ON_PASS=false`.
+ *
+ * @param {'passed'|'failed'} status
+ * @returns {boolean}
+ */
+function _shouldAttemptArtifacts(status) {
+  if (status === 'failed') return true;
+  return process.env.REGRESSION_KEEP_ARTIFACTS_ON_PASS !== 'false';
+}
+
+/**
  * Normalisiert die Zähler auf `{passed,failed,total}` (Security-/Daten-Hygiene
  * — kein Durchreichen beliebiger Felder).
  *
@@ -139,8 +220,11 @@ function _normalizeCounts(counts) {
 }
 
 /**
- * Normalisiert die Artefakt-Referenz auf `{htmlReport?,traces?}` — nur
- * String-Pfade, kein Durchreichen beliebiger Felder.
+ * Normalisiert die Artefakt-Referenz auf `{htmlReport?,testResults?}` — nur
+ * String-Pfade, kein Durchreichen beliebiger Felder. Wird NUR beim Laden
+ * einer bereits persistierten Datei angewandt (Defensive gegen ein
+ * korruptes/fremd geschriebenes Datei-Set) — beim `record()` selbst baut
+ * `#captureArtifacts` das Feld direkt aus den festen Ordnernamen.
  *
  * @param {unknown} artifacts
  * @returns {RegressionArtifacts|undefined}
@@ -151,11 +235,56 @@ function _normalizeArtifacts(artifacts) {
   if (typeof artifacts.htmlReport === 'string' && artifacts.htmlReport) {
     out.htmlReport = artifacts.htmlReport;
   }
-  if (typeof artifacts.traces === 'string' && artifacts.traces) {
-    out.traces = artifacts.traces;
+  if (typeof artifacts.testResults === 'string' && artifacts.testResults) {
+    out.testResults = artifacts.testResults;
   }
-  // Edge-Case: Artefakte fehlen bei einem roten Lauf → kein artifacts-Feld, kein Fehler.
   return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * Relativiert EINEN CTRF-Attachment-Eintrag gegen `sourceDir` (Projekt-Klon-
+ * Root) — oder liefert `null`, wenn der Eintrag nicht durchgereicht werden
+ * darf (kein String-Pfad, kein absoluter Pfad, oder außerhalb `sourceDir`).
+ * Security-Floor: kein absoluter Server-Pfad im Ergebnis.
+ *
+ * @param {{name?: string, contentType?: string, path?: string}} attachment
+ * @param {string} sourceDir
+ * @returns {{name?: string, contentType?: string, path: string}|null}
+ */
+function _relativizeAttachment(attachment, sourceDir) {
+  const p = attachment?.path;
+  if (typeof p !== 'string' || !p || !isAbsolute(p)) return null;
+  const rel = relative(sourceDir, p);
+  if (!rel || rel === '' || rel.startsWith('..') || isAbsolute(rel)) return null;
+  return { ...attachment, path: rel };
+}
+
+/**
+ * Schreibt eine (deep-geklonte) Kopie des CTRF-JSON mit relativierten
+ * `tests[].attachments[].path`-Einträgen (s. Modul-Doku „Artefakte
+ * kopieren“). Tolerant gegenüber abweichendem/fehlendem Schema (kein Crash).
+ *
+ * @param {*} ctrf
+ * @param {string} sourceDir
+ * @returns {*}
+ */
+function _rewriteCtrfAttachments(ctrf, sourceDir) {
+  if (!ctrf || typeof ctrf !== 'object') return ctrf;
+  const tests = ctrf?.results?.tests;
+  if (!Array.isArray(tests)) return ctrf;
+  let clone;
+  try {
+    clone = JSON.parse(JSON.stringify(ctrf));
+  } catch {
+    return ctrf; // nicht serialisierbar (sollte nie vorkommen) → unverändert lassen
+  }
+  for (const test of clone.results.tests) {
+    if (!Array.isArray(test.attachments)) continue;
+    test.attachments = test.attachments
+      .map((a) => _relativizeAttachment(a, sourceDir))
+      .filter(Boolean);
+  }
+  return clone;
 }
 
 export class RegressionResultStore {
@@ -234,10 +363,12 @@ export class RegressionResultStore {
 
   /**
    * Legt einen Lauf-Datensatz an (AC1): generiert `runId` falls nicht
-   * mitgegeben, hält `artifacts` nur bei `status:"failed"` (AC3), schneidet
-   * je Projekt-Slug auf die letzten `MAX_RUNS_PER_PROJECT` zurück (AC2,
-   * Auto-Prune inkl. Artefakte, AC3) und schreibt die Datei atomar.
-   * Serialisiert über eine In-Process-Kette.
+   * mitgegeben, kopiert (best-effort) Debug-Artefakte aus `artifactsSourceDir`
+   * in die eigene Lauf-Ablage (AC3, Modul-Doku „Artefakte kopieren“),
+   * schneidet je Projekt-Slug auf die letzten `MAX_RUNS_PER_PROJECT` Läufe
+   * (AC2) UND die letzten `REGRESSION_ARTIFACT_RETENTION` Artefakt-Ordner
+   * zurück (AC3, Auto-Prune) und schreibt die Datei atomar. Serialisiert
+   * über eine In-Process-Kette.
    *
    * @param {object} input
    * @param {string} input.projekt Projekt-Slug (kein Pfad) — Pflicht.
@@ -248,9 +379,10 @@ export class RegressionResultStore {
    * @param {string} [input.startedAt]
    * @param {number} [input.durationMs]
    * @param {RegressionCounts} [input.counts]
-   * @param {*|null} [input.ctrf] CTRF-JSON, unverändert übernommen; `null`/fehlend bei Frühausfall (AC1b).
+   * @param {*|null} [input.ctrf] CTRF-JSON (Attachment-Pfade werden relativiert, s. Modul-Doku); `null`/fehlend bei Frühausfall (AC1b).
    * @param {string} [input.reason] secret-freie Kurzbegründung — nur bei status:"precondition-error"|"error" wirksam (AC1b).
-   * @param {RegressionArtifacts} [input.artifacts] nur bei status:"failed" wirksam.
+   * @param {string} [input.artifactsSourceDir] absoluter Projekt-Klon-Pfad, aus dem
+   *   `playwright-report/`/`test-results/` kopiert werden (best-effort, wenn vorhanden).
    * @returns {Promise<RegressionRun>} der geschriebene Lauf.
    * @throws {Error} wenn `projekt` kein gültiger Slug, `scopeTyp`/`status` ungültig ist.
    */
@@ -281,9 +413,11 @@ export class RegressionResultStore {
 
     await this.#ensureLoaded();
 
+    const runId = typeof input.runId === 'string' && input.runId ? input.runId : randomUUID();
+
     /** @type {RegressionRun} */
     const run = {
-      runId: typeof input.runId === 'string' && input.runId ? input.runId : randomUUID(),
+      runId,
       projekt,
       suite: typeof input.suite === 'string' ? input.suite : '',
       scopeTyp,
@@ -296,9 +430,27 @@ export class RegressionResultStore {
       // eines mitgäbe.
       ctrf: status === 'precondition-error' || status === 'error' ? null : (input.ctrf ?? null),
     };
-    // AC3: Debug-Artefakte NUR bei status:"failed".
-    if (status === 'failed') {
-      const artifacts = _normalizeArtifacts(input.artifacts);
+
+    const sourceDir =
+      typeof input.artifactsSourceDir === 'string' && input.artifactsSourceDir
+        ? input.artifactsSourceDir
+        : null;
+
+    // Security-Floor (AC5, HART — unabhängig von Status/Retention-Flag): die
+    // CTRF-Attachment-Pfade werden relativiert, SOBALD ein sourceDir vorliegt
+    // — auch wenn KEINE Artefakte kopiert werden (z.B. status:"passed" +
+    // REGRESSION_KEEP_ARTIFACTS_ON_PASS=false). Ohne diese Entkopplung bliebe
+    // der rohe Reporter-Output mit ABSOLUTEN Server-Pfaden im persistierten
+    // Datensatz stehen und würde über GET .../:runId geleakt (Review-Fix
+    // Iteration 2 — Critical).
+    if (sourceDir) {
+      run.ctrf = _rewriteCtrfAttachments(run.ctrf, sourceDir);
+    }
+
+    // AC3 (S-327): NUR die eigentliche Datei-Kopie bleibt hinter Rot/Grün-
+    // Default + Retention-Flag gegated — die Pfad-Relativierung oben nicht.
+    if (sourceDir && _shouldAttemptArtifacts(status) && RUN_ID_RE.test(runId)) {
+      const artifacts = await this.#copyArtifacts(projekt, runId, sourceDir);
       if (artifacts) run.artifacts = artifacts;
     }
     // AC1b: reason NUR bei precondition-error/error (bei passed/failed abwesend).
@@ -310,9 +462,9 @@ export class RegressionResultStore {
     const updated = [...existing, run];
     this.#runsByProject.set(projekt, updated);
 
-    // Auto-Prune (AC2): nur die letzten MAX_RUNS_PER_PROJECT Läufe DIESES
-    // Projekts behalten — die ältesten (früheste Einfüge-Reihenfolge) fallen
-    // heraus, inkl. ihrer Dateien (AC3, keine verwaisten Artefakte).
+    // Lauf-Retention (AC2, unverändert): höchstens MAX_RUNS_PER_PROJECT
+    // Datensätze DIESES Projekts — die ältesten fallen komplett heraus
+    // (inkl. ihrer Artefakte, keine verwaisten Ordner).
     let toDelete = [];
     if (updated.length > MAX_RUNS_PER_PROJECT) {
       toDelete = updated.slice(0, updated.length - MAX_RUNS_PER_PROJECT);
@@ -321,7 +473,24 @@ export class RegressionResultStore {
 
     await this.#persistRun(projekt, run);
     for (const old of toDelete) {
-      await this.#deleteRunFile(projekt, old.runId);
+      await this.#deleteRun(projekt, old.runId);
+    }
+
+    // Artefakt-Retention (AC3, NEU, Auto-Prune): schwerere Artefakte werden
+    // enger begrenzt als die Lauf-Retention — Läufe jenseits der
+    // Artefakt-Retention (aber noch innerhalb der Lauf-Retention) behalten
+    // nur den Datensatz, ihr Artefakt-Ordner + die `artifacts`-Referenz
+    // fallen weg (keine toten Referenzen, keine verwaisten Ordner).
+    const kept = this.#runsByProject.get(projekt) ?? [];
+    const artifactRetention = _resolveArtifactRetention();
+    if (kept.length > artifactRetention) {
+      const beyondArtifactWindow = kept.slice(0, kept.length - artifactRetention);
+      for (const old of beyondArtifactWindow) {
+        if (!old.artifacts) continue;
+        delete old.artifacts;
+        await this.#removeArtifactDir(projekt, old.runId);
+        await this.#persistRun(projekt, old); // Datensatz ohne artifacts neu schreiben (Referenz konsistent).
+      }
     }
 
     return run;
@@ -346,8 +515,8 @@ export class RegressionResultStore {
 
   /**
    * Liefert einen Einzel-Lauf read-only (AC4, inkl. Testfall-Details aus dem
-   * CTRF-JSON + Artefakt-Referenz bei roten Läufen), oder null wenn nicht
-   * vorhanden bzw. Slug ungültig.
+   * CTRF-JSON + Artefakt-Referenz, sofern (noch) vorhanden), oder null wenn
+   * nicht vorhanden bzw. Slug ungültig.
    *
    * @param {string} projekt
    * @param {string} runId
@@ -360,6 +529,97 @@ export class RegressionResultStore {
     const runs = this.#runsByProject.get(projekt) ?? [];
     const found = runs.find((r) => r.runId === runId);
     return found ? _cloneRun(found) : null;
+  }
+
+  /**
+   * Liefert den absoluten Pfad der Lauf-eigenen Artefakt-Ablage
+   * (`${CRED_STORE_DIR}/regression-runs/<projekt>/<runId>`) — für den
+   * Artefakt-Zugriffs-Endpunkt (`regressionRuns.js`, [[regression-result-view]]
+   * AC2). `null` ohne CRED_STORE_DIR oder bei ungültigem `projekt`-/`runId`-Slug
+   * (kein Dateizugriff, kein Leak). Prüft NICHT, ob der Ordner existiert —
+   * das übernimmt der Aufrufer (realpath/stat, 404 bei Fehlschlag).
+   *
+   * @param {string} projekt
+   * @param {string} runId
+   * @returns {string|null}
+   */
+  resolveArtifactDir(projekt, runId) {
+    const projectDir = _resolveProjectDir(projekt);
+    if (!projectDir) return null;
+    if (typeof runId !== 'string' || !RUN_ID_RE.test(runId)) return null;
+    return join(projectDir, runId);
+  }
+
+  /**
+   * Kopiert (best-effort) `playwright-report/`+`test-results/` aus
+   * `sourceDir` in die Lauf-eigene Artefakt-Ablage (Modul-Doku „Artefakte
+   * kopieren“). Reine Datei-Kopie — die CTRF-Attachment-Relativierung läuft
+   * SEPARAT und IMMER in `#doRecord` (Security-Floor AC5, unabhängig davon,
+   * ob diese Methode überhaupt aufgerufen wird — Review-Fix Iteration 2).
+   * Ohne `CRED_STORE_DIR` (In-Memory-Betrieb) wird NICHT kopiert (keine
+   * Ablage vorhanden).
+   *
+   * @param {string} projekt
+   * @param {string} runId
+   * @param {string} sourceDir absoluter Projekt-Klon-Pfad.
+   * @returns {Promise<RegressionArtifacts|undefined>}
+   */
+  async #copyArtifacts(projekt, runId, sourceDir) {
+    const projectDir = _resolveProjectDir(projekt);
+    if (!projectDir) {
+      return undefined;
+    }
+    const runArtifactDir = join(projectDir, runId);
+
+    const artifacts = {};
+    if (await this.#copyArtifactSubdir(sourceDir, runArtifactDir, HTML_REPORT_DIRNAME)) {
+      artifacts.htmlReport = HTML_REPORT_DIRNAME;
+    }
+    if (await this.#copyArtifactSubdir(sourceDir, runArtifactDir, TEST_RESULTS_DIRNAME)) {
+      artifacts.testResults = TEST_RESULTS_DIRNAME;
+    }
+    return Object.keys(artifacts).length > 0 ? artifacts : undefined;
+  }
+
+  /**
+   * Kopiert EINEN Unterordner (`playwright-report`/`test-results`) rekursiv
+   * aus `sourceDir` in `runArtifactDir` — best-effort: fehlt der Quellordner
+   * (ENOENT, z.B. Runner lieferte keinen HTML-Report), gilt das als "nicht
+   * kopiert" (kein Fehler, kein Absturz — Edge-Case AC „Artefakte fehlen“).
+   *
+   * @param {string} sourceDir
+   * @param {string} runArtifactDir
+   * @param {string} dirname
+   * @returns {Promise<boolean>} true bei erfolgreicher Kopie.
+   */
+  async #copyArtifactSubdir(sourceDir, runArtifactDir, dirname) {
+    const src = join(sourceDir, dirname);
+    const dest = join(runArtifactDir, dirname);
+    try {
+      await cp(src, dest, { recursive: true });
+      return true;
+    } catch (err) {
+      if (err.code !== 'ENOENT') {
+        console.error(`[RegressionResultStore] Artefakt-Kopie fehlgeschlagen (${dirname}):`, err.message);
+      }
+      return false;
+    }
+  }
+
+  /**
+   * Entfernt die Lauf-eigene Artefakt-Ablage (rekursiv, best-effort,
+   * non-fatal bei Fehlschlag) — für Prune (Artefakt- oder Lauf-Retention).
+   *
+   * @param {string} projekt
+   * @param {string} runId
+   * @returns {Promise<void>}
+   */
+  async #removeArtifactDir(projekt, runId) {
+    const dir = this.resolveArtifactDir(projekt, runId);
+    if (!dir) return;
+    await rm(dir, { recursive: true, force: true }).catch((err) => {
+      console.error('[RegressionResultStore] Artefakt-Ordner-Löschen fehlgeschlagen:', err.message);
+    });
   }
 
   /**
@@ -398,22 +658,23 @@ export class RegressionResultStore {
   }
 
   /**
-   * Entfernt die persistierte Datei eines geprunten Laufs (AC3: keine
-   * verwaisten Artefakte-Referenzen — die referenzierten Artefakt-Dateien
-   * selbst liegen außerhalb dieses Stores beim Runner, hier wird nur der
-   * Lauf-Datensatz selbst entfernt). Best-effort, non-fatal bei Fehlschlag.
+   * Entfernt einen geprunten Lauf vollständig: den persistierten
+   * Lauf-Datensatz UND seine Artefakt-Ablage (keine verwaisten Dateien/
+   * Ordner). Best-effort, non-fatal bei Fehlschlag.
    *
    * @param {string} projekt
    * @param {string} runId
    * @returns {Promise<void>}
    */
-  async #deleteRunFile(projekt, runId) {
+  async #deleteRun(projekt, runId) {
     const projectDir = _resolveProjectDir(projekt);
-    if (!projectDir) return;
-    const filePath = join(projectDir, `${runId}.json`);
-    await rm(filePath, { force: true }).catch((err) => {
-      console.error('[RegressionResultStore] Prune-Löschen fehlgeschlagen:', err.message);
-    });
+    if (projectDir) {
+      const filePath = join(projectDir, `${runId}.json`);
+      await rm(filePath, { force: true }).catch((err) => {
+        console.error('[RegressionResultStore] Prune-Löschen fehlgeschlagen:', err.message);
+      });
+    }
+    await this.#removeArtifactDir(projekt, runId);
   }
 }
 
@@ -446,11 +707,11 @@ function _normalizeRun(raw, projekt) {
     // AC1b: Frühausfall-Datensatz trägt IMMER ctrf:null beim Rückladen.
     ctrf: raw.status === 'precondition-error' || raw.status === 'error' ? null : (raw.ctrf ?? null),
   };
-  if (raw.status === 'failed') {
-    const artifacts = _normalizeArtifacts(raw.artifacts);
-    if (artifacts) run.artifacts = artifacts;
-  }
-  // AC1b: reason NUR bei precondition-error/error; Edge-Case "ohne reason" →
+  // AC3 (S-327): artifacts kann bei JEDEM Status vorkommen (frühere
+  // "nur bei failed"-Gate beim Laden entfernt).
+  const artifacts = _normalizeArtifacts(raw.artifacts);
+  if (artifacts) run.artifacts = artifacts;
+  // AC1b (S-326): reason NUR bei precondition-error/error; Edge-Case "ohne reason" →
   // Datensatz bleibt gültig, reason fehlt einfach (kein Crash).
   if ((raw.status === 'precondition-error' || raw.status === 'error') && typeof raw.reason === 'string' && raw.reason) {
     run.reason = raw.reason;

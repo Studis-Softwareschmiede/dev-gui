@@ -87,10 +87,13 @@
  * `playwright-ctrf-json-reporter` mit `outputDir: 'test-results'`) und übergibt
  * EINEN aggregierten Lauf-Datensatz an `RegressionResultStore.record()` (A1:
  * „Gesamt" = ein Datensatz, `suite`-Label = gewählter Scope). Debug-Artefakte
- * (`playwright-report/`) werden NUR bei `status:'failed'` referenziert
- * (RegressionResultStore AC3) — dieser Runner reicht dafür nur den relativen
- * Pfad `playwright-report` durch (Existenz wird vom Store/Frontend nicht
- * geprüft, best-effort-Referenz).
+ * (`playwright-report/`, `test-results/`) werden NICHT mehr referenziert,
+ * sondern vom Store selbst aus dem Projekt-Klon in seine eigene Lauf-Ablage
+ * KOPIERT (S-327, docs/specs/regression-result-store.md AC3) — dieser Runner
+ * übergibt dafür nur den validierten, absoluten Projekt-Klon-Pfad
+ * (`artifactsSourceDir: job.projectPath`); OB + welche Artefakte tatsächlich
+ * behalten werden (Rot/Grün-Default, Retention), entscheidet ausschließlich
+ * der Store — dieser Runner selbst unterscheidet dafür nicht mehr nach Status.
  *
  * Kein Projekt-Klon / kein Playwright-Grundgerüst (Edge-Case, Spec §Edge-Cases):
  *   fehlt `tests/regression` im Klon → `error` mit dem Grund „kein
@@ -151,9 +154,6 @@ export const REGRESSION_TESTS_ROOT = 'tests/regression';
 
 /** Relativer Pfad des CTRF-JSON-Ergebnisses (Referenz-Template `outputDir: 'test-results'`, Default-Dateiname des Reporters). */
 export const CTRF_RESULT_PATH = 'test-results/ctrf-report.json';
-
-/** Relativer Pfad des HTML-Reports (nur referenziert, nicht geprüft — RegressionResultStore AC3). */
-export const HTML_REPORT_PATH = 'playwright-report';
 
 /**
  * Selbsttest-Erkennung (AC8, Annahme A2 der Spec): Projekt-Slug, unter dem
@@ -859,7 +859,14 @@ export class RegressionRunner {
    * synthetisches Ersatz-CTRF, [[regression-result-store]] AC1b); `reason`
    * wird NUR bei `precondition-error`/`error` gesetzt.
    *
-   * @param {{ projekt: string, suite: string, scopeTyp: string }} job
+   * S-327: `artifactsSourceDir` wird IMMER (unabhängig vom Status) als der
+   * validierte, absolute Projekt-Klon-Pfad übergeben — der Store entscheidet
+   * selbst (Rot/Grün-Default, `REGRESSION_KEEP_ARTIFACTS_ON_PASS`, Retention),
+   * ob + welche Artefakte er daraus in seine eigene Lauf-Ablage kopiert
+   * (docs/specs/regression-result-store.md AC3). Dieser Runner selbst baut
+   * KEINE `artifacts`-Referenz mehr.
+   *
+   * @param {{ projekt: string, suite: string, scopeTyp: string, projectPath: string }} job
    * @param {'passed'|'failed'|'precondition-error'|'error'} status
    * @param {{ counts?: object, ctrf?: object, durationMs?: number, reason?: string }} patch
    */
@@ -877,11 +884,12 @@ export class RegressionRunner {
         // AC10/AC1b: kein CTRF bei einem Frühausfall -> ctrf:null, KEIN
         // synthetisches Ersatz-CTRF.
         ctrf: ctrf ?? null,
+        // S-327: artifactsSourceDir IMMER übergeben — der Store entscheidet
+        // selbst über Kopie/Retention/Relativierung. Der Runner baut keine
+        // artifacts-Referenz mehr (bei Frühausfall existiert im Klon ohnehin
+        // kein playwright-report/ — fs.cp ist best-effort, kein Crash).
+        artifactsSourceDir: job.projectPath,
       };
-      // RegressionResultStore AC3: Debug-Artefakte NUR bei status:'failed'.
-      if (status === 'failed') {
-        input.artifacts = { htmlReport: HTML_REPORT_PATH };
-      }
       // AC1b: reason NUR bei precondition-error/error (bei passed/failed abwesend).
       if ((status === 'precondition-error' || status === 'error') && reason) {
         input.reason = reason;

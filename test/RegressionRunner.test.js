@@ -44,7 +44,10 @@
  *         gesamt → tests/regression); nach Abschluss wird GENAU EIN
  *         aggregierter Datensatz (A1) an resultStore.record() übergeben
  *         (counts aus dem CTRF-Summary, status passed/failed via
- *         summarizeCtrf(), artifacts NUR bei failed).
+ *         summarizeCtrf()). `artifactsSourceDir` wird IMMER (unabhängig vom
+ *         Status) als `job.projectPath` mitgegeben — S-327: der Runner selbst
+ *         baut keine `artifacts`-Referenz mehr, das entscheidet ausschließlich
+ *         der `RegressionResultStore` (s. RegressionResultStore.test.js AC3).
  *   AC10 (S-326) — JEDER terminale Zustand (auch ein Frühausfall OHNE CTRF:
  *         kein Grundgerüst, precondition-error, Rollout-Fehler, kein CTRF,
  *         npx fehlt, nicht unterstütztes Testobjekt) übergibt strukturell
@@ -627,7 +630,10 @@ describe('RegressionRunner — regression-run.md', () => {
       expect(input.scopeTyp).toBe('bereich');
       expect(input.status).toBe('passed');
       expect(input.counts).toEqual({ passed: 2, failed: 0, total: 2 });
-      expect(input.artifacts).toBeUndefined(); // AC3 RegressionResultStore: nur bei failed
+      // S-327: der Runner selbst baut KEINE artifacts-Referenz mehr — er
+      // übergibt nur den Projekt-Klon-Pfad, der Store entscheidet (AC3).
+      expect(input.artifacts).toBeUndefined();
+      expect(input.artifactsSourceDir).toBe('/ws/dev-gui');
 
       const run = runner.getRun(runId);
       expect(run.status).toBe('passed');
@@ -646,7 +652,7 @@ describe('RegressionRunner — regression-run.md', () => {
       expect(record.mock.calls[0][0].scopeTyp).toBe('gesamt');
     });
 
-    it('roter Lauf (failed>0) -> status failed + artifacts.htmlReport gesetzt', async () => {
+    it('roter Lauf (failed>0) -> status failed + artifactsSourceDir gesetzt (S-327: Store entscheidet über artifacts)', async () => {
       const record = jest.fn(async (input) => input);
       const runPlaywright = jest.fn(async () => ({ exitCode: 1 }));
       const readFile = jest.fn(async (p) => {
@@ -663,7 +669,8 @@ describe('RegressionRunner — regression-run.md', () => {
       await flush();
 
       expect(record.mock.calls[0][0].status).toBe('failed');
-      expect(record.mock.calls[0][0].artifacts).toEqual({ htmlReport: 'playwright-report' });
+      expect(record.mock.calls[0][0].artifacts).toBeUndefined();
+      expect(record.mock.calls[0][0].artifactsSourceDir).toBe('/ws/dev-gui');
       expect(runner.getRun(runId).status).toBe('failed');
     });
 
