@@ -24,6 +24,17 @@
  *         hinausführt (Race/externe Manipulation nach dem Setzen) → missing-projekte, BEVOR das
  *         externe Zielverzeichnis je gelistet wird (Confinement-Bypass-Regression).
  *
+ * Covers (obsidian-vault-config v2, S-330 — Projekt-Unterordner konfigurierbar):
+ *   AC2/AC3/AC5 — `resolveProjekteSubdir`: Default „Projekte" ohne Env; Env
+ *         `OBSIDIAN_PROJEKTE_SUBDIR` (inkl. Mehrebenen-Segment) überschreibt Default;
+ *         `deps.projekteSubdir`-Override schlägt Env (Testmuster analog `resolveMountRoot`).
+ *   AC2/AC5 — `validateObsidianVaultPath`/`listObsidianVaultProjects` mit Mehrebenen-Segment
+ *         („300 Projekte/Studis Softwareschmiede") korrekt aufgelöst/gelistet (echtes fs).
+ *   AC5 — Rückwärtskompatibilität: kein Env gesetzt → weiterhin Default „Projekte" wirksam.
+ *   AC3 — Traversal-Schutz für das konfigurierte Segment selbst: ein Segment mit `..`, das aus
+ *         dem Vault hinausführt, wird abgewiesen (`missing-projekte`), BEVOR es als gültig gilt
+ *         (realpath-Confinement-Check, gleiche Technik wie für Projekt-Einträge).
+ *
  * Strategy:
  *   - CredentialStore.read/write/deleteObsidianVaultPath: Unit-Tests mit echtem CredentialStore
  *     (tmp-Dir, kein Master-Key nötig da meta-only).
@@ -49,6 +60,8 @@ import {
   resolveMountRoot,
   listObsidianVaultProjects,
   PROJEKTE_SUBDIR,
+  resolveProjekteSubdir,
+  OBSIDIAN_PROJEKTE_SUBDIR_ENV,
 } from '../src/obsidianVaultPath.js';
 import { obsidianVaultPathRouter } from '../src/obsidianVaultPathRouter.js';
 import { AuditStore } from '../src/AuditStore.js';
@@ -264,6 +277,56 @@ describe('validateObsidianVaultPath — AC3 Containment/Symlink (injiziert)', ()
   });
 });
 
+// ── validateObsidianVaultPath — konfigurierbarer Projekt-Unterordner (S-330/v2) ──
+
+describe('validateObsidianVaultPath — konfigurierbarer Projekt-Unterordner (echtes fs, S-330/v2)', () => {
+  let vaultDir;
+
+  afterEach(async () => {
+    if (vaultDir) await rm(vaultDir, { recursive: true, force: true });
+    vaultDir = null;
+  });
+
+  it('AC2/AC5 — Mehrebenen-Segment „300 Projekte/Studis Softwareschmiede" wird korrekt geprüft', async () => {
+    vaultDir = join(tmpdir(), `obs-vault-multi-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(join(vaultDir, '300 Projekte', 'Studis Softwareschmiede'), { recursive: true });
+    const { resolvedPath } = await validateObsidianVaultPath(vaultDir, {
+      projekteSubdir: '300 Projekte/Studis Softwareschmiede',
+    });
+    expect(resolvedPath.endsWith(vaultDir.split('/').pop())).toBe(true);
+  });
+
+  it('AC2/AC5 — Mehrebenen-Segment fehlt (nur erste Ebene existiert) → missing-projekte', async () => {
+    vaultDir = join(tmpdir(), `obs-vault-multi-missing-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(join(vaultDir, '300 Projekte'), { recursive: true });
+    await expect(
+      validateObsidianVaultPath(vaultDir, { projekteSubdir: '300 Projekte/Studis Softwareschmiede' }),
+    ).rejects.toMatchObject({ errorClass: 'missing-projekte' });
+  });
+
+  it('AC3 — Traversal: Segment mit „..", das aus dem Vault hinausführt → missing-projekte, nicht wirksam (injiziert)', async () => {
+    const deps = {
+      realpath: async (p) => {
+        // Vault selbst existiert; das Projekte-Segment „../../etc" löst (simuliert) außerhalb auf.
+        if (p.includes('..')) return '/etc';
+        return p;
+      },
+      stat: async () => ({ isDirectory: () => true }),
+      access: async () => {},
+      projekteSubdir: '../../etc',
+    };
+    await expect(validateObsidianVaultPath('/vault', deps))
+      .rejects.toMatchObject({ errorClass: 'missing-projekte' });
+  });
+
+  it('AC5 — kein Env/Override gesetzt → Default „Projekte" bleibt wirksam (Rückwärtskompatibilität)', async () => {
+    vaultDir = join(tmpdir(), `obs-vault-default-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(join(vaultDir, 'Projekte'), { recursive: true });
+    const { resolvedPath } = await validateObsidianVaultPath(vaultDir);
+    expect(resolvedPath.endsWith(vaultDir.split('/').pop())).toBe(true);
+  });
+});
+
 // ── resolveMountRoot (AC3/GET mountRoot) ─────────────────────────────────────
 
 describe('resolveMountRoot — Env-Auflösung', () => {
@@ -282,6 +345,38 @@ describe('resolveMountRoot — Env-Auflösung', () => {
   it('deps.mountRoot override schlägt Env', () => {
     process.env.OBSIDIAN_VAULT_DIR = '/env-vault';
     expect(resolveMountRoot({ mountRoot: '/override' })).toBe('/override');
+  });
+});
+
+// ── resolveProjekteSubdir — Env-Auflösung (AC2/AC3/AC5, S-330/v2) ───────────
+
+describe('resolveProjekteSubdir — Env-Auflösung (S-330/v2)', () => {
+  afterEach(() => { delete process.env[OBSIDIAN_PROJEKTE_SUBDIR_ENV]; });
+
+  it('gibt Default „Projekte" zurück wenn OBSIDIAN_PROJEKTE_SUBDIR ungesetzt (Rückwärtskompatibilität)', () => {
+    delete process.env[OBSIDIAN_PROJEKTE_SUBDIR_ENV];
+    expect(resolveProjekteSubdir()).toBe(PROJEKTE_SUBDIR);
+    expect(resolveProjekteSubdir()).toBe('Projekte');
+  });
+
+  it('gibt getrimmten Env-Wert zurück wenn gesetzt (einfaches Segment)', () => {
+    process.env[OBSIDIAN_PROJEKTE_SUBDIR_ENV] = '  Ideen  ';
+    expect(resolveProjekteSubdir()).toBe('Ideen');
+  });
+
+  it('gibt Mehrebenen-Segment unverändert zurück (z. B. „300 Projekte/Studis Softwareschmiede")', () => {
+    process.env[OBSIDIAN_PROJEKTE_SUBDIR_ENV] = '300 Projekte/Studis Softwareschmiede';
+    expect(resolveProjekteSubdir()).toBe('300 Projekte/Studis Softwareschmiede');
+  });
+
+  it('leerer/whitespace Env-Wert → Default „Projekte" (kein leeres Segment wirksam)', () => {
+    process.env[OBSIDIAN_PROJEKTE_SUBDIR_ENV] = '   ';
+    expect(resolveProjekteSubdir()).toBe('Projekte');
+  });
+
+  it('deps.projekteSubdir override schlägt Env', () => {
+    process.env[OBSIDIAN_PROJEKTE_SUBDIR_ENV] = '300 Projekte/Studis Softwareschmiede';
+    expect(resolveProjekteSubdir({ projekteSubdir: 'Override-Ordner' })).toBe('Override-Ordner');
   });
 });
 
@@ -389,6 +484,61 @@ describe('listObsidianVaultProjects — AC5/AC3 (echtes fs)', () => {
     await symlink(join(projekteDir, 'nicht-existent'), join(projekteDir, 'kaputt'));
     const projects = await listObsidianVaultProjects(vaultDir);
     expect(projects.map((p) => p.name)).toEqual(['Gesund']);
+  });
+
+  it('AC2/AC5 (S-330/v2) — Mehrebenen-Segment „300 Projekte/Studis Softwareschmiede" wird korrekt gelistet', async () => {
+    const multiVaultDir = join(tmpdir(), `obs-list-multi-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    const multiProjekteDir = join(multiVaultDir, '300 Projekte', 'Studis Softwareschmiede');
+    await mkdir(join(multiProjekteDir, 'Agent Flow'), { recursive: true });
+    await mkdir(join(multiProjekteDir, 'dev-gui'), { recursive: true });
+    try {
+      const projects = await listObsidianVaultProjects(multiVaultDir, {
+        projekteSubdir: '300 Projekte/Studis Softwareschmiede',
+      });
+      expect(projects.map((p) => p.name)).toEqual(['Agent Flow', 'dev-gui']);
+    } finally {
+      await rm(multiVaultDir, { recursive: true, force: true });
+    }
+  });
+
+  it('AC5 — kein deps.projekteSubdir/Env gesetzt → Default „Projekte" bleibt wirksam (Rückwärtskompatibilität)', async () => {
+    await mkdir(join(projekteDir, 'Idee A'));
+    const projects = await listObsidianVaultProjects(vaultDir);
+    expect(projects.map((p) => p.name)).toEqual(['Idee A']);
+  });
+
+  it('AC3 (S-330/v2) — Traversal: konfiguriertes Segment mit „..", das aus dem Vault hinausführt → missing-projekte, externes Ziel NICHT gelistet', async () => {
+    const outsideTarget = join(tmpdir(), `obs-list-traversal-outside-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(join(outsideTarget, 'secret-projekt'), { recursive: true });
+    try {
+      // deps.realpath simuliert die Auflösung eines „..`-Segments, das aus dem Vault
+      // hinausführt (die reale fs-Auflösung von „..` würde ebenso außerhalb landen).
+      const deps = {
+        realpath: async (p) => {
+          if (p === vaultDir) return vaultDir;
+          return outsideTarget;
+        },
+        projekteSubdir: '../../../etc',
+      };
+      await expect(listObsidianVaultProjects(vaultDir, deps))
+        .rejects.toMatchObject({ errorClass: 'missing-projekte' });
+    } finally {
+      await rm(outsideTarget, { recursive: true, force: true });
+    }
+  });
+
+  it('AC3 (S-330/v2) — Traversal mit echtem fs: „..``-Segment führt real aus dem Vault hinaus → missing-projekte', async () => {
+    // Sibling-Verzeichnis NEBEN vaultDir (nicht darunter) — reales Escape-Ziel ohne Mocks.
+    const parentDir = join(vaultDir, '..');
+    const siblingName = `obs-list-real-sibling-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    await mkdir(join(parentDir, siblingName, 'secret-projekt'), { recursive: true });
+    try {
+      await expect(
+        listObsidianVaultProjects(vaultDir, { projekteSubdir: `../${siblingName}` }),
+      ).rejects.toMatchObject({ errorClass: 'missing-projekte' });
+    } finally {
+      await rm(join(parentDir, siblingName), { recursive: true, force: true });
+    }
   });
 });
 
@@ -861,6 +1011,52 @@ describe('E2E — GET /api/settings/obsidian-vault/projects mit echtem fs (AC5/A
     const res = await get(port, '/api/settings/obsidian-vault/projects');
     expect(res.status).toBe(404);
     expect(res.body.error).toBeTruthy();
+  });
+});
+
+// ── E2E: OBSIDIAN_PROJEKTE_SUBDIR (Mehrebenen-Segment, HTTP-Ebene) — S-330/v2 ──
+
+describe('E2E — GET /api/settings/obsidian-vault/projects mit OBSIDIAN_PROJEKTE_SUBDIR (S-330/v2)', () => {
+  let server, port, storeDir, vaultDir, store;
+
+  beforeEach(async () => {
+    process.env.DEV_NO_ACCESS = '1';
+    storeDir = join(tmpdir(), `obs-e2e-subdir-cred-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    vaultDir = join(tmpdir(), `obs-e2e-subdir-vault-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(join(vaultDir, '300 Projekte', 'Studis Softwareschmiede'), { recursive: true });
+    store = new CredentialStore({ dir: storeDir, masterKey: null });
+    await store.writeObsidianVaultPath(vaultDir);
+    process.env[OBSIDIAN_PROJEKTE_SUBDIR_ENV] = '300 Projekte/Studis Softwareschmiede';
+  });
+
+  afterEach(async () => {
+    if (server) await closeServer(server);
+    server = null;
+    delete process.env.DEV_NO_ACCESS;
+    delete process.env[OBSIDIAN_PROJEKTE_SUBDIR_ENV];
+    await rm(storeDir, { recursive: true, force: true });
+    await rm(vaultDir, { recursive: true, force: true }).catch(() => {});
+  });
+
+  it('AC2/AC5 — echter Vault mit Mehrebenen-Segment „300 Projekte/Studis Softwareschmiede" → 200, korrekt gelistet', async () => {
+    const projekteDir = join(vaultDir, '300 Projekte', 'Studis Softwareschmiede');
+    await mkdir(join(projekteDir, 'Agent Flow'));
+    await mkdir(join(projekteDir, 'dev-gui'));
+    ({ server, port } = await startServer(makeApp(store, new AuditStore())));
+    const res = await get(port, '/api/settings/obsidian-vault/projects');
+    expect(res.status).toBe(200);
+    expect(res.body.projects.map((p) => p.name)).toEqual(['Agent Flow', 'dev-gui']);
+    const resolvedProjekteDir = await fsRealpath(projekteDir);
+    for (const p of res.body.projects) {
+      expect(p.path.startsWith(resolvedProjekteDir)).toBe(true);
+    }
+  });
+
+  it('AC2 — PUT gegen denselben Vault mit Mehrebenen-Segment → 200, validiert erfolgreich', async () => {
+    ({ server, port } = await startServer(makeApp(store, new AuditStore())));
+    const res = await put(port, '/api/settings/obsidian-vault-path', { path: vaultDir });
+    expect(res.status).toBe(200);
+    expect(res.body.configured).toBe(true);
   });
 });
 

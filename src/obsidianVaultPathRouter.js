@@ -17,8 +17,9 @@
  *     → 403 { error }                               — keine Berechtigung (AC7)
  *     → 500 { error }                               — Audit/Store-Fehler
  *   GET    /api/settings/obsidian-vault/projects  (obsidian-vault-config AC5, S-246)
- *     → 200 { projects: Array<{ name, path }> }  — direkte Unterordner unter <vault>/Projekte,
- *       nur Verzeichnisse, keine Dot-Ordner, stabil sortiert; jeder `path` vault-confined (AC3).
+ *     → 200 { projects: Array<{ name, path }> }  — direkte Unterordner unter
+ *       <vault>/<konfigurierter Projekt-Unterordner> (Default „Projekte", `OBSIDIAN_PROJEKTE_SUBDIR`,
+ *       v2/S-330), nur Verzeichnisse, keine Dot-Ordner, stabil sortiert; jeder `path` vault-confined (AC3).
  *     → 409 { configured: false }                — kein Vault konfiguriert
  *     → 404 { error }                             — Vault/„Projekte" (mehr) nicht erreichbar (Race/AC2)
  *       Read-only; hinter Access-Mauer, kein zusätzlicher Rollencheck (AC7).
@@ -32,7 +33,8 @@
  *   - Mutierende Endpunkte hinter AccessGuard + CRED_ADMIN_EMAILS-Linie (AC7 / ADR-007).
  *   - Audit-First: Intent-Eintrag VOR Mutation; Audit-Write-Fehler → Mutation unterbleibt (AC6).
  *   - Pfad wird als Klartext-Betreiber-Info behandelt (kein Secret in Log/Audit/Response).
- *   - Projekt-Auflistung strikt auf `<vault>/Projekte` confined (Symlink-/Race-sicher, AC3/AC5).
+ *   - Projekt-Auflistung strikt auf `<vault>/<konfigurierter Projekt-Unterordner>` confined
+ *     (Symlink-/Race-sicher, AC3/AC5).
  *
  * @module obsidianVaultPathRouter
  */
