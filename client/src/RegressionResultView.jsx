@@ -27,22 +27,48 @@
  *          grün/rot + Fehlermeldung bei Rot). Ist `ctrf`/`results`/`tests`
  *          nicht das erwartete Format (unlesbar/teilweise), zeigt der
  *          Drilldown eine degradierte Meldung statt zu crashen (Edge-Case).
- *   AC6 — Debug-Artefakt-Zugriff (Link auf
- *          `GET .../regression-runs/:runId/artifacts/`) NUR wenn
- *          `run.status === 'failed'` — grüne Läufe zeigen keinen Link (kein
- *          toter Link, Edge-Case „Artefakt-Zugriff auf einen grünen ... Lauf
- *          → 404, kein Leak" wird so vermieden, statt erst serverseitig
- *          sichtbar zu werden).
+ *   AC2/AC6 (S-328) — Debug-Artefakte sind für JEDEN Lauf (unabhängig von
+ *          grün/rot) zugänglich, sofern seine Artefakt-Ablage noch existiert.
+ *          ZWEI GETRENNTE Signale (Review-Fix Iteration 2 — `htmlReport` und
+ *          `testResults` werden Store-seitig UNABHÄNGIG voneinander kopiert,
+ *          zwei separate best-effort `cp()`-Aufrufe, s.
+ *          RegressionResultStore.js `#copyArtifacts`; ein abgebrochener/
+ *          getimeouteter Lauf kann `testResults` OHNE `htmlReport` haben —
+ *          der Report wird erst am Lauf-Ende geschrieben):
+ *            - **Screenshot-Galerie**: je Testfall werden dessen
+ *              `image/*`-Attachments (`tc.attachments`, S-327) inline als
+ *              `<img>` gerendert (Alt-Text: Testfallname + „Screenshot") —
+ *              gated auf `runDetail.artifacts.testResults` (die Attachments
+ *              liegen unter `test-results/`), NICHT auf `htmlReport`.
+ *            - **Video**: je Testfall dessen `video/webm`-Attachment (falls
+ *              vorhanden — laut Store-Doku i.d.R. nur bei Rot) als
+ *              `<video controls>` — ebenfalls gated auf `testResults`.
+ *            - **Trace-Viewer-Link**: Link auf
+ *              `GET .../regression-runs/:runId/artifacts/` (HTML-Report-
+ *              Index) — bewusst NICHT der öffentliche
+ *              `trace.playwright.dev`-Viewer, der die `trace.zip` selbst
+ *              laden müsste und hinter Cloudflare Access dafür nicht
+ *              erreichbar wäre (Access-Redirect/CORS, tote Verlinkung); der
+ *              mitgelieferte HTML-Report hat einen eingebauten Trace-Viewer
+ *              und kommt aus derselben, access-geschützten Ablage — gated
+ *              auf `runDetail.artifacts.htmlReport` (NICHT `testResults`).
+ *          Fehlt `testResults` (grüner Lauf ohne Kopie, geprunt, oder der
+ *          o.g. Teilzustand ohne `testResults`), zeigt die Ansicht KEINE
+ *          Galerie/Video, sondern — nur wenn mindestens ein Testfall
+ *          überhaupt Attachments referenziert (sonst gäbe es nichts zu
+ *          vermissen) — einen Hinweis „Screenshots/Video nicht mehr
+ *          vorhanden.". Fehlt `htmlReport`, entfällt NUR der Report-Link
+ *          (unabhängig von der Galerie).
  *   AC7 (S-326) — Frühausfall-Darstellung: ein Lauf mit `status:
  *          "precondition-error"|"error"` ([[regression-result-store]] AC1b)
  *          erscheint in der Lauf-Liste UND im Drilldown als eigener,
  *          dritter Zustand „⚠ Nicht ausgeführt" (Icon+Text+Farbe, NIE grün/
  *          NIE rot) — sein `reason` erscheint im Drilldown als Fehlgrund-Text
  *          (`role="alert"`, generischer Hinweis „Kein Fehlgrund hinterlegt."
- *          falls `reason` fehlt), KEIN Artefakt-Link (AC6 gilt nur für
- *          `failed`), KEINE Testfall-Liste (kein CTRF vorhanden — `ctrf` ist
- *          `null`). Im Suite-Trend (AC4) zählt er als eigenes ⚠-Zeichen, NIE
- *          als ✓.
+ *          falls `reason` fehlt), KEIN Artefakt-Link (Playwright lief nie,
+ *          keine Artefakt-Ablage, `artifacts` daher nie gesetzt), KEINE
+ *          Testfall-Liste (kein CTRF vorhanden — `ctrf` ist `null`). Im
+ *          Suite-Trend (AC4) zählt er als eigenes ⚠-Zeichen, NIE als ✓.
  *
  * Edge-Cases (Spec):
  *   - Keine Läufe → Hinweistext „Noch kein Regressionstest gelaufen."
@@ -75,9 +101,12 @@
  *   - Kein Secret/Token im UI — Lauf-/Testfall-Texte kommen 1:1 vom bereits
  *     secret-freien Backend-Contract (`regressionRuns.js`, s. dortige
  *     Modul-Doku „Security (Floor)").
- *   - Artefakt-Link zeigt ausschließlich auf den bereits pfad-confined
- *     Backend-Endpunkt (`.../artifacts/`) — kein Client-seitiger Pfadbau
- *     über Nutzereingabe.
+ *   - Artefakt-Link/Bild-/Video-`src` zeigen ausschließlich auf den bereits
+ *     pfad-confined Backend-Endpunkt (`.../artifacts/<attachment.path>`) —
+ *     kein Client-seitiger Pfadbau über Nutzereingabe; `attachment.path`
+ *     kommt 1:1 vom Backend (bereits relativ zur Lauf-Ablage, S-327) und
+ *     wird nur je Pfad-Segment `encodeURIComponent`-kodiert, nicht
+ *     interpretiert/zusammengesetzt.
  */
 
 import { useState, useRef, useEffect, useCallback } from 'react';
@@ -183,6 +212,36 @@ function trendGlyph(status) {
   if (status === 'failed') return { icon: '✗', style: styles.trendDotFailed, label: 'Fehlgeschlagen' };
   if (status === 'passed') return { icon: '✓', style: styles.trendDotPassed, label: 'Erfolgreich' };
   return { icon: '⚠', style: styles.trendDotNotRun, label: 'Nicht ausgeführt' };
+}
+
+/**
+ * AC2/AC6 (S-328): baut die Artefakt-URL für ein CTRF-Attachment (oder den
+ * HTML-Report-Index ohne Rest-Pfad) — jedes Pfad-Segment einzeln
+ * `encodeURIComponent`-kodiert, kein Zusammensetzen über die vom Backend
+ * bereits pfad-confined gelieferte Struktur hinaus (Security Floor).
+ *
+ * @param {string} projectSlug
+ * @param {string} runId
+ * @param {string} [relativePath] relativer Pfad innerhalb der Lauf-Artefakt-Ablage (z.B. `attachment.path`)
+ * @returns {string}
+ */
+function artifactUrl(projectSlug, runId, relativePath) {
+  const base = `/api/projects/${encodeURIComponent(projectSlug)}/regression-runs/${encodeURIComponent(runId)}/artifacts/`;
+  if (!relativePath) return base;
+  const segments = String(relativePath).split('/').filter(Boolean).map(encodeURIComponent);
+  return base + segments.join('/');
+}
+
+/**
+ * AC6 (S-328): filtert die Attachments eines Testfalls nach Content-Type.
+ *
+ * @param {Array<{name?: string, contentType?: string, path?: string}>|undefined} attachments
+ * @param {(contentType: string) => boolean} predicate
+ * @returns {Array<{name?: string, contentType?: string, path?: string}>}
+ */
+function filterAttachments(attachments, predicate) {
+  if (!Array.isArray(attachments)) return [];
+  return attachments.filter((a) => typeof a?.path === 'string' && a.path && typeof a?.contentType === 'string' && predicate(a.contentType));
 }
 
 function SuiteTrend({ runs }) {
@@ -291,6 +350,20 @@ export function RegressionResultView({ projectSlug, onClose, triggerRef, fetchFn
   // statt Crash (kein `ctrf`, kein `results`, kein `tests`-Array).
   const testCases = Array.isArray(runDetail?.ctrf?.results?.tests) ? runDetail.ctrf.results.tests : null;
 
+  // AC2/AC6 (S-328, Review-Fix Iteration 2): `htmlReport` (Report-Link) und
+  // `testResults` (Screenshot-Galerie/Video, liegen unter test-results/)
+  // werden Store-seitig UNABHÄNGIG voneinander kopiert (zwei separate,
+  // best-effort `cp()`-Aufrufe — s. RegressionResultStore.js `#copyArtifacts`)
+  // und können deshalb AUSEINANDERFALLEN (z.B. ein abgebrochener/
+  // getimeouteter Lauf hat `testResults`, aber der erst am Lauf-Ende
+  // geschriebene `htmlReport` fehlt noch). Zwei getrennte Signale statt
+  // eines gemeinsamen — sonst zeigt ein Teilzustand fälschlich GAR NICHTS
+  // (weder Link noch physisch vorhandene Screenshots).
+  const hasHtmlReport = Boolean(runDetail?.artifacts?.htmlReport);
+  const hasTestResults = Boolean(runDetail?.artifacts?.testResults);
+  const anyAttachmentsReferenced = testCases !== null
+    && testCases.some((tc) => Array.isArray(tc?.attachments) && tc.attachments.length > 0);
+
   const titleId = 'regression-result-view-title';
 
   return (
@@ -388,17 +461,27 @@ export function RegressionResultView({ projectSlug, onClose, triggerRef, fetchFn
                   {runDetail.suite} — {formatTimestamp(runDetail.startedAt)}
                 </h3>
 
-                {/* AC6: Debug-Artefakt-Zugriff NUR bei roten Läufen (kein toter Link bei Grün). */}
-                {runDetail.status === 'failed' && (
+                {/* AC2/AC6 (S-328): Debug-Artefakt-Zugriff für JEDEN Status,
+                    solange die Artefakt-Ablage noch existiert (kein
+                    Rot-Only-Gate mehr) — kein toter Link bei fehlender
+                    Ablage. Report-Link EIGENSTÄNDIG von der Galerie/Video
+                    gegated (Review-Fix Iteration 2, s. hasHtmlReport/
+                    hasTestResults oben). */}
+                {hasHtmlReport && (
                   <a
-                    href={`/api/projects/${encodeURIComponent(projectSlug)}/regression-runs/${encodeURIComponent(runDetail.runId)}/artifacts/`}
+                    href={artifactUrl(projectSlug, runDetail.runId)}
                     target="_blank"
                     rel="noopener noreferrer"
                     style={styles.artifactLink}
                     data-testid="regression-result-artifact-link"
                   >
-                    Debug-Artefakte (HTML-Report) öffnen ↗
+                    Debug-Artefakte (HTML-Report, inkl. Trace-Viewer) öffnen ↗
                   </a>
+                )}
+                {!hasTestResults && anyAttachmentsReferenced && (
+                  <p style={styles.hint} data-testid="regression-result-artifacts-pruned">
+                    Screenshots/Video nicht mehr vorhanden (Artefakte bereits bereinigt).
+                  </p>
                 )}
 
                 {/* AC7 (S-326): Frühausfall — kein CTRF, kein Artefakt; statt
@@ -425,6 +508,15 @@ export function RegressionResultView({ projectSlug, onClose, triggerRef, fetchFn
                       <ul style={styles.testCaseList} data-testid="regression-result-testcases">
                         {testCases.map((tc, idx) => {
                           const isFailed = tc?.status === 'failed';
+                          // AC6 (S-328, Review-Fix Iteration 2): Screenshot-
+                          // Galerie/Video gated auf `hasTestResults` (NICHT
+                          // `hasHtmlReport`) — die Attachments liegen unter
+                          // test-results/, unabhängig davon ob der HTML-Report
+                          // (noch) existiert. Sonst tote <img>-URLs (404) bzw.
+                          // fälschlich gar keine Galerie im Teilzustand
+                          // „nur testResults vorhanden".
+                          const screenshots = hasTestResults ? filterAttachments(tc?.attachments, (ct) => ct.startsWith('image/')) : [];
+                          const videos = hasTestResults ? filterAttachments(tc?.attachments, (ct) => ct === 'video/webm') : [];
                           return (
                             <li key={`${tc?.name ?? 'test'}-${idx}`} style={styles.testCaseItem}>
                               <span style={styles.testCaseRow}>
@@ -435,6 +527,29 @@ export function RegressionResultView({ projectSlug, onClose, triggerRef, fetchFn
                                 <p role="alert" style={styles.testCaseMessage} data-testid="regression-result-testcase-message">
                                   {tc.message}
                                 </p>
+                              )}
+                              {(screenshots.length > 0 || videos.length > 0) && (
+                                <div style={styles.attachments} data-testid="regression-result-attachments">
+                                  {screenshots.map((a, aIdx) => (
+                                    <img
+                                      key={`${a.path}-${aIdx}`}
+                                      src={artifactUrl(projectSlug, runDetail.runId, a.path)}
+                                      alt={`${tc?.name ?? 'Testfall'} — Screenshot`}
+                                      style={styles.screenshot}
+                                      data-testid="regression-result-screenshot"
+                                    />
+                                  ))}
+                                  {videos.map((a, aIdx) => (
+                                    <video
+                                      key={`${a.path}-${aIdx}`}
+                                      controls
+                                      style={styles.video}
+                                      data-testid="regression-result-video"
+                                    >
+                                      <source src={artifactUrl(projectSlug, runDetail.runId, a.path)} type={a.contentType} />
+                                    </video>
+                                  ))}
+                                </div>
                               )}
                             </li>
                           );
@@ -662,6 +777,24 @@ const styles = {
     margin: '6px 0 0',
     fontSize: 12,
     color: '#f87171',
+  },
+  attachments: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 8,
+  },
+  screenshot: {
+    maxWidth: 160,
+    maxHeight: 120,
+    borderRadius: 4,
+    border: '1px solid #1f2937',
+    objectFit: 'cover',
+  },
+  video: {
+    maxWidth: 240,
+    borderRadius: 4,
+    border: '1px solid #1f2937',
   },
   buttonRow: {
     display: 'flex',

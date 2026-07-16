@@ -17,8 +17,20 @@
  *          `ctrf.results.tests[]` (Name + grün/rot + Fehlermeldung bei Rot).
  *          Unlesbares/unerwartetes CTRF-Format → degradierte Meldung statt
  *          Crash.
- *   AC6 — Debug-Artefakt-Link NUR wenn `status === 'failed'`; grüne Läufe
- *          zeigen keinen Link (kein toter Link).
+ *   AC2/AC6 (S-328) — Debug-Artefakte (HTML-Report-Link inkl. Trace-Viewer,
+ *          Screenshot-Galerie je Testfall, Video je Testfall) sind für JEDEN
+ *          Status (grün UND rot) zugänglich, solange die jeweils benötigte
+ *          Artefakt-Referenz vorhanden ist. Review-Fix Iteration 2: ZWEI
+ *          GETRENNTE Gates, weil `htmlReport`/`testResults` Store-seitig
+ *          unabhängig voneinander kopiert werden (Teilzustand möglich) —
+ *          Report-Link hängt NUR an `run.artifacts.htmlReport`; Galerie/Video
+ *          hängen NUR an `run.artifacts.testResults` (die Attachments liegen
+ *          unter `test-results/`). Fehlt `testResults` (nie erfasst /
+ *          geprunt), zeigt die Ansicht — nur wenn Testfälle überhaupt
+ *          Attachments referenzieren — einen Hinweis „Screenshots/Video
+ *          nicht mehr vorhanden." statt toter `<img>`-URLs; fehlt (nur)
+ *          `htmlReport`, entfällt nur der Report-Link, unabhängig von der
+ *          Galerie.
  *   AC7 (S-326) — Frühausfall-Darstellung: ein Lauf mit `status:
  *          "precondition-error"|"error"` erscheint als eigener dritter
  *          Zustand „⚠ Nicht ausgeführt" (NIE grün/NIE rot) in Liste UND
@@ -68,7 +80,10 @@ const RUN_FAILED = {
   startedAt: '2026-07-07T10:00:00.000Z',
   durationMs: 6100,
   counts: { passed: 3, failed: 2, total: 5 },
-  artifacts: { htmlReport: 'playwright-report' },
+  // Review-Fix Iteration 2: htmlReport UND testResults gesetzt (Regelfall,
+  // vollständige Artefakt-Ablage) — die Teilzustand-Tests (nur EIN Teil)
+  // überschreiben `artifacts` gezielt.
+  artifacts: { htmlReport: 'playwright-report', testResults: 'test-results' },
 };
 // AC7 (S-326): Frühausfall-Datensatz — kein CTRF, ctrf:null, reason gesetzt.
 const RUN_NOT_RUN = {
@@ -305,10 +320,10 @@ describe('RegressionResultView — AC5: Drilldown', () => {
   });
 });
 
-// ── AC6: Debug-Artefakt-Zugriff nur bei Rot ─────────────────────────────────
+// ── AC2/AC6 (S-328): Debug-Artefakte bei JEDEM Status, gated auf Vorhandensein ──
 
-describe('RegressionResultView — AC6: Debug-Artefakt-Zugriff nur bei Rot', () => {
-  it('shows the artifact link for a failed run', async () => {
+describe('RegressionResultView — AC2/AC6 (S-328): Debug-Artefakt-Zugriff bei jedem Status', () => {
+  it('shows the artifact link for a failed run with artifacts', async () => {
     const fetchFn = makeFetch({
       runDetails: {
         'run-1': { ...RUN_FAILED, ctrf: { results: { tests: [] } } },
@@ -327,7 +342,27 @@ describe('RegressionResultView — AC6: Debug-Artefakt-Zugriff nur bei Rot', () 
     });
   });
 
-  it('does NOT show the artifact link for a passed run (no dead link)', async () => {
+  it('S-328: also shows the artifact link for a PASSED run with artifacts (Rot-Only-Gate ist aufgehoben)', async () => {
+    const passedWithArtifacts = { ...RUN_PASSED, artifacts: { htmlReport: 'playwright-report' } };
+    const fetchFn = makeFetch({
+      runDetails: {
+        'run-2': { ...passedWithArtifacts, ctrf: { results: { tests: [{ name: 'a', status: 'passed' }] } } },
+      },
+    });
+    await renderView(fetchFn);
+
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="regression-result-run-run-2"]'));
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      const link = document.querySelector('[data-testid="regression-result-artifact-link"]');
+      expect(link).toBeTruthy();
+      expect(link.getAttribute('href')).toMatch(/\/regression-runs\/run-2\/artifacts\//);
+    });
+  });
+
+  it('does NOT show the artifact link for a run WITHOUT artifacts (kein toter Link), no hint when no attachments referenced', async () => {
     const fetchFn = makeFetch({
       runDetails: {
         'run-2': { ...RUN_PASSED, ctrf: { results: { tests: [{ name: 'a', status: 'passed' }] } } },
@@ -343,6 +378,225 @@ describe('RegressionResultView — AC6: Debug-Artefakt-Zugriff nur bei Rot', () 
       expect(document.querySelector('[data-testid="regression-result-testcases"]')).toBeTruthy();
     });
     expect(document.querySelector('[data-testid="regression-result-artifact-link"]')).toBeNull();
+    expect(document.querySelector('[data-testid="regression-result-artifacts-pruned"]')).toBeNull();
+  });
+
+  it('Edge-Case (gepruneter Lauf): keine artifacts, aber Testfälle referenzieren Attachments → Hinweis statt totem Link/toter Galerie', async () => {
+    const fetchFn = makeFetch({
+      runDetails: {
+        'run-2': {
+          ...RUN_PASSED,
+          ctrf: {
+            results: {
+              tests: [{ name: 'a', status: 'passed', attachments: [{ name: 'screenshot', contentType: 'image/png', path: 'test-results/a/screenshot.png' }] }],
+            },
+          },
+        },
+      },
+    });
+    await renderView(fetchFn);
+
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="regression-result-run-run-2"]'));
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="regression-result-artifacts-pruned"]')).toBeTruthy();
+    });
+    expect(document.querySelector('[data-testid="regression-result-artifacts-pruned"]').textContent).toMatch(/Screenshots\/Video nicht mehr vorhanden/);
+    expect(document.querySelector('[data-testid="regression-result-artifact-link"]')).toBeNull();
+    expect(document.querySelector('[data-testid="regression-result-screenshot"]')).toBeNull();
+  });
+
+  // ── Review-Fix Iteration 2: htmlReport/testResults sind ZWEI unabhängige
+  //    Gates (Store kopiert beide separat, best-effort je Teil) ────────────
+
+  it('Teilzustand: NUR testResults (kein htmlReport) → Galerie sichtbar, KEIN Report-Link', async () => {
+    const fetchFn = makeFetch({
+      runDetails: {
+        'run-1': {
+          ...RUN_FAILED,
+          artifacts: { testResults: 'test-results' },
+          ctrf: {
+            results: {
+              tests: [{ name: 'checkout fails', status: 'failed', attachments: [{ name: 's', contentType: 'image/png', path: 'test-results/checkout/shot.png' }] }],
+            },
+          },
+        },
+      },
+    });
+    await renderView(fetchFn);
+
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="regression-result-run-run-1"]'));
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="regression-result-screenshot"]')).toBeTruthy();
+    });
+    expect(document.querySelector('[data-testid="regression-result-artifact-link"]')).toBeNull();
+    expect(document.querySelector('[data-testid="regression-result-artifacts-pruned"]')).toBeNull();
+  });
+
+  it('Teilzustand: NUR htmlReport (kein testResults) → Report-Link sichtbar, KEINE Galerie (Hinweis statt totem <img>)', async () => {
+    const fetchFn = makeFetch({
+      runDetails: {
+        'run-1': {
+          ...RUN_FAILED,
+          artifacts: { htmlReport: 'playwright-report' },
+          ctrf: {
+            results: {
+              tests: [{ name: 'checkout fails', status: 'failed', attachments: [{ name: 's', contentType: 'image/png', path: 'test-results/checkout/shot.png' }] }],
+            },
+          },
+        },
+      },
+    });
+    await renderView(fetchFn);
+
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="regression-result-run-run-1"]'));
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      const link = document.querySelector('[data-testid="regression-result-artifact-link"]');
+      expect(link).toBeTruthy();
+    });
+    expect(document.querySelector('[data-testid="regression-result-screenshot"]')).toBeNull();
+    expect(document.querySelector('[data-testid="regression-result-artifacts-pruned"]')).toBeTruthy();
+    expect(document.querySelector('[data-testid="regression-result-artifacts-pruned"]').textContent).toMatch(/Screenshots\/Video nicht mehr vorhanden/);
+  });
+});
+
+// ── AC6 (S-328): Screenshot-Galerie ─────────────────────────────────────────
+
+describe('RegressionResultView — AC6 (S-328): Screenshot-Galerie', () => {
+  const runWithScreenshot = {
+    ...RUN_FAILED,
+    ctrf: {
+      results: {
+        tests: [
+          {
+            name: 'checkout fails',
+            status: 'failed',
+            message: 'Timeout waiting for selector',
+            attachments: [
+              { name: 'screenshot', contentType: 'image/png', path: 'test-results/checkout/screenshot.png' },
+            ],
+          },
+        ],
+      },
+    },
+  };
+
+  it('renders an inline <img> per image/* attachment with a meaningful alt text', async () => {
+    const fetchFn = makeFetch({ runDetails: { 'run-1': runWithScreenshot } });
+    await renderView(fetchFn);
+
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="regression-result-run-run-1"]'));
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="regression-result-screenshot"]')).toBeTruthy();
+    });
+
+    const img = document.querySelector('[data-testid="regression-result-screenshot"]');
+    expect(img.getAttribute('src')).toBe('/api/projects/my-project/regression-runs/run-1/artifacts/test-results/checkout/screenshot.png');
+    expect(img.getAttribute('alt')).toMatch(/checkout fails/);
+    expect(img.getAttribute('alt')).toMatch(/Screenshot/);
+  });
+
+  it('encodes each path segment of the attachment path (no client-side path building beyond that)', async () => {
+    const runWithSpecialPath = {
+      ...RUN_FAILED,
+      ctrf: {
+        results: {
+          tests: [{
+            name: 'a',
+            status: 'failed',
+            attachments: [{ name: 's', contentType: 'image/png', path: 'test-results/a b/shot #1.png' }],
+          }],
+        },
+      },
+    };
+    const fetchFn = makeFetch({ runDetails: { 'run-1': runWithSpecialPath } });
+    await renderView(fetchFn);
+
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="regression-result-run-run-1"]'));
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      const img = document.querySelector('[data-testid="regression-result-screenshot"]');
+      expect(img).toBeTruthy();
+      expect(img.getAttribute('src')).toBe('/api/projects/my-project/regression-runs/run-1/artifacts/test-results/a%20b/shot%20%231.png');
+    });
+  });
+
+  it('renders no screenshot for a test case without attachments', async () => {
+    const fetchFn = makeFetch({ runDetails: { 'run-1': { ...RUN_FAILED, ctrf: { results: { tests: [{ name: 'a', status: 'passed' }] } } } } });
+    await renderView(fetchFn);
+
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="regression-result-run-run-1"]'));
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="regression-result-testcases"]')).toBeTruthy();
+    });
+    expect(document.querySelector('[data-testid="regression-result-screenshot"]')).toBeNull();
+  });
+});
+
+// ── AC6 (S-328): Video ───────────────────────────────────────────────────────
+
+describe('RegressionResultView — AC6 (S-328): Video', () => {
+  it('renders a <video controls> for a video/webm attachment', async () => {
+    const runWithVideo = {
+      ...RUN_FAILED,
+      ctrf: {
+        results: {
+          tests: [{
+            name: 'checkout fails',
+            status: 'failed',
+            attachments: [{ name: 'video', contentType: 'video/webm', path: 'test-results/checkout/video.webm' }],
+          }],
+        },
+      },
+    };
+    const fetchFn = makeFetch({ runDetails: { 'run-1': runWithVideo } });
+    await renderView(fetchFn);
+
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="regression-result-run-run-1"]'));
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="regression-result-video"]')).toBeTruthy();
+    });
+    const video = document.querySelector('[data-testid="regression-result-video"]');
+    expect(video.hasAttribute('controls')).toBe(true);
+    const source = video.querySelector('source');
+    expect(source.getAttribute('src')).toBe('/api/projects/my-project/regression-runs/run-1/artifacts/test-results/checkout/video.webm');
+  });
+
+  it('Edge-Case: kein Video-Attachment vorhanden → kein toter Player', async () => {
+    const fetchFn = makeFetch({
+      runDetails: {
+        'run-1': { ...RUN_FAILED, ctrf: { results: { tests: [{ name: 'a', status: 'failed', attachments: [{ name: 's', contentType: 'image/png', path: 'x.png' }] }] } } },
+      },
+    });
+    await renderView(fetchFn);
+
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="regression-result-run-run-1"]'));
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="regression-result-screenshot"]')).toBeTruthy();
+    });
+    expect(document.querySelector('[data-testid="regression-result-video"]')).toBeNull();
   });
 });
 

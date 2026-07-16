@@ -19,14 +19,22 @@
  *
  * Covers (regression-result-view):
  *   AC2 — GET /api/projects/:slug/regression-runs/:runId/artifacts/*splat:
- *          nur bei `status:"failed"` verfügbar (grüner/unbekannter Lauf →
- *          404, kein Leak); dient eine Datei INNERHALB der Lauf-EIGENEN
- *          Artefakt-Ablage aus (200 + Bytes) — S-327: die Basis ist die
- *          Store-eigene Lauf-Ablage (`regressionResultStore.resolveArtifactDir()`),
- *          NICHT mehr der Projekt-Klon. Ohne Rest-Pfad wird der
- *          HTML-Report-Index ausgeliefert (Rückwärtskompatibilität); ein
- *          expliziter Rest-Pfad (z.B. eine CTRF-Attachment-Datei unter
- *          `test-results/…`) wird direkt gegen die Basis aufgelöst.
+ *          S-328: bei JEDEM Status verfügbar (grün UND rot), solange
+ *          MINDESTENS EIN Artefakt-Teil (`artifacts.htmlReport` und/oder
+ *          `artifacts.testResults`) referenziert ist — unbekannter Lauf ODER
+ *          Lauf ganz ohne `artifacts` (nie erfasst / komplett geprunt) → 404,
+ *          kein Leak. Review-Fix Iteration 2: `htmlReport` und `testResults`
+ *          werden Store-seitig UNABHÄNGIG voneinander kopiert (zwei separate
+ *          best-effort `cp()`-Aufrufe) — ein Teilzustand mit NUR `testResults`
+ *          (kein `htmlReport`, z.B. abgebrochener/getimeouteter Lauf) ist
+ *          möglich: ein Attachment-Zugriff (Rest-Pfad, z.B. eine Datei unter
+ *          `test-results/…`) ist dann bereits erreichbar; NUR der
+ *          Default-Pfad OHNE Rest-Pfad (Report-Index) braucht SPEZIFISCH
+ *          `htmlReport` → 404, solange dieses fehlt. Dient eine Datei
+ *          INNERHALB der Lauf-EIGENEN Artefakt-Ablage aus (200 + Bytes) —
+ *          S-327: die Basis ist die Store-eigene Lauf-Ablage
+ *          (`regressionResultStore.resolveArtifactDir()`), NICHT mehr der
+ *          Projekt-Klon.
  *          Path-Traversal (`..` im Wildcard-Rest, manipulierter
  *          `artifacts.htmlReport`-String) UND Symlink-Ausbruch aus der
  *          Ablage → 404 (kein Escape). `resolveArtifactDir` wird als
@@ -237,10 +245,31 @@ describe('GET /api/projects/:slug/regression-runs/:runId/artifacts/*splat (regre
     status: 'failed',
     artifacts: { htmlReport: 'playwright-report', testResults: 'test-results' },
   };
-  const GREEN_RUN = {
+  // S-328: grüner Lauf MIT Artefakt-Ablage (seit S-327 Regelfall, Default AN,
+  // s. RegressionResultStore.js „Artefakte bei GRÜN (AC3)") → 200, kein
+  // Rot-Only-Gate mehr.
+  const GREEN_RUN_WITH_ARTIFACTS = {
     runId: 'run-green',
     projekt: 'proj-a',
     status: 'passed',
+    artifacts: { htmlReport: 'playwright-report', testResults: 'test-results' },
+  };
+  // Lauf ohne (mehr) vorhandene Artefakt-Ablage — nie erfasst ODER bereits
+  // von der Artefakt-Retention geprunt (regression-result-view Edge-Case).
+  const RUN_WITHOUT_ARTIFACTS = {
+    runId: 'run-no-artifacts',
+    projekt: 'proj-a',
+    status: 'passed',
+  };
+  // Review-Fix Iteration 2: Teilzustand — NUR testResults referenziert, KEIN
+  // htmlReport (z.B. ein abgebrochener/getimeouteter Lauf: der Report wird
+  // erst am Lauf-Ende geschrieben, `#copyArtifacts` kopiert beide Ordner
+  // unabhängig voneinander, s. RegressionResultStore.js).
+  const RUN_TEST_RESULTS_ONLY = {
+    runId: 'run-partial',
+    projekt: 'proj-a',
+    status: 'failed',
+    artifacts: { testResults: 'test-results' },
   };
 
   it('200 + Datei-Bytes für den HTML-Report-Index eines roten Laufs (Default, kein Rest-Pfad)', async () => {
@@ -276,10 +305,39 @@ describe('GET /api/projects/:slug/regression-runs/:runId/artifacts/*splat (regre
     });
   });
 
-  it('404 bei grünem Lauf (kein Artefakt, kein toter Link)', async () => {
-    const regressionResultStore = makeStore(async () => GREEN_RUN);
+  it('Review-Fix Iteration 2: 200 für eine Attachment-Datei, wenn NUR testResults referenziert ist (kein htmlReport)', async () => {
+    const regressionResultStore = makeStore(async () => RUN_TEST_RESULTS_ONLY);
+    await withServer({ regressionResultStore }, async (port) => {
+      const res = await httpGet(
+        port,
+        '/api/projects/proj-a/regression-runs/run-partial/artifacts/test-results/checkout-chromium/test-failed-1.png',
+      );
+      expect(res.status).toBe(200);
+      expect(String(res.body)).toContain('png-bytes');
+    });
+  });
+
+  it('Review-Fix Iteration 2: 404 für den Default-Pfad (Report-Index), wenn NUR testResults referenziert ist (kein htmlReport)', async () => {
+    const regressionResultStore = makeStore(async () => RUN_TEST_RESULTS_ONLY);
+    await withServer({ regressionResultStore }, async (port) => {
+      const res = await httpGet(port, '/api/projects/proj-a/regression-runs/run-partial/artifacts/');
+      expect(res.status).toBe(404);
+    });
+  });
+
+  it('200 + Datei-Bytes für den HTML-Report-Index eines GRÜNEN Laufs mit Artefakt-Ablage (S-328: kein Rot-Only-Gate mehr)', async () => {
+    const regressionResultStore = makeStore(async () => GREEN_RUN_WITH_ARTIFACTS);
     await withServer({ regressionResultStore }, async (port) => {
       const res = await httpGet(port, '/api/projects/proj-a/regression-runs/run-green/artifacts/');
+      expect(res.status).toBe(200);
+      expect(String(res.body)).toContain('report');
+    });
+  });
+
+  it('404 bei einem Lauf ohne (mehr) vorhandene Artefakt-Ablage (nie erfasst / bereits geprunt) — kein toter Link', async () => {
+    const regressionResultStore = makeStore(async () => RUN_WITHOUT_ARTIFACTS);
+    await withServer({ regressionResultStore }, async (port) => {
+      const res = await httpGet(port, '/api/projects/proj-a/regression-runs/run-no-artifacts/artifacts/');
       expect(res.status).toBe(404);
       expect(res.body.error).toBeDefined();
     });

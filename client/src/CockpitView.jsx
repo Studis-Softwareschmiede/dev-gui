@@ -1270,7 +1270,7 @@ function FactoryWorkspace({
         >
           <div style={styles.flowTriggerHeader}>Regressions-Ergebnisse</div>
           <p style={styles.flowTriggerHint}>
-            Lauf-Liste, grün/rot-Trend je Suite, Testfall-Drilldown und Debug-Artefakte (bei Rot).
+            Lauf-Liste, grün/rot-Trend je Suite, Testfall-Drilldown und Debug-Artefakte (Screenshots/Trace-Viewer/Video, bei jedem Lauf).
           </p>
           <button
             type="button"
