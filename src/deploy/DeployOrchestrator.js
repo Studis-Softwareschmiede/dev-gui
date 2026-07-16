@@ -9,13 +9,18 @@
  *   - Deploy saga: (1) LockoutGuard-Check → (2) Tunnel-Mismatch/Missing-Gate
  *     (vps-tunnel-existence-gate AC5/AC6) → (3) Readiness-Probe (vps-readiness-gate AC4) →
  *     (4) Tunnel-Existenz-Gate via listTunnels (vps-tunnel-existence-gate AC1) →
- *     (5) pull image →
- *     (6) run container with label cloudflare.tunnel-hostname=<hostname>
+ *     (5) pull image (AC18 v3 — pull-vor-remove, fail-closed: a failed pull leaves the
+ *     existing container running untouched — no rm/run/route step) →
+ *     (6) re-deploy replace: remove ALL existing containers matching the hostname label,
+ *     running and stopped (AC14/AC17), best-effort — runs AFTER pull (AC18) so a failed
+ *     pull never removes the existing container, and BEFORE host-port selection so the
+ *     old container's host port is free again for reuse (AC19) →
+ *     (7) run container with label cloudflare.tunnel-hostname=<hostname>
  *     (inkl. optionalem persistentem read-write config-Verzeichnis-Mount + idempotentem
  *     `mkdir -p`, beides IN run() selbst, deploy-config-volume-mount AC1/AC2, F-079-Korrektur
  *     — kein separates Guard-/Seed-Gate mehr im Orchestrator) →
- *     (7) add tunnel route + DNS CNAME. On failure at step 7 → rollback container (rm).
- *     On failure at step 6 → no route step. (AC3, AC4)
+ *     (8) add tunnel route + DNS CNAME. On failure at step 8 → rollback container (rm).
+ *     On failure at step 7 → no route step. (AC3, AC4)
  *   - Undeploy: (1) LockoutGuard-Check → (2) confirm-token check → (3) remove
  *     route + DNS → (4) container rm. Route-first to prevent traffic on removed
  *     container. (AC5, AC6)
@@ -91,25 +96,39 @@ export class DeployOrchestrator {
   // ── Deploy ──────────────────────────────────────────────────────────────────
 
   /**
-   * Deploy: pull image → run container → add tunnel route + DNS CNAME.
-   * Rollback: if route-step fails → rm container.
+   * Deploy: pull image → replace existing container(s) → run new container → add
+   * tunnel route + DNS CNAME.
+   * Rollback: if route-step fails → rm container. No rollback for the replace step
+   * itself — AC18 (pull-vor-remove) protects it instead: a failed pull never removes
+   * the existing container in the first place.
    *
-   * AC3: success → { result: "ok", deployment: Deployment }
-   * AC4: route-step fails → container rolled back → { result: "error", reason }
-   * AC7: protected hostname → { result: "error", reason: "protected-resource" }, no step
+   * AC3:  success → { result: "ok", deployment: Deployment }
+   * AC4:  route-step fails → container rolled back → { result: "error", reason }
+   * AC7:  protected hostname → { result: "error", reason: "protected-resource" }, no step
+   * AC18: pull fails → { result: "error", reason, errorClass }, no rm/run/route step —
+   *       the existing container keeps running unchanged (fail-closed, no outage)
+   * AC19: replace step stays BEFORE host-port selection — a re-deploy on the same
+   *       hostname reuses the old container's host port instead of drifting upward
    *
-   * Preflight gates (all before any Docker/Cloudflare mutation step, incl. re-deploy rm):
+   * Preflight gates (all before any Docker/Cloudflare mutation step, incl. pull/re-deploy rm):
    *   (a) LockoutGuard (AC7)
    *   (b) hostname validation
    *   (c) resolveZoneForHostname — zone-not-found / cloudflare-unavailable
    *   (d) Tunnel-Mismatch/-Missing via VpsProviderRegistry (AC5/AC6, when vpsId + vpsRegistry set)
    *   (e) Tunnel-Existenz via CloudflareApi.listTunnels() (AC1–AC4)
    *   (f) Readiness-Probe via VpsDockerControl.probe() (vps-readiness-gate)
-   *   (g) Re-deploy: psAll() → rm() ALL existing containers with matching hostname
-   *       label, running or stopped (AC14/AC17)
    *
-   * Gates (d)/(e) run BEFORE (g) so that a missing/mismatched tunnel aborts the deploy
-   * without removing the existing container first (AC1/AC3/AC5/AC6: "no step before the gate").
+   * After the gates (v3, AC18/AC19 — kanonische Reihenfolge):
+   *   (g) pull image — fail-closed: pull error → early return before any rm/run/
+   *       Cloudflare step, existing container + route stay untouched
+   *   (h) Re-deploy: psAll() → rm() ALL existing containers with matching hostname
+   *       label, running or stopped (AC14/AC17) — placed AFTER (g) so a failed pull
+   *       never removes the existing container (AC18), and BEFORE #selectFreeHostPort
+   *       so the old container's host port is free again for reuse (AC19)
+   *
+   * Gates (a)–(f) run BEFORE (g)/(h) so that a missing/mismatched tunnel or a failed
+   * pull both abort the deploy without removing the existing container first
+   * (AC1/AC3/AC5/AC6/AC18: "no step before the gate").
    *
    * zoneId is NOT a parameter — it is resolved server-side from the hostname via
    * CloudflareApi.resolveZoneForHostname() (longest-suffix match). No zone-not-found
@@ -256,12 +275,28 @@ export class DeployOrchestrator {
       }
     }
 
-    // (g) AC14/AC17: Re-deploy = replace. Gates (a)–(f) have all passed; now find ALL
-    // existing containers with this hostname label — running AND stopped (AC17 zombie
-    // fix) — and remove them before starting the new one. This is best-effort — if a
-    // removal fails, we still attempt the new deploy.
-    // Placed AFTER all Tunnel/Readiness gates so a missing/mismatched tunnel never causes
-    // the existing container to be removed (AC1/AC3/AC5/AC6: no step before the gate).
+    // (g) Pull image (AC3, AC18 v3 — pull-vor-remove, fail-closed). Gates (a)–(f) have
+    // all passed; the image is pulled BEFORE the existing container is touched. A failed
+    // pull returns early — no rm, no run, no Cloudflare step — so the existing container
+    // (and its route) stays exactly as it was (no outage). This early return is
+    // deliberately placed BEFORE the re-deploy replacement step (h) below.
+    const pullResult = await this.#dockerControl.pull(vps, image, dockerOpts);
+    if (pullResult.result !== 'ok') {
+      return {
+        result: 'error',
+        reason: sanitizeReason(pullResult.reason ?? 'Image-Pull fehlgeschlagen'),
+        errorClass: pullResult.errorClass ?? 'error',
+      };
+    }
+
+    // (h) AC14/AC17: Re-deploy = replace. Runs AFTER the pull step (g) — a successful
+    // pull means a replacement image is available, so it is now safe to remove the
+    // existing container(s). Find ALL existing containers with this hostname label —
+    // running AND stopped (AC17 zombie fix) — and remove them before starting the new
+    // one. This is best-effort — if a removal fails, we still attempt the new deploy.
+    // Placed AFTER pull (AC18: a failed pull never removes the existing container) and
+    // BEFORE #selectFreeHostPort (AC19: the old container's host port becomes free again
+    // and is reused instead of drifting to a higher port on every re-deploy).
     //
     // AC17 (v2, zombie fix): uses psAll() (docker ps -a, state-complete read) instead of
     // ps() (running-only) — a stopped legacy container with the same hostname label used
@@ -278,16 +313,6 @@ export class DeployOrchestrator {
           await this.#rollbackContainer(vps, existing.containerId, dockerOpts);
         }
       }
-    }
-
-    // Step 1: Pull image (AC3)
-    const pullResult = await this.#dockerControl.pull(vps, image, dockerOpts);
-    if (pullResult.result !== 'ok') {
-      return {
-        result: 'error',
-        reason: sanitizeReason(pullResult.reason ?? 'Image-Pull fehlgeschlagen'),
-        errorClass: pullResult.errorClass ?? 'error',
-      };
     }
 
     // AC13: Auto-Port — nach docker pull via docker inspect ExposedPorts ermitteln.
