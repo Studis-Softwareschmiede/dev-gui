@@ -175,6 +175,15 @@
  *          (Disabled-Token + `lockNotice`); „definieren" bleibt bedienbar.
  *   AC6/AC7 — natives `<button type="button">`, `minHeight:44`, Fokusring
  *          erhalten, `data-testid`-Präfix `regression-` (D16).
+ *   AC4b/D9a (S-326) — ein terminaler Frühausfall-Lauf (`status:
+ *          "precondition-error"|"error"`, [[regression-result-store]] AC1b)
+ *          wird NIE auf „kein Lauf" abgebildet — fünfter Karten-Zustand
+ *          „⚠ Nicht ausgeführt — <Zeitstempel>" (`data-status="not-run"`,
+ *          `role="alert"`, Amber `#fbbf24` aus der D15-Palette, kein neuer
+ *          Farbwert). Verifizierter Befund 2026-07-08: ein Frühausfall
+ *          (vps-Suite lief fälschlich über den local-Prüfpfad) blieb bis
+ *          dahin spurlos verschwunden, weil die Karte jeden Status ≠
+ *          passed|failed|running auf „kein Lauf" mappte.
  *
  * regression-result-view (S-314):
  *   AC3-AC6 — eigene Karte „Regressions-Ergebnisse" (`regression-result-card`,
@@ -690,6 +699,12 @@ function FactoryWorkspace({
         if (!cancelled) {
           if (latest && (latest.status === 'passed' || latest.status === 'failed' || latest.status === 'running')) {
             setRegressionLastStatus(latest.status);
+            setRegressionLastAt(latest.startedAt ?? null);
+          } else if (latest && (latest.status === 'precondition-error' || latest.status === 'error')) {
+            // AC4b (S-326): ein terminaler Frühausfall-Lauf wird NIE auf
+            // "kein Lauf" abgebildet — eigener Zustand "nicht ausgeführt"
+            // (D9a), sonst verschwindet der Fehlgrund spurlos (Befund 2026-07-08).
+            setRegressionLastStatus('not-run');
             setRegressionLastAt(latest.startedAt ?? null);
           } else {
             setRegressionLastStatus(null);
@@ -1219,6 +1234,21 @@ function FactoryWorkspace({
               data-status="failed"
             >
               ✗ Fehlgeschlagen — {formatRegressionTimestamp(regressionLastAt)}
+            </div>
+          )}
+          {/* AC4/AC4b/D9a (S-326): fünfter Zustand — ein Lauf, der VOR der
+              Testausführung scheiterte (precondition-error/error). Bewusst
+              NICHT "fehlgeschlagen" (das würde eine gemessene Regression
+              behaupten, die nie stattfand) und NICHT "kein Lauf" (das
+              verschweigt den Fehler ganz). */}
+          {regressionLastStatus === 'not-run' && (
+            <div
+              role="alert"
+              style={styles.drainStatusNotRun}
+              data-testid="regression-status"
+              data-status="not-run"
+            >
+              ⚠ Nicht ausgeführt — {formatRegressionTimestamp(regressionLastAt)}
             </div>
           )}
           {!regressionLastStatus && (
@@ -1792,6 +1822,13 @@ const styles = {
   drainStatusFailed: {
     fontSize: 12,
     color: '#f87171',
+    fontWeight: 600,
+  },
+
+  // ── regression-panel D9a (S-326): fünfter Karten-Zustand "nicht ausgeführt" ──
+  drainStatusNotRun: {
+    fontSize: 12,
+    color: '#fbbf24',
     fontWeight: 600,
   },
 

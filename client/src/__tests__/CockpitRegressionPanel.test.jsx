@@ -23,6 +23,9 @@
  *          Format wie D10 (toLocaleString('de-DE', {dateStyle:'short',
  *          timeStyle:'medium'})). Quelle: GET …/regression-runs (jüngster
  *          Lauf zuerst).
+ *   AC4b/D9a (S-326) — ein Lauf mit `status:"precondition-error"|"error"`
+ *          zeigt den fünften Zustand „⚠ Nicht ausgeführt — <Zeitstempel>"
+ *          (`role="alert"`, `data-status="not-run"`) — NIE „kein Lauf".
  *   AC5 — Während `status:"running"` ist NUR „ausführen" gesperrt
  *          (Disabled-Token + lockNotice-Hinweis); „definieren" bleibt
  *          bedienbar (D11).
@@ -287,6 +290,29 @@ describe('CockpitView — regression-panel AC4: Inline-Statuszeile', () => {
       const status = document.querySelector('[data-testid="regression-status"]');
       expect(status.textContent).toMatch(/^✗ Fehlgeschlagen —/);
       expect(status.getAttribute('role')).toBe('alert');
+    });
+  });
+
+  // ── AC4b/D9a (S-326): fünfter Zustand "nicht ausgeführt" ──────────────────
+  it('AC4b: shows „⚠ Nicht ausgeführt — <Zeitstempel>" as role=alert for a precondition-error run — NIE "kein Lauf"', async () => {
+    const ts = '2026-07-08T09:00:00Z';
+    renderCockpit(makeFetchFn({ mode: 'ok', runs: [{ runId: 'r3', status: 'precondition-error', startedAt: ts }] }));
+    await waitFor(() => {
+      const status = document.querySelector('[data-testid="regression-status"]');
+      expect(status.textContent).toMatch(/^⚠ Nicht ausgeführt —/);
+      expect(status.textContent).toContain(
+        new Date(ts).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'medium' }),
+      );
+      expect(status.getAttribute('role')).toBe('alert');
+      expect(status.getAttribute('data-status')).toBe('not-run');
+    });
+  });
+
+  it('AC4b: shows „⚠ Nicht ausgeführt" for status:"error" (nicht unterstütztes Testobjekt) ebenso', async () => {
+    renderCockpit(makeFetchFn({ mode: 'ok', runs: [{ runId: 'r4', status: 'error', startedAt: '2026-07-08T09:05:00Z' }] }));
+    await waitFor(() => {
+      const status = document.querySelector('[data-testid="regression-status"]');
+      expect(status.getAttribute('data-status')).toBe('not-run');
     });
   });
 });

@@ -6,7 +6,7 @@ status: To Do
 priority: P2
 spec: docs/specs/regression-run.md
 implements:
-- A3
+- AC12
 depends:
 - S-326
 labels:

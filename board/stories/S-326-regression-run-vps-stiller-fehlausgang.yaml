@@ -1,7 +1,7 @@
 id: S-326
 parent: F-069
-title: 'Regressions-Run (ephemeral-infra/VPS) scheitert still — kein Prozess/Log/Ergebnis/Diagnose'
-status: To Do
+title: Regressions-Run (ephemeral-infra/VPS) scheitert still — kein Prozess/Log/Ergebnis/Diagnose
+status: In Progress
 priority: P2
 spec: docs/specs/regression-run.md
 implements:
@@ -17,82 +17,94 @@ size_est: M
 dispo_est: '5'
 dispo_act: null
 dispo_forecast: null
-estimate_note: 'M — Diagnose des ephemeral-infra-Ausführungspfads + Pflicht-Ergebnis/Fehlerprotokoll auch bei Frühausfall.'
+estimate_note: M — Diagnose des ephemeral-infra-Ausführungspfads + Pflicht-Ergebnis/Fehlerprotokoll
+  auch bei Frühausfall.
 confidence: low
-branch: null
+branch: feat/S-326-regression-fruehausfall-diagnose
 pr: null
 blocked_reason: null
 created_at: '2026-07-08T20:15:00Z'
-updated_at: '2026-07-08T20:15:00Z'
+updated_at: '2026-07-16T05:55:19Z'
 done_at: null
 tok_est: null
 area: fabrik-arbeiten
 scope_2026_07_16: 'SCOPE-SCHNITT (Owner-Entscheidung 2026-07-16, nach Code-Gegenprüfung
-  der beiden Befunde): diese Story landet NUR Arbeitspunkt 1 (Diagnose-Pflicht).
-  Arbeitspunkt 2 (ephemeral-infra-Ausführungspfad, Befund A) ist als eigene Story
-  S-362 aufs Board gelegt — er ist ein komplettes Feature (target lesen, VpsProvisioner
-  anbinden, rtest-*-Namensschema, garantiertes Cleanup, echte Infra-Kosten) und
-  verdient eine eigene Spezifikation. Ergebnis dieses Schnitts: die GUI zeigt ab
-  sofort einen ehrlichen Fehlgrund statt Schweigen, und der teure Infra-Pfad
-  bekommt eigene AC. Die Specs sind für BEIDE Punkte bereits nachgezogen (s.
-  spec_2026_07_16) — der coder baut gegen regression-run.md AC10+AC11, NICHT gegen A3.
-  Der lokale Pfad (target local) ist Bestand und über die Smoke-Suite abgedeckt:
-  nicht kaputt machen, Bestandstests grün halten.'
-spec_2026_07_16: 'SPEC-NACHZUG (bereits gelandet, Grundlage für den coder — kein
-  eigenes Spezifizieren nötig/erlaubt): (1) regression-result-store.md — AC1 erweitert
-  (status-Vokabular passed|failed|precondition-error|error, identisch mit den
-  TERMINALEN Zuständen des GET-Vertrags aus regression-run.md; kein zweites
-  Vokabular), NEU AC1b (Frühausfall-Datensatz: ctrf null — BEWUSST kein
-  synthetisches Ersatz-CTRF, weil es eine nie erfolgte Ausführung vortäuschen würde;
-  reason = secret-freier Kurztext aus fester Meldungs-Menge; counts {0,0,0};
-  Retention/Prune/Read-API identisch, kein Sonderweg), AC3/AC5 nachgezogen (artifacts
-  bleiben failed-exklusiv; reason fällt unter das Secret-Verbot), Schema + Edge-Cases.
-  (2) regression-run.md — NEU AC10 (Diagnose-Pflicht: JEDER terminale Zustand
-  persistiert genau EINEN Datensatz, ausnahmslos alle Frühausgänge aufgezählt), NEU
-  AC11 (Testobjekt-Weiche: target über DIESELBE Lese-Boundary wie der Dialog lesen —
-  RegressionSuiteReader, kein zweiter Parser; nicht gebautes Testobjekt -> sofortiger
+  der beiden Befunde): diese Story landet NUR Arbeitspunkt 1 (Diagnose-Pflicht). Arbeitspunkt
+  2 (ephemeral-infra-Ausführungspfad, Befund A) ist als eigene Story S-362 aufs Board
+  gelegt — er ist ein komplettes Feature (target lesen, VpsProvisioner anbinden, rtest-*-Namensschema,
+  garantiertes Cleanup, echte Infra-Kosten) und verdient eine eigene Spezifikation.
+  Ergebnis dieses Schnitts: die GUI zeigt ab sofort einen ehrlichen Fehlgrund statt
+  Schweigen, und der teure Infra-Pfad bekommt eigene AC. Die Specs sind für BEIDE
+  Punkte bereits nachgezogen (s. spec_2026_07_16) — der coder baut gegen regression-run.md
+  AC10+AC11, NICHT gegen A3. Der lokale Pfad (target local) ist Bestand und über die
+  Smoke-Suite abgedeckt: nicht kaputt machen, Bestandstests grün halten.'
+spec_2026_07_16: 'SPEC-NACHZUG (bereits gelandet, Grundlage für den coder — kein eigenes
+  Spezifizieren nötig/erlaubt): (1) regression-result-store.md — AC1 erweitert (status-Vokabular
+  passed|failed|precondition-error|error, identisch mit den TERMINALEN Zuständen des
+  GET-Vertrags aus regression-run.md; kein zweites Vokabular), NEU AC1b (Frühausfall-Datensatz:
+  ctrf null — BEWUSST kein synthetisches Ersatz-CTRF, weil es eine nie erfolgte Ausführung
+  vortäuschen würde; reason = secret-freier Kurztext aus fester Meldungs-Menge; counts
+  {0,0,0}; Retention/Prune/Read-API identisch, kein Sonderweg), AC3/AC5 nachgezogen
+  (artifacts bleiben failed-exklusiv; reason fällt unter das Secret-Verbot), Schema
+  + Edge-Cases. (2) regression-run.md — NEU AC10 (Diagnose-Pflicht: JEDER terminale
+  Zustand persistiert genau EINEN Datensatz, ausnahmslos alle Frühausgänge aufgezählt),
+  NEU AC11 (Testobjekt-Weiche: target über DIESELBE Lese-Boundary wie der Dialog lesen
+  — RegressionSuiteReader, kein zweiter Parser; nicht gebautes Testobjekt -> sofortiger
   persistierter error, KEIN stiller local-Fallback; kein target deklariert -> konservativ
   local; gesamt-Scope -> local wie bisher), A3/A4 als „Umsetzungsstand NICHT gebaut"
-  ehrlich gemacht mit Verweis auf S-362, Edge-Cases + Verträge nachgezogen.
-  (3) regression-result-view.md — NEU AC7 (Frühausfall als DRITTER Zustand „⚠ Nicht
-  ausgeführt", nie grün/nie rot; reason als Fehlgrund; kein Artefakt-Link; im
-  Suite-Trend eigenes ⚠-Zeichen statt ✓). (4) regression-panel.md AC4/AC4b + design.md
-  D9a — fünfter Karten-Zustand „⚠ Nicht ausgeführt — <Zeitstempel>" (Amber #fbbf24,
-  bereits in der D15-Palette, KEIN neuer Farbwert; role=alert).'
+  ehrlich gemacht mit Verweis auf S-362, Edge-Cases + Verträge nachgezogen. (3) regression-result-view.md
+  — NEU AC7 (Frühausfall als DRITTER Zustand „⚠ Nicht ausgeführt", nie grün/nie rot;
+  reason als Fehlgrund; kein Artefakt-Link; im Suite-Trend eigenes ⚠-Zeichen statt
+  ✓). (4) regression-panel.md AC4/AC4b + design.md D9a — fünfter Karten-Zustand „⚠
+  Nicht ausgeführt — <Zeitstempel>" (Amber #fbbf24, bereits in der D15-Palette, KEIN
+  neuer Farbwert; role=alert).'
 befund_2026_07_16_code: 'CODE-GEGENPRÜFUNG (beide Owner-Befunde am Code bestätigt,
-  plus ein dritter): (A) BESTÄTIGT — src/RegressionRunner.js #runLifecycle liest
-  `target` nirgends; der Kommentar sagt es wörtlich („diese Story liest target je
-  Suite noch nicht"), target ist in den #finish-Aufrufen hartkodiert auf local, kein
-  VpsProvisioner-Import. Wichtig: src/RegressionSuiteReader.js#readRegressionSuites
-  liest `target` je Suite BEREITS (für den Dialog, AC4/AC6) — die Weiche in AC11
-  braucht daher KEINEN neuen Parser, nur die Wiederverwendung dieser Boundary.
-  (B) BESTÄTIGT — #persistResult wird ausschliesslich NACH erfolgreichem CTRF-Lesen
-  gerufen; alle Frühausgänge rufen nur #finish (flüchtiger In-Memory-Status).
-  Zusätzlich: RegressionResultStore.js validiert status HART gegen [passed,failed]
-  und WIRFT sonst — ein error-Datensatz wäre also selbst bei einem persist-Aufruf
-  abgelehnt worden. (C) NEU GEFUNDEN, gehört zum selben Symptom: client/src/CockpitView.jsx
-  filtert den gepollten Lauf-Status auf passed|failed|running und mappt ALLES andere
-  auf null -> „Noch kein Regressionstest gelaufen.". Ein Frühausfall-Datensatz bliebe
-  in der Karte also WEITERHIN unsichtbar, selbst wenn der Store ihn hält — deshalb
-  gehören AC4b/D9a und regression-result-view AC7 in diese Story, sonst zeigt die
-  GUI trotz Fix „nichts". Wahrscheinlichster konkreter Fehlgrund des 2026-07-08-Laufs:
-  precondition-error „Applikation lokal nicht gestartet" — die vps-Suiten (target
-  ephemeral-infra) durchliefen die local-Erreichbarkeitsprüfung, die AC5 für sie
-  ausdrücklich ausschliesst. Passt exakt zum Symptom (kein Playwright-Prozess, kein
-  Server, keine Kosten, kein Store-Eintrag).'
+  plus ein dritter): (A) BESTÄTIGT — src/RegressionRunner.js #runLifecycle liest `target`
+  nirgends; der Kommentar sagt es wörtlich („diese Story liest target je Suite noch
+  nicht"), target ist in den #finish-Aufrufen hartkodiert auf local, kein VpsProvisioner-Import.
+  Wichtig: src/RegressionSuiteReader.js#readRegressionSuites liest `target` je Suite
+  BEREITS (für den Dialog, AC4/AC6) — die Weiche in AC11 braucht daher KEINEN neuen
+  Parser, nur die Wiederverwendung dieser Boundary. (B) BESTÄTIGT — #persistResult
+  wird ausschliesslich NACH erfolgreichem CTRF-Lesen gerufen; alle Frühausgänge rufen
+  nur #finish (flüchtiger In-Memory-Status). Zusätzlich: RegressionResultStore.js
+  validiert status HART gegen [passed,failed] und WIRFT sonst — ein error-Datensatz
+  wäre also selbst bei einem persist-Aufruf abgelehnt worden. (C) NEU GEFUNDEN, gehört
+  zum selben Symptom: client/src/CockpitView.jsx filtert den gepollten Lauf-Status
+  auf passed|failed|running und mappt ALLES andere auf null -> „Noch kein Regressionstest
+  gelaufen.". Ein Frühausfall-Datensatz bliebe in der Karte also WEITERHIN unsichtbar,
+  selbst wenn der Store ihn hält — deshalb gehören AC4b/D9a und regression-result-view
+  AC7 in diese Story, sonst zeigt die GUI trotz Fix „nichts". Wahrscheinlichster konkreter
+  Fehlgrund des 2026-07-08-Laufs: precondition-error „Applikation lokal nicht gestartet"
+  — die vps-Suiten (target ephemeral-infra) durchliefen die local-Erreichbarkeitsprüfung,
+  die AC5 für sie ausdrücklich ausschliesst. Passt exakt zum Symptom (kein Playwright-Prozess,
+  kein Server, keine Kosten, kein Store-Eintrag).'
 hinweis_test_2026_07_16: 'TEST-FALLSTRICK (verifiziert, s. .claude/lessons/tester.md
   2026-07-06): läuft die Story in einem eigenen Worktree unter .claude/worktrees/,
   findet Jest 0 Tests — jest.config.js schliesst diesen Pfad via testPathIgnorePatterns
   UND modulePathIgnorePatterns aus, der Guard trifft den eigenen Baum. Workaround:
   Stand per tar-Kopie nach ausserhalb spiegeln, node_modules symlinken, dort testen.
-  ZWEITENS (im Worktree reproduziert): wird die target-Auflösung mit dem ECHTEN
-  RegressionSuiteReader verdrahtet, macht sie echtes Datei-IO — die Bestandstests in
-  test/RegressionRunner.test.js mocken alle fs-Deps und treiben den fire-and-forget-Lauf
-  nur über flush() (2 setImmediate-Ticks). Zwei Tests (AC5 precondition-error, AC7
-  pullAndRecreate-Reihenfolge) wurden dadurch rot, die übrigen 71 blieben zufällig
-  grün -> latent nichtdeterministisch. Konsequenz für den coder: die Suite-Lese-Boundary
-  MUSS im Runner injizierbar sein (Konstruktor-Dep, Default readRegressionSuites) und
-  in den Bestandstests hermetisch gemockt werden (leere Suite-Liste -> target local ->
-  unverändertes Bestandsverhalten). Nicht per flush()-Erhöhung „reparieren" — echtes
-  IO ist nicht deterministisch abzuwarten.'
-befund_2026_07_08: 'Owner startete die VPS-Suite (target ephemeral-infra) über „Regressionstest ausführen". Ergebnis: die GUI zeigte NICHTS — und serverseitig verifiziert: kein laufender Playwright-Prozess, keine Server-Log-Zeile, KEIN Ergebnis im Store, KEIN Hetzner-Server angelegt (machines: [] → keine Kosten entstanden). Der Lauf ist also ganz früh gescheitert (vor dem Provisionieren), OHNE dass irgendwo eine Diagnose abgelegt wurde. Credential-Store war unlocked, Hetzner-Token vorhanden, Playwright/Chromium im Container lauffähig (alles separat verifiziert) — es lag NICHT daran. ZWEI Arbeitspunkte: (1) DIAGNOSE-PFLICHT: Ein Regressions-Run MUSS auch bei einem Frühausfall (Precheck/Provisionierungs-Vorstufe) ein maschinenlesbares Ergebnis + secret-freie Fehlermeldung in den Ergebnis-Store schreiben, damit „Ergebnisse ansehen" den Fehlgrund zeigt statt der GUI „nichts". Aktuell bleibt der Fehlgrund nur im flüchtigen In-Memory-Run-Status (verloren, sobald der Dialog schließt). (2) URSACHE im ephemeral-infra-Ausführungspfad des RegressionRunner (S-309) + VpsProvisioner ermitteln (warum bricht der VPS-Lauf vor dem Provisionieren still ab). Reproduktion: dev-gui, Bereich vps, „Regressionstest ausführen". Der lokale Ausführungspfad (target local) ist über die parallel angelegte Smoke-Suite abgedeckt/funktioniert — dieses Item betrifft nur ephemeral-infra.'
+  ZWEITENS (im Worktree reproduziert): wird die target-Auflösung mit dem ECHTEN RegressionSuiteReader
+  verdrahtet, macht sie echtes Datei-IO — die Bestandstests in test/RegressionRunner.test.js
+  mocken alle fs-Deps und treiben den fire-and-forget-Lauf nur über flush() (2 setImmediate-Ticks).
+  Zwei Tests (AC5 precondition-error, AC7 pullAndRecreate-Reihenfolge) wurden dadurch
+  rot, die übrigen 71 blieben zufällig grün -> latent nichtdeterministisch. Konsequenz
+  für den coder: die Suite-Lese-Boundary MUSS im Runner injizierbar sein (Konstruktor-Dep,
+  Default readRegressionSuites) und in den Bestandstests hermetisch gemockt werden
+  (leere Suite-Liste -> target local -> unverändertes Bestandsverhalten). Nicht per
+  flush()-Erhöhung „reparieren" — echtes IO ist nicht deterministisch abzuwarten.'
+befund_2026_07_08: 'Owner startete die VPS-Suite (target ephemeral-infra) über „Regressionstest
+  ausführen". Ergebnis: die GUI zeigte NICHTS — und serverseitig verifiziert: kein
+  laufender Playwright-Prozess, keine Server-Log-Zeile, KEIN Ergebnis im Store, KEIN
+  Hetzner-Server angelegt (machines: [] → keine Kosten entstanden). Der Lauf ist also
+  ganz früh gescheitert (vor dem Provisionieren), OHNE dass irgendwo eine Diagnose
+  abgelegt wurde. Credential-Store war unlocked, Hetzner-Token vorhanden, Playwright/Chromium
+  im Container lauffähig (alles separat verifiziert) — es lag NICHT daran. ZWEI Arbeitspunkte:
+  (1) DIAGNOSE-PFLICHT: Ein Regressions-Run MUSS auch bei einem Frühausfall (Precheck/Provisionierungs-Vorstufe)
+  ein maschinenlesbares Ergebnis + secret-freie Fehlermeldung in den Ergebnis-Store
+  schreiben, damit „Ergebnisse ansehen" den Fehlgrund zeigt statt der GUI „nichts".
+  Aktuell bleibt der Fehlgrund nur im flüchtigen In-Memory-Run-Status (verloren, sobald
+  der Dialog schließt). (2) URSACHE im ephemeral-infra-Ausführungspfad des RegressionRunner
+  (S-309) + VpsProvisioner ermitteln (warum bricht der VPS-Lauf vor dem Provisionieren
+  still ab). Reproduktion: dev-gui, Bereich vps, „Regressionstest ausführen". Der
+  lokale Ausführungspfad (target local) ist über die parallel angelegte Smoke-Suite
+  abgedeckt/funktioniert — dieses Item betrifft nur ephemeral-infra.'

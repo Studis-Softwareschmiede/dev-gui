@@ -19,11 +19,21 @@
  *          Crash.
  *   AC6 — Debug-Artefakt-Link NUR wenn `status === 'failed'`; grüne Läufe
  *          zeigen keinen Link (kein toter Link).
+ *   AC7 (S-326) — Frühausfall-Darstellung: ein Lauf mit `status:
+ *          "precondition-error"|"error"` erscheint als eigener dritter
+ *          Zustand „⚠ Nicht ausgeführt" (NIE grün/NIE rot) in Liste UND
+ *          Drilldown; `reason` erscheint im Drilldown als Fehlgrund-Text
+ *          (`role="alert"`); fehlt `reason` → generischer Hinweis; kein
+ *          Artefakt-Link, keine Testfall-Liste; im Suite-Trend eigenes
+ *          ⚠-Zeichen statt ✓.
  *
  * Edge-Cases (Spec):
  *   - Keine Läufe → „Noch kein Regressionstest gelaufen." (kein Fehler).
  *   - CTRF-Details unlesbar/teilweise → Lauf bleibt in der Liste, Drilldown
  *     zeigt degradierte Meldung statt Crash.
+ *   - Frühausfall-Lauf ohne `reason` (S-326) → generischer Hinweis „Kein
+ *     Fehlgrund hinterlegt.".
+ *   - Suite hat ausschließlich Frühausfall-Läufe (S-326) → reine ⚠-Kette.
  *
  * @jest-environment jsdom
  */
@@ -59,6 +69,18 @@ const RUN_FAILED = {
   durationMs: 6100,
   counts: { passed: 3, failed: 2, total: 5 },
   artifacts: { htmlReport: 'playwright-report' },
+};
+// AC7 (S-326): Frühausfall-Datensatz — kein CTRF, ctrf:null, reason gesetzt.
+const RUN_NOT_RUN = {
+  runId: 'run-4',
+  suite: 'vps',
+  scopeTyp: 'bereich',
+  status: 'precondition-error',
+  startedAt: '2026-07-09T08:00:00.000Z',
+  durationMs: 120,
+  counts: { passed: 0, failed: 0, total: 0 },
+  reason: 'Applikation lokal nicht gestartet',
+  ctrf: null,
 };
 
 /**
@@ -321,6 +343,79 @@ describe('RegressionResultView — AC6: Debug-Artefakt-Zugriff nur bei Rot', () 
       expect(document.querySelector('[data-testid="regression-result-testcases"]')).toBeTruthy();
     });
     expect(document.querySelector('[data-testid="regression-result-artifact-link"]')).toBeNull();
+  });
+});
+
+// ── AC7 (S-326): Frühausfall-Darstellung ────────────────────────────────────
+
+describe('RegressionResultView — AC7 (S-326): Frühausfall-Darstellung', () => {
+  it('list + trend: ein precondition-error/error-Lauf zeigt "⚠ Nicht ausgeführt" — nie grün, nie rot', async () => {
+    const fetchFn = makeFetch({ runs: [RUN_NOT_RUN] });
+    await renderView(fetchFn);
+
+    const badge = document.querySelector('[data-testid="regression-result-status-badge"][data-status="not-run"]');
+    expect(badge).toBeTruthy();
+    expect(badge.textContent).toMatch(/⚠/);
+    expect(badge.textContent).toMatch(/Nicht ausgeführt/);
+
+    const trend = document.querySelector('[data-testid="regression-result-trend-vps"]');
+    const dots = trend.querySelectorAll('[data-testid="regression-result-trend"] > span[aria-hidden="true"]');
+    expect(dots).toHaveLength(1);
+    expect(dots[0].textContent).toBe('⚠');
+  });
+
+  it('Edge-Case: Suite hat ausschließlich Frühausfall-Läufe → reine ⚠-Kette (weder grün noch rot)', async () => {
+    const secondNotRun = { ...RUN_NOT_RUN, runId: 'run-5', status: 'error', startedAt: '2026-07-08T08:00:00.000Z' };
+    const fetchFn = makeFetch({ runs: [secondNotRun, RUN_NOT_RUN] });
+    await renderView(fetchFn);
+
+    const trend = document.querySelector('[data-testid="regression-result-trend-vps"]');
+    const dots = trend.querySelectorAll('[data-testid="regression-result-trend"] > span[aria-hidden="true"]');
+    expect(dots).toHaveLength(2);
+    expect(Array.from(dots).every((d) => d.textContent === '⚠')).toBe(true);
+  });
+
+  it('Drilldown: reason erscheint als Fehlgrund-Text (role=alert), kein Artefakt-Link, keine Testfall-Liste', async () => {
+    const fetchFn = makeFetch({
+      runs: [RUN_NOT_RUN],
+      runDetails: { 'run-4': RUN_NOT_RUN },
+    });
+    await renderView(fetchFn);
+
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="regression-result-run-run-4"]'));
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="regression-result-not-run-reason"]')).toBeTruthy();
+    });
+
+    const reasonEl = document.querySelector('[data-testid="regression-result-not-run-reason"]');
+    expect(reasonEl.textContent).toBe('Applikation lokal nicht gestartet');
+    expect(reasonEl.getAttribute('role')).toBe('alert');
+    expect(document.querySelector('[data-testid="regression-result-artifact-link"]')).toBeNull();
+    expect(document.querySelector('[data-testid="regression-result-testcases"]')).toBeNull();
+    expect(document.querySelector('[data-testid="regression-result-ctrf-empty"]')).toBeNull();
+    expect(document.querySelector('[data-testid="regression-result-ctrf-degraded"]')).toBeNull();
+  });
+
+  it('Edge-Case: Frühausfall-Lauf ohne reason → generischer Hinweis "Kein Fehlgrund hinterlegt."', async () => {
+    const noReasonRun = { ...RUN_NOT_RUN, reason: undefined };
+    const fetchFn = makeFetch({
+      runs: [noReasonRun],
+      runDetails: { 'run-4': noReasonRun },
+    });
+    await renderView(fetchFn);
+
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="regression-result-run-run-4"]'));
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      const reasonEl = document.querySelector('[data-testid="regression-result-not-run-reason"]');
+      expect(reasonEl).toBeTruthy();
+      expect(reasonEl.textContent).toBe('Kein Fehlgrund hinterlegt.');
+    });
   });
 });
 

@@ -2,7 +2,7 @@
  * @file RegressionRunner.test.js — unit tests for the deterministic
  * Regressionstest-Runner + its pure helpers (docs/specs/regression-run.md).
  *
- * Covers (regression-run): AC1, AC2, AC5, AC7, AC8, AC9
+ * Covers (regression-run): AC1, AC2, AC5, AC7, AC8, AC9, AC10, AC11
  *
  *   AC1 — RegressionRunner is an own boundary with an OWN, isolated
  *         ProjectJobLock instance (never a `claude`/agent process — grep-
@@ -45,11 +45,36 @@
  *         aggregierter Datensatz (A1) an resultStore.record() übergeben
  *         (counts aus dem CTRF-Summary, status passed/failed via
  *         summarizeCtrf(), artifacts NUR bei failed).
+ *   AC10 (S-326) — JEDER terminale Zustand (auch ein Frühausfall OHNE CTRF:
+ *         kein Grundgerüst, precondition-error, Rollout-Fehler, kein CTRF,
+ *         npx fehlt, nicht unterstütztes Testobjekt) übergibt strukturell
+ *         GENAU EINEN Datensatz an resultStore.record() — `ctrf:null` (KEIN
+ *         synthetisches Ersatz-CTRF), `counts:{0,0,0}`, `reason` gesetzt. Ein
+ *         Store-Fehler verhindert den Lauf-Abschluss/die Lock-Freigabe nie.
+ *   AC11 (S-326) — Testobjekt-Weiche: `target` wird über die injizierbare
+ *         `readSuites`-Boundary (Default: `readRegressionSuites`) aufgelöst.
+ *         `gesamt` → IMMER `local` (readSuites wird dafür NICHT aufgerufen).
+ *         `bereich`/`verbund` mit deklariertem `target:"local"` → bestehender
+ *         lokaler Pfad; `ephemeral-infra`/`url`/unbekannter Wert → SOFORTIGER
+ *         `error` „Testobjekt `<target>` wird noch nicht unterstützt" (nur
+ *         bekannte Werte wörtlich in der Meldung, sonst generisch), OHNE
+ *         Playwright-Start/local-Prüfung; kein deklariertes `target`
+ *         (Suite nicht gefunden/Lesefehler) → konservativ `local`.
  *
  * Edge-Cases: kein Projekt-Grundgerüst (tests/regression fehlt) → `error`
  * "kein Regressions-Grundgerüst", kein Playwright-Start. Kein CTRF-Ergebnis
  * nach einem (vermeintlich grünen) Lauf → `error`, kein Crash. npx nicht
  * verfügbar (ENOENT) → `error`, sanfter Fehlertext.
+ *
+ * Test-Fallstrick (verifiziert, .claude/lessons/tester.md 2026-07-06 +
+ * Story-Notiz S-326): die Suite-Lese-Boundary (`readSuites`) MUSS in JEDEM
+ * Test, der einen `bereich`/`verbund`-Scope startet, hermetisch gemockt
+ * werden (leere Suite-Liste → target 'local') — sonst macht die default
+ * `readRegressionSuites` echtes Datei-IO gegen einen nicht existierenden
+ * Test-Pfad, was den fire-and-forget-Lauf (nur über `flush()`/2
+ * setImmediate-Ticks abgewartet) latent nichtdeterministisch macht. `gesamt`-
+ * Scopes sind davon NICHT betroffen (die Weiche ruft `readSuites` für
+ * `gesamt` gar nicht erst auf).
  *
  * AC1 Grep-Verifikation (security-relevant): dieses Modul importiert NICHT
  * `HeadlessRunnerCore.js` und ruft nirgends `spawn('claude', ...)` auf — nur
@@ -85,6 +110,7 @@ import {
   readCtrfResult,
   summarizeCtrf,
   defaultRunPlaywright,
+  buildUnsupportedTargetMessage,
   REGRESSION_TESTS_ROOT,
   CTRF_RESULT_PATH,
 } from '../src/RegressionRunner.js';
@@ -577,7 +603,12 @@ describe('RegressionRunner — regression-run.md', () => {
         }
         throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
       });
-      return new RegressionRunner({ runPlaywright, readFile, resultStore });
+      // AC11-Weiche: hermetisch gemockte Suite-Lese-Boundary (leere Liste ->
+      // target 'local' -> unverändertes Bestandsverhalten) — verhindert
+      // echtes Datei-IO über die default readRegressionSuites (s. Datei-Header
+      // Test-Fallstrick-Hinweis).
+      const readSuites = jest.fn(async () => ({ suites: [] }));
+      return new RegressionRunner({ runPlaywright, readFile, resultStore, readSuites });
     }
 
     it('führt npx playwright test für den gewählten Scope aus und übergibt EINEN Datensatz an den resultStore', async () => {
@@ -707,7 +738,15 @@ describe('RegressionRunner — regression-run.md', () => {
         }
         throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
       });
-      return new RegressionRunner({ runPlaywright, readFile, notifier, resultStore: resultStore ?? { record: jest.fn(async (i) => i) } });
+      // AC11-Weiche: hermetisch gemockte Suite-Lese-Boundary (s. makeGreenSetup oben).
+      const readSuites = jest.fn(async () => ({ suites: [] }));
+      return new RegressionRunner({
+        runPlaywright,
+        readFile,
+        notifier,
+        resultStore: resultStore ?? { record: jest.fn(async (i) => i) },
+        readSuites,
+      });
     }
 
     it('roter Lauf (status:"failed") ruft notifier.notifyRegressionFailed GENAU EINMAL mit {projekt,suite,failed,total}', async () => {
@@ -795,6 +834,264 @@ describe('RegressionRunner — regression-run.md', () => {
       const { runId } = runner.start('/ws/dev-gui', 'dev-gui', { typ: 'gesamt' });
       await flush();
       expect(runner.getRun(runId).status).toBe('failed');
+    });
+  });
+
+  // ── buildUnsupportedTargetMessage (pure, Datenhygiene AC11) ────────────────
+  describe('buildUnsupportedTargetMessage — Datenhygiene (nur bekannte Werte wörtlich)', () => {
+    it('bekannte Werte (ephemeral-infra/url) werden wörtlich in die Meldung übernommen', () => {
+      expect(buildUnsupportedTargetMessage('ephemeral-infra')).toBe('Testobjekt ephemeral-infra wird noch nicht unterstützt');
+      expect(buildUnsupportedTargetMessage('url')).toBe('Testobjekt url wird noch nicht unterstützt');
+    });
+
+    it('ein unbekannter/roher Wert erzeugt eine generische Meldung (kein Fremd-String-Durchreichen)', () => {
+      expect(buildUnsupportedTargetMessage('some-garbage-value')).toBe('Testobjekt wird noch nicht unterstützt');
+      expect(buildUnsupportedTargetMessage(undefined)).toBe('Testobjekt wird noch nicht unterstützt');
+    });
+  });
+
+  // ── AC11: Testobjekt-Weiche (target über readSuites, dieselbe Lese-Boundary) ──
+  describe('AC11 — Testobjekt-Weiche (target)', () => {
+    function readFileScaffoldOnly() {
+      return jest.fn(async (p) => {
+        if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
+        throw Object.assign(new Error('enoent'), { code: 'ENOENT' }); // kein profile.md -> kein local-Check
+      });
+    }
+
+    it('"gesamt"-Scope ruft readSuites NIE auf und läuft IMMER über den local-Pfad (Bestandsverhalten, AC11 letzter Satz)', async () => {
+      const readSuites = jest.fn(async () => ({ suites: [] }));
+      const runPlaywright = jest.fn(async () => ({ exitCode: 0 }));
+      const readFile = jest.fn(async (p) => {
+        if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
+        if (String(p).endsWith(CTRF_RESULT_PATH)) return JSON.stringify({ results: { summary: { tests: 1, passed: 1, failed: 0 } } });
+        throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+      });
+      const runner = new RegressionRunner({ runPlaywright, readFile, readSuites });
+
+      const { runId } = runner.start('/ws/proj', 'proj', { typ: 'gesamt' });
+      await flush();
+
+      expect(readSuites).not.toHaveBeenCalled();
+      expect(runPlaywright).toHaveBeenCalledTimes(1);
+      expect(runner.getRun(runId).status).toBe('passed');
+    });
+
+    it('bereich-Scope mit deklariertem target:"local" -> bestehender lokaler Pfad (Playwright läuft)', async () => {
+      const readSuites = jest.fn(async () => ({
+        suites: [{ scope: { typ: 'bereich', id: 'fabrik-arbeiten' }, label: 'fabrik-arbeiten', target: 'local' }],
+      }));
+      const runPlaywright = jest.fn(async () => ({ exitCode: 0 }));
+      const readFile = jest.fn(async (p) => {
+        if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
+        if (String(p).endsWith(CTRF_RESULT_PATH)) return JSON.stringify({ results: { summary: { tests: 1, passed: 1, failed: 0 } } });
+        throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+      });
+      const runner = new RegressionRunner({ runPlaywright, readFile, readSuites });
+
+      const { runId } = runner.start('/ws/proj', 'proj', { typ: 'bereich', id: 'fabrik-arbeiten' });
+      await flush();
+
+      expect(readSuites).toHaveBeenCalledWith('/ws/proj');
+      expect(runPlaywright).toHaveBeenCalledTimes(1);
+      expect(runner.getRun(runId).status).toBe('passed');
+    });
+
+    it('bereich-Scope mit target:"ephemeral-infra" -> sofortiger error, KEIN Playwright-Start, KEINE local-Prüfung', async () => {
+      const readSuites = jest.fn(async () => ({
+        suites: [{ scope: { typ: 'bereich', id: 'vps' }, label: 'vps', target: 'ephemeral-infra' }],
+      }));
+      const runPlaywright = jest.fn();
+      const probeReachability = jest.fn();
+      const record = jest.fn(async (i) => i);
+      const runner = new RegressionRunner({
+        runPlaywright,
+        readFile: readFileScaffoldOnly(),
+        readSuites,
+        probeReachability,
+        resultStore: { record },
+      });
+
+      const { runId } = runner.start('/ws/proj', 'proj', { typ: 'bereich', id: 'vps' });
+      await flush();
+
+      const run = runner.getRun(runId);
+      expect(run.status).toBe('error');
+      expect(run.reason).toBe('Testobjekt ephemeral-infra wird noch nicht unterstützt');
+      expect(run.target).toBe('ephemeral-infra');
+      expect(runPlaywright).not.toHaveBeenCalled();
+      expect(probeReachability).not.toHaveBeenCalled();
+      // AC10: trotzdem GENAU EIN persistierter Datensatz, ctrf:null, counts 0/0/0.
+      expect(record).toHaveBeenCalledTimes(1);
+      expect(record.mock.calls[0][0]).toMatchObject({
+        status: 'error',
+        ctrf: null,
+        counts: { passed: 0, failed: 0, total: 0 },
+        reason: 'Testobjekt ephemeral-infra wird noch nicht unterstützt',
+      });
+    });
+
+    it('verbund-Scope mit target:"url" -> sofortiger error mit dem deklarierten Wert in der Meldung', async () => {
+      const readSuites = jest.fn(async () => ({
+        suites: [{ scope: { typ: 'verbund' }, label: 'Verbund', target: 'url' }],
+      }));
+      const runPlaywright = jest.fn();
+      const runner = new RegressionRunner({ runPlaywright, readFile: readFileScaffoldOnly(), readSuites });
+
+      const { runId } = runner.start('/ws/proj', 'proj', { typ: 'verbund', id: 'irrelevant' });
+      await flush();
+
+      const run = runner.getRun(runId);
+      expect(run.status).toBe('error');
+      expect(run.reason).toBe('Testobjekt url wird noch nicht unterstützt');
+      expect(runPlaywright).not.toHaveBeenCalled();
+    });
+
+    it('ein unbekannter/roher target-Wert -> sofortiger error mit GENERISCHER Meldung (kein Fremd-String im reason)', async () => {
+      const readSuites = jest.fn(async () => ({
+        suites: [{ scope: { typ: 'bereich', id: 'fabrik-arbeiten' }, label: 'fabrik-arbeiten', target: 'irgendwas-kaputtes' }],
+      }));
+      const runPlaywright = jest.fn();
+      const runner = new RegressionRunner({ runPlaywright, readFile: readFileScaffoldOnly(), readSuites });
+
+      const { runId } = runner.start('/ws/proj', 'proj', { typ: 'bereich', id: 'fabrik-arbeiten' });
+      await flush();
+
+      const run = runner.getRun(runId);
+      expect(run.status).toBe('error');
+      expect(run.reason).toBe('Testobjekt wird noch nicht unterstützt');
+      expect(run.reason).not.toMatch(/irgendwas-kaputtes/);
+      expect(run.target).toBeUndefined(); // Datenhygiene: kein unbekannter Rohwert im view
+      expect(runPlaywright).not.toHaveBeenCalled();
+    });
+
+    it('kein deklariertes target (Suite nicht gefunden, leere Liste) -> konservativ local, Lauf läuft weiter', async () => {
+      const readSuites = jest.fn(async () => ({ suites: [] }));
+      const runPlaywright = jest.fn(async () => ({ exitCode: 0 }));
+      const readFile = jest.fn(async (p) => {
+        if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
+        if (String(p).endsWith(CTRF_RESULT_PATH)) return JSON.stringify({ results: { summary: { tests: 1, passed: 1, failed: 0 } } });
+        throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+      });
+      const runner = new RegressionRunner({ runPlaywright, readFile, readSuites });
+
+      const { runId } = runner.start('/ws/proj', 'proj', { typ: 'bereich', id: 'unbekannter-bereich' });
+      await flush();
+
+      expect(runPlaywright).toHaveBeenCalledTimes(1);
+      expect(runner.getRun(runId).status).toBe('passed');
+    });
+
+    it('readSuites wirft (Lesefehler) -> konservativ local, kein Crash', async () => {
+      const readSuites = jest.fn(async () => { throw new Error('fs kaputt'); });
+      const runPlaywright = jest.fn(async () => ({ exitCode: 0 }));
+      const readFile = jest.fn(async (p) => {
+        if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
+        if (String(p).endsWith(CTRF_RESULT_PATH)) return JSON.stringify({ results: { summary: { tests: 1, passed: 1, failed: 0 } } });
+        throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+      });
+      const runner = new RegressionRunner({ runPlaywright, readFile, readSuites });
+
+      const { runId } = runner.start('/ws/proj', 'proj', { typ: 'bereich', id: 'x' });
+      await flush();
+
+      expect(runPlaywright).toHaveBeenCalledTimes(1);
+      expect(runner.getRun(runId).status).toBe('passed');
+    });
+
+    it('ein nicht unterstütztes Testobjekt ruft notifyRegressionFailed NIE auf (regression-failed-notification AC2/AC3)', async () => {
+      const readSuites = jest.fn(async () => ({
+        suites: [{ scope: { typ: 'bereich', id: 'vps' }, label: 'vps', target: 'ephemeral-infra' }],
+      }));
+      const notifyRegressionFailed = jest.fn(async () => {});
+      const runner = new RegressionRunner({
+        runPlaywright: jest.fn(),
+        readFile: readFileScaffoldOnly(),
+        readSuites,
+        notifier: { notifyRegressionFailed },
+      });
+
+      const { runId } = runner.start('/ws/proj', 'proj', { typ: 'bereich', id: 'vps' });
+      await flush();
+
+      expect(runner.getRun(runId).status).toBe('error');
+      expect(notifyRegressionFailed).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── AC10: Diagnose-Pflicht bei Frühausfall — strukturelle Persistenz über #finish ──
+  describe('AC10 — Diagnose-Pflicht: JEDER terminale Zustand persistiert genau EINEN Datensatz', () => {
+    it('kein Grundgerüst -> resultStore.record() mit status:"error", ctrf:null, counts 0/0/0, reason gesetzt', async () => {
+      const record = jest.fn(async (i) => i);
+      const readFile = jest.fn(async () => { throw Object.assign(new Error('enoent'), { code: 'ENOENT' }); });
+      const runner = new RegressionRunner({ runPlaywright: jest.fn(), readFile, resultStore: { record } });
+
+      const { runId } = runner.start('/ws/proj', 'proj', { typ: 'gesamt' });
+      await flush();
+
+      expect(runner.getRun(runId).status).toBe('error');
+      expect(record).toHaveBeenCalledTimes(1);
+      expect(record.mock.calls[0][0]).toMatchObject({
+        status: 'error',
+        ctrf: null,
+        counts: { passed: 0, failed: 0, total: 0 },
+        reason: 'kein Regressions-Grundgerüst',
+      });
+      expect(record.mock.calls[0][0].artifacts).toBeUndefined();
+    });
+
+    it('precondition-error (local nicht erreichbar) -> resultStore.record() mit status/reason/ctrf:null', async () => {
+      const record = jest.fn(async (i) => i);
+      const readFile = jest.fn(async (p) => {
+        if (String(p).endsWith('.claude/profile.md')) return 'preview_port: 8080\n';
+        if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
+        throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+      });
+      const probeReachability = jest.fn(async () => false);
+      const runner = new RegressionRunner({ runPlaywright: jest.fn(), readFile, probeReachability, resultStore: { record } });
+
+      const { runId } = runner.start('/ws/proj', 'proj', { typ: 'gesamt' });
+      await flush();
+
+      expect(runner.getRun(runId).status).toBe('precondition-error');
+      expect(record).toHaveBeenCalledTimes(1);
+      expect(record.mock.calls[0][0]).toMatchObject({
+        status: 'precondition-error',
+        ctrf: null,
+        counts: { passed: 0, failed: 0, total: 0 },
+        reason: 'Applikation lokal nicht gestartet',
+      });
+    });
+
+    it('Lock wird VOR dem Store-Schreibzugriff freigegeben — ein NIE auflösendes record() hält das Lock nicht', async () => {
+      const neverResolves = jest.fn(() => new Promise(() => {})); // hängt für immer
+      const readFile = jest.fn(async () => { throw Object.assign(new Error('enoent'), { code: 'ENOENT' }); });
+      const runner = new RegressionRunner({ runPlaywright: jest.fn(), readFile, resultStore: { record: neverResolves } });
+
+      runner.start('/ws/proj', 'proj', { typ: 'gesamt' });
+      await flush();
+
+      // Status bereits terminal UND Lock frei, OBWOHL record() nie auflöst.
+      expect(runner.isRunning('/ws/proj')).toBe(false);
+      expect(neverResolves).toHaveBeenCalledTimes(1);
+    });
+
+    it('kein CTRF nach dem Lauf -> resultStore.record() mit status:"error", ctrf:null, counts 0/0/0', async () => {
+      const record = jest.fn(async (i) => i);
+      const runPlaywright = jest.fn(async () => ({ exitCode: 0 }));
+      const readFile = jest.fn(async (p) => {
+        if (String(p).endsWith('.claude/profile.md')) throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+        if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
+        throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+      });
+      const runner = new RegressionRunner({ runPlaywright, readFile, resultStore: { record } });
+
+      const { runId } = runner.start('/ws/proj', 'proj', { typ: 'gesamt' });
+      await flush();
+
+      expect(runner.getRun(runId).status).toBe('error');
+      expect(record).toHaveBeenCalledTimes(1);
+      expect(record.mock.calls[0][0]).toMatchObject({ status: 'error', ctrf: null, counts: { passed: 0, failed: 0, total: 0 } });
     });
   });
 

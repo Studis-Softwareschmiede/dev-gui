@@ -14,14 +14,19 @@
  * und ein korruptes/teilweises Datei-Set darf nur DIESEN einen Lauf betreffen
  * (Edge-Case AC: „Rest bleibt lesbar“), nicht die gesamte Sammlung.
  *
- * Datensatz-Schema (AC1, verbindlich):
+ * Datensatz-Schema (AC1/AC1b, verbindlich):
  *   { runId, projekt, suite, scopeTyp: "bereich"|"verbund"|"gesamt",
- *     status: "passed"|"failed", startedAt, durationMs,
- *     counts:{passed,failed,total}, ctrf: <CTRF-JSON>,
- *     artifacts?: { htmlReport, traces } }
+ *     status: "passed"|"failed"|"precondition-error"|"error", startedAt,
+ *     durationMs, counts:{passed,failed,total}, ctrf: <CTRF-JSON>|null,
+ *     reason?: string, artifacts?: { htmlReport, traces } }
  *   - `artifacts` NUR bei `status:"failed"` (AC3) — grüne Läufe halten nur
  *     CTRF-JSON + Metadaten (keine schweren Artefakte).
  *   - `projekt` = Projekt-Slug (kein absoluter Pfad).
+ *   - Frühausfall-Datensatz (AC1b, S-326): bei `status:"precondition-error"|
+ *     "error"` ist `ctrf: null` (KEIN synthetisches Ersatz-CTRF), `counts`
+ *     `{0,0,0}` und `reason` eine secret-freie Kurzbegründung (fehlt sie im
+ *     Input, bleibt der Datensatz ohne `reason`, kein Crash). Bei
+ *     `status:"passed"|"failed"` ist `reason` abwesend.
  *
  * Ablage: ${CRED_STORE_DIR}/regression-runs/<projekt>/<runId>.json
  * Rechte: 0600
@@ -60,8 +65,8 @@ export const MAX_RUNS_PER_PROJECT = 50;
 /** Erlaubter Scope-Typ-Wert (Vertrag, spec §Verträge). */
 export const SCOPE_TYPES = Object.freeze(['bereich', 'verbund', 'gesamt']);
 
-/** Erlaubter Status-Wert (AC1/AC3). */
-export const STATUSES = Object.freeze(['passed', 'failed']);
+/** Erlaubter Status-Wert (AC1/AC1b/AC3) — identisch zu den terminalen Zuständen des GET-Vertrags ([[regression-run]] §Verträge). */
+export const STATUSES = Object.freeze(['passed', 'failed', 'precondition-error', 'error']);
 
 /** Erlaubter Projekt-Slug: nur Buchstaben, Ziffern, `-` und `_` (analog DrainReportStore). */
 export const PROJECT_SLUG_RE = /^[A-Za-z0-9_-]+$/;
@@ -81,11 +86,13 @@ export const PROJECT_SLUG_RE = /^[A-Za-z0-9_-]+$/;
  * @property {string} projekt   Projekt-Slug (kein Pfad)
  * @property {string} suite
  * @property {'bereich'|'verbund'|'gesamt'} scopeTyp
- * @property {'passed'|'failed'} status
+ * @property {'passed'|'failed'|'precondition-error'|'error'} status
  * @property {string} startedAt ISO-8601
  * @property {number} durationMs
  * @property {RegressionCounts} counts
- * @property {*} ctrf CTRF-JSON, unverändert übernommen
+ * @property {*|null} ctrf CTRF-JSON, unverändert übernommen; `null` bei einem
+ *   Frühausfall-Datensatz (AC1b, KEIN synthetisches Ersatz-CTRF)
+ * @property {string} [reason] NUR bei status:"precondition-error"|"error" (AC1b)
  * @property {RegressionArtifacts} [artifacts] NUR bei status:"failed"
  */
 
@@ -237,11 +244,12 @@ export class RegressionResultStore {
    * @param {string} [input.runId] optional; wird generiert falls fehlend.
    * @param {string} input.suite
    * @param {'bereich'|'verbund'|'gesamt'} input.scopeTyp
-   * @param {'passed'|'failed'} input.status
+   * @param {'passed'|'failed'|'precondition-error'|'error'} input.status
    * @param {string} [input.startedAt]
    * @param {number} [input.durationMs]
    * @param {RegressionCounts} [input.counts]
-   * @param {*} input.ctrf CTRF-JSON, unverändert übernommen.
+   * @param {*|null} [input.ctrf] CTRF-JSON, unverändert übernommen; `null`/fehlend bei Frühausfall (AC1b).
+   * @param {string} [input.reason] secret-freie Kurzbegründung — nur bei status:"precondition-error"|"error" wirksam (AC1b).
    * @param {RegressionArtifacts} [input.artifacts] nur bei status:"failed" wirksam.
    * @returns {Promise<RegressionRun>} der geschriebene Lauf.
    * @throws {Error} wenn `projekt` kein gültiger Slug, `scopeTyp`/`status` ungültig ist.
@@ -268,7 +276,7 @@ export class RegressionResultStore {
     }
     const status = STATUSES.includes(input?.status) ? input.status : null;
     if (!status) {
-      throw new Error('[RegressionResultStore] Ungültiger status — erlaubt: passed|failed.');
+      throw new Error('[RegressionResultStore] Ungültiger status — erlaubt: passed|failed|precondition-error|error.');
     }
 
     await this.#ensureLoaded();
@@ -283,12 +291,19 @@ export class RegressionResultStore {
       startedAt: typeof input.startedAt === 'string' ? input.startedAt : '',
       durationMs: Number.isFinite(input.durationMs) ? input.durationMs : 0,
       counts: _normalizeCounts(input.counts),
-      ctrf: input.ctrf ?? null,
+      // AC1b: Frühausfall (precondition-error/error) trägt IMMER ctrf:null —
+      // KEIN synthetisches Ersatz-CTRF, auch wenn der Aufrufer fälschlich
+      // eines mitgäbe.
+      ctrf: status === 'precondition-error' || status === 'error' ? null : (input.ctrf ?? null),
     };
     // AC3: Debug-Artefakte NUR bei status:"failed".
     if (status === 'failed') {
       const artifacts = _normalizeArtifacts(input.artifacts);
       if (artifacts) run.artifacts = artifacts;
+    }
+    // AC1b: reason NUR bei precondition-error/error (bei passed/failed abwesend).
+    if ((status === 'precondition-error' || status === 'error') && typeof input.reason === 'string' && input.reason) {
+      run.reason = input.reason;
     }
 
     const existing = this.#runsByProject.get(projekt) ?? [];
@@ -428,11 +443,17 @@ function _normalizeRun(raw, projekt) {
     startedAt: typeof raw.startedAt === 'string' ? raw.startedAt : '',
     durationMs: Number.isFinite(raw.durationMs) ? raw.durationMs : 0,
     counts: _normalizeCounts(raw.counts),
-    ctrf: raw.ctrf ?? null,
+    // AC1b: Frühausfall-Datensatz trägt IMMER ctrf:null beim Rückladen.
+    ctrf: raw.status === 'precondition-error' || raw.status === 'error' ? null : (raw.ctrf ?? null),
   };
   if (raw.status === 'failed') {
     const artifacts = _normalizeArtifacts(raw.artifacts);
     if (artifacts) run.artifacts = artifacts;
+  }
+  // AC1b: reason NUR bei precondition-error/error; Edge-Case "ohne reason" →
+  // Datensatz bleibt gültig, reason fehlt einfach (kein Crash).
+  if ((raw.status === 'precondition-error' || raw.status === 'error') && typeof raw.reason === 'string' && raw.reason) {
+    run.reason = raw.reason;
   }
   return run;
 }

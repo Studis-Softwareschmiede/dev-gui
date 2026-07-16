@@ -96,6 +96,40 @@
  *   fehlt `tests/regression` im Klon → `error` mit dem Grund „kein
  *   Regressions-Grundgerüst" statt eines Crashs.
  *
+ * Diagnose-Pflicht bei Frühausfall (AC10, S-326): `#finish` ist die EINZIGE
+ * Naht zu einem terminalen Zustand (`passed`/`failed`/`precondition-error`/
+ * `error`) UND persistiert selbst — strukturell, nicht per Aufzählung: jeder
+ * künftige Frühausgang, der `#finish` ruft, bekommt die Persistenz automatisch
+ * mit, ohne dass ein Aufrufer daran denken muss. Reihenfolge in `#finish`:
+ * (1) Status setzen, (2) Lock freigeben, (3) Audit, (4) best-effort
+ * Store-Schreibzugriff — Lock-Freigabe VOR dem Store-Schreibzugriff, damit ein
+ * hängender/fehlschlagender Store NIE ein Lock hält. Ohne CTRF (Frühausfall)
+ * wird `ctrf: null` übergeben (KEIN synthetisches Ersatz-CTRF,
+ * [[regression-result-store]] AC1b) — `reason` ist bei `precondition-error`/
+ * `error` gesetzt, bei `passed`/`failed` abwesend. Ein Store-Fehler verhindert
+ * den Lauf-Abschluss nie (best-effort, s. `#persistToStore`).
+ *
+ * Testobjekt-Weiche (AC11, S-326): VOR dem lokalen Pfad löst `#resolveTarget`
+ * das je Scope deklarierte `target` über DIESELBE Lese-Boundary wie der
+ * Ausführen-Dialog (`RegressionSuiteReader#readRegressionSuites`, AC4/AC6 —
+ * kein zweiter Parser). `gesamt` mischt Testobjekte und läuft IMMER über den
+ * local-Pfad (Bestandsverhalten, AC11 letzter Satz) — dafür wird
+ * `readRegressionSuites` gar nicht erst aufgerufen (kein unnötiges Datei-IO).
+ * Für `bereich`/`verbund` gilt: kein deklariertes `target` (fehlende/unlesbare
+ * Begleitbeschreibung, Suite nicht gefunden) → konservativ `local`
+ * (unverändertes Bestandsverhalten); `local` → bestehender lokaler Pfad
+ * (AC5/AC7/AC8); jeder andere Wert (`ephemeral-infra`/`url`/ein unbekannter
+ * String) → SOFORTIGER, persistierter `error` „Testobjekt `<target>` wird
+ * noch nicht unterstützt" — OHNE Provisionierung, OHNE Playwright-Start, OHNE
+ * die local-Erreichbarkeitsprüfung. Ein Fallback auf den local-Pfad ist
+ * ausgeschlossen (verifizierter Befund 2026-07-08: die vps-Suite durchlief
+ * fälschlich die local-Prüfung und meldete einen irreführenden
+ * Vorbedingungs-Fehler). Datenhygiene: `target` kommt aus einer Repo-Datei,
+ * die dieser Runner nicht kontrolliert — nur die drei bekannten Werte
+ * (`local`/`ephemeral-infra`/`url`) werden wörtlich in die Meldung
+ * übernommen, ein unbekannter Wert erzeugt eine generische Meldung
+ * (`buildUnsupportedTargetMessage`).
+ *
  * @module RegressionRunner
  */
 
@@ -104,6 +138,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { ProjectJobLock } from './ProjectJobLock.js';
+import { readRegressionSuites } from './RegressionSuiteReader.js';
 
 /** Eigenständiger, entkoppelter Runaway-Timeout (Default 15 min — ein Playwright-Lauf kann mehrere Minuten dauern). */
 export const DEFAULT_REGRESSION_RUN_TIMEOUT_MS = 15 * 60 * 1000;
@@ -139,6 +174,31 @@ const INTERNAL_FAILURE_MESSAGE = 'Interner Fehler im Regressions-Runner';
 const NO_CTRF_MESSAGE = 'Regressionslauf beendet, aber kein CTRF-Ergebnis gefunden';
 const ROLLOUT_FAILURE_MESSAGE = 'Frisch-Ausrollen fehlgeschlagen';
 const ROLLOUT_NOT_READY_MESSAGE = 'Applikation lokal nicht gestartet';
+
+/**
+ * Bekannte, bereits im Testobjekt-Modell definierte, aber (noch) nicht
+ * gebaute `target`-Werte (AC11, A3/A4) — dürfen wörtlich in die
+ * Fehlermeldung übernommen werden (Datenhygiene: nur bekannte Werte).
+ */
+const KNOWN_UNSUPPORTED_TARGETS = new Set(['ephemeral-infra', 'url']);
+
+/**
+ * Baut die secret-freie „noch nicht unterstützt"-Meldung für ein deklariertes,
+ * aber (noch) nicht gebautes Testobjekt (AC11). `target` kommt aus einer
+ * Repo-Datei, die dieser Runner nicht kontrolliert — nur die bekannten Werte
+ * (`ephemeral-infra`/`url`) werden wörtlich übernommen; ein unbekannter/
+ * unerwarteter Wert erzeugt eine generische Meldung (keine Übernahme
+ * beliebiger Fremd-Strings in die Diagnose).
+ *
+ * @param {string} target
+ * @returns {string}
+ */
+export function buildUnsupportedTargetMessage(target) {
+  if (KNOWN_UNSUPPORTED_TARGETS.has(target)) {
+    return `Testobjekt ${target} wird noch nicht unterstützt`;
+  }
+  return 'Testobjekt wird noch nicht unterstützt';
+}
 
 /**
  * Validiert den Ausführen-Scope (Vertrag `regression-run.md` §Verträge).
@@ -430,6 +490,8 @@ export class RegressionRunner {
   #dockerControl;
   /** @type {import('./DrainNotifier.js').DrainNotifier|null} injectable (regression-failed-notification AC1–AC4, Default: kein Push) */
   #notifier;
+  /** @type {(projectPath: string, deps?: object) => Promise<{suites: Array<object>}>} injectable (AC11 — dieselbe Lese-Boundary wie der Ausführen-Dialog, Default: readRegressionSuites) */
+  #readSuites;
   /**
    * @type {Map<string, {
    *   status: 'running'|'passed'|'failed'|'precondition-error'|'error',
@@ -457,6 +519,7 @@ export class RegressionRunner {
    * @param {Function} [params.readRolloutConfig] - injectable (default: readLocalRolloutConfig, AC7).
    * @param {import('./deploy/LocalDockerControl.js').LocalDockerControl} [params.dockerControl] - injectable (AC7; ohne → kein Frisch-Ausrollen möglich, degradiert).
    * @param {import('./DrainNotifier.js').DrainNotifier} [params.notifier] - injectable (regression-failed-notification AC1–AC4; ohne → kein Push, degradiert).
+   * @param {Function} [params.readSuites] - injectable (AC11, default: readRegressionSuites — dieselbe Lese-Boundary wie der Ausführen-Dialog, AC4/AC6).
    */
   constructor({
     runPlaywright,
@@ -472,6 +535,7 @@ export class RegressionRunner {
     readRolloutConfig,
     dockerControl,
     notifier,
+    readSuites,
   } = {}) {
     this.#timeoutMs = timeoutMs ?? (Number(process.env.REGRESSION_RUN_TIMEOUT_MS) || DEFAULT_REGRESSION_RUN_TIMEOUT_MS);
     this.#readRolloutConfig = readRolloutConfig ?? readLocalRolloutConfig;
@@ -486,6 +550,7 @@ export class RegressionRunner {
     this.#readCtrf = readCtrf ?? readCtrfResult;
     this.#readFile = readFileFn ?? readFile;
     this.#notifier = notifier ?? null;
+    this.#readSuites = readSuites ?? readRegressionSuites;
   }
 
   /**
@@ -563,10 +628,10 @@ export class RegressionRunner {
   }
 
   /**
-   * Führt EINEN Regressionslauf vollständig aus: local-Erreichbarkeitsprüfung
-   * (AC5, nur bei potenziell `local`-Scopes — konservativ: immer, da diese
-   * Story kein `target`-Lesen je Suite umfasst, s. Nicht-Ziele/AC4 spätere
-   * Story), `npx playwright test`, CTRF-Auswertung, Ergebnis-Übergabe (AC9).
+   * Führt EINEN Regressionslauf vollständig aus: Testobjekt-Weiche (AC11),
+   * local-Erreichbarkeitsprüfung (AC5), `npx playwright test`,
+   * CTRF-Auswertung, Ergebnis-Übergabe (AC9, strukturell über `#finish`,
+   * AC10).
    *
    * @param {string} runId
    * @param {{ typ: 'bereich'|'verbund'|'gesamt', id?: string }} scope
@@ -586,8 +651,21 @@ export class RegressionRunner {
       return;
     }
 
-    // AC5: local-Erreichbarkeitsprüfung VOR jedem Lauf (konservativ — diese
-    // Story liest `target` je Suite noch nicht, s. Modul-Doku/Nicht-Ziele).
+    // AC11: Testobjekt-Weiche VOR dem lokalen Pfad — dieselbe Lese-Boundary
+    // wie der Ausführen-Dialog (kein zweiter Parser). Ein deklariertes,
+    // (noch) nicht gebautes Testobjekt endet SOFORT als `error`, ohne
+    // Provisionierung/Playwright-Start/local-Erreichbarkeitsprüfung.
+    const target = await this.#resolveTarget(job.projectPath, scope);
+    if (target !== 'local') {
+      this.#finish(runId, 'error', {
+        reason: buildUnsupportedTargetMessage(target),
+        ...(KNOWN_UNSUPPORTED_TARGETS.has(target) ? { target } : {}),
+        durationMs: Date.now() - start,
+      });
+      return;
+    }
+
+    // AC5: local-Erreichbarkeitsprüfung VOR jedem local-Lauf.
     const port = await this.#readPort(job.projectPath, { readFile: this.#readFile });
     let baseUrl;
     if (port !== null) {
@@ -643,9 +721,6 @@ export class RegressionRunner {
     const { counts, status } = summarizeCtrf(ctrf);
     const durationMs = Date.now() - start;
 
-    // AC9: Ergebnis-Übergabe an den Store (S-312) — EIN aggregierter Datensatz.
-    await this.#persistResult(job, { status, counts, ctrf, durationMs });
-
     // regression-failed-notification AC2/AC3: NUR bei status:"failed" (echte
     // rote Testfälle, aus summarizeCtrf()) — NIE bei precondition-error/error
     // (die erreichen diesen Codepfad ohnehin nie, s. Modul-Doku #runLifecycle).
@@ -654,7 +729,40 @@ export class RegressionRunner {
       this.#notifyRegressionFailed(job, counts);
     }
 
-    this.#finish(runId, status, { counts, durationMs, target: baseUrl ? 'local' : undefined });
+    // AC9/AC10: Ergebnis-Übergabe geschieht strukturell über #finish (EIN
+    // aggregierter Datensatz, A1) — #finish selbst darf NICHT notifizieren
+    // (s. Modul-Doku, Notify-Naht bleibt strukturell auf summarizeCtrf()
+    // beschränkt).
+    this.#finish(runId, status, { counts, durationMs, target: 'local', ctrf });
+  }
+
+  /**
+   * Löst das für den gewählten Scope deklarierte `target` auf (AC11) — über
+   * DIESELBE Lese-Boundary wie der Ausführen-Dialog (`readRegressionSuites`,
+   * AC4/AC6, kein zweiter Parser). `gesamt` mischt Testobjekte und läuft
+   * IMMER über den local-Pfad (Bestandsverhalten, AC11 letzter Satz) —
+   * `readRegressionSuites` wird dafür gar nicht erst aufgerufen. Fehlt das
+   * `target` (keine/unlesbare Begleitbeschreibung, Suite nicht (mehr)
+   * gefunden, Lesefehler) → konservativ `'local'`.
+   *
+   * @param {string} projectPath
+   * @param {{ typ: 'bereich'|'verbund'|'gesamt', id?: string }} scope
+   * @returns {Promise<string>} `'local'` oder der roh deklarierte `target`-Wert.
+   */
+  async #resolveTarget(projectPath, scope) {
+    if (scope.typ === 'gesamt') return 'local';
+    let result;
+    try {
+      result = await this.#readSuites(projectPath);
+    } catch {
+      return 'local'; // Lesefehler -> konservativ local (AC11)
+    }
+    const suites = Array.isArray(result?.suites) ? result.suites : [];
+    const match = suites.find((s) => {
+      if (!s?.scope || s.scope.typ !== scope.typ) return false;
+      return scope.typ === 'bereich' ? s.scope.id === scope.id : true;
+    });
+    return match?.target ?? 'local'; // kein target deklariert -> konservativ local (AC11)
   }
 
   /**
@@ -742,14 +850,20 @@ export class RegressionRunner {
   }
 
   /**
-   * Übergibt EINEN aggregierten Lauf-Datensatz an den `RegressionResultStore`
-   * (AC9, best-effort — ein Store-Fehler crasht den Runner nicht, der
-   * Lauf-Status selbst bleibt korrekt, nur die Persistenz kann fehlen).
+   * Übergibt EINEN Lauf-Datensatz an den `RegressionResultStore` (AC9/AC10,
+   * best-effort — ein Store-Fehler crasht den Runner nicht, der Lauf-Status
+   * selbst bleibt korrekt, nur die Persistenz kann fehlen). Wird
+   * AUSSCHLIESSLICH von `#finish` gerufen (strukturelle Garantie AC10: JEDER
+   * terminale Zustand — auch ein Frühausfall ohne CTRF — landet hier genau
+   * einmal). Ohne CTRF (Frühausfall) wird `ctrf: null` übergeben (KEIN
+   * synthetisches Ersatz-CTRF, [[regression-result-store]] AC1b); `reason`
+   * wird NUR bei `precondition-error`/`error` gesetzt.
    *
    * @param {{ projekt: string, suite: string, scopeTyp: string }} job
-   * @param {{ status: 'passed'|'failed', counts: object, ctrf: object, durationMs: number }} outcome
+   * @param {'passed'|'failed'|'precondition-error'|'error'} status
+   * @param {{ counts?: object, ctrf?: object, durationMs?: number, reason?: string }} patch
    */
-  async #persistResult(job, { status, counts, ctrf, durationMs }) {
+  async #persistToStore(job, status, { counts, ctrf, durationMs, reason }) {
     if (!this.#resultStore || typeof this.#resultStore.record !== 'function') return;
     try {
       const input = {
@@ -757,28 +871,42 @@ export class RegressionRunner {
         suite: job.suite,
         scopeTyp: job.scopeTyp,
         status,
-        startedAt: new Date(Date.now() - durationMs).toISOString(),
-        durationMs,
-        counts,
-        ctrf,
+        startedAt: new Date(Date.now() - (durationMs ?? 0)).toISOString(),
+        durationMs: durationMs ?? 0,
+        counts: counts ?? { passed: 0, failed: 0, total: 0 },
+        // AC10/AC1b: kein CTRF bei einem Frühausfall -> ctrf:null, KEIN
+        // synthetisches Ersatz-CTRF.
+        ctrf: ctrf ?? null,
       };
       // RegressionResultStore AC3: Debug-Artefakte NUR bei status:'failed'.
       if (status === 'failed') {
         input.artifacts = { htmlReport: HTML_REPORT_PATH };
       }
+      // AC1b: reason NUR bei precondition-error/error (bei passed/failed abwesend).
+      if ((status === 'precondition-error' || status === 'error') && reason) {
+        input.reason = reason;
+      }
       await this.#resultStore.record(input);
     } catch (err) {
-      console.error('[RegressionRunner] Ergebnis-Übergabe fehlgeschlagen:', err.message);
+      console.error('[RegressionRunner] Ergebnis-Übergabe fehlgeschlagen:', err?.message ?? String(err));
     }
   }
 
   /**
-   * Setzt einen Lauf terminal, gibt das Lock frei (immer) und schreibt genau
-   * EINEN Ende-/Fehler-Audit-Eintrag (secret-frei).
+   * Setzt einen Lauf terminal, gibt das Lock frei (immer), schreibt genau
+   * EINEN Ende-/Fehler-Audit-Eintrag (secret-frei) und übergibt best-effort
+   * GENAU EINEN Datensatz an den `RegressionResultStore` (AC10, S-326) —
+   * strukturell für JEDEN terminalen Zustand, auch ohne CTRF (Frühausfall).
+   * Reihenfolge (bindend, Modul-Doku): Status → Lock-Freigabe → Audit →
+   * Store — Lock-Freigabe VOR dem best-effort-Store-Schreibzugriff, damit ein
+   * hängender/fehlschlagender Store NIE ein Lock hält. `#finish` selbst
+   * notifiziert NIE (die Notify-Naht bleibt strukturell auf den
+   * `summarizeCtrf()`-Erfolgspfad in `#runLifecycle` beschränkt,
+   * regression-failed-notification AC2/AC3).
    *
    * @param {string} runId
    * @param {'passed'|'failed'|'precondition-error'|'error'} status
-   * @param {{ counts?: object, durationMs?: number, reason?: string, target?: string }} patch
+   * @param {{ counts?: object, ctrf?: object, durationMs?: number, reason?: string, target?: string }} patch
    */
   #finish(runId, status, patch) {
     const job = this.#jobs.get(runId);
@@ -789,7 +917,7 @@ export class RegressionRunner {
     if (patch.reason !== undefined) job.reason = patch.reason;
     if (patch.target !== undefined) job.target = patch.target;
 
-    // Lock IMMER freigeben (terminaler Zustand).
+    // Lock IMMER freigeben (terminaler Zustand) — VOR dem Store-Schreibzugriff.
     this.#lock.release(job.projectPath);
 
     if (status === 'passed') {
@@ -797,6 +925,13 @@ export class RegressionRunner {
     } else {
       this.#audit(job.identity, `regression-run:error:${runId}:${status}`);
     }
+
+    // AC10: strukturelle, ausnahmslose Diagnose-Pflicht — best-effort, ein
+    // Store-Fehler darf den Lauf-Abschluss (bereits oben erfolgt) nie
+    // verhindern.
+    this.#persistToStore(job, status, patch).catch(() => {
+      // #persistToStore fängt selbst bereits alle Fehler ab (Sicherheitsnetz).
+    });
   }
 
   /**

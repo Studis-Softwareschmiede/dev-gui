@@ -33,6 +33,16 @@
  *          toter Link, Edge-Case „Artefakt-Zugriff auf einen grünen ... Lauf
  *          → 404, kein Leak" wird so vermieden, statt erst serverseitig
  *          sichtbar zu werden).
+ *   AC7 (S-326) — Frühausfall-Darstellung: ein Lauf mit `status:
+ *          "precondition-error"|"error"` ([[regression-result-store]] AC1b)
+ *          erscheint in der Lauf-Liste UND im Drilldown als eigener,
+ *          dritter Zustand „⚠ Nicht ausgeführt" (Icon+Text+Farbe, NIE grün/
+ *          NIE rot) — sein `reason` erscheint im Drilldown als Fehlgrund-Text
+ *          (`role="alert"`, generischer Hinweis „Kein Fehlgrund hinterlegt."
+ *          falls `reason` fehlt), KEIN Artefakt-Link (AC6 gilt nur für
+ *          `failed`), KEINE Testfall-Liste (kein CTRF vorhanden — `ctrf` ist
+ *          `null`). Im Suite-Trend (AC4) zählt er als eigenes ⚠-Zeichen, NIE
+ *          als ✓.
  *
  * Edge-Cases (Spec):
  *   - Keine Läufe → Hinweistext „Noch kein Regressionstest gelaufen."
@@ -42,6 +52,10 @@
  *   - Suite mit nur einem Lauf → Trend zeigt genau diesen einen Zustand
  *     (kein Sonderfall nötig — die Gruppierung produziert ohnehin ein
  *     1-elementiges Array).
+ *   - Frühausfall-Lauf ohne `reason` (S-326) → „⚠ Nicht ausgeführt" +
+ *     generischer Hinweis „Kein Fehlgrund hinterlegt." (kein Crash).
+ *   - Suite hat ausschließlich Frühausfall-Läufe (S-326) → Trend zeigt eine
+ *     reine ⚠-Kette (weder grün noch rot suggeriert).
  *
  * ── Component-Props-Vertrag ─────────────────────────────────────────────────
  * @param {{
@@ -133,6 +147,16 @@ function StatusBadge({ status }) {
       </span>
     );
   }
+  // AC7 (S-326): precondition-error/error sind kein roter Testlauf, sondern
+  // ein Lauf, der gar nicht erst ausgeführt wurde — eigener dritter Zustand,
+  // NIE grün/NIE rot.
+  if (status === 'precondition-error' || status === 'error') {
+    return (
+      <span style={styles.statusNotRun} data-testid="regression-result-status-badge" data-status="not-run">
+        ⚠ Nicht ausgeführt
+      </span>
+    );
+  }
   return (
     <span style={styles.statusUnknown} data-testid="regression-result-status-badge" data-status={status ?? 'unknown'}>
       ? Unbekannt
@@ -147,21 +171,33 @@ function StatusBadge({ status }) {
  *
  * @param {{ runs: Array<{status: string}> }} props
  */
+/**
+ * AC4/AC7 (S-326): je Lauf-Status Icon + Stil + Sprach-Label für die
+ * Trend-Kette — precondition-error/error zählen als eigenes ⚠-Zeichen, NIE
+ * als ✓ (das würde eine nie stattgefundene Ausführung als grün ausgeben).
+ *
+ * @param {string} status
+ * @returns {{ icon: string, style: object, label: string }}
+ */
+function trendGlyph(status) {
+  if (status === 'failed') return { icon: '✗', style: styles.trendDotFailed, label: 'Fehlgeschlagen' };
+  if (status === 'passed') return { icon: '✓', style: styles.trendDotPassed, label: 'Erfolgreich' };
+  return { icon: '⚠', style: styles.trendDotNotRun, label: 'Nicht ausgeführt' };
+}
+
 function SuiteTrend({ runs }) {
   return (
     <span style={styles.trendRow} data-testid="regression-result-trend">
-      {runs.map((run, idx) => (
-        <span
-          key={run.runId ?? idx}
-          style={run.status === 'failed' ? styles.trendDotFailed : styles.trendDotPassed}
-          title={run.status === 'failed' ? 'Fehlgeschlagen' : 'Erfolgreich'}
-          aria-hidden="true"
-        >
-          {run.status === 'failed' ? '✗' : '✓'}
-        </span>
-      ))}
+      {runs.map((run, idx) => {
+        const { icon, style, label } = trendGlyph(run.status);
+        return (
+          <span key={run.runId ?? idx} style={style} title={label} aria-hidden="true">
+            {icon}
+          </span>
+        );
+      })}
       <span style={styles.trendSrOnly}>
-        {runs.map((r) => (r.status === 'failed' ? 'Fehlgeschlagen' : 'Erfolgreich')).join(', ')}
+        {runs.map((r) => trendGlyph(r.status).label).join(', ')}
       </span>
     </span>
   );
@@ -365,37 +401,47 @@ export function RegressionResultView({ projectSlug, onClose, triggerRef, fetchFn
                   </a>
                 )}
 
-                {testCases === null && (
-                  <p style={styles.hint} data-testid="regression-result-ctrf-degraded">
-                    Testfall-Details konnten nicht gelesen werden (unerwartetes Format).
+                {/* AC7 (S-326): Frühausfall — kein CTRF, kein Artefakt; statt
+                    Testfall-Liste erscheint der Fehlgrund. */}
+                {runDetail.status === 'precondition-error' || runDetail.status === 'error' ? (
+                  <p role="alert" style={styles.notRunReason} data-testid="regression-result-not-run-reason">
+                    {runDetail.reason || 'Kein Fehlgrund hinterlegt.'}
                   </p>
-                )}
+                ) : (
+                  <>
+                    {testCases === null && (
+                      <p style={styles.hint} data-testid="regression-result-ctrf-degraded">
+                        Testfall-Details konnten nicht gelesen werden (unerwartetes Format).
+                      </p>
+                    )}
 
-                {testCases !== null && testCases.length === 0 && (
-                  <p style={styles.hint} data-testid="regression-result-ctrf-empty">
-                    Keine Testfälle im Ergebnis.
-                  </p>
-                )}
+                    {testCases !== null && testCases.length === 0 && (
+                      <p style={styles.hint} data-testid="regression-result-ctrf-empty">
+                        Keine Testfälle im Ergebnis.
+                      </p>
+                    )}
 
-                {testCases !== null && testCases.length > 0 && (
-                  <ul style={styles.testCaseList} data-testid="regression-result-testcases">
-                    {testCases.map((tc, idx) => {
-                      const isFailed = tc?.status === 'failed';
-                      return (
-                        <li key={`${tc?.name ?? 'test'}-${idx}`} style={styles.testCaseItem}>
-                          <span style={styles.testCaseRow}>
-                            <StatusBadge status={tc?.status} />
-                            <span>{tc?.name ?? '(ohne Namen)'}</span>
-                          </span>
-                          {isFailed && tc?.message && (
-                            <p role="alert" style={styles.testCaseMessage} data-testid="regression-result-testcase-message">
-                              {tc.message}
-                            </p>
-                          )}
-                        </li>
-                      );
-                    })}
-                  </ul>
+                    {testCases !== null && testCases.length > 0 && (
+                      <ul style={styles.testCaseList} data-testid="regression-result-testcases">
+                        {testCases.map((tc, idx) => {
+                          const isFailed = tc?.status === 'failed';
+                          return (
+                            <li key={`${tc?.name ?? 'test'}-${idx}`} style={styles.testCaseItem}>
+                              <span style={styles.testCaseRow}>
+                                <StatusBadge status={tc?.status} />
+                                <span>{tc?.name ?? '(ohne Namen)'}</span>
+                              </span>
+                              {isFailed && tc?.message && (
+                                <p role="alert" style={styles.testCaseMessage} data-testid="regression-result-testcase-message">
+                                  {tc.message}
+                                </p>
+                              )}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                  </>
                 )}
               </>
             )}
@@ -497,6 +543,10 @@ const styles = {
     color: '#f87171',
     fontSize: 12,
   },
+  trendDotNotRun: {
+    color: '#fbbf24',
+    fontSize: 12,
+  },
   trendSrOnly: {
     position: 'absolute',
     width: 1,
@@ -560,6 +610,16 @@ const styles = {
   statusUnknown: {
     color: '#9ca3af',
     fontWeight: 600,
+  },
+  statusNotRun: {
+    color: '#fbbf24',
+    fontWeight: 600,
+  },
+  notRunReason: {
+    margin: '0 0 12px',
+    fontSize: 13,
+    color: '#fbbf24',
+    lineHeight: 1.5,
   },
   btnBack: {
     background: 'none',

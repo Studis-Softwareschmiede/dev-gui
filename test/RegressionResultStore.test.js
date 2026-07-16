@@ -27,6 +27,13 @@
  *          `null` wenn nicht gefunden/Slug ungültig.
  *   AC5 — Keine Secrets/Tokens in Datensatz/Datei; `ctrf` wird unverändert
  *          (deep) übernommen.
+ *   AC1b (S-326) — Frühausfall-Datensatz: bei `status:"precondition-error"|
+ *          "error"` wird `ctrf:null` (KEIN synthetisches Ersatz-CTRF, auch
+ *          wenn der Aufrufer fälschlich eines mitgibt), `counts:{0,0,0}` und
+ *          ein `reason` (secret-freie Kurzbegründung) abgelegt; bei `passed`/
+ *          `failed` bleibt `reason` abwesend. Retention/Prune/Read-API sind
+ *          identisch zu passed/failed (kein Sonderweg). `_normalizeRun` lädt
+ *          Frühausfall-Datensätze nach einem Neustart korrekt zurück.
  *
  * Edge-Cases (spec):
  *   - Artefakte fehlen bei einem roten Lauf → Datensatz ohne `artifacts`,
@@ -35,6 +42,8 @@
  *     Projekt-Buckets, keine Kollision.
  *   - Korruptes/teilweises Datei-Set beim Laden → betroffener Datensatz wird
  *     übersprungen, Rest bleibt lesbar.
+ *   - Frühausfall-Datensatz ohne `reason` (S-326) → wird abgelegt, `reason`
+ *     fehlt einfach (kein Crash).
  *
  * Strategy: echtes fs gegen ein frisches tmp-CRED_STORE_DIR je Test; je Test
  * eine frische RegressionResultStore-Instanz (der In-Memory-Cache ist
@@ -356,5 +365,88 @@ describe('RegressionResultStore — keine Secrets, ctrf unverändert (AC5)', () 
     const [filename] = await readdir(projectDir);
     const raw = await readFile(join(projectDir, filename), 'utf8');
     expect(raw).not.toMatch(/token|secret|password/i);
+  });
+});
+
+describe('RegressionResultStore — Frühausfall-Datensatz (AC1b, S-326)', () => {
+  it('akzeptiert status:"precondition-error"/"error" — ctrf:null, counts:{0,0,0}, reason gesetzt', async () => {
+    const store = new RegressionResultStore();
+    const precon = await store.record(
+      base({ status: 'precondition-error', ctrf: undefined, counts: undefined, reason: 'Applikation lokal nicht gestartet' }),
+    );
+    expect(precon.status).toBe('precondition-error');
+    expect(precon.ctrf).toBeNull();
+    expect(precon.counts).toEqual({ passed: 0, failed: 0, total: 0 });
+    expect(precon.reason).toBe('Applikation lokal nicht gestartet');
+
+    const err = await store.record(
+      base({ status: 'error', ctrf: undefined, counts: undefined, reason: 'kein Regressions-Grundgerüst' }),
+    );
+    expect(err.status).toBe('error');
+    expect(err.ctrf).toBeNull();
+    expect(err.reason).toBe('kein Regressions-Grundgerüst');
+  });
+
+  it('ctrf bleibt null bei precondition-error/error, SELBST wenn der Aufrufer fälschlich eines mitgibt (kein synthetisches Ersatz-CTRF)', async () => {
+    const store = new RegressionResultStore();
+    const run = await store.record(
+      base({ status: 'error', ctrf: { results: { summary: { tests: 1, passed: 1, failed: 0 } } }, reason: 'kein CTRF' }),
+    );
+    expect(run.ctrf).toBeNull();
+  });
+
+  it('reason ist bei status:"passed"/"failed" abwesend (auch wenn mitgegeben)', async () => {
+    const store = new RegressionResultStore();
+    const passedRun = await store.record(base({ status: 'passed', reason: 'sollte-nicht-erscheinen' }));
+    expect(passedRun.reason).toBeUndefined();
+    const failedRun = await store.record(base({ status: 'failed', reason: 'sollte-nicht-erscheinen' }));
+    expect(failedRun.reason).toBeUndefined();
+  });
+
+  it('Frühausfall-Datensatz ohne reason → wird abgelegt, reason fehlt (kein Crash, Edge-Case)', async () => {
+    const store = new RegressionResultStore();
+    const run = await store.record(base({ status: 'error', ctrf: undefined, counts: undefined, reason: undefined }));
+    expect(run.reason).toBeUndefined();
+    expect(await store.get('proj-a', run.runId)).not.toBeNull();
+  });
+
+  it('artifacts bleibt abwesend bei precondition-error/error (AC3 gilt nur für failed)', async () => {
+    const store = new RegressionResultStore();
+    const run = await store.record(
+      base({ status: 'precondition-error', ctrf: undefined, counts: undefined, artifacts: { htmlReport: 'x.html' } }),
+    );
+    expect(run.artifacts).toBeUndefined();
+  });
+
+  it('_normalizeRun lädt einen Frühausfall-Datensatz nach einem Neustart korrekt zurück (ctrf:null, reason erhalten)', async () => {
+    const store1 = new RegressionResultStore();
+    await store1.record(
+      base({ status: 'precondition-error', ctrf: undefined, counts: undefined, reason: 'Applikation lokal nicht gestartet' }),
+    );
+
+    const store2 = new RegressionResultStore();
+    const runs = await store2.list('proj-a');
+    expect(runs).toHaveLength(1);
+    expect(runs[0].status).toBe('precondition-error');
+    expect(runs[0].ctrf).toBeNull();
+    expect(runs[0].reason).toBe('Applikation lokal nicht gestartet');
+    expect(runs[0].counts).toEqual({ passed: 0, failed: 0, total: 0 });
+  });
+
+  it('Retention/Prune (AC2) behandelt Frühausfall-Datensätze identisch zu passed/failed (kein Sonderweg)', async () => {
+    const store = new RegressionResultStore();
+    const first = await store.record(base({ status: 'error', ctrf: undefined, counts: undefined, reason: 'x', suite: 'r0' }));
+    for (let i = 1; i <= MAX_RUNS_PER_PROJECT; i++) {
+      await store.record(base({ suite: `r${i}` }));
+    }
+    const runs = await store.list('proj-a');
+    expect(runs).toHaveLength(MAX_RUNS_PER_PROJECT);
+    expect(await store.get('proj-a', first.runId)).toBeNull(); // geprunt wie jeder andere Lauf
+  });
+
+  it('record() lehnt weiterhin unbekannte status-Werte ab (Vokabular bleibt geschlossen)', async () => {
+    const store = new RegressionResultStore();
+    await expect(store.record(base({ status: 'not-run' }))).rejects.toThrow();
+    await expect(store.record(base({ status: 'running' }))).rejects.toThrow();
   });
 });
