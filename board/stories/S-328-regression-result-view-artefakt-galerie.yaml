@@ -22,8 +22,38 @@ branch: null
 pr: null
 blocked_reason: null
 created_at: '2026-07-08T21:00:00Z'
-updated_at: '2026-07-08T21:00:00Z'
+updated_at: '2026-07-16T00:00:00Z'
 done_at: null
 tok_est: null
 area: fabrik-arbeiten
+owner_entscheid_2026_07_16: |
+  BINDENDE Vorgaben (Vorklärung 2026-07-16, Schwester-Story S-327 setzt das Fundament):
+
+  SPEC-KONFLIKT (zwingend mitziehen, sonst blockt das Drift-Gate zu Recht):
+  docs/specs/regression-result-view.md schreibt den heutigen Zustand als bindend fest —
+  Zweck, Kontext-Abschnitt ("Debug-Artefakt-Zugriff nur bei Rot"), Main Success Scenario
+  Schritt 5, AC2, AC6, Vertrag "nur bei status: failed" sowie der Edge-Case
+  "Artefakt-Zugriff auf einen grünen Lauf -> 404". Alles konsistent nachziehen (kein
+  AC-Rest, der noch "nur bei Rot" behauptet), version hochziehen.
+  UNVERÄNDERT bindend bleibt: Artefakt-Zugriff pfad-confined (kein Path-Traversal/
+  Symlink-Ausbruch), hinter Access, read-only, keine Secrets im Stream, A11y (grün/rot
+  nie allein über Farbe, Icon + Text, WCAG 2.1 AA). NUR die Rot/Grün-Bedingung fällt.
+  Der Edge-Case "gepruneter Lauf -> 404" bleibt gültig und wird durch die NEUE
+  Artefakt-Retention (10, s. S-327) zum Regelfall für Lauf 11–50: der Drilldown muss
+  das sauber abfangen (kein toter Link, verständlicher Hinweis statt 404-Sackgasse).
+
+  DATENQUELLE (durch S-327 bereits vorhanden, nicht neu bauen): das CTRF-JSON listet je
+  Testfall attachments:[{name,contentType,path}] mit RELATIVEN Pfaden in die Lauf-Ablage.
+  Galerie-URL = /api/projects/<slug>/regression-runs/<runId>/artifacts/<attachment.path>
+  (kein Client-seitiger Pfadbau darüber hinaus). name/contentType unterscheiden
+  Screenshot (image/png) / Video (video/webm) / Trace (application/zip).
+
+  TRACE-VIEWER — FALLE (vor der Umsetzung prüfen): der öffentliche Viewer
+  https://trace.playwright.dev/?trace=<URL> muss die trace.zip SELBST laden können. Hinter
+  Cloudflare Access ist unsere Artefakt-URL für ihn NICHT erreichbar (Access-Redirect + CORS)
+  — ein solcher Link wäre tot. Pragmatischer Weg stattdessen: Link auf den mitgelieferten
+  Playwright-HTML-Report (.../artifacts/playwright-report/index.html), der einen EINGEBAUTEN
+  Trace-Viewer hat und aus derselben, access-geschützten Ablage kommt. Der bestehende
+  "Debug-Artefakte (HTML-Report) öffnen"-Link bleibt damit bestehen — nur nicht mehr
+  auf rote Läufe beschränkt.
 owner_wunsch_2026_07_08: 'Aufsetzend auf S-327 (Erfassen/Aufbewahren): Die Ergebnis-Ansicht (regression-result-view) zeigt je Lauf/Testfall die visuellen Artefakte an — eine Screenshot-Galerie (Bilder inline anschaubar) + Link zum Playwright-Trace-Viewer (Schritt-für-Schritt mit DOM-Snapshots) + ggf. Video. Heute existiert nur der Link "Debug-Artefakte (HTML-Report) öffnen" und der nur bei roten Läufen. Ziel: Screenshots/Trace auch für grüne Läufe sichtbar, direkt im Drilldown, nicht nur als externer HTML-Report. Owner-O-Ton: "Playwright bietet doch viel mehr — die Bilder vermisse ich."'
