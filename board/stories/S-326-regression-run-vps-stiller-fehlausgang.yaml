@@ -1,7 +1,7 @@
 id: S-326
 parent: F-069
 title: Regressions-Run (ephemeral-infra/VPS) scheitert still — kein Prozess/Log/Ergebnis/Diagnose
-status: In Progress
+status: Done
 priority: P2
 spec: docs/specs/regression-run.md
 implements:
@@ -24,8 +24,8 @@ branch: feat/S-326-regression-fruehausfall-diagnose
 pr: null
 blocked_reason: null
 created_at: '2026-07-08T20:15:00Z'
-updated_at: '2026-07-16T05:55:19Z'
-done_at: null
+updated_at: '2026-07-16T11:43:59Z'
+done_at: '2026-07-16T11:43:59Z'
 tok_est: null
 area: fabrik-arbeiten
 scope_2026_07_16: 'SCOPE-SCHNITT (Owner-Entscheidung 2026-07-16, nach Code-Gegenprüfung
