@@ -266,6 +266,20 @@ services:
       # Muss mit dem Volume-Mount unten übereinstimmen.
       WORKSPACE_HOST_DIR: ${WORKSPACE_HOST_DIR:-}
 
+      # ── Obsidian-Vault (obsidian-vault-config / S-329, Owner-Vorfall 2026-07-08) ──
+      # Container-interne Containment-Schranke (Modell a, analog WORKSPACE_DIR) —
+      # muss gesetzt sein, damit die harte Traversal-/Symlink-Schranke aus
+      # src/obsidianVaultPath.js (AC3) greift. Der in den Einstellungen eingegebene
+      # Vault-Pfad ist dieser CONTAINER-Pfad (z.B. /obsidian-vault/<vault-name>),
+      # NICHT der Mac-/VPS-Host-Pfad — siehe docs/obsidian-vault-mount-runbook.md.
+      OBSIDIAN_VAULT_DIR: /obsidian-vault
+      # Host-Pfad des Vault-Mounts — rein informativ, analog WORKSPACE_HOST_DIR.
+      # Auf dem Mac: der iCloud-Obsidian-Ordner; auf dem VPS liegt der Vault anders
+      # (z.B. per Syncthing/rsync repliziert) — siehe Runbook. Ohne Setzung ist
+      # "kein Vault konfiguriert" der Normalzustand (Nicht-Ziel jeder Vault-Nutzung
+      # ist möglich, ohne dass hier etwas gesetzt sein muss).
+      OBSIDIAN_VAULT_HOST_DIR: ${OBSIDIAN_VAULT_HOST_DIR:-}
+
     volumes:
       # Claude OAuth credentials + agent-flow plugin cache (persisted across
       # restarts/image updates). Must be owned by uid 1000 (node).
@@ -286,6 +300,29 @@ services:
       # (Mac, alex) — die äußere, gemountete Schranke. WORKSPACE_DIR (Effektiv-
       # wert) wird per Settings innerhalb dieser Schranke gewählt (workspace-path-config).
       - ${WORKSPACE_HOST_DIR:-/Users/alex/Git}:/workspace
+
+      # ── Obsidian-Vault (obsidian-vault-config / S-329) ─────────────────────
+      # Read-write (KEIN :ro): der headless Obsidian-Ingest-Runner
+      # (ObsidianIngestRunner, `claude -p '/agent-flow:from-notes …'`) schreibt
+      # Frontmatter-Sync-Felder in die Notizen zurück. dev-gui SELBST liest den
+      # Vault nur (obsidian-vault-config Nicht-Ziel „Schreiben in den Vault" gilt
+      # für den dev-gui-Anwendungscode/obsidianVaultPath.js — nicht für den
+      # innerhalb desselben Containers laufenden agent-flow-Kindprozess, der den
+      # Vault braucht, um seinen eigenen Frontmatter-Roundtrip zu erfüllen).
+      #
+      # Anders als beim Workspace-Mount ist "kein Vault konfiguriert" der
+      # Normalzustand — daher hier ein AKTIVER Mount mit einem syntaktisch
+      # gültigen, aber harmlosen Default (/dev/null), statt eines auskommentierten
+      # Templates: eine leere/ungesetzte OBSIDIAN_VAULT_HOST_DIR darf den Compose-
+      # Boot NICHT brechen (`docker compose config -q` scheitert sonst mit "empty
+      # section between colons"). Bindet Docker /dev/null auf einen bisher nicht
+      # existierenden Container-Pfad, wird /obsidian-vault zu einer harmlosen
+      # Character-Device-Datei (verifiziert: kein Boot-Bruch) statt einem echten
+      # Verzeichnis — die Settings-Validierung (obsidianVaultPath.js) lehnt jeden
+      # eingegebenen Pfad dann klar mit "außerhalb der Schranke" ab, statt zu
+      # crashen. Sobald OBSIDIAN_VAULT_HOST_DIR gesetzt ist, ersetzt der reale
+      # Host-Pfad diesen Default.
+      - ${OBSIDIAN_VAULT_HOST_DIR:-/dev/null}:/obsidian-vault
 
     networks:
       # internal net — reach socket-proxy:2375
