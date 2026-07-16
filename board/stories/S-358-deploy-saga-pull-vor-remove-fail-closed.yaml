@@ -2,7 +2,7 @@ id: S-358
 parent: F-081
 title: 'Deploy-Saga: pull vor remove — fehlgeschlagener Pull lässt den bestehenden
   Container laufen (fail-closed statt Ausfall)'
-status: In Progress
+status: Done
 priority: P2
 spec: docs/specs/deploy-lifecycle.md
 implements:
@@ -48,6 +48,9 @@ branch: worktree-S-358-deploy-saga-pull-vor-remove
 pr: null
 blocked_reason: null
 created_at: '2026-07-15T00:00:00Z'
-updated_at: '2026-07-16T05:54:42Z'
+updated_at: '2026-07-16T06:22:57Z'
 area: deployment
-done_at: null
+done_at: '2026-07-16T06:20:48Z'
+dispo_act: '3'
+tok: null
+dispo_forecast: '.6666'

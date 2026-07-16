@@ -2,6 +2,30 @@
 
 Newest-first. Regeln für die Orchestrator-Ebene (Landen/Konsolidieren/Recovery/Dispatch-Ökonomie).
 
+## flow/L07 — `board-ship.sh` Modus A kann aus einem Worktree **strukturell nie** landen (`checkout main` ist dort verboten)
+
+**Beobachtung (2026-07-16, S-358):** `board-ship.sh S-358 dev-gui` pusht den Story-Branch korrekt und stirbt dann sofort mit `fatal: a branch named 'main' already exists`. Kein CI-Fehler, kein Merge-Konflikt, nichts gelandet, Board bleibt auf `In Progress`.
+
+**Ursache (verifiziert im Skript, nicht vermutet):** `board-ship.sh` Z.255/270 fährt `git checkout "$SHIP_BRANCH" || git checkout -b "$SHIP_BRANCH" "origin/${SHIP_BRANCH}"` — mit `SHIP_BRANCH=main`. **Git verbietet denselben Branch in zwei Worktrees**: der Hauptordner hält `main` (`git worktree list` zeigt es), also scheitert `checkout main` im Story-Worktree; der Fallback `checkout -b main` scheitert dann am bereits existierenden Branch. Das Skript setzt voraus, im Hauptordner zu laufen — die Kopf-Doku sagt zwar „läuft im Story-Worktree", der Merge-Schritt widerspricht dem aber.
+
+**Das ist kein Randfall, sondern der Normalfall dieses Repos:** `.claude/CLAUDE.md` („Parallelbetrieb") **verpflichtet** jede schreibende Session auf `EnterWorktree`. Jede vertragstreue `/flow`-Session landet damit zwangsläufig in diesem Abbruch. Am 2026-07-16 lagen drei Worktrees parallel (S-358, S-326, F-067) — der Hauptordner hielt durchgehend `main`.
+
+**Regel — nicht reparieren, deterministisch selbst fahren** (dasselbe Prinzip wie flow/L02, andere Ursache). Der Wert des Skripts ist „prüfen statt behaupten", nicht der `checkout` — also die Prüfungen von Hand übernehmen, den `checkout` weglassen:
+1. `git status --porcelain` → leer? (L6-Guard von Hand, vor jedem git-Schritt)
+2. `git fetch origin && git rev-list --count origin/main..HEAD` / `HEAD..origin/main` → vor=n, zurück=**0** ⇒ Fast-Forward möglich. Zurück>0 → **STOPP**, nicht mergen (jemand anders war schneller).
+3. **`git push origin HEAD:main`** — landet ohne lokalen `checkout` und **ohne den Hauptordner anzufassen** (kein Datei-Tausch bei fremden Sessions, kein `reset`-Risiko). Bei `merge_policy: direct` ist das genau die Policy; ein non-fast-forward-Push scheitert sichtbar statt still zu überschreiben.
+4. **Mechanisch verifizieren, nie behaupten:** `git merge-base --is-ancestor "$SHA" origin/main`.
+5. CI-Watch von Hand mit **headSha-Race-Schutz**: `gh run list --branch main --limit 1 --json headSha` gegen den **eigenen** SHA vergleichen — sonst wertet man den Run des Vorgänger-Commits als seinen eigenen (bei S-358 lief 19×15 s bis `success`).
+6. Rollout: dev-gui läuft als **compose**-Projekt, der Container heisst `dev-gui-dev-gui-1`, **nicht** `dev-gui` — `docker inspect dev-gui` liefert leer und verleitet zu „kein Container da". `docker compose pull` → Label `org.opencontainers.image.revision` des gezogenen Images gegen den eigenen SHA prüfen **vor** `docker compose up -d` (recreate, nie `restart`) → danach dasselbe Label am laufenden Container prüfen → Smoke (braucht ~30 s bis HTTP 200) → `docker image prune -f`.
+7. Erst dann Board-Flip + Dispo-Spiegel + `board/`-Commit, gepusht via `git push origin HEAD:main`.
+
+**Nicht tun:**
+- **In den Hauptordner wechseln, um `board-ship.sh` dort zu fahren.** Das ist die naheliegende „Lösung" und genau die verbotene: `checkout`/`reset` im Hauptordner wirkt auf **alle** dort aktiven Sessions und löscht fremde, ungecommittete Arbeit still (CLAUDE.md, S-047-Vorfall). Der Skript-Abbruch ist hier ein **Feature** — er verhindert genau diesen Eingriff.
+- Den Worktree auflösen, nur um das Skript zufriedenzustellen (der Owner hat den Worktree bewusst beauftragt; parallele Sessions liefen).
+- `git push --force` oder `-f` in irgendeiner Form.
+
+**Strukturelle Kur (offen, cross-repo — agent-flow, Owner-Entscheidung nötig):** `board-ship.sh` sollte den Merge worktree-tauglich fahren, statt `main` auszuchecken. Bei Fast-Forward genügt `git push origin HEAD:${SHIP_BRANCH}` ohne jeden `checkout`; für echte Merge-Commits gäbe es `git worktree add` eines temporären main-Worktrees oder `git fetch . HEAD:main` bei FF. Solange das offen ist, tritt die Falle in **jedem** Projekt mit Worktree-Pflicht auf — diese Lesson ist nur die lokale Umgehung. Verwandt mit flow/L02: beide Male ist `board-ship.sh` an einer Umgebungsannahme gescheitert, die es nicht prüft.
+
 ## flow/L06 — Agent stirbt an einem API-Fehler: **fortsetzen, nicht neu dispatchen** (Kontext bleibt intakt)
 
 **Beobachtung (2026-07-15, S-359):** Der coder-Dispatch endete nach 32 Tool-Calls und ~118k Token mit `Agent terminated early due to an API error: Server error mid-response`. Der Handoff fehlte, der Auftrag war unfertig (Produktionscode geändert, Tests noch nicht umgestellt) — die Arbeit selbst war aber weder falsch noch verloren: der bereits geschriebene Diff stand vollständig im Working-Tree.
