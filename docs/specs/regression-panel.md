@@ -21,7 +21,7 @@ Der Fabrik-„Arbeiten"-Reiter (`CockpitView.jsx`, `actionGrid`) bekommt je Proj
 1. Im `actionGrid` erscheint eine neue Karte „Regressionstests" als **fünftes** Flex-Item, direkt nach „Neue Story" und vor `TriggerPanel`/Status-Dashboard (Design D1). Rahmen/Kopf/Kurzbeschreibung folgen exakt den bestehenden `flowTriggerBox`/`flowTriggerHeader`/`flowTriggerHint`-Tokens (D2–D4) — keine neuen Farbwerte (D15).
 2. Zwei Buttons untereinander (D5): „Regressionstest ausführen" primär (`btnFlowTrigger`-Token, D6), „Regressionstest definieren" sekundär (Outline-Familie `btnCancel`/`btnFlowReset`, D7). Visuelle Hierarchie nur über Fläche + Fettdruck (D8).
 3. Klick auf „Regressionstest ausführen" öffnet den Ausführen-Dialog ([[regression-run]]); Klick auf „Regressionstest definieren" öffnet den Definier-Dialog ([[regression-define-dialog]]).
-4. Unter den Buttons steht eine Inline-Statuszeile zum **letzten** Lauf des Projekts (D9): „Noch kein Regressionstest gelaufen." / „⏳ Regressionstest läuft…" / „✓ Erfolgreich — `<Zeitstempel>`" / „✗ Fehlgeschlagen — `<Zeitstempel>`". Icon + Text + Farbe immer gemeinsam (nie Farbe allein, WCAG 2.1 AA). Zeitstempel-Format `toLocaleString('de-DE', {dateStyle:'short', timeStyle:'medium'})` (D10).
+4. Unter den Buttons steht eine Inline-Statuszeile zum **letzten** Lauf des Projekts (D9/D9a): „Noch kein Regressionstest gelaufen." / „⏳ Regressionstest läuft…" / „✓ Erfolgreich — `<Zeitstempel>`" / „✗ Fehlgeschlagen — `<Zeitstempel>`" / „⚠ Nicht ausgeführt — `<Zeitstempel>`" (Lauf vor der Testausführung gescheitert, S-326). Icon + Text + Farbe immer gemeinsam (nie Farbe allein, WCAG 2.1 AA). Zeitstempel-Format `toLocaleString('de-DE', {dateStyle:'short', timeStyle:'medium'})` (D10).
 5. Während eines aktiven Regressionstest-Laufs ist **ausschließlich** „Regressionstest ausführen" gesperrt (Disabled-Token + `lockNotice`-Hinweis „Ein Regressionstest läuft — Ausführen gesperrt."); „Regressionstest definieren" bleibt bedienbar (D11).
 6. Der Lauf-Zustand der Statuszeile wird aus dem Ergebnis-Store/Lauf-Status gespeist ([[regression-result-store]] / [[regression-run]]); die konkrete Quelle (Polling des Lauf-Status, SSE, lokaler State) ist Implementierungssache, das beobachtbare Verhalten (Tabelle D9 + D11) ist bindend.
 
@@ -33,7 +33,8 @@ Der Fabrik-„Arbeiten"-Reiter (`CockpitView.jsx`, `actionGrid`) bekommt je Proj
 
 ### Klick-Ziele & Sperr-/Status-Logik
 - **AC3** — „Regressionstest ausführen" öffnet den Ausführen-Dialog ([[regression-run]]); „Regressionstest definieren" öffnet den Definier-Dialog ([[regression-define-dialog]]).
-- **AC4** — Die Inline-Statuszeile bildet die vier Zustände „kein Lauf" / „läuft" / „erfolgreich + Zeitstempel" / „fehlgeschlagen + Zeitstempel" mit den D9-Tokens ab; Icon + Text + Farbe stets gemeinsam; Zeitstempel-Format wie D10.
+- **AC4** — Die Inline-Statuszeile bildet die fünf Zustände „kein Lauf" / „läuft" / „erfolgreich + Zeitstempel" / „fehlgeschlagen + Zeitstempel" / **„nicht ausgeführt + Zeitstempel"** (S-326, D9a) mit den D9/D9a-Tokens ab; Icon + Text + Farbe stets gemeinsam; Zeitstempel-Format wie D10.
+- **AC4b** (S-326) — Ein letzter Lauf mit `status: "precondition-error"|"error"` ([[regression-result-store]] AC1b) zeigt „⚠ Nicht ausgeführt — `<Zeitstempel>`" (D9a) — **nicht** „Noch kein Regressionstest gelaufen.". Die Karte darf einen terminalen Lauf-Zustand des Stores **nie** auf „kein Lauf" abbilden: genau das liess einen gescheiterten Lauf spurlos verschwinden (verifizierter Befund 2026-07-08).
 - **AC5** — Während eines aktiven Laufs ist **nur** der „ausführen"-Button gesperrt (Disabled-Token + `lockNotice`-Hinweis mit dem Wortlaut aus D11); „definieren" bleibt bedienbar (D11).
 
 ### Accessibility (WCAG 2.1 AA, Design-Bindung)

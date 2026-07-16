@@ -487,6 +487,19 @@ AC7a — s. `CockpitView.jsx`):
   „läuft" / „erfolgreich + Zeitstempel" / „fehlgeschlagen + Zeitstempel",
   Stile 1:1 aus `drainStatusRunning`/`drainStatusDone`/`drainStatusFailed`
   übernommen; `role="status"` außer bei fehlgeschlagen (`role="alert"`).
+- **D9a** (S-326, Ergänzung zu D9) — **Fünfter Zustand „nicht ausgeführt"**:
+  „⚠ Nicht ausgeführt — `<Zeitstempel>`" für einen Lauf, der vor der
+  Testausführung scheiterte (`status: "precondition-error"|"error"`,
+  s. [[regression-result-store]] AC1b). Bewusst ein **eigener** Zustand,
+  nicht „fehlgeschlagen": rot behauptet eine gemessene Test-Regression, die
+  nie stattfand — und „kein Lauf" (das bisherige, faktische Verhalten)
+  verschweigt den Fehler ganz. Stil = `drainStatusFailed`-Token mit
+  `color:'#fbbf24'` (Amber, in D15 bereits gelistet — **kein** neuer
+  Farbwert); Icon „⚠" als Unicode-Zeichen wie „⏳"/„✓"/„✗"; `role="alert"`
+  (der Owner muss handeln). Der Fehlgrund (`reason`) selbst gehört **nicht**
+  in die einzeilige Karte, sondern in die Ergebnis-Ansicht
+  ([[regression-result-view]] AC7) — die Karte verlinkt ihn nicht (die
+  „Ergebnisse ansehen"-Karte daneben ist der Einstieg).
 - **D10** — Zeitstempel-Format `toLocaleString('de-DE', {dateStyle:'short',
   timeStyle:'medium'})`, identisch zu `BackupSection.jsx`.
 - **D11** — Während eines aktiven Laufs ist ausschließlich der
@@ -505,7 +518,8 @@ AC7a — s. `CockpitView.jsx`):
   Stelle in exakt dieser Bedeutung im Einsatz (`CockpitView.jsx`).
 - **D16** — `data-testid`-Konvention (kebab-case, Präfix `regression-`):
   `regression-card`, `regression-run-btn`, `regression-define-btn`,
-  `regression-status`.
+  `regression-status`. Der Zustand steht zusätzlich in `data-status`
+  (`running`/`passed`/`failed`/`not-run`/`none`, S-326).
 
 ### Annahmen
 

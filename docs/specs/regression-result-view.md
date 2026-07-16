@@ -22,6 +22,7 @@ Je Projekt zeigt eine Ergebnis-Ansicht die letzten Regressionsläufe (Datum, Sui
 - **Drilldown:** ein Lauf öffnet die Testfall-Liste (aus dem CTRF-JSON): je Testfall Name + grün/rot (+ Fehlermeldung bei Rot).
 - **Debug-Artefakt-Zugriff nur bei Rot:** bei roten Läufen sind HTML-Report/Traces zugänglich; grüne Läufe haben keine Artefakte (nur CTRF-Details).
 - **Icon + Text + Farbe** für grün/rot (nie Farbe allein, WCAG 2.1 AA) — konsistent zur Karten-Statuszeile ([[regression-panel]] D9).
+- **Nicht-ausgeführte Läufe sichtbar machen (S-326):** ein Frühausfall-Datensatz ([[regression-result-store]] AC1b, `status: "precondition-error"|"error"`) ist **kein roter Testlauf**, sondern ein Lauf, der gar nicht erst ausgeführt wurde. Die Ansicht stellt ihn als **dritten, eigenen Zustand** dar („nicht ausgeführt", Icon ⚠ + Text + Farbe) und zeigt sein `reason` als Fehlgrund — genau dafür existiert der Datensatz. Ihn als grün oder als rot darzustellen wäre in beide Richtungen falsch (grün: verschweigt den Fehler; rot: behauptet eine Test-Regression, die nie gemessen wurde).
 
 ## Main Success Scenario
 1. Owner öffnet die Regressions-Ergebnis-Ansicht eines Projekts.
@@ -41,6 +42,7 @@ Je Projekt zeigt eine Ergebnis-Ansicht die letzten Regressionsläufe (Datum, Sui
 - **AC4** — Je Suite wird ein **einfacher grün/rot-Trend** dargestellt (Abfolge der letzten Läufe dieser Suite).
 - **AC5** — **Drilldown:** Klick auf einen Lauf zeigt dessen Testfälle (Name + grün/rot + Fehlermeldung bei Rot) aus dem CTRF-JSON.
 - **AC6** — Bei roten Läufen sind die Debug-Artefakte (HTML-Report/Traces) aus der Ansicht heraus zugänglich; bei grünen Läufen gibt es keinen Artefakt-Zugriff (kein toter Link).
+- **AC7** — **Frühausfall-Darstellung (S-326):** ein Lauf mit `status: "precondition-error"|"error"` wird in der Lauf-Liste **und** im Drilldown als eigener Zustand „⚠ Nicht ausgeführt" (Icon + Text + Farbe) gezeigt — **nicht** als grün und **nicht** als rot; sein `reason` erscheint als Fehlgrund-Text (Drilldown mit `role="alert"`). Fehlt `reason`, steht dort ein generischer Hinweis. Kein Artefakt-Zugriff (AC6 gilt nur für `failed`), keine Testfall-Liste (es gibt kein CTRF) — statt „Keine Testfälle im Ergebnis" erscheint der Fehlgrund. Im Suite-Trend (AC4) zählt er als eigenes ⚠-Zeichen, **nie** als ✓.
 
 ## Verträge
 - Konsumiert die Read-API aus [[regression-result-store]] (`GET …/regression-runs`, `GET …/regression-runs/:runId`).
@@ -51,6 +53,8 @@ Je Projekt zeigt eine Ergebnis-Ansicht die letzten Regressionsläufe (Datum, Sui
 - Keine Läufe für ein Projekt → leere Liste mit Hinweis „Noch kein Regressionstest gelaufen." (kein Fehler).
 - Artefakt-Zugriff auf einen grünen/gepruneten Lauf → 404 (kein Artefakt), kein Leak.
 - CTRF-Details eines Laufs unlesbar/teilweise → Lauf erscheint in der Liste, Drilldown zeigt eine degradierte Meldung statt Crash.
+- Frühausfall-Lauf ohne `reason` → „⚠ Nicht ausgeführt" + generischer Hinweis „Kein Fehlgrund hinterlegt." (kein Crash, kein leerer Drilldown).
+- Suite hat **ausschliesslich** Frühausfall-Läufe → Trend zeigt eine reine ⚠-Kette (weder grün noch rot suggeriert).
 - Suite mit nur einem Lauf → Trend zeigt genau diesen einen Zustand.
 
 ## NFRs
