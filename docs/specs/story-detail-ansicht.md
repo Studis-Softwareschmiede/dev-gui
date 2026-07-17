@@ -1,14 +1,14 @@
 ---
 id: story-detail-ansicht
 title: Story-Detail-Ansicht — Zeiten, Agenten-Flow, Schätzung vs. Ist
-status: draft
+status: active
 area: board
-version: 1
+version: 2
 ---
 
 # Spec: Story-Detail-Ansicht  (`story-detail-ansicht`)
 
-> **Konzept-only** (status: draft). Verbesserung der Story-Anzeige im Studis-Kanban-Board.
+> **Aktiv** (umgesetzt via F-007/F-019; auf `active` gehoben 2026-07-17 — die Spec war trotz Umsetzung nie aktiviert und hätte jede Folge-Story still vom Drain ausgeschlossen). Verbesserung der Story-Anzeige im Studis-Kanban-Board.
 >
 > **Zweck.** Klick auf eine Story öffnet eine **Detail-Seite** mit der Bearbeitungs-Historie: wann begonnen/beendet, welche Agenten in welcher Reihenfolge (Flow), und die **Soll-Ist-Gegenüberstellung** (geschätzte vs. tatsächliche Aufwands-Punkte + Tokens). Die Kanban-Karte selbst bleibt schlank — die Details sind ein Drill-down.
 
@@ -42,6 +42,8 @@ Liefert `items.jsonl` für die Story **kein** `ep_est`/`tok_est` (z. B. vor dem 
 - **AC1** — Backend-Reader liefert zu einer Story aus dispatches.jsonl+items.jsonl: Start/Ende/Dauer, Agenten-Flow (seq-geordnet), ep_est/ep_act/tok-geschätzt/tok_total/size_est + Abweichungen; fehlende Metrik → null, kein Crash. *(V1)*
 - **AC2** — `GET …/stories/:id/detail` liefert das Detail-Objekt (read-only, lazy, hinter accessGuard). *(V2)*
 - **AC3** — Klick auf Story-Karte öffnet Detail-Ansicht mit drei Blöcken (Zeiten/Flow/Soll-Ist); Rückweg vorhanden. *(V3)*
+- **AC3a** *(V2, Story S-363)* — Die Token-Spalte der Agenten-Flow-Tabelle rendert das Ledger-Feld `tok` korrekt. **Vertrag:** `tok` ist im Ledger ein **Objekt** `{in, out, cache}` (z.B. `{"in":34,"out":7006,"cache":1200852}`), **keine Zahl**. Die Zelle zeigt die **Summe** `in+out+cache` — dieselbe Definition wie `tok_total`, damit Spalte und Soll-Ist konsistent sind; die Aufschlüsselung nach `in`/`out`/`cache` ist am selben Element zusätzlich abrufbar (z.B. `title`-Attribut), da `cache` die Summe dominiert und für die Kostenbewertung getrennt sichtbar sein muss. `tok: null` → `—`. **Testbar gegen eine echte Ledger-Zeile**, nicht gegen einen Zahl-Mock: der bisherige Test mockte `tok: 800`, während die Realität ein Objekt liefert — `String({...})` ergibt `[object Object]`. Der Defekt blieb unbemerkt, weil `tok` seit 2026-07-02 durchgängig `null` war und als `—` renderte. *(V3a)*
+- **AC3b** *(V2, Story S-363)* — Der Leer-Zustand des Agenten-Flow-Blocks benennt die **tatsächliche** Ursache und behauptet nichts Unbelegtes. Die bisherige Meldung „Vor Metrik-Erfassung abgeschlossen — kein Agenten-Flow aufgezeichnet." hängt allein an `ended_at != null` und macht **keinen** Datumsvergleich; sie erscheint deshalb auch bei Stories, die lange nach Einführung der Erfassung liefen (belegt: flashrescue S-012, abgeschlossen 2026-07-09), und bei Projekten, in denen **nie** erfasst wurde. Zu unterscheiden sind mindestens: Ledger für das Projekt nicht vorhanden (keine Erfassung) · Ledger vorhanden, aber keine Zeile für diese Story · noch kein Flow-Lauf. *(V3b)*
 - **AC4** — Soll-Ist zeigt ep_est↔ep_act + tok-geschätzt↔tok_total mit Abweichung; fehlende Schätzung sauber dargestellt. *(V4)*
 - **AC5** — Liefert `items.jsonl` für die Story kein `ep_est`/`tok_est`, fällt die Soll-Ist-Ansicht für die Schätzung auf `dispo_est` (und ein Token-Schätzfeld, falls in der Story-YAML vorhanden) zurück; die Ist-/Abweichungs-Spalten bleiben leer bis zum Flow-Lauf; die Herkunft der Schätzung (Vorab-Schätzung aus YAML vs. Flow-Ledger) ist im UI erkennbar. Fehlt auch die YAML-Schätzung → „keine Schätzung". *(V5)* (Testbar: Story mit `dispo_est` und ohne Ledger-Zeile zeigt die YAML-Schätzung mit Herkunfts-Kennzeichnung und leere Ist-/Abweichungs-Spalten; Story ohne beides zeigt „keine Schätzung".)
 
