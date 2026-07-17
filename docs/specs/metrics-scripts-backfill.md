@@ -12,6 +12,8 @@ version: 1
 > **Source of Truth** für `coder` (baut daraus), `tester` (testet die Acceptance-Kriterien), `reviewer` (prüft den Diff dagegen — hartes Drift-Gate).
 
 ## Zweck
+> **Abgelöst (2026-07-17, Story S-364).** Diese Spec schreibt Skript-**Kopien** ins Projekt vor. agent-flow-Spec `metrics-repo-anchor` AC6 (V2) legt das Werkzeug stattdessen ausschließlich ins Plugin (`${CLAUDE_PLUGIN_ROOT}/scripts/`) und übergibt den Ledger-Pfad explizit via `METRICS_ROOT`. Damit wird das Nachrüsten gegenstandslos: Kopien driften (dev-gui hatte sie, sechs andere Projekte nie — Erfassung existierte in 2 von 8 Projekten). Status → `superseded`, sobald S-069 gelandet ist; Kopien unter `scripts/metrics-*.sh` entfallen.
+
 dev-gui entstand, bevor das Metrik-Subsystem in den `new-project`/`adopt`-Scaffold aufgenommen wurde — das Nachrüsten der projekteigenen Ledger-Skripte wurde nie durchgeführt. Diese Spec rüstet die vier Metrik-Ledger-Skripte einmalig in dev-guis `scripts/` nach, damit `/flow` und `/retro` sie **spec-konform** über `${METRICS_ROOT}/scripts/…` finden (agent-flow-Spec `metrics-repo-anchor` AC2) und die Ledger-Aggregation/Kalibrierung wieder läuft.
 
 ## Kontext / Problem

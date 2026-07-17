@@ -1,0 +1,27 @@
+id: S-364
+parent: F-083
+title: metrics-scripts-backfill superseden + Skript-Kopien aus scripts/ entfernen
+  (Werkzeug lebt im Plugin)
+status: To Do
+priority: P2
+spec: docs/specs/metrics-scripts-backfill.md
+implements:
+- AC1
+- AC2
+depends:
+- S-363
+labels:
+- metrics
+size_est: null
+dispo_est: null
+dispo_act: null
+dispo_forecast: null
+estimate_note: null
+confidence: null
+tok_est: null
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-07-17T11:50:43Z'
+updated_at: '2026-07-17T11:50:43Z'
+done_at: null
