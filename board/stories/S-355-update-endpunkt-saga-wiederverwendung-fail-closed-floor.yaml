@@ -22,8 +22,8 @@ labels:
 - security
 size_est: L
 dispo_est: '5.0'
-dispo_act: '4'
-dispo_forecast: '.2500'
+dispo_act: '6.5'
+dispo_forecast: '-0.2308'
 estimate_note: 'Heuristik L (score=11: 8 AC + 2 Komponenten [src/vpsContainerRouter.js,
   Tests] + security-Label; DeployOrchestrator/VpsDockerControl werden unverändert
   KONSUMIERT, nicht geändert). estimator (Task/agents/estimator.md) in diesem Lauf
@@ -56,7 +56,7 @@ branch: feat/S-355-update-endpunkt
 pr: null
 blocked_reason: null
 created_at: '2026-07-15T00:00:00Z'
-updated_at: '2026-07-15T13:42:26Z'
+updated_at: '2026-07-17T11:14:27Z'
 area: deployment
 done_at: '2026-07-15T13:40:06Z'
 tok: null
