@@ -138,6 +138,22 @@ export class StoryMetricReader {
   }
 
   /**
+   * Whether a metrics file exists at all (readable), independent of content.
+   * Distinguishes "kein Ledger im Projekt" from "Ledger da, aber leer" (AC3b).
+   *
+   * @param {string} filePath  Absolute path.
+   * @returns {Promise<boolean>}
+   */
+  async #fileExists(filePath) {
+    try {
+      await this.#fsDeps.readFile(filePath, 'utf8');
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Get story detail metrics for a given story ID within a project.
    *
    * Reads dispatches.jsonl (all rows with item == storyId) and items.jsonl (the story row).
@@ -151,10 +167,17 @@ export class StoryMetricReader {
     const metricsDir = join(repoPath, '.claude', 'metrics');
 
     // Read both files in parallel — errors caught per-file
-    const [dispatches, items] = await Promise.all([
+    const [dispatches, items, dispatchesExist, itemsExist] = await Promise.all([
       this.#readJsonl(join(metricsDir, 'dispatches.jsonl')),
       this.#readJsonl(join(metricsDir, 'items.jsonl')),
+      this.#fileExists(join(metricsDir, 'dispatches.jsonl')),
+      this.#fileExists(join(metricsDir, 'items.jsonl')),
     ]);
+
+    // ledger_present: existiert überhaupt ein Metrik-Ledger im Projekt? (AC3b)
+    // false → in diesem Projekt wird nichts erfasst; true, aber keine Story-Zeile
+    // → Story lief vor der Erfassung / noch kein Flow-Lauf.
+    const ledger_present = dispatchesExist || itemsExist;
 
     // ── dispatches: filter by item == storyId (AC2 robustes ID-Matching) ──────────
     const storyDispatches = dispatches.filter(
@@ -233,6 +256,7 @@ export class StoryMetricReader {
       ep_dev_pct,
       tok_dev,
       tok_dev_pct,
+      ledger_present,
     };
   }
 }

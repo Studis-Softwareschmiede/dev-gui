@@ -2737,6 +2737,24 @@ function StoryDetailView({ story, detailState, detailData, detailError, onBack }
     return v != null ? String(v) : fallback;
   }
 
+  // Token-Feld eines Dispatch-Schritts: im Ledger ein Objekt {in, out, cache}
+  // (nicht eine Zahl). Zelle = Summe in+out+cache — dieselbe Definition wie
+  // tok_total; die Aufschlüsselung kommt als title-Tooltip mit. null → '—'.
+  function fmtTok(tok, fallback = '—') {
+    if (tok == null) return { text: fallback, title: undefined };
+    if (typeof tok === 'number') return { text: String(tok), title: undefined };
+    if (typeof tok === 'object') {
+      const i = tok.in ?? 0;
+      const o = tok.out ?? 0;
+      const c = tok.cache ?? 0;
+      return {
+        text: String(i + o + c),
+        title: `in ${i} · out ${o} · cache ${c}`,
+      };
+    }
+    return { text: fallback, title: undefined };
+  }
+
   /**
    * Format deviation percentage with sign.
    */
@@ -2820,10 +2838,13 @@ function StoryDetailView({ story, detailState, detailData, detailError, onBack }
             <h2 style={styles.detailBlockTitle}>Agenten-Flow</h2>
             {(!detailData.flow || detailData.flow.length === 0) ? (
               <p style={styles.hintMsg} data-testid="flow-empty">
-                {/* AC5 yaml-fallback: differenzierter Leer-Hinweis */}
-                {detailData.ended_at != null
-                  ? 'Vor Metrik-Erfassung abgeschlossen — kein Agenten-Flow aufgezeichnet.'
-                  : 'Noch kein Flow-Lauf erfasst.'}
+                {/* AC3b: ehrlicher Leer-Zustand — benennt die tatsächliche Ursache,
+                    unterscheidet fehlendes Ledger von fehlender Story-Zeile. */}
+                {detailData.ledger_present === false
+                  ? 'In diesem Projekt wird (noch) keine Metrik erfasst — kein Ledger vorhanden.'
+                  : detailData.ended_at != null
+                    ? 'Diese Story wurde ohne Metrik-Erfassung abgeschlossen — kein Agenten-Flow aufgezeichnet.'
+                    : 'Noch kein Flow-Lauf erfasst.'}
               </p>
             ) : (
               <table style={styles.flowTable} aria-label="Agenten-Flow-Schritte">
@@ -2847,7 +2868,14 @@ function StoryDetailView({ story, detailState, detailData, detailError, onBack }
                       <td style={styles.flowTd}>
                         {step.secs != null ? fmtDuration(step.secs) : '—'}
                       </td>
-                      <td style={styles.flowTd}>{fmtNum(step.tok)}</td>
+                      {(() => {
+                        const t = fmtTok(step.tok);
+                        return (
+                          <td style={styles.flowTd} title={t.title} data-testid={`flow-tok-${idx}`}>
+                            {t.text}
+                          </td>
+                        );
+                      })()}
                     </tr>
                   ))}
                 </tbody>

@@ -3303,9 +3303,11 @@ const STORY_DETAIL_FULL = {
   started_at:  '2025-01-10T10:00:00.000Z',
   ended_at:    '2025-01-10T10:05:00.000Z',
   duration:    300,
+  // tok ist im echten Ledger ein Objekt {in,out,cache}, keine Zahl (AC3a).
+  // Summen: coder 100+300+400=800, reviewer 50+150+200=400 (wie zuvor).
   flow: [
-    { seq: 1, agent: 'coder',    iter: 1, gate: null,   secs: 120, tok: 800 },
-    { seq: 2, agent: 'reviewer', iter: 1, gate: 'PASS', secs:  60, tok: 400 },
+    { seq: 1, agent: 'coder',    iter: 1, gate: null,   secs: 120, tok: { in: 100, out: 300, cache: 400 } },
+    { seq: 2, agent: 'reviewer', iter: 1, gate: 'PASS', secs:  60, tok: { in: 50,  out: 150, cache: 200 } },
   ],
   ep_est:      3,
   ep_act:      4,
@@ -3316,6 +3318,7 @@ const STORY_DETAIL_FULL = {
   ep_dev_pct:  33.3,
   tok_dev:     300,
   tok_dev_pct: 25,
+  ledger_present: true,
 };
 
 const STORY_DETAIL_MISSING = {
@@ -3332,6 +3335,14 @@ const STORY_DETAIL_MISSING = {
   ep_dev_pct:  null,
   tok_dev:     null,
   tok_dev_pct: null,
+  ledger_present: true,
+};
+
+// Projekt ohne jede Metrik-Erfassung (kein Ledger) — AC3b.
+const STORY_DETAIL_NO_LEDGER = {
+  ...STORY_DETAIL_MISSING,
+  ended_at:       '2026-07-09T11:24:38.000Z',
+  ledger_present: false,
 };
 
 /**
@@ -3601,6 +3612,24 @@ describe('story-detail-ansicht — AC3: Drei Blöcke in Detail-Ansicht', () => {
     expect(container.querySelector('[data-testid="flow-step-1"]')).toBeTruthy();
   });
 
+  it('Token-Zelle rendert die Summe von {in,out,cache}, nicht [object Object] (AC3a)', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({ fullProjects: [PROJECT_A] });
+    const { container } = renderCockpit('project-alpha');
+    await openStoryDetail(container);
+
+    const tok0 = container.querySelector('[data-testid="flow-tok-0"]');
+    expect(tok0).toBeTruthy();
+    // coder: 100+300+400 = 800
+    expect(tok0.textContent).toBe('800');
+    expect(tok0.textContent).not.toMatch(/\[object Object\]/);
+    // Aufschlüsselung als Tooltip
+    expect(tok0.getAttribute('title')).toBe('in 100 · out 300 · cache 400');
+
+    // reviewer: 50+150+200 = 400
+    const tok1 = container.querySelector('[data-testid="flow-tok-1"]');
+    expect(tok1.textContent).toBe('400');
+  });
+
   it('Soll-Ist block shows ep_est and ep_act', async () => {
     globalThis.fetch = makeBoardFetchWithDetail({ fullProjects: [PROJECT_A] });
     const { container } = renderCockpit('project-alpha');
@@ -3866,7 +3895,7 @@ describe('story-detail-yaml-fallback — AC5: differenzierter Leer-Zustand im Fl
     });
   }
 
-  it('zeigt "Vor Metrik-Erfassung abgeschlossen" wenn ended_at vorhanden aber flow leer', async () => {
+  it('zeigt "ohne Metrik-Erfassung abgeschlossen" wenn Ledger da, ended_at vorhanden aber flow leer (AC3b)', async () => {
     globalThis.fetch = makeBoardFetchWithDetail({
       fullProjects: [PROJECT_A],
       detailData: STORY_DETAIL_DONE_NO_LEDGER,
@@ -3876,7 +3905,7 @@ describe('story-detail-yaml-fallback — AC5: differenzierter Leer-Zustand im Fl
 
     const flowEmpty = container.querySelector('[data-testid="flow-empty"]');
     expect(flowEmpty).toBeTruthy();
-    expect(flowEmpty.textContent).toMatch(/vor metrik-erfassung abgeschlossen/i);
+    expect(flowEmpty.textContent).toMatch(/ohne metrik-erfassung abgeschlossen/i);
   });
 
   it('zeigt "Noch kein Flow-Lauf erfasst" wenn ended_at null und flow leer', async () => {
@@ -3890,6 +3919,21 @@ describe('story-detail-yaml-fallback — AC5: differenzierter Leer-Zustand im Fl
     const flowEmpty = container.querySelector('[data-testid="flow-empty"]');
     expect(flowEmpty).toBeTruthy();
     expect(flowEmpty.textContent).toMatch(/noch kein flow-lauf/i);
+  });
+
+  it('zeigt "keine Metrik erfasst — kein Ledger" wenn ledger_present false (AC3b)', async () => {
+    globalThis.fetch = makeBoardFetchWithDetail({
+      fullProjects: [PROJECT_A],
+      detailData: STORY_DETAIL_NO_LEDGER,
+    });
+    const { container } = renderCockpit('project-alpha');
+    await openDetailYamlFallback(container);
+
+    const flowEmpty = container.querySelector('[data-testid="flow-empty"]');
+    expect(flowEmpty).toBeTruthy();
+    // trotz gesetztem ended_at NICHT die "ohne Erfassung abgeschlossen"-Meldung,
+    // sondern die Ledger-fehlt-Meldung (die alte Logik hing nur an ended_at).
+    expect(flowEmpty.textContent).toMatch(/kein ledger vorhanden/i);
   });
 
   it('zeigt YAML-Badge bei ended_at aus YAML (ended_at_source="yaml")', async () => {

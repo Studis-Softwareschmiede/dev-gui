@@ -369,3 +369,38 @@ describe('StoryMetricReader.getDetail — AC2 int/string integration', () => {
     expect(detail.flow).toHaveLength(0);
   });
 });
+
+// ── ledger_present + tok-Objekt (story-detail-ansicht V2, S-363) ────────────────
+
+describe('StoryMetricReader.getDetail — ledger_present (AC3b)', () => {
+  it('ist true, wenn beide Ledger-Dateien existieren', async () => {
+    const reader = new StoryMetricReader({ fsDeps: makeFsDeps() });
+    const detail = await reader.getDetail(REPO_PATH, 'S-116');
+    expect(detail.ledger_present).toBe(true);
+  });
+
+  it('ist true, wenn nur eine der beiden Dateien existiert', async () => {
+    const reader = new StoryMetricReader({ fsDeps: makeFsDeps({ items: null }) });
+    const detail = await reader.getDetail(REPO_PATH, 'S-116');
+    expect(detail.ledger_present).toBe(true);
+  });
+
+  it('ist false, wenn kein Ledger vorhanden ist (beide ENOENT)', async () => {
+    const reader = new StoryMetricReader({ fsDeps: makeFsDeps({ dispatches: null, items: null }) });
+    const detail = await reader.getDetail(REPO_PATH, 'S-116');
+    expect(detail.ledger_present).toBe(false);
+    expect(detail.flow).toHaveLength(0);
+  });
+});
+
+describe('StoryMetricReader.getDetail — tok als Objekt (AC3a)', () => {
+  it('reicht das echte tok-Objekt {in,out,cache} unverändert durch (kein Summieren im Reader)', async () => {
+    const dispatchLine = JSON.stringify({
+      ts: '2025-01-10T10:00:00.000Z', agent: 'coder', seq: 1, iter: 1, gate: null,
+      secs: 120, tok: { in: 34, out: 7006, cache: 1200852 }, item: 'S-116',
+    });
+    const reader = new StoryMetricReader({ fsDeps: makeFsDeps({ dispatches: dispatchLine }) });
+    const detail = await reader.getDetail(REPO_PATH, 'S-116');
+    expect(detail.flow[0].tok).toEqual({ in: 34, out: 7006, cache: 1200852 });
+  });
+});
