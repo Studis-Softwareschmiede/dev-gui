@@ -1,7 +1,7 @@
 ---
 id: metrics-scripts-backfill
 title: Metrik-Ledger-Skripte in dev-guis scripts/ nachrüsten
-status: active
+status: superseded
 area: retro-lernen
 version: 1
 ---
