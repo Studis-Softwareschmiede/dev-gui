@@ -80,6 +80,33 @@
  *   Feature-Lauf unsichtbar (übersprungen, best-effort geloggt) — der restliche
  *   Run-State-Index UND der bestehende Board-Index bleiben intakt.
  *
+ * board-aggregator-periodic-rescan (S-325 — periodischer Rescan als Cache-
+ * Refresh-Sicherheitsnetz, Vorfall S-061 macOS-Docker-Bind-Mount):
+ *   AC1 — Zusätzlich zum event-getriebenen Pfad (unverändert) liest der
+ *   Aggregator die Board-Dateien in einem festen Intervall neu ein
+ *   (`scan()`, dieselbe Mechanik) — unabhängig von fs-Events. Fängt ein
+ *   verpasstes fs-Event (z.B. macOS-Docker-Bind-Mount: kein inotify für
+ *   Host-seitige Änderungen) spätestens nach einem Intervall auf.
+ *   AC2 — Additiv: Watcher-Pfad/Debounce/SSE bleiben unverändert, kein
+ *   zweiter Diff-/Broadcast-Pfad.
+ *   AC3 — Intervall via `BOARD_RESCAN_INTERVAL_MS` (Default 60000ms,
+ *   `RESCAN_INTERVAL_MS_DEFAULT`), Konstruktor-Option `rescanIntervalMs`
+ *   hat Vorrang (Testmuster `boardRootsEnv`). `0` deaktiviert (Opt-out).
+ *   Ungültig/negativ → Default + einmalige `console.warn`.
+ *   AC4 — Kein Overlap: Self-Rescheduling-Kette (`_scheduleRescanTimer()`
+ *   plant den nächsten Tick erst NACH Abschluss des laufenden `scan()`) plus
+ *   `#rescanInFlight`-Flag als zusätzliche, direkt testbare Absicherung
+ *   gegen einen doppelten `_onRescanTick()`-Aufruf während desselben
+ *   Rescans — ein während der In-flight-Phase feuernder Tick wird
+ *   verworfen, nicht aufgestaut. Höchstens ein ausstehender Rescan-Timer je
+ *   Instanz (`_scheduleRescanTimer()` armt nur, wenn keiner aussteht).
+ *   AC5 — Lebenszyklus an `startWatchers()`/`stopWatchers()` gekoppelt
+ *   (`_armRescanCycle()` bzw. `#rescanTimerId`-Clear), analog zur
+ *   bestehenden `#allStopped`-Disziplin (fswatcher-crash-hardening) — kein
+ *   Timer-Leak, kein Re-Arm nach Stop, idempotent bei doppeltem Start.
+ *   AC6 — Ein scheiternder Rescan (scan() ist bereits selbst fehlertolerant,
+ *   AC8) beendet den Zyklus nicht; kein Log pro Tick, read-only (AC7).
+ *
  * Scannt die konfigurierten Repo-Wurzeln (BOARD_ROOTS env-Variable) read-only nach
  * board/-Ordnern und liest je Repo:
  *   - board/board.yaml               (Projekt-Meta)
@@ -808,6 +835,40 @@ export function parseBoardRoots(envValue) {
     .map((p) => resolve(expandTilde(p)));
 }
 
+// ── Periodischer Rescan (board-aggregator-periodic-rescan AC3) ────────────────
+// Fester, dokumentierter Default (~30–60s laut Owner-Vorgabe, oberes Ende
+// gewählt — deckt sich mit dem bestehenden NotificationWatcher-60s-Takt,
+// erzeugt also kein neues Lastprofil, siehe Spec Annahme A2).
+const RESCAN_INTERVAL_MS_DEFAULT = 60_000;
+
+/**
+ * Parse the BOARD_RESCAN_INTERVAL_MS environment variable value into the
+ * periodic-rescan interval in milliseconds (board-aggregator-periodic-rescan
+ * AC3).
+ *
+ * - Fehlt/leer → Default (`RESCAN_INTERVAL_MS_DEFAULT`), kein Log.
+ * - Nicht parsbar (kein Ganzzahl-String) ODER negativ → Default + einmalige
+ *   `console.warn` (secret-frei).
+ * - `"0"` → explizites Opt-out (periodischer Rescan deaktiviert) — wird
+ *   UNVERÄNDERT als `0` zurückgegeben, nicht als "fehlend" behandelt.
+ *
+ * @param {string|undefined} envValue
+ * @returns {number}
+ */
+export function parseRescanIntervalMs(envValue) {
+  if (envValue === undefined || envValue === null || envValue.trim() === '') {
+    return RESCAN_INTERVAL_MS_DEFAULT;
+  }
+  const parsed = Number(envValue.trim());
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    console.warn(
+      `[BoardAggregator] Ungültiger BOARD_RESCAN_INTERVAL_MS-Wert ("${envValue}") — verwende Default ${RESCAN_INTERVAL_MS_DEFAULT}ms.`,
+    );
+    return RESCAN_INTERVAL_MS_DEFAULT;
+  }
+  return parsed;
+}
+
 // ── Watcher-Re-Arm-Backoff (fswatcher-crash-hardening AC4) ────────────────────
 // Feste, benannte Backoff-Parameter für den Watcher-Re-Arm nach Fehler/
 // Verschwinden einer Wurzel: exponentiell wachsend, nach oben begrenzt (kein
@@ -918,6 +979,12 @@ export function isWatchIgnoredPath(relativePath) {
  *   real defaults (node:fs/promises + real timers) — a partial override (e.g.
  *   just { readdir, readFile, watch }, the pre-existing pattern) keeps real
  *   timers/pathExists for the fields it omits.
+ * @param {number} [options.rescanIntervalMs]
+ *   Test-only override (board-aggregator-periodic-rescan AC3, Muster
+ *   `boardRootsEnv`) für das periodische Rescan-Intervall in ms — hat
+ *   Vorrang vor `BOARD_RESCAN_INTERVAL_MS`. `0` deaktiviert den Rescan
+ *   (kein Timer). Ohne Option gilt `parseRescanIntervalMs(process.env
+ *   .BOARD_RESCAN_INTERVAL_MS)` (Default 60000ms).
  */
 export class BoardAggregator {
   /** @type {string[]} */
@@ -985,14 +1052,48 @@ export class BoardAggregator {
    * @type {boolean}
    */
   #allStopped = false;
+  /**
+   * Rescan-Intervall in ms (board-aggregator-periodic-rescan AC3). `0` = Opt-
+   * out (kein Timer wird bewaffnet). Aus der Konstruktor-Option
+   * `rescanIntervalMs` (Vorrang) oder `BOARD_RESCAN_INTERVAL_MS`
+   * (`parseRescanIntervalMs()`) abgeleitet, unveränderlich nach Konstruktion.
+   * @type {number}
+   */
+  #rescanIntervalMs;
+  /**
+   * ID des aktuell ausstehenden Rescan-Timers, oder `null`, wenn keiner
+   * aussteht (board-aggregator-periodic-rescan AC4/AC5 — Self-Rescheduling:
+   * der nächste Tick wird erst NACH Abschluss des laufenden Rescans neu
+   * bewaffnet, `_scheduleRescanTimer()` armt nie einen zweiten parallel
+   * dazu).
+   * @type {*}
+   */
+  #rescanTimerId = null;
+  /**
+   * True, während ein periodischer Rescan (`this.scan()`, ausgelöst über
+   * `_onRescanTick()`) in-flight ist (board-aggregator-periodic-rescan AC4 —
+   * Overlap-Schutz). Strukturell bereits durch die Self-Rescheduling-Kette
+   * ausgeschlossen; dieser Flag ist eine zusätzliche, direkt testbare
+   * Absicherung gegen einen doppelten `_onRescanTick()`-Aufruf während
+   * desselben Rescans (z.B. ein Tick, der re-entrant feuert).
+   * @type {boolean}
+   */
+  #rescanInFlight = false;
 
-  constructor({ boardRootsEnv, fsDeps } = {}) {
+  constructor({ boardRootsEnv, fsDeps, rescanIntervalMs } = {}) {
     const envVal = boardRootsEnv ?? process.env.BOARD_ROOTS ?? '';
     this.#boardRoots = parseBoardRoots(envVal);
     // Merge (not replace): callers/tests overriding just { readdir, readFile, watch }
     // (pre-existing pattern) automatically keep real timers/pathExists for the new
     // re-arm/backoff machinery — no silent breakage of existing fsDeps overrides.
     this.#fsDeps = { ...defaultFsDeps, ...(fsDeps ?? {}) };
+    // board-aggregator-periodic-rescan AC3: rescanIntervalMs-Option (test-only,
+    // Muster boardRootsEnv) hat Vorrang vor BOARD_RESCAN_INTERVAL_MS — anders
+    // als boardRootsEnv ist dies bereits der fertige ms-Wert, kein Roh-Env-String.
+    this.#rescanIntervalMs =
+      rescanIntervalMs !== undefined
+        ? rescanIntervalMs
+        : parseRescanIntervalMs(process.env.BOARD_RESCAN_INTERVAL_MS);
   }
 
   /**
@@ -1462,6 +1563,78 @@ export class BoardAggregator {
       // Initiale Unterbaum-Watches für bereits vorhandene Repos.
       this._syncRepoWatchers(root).catch(() => { /* defensiv, AC1 */ });
     }
+
+    // board-aggregator-periodic-rescan AC1/AC5: Sicherheitsnetz-Rescan-Zyklus
+    // bewaffnen — additiv zum obigen event-getriebenen Watcher-Pfad (AC2
+    // bleibt unverändert). No-op bei rescanIntervalMs <= 0 (AC3 Opt-out).
+    this._armRescanCycle();
+  }
+
+  /**
+   * Bewaffnet den periodischen Rescan-Zyklus (board-aggregator-periodic-
+   * rescan AC1/AC5) — additiv zum event-getriebenen Watcher-Pfad (AC2), der
+   * unverändert bleibt. No-op, wenn `#rescanIntervalMs <= 0` (AC3 Opt-out:
+   * kein Timer wird bewaffnet, der Event-Pfad läuft unverändert weiter).
+   * Aufgerufen von `startWatchers()`, nachdem `#allStopped` zurückgesetzt
+   * wurde.
+   * @returns {void}
+   */
+  _armRescanCycle() {
+    if (this.#rescanIntervalMs <= 0) return; // AC3: 0 deaktiviert den Rescan.
+    this._scheduleRescanTimer();
+  }
+
+  /**
+   * Bewaffnet den nächsten Rescan-Timer (board-aggregator-periodic-rescan
+   * AC4/AC5). Zwei Wächter, die zusammen die AC4-Invariante "höchstens ein
+   * ausstehender Rescan-Timer je Instanz" erzwingen: kein Arm nach
+   * `stopWatchers()` (`#allStopped`) und kein zweiter, paralleler Timer,
+   * falls bereits einer aussteht (`#rescanTimerId !== null` — schützt auch
+   * gegen einen Restart-während-in-flight-Randfall: ein bereits in-flight
+   * gewesener Rescan, dessen `finally()` nach einem zwischenzeitlichen
+   * `stopWatchers()`+`startWatchers()` noch nachplant, würde sonst einen
+   * zweiten, überflüssigen Timer neben dem frisch bewaffneten erzeugen).
+   * @returns {void}
+   */
+  _scheduleRescanTimer() {
+    if (this.#allStopped) return; // AC5: kein Timer-Arm nach stopWatchers().
+    if (this.#rescanTimerId !== null) return; // AC4: höchstens ein ausstehender Timer.
+    this.#rescanTimerId = this.#fsDeps.setTimeout(
+      () => this._onRescanTick(),
+      this.#rescanIntervalMs,
+    );
+  }
+
+  /**
+   * Ein Rescan-Tick (board-aggregator-periodic-rescan AC1/AC4/AC5/AC6):
+   * liest die Board-Dateien via `this.scan()` (identische Mechanik zu einem
+   * manuellen Rescan, A1) neu ein — unabhängig davon, ob fs-Events
+   * eintreffen (Sicherheitsnetz für den Vorfall S-061).
+   *
+   * - AC5: nach `stopWatchers()` (`#allStopped`) kein Rescan, kein
+   *   Folge-Timer.
+   * - AC4: läuft bereits ein Rescan (`#rescanInFlight`), wird dieser Tick
+   *   übersprungen (verworfen, NICHT gequeued/nachgeholt) — der reguläre
+   *   Rhythmus setzt fort, sobald der laufende Rescan fertig ist
+   *   (`_scheduleRescanTimer()` im `finally`-Block).
+   * - AC6: ein scheiternder `scan()` (bereits selbst fehlertolerant, AC8
+   *   `factory-status`) beendet den Zyklus nicht — der nächste Timer wird
+   *   trotz Fehler regulär bewaffnet; kein Crash, keine unhandled rejection,
+   *   kein Log pro Tick. `scan()` bleibt read-only (`factory-status` AC7).
+   * @returns {void}
+   */
+  _onRescanTick() {
+    this.#rescanTimerId = null;
+    if (this.#allStopped) return; // AC5
+    if (this.#rescanInFlight) return; // AC4: Overlap-Schutz, Tick verworfen.
+
+    this.#rescanInFlight = true;
+    this.scan()
+      .catch(() => { /* AC6: degradierend, nie fatal — nächster Tick regulär */ })
+      .finally(() => {
+        this.#rescanInFlight = false;
+        this._scheduleRescanTimer(); // AC4: nächster Tick erst nach Abschluss.
+      });
   }
 
   /**
@@ -1818,7 +1991,9 @@ export class BoardAggregator {
   /**
    * Stop all active filesystem watchers — including any pending backoff/re-arm
    * timers (AC5). After this call, no further `watch()` call and no re-arm
-   * happens for any previously started root.
+   * happens for any previously started root. Also stops the periodic rescan
+   * cycle (board-aggregator-periodic-rescan AC5): the pending rescan timer
+   * (if any) is cleared and no further rescan tick is scheduled.
    * @returns {void}
    */
   stopWatchers() {
@@ -1837,6 +2012,16 @@ export class BoardAggregator {
       try { state.ac.abort(); } catch { /* ignore */ }
     }
     this.#watchers = [];
+
+    // board-aggregator-periodic-rescan AC5: laufenden Rescan-Timer abbrechen
+    // — kein Folge-Tick mehr nach diesem Aufruf. Ein bereits in-flight
+    // gewesener `scan()` läuft read-only zu Ende (harmlos, AC7), plant dank
+    // `#allStopped` in seinem `finally`-Block aber keinen Folge-Timer mehr
+    // (siehe `_scheduleRescanTimer()`).
+    if (this.#rescanTimerId !== null) {
+      this.#fsDeps.clearTimeout(this.#rescanTimerId);
+      this.#rescanTimerId = null;
+    }
   }
 }
 

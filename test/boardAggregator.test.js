@@ -12,7 +12,9 @@
  *   readProjectAt() injizierbare Datei-Quelle, drain-origin-progress-sync S-319;
  *   FSWatcher-Crash-Härtung V2 (interne FSWatcher-'error'-Events + Scope-
  *   Verengung, isWatchIgnoredEntry/isWatchIgnoredPath, Kindprozess-
- *   Regressionstest), fswatcher-crash-hardening S-320).
+ *   Regressionstest), fswatcher-crash-hardening S-320;
+ *   periodischer Rescan als Cache-Refresh-Sicherheitsnetz (verpasste fs-Events,
+ *   Vorfall S-061), board-aggregator-periodic-rescan S-325).
  *
  * Covers (dev-gui-board-aggregator backend):
  *   AC1 — Scant konfigurierte Repo-Wurzeln read-only nach board/-Ordnern;
@@ -270,6 +272,31 @@
  *   AC7 — `readProjectAt()` ist read-only und hat keinen Seiteneffekt auf den
  *          In-Memory-`#index`/`getIndex()` (unabhängig von `scan()`).
  *
+ * Covers (board-aggregator-periodic-rescan, S-325 — periodischer Rescan als
+ * Cache-Refresh-Sicherheitsnetz für verpasste fs-Events, Vorfall S-061):
+ *   AC1 — Ein verpasstes fs-Event (injiziertes `watch`, das nie feuert) wird
+ *          spätestens nach einem Rescan-Intervall an `getIndex()` sichtbar.
+ *   AC2 — Der event-getriebene Pfad bleibt additiv bestehen: ein eintreffendes
+ *          fs-Event invalidiert weiterhin debounced, deutlich VOR Ablauf eines
+ *          (bewusst grossen) Rescan-Intervalls — kein zweiter Diff-/Broadcast-
+ *          Pfad. Alle bestehenden fswatcher-crash-hardening-Tests bleiben
+ *          unverändert grün (kein Regress, keine Änderung an ihnen in diesem
+ *          Diff).
+ *   AC3 — `parseRescanIntervalMs()`: Default (fehlende/leere Env), gültige
+ *          Env, ungültige Env (nicht-Ganzzahl/negativ → Default + einmalige
+ *          `console.warn`), `"0"` (Opt-out, unverändert `0`). Konstruktor-
+ *          Option `rescanIntervalMs` hat Vorrang vor der Env; `0` deaktiviert
+ *          den Timer vollständig (kein Rescan-Timer bewaffnet).
+ *   AC4 — Kein Overlap: ein Tick während eines laufenden Rescans wird
+ *          übersprungen (kein zweiter paralleler `scan()`), der normale
+ *          Rhythmus setzt nach Abschluss fort. Höchstens ein ausstehender
+ *          Rescan-Timer je Instanz.
+ *   AC5 — Lebenszyklus: `startWatchers()` bewaffnet den Zyklus, `stopWatchers()`
+ *          bricht ihn ab (kein Folge-Tick, kein Timer-Leak); doppeltes
+ *          `startWatchers()` erzeugt keinen zweiten parallelen Zyklus.
+ *   AC6 — Ein scheiternder Rescan ist nie fatal (kein Crash, kein unhandled
+ *          rejection); der nächste Tick läuft regulär weiter.
+ *
  * AccessGuard:
  *   POST /api/board/projects/rescan (Schreib-Trigger) liegt hinter
  *   app.use('/api', accessGuard) in server.js — kein separater Middleware-Test
@@ -281,7 +308,7 @@
  *   - Verifiziert, dass fsDeps.readFile niemals write-äquivalente Aufrufe macht (AC7).
  */
 
-import { describe, it, expect } from '@jest/globals';
+import { describe, it, expect, jest } from '@jest/globals';
 import {
   BoardAggregator,
   parseYaml,
@@ -291,6 +318,7 @@ import {
   isWatchIgnoredEntry,
   isWatchIgnoredPath,
   watchWithErrorGuard,
+  parseRescanIntervalMs,
 } from '../src/BoardAggregator.js';
 
 // ── parseYaml unit tests ──────────────────────────────────────────────────────
@@ -1616,6 +1644,11 @@ describe('fswatcher-crash-hardening AC4 — Re-Arm mit exponentiellem, begrenzte
 
     const aggregator = new BoardAggregator({
       boardRootsEnv: '/tmp/does-not-matter-ac4',
+      // board-aggregator-periodic-rescan AC3 Opt-out: dieser Test prüft die
+      // Re-Arm-/Backoff-Timer-Reihenfolge über dieselbe injizierte Fake-Timer-
+      // Queue — der (orthogonale) periodische Rescan-Timer würde sie sonst
+      // kontaminieren (Isolation, kein Verhaltensunterschied am Watcher selbst).
+      rescanIntervalMs: 0,
       fsDeps: {
         readdir: async () => { readdirCalls++; return []; },
         readFile: async () => '',
@@ -1666,6 +1699,9 @@ describe('fswatcher-crash-hardening AC4 — Re-Arm mit exponentiellem, begrenzte
 
     const aggregator = new BoardAggregator({
       boardRootsEnv: '/tmp/does-not-matter-ac4b',
+      // board-aggregator-periodic-rescan AC3 Opt-out: siehe Kommentar oben
+      // (Isolation der Fake-Timer-Queue vom orthogonalen Rescan-Timer).
+      rescanIntervalMs: 0,
       fsDeps: {
         readdir: async () => [],
         readFile: async () => '',
@@ -1697,6 +1733,9 @@ describe('fswatcher-crash-hardening AC4 — Re-Arm mit exponentiellem, begrenzte
     const timers = makeFakeTimers();
     const aggregator = new BoardAggregator({
       boardRootsEnv: '/tmp/does-not-matter-ac4c',
+      // board-aggregator-periodic-rescan AC3 Opt-out: siehe Kommentar oben
+      // (Isolation der Fake-Timer-Queue vom orthogonalen Rescan-Timer).
+      rescanIntervalMs: 0,
       fsDeps: {
         readdir: async () => [],
         readFile: async () => '',
@@ -1722,6 +1761,9 @@ describe('fswatcher-crash-hardening AC5 — stopWatchers() bricht Re-Arm ab', ()
 
     const aggregator = new BoardAggregator({
       boardRootsEnv: '/tmp/does-not-matter-ac5',
+      // board-aggregator-periodic-rescan AC3 Opt-out: siehe Kommentar oben
+      // (Isolation der Fake-Timer-Queue vom orthogonalen Rescan-Timer).
+      rescanIntervalMs: 0,
       fsDeps: {
         readdir: async () => [],
         readFile: async () => '',
@@ -4950,4 +4992,606 @@ describe('fswatcher-crash-hardening V2 AC10 — Index-Aktualität bleibt erhalte
     },
     15000,
   );
+});
+
+// ── board-aggregator-periodic-rescan (S-325) ───────────────────────────────────
+//
+// Covers (board-aggregator-periodic-rescan): siehe Datei-Header (Covers-Block)
+// oben. Strategy: injizierte #fsDeps (setTimeout/clearTimeout via
+// makeFakeTimers(), watch via hangingAsyncIterable()/gezielte Async-
+// Generatoren) — kein echtes Warten, kein jest.useFakeTimers() (Muster
+// identisch zu den bestehenden fswatcher-crash-hardening-Tests oben).
+
+/**
+ * Ein async-iterable, dessen `next()` NIE auflöst — bildet einen watch()-
+ * Iterator ab, der niemals ein fs-Event liefert (board-aggregator-periodic-
+ * rescan AC1 — das exakte strukturelle Abbild des macOS-Docker-Bind-Mount-
+ * Vorfalls S-061, siehe Spec Annahme A6: "watch feuert nie" statt eines
+ * echten, in CI nicht reproduzierbaren Bind-Mounts).
+ */
+function hangingAsyncIterable() {
+  return {
+    [Symbol.asyncIterator]() {
+      return { next: () => new Promise(() => { /* never resolves */ }) };
+    },
+  };
+}
+
+/**
+ * Ein async-iterable, das GENAU EIN Event liefert und danach — wie ein
+ * echter, weiterhin aktiver `fs.watch()`-Stream — auf das NÄCHSTE Event
+ * wartet (hängt, statt zu enden). Ein async-Generator, der nach einem
+ * einzigen `yield` normal endet, würde den `for await`-Loop in `_watchRoot()`
+ * sofort verlassen und dessen `finally`-Block den soeben gesetzten Debounce-
+ * Timer wieder clearen (board-aggregator-periodic-rescan AC2-Test-Artefakt)
+ * — dieses Double bildet daher einen weiterhin lauschenden Watcher ab.
+ * @param {object} event
+ */
+function onceThenHangingAsyncIterable(event) {
+  let yielded = false;
+  return {
+    [Symbol.asyncIterator]() {
+      return {
+        next: () => {
+          if (!yielded) {
+            yielded = true;
+            return Promise.resolve({ done: false, value: event });
+          }
+          return new Promise(() => { /* weiterhin aktiv, kein zweites Event */ });
+        },
+      };
+    },
+  };
+}
+
+describe('parseRescanIntervalMs (board-aggregator-periodic-rescan AC3)', () => {
+  it('fehlende/leere Env → Default 60000, keine Warnung', () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(parseRescanIntervalMs(undefined)).toBe(60000);
+      expect(parseRescanIntervalMs('')).toBe(60000);
+      expect(parseRescanIntervalMs('   ')).toBe(60000);
+      expect(warnSpy).not.toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('gültige Env wird übernommen', () => {
+    expect(parseRescanIntervalMs('30000')).toBe(30000);
+    expect(parseRescanIntervalMs(' 15000 ')).toBe(15000);
+  });
+
+  it('nicht parsbare Env (kein Ganzzahl-String) → Default + einmalige Warnung', () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(parseRescanIntervalMs('abc')).toBe(60000);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy.mock.calls[0][0]).toContain('BOARD_RESCAN_INTERVAL_MS');
+
+      warnSpy.mockClear();
+      expect(parseRescanIntervalMs('12.5')).toBe(60000); // kein Ganzzahl-Wert
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('negative Env → Default + einmalige Warnung', () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(parseRescanIntervalMs('-100')).toBe(60000);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('"0" deaktiviert (Opt-out) — unverändert 0, keine Warnung', () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(parseRescanIntervalMs('0')).toBe(0);
+      expect(warnSpy).not.toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+});
+
+describe('board-aggregator-periodic-rescan AC3 — Konstruktor-Option/Env-Wirkung auf den bewaffneten Timer', () => {
+  function makeEnvAwareAggregator(timers, { boardRootsEnv, rescanIntervalMs } = {}) {
+    return new BoardAggregator({
+      boardRootsEnv,
+      rescanIntervalMs,
+      fsDeps: {
+        readdir: async () => [],
+        readFile: async () => '',
+        watch: () => hangingAsyncIterable(),
+        setTimeout: timers.setTimeout,
+        clearTimeout: timers.clearTimeout,
+        pathExists: async () => true,
+      },
+    });
+  }
+
+  it('rescanIntervalMs-Option hat Vorrang vor BOARD_RESCAN_INTERVAL_MS', async () => {
+    const timers = makeFakeTimers();
+    const prevEnv = process.env.BOARD_RESCAN_INTERVAL_MS;
+    process.env.BOARD_RESCAN_INTERVAL_MS = '99999';
+    try {
+      const aggregator = makeEnvAwareAggregator(timers, {
+        boardRootsEnv: '/tmp/does-not-matter-rescan-ac3a',
+        rescanIntervalMs: 12345,
+      });
+      aggregator.startWatchers();
+      await flushMicrotasks();
+      expect(timers.pending.size).toBe(1);
+      expect([...timers.pending.values()][0].delay).toBe(12345);
+      aggregator.stopWatchers();
+    } finally {
+      if (prevEnv === undefined) delete process.env.BOARD_RESCAN_INTERVAL_MS;
+      else process.env.BOARD_RESCAN_INTERVAL_MS = prevEnv;
+    }
+  });
+
+  it('rescanIntervalMs: 0 deaktiviert den periodischen Rescan — kein Timer wird bewaffnet', async () => {
+    const timers = makeFakeTimers();
+    const aggregator = makeEnvAwareAggregator(timers, {
+      boardRootsEnv: '/tmp/does-not-matter-rescan-ac3b',
+      rescanIntervalMs: 0,
+    });
+    aggregator.startWatchers();
+    await flushMicrotasks();
+    expect(timers.pending.size).toBe(0);
+    aggregator.stopWatchers();
+  });
+
+  it('BOARD_RESCAN_INTERVAL_MS="0" (Env, kein Options-Override) deaktiviert den Timer ebenso', async () => {
+    const timers = makeFakeTimers();
+    const prevEnv = process.env.BOARD_RESCAN_INTERVAL_MS;
+    process.env.BOARD_RESCAN_INTERVAL_MS = '0';
+    try {
+      const aggregator = makeEnvAwareAggregator(timers, {
+        boardRootsEnv: '/tmp/does-not-matter-rescan-ac3c',
+      });
+      aggregator.startWatchers();
+      await flushMicrotasks();
+      expect(timers.pending.size).toBe(0);
+      aggregator.stopWatchers();
+    } finally {
+      if (prevEnv === undefined) delete process.env.BOARD_RESCAN_INTERVAL_MS;
+      else process.env.BOARD_RESCAN_INTERVAL_MS = prevEnv;
+    }
+  });
+
+  it('gültige BOARD_RESCAN_INTERVAL_MS-Env (kein Options-Override) bewaffnet den Timer mit diesem Wert', async () => {
+    const timers = makeFakeTimers();
+    const prevEnv = process.env.BOARD_RESCAN_INTERVAL_MS;
+    process.env.BOARD_RESCAN_INTERVAL_MS = '5000';
+    try {
+      const aggregator = makeEnvAwareAggregator(timers, {
+        boardRootsEnv: '/tmp/does-not-matter-rescan-ac3d',
+      });
+      aggregator.startWatchers();
+      await flushMicrotasks();
+      expect(timers.pending.size).toBe(1);
+      expect([...timers.pending.values()][0].delay).toBe(5000);
+      aggregator.stopWatchers();
+    } finally {
+      if (prevEnv === undefined) delete process.env.BOARD_RESCAN_INTERVAL_MS;
+      else process.env.BOARD_RESCAN_INTERVAL_MS = prevEnv;
+    }
+  });
+
+  it('fehlende BOARD_RESCAN_INTERVAL_MS-Env (kein Options-Override) bewaffnet den Timer mit dem Default 60000', async () => {
+    const timers = makeFakeTimers();
+    const prevEnv = process.env.BOARD_RESCAN_INTERVAL_MS;
+    delete process.env.BOARD_RESCAN_INTERVAL_MS;
+    try {
+      const aggregator = makeEnvAwareAggregator(timers, {
+        boardRootsEnv: '/tmp/does-not-matter-rescan-ac3e',
+      });
+      aggregator.startWatchers();
+      await flushMicrotasks();
+      expect(timers.pending.size).toBe(1);
+      expect([...timers.pending.values()][0].delay).toBe(60000);
+      aggregator.stopWatchers();
+    } finally {
+      if (prevEnv === undefined) delete process.env.BOARD_RESCAN_INTERVAL_MS;
+      else process.env.BOARD_RESCAN_INTERVAL_MS = prevEnv;
+    }
+  });
+});
+
+describe('board-aggregator-periodic-rescan AC1 — verpasstes fs-Event wird spätestens nach einem Intervall sichtbar (Vorfall S-061)', () => {
+  it('ein Datei-Wechsel ohne fs-Event (watch liefert nie ein Event) wird nach einem Rescan-Tick an getIndex() sichtbar', async () => {
+    const ROOT = '/fake/rescan-ac1';
+    const specContent = '---\nstatus: active\n---\n# Spec\nAC1 — Kern.\n';
+    const storyYamlBlocked = [
+      'id: S-001',
+      'parent: F-001',
+      'title: Kern-Story',
+      'status: To Do',
+      'priority: P1',
+      'spec: docs/specs/x.md',
+      'implements: [AC1]',
+      'labels: []',
+      'dispo_est: null',
+      'dispo_act: null',
+      'created_at: 2026-07-08T00:00:00Z',
+      'updated_at: 2026-07-08T00:00:00Z',
+      'done_at: null',
+      'blocked_reason: warte-auf-freigabe',
+      '',
+    ].join('\n');
+    const storyYamlUnblocked = storyYamlBlocked.replace(
+      'blocked_reason: warte-auf-freigabe',
+      'blocked_reason: null',
+    );
+
+    const files = {
+      [`${ROOT}/proj/board/board.yaml`]: 'schema_version: 1\nproject_slug: proj\n',
+      [`${ROOT}/proj/board/features/F-001-kern.yaml`]:
+        'id: F-001\ntitle: Kern\ngoal: Test\nstatus: Active\npriority: P1\nspec: docs/specs/x.md\nlabels: []\ncreated_at: 2026-07-08T00:00:00Z\nupdated_at: 2026-07-08T00:00:00Z\nstories:\n- S-001\nprogress: null\n',
+      [`${ROOT}/proj/board/stories/S-001-kern.yaml`]: storyYamlBlocked,
+      [`${ROOT}/proj/docs/specs/x.md`]: specContent,
+    };
+    const dirs = {
+      [ROOT]: [{ name: 'proj', isDirectory: () => true, isSymbolicLink: () => false, isFile: () => false }],
+      [`${ROOT}/proj`]: [{ name: 'board', isDirectory: () => true, isSymbolicLink: () => false, isFile: () => false }],
+      [`${ROOT}/proj/board`]: [
+        { name: 'board.yaml', isFile: () => true, isDirectory: () => false, isSymbolicLink: () => false },
+        { name: 'features', isDirectory: () => true, isFile: () => false, isSymbolicLink: () => false },
+        { name: 'stories', isDirectory: () => true, isFile: () => false, isSymbolicLink: () => false },
+      ],
+      [`${ROOT}/proj/board/features`]: [
+        { name: 'F-001-kern.yaml', isFile: () => true, isDirectory: () => false, isSymbolicLink: () => false },
+      ],
+      [`${ROOT}/proj/board/stories`]: [
+        { name: 'S-001-kern.yaml', isFile: () => true, isDirectory: () => false, isSymbolicLink: () => false },
+      ],
+    };
+
+    const timers = makeFakeTimers();
+    const aggregator = new BoardAggregator({
+      boardRootsEnv: ROOT,
+      rescanIntervalMs: 60000,
+      fsDeps: {
+        readdir: async (path) => {
+          if (path in dirs) return dirs[path];
+          const err = new Error(`ENOENT: no such dir: ${path}`);
+          err.code = 'ENOENT';
+          throw err;
+        },
+        readFile: async (path) => {
+          if (path in files) return files[path];
+          const err = new Error(`ENOENT: no such file: ${path}`);
+          err.code = 'ENOENT';
+          throw err;
+        },
+        // AC1-Kernvoraussetzung: watch(), das NIE ein Event liefert — das
+        // exakte strukturelle Abbild des macOS-Docker-Bind-Mount-Vorfalls.
+        watch: () => hangingAsyncIterable(),
+        setTimeout: timers.setTimeout,
+        clearTimeout: timers.clearTimeout,
+        pathExists: async () => false,
+      },
+    });
+
+    // scan() spyen (ruft die echte Implementierung weiter auf) — erlaubt,
+    // das vom Rescan-Tick ausgelöste ECHTE scan()-Promise deterministisch
+    // abzuwarten, statt eine Anzahl Microtask-Flush-Runden zu erraten (die
+    // echte _readBoard()-Kette hat mehrere sequenzielle awaits).
+    const scanSpy = jest.spyOn(aggregator, 'scan');
+
+    aggregator.startWatchers();
+    await flushMicrotasks();
+
+    // Baseline: Story ist geblockt (initialer Stand) — Index memoisiert (AC2).
+    let index = await aggregator.getIndex();
+    let story = index[0].features[0].stories[0];
+    expect(story.ready).toBe(false);
+    expect(story.blocked_reason).toBe('warte-auf-freigabe');
+
+    // Vorfall-Abbild: Host-seitige Änderung OHNE fs-Event (watch liefert nie
+    // eines) — z.B. ein Host-git-merge unter macOS-Docker-Bind-Mount.
+    files[`${ROOT}/proj/board/stories/S-001-kern.yaml`] = storyYamlUnblocked;
+
+    // Ohne Rescan-Tick bleibt getIndex() beim alten, gecachten Stand.
+    index = await aggregator.getIndex();
+    story = index[0].features[0].stories[0];
+    expect(story.ready).toBe(false);
+
+    // Ein Rescan-Intervall vorstellen (Timer feuern).
+    const rescanEntry = [...timers.pending.entries()].find(([, e]) => e.delay === 60000);
+    expect(rescanEntry).toBeDefined();
+    const [rescanTimerId, entry] = rescanEntry;
+    timers.pending.delete(rescanTimerId);
+    entry.fn();
+    // Auf den vom Tick ausgelösten (zweiten) echten scan()-Aufruf warten —
+    // deterministisch, unabhängig von der Anzahl seiner internen awaits.
+    expect(scanSpy).toHaveBeenCalledTimes(2);
+    await scanSpy.mock.results[1].value;
+    await flushMicrotasks();
+
+    // Neuer Stand ist jetzt sichtbar — spätestens nach einem Intervall, ohne
+    // Container-/Prozess-Neustart und ohne expliziten POST .../rescan.
+    index = await aggregator.getIndex();
+    story = index[0].features[0].stories[0];
+    expect(story.ready).toBe(true);
+    expect(story.blocked_reason).toBeNull();
+
+    aggregator.stopWatchers();
+  });
+});
+
+describe('board-aggregator-periodic-rescan AC2 — Event-Pfad + SSE bleiben additiv unverändert (kein Ersatz)', () => {
+  it('ein fs-Event invalidiert den Index weiterhin debounced — deutlich VOR Ablauf eines (bewusst großen) Rescan-Intervalls, das koexistiert', async () => {
+    const META_ROOT = '/tmp/does-not-matter-rescan-ac2';
+    const SUBTREE_ROOT = `${META_ROOT}/repo/board`;
+    const timers = makeFakeTimers();
+
+    const aggregator = new BoardAggregator({
+      boardRootsEnv: META_ROOT,
+      rescanIntervalMs: 60000, // bewusst groß — darf in diesem Test nie feuern
+      fsDeps: {
+        readdir: async () => [],
+        readFile: async () => '',
+        watch: (path) => {
+          // Meta-Watch (Top-Level-Wurzel): nie ein Event.
+          if (path === META_ROOT) return hangingAsyncIterable();
+          // Direkt aufgerufener Subtree-Watch (Test-Isolation, Muster
+          // fswatcher-crash-hardening AC3-Test): genau EIN Event, danach
+          // weiterhin aktiv (wie ein echter Watch-Stream) — kein sofortiges
+          // Loop-Ende, das den gerade gesetzten Debounce-Timer wieder clearen
+          // würde.
+          return onceThenHangingAsyncIterable({ eventType: 'change', filename: 'S-001.yaml' });
+        },
+        setTimeout: timers.setTimeout,
+        clearTimeout: timers.clearTimeout,
+        pathExists: async () => false,
+      },
+    });
+
+    const indexBaseline = await aggregator.getIndex(); // Baseline-Scan
+
+    aggregator.startWatchers();
+    await flushMicrotasks();
+
+    // Der (grosse) Rescan-Timer wurde additiv bewaffnet — unverändert, koexistiert.
+    const rescanEntry = [...timers.pending.entries()].find(([, e]) => e.delay === 60000);
+    expect(rescanEntry).toBeDefined();
+    const [rescanTimerId] = rescanEntry;
+
+    // Direkter Subtree-Watch-Aufruf (isoliert den event-getriebenen Debounce-
+    // Pfad vom Meta-/Subtree-Dispatch, der unverändert + separat in den
+    // bestehenden fswatcher-crash-hardening-Tests abgedeckt bleibt). Der
+    // Watch-Stream bleibt danach aktiv (kein Loop-Ende) — das zurückgegebene
+    // Promise wird bewusst NICHT awaited (bliebe sonst dauerhaft pending).
+    const ac = new AbortController();
+    void aggregator._watchRoot(SUBTREE_ROOT, ac.signal, undefined, undefined, false);
+    await flushMicrotasks();
+
+    // Debounce-Timer (WATCH_DEBOUNCE_MS = 200ms) — deutlich schneller als das
+    // (60000ms) Rescan-Intervall.
+    const debounceEntry = [...timers.pending.entries()].find(([, e]) => e.delay === 200);
+    expect(debounceEntry).toBeDefined();
+    expect(200).toBeLessThan(60000);
+
+    const [debounceTimerId, debounceTimer] = debounceEntry;
+    timers.pending.delete(debounceTimerId);
+    debounceTimer.fn(); // Debounce feuert -> Index invalidiert
+    await flushMicrotasks();
+    ac.abort();
+
+    // Index wurde invalidiert — der nächste getIndex() re-scant, OHNE dass
+    // der (60000ms) Rescan-Timer je gefeuert hat.
+    const indexAfterEvent = await aggregator.getIndex();
+    expect(indexAfterEvent).not.toBe(indexBaseline);
+
+    // Der Rescan-Timer ist unverändert derselbe, weiterhin ausstehende Timer
+    // — der Event-Pfad hat ihn weder verbraucht noch neu bewaffnet (additiv,
+    // kein zweiter Diff-/Broadcast-Pfad, AC2).
+    expect(timers.pending.has(rescanTimerId)).toBe(true);
+
+    aggregator.stopWatchers();
+  });
+});
+
+describe('board-aggregator-periodic-rescan AC4 — kein Rescan-Sturm / kein Overlap', () => {
+  it('ein Tick während eines laufenden Rescans wird übersprungen (kein zweiter paralleler scan()); nach Abschluss läuft der nächste Tick regulär', async () => {
+    const timers = makeFakeTimers();
+    const aggregator = new BoardAggregator({
+      boardRootsEnv: '/tmp/does-not-matter-rescan-ac4',
+      rescanIntervalMs: 1000,
+      fsDeps: {
+        readdir: async () => [],
+        readFile: async () => '',
+        watch: () => hangingAsyncIterable(),
+        setTimeout: timers.setTimeout,
+        clearTimeout: timers.clearTimeout,
+        pathExists: async () => true,
+      },
+    });
+
+    // scan() kontrolliert langsam auflösend (Deferred) — Muster laut Spec
+    // "Verträge"/AC4-Testbeschreibung.
+    let resolveScan;
+    aggregator.scan = jest.fn(() => new Promise((resolve) => { resolveScan = resolve; }));
+
+    aggregator.startWatchers();
+    await flushMicrotasks();
+    expect(timers.pending.size).toBe(1);
+    const [timerId, entry] = [...timers.pending.entries()][0];
+    expect(entry.delay).toBe(1000);
+
+    // Tick feuern -> scan() aufgerufen, bleibt in-flight (hängender Promise).
+    timers.pending.delete(timerId);
+    entry.fn();
+    await flushMicrotasks();
+    expect(aggregator.scan).toHaveBeenCalledTimes(1);
+    // Self-Rescheduling: solange der Rescan läuft, ist KEIN neuer Timer
+    // bewaffnet (der nächste wird erst im finally() nach scan() geplant).
+    expect(timers.pending.size).toBe(0);
+
+    // Ein weiterer Tick, der (re-entrant) während der In-flight-Phase feuert
+    // — direkter Beleg des Overlap-Schutzes, unabhängig von der Self-
+    // Rescheduling-Struktur, die einen zweiten parallelen Timer strukturell
+    // bereits ausschliesst.
+    aggregator._onRescanTick();
+    aggregator._onRescanTick();
+    await flushMicrotasks();
+    expect(aggregator.scan).toHaveBeenCalledTimes(1); // kein zweiter paralleler scan()
+
+    // Rescan abschliessen -> normaler Rhythmus setzt fort.
+    resolveScan();
+    await flushMicrotasks();
+    expect(timers.pending.size).toBe(1);
+    expect([...timers.pending.values()][0].delay).toBe(1000);
+
+    aggregator.stopWatchers();
+  });
+});
+
+describe('board-aggregator-periodic-rescan AC5 — Lebenszyklus, kein Timer-Leak', () => {
+  it('stopWatchers() bricht den Rescan-Timer ab — kein Folge-Tick, kein Timer-Leak', async () => {
+    const timers = makeFakeTimers();
+    const aggregator = new BoardAggregator({
+      boardRootsEnv: '/tmp/does-not-matter-rescan-ac5a',
+      rescanIntervalMs: 1000,
+      fsDeps: {
+        readdir: async () => [],
+        readFile: async () => '',
+        watch: () => hangingAsyncIterable(),
+        setTimeout: timers.setTimeout,
+        clearTimeout: timers.clearTimeout,
+        pathExists: async () => true,
+      },
+    });
+    let scanCalls = 0;
+    aggregator.scan = jest.fn(async () => { scanCalls++; });
+
+    aggregator.startWatchers();
+    await flushMicrotasks();
+    expect(timers.pending.size).toBe(1);
+
+    aggregator.stopWatchers();
+    expect(timers.pending.size).toBe(0);
+    expect(timers.clearCalls.length).toBeGreaterThan(0);
+
+    // Selbst nach vollständigem Flush darf kein weiterer Rescan (scan())
+    // erfolgen — kein Timer bleibt aktiv.
+    await flushMicrotasks();
+    expect(scanCalls).toBe(0);
+  });
+
+  it('doppeltes startWatchers() erzeugt keinen zweiten parallelen Rescan-Zyklus', async () => {
+    const timers = makeFakeTimers();
+    const aggregator = new BoardAggregator({
+      boardRootsEnv: '/tmp/does-not-matter-rescan-ac5b',
+      rescanIntervalMs: 1000,
+      fsDeps: {
+        readdir: async () => [],
+        readFile: async () => '',
+        watch: () => hangingAsyncIterable(),
+        setTimeout: timers.setTimeout,
+        clearTimeout: timers.clearTimeout,
+        pathExists: async () => true,
+      },
+    });
+
+    aggregator.startWatchers();
+    await flushMicrotasks();
+    expect(timers.pending.size).toBe(1);
+
+    aggregator.startWatchers(); // zweiter Aufruf — muss idempotent bleiben.
+    await flushMicrotasks();
+    expect(timers.pending.size).toBe(1); // weiterhin nur EIN ausstehender Rescan-Timer
+
+    aggregator.stopWatchers();
+  });
+
+  it('stopWatchers() während eines laufenden Rescans: der in-flight scan() läuft zu Ende, aber es wird kein Folge-Tick geplant', async () => {
+    const timers = makeFakeTimers();
+    const aggregator = new BoardAggregator({
+      boardRootsEnv: '/tmp/does-not-matter-rescan-ac5c',
+      rescanIntervalMs: 1000,
+      fsDeps: {
+        readdir: async () => [],
+        readFile: async () => '',
+        watch: () => hangingAsyncIterable(),
+        setTimeout: timers.setTimeout,
+        clearTimeout: timers.clearTimeout,
+        pathExists: async () => true,
+      },
+    });
+    let resolveScan;
+    aggregator.scan = jest.fn(() => new Promise((resolve) => { resolveScan = resolve; }));
+
+    aggregator.startWatchers();
+    await flushMicrotasks();
+    const [timerId, entry] = [...timers.pending.entries()][0];
+    timers.pending.delete(timerId);
+    entry.fn(); // Tick feuert -> scan() in-flight (hängender Promise)
+    await flushMicrotasks();
+    expect(aggregator.scan).toHaveBeenCalledTimes(1);
+
+    aggregator.stopWatchers(); // Stop WÄHREND der Rescan noch läuft
+
+    // Der in-flight scan() läuft zu Ende (read-only, harmlos).
+    resolveScan();
+    await flushMicrotasks();
+
+    // Kein Folge-Timer wurde geplant (AC5) — trotz erfolgreichem Abschluss.
+    expect(timers.pending.size).toBe(0);
+  });
+});
+
+describe('board-aggregator-periodic-rescan AC6 — degradierend, nie fatal', () => {
+  it('ein scheiternder Rescan (scan() wirft) crasht nicht — der nächste Tick läuft regulär weiter', async () => {
+    const timers = makeFakeTimers();
+    const rejections = [];
+    const onRejection = (reason) => rejections.push(reason);
+    process.on('unhandledRejection', onRejection);
+    try {
+      const aggregator = new BoardAggregator({
+        boardRootsEnv: '/tmp/does-not-matter-rescan-ac6',
+        rescanIntervalMs: 1000,
+        fsDeps: {
+          readdir: async () => [],
+          readFile: async () => '',
+          watch: () => hangingAsyncIterable(),
+          setTimeout: timers.setTimeout,
+          clearTimeout: timers.clearTimeout,
+          pathExists: async () => true,
+        },
+      });
+
+      let scanCalls = 0;
+      aggregator.scan = jest.fn(async () => {
+        scanCalls++;
+        throw new Error('scan boom');
+      });
+
+      aggregator.startWatchers();
+      await flushMicrotasks();
+      expect(timers.pending.size).toBe(1);
+
+      // Ersten Tick feuern -> scan() wirft.
+      await timers.fireNext();
+      expect(scanCalls).toBe(1);
+      expect(rejections).toEqual([]); // kein unhandled rejection, kein Crash
+
+      // Zyklus läuft weiter: ein neuer Timer wurde regulär bewaffnet.
+      expect(timers.pending.size).toBe(1);
+
+      // Zweiten Tick feuern -> scan() wird erneut regulär aufgerufen.
+      await timers.fireNext();
+      expect(scanCalls).toBe(2);
+
+      aggregator.stopWatchers();
+    } finally {
+      process.off('unhandledRejection', onRejection);
+    }
+  });
 });
