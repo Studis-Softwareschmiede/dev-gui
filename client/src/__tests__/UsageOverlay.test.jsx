@@ -33,10 +33,17 @@ function makeFetch(payload) {
   }));
 }
 
+// Fester ISO-Zeitstempel statt Wanduhrzeit (new Date()): die Komponente rendert
+// `generatedAt` als "Stand: HH:MM:SS" (de-CH) — mit einer echten, ungemockten
+// Wanduhrzeit matcht das nicht-deterministisch einige Digit-Regex-Assertions
+// weiter unten (z.B. "12" als Stunde/Minute/Sekunde). Fixer Wert macht jeden
+// Testlauf reproduzierbar, unabhängig von der Uhrzeit des Testlaufs.
+const FIXED_GENERATED_AT = '2026-07-18T09:00:00.000Z';
+
 function estimatedPayload(overrides = {}) {
   return {
     source: 'estimated',
-    generatedAt: new Date().toISOString(),
+    generatedAt: FIXED_GENERATED_AT,
     session: { outputTokens: 12345, windowHours: 5 },
     week: { outputTokens: 987654, windowDays: 7 },
     ...overrides,
@@ -46,7 +53,7 @@ function estimatedPayload(overrides = {}) {
 function officialPayload(overrides = {}) {
   return {
     source: 'official',
-    generatedAt: new Date().toISOString(),
+    generatedAt: FIXED_GENERATED_AT,
     session: { percentUsed: 42, resetAt: '2026-07-18T20:00:00.000Z' },
     week: {
       allModels: { percentUsed: 61.5, resetAt: '2026-07-21T00:00:00.000Z' },
@@ -105,7 +112,7 @@ describe('AC10 — source: "official" zeigt Prozent + Reset für Session/Alle Mo
     await waitFor(() => { expect(getByText(/Alle Modelle/)).toBeTruthy(); });
     expect(getByText(/opus/)).toBeTruthy();
     expect(getByText(/sonnet/)).toBeTruthy();
-    expect(getByText(/61.5/)).toBeTruthy();
+    expect(getByText(/61\.5/)).toBeTruthy();
   });
 
   it('zeigt spend, wenn vorhanden', async () => {
@@ -113,7 +120,7 @@ describe('AC10 — source: "official" zeigt Prozent + Reset für Session/Alle Mo
     const { getByLabelText, getByText } = render(React.createElement(UsageCoinButton, { fetchFn }));
     fireEvent.click(getByLabelText('Token-Nutzung anzeigen'));
     await waitFor(() => { expect(getByText(/Guthaben/)).toBeTruthy(); });
-    expect(getByText(/12.5/)).toBeTruthy();
+    expect(getByText(/12\.5/)).toBeTruthy();
   });
 
   it('zeigt kein Guthaben-Feld, wenn spend fehlt', async () => {
@@ -139,7 +146,7 @@ describe('AC10 — source: "official" zeigt Prozent + Reset für Session/Alle Mo
     );
     fireEvent.click(getByLabelText('Token-Nutzung anzeigen'));
     await waitFor(() => { expect(getByText(/Guthaben/)).toBeTruthy(); });
-    expect(getByText(/12.34 USD/)).toBeTruthy();
+    expect(getByText(/12\.34 USD/)).toBeTruthy();
     expect(queryByText(/Learn more/)).toBeNull();
     expect(queryByText(/can_purchase_credits/)).toBeNull();
     expect(container.textContent).not.toMatch(/amount_minor/);
@@ -158,9 +165,9 @@ describe('AC10 — source: "official" zeigt Prozent + Reset für Session/Alle Mo
     const { getByLabelText, getByText } = render(React.createElement(UsageCoinButton, { fetchFn }));
     fireEvent.click(getByLabelText('Token-Nutzung anzeigen'));
     await waitFor(() => { expect(getByText(/Guthaben/)).toBeTruthy(); });
-    expect(getByText(/5.00 USD/)).toBeTruthy();
+    expect(getByText(/5\.00 USD/)).toBeTruthy();
     expect(getByText(/Limit/)).toBeTruthy();
-    expect(getByText(/100.00 USD/)).toBeTruthy();
+    expect(getByText(/100\.00 USD/)).toBeTruthy();
     expect(getByText(/5 % genutzt/)).toBeTruthy();
   });
 
@@ -177,7 +184,7 @@ describe('AC10 — source: "official" zeigt Prozent + Reset für Session/Alle Mo
     const { getByLabelText, getByText, queryByText } = render(React.createElement(UsageCoinButton, { fetchFn }));
     fireEvent.click(getByLabelText('Token-Nutzung anzeigen'));
     await waitFor(() => { expect(getByText(/Guthaben/)).toBeTruthy(); });
-    expect(getByText(/0.00 USD/)).toBeTruthy();
+    expect(getByText(/0\.00 USD/)).toBeTruthy();
     expect(queryByText(/Limit/)).toBeNull();
   });
 
@@ -201,14 +208,14 @@ describe('AC11 — source: "estimated"/"unavailable" transparent, keine erfunden
     const { getByLabelText, getByText, queryByText } = render(React.createElement(UsageCoinButton, { fetchFn }));
     fireEvent.click(getByLabelText('Token-Nutzung anzeigen'));
     await waitFor(() => { expect(getByText(/12.345/)).toBeTruthy(); });
-    expect(getByText(/987.654/)).toBeTruthy();
+    expect(getByText(/987.654/)).toBeTruthy(); // "." matcht bewusst den lokalen Tausender-Trenner (Apostroph-Variante), kein Dezimalpunkt
     expect(getByText(/Geschätzt/)).toBeTruthy();
     expect(queryByText(/%/)).toBeNull();
   });
 
   it('fehlendes `source`-Feld (Alt-Antwort) wird defensiv wie estimated behandelt', async () => {
     const fetchFn = makeFetch({
-      generatedAt: new Date().toISOString(),
+      generatedAt: FIXED_GENERATED_AT,
       session: { outputTokens: 111, windowHours: 5 },
       week: { outputTokens: 222, windowDays: 7 },
     });
@@ -219,7 +226,7 @@ describe('AC11 — source: "estimated"/"unavailable" transparent, keine erfunden
   });
 
   it('unavailable: zeigt ehrlichen Fehler-/Leer-Hinweis statt Zahlen', async () => {
-    const fetchFn = makeFetch({ source: 'unavailable', generatedAt: new Date().toISOString() });
+    const fetchFn = makeFetch({ source: 'unavailable', generatedAt: FIXED_GENERATED_AT });
     const { getByLabelText, getByText, queryByText } = render(React.createElement(UsageCoinButton, { fetchFn }));
     fireEvent.click(getByLabelText('Token-Nutzung anzeigen'));
     await waitFor(() => { expect(getByText(/nicht verfügbar/)).toBeTruthy(); });
@@ -242,7 +249,7 @@ describe('AC12 — A11y bleibt in allen drei Zuständen erhalten', () => {
   });
 
   it('unavailable: role=dialog/aria-modal, ESC schliesst, Fokus-Rückgabe, Aktualisieren-Knopf', async () => {
-    const fetchFn = makeFetch({ source: 'unavailable', generatedAt: new Date().toISOString() });
+    const fetchFn = makeFetch({ source: 'unavailable', generatedAt: FIXED_GENERATED_AT });
     const { getByLabelText, getByRole, queryByRole } = render(React.createElement(UsageCoinButton, { fetchFn }));
     const trigger = getByLabelText('Token-Nutzung anzeigen');
     fireEvent.click(trigger);
