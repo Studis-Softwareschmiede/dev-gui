@@ -1,0 +1,30 @@
+id: S-368
+parent: F-085
+title: 'Frontend: Settings-Sektion „Claude-Abo (Nutzungsanzeige)" — write-only access/refresh-Token
+  + Status/expires_at-Anzeige (admin-gated, auditiert)'
+status: To Do
+priority: P2
+spec: docs/specs/anthropic-oauth-vault.md
+implements:
+- AC10
+- AC11
+depends:
+- S-367
+labels:
+- security
+- ui
+size_est: M
+dispo_est: '5.0'
+dispo_act: null
+dispo_forecast: null
+estimate_note: 'S/M-Heuristik score 7 (2 AC + 3 Komponenten: SettingsView-Sektion/CredentialField/settingsApi
+  + 2 labels ui,security) -> M; baseline js|balanced|M ep 5.0 (n=8); keine Baseline-Tokens'
+confidence: medium
+tok_est: null
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-07-18T07:23:07Z'
+updated_at: '2026-07-18T07:25:08Z'
+done_at: null
+area: einstellungen
