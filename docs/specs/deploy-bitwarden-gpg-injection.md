@@ -66,7 +66,7 @@ Unlock-Dialog). Diese Spec ergänzt den **unbeaufsichtigten** Weg (API-Key, kein
   **und** derselben `CRED_ADMIN_EMAILS`-Logik wie `deploymentsRouter`/`vpsRouter`.
 - **S6 — At-rest-Schutz Variante B lokal.** Der `0600`-Zugangs-Speicher ist bewusst
   Klartext-nah at rest (kein Master-Key verfügbar, um ihn zu schützen — Henne-Ei). Das ist
-  **nur für lokalen Betrieb** akzeptiert; für VPS/öffentlich neu zu bewerten (offener Punkt).
+  **nur für lokalen Betrieb** akzeptiert.
 
 ## 4. Komponenten & Acceptance Criteria
 
@@ -161,9 +161,6 @@ Unlock-Dialog). Diese Spec ergänzt den **unbeaufsichtigten** Weg (API-Key, kein
 
 ## 6. Offene Punkte (bewusst, nicht blockierend)
 
-- **VPS/öffentlich:** S6 (at-rest-Schutz des `0600`-Zugangs) ist nur für **lokal**
-  akzeptiert. Für Remote-Betrieb ein eigenes Konzept (z. B. Docker-Secret + eng geschnittene
-  Rechte) — separate Story, nicht Teil von F-072.
 - **Kein R2-Backup des Zugangs:** Der Bitwarden-Zugang wird **bewusst nicht** off-host
   gesichert (Owner-Entscheidung: Wurzel-Anker bleibt lokal; Voll-Restore kostet ohnehin nur
   eine erneute Zugangs-Eingabe über den Reiter). Siehe Retro/Owner-Diskussion 2026-07-12.
