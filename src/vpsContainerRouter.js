@@ -746,6 +746,9 @@ export function vpsContainerRouter({ vpsDockerControl, deployOrchestrator, audit
 
     // Deploy-Saga: pull (unveränderter Image-Ref) → rm Altcontainer → run → Route/DNS.
     // Kein eigener pull/run/Route-Code — ausschließlich DeployOrchestrator.deploy() (Grep-prüfbar).
+    // [[deploy-cache-purge]] AC10: dieselbe deploy()-Instanz purged am Erfolgsausgang best-effort
+    // den Edge-Cache des Hostnamens (kein eigener Purge-Code hier nötig) — deployResult.deployment.cachePurge
+    // spiegelt den Ausgang unverändert in die Update-Response (siehe unten).
     let deployResult;
     try {
       deployResult = await deployOrchestrator.deploy({

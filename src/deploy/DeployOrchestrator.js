@@ -21,6 +21,14 @@
  *     — kein separates Guard-/Seed-Gate mehr im Orchestrator) →
  *     (8) add tunnel route + DNS CNAME. On failure at step 8 → rollback container (rm).
  *     On failure at step 7 → no route step. (AC3, AC4)
+ *     (9) [[deploy-cache-purge]] AC4: purgeCache(zoneId, hostname) — genau einmal, best-effort,
+ *     NACH Route+DNS (Schritt 8) und VOR dem Return { result:"ok", deployment }. Ein Purge-Fehler
+ *     lässt den Deploy NIE fehlschlagen (AC6) — sichtbar nur über deployment.cachePurge. Läuft
+ *     NICHT, wenn ein Schritt vor (9) fehlgeschlagen ist (AC5) und NICHT für addRouteOnly()
+ *     (Reconciliation-Healing-Pfad — keine eigene Deploy-Erfolgsmeldung, außerhalb dieser Spec).
+ *     Wird von BEIDEM — Erst-Deploy (deploymentsRouter.js) UND Container-Image-Update-Pfad
+ *     (vpsContainerRouter.js `/update`, F-080/F-082) — geerbt, da beide dieselbe deploy()-Instanz
+ *     aufrufen (AC10, [[deploy-cache-purge]]) — kein separater Purge-Code je Aufrufer nötig.
  *   - Undeploy: (1) LockoutGuard-Check → (2) confirm-token check → (3) remove
  *     route + DNS → (4) container rm. Route-first to prevent traffic on removed
  *     container. (AC5, AC6)
@@ -401,6 +409,12 @@ export class DeployOrchestrator {
       };
     }
 
+    // [[deploy-cache-purge]] AC4: genau einmal, nach Route+DNS, vor der Erfolgsmeldung.
+    // Best-effort (AC6): purgeCache() wirft nie — sie liefert immer einen typed result,
+    // ein Fehler lässt den Deploy nicht scheitern (nur deployment.cachePurge trägt ihn sichtbar).
+    const cachePurge = await this.#cloudflareApi.purgeCache(zoneId, hostname);
+    logCachePurgeOutcome({ hostname, zoneId, cachePurge });
+
     const deployment = {
       vps: vps.host,
       hostname,
@@ -416,6 +430,8 @@ export class DeployOrchestrator {
       portFallback,    // true wenn kein ExposedPort → Default 8080
       // AC14: Re-Deploy = Ersetzen
       replaced: replacingExisting,
+      // AC6/AC7: sichtbares, secret-freies Purge-Ergebnis (ok|failed|skipped)
+      cachePurge: buildCachePurgeField(cachePurge),
     };
 
     return { result: 'ok', deployment };
@@ -696,6 +712,44 @@ function sanitizeReason(msg) {
     .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer [REDACTED]')
     .replace(/BEGIN (?:OPENSSH|RSA|EC|DSA) PRIVATE KEY[\s\S]*?END (?:OPENSSH|RSA|EC|DSA) PRIVATE KEY/gi, '[KEY REDACTED]')
     .slice(0, 300);
+}
+
+/**
+ * Map CloudflareApi.purgeCache()'s typed result onto the deployment.cachePurge read-model
+ * field ([[deploy-cache-purge]] AC6/AC7 contract).
+ *
+ * @param {{result:'ok'|'skipped'|'error', mode?:string, errorClass?:string, reason?:string}} cachePurge
+ * @returns {{status:'ok'|'failed'|'skipped', mode?:string, warning?:string}}
+ */
+function buildCachePurgeField(cachePurge) {
+  if (cachePurge.result === 'ok') {
+    return { status: 'ok', mode: cachePurge.mode };
+  }
+  if (cachePurge.result === 'skipped') {
+    return { status: 'skipped' };
+  }
+  // AC6: sichtbare Warnung mit Retry-Hinweis, secret-frei (errorClass ist bereits ein
+  // generisches Klassifikations-Label, kein Rohtext aus der Cloudflare-Antwort).
+  return {
+    status: 'failed',
+    warning: `Cache-Purge fehlgeschlagen (${cachePurge.errorClass ?? 'error'}) — Edge-Cache ggf. veraltet, bitte in ein paar Minuten erneut versuchen oder manuell in Cloudflare purgen.`,
+  };
+}
+
+/**
+ * Secret-freies Log/Audit für den Purge-Ausgang (AC7/AC8): Hostname, Zone-Id, Modus,
+ * Ergebnis/Fehlerklasse — nie ein Token (CloudflareApiError/purgeCache liefern nie eines).
+ *
+ * @param {{hostname:string, zoneId:string, cachePurge:{result:string, mode?:string, errorClass?:string, reason?:string}}} params
+ */
+function logCachePurgeOutcome({ hostname, zoneId, cachePurge }) {
+  if (cachePurge.result === 'ok') {
+    console.log(`[DeployOrchestrator] Cache-Purge ok: hostname=${hostname} zoneId=${zoneId} mode=${cachePurge.mode}`);
+  } else if (cachePurge.result === 'skipped') {
+    console.log(`[DeployOrchestrator] Cache-Purge übersprungen: hostname=${hostname} zoneId=${zoneId} reason=${cachePurge.reason}`);
+  } else {
+    console.warn(`[DeployOrchestrator] Cache-Purge fehlgeschlagen: hostname=${hostname} zoneId=${zoneId} errorClass=${cachePurge.errorClass}`);
+  }
 }
 
 /**

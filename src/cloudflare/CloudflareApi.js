@@ -23,6 +23,11 @@
  * Mutate-methods (stub placeholders — implemented in #108):
  *   mutate* methods are wired to LockoutGuard.isProtected() BEFORE any API call.
  *
+ * purgeCache (deploy-cache-purge, S-370, AC1–AC8):
+ *   purgeCache(zoneId, hostname) → best-effort Edge-Cache-Purge, called by DeployOrchestrator
+ *   as the Saga's success-path completion step. Never throws — returns a typed result
+ *   ({result:'ok'|'skipped'|'error', ...}). hosts-scoped first, purge_everything fallback.
+ *
  * @module cloudflare/CloudflareApi
  */
 
@@ -605,6 +610,126 @@ export class CloudflareApi {
     return { result: 'ok' };
   }
 
+  // ── Cache purge (deploy-cache-purge) ────────────────────────────────────────
+
+  /**
+   * Purge the Cloudflare edge cache for a hostname — best-effort Saga-Abschlussschritt
+   * (deploy-cache-purge AC1–AC8). The ONLY place that calls .../purge_cache (ADR-010).
+   *
+   * Hostname-scoped purge is tried first (`{"hosts":[hostname]}`, AC2). If Cloudflare
+   * responds with an error that indicates hosts-scoped purge is not supported for this
+   * zone's plan (typically non-Enterprise — Spec-Edge-Case "Plan ohne hostname-scoped
+   * Purge"), falls back **once** to `{"purge_everything":true}` on the same zone (AC3).
+   * `purge_everything` is NEVER sent without a prior `hosts` attempt.
+   *
+   * This method NEVER throws (best-effort, AC6) — every outcome (not configured, no
+   * zoneId, API error, fallback also failing) is returned as a typed result so the
+   * caller (`DeployOrchestrator`) can surface it without special-casing exceptions.
+   *
+   * Detection of "hosts unsupported" is message-based (Cloudflare does not document a
+   * single stable error code for this specific entitlement gap) — it looks for a
+   * Cloudflare error whose message mentions "hosts"/"hostname" together with wording
+   * indicating a plan/entitlement restriction (not supported/available/entitled,
+   * enterprise-only). Any other error (auth, rate-limit, network, unrelated 4xx/5xx)
+   * is classified as a genuine failure — no fallback attempt (AC3).
+   *
+   * @param {string} zoneId   - already-resolved Cloudflare zone id (AC7: falsy → skipped, no API call)
+   * @param {string} hostname - target hostname (hosts-scoped purge target)
+   * @returns {Promise<
+   *   { result: 'ok', mode: 'hosts'|'purge_everything' } |
+   *   { result: 'skipped', reason: 'cloudflare-not-configured'|'zone-not-found' } |
+   *   { result: 'error', errorClass: string, reason: string }
+   * >}
+   */
+  async purgeCache(zoneId, hostname) {
+    // AC7: kein zoneId auflösbar → übersprungen, kein API-Call (defensiver No-op —
+    // in der regulären Saga ist zoneId hier bereits gesetzt, siehe Spec Edge-Cases).
+    if (!zoneId) {
+      return { result: 'skipped', reason: 'zone-not-found' };
+    }
+
+    const creds = await this.#resolveCredentials();
+    if (!creds) {
+      // AC7: Cloudflare nicht konfiguriert → übersprungen, kein API-Call
+      return { result: 'skipped', reason: 'cloudflare-not-configured' };
+    }
+    const { token } = creds;
+
+    const url = `${CF_BASE}/zones/${encodeURIComponent(zoneId)}/purge_cache`;
+
+    // AC2: hostname-scoped bevorzugt
+    const hostsAttempt = await this.#purgeRequest(url, token, { hosts: [hostname] });
+    if (hostsAttempt.result === 'ok') {
+      return { result: 'ok', mode: 'hosts' };
+    }
+
+    if (!isHostsUnsupportedError(hostsAttempt)) {
+      // Genuiner Fehler (Auth/Rate-Limit/Netz/unbekannt) — kein Fallback-Versuch (AC3)
+      return { result: 'error', errorClass: hostsAttempt.errorClass, reason: hostsAttempt.reason };
+    }
+
+    // AC3: Fallback — einmalig purge_everything, derselben Zone
+    const everythingAttempt = await this.#purgeRequest(url, token, { purge_everything: true });
+    if (everythingAttempt.result === 'ok') {
+      return { result: 'ok', mode: 'purge_everything' };
+    }
+    return { result: 'error', errorClass: everythingAttempt.errorClass, reason: everythingAttempt.reason };
+  }
+
+  /**
+   * Execute a single purge_cache POST attempt. Unlike #apiPost, this does NOT throw —
+   * it returns a typed result and preserves the raw Cloudflare error code/message
+   * (needed by isHostsUnsupportedError()) instead of collapsing to a fixed errorClass.
+   * Token goes in Authorization: Bearer header — never in URL/log/response (AC8).
+   *
+   * @param {string} url
+   * @param {string} token - Bearer token (NEVER logged)
+   * @param {object} body  - JSON request body ({hosts:[...]} or {purge_everything:true})
+   * @returns {Promise<{result:'ok'} | {result:'error', errorClass:string, reason:string, cfErrorCode?:number, cfErrorMessage?:string}>}
+   */
+  async #purgeRequest(url, token, body) {
+    let res;
+    try {
+      res = await this.#fetch(url, {
+        method: 'POST',
+        headers: buildHeaders(token),
+        body: JSON.stringify(body),
+      });
+    } catch (err) {
+      if (err?.name === 'AbortError' || err?.message === 'timeout') {
+        return { result: 'error', errorClass: 'cloudflare-unavailable', reason: 'Cloudflare API request timed out' };
+      }
+      return { result: 'error', errorClass: 'cloudflare-unavailable', reason: 'Cloudflare API unreachable' };
+    }
+
+    if (res.status === 401 || res.status === 403) {
+      return { result: 'error', errorClass: 'cloudflare-auth-failed', reason: 'Cloudflare authentication failed' };
+    }
+    if (res.status === 429) {
+      return { result: 'error', errorClass: 'cloudflare-unavailable', reason: 'Cloudflare API rate limit exceeded' };
+    }
+
+    let parsed = null;
+    try {
+      parsed = await res.json();
+    } catch {
+      // Kein/ungültiges JSON — bei !res.ok unten als Fehler behandelt, sonst als ok gewertet
+    }
+
+    if (!res.ok || parsed?.success === false) {
+      const firstError = Array.isArray(parsed?.errors) ? parsed.errors[0] : null;
+      return {
+        result: 'error',
+        errorClass: 'cloudflare-unavailable',
+        reason: 'Cloudflare API konnte den Cache-Purge nicht ausführen',
+        cfErrorCode: firstError?.code,
+        cfErrorMessage: typeof firstError?.message === 'string' ? firstError.message : undefined,
+      };
+    }
+
+    return { result: 'ok' };
+  }
+
   // ── Private helpers ──────────────────────────────────────────────────────────
 
   /**
@@ -1057,6 +1182,33 @@ async function fetchWithTimeout(url, init, timeoutMs = FETCH_TIMEOUT_MS) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Detect whether a failed purge_cache attempt indicates hosts-scoped purge is not
+ * supported for this zone's plan (deploy-cache-purge AC3 fallback trigger).
+ *
+ * Cloudflare does not document a single stable error code for this specific
+ * entitlement gap, so detection is message-based: the error message must mention
+ * hosts/hostname-scoped purge together with wording indicating a plan/entitlement
+ * restriction. Any other error (auth, rate-limit, network, unrelated API error)
+ * returns false — no fallback attempt for those (AC3: fallback only on this specific
+ * unsupported-signal, not on every error).
+ *
+ * @param {{cfErrorMessage?: string}} attempt
+ * @returns {boolean}
+ */
+function isHostsUnsupportedError(attempt) {
+  const msg = String(attempt?.cfErrorMessage ?? '').toLowerCase();
+  if (!msg) return false;
+  const mentionsHosts = msg.includes('host');
+  const mentionsRestriction =
+    msg.includes('not supported') ||
+    msg.includes('not available') ||
+    msg.includes('not entitled') ||
+    msg.includes('enterprise') ||
+    msg.includes('plan');
+  return mentionsHosts && mentionsRestriction;
 }
 
 /**

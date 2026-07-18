@@ -74,6 +74,20 @@
  *          (kein rm, kein psAll-Aufruf für die Ersetzung)
  *   AC19 — Host-Port-Wiederverwendung: Altcontainer auf Host-Port 8080 → Re-Deploy → neuer
  *          Container erneut auf 8080 (Ersetzungsschritt bleibt VOR #selectFreeHostPort)
+ *
+ * Covers (deploy-cache-purge AC1–AC8, S-370 — Cache-Purge-Saga-Abschlussschritt):
+ *   AC4 — purgeCache(zoneId, hostname) wird genau einmal aufgerufen, mit der aufgelösten
+ *         zoneId + hostname; Aufruf-Reihenfolge addRoute → createDnsRecord → purgeCache
+ *   AC2/AC3 — deployment.cachePurge trägt den von purgeCache() gemeldeten Modus (hosts |
+ *         purge_everything) unverändert durch (Modus-Logik selbst lebt in CloudflareApi.test.js)
+ *   AC5 — Route-Fehler / DNS-Fehler / Pull-Fehler / protected-resource VOR dem Purge-Schritt →
+ *         purgeCache NICHT aufgerufen
+ *   AC6 — purgeCache liefert result:"error" → Deploy bleibt result:"ok",
+ *         deployment.cachePurge = { status:"failed", warning } mit Retry-Hinweis, kein Secret-Leak
+ *   AC7 — purgeCache liefert result:"skipped" (nicht konfiguriert/kein zoneId) → Deploy bleibt
+ *         ok, deployment.cachePurge = { status:"skipped" }
+ *   AC1/AC8 (CloudflareApi-Vertrag: einzige purge_cache-Boundary, Token nie im Log/Ergebnis) —
+ *         siehe CloudflareApi.test.js (Boundary-eigene Tests, nicht hier dupliziert)
  */
 
 import { describe, it, expect, jest } from '@jest/globals';
@@ -135,6 +149,10 @@ function makeCloudflareApi({
   // Default: Tunnel existiert → Gate ist No-op (Rückwärtskompatibilität für alle bestehenden Tests)
   listTunnelsResult = [{ id: 'tunnel-abc-123' }], // matches DEPLOY_PARAMS.tunnelId
   listTunnelsError = null,
+  // [[deploy-cache-purge]] S-370: purgeCache mock — never throws (best-effort contract).
+  // Default: ok/hosts, so all pre-existing tests (that don't care about the purge step)
+  // keep passing unchanged (Rückwärtskompatibilität, analog listTunnels-Default oben).
+  purgeCacheResult = { result: 'ok', mode: 'hosts' },
 } = {}) {
   return {
     addRoute: jest.fn(async () => {
@@ -166,6 +184,7 @@ function makeCloudflareApi({
       if (resolveZoneError) throw resolveZoneError;
       return resolvedZoneId;
     }),
+    purgeCache: jest.fn(async () => purgeCacheResult),
   };
 }
 
@@ -452,6 +471,137 @@ describe('DeployOrchestrator — deploy() — AC7: LockoutGuard', () => {
     expect(docker.pull).not.toHaveBeenCalled();
     expect(docker.run).not.toHaveBeenCalled();
     expect(cf.addRoute).not.toHaveBeenCalled();
+  });
+});
+
+// ── deploy() — [[deploy-cache-purge]] AC4–AC7: Cache-Purge-Saga-Abschlussschritt ──
+
+describe('DeployOrchestrator — deploy() — [[deploy-cache-purge]] AC4: Purge-Aufruf im Erfolgspfad', () => {
+  it('AC4: purgeCache wird genau einmal aufgerufen, mit der aufgelösten zoneId + hostname', async () => {
+    const resolvedZone = 'resolved-zone-id-xyz';
+    const docker = makeDockerControl();
+    const cf = makeCloudflareApi({ resolvedZoneId: resolvedZone });
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.result).toBe('ok');
+    expect(cf.purgeCache).toHaveBeenCalledTimes(1);
+    expect(cf.purgeCache).toHaveBeenCalledWith(resolvedZone, DEPLOY_PARAMS.hostname);
+  });
+
+  it('AC4: purgeCache läuft NACH addRoute/createDnsRecord und VOR dem Return (Aufruf-Reihenfolge)', async () => {
+    const callOrder = [];
+    const docker = makeDockerControl();
+    const cf = makeCloudflareApi();
+    cf.addRoute.mockImplementation(async () => { callOrder.push('addRoute'); });
+    cf.createDnsRecord.mockImplementation(async () => { callOrder.push('createDnsRecord'); });
+    cf.purgeCache.mockImplementation(async () => { callOrder.push('purgeCache'); return { result: 'ok', mode: 'hosts' }; });
+
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+    await orch.deploy(DEPLOY_PARAMS);
+
+    expect(callOrder).toEqual(['addRoute', 'createDnsRecord', 'purgeCache']);
+  });
+
+  it('AC2/AC6: purgeCache ok(mode:hosts) → deployment.cachePurge = { status:"ok", mode:"hosts" }', async () => {
+    const docker = makeDockerControl();
+    const cf = makeCloudflareApi({ purgeCacheResult: { result: 'ok', mode: 'hosts' } });
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.deployment.cachePurge).toEqual({ status: 'ok', mode: 'hosts' });
+  });
+
+  it('AC3: purgeCache ok(mode:purge_everything, Fallback) → deployment.cachePurge trägt den Fallback-Modus', async () => {
+    const docker = makeDockerControl();
+    const cf = makeCloudflareApi({ purgeCacheResult: { result: 'ok', mode: 'purge_everything' } });
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.deployment.cachePurge).toEqual({ status: 'ok', mode: 'purge_everything' });
+  });
+});
+
+describe('DeployOrchestrator — deploy() — [[deploy-cache-purge]] AC5: kein Purge bei Fehl-Deploy', () => {
+  it('AC5: Route-Fehler VOR dem Purge-Schritt → purgeCache NICHT aufgerufen', async () => {
+    const routeError = Object.assign(new Error('Route-Fehler'), { errorClass: 'error' });
+    const docker = makeDockerControl({ psResult: { result: 'ok', containers: [] } });
+    const cf = makeCloudflareApi({ addRouteError: routeError });
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.result).toBe('error');
+    expect(cf.purgeCache).not.toHaveBeenCalled();
+  });
+
+  it('AC5: DNS-Fehler VOR dem Purge-Schritt → purgeCache NICHT aufgerufen', async () => {
+    const dnsError = Object.assign(new Error('DNS-Fehler'), { errorClass: 'error' });
+    const docker = makeDockerControl({ psResult: { result: 'ok', containers: [] } });
+    const cf = makeCloudflareApi({ createDnsRecordError: dnsError });
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.result).toBe('error');
+    expect(cf.purgeCache).not.toHaveBeenCalled();
+  });
+
+  it('AC5: Pull-Fehler VOR Route/DNS → purgeCache NICHT aufgerufen', async () => {
+    const docker = makeDockerControl({ pullResult: { result: 'error', reason: 'pull failed', errorClass: 'error' } });
+    const cf = makeCloudflareApi();
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.result).toBe('error');
+    expect(cf.purgeCache).not.toHaveBeenCalled();
+  });
+
+  it('AC5/AC7: protected-resource/LockoutGuard vor allen Schritten → purgeCache NICHT aufgerufen', async () => {
+    const docker = makeDockerControl();
+    const cf = makeCloudflareApi();
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(true) });
+
+    await orch.deploy(DEPLOY_PARAMS);
+
+    expect(cf.purgeCache).not.toHaveBeenCalled();
+  });
+});
+
+describe('DeployOrchestrator — deploy() — [[deploy-cache-purge]] AC6: Purge best-effort, Deploy bleibt ok', () => {
+  it('AC6: purgeCache liefert result:error → Deploy bleibt result:ok, cachePurge.status:"failed" mit Warnung', async () => {
+    const docker = makeDockerControl();
+    const cf = makeCloudflareApi({
+      purgeCacheResult: { result: 'error', errorClass: 'cloudflare-unavailable', reason: 'Cloudflare API konnte den Cache-Purge nicht ausführen' },
+    });
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.result).toBe('ok');
+    expect(result.deployment.cachePurge.status).toBe('failed');
+    expect(result.deployment.cachePurge.warning).toEqual(expect.stringContaining('erneut'));
+    // AC9-Analogie/AC8: kein Secret in der Warnung
+    expect(result.deployment.cachePurge.warning).not.toMatch(/Bearer\s+\S+/i);
+  });
+});
+
+describe('DeployOrchestrator — deploy() — [[deploy-cache-purge]] AC7: kein Purge ohne Cloudflare/zoneId', () => {
+  it('AC7: purgeCache liefert result:skipped(cloudflare-not-configured) → Deploy bleibt ok, cachePurge.status:"skipped"', async () => {
+    const docker = makeDockerControl();
+    const cf = makeCloudflareApi({
+      purgeCacheResult: { result: 'skipped', reason: 'cloudflare-not-configured' },
+    });
+    const orch = new DeployOrchestrator({ dockerControl: docker, cloudflareApi: cf, lockoutGuard: makeLockoutGuard(false) });
+
+    const result = await orch.deploy(DEPLOY_PARAMS);
+
+    expect(result.result).toBe('ok');
+    expect(result.deployment.cachePurge).toEqual({ status: 'skipped' });
   });
 });
 
