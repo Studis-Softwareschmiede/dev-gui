@@ -1,6 +1,7 @@
 id: S-147
 parent: F-012
-title: 'Off-Host-Backup wirkt nicht: Hook ignoriert UI-Config + targetType-Mismatch + Präfix-Default'
+title: 'Off-Host-Backup wirkt nicht: Hook ignoriert UI-Config + targetType-Mismatch
+  + Präfix-Default'
 status: Done
 priority: P1
 spec: docs/specs/credential-backup.md
@@ -22,10 +23,19 @@ confidence: medium
 branch: feat/S-147-backup-offhost-fix
 pr: 307
 blocked_reason: null
-estimate_note: 'Drei diagnostizierte Backup-Bugs, ein Durchlauf. Bug 1 (KERN, backend/security): #runBackupHook ruft sync resolveOffHostConfig() (Env-only) statt await resolveOffHostConfigAsync() (BackupConfigStore) — die gesamte UI-Off-Host-Config aus S-143 ist wirkungslos, offHostResult immer ''disabled''. Override-Verhalten (null/Wert/undefined) erhalten. Bug 2 (frontend): targetType-Dropdown ohne ''local''-Option zeigt bei State=''local'' fälschlich S3, State bleibt ''local'' → S3-Felder fehlen, ''local'' wird zurückgeschrieben (Teufelskreis) → beim Laden auf darstellbaren Wert normalisieren. Bug 3 (frontend, Komfort): Präfix-Default dev-gui/ ohne gespeicherten Wert zu überschreiben. Mittlere Bug-Fix-Größe, ~M (~4 EP); Fixes lokalisiert, brauchen aber je einen Regressions-Test inkl. Live-Pfad offHostResult!=disabled.'
+estimate_note: 'Drei diagnostizierte Backup-Bugs, ein Durchlauf. Bug 1 (KERN, backend/security):
+  #runBackupHook ruft sync resolveOffHostConfig() (Env-only) statt await resolveOffHostConfigAsync()
+  (BackupConfigStore) — die gesamte UI-Off-Host-Config aus S-143 ist wirkungslos,
+  offHostResult immer ''disabled''. Override-Verhalten (null/Wert/undefined) erhalten.
+  Bug 2 (frontend): targetType-Dropdown ohne ''local''-Option zeigt bei State=''local''
+  fälschlich S3, State bleibt ''local'' → S3-Felder fehlen, ''local'' wird zurückgeschrieben
+  (Teufelskreis) → beim Laden auf darstellbaren Wert normalisieren. Bug 3 (frontend,
+  Komfort): Präfix-Default dev-gui/ ohne gespeicherten Wert zu überschreiben. Mittlere
+  Bug-Fix-Größe, ~M (~4 EP); Fixes lokalisiert, brauchen aber je einen Regressions-Test
+  inkl. Live-Pfad offHostResult!=disabled.'
 created_at: '2026-06-17T00:00:00Z'
-updated_at: '2026-07-02T03:22:17.133Z'
+updated_at: '2026-07-02T03:22:17Z'
 done_at: '2026-06-17T17:36:30Z'
 archived: true
-archived_at: '2026-07-02T03:22:17.133Z'
-area: 'deployment'
+archived_at: '2026-07-02T03:22:17Z'
+area: deployment

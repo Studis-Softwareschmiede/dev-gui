@@ -25,7 +25,7 @@ branch: feat/S-212-flowrunner-injection
 pr: null
 blocked_reason: null
 created_at: '2026-07-01T12:00:00Z'
-updated_at: '2026-07-02T03:22:17.133Z'
+updated_at: '2026-07-02T03:22:17Z'
 done_at: '2026-07-01T12:10:07Z'
 notes: 'Story 2 von 3 des headless-parallel-drain-Epics (Spec: docs/specs/headless-parallel-drain.md).
 
@@ -48,5 +48,5 @@ notes: 'Story 2 von 3 des headless-parallel-drain-Epics (Spec: docs/specs/headle
   Gate: Unit-/Integrationstests mit gemocktem Runner/spawn (AC13). Depends: S-204
   (HeadlessFlowRunner).'
 archived: true
-archived_at: '2026-07-02T03:22:17.133Z'
+archived_at: '2026-07-02T03:22:17Z'
 area: '''nachtwaechter'''

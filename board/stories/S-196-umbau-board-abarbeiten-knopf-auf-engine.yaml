@@ -21,7 +21,7 @@ branch: feat/S-196-board-abarbeiten-drain
 pr: null
 blocked_reason: null
 created_at: '2026-06-30T20:09:55Z'
-updated_at: '2026-07-02T03:22:17.133Z'
+updated_at: '2026-07-02T03:22:17Z'
 done_at: '2026-07-01T06:23:11Z'
 notes: 'Der bestehende Knopf "Board abarbeiten" (client/src/CockpitView.jsx, Reiter
 
@@ -39,5 +39,5 @@ notes: 'Der bestehende Knopf "Board abarbeiten" (client/src/CockpitView.jsx, Rei
 
   '
 archived: true
-archived_at: '2026-07-02T03:22:17.133Z'
+archived_at: '2026-07-02T03:22:17Z'
 area: '''nachtwaechter'''

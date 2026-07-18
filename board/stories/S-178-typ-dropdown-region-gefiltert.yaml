@@ -1,6 +1,7 @@
 id: S-178
 parent: F-023
-title: 'Create-Formular: Server-Typ-Dropdown auf availability[region] filtern + Reset bei Region-Wechsel (kein "unsupported location")'
+title: 'Create-Formular: Server-Typ-Dropdown auf availability[region] filtern + Reset
+  bei Region-Wechsel (kein "unsupported location")'
 status: Done
 priority: P1
 spec: docs/specs/vps-create-options.md
@@ -18,24 +19,27 @@ labels:
 size_est: S
 dispo_est: 2
 confidence: high
-estimate_note: 'Frontend-Fortschreibung der S-162-Logik in client/src/VpsView.jsx (VpsCreateForm). Bei
-  Provider=hetzner und vorhandenem availability (aus S-177) das Server-Typ-Dropdown auf availability[region]
-  filtern: nur in der gewaehlten Region bereitstellbare Typen sind waehlbar (Region steuert die Typen-Liste,
-  KEIN beidseitiges Filtern). Bei Region-Wechsel pruefen, ob der aktuell gewaehlte serverType in
-  availability[neueRegion] liegt; falls nicht -> Typ-Auswahl zuruecksetzen (kein Typ gewaehlt oder ersten
-  gueltigen vorauswaehlen), sodass nie eine bekannt-ungueltige Region+Typ-Kombi absendbar ist; bleibt der Typ
-  verfuegbar, bleibt die Wahl erhalten. Graceful Fallback: fehlt availability ganz (S-177-Degradation) oder
-  fehlt der Eintrag fuer die gewaehlte Region -> ungefiltert rendern (heutiges S-162-Verhalten, alle
-  nicht-deprecated Typen). Behebt nebenbei "Preis unbekannt" fuer fsn1+cpx11-artige Kombis. Floor unveraendert:
-  Create-Payload (region/serverType/image + SSH-Label-Referenzen) unveraendert, kein Hetzner-Token im
-  Bundle/Log, AccessGuard. A11y: beschriftetes select bleibt, aria-required/aria-describedby/role=status wie
-  S-162. Tests (RTL, gemockter Options-Endpunkt mit availability): Typ-Dropdown zeigt nur availability[region];
-  Region-Wechsel auf Region ohne den gewaehlten Typ -> Reset; Region-Wechsel mit weiter verfuegbarem Typ ->
-  Wahl bleibt; fehlende availability / fehlende Region-Map -> ungefiltert (Fallback); eine angebotene
-  Region+Typ-Kombi fuehrt nicht mehr zu unsupported location. S (~2 EP) — fokussierte Filter-/Reset-Logik in
-  bestehender View, haengt an S-162 + S-177.'
+estimate_note: 'Frontend-Fortschreibung der S-162-Logik in client/src/VpsView.jsx
+  (VpsCreateForm). Bei Provider=hetzner und vorhandenem availability (aus S-177) das
+  Server-Typ-Dropdown auf availability[region] filtern: nur in der gewaehlten Region
+  bereitstellbare Typen sind waehlbar (Region steuert die Typen-Liste, KEIN beidseitiges
+  Filtern). Bei Region-Wechsel pruefen, ob der aktuell gewaehlte serverType in availability[neueRegion]
+  liegt; falls nicht -> Typ-Auswahl zuruecksetzen (kein Typ gewaehlt oder ersten gueltigen
+  vorauswaehlen), sodass nie eine bekannt-ungueltige Region+Typ-Kombi absendbar ist;
+  bleibt der Typ verfuegbar, bleibt die Wahl erhalten. Graceful Fallback: fehlt availability
+  ganz (S-177-Degradation) oder fehlt der Eintrag fuer die gewaehlte Region -> ungefiltert
+  rendern (heutiges S-162-Verhalten, alle nicht-deprecated Typen). Behebt nebenbei
+  "Preis unbekannt" fuer fsn1+cpx11-artige Kombis. Floor unveraendert: Create-Payload
+  (region/serverType/image + SSH-Label-Referenzen) unveraendert, kein Hetzner-Token
+  im Bundle/Log, AccessGuard. A11y: beschriftetes select bleibt, aria-required/aria-describedby/role=status
+  wie S-162. Tests (RTL, gemockter Options-Endpunkt mit availability): Typ-Dropdown
+  zeigt nur availability[region]; Region-Wechsel auf Region ohne den gewaehlten Typ
+  -> Reset; Region-Wechsel mit weiter verfuegbarem Typ -> Wahl bleibt; fehlende availability
+  / fehlende Region-Map -> ungefiltert (Fallback); eine angebotene Region+Typ-Kombi
+  fuehrt nicht mehr zu unsupported location. S (~2 EP) — fokussierte Filter-/Reset-Logik
+  in bestehender View, haengt an S-162 + S-177.'
 created_at: '2026-06-19T00:00:00Z'
-updated_at: '2026-07-02T03:22:17.133Z'
+updated_at: '2026-07-02T03:22:17Z'
 archived: true
-archived_at: '2026-07-02T03:22:17.133Z'
+archived_at: '2026-07-02T03:22:17Z'
 area: '''vps'''

@@ -20,7 +20,7 @@ branch: feat/S-190-project-job-lock
 pr: null
 blocked_reason: null
 created_at: '2026-06-30T20:09:55Z'
-updated_at: '2026-07-02T03:22:17.133Z'
+updated_at: '2026-07-02T03:22:17Z'
 done_at: '2026-06-30T21:02:47Z'
 notes: 'ProjectJobLock (Schluessel = absoluter Projektpfad) ersetzt fuer Drains den
   globalen
@@ -40,5 +40,5 @@ notes: 'ProjectJobLock (Schluessel = absoluter Projektpfad) ersetzt fuer Drains 
 
   '
 archived: true
-archived_at: '2026-07-02T03:22:17.133Z'
+archived_at: '2026-07-02T03:22:17Z'
 area: '''nachtwaechter'''

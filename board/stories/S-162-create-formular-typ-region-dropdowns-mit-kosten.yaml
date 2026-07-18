@@ -22,23 +22,27 @@ confidence: medium
 branch: feat/S-162-typ-region-dropdowns
 pr: null
 blocked_reason: null
-estimate_note: 'Frontend-Umbau in client/src/VpsView.jsx (VpsCreateForm). Bei Provider=hetzner Optionen
-  vom Endpunkt aus S-161 laden und die Freitextfelder Region + Server-Typ durch select-Dropdowns ersetzen
-  (Vorbild: client/src/DeploymentsView.jsx S-155 + CloudflareView zones-Dropdown). Region-Dropdown: Hetzner-Locations
-  (name, sinnvoll + city/country/network_zone), Auswahl setzt region=name. Server-Typ-Dropdown: je Typ name +
-  Specs (cores/memory/disk) + Kosten (monatlich+stuendlich, brutto bevorzugt, net mit Kennzeichnung als Fallback);
-  Preis richtet sich nach gewaehlter Region (Match im prices-Array per location); kein Match -> Fallback-Preis
-  mit Hinweis bzw. "Preis unbekannt"; Regionswechsel aktualisiert Preisanzeige. deprecated Typen nicht waehlbar.
-  Graceful Degradation: Optionen-Laden fehlgeschlagen / optionsAvailable:false (Nicht-Hetzner / nicht konfiguriert /
-  API-Fehler) -> sichtbarer Hinweis + Rueckfall auf heutige Freitextfelder, Create bleibt absendbar. Create-Payload
-  unveraendert (region/serverType + bestehende Felder, nur Label-Referenzen fuer SSH). Kein Hetzner-Token im Bundle/Log.
-  A11y: beschriftete selects, aria-required, aria-describedby fuer Fehler, role=alert/status, Touch-Target >=44px.
-  Tests (gemockter Endpunkt): Dropdowns rendern aus Live-Listen; Typ zeigt Specs+Preis; Preis folgt Region;
-  fehlende Preise -> "Preis unbekannt"; deprecated ausgeblendet; Fehler/optionsAvailable:false -> Freitext-Fallback;
-  korrekte Create-Payload; kein Secret im Bundle. M (~5 EP) — UI-Umbau einer bestehenden View mit abhaengiger
-  Preis-Logik + Degradation, haengt an S-161.'
+estimate_note: 'Frontend-Umbau in client/src/VpsView.jsx (VpsCreateForm). Bei Provider=hetzner
+  Optionen vom Endpunkt aus S-161 laden und die Freitextfelder Region + Server-Typ
+  durch select-Dropdowns ersetzen (Vorbild: client/src/DeploymentsView.jsx S-155 +
+  CloudflareView zones-Dropdown). Region-Dropdown: Hetzner-Locations (name, sinnvoll
+  + city/country/network_zone), Auswahl setzt region=name. Server-Typ-Dropdown: je
+  Typ name + Specs (cores/memory/disk) + Kosten (monatlich+stuendlich, brutto bevorzugt,
+  net mit Kennzeichnung als Fallback); Preis richtet sich nach gewaehlter Region (Match
+  im prices-Array per location); kein Match -> Fallback-Preis mit Hinweis bzw. "Preis
+  unbekannt"; Regionswechsel aktualisiert Preisanzeige. deprecated Typen nicht waehlbar.
+  Graceful Degradation: Optionen-Laden fehlgeschlagen / optionsAvailable:false (Nicht-Hetzner
+  / nicht konfiguriert / API-Fehler) -> sichtbarer Hinweis + Rueckfall auf heutige
+  Freitextfelder, Create bleibt absendbar. Create-Payload unveraendert (region/serverType
+  + bestehende Felder, nur Label-Referenzen fuer SSH). Kein Hetzner-Token im Bundle/Log.
+  A11y: beschriftete selects, aria-required, aria-describedby fuer Fehler, role=alert/status,
+  Touch-Target >=44px. Tests (gemockter Endpunkt): Dropdowns rendern aus Live-Listen;
+  Typ zeigt Specs+Preis; Preis folgt Region; fehlende Preise -> "Preis unbekannt";
+  deprecated ausgeblendet; Fehler/optionsAvailable:false -> Freitext-Fallback; korrekte
+  Create-Payload; kein Secret im Bundle. M (~5 EP) — UI-Umbau einer bestehenden View
+  mit abhaengiger Preis-Logik + Degradation, haengt an S-161.'
 created_at: '2026-06-18T00:00:00Z'
-updated_at: '2026-07-02T03:22:17.133Z'
+updated_at: '2026-07-02T03:22:17Z'
 archived: true
-archived_at: '2026-07-02T03:22:17.133Z'
+archived_at: '2026-07-02T03:22:17Z'
 area: '''vps'''

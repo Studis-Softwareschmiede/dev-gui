@@ -1,6 +1,7 @@
 id: S-167
 parent: F-015
-title: 'Dynamische VPS-SSH-Ziele: Auflösung für Deploy-Dropdown, Container-Übersicht + Reconcile (dynamisch ⊕ Env)'
+title: 'Dynamische VPS-SSH-Ziele: Auflösung für Deploy-Dropdown, Container-Übersicht
+  + Reconcile (dynamisch ⊕ Env)'
 status: Done
 priority: P1
 spec: docs/specs/vps-dynamic-ssh-targets.md
@@ -20,13 +21,32 @@ labels:
 - backend
 size_est: M
 dispo_est: 5
-estimate_note: 'Lücke B, Teil 2 (Auflösung): die in S-166 persistierten VpsTargetRecords zusätzlich zur statischen VPS_TARGETS-Env als SSH-Ziel-Quelle nutzen — Vereinigung(dynamisch, Env), Env gewinnt bei Kollision (Override/Fallback bleibt). Drei Konsumenten heute env-only: (1) GET /api/deployments/vps-targets → Array.from(vpsTargets.keys()) (src/deploymentsRouter.js:236) → liefert künftig die vereinigte ID-Menge, nur IDs, kein host/user/key (AC3). (2) resolveVpsTarget(provider,serverId,...) (src/vpsContainerRouter.js:192, "if vpsTargets.size===0 return null") → zuerst dynamischer {provider,serverId}-Match (host via getMachineIp auffrischbar), dann Env/IP-Match-Fallback; nur-dynamischer VPS löst auf statt null (AC4) → Container-Übersicht (vps-container-overview, S-157) erreicht den VPS und zeigt den laufenden cloudflared-Container statt "nicht konfiguriert" (AC5). (3) buildReconcileVpsConfigs (server.js:192, an VPS_TARGETS+RECONCILE_TUNNEL_IDS gebunden) → dynamischen VPS inkl. seiner persistierten tunnelId einbeziehen, ohne zusätzlichen RECONCILE_TUNNEL_IDS-Eintrag; Env bleibt Override/Fallback (AC6). Rückwärtskompatibel: Env bleibt vollwertige Quelle, Bestandssetups brechen nicht; dedup, deterministisch. IONOS composite serverId (Slash, *splat) literal matchen. Floor (AC8): vps-targets bleibt ID-only, kein Key/Token-Leak im neuen Pfad. Tests mit gemocktem Store/Registry/VpsDockerControl: leere Env + dynamischer Datensatz → ID im Dropdown, resolveVpsTarget != null, Container-Listing erreicht Ziel; Kollision → Env gewinnt; Reconcile-Konfig trägt dyn. tunnelId; kein Leak. M (~5 EP) — drei Auflösungs-Pfade angleichen + dedup/Override + Tests, kein neuer Endpunkt/keine neue UI.'
+estimate_note: 'Lücke B, Teil 2 (Auflösung): die in S-166 persistierten VpsTargetRecords
+  zusätzlich zur statischen VPS_TARGETS-Env als SSH-Ziel-Quelle nutzen — Vereinigung(dynamisch,
+  Env), Env gewinnt bei Kollision (Override/Fallback bleibt). Drei Konsumenten heute
+  env-only: (1) GET /api/deployments/vps-targets → Array.from(vpsTargets.keys()) (src/deploymentsRouter.js:236)
+  → liefert künftig die vereinigte ID-Menge, nur IDs, kein host/user/key (AC3). (2)
+  resolveVpsTarget(provider,serverId,...) (src/vpsContainerRouter.js:192, "if vpsTargets.size===0
+  return null") → zuerst dynamischer {provider,serverId}-Match (host via getMachineIp
+  auffrischbar), dann Env/IP-Match-Fallback; nur-dynamischer VPS löst auf statt null
+  (AC4) → Container-Übersicht (vps-container-overview, S-157) erreicht den VPS und
+  zeigt den laufenden cloudflared-Container statt "nicht konfiguriert" (AC5). (3)
+  buildReconcileVpsConfigs (server.js:192, an VPS_TARGETS+RECONCILE_TUNNEL_IDS gebunden)
+  → dynamischen VPS inkl. seiner persistierten tunnelId einbeziehen, ohne zusätzlichen
+  RECONCILE_TUNNEL_IDS-Eintrag; Env bleibt Override/Fallback (AC6). Rückwärtskompatibel:
+  Env bleibt vollwertige Quelle, Bestandssetups brechen nicht; dedup, deterministisch.
+  IONOS composite serverId (Slash, *splat) literal matchen. Floor (AC8): vps-targets
+  bleibt ID-only, kein Key/Token-Leak im neuen Pfad. Tests mit gemocktem Store/Registry/VpsDockerControl:
+  leere Env + dynamischer Datensatz → ID im Dropdown, resolveVpsTarget != null, Container-Listing
+  erreicht Ziel; Kollision → Env gewinnt; Reconcile-Konfig trägt dyn. tunnelId; kein
+  Leak. M (~5 EP) — drei Auflösungs-Pfade angleichen + dedup/Override + Tests, kein
+  neuer Endpunkt/keine neue UI.'
 confidence: medium
 branch: feat/S-167-dynamic-vps-resolution
 pr: null
 blocked_reason: null
 created_at: '2026-06-18T00:00:00Z'
-updated_at: '2026-07-02T03:22:17.133Z'
+updated_at: '2026-07-02T03:22:17Z'
 archived: true
-archived_at: '2026-07-02T03:22:17.133Z'
+archived_at: '2026-07-02T03:22:17Z'
 area: '''deployment'''

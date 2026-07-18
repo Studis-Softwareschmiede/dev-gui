@@ -14,13 +14,14 @@ size_est: S
 dispo_est: null
 dispo_act: 2
 dispo_forecast: null
-estimate_note: 'Doku-only: absoluten ensure-gh-auth.sh-Pfad zusätzlich in CLAUDE.md, Glob bleibt primär. S (2 EP, 1 Iteration).'
+estimate_note: 'Doku-only: absoluten ensure-gh-auth.sh-Pfad zusätzlich in CLAUDE.md,
+  Glob bleibt primär. S (2 EP, 1 Iteration).'
 confidence: low
 branch: feat/S-126-gh-auth-abs-path
 pr: 303
 blocked_reason: null
 created_at: '2026-06-15T19:42:15Z'
-updated_at: '2026-07-02T03:22:17.133Z'
+updated_at: '2026-07-02T03:22:17Z'
 done_at: '2026-06-17T02:00:00Z'
 archived: true
-archived_at: '2026-07-02T03:22:17.133Z'
+archived_at: '2026-07-02T03:22:17Z'

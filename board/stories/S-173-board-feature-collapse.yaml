@@ -1,6 +1,7 @@
 id: S-173
 parent: F-020
-title: 'Board: Feature-Zeilen ein-/ausklappbar (Stories verstecken) + Alle-Toggle + localStorage-Persistenz'
+title: 'Board: Feature-Zeilen ein-/ausklappbar (Stories verstecken) + Alle-Toggle
+  + localStorage-Persistenz'
 status: Done
 branch: board/concepts-2026-06-19
 priority: P2
@@ -25,18 +26,18 @@ dispo_forecast: null
 confidence: medium
 estimate_note: 'Frontend-only (client/src/BoardView.jsx). FeatureRow: Auf-/Zu-Schalter
   (Chevron) blendet Story-Spalten aus; Ziel/DoD-Detail-Panel auf eigenen Schalter
-  entkoppeln. Board-Kopfleiste: Alle ein-/ausklappen. Default "Gemischt" (erledigte zu,
-  aktive offen) aus computeRollup/feature.status. localStorage pro Projekt-Slug (Key
-  boardview.collapsed.<slug>), Rückfall bei defektem Storage. Filter-Wechselwirkung:
+  entkoppeln. Board-Kopfleiste: Alle ein-/ausklappen. Default "Gemischt" (erledigte
+  zu, aktive offen) aus computeRollup/feature.status. localStorage pro Projekt-Slug
+  (Key boardview.collapsed.<slug>), Rückfall bei defektem Storage. Filter-Wechselwirkung:
   eingeklappte Features mit Treffern temporär ausgeklappt zeigen ohne gespeicherten
   Zustand zu überschreiben. A11y: button + aria-expanded/-controls, Tastatur, Fokusring.
-  Kein Backend/keine API-Änderung. M heuristisch (mehrere UI-Stellen + Persistenz +
-  Filter-Interaktion, eine Datei).'
+  Kein Backend/keine API-Änderung. M heuristisch (mehrere UI-Stellen + Persistenz
+  + Filter-Interaktion, eine Datei).'
 pr: null
 blocked_reason: null
 created_at: '2026-06-19T00:00:00Z'
-updated_at: '2026-07-02T03:22:17.133Z'
+updated_at: '2026-07-02T03:22:17Z'
 done_at: '2026-06-19T00:00:00Z'
 archived: true
-archived_at: '2026-07-02T03:22:17.133Z'
+archived_at: '2026-07-02T03:22:17Z'
 area: '''board'''

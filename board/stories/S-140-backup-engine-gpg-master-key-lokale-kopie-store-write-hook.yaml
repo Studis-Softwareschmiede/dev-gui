@@ -23,14 +23,16 @@ size_est: M
 dispo_est: 5
 dispo_act: 7
 dispo_forecast: -0.2857
-estimate_note: 'Backup-Engine: GPG-symmetrisch (Passphrase nicht über Argv: fd/stdin), Store-Write-Hook, Retention-Aufräumlogik, Stufen-Response; sicherheitsintensive Testtiefe. Oberes Ende M (5 EP).'
+estimate_note: 'Backup-Engine: GPG-symmetrisch (Passphrase nicht über Argv: fd/stdin),
+  Store-Write-Hook, Retention-Aufräumlogik, Stufen-Response; sicherheitsintensive
+  Testtiefe. Oberes Ende M (5 EP).'
 confidence: low
 branch: feat/S-140-backup-engine
 pr: 294
 blocked_reason: null
 created_at: '2026-06-16T12:00:00Z'
-updated_at: '2026-07-02T03:22:17.133Z'
+updated_at: '2026-07-02T03:22:17Z'
 done_at: '2026-06-16T20:00:00Z'
 archived: true
-archived_at: '2026-07-02T03:22:17.133Z'
-area: 'deployment'
+archived_at: '2026-07-02T03:22:17Z'
+area: deployment

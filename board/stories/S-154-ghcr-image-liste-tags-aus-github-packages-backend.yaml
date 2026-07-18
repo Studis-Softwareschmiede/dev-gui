@@ -1,6 +1,7 @@
 id: S-154
 parent: F-013
-title: 'GHCR-Image-Liste + Tags aus GitHub Packages (Backend): GET /api/github/packages (+/{name}/tags)'
+title: 'GHCR-Image-Liste + Tags aus GitHub Packages (Backend): GET /api/github/packages
+  (+/{name}/tags)'
 status: Done
 priority: P1
 spec: docs/specs/ghcr-image-list.md
@@ -16,13 +17,29 @@ labels:
 - backend
 size_est: M
 dispo_est: 5
-estimate_note: 'Read-only Backend-Bausteine für Paket ②: zwei neue Read-Endpunkte über den bestehenden GitHub-Reader-Boundary. (1) GET /api/github/packages → Org-Container-Pakete via GitHub Packages "GET /orgs/{org}/packages?package_type=container" (paginiert via Link-Header), normalisiert zu { name, fullImageRef=ghcr.io/<org>/<name>, visibility, htmlUrl, updatedAt }. (2) GET /api/github/packages/{name}/tags → Versionen via "GET /orgs/{org}/packages/container/{name}/versions" (paginiert), je Tag ein { tag, digest, updatedAt }, untagged-Versionen ausgelassen, nach updatedAt absteigend sortiert. Token AUSSCHLIESSLICH über den injizierten App-Token-Provider (S-146), KEIN process.env.GH_TOKEN-Fallback (S-149). Org fix = Studis-Softwareschmiede (kein SSRF). {name} validiert (^[A-Za-z0-9._-]+$, sonst 400). Graceful degradation analog github-repos-overview: GitHub unerreichbar/Token fehlt/401-403/404 → leere Liste + optional errors, immer 200, KEIN Token-Leak in Response/Log/WS. Jeder Fetch mit Timeout, Seiten-Limit (DoS). Neuer Router analog githubReposListRouter, neue Reader-Methoden listImagePackages()/listImageTags(name). Tests: Paket-/Tag-Normalisierung, Paginierung, Sortierung, untagged ausgelassen, name-Validierung, Degradation (kein Token/401/404), kein Token-Leak. M (~5 EP) — zwei Endpunkte + Reader-Methoden + Paginierung + Degradations-/Security-Pfade, aber etabliertes Boundary-/Router-Muster.'
+estimate_note: 'Read-only Backend-Bausteine für Paket ②: zwei neue Read-Endpunkte
+  über den bestehenden GitHub-Reader-Boundary. (1) GET /api/github/packages → Org-Container-Pakete
+  via GitHub Packages "GET /orgs/{org}/packages?package_type=container" (paginiert
+  via Link-Header), normalisiert zu { name, fullImageRef=ghcr.io/<org>/<name>, visibility,
+  htmlUrl, updatedAt }. (2) GET /api/github/packages/{name}/tags → Versionen via "GET
+  /orgs/{org}/packages/container/{name}/versions" (paginiert), je Tag ein { tag, digest,
+  updatedAt }, untagged-Versionen ausgelassen, nach updatedAt absteigend sortiert.
+  Token AUSSCHLIESSLICH über den injizierten App-Token-Provider (S-146), KEIN process.env.GH_TOKEN-Fallback
+  (S-149). Org fix = Studis-Softwareschmiede (kein SSRF). {name} validiert (^[A-Za-z0-9._-]+$,
+  sonst 400). Graceful degradation analog github-repos-overview: GitHub unerreichbar/Token
+  fehlt/401-403/404 → leere Liste + optional errors, immer 200, KEIN Token-Leak in
+  Response/Log/WS. Jeder Fetch mit Timeout, Seiten-Limit (DoS). Neuer Router analog
+  githubReposListRouter, neue Reader-Methoden listImagePackages()/listImageTags(name).
+  Tests: Paket-/Tag-Normalisierung, Paginierung, Sortierung, untagged ausgelassen,
+  name-Validierung, Degradation (kein Token/401/404), kein Token-Leak. M (~5 EP) —
+  zwei Endpunkte + Reader-Methoden + Paginierung + Degradations-/Security-Pfade, aber
+  etabliertes Boundary-/Router-Muster.'
 confidence: medium
 branch: feat/S-154-ghcr-image-list
 pr: null
 blocked_reason: null
 created_at: '2026-06-17T00:00:00Z'
-updated_at: '2026-07-02T03:22:17.133Z'
+updated_at: '2026-07-02T03:22:17Z'
 archived: true
-archived_at: '2026-07-02T03:22:17.133Z'
+archived_at: '2026-07-02T03:22:17Z'
 area: '''deployment'''

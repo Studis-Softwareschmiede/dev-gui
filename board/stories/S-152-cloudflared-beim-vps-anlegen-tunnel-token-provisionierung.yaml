@@ -1,6 +1,7 @@
 id: S-152
 parent: F-013
-title: 'cloudflared beim VPS-Anlegen: Tunnel anlegen + Token sicher auf VPS + Dienst starten'
+title: 'cloudflared beim VPS-Anlegen: Tunnel anlegen + Token sicher auf VPS + Dienst
+  starten'
 status: Done
 branch: feat/S-152-cloudflared-vps
 priority: P1
@@ -23,9 +24,25 @@ size_est: L
 dispo_est: 8
 dispo_forecast: 0.0
 confidence: medium
-estimate_note: 'Integration in den VPS-Create-Pfad (VpsProviderRegistry.create / POST /api/vps/machines/:provider): nach dem bestehenden cloud-init Default-Setup (Docker/User/SSH) (a) createTunnel(devgui-<sanitized-vpsname>) via S-151 aufrufen, (b) Tunnel-Token sicher auf den VPS bringen, (c) cloudflared installieren + als token-basierten remote-managed systemd-Dienst starten. Mechanik-Wahl durch architekt/coder: bevorzugt cloud-init (Token via write_files-Datei mit restriktiven Permissions, cloudflared service install — NIE Token im geloggten runcmd-Echo/Argv; siehe vps-cloud-init-setup AC12/AC13, TEMPLATE_VERSION->v3) ODER post-create per SSH (VpsProvisioner/VpsDockerControl). Tunnel-Token im CredentialStore ablegen (credentials/cloudflare/tunnel_token/<tunnelId>, verschluesselt at rest); Tunnel-ID + Token-Referenz dem VPS zuordnen (Provider-Label/Metadatum oder store-interne Map), damit Paket 2 (Deploy) + vps-delete die tunnelId aufloesen koennen. Floor: Token nie in Create-Response/VpsMachine/Audit/Log/Argv/Bundle; Verhalten bei cloudflare-not-configured beim Create definiert+getestet (AC9); cloudflared-Laufzeitfehler laesst Tunnel referenziert (AC10). Groesser, beruehrt Create-Pfad + cloud-init/Provisioner + CredentialStore + Zuordnung (~L, ~8 EP). Test: Create legt genau 1 Tunnel devgui-<name> an, Token landet im Store (nicht in Response/VpsMachine), Mechanik-Dokument/Pfad enthaelt cloudflared-Install/-Start, kein Token-Leak in Log/Argv.'
+estimate_note: 'Integration in den VPS-Create-Pfad (VpsProviderRegistry.create / POST
+  /api/vps/machines/:provider): nach dem bestehenden cloud-init Default-Setup (Docker/User/SSH)
+  (a) createTunnel(devgui-<sanitized-vpsname>) via S-151 aufrufen, (b) Tunnel-Token
+  sicher auf den VPS bringen, (c) cloudflared installieren + als token-basierten remote-managed
+  systemd-Dienst starten. Mechanik-Wahl durch architekt/coder: bevorzugt cloud-init
+  (Token via write_files-Datei mit restriktiven Permissions, cloudflared service install
+  — NIE Token im geloggten runcmd-Echo/Argv; siehe vps-cloud-init-setup AC12/AC13,
+  TEMPLATE_VERSION->v3) ODER post-create per SSH (VpsProvisioner/VpsDockerControl).
+  Tunnel-Token im CredentialStore ablegen (credentials/cloudflare/tunnel_token/<tunnelId>,
+  verschluesselt at rest); Tunnel-ID + Token-Referenz dem VPS zuordnen (Provider-Label/Metadatum
+  oder store-interne Map), damit Paket 2 (Deploy) + vps-delete die tunnelId aufloesen
+  koennen. Floor: Token nie in Create-Response/VpsMachine/Audit/Log/Argv/Bundle; Verhalten
+  bei cloudflare-not-configured beim Create definiert+getestet (AC9); cloudflared-Laufzeitfehler
+  laesst Tunnel referenziert (AC10). Groesser, beruehrt Create-Pfad + cloud-init/Provisioner
+  + CredentialStore + Zuordnung (~L, ~8 EP). Test: Create legt genau 1 Tunnel devgui-<name>
+  an, Token landet im Store (nicht in Response/VpsMachine), Mechanik-Dokument/Pfad
+  enthaelt cloudflared-Install/-Start, kein Token-Leak in Log/Argv.'
 created_at: '2026-06-17T00:00:00Z'
-updated_at: '2026-07-02T03:22:17.133Z'
+updated_at: '2026-07-02T03:22:17Z'
 archived: true
-archived_at: '2026-07-02T03:22:17.133Z'
+archived_at: '2026-07-02T03:22:17Z'
 area: '''deployment'''

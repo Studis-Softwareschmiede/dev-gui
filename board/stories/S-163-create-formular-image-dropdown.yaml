@@ -19,17 +19,21 @@ confidence: medium
 branch: feat/S-163-image-dropdown
 pr: null
 blocked_reason: null
-estimate_note: 'Frontend in client/src/VpsView.jsx (VpsCreateForm). Bei Provider=hetzner das heutige Freitext-Image-Feld
-  durch ein select-Dropdown ersetzen, befuellt aus images[] des Endpunkts (S-161; Anzeige description bzw. name).
-  Default-Vorauswahl Ubuntu 26.04 falls in der Live-Liste vorhanden, sonst Fallback auf den aktuellen Ubuntu-LTS-Slug
-  (analog vps-provider-boundary AC7, Grep-Tag UBUNTU_26_04_SLUG). Auswahl setzt image=name (Slug). Graceful Degradation
-  wie S-162: Laden fehlgeschlagen / optionsAvailable:false -> Rueckfall auf heutiges Freitext-Image-Feld mit
-  Default-Hinweis Ubuntu 26.04; Create bleibt absendbar. A11y: beschriftetes select, aria-required, Fehler programmatisch
-  zugeordnet. Tests (gemockter Endpunkt): Image-Dropdown rendert Systemnames; Default Ubuntu 26.04 vorausgewaehlt
-  (bzw. LTS-Fallback wenn fehlend); Fehler/keine Quelle -> Freitext-Fallback; korrektes image im Create. Nutzt dieselbe
-  Optionen-Quelle wie S-162 (kein zweiter Fetch noetig), daher S (~3 EP); haengt an S-162.'
+estimate_note: 'Frontend in client/src/VpsView.jsx (VpsCreateForm). Bei Provider=hetzner
+  das heutige Freitext-Image-Feld durch ein select-Dropdown ersetzen, befuellt aus
+  images[] des Endpunkts (S-161; Anzeige description bzw. name). Default-Vorauswahl
+  Ubuntu 26.04 falls in der Live-Liste vorhanden, sonst Fallback auf den aktuellen
+  Ubuntu-LTS-Slug (analog vps-provider-boundary AC7, Grep-Tag UBUNTU_26_04_SLUG).
+  Auswahl setzt image=name (Slug). Graceful Degradation wie S-162: Laden fehlgeschlagen
+  / optionsAvailable:false -> Rueckfall auf heutiges Freitext-Image-Feld mit Default-Hinweis
+  Ubuntu 26.04; Create bleibt absendbar. A11y: beschriftetes select, aria-required,
+  Fehler programmatisch zugeordnet. Tests (gemockter Endpunkt): Image-Dropdown rendert
+  Systemnames; Default Ubuntu 26.04 vorausgewaehlt (bzw. LTS-Fallback wenn fehlend);
+  Fehler/keine Quelle -> Freitext-Fallback; korrektes image im Create. Nutzt dieselbe
+  Optionen-Quelle wie S-162 (kein zweiter Fetch noetig), daher S (~3 EP); haengt an
+  S-162.'
 created_at: '2026-06-18T00:00:00Z'
-updated_at: '2026-07-02T03:22:17.133Z'
+updated_at: '2026-07-02T03:22:17Z'
 archived: true
-archived_at: '2026-07-02T03:22:17.133Z'
+archived_at: '2026-07-02T03:22:17Z'
 area: '''vps'''

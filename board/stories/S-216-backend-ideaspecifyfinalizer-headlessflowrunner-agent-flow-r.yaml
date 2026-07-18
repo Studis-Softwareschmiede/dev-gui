@@ -29,7 +29,7 @@ branch: feat/S-216-idea-specify-finalizer
 pr: null
 blocked_reason: null
 created_at: '2026-07-01T15:25:53Z'
-updated_at: '2026-07-02T03:22:17.133Z'
+updated_at: '2026-07-02T03:22:17Z'
 done_at: '2026-07-01T16:58:32Z'
 notes: 'Spec: docs/specs/idea-specify-chat.md AC6,AC7,AC8,AC9. Depends: S-215 (gemeinsamer
   ideaSpecifyRouter + Chat-Session/draftText).
@@ -64,5 +64,5 @@ notes: 'Spec: docs/specs/idea-specify-chat.md AC6,AC7,AC8,AC9. Depends: S-215 (g
   HeadlessFlowRunner.test.js + BoardWriter-Tests duerfen nicht regressieren.'
 tok: '7281914'
 archived: true
-archived_at: '2026-07-02T03:22:17.133Z'
+archived_at: '2026-07-02T03:22:17Z'
 area: '''fabrik-arbeiten'''

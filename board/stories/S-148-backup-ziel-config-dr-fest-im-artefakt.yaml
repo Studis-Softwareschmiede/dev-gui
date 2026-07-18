@@ -1,6 +1,7 @@
 id: S-148
 parent: F-012
-title: 'Backup-Ziel-Config DR-fest machen: nicht-geheime Config ins Artefakt + Restore stellt sie wieder her'
+title: 'Backup-Ziel-Config DR-fest machen: nicht-geheime Config ins Artefakt + Restore
+  stellt sie wieder her'
 status: Done
 priority: P2
 spec: docs/specs/credential-backup.md
@@ -24,10 +25,20 @@ confidence: medium
 branch: feat/S-148-dr-completion
 pr: 308
 blocked_reason: null
-estimate_note: 'DR-Test-Befund (verifiziert): beim Restore kommen die geheimen Remote-Creds aus dem Blob zurück, aber die nicht-geheime Backup-Ziel-Config (off-host enabled, S3-Endpoint/Bucket/Präfix/Region, Retention) geht verloren — sie lag nur als backup-config.json im zerstörten Volume. Lösung: BackupEngine.runBackup erweitert das Artefakt {manifest,blob} um ein nicht-geheimes config-Feld (aus BackupConfigStore.read(), KEINE Remote-Creds/Master-Key — Floor); CredentialStore.restore() bzw. backupRestore.js schreibt config beim Restore atomar über BackupConfigStore zurück (best-effort, kein Store-Rollback bei Config-Fehler). Rückwärtskompatibel: Alt-Artefakte ohne config restoren wie bisher. Lokalisiert auf BackupEngine + Restore-Pfad; Tests: Artefakt-config vorhanden+geheimnisfrei, Restore stellt config wieder her, Config-Fehler rollt Store nicht zurück, config-loses Alt-Artefakt restored sauber. ~M (~4 EP).'
+estimate_note: 'DR-Test-Befund (verifiziert): beim Restore kommen die geheimen Remote-Creds
+  aus dem Blob zurück, aber die nicht-geheime Backup-Ziel-Config (off-host enabled,
+  S3-Endpoint/Bucket/Präfix/Region, Retention) geht verloren — sie lag nur als backup-config.json
+  im zerstörten Volume. Lösung: BackupEngine.runBackup erweitert das Artefakt {manifest,blob}
+  um ein nicht-geheimes config-Feld (aus BackupConfigStore.read(), KEINE Remote-Creds/Master-Key
+  — Floor); CredentialStore.restore() bzw. backupRestore.js schreibt config beim Restore
+  atomar über BackupConfigStore zurück (best-effort, kein Store-Rollback bei Config-Fehler).
+  Rückwärtskompatibel: Alt-Artefakte ohne config restoren wie bisher. Lokalisiert
+  auf BackupEngine + Restore-Pfad; Tests: Artefakt-config vorhanden+geheimnisfrei,
+  Restore stellt config wieder her, Config-Fehler rollt Store nicht zurück, config-loses
+  Alt-Artefakt restored sauber. ~M (~4 EP).'
 created_at: '2026-06-17T00:00:00Z'
-updated_at: '2026-07-02T03:22:17.133Z'
+updated_at: '2026-07-02T03:22:17Z'
 done_at: '2026-06-17T18:37:57Z'
 archived: true
-archived_at: '2026-07-02T03:22:17.133Z'
-area: 'deployment'
+archived_at: '2026-07-02T03:22:17Z'
+area: deployment
