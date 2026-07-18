@@ -19,6 +19,7 @@
  *   POST   /api/deployments/local-test               → { result, report? }               [MUTATION, S-156]
  *   POST   /api/deployments/vps/:vpsId/tunnel/recreate → { result, report } [MUTATION, S-187 AC1–5,11,12 + S-188 AC6–8]
  *   POST   /api/deployments/:app/gpg-provision        → { result, reason? } [MUTATION, F-073/S-335 AC10]
+ *   GET    /api/deployments/:app/gpg-exists           → { exists, reason? } [READ-ONLY, F-073/S-373 AC16]
  *   POST   /api/deployments/:app/gpg-rotate/start             → { ok, phase?, errorClass?, reason? } [MUTATION, F-073/S-338]
  *   POST   /api/deployments/:app/gpg-rotate/commit            → { ok, errorClass?, reason? }         [MUTATION, F-073/S-338]
  *   POST   /api/deployments/:app/gpg-rotate/discard-previous  → { ok, errorClass?, reason? }         [MUTATION, F-073/S-338]
@@ -36,6 +37,9 @@
  *   - VPS-Tunnel-Read-Model (S-185 AC7): read-only, kein Audit, kein Tunnel-Token, nur tunnelId.
  *   - GPG-Provisionierung (F-073/S-335 AC10): hinter AccessGuard + CRED_ADMIN_EMAILS;
  *     Response geheimnisfrei ({ result, reason? }) — nie die Passphrase (AC8).
+ *   - GPG-Existenz-Abfrage (F-073/S-373 AC16): read-only, hinter AccessGuard +
+ *     CRED_ADMIN_EMAILS; mutiert nichts, legt nichts an; Response geheimnisfrei
+ *     ({ exists, reason? }) — nie die Passphrase.
  *   - GPG-Rotation (F-073/S-338 AC7): hinter AccessGuard + CRED_ADMIN_EMAILS;
  *     Response geheimnisfrei ({ ok, phase?, errorClass?, reason? }) — nie alte/
  *     neue Passphrase, nie .env.gpg-Klartext.
@@ -406,8 +410,9 @@ async function resolveVpsIdToTarget(vpsId, vpsTargets, vpsRegistry) {
  *   Optional injected for the Tunnel-Selbstheilung (S-187 AC1–AC5, AC11, AC12).
  *   When provided, POST /api/deployments/vps/:vpsId/tunnel/recreate is active.
  * @param {import('./PerAppGpgProvisioningService.js').PerAppGpgProvisioningService} [perAppGpgProvisioningService]
- *   Optional injected for the Nach-Provisionierungs-Endpunkt (F-073/S-335 AC10).
- *   When provided, POST /api/deployments/:app/gpg-provision is active.
+ *   Optional injected for the Nach-Provisionierungs-Endpunkt (F-073/S-335 AC10)
+ *   and die read-only Existenz-Abfrage (F-073/S-373 AC16). When provided,
+ *   POST /api/deployments/:app/gpg-provision und GET .../gpg-exists sind aktiv.
  * @returns {import('express').Router}
  */
 export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconciliationJob, localDockerControl, vpsRegistry, vpsDockerControl, cloudflareApi, tunnelHealService, deployAccessStore, deployLoginService, perAppGpgProvisioningService, perAppGpgRotationService) {
@@ -1181,6 +1186,48 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconcil
     // AC1/AC8/AC9: Der Dienst übernimmt Audit-First, Zugangs-Gate, Existenz-Check
     // und Passphrasen-Erzeugung — Router reicht nur weiter, kein Secret in Sicht.
     const result = await perAppGpgProvisioningService.provision(app.trim(), { identity: identity?.email ?? null });
+    return res.status(200).json(result);
+  });
+
+  // ── GET /api/deployments/:app/gpg-exists ─────────────────────────────────
+  // per-app-gpg-passphrase-provisioning (F-073/S-373 AC16): read-only Existenz-
+  // Abfrage — beantwortet nur, ob das Bitwarden-Item env.gpg-passphrase-<app>
+  // existiert (Boolean), NIE einen Passphrasen-Wert. Nutzt denselben
+  // itemExists-Pfad (bw get) wie provision(), mutiert nichts, legt nichts an.
+  // Hinter AccessGuard (server.js) + CRED_ADMIN_EMAILS (wie die Mutations-
+  // Endpunkte). Kein Audit-First (keine Mutation — Spec-Vertrag).
+
+  /**
+   * GET /api/deployments/:app/gpg-exists
+   * Beantwortet, ob für die App bereits ein Bitwarden-Item env.gpg-passphrase-<app> existiert.
+   *
+   * Responses:
+   *   200 { exists: boolean, reason?: "access-not-ready" }
+   *   400 { error }  — app-Parameter fehlt/ungültig
+   *   403 { error }  — nicht in CRED_ADMIN_EMAILS
+   *   503 { exists: false, reason }  — Dienst nicht konfiguriert
+   */
+  router.get('/api/deployments/:app/gpg-exists', async (req, res) => {
+    const identity = req.identity ?? null;
+
+    // AC16: Identitäts-/Rollenschutz — ohne Berechtigung 403, KEIN bw-Aufruf.
+    const authz = checkMutationAuthz(identity);
+    if (!authz.allowed) {
+      return res.status(403).json({ error: 'Keine Berechtigung für diese Aktion' });
+    }
+
+    const { app } = req.params;
+    if (!app || typeof app !== 'string' || !app.trim() || app.trim().length > MAX_APP_SLUG_LEN || !APP_SLUG_PARAM_RE.test(app.trim())) {
+      return res.status(400).json({ error: 'app-Parameter fehlt oder enthält ungültige Zeichen' });
+    }
+
+    if (!perAppGpgProvisioningService || typeof perAppGpgProvisioningService.itemExistsFor !== 'function') {
+      return res.status(503).json({ exists: false, reason: 'GPG-Provisionierungsdienst nicht konfiguriert' });
+    }
+
+    // AC16: read-only — kein Audit-First (keine Mutation), Dienst übernimmt
+    // Zugangs-Gate + Existenz-Check; Router reicht nur weiter.
+    const result = await perAppGpgProvisioningService.itemExistsFor(app.trim(), { identity: identity?.email ?? null });
     return res.status(200).json(result);
   });
 

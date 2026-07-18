@@ -6,31 +6,42 @@
  *       vps-readiness-gate.md AC9–AC12 (S-181)
  *       vps-tunnel-existence-gate.md AC8–AC11 (S-186)
  *       vps-tunnel-self-heal.md AC9–AC10 (S-188)
- *       per-app-gpg-passphrase-provisioning.md AC7/AC8 (F-073/S-337)
- *       per-app-gpg-passphrase-rotation.md AC8/AC9 (F-073/S-339)
  *       deploy-bitwarden-gpg-injection.md AC16 (F-073/S-340)
  *       deploy-config-volume-mount.md AC9 (F-078/S-348)
+ *       deployments-gpg-subview.md AC1/AC2/AC8 (F-087/S-374), AC3/AC4/AC5/AC7 (F-087/S-375),
+ *       AC6/AC7/AC8 (F-087/S-376)
  *
  * Responsibilities:
- *   - GPG-Passphrasen-Provisionierung je App (per-app-gpg-passphrase-provisioning.md
- *     AC7/AC8, F-073/S-337): Knopf je in GET /api/github/packages gelisteter App —
- *     POST /api/deployments/:app/gpg-provision (bestehender AccessGuard+CRED_ADMIN-
- *     Endpunkt, S-335). Quittung geheimnisfrei: nur `created`|`already-exists`|
- *     `access-not-ready`|`failed` (+ Klartext-Hinweis) — NIE die Passphrase; die
- *     Response enthält per Vertrag kein weiteres Feld.
- *   - GPG-Passphrasen-Rotation je App (per-app-gpg-passphrase-rotation.md AC8/AC9,
- *     F-073/S-339): zweistufige Quittung (Muster Backup-Settings [[credential-backup]])
- *     gegen die bestehenden, hinter AccessGuard+CRED_ADMIN geschützten Endpunkte
- *     (S-338) — POST .../gpg-rotate/start (Stufe 1: Kandidat + Beweis-Runde),
- *     POST .../gpg-rotate/commit (Stufe 2: umschalten). Bleibt eine Stufe aus/
- *     fehlerhaft, erscheint eine stufen-genaue Warnung statt grüner Quittung.
- *     Der Rollback-Anker-Aufräum-Knopf (POST .../gpg-rotate/discard-previous) ist
- *     eine GETRENNTE, explizit bestätigte Aktion (type-to-confirm, Muster Undeploy-
- *     Dialog dieser Datei) — deaktiviert, bis Stufe 2 dieser Session erfolgreich war
- *     UND der Nutzer selbst bestätigt hat, dass ein Deploy mit der neuen Passphrase
- *     durchgelaufen ist (kein Backend-Signal dafür vorhanden — reine UI-Bestätigung,
- *     AC9). Response geheimnisfrei (`{ok, phase?, errorClass?, reason?}`) — nie eine
- *     Passphrase, nie `.env.gpg`-Klartext.
+ *   - Linkes Bereichs-Untermenü „Deployment"/„GPG-Schlüssel" (deployments-gpg-subview.md
+ *     AC1/AC2/AC8, F-087/S-374, Design docs/design.md „Bereichs-Untermenü"): reiner
+ *     Client-State (kein Voll-Reload, kein Deep-Link), „Deployment" ist Standard-
+ *     Auswahl beim Öffnen. Genau eine Unteransicht ist gleichzeitig gemountet. Die
+ *     „Deployment"-Unteransicht rendert die bestehende Deployments-Ansicht MINUS der
+ *     beiden bisherigen GPG-Sektionen (Provisionierung + Rotation, ehemals
+ *     per-app-gpg-passphrase-provisioning.md AC7/AC8 F-073/S-337 und
+ *     per-app-gpg-passphrase-rotation.md AC8/AC9 F-073/S-339) — deren Funktion lebt
+ *     künftig kompakt (App-Dropdown statt Liste aller Apps) im Unterbereich
+ *     „GPG-Schlüssel".
+ *   - Unteransicht „GPG-Schlüssel" (deployments-gpg-subview.md AC3/AC4/AC5/AC7,
+ *     F-087/S-375, Komponente `GpgKeysSubview` unten): kurze Erklärung + App-
+ *     Dropdown (Quelle: `packages`, wie zuvor die GPG-Listen) + Aktion „Passphrase
+ *     anlegen" (POST .../gpg-provision, geheimnisfreie Quittung AC4/AC7). Existenz-
+ *     Gating (AC5): Knopf nur aktiv bei `GET .../gpg-exists` → `exists:false`;
+ *     `exists:true` → deaktiviert mit Hinweis; Existenz wird bei jedem App-Wechsel
+ *     neu ermittelt (eigene, pro Mount lokale States — Mount/Unmount beim
+ *     Unterbereichswechsel setzt sie zurück, Design D10); `access-not-ready`/Fehler
+ *     lässt den Knopf bedienbar (konservativer Fallback).
+ *   - „Rotieren" (deployments-gpg-subview.md AC6/AC7/AC8, F-087/S-376): klappt für
+ *     die gewählte App die bestehende, unveränderte zweistufige Rotation auf
+ *     (per-app-gpg-passphrase-rotation.md AC1–AC13, ehemals F-073/S-339, aus der
+ *     Hauptansicht entfernt in F-087/S-374) — Stufe 1 „Kandidat + Beweis-Runde"
+ *     (POST .../gpg-rotate/start), Stufe 2 „Umschalten" (POST .../gpg-rotate/commit),
+ *     getrennter, explizit bestätigter Rollback-Anker-Aufräum-Knopf (type-to-confirm,
+ *     POST .../gpg-rotate/discard-previous). Kompakt: EIN Rotations-Zustand für die
+ *     jeweils gewählte App (kein `{ [app]: … }`-Dictionary mehr wie in der ehemaligen
+ *     Listen-Darstellung) — beim App-Wechsel wird der Zustand zusammen mit dem
+ *     Provisionierungs-Zustand zurückgesetzt (derselbe useEffect, s.u.). Response
+ *     geheimnisfrei (`{ ok, phase?, errorClass?, reason? }`) — nie eine Passphrase.
  *   - Mode toggle: "Single-Image" | "Compose-Stack aus Repo" (AC12)
  *   - Single-Image mode (deploy-lifecycle.md AC10–AC14):
  *       List live deployments (Container↔Route as unit) — GET /api/deployments
@@ -102,6 +113,22 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 /** Default domain suffix when none selected. */
 const DEFAULT_DOMAIN = '';
 
+// deployments-gpg-subview AC6 (F-087/S-376): initialer Rotations-Zustand der
+// "GPG-Schlüssel"-Ansicht (GpgKeysSubview) — EIN Zustand für die jeweils
+// gewählte App (kein per-App-Dictionary wie in der ehemaligen Listen-
+// Darstellung, F-073/S-339). Response geheimnisfrei — nie eine Passphrase.
+const INITIAL_GPG_ROTATION_STATE = {
+  starting: false,
+  startResult: null, // { ok, phase?, errorClass?, reason? } | null
+  committing: false,
+  commitResult: null, // { ok, errorClass?, reason? } | null
+  rotationCompleted: false, // true nach commitResult.ok === true (diese Session)
+  deployConfirmed: false, // reine UI-Selbst-Bestätigung (AC9, kein Backend-Signal)
+  discardConfirmText: '', // type-to-confirm (App-Name)
+  discarding: false,
+  discardResult: null, // { ok, errorClass?, reason? } | null
+};
+
 const INITIAL_UNDEPLOY_STATE = {
   hostname: '',
   vps: '',
@@ -113,6 +140,14 @@ const INITIAL_UNDEPLOY_STATE = {
 // Modes for the toggle (AC12)
 const MODE_SINGLE = 'single';
 const MODE_STACK  = 'stack';
+
+// ── deployments-gpg-subview AC1 (F-087/S-374): Bereichs-Untermenü-Einträge ──
+// Feste Reihenfolge (D9): „Deployment" (Standard/aktiv beim Öffnen) vor
+// „GPG-Schlüssel" — docs/design.md „Bereichs-Untermenü" §5.
+const SUBNAV_ITEMS = [
+  { slug: 'deployment', label: 'Deployment' },
+  { slug: 'gpg', label: 'GPG-Schlüssel' },
+];
 
 /** Poll interval for VPS readiness check (AC9/AC11 — NFR: ~3s). */
 const READINESS_POLL_MS = 3000;
@@ -245,27 +280,9 @@ export function DeploymentsView({ onNavigate }) {
   const [stackStatusLoading, setStackStatusLoading] = useState(false);
   const [stackStatusError, setStackStatusError] = useState(null);
 
-  // ── F-073/S-337 AC7/AC8: Nach-Provisionierung GPG-Passphrase je App ──────
-  // Keyed by App-Slug (packages[].name). Response ist per Vertrag geheimnisfrei
-  // (nur { result, reason? }) — es wird NIE ein Passphrasen-Wert im State gehalten.
-  const [gpgProvisionState, setGpgProvisionState] = useState({}); // { [app]: { loading, result, reason, errorMsg } }
-
-  // ── F-073/S-339 AC8/AC9: Per-App-GPG-Passphrase-Rotation (zweistufige Quittung
-  // + Rollback-Anker-Aufräum-Knopf) ─────────────────────────────────────────────
-  // Keyed by App-Slug. Response ist geheimnisfrei ({ ok, phase?, errorClass?,
-  // reason? }) — nie ein Passphrasen-Wert im State. `rotationCompleted`/
-  // `deployConfirmed` sind reine UI-Zustände (kein Backend-Signal existiert für
-  // "Deploy mit neuer Passphrase bestätigt" — AC9 verlangt genau deshalb die
-  // getrennte, explizite Nutzer-Bestätigung).
-  const [gpgRotationState, setGpgRotationState] = useState({});
-  // { [app]: {
-  //     starting, startResult: {ok, phase, errorClass?, reason?} | null,
-  //     committing, commitResult: {ok, errorClass?, reason?} | null,
-  //     rotationCompleted: boolean,   // true nach commitResult.ok === true (diese Session)
-  //     deployConfirmed: boolean,     // Selbst-Bestätigung "Deploy mit neuer Passphrase durchgelaufen"
-  //     discardConfirmText: string,   // type-to-confirm (App-Name)
-  //     discarding, discardResult: {ok, errorClass?, reason?} | null,
-  // } }
+  // ── deployments-gpg-subview AC1 (F-087/S-374): aktive Unteransicht des linken
+  // Bereichs-Untermenüs. Standard = 'deployment' (D9, erster Eintrag).
+  const [activeSubview, setActiveSubview] = useState('deployment'); // 'deployment' | 'gpg'
 
   // ── Load deployments
   const loadDeployments = useCallback(async () => {
@@ -594,161 +611,6 @@ export function DeploymentsView({ onNavigate }) {
     }
   }
 
-  // ── F-073/S-337 AC7: Nach-Provisionierung GPG-Passphrase je App ─────────
-  // Ruft POST /api/deployments/:app/gpg-provision auf (bestehender, hinter
-  // AccessGuard+CRED_ADMIN geschützter Endpunkt, S-335). AC8: nur { result,
-  // reason? } wird aus der Response übernommen — nie ein weiteres Feld (kein
-  // Passphrasen-Wert landet je im UI-State).
-  async function handleGpgProvision(appName) {
-    if (!appName || gpgProvisionState[appName]?.loading) return;
-    setGpgProvisionState((s) => ({
-      ...s,
-      [appName]: { loading: true, result: null, reason: null, errorMsg: null },
-    }));
-    try {
-      const res = await fetch(`/api/deployments/${encodeURIComponent(appName)}/gpg-provision`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-      });
-      const data = await res.json();
-      if (res.ok && typeof data?.result === 'string') {
-        setGpgProvisionState((s) => ({
-          ...s,
-          [appName]: {
-            loading: false,
-            result: data.result,
-            reason: typeof data.reason === 'string' ? data.reason : null,
-            errorMsg: null,
-          },
-        }));
-      } else {
-        const errorMsg =
-          typeof data?.error === 'string' ? data.error
-          : typeof data?.reason === 'string' ? data.reason
-          : 'GPG-Provisionierung fehlgeschlagen';
-        setGpgProvisionState((s) => ({
-          ...s,
-          [appName]: { loading: false, result: null, reason: null, errorMsg },
-        }));
-      }
-    } catch {
-      setGpgProvisionState((s) => ({
-        ...s,
-        [appName]: { loading: false, result: null, reason: null, errorMsg: 'Netzwerkfehler bei der GPG-Provisionierung' },
-      }));
-    }
-  }
-
-  // ── F-073/S-339 AC8: Stufe 1 — Kandidat + Beweis-Runde ───────────────────
-  // Ruft POST .../gpg-rotate/start auf. Startet KEINE neue Runde, während eine
-  // vorherige noch läuft (Doppel-Klick-Schutz, analog handleGpgProvision).
-  async function handleGpgRotateStart(appName) {
-    if (!appName || gpgRotationState[appName]?.starting) return;
-    setGpgRotationState((s) => ({
-      ...s,
-      [appName]: { ...s[appName], starting: true, startResult: null, commitResult: null },
-    }));
-    try {
-      const res = await fetch(`/api/deployments/${encodeURIComponent(appName)}/gpg-rotate/start`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-      });
-      const data = await res.json();
-      const startResult =
-        res.ok && typeof data?.ok === 'boolean'
-          ? data
-          : { ok: false, errorClass: 'error', reason: typeof data?.reason === 'string' ? data.reason : 'Stufe 1 fehlgeschlagen' };
-      setGpgRotationState((s) => ({
-        ...s,
-        [appName]: { ...s[appName], starting: false, startResult },
-      }));
-    } catch {
-      setGpgRotationState((s) => ({
-        ...s,
-        [appName]: { ...s[appName], starting: false, startResult: { ok: false, errorClass: 'error', reason: 'Netzwerkfehler bei Stufe 1' } },
-      }));
-    }
-  }
-
-  // ── F-073/S-339 AC8: Stufe 2 — Umschalten (Commit-Punkt) ─────────────────
-  // Ruft POST .../gpg-rotate/commit auf. Nur sinnvoll aufrufbar, wenn Stufe 1
-  // dieser Session grün war (UI blockt vorher — Backend prüft ohnehin serverseitig).
-  async function handleGpgRotateCommit(appName) {
-    if (!appName || gpgRotationState[appName]?.committing) return;
-    setGpgRotationState((s) => ({
-      ...s,
-      [appName]: { ...s[appName], committing: true, commitResult: null },
-    }));
-    try {
-      const res = await fetch(`/api/deployments/${encodeURIComponent(appName)}/gpg-rotate/commit`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-      });
-      const data = await res.json();
-      const commitResult =
-        res.ok && typeof data?.ok === 'boolean'
-          ? data
-          : { ok: false, errorClass: 'error', reason: typeof data?.reason === 'string' ? data.reason : 'Stufe 2 fehlgeschlagen' };
-      setGpgRotationState((s) => ({
-        ...s,
-        [appName]: {
-          ...s[appName],
-          committing: false,
-          commitResult,
-          rotationCompleted: commitResult.ok === true ? true : s[appName]?.rotationCompleted ?? false,
-        },
-      }));
-    } catch {
-      setGpgRotationState((s) => ({
-        ...s,
-        [appName]: { ...s[appName], committing: false, commitResult: { ok: false, errorClass: 'error', reason: 'Netzwerkfehler bei Stufe 2' } },
-      }));
-    }
-  }
-
-  // ── F-073/S-339 AC9: Rollback-Anker-Aufräumen (getrennte, explizit bestätigte
-  // Aktion) — Ruft POST .../gpg-rotate/discard-previous auf. Nur erreichbar, wenn
-  // Stufe 2 dieser Session erfolgreich war, der Nutzer den Deploy-Erfolg selbst
-  // bestätigt hat UND den App-Namen exakt eingetippt hat (type-to-confirm).
-  async function handleGpgRotateDiscard(appName) {
-    const rs = gpgRotationState[appName] ?? {};
-    if (
-      !appName ||
-      rs.discarding ||
-      rs.rotationCompleted !== true ||
-      rs.deployConfirmed !== true ||
-      rs.discardConfirmText !== appName
-    ) {
-      return;
-    }
-    setGpgRotationState((s) => ({
-      ...s,
-      [appName]: { ...s[appName], discarding: true, discardResult: null },
-    }));
-    try {
-      const res = await fetch(`/api/deployments/${encodeURIComponent(appName)}/gpg-rotate/discard-previous`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-      });
-      const data = await res.json();
-      const discardResult =
-        res.ok && typeof data?.ok === 'boolean'
-          ? data
-          : { ok: false, errorClass: 'error', reason: typeof data?.reason === 'string' ? data.reason : 'Entsorgen fehlgeschlagen' };
-      setGpgRotationState((s) => ({
-        ...s,
-        [appName]: discardResult.ok === true
-          ? { ...s[appName], discarding: false, discardResult, rotationCompleted: false, deployConfirmed: false, discardConfirmText: '' }
-          : { ...s[appName], discarding: false, discardResult },
-      }));
-    } catch {
-      setGpgRotationState((s) => ({
-        ...s,
-        [appName]: { ...s[appName], discarding: false, discardResult: { ok: false, errorClass: 'error', reason: 'Netzwerkfehler beim Entsorgen' } },
-      }));
-    }
-  }
-
   // ── AC12: Deploy handler ─────────────────────────────────────────────────
   async function handleDeploy(e) {
     e.preventDefault();
@@ -969,203 +831,43 @@ export function DeploymentsView({ onNavigate }) {
       <div style={styles.inner}>
         <h1 style={styles.title}>Deployments</h1>
 
-        {/* ── F-073/S-337 AC7/AC8: Nach-Provisionierung GPG-Passphrase je App ── */}
-        {packages.length > 0 && (
-          <section style={styles.section} aria-label="GPG-Passphrasen provisionieren">
-            <h2 style={styles.sectionTitle}>GPG-Passphrasen (Bitwarden)</h2>
-            <p style={styles.hint}>
-              Legt je App eine eigene, zufällige GPG-Passphrase in Bitwarden an (Item „env.gpg-passphrase-&lt;app&gt;"). Eine bereits vorhandene Passphrase wird nie überschrieben.
-            </p>
-            <ul style={styles.gpgProvisionList}>
-              {packages.map((p) => {
-                const st = gpgProvisionState[p.name] ?? {};
-                const statusText = st.loading
-                  ? null
-                  : st.errorMsg
-                    ? st.errorMsg
-                    : st.result
-                      ? friendlyGpgProvisionResult(st.result, st.reason)
-                      : null;
+        {/* ── deployments-gpg-subview AC1/AC8 (F-087/S-374): linkes Bereichs-
+            Untermenü „Deployment"/„GPG-Schlüssel" — Client-State, kein Voll-
+            Reload, „Deployment" ist Standard-Auswahl (D9). Struktur/A11y gemäß
+            docs/design.md „Bereichs-Untermenü": <nav>-Landmark + Buttons mit
+            aria-current="page" (KEIN role=tablist/tab — bewusste Abgrenzung zur
+            Settings-Kategorien-Nav, s. Design §0). CSS-Klassen `.subnav-*` in
+            client/index.html (D12). ── */}
+        <div className="subnav-layout">
+          <nav aria-label="Deployments-Unterbereiche" className="subnav" data-testid="subnav">
+            <div className="subnav-list">
+              {SUBNAV_ITEMS.map(({ slug, label }) => {
+                const active = activeSubview === slug;
                 return (
-                  <li key={p.name} style={styles.gpgProvisionRow}>
-                    <span style={styles.gpgProvisionAppName}>{p.name}</span>
-                    <button
-                      type="button"
-                      style={styles.btnSecondary}
-                      disabled={st.loading}
-                      aria-busy={st.loading}
-                      aria-label={`GPG-Passphrase für ${p.name} in Bitwarden anlegen`}
-                      onClick={() => handleGpgProvision(p.name)}
-                    >
-                      {st.loading ? 'Lege an…' : 'GPG-Passphrase in Bitwarden anlegen'}
-                    </button>
-                    {statusText && (
-                      <span
-                        role="alert"
-                        aria-live="polite"
-                        style={
-                          !st.errorMsg && ['created', 'already-exists'].includes(st.result ?? '')
-                            ? styles.successText
-                            : styles.errorText
-                        }
-                      >
-                        {statusText}
-                      </span>
-                    )}
-                  </li>
+                  <button
+                    key={slug}
+                    type="button"
+                    id={`subnav-${slug}`}
+                    aria-current={active ? 'page' : undefined}
+                    className={`subnav-item${active ? ' active' : ''}`}
+                    data-testid={`subnav-item-${slug}`}
+                    onClick={() => setActiveSubview(slug)}
+                  >
+                    {label}
+                  </button>
                 );
               })}
-            </ul>
-          </section>
-        )}
+            </div>
+          </nav>
 
-        {/* ── F-073/S-339 AC8/AC9: Per-App-GPG-Passphrase-Rotation ─────────── */}
-        {packages.length > 0 && (
-          <section style={styles.section} aria-label="GPG-Passphrasen-Rotation">
-            <h2 style={styles.sectionTitle}>GPG-Passphrasen-Rotation</h2>
-            <p style={styles.hint}>
-              Rotiert die aktive GPG-Passphrase einer App zweistufig: Stufe 1 erzeugt einen
-              Kandidaten und beweist ihn (Alt-Decrypt → Neu-Encrypt → Probe-Decrypt →
-              Vergleich), ohne den aktiven Zustand zu ändern. Erst Stufe 2 schaltet um. Die
-              alte Passphrase bleibt als Rollback-Anker erhalten, bis sie manuell entsorgt wird.
-            </p>
-            <ul style={styles.gpgRotationList}>
-              {packages.map((p) => {
-                const rs = gpgRotationState[p.name] ?? {};
-                const stage1Ok = rs.startResult?.ok === true && rs.startResult?.phase === 'candidate-proved';
-                const stage2Ok = rs.commitResult?.ok === true;
-                const rotationCompleted = rs.rotationCompleted === true;
-                const discardReady =
-                  rotationCompleted && rs.deployConfirmed === true && rs.discardConfirmText === p.name;
-                return (
-                  <li key={p.name} style={styles.gpgRotationCard}>
-                    <span style={styles.gpgProvisionAppName}>{p.name}</span>
-
-                    {/* Stufe 1 + Stufe 2 (zweistufige Quittung, Muster Backup-Settings) */}
-                    <div style={styles.btnRow}>
-                      <button
-                        type="button"
-                        style={styles.btnSecondary}
-                        disabled={rs.starting}
-                        aria-busy={rs.starting}
-                        aria-label={`Rotation für ${p.name}: Stufe 1 starten (Kandidat + Beweis-Runde)`}
-                        onClick={() => handleGpgRotateStart(p.name)}
-                      >
-                        {rs.starting ? 'Stufe 1 läuft…' : 'Stufe 1: Kandidat + Beweis-Runde'}
-                      </button>
-                      <button
-                        type="button"
-                        style={styles.btnPrimary}
-                        disabled={!stage1Ok || rs.committing}
-                        aria-busy={rs.committing}
-                        aria-label={`Rotation für ${p.name}: Stufe 2 umschalten`}
-                        onClick={() => handleGpgRotateCommit(p.name)}
-                      >
-                        {rs.committing ? 'Stufe 2 läuft…' : 'Stufe 2: Umschalten'}
-                      </button>
-                    </div>
-
-                    {rs.startResult && (
-                      <div role="alert" aria-live="polite" style={stage1Ok ? styles.successBox : styles.warnBox}>
-                        <p style={stage1Ok ? styles.successText : styles.warnText}>
-                          {stage1Ok
-                            ? 'Stufe 1: Kandidat erzeugt, Beweis-Runde erfolgreich — aktiver Zustand unverändert.'
-                            : `Stufe 1 fehlgeschlagen: ${friendlyGpgRotateError(rs.startResult.errorClass, rs.startResult.reason)}`}
-                        </p>
-                      </div>
-                    )}
-
-                    {rs.commitResult && (
-                      <div role="alert" aria-live="polite" style={stage2Ok ? styles.successBox : styles.warnBox}>
-                        <p style={stage2Ok ? styles.successText : styles.warnText}>
-                          {stage2Ok
-                            ? 'Stufe 2: umgeschaltet — neue Passphrase ist aktiv, alte als Rollback-Anker gesichert.'
-                            : `Stufe 2 fehlgeschlagen: ${friendlyGpgRotateError(rs.commitResult.errorClass, rs.commitResult.reason)}`}
-                        </p>
-                      </div>
-                    )}
-
-                    {/* AC9: Rollback-Anker-Aufräumen — getrennte, explizit bestätigte Aktion */}
-                    <div style={styles.gpgDiscardBlock}>
-                      <h3 style={styles.gpgDiscardHeading}>Rollback-Anker (alte Passphrase) aufräumen</h3>
-                      {!rotationCompleted ? (
-                        <p style={styles.warnText}>
-                          Erst verfügbar, nachdem Stufe 2 (Umschalten) für {p.name} erfolgreich war.
-                        </p>
-                      ) : (
-                        <>
-                          <label style={styles.gpgDiscardConfirmLabel} htmlFor={`gpg-discard-deploy-confirmed-${p.name}`}>
-                            <input
-                              id={`gpg-discard-deploy-confirmed-${p.name}`}
-                              type="checkbox"
-                              checked={rs.deployConfirmed === true}
-                              onChange={(e) =>
-                                setGpgRotationState((s) => ({
-                                  ...s,
-                                  [p.name]: { ...s[p.name], deployConfirmed: e.target.checked },
-                                }))
-                              }
-                              style={styles.gpgDiscardCheckbox}
-                            />
-                            {' '}Ich bestätige: ein Deploy mit der neuen Passphrase ist erfolgreich durchgelaufen.
-                          </label>
-                          {rs.deployConfirmed !== true && (
-                            <p style={styles.warnText}>
-                              Ohne diese Bestätigung bleibt der Aufräum-Knopf gesperrt.
-                            </p>
-                          )}
-                          <div style={styles.row}>
-                            <label style={styles.label} htmlFor={`gpg-discard-confirm-${p.name}`}>
-                              App-Name zum Bestätigen eintippen (type-to-confirm)
-                            </label>
-                            <input
-                              id={`gpg-discard-confirm-${p.name}`}
-                              type="text"
-                              style={styles.input}
-                              value={rs.discardConfirmText ?? ''}
-                              disabled={rs.deployConfirmed !== true}
-                              onChange={(e) =>
-                                setGpgRotationState((s) => ({
-                                  ...s,
-                                  [p.name]: { ...s[p.name], discardConfirmText: e.target.value },
-                                }))
-                              }
-                              placeholder={p.name}
-                              autoComplete="off"
-                              aria-describedby={`gpg-discard-confirm-hint-${p.name}`}
-                            />
-                            <span id={`gpg-discard-confirm-hint-${p.name}`} style={styles.inputHint}>
-                              Tippe exakt: {p.name}
-                            </span>
-                          </div>
-                          <button
-                            type="button"
-                            style={styles.btnDanger}
-                            disabled={!discardReady || rs.discarding}
-                            aria-busy={rs.discarding}
-                            aria-label={`Rollback-Anker für ${p.name} entsorgen`}
-                            onClick={() => handleGpgRotateDiscard(p.name)}
-                          >
-                            {rs.discarding ? 'Entsorge…' : 'Rollback-Anker entsorgen'}
-                          </button>
-                        </>
-                      )}
-                      {rs.discardResult && (
-                        <div role="alert" aria-live="polite" style={rs.discardResult.ok ? styles.successBox : styles.errorBox}>
-                          <p style={rs.discardResult.ok ? styles.successText : styles.errorText}>
-                            {rs.discardResult.ok
-                              ? 'Rollback-Anker entsorgt.'
-                              : `Entsorgen fehlgeschlagen: ${friendlyGpgRotateError(rs.discardResult.errorClass, rs.discardResult.reason)}`}
-                          </p>
-                        </div>
-                      )}
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
-          </section>
-        )}
+          <section
+            aria-labelledby={`subnav-${activeSubview}`}
+            tabIndex={-1}
+            className="subnav-content"
+            data-testid="subnav-content"
+          >
+          {activeSubview === 'deployment' && (
+            <>
 
         {/* ── Mode toggle (AC12) ────────────────────────────────────────── */}
         <div
@@ -1861,6 +1563,18 @@ export function DeploymentsView({ onNavigate }) {
           </>
         )} {/* end Compose-Stack mode */}
 
+            </>
+          )} {/* end activeSubview === 'deployment' */}
+
+          {/* ── deployments-gpg-subview AC3–AC8 (F-087/S-375+S-376): kompakte
+              GPG-Schlüssel-Ansicht — App-Dropdown + "Passphrase anlegen" mit
+              Existenz-Gating + "Rotieren" (bestehende zweistufige Rotation). ── */}
+          {activeSubview === 'gpg' && (
+            <GpgKeysSubview packages={packages} />
+          )}
+          </section>
+        </div>
+
         {/* ── Back button ──────────────────────────────────────────────── */}
         <button
           type="button"
@@ -1873,6 +1587,544 @@ export function DeploymentsView({ onNavigate }) {
       </div>
     </main>
   );
+}
+
+// ── GpgKeysSubview component (deployments-gpg-subview.md AC3–AC8, F-087/S-375+S-376) ──
+
+/**
+ * Kompakte GPG-Schlüssel-Ansicht: App-Dropdown (genau eine App gewählt) +
+ * Aktion "Passphrase anlegen" mit Existenz-Gating (AC5) + Aktion "Rotieren"
+ * (AC6, F-087/S-376). Eigene, lokale States (Mount/Unmount durch den
+ * Unterbereichswechsel setzt sie zurück, Design D10: bei Rückkehr zu
+ * "GPG-Schlüssel" wird die App-Auswahl auf den Default zurückgesetzt und die
+ * Existenz-Abfrage neu ausgelöst — kein veralteter Knopf-/Rotations-Zustand
+ * über einen Ansichtswechsel hinweg).
+ *
+ * "Rotieren" klappt die bestehende, unveränderte zweistufige Rotation
+ * (per-app-gpg-passphrase-rotation.md AC1–AC13) für die GEWÄHLTE App auf —
+ * Stufe 1 (.../gpg-rotate/start), Stufe 2 (.../gpg-rotate/commit), getrennter
+ * type-to-confirm-Aufräum-Knopf (.../gpg-rotate/discard-previous). Anders als
+ * die ehemalige Listen-Darstellung (F-073/S-339, entfernt in F-087/S-374) gibt
+ * es HIER nur EINEN Rotations-Zustand (kein `{ [app]: … }`-Dictionary) — er
+ * wird beim App-Wechsel zusammen mit dem Provisionierungs-Zustand
+ * zurückgesetzt (s. Existenz-Abfrage-Effekt unten).
+ *
+ * @param {{ packages: Array<{ name: string }> }} props
+ */
+function GpgKeysSubview({ packages }) {
+  const [selectedApp, setSelectedApp] = useState('');
+  // AC5: { status: 'idle'|'loading'|'known'|'unknown', exists, reason }.
+  // 'unknown' deckt sowohl den expliziten access-not-ready-Fall als auch einen
+  // Netzwerk-/HTTP-Fehler ab — in beiden Fällen bleibt der Knopf bedienbar
+  // (konservativer Fallback, Edge-Case "Existenz-Abfrage schlägt fehl").
+  const [existsState, setExistsState] = useState({ status: 'idle', exists: null, reason: null });
+  const [provisionState, setProvisionState] = useState({ loading: false, result: null, reason: null, errorMsg: null });
+  // AC6 (F-087/S-376): Rotations-Zustand der GEWÄHLTEN App — EIN Zustand statt
+  // Dictionary (nur eine App gleichzeitig sichtbar). `open` steuert, ob die
+  // Rotations-Aktion aufgeklappt ist. Response geheimnisfrei (AC7): nie ein
+  // Passphrasen-Wert.
+  const [rotationOpen, setRotationOpen] = useState(false);
+  const [rotationState, setRotationState] = useState(INITIAL_GPG_ROTATION_STATE);
+  const selectedAppRef = useRef('');
+
+  useEffect(() => {
+    selectedAppRef.current = selectedApp;
+  }, [selectedApp]);
+
+  // Default-App: erste Liste-App, solange die aktuelle Auswahl nicht (mehr)
+  // in der Liste vorkommt; leere Liste → keine Auswahl (Edge-Case "keine App").
+  useEffect(() => {
+    if (packages.length === 0) {
+      setSelectedApp('');
+      return;
+    }
+    setSelectedApp((cur) => (cur && packages.some((p) => p.name === cur) ? cur : packages[0].name));
+  }, [packages]);
+
+  // AC5: Existenz-Abfrage bei jedem App-Wechsel neu; Edge-Case "App-Wechsel
+  // während laufender Abfrage" — verworfene Antworten der alten App werden
+  // per cancelled-Flag nicht mehr übernommen. Verwirft außerdem ein noch
+  // laufendes/gezeigtes Provisionierungs-Ergebnis der vorherigen App.
+  // AC6 (F-087/S-376): setzt zusätzlich einen laufenden/angezeigten
+  // Rotations-Zustand der vorherigen App zurück (kein Zustand der falschen
+  // App über einen App-Wechsel hinweg — dasselbe Race-Muster wie oben).
+  useEffect(() => {
+    setProvisionState({ loading: false, result: null, reason: null, errorMsg: null });
+    setRotationOpen(false);
+    setRotationState(INITIAL_GPG_ROTATION_STATE);
+
+    if (!selectedApp) {
+      setExistsState({ status: 'idle', exists: null, reason: null });
+      return;
+    }
+
+    let cancelled = false;
+    setExistsState({ status: 'loading', exists: null, reason: null });
+    fetch(`/api/deployments/${encodeURIComponent(selectedApp)}/gpg-exists`)
+      .then(async (res) => {
+        const data = await res.json().catch(() => ({}));
+        if (cancelled) return;
+        if (res.ok && typeof data?.exists === 'boolean') {
+          setExistsState({
+            status: 'known',
+            exists: data.exists,
+            reason: typeof data.reason === 'string' ? data.reason : null,
+          });
+        } else {
+          // access-not-ready oder sonstiger Fehler-Body: Existenz unbekannt.
+          setExistsState({
+            status: 'unknown',
+            exists: null,
+            reason: typeof data?.reason === 'string' ? data.reason : null,
+          });
+        }
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setExistsState({ status: 'unknown', exists: null, reason: null });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedApp]);
+
+  // AC4: POST .../gpg-provision für die gewählte App; geheimnisfreie Quittung
+  // (nur result/reason übernommen, nie ein weiteres Response-Feld).
+  async function handleProvision() {
+    if (!selectedApp || provisionState.loading) return;
+    const appAtRequest = selectedApp;
+    setProvisionState({ loading: true, result: null, reason: null, errorMsg: null });
+    try {
+      const res = await fetch(`/api/deployments/${encodeURIComponent(appAtRequest)}/gpg-provision`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const data = await res.json().catch(() => ({}));
+      // Edge-Case: App wurde gewechselt, während die Anfrage lief — Ergebnis
+      // gehört der alten App und darf der neuen nicht zugeordnet werden.
+      if (selectedAppRef.current !== appAtRequest) return;
+      if (res.ok && typeof data?.result === 'string') {
+        setProvisionState({
+          loading: false,
+          result: data.result,
+          reason: typeof data.reason === 'string' ? data.reason : null,
+          errorMsg: null,
+        });
+      } else {
+        const errorMsg =
+          typeof data?.error === 'string' ? data.error
+          : typeof data?.reason === 'string' ? data.reason
+          : 'GPG-Provisionierung fehlgeschlagen';
+        setProvisionState({ loading: false, result: null, reason: null, errorMsg });
+      }
+    } catch {
+      if (selectedAppRef.current !== appAtRequest) return;
+      setProvisionState({
+        loading: false,
+        result: null,
+        reason: null,
+        errorMsg: 'Netzwerkfehler bei der GPG-Provisionierung',
+      });
+    }
+  }
+
+  // ── AC6 (F-087/S-376): Stufe 1 — Kandidat + Beweis-Runde. Ruft
+  // POST .../gpg-rotate/start für die gewählte App auf. Startet KEINE neue
+  // Runde, während eine vorherige noch läuft (Doppel-Klick-Schutz, analog
+  // handleProvision). Race-Guard: ein App-Wechsel während des Requests
+  // verwirft das Ergebnis der alten App (selectedAppRef, wie bei AC5/AC4).
+  async function handleGpgRotateStart() {
+    if (!selectedApp || rotationState.starting) return;
+    const appAtRequest = selectedApp;
+    setRotationState((s) => ({ ...s, starting: true, startResult: null, commitResult: null }));
+    try {
+      const res = await fetch(`/api/deployments/${encodeURIComponent(appAtRequest)}/gpg-rotate/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (selectedAppRef.current !== appAtRequest) return;
+      const startResult =
+        res.ok && typeof data?.ok === 'boolean'
+          ? data
+          : { ok: false, errorClass: 'error', reason: typeof data?.reason === 'string' ? data.reason : 'Stufe 1 fehlgeschlagen' };
+      setRotationState((s) => ({ ...s, starting: false, startResult }));
+    } catch {
+      if (selectedAppRef.current !== appAtRequest) return;
+      setRotationState((s) => ({
+        ...s,
+        starting: false,
+        startResult: { ok: false, errorClass: 'error', reason: 'Netzwerkfehler bei Stufe 1' },
+      }));
+    }
+  }
+
+  // ── AC6 (F-087/S-376): Stufe 2 — Umschalten (Commit-Punkt). Ruft
+  // POST .../gpg-rotate/commit auf; die UI blockt den Aufruf vorher (Stufe 1
+  // muss grün sein), das Backend prüft ohnehin serverseitig.
+  async function handleGpgRotateCommit() {
+    if (!selectedApp || rotationState.committing) return;
+    const appAtRequest = selectedApp;
+    setRotationState((s) => ({ ...s, committing: true, commitResult: null }));
+    try {
+      const res = await fetch(`/api/deployments/${encodeURIComponent(appAtRequest)}/gpg-rotate/commit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (selectedAppRef.current !== appAtRequest) return;
+      const commitResult =
+        res.ok && typeof data?.ok === 'boolean'
+          ? data
+          : { ok: false, errorClass: 'error', reason: typeof data?.reason === 'string' ? data.reason : 'Stufe 2 fehlgeschlagen' };
+      setRotationState((s) => ({
+        ...s,
+        committing: false,
+        commitResult,
+        rotationCompleted: commitResult.ok === true ? true : s.rotationCompleted,
+      }));
+    } catch {
+      if (selectedAppRef.current !== appAtRequest) return;
+      setRotationState((s) => ({
+        ...s,
+        committing: false,
+        commitResult: { ok: false, errorClass: 'error', reason: 'Netzwerkfehler bei Stufe 2' },
+      }));
+    }
+  }
+
+  // ── AC6 (F-087/S-376): Rollback-Anker-Aufräumen — getrennte, explizit
+  // bestätigte Aktion (type-to-confirm + Selbst-Bestätigung, unverändert aus
+  // per-app-gpg-passphrase-rotation.md AC9). Nur erreichbar, wenn Stufe 2
+  // dieser Session erfolgreich war, der Nutzer den Deploy-Erfolg selbst
+  // bestätigt hat UND den App-Namen exakt eingetippt hat.
+  async function handleGpgRotateDiscard() {
+    if (
+      !selectedApp ||
+      rotationState.discarding ||
+      rotationState.rotationCompleted !== true ||
+      rotationState.deployConfirmed !== true ||
+      rotationState.discardConfirmText !== selectedApp
+    ) {
+      return;
+    }
+    const appAtRequest = selectedApp;
+    setRotationState((s) => ({ ...s, discarding: true, discardResult: null }));
+    try {
+      const res = await fetch(`/api/deployments/${encodeURIComponent(appAtRequest)}/gpg-rotate/discard-previous`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (selectedAppRef.current !== appAtRequest) return;
+      const discardResult =
+        res.ok && typeof data?.ok === 'boolean'
+          ? data
+          : { ok: false, errorClass: 'error', reason: typeof data?.reason === 'string' ? data.reason : 'Entsorgen fehlgeschlagen' };
+      setRotationState((s) =>
+        discardResult.ok === true
+          ? { ...s, discarding: false, discardResult, rotationCompleted: false, deployConfirmed: false, discardConfirmText: '' }
+          : { ...s, discarding: false, discardResult },
+      );
+    } catch {
+      if (selectedAppRef.current !== appAtRequest) return;
+      setRotationState((s) => ({
+        ...s,
+        discarding: false,
+        discardResult: { ok: false, errorClass: 'error', reason: 'Netzwerkfehler beim Entsorgen' },
+      }));
+    }
+  }
+
+  const noApps = packages.length === 0;
+  const existsKnownTrue = existsState.status === 'known' && existsState.exists === true;
+  // AC5: solange die Existenz nicht bekannt ist (idle/loading), bleibt der
+  // Knopf im Lade-/Neutral-Zustand (hier: deaktiviert). "unknown" (access-not-
+  // ready/Fehler) macht ihn NICHT unklickbar — konservativer Fallback.
+  const provisionPending = existsState.status === 'idle' || existsState.status === 'loading';
+  const provisionDisabled = noApps || provisionPending || existsKnownTrue || provisionState.loading;
+
+  const statusText = provisionState.loading
+    ? null
+    : provisionState.errorMsg
+      ? provisionState.errorMsg
+      : provisionState.result
+        ? friendlyGpgProvisionResult(provisionState.result, provisionState.reason)
+        : null;
+  // Farbe/Rolle aus dem SEMANTISCHEN result-Wert ableiten (nicht aus einem
+  // separaten errorMsg-Flag) — konsistent mit dem etablierten Muster im
+  // restlichen Formular (s. deploy/undeploy-Quittungen).
+  const statusIsSuccess = !provisionState.errorMsg && ['created', 'already-exists'].includes(provisionState.result ?? '');
+
+  // ── AC6 (F-087/S-376): abgeleitete Rotations-Zustände ────────────────────
+  const stage1Ok = rotationState.startResult?.ok === true && rotationState.startResult?.phase === 'candidate-proved';
+  const stage2Ok = rotationState.commitResult?.ok === true;
+  const discardReady =
+    rotationState.rotationCompleted === true &&
+    rotationState.deployConfirmed === true &&
+    rotationState.discardConfirmText === selectedApp;
+
+  return (
+    <section style={styles.section} aria-label="GPG-Schlüssel">
+      <h2 style={styles.sectionTitle}>GPG-Schlüssel</h2>
+      <p style={styles.hint}>
+        Hier legst du je App eine GPG-Passphrase in Bitwarden an und rotierst die
+        aktive Passphrase sicher. Die Passphrase selbst wird nie angezeigt.
+      </p>
+
+      {noApps ? (
+        <p style={styles.hint}>Keine App gefunden.</p>
+      ) : (
+        <div style={styles.row}>
+          <label style={styles.label} htmlFor="gpg-app-select">App</label>
+          <select
+            id="gpg-app-select"
+            style={styles.input}
+            value={selectedApp}
+            onChange={(e) => setSelectedApp(e.target.value)}
+            aria-label="App für GPG-Schlüssel-Verwaltung auswählen"
+          >
+            {packages.map((p) => (
+              <option key={p.name} value={p.name}>{p.name}</option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      <div style={styles.btnRow}>
+        <button
+          type="button"
+          style={styles.btnPrimary}
+          disabled={provisionDisabled}
+          aria-busy={provisionState.loading}
+          aria-describedby={existsKnownTrue ? 'gpg-provision-exists-hint' : undefined}
+          aria-label={
+            selectedApp ? `GPG-Passphrase für ${selectedApp} in Bitwarden anlegen` : 'Passphrase anlegen'
+          }
+          onClick={handleProvision}
+        >
+          {provisionState.loading ? 'Lege an…' : 'Passphrase anlegen'}
+        </button>
+        {existsKnownTrue && (
+          <span id="gpg-provision-exists-hint" style={styles.inputHint}>
+            Passphrase existiert bereits
+          </span>
+        )}
+        {/* AC6 (F-087/S-376): "Rotieren" klappt die bestehende zweistufige
+            Rotation für die gewählte App auf/zu. */}
+        <button
+          type="button"
+          style={styles.btnSecondary}
+          disabled={noApps}
+          aria-expanded={rotationOpen}
+          aria-controls="gpg-rotation-panel"
+          aria-label={selectedApp ? `Rotation für ${selectedApp} auf-/zuklappen` : 'Rotieren'}
+          onClick={() => setRotationOpen((v) => !v)}
+        >
+          {rotationOpen ? 'Rotieren ausblenden' : 'Rotieren'}
+        </button>
+      </div>
+
+      {statusText && (
+        <span
+          role={statusIsSuccess ? 'status' : 'alert'}
+          aria-live="polite"
+          style={statusIsSuccess ? styles.successText : styles.errorText}
+        >
+          {statusText}
+        </span>
+      )}
+
+      {/* ── AC6/AC7/AC8 (F-087/S-376): zweistufige Rotation, kompakt je
+          gewählter App — Logik/Endpunkte/Bestätigungs-Gates unverändert aus
+          per-app-gpg-passphrase-rotation.md AC1–AC13. ── */}
+      {rotationOpen && selectedApp && (
+        <div id="gpg-rotation-panel" style={styles.gpgRotationCard}>
+          <p style={styles.hint}>
+            Rotiert die aktive GPG-Passphrase von {selectedApp} zweistufig: Stufe 1
+            erzeugt einen Kandidaten und beweist ihn (Alt-Decrypt → Neu-Encrypt →
+            Probe-Decrypt → Vergleich), ohne den aktiven Zustand zu ändern. Erst
+            Stufe 2 schaltet um. Die alte Passphrase bleibt als Rollback-Anker
+            erhalten, bis sie manuell entsorgt wird.
+          </p>
+
+          <div style={styles.btnRow}>
+            <button
+              type="button"
+              style={styles.btnSecondary}
+              disabled={rotationState.starting}
+              aria-busy={rotationState.starting}
+              aria-label={`Rotation für ${selectedApp}: Stufe 1 starten (Kandidat + Beweis-Runde)`}
+              onClick={handleGpgRotateStart}
+            >
+              {rotationState.starting ? 'Stufe 1 läuft…' : 'Stufe 1: Kandidat + Beweis-Runde'}
+            </button>
+            <button
+              type="button"
+              style={styles.btnPrimary}
+              disabled={!stage1Ok || rotationState.committing}
+              aria-busy={rotationState.committing}
+              aria-label={`Rotation für ${selectedApp}: Stufe 2 umschalten`}
+              onClick={handleGpgRotateCommit}
+            >
+              {rotationState.committing ? 'Stufe 2 läuft…' : 'Stufe 2: Umschalten'}
+            </button>
+          </div>
+
+          {rotationState.startResult && (
+            <div role="alert" aria-live="polite" style={stage1Ok ? styles.successBox : styles.warnBox}>
+              <p style={stage1Ok ? styles.successText : styles.warnText}>
+                {stage1Ok
+                  ? 'Stufe 1: Kandidat erzeugt, Beweis-Runde erfolgreich — aktiver Zustand unverändert.'
+                  : `Stufe 1 fehlgeschlagen: ${friendlyGpgRotateError(rotationState.startResult.errorClass, rotationState.startResult.reason)}`}
+              </p>
+            </div>
+          )}
+
+          {rotationState.commitResult && (
+            <div role="alert" aria-live="polite" style={stage2Ok ? styles.successBox : styles.warnBox}>
+              <p style={stage2Ok ? styles.successText : styles.warnText}>
+                {stage2Ok
+                  ? 'Stufe 2: umgeschaltet — neue Passphrase ist aktiv, alte als Rollback-Anker gesichert.'
+                  : `Stufe 2 fehlgeschlagen: ${friendlyGpgRotateError(rotationState.commitResult.errorClass, rotationState.commitResult.reason)}`}
+              </p>
+            </div>
+          )}
+
+          {/* AC9 (per-app-gpg-passphrase-rotation, unverändert): Rollback-Anker-
+              Aufräumen — getrennte, explizit bestätigte Aktion. */}
+          <div style={styles.gpgDiscardBlock}>
+            <h3 style={styles.gpgDiscardHeading}>Rollback-Anker (alte Passphrase) aufräumen</h3>
+            {rotationState.rotationCompleted !== true ? (
+              <p style={styles.warnText}>
+                Erst verfügbar, nachdem Stufe 2 (Umschalten) für {selectedApp} erfolgreich war.
+              </p>
+            ) : (
+              <>
+                <label style={styles.gpgDiscardConfirmLabel} htmlFor="gpg-discard-deploy-confirmed">
+                  <input
+                    id="gpg-discard-deploy-confirmed"
+                    type="checkbox"
+                    checked={rotationState.deployConfirmed === true}
+                    onChange={(e) =>
+                      setRotationState((s) => ({ ...s, deployConfirmed: e.target.checked }))
+                    }
+                    style={styles.gpgDiscardCheckbox}
+                  />
+                  {' '}Ich bestätige: ein Deploy mit der neuen Passphrase ist erfolgreich durchgelaufen.
+                </label>
+                {rotationState.deployConfirmed !== true && (
+                  <p style={styles.warnText}>
+                    Ohne diese Bestätigung bleibt der Aufräum-Knopf gesperrt.
+                  </p>
+                )}
+                <div style={styles.row}>
+                  <label style={styles.label} htmlFor="gpg-discard-confirm">
+                    App-Name zum Bestätigen eintippen (type-to-confirm)
+                  </label>
+                  <input
+                    id="gpg-discard-confirm"
+                    type="text"
+                    style={styles.input}
+                    value={rotationState.discardConfirmText}
+                    disabled={rotationState.deployConfirmed !== true}
+                    onChange={(e) =>
+                      setRotationState((s) => ({ ...s, discardConfirmText: e.target.value }))
+                    }
+                    placeholder={selectedApp}
+                    autoComplete="off"
+                    aria-describedby="gpg-discard-confirm-hint"
+                  />
+                  <span id="gpg-discard-confirm-hint" style={styles.inputHint}>
+                    Tippe exakt: {selectedApp}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  style={styles.btnDanger}
+                  disabled={!discardReady || rotationState.discarding}
+                  aria-busy={rotationState.discarding}
+                  aria-label={`Rollback-Anker für ${selectedApp} entsorgen`}
+                  onClick={handleGpgRotateDiscard}
+                >
+                  {rotationState.discarding ? 'Entsorge…' : 'Rollback-Anker entsorgen'}
+                </button>
+              </>
+            )}
+            {rotationState.discardResult && (
+              <div role="alert" aria-live="polite" style={rotationState.discardResult.ok ? styles.successBox : styles.errorBox}>
+                <p style={rotationState.discardResult.ok ? styles.successText : styles.errorText}>
+                  {rotationState.discardResult.ok
+                    ? 'Rollback-Anker entsorgt.'
+                    : `Entsorgen fehlgeschlagen: ${friendlyGpgRotateError(rotationState.discardResult.errorClass, rotationState.discardResult.reason)}`}
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+/**
+ * Formatiert das geheimnisfreie Provisionierungs-Ergebnis (AC4) als
+ * Klartext-Hinweis. Zeigt NIE die Passphrase — sie ist per Vertrag nicht Teil
+ * der Response (nur `result`/`reason`).
+ * @param {'created'|'already-exists'|'access-not-ready'|'failed'} result
+ * @param {string|null} reason
+ * @returns {string}
+ */
+function friendlyGpgProvisionResult(result, reason) {
+  switch (result) {
+    case 'created':
+      return 'Angelegt — GPG-Passphrase wurde in Bitwarden hinterlegt.';
+    case 'already-exists':
+      return reason ?? 'Bereits vorhanden — keine Änderung.';
+    case 'access-not-ready':
+      return reason ?? 'Bitwarden-Deploy-Zugang ist noch nicht eingerichtet.';
+    case 'failed':
+      return reason ?? 'GPG-Provisionierung fehlgeschlagen.';
+    default:
+      return reason ?? 'Unbekanntes Ergebnis.';
+  }
+}
+
+// ── AC6/AC7 (F-087/S-376): geheimnisfreie Quittung der GPG-Passphrasen-Rotation ──
+
+/**
+ * Formatiert eine Rotations-`errorClass` (per-app-gpg-passphrase-rotation.md
+ * Fehlerklassen-Liste, unverändert) als geheimnisfreien Klartext-Hinweis.
+ * Zeigt NIE die Passphrase oder `.env.gpg`-Klartext — sie sind per Vertrag
+ * nicht Teil der Response (nur `ok`/`phase`/`errorClass`/`reason`).
+ * @param {string|undefined} errorClass
+ * @param {string|null|undefined} reason
+ * @returns {string}
+ */
+function friendlyGpgRotateError(errorClass, reason) {
+  switch (errorClass) {
+    case 'clone-missing':
+      return reason ?? 'Workspace-Klon fehlt — App zuerst in den Workspace klonen.';
+    case 'access-not-ready':
+      return reason ?? 'Bitwarden-Deploy-Zugang ist noch nicht eingerichtet.';
+    case 'decrypt-old-failed':
+      return reason ?? 'Die aktuelle .env.gpg ließ sich mit der aktiven Passphrase nicht entschlüsseln.';
+    case 'encrypt-new-failed':
+      return reason ?? 'Verschlüsseln mit der neuen Passphrase fehlgeschlagen.';
+    case 'verify-failed':
+      return reason ?? 'Beweis-Runde: Vergleich der entschlüsselten Inhalte fehlgeschlagen.';
+    case 'bw-update-failed':
+      return reason ?? 'Bitwarden-Item ließ sich nicht aktualisieren.';
+    case 'push-failed':
+      return reason ?? 'Push auf den Default-Branch fehlgeschlagen — Bitwarden wurde zurückgerollt.';
+    case 'commit-failed':
+      return reason ?? 'Commit der .env.gpg im Klon fehlgeschlagen.';
+    case 'branch-mismatch':
+      return reason ?? 'Der Workspace-Klon steht nicht auf dem Default-Branch der App — Abbruch.';
+    default:
+      return reason ?? 'Rotation fehlgeschlagen.';
+  }
 }
 
 // ── VpsReadinessBadge component (S-181, AC9) ─────────────────────────────────
@@ -2087,67 +2339,6 @@ function formatTunnelHealError(data) {
   }
 }
 
-// ── F-073/S-337 AC7/AC8: geheimnisfreie Quittung der GPG-Provisionierung ────
-
-/**
- * Formatiert das Ergebnis der Nach-Provisionierung (F-073/S-337 AC7/AC8) als
- * geheimnisfreien Klartext-Hinweis. Zeigt NIE die Passphrase — sie ist schon
- * per Vertrag nicht Teil der Response (nur `result`/`reason`).
- * @param {'created'|'already-exists'|'access-not-ready'|'failed'} result
- * @param {string|null} reason
- * @returns {string}
- */
-function friendlyGpgProvisionResult(result, reason) {
-  switch (result) {
-    case 'created':
-      return 'Angelegt — GPG-Passphrase wurde in Bitwarden hinterlegt.';
-    case 'already-exists':
-      return reason ?? 'Bereits vorhanden — keine Änderung.';
-    case 'access-not-ready':
-      return reason ?? 'Bitwarden-Deploy-Zugang ist noch nicht eingerichtet.';
-    case 'failed':
-      return reason ?? 'GPG-Provisionierung fehlgeschlagen.';
-    default:
-      return reason ?? 'Unbekanntes Ergebnis.';
-  }
-}
-
-// ── F-073/S-339 AC8/AC9: geheimnisfreie Quittung der GPG-Passphrasen-Rotation ──
-
-/**
- * Formatiert eine Rotations-`errorClass` (per-app-gpg-passphrase-rotation.md
- * Fehlerklassen-Liste) als geheimnisfreien Klartext-Hinweis. Zeigt NIE die
- * Passphrase oder `.env.gpg`-Klartext — sie sind schon per Vertrag nicht Teil
- * der Response (nur `ok`/`phase`/`errorClass`/`reason`).
- * @param {string|undefined} errorClass
- * @param {string|null|undefined} reason
- * @returns {string}
- */
-function friendlyGpgRotateError(errorClass, reason) {
-  switch (errorClass) {
-    case 'clone-missing':
-      return reason ?? 'Workspace-Klon fehlt — App zuerst in den Workspace klonen.';
-    case 'access-not-ready':
-      return reason ?? 'Bitwarden-Deploy-Zugang ist noch nicht eingerichtet.';
-    case 'decrypt-old-failed':
-      return reason ?? 'Die aktuelle .env.gpg ließ sich mit der aktiven Passphrase nicht entschlüsseln.';
-    case 'encrypt-new-failed':
-      return reason ?? 'Verschlüsseln mit der neuen Passphrase fehlgeschlagen.';
-    case 'verify-failed':
-      return reason ?? 'Beweis-Runde: Vergleich der entschlüsselten Inhalte fehlgeschlagen.';
-    case 'bw-update-failed':
-      return reason ?? 'Bitwarden-Item ließ sich nicht aktualisieren.';
-    case 'push-failed':
-      return reason ?? 'Push auf den Default-Branch fehlgeschlagen — Bitwarden wurde zurückgerollt.';
-    case 'commit-failed':
-      return reason ?? 'Commit der .env.gpg im Klon fehlgeschlagen.';
-    case 'branch-mismatch':
-      return reason ?? 'Der Workspace-Klon steht nicht auf dem Default-Branch der App — Abbruch.';
-    default:
-      return reason ?? 'Rotation fehlgeschlagen.';
-  }
-}
-
 // ── LocalTestReport component (S-156) ────────────────────────────────────────
 
 /**
@@ -2236,8 +2427,12 @@ const styles = {
     color: '#d4d4d4',
     fontFamily: 'system-ui, sans-serif',
   },
+  // deployments-gpg-subview (F-087/S-374, Design „Bereichs-Untermenü" §1): wächst
+  // von 860 auf ~1104px (220 Nav + 24 Gap + 860 Content), damit die Content-Spalte
+  // ihre bisherige Breite behält — s. `.subnav-content` (max-width: 860) in
+  // client/index.html.
   inner: {
-    maxWidth: 860,
+    maxWidth: 1104,
     margin: '0 auto',
     padding: '32px 24px 48px',
     width: '100%',
@@ -2425,58 +2620,10 @@ const styles = {
     width: 110,
     flexShrink: 0,
   },
-  // F-073/S-337 AC7/AC8: GPG-Provisionierung je App
-  gpgProvisionList: {
-    listStyle: 'none',
-    margin: 0,
-    padding: 0,
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 4,
-  },
-  gpgProvisionRow: {
-    display: 'flex',
-    alignItems: 'center',
-    flexWrap: 'wrap',
-    gap: 12,
-    padding: '10px 0',
-    borderBottom: '1px solid #1e293b',
-  },
-  gpgProvisionAppName: {
-    flex: '0 0 180px',
-    fontSize: 13,
-    color: '#d4d4d4',
-    wordBreak: 'break-all',
-  },
-  // F-073/S-339 AC8/AC9: GPG-Passphrasen-Rotation je App
-  gpgRotationList: {
-    listStyle: 'none',
-    margin: 0,
-    padding: 0,
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 12,
-  },
-  gpgRotationCard: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 8,
-    padding: '14px 16px',
-    background: '#0f172a',
-    border: '1px solid #1e293b',
-    borderRadius: 6,
-  },
-  gpgDiscardBlock: {
-    marginTop: 8,
-    paddingTop: 12,
-    borderTop: '1px solid #1e293b',
-  },
-  gpgDiscardHeading: {
-    margin: '0 0 6px',
-    fontSize: 13,
-    fontWeight: 600,
-    color: '#e5e7eb',
-  },
+  // Wieder von der GPG-Rotations-Aufräumen-Checkbox genutzt (AC6, F-087/S-376,
+  // Rückkehr des Namens zu seinem ursprünglichen Zweck) UND von der config-
+  // Mount-Checkbox ("Neues Deployment"-Formular, F-079/S-350) — generisches
+  // Checkbox-Label-Styling, an zwei Stellen geteilt.
   gpgDiscardConfirmLabel: {
     display: 'flex',
     alignItems: 'flex-start',
@@ -2492,6 +2639,29 @@ const styles = {
     minWidth: 16,
     minHeight: 16,
     cursor: 'pointer',
+  },
+  // AC6 (F-087/S-376): kompaktes Rotations-Panel innerhalb der GPG-Schlüssel-
+  // Ansicht (aufgeklappt durch "Rotieren").
+  gpgRotationCard: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 8,
+    marginTop: 12,
+    padding: '14px 16px',
+    background: '#0f172a',
+    border: '1px solid #1e293b',
+    borderRadius: 6,
+  },
+  gpgDiscardBlock: {
+    marginTop: 8,
+    paddingTop: 12,
+    borderTop: '1px solid #1e293b',
+  },
+  gpgDiscardHeading: {
+    margin: '0 0 6px',
+    fontSize: 13,
+    fontWeight: 600,
+    color: '#e5e7eb',
   },
   // Local-Test (S-156)
   localTestSection: {

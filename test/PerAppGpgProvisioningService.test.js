@@ -28,6 +28,14 @@
  *         `fn({})` (Plugin-Fallback-Scaffold OHNE `gpgPassFilePath`), KEINE
  *         Datei, KEIN Item.
  *
+ * Covers (per-app-gpg-passphrase-provisioning.md, v3, S-373):
+ *   AC16 — `itemExistsFor(app, opts)`: read-only Existenz-Abfrage über
+ *         denselben `itemExists`-Pfad (bw get); vorhandenes Item → `exists:true`;
+ *         fehlendes Item → `exists:false`; mutiert nichts (KEIN createItem-
+ *         Aufruf); Zugang nicht ready / anderer bw-Fehler → `exists:false,
+ *         reason:'access-not-ready'` (kein Raten); ungültiger Slug → `exists:false`,
+ *         kein bw-Aufruf; Response enthält nie einen Passphrasen-Wert.
+ *
  * Strategy: deployLoginService.openSession() wird gemockt und liefert eine
  * Session mit itemExists/createItem/close-Spies — kein echtes `bw`. Für
  * `withScaffoldPassphrase` wird zusätzlich `fsDeps` (mkdtemp/writeFile/chmod/rm)
@@ -412,5 +420,95 @@ describe('PerAppGpgProvisioningService — withScaffoldPassphrase() — AC4/AC5/
 
     expect(result.result).toBe('failed');
     expect(fn).not.toHaveBeenCalled();
+  });
+});
+
+describe('PerAppGpgProvisioningService — itemExistsFor() — AC16 (v3, S-373)', () => {
+  it('vorhandenes Item → { exists: true }, KEIN createItem-Aufruf (read-only)', async () => {
+    const { session, calls } = makeSession({ exists: true });
+    const openSession = jest.fn(async () => session);
+    const svc = new PerAppGpgProvisioningService({ deployLoginService: { openSession }, auditStore: auditSpy() });
+
+    const result = await svc.itemExistsFor('myapp', { identity: 'a@b.ch' });
+
+    expect(result).toEqual({ exists: true });
+    expect(calls.itemExists).toEqual(['env.gpg-passphrase-myapp']);
+    expect(calls.createItem.length).toBe(0);
+    expect(calls.close).toBe(1);
+  });
+
+  it('fehlendes Item → { exists: false }, KEIN createItem-Aufruf', async () => {
+    const { session, calls } = makeSession({ exists: false });
+    const openSession = jest.fn(async () => session);
+    const svc = new PerAppGpgProvisioningService({ deployLoginService: { openSession }, auditStore: auditSpy() });
+
+    const result = await svc.itemExistsFor('myapp', {});
+
+    expect(result).toEqual({ exists: false });
+    expect(calls.createItem.length).toBe(0);
+    expect(calls.close).toBe(1);
+  });
+
+  it('Zugang nicht ready → { exists: false, reason: "access-not-ready" }, KEIN itemExists-Aufruf', async () => {
+    const openSession = jest.fn(async () => {
+      const err = new Error('Deploy-Zugang unvollständig');
+      err.deployErrorClass = 'access-incomplete';
+      throw err;
+    });
+    const svc = new PerAppGpgProvisioningService({ deployLoginService: { openSession }, auditStore: auditSpy() });
+
+    const result = await svc.itemExistsFor('myapp', {});
+
+    expect(result).toEqual({ exists: false, reason: 'access-not-ready' });
+    expect(openSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('anderer bw-Fehler bei itemExists → { exists: false, reason: "access-not-ready" } (kein Raten), Session wird geschlossen', async () => {
+    const session = {
+      itemExists: jest.fn(async () => {
+        const err = new Error('bw nicht erreichbar');
+        err.deployErrorClass = 'bw-unreachable';
+        throw err;
+      }),
+      close: jest.fn(async () => {}),
+    };
+    const openSession = jest.fn(async () => session);
+    const svc = new PerAppGpgProvisioningService({ deployLoginService: { openSession }, auditStore: auditSpy() });
+
+    const result = await svc.itemExistsFor('myapp', {});
+
+    expect(result).toEqual({ exists: false, reason: 'access-not-ready' });
+    expect(session.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('ungültiger App-Slug → { exists: false }, kein openSession()-Aufruf', async () => {
+    const openSession = jest.fn();
+    const svc = new PerAppGpgProvisioningService({ deployLoginService: { openSession }, auditStore: auditSpy() });
+
+    const result = await svc.itemExistsFor('inv@lid slug', {});
+
+    expect(result).toEqual({ exists: false });
+    expect(openSession).not.toHaveBeenCalled();
+  });
+
+  it('KEIN Audit-Eintrag (read-only, kein Audit-First-Zwang)', async () => {
+    const { session } = makeSession({ exists: false });
+    const openSession = jest.fn(async () => session);
+    const audit = auditSpy();
+    const svc = new PerAppGpgProvisioningService({ deployLoginService: { openSession }, auditStore: audit });
+
+    await svc.itemExistsFor('myapp', { identity: 'a@b.ch' });
+
+    expect(audit.calls.length).toBe(0);
+  });
+
+  it('AC8-Analogie: Response enthält nie einen Passphrasen-artigen Wert (nur exists/reason)', async () => {
+    const { session } = makeSession({ exists: true });
+    const openSession = jest.fn(async () => session);
+    const svc = new PerAppGpgProvisioningService({ deployLoginService: { openSession }, auditStore: auditSpy() });
+
+    const result = await svc.itemExistsFor('myapp', {});
+
+    expect(Object.keys(result).sort()).toEqual(['exists']);
   });
 });
