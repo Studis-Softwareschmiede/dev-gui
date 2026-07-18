@@ -1,48 +1,211 @@
 {
   "schema_version": 1,
-  "calibrated_at": "2026-07-02",
-  "n_items": 16,
-  "ep_per_token": null,
+  "calibrated_at": "2026-07-18",
+  "n_items": 138,
+  "ep_per_token": 0.000002,
   "cache_kappa": 0.1,
   "weights": {
-    "iter": 2,
-    "crit": 1,
-    "imp": 0.5,
-    "test_fail": 2,
-    "loc_log": 1,
-    "blocked": 3
+    "iter": 2.2159,
+    "crit": 1.2219,
+    "imp": 0.4336,
+    "test_fail": 1.6818,
+    "loc_log": 0.9953,
+    "blocked": 2.8602
   },
   "medians": {
     "js|balanced|L": {
-      "n": 5,
-      "ep": 5.0,
-      "iters": 2,
-      "crit": 0,
-      "tok_total": null,
-      "secs_total": 1286.0
+      "n": 42,
+      "ep": 5.25,
+      "iters": 2.0,
+      "crit": 0.0,
+      "tok_total": 2591205.2,
+      "secs_total": 1698.5
     },
     "js|balanced|M": {
-      "n": 8,
-      "ep": 5.0,
-      "iters": 1.5,
+      "n": 50,
+      "ep": 4.0,
+      "iters": 1.0,
       "crit": 0.0,
-      "tok_total": null,
-      "secs_total": 2095.0
+      "tok_total": 1659043.1,
+      "secs_total": 1118.0
     },
     "js|balanced|S": {
-      "n": 3,
+      "n": 12,
+      "ep": 3.0,
+      "iters": 1.0,
+      "crit": 0.0,
+      "tok_total": 957604.8999999999,
+      "secs_total": 1055.5
+    },
+    "js|balanced|XL": {
+      "n": 2,
+      "ep": 4.0,
+      "iters": 1.0,
+      "crit": 0.0,
+      "tok_total": 4075996.7,
+      "secs_total": 1569.0
+    },
+    "js|low-cost|M": {
+      "n": 1,
+      "ep": null,
+      "iters": null,
+      "crit": null,
+      "tok_total": null,
+      "secs_total": null
+    },
+    "js|max-quality|L": {
+      "n": 5,
+      "ep": 4.0,
+      "iters": 1,
+      "crit": 0,
+      "tok_total": null,
+      "secs_total": 1692.0
+    },
+    "js|max-quality|M": {
+      "n": 21,
+      "ep": 4.0,
+      "iters": 1,
+      "crit": 0,
+      "tok_total": null,
+      "secs_total": 1889.0
+    },
+    "js|max-quality|S": {
+      "n": 5,
       "ep": 2.0,
       "iters": 1,
       "crit": 0,
       "tok_total": null,
-      "secs_total": 800.0
+      "secs_total": 960.0
     }
   },
-  "forecast_mae": null,
-  "defect_rates": {},
+  "forecast_mae": 0.3571,
+  "defect_rates": {
+    "reviewer/R-scope-selfres": {
+      "hits": 1,
+      "ep_total": 636.0,
+      "rate_per_100ep": 0.1572,
+      "n_items": 1,
+      "window_items": [
+        "S-225"
+      ]
+    },
+    "reviewer/R02": {
+      "hits": 1,
+      "ep_total": 636.0,
+      "rate_per_100ep": 0.1572,
+      "n_items": 1,
+      "window_items": [
+        "S-286"
+      ]
+    },
+    "reviewer/R03": {
+      "hits": 9,
+      "ep_total": 636.0,
+      "rate_per_100ep": 1.4151,
+      "n_items": 9,
+      "window_items": [
+        "S-179",
+        "S-180",
+        "S-181",
+        "S-215",
+        "S-242",
+        "S-245",
+        "S-250",
+        "S-282",
+        "S-351"
+      ]
+    },
+    "reviewer/R04": {
+      "hits": 2,
+      "ep_total": 636.0,
+      "rate_per_100ep": 0.3145,
+      "n_items": 2,
+      "window_items": [
+        "S-179",
+        "S-245"
+      ]
+    },
+    "reviewer/R06": {
+      "hits": 3,
+      "ep_total": 636.0,
+      "rate_per_100ep": 0.4717,
+      "n_items": 3,
+      "window_items": [
+        "S-251",
+        "S-264",
+        "S-351"
+      ]
+    },
+    "security/R01": {
+      "hits": 1,
+      "ep_total": 636.0,
+      "rate_per_100ep": 0.1572,
+      "n_items": 1,
+      "window_items": [
+        "S-257"
+      ]
+    },
+    "security/R02": {
+      "hits": 1,
+      "ep_total": 636.0,
+      "rate_per_100ep": 0.1572,
+      "n_items": 1,
+      "window_items": [
+        "S-246"
+      ]
+    },
+    "security/R05": {
+      "hits": 1,
+      "ep_total": 636.0,
+      "rate_per_100ep": 0.1572,
+      "n_items": 1,
+      "window_items": [
+        "S-183"
+      ]
+    }
+  },
   "retro_effectiveness": null,
   "learnings_rules": [],
-  "estimator_bias": {},
-  "estimator_calibration": [],
-  "_calibration_note": "Keine Token-Daten — ep_per_token bleibt null"
+  "estimator_bias": {
+    "js|balanced|L": 0.1141,
+    "js|balanced|M": 0.2506,
+    "js|balanced|S": -0.4871,
+    "js|balanced|XL": 0.25,
+    "js|max-quality|L": 0.25,
+    "js|max-quality|M": 0.2698,
+    "js|max-quality|S": -0.2095
+  },
+  "estimator_calibration": [
+    {
+      "target": "js|balanced|L",
+      "kind": "bias",
+      "status": "pending",
+      "baseline_mae": 0.3571,
+      "measured_mae": null,
+      "n": 0,
+      "started_after_item": 379,
+      "decided_after_item": null
+    },
+    {
+      "target": "js|balanced|XL",
+      "kind": "bias",
+      "status": "pending",
+      "baseline_mae": 0.3571,
+      "measured_mae": null,
+      "n": 0,
+      "started_after_item": 379,
+      "decided_after_item": null
+    },
+    {
+      "target": "js|max-quality|L",
+      "kind": "bias",
+      "status": "pending",
+      "baseline_mae": 0.3571,
+      "measured_mae": null,
+      "n": 0,
+      "started_after_item": 379,
+      "decided_after_item": null
+    }
+  ],
+  "_calibration_note": "ep_per_token kalibriert auf 24 Items (κ=0.1)"
 }
