@@ -16,6 +16,9 @@
  *     und legt das Bitwarden-Item NACH Scaffold-Erfolg mit DERSELBEN Passphrase
  *     an (AC6 — kein Delegieren an `provision()`s eigene Generierung, sonst
  *     Wert-Divergenz zwischen `.env.gpg` und Bitwarden-Item).
+ *   - `itemExistsFor(app, opts)` — read-only Existenz-Abfrage (S-373, AC16):
+ *     nutzt denselben `itemExists`-Pfad (bw get), mutiert nichts, legt nichts
+ *     an, liefert NIE einen Passphrasen-Wert — nur `{ exists, reason? }`.
  *
  * Boundary-Disziplin: spricht NICHT selbst mit `bw` — nutzt ausschließlich die
  * Session des bestehenden `BitwardenDeployLoginService` (dessen `openSession()`
@@ -346,6 +349,49 @@ export class PerAppGpgProvisioningService {
     } finally {
       // ── AC5: Datei + Verzeichnis IMMER entfernen — Erfolg UND Fehler ─────────
       await this.#fsDeps.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
+  /**
+   * Read-only Existenz-Abfrage — AC16 (v3, Owner 2026-07-18). Nutzt denselben
+   * `itemExists`-Pfad (bw get) wie `provision()`, mutiert NICHTS, legt NICHTS
+   * an. KEIN Audit-First (keine Mutation — AccessGuard + CRED_ADMIN_EMAILS im
+   * Router genügt als Schutz, Spec-Vertrag "kein Audit-First-Zwang, da keine
+   * Mutation"). Ist der Zugang nicht `ready` (oder ein anderer bw-Fehler tritt
+   * auf), ist die Existenz UNBEKANNT — die Methode meldet dies geheimnisfrei
+   * (`reason: 'access-not-ready'`), OHNE zu raten (kein `exists:true`/`false`
+   * als Vermutung).
+   *
+   * @param {string} app - Ziel-Slug (App-Name)
+   * @param {{ identity?: string|null }} [_opts] - Signatur-Parität zu
+   *   provision()/withScaffoldPassphrase(); unbenutzt (kein Audit für read-only).
+   * @returns {Promise<{ exists: boolean, reason?: 'access-not-ready' }>}
+   */
+  async itemExistsFor(app, _opts = {}) {
+    // ── Input-Validierung (Security-Floor, Defense-in-Depth — Router validiert
+    // bereits vorher): ungültiger Slug kann nicht existieren. ────────────────
+    const validation = this.#validateApp(app);
+    if (!validation.ok) {
+      return { exists: false };
+    }
+    const { itemName } = validation;
+
+    let session;
+    try {
+      session = await this.#deployLoginService.openSession();
+    } catch {
+      // Zugang nicht ready ODER anderer Login-Fehler: Existenz unbekannt —
+      // geheimnisfrei melden, kein Raten (Spec §"Read-only Existenz-Abfrage").
+      return { exists: false, reason: 'access-not-ready' };
+    }
+
+    try {
+      const exists = await session.itemExists(itemName);
+      return { exists };
+    } catch {
+      return { exists: false, reason: 'access-not-ready' };
+    } finally {
+      await session.close();
     }
   }
 
