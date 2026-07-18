@@ -17,6 +17,17 @@
  *   - API: getPublicKey(user), setPublicKey(user, key), deletePublicKey(user),
  *           listSshKeys() → [{ user, publicKey?, privateKeyStatus }]
  *
+ * Abo-OAuth-Credentials (docs/specs/anthropic-oauth-vault.md, S-367):
+ *   - Katalog-Integration `anthropic-oauth`: `access_token`/`refresh_token`
+ *     verschlüsselt/write-only in `entries` (Katalog-Pflege-Endpunkte, kein neuer
+ *     Mutations-Endpunkt-Typ).
+ *   - `expires_at` (Unix-ms, NICHT geheim): Klartext-Metadatum im `meta`-Block
+ *     (Resolution R2), damit `list()` es ohne Entschlüsselung an den access_token-
+ *     Katalog-Eintrag anhängen kann (Status-Anzeige).
+ *   - Interne API (nie über HTTP): getAnthropicOAuthCredentials() liest alle drei
+ *     Werte für die Usage-Route; setAnthropicOAuthCredentials({accessToken,
+ *     refreshToken, expiresAt}) schreibt einen Refresh atomar zurück.
+ *
  * Datei-Schema (ADR-007):
  * {
  *   "version": 1,
@@ -62,6 +73,11 @@ export const CREDENTIAL_CATALOG = {
   'backup-remote': ['s3_access_key', 's3_secret_key'],
   // S-182: ntfy-Zugriffs-Token (verschlüsselt, write-only, AC1/AC10 push-notifications)
   notifications: ['ntfy_token'],
+  // S-367: Abo-OAuth-Credentials für die offizielle Usage-Anzeige (anthropic-oauth-vault
+  // AC1). access_token/refresh_token verschlüsselt/write-only; der nicht-geheime
+  // Ablaufzeitpunkt (expires_at) lebt NICHT hier, sondern im meta-Block (siehe
+  // ANTHROPIC_OAUTH_EXPIRES_AT_META_KEY unten, Resolution R2).
+  'anthropic-oauth': ['access_token', 'refresh_token'],
 };
 
 /** Maximale Länge eines Credential-Werts (Bytes). */
@@ -72,6 +88,16 @@ const WORKSPACE_PATH_META_KEY = 'settings/workspace-path';
 
 /** meta-Block-Schlüssel für den konfigurierten Obsidian-Vault-Pfad (obsidian-vault-config, AC4). */
 const OBSIDIAN_VAULT_PATH_META_KEY = 'settings/obsidian-vault-path';
+
+/**
+ * meta-Block-Schlüssel für den Ablaufzeitpunkt des Abo-OAuth-Access-Tokens
+ * (anthropic-oauth-vault AC2, Resolution R2 — Unix-ms, NICHT geheim, deshalb im
+ * meta-Block statt in `entries`: die Status-Anzeige kann ihn ohne Entschlüsselung
+ * der Secrets lesen). Wird ausschließlich am `access_token`-Katalog-Eintrag in
+ * list() angehängt (Implementierungsentscheidung, siehe anthropic-oauth-vault.md
+ * "Verträge").
+ */
+const ANTHROPIC_OAUTH_EXPIRES_AT_META_KEY = 'anthropic-oauth/expires_at';
 
 /** Erlaubte Zeichen für misc-Schlüsselnamen. */
 const MISC_NAME_RE = /^[a-zA-Z0-9_\-.:@]+$/;
@@ -887,11 +913,22 @@ export class CredentialStore {
 
     const result = [];
 
+    // S-367 AC2: nicht-geheimer Ablaufzeitpunkt des Abo-OAuth-Access-Tokens
+    // (Unix-ms, meta-Block) — wird unten ausschließlich am access_token-Eintrag
+    // angehängt, wenn er gesetzt ist (Resolution R2/Verträge).
+    const rawAnthropicOAuthExpiresAt = storeData?.meta?.[ANTHROPIC_OAUTH_EXPIRES_AT_META_KEY]?.value;
+    const anthropicOAuthExpiresAt =
+      typeof rawAnthropicOAuthExpiresAt === 'number' && Number.isFinite(rawAnthropicOAuthExpiresAt)
+        ? rawAnthropicOAuthExpiresAt
+        : undefined;
+
     // Katalog-Felder
     for (const [integration, fields] of Object.entries(CREDENTIAL_CATALOG)) {
       for (const name of fields) {
         const key = `credentials/${integration}/${name}`;
         const entry = entries[key];
+        const attachExpiresAt = integration === 'anthropic-oauth' && name === 'access_token'
+          && anthropicOAuthExpiresAt !== undefined;
         if (entry) {
           result.push({
             integration,
@@ -899,9 +936,15 @@ export class CredentialStore {
             status: 'set',
             masked: '•••• gesetzt',
             updatedAt: entry.updatedAt,
+            ...(attachExpiresAt ? { expiresAt: anthropicOAuthExpiresAt } : {}),
           });
         } else {
-          result.push({ integration, name, status: 'unset' });
+          result.push({
+            integration,
+            name,
+            status: 'unset',
+            ...(attachExpiresAt ? { expiresAt: anthropicOAuthExpiresAt } : {}),
+          });
         }
       }
     }
@@ -1217,6 +1260,98 @@ export class CredentialStore {
       const storeData = await this.#readStore();
       if (!storeData?.meta?.[OBSIDIAN_VAULT_PATH_META_KEY]) return {};
       delete storeData.meta[OBSIDIAN_VAULT_PATH_META_KEY];
+      const storeBlob = await this.#writeStore(storeData);
+      const backup = await this.#runBackupHook(storeBlob);
+      return { backup };
+    });
+  }
+
+  // ── Abo-OAuth-Credentials-API (anthropic-oauth-vault, S-367) ────────────────
+
+  /**
+   * Liest die Abo-OAuth-Credentials (Klartext) — NUR für interne Konsumenten
+   * (Usage-Route, `src/routers/usage.js`). NIEMALS über HTTP exponieren.
+   *
+   * Degradiert defensiv auf `{ accessToken: null, refreshToken: null, expiresAt: null }`
+   * wenn der Store gesperrt ist (kein Master-Key) oder ein Eintrag nicht
+   * entschlüsselbar ist (Edge-Case, anthropic-oauth-vault.md "Store gesperrt")
+   * — der Aufrufer degradiert dann auf den Env-Token-Fallback (AC12).
+   *
+   * @returns {Promise<{ accessToken: string|null, refreshToken: string|null, expiresAt: number|null }>}
+   */
+  async getAnthropicOAuthCredentials() {
+    let accessToken;
+    let refreshToken;
+    try {
+      accessToken = await this.getPlaintext(catalogKey('anthropic-oauth', 'access_token'));
+      refreshToken = await this.getPlaintext(catalogKey('anthropic-oauth', 'refresh_token'));
+    } catch {
+      // Store gesperrt (kein Master-Key) oder GCM-Tag-Fehler → Tresor-Tokens nicht
+      // lesbar. Secret-freier Warn-Log (Floor); Aufrufer nutzt den Env-Fallback (AC12).
+      console.warn('[CredentialStore] anthropic-oauth: Tresor-Tokens nicht lesbar (Store gesperrt?) — Env-Fallback greift');
+      return { accessToken: null, refreshToken: null, expiresAt: null };
+    }
+
+    const storeData = await this.#readStore();
+    const rawExpiresAt = storeData?.meta?.[ANTHROPIC_OAUTH_EXPIRES_AT_META_KEY]?.value;
+    const expiresAt = typeof rawExpiresAt === 'number' && Number.isFinite(rawExpiresAt) ? rawExpiresAt : null;
+
+    return { accessToken, refreshToken, expiresAt };
+  }
+
+  /**
+   * Schreibt die Abo-OAuth-Credentials nach einem erfolgreichen Refresh atomar
+   * zurück (anthropic-oauth-vault AC5): `access_token`/`refresh_token`
+   * verschlüsselt in `entries`, `expires_at` (Unix-ms, nicht geheim) im
+   * meta-Block — ein einziger Store-Write (tmp+fsync+rename) + Backup-Hook.
+   *
+   * @param {{ accessToken: string, refreshToken: string, expiresAt: number }} tokens
+   * @returns {Promise<{ backup: BackupResult }>}
+   */
+  async setAnthropicOAuthCredentials({ accessToken, refreshToken, expiresAt }) {
+    if (typeof accessToken !== 'string' || accessToken.trim() === '') {
+      throw new Error('[CredentialStore] setAnthropicOAuthCredentials: accessToken darf nicht leer sein');
+    }
+    if (typeof refreshToken !== 'string' || refreshToken.trim() === '') {
+      throw new Error('[CredentialStore] setAnthropicOAuthCredentials: refreshToken darf nicht leer sein');
+    }
+    if (typeof expiresAt !== 'number' || !Number.isFinite(expiresAt)) {
+      throw new Error('[CredentialStore] setAnthropicOAuthCredentials: expiresAt muss eine endliche Unix-ms-Zahl sein');
+    }
+
+    const masterKeyRaw = await this.#ensureKey();
+    const updatedAt = new Date().toISOString();
+
+    return this.#withWriteLock(async () => {
+      let storeData = await this.#readStore();
+
+      let salt;
+      if (!storeData || !storeData.kdf) {
+        salt = randomBytes(32);
+        const kdf = { algo: 'scrypt', salt: salt.toString('base64'), N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P };
+        if (!storeData) {
+          storeData = { version: 1, kdf, entries: {}, meta: {} };
+        } else {
+          storeData.kdf = kdf;
+          if (!storeData.entries) storeData.entries = {};
+        }
+      } else {
+        salt = Buffer.from(storeData.kdf.salt, 'base64');
+      }
+      if (!storeData.meta) storeData.meta = {};
+
+      const aesKey = await this.#deriveKey(masterKeyRaw, salt);
+
+      storeData.entries[catalogKey('anthropic-oauth', 'access_token')] = {
+        ...this.#encrypt(aesKey, accessToken),
+        updatedAt,
+      };
+      storeData.entries[catalogKey('anthropic-oauth', 'refresh_token')] = {
+        ...this.#encrypt(aesKey, refreshToken),
+        updatedAt,
+      };
+      storeData.meta[ANTHROPIC_OAUTH_EXPIRES_AT_META_KEY] = { value: expiresAt, updatedAt };
+
       const storeBlob = await this.#writeStore(storeData);
       const backup = await this.#runBackupHook(storeBlob);
       return { backup };

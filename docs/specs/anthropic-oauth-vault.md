@@ -64,11 +64,15 @@ anthropic-oauth: ['access_token', 'refresh_token']   // Secrets, verschlüsselt 
 ```
 `expires_at` (Unix-ms, nicht-geheim) wird **nicht** verschlüsselt behandelt: es darf für die Anzeige zurückgegeben werden. **Ablage-Ort ist Implementierungsdetail des `coder`/`architekt`** (Resolution R2) — Empfehlung: `meta`-Block (analog Workspace-/Vault-Pfad), damit die Status-Anzeige `expires_at` **ohne** Entschlüsselung der Secrets lesen kann. Constraint (bindend): `expires_at` ist lesbar; die Tokens sind es **nie**.
 
+**Präzisierung (umgesetzt, S-367):** `expires_at` lebt im `meta`-Block unter dem Schlüssel `anthropic-oauth/expires_at` und wird von `GET /api/settings/credentials` (`CredentialStore.list()`) ausschließlich am Katalog-Eintrag `{integration:"anthropic-oauth", name:"access_token"}` als zusätzliches Feld `expiresAt` angehängt (nur wenn gesetzt) — nicht am `refresh_token`-Eintrag, da der Ablaufzeitpunkt semantisch zum Access-Token gehört.
+
 **Pflege-Endpunkte:** die bestehenden `PUT`/`DELETE /api/settings/credentials/anthropic-oauth/{access_token|refresh_token}` ([[settings-credentials]]-Verträge) — kein neuer Mutations-Endpunkt-Typ. Für `expires_at` + Status genügt der bestehende Listen-/Status-Lesepfad, erweitert um `expires_at` (nicht-geheim).
 
 **`GET /api/usage`:** Endpunkt, Antwort-Modell (`official`/`estimated`/`unavailable`) und Montage (`order = 400`) **unverändert** gegenüber [[usage-official-values]]. Neu ist ausschließlich die **Token-Quelle** (Tresor vor Env) + der Refresh-Vorlauf.
 
 **Refresh (inoffiziell, NICHT als Vertrag fixiert):** OAuth-Token-Refresh gegen den festen Anthropic-Host; exakte URL/`client_id`/Body ermittelt der `coder`/`architekt` gegen die lokale Claude-Code-Binary (Resolution R4). Erfolgs-Payload liefert mindestens ein neues `access_token` + `expires_at` (und i. d. R. ein rotiertes `refresh_token`); der Adapter ist die **einzige** Stelle, die dieses Upstream-Schema kennt (isolierte Bruchstelle, analog `AnthropicUsageClient.js`).
+
+**Präzisierung (umgesetzt, S-367 — per `strings` gegen die lokal installierte `@anthropic-ai/claude-code`-Binary verifiziert, Fundstellen im Modul-Header von `src/AnthropicOAuthClient.js`):** Host+Pfad `https://platform.claude.com/v1/oauth/token`, `client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e"` (Claude Codes öffentlicher PKCE-Client, kein Client-Secret). Request: `POST`, `Content-Type: application/json`, Body `{ grant_type: "refresh_token", refresh_token, client_id }` (bewusst ohne `scope` — RFC-6749-§6-konform weggelassen, Begründung im Modul-Header). Erfolgs-Response: `{ access_token, refresh_token?, expires_in }` (Sekunden; `expiresAt` wird als `Date.now() + expires_in * 1000` berechnet, fehlt ein rotiertes `refresh_token` bleibt der gesendete Wert gültig).
 
 ## Edge-Cases & Fehlerverhalten
 

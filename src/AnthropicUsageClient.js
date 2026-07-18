@@ -52,18 +52,21 @@ async function fetchWithTimeout(url, init, timeoutMs) {
 }
 
 /**
- * Ruft den Anthropic-Usage-Endpunkt ab. Liefert das rohe, ungeprüfte JSON-Payload
- * bei HTTP 2xx, sonst `null` (kein Auth-Token, Netzfehler, Timeout, HTTP ≥ 400,
- * kein parsebares JSON) — wirft NIE (AC5/AC7).
+ * Ruft den Anthropic-Usage-Endpunkt ab und liefert zusätzlich den rohen
+ * HTTP-Status (anthropic-oauth-vault AC5/AC7: der Aufrufer muss 401/403 von
+ * anderen Fehlern unterscheiden können, um GENAU EINEN Token-Refresh
+ * auszulösen — reines `null` wie bei `fetchAnthropicUsage` würde das verwischen).
+ * Wirft NIE (AC5/AC7).
  *
  * @param {object} opts
  * @param {string|undefined|null} opts.token - Abo-OAuth-Token (Bearer). Fehlt/leer → kein Abruf-Versuch.
  * @param {typeof fetch} [opts.fetchFn] - Injectable fetch (Tests). Default: fetch mit Timeout-Wrapper.
  * @param {number} [opts.timeoutMs]
- * @returns {Promise<object|null>}
+ * @returns {Promise<{ status: number|null, raw: object|null }>} `status: null` bedeutet
+ *   Netzfehler/Timeout/fehlendes Token (kein HTTP-Response vorhanden).
  */
-export async function fetchAnthropicUsage({ token, fetchFn, timeoutMs = FETCH_TIMEOUT_MS } = {}) {
-  if (!token) return null; // kein leerer Header-Versuch (Edge-Case, AC5)
+export async function fetchAnthropicUsageDetailed({ token, fetchFn, timeoutMs = FETCH_TIMEOUT_MS } = {}) {
+  if (!token) return { status: null, raw: null }; // kein leerer Header-Versuch (Edge-Case, AC5)
 
   const doFetch = fetchFn ?? ((url, init) => fetchWithTimeout(url, init, timeoutMs));
   const url = `${ANTHROPIC_USAGE_HOST}${ANTHROPIC_USAGE_PATH}`;
@@ -77,16 +80,36 @@ export async function fetchAnthropicUsage({ token, fetchFn, timeoutMs = FETCH_TI
       },
     });
   } catch {
-    return null; // Netzfehler/Timeout → Fallback (AC5)
+    return { status: null, raw: null }; // Netzfehler/Timeout → Fallback (AC5)
   }
 
-  if (!res || res.status >= 400) return null; // 401/403/5xx → Fallback (AC5)
+  if (!res) return { status: null, raw: null };
+  if (res.status >= 400) return { status: res.status, raw: null }; // 401/403/5xx → Fallback (AC5)
 
   try {
-    return await res.json();
+    return { status: res.status, raw: await res.json() };
   } catch {
-    return null; // kein parsebares JSON → Fallback (AC7)
+    return { status: res.status, raw: null }; // kein parsebares JSON → Fallback (AC7)
   }
+}
+
+/**
+ * Ruft den Anthropic-Usage-Endpunkt ab. Liefert das rohe, ungeprüfte JSON-Payload
+ * bei HTTP 2xx, sonst `null` (kein Auth-Token, Netzfehler, Timeout, HTTP ≥ 400,
+ * kein parsebares JSON) — wirft NIE (AC5/AC7).
+ *
+ * Dünner Wrapper um `fetchAnthropicUsageDetailed()` (verwirft den Status) —
+ * unveränderter Vertrag/Bestandsverhalten für bestehende Konsumenten.
+ *
+ * @param {object} opts
+ * @param {string|undefined|null} opts.token - Abo-OAuth-Token (Bearer). Fehlt/leer → kein Abruf-Versuch.
+ * @param {typeof fetch} [opts.fetchFn] - Injectable fetch (Tests). Default: fetch mit Timeout-Wrapper.
+ * @param {number} [opts.timeoutMs]
+ * @returns {Promise<object|null>}
+ */
+export async function fetchAnthropicUsage(opts) {
+  const { raw } = await fetchAnthropicUsageDetailed(opts);
+  return raw;
 }
 
 /**

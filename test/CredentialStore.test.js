@@ -13,6 +13,13 @@
  *   AC9  — VPS-Provider-Token (hetzner, ionos, hostinger): je Provider set/getMeta/delete write-only; Audit ohne Klartext
  *   AC10 — Cloudflare-Credentials (api_token, account_id): CATALOG, resolveKey, set/getMeta/delete write-only, at-rest-Verschlüsselung, HTTP PUT/GET/DELETE, Audit ohne Klartext, CRED_ADMIN_EMAILS-Schutz
  *
+ * Covers (anthropic-oauth-vault, S-367):
+ *   AC1 — CATALOG.anthropic-oauth (access_token/refresh_token); PUT speichert; list() zeigt set ohne Klartext; DELETE → unset
+ *   AC2 — list() liefert expiresAt (Unix-ms) am access_token-Eintrag, nie Token-Klartext
+ *   AC5 — getAnthropicOAuthCredentials()/setAnthropicOAuthCredentials(): Round-trip, atomares Rückschreiben
+ *   AC8 — kein Token-Klartext in Response/Audit (HTTP-Ebene)
+ *   AC9 — at-rest verschlüsselt: kein anthropic-oauth-Klartext in der Store-Datei
+ *
  * Covers (credential-runtime-unlock):
  *   AC1  — Start ohne Master-Key und ohne verschlüsselte Einträge → locked, kein Abbruch
  *   AC2  — Fail-Fast-Regression: Store mit verschlüsselten Einträgen + kein Key → assertCredentialConfig wirft
@@ -968,6 +975,175 @@ describe('credentialsRouter — AC10: Cloudflare-Credentials über HTTP', () => 
   it('AC10/AC8 — PUT cloudflare mit unbekanntem Feldnamen → 404', async () => {
     const res = await testServer.req('PUT', '/api/settings/credentials/cloudflare/zone_id', { value: 'some-zone-id' });
     expect(res.status).toBe(404);
+  });
+});
+
+describe('CredentialStore — AC1/AC9 (anthropic-oauth-vault): Katalog + at-rest', () => {
+  let dir, store;
+
+  beforeEach(async () => {
+    ({ store, dir } = await makeTmpStore());
+    process.env.DEV_NO_ACCESS = '1';
+  });
+
+  afterEach(async () => {
+    delete process.env.DEV_NO_ACCESS;
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('AC1 — CREDENTIAL_CATALOG.anthropic-oauth enthält access_token und refresh_token', () => {
+    expect(CREDENTIAL_CATALOG['anthropic-oauth']).toContain('access_token');
+    expect(CREDENTIAL_CATALOG['anthropic-oauth']).toContain('refresh_token');
+    expect(CREDENTIAL_CATALOG['anthropic-oauth'].length).toBe(2);
+  });
+
+  it('AC1 — resolveKey akzeptiert access_token/refresh_token', () => {
+    expect(resolveKey('anthropic-oauth', 'access_token')).toEqual({ ok: true, storeKey: 'credentials/anthropic-oauth/access_token' });
+    expect(resolveKey('anthropic-oauth', 'refresh_token')).toEqual({ ok: true, storeKey: 'credentials/anthropic-oauth/refresh_token' });
+  });
+
+  it('AC1 — list() zeigt beide Felder unset bei leerem Store', async () => {
+    const items = await store.list();
+    const items_ = items.filter((i) => i.integration === 'anthropic-oauth');
+    expect(items_.length).toBe(2);
+    for (const item of items_) expect(item.status).toBe('unset');
+  });
+
+  it('AC1 — set/getMeta/delete für access_token: write-only-Verhalten', async () => {
+    const meta = await store.set('credentials/anthropic-oauth/access_token', 'sk-ant-oat-secret-value');
+    expect(meta.status).toBe('set');
+    expect(JSON.stringify(meta)).not.toContain('sk-ant-oat-secret-value');
+
+    const getMeta = await store.getMeta('credentials/anthropic-oauth/access_token');
+    expect(getMeta.status).toBe('set');
+    expect(getMeta.masked).toBe('•••• gesetzt');
+
+    await store.delete('credentials/anthropic-oauth/access_token');
+    expect((await store.getMeta('credentials/anthropic-oauth/access_token')).status).toBe('unset');
+  });
+
+  it('AC9 — at-rest verschlüsselt: kein anthropic-oauth-Klartext in der Store-Datei', async () => {
+    await store.set('credentials/anthropic-oauth/access_token', 'at-cleartext-marker');
+    await store.set('credentials/anthropic-oauth/refresh_token', 'rt-cleartext-marker');
+    const raw = await fsReadFile(join(dir, 'secrets.enc.json'), 'utf8');
+    expect(raw).not.toContain('at-cleartext-marker');
+    expect(raw).not.toContain('rt-cleartext-marker');
+  });
+});
+
+describe('credentialsRouter — AC1 (anthropic-oauth-vault): anthropic-oauth über HTTP', () => {
+  let dir, store, testServer;
+
+  beforeEach(async () => {
+    process.env.DEV_NO_ACCESS = '1';
+    ({ store, dir } = await makeTmpStore());
+    testServer = await makeTestServer(store);
+  });
+
+  afterEach(async () => {
+    delete process.env.DEV_NO_ACCESS;
+    await testServer.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('AC1 — PUT access_token → 200, Response kein Klartext', async () => {
+    const res = await testServer.req('PUT', '/api/settings/credentials/anthropic-oauth/access_token', { value: 'oauth-access-http-secret' });
+    expect(res.status).toBe(200);
+    const data = JSON.parse(res.body);
+    expect(data.status).toBe('set');
+    expect(res.body).not.toContain('oauth-access-http-secret');
+  });
+
+  it('AC1 — GET nach PUT zeigt status:set für access_token, unset für refresh_token', async () => {
+    await testServer.req('PUT', '/api/settings/credentials/anthropic-oauth/access_token', { value: 'oauth-access-only' });
+    const res = await testServer.req('GET', '/api/settings/credentials');
+    const data = JSON.parse(res.body);
+    const at = data.find((i) => i.integration === 'anthropic-oauth' && i.name === 'access_token');
+    const rt = data.find((i) => i.integration === 'anthropic-oauth' && i.name === 'refresh_token');
+    expect(at.status).toBe('set');
+    expect(rt.status).toBe('unset');
+    expect(res.body).not.toContain('oauth-access-only');
+  });
+
+  it('AC1 — DELETE access_token → 200, status:unset (idempotent)', async () => {
+    await store.set('credentials/anthropic-oauth/access_token', 'to-delete');
+    const res = await testServer.req('DELETE', '/api/settings/credentials/anthropic-oauth/access_token');
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body).status).toBe('unset');
+    const again = await testServer.req('DELETE', '/api/settings/credentials/anthropic-oauth/access_token');
+    expect(again.status).toBe(200);
+  });
+
+  it('AC8 — Audit-Eintrag für PUT access_token ohne Klartext', async () => {
+    await testServer.req('PUT', '/api/settings/credentials/anthropic-oauth/access_token', { value: 'audited-secret-value' });
+    const entry = testServer.audit.getAll().at(-1);
+    expect(entry.command).toMatch(/credential:set:credentials\/anthropic-oauth\/access_token/);
+    expect(JSON.stringify(entry)).not.toContain('audited-secret-value');
+  });
+
+  it('AC1 — PUT unbekanntes Feld unter anthropic-oauth → 404', async () => {
+    const res = await testServer.req('PUT', '/api/settings/credentials/anthropic-oauth/scope', { value: 'irrelevant' });
+    expect(res.status).toBe(404);
+  });
+});
+
+describe('CredentialStore — AC2/AC5 (anthropic-oauth-vault): expiresAt-Anzeige + Refresh-Rückschreiben', () => {
+  let dir, store;
+
+  beforeEach(async () => {
+    ({ store, dir } = await makeTmpStore());
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('AC2 — ohne gesetzten Tresor-Token: getAnthropicOAuthCredentials() liefert alle drei Werte null', async () => {
+    const result = await store.getAnthropicOAuthCredentials();
+    expect(result).toEqual({ accessToken: null, refreshToken: null, expiresAt: null });
+  });
+
+  it('AC5 — setAnthropicOAuthCredentials() schreibt access_token/refresh_token/expiresAt atomar zurück; getAnthropicOAuthCredentials() liest sie identisch', async () => {
+    const expiresAt = Date.now() + 3600_000;
+    await store.setAnthropicOAuthCredentials({ accessToken: 'at-fresh-value', refreshToken: 'rt-fresh-value', expiresAt });
+
+    const result = await store.getAnthropicOAuthCredentials();
+    expect(result).toEqual({ accessToken: 'at-fresh-value', refreshToken: 'rt-fresh-value', expiresAt });
+  });
+
+  it('AC5 — setAnthropicOAuthCredentials() überschreibt einen vorherigen Refresh (Rotation)', async () => {
+    await store.setAnthropicOAuthCredentials({ accessToken: 'at-old', refreshToken: 'rt-old', expiresAt: 1000 });
+    await store.setAnthropicOAuthCredentials({ accessToken: 'at-new', refreshToken: 'rt-new', expiresAt: 2000 });
+
+    const result = await store.getAnthropicOAuthCredentials();
+    expect(result).toEqual({ accessToken: 'at-new', refreshToken: 'rt-new', expiresAt: 2000 });
+  });
+
+  it('AC2 — list() hängt expiresAt an den access_token-Eintrag, NICHT an refresh_token', async () => {
+    const expiresAt = 1737199200000;
+    await store.setAnthropicOAuthCredentials({ accessToken: 'at-val', refreshToken: 'rt-val', expiresAt });
+
+    const items = await store.list();
+    const at = items.find((i) => i.integration === 'anthropic-oauth' && i.name === 'access_token');
+    const rt = items.find((i) => i.integration === 'anthropic-oauth' && i.name === 'refresh_token');
+    expect(at.expiresAt).toBe(expiresAt);
+    expect(rt.expiresAt).toBeUndefined();
+    expect(JSON.stringify(items)).not.toContain('at-val');
+    expect(JSON.stringify(items)).not.toContain('rt-val');
+  });
+
+  it('AC2 — list() lässt expiresAt weg, solange kein Refresh/Set stattgefunden hat', async () => {
+    await store.set('credentials/anthropic-oauth/access_token', 'manually-set-without-expiry');
+    const items = await store.list();
+    const at = items.find((i) => i.integration === 'anthropic-oauth' && i.name === 'access_token');
+    expect(at.status).toBe('set');
+    expect(at.expiresAt).toBeUndefined();
+  });
+
+  it('Edge-Case — Store gesperrt (kein Master-Key): getAnthropicOAuthCredentials() degradiert auf alle-null statt zu werfen', async () => {
+    const lockedStore = new CredentialStore({ dir, masterKey: '' });
+    const result = await lockedStore.getAnthropicOAuthCredentials();
+    expect(result).toEqual({ accessToken: null, refreshToken: null, expiresAt: null });
   });
 });
 

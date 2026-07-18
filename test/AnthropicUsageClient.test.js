@@ -8,15 +8,21 @@
  * AC7 (Schema-Validierung/Adapter: Müll-Payload/Teil-Payload crasht nie),
  * AC8 (Token nie im Body/Fehlerpfad — kein leerer Abruf-Versuch ohne Token).
  *
- * Strategy: `fetchAnthropicUsage` wird gegen einen injizierten `fetchFn`-Stub
- * getestet (kein echter HTTP-Call); `mapAnthropicUsagePayload` ist eine reine
- * Funktion und wird direkt mit synthetischen Upstream-Payloads getestet.
+ * Covers (anthropic-oauth-vault, S-367): `fetchAnthropicUsageDetailed()` liefert
+ * zusätzlich den rohen HTTP-Status (Grundlage für den 401/403-Retry-einmalig
+ * in `src/routers/usage.js`) — AC5/AC7.
+ *
+ * Strategy: `fetchAnthropicUsage`/`fetchAnthropicUsageDetailed` werden gegen
+ * einen injizierten `fetchFn`-Stub getestet (kein echter HTTP-Call);
+ * `mapAnthropicUsagePayload` ist eine reine Funktion und wird direkt mit
+ * synthetischen Upstream-Payloads getestet.
  *
  * @jest-environment node
  */
 import { describe, it, expect } from '@jest/globals';
 import {
   fetchAnthropicUsage,
+  fetchAnthropicUsageDetailed,
   mapAnthropicUsagePayload,
   ANTHROPIC_USAGE_HOST,
   ANTHROPIC_USAGE_PATH,
@@ -75,6 +81,42 @@ describe('fetchAnthropicUsage', () => {
       },
     });
     await expect(fetchAnthropicUsage({ token: 'x', fetchFn })).resolves.toBeNull();
+  });
+});
+
+describe('fetchAnthropicUsageDetailed (anthropic-oauth-vault, S-367)', () => {
+  it('AC5/AC7 — liefert status + raw bei Erfolg', async () => {
+    const fetchFn = async () => makeFetchResponse(200, { five_hour: { utilization: 1, resets_at: 1737199200 } });
+    const result = await fetchAnthropicUsageDetailed({ token: 'x', fetchFn });
+    expect(result.status).toBe(200);
+    expect(result.raw).toEqual({ five_hour: { utilization: 1, resets_at: 1737199200 } });
+  });
+
+  it('AC5/AC7 — liefert status 401/403 bei Ablehnung (Retry-Grundlage), raw:null', async () => {
+    const fetchFn401 = async () => makeFetchResponse(401, { error: 'invalid token' });
+    expect(await fetchAnthropicUsageDetailed({ token: 'x', fetchFn: fetchFn401 })).toEqual({ status: 401, raw: null });
+
+    const fetchFn403 = async () => makeFetchResponse(403, { error: 'forbidden' });
+    expect(await fetchAnthropicUsageDetailed({ token: 'x', fetchFn: fetchFn403 })).toEqual({ status: 403, raw: null });
+  });
+
+  it('AC5 — Netzfehler/Timeout liefert status:null statt zu werfen', async () => {
+    const fetchFn = async () => {
+      const err = new Error('network down');
+      err.name = 'AbortError';
+      throw err;
+    };
+    await expect(fetchAnthropicUsageDetailed({ token: 'x', fetchFn })).resolves.toEqual({ status: null, raw: null });
+  });
+
+  it('AC8 — kein Token-Abruf-Versuch ohne Token (status:null, raw:null)', async () => {
+    let called = false;
+    const fetchFn = async () => {
+      called = true;
+      return makeFetchResponse(200, {});
+    };
+    expect(await fetchAnthropicUsageDetailed({ token: undefined, fetchFn })).toEqual({ status: null, raw: null });
+    expect(called).toBe(false);
   });
 });
 
