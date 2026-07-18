@@ -2,7 +2,7 @@ id: S-362
 parent: F-069
 title: ephemeral-infra-Ausführungspfad im RegressionRunner bauen (VpsProvisioner,
   rtest-*-Schema, garantiertes Cleanup)
-status: To Do
+status: In Progress
 priority: P2
 spec: docs/specs/regression-run.md
 implements:
@@ -23,30 +23,30 @@ estimate_note: 'L — kompletter, bislang nicht existenter Ausführungspfad: Vps
   Sicherheits-/Kosten-relevant, security-Bump. Kein Referenz-Vorgänger im Repo, daher
   confidence low.'
 confidence: low
-branch: null
+branch: feat/S-362-ephemeral-infra-runner
 pr: null
 blocked_reason: null
 created_at: '2026-07-16T00:00:00Z'
-updated_at: '2026-07-16T00:00:00Z'
+updated_at: '2026-07-18T05:50:57Z'
 done_at: null
 tok_est: null
 area: fabrik-arbeiten
 notes: 'Ausgegliedert aus S-326 (Befund A, dort verifiziert): der RegressionRunner
   hat für target ephemeral-infra KEINEN Ausführungspfad — kein VpsProvisioner-Aufruf,
   kein rtest-*-Namensschema, kein Cleanup. Bis S-309/S-326 las der Runner `target`
-  je Suite gar nicht und behandelte jeden Lauf als local; das erklärt, warum der
-  VPS-Lauf des Owners vom 2026-07-08 nie einen Hetzner-Server anlegte (keine Kosten).
-  S-326 hat NUR die Diagnose-Pflicht gelandet (AC10) + die target-Weiche (AC11): eine
-  ephemeral-infra-Suite endet seither als ehrlicher, persistierter Fehler „Testobjekt
-  ephemeral-infra wird noch nicht unterstützt" statt still als local-Lauf. Diese Story
-  baut den echten Pfad: target ephemeral-infra -> rtest-*-Wegwerf-Ziel provisionieren
-  (VpsProvisioner, src/VpsProvisioner.js), Suite dagegen laufen lassen, Ziel danach
-  GARANTIERT abbauen — auch im Fehler-, Timeout- und Prozess-Abbruch-Pfad (sonst
-  verwaiste, kostenpflichtige Server). Bindend: agent-flow `regression-runner` AC4/AC7/AC8
-  (Infra-Leitplanken, Produktiv-Allowlist, Cleanup-Garantie) — dev-gui spiegelt das
-  Modell, definiert es NICHT neu. Der Kosten-/Ressourcen-Hinweis im Dialog (AC6) steht
-  bereits. Vorhandene Suiten als Testobjekt: tests/regression/vps/ (3 Suiten, target
-  ephemeral-infra). Beim Landen: A3 in docs/specs/regression-run.md von „Umsetzungsstand
-  NICHT gebaut" auf gebaut umstellen und die AC11-Weiche für ephemeral-infra vom
-  Fehler- auf den Provisionier-Pfad umhängen. Achtung Nicht-Ziel: target url (A4)
-  bleibt weiterhin ungebaut — separat halten.'
+  je Suite gar nicht und behandelte jeden Lauf als local; das erklärt, warum der VPS-Lauf
+  des Owners vom 2026-07-08 nie einen Hetzner-Server anlegte (keine Kosten). S-326
+  hat NUR die Diagnose-Pflicht gelandet (AC10) + die target-Weiche (AC11): eine ephemeral-infra-Suite
+  endet seither als ehrlicher, persistierter Fehler „Testobjekt ephemeral-infra wird
+  noch nicht unterstützt" statt still als local-Lauf. Diese Story baut den echten
+  Pfad: target ephemeral-infra -> rtest-*-Wegwerf-Ziel provisionieren (VpsProvisioner,
+  src/VpsProvisioner.js), Suite dagegen laufen lassen, Ziel danach GARANTIERT abbauen
+  — auch im Fehler-, Timeout- und Prozess-Abbruch-Pfad (sonst verwaiste, kostenpflichtige
+  Server). Bindend: agent-flow `regression-runner` AC4/AC7/AC8 (Infra-Leitplanken,
+  Produktiv-Allowlist, Cleanup-Garantie) — dev-gui spiegelt das Modell, definiert
+  es NICHT neu. Der Kosten-/Ressourcen-Hinweis im Dialog (AC6) steht bereits. Vorhandene
+  Suiten als Testobjekt: tests/regression/vps/ (3 Suiten, target ephemeral-infra).
+  Beim Landen: A3 in docs/specs/regression-run.md von „Umsetzungsstand NICHT gebaut"
+  auf gebaut umstellen und die AC11-Weiche für ephemeral-infra vom Fehler- auf den
+  Provisionier-Pfad umhängen. Achtung Nicht-Ziel: target url (A4) bleibt weiterhin
+  ungebaut — separat halten.'

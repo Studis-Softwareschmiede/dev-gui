@@ -2,7 +2,7 @@ id: S-366
 parent: F-084
 title: 'Frontend: UsageOverlay zeigt offizielle %/Reset-Werte (Session, Alle Modelle,
   je Modell, optional Spend) + drei Herkunfts-Zustände (official/estimated/unavailable)'
-status: To Do
+status: In Progress
 priority: P2
 spec: docs/specs/usage-official-values.md
 implements:
@@ -21,10 +21,10 @@ estimate_note: S/M-Heuristik score 5 (3 AC + 1 Komponente + 1 ui-label) -> M; ba
   js|balanced|M ep 5.0 (n=8); keine Baseline-Tokens
 confidence: medium
 tok_est: null
-branch: null
+branch: feat/S-366-usage-overlay-official
 pr: null
 blocked_reason: null
 created_at: '2026-07-18T04:23:19Z'
-updated_at: '2026-07-18T04:24:44Z'
+updated_at: '2026-07-18T06:25:35Z'
 done_at: null
 area: nachtwaechter
