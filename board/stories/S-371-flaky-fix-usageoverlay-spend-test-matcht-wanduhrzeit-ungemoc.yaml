@@ -1,0 +1,26 @@
+id: S-371
+parent: F-084
+title: 'Flaky-Fix: UsageOverlay-spend-Test matcht Wanduhrzeit (ungemockte Zeit + Punkt-Wildcard
+  in Regex)'
+status: In Progress
+priority: P3
+spec: docs/specs/usage-official-values.md
+implements:
+- AC10
+depends: null
+labels:
+- ui
+size_est: S
+dispo_est: '1.0'
+dispo_act: null
+dispo_forecast: null
+estimate_note: 'Test-only-Fix: Fixture-Zeit mocken bzw. Regex ohne Punkt-Wildcard;
+  Befund tester S-370 (Fail nur bei Uhrzeit :50-:59).'
+confidence: null
+tok_est: null
+branch: feat/S-371-flaky-usageoverlay
+pr: null
+blocked_reason: null
+created_at: '2026-07-18T11:21:52Z'
+updated_at: '2026-07-18T11:22:40Z'
+done_at: null

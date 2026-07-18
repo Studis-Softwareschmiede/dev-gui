@@ -1,0 +1,27 @@
+id: S-372
+parent: F-086
+title: Cache-Purge-Ausgang in den persistenten AuditStore (Konsistenz mit anderen
+  Deploy-Mutationen)
+status: In Progress
+priority: P3
+spec: docs/specs/deploy-cache-purge.md
+implements:
+- AC7
+depends: null
+labels:
+- backend
+size_est: S
+dispo_est: '2.0'
+dispo_act: null
+dispo_forecast: null
+estimate_note: 'Reviewer-Befund S-370: cachePurge-Ausgang fliesst nur in console.log,
+  nicht in auditStore.record — nachziehen analog anderer Mutationen im selben Router,
+  secret-frei.'
+confidence: null
+tok_est: null
+branch: feat/S-372-purge-audit
+pr: null
+blocked_reason: null
+created_at: '2026-07-18T11:21:53Z'
+updated_at: '2026-07-18T11:23:03Z'
+done_at: null
