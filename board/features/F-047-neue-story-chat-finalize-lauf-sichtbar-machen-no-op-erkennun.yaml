@@ -4,7 +4,7 @@ goal: 'Der ''Neue Story''-Chat-Finalize-Lauf darf nicht mehr unsichtbar ergebnis
   scheitern: ''durchgelaufen, aber nichts erzeugt'' (No-Op) wird erkannt und dem Owner
   zuverlässig zurückgemeldet (Overlay-inline + reload-fester, projekt-keyed Board-Hinweis),
   sodass jeder Fehlausgang bemerkt + wiederholbar ist.'
-status: Backlog
+status: Done
 priority: P1
 spec: docs/specs/story-specify-finalize-visibility.md
 definition_of_done: null
@@ -17,7 +17,8 @@ owner: null
 stories:
 - S-239
 - S-240
-progress: 0/2 done
+progress: 2/2 done
 created_at: '2026-07-02T05:07:34Z'
-updated_at: '2026-07-02T05:10:12Z'
-area: 'fabrik-arbeiten'
+updated_at: '2026-07-18T05:24:03Z'
+area: fabrik-arbeiten
+done_at: '2026-07-18T05:24:03Z'

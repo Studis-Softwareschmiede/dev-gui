@@ -6,7 +6,7 @@ goal: 'Ein unbehandelter Dateisystem-Watcher-Fehler (Vorfall 2026-07-02: ENOENT 
   recursive über BOARD_ROOTS=/workspace) härten: error-Handler Pflicht, verschwindende/wiederauftauchende
   Pfade via sauberem Schließen + Re-Arm mit Backoff tolerieren, Workspace-Mutationen
   (npm install, Worktrees) folgenlos für die Prozess-Lebensdauer. Spec: fswatcher-crash-hardening.'
-status: Backlog
+status: Done
 priority: P1
 spec: docs/specs/fswatcher-crash-hardening.md
 definition_of_done: null
@@ -17,7 +17,8 @@ owner: null
 stories:
 - S-280
 - S-320
-progress: 1/2 done
+progress: 2/2 done
 created_at: '2026-07-03T07:00:15Z'
-updated_at: '2026-07-07T22:50:18Z'
-area: 'fabrik-arbeiten'
+updated_at: '2026-07-18T05:24:17Z'
+area: fabrik-arbeiten
+done_at: '2026-07-18T05:24:17Z'

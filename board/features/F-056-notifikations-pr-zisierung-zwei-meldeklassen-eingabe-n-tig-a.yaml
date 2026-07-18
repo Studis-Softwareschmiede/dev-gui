@@ -4,7 +4,7 @@ goal: 'Genau zwei Meldeklassen statt Push-Flut: EIN drain_done-Push je Drain-End
   mit Bilanz, EIN questions_pending-Push bei needs-answers; Default-Events auf {drain_done,tunnel_missing}
   reduziert + Bestands-Settings einmalig migriert; story_done/blocked/feature_done
   bleiben verfuegbar, default AUS.'
-status: Backlog
+status: Done
 priority: P1
 spec: docs/specs/notification-event-defaults.md
 definition_of_done: null
@@ -14,8 +14,13 @@ labels:
 - ui
 depends: null
 owner: null
-stories: null
-progress: null
+stories:
+- S-276
+- S-277
+- S-278
+- S-279
+progress: 4/4 done
 created_at: '2026-07-03T06:48:38Z'
-updated_at: '2026-07-03T06:48:38Z'
-area: 'benachrichtigungen'
+updated_at: '2026-07-18T05:24:14Z'
+area: benachrichtigungen
+done_at: '2026-07-18T05:24:14Z'

@@ -7,7 +7,7 @@ goal: 'Die Story-Detailansicht zeigt pro Story, welche Agenten gearbeitet haben,
   ''Vor Metrik-Erfassung abgeschlossen'', haengt aber nur an ended_at != null ohne
   Datumsvergleich — bei Projekten ohne Erfassung ist die Meldung falsch. Ergaenzt
   die agent-flow-Seite (S-069/S-070, PR #348), die die Daten erst entstehen laesst.'
-status: Backlog
+status: Done
 priority: P1
 spec: null
 definition_of_done: null
@@ -16,7 +16,10 @@ labels:
 - board
 depends: null
 owner: null
-stories: null
-progress: null
+stories:
+- S-363
+- S-364
+progress: 2/2 done
 created_at: '2026-07-17T11:50:32Z'
-updated_at: '2026-07-17T11:50:32Z'
+updated_at: '2026-07-18T05:24:46Z'
+done_at: '2026-07-18T05:24:46Z'

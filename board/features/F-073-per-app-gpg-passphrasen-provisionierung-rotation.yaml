@@ -1,13 +1,14 @@
 id: F-073
 title: 'Per-App-GPG-Passphrasen: automatische Provisionierung & sichere Zwei-Phasen-Rotation'
-goal: Jede von der Fabrik angelegte App bekommt eine eigene, kryptografisch starke GPG-Passphrase
-  statt der geteilten Fabrik-Passphrase (Doktrin-Wechsel, Owner 2026-07-13). dev-gui provisioniert
-  sie automatisch bei Projektanlage (idempotent, existierendes Bitwarden-Item wird nie überschrieben)
-  und per Nach-Provisionierungs-Knopf für Bestands-Apps, reicht sie dem Scaffold via GPG_PASS_FILE
-  durch (GE4) und rotiert sie im Zwei-Phasen-Muster (beweisen, umschalten, alt erst am Schluss weg).
-  agent-flow bleibt Bitwarden-agnostisch; der Zugang verlässt dev-gui nie. Löst die Bonus-Lücke
-  (Deploy-Formular-Default env.gpg-passphrase-<slug>) mit.
-status: To Do
+goal: Jede von der Fabrik angelegte App bekommt eine eigene, kryptografisch starke
+  GPG-Passphrase statt der geteilten Fabrik-Passphrase (Doktrin-Wechsel, Owner 2026-07-13).
+  dev-gui provisioniert sie automatisch bei Projektanlage (idempotent, existierendes
+  Bitwarden-Item wird nie überschrieben) und per Nach-Provisionierungs-Knopf für Bestands-Apps,
+  reicht sie dem Scaffold via GPG_PASS_FILE durch (GE4) und rotiert sie im Zwei-Phasen-Muster
+  (beweisen, umschalten, alt erst am Schluss weg). agent-flow bleibt Bitwarden-agnostisch;
+  der Zugang verlässt dev-gui nie. Löst die Bonus-Lücke (Deploy-Formular-Default env.gpg-passphrase-<slug>)
+  mit.
+status: Done
 priority: P2
 spec: docs/specs/per-app-gpg-passphrase-provisioning.md
 definition_of_done: null
@@ -17,8 +18,17 @@ labels:
 - bitwarden
 depends: null
 owner: null
-stories: null
-progress: null
+stories:
+- S-335
+- S-336
+- S-337
+- S-338
+- S-339
+- S-340
+- S-341
+- S-343
+progress: 8/8 done
 created_at: '2026-07-13T00:00:00Z'
-updated_at: '2026-07-13T00:00:00Z'
+updated_at: '2026-07-18T05:24:38Z'
 area: deployment
+done_at: '2026-07-18T05:24:38Z'

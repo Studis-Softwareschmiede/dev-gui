@@ -6,7 +6,7 @@ goal: 'Ein dünner GUI-Auslöser im Spezifikation-Reiter startet den Fabrik-Befe
   mit projectPath, Bestätigungsdialog vor dem doku-ändernden Lauf, Sperre bei laufendem
   Job, Fehler-/Status-Anzeige. Die Abgleich-Logik selbst lebt cross-repo in agent-flow
   (reconcile-subsystem.md); die UI ist entkoppelt baubar + testbar (mockbarer fetch).'
-status: Backlog
+status: Done
 priority: P2
 spec: docs/specs/reconcile-trigger.md
 definition_of_done: null
@@ -18,7 +18,8 @@ stories:
 - S-201
 progress: 1/1 done
 created_at: '2026-06-30T21:15:10Z'
-updated_at: '2026-07-02T03:22:17.133Z'
+updated_at: '2026-07-18T05:23:53Z'
 archived: true
 archived_at: '2026-07-02T03:22:17.133Z'
-area: 'spezifikation'
+area: spezifikation
+done_at: '2026-07-18T05:23:53Z'

@@ -3,7 +3,7 @@ title: 'VPS-SSH-Terminal: root/alex direkt im Panel (interaktive Shell je Server
 goal: Jede VPS-Karte bekommt klein übereinander die Buttons root/alex; Klick öffnet
   unterhalb der Karte ein Terminal, das automatisch per SSH als der jeweilige User
   mit dem beim Bootstrap hinterlegten Key verbindet — direkt auf dem Server arbeiten.
-status: Backlog
+status: Done
 priority: P2
 spec: docs/specs/vps-ssh-terminal.md
 definition_of_done: null
@@ -15,7 +15,8 @@ stories:
 - S-262
 - S-263
 - S-264
-progress: 0/3 done
+progress: 3/3 done
 created_at: '2026-07-02T06:35:18Z'
-updated_at: '2026-07-02T06:37:56Z'
-area: 'vps'
+updated_at: '2026-07-18T05:24:10Z'
+area: vps
+done_at: '2026-07-18T05:24:10Z'

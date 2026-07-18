@@ -1,8 +1,8 @@
 id: F-076
 title: RTK-Ausgabe-Diät — Mess-Pilot im Konsum-Repo
 goal: 'Die messungs-vorbehaltliche Vorab-Empfehlung des agent-flow-Spikes output-token-shaping
-  (S-065, ADR) empirisch schließen: RTK-Ausgabefilter in dev-gui hinter einem auf die
-  ADR-Allowlist beschränkten PreToolUse-Hook messen (Baseline vs. RTK, N>=3 /flow-Läufe),
+  (S-065, ADR) empirisch schließen: RTK-Ausgabefilter in dev-gui hinter einem auf
+  die ADR-Allowlist beschränkten PreToolUse-Hook messen (Baseline vs. RTK, N>=3 /flow-Läufe),
   mit harter Fidelity-Gegenprobe, dass reviewer/tester-Gates nicht getäuscht werden.
   Liefert gemessene Token-Ersparnis + Übernahme-/Verwerf-Empfehlung zurück ans ADR.
 
@@ -25,5 +25,5 @@ stories:
 - S-345
 progress: 1/1 done
 created_at: '2026-07-14T06:56:08Z'
-updated_at: '2026-07-14T06:56:08Z'
+updated_at: '2026-07-18T05:23:38Z'
 area: retro-lernen

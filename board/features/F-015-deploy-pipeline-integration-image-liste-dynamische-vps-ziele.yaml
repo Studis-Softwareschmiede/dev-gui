@@ -1,6 +1,6 @@
 id: F-015
 title: 'Deploy-Pipeline-Integration: Image-Liste + dynamische VPS-Ziele'
-goal: 'Die beim ersten echten Live-Test (2026-06) aufgedeckten Integrationslücken der
+goal: Die beim ersten echten Live-Test (2026-06) aufgedeckten Integrationslücken der
   End-to-End-Deploy-Pipeline (F-013) schließen — die Einzelbausteine funktionieren,
   aber die Naht zwischen "VPS anlegen" (S-152) und "App deployen/verwalten" (S-155/S-157)
   fehlt. (A) Das Image-Dropdown bleibt leer, weil der GitHub-Packages-Listen-Endpunkt
@@ -10,7 +10,7 @@ goal: 'Die beim ersten echten Live-Test (2026-06) aufgedeckten Integrationslück
   VPS ist weder deploybar noch in der Container-Übersicht sichtbar, weil SSH-Ziele
   nur aus der statischen VPS_TARGETS-Env aufgelöst werden → beim Create die Ziel-Metadaten
   persistieren und alle drei Konsumenten (Deploy-Dropdown, Container-Übersicht, Reconcile)
-  zusätzlich zur Env aus dieser dynamischen Quelle auflösen.'
+  zusätzlich zur Env aus dieser dynamischen Quelle auflösen.
 status: Done
 priority: P1
 spec: docs/specs/vps-dynamic-ssh-targets.md
@@ -27,9 +27,9 @@ stories:
 - S-165
 - S-166
 - S-167
-progress: 3/3
+progress: 3/3 done
 created_at: '2026-06-18T00:00:00Z'
-updated_at: '2026-07-02T03:22:17.133Z'
+updated_at: '2026-07-18T05:23:04Z'
 archived: true
 archived_at: '2026-07-02T03:22:17.133Z'
-area: 'deployment'
+area: deployment

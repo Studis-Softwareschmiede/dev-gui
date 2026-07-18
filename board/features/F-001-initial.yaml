@@ -1,7 +1,7 @@
 id: F-001
 title: Initial
 goal: '[Platzhalter — Owner ausfüllen im Cut-PR] Bootstrap-Feature: Initial'
-status: Backlog
+status: Done
 priority: P2
 spec: null
 definition_of_done: null
@@ -91,7 +91,6 @@ stories:
 - S-080
 - S-081
 - S-082
-- S-083
 - S-084
 - S-085
 - S-086
@@ -102,6 +101,7 @@ stories:
 - S-091
 - S-092
 - S-093
-progress: 87/93 done · 5 blocked
+progress: 88/92 done · 4 verworfen
 created_at: '2026-06-15T07:24:07Z'
-updated_at: '2026-06-15T07:25:41Z'
+updated_at: '2026-07-18T05:23:52Z'
+done_at: '2026-07-18T05:23:52Z'

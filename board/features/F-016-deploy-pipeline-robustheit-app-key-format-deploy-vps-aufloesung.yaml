@@ -3,13 +3,13 @@ title: 'Deploy-Pipeline-Robustheit: App-Key-Format + Deploy-VPS-Auflösung'
 goal: 'Zwei beim ersten echten Live-Deploy (2026-06, VPS unter alexstuder.cloud) aufgedeckte
   Robustheits-Lücken der Deploy-Pipeline (F-013/F-015) schließen — beide passierten
   alle Mock-Tests und sind am laufenden System verifiziert. (A) Setup-Falle: der App-Token-Provider
-  (src/githubAppToken.js:109) nutzt importPKCS8 (jose), das nur PKCS#8 akzeptiert —
-  GitHub liefert App-Private-Keys aber als PKCS#1, und ein einzeiliges Eingabefeld
+  (src/githubAppToken.js:109) nutzt importPKCS8 (jose), das nur PKCS#8 akzeptiert
+  — GitHub liefert App-Private-Keys aber als PKCS#1, und ein einzeiliges Eingabefeld
   zerstört die Zeilenumbrüche. Folge: jwt-sign-failed → kein App-Token → Image-Dropdown
-  leer + alle App-Token-Funktionen tot. Fix: Key format-tolerant (PKCS#1 ⊕ PKCS#8 via
-  crypto.createPrivateKey) + newline-normalisiert laden + mehrzeilige Textarea-Eingabe;
-  App-Token-only bleibt (kein GH_TOKEN-Fallback). (B) Echter Bug: S-167 stellte nur das
-  vps-targets-Listing auf die dynamische Quelle um — die Deploy-/Undeploy-/Deployments-Handler
+  leer + alle App-Token-Funktionen tot. Fix: Key format-tolerant (PKCS#1 ⊕ PKCS#8
+  via crypto.createPrivateKey) + newline-normalisiert laden + mehrzeilige Textarea-Eingabe;
+  App-Token-only bleibt (kein GH_TOKEN-Fallback). (B) Echter Bug: S-167 stellte nur
+  das vps-targets-Listing auf die dynamische Quelle um — die Deploy-/Undeploy-/Deployments-Handler
   im deploymentsRouter lösen die vpsId weiterhin nur über die statische VPS_TARGETS-Env
   auf (Zeilen 261/314/422) → ein dynamisch angelegter VPS (testdevgui) erscheint im
   Dropdown, aber "Deploy starten" scheitert mit "Unbekannter VPS". Fix: dieselbe vereinigte
@@ -29,9 +29,9 @@ owner: alex
 stories:
 - S-168
 - S-169
-progress: 2/2
+progress: 2/2 done
 created_at: '2026-06-18T00:00:00Z'
-updated_at: '2026-07-02T03:22:17.133Z'
+updated_at: '2026-07-18T05:23:05Z'
 archived: true
 archived_at: '2026-07-02T03:22:17.133Z'
-area: 'deployment'
+area: deployment
