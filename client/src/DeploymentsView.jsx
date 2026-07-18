@@ -8,7 +8,7 @@
  *       vps-tunnel-self-heal.md AC9–AC10 (S-188)
  *       deploy-bitwarden-gpg-injection.md AC16 (F-073/S-340)
  *       deploy-config-volume-mount.md AC9 (F-078/S-348)
- *       deployments-gpg-subview.md AC1/AC2/AC8 (F-087/S-374)
+ *       deployments-gpg-subview.md AC1/AC2/AC8 (F-087/S-374), AC3/AC4/AC5/AC7 (F-087/S-375)
  *
  * Responsibilities:
  *   - Linkes Bereichs-Untermenü „Deployment"/„GPG-Schlüssel" (deployments-gpg-subview.md
@@ -20,8 +20,18 @@
  *     per-app-gpg-passphrase-provisioning.md AC7/AC8 F-073/S-337 und
  *     per-app-gpg-passphrase-rotation.md AC8/AC9 F-073/S-339) — deren Funktion lebt
  *     künftig kompakt (App-Dropdown statt Liste aller Apps) im Unterbereich
- *     „GPG-Schlüssel" (Folge-Stories S-375/S-376, AC3–AC7 NICHT Teil dieser Story).
- *     Bis dahin zeigt „GPG-Schlüssel" einen Platzhalter-Erklärungstext.
+ *     „GPG-Schlüssel".
+ *   - Unteransicht „GPG-Schlüssel" (deployments-gpg-subview.md AC3/AC4/AC5/AC7,
+ *     F-087/S-375, Komponente `GpgKeysSubview` unten): kurze Erklärung + App-
+ *     Dropdown (Quelle: `packages`, wie zuvor die GPG-Listen) + Aktion „Passphrase
+ *     anlegen" (POST .../gpg-provision, geheimnisfreie Quittung AC4/AC7). Existenz-
+ *     Gating (AC5): Knopf nur aktiv bei `GET .../gpg-exists` → `exists:false`;
+ *     `exists:true` → deaktiviert mit Hinweis; Existenz wird bei jedem App-Wechsel
+ *     neu ermittelt (eigene, pro Mount lokale States — Mount/Unmount beim
+ *     Unterbereichswechsel setzt sie zurück, Design D10); `access-not-ready`/Fehler
+ *     lässt den Knopf bedienbar (konservativer Fallback). Die „Rotieren"-Aktion
+ *     (AC6) ist NICHT Teil dieser Story (Folge-Story S-376) — der Aktions-Block ist
+ *     so strukturiert, dass sie daneben andocken kann.
  *   - Mode toggle: "Single-Image" | "Compose-Stack aus Repo" (AC12)
  *   - Single-Image mode (deploy-lifecycle.md AC10–AC14):
  *       List live deployments (Container↔Route as unit) — GET /api/deployments
@@ -1530,20 +1540,11 @@ export function DeploymentsView({ onNavigate }) {
             </>
           )} {/* end activeSubview === 'deployment' */}
 
-          {/* ── deployments-gpg-subview AC2 (F-087/S-374): Platzhalter-Inhalt
-              für den Unterbereich „GPG-Schlüssel" — die kompakte App-Auswahl +
-              Aktionen ("Passphrase anlegen"/"Rotieren") folgen in den
-              Folge-Stories S-375/S-376 (AC3–AC7, NICHT Teil dieser Story). */}
+          {/* ── deployments-gpg-subview AC3/AC4/AC5/AC7 (F-087/S-375): kompakte
+              GPG-Schlüssel-Ansicht — App-Dropdown + "Passphrase anlegen" mit
+              Existenz-Gating. "Rotieren" (AC6) folgt in S-376. ── */}
           {activeSubview === 'gpg' && (
-            <section style={styles.section} aria-label="GPG-Schlüssel">
-              <h2 style={styles.sectionTitle}>GPG-Schlüssel</h2>
-              <p style={styles.hint}>
-                Hier legst du je App eine GPG-Passphrase in Bitwarden an und rotierst die
-                aktive Passphrase sicher. Die Passphrase selbst wird nie angezeigt. Die
-                App-Auswahl und die Aktionen „Passphrase anlegen" und „Rotieren" folgen in
-                einer der nächsten Storys.
-              </p>
-            </section>
+            <GpgKeysSubview packages={packages} />
           )}
           </section>
         </div>
@@ -1560,6 +1561,236 @@ export function DeploymentsView({ onNavigate }) {
       </div>
     </main>
   );
+}
+
+// ── GpgKeysSubview component (deployments-gpg-subview.md AC3/AC4/AC5/AC7, F-087/S-375) ──
+
+/**
+ * Kompakte GPG-Schlüssel-Ansicht: App-Dropdown (genau eine App gewählt) +
+ * Aktion "Passphrase anlegen" mit Existenz-Gating (AC5). Eigene, lokale States
+ * (Mount/Unmount durch den Unterbereichswechsel setzt sie zurück, Design D10:
+ * bei Rückkehr zu "GPG-Schlüssel" wird die App-Auswahl auf den Default
+ * zurückgesetzt und die Existenz-Abfrage neu ausgelöst — kein veralteter
+ * Knopf-Zustand über einen Ansichtswechsel hinweg).
+ *
+ * "Rotieren" (AC6) ist NICHT Teil dieser Story (S-376) — der Aktions-Block
+ * (styles.btnRow) ist so strukturiert, dass ein zweiter Knopf daneben andocken
+ * kann.
+ *
+ * @param {{ packages: Array<{ name: string }> }} props
+ */
+function GpgKeysSubview({ packages }) {
+  const [selectedApp, setSelectedApp] = useState('');
+  // AC5: { status: 'idle'|'loading'|'known'|'unknown', exists, reason }.
+  // 'unknown' deckt sowohl den expliziten access-not-ready-Fall als auch einen
+  // Netzwerk-/HTTP-Fehler ab — in beiden Fällen bleibt der Knopf bedienbar
+  // (konservativer Fallback, Edge-Case "Existenz-Abfrage schlägt fehl").
+  const [existsState, setExistsState] = useState({ status: 'idle', exists: null, reason: null });
+  const [provisionState, setProvisionState] = useState({ loading: false, result: null, reason: null, errorMsg: null });
+  const selectedAppRef = useRef('');
+
+  useEffect(() => {
+    selectedAppRef.current = selectedApp;
+  }, [selectedApp]);
+
+  // Default-App: erste Liste-App, solange die aktuelle Auswahl nicht (mehr)
+  // in der Liste vorkommt; leere Liste → keine Auswahl (Edge-Case "keine App").
+  useEffect(() => {
+    if (packages.length === 0) {
+      setSelectedApp('');
+      return;
+    }
+    setSelectedApp((cur) => (cur && packages.some((p) => p.name === cur) ? cur : packages[0].name));
+  }, [packages]);
+
+  // AC5: Existenz-Abfrage bei jedem App-Wechsel neu; Edge-Case "App-Wechsel
+  // während laufender Abfrage" — verworfene Antworten der alten App werden
+  // per cancelled-Flag nicht mehr übernommen. Verwirft außerdem ein noch
+  // laufendes/gezeigtes Provisionierungs-Ergebnis der vorherigen App.
+  useEffect(() => {
+    setProvisionState({ loading: false, result: null, reason: null, errorMsg: null });
+
+    if (!selectedApp) {
+      setExistsState({ status: 'idle', exists: null, reason: null });
+      return;
+    }
+
+    let cancelled = false;
+    setExistsState({ status: 'loading', exists: null, reason: null });
+    fetch(`/api/deployments/${encodeURIComponent(selectedApp)}/gpg-exists`)
+      .then(async (res) => {
+        const data = await res.json().catch(() => ({}));
+        if (cancelled) return;
+        if (res.ok && typeof data?.exists === 'boolean') {
+          setExistsState({
+            status: 'known',
+            exists: data.exists,
+            reason: typeof data.reason === 'string' ? data.reason : null,
+          });
+        } else {
+          // access-not-ready oder sonstiger Fehler-Body: Existenz unbekannt.
+          setExistsState({
+            status: 'unknown',
+            exists: null,
+            reason: typeof data?.reason === 'string' ? data.reason : null,
+          });
+        }
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setExistsState({ status: 'unknown', exists: null, reason: null });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedApp]);
+
+  // AC4: POST .../gpg-provision für die gewählte App; geheimnisfreie Quittung
+  // (nur result/reason übernommen, nie ein weiteres Response-Feld).
+  async function handleProvision() {
+    if (!selectedApp || provisionState.loading) return;
+    const appAtRequest = selectedApp;
+    setProvisionState({ loading: true, result: null, reason: null, errorMsg: null });
+    try {
+      const res = await fetch(`/api/deployments/${encodeURIComponent(appAtRequest)}/gpg-provision`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const data = await res.json().catch(() => ({}));
+      // Edge-Case: App wurde gewechselt, während die Anfrage lief — Ergebnis
+      // gehört der alten App und darf der neuen nicht zugeordnet werden.
+      if (selectedAppRef.current !== appAtRequest) return;
+      if (res.ok && typeof data?.result === 'string') {
+        setProvisionState({
+          loading: false,
+          result: data.result,
+          reason: typeof data.reason === 'string' ? data.reason : null,
+          errorMsg: null,
+        });
+      } else {
+        const errorMsg =
+          typeof data?.error === 'string' ? data.error
+          : typeof data?.reason === 'string' ? data.reason
+          : 'GPG-Provisionierung fehlgeschlagen';
+        setProvisionState({ loading: false, result: null, reason: null, errorMsg });
+      }
+    } catch {
+      if (selectedAppRef.current !== appAtRequest) return;
+      setProvisionState({
+        loading: false,
+        result: null,
+        reason: null,
+        errorMsg: 'Netzwerkfehler bei der GPG-Provisionierung',
+      });
+    }
+  }
+
+  const noApps = packages.length === 0;
+  const existsKnownTrue = existsState.status === 'known' && existsState.exists === true;
+  // AC5: solange die Existenz nicht bekannt ist (idle/loading), bleibt der
+  // Knopf im Lade-/Neutral-Zustand (hier: deaktiviert). "unknown" (access-not-
+  // ready/Fehler) macht ihn NICHT unklickbar — konservativer Fallback.
+  const provisionPending = existsState.status === 'idle' || existsState.status === 'loading';
+  const provisionDisabled = noApps || provisionPending || existsKnownTrue || provisionState.loading;
+
+  const statusText = provisionState.loading
+    ? null
+    : provisionState.errorMsg
+      ? provisionState.errorMsg
+      : provisionState.result
+        ? friendlyGpgProvisionResult(provisionState.result, provisionState.reason)
+        : null;
+  // Farbe/Rolle aus dem SEMANTISCHEN result-Wert ableiten (nicht aus einem
+  // separaten errorMsg-Flag) — konsistent mit dem etablierten Muster im
+  // restlichen Formular (s. deploy/undeploy-Quittungen).
+  const statusIsSuccess = !provisionState.errorMsg && ['created', 'already-exists'].includes(provisionState.result ?? '');
+
+  return (
+    <section style={styles.section} aria-label="GPG-Schlüssel">
+      <h2 style={styles.sectionTitle}>GPG-Schlüssel</h2>
+      <p style={styles.hint}>
+        Hier legst du je App eine GPG-Passphrase in Bitwarden an und rotierst die
+        aktive Passphrase sicher. Die Passphrase selbst wird nie angezeigt.
+      </p>
+
+      {noApps ? (
+        <p style={styles.hint}>Keine App gefunden.</p>
+      ) : (
+        <div style={styles.row}>
+          <label style={styles.label} htmlFor="gpg-app-select">App</label>
+          <select
+            id="gpg-app-select"
+            style={styles.input}
+            value={selectedApp}
+            onChange={(e) => setSelectedApp(e.target.value)}
+            aria-label="App für GPG-Schlüssel-Verwaltung auswählen"
+          >
+            {packages.map((p) => (
+              <option key={p.name} value={p.name}>{p.name}</option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      <div style={styles.btnRow}>
+        <button
+          type="button"
+          style={styles.btnPrimary}
+          disabled={provisionDisabled}
+          aria-busy={provisionState.loading}
+          aria-describedby={existsKnownTrue ? 'gpg-provision-exists-hint' : undefined}
+          aria-label={
+            selectedApp ? `GPG-Passphrase für ${selectedApp} in Bitwarden anlegen` : 'Passphrase anlegen'
+          }
+          onClick={handleProvision}
+        >
+          {provisionState.loading ? 'Lege an…' : 'Passphrase anlegen'}
+        </button>
+        {existsKnownTrue && (
+          <span id="gpg-provision-exists-hint" style={styles.inputHint}>
+            Passphrase existiert bereits
+          </span>
+        )}
+        {/* ── Andock-Stelle für "Rotieren" (AC6, Folge-Story S-376) — bewusst
+            noch nicht gebaut, hier nur die Struktur (styles.btnRow neben
+            "Passphrase anlegen"). ── */}
+      </div>
+
+      {statusText && (
+        <span
+          role={statusIsSuccess ? 'status' : 'alert'}
+          aria-live="polite"
+          style={statusIsSuccess ? styles.successText : styles.errorText}
+        >
+          {statusText}
+        </span>
+      )}
+    </section>
+  );
+}
+
+/**
+ * Formatiert das geheimnisfreie Provisionierungs-Ergebnis (AC4) als
+ * Klartext-Hinweis. Zeigt NIE die Passphrase — sie ist per Vertrag nicht Teil
+ * der Response (nur `result`/`reason`).
+ * @param {'created'|'already-exists'|'access-not-ready'|'failed'} result
+ * @param {string|null} reason
+ * @returns {string}
+ */
+function friendlyGpgProvisionResult(result, reason) {
+  switch (result) {
+    case 'created':
+      return 'Angelegt — GPG-Passphrase wurde in Bitwarden hinterlegt.';
+    case 'already-exists':
+      return reason ?? 'Bereits vorhanden — keine Änderung.';
+    case 'access-not-ready':
+      return reason ?? 'Bitwarden-Deploy-Zugang ist noch nicht eingerichtet.';
+    case 'failed':
+      return reason ?? 'GPG-Provisionierung fehlgeschlagen.';
+    default:
+      return reason ?? 'Unbekanntes Ergebnis.';
+  }
 }
 
 // ── VpsReadinessBadge component (S-181, AC9) ─────────────────────────────────

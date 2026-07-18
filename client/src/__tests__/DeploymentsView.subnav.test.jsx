@@ -21,10 +21,10 @@
  *         Quellcode-Review verifiziert (client/index.html `.subnav-item`
  *         min-height: 44px, `.subnav-item:focus-visible` Outline).
  *
- * Hinweis: ein zusätzlicher Test prüft, dass die "GPG-Schlüssel"-Ansicht in
- * dieser Story nur einen Platzhalter-Erklärungstext zeigt (kein Dropdown/keine
- * Aktionen) — AC3–AC7 (App-Auswahl, Provisionieren, Rotieren) sind NICHT Teil
- * dieser Story (Folge-Stories S-375/S-376) und werden hier bewusst NICHT getestet.
+ * Hinweis: AC3–AC7 (App-Auswahl, Provisionieren, Rotieren) sind seit S-375
+ * teilweise umgesetzt (AC3/AC4/AC5/AC7 — "Rotieren" AC6 folgt in S-376) und
+ * werden dediziert in DeploymentsView.gpgKeysSubview.test.jsx getestet, nicht
+ * hier — diese Datei bleibt auf das Untermenü selbst (AC1/AC2/AC8) fokussiert.
  *
  * @jest-environment jsdom
  */
@@ -188,7 +188,7 @@ describe('DeploymentsView — Bereichs-Untermenü Deployment/GPG-Schlüssel (F-0
     expect(container.querySelector('label[for="deploy-gpg-bw-item"]').textContent).toBe('GPG-Bitwarden-Item');
   });
 
-  it('AC3 (Platzhalter, Nicht-Ziel dieser Story): "GPG-Schlüssel"-Ansicht zeigt einen Erklärungstext ohne Dropdown/Aktionen', async () => {
+  it('AC3: "GPG-Schlüssel"-Ansicht zeigt einen Erklärungstext (Dropdown/Aktionen s. DeploymentsView.gpgKeysSubview.test.jsx)', async () => {
     globalThis.fetch = makeFetch();
     const { container } = renderView();
 
@@ -198,8 +198,5 @@ describe('DeploymentsView — Bereichs-Untermenü Deployment/GPG-Schlüssel (F-0
     const section = container.querySelector('[aria-label="GPG-Schlüssel"]');
     expect(section).toBeTruthy();
     expect(section.textContent).toMatch(/Passphrase.*Bitwarden/i);
-    // Kein Dropdown/keine Aktionen in dieser Story (S-375/S-376 folgen)
-    expect(section.querySelector('select')).toBeFalsy();
-    expect(section.querySelector('button')).toBeFalsy();
   });
 });
