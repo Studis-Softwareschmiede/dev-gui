@@ -1,17 +1,18 @@
 id: F-023
-title: 'VPS-Create: region-gefilterte Server-Typen via /v1/datacenters (keine "unsupported location" mehr)'
+title: 'VPS-Create: region-gefilterte Server-Typen via /v1/datacenters (keine "unsupported
+  location" mehr)'
 goal: 'Beim VPS-Erstellen fuehrt eine Region+Server-Typ-Kombination oft zu "Hetzner
   API: Ungueltige Anfrage — unsupported location for server type" (live gefunden:
   fsn1 + cpx11). Wurzel (gegen Hetzner-API 2026-06-19 verifiziert): das Server-Typ-Dropdown
   (S-162) leitet Verfuegbarkeit implizit aus server_types.prices[].location ab — das
   ist falsch (cpx11 hat einen fsn1-PREIS, ist laut /v1/datacenters in fsn1 aber NICHT
-  bereitstellbar; cpx11 nur in ash+hil). Autoritativ ist GET /v1/datacenters
-  (server_types.available je Datacenter, location.name ordnet zu; Union je Location).
-  Diese Feature: Backend liefert eine availability-Map { location: [server-type-name] }
-  aus /v1/datacenters; das Frontend filtert das Typ-Dropdown auf availability[region]
-  und setzt bei Region-Wechsel einen ungueltigen Typ zurueck, sodass nie eine
-  bekannt-ungueltige Kombi absendbar ist. Graceful: fehlt availability -> heutiges
-  Verhalten (alle Typen). Korrektur/Erweiterung von F-014.'
+  bereitstellbar; cpx11 nur in ash+hil). Autoritativ ist GET /v1/datacenters (server_types.available
+  je Datacenter, location.name ordnet zu; Union je Location). Diese Feature: Backend
+  liefert eine availability-Map { location: [server-type-name] } aus /v1/datacenters;
+  das Frontend filtert das Typ-Dropdown auf availability[region] und setzt bei Region-Wechsel
+  einen ungueltigen Typ zurueck, sodass nie eine bekannt-ungueltige Kombi absendbar
+  ist. Graceful: fehlt availability -> heutiges Verhalten (alle Typen). Korrektur/Erweiterung
+  von F-014.'
 status: Done
 priority: P1
 spec: docs/specs/vps-create-options.md
@@ -27,9 +28,9 @@ owner: alex
 stories:
 - S-177
 - S-178
-progress: 0/2
+progress: 2/2 done
 created_at: '2026-06-19T00:00:00Z'
-updated_at: '2026-07-02T03:22:17.133Z'
+updated_at: '2026-07-18T05:23:09Z'
 archived: true
 archived_at: '2026-07-02T03:22:17.133Z'
-area: 'vps'
+area: vps

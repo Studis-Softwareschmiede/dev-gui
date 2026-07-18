@@ -3,7 +3,7 @@ title: 'CI-Build-Effizienz: Container-Build nur bei Code-Änderungen'
 goal: build.yml baut den dev-gui-Container nicht mehr bei reinen board/**-, docs/**-
   und Markdown-Commits; echte Code-/Test-/Dockerfile-/CI-Änderungen bauen unverändert
   voll. Spart die ~5-Min-Leerläufe pro reinem Board-Statuswechsel im Einzel-Drain-Modus.
-status: Backlog
+status: Done
 priority: P2
 spec: docs/specs/ci-build-path-filter.md
 definition_of_done: null
@@ -12,8 +12,10 @@ labels:
 - deploy
 depends: null
 owner: null
-stories: null
-progress: null
+stories:
+- S-323
+progress: 1/1 done
 created_at: '2026-07-08T15:42:17Z'
-updated_at: '2026-07-08T15:42:19Z'
+updated_at: '2026-07-18T05:24:36Z'
 area: deployment
+done_at: '2026-07-18T05:24:36Z'

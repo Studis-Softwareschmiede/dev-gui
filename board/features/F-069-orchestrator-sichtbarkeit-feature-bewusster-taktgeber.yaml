@@ -7,12 +7,11 @@ goal: 'Zwei zusammengehörige Fähigkeiten rund um den neuen agent-flow-Feature-
   (dossier/story/merge/rollout), letzter Fehler; Quelle ist board/runs/F-###/state.yaml
   (read-only). (B) Feature-bewusster ProjectDrain/Nachtwächter: hat die nächste bereite
   To-Do-Story ein Parent-Feature mit mehreren bereiten Storys, wird board-feature-drain.sh
-  F-### gestartet statt einzelner /flow-Läufe; Einzelgänger laufen wie bisher über /flow.
-  Bestehende Leitplanken (JobLock max 1, TokenLimitWatcher, BudgetGuard, Eskalation nach
-  3x kein Fortschritt) gelten unverändert. Bewusst verworfen: lebende LLM-Orchestratoren,
-  parallele Features, Feature-PRs. CROSS-REPO: umsetzbar erst wenn agent-flow
-  feature-batch-orchestration v2 (Run-State-Schreiben) gelandet ist. Owner-Konzept FINAL
-  freigegeben 2026-07-07.'
+  F-### gestartet statt einzelner /flow-Läufe; Einzelgänger laufen wie bisher über
+  /flow. Bestehende Leitplanken (JobLock max 1, TokenLimitWatcher, BudgetGuard, Eskalation
+  nach 3x kein Fortschritt) gelten unverändert. Bewusst verworfen: lebende LLM-Orchestratoren,
+  parallele Features, Feature-PRs. CROSS-REPO: umsetzbar erst wenn agent-flow feature-batch-orchestration
+  v2 (Run-State-Schreiben) gelandet ist. Owner-Konzept FINAL freigegeben 2026-07-07.'
 status: Backlog
 priority: P2
 spec: docs/specs/feature-aware-drain.md
@@ -26,7 +25,13 @@ owner: null
 stories:
 - S-316
 - S-317
-progress: 0/2 done
+- S-324
+- S-325
+- S-326
+- S-329
+- S-330
+- S-362
+progress: 7/8 done
 created_at: '2026-07-07T09:58:50Z'
-updated_at: '2026-07-07T09:58:50Z'
+updated_at: '2026-07-18T05:23:34Z'
 area: nachtwaechter

@@ -11,7 +11,7 @@ goal: 'Der Reconcile-Button lief nie zuverlaessig: der interaktive PTY-Pfad raet
   GET liefert running|done|failed|auth-expired). Frontend: ReconcileTrigger von /api/session-PTY-Poll
   auf den neuen Headless-Endpunkt umgehaengt (bewusste Abloesung der S-205-Poll-Quelle).
   Interaktiver PTY-Pfad (Flow-/Board-Button) bleibt unangetastet.'
-status: Backlog
+status: Done
 priority: P1
 spec: docs/specs/headless-reconcile-runner.md
 definition_of_done: 'Supervised Live-Smoke vor Feature-Done: echter Klick ''Konzept/Spec
@@ -27,7 +27,8 @@ stories:
 - S-208
 progress: 2/2 done
 created_at: '2026-07-01T09:32:01Z'
-updated_at: '2026-07-02T03:22:17.133Z'
+updated_at: '2026-07-18T05:23:59Z'
 archived: true
 archived_at: '2026-07-02T03:22:17.133Z'
-area: 'spezifikation'
+area: spezifikation
+done_at: '2026-07-18T05:23:59Z'

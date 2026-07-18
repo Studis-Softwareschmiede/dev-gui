@@ -4,7 +4,7 @@ goal: In-flight Board-Drains (Nacht + manuell) ueberleben einen Server-/Containe
   als persistenter Datensatz; beim Boot werden verwaiste Drains erkannt, als abgebrochen
   markiert und je betroffenem Projekt genau ein idempotenter Wiederanlauf-Drain angestossen
   (ProjectDrain konvergiert selbst). Detached-Spawn bewusst abgelehnt (ADR-020).
-status: Backlog
+status: Done
 priority: P1
 spec: docs/specs/drain-restart-robustness.md
 definition_of_done: null
@@ -17,7 +17,8 @@ stories:
 - S-282
 - S-283
 - S-284
-progress: 0/4 done
+progress: 4/4 done
 created_at: '2026-07-03T07:15:19Z'
-updated_at: '2026-07-03T07:18:27Z'
-area: 'fabrik-arbeiten'
+updated_at: '2026-07-18T05:24:20Z'
+area: fabrik-arbeiten
+done_at: '2026-07-18T05:24:20Z'

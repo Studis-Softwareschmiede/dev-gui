@@ -4,7 +4,7 @@ goal: Container-claude-Sessions scheitern mit 401, sobald die interaktive OAuth-
   abgelaeuft ist — blockiert reconcile, /flow, Nachtwaechter. Langlebiges CLAUDE_CODE_OAUTH_TOKEN
   (claude setup-token) vom host-.env bis in die PTY-Child-Env durchreichen (compose
   env, PtyManager-Allowlist, Entrypoint-Warnung, .env.example).
-status: Backlog
+status: Done
 priority: P1
 spec: docs/specs/claude-code-oauth-token.md
 definition_of_done: null
@@ -17,7 +17,8 @@ stories:
 - S-206
 progress: 1/1 done
 created_at: '2026-07-01T08:44:33Z'
-updated_at: '2026-07-02T03:22:17.133Z'
+updated_at: '2026-07-18T05:23:59Z'
 archived: true
 archived_at: '2026-07-02T03:22:17.133Z'
-area: 'einstellungen'
+area: einstellungen
+done_at: '2026-07-18T05:23:59Z'

@@ -1,9 +1,9 @@
 id: F-017
 title: 'Deploy-Erreichbarkeit: cloudflared im cloud-init braucht --network host'
 goal: 'Live beim Deploy gefunden: deployte Apps sind ueber Cloudflare nicht erreichbar,
-  weil cloudflared im cloud-init im Default-Bridge-Netz laeuft. Aus Container-Sicht ist
-  localhost dann der Container selbst, nicht der Host, auf dem die App-Container ihre
-  Host-Ports mappen — die Tunnel-Route http://localhost:<hostPort> (DeployOrchestrator)
+  weil cloudflared im cloud-init im Default-Bridge-Netz laeuft. Aus Container-Sicht
+  ist localhost dann der Container selbst, nicht der Host, auf dem die App-Container
+  ihre Host-Ports mappen — die Tunnel-Route http://localhost:<hostPort> (DeployOrchestrator)
   laeuft ins Leere. Fix: cloudflared-docker-run im cloud-init mit --network host starten,
   konsistent zur Route-Konvention. TEMPLATE_VERSION 4->5. Token-Floor unveraendert.'
 status: Done
@@ -19,9 +19,9 @@ depends:
 owner: alex
 stories:
 - S-170
-progress: 1/1
+progress: 1/1 done
 created_at: '2026-06-18T00:00:00Z'
-updated_at: '2026-07-02T03:22:17.133Z'
+updated_at: '2026-07-18T05:23:05Z'
 archived: true
 archived_at: '2026-07-02T03:22:17.133Z'
-area: 'deployment'
+area: deployment

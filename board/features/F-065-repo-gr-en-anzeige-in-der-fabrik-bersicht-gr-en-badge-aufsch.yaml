@@ -6,7 +6,7 @@ goal: Jede Projekt-Karte der Fabrik-Übersicht zeigt ein menschenlesbares Größ
   gemessen lokal per pfad-confined Verzeichnis-Scan des Workspace-Mounts — asynchron,
   gecacht/zeitgestempelt (nie blockierend), plus dezente .git-Blähungs-Frühwarnung
   über konfigurierbare Grenze (Default 500 MB).
-status: Backlog
+status: Done
 priority: P2
 spec: docs/specs/repo-size-badge.md
 definition_of_done: null
@@ -15,8 +15,12 @@ labels:
 - security
 depends: null
 owner: null
-stories: null
-progress: '0/3 done'
+stories:
+- S-297
+- S-298
+- S-299
+progress: 3/3 done
 created_at: '2026-07-05T21:28:01Z'
-updated_at: '2026-07-05T21:28:12Z'
+updated_at: '2026-07-18T05:24:27Z'
 area: fabrik-arbeiten
+done_at: '2026-07-18T05:24:27Z'

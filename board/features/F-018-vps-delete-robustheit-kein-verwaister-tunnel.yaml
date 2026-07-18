@@ -2,13 +2,14 @@ id: F-018
 title: 'VPS-Delete-Robustheit: kein verwaister Cloudflare-Tunnel bei aktiven Connections'
 goal: 'Live beim VPS-Delete gefunden: der Tunnel-Cleanup (VpsProviderRegistry.#cleanupTunnel
   -> CloudflareApi.deleteTunnel) laesst den Tunnel verwaist zurueck, wenn die cloudflared-Connection
-  direkt nach dem Server-Delete noch aktiv ist — Cloudflare antwortet auf DELETE
-  .../cfd_tunnel/{id} mit HTTP 400 / Fehler-Code 1022 ("This tunnel has active connections").
-  Folge: VPS-Delete liefert {result:"ok", cleanupError:"Cloudflare API error (HTTP 400)"},
-  Server weg, Tunnel bleibt verwaist. Fix: deleteTunnel raeumt vor dem Tunnel-Delete die
-  aktiven Connections auf (DELETE .../cfd_tunnel/{id}/connections) bzw. behandelt Code 1022
-  mit connections-cleanup + begrenztem Retry. Idempotent/best-effort, Token-Floor (ADR-010)
-  unveraendert, AC4 (geheimnisfreier cleanupError, Server-Delete-Erfolg unmaskiert) bleibt.'
+  direkt nach dem Server-Delete noch aktiv ist — Cloudflare antwortet auf DELETE .../cfd_tunnel/{id}
+  mit HTTP 400 / Fehler-Code 1022 ("This tunnel has active connections"). Folge: VPS-Delete
+  liefert {result:"ok", cleanupError:"Cloudflare API error (HTTP 400)"}, Server weg,
+  Tunnel bleibt verwaist. Fix: deleteTunnel raeumt vor dem Tunnel-Delete die aktiven
+  Connections auf (DELETE .../cfd_tunnel/{id}/connections) bzw. behandelt Code 1022
+  mit connections-cleanup + begrenztem Retry. Idempotent/best-effort, Token-Floor
+  (ADR-010) unveraendert, AC4 (geheimnisfreier cleanupError, Server-Delete-Erfolg
+  unmaskiert) bleibt.'
 status: Done
 priority: P1
 spec: docs/specs/vps-delete.md
@@ -22,9 +23,9 @@ depends:
 owner: alex
 stories:
 - S-171
-progress: 1/1
+progress: 1/1 done
 created_at: '2026-06-18T00:00:00Z'
-updated_at: '2026-07-02T03:22:17.133Z'
+updated_at: '2026-07-18T05:23:06Z'
 archived: true
 archived_at: '2026-07-02T03:22:17.133Z'
-area: 'vps'
+area: vps

@@ -1,9 +1,10 @@
 id: F-013
 title: End-to-End-Deployment-Pipeline (Image → VPS+Tunnel → erreichbar)
-goal: 'Aus dev-gui heraus ein ghcr-Image lokal testen und auf einen VPS deployen; der
+goal: Aus dev-gui heraus ein ghcr-Image lokal testen und auf einen VPS deployen; der
   VPS bekommt beim Anlegen automatisch einen Cloudflare-Tunnel (cloudflared), sodass
   die App über eine wählbare Domäne aus dem Internet erreichbar wird. Container-Übersicht
-  pro VPS direkt in dev-gui (statt Portainer). Undeploy entfernt Container + Route. Nur S3 fürs Backup.'
+  pro VPS direkt in dev-gui (statt Portainer). Undeploy entfernt Container + Route.
+  Nur S3 fürs Backup.
 status: Done
 priority: P1
 spec: docs/specs/deploy-lifecycle.md
@@ -25,9 +26,9 @@ stories:
 - S-158
 - S-159
 - S-160
-progress: 10/10
+progress: 10/10 done
 created_at: '2026-06-17T21:26:29Z'
-updated_at: '2026-07-02T03:22:17.133Z'
+updated_at: '2026-07-18T05:23:03Z'
 archived: true
 archived_at: '2026-07-02T03:22:17.133Z'
-area: 'deployment'
+area: deployment

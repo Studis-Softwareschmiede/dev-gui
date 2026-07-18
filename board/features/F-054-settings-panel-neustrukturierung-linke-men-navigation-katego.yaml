@@ -5,7 +5,7 @@ goal: 'SettingsView.jsx (~5700 Zeilen) auf linke Kategorie-Menü-Navigation umst
   links klickbares/deep-linkbares Kategorie-Menü, rechts Parameterbereich der gewählten
   Kategorie; reine Umverpackung bestehender Sektionen + Tastatur/ARIA/Deep-Link gemäß
   docs/design.md D1-D20.'
-status: Backlog
+status: Done
 priority: P2
 spec: docs/specs/settings-panel-navigation.md
 definition_of_done: null
@@ -13,8 +13,13 @@ labels:
 - ui
 depends: null
 owner: null
-stories: null
-progress: null
+stories:
+- S-266
+- S-267
+- S-268
+- S-269
+progress: 4/4 done
 created_at: '2026-07-03T06:21:56Z'
-updated_at: '2026-07-03T06:21:56Z'
-area: 'einstellungen'
+updated_at: '2026-07-18T05:24:12Z'
+area: einstellungen
+done_at: '2026-07-18T05:24:12Z'

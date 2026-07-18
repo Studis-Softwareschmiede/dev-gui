@@ -1,10 +1,12 @@
 id: F-061
-title: Bereichs-Zuordnung im Story-/Idee-Dialog — Dropdown über dem Titel, Vorbelegung, Inline-Neuanlage
-goal: Ein Bereichs-Dropdown oberhalb des Titelfelds in beiden Erfassungs-Dialogen (Idee-Quick-Capture
-  + „Neue Story"-Start), vorbelegt mit dem Bereich der aktuell geöffneten Kachel, mit Inline-Neuanlage
-  eines Bereichs über den bestehenden Verwalten-Pfad; die gewählte Bereichszuordnung wird am neuen
-  Item (area-Feld) bzw. best-effort am headless requirement-Lauf persistiert.
-status: Backlog
+title: Bereichs-Zuordnung im Story-/Idee-Dialog — Dropdown über dem Titel, Vorbelegung,
+  Inline-Neuanlage
+goal: Ein Bereichs-Dropdown oberhalb des Titelfelds in beiden Erfassungs-Dialogen
+  (Idee-Quick-Capture + „Neue Story"-Start), vorbelegt mit dem Bereich der aktuell
+  geöffneten Kachel, mit Inline-Neuanlage eines Bereichs über den bestehenden Verwalten-Pfad;
+  die gewählte Bereichszuordnung wird am neuen Item (area-Feld) bzw. best-effort am
+  headless requirement-Lauf persistiert.
+status: Done
 priority: P2
 spec: docs/specs/story-idee-bereich-zuordnung.md
 definition_of_done: null
@@ -15,6 +17,7 @@ area: board
 stories:
 - S-291
 - S-292
-progress: 0/2 done
+progress: 2/2 done
 created_at: '2026-07-03T12:53:27Z'
-updated_at: '2026-07-03T12:53:27Z'
+updated_at: '2026-07-18T05:24:24Z'
+done_at: '2026-07-18T05:24:24Z'

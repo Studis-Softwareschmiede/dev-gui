@@ -6,7 +6,7 @@ goal: 'Das Projekt-Cockpit wird verschlankt (TriggerPanel + Status-Dashboard res
   mit drei Wegen: Neues Projekt (Scaffold, unveraendert), Aus Obsidian uebernehmen
   (from-notes umgehaengt) und Adopt (neu: beliebige GitHub-URL -> Fork+Uebernahme).
   Owner-Ko-Design 2026-07-03, freigegeben.'
-status: Backlog
+status: Done
 priority: P2
 spec: docs/specs/neues-projekt-auswahl-dialog.md
 definition_of_done: null
@@ -21,7 +21,8 @@ stories:
 - S-303
 - S-304
 - S-305
-progress: 0/6 done
+progress: 6/6 done
 created_at: '2026-07-05T22:16:40Z'
-updated_at: '2026-07-05T22:21:51Z'
+updated_at: '2026-07-18T05:24:30Z'
 area: fabrik-arbeiten
+done_at: '2026-07-18T05:24:30Z'

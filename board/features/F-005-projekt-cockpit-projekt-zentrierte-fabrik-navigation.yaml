@@ -9,10 +9,18 @@ definition_of_done: null
 labels: null
 depends: null
 owner: null
-stories: null
-progress: null
+stories:
+- S-108
+- S-109
+- S-110
+- S-111
+- S-112
+- S-113
+- S-124
+- S-125
+progress: 8/8 done
 created_at: '2026-06-15T09:08:55Z'
-updated_at: '2026-07-02T03:22:17.133Z'
+updated_at: '2026-07-18T05:22:59Z'
 archived: true
 archived_at: '2026-07-02T03:22:17.133Z'
-area: 'fabrik-arbeiten'
+area: fabrik-arbeiten

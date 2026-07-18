@@ -4,7 +4,7 @@ title: 'Fabrik Arbeiten-Tab: Claude-Terminal entfernen + Button-Spalte neu anord
 goal: Da der Board-Drain headless läuft (ADR-017), wird das dominante eingebettete
   Claude-Terminal aus dem Arbeiten-Reiter entfernt und die Button-Spalte (Board abarbeiten+Cost-Mode,
   Idee, Neue Story, verschlankter Trigger, Kill) per Designer-Vorschlag neu angeordnet.
-status: Backlog
+status: Done
 priority: P2
 spec: docs/specs/fabrik-arbeiten-layout.md
 definition_of_done: null
@@ -14,7 +14,8 @@ depends: null
 owner: null
 stories:
 - S-265
-progress: 0/1 done
+progress: 1/1 done
 created_at: '2026-07-02T06:35:23Z'
-updated_at: '2026-07-02T06:37:56Z'
-area: 'fabrik-arbeiten'
+updated_at: '2026-07-18T05:24:11Z'
+area: fabrik-arbeiten
+done_at: '2026-07-18T05:24:11Z'

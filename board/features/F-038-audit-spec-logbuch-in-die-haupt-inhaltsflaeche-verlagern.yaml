@@ -7,7 +7,7 @@ goal: 'Der Button ''Audit-Spec anzeigen'' (S-203) rendert docs/spec-audit.md heu
   gleiche Breite/Padding/Scroll). Der Button bleibt als kleiner Sekundaer-Button in
   der Sidebar. Umschalten Audit <-> Navigations-Dokument in einer Quelle; 404/Lade-/Fehlerzustaende
   + Auto-Reload (S-205) + PR-Bezug bleiben erhalten, jetzt in der Hauptflaeche.'
-status: Backlog
+status: Done
 priority: P2
 spec: docs/specs/audit-spec-main-pane.md
 definition_of_done: null
@@ -21,7 +21,8 @@ stories:
 - S-210
 progress: 1/1 done
 created_at: '2026-07-01T11:06:40Z'
-updated_at: '2026-07-02T03:22:17.133Z'
+updated_at: '2026-07-18T05:24:01Z'
 archived: true
 archived_at: '2026-07-02T03:22:17.133Z'
-area: 'spezifikation'
+area: spezifikation
+done_at: '2026-07-18T05:24:01Z'
