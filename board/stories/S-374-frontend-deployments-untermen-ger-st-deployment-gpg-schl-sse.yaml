@@ -1,0 +1,29 @@
+id: S-374
+parent: F-087
+title: 'Frontend: Deployments-Untermenü-Gerüst (Deployment/GPG-Schlüssel) + GPG-Sektionen
+  aus Hauptansicht herauslösen'
+status: To Do
+priority: P2
+spec: docs/specs/deployments-gpg-subview.md
+implements:
+- AC1
+- AC2
+- AC8
+depends: null
+labels:
+- ui
+size_est: M
+dispo_est: '5.0'
+dispo_act: null
+dispo_forecast: null
+estimate_note: Heuristik-Score→M (js|balanced); estimator nicht dispatchbar (Subagent,
+  keine Task) und bei M ohnehin nicht nötig; dispo_est aus baseline js|balanced|M
+  (.ep=5.0, n=8); keine Baseline-Tokens (tok_total null) → tok_est null.
+confidence: medium
+tok_est: null
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-07-18T13:44:55Z'
+updated_at: '2026-07-18T13:47:09Z'
+done_at: null

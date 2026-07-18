@@ -772,3 +772,277 @@ das optimistische Bild, sobald er eintrifft (SSE/Re-Fetch, s. Abschnitt 5).
   Icon+Text+Farbe-Muster der „Fabrik-Panel Regressionstests"-Sektion oben.
 - Kein Board-Story-Bezug (S-Nummer) bekannt — Abschnitt referenziert das
   Owner-Auftragsdatum (2026-07-06).
+
+## Bereichs-Untermenü (linke Unter-Navigation innerhalb einer Bereichs-Ansicht) (bereichs-untermenu, F-087, S-374)
+
+Designer-Vorgabe für ein **wiederverwendbares Pattern**: eine **linke
+Unter-Navigation innerhalb einer bereits geöffneten Bereichs-Ansicht**, die
+zwischen mehreren **Unteransichten desselben Bereichs** umschaltet (rein
+Client-State, ohne Voll-Reload). Erster Anwendungsfall: der Deployments-Bereich
+(`client/src/DeploymentsView.jsx`) mit den Einträgen „Deployment" (Standard)
+und „GPG-Schlüssel" — Spec [[deployments-gpg-subview]] (F-087, S-373–S-376),
+AC1/AC8. Bindend für `coder`; Konformität prüft `reviewer` via UI-Pack-Checklist.
+**Keine neuen Farbwerte** — ausschließlich bereits im Projekt verifizierte
+Tokens (`#9ca3af`/`#111`, `#e5e7eb`/`#1e293b`, `#3b82f6`-Akzent) und die
+bestehende `settings-nav`-CSS-Familie (`client/index.html`).
+
+### 0. Abgrenzung zur Settings-Kategorien-Nav (bewusste, testbare Unterscheidung)
+
+Dieses Pattern gleicht **anders** als die „Settings-Panel Navigation" oben
+(Abschnitt „Settings-Panel Navigation") — die Unterscheidung ist **bewusst**
+und in der Spec verankert (AC1/AC8 fordern **`aria-current`**, nicht
+`aria-selected`):
+
+| Aspekt | Settings-Kategorien-Nav | **Bereichs-Untermenü (dieses Pattern)** |
+|---|---|---|
+| ARIA-Rolle | `role="tablist"` / `role="tab"` / `role="tabpanel"`, `aria-selected` | **`<nav>`-Landmark + Buttons, aktiver Eintrag `aria-current="page"`** — **kein** Tablist/Tabpanel |
+| Tastatur | Roving Tabindex (**ein** Tab-Stopp), Pfeiltasten aktivieren sofort | **jeder Eintrag ein normaler Tab-Stopp**; Tab bewegt, Enter/Space aktiviert; **keine** Pfeiltasten-Roving-Logik |
+| Deep-Link | Pflicht (`#/settings/<slug>`) | **optional/nicht gefordert** ([[deployments-gpg-subview]] Verträge) — reiner Client-State |
+| Semantik | Tab-Widget (ein Steuerelement, viele Panels) | **In-Bereichs-Navigation** zwischen Unteransichten |
+
+**Begründung:** ein Bereichs-Untermenü ist konzeptionell **Navigation**
+(zwischen eigenständigen Unteransichten eines Bereichs), kein Tab-Widget über
+Facetten **eines** Inhalts. `aria-current="page"` ist das W3C-Muster für „der
+aktuell dargestellte Navigations-Eintrag"; Roving-Tabindex und Pfeiltasten-
+Aktivierung sind Tablist-Mechanik und hier bewusst **nicht** übernommen, um AT
+das erwartete Navigations-Verhalten (jeder Eintrag per Tab erreichbar) zu
+geben. **Visuell** ist das Untermenü mit der Settings-Nav identisch (gleiche
+Tokens/Zustände) — nur die **Semantik/Tastatur** unterscheidet sich.
+
+### 1. Layout-Spezifikation
+
+**Struktur (≥ 1024 px — identischer Breakpoint wie der globale Responsive-Floor
+oben und die Settings-Nav):**
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│ Deployments                                                    │  ← Bereichs-Titel (styles.title, unverändert)
+├───────────────┬──────────────────────────────────────────────┤
+│ Deployment    │                                                │
+│ GPG-Schlüssel │   Aktive Unteransicht (genau EINE sichtbar)    │
+│               │   (bestehende <section>/sectionTitle-Blöcke)   │
+└───────────────┴──────────────────────────────────────────────┘
+```
+
+- **Bereichs-Titel** („Deployments", `styles.title`) bleibt **oberhalb** von
+  Nav+Content, **nicht** Teil einer Unteransicht (analog Settings-Kopfzeile).
+- **Nav-Spalte:** feste Breite **220 px** (Wiederverwendung des bestehenden
+  `settings-nav`-Wertes — **kein** neuer Breitenwert trotz nur zweier kurzer
+  Einträge, zugunsten Konsistenz), Hintergrund transparent auf dem
+  `styles.view`-Grund (`#1a1a1a`); **kein** eigener Spalten-Hintergrund/Border
+  nötig (die Einträge tragen ihren eigenen Aktiv-/Hover-Hintergrund).
+- **Nav-Item:** Block-Button, volle Nav-Breite, **Mindesthöhe 44 px**, Padding
+  `10px 16px`, Schriftgröße 14 px, `border-left: 3px solid transparent` (Platz
+  für den Aktiv-Indikator reserviert → kein Layout-Sprung beim Wechsel).
+  Zustände 1:1 aus der `settings-nav-item`-Familie (s. Abschnitt 2).
+- **Content-Spalte:** `flex: 1`, `min-width: 0`, `max-width: 860 px`
+  (bestehender `styles.inner`-Wert der DeploymentsView **unverändert**
+  übernommen), zeigt **genau eine** Unteransicht gleichzeitig (kein Accordion,
+  kein Parallel-Render beider Unteransichten).
+- **Abstand Nav↔Content:** 24 px (3× 8-pt-Skala; identisch Settings).
+- **Gesamtcontainer:** wächst gegenüber dem heutigen `styles.inner`
+  (`maxWidth: 860`) auf **~1104 px** (220 Nav + 24 Gap + 860 Content),
+  weiterhin zentriert — die Content-Spalte behält damit ihre heutige Breite,
+  der Deploy-Bereich wird nicht schmaler.
+
+**Unter 1024 px:** Die Nav klappt in eine **horizontale, scrollbare Leiste**
+oberhalb des Content-Bereichs um (volle Breite, `overflow-x: auto`, jedes
+Nav-Item Mindesthöhe 44 px, horizontales Padding 16 px) — identisch zum
+Umklappen der Settings-Nav. *Entscheidung gegen Hamburger/Collapse-Icon:*
+zwei kurze Einträge bleiben so jederzeit mit einem Klick sichtbar; kein
+Öffnen/Schließen-Zwischenschritt (Admin-Tool-Charakter, Desktop-zuerst).
+Gleicher Breakpoint (1024 px) wie der bestehende globale Floor — **kein** neuer
+Breakpoint.
+
+**CSS-Wiederverwendung:** Das Pattern verwendet eine **eigene, generische**
+CSS-Klassenfamilie in `client/index.html` (`.subnav-layout` / `.subnav` /
+`.subnav-list` / `.subnav-item` / `.subnav-content`), **strukturell 1:1
+gespiegelt** von der bestehenden `settings-*`-Familie (Zeilen 24–46), damit das
+Pattern nicht an die Settings-View gekoppelt ist. Inline-Style-Objekte können
+`:hover`/`:focus-visible` nicht abbilden — daher CSS-Klassen (wie bei
+`settings-nav-item`), **nicht** Inline-Styles, für die interaktiven Zustände.
+
+### 2. Zustände der Nav-Einträge (1:1 aus `settings-nav-item`, keine neuen Werte)
+
+| Zustand | Hintergrund | Textfarbe | Rahmen links | Fettdruck | Kontrast (verifiziert) |
+|---|---|---|---|---|---|
+| **Inaktiv** | transparent | `#9ca3af` | `3px solid transparent` | 400 | `#9ca3af` auf `#1a1a1a` ≈ **6.8:1** (≥ 4.5:1) |
+| **Hover** (nur `:hover`, pointer-fähig) | `#1e293b` | `#9ca3af` | `3px solid transparent` | 400 | `#9ca3af` auf `#1e293b` ≈ **5.8:1** |
+| **Fokus** (`:focus-visible`) | wie Zustand darunter | wie darunter | wie darunter | wie darunter | Outline `2px solid #3b82f6`, `outline-offset: 1px` |
+| **Aktiv** (`aria-current="page"`) | `#1e293b` | `#e5e7eb` | `3px solid #3b82f6` | 700 | `#e5e7eb` auf `#1e293b` ≈ **11.6:1** |
+
+- **Aktiv-Unterscheidung nie allein über Farbe:** aktiver Eintrag trägt
+  **Rahmenfarbe + Textfarbe + Fettdruck + `aria-current="page"`** gleichzeitig
+  (WCAG 2.1 AA — vier Kanäle, nicht nur Farbe).
+- **Hover ≠ Aktiv:** Hover setzt **nur** den Hintergrund (`#1e293b`), **keinen**
+  linken Rahmen, **keinen** Fettdruck — Unterscheidung zum Aktiv-Zustand
+  ausschließlich über Rahmen/Fettdruck/Textfarbe (identisch Settings D8). Hover
+  ist reine Komfort-Rückmeldung, kein WCAG-Pflichtkriterium.
+- **Typografie/Abstände** folgen der bestehenden Skala: 14 px Nav-Text (wie
+  `settings-nav-item`), Padding `10px 16px`, 8-pt-Abstände; **kein** neuer
+  Typo-/Spacing-Wert.
+
+### 3. Verhalten beim Wechsel
+
+- **Standard-Eintrag:** beim Öffnen des Bereichs ist der **erste** Eintrag
+  (Deployments: „Deployment") aktiv und gerendert — Client-State-Default, kein
+  Deep-Link nötig ([[deployments-gpg-subview]] AC1).
+- **Genau eine Unteransicht gemountet:** die nicht-aktive Unteransicht wird
+  **nicht** gerendert (weder versteckt noch parallel gehalten). Umschalten
+  **unmountet** die alte und **mountet** die neue Unteransicht — kein
+  Voll-Reload der Bereichs-Ansicht, nur ein Client-State-Wechsel.
+- **Zustand der Unteransichten:** lokaler Eingabe-/Auswahl-State einer
+  Unteransicht wird beim Wegschalten **verworfen** (Konsequenz des
+  Unmount/Mount). Für die GPG-Schlüssel-Ansicht ist das **erwünscht** und
+  sicherheitskonform: bei Rückkehr wird die App-Auswahl auf den Default
+  zurückgesetzt und die Existenz-Abfrage `GET .../gpg-exists` **neu**
+  ausgelöst ([[deployments-gpg-subview]] AC5) — kein veralteter
+  Existenz-/Knopf-Zustand über einen Ansichtswechsel hinweg.
+- **Fokus beim Wechsel:** nach Aktivieren eines Eintrags **bleibt der Fokus auf
+  dem aktivierten Nav-Button** (kein Fokus-Diebstahl in den Content). Der
+  Content-Wechsel ist über die Region (Abschnitt 4) programmatisch benannt; die
+  Nav bleibt der stabile Bezugspunkt für weiteres Umschalten (Navigations-
+  Muster, nicht Dialog-Muster).
+
+### 4. Accessibility (WCAG 2.1 AA)
+
+- **Struktur:** `<nav aria-label="Deployments-Unterbereiche">` (allgemein:
+  `<Bereichsname>-Unterbereiche`) umschließt eine Liste; je Unteransicht ein
+  **nativer** `<button type="button" aria-current={active ? 'page' : undefined}
+  id="subnav-<slug>">`. **Kein** `role="tab"`/`role="tablist"` (s. Abschnitt 0).
+- **Content-Region:** die Content-Spalte ist `<section aria-labelledby="subnav-<aktiver-slug>"
+  tabIndex={-1}>` — programmatisch mit dem aktiven Nav-Eintrag verknüpft (der
+  Eintrags-Text benennt die Region). `tabIndex={-1}` erlaubt optionales,
+  programmatisches Fokussieren, **erzwingt** es aber nicht (Fokus bleibt per
+  Default auf dem Button, Abschnitt 3).
+- **Tastatur:** jeder Nav-Button ist ein **normaler Tab-Stopp** (Reihenfolge =
+  DOM-Reihenfolge = visuelle Reihenfolge: „Deployment" vor „GPG-Schlüssel");
+  **Tab/Shift+Tab** bewegt zwischen den Einträgen, **Enter/Space** aktiviert
+  den fokussierten Eintrag. **Keine** Pfeiltasten-Roving-Logik (bewusst, s.
+  Abschnitt 0). Kein `outline: none`.
+- **Fokus-Ring:** `:focus-visible`-Outline `2px solid #3b82f6`,
+  `outline-offset: 1px` — eigene CSS-Regel in `client/index.html`
+  (`.subnav-item:focus-visible`), identisch zur `settings-nav-item:focus-visible`-
+  Regel.
+- **Touch-Targets:** Nav-Items ≥ 44 px Höhe (Desktop-Spalte **und** Mobile-
+  Leiste).
+- **Fokus-Reihenfolge (Bereich gesamt):** Bereichs-Titel → Nav-Einträge →
+  aktive Content-Region (deren interne Fokus-Reihenfolge unverändert die der
+  bestehenden `<section>`-Blöcke ist).
+- **Screenreader:** der Nav-Eintrags-Text („GPG-Schlüssel") und die
+  `sectionTitle`-Überschriften **innerhalb** der Unteransicht sind
+  unterschiedliche, nicht redundante Texte — kein Doppel-Announcement.
+
+### 5. Erster Anwendungsfall — Deployments-Unterbereiche (F-087)
+
+- **Nav-Einträge (feste Reihenfolge):** 1) **„Deployment"** (`slug: deployment`,
+  Standard/aktiv beim Öffnen) → die bestehende Deployments-Ansicht **minus** der
+  zwei GPG-Sektionen ([[deployments-gpg-subview]] AC2); 2) **„GPG-Schlüssel"**
+  (`slug: gpg`) → die neue kompakte GPG-Ansicht (unten).
+- **`<nav aria-label="Deployments-Unterbereiche">`**; aktiver Eintrag
+  `aria-current="page"`.
+
+**Unteransicht „GPG-Schlüssel" (kompakt, [[deployments-gpg-subview]] AC3–AC7):**
+folgt dem bestehenden `styles.section`/`styles.sectionTitle`-Muster der
+DeploymentsView (**keine** neue Karten-/Sektionsvariante):
+
+1. **Kurze Erklärung** (`styles.hint`, `#9ca3af`, 14 px, `line-height 1.5`):
+   ein bis zwei Sätze, z. B. „Hier legst du je App eine GPG-Passphrase in
+   Bitwarden an und rotierst die aktive Passphrase sicher. Die Passphrase selbst
+   wird nie angezeigt."
+2. **App-Auswahl** — ein `<select>` im bestehenden `styles.input`-Stil
+   (`#1e293b`/`#334155`/`#e5e7eb`, `minHeight 36`) mit zugehörigem
+   `styles.label` (`htmlFor`-verknüpft). Bei leerer App-Liste: neutraler Hinweis
+   („keine App gefunden"), Select + Aktionen deaktiviert (AC-Edge-Case).
+3. **Zwei Aktionen daneben** (`styles.btnRow`, `gap 8`, `flex-wrap`) — auf
+   ≥ 44 px Touch-Target:
+   - **„Passphrase anlegen"** — `styles.btnPrimary` (`#1d4ed8`/`#fff`). **Nur
+     aktiv**, wenn `GET .../gpg-exists` `exists:false` liefert; bei `exists:true`
+     **deaktiviert** (`styles.btnSecondary`-artiges Disabled-Erscheinungsbild)
+     mit sichtbarem Text-Hinweis „Passphrase existiert bereits" (nie nur Farbe);
+     Lade-/`access-not-ready`-Fallback: bedienbar bleiben ([[deployments-gpg-subview]]
+     AC5).
+   - **„Rotieren"** — `styles.btnSecondary` (Outline `#334155`); klappt die
+     bestehende zweistufige Rotation auf (unveränderte Endpunkte/Bestätigungs-
+     Gates, AC6); der Rollback-Anker-Aufräum-Knopf bleibt der bestehende
+     `styles.btnDanger`-Typ-to-confirm-Knopf.
+4. **Statusmeldungen** geheimnisfrei, programmatisch zugeordnet: Erfolg/Info
+   `role="status" aria-live="polite"`, Fehler `role="alert"` — Bedeutung nie
+   allein über Farbe (Icon/Text zusätzlich), keine Passphrase je in State/DOM
+   (AC7).
+
+### 6. Design-Entscheidungen (testbar)
+
+- **D1** — Bereichs-Untermenü = **`<nav>`-Landmark + Buttons mit
+  `aria-current="page"`** am aktiven Eintrag; **kein** `role="tablist"`/
+  `role="tab"`/`role="tabpanel"`, **kein** `aria-selected` (bewusste Abgrenzung
+  zur Settings-Kategorien-Nav; Spec AC1/AC8 fordern `aria-current`).
+- **D2** — Jeder Nav-Eintrag ist ein **normaler Tab-Stopp**; Tab/Shift+Tab
+  bewegt, Enter/Space aktiviert; **keine** Pfeiltasten-Roving-Logik.
+- **D3** — Ab ≥ 1024 px: linke Nav-Spalte fester Breite **220 px**, 24 px Gap,
+  Content-Spalte `flex:1`/`max-width:860`. Unter 1024 px: horizontale,
+  scrollbare Nav-Leiste oberhalb des Contents. Kein Hamburger/Collapse-Icon.
+  Breakpoint 1024 px (bestehender Floor, kein neuer).
+- **D4** — Nav-Item Mindesthöhe **44 px**, Padding `10px 16px`, Schrift 14 px,
+  `border-left: 3px solid transparent` (Platz reserviert).
+- **D5** — Zustände 1:1 `settings-nav-item`: Inaktiv (transparent/`#9ca3af`),
+  Hover (`#1e293b`/`#9ca3af`, kein Rahmen/Fettdruck), Aktiv (`#1e293b`/`#e5e7eb`/
+  `border-left 3px #3b82f6`/`font-weight 700`).
+- **D6** — Aktiv-Zustand über **vier** Kanäle (Rahmen + Textfarbe + Fettdruck +
+  `aria-current`), nie Farbe allein.
+- **D7** — Sichtbarer Fokus `:focus-visible` `2px solid #3b82f6`,
+  `outline-offset: 1px`, als eigene CSS-Regel `.subnav-item:focus-visible` in
+  `client/index.html` (analog `settings-nav-item`).
+- **D8** — Genau **eine** Unteransicht gleichzeitig gemountet; Umschalten
+  unmountet die alte, mountet die neue (kein Parallel-Render, kein Voll-Reload).
+- **D9** — Standard-Eintrag = **erster** Eintrag („Deployment"), aktiv beim
+  Öffnen; reiner Client-State, kein Deep-Link erforderlich.
+- **D10** — Lokaler State einer Unteransicht wird beim Wegschalten verworfen
+  (Mount/Unmount); Rückkehr zu „GPG-Schlüssel" setzt App-Auswahl auf Default und
+  löst die Existenz-Abfrage neu aus (kein veralteter Knopf-Zustand).
+- **D11** — Fokus bleibt beim Wechsel auf dem aktivierten Nav-Button (kein
+  Fokus-Diebstahl); Content-Region `<section aria-labelledby="subnav-<slug>"
+  tabIndex={-1}>`.
+- **D12** — CSS-Klassenfamilie **`.subnav-*`** (generisch, nicht an Settings
+  gekoppelt), strukturell gespiegelt von `.settings-*`; interaktive Zustände via
+  CSS-Klassen, nicht Inline-Styles.
+- **D13** — GPG-Schlüssel-Unteransicht nutzt bestehende `styles.section`/
+  `sectionTitle`/`input`/`label`/`btnPrimary`/`btnSecondary`/`btnDanger`-Tokens
+  der DeploymentsView; keine neue Sektions-/Button-Variante.
+- **D14** — Statusmeldungen: Erfolg/Info `role="status" aria-live="polite"`,
+  Fehler `role="alert"`; Icon/Text zusätzlich zur Farbe; keine Passphrase im
+  State/DOM.
+- **D15** — Keine neuen Farbwerte: alle Hex-Werte (`#1a1a1a`, `#111`, `#1e293b`,
+  `#9ca3af`, `#e5e7eb`, `#334155`, `#3b82f6`, `#1d4ed8`, `#fff`, `#7f1d1d`,
+  `#fca5a5`) sind im Projekt bereits im Einsatz (`DeploymentsView.jsx` /
+  `settings-nav`).
+- **D16** — `data-testid`-Konvention (kebab-case, Präfix `subnav-`):
+  `subnav` (nav), `subnav-item-deployment` / `subnav-item-gpg` (Einträge),
+  `subnav-content` (Content-Region).
+
+### Annahmen
+
+- **`aria-current`-statt-`aria-selected`-Entscheidung** ist von der Spec
+  vorgegeben (AC1/AC8) und wird hier als bewusste, dauerhafte Pattern-Abgrenzung
+  zur Settings-Tablist verankert — nicht als Zufall.
+- **Nav-Breite 220 px** bewusst von der Settings-Nav übernommen, obwohl das
+  Deployments-Untermenü nur zwei kurze Einträge hat — Konsistenz vor
+  Minimal-Breite; falls der Owner eine schmalere Spalte wünscht, ist das eine
+  einzeilige Änderung an D3/`.subnav`-Breite.
+- **State-verwerfen-beim-Wechsel** (D10) statt Keep-Alive gewählt, weil es die
+  sicherheitskritische Existenz-Abfrage (`gpg-exists`) bei Rückkehr **frisch**
+  erzwingt und keinen veralteten „Knopf deaktiviert"-Zustand konserviert; für
+  die „Deployment"-Unteransicht ist der Mount/Unmount-Reload unkritisch (lädt
+  ihren Bestand ohnehin über bestehende Effects).
+- **Deep-Link je Unterbereich** ist **nicht** Teil dieser Vorgabe
+  ([[deployments-gpg-subview]] Nicht-Ziele) — falls später gewünscht, ließe sich
+  das `#/settings/<slug>`-Muster analog auf `#/deployments/<slug>` erweitern,
+  ohne die hier definierten Zustände/A11y zu ändern.
+- **`.subnav-*`-Klassen-Präfix** (statt Wiederverwendung der `settings-*`-
+  Klassen) gewählt, damit das Pattern bereichsunabhängig bleibt und ein
+  künftiger Umbau der Settings-Nav es nicht bricht — die konkrete
+  Datei-/Komponenten-Aufteilung (eigene `SubNav`-Komponente vs. inline in
+  `DeploymentsView`) ist Implementierungsdetail des `coder`; bindend ist nur
+  Markup/Zustände/A11y oben.
+- Kein Board-Story-Bezug im Detail zitiert außer F-087/S-374 (Untermenü-Gerüst
+  wird gegen diese Vorgabe gebaut) — Quelle: [[deployments-gpg-subview]].

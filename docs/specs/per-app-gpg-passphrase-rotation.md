@@ -4,7 +4,7 @@ title: Per-App-GPG-Passphrase — sichere Zwei-Phasen-Rotation (beweisen, umscha
 status: active
 area: deployment
 spec_format: use-case-2.0
-version: 2
+version: 3
 ---
 
 # Spec: Per-App-GPG-Passphrase — sichere Zwei-Phasen-Rotation (`per-app-gpg-passphrase-rotation`)
@@ -33,7 +33,7 @@ Die Leitplanken **S1–S6** aus [[deploy-bitwarden-gpg-injection]] §3 gelten un
 4. **(d) Alt erst am Schluss weg (manuell).** Das Feld `vorherige` wird **ausschließlich** manuell per Knopf entsorgt — und zwar **erst**, nachdem ein Deploy mit der neuen Passphrase nachweislich durchlief. Kein automatisches Löschen des Rollback-Ankers im Rotations-Flow.
 5. **Umkehrbarkeit bis (c).** Vor dem Umschalt-Punkt ist jeder Zwischenzustand vollständig umkehrbar: aktives `.env.gpg` unverändert, aktives Item-Passwortfeld unverändert, nur `naechste` gesetzt. Der Commit-Punkt ist Schritt (c).
 6. **Schutz (Floor, hart).** Rotation hinter `AccessGuard` + `CRED_ADMIN_EMAILS` + Audit-First (Audit nennt nur Aktion/Phase, **nie** Passphrasen-Werte). Weder alte noch neue Passphrase noch Klartext des `.env.gpg` erscheint in Log/Audit/Response/WS/Argv/Bundle.
-7. **UI-Muster.** Die Rotation wird über eine **zweistufige Quittung** ausgelöst (Muster Backup-Settings, [[credential-backup]]): Stufe 1 „Kandidat + Beweis-Runde", Stufe 2 „umgeschaltet". Der Rollback-Anker-Aufräum-Knopf ist eine getrennte, explizit bestätigte Aktion.
+7. **UI-Muster.** Die Rotation wird über eine **zweistufige Quittung** ausgelöst (Muster Backup-Settings, [[credential-backup]]): Stufe 1 „Kandidat + Beweis-Runde", Stufe 2 „umgeschaltet". Der Rollback-Anker-Aufräum-Knopf ist eine getrennte, explizit bestätigte Aktion. **(v3, Owner 2026-07-18):** Die Rotations-UI lebt seit dem Deployments-Unterbereich-Umbau ([[deployments-gpg-subview]]) im linken Unterbereich „GPG-Schlüssel" und wird **kompakt je gewählter App (Dropdown)** aufgeklappt statt als Liste aller Apps. Zweistufige Quittung, Bestätigungs-Gates, Sicherheitsmechanik und **alle Endpunkte bleiben unverändert** — nur der Ort/die Darstellung ändert sich (AC14).
 
 ## Acceptance-Kriterien
 - **AC1** — Eine gestartete Rotation schreibt die neue Passphrase **zusätzlich** ins Feld `naechste` des Items `env.gpg-passphrase-<app>`; das aktive Passwortfeld und `vorherige` bleiben **unverändert**. (Testbar: nach (a) hat das Item ein `naechste`, aktives Feld identisch zu vorher.)
@@ -49,6 +49,7 @@ Die Leitplanken **S1–S6** aus [[deploy-bitwarden-gpg-injection]] §3 gelten un
 - **AC11** — Beim Umschalten (c) wird das neu verschlüsselte `.env.gpg` per **direktem Commit + Push auf den Default-Branch** der App zurückgeschrieben (**kein PR**), über die bestehende GitHub-App-Auth. (Testbar: Rückschreiben löst genau einen Commit + Push auf den Default-Branch aus, keinen PR/Branch.)
 - **AC12** — **Fehlt der Workspace-Klon** der App, bricht die Rotation **VOR jeder Änderung** ab (vor (a)) mit klarem, geheimnisfreiem Hinweis („App zuerst in den Workspace klonen"); **keine** Kandidaten-Anlage, **keine** Bitwarden-Mutation, **kein** Repo-Zugriff. (Testbar: fehlender Klon → Abbruch vor (a), aktiver Zustand + Item unverändert.)
 - **AC13** — **Scheitert der Push** nach der Bitwarden-Umschaltung (c), wird die Bitwarden-Umschaltung **rückgängig** gemacht (Item zurück auf den Zustand vor (c): alte Passphrase wieder aktiv, neue zurück ins Feld `naechste`, `vorherige` geleert) und ein klassifizierter, geheimnisfreier Fehler gemeldet; die Rotation gilt erst als **abgeschlossen**, wenn **beide** Seiten (Item **und** Repo) umgestellt sind. (Testbar: erzwungener Push-Fehler → Bitwarden-Item byte-identisch zum Zustand vor (c), Rotation meldet `push-failed`, kein Misch-Zustand.)
+- **AC14 (v3, Owner 2026-07-18)** — Die Rotations-UI wird im Unterbereich „GPG-Schlüssel" ([[deployments-gpg-subview]]) **kompakt je gewählter App** (App-Dropdown-Auswahl) aufgeklappt, **nicht** mehr als Liste aller Apps; die zweistufige Quittung (AC8), der getrennte Rollback-Anker-Aufräum-Knopf (AC9) und **alle** Rotations-Endpunkte/-Sicherheitsmechanik (AC1–AC13) bleiben **unverändert** und gelten fort. (Testbar: Rotation wird für die im Dropdown gewählte App gerendert; die drei Endpunkte `.../gpg-rotate/{start,commit,discard-previous}` werden unverändert genutzt; keine Liste aller Apps mehr.)
 
 ## Verträge
 > GPG-Aufrufe (Passphrase nie über Argv) + `bw`-Item-Feld-Updates kanonisch im Verhalten; konkrete Technik entscheidet `coder`/`architekt`.
@@ -84,5 +85,6 @@ Die Leitplanken **S1–S6** aus [[deploy-bitwarden-gpg-injection]] §3 gelten un
 - [[per-app-gpg-passphrase-provisioning]] (Anlage; Item-Namens-Konvention).
 - [[deploy-bitwarden-gpg-injection]] (Bitwarden-Zugang, Login-Service, Injektion, Guard-Linie).
 - [[credential-backup]] (UI-Muster zweistufige Quittung).
+- [[deployments-gpg-subview]] (v3: Rotations-UI lebt kompakt je gewählter App im Unterbereich „GPG-Schlüssel"; Endpunkte/Logik unverändert, AC14).
 - [[access-and-guardrails]] (AccessGuard, `CRED_ADMIN_EMAILS`, Audit-First, Floor).
 - [[github-repo-clone]] / [[workspace-repos]] / [[workspace-path-config]] (Workspace-Klon + Pull, `WORKSPACE_DIR` — `.env.gpg`-Zugriffsweg, Owner 2026-07-13).

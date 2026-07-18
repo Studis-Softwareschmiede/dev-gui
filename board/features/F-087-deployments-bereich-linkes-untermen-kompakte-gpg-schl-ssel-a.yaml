@@ -1,0 +1,25 @@
+id: F-087
+title: 'Deployments-Bereich: linkes Untermenü + kompakte GPG-Schlüssel-Ansicht'
+goal: Die GPG-Passphrasen-Verwaltung wird aus der Deployment-Hauptansicht herausgelöst
+  und in einen eigenen Unterbereich mit linkem Untermenü (Deployment/GPG-Schlüssel)
+  verschoben — kompakt je gewählter App (Dropdown) statt Liste aller Apps, inkl. read-only
+  Existenz-Gating des Anlegen-Knopfs. Provisionierungs-/Rotations-Logik und -Endpunkte
+  bleiben unverändert.
+status: Backlog
+priority: P2
+spec: docs/specs/deployments-gpg-subview.md
+definition_of_done: null
+labels:
+- ui
+- deploy
+depends: null
+owner: null
+stories:
+- S-373
+- S-374
+- S-375
+- S-376
+progress: 0/4 done
+created_at: '2026-07-18T13:44:36Z'
+updated_at: '2026-07-18T13:49:49Z'
+area: deployment
