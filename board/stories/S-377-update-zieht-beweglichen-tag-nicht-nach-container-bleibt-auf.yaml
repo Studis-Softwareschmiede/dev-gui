@@ -2,7 +2,7 @@ id: S-377
 parent: F-080
 title: Update zieht beweglichen Tag nicht nach — Container bleibt auf altem Image
   (Digest-Pin)
-status: To Do
+status: In Progress
 priority: P1
 spec: docs/specs/container-image-update.md
 implements:
@@ -34,10 +34,10 @@ estimate_note: 'Heuristik M (score=6: 2 AC [AC16,AC17] + 3 Komponenten [VpsDocke
   run referenziert Tag/NEU-Digest, nie ALT; Regressionsschutz gegen pull-per-Alt-Digest.'
 confidence: medium
 tok_est: null
-branch: null
+branch: feat/S-377-update-digest-pin
 pr: null
 blocked_reason: null
 created_at: '2026-07-18T14:12:58Z'
-updated_at: '2026-07-18T14:14:40Z'
+updated_at: '2026-07-18T15:15:20Z'
 done_at: null
 area: deployment
