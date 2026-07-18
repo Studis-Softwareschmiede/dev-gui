@@ -83,11 +83,16 @@
  *   AC5 — Route-Fehler / DNS-Fehler / Pull-Fehler / protected-resource VOR dem Purge-Schritt →
  *         purgeCache NICHT aufgerufen
  *   AC6 — purgeCache liefert result:"error" → Deploy bleibt result:"ok",
- *         deployment.cachePurge = { status:"failed", warning } mit Retry-Hinweis, kein Secret-Leak
+ *         deployment.cachePurge = { status:"failed", warning, errorClass } mit Retry-Hinweis,
+ *         kein Secret-Leak (errorClass S-372/AC8-Nachzug: separat vom Warntext, damit der
+ *         aufrufende Router ihn unverändert in den persistenten Audit-Eintrag übernehmen kann)
  *   AC7 — purgeCache liefert result:"skipped" (nicht konfiguriert/kein zoneId) → Deploy bleibt
  *         ok, deployment.cachePurge = { status:"skipped" }
  *   AC1/AC8 (CloudflareApi-Vertrag: einzige purge_cache-Boundary, Token nie im Log/Ergebnis) —
  *         siehe CloudflareApi.test.js (Boundary-eigene Tests, nicht hier dupliziert)
+ *   AC8 (persistenter Audit-Nachzug, S-372) — der Orchestrator selbst bleibt audit-frei; die
+ *         Router (deploymentsRouter.test.js/vpsContainerRouter.test.js) tragen die eigenen
+ *         `deploy-cache-purge`-Audit-Tests, hier nicht dupliziert.
  */
 
 import { describe, it, expect, jest } from '@jest/globals';
@@ -587,6 +592,9 @@ describe('DeployOrchestrator — deploy() — [[deploy-cache-purge]] AC6: Purge 
     expect(result.deployment.cachePurge.warning).toEqual(expect.stringContaining('erneut'));
     // AC9-Analogie/AC8: kein Secret in der Warnung
     expect(result.deployment.cachePurge.warning).not.toMatch(/Bearer\s+\S+/i);
+    // S-372 (AC8-Nachzug): errorClass separat vom Warntext verfügbar, damit der aufrufende
+    // Router ihn unverändert in den persistenten Audit-Eintrag übernehmen kann.
+    expect(result.deployment.cachePurge.errorClass).toBe('cloudflare-unavailable');
   });
 });
 

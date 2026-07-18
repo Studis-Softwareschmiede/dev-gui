@@ -29,6 +29,14 @@
  *     Wird von BEIDEM — Erst-Deploy (deploymentsRouter.js) UND Container-Image-Update-Pfad
  *     (vpsContainerRouter.js `/update`, F-080/F-082) — geerbt, da beide dieselbe deploy()-Instanz
  *     aufrufen (AC10, [[deploy-cache-purge]]) — kein separater Purge-Code je Aufrufer nötig.
+ *     Persistenter Audit (S-372, AC8-Nachzug): der Orchestrator selbst bleibt audit-frei
+ *     (Bestands-Muster, vgl. vps-tunnel-existence-gate AC13 — Read-only/Saga-interne Schritte
+ *     erzeugen hier keinen Audit-Eintrag). Beide Router schreiben nach einem `result:"ok"`-Deploy
+ *     JEWEILS EINEN `auditStore.record(...)`-Eintrag für `deployment.cachePurge.status` — nur für
+ *     `ok`/`failed` (AC8: "Erfolg und Fehler"), `skipped` bleibt bewusst unauditiert (kein API-Call,
+ *     kein Vorgang, analog anderen No-op-Skips). `zoneId` steht dem Router nicht zur Verfügung
+ *     (bleibt Saga-intern) — sie wird bereits secret-frei über `logCachePurgeOutcome` geloggt;
+ *     der Audit-Eintrag trägt hostname/status/mode/errorClass.
  *   - Undeploy: (1) LockoutGuard-Check → (2) confirm-token check → (3) remove
  *     route + DNS → (4) container rm. Route-first to prevent traffic on removed
  *     container. (AC5, AC6)
@@ -718,8 +726,13 @@ function sanitizeReason(msg) {
  * Map CloudflareApi.purgeCache()'s typed result onto the deployment.cachePurge read-model
  * field ([[deploy-cache-purge]] AC6/AC7 contract).
  *
+ * S-372 (AC8-Nachzug): der `failed`-Zweig trägt zusätzlich `errorClass` (bereits ein
+ * generisches, secret-freies Klassifikations-Label) — nicht nur im Warntext eingebettet —
+ * damit der aufrufende Router ihn unverändert in den persistenten Audit-Eintrag übernehmen
+ * kann (AC8: "Ergebnis/Fehlerklasse" wird auditiert).
+ *
  * @param {{result:'ok'|'skipped'|'error', mode?:string, errorClass?:string, reason?:string}} cachePurge
- * @returns {{status:'ok'|'failed'|'skipped', mode?:string, warning?:string}}
+ * @returns {{status:'ok'|'failed'|'skipped', mode?:string, warning?:string, errorClass?:string}}
  */
 function buildCachePurgeField(cachePurge) {
   if (cachePurge.result === 'ok') {
@@ -730,9 +743,11 @@ function buildCachePurgeField(cachePurge) {
   }
   // AC6: sichtbare Warnung mit Retry-Hinweis, secret-frei (errorClass ist bereits ein
   // generisches Klassifikations-Label, kein Rohtext aus der Cloudflare-Antwort).
+  const errorClass = cachePurge.errorClass ?? 'error';
   return {
     status: 'failed',
-    warning: `Cache-Purge fehlgeschlagen (${cachePurge.errorClass ?? 'error'}) — Edge-Cache ggf. veraltet, bitte in ein paar Minuten erneut versuchen oder manuell in Cloudflare purgen.`,
+    errorClass,
+    warning: `Cache-Purge fehlgeschlagen (${errorClass}) — Edge-Cache ggf. veraltet, bitte in ein paar Minuten erneut versuchen oder manuell in Cloudflare purgen.`,
   };
 }
 

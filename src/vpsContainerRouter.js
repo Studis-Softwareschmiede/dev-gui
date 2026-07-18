@@ -183,6 +183,32 @@ function sanitizeMsg(msg) {
     .slice(0, 200);
 }
 
+/**
+ * [[deploy-cache-purge]] AC8-Nachzug (S-372): persistenter Audit-Eintrag für den
+ * Cache-Purge-Ausgang eines erfolgreichen Container-Updates — secret-frei ({hostname,
+ * status, mode|errorClass}). "skipped" wird bewusst NICHT auditiert (kein API-Call, kein
+ * Vorgang — AC8 nennt wörtlich nur "Erfolg und Fehler"). Best-effort: ein Audit-Fehler
+ * hier darf das bereits abgeschlossene Update nicht rückwirkend beeinflussen. Identisch
+ * zum Gegenstück in deploymentsRouter.js (kein Doppel-Audit über beide Aufrufpfade —
+ * jeder Pfad ruft diese Funktion genau einmal für sein eigenes deploy()-Ergebnis auf).
+ *
+ * @param {import('./AuditStore.js').AuditStore} auditStore
+ * @param {{email?: string}|null} identity
+ * @param {string} hostname
+ * @param {{status:'ok'|'failed'|'skipped', mode?:string, errorClass?:string}} [cachePurge]
+ */
+function recordCachePurgeAudit(auditStore, identity, hostname, cachePurge) {
+  if (!cachePurge || cachePurge.status === 'skipped') return;
+  try {
+    auditStore.record({
+      identity: identity?.email ?? null,
+      command: `deploy-cache-purge:${hostname}:${cachePurge.status}:${cachePurge.mode ?? cachePurge.errorClass ?? ''}`,
+    });
+  } catch {
+    // best-effort — Purge-Audit-Fehler darf das bereits erfolgreiche Update nicht beeinflussen
+  }
+}
+
 // ── VPS-Target-Auflösung ─────────────────────────────────────────────────────
 
 /**
@@ -776,6 +802,10 @@ export function vpsContainerRouter({ vpsDockerControl, deployOrchestrator, audit
         reason: deployResult.reason ?? 'Update fehlgeschlagen',
       });
     }
+
+    // [[deploy-cache-purge]] AC8-Nachzug (S-372): eigener Audit-Eintrag je Purge-Ausgang
+    // (ok/failed, skipped bleibt unauditiert) — best-effort, siehe recordCachePurgeAudit().
+    recordCachePurgeAudit(auditStore, identity, container.hostname, deployResult.deployment?.cachePurge);
 
     return res.json({ result: 'ok', deployment: deployResult.deployment });
   });

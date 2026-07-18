@@ -54,6 +54,14 @@
  *          nicht konfiguriert;
  *          403 via AccessGuard (Cloudflare Access): server.js `app.use('/api', accessGuard)`
  *          greift vor mountRouters() — nicht unit-testbar, durch server.js-Inspektion verifiziert.
+ *
+ * Covers ([[deploy-cache-purge]] AC8-Nachzug, S-372 — persistenter Audit für cachePurge):
+ *   AC8 — cachePurge.status "ok"/"failed" → eigener `deploy-cache-purge:<hostname>:<status>:<mode|
+ *         errorClass>`-Audit-Eintrag, secret-frei (kein Token/Bearer im Command-String)
+ *   AC8 — cachePurge.status "skipped" → KEIN zusätzlicher Audit-Eintrag (kein API-Call, kein Vorgang)
+ *   AC8 — Audit-Fehler beim Purge-Audit selbst lässt den bereits erfolgreichen Deploy unverändert
+ *         (best-effort, 200 bleibt 200)
+ *   AC8 — genau EIN `deploy-cache-purge`-Eintrag pro Request (kein Doppel-Audit)
  */
 
 import { describe, it, expect, jest } from '@jest/globals';
@@ -329,6 +337,90 @@ describe('POST /api/deployments', () => {
     const bodyStr = JSON.stringify(res.body);
     expect(bodyStr).not.toContain('SECRET');
     expect(bodyStr).not.toContain('PRIVATE KEY');
+  });
+});
+
+// ── [[deploy-cache-purge]] AC8-Nachzug (S-372): persistenter Audit für cachePurge ────
+
+describe('POST /api/deployments — [[deploy-cache-purge]] AC8-Nachzug: persistenter Audit-Eintrag für cachePurge', () => {
+  function deployResultWithPurge(cachePurge) {
+    return {
+      result: 'ok',
+      deployment: { hostname: 'app.example.com', image: 'x', containerId: 'cid', routePresent: true, containerPresent: true, cachePurge },
+    };
+  }
+
+  it('cachePurge.status "ok" → eigener Audit-Eintrag mit hostname+status+mode', async () => {
+    const orch = makeOrchestratorStub({ deployResult: deployResultWithPurge({ status: 'ok', mode: 'hosts' }) });
+    const auditStore = new AuditStore();
+    const app = makeApp({ orchestratorStub: orch, auditStore });
+
+    const res = await request(app, 'POST', '/api/deployments', DEPLOY_BODY);
+    expect(res.status).toBe(200);
+
+    const purgeEntry = auditStore.getAll().find((e) => e.command.startsWith('deploy-cache-purge:'));
+    expect(purgeEntry).toBeDefined();
+    expect(purgeEntry.command).toBe('deploy-cache-purge:app.example.com:ok:hosts');
+  });
+
+  it('cachePurge.status "failed" → Audit-Eintrag trägt errorClass statt Rohtext, kein Secret/Token', async () => {
+    const orch = makeOrchestratorStub({
+      deployResult: deployResultWithPurge({
+        status: 'failed',
+        errorClass: 'cloudflare-unavailable',
+        warning: 'Cache-Purge fehlgeschlagen (cloudflare-unavailable) — Edge-Cache ggf. veraltet.',
+      }),
+    });
+    const auditStore = new AuditStore();
+    const app = makeApp({ orchestratorStub: orch, auditStore });
+
+    const res = await request(app, 'POST', '/api/deployments', DEPLOY_BODY);
+    expect(res.status).toBe(200);
+
+    const purgeEntry = auditStore.getAll().find((e) => e.command.startsWith('deploy-cache-purge:'));
+    expect(purgeEntry.command).toBe('deploy-cache-purge:app.example.com:failed:cloudflare-unavailable');
+    expect(purgeEntry.command).not.toMatch(/Bearer\s+\S+/i);
+  });
+
+  it('cachePurge.status "skipped" → KEIN zusätzlicher Audit-Eintrag (kein API-Call, kein Vorgang)', async () => {
+    const orch = makeOrchestratorStub({ deployResult: deployResultWithPurge({ status: 'skipped' }) });
+    const auditStore = new AuditStore();
+    const app = makeApp({ orchestratorStub: orch, auditStore });
+
+    const res = await request(app, 'POST', '/api/deployments', DEPLOY_BODY);
+    expect(res.status).toBe(200);
+
+    expect(auditStore.getAll().some((e) => e.command.startsWith('deploy-cache-purge:'))).toBe(false);
+  });
+
+  it('Audit-Fehler beim Purge-Audit selbst lässt den bereits erfolgreichen Deploy unverändert (best-effort)', async () => {
+    const orch = makeOrchestratorStub({ deployResult: deployResultWithPurge({ status: 'ok', mode: 'hosts' }) });
+    const auditStore = new AuditStore();
+    const origRecord = auditStore.record.bind(auditStore);
+    let call = 0;
+    auditStore.record = (...args) => {
+      call += 1;
+      // Aufruf-Reihenfolge ohne GPG: (1) Audit-First, (2) Outcome-Erfolg, (3) cachePurge-Audit.
+      if (call === 3) throw new Error('audit storage full');
+      return origRecord(...args);
+    };
+
+    const app = makeApp({ orchestratorStub: orch, auditStore });
+    const res = await request(app, 'POST', '/api/deployments', DEPLOY_BODY);
+
+    expect(res.status).toBe(200);
+    expect(res.body.result).toBe('ok');
+  });
+
+  it('kein Doppel-Audit: genau EIN deploy-cache-purge-Eintrag pro Request', async () => {
+    const orch = makeOrchestratorStub({ deployResult: deployResultWithPurge({ status: 'ok', mode: 'hosts' }) });
+    const auditStore = new AuditStore();
+    const app = makeApp({ orchestratorStub: orch, auditStore });
+
+    await request(app, 'POST', '/api/deployments', DEPLOY_BODY);
+
+    const entries = auditStore.getAll().filter((e) => e.command.startsWith('deploy-cache-purge:'));
+    expect(entries.length).toBe(1);
   });
 });
 

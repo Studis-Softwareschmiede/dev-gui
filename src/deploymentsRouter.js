@@ -844,6 +844,12 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconcil
       });
     } catch { /* ignore */ }
 
+    // [[deploy-cache-purge]] AC8-Nachzug (S-372): eigener Audit-Eintrag je Purge-Ausgang.
+    // "skipped" bleibt bewusst unauditiert (kein API-Call, kein Vorgang) — nur ok/failed,
+    // wie AC8 wörtlich sagt ("Erfolg und Fehler des Purge werden ... auditiert").
+    // Best-effort: ein Audit-Fehler hier darf den bereits erfolgreichen Deploy nicht beeinflussen.
+    recordCachePurgeAudit(auditStore, identity, hostname, result.deployment?.cachePurge);
+
     return res.status(200).json(result);
   });
 
@@ -1401,4 +1407,28 @@ function sanitizeMsg(msg) {
     .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer [REDACTED]')
     .replace(/BEGIN (?:OPENSSH|RSA|EC|DSA) PRIVATE KEY[\s\S]*?END (?:OPENSSH|RSA|EC|DSA) PRIVATE KEY/gi, '[KEY REDACTED]')
     .slice(0, 300);
+}
+
+/**
+ * [[deploy-cache-purge]] AC8-Nachzug (S-372): persistenter Audit-Eintrag für den
+ * Cache-Purge-Ausgang eines erfolgreichen Deploys — secret-frei ({hostname, status,
+ * mode|errorClass}). "skipped" wird bewusst NICHT auditiert (kein API-Call, kein
+ * Vorgang — AC8 nennt wörtlich nur "Erfolg und Fehler"). Best-effort: ein Audit-Fehler
+ * hier darf den bereits abgeschlossenen Deploy nicht rückwirkend beeinflussen.
+ *
+ * @param {import('./AuditStore.js').AuditStore} auditStore
+ * @param {{email?: string}|null} identity
+ * @param {string} hostname
+ * @param {{status:'ok'|'failed'|'skipped', mode?:string, errorClass?:string}} [cachePurge]
+ */
+function recordCachePurgeAudit(auditStore, identity, hostname, cachePurge) {
+  if (!cachePurge || cachePurge.status === 'skipped') return;
+  try {
+    auditStore.record({
+      identity: identity?.email ?? null,
+      command: `deploy-cache-purge:${hostname}:${cachePurge.status}:${cachePurge.mode ?? cachePurge.errorClass ?? ''}`,
+    });
+  } catch {
+    // best-effort — Purge-Audit-Fehler darf den bereits erfolgreichen Deploy nicht beeinflussen
+  }
 }

@@ -51,6 +51,14 @@
  *          Doubles fehlschlagen statt den Test still durchzuwinken. Negativ-Nachweis + Positiv-
  *          Nachweis in der eigenen AC15-`describe`-Sektion am Dateiende.
  *
+ * Covers ([[deploy-cache-purge]] AC8-Nachzug, S-372 — persistenter Audit für cachePurge im Update-Pfad):
+ *   AC8 — deployResult.deployment.cachePurge.status "ok"/"failed" → eigener `deploy-cache-purge:
+ *         <hostname>:<status>:<mode|errorClass>`-Audit-Eintrag, secret-frei
+ *   AC8 — cachePurge.status "skipped" → KEIN zusätzlicher Audit-Eintrag
+ *   AC8 — genau EIN deploy-cache-purge-Eintrag pro Update-Request (kein Doppel-Audit über
+ *         Erst-Deploy- und Update-Pfad hinweg — jeder Pfad ruft die Audit-Funktion für sein
+ *         eigenes deploy()-Ergebnis genau einmal auf, s. deploymentsRouter.test.js Gegenstück)
+ *
  * Strategie:
  *   - VpsDockerControl als Mock injiziert (kein SSH-I/O)
  *   - DeployOrchestrator als Mock injiziert
@@ -1602,6 +1610,125 @@ describe('vpsContainerRouter — container-image-update: POST .../update', () =>
     const bodyStr = JSON.stringify(body);
     expect(bodyStr).not.toContain(FAKE_KEY);
     expect(bodyStr).not.toContain(FAKE_CF_TOKEN);
+  });
+
+  // ── [[deploy-cache-purge]] AC8-Nachzug (S-372): persistenter Audit für cachePurge ──
+
+  function deployResultWithPurge(cachePurge) {
+    return {
+      result: 'ok',
+      deployment: { vps: '1.2.3.4', hostname: MANAGED_CONTAINER.hostname, image: MANAGED_CONTAINER.image, containerId: 'new123', hostPort: 8080, containerPort: 8080, status: 'running', routePresent: true, containerPresent: true, replaced: true, cachePurge },
+    };
+  }
+
+  it('cachePurge.status "ok" → eigener Audit-Eintrag mit hostname+status+mode', async () => {
+    const auditStore = new AuditStore();
+    server = await makeTestServer({
+      env: { DEV_NO_ACCESS: '1' },
+      dockerControl: makeMockDockerControl({
+        psAllResult: { result: 'ok', containers: [MANAGED_CONTAINER] },
+        inspectContainerResult: {
+          result: 'ok',
+          config: { image: MANAGED_CONTAINER.image, env: {}, binds: [], labels: { 'cloudflare.tunnel-hostname': MANAGED_CONTAINER.hostname } },
+        },
+      }),
+      orchestrator: makeMockOrchestrator({ deployResult: deployResultWithPurge({ status: 'ok', mode: 'hosts' }) }),
+      registry: makeRegistryWithTunnel(),
+      audit: auditStore,
+    });
+
+    const { status } = await server.doRequest({
+      method: 'POST',
+      path: `/api/vps/machines/hetzner/1/containers/${MANAGED_CONTAINER.containerId}/update`,
+    });
+
+    expect(status).toBe(200);
+    const purgeEntry = auditStore.getAll().find((e) => e.command.startsWith('deploy-cache-purge:'));
+    expect(purgeEntry).toBeDefined();
+    expect(purgeEntry.command).toBe(`deploy-cache-purge:${MANAGED_CONTAINER.hostname}:ok:hosts`);
+  });
+
+  it('cachePurge.status "failed" → Audit-Eintrag trägt errorClass, kein Secret/Token', async () => {
+    const auditStore = new AuditStore();
+    server = await makeTestServer({
+      env: { DEV_NO_ACCESS: '1' },
+      dockerControl: makeMockDockerControl({
+        psAllResult: { result: 'ok', containers: [MANAGED_CONTAINER] },
+        inspectContainerResult: {
+          result: 'ok',
+          config: { image: MANAGED_CONTAINER.image, env: {}, binds: [], labels: { 'cloudflare.tunnel-hostname': MANAGED_CONTAINER.hostname } },
+        },
+      }),
+      orchestrator: makeMockOrchestrator({
+        deployResult: deployResultWithPurge({
+          status: 'failed',
+          errorClass: 'cloudflare-unavailable',
+          warning: 'Cache-Purge fehlgeschlagen (cloudflare-unavailable) — Edge-Cache ggf. veraltet.',
+        }),
+      }),
+      registry: makeRegistryWithTunnel(),
+      audit: auditStore,
+    });
+
+    const { status } = await server.doRequest({
+      method: 'POST',
+      path: `/api/vps/machines/hetzner/1/containers/${MANAGED_CONTAINER.containerId}/update`,
+    });
+
+    expect(status).toBe(200);
+    const purgeEntry = auditStore.getAll().find((e) => e.command.startsWith('deploy-cache-purge:'));
+    expect(purgeEntry.command).toBe(`deploy-cache-purge:${MANAGED_CONTAINER.hostname}:failed:cloudflare-unavailable`);
+    expect(purgeEntry.command).not.toMatch(/Bearer\s+\S+/i);
+  });
+
+  it('cachePurge.status "skipped" → KEIN zusätzlicher Audit-Eintrag (kein API-Call, kein Vorgang)', async () => {
+    const auditStore = new AuditStore();
+    server = await makeTestServer({
+      env: { DEV_NO_ACCESS: '1' },
+      dockerControl: makeMockDockerControl({
+        psAllResult: { result: 'ok', containers: [MANAGED_CONTAINER] },
+        inspectContainerResult: {
+          result: 'ok',
+          config: { image: MANAGED_CONTAINER.image, env: {}, binds: [], labels: { 'cloudflare.tunnel-hostname': MANAGED_CONTAINER.hostname } },
+        },
+      }),
+      orchestrator: makeMockOrchestrator({ deployResult: deployResultWithPurge({ status: 'skipped' }) }),
+      registry: makeRegistryWithTunnel(),
+      audit: auditStore,
+    });
+
+    const { status } = await server.doRequest({
+      method: 'POST',
+      path: `/api/vps/machines/hetzner/1/containers/${MANAGED_CONTAINER.containerId}/update`,
+    });
+
+    expect(status).toBe(200);
+    expect(auditStore.getAll().some((e) => e.command.startsWith('deploy-cache-purge:'))).toBe(false);
+  });
+
+  it('kein Doppel-Audit: genau EIN deploy-cache-purge-Eintrag pro Update-Request', async () => {
+    const auditStore = new AuditStore();
+    server = await makeTestServer({
+      env: { DEV_NO_ACCESS: '1' },
+      dockerControl: makeMockDockerControl({
+        psAllResult: { result: 'ok', containers: [MANAGED_CONTAINER] },
+        inspectContainerResult: {
+          result: 'ok',
+          config: { image: MANAGED_CONTAINER.image, env: {}, binds: [], labels: { 'cloudflare.tunnel-hostname': MANAGED_CONTAINER.hostname } },
+        },
+      }),
+      orchestrator: makeMockOrchestrator({ deployResult: deployResultWithPurge({ status: 'ok', mode: 'hosts' }) }),
+      registry: makeRegistryWithTunnel(),
+      audit: auditStore,
+    });
+
+    await server.doRequest({
+      method: 'POST',
+      path: `/api/vps/machines/hetzner/1/containers/${MANAGED_CONTAINER.containerId}/update`,
+    });
+
+    const entries = auditStore.getAll().filter((e) => e.command.startsWith('deploy-cache-purge:'));
+    expect(entries.length).toBe(1);
   });
 });
 
