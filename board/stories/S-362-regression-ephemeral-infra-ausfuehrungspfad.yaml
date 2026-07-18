@@ -2,7 +2,7 @@ id: S-362
 parent: F-069
 title: ephemeral-infra-Ausführungspfad im RegressionRunner bauen (VpsProvisioner,
   rtest-*-Schema, garantiertes Cleanup)
-status: In Progress
+status: Done
 priority: P2
 spec: docs/specs/regression-run.md
 implements:
@@ -15,51 +15,50 @@ labels:
 - infra
 size_est: L
 dispo_est: '8'
-dispo_act: null
-dispo_forecast: null
+dispo_act: '6.5'
+dispo_forecast: '.2307'
 estimate_note: 'L — kompletter, bislang nicht existenter Ausführungspfad: ephemeral-infra-Suiten
   laufen lassen (Provisionierung/Teardown ihres rtest-*-Ziels lebt fixture-scoped
-  in der Suite selbst, agent-flow regression-playwright-conventions AC4 — nicht
-  VpsProvisioner.js, das ist SSH-Key-Management), plus ein Runner-seitiges
-  best-effort Sicherheitsnetz (rtest-*-Sweep über VpsProviderRegistry), garantiertes
-  Cleanup im Fehler- UND Timeout-Pfad. Echte Infra-Kosten + Leak-Risiko (verwaiste
-  Hetzner-Server) -> Sicherheits-/Kosten-relevant, security-Bump. Kein
-  Referenz-Vorgänger im Repo, daher confidence low.'
+  in der Suite selbst, agent-flow regression-playwright-conventions AC4 — nicht VpsProvisioner.js,
+  das ist SSH-Key-Management), plus ein Runner-seitiges best-effort Sicherheitsnetz
+  (rtest-*-Sweep über VpsProviderRegistry), garantiertes Cleanup im Fehler- UND Timeout-Pfad.
+  Echte Infra-Kosten + Leak-Risiko (verwaiste Hetzner-Server) -> Sicherheits-/Kosten-relevant,
+  security-Bump. Kein Referenz-Vorgänger im Repo, daher confidence low.'
 confidence: low
 branch: feat/S-362-ephemeral-infra-runner
 pr: null
 blocked_reason: null
 created_at: '2026-07-16T00:00:00Z'
-updated_at: '2026-07-18T05:50:57Z'
-done_at: null
+updated_at: '2026-07-18T06:44:03Z'
+done_at: '2026-07-18T06:42:22Z'
 tok_est: null
 area: fabrik-arbeiten
 notes: 'Ausgegliedert aus S-326 (Befund A, dort verifiziert): der RegressionRunner
   hat für target ephemeral-infra KEINEN Ausführungspfad — kein rtest-*-Namensschema,
   kein Cleanup, die Suite lief nie. Bis S-309/S-326 las der Runner `target` je Suite
   gar nicht und behandelte jeden Lauf als local; das erklärt, warum der VPS-Lauf des
-  Owners vom 2026-07-08 nie einen Hetzner-Server anlegte (keine Kosten). S-326 hat NUR
-  die Diagnose-Pflicht gelandet (AC10) + die target-Weiche (AC11): eine ephemeral-infra-Suite
+  Owners vom 2026-07-08 nie einen Hetzner-Server anlegte (keine Kosten). S-326 hat
+  NUR die Diagnose-Pflicht gelandet (AC10) + die target-Weiche (AC11): eine ephemeral-infra-Suite
   endet seither als ehrlicher, persistierter Fehler „Testobjekt ephemeral-infra wird
   noch nicht unterstützt" statt still als local-Lauf. Diese Story baut den echten
-  Pfad — Korrektur (Review-Fix Iteration 1, verifiziert gegen agent-flow
-  regression-playwright-conventions AC4): NICHT `VpsProvisioner` (src/VpsProvisioner.js
-  ist SSH-Key-Management/authorized_keys, kein Server-Create) — die Provisionierung/
-  der Abbau des rtest-*-Wegwerf-Ziels lebt VERBINDLICH fixture-scoped INNERHALB der
-  einzelnen Playwright-Suite (try/finally je Test, s. tests/regression/vps/*.spec.ts,
-  die ihren rtest-*-Server über die dev-gui-eigene VPS-UI anlegt/abbaut) — dev-gui
-  definiert diese Leitplanken nicht neu. Der Runner selbst lässt die Suite laufen
-  (REGRESSION_BASE_URL analog local, OHNE lokale Erreichbarkeitsprüfung/Frisch-Ausrollen)
+  Pfad — Korrektur (Review-Fix Iteration 1, verifiziert gegen agent-flow regression-playwright-conventions
+  AC4): NICHT `VpsProvisioner` (src/VpsProvisioner.js ist SSH-Key-Management/authorized_keys,
+  kein Server-Create) — die Provisionierung/ der Abbau des rtest-*-Wegwerf-Ziels lebt
+  VERBINDLICH fixture-scoped INNERHALB der einzelnen Playwright-Suite (try/finally
+  je Test, s. tests/regression/vps/*.spec.ts, die ihren rtest-*-Server über die dev-gui-eigene
+  VPS-UI anlegt/abbaut) — dev-gui definiert diese Leitplanken nicht neu. Der Runner
+  selbst lässt die Suite laufen (REGRESSION_BASE_URL analog local, OHNE lokale Erreichbarkeitsprüfung/Frisch-Ausrollen)
   und trägt ZUSÄTZLICH ein best-effort Sicherheitsnetz bei: nach jedem Lauf-Ausgang
   (passed/failed/error/Timeout/interner Fehler) fegt er über VpsProviderRegistry und
-  löscht jede Maschine mit rtest-*-Präfix — GARANTIERT, auch im Fehler-, Timeout- und
-  Abbruch-Pfad (sonst verwaiste, kostenpflichtige Server), und garantiert VOR der
-  Lock-Freigabe (sonst Race mit einem sofort gestarteten Folgelauf desselben Projekts,
-  Review-Fix Iteration 2). Bindend: agent-flow `regression-runner` AC4/AC7/AC8
-  (Infra-Leitplanken, Produktiv-Allowlist, Cleanup-Garantie) — dev-gui spiegelt das
-  Modell, definiert es NICHT neu. Der Kosten-/Ressourcen-Hinweis im Dialog (AC6) steht
-  bereits. Vorhandene Suiten als Testobjekt: tests/regression/vps/ (3 Suiten, target
-  ephemeral-infra). Beim Landen: A3 in docs/specs/regression-run.md von „Umsetzungsstand
-  NICHT gebaut" auf gebaut umstellen und die AC11-Weiche für ephemeral-infra vom
-  Fehler- auf den Ausführungspfad umhängen. Achtung Nicht-Ziel: target url (A4)
-  bleibt weiterhin ungebaut — separat halten.'
+  löscht jede Maschine mit rtest-*-Präfix — GARANTIERT, auch im Fehler-, Timeout-
+  und Abbruch-Pfad (sonst verwaiste, kostenpflichtige Server), und garantiert VOR
+  der Lock-Freigabe (sonst Race mit einem sofort gestarteten Folgelauf desselben Projekts,
+  Review-Fix Iteration 2). Bindend: agent-flow `regression-runner` AC4/AC7/AC8 (Infra-Leitplanken,
+  Produktiv-Allowlist, Cleanup-Garantie) — dev-gui spiegelt das Modell, definiert
+  es NICHT neu. Der Kosten-/Ressourcen-Hinweis im Dialog (AC6) steht bereits. Vorhandene
+  Suiten als Testobjekt: tests/regression/vps/ (3 Suiten, target ephemeral-infra).
+  Beim Landen: A3 in docs/specs/regression-run.md von „Umsetzungsstand NICHT gebaut"
+  auf gebaut umstellen und die AC11-Weiche für ephemeral-infra vom Fehler- auf den
+  Ausführungspfad umhängen. Achtung Nicht-Ziel: target url (A4) bleibt weiterhin ungebaut
+  — separat halten.'
+tok: '115864226'
