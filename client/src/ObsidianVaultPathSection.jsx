@@ -1,15 +1,26 @@
 /**
  * ObsidianVaultPathSection.jsx — Sektion „Obsidian-Vault-Pfad" (obsidian-vault-config
- * AC1, UI-Anteil, S-247).
+ * AC1, UI-Anteil, S-247; obsidian-vault-folder-browser AC6–AC9, S-379).
  *
  * Extrahiert aus SettingsView.jsx (S-266, settings-panel-navigation AC15) — reine
  * Umverpackung, KEINE Logik-Änderung. Nutzt `wsPathStyles` aus WorkspacePathSection.jsx
  * (Muster gespiegelt — geteilte Styles, einzige Quelle).
+ *
+ * S-379 (obsidian-vault-folder-browser): Freitext-Feld bleibt unverändert als Fallback
+ * (AC8) — der neue „Durchsuchen"-Button öffnet `ObsidianVaultFolderBrowserOverlay`
+ * (server-seitiger, read-only Ordner-Browser, `GET .../obsidian-vault/browse`, S-378)
+ * und übernimmt bei „Diesen Ordner verwenden" nur einen KANDIDATEN-Pfad in dasselbe
+ * Freitext-Feld — die bestehende PUT-Validierung (AC2/AC3) bleibt unverändert das Gate
+ * (kein eigener Validierungs-Pfad im Overlay). Bei `mountStatus` `unusable`/`unconfigured`
+ * zeigt die Sektion STATT einer rein technischen Meldung eine Alltagssprache-Anleitung
+ * (AC7); der „Durchsuchen"-Button ist in diesem Zustand deaktiviert (kein Browse ohne
+ * nutzbare Mount-Schranke).
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { wsPathStyles } from './WorkspacePathSection.jsx';
 import { putObsidianVaultPath, deleteObsidianVaultPath } from './settingsApi.js';
+import { ObsidianVaultFolderBrowserOverlay } from './ObsidianVaultFolderBrowserOverlay.jsx';
 
 /**
  * Sektion „Obsidian-Vault-Pfad" — zeigt den konfigurierten Vault-Pfad inkl. Zustand
@@ -26,25 +37,40 @@ import { putObsidianVaultPath, deleteObsidianVaultPath } from './settingsApi.js'
  * A11y: label/htmlFor, aria-describedby, role=status/alert, aria-busy, Fokusführung
  *   bei Erfolg/Fehler.
  *
+ * obsidian-vault-folder-browser (S-379):
+ * AC6: „Durchsuchen"-Button öffnet `ObsidianVaultFolderBrowserOverlay`; „Diesen Ordner
+ *   verwenden" übernimmt den Container-Pfad in `inputVal` (Bearbeiten-Modus wird
+ *   geöffnet, falls noch nicht aktiv) — Speichern bleibt ein expliziter Klick des Owners
+ *   (kein Auto-Save direkt aus dem Overlay heraus).
+ * AC7: Bei `mountStatus` `unusable`/`unconfigured` erscheint eine Alltagssprache-Anleitung
+ *   (was los ist + Mac-Schritt `OBSIDIAN_VAULT_HOST_DIR` + Runbook-Verweis); der
+ *   „Durchsuchen"-Button ist deaktiviert mit demselben Hinweis (aria-disabled + Text).
+ * AC8: Freitext-Feld/Set-/Ändern-/Löschen-Funktion bleibt unverändert (kein Zwang zum Browser).
+ * AC9: Tastaturbedienbar, `role=status`/`alert`, `aria-disabled`, Touch-Targets ≥44px.
+ *
  * @param {{
  *   vaultPath: string|null,
  *   configured: boolean,
+ *   mountStatus?: 'ok'|'unusable'|'unconfigured',
  *   mountRoot?: string,
  *   onReload: () => Promise<void>,
  *   fetchFn?: typeof fetch,
  * }} props
  */
-export function ObsidianVaultPathSection({ vaultPath, configured, mountRoot, onReload, fetchFn }) {
+export function ObsidianVaultPathSection({ vaultPath, configured, mountStatus, mountRoot, onReload, fetchFn }) {
   const [editing, setEditing] = useState(false);
   const [inputVal, setInputVal] = useState('');
   const [saving, setSaving] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [error, setError] = useState(null);
   const [successMsg, setSuccessMsg] = useState(null);
+  const [browserOpen, setBrowserOpen] = useState(false);
   const inputRef = useRef(null);
   const successRef = useRef(null);
+  const browseBtnRef = useRef(null);
   const ERROR_ID = 'obsidian-vault-path-error';
   const SUCCESS_ID = 'obsidian-vault-path-success';
+  const mountNoticeNeeded = mountStatus === 'unusable' || mountStatus === 'unconfigured';
 
   // Fokus auf Input wenn Bearbeiten-Modus öffnet
   useEffect(() => {
@@ -115,6 +141,23 @@ export function ObsidianVaultPathSection({ vaultPath, configured, mountRoot, onR
     setEditing(false);
   }, []);
 
+  // obsidian-vault-folder-browser AC6: öffnet den Ordner-Browser (nur wenn die
+  // Mount-Schranke nutzbar ist — Durchsuchen-Button ist sonst deaktiviert, AC7).
+  const handleOpenBrowser = useCallback(() => {
+    if (mountNoticeNeeded) return;
+    setBrowserOpen(true);
+  }, [mountNoticeNeeded]);
+
+  // AC6: „Diesen Ordner verwenden" übernimmt den Container-Pfad in `inputVal` und
+  // öffnet den Bearbeiten-Modus — Speichern (PUT-Validierung, AC2/AC3) bleibt ein
+  // expliziter Owner-Klick, kein Auto-Save aus dem Overlay heraus.
+  const handleBrowserSelect = useCallback((path) => {
+    setError(null);
+    setSuccessMsg(null);
+    setInputVal(path);
+    setEditing(true);
+  }, []);
+
   return (
     <div style={wsPathStyles.wrapper}>
       {/* Effektivwert-Anzeige */}
@@ -133,6 +176,53 @@ export function ObsidianVaultPathSection({ vaultPath, configured, mountRoot, onR
             Mount-Schranke: <code style={wsPathStyles.mountCode}>{mountRoot}</code>
           </span>
         )}
+      </div>
+
+      {/* obsidian-vault-folder-browser AC7: Alltagssprache-Anleitung statt der
+          technischen Schranken-Meldung, wenn der Mount nicht nutzbar ist. */}
+      {mountNoticeNeeded && (
+        <div
+          style={localStyles.mountNotice}
+          role="status"
+          aria-live="polite"
+          data-testid="obsidian-mount-notice"
+        >
+          <p style={localStyles.mountNoticeTitle}>
+            {mountStatus === 'unconfigured'
+              ? 'Der Obsidian-Ordner ist noch nicht in den Container hineingereicht.'
+              : 'Der Obsidian-Ordner ist im Container nicht nutzbar (Mount fehlt oder ist kein Verzeichnis).'}
+          </p>
+          <p style={localStyles.mountNoticeBody}>
+            Setze auf dem Mac in der lokalen <code>.env</code>-Datei neben{' '}
+            <code>docker-compose.yml</code> die Zeile{' '}
+            <code>OBSIDIAN_VAULT_HOST_DIR=&lt;Pfad-zu-deinem-Obsidian-Vault&gt;</code>{' '}
+            und erstelle den Container danach neu. Details:{' '}
+            <code>docs/obsidian-vault-mount-runbook.md</code>.
+          </p>
+          <p style={localStyles.mountNoticeDetail}>
+            Technischer Status: <code>mountStatus = {mountStatus}</code>
+          </p>
+        </div>
+      )}
+
+      {/* obsidian-vault-folder-browser AC6/AC7: Durchsuchen-Button — deaktiviert
+          mit Hinweis, solange die Mount-Schranke nicht nutzbar ist. */}
+      <div style={wsPathStyles.actionRow}>
+        <button
+          type="button"
+          ref={browseBtnRef}
+          onClick={handleOpenBrowser}
+          disabled={mountNoticeNeeded}
+          aria-disabled={mountNoticeNeeded}
+          style={mountNoticeNeeded ? localStyles.btnBrowseDisabled : wsPathStyles.btnSmall}
+          aria-label={
+            mountNoticeNeeded
+              ? 'Durchsuchen — nicht verfügbar, solange der Obsidian-Vault-Mount fehlt'
+              : 'Obsidian-Vault-Ordner durchsuchen'
+          }
+        >
+          Durchsuchen…
+        </button>
       </div>
 
       {/* Erfolgs-Feedback */}
@@ -220,6 +310,53 @@ export function ObsidianVaultPathSection({ vaultPath, configured, mountRoot, onR
           )}
         </div>
       )}
+
+      {/* obsidian-vault-folder-browser AC6: Ordner-Browser-Overlay */}
+      {browserOpen && (
+        <ObsidianVaultFolderBrowserOverlay
+          onClose={() => setBrowserOpen(false)}
+          onSelect={handleBrowserSelect}
+          triggerRef={browseBtnRef}
+          fetchFn={fetchFn}
+        />
+      )}
     </div>
   );
 }
+
+/** Component-lokale Styles (obsidian-vault-folder-browser AC7/AC9, S-379). */
+const localStyles = {
+  mountNotice: {
+    margin: '0 0 14px',
+    padding: '12px 14px',
+    background: '#1c1200',
+    border: '1px solid #854d0e',
+    borderRadius: 6,
+    color: '#fef08a',   // Kontrast auf #1c1200 ≥ 4.5:1 (WCAG AA)
+    fontSize: 13,
+    lineHeight: 1.5,
+  },
+  mountNoticeTitle: {
+    margin: '0 0 8px',
+    fontWeight: 700,
+  },
+  mountNoticeBody: {
+    margin: 0,
+  },
+  mountNoticeDetail: {
+    margin: '8px 0 0',
+    fontSize: 12,
+    color: '#d4d4d4',
+    fontStyle: 'italic',
+  },
+  btnBrowseDisabled: {
+    padding: '6px 14px',
+    background: '#1e293b',
+    color: '#4b5563',
+    border: '1px solid #334155',
+    borderRadius: 4,
+    fontSize: 13,
+    cursor: 'not-allowed',
+    minHeight: 44,
+  },
+};
