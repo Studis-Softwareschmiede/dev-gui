@@ -44,6 +44,32 @@
         .settings-nav { width: 220px; }
         .settings-tablist { flex-direction: column; overflow-x: visible; }
       }
+      /* ── Bereichs-Untermenü (bereichs-untermenu, F-087/S-374) ──
+         Strukturell 1:1 gespiegelt von der settings-*-Familie oben, aber
+         bereichsunabhängig (eigener Klassen-Präfix) UND semantisch <nav>+
+         aria-current statt role=tablist/aria-selected (Design §0). */
+      .subnav-layout { display: flex; flex-direction: column; gap: 16px; }
+      .subnav { flex-shrink: 0; }
+      .subnav-list { display: flex; flex-direction: row; overflow-x: auto; gap: 2px; }
+      .subnav-item {
+        display: block; min-height: 44px; padding: 10px 16px;
+        background: transparent; color: #9ca3af;
+        border: none; border-left: 3px solid transparent; border-radius: 6px;
+        font-size: 14px; text-align: left; cursor: pointer; white-space: nowrap;
+      }
+      .subnav-item:hover { background: #1e293b; }
+      .subnav-item.active {
+        background: #1e293b; color: #e5e7eb; font-weight: 700;
+        border-left: 3px solid #3b82f6;
+      }
+      .subnav-item:focus-visible { outline: 2px solid #3b82f6; outline-offset: 1px; }
+      .subnav-content { flex: 1; min-width: 0; max-width: 860px; }
+      .subnav-content:focus-visible { outline: 2px solid #3b82f6; outline-offset: 1px; }
+      @media (min-width: 1024px) {
+        .subnav-layout { flex-direction: row; gap: 24px; }
+        .subnav { width: 220px; }
+        .subnav-list { flex-direction: column; overflow-x: visible; }
+      }
     </style>
   </head>
   <body>
