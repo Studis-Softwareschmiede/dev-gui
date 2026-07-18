@@ -17,5 +17,5 @@ App, Anlegen mit Existenz-Gating, Rotieren via unveränderter Zwei-Phasen-Rotati
 
 ## Offene Fäden
 - Reviewer-Suggestion S-377: Digest-Pin-Fix vor dem nächsten echten VPS-Rollout einmal gegen einen realen digest-gepinnten Container verifizieren (RepoTags liefert genau einen Eintrag).
-- Metrik-Ledger: `dispatches.jsonl` enthält 4 korrupte Zeilen vom 2026-07-03 (flow/L05) — Owner-Entscheidung zum lokalen Entfernen steht aus; `tok_total`-Werte aus `metrics-collect` wirken zudem überhöht (Transcript-Matching zu breit).
+- Metrik-Ledger: flow/L05-Defekt ist BEHOBEN (Zeilen repariert + agent-flow-Fix S-073); `tok_total` zählt per Design in+out+cache (inkl. Cache-Reads) — Millionenwerte sind normal.
 - Kosmetik: Style-Namen `gpgDiscardConfirmLabel`/`gpgDiscardCheckbox` in DeploymentsView benennen nicht mehr ihre Funktion (Reviewer-Suggestion S-374).
