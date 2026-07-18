@@ -39,7 +39,7 @@ export const ANTHROPIC_OAUTH_TOKEN_HOST = 'https://platform.claude.com';
 export const ANTHROPIC_OAUTH_TOKEN_PATH = '/v1/oauth/token';
 
 /** Claude Codes öffentlicher OAuth-Client (PKCE, kein Client-Secret) — Default in der Binary. */
-export const ANTHROPIC_OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
+export const ANTHROPIC_OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'; // gitleaks:allow — öffentliche PKCE-Client-ID (kein Secret, in jeder Claude-Code-Binary enthalten)
 
 /** Beschränktes Timeout gegen hängende Refresh-Aufrufe (Edge-Case "Refresh-Timeout", Richtwert wie Usage-Fetch). */
 const REFRESH_TIMEOUT_MS = 8000;
