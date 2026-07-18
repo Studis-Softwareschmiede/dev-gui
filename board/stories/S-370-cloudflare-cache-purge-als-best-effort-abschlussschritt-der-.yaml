@@ -1,7 +1,7 @@
 id: S-370
 parent: F-086
 title: Cloudflare-Cache-Purge als Best-effort-Abschlussschritt der Deploy-Saga
-status: To Do
+status: In Progress
 priority: P1
 spec: docs/specs/deploy-cache-purge.md
 implements:
@@ -28,9 +28,9 @@ estimate_note: 'Heuristik: 8 AC + 2 Komponenten (CloudflareApi.js, DeployOrchest
   -> keine Baseline-Tokens.'
 confidence: low
 tok_est: null
-branch: null
+branch: feat/S-370-deploy-cache-purge
 pr: null
 blocked_reason: null
 created_at: '2026-07-18T10:33:41Z'
-updated_at: '2026-07-18T10:34:06Z'
+updated_at: '2026-07-18T10:34:56Z'
 done_at: null
