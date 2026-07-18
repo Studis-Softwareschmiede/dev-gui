@@ -1,21 +1,65 @@
 /**
  * UsageOverlay.jsx — Token-Nutzungs-Anzeige (Owner-Ko-Design 2026-07-03/05,
  * "goldene Münze"): Kopfleiste rechts neben dem Zahnrad ein Münz-Icon, Klick
- * öffnet ein Vollbild-Overlay mit dem geschätzten Output-Token-Verbrauch der
- * aktuellen 5h-Session und der laufenden Woche (GET /api/usage).
+ * öffnet ein Vollbild-Overlay mit dem Token-/Nutzungsverbrauch der aktuellen
+ * 5h-Session und der laufenden Woche (GET /api/usage).
  *
- * Bewusst nur geschätzte Rohzahlen (kein OAuth-Prozent/Reset-Zeit-Anspruch,
- * s. src/routers/usage.js) — als „geschätzt" gekennzeichnet.
+ * Dreistufiges Antwortmodell (docs/specs/usage-official-values.md AC10–AC12,
+ * `source` löst das frühere `estimated: true`-Flag ab):
+ *   - `source: "official"` — offizielle Anthropic-Werte (Prozent verbraucht +
+ *     Reset-Zeitpunkt) für Session, "Alle Modelle" + je Modell, `spend` falls
+ *     vorhanden. Reine Durchreichung, keine eigene Berechnung (AC10).
+ *   - `source: "estimated"` (Fallback, heutiges Verhalten unverändert) — rohe
+ *     Output-Token-Zahlen, klar als „geschätzt" gekennzeichnet, KEINE Prozent-/
+ *     Reset-Werte (AC11). Fehlt `source` (Alt-Antwort), wird defensiv wie
+ *     `estimated` behandelt.
+ *   - `source: "unavailable"` — ehrlicher Fehler-/Leer-Hinweis statt Zahlen
+ *     (AC11).
  *
- * A11y: role=dialog/aria-modal, Fokus-Falle, ESC schließt, Schließen-Kreuz
- * oben rechts, Fokus-Rückgabe an den Auslöser (Muster des Bitwarden-Unlock-
- * Dialogs in SettingsView.jsx).
+ * A11y (AC12): role=dialog/aria-modal, Fokus-Falle, ESC schließt, Schließen-
+ * Kreuz oben rechts, Fokus-Rückgabe an den Auslöser, Aktualisieren-Knopf — in
+ * allen drei Zuständen unverändert (Muster des Bitwarden-Unlock-Dialogs in
+ * SettingsView.jsx).
  */
 import { useState, useEffect, useRef, useCallback } from 'react';
 
 function formatTokens(n) {
   if (typeof n !== 'number') return '–';
   return n.toLocaleString('de-CH');
+}
+
+/** Prozentwert lokalisiert (de-CH) formatiert, z.B. "42,5 %". */
+function formatPercent(n) {
+  if (typeof n !== 'number' || !Number.isFinite(n)) return '–';
+  return `${n.toLocaleString('de-CH', { maximumFractionDigits: 1 })} %`;
+}
+
+/** Reset-Zeitpunkt (ISO-8601) lokalisiert (de-CH) formatiert. */
+function formatResetAt(iso) {
+  if (typeof iso !== 'string' || !iso) return '–';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '–';
+  return d.toLocaleString('de-CH', { dateStyle: 'short', timeStyle: 'short' });
+}
+
+/**
+ * `spend`-Form folgt dem (nicht vertraglich fixierten) Upstream-Endpunkt —
+ * defensive Best-effort-Darstellung: bekannte `amountUsd`-Zahl bevorzugt,
+ * sonst Roh-Zahl, sonst JSON-Fallback. Liefert `null`, wenn nichts darstellbar ist.
+ */
+function formatSpend(spend) {
+  if (spend === undefined || spend === null) return null;
+  if (typeof spend === 'number' && Number.isFinite(spend)) {
+    return `${spend.toLocaleString('de-CH', { maximumFractionDigits: 2 })} USD`;
+  }
+  if (typeof spend === 'object' && typeof spend.amountUsd === 'number') {
+    return `${spend.amountUsd.toLocaleString('de-CH', { maximumFractionDigits: 2 })} USD`;
+  }
+  try {
+    return JSON.stringify(spend);
+  } catch {
+    return null;
+  }
 }
 
 export function UsageCoinButton({ fetchFn }) {
@@ -107,7 +151,53 @@ function UsageOverlay({ onClose, triggerRef, fetchFn }) {
         {loading && <p aria-live="polite" style={styles.hint}>Lade…</p>}
         {error && <p role="alert" style={styles.error}>{error}</p>}
 
-        {data && (
+        {data && data.source === 'official' && (
+          <div>
+            {data.session && (
+              <section style={styles.section}>
+                <h3 style={styles.sectionTitle}>Aktuelle Sitzung (5 Std.)</h3>
+                <p style={styles.value}>{formatPercent(data.session.percentUsed)}</p>
+                <p style={styles.footnote}>Reset: {formatResetAt(data.session.resetAt)}</p>
+              </section>
+            )}
+            {data.week?.allModels && (
+              <section style={styles.section}>
+                <h3 style={styles.sectionTitle}>Woche — Alle Modelle</h3>
+                <p style={styles.value}>{formatPercent(data.week.allModels.percentUsed)}</p>
+                <p style={styles.footnote}>Reset: {formatResetAt(data.week.allModels.resetAt)}</p>
+              </section>
+            )}
+            {Array.isArray(data.week?.perModel) && data.week.perModel.map((m) => (
+              <section style={styles.section} key={m.model}>
+                <h3 style={styles.sectionTitle}>Woche — {m.model}</h3>
+                <p style={styles.value}>{formatPercent(m.percentUsed)}</p>
+                <p style={styles.footnote}>Reset: {formatResetAt(m.resetAt)}</p>
+              </section>
+            ))}
+            {formatSpend(data.spend) && (
+              <section style={styles.section}>
+                <h3 style={styles.sectionTitle}>Guthaben</h3>
+                <p style={styles.value}>{formatSpend(data.spend)}</p>
+              </section>
+            )}
+            <p style={styles.footnote}>
+              Offizielle Anthropic-Nutzungswerte.
+              Stand: {new Date(data.generatedAt).toLocaleTimeString('de-CH')}
+            </p>
+            <button type="button" onClick={load} style={styles.refreshBtn}>Aktualisieren</button>
+          </div>
+        )}
+
+        {data && data.source === 'unavailable' && (
+          <div>
+            <p role="alert" style={styles.error}>
+              Nutzungsdaten aktuell nicht verfügbar.
+            </p>
+            <button type="button" onClick={load} style={styles.refreshBtn}>Aktualisieren</button>
+          </div>
+        )}
+
+        {data && data.source !== 'official' && data.source !== 'unavailable' && (
           <div>
             <section style={styles.section}>
               <h3 style={styles.sectionTitle}>Aktuelle Sitzung (~{data.session.windowHours} Std.)</h3>
