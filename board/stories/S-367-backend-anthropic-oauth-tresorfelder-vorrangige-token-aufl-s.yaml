@@ -2,7 +2,7 @@ id: S-367
 parent: F-085
 title: 'Backend: anthropic-oauth-Tresorfelder + vorrangige Token-Auflösung in GET
   /api/usage + On-demand-Refresh mit verschlüsseltem Rückschreiben'
-status: To Do
+status: Done
 priority: P2
 spec: docs/specs/anthropic-oauth-vault.md
 implements:
@@ -21,17 +21,18 @@ labels:
 - security
 size_est: XL
 dispo_est: '5.0'
-dispo_act: null
-dispo_forecast: null
+dispo_act: '4'
+dispo_forecast: '.2500'
 estimate_note: 'Heuristik score 15 (10 AC + 4 Komponenten: CredentialStore/usage.js/Refresh-Client/Audit
   + 1 security-label) -> XL; estimator nicht dispatchbar (Subagent, kein Task) ->
   Baseline-Fallback js|balanced aggregat ep 5.0; keine Baseline-Tokens'
 confidence: low
 tok_est: null
-branch: null
+branch: feat/S-367-anthropic-oauth-vault-backend
 pr: null
 blocked_reason: null
 created_at: '2026-07-18T07:22:58Z'
-updated_at: '2026-07-18T07:25:03Z'
-done_at: null
+updated_at: '2026-07-18T08:11:11Z'
+done_at: '2026-07-18T08:09:30Z'
 area: einstellungen
+tok: '59685762'
