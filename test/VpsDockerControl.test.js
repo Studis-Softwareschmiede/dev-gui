@@ -24,6 +24,11 @@
  *          `docker inspect <containerId>`, GETRENNT von inspect(vps, image) (Image-ExposedPorts,
  *          deploy-lifecycle AC13); Container-ID-Validierung wie rm(); geheimnisfrei klassifizierte
  *          Fehler (docker-failed/no-private-key/unreachable/error); kein Private-Key-Leak im Kommando
+ *   AC17 — (S-377) getImageRepoTags(vps, imageRef, opts?): { tags: string[] } via
+ *          `docker image inspect --format '{{json .RepoTags}}' <imageRef>`, GETRENNT von
+ *          inspect(vps, image) (ExposedPorts) und inspectContainer() (Container-Run-Config);
+ *          imageRef via Shell-Escaping abgesichert; geheimnisfrei klassifizierte Fehler; kein
+ *          Private-Key-Leak im Kommando; nicht-JSON-stdout → leere Tag-Liste (kein Crash)
  *
  * Covers (deploy-config-volume-mount, v2/F-079-Korrektur — generischer rw-Verzeichnis-Mount):
  *   AC1  — run(): requiresConfig true → (a) `mkdir -p <hostConfigDir>` in DERSELBEN SSH-Session
@@ -1411,6 +1416,149 @@ describe('VpsDockerControl.inspectContainer() — container-image-update AC5', (
     await ctrl.inspectContainer(TEST_VPS, 'abc123def456', {
       _sshClientFactory: makeMockSshClient({
         stdout: inspectOutput(),
+        exitCode: 0,
+        onCommand: (cmd) => { capturedCmd = cmd; },
+      }),
+    });
+
+    expect(capturedCmd).not.toContain(FAKE_PRIVATE_KEY);
+    expect(capturedCmd).not.toContain('FAKEPRIVATE');
+  });
+});
+
+// ── getImageRepoTags() (container-image-update AC17) ───────────────────────────
+
+describe('VpsDockerControl.getImageRepoTags() — container-image-update AC17', () => {
+  let store, dir;
+
+  const DIGEST_REF = 'ghcr.io/org/app@sha256:1111111111111111111111111111111111111111111111111111111111111111';
+
+  beforeEach(async () => {
+    ({ store, dir } = await makeTmpStore());
+    await store.set('ssh/root/private_key', FAKE_PRIVATE_KEY);
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('gibt result:ok + tags: string[] bei erfolgreichem docker image inspect zurück', async () => {
+    const ctrl = new VpsDockerControl(store);
+    const stdout = JSON.stringify(['ghcr.io/org/app:latest']);
+
+    const result = await ctrl.getImageRepoTags(TEST_VPS, DIGEST_REF, {
+      _sshClientFactory: makeMockSshClient({ stdout, exitCode: 0 }),
+    });
+
+    expect(result.result).toBe('ok');
+    expect(result.tags).toEqual(['ghcr.io/org/app:latest']);
+  });
+
+  it('mehrere RepoTags → alle werden zurückgegeben (Auswahl-Logik liegt beim Aufrufer)', async () => {
+    const ctrl = new VpsDockerControl(store);
+    const stdout = JSON.stringify(['ghcr.io/org/app:latest', 'ghcr.io/org/app:v2']);
+
+    const result = await ctrl.getImageRepoTags(TEST_VPS, DIGEST_REF, {
+      _sshClientFactory: makeMockSshClient({ stdout, exitCode: 0 }),
+    });
+
+    expect(result.result).toBe('ok');
+    expect(result.tags).toEqual(['ghcr.io/org/app:latest', 'ghcr.io/org/app:v2']);
+  });
+
+  it('RepoTags null (keine Tags) → tags: []', async () => {
+    const ctrl = new VpsDockerControl(store);
+    const stdout = JSON.stringify(null);
+
+    const result = await ctrl.getImageRepoTags(TEST_VPS, DIGEST_REF, {
+      _sshClientFactory: makeMockSshClient({ stdout, exitCode: 0 }),
+    });
+
+    expect(result.result).toBe('ok');
+    expect(result.tags).toEqual([]);
+  });
+
+  it('nicht-JSON stdout → result:ok, tags: [] (kein Crash)', async () => {
+    const ctrl = new VpsDockerControl(store);
+
+    const result = await ctrl.getImageRepoTags(TEST_VPS, DIGEST_REF, {
+      _sshClientFactory: makeMockSshClient({ stdout: 'not-json', exitCode: 0 }),
+    });
+
+    expect(result.result).toBe('ok');
+    expect(result.tags).toEqual([]);
+  });
+
+  it('docker image inspect exit != 0 (Image nicht gefunden) → result:error, errorClass:docker-failed', async () => {
+    const ctrl = new VpsDockerControl(store);
+
+    const result = await ctrl.getImageRepoTags(TEST_VPS, DIGEST_REF, {
+      _sshClientFactory: makeMockSshClient({ stdout: '', exitCode: 1 }),
+    });
+
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('docker-failed');
+    expect(result.reason).not.toContain(FAKE_PRIVATE_KEY);
+  });
+
+  it('kein Private-Key → errorClass:no-private-key, KEIN SSH-Aufruf', async () => {
+    const { store: emptyStore, dir: emptyDir } = await makeTmpStore();
+    const ctrl = new VpsDockerControl(emptyStore);
+    let sshCalled = false;
+
+    const result = await ctrl.getImageRepoTags(TEST_VPS, DIGEST_REF, {
+      _sshClientFactory: makeMockSshClient({
+        stdout: JSON.stringify(['x:latest']),
+        exitCode: 0,
+        onCommand: () => { sshCalled = true; },
+      }),
+    });
+
+    await rm(emptyDir, { recursive: true, force: true });
+
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('no-private-key');
+    expect(sshCalled).toBe(false);
+  });
+
+  it('SSH unreachable → errorClass:unreachable', async () => {
+    const ctrl = new VpsDockerControl(store);
+    const connErr = new Error('Connection refused');
+    connErr.code = 'ECONNREFUSED';
+
+    const result = await ctrl.getImageRepoTags(TEST_VPS, DIGEST_REF, {
+      _sshClientFactory: makeMockSshClient({ connectError: connErr }),
+    });
+
+    expect(result.result).toBe('error');
+    expect(result.errorClass).toBe('unreachable');
+  });
+
+  it('Kommando ruft "docker image inspect" mit der Image-Referenz auf, GETRENNT von inspect(vps, image)', async () => {
+    const ctrl = new VpsDockerControl(store);
+    let capturedCmd = null;
+
+    await ctrl.getImageRepoTags(TEST_VPS, DIGEST_REF, {
+      _sshClientFactory: makeMockSshClient({
+        stdout: JSON.stringify(['ghcr.io/org/app:latest']),
+        exitCode: 0,
+        onCommand: (cmd) => { capturedCmd = cmd; },
+      }),
+    });
+
+    expect(capturedCmd).toContain('docker image inspect');
+    expect(capturedCmd).toContain('.RepoTags');
+    expect(capturedCmd).toContain(DIGEST_REF);
+    expect(capturedCmd).not.toContain('ExposedPorts');
+  });
+
+  it('AC12/Floor — SSH-Private-Key erscheint NICHT im Kommando', async () => {
+    const ctrl = new VpsDockerControl(store);
+    let capturedCmd = null;
+
+    await ctrl.getImageRepoTags(TEST_VPS, DIGEST_REF, {
+      _sshClientFactory: makeMockSshClient({
+        stdout: JSON.stringify(['ghcr.io/org/app:latest']),
         exitCode: 0,
         onCommand: (cmd) => { capturedCmd = cmd; },
       }),

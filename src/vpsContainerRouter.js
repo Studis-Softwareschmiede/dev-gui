@@ -1,7 +1,7 @@
 /**
  * vpsContainerRouter — Express-Router für Container-Übersicht + Aktionen pro VPS.
  *
- * Implements: vps-container-overview AC8–AC12/AC11b, container-image-update AC1–AC4/AC7/AC10–AC12
+ * Implements: vps-container-overview AC8–AC12/AC11b, container-image-update AC1–AC4/AC7/AC10–AC12/AC16/AC17
  *
  * Routes (alle hinter AccessGuard in server.js):
  *   GET    /api/vps/machines/:provider/*splat/containers
@@ -31,10 +31,14 @@
  *             → { result:'ok', deployment } | { result:'error', errorClass, reason }  [MUTATION]
  *             Nur managed (AC3) — pull + recreate über DeployOrchestrator.deploy() mit dem
  *             UNVERÄNDERTEN Image-Ref + rekonstruierter Run-Config des Bestands-Containers
- *             (VpsDockerControl.inspectContainer + RunConfigMapper, AC1/AC6). Fail-closed vor
+ *             (VpsDockerControl.inspectContainer + RunConfigMapper, AC1/AC6). Ist der Bestands-Ref
+ *             Digest-gepinnt (repo@sha256:…), wird stattdessen der zugehörige bewegliche Tag aus
+ *             den RepoTags des Images verwendet (VpsDockerControl.getImageRepoTags +
+ *             ImageRefResolver, AC16/AC17) — nie der gepinnte Alt-Digest. Fail-closed vor
  *             jeder Mutation (AC7): inspect-Fehler, fehlendes Hostname-Label, nicht auflösbare
- *             tunnelId, oder nicht eindeutig abbildbare Run-Config brechen ab — KEIN pull/rm/run.
- *             Niemals docker restart (AC2). container-image-update.md AC1–AC4/AC7/AC10–AC12.
+ *             tunnelId, nicht eindeutig abbildbare Run-Config, oder kein eindeutiger beweglicher
+ *             Tag (AC17) brechen ab — KEIN pull/rm/run. Niemals docker restart (AC2).
+ *             container-image-update.md AC1–AC4/AC7/AC10–AC12/AC16/AC17.
  *
  * ServerId-Routing (IONOS composite IDs):
  *   Express 5 *splat captures path-segments between :provider and /containers as array.
@@ -62,6 +66,7 @@
 import { Router } from 'express';
 import { LockoutGuard } from './cloudflare/LockoutGuard.js';
 import { mapRunConfigToDeployParams } from './deploy/RunConfigMapper.js';
+import { isDigestPinnedImageRef, pickMovingTag } from './deploy/ImageRefResolver.js';
 
 /** Erlaubte Provider-IDs (sync mit vpsRouter.js). */
 const KNOWN_PROVIDERS = ['hetzner', 'ionos', 'hostinger'];
@@ -615,8 +620,10 @@ export function vpsContainerRouter({ vpsDockerControl, deployOrchestrator, audit
    * POST /api/vps/machines/:provider/*splat/containers/:containerId/update
    * Zieht das UNVERÄNDERTE Image des Bestands-Containers neu (`docker pull`) und baut den
    * Container über die bestehende Deploy-Saga (`DeployOrchestrator.deploy`) neu auf — unter
-   * Erhalt von Env/Mount/Hostname-Label (container-image-update AC1/AC4/AC6). Body ist LEER:
-   * ein mitgesendetes Image/Tag/tunnelId wird NICHT gelesen (AC4).
+   * Erhalt von Env/Mount/Hostname-Label (container-image-update AC1/AC4/AC6). Ist der
+   * Bestands-Ref Digest-gepinnt (repo@sha256:…), wird stattdessen der zugehörige bewegliche
+   * Tag verwendet (AC16/AC17) — nie der gepinnte Alt-Digest. Body ist LEER: ein mitgesendetes
+   * Image/Tag/tunnelId wird NICHT gelesen (AC4).
    *
    * Ablauf (container-image-update §Auslösen & Ablauf; Reihenfolge des Audit-Writes gegenüber
    * der Spec-Prosa PRÄZISIERT, S-355 Iteration 2 — AC10 verlangt hostname im Audit-Eintrag,
@@ -627,9 +634,12 @@ export function vpsContainerRouter({ vpsDockerControl, deployOrchestrator, audit
    *   (a') Audit-First — jetzt inkl. hostname, VOR jedem weiteren (auch lesenden) Schritt und
    *        insbesondere VOR LockoutGuard/deploy()
    *   (c) Run-Config lesen (VpsDockerControl.inspectContainer)
+   *   (c') Ziel-Ref-Auflösung (AC16/AC17): Bestands-Ref Digest-gepinnt? → beweglichen Tag aus
+   *        den RepoTags des Images ableiten (VpsDockerControl.getImageRepoTags), sonst
+   *        Bestands-Ref unverändert (AC4)
    *   (d) tunnelId server-seitig auflösen (derselbe Weg wie managed-Remove)
    *   (e) LockoutGuard auf den Hostname
-   *   (f) Deploy-Saga mit demselben Image-Ref + rekonstruierter Run-Config
+   *   (f) Deploy-Saga mit dem aufgelösten Ziel-Ref + rekonstruierter Run-Config
    *
    * Fail-closed (AC7): jeder Vor-Schritt-Fehler bricht VOR jeder Mutation ab — kein
    * pull/rm/run. Niemals `docker restart` (AC2, grep-prüfbar: kein restart-Aufruf hier).
@@ -644,7 +654,7 @@ export function vpsContainerRouter({ vpsDockerControl, deployOrchestrator, audit
    *                                                        tunnel-not-found | protected-resource
    *   422 { error }                                      — Provider-/ServerId-/ContainerId-Validierung
    *   500 { error }                                       — Audit-Write fehlgeschlagen (AC10)
-   *   502 { result:'error', errorClass, reason }          — Docker-/SSH-/Deploy-Fehler
+   *   502 { result:'error', errorClass, reason }          — Docker-/SSH-/Deploy-/RepoTags-Fehler
    */
   router.post('/api/vps/machines/:provider/*splat/containers/:containerId/update', async (req, res) => {
     const identity = req.identity ?? null;
@@ -737,6 +747,37 @@ export function vpsContainerRouter({ vpsDockerControl, deployOrchestrator, audit
     }
     const config = inspectResult.config;
 
+    // (c') Ziel-Ref-Auflösung (AC16/AC17): ist der Bestands-Ref Digest-gepinnt
+    // (repo@sha256:… bzw. reiner Digest/Image-ID), wird der zugehörige BEWEGLICHE Tag
+    // ausschließlich aus einer real am Image vorhandenen Quelle abgeleitet (RepoTags des
+    // Images) — kein geratenes/hartkodiertes ":latest", keine Client-Angabe (AC4 bleibt
+    // scharf). Trägt der Bestands-Ref bereits einen beweglichen Tag, bleibt targetImage
+    // unverändert (AC4). Ein technischer Fehler beim RepoTags-Read (SSH/Docker) ist KEIN
+    // update-unsafe, sondern ein regulärer Docker-/SSH-Fehler (502) — update-unsafe ist
+    // ausschließlich für "kein eindeutiger Tag ermittelbar" reserviert (AC7/AC17).
+    let targetImage = config.image;
+    if (isDigestPinnedImageRef(config.image)) {
+      const repoTagsResult = await vpsDockerControl.getImageRepoTags(vpsTarget, config.image);
+      if (repoTagsResult.result !== 'ok') {
+        return res.status(502).json({
+          result: 'error',
+          errorClass: repoTagsResult.errorClass ?? 'docker-failed',
+          reason: repoTagsResult.reason ?? 'Bewegliche Tag-Ermittlung fehlgeschlagen',
+        });
+      }
+      const picked = pickMovingTag(repoTagsResult.tags);
+      if (!picked.ok) {
+        // Kein eindeutiger beweglicher Tag ermittelbar (kein Tag oder mehrdeutig) →
+        // fail-closed, KEIN Update auf den gepinnten Alt-Digest als "Notlösung" (AC17).
+        return res.status(422).json({
+          result: 'error',
+          errorClass: 'update-unsafe',
+          reason: 'update-unsafe',
+        });
+      }
+      targetImage = picked.tag;
+    }
+
     // (d) tunnelId server-seitig auflösen (AC13) — derselbe Target-Record wie vpsTarget selbst,
     // additiv von resolveVpsTarget durchgereicht (derselbe Weg wie managed-Remove, AC11
     // vps-container-overview). AC7: kein Fallback auf einen Deploy ohne Route — nicht
@@ -770,7 +811,8 @@ export function vpsContainerRouter({ vpsDockerControl, deployOrchestrator, audit
       });
     }
 
-    // Deploy-Saga: pull (unveränderter Image-Ref) → rm Altcontainer → run → Route/DNS.
+    // Deploy-Saga: pull (unveränderter Image-Ref, bzw. der aufgelöste bewegliche Tag bei
+    // Digest-Pin, AC16/AC17) → rm Altcontainer → run → Route/DNS.
     // Kein eigener pull/run/Route-Code — ausschließlich DeployOrchestrator.deploy() (Grep-prüfbar).
     // [[deploy-cache-purge]] AC10: dieselbe deploy()-Instanz purged am Erfolgsausgang best-effort
     // den Edge-Cache des Hostnamens (kein eigener Purge-Code hier nötig) — deployResult.deployment.cachePurge
@@ -778,7 +820,7 @@ export function vpsContainerRouter({ vpsDockerControl, deployOrchestrator, audit
     let deployResult;
     try {
       deployResult = await deployOrchestrator.deploy({
-        image: config.image,
+        image: targetImage,
         vps: vpsTarget,
         hostname: container.hostname,
         tunnelId,

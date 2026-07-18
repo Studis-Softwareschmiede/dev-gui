@@ -50,6 +50,15 @@
  *          `VpsProviderRegistry.prototype` prüft — eine erfundene Methode lässt den Aufbau des
  *          Doubles fehlschlagen statt den Test still durchzuwinken. Negativ-Nachweis + Positiv-
  *          Nachweis in der eigenen AC15-`describe`-Sektion am Dateiende.
+ *   AC16 — (S-377) Bestands-Ref Digest-gepinnt (repo@sha256:ALT) + eindeutig auflösbarer Tag
+ *          (RepoTags des Images enthält genau EINEN Eintrag) → deploy() erhält den TAG, NIE
+ *          den Alt-Digest.
+ *   AC17 — (S-377) Tag-Ermittlung ausschließlich über VpsDockerControl.getImageRepoTags
+ *          (RepoTags-Quelle); kein eindeutiger Tag (leer ODER mehrdeutig) → 422 update-unsafe,
+ *          kein deploy(); ein technischer Fehler beim RepoTags-Read (SSH/Docker) → 502, kein
+ *          deploy(); Bestands-Ref bereits beweglich (repo:tag) → RepoTags-Quelle wird NICHT
+ *          aufgerufen (AC4-Verhalten unverändert); eine Client-Tag-Angabe im Body bestimmt den
+ *          Ziel-Ref nie (identisch AC4).
  *
  * Covers ([[deploy-cache-purge]] AC8-Nachzug, S-372 — persistenter Audit für cachePurge im Update-Pfad):
  *   AC8 — deployResult.deployment.cachePurge.status "ok"/"failed" → eigener `deploy-cache-purge:
@@ -135,6 +144,8 @@ function makeMockDockerControl({
     result: 'ok',
     config: { image: MANAGED_CONTAINER.image, env: {}, binds: [], labels: { 'cloudflare.tunnel-hostname': MANAGED_CONTAINER.hostname } },
   },
+  // container-image-update AC16/AC17: RepoTags-Quelle für den beweglichen Tag bei Digest-Pin.
+  getImageRepoTagsResult = { result: 'ok', tags: [] },
   onPsAll = null,
   onStart = null,
   onStop = null,
@@ -142,6 +153,7 @@ function makeMockDockerControl({
   onLogs = null,
   onRm = null,
   onInspectContainer = null,
+  onGetImageRepoTags = null,
 } = {}) {
   return {
     async psAll(_vps, _opts) {
@@ -171,6 +183,10 @@ function makeMockDockerControl({
     async inspectContainer(_vps, containerId, _opts) {
       if (onInspectContainer) onInspectContainer(containerId);
       return inspectContainerResult;
+    },
+    async getImageRepoTags(_vps, imageRef, _opts) {
+      if (onGetImageRepoTags) onGetImageRepoTags(imageRef);
+      return getImageRepoTagsResult;
     },
   };
 }
@@ -1288,6 +1304,185 @@ describe('vpsContainerRouter — container-image-update: POST .../update', () =>
     expect(deployParams.image).toBe(MANAGED_CONTAINER.image);
     expect(deployParams.image).not.toBe('ghcr.io/evil/other:latest');
     expect(deployParams.tunnelId).not.toBe('fremde-tunnel-id');
+  });
+
+  // ── AC16/AC17: Digest-gepinnter Bestands-Ref → beweglicher Tag statt Alt-Digest ──
+
+  const DIGEST_PINNED_IMAGE = 'ghcr.io/org/app@sha256:1111111111111111111111111111111111111111111111111111111111111111';
+  const MOVING_TAG = 'ghcr.io/org/app:latest';
+
+  it('AC16 — Digest-Pin mit genau EINEM RepoTag → deploy() erhält den TAG, nie den Alt-Digest', async () => {
+    let deployParams = null;
+    let repoTagsCalledWith = null;
+    server = await makeTestServer({
+      env: { DEV_NO_ACCESS: '1' },
+      dockerControl: makeMockDockerControl({
+        psAllResult: { result: 'ok', containers: [MANAGED_CONTAINER] },
+        inspectContainerResult: {
+          result: 'ok',
+          config: { image: DIGEST_PINNED_IMAGE, env: {}, binds: [], labels: { 'cloudflare.tunnel-hostname': MANAGED_CONTAINER.hostname } },
+        },
+        getImageRepoTagsResult: { result: 'ok', tags: [MOVING_TAG] },
+        onGetImageRepoTags: (imageRef) => { repoTagsCalledWith = imageRef; },
+      }),
+      orchestrator: makeMockOrchestrator({
+        onDeploy: (params) => { deployParams = params; },
+      }),
+      registry: makeRegistryWithTunnel(),
+    });
+
+    const { status, body } = await server.doRequest({
+      method: 'POST',
+      path: `/api/vps/machines/hetzner/1/containers/${MANAGED_CONTAINER.containerId}/update`,
+    });
+
+    expect(status).toBe(200);
+    expect(body.result).toBe('ok');
+    expect(repoTagsCalledWith).toBe(DIGEST_PINNED_IMAGE); // RepoTags-Quelle am gepinnten Ref
+    expect(deployParams.image).toBe(MOVING_TAG);
+    expect(deployParams.image).not.toBe(DIGEST_PINNED_IMAGE);
+  });
+
+  it('AC17 — Digest-Pin OHNE eindeutigen Tag (RepoTags leer) → 422 update-unsafe, kein deploy()', async () => {
+    let deployCalled = false;
+    server = await makeTestServer({
+      env: { DEV_NO_ACCESS: '1' },
+      dockerControl: makeMockDockerControl({
+        psAllResult: { result: 'ok', containers: [MANAGED_CONTAINER] },
+        inspectContainerResult: {
+          result: 'ok',
+          config: { image: DIGEST_PINNED_IMAGE, env: {}, binds: [], labels: { 'cloudflare.tunnel-hostname': MANAGED_CONTAINER.hostname } },
+        },
+        getImageRepoTagsResult: { result: 'ok', tags: [] },
+      }),
+      orchestrator: makeMockOrchestrator({
+        onDeploy: () => { deployCalled = true; },
+      }),
+      registry: makeRegistryWithTunnel(),
+    });
+
+    const { status, body } = await server.doRequest({
+      method: 'POST',
+      path: `/api/vps/machines/hetzner/1/containers/${MANAGED_CONTAINER.containerId}/update`,
+    });
+
+    expect(status).toBe(422);
+    expect(body.errorClass).toBe('update-unsafe');
+    expect(deployCalled).toBe(false);
+  });
+
+  it('AC17 — Digest-Pin mit MEHRDEUTIGEN RepoTags (>1) → 422 update-unsafe, kein deploy()', async () => {
+    let deployCalled = false;
+    server = await makeTestServer({
+      env: { DEV_NO_ACCESS: '1' },
+      dockerControl: makeMockDockerControl({
+        psAllResult: { result: 'ok', containers: [MANAGED_CONTAINER] },
+        inspectContainerResult: {
+          result: 'ok',
+          config: { image: DIGEST_PINNED_IMAGE, env: {}, binds: [], labels: { 'cloudflare.tunnel-hostname': MANAGED_CONTAINER.hostname } },
+        },
+        getImageRepoTagsResult: { result: 'ok', tags: ['ghcr.io/org/app:latest', 'ghcr.io/org/app:v2'] },
+      }),
+      orchestrator: makeMockOrchestrator({
+        onDeploy: () => { deployCalled = true; },
+      }),
+      registry: makeRegistryWithTunnel(),
+    });
+
+    const { status, body } = await server.doRequest({
+      method: 'POST',
+      path: `/api/vps/machines/hetzner/1/containers/${MANAGED_CONTAINER.containerId}/update`,
+    });
+
+    expect(status).toBe(422);
+    expect(body.errorClass).toBe('update-unsafe');
+    expect(deployCalled).toBe(false);
+  });
+
+  it('AC17 — RepoTags-Read schlägt technisch fehl (SSH/Docker) → 502, kein deploy() (kein update-unsafe)', async () => {
+    let deployCalled = false;
+    server = await makeTestServer({
+      env: { DEV_NO_ACCESS: '1' },
+      dockerControl: makeMockDockerControl({
+        psAllResult: { result: 'ok', containers: [MANAGED_CONTAINER] },
+        inspectContainerResult: {
+          result: 'ok',
+          config: { image: DIGEST_PINNED_IMAGE, env: {}, binds: [], labels: { 'cloudflare.tunnel-hostname': MANAGED_CONTAINER.hostname } },
+        },
+        getImageRepoTagsResult: { result: 'error', errorClass: 'docker-failed', reason: 'docker-Kommando fehlgeschlagen' },
+      }),
+      orchestrator: makeMockOrchestrator({
+        onDeploy: () => { deployCalled = true; },
+      }),
+      registry: makeRegistryWithTunnel(),
+    });
+
+    const { status, body } = await server.doRequest({
+      method: 'POST',
+      path: `/api/vps/machines/hetzner/1/containers/${MANAGED_CONTAINER.containerId}/update`,
+    });
+
+    expect(status).toBe(502);
+    expect(body.errorClass).toBe('docker-failed');
+    expect(deployCalled).toBe(false);
+  });
+
+  it('AC17 — Bestands-Ref bereits beweglich (repo:tag) → getImageRepoTags wird NICHT aufgerufen (AC4 unverändert)', async () => {
+    let repoTagsCalled = false;
+    let deployParams = null;
+    server = await makeTestServer({
+      env: { DEV_NO_ACCESS: '1' },
+      dockerControl: makeMockDockerControl({
+        psAllResult: { result: 'ok', containers: [MANAGED_CONTAINER] },
+        inspectContainerResult: {
+          result: 'ok',
+          config: { image: MANAGED_CONTAINER.image, env: {}, binds: [], labels: { 'cloudflare.tunnel-hostname': MANAGED_CONTAINER.hostname } },
+        },
+        onGetImageRepoTags: () => { repoTagsCalled = true; },
+      }),
+      orchestrator: makeMockOrchestrator({
+        onDeploy: (params) => { deployParams = params; },
+      }),
+      registry: makeRegistryWithTunnel(),
+    });
+
+    const { status } = await server.doRequest({
+      method: 'POST',
+      path: `/api/vps/machines/hetzner/1/containers/${MANAGED_CONTAINER.containerId}/update`,
+    });
+
+    expect(status).toBe(200);
+    expect(repoTagsCalled).toBe(false);
+    expect(deployParams.image).toBe(MANAGED_CONTAINER.image);
+  });
+
+  it('AC17 — Client-Tag-Angabe im Body bestimmt den Ziel-Ref auch im Digest-Pin-Fall nie (identisch AC4)', async () => {
+    let deployParams = null;
+    server = await makeTestServer({
+      env: { DEV_NO_ACCESS: '1' },
+      dockerControl: makeMockDockerControl({
+        psAllResult: { result: 'ok', containers: [MANAGED_CONTAINER] },
+        inspectContainerResult: {
+          result: 'ok',
+          config: { image: DIGEST_PINNED_IMAGE, env: {}, binds: [], labels: { 'cloudflare.tunnel-hostname': MANAGED_CONTAINER.hostname } },
+        },
+        getImageRepoTagsResult: { result: 'ok', tags: [MOVING_TAG] },
+      }),
+      orchestrator: makeMockOrchestrator({
+        onDeploy: (params) => { deployParams = params; },
+      }),
+      registry: makeRegistryWithTunnel(),
+    });
+
+    const { status } = await server.doRequest({
+      method: 'POST',
+      path: `/api/vps/machines/hetzner/1/containers/${MANAGED_CONTAINER.containerId}/update`,
+      body: { image: 'ghcr.io/evil/other:latest', tag: 'v9' },
+    });
+
+    expect(status).toBe(200);
+    expect(deployParams.image).toBe(MOVING_TAG);
+    expect(deployParams.image).not.toBe('ghcr.io/evil/other:latest');
   });
 
   // ── AC7: Fail-closed vor jeder Mutation ──────────────────────────────────────

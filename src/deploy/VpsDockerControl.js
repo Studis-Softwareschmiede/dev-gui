@@ -21,6 +21,9 @@
  *                                (container-image-update AC5): { image, env, binds, labels } via
  *                                `docker inspect <containerId>`. GETRENNT von `inspect(vps, image)`
  *                                (Image-ExposedPorts, deploy-lifecycle AC13) — ersetzt sie NICHT.
+ *   - getImageRepoTags(vps, imageRef, opts?) — RepoTags eines Images via
+ *                                `docker image inspect` (container-image-update AC17): Quelle für
+ *                                den beweglichen Tag, wenn `Config.Image` Digest-gepinnt ist.
  *
  * SSH-Transport: ssh2 (analog VpsProvisioner — kein System-ssh binary nötig).
  *
@@ -391,6 +394,66 @@ export class VpsDockerControl {
       const labels = (parsed.labels && typeof parsed.labels === 'object') ? parsed.labels : {};
 
       return { result: 'ok', config: { image, env, binds, labels } };
+    } catch (err) {
+      const errorClass = classifyError(err);
+      return {
+        result: 'error',
+        reason: sanitizeErrorReason(errorClass),
+        errorClass,
+      };
+    }
+  }
+
+  /**
+   * Ermittelt die RepoTags eines Images via `docker image inspect` auf dem VPS
+   * (container-image-update AC17): Quelle für den beweglichen Tag, wenn `Config.Image`
+   * eines Bestands-Containers Digest-gepinnt ist (`repo@sha256:<digest>` bzw. ein reiner
+   * Digest/Image-ID) — in diesem Fall trägt `Config.Image` selbst keinen Tag mehr; nur die
+   * RepoTags-Liste des zugrunde liegenden Images kann ihn (falls eindeutig) liefern.
+   *
+   * **Strikt getrennt** von `inspect(vps, image)` (ExposedPorts, deploy-lifecycle AC13) und
+   * `inspectContainer(vps, containerId)` (Container-Run-Config, AC5) — diese Methode
+   * inspiziert ein IMAGE (nicht einen Container) auf seine RepoTags.
+   *
+   * Security: `imageRef` wird via Shell-Escaping abgesichert, bevor er in das Kommando
+   * eingebettet wird; der SSH-Private-Key erscheint nie in Argv/Log/Response.
+   *
+   * @param {VpsTarget} vps
+   * @param {string}    imageRef   - Image-Referenz (z.B. `repo@sha256:<digest>` oder Image-ID)
+   * @param {object}    [opts]
+   * @param {string}    [opts.hostFingerprint]    - SHA-256-Fingerprint für Host-Key-Verifikation
+   * @param {Function}  [opts._sshClientFactory] - testbare SSH-Client-Fabrik (für Unit-Tests)
+   * @returns {Promise<{ result:'ok', tags: string[] } | { result:'error', reason?: string, errorClass?: string }>}
+   */
+  async getImageRepoTags(vps, imageRef, opts = {}) {
+    const privateKey = await this.#loadPrivateKey(vps.targetUser);
+    if (!privateKey.ok) return { result: 'error', ...privateKey.error };
+
+    // Security: imageRef via Shell-Single-Quote-Escaping absichern (analog pull()/inspect()).
+    const escapedRef = shellEscape(imageRef);
+    const cmd = `docker image inspect --format '{{json .RepoTags}}' ${escapedRef}`;
+
+    try {
+      const stdout = await runSshCommand({
+        privateKey: privateKey.value,
+        host: vps.host,
+        port: vps.port ?? 22,
+        targetUser: vps.targetUser,
+        command: cmd,
+        timeoutMs: EXEC_TIMEOUT_MS,
+        hostFingerprint: opts.hostFingerprint ?? null,
+        sshClientFactory: opts._sshClientFactory,
+      });
+
+      let parsed;
+      try {
+        parsed = JSON.parse(stdout.trim());
+      } catch {
+        // Kein valides JSON (unerwartete Ausgabe) → konservativ leere Tag-Liste, kein Crash.
+        return { result: 'ok', tags: [] };
+      }
+      const tags = Array.isArray(parsed) ? parsed.filter((t) => typeof t === 'string') : [];
+      return { result: 'ok', tags };
     } catch (err) {
       const errorClass = classifyError(err);
       return {
