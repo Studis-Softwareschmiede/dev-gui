@@ -43,23 +43,67 @@ function formatResetAt(iso) {
 }
 
 /**
- * `spend`-Form folgt dem (nicht vertraglich fixierten) Upstream-Endpunkt —
- * defensive Best-effort-Darstellung: bekannte `amountUsd`-Zahl bevorzugt,
- * sonst Roh-Zahl, sonst JSON-Fallback. Liefert `null`, wenn nichts darstellbar ist.
+ * Formatiert einen Geldbetrag aus dem realen Upstream-Schema
+ * `{ amount_minor, currency, exponent }` (verifiziert 2026-07-18) — Betrag =
+ * amount_minor / 10^exponent, lokalisiert (de-CH) mit fester Nachkommastellenzahl.
+ * Akzeptiert defensiv auch eine reine Zahl. Liefert `null`, wenn nichts
+ * Erkennbares vorliegt.
+ */
+function formatMoneyPart(part) {
+  if (typeof part === 'number' && Number.isFinite(part)) {
+    return `${part.toLocaleString('de-CH', { maximumFractionDigits: 2 })} USD`;
+  }
+  if (
+    part && typeof part === 'object' &&
+    typeof part.amount_minor === 'number' && Number.isFinite(part.amount_minor)
+  ) {
+    const exponent = typeof part.exponent === 'number' && Number.isFinite(part.exponent)
+      ? part.exponent
+      : 2;
+    const amount = part.amount_minor / 10 ** exponent;
+    const currency = typeof part.currency === 'string' && part.currency ? part.currency : 'USD';
+    return `${amount.toLocaleString('de-CH', {
+      minimumFractionDigits: exponent,
+      maximumFractionDigits: exponent,
+    })} ${currency}`;
+  }
+  return null;
+}
+
+/**
+ * `spend`-Form folgt dem realen Upstream-Endpunkt (live verifiziert 2026-07-18):
+ * `{ used: { amount_minor, currency, exponent }, limit, percent, description,
+ * can_purchase_credits }`. `description`/`can_purchase_credits` sind Marketing-/
+ * Markdown-Text und werden bewusst NICHT dargestellt. Defensive Fallbacks für
+ * ältere/unbekannte Formen (reine Zahl, `amountUsd`-Kandidat) bleiben erhalten.
+ * Liefert `null`, wenn nichts Erkennbares darstellbar ist (nie Roh-JSON).
  */
 function formatSpend(spend) {
   if (spend === undefined || spend === null) return null;
+
+  if (typeof spend === 'object' && spend.used !== undefined) {
+    const usedText = formatMoneyPart(spend.used);
+    if (!usedText) return null;
+    const limitText = spend.limit === null || spend.limit === undefined
+      ? null
+      : formatMoneyPart(spend.limit);
+    const percentText = typeof spend.percent === 'number' && Number.isFinite(spend.percent)
+      ? formatPercent(spend.percent)
+      : null;
+    return { usedText, limitText, percentText };
+  }
+
   if (typeof spend === 'number' && Number.isFinite(spend)) {
-    return `${spend.toLocaleString('de-CH', { maximumFractionDigits: 2 })} USD`;
+    return { usedText: formatMoneyPart(spend), limitText: null, percentText: null };
   }
   if (typeof spend === 'object' && typeof spend.amountUsd === 'number') {
-    return `${spend.amountUsd.toLocaleString('de-CH', { maximumFractionDigits: 2 })} USD`;
+    return {
+      usedText: `${spend.amountUsd.toLocaleString('de-CH', { maximumFractionDigits: 2 })} USD`,
+      limitText: null,
+      percentText: null,
+    };
   }
-  try {
-    return JSON.stringify(spend);
-  } catch {
-    return null;
-  }
+  return null;
 }
 
 export function UsageCoinButton({ fetchFn }) {
@@ -174,12 +218,21 @@ function UsageOverlay({ onClose, triggerRef, fetchFn }) {
                 <p style={styles.footnote}>Reset: {formatResetAt(m.resetAt)}</p>
               </section>
             ))}
-            {formatSpend(data.spend) && (
-              <section style={styles.section}>
-                <h3 style={styles.sectionTitle}>Guthaben</h3>
-                <p style={styles.value}>{formatSpend(data.spend)}</p>
-              </section>
-            )}
+            {formatSpend(data.spend) && (() => {
+              const spendInfo = formatSpend(data.spend);
+              return (
+                <section style={styles.section}>
+                  <h3 style={styles.sectionTitle}>Guthaben</h3>
+                  <p style={styles.value}>{spendInfo.usedText} verbraucht</p>
+                  {spendInfo.limitText && (
+                    <p style={styles.footnote}>Limit: {spendInfo.limitText}</p>
+                  )}
+                  {spendInfo.percentText && (
+                    <p style={styles.footnote}>{spendInfo.percentText} genutzt</p>
+                  )}
+                </section>
+              );
+            })()}
             <p style={styles.footnote}>
               Offizielle Anthropic-Nutzungswerte.
               Stand: {new Date(data.generatedAt).toLocaleTimeString('de-CH')}

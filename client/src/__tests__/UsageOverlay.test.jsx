@@ -3,7 +3,12 @@
  *
  * Covers (docs/specs/usage-official-values.md):
  *   AC10 — `source: "official"` zeigt Prozent + lokalisierten Reset-Zeitpunkt
- *          für Session, "Alle Modelle" + je Modell, sowie `spend` falls vorhanden.
+ *          für Session, "Alle Modelle" + je Modell, sowie `spend` falls vorhanden
+ *          (inkl. dem realen Upstream-Schema `{used,limit,percent,description,
+ *          can_purchase_credits}` — live verifiziert 2026-07-18, S-369: Betrag
+ *          formatiert, `description`/`can_purchase_credits` nicht dargestellt,
+ *          `limit: null` → kein Limit-Text, unerkennbares Objekt → kein
+ *          Guthaben-Block statt Roh-JSON).
  *   AC11 — `source: "estimated"` zeigt weiterhin nur die geschätzten rohen
  *          Output-Token-Zahlen (kein %/Reset); fehlt `source` (Alt-Antwort),
  *          wird defensiv wie `estimated` behandelt. `source: "unavailable"`
@@ -117,6 +122,76 @@ describe('AC10 — source: "official" zeigt Prozent + Reset für Session/Alle Mo
     fireEvent.click(getByLabelText('Token-Nutzung anzeigen'));
     await waitFor(() => { expect(getByText(/Aktuelle Sitzung/)).toBeTruthy(); });
     expect(queryByText(/Guthaben/)).toBeNull();
+  });
+
+  it('reales Upstream-Schema: formatierter Betrag sichtbar, kein Roh-JSON im DOM', async () => {
+    const fetchFn = makeFetch(officialPayload({
+      spend: {
+        used: { amount_minor: 1234, currency: 'USD', exponent: 2 },
+        limit: null,
+        percent: null,
+        description: 'Extra usage credits cover you when you hit your plan limits. [Learn more](https://support.claude.com/articles/12429409)',
+        can_purchase_credits: true,
+      },
+    }));
+    const { getByLabelText, getByText, queryByText, container } = render(
+      React.createElement(UsageCoinButton, { fetchFn })
+    );
+    fireEvent.click(getByLabelText('Token-Nutzung anzeigen'));
+    await waitFor(() => { expect(getByText(/Guthaben/)).toBeTruthy(); });
+    expect(getByText(/12.34 USD/)).toBeTruthy();
+    expect(queryByText(/Learn more/)).toBeNull();
+    expect(queryByText(/can_purchase_credits/)).toBeNull();
+    expect(container.textContent).not.toMatch(/amount_minor/);
+  });
+
+  it('reales Upstream-Schema mit gesetztem limit + percent: beide werden angezeigt', async () => {
+    const fetchFn = makeFetch(officialPayload({
+      spend: {
+        used: { amount_minor: 500, currency: 'USD', exponent: 2 },
+        limit: { amount_minor: 10000, currency: 'USD', exponent: 2 },
+        percent: 5,
+        description: 'irrelevant',
+        can_purchase_credits: false,
+      },
+    }));
+    const { getByLabelText, getByText } = render(React.createElement(UsageCoinButton, { fetchFn }));
+    fireEvent.click(getByLabelText('Token-Nutzung anzeigen'));
+    await waitFor(() => { expect(getByText(/Guthaben/)).toBeTruthy(); });
+    expect(getByText(/5.00 USD/)).toBeTruthy();
+    expect(getByText(/Limit/)).toBeTruthy();
+    expect(getByText(/100.00 USD/)).toBeTruthy();
+    expect(getByText(/5 % genutzt/)).toBeTruthy();
+  });
+
+  it('reales Upstream-Schema mit limit: null zeigt keinen Limit-Text', async () => {
+    const fetchFn = makeFetch(officialPayload({
+      spend: {
+        used: { amount_minor: 0, currency: 'USD', exponent: 2 },
+        limit: null,
+        percent: null,
+        description: 'x',
+        can_purchase_credits: false,
+      },
+    }));
+    const { getByLabelText, getByText, queryByText } = render(React.createElement(UsageCoinButton, { fetchFn }));
+    fireEvent.click(getByLabelText('Token-Nutzung anzeigen'));
+    await waitFor(() => { expect(getByText(/Guthaben/)).toBeTruthy(); });
+    expect(getByText(/0.00 USD/)).toBeTruthy();
+    expect(queryByText(/Limit/)).toBeNull();
+  });
+
+  it('unerkennbares spend-Objekt: kein Guthaben-Block, kein Roh-JSON', async () => {
+    const fetchFn = makeFetch(officialPayload({
+      spend: { irgendwas: 'unbekannt', foo: 42 },
+    }));
+    const { getByLabelText, getByText, queryByText, container } = render(
+      React.createElement(UsageCoinButton, { fetchFn })
+    );
+    fireEvent.click(getByLabelText('Token-Nutzung anzeigen'));
+    await waitFor(() => { expect(getByText(/Aktuelle Sitzung/)).toBeTruthy(); });
+    expect(queryByText(/Guthaben/)).toBeNull();
+    expect(container.textContent).not.toMatch(/irgendwas/);
   });
 });
 
