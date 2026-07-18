@@ -7,11 +7,11 @@ status: Done
 priority: P2
 spec: docs/specs/credential-backup.md
 implements:
-- SFTP-1
-- SFTP-2
-- SFTP-3
-- SFTP-4
-- SFTP-5
+- AC25
+- AC26
+- AC27
+- AC28
+- AC29
 depends: []
 labels:
 - backend
