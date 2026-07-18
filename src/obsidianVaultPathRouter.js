@@ -4,8 +4,9 @@
  *
  * Routes (alle hinter dem `/api`-AccessGuard in server.js):
  *   GET    /api/settings/obsidian-vault-path
- *     → 200 { vaultPath: string|null, configured: boolean, mountRoot?: string }
- *       Read-only; hinter Access-Mauer, kein zusätzlicher Rollencheck (AC7).
+ *     → 200 { vaultPath: string|null, configured: boolean, mountStatus: 'ok'|'unusable'|'unconfigured', mountRoot?: string }
+ *       `mountStatus` additiv (obsidian-vault-folder-browser AC1, S-378) — read-only,
+ *       kein Secret. Read-only; hinter Access-Mauer, kein zusätzlicher Rollencheck (AC7).
  *   PUT    /api/settings/obsidian-vault-path
  *     Body { path: string }
  *     → 200 { vaultPath, configured: true }   — Erfolg (AC1)
@@ -23,6 +24,16 @@
  *     → 409 { configured: false }                — kein Vault konfiguriert
  *     → 404 { error }                             — Vault/„Projekte" (mehr) nicht erreichbar (Race/AC2)
  *       Read-only; hinter Access-Mauer, kein zusätzlicher Rollencheck (AC7).
+ *   GET    /api/settings/obsidian-vault/browse  (obsidian-vault-folder-browser AC2–AC4, S-378)
+ *     Query ?path=<container-pfad>  (optional; Default = Mount-Root von OBSIDIAN_VAULT_DIR)
+ *     → 200 { root, path, parent: string|null, breadcrumb: Array<{name,path}>, entries: Array<{name,path}> }
+ *       direkte Unterordner innerhalb der Mount-Schranke; nur Verzeichnisse, keine Dot-Ordner,
+ *       stabil nach `name` sortiert; jeder Pfad realpath-confined (AC3).
+ *     → 409 { mountStatus: 'unusable'|'unconfigured' } — Mount-Schranke nicht nutzbar (AC4)
+ *     → 400 { error }   — `path` außerhalb der Schranke / `..` / Symlink-Flucht (AC3), oder
+ *                          `path` zeigt auf eine Datei statt ein Verzeichnis
+ *     → 404 { error }   — angefragter `path` (mehr) nicht erreichbar (Race, AC4)
+ *       Read-only; hinter Access-Mauer, kein zusätzlicher Rollencheck (AC5).
  *
  * Muster: bewusst analog zu `workspacePathRouter.js` (workspace-path-config), aber:
  *   - Response-Shape `{ vaultPath, configured, mountRoot? }` (kein Env-Default-Effektivwert).
@@ -45,6 +56,8 @@ import {
   ObsidianVaultPathError,
   resolveMountRoot,
   listObsidianVaultProjects,
+  deriveMountStatus,
+  browseObsidianVaultFolder,
 } from './obsidianVaultPath.js';
 import { toExternalBackup } from './CredentialStore.js';
 
@@ -94,13 +107,17 @@ function buildStateBody(vaultPath) {
  * @param {import('./CredentialStore.js').CredentialStore} credentialStore
  * @param {import('./AuditStore.js').AuditStore} auditStore
  * @param {object} [deps]  Injectable dependencies für Tests.
- * @param {Function} [deps.validatePath]   Override für validateObsidianVaultPath (Tests).
- * @param {Function} [deps.listProjects]   Override für listObsidianVaultProjects (Tests).
+ * @param {Function} [deps.validatePath]      Override für validateObsidianVaultPath (Tests).
+ * @param {Function} [deps.listProjects]      Override für listObsidianVaultProjects (Tests).
+ * @param {Function} [deps.deriveMountStatus] Override für deriveMountStatus (Tests, S-378).
+ * @param {Function} [deps.browseFolder]      Override für browseObsidianVaultFolder (Tests, S-378).
  * @returns {import('express').Router}
  */
 export function obsidianVaultPathRouter(credentialStore, auditStore, deps = {}) {
   const _validatePath = deps.validatePath ?? validateObsidianVaultPath;
   const _listProjects = deps.listProjects ?? listObsidianVaultProjects;
+  const _deriveMountStatus = deps.deriveMountStatus ?? deriveMountStatus;
+  const _browseFolder = deps.browseFolder ?? browseObsidianVaultFolder;
   const router = Router();
 
   /**
@@ -110,10 +127,41 @@ export function obsidianVaultPathRouter(credentialStore, auditStore, deps = {}) 
   router.get('/api/settings/obsidian-vault-path', async (_req, res) => {
     try {
       const configured = await credentialStore.readObsidianVaultPath();
-      return res.json(buildStateBody(configured));
+      const mountStatus = await _deriveMountStatus();
+      return res.json({ ...buildStateBody(configured), mountStatus });
     } catch (err) {
       console.error('[obsidianVaultPathRouter] GET failed:', err.message);
       return res.status(500).json({ error: 'Obsidian-Vault-Konfiguration nicht erreichbar' });
+    }
+  });
+
+  /**
+   * GET /api/settings/obsidian-vault/browse — Ordner-Browser (obsidian-vault-folder-browser
+   * AC2–AC4, S-378). Hinter Access-Mauer, kein zusätzlicher Rollencheck (AC5). Read-only,
+   * keine Mutation, kein Audit nötig (analog GET .../obsidian-vault/projects).
+   */
+  router.get('/api/settings/obsidian-vault/browse', async (req, res) => {
+    const rawPath = req.query?.path;
+    const inputPath = typeof rawPath === 'string' ? rawPath : undefined;
+
+    try {
+      const result = await _browseFolder(inputPath);
+      return res.json(result);
+    } catch (err) {
+      if (err instanceof ObsidianVaultPathError) {
+        if (err.errorClass === 'unconfigured' || err.errorClass === 'unusable') {
+          // AC4: definierter Fehler bei nicht nutzbarer Mount-Schranke, kein Crash.
+          return res.status(409).json({ mountStatus: err.errorClass });
+        }
+        if (err.errorClass === 'not-exists') {
+          // Race (Zielpfad zwischen Health-Check und readdir entfernt) — kein Crash.
+          return res.status(404).json({ error: err.message });
+        }
+        // outside-boundary (AC3) / not-directory
+        return res.status(400).json({ error: err.message });
+      }
+      console.error('[obsidianVaultPathRouter] GET browse unexpected error:', err.message);
+      return res.status(500).json({ error: 'Ordner-Auflistung fehlgeschlagen' });
     }
   });
 

@@ -43,11 +43,17 @@
  *     `missing-projekte`) — kein Crash. Ein einzelner Eintrag, der währenddessen verschwindet
  *     oder ein kaputter Symlink ist, wird übersprungen statt die ganze Liste scheitern zu lassen.
  *
+ * `deriveMountStatus` + `browseObsidianVaultFolder` (obsidian-vault-folder-browser AC1–AC4,
+ * S-378) ergänzen einen read-only Mount-Status (`ok`|`unusable`|`unconfigured`, abgeleitet
+ * aus `OBSIDIAN_VAULT_DIR`) und einen generischen Ordner-Browser für BELIEBIGE Unterordner
+ * innerhalb der Mount-Schranke (statt nur `<vault>/<Projekt-Unterordner>`) — dieselbe
+ * Confinement-Technik (realpath + Trailing-Slash-Prefix) wie oben.
+ *
  * @module obsidianVaultPath
  */
 
 import { realpath, stat, access, constants, readdir } from 'node:fs/promises';
-import { resolve, join, sep } from 'node:path';
+import { resolve, join, sep, dirname, basename } from 'node:path';
 
 /** Default-Name des Projekt-Unterordners im Vault (Rückwärtskompatibilität, obsidian-vault-config AC2c). */
 export const PROJEKTE_SUBDIR = 'Projekte';
@@ -88,7 +94,11 @@ export function resolveProjekteSubdir(deps = {}) {
 }
 
 /**
- * @typedef {'empty-path'|'outside-boundary'|'not-exists'|'not-directory'|'not-readable'|'missing-projekte'|'vault-unreachable'} ObsidianVaultPathErrorClass
+ * @typedef {'empty-path'|'outside-boundary'|'not-exists'|'not-directory'|'not-readable'|'missing-projekte'|'vault-unreachable'|'unconfigured'|'unusable'} ObsidianVaultPathErrorClass
+ */
+
+/**
+ * @typedef {'ok'|'unusable'|'unconfigured'} ObsidianVaultMountStatus
  */
 
 /**
@@ -409,4 +419,206 @@ export async function listObsidianVaultProjects(vaultPath, deps = {}) {
   results.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 
   return results;
+}
+
+/**
+ * Leitet den Mount-Status aus `OBSIDIAN_VAULT_DIR` ab (obsidian-vault-folder-browser AC1):
+ *   - `unconfigured` — Env ungesetzt/leer.
+ *   - `unusable`     — Env gesetzt, aber Pfad existiert nicht oder ist kein Verzeichnis
+ *                       (z. B. `/dev/null`-Character-Device beim Default-Compose-Mount
+ *                       ohne `OBSIDIAN_VAULT_HOST_DIR`).
+ *   - `ok`           — Env gesetzt, Pfad existiert und ist ein Verzeichnis (auch wenn leer).
+ *
+ * Read-only Betreiber-Info, kein Secret.
+ *
+ * @param {object} [deps]  Injectable dependencies für Tests.
+ * @param {Function} [deps.stat]  default: node:fs/promises.stat
+ * @param {string}   [deps.mountRoot]  Override für OBSIDIAN_VAULT_DIR (Tests).
+ * @returns {Promise<ObsidianVaultMountStatus>}
+ */
+export async function deriveMountStatus(deps = {}) {
+  const _stat = deps.stat ?? stat;
+  const mountRoot = resolveMountRoot(deps);
+  if (!mountRoot) return 'unconfigured';
+
+  try {
+    const statResult = await _stat(mountRoot);
+    return statResult.isDirectory() ? 'ok' : 'unusable';
+  } catch {
+    return 'unusable';
+  }
+}
+
+/**
+ * Baut die Breadcrumb-Kette (Root → aktueller Ordner) aus dem confinierten Root- und
+ * Ziel-Pfad (obsidian-vault-folder-browser AC2, Verhalten Punkt 4).
+ *
+ * @param {string} root    realpath-aufgelöste Mount-Root-Schranke.
+ * @param {string} target  realpath-aufgelöster, confinierter Zielpfad (root oder Unterordner).
+ * @returns {Array<{ name: string, path: string }>}
+ */
+function buildBreadcrumb(root, target) {
+  const rootEntry = { name: basename(root) || root, path: root };
+  if (target === root) return [rootEntry];
+
+  const relPrefix = root.endsWith(sep) ? root : root + sep;
+  const relative = target.startsWith(relPrefix) ? target.slice(relPrefix.length) : '';
+  const segments = relative.split(sep).filter(Boolean);
+
+  const breadcrumb = [rootEntry];
+  let acc = root;
+  for (const segment of segments) {
+    acc = join(acc, segment);
+    breadcrumb.push({ name: segment, path: acc });
+  }
+  return breadcrumb;
+}
+
+/**
+ * Listet die direkten Unterordner eines Container-Pfads innerhalb der Mount-Schranke
+ * `OBSIDIAN_VAULT_DIR` (obsidian-vault-folder-browser AC2–AC4).
+ *
+ * Confinement (AC3, hart) — identische Technik wie `validateObsidianVaultPath`/
+ * `listObsidianVaultProjects`: `realpath`-Auflösung beider Seiten + Trailing-Slash-Prefix
+ * (kein nacktes `startsWith`). Ein `path`-Parameter mit `..`, ein absoluter Pfad außerhalb
+ * der Schranke oder ein Symlink, der aus der Schranke hinausführt, wird abgewiesen
+ * (`outside-boundary`), OHNE außerhalb zu listen. Ein einzelner Unterordner-Eintrag, dessen
+ * `realpath` aus der Schranke hinauszeigt, wird still übersprungen (nicht gelistet).
+ *
+ * Mount-Health (AC4): ist `OBSIDIAN_VAULT_DIR` `unconfigured`/`unusable`, wird VOR jedem
+ * Dateisystem-Zugriff auf den Zielpfad abgebrochen (`unconfigured`/`unusable` als
+ * `errorClass` — der Router mappt das auf `409 { mountStatus }`).
+ *
+ * Race-Sicherheit: verschwindet der Zielpfad zwischen Mount-Health-Check und `readdir`
+ * (extern entfernt/unmounted), wird ein definierter `not-exists`-Fehler geworfen (Router:
+ * `404`), kein Crash. Zeigt der Zielpfad auf eine Datei statt ein Verzeichnis, wird
+ * `not-directory` geworfen (Router: `4xx`).
+ *
+ * @param {string} [inputPath]  Optionaler Container-Pfad (untrusted, aus Query-Param).
+ *                               Ohne Angabe: Mount-Root selbst.
+ * @param {object} [deps]       Injectable dependencies für Tests.
+ * @param {Function} [deps.realpath]  default: node:fs/promises.realpath
+ * @param {Function} [deps.stat]      default: node:fs/promises.stat
+ * @param {Function} [deps.readdir]   default: node:fs/promises.readdir
+ * @param {string}   [deps.mountRoot] Override für OBSIDIAN_VAULT_DIR (Tests).
+ * @returns {Promise<{ root: string, path: string, parent: string|null, breadcrumb: Array<{name:string,path:string}>, entries: Array<{name:string,path:string}> }>}
+ * @throws {ObsidianVaultPathError} `unconfigured` | `unusable` | `outside-boundary` | `not-exists` | `not-directory`
+ */
+export async function browseObsidianVaultFolder(inputPath, deps = {}) {
+  const _realpath = deps.realpath ?? realpath;
+  const _stat = deps.stat ?? stat;
+  const _readdir = deps.readdir ?? readdir;
+
+  // AC4: Mount-Health VOR jedem Dateisystem-Zugriff auf den Zielpfad.
+  const mountRoot = resolveMountRoot(deps);
+  if (!mountRoot) {
+    throw new ObsidianVaultPathError('Obsidian-Vault-Mount ist nicht konfiguriert', 'unconfigured');
+  }
+
+  let resolvedMountRoot;
+  try {
+    const mountStat = await _stat(mountRoot);
+    if (!mountStat.isDirectory()) {
+      throw new ObsidianVaultPathError(
+        `Mount-Schranke '${mountRoot}' ist kein Verzeichnis`,
+        'unusable',
+      );
+    }
+    resolvedMountRoot = await _realpath(mountRoot);
+  } catch (err) {
+    if (err instanceof ObsidianVaultPathError) throw err;
+    throw new ObsidianVaultPathError(
+      `Mount-Schranke '${mountRoot}' existiert nicht oder ist nicht zugänglich`,
+      'unusable',
+    );
+  }
+
+  // AC3: Ohne path-Parameter wird das Mount-Root selbst aufgelistet (A3-Default).
+  const targetRaw = inputPath && inputPath.trim() ? inputPath.trim() : resolvedMountRoot;
+  const normalizedTarget = resolve(targetRaw);
+
+  let resolvedTarget;
+  try {
+    resolvedTarget = await _realpath(normalizedTarget);
+  } catch {
+    throw new ObsidianVaultPathError(`Pfad '${targetRaw}' existiert nicht`, 'not-exists');
+  }
+
+  // Confinement (AC3, hart): Trailing-Slash-Prefix, kein nacktes startsWith.
+  const mountPrefix = resolvedMountRoot.endsWith(sep) ? resolvedMountRoot : resolvedMountRoot + sep;
+  const isInsideBoundary =
+    resolvedTarget === resolvedMountRoot || resolvedTarget.startsWith(mountPrefix);
+  if (!isInsideBoundary) {
+    throw new ObsidianVaultPathError(
+      `Pfad '${targetRaw}' liegt außerhalb der gemounteten Schranke ${OBSIDIAN_VAULT_MOUNT_ENV}`,
+      'outside-boundary',
+    );
+  }
+
+  let targetStat;
+  try {
+    targetStat = await _stat(resolvedTarget);
+  } catch {
+    throw new ObsidianVaultPathError(`Pfad '${targetRaw}' existiert nicht`, 'not-exists');
+  }
+  if (!targetStat.isDirectory()) {
+    throw new ObsidianVaultPathError(`Pfad '${targetRaw}' ist kein Verzeichnis`, 'not-directory');
+  }
+
+  let dirents;
+  try {
+    dirents = await _readdir(resolvedTarget, { withFileTypes: true });
+  } catch {
+    // Race: Zielpfad zwischen stat() und readdir() entfernt/unmounted.
+    throw new ObsidianVaultPathError(`Pfad '${targetRaw}' existiert nicht (mehr)`, 'not-exists');
+  }
+
+  const targetPrefix = resolvedTarget.endsWith(sep) ? resolvedTarget : resolvedTarget + sep;
+  const entries = [];
+
+  for (const dirent of dirents) {
+    const name = dirent.name;
+
+    // Keine versteckten/Dot-Ordner (AC2).
+    if (name.startsWith('.')) continue;
+
+    const entryPath = join(resolvedTarget, name);
+
+    let resolvedEntry;
+    try {
+      resolvedEntry = await _realpath(entryPath);
+    } catch {
+      continue;
+    }
+
+    // Confinement (AC3, hart): ein Symlink, der aus der Schranke hinausführt, wird NICHT
+    // gelistet (still übersprungen).
+    const isConfined = resolvedEntry === resolvedTarget || resolvedEntry.startsWith(targetPrefix);
+    if (!isConfined) continue;
+
+    // Nur Verzeichnisse (nach Symlink-Auflösung); keine Dateien (AC2).
+    let entryStat;
+    try {
+      entryStat = await _stat(resolvedEntry);
+    } catch {
+      continue;
+    }
+    if (!entryStat.isDirectory()) continue;
+
+    entries.push({ name, path: resolvedEntry });
+  }
+
+  // Stabil sortiert (nach Name).
+  entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+
+  const parent = resolvedTarget === resolvedMountRoot ? null : dirname(resolvedTarget);
+  const breadcrumb = buildBreadcrumb(resolvedMountRoot, resolvedTarget);
+
+  return {
+    root: resolvedMountRoot,
+    path: resolvedTarget,
+    parent,
+    breadcrumb,
+    entries,
+  };
 }

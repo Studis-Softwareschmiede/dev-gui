@@ -35,6 +35,24 @@
  *         dem Vault hinausführt, wird abgewiesen (`missing-projekte`), BEVOR es als gültig gilt
  *         (realpath-Confinement-Check, gleiche Technik wie für Projekt-Einträge).
  *
+ * Covers (obsidian-vault-folder-browser, S-378 — Backend AC1–AC5):
+ *   AC1 — `deriveMountStatus`: `unconfigured` (Env ungesetzt/leer), `unusable` (Pfad existiert
+ *         nicht ODER ist kein Verzeichnis — inkl. `/dev/null`-Character-Device-Simulation), `ok`
+ *         (Pfad existiert, ist Verzeichnis, auch wenn leer); additives `mountStatus`-Feld an
+ *         GET /api/settings/obsidian-vault-path (HTTP-Ebene).
+ *   AC2 — `browseObsidianVaultFolder`/`GET .../obsidian-vault/browse`: direkte Unterordner
+ *         (echtes fs), Default = Mount-Root ohne `path`, Response-Shape
+ *         `{root,path,parent,breadcrumb,entries}`, keine Dot-Ordner, keine Dateien, stabil
+ *         sortiert, Breadcrumb-Kette Root→aktueller Ordner (HTTP-Ebene).
+ *   AC3 — Traversal-/Symlink-Schutz (Security-Floor, hart): `..`, absoluter Fremd-Pfad,
+ *         Symlink-Flucht als `path`-Parameter → `400`, kein Listing außerhalb; einzelner
+ *         Symlink-Eintrag, der aus der Schranke hinausführt → still übersprungen (echtes fs).
+ *   AC4 — Mount-Status `unusable`/`unconfigured` → `409 { mountStatus }`, kein Crash; Race
+ *         (Zielpfad zwischen Health-Check und `readdir` entfernt) → `404`, kein Crash; `path`
+ *         zeigt auf eine Datei → `400`.
+ *   AC5 — `GET .../obsidian-vault/browse` read-only, hinter AccessGuard, kein zusätzlicher
+ *         Rollencheck (200 trotz `CRED_ADMIN_EMAILS`-Restriktion), 403 ohne AccessGuard-Token.
+ *
  * Strategy:
  *   - CredentialStore.read/write/deleteObsidianVaultPath: Unit-Tests mit echtem CredentialStore
  *     (tmp-Dir, kein Master-Key nötig da meta-only).
@@ -62,6 +80,8 @@ import {
   PROJEKTE_SUBDIR,
   resolveProjekteSubdir,
   OBSIDIAN_PROJEKTE_SUBDIR_ENV,
+  deriveMountStatus,
+  browseObsidianVaultFolder,
 } from '../src/obsidianVaultPath.js';
 import { obsidianVaultPathRouter } from '../src/obsidianVaultPathRouter.js';
 import { AuditStore } from '../src/AuditStore.js';
@@ -1177,6 +1197,398 @@ describe('E2E — echter CredentialStore + realer Vault (AC2/AC3/AC4)', () => {
       expect(res.status).toBe(422);
       expect(res.body.error).toMatch(/außerhalb/);
       expect(await store.readObsidianVaultPath()).toBeNull();
+    } finally {
+      await rm(outsideTarget, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── Unit tests: deriveMountStatus (obsidian-vault-folder-browser AC1, S-378) ────────────
+
+describe('deriveMountStatus — AC1 (S-378)', () => {
+  afterEach(() => { delete process.env.OBSIDIAN_VAULT_DIR; });
+
+  it('unconfigured — OBSIDIAN_VAULT_DIR ungesetzt', async () => {
+    delete process.env.OBSIDIAN_VAULT_DIR;
+    expect(await deriveMountStatus()).toBe('unconfigured');
+  });
+
+  it('unconfigured — OBSIDIAN_VAULT_DIR leer/whitespace', async () => {
+    process.env.OBSIDIAN_VAULT_DIR = '   ';
+    expect(await deriveMountStatus()).toBe('unconfigured');
+  });
+
+  it('unusable — Pfad existiert nicht (stat wirft ENOENT)', async () => {
+    const deps = { mountRoot: '/nope', stat: async () => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); } };
+    expect(await deriveMountStatus(deps)).toBe('unusable');
+  });
+
+  it('unusable — Pfad existiert, ist aber kein Verzeichnis (z.B. /dev/null-Character-Device)', async () => {
+    const deps = { mountRoot: '/dev/null', stat: async () => ({ isDirectory: () => false }) };
+    expect(await deriveMountStatus(deps)).toBe('unusable');
+  });
+
+  it('ok — Pfad existiert und ist Verzeichnis', async () => {
+    const deps = { mountRoot: '/vault', stat: async () => ({ isDirectory: () => true }) };
+    expect(await deriveMountStatus(deps)).toBe('ok');
+  });
+
+  it('unusable — echtes fs, realer /dev/null-Mount (Owner-Vorfall)', async () => {
+    expect(await deriveMountStatus({ mountRoot: '/dev/null' })).toBe('unusable');
+  });
+
+  it('ok — echtes fs, realer tmp-Vault (leer, gültiges Root)', async () => {
+    const vaultDir = join(tmpdir(), `obs-mountstatus-ok-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(vaultDir, { recursive: true });
+    try {
+      expect(await deriveMountStatus({ mountRoot: vaultDir })).toBe('ok');
+    } finally {
+      await rm(vaultDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── Unit tests: browseObsidianVaultFolder — AC2/AC4 (echtes fs) ────────────────────────
+
+describe('browseObsidianVaultFolder — AC2/AC4 (echtes fs, S-378)', () => {
+  let vaultDir;
+
+  afterEach(async () => {
+    delete process.env.OBSIDIAN_VAULT_DIR;
+    if (vaultDir) await rm(vaultDir, { recursive: true, force: true });
+    vaultDir = null;
+  });
+
+  it('AC4 — kein OBSIDIAN_VAULT_DIR gesetzt → unconfigured', async () => {
+    delete process.env.OBSIDIAN_VAULT_DIR;
+    await expect(browseObsidianVaultFolder()).rejects.toMatchObject({ errorClass: 'unconfigured' });
+  });
+
+  it('AC4 — OBSIDIAN_VAULT_DIR zeigt auf /dev/null (kein Verzeichnis) → unusable', async () => {
+    await expect(browseObsidianVaultFolder(undefined, { mountRoot: '/dev/null' }))
+      .rejects.toMatchObject({ errorClass: 'unusable' });
+  });
+
+  it('AC4 — OBSIDIAN_VAULT_DIR existiert nicht → unusable', async () => {
+    await expect(browseObsidianVaultFolder(undefined, { mountRoot: '/does/not/exist/anywhere' }))
+      .rejects.toMatchObject({ errorClass: 'unusable' });
+  });
+
+  it('AC2 — ohne path-Parameter: Mount-Root selbst wird gelistet, entries sortiert', async () => {
+    vaultDir = join(tmpdir(), `obs-browse-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(join(vaultDir, 'Zeta'), { recursive: true });
+    await mkdir(join(vaultDir, 'Alpha'), { recursive: true });
+    const result = await browseObsidianVaultFolder(undefined, { mountRoot: vaultDir });
+    expect(result.entries.map((e) => e.name)).toEqual(['Alpha', 'Zeta']);
+    expect(result.parent).toBeNull();
+    expect(result.path).toBe(result.root);
+    expect(result.breadcrumb).toHaveLength(1);
+  });
+
+  it('AC2 — mit path-Parameter: Unterordner wird gelistet, parent + Breadcrumb korrekt', async () => {
+    vaultDir = join(tmpdir(), `obs-browse-sub-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(join(vaultDir, 'Sub', 'Child'), { recursive: true });
+    const result = await browseObsidianVaultFolder(join(vaultDir, 'Sub'), { mountRoot: vaultDir });
+    expect(result.entries.map((e) => e.name)).toEqual(['Child']);
+    expect(result.parent).toBe(result.root);
+    expect(result.breadcrumb.map((b) => b.name)).toEqual([expect.any(String), 'Sub']);
+  });
+
+  it('AC2 — keine Dateien, keine Dot-Ordner gelistet', async () => {
+    vaultDir = join(tmpdir(), `obs-browse-filter-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(join(vaultDir, 'Echter-Ordner'), { recursive: true });
+    await writeFile(join(vaultDir, 'notiz.md'), '# Notiz');
+    await mkdir(join(vaultDir, '.obsidian'), { recursive: true });
+    const result = await browseObsidianVaultFolder(undefined, { mountRoot: vaultDir });
+    expect(result.entries.map((e) => e.name)).toEqual(['Echter-Ordner']);
+  });
+
+  it('AC2 — leeres Root → entries: [] (kein Fehler)', async () => {
+    vaultDir = join(tmpdir(), `obs-browse-empty-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(vaultDir, { recursive: true });
+    const result = await browseObsidianVaultFolder(undefined, { mountRoot: vaultDir });
+    expect(result.entries).toEqual([]);
+  });
+
+  it('AC3 — path außerhalb der Schranke (absoluter Fremd-Pfad) → outside-boundary, kein Listing', async () => {
+    vaultDir = join(tmpdir(), `obs-browse-outside-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(vaultDir, { recursive: true });
+    await expect(browseObsidianVaultFolder('/etc', { mountRoot: vaultDir }))
+      .rejects.toMatchObject({ errorClass: 'outside-boundary' });
+  });
+
+  it('AC3 — Prefix-Falle (Schranke + "-evil"-Suffix) → outside-boundary, kein nackter startsWith', async () => {
+    vaultDir = join(tmpdir(), `obs-browse-prefix-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(vaultDir, { recursive: true });
+    const evilDir = `${vaultDir}-evil`;
+    await mkdir(evilDir, { recursive: true });
+    try {
+      await expect(browseObsidianVaultFolder(evilDir, { mountRoot: vaultDir }))
+        .rejects.toMatchObject({ errorClass: 'outside-boundary' });
+    } finally {
+      await rm(evilDir, { recursive: true, force: true });
+    }
+  });
+
+  it('AC3 — path mit „.." das aus der Schranke hinausführt → outside-boundary, kein Listing außerhalb', async () => {
+    vaultDir = join(tmpdir(), `obs-browse-traversal-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(vaultDir, { recursive: true });
+    await expect(browseObsidianVaultFolder(join(vaultDir, '..'), { mountRoot: vaultDir }))
+      .rejects.toMatchObject({ errorClass: 'outside-boundary' });
+  });
+
+  it('AC3 — Symlink-Flucht als path-Parameter → outside-boundary (echtes fs)', async () => {
+    vaultDir = join(tmpdir(), `obs-browse-symlink-param-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(vaultDir, { recursive: true });
+    const outsideTarget = join(tmpdir(), `obs-browse-symlink-target-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(outsideTarget, { recursive: true });
+    const escapeLink = join(vaultDir, 'escape');
+    await symlink(outsideTarget, escapeLink);
+    try {
+      await expect(browseObsidianVaultFolder(escapeLink, { mountRoot: vaultDir }))
+        .rejects.toMatchObject({ errorClass: 'outside-boundary' });
+    } finally {
+      await rm(outsideTarget, { recursive: true, force: true });
+    }
+  });
+
+  it('AC3 — Symlink-Eintrag innerhalb der Schranke, der nach außen zeigt → still übersprungen (nicht gelistet)', async () => {
+    vaultDir = join(tmpdir(), `obs-browse-symlink-entry-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(vaultDir, { recursive: true });
+    const outsideTarget = join(tmpdir(), `obs-browse-symlink-entry-target-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(outsideTarget, { recursive: true });
+    await mkdir(join(vaultDir, 'Echt'), { recursive: true });
+    await symlink(outsideTarget, join(vaultDir, 'escape-entry'));
+    try {
+      const result = await browseObsidianVaultFolder(undefined, { mountRoot: vaultDir });
+      expect(result.entries.map((e) => e.name)).toEqual(['Echt']);
+    } finally {
+      await rm(outsideTarget, { recursive: true, force: true });
+    }
+  });
+
+  it('AC4 — path zeigt auf eine Datei statt ein Verzeichnis → not-directory', async () => {
+    vaultDir = join(tmpdir(), `obs-browse-file-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(vaultDir, { recursive: true });
+    const filePath = join(vaultDir, 'a-file.md');
+    await writeFile(filePath, 'note');
+    await expect(browseObsidianVaultFolder(filePath, { mountRoot: vaultDir }))
+      .rejects.toMatchObject({ errorClass: 'not-directory' });
+  });
+
+  it('AC4 — path existiert nicht (mehr) → not-exists, kein Crash', async () => {
+    vaultDir = join(tmpdir(), `obs-browse-race-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(vaultDir, { recursive: true });
+    await expect(browseObsidianVaultFolder(join(vaultDir, 'does-not-exist'), { mountRoot: vaultDir }))
+      .rejects.toMatchObject({ errorClass: 'not-exists' });
+  });
+});
+
+// ── Integration: GET /api/settings/obsidian-vault-path — mountStatus (AC1, S-378) ──────
+
+describe('GET /api/settings/obsidian-vault-path — mountStatus additiv (AC1, S-378)', () => {
+  let server, port;
+
+  beforeEach(() => { process.env.DEV_NO_ACCESS = '1'; });
+  afterEach(async () => {
+    if (server) await closeServer(server);
+    server = null;
+    delete process.env.DEV_NO_ACCESS;
+    delete process.env.OBSIDIAN_VAULT_DIR;
+  });
+
+  it('mountStatus: unconfigured wenn OBSIDIAN_VAULT_DIR ungesetzt', async () => {
+    delete process.env.OBSIDIAN_VAULT_DIR;
+    ({ server, port } = await startServer(makeApp(makeFakeCredStore(null), new AuditStore())));
+    const res = await get(port, '/api/settings/obsidian-vault-path');
+    expect(res.status).toBe(200);
+    expect(res.body.mountStatus).toBe('unconfigured');
+  });
+
+  it('mountStatus: unusable wenn OBSIDIAN_VAULT_DIR auf nicht-Verzeichnis zeigt', async () => {
+    process.env.OBSIDIAN_VAULT_DIR = '/dev/null';
+    ({ server, port } = await startServer(makeApp(makeFakeCredStore(null), new AuditStore())));
+    const res = await get(port, '/api/settings/obsidian-vault-path');
+    expect(res.status).toBe(200);
+    expect(res.body.mountStatus).toBe('unusable');
+  });
+
+  it('mountStatus: ok wenn OBSIDIAN_VAULT_DIR auf echtes Verzeichnis zeigt', async () => {
+    const vaultDir = join(tmpdir(), `obs-mountstatus-http-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(vaultDir, { recursive: true });
+    process.env.OBSIDIAN_VAULT_DIR = vaultDir;
+    try {
+      ({ server, port } = await startServer(makeApp(makeFakeCredStore(null), new AuditStore())));
+      const res = await get(port, '/api/settings/obsidian-vault-path');
+      expect(res.status).toBe(200);
+      expect(res.body.mountStatus).toBe('ok');
+    } finally {
+      await rm(vaultDir, { recursive: true, force: true });
+    }
+  });
+
+  it('vaultPath/configured bleiben unverändert (Rückwärtskompatibilität, additive Erweiterung)', async () => {
+    ({ server, port } = await startServer(makeApp(makeFakeCredStore('/mnt/vault/x'), new AuditStore())));
+    const res = await get(port, '/api/settings/obsidian-vault-path');
+    expect(res.body.vaultPath).toBe('/mnt/vault/x');
+    expect(res.body.configured).toBe(true);
+    expect(res.body.mountStatus).toBeDefined();
+  });
+});
+
+// ── Integration: GET /api/settings/obsidian-vault/browse (AC2–AC5, S-378) ──────────────
+
+describe('GET /api/settings/obsidian-vault/browse (AC2–AC5, S-378)', () => {
+  let server, port;
+
+  beforeEach(() => { process.env.DEV_NO_ACCESS = '1'; });
+  afterEach(async () => {
+    if (server) await closeServer(server);
+    server = null;
+    delete process.env.DEV_NO_ACCESS;
+    delete process.env.CRED_ADMIN_EMAILS;
+  });
+
+  it('AC4 — 409 { mountStatus: "unconfigured" } wenn Browse unconfigured wirft', async () => {
+    const deps = { browseFolder: async () => {
+      throw new ObsidianVaultPathError('nicht konfiguriert', 'unconfigured');
+    } };
+    ({ server, port } = await startServer(makeApp(makeFakeCredStore(null), new AuditStore(), deps)));
+    const res = await get(port, '/api/settings/obsidian-vault/browse');
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ mountStatus: 'unconfigured' });
+  });
+
+  it('AC4 — 409 { mountStatus: "unusable" } wenn Browse unusable wirft', async () => {
+    const deps = { browseFolder: async () => {
+      throw new ObsidianVaultPathError('nicht nutzbar', 'unusable');
+    } };
+    ({ server, port } = await startServer(makeApp(makeFakeCredStore(null), new AuditStore(), deps)));
+    const res = await get(port, '/api/settings/obsidian-vault/browse');
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ mountStatus: 'unusable' });
+  });
+
+  it('AC2 — happy path → 200 mit erwarteter Response-Shape (injizierte browseFolder)', async () => {
+    const shape = {
+      root: '/vault', path: '/vault', parent: null,
+      breadcrumb: [{ name: 'vault', path: '/vault' }],
+      entries: [{ name: 'Idee A', path: '/vault/Idee A' }],
+    };
+    const deps = { browseFolder: async (p) => { expect(p).toBeUndefined(); return shape; } };
+    ({ server, port } = await startServer(makeApp(makeFakeCredStore(null), new AuditStore(), deps)));
+    const res = await get(port, '/api/settings/obsidian-vault/browse');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(shape);
+  });
+
+  it('AC2/A3 — path-Query-Parameter wird an browseFolder durchgereicht', async () => {
+    const deps = { browseFolder: async (p) => {
+      expect(p).toBe('/vault/Sub');
+      return { root: '/vault', path: '/vault/Sub', parent: '/vault', breadcrumb: [], entries: [] };
+    } };
+    ({ server, port } = await startServer(makeApp(makeFakeCredStore(null), new AuditStore(), deps)));
+    const res = await get(port, '/api/settings/obsidian-vault/browse?path=%2Fvault%2FSub');
+    expect(res.status).toBe(200);
+    expect(res.body.path).toBe('/vault/Sub');
+  });
+
+  it('AC3 — 400 bei outside-boundary (Traversal/Symlink-Flucht abgewiesen)', async () => {
+    const deps = { browseFolder: async () => {
+      throw new ObsidianVaultPathError('außerhalb der Schranke', 'outside-boundary');
+    } };
+    ({ server, port } = await startServer(makeApp(makeFakeCredStore(null), new AuditStore(), deps)));
+    const res = await get(port, '/api/settings/obsidian-vault/browse?path=..%2F..%2Fetc');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBeTruthy();
+  });
+
+  it('AC4 — 400 bei not-directory (path zeigt auf Datei)', async () => {
+    const deps = { browseFolder: async () => {
+      throw new ObsidianVaultPathError('ist kein Verzeichnis', 'not-directory');
+    } };
+    ({ server, port } = await startServer(makeApp(makeFakeCredStore(null), new AuditStore(), deps)));
+    const res = await get(port, '/api/settings/obsidian-vault/browse');
+    expect(res.status).toBe(400);
+  });
+
+  it('AC4 — 404 bei not-exists (Race, kein Crash)', async () => {
+    const deps = { browseFolder: async () => {
+      throw new ObsidianVaultPathError('existiert nicht (mehr)', 'not-exists');
+    } };
+    ({ server, port } = await startServer(makeApp(makeFakeCredStore(null), new AuditStore(), deps)));
+    const res = await get(port, '/api/settings/obsidian-vault/browse');
+    expect(res.status).toBe(404);
+  });
+
+  it('AC5 — read-only, hinter AccessGuard, aber NICHT zusätzlich rollengeschützt (200 trotz CRED_ADMIN_EMAILS)', async () => {
+    process.env.CRED_ADMIN_EMAILS = 'admin@example.com'; // dev@local nicht in Liste
+    const deps = { browseFolder: async () => ({ root: '/vault', path: '/vault', parent: null, breadcrumb: [], entries: [] }) };
+    ({ server, port } = await startServer(makeApp(makeFakeCredStore(null), new AuditStore(), deps)));
+    const res = await get(port, '/api/settings/obsidian-vault/browse');
+    expect(res.status).toBe(200);
+  });
+
+  it('AC5 — ohne AccessGuard-Token → 403', async () => {
+    delete process.env.DEV_NO_ACCESS;
+    const savedDomain = process.env.ACCESS_TEAM_DOMAIN;
+    const savedAud = process.env.ACCESS_AUD;
+    delete process.env.ACCESS_TEAM_DOMAIN;
+    delete process.env.ACCESS_AUD;
+    ({ server, port } = await startServer(makeApp(makeFakeCredStore(null), new AuditStore())));
+    try {
+      const res = await get(port, '/api/settings/obsidian-vault/browse');
+      expect(res.status).toBe(403);
+    } finally {
+      process.env.DEV_NO_ACCESS = '1';
+      if (savedDomain !== undefined) process.env.ACCESS_TEAM_DOMAIN = savedDomain;
+      if (savedAud !== undefined) process.env.ACCESS_AUD = savedAud;
+    }
+  });
+});
+
+// ── E2E: GET /api/settings/obsidian-vault/browse mit echtem fs + echtem Symlink (AC2/AC3) ──
+
+describe('E2E — GET /api/settings/obsidian-vault/browse mit echtem fs (AC2/AC3, S-378)', () => {
+  let server, port, vaultDir;
+
+  beforeEach(() => { process.env.DEV_NO_ACCESS = '1'; });
+  afterEach(async () => {
+    if (server) await closeServer(server);
+    server = null;
+    delete process.env.DEV_NO_ACCESS;
+    delete process.env.OBSIDIAN_VAULT_DIR;
+    if (vaultDir) await rm(vaultDir, { recursive: true, force: true });
+    vaultDir = null;
+  });
+
+  it('AC2 — echter Vault mit zwei Unterordnern → 200, sortiert, confined', async () => {
+    vaultDir = join(tmpdir(), `obs-e2e-browse-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(join(vaultDir, 'Zeta'), { recursive: true });
+    await mkdir(join(vaultDir, 'Alpha'), { recursive: true });
+    process.env.OBSIDIAN_VAULT_DIR = vaultDir;
+    ({ server, port } = await startServer(makeApp(makeFakeCredStore(null), new AuditStore())));
+    const res = await get(port, '/api/settings/obsidian-vault/browse');
+    expect(res.status).toBe(200);
+    expect(res.body.entries.map((e) => e.name)).toEqual(['Alpha', 'Zeta']);
+    const resolvedVault = await fsRealpath(vaultDir);
+    for (const e of res.body.entries) {
+      expect(e.path.startsWith(resolvedVault)).toBe(true);
+    }
+  });
+
+  it('AC3 — echte Symlink-Flucht als path-Parameter → 400, kein Listing außerhalb', async () => {
+    vaultDir = join(tmpdir(), `obs-e2e-browse-traversal-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(vaultDir, { recursive: true });
+    process.env.OBSIDIAN_VAULT_DIR = vaultDir;
+    const outsideTarget = join(tmpdir(), `obs-e2e-browse-outside-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(join(outsideTarget, 'secret'), { recursive: true });
+    const escapeLink = join(vaultDir, 'escape');
+    await symlink(outsideTarget, escapeLink);
+    try {
+      ({ server, port } = await startServer(makeApp(makeFakeCredStore(null), new AuditStore())));
+      const res = await get(port, `/api/settings/obsidian-vault/browse?path=${encodeURIComponent(escapeLink)}`);
+      expect(res.status).toBe(400);
     } finally {
       await rm(outsideTarget, { recursive: true, force: true });
     }
