@@ -7,11 +7,15 @@
  *   - VPS-Provider-Credential-Felder (hetzner, ionos, hostinger tokens)
  *   - SshKeysSection
  *
+ * Neu (anthropic-oauth-vault AC10/AC11, S-368):
+ *   - Claude-Abo-Credential-Felder (access_token, refresh_token) + Ablauf-Anzeige
+ *
  * AC16: Bestehende id/aria-labelledby-Werte bleiben unverändert:
  *   - settings-section-github
  *   - settings-section-cloudflare
  *   - settings-section-vps
  *   - settings-section-ssh-keys
+ * Neu: settings-section-anthropic-oauth (S-368)
  *
  * Props:
  *   - credentials: array of credential objects
@@ -26,6 +30,22 @@
 import { CredentialField } from '../CredentialField.jsx';
 import { SshKeysSection } from '../SshKeysSection.jsx';
 import { KNOWN_FIELDS } from '../settingsApi.js';
+
+/**
+ * Formatiert den Ablaufzeitpunkt (Unix-ms) des Abo-OAuth-Access-Tokens de-CH
+ * lokalisiert (anthropic-oauth-vault AC10). Fehlt/unparsebar → "kein Ablaufdatum".
+ *
+ * @param {number|undefined} expiresAtMs
+ * @returns {string}
+ */
+export function formatAnthropicOAuthExpiresAt(expiresAtMs) {
+  if (typeof expiresAtMs !== 'number' || !Number.isFinite(expiresAtMs)) {
+    return 'kein Ablaufdatum';
+  }
+  const d = new Date(expiresAtMs);
+  if (Number.isNaN(d.getTime())) return 'kein Ablaufdatum';
+  return d.toLocaleString('de-CH', { dateStyle: 'short', timeStyle: 'short' });
+}
 
 const styles = {
   section: {
@@ -55,6 +75,12 @@ const styles = {
     borderRadius: 4,
     color: '#fca5a5',
     fontSize: 14,
+  },
+  // anthropic-oauth-vault AC10 (S-368): Ablauf-Anzeige des Access-Tokens
+  expiresAtHint: {
+    margin: '8px 0 0',
+    fontSize: 12,
+    color: '#9ca3af',   // Kontrast ≥ 4.5:1 auf #111
   },
 };
 
@@ -128,6 +154,29 @@ export function ZugaengeCategory({
           </p>
         )}
         <SshKeysSection sshKeys={sshKeys} setSshKeys={setSshKeys} onSaved={onLoad} />
+      </section>
+
+      {/* Claude-Abo (Nutzungsanzeige) — anthropic-oauth-vault AC10/AC11, S-368 */}
+      <section aria-labelledby="settings-section-anthropic-oauth" style={styles.section}>
+        <h2 id="settings-section-anthropic-oauth" style={styles.sectionHeading}>Claude-Abo (Nutzungsanzeige)</h2>
+        <p style={styles.sectionDesc}>
+          Abo-OAuth-Credentials für die offizielle Nutzungsanzeige (Prozent-/Reset-Werte in der
+          Token-Anzeige). Herkunft: Login mit dem Claude-Abo (interaktive Claude-Code-Anmeldung).
+          Die Werte liegen verschlüsselt im Tresor und werden nie im Klartext angezeigt.
+        </p>
+        {KNOWN_FIELDS['anthropic-oauth'].map(({ name, label }) => (
+          <CredentialField
+            key={name}
+            integration="anthropic-oauth"
+            name={name}
+            label={label}
+            meta={getMeta('anthropic-oauth', name)}
+            onSaved={onLoad}
+          />
+        ))}
+        <p style={styles.expiresAtHint}>
+          Ablauf Access-Token: {formatAnthropicOAuthExpiresAt(getMeta('anthropic-oauth', 'access_token')?.expiresAt)}
+        </p>
       </section>
     </>
   );

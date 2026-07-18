@@ -31,6 +31,12 @@ export const KNOWN_FIELDS = {
     { name: 'ionos_api_token', label: 'IONOS API-Token' },
     { name: 'hostinger_api_token', label: 'Hostinger API-Token' },
   ],
+  // anthropic-oauth-vault AC10 (S-368): Abo-OAuth-Credentials für die offizielle
+  // Nutzungsanzeige (GET /api/usage) — write-only, gleiches CredentialField-Muster.
+  'anthropic-oauth': [
+    { name: 'access_token', label: 'Access-Token' },
+    { name: 'refresh_token', label: 'Refresh-Token' },
+  ],
 };
 
 /**

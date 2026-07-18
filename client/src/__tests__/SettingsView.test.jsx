@@ -8,7 +8,8 @@
  * credential-backup S-142 AC13–AC16 — Restore-UI + Upload + Confirm + A11y,
  * github-app-key-format-tolerant S-168 AC5,
  * push-notifications S-183 AC3/AC10 — Benachrichtigungs-Sektion,
- * obsidian-vault-config S-247 AC1 (UI-Anteil) — Obsidian-Vault-Pfad-Sektion).
+ * obsidian-vault-config S-247 AC1 (UI-Anteil) — Obsidian-Vault-Pfad-Sektion,
+ * anthropic-oauth-vault S-368 AC10/AC11 (UI-Anteil) — Claude-Abo-Sektion).
  *
  * Covers (github-app-key-format-tolerant S-168) — Frontend-ACs:
  *   AC5 — Textarea für github/private_key; Newlines erhalten; andere Felder password-input; nach Speichern kein Klartext im DOM.
@@ -183,6 +184,22 @@
  *          AC2/AC3/AC4/AC5/AC6/AC7 (Backend-Validierung, Traversal-Schutz, Persistenz,
  *          Projekt-Listing, Audit, Rollenschutz) sind in obsidianVaultPath.test.js /
  *          obsidianVaultPathRouter.test.js abgedeckt, nicht hier (S-245/S-246).
+ *
+ * Covers (anthropic-oauth-vault S-368) — Frontend, UI-Anteil (Zugänge-Kategorie,
+ * settings-section-anthropic-oauth):
+ *   AC10 — Sektion „Claude-Abo (Nutzungsanzeige)" (h2) mit write-only-Feldern für
+ *          access_token + refresh_token (CredentialField-Muster, gleiche Semantik wie
+ *          GitHub/Cloudflare/VPS); Status „gesetzt"/„nicht gesetzt" je Feld; kein
+ *          Token-Klartext im DOM (weder vor noch nach dem Speichern — Feld wird nach
+ *          Speichern geleert); expires_at des access_token de-CH lokalisiert
+ *          menschenlesbar angezeigt, „kein Ablaufdatum" wenn ungesetzt/nicht vorhanden.
+ *          Löschen-Button vorhanden (analog GitHub/Cloudflare/VPS-Muster).
+ *   AC11 — Mutation läuft über den bestehenden generischen Credential-Pfad (PUT/DELETE
+ *          /api/settings/credentials/anthropic-oauth/:name) — Admin-Gate + Audit sind
+ *          Backend-seitig bereits durch settings-credentials AC6/AC7 (credentialsRouter)
+ *          abgedeckt, hier NUR der Frontend-Fehlerpfad: PUT-Fehler → role=alert-Meldung,
+ *          kein Klartext im DOM. Kein separater Endpunkt-Test nötig (kein neuer
+ *          Endpunkt-Typ eingeführt, S-367 hat den Katalog bereits generisch verdrahtet).
  *
  * @jest-environment jsdom
  */
@@ -3235,6 +3252,186 @@ describe('SettingsView — AC9: VPS-Provider-Sektion mit drei Token-Feldern', ()
       const main = document.querySelector('[aria-label="Einstellungen-Ansicht"]');
       if (main) expect(main.textContent).not.toContain('ionos-secret-token');
     });
+  });
+});
+
+// ── anthropic-oauth-vault AC10/AC11 — Claude-Abo (Nutzungsanzeige) ───────────
+
+describe('SettingsView — AC10: Claude-Abo-Sektion (Settings-GUI)', () => {
+  beforeEach(() => { testCategory = 'zugaenge'; });
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('AC10 — rendert Sektion "Claude-Abo (Nutzungsanzeige)" mit write-only-Feldern für access_token + refresh_token', async () => {
+    const { getByRole } = renderView(makeFetch({ getResponse: EMPTY_CREDS }));
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      expect(main.textContent).toMatch(/claude-abo \(nutzungsanzeige\)/i);
+      expect(main.textContent).toMatch(/access-token/i);
+      expect(main.textContent).toMatch(/refresh-token/i);
+    });
+  });
+
+  it('AC10 — beide Felder zeigen "nicht gesetzt" bei leerem Store', async () => {
+    renderView(makeFetch({ getResponse: EMPTY_CREDS }));
+    await waitFor(() => {
+      const section = document.querySelector('[aria-labelledby="settings-section-anthropic-oauth"]');
+      expect(section).toBeTruthy();
+      const groups = section.querySelectorAll('[role="group"]');
+      expect(groups.length).toBe(2);
+      for (const g of groups) {
+        expect(g.textContent).toMatch(/nicht gesetzt/i);
+      }
+    });
+  });
+
+  it('AC10 — gesetzter access_token zeigt maskierten Status, kein Klartext', async () => {
+    const credsWithAnthropicOAuth = [
+      ...EMPTY_CREDS,
+      {
+        integration: 'anthropic-oauth',
+        name: 'access_token',
+        status: 'set',
+        masked: '•••• gesetzt',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+        expiresAt: 1799985600000,
+      },
+    ];
+    const { getByRole } = renderView(makeFetch({ getResponse: credsWithAnthropicOAuth }));
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      expect(main.textContent).toContain('•••• gesetzt');
+      expect(main.textContent).not.toContain('sk-ant-oat01-secret');
+    });
+  });
+
+  it('AC10 — gesetzter access_token zeigt "Ändern"- und "Löschen"-Button (Löschen analog anderer Credential-Einträge)', async () => {
+    const credsWithAnthropicOAuth = [
+      ...EMPTY_CREDS,
+      { integration: 'anthropic-oauth', name: 'access_token', status: 'set', masked: '•••• gesetzt', updatedAt: '2026-01-01T00:00:00.000Z' },
+    ];
+    const { getAllByRole } = renderView(makeFetch({ getResponse: credsWithAnthropicOAuth }));
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/access-token ändern/i))).toBe(true);
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/access-token löschen/i))).toBe(true);
+    });
+  });
+
+  it('AC10 — PUT für access_token feuert korrekten Endpunkt, Feld wird nach Speichern geleert (write-only)', async () => {
+    const fetchMock = makeFetch({ getResponse: EMPTY_CREDS });
+    globalThis.fetch = fetchMock;
+    const onNavigate = jest.fn();
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/access-token setzen/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const setzenBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/access-token setzen/i),
+      );
+      fireEvent.click(setzenBtn);
+    });
+
+    await waitFor(() => {
+      const pwdInputs = document.querySelectorAll('input[type="password"]');
+      expect(pwdInputs.length).toBeGreaterThan(0);
+    });
+
+    const pwdInput = document.querySelector('#input-anthropic-oauth-access_token');
+    expect(pwdInput).toBeTruthy();
+    await act(async () => {
+      fireEvent.change(pwdInput, { target: { value: 'sk-ant-oat01-secret-value' } });
+    });
+
+    await act(async () => {
+      const saveBtns = getAllByRole('button').filter((b) => b.textContent.trim() === 'Speichern');
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    await waitFor(() => {
+      const putCalls = fetchMock.mock.calls.filter(
+        ([url, opts]) => (opts?.method ?? 'GET') === 'PUT' && url.includes('/anthropic-oauth/access_token'),
+      );
+      expect(putCalls.length).toBeGreaterThan(0);
+    });
+
+    // AC10: kein Klartext im DOM nach Speichern; Feld wieder leer (write-only)
+    await waitFor(() => {
+      const main = document.querySelector('[aria-label="Einstellungen-Ansicht"]');
+      if (main) expect(main.textContent).not.toContain('sk-ant-oat01-secret-value');
+      const remainingInput = document.querySelector('#input-anthropic-oauth-access_token');
+      expect(remainingInput).toBeNull(); // editArea geschlossen nach Speichern
+    });
+  });
+
+  it('AC10 — zeigt expires_at menschenlesbar (de-CH) am access_token-Feld, wenn gesetzt', async () => {
+    // 2027-01-14T12:00:00.000Z als Unix-ms — deterministisch, in der Zukunft
+    const credsWithExpiry = [
+      ...EMPTY_CREDS,
+      {
+        integration: 'anthropic-oauth',
+        name: 'access_token',
+        status: 'set',
+        masked: '•••• gesetzt',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+        expiresAt: Date.parse('2027-01-14T12:00:00.000Z'),
+      },
+    ];
+    const { getByRole } = renderView(makeFetch({ getResponse: credsWithExpiry }));
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      expect(main.textContent).toMatch(/ablauf access-token:/i);
+      expect(main.textContent).not.toMatch(/kein ablaufdatum/i);
+    });
+  });
+
+  it('AC10 — zeigt "kein Ablaufdatum" am access_token-Feld, wenn ungesetzt/kein expiresAt vorhanden', async () => {
+    const { getByRole } = renderView(makeFetch({ getResponse: EMPTY_CREDS }));
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      expect(main.textContent).toMatch(/ablauf access-token:\s*kein ablaufdatum/i);
+    });
+  });
+
+  it('AC11 — Fehlerpfad: PUT scheitert (z.B. 403 fehlende Berechtigung) → Fehlermeldung, kein Klartext im DOM', async () => {
+    const fetchMock = makeFetch({ getResponse: EMPTY_CREDS, putResponse: 'error' });
+    globalThis.fetch = fetchMock;
+    const onNavigate = jest.fn();
+    const { getAllByRole, getByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate }));
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/refresh-token setzen/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const setzenBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/refresh-token setzen/i),
+      );
+      fireEvent.click(setzenBtn);
+    });
+
+    const pwdInput = document.querySelector('#input-anthropic-oauth-refresh_token');
+    await act(async () => {
+      fireEvent.change(pwdInput, { target: { value: 'sk-ant-ort01-secret-value' } });
+    });
+
+    await act(async () => {
+      const saveBtns = getAllByRole('button').filter((b) => b.textContent.trim() === 'Speichern');
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    await waitFor(() => {
+      expect(getByRole('alert')).toBeTruthy();
+    });
+
+    const main = document.querySelector('[aria-label="Einstellungen-Ansicht"]');
+    expect(main.textContent).not.toContain('sk-ant-ort01-secret-value');
   });
 });
 

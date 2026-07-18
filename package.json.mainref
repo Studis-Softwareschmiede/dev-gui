@@ -1,0 +1,46 @@
+{
+  "name": "dev-gui",
+  "version": "0.1.0",
+  "description": "GUI for the Softwareschmiede factory — bridges PTY to WebSocket",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --experimental-vm-modules node_modules/.bin/jest --forceExit",
+    "lint": "eslint .",
+    "build": "vite build client/",
+    "postinstall": "node scripts/fix-pty-perms.mjs"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1075.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "express": "^5.2.1",
+    "jose": "^6.2.3",
+    "lucide-react": "^1.21.0",
+    "node-pty": "^1.0.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "ssh2": "^1.17.0",
+    "ws": "^8.17.1"
+  },
+  "devDependencies": {
+    "@babel/core": "^8.0.1",
+    "@babel/preset-env": "^8.0.2",
+    "@babel/preset-react": "^8.0.1",
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.61.1",
+    "@testing-library/react": "^16.0.0",
+    "@vitejs/plugin-react": "^6.0.2",
+    "babel-jest": "^30.0.0",
+    "eslint": "^10.5.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "jest": "^30.4.2",
+    "jest-environment-jsdom": "^30.4.1",
+    "playwright-ctrf-json-reporter": "^0.0.29",
+    "vite": "^8.0.16"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
