@@ -7,7 +7,7 @@ priority: P2
 spec: docs/specs/vps-container-overview.md
 implements:
 - AC2
-- AC4b
+- AC4
 - AC8
 - AC14
 depends: S-351

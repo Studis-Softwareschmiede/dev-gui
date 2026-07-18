@@ -7,7 +7,7 @@ priority: P1
 spec: docs/specs/fabric-intake-dialog.md
 implements:
 - AC1
-- AC2b
+- AC2
 - AC4
 - AC9
 depends:

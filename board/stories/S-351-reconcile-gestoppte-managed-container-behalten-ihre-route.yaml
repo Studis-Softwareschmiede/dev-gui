@@ -7,9 +7,8 @@ priority: P1
 spec: docs/specs/cloudflare-reconciliation.md
 implements:
 - AC3
-- AC3b
-- AC5d
-- AC7b
+- AC5
+- AC7
 - AC8
 depends: null
 labels:

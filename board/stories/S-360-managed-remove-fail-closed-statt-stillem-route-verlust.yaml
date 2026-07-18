@@ -6,7 +6,7 @@ status: Done
 priority: P1
 spec: docs/specs/vps-container-overview.md
 implements:
-- AC11b
+- AC11
 depends: S-359
 labels:
 - backend

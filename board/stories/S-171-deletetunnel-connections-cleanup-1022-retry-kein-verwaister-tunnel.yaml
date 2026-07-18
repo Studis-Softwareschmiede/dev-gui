@@ -7,7 +7,6 @@ branch: feat/S-171-tunnel-connections
 priority: P1
 spec: docs/specs/vps-delete.md
 implements:
-- AC3a
 - AC3
 - AC4
 depends:
