@@ -5,8 +5,10 @@
  * AC16: Bestehende id/aria-labelledby-Wert bleibt unverändert:
  *   - settings-section-obsidian
  *
+ * S-379 (obsidian-vault-folder-browser): `mountStatus` additiv durchgereicht (AC1/AC7).
+ *
  * Props:
- *   - obsidianVaultPath: { vaultPath, configured, mountRoot } or null
+ *   - obsidianVaultPath: { vaultPath, configured, mountStatus, mountRoot } or null
  *   - obsidianVaultPathError: string or null
  *   - onReload: async () => void
  *   - fetchFn: typeof fetch
@@ -67,6 +69,7 @@ export function IntegrationenCategory({
         <ObsidianVaultPathSection
           vaultPath={obsidianVaultPath.vaultPath}
           configured={obsidianVaultPath.configured}
+          mountStatus={obsidianVaultPath.mountStatus}
           mountRoot={obsidianVaultPath.mountRoot}
           onReload={onReload}
           fetchFn={fetchFn}

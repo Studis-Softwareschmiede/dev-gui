@@ -265,14 +265,40 @@ export async function fetchWorkspaceHealth(fetchImpl) {
 
 /**
  * GET /api/settings/obsidian-vault-path
+ * `mountStatus` additiv (obsidian-vault-folder-browser AC1, S-378).
+ *
  * @param {typeof fetch} [fetchImpl]
- * @returns {Promise<{ vaultPath: string|null, configured: boolean, mountRoot?: string }>}
+ * @returns {Promise<{ vaultPath: string|null, configured: boolean, mountStatus: 'ok'|'unusable'|'unconfigured', mountRoot?: string }>}
  */
 export async function fetchObsidianVaultPath(fetchImpl) {
   const fn = fetchImpl ?? globalThis.fetch.bind(globalThis);
   const res = await fn('/api/settings/obsidian-vault-path');
   if (!res.ok) throw new Error(`Obsidian-Vault-Pfad laden fehlgeschlagen (${res.status})`);
   return res.json();
+}
+
+/**
+ * GET /api/settings/obsidian-vault/browse (obsidian-vault-folder-browser AC2–AC4, S-378/S-379)
+ * Read-only Ordner-Browser innerhalb der Mount-Schranke `OBSIDIAN_VAULT_DIR`.
+ *
+ * @param {string|null|undefined} path  Container-Pfad (optional; ohne Angabe = Mount-Root).
+ * @param {typeof fetch} [fetchImpl]
+ * @returns {Promise<{ root: string, path: string, parent: string|null, breadcrumb: Array<{name:string,path:string}>, entries: Array<{name:string,path:string}> }>}
+ * @throws {Error & { status: number, mountStatus?: 'unusable'|'unconfigured' }}
+ *   `status` trägt den HTTP-Status (409 = mountStatus nicht nutzbar, 400/404 = Traversal/Race).
+ */
+export async function fetchObsidianVaultBrowse(path, fetchImpl) {
+  const fn = fetchImpl ?? globalThis.fetch.bind(globalThis);
+  const qs = path ? `?path=${encodeURIComponent(path)}` : '';
+  const res = await fn(`/api/settings/obsidian-vault/browse${qs}`);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(data.error ?? `Ordner-Auflistung fehlgeschlagen (${res.status})`);
+    err.status = res.status;
+    if (data.mountStatus) err.mountStatus = data.mountStatus;
+    throw err;
+  }
+  return data;
 }
 
 /**
