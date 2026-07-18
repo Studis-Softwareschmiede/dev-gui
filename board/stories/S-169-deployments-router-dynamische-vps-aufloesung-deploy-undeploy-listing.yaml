@@ -1,6 +1,7 @@
 id: S-169
 parent: F-016
-title: 'deploymentsRouter Deploy/Undeploy/Deployments-Listing auf vereinigte VPS-Auflösung (Env ⊕ dynamisch)'
+title: deploymentsRouter Deploy/Undeploy/Deployments-Listing auf vereinigte VPS-Auflösung
+  (Env ⊕ dynamisch)
 status: Done
 priority: P1
 spec: docs/specs/vps-dynamic-ssh-targets.md
@@ -15,13 +16,39 @@ labels:
 - backend
 size_est: S
 dispo_est: 3
-estimate_note: 'Lücke B (echter Bug, live verifiziert): S-167 stellte nur das vps-targets-LISTING (GET /api/deployments/vps-targets, src/deploymentsRouter.js:247) auf die dynamische Quelle (vpsRegistry.listTargetRecords()) um — der dynamisch angelegte VPS erscheint im Deploy-Dropdown. ABER die Mutations-/Auflösungs-Handler im SELBEN Router lösen die vpsId weiterhin NUR über die statische Env-Map auf: vpsTargets.get(vpsId) an Zeile 314 (POST /api/deployments = Deploy), 422 (DELETE /api/deployments/:vps/:hostname = Undeploy), 261 (GET /api/deployments = Deployments-Listing) → bei dynamischem VPS: 422 "Unbekannter VPS: <id>". Folge live: Dropdown bietet testdevgui an, aber "Deploy starten" scheitert mit "Unbekannter VPS: testdevgui" (serverId 142574176, host 188.34.202.209, Tunnel devgui-testdevgui). Wurzel: AC3 von vps-dynamic-ssh-targets (S-167) deckte nur das GET-Listing ab, nicht den Deploy-/Undeploy-Resolve; vpsContainerRouter.resolveVpsTarget (AC4) macht die dyn. Auflösung bereits richtig, deploymentsRouter hat aber seinen eigenen, nicht umgestellten Pfad. Fix (Spec AC9): die vpsId-Auflösung in den drei Handlern nutzt dieselbe VEREINIGTE Quelle wie Listing+resolveVpsTarget — Env-Map ⊕ dynamische Records (vpsRegistry.getTargetRecord/listTargetRecords), ENV GEWINNT bei Kollision; host ggf. via getMachineIp auffrischen. 422 "Unbekannter VPS" bleibt nur, wenn die ID in KEINER Quelle existiert. Wiring: deploymentsRouter(...) erhält künftig vpsRegistry (heute nur vpsTargets-Map); src/routers/deployments.js create(deps) reicht vpsRegistry durch; idealerweise gemeinsamer Resolver-Helper (DRY mit AC3/AC4). Floor (AC8): AccessGuard-403 + Audit-First + Rollen-/Identitätsschutz unverändert (nur die Auflösung ändert sich, nicht die Mutations-Sicherheit); 422-Meldung trägt nur die vpsId, kein host/key/token; kein Leak im neuen Pfad. Tests mit gemocktem Store/Registry/Orchestrator: leere VPS_TARGETS-Env + dynamischer testdevgui-Datensatz → Deploy/Undeploy/Listing rufen Orchestrator mit aufgelöstem {host,port,targetUser} statt 422; Env↔dyn-Kollision → Env gewinnt; unbekannte ID → 422; AccessGuard-403 weiter vor der Auflösung. S (~3 EP) — drei Handler-Resolves angleichen + Factory-Wiring (vpsRegistry) + Tests, kein neuer Endpunkt/keine UI.'
+estimate_note: 'Lücke B (echter Bug, live verifiziert): S-167 stellte nur das vps-targets-LISTING
+  (GET /api/deployments/vps-targets, src/deploymentsRouter.js:247) auf die dynamische
+  Quelle (vpsRegistry.listTargetRecords()) um — der dynamisch angelegte VPS erscheint
+  im Deploy-Dropdown. ABER die Mutations-/Auflösungs-Handler im SELBEN Router lösen
+  die vpsId weiterhin NUR über die statische Env-Map auf: vpsTargets.get(vpsId) an
+  Zeile 314 (POST /api/deployments = Deploy), 422 (DELETE /api/deployments/:vps/:hostname
+  = Undeploy), 261 (GET /api/deployments = Deployments-Listing) → bei dynamischem
+  VPS: 422 "Unbekannter VPS: <id>". Folge live: Dropdown bietet testdevgui an, aber
+  "Deploy starten" scheitert mit "Unbekannter VPS: testdevgui" (serverId 142574176,
+  host 188.34.202.209, Tunnel devgui-testdevgui). Wurzel: AC3 von vps-dynamic-ssh-targets
+  (S-167) deckte nur das GET-Listing ab, nicht den Deploy-/Undeploy-Resolve; vpsContainerRouter.resolveVpsTarget
+  (AC4) macht die dyn. Auflösung bereits richtig, deploymentsRouter hat aber seinen
+  eigenen, nicht umgestellten Pfad. Fix (Spec AC9): die vpsId-Auflösung in den drei
+  Handlern nutzt dieselbe VEREINIGTE Quelle wie Listing+resolveVpsTarget — Env-Map
+  ⊕ dynamische Records (vpsRegistry.getTargetRecord/listTargetRecords), ENV GEWINNT
+  bei Kollision; host ggf. via getMachineIp auffrischen. 422 "Unbekannter VPS" bleibt
+  nur, wenn die ID in KEINER Quelle existiert. Wiring: deploymentsRouter(...) erhält
+  künftig vpsRegistry (heute nur vpsTargets-Map); src/routers/deployments.js create(deps)
+  reicht vpsRegistry durch; idealerweise gemeinsamer Resolver-Helper (DRY mit AC3/AC4).
+  Floor (AC8): AccessGuard-403 + Audit-First + Rollen-/Identitätsschutz unverändert
+  (nur die Auflösung ändert sich, nicht die Mutations-Sicherheit); 422-Meldung trägt
+  nur die vpsId, kein host/key/token; kein Leak im neuen Pfad. Tests mit gemocktem
+  Store/Registry/Orchestrator: leere VPS_TARGETS-Env + dynamischer testdevgui-Datensatz
+  → Deploy/Undeploy/Listing rufen Orchestrator mit aufgelöstem {host,port,targetUser}
+  statt 422; Env↔dyn-Kollision → Env gewinnt; unbekannte ID → 422; AccessGuard-403
+  weiter vor der Auflösung. S (~3 EP) — drei Handler-Resolves angleichen + Factory-Wiring
+  (vpsRegistry) + Tests, kein neuer Endpunkt/keine UI.'
 confidence: medium
 branch: feat/S-169-deploy-resolve
 pr: null
 blocked_reason: null
 created_at: '2026-06-18T00:00:00Z'
-updated_at: '2026-07-02T03:22:17.133Z'
+updated_at: '2026-07-02T03:22:17Z'
 archived: true
-archived_at: '2026-07-02T03:22:17.133Z'
+archived_at: '2026-07-02T03:22:17Z'
 area: '''deployment'''

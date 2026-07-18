@@ -1,6 +1,7 @@
 id: S-145
 parent: F-010
-title: 'dev-gui-cred-Volume: Ownership für frischen Deploy (Dockerfile mkdir+chown /home/node/.cred)'
+title: 'dev-gui-cred-Volume: Ownership für frischen Deploy (Dockerfile mkdir+chown
+  /home/node/.cred)'
 status: Done
 priority: P1
 spec: docs/specs/credential-runtime-unlock.md
@@ -15,14 +16,17 @@ size_est: S
 dispo_est: 2
 dispo_act: 2
 dispo_forecast: 0.0
-estimate_note: 'Folge-Finding aus F-012/S-139: dev-gui-cred-Volume (Mount /home/node/.cred) wird bei frischer Erstellung root-owned → manueller chown beim S-139-Rollout nötig. Fix: Dockerfile pre-creates+chownt /home/node/.cred zu node:node (analog /home/node/.claude) vor USER node, damit Docker das Volume mit uid-1000-Ownership seedet. S.'
+estimate_note: 'Folge-Finding aus F-012/S-139: dev-gui-cred-Volume (Mount /home/node/.cred)
+  wird bei frischer Erstellung root-owned → manueller chown beim S-139-Rollout nötig.
+  Fix: Dockerfile pre-creates+chownt /home/node/.cred zu node:node (analog /home/node/.claude)
+  vor USER node, damit Docker das Volume mit uid-1000-Ownership seedet. S.'
 confidence: medium
 branch: feat/S-145-cred-volume-ownership
 pr: 301
 blocked_reason: null
 created_at: '2026-06-17T00:00:00Z'
-updated_at: '2026-07-02T03:22:17.133Z'
+updated_at: '2026-07-02T03:22:17Z'
 done_at: '2026-06-17T01:15:00Z'
 archived: true
-archived_at: '2026-07-02T03:22:17.133Z'
-area: 'einstellungen'
+archived_at: '2026-07-02T03:22:17Z'
+area: einstellungen

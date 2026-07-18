@@ -1,6 +1,7 @@
 id: S-172
 parent: F-019
-title: 'Story-Detail: Board-YAML-Fallback (Ende/Branch/PR) + int/string-tolerantes ID-Matching + klarer Leer-Zustand'
+title: 'Story-Detail: Board-YAML-Fallback (Ende/Branch/PR) + int/string-tolerantes
+  ID-Matching + klarer Leer-Zustand'
 status: Done
 branch: board/concepts-2026-06-19
 priority: P2
@@ -35,8 +36,8 @@ estimate_note: 'Anzeige-Ebene (kein Schreibpfad). Backend: BoardAggregator um do
 pr: null
 blocked_reason: null
 created_at: '2026-06-19T00:00:00Z'
-updated_at: '2026-07-02T03:22:17.133Z'
+updated_at: '2026-07-02T03:22:17Z'
 done_at: '2026-06-19T00:00:00Z'
 archived: true
-archived_at: '2026-07-02T03:22:17.133Z'
+archived_at: '2026-07-02T03:22:17Z'
 area: '''board'''

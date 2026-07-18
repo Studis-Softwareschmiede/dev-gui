@@ -29,7 +29,7 @@ branch: feat/S-204-headless-flow-runner
 pr: null
 blocked_reason: null
 created_at: '2026-07-01T05:34:18Z'
-updated_at: '2026-07-02T03:22:17.133Z'
+updated_at: '2026-07-02T03:22:17Z'
 done_at: '2026-07-01T11:41:59Z'
 notes: 'NEU GESCHNITTEN (2026-07-01, requirement). Ziel des Gesamt-Epics: echte Parallelitaet
   im Nacht-Drain via headless "claude -p" (mehrere gleichzeitig), interaktiver PTV-Pfad
@@ -56,5 +56,5 @@ notes: 'NEU GESCHNITTEN (2026-07-01, requirement). Ziel des Gesamt-Epics: echte 
   + Auth-Vorabpruefung + Audit + CLAUDE.md). Alter Ansatz (interaktiven CommandService/JobLock
   projektweise entkoppeln) bleibt OBSOLET/verworfen.'
 archived: true
-archived_at: '2026-07-02T03:22:17.133Z'
+archived_at: '2026-07-02T03:22:17Z'
 area: '''nachtwaechter'''

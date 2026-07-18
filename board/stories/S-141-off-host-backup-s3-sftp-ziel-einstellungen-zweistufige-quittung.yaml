@@ -18,14 +18,16 @@ size_est: M
 dispo_est: 5
 dispo_act: 8
 dispo_forecast: -0.375
-estimate_note: 'Backend-Teil aus estimator-Split: S3/SFTP-Client (SDK, Retry/Status, Mock-Tests) + Remote-Creds write-only (Security-Floor) + Transport-Robustheit ohne Rollback. M (~5 EP). UI-Teil nach S-143 ausgegliedert.'
+estimate_note: 'Backend-Teil aus estimator-Split: S3/SFTP-Client (SDK, Retry/Status,
+  Mock-Tests) + Remote-Creds write-only (Security-Floor) + Transport-Robustheit ohne
+  Rollback. M (~5 EP). UI-Teil nach S-143 ausgegliedert.'
 confidence: low
 branch: feat/S-141-offhost-backup
 pr: 295
 blocked_reason: null
 created_at: '2026-06-16T12:00:00Z'
-updated_at: '2026-07-02T03:22:17.133Z'
+updated_at: '2026-07-02T03:22:17Z'
 done_at: '2026-06-16T20:30:00Z'
 archived: true
-archived_at: '2026-07-02T03:22:17.133Z'
-area: 'deployment'
+archived_at: '2026-07-02T03:22:17Z'
+area: deployment

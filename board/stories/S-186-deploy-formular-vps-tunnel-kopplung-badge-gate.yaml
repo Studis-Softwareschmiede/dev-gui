@@ -1,6 +1,7 @@
 id: S-186
 parent: F-026
-title: "Deploy-Formular: VPS<->Tunnel-Kopplung + Badge 'Tunnel ✓/fehlt ✗' + Button-Gate + errorClass-Mapping (Frontend)"
+title: 'Deploy-Formular: VPS<->Tunnel-Kopplung + Badge ''Tunnel ✓/fehlt ✗'' + Button-Gate
+  + errorClass-Mapping (Frontend)'
 status: Done
 priority: P1
 spec: docs/specs/vps-tunnel-existence-gate.md
@@ -18,15 +19,14 @@ size_est: M
 dispo_est: '5'
 dispo_act: null
 confidence: medium
-estimate_note: >-
-  Heuristik (n_ac=4, n_comp=2 [DeploymentsView.jsx, VPS-Tunnel-Read-Model],
+estimate_note: Heuristik (n_ac=4, n_comp=2 [DeploymentsView.jsx, VPS-Tunnel-Read-Model],
   label_bump=+1 ui) -> Score 7 -> M. S/M-Lookup baseline.json js|balanced|M (ep=5.0,
   n=8). confidence medium.
 branch: feat/S-186-tunnel-form-coupling
 pr: null
 blocked_reason: null
 created_at: '2026-06-30T00:00:00Z'
-updated_at: '2026-07-02T03:22:17.133Z'
+updated_at: '2026-07-02T03:22:17Z'
 archived: true
-archived_at: '2026-07-02T03:22:17.133Z'
+archived_at: '2026-07-02T03:22:17Z'
 area: '''deployment'''

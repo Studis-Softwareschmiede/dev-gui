@@ -1,6 +1,6 @@
 id: S-143
 parent: F-012
-title: 'Backup-Settings-UI + Status-Kachel + zweistufige Quittung'
+title: Backup-Settings-UI + Status-Kachel + zweistufige Quittung
 status: Done
 priority: P1
 spec: docs/specs/credential-backup.md
@@ -18,14 +18,18 @@ size_est: M
 dispo_est: 4
 dispo_act: 13
 dispo_forecast: -0.6923
-estimate_note: 'Frontend-Teil aus estimator-Split: Settings-Abschnitt "Backup / Sicherung" + Status-Kachel (leak-frei) + zweistufige Quittungs-State-Maschine (lokal/off-host, stufen-genaue Warnung) + A11y. M (~4 EP). IST 13 EP: Architekt-Entscheid Variante B (UI-schreibbar mit Persistenz) erweiterte Scope auf BackupConfigStore + 2 Endpunkte + Admin-Gate/Audit + Sidecar-Ergebnis-Persistenz, 3 Review-Iterationen.'
+estimate_note: 'Frontend-Teil aus estimator-Split: Settings-Abschnitt "Backup / Sicherung"
+  + Status-Kachel (leak-frei) + zweistufige Quittungs-State-Maschine (lokal/off-host,
+  stufen-genaue Warnung) + A11y. M (~4 EP). IST 13 EP: Architekt-Entscheid Variante
+  B (UI-schreibbar mit Persistenz) erweiterte Scope auf BackupConfigStore + 2 Endpunkte
+  + Admin-Gate/Audit + Sidecar-Ergebnis-Persistenz, 3 Review-Iterationen.'
 confidence: low
 branch: feat/S-143-backup-settings-ui
 pr: 298
 blocked_reason: null
 created_at: '2026-06-16T12:00:00Z'
-updated_at: '2026-07-02T03:22:17.133Z'
+updated_at: '2026-07-02T03:22:17Z'
 done_at: '2026-06-17T00:10:00Z'
 archived: true
-archived_at: '2026-07-02T03:22:17.133Z'
-area: 'deployment'
+archived_at: '2026-07-02T03:22:17Z'
+area: deployment

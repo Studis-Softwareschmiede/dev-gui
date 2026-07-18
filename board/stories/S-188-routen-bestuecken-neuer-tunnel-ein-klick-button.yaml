@@ -1,6 +1,7 @@
 id: S-188
 parent: F-027
-title: "Routen am neuen Tunnel bestuecken (Phase 3, geteilter addRouteOnly-Pfad) + Ein-Klick-Button & Ergebnis-Anzeige (Frontend)"
+title: Routen am neuen Tunnel bestuecken (Phase 3, geteilter addRouteOnly-Pfad) +
+  Ein-Klick-Button & Ergebnis-Anzeige (Frontend)
 status: Done
 priority: P1
 spec: docs/specs/vps-tunnel-self-heal.md
@@ -21,18 +22,17 @@ size_est: L
 dispo_est: '5'
 dispo_act: null
 confidence: low
-estimate_note: >-
-  Heuristik (n_ac=5, n_comp=4 [DeployOrchestrator.addRouteOnly geteilter Pfad,
-  VpsDockerControl.ps, recreate-Endpoint Phase-3-Loop, DeploymentsView.jsx],
-  label_bump=+2 ui+security) -> Score 11 -> L. estimator-Dispatch (L/XL) im
-  requirement-Lauf nicht verfuegbar -> Fallback dispo_est aus baseline.json
-  js|balanced|L (ep=5.0). confidence low. Grep-Kriterium: kein eigener
-  CloudflareApi.mutate*-Anlegecode neben dem geteilten Pfad (AC6).
+estimate_note: 'Heuristik (n_ac=5, n_comp=4 [DeployOrchestrator.addRouteOnly geteilter
+  Pfad, VpsDockerControl.ps, recreate-Endpoint Phase-3-Loop, DeploymentsView.jsx],
+  label_bump=+2 ui+security) -> Score 11 -> L. estimator-Dispatch (L/XL) im requirement-Lauf
+  nicht verfuegbar -> Fallback dispo_est aus baseline.json js|balanced|L (ep=5.0).
+  confidence low. Grep-Kriterium: kein eigener CloudflareApi.mutate*-Anlegecode neben
+  dem geteilten Pfad (AC6).'
 branch: feat/S-188-tunnel-repopulate-button
 pr: null
 blocked_reason: null
 created_at: '2026-06-30T00:00:00Z'
-updated_at: '2026-07-02T03:22:17.133Z'
+updated_at: '2026-07-02T03:22:17Z'
 archived: true
-archived_at: '2026-07-02T03:22:17.133Z'
+archived_at: '2026-07-02T03:22:17Z'
 area: '''deployment'''

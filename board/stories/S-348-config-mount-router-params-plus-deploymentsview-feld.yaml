@@ -5,10 +5,10 @@ status: Done
 priority: P2
 spec: docs/specs/deploy-config-volume-mount.md
 implements:
+- AC6
 - AC7
 - AC8
 - AC9
-- AC10
 depends:
 - S-347
 labels:

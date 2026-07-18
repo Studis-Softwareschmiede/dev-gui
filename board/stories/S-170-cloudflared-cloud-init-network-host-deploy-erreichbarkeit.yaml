@@ -1,6 +1,6 @@
 id: S-170
 parent: F-017
-title: 'cloudflared im cloud-init mit --network host starten (Deploy-Erreichbarkeit)'
+title: cloudflared im cloud-init mit --network host starten (Deploy-Erreichbarkeit)
 status: Done
 branch: feat/S-170-cloudflared-host-network
 priority: P1
@@ -21,24 +21,24 @@ dispo_est: 1
 dispo_forecast: 0.0
 confidence: high
 estimate_note: 'Kleiner, fokussierter Fix im CloudInitBuilder (src/vps/CloudInitBuilder.js).
-  Der cloudflared-docker-run-Eintrag im cloud-init muss --network host enthalten, damit
-  cloudflared die App-Container ueber localhost:<hostPort> (= Host-Ports) erreicht —
-  konsistent zur DeployOrchestrator-Route-Konvention http://localhost:<hostPort>. Konkret:
-  aktueller runcmd-Eintrag "docker run -d --name cloudflared --restart unless-stopped
-  --env-file /etc/cloudflared/env cloudflare/cloudflared:latest tunnel --no-autoupdate run"
-  um "--network host" ergaenzen. TEMPLATE_VERSION 4->5 erhoehen (AC8) + Versionshistorie-Kommentar
+  Der cloudflared-docker-run-Eintrag im cloud-init muss --network host enthalten,
+  damit cloudflared die App-Container ueber localhost:<hostPort> (= Host-Ports) erreicht
+  — konsistent zur DeployOrchestrator-Route-Konvention http://localhost:<hostPort>.
+  Konkret: aktueller runcmd-Eintrag "docker run -d --name cloudflared --restart unless-stopped
+  --env-file /etc/cloudflared/env cloudflare/cloudflared:latest tunnel --no-autoupdate
+  run" um "--network host" ergaenzen. TEMPLATE_VERSION 4->5 erhoehen (AC8) + Versionshistorie-Kommentar
   fortschreiben. Floor unveraendert (AC13): Token bleibt ausschliesslich im --env-file
-  /etc/cloudflared/env (0600 root:root via write_files), NIE in Argv/Log; --network host
-  ist mit dem env-file-Ansatz + restart-Policy kompatibel (live verifiziert). Live-Beweis
-  (2026-06-18, sandbox-3 auf testDevGui): mit Default-Bridge war die Cloudflare-Domain
+  /etc/cloudflared/env (0600 root:root via write_files), NIE in Argv/Log; --network
+  host ist mit dem env-file-Ansatz + restart-Policy kompatibel (live verifiziert).
+  Live-Beweis (2026-06-18, sandbox-3 auf testDevGui): mit Default-Bridge war die Cloudflare-Domain
   unerreichbar (Host curl localhost:8080 -> 200), nach cloudflared-Neustart mit --network
   host -> https://sandbox-3.alexstuder.cloud -> 200. Tests: erzeugtes cloud-init-YAML
-  enthaelt "--network host" im cloudflared-docker-run-Eintrag; Token weiterhin nur via
-  --env-file (kein Token in Argv/runcmd-Echo, Regression-Guard AC13); TEMPLATE_VERSION
+  enthaelt "--network host" im cloudflared-docker-run-Eintrag; Token weiterhin nur
+  via --env-file (kein Token in Argv/runcmd-Echo, Regression-Guard AC13); TEMPLATE_VERSION
   === 5. Bestehende CloudInitBuilder-Tests fuer den cloudflared-Block (AC12/AC13)
   entsprechend anpassen. ~S, ~1 EP.'
 created_at: '2026-06-18T00:00:00Z'
-updated_at: '2026-07-02T03:22:17.133Z'
+updated_at: '2026-07-02T03:22:17Z'
 archived: true
-archived_at: '2026-07-02T03:22:17.133Z'
+archived_at: '2026-07-02T03:22:17Z'
 area: '''deployment'''
