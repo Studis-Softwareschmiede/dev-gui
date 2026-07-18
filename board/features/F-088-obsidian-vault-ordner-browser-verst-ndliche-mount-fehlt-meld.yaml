@@ -3,7 +3,7 @@ title: Obsidian-Vault-Ordner-Browser + verständliche Mount-fehlt-Meldung
 goal: 'Obsidian-Settings-Sektion: server-seitiger, confinter Ordner-Browser (Container-Pfad
   klicken statt tippen) + Mount-fehlt-Erkennung mit Alltagssprache-Anleitung statt
   technischer Schranken-Meldung (Owner-Vorfall 2026-07-18). Freitext-Fallback bleibt.'
-status: Backlog
+status: Done
 priority: P2
 spec: docs/specs/obsidian-vault-folder-browser.md
 definition_of_done: null
@@ -16,7 +16,8 @@ owner: null
 stories:
 - S-378
 - S-379
-progress: 0/2 done
+progress: 2/2 done
 created_at: '2026-07-18T21:51:21Z'
-updated_at: '2026-07-18T21:53:48Z'
+updated_at: '2026-07-18T22:39:55Z'
 area: einstellungen
+done_at: '2026-07-18T22:39:55Z'

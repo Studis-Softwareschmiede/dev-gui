@@ -2,20 +2,24 @@
 > Kuratiert von /flow am Ende jeder Session. Max. 60 Zeilen.
 
 ## Aktueller Stand
-Board ist leer — F-087 (Deployments-Untermenü + kompakte GPG-Schlüssel-Ansicht,
-S-373–S-376) und der Einzelgänger S-377 (Digest-Pin-Fix beim Container-Update)
-sind gelandet und produktiv ausgerollt (Revision 9117e96). Die GPG-Verwaltung
-lebt jetzt im Unterbereich „GPG-Schlüssel" der Deployments-Ansicht (Dropdown je
-App, Anlegen mit Existenz-Gating, Rotieren via unveränderter Zwei-Phasen-Rotation).
+Board ist leer — F-088 (Obsidian-Vault-Ordner-Browser + verständliche
+Mount-fehlt-Meldung, S-378/S-379) ist gelandet und ausgerollt (Revision cd98eec),
+direkt nach F-087 (Deployments-Untermenü + GPG-Schlüssel-Ansicht) und S-377
+(Digest-Pin-Fix). Der Obsidian-Vault ist auf dem Mac eingerichtet:
+OBSIDIAN_VAULT_HOST_DIR in lokaler .env, OBSIDIAN_PROJEKTE_SUBDIR
+„300 Projekte/Studis Softwareschmiede" in compose aktiv, Settings-Pfad
+/obsidian-vault gesetzt, mountStatus meldet live „ok".
 
 ## Letzte Arbeiten
-- S-376 / „Rotieren" je gewählter App in der GPG-Schlüssel-Ansicht; Gates der Alt-UI (type-to-confirm-Discard) 1:1 erhalten.
-- S-375 / GPG-Ansicht: App-Dropdown + „Passphrase anlegen" mit Existenz-Gating (gpg-exists), Race-Guard beim App-Wechsel.
-- S-377 / Container-Update zieht bei Digest-gepinntem Bestands-Ref den beweglichen Tag nach (AC16/AC17, fail-closed `update-unsafe`).
-- S-374 / Linkes Untermenü „Deployment"/„GPG-Schlüssel" in DeploymentsView; alte GPG-Listen-Sektionen entfernt.
-- S-373 / Read-only `GET /api/deployments/:app/gpg-exists` (nie ein Passphrasen-Wert, access-not-ready-Fallback).
+- S-379 / Ordner-Browser-Overlay + Alltagssprache-Mount-Meldung in der Obsidian-Settings-Sektion; Freitext bleibt Fallback.
+- S-378 / Mount-Status (unconfigured/unusable/ok, /dev/null-Fall) + read-only Browse-Endpunkt, hart vault-confined.
+- S-376 / „Rotieren" je gewählter App in der GPG-Schlüssel-Ansicht (Zwei-Phasen-Rotation unverändert).
+- S-375 / GPG-Ansicht: App-Dropdown + „Passphrase anlegen" mit Existenz-Gating.
+- S-377 / Container-Update zieht bei Digest-Pin den beweglichen Tag nach (fail-closed `update-unsafe`).
+- S-374 / Linkes Untermenü „Deployment"/„GPG-Schlüssel" in DeploymentsView.
+- S-373 / Read-only `GET /api/deployments/:app/gpg-exists`.
 
 ## Offene Fäden
-- Reviewer-Suggestion S-377: Digest-Pin-Fix vor dem nächsten echten VPS-Rollout einmal gegen einen realen digest-gepinnten Container verifizieren (RepoTags liefert genau einen Eintrag).
-- Metrik-Ledger: flow/L05-Defekt ist BEHOBEN (Zeilen repariert + agent-flow-Fix S-073); `tok_total` zählt per Design in+out+cache (inkl. Cache-Reads) — Millionenwerte sind normal.
-- Kosmetik: Style-Namen `gpgDiscardConfirmLabel`/`gpgDiscardCheckbox` in DeploymentsView benennen nicht mehr ihre Funktion (Reviewer-Suggestion S-374).
+- Reviewer-Suggestion S-377: Digest-Pin-Fix beim nächsten echten VPS-Update einmal am realen Container verifizieren.
+- Reviewer-Suggestions F-088 (Kosmetik): Fehler-Zweig von `fetchObsidianVaultBrowse` direkt unit-testen; Tab-Fokus-Trap für beide Obsidian-Overlays gemeinsam nachrüsten.
+- Metrik-Ledger: flow/L05-Defekt BEHOBEN; `tok_total` zählt per Design in+out+cache (Millionenwerte normal).
