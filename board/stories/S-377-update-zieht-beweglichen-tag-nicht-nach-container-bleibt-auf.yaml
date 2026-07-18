@@ -2,7 +2,7 @@ id: S-377
 parent: F-080
 title: Update zieht beweglichen Tag nicht nach — Container bleibt auf altem Image
   (Digest-Pin)
-status: In Progress
+status: Done
 priority: P1
 spec: docs/specs/container-image-update.md
 implements:
@@ -15,8 +15,8 @@ labels:
 - security
 size_est: M
 dispo_est: '5.0'
-dispo_act: null
-dispo_forecast: null
+dispo_act: '4'
+dispo_forecast: '.2500'
 estimate_note: 'Heuristik M (score=6: 2 AC [AC16,AC17] + 3 Komponenten [VpsDockerControl.inspectContainer-Boundary,
   Update-Resolver in vpsContainerRouter, DeployOrchestrator-Aufruf/Tests] + security-Label).
   estimator (Task/agents/estimator.md) in diesem Lauf nicht dispatchbar (requirement-Subagent
@@ -38,6 +38,7 @@ branch: feat/S-377-update-digest-pin
 pr: null
 blocked_reason: null
 created_at: '2026-07-18T14:12:58Z'
-updated_at: '2026-07-18T15:15:20Z'
-done_at: null
+updated_at: '2026-07-18T15:47:48Z'
+done_at: '2026-07-18T15:46:12Z'
 area: deployment
+tok: '24695844'

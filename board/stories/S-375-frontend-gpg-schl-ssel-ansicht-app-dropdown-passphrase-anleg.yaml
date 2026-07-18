@@ -1,7 +1,7 @@
 id: S-375
 parent: F-087
 title: 'Frontend: GPG-Schlüssel-Ansicht — App-Dropdown + Passphrase anlegen mit Existenz-Gating'
-status: To Do
+status: In Progress
 priority: P2
 spec: docs/specs/deployments-gpg-subview.md
 implements:
@@ -23,9 +23,9 @@ estimate_note: Heuristik-Score→M (js|balanced); estimator nicht dispatchbar (S
   (.ep=5.0, n=8); keine Baseline-Tokens (tok_total null) -> tok_est null.
 confidence: medium
 tok_est: null
-branch: null
+branch: feat/S-375-gpg-view-provision
 pr: null
 blocked_reason: null
 created_at: '2026-07-18T13:44:55Z'
-updated_at: '2026-07-18T13:48:09Z'
+updated_at: '2026-07-18T15:43:22Z'
 done_at: null
