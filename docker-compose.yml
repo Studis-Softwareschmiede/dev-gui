@@ -283,7 +283,7 @@ services:
       # Owner-Vorfall 2026-07-08). Default „Projekte" passt nicht zu jedem Vault-Layout
       # (z.B. „300 Projekte/Studis Softwareschmiede/<Projekt>", Mehrebenen-Segment erlaubt).
       # Ohne Setzung bleibt der Default „Projekte" wirksam (Rückwärtskompatibilität).
-      # OBSIDIAN_PROJEKTE_SUBDIR: 300 Projekte/Studis Softwareschmiede
+      OBSIDIAN_PROJEKTE_SUBDIR: 300 Projekte/Studis Softwareschmiede
 
     volumes:
       # Claude OAuth credentials + agent-flow plugin cache (persisted across
