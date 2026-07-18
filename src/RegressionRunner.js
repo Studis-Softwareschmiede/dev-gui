@@ -121,17 +121,57 @@
  * Für `bereich`/`verbund` gilt: kein deklariertes `target` (fehlende/unlesbare
  * Begleitbeschreibung, Suite nicht gefunden) → konservativ `local`
  * (unverändertes Bestandsverhalten); `local` → bestehender lokaler Pfad
- * (AC5/AC7/AC8); jeder andere Wert (`ephemeral-infra`/`url`/ein unbekannter
- * String) → SOFORTIGER, persistierter `error` „Testobjekt `<target>` wird
- * noch nicht unterstützt" — OHNE Provisionierung, OHNE Playwright-Start, OHNE
- * die local-Erreichbarkeitsprüfung. Ein Fallback auf den local-Pfad ist
- * ausgeschlossen (verifizierter Befund 2026-07-08: die vps-Suite durchlief
- * fälschlich die local-Prüfung und meldete einen irreführenden
- * Vorbedingungs-Fehler). Datenhygiene: `target` kommt aus einer Repo-Datei,
- * die dieser Runner nicht kontrolliert — nur die drei bekannten Werte
- * (`local`/`ephemeral-infra`/`url`) werden wörtlich in die Meldung
- * übernommen, ein unbekannter Wert erzeugt eine generische Meldung
+ * (AC5/AC7/AC8); `ephemeral-infra` → **A3-Pfad** (`#runEphemeralInfra`, AC12,
+ * s.u.); jeder andere Wert (`url`/ein unbekannter String) → weiterhin
+ * SOFORTIGER, persistierter `error` „Testobjekt `<target>` wird noch nicht
+ * unterstützt" — OHNE Playwright-Start, OHNE die local-Erreichbarkeitsprüfung.
+ * Ein Fallback auf den local-Pfad ist ausgeschlossen (verifizierter Befund
+ * 2026-07-08: die vps-Suite durchlief fälschlich die local-Prüfung und
+ * meldete einen irreführenden Vorbedingungs-Fehler). Datenhygiene: `target`
+ * kommt aus einer Repo-Datei, die dieser Runner nicht kontrolliert — nur
+ * bekannte Werte (`local`/`ephemeral-infra`/`url`) werden wörtlich in die
+ * Meldung übernommen, ein unbekannter Wert erzeugt eine generische Meldung
  * (`buildUnsupportedTargetMessage`).
+ *
+ * `ephemeral-infra`-Ausführungspfad (AC12, S-362): agent-flow
+ * `regression-playwright-conventions` AC4 legt das Provisionier-/Teardown-
+ * Fixture-Muster für Infra-Ketten VERBINDLICH auf die EINZELNE Playwright-
+ * Suite (fixture-scoped `try/finally`, s. `tests/regression/vps/*.spec.ts`)
+ * — NICHT auf den Runner (dev-gui darf die Infra-Leitplanken/`target`-
+ * Semantik nicht neu definieren, Spec-Nicht-Ziel). `#runEphemeralInfra`
+ * spiegelt das: es überspringt die `local`-Erreichbarkeitsprüfung (AC5) UND
+ * das lokale Frisch-Ausrollen (AC7 ist lokal-exklusiv), setzt aber — wie eine
+ * `local`-Suite — `REGRESSION_BASE_URL` auf die lokal erreichbare Applikation
+ * (dieselbe Port-Auflösung, `#readPort`), weil bestehende `ephemeral-infra`-
+ * Suiten (view-vps-Feature) über die dev-gui-eigene UI navigieren UND ihr
+ * eigenes `rtest-*`-Wegwerf-Ziel selbst provisionieren/abbauen (Fixture-
+ * Teardown, s.o.). ZUSÄTZLICH zu diesem In-Test-Teardown garantiert der
+ * Runner selbst ein best-effort Sicherheitsnetz (`#cleanupEphemeralInfra`):
+ * nach JEDEM Lauf-Ausgang (passed/failed/error/Timeout/interner Fehler) wird
+ * EINMALIG über alle konfigurierten VPS-Provider gefegt und JEDE Maschine
+ * mit `rtest-*`-Namenspräfix gelöscht — greift genau dann, wenn der
+ * Runner-eigene Runaway-Timeout den Playwright-Kindprozess beendet, BEVOR
+ * dessen eigener Fixture-Teardown laufen konnte (Produktiv-Allowlist AC7:
+ * der Sweep rührt AUSSCHLIESSLICH `rtest-*`-Namen an, alles andere bleibt
+ * unberührt). **Reihenfolge zwingend (Review-Fix Iteration 2):** der Sweep
+ * läuft VOR `#finish()` — `#finish()` gibt synchron das `ProjectJobLock`
+ * frei; würde das Lock schon VOR dem Sweep fallen, könnte ein sofort
+ * gestarteter Folgelauf desselben Projekts (Busy-Check sieht „frei") seine
+ * frische `rtest-*`-Maschine anlegen, die der noch laufende Sweep der
+ * Vorrunde dann als vermeintliche Waise mitlöscht. `#runEphemeralInfra`
+ * ermittelt daher `status`/`patch` vollständig, OHNE zwischendurch `#finish`
+ * aufzurufen, fährt danach den Sweep und ruft `#finish` erst am Ende genau
+ * EINMAL. Ohne injizierte `vpsRegistry` degradiert der Sweep auf ein No-op
+ * (kein Crash, best-effort — analog `dockerControl`).
+ * Bekannte Grenze (dokumentiert, kein stiller Anspruch): der Sweep ist
+ * GLOBAL über alle `rtest-*`-Maschinen dieses Servers — bei echter
+ * Parallelität mehrerer Projekte mit je eigenen `ephemeral-infra`-Läufen
+ * könnte ein Sweep eine fremde, noch laufende `rtest-*`-Maschine treffen;
+ * heute existieren `ephemeral-infra`-Suiten nur in diesem Repo (kein
+ * Parallelitäts-Fall in der Praxis). Ein Absturz des GESAMTEN dev-gui-
+ * Serverprozesses (kein Timeout/Testfehler, sondern ein externer Kill) bleibt
+ * strukturell unerreichbar für JEDEN In-Process-`finally` — das ist außerhalb
+ * des Scopes dieses Runners (bräuchte eine separate Reconcile-Instanz).
  *
  * @module RegressionRunner
  */
@@ -177,18 +217,24 @@ const ROLLOUT_NOT_READY_MESSAGE = 'Applikation lokal nicht gestartet';
 
 /**
  * Bekannte, bereits im Testobjekt-Modell definierte, aber (noch) nicht
- * gebaute `target`-Werte (AC11, A3/A4) — dürfen wörtlich in die
- * Fehlermeldung übernommen werden (Datenhygiene: nur bekannte Werte).
+ * gebaute `target`-Werte (AC11, A4 — `ephemeral-infra`/A3 hat seit AC12/S-362
+ * einen eigenen Ausführungspfad, `#runEphemeralInfra`, und läuft daher NICHT
+ * mehr über diesen Zweig) — dürfen wörtlich in die Fehlermeldung übernommen
+ * werden (Datenhygiene: nur bekannte Werte).
  */
-const KNOWN_UNSUPPORTED_TARGETS = new Set(['ephemeral-infra', 'url']);
+const KNOWN_UNSUPPORTED_TARGETS = new Set(['url']);
+
+/** Namensschema-Präfix für flüchtige Test-Ressourcen (AC7, agent-flow `regression-runner` AC7). */
+const RTEST_PREFIX = 'rtest-';
 
 /**
  * Baut die secret-freie „noch nicht unterstützt"-Meldung für ein deklariertes,
- * aber (noch) nicht gebautes Testobjekt (AC11). `target` kommt aus einer
- * Repo-Datei, die dieser Runner nicht kontrolliert — nur die bekannten Werte
- * (`ephemeral-infra`/`url`) werden wörtlich übernommen; ein unbekannter/
- * unerwarteter Wert erzeugt eine generische Meldung (keine Übernahme
- * beliebiger Fremd-Strings in die Diagnose).
+ * aber (noch) nicht gebautes Testobjekt (AC11 — `ephemeral-infra` hat seit
+ * AC12/S-362 einen eigenen Ausführungspfad und landet hier nicht mehr).
+ * `target` kommt aus einer Repo-Datei, die dieser Runner nicht kontrolliert —
+ * nur die bekannten Werte (aktuell: `url`) werden wörtlich übernommen; ein
+ * unbekannter/unerwarteter Wert erzeugt eine generische Meldung (keine
+ * Übernahme beliebiger Fremd-Strings in die Diagnose).
  *
  * @param {string} target
  * @returns {string}
@@ -492,6 +538,8 @@ export class RegressionRunner {
   #notifier;
   /** @type {(projectPath: string, deps?: object) => Promise<{suites: Array<object>}>} injectable (AC11 — dieselbe Lese-Boundary wie der Ausführen-Dialog, Default: readRegressionSuites) */
   #readSuites;
+  /** @type {import('./vps/VpsProviderRegistry.js').VpsProviderRegistry|null} injectable (AC12 — Sicherheitsnetz-Sweep für `rtest-*`-Ressourcen, Default: kein Sweep möglich, degradiert) */
+  #vpsRegistry;
   /**
    * @type {Map<string, {
    *   status: 'running'|'passed'|'failed'|'precondition-error'|'error',
@@ -520,6 +568,7 @@ export class RegressionRunner {
    * @param {import('./deploy/LocalDockerControl.js').LocalDockerControl} [params.dockerControl] - injectable (AC7; ohne → kein Frisch-Ausrollen möglich, degradiert).
    * @param {import('./DrainNotifier.js').DrainNotifier} [params.notifier] - injectable (regression-failed-notification AC1–AC4; ohne → kein Push, degradiert).
    * @param {Function} [params.readSuites] - injectable (AC11, default: readRegressionSuites — dieselbe Lese-Boundary wie der Ausführen-Dialog, AC4/AC6).
+   * @param {import('./vps/VpsProviderRegistry.js').VpsProviderRegistry} [params.vpsRegistry] - injectable (AC12; ohne → Sicherheitsnetz-Sweep degradiert auf No-op, kein Crash).
    */
   constructor({
     runPlaywright,
@@ -536,6 +585,7 @@ export class RegressionRunner {
     dockerControl,
     notifier,
     readSuites,
+    vpsRegistry,
   } = {}) {
     this.#timeoutMs = timeoutMs ?? (Number(process.env.REGRESSION_RUN_TIMEOUT_MS) || DEFAULT_REGRESSION_RUN_TIMEOUT_MS);
     this.#readRolloutConfig = readRolloutConfig ?? readLocalRolloutConfig;
@@ -551,6 +601,7 @@ export class RegressionRunner {
     this.#readFile = readFileFn ?? readFile;
     this.#notifier = notifier ?? null;
     this.#readSuites = readSuites ?? readRegressionSuites;
+    this.#vpsRegistry = vpsRegistry ?? null;
   }
 
   /**
@@ -652,10 +703,16 @@ export class RegressionRunner {
     }
 
     // AC11: Testobjekt-Weiche VOR dem lokalen Pfad — dieselbe Lese-Boundary
-    // wie der Ausführen-Dialog (kein zweiter Parser). Ein deklariertes,
-    // (noch) nicht gebautes Testobjekt endet SOFORT als `error`, ohne
-    // Provisionierung/Playwright-Start/local-Erreichbarkeitsprüfung.
+    // wie der Ausführen-Dialog (kein zweiter Parser). `ephemeral-infra` hat
+    // seit AC12 einen eigenen Ausführungspfad (#runEphemeralInfra). Ein
+    // deklariertes, (noch) nicht gebautes Testobjekt (aktuell nur `url`)
+    // endet weiterhin SOFORT als `error`, ohne Playwright-Start/
+    // local-Erreichbarkeitsprüfung.
     const target = await this.#resolveTarget(job.projectPath, scope);
+    if (target === 'ephemeral-infra') {
+      await this.#runEphemeralInfra(runId, job, testPath, start);
+      return;
+    }
     if (target !== 'local') {
       this.#finish(runId, 'error', {
         reason: buildUnsupportedTargetMessage(target),
@@ -734,6 +791,129 @@ export class RegressionRunner {
     // (s. Modul-Doku, Notify-Naht bleibt strukturell auf summarizeCtrf()
     // beschränkt).
     this.#finish(runId, status, { counts, durationMs, target: 'local', ctrf });
+  }
+
+  /**
+   * Führt einen Lauf mit Testobjekt `ephemeral-infra` aus (AC12, A3). Die
+   * eigentliche `rtest-*`-Provisionierung/-Teardown lebt fixture-scoped
+   * INNERHALB der Playwright-Suite (agent-flow
+   * `regression-playwright-conventions` AC4 — VERBINDLICH, dev-gui definiert
+   * die Infra-Leitplanken nicht neu, s. Modul-Doku). Dieser Pfad spiegelt den
+   * lokalen Pfad NUR für die Basis-URL (`REGRESSION_BASE_URL`, dieselbe
+   * Port-Auflösung wie `local`, `#readPort`) — OHNE die local-Erreichbar-
+   * keitsprüfung (AC5) und OHNE Frisch-Ausrollen (AC7 ist lokal-exklusiv).
+   * Garantiertes Cleanup (AC12/agent-flow `regression-runner` AC8): dieser
+   * Pfad ermittelt das Lauf-Ergebnis erst VOLLSTÄNDIG (`status`/`patch`, OHNE
+   * `#finish` aufzurufen), fährt DANACH `#cleanupEphemeralInfra()` und ruft
+   * `#finish()` — der die Lock-Freigabe auslöst — ERST NACH abgeschlossenem
+   * Sweep auf. Reihenfolge zwingend: Ergebnis ermitteln → Sweep → `#finish`/
+   * Lock-Release — in JEDEM Ausgang (passed/failed/error/Timeout/interner
+   * Fehler). Begründung (Review-Fix Iteration 2): gäbe der Runner das Lock
+   * frei, BEVOR der Sweep gelaufen ist, könnte ein sofort gestarteter
+   * Folgelauf desselben Projekts (Busy-Check sieht "frei") seine frische
+   * `rtest-*`-Maschine anlegen, die der noch laufende Sweep der Vorrunde dann
+   * als vermeintliche Waise mitlöscht.
+   *
+   * @param {string} runId
+   * @param {object} job
+   * @param {string} testPath
+   * @param {number} start
+   * @returns {Promise<void>}
+   */
+  async #runEphemeralInfra(runId, job, testPath, start) {
+    let status;
+    let patch;
+
+    try {
+      const port = await this.#readPort(job.projectPath, { readFile: this.#readFile });
+      const baseUrl = port !== null ? `http://127.0.0.1:${port}` : undefined;
+
+      let res;
+      let internalError = false;
+      try {
+        res = await this.#runPlaywright({ projectPath: job.projectPath, testPath, baseUrl });
+      } catch {
+        internalError = true;
+      }
+
+      if (internalError) {
+        status = 'error';
+        patch = { reason: INTERNAL_FAILURE_MESSAGE, target: 'ephemeral-infra', durationMs: Date.now() - start };
+      } else if (res?.spawnError) {
+        const reason = res.notFound ? NOT_AVAILABLE_MESSAGE : GENERIC_FAILURE_MESSAGE;
+        status = 'error';
+        patch = { reason, target: 'ephemeral-infra', durationMs: Date.now() - start };
+      } else if (res?.timedOut) {
+        status = 'error';
+        patch = { reason: TIMEOUT_FAILURE_MESSAGE, target: 'ephemeral-infra', durationMs: Date.now() - start };
+      } else {
+        const ctrf = await this.#readCtrf(job.projectPath, { readFile: this.#readFile });
+        if (!ctrf) {
+          status = 'error';
+          patch = { reason: NO_CTRF_MESSAGE, target: 'ephemeral-infra', durationMs: Date.now() - start };
+        } else {
+          const summary = summarizeCtrf(ctrf);
+          status = summary.status;
+          patch = { counts: summary.counts, durationMs: Date.now() - start, target: 'ephemeral-infra', ctrf };
+
+          // regression-failed-notification AC2/AC3: NUR bei status:"failed".
+          if (status === 'failed') {
+            this.#notifyRegressionFailed(job, summary.counts);
+          }
+        }
+      }
+    } catch {
+      // Sicherheitsnetz gegen einen unerwarteten Wurf ausserhalb der
+      // expliziten Zweige oben (z.B. #readPort/#readCtrf — beide fangen
+      // intern bereits alles ab, aber dieser Catch bleibt defensiv).
+      status = 'error';
+      patch = { reason: INTERNAL_FAILURE_MESSAGE, target: 'ephemeral-infra', durationMs: Date.now() - start };
+    }
+
+    // AC12/agent-flow `regression-runner` AC8: garantiertes Cleanup — VOR der
+    // Lock-Freigabe (die erst in #finish passiert), damit kein Folgelauf
+    // desselben Projekts in die Sweep-Lücke starten kann (Review-Fix
+    // Iteration 2). Best-effort, kein Crash — läuft in JEDEM Ausgang.
+    await this.#cleanupEphemeralInfra();
+    this.#finish(runId, status, patch);
+  }
+
+  /**
+   * Best-effort Sicherheitsnetz-Sweep (AC12): löscht JEDE über alle
+   * konfigurierten VPS-Provider gelistete Maschine mit `rtest-*`-Namens-
+   * präfix. Läuft IMMER nach einem `ephemeral-infra`-Lauf (`finally`,
+   * s. `#runEphemeralInfra`) — zusätzlich zum In-Test-Fixture-Teardown
+   * (regression-playwright-conventions AC4), als Rückfallebene für den Fall,
+   * dass der Runner-eigene Runaway-Timeout den Playwright-Kindprozess killt,
+   * BEVOR dessen eigener Teardown lief. Produktiv-Allowlist (AC7): rührt
+   * AUSSCHLIESSLICH `rtest-*`-Namen an — alles andere bleibt unberührt. Ohne
+   * injizierte `vpsRegistry` (Default) No-op, kein Crash (degradiert analog
+   * `dockerControl`). Einzelne Lösch-/Listing-Fehler werden protokolliert
+   * (secret-frei) und stoppen den Sweep nicht (best-effort je Maschine).
+   *
+   * @returns {Promise<void>}
+   */
+  async #cleanupEphemeralInfra() {
+    if (!this.#vpsRegistry || typeof this.#vpsRegistry.listAllMachines !== 'function' || typeof this.#vpsRegistry.delete !== 'function') {
+      return; // kein Registry injiziert -> best-effort übersprungen (kein Crash)
+    }
+    let machines;
+    try {
+      const result = await this.#vpsRegistry.listAllMachines();
+      machines = Array.isArray(result?.machines) ? result.machines : [];
+    } catch (err) {
+      console.error('[RegressionRunner] rtest-*-Cleanup: Listing fehlgeschlagen (best-effort):', err?.message ?? String(err));
+      return;
+    }
+
+    const orphans = machines.filter((m) => typeof m?.name === 'string' && m.name.startsWith(RTEST_PREFIX));
+    for (const machine of orphans) {
+      try {
+        await this.#vpsRegistry.delete(machine.provider, machine.serverId, machine.name);
+      } catch (err) {
+        console.error('[RegressionRunner] rtest-*-Cleanup: Abbau fehlgeschlagen (best-effort):', err?.message ?? String(err));
+      }
+    }
   }
 
   /**

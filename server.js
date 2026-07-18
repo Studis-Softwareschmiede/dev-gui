@@ -624,11 +624,15 @@ const regressionResultStore = new RegressionResultStore();
 // vom übergebenen `freshRollout`-Wert. `notifier` = GETEILTE `DrainNotifier`-
 // Instanz (s.o.) — bei Lauf-Abschluss mit status:"failed" best-effort GENAU
 // EIN `regression_failed`-Push (kein zweiter Notify-Pfad).
+// `vpsRegistry` = GETEILTE `VpsProviderRegistry`-Instanz (s.o.) — AC12:
+// best-effort Sicherheitsnetz-Sweep von `rtest-*`-Ressourcen nach jedem
+// `ephemeral-infra`-Lauf (kein zweiter VPS-Boundary-Pfad).
 const regressionRunner = new RegressionRunner({
   auditStore,
   resultStore: regressionResultStore,
   dockerControl: localDockerControl,
   notifier: drainNotifier,
+  vpsRegistry,
 });
 
 // ── DrainJobRegistry (drain-restart-robustness AC1–AC4, S-281/S-282) ────────

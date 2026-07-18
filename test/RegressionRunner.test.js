@@ -2,7 +2,7 @@
  * @file RegressionRunner.test.js — unit tests for the deterministic
  * Regressionstest-Runner + its pure helpers (docs/specs/regression-run.md).
  *
- * Covers (regression-run): AC1, AC2, AC5, AC7, AC8, AC9, AC10, AC11
+ * Covers (regression-run): AC1, AC2, AC5, AC7, AC8, AC9, AC10, AC11, AC12
  *
  *   AC1 — RegressionRunner is an own boundary with an OWN, isolated
  *         ProjectJobLock instance (never a `claude`/agent process — grep-
@@ -58,11 +58,27 @@
  *         `readSuites`-Boundary (Default: `readRegressionSuites`) aufgelöst.
  *         `gesamt` → IMMER `local` (readSuites wird dafür NICHT aufgerufen).
  *         `bereich`/`verbund` mit deklariertem `target:"local"` → bestehender
- *         lokaler Pfad; `ephemeral-infra`/`url`/unbekannter Wert → SOFORTIGER
- *         `error` „Testobjekt `<target>` wird noch nicht unterstützt" (nur
- *         bekannte Werte wörtlich in der Meldung, sonst generisch), OHNE
- *         Playwright-Start/local-Prüfung; kein deklariertes `target`
- *         (Suite nicht gefunden/Lesefehler) → konservativ `local`.
+ *         lokaler Pfad; `ephemeral-infra` → eigener Ausführungspfad (AC12,
+ *         s.u.); `url`/unbekannter Wert → SOFORTIGER `error` „Testobjekt
+ *         `<target>` wird noch nicht unterstützt" (nur bekannte Werte
+ *         wörtlich in der Meldung, sonst generisch), OHNE Playwright-Start/
+ *         local-Prüfung; kein deklariertes `target` (Suite nicht gefunden/
+ *         Lesefehler) → konservativ `local`.
+ *   AC12 (S-362) — `ephemeral-infra`-Ausführungspfad: der Lauf startet
+ *         Playwright (KEINE local-Erreichbarkeitsprüfung, KEIN Frisch-
+ *         Ausrollen — beides AC5/AC7-exklusiv für `local`), setzt aber
+ *         `REGRESSION_BASE_URL` analog zum lokalen Pfad (dieselbe
+ *         `readPort`-Auflösung), da bestehende `ephemeral-infra`-Suiten
+ *         (`tests/regression/vps/*.spec.ts`) über die lokal laufende
+ *         Applikation navigieren und ihr eigenes `rtest-*`-Wegwerf-Ziel
+ *         SELBST provisionieren/abbauen (Fixture-Teardown, agent-flow
+ *         `regression-playwright-conventions` AC4 — dev-gui definiert die
+ *         Infra-Leitplanken nicht neu). Der Runner garantiert ZUSÄTZLICH
+ *         (`finally`, unabhängig von passed/failed/error/Timeout) einen
+ *         best-effort Sweep aller `rtest-*`-benannten Maschinen über die
+ *         injizierte `vpsRegistry` (Sicherheitsnetz für den Fall, dass der
+ *         Runner-eigene Timeout-Kill den In-Test-Teardown verhindert hat) —
+ *         ohne injizierte `vpsRegistry` degradiert der Sweep auf No-op.
  *
  * Edge-Cases: kein Projekt-Grundgerüst (tests/regression fehlt) → `error`
  * "kein Regressions-Grundgerüst", kein Playwright-Start. Kein CTRF-Ergebnis
@@ -846,9 +862,12 @@ describe('RegressionRunner — regression-run.md', () => {
 
   // ── buildUnsupportedTargetMessage (pure, Datenhygiene AC11) ────────────────
   describe('buildUnsupportedTargetMessage — Datenhygiene (nur bekannte Werte wörtlich)', () => {
-    it('bekannte Werte (ephemeral-infra/url) werden wörtlich in die Meldung übernommen', () => {
-      expect(buildUnsupportedTargetMessage('ephemeral-infra')).toBe('Testobjekt ephemeral-infra wird noch nicht unterstützt');
+    it('bekannte Werte (aktuell: url) werden wörtlich in die Meldung übernommen', () => {
       expect(buildUnsupportedTargetMessage('url')).toBe('Testobjekt url wird noch nicht unterstützt');
+    });
+
+    it('"ephemeral-infra" ist seit AC12/S-362 kein unbekanntes Testobjekt mehr — hat aber keinen eigenen Eintrag in dieser Meldungs-Datenhygiene (der Wert läuft über #runEphemeralInfra, nicht über diese Funktion)', () => {
+      expect(buildUnsupportedTargetMessage('ephemeral-infra')).toBe('Testobjekt wird noch nicht unterstützt');
     });
 
     it('ein unbekannter/roher Wert erzeugt eine generische Meldung (kein Fremd-String-Durchreichen)', () => {
@@ -902,40 +921,6 @@ describe('RegressionRunner — regression-run.md', () => {
       expect(readSuites).toHaveBeenCalledWith('/ws/proj');
       expect(runPlaywright).toHaveBeenCalledTimes(1);
       expect(runner.getRun(runId).status).toBe('passed');
-    });
-
-    it('bereich-Scope mit target:"ephemeral-infra" -> sofortiger error, KEIN Playwright-Start, KEINE local-Prüfung', async () => {
-      const readSuites = jest.fn(async () => ({
-        suites: [{ scope: { typ: 'bereich', id: 'vps' }, label: 'vps', target: 'ephemeral-infra' }],
-      }));
-      const runPlaywright = jest.fn();
-      const probeReachability = jest.fn();
-      const record = jest.fn(async (i) => i);
-      const runner = new RegressionRunner({
-        runPlaywright,
-        readFile: readFileScaffoldOnly(),
-        readSuites,
-        probeReachability,
-        resultStore: { record },
-      });
-
-      const { runId } = runner.start('/ws/proj', 'proj', { typ: 'bereich', id: 'vps' });
-      await flush();
-
-      const run = runner.getRun(runId);
-      expect(run.status).toBe('error');
-      expect(run.reason).toBe('Testobjekt ephemeral-infra wird noch nicht unterstützt');
-      expect(run.target).toBe('ephemeral-infra');
-      expect(runPlaywright).not.toHaveBeenCalled();
-      expect(probeReachability).not.toHaveBeenCalled();
-      // AC10: trotzdem GENAU EIN persistierter Datensatz, ctrf:null, counts 0/0/0.
-      expect(record).toHaveBeenCalledTimes(1);
-      expect(record.mock.calls[0][0]).toMatchObject({
-        status: 'error',
-        ctrf: null,
-        counts: { passed: 0, failed: 0, total: 0 },
-        reason: 'Testobjekt ephemeral-infra wird noch nicht unterstützt',
-      });
     });
 
     it('verbund-Scope mit target:"url" -> sofortiger error mit dem deklarierten Wert in der Meldung', async () => {
@@ -1008,7 +993,7 @@ describe('RegressionRunner — regression-run.md', () => {
 
     it('ein nicht unterstütztes Testobjekt ruft notifyRegressionFailed NIE auf (regression-failed-notification AC2/AC3)', async () => {
       const readSuites = jest.fn(async () => ({
-        suites: [{ scope: { typ: 'bereich', id: 'vps' }, label: 'vps', target: 'ephemeral-infra' }],
+        suites: [{ scope: { typ: 'bereich', id: 'vps' }, label: 'vps', target: 'url' }],
       }));
       const notifyRegressionFailed = jest.fn(async () => {});
       const runner = new RegressionRunner({
@@ -1023,6 +1008,401 @@ describe('RegressionRunner — regression-run.md', () => {
 
       expect(runner.getRun(runId).status).toBe('error');
       expect(notifyRegressionFailed).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── AC12: ephemeral-infra-Ausführungspfad (S-362) ──────────────────────────
+  describe('AC12 — ephemeral-infra-Ausführungspfad (Playwright läuft, garantiertes Cleanup)', () => {
+    function readFileScaffoldAndPort({ previewPort = 8080 } = {}) {
+      return jest.fn(async (p) => {
+        if (String(p).endsWith('.claude/profile.md')) return `preview_port: ${previewPort}\n`;
+        if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
+        if (String(p).endsWith(CTRF_RESULT_PATH)) return JSON.stringify({ results: { summary: { tests: 1, passed: 1, failed: 0 } } });
+        throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+      });
+    }
+
+    it('startet Playwright OHNE local-Erreichbarkeitsprüfung/Frisch-Ausrollen, setzt REGRESSION_BASE_URL analog local', async () => {
+      const readSuites = jest.fn(async () => ({
+        suites: [{ scope: { typ: 'bereich', id: 'vps' }, label: 'vps', target: 'ephemeral-infra' }],
+      }));
+      const runPlaywright = jest.fn(async ({ baseUrl, testPath }) => {
+        expect(baseUrl).toBe('http://127.0.0.1:8080');
+        expect(testPath).toBe('tests/regression/vps');
+        return { exitCode: 0 };
+      });
+      const probeReachability = jest.fn(); // AC5: darf NIE aufgerufen werden
+      const pullAndRecreate = jest.fn(); // AC7: darf NIE aufgerufen werden (lokal-exklusiv)
+      const runner = new RegressionRunner({
+        runPlaywright,
+        readFile: readFileScaffoldAndPort(),
+        readSuites,
+        probeReachability,
+        dockerControl: { pullAndRecreate },
+      });
+
+      const { runId } = runner.start('/ws/proj', 'proj', { typ: 'bereich', id: 'vps' }, { freshRollout: true });
+      await flush();
+
+      expect(runPlaywright).toHaveBeenCalledTimes(1);
+      expect(probeReachability).not.toHaveBeenCalled();
+      expect(pullAndRecreate).not.toHaveBeenCalled();
+      const run = runner.getRun(runId);
+      expect(run.status).toBe('passed');
+      expect(run.target).toBe('ephemeral-infra');
+    });
+
+    it('kein Port auffindbar -> Playwright läuft trotzdem, ohne REGRESSION_BASE_URL (kein Crash)', async () => {
+      const readSuites = jest.fn(async () => ({
+        suites: [{ scope: { typ: 'bereich', id: 'vps' }, label: 'vps', target: 'ephemeral-infra' }],
+      }));
+      const runPlaywright = jest.fn(async ({ baseUrl }) => {
+        expect(baseUrl).toBeUndefined();
+        return { exitCode: 0 };
+      });
+      const readFile = jest.fn(async (p) => {
+        if (String(p).endsWith('.claude/profile.md')) throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+        if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
+        if (String(p).endsWith(CTRF_RESULT_PATH)) return JSON.stringify({ results: { summary: { tests: 1, passed: 1, failed: 0 } } });
+        throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+      });
+      const runner = new RegressionRunner({ runPlaywright, readFile, readSuites });
+
+      const { runId } = runner.start('/ws/proj', 'proj', { typ: 'bereich', id: 'vps' });
+      await flush();
+
+      expect(runPlaywright).toHaveBeenCalledTimes(1);
+      expect(runner.getRun(runId).status).toBe('passed');
+    });
+
+    it('garantiertes Cleanup: fegt bei einem GRÜNEN Lauf ausschließlich rtest-*-Maschinen, andere Namen bleiben unberührt (Produktiv-Allowlist)', async () => {
+      const readSuites = jest.fn(async () => ({
+        suites: [{ scope: { typ: 'bereich', id: 'vps' }, label: 'vps', target: 'ephemeral-infra' }],
+      }));
+      const del = jest.fn(async () => ({ result: 'ok' }));
+      const vpsRegistry = {
+        listAllMachines: jest.fn(async () => ({
+          machines: [
+            { provider: 'hetzner', serverId: '1', name: 'rtest-regression-test-vps' },
+            { provider: 'hetzner', serverId: '2', name: 'produktiv-server' },
+          ],
+        })),
+        delete: del,
+      };
+      const runner = new RegressionRunner({
+        runPlaywright: jest.fn(async () => ({ exitCode: 0 })),
+        readFile: readFileScaffoldAndPort(),
+        readSuites,
+        vpsRegistry,
+      });
+
+      runner.start('/ws/proj', 'proj', { typ: 'bereich', id: 'vps' });
+      await flush();
+
+      expect(vpsRegistry.listAllMachines).toHaveBeenCalledTimes(1);
+      expect(del).toHaveBeenCalledTimes(1);
+      expect(del).toHaveBeenCalledWith('hetzner', '1', 'rtest-regression-test-vps');
+    });
+
+    it.each([
+      ['error (interner Fehler, runPlaywright wirft)', () => { throw new Error('boom'); }],
+      ['error (spawnError)', async () => ({ exitCode: -1, spawnError: true })],
+      ['error (Timeout)', async () => ({ exitCode: -1, timedOut: true })],
+      ['error (kein CTRF)', async () => ({ exitCode: 0 })],
+    ])('garantiertes Cleanup läuft auch bei %s', async (_label, runPlaywrightImpl) => {
+      const readSuites = jest.fn(async () => ({
+        suites: [{ scope: { typ: 'bereich', id: 'vps' }, label: 'vps', target: 'ephemeral-infra' }],
+      }));
+      const del = jest.fn(async () => ({ result: 'ok' }));
+      const vpsRegistry = {
+        listAllMachines: jest.fn(async () => ({ machines: [{ provider: 'hetzner', serverId: '9', name: 'rtest-orphan' }] })),
+        delete: del,
+      };
+      const readFile = jest.fn(async (p) => {
+        if (String(p).endsWith('.claude/profile.md')) throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+        if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
+        throw Object.assign(new Error('enoent'), { code: 'ENOENT' }); // kein CTRF -> deckt auch den "kein CTRF"-Fall
+      });
+      const runner = new RegressionRunner({
+        runPlaywright: jest.fn(runPlaywrightImpl),
+        readFile,
+        readSuites,
+        vpsRegistry,
+      });
+
+      const { runId } = runner.start('/ws/proj', 'proj', { typ: 'bereich', id: 'vps' });
+      await flush();
+
+      expect(runner.getRun(runId).status).toBe('error');
+      expect(del).toHaveBeenCalledTimes(1);
+      expect(del).toHaveBeenCalledWith('hetzner', '9', 'rtest-orphan');
+    });
+
+    it('rotem Lauf (failed>0) -> notifyRegressionFailed wird aufgerufen UND Cleanup läuft dennoch', async () => {
+      const readSuites = jest.fn(async () => ({
+        suites: [{ scope: { typ: 'bereich', id: 'vps' }, label: 'vps', target: 'ephemeral-infra' }],
+      }));
+      const notifyRegressionFailed = jest.fn(async () => {});
+      const del = jest.fn(async () => ({ result: 'ok' }));
+      const vpsRegistry = {
+        listAllMachines: jest.fn(async () => ({ machines: [{ provider: 'hetzner', serverId: '9', name: 'rtest-orphan' }] })),
+        delete: del,
+      };
+      const readFile = jest.fn(async (p) => {
+        if (String(p).endsWith('.claude/profile.md')) throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+        if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
+        if (String(p).endsWith(CTRF_RESULT_PATH)) return JSON.stringify({ results: { summary: { tests: 2, passed: 1, failed: 1 } } });
+        throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+      });
+      const runner = new RegressionRunner({
+        runPlaywright: jest.fn(async () => ({ exitCode: 1 })),
+        readFile,
+        readSuites,
+        vpsRegistry,
+        notifier: { notifyRegressionFailed },
+      });
+
+      runner.start('/ws/proj', 'proj', { typ: 'bereich', id: 'vps' });
+      await flush();
+
+      expect(notifyRegressionFailed).toHaveBeenCalledTimes(1);
+      expect(del).toHaveBeenCalledTimes(1);
+    });
+
+    it('ohne injizierte vpsRegistry (Default) -> Cleanup best-effort übersprungen, kein Crash', async () => {
+      const readSuites = jest.fn(async () => ({
+        suites: [{ scope: { typ: 'bereich', id: 'vps' }, label: 'vps', target: 'ephemeral-infra' }],
+      }));
+      const runner = new RegressionRunner({
+        runPlaywright: jest.fn(async () => ({ exitCode: 0 })),
+        readFile: readFileScaffoldAndPort(),
+        readSuites,
+        // kein vpsRegistry injiziert
+      });
+
+      const { runId } = runner.start('/ws/proj', 'proj', { typ: 'bereich', id: 'vps' });
+      await flush();
+
+      expect(runner.getRun(runId).status).toBe('passed');
+    });
+
+    it('listAllMachines() wirft (Listing-Fehler) -> kein Crash, Lauf-Status bleibt korrekt', async () => {
+      const readSuites = jest.fn(async () => ({
+        suites: [{ scope: { typ: 'bereich', id: 'vps' }, label: 'vps', target: 'ephemeral-infra' }],
+      }));
+      const vpsRegistry = { listAllMachines: jest.fn(async () => { throw new Error('API kaputt'); }), delete: jest.fn() };
+      const runner = new RegressionRunner({
+        runPlaywright: jest.fn(async () => ({ exitCode: 0 })),
+        readFile: readFileScaffoldAndPort(),
+        readSuites,
+        vpsRegistry,
+      });
+
+      const { runId } = runner.start('/ws/proj', 'proj', { typ: 'bereich', id: 'vps' });
+      await flush();
+
+      expect(runner.getRun(runId).status).toBe('passed');
+      expect(vpsRegistry.delete).not.toHaveBeenCalled();
+    });
+
+    it('delete() wirft für eine Maschine -> Sweep macht best-effort mit der nächsten weiter, kein Crash', async () => {
+      const readSuites = jest.fn(async () => ({
+        suites: [{ scope: { typ: 'bereich', id: 'vps' }, label: 'vps', target: 'ephemeral-infra' }],
+      }));
+      const del = jest.fn(async (provider, serverId) => {
+        if (serverId === '1') throw new Error('delete kaputt');
+        return { result: 'ok' };
+      });
+      const vpsRegistry = {
+        listAllMachines: jest.fn(async () => ({
+          machines: [
+            { provider: 'hetzner', serverId: '1', name: 'rtest-a' },
+            { provider: 'hetzner', serverId: '2', name: 'rtest-b' },
+          ],
+        })),
+        delete: del,
+      };
+      const runner = new RegressionRunner({
+        runPlaywright: jest.fn(async () => ({ exitCode: 0 })),
+        readFile: readFileScaffoldAndPort(),
+        readSuites,
+        vpsRegistry,
+      });
+
+      const { runId } = runner.start('/ws/proj', 'proj', { typ: 'bereich', id: 'vps' });
+      await flush();
+
+      expect(runner.getRun(runId).status).toBe('passed');
+      expect(del).toHaveBeenCalledTimes(2); // beide versucht, trotz Fehler bei der ersten
+    });
+
+    it('getRun() zeigt target:"ephemeral-infra" bei einem terminalen Zustand (GET-Vertrag)', async () => {
+      const readSuites = jest.fn(async () => ({
+        suites: [{ scope: { typ: 'bereich', id: 'vps' }, label: 'vps', target: 'ephemeral-infra' }],
+      }));
+      const record = jest.fn(async (i) => i);
+      const runner = new RegressionRunner({
+        runPlaywright: jest.fn(async () => ({ exitCode: 0 })),
+        readFile: readFileScaffoldAndPort(),
+        readSuites,
+        resultStore: { record },
+      });
+
+      const { runId } = runner.start('/ws/proj', 'proj', { typ: 'bereich', id: 'vps' });
+      await flush();
+
+      expect(runner.getRun(runId)).toMatchObject({ status: 'passed', target: 'ephemeral-infra' });
+      // AC9: der resultStore-Datensatz selbst trägt (S-327-Bestandsverhalten)
+      // keinen `target`-Key — nur die flüchtige GET-Sicht tut das.
+      expect(record.mock.calls[0][0].status).toBe('passed');
+      expect(record.mock.calls[0][0].target).toBeUndefined();
+    });
+
+    // ── Review-Fix Iteration 2: Sweep MUSS VOR der Lock-Freigabe laufen ──────
+    describe('Reihenfolge: Sicherheitsnetz-Sweep VOR Lock-Freigabe (kein Race mit einem Folgelauf)', () => {
+      it('Erfolgspfad: Lock bleibt gehalten, solange der Sweep (listAllMachines) noch aussteht — erst danach frei', async () => {
+        const readSuites = jest.fn(async () => ({
+          suites: [{ scope: { typ: 'bereich', id: 'vps' }, label: 'vps', target: 'ephemeral-infra' }],
+        }));
+        let resolveList;
+        const vpsRegistry = {
+          listAllMachines: jest.fn(() => new Promise((r) => { resolveList = r; })),
+          delete: jest.fn(async () => ({ result: 'ok' })),
+        };
+        const runner = new RegressionRunner({
+          runPlaywright: jest.fn(async () => ({ exitCode: 0 })),
+          readFile: readFileScaffoldAndPort(),
+          readSuites,
+          vpsRegistry,
+        });
+
+        const { runId } = runner.start('/ws/proj', 'proj', { typ: 'bereich', id: 'vps' });
+        // Genug Ticks, damit Playwright/CTRF-Auswertung durchgelaufen sind und
+        // der Sweep gestartet (listAllMachines aufgerufen), aber NICHT
+        // aufgelöst wurde.
+        await flush();
+        await flush();
+
+        expect(vpsRegistry.listAllMachines).toHaveBeenCalledTimes(1);
+        // Sweep hängt noch -> #finish wurde NOCH NICHT aufgerufen -> Lock hält,
+        // Status noch "running".
+        expect(runner.isRunning('/ws/proj')).toBe(true);
+        expect(runner.getRun(runId).status).toBe('running');
+
+        resolveList({ machines: [] });
+        await flush();
+        await flush();
+
+        expect(runner.isRunning('/ws/proj')).toBe(false);
+        expect(runner.getRun(runId).status).toBe('passed');
+      });
+
+      it('Fehlerpfad (spawnError): Lock bleibt gehalten, solange der Sweep aussteht — erst danach frei', async () => {
+        const readSuites = jest.fn(async () => ({
+          suites: [{ scope: { typ: 'bereich', id: 'vps' }, label: 'vps', target: 'ephemeral-infra' }],
+        }));
+        let resolveList;
+        const vpsRegistry = {
+          listAllMachines: jest.fn(() => new Promise((r) => { resolveList = r; })),
+          delete: jest.fn(async () => ({ result: 'ok' })),
+        };
+        const readFile = jest.fn(async (p) => {
+          if (String(p).endsWith('.claude/profile.md')) throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+          if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
+          throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+        });
+        const runner = new RegressionRunner({
+          runPlaywright: jest.fn(async () => ({ exitCode: -1, spawnError: true })),
+          readFile,
+          readSuites,
+          vpsRegistry,
+        });
+
+        const { runId } = runner.start('/ws/proj', 'proj', { typ: 'bereich', id: 'vps' });
+        await flush();
+        await flush();
+
+        expect(vpsRegistry.listAllMachines).toHaveBeenCalledTimes(1);
+        expect(runner.isRunning('/ws/proj')).toBe(true);
+        expect(runner.getRun(runId).status).toBe('running');
+
+        resolveList({ machines: [] });
+        await flush();
+        await flush();
+
+        expect(runner.isRunning('/ws/proj')).toBe(false);
+        expect(runner.getRun(runId).status).toBe('error');
+      });
+
+      it('Fehlerpfad (interner Fehler, runPlaywright wirft): Lock bleibt gehalten, solange der Sweep aussteht', async () => {
+        const readSuites = jest.fn(async () => ({
+          suites: [{ scope: { typ: 'bereich', id: 'vps' }, label: 'vps', target: 'ephemeral-infra' }],
+        }));
+        let resolveList;
+        const vpsRegistry = {
+          listAllMachines: jest.fn(() => new Promise((r) => { resolveList = r; })),
+          delete: jest.fn(async () => ({ result: 'ok' })),
+        };
+        const readFile = jest.fn(async (p) => {
+          if (String(p).endsWith('.claude/profile.md')) throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+          if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
+          throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+        });
+        const runner = new RegressionRunner({
+          runPlaywright: jest.fn(async () => { throw new Error('boom'); }),
+          readFile,
+          readSuites,
+          vpsRegistry,
+        });
+
+        const { runId } = runner.start('/ws/proj', 'proj', { typ: 'bereich', id: 'vps' });
+        await flush();
+        await flush();
+
+        expect(runner.isRunning('/ws/proj')).toBe(true);
+        expect(runner.getRun(runId).status).toBe('running');
+
+        resolveList({ machines: [] });
+        await flush();
+        await flush();
+
+        expect(runner.isRunning('/ws/proj')).toBe(false);
+        expect(runner.getRun(runId).status).toBe('error');
+      });
+
+      it('ein sofort gestarteter Folgelauf desselben Projekts wird abgelehnt (locked), solange der Sweep der Vorrunde noch läuft', async () => {
+        const readSuites = jest.fn(async () => ({
+          suites: [{ scope: { typ: 'bereich', id: 'vps' }, label: 'vps', target: 'ephemeral-infra' }],
+        }));
+        let resolveList;
+        const vpsRegistry = {
+          listAllMachines: jest.fn(() => new Promise((r) => { resolveList = r; })),
+          delete: jest.fn(async () => ({ result: 'ok' })),
+        };
+        const runner = new RegressionRunner({
+          runPlaywright: jest.fn(async () => ({ exitCode: 0 })),
+          readFile: readFileScaffoldAndPort(),
+          readSuites,
+          vpsRegistry,
+        });
+
+        runner.start('/ws/proj', 'proj', { typ: 'bereich', id: 'vps' });
+        await flush();
+        await flush();
+
+        // Sweep der ersten Runde hängt noch -> ein zweiter start() fürs
+        // selbe Projekt MUSS als "locked" abgelehnt werden (kein Race, in dem
+        // der Folgelauf eine frische rtest-*-Maschine anlegt, die der noch
+        // laufende Sweep dann versehentlich mitlöscht).
+        const res2 = runner.start('/ws/proj', 'proj', { typ: 'bereich', id: 'vps' });
+        expect(res2).toEqual({ ok: false, reason: 'locked' });
+
+        resolveList({ machines: [] });
+        await flush();
+        await flush();
+
+        expect(runner.isRunning('/ws/proj')).toBe(false);
+      });
     });
   });
 
