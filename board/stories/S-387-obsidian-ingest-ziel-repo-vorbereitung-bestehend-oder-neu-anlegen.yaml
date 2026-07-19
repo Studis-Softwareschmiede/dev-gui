@@ -3,7 +3,7 @@ parent: F-050
 title: 'Obsidian-Ingest: Ziel-Repo-Vorbereitung — bestehendes Projekt verwenden ODER
   neuen Namen (Slug-Form-validiert) via HeadlessNewProjectRunner anlegen, strikt vor
   dem Ingest-Start (start-Kontrakt unverändert)'
-status: To Do
+status: In Progress
 priority: P1
 spec: docs/specs/obsidian-question-catalog.md
 implements:
@@ -26,9 +26,10 @@ estimate_note: 'Heuristik score 8 (3 AC + 4 Komponenten ensure-target-Orchestrie
   Priorität, gleiche Spec, spiegelt den S-383/S-384-Schnitt). Anlage strikt VOR start;
   start-Endpunkt-Kontrakt (AC8/AC9/AC12) bleibt unveraendert. Owner-Korrektur: Ziel
   aus Nutzer-Eingabe (bestehend/neu) statt stillem Slug-Match.'
-branch: null
+branch: feat/S-387-ziel-repo-vorbereitung
 pr: null
 blocked_reason: null
 created_at: '2026-07-19T00:00:00Z'
-updated_at: '2026-07-19T00:00:00Z'
+updated_at: '2026-07-19T20:19:26Z'
 area: obsidian
+done_at: null
