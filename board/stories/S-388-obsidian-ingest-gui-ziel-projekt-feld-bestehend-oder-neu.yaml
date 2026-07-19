@@ -1,0 +1,30 @@
+id: S-388
+parent: F-050
+title: 'Obsidian-Ingest-GUI: Ziel-Projekt-Feld erweitern — bestehendes Projekt wählen
+  ODER neuen Namen eingeben (Slug-Form-validiert, Ordnername als Vorschlag) + Anlage-/Existenz-Status'
+status: To Do
+priority: P1
+spec: docs/specs/obsidian-question-catalog.md
+implements:
+- AC10
+- AC15
+depends:
+- S-387
+labels:
+- ui
+size_est: M
+dispo_est: '4.0'
+tok_est: '1659043'
+confidence: medium
+estimate_note: 'Heuristik score 6 (2 AC + 3 Komponenten ObsidianImportSection-Kombifeld-Auswahl+Freitext/Slug-Vorschlag+Inline-Form-Check/Anlage-Statusanzeige
+  + ui-Label) -> M. S/M-Baseline-Lookup js|balanced|M: ep=4.0, tok_total=1659043 (exakter
+  Schnitt) -> confidence medium. Frontend-Teil des vertikalen Slice (AC2b-Split: kombiniert
+  mit Backend-Teil S-387 XL; gekoppelt, depends S-387, gleiche Prioritaet, gleiche
+  Spec). Owner-Korrektur: Ziel-Projekt-Feld bleibt, erweitert um Neuanlage-Eingabe
+  (kein Dropdown-Rueckbau).'
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-07-19T00:00:00Z'
+updated_at: '2026-07-19T00:00:00Z'
+area: obsidian
