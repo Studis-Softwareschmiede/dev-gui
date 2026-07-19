@@ -67,10 +67,19 @@ function makeSpawn(plan = {}) {
     const cmd = args[0];
     if (cmd === 'config') return { stdout: '', stderr: '', exitCode: 0 };
     if (cmd === 'login') {
+      // S-386: `login --check` prüft nur den Status. Default: NICHT eingeloggt
+      // (Erst-Login nötig) → `login --apikey` folgt. plan.alreadyLoggedIn = true
+      // simuliert ein bereits registriertes Gerät (kein Neu-Login → keine Mail).
+      if (args[1] === '--check') {
+        return plan.alreadyLoggedIn
+          ? { stdout: 'You are logged in!', stderr: '', exitCode: 0 }
+          : { stdout: '', stderr: 'You are not logged in.', exitCode: 1 };
+      }
       if (plan.loginFail) return { stdout: '', stderr: 'Username or API key is incorrect', exitCode: 1 };
       if (plan.network) return { stdout: '', stderr: 'getaddrinfo ENOTFOUND', exitCode: 1 };
       return { stdout: 'You are logged in!', stderr: '', exitCode: 0 };
     }
+    if (cmd === 'lock') return { stdout: '', stderr: '', exitCode: 0 };
     if (cmd === 'unlock') {
       if (plan.unlockFail) return { stdout: '', stderr: 'Invalid master password', exitCode: 1 };
       return { stdout: SESSION_TOKEN + '\n', stderr: '', exitCode: 0 };
@@ -115,15 +124,24 @@ function assertNoSecretInArgv(calls) {
   }
 }
 
+let bwAppDir;
+let prevBwAppEnv;
 beforeEach(async () => {
   prevEnv = process.env.CRED_STORE_DIR;
   storeDir = join(tmpdir(), 'bw-deploy-login-test-' + randomBytes(6).toString('hex'));
   await mkdir(storeDir, { recursive: true });
   process.env.CRED_STORE_DIR = storeDir;
+  // S-386: persistentes bw-Verzeichnis auf einen echten Test-Pfad zeigen
+  // (der Service legt es via mkdir/chmod real an — kein bw wird gemockt-umgangen).
+  prevBwAppEnv = process.env.DEVGUI_BW_DEPLOY_APPDATA_DIR;
+  bwAppDir = join(tmpdir(), 'bw-deploy-appdata-test-' + randomBytes(6).toString('hex'));
+  process.env.DEVGUI_BW_DEPLOY_APPDATA_DIR = bwAppDir;
 });
 afterEach(async () => {
   if (prevEnv === undefined) delete process.env.CRED_STORE_DIR; else process.env.CRED_STORE_DIR = prevEnv;
   await rm(storeDir, { recursive: true, force: true }).catch(() => {});
+  if (prevBwAppEnv === undefined) delete process.env.DEVGUI_BW_DEPLOY_APPDATA_DIR; else process.env.DEVGUI_BW_DEPLOY_APPDATA_DIR = prevBwAppEnv;
+  await rm(bwAppDir, { recursive: true, force: true }).catch(() => {});
 });
 
 function auditSpy() {
@@ -143,18 +161,19 @@ describe('BitwardenDeployLoginService — Login + Secrets-Hygiene (AC8)', () => 
 
     // AC8: harte Argv-Hygiene
     assertNoSecretInArgv(calls);
-    // Secrets kamen via Env
-    const login = calls.find((c) => c.args[0] === 'login');
+    // Secrets kamen via Env (der eigentliche API-Key-Login ist `login --apikey`)
+    const login = calls.find((c) => c.args[0] === 'login' && c.args[1] === '--apikey');
     expect(login.env.BW_CLIENTID).toBe(SECRETS.clientId);
     expect(login.env.BW_CLIENTSECRET).toBe(SECRETS.clientSecret);
     const unlock = calls.find((c) => c.args[0] === 'unlock');
     expect(unlock.env.BW_PASSWORD).toBe(SECRETS.masterPassword);
     // Audit-First (ohne Werte)
     expect(audit.calls).toEqual([{ identity: 'a@b.ch', command: 'deploy-access:validate' }]);
-    // Isolierter APPDATA-Dir gesetzt
-    expect(login.env.BITWARDENCLI_APPDATA_DIR).toContain('bw-deploy-');
-    // Aufräumen: logout wurde gerufen
-    expect(calls.some((c) => c.args[0] === 'logout')).toBe(true);
+    // S-386: persistentes (nicht random-temporäres) APPDATA-Dir gesetzt
+    expect(login.env.BITWARDENCLI_APPDATA_DIR).toBe(process.env.DEVGUI_BW_DEPLOY_APPDATA_DIR);
+    // S-386: Aufräumen via `bw lock` (nicht `logout`) — Gerät bleibt registriert
+    expect(calls.some((c) => c.args[0] === 'lock')).toBe(true);
+    expect(calls.some((c) => c.args[0] === 'logout')).toBe(false);
   });
 
   it('validateAccess: unvollständiger Zugang → access-incomplete (kein bw-Aufruf)', async () => {
@@ -224,10 +243,56 @@ describe('BitwardenDeployLoginService — Item-Read (AC9/AC11)', () => {
 
     expect(p1).toBe('passphrase-for-deploy-gpg-a');
     expect(p2).toBe('passphrase-for-deploy-gpg-b');
-    // nur EIN login/unlock für beide Reads
-    expect(calls.filter((c) => c.args[0] === 'login').length).toBe(1);
+    // nur EIN API-Key-Login/unlock für beide Reads
+    expect(calls.filter((c) => c.args[0] === 'login' && c.args[1] === '--apikey').length).toBe(1);
     expect(calls.filter((c) => c.args[0] === 'unlock').length).toBe(1);
     expect(calls.filter((c) => c.args[0] === 'get').length).toBe(2);
+  });
+
+  // S-386: der Kern-Fix — bei bereits registriertem Gerät wird NICHT neu
+  // eingeloggt (kein „New Device", keine Mail), nur entsperrt.
+  it('bereits eingeloggtes Gerät → KEIN neuer API-Key-Login, nur unlock (S-386)', async () => {
+    const store = await readyStore();
+    const { spawn, calls } = makeSpawn({ alreadyLoggedIn: true });
+    const svc = new BitwardenDeployLoginService({ accessStore: store, auditStore: auditSpy(), _spawnBw: spawn });
+
+    const session = await svc.openSession({});
+    await session.readItemPassword('deploy-gpg-a');
+    await session.close();
+
+    // login --check lief, aber KEIN login --apikey (das ist die vermiedene Mail)
+    expect(calls.some((c) => c.args[0] === 'login' && c.args[1] === '--check')).toBe(true);
+    expect(calls.filter((c) => c.args[0] === 'login' && c.args[1] === '--apikey').length).toBe(0);
+    // unlock lief trotzdem (frische Session-Keys), close → lock (nicht logout)
+    expect(calls.filter((c) => c.args[0] === 'unlock').length).toBe(1);
+    expect(calls.some((c) => c.args[0] === 'lock')).toBe(true);
+    expect(calls.some((c) => c.args[0] === 'logout')).toBe(false);
+  });
+
+  // S-386: geteilter persistenter State → Sessions dürfen sich nicht überlappen.
+  it('serialisiert überlappende openSession-Aufrufe (kein paralleler bw-State) (S-386)', async () => {
+    const store = await readyStore();
+    let active = 0;
+    let maxActive = 0;
+    const spawn = async (args) => {
+      if (args[0] === 'unlock') {
+        active += 1; maxActive = Math.max(maxActive, active);
+        await new Promise((r) => setTimeout(r, 5));
+        active -= 1;
+        return { stdout: SESSION_TOKEN + '\n', stderr: '', exitCode: 0 };
+      }
+      if (args[0] === 'login') return { stdout: '', stderr: 'not logged in', exitCode: args[1] === '--check' ? 1 : 0 };
+      return { stdout: '', stderr: '', exitCode: 0 };
+    };
+    const svc = new BitwardenDeployLoginService({ accessStore: store, auditStore: auditSpy(), _spawnBw: spawn });
+
+    await Promise.all([0, 1, 2].map(async () => {
+      const s = await svc.openSession({});
+      await s.readItemPassword('deploy-gpg-a');
+      await s.close();
+    }));
+
+    expect(maxActive).toBe(1); // strikt serialisiert
   });
 });
 

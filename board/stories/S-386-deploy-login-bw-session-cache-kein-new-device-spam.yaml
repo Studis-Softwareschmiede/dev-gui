@@ -15,17 +15,20 @@ size_est: M
 dispo_est: null
 dispo_act: null
 dispo_forecast: null
-estimate_note: 'Symptom lokalisiert (BitwardenDeployLoginService führt `bw login` je
-  Deploy-/Provisioning-Zyklus aus; kein persistenter Geräte-/Session-State -> jeder
-  Login zählt als neues Gerät). Genauer periodischer Trigger (Aufrufer im ~15-min-Takt)
-  noch zu bestätigen, BEVOR der Session-Cache gesetzt wird — kein Blind-Fix.'
-confidence: low
+estimate_note: 'Root Cause: BitwardenDeployLoginService.#openSession legte pro Aufruf
+  ein frisches temp-BITWARDENCLI_APPDATA_DIR an + `bw login --apikey` + `bw logout` ->
+  leeres Verzeichnis => jeder Login = neues Gerät => Mailflut. Fix (Variante 2):
+  persistentes Verzeichnis (DEVGUI_BW_DEPLOY_APPDATA_DIR, chmod 700), `bw login --check`
+  vor Login (Folge-Sessions nur `bw unlock`), `bw lock` statt `logout` (Vault
+  verschlüsselt at-rest, Gerät bleibt), Instanz-Mutex serialisiert den geteilten State.
+  Code+Tests im Branch, 100 Suites-Tests grün, Lint sauber. Live-Beweis = Mailflut endet
+  nach Deploy (genau EIN Erst-Login pro Container).'
+confidence: high
 tok_est: null
-branch: null
+branch: fix/S-386-bw-deploy-session
 pr: null
-blocked_reason: 'Periodischer Aufrufer des Deploy-Logins (~15-min-Takt) noch nicht
-  eindeutig lokalisiert — Trigger bestätigen, dann Session/Device-State persistent halten.'
+blocked_reason: null
 created_at: '2026-07-19T18:10:40Z'
-updated_at: '2026-07-19T18:10:40Z'
+updated_at: '2026-07-19T20:20:00Z'
 done_at: null
 tok: null
