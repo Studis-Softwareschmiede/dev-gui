@@ -34,6 +34,19 @@
  *                          `path` zeigt auf eine Datei statt ein Verzeichnis
  *     → 404 { error }   — angefragter `path` (mehr) nicht erreichbar (Race, AC4)
  *       Read-only; hinter Access-Mauer, kein zusätzlicher Rollencheck (AC5).
+ *   GET    /api/settings/obsidian-projekte-subdir  (obsidian-vault-config v3, AC8/AC10/AC14)
+ *     → 200 { effective: string, source: 'persisted'|'env'|'default', persisted: string|null }
+ *       `effective` = wirksames Segment nach der Rangfolge (persistiert → Env → Default, AC10).
+ *       Read-only; hinter Access-Mauer, kein zusätzlicher Rollencheck (AC14).
+ *   PUT    /api/settings/obsidian-projekte-subdir  (AC9/AC11/AC12/AC14)
+ *     Body { subdir: string }  (vault-relatives Segment, Mehrebenen erlaubt)
+ *     → 200 { effective, source: 'persisted', persisted }  — Erfolg (AC9)
+ *     → 409 { error }   — kein Vault konfiguriert (AC11a); kein Effekt
+ *     → 422 { error }   — leer / `<vault>/<segment>` nicht existent/kein Verzeichnis/nicht
+ *       lesbar (AC11b) bzw. Traversal-/Symlink-Flucht (AC12); persistierter Wert unverändert
+ *     → 403 { error }   — keine Berechtigung (AC14)
+ *   DELETE /api/settings/obsidian-projekte-subdir  (AC14)
+ *     → 200 { effective, source: 'env'|'default', persisted: null }  — zurückgesetzt (AC10 greift wieder Env/Default)
  *
  * Muster: bewusst analog zu `workspacePathRouter.js` (workspace-path-config), aber:
  *   - Response-Shape `{ vaultPath, configured, mountRoot? }` (kein Env-Default-Effektivwert).
@@ -58,6 +71,8 @@ import {
   listObsidianVaultProjects,
   deriveMountStatus,
   browseObsidianVaultFolder,
+  resolveEffectiveProjekteSubdir,
+  validateObsidianProjekteSubdirSegment,
 } from './obsidianVaultPath.js';
 import { toExternalBackup } from './CredentialStore.js';
 
@@ -104,13 +119,38 @@ function buildStateBody(vaultPath) {
 }
 
 /**
+ * Liest den persistierten Projekt-Unterordner + berechnet das WIRKSAME Segment
+ * nach der v3-Rangfolge (AC10: persistiert → Env → Default). Fehlt die Methode
+ * am injizierten `credentialStore` (ältere Test-Doubles) oder schlägt der Read
+ * fehl, wird defensiv wie „nicht persistiert" behandelt (Env/Default greift) —
+ * kein Crash.
+ *
+ * @param {import('./CredentialStore.js').CredentialStore} credentialStore
+ * @param {Function} readPersisted  `credentialStore.readObsidianProjekteSubdir`-Aufruf (Tests).
+ * @returns {Promise<{ effective: string, source: 'persisted'|'env'|'default', persisted: string|null }>}
+ */
+async function resolveEffectiveSubdir(credentialStore, readPersisted) {
+  let persisted;
+  try {
+    if (typeof readPersisted === 'function') {
+      persisted = await readPersisted();
+    }
+  } catch {
+    persisted = null;
+  }
+  const { effective, source } = resolveEffectiveProjekteSubdir({ persisted });
+  return { effective, source, persisted: persisted && persisted.trim() ? persisted.trim() : null };
+}
+
+/**
  * @param {import('./CredentialStore.js').CredentialStore} credentialStore
  * @param {import('./AuditStore.js').AuditStore} auditStore
  * @param {object} [deps]  Injectable dependencies für Tests.
- * @param {Function} [deps.validatePath]      Override für validateObsidianVaultPath (Tests).
- * @param {Function} [deps.listProjects]      Override für listObsidianVaultProjects (Tests).
- * @param {Function} [deps.deriveMountStatus] Override für deriveMountStatus (Tests, S-378).
- * @param {Function} [deps.browseFolder]      Override für browseObsidianVaultFolder (Tests, S-378).
+ * @param {Function} [deps.validatePath]         Override für validateObsidianVaultPath (Tests).
+ * @param {Function} [deps.listProjects]         Override für listObsidianVaultProjects (Tests).
+ * @param {Function} [deps.deriveMountStatus]    Override für deriveMountStatus (Tests, S-378).
+ * @param {Function} [deps.browseFolder]         Override für browseObsidianVaultFolder (Tests, S-378).
+ * @param {Function} [deps.validateSubdirSegment] Override für validateObsidianProjekteSubdirSegment (Tests, v3).
  * @returns {import('express').Router}
  */
 export function obsidianVaultPathRouter(credentialStore, auditStore, deps = {}) {
@@ -118,6 +158,7 @@ export function obsidianVaultPathRouter(credentialStore, auditStore, deps = {}) 
   const _listProjects = deps.listProjects ?? listObsidianVaultProjects;
   const _deriveMountStatus = deps.deriveMountStatus ?? deriveMountStatus;
   const _browseFolder = deps.browseFolder ?? browseObsidianVaultFolder;
+  const _validateSubdirSegment = deps.validateSubdirSegment ?? validateObsidianProjekteSubdirSegment;
   const router = Router();
 
   /**
@@ -183,8 +224,14 @@ export function obsidianVaultPathRouter(credentialStore, auditStore, deps = {}) 
       return res.status(409).json({ configured: false });
     }
 
+    // AC10: Rangfolge (persistiert → Env → Default) auch an dieser Verbrauchsstelle.
+    const { effective: projekteSubdir } = await resolveEffectiveSubdir(
+      credentialStore,
+      credentialStore.readObsidianProjekteSubdir?.bind(credentialStore),
+    );
+
     try {
-      const projects = await _listProjects(vaultPath.trim());
+      const projects = await _listProjects(vaultPath.trim(), { projekteSubdir });
       return res.json({ projects });
     } catch (err) {
       if (err instanceof ObsidianVaultPathError) {
@@ -234,10 +281,17 @@ export function obsidianVaultPathRouter(credentialStore, auditStore, deps = {}) 
       return res.status(500).json({ error: 'Audit-Write fehlgeschlagen — Aktion abgebrochen' });
     }
 
+    // AC10: Rangfolge (persistiert → Env → Default) auch an der „Vault enthält
+    // Unterordner"-Prüfung (AC2c).
+    const { effective: projekteSubdir } = await resolveEffectiveSubdir(
+      credentialStore,
+      credentialStore.readObsidianProjekteSubdir?.bind(credentialStore),
+    );
+
     // AC2/AC3: Pfad validieren (Existenz, Verzeichnis, lesbar, „Projekte", Containment)
     let resolvedPath;
     try {
-      const validated = await _validatePath(inputPath.trim());
+      const validated = await _validatePath(inputPath.trim(), { projekteSubdir });
       resolvedPath = validated.resolvedPath;
     } catch (err) {
       const errorClass = err instanceof ObsidianVaultPathError ? err.errorClass : 'unexpected';
@@ -352,6 +406,201 @@ export function obsidianVaultPathRouter(credentialStore, auditStore, deps = {}) 
     return res.json({
       vaultPath: null,
       configured: false,
+      ...(deleteResult?.backup ? { backup: toExternalBackup(deleteResult.backup) } : {}),
+    });
+  });
+
+  /**
+   * GET /api/settings/obsidian-projekte-subdir — wirksamer Projekt-Unterordner + Quelle
+   * (obsidian-vault-config v3, AC8/AC10/AC14). Read-only, hinter Access-Mauer, kein
+   * zusätzlicher Rollencheck (AC14).
+   */
+  router.get('/api/settings/obsidian-projekte-subdir', async (_req, res) => {
+    try {
+      const { effective, source, persisted } = await resolveEffectiveSubdir(
+        credentialStore,
+        credentialStore.readObsidianProjekteSubdir?.bind(credentialStore),
+      );
+      return res.json({ effective, source, persisted });
+    } catch (err) {
+      console.error('[obsidianVaultPathRouter] GET obsidian-projekte-subdir failed:', err.message);
+      return res.status(500).json({ error: 'Obsidian-Projekt-Unterordner-Konfiguration nicht erreichbar' });
+    }
+  });
+
+  /**
+   * PUT /api/settings/obsidian-projekte-subdir — Projekt-Unterordner setzen/ändern
+   * (obsidian-vault-config v3, AC9/AC11/AC12/AC14). Body: { subdir: string }.
+   */
+  router.put('/api/settings/obsidian-projekte-subdir', async (req, res) => {
+    const identity = req.identity ?? null;
+
+    // AC14: Mutations-Autorisierung
+    const authz = checkMutationAuthz(identity);
+    if (!authz.allowed) {
+      return res.status(403).json({ error: 'Keine Berechtigung für diese Aktion' });
+    }
+
+    const { subdir: inputSubdir } = req.body ?? {};
+
+    // Basis-Validierung (leer/kein String) vor Audit
+    if (typeof inputSubdir !== 'string' || inputSubdir.trim() === '') {
+      return res.status(422).json({ error: 'Pflichtfeld "subdir" fehlt oder ist leer' });
+    }
+    const trimmedSubdir = inputSubdir.trim();
+
+    // AC11a: Ein Vault muss konfiguriert sein — sonst definierter 409, kein Effekt.
+    let vaultPath;
+    try {
+      vaultPath = await credentialStore.readObsidianVaultPath();
+    } catch (err) {
+      console.error(
+        '[obsidianVaultPathRouter] PUT obsidian-projekte-subdir — Vault-Konfiguration nicht lesbar:',
+        err.message,
+      );
+      return res.status(500).json({ error: 'Obsidian-Vault-Konfiguration nicht erreichbar' });
+    }
+    if (!vaultPath || !vaultPath.trim()) {
+      return res.status(409).json({ error: 'Obsidian-Vault ist nicht konfiguriert — zuerst Vault-Pfad setzen' });
+    }
+
+    // Alten Wert lesen (für Audit alt→neu). Segment ist kein Secret — Klartext erlaubt.
+    let oldSubdir;
+    try {
+      oldSubdir = (await credentialStore.readObsidianProjekteSubdir?.()) ?? null;
+    } catch {
+      oldSubdir = null;
+    }
+
+    // AC14: Audit-First — Intent-Eintrag VOR Mutation; Audit-Fehler → Mutation unterbleibt.
+    const intentAction = `obsidian-projekte-subdir:set:from:${oldSubdir ?? 'unset'}:to:${trimmedSubdir}`;
+    try {
+      auditStore.record({ identity: identity?.email ?? null, command: intentAction });
+    } catch (auditErr) {
+      console.error('[obsidianVaultPathRouter] Audit-Write (Intent) fehlgeschlagen:', auditErr.message);
+      return res.status(500).json({ error: 'Audit-Write fehlgeschlagen — Aktion abgebrochen' });
+    }
+
+    // AC11b/AC12: Segment gegen den konfigurierten Vault validieren (Existenz, Verzeichnis,
+    // lesbar, Confinement — identische Härte/Technik wie AC3).
+    try {
+      await _validateSubdirSegment(vaultPath.trim(), trimmedSubdir);
+    } catch (err) {
+      const errorClass = err instanceof ObsidianVaultPathError ? err.errorClass : 'unexpected';
+      try {
+        auditStore.record({
+          identity: identity?.email ?? null,
+          command: `obsidian-projekte-subdir:set:failed:${errorClass}`,
+        });
+      } catch {
+        // Non-blocking Outcome-Audit
+      }
+
+      if (err instanceof ObsidianVaultPathError) {
+        // AC11: klare, feldzugeordnete Meldung; bisher persistierter Wert bleibt unverändert.
+        return res.status(422).json({ error: err.message });
+      }
+      console.error('[obsidianVaultPathRouter] PUT obsidian-projekte-subdir validate unexpected error:', err.message);
+      return res.status(500).json({ error: 'Projekt-Unterordner-Validierung fehlgeschlagen' });
+    }
+
+    // AC9: Persistieren — als vault-relatives Segment (kein absoluter Pfad, A4).
+    let writeResult;
+    try {
+      writeResult = await credentialStore.writeObsidianProjekteSubdir(trimmedSubdir);
+    } catch (err) {
+      try {
+        auditStore.record({
+          identity: identity?.email ?? null,
+          command: 'obsidian-projekte-subdir:set:failed:store-error',
+        });
+      } catch {
+        // Non-blocking
+      }
+      console.error('[obsidianVaultPathRouter] PUT writeObsidianProjekteSubdir failed:', err.message);
+      return res.status(500).json({ error: 'Obsidian-Projekt-Unterordner konnte nicht gespeichert werden' });
+    }
+
+    // AC14: Outcome-Audit (Erfolg) — spiegelt alt→neu für Audit-Lesbarkeit
+    try {
+      auditStore.record({
+        identity: identity?.email ?? null,
+        command: `obsidian-projekte-subdir:set:success:from:${oldSubdir ?? 'unset'}:to:${trimmedSubdir}`,
+      });
+    } catch (auditOutcomeErr) {
+      console.error('[obsidianVaultPathRouter] Outcome-Audit (Erfolg) fehlgeschlagen:', auditOutcomeErr.message);
+    }
+
+    return res.json({
+      effective: trimmedSubdir,
+      source: 'persisted',
+      persisted: trimmedSubdir,
+      ...(writeResult?.backup ? { backup: toExternalBackup(writeResult.backup) } : {}),
+    });
+  });
+
+  /**
+   * DELETE /api/settings/obsidian-projekte-subdir — persistierten Wert zurücksetzen
+   * (obsidian-vault-config v3, AC8/AC14) — wieder Env bzw. Default wirksam (AC10).
+   */
+  router.delete('/api/settings/obsidian-projekte-subdir', async (req, res) => {
+    const identity = req.identity ?? null;
+
+    // AC14: Mutations-Autorisierung
+    const authz = checkMutationAuthz(identity);
+    if (!authz.allowed) {
+      return res.status(403).json({ error: 'Keine Berechtigung für diese Aktion' });
+    }
+
+    // Alten Wert lesen (für Audit alt→neu)
+    let oldSubdir;
+    try {
+      oldSubdir = (await credentialStore.readObsidianProjekteSubdir?.()) ?? null;
+    } catch {
+      oldSubdir = null;
+    }
+
+    // AC14: Audit-First — Intent-Eintrag VOR Mutation
+    const intentAction = `obsidian-projekte-subdir:delete:from:${oldSubdir ?? 'unset'}:to:unset`;
+    try {
+      auditStore.record({ identity: identity?.email ?? null, command: intentAction });
+    } catch (auditErr) {
+      console.error('[obsidianVaultPathRouter] Audit-Write (Intent) fehlgeschlagen:', auditErr.message);
+      return res.status(500).json({ error: 'Audit-Write fehlgeschlagen — Aktion abgebrochen' });
+    }
+
+    let deleteResult;
+    try {
+      deleteResult = await credentialStore.deleteObsidianProjekteSubdir();
+    } catch (err) {
+      try {
+        auditStore.record({
+          identity: identity?.email ?? null,
+          command: 'obsidian-projekte-subdir:delete:failed:store-error',
+        });
+      } catch {
+        // Non-blocking
+      }
+      console.error('[obsidianVaultPathRouter] DELETE deleteObsidianProjekteSubdir failed:', err.message);
+      return res.status(500).json({ error: 'Obsidian-Projekt-Unterordner konnte nicht zurückgesetzt werden' });
+    }
+
+    // AC14: Outcome-Audit (Erfolg)
+    try {
+      auditStore.record({
+        identity: identity?.email ?? null,
+        command: 'obsidian-projekte-subdir:delete:success',
+      });
+    } catch (auditOutcomeErr) {
+      console.error('[obsidianVaultPathRouter] Outcome-Audit (Erfolg) fehlgeschlagen:', auditOutcomeErr.message);
+    }
+
+    // AC10: nach dem Löschen wieder Env/Default wirksam.
+    const { effective, source } = resolveEffectiveProjekteSubdir({ persisted: null });
+    return res.json({
+      effective,
+      source,
+      persisted: null,
       ...(deleteResult?.backup ? { backup: toExternalBackup(deleteResult.backup) } : {}),
     });
   });

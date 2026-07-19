@@ -53,6 +53,23 @@
  *   AC5 — `GET .../obsidian-vault/browse` read-only, hinter AccessGuard, kein zusätzlicher
  *         Rollencheck (200 trotz `CRED_ADMIN_EMAILS`-Restriktion), 403 ohne AccessGuard-Token.
  *
+ * Covers (obsidian-vault-config v3, S-380 — Projekt-Unterordner GUI-persistiert):
+ *   AC9  — CredentialStore.read/write/deleteObsidianProjekteSubdir: Persistenz im meta-Block
+ *         (Klartext, NICHT in entries), überlebt Neustart-Simulation, idempotentes Delete.
+ *   AC10 — `resolveEffectiveProjekteSubdir`: Rangfolge persistiert → Env → Default (Unit);
+ *         dieselbe Rangfolge greift einheitlich an PUT `.../obsidian-vault-path` (AC2c),
+ *         GET `.../obsidian-vault/projects` (AC5) UND GET `.../obsidian-projekte-subdir`
+ *         (HTTP-Ebene) — ein persistierter Wert verdrängt eine gesetzte Env.
+ *   AC11 — PUT `.../obsidian-projekte-subdir`: kein Vault konfiguriert → 409, kein Effekt
+ *         (AC11a); `<vault>/<segment>` existiert nicht/kein Verzeichnis/nicht lesbar → 422,
+ *         alter persistierter Wert unverändert (AC11b, echtes fs).
+ *   AC12 — `validateObsidianProjekteSubdirSegment`: Traversal (`..`)/Symlink-Flucht aus dem
+ *         Vault → `missing-projekte`, NICHT wirksam — sowohl bei Set-Zeit (PUT) als auch an
+ *         den Verbrauchsstellen (echtes fs + injizierte Symlink-Deps).
+ *   AC14 — Audit-Eintrag (alt→neu) bei Set/Delete; Audit-First (Audit-Fehler blockiert
+ *         Mutation); 403 ohne CRED_ADMIN_EMAILS-Berechtigung; GET read-only ohne
+ *         zusätzlichen Rollencheck (HTTP-Ebene).
+ *
  * Strategy:
  *   - CredentialStore.read/write/deleteObsidianVaultPath: Unit-Tests mit echtem CredentialStore
  *     (tmp-Dir, kein Master-Key nötig da meta-only).
@@ -82,6 +99,8 @@ import {
   OBSIDIAN_PROJEKTE_SUBDIR_ENV,
   deriveMountStatus,
   browseObsidianVaultFolder,
+  resolveEffectiveProjekteSubdir,
+  validateObsidianProjekteSubdirSegment,
 } from '../src/obsidianVaultPath.js';
 import { obsidianVaultPathRouter } from '../src/obsidianVaultPathRouter.js';
 import { AuditStore } from '../src/AuditStore.js';
@@ -132,13 +151,18 @@ function makeApp(credentialStore, auditStore, deps = {}) {
 
 // ── Fake CredentialStore ──────────────────────────────────────────────────────
 
-function makeFakeCredStore(initialPath = null) {
+function makeFakeCredStore(initialPath = null, initialSubdir = null) {
   let stored = initialPath;
+  let storedSubdir = initialSubdir;
   return {
     async readObsidianVaultPath() { return stored; },
     async writeObsidianVaultPath(p) { stored = p; return { updatedAt: new Date().toISOString() }; },
     async deleteObsidianVaultPath() { stored = null; return {}; },
+    async readObsidianProjekteSubdir() { return storedSubdir; },
+    async writeObsidianProjekteSubdir(s) { storedSubdir = s; return { updatedAt: new Date().toISOString() }; },
+    async deleteObsidianProjekteSubdir() { storedSubdir = null; return {}; },
     _get() { return stored; },
+    _getSubdir() { return storedSubdir; },
   };
 }
 
@@ -1592,5 +1616,550 @@ describe('E2E — GET /api/settings/obsidian-vault/browse mit echtem fs (AC2/AC3
     } finally {
       await rm(outsideTarget, { recursive: true, force: true });
     }
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v3 (S-380): Projekt-Unterordner GUI-persistiert — AC9/AC10/AC11/AC12/AC14
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── Unit: resolveEffectiveProjekteSubdir — Rangfolge (AC10) ──────────────────
+
+describe('resolveEffectiveProjekteSubdir — Rangfolge persistiert → Env → Default (AC10)', () => {
+  afterEach(() => { delete process.env[OBSIDIAN_PROJEKTE_SUBDIR_ENV]; });
+
+  it('AC10 — kein persistierter Wert, keine Env → default "Projekte"', () => {
+    const { effective, source } = resolveEffectiveProjekteSubdir({});
+    expect(effective).toBe(PROJEKTE_SUBDIR);
+    expect(source).toBe('default');
+  });
+
+  it('AC10 — kein persistierter Wert, Env gesetzt → env gewinnt', () => {
+    const { effective, source } = resolveEffectiveProjekteSubdir({ projekteSubdir: '300 Projekte' });
+    expect(effective).toBe('300 Projekte');
+    expect(source).toBe('env');
+  });
+
+  it('AC10 — persistiert UND Env gesetzt → persistiert gewinnt (führende Quelle)', () => {
+    const { effective, source } = resolveEffectiveProjekteSubdir({
+      persisted: 'GUI Projekte',
+      projekteSubdir: '300 Projekte',
+    });
+    expect(effective).toBe('GUI Projekte');
+    expect(source).toBe('persisted');
+  });
+
+  it('AC10 — persistiert = leer/whitespace → wie „nicht persistiert" behandelt (Env/Default greift)', () => {
+    const withEnv = resolveEffectiveProjekteSubdir({ persisted: '   ', projekteSubdir: '300 Projekte' });
+    expect(withEnv).toEqual({ effective: '300 Projekte', source: 'env' });
+
+    const withoutEnv = resolveEffectiveProjekteSubdir({ persisted: '' });
+    expect(withoutEnv).toEqual({ effective: PROJEKTE_SUBDIR, source: 'default' });
+  });
+
+  it('AC10 — persistierter Wert mit umgebendem Whitespace wird getrimmt', () => {
+    const { effective, source } = resolveEffectiveProjekteSubdir({ persisted: '  300 Projekte/Team  ' });
+    expect(effective).toBe('300 Projekte/Team');
+    expect(source).toBe('persisted');
+  });
+});
+
+// ── Unit: validateObsidianProjekteSubdirSegment (AC11/AC12, echtes fs) ──────
+
+describe('validateObsidianProjekteSubdirSegment — AC11/AC12 (echtes fs)', () => {
+  let vaultDir;
+
+  beforeEach(async () => {
+    vaultDir = join(tmpdir(), `obs-subdir-vault-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(join(vaultDir, 'GUI Ordner'), { recursive: true });
+  });
+
+  afterEach(async () => {
+    await rm(vaultDir, { recursive: true, force: true });
+  });
+
+  it('AC11 — gültiges Segment (existiert, Verzeichnis, lesbar, innerhalb Vault) → resolvedSegmentPath', async () => {
+    const { resolvedSegmentPath } = await validateObsidianProjekteSubdirSegment(vaultDir, 'GUI Ordner');
+    expect(resolvedSegmentPath.endsWith('GUI Ordner')).toBe(true);
+  });
+
+  it('AC11b — leer/whitespace → empty-path', async () => {
+    await expect(validateObsidianProjekteSubdirSegment(vaultDir, '')).rejects.toMatchObject({ errorClass: 'empty-path' });
+    await expect(validateObsidianProjekteSubdirSegment(vaultDir, '   ')).rejects.toMatchObject({ errorClass: 'empty-path' });
+  });
+
+  it('AC11b — Segment existiert nicht im Vault → missing-projekte', async () => {
+    await expect(validateObsidianProjekteSubdirSegment(vaultDir, 'Existiert Nicht'))
+      .rejects.toMatchObject({ errorClass: 'missing-projekte' });
+  });
+
+  it('AC11b — Segment ist eine Datei (kein Verzeichnis) → missing-projekte', async () => {
+    await writeFile(join(vaultDir, 'a-file.md'), 'note');
+    await expect(validateObsidianProjekteSubdirSegment(vaultDir, 'a-file.md'))
+      .rejects.toMatchObject({ errorClass: 'missing-projekte' });
+  });
+
+  it('AC11 — Mehrebenen-Segment wird korrekt aufgelöst', async () => {
+    await mkdir(join(vaultDir, '300 Projekte', 'Team'), { recursive: true });
+    const { resolvedSegmentPath } = await validateObsidianProjekteSubdirSegment(vaultDir, '300 Projekte/Team');
+    expect(resolvedSegmentPath.endsWith(join('300 Projekte', 'Team'))).toBe(true);
+  });
+
+  it('AC12 — Segment mit „.." führt aus dem Vault hinaus → missing-projekte, NICHT wirksam', async () => {
+    await expect(validateObsidianProjekteSubdirSegment(vaultDir, '../outside'))
+      .rejects.toMatchObject({ errorClass: 'missing-projekte' });
+  });
+
+  it('AC12 — Symlink-Flucht aus dem Vault → missing-projekte (echter Symlink)', async () => {
+    const outsideTarget = join(tmpdir(), `obs-subdir-outside-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(outsideTarget, { recursive: true });
+    const escapeLink = join(vaultDir, 'escape');
+    await symlink(outsideTarget, escapeLink);
+    try {
+      await expect(validateObsidianProjekteSubdirSegment(vaultDir, 'escape'))
+        .rejects.toMatchObject({ errorClass: 'missing-projekte' });
+    } finally {
+      await rm(outsideTarget, { recursive: true, force: true });
+    }
+  });
+
+  it('AC11b — Segment nicht lesbar (injizierte deps) → not-readable', async () => {
+    const deps = {
+      realpath: async (p) => p,
+      stat: async () => ({ isDirectory: () => true }),
+      access: async () => { throw new Error('EACCES'); },
+    };
+    await expect(validateObsidianProjekteSubdirSegment('/vault', 'noread', deps))
+      .rejects.toMatchObject({ errorClass: 'not-readable' });
+  });
+
+  it('Race — Vault selbst nicht mehr erreichbar → vault-unreachable', async () => {
+    await rm(vaultDir, { recursive: true, force: true });
+    await expect(validateObsidianProjekteSubdirSegment(vaultDir, 'GUI Ordner'))
+      .rejects.toMatchObject({ errorClass: 'vault-unreachable' });
+  });
+});
+
+// ── CredentialStore — obsidian-projekte-subdir meta-Block (AC9) ─────────────
+
+describe('CredentialStore — obsidian-projekte-subdir meta-Block (AC9)', () => {
+  let storeDir, store;
+
+  beforeEach(async () => {
+    storeDir = join(tmpdir(), `obs-subdir-cred-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(storeDir, { recursive: true });
+    store = new CredentialStore({ dir: storeDir, masterKey: null });
+  });
+
+  afterEach(async () => {
+    await rm(storeDir, { recursive: true, force: true });
+  });
+
+  it('AC9 — readObsidianProjekteSubdir() → null wenn nicht persistiert', async () => {
+    expect(await store.readObsidianProjekteSubdir()).toBeNull();
+  });
+
+  it('AC9 — write persistiert; read liest ihn (Mehrebenen-Segment)', async () => {
+    await store.writeObsidianProjekteSubdir('300 Projekte/Team');
+    expect(await store.readObsidianProjekteSubdir()).toBe('300 Projekte/Team');
+  });
+
+  it('AC9 — Persistenz überlebt Neustart-Simulation (neuer Store, gleicher Dir)', async () => {
+    await store.writeObsidianProjekteSubdir('GUI Ordner');
+    const store2 = new CredentialStore({ dir: storeDir, masterKey: null });
+    expect(await store2.readObsidianProjekteSubdir()).toBe('GUI Ordner');
+  });
+
+  it('AC9 — delete entfernt den Wert; read → null; idempotent', async () => {
+    await store.writeObsidianProjekteSubdir('to-delete');
+    await store.deleteObsidianProjekteSubdir();
+    expect(await store.readObsidianProjekteSubdir()).toBeNull();
+    await expect(store.deleteObsidianProjekteSubdir()).resolves.not.toThrow();
+  });
+
+  it('AC9 — Wert liegt im meta-Block, NICHT in entries (nicht-geheim, kein Secret-Block)', async () => {
+    await store.writeObsidianProjekteSubdir('Klartext Segment');
+    const raw = await readFile(join(storeDir, 'secrets.enc.json'), 'utf8');
+    const parsed = JSON.parse(raw);
+    expect(parsed.meta?.['settings/obsidian-projekte-subdir']?.value).toBe('Klartext Segment');
+    const entriesStr = JSON.stringify(parsed.entries ?? {});
+    expect(entriesStr).not.toContain('Klartext Segment');
+  });
+
+  it('AC9 — write überschreibt vorherigen Wert (ändern)', async () => {
+    await store.writeObsidianProjekteSubdir('old');
+    await store.writeObsidianProjekteSubdir('new');
+    expect(await store.readObsidianProjekteSubdir()).toBe('new');
+  });
+
+  it('AC9 — write mit leerem Segment wirft (Programmierfehler-Schutz)', async () => {
+    await expect(store.writeObsidianProjekteSubdir('')).rejects.toThrow();
+    await expect(store.writeObsidianProjekteSubdir('   ')).rejects.toThrow();
+  });
+});
+
+// ── Integration: GET /api/settings/obsidian-projekte-subdir (AC10/AC14) ─────
+
+describe('GET /api/settings/obsidian-projekte-subdir (AC10/AC14)', () => {
+  let server, port;
+
+  beforeEach(() => { process.env.DEV_NO_ACCESS = '1'; });
+  afterEach(async () => {
+    if (server) await closeServer(server);
+    server = null;
+    delete process.env.DEV_NO_ACCESS;
+    delete process.env.CRED_ADMIN_EMAILS;
+    delete process.env[OBSIDIAN_PROJEKTE_SUBDIR_ENV];
+  });
+
+  it('AC10 — nichts persistiert, keine Env → { effective: "Projekte", source: "default", persisted: null }', async () => {
+    ({ server, port } = await startServer(makeApp(makeFakeCredStore(null), new AuditStore())));
+    const res = await get(port, '/api/settings/obsidian-projekte-subdir');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ effective: PROJEKTE_SUBDIR, source: 'default', persisted: null });
+  });
+
+  it('AC10 — Env gesetzt, nichts persistiert → source: "env"', async () => {
+    process.env[OBSIDIAN_PROJEKTE_SUBDIR_ENV] = '300 Projekte';
+    ({ server, port } = await startServer(makeApp(makeFakeCredStore(null), new AuditStore())));
+    const res = await get(port, '/api/settings/obsidian-projekte-subdir');
+    expect(res.body).toEqual({ effective: '300 Projekte', source: 'env', persisted: null });
+  });
+
+  it('AC10 — persistiert UND Env gesetzt → persistiert gewinnt', async () => {
+    process.env[OBSIDIAN_PROJEKTE_SUBDIR_ENV] = '300 Projekte';
+    ({ server, port } = await startServer(makeApp(makeFakeCredStore(null, 'GUI Ordner'), new AuditStore())));
+    const res = await get(port, '/api/settings/obsidian-projekte-subdir');
+    expect(res.body).toEqual({ effective: 'GUI Ordner', source: 'persisted', persisted: 'GUI Ordner' });
+  });
+
+  it('AC14 — GET ist hinter AccessGuard, aber NICHT zusätzlich rollengeschützt', async () => {
+    process.env.CRED_ADMIN_EMAILS = 'admin@example.com'; // dev@local nicht in Liste
+    ({ server, port } = await startServer(makeApp(makeFakeCredStore(null), new AuditStore())));
+    const res = await get(port, '/api/settings/obsidian-projekte-subdir');
+    expect(res.status).toBe(200); // kein 403 für read-only GET
+  });
+});
+
+// ── Integration: PUT /api/settings/obsidian-projekte-subdir (AC9/AC11/AC12/AC14) ──
+
+describe('PUT /api/settings/obsidian-projekte-subdir (AC9/AC11/AC12/AC14)', () => {
+  let server, port, auditStore;
+
+  beforeEach(() => { process.env.DEV_NO_ACCESS = '1'; });
+  afterEach(async () => {
+    if (server) await closeServer(server);
+    server = null;
+    delete process.env.DEV_NO_ACCESS;
+    delete process.env.CRED_ADMIN_EMAILS;
+  });
+
+  // validateSubdirSegment-Fake: erlaubt alles außer 'invalid'/'escape' → missing-projekte.
+  function fakeValidateSubdir() {
+    return {
+      validateSubdirSegment: async (_vaultPath, segment) => {
+        if (segment === 'invalid' || segment === '../escape') {
+          throw new ObsidianVaultPathError('Unterordner existiert nicht im Vault', 'missing-projekte');
+        }
+        return { resolvedSegmentPath: `${_vaultPath}/${segment}` };
+      },
+    };
+  }
+
+  async function startTestApp(credStore, opts = {}) {
+    auditStore = new AuditStore();
+    const app = makeApp(credStore, auditStore, opts.deps ?? fakeValidateSubdir());
+    ({ server, port } = await startServer(app));
+  }
+
+  it('AC9/AC11 — gültiges Segment mit konfiguriertem Vault → 200, persistiert', async () => {
+    const credStore = makeFakeCredStore('/vault/notes', null);
+    await startTestApp(credStore);
+    const res = await put(port, '/api/settings/obsidian-projekte-subdir', { subdir: 'GUI Ordner' });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ effective: 'GUI Ordner', source: 'persisted', persisted: 'GUI Ordner' });
+    expect(credStore._getSubdir()).toBe('GUI Ordner');
+  });
+
+  it('AC11a — kein Vault konfiguriert → 409, kein Effekt', async () => {
+    const credStore = makeFakeCredStore(null, null);
+    await startTestApp(credStore);
+    const res = await put(port, '/api/settings/obsidian-projekte-subdir', { subdir: 'GUI Ordner' });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBeTruthy();
+    expect(credStore._getSubdir()).toBeNull();
+  });
+
+  it('AC11b/AC12 — Validierungsfehler (missing-projekte) → 422, alter Wert unverändert', async () => {
+    const credStore = makeFakeCredStore('/vault/notes', 'original');
+    await startTestApp(credStore);
+    const res = await put(port, '/api/settings/obsidian-projekte-subdir', { subdir: 'invalid' });
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBeTruthy();
+    expect(credStore._getSubdir()).toBe('original');
+  });
+
+  it('AC12 — Traversal-Segment „../escape" → 422, NICHT persistiert', async () => {
+    const credStore = makeFakeCredStore('/vault/notes', null);
+    await startTestApp(credStore);
+    const res = await put(port, '/api/settings/obsidian-projekte-subdir', { subdir: '../escape' });
+    expect(res.status).toBe(422);
+    expect(credStore._getSubdir()).toBeNull();
+  });
+
+  it('AC11 — leeres Segment → 422, kein Store-Write', async () => {
+    const credStore = makeFakeCredStore('/vault/notes', null);
+    await startTestApp(credStore);
+    const res = await put(port, '/api/settings/obsidian-projekte-subdir', { subdir: '   ' });
+    expect(res.status).toBe(422);
+    expect(credStore._getSubdir()).toBeNull();
+  });
+
+  it('AC11 — fehlendes subdir-Feld → 422', async () => {
+    await startTestApp(makeFakeCredStore('/vault/notes', null));
+    const res = await put(port, '/api/settings/obsidian-projekte-subdir', {});
+    expect(res.status).toBe(422);
+  });
+
+  it('AC14 — CRED_ADMIN_EMAILS gesetzt, dev@local NICHT in Liste → 403, keine Mutation', async () => {
+    process.env.CRED_ADMIN_EMAILS = 'admin@example.com';
+    const credStore = makeFakeCredStore('/vault/notes', null);
+    await startTestApp(credStore);
+    const res = await put(port, '/api/settings/obsidian-projekte-subdir', { subdir: 'x' });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toMatch(/berechtigung/i);
+    expect(credStore._getSubdir()).toBeNull();
+  });
+
+  it('AC14 — CRED_ADMIN_EMAILS gesetzt, dev@local in Liste → 200', async () => {
+    process.env.CRED_ADMIN_EMAILS = 'dev@local,admin@example.com';
+    await startTestApp(makeFakeCredStore('/vault/notes', null));
+    const res = await put(port, '/api/settings/obsidian-projekte-subdir', { subdir: 'allowed' });
+    expect(res.status).toBe(200);
+  });
+
+  it('AC14 — Audit-First: Intent-Eintrag VOR Persistierung (callOrder)', async () => {
+    const callOrder = [];
+    const credStore = {
+      readObsidianVaultPath: async () => '/vault/notes',
+      readObsidianProjekteSubdir: async () => null,
+      writeObsidianProjekteSubdir: async (s) => { callOrder.push(`write:${s}`); return { updatedAt: new Date().toISOString() }; },
+      deleteObsidianProjekteSubdir: async () => ({}),
+    };
+    const spyAudit = {
+      record(entry) { callOrder.push(`audit:${entry.command.split(':').slice(0, 3).join(':')}`); },
+    };
+    const app = makeApp(credStore, spyAudit, { validateSubdirSegment: async (_v, s) => ({ resolvedSegmentPath: s }) });
+    ({ server, port } = await startServer(app));
+
+    await put(port, '/api/settings/obsidian-projekte-subdir', { subdir: 'test' });
+
+    const intentIdx = callOrder.findIndex((e) => e.startsWith('audit:obsidian-projekte-subdir:set'));
+    const writeIdx = callOrder.findIndex((e) => e.startsWith('write:'));
+    expect(intentIdx).toBeGreaterThanOrEqual(0);
+    expect(writeIdx).toBeGreaterThan(intentIdx);
+  });
+
+  it('AC14 — Audit-Write-Fehler blockiert Mutation (Audit-First)', async () => {
+    let writeCalled = false;
+    const credStore = {
+      readObsidianVaultPath: async () => '/vault/notes',
+      readObsidianProjekteSubdir: async () => null,
+      writeObsidianProjekteSubdir: async () => { writeCalled = true; return {}; },
+      deleteObsidianProjekteSubdir: async () => ({}),
+    };
+    const brokenAudit = { record() { throw new Error('Audit store down'); } };
+    const app = makeApp(credStore, brokenAudit, { validateSubdirSegment: async (_v, s) => ({ resolvedSegmentPath: s }) });
+    ({ server, port } = await startServer(app));
+
+    const res = await put(port, '/api/settings/obsidian-projekte-subdir', { subdir: 'test' });
+    expect(res.status).toBe(500);
+    expect(res.body.error).toMatch(/audit/i);
+    expect(writeCalled).toBe(false);
+  });
+
+  it('AC14 — Intent-Audit enthält alt→neu (Segment)', async () => {
+    const credStore = makeFakeCredStore('/vault/notes', 'old-segment');
+    await startTestApp(credStore);
+    await put(port, '/api/settings/obsidian-projekte-subdir', { subdir: 'new-segment' });
+    const intent = auditStore.getAll().find((e) => e.command.includes('obsidian-projekte-subdir:set') && e.command.includes('old-segment'));
+    expect(intent).toBeDefined();
+    expect(intent.command).toContain('new-segment');
+  });
+
+  it('AC14 — Outcome-Audit (success) nach erfolgreicher Mutation', async () => {
+    await startTestApp(makeFakeCredStore('/vault/notes', null));
+    await put(port, '/api/settings/obsidian-projekte-subdir', { subdir: 'test' });
+    const outcome = auditStore.getAll().find((e) => e.command.includes('obsidian-projekte-subdir:set:success'));
+    expect(outcome).toBeDefined();
+  });
+
+  it('AC14 — Outcome-Audit (failed:errorClass) nach fehlgeschlagener Validierung', async () => {
+    await startTestApp(makeFakeCredStore('/vault/notes', null));
+    await put(port, '/api/settings/obsidian-projekte-subdir', { subdir: 'invalid' });
+    const failed = auditStore.getAll().find((e) => e.command.includes('obsidian-projekte-subdir:set:failed:missing-projekte'));
+    expect(failed).toBeDefined();
+  });
+});
+
+// ── Integration: DELETE /api/settings/obsidian-projekte-subdir (AC14) ───────
+
+describe('DELETE /api/settings/obsidian-projekte-subdir (AC14)', () => {
+  let server, port, auditStore;
+
+  beforeEach(() => { process.env.DEV_NO_ACCESS = '1'; });
+  afterEach(async () => {
+    if (server) await closeServer(server);
+    server = null;
+    delete process.env.DEV_NO_ACCESS;
+    delete process.env.CRED_ADMIN_EMAILS;
+    delete process.env[OBSIDIAN_PROJEKTE_SUBDIR_ENV];
+  });
+
+  it('AC10/AC14 — zurücksetzen ohne Env → 200 { effective: "Projekte", source: "default", persisted: null }', async () => {
+    const credStore = makeFakeCredStore('/vault/notes', 'configured');
+    auditStore = new AuditStore();
+    ({ server, port } = await startServer(makeApp(credStore, auditStore)));
+    const res = await del(port, '/api/settings/obsidian-projekte-subdir');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ effective: PROJEKTE_SUBDIR, source: 'default', persisted: null });
+    expect(credStore._getSubdir()).toBeNull();
+  });
+
+  it('AC10/AC14 — zurücksetzen mit gesetzter Env → 200 { source: "env" } (Env wieder wirksam)', async () => {
+    process.env[OBSIDIAN_PROJEKTE_SUBDIR_ENV] = '300 Projekte';
+    const credStore = makeFakeCredStore('/vault/notes', 'configured');
+    auditStore = new AuditStore();
+    ({ server, port } = await startServer(makeApp(credStore, auditStore)));
+    const res = await del(port, '/api/settings/obsidian-projekte-subdir');
+    expect(res.body).toEqual({ effective: '300 Projekte', source: 'env', persisted: null });
+  });
+
+  it('AC14 — DELETE ohne Berechtigung (CRED_ADMIN_EMAILS) → 403, keine Mutation', async () => {
+    process.env.CRED_ADMIN_EMAILS = 'admin@example.com';
+    const credStore = makeFakeCredStore('/vault/notes', 'keep');
+    auditStore = new AuditStore();
+    ({ server, port } = await startServer(makeApp(credStore, auditStore)));
+    const res = await del(port, '/api/settings/obsidian-projekte-subdir');
+    expect(res.status).toBe(403);
+    expect(credStore._getSubdir()).toBe('keep');
+  });
+
+  it('AC14 — DELETE Audit-First: Audit-Fehler blockiert Löschung', async () => {
+    let deleteCalled = false;
+    const credStore = {
+      readObsidianProjekteSubdir: async () => 'x',
+      deleteObsidianProjekteSubdir: async () => { deleteCalled = true; return {}; },
+    };
+    const brokenAudit = { record() { throw new Error('Audit down'); } };
+    ({ server, port } = await startServer(makeApp(credStore, brokenAudit)));
+    const res = await del(port, '/api/settings/obsidian-projekte-subdir');
+    expect(res.status).toBe(500);
+    expect(deleteCalled).toBe(false);
+  });
+
+  it('AC14 — DELETE Outcome-Audit (success) nach erfolgreicher Löschung', async () => {
+    const credStore = makeFakeCredStore('/vault/notes', 'x');
+    auditStore = new AuditStore();
+    ({ server, port } = await startServer(makeApp(credStore, auditStore)));
+    await del(port, '/api/settings/obsidian-projekte-subdir');
+    const outcome = auditStore.getAll().find((e) => e.command.includes('obsidian-projekte-subdir:delete:success'));
+    expect(outcome).toBeDefined();
+  });
+});
+
+// ── AC14: AccessGuard (mutierende EPs ohne gültigen Token → 403) ────────────
+
+describe('PUT/DELETE /api/settings/obsidian-projekte-subdir — AC14: kein Access → 403', () => {
+  it('PUT ohne AccessGuard-Token → 403', async () => {
+    delete process.env.DEV_NO_ACCESS;
+    const savedDomain = process.env.ACCESS_TEAM_DOMAIN;
+    const savedAud = process.env.ACCESS_AUD;
+    delete process.env.ACCESS_TEAM_DOMAIN;
+    delete process.env.ACCESS_AUD;
+
+    const credStore = makeFakeCredStore('/vault/notes', null);
+    const app = makeApp(credStore, new AuditStore());
+    const { server, port } = await startServer(app);
+    try {
+      const res = await put(port, '/api/settings/obsidian-projekte-subdir', { subdir: 'x' });
+      expect(res.status).toBe(403);
+      expect(credStore._getSubdir()).toBeNull();
+    } finally {
+      await closeServer(server);
+      if (savedDomain !== undefined) process.env.ACCESS_TEAM_DOMAIN = savedDomain;
+      if (savedAud !== undefined) process.env.ACCESS_AUD = savedAud;
+    }
+  });
+
+  it('DELETE ohne AccessGuard-Token → 403', async () => {
+    delete process.env.DEV_NO_ACCESS;
+    const savedDomain = process.env.ACCESS_TEAM_DOMAIN;
+    const savedAud = process.env.ACCESS_AUD;
+    delete process.env.ACCESS_TEAM_DOMAIN;
+    delete process.env.ACCESS_AUD;
+
+    const credStore = makeFakeCredStore('/vault/notes', 'keep');
+    const app = makeApp(credStore, new AuditStore());
+    const { server, port } = await startServer(app);
+    try {
+      const res = await del(port, '/api/settings/obsidian-projekte-subdir');
+      expect(res.status).toBe(403);
+      expect(credStore._getSubdir()).toBe('keep');
+    } finally {
+      await closeServer(server);
+      if (savedDomain !== undefined) process.env.ACCESS_TEAM_DOMAIN = savedDomain;
+      if (savedAud !== undefined) process.env.ACCESS_AUD = savedAud;
+    }
+  });
+});
+
+// ── E2E: Rangfolge (AC10) an bestehenden Verbrauchsstellen (echtes fs) ──────
+
+describe('E2E — AC10 Rangfolge an PUT .../obsidian-vault-path und GET .../obsidian-vault/projects', () => {
+  let server, port, storeDir, vaultDir, store;
+
+  beforeEach(async () => {
+    process.env.DEV_NO_ACCESS = '1';
+    storeDir = join(tmpdir(), `obs-e2e-rank-cred-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    vaultDir = join(tmpdir(), `obs-e2e-rank-vault-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    // Env zeigt auf einen NICHT existierenden Unterordner — die persistierte GUI-Wahl muss
+    // trotzdem gewinnen (AC10: persistiert verdrängt Env).
+    await mkdir(join(vaultDir, 'GUI Gewählt'), { recursive: true });
+    store = new CredentialStore({ dir: storeDir, masterKey: null });
+    await store.writeObsidianVaultPath(vaultDir);
+    process.env[OBSIDIAN_PROJEKTE_SUBDIR_ENV] = 'Env Nicht Existent';
+  });
+
+  afterEach(async () => {
+    if (server) await closeServer(server);
+    server = null;
+    delete process.env.DEV_NO_ACCESS;
+    delete process.env[OBSIDIAN_PROJEKTE_SUBDIR_ENV];
+    await rm(storeDir, { recursive: true, force: true });
+    await rm(vaultDir, { recursive: true, force: true }).catch(() => {});
+  });
+
+  it('AC10 — GET .../obsidian-vault/projects: persistierter Wert verdrängt Env', async () => {
+    await mkdir(join(vaultDir, 'GUI Gewählt', 'Idee Eins'));
+    await store.writeObsidianProjekteSubdir('GUI Gewählt');
+    ({ server, port } = await startServer(makeApp(store, new AuditStore())));
+
+    const res = await get(port, '/api/settings/obsidian-vault/projects');
+    expect(res.status).toBe(200);
+    expect(res.body.projects.map((p) => p.name)).toEqual(['Idee Eins']);
+  });
+
+  it('AC10 — ohne persistierten Wert bleibt die Env wirksam (Race-freier Vergleich) → missing-projekte (404)', async () => {
+    ({ server, port } = await startServer(makeApp(store, new AuditStore())));
+    const res = await get(port, '/api/settings/obsidian-vault/projects');
+    expect(res.status).toBe(404); // „Env Nicht Existent" existiert nicht im Vault
+  });
+
+  it('AC2c/AC10 — PUT .../obsidian-vault-path: „Vault enthält Unterordner"-Prüfung nutzt den persistierten Wert', async () => {
+    await store.writeObsidianProjekteSubdir('GUI Gewählt');
+    ({ server, port } = await startServer(makeApp(store, new AuditStore())));
+    const res = await put(port, '/api/settings/obsidian-vault-path', { path: vaultDir });
+    expect(res.status).toBe(200); // Env-Segment existiert nicht, aber persistiert existiert → OK
   });
 });

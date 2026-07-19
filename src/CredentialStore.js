@@ -90,6 +90,13 @@ const WORKSPACE_PATH_META_KEY = 'settings/workspace-path';
 const OBSIDIAN_VAULT_PATH_META_KEY = 'settings/obsidian-vault-path';
 
 /**
+ * meta-Block-Schlüssel für den persistierten Obsidian-Projekt-Unterordner
+ * (obsidian-vault-config v3, AC9). Vault-relatives Pfad-Segment, Klartext,
+ * NICHT geheim — analog `OBSIDIAN_VAULT_PATH_META_KEY`.
+ */
+const OBSIDIAN_PROJEKTE_SUBDIR_META_KEY = 'settings/obsidian-projekte-subdir';
+
+/**
  * meta-Block-Schlüssel für den Ablaufzeitpunkt des Abo-OAuth-Access-Tokens
  * (anthropic-oauth-vault AC2, Resolution R2 — Unix-ms, NICHT geheim, deshalb im
  * meta-Block statt in `entries`: die Status-Anzeige kann ihn ohne Entschlüsselung
@@ -1260,6 +1267,64 @@ export class CredentialStore {
       const storeData = await this.#readStore();
       if (!storeData?.meta?.[OBSIDIAN_VAULT_PATH_META_KEY]) return {};
       delete storeData.meta[OBSIDIAN_VAULT_PATH_META_KEY];
+      const storeBlob = await this.#writeStore(storeData);
+      const backup = await this.#runBackupHook(storeBlob);
+      return { backup };
+    });
+  }
+
+  // ── Obsidian-Projekt-Unterordner-API (obsidian-vault-config v3 — AC9, GUI-persistiert) ─
+
+  /**
+   * Gibt das persistierte Obsidian-Projekt-Unterordner-Segment zurück (Klartext-Metadatum,
+   * AC9) — vault-relatives Pfad-Segment, kein absoluter Pfad. Gibt null zurück wenn nicht
+   * persistiert (dann greift die Rangfolge Env→Default, AC10).
+   *
+   * @returns {Promise<string|null>}
+   */
+  async readObsidianProjekteSubdir() {
+    const storeData = await this.#readStore();
+    return storeData?.meta?.[OBSIDIAN_PROJEKTE_SUBDIR_META_KEY]?.value ?? null;
+  }
+
+  /**
+   * Persistiert das Obsidian-Projekt-Unterordner-Segment (Klartext-Metadatum, nicht geheim,
+   * AC9). Der Wert lebt im `meta`-Block, NIE im verschlüsselten `entries`-Secret-Block, und
+   * wird als vault-relatives Segment gespeichert (kein `join(vault, segment)`-Auflösung hier —
+   * das übernimmt der Verbrauchs-Pfad, s. `resolveEffectiveProjekteSubdir`).
+   *
+   * @param {string} segment  Bereits validiertes Segment (AC11/AC12).
+   * @returns {Promise<{ updatedAt: string, backup: BackupResult }>}
+   */
+  async writeObsidianProjekteSubdir(segment) {
+    if (typeof segment !== 'string' || segment.trim() === '') {
+      throw new Error('[CredentialStore] writeObsidianProjekteSubdir: segment darf nicht leer sein');
+    }
+    const updatedAt = new Date().toISOString();
+    return this.#withWriteLock(async () => {
+      let storeData = await this.#readStore();
+      if (!storeData) {
+        storeData = { version: 1, entries: {}, meta: {} };
+      }
+      if (!storeData.meta) storeData.meta = {};
+      storeData.meta[OBSIDIAN_PROJEKTE_SUBDIR_META_KEY] = { value: segment.trim(), updatedAt };
+      const storeBlob = await this.#writeStore(storeData);
+      const backup = await this.#runBackupHook(storeBlob);
+      return { updatedAt, backup };
+    });
+  }
+
+  /**
+   * Löscht das persistierte Obsidian-Projekt-Unterordner-Segment. Idempotent
+   * (AC8 — zurücksetzen auf „kein persistierter Wert", wieder Env/Default wirksam).
+   *
+   * @returns {Promise<{ backup?: BackupResult }>}
+   */
+  async deleteObsidianProjekteSubdir() {
+    return this.#withWriteLock(async () => {
+      const storeData = await this.#readStore();
+      if (!storeData?.meta?.[OBSIDIAN_PROJEKTE_SUBDIR_META_KEY]) return {};
+      delete storeData.meta[OBSIDIAN_PROJEKTE_SUBDIR_META_KEY];
       const storeBlob = await this.#writeStore(storeData);
       const backup = await this.#runBackupHook(storeBlob);
       return { backup };

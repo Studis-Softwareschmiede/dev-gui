@@ -9,6 +9,12 @@
  *         400; vault not configured / "Projekte" unreachable → 404 (vault-confined
  *         resolution via listObsidianVaultProjects, security/R02/R03 — reuse, no
  *         new confinement mechanism, obsidian-vault-config AC5).
+ *
+ * Covers (obsidian-vault-config v3, S-380 — AC10):
+ *   AC10 — the Ingest-Flow (this router) resolves the project-subdir via the SAME
+ *         persisted → env → default ranking as the other consumption points
+ *         (AC2c/AC5) — verified by asserting `listProjects` receives the effective
+ *         `projekteSubdir` computed from a persisted CredentialStore value.
  *   AC2 — GET /api/obsidian-ingest/:jobId → 200 { status, catalog?, result?, error? };
  *         `catalog` only on needs-answers; secret-free; unknown jobId → 404.
  *   AC4 — POST /api/obsidian-ingest/:jobId/answers → 202 { status:"running" } on a
@@ -202,6 +208,28 @@ describe('POST /api/obsidian-ingest/start — AC1', () => {
       expect(typeof body.error).toBe('string');
     } finally {
       await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('AC10 (obsidian-vault-config v3, S-380) — listProjects receives the effective projekteSubdir per the persisted → env → default ranking', async () => {
+    process.env.OBSIDIAN_PROJEKTE_SUBDIR = 'Env Segment';
+    try {
+      let receivedDeps;
+      const capturingListProjects = async (_vaultPath, deps) => { receivedDeps = deps; return KNOWN_PROJECTS; };
+      const credentialStoreWithPersisted = {
+        readObsidianVaultPath: async () => '/vault',
+        readObsidianProjekteSubdir: async () => 'GUI Segment',
+      };
+      const { app } = makeApp({ credentialStore: credentialStoreWithPersisted, listProjects: capturingListProjects });
+      const srv = await startServer(app);
+      try {
+        await httpPost(srv, '/api/obsidian-ingest/start', { projectFolderPath: '/workspace/proj' });
+        expect(receivedDeps?.projekteSubdir).toBe('GUI Segment'); // persisted verdrängt Env
+      } finally {
+        await new Promise((r) => srv.close(r));
+      }
+    } finally {
+      delete process.env.OBSIDIAN_PROJEKTE_SUBDIR;
     }
   });
 

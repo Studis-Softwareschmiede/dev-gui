@@ -49,6 +49,15 @@
  * innerhalb der Mount-Schranke (statt nur `<vault>/<Projekt-Unterordner>`) — dieselbe
  * Confinement-Technik (realpath + Trailing-Slash-Prefix) wie oben.
  *
+ * `resolveEffectiveProjekteSubdir` + `validateObsidianProjekteSubdirSegment`
+ * (obsidian-vault-config v3, S-380) ergänzen die GUI-persistierbare Rangfolge
+ * (AC10: persistiert → Env → Default) und die Set-Zeit-Validierung eines
+ * eingegebenen Segments gegen einen bereits konfigurierten Vault (AC11/AC12) —
+ * identische Confinement-Technik wie oben. Der persistierte Rohwert selbst lebt
+ * im `CredentialStore`-`meta`-Block (`readObsidianProjekteSubdir` etc., AC9) und
+ * wird vom jeweiligen Router in `deps.projekteSubdir` eingespeist — diese Modul-
+ * Funktionen greifen NICHT selbst auf den CredentialStore zu (bleiben testbar/pur).
+ *
  * @module obsidianVaultPath
  */
 
@@ -91,6 +100,32 @@ export const OBSIDIAN_VAULT_MOUNT_ENV = 'OBSIDIAN_VAULT_DIR';
 export function resolveProjekteSubdir(deps = {}) {
   const raw = deps.projekteSubdir ?? process.env[OBSIDIAN_PROJEKTE_SUBDIR_ENV] ?? '';
   return raw && raw.trim() ? raw.trim() : PROJEKTE_SUBDIR;
+}
+
+/**
+ * Liefert das WIRKSAME Projekt-Unterordner-Segment nach der v3-Rangfolge
+ * (obsidian-vault-config AC10): persistiert → Env `OBSIDIAN_PROJEKTE_SUBDIR` →
+ * Default `PROJEKTE_SUBDIR`. Gilt einheitlich an allen Verbrauchsstellen (die
+ * „Vault enthält Unterordner"-Prüfung AC2c, die Projekt-Auflistung AC5 und der
+ * Obsidian-Ingest-Flow) — der persistierte Rohwert wird vom jeweiligen Router
+ * (CredentialStore-Read) beschafft und hier eingespeist; diese Funktion selbst
+ * greift NICHT auf den CredentialStore zu (bleibt pure/testbar).
+ *
+ * @param {object} [deps]
+ * @param {string|null} [deps.persisted]     Persistierter Rohwert (oder null/leer).
+ * @param {string} [deps.projekteSubdir]     Override für die Env (Tests, wie `resolveProjekteSubdir`).
+ * @returns {{ effective: string, source: 'persisted'|'env'|'default' }}
+ */
+export function resolveEffectiveProjekteSubdir(deps = {}) {
+  const persisted = typeof deps.persisted === 'string' ? deps.persisted.trim() : '';
+  if (persisted) {
+    return { effective: persisted, source: 'persisted' };
+  }
+  const envRaw = deps.projekteSubdir ?? process.env[OBSIDIAN_PROJEKTE_SUBDIR_ENV] ?? '';
+  if (envRaw && envRaw.trim()) {
+    return { effective: envRaw.trim(), source: 'env' };
+  }
+  return { effective: PROJEKTE_SUBDIR, source: 'default' };
 }
 
 /**
@@ -272,6 +307,105 @@ export async function validateObsidianVaultPath(inputPath, deps = {}) {
   }
 
   return { resolvedPath: pathToCheck };
+}
+
+/**
+ * Validiert ein einzugebendes Projekt-Unterordner-SEGMENT gegen einen bereits
+ * konfigurierten/persistierten Vault-Pfad (obsidian-vault-config v3, AC11/AC12).
+ * Gegenstück zu Schritt 5 von `validateObsidianVaultPath` — aber eigenständig
+ * aufrufbar (PUT `.../obsidian-projekte-subdir` validiert das Segment GEGEN den
+ * bereits gesetzten Vault, ohne den Vault selbst erneut zu prüfen).
+ *
+ * Regeln (Reihenfolge):
+ *   1. Segment darf nicht leer/whitespace sein → `empty-path` (AC11b-Edge-Case).
+ *   2. Der konfigurierte Vault muss (noch) erreichbar sein (Race) → `vault-unreachable`.
+ *   3. `<vault>/<segment>` muss nach `realpath`-Auflösung existieren und ein
+ *      Verzeichnis sein UND lesbar sein → `missing-projekte`/`not-readable` (AC11b).
+ *   4. Confinement (AC12, hart, identische Trailing-Slash-Prefix-Technik wie AC3):
+ *      das aufgelöste Segment MUSS innerhalb des Vaults liegen — ein Segment mit
+ *      `..`, ein absoluter Pfad oder eine Symlink-Flucht wird abgewiesen
+ *      (`missing-projekte`), BEVOR es als gültig gilt.
+ *
+ * @param {string} vaultPath  Bereits konfigurierter/persistierter Vault-Pfad (vertraut).
+ * @param {string} segment    Eingegebenes Segment (untrusted, aus HTTP-Body).
+ * @param {object} [deps]     Injectable dependencies für Tests.
+ * @param {Function} [deps.realpath]  default: node:fs/promises.realpath
+ * @param {Function} [deps.stat]      default: node:fs/promises.stat
+ * @param {Function} [deps.access]    default: node:fs/promises.access
+ * @returns {Promise<{ resolvedSegmentPath: string }>}
+ * @throws {ObsidianVaultPathError} `empty-path` | `vault-unreachable` | `missing-projekte` | `not-readable`
+ */
+export async function validateObsidianProjekteSubdirSegment(vaultPath, segment, deps = {}) {
+  const _realpath = deps.realpath ?? realpath;
+  const _stat = deps.stat ?? stat;
+  const _access = deps.access ?? access;
+
+  // (1) Leer/whitespace
+  if (typeof segment !== 'string' || segment.trim() === '') {
+    throw new ObsidianVaultPathError('Projekt-Unterordner darf nicht leer sein', 'empty-path');
+  }
+  const trimmedSegment = segment.trim();
+
+  // (2) Vault muss (noch) erreichbar sein (Race — extern entfernt/unmounted).
+  let vaultRoot;
+  try {
+    vaultRoot = await _realpath(vaultPath);
+  } catch {
+    throw new ObsidianVaultPathError(
+      `Obsidian-Vault '${vaultPath}' ist nicht mehr erreichbar`,
+      'vault-unreachable',
+    );
+  }
+
+  // (3)+(4) `<vault>/<segment>` auflösen + confinen (identische Technik wie AC3).
+  const candidatePath = join(vaultRoot, trimmedSegment);
+  let resolvedSegment;
+  try {
+    resolvedSegment = await _realpath(candidatePath);
+  } catch {
+    throw new ObsidianVaultPathError(
+      `Unterordner '${trimmedSegment}' existiert nicht im Vault`,
+      'missing-projekte',
+    );
+  }
+
+  const vaultPrefix = vaultRoot.endsWith(sep) ? vaultRoot : vaultRoot + sep;
+  const confined = resolvedSegment === vaultRoot || resolvedSegment.startsWith(vaultPrefix);
+  if (!confined) {
+    // AC12: `..`/absoluter Pfad/Symlink-Flucht → wie fehlender Unterordner behandelt,
+    // NICHT wirksam (identisch zur v2/AC3-Behandlung des Env-Segments).
+    throw new ObsidianVaultPathError(
+      `Unterordner '${trimmedSegment}' existiert nicht im Vault`,
+      'missing-projekte',
+    );
+  }
+
+  let segmentStat;
+  try {
+    segmentStat = await _stat(resolvedSegment);
+  } catch {
+    throw new ObsidianVaultPathError(
+      `Unterordner '${trimmedSegment}' existiert nicht im Vault`,
+      'missing-projekte',
+    );
+  }
+  if (!segmentStat.isDirectory()) {
+    throw new ObsidianVaultPathError(
+      `Unterordner '${trimmedSegment}' im Vault ist kein Verzeichnis`,
+      'missing-projekte',
+    );
+  }
+
+  try {
+    await _access(resolvedSegment, constants.R_OK);
+  } catch {
+    throw new ObsidianVaultPathError(
+      `Unterordner '${trimmedSegment}' im Vault ist nicht lesbar`,
+      'not-readable',
+    );
+  }
+
+  return { resolvedSegmentPath: resolvedSegment };
 }
 
 /**

@@ -24,6 +24,9 @@
  * — kein Freitext-Pfad gelangt ungeprüft in cwd/argv des Kindprozesses. Ist kein
  * Vault konfiguriert oder „Projekte" (mehr) nicht erreichbar → `404` (dieselbe
  * `ObsidianVaultPathError`-Fehlerklasse wie `GET .../obsidian-vault/projects`).
+ * Der Projekt-Unterordner selbst wird nach der v3-Rangfolge (obsidian-vault-config
+ * AC10: persistiert → Env `OBSIDIAN_PROJEKTE_SUBDIR` → Default „Projekte") aufgelöst
+ * — derselbe wirksame Wert wie an den übrigen Verbrauchsstellen (AC2c/AC5).
  *
  * Audit-First-Konvention (analog `ideaSpecifyRouter`): Format-/Existenz-/State-
  * Vorprüfungen werden OHNE Audit abgelehnt; genau EIN Audit-Eintrag je
@@ -40,7 +43,11 @@
 
 import { Router } from 'express';
 import { realpath as nodeRealpath } from 'node:fs/promises';
-import { listObsidianVaultProjects, ObsidianVaultPathError } from './obsidianVaultPath.js';
+import {
+  listObsidianVaultProjects,
+  ObsidianVaultPathError,
+  resolveEffectiveProjekteSubdir,
+} from './obsidianVaultPath.js';
 
 /**
  * Extrahiert den identity-String aus `req.identity` (AccessGuard-Claim) — analog
@@ -94,9 +101,21 @@ export function obsidianIngestRouter(runner, options = {}) {
       return { ok: false, status: 404, error: 'Obsidian-Vault ist nicht konfiguriert' };
     }
 
+    // obsidian-vault-config v3 AC10: Rangfolge (persistiert → Env → Default) gilt
+    // einheitlich auch am Ingest-Flow (dritte Verbrauchsstelle neben AC2c/AC5).
+    let persistedSubdir;
+    try {
+      persistedSubdir = _credentialStore?.readObsidianProjekteSubdir
+        ? await _credentialStore.readObsidianProjekteSubdir()
+        : null;
+    } catch {
+      persistedSubdir = null;
+    }
+    const { effective: projekteSubdir } = resolveEffectiveProjekteSubdir({ persisted: persistedSubdir });
+
     let projects;
     try {
-      projects = await _listProjects(vaultPath.trim());
+      projects = await _listProjects(vaultPath.trim(), { projekteSubdir });
     } catch (err) {
       if (err instanceof ObsidianVaultPathError) {
         // vault-unreachable / missing-projekte — Vault (mehr) nicht erreichbar
