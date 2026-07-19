@@ -3,7 +3,7 @@
  * Obsidian-Ingest runner + its pure parsers + default claude adapter
  * (docs/specs/obsidian-question-catalog.md, docs/specs/questions-pending-notification.md).
  *
- * Covers (obsidian-question-catalog): AC1, AC2, AC4, AC5, AC6, AC7
+ * Covers (obsidian-question-catalog): AC1, AC2, AC4, AC5, AC6, AC7, AC8, AC12
  *
  *   AC1 — start() runs headless via an OWN, isolated ProjectJobLock instance; a
  *         run round settles into a terminal `done`/`failed`/`auth-expired` OR the
@@ -25,6 +25,16 @@
  *         with identity + action.
  *   AC7 — error paths: runner error / unparsable catalog → secret-free `failed`
  *         error, no crash; answers on a non-waiting/unknown job → reason.
+ *   AC8 — start(targetRepoPath, { noteFolderPath }) passes the target repo path
+ *         as `cwd` (runClaude's `projectPath`) and the note folder path as the
+ *         `<notiz-ordner>` argv element of the from-notes prompt — two distinct
+ *         paths, never swapped.
+ *   AC12 — error-text differentiation: a run with no usable JSON output (raw
+ *          text, no `{status}` object) fails with "Lauf fehlgeschlagen (kein
+ *          JSON-Ausgang)"; a `needs-answers` outcome with an empty/broken
+ *          catalog fails with "Fragenkatalog defekt" — two distinguishable
+ *          messages, replacing the former blanket "Fragenkatalog konnte nicht
+ *          gelesen werden".
  *
  * Covers (questions-pending-notification): AC1, AC2 (gating itself in
  * test/DrainNotifier.test.js), AC4, AC5, AC6
@@ -56,6 +66,9 @@ import {
   FROM_NOTES_COMMAND,
   RESUME_PROMPT,
   AUTH_EXPIRED_MESSAGE,
+  BrokenCatalogError,
+  NO_JSON_OUTPUT_MESSAGE,
+  BROKEN_CATALOG_MESSAGE,
 } from '../src/ObsidianIngestRunner.js';
 import { ProjectJobLock } from '../src/ProjectJobLock.js';
 
@@ -122,23 +135,25 @@ describe('parseIngestOutcome — AC2 machine-readable catalog', () => {
     expect(out.catalog[0].pflicht).toBe(false);
   });
 
-  it('throws on unparsable JSON (AC2/AC7)', () => {
+  it('throws on unparsable JSON (AC2/AC7) — NOT a BrokenCatalogError (AC12 class 2)', () => {
     expect(() => parseIngestOutcome('not json at all')).toThrow();
+    expect(() => parseIngestOutcome('not json at all')).not.toThrow(BrokenCatalogError);
   });
 
-  it('throws on unknown status', () => {
+  it('throws on unknown status — NOT a BrokenCatalogError (AC12 class 2)', () => {
     expect(() => parseIngestOutcome('{"status":"weird"}')).toThrow();
+    expect(() => parseIngestOutcome('{"status":"weird"}')).not.toThrow(BrokenCatalogError);
   });
 
-  it('throws on needs-answers with an empty/absent catalog', () => {
-    expect(() => parseIngestOutcome('{"status":"needs-answers","catalog":[]}')).toThrow();
-    expect(() => parseIngestOutcome('{"status":"needs-answers"}')).toThrow();
+  it('throws a BrokenCatalogError on needs-answers with an empty/absent catalog (AC12 class 3)', () => {
+    expect(() => parseIngestOutcome('{"status":"needs-answers","catalog":[]}')).toThrow(BrokenCatalogError);
+    expect(() => parseIngestOutcome('{"status":"needs-answers"}')).toThrow(BrokenCatalogError);
   });
 
-  it('throws when a catalog question misses id/frage', () => {
+  it('throws a BrokenCatalogError when a catalog question misses id/frage (AC12 class 3)', () => {
     expect(() =>
       parseIngestOutcome('{"status":"needs-answers","catalog":[{"stage":"s"}]}'),
-    ).toThrow();
+    ).toThrow(BrokenCatalogError);
   });
 });
 
@@ -205,7 +220,10 @@ describe('ObsidianIngestRunner — start → needs-answers → resume → done',
     ]);
     const runner = new ObsidianIngestRunner({ runClaude });
 
-    const started = runner.start('/workspace/proj', { identity: 'alex@x' });
+    const started = runner.start('/workspace/target-repo', {
+      noteFolderPath: '/vault/proj-notes',
+      identity: 'alex@x',
+    });
     expect(started.ok).toBe(true);
     await flush();
 
@@ -217,8 +235,10 @@ describe('ObsidianIngestRunner — start → needs-answers → resume → done',
     expect(job).not.toHaveProperty('sessionId');
     expect(job).not.toHaveProperty('identity');
 
-    // First round used the from-notes command with the project path (AC1).
-    expect(runClaude.calls[0].promptArg).toBe(`${FROM_NOTES_COMMAND} /workspace/proj`);
+    // AC8: cwd = target repo path, argv prompt = the from-notes command with
+    // the NOTE FOLDER path (never the target repo, never swapped).
+    expect(runClaude.calls[0].projectPath).toBe('/workspace/target-repo');
+    expect(runClaude.calls[0].promptArg).toBe(`${FROM_NOTES_COMMAND} /vault/proj-notes`);
     expect(runClaude.calls[0].resumeSessionId).toBeUndefined();
 
     const answered = runner.answers(started.jobId, [{ id: 'q1', answer: 'Ziel X' }]);
@@ -241,7 +261,7 @@ describe('ObsidianIngestRunner — start → needs-answers → resume → done',
       { exitCode: 0, output: CATALOG_OUTPUT, sessionId: 'sess-1', authError: false },
     ]);
     const runner = new ObsidianIngestRunner({ runClaude });
-    const { jobId } = runner.start('/workspace/proj');
+    const { jobId } = runner.start('/workspace/proj', { noteFolderPath: '/vault/notes' });
     await flush();
     runner.answers(jobId, [{ id: 'q1', answer: 'a' }]);
     await flush();
@@ -258,23 +278,23 @@ describe('ObsidianIngestRunner — lock lifecycle (AC1/AC6)', () => {
     ]);
     const runner = new ObsidianIngestRunner({ runClaude, lock });
 
-    const first = runner.start('/workspace/proj');
+    const first = runner.start('/workspace/proj', { noteFolderPath: '/vault/notes' });
     await flush();
     expect(runner.getJob(first.jobId).status).toBe('needs-answers');
 
     // Lock still held during needs-answers → a second start for the SAME project is rejected.
-    const second = runner.start('/workspace/proj');
+    const second = runner.start('/workspace/proj', { noteFolderPath: '/vault/notes' });
     expect(second).toEqual({ ok: false, reason: 'locked' });
 
     // A DIFFERENT project is not blocked (per-project lock, AC1).
-    const other = runner.start('/workspace/other');
+    const other = runner.start('/workspace/other', { noteFolderPath: '/vault/notes' });
     expect(other.ok).toBe(true);
 
     // Resume to done → lock released → same project can start again.
     runner.answers(first.jobId, [{ id: 'q1', answer: 'a' }]);
     await flush();
     expect(runner.getJob(first.jobId).status).toBe('done');
-    expect(runner.start('/workspace/proj').ok).toBe(true);
+    expect(runner.start('/workspace/proj', { noteFolderPath: '/vault/notes' }).ok).toBe(true);
   });
 });
 
@@ -285,7 +305,7 @@ describe('ObsidianIngestRunner — terminal error paths (AC2/AC7)', () => {
       { exitCode: 1, output: '', sessionId: undefined, authError: true },
     ]);
     const runner = new ObsidianIngestRunner({ runClaude, lock });
-    const { jobId } = runner.start('/workspace/proj');
+    const { jobId } = runner.start('/workspace/proj', { noteFolderPath: '/vault/notes' });
     await flush();
     const job = runner.getJob(jobId);
     expect(job.status).toBe('auth-expired');
@@ -296,28 +316,56 @@ describe('ObsidianIngestRunner — terminal error paths (AC2/AC7)', () => {
   it('failed (secret-free) on a non-zero exit', async () => {
     const runClaude = makeSequencedRunClaude([{ exitCode: 2, output: '', authError: false }]);
     const runner = new ObsidianIngestRunner({ runClaude });
-    const { jobId } = runner.start('/workspace/secret-path');
+    const { jobId } = runner.start('/workspace/secret-path', { noteFolderPath: '/vault/notes' });
     await flush();
     const job = runner.getJob(jobId);
     expect(job.status).toBe('failed');
     expect(job.error).not.toMatch(/\/workspace\//);
   });
 
-  it('failed on an unparsable catalog outcome (AC2/AC7)', async () => {
+  it('failed with "Lauf fehlgeschlagen (kein JSON-Ausgang)" on an unparsable/raw-text outcome (AC2/AC7/AC12 class 2)', async () => {
     const runClaude = makeSequencedRunClaude([
       { exitCode: 0, output: 'this is not a catalog', authError: false },
     ]);
     const runner = new ObsidianIngestRunner({ runClaude });
-    const { jobId } = runner.start('/workspace/proj');
+    const { jobId } = runner.start('/workspace/proj', { noteFolderPath: '/vault/notes' });
     await flush();
     expect(runner.getJob(jobId).status).toBe('failed');
-    expect(runner.getJob(jobId).error).toBeTruthy();
+    expect(runner.getJob(jobId).error).toBe(NO_JSON_OUTPUT_MESSAGE);
+  });
+
+  it('failed with "Fragenkatalog defekt" on needs-answers with an empty catalog (AC12 class 3)', async () => {
+    const runClaude = makeSequencedRunClaude([
+      { exitCode: 0, output: '{"status":"needs-answers","catalog":[]}', authError: false },
+    ]);
+    const runner = new ObsidianIngestRunner({ runClaude });
+    const { jobId } = runner.start('/workspace/proj', { noteFolderPath: '/vault/notes' });
+    await flush();
+    expect(runner.getJob(jobId).status).toBe('failed');
+    expect(runner.getJob(jobId).error).toBe(BROKEN_CATALOG_MESSAGE);
+  });
+
+  it('failed with "Fragenkatalog defekt" on needs-answers with a non-normalisable question (AC12 class 3)', async () => {
+    const runClaude = makeSequencedRunClaude([
+      { exitCode: 0, output: '{"status":"needs-answers","catalog":[{"stage":"s"}]}', authError: false },
+    ]);
+    const runner = new ObsidianIngestRunner({ runClaude });
+    const { jobId } = runner.start('/workspace/proj', { noteFolderPath: '/vault/notes' });
+    await flush();
+    expect(runner.getJob(jobId).status).toBe('failed');
+    expect(runner.getJob(jobId).error).toBe(BROKEN_CATALOG_MESSAGE);
+  });
+
+  it('AC12: the two failure messages are distinguishable strings (no shared collapsed wording)', () => {
+    expect(NO_JSON_OUTPUT_MESSAGE).not.toBe(BROKEN_CATALOG_MESSAGE);
+    expect(NO_JSON_OUTPUT_MESSAGE).not.toBe('Fragenkatalog konnte nicht gelesen werden');
+    expect(BROKEN_CATALOG_MESSAGE).not.toBe('Fragenkatalog konnte nicht gelesen werden');
   });
 
   it('failed (claude nicht verfügbar) on a spawn error', async () => {
     const runClaude = makeSequencedRunClaude([{ spawnError: true, exitCode: -1, output: '', authError: false }]);
     const runner = new ObsidianIngestRunner({ runClaude });
-    const { jobId } = runner.start('/workspace/proj');
+    const { jobId } = runner.start('/workspace/proj', { noteFolderPath: '/vault/notes' });
     await flush();
     expect(runner.getJob(jobId).status).toBe('failed');
   });
@@ -325,7 +373,7 @@ describe('ObsidianIngestRunner — terminal error paths (AC2/AC7)', () => {
   it('failed (Timeout) when the adapter reports timedOut', async () => {
     const runClaude = makeSequencedRunClaude([{ timedOut: true, exitCode: -1, output: '', authError: false }]);
     const runner = new ObsidianIngestRunner({ runClaude });
-    const { jobId } = runner.start('/workspace/proj');
+    const { jobId } = runner.start('/workspace/proj', { noteFolderPath: '/vault/notes' });
     await flush();
     expect(runner.getJob(jobId).status).toBe('failed');
     expect(runner.getJob(jobId).error).toMatch(/Timeout/);
@@ -334,7 +382,7 @@ describe('ObsidianIngestRunner — terminal error paths (AC2/AC7)', () => {
   it('failed when the runClaude adapter itself throws (AC7, no crash)', async () => {
     const runClaude = jest.fn(async () => { throw new Error('boom'); });
     const runner = new ObsidianIngestRunner({ runClaude });
-    const { jobId } = runner.start('/workspace/proj');
+    const { jobId } = runner.start('/workspace/proj', { noteFolderPath: '/vault/notes' });
     await flush();
     expect(runner.getJob(jobId).status).toBe('failed');
   });
@@ -348,7 +396,7 @@ describe('ObsidianIngestRunner — terminal error paths (AC2/AC7)', () => {
       { exitCode: 0, output: CATALOG_OUTPUT, sessionId: undefined, authError: false },
     ]);
     const runner = new ObsidianIngestRunner({ runClaude, lock });
-    const { jobId } = runner.start('/workspace/secret-path');
+    const { jobId } = runner.start('/workspace/secret-path', { noteFolderPath: '/vault/notes' });
     await flush();
     expect(runner.getJob(jobId).status).toBe('needs-answers');
 
@@ -376,7 +424,7 @@ describe('ObsidianIngestRunner — answers() guards (AC4/AC7)', () => {
   it('not-waiting when the job is not in needs-answers', async () => {
     const runClaude = makeSequencedRunClaude([{ exitCode: 0, output: '{"status":"done"}', authError: false }]);
     const runner = new ObsidianIngestRunner({ runClaude });
-    const { jobId } = runner.start('/workspace/proj');
+    const { jobId } = runner.start('/workspace/proj', { noteFolderPath: '/vault/notes' });
     await flush();
     expect(runner.getJob(jobId).status).toBe('done');
     expect(runner.answers(jobId, [])).toEqual({ ok: false, reason: 'not-waiting' });
@@ -387,7 +435,7 @@ describe('ObsidianIngestRunner — answers() guards (AC4/AC7)', () => {
       { exitCode: 0, output: CATALOG_OUTPUT, sessionId: 's', authError: false },
     ]);
     const runner = new ObsidianIngestRunner({ runClaude });
-    const { jobId } = runner.start('/workspace/proj');
+    const { jobId } = runner.start('/workspace/proj', { noteFolderPath: '/vault/notes' });
     await flush();
     // q1 is required; answering only q2 (optional) → missing-required.
     expect(runner.answers(jobId, [{ id: 'q2', answer: 'x' }])).toEqual({ ok: false, reason: 'missing-required' });
@@ -403,7 +451,7 @@ describe('ObsidianIngestRunner — audit (AC6)', () => {
     const record = jest.fn();
     const runClaude = makeSequencedRunClaude([{ exitCode: 0, output: '{"status":"done"}', authError: false }]);
     const runner = new ObsidianIngestRunner({ runClaude, auditStore: { record } });
-    runner.start('/workspace/proj', { identity: 'alex@x' });
+    runner.start('/workspace/proj', { noteFolderPath: '/vault/notes', identity: 'alex@x' });
     await flush();
     expect(record).toHaveBeenCalledWith(
       expect.objectContaining({ identity: 'alex@x', command: expect.stringContaining('obsidian:ingest:done') }),
@@ -414,7 +462,7 @@ describe('ObsidianIngestRunner — audit (AC6)', () => {
     const record = jest.fn(() => { throw new Error('audit down'); });
     const runClaude = makeSequencedRunClaude([{ exitCode: 1, output: '', authError: false }]);
     const runner = new ObsidianIngestRunner({ runClaude, auditStore: { record } });
-    const { jobId } = runner.start('/workspace/proj', { identity: 'alex@x' });
+    const { jobId } = runner.start('/workspace/proj', { noteFolderPath: '/vault/notes', identity: 'alex@x' });
     await flush();
     expect(runner.getJob(jobId).status).toBe('failed'); // no crash despite audit throw
     expect(record).toHaveBeenCalled();
@@ -513,7 +561,7 @@ describe('ObsidianIngestRunner — notifyQuestionsPending wiring (AC1/AC4/AC5/AC
     ]);
     const runner = new ObsidianIngestRunner({ runClaude, notifier: { notifyQuestionsPending } });
 
-    runner.start('/workspace/proj-a');
+    runner.start('/workspace/proj-a', { noteFolderPath: '/vault/notes' });
     await flush();
 
     expect(notifyQuestionsPending).toHaveBeenCalledTimes(1);
@@ -527,7 +575,7 @@ describe('ObsidianIngestRunner — notifyQuestionsPending wiring (AC1/AC4/AC5/AC
     ]);
     const runner = new ObsidianIngestRunner({ runClaude, notifier: { notifyQuestionsPending } });
 
-    runner.start('/workspace/proj-a');
+    runner.start('/workspace/proj-a', { noteFolderPath: '/vault/notes' });
     await flush();
 
     expect(notifyQuestionsPending).not.toHaveBeenCalled();
@@ -541,7 +589,7 @@ describe('ObsidianIngestRunner — notifyQuestionsPending wiring (AC1/AC4/AC5/AC
     ]);
     const runner = new ObsidianIngestRunner({ runClaude, notifier: { notifyQuestionsPending } });
 
-    const { jobId } = runner.start('/workspace/proj-a');
+    const { jobId } = runner.start('/workspace/proj-a', { noteFolderPath: '/vault/notes' });
     await flush();
     expect(notifyQuestionsPending).toHaveBeenCalledTimes(1);
 
@@ -558,7 +606,7 @@ describe('ObsidianIngestRunner — notifyQuestionsPending wiring (AC1/AC4/AC5/AC
     ]);
     const runner = new ObsidianIngestRunner({ runClaude, lock, notifier: { notifyQuestionsPending } });
 
-    const { jobId } = runner.start('/workspace/proj-a');
+    const { jobId } = runner.start('/workspace/proj-a', { noteFolderPath: '/vault/notes' });
     await flush();
 
     const job = runner.getJob(jobId);
@@ -574,7 +622,7 @@ describe('ObsidianIngestRunner — notifyQuestionsPending wiring (AC1/AC4/AC5/AC
     ]);
     const runner = new ObsidianIngestRunner({ runClaude });
 
-    const { jobId } = runner.start('/workspace/proj-a');
+    const { jobId } = runner.start('/workspace/proj-a', { noteFolderPath: '/vault/notes' });
     await flush();
 
     expect(runner.getJob(jobId).status).toBe('needs-answers');
@@ -587,7 +635,7 @@ describe('ObsidianIngestRunner — notifyQuestionsPending wiring (AC1/AC4/AC5/AC
     ]);
     const runner = new ObsidianIngestRunner({ runClaude, notifier: { notifyQuestionsPending } });
 
-    runner.start('/workspace/secret-owner/my-project');
+    runner.start('/workspace/secret-owner/my-project', { noteFolderPath: '/vault/notes' });
     await flush();
 
     const [args] = notifyQuestionsPending.mock.calls[0];
@@ -604,7 +652,7 @@ describe('ObsidianIngestRunner — notifyQuestionsPending wiring (AC1/AC4/AC5/AC
     const runner = new ObsidianIngestRunner({ runClaude, notifier: { notifyQuestionsPending } });
 
     // A trailing-slash-only path has no usable basename segment.
-    runner.start('/');
+    runner.start('/', { noteFolderPath: '/vault/notes' });
     await flush();
 
     const [args] = notifyQuestionsPending.mock.calls[0];

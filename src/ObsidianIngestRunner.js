@@ -1,7 +1,16 @@
 /**
  * ObsidianIngestRunner — headless `claude -p '/agent-flow:from-notes …'`-
  * Kindprozess-Runner MIT strukturiertem Interrupt/Resume-Rückkanal
- * (docs/specs/obsidian-question-catalog.md AC1, AC2, AC4, AC5, AC6, AC7).
+ * (docs/specs/obsidian-question-catalog.md AC1, AC2, AC4, AC5, AC6, AC7,
+ * AC8, AC9, AC12 — v2 „Ziel-Projekt-Repo als cwd"-Fix).
+ *
+ * `cwd` = Ziel-Projekt-Repo, Notiz-Ordner NUR Argument (AC8, v2):
+ *   `start(targetRepoPath, { noteFolderPath, identity })` — `targetRepoPath`
+ *   (validierter Workspace-Checkout, cwd des Kindprozesses UND Lock-Schlüssel)
+ *   und `noteFolderPath` (vault-confined Notiz-Ordner, wird ausschließlich zum
+ *   Befehls-Argument `<notiz-ordner>`) sind ZWEI getrennte Pfade — nie
+ *   vertauscht. Der frühere Defekt (cwd = Notiz-Ordner → „kein Git-Repository"-
+ *   Abbruch, s. Spec-Kopf v2) ist damit behoben.
  *
  * Anders als die bestehenden fire-and-forget-Runner (`HeadlessReconcileRunner`/
  * `HeadlessFlowRunner`, bei denen `close` = terminal `done`) endet EIN Ingest-
@@ -84,7 +93,11 @@ const GENERIC_FAILURE_MESSAGE = 'Obsidian-Ingest-Lauf fehlgeschlagen';
 const TIMEOUT_FAILURE_MESSAGE = 'Obsidian-Ingest-Lauf abgebrochen (Timeout)';
 const INTERNAL_FAILURE_MESSAGE = 'Interner Fehler im Obsidian-Ingest-Runner';
 const NOT_AVAILABLE_MESSAGE = 'claude nicht verfügbar';
-const UNPARSABLE_MESSAGE = 'Fragenkatalog konnte nicht gelesen werden';
+// AC12 (v2): die frühere Sammelmeldung „Fragenkatalog konnte nicht gelesen
+// werden" für BEIDE Fälle (kein JSON-Ausgang / kaputter Katalog) entfällt —
+// zwei klassen-scharfe, unterscheidbare Meldungen (s. parseIngestOutcome).
+export const NO_JSON_OUTPUT_MESSAGE = 'Lauf fehlgeschlagen (kein JSON-Ausgang)';
+export const BROKEN_CATALOG_MESSAGE = 'Fragenkatalog defekt';
 const NO_SESSION_MESSAGE = 'Obsidian-Ingest-Lauf kann nicht fortgesetzt werden';
 const DONE_RESULT_MESSAGE = 'Obsidian-Ingest abgeschlossen';
 
@@ -152,14 +165,30 @@ function normalizeQuestion(q) {
 }
 
 /**
+ * Marker-Fehlerklasse für AC12-Klasse (3): der Ausgang HAT
+ * `status: 'needs-answers'`, der `catalog` ist aber leer/kaputt/nicht auf das
+ * Vertrags-Schema normalisierbar. Vom generischen „kein verwertbarer
+ * JSON-Ausgang"-Fall (Klasse 2, alle übrigen Wurf-Stellen unten) unterscheidbar,
+ * sodass der Runner die passende der beiden AC12-Meldungen setzt
+ * („Fragenkatalog defekt" statt „Lauf fehlgeschlagen (kein JSON-Ausgang)").
+ */
+export class BrokenCatalogError extends Error {}
+
+/**
  * Parst den strukturierten Ingest-Ausgang aus dem `result`-Text (AC2,
  * Markdown-Fence-tolerant, analog `IdeaSpecifyChatService.parseClaudeOutput`).
  * Erwartet ein JSON-Objekt `{ status: 'needs-answers'|'done', catalog?: [...] }`.
  *
+ * AC12 (v2, Fehlertext-Differenzierung): wirft `BrokenCatalogError` für die
+ * Klasse „status:'needs-answers', Katalog leer/nicht-normalisierbar" (3) —
+ * einen generischen `Error` für alles andere (kein valides JSON, kein
+ * `{status}`-Objekt, unbekannter `status`), Klasse (2). Der Aufrufer
+ * (`ObsidianIngestRunner#runRound`) unterscheidet danach die Meldung.
+ *
  * @param {string} raw
  * @returns {{ status: 'done' } | { status: 'needs-answers', catalog: Array<object> }}
- * @throws {Error} bei ungültigem JSON, unbekanntem `status` oder leerem/kaputtem
- *   `needs-answers`-Katalog (→ Runner mappt auf `failed`, secret-frei).
+ * @throws {BrokenCatalogError} bei `needs-answers` mit leerem/kaputtem Katalog (Klasse 3).
+ * @throws {Error} bei ungültigem JSON oder unbekanntem `status` (Klasse 2).
  */
 export function parseIngestOutcome(raw) {
   let parsed;
@@ -183,9 +212,14 @@ export function parseIngestOutcome(raw) {
   }
   if (status === 'needs-answers') {
     if (!Array.isArray(parsed.catalog) || parsed.catalog.length === 0) {
-      throw new Error('needs-answers without a non-empty catalog');
+      throw new BrokenCatalogError('needs-answers without a non-empty catalog');
     }
-    const catalog = parsed.catalog.map(normalizeQuestion);
+    let catalog;
+    try {
+      catalog = parsed.catalog.map(normalizeQuestion);
+    } catch (err) {
+      throw new BrokenCatalogError(err instanceof Error ? err.message : 'invalid catalog question');
+    }
     return { status: 'needs-answers', catalog };
   }
   throw new Error(`unknown ingest status: ${String(status)}`);
@@ -341,7 +375,7 @@ export class ObsidianIngestRunner {
    * @type {Map<string, {
    *   status: 'running'|'needs-answers'|'done'|'failed'|'auth-expired',
    *   catalog?: Array<object>, result?: string, error?: string,
-   *   projectPath: string, sessionId?: string, identity: string|null,
+   *   projectPath: string, noteFolderPath: string, sessionId?: string, identity: string|null,
    * }>}
    */
   #jobs = new Map();
@@ -368,22 +402,29 @@ export class ObsidianIngestRunner {
   }
 
   /**
-   * Startet einen Obsidian-Ingest-Lauf für ein Projekt (AC1). Erwirbt das
-   * projektweise Lock; freigegeben erst bei einem terminalen Zustand.
+   * Startet einen Obsidian-Ingest-Lauf für ein Ziel-Projekt (AC1, AC8/AC9 v2).
+   * Erwirbt das projektweise Lock (Schlüssel = `targetRepoPath`); freigegeben
+   * erst bei einem terminalen Zustand.
    *
-   * @param {string} projectPath - aufgelöster, validierter absoluter Projekt-/Notiz-Pfad.
+   * @param {string} targetRepoPath - aufgelöster, validierter absoluter
+   *   Ziel-Projekt-Repo-Pfad (Workspace-Checkout). Wird `cwd` des
+   *   `claude -p`-Kindprozesses UND Lock-Schlüssel (AC8) — NIE der Notiz-Ordner.
    * @param {object} [meta]
+   * @param {string} meta.noteFolderPath - aufgelöster, vault-confined
+   *   Obsidian-Notiz-Ordner. Wird AUSSCHLIESSLICH als Befehls-Argument
+   *   `<notiz-ordner>` übergeben, NIE als `cwd` (AC8).
    * @param {string|null} [meta.identity] - für das Ende-/Fehler-Audit (AC6).
    * @returns {{ ok: true, jobId: string } | { ok: false, reason: 'locked' }}
    */
-  start(projectPath, { identity = null } = {}) {
-    if (!this.#lock.tryAcquire(projectPath)) {
+  start(targetRepoPath, { noteFolderPath, identity = null } = {}) {
+    if (!this.#lock.tryAcquire(targetRepoPath)) {
       return { ok: false, reason: 'locked' };
     }
     const jobId = randomUUID();
     this.#jobs.set(jobId, {
       status: 'running',
-      projectPath,
+      projectPath: targetRepoPath,
+      noteFolderPath,
       identity: identity ?? null,
       sessionId: undefined,
     });
@@ -459,7 +500,9 @@ export class ObsidianIngestRunner {
       return;
     }
 
-    const promptArg = resume ? undefined : `${FROM_NOTES_COMMAND} ${job.projectPath}`;
+    // AC8 (v2): `cwd` = Ziel-Projekt-Repo (job.projectPath), das
+    // Kommando-Argument = der vault-confined Notiz-Ordner — NIE vertauscht.
+    const promptArg = resume ? undefined : `${FROM_NOTES_COMMAND} ${job.noteFolderPath}`;
 
     let res;
     try {
@@ -494,10 +537,14 @@ export class ObsidianIngestRunner {
     let outcome;
     try {
       outcome = parseIngestOutcome(res.output);
-    } catch {
+    } catch (err) {
       // Nicht-parsbarer/kaputter Katalog-Ausgang → definierter Fehlerzustand,
-      // secret-frei, Retry möglich (AC2/AC7). Kein Crash.
-      this.#finish(jobId, 'failed', { error: UNPARSABLE_MESSAGE });
+      // secret-frei, Retry möglich (AC2/AC7). Kein Crash. AC12 (v2): zwei
+      // klassen-scharfe Meldungen statt der früheren Sammelmeldung — der
+      // `BrokenCatalogError`-Marker unterscheidet Klasse (3, kaputter Katalog)
+      // von Klasse (2, kein verwertbarer JSON-Ausgang).
+      const message = err instanceof BrokenCatalogError ? BROKEN_CATALOG_MESSAGE : NO_JSON_OUTPUT_MESSAGE;
+      this.#finish(jobId, 'failed', { error: message });
       return;
     }
 

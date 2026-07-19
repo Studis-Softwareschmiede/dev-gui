@@ -1,6 +1,7 @@
 /**
  * obsidianIngestRouter — Express-Router für den Headless-Obsidian-Ingest-Runner
- * (docs/specs/obsidian-question-catalog.md AC1, AC2, AC4, AC5, AC6, AC7).
+ * (docs/specs/obsidian-question-catalog.md AC1, AC2, AC4, AC5, AC6, AC7,
+ * AC8, AC9, AC12 — v2 „Ziel-Projekt-Repo als cwd"-Fix).
  *
  * Routes (hinter dem AccessGuard, wie alle /api/*, s. server.js):
  *   POST /api/obsidian-ingest/start            — startet den headless from-notes-Lauf
@@ -11,22 +12,35 @@
  * `ObsidianIngestRunner` (eigene `ProjectJobLock`-Instanz), keinen
  * `CommandService`/`PtyManager`-Import.
  *
- * Pfad-Auflösung (vault-confined, security/R02/R03, Wiederverwendung — obsidian-
- * vault-config AC5, analog dem PTY-Trigger `/agent-flow:from-notes` in
- * `CommandService.js`: „vault-confined, never free text"): Der Client sendet
- * `projectFolderPath` als absoluten Pfad. Statt eines eigenen neuen Confinement-
- * Mechanismus wird der bereits konfigurierte Obsidian-Vault-Pfad gelesen
- * (`credentialStore.readObsidianVaultPath()`) und `listObsidianVaultProjects()`
- * (obsidianVaultPath.js) liefert die aktuell gültigen `<vault>/Projekte`-
- * Unterordner (bereits realpath-aufgelöst + Symlink-/Race-sicher confined,
- * obsidian-vault-config AC3/AC5). Der eingereichte `projectFolderPath` wird per
- * `realpath` aufgelöst und MUSS exakt einem dieser gelisteten Pfade entsprechen
- * — kein Freitext-Pfad gelangt ungeprüft in cwd/argv des Kindprozesses. Ist kein
- * Vault konfiguriert oder „Projekte" (mehr) nicht erreichbar → `404` (dieselbe
- * `ObsidianVaultPathError`-Fehlerklasse wie `GET .../obsidian-vault/projects`).
- * Der Projekt-Unterordner selbst wird nach der v3-Rangfolge (obsidian-vault-config
- * AC10: persistiert → Env `OBSIDIAN_PROJEKTE_SUBDIR` → Default „Projekte") aufgelöst
- * — derselbe wirksame Wert wie an den übrigen Verbrauchsstellen (AC2c/AC5).
+ * Pfad-Auflösung — ZWEI getrennte, NIE vertauschte Pfade (AC8/AC9, v2):
+ *   1. `projectFolderPath` (Notiz-Ordner, vault-confined, security/R02/R03,
+ *      Wiederverwendung — obsidian-vault-config AC5, analog dem PTY-Trigger
+ *      `/agent-flow:from-notes` in `CommandService.js`: „vault-confined, never
+ *      free text"): Der Client sendet `projectFolderPath` als absoluten Pfad.
+ *      Statt eines eigenen neuen Confinement-Mechanismus wird der bereits
+ *      konfigurierte Obsidian-Vault-Pfad gelesen (`credentialStore.
+ *      readObsidianVaultPath()`) und `listObsidianVaultProjects()`
+ *      (obsidianVaultPath.js) liefert die aktuell gültigen `<vault>/Projekte`-
+ *      Unterordner (bereits realpath-aufgelöst + Symlink-/Race-sicher confined,
+ *      obsidian-vault-config AC3/AC5). Der eingereichte `projectFolderPath`
+ *      wird per `realpath` aufgelöst und MUSS exakt einem dieser gelisteten
+ *      Pfade entsprechen — kein Freitext-Pfad gelangt ungeprüft in argv des
+ *      Kindprozesses. Ist kein Vault konfiguriert oder „Projekte" (mehr) nicht
+ *      erreichbar → `404` (dieselbe `ObsidianVaultPathError`-Fehlerklasse wie
+ *      `GET .../obsidian-vault/projects`). Der Projekt-Unterordner selbst wird
+ *      nach der v3-Rangfolge (obsidian-vault-config AC10: persistiert → Env
+ *      `OBSIDIAN_PROJEKTE_SUBDIR` → Default „Projekte") aufgelöst — derselbe
+ *      wirksame Wert wie an den übrigen Verbrauchsstellen (AC2c/AC5). Dieser
+ *      Pfad wird zum Befehls-Argument `<notiz-ordner>`, NIE zum `cwd` (AC8).
+ *   2. `targetProjectSlug` (Ziel-Projekt-Repo, NEU v2 — wird zum `cwd`,
+ *      AC8/AC9): server-seitig via `resolveProjectSlug(slug)` →
+ *      `validateProjectPath()` (`workspacePath.js`, `WORKSPACE_DIR`-Schranke)
+ *      auf einen existierenden Workspace-Checkout aufgelöst — exakt dasselbe
+ *      Confinement-Muster wie `POST /api/projects/:slug/drain`
+ *      (`projectDrainRouter.js`, Resolution R1). Fehlt/leer/malformter Slug →
+ *      `400`; `WORKSPACE_DIR` nicht konfiguriert / Checkout existiert nicht →
+ *      `404`. Kein Runner-Start ohne aufgelöstes Ziel-Repo — KEIN stiller
+ *      cwd-Fallback auf den Notiz-Ordner (AC9).
  *
  * Audit-First-Konvention (analog `ideaSpecifyRouter`): Format-/Existenz-/State-
  * Vorprüfungen werden OHNE Audit abgelehnt; genau EIN Audit-Eintrag je
@@ -48,6 +62,7 @@ import {
   ObsidianVaultPathError,
   resolveEffectiveProjekteSubdir,
 } from './obsidianVaultPath.js';
+import { resolveProjectSlug, validateProjectPath, ProjectPathError } from './workspacePath.js';
 
 /**
  * Extrahiert den identity-String aus `req.identity` (AccessGuard-Claim) — analog
@@ -70,6 +85,12 @@ function _resolveIdentity(identity) {
  * @param {(p: string) => Promise<string>} [options.realpath]
  *   Injectable (default: node:fs/promises.realpath). Inject a stub in tests.
  * @param {import('./AuditStore.js').AuditStore} [options.auditStore] - optional (AC6).
+ * @param {(slug: string|null) => string|null} [options.slugResolver]
+ *   Injectable Ziel-Projekt-Slug→Pfad-Resolver (default: `resolveProjectSlug`
+ *   aus `workspacePath.js`, AC9). Inject a stub in tests.
+ * @param {(path: string) => Promise<{ resolvedPath: string }>} [options.pathValidator]
+ *   Injectable Ziel-Projekt-Pfad-Validator (default: `validateProjectPath` aus
+ *   `workspacePath.js`, `WORKSPACE_DIR`-Schranke, AC9). Inject a stub in tests.
  * @returns {import('express').Router}
  */
 export function obsidianIngestRouter(runner, options = {}) {
@@ -77,6 +98,8 @@ export function obsidianIngestRouter(runner, options = {}) {
   const _listProjects = options.listProjects ?? listObsidianVaultProjects;
   const _realpath = options.realpath ?? nodeRealpath;
   const _auditStore = options.auditStore ?? null;
+  const _slugResolver = options.slugResolver ?? resolveProjectSlug;
+  const _pathValidator = options.pathValidator ?? validateProjectPath;
   const router = Router();
 
   /**
@@ -146,22 +169,73 @@ export function obsidianIngestRouter(runner, options = {}) {
   }
 
   /**
+   * Löst + validiert `targetProjectSlug` auf den Ziel-Projekt-Repo-Pfad auf
+   * (AC9, v2 — Confinement-Muster wie `POST /api/projects/:slug/drain`, s.
+   * Modul-Kommentar): `resolveProjectSlug` (Slug-Form-Check, security/R02/R03)
+   * → `validateProjectPath` (`WORKSPACE_DIR`-Schranke, realpath-Containment).
+   * Fehlender/leerer/malformter Slug → `400`; `WORKSPACE_DIR` nicht
+   * konfiguriert ODER Checkout existiert nicht/kein Verzeichnis → `404`. KEIN
+   * Runner-Start bei einem Fehler hier (AC9) — kein cwd-Fallback.
+   *
+   * @param {unknown} targetProjectSlug
+   * @returns {Promise<{ ok: true, resolvedPath: string } | { ok: false, status: number, error: string }>}
+   */
+  async function resolveTargetRepo(targetProjectSlug) {
+    let slugPath;
+    try {
+      slugPath = _slugResolver(typeof targetProjectSlug === 'string' ? targetProjectSlug : null);
+    } catch (err) {
+      const reason = err instanceof ProjectPathError ? err.message : 'Invalid targetProjectSlug';
+      return { ok: false, status: 400, error: `Invalid targetProjectSlug: ${reason}` };
+    }
+    if (slugPath === null) {
+      return { ok: false, status: 400, error: 'targetProjectSlug is required' };
+    }
+
+    try {
+      const { resolvedPath } = await _pathValidator(slugPath);
+      return { ok: true, resolvedPath };
+    } catch (err) {
+      if (err instanceof ProjectPathError && (err.errorClass === 'not-exists' || err.errorClass === 'not-directory')) {
+        return { ok: false, status: 404, error: 'Ziel-Projekt-Repo nicht gefunden' };
+      }
+      if (err instanceof ProjectPathError && err.errorClass === 'outside-boundary') {
+        // Die Slug-Form wurde bereits von resolveProjectSlug geprüft — diese
+        // Grenzverletzung erreicht man nur, wenn WORKSPACE_DIR selbst nicht
+        // konfiguriert/erreichbar ist.
+        return { ok: false, status: 404, error: 'Workspace nicht konfiguriert — Ziel-Projekt-Repo nicht erreichbar' };
+      }
+      return { ok: false, status: 400, error: 'Invalid targetProjectSlug' };
+    }
+  }
+
+  /**
    * POST /api/obsidian-ingest/start
-   * Body: { projectFolderPath: string }
+   * Body: { projectFolderPath: string, targetProjectSlug: string }
    *
    * Responses:
    *   202 { jobId, status: "running" }
-   *   400 { error }  — fehlender/ungültiger/nicht-gelisteter Pfad
-   *   404 { error }  — Vault nicht konfiguriert / „Projekte" (mehr) nicht erreichbar
+   *   400 { error }  — fehlender/ungültiger/nicht-gelisteter Notiz-Pfad ODER
+   *                    fehlender/ungültiger targetProjectSlug (AC9)
+   *   404 { error }  — Vault nicht konfiguriert / „Projekte" (mehr) nicht
+   *                    erreichbar ODER Ziel-Projekt-Repo nicht gefunden /
+   *                    Workspace nicht konfiguriert (AC9)
    *   409 { error }  — Projekt-Sperre (bereits ein laufender/offener Ingest-Lauf)
    *   500 { error }  — Vault-/Audit-Lesefehler (Aktion abgebrochen)
    */
   router.post('/api/obsidian-ingest/start', async (req, res) => {
-    const { projectFolderPath } = req.body ?? {};
+    const { projectFolderPath, targetProjectSlug } = req.body ?? {};
 
-    const resolved = await resolveConfinedProjectPath(projectFolderPath);
-    if (!resolved.ok) {
-      return res.status(resolved.status).json({ error: resolved.error });
+    const resolvedNotes = await resolveConfinedProjectPath(projectFolderPath);
+    if (!resolvedNotes.ok) {
+      return res.status(resolvedNotes.status).json({ error: resolvedNotes.error });
+    }
+
+    // AC9 (v2): kein Runner-Start ohne aufgelöstes Ziel-Repo — kein stiller
+    // cwd-Fallback auf den Notiz-Ordner.
+    const resolvedTarget = await resolveTargetRepo(targetProjectSlug);
+    if (!resolvedTarget.ok) {
+      return res.status(resolvedTarget.status).json({ error: resolvedTarget.error });
     }
 
     // Audit-First (genau EIN Eintrag je akzeptiertem Job-Start, AC6): schlägt
@@ -176,7 +250,11 @@ export function obsidianIngestRouter(runner, options = {}) {
       }
     }
 
-    const result = runner.start(resolved.resolvedPath, { identity });
+    // AC8: cwd = Ziel-Repo-Pfad, Notiz-Ordner NUR Argument — nie vertauscht.
+    const result = runner.start(resolvedTarget.resolvedPath, {
+      noteFolderPath: resolvedNotes.resolvedPath,
+      identity,
+    });
     if (!result.ok) {
       // Aktuell einzige Ablehnungs-Ursache: 'locked' (AC1/AC6, Parallel-Start).
       return res.status(409).json({ error: 'Obsidian-Ingest läuft bereits für dieses Projekt.' });
