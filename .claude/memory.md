@@ -20,7 +20,7 @@ OBSIDIAN_VAULT_HOST_DIR in lokaler .env, OBSIDIAN_PROJEKTE_SUBDIR
 - S-373 / Read-only `GET /api/deployments/:app/gpg-exists`.
 
 ## Offene Fäden
-- Retro 2026-07-19: agent-flow PR #372 (LEARNINGS-Wartezimmer) wartet auf Review/Merge; Issue #371 (board-ship.sh worktree-tauglich) offen.
+- Retro 2026-07-19: agent-flow PR #372 gemergt (Owner-Freigabe); Issue #371 (board-ship.sh worktree-tauglich) bleibt offen.
 - Reviewer-Suggestion S-377: Digest-Pin-Fix beim nächsten echten VPS-Update einmal am realen Container verifizieren.
 - Reviewer-Suggestions F-088 (Kosmetik): Fehler-Zweig von `fetchObsidianVaultBrowse` direkt unit-testen; Tab-Fokus-Trap für beide Obsidian-Overlays gemeinsam nachrüsten.
 - Metrik-Ledger: flow/L05-Defekt BEHOBEN; `tok_total` zählt per Design in+out+cache (Millionenwerte normal).
