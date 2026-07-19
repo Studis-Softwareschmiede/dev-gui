@@ -229,11 +229,18 @@ export class HeadlessNewProjectRunner {
    * @param {string[]} [opts.args] - Extra-argv für DIESEN `run()`-Lauf (Default: keine).
    * @param {string|null} [opts.identity] - Audit-Identity für die Provisionierung
    *   (Default: die Runner-eigene `identity` aus dem Konstruktor).
-   * @returns {Promise<{ result: 'created'|'already-exists'|'access-not-ready'|'failed', reason?: string }>}
+   * Rückgabe wird UNVERÄNDERT vom `provisioningService.withScaffoldPassphrase()`-
+   * Promise durchgereicht — inklusive dessen `scaffoldOk`-Flag (S-387-Fund,
+   * `docs/specs/obsidian-question-catalog.md` AC14), das zuverlässig anzeigt,
+   * ob der `fn`-Aufruf (dieser `run()`-Lauf) selbst erfolgreich war,
+   * UNABHÄNGIG vom `result`-Wert (der auch die Bitwarden-Teil-Ergebnisse nach
+   * erfolgreichem Scaffold codiert).
+   *
+   * @returns {Promise<{ result: 'created'|'already-exists'|'access-not-ready'|'failed', scaffoldOk: boolean, reason?: string }>}
    */
   async runWithAutoProvisioning(app, projectPath, { args, identity } = {}) {
     if (!this.#provisioningService || typeof this.#provisioningService.withScaffoldPassphrase !== 'function') {
-      return { result: 'failed', reason: 'Interner Fehler — kein Provisionierungs-Dienst konfiguriert' };
+      return { result: 'failed', scaffoldOk: false, reason: 'Interner Fehler — kein Provisionierungs-Dienst konfiguriert' };
     }
     return this.#provisioningService.withScaffoldPassphrase(
       app,

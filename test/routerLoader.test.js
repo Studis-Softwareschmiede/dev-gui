@@ -339,8 +339,12 @@ describe('routerLoader — Echte src/routers/ Module (AC1/AC3)', () => {
     // credentialRotate.js wurde mit credential-key-rotation (S-083 Kern) hinzugefügt
     //   (POST /api/settings/credential-rotate — atomare Master-Key-Rotation,
     //   AC1-AC3/AC7-AC10) → 51.
+    // obsidianTarget.js wurde mit obsidian-question-catalog v3 (S-387) hinzugefügt
+    //   (POST .../obsidian-ingest/ensure-target + GET .../obsidian-ingest/ensure-target/:jobId —
+    //   Ziel-Repo-Vorbereitung bestehend/neu via HeadlessNewProjectRunner, strikt
+    //   vor dem unveränderten start-Endpunkt, AC11/AC13/AC14) → 52.
     const entries = await readdir(ROUTERS_DIR);
     const mountedCount = entries.filter((f) => f.endsWith('.js')).length;
-    expect(mountedCount).toBe(51);
+    expect(mountedCount).toBe(52);
   });
 });

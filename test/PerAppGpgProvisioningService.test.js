@@ -12,7 +12,14 @@
  *         wirft `access-incomplete` VOR jeder Session — kein itemExists/createItem).
  *   AC4 (S-336) — `withScaffoldPassphrase(app, fn)`: Scaffold-Erfolg → genau EIN
  *         `createItem`-Aufruf (`created`); Scaffold-Fehlschlag (`fn()` rejected)
- *         → `failed`, KEIN `createItem`-Aufruf (kein Teil-Zustand).
+ *         → `failed`, KEIN `createItem`-Aufruf (kein Teil-Zustand). Rückgabe
+ *         trägt zusätzlich das explizite `scaffoldOk`-Flag (S-387-Fund,
+ *         `docs/specs/obsidian-question-catalog.md` AC14): `true` GENAU DANN,
+ *         wenn `fn` selbst erfolgreich lief — UNABHÄNGIG vom `result`-Wert
+ *         (auch in den Fallback-Zweigen `access-not-ready`/`already-exists`,
+ *         wo `fn({})` best-effort läuft, UND im Nach-Scaffold-Erfolg-Pfad,
+ *         wenn NUR der Bitwarden-Schritt scheitert — dort bleibt
+ *         `scaffoldOk: true` trotz `result: 'failed'`/`'access-not-ready'`).
  *   AC5 (S-336) — die Passphrase wird `fn({ gpgPassFilePath })` über eine
  *         TEMPORÄRE `0600`-Datei gereicht (nicht Argv); die Datei existiert
  *         WÄHREND `fn()` läuft und ist danach — AUCH bei Scaffold-Fehlschlag —
@@ -249,7 +256,7 @@ describe('PerAppGpgProvisioningService — withScaffoldPassphrase() — AC4/AC5/
 
     const result = await svc.withScaffoldPassphrase('myapp', fn, { identity: 'a@b.ch' });
 
-    expect(result).toEqual({ result: 'created' });
+    expect(result).toEqual({ result: 'created', scaffoldOk: true });
     expect(fn).toHaveBeenCalledTimes(1);
     expect(calls.createItem.length).toBe(1);
     expect(calls.createItem[0].name).toBe('env.gpg-passphrase-myapp');
@@ -283,6 +290,7 @@ describe('PerAppGpgProvisioningService — withScaffoldPassphrase() — AC4/AC5/
     const result = await svc.withScaffoldPassphrase('myapp', fn);
 
     expect(result.result).toBe('failed');
+    expect(result.scaffoldOk).toBe(false);
     expect(calls.createItem.length).toBe(0);
     await expect(stat(observedPath)).rejects.toThrow();
   });
@@ -303,6 +311,19 @@ describe('PerAppGpgProvisioningService — withScaffoldPassphrase() — AC4/AC5/
     await expect(stat(observedPath)).rejects.toThrow();
   });
 
+  it('S-387-Fund (Fehlrichtung b): bw-Fehler bei createItem NACH Scaffold-Erfolg → `result: "failed"`, ABER `scaffoldOk: true` (der Scaffold selbst lief durch — nur die Bitwarden-Provisionierung scheiterte)', async () => {
+    const { session } = makeSession({ exists: false, createFails: true });
+    const openSession = jest.fn(async () => session);
+    const svc = new PerAppGpgProvisioningService({ deployLoginService: { openSession }, auditStore: auditSpy() });
+
+    const fn = jest.fn(async () => {});
+
+    const result = await svc.withScaffoldPassphrase('myapp', fn);
+
+    expect(result.result).toBe('failed');
+    expect(result.scaffoldOk).toBe(true);
+  });
+
   it('AC4: genau EIN Provisionierungs-Aufruf pro Scaffold-Erfolg (ein einziger createItem-Call)', async () => {
     const { session, calls } = makeSession({ exists: false });
     const openSession = jest.fn(async () => session);
@@ -315,7 +336,7 @@ describe('PerAppGpgProvisioningService — withScaffoldPassphrase() — AC4/AC5/
     expect(calls.createItem.length).toBe(1);
   });
 
-  it('Item existiert bereits (Slug-Kollision bei Vor-Prüfung) → already-exists; fn({}) OHNE gpgPassFilePath, KEIN createItem, kein Überschreiben', async () => {
+  it('Item existiert bereits (Slug-Kollision bei Vor-Prüfung) → already-exists; fn({}) OHNE gpgPassFilePath, KEIN createItem, kein Überschreiben; scaffoldOk:true wenn fn() gelingt', async () => {
     const { session, calls } = makeSession({ exists: true });
     const openSession = jest.fn(async () => session);
     const svc = new PerAppGpgProvisioningService({ deployLoginService: { openSession }, auditStore: auditSpy() });
@@ -327,11 +348,27 @@ describe('PerAppGpgProvisioningService — withScaffoldPassphrase() — AC4/AC5/
     const result = await svc.withScaffoldPassphrase('myapp', fn);
 
     expect(result.result).toBe('already-exists');
+    expect(result.scaffoldOk).toBe(true);
     expect(fn).toHaveBeenCalledTimes(1);
     expect(calls.createItem.length).toBe(0);
   });
 
-  it('Zugang nicht ready (Vor-Prüfung) → access-not-ready; fn({}) OHNE gpgPassFilePath (Plugin-Fallback), KEIN itemExists/createItem', async () => {
+  it('S-387-Fund (Fehlrichtung a): Item existiert bereits (Slug-Kollision), ABER der Fallback-Scaffold fn() selbst wirft → weiterhin `result: "already-exists"`, ABER `scaffoldOk: false` (Scaffold ist NICHT erfolgreich durchgelaufen)', async () => {
+    const { session } = makeSession({ exists: true });
+    const openSession = jest.fn(async () => session);
+    const svc = new PerAppGpgProvisioningService({ deployLoginService: { openSession }, auditStore: auditSpy() });
+
+    const fn = jest.fn(async () => {
+      throw new Error('Scaffold-Fallback-Lauf fehlgeschlagen');
+    });
+
+    const result = await svc.withScaffoldPassphrase('myapp', fn);
+
+    expect(result.result).toBe('already-exists');
+    expect(result.scaffoldOk).toBe(false);
+  });
+
+  it('Zugang nicht ready (Vor-Prüfung) → access-not-ready; fn({}) OHNE gpgPassFilePath (Plugin-Fallback), KEIN itemExists/createItem; scaffoldOk:true wenn fn() gelingt', async () => {
     const openSession = jest.fn(async () => {
       const err = new Error('Deploy-Zugang unvollständig');
       err.deployErrorClass = 'access-incomplete';
@@ -346,11 +383,30 @@ describe('PerAppGpgProvisioningService — withScaffoldPassphrase() — AC4/AC5/
     const result = await svc.withScaffoldPassphrase('myapp', fn);
 
     expect(result.result).toBe('access-not-ready');
+    expect(result.scaffoldOk).toBe(true);
     expect(fn).toHaveBeenCalledTimes(1);
     expect(openSession).toHaveBeenCalledTimes(1);
   });
 
-  it('Zugang wird ZWISCHEN Vor-Prüfung und Item-Anlage unready → access-not-ready (Scaffold bereits erfolgreich, kein Teil-Zustand behauptet)', async () => {
+  it('S-387-Fund (Fehlrichtung a): Zugang nicht ready (Vor-Prüfung), ABER der Fallback-Scaffold fn() selbst wirft → weiterhin `result: "access-not-ready"`, ABER `scaffoldOk: false` (Scaffold ist NICHT erfolgreich durchgelaufen)', async () => {
+    const openSession = jest.fn(async () => {
+      const err = new Error('Deploy-Zugang unvollständig');
+      err.deployErrorClass = 'access-incomplete';
+      throw err;
+    });
+    const svc = new PerAppGpgProvisioningService({ deployLoginService: { openSession }, auditStore: auditSpy() });
+
+    const fn = jest.fn(async () => {
+      throw new Error('Scaffold-Fallback-Lauf fehlgeschlagen');
+    });
+
+    const result = await svc.withScaffoldPassphrase('myapp', fn);
+
+    expect(result.result).toBe('access-not-ready');
+    expect(result.scaffoldOk).toBe(false);
+  });
+
+  it('Zugang wird ZWISCHEN Vor-Prüfung und Item-Anlage unready → access-not-ready (Scaffold bereits erfolgreich, kein Teil-Zustand behauptet); scaffoldOk:true (S-387-Fund Fehlrichtung b)', async () => {
     const { session: preSession } = makeSession({ exists: false });
     let callCount = 0;
     const openSession = jest.fn(async () => {
@@ -366,6 +422,7 @@ describe('PerAppGpgProvisioningService — withScaffoldPassphrase() — AC4/AC5/
     const result = await svc.withScaffoldPassphrase('myapp', fn);
 
     expect(result.result).toBe('access-not-ready');
+    expect(result.scaffoldOk).toBe(true);
     expect(fn).toHaveBeenCalledTimes(1);
     expect(openSession).toHaveBeenCalledTimes(2);
   });
@@ -378,6 +435,7 @@ describe('PerAppGpgProvisioningService — withScaffoldPassphrase() — AC4/AC5/
     const result = await svc.withScaffoldPassphrase('inv@lid slug', fn);
 
     expect(result.result).toBe('failed');
+    expect(result.scaffoldOk).toBe(false);
     expect(fn).not.toHaveBeenCalled();
     expect(openSession).not.toHaveBeenCalled();
   });
@@ -390,6 +448,7 @@ describe('PerAppGpgProvisioningService — withScaffoldPassphrase() — AC4/AC5/
     const result = await svc.withScaffoldPassphrase('myapp', fn);
 
     expect(result.result).toBe('failed');
+    expect(result.scaffoldOk).toBe(false);
     expect(fn).not.toHaveBeenCalled();
     expect(openSession).not.toHaveBeenCalled();
   });
@@ -403,6 +462,7 @@ describe('PerAppGpgProvisioningService — withScaffoldPassphrase() — AC4/AC5/
     const result = await svc.withScaffoldPassphrase('myapp', undefined);
 
     expect(result.result).toBe('failed');
+    expect(result.scaffoldOk).toBe(false);
   });
 
   it('Temp-Datei kann nicht angelegt werden (mkdtemp-Fehler) → failed, fn() wird NICHT aufgerufen', async () => {
@@ -419,6 +479,7 @@ describe('PerAppGpgProvisioningService — withScaffoldPassphrase() — AC4/AC5/
     const result = await svc.withScaffoldPassphrase('myapp', fn);
 
     expect(result.result).toBe('failed');
+    expect(result.scaffoldOk).toBe(false);
     expect(fn).not.toHaveBeenCalled();
   });
 });

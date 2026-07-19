@@ -15,7 +15,16 @@
  *     `GPG_PASS_FILE=<pfad>`, typischerweise `HeadlessNewProjectRunner#run`)
  *     und legt das Bitwarden-Item NACH Scaffold-Erfolg mit DERSELBEN Passphrase
  *     an (AC6 — kein Delegieren an `provision()`s eigene Generierung, sonst
- *     Wert-Divergenz zwischen `.env.gpg` und Bitwarden-Item).
+ *     Wert-Divergenz zwischen `.env.gpg` und Bitwarden-Item). Die Rückgabe
+ *     trägt zusätzlich ein explizites, nicht überladenes `scaffoldOk`-Flag
+ *     (S-387-Fund, `docs/specs/obsidian-question-catalog.md` AC14): `true`
+ *     genau dann, wenn der eingereichte `fn`-Aufruf selbst erfolgreich
+ *     durchlief — UNABHÄNGIG vom `result`-Wert (der auch die
+ *     Bitwarden-Teil-Ergebnisse `access-not-ready`/`already-exists`/`failed`
+ *     NACH erfolgreichem Scaffold codiert). `result !== 'failed'` allein ist
+ *     KEIN zuverlässiger Scaffold-Erfolgs-Indikator — Aufrufer, die wissen
+ *     müssen, ob der Scaffold selbst lief (z.B. `ObsidianTargetPreparer`),
+ *     müssen `scaffoldOk` auswerten, nicht `result`.
  *   - `itemExistsFor(app, opts)` — read-only Existenz-Abfrage (S-373, AC16):
  *     nutzt denselben `itemExists`-Pfad (bw get), mutiert nichts, legt nichts
  *     an, liefert NIE einen Passphrasen-Wert — nur `{ exists, reason? }`.
@@ -216,19 +225,19 @@ export class PerAppGpgProvisioningService {
    *   reject = Fehlschlag. Wird IMMER genau einmal aufgerufen (außer bei
    *   Validierungs-/Audit-Fehler, die den Scaffold gar nicht erst starten).
    * @param {{ identity?: string|null }} [opts]
-   * @returns {Promise<{ result: 'created'|'already-exists'|'access-not-ready'|'failed', reason?: string }>}
+   * @returns {Promise<{ result: 'created'|'already-exists'|'access-not-ready'|'failed', scaffoldOk: boolean, reason?: string }>}
    */
   async withScaffoldPassphrase(app, fn, { identity } = {}) {
     const identityStr = identity ?? null;
 
     if (typeof fn !== 'function') {
-      return { result: 'failed', reason: 'Interner Fehler — kein Scaffold-Aufrufer übergeben' };
+      return { result: 'failed', scaffoldOk: false, reason: 'Interner Fehler — kein Scaffold-Aufrufer übergeben' };
     }
 
     // ── Input-Validierung (identisch provision()) ────────────────────────────
     const validation = this.#validateApp(app);
     if (!validation.ok) {
-      return { result: 'failed', reason: validation.reason };
+      return { result: 'failed', scaffoldOk: false, reason: validation.reason };
     }
     const { itemName } = validation;
 
@@ -237,7 +246,7 @@ export class PerAppGpgProvisioningService {
     try {
       this.#auditStore.record({ identity: identityStr, command: `deploy:gpg-provision:${app}` });
     } catch {
-      return { result: 'failed', reason: 'Audit-Write fehlgeschlagen — Aktion abgebrochen' };
+      return { result: 'failed', scaffoldOk: false, reason: 'Audit-Write fehlgeschlagen — Aktion abgebrochen' };
     }
 
     // ── Vor-Prüfung: Zugang-Gate + itemExists (kurzes bw-Fenster) ────────────
@@ -247,13 +256,14 @@ export class PerAppGpgProvisioningService {
     } catch (err) {
       const cls = err?.deployErrorClass ?? 'error';
       if (cls === 'access-incomplete') {
-        await this.#runFallbackScaffold(fn);
+        const fallback = await this.#runFallbackScaffold(fn);
         return {
           result: 'access-not-ready',
+          scaffoldOk: fallback.ok,
           reason: 'Bitte zuerst den Deploy-Zugang zu Bitwarden in den Einstellungen hinterlegen.',
         };
       }
-      return { result: 'failed', reason: 'Bitwarden-Login fehlgeschlagen — Zugang prüfen.' };
+      return { result: 'failed', scaffoldOk: false, reason: 'Bitwarden-Login fehlgeschlagen — Zugang prüfen.' };
     }
 
     let exists;
@@ -262,13 +272,14 @@ export class PerAppGpgProvisioningService {
     } catch (err) {
       const cls = err?.deployErrorClass ?? 'error';
       if (cls === 'access-incomplete') {
-        await this.#runFallbackScaffold(fn);
+        const fallback = await this.#runFallbackScaffold(fn);
         return {
           result: 'access-not-ready',
+          scaffoldOk: fallback.ok,
           reason: 'Bitte zuerst den Deploy-Zugang zu Bitwarden in den Einstellungen hinterlegen.',
         };
       }
-      return { result: 'failed', reason: 'Bitwarden-Provisionierung fehlgeschlagen — Zugang/Verbindung prüfen.' };
+      return { result: 'failed', scaffoldOk: false, reason: 'Bitwarden-Provisionierung fehlgeschlagen — Zugang/Verbindung prüfen.' };
     } finally {
       await preSession.close();
     }
@@ -277,9 +288,10 @@ export class PerAppGpgProvisioningService {
       // Edge-Case (Spec §Edge-Cases): Slug-Kollision bei echter Erst-Anlage —
       // transiente Passphrase wird verworfen (noch nicht erzeugt), Scaffold
       // läuft OHNE GPG_PASS_FILE (sonst Mismatch .env.gpg ↔ Item).
-      await this.#runFallbackScaffold(fn);
+      const fallback = await this.#runFallbackScaffold(fn);
       return {
         result: 'already-exists',
+        scaffoldOk: fallback.ok,
         reason: `Bitwarden-Item „${itemName}" existiert bereits — Scaffold läuft ohne Passphrasen-Durchreichung.`,
       };
     }
@@ -298,7 +310,7 @@ export class PerAppGpgProvisioningService {
       await this.#fsDeps.chmod(gpgPassFilePath, 0o600);
     } catch {
       if (tmpDir) await this.#fsDeps.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
-      return { result: 'failed', reason: 'Temporäre Passphrasen-Datei konnte nicht angelegt werden.' };
+      return { result: 'failed', scaffoldOk: false, reason: 'Temporäre Passphrasen-Datei konnte nicht angelegt werden.' };
     }
 
     try {
@@ -308,11 +320,14 @@ export class PerAppGpgProvisioningService {
       } catch {
         // AC5/Edge-Cases: Scaffold bricht ab, NACHDEM die temp-Datei existiert —
         // die Datei wird trotzdem gelöscht (äußeres finally), kein Item, kein
-        // Teil-Zustand.
-        return { result: 'failed', reason: 'Projekt-Scaffold fehlgeschlagen — keine Provisionierung.' };
+        // Teil-Zustand. `scaffoldOk: false` — der Scaffold-fn-Aufruf selbst ist
+        // gescheitert (S-387-Fund: NICHT aus `result` ableitbar).
+        return { result: 'failed', scaffoldOk: false, reason: 'Projekt-Scaffold fehlgeschlagen — keine Provisionierung.' };
       }
 
-      // ── Scaffold-Erfolg → idempotente Item-Anlage MIT DERSELBEN Passphrase (AC6) ──
+      // ── Scaffold-Erfolg → idempotente Item-Anlage MIT DERSELBEN Passphrase (AC6).
+      // `scaffoldOk: true` ab hier IMMER — fn() ist bereits erfolgreich durchgelaufen,
+      // unabhängig vom weiteren Bitwarden-Teilergebnis (S-387-Fund). ─────────────────
       let postSession;
       try {
         postSession = await this.#deployLoginService.openSession();
@@ -325,24 +340,26 @@ export class PerAppGpgProvisioningService {
           // Provisionierung kann es später nachrüsten, AC7).
           return {
             result: 'access-not-ready',
+            scaffoldOk: true,
             reason: 'Bitte zuerst den Deploy-Zugang zu Bitwarden in den Einstellungen hinterlegen.',
           };
         }
-        return { result: 'failed', reason: 'Bitwarden-Login fehlgeschlagen — Zugang prüfen.' };
+        return { result: 'failed', scaffoldOk: true, reason: 'Bitwarden-Login fehlgeschlagen — Zugang prüfen.' };
       }
 
       try {
         await postSession.createItem(itemName, passphrase);
-        return { result: 'created' };
+        return { result: 'created', scaffoldOk: true };
       } catch (err) {
         const cls = err?.deployErrorClass ?? 'error';
         if (cls === 'access-incomplete') {
           return {
             result: 'access-not-ready',
+            scaffoldOk: true,
             reason: 'Bitte zuerst den Deploy-Zugang zu Bitwarden in den Einstellungen hinterlegen.',
           };
         }
-        return { result: 'failed', reason: 'Bitwarden-Provisionierung fehlgeschlagen — Zugang/Verbindung prüfen.' };
+        return { result: 'failed', scaffoldOk: true, reason: 'Bitwarden-Provisionierung fehlgeschlagen — Zugang/Verbindung prüfen.' };
       } finally {
         await postSession.close();
       }
@@ -398,18 +415,23 @@ export class PerAppGpgProvisioningService {
   /**
    * Führt den Scaffold-Fallback-Lauf OHNE `GPG_PASS_FILE` aus (Plugin-Fallback,
    * Spec AC3/Edge-Cases). Der zurückgegebene Provisionierungs-`result`
-   * (`access-not-ready`/`already-exists`) ist bereits feststehend — ein
-   * Scaffold-Fehlschlag in diesem Zweig wird best-effort ignoriert (er liegt
-   * außerhalb dieser Boundary; der Aufrufer des Scaffolds selbst behandelt
-   * seinen eigenen Fehlerpfad, analog dem heutigen Plugin-Backlog-Verhalten).
+   * (`access-not-ready`/`already-exists`) ist bereits feststehend — der
+   * Fallback-`fn`-Aufruf bleibt zwar best-effort (ein Fehlschlag hier crasht
+   * `withScaffoldPassphrase()` nicht, `result` bleibt unverändert), ABER das
+   * tatsächliche Gelingen/Scheitern von `fn()` wird über `{ ok }` an den
+   * Aufrufer zurückgemeldet (S-387-Fund: `withScaffoldPassphrase()` setzt
+   * darüber `scaffoldOk` korrekt statt es implizit als „erfolgreich" zu werten).
    * @param {(args: {}) => Promise<*>} fn
-   * @returns {Promise<void>}
+   * @returns {Promise<{ ok: boolean }>}
    */
   async #runFallbackScaffold(fn) {
     try {
       await fn({});
+      return { ok: true };
     } catch {
-      // best-effort — der Provisionierungs-`result` bleibt unabhängig davon.
+      // best-effort — der Provisionierungs-`result` bleibt unabhängig davon,
+      // aber `ok: false` meldet den tatsächlichen Scaffold-Fehlschlag weiter.
+      return { ok: false };
     }
   }
 

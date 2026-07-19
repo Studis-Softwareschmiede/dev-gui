@@ -28,10 +28,14 @@
  *         GENAU EINEN `withScaffoldPassphrase`-Aufruf mit korrektem `app` +
  *         `GPG_PASS_FILE`-Env-Weiterreichung aus; Scaffold-Fehlschlag löst
  *         KEINEN Aufruf aus. Fehlender `provisioningService` → `{result:
- *         'failed'}` (Wiring-Fehler, kein Crash). **Scope-Hinweis:** kein
- *         Produktivcode-Aufrufer dieser Methode in dieser Story (S-336) — die
- *         Verdrahtung der drei Anlage-Wege ist die separate Folge-Story S-343
- *         (AC12-AC14, siehe Modul-Header-Scope-Hinweis).
+ *         'failed', scaffoldOk: false}` (Wiring-Fehler, kein Crash). Das
+ *         `scaffoldOk`-Flag (S-387-Fund, `obsidian-question-catalog.md` AC14)
+ *         wird von `withScaffoldPassphrase()` UNVERÄNDERT durchgereicht (kein
+ *         eigenes Mapping in `runWithAutoProvisioning()` nötig, s.
+ *         End-zu-Ende-Tests unten mit dem ECHTEN `PerAppGpgProvisioningService`).
+ *         **Scope-Hinweis:** kein Produktivcode-Aufrufer dieser Methode in
+ *         dieser Story (S-336) — die Verdrahtung der drei Anlage-Wege ist die
+ *         separate Folge-Story S-343 (AC12-AC14, siehe Modul-Header-Scope-Hinweis).
  *
  * Pattern: injizierbare `spawnFn`, die ein Fake-Child (EventEmitter mit
  * stdout/stderr-Sub-Emittern + `kill()`-Spy) liefert — der ECHTE
@@ -381,7 +385,7 @@ describe('HeadlessNewProjectRunner — runWithAutoProvisioning() — AC4/AC15 Na
 
     const result = await runner.runWithAutoProvisioning('myapp', PROJECT_PATH);
 
-    expect(result).toEqual({ result: 'failed', reason: expect.any(String) });
+    expect(result).toEqual({ result: 'failed', scaffoldOk: false, reason: expect.any(String) });
     expect(spawnFn).not.toHaveBeenCalled();
   });
 
@@ -470,7 +474,7 @@ describe('HeadlessNewProjectRunner — runWithAutoProvisioning() — End-zu-Ende
     child.emit('close', 0);
     const result = await p;
 
-    expect(result).toEqual({ result: 'created' });
+    expect(result).toEqual({ result: 'created', scaffoldOk: true });
     // AC5: 0600, existierte WÄHREND des Scaffold-Laufs (Beobachtung im spawnFn-Callback).
     expect(observedModeDuringSpawn).toBe(0o600);
     // AC6: dieselbe Passphrase, mit der der Scaffold lief, steht im Bitwarden-createItem.
@@ -514,6 +518,7 @@ describe('HeadlessNewProjectRunner — runWithAutoProvisioning() — End-zu-Ende
     const result = await p;
 
     expect(result.result).toBe('failed');
+    expect(result.scaffoldOk).toBe(false);
     expect(calls.createItem.length).toBe(0);
     expect(() => statSync(observedGpgPassFilePath)).toThrow();
   });
