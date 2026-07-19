@@ -26,9 +26,14 @@
  *          "Strukturiert starten" (nicht "Fortsetzen") und ein erneuter Klick
  *          löst einen NEUEN `POST /start` für Projekt B aus, statt lautlos
  *          den Job von Projekt A zu resumen.
- *   AC10 — (v2, S-384) Ziel-Projekt-Auswahl ist zusätzliche Voraussetzung für
- *          "Strukturiert starten"; der `POST /start`-Body enthält
- *          `targetProjectSlug` aus der GET-/api/workspace/repos-Liste.
+ *   AC10 — Ziel-Projekt-Auswahl (BESTEHENDES Workspace-Projekt, v3 S-388: das
+ *          `<select>` selbst trägt seit v3 zusätzlich einen "Neues Projekt
+ *          erstellen"-Sentinel + Freitext-Neuanlage — dieser Pfad UND die
+ *          AC15-Ziel-Repo-Vorbereitung sind ausschließlich in
+ *          `ObsidianImportSection.test.jsx` getestet, da sie NICHT die
+ *          Integrations-Naht zu `GitHubView.jsx` betreffen) ist zusätzliche
+ *          Voraussetzung für "Strukturiert starten"; der `POST /start`-Body
+ *          enthält `targetProjectSlug` aus der GET-/api/workspace/repos-Liste.
  *
  * @jest-environment jsdom
  */

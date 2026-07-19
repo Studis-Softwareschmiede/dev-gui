@@ -18,17 +18,39 @@
  *   AC7 — 409 → sichtbare Fehleranzeige, kein Navigate. 400/500/Netzwerkfehler →
  *         Fehleranzeige mit Reset, kein Navigate, kein Crash.
  *
- * Covers (obsidian-question-catalog, v2 S-384):
- *   AC10 — Ziel-Projekt-Auswahl lädt GET /api/workspace/repos (Namen sichtbar, dieselbe
- *         Quelle wie die Fabrik-Übersicht/Cockpit-Repo-Auswahl); "Strukturiert starten"
- *         bleibt disabled (disabled-Attribut + Text-Label), solange kein Ziel-Projekt
- *         gewählt ist — auch bei bereits gewähltem Notiz-Ordner; aktiv sobald beides
- *         gesetzt ist. Der `POST .../obsidian-ingest/start`-Body-Inhalt selbst
+ * Covers (obsidian-question-catalog, v3 S-388 — ersetzt v2 AC10/AC11 aus S-384):
+ *   AC10 — Ziel-Projekt-Feld = bestehend wählen ODER neu eingeben: das <select> lädt
+ *         GET /api/workspace/repos (Namen sichtbar, dieselbe Quelle wie die Fabrik-
+ *         Übersicht/Cockpit-Repo-Auswahl) UND trägt zusätzlich den Sentinel-Eintrag
+ *         "Neues Projekt erstellen"; bei dessen Auswahl erscheint ein Freitext-Feld,
+ *         vorbelegt mit einem aus dem Notiz-Ordner-Basisnamen abgeleiteten Slug-
+ *         Vorschlag (editierbar, `_slugifyBase`-Konvention), inline gegen
+ *         `^[A-Za-z0-9_-]+$` validiert (Text-Label, nicht nur Farbe). "Strukturiert
+ *         starten" bleibt disabled (disabled-Attribut + Text-Label), solange kein
+ *         Notiz-Ordner ODER kein gültiges Ziel (bestehend gewählt ODER gültiger neuer
+ *         Name) vorliegt. Eine leere Projekt-Liste ist seit v3 KEIN Blocker mehr
+ *         (AC11-Konsequenz) — das <select> trägt den Sentinel-Eintrag unabhängig von
+ *         der Listengröße; der frühere `new-project`-Blocker-Hinweis entfällt.
+ *   AC15 — Beim Start mit einem NEUEN Namen ruft "Strukturiert starten" zuerst
+ *         POST .../obsidian-ingest/ensure-target (+ Status-Poll
+ *         GET .../ensure-target/:jobId) und zeigt den Anlage-/Existenz-Status
+ *         informativ ("wird geprüft…"/"wird angelegt…"/"vorhanden"/Fehlertext,
+ *         Text-Label); das Fragenkatalog-Overlay (und damit `POST .../start`) öffnet
+ *         erst bei `ready` — ein Anlage-Fehlschlag zeigt den vom Backend gelieferten,
+ *         secret-freien Fehlertext und öffnet KEIN Overlay (kein Ingest-Start).
+ *         Bestehendes Ziel gewählt → weiterhin direkt zum Overlay (kein
+ *         `ensure-target`-Umweg). Der `POST .../start`-Body-Inhalt selbst
  *         (`targetProjectSlug` inkl. Resume-Kopplung) ist in
  *         `GitHubViewObsidianIngestDocking.test.jsx` (Integration) und
  *         `ObsidianIngestOverlay.test.jsx` (Overlay-Vertrag) abgedeckt.
- *   AC11 — Leere Ziel-Projekt-Liste → definierter `new-project`-Hinweis statt Auswahlfeld;
- *         "Strukturiert starten" bleibt disabled (kein Start ohne gültiges Ziel-Projekt).
+ *         Review-Fix (Iteration 2, Important): Notiz-Ordner- UND Ziel-Auswahl
+ *         sind während `checking`/`creating` disabled; ein Auswahlwechsel
+ *         (auch per direktem `fireEvent`, Defense in Depth ohne Verlass auf
+ *         das disabled-Attribut) bricht die laufende Vorbereitung sofort ab
+ *         (Poll gestoppt, Statusanzeige verschwindet, KEIN Auto-Start gegen
+ *         die alte oder neue Auswahl). Unmount während des Polls hinterlässt
+ *         keinen State-Update-Leck (kein Poll-Call/kein `console.error` nach
+ *         Unmount).
  *
  * NFR A11y:
  *   - "Auslösen"-Button: Touch-Target ≥ 44 px (minHeight).
@@ -80,6 +102,9 @@ const FROM_NOTES_ACCEPTED = { commandId: 'cmd-1', status: 'accepted' };
  *   workspaceRepos?: object,
  *   session?: object,
  *   command?: { status: number, data: object } | 'reject' | 'pending',
+ *   ensureTargetPost?: { status: number, data: object } | 'reject',
+ *   ensureTargetStatusSequence?: Array<{ status: number, data: object }>,
+ *   ingestStart?: { status: number, data: object },
  * }} opts
  * @returns {{ fetchFn: jest.Mock, calls: Array<{url:string, method:string, body:*}> }}
  */
@@ -88,8 +113,17 @@ function makeFetchFn({
   workspaceRepos = WORKSPACE_REPOS_RESPONSE,
   session        = SESSION_READY,
   command        = { status: 202, data: FROM_NOTES_ACCEPTED },
+  // obsidian-question-catalog v3 AC15 (S-388): Ziel-Repo-Vorbereitung.
+  ensureTargetPost           = { status: 200, data: { status: 'ready' } },
+  ensureTargetStatusSequence = [{ status: 200, data: { status: 'ready' } }],
+  // Vom Overlay selbst ausgelöst, sobald es (nach AC15-Vorbereitung oder
+  // direkt bei bestehendem Ziel) öffnet — nur benötigt, damit der Overlay-
+  // Mount keinen "unmatched fetch"-Fehler auslöst; der Katalog-Zyklus selbst
+  // ist NICHT Gegenstand dieser Testdatei (s. ObsidianIngestOverlay.test.jsx).
+  ingestStart    = { status: 202, data: { jobId: 'ingest-job-1', status: 'running' } },
 } = {}) {
   const calls = [];
+  let ensureStatusIdx = 0;
 
   const fetchFn = jest.fn(async (url, opts = {}) => {
     const method = opts.method ?? 'GET';
@@ -121,6 +155,27 @@ function makeFetchFn({
         json: async () => command.data,
       };
     }
+    if (url === '/api/obsidian-ingest/ensure-target' && method === 'POST') {
+      if (ensureTargetPost === 'reject') throw new Error('network error');
+      return {
+        ok: ensureTargetPost.status < 300,
+        status: ensureTargetPost.status,
+        json: async () => ensureTargetPost.data,
+      };
+    }
+    if (/^\/api\/obsidian-ingest\/ensure-target\/[^/]+$/.test(url) && method === 'GET') {
+      const entry = ensureTargetStatusSequence[Math.min(ensureStatusIdx, ensureTargetStatusSequence.length - 1)];
+      ensureStatusIdx += 1;
+      return { ok: entry.status === 200, status: entry.status, json: async () => entry.data };
+    }
+    if (url === '/api/obsidian-ingest/start' && method === 'POST') {
+      return { ok: ingestStart.status < 300, status: ingestStart.status, json: async () => ingestStart.data };
+    }
+    if (/^\/api\/obsidian-ingest\/[^/]+$/.test(url) && method === 'GET') {
+      // Poll des Overlays nach dem Start — bleibt bewusst 'running' (kein
+      // terminaler Zustand, s.o.).
+      return { ok: true, status: 200, json: async () => ({ status: 'running' }) };
+    }
     throw new Error(`Unerwarteter fetch-Aufruf: ${method} ${url}`);
   });
 
@@ -143,11 +198,28 @@ async function selectProject(getByLabelText, path) {
   return select;
 }
 
-/** Wählt ein Ziel-Projekt im <select> aus (obsidian-question-catalog v2 AC10). */
+/** Wählt ein BESTEHENDES Ziel-Projekt im <select> aus (obsidian-question-catalog AC10). */
 async function selectTargetProject(getByLabelText, slug) {
   const select = await waitFor(() => getByLabelText(/^ziel-projekt$/i));
   fireEvent.change(select, { target: { value: slug } });
   return select;
+}
+
+/**
+ * Wählt "Neues Projekt erstellen" im Ziel-Projekt-<select> aus (obsidian-
+ * question-catalog v3 AC10) — öffnet das Freitext-Feld.
+ */
+async function selectNewTargetOption(getByLabelText) {
+  const select = await waitFor(() => getByLabelText(/^ziel-projekt$/i));
+  fireEvent.change(select, { target: { value: '__obsidian-new-target__' } });
+  return select;
+}
+
+/** Tippt einen Neuanlage-Projektnamen ins Freitext-Feld (AC10). */
+async function typeNewTargetName(getByLabelText, name) {
+  const input = await waitFor(() => getByLabelText(/^neuer projektname$/i));
+  fireEvent.change(input, { target: { value: name } });
+  return input;
 }
 
 afterEach(() => {
@@ -200,9 +272,9 @@ describe('obsidian-project-intake AC2 — Projekt-Unterordner-Liste', () => {
   });
 });
 
-// ── v2 AC10/AC11 (S-384): Ziel-Projekt-Auswahl ────────────────────────────────
+// ── v3 AC10 (S-388): Ziel-Projekt — bestehend wählen ODER neu eingeben ───────
 
-describe('obsidian-question-catalog v2 AC10 — Ziel-Projekt-Auswahl vor dem Start', () => {
+describe('obsidian-question-catalog v3 AC10 — Ziel-Projekt: bestehend wählen ODER neu eingeben', () => {
   it('zeigt Ziel-Projekt-Namen aus GET /api/workspace/repos', async () => {
     const { fetchFn } = makeFetchFn({ workspaceRepos: WORKSPACE_REPOS_RESPONSE });
     const { getByText } = renderSection(fetchFn);
@@ -222,7 +294,7 @@ describe('obsidian-question-catalog v2 AC10 — Ziel-Projekt-Auswahl vor dem Sta
     expect(startBtn.getAttribute('aria-label')).toMatch(/ziel-projekt fehlt/i);
   });
 
-  it('"Strukturiert starten" wird aktiv, sobald Notiz-Ordner UND Ziel-Projekt gewählt sind', async () => {
+  it('"Strukturiert starten" wird aktiv, sobald Notiz-Ordner UND bestehendes Ziel-Projekt gewählt sind', async () => {
     const { fetchFn } = makeFetchFn();
     const { getByRole, getByLabelText } = renderSection(fetchFn);
     await selectProject(getByLabelText, '/vault/Projekte/mein-projekt');
@@ -244,28 +316,343 @@ describe('obsidian-question-catalog v2 AC10 — Ziel-Projekt-Auswahl vor dem Sta
 
     expect(document.querySelector('[data-testid="obsidian-ingest-overlay"]')).toBeNull();
   });
-});
 
-describe('obsidian-question-catalog v2 AC11 — kein passendes Ziel-Projekt vorhanden', () => {
-  it('leere Ziel-Projekt-Liste → definierter new-project-Hinweis statt Auswahlfeld', async () => {
-    const { fetchFn } = makeFetchFn({ workspaceRepos: WORKSPACE_REPOS_EMPTY });
-    const { getByTestId, queryByLabelText } = renderSection(fetchFn);
-    await waitFor(() => {
-      expect(getByTestId('obsidian-target-project-empty-hint').textContent).toMatch(/neues projekt/i);
+  it('"Neues Projekt erstellen" zeigt ein Freitext-Feld, vorbelegt mit einem Slug-Vorschlag aus dem Notiz-Ordner-Basisnamen', async () => {
+    const { fetchFn } = makeFetchFn({
+      projects: {
+        status: 200,
+        data: { projects: [{ name: 'Müller Notizen', path: '/vault/Projekte/mueller-notizen' }] },
+      },
     });
-    expect(queryByLabelText(/^ziel-projekt$/i)).toBeNull();
+    const { getByLabelText } = renderSection(fetchFn);
+    await selectProject(getByLabelText, '/vault/Projekte/mueller-notizen');
+    await selectNewTargetOption(getByLabelText);
+
+    await waitFor(() => {
+      const input = getByLabelText(/^neuer projektname$/i);
+      expect(input.value).toBe('mueller-notizen');
+    });
   });
 
-  it('leere Ziel-Projekt-Liste → "Strukturiert starten" bleibt disabled trotz gewähltem Notiz-Ordner', async () => {
-    const { fetchFn } = makeFetchFn({ workspaceRepos: WORKSPACE_REPOS_EMPTY });
-    const { getByRole, getByLabelText } = renderSection(fetchFn);
+  it('Freitext-Neuanlage-Name mit ungültigen Zeichen → Inline-Fehler (Text-Label), "Strukturiert starten" bleibt disabled', async () => {
+    const { fetchFn } = makeFetchFn();
+    const { getByRole, getByLabelText, getByTestId } = renderSection(fetchFn);
     await selectProject(getByLabelText, '/vault/Projekte/mein-projekt');
+    await selectNewTargetOption(getByLabelText);
+    await typeNewTargetName(getByLabelText, 'ungültiger name mit leerzeichen');
+
+    await waitFor(() => {
+      expect(getByTestId('obsidian-new-target-invalid').textContent).toMatch(/ungültiger projektname/i);
+    });
+    const startBtn = getByRole('button', { name: /strukturiert starten/i });
+    expect(startBtn.disabled).toBe(true);
+    expect(startBtn.getAttribute('aria-label')).toMatch(/ungültiger projektname/i);
+  });
+
+  it('gültiger Freitext-Neuanlage-Name → "Strukturiert starten" wird aktiv, kein Inline-Fehler', async () => {
+    const { fetchFn } = makeFetchFn();
+    const { getByRole, getByLabelText, queryByTestId } = renderSection(fetchFn);
+    await selectProject(getByLabelText, '/vault/Projekte/mein-projekt');
+    await selectNewTargetOption(getByLabelText);
+    await typeNewTargetName(getByLabelText, 'mein-neues-projekt');
 
     await waitFor(() => {
       const startBtn = getByRole('button', { name: /strukturiert starten/i });
-      expect(startBtn.disabled).toBe(true);
+      expect(startBtn.disabled).toBe(false);
+    });
+    expect(queryByTestId('obsidian-new-target-invalid')).toBeNull();
+  });
+
+  it('leere Ziel-Projekt-Liste (AC11) → KEIN Blocker-Hinweis mehr, das <select> trägt weiterhin "Neues Projekt erstellen"', async () => {
+    const { fetchFn } = makeFetchFn({ workspaceRepos: WORKSPACE_REPOS_EMPTY });
+    const { getByLabelText, queryByTestId } = renderSection(fetchFn);
+    await waitFor(() => {
+      expect(getByLabelText(/^ziel-projekt$/i)).toBeTruthy();
+    });
+    expect(queryByTestId('obsidian-target-project-empty-hint')).toBeNull();
+  });
+
+  it('leere Ziel-Projekt-Liste + gültiger neuer Name → "Strukturiert starten" wird aktiv (kein Blocker)', async () => {
+    const { fetchFn } = makeFetchFn({ workspaceRepos: WORKSPACE_REPOS_EMPTY });
+    const { getByRole, getByLabelText } = renderSection(fetchFn);
+    await selectProject(getByLabelText, '/vault/Projekte/mein-projekt');
+    await selectNewTargetOption(getByLabelText);
+    await typeNewTargetName(getByLabelText, 'frisches-projekt');
+
+    await waitFor(() => {
+      const startBtn = getByRole('button', { name: /strukturiert starten/i });
+      expect(startBtn.disabled).toBe(false);
     });
   });
+});
+
+// ── v3 AC15 (S-388): Ziel-Repo-Vorbereitung (ensure-target) ──────────────────
+
+describe('obsidian-question-catalog v3 AC15 — Anlage-/Existenz-Statusanzeige vor dem Ingest-Start', () => {
+  it('bestehendes Ziel gewählt → Klick öffnet das Overlay DIREKT, kein POST an .../ensure-target', async () => {
+    const { fetchFn, calls } = makeFetchFn();
+    const { getByRole, getByLabelText } = renderSection(fetchFn);
+    await selectProject(getByLabelText, '/vault/Projekte/mein-projekt');
+    await selectTargetProject(getByLabelText, 'ziel-repo-a');
+
+    const startBtn = getByRole('button', { name: /strukturiert starten/i });
+    await waitFor(() => expect(startBtn.disabled).toBe(false));
+    await act(async () => { fireEvent.click(startBtn); });
+
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="obsidian-ingest-overlay"]')).toBeTruthy();
+    });
+    expect(calls.some((c) => c.url === '/api/obsidian-ingest/ensure-target')).toBe(false);
+  });
+
+  it('neuer Name, ensure-target liefert sofort 200 "ready" → zeigt "vorhanden", öffnet danach das Overlay', async () => {
+    const { fetchFn } = makeFetchFn({
+      ensureTargetPost: { status: 200, data: { status: 'ready' } },
+    });
+    const { getByRole, getByLabelText, getByTestId } = renderSection(fetchFn);
+    await selectProject(getByLabelText, '/vault/Projekte/mein-projekt');
+    await selectNewTargetOption(getByLabelText);
+    await typeNewTargetName(getByLabelText, 'frisches-projekt');
+
+    const startBtn = await waitFor(() => {
+      const btn = getByRole('button', { name: /strukturiert starten/i });
+      expect(btn.disabled).toBe(false);
+      return btn;
+    });
+    await act(async () => { fireEvent.click(startBtn); });
+
+    await waitFor(() => {
+      expect(getByTestId('obsidian-target-ensure-status').textContent).toMatch(/vorhanden/i);
+    });
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="obsidian-ingest-overlay"]')).toBeTruthy();
+    });
+  });
+
+  it('neuer Name, ensure-target liefert 202 "creating" → zeigt "wird angelegt…", pollt bis "ready", öffnet dann das Overlay', async () => {
+    const { fetchFn } = makeFetchFn({
+      ensureTargetPost: { status: 202, data: { jobId: 'ensure-job-1' } },
+      ensureTargetStatusSequence: [
+        { status: 200, data: { status: 'creating' } },
+        { status: 200, data: { status: 'ready' } },
+      ],
+    });
+    const { getByRole, getByLabelText, getByTestId } = renderSection(fetchFn);
+    await selectProject(getByLabelText, '/vault/Projekte/mein-projekt');
+    await selectNewTargetOption(getByLabelText);
+    await typeNewTargetName(getByLabelText, 'frisches-projekt');
+
+    const startBtn = await waitFor(() => {
+      const btn = getByRole('button', { name: /strukturiert starten/i });
+      expect(btn.disabled).toBe(false);
+      return btn;
+    });
+    await act(async () => { fireEvent.click(startBtn); });
+
+    await waitFor(() => {
+      expect(getByTestId('obsidian-target-ensure-status').textContent).toMatch(/wird angelegt/i);
+    });
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="obsidian-ingest-overlay"]')).toBeTruthy();
+    }, { timeout: 3000 });
+  });
+
+  it('neuer Name, Anlage schlägt fehl ("failed") → definierter Fehlertext, KEIN Overlay, kein Ingest-Start', async () => {
+    const { fetchFn, calls } = makeFetchFn({
+      ensureTargetPost: { status: 202, data: { jobId: 'ensure-job-2' } },
+      ensureTargetStatusSequence: [
+        { status: 200, data: { status: 'failed', error: 'Projekt-Anlage fehlgeschlagen' } },
+      ],
+    });
+    const { getByRole, getByLabelText, getByTestId } = renderSection(fetchFn);
+    await selectProject(getByLabelText, '/vault/Projekte/mein-projekt');
+    await selectNewTargetOption(getByLabelText);
+    await typeNewTargetName(getByLabelText, 'frisches-projekt');
+
+    const startBtn = await waitFor(() => {
+      const btn = getByRole('button', { name: /strukturiert starten/i });
+      expect(btn.disabled).toBe(false);
+      return btn;
+    });
+    await act(async () => { fireEvent.click(startBtn); });
+
+    await waitFor(() => {
+      expect(getByTestId('obsidian-target-ensure-error').textContent).toMatch(/projekt-anlage fehlgeschlagen/i);
+    });
+    expect(document.querySelector('[data-testid="obsidian-ingest-overlay"]')).toBeNull();
+    expect(calls.some((c) => c.url === '/api/obsidian-ingest/start')).toBe(false);
+  });
+
+  it('Netzwerkfehler bei POST .../ensure-target → Fehleranzeige, kein Overlay', async () => {
+    const { fetchFn } = makeFetchFn({ ensureTargetPost: 'reject' });
+    const { getByRole, getByLabelText, getByTestId } = renderSection(fetchFn);
+    await selectProject(getByLabelText, '/vault/Projekte/mein-projekt');
+    await selectNewTargetOption(getByLabelText);
+    await typeNewTargetName(getByLabelText, 'frisches-projekt');
+
+    const startBtn = await waitFor(() => {
+      const btn = getByRole('button', { name: /strukturiert starten/i });
+      expect(btn.disabled).toBe(false);
+      return btn;
+    });
+    await act(async () => { fireEvent.click(startBtn); });
+
+    await waitFor(() => {
+      expect(getByTestId('obsidian-target-ensure-error').textContent).toMatch(/netzwerkfehler/i);
+    });
+    expect(document.querySelector('[data-testid="obsidian-ingest-overlay"]')).toBeNull();
+  });
+
+  // ── Review-Fix Iteration 2 (Important) ───────────────────────────────────
+  // Während `ensure-target` läuft (checking/creating), blieben Notiz-Ordner-
+  // und Ziel-Auswahl bedienbar; wechselte der Nutzer sie, lief der alte Poll
+  // weiter und startete nach `ready` AUTOMATISCH gegen das NEUE Ziel — ohne
+  // erneuten Klick auf "Strukturiert starten". Fix: Auswahlwechsel bricht
+  // die laufende Vorbereitung sofort ab (Poll gestoppt, kein Auto-Start);
+  // die Felder sind während `isEnsuring` zusätzlich disabled.
+
+  it('Ziel-Projekt-Auswahlwechsel WÄHREND der Anlage → kein Auto-Start, Poll gestoppt, Statusanzeige verschwindet', async () => {
+    jest.useFakeTimers();
+    try {
+      const { fetchFn, calls } = makeFetchFn({
+        ensureTargetPost: { status: 202, data: { jobId: 'ensure-job-abort-1' } },
+        // Antwortet dauerhaft 'creating' — würde ohne Abbruch NIE von selbst
+        // 'ready' werden; jeder Poll-Aufruf nach dem Abbruch wäre also ein
+        // eindeutiges Indiz für "Poll NICHT gestoppt".
+        ensureTargetStatusSequence: [{ status: 200, data: { status: 'creating' } }],
+      });
+      const { getByRole, getByLabelText, getByTestId, queryByTestId } = renderSection(fetchFn);
+      await selectProject(getByLabelText, '/vault/Projekte/mein-projekt');
+      await selectNewTargetOption(getByLabelText);
+      await typeNewTargetName(getByLabelText, 'frisches-projekt');
+
+      const startBtn = await waitFor(() => {
+        const btn = getByRole('button', { name: /strukturiert starten/i });
+        expect(btn.disabled).toBe(false);
+        return btn;
+      });
+      fireEvent.click(startBtn);
+
+      await waitFor(() => {
+        expect(getByTestId('obsidian-target-ensure-status').textContent).toMatch(/wird angelegt/i);
+      });
+      // Während der Anlage sind beide Auswahl-Felder disabled (Kernpunkt 3).
+      expect(getByLabelText(/^projekt-ordner$/i).disabled).toBe(true);
+      expect(getByLabelText(/^ziel-projekt$/i).disabled).toBe(true);
+
+      const pollCallsBeforeChange = calls.filter((c) => /\/ensure-target\//.test(c.url)).length;
+      expect(pollCallsBeforeChange).toBeGreaterThanOrEqual(1);
+
+      // Auswahlwechsel WÄHREND der Anlage — bewusst per fireEvent (nicht
+      // userEvent), da der Abbruch-Schutz (Kernpunkt 2) explizit AUCH ohne
+      // Verlass auf das disabled-Attribut greifen muss (Defense in Depth).
+      fireEvent.change(getByLabelText(/^ziel-projekt$/i), { target: { value: 'ziel-repo-a' } });
+
+      // Statusanzeige verschwindet sofort (ensureState zurück auf 'idle').
+      expect(queryByTestId('obsidian-target-ensure-status')).toBeNull();
+      expect(queryByTestId('obsidian-target-ensure-error')).toBeNull();
+
+      // Poll gestoppt: über mehrere weitere Intervalle hinweg keine neuen Calls.
+      await act(async () => { await jest.advanceTimersByTimeAsync(6000); });
+      const pollCallsAfterWait = calls.filter((c) => /\/ensure-target\//.test(c.url)).length;
+      expect(pollCallsAfterWait).toBe(pollCallsBeforeChange);
+
+      // Kein Auto-Start gegen das alte ODER das neue Ziel.
+      expect(document.querySelector('[data-testid="obsidian-ingest-overlay"]')).toBeNull();
+      expect(calls.some((c) => c.url === '/api/obsidian-ingest/start')).toBe(false);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('Notiz-Ordner-Auswahlwechsel WÄHREND der Anlage → kein Auto-Start, Poll gestoppt', async () => {
+    jest.useFakeTimers();
+    try {
+      const { fetchFn, calls } = makeFetchFn({
+        ensureTargetPost: { status: 202, data: { jobId: 'ensure-job-abort-2' } },
+        ensureTargetStatusSequence: [{ status: 200, data: { status: 'creating' } }],
+      });
+      const { getByRole, getByLabelText, getByTestId, queryByTestId } = renderSection(fetchFn);
+      await selectProject(getByLabelText, '/vault/Projekte/mein-projekt');
+      await selectNewTargetOption(getByLabelText);
+      await typeNewTargetName(getByLabelText, 'frisches-projekt');
+
+      const startBtn = await waitFor(() => {
+        const btn = getByRole('button', { name: /strukturiert starten/i });
+        expect(btn.disabled).toBe(false);
+        return btn;
+      });
+      fireEvent.click(startBtn);
+
+      await waitFor(() => {
+        expect(getByTestId('obsidian-target-ensure-status').textContent).toMatch(/wird angelegt/i);
+      });
+
+      const pollCallsBeforeChange = calls.filter((c) => /\/ensure-target\//.test(c.url)).length;
+
+      fireEvent.change(getByLabelText(/^projekt-ordner$/i), { target: { value: '/vault/Projekte/anderes-projekt' } });
+
+      expect(queryByTestId('obsidian-target-ensure-status')).toBeNull();
+
+      await act(async () => { await jest.advanceTimersByTimeAsync(6000); });
+      const pollCallsAfterWait = calls.filter((c) => /\/ensure-target\//.test(c.url)).length;
+      expect(pollCallsAfterWait).toBe(pollCallsBeforeChange);
+      expect(document.querySelector('[data-testid="obsidian-ingest-overlay"]')).toBeNull();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('Unmount WÄHREND des Anlage-Polls → kein Leck (kein State-Update nach Unmount), Poll gestoppt, kein Overlay', async () => {
+    jest.useFakeTimers();
+    try {
+      const { fetchFn, calls } = makeFetchFn({
+        ensureTargetPost: { status: 202, data: { jobId: 'ensure-job-unmount-1' } },
+        ensureTargetStatusSequence: [{ status: 200, data: { status: 'creating' } }],
+      });
+      const onNavigate = jest.fn();
+      const { getByRole, getByLabelText, getByTestId, unmount } = render(
+        React.createElement(ObsidianImportSection, { onNavigate, fetchFn }),
+      );
+      await selectProject(getByLabelText, '/vault/Projekte/mein-projekt');
+      await selectNewTargetOption(getByLabelText);
+      await typeNewTargetName(getByLabelText, 'frisches-projekt');
+
+      const startBtn = await waitFor(() => {
+        const btn = getByRole('button', { name: /strukturiert starten/i });
+        expect(btn.disabled).toBe(false);
+        return btn;
+      });
+      fireEvent.click(startBtn);
+
+      await waitFor(() => {
+        expect(getByTestId('obsidian-target-ensure-status').textContent).toMatch(/wird angelegt/i);
+      });
+
+      const pollCallsBeforeUnmount = calls.filter((c) => /\/ensure-target\//.test(c.url)).length;
+
+      const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+      unmount();
+
+      await act(async () => { await jest.advanceTimersByTimeAsync(6000); });
+
+      const pollCallsAfterUnmount = calls.filter((c) => /\/ensure-target\//.test(c.url)).length;
+      expect(pollCallsAfterUnmount).toBe(pollCallsBeforeUnmount);
+      // Kein "Can't perform a React state update on an unmounted component"-
+      // Leck.
+      expect(consoleError).not.toHaveBeenCalled();
+      expect(document.querySelector('[data-testid="obsidian-ingest-overlay"]')).toBeNull();
+      expect(calls.some((c) => c.url === '/api/obsidian-ingest/start')).toBe(false);
+
+      consoleError.mockRestore();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  // Happy-Path unverändert: bereits durch die o.g. Tests ("bestehendes Ziel
+  // …", "sofort 200 'ready'…", "202 'creating' … bis 'ready'…") abgedeckt —
+  // kein Auswahlwechsel während der Vorbereitung → unverändertes Verhalten.
 });
 
 // ── AC3: Auslösen — genau ein POST ────────────────────────────────────────────

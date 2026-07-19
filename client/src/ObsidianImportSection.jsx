@@ -6,27 +6,56 @@
  * Verhalten, Guards und beide Pfade (strukturiertes Fragenkatalog-Overlay +
  * PTY-„Auslösen"-Fallback) bleiben unverändert.
  *
- * ── obsidian-question-catalog v2 AC10/AC11 (S-384): Ziel-Projekt-Auswahl ────
+ * ── obsidian-question-catalog v3 AC10/AC15 (S-388, ersetzt v2 AC10/AC11 aus
+ * S-384) — Ziel-Projekt: bestehend wählen ODER neu anlegen ─────────────────
  * Betrifft AUSSCHLIESSLICH den headless Fragenkatalog-Pfad ("Strukturiert
  * starten" → `ObsidianIngestOverlay` → `POST /api/obsidian-ingest/start`,
  * S-383 verlangt server-seitig ein aufgelöstes `targetProjectSlug` als `cwd`,
  * 400/404 ohne). Der PTY-Fallback ("Auslösen", obsidian-project-intake AC3)
  * bleibt UNVERÄNDERT — eigener Endpunkt (`POST /api/command`), eigene Spec,
  * kein Ziel-Projekt-Erfordernis.
- * Auswahlgrundlage (AC10, 0b): dieselbe Quelle wie die Repo-Auswahl der
- * Fabrik-Übersicht/Cockpit — `GET /api/workspace/repos` (`WorkspaceScanner`,
- * kein neuer Endpunkt), Muster identisch zu
- * `NightWatchSettings.jsx#fetchProjectSlugs` (best-effort, Netzwerkfehler →
- * leere Liste statt Crash). Eine leere Liste zeigt AC11's definierten
- * `new-project`-Hinweis statt eines Auswahlfelds; „Strukturiert starten"
- * bleibt disabled (disabled-Attribut + Text-Label), solange kein Ziel-Projekt
- * gewählt ist — ein Klick löst dann keinen `start`-POST aus (defensiv auch in
- * `handleOpenIngestOverlay` geprüft, nicht nur über das disabled-Attribut).
+ * Das Ziel-Projekt-`<select>` (Auswahlgrundlage weiterhin `GET
+ * /api/workspace/repos`, `WorkspaceScanner`, kein neuer Endpunkt — Muster
+ * identisch zu `NightWatchSettings.jsx#fetchProjectSlugs`, best-effort) trägt
+ * seit v3 zusätzlich einen Sentinel-Eintrag „Neues Projekt erstellen"
+ * (`NEW_TARGET_SENTINEL`). Ist er gewählt, erscheint ein Freitext-Feld für
+ * den neuen Projektnamen — vorbelegt mit einem aus dem Basisnamen des
+ * gewählten Notiz-Ordners abgeleiteten Vorschlag (`slugifySuggestion()`,
+ * dieselbe Umlaut-/Kebab-Case-Regel wie `AreaWriter.js#_slugifyBase`, hier
+ * client-seitig nachgebildet — `_slugifyBase` ist server-seitig und nicht
+ * exportiert), inline gegen `TARGET_SLUG_RE` (`^[A-Za-z0-9_-]+$`, wie
+ * `resolveProjectSlug`/`APP_SLUG_RE`) validiert. AC11 (leere/kein-Treffer-
+ * Projektliste) ist damit KEIN Blocker mehr — das `<select>` trägt den
+ * Sentinel-Eintrag unabhängig von der Listengröße; der frühere Blocker-
+ * Hinweis (`obsidian-target-project-empty-hint`) entfällt ersatzlos.
+ * AC15: bei einem neuen Namen ruft `handleStartStructured` ZUERST
+ * `POST .../obsidian-ingest/ensure-target` (+ Status-Poll
+ * `GET .../ensure-target/:jobId`, S-387/`obsidianTargetRouter.js`,
+ * Backend unverändert) und zeigt den Anlage-/Existenz-Status informativ
+ * (`ensureState`: „wird geprüft…"/„wird angelegt…"/„vorhanden"/Fehlertext) —
+ * das Overlay (und damit `POST .../start`) öffnet erst bei `ready`; ein
+ * Anlage-Fehlschlag zeigt den vom Backend gelieferten, secret-freien
+ * Fehlertext und öffnet KEIN Overlay (kein Ingest-Start). Bestehendes Ziel
+ * gewählt → weiterhin direkt zum Overlay (kein `ensure-target`-Umweg, AC10
+ * 0d „direkt verwenden").
+ * Review-Fix (Iteration 2, Important): während `ensureState` `checking`/
+ * `creating` ist (`isEnsuring`), sind Notiz-Ordner-, Ziel-Projekt-`<select>`
+ * UND das Neuanlage-Feld disabled (Text-Label in der Statusanzeige, s.u.);
+ * jeder ihrer `onChange`-Handler ruft zusätzlich `abortEnsureIfRunning()`
+ * (Poll stoppen, `ensureGenerationRef` erhöhen, Status auf `idle`
+ * zurücksetzen) — Defense in Depth, falls das `disabled`-Attribut umgangen
+ * wird (z.B. programmatischer Change). Das beim Klick eingefrorene Ziel
+ * (`activeIngestTarget`, Capture in `handleStartStructured`) ist die
+ * ALLEINIGE Quelle für die `ObsidianIngestOverlay`-Props — ein späterer
+ * Auswahlwechsel kann das bereits geöffnete/anstehende Overlay nicht mehr
+ * umlenken. Verhindert einen automatischen Ingest-Start gegen eine
+ * inzwischen geänderte Auswahl, nachdem `ready` asynchron eintrifft.
  * Der gemerkte Wiedereinstiegs-Job (`ingestJob`, Review-Fix Iteration 2 aus
- * S-251) wird jetzt zusätzlich am `targetProjectSlug` gemessen (analog dem
- * bestehenden `projectFolderPath`-Vergleich) — ein Wechsel des Ziel-Projekts
- * bei unverändertem Notiz-Ordner darf denselben Job genauso wenig lautlos
- * resumen wie ein Wechsel des Notiz-Ordners.
+ * S-251) wird weiterhin am `targetProjectSlug` gemessen (jetzt
+ * `effectiveTargetSlug` — der tatsächlich verwendete Wert, bestehend ODER
+ * neu getippt) — ein Wechsel des Ziel-Projekts bei unverändertem Notiz-
+ * Ordner darf denselben Job genauso wenig lautlos resumen wie ein Wechsel
+ * des Notiz-Ordners.
  *
  * @param {{ fetchFn?: typeof fetch, onNavigate: (view: string) => void }} props
  */
@@ -42,6 +71,41 @@ const FROM_NOTES_CMD = '/agent-flow:from-notes';
 
 /** Busy-guard poll interval for the Obsidian-Import section (AC5). */
 const OBSIDIAN_SESSION_POLL_MS = 3_000;
+
+// ── obsidian-question-catalog v3 AC10/AC15 (S-388) constants ────────────────
+
+/** Sentinel-Wert im Ziel-Projekt-`<select>` für "Neues Projekt erstellen". */
+const NEW_TARGET_SENTINEL = '__obsidian-new-target__';
+
+/** Slug-Form-Prüfung für einen neuen Projektnamen (AC10/0c, wie `resolveProjectSlug`/`APP_SLUG_RE`). */
+const TARGET_SLUG_RE = /^[A-Za-z0-9_-]+$/;
+
+/** Poll-Intervall (ms) für den `ensure-target`-Anlage-Status (AC15). */
+const ENSURE_TARGET_POLL_MS = 1_500;
+
+/** Umlaut-Transliteration, identisch zu `AreaWriter.js#_slugifyBase`. */
+const SLUG_UMLAUT_MAP = { ä: 'ae', ö: 'oe', ü: 'ue', Ä: 'Ae', Ö: 'Oe', Ü: 'Ue', ß: 'ss' };
+
+/**
+ * Leitet einen Slug-VORSCHLAG aus einem Namen ab (AC10/0c) — client-seitige
+ * Nachbildung von `AreaWriter.js#_slugifyBase` (dort server-seitig, nicht
+ * exportiert): Umlaut-Transliteration → NFKD/Diakritika-Strip → lowercase →
+ * jede Nicht-`[a-z0-9]`-Folge → ein `-` → Rand-`-` trimmen. Nur eine
+ * editierbare Vorbelegung — der tatsächlich verwendete Wert ist die
+ * Nutzer-Eingabe (nicht-autoritativ).
+ *
+ * @param {string} name
+ * @returns {string}
+ */
+function slugifySuggestion(name) {
+  let s = String(name ?? '').replace(/[äöüÄÖÜß]/g, (ch) => SLUG_UMLAUT_MAP[ch] ?? ch);
+  s = s.normalize('NFKD').replace(/[\u0300-\u036f]/g, '');
+  s = s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return s;
+}
 
 // ── Obsidian-Import API-Helfer (obsidian-project-intake, S-249) ──────────────
 
@@ -63,13 +127,14 @@ async function fetchObsidianProjects(fetchImpl) {
 
 /**
  * GET /api/workspace/repos — Ziel-Projekt-Auswahlgrundlage (obsidian-question-
- * catalog v2 AC10): dieselbe Quelle wie die Repo-Auswahl der Fabrik-Übersicht/
+ * catalog AC10): dieselbe Quelle wie die Repo-Auswahl der Fabrik-Übersicht/
  * Cockpit (`WorkspaceScanner`, kein neuer Endpunkt). `name` je Klon ist der
  * Verzeichnisname unter `WORKSPACE_DIR` == `targetProjectSlug`
  * (`resolveProjectSlug`/`validateProjectPath`, `workspacePath.js`).
  * Best-effort (Muster `NightWatchSettings.jsx#fetchProjectSlugs`): Fehler/
- * Netzwerkausfall → leere Liste statt Crash — AC11 zeigt bei leerer Liste
- * ohnehin den `new-project`-Hinweis statt einer Auswahl.
+ * Netzwerkausfall → leere Liste statt Crash — eine leere Liste ist seit v3
+ * (AC11) KEIN Blocker mehr, das `<select>` trägt zusätzlich immer den
+ * "Neues Projekt erstellen"-Sentinel-Eintrag.
  *
  * @param {typeof fetch} fetchImpl
  * @returns {Promise<string[]>}
@@ -140,18 +205,76 @@ export function ObsidianImportSection({ fetchFn, onNavigate }) {
   // FALSCHEN Job (A) für das NEU gewählte Projekt (B) resumen — lautlos,
   // ohne dass ein neuer `start()`-Call für B stattfindet. Zwei Sicherungen:
   // (1) der `<select>`-onChange setzt `ingestJob` zurück, sobald der neue
-  // Pfad vom gemerkten Job-Pfad abweicht; (2) `handleOpenIngestOverlay`
+  // Pfad vom gemerkten Job-Pfad abweicht; (2) `handleStartStructured`
   // prüft defensiv NOCHMAL vor dem Öffnen (defense in depth, falls „(1)"
   // je umgangen wird).
   const [showIngestOverlay, setShowIngestOverlay] = useState(false);
   const [ingestJob, setIngestJob]                  = useState(/** @type {{jobId:string, projectFolderPath:string, targetProjectSlug:string}|null} */(null));
   const ingestTriggerRef = useRef(null);
 
-  // obsidian-question-catalog v2 AC10/AC11 (S-384): Ziel-Projekt-Auswahl für
-  // den headless Fragenkatalog-Pfad (s. Modul-Kommentar). 'loading' | 'ok' | 'empty'.
+  // obsidian-question-catalog v3 AC10 (S-388): Ziel-Projekt-Auswahl für den
+  // headless Fragenkatalog-Pfad (s. Modul-Kommentar). 'loading' | 'ok' | 'empty'.
   const [targetProjectsState, setTargetProjectsState] = useState('loading');
   const [targetProjects, setTargetProjects]           = useState(/** @type {string[]} */([]));
-  const [selectedTargetSlug, setSelectedTargetSlug]   = useState('');
+  // Roh-Wert des `<select>`: '' | ein bestehender Slug | NEW_TARGET_SENTINEL.
+  const [selectedTargetOption, setSelectedTargetOption] = useState('');
+  // Freitext-Neuanlage-Name (nur relevant, wenn selectedTargetOption === NEW_TARGET_SENTINEL).
+  const [newTargetName, setNewTargetName]     = useState('');
+  const [newTargetTouched, setNewTargetTouched] = useState(false);
+
+  // obsidian-question-catalog v3 AC15 (S-388): Anlage-/Existenz-Status der
+  // Ziel-Repo-Vorbereitung (`POST/GET .../obsidian-ingest/ensure-target`,
+  // Backend S-387 unverändert). 'idle' | 'checking' | 'creating' | 'ready' | 'error'.
+  const [ensureState, setEnsureState] = useState('idle');
+  const [ensureError, setEnsureError] = useState(/** @type {string|null} */(null));
+  const ensurePollRef = useRef(/** @type {ReturnType<typeof setInterval>|null} */(null));
+  // Review-Fix (Iteration 2, Important): jeder `ensure-target`-Zyklus (POST +
+  // Poll) trägt seine eigene Generation. Ein Auswahlwechsel (Notiz-Ordner
+  // ODER Ziel-Projekt) WÄHREND `checking`/`creating` erhöht die Generation
+  // (`abortEnsureIfRunning`, s.u.) — jeder await-Fortsetzungspunkt in
+  // `handleStartStructured`/`startEnsurePolling` prüft die Generation VOR
+  // jeder State-Änderung und bricht bei Nichtübereinstimmung sofort ab (kein
+  // Auto-Öffnen des Overlays gegen eine inzwischen verworfene Auswahl).
+  const ensureGenerationRef = useRef(0);
+  // Das beim Klick auf "Strukturiert starten" EINGEFRORENE Start-Ziel
+  // (Notiz-Ordner + Ziel-Slug) — das Overlay öffnet AUSSCHLIESSLICH mit
+  // diesem Wert, NIE mit dem zu diesem Zeitpunkt evtl. bereits wieder
+  // geänderten Live-State (`selectedPath`/`effectiveTargetSlug`).
+  const [activeIngestTarget, setActiveIngestTarget] = useState(
+    /** @type {{projectFolderPath:string, targetProjectSlug:string}|null} */(null),
+  );
+  // Review-Fix (Iteration 2, Important, Kernpunkt „Unmount während Poll"):
+  // KEIN State-Update mehr nach Unmount — ein bereits in Flight befindlicher
+  // `poll()`-Tick (bzw. eine in Flight befindliche `ensure-target`-Anfrage)
+  // kann NACH dem Unmount noch auflösen; `clearInterval` allein verhindert
+  // nur ZUKÜNFTIGE Ticks, nicht den bereits laufenden (Muster identisch zu
+  // `ObsidianIngestOverlay.jsx#mountedRef`).
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (ensurePollRef.current) clearInterval(ensurePollRef.current);
+    };
+  }, []);
+
+  // Review-Fix (Iteration 2, Important): bricht eine laufende
+  // `ensure-target`-Vorbereitung sichtbar ab (Poll stoppen, Generation
+  // invalidieren, Status zurücksetzen) — aufgerufen aus JEDEM Auswahl-
+  // Wechsel-Handler (Notiz-Ordner-, Ziel-Projekt-<select>, Neuanlage-Feld),
+  // no-op wenn gerade nichts läuft.
+  const abortEnsureIfRunning = useCallback(() => {
+    if (ensurePollRef.current) {
+      clearInterval(ensurePollRef.current);
+      ensurePollRef.current = null;
+    }
+    ensureGenerationRef.current += 1;
+    setEnsureState((prev) => (prev === 'checking' || prev === 'creating' ? 'idle' : prev));
+    setEnsureError(null);
+  }, []);
 
   const fetchFnRef = useRef(fetchFn ?? globalThis.fetch.bind(globalThis));
   useEffect(() => {
@@ -176,7 +299,7 @@ export function ObsidianImportSection({ fetchFn, onNavigate }) {
     return () => { cancelled = true; };
   }, []);
 
-  // obsidian-question-catalog v2 AC10/AC11 (S-384): lädt die Ziel-Projekt-
+  // obsidian-question-catalog v3 AC10 (S-388): lädt die Ziel-Projekt-
   // Auswahlgrundlage einmal beim Öffnen der Sektion (unabhängig von der
   // Notiz-Ordner-Liste oben).
   useEffect(() => {
@@ -191,6 +314,17 @@ export function ObsidianImportSection({ fetchFn, onNavigate }) {
     load();
     return () => { cancelled = true; };
   }, []);
+
+  // obsidian-question-catalog v3 AC10/0c (S-388): solange der Nutzer das
+  // Neuanlage-Feld noch nicht selbst bearbeitet hat, wird der Vorschlag aus
+  // dem Basisnamen des aktuell gewählten Notiz-Ordners abgeleitet (nur
+  // Vorbelegung, nicht-autoritativ — s. `slugifySuggestion`).
+  const isNewTarget = selectedTargetOption === NEW_TARGET_SENTINEL;
+  useEffect(() => {
+    if (!isNewTarget || newTargetTouched) return;
+    const match = projects.find((p) => p.path === selectedPath);
+    setNewTargetName(match ? slugifySuggestion(match.name) : '');
+  }, [isNewTarget, newTargetTouched, selectedPath, projects]);
 
   // AC5: Busy-Guard-Poll (GET /api/session).
   useEffect(() => {
@@ -277,29 +411,166 @@ export function ObsidianImportSection({ fetchFn, onNavigate }) {
     setErrorMsg(null);
   }, []);
 
+  // obsidian-question-catalog v3 AC10/0c (S-388): der TATSÄCHLICH verwendete
+  // Ziel-Slug — bestehend gewählt ODER der (validierte) neu getippte Name.
+  const trimmedNewTargetName = newTargetName.trim();
+  const validNewTargetName = TARGET_SLUG_RE.test(trimmedNewTargetName);
+  const effectiveTargetSlug = isNewTarget ? trimmedNewTargetName : selectedTargetOption;
+  const targetMissing = isNewTarget ? trimmedNewTargetName === '' : !selectedTargetOption;
+  const targetInvalid = isNewTarget && trimmedNewTargetName !== '' && !validNewTargetName;
+  const targetChosen = !targetMissing && !targetInvalid;
+  const isEnsuring = ensureState === 'checking' || ensureState === 'creating';
+
   // obsidian-question-catalog AC3/AC4/AC5/AC7 (S-251): öffnet das Fragenkatalog-
   // Overlay — primärer, „richerer" Einstieg für die dritte Option (strukturierte
   // Rückfragen statt reinem Terminal-Text). Ein Wiedereinstieg (kein erneuter
   // `start()`) findet NUR statt, wenn der gemerkte Job zum AKTUELL gewählten
-  // Projekt-Pfad gehört (Review-Fix Iteration 2) — sonst wird eine Auswahl
-  // verlangt wie beim PTY-Fallback-Button.
+  // Projekt-Pfad UND Ziel-Slug gehört (Review-Fix Iteration 2) — sonst wird
+  // eine Auswahl verlangt wie beim PTY-Fallback-Button.
   const ingestJobMatchesSelection =
     Boolean(ingestJob) &&
     ingestJob.projectFolderPath === selectedPath &&
-    ingestJob.targetProjectSlug === selectedTargetSlug;
-  // AC10: „Strukturiert starten" bleibt disabled, solange kein Ziel-Projekt
-  // gewählt ist (zusätzlich zur bestehenden Notiz-Ordner-Auswahl).
-  const canStartIngest = Boolean(selectedPath) && Boolean(selectedTargetSlug) && !showIngestOverlay;
-  const handleOpenIngestOverlay = useCallback(() => {
-    if (!selectedPath || !selectedTargetSlug) return;
-    // Defense in depth (reviewer/R06, erweitert um targetProjectSlug S-384):
+    ingestJob.targetProjectSlug === effectiveTargetSlug;
+  // AC10: „Strukturiert starten" bleibt disabled, solange kein Notiz-Ordner
+  // ODER kein gültiges Ziel (bestehend gewählt ODER gültiger neuer Name)
+  // vorliegt; ebenso während eine Ziel-Repo-Vorbereitung (AC15) läuft.
+  const canStartIngest = Boolean(selectedPath) && targetChosen && !showIngestOverlay && !isEnsuring;
+
+  // obsidian-question-catalog v3 AC15 (S-388): pollt den Anlage-Status eines
+  // `ensure-target`-Jobs, bis `ready`/`failed` — öffnet das Overlay erst bei
+  // `ready` (kein Ingest-Start vor gesicherter Ziel-Repo-Existenz).
+  //
+  // Review-Fix (Iteration 2, Important): `generation` ist die zum Start-Klick
+  // gehörende Generation (s. `ensureGenerationRef`) — VOR jeder State-Änderung
+  // wird sie gegen den AKTUELLEN Ref-Wert geprüft. Ändert der Nutzer während
+  // des Pollens die Notiz-Ordner- ODER Ziel-Auswahl, hat `abortEnsureIfRunning`
+  // die Generation bereits erhöht (+ den Interval bereits gestoppt) — ein noch
+  // "in Flight" befindlicher `poll()`-Tick erkennt den Mismatch und bricht
+  // ab, OHNE das Overlay zu öffnen oder den Fehlerzustand zu setzen (kein
+  // stiller Auto-Start gegen eine verworfene Auswahl).
+  const startEnsurePolling = useCallback((jobId, generation) => {
+    // Review-Fix (Iteration 2): "stale" = Auswahl geändert (Generation-
+    // Mismatch) ODER Komponente bereits unmounted — in BEIDEN Fällen darf
+    // dieser Tick keinen State mehr setzen/das Overlay nicht mehr öffnen.
+    function isStale() {
+      return generation !== ensureGenerationRef.current || !mountedRef.current;
+    }
+    if (ensurePollRef.current) clearInterval(ensurePollRef.current);
+    async function poll() {
+      if (isStale()) return;
+      let res;
+      try {
+        res = await fetchFnRef.current(`/api/obsidian-ingest/ensure-target/${encodeURIComponent(jobId)}`);
+      } catch {
+        return; // transienter Netzwerkfehler — nächste Runde erneut versuchen
+      }
+      if (isStale()) return;
+      if (res.status !== 200) {
+        if (ensurePollRef.current) clearInterval(ensurePollRef.current);
+        ensurePollRef.current = null;
+        setEnsureState('error');
+        setEnsureError('Anlage-Status nicht mehr auffindbar (evtl. Server-Neustart).');
+        return;
+      }
+      let data = {};
+      try { data = await res.json(); } catch { /* ignore */ }
+      if (isStale()) return;
+      if (data.status === 'ready') {
+        if (ensurePollRef.current) clearInterval(ensurePollRef.current);
+        ensurePollRef.current = null;
+        setEnsureState('ready');
+        // AC15/Review-Fix: `activeIngestTarget` wurde bereits beim Klick
+        // (handleStartStructured) auf das eingefrorene Ziel gesetzt — das
+        // Overlay öffnet AUSSCHLIESSLICH dagegen, nie gegen den Live-State.
+        setShowIngestOverlay(true);
+        return;
+      }
+      if (data.status === 'failed') {
+        if (ensurePollRef.current) clearInterval(ensurePollRef.current);
+        ensurePollRef.current = null;
+        setEnsureState('error');
+        setEnsureError(data.error ?? 'Projekt-Anlage fehlgeschlagen');
+        return;
+      }
+      // 'creating' → weiter pollen.
+    }
+    poll();
+    ensurePollRef.current = setInterval(poll, ENSURE_TARGET_POLL_MS);
+  }, []);
+
+  const handleStartStructured = useCallback(async () => {
+    if (!selectedPath || !targetChosen || isEnsuring) return;
+    // Review-Fix (Iteration 2, Important, Kernpunkt 1): das Start-Ziel wird
+    // HIER, beim Klick, eingefroren (Capture) — jeder nachfolgende Schritt
+    // (Ensure-Request/-Poll, Overlay-Öffnen) verwendet AUSSCHLIESSLICH diese
+    // Capture, NIE erneut `selectedPath`/`effectiveTargetSlug` (die sich bis
+    // zum tatsächlichen Öffnen des Overlays bereits geändert haben könnten).
+    const capturedTarget = { projectFolderPath: selectedPath, targetProjectSlug: effectiveTargetSlug };
+
+    // Defense in depth (reviewer/R06, erweitert um effectiveTargetSlug S-388):
     // ein gemerkter Job für ein ANDERES Projekt (Notiz-Ordner ODER Ziel-Repo)
     // darf niemals stillschweigend resumed werden.
-    if (ingestJob && (ingestJob.projectFolderPath !== selectedPath || ingestJob.targetProjectSlug !== selectedTargetSlug)) {
+    if (ingestJob && (ingestJob.projectFolderPath !== capturedTarget.projectFolderPath || ingestJob.targetProjectSlug !== capturedTarget.targetProjectSlug)) {
       setIngestJob(null);
     }
-    setShowIngestOverlay(true);
-  }, [selectedPath, selectedTargetSlug, ingestJob]);
+
+    setActiveIngestTarget(capturedTarget);
+
+    if (!isNewTarget) {
+      // AC10/0d: bestehendes Ziel → direkt verwenden, kein ensure-Umweg.
+      setShowIngestOverlay(true);
+      return;
+    }
+
+    // AC15: neuer Name → zuerst Ziel-Repo sicherstellen; das Overlay (und
+    // damit POST .../start) öffnet erst bei 'ready'. Eigene Generation für
+    // diesen Zyklus (Review-Fix Kernpunkt 2) — ein Auswahlwechsel während des
+    // Wartens invalidiert sie über `abortEnsureIfRunning`; `!mountedRef.current`
+    // deckt zusätzlich ein Unmount WÄHREND der Anfrage ab (Kernpunkt „Unmount
+    // während Poll").
+    const generation = (ensureGenerationRef.current += 1);
+    const isStale = () => generation !== ensureGenerationRef.current || !mountedRef.current;
+    setEnsureState('checking');
+    setEnsureError(null);
+    let res;
+    try {
+      res = await fetchFnRef.current('/api/obsidian-ingest/ensure-target', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targetProjectSlug: capturedTarget.targetProjectSlug }),
+      });
+    } catch {
+      if (isStale()) return;
+      setEnsureState('error');
+      setEnsureError('Netzwerkfehler bei der Ziel-Projekt-Vorbereitung. Bitte erneut versuchen.');
+      return;
+    }
+    if (isStale()) return;
+
+    if (res.status === 200) {
+      setEnsureState('ready');
+      setShowIngestOverlay(true);
+      return;
+    }
+    if (res.status === 202) {
+      let data = {};
+      try { data = await res.json(); } catch { /* ignore */ }
+      if (isStale()) return;
+      if (!data.jobId) {
+        setEnsureState('error');
+        setEnsureError('Projekt-Anlage konnte nicht gestartet werden.');
+        return;
+      }
+      setEnsureState('creating');
+      startEnsurePolling(data.jobId, generation);
+      return;
+    }
+    let data = {};
+    try { data = await res.json(); } catch { /* ignore */ }
+    if (isStale()) return;
+    setEnsureState('error');
+    setEnsureError(data.error ?? `Ziel-Projekt-Vorbereitung fehlgeschlagen (HTTP ${res.status}).`);
+  }, [selectedPath, targetChosen, isEnsuring, isNewTarget, effectiveTargetSlug, ingestJob, startEnsurePolling]);
 
   return (
     <section style={styles.section} aria-labelledby="obsidian-import-heading">
@@ -309,7 +580,8 @@ export function ObsidianImportSection({ fetchFn, onNavigate }) {
       <p style={styles.sectionDesc}>
         Wählt einen Projekt-Unterordner aus dem konfigurierten Vault. „Strukturiert
         starten" zeigt Rückfragen als Fragenkatalog-Overlay (empfohlen) und
-        benötigt zusätzlich ein bestehendes Ziel-Projekt (dort läuft der Lauf);
+        benötigt zusätzlich ein Ziel-Projekt (dort läuft der Lauf) — entweder
+        ein bestehendes Workspace-Projekt oder ein neu anzulegendes;
         „Auslösen" löst stattdessen direkt{' '}
         <code style={styles.obsidianInlineCode}>/agent-flow:from-notes</code> im
         Terminal aus (unstrukturiert, Fallback).
@@ -346,18 +618,24 @@ export function ObsidianImportSection({ fetchFn, onNavigate }) {
             id="obsidian-project-select"
             style={styles.select}
             value={selectedPath}
-            disabled={isStarting}
-            aria-disabled={isStarting}
+            disabled={isStarting || isEnsuring}
+            aria-disabled={isStarting || isEnsuring}
             onChange={(e) => {
               const next = e.target.value;
+              // Review-Fix (Iteration 2, Important): ein Auswahlwechsel
+              // WÄHREND einer laufenden `ensure-target`-Vorbereitung bricht
+              // diese sofort sichtbar ab (Poll stoppen, Generation
+              // invalidieren, Status zurücksetzen) — kein stiller Auto-Start
+              // gegen den jetzt geänderten Notiz-Ordner.
+              abortEnsureIfRunning();
               setSelectedPath(next);
               // Review-Fix (Iteration 2, Important reviewer/R06; erweitert um
-              // targetProjectSlug S-384): ein Auswahlwechsel verwirft einen
+              // effectiveTargetSlug S-388): ein Auswahlwechsel verwirft einen
               // gemerkten Ingest-Job für das ALTE Projekt sofort — sonst zeigt
               // der Button weiter "Fortsetzen" und würde beim Öffnen lautlos
               // den falschen Job resumen.
               setIngestJob((prev) =>
-                prev && (prev.projectFolderPath !== next || prev.targetProjectSlug !== selectedTargetSlug)
+                prev && (prev.projectFolderPath !== next || prev.targetProjectSlug !== effectiveTargetSlug)
                   ? null
                   : prev,
               );
@@ -371,12 +649,15 @@ export function ObsidianImportSection({ fetchFn, onNavigate }) {
         </div>
       )}
 
-      {/* obsidian-question-catalog v2 AC10 (S-384): Ziel-Projekt-Auswahl —
+      {/* obsidian-question-catalog v3 AC10 (S-388): Ziel-Projekt-Auswahl —
           gilt nur für den headless Fragenkatalog-Pfad ("Strukturiert
           starten"), s. Modul-Kommentar. Lade-Zustand bewusst ohne eigenen
           Indikator (best-effort, kein blockierendes UI vor der Notiz-Ordner-
-          Auswahl). */}
-      {targetProjectsState === 'ok' && (
+          Auswahl). Das <select> trägt
+          IMMER — auch bei leerer Liste (AC11 ist kein Blocker mehr) —
+          zusätzlich zu den bestehenden Workspace-Projekten den Sentinel-
+          Eintrag "Neues Projekt erstellen". */}
+      {targetProjectsState !== 'loading' && (
         <div style={styles.fieldRow}>
           <label htmlFor="obsidian-target-project-select" style={styles.label}>
             Ziel-Projekt
@@ -384,14 +665,20 @@ export function ObsidianImportSection({ fetchFn, onNavigate }) {
           <select
             id="obsidian-target-project-select"
             style={styles.select}
-            value={selectedTargetSlug}
-            disabled={isStarting}
-            aria-disabled={isStarting}
+            value={selectedTargetOption}
+            disabled={isStarting || isEnsuring}
+            aria-disabled={isStarting || isEnsuring}
             onChange={(e) => {
               const next = e.target.value;
-              setSelectedTargetSlug(next);
+              // Review-Fix (Iteration 2, Important): Ziel-Auswahlwechsel
+              // WÄHREND einer laufenden `ensure-target`-Vorbereitung bricht
+              // diese sofort sichtbar ab (s.o.).
+              abortEnsureIfRunning();
+              setSelectedTargetOption(next);
+              setNewTargetTouched(false);
+              const nextSlug = next === NEW_TARGET_SENTINEL ? '' : next;
               setIngestJob((prev) =>
-                prev && (prev.targetProjectSlug !== next || prev.projectFolderPath !== selectedPath)
+                prev && (prev.targetProjectSlug !== nextSlug || prev.projectFolderPath !== selectedPath)
                   ? null
                   : prev,
               );
@@ -401,18 +688,87 @@ export function ObsidianImportSection({ fetchFn, onNavigate }) {
             {targetProjects.map((slug) => (
               <option key={slug} value={slug}>{slug}</option>
             ))}
+            <option value={NEW_TARGET_SENTINEL}>Neues Projekt erstellen</option>
           </select>
-        </div>
-      )}
 
-      {/* AC11: leere Ziel-Projekt-Liste → definierter Hinweis auf den
-          new-project-Weg statt eines Auswahlfelds; kein Lauf-Start möglich
-          (canStartIngest bleibt false, s.o.). */}
-      {targetProjectsState === 'empty' && (
-        <p style={styles.emptyHint} data-testid="obsidian-target-project-empty-hint">
-          Kein passendes Ziel-Projekt vorhanden. Lege es zuerst über die Option
-          „Neues Projekt" an, bevor du den Fragenkatalog-Lauf startest.
-        </p>
+          {/* obsidian-question-catalog v3 AC10/0c (S-388): Freitext-Neuanlage-
+              Name, vorbelegt mit dem Slug-Vorschlag aus dem Notiz-Ordner-
+              Basisnamen (nicht-autoritativ, editierbar); Inline-Validierung
+              gegen TARGET_SLUG_RE, Text-Label statt reiner Farb-Markierung. */}
+          {isNewTarget && (
+            <div style={styles.fieldRow}>
+              <label htmlFor="obsidian-new-target-name" style={styles.label}>
+                Neuer Projektname
+              </label>
+              <input
+                id="obsidian-new-target-name"
+                type="text"
+                style={styles.select}
+                value={newTargetName}
+                disabled={isStarting || isEnsuring}
+                aria-disabled={isStarting || isEnsuring}
+                aria-invalid={targetInvalid}
+                aria-describedby={targetInvalid ? 'obsidian-new-target-name-error' : undefined}
+                onChange={(e) => {
+                  const next = e.target.value;
+                  // Review-Fix (Iteration 2, Important): Tippen im Neuanlage-
+                  // Feld WÄHREND einer laufenden `ensure-target`-Vorbereitung
+                  // bricht diese sofort sichtbar ab (s.o.).
+                  abortEnsureIfRunning();
+                  setNewTargetName(next);
+                  setNewTargetTouched(true);
+                  const trimmedNext = next.trim();
+                  setIngestJob((prev) =>
+                    prev && (prev.targetProjectSlug !== trimmedNext || prev.projectFolderPath !== selectedPath)
+                      ? null
+                      : prev,
+                  );
+                }}
+              />
+              {targetInvalid && (
+                <p
+                  role="alert"
+                  id="obsidian-new-target-name-error"
+                  style={styles.fieldError}
+                  data-testid="obsidian-new-target-invalid"
+                >
+                  Ungültiger Projektname — nur Buchstaben, Zahlen, „_" und „-" erlaubt.
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* obsidian-question-catalog v3 AC15 (S-388): informative Anlage-/
+              Existenz-Statusanzeige — reines Feedback, steuert das Ziel
+              selbst nicht (das erfolgt über das Feld oben). */}
+          {(ensureState === 'checking' || ensureState === 'creating') && (
+            <div
+              role="status"
+              aria-live="polite"
+              style={styles.notice}
+              data-testid="obsidian-target-ensure-status"
+            >
+              {ensureState === 'checking'
+                ? 'Ziel-Projekt wird geprüft… (Notiz-Ordner und Ziel-Projekt sind währenddessen gesperrt)'
+                : 'Projekt wird angelegt… (Notiz-Ordner und Ziel-Projekt sind währenddessen gesperrt)'}
+            </div>
+          )}
+          {ensureState === 'ready' && (
+            <div
+              role="status"
+              aria-live="polite"
+              style={styles.notice}
+              data-testid="obsidian-target-ensure-status"
+            >
+              Ziel-Projekt vorhanden
+            </div>
+          )}
+          {ensureState === 'error' && ensureError && (
+            <div role="alert" style={styles.errorNotice} data-testid="obsidian-target-ensure-error">
+              {ensureError}
+            </div>
+          )}
+        </div>
       )}
 
       {/* AC5: Busy-Hinweis — Text-Label, nicht nur Farbe */}
@@ -452,13 +808,17 @@ export function ObsidianImportSection({ fetchFn, onNavigate }) {
           aria-label={
             !selectedPath
               ? 'Strukturiert starten — Projekt-Ordner fehlt'
-              : !selectedTargetSlug
+              : targetMissing
               ? 'Strukturiert starten — Ziel-Projekt fehlt'
+              : targetInvalid
+              ? 'Strukturiert starten — ungültiger Projektname'
+              : isEnsuring
+              ? 'Strukturiert starten — Ziel-Projekt wird vorbereitet'
               : ingestJobMatchesSelection
               ? 'Strukturiert starten — Fragenkatalog-Lauf fortsetzen'
               : 'Strukturiert starten — mit Fragenkatalog'
           }
-          onClick={handleOpenIngestOverlay}
+          onClick={handleStartStructured}
           data-testid="obsidian-ingest-open-btn"
         >
           {ingestJobMatchesSelection ? 'Fortsetzen' : 'Strukturiert starten'}
@@ -493,18 +853,20 @@ export function ObsidianImportSection({ fetchFn, onNavigate }) {
       {/* obsidian-question-catalog AC3/AC4/AC5/AC7 (S-251): Fragenkatalog-
           Overlay — eigene Datei, eigene State-Machine (s. Modul-Kommentar
           dort). Schließen bricht den headless Lauf NICHT ab (AC7); jobId +
-          projectFolderPath + targetProjectSlug (AC10, S-384) bleiben
-          zusammen in dieser Section gemerkt (Wiedereinstieg NUR bei
-          unverändertem selectedPath UND selectedTargetSlug, s.o.). */}
-      {showIngestOverlay && (
+          `activeIngestTarget` (AC10, S-388 — das beim Klick eingefrorene
+          Ziel, Review-Fix Iteration 2, NICHT der Live-`selectedPath`/
+          `effectiveTargetSlug`) bleiben zusammen in dieser Section gemerkt.
+          Öffnet bei einem neuen Ziel-Namen erst NACH erfolgreicher
+          `ensure-target`-Vorbereitung (AC15, s. handleStartStructured). */}
+      {showIngestOverlay && activeIngestTarget && (
         <ObsidianIngestOverlay
-          projectFolderPath={selectedPath}
-          targetProjectSlug={selectedTargetSlug}
+          projectFolderPath={activeIngestTarget.projectFolderPath}
+          targetProjectSlug={activeIngestTarget.targetProjectSlug}
           initialJobId={ingestJobMatchesSelection ? ingestJob.jobId : null}
           fetchFn={fetchFnRef.current}
           triggerRef={ingestTriggerRef}
           onClose={() => setShowIngestOverlay(false)}
-          onJobStarted={(jobId) => setIngestJob({ jobId, projectFolderPath: selectedPath, targetProjectSlug: selectedTargetSlug })}
+          onJobStarted={(jobId) => setIngestJob({ jobId, ...activeIngestTarget })}
           onJobEnded={() => setIngestJob(null)}
           onIngestComplete={() => onNavigate('factory')}
         />
@@ -632,6 +994,14 @@ const styles = {
     padding: '12px 0',
     fontSize: 13,
     color: '#9ca3af',
+  },
+  // obsidian-question-catalog v3 AC10 (S-388): Inline-Validierungshinweis
+  // für den Neuanlage-Namen — Kontrast #fca5a5 auf dunklem Hintergrund
+  // ≥ 4.5:1 (Konvention identisch zu errorNotice/formError).
+  fieldError: {
+    margin: '4px 0 0',
+    fontSize: 12,
+    color: '#fca5a5',
   },
   formError: {
     margin: '0 0 12px',
