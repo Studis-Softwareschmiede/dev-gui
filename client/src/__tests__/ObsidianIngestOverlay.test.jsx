@@ -5,6 +5,10 @@
  * Covers (obsidian-question-catalog, S-251 — UI-Anteile; Backend AC1/AC2/AC6
  * ist S-250, dort/in ObsidianIngestRunner.test.js + obsidianIngestRouter.test.js
  * abgedeckt, hier nur der Client-Konsum der dokumentierten Response-Shapes):
+ *   AC10 — (v2, S-384) `POST .../obsidian-ingest/start` sendet `targetProjectSlug`
+ *          zusätzlich zu `projectFolderPath`; ein non-202-Fehler (inkl. der
+ *          neuen 400/404-Fehlertexte aus AC9, S-383) wird secret-frei inline
+ *          angezeigt (bestehender AC7-Mechanismus, reine Weiterreichung).
  *   AC3 — Overlay (role=dialog, Backdrop, Fokus beim Öffnen, Esc schließt,
  *          Fokus-Rückgabe an triggerRef); Katalog gruppiert nach `stage`, je
  *          Frage `frage`-Text + `quelle`-Kontext; `optionen` als Radiogruppe,
@@ -113,6 +117,7 @@ function renderOverlay({
   initialJobId = null,
   triggerRef,
   projectFolderPath = '/vault/Projekte/mein-projekt',
+  targetProjectSlug = 'mein-repo',
 } = {}) {
   const fn = fetchFn ?? makeFetch().fetchFn;
   const close = onClose ?? jest.fn();
@@ -123,6 +128,7 @@ function renderOverlay({
   const rendered = render(
     React.createElement(ObsidianIngestOverlay, {
       projectFolderPath,
+      targetProjectSlug,
       fetchFn: fn,
       onClose: close,
       onIngestComplete: complete,
@@ -167,13 +173,13 @@ describe('obsidian-question-catalog AC3 — Overlay-Grundgerüst + Katalog-Rende
     expect(dialog.getAttribute('aria-modal')).toBe('true');
   });
 
-  it('startet den Lauf beim Öffnen (POST /start mit projectFolderPath)', async () => {
+  it('startet den Lauf beim Öffnen (POST /start mit projectFolderPath + targetProjectSlug)', async () => {
     const { fetchFn, calls } = makeFetch({ statusSequence: [{ status: 'running' }] });
-    renderOverlay({ fetchFn, projectFolderPath: '/vault/Projekte/xyz' });
+    renderOverlay({ fetchFn, projectFolderPath: '/vault/Projekte/xyz', targetProjectSlug: 'ziel-repo' });
     await waitFor(() => {
       const startCall = calls.find((c) => START_RE.test(c.url) && c.method === 'POST');
       expect(startCall).toBeTruthy();
-      expect(startCall.body).toEqual({ projectFolderPath: '/vault/Projekte/xyz' });
+      expect(startCall.body).toEqual({ projectFolderPath: '/vault/Projekte/xyz', targetProjectSlug: 'ziel-repo' });
     });
   });
 
@@ -202,6 +208,24 @@ describe('obsidian-question-catalog AC3 — Overlay-Grundgerüst + Katalog-Rende
     const q2Block = document.querySelector('[data-testid="obsidian-ingest-question"][data-question-id="q2"]');
     expect(q1Block.textContent).toMatch(/Pflicht/);
     expect(q2Block.textContent).toMatch(/Optional/);
+  });
+});
+
+// ── AC10 (v2, S-384): targetProjectSlug am Start-Endpunkt ────────────────────
+
+describe('obsidian-question-catalog v2 AC10 — targetProjectSlug am Start-Endpunkt', () => {
+  it('400 „targetProjectSlug is required" (AC9) wird 1:1 secret-frei inline gezeigt', async () => {
+    const { fetchFn } = makeFetch({ startStatus: 400, startBody: { error: 'targetProjectSlug is required' } });
+    renderOverlay({ fetchFn, targetProjectSlug: '' });
+    await waitFor(() => expect(q('obsidian-ingest-error')).toBeTruthy());
+    expect(q('obsidian-ingest-error').textContent).toMatch(/targetProjectSlug is required/);
+  });
+
+  it('404 „Ziel-Projekt-Repo nicht gefunden" (AC9) wird 1:1 secret-frei inline gezeigt', async () => {
+    const { fetchFn } = makeFetch({ startStatus: 404, startBody: { error: 'Ziel-Projekt-Repo nicht gefunden' } });
+    renderOverlay({ fetchFn, targetProjectSlug: 'unbekanntes-repo' });
+    await waitFor(() => expect(q('obsidian-ingest-error')).toBeTruthy());
+    expect(q('obsidian-ingest-error').textContent).toMatch(/Ziel-Projekt-Repo nicht gefunden/);
   });
 });
 

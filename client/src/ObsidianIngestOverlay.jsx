@@ -63,6 +63,14 @@
  * Kindprozess, kein neuer Endpunkt, reine Client-State-Wiederverwendung).
  *
  * Covers (obsidian-question-catalog):
+ *   AC10 — (v2, S-384) `POST .../obsidian-ingest/start` sendet `targetProjectSlug`
+ *         zusätzlich zu `projectFolderPath` mit (reine Weiterreichung des vom
+ *         Aufrufer bereits validiert ausgewählten Werts, kein eigenes
+ *         Confinement hier — Server-seitige Auflösung/Validierung ist AC9,
+ *         S-383, bereits gelandet). Ein non-202-Fehler (u.a. die neuen
+ *         400/404-Texte aus AC9) wird 1:1 wie jeder andere Start-Fehler
+ *         secret-frei inline gezeigt (bestehender AC7-Mechanismus, keine
+ *         Sonderbehandlung nötig).
  *   AC3 — Overlay (Backdrop, Fokus beim Öffnen, `Esc` schließt, Fokus-Rückgabe
  *         an `triggerRef`), Katalog gruppiert nach `stage`, je Frage `frage`-
  *         Text + `quelle`-Kontext, `optionen` als Radiogruppe (sonst Freitext-
@@ -96,6 +104,7 @@
  * ── Component-Props-Vertrag ─────────────────────────────────────────────────
  * @param {{
  *   projectFolderPath: string,
+ *   targetProjectSlug: string,
  *   onClose: () => void,
  *   triggerRef?: React.RefObject,
  *   fetchFn?: Function,
@@ -110,6 +119,12 @@
  * - `projectFolderPath` — der vault-confined Projekt-Pfad (aus der bereits
  *   geladenen Liste in `ObsidianImportSection`, kein Freitext). Nur für einen
  *   FRISCHEN Start nötig (bei `initialJobId` wird kein `start()` aufgerufen).
+ * - `targetProjectSlug` — das gewählte Ziel-Projekt-Repo (obsidian-question-
+ *   catalog v2 AC9/AC10, S-384; aus der bereits geladenen Workspace-Repo-Liste
+ *   in `ObsidianImportSection`, kein Freitext). Wird server-seitig via
+ *   `resolveProjectSlug`/`validateProjectPath` aufgelöst und als `cwd` des
+ *   Kindprozesses verwendet — ohne gültigen Wert antwortet der Server mit
+ *   `400`/`404` (kein Runner-Start). Nur für einen FRISCHEN Start nötig.
  * - `onClose` — schließt das Overlay (X/`Esc`/Backdrop/nach `done`-Linger).
  *   Bricht den Lauf NICHT ab.
  * - `triggerRef` — optional; erhält beim Schließen den Fokus zurück (A11y).
@@ -146,6 +161,7 @@ const OBSIDIAN_INGEST_SUCCESS_LINGER_MS = 1200;
 
 export function ObsidianIngestOverlay({
   projectFolderPath,
+  targetProjectSlug,
   onClose,
   triggerRef,
   fetchFn,
@@ -229,7 +245,7 @@ export function ObsidianIngestOverlay({
         res = await fetch_('/api/obsidian-ingest/start', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ projectFolderPath }),
+          body: JSON.stringify({ projectFolderPath, targetProjectSlug }),
         });
       } catch {
         if (cancelled || !mountedRef.current) return;

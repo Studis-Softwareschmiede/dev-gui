@@ -6,6 +6,28 @@
  * Verhalten, Guards und beide Pfade (strukturiertes Fragenkatalog-Overlay +
  * PTY-„Auslösen"-Fallback) bleiben unverändert.
  *
+ * ── obsidian-question-catalog v2 AC10/AC11 (S-384): Ziel-Projekt-Auswahl ────
+ * Betrifft AUSSCHLIESSLICH den headless Fragenkatalog-Pfad ("Strukturiert
+ * starten" → `ObsidianIngestOverlay` → `POST /api/obsidian-ingest/start`,
+ * S-383 verlangt server-seitig ein aufgelöstes `targetProjectSlug` als `cwd`,
+ * 400/404 ohne). Der PTY-Fallback ("Auslösen", obsidian-project-intake AC3)
+ * bleibt UNVERÄNDERT — eigener Endpunkt (`POST /api/command`), eigene Spec,
+ * kein Ziel-Projekt-Erfordernis.
+ * Auswahlgrundlage (AC10, 0b): dieselbe Quelle wie die Repo-Auswahl der
+ * Fabrik-Übersicht/Cockpit — `GET /api/workspace/repos` (`WorkspaceScanner`,
+ * kein neuer Endpunkt), Muster identisch zu
+ * `NightWatchSettings.jsx#fetchProjectSlugs` (best-effort, Netzwerkfehler →
+ * leere Liste statt Crash). Eine leere Liste zeigt AC11's definierten
+ * `new-project`-Hinweis statt eines Auswahlfelds; „Strukturiert starten"
+ * bleibt disabled (disabled-Attribut + Text-Label), solange kein Ziel-Projekt
+ * gewählt ist — ein Klick löst dann keinen `start`-POST aus (defensiv auch in
+ * `handleOpenIngestOverlay` geprüft, nicht nur über das disabled-Attribut).
+ * Der gemerkte Wiedereinstiegs-Job (`ingestJob`, Review-Fix Iteration 2 aus
+ * S-251) wird jetzt zusätzlich am `targetProjectSlug` gemessen (analog dem
+ * bestehenden `projectFolderPath`-Vergleich) — ein Wechsel des Ziel-Projekts
+ * bei unverändertem Notiz-Ordner darf denselben Job genauso wenig lautlos
+ * resumen wie ein Wechsel des Notiz-Ordners.
+ *
  * @param {{ fetchFn?: typeof fetch, onNavigate: (view: string) => void }} props
  */
 
@@ -37,6 +59,32 @@ async function fetchObsidianProjects(fetchImpl) {
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const data = await res.json();
   return Array.isArray(data?.projects) ? data.projects : [];
+}
+
+/**
+ * GET /api/workspace/repos — Ziel-Projekt-Auswahlgrundlage (obsidian-question-
+ * catalog v2 AC10): dieselbe Quelle wie die Repo-Auswahl der Fabrik-Übersicht/
+ * Cockpit (`WorkspaceScanner`, kein neuer Endpunkt). `name` je Klon ist der
+ * Verzeichnisname unter `WORKSPACE_DIR` == `targetProjectSlug`
+ * (`resolveProjectSlug`/`validateProjectPath`, `workspacePath.js`).
+ * Best-effort (Muster `NightWatchSettings.jsx#fetchProjectSlugs`): Fehler/
+ * Netzwerkausfall → leere Liste statt Crash — AC11 zeigt bei leerer Liste
+ * ohnehin den `new-project`-Hinweis statt einer Auswahl.
+ *
+ * @param {typeof fetch} fetchImpl
+ * @returns {Promise<string[]>}
+ */
+async function fetchWorkspaceTargetSlugs(fetchImpl) {
+  const fn = fetchImpl ?? globalThis.fetch.bind(globalThis);
+  try {
+    const res = await fn('/api/workspace/repos');
+    if (!res.ok) return [];
+    const data = await res.json();
+    const list = Array.isArray(data?.repos) ? data.repos : [];
+    return list.map((r) => r?.name).filter((n) => typeof n === 'string' && n.trim() !== '');
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -96,8 +144,14 @@ export function ObsidianImportSection({ fetchFn, onNavigate }) {
   // prüft defensiv NOCHMAL vor dem Öffnen (defense in depth, falls „(1)"
   // je umgangen wird).
   const [showIngestOverlay, setShowIngestOverlay] = useState(false);
-  const [ingestJob, setIngestJob]                  = useState(/** @type {{jobId:string, projectFolderPath:string}|null} */(null));
+  const [ingestJob, setIngestJob]                  = useState(/** @type {{jobId:string, projectFolderPath:string, targetProjectSlug:string}|null} */(null));
   const ingestTriggerRef = useRef(null);
+
+  // obsidian-question-catalog v2 AC10/AC11 (S-384): Ziel-Projekt-Auswahl für
+  // den headless Fragenkatalog-Pfad (s. Modul-Kommentar). 'loading' | 'ok' | 'empty'.
+  const [targetProjectsState, setTargetProjectsState] = useState('loading');
+  const [targetProjects, setTargetProjects]           = useState(/** @type {string[]} */([]));
+  const [selectedTargetSlug, setSelectedTargetSlug]   = useState('');
 
   const fetchFnRef = useRef(fetchFn ?? globalThis.fetch.bind(globalThis));
   useEffect(() => {
@@ -117,6 +171,22 @@ export function ObsidianImportSection({ fetchFn, onNavigate }) {
       } catch {
         if (!cancelled) setProjectsState('error');
       }
+    }
+    load();
+    return () => { cancelled = true; };
+  }, []);
+
+  // obsidian-question-catalog v2 AC10/AC11 (S-384): lädt die Ziel-Projekt-
+  // Auswahlgrundlage einmal beim Öffnen der Sektion (unabhängig von der
+  // Notiz-Ordner-Liste oben).
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      setTargetProjectsState('loading');
+      const slugs = await fetchWorkspaceTargetSlugs(fetchFnRef.current);
+      if (cancelled) return;
+      setTargetProjects(slugs);
+      setTargetProjectsState(slugs.length === 0 ? 'empty' : 'ok');
     }
     load();
     return () => { cancelled = true; };
@@ -213,17 +283,23 @@ export function ObsidianImportSection({ fetchFn, onNavigate }) {
   // `start()`) findet NUR statt, wenn der gemerkte Job zum AKTUELL gewählten
   // Projekt-Pfad gehört (Review-Fix Iteration 2) — sonst wird eine Auswahl
   // verlangt wie beim PTY-Fallback-Button.
-  const ingestJobMatchesSelection = Boolean(ingestJob) && ingestJob.projectFolderPath === selectedPath;
-  const canStartIngest = Boolean(selectedPath) && !showIngestOverlay;
+  const ingestJobMatchesSelection =
+    Boolean(ingestJob) &&
+    ingestJob.projectFolderPath === selectedPath &&
+    ingestJob.targetProjectSlug === selectedTargetSlug;
+  // AC10: „Strukturiert starten" bleibt disabled, solange kein Ziel-Projekt
+  // gewählt ist (zusätzlich zur bestehenden Notiz-Ordner-Auswahl).
+  const canStartIngest = Boolean(selectedPath) && Boolean(selectedTargetSlug) && !showIngestOverlay;
   const handleOpenIngestOverlay = useCallback(() => {
-    if (!selectedPath) return;
-    // Defense in depth (reviewer/R06): ein gemerkter Job für ein ANDERES
-    // Projekt darf niemals stillschweigend resumed werden.
-    if (ingestJob && ingestJob.projectFolderPath !== selectedPath) {
+    if (!selectedPath || !selectedTargetSlug) return;
+    // Defense in depth (reviewer/R06, erweitert um targetProjectSlug S-384):
+    // ein gemerkter Job für ein ANDERES Projekt (Notiz-Ordner ODER Ziel-Repo)
+    // darf niemals stillschweigend resumed werden.
+    if (ingestJob && (ingestJob.projectFolderPath !== selectedPath || ingestJob.targetProjectSlug !== selectedTargetSlug)) {
       setIngestJob(null);
     }
     setShowIngestOverlay(true);
-  }, [selectedPath, ingestJob]);
+  }, [selectedPath, selectedTargetSlug, ingestJob]);
 
   return (
     <section style={styles.section} aria-labelledby="obsidian-import-heading">
@@ -232,8 +308,9 @@ export function ObsidianImportSection({ fetchFn, onNavigate }) {
       </h2>
       <p style={styles.sectionDesc}>
         Wählt einen Projekt-Unterordner aus dem konfigurierten Vault. „Strukturiert
-        starten" zeigt Rückfragen als Fragenkatalog-Overlay (empfohlen); „Auslösen"
-        löst stattdessen direkt{' '}
+        starten" zeigt Rückfragen als Fragenkatalog-Overlay (empfohlen) und
+        benötigt zusätzlich ein bestehendes Ziel-Projekt (dort läuft der Lauf);
+        „Auslösen" löst stattdessen direkt{' '}
         <code style={styles.obsidianInlineCode}>/agent-flow:from-notes</code> im
         Terminal aus (unstrukturiert, Fallback).
       </p>
@@ -274,11 +351,16 @@ export function ObsidianImportSection({ fetchFn, onNavigate }) {
             onChange={(e) => {
               const next = e.target.value;
               setSelectedPath(next);
-              // Review-Fix (Iteration 2, Important reviewer/R06): ein Auswahl-
-              // wechsel verwirft einen gemerkten Ingest-Job für das ALTE
-              // Projekt sofort — sonst zeigt der Button weiter "Fortsetzen"
-              // und würde beim Öffnen lautlos den falschen Job resumen.
-              setIngestJob((prev) => (prev && prev.projectFolderPath !== next ? null : prev));
+              // Review-Fix (Iteration 2, Important reviewer/R06; erweitert um
+              // targetProjectSlug S-384): ein Auswahlwechsel verwirft einen
+              // gemerkten Ingest-Job für das ALTE Projekt sofort — sonst zeigt
+              // der Button weiter "Fortsetzen" und würde beim Öffnen lautlos
+              // den falschen Job resumen.
+              setIngestJob((prev) =>
+                prev && (prev.projectFolderPath !== next || prev.targetProjectSlug !== selectedTargetSlug)
+                  ? null
+                  : prev,
+              );
             }}
           >
             <option value="">— wählen —</option>
@@ -287,6 +369,50 @@ export function ObsidianImportSection({ fetchFn, onNavigate }) {
             ))}
           </select>
         </div>
+      )}
+
+      {/* obsidian-question-catalog v2 AC10 (S-384): Ziel-Projekt-Auswahl —
+          gilt nur für den headless Fragenkatalog-Pfad ("Strukturiert
+          starten"), s. Modul-Kommentar. Lade-Zustand bewusst ohne eigenen
+          Indikator (best-effort, kein blockierendes UI vor der Notiz-Ordner-
+          Auswahl). */}
+      {targetProjectsState === 'ok' && (
+        <div style={styles.fieldRow}>
+          <label htmlFor="obsidian-target-project-select" style={styles.label}>
+            Ziel-Projekt
+          </label>
+          <select
+            id="obsidian-target-project-select"
+            style={styles.select}
+            value={selectedTargetSlug}
+            disabled={isStarting}
+            aria-disabled={isStarting}
+            onChange={(e) => {
+              const next = e.target.value;
+              setSelectedTargetSlug(next);
+              setIngestJob((prev) =>
+                prev && (prev.targetProjectSlug !== next || prev.projectFolderPath !== selectedPath)
+                  ? null
+                  : prev,
+              );
+            }}
+          >
+            <option value="">— wählen —</option>
+            {targetProjects.map((slug) => (
+              <option key={slug} value={slug}>{slug}</option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      {/* AC11: leere Ziel-Projekt-Liste → definierter Hinweis auf den
+          new-project-Weg statt eines Auswahlfelds; kein Lauf-Start möglich
+          (canStartIngest bleibt false, s.o.). */}
+      {targetProjectsState === 'empty' && (
+        <p style={styles.emptyHint} data-testid="obsidian-target-project-empty-hint">
+          Kein passendes Ziel-Projekt vorhanden. Lege es zuerst über die Option
+          „Neues Projekt" an, bevor du den Fragenkatalog-Lauf startest.
+        </p>
       )}
 
       {/* AC5: Busy-Hinweis — Text-Label, nicht nur Farbe */}
@@ -326,6 +452,8 @@ export function ObsidianImportSection({ fetchFn, onNavigate }) {
           aria-label={
             !selectedPath
               ? 'Strukturiert starten — Projekt-Ordner fehlt'
+              : !selectedTargetSlug
+              ? 'Strukturiert starten — Ziel-Projekt fehlt'
               : ingestJobMatchesSelection
               ? 'Strukturiert starten — Fragenkatalog-Lauf fortsetzen'
               : 'Strukturiert starten — mit Fragenkatalog'
@@ -365,16 +493,18 @@ export function ObsidianImportSection({ fetchFn, onNavigate }) {
       {/* obsidian-question-catalog AC3/AC4/AC5/AC7 (S-251): Fragenkatalog-
           Overlay — eigene Datei, eigene State-Machine (s. Modul-Kommentar
           dort). Schließen bricht den headless Lauf NICHT ab (AC7); jobId +
-          projectFolderPath bleiben zusammen in dieser Section gemerkt
-          (Wiedereinstieg NUR bei unverändertem selectedPath, s.o.). */}
+          projectFolderPath + targetProjectSlug (AC10, S-384) bleiben
+          zusammen in dieser Section gemerkt (Wiedereinstieg NUR bei
+          unverändertem selectedPath UND selectedTargetSlug, s.o.). */}
       {showIngestOverlay && (
         <ObsidianIngestOverlay
           projectFolderPath={selectedPath}
+          targetProjectSlug={selectedTargetSlug}
           initialJobId={ingestJobMatchesSelection ? ingestJob.jobId : null}
           fetchFn={fetchFnRef.current}
           triggerRef={ingestTriggerRef}
           onClose={() => setShowIngestOverlay(false)}
-          onJobStarted={(jobId) => setIngestJob({ jobId, projectFolderPath: selectedPath })}
+          onJobStarted={(jobId) => setIngestJob({ jobId, projectFolderPath: selectedPath, targetProjectSlug: selectedTargetSlug })}
           onJobEnded={() => setIngestJob(null)}
           onIngestComplete={() => onNavigate('factory')}
         />

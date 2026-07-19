@@ -18,6 +18,18 @@
  *   AC7 — 409 → sichtbare Fehleranzeige, kein Navigate. 400/500/Netzwerkfehler →
  *         Fehleranzeige mit Reset, kein Navigate, kein Crash.
  *
+ * Covers (obsidian-question-catalog, v2 S-384):
+ *   AC10 — Ziel-Projekt-Auswahl lädt GET /api/workspace/repos (Namen sichtbar, dieselbe
+ *         Quelle wie die Fabrik-Übersicht/Cockpit-Repo-Auswahl); "Strukturiert starten"
+ *         bleibt disabled (disabled-Attribut + Text-Label), solange kein Ziel-Projekt
+ *         gewählt ist — auch bei bereits gewähltem Notiz-Ordner; aktiv sobald beides
+ *         gesetzt ist. Der `POST .../obsidian-ingest/start`-Body-Inhalt selbst
+ *         (`targetProjectSlug` inkl. Resume-Kopplung) ist in
+ *         `GitHubViewObsidianIngestDocking.test.jsx` (Integration) und
+ *         `ObsidianIngestOverlay.test.jsx` (Overlay-Vertrag) abgedeckt.
+ *   AC11 — Leere Ziel-Projekt-Liste → definierter `new-project`-Hinweis statt Auswahlfeld;
+ *         "Strukturiert starten" bleibt disabled (kein Start ohne gültiges Ziel-Projekt).
+ *
  * NFR A11y:
  *   - "Auslösen"-Button: Touch-Target ≥ 44 px (minHeight).
  *   - Disabled-Zustände: disabled-Attribut UND Text-Label (nie nur Farbe).
@@ -43,6 +55,16 @@ const PROJECTS_RESPONSE = {
 };
 const PROJECTS_EMPTY = { projects: [] };
 
+// obsidian-question-catalog v2 AC10/AC11 (S-384): Ziel-Projekt-Auswahlgrundlage
+// (dieselbe Quelle wie die Fabrik-Übersicht/Cockpit-Repo-Auswahl).
+const WORKSPACE_REPOS_RESPONSE = {
+  repos: [
+    { name: 'ziel-repo-a', branch: 'main', dirty: false, lastCommit: null, originUrl: null },
+    { name: 'ziel-repo-b', branch: 'main', dirty: false, lastCommit: null, originUrl: null },
+  ],
+};
+const WORKSPACE_REPOS_EMPTY = { repos: [] };
+
 const SESSION_READY = { state: 'ready' };
 const SESSION_BUSY  = { state: 'busy' };
 
@@ -55,15 +77,17 @@ const FROM_NOTES_ACCEPTED = { commandId: 'cmd-1', status: 'accepted' };
  *
  * @param {{
  *   projects?: { status: number, data: object } | 'reject',
+ *   workspaceRepos?: object,
  *   session?: object,
  *   command?: { status: number, data: object } | 'reject' | 'pending',
  * }} opts
  * @returns {{ fetchFn: jest.Mock, calls: Array<{url:string, method:string, body:*}> }}
  */
 function makeFetchFn({
-  projects    = { status: 200, data: PROJECTS_RESPONSE },
-  session     = SESSION_READY,
-  command     = { status: 202, data: FROM_NOTES_ACCEPTED },
+  projects       = { status: 200, data: PROJECTS_RESPONSE },
+  workspaceRepos = WORKSPACE_REPOS_RESPONSE,
+  session        = SESSION_READY,
+  command        = { status: 202, data: FROM_NOTES_ACCEPTED },
 } = {}) {
   const calls = [];
 
@@ -78,6 +102,9 @@ function makeFetchFn({
         status: projects.status,
         json: async () => projects.data,
       };
+    }
+    if (url === '/api/workspace/repos') {
+      return { ok: true, status: 200, json: async () => workspaceRepos };
     }
     if (url === '/api/session') {
       return { ok: true, status: 200, json: async () => session };
@@ -113,6 +140,13 @@ function renderSection(fetchFn) {
 async function selectProject(getByLabelText, path) {
   const select = await waitFor(() => getByLabelText(/^projekt-ordner$/i));
   fireEvent.change(select, { target: { value: path } });
+  return select;
+}
+
+/** Wählt ein Ziel-Projekt im <select> aus (obsidian-question-catalog v2 AC10). */
+async function selectTargetProject(getByLabelText, slug) {
+  const select = await waitFor(() => getByLabelText(/^ziel-projekt$/i));
+  fireEvent.change(select, { target: { value: slug } });
   return select;
 }
 
@@ -162,6 +196,74 @@ describe('obsidian-project-intake AC2 — Projekt-Unterordner-Liste', () => {
     const { getByRole } = renderSection(fetchFn);
     await waitFor(() => {
       expect(getByRole('alert').textContent).toMatch(/nicht geladen werden/i);
+    });
+  });
+});
+
+// ── v2 AC10/AC11 (S-384): Ziel-Projekt-Auswahl ────────────────────────────────
+
+describe('obsidian-question-catalog v2 AC10 — Ziel-Projekt-Auswahl vor dem Start', () => {
+  it('zeigt Ziel-Projekt-Namen aus GET /api/workspace/repos', async () => {
+    const { fetchFn } = makeFetchFn({ workspaceRepos: WORKSPACE_REPOS_RESPONSE });
+    const { getByText } = renderSection(fetchFn);
+    await waitFor(() => {
+      expect(getByText('ziel-repo-a')).toBeTruthy();
+      expect(getByText('ziel-repo-b')).toBeTruthy();
+    });
+  });
+
+  it('"Strukturiert starten" bleibt disabled ohne Ziel-Projekt, auch wenn Notiz-Ordner bereits gewählt ist', async () => {
+    const { fetchFn } = makeFetchFn();
+    const { getByRole, getByLabelText } = renderSection(fetchFn);
+    await selectProject(getByLabelText, '/vault/Projekte/mein-projekt');
+
+    const startBtn = getByRole('button', { name: /strukturiert starten/i });
+    expect(startBtn.disabled).toBe(true);
+    expect(startBtn.getAttribute('aria-label')).toMatch(/ziel-projekt fehlt/i);
+  });
+
+  it('"Strukturiert starten" wird aktiv, sobald Notiz-Ordner UND Ziel-Projekt gewählt sind', async () => {
+    const { fetchFn } = makeFetchFn();
+    const { getByRole, getByLabelText } = renderSection(fetchFn);
+    await selectProject(getByLabelText, '/vault/Projekte/mein-projekt');
+    await selectTargetProject(getByLabelText, 'ziel-repo-a');
+
+    await waitFor(() => {
+      const startBtn = getByRole('button', { name: /strukturiert starten/i });
+      expect(startBtn.disabled).toBe(false);
+    });
+  });
+
+  it('Klick auf "Strukturiert starten" ohne Ziel-Projekt öffnet KEIN Overlay (defense in depth)', async () => {
+    const { fetchFn } = makeFetchFn();
+    const { getByRole, getByLabelText } = renderSection(fetchFn);
+    await selectProject(getByLabelText, '/vault/Projekte/mein-projekt');
+
+    const startBtn = getByRole('button', { name: /strukturiert starten/i });
+    await act(async () => { fireEvent.click(startBtn); });
+
+    expect(document.querySelector('[data-testid="obsidian-ingest-overlay"]')).toBeNull();
+  });
+});
+
+describe('obsidian-question-catalog v2 AC11 — kein passendes Ziel-Projekt vorhanden', () => {
+  it('leere Ziel-Projekt-Liste → definierter new-project-Hinweis statt Auswahlfeld', async () => {
+    const { fetchFn } = makeFetchFn({ workspaceRepos: WORKSPACE_REPOS_EMPTY });
+    const { getByTestId, queryByLabelText } = renderSection(fetchFn);
+    await waitFor(() => {
+      expect(getByTestId('obsidian-target-project-empty-hint').textContent).toMatch(/neues projekt/i);
+    });
+    expect(queryByLabelText(/^ziel-projekt$/i)).toBeNull();
+  });
+
+  it('leere Ziel-Projekt-Liste → "Strukturiert starten" bleibt disabled trotz gewähltem Notiz-Ordner', async () => {
+    const { fetchFn } = makeFetchFn({ workspaceRepos: WORKSPACE_REPOS_EMPTY });
+    const { getByRole, getByLabelText } = renderSection(fetchFn);
+    await selectProject(getByLabelText, '/vault/Projekte/mein-projekt');
+
+    await waitFor(() => {
+      const startBtn = getByRole('button', { name: /strukturiert starten/i });
+      expect(startBtn.disabled).toBe(true);
     });
   });
 });

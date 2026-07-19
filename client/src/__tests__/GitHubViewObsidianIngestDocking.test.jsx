@@ -26,6 +26,9 @@
  *          "Strukturiert starten" (nicht "Fortsetzen") und ein erneuter Klick
  *          löst einen NEUEN `POST /start` für Projekt B aus, statt lautlos
  *          den Job von Projekt A zu resumen.
+ *   AC10 — (v2, S-384) Ziel-Projekt-Auswahl ist zusätzliche Voraussetzung für
+ *          "Strukturiert starten"; der `POST /start`-Body enthält
+ *          `targetProjectSlug` aus der GET-/api/workspace/repos-Liste.
  *
  * @jest-environment jsdom
  */
@@ -39,6 +42,8 @@ const { GitHubView } = await import('../GitHubView.jsx');
 
 const REPOS_EMPTY = { repos: [] };
 const WORKSPACE_REPOS_EMPTY = { repos: [] };
+// obsidian-question-catalog v2 AC10 (S-384): Ziel-Projekt-Auswahlgrundlage.
+const WORKSPACE_REPOS_ONE = { repos: [{ name: 'ziel-repo' }] };
 const VAULT_CONFIGURED = { vaultPath: '/vault', configured: true };
 const PROJECTS_RESPONSE = {
   projects: [{ name: 'mein-projekt', path: '/vault/Projekte/mein-projekt' }],
@@ -62,7 +67,7 @@ function makeFetchFn({ ingestStatusSequence = [{ status: 'done' }] } = {}) {
     calls.push({ url, method, body: opts.body });
 
     if (url === '/api/github/repos') return { ok: true, status: 200, json: async () => REPOS_EMPTY };
-    if (url === '/api/workspace/repos') return { ok: true, status: 200, json: async () => WORKSPACE_REPOS_EMPTY };
+    if (url === '/api/workspace/repos') return { ok: true, status: 200, json: async () => WORKSPACE_REPOS_ONE };
     if (url === '/api/settings/obsidian-vault-path') return { ok: true, status: 200, json: async () => VAULT_CONFIGURED };
     if (url === '/api/settings/obsidian-vault/projects') return { ok: true, status: 200, json: async () => PROJECTS_RESPONSE };
     if (url === '/api/session') return { ok: true, status: 200, json: async () => SESSION_READY };
@@ -96,6 +101,13 @@ async function selectProject(getByLabelText, path) {
   return select;
 }
 
+/** obsidian-question-catalog v2 AC10 (S-384): wählt das Ziel-Projekt aus. */
+async function selectTargetProject(getByLabelText, slug) {
+  const select = await waitFor(() => getByLabelText(/^ziel-projekt$/i));
+  fireEvent.change(select, { target: { value: slug } });
+  return select;
+}
+
 /**
  * fetch-Mock mit ZWEI wählbaren Projekten (`projekt-a`/`projekt-b`); der
  * gestartete Ingest-Job bleibt `running` (nicht terminal) — nötig, um das
@@ -111,7 +123,7 @@ function makeMultiProjectFetchFn() {
     calls.push({ url, method, body: parsedBody });
 
     if (url === '/api/github/repos') return { ok: true, status: 200, json: async () => REPOS_EMPTY };
-    if (url === '/api/workspace/repos') return { ok: true, status: 200, json: async () => WORKSPACE_REPOS_EMPTY };
+    if (url === '/api/workspace/repos') return { ok: true, status: 200, json: async () => WORKSPACE_REPOS_ONE };
     if (url === '/api/settings/obsidian-vault-path') return { ok: true, status: 200, json: async () => VAULT_CONFIGURED };
     if (url === '/api/settings/obsidian-vault/projects') return { ok: true, status: 200, json: async () => PROJECTS_TWO };
     if (url === '/api/session') return { ok: true, status: 200, json: async () => SESSION_READY };
@@ -157,15 +169,20 @@ describe('obsidian-question-catalog — Andockung "Strukturiert starten" in GitH
     await waitFor(() => expect(getByRole('button', { name: /aus obsidian-notizen/i }).disabled).toBe(false));
     await openObsidianPanel(getByRole);
     await selectProject(getByLabelText, '/vault/Projekte/mein-projekt');
+    await selectTargetProject(getByLabelText, 'ziel-repo');
 
     const startBtn = getByRole('button', { name: /strukturiert starten/i });
+    await waitFor(() => expect(startBtn.disabled).toBe(false));
     await act(async () => { fireEvent.click(startBtn); });
 
     await waitFor(() => {
       expect(document.querySelector('[data-testid="obsidian-ingest-overlay"]')).toBeTruthy();
       const startCall = calls.find((c) => START_RE.test(c.url) && c.method === 'POST');
       expect(startCall).toBeTruthy();
-      expect(JSON.parse(startCall.body)).toEqual({ projectFolderPath: '/vault/Projekte/mein-projekt' });
+      expect(JSON.parse(startCall.body)).toEqual({
+        projectFolderPath: '/vault/Projekte/mein-projekt',
+        targetProjectSlug: 'ziel-repo',
+      });
     });
   });
 
@@ -175,8 +192,10 @@ describe('obsidian-question-catalog — Andockung "Strukturiert starten" in GitH
     await waitFor(() => expect(getByRole('button', { name: /aus obsidian-notizen/i }).disabled).toBe(false));
     await openObsidianPanel(getByRole);
     await selectProject(getByLabelText, '/vault/Projekte/mein-projekt');
+    await selectTargetProject(getByLabelText, 'ziel-repo');
 
     const startBtn = getByRole('button', { name: /strukturiert starten/i });
+    await waitFor(() => expect(startBtn.disabled).toBe(false));
     await act(async () => { fireEvent.click(startBtn); });
 
     await waitFor(() => expect(document.querySelector('[data-testid="obsidian-ingest-done"]')).toBeTruthy());
@@ -223,9 +242,12 @@ describe('obsidian-question-catalog — Andockung "Strukturiert starten" in GitH
     await waitFor(() => expect(getByRole('button', { name: /aus obsidian-notizen/i }).disabled).toBe(false));
     await openObsidianPanel(getByRole);
     await selectProject(getByLabelText, '/vault/Projekte/projekt-a');
+    await selectTargetProject(getByLabelText, 'ziel-repo');
 
     // Projekt A starten (Job bleibt "running", also nicht terminal).
-    await act(async () => { fireEvent.click(getByRole('button', { name: /strukturiert starten/i })); });
+    const startBtnA = getByRole('button', { name: /strukturiert starten/i });
+    await waitFor(() => expect(startBtnA.disabled).toBe(false));
+    await act(async () => { fireEvent.click(startBtnA); });
     await waitFor(() => expect(document.querySelector('[data-testid="obsidian-ingest-overlay"]')).toBeTruthy());
 
     // Overlay schließen, OHNE dass der Job terminal wurde — läuft detached weiter.
@@ -256,7 +278,7 @@ describe('obsidian-question-catalog — Andockung "Strukturiert starten" in GitH
       const startCallsAfter = calls.filter((c) => START_RE.test(c.url));
       expect(startCallsAfter.length).toBe(startCallsBefore + 1);
       const lastCall = startCallsAfter[startCallsAfter.length - 1];
-      expect(lastCall.body).toEqual({ projectFolderPath: '/vault/Projekte/projekt-b' });
+      expect(lastCall.body).toEqual({ projectFolderPath: '/vault/Projekte/projekt-b', targetProjectSlug: 'ziel-repo' });
     });
   });
 });
