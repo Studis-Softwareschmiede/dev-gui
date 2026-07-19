@@ -43,9 +43,38 @@
  * @module BitwardenDeployLoginService
  */
 
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, chmod } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
+
+/**
+ * Persistentes bw-Datenverzeichnis der Deploy-Rolle (S-386).
+ *
+ * FRÜHER wurde pro `openSession()` ein frisches temporäres Verzeichnis angelegt
+ * und am Ende samt `bw logout` weggeräumt. Weil das Verzeichnis jedes Mal leer
+ * war, kannte Bitwarden die Geräte-ID nie wieder → JEDER Login zählte als „neues
+ * Gerät" → eine „New Device"-Mail pro Session (bei periodischem Provisioning:
+ * Mailflut alle paar Minuten).
+ *
+ * JETZT persistent (ein festes Verzeichnis, überschreibbar via Env): Die beim
+ * ersten Login erzeugte Geräte-ID bleibt erhalten → Bitwarden erkennt das Gerät
+ * wieder. Folge-Sessions loggen NICHT neu ein (`bw login --check` → nur `bw
+ * unlock`), und `close()` macht `bw lock` statt `bw logout` — der Vault liegt
+ * dadurch VERSCHLÜSSELT (locked) at-rest, die Geräte-Registrierung bleibt.
+ *
+ * Sicherheit: eigenes Unterverzeichnis (getrennt vom interaktiven Master-Key-
+ * Pfad), `chmod 700`, es landen KEINE Klartext-Geheimnisse darin (nur der bereits
+ * verschlüsselte Vault-Cache + Geräte-ID; API-Key/Master-Passwort kommen weiter
+ * ausschließlich via Env). Nebenläufigkeit: da alle Sessions dasselbe Verzeichnis
+ * teilen, serialisiert ein Instanz-Mutex sie strikt (ersetzt die frühere
+ * Isolation-über-eigenes-temp-Verzeichnis).
+ */
+function deployAppDataDir() {
+  return (
+    process.env.DEVGUI_BW_DEPLOY_APPDATA_DIR ||
+    join(process.env.HOME || homedir() || '/home/node', '.config', 'dev-gui', 'bw-deploy')
+  );
+}
 
 /** Erlaubte Fehlerklassen (Spec AC10) — nach außen nur diese, nie Rohtext. */
 export const DEPLOY_LOGIN_ERROR_CLASSES = Object.freeze([
@@ -95,6 +124,15 @@ export class BitwardenDeployLoginService {
   #auditStore;
   /** @type {Function} injizierbare Spawn-Funktion (Tests) */
   #spawnBw;
+  /**
+   * Serialisiert Deploy-Sessions (S-386). Alle Sessions teilen das persistente
+   * `DEPLOY_APPDATA_DIR`; paralleles `unlock`/`lock` würde die Session der jeweils
+   * anderen zerstören bzw. `data.json`-Races erzeugen. Der Service ist in der App
+   * ein Singleton → ein Instanz-Mutex genügt (kein Cross-Prozess-Zugriff auf
+   * dieses Verzeichnis; der interaktive Pfad nutzt ein eigenes Verzeichnis).
+   * @type {Promise<void>}
+   */
+  #sessionChain = Promise.resolve();
 
   /**
    * @param {object} deps
@@ -199,20 +237,47 @@ export class BitwardenDeployLoginService {
    *   close(): Promise<void>,
    * }>}
    */
+  /**
+   * Serialisiert Deploy-Sessions über den geteilten persistenten bw-State (S-386).
+   * Gibt eine `release`-Funktion zurück, die der Aufrufer genau einmal aufruft
+   * (immer in `close()` bzw. dem Fehler-Cleanup).
+   * @returns {Promise<() => void>}
+   */
+  async #acquireLock() {
+    let release;
+    const prev = this.#sessionChain;
+    this.#sessionChain = new Promise((resolve) => { release = resolve; });
+    await prev;
+    return release;
+  }
+
   async #openSession(access) {
-    const appDataDir = await mkdtemp(join(tmpdir(), 'bw-deploy-'));
+    // Serialisieren: alle Sessions teilen DEPLOY_APPDATA_DIR (S-386).
+    const release = await this.#acquireLock();
+
+    const appDataDir = deployAppDataDir();
     const baseEnv = {
       BITWARDENCLI_APPDATA_DIR: appDataDir,
       HOME: process.env.HOME ?? '/home/node',
       PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin',
     };
 
+    // close() lässt das Verzeichnis STEHEN (persistente Geräte-ID) und macht
+    // `bw lock` statt `logout`: aktive Session-Keys werden vernichtet, der Vault
+    // liegt verschlüsselt at-rest, die Geräte-Registrierung bleibt erhalten. Der
+    // Mutex wird IMMER genau einmal freigegeben (auch bei Fehlern), sonst blockiert
+    // der Dienst dauerhaft.
+    let released = false;
     const cleanup = async () => {
-      try { await this.#spawnBw(['logout'], { env: { ...baseEnv } }); } catch { /* best-effort */ }
-      await rm(appDataDir, { recursive: true, force: true }).catch(() => {});
+      try { await this.#spawnBw(['lock'], { env: { ...baseEnv } }); } catch { /* best-effort */ }
+      if (!released) { released = true; release(); }
     };
 
     try {
+      // Persistentes Verzeichnis anlegen/absichern (chmod 700, nur node-User).
+      await mkdir(appDataDir, { recursive: true, mode: 0o700 });
+      await chmod(appDataDir, 0o700).catch(() => {});
+
       // Optional: Server-URL setzen (Argv ist kein Geheimnis)
       if (access.serverUrl) {
         const r = await this.#spawnBw(['config', 'server', access.serverUrl], { env: { ...baseEnv } });
@@ -221,11 +286,18 @@ export class BitwardenDeployLoginService {
         }
       }
 
-      // API-Key-Login (Secrets via Env, nicht Argv) — kein OTP/2FA (Spec AC8)
-      const loginEnv = { ...baseEnv, BW_CLIENTID: access.clientId, BW_CLIENTSECRET: access.clientSecret };
-      const loginRes = await this.#spawnBw(['login', '--apikey'], { env: loginEnv });
-      if (loginRes.exitCode !== 0) {
-        throw makeErr(classify(loginRes.stdout + loginRes.stderr, loginRes.exitCode, 'login'));
+      // Login NUR wenn noch nicht eingeloggt (S-386): `bw login --check` (exit 0 =
+      // eingeloggt) vermeidet den „New Device"-Login bei bereits registriertem
+      // Gerät. Der Erst-Login pro Geräte-Verzeichnis erzeugt weiterhin genau EIN
+      // Device-Event — danach keines mehr (Ende der Mailflut).
+      const check = await this.#spawnBw(['login', '--check'], { env: { ...baseEnv } });
+      if (check.exitCode !== 0) {
+        // API-Key-Login (Secrets via Env, nicht Argv) — kein OTP/2FA (Spec AC8)
+        const loginEnv = { ...baseEnv, BW_CLIENTID: access.clientId, BW_CLIENTSECRET: access.clientSecret };
+        const loginRes = await this.#spawnBw(['login', '--apikey'], { env: loginEnv });
+        if (loginRes.exitCode !== 0) {
+          throw makeErr(classify(loginRes.stdout + loginRes.stderr, loginRes.exitCode, 'login'));
+        }
       }
 
       // Unlock mit Master-Passwort (Env) → Session-Token (--raw)
