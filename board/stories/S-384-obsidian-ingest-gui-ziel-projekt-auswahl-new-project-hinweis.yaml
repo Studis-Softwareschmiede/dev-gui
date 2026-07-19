@@ -2,7 +2,7 @@ id: S-384
 parent: F-050
 title: 'Obsidian-Ingest-GUI: Ziel-Projekt-Auswahl vor dem Start (Notiz-Ordner-Auswahl
   unverändert) + new-project-Hinweis bei fehlendem Ziel-Repo'
-status: To Do
+status: In Progress
 priority: P1
 spec: docs/specs/obsidian-question-catalog.md
 implements:
@@ -20,10 +20,10 @@ estimate_note: 'Heuristik score 6 (2 AC + 3 Komponenten ObsidianIngestOverlay/Zi
   + ui-Label) -> M. S/M-Baseline-Lookup js|balanced|M: ep=4.0 (n=50), tok_total=1659043;
   confidence medium. Gekoppelter Frontend-Teil zu S-383 (vertikaler Slice, AC2b-Split,
   gleiche Priorität, gleiche Spec).'
-branch: null
+branch: feat/S-384-ingest-gui-zielprojekt
 pr: null
 blocked_reason: null
 created_at: '2026-07-19T00:00:00Z'
-updated_at: '2026-07-19T18:50:51Z'
+updated_at: '2026-07-19T19:19:10Z'
 area: obsidian
 done_at: null
