@@ -2,7 +2,7 @@ id: S-382
 parent: F-080
 title: Update friert Build-Version ein — image-gebackene APP_VERSION aus Alt-Container-Env
   ueberschreibt neues Image
-status: To Do
+status: In Review
 priority: P2
 spec: docs/specs/container-image-update.md
 implements:
@@ -30,10 +30,10 @@ estimate_note: 'Heuristik M (score=5: 1 AC [AC18] + 3 Komponenten [carryover-Env
   Secret-Floor AC12 unveraendert.'
 confidence: medium
 tok_est: '1659043'
-branch: null
+branch: wt-S-382
 pr: null
 blocked_reason: null
 created_at: '2026-07-19T13:28:32Z'
-updated_at: '2026-07-19T13:29:50Z'
+updated_at: '2026-07-19T13:44:40Z'
 done_at: null
 area: deployment

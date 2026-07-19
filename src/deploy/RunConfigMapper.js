@@ -27,9 +27,25 @@
 const KNOWN_CONFIG_BIND_HOST_RE = /\/apps\/([a-z0-9][a-z0-9._-]*)\/config$/;
 
 /**
+ * Benannte, deterministische Deny-Liste image-gebackener Build-Metadaten-Env-Keys
+ * (container-image-update AC18). `docker inspect` -> `Config.Env` eines Bestands-
+ * Containers enthält NICHT nur explizit per `-e` gesetzte echte Run-Config, sondern
+ * auch die im Image gebackenen Dockerfile-`ENV`-Zeilen. Ohne Filter überschreibt der
+ * carryover-Wert die frische `ENV` des neuen Images (Live-Befund 2026-07-19, `flashrescue`:
+ * Update baute neuen Code, aber `APP_VERSION` blieb auf dem alten Stand eingefroren).
+ * Bewusst eine Deny- statt Allow-Liste (Resolution O1, container-image-update.md): eine
+ * Allow-Liste würde jeden nicht-enumerierten echten Secret-/Config-Key still verlieren
+ * (Datenerhalt-Verletzung, AC6). Erweiterbar — jeder weitere image-gebackene
+ * Build-Metadaten-Key kommt hier dazu, keine Heuristik.
+ */
+export const BUILD_METADATA_ENV_DENYLIST = Object.freeze(['APP_VERSION']);
+
+/**
  * @typedef {object} DeployParamsMapping
- * @property {Record<string,string>} containerEnv - Env des Bestands-Containers, unverändert
- *   für den `run()`-Schritt der Saga (`opts.containerEnv`). **Kann Secrets enthalten** — server-
+ * @property {Record<string,string>} containerEnv - Env des Bestands-Containers für den
+ *   `run()`-Schritt der Saga (`opts.containerEnv`), bereinigt um die
+ *   `BUILD_METADATA_ENV_DENYLIST` (container-image-update AC18) — echte Run-Config
+ *   (Secrets/Config) bleibt unverändert erhalten (AC6). **Kann Secrets enthalten** — server-
  *   intern/transient, NIE in Response/Log/Audit/WS/Frontend (AC12, Floor).
  * @property {boolean} requiresConfig - Saga-Parameter (deploy-config-volume-mount D1).
  * @property {string} [configApp]     - Saga-Parameter, nur gesetzt wenn requiresConfig true.
@@ -62,6 +78,12 @@ export function mapRunConfigToDeployParams(config) {
   const containerEnv = (config && typeof config.env === 'object' && config.env !== null)
     ? { ...config.env }
     : {};
+  // AC18: image-gebackene Build-Metadaten (mind. APP_VERSION) NICHT als carryover-Env
+  // auf den neuen Container übertragen — sonst überschreibt der Alt-Wert die frische
+  // ENV des neuen Images. Alle nicht gelisteten Keys (Secrets/Config) bleiben unverändert.
+  for (const key of BUILD_METADATA_ENV_DENYLIST) {
+    delete containerEnv[key];
+  }
   const binds = Array.isArray(config?.binds) ? config.binds : [];
 
   if (binds.length === 0) {

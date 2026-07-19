@@ -5,18 +5,23 @@
  * Covers (container-image-update):
  *   AC6 — mapRunConfigToDeployParams() bildet eine ContainerRunConfig (aus
  *         VpsDockerControl.inspectContainer()) auf die DeployOrchestrator.deploy()-Parameter
- *         containerEnv/requiresConfig/configApp/configMountPath ab; Env bleibt unverändert
- *         erhalten (inkl. potenzieller Secrets — reiner Mapper, kein Log/Response-Pfad hier)
+ *         containerEnv/requiresConfig/configApp/configMountPath ab; echte Run-Config-Env
+ *         bleibt unverändert erhalten (inkl. potenzieller Secrets — reiner Mapper, kein
+ *         Log/Response-Pfad hier)
  *   AC7 — erkennt NICHT eindeutig abbildbare Binds (mehrere Binds, unbekanntes Format,
  *         Nicht-rw-Modus, Host-Pfad außerhalb des bekannten .../apps/<app>/config-Musters)
  *         und liefert das Prädikat `ambiguous: true` nach außen (der fail-closed-Abbruch
  *         selbst ist Aufgabe des Update-Endpunkts, S-355 — hier nur das Prädikat)
+ *   AC18 — (S-382) image-gebackene Build-Metadaten-Env-Keys (BUILD_METADATA_ENV_DENYLIST,
+ *          mind. APP_VERSION) werden aus containerEnv herausgefiltert, BEVOR es an die
+ *          Saga geht; alle nicht gelisteten Keys (Secrets/Config wie GPG_PASSPHRASE)
+ *          bleiben unverändert erhalten (AC6)
  *
  * Strategie: reine Funktion, keine Mocks nötig.
  */
 
 import { describe, it, expect } from '@jest/globals';
-import { mapRunConfigToDeployParams } from '../src/deploy/RunConfigMapper.js';
+import { mapRunConfigToDeployParams, BUILD_METADATA_ENV_DENYLIST } from '../src/deploy/RunConfigMapper.js';
 
 describe('mapRunConfigToDeployParams — kein Bind (AC6)', () => {
   it('kein Bind → requiresConfig:false, ambiguous:false', () => {
@@ -170,5 +175,47 @@ describe('mapRunConfigToDeployParams — Eindeutigkeits-Prädikat (AC7)', () => 
     expect(result.requiresConfig).toBe(false);
     expect(result.configApp).toBeUndefined();
     expect(result.configMountPath).toBeUndefined();
+  });
+});
+
+describe('mapRunConfigToDeployParams — Build-Metadaten-Deny-Liste (AC18)', () => {
+  it('APP_VERSION wird aus containerEnv gefiltert, echte Env (GPG_PASSPHRASE) bleibt erhalten', () => {
+    const result = mapRunConfigToDeployParams({
+      image: 'ghcr.io/org/app:latest',
+      env: { APP_VERSION: '2026-07-18 13:36:16 CEST', GPG_PASSPHRASE: 's3cr3t', PATH: '/usr/bin' },
+      binds: [],
+      labels: {},
+    });
+
+    expect(result.containerEnv).toEqual({ GPG_PASSPHRASE: 's3cr3t', PATH: '/usr/bin' });
+    expect(result.containerEnv).not.toHaveProperty('APP_VERSION');
+  });
+
+  it('BUILD_METADATA_ENV_DENYLIST ist eine benannte, deterministische Konstante und enthält mindestens APP_VERSION', () => {
+    expect(Array.isArray(BUILD_METADATA_ENV_DENYLIST)).toBe(true);
+    expect(BUILD_METADATA_ENV_DENYLIST).toContain('APP_VERSION');
+  });
+
+  it('Env ohne APP_VERSION bleibt vollständig unverändert (kein Über-Filtern)', () => {
+    const result = mapRunConfigToDeployParams({
+      image: 'x',
+      env: { GPG_PASSPHRASE: 's3cr3t', HOSTNAME_LABEL_HINT: 'x' },
+      binds: [],
+      labels: {},
+    });
+
+    expect(result.containerEnv).toEqual({ GPG_PASSPHRASE: 's3cr3t', HOSTNAME_LABEL_HINT: 'x' });
+  });
+
+  it('Deny-Filter wirkt auch bei ambiguous:true (Binds außerhalb des bekannten Musters)', () => {
+    const result = mapRunConfigToDeployParams({
+      image: 'x',
+      env: { APP_VERSION: 'alt', GPG_PASSPHRASE: 's3cr3t' },
+      binds: ['/var/lib/some-other-volume:/app/config'],
+      labels: {},
+    });
+
+    expect(result.ambiguous).toBe(true);
+    expect(result.containerEnv).toEqual({ GPG_PASSPHRASE: 's3cr3t' });
   });
 });
