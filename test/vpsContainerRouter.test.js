@@ -59,6 +59,9 @@
  *          deploy(); Bestands-Ref bereits beweglich (repo:tag) → RepoTags-Quelle wird NICHT
  *          aufgerufen (AC4-Verhalten unverändert); eine Client-Tag-Angabe im Body bestimmt den
  *          Ziel-Ref nie (identisch AC4).
+ *   AC18 — (S-382) HTTP-Ebene: Bestands-Container-Env mit APP_VERSION + GPG_PASSPHRASE →
+ *          der deploy()-Aufruf erhält containerEnv OHNE APP_VERSION, aber MIT GPG_PASSPHRASE
+ *          (echte Run-Config-Erhalt, AC6, bleibt scharf); kein Env-Wert in der Response.
  *
  * Covers ([[deploy-cache-purge]] AC8-Nachzug, S-372 — persistenter Audit für cachePurge im Update-Pfad):
  *   AC8 — deployResult.deployment.cachePurge.status "ok"/"failed" → eigener `deploy-cache-purge:
@@ -1181,6 +1184,42 @@ describe('vpsContainerRouter — container-image-update: POST .../update', () =>
     expect(deployParams.containerEnv).toEqual({ GPG_PASSPHRASE: SECRET_ENV_VALUE });
     // AC12: Env-Wert erscheint NIE in der Response
     expect(JSON.stringify(body)).not.toContain(SECRET_ENV_VALUE);
+  });
+
+  it('AC18 — image-gebackene APP_VERSION wird aus containerEnv gefiltert, GPG_PASSPHRASE bleibt erhalten (HTTP-Ebene)', async () => {
+    let deployParams = null;
+    const OLD_APP_VERSION = '2026-07-18 13:36:16 CEST';
+    server = await makeTestServer({
+      env: { DEV_NO_ACCESS: '1' },
+      dockerControl: makeMockDockerControl({
+        psAllResult: { result: 'ok', containers: [MANAGED_CONTAINER] },
+        inspectContainerResult: {
+          result: 'ok',
+          config: {
+            image: MANAGED_CONTAINER.image,
+            env: { APP_VERSION: OLD_APP_VERSION, GPG_PASSPHRASE: SECRET_ENV_VALUE },
+            binds: [],
+            labels: { 'cloudflare.tunnel-hostname': MANAGED_CONTAINER.hostname },
+          },
+        },
+      }),
+      orchestrator: makeMockOrchestrator({
+        onDeploy: (params) => { deployParams = params; },
+      }),
+      registry: makeRegistryWithTunnel(),
+    });
+
+    const { status, body } = await server.doRequest({
+      method: 'POST',
+      path: `/api/vps/machines/hetzner/1/containers/${MANAGED_CONTAINER.containerId}/update`,
+    });
+
+    expect(status).toBe(200);
+    expect(deployParams.containerEnv).toEqual({ GPG_PASSPHRASE: SECRET_ENV_VALUE });
+    expect(deployParams.containerEnv).not.toHaveProperty('APP_VERSION');
+    // AC12: kein Env-Wert (weder gefiltert noch durchgereicht) erscheint in der Response
+    expect(JSON.stringify(body)).not.toContain(SECRET_ENV_VALUE);
+    expect(JSON.stringify(body)).not.toContain(OLD_APP_VERSION);
   });
 
   // ── AC8 (container-image-update, S-356): gestoppter Container läuft danach ──
