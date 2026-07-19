@@ -14,7 +14,8 @@
  *   Sicherung             → SicherungCategory.jsx        (BackupSection inkl. RestoreSection)
  *   Benachrichtigungen    → BenachrichtigungenCategory.jsx (NotificationSection)
  *   Automatisierung       → AutomatisierungCategory.jsx  (NightWatchSettings)
- *   Integrationen         → IntegrationenCategory.jsx    (ObsidianVaultPathSection)
+ *   Integrationen         → IntegrationenCategory.jsx    (ObsidianVaultPathSection,
+ *                                                          ObsidianProjekteSubdirSection)
  *   Diverses              → DiversesCategory.jsx         (MiscSection)
  *
  * Extrahierte Sektions-Komponenten + deren AC-Herkunft (unverändert, reine Umverpackung,
@@ -24,6 +25,8 @@
  *   - MiscSection.jsx      — settings-credentials AC5.
  *   - WorkspacePathSection.jsx — workspace-path-config AC1/AC3, workspace-health-hinweis AC3.
  *   - ObsidianVaultPathSection.jsx — obsidian-vault-config AC1 (UI-Anteil, S-247).
+ *   - ObsidianProjekteSubdirSection.jsx — obsidian-vault-config v3 AC8/AC13/AC15
+ *     (UI-Anteil, S-381).
  *   - BackupSection.jsx    — credential-backup S-143 AC11/AC12 (inkl. RestoreSection S-142
  *     AC13–AC16, BackupRemoteCredField, BackupStepResults, BackupStatusTile).
  *   - SshKeysSection.jsx   — settings-ssh-keys SSH-AC1–AC10; ssh-key-generation
@@ -77,6 +80,7 @@ import {
   fetchWorkspacePath,
   fetchWorkspaceHealth,
   fetchObsidianVaultPath,
+  fetchObsidianProjekteSubdir,
 } from './settingsApi.js';
 
 // ── BitwardenUnlockDialog (credential-unlock-dialog #185) ─────────────────────
@@ -583,6 +587,9 @@ export function SettingsView({ onNavigate, fetchFn }) {
   // obsidian-vault-config AC1 (UI-Anteil, S-247): Obsidian-Vault-Pfad state
   const [obsidianVaultPath, setObsidianVaultPath] = useState(null);
   const [obsidianVaultPathError, setObsidianVaultPathError] = useState(null);
+  // obsidian-vault-config v3 AC8 (UI-Anteil, S-381): Obsidian-Projekt-Unterordner state
+  const [obsidianProjekteSubdir, setObsidianProjekteSubdir] = useState(null);
+  const [obsidianProjekteSubdirError, setObsidianProjekteSubdirError] = useState(null);
   // credential-unlock-dialog #185: Bitwarden-Unlock-Status + Dialog
   const [credentialStatus, setCredentialStatus] = useState(null); // null = noch nicht geladen
   const [showUnlockDialog, setShowUnlockDialog] = useState(false);
@@ -679,13 +686,37 @@ export function SettingsView({ onNavigate, fetchFn }) {
     }
   }, [fetchFn]);
 
+  /**
+   * obsidian-vault-config v3 AC8 (UI-Anteil, S-381): Fetches the effective Obsidian-
+   * Projekt-Unterordner + Quelle + persistierten Rohwert. Used as onReload callback
+   * for ObsidianProjekteSubdirSection.
+   */
+  const reloadObsidianProjekteSubdir = useCallback(async () => {
+    try {
+      const data = await fetchObsidianProjekteSubdir(fetchFn);
+      setObsidianProjekteSubdir(data);
+      setObsidianProjekteSubdirError(null);
+    } catch (err) {
+      setObsidianProjekteSubdir(null);
+      setObsidianProjekteSubdirError(err.message ?? 'Unbekannter Fehler');
+    }
+  }, [fetchFn]);
+
   useEffect(() => {
     load();
     reloadWorkspacePath();
     reloadWorkspaceHealth();
     reloadObsidianVaultPath();
+    reloadObsidianProjekteSubdir();
     reloadCredentialStatus();
-  }, [load, reloadWorkspacePath, reloadWorkspaceHealth, reloadObsidianVaultPath, reloadCredentialStatus]);
+  }, [
+    load,
+    reloadWorkspacePath,
+    reloadWorkspaceHealth,
+    reloadObsidianVaultPath,
+    reloadObsidianProjekteSubdir,
+    reloadCredentialStatus,
+  ]);
 
   /** Hilfsfunktion: Metadaten eines bestimmten Felds aus der Liste. */
   const getMeta = useCallback((integration, name) => {
@@ -865,7 +896,10 @@ export function SettingsView({ onNavigate, fetchFn }) {
         <IntegrationenCategory
                 obsidianVaultPath={obsidianVaultPath}
                 obsidianVaultPathError={obsidianVaultPathError}
+                obsidianProjekteSubdir={obsidianProjekteSubdir}
+                obsidianProjekteSubdirError={obsidianProjekteSubdirError}
                 onReload={reloadObsidianVaultPath}
+                onReloadProjekteSubdir={reloadObsidianProjekteSubdir}
                 fetchFn={fetchFn}
               />
             )}

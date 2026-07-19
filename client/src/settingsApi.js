@@ -332,6 +332,51 @@ export async function deleteObsidianVaultPath(fetchImpl) {
   return data;
 }
 
+// ── Obsidian-Projekt-Unterordner-API-Helfer (obsidian-vault-config v3 AC8, S-381) ──
+
+/**
+ * GET /api/settings/obsidian-projekte-subdir
+ * @param {typeof fetch} [fetchImpl]
+ * @returns {Promise<{ effective: string, source: 'persisted'|'env'|'default', persisted: string|null }>}
+ */
+export async function fetchObsidianProjekteSubdir(fetchImpl) {
+  const fn = fetchImpl ?? globalThis.fetch.bind(globalThis);
+  const res = await fn('/api/settings/obsidian-projekte-subdir');
+  if (!res.ok) throw new Error(`Obsidian-Projekt-Unterordner laden fehlgeschlagen (${res.status})`);
+  return res.json();
+}
+
+/**
+ * PUT /api/settings/obsidian-projekte-subdir
+ * @param {string} subdir  Vault-relatives Segment (AC9, Mehrebenen erlaubt).
+ * @param {typeof fetch} [fetchImpl]
+ * @returns {Promise<{ effective: string, source: 'persisted', persisted: string }>}
+ */
+export async function putObsidianProjekteSubdir(subdir, fetchImpl) {
+  const fn = fetchImpl ?? globalThis.fetch.bind(globalThis);
+  const res = await fn('/api/settings/obsidian-projekte-subdir', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ subdir }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error ?? `Speichern fehlgeschlagen (${res.status})`);
+  return data;
+}
+
+/**
+ * DELETE /api/settings/obsidian-projekte-subdir
+ * @param {typeof fetch} [fetchImpl]
+ * @returns {Promise<{ effective: string, source: 'env'|'default', persisted: null }>}
+ */
+export async function deleteObsidianProjekteSubdir(fetchImpl) {
+  const fn = fetchImpl ?? globalThis.fetch.bind(globalThis);
+  const res = await fn('/api/settings/obsidian-projekte-subdir', { method: 'DELETE' });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error ?? `Zurücksetzen fehlgeschlagen (${res.status})`);
+  return data;
+}
+
 // ── SSH-Key-API-Helfer ────────────────────────────────────────────────────────
 
 export async function fetchSshKeys() {

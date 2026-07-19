@@ -6,15 +6,24 @@
  *   - settings-section-obsidian
  *
  * S-379 (obsidian-vault-folder-browser): `mountStatus` additiv durchgereicht (AC1/AC7).
+ * S-381 (obsidian-vault-config v3, AC8/AC13/AC15): `ObsidianProjekteSubdirSection`
+ *   ergänzt — eigener Eintrag „Obsidian-Projekt-Unterordner" in derselben Sektion.
+ *   Der Ordner-Browser (AC13) braucht den konfigurierten Vault-Pfad, um das gewählte
+ *   Verzeichnis vault-relativ abzuleiten — deshalb wird `obsidianVaultPath` zusätzlich
+ *   durchgereicht.
  *
  * Props:
  *   - obsidianVaultPath: { vaultPath, configured, mountStatus, mountRoot } or null
  *   - obsidianVaultPathError: string or null
+ *   - obsidianProjekteSubdir: { effective, source, persisted } or null
+ *   - obsidianProjekteSubdirError: string or null
  *   - onReload: async () => void
+ *   - onReloadProjekteSubdir: async () => void
  *   - fetchFn: typeof fetch
  */
 
 import { ObsidianVaultPathSection } from '../ObsidianVaultPathSection.jsx';
+import { ObsidianProjekteSubdirSection } from '../ObsidianProjekteSubdirSection.jsx';
 
 const styles = {
   section: {
@@ -45,12 +54,21 @@ const styles = {
     color: '#fca5a5',
     fontSize: 14,
   },
+  subHeading: {
+    margin: '24px 0 8px',
+    fontSize: 15,
+    fontWeight: 700,
+    color: '#e5e7eb',
+  },
 };
 
 export function IntegrationenCategory({
   obsidianVaultPath,
   obsidianVaultPathError,
+  obsidianProjekteSubdir,
+  obsidianProjekteSubdirError,
   onReload,
+  onReloadProjekteSubdir,
   fetchFn,
 }) {
   return (
@@ -72,6 +90,25 @@ export function IntegrationenCategory({
           mountStatus={obsidianVaultPath.mountStatus}
           mountRoot={obsidianVaultPath.mountRoot}
           onReload={onReload}
+          fetchFn={fetchFn}
+        />
+      )}
+
+      {/* obsidian-vault-config v3 (AC8/AC13/AC15, S-381) */}
+      <h3 style={styles.subHeading}>Obsidian-Projekt-Unterordner</h3>
+      {obsidianProjekteSubdirError && (
+        <p style={styles.loadError} role="alert" aria-live="polite">
+          Obsidian-Projekt-Unterordner konnte nicht geladen werden: {obsidianProjekteSubdirError}
+        </p>
+      )}
+      {obsidianProjekteSubdir && (
+        <ObsidianProjekteSubdirSection
+          effective={obsidianProjekteSubdir.effective}
+          source={obsidianProjekteSubdir.source}
+          persisted={obsidianProjekteSubdir.persisted}
+          vaultPath={obsidianVaultPath?.vaultPath ?? null}
+          vaultConfigured={Boolean(obsidianVaultPath?.configured)}
+          onReload={onReloadProjekteSubdir}
           fetchFn={fetchFn}
         />
       )}

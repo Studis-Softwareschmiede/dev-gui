@@ -185,6 +185,29 @@
  *          Projekt-Listing, Audit, Rollenschutz) sind in obsidianVaultPath.test.js /
  *          obsidianVaultPathRouter.test.js abgedeckt, nicht hier (S-245/S-246).
  *
+ * Covers (obsidian-vault-config v3, S-381) — Frontend, UI-Anteil (Obsidian-Projekt-
+ * Unterordner-Sektion, ObsidianProjekteSubdirSection):
+ *   AC8  — Eigener Eintrag „Obsidian-Projekt-Unterordner" zeigt den WIRKSAMEN Wert +
+ *          Quelle (persistiert/env/default — Text, nicht nur Farbe); „Setzen"/„Ändern"
+ *          öffnet Eingabefeld (PUT); „Zurücksetzen" nur sichtbar wenn ein Wert
+ *          persistiert ist, löst DELETE aus, Quelle fällt auf env/default zurück.
+ *          409 (kein Vault, AC11a), 422 (Validierung, AC11b) und 403 (keine
+ *          Berechtigung, AC14) landen feldzugeordnet (role=alert, aria-describedby)
+ *          im selben Fehler-Element; bisheriger Wert bleibt bei Fehler unverändert
+ *          sichtbar (kein Reload). Leeres Feld → Frontend-Fehlermeldung, kein PUT.
+ *          Ladefehler (GET) → eigener role=alert-Block.
+ *   AC15 — label/htmlFor auf Eingabefeld; aria-describedby verbindet Input mit
+ *          Fehler-Element; Fokusführung auf Input bei Fehler / auf Erfolgsmeldung bei
+ *          Erfolg (activeElement); Touch-Targets ≥ 44 px.
+ *   AC13 (Ordner-Browser-Ableitung eines vault-relativen Segments, Übernahme in das
+ *          Freitext-Feld ohne Auto-Save, Fehlermeldung bei „außerhalb Vault"/„kein
+ *          Vault konfiguriert") ist NICHT hier, sondern in
+ *          ObsidianProjekteSubdirSection.test.jsx abgedeckt (isolierter Komponenten-
+ *          Test, braucht den Browse-Endpunkt-Mock aus obsidian-vault-folder-browser).
+ *          AC9/AC10/AC11/AC12/AC14 (Backend-Persistenz, Rangfolge, Validierung,
+ *          Confinement, Audit/Rollenschutz) sind in obsidianVaultPath.test.js /
+ *          obsidianVaultPathRouter.test.js abgedeckt (S-380), nicht hier.
+ *
  * Covers (anthropic-oauth-vault S-368) — Frontend, UI-Anteil (Zugänge-Kategorie,
  * settings-section-anthropic-oauth):
  *   AC10 — Sektion „Claude-Abo (Nutzungsanzeige)" (h2) mit write-only-Feldern für
@@ -274,6 +297,20 @@ const CONFIGURED_OBSIDIAN_VAULT_PATH = {
   vaultPath: '/vault/obsidian',
   configured: true,
   mountRoot: '/vault',
+};
+
+/** Standard-Obsidian-Projekt-Unterordner-Antwort (Default, obsidian-vault-config v3, S-381). */
+const DEFAULT_OBSIDIAN_PROJEKTE_SUBDIR = {
+  effective: 'Projekte',
+  source: 'default',
+  persisted: null,
+};
+
+/** Obsidian-Projekt-Unterordner-Antwort mit persistiertem Segment. */
+const CONFIGURED_OBSIDIAN_PROJEKTE_SUBDIR = {
+  effective: '300 Projekte/Studis Softwareschmiede',
+  source: 'persisted',
+  persisted: '300 Projekte/Studis Softwareschmiede',
 };
 
 /**
@@ -383,6 +420,10 @@ function makeFetch({
   getObsidianVaultPath    = { ok: true, status: 200, data: DEFAULT_OBSIDIAN_VAULT_PATH },
   putObsidianVaultPath    = { ok: true, status: 200, data: { vaultPath: '/vault/obsidian', configured: true } },
   deleteObsidianVaultPath = { ok: true, status: 200, data: { vaultPath: null, configured: false } },
+  // obsidian-vault-config v3 AC8 (UI-Anteil, S-381): obsidian-projekte-subdir endpoint
+  getObsidianProjekteSubdir    = { ok: true, status: 200, data: DEFAULT_OBSIDIAN_PROJEKTE_SUBDIR },
+  putObsidianProjekteSubdir    = { ok: true, status: 200, data: CONFIGURED_OBSIDIAN_PROJEKTE_SUBDIR },
+  deleteObsidianProjekteSubdir = { ok: true, status: 200, data: DEFAULT_OBSIDIAN_PROJEKTE_SUBDIR },
   // S-143 AC12: backup-status endpoint (I1-Fix: kein backupDir)
   getBackupStatus = { ok: true, status: 200, data: DEFAULT_BACKUP_STATUS_NO_OFFHOST },
   // S-143 Architekt-Entscheid: backup-config endpoint (GET/PUT)
@@ -511,6 +552,20 @@ function makeFetch({
       }
       if (method === 'DELETE') {
         return { ok: deleteObsidianVaultPath.ok, status: deleteObsidianVaultPath.status, json: async () => deleteObsidianVaultPath.data };
+      }
+    }
+
+    // Obsidian-Projekt-Unterordner-Endpunkte (obsidian-vault-config v3 AC8, S-381)
+    if (url === '/api/settings/obsidian-projekte-subdir') {
+      if (method === 'GET') {
+        if (getObsidianProjekteSubdir === 'reject') throw new Error('obsidian-projekte-subdir endpoint unreachable');
+        return { ok: getObsidianProjekteSubdir.ok, status: getObsidianProjekteSubdir.status, json: async () => getObsidianProjekteSubdir.data };
+      }
+      if (method === 'PUT') {
+        return { ok: putObsidianProjekteSubdir.ok, status: putObsidianProjekteSubdir.status, json: async () => putObsidianProjekteSubdir.data };
+      }
+      if (method === 'DELETE') {
+        return { ok: deleteObsidianProjekteSubdir.ok, status: deleteObsidianProjekteSubdir.status, json: async () => deleteObsidianProjekteSubdir.data };
       }
     }
 
@@ -3142,6 +3197,569 @@ describe('SettingsView — OBS-A11y: label/htmlFor + Fokusführung + Touch-Targe
       const alerts = main.querySelectorAll('[role="alert"]');
       const hasObsError = Array.from(alerts).some((el) =>
         el.textContent.match(/obsidian-vault-pfad konnte nicht geladen werden/i),
+      );
+      expect(hasObsError).toBe(true);
+    });
+  });
+});
+
+// ── obsidian-vault-config v3 — AC8/AC15: Obsidian-Projekt-Unterordner (S-381) ─
+// AC13 (Ordner-Browser-Ableitung) ist in ObsidianProjekteSubdirSection.test.jsx
+// abgedeckt — hier NUR Anzeige/Quelle, Setzen/Zurücksetzen, Fehlerpfade + A11y.
+
+describe('SettingsView — OBS-AC8: Anzeige wirksamer Projekt-Unterordner + Quelle', () => {
+  beforeEach(() => { testCategory = 'integrationen'; });
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('OBS-AC8 — zeigt Default-Segment + Quelle "Standard" wenn nichts persistiert/env gesetzt', async () => {
+    const { getByRole, getAllByRole } = renderView(makeFetch({
+      getObsidianProjekteSubdir: { ok: true, status: 200, data: DEFAULT_OBSIDIAN_PROJEKTE_SUBDIR },
+    }));
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      expect(main.textContent).toContain('Projekte');
+      expect(main.textContent).toMatch(/Standard/);
+    });
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/obsidian-projekt-unterordner setzen/i))).toBe(true);
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/obsidian-projekt-unterordner zurücksetzen/i))).toBe(false);
+    });
+  });
+
+  it('OBS-AC8 — zeigt persistiertes Segment + Quelle "persistiert" + Ändern/Zurücksetzen-Buttons', async () => {
+    const { getByRole, getAllByRole } = renderView(makeFetch({
+      getObsidianProjekteSubdir: { ok: true, status: 200, data: CONFIGURED_OBSIDIAN_PROJEKTE_SUBDIR },
+    }));
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      expect(main.textContent).toContain('300 Projekte/Studis Softwareschmiede');
+      expect(main.textContent).toMatch(/persistiert/i);
+    });
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/obsidian-projekt-unterordner ändern/i))).toBe(true);
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/obsidian-projekt-unterordner zurücksetzen/i))).toBe(true);
+    });
+  });
+
+  it('OBS-AC8 — zeigt Quelle "Umgebungsvariable" wenn Env wirksam (kein persistierter Wert)', async () => {
+    const { getByRole, getAllByRole } = renderView(makeFetch({
+      getObsidianProjekteSubdir: {
+        ok: true,
+        status: 200,
+        data: { effective: '300 Projekte', source: 'env', persisted: null },
+      },
+    }));
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      expect(main.textContent).toContain('300 Projekte');
+      expect(main.textContent).toMatch(/OBSIDIAN_PROJEKTE_SUBDIR/);
+    });
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      // Env ist keine Persistierung — Zurücksetzen-Button bleibt verborgen (nichts zu löschen).
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/obsidian-projekt-unterordner zurücksetzen/i))).toBe(false);
+    });
+  });
+});
+
+describe('SettingsView — OBS-AC8: Setzen (PUT)', () => {
+  beforeEach(() => { testCategory = 'integrationen'; });
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('OBS-AC8 — erfolgreiches Setzen: PUT abgefeuert, effektiver Wert + Quelle aktualisiert', async () => {
+    let callCount = 0;
+    const fetchFn = jest.fn(async (url, opts = {}) => {
+      const method = opts.method ?? 'GET';
+      if (method === 'PUT' && url === '/api/settings/obsidian-projekte-subdir') {
+        return { ok: true, status: 200, json: async () => CONFIGURED_OBSIDIAN_PROJEKTE_SUBDIR };
+      }
+      if (method === 'GET' && url === '/api/settings/obsidian-projekte-subdir') {
+        callCount++;
+        const data = callCount > 1 ? CONFIGURED_OBSIDIAN_PROJEKTE_SUBDIR : DEFAULT_OBSIDIAN_PROJEKTE_SUBDIR;
+        return { ok: true, status: 200, json: async () => data };
+      }
+      if (method === 'GET' && url === '/api/settings/obsidian-vault-path') {
+        return { ok: true, status: 200, json: async () => CONFIGURED_OBSIDIAN_VAULT_PATH };
+      }
+      return { ok: true, status: 200, json: async () => EMPTY_CREDS };
+    });
+    globalThis.fetch = fetchFn;
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/obsidian-projekt-unterordner setzen/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const setzenBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/obsidian-projekt-unterordner setzen/i),
+      );
+      fireEvent.click(setzenBtn);
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('obsidian-projekte-subdir-input')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.change(document.getElementById('obsidian-projekte-subdir-input'), {
+        target: { value: '300 Projekte/Studis Softwareschmiede' },
+      });
+    });
+
+    await act(async () => {
+      const saveBtns = Array.from(document.querySelectorAll('button')).filter(
+        (b) => b.textContent.trim() === 'Speichern',
+      );
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    await waitFor(() => {
+      const putCalls = fetchFn.mock.calls.filter(
+        ([u, o]) => (o?.method ?? 'GET') === 'PUT' && u === '/api/settings/obsidian-projekte-subdir',
+      );
+      expect(putCalls.length).toBeGreaterThan(0);
+      const [, opts] = putCalls[putCalls.length - 1];
+      expect(JSON.parse(opts.body)).toEqual({ subdir: '300 Projekte/Studis Softwareschmiede' });
+    });
+
+    await waitFor(() => {
+      const main = document.querySelector('main[aria-label="Einstellungen-Ansicht"]');
+      expect(main.textContent).toContain('300 Projekte/Studis Softwareschmiede');
+    });
+  });
+
+  it('OBS-AC8 — Erfolg zeigt role=status Meldung', async () => {
+    const fetchFn = makeFetch({
+      getObsidianProjekteSubdir: { ok: true, status: 200, data: DEFAULT_OBSIDIAN_PROJEKTE_SUBDIR },
+    });
+    globalThis.fetch = fetchFn;
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/obsidian-projekt-unterordner setzen/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const setzenBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/obsidian-projekt-unterordner setzen/i),
+      );
+      fireEvent.click(setzenBtn);
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('obsidian-projekte-subdir-input')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.change(document.getElementById('obsidian-projekte-subdir-input'), {
+        target: { value: '300 Projekte' },
+      });
+    });
+
+    await act(async () => {
+      const saveBtns = Array.from(document.querySelectorAll('button')).filter(
+        (b) => b.textContent.trim() === 'Speichern',
+      );
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    await waitFor(() => {
+      const statusEl = document.getElementById('obsidian-projekte-subdir-success');
+      expect(statusEl).toBeTruthy();
+      expect(statusEl.textContent).toMatch(/obsidian-projekt-unterordner gespeichert/i);
+    });
+  });
+});
+
+describe('SettingsView — OBS-AC8/AC11: Fehlerpfade (409 kein Vault, 422 Validierung, 403)', () => {
+  beforeEach(() => { testCategory = 'integrationen'; });
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('OBS-AC11a — 409 (kein Vault konfiguriert): feldzugeordnete role=alert-Meldung, alter Wert bleibt sichtbar', async () => {
+    const fetchFn = makeFetch({
+      getObsidianProjekteSubdir: { ok: true, status: 200, data: DEFAULT_OBSIDIAN_PROJEKTE_SUBDIR },
+      putObsidianProjekteSubdir: { ok: false, status: 409, data: { error: 'Obsidian-Vault ist nicht konfiguriert — zuerst Vault-Pfad setzen' } },
+    });
+    globalThis.fetch = fetchFn;
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/obsidian-projekt-unterordner setzen/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const setzenBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/obsidian-projekt-unterordner setzen/i),
+      );
+      fireEvent.click(setzenBtn);
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('obsidian-projekte-subdir-input')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.change(document.getElementById('obsidian-projekte-subdir-input'), {
+        target: { value: '300 Projekte' },
+      });
+    });
+
+    await act(async () => {
+      const saveBtns = Array.from(document.querySelectorAll('button')).filter(
+        (b) => b.textContent.trim() === 'Speichern',
+      );
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    await waitFor(() => {
+      const input = document.getElementById('obsidian-projekte-subdir-input');
+      expect(input.getAttribute('aria-describedby')).toBe('obsidian-projekte-subdir-error');
+      const errorEl = document.getElementById('obsidian-projekte-subdir-error');
+      expect(errorEl).toBeTruthy();
+      expect(errorEl.getAttribute('role')).toBe('alert');
+      expect(errorEl.textContent).toMatch(/vault ist nicht konfiguriert/i);
+    });
+
+    const main = document.querySelector('main[aria-label="Einstellungen-Ansicht"]');
+    expect(main.textContent).toContain('Projekte');
+  });
+
+  it('OBS-AC11b — 422-Fehler (Segment existiert nicht): role=alert-Meldung', async () => {
+    const fetchFn = makeFetch({
+      getObsidianProjekteSubdir: { ok: true, status: 200, data: DEFAULT_OBSIDIAN_PROJEKTE_SUBDIR },
+      putObsidianProjekteSubdir: { ok: false, status: 422, data: { error: 'Unterordner "Nicht Vorhanden" existiert nicht im Vault' } },
+    });
+    globalThis.fetch = fetchFn;
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/obsidian-projekt-unterordner setzen/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const setzenBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/obsidian-projekt-unterordner setzen/i),
+      );
+      fireEvent.click(setzenBtn);
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('obsidian-projekte-subdir-input')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.change(document.getElementById('obsidian-projekte-subdir-input'), {
+        target: { value: 'Nicht Vorhanden' },
+      });
+    });
+
+    await act(async () => {
+      const saveBtns = Array.from(document.querySelectorAll('button')).filter(
+        (b) => b.textContent.trim() === 'Speichern',
+      );
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    await waitFor(() => {
+      const errorEl = document.getElementById('obsidian-projekte-subdir-error');
+      expect(errorEl).toBeTruthy();
+      expect(errorEl.textContent).toMatch(/existiert nicht/i);
+    });
+  });
+
+  it('OBS-AC14 — 403 (keine Berechtigung): verständliche Fehlermeldung', async () => {
+    const fetchFn = makeFetch({
+      getObsidianProjekteSubdir: { ok: true, status: 200, data: DEFAULT_OBSIDIAN_PROJEKTE_SUBDIR },
+      putObsidianProjekteSubdir: { ok: false, status: 403, data: { error: 'Keine Berechtigung für diese Aktion' } },
+    });
+    globalThis.fetch = fetchFn;
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/obsidian-projekt-unterordner setzen/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const setzenBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/obsidian-projekt-unterordner setzen/i),
+      );
+      fireEvent.click(setzenBtn);
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('obsidian-projekte-subdir-input')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.change(document.getElementById('obsidian-projekte-subdir-input'), {
+        target: { value: '300 Projekte' },
+      });
+    });
+
+    await act(async () => {
+      const saveBtns = Array.from(document.querySelectorAll('button')).filter(
+        (b) => b.textContent.trim() === 'Speichern',
+      );
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    await waitFor(() => {
+      const errorEl = document.getElementById('obsidian-projekte-subdir-error');
+      expect(errorEl).toBeTruthy();
+      expect(errorEl.textContent).toMatch(/keine berechtigung/i);
+    });
+  });
+
+  it('OBS-AC8 — leeres Feld: Frontend-Fehlermeldung, kein PUT abgefeuert', async () => {
+    const fetchFn = makeFetch({
+      getObsidianProjekteSubdir: { ok: true, status: 200, data: DEFAULT_OBSIDIAN_PROJEKTE_SUBDIR },
+    });
+    globalThis.fetch = fetchFn;
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/obsidian-projekt-unterordner setzen/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const setzenBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/obsidian-projekt-unterordner setzen/i),
+      );
+      fireEvent.click(setzenBtn);
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('obsidian-projekte-subdir-input')).toBeTruthy();
+    });
+
+    await act(async () => {
+      const saveBtns = Array.from(document.querySelectorAll('button')).filter(
+        (b) => b.textContent.trim() === 'Speichern',
+      );
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    await waitFor(() => {
+      const errorEl = document.getElementById('obsidian-projekte-subdir-error');
+      expect(errorEl).toBeTruthy();
+      expect(errorEl.textContent).toMatch(/leer/i);
+    });
+
+    const putCalls = fetchFn.mock.calls.filter(
+      ([u, o]) => (o?.method ?? 'GET') === 'PUT' && u === '/api/settings/obsidian-projekte-subdir',
+    );
+    expect(putCalls.length).toBe(0);
+  });
+});
+
+describe('SettingsView — OBS-AC8: Zurücksetzen (DELETE)', () => {
+  beforeEach(() => { testCategory = 'integrationen'; });
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('OBS-AC8 — Zurücksetzen: DELETE abgefeuert, Quelle fällt zurück auf Default/Env', async () => {
+    let callCount = 0;
+    const fetchFn = jest.fn(async (url, opts = {}) => {
+      const method = opts.method ?? 'GET';
+      if (method === 'DELETE' && url === '/api/settings/obsidian-projekte-subdir') {
+        return { ok: true, status: 200, json: async () => DEFAULT_OBSIDIAN_PROJEKTE_SUBDIR };
+      }
+      if (method === 'GET' && url === '/api/settings/obsidian-projekte-subdir') {
+        callCount++;
+        const data = callCount > 1 ? DEFAULT_OBSIDIAN_PROJEKTE_SUBDIR : CONFIGURED_OBSIDIAN_PROJEKTE_SUBDIR;
+        return { ok: true, status: 200, json: async () => data };
+      }
+      return { ok: true, status: 200, json: async () => EMPTY_CREDS };
+    });
+    globalThis.fetch = fetchFn;
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/obsidian-projekt-unterordner zurücksetzen/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const resetBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/obsidian-projekt-unterordner zurücksetzen/i),
+      );
+      fireEvent.click(resetBtn);
+    });
+
+    await waitFor(() => {
+      const deleteCalls = fetchFn.mock.calls.filter(
+        ([u, o]) => (o?.method ?? 'GET') === 'DELETE' && u === '/api/settings/obsidian-projekte-subdir',
+      );
+      expect(deleteCalls.length).toBeGreaterThan(0);
+    });
+
+    await waitFor(() => {
+      const main = document.querySelector('main[aria-label="Einstellungen-Ansicht"]');
+      expect(main.textContent).toMatch(/Standard/);
+    });
+  });
+});
+
+describe('SettingsView — OBS-AC15 (Projekt-Unterordner): A11y label/htmlFor + Fokusführung + Touch-Target', () => {
+  beforeEach(() => { testCategory = 'integrationen'; });
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('OBS-AC15 — Eingabefeld hat label/htmlFor', async () => {
+    const { getAllByRole } = renderView(makeFetch({
+      getObsidianProjekteSubdir: { ok: true, status: 200, data: DEFAULT_OBSIDIAN_PROJEKTE_SUBDIR },
+    }));
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/obsidian-projekt-unterordner setzen/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const setzenBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/obsidian-projekt-unterordner setzen/i),
+      );
+      fireEvent.click(setzenBtn);
+    });
+
+    await waitFor(() => {
+      const input = document.getElementById('obsidian-projekte-subdir-input');
+      expect(input).toBeTruthy();
+      const label = document.querySelector('label[for="obsidian-projekte-subdir-input"]');
+      expect(label).toBeTruthy();
+    });
+  });
+
+  it('OBS-AC15 — Fokus landet nach 422-Fehler auf dem Input (activeElement)', async () => {
+    const fetchFn = makeFetch({
+      getObsidianProjekteSubdir: { ok: true, status: 200, data: DEFAULT_OBSIDIAN_PROJEKTE_SUBDIR },
+      putObsidianProjekteSubdir: { ok: false, status: 422, data: { error: 'Segment ist kein Verzeichnis' } },
+    });
+    globalThis.fetch = fetchFn;
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/obsidian-projekt-unterordner setzen/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const setzenBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/obsidian-projekt-unterordner setzen/i),
+      );
+      fireEvent.click(setzenBtn);
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('obsidian-projekte-subdir-input')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.change(document.getElementById('obsidian-projekte-subdir-input'), {
+        target: { value: 'irgendeine-datei.md' },
+      });
+    });
+
+    await act(async () => {
+      const saveBtns = Array.from(document.querySelectorAll('button')).filter(
+        (b) => b.textContent.trim() === 'Speichern',
+      );
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('obsidian-projekte-subdir-error')).toBeTruthy();
+      expect(document.activeElement).toBe(document.getElementById('obsidian-projekte-subdir-input'));
+    });
+  });
+
+  it('OBS-AC15 — Fokus landet nach Erfolg auf der Erfolgsmeldung (activeElement)', async () => {
+    const fetchFn = makeFetch({
+      getObsidianProjekteSubdir: { ok: true, status: 200, data: DEFAULT_OBSIDIAN_PROJEKTE_SUBDIR },
+    });
+    globalThis.fetch = fetchFn;
+    const { getAllByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      expect(btns.some((b) => b.getAttribute('aria-label')?.match(/obsidian-projekt-unterordner setzen/i))).toBe(true);
+    });
+
+    await act(async () => {
+      const setzenBtn = getAllByRole('button').find((b) =>
+        b.getAttribute('aria-label')?.match(/obsidian-projekt-unterordner setzen/i),
+      );
+      fireEvent.click(setzenBtn);
+    });
+
+    await waitFor(() => {
+      expect(document.getElementById('obsidian-projekte-subdir-input')).toBeTruthy();
+    });
+
+    await act(async () => {
+      fireEvent.change(document.getElementById('obsidian-projekte-subdir-input'), {
+        target: { value: '300 Projekte' },
+      });
+    });
+
+    await act(async () => {
+      const saveBtns = Array.from(document.querySelectorAll('button')).filter(
+        (b) => b.textContent.trim() === 'Speichern',
+      );
+      if (saveBtns[0]) fireEvent.click(saveBtns[0]);
+    });
+
+    await waitFor(() => {
+      const statusEl = document.getElementById('obsidian-projekte-subdir-success');
+      expect(statusEl).toBeTruthy();
+      expect(document.activeElement).toBe(statusEl);
+    });
+  });
+
+  it('OBS-AC15 — Buttons haben minHeight ≥ 44 px (Touch-Target)', async () => {
+    const { getAllByRole } = renderView(makeFetch({
+      getObsidianProjekteSubdir: { ok: true, status: 200, data: CONFIGURED_OBSIDIAN_PROJEKTE_SUBDIR },
+    }));
+
+    await waitFor(() => {
+      const btns = getAllByRole('button');
+      const obsBtns = btns.filter((b) => (b.getAttribute('aria-label') ?? '').match(/obsidian-projekt-unterordner/i));
+      expect(obsBtns.length).toBeGreaterThan(0);
+      for (const btn of obsBtns) {
+        expect(parseInt(btn.style.minHeight ?? '0', 10)).toBeGreaterThanOrEqual(44);
+      }
+    });
+  });
+
+  it('OBS-AC15 — Ladefehler zeigt role=alert', async () => {
+    const fetchFn = makeFetch({
+      getObsidianProjekteSubdir: 'reject',
+    });
+    globalThis.fetch = fetchFn;
+    const { getByRole } = renderSettingsWithCategory(React.createElement(SettingsView, { onNavigate: jest.fn(), fetchFn }));
+
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      const alerts = main.querySelectorAll('[role="alert"]');
+      const hasObsError = Array.from(alerts).some((el) =>
+        el.textContent.match(/obsidian-projekt-unterordner konnte nicht geladen werden/i),
       );
       expect(hasObsError).toBe(true);
     });
