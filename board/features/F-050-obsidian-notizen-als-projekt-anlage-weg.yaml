@@ -4,9 +4,9 @@ goal: 'Dritter Weg (neben neu/klonen), ein Projekt aus lokalen Obsidian-Notizen 
   Vault-Pfad in Settings + Ordner-Auswahl + Trigger der Fabrik-Pipeline /agent-flow:from-notes
   (PTY), strukturierter Fragenkatalog in der GUI, sowie ein Obsidian-Sync-Knopf. Nur
   dev-gui-Bedienseite; Ingest-Logik lebt in agent-flow (PR #217).'
-status: Done
+status: Backlog
 priority: P1
-spec: null
+spec: docs/specs/obsidian-question-catalog.md
 definition_of_done: null
 labels:
 - security
@@ -21,8 +21,10 @@ stories:
 - S-250
 - S-251
 - S-252
-progress: 8/8 done
+- S-383
+- S-384
+progress: 8/10 done
 created_at: '2026-07-02T05:41:54Z'
-updated_at: '2026-07-18T05:24:07Z'
+updated_at: '2026-07-19T00:00:00Z'
 area: obsidian
-done_at: '2026-07-18T05:24:07Z'
+done_at: null
