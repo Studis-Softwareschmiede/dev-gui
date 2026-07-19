@@ -26,10 +26,13 @@
  * Fehlertoleranz (AC3):
  *   - `board/runs/` fehlt ganz → leere Liste, kein Fehler (Normalzustand ohne
  *     laufenden Feature-Drain).
- *   - Ein einzelnes defektes/halb-geschriebenes state.yaml (Parse-Fehler, ENOENT
- *     durch Race mit dem schreibenden Feature-Drain) macht NUR diesen einen
- *     Feature-Lauf unsichtbar (übersprungen, best-effort geloggt, secret-frei) —
- *     der restliche Run-State-Index bleibt intakt (kein Crash).
+ *   - Ein einzelner F-###-Ordner OHNE state.yaml (ENOENT) ist der Normalzustand
+ *     eines abgeschlossenen Laufs (nur `notes.md` bleibt übrig) bzw. eines kurzen
+ *     Race mit dem schreibenden Feature-Drain → still übersprungen, KEIN Log
+ *     (sonst pollt der Watcher endlos Warnungen für jeden ruhenden Ordner).
+ *   - Ein einzelnes defektes/halb-geschriebenes state.yaml (echter Parse-Fehler)
+ *     macht NUR diesen einen Feature-Lauf unsichtbar (übersprungen, best-effort
+ *     geloggt, secret-frei) — der restliche Run-State-Index bleibt intakt (kein Crash).
  *
  * Security:
  *   - Rein lesend — KEIN Schreibpfad nach board/runs/.
@@ -138,8 +141,13 @@ export async function readRunStates(repoPath, fsDeps = { readdir, readFile }) {
       }
       runs.push(normalizeRunState(entry.name, parsed));
     } catch (err) {
-      // AC3: EIN defektes/halb-geschriebenes state.yaml macht nur diesen Lauf
-      // unsichtbar — best-effort geloggt, secret-frei, kein Crash.
+      // AC3: Fehlt die state.yaml schlicht (ENOENT) — abgeschlossener Lauf mit nur
+      // notes.md, oder kurzer Race mit dem schreibenden Feature-Drain — ist das der
+      // Normalzustand: still überspringen (kein Log), sonst pollt der Watcher endlos
+      // Warnungen für jeden ruhenden Ordner.
+      if (err && err.code === 'ENOENT') continue;
+      // Nur ein echt defektes/halb-geschriebenes state.yaml (Parse-Fehler) macht
+      // diesen Lauf unsichtbar — best-effort geloggt, secret-frei, kein Crash.
       console.warn(
         `[RunStateReader] state.yaml für ${entry.name} übersprungen (${statePath}): ${err.message}`
       );

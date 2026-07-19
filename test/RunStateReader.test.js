@@ -228,7 +228,7 @@ describe('readRunStates (AC1/AC2 — happy path)', () => {
 });
 
 describe('readRunStates (AC3 — Fehlertoleranz je Einzel-Lauf)', () => {
-  it('a broken/half-written state.yaml (parse error) hides only that one run — others remain visible', async () => {
+  it('a missing state.yaml (ENOENT — finished run with only notes.md, or a write race) is skipped SILENTLY, no log', async () => {
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
     const fsDeps = {
       readdir: jest.fn(async (path) => {
@@ -237,11 +237,28 @@ describe('readRunStates (AC3 — Fehlertoleranz je Einzel-Lauf)', () => {
       }),
       readFile: jest.fn(async (path) => {
         if (path === `${RUNS_DIR}/F-001/state.yaml`) return 'phase: story\n';
-        if (path === `${RUNS_DIR}/F-002/state.yaml`) {
-          // Simulates a half-written file mid-write by the feature drain (ENOENT race).
-          throw Object.assign(new Error('ENOENT: file vanished mid-read'), { code: 'ENOENT' });
-        }
-        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+        // F-002: only notes.md, no state.yaml → ENOENT (normal for a finished/idle run).
+        throw Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' });
+      }),
+    };
+    const runs = await readRunStates(REPO_PATH, fsDeps);
+    expect(runs.map((r) => r.feature)).toEqual(['F-001']);
+    // The whole point of the fix: an idle F-### dir must NOT be logged on every poll.
+    expect(warnSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  it('a genuine read error other than ENOENT (parse/permission) still logs only that skipped run', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const fsDeps = {
+      readdir: jest.fn(async (path) => {
+        if (path === RUNS_DIR) return [dirEntry('F-001'), dirEntry('F-002')];
+        return [];
+      }),
+      readFile: jest.fn(async (path) => {
+        if (path === `${RUNS_DIR}/F-001/state.yaml`) return 'phase: story\n';
+        // F-002: a real defect (not a missing file) — must remain visible in the log.
+        throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
       }),
     };
     const runs = await readRunStates(REPO_PATH, fsDeps);
