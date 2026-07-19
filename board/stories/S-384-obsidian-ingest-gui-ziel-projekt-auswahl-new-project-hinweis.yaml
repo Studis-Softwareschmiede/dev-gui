@@ -2,7 +2,7 @@ id: S-384
 parent: F-050
 title: 'Obsidian-Ingest-GUI: Ziel-Projekt-Auswahl vor dem Start (Notiz-Ordner-Auswahl
   unverändert) + new-project-Hinweis bei fehlendem Ziel-Repo'
-status: In Progress
+status: Done
 priority: P1
 spec: docs/specs/obsidian-question-catalog.md
 implements:
@@ -24,6 +24,9 @@ branch: feat/S-384-ingest-gui-zielprojekt
 pr: null
 blocked_reason: null
 created_at: '2026-07-19T00:00:00Z'
-updated_at: '2026-07-19T19:19:10Z'
+updated_at: '2026-07-19T19:46:56Z'
 area: obsidian
-done_at: null
+done_at: '2026-07-19T19:46:00Z'
+dispo_act: '4'
+tok: '42346881'
+dispo_forecast: '0'
