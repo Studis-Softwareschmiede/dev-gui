@@ -281,9 +281,11 @@ services:
       OBSIDIAN_VAULT_HOST_DIR: ${OBSIDIAN_VAULT_HOST_DIR:-}
       # Konfigurierbarer Projekt-Unterordner im Vault (obsidian-vault-config v2 / S-330,
       # Owner-Vorfall 2026-07-08). Default „Projekte" passt nicht zu jedem Vault-Layout
-      # (z.B. „300 Projekte/Studis Softwareschmiede/<Projekt>", Mehrebenen-Segment erlaubt).
+      # (z.B. „300 Projekte/<Projekt>", Mehrebenen-Segment erlaubt).
       # Ohne Setzung bleibt der Default „Projekte" wirksam (Rückwärtskompatibilität).
-      OBSIDIAN_PROJEKTE_SUBDIR: 300 Projekte/Studis Softwareschmiede
+      # Owner-Entscheidung 2026-07-19: alle neuen Projekte liegen direkt unter
+      # „300 Projekte" — nicht mehr unter „300 Projekte/Studis Softwareschmiede".
+      OBSIDIAN_PROJEKTE_SUBDIR: 300 Projekte
 
     volumes:
       # Claude OAuth credentials + agent-flow plugin cache (persisted across
