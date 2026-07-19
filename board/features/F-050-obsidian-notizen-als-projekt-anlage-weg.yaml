@@ -23,8 +23,12 @@ stories:
 - S-252
 - S-383
 - S-384
-progress: 10/10 done
+- S-387
+- S-388
+- S-389
+- S-390
+progress: 10/14 done
 created_at: '2026-07-02T05:41:54Z'
-updated_at: '2026-07-19T19:46:57Z'
+updated_at: '2026-07-19T20:56:04Z'
 area: obsidian
 done_at: null

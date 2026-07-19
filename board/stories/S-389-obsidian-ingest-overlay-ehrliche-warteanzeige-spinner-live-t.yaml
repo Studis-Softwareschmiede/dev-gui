@@ -1,0 +1,30 @@
+id: S-389
+parent: F-050
+title: 'Obsidian-Ingest-Overlay: ehrliche Warteanzeige — Spinner + live tickende Laufzeit
+  ("läuft seit m:ss") + Erwartungstext; Backend liefert startedAt im Status-Endpunkt'
+status: To Do
+priority: P1
+spec: docs/specs/obsidian-question-catalog.md
+implements:
+- AC16
+- AC17
+depends: null
+labels:
+- ui
+size_est: M
+dispo_est: '4.0'
+dispo_act: null
+dispo_forecast: null
+estimate_note: 'Heuristik score 6 (2 AC + 3 Komponenten ObsidianIngestRunner.startedAt/obsidianIngestRouter-Status-Body/ObsidianIngestOverlay-Spinner+Ticker
+  + ui-Label) -> M. estimator als Subagent nicht dispatchbar -> S/M-Baseline-Lookup
+  js|balanced|M: ep=4.0 (n=50), tok_total=1659043 (exakter Schnitt); confidence medium.
+  Vertikaler Slice (Backend startedAt + Frontend-Warteanzeige).'
+confidence: medium
+tok_est: '1659043'
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-07-19T20:53:48Z'
+updated_at: '2026-07-19T20:55:55Z'
+done_at: null
+area: obsidian

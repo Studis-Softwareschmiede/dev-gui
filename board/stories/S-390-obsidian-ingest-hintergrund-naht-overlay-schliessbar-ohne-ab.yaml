@@ -1,0 +1,33 @@
+id: S-390
+parent: F-050
+title: 'Obsidian-Ingest: Hintergrund-Naht — Overlay schliessbar ohne Abbruch, sichtbarer
+  Status-Badge (needs-answers/done/failed) im "Aus Obsidian-Notizen"-Bereich; Klick
+  öffnet Overlay am richtigen Punkt (bestehendes Resume + Verwerf-Regel)'
+status: To Do
+priority: P1
+spec: docs/specs/obsidian-question-catalog.md
+implements:
+- AC18
+- AC19
+depends:
+- S-389
+labels:
+- ui
+size_est: M
+dispo_est: '4.0'
+dispo_act: null
+dispo_forecast: null
+estimate_note: 'Heuristik score 5 (2 AC + 2 Komponenten ObsidianImportSection-Badge+Poll+Klick/ObsidianIngestOverlay-initialJobId-Wiedereinstieg
+  + ui-Label) -> M. estimator als Subagent nicht dispatchbar -> S/M-Baseline-Lookup
+  js|balanced|M: ep=4.0 (n=50), tok_total=1659043 (exakter Schnitt); confidence medium.
+  Reiner Frontend-Slice (Status-Endpunkt bereits vorhanden); depends S-389 wegen geteilter
+  Dateien.'
+confidence: medium
+tok_est: '1659043'
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-07-19T20:53:56Z'
+updated_at: '2026-07-19T20:56:03Z'
+done_at: null
+area: obsidian
