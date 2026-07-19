@@ -1,0 +1,28 @@
+id: S-385
+parent: F-069
+title: 'RunStateReader: fehlende state.yaml (ENOENT) still überspringen statt bei
+  jedem Poll zu warnen (Logspam für ruhende F-###-Ordner)'
+status: 'To Do'
+priority: P2
+spec: docs/specs/run-state-live-view.md
+implements:
+- AC3
+depends: null
+labels:
+- bug
+- observability
+size_est: S
+dispo_est: null
+dispo_act: null
+dispo_forecast: null
+estimate_note: 'S — 1 catch-Zweig in RunStateReader.js + 2 Tests. Fix bereits im Branch
+  implementiert und getestet (17/17 grün), Review/Merge ausstehend.'
+confidence: high
+tok_est: null
+branch: fix/S-382-runstate-enoent
+pr: null
+blocked_reason: null
+created_at: '2026-07-19T18:10:40Z'
+updated_at: '2026-07-19T18:10:40Z'
+done_at: null
+tok: null

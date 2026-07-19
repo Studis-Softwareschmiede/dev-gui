@@ -1,0 +1,31 @@
+id: S-386
+parent: F-072
+title: 'Deploy-Login: bw-Session über die periodischen Poll-Zyklen wiederverwenden
+  statt je Zyklus neu einzuloggen (Bitwarden "New Device"-Mailflut alle ~15 min)'
+status: 'To Do'
+priority: P2
+spec: docs/specs/deploy-bitwarden-gpg-injection.md
+implements: null
+depends: null
+labels:
+- bug
+- security
+- deploy
+size_est: M
+dispo_est: null
+dispo_act: null
+dispo_forecast: null
+estimate_note: 'Symptom lokalisiert (BitwardenDeployLoginService führt `bw login` je
+  Deploy-/Provisioning-Zyklus aus; kein persistenter Geräte-/Session-State -> jeder
+  Login zählt als neues Gerät). Genauer periodischer Trigger (Aufrufer im ~15-min-Takt)
+  noch zu bestätigen, BEVOR der Session-Cache gesetzt wird — kein Blind-Fix.'
+confidence: low
+tok_est: null
+branch: null
+pr: null
+blocked_reason: 'Periodischer Aufrufer des Deploy-Logins (~15-min-Takt) noch nicht
+  eindeutig lokalisiert — Trigger bestätigen, dann Session/Device-State persistent halten.'
+created_at: '2026-07-19T18:10:40Z'
+updated_at: '2026-07-19T18:10:40Z'
+done_at: null
+tok: null
