@@ -2,7 +2,7 @@ id: S-383
 parent: F-050
 title: 'Obsidian-Ingest-Runner: cwd = Ziel-Projekt-Repo (Notiz-Ordner nur Argument)
   + Ziel-Projekt-Confinement am start-Endpunkt + Fehlertext-Differenzierung'
-status: Backlog
+status: In Progress
 priority: P1
 spec: docs/specs/obsidian-question-catalog.md
 implements:
@@ -20,9 +20,10 @@ confidence: low
 estimate_note: 'Heuristik score 8 (3 AC + 4 Komponenten ObsidianIngestRunner/obsidianIngestRouter/workspacePath/parseIngestOutcome
   + security-Label) -> L. estimator als Subagent nicht dispatchbar (kein Task-Tool)
   -> Baseline js|balanced|L: ep=5.25, tok_total=2591205; confidence low.'
-branch: null
+branch: feat/S-383-ingest-cwd-ziel-repo
 pr: null
 blocked_reason: null
 created_at: '2026-07-19T00:00:00Z'
-updated_at: '2026-07-19T00:00:00Z'
+updated_at: '2026-07-19T18:51:07Z'
 area: obsidian
+done_at: null
