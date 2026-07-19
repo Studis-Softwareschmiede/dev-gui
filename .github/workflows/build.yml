@@ -4,6 +4,7 @@
 # Security-Gate: secret-scan (gitleaks) MUSS grün sein, bevor das Image gebaut/gepusht wird.
 name: build
 on:
+  workflow_dispatch:
   push:
     branches: [main]
     # Pfad-Filter (S-323): reine Board-State-/Doku-/Markdown-Commits (board/**, docs/**, **.md)
