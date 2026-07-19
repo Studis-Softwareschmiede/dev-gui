@@ -1,0 +1,24 @@
+id: F-089
+title: Obsidian-Projekt-Unterordner in der GUI wählbar (führende Quelle, Env als Fallback)
+goal: Der Projekt-Unterordner im Obsidian-Vault (bisher nur Deploy-Env OBSIDIAN_PROJEKTE_SUBDIR,
+  hart in docker-compose) wird in Einstellungen -> Integrationen -> Obsidian per bestehendem
+  Ordner-Browser wählbar + persistiert (meta-Block), analog zum Vault-Pfad. Persistierter
+  Wert wird führende Quelle (Rangfolge persistiert->env->default Projekte); Env bleibt
+  Fallback. Erweitert obsidian-vault-config v3.
+status: Backlog
+priority: P2
+spec: docs/specs/obsidian-vault-config.md
+definition_of_done: null
+labels:
+- backend
+- security
+- ui
+depends: null
+owner: null
+stories:
+- S-380
+- S-381
+progress: 0/2 done
+created_at: '2026-07-19T06:53:34Z'
+updated_at: '2026-07-19T06:55:59Z'
+area: obsidian
