@@ -1,0 +1,29 @@
+id: S-395
+parent: F-090
+title: 'RedTeamView-Kachel: Allowlist-Auswahl (kein Freitext), Feuer-Freigabe-Bestätigung, Trigger+Polling, Ergebnis/Protokoll/PR'
+status: To Do
+priority: P1
+spec: docs/specs/red-team-tile.md
+implements:
+- AC7
+- AC8
+- AC9
+depends:
+- S-393
+labels:
+- ui
+- security
+size_est: M
+dispo_est: '4.0'
+dispo_act: null
+dispo_forecast: null
+estimate_note: 'Neue Tile-View + viewRegistry-Eintrag (Hot-Spot, nur diese Story) + Trigger/Poll-Muster aus ReconcileTrigger + Client-Test. M.'
+confidence: medium
+tok_est: null
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-07-21T00:00:00Z'
+updated_at: '2026-07-21T00:00:00Z'
+done_at: null
+area: fabrik-arbeiten
