@@ -29,6 +29,7 @@ import { TeamView }         from './TeamView.jsx';
 import { RetroView }        from './RetroView.jsx';
 import { RetroTrendView }   from './RetroTrendView.jsx';
 import { BoardView }        from './BoardView.jsx';
+import RedTeamView          from './RedTeamView.jsx';
 
 /**
  * @typedef {{ label: string, description: string }} TileMeta
@@ -89,6 +90,17 @@ export const VIEW_REGISTRY = [
     tile: {
       label: 'Team',
       description: 'Agenten, Skills und Knowledge der Fabrik einsehen.',
+    },
+  },
+  // red-team-tile AC7: dünner Auslöser für /agent-flow:red-team (autorisiertes,
+  // trockenes Testen eigener Apps) — Ziel-Auswahl nur aus der Allowlist-Schnittmenge.
+  // Vor 'deployments' platziert, damit Deployments die letzte Kachel bleibt (AC4).
+  {
+    id: 'red-team',
+    Component: RedTeamView,
+    tile: {
+      label: 'Red-Team',
+      description: 'Autorisiertes Testen eigener Apps — Trockenlauf, Funde als PR.',
     },
   },
   {

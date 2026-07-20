@@ -343,8 +343,11 @@ describe('routerLoader — Echte src/routers/ Module (AC1/AC3)', () => {
     //   (POST .../obsidian-ingest/ensure-target + GET .../obsidian-ingest/ensure-target/:jobId —
     //   Ziel-Repo-Vorbereitung bestehend/neu via HeadlessNewProjectRunner, strikt
     //   vor dem unveränderten start-Endpunkt, AC11/AC13/AC14) → 52.
+    // redTeam.js wurde mit red-team-tile (F-090) hinzugefügt
+    //   (POST /api/red-team + GET /api/red-team/:jobId + GET /api/red-team/targets —
+    //   dünner Auslöser für /agent-flow:red-team, Allowlist-Schnittmenge VPS ∩ eigenes Repo) → 53.
     const entries = await readdir(ROUTERS_DIR);
     const mountedCount = entries.filter((f) => f.endsWith('.js')).length;
-    expect(mountedCount).toBe(52);
+    expect(mountedCount).toBe(53);
   });
 });

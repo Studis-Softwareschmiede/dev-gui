@@ -139,6 +139,7 @@ import { IdeaSpecifyChatService } from './src/IdeaSpecifyChatService.js';
 import { IdeaSpecifyFinalizer } from './src/IdeaSpecifyFinalizer.js';
 import { StorySpecifyFinalizer } from './src/StorySpecifyFinalizer.js';
 import { HeadlessReconcileRunner } from './src/HeadlessReconcileRunner.js';
+import { HeadlessRedTeamRunner } from './src/HeadlessRedTeamRunner.js';
 import { ObsidianIngestRunner } from './src/ObsidianIngestRunner.js';
 import { RegressionDefineRunner } from './src/RegressionDefineRunner.js';
 import { RegressionRunner } from './src/RegressionRunner.js';
@@ -848,6 +849,10 @@ const storySpecifyFinalizer = new StorySpecifyFinalizer();
 // getrennt (AC7) — eigene ProjectJobLock-Instanz, kein Idle-/Rate-Timer.
 const reconcileRunner = new HeadlessReconcileRunner();
 
+// ── HeadlessRedTeamRunner (red-team-tile AC1/AC6: getrennter claude -p-Kindprozess
+// für /agent-flow:red-team; eigene ProjectJobLock-Instanz, RED_TEAM_TIMEOUT_MS) ──
+const redTeamRunner = new HeadlessRedTeamRunner();
+
 // ── ObsidianIngestRunner (headless from-notes-Katalog-Lauf mit Interrupt/Resume,
 // docs/specs/obsidian-question-catalog.md AC1, AC2, AC4, AC5, AC6, AC7) ──
 // EIGENE, isolierte ProjectJobLock-Instanz (Konstruktor-Default `new ProjectJobLock()`
@@ -956,6 +961,10 @@ const deps = {
   // headless-reconcile-runner AC1-AC9: getrennter claude -p-Kindprozess-Runner
   // für POST /api/reconcile + GET /api/reconcile/:jobId (reconcile.js Router).
   reconcileRunner,
+  // red-team-tile AC6: Red-Team-Runner + Boundaries für den Allowlist-Targets-Endpunkt
+  // (VPS-laufend ∩ eigenes Repo). vpsDockerControl/vpsRegistry/vpsTargets/workspaceScanner
+  // sind bereits im deps-Objekt vorhanden (vps-/workspace-Router). Router: redTeam.js.
+  redTeamRunner,
   // obsidian-question-catalog AC1/AC2/AC4-AC7: headless from-notes-Katalog-Runner
   // mit Interrupt(needs-answers)/Resume-Protokoll für POST .../obsidian-ingest/start
   // + GET .../obsidian-ingest/:jobId + POST .../obsidian-ingest/:jobId/answers
