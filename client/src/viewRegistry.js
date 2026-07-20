@@ -6,9 +6,9 @@
  *   AppShell.jsx imports only from here; no per-view imports or switch chains there.
  * AC8: Adding a new view = new view file + new entry here; AppShell.jsx unchanged.
  * AC9: All existing routes represented: factory, github, vps, cloudflare, deployments,
- *   settings, team, retro, retro-trend, board, and the implicit 'panel' root.
+ *   red-team, settings, team, retro, retro-trend, board, and the implicit 'panel' root.
  * AC10: Tile views listed in exact order (github, vps, cloudflare, factory, team,
- *   deployments); settings/retro/retro-trend have tile: null (no panel tile).
+ *   red-team, deployments); settings/retro/retro-trend have tile: null (no panel tile).
  * AC11: AppShell renders only the active view conditionally (see AppShell.jsx); all
  *   components are imported here statically but mounted only on demand.
  * AC12: No new secrets, no new backend endpoints, no view-specific authorization.
@@ -29,6 +29,7 @@ import { TeamView }         from './TeamView.jsx';
 import { RetroView }        from './RetroView.jsx';
 import { RetroTrendView }   from './RetroTrendView.jsx';
 import { BoardView }        from './BoardView.jsx';
+import RedTeamView          from './RedTeamView.jsx';
 
 /**
  * @typedef {{ label: string, description: string }} TileMeta
@@ -44,7 +45,7 @@ import { BoardView }        from './BoardView.jsx';
  * VIEW_REGISTRY — ordered list of all registered views.
  *
  * Tile entries (tile !== null) appear in panel order as mandated by AC10:
- *   github → vps → cloudflare → factory → team → deployments
+ *   github → vps → cloudflare → factory → team → red-team → deployments
  * Non-tile views (settings, retro, retro-trend) follow; order there is arbitrary.
  *
  * @type {ViewEntry[]}
@@ -89,6 +90,17 @@ export const VIEW_REGISTRY = [
     tile: {
       label: 'Team',
       description: 'Agenten, Skills und Knowledge der Fabrik einsehen.',
+    },
+  },
+  // red-team-tile AC7: dünner Auslöser für /agent-flow:red-team (autorisiertes,
+  // trockenes Testen eigener Apps) — Ziel-Auswahl nur aus der Allowlist-Schnittmenge.
+  // Vor 'deployments' platziert, damit Deployments die letzte Kachel bleibt (AC4).
+  {
+    id: 'red-team',
+    Component: RedTeamView,
+    tile: {
+      label: 'Red-Team',
+      description: 'Autorisiertes Testen eigener Apps — Trockenlauf, Funde als PR.',
     },
   },
   {

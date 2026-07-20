@@ -1,0 +1,27 @@
+id: F-090
+title: Red-Team-Kachel — dünner Auslöser für die autorisierte Angriffs-Fähigkeit der Fabrik
+goal: Cross-Repo-Gegenstück zu /agent-flow:red-team (Rahmen agent-flow docs/architecture/red-team-subsystem.md §6).
+  Dünne Kachel im Fabrik-Panel, Logik in der Fabrik — Muster des Reconcile-Buttons. Ziel-Auswahl aus konstruktiv
+  erzwungener Allowlist (VPS-laufend ∩ eigenes Repo), Headless-Runner (claude -p /agent-flow:red-team), explizite
+  Feuer-Freigabe-Bestätigung (Sicherheits-Grenze sichtbar), Ergebnis + Protokoll-PR. Kein Auto-Feuern, keine
+  Cloudflare-Umkonfiguration.
+status: Done
+priority: P1
+spec: docs/specs/red-team-tile.md
+definition_of_done: AC1-AC10 grün; Runner + Router + Allowlist + Composition + Kachel gebaut; Jest-Tests grün;
+  Client-Build grün.
+labels:
+- backend
+- ui
+- security
+depends: null
+owner: null
+stories:
+- S-392
+- S-393
+- S-394
+- S-395
+progress: 4/4 done
+created_at: '2026-07-21T00:00:00Z'
+updated_at: '2026-07-21T00:00:00Z'
+area: fabrik-arbeiten
