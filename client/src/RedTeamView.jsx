@@ -48,7 +48,6 @@ export default function RedTeamView({ onNavigate, fetchFn = fetch, pollInterval 
   const fetchFnRef = useRef(bind(fetchFn));
   useEffect(() => {
     fetchFnRef.current = bind(fetchFn);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetchFn]);
 
   // ── Allowlist-Ziele (GET /api/red-team/targets) ────────────────────────────
@@ -234,7 +233,15 @@ export default function RedTeamView({ onNavigate, fetchFn = fetch, pollInterval 
       } catch {
         json = {};
       }
-      jobIdRef.current = typeof json.jobId === 'string' ? json.jobId : null;
+      // Ohne verwertbare jobId NICHT nach 'running' — sonst bricht der Poll-Effekt
+      // bei `if (!jobId) return` vor dem Degrade-Timer ab und der Spinner läuft endlos.
+      const jid = typeof json.jobId === 'string' && json.jobId.trim() !== '' ? json.jobId : null;
+      if (!jid) {
+        setRunState('error');
+        setRunError('Lauf gestartet, aber keine gültige Job-ID erhalten — bitte erneut versuchen.');
+        return;
+      }
+      jobIdRef.current = jid;
       runStartRef.current = Date.now();
       consecutiveFailRef.current = 0;
       setRunState('running');

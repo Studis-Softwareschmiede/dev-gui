@@ -207,3 +207,32 @@ describe('RedTeamView — AC7: POST→202, Poll→done zeigt Ergebnis + PR-Link'
     expect(body.modus).toBe('beide');
   });
 });
+
+// ── (e) Regression: 202 ohne verwertbare jobId → Fehler, kein Endlos-Spinner ────
+describe('RedTeamView — 202 ohne gültige jobId geht in Fehler statt Dauer-„running"', () => {
+  it('zeigt einen Fehler und KEIN Ergebnis, wenn die 202-Antwort keine jobId liefert', async () => {
+    const fetchFn = makeFetchFn({
+      targets: [{ slug: 'app-a', state: 'running' }],
+      startStatus: 202,
+      startBody: { status: 'running' }, // keine jobId
+    });
+    renderView(fetchFn);
+
+    await waitFor(() => expect(sel('red-team-targets-select')).toBeTruthy());
+    await act(async () => {
+      fireEvent.change(sel('red-team-targets-select'), { target: { value: 'app-a' } });
+    });
+    await act(async () => {
+      fireEvent.click(sel('red-team-fire-confirm'));
+    });
+    await waitFor(() => expect(sel('red-team-start-btn').disabled).toBe(false));
+    await act(async () => {
+      fireEvent.click(sel('red-team-start-btn'));
+    });
+
+    // Fehlerzustand statt endlosem „running": Fehlerbox erscheint, kein Ergebnis.
+    await waitFor(() => expect(sel('red-team-error')).toBeTruthy());
+    expect(sel('red-team-error').textContent).toMatch(/Job-ID/i);
+    expect(sel('red-team-result')).toBeFalsy();
+  });
+});

@@ -31,7 +31,7 @@
  */
 
 import { Router } from 'express';
-import { validateProjectPath, ProjectPathError, resolveProjectSlug } from './workspacePath.js';
+import { validateProjectPath, resolveProjectSlug } from './workspacePath.js';
 
 const VALID_MODUS = new Set(['durch-cloudflare', 'direkt', 'beide']);
 const DEFAULT_MODUS = 'beide';
@@ -175,7 +175,14 @@ export function redTeamRouter(runner, deps = {}, options = {}) {
    * → 200 { targets: [{ slug, image, state, repo }] }  (leere Liste gültig, AC2/AC8)
    */
   router.get('/api/red-team/targets', async (_req, res) => {
-    const targets = await computeAllowlist(deps);
+    // Fail-closed + kein Stack-Leak (AC10): ein Fehler bei der Ermittlung ⇒ leere
+    // Allowlist (nichts autorisiert), nie ein 500 mit internem Detail an den Client.
+    let targets;
+    try {
+      targets = await computeAllowlist(deps);
+    } catch {
+      targets = [];
+    }
     return res.status(200).json({ targets });
   });
 
@@ -199,32 +206,42 @@ export function redTeamRouter(runner, deps = {}, options = {}) {
 
     // (b) Allowlist-Gate (serverseitig, Defense in Depth, security/R04): das Ziel
     // muss in derselben Schnittmenge liegen, die GET /targets liefert — sonst 403.
-    const allowlist = await computeAllowlist(deps);
-    const slugLc = projectSlug.trim().toLowerCase();
-    const allowed = allowlist.some((t) => t.slug.toLowerCase() === slugLc);
-    if (!allowed) {
+    // computeAllowlist explizit gekapselt (fail-closed): ein Fehler bei der Ermittlung
+    // ⇒ 403, kein Start, kein Stack-Leak an den Client (AC10).
+    let allowlist;
+    try {
+      allowlist = await computeAllowlist(deps);
+    } catch {
       return res.status(403).json({ error: 'projectSlug is not an authorized red-team target' });
     }
+    const slugLc = projectSlug.trim().toLowerCase();
+    const matched = allowlist.find((t) => t.slug.toLowerCase() === slugLc);
+    if (!matched) {
+      return res.status(403).json({ error: 'projectSlug is not an authorized red-team target' });
+    }
+    // Ab hier ausschliesslich den KANONISCHEN Allowlist-Slug verwenden (VPS ∩ Repo-geprüft) —
+    // keine Case-/Whitespace-Drift des Client-Werts in die Pfad-Auflösung oder den claude -p-Prompt.
+    const canonicalSlug = matched.slug;
 
     // (c) Slug→Pfad-Auflösung + Boundary-Containment (Traversal/ungültig → 400).
+    // Fehlertext bleibt PFAD-FREI (AC10 — keine absoluten Host-Pfade/WORKSPACE_DIR in der Response).
     let resolvedPath;
     try {
-      const slugPath = _slugResolver(projectSlug);
+      const slugPath = _slugResolver(canonicalSlug);
       if (slugPath === null) {
-        return res.status(400).json({ error: 'Invalid project slug' });
+        return res.status(400).json({ error: 'Invalid projectSlug' });
       }
       const { resolvedPath: p } = await _pathValidator(slugPath);
       resolvedPath = p;
-    } catch (err) {
-      const reason = err instanceof ProjectPathError ? err.message : 'Invalid project path';
-      return res.status(400).json({ error: `Invalid projectSlug: ${reason}` });
+    } catch {
+      return res.status(400).json({ error: 'Invalid projectSlug' });
     }
 
     // (d) modus validieren — nur bekannte Werte, sonst Default `beide`.
     const resolvedModus = VALID_MODUS.has(modus) ? modus : DEFAULT_MODUS;
 
     // (e) Runner starten — argv als Array im Runner (kein Shell-String, R03).
-    const result = runner.start(resolvedPath, { ziel: projectSlug, modus: resolvedModus });
+    const result = runner.start(resolvedPath, { ziel: canonicalSlug, modus: resolvedModus });
     if (!result.ok) {
       // Aktuell einzige Ablehnungs-Ursache: 'locked'.
       return res.status(409).json({ error: 'Red-team already running for this project' });
