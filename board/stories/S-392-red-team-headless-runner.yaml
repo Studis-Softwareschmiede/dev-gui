@@ -1,7 +1,7 @@
 id: S-392
 parent: F-090
 title: 'HeadlessRedTeamRunner: dünner Wrapper um HeadlessRunnerCore (/agent-flow:red-team, ziel/modus-args, RED_TEAM_TIMEOUT_MS)'
-status: To Do
+status: Done
 priority: P1
 spec: docs/specs/red-team-tile.md
 implements:
@@ -22,5 +22,5 @@ pr: null
 blocked_reason: null
 created_at: '2026-07-21T00:00:00Z'
 updated_at: '2026-07-21T00:00:00Z'
-done_at: null
+done_at: '2026-07-21T00:00:00Z'
 area: fabrik-arbeiten

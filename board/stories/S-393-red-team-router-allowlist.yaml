@@ -1,7 +1,7 @@
 id: S-393
 parent: F-090
 title: 'redTeamRouter + routers/redTeam.js: POST /api/red-team (Allowlist-Gate 403), GET /:jobId, GET /targets (VPS∩Repo-Schnittmenge)'
-status: To Do
+status: Done
 priority: P1
 spec: docs/specs/red-team-tile.md
 implements:
@@ -27,5 +27,5 @@ pr: null
 blocked_reason: null
 created_at: '2026-07-21T00:00:00Z'
 updated_at: '2026-07-21T00:00:00Z'
-done_at: null
+done_at: '2026-07-21T00:00:00Z'
 area: fabrik-arbeiten

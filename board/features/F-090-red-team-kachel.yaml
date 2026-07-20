@@ -5,7 +5,7 @@ goal: Cross-Repo-Gegenstück zu /agent-flow:red-team (Rahmen agent-flow docs/arc
   erzwungener Allowlist (VPS-laufend ∩ eigenes Repo), Headless-Runner (claude -p /agent-flow:red-team), explizite
   Feuer-Freigabe-Bestätigung (Sicherheits-Grenze sichtbar), Ergebnis + Protokoll-PR. Kein Auto-Feuern, keine
   Cloudflare-Umkonfiguration.
-status: To Do
+status: Done
 priority: P1
 spec: docs/specs/red-team-tile.md
 definition_of_done: AC1-AC10 grün; Runner + Router + Allowlist + Composition + Kachel gebaut; Jest-Tests grün;
@@ -21,7 +21,7 @@ stories:
 - S-393
 - S-394
 - S-395
-progress: 0/4 done
+progress: 4/4 done
 created_at: '2026-07-21T00:00:00Z'
 updated_at: '2026-07-21T00:00:00Z'
 area: fabrik-arbeiten

@@ -1,7 +1,7 @@
 id: S-395
 parent: F-090
 title: 'RedTeamView-Kachel: Allowlist-Auswahl (kein Freitext), Feuer-Freigabe-Bestätigung, Trigger+Polling, Ergebnis/Protokoll/PR'
-status: To Do
+status: Done
 priority: P1
 spec: docs/specs/red-team-tile.md
 implements:
@@ -25,5 +25,5 @@ pr: null
 blocked_reason: null
 created_at: '2026-07-21T00:00:00Z'
 updated_at: '2026-07-21T00:00:00Z'
-done_at: null
+done_at: '2026-07-21T00:00:00Z'
 area: fabrik-arbeiten
