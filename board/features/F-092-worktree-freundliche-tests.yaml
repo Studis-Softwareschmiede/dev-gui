@@ -1,0 +1,20 @@
+id: F-092
+title: Worktree-freundliche Tests — Jest-Suite läuft sauber aus einem git-Worktree
+goal: P2 aus der Retro 2026-07-21. routerLoader-Test legt Temp-Dirs im OS-tmpdir statt projekt-relativ an (kein
+  falscher Guard-Fehler im Worktree); neues npm run test:worktree hebt die Worktree-Ignore für einen bewussten Lauf
+  auf (isolierter Cache); Haupt-Gate npm test unverändert; dokumentiert.
+status: Done
+priority: P2
+spec: docs/specs/worktree-friendly-tests.md
+definition_of_done: AC1-AC4 grün; volle Suite aus Worktree grün; Haupt-Gate unverändert.
+labels:
+- backend
+- dx
+depends: null
+owner: null
+stories:
+- S-400
+progress: 1/1 done
+created_at: '2026-07-21T00:00:00Z'
+updated_at: '2026-07-21T00:00:00Z'
+area: einstellungen
