@@ -1,2 +1,11 @@
 schema_version: 1
-namespaces: {}
+namespaces:
+  BR:
+    block_size: 10
+    reservations:
+    - feature_id: F-093
+      range_start: 1
+      range_end: 10
+      status: active
+      reserved_at: '2026-07-21T21:20:23Z'
+      high_water: null
