@@ -146,7 +146,13 @@ async function computeAllowlist(deps = {}) {
     if (match) {
       // Origin-URL nur bilden, wenn Host UND Port auflösbar sind (Guard-Voraussetzung
       // im POST, AC12/AC13). edgeUrl (öffentliche/Cloudflare-URL) in dieser Iteration null.
-      const originUrl = (match._vpsHost && match.hostPort != null)
+      // Host-Whitespace-Härtung: ein (fehlkonfigurierter) Host mit Leerzeichen würde den
+      // Leerzeichen-Guard des Runners als TypeError auslösen → hier lieber originUrl=null
+      // (→ sauberer 409 statt Express-500).
+      const hostOk = typeof match._vpsHost === 'string'
+        && match._vpsHost.trim() !== ''
+        && !/\s/.test(match._vpsHost);
+      const originUrl = (hostOk && match.hostPort != null)
         ? ('http://' + match._vpsHost + ':' + match.hostPort)
         : null;
       targets.push({ slug: name, image: match.image, state: match.state, repo: name, originUrl, edgeUrl: null });
@@ -253,6 +259,13 @@ export function redTeamRouter(runner, deps = {}, options = {}) {
     // (`durch-cloudflare` braucht die Origin-URL nicht; edgeUrl in dieser Iteration null.)
     if ((resolvedModus === 'direkt' || resolvedModus === 'beide') && matched.originUrl == null) {
       return res.status(409).json({ error: 'Ziel-URL nicht auflösbar (VPS-Host/Port fehlt) — Lauf nicht gestartet' });
+    }
+
+    // (d3) Guard: Modi mit Edge-/Cloudflare-Ziel (`durch-cloudflare`/`beide`) brauchen eine
+    // öffentliche Edge-URL. Sie wird in dieser Iteration nicht aufgelöst (edgeUrl null) →
+    // symmetrischer 409 statt stillem No-Target-Lauf; nur `direkt` ist derzeit scharf lauffähig.
+    if ((resolvedModus === 'durch-cloudflare' || resolvedModus === 'beide') && matched.edgeUrl == null) {
+      return res.status(409).json({ error: "Cloudflare-/Edge-URL für dieses Ziel nicht verfügbar — bitte Modus 'direkt' verwenden" });
     }
 
     // (e) Runner starten — argv als Array im Runner (kein Shell-String, R03).
