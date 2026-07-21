@@ -264,12 +264,37 @@ describe('GET /api/red-team/targets — AC2: Allowlist-Schnittmenge', () => {
       await new Promise((r) => srv.close(r));
     }
   });
+
+  it('leakt KEINE server-interne originUrl/edgeUrl an den Client (nur slug/image/state/repo, AC12/AC13)', async () => {
+    // deps mit hostPort + VPS-host → intern wird eine originUrl gebildet; die HTTP-Antwort
+    // darf sie NICHT enthalten (Origin bleibt server-intern für den POST).
+    const deps = {
+      vpsTargets: new Map([['a', { host: '1.1.1.1', targetUser: 'root' }]]),
+      vpsDockerControl: {
+        psAll: async () => ({ result: 'ok', containers: [runningContainer({ hostname: 'dev-gui', hostPort: 8080 })] }),
+      },
+      workspaceScanner: { listClones: async () => [{ name: 'dev-gui' }] },
+    };
+    const { app } = makeApp({ deps });
+    const srv = await startServer(app);
+    try {
+      const { status, body } = await httpGet(srv, '/api/red-team/targets');
+      expect(status).toBe(200);
+      expect(body.targets).toHaveLength(1);
+      const t = body.targets[0];
+      expect(t).toEqual({ slug: 'dev-gui', image: 'ghcr.io/org/img:sha', state: 'running', repo: 'dev-gui' });
+      expect(Object.prototype.hasOwnProperty.call(t, 'originUrl')).toBe(false);
+      expect(Object.prototype.hasOwnProperty.call(t, 'edgeUrl')).toBe(false);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
 });
 
 // ── POST /api/red-team — AC3 ──────────────────────────────────────────────────
 
 describe('POST /api/red-team — AC3: happy path (202)', () => {
-  it('202 { jobId, status:"running" } für ein gültiges Allowlist-Ziel; reicht ziel+modus an den Runner', async () => {
+  it('202 { jobId, status:"running" } für ein gültiges Allowlist-Ziel; reicht ziel+modus+url an den Runner (AC12/AC13)', async () => {
     const runner = makeRunner();
     const { app } = makeApp({ runner, deps: makeDepsAllowing('dev-gui'), slugResolver: defaultSlugResolver, pathValidator: defaultPathValidator });
     const srv = await startServer(app);
@@ -279,20 +304,46 @@ describe('POST /api/red-team — AC3: happy path (202)', () => {
       expect(typeof body.jobId).toBe('string');
       expect(body.status).toBe('running');
       expect(runner.startCalls).toHaveLength(1);
-      expect(runner.startCalls[0].opts).toEqual({ ziel: 'dev-gui', modus: 'direkt' });
+      // Origin-URL server-seitig aus dem Allowlist-Eintrag abgeleitet (VPS-Host:hostPort)
+      // und an den Runner durchgereicht; edgeUrl in dieser Iteration null.
+      expect(runner.startCalls[0].opts).toEqual({
+        ziel: 'dev-gui',
+        modus: 'direkt',
+        url: 'http://1.1.1.1:8080',
+        urlEdge: null,
+      });
     } finally {
       await new Promise((r) => srv.close(r));
     }
   });
 
-  it('ungültiger/fehlender modus → Default "beide"', async () => {
+  it('ungültiger/fehlender modus → Default "direkt" (Cloudflare-frei); reicht Default an den Runner', async () => {
+    const runner = makeRunner();
+    const { app } = makeApp({ runner, deps: makeDepsAllowing('dev-gui'), slugResolver: defaultSlugResolver, pathValidator: defaultPathValidator });
+    const srv = await startServer(app);
+    try {
+      // (d) POST OHNE modus → Default 'direkt'.
+      const { status } = await httpPost(srv, '/api/red-team', { projectSlug: 'dev-gui' });
+      expect(status).toBe(202);
+      expect(runner.startCalls[0].opts).toEqual({
+        ziel: 'dev-gui',
+        modus: 'direkt',
+        url: 'http://1.1.1.1:8080',
+        urlEdge: null,
+      });
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('unbekannter modus-Wert → Default "direkt"', async () => {
     const runner = makeRunner();
     const { app } = makeApp({ runner, deps: makeDepsAllowing('dev-gui'), slugResolver: defaultSlugResolver, pathValidator: defaultPathValidator });
     const srv = await startServer(app);
     try {
       const { status } = await httpPost(srv, '/api/red-team', { projectSlug: 'dev-gui', modus: 'kaputt' });
       expect(status).toBe(202);
-      expect(runner.startCalls[0].opts).toEqual({ ziel: 'dev-gui', modus: 'beide' });
+      expect(runner.startCalls[0].opts.modus).toBe('direkt');
     } finally {
       await new Promise((r) => srv.close(r));
     }
@@ -364,6 +415,45 @@ describe('POST /api/red-team — AC3/AC10: 403 auf Ziel ausserhalb der Allowlist
       const { status, body } = await httpPost(srv, '/api/red-team', { projectSlug: 'ghost-repo' });
       expect(status).toBe(403);
       expect(typeof body.error).toBe('string');
+      expect(runner.startCalls).toHaveLength(0);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+});
+
+describe('POST /api/red-team — AC12/AC13: 409 wenn Origin-URL nicht auflösbar (direkt/beide)', () => {
+  // Ein Ziel landet in der Allowlist (VPS-host vorhanden → Container gelistet), aber ohne
+  // hostPort ist die Origin-URL nicht bildbar (null). Modi mit Origin-Ziel dürfen dann NICHT starten.
+  const depsUnresolvableOrigin = (slug) => ({
+    vpsTargets: new Map([['a', { host: '1.1.1.1', targetUser: 'root' }]]),
+    vpsDockerControl: {
+      psAll: async () => ({ result: 'ok', containers: [runningContainer({ hostname: slug, hostPort: null })] }),
+    },
+    workspaceScanner: { listClones: async () => [{ name: slug }] },
+  });
+
+  it('409 für modus "direkt" bei null originUrl; Runner wird NICHT gestartet', async () => {
+    const runner = makeRunner();
+    const { app } = makeApp({ runner, deps: depsUnresolvableOrigin('dev-gui'), slugResolver: defaultSlugResolver, pathValidator: defaultPathValidator });
+    const srv = await startServer(app);
+    try {
+      const { status, body } = await httpPost(srv, '/api/red-team', { projectSlug: 'dev-gui', modus: 'direkt' });
+      expect(status).toBe(409);
+      expect(typeof body.error).toBe('string');
+      expect(runner.startCalls).toHaveLength(0);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('409 für modus "beide" bei null originUrl; Runner wird NICHT gestartet', async () => {
+    const runner = makeRunner();
+    const { app } = makeApp({ runner, deps: depsUnresolvableOrigin('dev-gui'), slugResolver: defaultSlugResolver, pathValidator: defaultPathValidator });
+    const srv = await startServer(app);
+    try {
+      const { status } = await httpPost(srv, '/api/red-team', { projectSlug: 'dev-gui', modus: 'beide' });
+      expect(status).toBe(409);
       expect(runner.startCalls).toHaveLength(0);
     } finally {
       await new Promise((r) => srv.close(r));

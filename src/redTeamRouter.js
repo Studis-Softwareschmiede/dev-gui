@@ -34,7 +34,7 @@ import { Router } from 'express';
 import { validateProjectPath, resolveProjectSlug } from './workspacePath.js';
 
 const VALID_MODUS = new Set(['durch-cloudflare', 'direkt', 'beide']);
-const DEFAULT_MODUS = 'beide';
+const DEFAULT_MODUS = 'direkt';
 
 /**
  * Leitet den Image-Repo-Namen aus einer Container-Image-Referenz ab:
@@ -98,7 +98,8 @@ async function listVpsTargets({ vpsRegistry, vpsTargets } = {}) {
  * leere Repo-Liste. Leere Schnittmenge ist gültig.
  *
  * @param {object} deps { vpsDockerControl, vpsRegistry, vpsTargets, workspaceScanner }
- * @returns {Promise<Array<{ slug: string, image: string, state: string, repo: string }>>}
+ * @returns {Promise<Array<{ slug: string, image: string, state: string, repo: string, originUrl: string|null, edgeUrl: string|null }>>}
+ *   `originUrl`/`edgeUrl` sind server-intern (POST-only) und werden nie an den Client geleakt.
  */
 async function computeAllowlist(deps = {}) {
   const { vpsDockerControl, workspaceScanner } = deps;
@@ -116,7 +117,7 @@ async function computeAllowlist(deps = {}) {
       }
       if (!result || result.result !== 'ok') continue;
       for (const c of result.containers ?? []) {
-        if (c && c.state === 'running') runningContainers.push(c);
+        if (c && c.state === 'running') runningContainers.push({ ...c, _vpsHost: target.host });
       }
     }
   }
@@ -143,7 +144,18 @@ async function computeAllowlist(deps = {}) {
       return repoName === nameLc || hostname === nameLc;
     });
     if (match) {
-      targets.push({ slug: name, image: match.image, state: match.state, repo: name });
+      // Origin-URL nur bilden, wenn Host UND Port auflösbar sind (Guard-Voraussetzung
+      // im POST, AC12/AC13). edgeUrl (öffentliche/Cloudflare-URL) in dieser Iteration null.
+      // Host-Whitespace-Härtung: ein (fehlkonfigurierter) Host mit Leerzeichen würde den
+      // Leerzeichen-Guard des Runners als TypeError auslösen → hier lieber originUrl=null
+      // (→ sauberer 409 statt Express-500).
+      const hostOk = typeof match._vpsHost === 'string'
+        && match._vpsHost.trim() !== ''
+        && !/\s/.test(match._vpsHost);
+      const originUrl = (hostOk && match.hostPort != null)
+        ? ('http://' + match._vpsHost + ':' + match.hostPort)
+        : null;
+      targets.push({ slug: name, image: match.image, state: match.state, repo: name, originUrl, edgeUrl: null });
     }
   }
   return targets;
@@ -183,7 +195,9 @@ export function redTeamRouter(runner, deps = {}, options = {}) {
     } catch {
       targets = [];
     }
-    return res.status(200).json({ targets });
+    // originUrl/edgeUrl bleiben server-intern (POST-only) — nie an den Client leaken (AC12/AC13).
+    const publicTargets = targets.map((t) => ({ slug: t.slug, image: t.image, state: t.state, repo: t.repo }));
+    return res.status(200).json({ targets: publicTargets });
   });
 
   /**
@@ -237,11 +251,30 @@ export function redTeamRouter(runner, deps = {}, options = {}) {
       return res.status(400).json({ error: 'Invalid projectSlug' });
     }
 
-    // (d) modus validieren — nur bekannte Werte, sonst Default `beide`.
+    // (d) modus validieren — nur bekannte Werte, sonst Default `direkt`.
     const resolvedModus = VALID_MODUS.has(modus) ? modus : DEFAULT_MODUS;
 
+    // (d2) Guard: Modi mit Origin-Ziel (`direkt`/`beide`) brauchen eine auflösbare
+    // Origin-URL. Fehlt sie (VPS-Host/Port nicht ableitbar) → 409, kein stiller Fehllauf.
+    // (`durch-cloudflare` braucht die Origin-URL nicht; edgeUrl in dieser Iteration null.)
+    if ((resolvedModus === 'direkt' || resolvedModus === 'beide') && matched.originUrl == null) {
+      return res.status(409).json({ error: 'Ziel-URL nicht auflösbar (VPS-Host/Port fehlt) — Lauf nicht gestartet' });
+    }
+
+    // (d3) Guard: Modi mit Edge-/Cloudflare-Ziel (`durch-cloudflare`/`beide`) brauchen eine
+    // öffentliche Edge-URL. Sie wird in dieser Iteration nicht aufgelöst (edgeUrl null) →
+    // symmetrischer 409 statt stillem No-Target-Lauf; nur `direkt` ist derzeit scharf lauffähig.
+    if ((resolvedModus === 'durch-cloudflare' || resolvedModus === 'beide') && matched.edgeUrl == null) {
+      return res.status(409).json({ error: "Cloudflare-/Edge-URL für dieses Ziel nicht verfügbar — bitte Modus 'direkt' verwenden" });
+    }
+
     // (e) Runner starten — argv als Array im Runner (kein Shell-String, R03).
-    const result = runner.start(resolvedPath, { ziel: canonicalSlug, modus: resolvedModus });
+    const result = runner.start(resolvedPath, {
+      ziel: canonicalSlug,
+      modus: resolvedModus,
+      url: matched.originUrl,
+      urlEdge: matched.edgeUrl,
+    });
     if (!result.ok) {
       // Aktuell einzige Ablehnungs-Ursache: 'locked'.
       return res.status(409).json({ error: 'Red-team already running for this project' });

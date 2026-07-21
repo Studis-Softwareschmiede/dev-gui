@@ -8,16 +8,21 @@
  *
  * AC7 — Ziel-Auswahl NUR aus GET /api/red-team/targets (Dropdown, kein Freitext),
  *        modus-Auswahl, explizite Feuer-Freigabe-Bestätigung (Sicherheits-Grenze
- *        sichtbar: Trockenlauf/Gerüst, kein Live-Angriff, keine Cloudflare-
- *        Umkonfiguration), POST-Start + Status-Polling (Muster ReconcileTrigger),
+ *        sichtbar: scharfer, nicht-destruktiver Nuclei-Scan der eigenen App;
+ *        Koordination statt Tarnung — die Kachel ändert Cloudflare nie selbst),
+ *        POST-Start + Status-Polling (Muster ReconcileTrigger),
  *        Ergebnis-Anzeige inkl. Protokoll-Hinweis (docs/red-team-audit.md) + PR-Link.
  * AC8 — Leere Allowlist → klarer Hinweis, Start deaktiviert (nichts feuerbar).
  * AC9 — abgedeckt in client/src/__tests__/RedTeamView.test.jsx.
  *
  * Sicherheits-Grenze (agent-flow-Rahmen §6): Die Kachel triggert die Fabrik-
- * Fähigkeit, die in dieser Iteration TROCKEN läuft — sie feuert nicht selbst und
- * konfiguriert Cloudflare nicht um. Die Feuer-Freigabe ist eine explizite
- * menschliche Bestätigung. Board-Items/Protokoll landen als PR zur Freigabe.
+ * Fähigkeit, die SCHARF läuft — ein echter, nicht-destruktiver Nuclei-Scan der
+ * eigenen App (Allowlist): nur Detektion, kein Datenabfluss, keine Änderung am
+ * Ziel. Koordination statt Tarnung — die Kachel ändert Cloudflare nie selbst
+ * (Default `direkt` braucht keine Cloudflare-Änderung; `durch-cloudflare`/`beide`
+ * setzen eine vorab gesetzte Ausnahme voraus). Die Feuer-Freigabe ist eine
+ * zwingende, explizite menschliche Bestätigung. Board-Items/Protokoll landen als
+ * PR zur Freigabe.
  *
  * @param {{
  *   onNavigate: (view: string) => void,
@@ -35,9 +40,9 @@ const SAFETY_WINDOW_MS = 20 * 60 * 1000; // 20 min — Runner-Default 15 min + P
 const MAX_CONSECUTIVE_FAILURES = 5;
 
 const MODUS_OPTIONS = [
-  { value: 'beide', label: 'beide (durch Cloudflare + direkt)' },
-  { value: 'durch-cloudflare', label: 'nur durch Cloudflare' },
-  { value: 'direkt', label: 'nur direkt' },
+  { value: 'direkt', label: 'nur direkt (Origin) — keine Cloudflare-Änderung nötig' },
+  { value: 'durch-cloudflare', label: 'durch Cloudflare (Ausnahme vorab setzen)' },
+  { value: 'beide', label: 'beide + Differenz' },
 ];
 
 export default function RedTeamView({ onNavigate, fetchFn = fetch, pollInterval = 3000 }) {
@@ -58,7 +63,7 @@ export default function RedTeamView({ onNavigate, fetchFn = fetch, pollInterval 
 
   // ── Auswahl ────────────────────────────────────────────────────────────────
   const [selectedSlug, setSelectedSlug] = useState('');
-  const [modus, setModus] = useState('beide');
+  const [modus, setModus] = useState('direkt');
   const [fireConfirmed, setFireConfirmed] = useState(false);
 
   // ── Lauf-Zustand (Muster ReconcileTrigger) ─────────────────────────────────
@@ -294,9 +299,14 @@ export default function RedTeamView({ onNavigate, fetchFn = fetch, pollInterval 
 
         {/* Sicherheits-Grenze dauerhaft sichtbar (AC7) */}
         <div style={styles.safetyBox} role="note" data-testid="red-team-safety-note">
-          Diese Iteration läuft als <strong>Trockenlauf/Gerüst</strong> — kein realer Live-Angriff,
-          keine Cloudflare-Umkonfiguration. Koordination statt Tarnung. Funde landen als PR zur
-          Freigabe.
+          Dieser Lauf ist <strong>scharf</strong>: ein echter, <strong>nicht-destruktiver</strong>{' '}
+          Nuclei-Scan der <strong>eigenen</strong> App (nur autorisierte Ziele der Allowlist, nur
+          Detektion — kein Datenabfluss, keine Änderung am Ziel).{' '}
+          <strong>Koordination statt Tarnung:</strong> die Kachel ändert Cloudflare nie selbst — der
+          Default <code style={styles.code}>direkt</code> braucht keine Cloudflare-Änderung,{' '}
+          <code style={styles.code}>durch Cloudflare</code>/<code style={styles.code}>beide</code>{' '}
+          setzen eine vorab von dir gesetzte Ausnahme voraus. Die Feuer-Freigabe bleibt zwingend vor
+          dem Start. Funde landen als PR zur Freigabe.
         </div>
 
         {/* Ziele laden */}
@@ -393,9 +403,10 @@ export default function RedTeamView({ onNavigate, fetchFn = fetch, pollInterval 
                 data-testid="red-team-fire-confirm"
               />
               <span style={styles.confirmText}>
-                <strong>Feuer-Freigabe.</strong> Autorisiertes Testen der EIGENEN App. Diese Iteration
-                läuft als <strong>Trockenlauf/Gerüst</strong> — kein realer Live-Angriff, keine
-                Cloudflare-Umkonfiguration. Koordination statt Tarnung.
+                <strong>Feuer-Freigabe.</strong> Autorisiertes Testen der EIGENEN App (Allowlist).
+                Dieser Lauf ist <strong>scharf</strong> — ein echter, <strong>nicht-destruktiver</strong>{' '}
+                Nuclei-Scan (nur Detektion, kein Datenabfluss, keine Änderung am Ziel).{' '}
+                <strong>Koordination statt Tarnung:</strong> die Kachel ändert Cloudflare nie selbst.
               </span>
             </label>
 
@@ -428,7 +439,7 @@ export default function RedTeamView({ onNavigate, fetchFn = fetch, pollInterval 
                 style={styles.runningBox}
                 data-testid="red-team-running"
               >
-                Red-Team-Lauf läuft… (Trockenlauf)
+                Red-Team-Lauf läuft… (scharf)
               </div>
             )}
 
@@ -465,7 +476,7 @@ export default function RedTeamView({ onNavigate, fetchFn = fetch, pollInterval 
             {/* Ergebnis (AC7) */}
             {runState === 'done' && (
               <div style={styles.resultBox} role="status" data-testid="red-team-result">
-                <h3 style={styles.resultHeading}>Red-Team-Lauf abgeschlossen (Trockenlauf)</h3>
+                <h3 style={styles.resultHeading}>Red-Team-Lauf abgeschlossen (scharf)</h3>
                 {result?.result && (
                   <p style={styles.resultText}>
                     {typeof result.result === 'string'
@@ -491,8 +502,8 @@ export default function RedTeamView({ onNavigate, fetchFn = fetch, pollInterval 
                   </p>
                 )}
                 <p style={styles.resultBoundary}>
-                  Sicherheits-Grenze: kein Live-Angriff / keine Cloudflare-Umkonfiguration in dieser
-                  Iteration — die Funde landen als PR zur menschlichen Freigabe.
+                  Sicherheits-Grenze: scharfer, nicht-destruktiver Scan der eigenen App — die Kachel
+                  ändert Cloudflare nie selbst; die Funde landen als PR zur menschlichen Freigabe.
                 </p>
                 <button type="button" style={styles.secondaryBtn} onClick={handleReset}>
                   Neuer Lauf

@@ -72,6 +72,82 @@ describe('HeadlessRedTeamRunner — AC1 (b): start without modus → only ziel',
   });
 });
 
+describe('HeadlessRedTeamRunner — AC12: per-run url / url_edge pass-through (scharfer Betrieb F-032)', () => {
+  it('(a) start with ziel + modus + url → prompt argv contains "ziel=app modus=direkt url=http://h:8080"', () => {
+    const child = makeFakeChild();
+    const spawnFn = jest.fn(() => child);
+    const runner = new HeadlessRedTeamRunner({ spawnFn, timeoutMs: 10_000 });
+
+    const result = runner.start('/workspace/my-project', {
+      ziel: 'app',
+      modus: 'direkt',
+      url: 'http://h:8080',
+    });
+
+    expect(result.ok).toBe(true);
+    const [, args] = spawnFn.mock.calls[0];
+    expect(args).toEqual([
+      '-p',
+      '/agent-flow:red-team ziel=app modus=direkt url=http://h:8080',
+      '--dangerously-skip-permissions',
+    ]);
+  });
+
+  it('(b) start with modus:beide + url + urlEdge → prompt argv contains url_edge=https://public (order ziel,modus,url,url_edge)', () => {
+    const child = makeFakeChild();
+    const spawnFn = jest.fn(() => child);
+    const runner = new HeadlessRedTeamRunner({ spawnFn, timeoutMs: 10_000 });
+
+    const result = runner.start('/workspace/my-project', {
+      ziel: 'app',
+      modus: 'beide',
+      url: 'http://h:8080',
+      urlEdge: 'https://public',
+    });
+
+    expect(result.ok).toBe(true);
+    const [, args] = spawnFn.mock.calls[0];
+    expect(args).toEqual([
+      '-p',
+      '/agent-flow:red-team ziel=app modus=beide url=http://h:8080 url_edge=https://public',
+      '--dangerously-skip-permissions',
+    ]);
+  });
+
+  it('(c) start without url → no "url=" segment in the prompt argv', () => {
+    const child = makeFakeChild();
+    const spawnFn = jest.fn(() => child);
+    const runner = new HeadlessRedTeamRunner({ spawnFn, timeoutMs: 10_000 });
+
+    const result = runner.start('/workspace/my-project', { ziel: 'app', modus: 'direkt' });
+
+    expect(result.ok).toBe(true);
+    const [, args] = spawnFn.mock.calls[0];
+    expect(args[1]).not.toMatch(/url=/);
+    expect(args[1]).not.toMatch(/url_edge=/);
+  });
+
+  it('(d) url containing a space → TypeError, no spawn', () => {
+    const spawnFn = jest.fn(() => makeFakeChild());
+    const runner = new HeadlessRedTeamRunner({ spawnFn, timeoutMs: 10_000 });
+
+    expect(() =>
+      runner.start('/workspace/my-project', { ziel: 'app', url: 'http://h:8080 evil=1' }),
+    ).toThrow(TypeError);
+    expect(spawnFn).not.toHaveBeenCalled();
+  });
+
+  it('(d2) urlEdge containing a space → TypeError, no spawn', () => {
+    const spawnFn = jest.fn(() => makeFakeChild());
+    const runner = new HeadlessRedTeamRunner({ spawnFn, timeoutMs: 10_000 });
+
+    expect(() =>
+      runner.start('/workspace/my-project', { ziel: 'app', urlEdge: 'https://public x' }),
+    ).toThrow(TypeError);
+    expect(spawnFn).not.toHaveBeenCalled();
+  });
+});
+
 describe('HeadlessRedTeamRunner — AC1 (c): per-project lock', () => {
   it('rejects a second start() for the SAME project path while one is running', () => {
     const spawnFn = jest.fn(() => makeFakeChild());
