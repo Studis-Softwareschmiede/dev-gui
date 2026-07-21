@@ -1,0 +1,21 @@
+id: F-094
+title: Red-Team-Scan hinter der Access-Wall — Cloudflare-Access-Service-Token (Ausbaustufe
+  2)
+goal: 'Test der App HINTER der Cloudflare-Access-Wall: Scan schickt CF-Access-Client-Id/-Secret
+  als Header (CredentialStore, ADR-007-Linie), Confinement bleibt, ADR-Anteil. Baut
+  auf F-090-Engine auf.'
+status: Backlog
+priority: P3
+spec: docs/specs/red-team-scan-access-token.md
+definition_of_done: null
+labels:
+- backend
+- security
+depends: F-093
+owner: null
+stories:
+- S-407
+progress: 0/1 done
+created_at: '2026-07-21T19:54:33Z'
+updated_at: '2026-07-21T20:01:59Z'
+area: deployment

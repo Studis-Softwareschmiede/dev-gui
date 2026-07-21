@@ -1,0 +1,29 @@
+id: F-093
+title: Red-Team-Scan pro Container — direkt + Cloudflare-Wand, Verlauf, Befunde→Board
+  (Ausbaustufe 1)
+goal: 'Sicherheits-/Red-Team-Test einer laufenden App per Knopf pro Container (VpsView,
+  keine Kachel): KI-Red-Team-Agent (HeadlessScanRunner) scannt zwei Testorte (direkt
+  + Cloudflare-Wand), container-confined Ziel, Live-Fortschritt, persistierter Verlauf,
+  Befunde→Board nur auf Bestätigung.'
+status: Backlog
+priority: P1
+spec: docs/specs/red-team-scan-per-container.md
+definition_of_done: null
+labels:
+- backend
+- security
+- ui
+depends: null
+owner: null
+stories:
+- S-401
+- S-402
+- S-403
+- S-404
+- S-405
+- S-406
+- S-408
+progress: 0/7 done
+created_at: '2026-07-21T19:54:33Z'
+updated_at: '2026-07-21T20:12:22Z'
+area: deployment
