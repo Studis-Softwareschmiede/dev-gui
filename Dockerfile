@@ -67,7 +67,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-client \
     python3 \
     python3-yaml \
+    unzip \
   && rm -rf /var/lib/apt/lists/*
+
+# Nuclei (projectdiscovery) — Sicherheits-Scanner für den headless
+# `claude -p /agent-flow:red-team`-Lauf (red-team-tile scharfer Betrieb, F-032).
+# Version robust zur Build-Zeit über die GitHub-API ableiten, damit keine
+# hartkodierte Version veraltet. jq ist oben bereits installiert. Image wird
+# als linux/amd64 gebaut (CI) — daher _linux_amd64.
+RUN set -eux; \
+    ver="$(curl -fsSL https://api.github.com/repos/projectdiscovery/nuclei/releases/latest | jq -r '.tag_name' | sed 's/^v//')"; \
+    curl -fsSL "https://github.com/projectdiscovery/nuclei/releases/download/v${ver}/nuclei_${ver}_linux_amd64.zip" -o /tmp/nuclei.zip; \
+    unzip -o /tmp/nuclei.zip -d /usr/local/bin nuclei; \
+    rm /tmp/nuclei.zip; \
+    chmod +x /usr/local/bin/nuclei; \
+    nuclei -version
 
 # AC6 — GitHub CLI (gh): needed by ensure-gh-auth.sh + skill scripts.
 # Tarball layout: gh_2.62.0_linux_amd64/bin/gh → with --strip-components=1

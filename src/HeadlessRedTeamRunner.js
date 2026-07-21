@@ -13,16 +13,20 @@
  * aus dem Core — kein Regress gegenüber den Geschwister-Runnern.
  *
  * Besonderheit gegenüber Reconcile: der Red-Team-Lauf braucht Per-Lauf-
- * Argumente (`ziel`, optional `modus`). Diese werden als args-Array an den Core
+ * Argumente (`ziel`, optional `modus`, optional `url`/`urlEdge` für den scharfen
+ * Betrieb F-032 / Spec AC12). Diese werden als args-Array an den Core
  * durchgereicht und dort zu EINEM zusammenhängenden `-p`-argv-Element
- * (`/agent-flow:red-team ziel=<slug> [modus=<modus>]`) zusammengesetzt.
+ * (`/agent-flow:red-team ziel=<slug> [modus=<modus>] [url=<url>] [url_edge=<urlEdge>]`)
+ * zusammengesetzt.
  *
  * Trust-Boundary: `ziel` ist ein bereits validierter Slug — der Aufrufer/Router
  * prüft ihn gegen die Allowlist, BEVOR `start()` gerufen wird. Der Runner
  * vertraut dem übergebenen Wert und interpoliert ihn nicht in eine Shell
  * (argv-Array, kein Shell-String, security/R03). Als defensive Basis wirft
  * `start()` bei fehlendem/leerem `ziel` einen `TypeError`, statt einen leeren
- * `ziel=`-Parameter an den Kindprozess zu reichen.
+ * `ziel=`-Parameter an den Kindprozess zu reichen. Ebenso Trust-Boundary bei
+ * `url`/`urlEdge`: die Pflicht für scharfe Läufe erzwingt der Router/Agent, NICHT
+ * der Runner — dieser reicht nur durch und lässt sie weg, wenn nicht gesetzt.
  *
  * Injectable (Test-Entkopplung): `spawnFn` (Default `node:child_process` `spawn`),
  * kein Test benötigt einen echten `claude`-Lauf.
@@ -90,11 +94,14 @@ export class HeadlessRedTeamRunner {
   }
 
   /**
-   * Startet einen Red-Team-Job für ein Projekt (docs/specs/red-team-tile.md AC1).
+   * Startet einen Red-Team-Job für ein Projekt (docs/specs/red-team-tile.md AC1,
+   * scharfer Betrieb F-032 / Spec AC12).
    *
-   * Baut die Per-Lauf-Argumente `['ziel=<ziel>']` (plus `'modus=<modus>'`, wenn
-   * `modus` gesetzt ist) und reicht sie als `overrides.args` an den Core, der sie
-   * zu EINEM `-p`-argv-Element `/agent-flow:red-team ziel=<ziel> [modus=<modus>]`
+   * Baut die Per-Lauf-Argumente `['ziel=<ziel>']` (plus `'modus=<modus>'`,
+   * `'url=<url>'`, `'url_edge=<urlEdge>'`, jeweils nur wenn gesetzt) in fester
+   * Reihenfolge `ziel, modus, url, url_edge` und reicht sie als `overrides.args`
+   * an den Core, der sie zu EINEM `-p`-argv-Element
+   * `/agent-flow:red-team ziel=<ziel> [modus=<modus>] [url=<url>] [url_edge=<urlEdge>]`
    * zusammensetzt.
    *
    * Trust-Boundary: `ziel` ist ein bereits validierter Slug — der Aufrufer/Router
@@ -103,20 +110,43 @@ export class HeadlessRedTeamRunner {
    * Shell (argv-Array, security/R03). Fehlt/leer → `TypeError` (defensive Basis
    * gegen einen leeren `ziel=`-Parameter).
    *
+   * `url`/`urlEdge` sind hier OPTIONAL: die Pflicht für scharfe Läufe erzwingt der
+   * Router/Agent vor dem Aufruf, nicht der Runner. Falls gesetzt, müssen sie aber
+   * Strings OHNE Leerzeichen sein — ein Leerzeichen würde das zusammengesetzte
+   * `-p`-argv-Element in mehrere Prompt-Tokens zerlegen und so einen fremden
+   * Parameter einschmuggeln. Verletzung → `TypeError` (bewusst konsistent mit
+   * `ziel`, statt still zu ignorieren: ein kaputter URL-Wert soll sichtbar
+   * scheitern, nicht unbemerkt weggelassen werden).
+   *
    * @param {string} projectPath - aufgelöster, validierter absoluter Projekt-Pfad (WORKSPACE_DIR/<slug>).
    * @param {object} [params]
    * @param {string} params.ziel - validierter Ziel-Slug (Pflicht).
    * @param {string} [params.modus] - optionaler Red-Team-Modus.
+   * @param {string} [params.url] - optionale Ziel-URL (scharfer Betrieb); String ohne Leerzeichen.
+   * @param {string} [params.urlEdge] - optionale Edge-/Public-URL (scharfer Betrieb); String ohne Leerzeichen.
    * @returns {{ ok: true, jobId: string } | { ok: false, reason: 'locked' }}
-   * @throws {TypeError} wenn `ziel` fehlt oder leer ist.
+   * @throws {TypeError} wenn `ziel` fehlt/leer ist oder wenn `url`/`urlEdge`
+   *   gesetzt, aber kein String bzw. mit Leerzeichen sind.
    */
-  start(projectPath, { ziel, modus } = {}) {
+  start(projectPath, { ziel, modus, url, urlEdge } = {}) {
     if (!ziel) {
       throw new TypeError('HeadlessRedTeamRunner.start: "ziel" ist erforderlich (validierter Slug)');
     }
     const args = ['ziel=' + ziel];
     if (modus) {
       args.push('modus=' + modus);
+    }
+    if (url) {
+      if (typeof url !== 'string' || /\s/.test(url)) {
+        throw new TypeError('HeadlessRedTeamRunner.start: "url" muss ein String ohne Leerzeichen sein');
+      }
+      args.push('url=' + url);
+    }
+    if (urlEdge) {
+      if (typeof urlEdge !== 'string' || /\s/.test(urlEdge)) {
+        throw new TypeError('HeadlessRedTeamRunner.start: "urlEdge" muss ein String ohne Leerzeichen sein');
+      }
+      args.push('url_edge=' + urlEdge);
     }
     return this.#core.start(projectPath, { args });
   }

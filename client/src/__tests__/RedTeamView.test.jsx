@@ -6,7 +6,9 @@
  *   (a) lädt Targets und rendert sie als Auswahl (Dropdown, KEIN Freitext-Input).
  *   (b) leere Allowlist → Hinweis, kein Start-Button (nichts feuerbar, AC8).
  *   (c) Start erst nach Feuer-Freigabe-Bestätigung möglich (AC7).
- *   (d) POST→202 dann Poll→done zeigt Ergebnis + PR-Link (injizierter fetchFn + pollInterval).
+ *   (d) POST→202 dann Poll→done zeigt Ergebnis + PR-Link; POST-Body-Default modus:'direkt'.
+ *   (f) Sicherheits-Text ist ehrlich zum scharfen Betrieb: „nicht-destruktiv" +
+ *       „Koordination"/„Cloudflare … nie selbst", NICHT mehr „Trockenlauf" (F-032).
  *
  * Mock-Muster gespiegelt von SpecViewReconcileTrigger.test.jsx (mockbarer fetchFn,
  * kurzes pollInterval statt Fake-Timer).
@@ -99,6 +101,30 @@ describe('RedTeamView — AC7: Ziel-Auswahl aus Allowlist (kein Freitext)', () =
   });
 });
 
+// ── (f) Sicherheits-Text: scharf, nicht-destruktiv, Koordination (F-032) ────────
+
+describe('RedTeamView — Sicherheits-Text ist ehrlich zum scharfen Betrieb', () => {
+  it('nennt „nicht-destruktiv" + Koordination/Cloudflare-nie-selbst und NICHT mehr „Trockenlauf"', async () => {
+    const fetchFn = makeFetchFn({ targets: [{ slug: 'app-a', state: 'running' }] });
+    renderView(fetchFn);
+
+    await waitFor(() => expect(sel('red-team-safety-note')).toBeTruthy());
+
+    const note = sel('red-team-safety-note');
+    expect(note.textContent).toMatch(/nicht-destruktiv/i);
+    expect(note.textContent).toMatch(/koordination/i);
+    expect(note.textContent).toMatch(/cloudflare nie selbst/i);
+    // „Trockenlauf" ist jetzt falsch und muss verschwunden sein.
+    expect(document.body.textContent).not.toMatch(/trockenlauf/i);
+
+    // Auch die Feuer-Freigabe-Bestätigung bleibt scharf-ehrlich.
+    await waitFor(() => expect(sel('red-team-fire-confirm')).toBeTruthy());
+    const confirmRow = sel('red-team-fire-confirm').closest('label');
+    expect(confirmRow.textContent).toMatch(/nicht-destruktiv/i);
+    expect(confirmRow.textContent).toMatch(/koordination/i);
+  });
+});
+
 // ── (b) Leere Allowlist (AC8) ───────────────────────────────────────────────────
 
 describe('RedTeamView — AC8: leere Allowlist', () => {
@@ -163,7 +189,7 @@ describe('RedTeamView — AC7: POST→202, Poll→done zeigt Ergebnis + PR-Link'
       startBody: { jobId: 'rt-1', status: 'running' },
       jobBody: {
         status: 'done',
-        result: '2 potenzielle Funde (Trockenlauf)',
+        result: '2 potenzielle Funde (scharf)',
         prHint: 'https://github.com/org/app-a/pull/42',
       },
     });
@@ -204,7 +230,7 @@ describe('RedTeamView — AC7: POST→202, Poll→done zeigt Ergebnis + PR-Link'
     expect(postCalls).toHaveLength(1);
     const body = JSON.parse(postCalls[0][1].body);
     expect(body.projectSlug).toBe('app-a');
-    expect(body.modus).toBe('beide');
+    expect(body.modus).toBe('direkt');
   });
 });
 

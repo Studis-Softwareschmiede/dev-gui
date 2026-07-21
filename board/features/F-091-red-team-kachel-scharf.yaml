@@ -1,0 +1,25 @@
+id: F-091
+title: Red-Team-Kachel scharf — echter Nuclei-Lauf (Gegenstück zu agent-flow F-032)
+goal: Die Red-Team-Kachel führt echt aus statt trocken. Nuclei im Container installiert, Origin-URL server-seitig
+  aus dem Allowlist-Eintrag abgeleitet (VPS-Host:hostPort) und an den Runner durchgereicht, Default-Modus direkt
+  (kein Cloudflare nötig), Kachel-Wording auf scharf/nicht-destruktiv umgestellt. Cloudflare wird nie umkonfiguriert.
+status: Done
+priority: P1
+spec: docs/specs/red-team-tile.md
+definition_of_done: Nuclei im Runtime-Image; Origin-URL-Auflösung + Durchreichung; Default direkt; Kachel scharf;
+  Jest grün; Client-Build grün.
+labels:
+- backend
+- ui
+- security
+depends: null
+owner: null
+stories:
+- S-396
+- S-397
+- S-398
+- S-399
+progress: 4/4 done
+created_at: '2026-07-21T00:00:00Z'
+updated_at: '2026-07-21T00:00:00Z'
+area: fabrik-arbeiten
