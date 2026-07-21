@@ -25,6 +25,12 @@
  *   AC6 — Wiring: Router akzeptiert Runner + Boundaries via Factory-Parameter (analog
  *         server.js-Dependency-Injection); scanResultStore ist optional/best-effort
  *         verdrahtet (S-402 hängt den echten Store nur noch ein).
+ *   AC7/AC8 (S-402) — GET .../containers/:containerId/scans → 200 { scans:[...] } (kompakt,
+ *         neueste zuerst, ohne findings/reportRef); ohne Store/nicht auflösbaren Container/
+ *         Store-Fehler → 200 { scans:[] } (best-effort, kein Crash). GET .../scans/:scanId →
+ *         200 { scan:{...} } (voller Datensatz inkl. findings+reportRef) | 404 bei
+ *         unbekannter scanId/fehlendem Store; ungültige Route (provider/serverId/
+ *         containerId) → 400.
  *   AC22 — Security-Floor: jobId ist reine Korrelations-ID; keine Host-Pfade in der
  *         Response; Confinement bleibt bei einem Store-Fehler robust (kein Crash).
  *
@@ -574,6 +580,183 @@ describe('Security-Floor — AC22', () => {
       const serialized = JSON.stringify(body);
       expect(serialized).not.toMatch(/\/workspace\//);
       expect(serialized).not.toMatch(/\/home\//);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+});
+
+// ── AC7/AC8 (S-402) — GET .../containers/:containerId/scans ──────────────────────
+
+describe('GET .../containers/:containerId/scans — AC7/AC8', () => {
+  function makeScanResultStore(scansByApp = {}) {
+    return {
+      calls: [],
+      async list(app) {
+        this.calls.push(app);
+        return scansByApp[app] ?? [];
+      },
+      async getByScanId() {
+        return null;
+      },
+    };
+  }
+
+  it('liefert die kompakte Verlaufsliste des über den Container aufgelösten App-Hostnamens', async () => {
+    const scanResultStore = makeScanResultStore({
+      'dev-gui.example.com': [
+        { scanId: 'scan-1', startedAt: '2026-07-22T10:00:00.000Z', ampel: 'gruen', findingCount: 0, boardItemIds: [] },
+      ],
+    });
+    const { app } = makeApp({ scanResultStore });
+    const srv = await startServer(app);
+    try {
+      const { status, body } = await httpGet(srv, '/api/vps/machines/hetzner/srv1/containers/c1/scans');
+      expect(status).toBe(200);
+      expect(body).toEqual({
+        scans: [{ scanId: 'scan-1', startedAt: '2026-07-22T10:00:00.000Z', ampel: 'gruen', findingCount: 0, boardItemIds: [] }],
+      });
+      expect(scanResultStore.calls).toEqual(['dev-gui.example.com']);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('ohne scanResultStore → 200 { scans: [] } (best-effort, kein Crash)', async () => {
+    const { app } = makeApp();
+    const srv = await startServer(app);
+    try {
+      const { status, body } = await httpGet(srv, '/api/vps/machines/hetzner/srv1/containers/c1/scans');
+      expect(status).toBe(200);
+      expect(body).toEqual({ scans: [] });
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('Container nicht (mehr) gefunden → 200 { scans: [] } (kein Crash, kein 404)', async () => {
+    const deps = makeDeps({ containers: [runningContainer({ containerId: 'other' })] });
+    const scanResultStore = makeScanResultStore();
+    const { app } = makeApp({ deps, scanResultStore });
+    const srv = await startServer(app);
+    try {
+      const { status, body } = await httpGet(srv, '/api/vps/machines/hetzner/srv1/containers/c1/scans');
+      expect(status).toBe(200);
+      expect(body).toEqual({ scans: [] });
+      expect(scanResultStore.calls).toEqual([]); // nie aufgerufen — kein Hostname auflösbar
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('ein scanResultStore.list()-Fehler crasht die Anfrage nicht (best-effort)', async () => {
+    const scanResultStore = {
+      list: async () => { throw new Error('store down'); },
+      getByScanId: async () => null,
+    };
+    const { app } = makeApp({ scanResultStore });
+    const srv = await startServer(app);
+    try {
+      const { status, body } = await httpGet(srv, '/api/vps/machines/hetzner/srv1/containers/c1/scans');
+      expect(status).toBe(200);
+      expect(body).toEqual({ scans: [] });
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('ungültiger Provider → 400', async () => {
+    const { app } = makeApp();
+    const srv = await startServer(app);
+    try {
+      const { status } = await httpGet(srv, '/api/vps/machines/evil-provider/srv1/containers/c1/scans');
+      expect(status).toBe(400);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('ungültige containerId (Sonderzeichen) → 400', async () => {
+    const { app } = makeApp();
+    const srv = await startServer(app);
+    try {
+      const { status } = await httpGet(srv, '/api/vps/machines/hetzner/srv1/containers/c!1/scans');
+      expect(status).toBe(400);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+});
+
+// ── AC7/AC8 (S-402) — GET .../scans/:scanId ────────────────────────────────────
+
+describe('GET .../scans/:scanId — AC7/AC8', () => {
+  it('liefert den vollen Datensatz inkl. findings + reportRef', async () => {
+    const fullScan = {
+      scanId: 'scan-1',
+      app: 'dev-gui.example.com',
+      startedAt: '2026-07-22T10:00:00.000Z',
+      finishedAt: '2026-07-22T10:05:00.000Z',
+      ampel: 'rot',
+      findings: [{ id: 'f1', severity: 'high', kind: 'xss', testort: 'direkt', titel: 'XSS' }],
+      findingCount: 1,
+      reportRef: 'report-1',
+      boardItemIds: [],
+    };
+    const scanResultStore = { getByScanId: async (scanId) => (scanId === 'scan-1' ? fullScan : null) };
+    const { app } = makeApp({ scanResultStore });
+    const srv = await startServer(app);
+    try {
+      const { status, body } = await httpGet(srv, '/api/vps/machines/hetzner/srv1/scans/scan-1');
+      expect(status).toBe(200);
+      expect(body).toEqual({ scan: fullScan });
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('unbekannte scanId → 404', async () => {
+    const scanResultStore = { getByScanId: async () => null };
+    const { app } = makeApp({ scanResultStore });
+    const srv = await startServer(app);
+    try {
+      const { status, body } = await httpGet(srv, '/api/vps/machines/hetzner/srv1/scans/does-not-exist');
+      expect(status).toBe(404);
+      expect(typeof body.error).toBe('string');
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('ohne scanResultStore → 404 (kein Crash)', async () => {
+    const { app } = makeApp();
+    const srv = await startServer(app);
+    try {
+      const { status } = await httpGet(srv, '/api/vps/machines/hetzner/srv1/scans/scan-1');
+      expect(status).toBe(404);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('ein scanResultStore.getByScanId()-Fehler crasht die Anfrage nicht (best-effort) → 404', async () => {
+    const scanResultStore = { getByScanId: async () => { throw new Error('store down'); } };
+    const { app } = makeApp({ scanResultStore });
+    const srv = await startServer(app);
+    try {
+      const { status } = await httpGet(srv, '/api/vps/machines/hetzner/srv1/scans/scan-1');
+      expect(status).toBe(404);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('ungültiger Provider → 400', async () => {
+    const { app } = makeApp();
+    const srv = await startServer(app);
+    try {
+      const { status } = await httpGet(srv, '/api/vps/machines/evil-provider/srv1/scans/scan-1');
+      expect(status).toBe(400);
     } finally {
       await new Promise((r) => srv.close(r));
     }
