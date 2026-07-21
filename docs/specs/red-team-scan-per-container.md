@@ -122,9 +122,25 @@ Bestätigung** — als Board-Punkte übernommen werden.
   `{ scanId, app, startedAt, finishedAt, ampel, findings: [{ id, severity, kind, testort, titel }],
   findingCount, reportRef, boardItemIds: [] }` — `app` = Hostname/Slug (kein Host-Pfad), `ampel ∈
   {gruen, gelb, rot}`.
+  **Präzisierung (S-402 — Fundament, Schreibpfad ausserhalb des Story-Scopes):** `scanId` ≡ die
+  Runner-`jobId` (AC1-AC3) — der (künftige) Aufrufer, der einen abgeschlossenen Lauf persistiert,
+  übergibt dieselbe Korrelations-ID durchgängig; `ampel`/`findingCount` werden vom Store IMMER
+  deterministisch aus `findings` abgeleitet (nie vom Aufrufer übernommen, single source of
+  truth, s. AC9). Diese Story implementiert nur das Store-Fundament (`record`/`list`/
+  `getByScanId`/`getByJobId`) — WER `record()` nach Lauf-Abschluss aufruft (Parsing des
+  Agent-Outputs zu `findings`), ist nicht Teil von AC7-AC9 und bleibt eine offene Folge-Naht.
 - **AC8 — Verlauf-Lese-Endpunkte.** `GET …/containers/:containerId/scans` → Liste der Verlaufseinträge
   (neueste zuerst, ohne Rohbericht-Volltext); `GET …/scans/:scanId` → Detail inkl. Referenz auf den
   Rohbericht. Beide read-only.
+  **Präzisierung (S-402):** beide Routen hängen — wie die AC2/AC3-Endpunkte — unter demselben
+  `/api/vps/machines/:provider/*splat`-Präfix (`vpsContainerScanRouter.js`): `GET
+  …/containers/:containerId/scans` löst den Container über dieselbe Provider/ServerId/
+  ContainerId-Auflösung wie AC2 auf und filtert den Store über `app = container.hostname`;
+  `GET …/scans/:scanId` ist containerId-unabhängig (`scanId` ist bereits global eindeutig). Jede
+  Auflösungs-Lücke der Listen-Route (kein Store, kein VPS-Ziel, Container nicht gefunden,
+  unmanaged ohne `hostname`, Store-Fehler) liefert best-effort `200 { scans: [] }` statt eines
+  weiteren Fehlercodes (Robustheit-NFR: ein read-only Verlauf-Abruf darf nie crashen); die
+  Detail-Route liefert bei fehlendem Store/unbekannter `scanId`/Store-Fehler einheitlich `404`.
 - **AC9 — Ampel-Ableitung (deterministisch).** `gruen` = keine Befunde; `gelb` = ausschließlich
   low/medium-Befunde; `rot` = mindestens ein high/critical-Befund. Die Ableitung ist eindeutig und
   testbar aus der `findings`-Liste.

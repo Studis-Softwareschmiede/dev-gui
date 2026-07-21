@@ -166,6 +166,7 @@ import { PerAppGpgRotationService } from './src/PerAppGpgRotationService.js';
 import { HeadlessNewProjectRunner } from './src/HeadlessNewProjectRunner.js';
 import { HeadlessAdoptRunner } from './src/HeadlessAdoptRunner.js';
 import { RegressionResultStore } from './src/RegressionResultStore.js';
+import { ScanResultStore } from './src/ScanResultStore.js';
 import { DrainJobRegistry } from './src/DrainJobRegistry.js';
 import { FeatureDrainRegistry } from './src/FeatureDrainRegistry.js';
 import { FeatureDrainRunner } from './src/FeatureDrainRunner.js';
@@ -853,6 +854,16 @@ const reconcileRunner = new HeadlessReconcileRunner();
 // für /agent-flow:red-team; eigene ProjectJobLock-Instanz, RED_TEAM_TIMEOUT_MS) ──
 const redTeamRunner = new HeadlessRedTeamRunner();
 
+// ── ScanResultStore (red-team-scan-per-container AC7-AC9, S-402) ────────────
+// Persistente, größenbegrenzte Verlaufs-Ablage pro App (letzte 30 je App-Slug,
+// ${CRED_STORE_DIR}/scan-results.json, atomarer Schreibzugriff, 0600), inkl.
+// deterministischer Ampel-Ableitung. Read-only für
+// GET .../containers/:containerId/scans + GET .../scans/:scanId sowie
+// best-effort Anreicherung des Status-Polls (vpsContainerScanRouter.js AC3).
+// Der Schreibpfad (record()) wird von einem künftigen Job-Abschluss-Hook
+// aufgerufen — hier nur das Fundament (Story-Scope S-402: AC7/AC8/AC9).
+const scanResultStore = new ScanResultStore();
+
 // ── ObsidianIngestRunner (headless from-notes-Katalog-Lauf mit Interrupt/Resume,
 // docs/specs/obsidian-question-catalog.md AC1, AC2, AC4, AC5, AC6, AC7) ──
 // EIGENE, isolierte ProjectJobLock-Instanz (Konstruktor-Default `new ProjectJobLock()`
@@ -965,6 +976,10 @@ const deps = {
   // (VPS-laufend ∩ eigenes Repo). vpsDockerControl/vpsRegistry/vpsTargets/workspaceScanner
   // sind bereits im deps-Objekt vorhanden (vps-/workspace-Router). Router: redTeam.js.
   redTeamRunner,
+  // red-team-scan-per-container AC7-AC9 (S-402): ScanResultStore für den Pro-Container-
+  // Scan-Verlauf (routers/vpsContainerScan.js — Status-Poll-Anreicherung + die neuen
+  // GET .../containers/:containerId/scans + GET .../scans/:scanId Lese-Endpunkte).
+  scanResultStore,
   // obsidian-question-catalog AC1/AC2/AC4-AC7: headless from-notes-Katalog-Runner
   // mit Interrupt(needs-answers)/Resume-Protokoll für POST .../obsidian-ingest/start
   // + GET .../obsidian-ingest/:jobId + POST .../obsidian-ingest/:jobId/answers

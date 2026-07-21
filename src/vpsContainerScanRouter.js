@@ -1,7 +1,8 @@
 /**
  * vpsContainerScanRouter — Pro-Container Red-Team-Scan-Endpunkt.
  *
- * Implements: docs/specs/red-team-scan-per-container.md AC1, AC2, AC3, AC4, AC5, AC6, AC22.
+ * Implements: docs/specs/red-team-scan-per-container.md AC1, AC2, AC3, AC4, AC5, AC6, AC7,
+ * AC8, AC9, AC22.
  *
  * Routes (hinter AccessGuard, s. server.js):
  *   POST /api/vps/machines/:provider/*splat/containers/:containerId/scan
@@ -13,6 +14,17 @@
  *     → 200 { status, phase, ampel?, findings?, reportRef? }
  *     → 404 { error }                             — unbekannte jobId (auch: jobId gehört zu einem
  *                                                    ANDEREN Container — kein Cross-Container-Leak)
+ *   GET  /api/vps/machines/:provider/*splat/containers/:containerId/scans   (AC8, S-402)
+ *     → 200 { scans: [{ scanId, startedAt, ampel, findingCount, boardItemIds }] }
+ *       (neueste zuerst, ohne Rohbericht-Volltext; nicht auflösbarer Container/kein Store
+ *       → 200 { scans: [] }, best-effort/non-fatal — kein zweiter Fehlercode für einen
+ *       read-only Verlauf-Endpunkt)
+ *     → 400 { error }                             — ungültige Route (provider/serverId/containerId)
+ *   GET  /api/vps/machines/:provider/*splat/scans/:scanId                  (AC8, S-402)
+ *     → 200 { scan: { scanId, app, startedAt, finishedAt, ampel, findings, findingCount,
+ *              reportRef, boardItemIds } }
+ *     → 404 { error }                             — unbekannte scanId
+ *     → 400 { error }                             — ungültige Route (provider/serverId)
  *
  * Kein neuer Runner (AC1): dieser Router dockt den **bestehenden** `HeadlessRedTeamRunner`
  * (F-090/F-091, unverändert) an — Runner-Semantik (eigene `ProjectJobLock`-Instanz, `close`-
@@ -50,10 +62,15 @@
  * Status-Poll (AC3) zu prüfen. Geht bei Server-Neustart verloren (kein Ziel: persistente
  * Job-Historie, s. Spec-Edge-Case "Server-Neustart während Lauf").
  *
- * scanResultStore (S-402, hier NUR defensiv verdrahtet, AC6): optionale Boundary — sobald
- * ein echter Store existiert, werden `ampel`/`findings`/`reportRef` best-effort nachgeladen.
- * Ohne Store (oder bei einem Store-Fehler) bleiben diese Felder schlicht abwesend — sie sind
- * laut AC3-Contract optional (`ampel?`/`findings?`/`reportRef?`).
+ * scanResultStore (S-402, AC7/AC8/AC9): dieselbe Boundary, jetzt mit zwei zusätzlichen
+ * Zwecken — (a) am Status-Poll (AC3) weiterhin NUR defensiv/best-effort verdrahtet:
+ * `ampel`/`findings`/`reportRef` werden nachgeladen, sofern ein echter Store existiert und
+ * einen Treffer liefert; ohne Store (oder bei einem Store-Fehler) bleiben diese Felder
+ * schlicht abwesend (laut AC3-Contract optional); (b) für die NEUEN Verlauf-Lese-Endpunkte
+ * (AC8) ist der Store die primäre Datenquelle — `list(app)` (kompakte Historie je Container/
+ * App, "app" = `container.hostname`) und `getByScanId(scanId)`/`getByJobId(jobId)` (Detail).
+ * Fehlt der Store oder liefert er einen Fehler, antworten auch diese Endpunkte best-effort
+ * (leere Liste bzw. 404) statt zu crashen (Robustheit-NFR).
  *
  * Security (Floor, AC22): keine Secrets/Tokens/absolute Host-Pfade in Response/Log; `jobId`
  * ist eine reine Korrelations-ID (`randomUUID()` im Runner); argv bleibt Array (kein Shell-
@@ -313,6 +330,92 @@ export function vpsContainerScanRouter(runner, deps = {}, options = {}) {
     }
 
     return res.status(200).json(body);
+  });
+
+  // ── GET .../containers/:containerId/scans (AC8, S-402) ───────────────────────
+
+  router.get('/api/vps/machines/:provider/*splat/containers/:containerId/scans', async (req, res) => {
+    const providerVal = validateProvider(req.params.provider);
+    if (!providerVal.ok) {
+      return res.status(400).json({ error: providerVal.error });
+    }
+    const provider = req.params.provider;
+
+    const serverIdResult = extractServerId(req.params.splat);
+    if (!serverIdResult.ok) {
+      return res.status(400).json({ error: serverIdResult.error });
+    }
+    const serverId = serverIdResult.serverId;
+
+    const containerIdVal = validateContainerId(req.params.containerId);
+    if (!containerIdVal.ok) {
+      return res.status(400).json({ error: containerIdVal.error });
+    }
+    const containerId = req.params.containerId.trim();
+
+    // Read-only Verlauf-Endpunkt (AC8): jede Auflösungs-Lücke (kein Store, kein VPS-Ziel,
+    // Container nicht (mehr) gefunden, unmanaged Container ohne hostname, Store-Fehler)
+    // führt best-effort auf eine LEERE Liste — kein zweiter Fehlercode neben dem bereits
+    // etablierten 400 (ungültige Route). Robustheit-NFR: ein Verlauf-Abruf darf nie crashen.
+    if (!scanResultStore || typeof scanResultStore.list !== 'function') {
+      return res.status(200).json({ scans: [] });
+    }
+
+    const vpsTarget = await resolveVpsTarget(provider, serverId, vpsRegistry, vpsTargets);
+    if (!vpsTarget) {
+      return res.status(200).json({ scans: [] });
+    }
+
+    let psResult;
+    try {
+      psResult = await vpsDockerControl.psAll(vpsTarget);
+    } catch {
+      return res.status(200).json({ scans: [] });
+    }
+    const container = (psResult?.containers ?? []).find((c) => c.containerId === containerId);
+    if (!container || !container.hostname) {
+      return res.status(200).json({ scans: [] });
+    }
+
+    try {
+      const scans = await scanResultStore.list(container.hostname);
+      return res.status(200).json({ scans });
+    } catch {
+      return res.status(200).json({ scans: [] });
+    }
+  });
+
+  // ── GET .../scans/:scanId (AC8, S-402) — Detail, containerId-unabhängig (scanId ist ─────
+  // ── bereits global eindeutig, s. ScanResultStore) ────────────────────────────────────────
+
+  router.get('/api/vps/machines/:provider/*splat/scans/:scanId', async (req, res) => {
+    const providerVal = validateProvider(req.params.provider);
+    if (!providerVal.ok) {
+      return res.status(400).json({ error: providerVal.error });
+    }
+
+    const serverIdResult = extractServerId(req.params.splat);
+    if (!serverIdResult.ok) {
+      return res.status(400).json({ error: serverIdResult.error });
+    }
+
+    const { scanId } = req.params;
+
+    if (!scanResultStore || typeof scanResultStore.getByScanId !== 'function') {
+      return res.status(404).json({ error: 'Unknown scanId' });
+    }
+
+    let scan;
+    try {
+      scan = await scanResultStore.getByScanId(scanId);
+    } catch {
+      return res.status(404).json({ error: 'Unknown scanId' });
+    }
+    if (!scan) {
+      return res.status(404).json({ error: 'Unknown scanId' });
+    }
+
+    return res.status(200).json({ scan });
   });
 
   return router;
