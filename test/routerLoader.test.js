@@ -349,8 +349,12 @@ describe('routerLoader — Echte src/routers/ Module (AC1/AC3)', () => {
     // redTeam.js wurde mit red-team-tile (F-090) hinzugefügt
     //   (POST /api/red-team + GET /api/red-team/:jobId + GET /api/red-team/targets —
     //   dünner Auslöser für /agent-flow:red-team, Allowlist-Schnittmenge VPS ∩ eigenes Repo) → 53.
+    // vpsContainerScan.js wurde mit red-team-scan-per-container (F-093, S-401) hinzugefügt
+    //   (POST .../containers/:containerId/scan + GET .../containers/:containerId/scan/:jobId —
+    //   confinierter Pro-Container-Scan-Auslöser, dockt den bestehenden HeadlessRedTeamRunner
+    //   an, kein neuer Runner, AC1/AC2/AC3/AC4/AC5/AC6/AC22) → 54.
     const entries = await readdir(ROUTERS_DIR);
     const mountedCount = entries.filter((f) => f.endsWith('.js')).length;
-    expect(mountedCount).toBe(53);
+    expect(mountedCount).toBe(54);
   });
 });

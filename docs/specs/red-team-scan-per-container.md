@@ -73,6 +73,13 @@ Bestätigung** — als Board-Punkte übernommen werden.
   `close`-Event als einzige Fertig-Quelle, Runaway-Timeout, secret-freies Per-Lauf-Audit, argv-Array,
   `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`-Block, kein `PtyManager`/`CommandService`). Es wird **kein** zweiter/
   paralleler Runner gebaut.
+  **Präzisierung (S-401 — `<container-referenz>` + Spawn-Verzeichnis):** der Runner braucht ein
+  aufgelöstes Projekt-Verzeichnis als Spawn-`cwd` (`ProjectJobLock`-Schlüssel). Der Container wird dafür
+  über `imageRepoName(image)`/`hostname` auf einen Workspace-Klon gemappt (identische Matching-Logik wie
+  der abzulösende `redTeamRouter.js#computeAllowlist`, S-408) — `ziel` = der ermittelte Repo-Slug. Kein
+  Match (Container ohne lokalen Klon im Workspace) → `422 not-scannable` (kein Freitext-Fallback). Diese
+  Wahl gibt jedem Repo/Container ein EIGENES Lock-Verzeichnis, sodass Scans für unterschiedliche
+  Container/Repos einander nicht blockieren (AC5).
 - **AC2 — Start-Endpunkt (pro Container).** `POST /api/vps/machines/:provider/*splat/containers/:containerId/scan`
   → `202 { jobId, status: "running" }`. Nur **managed, laufende** Container (`hostname !== null`,
   `state === 'running'`) — sonst `422 { errorClass: "not-scannable" }`. Bereits laufender Scan für denselben
@@ -80,7 +87,18 @@ Bestätigung** — als Board-Punkte übernommen werden.
   bestehenden Container-Routen aufgelöst/validiert.
 - **AC3 — Status-Endpunkt.** `GET /api/vps/machines/:provider/*splat/containers/:containerId/scan/:jobId`
   → `200 { status, phase, ampel?, findings?, reportRef? }` mit `status ∈ {running, done, failed, auth-expired}`
-  und `phase ∈ {direkt, cloudflare, auswerten, fertig}`; `404` bei unbekannter `jobId`.
+  und `phase ∈ {direkt, cloudflare, auswerten, fertig}`; `404` bei unbekannter `jobId` (auch wenn eine
+  ansonsten bekannte `jobId` zu einem ANDEREN Container gehört — kein Cross-Container-Leak).
+  **Präzisierung (S-401, Backend-Fundament — kein Zwischen-Fortschritts-Signal in dieser Iteration):**
+  der wiederverwendete `HeadlessRedTeamRunner` ist ein opaker Kindprozess ohne Zwischenstands-Meldung
+  (`close` bleibt die einzige Fertig-Quelle, s. `HeadlessRunnerCore`) — `phase` ist deshalb **coarse**:
+  `direkt` solange `status === 'running'`, `fertig` in jedem Terminalzustand (`done`/`failed`/
+  `auth-expired`). Eine granulare `cloudflare`/`auswerten`-Zwischenphase erfordert eine stdout-
+  Fortschritts-Erkennung, die NICHT Teil dieser Story ist (Kandidat für eine Folge-Iteration/S-403,
+  sobald der Live-Fortschritts-Panel-Bedarf das rechtfertigt). Der Core kennt zusätzlich einen fünften
+  internen Status `budget-limited` (headless-budget-limit-detection, unabhängig von dieser Spec) — er
+  wird am Pro-Container-Endpunkt defensiv auf `failed` gemappt, damit der `status`-Enum dieser Story
+  exakt bei den vier genannten Werten bleibt.
 - **AC4 — Ziel-Confinement (sicherheitskritisch).** Die beiden Scan-Ziele werden **ausschließlich
   server-seitig** aus dem ContainerEntry abgeleitet: **direkt** = VPS-Host + veröffentlichter `hostPort`;
   **öffentlich** = `https://<hostname>`. Es existiert **kein** Freitext-URL-Feld und **kein**
