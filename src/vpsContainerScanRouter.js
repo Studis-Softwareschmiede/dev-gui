@@ -62,15 +62,32 @@
  * Status-Poll (AC3) zu prüfen. Geht bei Server-Neustart verloren (kein Ziel: persistente
  * Job-Historie, s. Spec-Edge-Case "Server-Neustart während Lauf").
  *
- * scanResultStore (S-402, AC7/AC8/AC9): dieselbe Boundary, jetzt mit zwei zusätzlichen
- * Zwecken — (a) am Status-Poll (AC3) weiterhin NUR defensiv/best-effort verdrahtet:
- * `ampel`/`findings`/`reportRef` werden nachgeladen, sofern ein echter Store existiert und
- * einen Treffer liefert; ohne Store (oder bei einem Store-Fehler) bleiben diese Felder
- * schlicht abwesend (laut AC3-Contract optional); (b) für die NEUEN Verlauf-Lese-Endpunkte
- * (AC8) ist der Store die primäre Datenquelle — `list(app)` (kompakte Historie je Container/
- * App, "app" = `container.hostname`) und `getByScanId(scanId)`/`getByJobId(jobId)` (Detail).
- * Fehlt der Store oder liefert er einen Fehler, antworten auch diese Endpunkte best-effort
- * (leere Liste bzw. 404) statt zu crashen (Robustheit-NFR).
+ * scanResultStore (S-402, AC7/AC8/AC9): dieselbe Boundary, mit zwei Zwecken — (a) am
+ * Status-Poll (AC3) weiterhin NUR defensiv/best-effort verdrahtet: `ampel`/`findings`/
+ * `reportRef` werden nachgeladen, sofern ein echter Store existiert und einen Treffer
+ * liefert; ohne Store (oder bei einem Store-Fehler) bleiben diese Felder schlicht abwesend
+ * (laut AC3-Contract optional); (b) für die Verlauf-Lese-Endpunkte (AC8) ist der Store die
+ * primäre Datenquelle — `list(app)` (kompakte Historie je Container/App, "app" =
+ * `container.hostname`) und `getByScanId(scanId)`/`getByJobId(jobId)` (Detail). Fehlt der
+ * Store oder liefert er einen Fehler, antworten auch diese Endpunkte best-effort (leere
+ * Liste bzw. 404) statt zu crashen (Robustheit-NFR).
+ *
+ * **Offene Folge-Naht (S-403 Review-Fund, Iteration 2 — bewusst NICHT in diesem Router
+ * geschlossen):** der ursprüngliche Plan war, `scanResultStore.record()` am Status-Poll
+ * bei `status:'done'` mit `findings: []` aufzurufen. Das wurde verworfen: der wieder-
+ * verwendete `HeadlessRedTeamRunner`/`HeadlessRunnerCore` legt die erfasste stdout/stderr-
+ * Ausgabe NICHT im Job-Objekt ab (nur `status`/`result`/`error`/`prHint`) — ein Findings-
+ * Parser aus dem Runner-Output ist mit dem heutigen Core-Vertrag NICHT baubar. Ein
+ * `record()` mit hartkodiert leeren `findings` hätte für JEDEN abgeschlossenen Lauf
+ * dauerhaft `ampel:'gruen'` ("keine Befunde") persistiert — für ein Sicherheitswerkzeug
+ * eine aktiv irreführende "alles sicher"-Aussage, unabhängig vom tatsächlichen Lauf-
+ * Ergebnis, und macht den gesamten Verlauf (S-402/S-404) wertlos. Der Status-Endpunkt
+ * liefert deshalb weiterhin NUR `status`/`phase`/`reportRef?` ohne Ampel-/Findings-
+ * Behauptung, bis eine echte Findings-Extraktion existiert (Core müsste die erfasste
+ * Ausgabe im Job-Objekt exponieren + ein Parser-Vertrag für `/agent-flow:red-team`-Output
+ * definiert werden — Folge-Story). `reportRef` bleibt trotzdem ohne Store nutzbar: fällt
+ * mangels Store-Treffer auf den vom Runner bereits extrahierten `job.prHint` zurück (s.
+ * unten, AC12-Bericht-Link funktioniert unabhängig von der offenen Findings-Naht).
  *
  * Security (Floor, AC22): keine Secrets/Tokens/absolute Host-Pfade in Response/Log; `jobId`
  * ist eine reine Korrelations-ID (`randomUUID()` im Runner); argv bleibt Array (kein Shell-
@@ -315,7 +332,10 @@ export function vpsContainerScanRouter(runner, deps = {}, options = {}) {
 
     // scanResultStore (S-402, defensiv/best-effort, AC6): ampel/findings/reportRef nur wenn
     // ein echter Store existiert UND einen Eintrag zu dieser jobId liefert. Ein Store-Fehler
-    // darf den Status-Poll nie crashen lassen (NFR Robustheit).
+    // darf den Status-Poll nie crashen lassen (NFR Robustheit). Kein record()-Aufruf hier
+    // (Review-Fund S-403 Iteration 2, s. Moduldoku oben) — solange keine echte Findings-
+    // Extraktion existiert, bleiben ampel/findings ohne Store-Treffer bewusst abwesend
+    // (kein irreführendes "gruen").
     if (scanResultStore && typeof scanResultStore.getByJobId === 'function') {
       try {
         const stored = await scanResultStore.getByJobId(jobId);
@@ -327,6 +347,17 @@ export function vpsContainerScanRouter(runner, deps = {}, options = {}) {
       } catch {
         // best-effort — kein Crash, Felder bleiben abwesend (optional laut AC3-Contract).
       }
+    }
+
+    // AC12-Bericht-Link bleibt auch OHNE Store/Findings-Naht nutzbar: fällt bei sauberem
+    // Abschluss (status:'done') mangels Store-Treffer auf den vom Runner bereits
+    // extrahierten PR-/Protokoll-Hinweis zurück (Review-Fund S-403 Iteration 2 — der
+    // Bericht-Link darf nicht an der offenen Findings-Naht hängen). Auf `done` begrenzt
+    // — konsistent mit ampel/findings, die ebenfalls nur bei sauberem Abschluss eine
+    // Aussage treffen (der Core setzt `prHint` ohnehin nur im `done`-Pfad, s.
+    // `HeadlessRunnerCore`, dies ist Defense in Depth für die Response-Form).
+    if (status === 'done' && body.reportRef === undefined && typeof job.prHint === 'string' && job.prHint) {
+      body.reportRef = job.prHint;
     }
 
     return res.status(200).json(body);
