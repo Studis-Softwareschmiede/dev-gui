@@ -72,6 +72,33 @@
  *          „Keine Berechtigung"-Meldung ohne Crash (Terminal.jsx, einmalig); übrige
  *          Kartenliste bleibt unberührt (Fehler ist auf die jeweilige Zeile beschränkt).
  *
+ * Implements: red-team-scan-per-container AC10, AC11, AC12, AC13, AC21 (S-403, Frontend —
+ *   Backend-Endpunkte S-401/S-402 bereits gelandet)
+ *   AC10 — „Red-Team-Scan"-Knopf je `ContainerRow`, NUR für managed+laufende Container
+ *          (`c.managed && state==='running'`); Klick sperrt den Knopf sofort (Spinner +
+ *          mitlaufende Uhr, `formatElapsed`), ein zweiter Klick ist wirkungslos, solange
+ *          das Panel gemountet ist (Client-Sperre; Server-`409` bleibt zusätzlich bestehen).
+ *   AC11 — Live-Fortschritts-Panel (`RedTeamScanPanel.jsx`, Muster `ObsidianIngestOverlay`):
+ *          startet den Job selbst (POST beim Mount) und pollt bis zu einem Terminalzustand;
+ *          Phasen-Anzeige bewusst defensiv (Backend liefert nur `phase∈{direkt,fertig}`,
+ *          coarse — kein Vortäuschen granularer Zwischenstände).
+ *   AC12 — Ergebnis-Anzeige bei `done`: Ampel-Textbadge (grün/gelb/rot) + Befund-Kurzliste
+ *          (max. 5, Rest als „N weitere") NUR bei echten `ampel`-Daten vom Endpunkt (Store-
+ *          Treffer — die Findings-Extraktion bleibt eine offene Folge-Naht, s.
+ *          `src/vpsContainerScanRouter.js`); ohne `ampel`-Daten eine ehrliche neutrale
+ *          Meldung statt einer irreführenden grünen „keine Befunde"-Aussage (Review-Fund
+ *          Iteration 2). Link zum vollen Bericht (`reportRef`, fällt bei `done` serverseitig
+ *          auf `job.prHint` zurück, sofern kein Store-Treffer — funktioniert unabhängig von
+ *          der offenen Findings-Naht) — ohne `reportRef` ein klarer „kein Bericht"-Hinweis.
+ *   AC13 — `failed`/`auth-expired`/Netzwerk-/Start-Fehler/Timeout (Safety-Window + Fail-
+ *          Streak, Muster `RedTeamView`) zeigen einen `role="alert"`-Text — nie ein
+ *          hängender Spinner/leerer Endzustand; ein Nicht-200-Poll-Ergebnis wird explizit
+ *          als Fehler behandelt (lessons 2026-07-01), nicht als „noch running".
+ *   AC21 — Kein zusätzlicher Rollen-Check am Knopf (bewusste Owner-Entscheidung — Cloudflare
+ *          Access davor genügt); dieselbe Zugriffs-Grenze wie alle übrigen `/api/vps/*`-Aktionen.
+ *   (AC1–AC9/AC22 — Backend/Confinement/Persistenz — s. `src/vpsContainerScanRouter.js`,
+ *   `src/ScanResultStore.js`, S-401/S-402, bereits gelandet.)
+ *
  * Security (Floor):
  *   - Nur Label-Referenzen werden an das Backend gesendet (sshKeyAssignment),
  *     niemals rohe Key-Material-Strings vom Client.
@@ -89,6 +116,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Terminal } from './Terminal.jsx';
+import { RedTeamScanPanel } from './RedTeamScanPanel.jsx';
 
 /**
  * Build a WS URL from a relative path such as '/ws/vps-terminal'. Handles http→ws
@@ -468,6 +496,44 @@ function ContainerRow({ container: c, provider, serverId, onAction, onLogs, onRe
   const startDisabled = isPending || isRunning;
   const stopRestartDisabled = isPending || !isRunning;
 
+  // ── Red-Team-Scan (red-team-scan-per-container AC10–AC13, AC21) ────────────────
+  // `scanOpen` ist die EINZIGE Quelle für den Knopf-Lock (AC10): solange das Panel
+  // gemountet ist, ist der Knopf gesperrt — ein zweiter Klick ist wirkungslos (Client-
+  // Sperre; Server-409 bleibt zusätzlich bestehen). `scanActive` steuert nur die
+  // Spinner-/Uhr-Anzeige AM KNOPF (stoppt bei Terminalzustand via onEnded, das Panel
+  // bleibt bis zum expliziten Schließen sichtbar — AC12/AC13: kein leerer Endzustand,
+  // der Betreiber sieht das Ergebnis, bis er es aktiv wegklickt).
+  const [scanOpen, setScanOpen] = useState(false);
+  const [scanActive, setScanActive] = useState(false);
+  const [scanElapsedSec, setScanElapsedSec] = useState(0);
+  const scanStartRef = useRef(null);
+
+  // AC10: nur für managed, laufende Container.
+  const canScan = c.managed && isRunning;
+
+  const handleScanClick = useCallback(() => {
+    if (scanOpen) return; // Client-Sperre — Doppelklick wirkungslos (AC10).
+    scanStartRef.current = Date.now();
+    setScanElapsedSec(0);
+    setScanActive(true);
+    setScanOpen(true);
+  }, [scanOpen]);
+
+  // Mitlaufende Uhr am Knopf (AC10), solange der Scan aktiv ist.
+  useEffect(() => {
+    if (!scanActive) return undefined;
+    const timer = setInterval(() => {
+      setScanElapsedSec(Math.floor((Date.now() - (scanStartRef.current ?? Date.now())) / 1000));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [scanActive]);
+
+  const handleScanEnded = useCallback(() => setScanActive(false), []);
+  const handleScanClose = useCallback(() => {
+    setScanOpen(false);
+    setScanActive(false);
+  }, []);
+
   const handleAction = useCallback(async (action) => {
     setActionState('pending');
     setActionMsg(null);
@@ -589,6 +655,20 @@ function ContainerRow({ container: c, provider, serverId, onAction, onLogs, onRe
         >
           {isPending ? '…' : 'Update'}
         </button>
+        {/* AC10 (red-team-scan-per-container): nur managed, laufende Container. */}
+        <button
+          type="button"
+          style={!canScan || scanOpen
+            ? { ...containerStyles.actionSmall, ...containerStyles.actionScan, opacity: 0.45, cursor: 'not-allowed' }
+            : { ...containerStyles.actionSmall, ...containerStyles.actionScan }}
+          disabled={!canScan || scanOpen}
+          aria-label={`Red-Team-Scan für Container ${c.name} auslösen`}
+          aria-busy={scanActive}
+          title={!canScan ? 'Nur für laufende, managed Container verfügbar' : undefined}
+          onClick={handleScanClick}
+        >
+          {scanActive ? `Scan läuft… ${formatElapsed(scanElapsedSec)}` : 'Red-Team-Scan'}
+        </button>
         <button
           type="button"
           style={containerStyles.actionSmall}
@@ -636,8 +716,32 @@ function ContainerRow({ container: c, provider, serverId, onAction, onLogs, onRe
       {actionState === 'ok' && (
         <span style={containerStyles.feedbackOk} role="status">OK</span>
       )}
+
+      {/* AC11–AC13 (red-team-scan-per-container): Live-Fortschritts-/Ergebnis-Panel. */}
+      {scanOpen && (
+        <RedTeamScanPanel
+          provider={provider}
+          serverId={serverId}
+          containerId={c.containerId}
+          containerLabel={c.hostname ?? c.name}
+          onClose={handleScanClose}
+          onEnded={handleScanEnded}
+        />
+      )}
     </li>
   );
+}
+
+/**
+ * Formatiert Sekunden als "m:ss" für die mitlaufende Uhr am Scan-Knopf (AC10).
+ * @param {number} totalSec
+ * @returns {string}
+ */
+function formatElapsed(totalSec) {
+  const s = Math.max(0, totalSec);
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  return `${m}:${String(rem).padStart(2, '0')}`;
 }
 
 // ── ContainerOverview ─────────────────────────────────────────────────────────
@@ -2764,6 +2868,13 @@ const containerStyles = {
     background: '#1a1300',
     color: '#e3b341',
     border: '1px solid #9e6a03',
+  },
+  // AC10 (red-team-scan-per-container): Scan-Knopf — eigene Akzentfarbe (Violett),
+  // damit er sich visuell von Stop/Update/Entfernen abhebt.
+  actionScan: {
+    background: '#1a0e2a',
+    color: '#c4b5fd',
+    border: '1px solid #5b21b6',
   },
   updateHint: {
     display: 'block',

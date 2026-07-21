@@ -33,6 +33,14 @@
  *         containerId) → 400.
  *   AC22 — Security-Floor: jobId ist reine Korrelations-ID; keine Host-Pfade in der
  *         Response; Confinement bleibt bei einem Store-Fehler robust (kein Crash).
+ *   reportRef-Fallback (S-403 Iteration 2, Review-Fund) — GET .../scan/:jobId liefert
+ *         `reportRef` bei `status:'done'` auch OHNE Store-Treffer direkt aus `job.prHint`
+ *         (der Bericht-Link darf nicht an der offenen Findings-Extraktions-Naht hängen);
+ *         ein vorhandener Store-Treffer hat Vorrang vor dem `prHint`-Fallback. KEIN
+ *         `scanResultStore.record()`-Aufruf mehr an dieser Stelle (Review-Fund Iteration 2:
+ *         ein hartkodiertes `findings:[]` hätte für JEDEN abgeschlossenen Lauf dauerhaft
+ *         "gruen" persistiert — irreführend für ein Sicherheitswerkzeug; die Findings-
+ *         Extraktion bleibt eine bewusst offene Folge-Naht, s. Moduldoku).
  *
  * Muster: express + node:http createServer auf Port 0 (127.0.0.1), kein supertest
  * (wie redTeamRouter.test.js / reconcileRouter.test.js). Injizierte Stubs für runner +
@@ -562,6 +570,68 @@ describe('GET .../containers/:containerId/scan/:jobId — AC3', () => {
       const { body } = await httpGet(srv, `${SCAN_PATH}/${start.body.jobId}`);
       expect(body.ampel).toBeUndefined();
       expect(body.findings).toBeUndefined();
+      expect(body.reportRef).toBeUndefined();
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+});
+
+// ── reportRef-Fallback auf job.prHint (S-403 Iteration 2, Review-Fund) ──────────
+
+describe('GET .../containers/:containerId/scan/:jobId — reportRef-Fallback (S-403 Iteration 2)', () => {
+  it('bei status:"done" OHNE Store-Treffer liefert reportRef den Runner-prHint', async () => {
+    const scanResultStore = { getByJobId: async () => null };
+    const { app, runner } = makeApp({ scanResultStore });
+    const srv = await startServer(app);
+    try {
+      const start = await httpPost(srv, SCAN_PATH, {});
+      runner.finishJob(start.body.jobId, { status: 'done', prHint: 'https://github.com/org/repo/pull/42' });
+      const { status, body } = await httpGet(srv, `${SCAN_PATH}/${start.body.jobId}`);
+      expect(status).toBe(200);
+      expect(body).toEqual({ status: 'done', phase: 'fertig', reportRef: 'https://github.com/org/repo/pull/42' });
+      // Explizit KEINE ampel/findings — kein irreführendes "gruen" ohne echte Findings-Erfassung.
+      expect(body.ampel).toBeUndefined();
+      expect(body.findings).toBeUndefined();
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('ohne prHint UND ohne Store-Treffer bleibt reportRef abwesend (kein leerer/erfundener Wert)', async () => {
+    const { app, runner } = makeApp();
+    const srv = await startServer(app);
+    try {
+      const start = await httpPost(srv, SCAN_PATH, {});
+      runner.finishJob(start.body.jobId, { status: 'done' });
+      const { body } = await httpGet(srv, `${SCAN_PATH}/${start.body.jobId}`);
+      expect(body).toEqual({ status: 'done', phase: 'fertig' });
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('ein Store-Treffer hat Vorrang vor dem prHint-Fallback', async () => {
+    const scanResultStore = { getByJobId: async () => ({ ampel: 'rot', findings: [], reportRef: 'stored-ref' }) };
+    const { app, runner } = makeApp({ scanResultStore });
+    const srv = await startServer(app);
+    try {
+      const start = await httpPost(srv, SCAN_PATH, {});
+      runner.finishJob(start.body.jobId, { status: 'done', prHint: 'https://github.com/org/repo/pull/42' });
+      const { body } = await httpGet(srv, `${SCAN_PATH}/${start.body.jobId}`);
+      expect(body.reportRef).toBe('stored-ref');
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('bei status:"failed" wird KEIN prHint-Fallback angewandt (Fallback nur bei done)', async () => {
+    const { app, runner } = makeApp();
+    const srv = await startServer(app);
+    try {
+      const start = await httpPost(srv, SCAN_PATH, {});
+      runner.finishJob(start.body.jobId, { status: 'failed', error: 'x', prHint: 'https://github.com/org/repo/pull/1' });
+      const { body } = await httpGet(srv, `${SCAN_PATH}/${start.body.jobId}`);
       expect(body.reportRef).toBeUndefined();
     } finally {
       await new Promise((r) => srv.close(r));
