@@ -108,10 +108,15 @@ function checkMutationAuthz(identity) {
 
 /**
  * Validiert einen Provider-Param (security/R02).
+ *
+ * Exportiert (red-team-scan-per-container AC2/AC6, S-401): `vpsContainerScanRouter.js`
+ * nutzt dieselbe Validierung wie hier — keine zweite Wahrheit für Provider-/ServerId-/
+ * ContainerId-Form-Checks.
+ *
  * @param {unknown} provider
  * @returns {{ ok: boolean, error?: string }}
  */
-function validateProvider(provider) {
+export function validateProvider(provider) {
   if (typeof provider !== 'string' || !provider.trim()) {
     return { ok: false, error: 'provider ist ein Pflichtfeld' };
   }
@@ -149,10 +154,12 @@ function validateServerId(serverId) {
  * Validiert eine containerId (security/R02).
  * Nur alphanumerische Zeichen, Unterstriche und Bindestriche erlaubt.
  *
+ * Exportiert (red-team-scan-per-container AC2/AC6, S-401) — s. `validateProvider`-Kommentar.
+ *
  * @param {unknown} containerId
  * @returns {{ ok: boolean, error?: string }}
  */
-function validateContainerId(containerId) {
+export function validateContainerId(containerId) {
   if (typeof containerId !== 'string' || !containerId.trim()) {
     return { ok: false, error: 'containerId ist ein Pflichtfeld' };
   }
@@ -166,10 +173,12 @@ function validateContainerId(containerId) {
  * Extrahiert und validiert die ServerId aus dem *splat-Param (Express 5).
  * IONOS composite IDs ("<datacenterId>/<serverId>") werden via Array-Join rekonstruiert.
  *
+ * Exportiert (red-team-scan-per-container AC2/AC6, S-401) — s. `validateProvider`-Kommentar.
+ *
  * @param {string|string[]} splatRaw - req.params.splat
  * @returns {{ ok: true, serverId: string } | { ok: false, error: string }}
  */
-function extractServerId(splatRaw) {
+export function extractServerId(splatRaw) {
   const rawServerId = Array.isArray(splatRaw) ? splatRaw.join('/') : String(splatRaw ?? '');
   const val = validateServerId(rawServerId);
   if (!val.ok) return { ok: false, error: val.error };
