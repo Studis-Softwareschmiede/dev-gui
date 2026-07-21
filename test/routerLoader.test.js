@@ -16,8 +16,9 @@
  */
 
 import { describe, it, expect } from '@jest/globals';
-import { mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import express from 'express';
 import { readdir } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
@@ -25,12 +26,14 @@ import { mountRouters } from '../src/routerLoader.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-// Temp-Verzeichnis innerhalb des Projekts (erbt package.json "type":"module")
-const PROJECT_ROOT = new URL('..', import.meta.url).pathname;
-
+// Temp-Verzeichnis im OS-tmpdir (NICHT projekt-relativ): in einem git-Worktree läge ein
+// projekt-relativer Pfad unter .claude/worktrees/, was der routerLoader-Sicherheits-Guard
+// (zu Recht) ablehnt → falscher Test-Fehler im Worktree. os.tmpdir() ist kontext-unabhängig.
+// Das eingelegte package.json {"type":"module"} ersetzt die bisher projekt-geerbte
+// ESM-Auflösung, damit die .js-Router-Vorlagen als ESM (nicht CommonJS) geladen werden.
 async function mkTempProjectDir(prefix) {
-  const base = join(PROJECT_ROOT, 'test', '.tmp-' + prefix + Math.random().toString(36).slice(2));
-  await mkdir(base, { recursive: true });
+  const base = await mkdtemp(join(tmpdir(), 'dev-gui-' + prefix));
+  await writeFile(join(base, 'package.json'), '{"type":"module"}\n', 'utf8');
   return base;
 }
 
