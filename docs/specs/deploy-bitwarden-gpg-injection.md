@@ -4,13 +4,15 @@ title: Deploy-Zugang zu Bitwarden (Variante B) + per-App-GPG-Passphrasen-Injekti
 status: active
 area: deployment
 spec_format: use-case-2.0
-version: 3
+version: 4
 ---
 
 # Deploy-Zugang zu Bitwarden (Variante B) + per-App-GPG-Passphrasen-Injektion
 
 **Schicht 3 (Spec).** Quelle für Schicht 1/2: `docs/concept.md`, `docs/architecture.md`.
 **Bereich:** `deployment`. **Feature:** F-072.
+
+> **v4 — „Zugang prüfen"-Button kennt `config-failed` noch nicht (Folge zu S-409, 2026-07-22).** Der `validateAccess()`-Pfad hinter dem „Zugang prüfen"-Button durchläuft denselben konditionalen `bw config server`-Schritt wie ein Deploy und kann seit S-409/AC19 die Fehlerklasse `config-failed` liefern. Der Validate-Katalog (`bitwardenDeployAccessRouter`, `VALIDATE_ERROR_MESSAGES`) hat dafür jedoch **keinen** Eintrag und fällt auf den generischen Text „Unbekannter Fehler bei der Zugangs-Prüfung." zurück. Neue **AC22** (§4.5) ergänzt eine spezifische, verständliche Meldung — analog zur Deploy-Meldung `bitwarden-config-failed` (AC19).
 
 > **v3 — Folge-Bug zu S-386: `bw config server` bei jedem Deploy (2026-07-22).** Der in S-386 eingeführte **persistente**, eingeloggte bw-Appdata-Pfad hat einen Folge-Bug: `#openSession` rief `bw config server <url>` bei **jedem** Aufruf **vor** der `bw login --check`-Weiche auf. Auf dem persistenten, eingeloggten Verzeichnis verweigert die bw-CLI das mit „Logout required before server config update" (Exit 1) → jeder Deploy **nach dem ersten** scheitert. Neue **AC17–AC21** (§4.5) machen den `config`-Schritt **konditional** und geben dem config-Fehler eine **eigene** Fehlerklasse. Angewandter Workaround bis zum Fix: `server_url`-Feld im Deploy-Zugangs-Store geleert (dann entfällt der config-Schritt, AC21).
 
@@ -194,6 +196,14 @@ scheitert. Verifiziert 2026-07-22 im laufenden Container.
   `server_url` leer oder nicht gesetzt, gilt der Default-Server `https://vault.bitwarden.com`
   und `bw config server` wird **nicht** aufgerufen (bestehendes Verhalten aus §4.1 AC1, hier
   dokumentiert). Dieser Pfad war der angewandte Workaround, bis AC17 landet.
+- **AC22** — **Der „Zugang prüfen"-Button übersetzt die Fehlerklasse `config-failed`.** `validateAccess()`
+  läuft durch denselben konditionalen `bw config server`-Schritt wie ein Deploy und kann seit S-409/AC19
+  `errorClass: "config-failed"` zurückgeben. Der Validate-Pfad (`bitwardenDeployAccessRouter`,
+  Katalog `VALIDATE_ERROR_MESSAGES`) erhält für `config-failed` eine **eigene, verständliche** Meldung
+  mit Handlungshinweis (statt des generischen Fallbacks „Unbekannter Fehler bei der Zugangs-Prüfung.") —
+  inhaltlich analog zur Deploy-Meldung `bitwarden-config-failed` (AC19), **Reuse** der bestehenden
+  Fehlerbehandlung/des Katalogs, **kein** UI-/Komponenten-Umbau (`DeployZugangCategory.jsx` rendert
+  `validateResult.error` bereits). Tritt kein `config-failed` auf, bleibt das heutige Verhalten unverändert.
 
 ## 5. Tests (Pflicht)
 
@@ -219,6 +229,9 @@ scheitert. Verifiziert 2026-07-22 im laufenden Container.
   - **Zwei aufeinanderfolgende Sessions** über den simulierten eingeloggten Zustand (`config server`
     → Exit 1) laufen beide erfolgreich durch, weil config übersprungen wird (AC20-Regressionstest).
   - Leere `server_url` → **kein** `config server`-Aufruf, Default-Server (AC21).
+  - „Zugang prüfen"/`validateAccess` mit simuliertem `config-failed` (`config server` Exit 1) → Response
+    trägt die **spezifische** `config-failed`-Meldung, **nicht** den generischen „Unbekannter Fehler"-Text;
+    kein Rohtext-Leak (AC22).
 
 ## 6. Offene Punkte (bewusst, nicht blockierend)
 
