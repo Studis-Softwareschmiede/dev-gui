@@ -169,9 +169,24 @@ Bestätigung** — als Board-Punkte übernommen werden.
 
 - **AC14 — Verlauf-Aufklapper.** Am Container ein „Verlauf"-Aufklapper: Liste der Läufe (Zeitpunkt,
   Testort, Ampel, Befund-Anzahl+Art, Bericht-Referenz); Klick öffnet den Detailbericht (`GET …/scans/:scanId`).
+  **Präzisierung (S-404 — Felder ohne Backend-Änderung, kompakter `list()`-Kontrakt bleibt unverändert):**
+  die kompakte `GET …/containers/:containerId/scans`-Form (AC8, S-402 — bereits vertraglich fixiert UND
+  getestet, `test/ScanResultStore.test.js`: `entry).not.toHaveProperty('reportRef')`) liefert weder
+  `reportRef` noch einen Testort-Wert je Zeile. „Testort" wird als statischer Text „Direkt + über
+  Cloudflare" gerendert — jeder Lauf testet laut AC5 **immer beide** Orte in einem Job, ein Testort-Feld
+  je Zeile wäre redundant. „Befund-Anzahl+Art" = `findingCount` + die bereits vorhandene `ampel`-Kategorie
+  (identisches Vokabular zu AC12). „Bericht-Referenz" ist der Klick-auf-Zeile-Button selbst — er öffnet
+  den Detailbericht (`GET …/scans/:scanId`, liefert `reportRef`+`findings`) inline.
 - **AC15 — Board-Rückverfolgung (live).** Trägt ein Verlaufseintrag `boardItemIds`, zeigt der Verlauf je
   Scan „daraus wurden N Punkte aufs Board gelegt — Status live vom Board"; der Board-Status wird **live**
   gelesen (keine eigene DB — ADR-005-Linie).
+  **Präzisierung (S-404 — Live-Lesung ohne neuen Backend-Endpunkt):** der `repoSlug` (Board-Projekt-Slug,
+  identisch zu `ziel` aus AC1) kommt aus dem bereits vorhandenen Detail-Endpunkt (`GET …/scans/:scanId`,
+  AC8/S-405 — `scan.repoSlug`); der Status je Board-ID kommt aus dem bereits vorhandenen, read-only
+  `GET /api/board/projects/:slug` (`src/boardRouter.js`, liefert `features[].stories[].status`) — kein
+  neuer Backend-Endpunkt nötig (geprüfter, bereits vorhandener Lese-Pfad). Fehlt `repoSlug` (älterer/
+  unvollständiger Verlaufseintrag) oder schlägt der Board-Fetch fehl, zeigt die Zeile die Anzahl
+  weiterhin, aber „Status derzeit nicht verfügbar" statt zu crashen (Robustheit-NFR).
 
 ### Befunde → Board (nur auf Bestätigung)
 

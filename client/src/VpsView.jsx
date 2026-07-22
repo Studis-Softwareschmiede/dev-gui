@@ -99,6 +99,18 @@
  *   (AC1–AC9/AC22 — Backend/Confinement/Persistenz — s. `src/vpsContainerScanRouter.js`,
  *   `src/ScanResultStore.js`, S-401/S-402, bereits gelandet.)
  *
+ * Implements: red-team-scan-per-container AC14, AC15 (S-404, Frontend — Backend-Endpunkte
+ *   AC8 bereits S-402/S-405 gelandet, unverändert wiederverwendet)
+ *   AC14 — „Verlauf"-Knopf je managed `ContainerRow` (`aria-expanded`, Muster des
+ *          bestehenden „Container"-Aufklappers) öffnet `RedTeamScanHistory.jsx`: listet
+ *          die Läufe (`GET .../scans`) mit Zeitpunkt/Testort/Ampel/Befund-Anzahl+Art,
+ *          Klick auf einen Lauf öffnet den Detailbericht (`GET .../scans/:scanId`) —
+ *          Details s. `RedTeamScanHistory.jsx` Moduldoku.
+ *   AC15 — Board-Rückverfolgung live: Verlaufseinträge mit `boardItemIds` zeigen „daraus
+ *          wurden N Punkte aufs Board gelegt — Status live vom Board" (Live-Lesung über
+ *          den bestehenden `GET /api/board/projects/:slug`, keine eigene DB) — Details s.
+ *          `RedTeamScanHistory.jsx` Moduldoku.
+ *
  * Security (Floor):
  *   - Nur Label-Referenzen werden an das Backend gesendet (sshKeyAssignment),
  *     niemals rohe Key-Material-Strings vom Client.
@@ -117,6 +129,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Terminal } from './Terminal.jsx';
 import { RedTeamScanPanel } from './RedTeamScanPanel.jsx';
+import { RedTeamScanHistory } from './RedTeamScanHistory.jsx';
 
 /**
  * Build a WS URL from a relative path such as '/ws/vps-terminal'. Handles http→ws
@@ -534,6 +547,15 @@ function ContainerRow({ container: c, provider, serverId, onAction, onLogs, onRe
     setScanActive(false);
   }, []);
 
+  // ── Verlauf-Aufklapper (red-team-scan-per-container AC14/AC15) ─────────────────
+  // Sichtbar für JEDEN managed Container (Verlauf-Einträge sind an container.hostname
+  // gebunden, s. `ScanResultStore` — nicht an den aktuellen Laufzustand gekoppelt wie
+  // der Scan-Auslöse-Knopf selbst; ein inzwischen gestoppter Container behält seinen
+  // Verlauf sichtbar).
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const canShowHistory = c.managed;
+  const historyPanelId = `redteam-history-panel-${c.containerId}`.replace(/[^a-zA-Z0-9-]/g, '-');
+
   const handleAction = useCallback(async (action) => {
     setActionState('pending');
     setActionMsg(null);
@@ -669,6 +691,22 @@ function ContainerRow({ container: c, provider, serverId, onAction, onLogs, onRe
         >
           {scanActive ? `Scan läuft… ${formatElapsed(scanElapsedSec)}` : 'Red-Team-Scan'}
         </button>
+        {/* AC14 (red-team-scan-per-container): Verlauf-Aufklapper — nur für managed
+            Container (Verlauf ist an container.hostname gebunden). */}
+        {canShowHistory && (
+          <button
+            type="button"
+            style={historyOpen
+              ? { ...containerStyles.actionSmall, ...containerStyles.actionHistory, ...containerStyles.actionHistoryActive }
+              : { ...containerStyles.actionSmall, ...containerStyles.actionHistory }}
+            aria-label={`Verlauf für Container ${c.name} ${historyOpen ? 'schließen' : 'anzeigen'}`}
+            aria-expanded={historyOpen}
+            aria-controls={historyPanelId}
+            onClick={() => setHistoryOpen((v) => !v)}
+          >
+            Verlauf
+          </button>
+        )}
         <button
           type="button"
           style={containerStyles.actionSmall}
@@ -726,6 +764,17 @@ function ContainerRow({ container: c, provider, serverId, onAction, onLogs, onRe
           containerLabel={c.hostname ?? c.name}
           onClose={handleScanClose}
           onEnded={handleScanEnded}
+        />
+      )}
+
+      {/* AC14/AC15 (red-team-scan-per-container): Verlauf-Aufklapper + Board-Rückverfolgung. */}
+      {canShowHistory && (
+        <RedTeamScanHistory
+          provider={provider}
+          serverId={serverId}
+          containerId={c.containerId}
+          containerLabel={c.hostname ?? c.name}
+          open={historyOpen}
         />
       )}
     </li>
@@ -2875,6 +2924,17 @@ const containerStyles = {
     background: '#1a0e2a',
     color: '#c4b5fd',
     border: '1px solid #5b21b6',
+  },
+  // AC14 (red-team-scan-per-container): Verlauf-Aufklapper-Knopf — neutrale Akzentfarbe,
+  // aktiver Zustand analog `actionBtnContainerActive` (heller Rand bei geöffnetem Aufklapper).
+  actionHistory: {
+    background: '#161b22',
+    color: '#8b949e',
+    border: '1px solid #30363d',
+  },
+  actionHistoryActive: {
+    color: '#c9d1d9',
+    border: '1px solid #58a6ff',
   },
   updateHint: {
     display: 'block',
