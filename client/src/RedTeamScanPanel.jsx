@@ -124,14 +124,17 @@ const PHASE_STEPS = [
   { key: 'fertig', label: 'Fertig' },
 ];
 
-const AMPEL_LABEL = {
+// Exportiert (Simplicity-Leiter Stufe 2, coder/R09): `RedTeamScanHistory.jsx` (AC14/AC15,
+// S-404) verwendet dasselbe Ampel-Vokabular für die Verlauf-Liste — keine zweite,
+// unabhängig driftende Label-/Farb-Zuordnung.
+export const AMPEL_LABEL = {
   gruen: 'Grün — keine Befunde',
   gelb: 'Gelb — geringe/mittlere Befunde',
   rot: 'Rot — kritische Befunde',
 };
 
 // Kontrastpaare analog BoardView/ObsidianIngestOverlay-Konvention (WCAG AA).
-const AMPEL_STYLE = {
+export const AMPEL_STYLE = {
   gruen: { color: '#6ee7b7', background: '#0f2417', border: '1px solid #14532d' },
   gelb: { color: '#fcd34d', background: '#2a1f00', border: '1px solid #b45309' },
   rot: { color: '#fca5a5', background: '#2a1a1a', border: '1px solid #7f1d1d' },
