@@ -1,0 +1,27 @@
+id: S-416
+parent: F-096
+title: Port-Aufloesung robust gegen Inline-Kommentare + port-null als Vorbedingungsfehler
+  + deployment-bewusste Ziel-Adressierung
+status: To Do
+priority: P1
+spec: docs/specs/regression-local-execution.md
+implements:
+- AC4
+- AC5
+- AC6
+depends: null
+labels: null
+size_est: M
+dispo_est: '4.0'
+dispo_act: null
+dispo_forecast: null
+estimate_note: 'M (Score 7: 3 AC + zwei Regex-Fixes + deployment-bewusste Adressierung
+  host.docker.internal/127.0.0.1 + Docker-Port-Mapping). baseline js|balanced|M.'
+confidence: medium
+tok_est: '1659043'
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-07-22T19:10:22Z'
+updated_at: '2026-07-22T19:12:01Z'
+done_at: null

@@ -1,0 +1,30 @@
+id: F-096
+title: Regressionslauf target:local end-to-end lauffähig + Scope-Vertrag konsistent
+goal: 'Ein target:local-Regressionslauf (Referenzfall flashrescue-Verbund) laesst
+  sich aus der dev-gui-Oberflaeche starten und schliesst reproduzierbar gruen ab,
+  ohne manuellen Fummel im Ausfuehrungskontext: der RegressionRunner stellt seine
+  Vorbedingungen aktiv her (Test-Dependencies + Playwright-Browser im Klon, robuste
+  + deployment-bewusste erreichbare Ziel-Adresse, App-Secrets sicher in die Kind-Env
+  via Bitwarden/GPG, Test-Backend mit korrekter Test-Config), statt npx playwright
+  test blind zu starten und am fehlenden CTRF-Ergebnis zu scheitern (Befunde 1-4,
+  verifiziert 2026-07-22). Zusaetzlich: Scope-Vertrag Reader<->Runner konsistent (Verbund
+  ohne id ausfuehrbar, Befund 5). Spec docs/specs/regression-local-execution.md +
+  regression-run.md AC13.'
+status: Backlog
+priority: P1
+spec: docs/specs/regression-local-execution.md
+definition_of_done: null
+labels:
+- security
+depends: null
+owner: null
+stories:
+- S-415
+- S-416
+- S-417
+- S-418
+- S-419
+progress: 0/5 done
+created_at: '2026-07-22T19:09:55Z'
+updated_at: '2026-07-22T19:16:10Z'
+area: fabrik-arbeiten
