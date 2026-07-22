@@ -172,7 +172,7 @@ describe('AppShell — AC1: Entry panel tiles', () => {
     // Tile buttons are inside the entry panel main landmark
     const panel = getByRole('main', { name: /einstiegs-panel/i });
     const tiles = panel.querySelectorAll('button[data-view]');
-    expect(tiles).toHaveLength(7);
+    expect(tiles).toHaveLength(6);
   });
 
   it('renders tile labelled "GitHub"', () => {
@@ -205,14 +205,14 @@ describe('AppShell — AC1: Entry panel tiles', () => {
     expect(getByRole('button', { name: /^deployments/i })).toBeTruthy();
   });
 
-  it('Deployments tile is the last (seventh) tile in order (AC4; red-team inserted before it)', () => {
+  it('Deployments tile is the last (sixth) tile in order (AC4; red-team-tile abgebaut, S-408)', () => {
     window.location.hash = '';
     const { getByRole } = render(React.createElement(AppShell));
     const panel = getByRole('main', { name: /einstiegs-panel/i });
     const tiles = Array.from(panel.querySelectorAll('button[data-view]'));
-    expect(tiles).toHaveLength(7);
+    expect(tiles).toHaveLength(6);
     const ids = tiles.map((t) => t.getAttribute('data-view'));
-    expect(ids).toEqual(['github', 'vps', 'cloudflare', 'factory', 'team', 'red-team', 'deployments']);
+    expect(ids).toEqual(['github', 'vps', 'cloudflare', 'factory', 'team', 'deployments']);
   });
 
   it('Deployments IS a tile (button[data-view="deployments"]) in the panel (AC1/AC2)', () => {
@@ -832,13 +832,13 @@ describe('settings-shell — AC4: Settings view sections', () => {
 
 // ── settings-shell AC5 — Entry panel: six tiles, Settings is not a tile ──────
 
-describe('settings-shell — AC5: Entry panel (seven tiles, Settings not a tile)', () => {
-  it('entry panel shows exactly seven tiles (after red-team-tile)', () => {
+describe('settings-shell — AC5: Entry panel (six tiles, Settings not a tile)', () => {
+  it('entry panel shows exactly six tiles (red-team-tile abgebaut, S-408)', () => {
     window.location.hash = '';
     const { getByRole } = render(React.createElement(AppShell));
     const panel = getByRole('main', { name: /einstiegs-panel/i });
     const tiles = panel.querySelectorAll('button[data-view]');
-    expect(tiles).toHaveLength(7);
+    expect(tiles).toHaveLength(6);
   });
 
   it('Settings is NOT a tile in the entry panel', () => {
@@ -1202,7 +1202,7 @@ describe('view-registry — AC10: non-tile views absent from panel', () => {
     const ids = Array.from(panel.querySelectorAll('button[data-view]')).map(
       (b) => b.getAttribute('data-view')
     );
-    expect(ids).toEqual(['github', 'vps', 'cloudflare', 'factory', 'team', 'red-team', 'deployments']);
+    expect(ids).toEqual(['github', 'vps', 'cloudflare', 'factory', 'team', 'deployments']);
   });
 });
 

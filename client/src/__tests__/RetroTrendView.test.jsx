@@ -195,12 +195,12 @@ describe('retro-trend-frontend — AC2: AppShell rendert RetroTrendView', () => 
     });
   });
 
-  it('Panel hat weiterhin genau sieben Kacheln (RetroTrendView ist KEIN TILES-Eintrag)', () => {
+  it('Panel hat weiterhin genau sechs Kacheln (RetroTrendView ist KEIN TILES-Eintrag)', () => {
     window.location.hash = '';
     const { getByRole } = render(React.createElement(AppShell));
     const panel = getByRole('main', { name: /einstiegs-panel/i });
     const tiles = panel.querySelectorAll('button[data-view]');
-    expect(tiles).toHaveLength(7);
+    expect(tiles).toHaveLength(6);
     const ids = Array.from(tiles).map((t) => t.getAttribute('data-view'));
     expect(ids).not.toContain('retro-trend');
   });

@@ -63,10 +63,11 @@
  *
  * cwd-Auflösung (Spawn-Verzeichnis des `claude -p`-Kindprozesses): der Container wird über
  * `imageRepoName(container.image)` bzw. `container.hostname` auf einen Workspace-Klon
- * gemappt (identische Matching-Logik wie `redTeamRouter.js#computeAllowlist` — der
- * kachel-Vorgänger dieses Features, hier NICHT abgebaut, s. S-408). Kein Match → 422
- * not-scannable (der Server kann ohne aufgelöstes cwd keinen Lauf starten). Die Wahl von
- * cwd = Repo-Verzeichnis (statt eines generischen Workspace-Roots) ist bewusst: sie gibt
+ * gemappt (Matching-Logik, ursprünglich `redTeamRouter.js#computeAllowlist` — der
+ * kachel-Vorgänger dieses Features, mit S-408/AC23 abgebaut; `imageRepoName` lebt seither
+ * hier). Kein Match → 422 not-scannable (der Server kann ohne aufgelöstes cwd keinen Lauf
+ * starten). Die Wahl von cwd = Repo-Verzeichnis (statt eines generischen Workspace-Roots)
+ * ist bewusst: sie gibt
  * jedem Container/Repo ein EIGENES `ProjectJobLock`-Schlüssel-Verzeichnis, sodass ein
  * laufender Scan für Container A einen parallelen Scan für Container B (anderes Repo)
  * NICHT blockiert (AC5 — zwei unabhängige Testorte/Container, kein Cross-Blocking über
@@ -122,7 +123,6 @@ import {
   validateContainerId,
   extractServerId,
 } from './vpsContainerRouter.js';
-import { imageRepoName } from './redTeamRouter.js';
 import { validateProjectPath, resolveProjectSlug } from './workspacePath.js';
 import { BoardWriterError, IDEA_TITLE_MAX_LENGTH } from './BoardWriter.js';
 
@@ -137,6 +137,29 @@ import { BoardWriterError, IDEA_TITLE_MAX_LENGTH } from './BoardWriter.js';
  */
 function containerKey(provider, serverId, containerId) {
   return `${provider}::${serverId}::${containerId}`;
+}
+
+/**
+ * Leitet den Image-Repo-Namen aus einer Container-Image-Referenz ab: letztes
+ * Pfadsegment ohne Registry-Präfix und ohne `:tag`/`@digest` (übernommen aus dem
+ * abgebauten `redTeamRouter.js#imageRepoName` — S-408/AC23, einziger verbleibender
+ * Konsument dieser Ableitung).
+ *
+ * Beispiele:
+ *   ghcr.io/org/dev-gui:sha        → dev-gui
+ *   ghcr.io/org/dev-gui@sha256:ab… → dev-gui
+ *   localhost:5000/foo/bar:latest  → bar
+ *   dev-gui                        → dev-gui
+ *
+ * @param {string} image
+ * @returns {string} Repo-Name (leer bei leerer/ungültiger Eingabe)
+ */
+export function imageRepoName(image) {
+  if (typeof image !== 'string' || image.trim() === '') return '';
+  // Digest abschneiden (@sha256:…), dann letztes '/'-Segment, dann Tag (:…) entfernen.
+  const noDigest = image.split('@')[0];
+  const lastSeg = noDigest.split('/').pop() ?? '';
+  return lastSeg.split(':')[0];
 }
 
 /**
@@ -157,8 +180,8 @@ function mapStatus(coreStatus) {
 
 /**
  * Ermittelt den Workspace-Repo-Slug für einen Container: Match über den Image-Repo-Namen
- * ODER den Hostname gegen `workspaceScanner.listClones()` (identische Logik wie
- * `redTeamRouter.js#computeAllowlist`).
+ * ODER den Hostname gegen `workspaceScanner.listClones()` (Matching-Logik, ursprünglich
+ * `redTeamRouter.js#computeAllowlist` — s. `imageRepoName()` oben).
  *
  * @param {{ image: string, hostname: string|null }} container
  * @param {{ listClones?: () => Promise<Array<{name:string}>> }} [workspaceScanner]

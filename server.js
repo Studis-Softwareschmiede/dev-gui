@@ -972,9 +972,9 @@ const deps = {
   // headless-reconcile-runner AC1-AC9: getrennter claude -p-Kindprozess-Runner
   // für POST /api/reconcile + GET /api/reconcile/:jobId (reconcile.js Router).
   reconcileRunner,
-  // red-team-tile AC6: Red-Team-Runner + Boundaries für den Allowlist-Targets-Endpunkt
-  // (VPS-laufend ∩ eigenes Repo). vpsDockerControl/vpsRegistry/vpsTargets/workspaceScanner
-  // sind bereits im deps-Objekt vorhanden (vps-/workspace-Router). Router: redTeam.js.
+  // red-team-scan-per-container (S-408/AC23): der Headless-Red-Team-Runner selbst bleibt
+  // bestehen — wiederverwendet vom Pro-Container-Scan-Endpunkt (routers/vpsContainerScan.js).
+  // Die eigenständige Red-Team-Kachel (routers/redTeam.js) wurde mit S-408 abgebaut.
   redTeamRunner,
   // red-team-scan-per-container AC7-AC9 (S-402): ScanResultStore für den Pro-Container-
   // Scan-Verlauf (routers/vpsContainerScan.js — Status-Poll-Anreicherung + die neuen
