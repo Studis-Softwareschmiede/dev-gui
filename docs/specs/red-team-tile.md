@@ -1,10 +1,16 @@
 ---
 id: red-team-tile
 title: Red-Team-Kachel — dünner Auslöser für die autorisierte Angriffs-Fähigkeit der Fabrik
-status: draft
+status: superseded
 area: fabrik-arbeiten
 version: 1
 ---
+
+> **Superseded (S-408/AC23, docs/specs/red-team-scan-per-container.md, ADR-023):** die
+> eigenständige Red-Team-Kachel wurde abgebaut — der Pro-Container-Scan-Knopf in
+> `client/src/VpsView.jsx` ist der einzige Einstieg. `client/src/RedTeamView.jsx`,
+> `src/redTeamRouter.js` und `src/routers/redTeam.js` sind entfernt; der wiederverwendete
+> `src/HeadlessRedTeamRunner.js` bleibt bestehen.
 
 # Red-Team-Kachel
 

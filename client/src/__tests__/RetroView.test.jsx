@@ -243,12 +243,12 @@ describe('retro-view-frontend — AC2: AppShell renders RetroView', () => {
     });
   });
 
-  it('panel still has exactly seven tiles (RetroView is NOT a TILES entry)', () => {
+  it('panel still has exactly six tiles (RetroView is NOT a TILES entry)', () => {
     window.location.hash = '';
     const { getByRole } = render(React.createElement(AppShell));
     const panel = getByRole('main', { name: /einstiegs-panel/i });
     const tiles = panel.querySelectorAll('button[data-view]');
-    expect(tiles).toHaveLength(7);
+    expect(tiles).toHaveLength(6);
     const ids = Array.from(tiles).map((t) => t.getAttribute('data-view'));
     expect(ids).not.toContain('retro');
   });
