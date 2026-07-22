@@ -1,6 +1,7 @@
 /**
  * RedTeamScanPanel.test.jsx — Tests für das Live-Fortschritts-/Ergebnis-Panel des
- * Pro-Container Red-Team-Scans (docs/specs/red-team-scan-per-container.md AC11/AC12/AC13).
+ * Pro-Container Red-Team-Scans (docs/specs/red-team-scan-per-container.md
+ * AC11/AC12/AC13/AC18/AC19/AC20).
  *
  * @jest-environment jsdom
  *
@@ -22,6 +23,14 @@
  *          `onEnded` wird in JEDEM Terminalzustand genau einmal aufgerufen; `onClose`
  *          reagiert in JEDEM Zustand sofort (Esc, Backdrop, Schließen-Button) — auch
  *          während der Lauf noch aktiv ist.
+ *   AC18 — je gezeigtem Befund eine Checkbox, per Default alle vorgehakt (ausser bereits
+ *          `boardId`); Schnellwahl Alle/Keine/Nur kritische (`severity ∈ {high,critical}`).
+ *   AC19 — Sticky Sammel-Button mit live mitzählender Zahl, bei 0 Auswahl gesperrt; Klick →
+ *          Rückfrage (`role="alertdialog"`) → erst nach Bestätigen `POST .../scans/:scanId/board`
+ *          mit den ausgewählten `findingIds`.
+ *   AC20 — `created`- und `skipped`-Antworten sperren die jeweilige Zeile ("→ aufs Board
+ *          gelegt (ID)"); Befunde mit bereits beim Laden gesetzter `boardId` starten direkt
+ *          in diesem Zustand.
  */
 
 import { describe, it, expect, jest, afterEach } from '@jest/globals';
@@ -331,5 +340,252 @@ describe('RedTeamScanPanel — AC13: Fehler/Abbruch', () => {
       fireEvent.click(getByTestId('redteam-scan-close-btn'));
     });
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── AC18/AC19/AC20 — Befundliste, Sammel-Button, Board-Übertrag ─────────────────
+
+/**
+ * Wie `makeFetchFn`, ergänzt aber um einen dritten Request-Typ: `POST .../scans/:scanId/board`
+ * (AC16-Endpunkt, S-405) — unterschieden von der Boot-POST über die URL (`/board`).
+ */
+function makeFullFetchFn({
+  startStatus = 202,
+  startBody = { jobId: 'job-1' },
+  pollResponses = [{ status: 200, body: { status: 'running', phase: 'direkt' } }],
+  boardStatus = 200,
+  boardBody = { created: [], skipped: [] },
+} = {}) {
+  let pollIdx = 0;
+  const calls = [];
+  const fn = jest.fn(async (url, opts) => {
+    calls.push({ url, opts });
+    if (opts?.method === 'POST' && url.includes('/board')) {
+      return { ok: boardStatus === 200, status: boardStatus, json: async () => boardBody };
+    }
+    if (opts?.method === 'POST') {
+      return { ok: startStatus === 202, status: startStatus, json: async () => startBody };
+    }
+    const next = pollResponses[Math.min(pollIdx, pollResponses.length - 1)];
+    pollIdx += 1;
+    if (next.throw) throw new Error('network');
+    return { ok: next.status === 200, status: next.status, json: async () => next.body };
+  });
+  fn.calls = calls;
+  return fn;
+}
+
+const MULTI_FINDINGS = [
+  { id: 'f1', severity: 'critical', kind: 'sqli', testort: 'direkt', titel: 'SQLi' },
+  { id: 'f2', severity: 'low', kind: 'info', testort: 'öffentlich', titel: 'Info-Leak' },
+  { id: 'f3', severity: 'high', kind: 'xss', testort: 'direkt', titel: 'XSS' },
+];
+
+describe('RedTeamScanPanel — AC18: Befundliste mit Vorauswahl', () => {
+  it('alle Befunde sind per Default vorgehakt', async () => {
+    const fetchFn = makeFullFetchFn({
+      pollResponses: [{ status: 200, body: { status: 'done', phase: 'fertig', ampel: 'rot', findings: MULTI_FINDINGS } }],
+    });
+    const { getByTestId } = renderPanel(fetchFn);
+    // AC18-Init-Effekt läuft nach dem Findings-Render — auf die Auswahl warten (nicht nur
+    // auf das Erscheinen der Liste, sonst Race gegen den Initialisierungs-Effekt).
+    await waitFor(() => {
+      expect(getByTestId('redteam-board-transfer-btn').textContent).toMatch(/3 Befunde/);
+    });
+
+    for (const f of MULTI_FINDINGS) {
+      expect(getByTestId(`redteam-finding-checkbox-${f.id}`).checked).toBe(true);
+    }
+  });
+
+  it('Schnellwahl "Keine" hakt alle ab, "Alle" wieder alle an', async () => {
+    const fetchFn = makeFullFetchFn({
+      pollResponses: [{ status: 200, body: { status: 'done', phase: 'fertig', ampel: 'rot', findings: MULTI_FINDINGS } }],
+    });
+    const { getByTestId } = renderPanel(fetchFn);
+    // AC18-Init-Effekt läuft nach dem Findings-Render — auf die Auswahl warten (nicht nur
+    // auf das Erscheinen der Liste, sonst Race gegen den Initialisierungs-Effekt).
+    await waitFor(() => {
+      expect(getByTestId('redteam-board-transfer-btn').textContent).toMatch(/3 Befunde/);
+    });
+
+    await act(async () => { fireEvent.click(getByTestId('redteam-select-none')); });
+    for (const f of MULTI_FINDINGS) {
+      expect(getByTestId(`redteam-finding-checkbox-${f.id}`).checked).toBe(false);
+    }
+
+    await act(async () => { fireEvent.click(getByTestId('redteam-select-all')); });
+    for (const f of MULTI_FINDINGS) {
+      expect(getByTestId(`redteam-finding-checkbox-${f.id}`).checked).toBe(true);
+    }
+  });
+
+  it('Schnellwahl "Nur kritische" wählt severity high/critical', async () => {
+    const fetchFn = makeFullFetchFn({
+      pollResponses: [{ status: 200, body: { status: 'done', phase: 'fertig', ampel: 'rot', findings: MULTI_FINDINGS } }],
+    });
+    const { getByTestId } = renderPanel(fetchFn);
+    // AC18-Init-Effekt läuft nach dem Findings-Render — auf die Auswahl warten (nicht nur
+    // auf das Erscheinen der Liste, sonst Race gegen den Initialisierungs-Effekt).
+    await waitFor(() => {
+      expect(getByTestId('redteam-board-transfer-btn').textContent).toMatch(/3 Befunde/);
+    });
+
+    await act(async () => { fireEvent.click(getByTestId('redteam-select-critical')); });
+    expect(getByTestId('redteam-finding-checkbox-f1').checked).toBe(true);
+    expect(getByTestId('redteam-finding-checkbox-f3').checked).toBe(true);
+    expect(getByTestId('redteam-finding-checkbox-f2').checked).toBe(false);
+  });
+});
+
+describe('RedTeamScanPanel — AC19: Sticky Sammel-Button + Rückfrage', () => {
+  it('Zahl zählt live mit, Button bei 0 Auswahl gesperrt', async () => {
+    const fetchFn = makeFullFetchFn({
+      pollResponses: [{ status: 200, body: { status: 'done', phase: 'fertig', ampel: 'rot', findings: MULTI_FINDINGS } }],
+    });
+    const { getByTestId } = renderPanel(fetchFn);
+    // AC18-Init-Effekt läuft nach dem Findings-Render — auf die Auswahl warten (nicht nur
+    // auf das Erscheinen der Liste, sonst Race gegen den Initialisierungs-Effekt).
+    await waitFor(() => {
+      expect(getByTestId('redteam-board-transfer-btn').textContent).toMatch(/3 Befunde/);
+    });
+
+    expect(getByTestId('redteam-board-transfer-btn').textContent).toMatch(/3 Befunde/);
+    expect(getByTestId('redteam-board-transfer-btn').disabled).toBe(false);
+
+    await act(async () => { fireEvent.click(getByTestId('redteam-select-none')); });
+    expect(getByTestId('redteam-board-transfer-btn').textContent).toMatch(/0 Befunde/);
+    expect(getByTestId('redteam-board-transfer-btn').disabled).toBe(true);
+  });
+
+  it('Klick zeigt Rückfrage; Bestätigen POSTet die ausgewählten findingIds an .../scans/:scanId/board', async () => {
+    const fetchFn = makeFullFetchFn({
+      pollResponses: [{ status: 200, body: { status: 'done', phase: 'fertig', ampel: 'rot', findings: MULTI_FINDINGS } }],
+      boardBody: { created: [{ findingId: 'f1', boardId: 'S-999' }], skipped: [] },
+    });
+    const { getByTestId } = renderPanel(fetchFn);
+    // AC18-Init-Effekt läuft nach dem Findings-Render — auf die Auswahl warten (nicht nur
+    // auf das Erscheinen der Liste, sonst Race gegen den Initialisierungs-Effekt).
+    await waitFor(() => {
+      expect(getByTestId('redteam-board-transfer-btn').textContent).toMatch(/3 Befunde/);
+    });
+
+    await act(async () => { fireEvent.click(getByTestId('redteam-select-critical')); });
+    await act(async () => { fireEvent.click(getByTestId('redteam-board-transfer-btn')); });
+    expect(getByTestId('redteam-board-confirm').textContent).toMatch(/2 Befunde werden aufs Board gelegt/);
+
+    await act(async () => { fireEvent.click(getByTestId('redteam-board-confirm-yes')); });
+
+    await waitFor(() => {
+      const boardCalls = fetchFn.calls.filter((c) => c.url.includes('/board'));
+      expect(boardCalls).toHaveLength(1);
+      expect(boardCalls[0].url).toBe('/api/vps/machines/hetzner/srv1/scans/job-1/board');
+      expect(JSON.parse(boardCalls[0].opts.body).findingIds.sort()).toEqual(['f1', 'f3']);
+    });
+  });
+
+  it('Öffnen der Rückfrage fokussiert den "Übertragen"-Button (Review-Fix Iteration 2, Muster SshKeysSection.jsx)', async () => {
+    const fetchFn = makeFullFetchFn({
+      pollResponses: [{ status: 200, body: { status: 'done', phase: 'fertig', ampel: 'rot', findings: MULTI_FINDINGS } }],
+    });
+    const { getByTestId } = renderPanel(fetchFn);
+    await waitFor(() => {
+      expect(getByTestId('redteam-board-transfer-btn').textContent).toMatch(/3 Befunde/);
+    });
+
+    await act(async () => { fireEvent.click(getByTestId('redteam-board-transfer-btn')); });
+
+    expect(document.activeElement).toBe(getByTestId('redteam-board-confirm-yes'));
+  });
+
+  it('Abbrechen schließt die Rückfrage ohne POST', async () => {
+    const fetchFn = makeFullFetchFn({
+      pollResponses: [{ status: 200, body: { status: 'done', phase: 'fertig', ampel: 'rot', findings: MULTI_FINDINGS } }],
+    });
+    const { getByTestId, queryByTestId } = renderPanel(fetchFn);
+    // AC18-Init-Effekt läuft nach dem Findings-Render — auf die Auswahl warten (nicht nur
+    // auf das Erscheinen der Liste, sonst Race gegen den Initialisierungs-Effekt).
+    await waitFor(() => {
+      expect(getByTestId('redteam-board-transfer-btn').textContent).toMatch(/3 Befunde/);
+    });
+
+    await act(async () => { fireEvent.click(getByTestId('redteam-board-transfer-btn')); });
+    await act(async () => { fireEvent.click(getByTestId('redteam-board-confirm-cancel')); });
+    expect(queryByTestId('redteam-board-confirm')).toBeNull();
+    const boardCalls = fetchFn.calls.filter((c) => c.url.includes('/board'));
+    expect(boardCalls).toHaveLength(0);
+  });
+
+  it('Übertrag-Fehler (Nicht-200) zeigt role=alert, Auswahl bleibt erhalten', async () => {
+    const fetchFn = makeFullFetchFn({
+      pollResponses: [{ status: 200, body: { status: 'done', phase: 'fertig', ampel: 'rot', findings: MULTI_FINDINGS } }],
+      boardStatus: 500,
+      boardBody: {},
+    });
+    const { getByTestId } = renderPanel(fetchFn);
+    // AC18-Init-Effekt läuft nach dem Findings-Render — auf die Auswahl warten (nicht nur
+    // auf das Erscheinen der Liste, sonst Race gegen den Initialisierungs-Effekt).
+    await waitFor(() => {
+      expect(getByTestId('redteam-board-transfer-btn').textContent).toMatch(/3 Befunde/);
+    });
+
+    await act(async () => { fireEvent.click(getByTestId('redteam-board-transfer-btn')); });
+    await act(async () => { fireEvent.click(getByTestId('redteam-board-confirm-yes')); });
+
+    await waitFor(() => expect(getByTestId('redteam-board-transfer-error')).toBeDefined());
+    expect(getByTestId('redteam-finding-checkbox-f1').checked).toBe(true);
+  });
+});
+
+describe('RedTeamScanPanel — AC20: Nach-Übertrag-Zustand', () => {
+  it('created/skipped-Antworten sperren die jeweilige Zeile ("→ aufs Board gelegt (ID)")', async () => {
+    const fetchFn = makeFullFetchFn({
+      pollResponses: [{ status: 200, body: { status: 'done', phase: 'fertig', ampel: 'rot', findings: MULTI_FINDINGS } }],
+      boardBody: {
+        created: [{ findingId: 'f1', boardId: 'S-100' }],
+        skipped: [{ findingId: 'f3', boardId: 'S-050' }],
+      },
+    });
+    const { getByTestId, queryByTestId } = renderPanel(fetchFn);
+    // AC18-Init-Effekt läuft nach dem Findings-Render — auf die Auswahl warten (nicht nur
+    // auf das Erscheinen der Liste, sonst Race gegen den Initialisierungs-Effekt).
+    await waitFor(() => {
+      expect(getByTestId('redteam-board-transfer-btn').textContent).toMatch(/3 Befunde/);
+    });
+
+    await act(async () => { fireEvent.click(getByTestId('redteam-board-transfer-btn')); });
+    await act(async () => { fireEvent.click(getByTestId('redteam-board-confirm-yes')); });
+
+    await waitFor(() => {
+      expect(getByTestId('redteam-finding-transferred-f1').textContent).toMatch(/S-100/);
+    });
+    expect(getByTestId('redteam-finding-transferred-f3').textContent).toMatch(/S-050/);
+    expect(queryByTestId('redteam-finding-checkbox-f1')).toBeNull();
+    expect(queryByTestId('redteam-finding-checkbox-f3')).toBeNull();
+    // f2 war nicht Teil der Auswahl/Antwort — bleibt wählbar.
+    expect(getByTestId('redteam-finding-checkbox-f2')).toBeDefined();
+  });
+
+  it('Befund mit bereits beim Laden gesetzter boardId startet direkt im gesperrten Zustand', async () => {
+    const findingsWithExisting = [
+      ...MULTI_FINDINGS,
+      { id: 'f4', severity: 'medium', kind: 'info', testort: 'direkt', titel: 'Schon übertragen', boardId: 'S-777' },
+    ];
+    const fetchFn = makeFullFetchFn({
+      pollResponses: [
+        { status: 200, body: { status: 'done', phase: 'fertig', ampel: 'rot', findings: findingsWithExisting } },
+      ],
+    });
+    const { getByTestId, queryByTestId } = renderPanel(fetchFn);
+    // AC18-Init-Effekt läuft nach dem Findings-Render — auf die Auswahl warten (nicht nur
+    // auf das Erscheinen der Liste, sonst Race gegen den Initialisierungs-Effekt).
+    await waitFor(() => {
+      expect(getByTestId('redteam-board-transfer-btn').textContent).toMatch(/3 Befunde/);
+    });
+
+    expect(getByTestId('redteam-finding-transferred-f4').textContent).toMatch(/S-777/);
+    expect(queryByTestId('redteam-finding-checkbox-f4')).toBeNull();
+    // Sammel-Button zählt f4 (bereits übertragen) nicht mit.
+    expect(getByTestId('redteam-board-transfer-btn').textContent).toMatch(/3 Befunde/);
   });
 });

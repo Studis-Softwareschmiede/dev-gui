@@ -204,6 +204,12 @@ Bestätigung** — als Board-Punkte übernommen werden.
 - **AC18 — Befundliste mit Vorauswahl.** Die Befundliste zeigt je Befund eine Checkbox; **alle** sind per
   Default **vorgehakt** (der Betreiber entfernt nur, was **nicht** aufs Board soll). Schnellwahl oben:
   **Alle / Keine / Nur kritische**.
+  **Präzisierung (S-406):** „Nur kritische" wählt Befunde mit `severity ∈ {high, critical}` —
+  identisch zur `deriveAmpel()`-Rot-Schwelle (AC9) und zum bestehenden UI-Vokabular
+  („Rot — kritische Befunde", AC12). Die Checkbox-/Schnellwahl-Interaktion bezieht sich auf
+  die in der Kurzliste **gezeigten** Befunde (AC12-Truncation, `MAX_FINDINGS_SHOWN`) — über
+  die Kurzliste hinausgehende „N weitere"-Befunde sind aus dieser Ansicht heraus nicht
+  einzeln wählbar (Bestandsverhalten aus S-403, hier unverändert respektiert).
 - **AC19 — Sticky Sammel-Button.** Unten fest sichtbar (sticky) ein Button „N Befunde aufs Board
   übertragen" mit **live mitzählender** Zahl; bei 0 Auswahl **grau/gesperrt**. Klick → kurze Rückfrage
   („N Befunde werden aufs Board gelegt — übertragen?") → Übertrag der ausgewählten Befunde (AC16).

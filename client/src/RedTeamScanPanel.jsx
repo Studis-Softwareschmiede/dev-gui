@@ -48,6 +48,29 @@
  *          (Safety-Window + Fail-Streak, Muster RedTeamView) zeigen einen `role="alert"`-
  *          Text — NIE ein stiller/hängender Zustand. Ein Nicht-200-Poll-Ergebnis wird
  *          explizit als Fehler behandelt (lessons 2026-07-01), NICHT als "noch running".
+ *   AC18 — Befundliste mit Vorauswahl: je (sichtbarem) Befund der Kurzliste eine Checkbox,
+ *          per Default alle vorgehakt — AUSSER ein Befund trägt beim Laden bereits eine
+ *          `boardId` (dann sofort AC20-Zustand, s.u., keine Checkbox). Schnellwahl-Leiste
+ *          (Alle / Keine / Nur kritische — "kritisch" = `severity ∈ {high, critical}`,
+ *          identisch zur `deriveAmpel()`-Rot-Schwelle, s. AC9/`ScanResultStore.js`, aus
+ *          Vokabular-Konsistenz mit `AMPEL_LABEL.rot` "kritische Befunde"). Wirkt NUR auf die
+ *          gezeigten (`MAX_FINDINGS_SHOWN`), noch nicht übertragenen Befunde — über die
+ *          Kurzliste hinausgehende "N weitere"-Befunde sind aus dieser Ansicht heraus nicht
+ *          einzeln wählbar (Kurzliste-Truncation ist AC12/S-403-Bestandsverhalten, hier
+ *          unverändert respektiert; s. Spec-Präzisierung AC18).
+ *   AC19 — Sticky Sammel-Button (unten im Panel fest sichtbar) mit live mitzählender Zahl
+ *          der Auswahl; bei 0 Auswahl gesperrt (`disabled`). Klick → inline
+ *          `role="alertdialog"`-Rückfrage ("N Befunde werden aufs Board gelegt —
+ *          übertragen?", Muster `SshKeysSection.jsx` Overwrite-Bestätigung) → erst nach
+ *          Bestätigen `POST .../scans/:scanId/board` (AC16-Endpunkt, S-405) mit den
+ *          ausgewählten `findingIds` (`scanId` ≡ die Runner-`jobId` dieses Panels, s.
+ *          Feature-Notes S-405). Ein Übertrag-Fehler (Netzwerk/Nicht-200) zeigt einen
+ *          `role="alert"`-Inline-Text, Auswahl bleibt erhalten (Retry möglich).
+ *   AC20 — Nach-Übertrag-Zustand: `created`- UND `skipped`-Einträge der Response setzen den
+ *          jeweiligen Befund auf "→ aufs Board gelegt (ID)" statt Checkbox (Idempotenz
+ *          sichtbar, betroffene IDs werden aus der Auswahl entfernt) — gilt identisch für
+ *          Befunde, die der Server als bereits übertragen (`skipped`) meldet, und für
+ *          Befunde, die schon beim initialen Laden eine `boardId` trugen.
  *
  * Security (Floor):
  *   - Kein `dangerouslySetInnerHTML` — Fehler-/Befundtexte werden als reiner React-Text
@@ -131,17 +154,35 @@ export function RedTeamScanPanel({
   const [errorMsg, setErrorMsg] = useState('');
   const [result, setResult] = useState(null); // { ampel, findings, reportRef }
 
+  // AC18/AC19/AC20 — Befunde-Auswahl + Board-Übertrag (nur für die gezeigten,
+  // MAX_FINDINGS_SHOWN-begrenzten Befunde, s. Moduldoku "Covers" oben).
+  const [selection, setSelection] = useState(() => new Set()); // findingId → ausgewählt
+  const [transferredById, setTransferredById] = useState({}); // findingId → boardId (AC20)
+  const [confirmOpen, setConfirmOpen] = useState(false); // AC19 — Rückfrage vor Übertrag
+  const [isTransferring, setIsTransferring] = useState(false);
+  const [transferError, setTransferError] = useState('');
+
   const jobIdRef = useRef(null);
   const dialogRef = useRef(null);
   const startedAtRef = useRef(null);
   const failStreakRef = useRef(0);
   const endedRef = useRef(false); // onEnded genau einmal
   const mountedRef = useRef(true);
+  const confirmYesRef = useRef(null); // AC19 — Fokus auf "Übertragen" beim Öffnen der Rückfrage
 
   useEffect(() => {
     mountedRef.current = true;
     return () => { mountedRef.current = false; };
   }, []);
+
+  // AC19 — Fokus-Muster identisch zu `SshKeysSection.jsx` (Overwrite-Bestätigung, Review-Fix
+  // Iteration 2, Important): beim Öffnen der Rückfrage geht der Fokus sofort auf den
+  // "Übertragen"-Button (A11y — kein verlorener Fokus im Hintergrund-Panel).
+  useEffect(() => {
+    if (confirmOpen && confirmYesRef.current) {
+      confirmYesRef.current.focus();
+    }
+  }, [confirmOpen]);
 
   const signalEnded = useCallback(() => {
     if (endedRef.current) return;
@@ -320,6 +361,111 @@ export function RedTeamScanPanel({
   // "keine Befunde"-Aussage vortäuschen (aktiv irreführend für ein Sicherheitswerkzeug).
   const hasAmpelData = phase === 'done' && result != null && result.ampel !== undefined && result.ampel !== null;
 
+  // ── AC18/AC20 — Auswahl + Transfer-Zustand initialisieren, sobald echte Befund-Daten
+  // vorliegen. Läuft genau einmal (bei Übergang zu hasAmpelData:true) — alle Befunde ohne
+  // `boardId` starten vorgehakt (AC18); Befunde mit bereits gesetzter `boardId` (schon beim
+  // Laden übertragen) starten sofort im AC20-Zustand.
+  useEffect(() => {
+    if (!hasAmpelData) return;
+    const initialSelection = new Set();
+    const initialTransferred = {};
+    for (const f of shownFindings) {
+      if (f.boardId) {
+        initialTransferred[f.id] = f.boardId;
+      } else if (f.id) {
+        initialSelection.add(f.id);
+      }
+    }
+    setSelection(initialSelection);
+    setTransferredById(initialTransferred);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasAmpelData]);
+
+  function toggleFindingSelected(id) {
+    setSelection((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+
+  // AC18 — Schnellwahl wirkt nur auf gezeigte, noch nicht übertragene Befunde.
+  const selectableFindings = shownFindings.filter((f) => !transferredById[f.id]);
+
+  function selectAllFindings() {
+    setSelection(new Set(selectableFindings.map((f) => f.id)));
+  }
+  function selectNoFindings() {
+    setSelection(new Set());
+  }
+  function selectCriticalFindings() {
+    // "kritisch" = severity ∈ {high, critical} — identisch zur deriveAmpel()-Rot-Schwelle
+    // (AC9), Vokabular-Konsistenz mit AMPEL_LABEL.rot "kritische Befunde".
+    setSelection(
+      new Set(selectableFindings.filter((f) => f.severity === 'high' || f.severity === 'critical').map((f) => f.id)),
+    );
+  }
+
+  function requestBoardTransfer() {
+    if (selection.size === 0 || isTransferring) return;
+    setConfirmOpen(true);
+  }
+  function cancelBoardTransfer() {
+    setConfirmOpen(false);
+  }
+
+  // AC19 — POST der ausgewählten findingIds an den AC16-Endpunkt (S-405); scanId ≡ jobId
+  // dieses Panel-Laufs (Feature-Notes S-405). Best-effort/klarer Fehlertext, keine Crashes.
+  async function confirmBoardTransfer() {
+    setConfirmOpen(false);
+    const findingIds = Array.from(selection);
+    if (findingIds.length === 0) return;
+    setIsTransferring(true);
+    setTransferError('');
+
+    const url = `/api/vps/machines/${encodeURIComponent(provider)}/${serverId}/scans/${encodeURIComponent(jobIdRef.current)}/board`;
+    let res;
+    try {
+      res = await fetch_(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ findingIds }),
+      });
+    } catch {
+      if (!mountedRef.current) return;
+      setIsTransferring(false);
+      setTransferError('Netzwerkfehler beim Übertragen — bitte erneut versuchen.');
+      return;
+    }
+    if (!mountedRef.current) return;
+
+    let data = {};
+    try { data = await res.json(); } catch { /* ignore */ }
+    if (!mountedRef.current) return;
+    setIsTransferring(false);
+
+    if (res.status !== 200) {
+      setTransferError('Übertrag fehlgeschlagen — bitte erneut versuchen.');
+      return;
+    }
+
+    // AC20 — created UND skipped (bereits übertragen) sperren die jeweilige Zeile.
+    const created = Array.isArray(data.created) ? data.created : [];
+    const skipped = Array.isArray(data.skipped) ? data.skipped : [];
+    const updates = {};
+    for (const entry of [...created, ...skipped]) {
+      if (entry && typeof entry.findingId === 'string' && typeof entry.boardId === 'string' && entry.boardId) {
+        updates[entry.findingId] = entry.boardId;
+      }
+    }
+    setTransferredById((prev) => ({ ...prev, ...updates }));
+    setSelection((prev) => {
+      const next = new Set(prev);
+      for (const id of Object.keys(updates)) next.delete(id);
+      return next;
+    });
+  }
+
   return (
     <>
       <div style={styles.backdrop} onClick={onClose} aria-hidden="true" />
@@ -387,14 +533,70 @@ export function RedTeamScanPanel({
                 )}
 
                 {findings.length > 0 && (
-                  <ul style={styles.findingsList} data-testid="redteam-scan-findings">
-                    {shownFindings.map((f) => (
-                      <li key={f.id ?? `${f.titel}-${f.testort}`} style={styles.findingItem}>
-                        <strong>{f.severity ?? '—'}</strong> · {f.titel ?? '(ohne Titel)'} · {f.testort ?? '—'}
-                      </li>
-                    ))}
-                    {hiddenCount > 0 && <li style={styles.findingMore}>… {hiddenCount} weitere</li>}
-                  </ul>
+                  <>
+                    {/* AC18 — Schnellwahl (wirkt nur auf gezeigte, noch nicht übertragene Befunde). */}
+                    <div style={styles.quickSelectRow} role="group" aria-label="Schnellwahl Befundauswahl">
+                      <button
+                        type="button"
+                        onClick={selectAllFindings}
+                        disabled={isTransferring}
+                        style={styles.btnQuick}
+                        data-testid="redteam-select-all"
+                      >
+                        Alle
+                      </button>
+                      <button
+                        type="button"
+                        onClick={selectNoFindings}
+                        disabled={isTransferring}
+                        style={styles.btnQuick}
+                        data-testid="redteam-select-none"
+                      >
+                        Keine
+                      </button>
+                      <button
+                        type="button"
+                        onClick={selectCriticalFindings}
+                        disabled={isTransferring}
+                        style={styles.btnQuick}
+                        data-testid="redteam-select-critical"
+                      >
+                        Nur kritische
+                      </button>
+                    </div>
+
+                    <ul style={styles.findingsList} data-testid="redteam-scan-findings">
+                      {shownFindings.map((f) => {
+                        const boardId = transferredById[f.id];
+                        return (
+                          <li key={f.id ?? `${f.titel}-${f.testort}`} style={styles.findingItem}>
+                            {boardId ? (
+                              // AC20 — Nach-Übertrag-Zustand: gesperrt, keine Checkbox mehr.
+                              <span
+                                style={styles.findingTransferred}
+                                data-testid={`redteam-finding-transferred-${f.id}`}
+                              >
+                                → aufs Board gelegt ({boardId})
+                              </span>
+                            ) : (
+                              <label style={styles.findingCheckboxLabel}>
+                                <input
+                                  type="checkbox"
+                                  checked={selection.has(f.id)}
+                                  onChange={() => toggleFindingSelected(f.id)}
+                                  disabled={isTransferring}
+                                  aria-label={`Befund "${f.titel || f.id}" für Board-Übertrag auswählen`}
+                                  data-testid={`redteam-finding-checkbox-${f.id}`}
+                                />
+                              </label>
+                            )}{' '}
+                            <strong>{f.severity ?? '—'}</strong> · {f.titel ?? '(ohne Titel)'} · {f.testort ?? '—'}
+                          </li>
+                        );
+                      })}
+                      {hiddenCount > 0 && <li style={styles.findingMore}>… {hiddenCount} weitere</li>}
+                    </ul>
+                  </>
                 )}
               </>
             ) : (
@@ -419,6 +621,63 @@ export function RedTeamScanPanel({
                 <span data-testid="redteam-scan-no-report">Kein Bericht verfügbar.</span>
               )}
             </p>
+
+            {/* AC19 — Sticky Sammel-Button + Rückfrage; nur wenn es überhaupt Befunde gibt. */}
+            {hasAmpelData && findings.length > 0 && (
+              <div style={styles.stickyFooter}>
+                {confirmOpen && (
+                  <div
+                    role="alertdialog"
+                    aria-modal="true"
+                    aria-labelledby="redteam-board-confirm-title"
+                    style={styles.confirmBox}
+                    data-testid="redteam-board-confirm"
+                  >
+                    <p id="redteam-board-confirm-title" style={styles.hint}>
+                      {selection.size} Befunde werden aufs Board gelegt — übertragen?
+                    </p>
+                    <div style={styles.buttonRow}>
+                      <button
+                        type="button"
+                        ref={confirmYesRef}
+                        onClick={confirmBoardTransfer}
+                        style={styles.btnPrimary}
+                        data-testid="redteam-board-confirm-yes"
+                      >
+                        Übertragen
+                      </button>
+                      <button
+                        type="button"
+                        onClick={cancelBoardTransfer}
+                        style={styles.btnSecondary}
+                        data-testid="redteam-board-confirm-cancel"
+                      >
+                        Abbrechen
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {transferError && (
+                  <div role="alert" style={styles.error} data-testid="redteam-board-transfer-error">
+                    {transferError}
+                  </div>
+                )}
+
+                <button
+                  type="button"
+                  onClick={requestBoardTransfer}
+                  disabled={selection.size === 0 || isTransferring}
+                  style={{
+                    ...styles.btnPrimary,
+                    ...(selection.size === 0 || isTransferring ? styles.btnDisabled : {}),
+                  }}
+                  data-testid="redteam-board-transfer-btn"
+                >
+                  {isTransferring ? 'Übertrage…' : `${selection.size} Befunde aufs Board übertragen`}
+                </button>
+              </div>
+            )}
           </div>
         )}
 
@@ -543,10 +802,55 @@ const styles = {
     color: '#9ca3af',
     fontStyle: 'italic',
   },
+  // AC20 — Nach-Übertrag-Zustand (statt Checkbox).
+  findingTransferred: {
+    fontSize: 12,
+    fontWeight: 600,
+    color: '#6ee7b7',
+  },
+  findingCheckboxLabel: {
+    display: 'inline-flex',
+    alignItems: 'center',
+  },
+  // AC18 — Schnellwahl-Leiste.
+  quickSelectRow: {
+    display: 'flex',
+    gap: 6,
+    margin: '4px 0 8px',
+  },
+  btnQuick: {
+    // Touch-Target-NFR (docs/design.md, .claude/lessons/coder.md): mind. 44px Höhe —
+    // kompaktere Innenabstände statt geringerer Höhe (Review-Fix Iteration 2, Important).
+    minHeight: 44,
+    padding: '4px 10px',
+    background: '#1e293b',
+    color: '#93c5fd',
+    border: '1px solid #334155',
+    borderRadius: 6,
+    fontSize: 12,
+    fontWeight: 600,
+    cursor: 'pointer',
+  },
   reportLink: {
     color: '#60a5fa',
     textDecoration: 'underline',
     textUnderlineOffset: 2,
+  },
+  // AC19 — unten fest sichtbar innerhalb des scrollbaren Dialogs.
+  stickyFooter: {
+    position: 'sticky',
+    bottom: 0,
+    background: '#1a1a1a',
+    paddingTop: 8,
+    marginTop: 8,
+    borderTop: '1px solid #374151',
+  },
+  confirmBox: {
+    background: '#111827',
+    border: '1px solid #374151',
+    borderRadius: 6,
+    padding: '10px 12px',
+    marginBottom: 8,
   },
   buttonRow: {
     display: 'flex',
@@ -564,5 +868,22 @@ const styles = {
     fontSize: 14,
     fontWeight: 600,
     cursor: 'pointer',
+  },
+  btnPrimary: {
+    minHeight: 44,
+    padding: '8px 18px',
+    background: '#2563eb',
+    color: '#eff6ff',
+    border: '1px solid #1d4ed8',
+    borderRadius: 6,
+    fontSize: 14,
+    fontWeight: 700,
+    cursor: 'pointer',
+  },
+  btnDisabled: {
+    background: '#1f2937',
+    color: '#6b7280',
+    border: '1px solid #374151',
+    cursor: 'not-allowed',
   },
 };
