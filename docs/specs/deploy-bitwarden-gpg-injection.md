@@ -4,13 +4,15 @@ title: Deploy-Zugang zu Bitwarden (Variante B) + per-App-GPG-Passphrasen-Injekti
 status: active
 area: deployment
 spec_format: use-case-2.0
-version: 2
+version: 3
 ---
 
 # Deploy-Zugang zu Bitwarden (Variante B) + per-App-GPG-Passphrasen-Injektion
 
 **Schicht 3 (Spec).** Quelle für Schicht 1/2: `docs/concept.md`, `docs/architecture.md`.
 **Bereich:** `deployment`. **Feature:** F-072.
+
+> **v3 — Folge-Bug zu S-386: `bw config server` bei jedem Deploy (2026-07-22).** Der in S-386 eingeführte **persistente**, eingeloggte bw-Appdata-Pfad hat einen Folge-Bug: `#openSession` rief `bw config server <url>` bei **jedem** Aufruf **vor** der `bw login --check`-Weiche auf. Auf dem persistenten, eingeloggten Verzeichnis verweigert die bw-CLI das mit „Logout required before server config update" (Exit 1) → jeder Deploy **nach dem ersten** scheitert. Neue **AC17–AC21** (§4.5) machen den `config`-Schritt **konditional** und geben dem config-Fehler eine **eigene** Fehlerklasse. Angewandter Workaround bis zum Fix: `server_url`-Feld im Deploy-Zugangs-Store geleert (dann entfällt der config-Schritt, AC21).
 
 > **v2 — Item-Namens-Konvention `env.gpg-passphrase-<app>` (Owner 2026-07-13).** Die Item-Namens-Konvention lautet jetzt **`env.gpg-passphrase-<app>`** (vormals `deploy-gpg-<app>`). Alle nachstehenden Erwähnungen von `deploy-gpg-<app>` (AC14/AC15) gelten als auf **`env.gpg-passphrase-<app>`** umgestellt; **AC16** verdrahtet den daraus abgeleiteten Frontend-Default. Die Anlage-/Rotations-Seite dieser Passphrasen ist in [[per-app-gpg-passphrase-provisioning]] + [[per-app-gpg-passphrase-rotation]] spezifiziert.
 
@@ -147,6 +149,52 @@ Unlock-Dialog). Diese Spec ergänzt den **unbeaufsichtigten** Weg (API-Key, kein
   Formular-Default `env.gpg-passphrase-foo`; ein manuell gesetzter Wert bleibt erhalten und wird
   gesendet.)
 
+### 4.5 Konditionaler `bw config server`-Schritt (Folge-Bug zu S-386)
+
+**Kontext:** Seit S-386 teilen alle Deploy-Sessions **ein persistentes, eingeloggtes**
+`BITWARDENCLI_APPDATA_DIR` (Geräte-ID bleibt erhalten; `bw login --check` vor Login,
+`bw lock` statt `logout`). `#openSession` rief `bw config server <url>` bislang **bei jedem
+Aufruf** und **vor** der `bw login --check`-Weiche auf. Die bw-CLI erlaubt eine Server-Config-
+Änderung aber **nur im ausgeloggten Zustand** → auf dem persistenten, eingeloggten Verzeichnis
+antwortet `bw config server` mit „Logout required before server config update" (Exit 1). Der
+**Erstversuch** (frisches Verzeichnis, noch nicht eingeloggt) gelingt, **jeder Folgeversuch**
+scheitert. Verifiziert 2026-07-22 im laufenden Container.
+
+- **AC17** — **`bw config server` läuft nur bedingt.** In `#openSession` wird `bw config server
+  <server_url>` **ausschließlich** ausgeführt, wenn (a) der bw-Status **unauthenticated** ist
+  (`bw login --check` liefert Exit ≠ 0) **ODER** (b) die hinterlegte `server_url` von der
+  **aktuell konfigurierten** Server-URL abweicht. Ist bw bereits eingeloggt **und** stimmt die
+  konfigurierte Server-URL mit `server_url` überein → `bw config server` wird **übersprungen**
+  (kein Aufruf). Der bisherige **unbedingte** `config`-Aufruf **vor** der `login --check`-Weiche
+  entfällt; die Weiche entscheidet **vor** einem etwaigen config-Aufruf über den Login-Zustand.
+  Die aktuell konfigurierte Server-URL wird über die bw-CLI bzw. den bw-State ermittelt (Mechanik
+  ist Umsetzungsdetail; Argv trägt kein Geheimnis, S2).
+- **AC18** — **Eingeloggt + abweichende Server-URL → sauberer Reconfigure.** Ist bw **eingeloggt**,
+  weicht aber die hinterlegte `server_url` von der aktuell konfigurierten ab (AC17-Fall b), führt
+  der Dienst in dieser Reihenfolge aus: **`bw logout` → `bw config server <server_url>` →
+  Neu-Login** (`bw login --apikey`, Secrets via Env, S2) → `bw unlock`. Das dabei entstehende
+  **neue Device-Event ist akzeptiert** — Server-Wechsel ist ein seltener, bewusster Sonderfall,
+  der genau **einen** neuen „New Device"-Login rechtfertigt (kein Widerspruch zur S-386-Mailflut-
+  Vermeidung, die den *unveränderten* Normalbetrieb adressiert).
+- **AC19** — **config-Fehler bekommt eine eigene Fehlerklasse.** Schlägt der `bw config server`-
+  Schritt fehl (Exit ≠ 0, einschließlich „Logout required before server config update"), liefert
+  der Dienst die **eigene** Fehlerklasse `config-failed` (neu in `DEPLOY_LOGIN_ERROR_CLASSES`) —
+  **nicht** mehr das generische `error`. Der Deploy-Pfad (`deploymentsRouter`) bildet
+  `config-failed` auf `errorClass: "bitwarden-config-failed"` mit einer eigenen, verständlichen
+  `reason` ab (statt auf den Sammelfall `bitwarden-login-failed`). Es wird **kein** bw-Rohtext
+  nach außen gereicht (S1); stderr bleibt intern gepuffert.
+- **AC20** — **Zwei aufeinanderfolgende Deploy-Sessions funktionieren ohne manuellen Eingriff.**
+  Über dasselbe persistente, eingeloggte Appdata-Verzeichnis laufen zwei aufeinanderfolgende
+  `openSession()`/`fetchItemPassword()`-Vorgänge erfolgreich durch (der zweite überspringt den
+  config-Schritt gemäß AC17). Regressionstest mit injiziertem `_spawnBw`, der den **eingeloggten**
+  Zustand simuliert (`bw login --check` → Exit 0; `bw config server` → Exit 1 mit „Logout required
+  before server config update"): der zweite Vorgang darf **nicht** an `config-failed`/
+  `bitwarden-login-failed` scheitern.
+- **AC21** — **Leeres/fehlendes `server_url` = Default-Server, kein config-Aufruf.** Ist
+  `server_url` leer oder nicht gesetzt, gilt der Default-Server `https://vault.bitwarden.com`
+  und `bw config server` wird **nicht** aufgerufen (bestehendes Verhalten aus §4.1 AC1, hier
+  dokumentiert). Dieser Pfad war der angewandte Workaround, bis AC17 landet.
+
 ## 5. Tests (Pflicht)
 
 - Store: Persistenz `0600` + atomar; Status ist write-only (kein Klartext); In-Memory-
@@ -158,6 +206,19 @@ Unlock-Dialog). Diese Spec ergänzt den **unbeaufsichtigten** Weg (API-Key, kein
   `gpg-item-not-found`.
 - Injektion: `GPG_PASSPHRASE` landet in der Env des Deploy-Aufrufs, **nicht** im Argv,
   **nicht** im Log/Audit/Response (Assertions gegen Spy-Capture).
+- **config-Gating (AC17–AC21):**
+  - Eingeloggt + gleiche Server-URL (`login --check` Exit 0) → `_spawnBw`-Spy erhält **keinen**
+    `config server`-Aufruf (übersprungen).
+  - Unauthenticated (`login --check` Exit ≠ 0) mit gesetzter `server_url` → `config server` wird
+    aufgerufen, dann Login+Unlock.
+  - Eingeloggt + abweichende `server_url` → Aufrufreihenfolge `logout` → `config server` →
+    `login --apikey` → `unlock` (AC18).
+  - config-Schritt Exit 1 („Logout required …") → Fehlerklasse `config-failed`; `deploymentsRouter`
+    mappt auf `errorClass: "bitwarden-config-failed"` (nicht `bitwarden-login-failed`); kein
+    Rohtext-Leak (AC19).
+  - **Zwei aufeinanderfolgende Sessions** über den simulierten eingeloggten Zustand (`config server`
+    → Exit 1) laufen beide erfolgreich durch, weil config übersprungen wird (AC20-Regressionstest).
+  - Leere `server_url` → **kein** `config server`-Aufruf, Default-Server (AC21).
 
 ## 6. Offene Punkte (bewusst, nicht blockierend)
 
