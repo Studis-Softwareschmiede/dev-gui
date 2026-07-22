@@ -73,6 +73,13 @@ Bestätigung** — als Board-Punkte übernommen werden.
   `close`-Event als einzige Fertig-Quelle, Runaway-Timeout, secret-freies Per-Lauf-Audit, argv-Array,
   `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`-Block, kein `PtyManager`/`CommandService`). Es wird **kein** zweiter/
   paralleler Runner gebaut.
+  **Präzisierung (S-401 — `<container-referenz>` + Spawn-Verzeichnis):** der Runner braucht ein
+  aufgelöstes Projekt-Verzeichnis als Spawn-`cwd` (`ProjectJobLock`-Schlüssel). Der Container wird dafür
+  über `imageRepoName(image)`/`hostname` auf einen Workspace-Klon gemappt (identische Matching-Logik wie
+  der abzulösende `redTeamRouter.js#computeAllowlist`, S-408) — `ziel` = der ermittelte Repo-Slug. Kein
+  Match (Container ohne lokalen Klon im Workspace) → `422 not-scannable` (kein Freitext-Fallback). Diese
+  Wahl gibt jedem Repo/Container ein EIGENES Lock-Verzeichnis, sodass Scans für unterschiedliche
+  Container/Repos einander nicht blockieren (AC5).
 - **AC2 — Start-Endpunkt (pro Container).** `POST /api/vps/machines/:provider/*splat/containers/:containerId/scan`
   → `202 { jobId, status: "running" }`. Nur **managed, laufende** Container (`hostname !== null`,
   `state === 'running'`) — sonst `422 { errorClass: "not-scannable" }`. Bereits laufender Scan für denselben
@@ -80,7 +87,18 @@ Bestätigung** — als Board-Punkte übernommen werden.
   bestehenden Container-Routen aufgelöst/validiert.
 - **AC3 — Status-Endpunkt.** `GET /api/vps/machines/:provider/*splat/containers/:containerId/scan/:jobId`
   → `200 { status, phase, ampel?, findings?, reportRef? }` mit `status ∈ {running, done, failed, auth-expired}`
-  und `phase ∈ {direkt, cloudflare, auswerten, fertig}`; `404` bei unbekannter `jobId`.
+  und `phase ∈ {direkt, cloudflare, auswerten, fertig}`; `404` bei unbekannter `jobId` (auch wenn eine
+  ansonsten bekannte `jobId` zu einem ANDEREN Container gehört — kein Cross-Container-Leak).
+  **Präzisierung (S-401, Backend-Fundament — kein Zwischen-Fortschritts-Signal in dieser Iteration):**
+  der wiederverwendete `HeadlessRedTeamRunner` ist ein opaker Kindprozess ohne Zwischenstands-Meldung
+  (`close` bleibt die einzige Fertig-Quelle, s. `HeadlessRunnerCore`) — `phase` ist deshalb **coarse**:
+  `direkt` solange `status === 'running'`, `fertig` in jedem Terminalzustand (`done`/`failed`/
+  `auth-expired`). Eine granulare `cloudflare`/`auswerten`-Zwischenphase erfordert eine stdout-
+  Fortschritts-Erkennung, die NICHT Teil dieser Story ist (Kandidat für eine Folge-Iteration/S-403,
+  sobald der Live-Fortschritts-Panel-Bedarf das rechtfertigt). Der Core kennt zusätzlich einen fünften
+  internen Status `budget-limited` (headless-budget-limit-detection, unabhängig von dieser Spec) — er
+  wird am Pro-Container-Endpunkt defensiv auf `failed` gemappt, damit der `status`-Enum dieser Story
+  exakt bei den vier genannten Werten bleibt.
 - **AC4 — Ziel-Confinement (sicherheitskritisch).** Die beiden Scan-Ziele werden **ausschließlich
   server-seitig** aus dem ContainerEntry abgeleitet: **direkt** = VPS-Host + veröffentlichter `hostPort`;
   **öffentlich** = `https://<hostname>`. Es existiert **kein** Freitext-URL-Feld und **kein**
@@ -104,9 +122,33 @@ Bestätigung** — als Board-Punkte übernommen werden.
   `{ scanId, app, startedAt, finishedAt, ampel, findings: [{ id, severity, kind, testort, titel }],
   findingCount, reportRef, boardItemIds: [] }` — `app` = Hostname/Slug (kein Host-Pfad), `ampel ∈
   {gruen, gelb, rot}`.
+  **Präzisierung (S-402 — Fundament, Schreibpfad ausserhalb des Story-Scopes):** `scanId` ≡ die
+  Runner-`jobId` (AC1-AC3) — der (künftige) Aufrufer, der einen abgeschlossenen Lauf persistiert,
+  übergibt dieselbe Korrelations-ID durchgängig; `ampel`/`findingCount` werden vom Store IMMER
+  deterministisch aus `findings` abgeleitet (nie vom Aufrufer übernommen, single source of
+  truth, s. AC9). Diese Story implementiert nur das Store-Fundament (`record`/`list`/
+  `getByScanId`/`getByJobId`) — WER `record()` nach Lauf-Abschluss aufruft (Parsing des
+  Agent-Outputs zu `findings`), ist nicht Teil von AC7-AC9 und bleibt eine offene Folge-Naht.
+  **Präzisierung (S-405 — zusätzliche Felder für AC16/AC17):** das Schema wird um
+  `repoSlug: string|null` (Scan-Ebene, identisch zu `ziel` aus AC1 — der Workspace-Repo-Slug für
+  den Board-Übertrag) und `boardId: string|null` (je Finding — Idempotenz-Grundlage, `null` bis
+  übertragen) erweitert. Beide Felder sind optional/additiv (`null`-Default) — bestehende
+  Verlaufseinträge ohne diese Felder bleiben gültig; der künftige `record()`-Aufrufer (weiterhin
+  offene Naht, s.o.) sollte `repoSlug` mitgeben, sobald er existiert (er kennt ihn bereits aus
+  AC1). `ScanResultStore.recordBoardTransfer({scanId, transfers})` (AC17) ist der einzige
+  Schreibpfad für `boardId`/die Ergänzung von `boardItemIds`.
 - **AC8 — Verlauf-Lese-Endpunkte.** `GET …/containers/:containerId/scans` → Liste der Verlaufseinträge
   (neueste zuerst, ohne Rohbericht-Volltext); `GET …/scans/:scanId` → Detail inkl. Referenz auf den
   Rohbericht. Beide read-only.
+  **Präzisierung (S-402):** beide Routen hängen — wie die AC2/AC3-Endpunkte — unter demselben
+  `/api/vps/machines/:provider/*splat`-Präfix (`vpsContainerScanRouter.js`): `GET
+  …/containers/:containerId/scans` löst den Container über dieselbe Provider/ServerId/
+  ContainerId-Auflösung wie AC2 auf und filtert den Store über `app = container.hostname`;
+  `GET …/scans/:scanId` ist containerId-unabhängig (`scanId` ist bereits global eindeutig). Jede
+  Auflösungs-Lücke der Listen-Route (kein Store, kein VPS-Ziel, Container nicht gefunden,
+  unmanaged ohne `hostname`, Store-Fehler) liefert best-effort `200 { scans: [] }` statt eines
+  weiteren Fehlercodes (Robustheit-NFR: ein read-only Verlauf-Abruf darf nie crashen); die
+  Detail-Route liefert bei fehlendem Store/unbekannter `scanId`/Store-Fehler einheitlich `404`.
 - **AC9 — Ampel-Ableitung (deterministisch).** `gruen` = keine Befunde; `gelb` = ausschließlich
   low/medium-Befunde; `rot` = mindestens ein high/critical-Befund. Die Ableitung ist eindeutig und
   testbar aus der `findings`-Liste.
@@ -127,9 +169,24 @@ Bestätigung** — als Board-Punkte übernommen werden.
 
 - **AC14 — Verlauf-Aufklapper.** Am Container ein „Verlauf"-Aufklapper: Liste der Läufe (Zeitpunkt,
   Testort, Ampel, Befund-Anzahl+Art, Bericht-Referenz); Klick öffnet den Detailbericht (`GET …/scans/:scanId`).
+  **Präzisierung (S-404 — Felder ohne Backend-Änderung, kompakter `list()`-Kontrakt bleibt unverändert):**
+  die kompakte `GET …/containers/:containerId/scans`-Form (AC8, S-402 — bereits vertraglich fixiert UND
+  getestet, `test/ScanResultStore.test.js`: `entry).not.toHaveProperty('reportRef')`) liefert weder
+  `reportRef` noch einen Testort-Wert je Zeile. „Testort" wird als statischer Text „Direkt + über
+  Cloudflare" gerendert — jeder Lauf testet laut AC5 **immer beide** Orte in einem Job, ein Testort-Feld
+  je Zeile wäre redundant. „Befund-Anzahl+Art" = `findingCount` + die bereits vorhandene `ampel`-Kategorie
+  (identisches Vokabular zu AC12). „Bericht-Referenz" ist der Klick-auf-Zeile-Button selbst — er öffnet
+  den Detailbericht (`GET …/scans/:scanId`, liefert `reportRef`+`findings`) inline.
 - **AC15 — Board-Rückverfolgung (live).** Trägt ein Verlaufseintrag `boardItemIds`, zeigt der Verlauf je
   Scan „daraus wurden N Punkte aufs Board gelegt — Status live vom Board"; der Board-Status wird **live**
   gelesen (keine eigene DB — ADR-005-Linie).
+  **Präzisierung (S-404 — Live-Lesung ohne neuen Backend-Endpunkt):** der `repoSlug` (Board-Projekt-Slug,
+  identisch zu `ziel` aus AC1) kommt aus dem bereits vorhandenen Detail-Endpunkt (`GET …/scans/:scanId`,
+  AC8/S-405 — `scan.repoSlug`); der Status je Board-ID kommt aus dem bereits vorhandenen, read-only
+  `GET /api/board/projects/:slug` (`src/boardRouter.js`, liefert `features[].stories[].status`) — kein
+  neuer Backend-Endpunkt nötig (geprüfter, bereits vorhandener Lese-Pfad). Fehlt `repoSlug` (älterer/
+  unvollständiger Verlaufseintrag) oder schlägt der Board-Fetch fehl, zeigt die Zeile die Anzahl
+  weiterhin, aber „Status derzeit nicht verfügbar" statt zu crashen (Robustheit-NFR).
 
 ### Befunde → Board (nur auf Bestätigung)
 
@@ -137,12 +194,37 @@ Bestätigung** — als Board-Punkte übernommen werden.
   `{ findingIds: string[] }` legt **genau** die ausgewählten Befunde als Board-Items an (Inhalt je Item:
   Befund + Details + betroffene App/URL + Referenz auf den Scan). **Idempotent:** ein bereits übertragener
   Befund wird **nicht** erneut angelegt (Antwort nennt die bestehende Board-ID). Ohne Auswahl (leere Liste)
-  → `400`.
+  → `400`. Unbekannte `scanId` → `404`.
+  **Präzisierung (S-405 — Board-Item-Anlage + Idempotenz-Mechanik + Projekt-Auflösung):**
+  Board-Items werden über den bestehenden, einzigen programmatischen Schreibpfad
+  `BoardWriter.createIdea()` (S-199, `src/BoardWriter.js`) als neue Story mit `status: Idee`
+  angelegt (kein neuer Board-Schreibmechanismus) — Titel = Kurzform des Befunds, Body = Details
+  (Schweregrad/Art/Testort) + betroffene App + Scan-Referenz. Die Idempotenz-Prüfung ist **je
+  Befund**: jedes `ScanFinding` trägt zusätzlich `boardId` (`null` bis übertragen, danach die
+  entstandene Board-Story-ID) — ein Befund mit bereits gesetztem `boardId` wird als `skipped`
+  gemeldet, nie erneut angelegt; unbekannte `findingIds` (kein Treffer im Scan) werden still
+  ignoriert. Für die Zuordnung "in welches Workspace-Repo (`board/stories/`) gehört dieser
+  Befund" trägt der `ScanResultStore`-Eintrag zusätzlich `repoSlug` (identisch zu `ziel` aus
+  AC1) — fehlt es (älterer/unvollständiger Eintrag) und es müssen tatsächlich NEUE Befunde
+  angelegt werden (reine Idempotenz-Treffer sind davon nicht betroffen), antwortet der Endpunkt
+  mit `422 { errorClass: 'not-scannable' }` (reuse der bereits etablierten Fehlerklasse aus
+  AC1/AC2, kein neuer Fehlercode). Ein einzelner fehlgeschlagener Transfer (z. B. Board-Schreibfehler)
+  bricht die übrigen Befunde nicht ab (best-effort, analog `BoardWriter.archiveDoneFeatures()`).
 - **AC17 — Board-IDs zurückschreiben.** Die entstandenen Board-IDs werden in den `boardItemIds` des
   zugehörigen `ScanResultStore`-Eintrags persistiert (Grundlage für AC15).
+  **Präzisierung (S-405):** `ScanResultStore.recordBoardTransfer({scanId, transfers})` setzt je
+  Befund `boardId` (nur wenn noch nicht gesetzt — Idempotenz) und ergänzt `boardItemIds` um die
+  neu entstandenen IDs (dedupliziert); best-effort/non-fatal (ein Schreibfehler hier darf die
+  Response nicht kippen — die Board-Items sind zu diesem Zeitpunkt bereits real angelegt).
 - **AC18 — Befundliste mit Vorauswahl.** Die Befundliste zeigt je Befund eine Checkbox; **alle** sind per
   Default **vorgehakt** (der Betreiber entfernt nur, was **nicht** aufs Board soll). Schnellwahl oben:
   **Alle / Keine / Nur kritische**.
+  **Präzisierung (S-406):** „Nur kritische" wählt Befunde mit `severity ∈ {high, critical}` —
+  identisch zur `deriveAmpel()`-Rot-Schwelle (AC9) und zum bestehenden UI-Vokabular
+  („Rot — kritische Befunde", AC12). Die Checkbox-/Schnellwahl-Interaktion bezieht sich auf
+  die in der Kurzliste **gezeigten** Befunde (AC12-Truncation, `MAX_FINDINGS_SHOWN`) — über
+  die Kurzliste hinausgehende „N weitere"-Befunde sind aus dieser Ansicht heraus nicht
+  einzeln wählbar (Bestandsverhalten aus S-403, hier unverändert respektiert).
 - **AC19 — Sticky Sammel-Button.** Unten fest sichtbar (sticky) ein Button „N Befunde aufs Board
   übertragen" mit **live mitzählender** Zahl; bei 0 Auswahl **grau/gesperrt**. Klick → kurze Rückfrage
   („N Befunde werden aufs Board gelegt — übertragen?") → Übertrag der ausgewählten Befunde (AC16).
@@ -178,7 +260,8 @@ Bestätigung** — als Board-Punkte übernommen werden.
   boardItemIds }] }`.
 - **`GET …/scans/:scanId`** → `200 { scan: { …, findings:[…], reportRef } }` | `404`.
 - **`POST …/scans/:scanId/board`** Body `{ findingIds: string[] }` → `200 { created:[{ findingId, boardId }],
-  skipped:[{ findingId, boardId }] }` | `400` (leere Liste) | `404`.
+  skipped:[{ findingId, boardId }] }` | `400` (leere Liste) | `404` (unbekannte scanId) |
+  `422 not-scannable` (kein `repoSlug` beim Scan-Eintrag UND es müssen neue Befunde angelegt werden).
 - Runner-Args (server-seitig gesetzt, argv-Array): Ziel-App-Referenz + abgeleitete `url`/`url_edge` +
   `modus=beide` an `claude -p <red-team-command>`.
 

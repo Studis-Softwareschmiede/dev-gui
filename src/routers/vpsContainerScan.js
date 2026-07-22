@@ -1,0 +1,45 @@
+/**
+ * Router-Wrapper: Pro-Container Red-Team-Scan-Endpunkt (den bestehenden
+ * HeadlessRedTeamRunner hinter dem confinierten Pro-Container-Endpunkt) +
+ * Verlauf-Lese-Endpunkte (ScanResultStore, S-402) + Befunde→Board-Übertrag
+ * (S-405).
+ * Factory-Signatur: create(deps) → Express Router
+ * Montiert:
+ *   POST /api/vps/machines/:provider/*splat/containers/:containerId/scan
+ *   GET  /api/vps/machines/:provider/*splat/containers/:containerId/scan/:jobId
+ *   GET  /api/vps/machines/:provider/*splat/containers/:containerId/scans
+ *   GET  /api/vps/machines/:provider/*splat/scans/:scanId
+ *   POST /api/vps/machines/:provider/*splat/scans/:scanId/board
+ * (docs/specs/red-team-scan-per-container.md AC1, AC2, AC3, AC4, AC5, AC6, AC7, AC8,
+ * AC9, AC16, AC17, AC22)
+ *
+ * order 119 — vor vps.js (order 120), analog vpsContainers.js: der greedy
+ * `DELETE /api/vps/machines/:provider/*splat`-Fallback in vps.js darf diese
+ * spezifischeren `.../containers/:containerId/scan`-Routen nicht abfangen.
+ */
+import { vpsContainerScanRouter } from '../vpsContainerScanRouter.js';
+
+export const order = 119;
+
+/**
+ * @param {{
+ *   redTeamRunner: import('../HeadlessRedTeamRunner.js').HeadlessRedTeamRunner,
+ *   vpsDockerControl: import('../deploy/VpsDockerControl.js').VpsDockerControl,
+ *   vpsRegistry: import('../vps/VpsProviderRegistry.js').VpsProviderRegistry,
+ *   vpsTargets: Map<string, { host: string, port?: number, targetUser: string }>,
+ *   workspaceScanner: import('../WorkspaceScanner.js').WorkspaceScanner,
+ *   scanResultStore?: object,
+ *   boardWriter?: import('../BoardWriter.js').BoardWriter,
+ * }} deps
+ * @returns {import('express').Router}
+ */
+export function create({ redTeamRunner, vpsDockerControl, vpsRegistry, vpsTargets, workspaceScanner, scanResultStore, boardWriter }) {
+  return vpsContainerScanRouter(redTeamRunner, {
+    vpsDockerControl,
+    vpsRegistry,
+    vpsTargets,
+    workspaceScanner,
+    scanResultStore,
+    boardWriter,
+  });
+}

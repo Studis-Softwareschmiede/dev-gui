@@ -2,30 +2,32 @@
 > Kuratiert von /flow am Ende jeder Session. Max. 60 Zeilen.
 
 ## Aktueller Stand
-S-387/S-388 gelandet (20.07., Revision 2f35df8): Das Ziel-Projekt-Feld im
-Obsidian-Ingest ist jetzt ein Kombifeld — bestehendes Projekt wählen ODER
-«Neues Projekt erstellen» mit Namens-Eingabe (Slug-Vorschlag aus dem
-Ordnernamen). Neuanlage läuft über POST /api/obsidian-ingest/ensure-target
-(HeadlessNewProjectRunner via runWithAutoProvisioning/ADR-021, scaffoldOk-
-Flag, checkMutationAuthz, APP_SLUG_RE nur im Anlage-Pfad, TOCTOU-fest);
-die GUI pollt den Status und startet den Ingest erst bei ready, mit beim
-Klick eingefrorener Start-Absicht. Parallel-Session baut S-389/S-390
-(AC16–AC19, ehrliche Warteanzeige). Für den Research-App-Pilot existiert
-das Repo research-app bereits (stack-neutral, obsidian_source gesetzt).
+F-093 „Red-Team-Scan pro Container" ist story-seitig fertig: S-401..S-406 und
+S-408 gelandet auf feature/F-093 (S-407 gehört zu F-094 Ausbaustufe 2, nicht
+zu F-093). Die eigenständige Red-Team-Kachel ist abgebaut, der
+Container-Knopf ist der einzige Einstieg. Es folgt der Feature-Abschluss:
+board-ship.sh --merge-feature feature/F-093 (Push→main mit echter CI +
+Secret-Gate), Rollout und ID-Block-Freigabe gebündelt durch den Drain.
 
 ## Letzte Arbeiten
-- S-388 / GUI-Kombifeld + ensure-Statusanzeige + Stale-Poll-Fix (AC10/AC15).
-- S-387 / ensure-target-Endpunkt: 4 Review-Runden (Prompt-Injection-Guard,
-  checkMutationAuthz, GPG-Naht scaffoldOk, TOCTOU) — EP 10.5 vs. 5.25.
-- S-383/S-384 / Ingest-cwd-Fix (Ziel-Repo statt Vault-Ordner) + erste
-  Ziel-Projekt-Auswahl; ausgerollt als be5ef44.
-- S-385/S-386 (parallele Sessions) / RunStateReader-ENOENT, bw-Verzeichnis.
+- S-408 / Kachel-Rückbau (AC23): RedTeamView.jsx, redTeamRouter.js,
+  routers/redTeam.js, viewRegistry-Eintrag + Kachel-Tests entfernt;
+  imageRepoName() lokal in vpsContainerScanRouter.js; red-team-tile.md
+  superseded. Zählungen: 53 Router, 6 Tiles. EP 4/4 (Punktlandung).
+- S-404 / Verlauf-Aufklapper (AC14/AC15): RedTeamScanHistory.jsx, Board-Status
+  live via GET /api/board/projects/:slug. EP 4/4.
+- S-406 / Befundliste (AC18-AC20): Sammel-Button + Rückfrage. EP 7 vs. 4.
+- S-405 / Befunde→Board-Übertrag (AC16/AC17): POST scans/:scanId/board,
+  idempotent. EP 4.0/4.0.
+- S-403 / Scan-Knopf + Panel (AC10-AC13,AC21): RedTeamScanPanel.jsx. EP 7/5.25.
+- S-402 / ScanResultStore (AC7-AC9): dateibasiert, Cap 30/App. EP 4.0/4.0.
+- S-401 / Scan-Endpunkt (AC1-AC6,AC22): vpsContainerScanRouter. EP 6.5/5.25.
 
 ## Offene Fäden
-- Supervised Live-Smoke des echten from-notes-Laufs (neuer cwd/argv) steht
-  aus — ideal beim ersten Research-App-Ingest des Owners.
-- scaffoldOk-Semantik: PerAppGpgProvisioningService liefert jetzt additives
-  Flag — bei künftigen Aufrufer-Änderungen darauf stützen, nie auf result.
-- Reviewer-Suggestions offen: Retry-Test nach 404-Rollback (Preparer),
-  checkMutationAuthz/resolveWorkspaceRootDir-Dedup, Slug-Längenprüfung GUI.
-- Retro: Issue #371 (board-ship.sh worktree-tauglich) bleibt offen.
+- Findings-Extraktion bleibt offene Folge-Naht (keiner Story zugeordnet):
+  HeadlessRunnerCore exponiert Runner-Ausgabe nicht → record() wird nirgends
+  mit echten Findings aufgerufen; Verlauf/Befundliste/Ampel ohne echte Daten.
+  Der künftige record()-Aufrufer muss repoSlug mitgeben. Owner/requirement.
+- Landen bei --parent weiter von Hand deterministisch (flow/L02/L07);
+  Retro-Issue #371 (board-ship.sh worktree-tauglich) offen.
+- Testläufe im Worktree: npm run test:worktree (S-400) statt tar-Workaround.

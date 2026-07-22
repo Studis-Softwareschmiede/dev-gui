@@ -346,9 +346,13 @@ describe('routerLoader — Echte src/routers/ Module (AC1/AC3)', () => {
     //   (POST .../obsidian-ingest/ensure-target + GET .../obsidian-ingest/ensure-target/:jobId —
     //   Ziel-Repo-Vorbereitung bestehend/neu via HeadlessNewProjectRunner, strikt
     //   vor dem unveränderten start-Endpunkt, AC11/AC13/AC14) → 52.
-    // redTeam.js wurde mit red-team-tile (F-090) hinzugefügt
-    //   (POST /api/red-team + GET /api/red-team/:jobId + GET /api/red-team/targets —
-    //   dünner Auslöser für /agent-flow:red-team, Allowlist-Schnittmenge VPS ∩ eigenes Repo) → 53.
+    // redTeam.js wurde mit red-team-tile (F-090) hinzugefügt (→ 53), mit S-408/AC23
+    //   (red-team-scan-per-container, Kachel-Rückbau) wieder ENTFERNT — der Pro-Container-
+    //   Scan-Knopf (vpsContainerScan.js) ist der einzige verbleibende Einstieg → zurück auf 53.
+    // vpsContainerScan.js wurde mit red-team-scan-per-container (F-093, S-401) hinzugefügt
+    //   (POST .../containers/:containerId/scan + GET .../containers/:containerId/scan/:jobId —
+    //   confinierter Pro-Container-Scan-Auslöser, dockt den bestehenden HeadlessRedTeamRunner
+    //   an, kein neuer Runner, AC1/AC2/AC3/AC4/AC5/AC6/AC22) → 53.
     const entries = await readdir(ROUTERS_DIR);
     const mountedCount = entries.filter((f) => f.endsWith('.js')).length;
     expect(mountedCount).toBe(53);
