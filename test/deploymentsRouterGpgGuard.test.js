@@ -9,6 +9,9 @@
  *   AC14 — gpgBwItem + ready → Passphrase geholt + als containerEnv.GPG_PASSPHRASE an
  *          orchestrator.deploy gereicht; Wert erscheint nicht in Response/Audit (S1).
  *   AC15 — fehlendes Item → 422 gpg-item-not-found; Login-Fehler → 502.
+ *   AC19 (S-409, §4.5) — deployErrorClass 'config-failed' → 502
+ *          errorClass 'bitwarden-config-failed' (eigene reason, kein
+ *          Sammelfall 'bitwarden-login-failed', kein bw-Rohtext-Leak).
  *   503  — gpgBwItem gesetzt, aber Zugangs-Dienst nicht verdrahtet.
  */
 
@@ -132,6 +135,18 @@ describe('deploymentsRouter — GPG-Guard + Injektion (F-072/S-334)', () => {
     const r = await httpPost(ctx.port, '/api/deployments', { ...BASE_BODY, gpgBwItem: 'deploy-gpg-app' });
     expect(r.status).toBe(502);
     expect(r.body.errorClass).toBe('bitwarden-login-failed');
+  });
+
+  it('AC19 (S-409): config-Fehler (config-failed) → 502 bitwarden-config-failed, nicht bitwarden-login-failed', async () => {
+    const fetchItemPassword = jest.fn(async () => { const e = new Error('bw-deploy: config-failed'); e.deployErrorClass = 'config-failed'; throw e; });
+    const parts = build({ accessStatus: { ready: true }, fetchItemPassword });
+    await serve(parts);
+    const r = await httpPost(ctx.port, '/api/deployments', { ...BASE_BODY, gpgBwItem: 'deploy-gpg-app' });
+    expect(r.status).toBe(502);
+    expect(r.body.errorClass).toBe('bitwarden-config-failed');
+    expect(r.body.errorClass).not.toBe('bitwarden-login-failed');
+    expect(r.raw).not.toContain('Logout required');
+    expect(parts.orchestrator.deploy).not.toHaveBeenCalled();
   });
 
   it('503 wenn gpgBwItem gesetzt, aber Zugangs-Dienst nicht verdrahtet', async () => {

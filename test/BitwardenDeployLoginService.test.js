@@ -9,6 +9,17 @@
  *   AC10 — validateAccess klassifiziert Fehler (access-incomplete/auth-failed/
  *          unlock-failed/bw-unreachable) ohne Rohtext-Leak.
  *   AC11 — openSession erlaubt mehrere Item-Reads in EINEM Login; close() räumt auf.
+ *   AC17 — `bw config server` läuft NUR wenn unauthenticated ODER die
+ *          konfigurierte Server-URL von `server_url` abweicht; sonst übersprungen.
+ *          Vergleich NORMALISIERT (Trailing-Slash/Case, Review-Fund Iteration 2) —
+ *          rein kosmetische Abweichungen zwischen `bw status` und `server_url`
+ *          lösen KEINEN Reconfigure aus.
+ *   AC18 — eingeloggt + abweichende `server_url` → logout → config → Neu-Login → unlock.
+ *   AC19 — config-Fehler (u.a. „Logout required …") → eigene Klasse `config-failed`
+ *          (kein Rohtext-Leak).
+ *   AC20 — Regressionstest: zwei aufeinanderfolgende Sessions über denselben
+ *          simulierten eingeloggten Zustand scheitern NICHT an config-failed.
+ *   AC21 — leere/fehlende `server_url` → kein config-Aufruf (Default-Server).
  *
  * Covers (docs/specs/per-app-gpg-passphrase-provisioning.md, F-073/S-335):
  *   AC1/AC2 — Item-Anlage-Technik der Session (`itemExists`/`createItem`):
@@ -37,7 +48,7 @@ import { mkdir, rm } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 
 import { BitwardenDeployAccessStore } from '../src/BitwardenDeployAccessStore.js';
-import { BitwardenDeployLoginService } from '../src/BitwardenDeployLoginService.js';
+import { BitwardenDeployLoginService, DEPLOY_LOGIN_ERROR_CLASSES } from '../src/BitwardenDeployLoginService.js';
 
 const SECRETS = {
   clientId: 'user.abc123',
@@ -65,7 +76,21 @@ function makeSpawn(plan = {}) {
   const spawn = async (args, { env, input } = {}) => {
     calls.push({ args: [...args], env: { ...env }, input });
     const cmd = args[0];
-    if (cmd === 'config') return { stdout: '', stderr: '', exitCode: 0 };
+    if (cmd === 'status') {
+      // S-409 (AC17): `bw status` liefert die aktuell konfigurierte Server-URL.
+      // Default: identisch zur hinterlegten server_url (Standardfall „gleiches
+      // Gerät, gleicher Server" — config wird übersprungen); plan.currentServerUrl
+      // überschreibt das gezielt (AC18-Abweichungs-Fälle).
+      return {
+        stdout: JSON.stringify({ serverUrl: plan.currentServerUrl ?? SECRETS.serverUrl, status: 'locked' }),
+        stderr: '',
+        exitCode: 0,
+      };
+    }
+    if (cmd === 'config') {
+      if (plan.configFail) return { stdout: '', stderr: 'Logout required before server config update', exitCode: 1 };
+      return { stdout: '', stderr: '', exitCode: 0 };
+    }
     if (cmd === 'login') {
       // S-386: `login --check` prüft nur den Status. Default: NICHT eingeloggt
       // (Erst-Login nötig) → `login --apikey` folgt. plan.alreadyLoggedIn = true
@@ -389,6 +414,8 @@ function makeItemStoreSpawn(initialItems = {}) {
   const spawn = async (args, { env, input } = {}) => {
     calls.push({ args: [...args], env: { ...env }, input });
     const cmd = args[0];
+    // S-409 (AC17): eingeloggt + gleiche Server-URL → config wird übersprungen.
+    if (cmd === 'status') return { stdout: JSON.stringify({ serverUrl: SECRETS.serverUrl, status: 'locked' }), stderr: '', exitCode: 0 };
     if (cmd === 'config') return { stdout: '', stderr: '', exitCode: 0 };
     if (cmd === 'login') return { stdout: 'You are logged in!', stderr: '', exitCode: 0 };
     if (cmd === 'unlock') return { stdout: SESSION_TOKEN + '\n', stderr: '', exitCode: 0 };
@@ -558,5 +585,185 @@ describe('BitwardenDeployLoginService — readItemFields/updateItemFields (F-073
 
     expect(calls.some((c) => c.args[0] === 'encode')).toBe(false);
     expect(calls.some((c) => c.args[0] === 'edit')).toBe(false);
+  });
+});
+
+// ── Folge-Bug zu S-386 (F-072/S-409, Spec §4.5 AC17–AC21): konditionaler
+// `bw config server`-Schritt ── siehe docs/specs/deploy-bitwarden-gpg-injection.md
+// Abschnitt 4.5 + Tests §5 „config-Gating".
+describe('BitwardenDeployLoginService — config-Gating (S-409, AC17–AC21)', () => {
+  it('AC17: eingeloggt + gleiche Server-URL → config server wird übersprungen', async () => {
+    const store = await readyStore();
+    // Default-Plan: makeSpawn's `status`-Mock liefert dieselbe URL wie SECRETS.serverUrl.
+    const { spawn, calls } = makeSpawn({ alreadyLoggedIn: true });
+    const svc = new BitwardenDeployLoginService({ accessStore: store, auditStore: auditSpy(), _spawnBw: spawn });
+
+    const session = await svc.openSession();
+    await session.readItemPassword('deploy-gpg-a');
+    await session.close();
+
+    expect(calls.some((c) => c.args[0] === 'config')).toBe(false);
+    expect(calls.some((c) => c.args[0] === 'logout')).toBe(false);
+    expect(calls.filter((c) => c.args[0] === 'login' && c.args[1] === '--apikey').length).toBe(0);
+  });
+
+  // Review-Fund Iteration 2 (reviewer/R02+R06): der Vergleich MUSS kosmetische
+  // Abweichungen (Trailing-Slash) tolerieren — sonst löst ein reales `bw
+  // status`-Format, das sich nur im Trailing-Slash vom gespeicherten
+  // `server_url` unterscheidet, bei JEDEM Deploy einen unnötigen
+  // logout→config→Neu-Login aus (S-386-Bug unter neuem Namen).
+  it('AC17(b) Normalisierung: gespeichert ohne, bw status MIT Trailing-Slash → config bleibt übersprungen', async () => {
+    const store = await readyStore(); // server_url = SECRETS.serverUrl (kein Trailing-Slash)
+    const { spawn, calls } = makeSpawn({ alreadyLoggedIn: true, currentServerUrl: `${SECRETS.serverUrl}/` });
+    const svc = new BitwardenDeployLoginService({ accessStore: store, auditStore: auditSpy(), _spawnBw: spawn });
+
+    const session = await svc.openSession();
+    await session.close();
+
+    expect(calls.some((c) => c.args[0] === 'config')).toBe(false);
+    expect(calls.some((c) => c.args[0] === 'logout')).toBe(false);
+    expect(calls.filter((c) => c.args[0] === 'login' && c.args[1] === '--apikey').length).toBe(0);
+  });
+
+  it('AC17(b) Normalisierung: gespeichert MIT Trailing-Slash, bw status ohne → config bleibt übersprungen', async () => {
+    const store = new BitwardenDeployAccessStore();
+    await store.setField('server_url', `${SECRETS.serverUrl}/`); // Trailing-Slash im gespeicherten Wert
+    await store.setField('client_id', SECRETS.clientId);
+    await store.setField('client_secret', SECRETS.clientSecret);
+    await store.setField('master_password', SECRETS.masterPassword);
+    const { spawn, calls } = makeSpawn({ alreadyLoggedIn: true, currentServerUrl: SECRETS.serverUrl });
+    const svc = new BitwardenDeployLoginService({ accessStore: store, auditStore: auditSpy(), _spawnBw: spawn });
+
+    const session = await svc.openSession();
+    await session.close();
+
+    expect(calls.some((c) => c.args[0] === 'config')).toBe(false);
+    expect(calls.some((c) => c.args[0] === 'logout')).toBe(false);
+  });
+
+  it('AC17(b) Normalisierung: gespeichert und bw status unterscheiden sich nur in Groß-/Kleinschreibung des Hosts → config bleibt übersprungen', async () => {
+    const store = await readyStore(); // server_url = 'https://vault.example.com'
+    const { spawn, calls } = makeSpawn({ alreadyLoggedIn: true, currentServerUrl: 'https://VAULT.EXAMPLE.COM' });
+    const svc = new BitwardenDeployLoginService({ accessStore: store, auditStore: auditSpy(), _spawnBw: spawn });
+
+    const session = await svc.openSession();
+    await session.close();
+
+    expect(calls.some((c) => c.args[0] === 'config')).toBe(false);
+  });
+
+  it('AC17: unauthenticated + gesetzte server_url → config server wird aufgerufen, dann Login+Unlock', async () => {
+    const store = await readyStore();
+    const { spawn, calls } = makeSpawn(); // Default: nicht eingeloggt
+    const svc = new BitwardenDeployLoginService({ accessStore: store, auditStore: auditSpy(), _spawnBw: spawn });
+
+    const session = await svc.openSession();
+    await session.close();
+
+    // Weiche (login --check) läuft VOR dem config-Aufruf, config VOR Login+Unlock.
+    const idxCheck = calls.findIndex((c) => c.args[0] === 'login' && c.args[1] === '--check');
+    const idxConfig = calls.findIndex((c) => c.args[0] === 'config');
+    const idxLogin = calls.findIndex((c) => c.args[0] === 'login' && c.args[1] === '--apikey');
+    const idxUnlock = calls.findIndex((c) => c.args[0] === 'unlock');
+    expect(idxCheck).toBeGreaterThanOrEqual(0);
+    expect(idxConfig).toBeGreaterThan(idxCheck);
+    expect(idxLogin).toBeGreaterThan(idxConfig);
+    expect(idxUnlock).toBeGreaterThan(idxLogin);
+    // im unauthenticated-Zweig wird die konfigurierte URL nicht per `status` erfragt
+    // (config läuft dort ohnehin unbedingt) — kein unnötiger bw-Aufruf.
+    expect(calls.some((c) => c.args[0] === 'status')).toBe(false);
+  });
+
+  it('AC18: eingeloggt + abweichende server_url → logout → config server → login --apikey → unlock', async () => {
+    const store = await readyStore();
+    const { spawn, calls } = makeSpawn({
+      alreadyLoggedIn: true,
+      currentServerUrl: 'https://vault.old-server.example.com', // weicht von SECRETS.serverUrl ab
+    });
+    const svc = new BitwardenDeployLoginService({ accessStore: store, auditStore: auditSpy(), _spawnBw: spawn });
+
+    const session = await svc.openSession();
+    await session.close();
+
+    const idxLogout = calls.findIndex((c) => c.args[0] === 'logout');
+    const idxConfig = calls.findIndex((c) => c.args[0] === 'config');
+    const idxLogin = calls.findIndex((c) => c.args[0] === 'login' && c.args[1] === '--apikey');
+    const idxUnlock = calls.findIndex((c) => c.args[0] === 'unlock');
+    expect(idxLogout).toBeGreaterThanOrEqual(0);
+    expect(idxConfig).toBeGreaterThan(idxLogout);
+    expect(idxLogin).toBeGreaterThan(idxConfig);
+    expect(idxUnlock).toBeGreaterThan(idxLogin);
+    // AC18: der Server-Wechsel rechtfertigt genau EINEN neuen Login (akzeptiertes Device-Event)
+    expect(calls.filter((c) => c.args[0] === 'login' && c.args[1] === '--apikey').length).toBe(1);
+    const cfgCall = calls.find((c) => c.args[0] === 'config');
+    expect(cfgCall.args).toEqual(['config', 'server', SECRETS.serverUrl]);
+  });
+
+  it('AC19: config-Schritt schlägt fehl ("Logout required …") → Fehlerklasse config-failed, kein Rohtext-Leak', async () => {
+    const store = await readyStore();
+    // Default-Plan: nicht eingeloggt → config läuft unbedingt (AC17a) und scheitert hier.
+    const { spawn } = makeSpawn({ configFail: true });
+    const svc = new BitwardenDeployLoginService({ accessStore: store, auditStore: auditSpy(), _spawnBw: spawn });
+
+    let caught;
+    try {
+      await svc.openSession();
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toMatchObject({ deployErrorClass: 'config-failed' });
+    expect(caught.message).not.toContain('Logout required');
+    expect(DEPLOY_LOGIN_ERROR_CLASSES).toContain('config-failed');
+  });
+
+  it('AC20: zwei aufeinanderfolgende Sessions über simulierten eingeloggten Zustand (config server exit 1) laufen beide durch', async () => {
+    const store = await readyStore();
+    // config server ist so präpariert, dass es MIT „Logout required …" scheitern
+    // würde, WENN es aufgerufen würde — der Regressionsbeweis ist, dass es das
+    // nicht wird (eingeloggt + gleiche URL → übersprungen, S-409-Fix).
+    const { spawn, calls } = makeSpawn({ alreadyLoggedIn: true, configFail: true });
+    const svc = new BitwardenDeployLoginService({ accessStore: store, auditStore: auditSpy(), _spawnBw: spawn });
+
+    const s1 = await svc.openSession();
+    await s1.readItemPassword('deploy-gpg-a');
+    await s1.close();
+
+    const s2 = await svc.openSession();
+    await s2.readItemPassword('deploy-gpg-b');
+    await s2.close();
+
+    expect(calls.some((c) => c.args[0] === 'config')).toBe(false);
+  });
+
+  it('AC21: leere/fehlende server_url → kein config-Aufruf, Default-Server (unauthenticated)', async () => {
+    const store = new BitwardenDeployAccessStore();
+    await store.setField('client_id', SECRETS.clientId);
+    await store.setField('client_secret', SECRETS.clientSecret);
+    await store.setField('master_password', SECRETS.masterPassword);
+    // server_url bewusst NICHT gesetzt
+    const { spawn, calls } = makeSpawn();
+    const svc = new BitwardenDeployLoginService({ accessStore: store, auditStore: auditSpy(), _spawnBw: spawn });
+
+    const session = await svc.openSession();
+    await session.close();
+
+    expect(calls.some((c) => c.args[0] === 'config')).toBe(false);
+    expect(calls.some((c) => c.args[0] === 'status')).toBe(false);
+    expect(calls.filter((c) => c.args[0] === 'login' && c.args[1] === '--apikey').length).toBe(1);
+  });
+
+  it('AC21: leere/fehlende server_url + bereits eingeloggt → weiterhin kein config-Aufruf', async () => {
+    const store = new BitwardenDeployAccessStore();
+    await store.setField('client_id', SECRETS.clientId);
+    await store.setField('client_secret', SECRETS.clientSecret);
+    await store.setField('master_password', SECRETS.masterPassword);
+    const { spawn, calls } = makeSpawn({ alreadyLoggedIn: true });
+    const svc = new BitwardenDeployLoginService({ accessStore: store, auditStore: auditSpy(), _spawnBw: spawn });
+
+    const session = await svc.openSession();
+    await session.close();
+
+    expect(calls.some((c) => c.args[0] === 'config')).toBe(false);
+    expect(calls.filter((c) => c.args[0] === 'login' && c.args[1] === '--apikey').length).toBe(0);
   });
 });

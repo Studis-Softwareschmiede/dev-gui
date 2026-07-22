@@ -750,6 +750,17 @@ export function deploymentsRouter(orchestrator, auditStore, vpsTargets, reconcil
             reason: 'Bitte zuerst den Deploy-Zugang zu Bitwarden in den Einstellungen hinterlegen.',
           });
         }
+        // Folge-Bug zu S-386 (F-072/S-409, Spec §4.5 AC19): `bw config server`
+        // fehlgeschlagen — eigene Fehlerklasse statt Sammelfall
+        // 'bitwarden-login-failed', damit der Hinweis auf den Server-URL-
+        // Reconfigure zeigt statt auf Zugangsdaten (kein bw-Rohtext, S1).
+        if (cls === 'config-failed') {
+          return res.status(502).json({
+            result: 'error',
+            errorClass: 'bitwarden-config-failed',
+            reason: 'Bitwarden-Server-Konfiguration konnte nicht aktualisiert werden — Server-URL im Deploy-Zugang prüfen.',
+          });
+        }
         // auth-failed | unlock-failed | bw-unreachable | error
         return res.status(502).json({
           result: 'error',

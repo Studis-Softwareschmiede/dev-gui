@@ -68,6 +68,13 @@ import { join } from 'node:path';
  * ausschließlich via Env). Nebenläufigkeit: da alle Sessions dasselbe Verzeichnis
  * teilen, serialisiert ein Instanz-Mutex sie strikt (ersetzt die frühere
  * Isolation-über-eigenes-temp-Verzeichnis).
+ *
+ * Folge-Bug (S-409, Spec §4.5 AC17–AC21): weil das Verzeichnis jetzt persistent
+ * ist, verweigert `bw config server` auf dem eingeloggten Zustand mit „Logout
+ * required before server config update". Der `config`-Aufruf läuft deshalb NUR
+ * noch, wenn (a) noch nicht eingeloggt ist ODER (b) die hinterlegte `server_url`
+ * von der aktuell konfigurierten Server-URL abweicht (dann: logout → config →
+ * Neu-Login, AC18) — siehe `#openSession`.
  */
 function deployAppDataDir() {
   return (
@@ -92,6 +99,11 @@ export const DEPLOY_LOGIN_ERROR_CLASSES = Object.freeze([
   // BESTEHENDEN Item-Instanz (Feld-Lese-/Schreibfehler, ungültige JSON-Antwort,
   // `bw edit item` fehlgeschlagen) — eigene Klasse (kein Rohtext-Leak, S1).
   'item-update-failed',
+  // Folge-Bug zu S-386 (F-072/S-409, Spec §4.5 AC19): `bw config server`
+  // schlägt fehl (u.a. „Logout required before server config update" auf dem
+  // persistenten, eingeloggten Verzeichnis) — eigene Klasse statt Sammelfall
+  // 'error', damit deploymentsRouter eine eigene, verständliche `reason` liefert.
+  'config-failed',
   'error',
 ]);
 
@@ -112,9 +124,82 @@ function classify(output, exitCode, step) {
   ) {
     return 'bw-unreachable';
   }
-  if (step === 'login') return 'auth-failed';       // API-Key falsch/abgelehnt
-  if (step === 'unlock') return 'unlock-failed';     // Master-Passwort falsch
+  if (step === 'config') return 'config-failed';     // z.B. „Logout required …" (S-409)
+  if (step === 'login') return 'auth-failed';         // API-Key falsch/abgelehnt
+  if (step === 'unlock') return 'unlock-failed';      // Master-Passwort falsch
   return 'error';
+}
+
+/**
+ * Ermittelt die AKTUELL konfigurierte bw-Server-URL über `bw status` (liefert
+ * JSON inkl. `serverUrl`; funktioniert unabhängig vom Login-/Lock-Zustand,
+ * kein Geheimnis in Argv/Env nötig — S2). Spec AC17: entscheidet zusammen mit
+ * dem Login-Zustand, ob `bw config server` übersprungen werden darf.
+ *
+ * Bei Spawn-/Parse-Fehler: `null` — das Fehlerauflösungsverhalten in
+ * `#openSession` behandelt `null` konservativ wie „weicht ab" (führt also
+ * NICHT dazu, dass ein nötiger Reconfigure fälschlich übersprungen wird).
+ *
+ * @param {Function} spawnBw
+ * @param {object} env
+ * @returns {Promise<string|null>}
+ */
+async function getConfiguredServerUrl(spawnBw, env) {
+  try {
+    const res = await spawnBw(['status'], { env: { ...env } });
+    if (res.exitCode !== 0) return null;
+    const parsed = JSON.parse(res.stdout);
+    return typeof parsed?.serverUrl === 'string' ? parsed.serverUrl : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Normalisiert eine bw-Server-URL für den AC17(b)-Vergleich (Review-Fund
+ * reviewer/R02+R06, Iteration 2): `bw status` und der gespeicherte
+ * `server_url`-Wert können sich rein KOSMETISCH unterscheiden (Trailing-Slash,
+ * Groß-/Kleinschreibung von Schema/Host) — eine rohe String-Gleichheit würde
+ * das als „Server-Wechsel" werten und bei JEDEM Deploy unnötig
+ * logout→config→Neu-Login auslösen (S-386-Bug unter neuem Namen).
+ *
+ * Strategie: per `URL` parsen und Schema+Host kleinschreiben, Pfad ohne
+ * abschließende(n) Slash(es) vergleichen (Query bleibt erhalten, aber für
+ * bw-Server-URLs irrelevant). Lässt sich der Wert nicht als URL parsen
+ * (z. B. leerer/kaputter String) → Fallback auf getrimmten String ohne
+ * abschließende Slashes, damit der Vergleich nie hart crasht.
+ *
+ * @param {string|null|undefined} url
+ * @returns {string|null} normalisierte Form, oder `null` bei leerem/fehlendem Wert
+ */
+function normalizeServerUrl(url) {
+  if (typeof url !== 'string') return null;
+  const trimmed = url.trim();
+  if (!trimmed) return null;
+  try {
+    const u = new URL(trimmed);
+    const path = u.pathname.replace(/\/+$/, '');
+    return `${u.protocol.toLowerCase()}//${u.host.toLowerCase()}${path}${u.search}`;
+  } catch {
+    return trimmed.replace(/\/+$/, '');
+  }
+}
+
+/**
+ * Vergleicht zwei bw-Server-URLs NACH Normalisierung (AC17(b)). `null` auf
+ * einer der beiden Seiten (Spawn-/Parse-Fehler bei `bw status`, oder leerer
+ * `server_url`) gilt konservativ als „nicht gleich" — führt also NICHT dazu,
+ * dass ein nötiger Reconfigure fälschlich übersprungen wird.
+ *
+ * @param {string|null} a
+ * @param {string|null} b
+ * @returns {boolean}
+ */
+function serverUrlsEqual(a, b) {
+  const na = normalizeServerUrl(a);
+  const nb = normalizeServerUrl(b);
+  if (na === null || nb === null) return false;
+  return na === nb;
 }
 
 export class BitwardenDeployLoginService {
@@ -278,20 +363,45 @@ export class BitwardenDeployLoginService {
       await mkdir(appDataDir, { recursive: true, mode: 0o700 });
       await chmod(appDataDir, 0o700).catch(() => {});
 
-      // Optional: Server-URL setzen (Argv ist kein Geheimnis)
+      // S-409 (Folge-Bug zu S-386, Spec §4.5 AC17): die Login-Weiche läuft VOR
+      // einem etwaigen `bw config server`-Aufruf — die bw-CLI verweigert eine
+      // Server-Config-Änderung im eingeloggten Zustand („Logout required before
+      // server config update"). `bw login --check` (exit 0 = eingeloggt)
+      // vermeidet außerdem weiterhin den „New Device"-Login bei bereits
+      // registriertem Gerät (S-386).
+      const check = await this.#spawnBw(['login', '--check'], { env: { ...baseEnv } });
+      const authenticated = check.exitCode === 0;
+      let needsLogin = !authenticated;
+
       if (access.serverUrl) {
-        const r = await this.#spawnBw(['config', 'server', access.serverUrl], { env: { ...baseEnv } });
-        if (r.exitCode !== 0) {
-          throw makeErr(classify(r.stdout + r.stderr, r.exitCode, 'config'));
+        if (!authenticated) {
+          // AC17(a): unauthenticated + gesetzte server_url → config läuft
+          // unbedingt (ausgeloggter Zustand erlaubt die Änderung).
+          const cfgRes = await this.#spawnBw(['config', 'server', access.serverUrl], { env: { ...baseEnv } });
+          if (cfgRes.exitCode !== 0) {
+            throw makeErr(classify(cfgRes.stdout + cfgRes.stderr, cfgRes.exitCode, 'config'));
+          }
+        } else {
+          // AC17(b): eingeloggt → config NUR bei abweichender konfigurierter
+          // Server-URL (AC18: logout → config → Neu-Login). Stimmt die URL
+          // überein → config wird übersprungen (der eigentliche S-409-Fix).
+          // Vergleich NORMALISIERT (Review-Fund Iteration 2): eine rohe
+          // String-Gleichheit würde kosmetische Unterschiede (Trailing-Slash,
+          // Groß-/Kleinschreibung) fälschlich als Server-Wechsel werten und
+          // bei JEDEM Deploy unnötig logout→config→Neu-Login auslösen.
+          const currentUrl = await getConfiguredServerUrl(this.#spawnBw, baseEnv);
+          if (!serverUrlsEqual(currentUrl, access.serverUrl)) {
+            await this.#spawnBw(['logout'], { env: { ...baseEnv } }); // best-effort
+            const cfgRes = await this.#spawnBw(['config', 'server', access.serverUrl], { env: { ...baseEnv } });
+            if (cfgRes.exitCode !== 0) {
+              throw makeErr(classify(cfgRes.stdout + cfgRes.stderr, cfgRes.exitCode, 'config'));
+            }
+            needsLogin = true; // nach dem logout ist ein Neu-Login zwingend
+          }
         }
       }
 
-      // Login NUR wenn noch nicht eingeloggt (S-386): `bw login --check` (exit 0 =
-      // eingeloggt) vermeidet den „New Device"-Login bei bereits registriertem
-      // Gerät. Der Erst-Login pro Geräte-Verzeichnis erzeugt weiterhin genau EIN
-      // Device-Event — danach keines mehr (Ende der Mailflut).
-      const check = await this.#spawnBw(['login', '--check'], { env: { ...baseEnv } });
-      if (check.exitCode !== 0) {
+      if (needsLogin) {
         // API-Key-Login (Secrets via Env, nicht Argv) — kein OTP/2FA (Spec AC8)
         const loginEnv = { ...baseEnv, BW_CLIENTID: access.clientId, BW_CLIENTSECRET: access.clientSecret };
         const loginRes = await this.#spawnBw(['login', '--apikey'], { env: loginEnv });
