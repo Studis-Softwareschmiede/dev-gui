@@ -129,6 +129,14 @@ Bestätigung** — als Board-Punkte übernommen werden.
   truth, s. AC9). Diese Story implementiert nur das Store-Fundament (`record`/`list`/
   `getByScanId`/`getByJobId`) — WER `record()` nach Lauf-Abschluss aufruft (Parsing des
   Agent-Outputs zu `findings`), ist nicht Teil von AC7-AC9 und bleibt eine offene Folge-Naht.
+  **Präzisierung (S-405 — zusätzliche Felder für AC16/AC17):** das Schema wird um
+  `repoSlug: string|null` (Scan-Ebene, identisch zu `ziel` aus AC1 — der Workspace-Repo-Slug für
+  den Board-Übertrag) und `boardId: string|null` (je Finding — Idempotenz-Grundlage, `null` bis
+  übertragen) erweitert. Beide Felder sind optional/additiv (`null`-Default) — bestehende
+  Verlaufseinträge ohne diese Felder bleiben gültig; der künftige `record()`-Aufrufer (weiterhin
+  offene Naht, s.o.) sollte `repoSlug` mitgeben, sobald er existiert (er kennt ihn bereits aus
+  AC1). `ScanResultStore.recordBoardTransfer({scanId, transfers})` (AC17) ist der einzige
+  Schreibpfad für `boardId`/die Ergänzung von `boardItemIds`.
 - **AC8 — Verlauf-Lese-Endpunkte.** `GET …/containers/:containerId/scans` → Liste der Verlaufseinträge
   (neueste zuerst, ohne Rohbericht-Volltext); `GET …/scans/:scanId` → Detail inkl. Referenz auf den
   Rohbericht. Beide read-only.
@@ -171,9 +179,28 @@ Bestätigung** — als Board-Punkte übernommen werden.
   `{ findingIds: string[] }` legt **genau** die ausgewählten Befunde als Board-Items an (Inhalt je Item:
   Befund + Details + betroffene App/URL + Referenz auf den Scan). **Idempotent:** ein bereits übertragener
   Befund wird **nicht** erneut angelegt (Antwort nennt die bestehende Board-ID). Ohne Auswahl (leere Liste)
-  → `400`.
+  → `400`. Unbekannte `scanId` → `404`.
+  **Präzisierung (S-405 — Board-Item-Anlage + Idempotenz-Mechanik + Projekt-Auflösung):**
+  Board-Items werden über den bestehenden, einzigen programmatischen Schreibpfad
+  `BoardWriter.createIdea()` (S-199, `src/BoardWriter.js`) als neue Story mit `status: Idee`
+  angelegt (kein neuer Board-Schreibmechanismus) — Titel = Kurzform des Befunds, Body = Details
+  (Schweregrad/Art/Testort) + betroffene App + Scan-Referenz. Die Idempotenz-Prüfung ist **je
+  Befund**: jedes `ScanFinding` trägt zusätzlich `boardId` (`null` bis übertragen, danach die
+  entstandene Board-Story-ID) — ein Befund mit bereits gesetztem `boardId` wird als `skipped`
+  gemeldet, nie erneut angelegt; unbekannte `findingIds` (kein Treffer im Scan) werden still
+  ignoriert. Für die Zuordnung "in welches Workspace-Repo (`board/stories/`) gehört dieser
+  Befund" trägt der `ScanResultStore`-Eintrag zusätzlich `repoSlug` (identisch zu `ziel` aus
+  AC1) — fehlt es (älterer/unvollständiger Eintrag) und es müssen tatsächlich NEUE Befunde
+  angelegt werden (reine Idempotenz-Treffer sind davon nicht betroffen), antwortet der Endpunkt
+  mit `422 { errorClass: 'not-scannable' }` (reuse der bereits etablierten Fehlerklasse aus
+  AC1/AC2, kein neuer Fehlercode). Ein einzelner fehlgeschlagener Transfer (z. B. Board-Schreibfehler)
+  bricht die übrigen Befunde nicht ab (best-effort, analog `BoardWriter.archiveDoneFeatures()`).
 - **AC17 — Board-IDs zurückschreiben.** Die entstandenen Board-IDs werden in den `boardItemIds` des
   zugehörigen `ScanResultStore`-Eintrags persistiert (Grundlage für AC15).
+  **Präzisierung (S-405):** `ScanResultStore.recordBoardTransfer({scanId, transfers})` setzt je
+  Befund `boardId` (nur wenn noch nicht gesetzt — Idempotenz) und ergänzt `boardItemIds` um die
+  neu entstandenen IDs (dedupliziert); best-effort/non-fatal (ein Schreibfehler hier darf die
+  Response nicht kippen — die Board-Items sind zu diesem Zeitpunkt bereits real angelegt).
 - **AC18 — Befundliste mit Vorauswahl.** Die Befundliste zeigt je Befund eine Checkbox; **alle** sind per
   Default **vorgehakt** (der Betreiber entfernt nur, was **nicht** aufs Board soll). Schnellwahl oben:
   **Alle / Keine / Nur kritische**.
@@ -212,7 +239,8 @@ Bestätigung** — als Board-Punkte übernommen werden.
   boardItemIds }] }`.
 - **`GET …/scans/:scanId`** → `200 { scan: { …, findings:[…], reportRef } }` | `404`.
 - **`POST …/scans/:scanId/board`** Body `{ findingIds: string[] }` → `200 { created:[{ findingId, boardId }],
-  skipped:[{ findingId, boardId }] }` | `400` (leere Liste) | `404`.
+  skipped:[{ findingId, boardId }] }` | `400` (leere Liste) | `404` (unbekannte scanId) |
+  `422 not-scannable` (kein `repoSlug` beim Scan-Eintrag UND es müssen neue Befunde angelegt werden).
 - Runner-Args (server-seitig gesetzt, argv-Array): Ziel-App-Referenz + abgeleitete `url`/`url_edge` +
   `modus=beide` an `claude -p <red-team-command>`.
 

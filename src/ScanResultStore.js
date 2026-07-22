@@ -16,9 +16,10 @@
  * Rechte: 0600
  * Schreiben: atomar (tmp + rename)
  *
- * Eintrag-Schema (AC7, verbindlich):
- *   { scanId, app, startedAt, finishedAt, ampel,
- *     findings: [{ id, severity, kind, testort, titel }],
+ * Eintrag-Schema (AC7, verbindlich; um `repoSlug`/`boardId` erweitert — S-405,
+ * AC16/AC17, s. Präzisierung unten):
+ *   { scanId, app, repoSlug, startedAt, finishedAt, ampel,
+ *     findings: [{ id, severity, kind, testort, titel, boardId }],
  *     findingCount, reportRef, boardItemIds: [] }
  *   - `app` = Hostname/Slug der gescannten App (KEIN Host-Pfad).
  *   - `ampel` ∈ {gruen, gelb, rot} — IMMER deterministisch aus `findings`
@@ -31,8 +32,25 @@
  *     öffentlich} (AC5-Vokabular). Ungültige/fehlende Werte werden beim
  *     Schreiben defensiv normalisiert (analog `DrainReportStore._normalizeStories`)
  *     — kein Crash durch einen malformten Eintrag.
- *   - `boardItemIds` startet als `[]`; AC17/S-405 schreibt hier später
- *     entstandene Board-IDs zurück (ausserhalb des Scopes dieser Story).
+ *   - `boardItemIds` startet als `[]`; `recordBoardTransfer()` (AC17, S-405)
+ *     schreibt hier entstandene Board-IDs zurück.
+ *   - `repoSlug` (S-405-Präzisierung, AC16/AC17): der zum Scan-Zeitpunkt
+ *     ermittelte Workspace-Repo-Slug — identisch zu `ziel` aus AC1
+ *     (`resolveRepoSlug()` in `vpsContainerScanRouter.js`). Optional,
+ *     `null` falls beim `record()`-Aufruf nicht mitgegeben (der künftige
+ *     Aufrufer, der `record()` nach Lauf-Abschluss aufruft, bleibt weiterhin
+ *     ausserhalb des Scopes dieser wie der Vorgänger-Storys, s. S-402-Notiz
+ *     unten). `POST .../scans/:scanId/board` (AC16) braucht dieses Feld, um
+ *     zu bestimmen, in welchem Workspace-Repo (`board/stories/`) die
+ *     ausgewählten Befunde als Board-Items angelegt werden — fehlt es,
+ *     antwortet der Endpunkt mit `422 { errorClass: 'not-scannable' }`
+ *     (reuse der bereits etablierten Fehlerklasse aus AC1/AC2, kein neuer
+ *     Fehlercode).
+ *   - `boardId` je Finding (S-405-Präzisierung, AC16): `null` bis der Befund
+ *     übertragen wurde, danach die entstandene Board-Story-ID — Grundlage
+ *     für die Idempotenz-Prüfung in `POST .../scans/:scanId/board` (ein
+ *     Befund mit bereits gesetztem `boardId` wird nie erneut angelegt) und
+ *     für AC20 (Nach-Übertrag-Zustand in der Befundliste).
  *
  * scanId ≡ Runner-jobId (Korrelation zum `HeadlessRedTeamRunner`-Job,
  * AC1-AC3): der Aufrufer, der einen abgeschlossenen Lauf persistiert (diese
@@ -97,10 +115,14 @@ export const APP_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,253}[A-Za-z0-9])?$/;
  * @property {string} kind
  * @property {'direkt'|'öffentlich'} testort
  * @property {string} titel
+ * @property {string|null} boardId  Entstandene Board-Story-ID nach Übertrag
+ *   (AC16, S-405), sonst `null` — Idempotenz-Grundlage.
  *
  * @typedef {object} ScanResult
  * @property {string} scanId
  * @property {string} app          Hostname/Slug der gescannten App (kein Pfad)
+ * @property {string|null} repoSlug  Workspace-Repo-Slug (AC16/AC17, S-405) —
+ *   identisch zu `ziel` aus AC1, `null` falls beim `record()` nicht mitgegeben
  * @property {string} startedAt    ISO-8601
  * @property {string} finishedAt   ISO-8601
  * @property {'gruen'|'gelb'|'rot'} ampel  IMMER aus `findings` abgeleitet (AC9)
@@ -162,6 +184,9 @@ function _normalizeFinding(f) {
     kind: typeof f.kind === 'string' ? f.kind : '',
     testort: TESTORTE.includes(f.testort) ? f.testort : 'direkt',
     titel: typeof f.titel === 'string' ? f.titel : '',
+    // AC16/AC17 (S-405): Idempotenz-Grundlage für den Board-Übertrag — `null`
+    // bis übertragen, danach die entstandene Board-Story-ID.
+    boardId: typeof f.boardId === 'string' && f.boardId ? f.boardId : null,
   };
 }
 
@@ -201,6 +226,9 @@ function _normalizeScan(raw) {
   return {
     scanId: typeof raw.scanId === 'string' && raw.scanId ? raw.scanId : randomUUID(),
     app: raw.app,
+    // AC16/AC17 (S-405): der zum Scan-Zeitpunkt ermittelte Workspace-Repo-Slug
+    // (identisch zu `ziel` aus AC1) — optional, s. Moduldoku "Präzisierung".
+    repoSlug: typeof raw.repoSlug === 'string' && raw.repoSlug ? raw.repoSlug : null,
     startedAt: typeof raw.startedAt === 'string' ? raw.startedAt : '',
     finishedAt: typeof raw.finishedAt === 'string' ? raw.finishedAt : '',
     ampel: deriveAmpel(findings),
@@ -278,6 +306,8 @@ export class ScanResultStore {
    * @param {string} [input.scanId] optional; wird generiert falls fehlend
    *   (Konvention: die Runner-`jobId` des zugehörigen Scan-Jobs).
    * @param {string} input.app Hostname/Slug der gescannten App — Pflicht.
+   * @param {string} [input.repoSlug] optional (AC16/AC17, S-405); Workspace-
+   *   Repo-Slug — Grundlage für `POST .../scans/:scanId/board`.
    * @param {string} [input.startedAt]
    * @param {string} [input.finishedAt]
    * @param {ScanFinding[]} [input.findings]
@@ -372,6 +402,66 @@ export class ScanResultStore {
    */
   async getByJobId(jobId) {
     return this.getByScanId(jobId);
+  }
+
+  /**
+   * Schreibt entstandene Board-IDs in einen bestehenden Verlaufseintrag
+   * zurück (AC17, Grundlage für AC15/AC20): setzt `boardId` je passendem
+   * Fund — NUR bei Findings, die noch KEIN `boardId` tragen (Idempotenz, ein
+   * bereits transferierter Fund wird nie überschrieben) — und ergänzt
+   * `boardItemIds` um die dabei neu entstandenen IDs (dedupliziert,
+   * bestehende Reihenfolge bleibt erhalten). Serialisiert über dieselbe
+   * In-Process-Kette wie `record()` (kein Read-Modify-Write-Race).
+   *
+   * Unbekannte `scanId` oder `findingId` (kein Treffer in `findings`) werden
+   * still übersprungen (best-effort, kein Wurf) — der Aufrufer
+   * (`vpsContainerScanRouter.js` POST .../scans/:scanId/board) hat die
+   * Board-Items zu diesem Zeitpunkt bereits angelegt; ein Rückschreibe-
+   * Fehler darf diese Tatsache nicht rückgängig machen (Robustheit-NFR).
+   *
+   * @param {object} input
+   * @param {string} input.scanId
+   * @param {Array<{ findingId: string, boardId: string }>} input.transfers
+   * @returns {Promise<ScanResult|null>} der aktualisierte Verlaufseintrag,
+   *   oder `null` wenn `scanId` unbekannt ist (kein Wurf).
+   */
+  recordBoardTransfer(input) {
+    const run = () => this.#doRecordBoardTransfer(input);
+    this.#queue = this.#queue.then(run, run);
+    return this.#queue;
+  }
+
+  /**
+   * @param {object} input
+   * @returns {Promise<ScanResult|null>}
+   */
+  async #doRecordBoardTransfer({ scanId, transfers } = {}) {
+    await this.#ensureLoaded();
+    const scan = this.#scans.find((s) => s.scanId === scanId);
+    if (!scan) return null;
+
+    const list = Array.isArray(transfers) ? transfers : [];
+    const newlyAdded = [];
+    for (const t of list) {
+      if (!t || typeof t.findingId !== 'string' || typeof t.boardId !== 'string' || !t.boardId) continue;
+      const finding = scan.findings.find((f) => f.id === t.findingId);
+      if (!finding || finding.boardId) continue; // unbekannt oder bereits übertragen — Idempotenz
+      finding.boardId = t.boardId;
+      newlyAdded.push(t.boardId);
+    }
+
+    if (newlyAdded.length > 0) {
+      const existing = new Set(scan.boardItemIds);
+      for (const id of newlyAdded) {
+        if (!existing.has(id)) {
+          scan.boardItemIds.push(id);
+          existing.add(id);
+        }
+      }
+      await this.#persist();
+    }
+
+    return _cloneScan(scan);
   }
 
   /**

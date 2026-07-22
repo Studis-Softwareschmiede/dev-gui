@@ -31,6 +31,15 @@
  *         200 { scan:{...} } (voller Datensatz inkl. findings+reportRef) | 404 bei
  *         unbekannter scanId/fehlendem Store; ungültige Route (provider/serverId/
  *         containerId) → 400.
+ *   AC16/AC17 (S-405) — POST .../scans/:scanId/board: legt genau die ausgewählten,
+ *         noch nicht übertragenen Befunde als Board-Items an (`boardWriter.createIdea()`,
+ *         `scan.repoSlug` als Ziel-Projekt) → 200 { created, skipped }; ein Befund mit
+ *         bereits gesetztem `boardId` wird als `skipped` gemeldet statt erneut angelegt
+ *         (Idempotenz); leere/ungültige `findingIds` → 400; unbekannte `scanId` → 404;
+ *         fehlender `repoSlug`/`boardWriter` bei tatsächlich neuen Befunden → 422
+ *         not-scannable (reine Idempotenz-Treffer brauchen das nicht). Entstandene
+ *         Board-IDs werden best-effort über `scanResultStore.recordBoardTransfer()`
+ *         zurückgeschrieben (AC17) — ein Rückschreibe-Fehler kippt die Response nicht.
  *   AC22 — Security-Floor: jobId ist reine Korrelations-ID; keine Host-Pfade in der
  *         Response; Confinement bleibt bei einem Store-Fehler robust (kein Crash).
  *   reportRef-Fallback (S-403 Iteration 2, Review-Fund) — GET .../scan/:jobId liefert
@@ -167,14 +176,14 @@ function makeDeps({ containers, listClones } = {}) {
   };
 }
 
-function makeApp({ runner, deps, pathValidator, slugResolver, scanResultStore } = {}) {
+function makeApp({ runner, deps, pathValidator, slugResolver, scanResultStore, boardWriter } = {}) {
   const app = express();
   app.use(express.json());
   const _runner = runner ?? makeRunner();
   app.use(
     vpsContainerScanRouter(
       _runner,
-      { ...(deps ?? makeDeps()), scanResultStore },
+      { ...(deps ?? makeDeps()), scanResultStore, boardWriter },
       {
         pathValidator: pathValidator ?? defaultPathValidator,
         slugResolver: slugResolver ?? defaultSlugResolver,
@@ -826,6 +835,258 @@ describe('GET .../scans/:scanId — AC7/AC8', () => {
     const srv = await startServer(app);
     try {
       const { status } = await httpGet(srv, '/api/vps/machines/evil-provider/srv1/scans/scan-1');
+      expect(status).toBe(400);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+});
+
+// ── AC16/AC17 (S-405) — POST .../scans/:scanId/board ────────────────────────────
+
+describe('POST .../scans/:scanId/board — AC16/AC17', () => {
+  const BOARD_PATH = '/api/vps/machines/hetzner/srv1/scans/scan-1/board';
+
+  function makeFullScan(overrides = {}) {
+    return {
+      scanId: 'scan-1',
+      app: 'dev-gui.example.com',
+      repoSlug: 'dev-gui',
+      startedAt: '2026-07-22T10:00:00.000Z',
+      finishedAt: '2026-07-22T10:05:00.000Z',
+      ampel: 'rot',
+      findings: [
+        { id: 'f1', severity: 'high', kind: 'xss', testort: 'direkt', titel: 'XSS', boardId: null },
+        { id: 'f2', severity: 'low', kind: 'info', testort: 'direkt', titel: 'Info', boardId: 'S-100' },
+      ],
+      findingCount: 2,
+      reportRef: 'report-1',
+      boardItemIds: ['S-100'],
+      ...overrides,
+    };
+  }
+
+  function makeScanResultStoreWithScan(scan) {
+    return {
+      recordBoardTransferCalls: [],
+      async getByScanId(scanId) {
+        return scanId === scan.scanId ? scan : null;
+      },
+      async recordBoardTransfer(input) {
+        this.recordBoardTransferCalls.push(input);
+        return null;
+      },
+    };
+  }
+
+  function makeBoardWriter({ failFor = new Set() } = {}) {
+    let seq = 0;
+    return {
+      calls: [],
+      async createIdea({ projectSlug, title, body }) {
+        this.calls.push({ projectSlug, title, body });
+        if (failFor.has(title)) throw new Error('boom');
+        seq += 1;
+        return { storyId: `S-${900 + seq}`, filePath: `/workspace/${projectSlug}/board/stories/S-${900 + seq}.yaml` };
+      },
+    };
+  }
+
+  it('legt einen neuen Befund als Board-Item an → created', async () => {
+    const scan = makeFullScan();
+    const scanResultStore = makeScanResultStoreWithScan(scan);
+    const boardWriter = makeBoardWriter();
+    const { app } = makeApp({ scanResultStore, boardWriter });
+    const srv = await startServer(app);
+    try {
+      const { status, body } = await httpPost(srv, BOARD_PATH, { findingIds: ['f1'] });
+      expect(status).toBe(200);
+      expect(body).toEqual({ created: [{ findingId: 'f1', boardId: 'S-901' }], skipped: [] });
+      expect(boardWriter.calls).toHaveLength(1);
+      expect(boardWriter.calls[0].projectSlug).toBe('dev-gui');
+      expect(scanResultStore.recordBoardTransferCalls).toEqual([
+        { scanId: 'scan-1', transfers: [{ findingId: 'f1', boardId: 'S-901' }] },
+      ]);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('ein bereits übertragener Befund wird NICHT erneut angelegt → skipped mit bestehender Board-ID (Idempotenz)', async () => {
+    const scan = makeFullScan();
+    const scanResultStore = makeScanResultStoreWithScan(scan);
+    const boardWriter = makeBoardWriter();
+    const { app } = makeApp({ scanResultStore, boardWriter });
+    const srv = await startServer(app);
+    try {
+      const { status, body } = await httpPost(srv, BOARD_PATH, { findingIds: ['f2'] });
+      expect(status).toBe(200);
+      expect(body).toEqual({ created: [], skipped: [{ findingId: 'f2', boardId: 'S-100' }] });
+      expect(boardWriter.calls).toHaveLength(0); // kein Anlegen versucht
+      expect(scanResultStore.recordBoardTransferCalls).toEqual([]); // nichts Neues zurückzuschreiben
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('gemischte Auswahl: ein neuer + ein bereits übertragener Befund → created + skipped getrennt', async () => {
+    const scan = makeFullScan();
+    const scanResultStore = makeScanResultStoreWithScan(scan);
+    const boardWriter = makeBoardWriter();
+    const { app } = makeApp({ scanResultStore, boardWriter });
+    const srv = await startServer(app);
+    try {
+      const { status, body } = await httpPost(srv, BOARD_PATH, { findingIds: ['f1', 'f2'] });
+      expect(status).toBe(200);
+      expect(body.created).toEqual([{ findingId: 'f1', boardId: 'S-901' }]);
+      expect(body.skipped).toEqual([{ findingId: 'f2', boardId: 'S-100' }]);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('unbekannte findingId (kein Treffer im Scan) wird still ignoriert (kein Erfinden von Findings)', async () => {
+    const scan = makeFullScan();
+    const scanResultStore = makeScanResultStoreWithScan(scan);
+    const boardWriter = makeBoardWriter();
+    const { app } = makeApp({ scanResultStore, boardWriter });
+    const srv = await startServer(app);
+    try {
+      const { status, body } = await httpPost(srv, BOARD_PATH, { findingIds: ['does-not-exist'] });
+      expect(status).toBe(200);
+      expect(body).toEqual({ created: [], skipped: [] });
+      expect(boardWriter.calls).toHaveLength(0);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('leere findingIds-Liste → 400', async () => {
+    const { app } = makeApp({ scanResultStore: makeScanResultStoreWithScan(makeFullScan()) });
+    const srv = await startServer(app);
+    try {
+      const { status, body } = await httpPost(srv, BOARD_PATH, { findingIds: [] });
+      expect(status).toBe(400);
+      expect(typeof body.error).toBe('string');
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('findingIds fehlt/kein Array → 400', async () => {
+    const { app } = makeApp({ scanResultStore: makeScanResultStoreWithScan(makeFullScan()) });
+    const srv = await startServer(app);
+    try {
+      const { status } = await httpPost(srv, BOARD_PATH, {});
+      expect(status).toBe(400);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('unbekannte scanId → 404', async () => {
+    const { app } = makeApp({ scanResultStore: makeScanResultStoreWithScan(makeFullScan()) });
+    const srv = await startServer(app);
+    try {
+      const { status, body } = await httpPost(
+        srv,
+        '/api/vps/machines/hetzner/srv1/scans/does-not-exist/board',
+        { findingIds: ['f1'] },
+      );
+      expect(status).toBe(404);
+      expect(typeof body.error).toBe('string');
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('ohne scanResultStore → 404 (kein Crash)', async () => {
+    const { app } = makeApp();
+    const srv = await startServer(app);
+    try {
+      const { status } = await httpPost(srv, BOARD_PATH, { findingIds: ['f1'] });
+      expect(status).toBe(404);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('fehlender repoSlug + neue Befunde nötig → 422 not-scannable', async () => {
+    const scan = makeFullScan({ repoSlug: null });
+    const scanResultStore = makeScanResultStoreWithScan(scan);
+    const boardWriter = makeBoardWriter();
+    const { app } = makeApp({ scanResultStore, boardWriter });
+    const srv = await startServer(app);
+    try {
+      const { status, body } = await httpPost(srv, BOARD_PATH, { findingIds: ['f1'] });
+      expect(status).toBe(422);
+      expect(body.errorClass).toBe('not-scannable');
+      expect(boardWriter.calls).toHaveLength(0);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('fehlender repoSlug, aber NUR bereits übertragene Befunde ausgewählt → 200 (kein 422, kein repoSlug nötig)', async () => {
+    const scan = makeFullScan({ repoSlug: null });
+    const scanResultStore = makeScanResultStoreWithScan(scan);
+    const { app } = makeApp({ scanResultStore });
+    const srv = await startServer(app);
+    try {
+      const { status, body } = await httpPost(srv, BOARD_PATH, { findingIds: ['f2'] });
+      expect(status).toBe(200);
+      expect(body).toEqual({ created: [], skipped: [{ findingId: 'f2', boardId: 'S-100' }] });
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('kein boardWriter verdrahtet + neue Befunde nötig → 422 not-scannable', async () => {
+    const scan = makeFullScan();
+    const scanResultStore = makeScanResultStoreWithScan(scan);
+    const { app } = makeApp({ scanResultStore }); // kein boardWriter
+    const srv = await startServer(app);
+    try {
+      const { status, body } = await httpPost(srv, BOARD_PATH, { findingIds: ['f1'] });
+      expect(status).toBe(422);
+      expect(body.errorClass).toBe('not-scannable');
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('ein fehlgeschlagener Einzel-Transfer bricht die übrigen nicht ab (best-effort)', async () => {
+    const scan = makeFullScan({
+      findings: [
+        { id: 'f1', severity: 'high', kind: 'xss', testort: 'direkt', titel: 'XSS', boardId: null },
+        { id: 'f3', severity: 'medium', kind: 'ssrf', testort: 'öffentlich', titel: 'SSRF', boardId: null },
+      ],
+      findingCount: 2,
+      boardItemIds: [],
+    });
+    const scanResultStore = makeScanResultStoreWithScan(scan);
+    const boardWriter = makeBoardWriter({ failFor: new Set(['Red-Team-Befund: XSS']) });
+    const { app } = makeApp({ scanResultStore, boardWriter });
+    const srv = await startServer(app);
+    try {
+      const { status, body } = await httpPost(srv, BOARD_PATH, { findingIds: ['f1', 'f3'] });
+      expect(status).toBe(200);
+      expect(body.created).toEqual([{ findingId: 'f3', boardId: 'S-901' }]);
+      expect(body.skipped).toEqual([]);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('ungültiger Provider → 400', async () => {
+    const { app } = makeApp({ scanResultStore: makeScanResultStoreWithScan(makeFullScan()) });
+    const srv = await startServer(app);
+    try {
+      const { status } = await httpPost(
+        srv,
+        '/api/vps/machines/evil-provider/srv1/scans/scan-1/board',
+        { findingIds: ['f1'] },
+      );
       expect(status).toBe(400);
     } finally {
       await new Promise((r) => srv.close(r));

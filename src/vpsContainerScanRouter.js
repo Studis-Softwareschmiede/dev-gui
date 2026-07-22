@@ -2,7 +2,7 @@
  * vpsContainerScanRouter — Pro-Container Red-Team-Scan-Endpunkt.
  *
  * Implements: docs/specs/red-team-scan-per-container.md AC1, AC2, AC3, AC4, AC5, AC6, AC7,
- * AC8, AC9, AC22.
+ * AC8, AC9, AC16, AC17, AC22.
  *
  * Routes (hinter AccessGuard, s. server.js):
  *   POST /api/vps/machines/:provider/*splat/containers/:containerId/scan
@@ -25,6 +25,24 @@
  *              reportRef, boardItemIds } }
  *     → 404 { error }                             — unbekannte scanId
  *     → 400 { error }                             — ungültige Route (provider/serverId)
+ *   POST /api/vps/machines/:provider/*splat/scans/:scanId/board             (AC16/AC17, S-405)
+ *     Body: { findingIds: string[] }
+ *     → 200 { created:[{findingId,boardId}], skipped:[{findingId,boardId}] }
+ *       — legt GENAU die ausgewählten (noch nicht übertragenen) Befunde als
+ *       neue Board-Items an (BoardWriter.createIdea(), `status: Idee`); ein
+ *       bereits übertragener Befund (Finding trägt bereits `boardId`) wird
+ *       NICHT erneut angelegt, sondern als `skipped` mit der bestehenden
+ *       Board-ID gemeldet (Idempotenz, AC16/AC20). Unbekannte `findingIds`
+ *       (kein Treffer in `scan.findings`) werden still ignoriert (kein
+ *       Erfinden von Findings). Entstandene Board-IDs werden best-effort in
+ *       den Store zurückgeschrieben (AC17, `scanResultStore.recordBoardTransfer()`).
+ *     → 400 { error }                             — `findingIds` leer/kein Array
+ *     → 404 { error }                             — unbekannte scanId (kein Store/kein Treffer)
+ *     → 422 { errorClass:'not-scannable' }         — Scan hat keinen `repoSlug`
+ *       (der Workspace-Repo-Slug, der Board-Items zugeordnet werden — s.
+ *       `ScanResultStore.js` Moduldoku "Präzisierung") ODER kein `boardWriter`
+ *       verdrahtet — NUR wenn tatsächlich neue Items angelegt werden müssten
+ *       (reine Idempotenz-Treffer brauchen keinen `repoSlug`).
  *
  * Kein neuer Runner (AC1): dieser Router dockt den **bestehenden** `HeadlessRedTeamRunner`
  * (F-090/F-091, unverändert) an — Runner-Semantik (eigene `ProjectJobLock`-Instanz, `close`-
@@ -106,6 +124,7 @@ import {
 } from './vpsContainerRouter.js';
 import { imageRepoName } from './redTeamRouter.js';
 import { validateProjectPath, resolveProjectSlug } from './workspacePath.js';
+import { BoardWriterError, IDEA_TITLE_MAX_LENGTH } from './BoardWriter.js';
 
 /**
  * Baut den zusammengesetzten Container-Schlüssel. containerId allein ist über mehrere
@@ -167,13 +186,51 @@ async function resolveRepoSlug(container, workspaceScanner) {
 }
 
 /**
+ * Baut den Board-Item-Titel für einen übertragenen Befund (AC16) — gekappt auf
+ * `IDEA_TITLE_MAX_LENGTH` (defensiv, `BoardWriter.createIdea()` würde einen zu
+ * langen Titel sonst mit `invalid-title` ablehnen).
+ *
+ * @param {{ id: string, kind: string, titel: string }} finding
+ * @returns {string}
+ */
+function _findingBoardTitle(finding) {
+  const label = finding.titel || finding.kind || finding.id;
+  return `Red-Team-Befund: ${label}`.slice(0, IDEA_TITLE_MAX_LENGTH);
+}
+
+/**
+ * Baut den Board-Item-Body für einen übertragenen Befund (AC16) — Details +
+ * betroffene App/URL + Referenz auf den Scan (Nutzer-Kontext für die neue Story).
+ *
+ * @param {{ severity: string, kind: string, testort: string }} finding
+ * @param {{ app: string, scanId: string, reportRef: string|null }} scan
+ * @returns {string}
+ */
+function _findingBoardBody(finding, scan) {
+  const lines = [
+    `Schweregrad: ${finding.severity}`,
+    `Art: ${finding.kind || '–'}`,
+    `Testort: ${finding.testort}`,
+    `Betroffene App: ${scan.app}`,
+    `Scan-Referenz: ${scan.scanId}`,
+  ];
+  if (scan.reportRef) lines.push(`Bericht: ${scan.reportRef}`);
+  return lines.join('\n');
+}
+
+/**
  * @param {import('./HeadlessRedTeamRunner.js').HeadlessRedTeamRunner} runner
  * @param {{
  *   vpsDockerControl?: import('./deploy/VpsDockerControl.js').VpsDockerControl,
  *   vpsRegistry?: import('./vps/VpsProviderRegistry.js').VpsProviderRegistry,
  *   vpsTargets?: Map<string, { host: string, port?: number, targetUser: string }>,
  *   workspaceScanner?: import('./WorkspaceScanner.js').WorkspaceScanner,
- *   scanResultStore?: { getByJobId?: (jobId:string) => Promise<object|null> },
+ *   scanResultStore?: {
+ *     getByJobId?: (jobId:string) => Promise<object|null>,
+ *     getByScanId?: (scanId:string) => Promise<object|null>,
+ *     recordBoardTransfer?: (input: { scanId:string, transfers: Array<{findingId:string,boardId:string}> }) => Promise<object|null>,
+ *   },
+ *   boardWriter?: import('./BoardWriter.js').BoardWriter,
  * }} [deps]
  * @param {object} [options]
  * @param {(path: string) => Promise<{ resolvedPath: string }>} [options.pathValidator]
@@ -183,7 +240,7 @@ async function resolveRepoSlug(container, workspaceScanner) {
  * @returns {import('express').Router}
  */
 export function vpsContainerScanRouter(runner, deps = {}, options = {}) {
-  const { vpsDockerControl, vpsRegistry, vpsTargets, workspaceScanner, scanResultStore } = deps;
+  const { vpsDockerControl, vpsRegistry, vpsTargets, workspaceScanner, scanResultStore, boardWriter } = deps;
   const _pathValidator = options.pathValidator ?? validateProjectPath;
   const _slugResolver = options.slugResolver ?? resolveProjectSlug;
   const router = Router();
@@ -447,6 +504,112 @@ export function vpsContainerScanRouter(runner, deps = {}, options = {}) {
     }
 
     return res.status(200).json({ scan });
+  });
+
+  // ── POST .../scans/:scanId/board (AC16/AC17, S-405) — Befunde → Board ────────
+
+  router.post('/api/vps/machines/:provider/*splat/scans/:scanId/board', async (req, res) => {
+    const providerVal = validateProvider(req.params.provider);
+    if (!providerVal.ok) {
+      return res.status(400).json({ error: providerVal.error });
+    }
+
+    const serverIdResult = extractServerId(req.params.splat);
+    if (!serverIdResult.ok) {
+      return res.status(400).json({ error: serverIdResult.error });
+    }
+
+    const { scanId } = req.params;
+
+    // AC16 — leere/ungültige Auswahl → 400 (kein Auto-Anlegen, s. Nicht-Ziele).
+    const rawFindingIds = req.body?.findingIds;
+    const findingIds = Array.isArray(rawFindingIds)
+      ? rawFindingIds.filter((x) => typeof x === 'string' && x)
+      : [];
+    if (findingIds.length === 0) {
+      return res.status(400).json({ error: 'findingIds darf nicht leer sein' });
+    }
+
+    if (!scanResultStore || typeof scanResultStore.getByScanId !== 'function') {
+      return res.status(404).json({ error: 'Unknown scanId' });
+    }
+
+    let scan;
+    try {
+      scan = await scanResultStore.getByScanId(scanId);
+    } catch {
+      return res.status(404).json({ error: 'Unknown scanId' });
+    }
+    if (!scan) {
+      return res.status(404).json({ error: 'Unknown scanId' });
+    }
+
+    // Nur tatsächlich in DIESEM Scan vorhandene Befunde verarbeiten (kein
+    // Erfinden von Findings, s. Nicht-Ziele) — unbekannte findingIds werden
+    // still ignoriert (weder created noch skipped).
+    const findingsById = new Map(scan.findings.map((f) => [f.id, f]));
+    const requested = findingIds.map((id) => findingsById.get(id)).filter(Boolean);
+
+    const created = [];
+    const skipped = [];
+    const toCreate = [];
+    for (const finding of requested) {
+      if (finding.boardId) {
+        // AC16/AC20 — Idempotenz: bereits übertragen, nicht erneut anlegen.
+        skipped.push({ findingId: finding.id, boardId: finding.boardId });
+      } else {
+        toCreate.push(finding);
+      }
+    }
+
+    if (toCreate.length > 0) {
+      // AC16 — projectSlug: der zum Scan-Zeitpunkt ermittelte Workspace-Repo-Slug
+      // (s. ScanResultStore.js Moduldoku "Präzisierung"). Fehlt er (älterer/
+      // unvollständiger Eintrag) oder ist kein boardWriter verdrahtet, können
+      // NEUE Befunde keinem Board zugeordnet werden — reine Idempotenz-Treffer
+      // oben brauchen das nicht und wurden bereits berechnet.
+      if (!scan.repoSlug || !boardWriter) {
+        return res.status(422).json({ errorClass: 'not-scannable' });
+      }
+
+      for (const finding of toCreate) {
+        let storyId;
+        try {
+          const result = await boardWriter.createIdea({
+            projectSlug: scan.repoSlug,
+            title: _findingBoardTitle(finding),
+            body: _findingBoardBody(finding, scan),
+          });
+          storyId = result.storyId;
+        } catch (err) {
+          // best-effort (analog BoardWriter.archiveDoneFeatures()): ein
+          // fehlgeschlagener Einzel-Transfer bricht die übrigen nicht ab, kein
+          // Secret/Pfad im Log (AC22).
+          console.warn(
+            `vpsContainerScanRouter: Board-Übertrag für Befund '${finding.id}' fehlgeschlagen ` +
+              `(${err instanceof BoardWriterError ? err.errorClass : 'unbekannter Fehler'})`,
+          );
+          continue;
+        }
+        created.push({ findingId: finding.id, boardId: storyId });
+      }
+
+      // AC17 — Board-IDs best-effort zurückschreiben (Grundlage für AC15/AC20).
+      // Ein Schreibfehler hier darf die Response nicht kippen — die Board-Items
+      // sind zu diesem Zeitpunkt bereits real angelegt (Robustheit-NFR).
+      if (created.length > 0 && typeof scanResultStore.recordBoardTransfer === 'function') {
+        try {
+          await scanResultStore.recordBoardTransfer({
+            scanId,
+            transfers: created.map((c) => ({ findingId: c.findingId, boardId: c.boardId })),
+          });
+        } catch {
+          // best-effort — s.o.
+        }
+      }
+    }
+
+    return res.status(200).json({ created, skipped });
   });
 
   return router;
