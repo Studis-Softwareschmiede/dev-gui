@@ -22,6 +22,14 @@
  *         low/medium, `rot` bei mindestens einem high/critical-Befund. `record()` leitet
  *         `ampel`/`findingCount` IMMER aus `findings` ab — ein mitgegebenes `input.ampel`
  *         wird ignoriert (single source of truth, kein zweiter driftender Wert).
+ *   AC16/AC17 (S-405) — Schema-Erweiterung: `record()` akzeptiert optional `repoSlug`
+ *         (Scan-Ebene, `null` falls nicht mitgegeben); jedes Finding trägt zusätzlich
+ *         `boardId` (`null` bis übertragen). `recordBoardTransfer({scanId,transfers})`
+ *         setzt `boardId` je passendem, noch nicht übertragenem Finding (Idempotenz — ein
+ *         bereits gesetztes `boardId` wird nie überschrieben), ergänzt `boardItemIds`
+ *         dedupliziert um die neu entstandenen IDs, schreibt atomar, und liefert `null`
+ *         bei unbekannter `scanId` (kein Wurf). Unbekannte `findingId`s in `transfers`
+ *         werden still ignoriert.
  *
  * Strategy: echtes fs gegen ein frisches tmp-CRED_STORE_DIR je Test (Muster
  * `DrainReportStore.test.js`); je Test eine frische ScanResultStore-Instanz (der
@@ -116,7 +124,7 @@ describe('ScanResultStore.record() (AC7)', () => {
     expect(written.findingCount).toBe(1);
   });
 
-  it('normalisiert findings auf {id,severity,kind,testort,titel} (kein Durchreichen von Extra-Feldern)', async () => {
+  it('normalisiert findings auf {id,severity,kind,testort,titel,boardId} (kein Durchreichen von Extra-Feldern)', async () => {
     const store = new ScanResultStore();
     const written = await store.record(
       base({
@@ -126,8 +134,20 @@ describe('ScanResultStore.record() (AC7)', () => {
       }),
     );
     expect(written.findings).toEqual([
-      { id: 'f1', severity: 'high', kind: 'ssrf', testort: 'öffentlich', titel: 'SSRF' },
+      { id: 'f1', severity: 'high', kind: 'ssrf', testort: 'öffentlich', titel: 'SSRF', boardId: null },
     ]);
+  });
+
+  it('leitet repoSlug/boardId als null, falls nicht mitgegeben (AC16/AC17, S-405)', async () => {
+    const store = new ScanResultStore();
+    const written = await store.record(base());
+    expect(written.repoSlug).toBeNull();
+  });
+
+  it('übernimmt eine mitgegebene repoSlug (AC16/AC17, S-405)', async () => {
+    const store = new ScanResultStore();
+    const written = await store.record(base({ repoSlug: 'dev-gui' }));
+    expect(written.repoSlug).toBe('dev-gui');
   });
 
   it('normalisiert ungültige/fehlende severity/testort defensiv (kein Crash)', async () => {
@@ -190,7 +210,9 @@ describe('ScanResultStore.list() + getByScanId()/getByJobId() (AC8)', () => {
     );
 
     const full = await store.getByScanId('scan-1');
-    expect(full.findings).toEqual([{ id: 'f1', severity: 'high', kind: 'xss', testort: 'direkt', titel: 'XSS' }]);
+    expect(full.findings).toEqual([
+      { id: 'f1', severity: 'high', kind: 'xss', testort: 'direkt', titel: 'XSS', boardId: null },
+    ]);
     expect(full.reportRef).toBe('report-1');
     expect(full.ampel).toBe('rot');
   });
@@ -268,6 +290,96 @@ describe('ScanResultStore — Persistenz + atomares Schreiben (AC7)', () => {
     const list = await store2.list('dev-gui.example.com');
     expect(list).toHaveLength(1);
     expect(list[0].scanId).toBe('persisted-1');
+  });
+});
+
+// ── AC16/AC17 (S-405) — recordBoardTransfer() ───────────────────────────────────
+
+describe('ScanResultStore.recordBoardTransfer() (AC16/AC17)', () => {
+  it('setzt boardId je passendem Finding und ergänzt boardItemIds', async () => {
+    const store = new ScanResultStore();
+    await store.record(
+      base({
+        scanId: 'scan-1',
+        findings: [
+          { id: 'f1', severity: 'high', kind: 'xss', testort: 'direkt', titel: 'XSS' },
+          { id: 'f2', severity: 'low', kind: 'info', testort: 'direkt', titel: 'Info' },
+        ],
+      }),
+    );
+
+    const updated = await store.recordBoardTransfer({
+      scanId: 'scan-1',
+      transfers: [{ findingId: 'f1', boardId: 'S-500' }],
+    });
+
+    expect(updated.findings.find((f) => f.id === 'f1').boardId).toBe('S-500');
+    expect(updated.findings.find((f) => f.id === 'f2').boardId).toBeNull();
+    expect(updated.boardItemIds).toEqual(['S-500']);
+
+    // persistiert — zweite Instanz liest denselben Stand.
+    const store2 = new ScanResultStore();
+    const reloaded = await store2.getByScanId('scan-1');
+    expect(reloaded.findings.find((f) => f.id === 'f1').boardId).toBe('S-500');
+    expect(reloaded.boardItemIds).toEqual(['S-500']);
+  });
+
+  it('idempotent: ein bereits gesetztes boardId wird NIE überschrieben', async () => {
+    const store = new ScanResultStore();
+    await store.record(
+      base({ scanId: 'scan-1', findings: [{ id: 'f1', severity: 'high', kind: 'xss', testort: 'direkt', titel: 'XSS' }] }),
+    );
+    await store.recordBoardTransfer({ scanId: 'scan-1', transfers: [{ findingId: 'f1', boardId: 'S-500' }] });
+
+    const second = await store.recordBoardTransfer({
+      scanId: 'scan-1',
+      transfers: [{ findingId: 'f1', boardId: 'S-999' }],
+    });
+
+    expect(second.findings.find((f) => f.id === 'f1').boardId).toBe('S-500');
+    expect(second.boardItemIds).toEqual(['S-500']);
+  });
+
+  it('dedupliziert boardItemIds bei mehreren Findings mit derselben Board-ID', async () => {
+    const store = new ScanResultStore();
+    await store.record(
+      base({
+        scanId: 'scan-1',
+        findings: [
+          { id: 'f1', severity: 'high', kind: 'xss', testort: 'direkt', titel: 'XSS' },
+          { id: 'f2', severity: 'high', kind: 'xss', testort: 'öffentlich', titel: 'XSS (edge)' },
+        ],
+      }),
+    );
+
+    const updated = await store.recordBoardTransfer({
+      scanId: 'scan-1',
+      transfers: [
+        { findingId: 'f1', boardId: 'S-500' },
+        { findingId: 'f2', boardId: 'S-500' },
+      ],
+    });
+
+    expect(updated.boardItemIds).toEqual(['S-500']);
+  });
+
+  it('unbekannte scanId → null (kein Wurf)', async () => {
+    const store = new ScanResultStore();
+    const result = await store.recordBoardTransfer({ scanId: 'does-not-exist', transfers: [{ findingId: 'f1', boardId: 'S-500' }] });
+    expect(result).toBeNull();
+  });
+
+  it('unbekannte findingId in transfers wird still ignoriert', async () => {
+    const store = new ScanResultStore();
+    await store.record(
+      base({ scanId: 'scan-1', findings: [{ id: 'f1', severity: 'high', kind: 'xss', testort: 'direkt', titel: 'XSS' }] }),
+    );
+    const updated = await store.recordBoardTransfer({
+      scanId: 'scan-1',
+      transfers: [{ findingId: 'does-not-exist', boardId: 'S-500' }],
+    });
+    expect(updated.findings[0].boardId).toBeNull();
+    expect(updated.boardItemIds).toEqual([]);
   });
 });
 
