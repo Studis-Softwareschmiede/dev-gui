@@ -2,7 +2,7 @@ id: S-409
 parent: F-072
 title: 'Deploy-Bitwarden: bw config server konditional machen (Folge-Bug S-386) —
   nur bei unauthenticated ODER abweichender Server-URL; eigene Fehlerklasse bitwarden-config-failed'
-status: In Progress
+status: Done
 priority: P2
 spec: docs/specs/deploy-bitwarden-gpg-injection.md
 implements:
@@ -18,8 +18,8 @@ labels:
 - deploy
 size_est: L
 dispo_est: '5.25'
-dispo_act: null
-dispo_forecast: null
+dispo_act: '6.5'
+dispo_forecast: -.1923
 estimate_note: 'L (Score 9: 5 AC + 3 Komponenten [BitwardenDeployLoginService, deploymentsRouter,
   DEPLOY_LOGIN_ERROR_CLASSES] + security). estimator in dieser nicht-interaktiven
   requirement-Session nicht dispatchbar (kein Task-Tool) -> dispo_est/tok_est aus
@@ -30,5 +30,6 @@ branch: feat/S-409-bw-config-konditional
 pr: null
 blocked_reason: null
 created_at: '2026-07-22T07:31:21Z'
-updated_at: '2026-07-22T10:01:33Z'
-done_at: null
+updated_at: '2026-07-22T10:31:46Z'
+done_at: '2026-07-22T10:30:37Z'
+tok: '43276947'
