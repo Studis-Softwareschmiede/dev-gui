@@ -1,0 +1,28 @@
+id: S-412
+parent: F-095
+title: 'Frontend: In-App-Report — Pruefpunkt-Liste + per-Punkt-Ampel + Kein-Fund-sauber
+  (Panel + Verlauf)'
+status: To Do
+priority: P1
+spec: docs/specs/red-team-scan-per-container.md
+implements:
+- AC29
+- AC30
+depends:
+- S-411
+labels:
+- ui
+size_est: M
+dispo_est: '4.0'
+dispo_act: null
+dispo_forecast: null
+estimate_note: M-Heuristik (score 6-7); baseline js|balanced|M (.ep/.tok_total); kein
+  estimator (Subagent ohne Task)
+confidence: medium
+tok_est: '1659043'
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-07-22T09:42:04Z'
+updated_at: '2026-07-22T09:43:35Z'
+done_at: null

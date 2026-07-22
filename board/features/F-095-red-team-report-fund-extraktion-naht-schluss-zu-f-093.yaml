@@ -1,0 +1,26 @@
+id: F-095
+title: Red-Team-Report + Fund-Extraktion (Naht-Schluss zu F-093)
+goal: 'Schliesst die bewusst offene Findings-Naht aus F-093 (S-403 It.2): echte Fund-/Pruefpunkt-Extraktion
+  aus der Runner-Ausgabe, Persistenz via ScanResultStore.record(), In-App-Report der
+  ALLE Pruefpunkte mit eigener Ampel zeigt (nicht nur Funde), Kein-Fund-sauber-Bericht
+  statt totem PR-Link, Overlay-Hinweis (Hintergrund/15min/spaeter unter Reports).'
+status: Backlog
+priority: P1
+spec: docs/specs/red-team-scan-per-container.md
+definition_of_done: null
+labels:
+- backend
+- security
+- ui
+depends:
+- F-093
+owner: null
+stories:
+- S-410
+- S-411
+- S-412
+- S-413
+progress: 0/4 done
+created_at: '2026-07-22T09:41:44Z'
+updated_at: '2026-07-22T09:48:05Z'
+area: deployment

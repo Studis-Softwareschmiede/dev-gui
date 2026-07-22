@@ -3,7 +3,7 @@ id: red-team-scan-per-container
 title: Red-Team-Scan pro Container — direkt + Cloudflare-Wand, Verlauf, Befunde→Board
 status: active
 area: deployment
-version: 1
+version: 2
 spec_format: use-case-2.0
 ---
 
@@ -250,6 +250,97 @@ Bestätigung** — als Board-Punkte übernommen werden.
   bleibt bestehen** (wird über AC1 wiederverwendet) — nur die kachel-spezifische UI-/Router-Schicht entfällt.
   Nach dem Abbau referenziert **kein** aktiver Code mehr die entfernten Kachel-Endpunkte (`/api/red-team*`).
 
+### Fund-Extraktion, Prüfpunkt-Report & In-App-Bericht (Ausbaustufe 1b — Naht-Schluss, F-095)
+
+> **Kontext (bindend).** F-093 (AC1–AC23) hat den Scan-Pfad gebaut, aber **bewusst eine offene
+> Naht** hinterlassen (Review-Fund S-403 Iteration 2, dokumentiert in
+> `src/vpsContainerScanRouter.js`-Moduldoku): die tatsächlichen **Funde werden nicht aus der
+> Runner-Ausgabe extrahiert und nicht persistiert**, weil (a) der wiederverwendete
+> `HeadlessRunnerCore`/`HeadlessRedTeamRunner` die erfasste stdout/stderr-Ausgabe **nicht** im
+> Job-Objekt exponiert (nur `status`/`result`/`error`/`prHint`) und (b) ein hartkodiertes
+> `record()` mit leeren `findings` für **jeden** Lauf dauerhaft ein irreführendes `ampel:'gruen'`
+> („alles sicher") persistiert hätte. Folge: Befundliste (AC18/S-406), Board-Übertrag
+> (AC16/S-405) und Verlauf (AC14/S-404) blieben ohne echte Daten, und der als „Report" gezeigte
+> `job.prHint`-PR-Link lief im Realtest ins **404** (PR existierte nicht / Repo-Slug falsch). Die
+> folgenden AC24–AC31 schliessen die Naht: echte Extraktion → Persistenz → In-App-Report, der
+> **alle** durchgeführten Prüfpunkte zeigt (nicht nur Funde) und **nie** einen toten externen Link.
+
+- **AC24 — Fund-/Prüfpunkt-Extraktion aus der Runner-Ausgabe (Parser).** Ein **fail-safe** Parser
+  liest aus der erfassten Ausgabe des bestehenden `/agent-flow:red-team`-Laufs (stdout/stderr des
+  Runners bzw. dessen Audit-/PR-Inhalt) eine strukturierte Auswertung heraus:
+  (a) **Funde** `findings: [{ id, severity, kind, testort, titel, detail? }]` — `severity ∈
+  {low,medium,high,critical}`, `testort ∈ {direkt, öffentlich}` (bestehendes Vokabular, AC5/AC7/AC9),
+  `detail` = Kurzbeschreibung/betroffener Testpunkt;
+  (b) **Prüfpunkte** `checks: [{ id, titel, testort, ampel, detail? }]` — die Liste **aller**
+  durchgeführten Prüfungen/Testpunkte (auch die ohne Fund), je Prüfpunkt einer der beiden Testorte,
+  optional `checkId`-Verknüpfung zwischen `finding` und `check`.
+  **Fail-safe (bestehende Runner-Semantik, Nicht-Erfindung):** ist die Ausgabe **nicht** in Funde
+  ODER Prüfpunkte auswertbar (Parser findet nichts Erkennbares), liefert der Parser ein
+  **leeres, als „nicht auswertbar" markiertes** Ergebnis — er **erfindet nie** Funde/Prüfpunkte und
+  behauptet **nie** ein „sauber". Ein Parser-Fehler crasht den Lauf nicht (best-effort/non-fatal).
+  Das **exakte Ausgabeformat** von `/agent-flow:red-team` (Nuclei-Lauf / Audit-Protokoll / PR-Inhalt)
+  ist beim coder/architekt gegen den aktuellen `red-team`-Skill (`docs/red-team-audit.md`) zu
+  bestätigen — der Parser ist gegen dieses Format zu schreiben und bei Format-Abweichung fail-safe
+  (kein erfundenes Ergebnis).
+- **AC25 — Runner-Ausgabe für den Parser verfügbar machen (additiv, kein Regress der übrigen
+  Headless-Runner).** Die vom `HeadlessRunnerCore` bereits **erfasste** kombinierte Ausgabe wird dem
+  Red-Team-Pfad für die Extraktion (AC24) zugänglich gemacht — **rein additiv**: entweder als
+  optionales Feld am Job-Objekt des `HeadlessRedTeamRunner` **oder** über eine im Red-Team-Runner
+  ausgeführte Parse-beim-`close`-Naht. Das Verhalten der übrigen Core-Nutzer
+  (`HeadlessFlowRunner`/`HeadlessReconcileRunner`/`HeadlessRetroRunner`/…) bleibt **byte-identisch**
+  (keine geänderte Signatur/Semantik für sie; die Ausgabe-Exposition ist opt-in/red-team-lokal). Die
+  Security-Floor-Invarianten bleiben unangetastet (keine Secrets/Tokens/absoluten Host-Pfade in der
+  exponierten/persistierten Ausgabe — AC22 gilt weiter; die Extraktion übernimmt nur die
+  strukturierten Kurz-Metadaten aus AC24, nicht die Roh-Ausgabe im Klartext).
+- **AC26 — Store-Schema `checks` + per-Prüfpunkt-Ampel (deterministisch, konsistent, KEINE
+  Invertierung).** Das `ScanResultStore`-Eintrag-Schema (AC7) wird **additiv** um
+  `checks: [{ id, titel, testort, ampel, detail? }]` erweitert (optional/`[]`-Default — bestehende
+  Verlaufseinträge ohne `checks` bleiben gültig). Jeder Prüfpunkt trägt eine **eigene Ampel**
+  `ampel ∈ {gruen, gelb, rot}`, deterministisch abgeleitet **mit derselben Semantik wie die
+  Gesamt-Ampel (AC9)**: **grün** = Prüfpunkt ok / kein Befund; **gelb** = nur low/medium-Befund(e) an
+  diesem Punkt; **rot** = mindestens ein high/critical-Befund an diesem Punkt (Handlungsbedarf). Die
+  Zuordnung Fund→Prüfpunkt erfolgt über `checkId` (bzw. `testort`+Kontext, falls kein `checkId`). Die
+  Farbzuordnung ist **identisch** zur Gesamt-Ampel — **keine Invertierung** (grün bleibt „sauber/ok",
+  rot bleibt „kritisch/Handlungsbedarf"). `findingCount`/`ampel` (Gesamt) bleiben unverändert aus
+  `findings` abgeleitet (AC9, single source of truth).
+- **AC27 — record()-Naht schliessen: nach Abschluss genau EINMAL persistieren (idempotent, ehrliche
+  Degradation).** Nach sauberem Lauf-Abschluss (`status: done`) wird der abgeschlossene Lauf **genau
+  einmal** über `scanResultStore.record()` mit den aus AC24 extrahierten `findings` **und** `checks`
+  persistiert (`scanId ≡ jobId`, plus `repoSlug` aus AC1, `startedAt`/`finishedAt`). **Idempotent:**
+  ein bereits für diese `scanId` persistierter Lauf wird **nicht** erneut geschrieben (der Status-Poll
+  darf mehrfach laufen). **Ehrliche Degradation (Security-Kern, löst den S-403-Grund auf):** ein
+  `record()` mit „sauber/gruen" wird **nur** geschrieben, wenn die Ausgabe **auswertbar** war
+  (mind. ein Prüfpunkt in `checks` **oder** mind. ein Fund) — ein Lauf, dessen Ausgabe **nicht
+  auswertbar** ist (AC24 fail-safe), wird **nicht** als grüner „keine Befunde"-Eintrag persistiert,
+  sondern bleibt im bestehenden ehrlichen „Befund-Erfassung nicht verfügbar"-Zustand (kein
+  irreführendes „alles sicher"). Store-/Schreibfehler bleiben best-effort/non-fatal (NFR Robustheit).
+- **AC28 — reportRef nicht mehr als toter externer Link (Backend).** Der Status-Endpunkt (AC3) fällt
+  **nicht** mehr auf `job.prHint` als `reportRef` zurück (dieser unverifizierte PR-Link lief im
+  Realtest ins 404). `reportRef` trägt künftig **nur** eine tatsächlich nutzbare Bericht-Referenz
+  (oder `null`) — der **In-App-Report** (die persistierten `checks`+`findings`, AC29/AC30) ist die
+  autoritative Bericht-Ansicht. Ein unverifizierter PR-/externer Link wird **nie** als Report-Link
+  ausgeliefert.
+- **AC29 — Report zeigt ALLE Prüfpunkte + per-Punkt-Ampel (Frontend).** Der In-App-Report zeigt
+  **nicht nur die Funde**, sondern die **vollständige Prüfpunkt-Liste** (`checks` aus AC26) — je
+  Prüfpunkt Titel, Testort und die **eigene Ampel** (grün/gelb/rot, Text-Badge nicht nur Farbe,
+  A11y). Sichtbar sowohl im **Verlauf-Detailbericht** (`RedTeamScanHistory.jsx`, AC14) als auch im
+  **Ergebnis-Panel** nach Lauf-Ende (`RedTeamScanPanel.jsx`, AC12). Die Ampel-Farb-/Label-Zuordnung
+  wird aus dem bestehenden `AMPEL_STYLE`/`AMPEL_LABEL` (`RedTeamScanPanel.jsx`) wiederverwendet — keine
+  zweite, unabhängig driftende Zuordnung, **keine Invertierung** gegenüber der Gesamt-Ampel.
+- **AC30 — In-App-Report ersetzt den toten Link; Kein-Fund-Fall sauber (Frontend).** Der als „Report"
+  angezeigte Inhalt ist die **In-App-Ansicht** (Prüfpunkte + Funde), **kein** externer PR-Link, der
+  ins 404 laufen kann. **Kein-Fund-Fall:** hat der (auswertbare) Lauf **keine** Funde, zeigt der
+  Report einen ordentlichen „**keine Befunde / alles sauber**"-Zustand — die grüne Gesamt-Ampel
+  **plus** die vollständige, durchweg grüne Prüfpunkt-Liste als Beleg **was** getestet wurde — und
+  **nie** einen 404/toten Link. War die Ausgabe **nicht auswertbar** (AC27-Degradation), bleibt der
+  bestehende ehrliche „Befund-Erfassung noch nicht verfügbar"-Text (kein falsches „sauber").
+- **AC31 — Overlay-Text: gefahrlos schliessbar, Hintergrund-Lauf, Dauer, später abrufbar
+  (Frontend).** Das Live-Fortschritts-Panel (`RedTeamScanPanel.jsx`) zeigt während des Laufs einen
+  klaren Hinweis, der dem Nutzer sagt, dass er (a) das Panel **gefahrlos schliessen** kann und der
+  Lauf **im Hintergrund weiterläuft**, (b) ein Lauf **ca. 15 Minuten** dauert, und (c) er das
+  **Ergebnis später unter dem Verlauf/„Reports"** (AC14-Aufklapper) pro Container abrufen und
+  nachschauen kann. Reiner React-Text (kein `dangerouslySetInnerHTML`).
+
 ## Verträge
 
 - **`POST …/containers/:containerId/scan`** → `202 { jobId, status:"running" }` | `409 scan-in-progress`
@@ -264,6 +355,14 @@ Bestätigung** — als Board-Punkte übernommen werden.
   `422 not-scannable` (kein `repoSlug` beim Scan-Eintrag UND es müssen neue Befunde angelegt werden).
 - Runner-Args (server-seitig gesetzt, argv-Array): Ziel-App-Referenz + abgeleitete `url`/`url_edge` +
   `modus=beide` an `claude -p <red-team-command>`.
+- **Parser-Ergebnis (AC24, intern):** `{ findings: [{ id, severity, kind, testort, titel, detail?,
+  checkId? }], checks: [{ id, titel, testort, ampel, detail? }], auswertbar: boolean }` —
+  `auswertbar=false` ⇒ weder Funde noch Prüfpunkte erkannt (fail-safe, kein `record()` als grün, AC27).
+- **`ScanResultStore`-Eintrag (AC26-Erweiterung, additiv):** zusätzlich `checks: [{ id, titel, testort,
+  ampel }]` (`ampel ∈ {gruen,gelb,rot}`, per-Prüfpunkt, deterministisch abgeleitet — AC26); `findings`
+  optional um `detail?`/`checkId?` erweitert; bestehende Einträge ohne `checks` bleiben gültig (`[]`).
+- **`GET …/scans/:scanId`** liefert nach dem Naht-Schluss zusätzlich `scan.checks` (Detail-Ansicht,
+  AC29) — additiv, keine bestehende Feld-Semantik geändert.
 
 ## Edge-Cases & Fehlerverhalten
 
@@ -279,6 +378,15 @@ Bestätigung** — als Board-Punkte übernommen werden.
 - **Server-Neustart während Lauf:** In-Memory-Job-Registry geht verloren (kein Ziel: persistente
   Job-Historie); der Verlaufseintrag entsteht nur bei sauberem Abschluss.
 - **Übertrag doppelt geklickt / Befund schon übertragen:** idempotent (AC16/AC20), keine Duplikate.
+- **Runner-Ausgabe nicht auswertbar (AC24/AC27):** kein `record()` als grün, kein erfundener Befund —
+  der Report bleibt im ehrlichen „Befund-Erfassung nicht verfügbar"-Zustand; **nie** ein falsches
+  „alles sauber".
+- **Status-Poll läuft mehrfach nach `done`:** `record()` ist idempotent je `scanId` (AC27) — es
+  entsteht **genau ein** Verlaufseintrag, kein Duplikat bei wiederholtem Poll.
+- **Auswertbarer Lauf ohne Funde (Kein-Fund-Fall, AC30):** grüne Gesamt-Ampel + durchweg grüne
+  Prüfpunkt-Liste als „alles sauber"-Beleg — **kein** 404/toter Link.
+- **Alter Verlaufseintrag ohne `checks` (vor dem Naht-Schluss geschrieben):** Report zeigt weiterhin
+  Funde/Ampel; die Prüfpunkt-Liste bleibt leer (kein Crash, additive Degradation).
 
 ## NFRs
 
@@ -296,6 +404,10 @@ Bestätigung** — als Board-Punkte übernommen werden.
   ([[red-team-scan-access-token]]).
 - **Keine** eigene Kachel/kein neuer Menüpunkt.
 - **Keine** Cloudflare-Umkonfiguration durch den Scan.
+- **Kein** erfundener Fund/Prüfpunkt und **kein** falsches „alles sauber" bei nicht auswertbarer
+  Runner-Ausgabe (AC24/AC27 — ehrliche Degradation statt irreführender Grün-Behauptung).
+- **Kein** externer PR-/Link als Report-Referenz mehr (AC28) — der In-App-Report ist autoritativ.
+- **Kein** neuer Runner und **keine** geänderte Semantik für die übrigen Core-Nutzer (AC25 additiv).
 
 ## Abhängigkeiten
 
@@ -309,3 +421,12 @@ Bestätigung** — als Board-Punkte übernommen werden.
 - **Löst ab (Owner-Entscheidung 2026-07-21):** [[red-team-tile]] (F-090/F-091, eigenständige Kachel) — die
   Kachel-Schicht wird per AC23 abgebaut, der Runner bleibt.
 - Folge-Stufe: [[red-team-scan-access-token]] (Ausbaustufe 2).
+- **Naht-Schluss (AC24–AC31, F-095):** schliesst die in `src/vpsContainerScanRouter.js` (S-403
+  Iteration 2) bewusst offen gelassene Findings-Naht. Berührt zusätzlich `src/HeadlessRunnerCore.js`
+  (additive Ausgabe-Exposition, AC25), `src/HeadlessRedTeamRunner.js` (Parse-/Exposition-Naht),
+  einen neuen fail-safe Parser (Format gegen `docs/red-team-audit.md` bestätigen), `src/ScanResultStore.js`
+  (`checks`-Feld + per-Prüfpunkt-Ampel), `client/src/RedTeamScanPanel.jsx` + `client/src/RedTeamScanHistory.jsx`
+  (Prüfpunkt-Report, Overlay-Text). **Architektur-Hinweis:** die Ausgabe-Exposition (AC25) berührt den
+  **geteilten** `HeadlessRunnerCore` — additiv/opt-in, damit die übrigen Headless-Runner byte-identisch
+  bleiben; der Zuschnitt (Core-Feld vs. Parse-beim-close-Naht im Red-Team-Runner) ist beim coder/architekt
+  final zu wählen.
