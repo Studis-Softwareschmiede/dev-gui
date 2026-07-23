@@ -16,6 +16,7 @@ on:
       - 'board/**'
       - 'docs/**'
       - '**.md'
+      - '.claude/**'
 permissions:
   contents: read
   packages: write
