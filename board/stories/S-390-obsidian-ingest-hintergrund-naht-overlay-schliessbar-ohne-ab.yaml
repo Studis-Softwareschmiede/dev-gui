@@ -3,7 +3,7 @@ parent: F-050
 title: 'Obsidian-Ingest: Hintergrund-Naht — Overlay schliessbar ohne Abbruch, sichtbarer
   Status-Badge (needs-answers/done/failed) im "Aus Obsidian-Notizen"-Bereich; Klick
   öffnet Overlay am richtigen Punkt (bestehendes Resume + Verwerf-Regel)'
-status: To Do
+status: In Progress
 priority: P1
 spec: docs/specs/obsidian-question-catalog.md
 implements:
@@ -24,10 +24,12 @@ estimate_note: 'Heuristik score 5 (2 AC + 2 Komponenten ObsidianImportSection-Ba
   Dateien.'
 confidence: medium
 tok_est: '1659043'
-branch: null
+branch: feat/S-390-hintergrund-naht
 pr: null
 blocked_reason: null
 created_at: '2026-07-19T20:53:56Z'
-updated_at: '2026-07-19T20:56:03Z'
+updated_at: '2026-07-26T20:38:49Z'
 done_at: null
 area: obsidian
+claimed_by: MacBook-Pro-von-Alexander.local-38441-1785098282-24823
+claimed_at: '2026-07-26T20:38:25Z'
