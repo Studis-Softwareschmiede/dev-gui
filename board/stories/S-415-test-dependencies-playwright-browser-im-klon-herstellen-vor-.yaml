@@ -16,7 +16,10 @@ dispo_est: '4.0'
 dispo_act: null
 dispo_forecast: null
 estimate_note: 'M (Score 6: 3 AC + npm ci/playwright install im Klon-Root + Basis-Image/Install-Schritt-Infra).
-  baseline js|balanced|M.'
+  baseline js|balanced|M. Update 2026-07-26: A1 entschieden (Browser bereits fest
+  im Image, /ms-playwright + PLAYWRIGHT_BROWSERS_PATH vorhanden) — AC2 reduziert
+  sich auf den Versions-Guard, kein Install-Schritt/Image-Umbau mehr noetig;
+  effektiver Umfang eher S-M.'
 confidence: medium
 tok_est: '1659043'
 branch: null
