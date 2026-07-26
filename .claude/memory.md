@@ -3,15 +3,17 @@
 
 ## Aktueller Stand
 F-096 (target:local-Regressionslauf end-to-end lauffähig) ist in Arbeit im
-Feature-Batch: S-415 (Test-Deps + Browser-Guard) und S-416 (Port-Auflösung
-+ deployment-bewusste Ziel-Adressierung) sind auf feature/F-096 gelandet —
-der Runner stellt Vorbedingungen her und adressiert das Testobjekt jetzt
-container-/host-bewusst. Als Nächstes: S-417 (App-Secrets via
-Bitwarden/GPG in die Kind-Env), S-419 (Scope-Vertrag Reader↔Runner),
-danach S-418 (Integrationslauf, depends auf 415–417). Feature landet
-gebündelt am Ende in main (kein Rollout je Story).
+Feature-Batch: S-415 (Test-Deps + Browser-Guard), S-416 (Port-Auflösung +
+Ziel-Adressierung) und S-419 (Verbund-Scope ohne id) sind auf feature/F-096
+gelandet. Als Nächstes: S-417 (App-Secrets via Bitwarden/GPG in die
+Kind-Env), danach S-418 (Integrationslauf, depends auf S-417). Feature
+landet gebündelt am Ende in main (kein Rollout je Story).
 
 ## Letzte Arbeiten
+- S-419 / Verbund-Scope ohne id (AC13 regression-run): validateScope
+  akzeptiert { typ: "verbund" } ohne id (eigener Zweig vor der generischen
+  id-Pflicht), id tolerant/wirkungslos; bereich verlangt weiter id.
+  „Verbund ausführen" liefert kein 400 missing-id mehr. EP 3/3.
 - S-416 / Port + Ziel-Adressierung (AC4-AC6 regression-local-execution):
   portFieldRegex() toleriert Inline-Kommentare (beide Port-Leser);
   port=null → precondition-error „lokaler Test-Port nicht bestimmbar";
@@ -28,7 +30,6 @@ gebündelt am Ende in main (kein Rollout je Story).
 - S-408 / Kachel-Rückbau (AC23): Red-Team-Kachel entfernt. EP 4/4.
 - S-404 / Verlauf-Aufklapper: RedTeamScanHistory.jsx. EP 4/4.
 - S-406 / Befundliste: Sammel-Button + Rückfrage. EP 7 vs. 4.
-- S-405 / Befunde→Board-Übertrag: idempotent. EP 4.0/4.0.
 
 ## Offene Fäden
 - ADR-Eintrag zu A1 (Playwright-Browser fest im Image + zentrales
