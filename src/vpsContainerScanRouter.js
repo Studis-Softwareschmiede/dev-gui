@@ -94,19 +94,28 @@
  * **Offene Folge-Naht (S-403 Review-Fund, Iteration 2 — bewusst NICHT in diesem Router
  * geschlossen):** der ursprüngliche Plan war, `scanResultStore.record()` am Status-Poll
  * bei `status:'done'` mit `findings: []` aufzurufen. Das wurde verworfen: der wieder-
- * verwendete `HeadlessRedTeamRunner`/`HeadlessRunnerCore` legt die erfasste stdout/stderr-
+ * verwendete `HeadlessRedTeamRunner`/`HeadlessRunnerCore` legte die erfasste stdout/stderr-
  * Ausgabe NICHT im Job-Objekt ab (nur `status`/`result`/`error`/`prHint`) — ein Findings-
- * Parser aus dem Runner-Output ist mit dem heutigen Core-Vertrag NICHT baubar. Ein
+ * Parser aus dem Runner-Output war mit dem damaligen Core-Vertrag NICHT baubar. Ein
  * `record()` mit hartkodiert leeren `findings` hätte für JEDEN abgeschlossenen Lauf
  * dauerhaft `ampel:'gruen'` ("keine Befunde") persistiert — für ein Sicherheitswerkzeug
  * eine aktiv irreführende "alles sicher"-Aussage, unabhängig vom tatsächlichen Lauf-
- * Ergebnis, und macht den gesamten Verlauf (S-402/S-404) wertlos. Der Status-Endpunkt
- * liefert deshalb weiterhin NUR `status`/`phase`/`reportRef?` ohne Ampel-/Findings-
- * Behauptung, bis eine echte Findings-Extraktion existiert (Core müsste die erfasste
- * Ausgabe im Job-Objekt exponieren + ein Parser-Vertrag für `/agent-flow:red-team`-Output
- * definiert werden — Folge-Story). `reportRef` bleibt trotzdem ohne Store nutzbar: fällt
- * mangels Store-Treffer auf den vom Runner bereits extrahierten `job.prHint` zurück (s.
- * unten, AC12-Bericht-Link funktioniert unabhängig von der offenen Findings-Naht).
+ * Ergebnis, und macht den gesamten Verlauf (S-402/S-404) wertlos.
+ * **Baustein jetzt vorhanden (S-410, AC24/AC25, F-095):** `HeadlessRunnerCore` exponiert
+ * die erfasste Ausgabe optIn (`captureOutput`, NUR `HeadlessRedTeamRunner` aktiviert es,
+ * die übrigen Core-Nutzer bleiben byte-identisch) als `job.output`; ein fail-safe Parser
+ * (`src/redTeamOutputParser.js#parseRedTeamOutput()`) extrahiert daraus `{findings, checks,
+ * auswertbar}` (erfindet nie Funde, `auswertbar:false` bei nicht auswertbarer Ausgabe —
+ * das bestätigte reale Format des headless End-JSON, `agents/red-team.md`/
+ * `skills/red-team/SKILL.md` §5, trägt heute nur `findings_count` als Zähler, KEINE
+ * per-Fund-Details, daher bleibt ein realer Lauf nach heutigem Format `auswertbar:false`,
+ * bis der Agent/Skill selbst eine reichere Struktur liefert). Das eigentliche Verdrahten
+ * (`record()` NACH Lauf-Abschluss aufrufen, idempotent, `checks`-Store-Erweiterung) ist
+ * weiterhin NICHT Teil dieser Story (AC26/AC27, Folge-Story) — der Status-Endpunkt liefert
+ * deshalb unverändert NUR `status`/`phase`/`reportRef?` ohne Ampel-/Findings-Behauptung.
+ * `reportRef` bleibt trotzdem ohne Store nutzbar: fällt mangels Store-Treffer auf den vom
+ * Runner bereits extrahierten `job.prHint` zurück (s. unten, AC12-Bericht-Link funktioniert
+ * unabhängig von der offenen Findings-Naht — wird ohnehin mit AC28 abgelöst).
  *
  * Security (Floor, AC22): keine Secrets/Tokens/absolute Host-Pfade in Response/Log; `jobId`
  * ist eine reine Korrelations-ID (`randomUUID()` im Runner); argv bleibt Array (kein Shell-

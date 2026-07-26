@@ -13,6 +13,12 @@
  * Pattern (aus HeadlessReconcileRunner.test.js übernommen): injectable `spawnFn`
  * liefert einen fake EventEmitter-Kindprozess (stdout/stderr sub-emitters +
  * kill() spy) — kein echter `claude`-Lauf.
+ *
+ * Covers (red-team-scan-per-container.md): AC25
+ *   AC25 — dieser Runner aktiviert `captureOutput: true` am Core (der EINZIGE
+ *         opt-in Nutzer) — `getJob(jobId).output` trägt nach Lauf-Ende die
+ *         erfasste stdout+stderr-Kombination (Eingabe für
+ *         `parseRedTeamOutput()`, AC24).
  */
 
 import { describe, it, expect, jest, afterEach } from '@jest/globals';
@@ -243,5 +249,37 @@ describe('HeadlessRedTeamRunner — AC1 (e): missing ziel → TypeError', () => 
 
     expect(() => runner.start('/workspace/proj-empty-ziel', { ziel: '' })).toThrow(TypeError);
     expect(spawnFn).not.toHaveBeenCalled();
+  });
+});
+
+describe('HeadlessRedTeamRunner — AC25: opt-in output exposition (job.output)', () => {
+  it('getJob(jobId).output carries the captured stdout+stderr combination after a clean done exit', async () => {
+    const child = makeFakeChild();
+    const spawnFn = jest.fn(() => child);
+    const runner = new HeadlessRedTeamRunner({ spawnFn, timeoutMs: 10_000 });
+
+    const { jobId } = runner.start('/workspace/proj-output', { ziel: 'foo' });
+    child.stdout.emit('data', '{"status":"done","findings_count":0}');
+    child.emit('close', 0);
+    await tick();
+
+    const job = runner.getJob(jobId);
+    expect(job.status).toBe('done');
+    expect(job.output).toBe('{"status":"done","findings_count":0}\n');
+  });
+
+  it('getJob(jobId).output is present even on a failed (non-zero exit) run', async () => {
+    const child = makeFakeChild();
+    const spawnFn = jest.fn(() => child);
+    const runner = new HeadlessRedTeamRunner({ spawnFn, timeoutMs: 10_000 });
+
+    const { jobId } = runner.start('/workspace/proj-output-failed', { ziel: 'foo' });
+    child.stderr.emit('data', 'boom');
+    child.emit('close', 1);
+    await tick();
+
+    const job = runner.getJob(jobId);
+    expect(job.status).toBe('failed');
+    expect(job.output).toBe('\nboom');
   });
 });
