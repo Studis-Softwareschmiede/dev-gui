@@ -2,7 +2,19 @@
  * ObsidianIngestRunner — headless `claude -p '/agent-flow:from-notes …'`-
  * Kindprozess-Runner MIT strukturiertem Interrupt/Resume-Rückkanal
  * (docs/specs/obsidian-question-catalog.md AC1, AC2, AC4, AC5, AC6, AC7,
- * AC8, AC9, AC12 — v2 „Ziel-Projekt-Repo als cwd"-Fix).
+ * AC8, AC9, AC12, AC16, AC20, AC21, AC22 — v2 „Ziel-Projekt-Repo als cwd"-Fix,
+ * v4 „startedAt"-Warteanzeige-Grundlage, v5 Headless-Format-Token +
+ * Prompt-Absicherung).
+ *
+ * Headless-Format-Signal + Prompt-Absicherung (v5, AC20/AC21): `defaultRunClaude`
+ * hängt an den Initial-Prompt das feste Headless-Token `HEADLESS_GUI_TOKEN`
+ * (`--gui`, agent-flow-Vertrag `obsidian-ingest` AC23–AC25, Story S-098) an —
+ * HINTER dem unverändert vault-confinten Notiz-Ordner-Argument (AC8) — und
+ * ergänzt (Initial UND Resume) `JSON_OUTPUT_INSTRUCTION`, eine kurze,
+ * secret-freie Instruktion, dass die Runde mit genau EINEM JSON-Objekt als
+ * letzter Ausgabe enden muss. Das Parsing selbst (`extractClaudeResult`/
+ * `parseIngestOutcome`, AC12-Fehlerklassen) bleibt dabei UNVERÄNDERT (AC22,
+ * Regressionsschutz).
  *
  * `cwd` = Ziel-Projekt-Repo, Notiz-Ordner NUR Argument (AC8, v2):
  *   `start(targetRepoPath, { noteFolderPath, identity })` — `targetRepoPath`
@@ -55,6 +67,16 @@
  * Test benötigt einen echten `claude`-Lauf; der Default-Adapter
  * (`defaultRunClaude`) kapselt spawn/env/session-id/auth-Erkennung.
  *
+ * `startedAt` im Job-Status (docs/specs/obsidian-question-catalog.md v4, AC16):
+ * `start()` legt EINMALIG einen ISO-8601-UTC-Zeitstempel (`startedAt`) im
+ * Job-State ab — anders als der per-Runde neu gesetzte `startedAt` im
+ * Geschwister-Runner `RegressionDefineRunner` (dortiges AC9) bleibt dieser
+ * Wert über die gesamte Job-Lebensdauer (inkl. `needs-answers`/Resume)
+ * UNVERÄNDERT, da AC16 wörtlich „beim `start()`" verlangt. `getJob()` gibt
+ * ihn secret-frei für JEDEN Zustand (`running`/`needs-answers`/`done`/
+ * `failed`/`auth-expired`) mit aus — Grundlage der clientseitigen
+ * Laufzeitanzeige (AC17).
+ *
  * Fragen-offen-Push (docs/specs/questions-pending-notification.md, S-279:
  * AC1/AC2/AC3/AC4/AC5): optionaler injizierter `notifier` (Muster `auditStore`
  * — Default `null` → No-op, AC5 Default-Regress). An der `needs-answers`-
@@ -83,10 +105,31 @@ export const DEFAULT_INGEST_TIMEOUT_MS = 15 * 60 * 1000; // 15 min
 // Re-Export für Aufrufer/Tests (gleiche Semantik wie in den Geschwister-Runnern).
 export { buildChildEnv, isAuthError, AUTH_EXPIRED_MESSAGE };
 
+/** Headless-Format-Token (v5, AC20 — agent-flow-Vertrag `obsidian-ingest`
+ * AC23–AC25, `from-notes`-SKILL §0c-headless, Story S-098, A5 aufgelöst):
+ * signalisiert dem Skill den ferngesteuerten (headless/GUI) Lauf, damit dieser
+ * den `{ status, … }`-JSON-Vertrag statt Fliesstext ausgibt. Fester,
+ * secret-freier String — analog `--cost` VOR der Pfad-Auswertung
+ * herausgeparst — steht in `defaultRunClaude` HINTER dem unverändert
+ * vault-confinten Notiz-Ordner-Argument (AC8 unberührt). */
+export const HEADLESS_GUI_TOKEN = '--gui';
+
+/** Plugin-versions-robuste JSON-Ausgabe-Instruktion (v5, AC21): erzwingt den
+ * `{ status, … }`-JSON-Endausgabe-Vertrag je Runde — GENAU EIN JSON-Objekt als
+ * letzte Ausgabe, beide `status`-Formen benannt — auch mit einer älteren
+ * agent-flow-Plugin-Version ohne Kenntnis von `HEADLESS_GUI_TOKEN` (Punkt 2 der
+ * Anforderung, standalone wirksam). Secret-/Host-Pfad-frei; wird an den
+ * Initial- UND den Resume-Prompt angehängt. */
+export const JSON_OUTPUT_INSTRUCTION =
+  'End this round with exactly one JSON object as the very last line of output: ' +
+  'either {"status":"needs-answers","catalog":[...]} or {"status":"done"}. ' +
+  'No other JSON object may follow it.';
+
 /** Kurzer, secret-freier argv-Prompt für die Resume-Runde — die Antworten selbst
- * gehen via STDIN (AC6), nie als argv/Shell-String. */
+ * gehen via STDIN (AC6), nie als argv/Shell-String. Trägt seit v5 (AC21)
+ * dieselbe JSON-Ausgabe-Instruktion wie der Initial-Prompt. */
 export const RESUME_PROMPT =
-  'Continue the interrupted ingest with the answers provided on stdin.';
+  `Continue the interrupted ingest with the answers provided on stdin.\n\n${JSON_OUTPUT_INSTRUCTION}`;
 
 // ── Secret-freie Meldungstexte ────────────────────────────────────────────────
 const GENERIC_FAILURE_MESSAGE = 'Obsidian-Ingest-Lauf fehlgeschlagen';
@@ -279,6 +322,12 @@ export function validateAnswers(answers, catalog) {
  *   - Resume-Antworten via STDIN (nie argv/Shell); `--resume <session-id>` argv.
  *   - stderr wird gedraint (Pipe-Blockade), aber NICHT in Fehlermeldungen geleakt.
  *
+ * Headless-Format-Signal (v5, AC20/AC21): der Initial-Prompt bleibt EIN
+ * einzelnes `-p`-argv-Element = `<promptArg> <HEADLESS_GUI_TOKEN>` gefolgt von
+ * `JSON_OUTPUT_INSTRUCTION` (Token HINTER dem unveränderten `promptArg`, AC8
+ * unberührt); der Resume-Prompt (`RESUME_PROMPT`) trägt dieselbe Instruktion
+ * bereits eingebacken (kein Token, da kein `from-notes`-Neuaufruf).
+ *
  * @param {object} params
  * @param {string} params.projectPath - validierter absoluter cwd.
  * @param {string} [params.promptArg] - Initial-Runde: `'<command> <path>'` (ein argv-Element).
@@ -299,7 +348,10 @@ export function defaultRunClaude({
 }) {
   return new Promise((resolve) => {
     const isResume = typeof resumeSessionId === 'string' && resumeSessionId !== '';
-    const argv = ['-p', isResume ? RESUME_PROMPT : String(promptArg ?? '')];
+    // AC20/AC21 (v5): Initial-Runde = promptArg + Headless-Token + JSON-
+    // Ausgabe-Instruktion, als EIN einzelnes -p-argv-Element (kein Shell-String).
+    const initialPrompt = `${String(promptArg ?? '')} ${HEADLESS_GUI_TOKEN}\n\n${JSON_OUTPUT_INSTRUCTION}`;
+    const argv = ['-p', isResume ? RESUME_PROMPT : initialPrompt];
     if (isResume) argv.push('--resume', resumeSessionId);
     argv.push('--dangerously-skip-permissions', '--output-format', 'json');
 
@@ -376,6 +428,7 @@ export class ObsidianIngestRunner {
    *   status: 'running'|'needs-answers'|'done'|'failed'|'auth-expired',
    *   catalog?: Array<object>, result?: string, error?: string,
    *   projectPath: string, noteFolderPath: string, sessionId?: string, identity: string|null,
+   *   startedAt: string,
    * }>}
    */
   #jobs = new Map();
@@ -427,6 +480,9 @@ export class ObsidianIngestRunner {
       noteFolderPath,
       identity: identity ?? null,
       sessionId: undefined,
+      // AC16 (v4): EINMALIG beim start() gesetzt, bleibt über die gesamte
+      // Job-Lebensdauer unverändert (kein Reset je Runde/Resume).
+      startedAt: new Date().toISOString(),
     });
     // Fire-and-forget: der Lauf kann lange dauern; der Aufrufer wartet nicht.
     this.#runRound(jobId, { resume: false }).catch(() => {
@@ -436,17 +492,18 @@ export class ObsidianIngestRunner {
   }
 
   /**
-   * Liest die ÖFFENTLICHE Sicht auf einen Job (AC1/AC2/AC5) — secret-frei, ohne
-   * interne Felder (`projectPath`/`sessionId`/`identity`). `catalog` nur bei
-   * `needs-answers`.
+   * Liest die ÖFFENTLICHE Sicht auf einen Job (AC1/AC2/AC5/AC16) — secret-frei,
+   * ohne interne Felder (`projectPath`/`sessionId`/`identity`). `catalog` nur
+   * bei `needs-answers`. `startedAt` (AC16, v4) ist für JEDEN Zustand gesetzt
+   * (immer vorhanden, seit `start()` einmalig geschrieben).
    *
    * @param {string} jobId
-   * @returns {{ status: string, catalog?: Array<object>, result?: string, error?: string } | undefined}
+   * @returns {{ status: string, startedAt: string, catalog?: Array<object>, result?: string, error?: string } | undefined}
    */
   getJob(jobId) {
     const job = this.#jobs.get(jobId);
     if (!job) return undefined;
-    const view = { status: job.status };
+    const view = { status: job.status, startedAt: job.startedAt };
     if (job.catalog !== undefined) view.catalog = job.catalog;
     if (job.result !== undefined) view.result = job.result;
     if (job.error !== undefined) view.error = job.error;

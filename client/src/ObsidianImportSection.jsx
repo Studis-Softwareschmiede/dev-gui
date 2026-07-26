@@ -57,6 +57,26 @@
  * Ordner darf denselben Job genauso wenig lautlos resumen wie ein Wechsel
  * des Notiz-Ordners.
  *
+ * ── obsidian-question-catalog v4 AC18/AC19 (S-390) — Hintergrund-Status-
+ * Badge + Wiedereinstieg ─────────────────────────────────────────────────
+ * Solange das Fragenkatalog-Overlay GESCHLOSSEN ist und `ingestJobMatchesSelection`
+ * zutrifft (derselbe gemerkte Job wie oben), pollt diese Section zusätzlich
+ * (unabhängig vom `ensure-target`-Poll) den bestehenden Status-Endpunkt
+ * `GET .../obsidian-ingest/:jobId` — KEIN neuer Endpunkt. Erreicht der Job
+ * `needs-answers`/`done`/`failed`/`auth-expired`, stoppt der Poll und ein
+ * text-beschrifteter, klickbarer Badge erscheint (`badgeStatus`); ein Klick
+ * öffnet das Overlay über denselben Direkt-Öffnen-Pfad wie ein bereits
+ * bestehendes Ziel (AC10/0d, kein `ensure-target`-Umweg — der Job läuft ja
+ * bereits gegen dieses Ziel) mit `initialJobId` (Wiedereinstieg, kein neuer
+ * `start()`). Ein `404`/Netzwerkfehler beim Hintergrund-Poll verwirft die
+ * Merkung (`setIngestJob(null)`) und lässt den Badge still verschwinden
+ * (Edge-Case „Badge-Poll-Fehler", v4) — kein Crash. Die bestehende Verwerf-
+ * Regel bei Auswahlwechsel (oben) ist unverändert die Enforcement-Grenze:
+ * ändert sich die Auswahl, wird `ingestJob` bereits von den `onChange`-
+ * Handlern zurückgesetzt, `ingestJobMatchesSelection` wird `false`, der
+ * Badge-Poll-Effect stoppt sich selbst (Dependency `badgeJobId`) und der
+ * Badge verschwindet.
+ *
  * @param {{ fetchFn?: typeof fetch, onNavigate: (view: string) => void }} props
  */
 
@@ -82,6 +102,17 @@ const TARGET_SLUG_RE = /^[A-Za-z0-9_-]+$/;
 
 /** Poll-Intervall (ms) für den `ensure-target`-Anlage-Status (AC15). */
 const ENSURE_TARGET_POLL_MS = 1_500;
+
+/** Poll-Intervall (ms) für den Hintergrund-Status-Badge (AC18, v4). */
+const OBSIDIAN_BADGE_POLL_MS = 5_000;
+
+/** Text-Label je Job-Zustand für den Hintergrund-Badge (AC18 — nicht nur Farbe). */
+const BACKGROUND_BADGE_LABEL = {
+  'needs-answers': 'Fragenkatalog wartet — bitte beantworten',
+  done: 'Ingest abgeschlossen',
+  failed: 'Ingest fehlgeschlagen',
+  'auth-expired': 'Anmeldung abgelaufen — bitte erneut versuchen',
+};
 
 /** Umlaut-Transliteration, identisch zu `AreaWriter.js#_slugifyBase`. */
 const SLUG_UMLAUT_MAP = { ä: 'ae', ö: 'oe', ü: 'ue', Ä: 'Ae', Ö: 'Oe', Ü: 'Ue', ß: 'ss' };
@@ -436,6 +467,96 @@ export function ObsidianImportSection({ fetchFn, onNavigate }) {
   // vorliegt; ebenso während eine Ziel-Repo-Vorbereitung (AC15) läuft.
   const canStartIngest = Boolean(selectedPath) && targetChosen && !showIngestOverlay && !isEnsuring;
 
+  // obsidian-question-catalog v4 AC18 (S-390): Hintergrund-Status-Badge —
+  // 'needs-answers' | 'done' | 'failed' | 'auth-expired' | null. Nur gesetzt,
+  // solange das Overlay geschlossen ist und der gemerkte Job zur aktuellen
+  // Auswahl passt (s. Modul-Kommentar).
+  const [badgeStatus, setBadgeStatus] = useState(
+    /** @type {'needs-answers'|'done'|'failed'|'auth-expired'|null} */(null),
+  );
+  // Primitive Ableitung statt des `ingestJob`-Objekts selbst als Effect-
+  // Dependency — vermeidet unnötige Effect-Neustarts bei Objekt-Identitäts-
+  // wechseln, die den Job-Wert nicht tatsächlich ändern.
+  const badgeJobId = ingestJobMatchesSelection ? ingestJob.jobId : null;
+
+  useEffect(() => {
+    // Kein Poll ohne gemerkten, zur Auswahl passenden Job — UND nicht,
+    // solange das Overlay selbst offen ist (AC18: "solange das Overlay
+    // GESCHLOSSEN ist"). Lessons 2026-07-07 (projektgebundener Polling-
+    // State): Badge sofort zurücksetzen, nicht erst nach der ersten Antwort
+    // eines evtl. NEUEN Jobs.
+    setBadgeStatus(null);
+    if (showIngestOverlay || !badgeJobId) return;
+
+    let stopped = false;
+    let timer;
+
+    function stop() {
+      stopped = true;
+      clearInterval(timer);
+    }
+
+    // v4 Edge-Case "Badge-Poll-Fehler": 404 ODER Netzwerkfehler → Badge
+    // entfällt still, Merkung verworfen, kein Crash (AC18).
+    function discard() {
+      stop();
+      setBadgeStatus(null);
+      setIngestJob(null);
+    }
+
+    async function poll() {
+      if (stopped) return;
+      let res;
+      try {
+        res = await fetchFnRef.current(`/api/obsidian-ingest/${encodeURIComponent(badgeJobId)}`);
+      } catch {
+        if (stopped || !mountedRef.current) return;
+        discard();
+        return;
+      }
+      if (stopped || !mountedRef.current) return;
+      // lessons 2026-07-01: Nicht-200 NICHT wie "noch running" behandeln.
+      if (res.status !== 200) {
+        discard();
+        return;
+      }
+      let data = {};
+      try { data = await res.json(); } catch { /* ignore */ }
+      if (stopped || !mountedRef.current) return;
+      if (
+        data.status === 'needs-answers' ||
+        data.status === 'done' ||
+        data.status === 'failed' ||
+        data.status === 'auth-expired'
+      ) {
+        stop();
+        setBadgeStatus(data.status);
+        return;
+      }
+      // 'running' → weiter pollen, kein Badge.
+    }
+
+    poll();
+    timer = setInterval(poll, OBSIDIAN_BADGE_POLL_MS);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [showIngestOverlay, badgeJobId]);
+
+  // obsidian-question-catalog v4 AC19 (S-390): Badge-Klick öffnet das
+  // Overlay erneut mit `initialJobId` (Wiedereinstieg, kein neuer `start()`)
+  // — derselbe Direkt-Öffnen-Pfad wie ein bereits bestehendes Ziel
+  // (AC10/0d, kein `ensure-target`-Umweg, weil der Job bereits gegen dieses
+  // Ziel läuft). `ingestJobMatchesSelection` garantiert an dieser Stelle,
+  // dass `ingestJob` gesetzt ist (Badge wird nur unter dieser Bedingung
+  // gerendert).
+  const handleBadgeClick = useCallback(() => {
+    if (!ingestJobMatchesSelection) return;
+    setActiveIngestTarget({ projectFolderPath: selectedPath, targetProjectSlug: effectiveTargetSlug });
+    setShowIngestOverlay(true);
+  }, [ingestJobMatchesSelection, selectedPath, effectiveTargetSlug]);
+
   // obsidian-question-catalog v3 AC15 (S-388): pollt den Anlage-Status eines
   // `ensure-target`-Jobs, bis `ready`/`failed` — öffnet das Overlay erst bei
   // `ready` (kein Ingest-Start vor gesicherter Ziel-Repo-Existenz).
@@ -771,6 +892,24 @@ export function ObsidianImportSection({ fetchFn, onNavigate }) {
         </div>
       )}
 
+      {/* obsidian-question-catalog v4 AC18/AC19 (S-390): Hintergrund-Status-
+          Badge — nur sichtbar solange das Overlay geschlossen ist (s.o.,
+          `showIngestOverlay` steuert den Poll-Effect). Text-beschriftet
+          (nicht nur Farbe), je Zustand unterscheidbarer Wortlaut; Klick
+          öffnet das Overlay mit `initialJobId` (Wiedereinstieg). */}
+      {!showIngestOverlay && badgeStatus && (
+        <button
+          type="button"
+          style={styles.backgroundBadge(badgeStatus)}
+          onClick={handleBadgeClick}
+          data-testid="obsidian-ingest-background-badge"
+          data-badge-status={badgeStatus}
+        >
+          <span aria-hidden="true">●</span>{' '}
+          {BACKGROUND_BADGE_LABEL[badgeStatus] ?? 'Hintergrund-Lauf — Status unbekannt'}
+        </button>
+      )}
+
       {/* AC5: Busy-Hinweis — Text-Label, nicht nur Farbe */}
       {busy && (
         <div role="status" aria-live="polite" style={styles.obsidianLockNotice}>
@@ -1011,5 +1150,39 @@ const styles = {
     borderRadius: 4,
     fontSize: 13,
     color: '#fca5a5',           // Kontrast auf #2d0f0f ≥ 4.5:1
+  },
+  // obsidian-question-catalog v4 AC18 (S-390): Hintergrund-Status-Badge —
+  // je Zustand eigenes, bereits an anderer Stelle in dieser Datei bzw. in
+  // ObsidianIngestOverlay.jsx etabliertes Farbpaar (WCAG-AA-Kontrast dort
+  // bereits dokumentiert), damit die Farbe der Wortbedeutung entspricht;
+  // der Text-Wortlaut selbst (BACKGROUND_BADGE_LABEL) ist die eigentliche,
+  // nicht-farbabhängige Unterscheidung (AC18 "nicht nur Farbe").
+  backgroundBadge(status) {
+    const variant =
+      status === 'done'
+        ? { color: '#86efac', background: '#0f2417', border: '#14532d' } // wie ObsidianIngestOverlay success
+        : status === 'needs-answers'
+        ? { color: '#93c5fd', background: '#0f1f33', border: '#1d4ed8' } // analog btnPrimary-Blauton
+        : status === 'auth-expired'
+        ? { color: '#fbbf24', background: '#1a1500', border: '#3a2f00' } // wie obsidianLockNotice
+        : { color: '#fca5a5', background: '#2d0f0f', border: '#7f1d1d' }; // failed — wie formError
+    return {
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 6,
+      width: '100%',
+      boxSizing: 'border-box',
+      padding: '10px 14px',
+      marginBottom: 12,
+      minHeight: 44,
+      borderRadius: 4,
+      border: `1px solid ${variant.border}`,
+      background: variant.background,
+      color: variant.color,
+      fontSize: 13,
+      fontWeight: 600,
+      cursor: 'pointer',
+      textAlign: 'left',
+    };
   },
 };

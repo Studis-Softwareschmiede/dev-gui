@@ -1,8 +1,8 @@
 /**
  * ObsidianIngestOverlay.jsx — Fragenkatalog-Overlay für den headless Obsidian-
- * Ingest-Lauf (docs/specs/obsidian-question-catalog.md, UI-Anteile AC3/AC4/AC5/AC7
- * — Backend `ObsidianIngestRunner`/`obsidianIngestRouter` ist S-250, bereits
- * gelandet).
+ * Ingest-Lauf (docs/specs/obsidian-question-catalog.md, UI-Anteile AC3/AC4/AC5/
+ * AC7/AC17 — Backend `ObsidianIngestRunner`/`obsidianIngestRouter` ist S-250,
+ * bereits gelandet; `startedAt`/AC16 ist S-389, in diesem Item gelandet).
  *
  * A11y-/Struktur-Muster 1:1 aus `IdeaSpecifyChatModal.jsx` übernommen (Backdrop,
  * Fokus beim Öffnen, `Esc` schließt IMMER, Fokus-Rückgabe an `triggerRef`,
@@ -100,6 +100,19 @@
  *         via `initialJobId`/`onJobStarted`, s.o.). Ein Nicht-200-Poll-Ergebnis
  *         (z.B. `404` nach Server-Neustart) wird explizit als Fehler behandelt,
  *         NICHT als "noch running" (lessons 2026-07-01).
+ *   AC17 — Ehrliche Warteanzeige (v4, S-389): solange `starting`/`running`
+ *         zeigt das Overlay (a) einen animierten Spinner (CSS-Keyframe, kein
+ *         externes Asset — analog `RegressionDefineDialog.jsx` AC10), (b)
+ *         eine live tickende Laufzeitanzeige „läuft seit m:ss" (`setInterval`,
+ *         `livenessTickMs`, aus dem Backend-`startedAt` (AC16) berechnet,
+ *         `formatElapsed` klemmt negative/Uhr-Sprung-Differenzen auf `0:00`),
+ *         und (c) einen Erwartungstext, dass der Lauf je nach Notizmenge
+ *         mehrere Minuten dauern kann. `role="status"`/`aria-live="polite"`.
+ *         Fehlt `startedAt` noch (Wiedereinstieg vor dem ersten Poll) →
+ *         Spinner + Erwartungstext erscheinen trotzdem, die Laufzeit zeigt
+ *         `0:00` (kein `NaN`) und beginnt zu ticken, sobald der erste Poll
+ *         `startedAt` liefert. Der Tick-Timer wird beim Verlassen der Phase
+ *         (Effekt-Dependency `phase`) bzw. bei Unmount aufgeräumt.
  *
  * ── Component-Props-Vertrag ─────────────────────────────────────────────────
  * @param {{
@@ -114,6 +127,7 @@
  *   onIngestComplete?: () => void,
  *   pollMs?: number,
  *   successLingerMs?: number,
+ *   livenessTickMs?: number,
  * }} props
  *
  * - `projectFolderPath` — der vault-confined Projekt-Pfad (aus der bereits
@@ -139,6 +153,8 @@
  * - `pollMs` — Poll-Intervall (default 2000; in Tests überschreibbar).
  * - `successLingerMs` — Anzeigedauer der Erfolgsmeldung vor dem Schließen
  *   (default 1200; in Tests überschreibbar).
+ * - `livenessTickMs` — Aktualisierungsintervall der Laufzeitanzeige (AC17,
+ *   default 1000; in Tests überschreibbar).
  *
  * Security (Floor):
  *   - Kein `dangerouslySetInnerHTML` — Katalog-/Fehlertexte werden als reiner
@@ -159,6 +175,24 @@ const OBSIDIAN_INGEST_POLL_MS = 2000;
 /** Anzeigedauer der Erfolgsmeldung vor dem Schließen (überschreibbar). */
 const OBSIDIAN_INGEST_SUCCESS_LINGER_MS = 1200;
 
+/** Aktualisierungsintervall der Laufzeitanzeige (AC17, v4 — überschreibbar). */
+const OBSIDIAN_INGEST_LIVENESS_TICK_MS = 1000;
+
+/**
+ * Formatiert eine verstrichene Millisekunden-Dauer als „m:ss" (AC17) —
+ * Minuten OHNE führende Null (Spec-Wortlaut „läuft seit m:ss"), Sekunden
+ * zweistellig. Negativ/Uhr-Sprung (Edge-Case „Uhr-Sprung / negative Differenz")
+ * wird auf `0:00` geklemmt, nie negativ, nie `NaN`.
+ * @param {number} elapsedMs
+ * @returns {string}
+ */
+function formatElapsed(elapsedMs) {
+  const totalSeconds = Math.max(0, Math.floor(elapsedMs / 1000));
+  const mm = Math.floor(totalSeconds / 60);
+  const ss = totalSeconds % 60;
+  return `${mm}:${String(ss).padStart(2, '0')}`;
+}
+
 export function ObsidianIngestOverlay({
   projectFolderPath,
   targetProjectSlug,
@@ -171,6 +205,7 @@ export function ObsidianIngestOverlay({
   onIngestComplete,
   pollMs = OBSIDIAN_INGEST_POLL_MS,
   successLingerMs = OBSIDIAN_INGEST_SUCCESS_LINGER_MS,
+  livenessTickMs = OBSIDIAN_INGEST_LIVENESS_TICK_MS,
 }) {
   const fetch_ = fetchFn ?? globalThis.fetch.bind(globalThis);
 
@@ -181,6 +216,13 @@ export function ObsidianIngestOverlay({
   const [answers, setAnswers] = useState({}); // { [id]: string }
   const [submitError, setSubmitError] = useState('');
   const [retryToken, setRetryToken] = useState(0);
+
+  // ── Ehrliche Warteanzeige (AC16/AC17, v4) — Grundlage: `startedAt` aus dem
+  // Status-Endpunkt (AC16). Fehlt es noch (Wiedereinstieg vor dem ersten Poll),
+  // bleibt `livenessStartedAt` `null` — `elapsedLabel` klemmt dann auf `0:00`
+  // (kein NaN), die Anzeige beginnt zu ticken, sobald der erste Poll es liefert.
+  const [livenessStartedAt, setLivenessStartedAt] = useState(null);
+  const [nowTick, setNowTick] = useState(() => Date.now());
   // Erhöht sich JEDES Mal, wenn ein neuer Poll-Loop-Durchlauf beginnen soll
   // (frischer Start, Wiedereinstieg, nach erfolgreichem Antworten-Resume).
   // Bewusst NICHT direkt an `phase` gekoppelt: ein `setInterval` mit sehr
@@ -330,6 +372,10 @@ export function ObsidianIngestOverlay({
       try { data = await res.json(); } catch { /* ignore */ }
       if (stopped || !mountedRef.current) return;
 
+      // AC16/AC17: `startedAt` bei JEDEM Poll mitziehen — für alle Zustände
+      // vorhanden, sobald der Server es liefert (Grundlage der Laufzeitanzeige).
+      if (typeof data.startedAt === 'string') setLivenessStartedAt(data.startedAt);
+
       if (data.status === 'needs-answers') {
         stop();
         setCatalog(Array.isArray(data.catalog) ? data.catalog : []);
@@ -433,8 +479,24 @@ export function ObsidianIngestOverlay({
     setCatalog([]);
     setAnswers({});
     setSubmitError('');
+    setLivenessStartedAt(null);
     setRetryToken((t) => t + 1);
   }, []);
+
+  // AC17: Laufzeitanzeige fortlaufend aktualisieren, solange starting/running
+  // (Timer wird beim Verlassen der Phase / Unmount aufgeräumt, kein Leak).
+  useEffect(() => {
+    if (phase !== 'starting' && phase !== 'running') return;
+    setNowTick(Date.now());
+    const t = setInterval(() => setNowTick(Date.now()), livenessTickMs);
+    return () => clearInterval(t);
+  }, [phase, livenessTickMs]);
+
+  // AC17: fehlt `startedAt` noch (Wiedereinstieg vor dem ersten Poll) → `0:00`,
+  // niemals `NaN`; tickt, sobald `startedAt` vorliegt.
+  const elapsedLabel = livenessStartedAt
+    ? formatElapsed(nowTick - new Date(livenessStartedAt).getTime())
+    : '0:00';
 
   const titleId = 'obsidian-ingest-overlay-title';
   const stages = groupByStage(catalog);
@@ -452,18 +514,27 @@ export function ObsidianIngestOverlay({
         style={styles.dialog}
         data-testid="obsidian-ingest-overlay"
       >
+        {/* AC17: scoped Keyframe-Animation für den Spinner (kein externes Asset). */}
+        <style>{'@keyframes obsidian-ingest-spin { to { transform: rotate(360deg); } }'}</style>
+
         <h2 id={titleId} style={styles.heading}>Obsidian-Ingest — Fragenkatalog</h2>
 
-        {phase === 'starting' && (
-          <p role="status" aria-live="polite" style={styles.hint} data-testid="obsidian-ingest-starting">
-            Ingest-Lauf wird gestartet…
-          </p>
-        )}
-
-        {(phase === 'running') && (
-          <p role="status" aria-live="polite" style={styles.hint} data-testid="obsidian-ingest-running">
-            Notizen werden verarbeitet…
-          </p>
+        {(phase === 'starting' || phase === 'running') && (
+          <div
+            role="status"
+            aria-live="polite"
+            style={styles.hint}
+            data-testid={phase === 'starting' ? 'obsidian-ingest-starting' : 'obsidian-ingest-running'}
+          >
+            <div style={styles.livenessRow}>
+              <span style={styles.spinner} aria-hidden="true" data-testid="obsidian-ingest-liveness-spinner" />
+              <span data-testid="obsidian-ingest-elapsed">läuft seit {elapsedLabel}</span>
+            </div>
+            <p style={styles.hint} data-testid="obsidian-ingest-expectation-hint">
+              {phase === 'starting' ? 'Ingest-Lauf wird gestartet…' : 'Notizen werden verarbeitet…'} Je nach
+              Notizmenge kann der Lauf mehrere Minuten dauern.
+            </p>
+          </div>
         )}
 
         {phase === 'error' && (
@@ -684,6 +755,24 @@ const styles = {
     fontSize: 13,
     color: '#9ca3af',
     lineHeight: 1.5,
+  },
+  // AC17 (v4) — Spinner + Laufzeit, analog RegressionDefineDialog.jsx AC10.
+  livenessRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 10,
+    fontSize: 13,
+    color: '#e5e7eb',
+    marginBottom: 4,
+  },
+  spinner: {
+    display: 'inline-block',
+    width: 14,
+    height: 14,
+    borderRadius: '50%',
+    border: '2px solid #374151',
+    borderTopColor: '#93c5fd',
+    animation: 'obsidian-ingest-spin 0.8s linear infinite',
   },
   stageList: {
     display: 'flex',
