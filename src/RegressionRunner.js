@@ -173,6 +173,27 @@
  * strukturell unerreichbar für JEDEN In-Process-`finally` — das ist außerhalb
  * des Scopes dieses Runners (bräuchte eine separate Reconcile-Instanz).
  *
+ * Vorbedingungen VOR `npx playwright test` — Test-Dependencies + Browser-
+ * Versions-Guard (docs/specs/regression-local-execution.md AC1–AC3, `local`-
+ * Pfad exklusiv, `ephemeral-infra` unberührt — Spec-Nicht-Ziel/Scope dieser
+ * Story): fehlt `node_modules`/`@playwright/test` im Projekt-Klon (EIN Check,
+ * `isPlaywrightTestInstalled`), führt `#ensureTestDependencies` `npm ci`
+ * (Fallback `npm install`) im Klon-Root aus — idempotent (NFR), bereits
+ * vorhandene Dependencies lösen KEINEN Install-Lauf aus. Danach prüft
+ * `#checkBrowserVersionGuard`, ob die im Klon installierte `@playwright/test`-
+ * Version zur Referenz-Version passt, gegen die das dev-gui-Image seine
+ * Browser installiert hat (`/ms-playwright`, Dockerfile `npx playwright
+ * install --with-deps chromium`) — Owner-Entscheidung A1: Browser fest im
+ * Image, KEIN Laufzeit-Nachladen; die Referenz-Version ist die im
+ * dev-gui-Image selbst installierte `@playwright/test`-Version
+ * (`readImagePlaywrightVersion`, `createRequire`-Auflösung, robust gegen
+ * `cwd`). Beide Prüfungen laufen NACH der Testobjekt-Weiche (nur `target:
+ * local`) und VOR der lokalen Erreichbarkeitsprüfung/`npx playwright test` —
+ * ein Fehlschlag endet als terminaler `error`/`precondition-error` mit
+ * secret-freier, fester Diagnose (NIE roher Prozess-Output, [[regression-run]]
+ * AC10) — NIE der unspezifische `NO_CTRF_MESSAGE`-Spätausfall für diese
+ * Fehlerklasse (Befund 1).
+ *
  * @module RegressionRunner
  */
 
@@ -180,8 +201,11 @@ import { spawn as nodeSpawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { createRequire } from 'node:module';
 import { ProjectJobLock } from './ProjectJobLock.js';
 import { readRegressionSuites } from './RegressionSuiteReader.js';
+
+const _require = createRequire(import.meta.url);
 
 /** Eigenständiger, entkoppelter Runaway-Timeout (Default 15 min — ein Playwright-Lauf kann mehrere Minuten dauern). */
 export const DEFAULT_REGRESSION_RUN_TIMEOUT_MS = 15 * 60 * 1000;
@@ -214,6 +238,11 @@ const INTERNAL_FAILURE_MESSAGE = 'Interner Fehler im Regressions-Runner';
 const NO_CTRF_MESSAGE = 'Regressionslauf beendet, aber kein CTRF-Ergebnis gefunden';
 const ROLLOUT_FAILURE_MESSAGE = 'Frisch-Ausrollen fehlgeschlagen';
 const ROLLOUT_NOT_READY_MESSAGE = 'Applikation lokal nicht gestartet';
+const DEPENDENCY_INSTALL_FAILURE_MESSAGE = 'Test-Dependencies konnten nicht installiert werden';
+const BROWSER_VERSION_MISMATCH_MESSAGE = 'Playwright-Version des Projekts passt nicht zum Image-Browser';
+
+/** Relativer Pfad des `@playwright/test`-`package.json` im Projekt-Klon (AC1/AC2). */
+const PLAYWRIGHT_TEST_PACKAGE_JSON = 'node_modules/@playwright/test/package.json';
 
 /**
  * Bekannte, bereits im Testobjekt-Modell definierte, aber (noch) nicht
@@ -508,8 +537,196 @@ export function defaultRunPlaywright({
 }
 
 /**
+ * Prüft, ob `@playwright/test` im Projekt-Klon installiert ist
+ * (docs/specs/regression-local-execution.md AC1). Existenz von
+ * `node_modules/@playwright/test/package.json` deckt in EINEM Check sowohl
+ * "node_modules fehlt komplett" als auch "nur @playwright/test fehlt" ab.
+ *
+ * @param {string} projectPath
+ * @param {{ readFile?: Function }} [deps] - injectable fs-Dep für Tests.
+ * @returns {Promise<boolean>}
+ */
+export async function isPlaywrightTestInstalled(projectPath, { readFile: readFileFn = readFile } = {}) {
+  try {
+    await readFileFn(join(projectPath, PLAYWRIGHT_TEST_PACKAGE_JSON), 'utf8');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Default `npm <args>`-Adapter (AC1): startet den Kindprozess als Array-argv
+ * (kein Shell-String, security/R03), `cwd` = Projekt-Pfad. Eigener,
+ * entkoppelter Timeout (Default: derselbe Runaway-Timeout-Wert wie der
+ * Playwright-Lauf, Wiederverwendung statt neuer Konstante) — verhindert einen
+ * hängenden `npm ci` bei Netzfehlern.
+ *
+ * @param {object} params
+ * @param {string} params.projectPath
+ * @param {string[]} params.args - z.B. `['ci']` oder `['install']`.
+ * @param {number} [params.timeoutMs]
+ * @param {Function} [params.spawnFn] - injectable (default node:child_process spawn).
+ * @returns {Promise<{ exitCode: number|null, spawnError?: boolean, timedOut?: boolean }>}
+ */
+export function defaultRunNpmCommand({ projectPath, args, timeoutMs = DEFAULT_REGRESSION_RUN_TIMEOUT_MS, spawnFn = nodeSpawn }) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let timeoutHandle;
+    let child;
+
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutHandle);
+      resolve(result);
+    };
+
+    try {
+      child = spawnFn('npm', args, { cwd: projectPath, stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch {
+      finish({ exitCode: null, spawnError: true });
+      return;
+    }
+
+    timeoutHandle = setTimeout(() => {
+      if (settled) return;
+      child.kill('SIGTERM');
+      finish({ exitCode: null, timedOut: true });
+    }, timeoutMs);
+
+    // stdout/stderr draining (keine Pipe-Blockade) — Inhalt wird NICHT in die
+    // Diagnose übernommen (Secret-Floor: kein roher Prozess-Output, AC1).
+    child.stdout?.on('data', () => {});
+    child.stderr?.on('data', () => {});
+
+    child.on('close', (code) => finish({ exitCode: code }));
+    child.on('error', () => finish({ exitCode: null, spawnError: true }));
+  });
+}
+
+/**
+ * Stellt die Test-Dependencies im Projekt-Klon her (AC1): fehlt
+ * `node_modules` ODER `@playwright/test`, führt diese Funktion `npm ci`
+ * (Fallback `npm install`) im Klon-Root aus, BEVOR der Test startet.
+ * Idempotent (NFR) — bereits vorhandene Dependencies lösen KEINEN Install-Lauf
+ * aus. Schlägt auch der Fallback fehl (oder ist `@playwright/test` danach
+ * immer noch nicht auffindbar), liefert die Funktion einen secret-freien,
+ * festen Fehlgrund (AC1, [[regression-run]] AC10) — NIE roher Prozess-Output.
+ *
+ * @param {string} projectPath
+ * @param {{ readFile?: Function, runNpmCommand?: Function }} [deps] - injectable für Tests.
+ * @returns {Promise<{ ok: true } | { ok: false, reason: string }>}
+ */
+export async function ensureTestDependencies(
+  projectPath,
+  { readFile: readFileFn = readFile, runNpmCommand = defaultRunNpmCommand } = {},
+) {
+  const alreadyInstalled = await isPlaywrightTestInstalled(projectPath, { readFile: readFileFn });
+  if (alreadyInstalled) return { ok: true };
+
+  let result = await runNpmCommand({ projectPath, args: ['ci'] });
+  if (result?.exitCode !== 0) {
+    result = await runNpmCommand({ projectPath, args: ['install'] });
+  }
+  if (result?.exitCode !== 0) {
+    return { ok: false, reason: DEPENDENCY_INSTALL_FAILURE_MESSAGE };
+  }
+
+  const installedNow = await isPlaywrightTestInstalled(projectPath, { readFile: readFileFn });
+  if (!installedNow) {
+    return { ok: false, reason: DEPENDENCY_INSTALL_FAILURE_MESSAGE };
+  }
+  return { ok: true };
+}
+
+/**
+ * Liest die im Projekt-Klon installierte `@playwright/test`-Version aus
+ * `node_modules/@playwright/test/package.json` (AC2). `null` wenn nicht
+ * auffindbar/unlesbar/kein `version`-Feld (kein Crash — der Aufrufer
+ * behandelt das als "Guard nicht bestehbar").
+ *
+ * @param {string} projectPath
+ * @param {{ readFile?: Function }} [deps]
+ * @returns {Promise<string|null>}
+ */
+export async function readInstalledPlaywrightVersion(projectPath, { readFile: readFileFn = readFile } = {}) {
+  try {
+    const raw = await readFileFn(join(projectPath, PLAYWRIGHT_TEST_PACKAGE_JSON), 'utf8');
+    const pkg = JSON.parse(raw);
+    return typeof pkg?.version === 'string' ? pkg.version : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Löst den absoluten Pfad des dev-gui-eigenen (Image-)
+ * `@playwright/test/package.json` auf — über `createRequire`, robust gegen
+ * `cwd` (funktioniert unabhängig vom Arbeitsverzeichnis des Prozesses).
+ *
+ * @returns {string}
+ */
+export function resolveImagePlaywrightTestPackageJson() {
+  return _require.resolve('@playwright/test/package.json');
+}
+
+/**
+ * Liest die REFERENZ-Playwright-Version — die im dev-gui-Image selbst
+ * installierte `@playwright/test`-Version (AC2, A1: die Browser unter
+ * `/ms-playwright` wurden beim Image-Build GENAU gegen diese Version
+ * installiert, `Dockerfile` `npx playwright install --with-deps chromium`).
+ *
+ * @param {{ resolvePackageJson?: Function, readFile?: Function }} [deps] - injectable für Tests.
+ * @returns {Promise<string|null>}
+ */
+export async function readImagePlaywrightVersion({
+  resolvePackageJson = resolveImagePlaywrightTestPackageJson,
+  readFile: readFileFn = readFile,
+} = {}) {
+  try {
+    const pkgPath = resolvePackageJson();
+    const raw = await readFileFn(pkgPath, 'utf8');
+    const pkg = JSON.parse(raw);
+    return typeof pkg?.version === 'string' ? pkg.version : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Browser-Versions-Guard (AC2, Owner-Entscheidung A1 — Browser fest im Image,
+ * KEIN Laufzeit-Nachladen): prüft, dass die im Klon installierte
+ * `@playwright/test`-Version EXAKT zur Referenz-Version passt, gegen die das
+ * dev-gui-Image seine Browser installiert hat. A1-Konvention: agent-flow-
+ * Template + Projekt-Repos pinnen dieselbe Version wie das Image — im
+ * Normalbetrieb schlägt dieser Guard daher nie an. Exakter String-Vergleich
+ * (beide Seiten sind konkrete, aufgelöste Versionen — keine Semver-Ranges).
+ * Nicht auflösbar (Klon-Version ODER Referenz-Version fehlt) zählt konservativ
+ * als Mismatch — KEIN blinder Playwright-Start ohne diese Garantie (AC2/AC3).
+ *
+ * @param {string} projectPath
+ * @param {{ readFile?: Function, readImageVersion?: Function }} [deps] - injectable für Tests.
+ * @returns {Promise<{ ok: true } | { ok: false, reason: string }>}
+ */
+export async function checkBrowserVersionGuard(
+  projectPath,
+  { readFile: readFileFn = readFile, readImageVersion = readImagePlaywrightVersion } = {},
+) {
+  const [cloneVersion, imageVersion] = await Promise.all([
+    readInstalledPlaywrightVersion(projectPath, { readFile: readFileFn }),
+    readImageVersion({ readFile: readFileFn }),
+  ]);
+  if (!cloneVersion || !imageVersion || cloneVersion !== imageVersion) {
+    return { ok: false, reason: BROWSER_VERSION_MISMATCH_MESSAGE };
+  }
+  return { ok: true };
+}
+
+/**
  * RegressionRunner — deterministischer `npx playwright test`-Runner + In-Memory
- * Job-Registry (docs/specs/regression-run.md AC1, AC2, AC3, AC5, AC9).
+ * Job-Registry (docs/specs/regression-run.md AC1, AC2, AC3, AC5, AC9;
+ * docs/specs/regression-local-execution.md AC1–AC3).
  */
 export class RegressionRunner {
   /** @type {(params: object) => Promise<object>} */
@@ -540,6 +757,10 @@ export class RegressionRunner {
   #readSuites;
   /** @type {import('./vps/VpsProviderRegistry.js').VpsProviderRegistry|null} injectable (AC12 — Sicherheitsnetz-Sweep für `rtest-*`-Ressourcen, Default: kein Sweep möglich, degradiert) */
   #vpsRegistry;
+  /** @type {(projectPath: string, deps?: object) => Promise<{ok:true}|{ok:false,reason:string}>} injectable (regression-local-execution AC1, Default: ensureTestDependencies) */
+  #ensureTestDependencies;
+  /** @type {(projectPath: string, deps?: object) => Promise<{ok:true}|{ok:false,reason:string}>} injectable (regression-local-execution AC2, Default: checkBrowserVersionGuard) */
+  #checkBrowserVersionGuard;
   /**
    * @type {Map<string, {
    *   status: 'running'|'passed'|'failed'|'precondition-error'|'error',
@@ -569,6 +790,8 @@ export class RegressionRunner {
    * @param {import('./DrainNotifier.js').DrainNotifier} [params.notifier] - injectable (regression-failed-notification AC1–AC4; ohne → kein Push, degradiert).
    * @param {Function} [params.readSuites] - injectable (AC11, default: readRegressionSuites — dieselbe Lese-Boundary wie der Ausführen-Dialog, AC4/AC6).
    * @param {import('./vps/VpsProviderRegistry.js').VpsProviderRegistry} [params.vpsRegistry] - injectable (AC12; ohne → Sicherheitsnetz-Sweep degradiert auf No-op, kein Crash).
+   * @param {Function} [params.ensureTestDependencies] - injectable (regression-local-execution AC1, default: ensureTestDependencies).
+   * @param {Function} [params.checkBrowserVersionGuard] - injectable (regression-local-execution AC2, default: checkBrowserVersionGuard).
    */
   constructor({
     runPlaywright,
@@ -586,6 +809,8 @@ export class RegressionRunner {
     notifier,
     readSuites,
     vpsRegistry,
+    ensureTestDependencies: ensureTestDependenciesFn,
+    checkBrowserVersionGuard: checkBrowserVersionGuardFn,
   } = {}) {
     this.#timeoutMs = timeoutMs ?? (Number(process.env.REGRESSION_RUN_TIMEOUT_MS) || DEFAULT_REGRESSION_RUN_TIMEOUT_MS);
     this.#readRolloutConfig = readRolloutConfig ?? readLocalRolloutConfig;
@@ -602,6 +827,8 @@ export class RegressionRunner {
     this.#notifier = notifier ?? null;
     this.#readSuites = readSuites ?? readRegressionSuites;
     this.#vpsRegistry = vpsRegistry ?? null;
+    this.#ensureTestDependencies = ensureTestDependenciesFn ?? ensureTestDependencies;
+    this.#checkBrowserVersionGuard = checkBrowserVersionGuardFn ?? checkBrowserVersionGuard;
   }
 
   /**
@@ -719,6 +946,25 @@ export class RegressionRunner {
         ...(KNOWN_UNSUPPORTED_TARGETS.has(target) ? { target } : {}),
         durationMs: Date.now() - start,
       });
+      return;
+    }
+
+    // regression-local-execution AC1/AC3: Test-Dependencies HERSTELLEN, BEVOR
+    // überhaupt versucht wird, `npx playwright test` zu starten — nie der
+    // bisherige unspezifische NO_CTRF_MESSAGE-Spätausfall für diese
+    // Fehlerklasse (Befund 1).
+    const depsOutcome = await this.#ensureTestDependencies(job.projectPath, { readFile: this.#readFile });
+    if (!depsOutcome.ok) {
+      this.#finish(runId, 'error', { reason: depsOutcome.reason, target: 'local', durationMs: Date.now() - start });
+      return;
+    }
+
+    // regression-local-execution AC2/AC3: Browser-Versions-Guard — die im
+    // Klon installierte @playwright/test-Version muss zur Referenz-Version
+    // passen, gegen die das dev-gui-Image seine Browser installiert hat (A1).
+    const browserOutcome = await this.#checkBrowserVersionGuard(job.projectPath, { readFile: this.#readFile });
+    if (!browserOutcome.ok) {
+      this.#finish(runId, 'precondition-error', { reason: browserOutcome.reason, target: 'local', durationMs: Date.now() - start });
       return;
     }
 

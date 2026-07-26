@@ -123,6 +123,15 @@ function buildApp(router, identity = { email: 'owner@example.com' }) {
   return app;
 }
 
+// regression-local-execution AC1/AC2: Diese Router-Tests interessieren sich
+// nicht für Test-Dependencies/Browser-Guard — beide Vorbedingungen werden per
+// Default als "bestehbar" gemockt (kein echter `npm ci`/Datei-Zugriff gegen
+// den fiktiven '/workspace/dev-gui'-Pfad dieser Fixtures).
+const PASSING_PRECONDITIONS = {
+  ensureTestDependencies: async () => ({ ok: true }),
+  checkBrowserVersionGuard: async () => ({ ok: true }),
+};
+
 /** Ein RegressionRunner, der NIE terminiert (für Busy-/Lock-Tests). */
 function makeHangingRunner() {
   const readFile = jest.fn(async (p) => {
@@ -130,7 +139,7 @@ function makeHangingRunner() {
     if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
     throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
   });
-  return new RegressionRunner({ runPlaywright: () => new Promise(() => {}), readFile });
+  return new RegressionRunner({ runPlaywright: () => new Promise(() => {}), readFile, ...PASSING_PRECONDITIONS });
 }
 
 /** Ein RegressionRunner, der sofort grün terminiert. */
@@ -143,7 +152,7 @@ function makeGreenRunner() {
     }
     throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
   });
-  return new RegressionRunner({ runPlaywright: async () => ({ exitCode: 0 }), readFile });
+  return new RegressionRunner({ runPlaywright: async () => ({ exitCode: 0 }), readFile, ...PASSING_PRECONDITIONS });
 }
 
 describe('regressionRunRouter — regression-run.md', () => {
