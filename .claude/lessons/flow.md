@@ -2,6 +2,12 @@
 
 Newest-first. Regeln für die Orchestrator-Ebene (Landen/Konsolidieren/Recovery/Dispatch-Ökonomie).
 
+## flow/L08 — Feature-Batch (`--parent`): Claim-Commit auf `feature/<F-###>` pushen, nicht auf `main`
+
+**Beobachtung (2026-07-26, S-410):** §2 des `/flow`-Vertrags sagt `git push origin HEAD:"$default_branch"` für den Claim. Im Feature-Batch steht der Worktree aber auf `feature/<F-###>`, das typischerweise hinter `origin/main` liegt (hier 3 Commits) — ein `HEAD:main`-Push ist damit **strukturell non-fast-forward** und würde nach 3 Retries als „Senke belegt" abbrechen, obwohl nichts kollidiert.
+
+**Regel:** Bei aktivem `--parent <F-###>` gehen Claim-Commit, Story-Merge UND Board-Meta-Commit (Done/Dispo/Memory) alle auf `origin/feature/<F-###>` — dieselbe Senke, in der auch der Code landet; `main` bekommt alles gebündelt beim finalen `--merge-feature`. Der Drain (`board-feature-drain.sh`) ist seriell je Feature, das Claim-Sichtbarkeits-Argument (parallele Sessions fetchen main) trägt hier nicht. Konsistent mit flow/L02 Schritt 5 (F-080-Praxis).
+
 ## flow/L07 — `board-ship.sh` Modus A kann aus einem Worktree **strukturell nie** landen (`checkout main` ist dort verboten)
 
 **Beobachtung (2026-07-16, S-358):** `board-ship.sh S-358 dev-gui` pusht den Story-Branch korrekt und stirbt dann sofort mit `fatal: a branch named 'main' already exists`. Kein CI-Fehler, kein Merge-Konflikt, nichts gelandet, Board bleibt auf `In Progress`.
