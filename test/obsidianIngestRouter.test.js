@@ -2,7 +2,7 @@
  * @file obsidianIngestRouter.test.js — HTTP-level tests for the headless
  * Obsidian-Ingest endpoints (docs/specs/obsidian-question-catalog.md).
  *
- * Covers (obsidian-question-catalog): AC1, AC2, AC4, AC5, AC6, AC7, AC8, AC9
+ * Covers (obsidian-question-catalog): AC1, AC2, AC4, AC5, AC6, AC7, AC8, AC9, AC16
  *
  *   AC1 — POST /api/obsidian-ingest/start { projectFolderPath, targetProjectSlug } →
  *         202 { jobId, status:"running" }; active project lock → 409; missing/
@@ -18,6 +18,9 @@
  *         `projekteSubdir` computed from a persisted CredentialStore value.
  *   AC2 — GET /api/obsidian-ingest/:jobId → 200 { status, catalog?, result?, error? };
  *         `catalog` only on needs-answers; secret-free; unknown jobId → 404.
+ *   AC16 — GET /api/obsidian-ingest/:jobId's 200 body includes `startedAt` for
+ *          EVERY state (running/needs-answers/done/failed), secret-free; the
+ *          404 body carries no `startedAt`.
  *   AC4 — POST /api/obsidian-ingest/:jobId/answers → 202 { status:"running" } on a
  *         valid required-complete set; missing required / unknown id → 400.
  *   AC5 — after answers the status endpoint reports the next state (running →
@@ -481,6 +484,79 @@ describe('GET /api/obsidian-ingest/:jobId — AC2', () => {
     try {
       const { status } = await httpGet(srv, '/api/obsidian-ingest/does-not-exist');
       expect(status).toBe(404);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+});
+
+// ── GET /:jobId — startedAt (AC16, v4) ───────────────────────────────────────
+
+describe('GET /api/obsidian-ingest/:jobId — AC16 (startedAt for every state)', () => {
+  it('200 body includes a plausible startedAt on running/needs-answers', async () => {
+    const runner = new ObsidianIngestRunner({
+      runClaude: sequencedRunClaude([{ exitCode: 0, output: CATALOG_OUTPUT, sessionId: 's1', authError: false }]),
+    });
+    const { app } = makeApp({ runner });
+    const srv = await startServer(app);
+    try {
+      const before = Date.now();
+      const { body: startBody } = await httpPost(srv, '/api/obsidian-ingest/start', { projectFolderPath: '/workspace/proj', targetProjectSlug: 'target-repo' });
+      await flush();
+      const { status, body } = await httpGet(srv, `/api/obsidian-ingest/${startBody.jobId}`);
+      expect(status).toBe(200);
+      expect(body.status).toBe('needs-answers');
+      expect(typeof body.startedAt).toBe('string');
+      const t = new Date(body.startedAt).getTime();
+      expect(Number.isNaN(t)).toBe(false);
+      expect(t).toBeGreaterThanOrEqual(before - 1);
+      // secret-free: no internal fields alongside startedAt.
+      expect(body).not.toHaveProperty('projectPath');
+      expect(body).not.toHaveProperty('identity');
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('startedAt is present on a terminal done/failed state too', async () => {
+    const runnerDone = new ObsidianIngestRunner({
+      runClaude: sequencedRunClaude([{ exitCode: 0, output: '{"status":"done"}', authError: false }]),
+    });
+    const { app: appDone } = makeApp({ runner: runnerDone });
+    const srvDone = await startServer(appDone);
+    try {
+      const { body: startBody } = await httpPost(srvDone, '/api/obsidian-ingest/start', { projectFolderPath: '/workspace/proj', targetProjectSlug: 'target-repo' });
+      await flush();
+      const { body } = await httpGet(srvDone, `/api/obsidian-ingest/${startBody.jobId}`);
+      expect(body.status).toBe('done');
+      expect(typeof body.startedAt).toBe('string');
+    } finally {
+      await new Promise((r) => srvDone.close(r));
+    }
+
+    const runnerFailed = new ObsidianIngestRunner({
+      runClaude: sequencedRunClaude([{ exitCode: 1, output: '', authError: false }]),
+    });
+    const { app: appFailed } = makeApp({ runner: runnerFailed });
+    const srvFailed = await startServer(appFailed);
+    try {
+      const { body: startBody } = await httpPost(srvFailed, '/api/obsidian-ingest/start', { projectFolderPath: '/workspace/proj', targetProjectSlug: 'target-repo' });
+      await flush();
+      const { body } = await httpGet(srvFailed, `/api/obsidian-ingest/${startBody.jobId}`);
+      expect(body.status).toBe('failed');
+      expect(typeof body.startedAt).toBe('string');
+    } finally {
+      await new Promise((r) => srvFailed.close(r));
+    }
+  });
+
+  it('404 for an unknown jobId is unaffected (no startedAt in the 404 body)', async () => {
+    const { app } = makeApp({});
+    const srv = await startServer(app);
+    try {
+      const { status, body } = await httpGet(srv, '/api/obsidian-ingest/does-not-exist');
+      expect(status).toBe(404);
+      expect(body).not.toHaveProperty('startedAt');
     } finally {
       await new Promise((r) => srv.close(r));
     }

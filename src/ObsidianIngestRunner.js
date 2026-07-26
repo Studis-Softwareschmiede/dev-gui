@@ -2,7 +2,8 @@
  * ObsidianIngestRunner — headless `claude -p '/agent-flow:from-notes …'`-
  * Kindprozess-Runner MIT strukturiertem Interrupt/Resume-Rückkanal
  * (docs/specs/obsidian-question-catalog.md AC1, AC2, AC4, AC5, AC6, AC7,
- * AC8, AC9, AC12 — v2 „Ziel-Projekt-Repo als cwd"-Fix).
+ * AC8, AC9, AC12, AC16 — v2 „Ziel-Projekt-Repo als cwd"-Fix, v4 „startedAt"-
+ * Warteanzeige-Grundlage).
  *
  * `cwd` = Ziel-Projekt-Repo, Notiz-Ordner NUR Argument (AC8, v2):
  *   `start(targetRepoPath, { noteFolderPath, identity })` — `targetRepoPath`
@@ -54,6 +55,16 @@
  * Injectable (Test-Entkopplung, NFR „Entkopplung"): `runClaude`-Adapter — kein
  * Test benötigt einen echten `claude`-Lauf; der Default-Adapter
  * (`defaultRunClaude`) kapselt spawn/env/session-id/auth-Erkennung.
+ *
+ * `startedAt` im Job-Status (docs/specs/obsidian-question-catalog.md v4, AC16):
+ * `start()` legt EINMALIG einen ISO-8601-UTC-Zeitstempel (`startedAt`) im
+ * Job-State ab — anders als der per-Runde neu gesetzte `startedAt` im
+ * Geschwister-Runner `RegressionDefineRunner` (dortiges AC9) bleibt dieser
+ * Wert über die gesamte Job-Lebensdauer (inkl. `needs-answers`/Resume)
+ * UNVERÄNDERT, da AC16 wörtlich „beim `start()`" verlangt. `getJob()` gibt
+ * ihn secret-frei für JEDEN Zustand (`running`/`needs-answers`/`done`/
+ * `failed`/`auth-expired`) mit aus — Grundlage der clientseitigen
+ * Laufzeitanzeige (AC17).
  *
  * Fragen-offen-Push (docs/specs/questions-pending-notification.md, S-279:
  * AC1/AC2/AC3/AC4/AC5): optionaler injizierter `notifier` (Muster `auditStore`
@@ -376,6 +387,7 @@ export class ObsidianIngestRunner {
    *   status: 'running'|'needs-answers'|'done'|'failed'|'auth-expired',
    *   catalog?: Array<object>, result?: string, error?: string,
    *   projectPath: string, noteFolderPath: string, sessionId?: string, identity: string|null,
+   *   startedAt: string,
    * }>}
    */
   #jobs = new Map();
@@ -427,6 +439,9 @@ export class ObsidianIngestRunner {
       noteFolderPath,
       identity: identity ?? null,
       sessionId: undefined,
+      // AC16 (v4): EINMALIG beim start() gesetzt, bleibt über die gesamte
+      // Job-Lebensdauer unverändert (kein Reset je Runde/Resume).
+      startedAt: new Date().toISOString(),
     });
     // Fire-and-forget: der Lauf kann lange dauern; der Aufrufer wartet nicht.
     this.#runRound(jobId, { resume: false }).catch(() => {
@@ -436,17 +451,18 @@ export class ObsidianIngestRunner {
   }
 
   /**
-   * Liest die ÖFFENTLICHE Sicht auf einen Job (AC1/AC2/AC5) — secret-frei, ohne
-   * interne Felder (`projectPath`/`sessionId`/`identity`). `catalog` nur bei
-   * `needs-answers`.
+   * Liest die ÖFFENTLICHE Sicht auf einen Job (AC1/AC2/AC5/AC16) — secret-frei,
+   * ohne interne Felder (`projectPath`/`sessionId`/`identity`). `catalog` nur
+   * bei `needs-answers`. `startedAt` (AC16, v4) ist für JEDEN Zustand gesetzt
+   * (immer vorhanden, seit `start()` einmalig geschrieben).
    *
    * @param {string} jobId
-   * @returns {{ status: string, catalog?: Array<object>, result?: string, error?: string } | undefined}
+   * @returns {{ status: string, startedAt: string, catalog?: Array<object>, result?: string, error?: string } | undefined}
    */
   getJob(jobId) {
     const job = this.#jobs.get(jobId);
     if (!job) return undefined;
-    const view = { status: job.status };
+    const view = { status: job.status, startedAt: job.startedAt };
     if (job.catalog !== undefined) view.catalog = job.catalog;
     if (job.result !== undefined) view.result = job.result;
     if (job.error !== undefined) view.error = job.error;

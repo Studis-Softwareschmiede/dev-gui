@@ -3,7 +3,7 @@
  * Obsidian-Ingest runner + its pure parsers + default claude adapter
  * (docs/specs/obsidian-question-catalog.md, docs/specs/questions-pending-notification.md).
  *
- * Covers (obsidian-question-catalog): AC1, AC2, AC4, AC5, AC6, AC7, AC8, AC12
+ * Covers (obsidian-question-catalog): AC1, AC2, AC4, AC5, AC6, AC7, AC8, AC12, AC16
  *
  *   AC1 — start() runs headless via an OWN, isolated ProjectJobLock instance; a
  *         run round settles into a terminal `done`/`failed`/`auth-expired` OR the
@@ -35,6 +35,9 @@
  *          catalog fails with "Fragenkatalog defekt" — two distinguishable
  *          messages, replacing the former blanket "Fragenkatalog konnte nicht
  *          gelesen werden".
+ *   AC16 — start() records a `startedAt` (ISO-8601 UTC) timestamp ONCE; getJob()
+ *          exposes it for EVERY state (running/needs-answers/done/failed/
+ *          auth-expired), unchanged across a resume round (no per-round reset).
  *
  * Covers (questions-pending-notification): AC1, AC2 (gating itself in
  * test/DrainNotifier.test.js), AC4, AC5, AC6
@@ -266,6 +269,77 @@ describe('ObsidianIngestRunner — start → needs-answers → resume → done',
     runner.answers(jobId, [{ id: 'q1', answer: 'a' }]);
     await flush();
     expect(runner.getJob(jobId).status).toBe('needs-answers');
+  });
+});
+
+describe('ObsidianIngestRunner — startedAt in the job status (AC16, v4)', () => {
+  it('exposes a plausible startedAt right after start() (running state)', async () => {
+    const runClaude = makeSequencedRunClaude([]);
+    const runner = new ObsidianIngestRunner({ runClaude });
+    const before = Date.now();
+    const { jobId } = runner.start('/workspace/proj', { noteFolderPath: '/vault/notes' });
+    const after = Date.now();
+
+    const job = runner.getJob(jobId);
+    expect(typeof job.startedAt).toBe('string');
+    const t = new Date(job.startedAt).getTime();
+    expect(Number.isNaN(t)).toBe(false);
+    expect(t).toBeGreaterThanOrEqual(before);
+    expect(t).toBeLessThanOrEqual(after + 1);
+  });
+
+  it('keeps startedAt set for needs-answers, done, failed AND auth-expired (every state)', async () => {
+    const runClaudeNeedsAnswers = makeSequencedRunClaude([
+      { exitCode: 0, output: CATALOG_OUTPUT, sessionId: 'sess-1', authError: false },
+    ]);
+    const runnerA = new ObsidianIngestRunner({ runClaude: runClaudeNeedsAnswers });
+    const a = runnerA.start('/workspace/a', { noteFolderPath: '/vault/a' });
+    await flush();
+    expect(typeof runnerA.getJob(a.jobId).startedAt).toBe('string');
+
+    const runClaudeDone = makeSequencedRunClaude([
+      { exitCode: 0, output: '{"status":"done"}', sessionId: undefined, authError: false },
+    ]);
+    const runnerB = new ObsidianIngestRunner({ runClaude: runClaudeDone });
+    const b = runnerB.start('/workspace/b', { noteFolderPath: '/vault/b' });
+    await flush();
+    expect(runnerB.getJob(b.jobId).status).toBe('done');
+    expect(typeof runnerB.getJob(b.jobId).startedAt).toBe('string');
+
+    const runClaudeFailed = makeSequencedRunClaude([{ exitCode: 1, output: '', sessionId: undefined, authError: false }]);
+    const runnerC = new ObsidianIngestRunner({ runClaude: runClaudeFailed });
+    const c = runnerC.start('/workspace/c', { noteFolderPath: '/vault/c' });
+    await flush();
+    expect(runnerC.getJob(c.jobId).status).toBe('failed');
+    expect(typeof runnerC.getJob(c.jobId).startedAt).toBe('string');
+
+    const runClaudeAuthExpired = makeSequencedRunClaude([{ exitCode: 1, output: '', sessionId: undefined, authError: true }]);
+    const runnerD = new ObsidianIngestRunner({ runClaude: runClaudeAuthExpired });
+    const d = runnerD.start('/workspace/d', { noteFolderPath: '/vault/d' });
+    await flush();
+    expect(runnerD.getJob(d.jobId).status).toBe('auth-expired');
+    expect(typeof runnerD.getJob(d.jobId).startedAt).toBe('string');
+  });
+
+  it('startedAt stays UNCHANGED across a resume round (set once at start(), not per round)', async () => {
+    const runClaude = makeSequencedRunClaude([
+      { exitCode: 0, output: CATALOG_OUTPUT, sessionId: 'sess-1', authError: false },
+      { exitCode: 0, output: '{"status":"done"}', sessionId: 'sess-1', authError: false },
+    ]);
+    const runner = new ObsidianIngestRunner({ runClaude });
+    const { jobId } = runner.start('/workspace/proj', { noteFolderPath: '/vault/notes' });
+    await flush();
+    const startedAtBeforeResume = runner.getJob(jobId).startedAt;
+
+    runner.answers(jobId, [{ id: 'q1', answer: 'a' }]);
+    await flush();
+    expect(runner.getJob(jobId).status).toBe('done');
+    expect(runner.getJob(jobId).startedAt).toBe(startedAtBeforeResume);
+  });
+
+  it('404 for an unknown jobId is unaffected (getJob returns undefined, no startedAt leak)', () => {
+    const runner = new ObsidianIngestRunner({ runClaude: makeSequencedRunClaude([]) });
+    expect(runner.getJob('does-not-exist')).toBeUndefined();
   });
 });
 

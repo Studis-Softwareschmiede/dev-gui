@@ -1,7 +1,8 @@
 /**
  * obsidianIngestRouter — Express-Router für den Headless-Obsidian-Ingest-Runner
  * (docs/specs/obsidian-question-catalog.md AC1, AC2, AC4, AC5, AC6, AC7,
- * AC8, AC9, AC12 — v2 „Ziel-Projekt-Repo als cwd"-Fix).
+ * AC8, AC9, AC12, AC16 — v2 „Ziel-Projekt-Repo als cwd"-Fix, v4 „startedAt"-
+ * Warteanzeige-Grundlage).
  *
  * Routes (hinter dem AccessGuard, wie alle /api/*, s. server.js):
  *   POST /api/obsidian-ingest/start            — startet den headless from-notes-Lauf
@@ -267,9 +268,11 @@ export function obsidianIngestRouter(runner, options = {}) {
    * GET /api/obsidian-ingest/:jobId
    *
    * Responses:
-   *   200 { status, catalog?, result?, error? }
+   *   200 { status, startedAt, catalog?, result?, error? }
    *        status ∈ {running, needs-answers, done, failed, auth-expired};
-   *        `catalog` nur bei needs-answers (AC2). Secret-frei.
+   *        `catalog` nur bei needs-answers (AC2). `startedAt` (AC16, v4) ist
+   *        für JEDEN Zustand gesetzt — ISO-8601-UTC-Zeitstempel des `start()`,
+   *        Grundlage der clientseitigen Laufzeitanzeige (AC17). Secret-frei.
    *   404 { error }  — unbekannte jobId (auch nach Server-Neustart)
    */
   router.get('/api/obsidian-ingest/:jobId', (req, res) => {
@@ -278,7 +281,7 @@ export function obsidianIngestRouter(runner, options = {}) {
       return res.status(404).json({ error: 'Unknown jobId' });
     }
 
-    const body = { status: job.status };
+    const body = { status: job.status, startedAt: job.startedAt };
     if (job.catalog !== undefined) body.catalog = job.catalog;
     if (job.result !== undefined) body.result = job.result;
     if (job.error !== undefined) body.error = job.error;
