@@ -3,7 +3,8 @@
  * Obsidian-Ingest runner + its pure parsers + default claude adapter
  * (docs/specs/obsidian-question-catalog.md, docs/specs/questions-pending-notification.md).
  *
- * Covers (obsidian-question-catalog): AC1, AC2, AC4, AC5, AC6, AC7, AC8, AC12, AC16
+ * Covers (obsidian-question-catalog): AC1, AC2, AC4, AC5, AC6, AC7, AC8, AC12,
+ * AC16, AC20, AC21, AC22
  *
  *   AC1 — start() runs headless via an OWN, isolated ProjectJobLock instance; a
  *         run round settles into a terminal `done`/`failed`/`auth-expired` OR the
@@ -38,6 +39,13 @@
  *   AC16 — start() records a `startedAt` (ISO-8601 UTC) timestamp ONCE; getJob()
  *          exposes it for EVERY state (running/needs-answers/done/failed/
  *          auth-expired), unchanged across a resume round (no per-round reset).
+ *   AC20 — defaultRunClaude's Initial argv carries the note folder argument AND
+ *          the fixed, secret-free HEADLESS_GUI_TOKEN (`--gui`), token AFTER the
+ *          note folder, as ONE single -p argv element (no shell string).
+ *   AC21 — Initial AND Resume prompts both carry JSON_OUTPUT_INSTRUCTION (both
+ *          `status` forms named); no secrets/host paths in the instruction.
+ *   AC22 — extractClaudeResult/parseIngestOutcome + the AC12 error-text classes
+ *          are unchanged (regression); existing parsing tests stay green.
  *
  * Covers (questions-pending-notification): AC1, AC2 (gating itself in
  * test/DrainNotifier.test.js), AC4, AC5, AC6
@@ -72,6 +80,8 @@ import {
   BrokenCatalogError,
   NO_JSON_OUTPUT_MESSAGE,
   BROKEN_CATALOG_MESSAGE,
+  HEADLESS_GUI_TOKEN,
+  JSON_OUTPUT_INSTRUCTION,
 } from '../src/ObsidianIngestRunner.js';
 import { ProjectJobLock } from '../src/ProjectJobLock.js';
 
@@ -573,8 +583,13 @@ describe('defaultRunClaude — security floor (AC6)', () => {
       expect(argv).toContain('-p');
       expect(argv).toContain('--dangerously-skip-permissions');
       expect(argv).toEqual(expect.arrayContaining(['--output-format', 'json']));
-      // The prompt is one argv element (no shell string), and no API key in child env.
-      expect(argv).toContain(`${FROM_NOTES_COMMAND} /workspace/proj`);
+      // The prompt is ONE argv element (no shell string): note folder + headless
+      // token + JSON instruction (v5, AC20/AC21) — it now goes BEYOND the raw
+      // promptArg string, so we assert on the single -p element instead of an
+      // exact equality (that changed on purpose, see AC20/AC21 below).
+      expect(argv).toContain('-p');
+      const promptElement = argv[argv.indexOf('-p') + 1];
+      expect(promptElement.startsWith(`${FROM_NOTES_COMMAND} /workspace/proj`)).toBe(true);
       expect(opts.env).not.toHaveProperty('ANTHROPIC_API_KEY');
       expect(opts.env).not.toHaveProperty('OPENAI_API_KEY');
       expect(opts.cwd).toBe('/workspace/proj');
@@ -622,6 +637,58 @@ describe('defaultRunClaude — security floor (AC6)', () => {
     const res = await promise;
     expect(res.authError).toBe(true);
     expect(res.output).not.toMatch(/secret\/path/);
+  });
+});
+
+describe('defaultRunClaude — headless format token + JSON prompt hardening (v5, AC20/AC21)', () => {
+  it('AC20: Initial argv carries the note folder AND the fixed --gui token AFTER it, as one -p element', async () => {
+    const child = makeFakeChild();
+    const spawnFn = jest.fn(() => child);
+    const promise = defaultRunClaude({
+      projectPath: '/workspace/proj',
+      promptArg: `${FROM_NOTES_COMMAND} /vault/proj-notes`,
+      spawnFn,
+    });
+
+    const [, argv] = spawnFn.mock.calls[0];
+    const promptElement = argv[argv.indexOf('-p') + 1];
+    expect(HEADLESS_GUI_TOKEN).toBe('--gui'); // fixed, secret-/path-free value (A5 resolved)
+    const notePos = promptElement.indexOf('/vault/proj-notes');
+    const tokenPos = promptElement.indexOf(HEADLESS_GUI_TOKEN);
+    expect(notePos).toBeGreaterThan(-1);
+    expect(tokenPos).toBeGreaterThan(notePos);
+
+    child.stdout.emit('data', JSON.stringify({ result: '{"status":"done"}' }));
+    child.emit('close', 0);
+    await promise;
+  });
+
+  it('AC21: Initial prompt carries the JSON-output instruction naming both status forms, no secrets/host paths', async () => {
+    const child = makeFakeChild();
+    const spawnFn = jest.fn(() => child);
+    const promise = defaultRunClaude({
+      projectPath: '/workspace/proj',
+      promptArg: `${FROM_NOTES_COMMAND} /vault/proj-notes`,
+      spawnFn,
+    });
+
+    const [, argv] = spawnFn.mock.calls[0];
+    const promptElement = argv[argv.indexOf('-p') + 1];
+    expect(promptElement).toContain(JSON_OUTPUT_INSTRUCTION);
+    expect(JSON_OUTPUT_INSTRUCTION).toContain('needs-answers');
+    expect(JSON_OUTPUT_INSTRUCTION).toContain('"status":"done"');
+    expect(JSON_OUTPUT_INSTRUCTION).not.toMatch(/\/(Users|home|workspace|vault)\//);
+    expect(JSON_OUTPUT_INSTRUCTION).not.toMatch(/sk-|api[_-]?key|password/i);
+
+    child.stdout.emit('data', JSON.stringify({ result: '{"status":"done"}' }));
+    child.emit('close', 0);
+    await promise;
+  });
+
+  it('AC21: Resume prompt (RESUME_PROMPT) also carries the same JSON-output instruction', () => {
+    expect(RESUME_PROMPT).toContain(JSON_OUTPUT_INSTRUCTION);
+    // Resume is a session continuation, not a fresh from-notes invocation — no
+    // --gui token expected here (only the JSON-format instruction, AC21).
   });
 });
 
