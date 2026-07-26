@@ -38,6 +38,9 @@
  *   AC30 — Kein-Fund-Fall (auswertbar, keine Funde): grüne Gesamt-Ampel PLUS vollständige,
  *          durchweg grüne Prüfpunkt-Liste als Beleg, was getestet wurde — statt nur eines
  *          knappen "Keine Befunde erkannt".
+ *   AC31 — solange der Lauf läuft (`starting`/`running`) zeigt das Panel einen Hinweistext:
+ *          gefahrlos schließbar/Hintergrund-Lauf, ca. 15 Minuten Dauer, Ergebnis später im
+ *          Verlauf/"Reports" abrufbar. Der Hinweis verschwindet bei `done`/Fehlerzuständen.
  */
 
 import { describe, it, expect, jest, afterEach } from '@jest/globals';
@@ -347,6 +350,50 @@ describe('RedTeamScanPanel — AC13: Fehler/Abbruch', () => {
       fireEvent.click(getByTestId('redteam-scan-close-btn'));
     });
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── AC31 — Hintergrund-Lauf-Hinweis (gefahrlos schliessbar/Dauer/später abrufbar) ─────
+
+describe('RedTeamScanPanel — AC31: Hintergrund-Lauf-Hinweis', () => {
+  it('zeigt während `running` den Hinweis: gefahrlos schließen, Hintergrund-Lauf, ~15 min, später im Verlauf/Reports', async () => {
+    const fetchFn = makeFetchFn();
+    const { getByTestId } = renderPanel(fetchFn);
+
+    await waitFor(() => expect(getByTestId('redteam-scan-running')).toBeDefined());
+
+    const hint = getByTestId('redteam-scan-background-hint').textContent;
+    expect(hint).toMatch(/gefahrlos schließen/i);
+    expect(hint).toMatch(/Hintergrund/i);
+    expect(hint).toMatch(/15 Minuten/i);
+    expect(hint).toMatch(/Verlauf/i);
+  });
+
+  it('zeigt den Hinweis bereits während `starting` (vor dem ersten Poll)', () => {
+    const fetchFn = jest.fn(() => new Promise(() => {})); // POST bleibt hängen → phase:'starting'
+    const { getByTestId } = renderPanel(fetchFn);
+
+    expect(getByTestId('redteam-scan-background-hint')).toBeDefined();
+  });
+
+  it('verschwindet, sobald der Lauf beendet ist (done)', async () => {
+    const fetchFn = makeFetchFn({
+      pollResponses: [{ status: 200, body: { status: 'done', phase: 'fertig' } }],
+    });
+    const { getByTestId, queryByTestId } = renderPanel(fetchFn);
+
+    await waitFor(() => expect(getByTestId('redteam-scan-result')).toBeDefined());
+    expect(queryByTestId('redteam-scan-background-hint')).toBeNull();
+  });
+
+  it('verschwindet im Fehlerzustand (failed)', async () => {
+    const fetchFn = makeFetchFn({
+      pollResponses: [{ status: 200, body: { status: 'failed', phase: 'fertig' } }],
+    });
+    const { getByTestId, queryByTestId } = renderPanel(fetchFn);
+
+    await waitFor(() => expect(getByTestId('redteam-scan-error')).toBeDefined());
+    expect(queryByTestId('redteam-scan-background-hint')).toBeNull();
   });
 });
 

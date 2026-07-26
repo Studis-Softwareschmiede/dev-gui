@@ -90,6 +90,14 @@
  *          autoritative Bericht-Ansicht; ein evtl. vorhandener `reportRef`-Link (AC12)
  *          bleibt unverändert als optionale Zusatz-Referenz bestehen (Backend garantiert
  *          seit AC28, dass dieser Wert nie mehr ein toter PR-Link ist).
+ *   AC31 — Hintergrund-Lauf-Hinweis: solange der Lauf noch nicht beendet ist (`starting`/
+ *          `running`), zeigt das Panel einen reinen React-Text (kein
+ *          `dangerouslySetInnerHTML`), der erklärt, dass (a) das Panel gefahrlos
+ *          geschlossen werden kann und der Scan im Hintergrund weiterläuft, (b) ein Lauf
+ *          ca. 15 Minuten dauert, und (c) das Ergebnis später im Verlauf/"Reports"
+ *          (AC14-Aufklapper) pro Container abrufbar ist. Reiner Hinweistext — kein neuer
+ *          Zustand/State, keine neue Logik (Simplicity-Leiter Stufe 1: AC31 verlangt
+ *          ausschliesslich Text, s. coder/R09).
  *
  * Security (Floor):
  *   - Kein `dangerouslySetInnerHTML` — Fehler-/Befundtexte werden als reiner React-Text
@@ -557,6 +565,14 @@ export function RedTeamScanPanel({
                 ))}
               </ol>
             )}
+
+            {/* AC31 — Hintergrund-Lauf-Hinweis: gefahrlos schliessbar, Dauer, später
+                abrufbar (reiner React-Text, kein dangerouslySetInnerHTML). */}
+            <p style={styles.hint} data-testid="redteam-scan-background-hint">
+              Sie können dieses Fenster jetzt gefahrlos schließen — der Scan läuft im
+              Hintergrund weiter. Ein Lauf dauert ca. 15 Minuten. Das Ergebnis finden Sie
+              später im Verlauf ("Reports") bei diesem Container.
+            </p>
           </>
         )}
 
