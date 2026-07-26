@@ -116,6 +116,18 @@ services:
       # Bind only to loopback — Cloudflare Tunnel reaches the container via
       # localhost:8080; no direct internet exposure.
       - "127.0.0.1:8080:8080"
+    extra_hosts:
+      # host.docker.internal resolves automatically on Docker Desktop (Mac/
+      # Windows) but NOT on native Linux Docker (VPS production) — without
+      # this entry, regression-local-execution AC6's container-mode addressing
+      # (Nachbar-Container-Testobjekt via host.docker.internal:<hostPort>)
+      # would fail to resolve on the VPS and every container-mode local run
+      # would end as "Applikation lokal nicht gestartet" (docs/specs/
+      # regression-local-execution.md AC6). "host-gateway" is Docker's
+      # special value that resolves to the host's internal gateway IP on
+      # BOTH platforms (Docker Engine ≥20.10) — safe/no-op where the mapping
+      # already exists (Docker Desktop), required where it doesn't (Linux).
+      - "host.docker.internal:host-gateway"
     environment:
       NODE_ENV: production
 
