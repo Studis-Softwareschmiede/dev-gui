@@ -17,10 +17,12 @@
  * Schreiben: atomar (tmp + rename)
  *
  * Eintrag-Schema (AC7, verbindlich; um `repoSlug`/`boardId` erweitert — S-405,
- * AC16/AC17, s. Präzisierung unten):
+ * AC16/AC17; um `checks` + `detail?`/`checkId?` je Finding erweitert — S-411,
+ * AC26, s. Präzisierung unten):
  *   { scanId, app, repoSlug, startedAt, finishedAt, ampel,
- *     findings: [{ id, severity, kind, testort, titel, boardId }],
- *     findingCount, reportRef, boardItemIds: [] }
+ *     findings: [{ id, severity, kind, testort, titel, boardId, detail?, checkId? }],
+ *     findingCount, checks: [{ id, titel, testort, ampel, detail? }],
+ *     reportRef, boardItemIds: [] }
  *   - `app` = Hostname/Slug der gescannten App (KEIN Host-Pfad).
  *   - `ampel` ∈ {gruen, gelb, rot} — IMMER deterministisch aus `findings`
  *     abgeleitet (AC9, `deriveAmpel()`); ein evtl. mitgegebener `input.ampel`
@@ -37,20 +39,32 @@
  *   - `repoSlug` (S-405-Präzisierung, AC16/AC17): der zum Scan-Zeitpunkt
  *     ermittelte Workspace-Repo-Slug — identisch zu `ziel` aus AC1
  *     (`resolveRepoSlug()` in `vpsContainerScanRouter.js`). Optional,
- *     `null` falls beim `record()`-Aufruf nicht mitgegeben (der künftige
- *     Aufrufer, der `record()` nach Lauf-Abschluss aufruft, bleibt weiterhin
- *     ausserhalb des Scopes dieser wie der Vorgänger-Storys, s. S-402-Notiz
- *     unten). `POST .../scans/:scanId/board` (AC16) braucht dieses Feld, um
- *     zu bestimmen, in welchem Workspace-Repo (`board/stories/`) die
- *     ausgewählten Befunde als Board-Items angelegt werden — fehlt es,
- *     antwortet der Endpunkt mit `422 { errorClass: 'not-scannable' }`
- *     (reuse der bereits etablierten Fehlerklasse aus AC1/AC2, kein neuer
- *     Fehlercode).
+ *     `null` falls beim `record()`-Aufruf nicht mitgegeben. `POST
+ *     .../scans/:scanId/board` (AC16) braucht dieses Feld, um zu bestimmen,
+ *     in welchem Workspace-Repo (`board/stories/`) die ausgewählten Befunde
+ *     als Board-Items angelegt werden — fehlt es, antwortet der Endpunkt mit
+ *     `422 { errorClass: 'not-scannable' }` (reuse der bereits etablierten
+ *     Fehlerklasse aus AC1/AC2, kein neuer Fehlercode).
  *   - `boardId` je Finding (S-405-Präzisierung, AC16): `null` bis der Befund
  *     übertragen wurde, danach die entstandene Board-Story-ID — Grundlage
  *     für die Idempotenz-Prüfung in `POST .../scans/:scanId/board` (ein
  *     Befund mit bereits gesetztem `boardId` wird nie erneut angelegt) und
  *     für AC20 (Nach-Übertrag-Zustand in der Befundliste).
+ *   - `detail?`/`checkId?` je Finding (S-411-Präzisierung, AC26): optional
+ *     durchgereichte Kurz-Metadaten aus dem Parser (`redTeamOutputParser.js`,
+ *     AC24) — `checkId` verknüpft einen Fund mit einem Prüfpunkt aus `checks`.
+ *   - `checks` (S-411, AC26, additiv — bestehende Einträge ohne `checks`
+ *     bleiben gültig, `[]`-Default): die Liste ALLER durchgeführten
+ *     Prüfpunkte (auch ohne Fund), je Prüfpunkt mit einer EIGENEN,
+ *     deterministisch abgeleiteten Ampel (`deriveCheckAmpel()`) — IMMER aus
+ *     `findings` abgeleitet, ein evtl. mitgegebenes `input.checks[].ampel`
+ *     wird ignoriert (single source of truth, analog zur Gesamt-Ampel).
+ *     Zuordnung Fund→Prüfpunkt: zuerst über `checkId` (Findings mit
+ *     `checkId === check.id`); hat KEIN Fund `checkId` gesetzt, fallen die
+ *     Findings OHNE `checkId` mit demselben `testort` diesem Prüfpunkt zu
+ *     (Fallback "testort+Kontext", s. AC26). Farbzuordnung identisch zur
+ *     Gesamt-Ampel (AC9) — KEINE Invertierung: `gruen` = kein Befund an
+ *     diesem Punkt, `gelb` = nur low/medium, `rot` = mind. ein high/critical.
  *
  * scanId ≡ Runner-jobId (Korrelation zum `HeadlessRedTeamRunner`-Job,
  * AC1-AC3): der Aufrufer, der einen abgeschlossenen Lauf persistiert (diese
@@ -117,6 +131,16 @@ export const APP_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,253}[A-Za-z0-9])?$/;
  * @property {string} titel
  * @property {string|null} boardId  Entstandene Board-Story-ID nach Übertrag
  *   (AC16, S-405), sonst `null` — Idempotenz-Grundlage.
+ * @property {string} [detail]      Optionale Kurzbeschreibung (AC26, S-411).
+ * @property {string} [checkId]     Optionale Verknüpfung zu `checks[].id` (AC26, S-411).
+ *
+ * @typedef {object} ScanCheck
+ * @property {string} id
+ * @property {string} titel
+ * @property {'direkt'|'öffentlich'} testort
+ * @property {'gruen'|'gelb'|'rot'} ampel  IMMER aus `findings` abgeleitet
+ *   (AC26, `deriveCheckAmpel()`) — nie aus dem Input übernommen.
+ * @property {string} [detail]
  *
  * @typedef {object} ScanResult
  * @property {string} scanId
@@ -128,6 +152,8 @@ export const APP_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,253}[A-Za-z0-9])?$/;
  * @property {'gruen'|'gelb'|'rot'} ampel  IMMER aus `findings` abgeleitet (AC9)
  * @property {ScanFinding[]} findings
  * @property {number} findingCount IMMER `findings.length`
+ * @property {ScanCheck[]} checks  Alle durchgeführten Prüfpunkte (AC26, S-411,
+ *   `[]`-Default — additiv, bestehende Einträge ohne `checks` bleiben gültig)
  * @property {string|null} reportRef
  * @property {string[]} boardItemIds
  *
@@ -167,18 +193,45 @@ export function deriveAmpel(findings) {
 }
 
 /**
- * Normalisiert EINEN Befund auf `{id,severity,kind,testort,titel}` — kein
- * Durchreichen beliebiger Felder (Security-/Daten-Hygiene, analog
- * `DrainReportStore._normalizeStories`). Ungültige/fehlende `severity`/
- * `testort` werden defensiv auf einen Default normalisiert (kein Crash durch
- * einen malformten Eintrag).
+ * Leitet die Ampel EINES Prüfpunkts deterministisch ab (AC26) — dieselbe
+ * Semantik wie `deriveAmpel()` (AC9), aber nur auf die dem Prüfpunkt
+ * zugeordneten Findings angewandt (keine Invertierung). Zuordnung:
+ *   1. Findings mit `checkId === check.id` (explizite Verknüpfung).
+ *   2. Fallback, falls (1) leer ist: Findings OHNE `checkId`, deren
+ *      `testort` mit dem des Prüfpunkts übereinstimmt ("testort+Kontext").
+ * Findings, die per `checkId` an einen ANDEREN Prüfpunkt gebunden sind,
+ * fliessen nie in den Fallback eines anderen Prüfpunkts ein (keine
+ * Doppel-Zuordnung).
+ *
+ * @param {{ id: string, testort: string }} check
+ * @param {ScanFinding[]} findings
+ * @returns {'gruen'|'gelb'|'rot'}
+ */
+export function deriveCheckAmpel(check, findings) {
+  const list = Array.isArray(findings) ? findings : [];
+  const linked = list.filter((f) => f && typeof f === 'object' && f.checkId === check?.id);
+  const relevant =
+    linked.length > 0
+      ? linked
+      : list.filter((f) => f && typeof f === 'object' && !f.checkId && f.testort === check?.testort);
+  return deriveAmpel(relevant);
+}
+
+/**
+ * Normalisiert EINEN Befund auf `{id,severity,kind,testort,titel,boardId,
+ * detail?,checkId?}` — kein Durchreichen beliebiger Felder (Security-/
+ * Daten-Hygiene, analog `DrainReportStore._normalizeStories`).
+ * Ungültige/fehlende `severity`/`testort` werden defensiv auf einen Default
+ * normalisiert (kein Crash durch einen malformten Eintrag). `detail`/
+ * `checkId` (AC26, S-411) sind optional — nur übernommen, wenn nicht-leerer
+ * String.
  *
  * @param {unknown} f
  * @returns {ScanFinding|null}
  */
 function _normalizeFinding(f) {
   if (!f || typeof f !== 'object') return null;
-  return {
+  const finding = {
     id: typeof f.id === 'string' && f.id ? f.id : randomUUID(),
     severity: SEVERITIES.includes(f.severity) ? f.severity : 'medium',
     kind: typeof f.kind === 'string' ? f.kind : '',
@@ -188,6 +241,9 @@ function _normalizeFinding(f) {
     // bis übertragen, danach die entstandene Board-Story-ID.
     boardId: typeof f.boardId === 'string' && f.boardId ? f.boardId : null,
   };
+  if (typeof f.detail === 'string' && f.detail) finding.detail = f.detail;
+  if (typeof f.checkId === 'string' && f.checkId) finding.checkId = f.checkId;
+  return finding;
 }
 
 /**
@@ -197,6 +253,39 @@ function _normalizeFinding(f) {
 function _normalizeFindings(list) {
   if (!Array.isArray(list)) return [];
   return list.map(_normalizeFinding).filter(Boolean);
+}
+
+/**
+ * Normalisiert EINEN Prüfpunkt auf `{id,titel,testort,ampel,detail?}` (AC26,
+ * S-411) — analog `_normalizeFinding()`. `ampel` wird IMMER über
+ * `deriveCheckAmpel()` aus den (bereits normalisierten) `findings`
+ * abgeleitet — ein mitgegebener `raw.ampel` wird ignoriert (single source of
+ * truth, keine zweite driftende Ampel).
+ *
+ * @param {unknown} raw
+ * @param {ScanFinding[]} findings bereits normalisierte Findings des Scans.
+ * @returns {ScanCheck|null}
+ */
+function _normalizeCheck(raw, findings) {
+  if (!raw || typeof raw !== 'object') return null;
+  const check = {
+    id: typeof raw.id === 'string' && raw.id ? raw.id : randomUUID(),
+    titel: typeof raw.titel === 'string' ? raw.titel : '',
+    testort: TESTORTE.includes(raw.testort) ? raw.testort : 'direkt',
+  };
+  check.ampel = deriveCheckAmpel(check, findings);
+  if (typeof raw.detail === 'string' && raw.detail) check.detail = raw.detail;
+  return check;
+}
+
+/**
+ * @param {unknown} list
+ * @param {ScanFinding[]} findings bereits normalisierte Findings des Scans.
+ * @returns {ScanCheck[]}
+ */
+function _normalizeChecks(list, findings) {
+  if (!Array.isArray(list)) return [];
+  return list.map((raw) => _normalizeCheck(raw, findings)).filter(Boolean);
 }
 
 /**
@@ -223,6 +312,7 @@ function _normalizeScan(raw) {
   if (!raw || typeof raw !== 'object') return null;
   if (typeof raw.app !== 'string' || !APP_RE.test(raw.app)) return null;
   const findings = _normalizeFindings(raw.findings);
+  const checks = _normalizeChecks(raw.checks, findings);
   return {
     scanId: typeof raw.scanId === 'string' && raw.scanId ? raw.scanId : randomUUID(),
     app: raw.app,
@@ -233,6 +323,9 @@ function _normalizeScan(raw) {
     finishedAt: typeof raw.finishedAt === 'string' ? raw.finishedAt : '',
     ampel: deriveAmpel(findings),
     findings,
+    // AC26 (S-411): additiv — bestehende Einträge ohne `checks` normalisieren
+    // still auf `[]` (raw.checks ist dann undefined → _normalizeChecks liefert []).
+    checks,
     findingCount: findings.length,
     reportRef: typeof raw.reportRef === 'string' && raw.reportRef ? raw.reportRef : null,
     boardItemIds: _normalizeBoardItemIds(raw.boardItemIds),
@@ -249,6 +342,7 @@ function _cloneScan(scan) {
   return {
     ...scan,
     findings: scan.findings.map((f) => ({ ...f })),
+    checks: (scan.checks ?? []).map((c) => ({ ...c })),
     boardItemIds: [...scan.boardItemIds],
   };
 }
@@ -311,6 +405,9 @@ export class ScanResultStore {
    * @param {string} [input.startedAt]
    * @param {string} [input.finishedAt]
    * @param {ScanFinding[]} [input.findings]
+   * @param {ScanCheck[]} [input.checks] optional (AC26, S-411); je Prüfpunkt
+   *   wird `ampel` IMMER neu aus `findings` abgeleitet (ein mitgegebenes
+   *   `input.checks[].ampel` wird ignoriert).
    * @param {string} [input.reportRef]
    * @param {string[]} [input.boardItemIds]
    * @returns {Promise<ScanResult>} der geschriebene Verlaufseintrag.

@@ -42,14 +42,18 @@
  *         zurückgeschrieben (AC17) — ein Rückschreibe-Fehler kippt die Response nicht.
  *   AC22 — Security-Floor: jobId ist reine Korrelations-ID; keine Host-Pfade in der
  *         Response; Confinement bleibt bei einem Store-Fehler robust (kein Crash).
- *   reportRef-Fallback (S-403 Iteration 2, Review-Fund) — GET .../scan/:jobId liefert
- *         `reportRef` bei `status:'done'` auch OHNE Store-Treffer direkt aus `job.prHint`
- *         (der Bericht-Link darf nicht an der offenen Findings-Extraktions-Naht hängen);
- *         ein vorhandener Store-Treffer hat Vorrang vor dem `prHint`-Fallback. KEIN
- *         `scanResultStore.record()`-Aufruf mehr an dieser Stelle (Review-Fund Iteration 2:
- *         ein hartkodiertes `findings:[]` hätte für JEDEN abgeschlossenen Lauf dauerhaft
- *         "gruen" persistiert — irreführend für ein Sicherheitswerkzeug; die Findings-
- *         Extraktion bleibt eine bewusst offene Folge-Naht, s. Moduldoku).
+ *   AC26/AC27 (S-411) — bei `status:'done'` ruft GET .../scan/:jobId GENAU EINMAL je
+ *         jobId (In-Memory-Guard, überlebt keinen Doppel-Poll) `scanResultStore.record()`
+ *         mit den über `parseRedTeamOutput(job.output)` extrahierten `findings`+`checks`
+ *         auf (plus `app`/`repoSlug`/`startedAt`/`finishedAt`) — NUR wenn die Ausgabe
+ *         `auswertbar` ist (ehrliche Degradation: eine nicht auswertbare Ausgabe führt zu
+ *         KEINEM record()-Aufruf, kein irreführendes "gruen"). Ein wiederholter Poll nach
+ *         `done` löst KEINEN zweiten `record()`-Aufruf aus. Ein Store-Schreibfehler beim
+ *         `record()` crasht den Status-Poll nicht (best-effort/non-fatal).
+ *   AC28 (S-411) — reportRef-Fallback auf `job.prHint` ENTFERNT (der vormalige Fallback,
+ *         s. Git-Historie/S-403 Iteration 2, lief im Realtest ins 404): `reportRef` bleibt
+ *         bei `status:'done'` OHNE Store-Treffer abwesend, AUCH wenn `job.prHint` gesetzt
+ *         ist — nur ein tatsächlicher Store-Treffer liefert `reportRef`.
  *
  * Muster: express + node:http createServer auf Port 0 (127.0.0.1), kein supertest
  * (wie redTeamRouter.test.js / reconcileRouter.test.js). Injizierte Stubs für runner +
@@ -586,10 +590,10 @@ describe('GET .../containers/:containerId/scan/:jobId — AC3', () => {
   });
 });
 
-// ── reportRef-Fallback auf job.prHint (S-403 Iteration 2, Review-Fund) ──────────
+// ── reportRef: KEIN job.prHint-Fallback mehr (AC28, S-411) ─────────────────────
 
-describe('GET .../containers/:containerId/scan/:jobId — reportRef-Fallback (S-403 Iteration 2)', () => {
-  it('bei status:"done" OHNE Store-Treffer liefert reportRef den Runner-prHint', async () => {
+describe('GET .../containers/:containerId/scan/:jobId — reportRef ohne prHint-Fallback (AC28)', () => {
+  it('bei status:"done" OHNE Store-Treffer bleibt reportRef abwesend, AUCH wenn job.prHint gesetzt ist', async () => {
     const scanResultStore = { getByJobId: async () => null };
     const { app, runner } = makeApp({ scanResultStore });
     const srv = await startServer(app);
@@ -598,8 +602,9 @@ describe('GET .../containers/:containerId/scan/:jobId — reportRef-Fallback (S-
       runner.finishJob(start.body.jobId, { status: 'done', prHint: 'https://github.com/org/repo/pull/42' });
       const { status, body } = await httpGet(srv, `${SCAN_PATH}/${start.body.jobId}`);
       expect(status).toBe(200);
-      expect(body).toEqual({ status: 'done', phase: 'fertig', reportRef: 'https://github.com/org/repo/pull/42' });
-      // Explizit KEINE ampel/findings — kein irreführendes "gruen" ohne echte Findings-Erfassung.
+      expect(body).toEqual({ status: 'done', phase: 'fertig' });
+      expect(body.reportRef).toBeUndefined();
+      // Explizit KEINE ampel/findings — kein irreführendes "gruen" ohne Store-Treffer.
       expect(body.ampel).toBeUndefined();
       expect(body.findings).toBeUndefined();
     } finally {
@@ -620,7 +625,7 @@ describe('GET .../containers/:containerId/scan/:jobId — reportRef-Fallback (S-
     }
   });
 
-  it('ein Store-Treffer hat Vorrang vor dem prHint-Fallback', async () => {
+  it('ein Store-Treffer liefert reportRef — unabhängig von job.prHint (prHint wird nie gelesen)', async () => {
     const scanResultStore = { getByJobId: async () => ({ ampel: 'rot', findings: [], reportRef: 'stored-ref' }) };
     const { app, runner } = makeApp({ scanResultStore });
     const srv = await startServer(app);
@@ -634,7 +639,7 @@ describe('GET .../containers/:containerId/scan/:jobId — reportRef-Fallback (S-
     }
   });
 
-  it('bei status:"failed" wird KEIN prHint-Fallback angewandt (Fallback nur bei done)', async () => {
+  it('bei status:"failed" bleibt reportRef abwesend (auch mit gesetztem prHint)', async () => {
     const { app, runner } = makeApp();
     const srv = await startServer(app);
     try {
@@ -642,6 +647,120 @@ describe('GET .../containers/:containerId/scan/:jobId — reportRef-Fallback (S-
       runner.finishJob(start.body.jobId, { status: 'failed', error: 'x', prHint: 'https://github.com/org/repo/pull/1' });
       const { body } = await httpGet(srv, `${SCAN_PATH}/${start.body.jobId}`);
       expect(body.reportRef).toBeUndefined();
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+});
+
+// ── record()-Naht: AC26/AC27 (S-411) ────────────────────────────────────────────
+
+describe('GET .../containers/:containerId/scan/:jobId — record()-Naht (AC26/AC27)', () => {
+  function makeRecordingStore() {
+    return {
+      recordCalls: [],
+      async record(input) {
+        this.recordCalls.push(input);
+        return { ...input };
+      },
+      async getByJobId() {
+        return null;
+      },
+    };
+  }
+
+  const AUSWERTBARER_OUTPUT = JSON.stringify({
+    findings: [{ id: 'f1', severity: 'high', kind: 'xss', testort: 'direkt', titel: 'XSS' }],
+    checks: [{ id: 'c1', titel: 'XSS-Test', testort: 'direkt', ampel: 'rot' }],
+  });
+
+  it('bei status:"done" + auswertbarer Ausgabe wird record() GENAU EINMAL mit findings+checks aufgerufen', async () => {
+    const scanResultStore = makeRecordingStore();
+    const { app, runner } = makeApp({ scanResultStore });
+    const srv = await startServer(app);
+    try {
+      const start = await httpPost(srv, SCAN_PATH, {});
+      runner.finishJob(start.body.jobId, { status: 'done', output: AUSWERTBARER_OUTPUT });
+
+      await httpGet(srv, `${SCAN_PATH}/${start.body.jobId}`);
+      // Zweiter Poll (Status-Poll darf mehrfach laufen) — kein zweiter record()-Aufruf.
+      await httpGet(srv, `${SCAN_PATH}/${start.body.jobId}`);
+
+      expect(scanResultStore.recordCalls).toHaveLength(1);
+      const call = scanResultStore.recordCalls[0];
+      expect(call.scanId).toBe(start.body.jobId);
+      expect(call.app).toBe('dev-gui.example.com');
+      expect(call.repoSlug).toBe('dev-gui');
+      expect(typeof call.startedAt).toBe('string');
+      expect(typeof call.finishedAt).toBe('string');
+      expect(call.findings).toEqual([{ id: 'f1', severity: 'high', kind: 'xss', testort: 'direkt', titel: 'XSS' }]);
+      expect(call.checks).toEqual([{ id: 'c1', titel: 'XSS-Test', testort: 'direkt', ampel: 'rot' }]);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('nicht auswertbare Ausgabe (AC24 fail-safe) → KEIN record()-Aufruf (ehrliche Degradation)', async () => {
+    const scanResultStore = makeRecordingStore();
+    const { app, runner } = makeApp({ scanResultStore });
+    const srv = await startServer(app);
+    try {
+      const start = await httpPost(srv, SCAN_PATH, {});
+      runner.finishJob(start.body.jobId, { status: 'done', output: 'kein JSON, nur Freitext-Log' });
+
+      await httpGet(srv, `${SCAN_PATH}/${start.body.jobId}`);
+
+      expect(scanResultStore.recordCalls).toHaveLength(0);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('status:"failed" löst KEINEN record()-Aufruf aus (nur "done" persistiert)', async () => {
+    const scanResultStore = makeRecordingStore();
+    const { app, runner } = makeApp({ scanResultStore });
+    const srv = await startServer(app);
+    try {
+      const start = await httpPost(srv, SCAN_PATH, {});
+      runner.finishJob(start.body.jobId, { status: 'failed', error: 'x', output: AUSWERTBARER_OUTPUT });
+
+      await httpGet(srv, `${SCAN_PATH}/${start.body.jobId}`);
+
+      expect(scanResultStore.recordCalls).toHaveLength(0);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('ein Schreibfehler beim record() crasht den Status-Poll nicht (best-effort)', async () => {
+    const scanResultStore = {
+      record: async () => { throw new Error('store down'); },
+      getByJobId: async () => null,
+    };
+    const { app, runner } = makeApp({ scanResultStore });
+    const srv = await startServer(app);
+    try {
+      const start = await httpPost(srv, SCAN_PATH, {});
+      runner.finishJob(start.body.jobId, { status: 'done', output: AUSWERTBARER_OUTPUT });
+
+      const { status, body } = await httpGet(srv, `${SCAN_PATH}/${start.body.jobId}`);
+      expect(status).toBe(200);
+      expect(body.status).toBe('done');
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('ohne scanResultStore.record (kein Store bzw. Store ohne record()) → kein Crash, Status-Poll bleibt funktionsfähig', async () => {
+    const { app, runner } = makeApp();
+    const srv = await startServer(app);
+    try {
+      const start = await httpPost(srv, SCAN_PATH, {});
+      runner.finishJob(start.body.jobId, { status: 'done', output: AUSWERTBARER_OUTPUT });
+
+      const { status, body } = await httpGet(srv, `${SCAN_PATH}/${start.body.jobId}`);
+      expect(status).toBe(200);
+      expect(body.status).toBe('done');
     } finally {
       await new Promise((r) => srv.close(r));
     }
@@ -789,6 +908,31 @@ describe('GET .../scans/:scanId — AC7/AC8', () => {
       const { status, body } = await httpGet(srv, '/api/vps/machines/hetzner/srv1/scans/scan-1');
       expect(status).toBe(200);
       expect(body).toEqual({ scan: fullScan });
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('liefert scan.checks zusätzlich, wenn der Store-Eintrag welche trägt (AC26/AC29, additiv)', async () => {
+    const fullScan = {
+      scanId: 'scan-2',
+      app: 'dev-gui.example.com',
+      startedAt: '2026-07-22T10:00:00.000Z',
+      finishedAt: '2026-07-22T10:05:00.000Z',
+      ampel: 'rot',
+      findings: [{ id: 'f1', severity: 'high', kind: 'xss', testort: 'direkt', titel: 'XSS' }],
+      findingCount: 1,
+      checks: [{ id: 'c1', titel: 'XSS-Test', testort: 'direkt', ampel: 'rot' }],
+      reportRef: null,
+      boardItemIds: [],
+    };
+    const scanResultStore = { getByScanId: async (scanId) => (scanId === 'scan-2' ? fullScan : null) };
+    const { app } = makeApp({ scanResultStore });
+    const srv = await startServer(app);
+    try {
+      const { status, body } = await httpGet(srv, '/api/vps/machines/hetzner/srv1/scans/scan-2');
+      expect(status).toBe(200);
+      expect(body.scan.checks).toEqual([{ id: 'c1', titel: 'XSS-Test', testort: 'direkt', ampel: 'rot' }]);
     } finally {
       await new Promise((r) => srv.close(r));
     }
