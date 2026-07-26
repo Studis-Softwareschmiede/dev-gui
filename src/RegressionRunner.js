@@ -194,11 +194,37 @@
  * AC10) — NIE der unspezifische `NO_CTRF_MESSAGE`-Spätausfall für diese
  * Fehlerklasse (Befund 1).
  *
+ * Port-Auflösung + deployment-bewusste Ziel-Adressierung
+ * (docs/specs/regression-local-execution.md AC4–AC6, `local`-Pfad exklusiv,
+ * `ephemeral-infra` unberührt — Spec-Nicht-Ziel/Scope dieser Story): die
+ * `preview_port`/`container_port`-Leser (`readLocalPreviewPort`,
+ * `readLocalRolloutConfig`) tolerieren einen Whitespace+Inline-Kommentar nach
+ * der Zahl (AC4, Befund 2a). Findet der Runner nach der Testobjekt-Weiche
+ * (nur `target: local`) KEINEN Port, endet der Lauf SOFORT als terminaler
+ * `precondition-error` „lokaler Test-Port nicht bestimmbar" — statt
+ * Frisch-Ausrollen/Erreichbarkeitsprüfung/`REGRESSION_BASE_URL` still zu
+ * überspringen und Playwright base-url-los zu starten (AC5, Befund 2b). Die
+ * lokale Erreichbarkeitsprüfung UND `REGRESSION_BASE_URL` nutzen danach
+ * DIESELBE aufgelöste Adresse (`#resolveTargetAddress`, AC6): läuft dieser
+ * Runner-Prozess selbst in einem Docker-Container (`isRunningInContainer`,
+ * Standard-Indikator `/.dockerenv`), wird das Nachbar-Container-Testobjekt
+ * über `host.docker.internal:<hostPort>` adressiert — `<hostPort>` NACH
+ * MÖGLICHKEIT aus dem tatsächlichen Docker-Port-Mapping des Ziel-Containers
+ * (`LocalDockerControl#getMappedHostPort`, dieselbe cicd/preview-Boundary wie
+ * Frisch-Ausrollen AC7), NICHT aus dem Container-internen EXPOSE-Port
+ * (Befund 3, `8080→8081`); ohne auflösbares `image`/`dockerControl`/Mapping
+ * degradiert das best-effort auf den statisch gelesenen Port (kein Crash).
+ * Im Host-Betrieb bleibt es unverändert bei `127.0.0.1:<port>`. Selbsttest
+ * (`isSelfProject`, [[regression-run]] AC8) bleibt unberührt: bleibt IMMER
+ * bei `127.0.0.1:<port>` (Playwright-Kindprozess + getesteter dev-gui-Server
+ * teilen dieselbe Netzwerk-Namespace, direkter Loopback ohne Host-Umweg).
+ *
  * @module RegressionRunner
  */
 
 import { spawn as nodeSpawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
@@ -240,6 +266,13 @@ const ROLLOUT_FAILURE_MESSAGE = 'Frisch-Ausrollen fehlgeschlagen';
 const ROLLOUT_NOT_READY_MESSAGE = 'Applikation lokal nicht gestartet';
 const DEPENDENCY_INSTALL_FAILURE_MESSAGE = 'Test-Dependencies konnten nicht installiert werden';
 const BROWSER_VERSION_MISMATCH_MESSAGE = 'Playwright-Version des Projekts passt nicht zum Image-Browser';
+const PORT_NOT_RESOLVABLE_MESSAGE = 'lokaler Test-Port nicht bestimmbar';
+
+/** Standard-Indikator, den Docker in JEDEM Container automatisch anlegt (AC6) — kein neuer Env-/Config-Vertrag. */
+const DOCKERENV_PATH = '/.dockerenv';
+
+/** Hostname, über den ein Docker-Container den Host erreicht (AC6, A4). */
+const DOCKER_HOST_GATEWAY = 'host.docker.internal';
 
 /** Relativer Pfad des `@playwright/test`-`package.json` im Projekt-Klon (AC1/AC2). */
 const PLAYWRIGHT_TEST_PACKAGE_JSON = 'node_modules/@playwright/test/package.json';
@@ -315,9 +348,25 @@ export function scopeToTestPath(scope) {
 }
 
 /**
+ * Regex-Fragment für einen `<key>: <digits>`-Wert, der einen optionalen
+ * Whitespace+Inline-Kommentar nach der Zahl toleriert (regression-local-
+ * execution AC4, Befund 2a — z.B. `container_port: 8080    # EXPOSE aus dem
+ * Dockerfile`). `[ \t]*` statt `\s*` NACH der Zahl, damit kein Zeilenumbruch
+ * versehentlich mit verschluckt wird; `$` im multiline-Modus matcht das
+ * Zeilenende.
+ *
+ * @param {string} key
+ * @returns {RegExp}
+ */
+function portFieldRegex(key) {
+  return new RegExp(`^${key}:\\s*(\\d+)[ \\t]*(?:#.*)?$`, 'm');
+}
+
+/**
  * Liest `preview_port` (Fallback: `container_port`) aus `.claude/profile.md`
  * des Projekt-Klons (Muster `templates/_shared/regression/run-regression.sh`).
  * Liefert `null`, wenn die Datei fehlt oder kein Port auffindbar ist (kein Crash).
+ * Toleriert einen Whitespace+Inline-Kommentar nach der Zahl (AC4).
  *
  * @param {string} projectPath - absoluter, validierter Projekt-Pfad.
  * @param {{ readFile?: Function }} [deps] - injectable fs-Dep für Tests.
@@ -330,9 +379,9 @@ export async function readLocalPreviewPort(projectPath, { readFile: readFileFn =
   } catch {
     return null;
   }
-  const previewMatch = content.match(/^preview_port:\s*(\d+)\s*$/m);
+  const previewMatch = content.match(portFieldRegex('preview_port'));
   if (previewMatch) return Number(previewMatch[1]);
-  const containerMatch = content.match(/^container_port:\s*(\d+)\s*$/m);
+  const containerMatch = content.match(portFieldRegex('container_port'));
   if (containerMatch) return Number(containerMatch[1]);
   return null;
 }
@@ -340,8 +389,10 @@ export async function readLocalPreviewPort(projectPath, { readFile: readFileFn =
 /**
  * Liest `image` + `container_port` aus `.claude/profile.md` des Projekt-Klons
  * (agent-flow `/preview up`-Konvention, s. Modul-Doku AC7) — für das
- * Frisch-Ausrollen (`pullAndRecreate`). Liefert `null`, wenn `image` fehlt
- * (kein Crash — Frisch-Ausrollen wird dann übersprungen).
+ * Frisch-Ausrollen (`pullAndRecreate`) UND die deployment-bewusste Ziel-
+ * Adressierung (AC6). Liefert `null`, wenn `image` fehlt (kein Crash —
+ * Frisch-Ausrollen wird dann übersprungen). Toleriert einen Whitespace+
+ * Inline-Kommentar nach `container_port` (AC4).
  *
  * @param {string} projectPath - absoluter, validierter Projekt-Pfad.
  * @param {{ readFile?: Function }} [deps] - injectable fs-Dep für Tests.
@@ -356,11 +407,31 @@ export async function readLocalRolloutConfig(projectPath, { readFile: readFileFn
   }
   const imageMatch = content.match(/^image:\s*(\S+)\s*$/m);
   if (!imageMatch) return null;
-  const containerMatch = content.match(/^container_port:\s*(\d+)\s*$/m);
+  const containerMatch = content.match(portFieldRegex('container_port'));
   return {
     image: imageMatch[1],
     containerPort: containerMatch ? Number(containerMatch[1]) : null,
   };
+}
+
+/**
+ * Erkennt, ob DIESER Runner-Prozess selbst in einem Docker-Container läuft
+ * (regression-local-execution AC6 — Deployment-bewusste Ziel-Adressierung).
+ * Standard-Indikator `/.dockerenv` (von Docker selbst in JEDEM Container
+ * angelegt, kein neuer Env-/Config-Vertrag). Best-effort: ein Lesefehler
+ * zählt konservativ als "nicht im Container" (degradiert auf den bisherigen
+ * `127.0.0.1`-Pfad statt einen potenziell unerreichbaren Hostnamen zu
+ * erzwingen).
+ *
+ * @param {{ existsSync?: Function }} [deps] - injectable für Tests.
+ * @returns {boolean}
+ */
+export function isRunningInContainer({ existsSync: existsSyncFn = existsSync } = {}) {
+  try {
+    return existsSyncFn(DOCKERENV_PATH);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -393,18 +464,20 @@ export function deriveContainerNameFromImage(image) {
 }
 
 /**
- * Best-effort HTTP-Erreichbarkeitsprüfung gegen `http://127.0.0.1:<port>/`
- * (Muster `LocalDockerControl#probeReachability`). Jeder HTTP-Statuscode zählt
- * als erreichbar; Timeout/Refused → false.
+ * Best-effort HTTP-Erreichbarkeitsprüfung gegen `http://<address>/` (Muster
+ * `LocalDockerControl#probeReachability`). `address` ist die bereits
+ * deployment-bewusst aufgelöste `host:port`-Adresse (AC6 — DIESELBE, die auch
+ * für `REGRESSION_BASE_URL` verwendet wird, s. `#resolveTargetAddress`).
+ * Jeder HTTP-Statuscode zählt als erreichbar; Timeout/Refused → false.
  *
- * @param {number} port
+ * @param {string} address - z.B. `127.0.0.1:8080` oder `host.docker.internal:8081`.
  * @param {{ fetchFn?: Function }} [deps] - injectable fetch für Tests.
  * @returns {Promise<boolean>}
  */
-export async function probeLocalReachability(port, { fetchFn } = {}) {
+export async function probeLocalReachability(address, { fetchFn } = {}) {
   const _fetch = fetchFn ?? defaultFetchProbe;
   try {
-    return await _fetch(`http://127.0.0.1:${port}/`, REACHABILITY_TIMEOUT_MS);
+    return await _fetch(`http://${address}/`, REACHABILITY_TIMEOUT_MS);
   } catch {
     return false;
   }
@@ -726,7 +799,7 @@ export async function checkBrowserVersionGuard(
 /**
  * RegressionRunner — deterministischer `npx playwright test`-Runner + In-Memory
  * Job-Registry (docs/specs/regression-run.md AC1, AC2, AC3, AC5, AC9;
- * docs/specs/regression-local-execution.md AC1–AC3).
+ * docs/specs/regression-local-execution.md AC1–AC6).
  */
 export class RegressionRunner {
   /** @type {(params: object) => Promise<object>} */
@@ -741,7 +814,7 @@ export class RegressionRunner {
   #resultStore;
   /** @type {(projectPath: string, deps?: object) => Promise<number|null>} */
   #readPort;
-  /** @type {(port: number, deps?: object) => Promise<boolean>} */
+  /** @type {(address: string, deps?: object) => Promise<boolean>} */
   #probeReachability;
   /** @type {(projectPath: string, deps?: object) => Promise<object|null>} */
   #readCtrf;
@@ -761,6 +834,8 @@ export class RegressionRunner {
   #ensureTestDependencies;
   /** @type {(projectPath: string, deps?: object) => Promise<{ok:true}|{ok:false,reason:string}>} injectable (regression-local-execution AC2, Default: checkBrowserVersionGuard) */
   #checkBrowserVersionGuard;
+  /** @type {() => boolean} injectable (regression-local-execution AC6, Default: isRunningInContainer — `/.dockerenv`-Indikator) */
+  #isContainerDeployment;
   /**
    * @type {Map<string, {
    *   status: 'running'|'passed'|'failed'|'precondition-error'|'error',
@@ -792,6 +867,7 @@ export class RegressionRunner {
    * @param {import('./vps/VpsProviderRegistry.js').VpsProviderRegistry} [params.vpsRegistry] - injectable (AC12; ohne → Sicherheitsnetz-Sweep degradiert auf No-op, kein Crash).
    * @param {Function} [params.ensureTestDependencies] - injectable (regression-local-execution AC1, default: ensureTestDependencies).
    * @param {Function} [params.checkBrowserVersionGuard] - injectable (regression-local-execution AC2, default: checkBrowserVersionGuard).
+   * @param {Function} [params.isContainerDeployment] - injectable (regression-local-execution AC6, default: isRunningInContainer).
    */
   constructor({
     runPlaywright,
@@ -811,6 +887,7 @@ export class RegressionRunner {
     vpsRegistry,
     ensureTestDependencies: ensureTestDependenciesFn,
     checkBrowserVersionGuard: checkBrowserVersionGuardFn,
+    isContainerDeployment,
   } = {}) {
     this.#timeoutMs = timeoutMs ?? (Number(process.env.REGRESSION_RUN_TIMEOUT_MS) || DEFAULT_REGRESSION_RUN_TIMEOUT_MS);
     this.#readRolloutConfig = readRolloutConfig ?? readLocalRolloutConfig;
@@ -829,6 +906,7 @@ export class RegressionRunner {
     this.#vpsRegistry = vpsRegistry ?? null;
     this.#ensureTestDependencies = ensureTestDependenciesFn ?? ensureTestDependencies;
     this.#checkBrowserVersionGuard = checkBrowserVersionGuardFn ?? checkBrowserVersionGuard;
+    this.#isContainerDeployment = isContainerDeployment ?? isRunningInContainer;
   }
 
   /**
@@ -968,34 +1046,55 @@ export class RegressionRunner {
       return;
     }
 
-    // AC5: local-Erreichbarkeitsprüfung VOR jedem local-Lauf.
+    // regression-local-execution AC5: port=null degradiert NICHT mehr still
+    // — sofortiger precondition-error VOR jedem weiteren local-Schritt
+    // (Frisch-Ausrollen/Erreichbarkeitsprüfung/REGRESSION_BASE_URL), statt
+    // Playwright base-url-los zu starten (Befund 2b).
     const port = await this.#readPort(job.projectPath, { readFile: this.#readFile });
-    let baseUrl;
-    if (port !== null) {
-      // AC7: Frisch-Ausrollen VOR der Erreichbarkeitsprüfung (pull + recreate,
-      // niemals restart) — nur wenn angefordert (start()-Aufrufer hat AC8
-      // bereits serverseitig erzwungen: job.freshRollout ist bei Selbsttest
-      // immer false) UND eine dockerControl injiziert ist (sonst degradiert
-      // auf die reine Erreichbarkeitsprüfung, kein Crash).
-      if (job.freshRollout && this.#dockerControl) {
-        const rolloutOutcome = await this.#performFreshRollout(job, port);
-        if (rolloutOutcome && !rolloutOutcome.ok) {
-          this.#finish(runId, rolloutOutcome.status, {
-            reason: rolloutOutcome.reason,
-            target: 'local',
-            durationMs: Date.now() - start,
-          });
-          return;
-        }
-      }
+    if (port === null) {
+      this.#finish(runId, 'precondition-error', { reason: PORT_NOT_RESOLVABLE_MESSAGE, target: 'local', durationMs: Date.now() - start });
+      return;
+    }
 
-      const reachable = await this.#probeReachability(port);
-      if (!reachable) {
-        this.#finish(runId, 'precondition-error', { reason: PRECONDITION_MESSAGE, target: 'local', durationMs: Date.now() - start });
+    // Lazy, EINMALIG pro Lauf gecachter `.claude/profile.md`-Rollout-Config-
+    // Getter — sowohl AC7 (Frisch-Ausrollen) als auch AC6 (Container-Betrieb-
+    // Adressierung) brauchen `image`/`container_port`; ohne diesen Getter
+    // würde derselbe Lauf die Datei bei aktivem Frisch-Ausrollen zweimal
+    // lesen (Review-Suggestion).
+    let rolloutConfigPromise;
+    const loadRolloutConfig = () => {
+      rolloutConfigPromise ??= this.#readRolloutConfig(job.projectPath, { readFile: this.#readFile });
+      return rolloutConfigPromise;
+    };
+
+    // AC7: Frisch-Ausrollen VOR der Erreichbarkeitsprüfung (pull + recreate,
+    // niemals restart) — nur wenn angefordert (start()-Aufrufer hat AC8
+    // bereits serverseitig erzwungen: job.freshRollout ist bei Selbsttest
+    // immer false) UND eine dockerControl injiziert ist (sonst degradiert
+    // auf die reine Erreichbarkeitsprüfung, kein Crash).
+    if (job.freshRollout && this.#dockerControl) {
+      const rolloutOutcome = await this.#performFreshRollout(job, port, loadRolloutConfig);
+      if (rolloutOutcome && !rolloutOutcome.ok) {
+        this.#finish(runId, rolloutOutcome.status, {
+          reason: rolloutOutcome.reason,
+          target: 'local',
+          durationMs: Date.now() - start,
+        });
         return;
       }
-      baseUrl = `http://127.0.0.1:${port}`;
     }
+
+    // AC6: dieselbe aufgelöste Adresse für die Erreichbarkeitsprüfung UND
+    // REGRESSION_BASE_URL — Container-Betrieb adressiert das Nachbar-
+    // Container-Testobjekt über host.docker.internal:<hostPort>, Host-Betrieb
+    // bleibt 127.0.0.1:<port>.
+    const address = await this.#resolveTargetAddress(job, port, loadRolloutConfig);
+    const reachable = await this.#probeReachability(address);
+    if (!reachable) {
+      this.#finish(runId, 'precondition-error', { reason: PRECONDITION_MESSAGE, target: 'local', durationMs: Date.now() - start });
+      return;
+    }
+    const baseUrl = `http://${address}`;
 
     let res;
     try {
@@ -1229,12 +1328,19 @@ export class RegressionRunner {
    * Projekten mit Großbuchstaben im Repo-Namen am laufenden Preview-Container
    * vorbei (Review-Fix S-310 Iteration 2).
    *
+   * Nimmt `loadRolloutConfig` als injizierten Getter entgegen (statt selbst
+   * `#readRolloutConfig` aufzurufen) — dieselbe, EINMALIG pro Lauf gelesene
+   * Instanz wird auch von `#resolveTargetAddress` (AC6) verwendet, damit
+   * `.claude/profile.md` innerhalb EINES Laufs nicht zweimal gelesen wird
+   * (Review-Suggestion).
+   *
    * @param {{ projectPath: string, projekt: string }} job
    * @param {number} port - `preview_port` (Host-Port).
+   * @param {() => Promise<{image:string,containerPort:number|null}|null>} loadRolloutConfig - lazy, gecachter Getter.
    * @returns {Promise<{ ok: true } | { ok: false, status: 'error'|'precondition-error', reason: string } | undefined>}
    */
-  async #performFreshRollout(job, port) {
-    const rolloutConfig = await this.#readRolloutConfig(job.projectPath, { readFile: this.#readFile });
+  async #performFreshRollout(job, port, loadRolloutConfig) {
+    const rolloutConfig = await loadRolloutConfig();
     if (!rolloutConfig || !rolloutConfig.image) {
       // Kein Profil/kein image auffindbar — best-effort übersprungen, kein Crash.
       return undefined;
@@ -1254,6 +1360,58 @@ export class RegressionRunner {
       const reason = err?.errorClass ? `${ROLLOUT_FAILURE_MESSAGE}: ${err.errorClass}` : ROLLOUT_FAILURE_MESSAGE;
       return { ok: false, status: 'error', reason };
     }
+  }
+
+  /**
+   * Löst die Ziel-Adresse für die local-Erreichbarkeitsprüfung UND
+   * `REGRESSION_BASE_URL` auf — DIESELBE Adresse für beide (AC6). Host-
+   * Betrieb (Bestandsverhalten, unverändert): `127.0.0.1:<port>`. Container-
+   * Betrieb (dieser Runner-Prozess läuft selbst in einem Docker-Container,
+   * `#isContainerDeployment`): `host.docker.internal:<hostPort>` —
+   * `<hostPort>` wird NACH MÖGLICHKEIT aus dem tatsächlichen Docker-Port-
+   * Mapping des Ziel-Containers ermittelt (`LocalDockerControl#getMappedHostPort`,
+   * dieselbe cicd/preview-Boundary wie Frisch-Ausrollen AC7 — kein zweiter
+   * Docker-Read-Pfad), NICHT aus dem Container-internen EXPOSE-Port (Befund 3,
+   * `8080→8081`). Ohne auflösbares `image` in `.claude/profile.md`, ohne
+   * injizierte `dockerControl`/`getMappedHostPort`-Methode oder ohne
+   * Mapping-Treffer degradiert die Funktion best-effort auf den statisch
+   * gelesenen `<port>` (kein Crash — eine sonst gültige Adresse darf nicht an
+   * einer optionalen Verfeinerung scheitern).
+   *
+   * Selbsttest-Sonderfall (`isSelfProject`, AC6 letzter Satz „bleibt
+   * unberührt"): läuft dieser Runner GEGEN SICH SELBST (dev-gui), teilt der
+   * gespawnte Playwright-Kindprozess DIESELBE Netzwerk-Namespace wie der
+   * getestete dev-gui-Server (derselbe Container/Prozessbaum) — `127.0.0.1`
+   * erreicht ihn IMMER direkt per Loopback, unabhängig vom Deployment. Ein
+   * Umweg über `host.docker.internal` wäre hier unnötig (setzt zusätzlich
+   * NAT-Hairpinning auf dem Host voraus) und bleibt daher bewusst aus.
+   *
+   * Nimmt `loadRolloutConfig` als injizierten, lazy-gecachten Getter entgegen
+   * (statt selbst `#readRolloutConfig` aufzurufen) — vermeidet einen zweiten
+   * `.claude/profile.md`-Read, falls `#performFreshRollout` in DIESEM Lauf
+   * bereits gelesen hat (Review-Suggestion, kein funktionaler Unterschied).
+   *
+   * @param {{ projectPath: string, projekt: string }} job
+   * @param {number} port - der bereits gelesene lokale Port (`#readPort`, AC4/AC5).
+   * @param {() => Promise<{image:string,containerPort:number|null}|null>} loadRolloutConfig - lazy, gecachter Getter.
+   * @returns {Promise<string>} z.B. `127.0.0.1:8080` oder `host.docker.internal:8081`.
+   */
+  async #resolveTargetAddress(job, port, loadRolloutConfig) {
+    if (!this.#isContainerDeployment() || isSelfProject(job.projekt)) {
+      return `127.0.0.1:${port}`;
+    }
+
+    let hostPort = port;
+    if (this.#dockerControl && typeof this.#dockerControl.getMappedHostPort === 'function') {
+      const rolloutConfig = await loadRolloutConfig();
+      if (rolloutConfig?.image) {
+        const containerName = deriveContainerNameFromImage(rolloutConfig.image);
+        const containerPort = rolloutConfig.containerPort ?? port;
+        const mapped = await this.#dockerControl.getMappedHostPort(containerName, containerPort);
+        if (mapped !== null) hostPort = mapped;
+      }
+    }
+    return `${DOCKER_HOST_GATEWAY}:${hostPort}`;
   }
 
   /**

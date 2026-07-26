@@ -5,7 +5,7 @@
  *
  * Covers (regression-run): AC1, AC2, AC5, AC7, AC8, AC9, AC10, AC11, AC12
  *
- * Covers (regression-local-execution): AC1, AC2, AC3
+ * Covers (regression-local-execution): AC1, AC2, AC3, AC4, AC5, AC6
  *   AC1 — Test-Dependencies herstellen: `isPlaywrightTestInstalled` erkennt
  *         in EINEM Check sowohl "node_modules fehlt" als auch "nur
  *         @playwright/test fehlt"; `ensureTestDependencies` ist idempotent
@@ -29,6 +29,25 @@
  *         Erreichbarkeitsprüfung -> `npx playwright test` (Call-Order-Test);
  *         beide Prüfungen sind lokal-exklusiv (Spec-Scope dieser Story) —
  *         der `ephemeral-infra`-Pfad ruft sie NICHT auf.
+ *   AC4 — Port-Leser tolerieren Whitespace+Inline-Kommentar nach der Zahl
+ *         (`readLocalPreviewPort`/`readLocalRolloutConfig`, dasselbe Muster,
+ *         Befund 2a) — z.B. `container_port: 8080    # EXPOSE aus dem
+ *         Dockerfile`.
+ *   AC5 — port=null degradiert NICHT mehr still: findet der Runner bei
+ *         `target: local` keinen Port, endet der Lauf SOFORT als
+ *         `precondition-error` "lokaler Test-Port nicht bestimmbar" — STATT
+ *         Erreichbarkeitsprüfung/Frisch-Ausrollen/REGRESSION_BASE_URL still
+ *         zu überspringen (Befund 2b). `runPlaywright` wird NICHT aufgerufen.
+ *   AC6 — Deployment-bewusste Ziel-Adressierung (`#resolveTargetAddress`):
+ *         Host-Betrieb -> `127.0.0.1:<port>` (Bestandsverhalten). Container-
+ *         Betrieb (`isContainerDeployment` liefert `true`) -> `host.docker.
+ *         internal:<hostPort>`, wobei `<hostPort>` bei auffindbarem `image` +
+ *         injizierter `dockerControl.getMappedHostPort()` aus dem
+ *         TATSÄCHLICHEN Docker-Port-Mapping stammt (Befund 3, `8080->8081`),
+ *         sonst best-effort auf den statisch gelesenen Port degradiert. Die
+ *         local-Erreichbarkeitsprüfung UND `REGRESSION_BASE_URL` nutzen
+ *         DIESELBE aufgelöste Adresse (EIN `probeReachability`-Aufruf mit
+ *         der Adresse als Argument).
  *
  *   AC1 — RegressionRunner is an own boundary with an OWN, isolated
  *         ProjectJobLock instance (never a `claude`/agent process — grep-
@@ -164,6 +183,7 @@ import {
   readInstalledPlaywrightVersion,
   readImagePlaywrightVersion,
   checkBrowserVersionGuard,
+  isRunningInContainer,
 } from '../src/RegressionRunner.js';
 import { ProjectJobLock } from '../src/ProjectJobLock.js';
 
@@ -173,18 +193,26 @@ function flush() {
 }
 
 /**
- * Test-Factory (regression-local-execution AC1/AC2): alle bestehenden
- * (regression-run.md-)Tests interessieren sich NICHT für Test-Dependencies/
- * Browser-Guard — per Default werden beide Vorbedingungen als "bestehbar"
- * gemockt (kein echter `npm ci`/Datei-Zugriff auf `node_modules`), damit die
- * bestehenden `readFile`-Mocks (die diese neuen Pfade nicht kennen) nicht für
- * jeden Testfall einzeln erweitert werden müssen. Tests, die AC1/AC2 SELBST
- * prüfen, überschreiben diese Defaults explizit (letzter Spread gewinnt).
+ * Test-Factory (regression-local-execution AC1/AC2/AC5/AC6): alle
+ * bestehenden (regression-run.md-)Tests interessieren sich NICHT für
+ * Test-Dependencies/Browser-Guard/Erreichbarkeit — per Default werden alle
+ * drei Vorbedingungen als "bestehbar" gemockt (kein echter `npm ci`/Datei-
+ * Zugriff auf `node_modules`, kein echter Netzwerk-`fetch` gegen
+ * `127.0.0.1:<port>`), damit die bestehenden `readFile`-Mocks (die diese
+ * neuen Pfade nicht kennen) nicht für jeden Testfall einzeln erweitert werden
+ * müssen. Tests, die AC1/AC2/AC5 SELBST prüfen, überschreiben diese Defaults
+ * explizit (letzter Spread gewinnt). `isContainerDeployment` defaultet
+ * hermetisch auf `false` (Host-Betrieb, Bestandsverhalten `127.0.0.1:<port>`)
+ * — unabhängig davon, ob der Test-Laufkontext selbst zufällig `/.dockerenv`
+ * sieht; Tests, die AC6 (Container-Betrieb) SELBST prüfen, überschreiben das
+ * explizit.
  */
 function newRegressionRunner(overrides = {}) {
   return new RegressionRunner({
     ensureTestDependencies: async () => ({ ok: true }),
     checkBrowserVersionGuard: async () => ({ ok: true }),
+    isContainerDeployment: () => false,
+    probeReachability: async () => true,
     ...overrides,
   });
 }
@@ -219,8 +247,9 @@ describe('RegressionRunner — regression-run.md', () => {
       const resolvers = new Map();
       const runPlaywright = jest.fn(({ projectPath }) => new Promise((r) => { resolvers.set(projectPath, r); }));
       const readFile = jest.fn(async (p) => {
+        if (String(p).endsWith('.claude/profile.md')) return 'preview_port: 8080\n';
         if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
-        throw Object.assign(new Error('enoent'), { code: 'ENOENT' }); // kein profile.md → kein local-Check
+        throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
       });
       const runner = newRegressionRunner({ runPlaywright, readFile });
 
@@ -304,15 +333,21 @@ describe('RegressionRunner — regression-run.md', () => {
 
   // ── probeLocalReachability (pure, injizierter fetchFn) ─────────────────────
   describe('probeLocalReachability', () => {
-    it('true bei jedem erfolgreichen fetch (jeder Statuscode zählt)', async () => {
+    it('true bei jedem erfolgreichen fetch (jeder Statuscode zählt) — nimmt eine bereits aufgelöste host:port-Adresse (AC6)', async () => {
       const fetchFn = jest.fn(async () => true);
-      expect(await probeLocalReachability(8080, { fetchFn })).toBe(true);
+      expect(await probeLocalReachability('127.0.0.1:8080', { fetchFn })).toBe(true);
       expect(fetchFn).toHaveBeenCalledWith('http://127.0.0.1:8080/', expect.any(Number));
     });
 
     it('false bei Timeout/Refused (fetch wirft)', async () => {
       const fetchFn = jest.fn(async () => { throw new Error('ECONNREFUSED'); });
-      expect(await probeLocalReachability(8080, { fetchFn })).toBe(false);
+      expect(await probeLocalReachability('127.0.0.1:8080', { fetchFn })).toBe(false);
+    });
+
+    it('AC6: Container-Adresse (host.docker.internal) wird unverändert an fetch durchgereicht', async () => {
+      const fetchFn = jest.fn(async () => true);
+      expect(await probeLocalReachability('host.docker.internal:8081', { fetchFn })).toBe(true);
+      expect(fetchFn).toHaveBeenCalledWith('http://host.docker.internal:8081/', expect.any(Number));
     });
   });
 
@@ -618,26 +653,76 @@ describe('RegressionRunner — regression-run.md', () => {
       const run = runner.getRun(runId);
       expect(run.status).toBe('precondition-error');
       expect(run.reason).toBe('Applikation lokal nicht gestartet');
+      // AC6: Host-Betrieb (Default-Factory: isContainerDeployment -> false) —
+      // die Erreichbarkeitsprüfung bekommt dieselbe Adresse wie REGRESSION_BASE_URL.
+      expect(probeReachability).toHaveBeenCalledWith('127.0.0.1:8080');
       expect(runPlaywright).not.toHaveBeenCalled();
       expect(runner.isRunning('/ws/proj')).toBe(false); // Lock freigegeben
     });
 
-    it('kein Port auffindbar (kein profile.md) -> kein local-Check, Lauf läuft trotzdem weiter', async () => {
-      const runPlaywright = jest.fn(async () => ({ exitCode: 0 }));
+    it('kein Port auffindbar (kein profile.md) -> SOFORTIGER precondition-error "lokaler Test-Port nicht bestimmbar", KEIN Playwright-Start (Befund 2b)', async () => {
+      const runPlaywright = jest.fn();
+      const probeReachability = jest.fn(); // darf NIE aufgerufen werden
       const readFile = jest.fn(async (p) => {
         if (String(p).endsWith('.claude/profile.md')) throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
         if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
-        if (String(p).endsWith(CTRF_RESULT_PATH)) return JSON.stringify({ results: { summary: { tests: 1, passed: 1, failed: 0 } } });
         throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
       });
-      const runner = newRegressionRunner({ runPlaywright, readFile });
+      const runner = newRegressionRunner({ runPlaywright, readFile, probeReachability });
 
       const { runId } = runner.start('/ws/proj', 'proj', { typ: 'gesamt' });
       await flush();
 
-      expect(runPlaywright).toHaveBeenCalledTimes(1);
       const run = runner.getRun(runId);
-      expect(run.status).toBe('passed');
+      expect(run.status).toBe('precondition-error');
+      expect(run.reason).toBe('lokaler Test-Port nicht bestimmbar');
+      expect(probeReachability).not.toHaveBeenCalled();
+      expect(runPlaywright).not.toHaveBeenCalled();
+      expect(runner.isRunning('/ws/proj')).toBe(false); // Lock freigegeben
+    });
+
+    it('kein Port auffindbar -> resultStore.record() mit status:"precondition-error" + secret-freiem reason (AC10-Diagnose-Pflicht bleibt gewahrt)', async () => {
+      const record = jest.fn(async (i) => i);
+      const readFile = jest.fn(async (p) => {
+        if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
+        throw Object.assign(new Error('enoent'), { code: 'ENOENT' }); // kein profile.md
+      });
+      const runner = newRegressionRunner({ runPlaywright: jest.fn(), readFile, resultStore: { record } });
+
+      const { runId } = runner.start('/ws/proj', 'proj', { typ: 'gesamt' });
+      await flush();
+
+      expect(runner.getRun(runId).status).toBe('precondition-error');
+      expect(record.mock.calls[0][0]).toMatchObject({
+        status: 'precondition-error',
+        ctrf: null,
+        counts: { passed: 0, failed: 0, total: 0 },
+        reason: 'lokaler Test-Port nicht bestimmbar',
+      });
+    });
+  });
+
+  // ── AC4: Port-Leser robust gegen Inline-Kommentare (Befund 2a) ─────────────
+  describe('AC4 — readLocalPreviewPort/readLocalRolloutConfig tolerieren Inline-Kommentare', () => {
+    it('readLocalPreviewPort: preview_port mit Whitespace+Inline-Kommentar wird korrekt gelesen', async () => {
+      const readFile = jest.fn(async () => 'preview_port: 8080    # Host-Port des Preview-Containers\n');
+      expect(await readLocalPreviewPort('/ws/proj', { readFile })).toBe(8080);
+    });
+
+    it('readLocalPreviewPort: container_port-Fallback mit Inline-Kommentar wird korrekt gelesen', async () => {
+      const readFile = jest.fn(async () => 'container_port: 8080    # EXPOSE aus dem Dockerfile\n');
+      expect(await readLocalPreviewPort('/ws/proj', { readFile })).toBe(8080);
+    });
+
+    it('readLocalRolloutConfig: container_port mit Inline-Kommentar wird korrekt gelesen', async () => {
+      const readFile = jest.fn(async () => 'image: ghcr.io/org/app\ncontainer_port: 8080    # EXPOSE aus dem Dockerfile\n');
+      const cfg = await readLocalRolloutConfig('/ws/proj', { readFile });
+      expect(cfg).toEqual({ image: 'ghcr.io/org/app', containerPort: 8080 });
+    });
+
+    it('ein Inline-Kommentar OHNE führenden Whitespace-Sprung (Tab statt Space) wird ebenfalls toleriert', async () => {
+      const readFile = jest.fn(async () => 'preview_port: 8080\t# Tab statt Space\n');
+      expect(await readLocalPreviewPort('/ws/proj', { readFile })).toBe(8080);
     });
   });
 
@@ -856,6 +941,161 @@ describe('RegressionRunner — regression-run.md', () => {
     });
   });
 
+  // ── isRunningInContainer (pure) ─────────────────────────────────────────────
+  describe('isRunningInContainer — /.dockerenv-Indikator (AC6)', () => {
+    it('true, wenn /.dockerenv existiert', () => {
+      const existsSync = jest.fn(() => true);
+      expect(isRunningInContainer({ existsSync })).toBe(true);
+      expect(existsSync).toHaveBeenCalledWith('/.dockerenv');
+    });
+
+    it('false, wenn /.dockerenv fehlt', () => {
+      expect(isRunningInContainer({ existsSync: () => false })).toBe(false);
+    });
+
+    it('ein werfender existsSync zählt konservativ als "nicht im Container" (kein Crash)', () => {
+      expect(isRunningInContainer({ existsSync: () => { throw new Error('boom'); } })).toBe(false);
+    });
+  });
+
+  // ── AC6: Deployment-bewusste Ziel-Adressierung ─────────────────────────────
+  describe('AC6 — Deployment-bewusste Ziel-Adressierung (host.docker.internal vs. 127.0.0.1)', () => {
+    function readFileWithPortAndImage({ previewPort = 8080, image = 'ghcr.io/org/app', containerPort = 8080 } = {}) {
+      return jest.fn(async (p) => {
+        if (String(p).endsWith('.claude/profile.md')) {
+          return `image: ${image}\ncontainer_port: ${containerPort}\npreview_port: ${previewPort}\n`;
+        }
+        if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
+        if (String(p).endsWith(CTRF_RESULT_PATH)) return JSON.stringify({ results: { summary: { tests: 1, passed: 1, failed: 0 } } });
+        throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+      });
+    }
+
+    it('Host-Betrieb (isContainerDeployment:false) -> 127.0.0.1:<port> für Erreichbarkeitsprüfung UND REGRESSION_BASE_URL', async () => {
+      const probeReachability = jest.fn(async () => true);
+      const runPlaywright = jest.fn(async ({ baseUrl }) => {
+        expect(baseUrl).toBe('http://127.0.0.1:8080');
+        return { exitCode: 0 };
+      });
+      const runner = newRegressionRunner({
+        runPlaywright,
+        readFile: readFileWithPortAndImage(),
+        probeReachability,
+        isContainerDeployment: () => false,
+      });
+
+      const { runId } = runner.start('/ws/proj', 'proj', { typ: 'gesamt' });
+      await flush();
+
+      expect(probeReachability).toHaveBeenCalledWith('127.0.0.1:8080');
+      expect(runner.getRun(runId).status).toBe('passed');
+    });
+
+    it('Container-Betrieb OHNE auffindbares Docker-Port-Mapping -> host.docker.internal:<statischer Port> (best-effort degradiert)', async () => {
+      const probeReachability = jest.fn(async () => true);
+      const runPlaywright = jest.fn(async ({ baseUrl }) => {
+        expect(baseUrl).toBe('http://host.docker.internal:8080');
+        return { exitCode: 0 };
+      });
+      const runner = newRegressionRunner({
+        runPlaywright,
+        readFile: readFileWithPortAndImage(),
+        probeReachability,
+        isContainerDeployment: () => true,
+        // kein dockerControl injiziert -> kein getMappedHostPort verfügbar
+      });
+
+      const { runId } = runner.start('/ws/proj', 'proj', { typ: 'gesamt' });
+      await flush();
+
+      expect(probeReachability).toHaveBeenCalledWith('host.docker.internal:8080');
+      expect(runner.getRun(runId).status).toBe('passed');
+    });
+
+    it('Container-Betrieb MIT dockerControl.getMappedHostPort -> host.docker.internal:<tatsächlich gemappter Port> (Befund 3, 8080->8081)', async () => {
+      const getMappedHostPort = jest.fn(async (containerName, containerPort) => {
+        expect(containerName).toBe('app');
+        expect(containerPort).toBe(8080);
+        return 8081; // tatsächliches Docker-Port-Mapping weicht vom statischen Profil-Port ab
+      });
+      const probeReachability = jest.fn(async () => true);
+      const runPlaywright = jest.fn(async ({ baseUrl }) => {
+        expect(baseUrl).toBe('http://host.docker.internal:8081');
+        return { exitCode: 0 };
+      });
+      const runner = newRegressionRunner({
+        runPlaywright,
+        readFile: readFileWithPortAndImage(),
+        probeReachability,
+        isContainerDeployment: () => true,
+        dockerControl: { getMappedHostPort },
+      });
+
+      const { runId } = runner.start('/ws/proj', 'proj', { typ: 'gesamt' });
+      await flush();
+
+      expect(getMappedHostPort).toHaveBeenCalledTimes(1);
+      expect(probeReachability).toHaveBeenCalledWith('host.docker.internal:8081');
+      expect(runner.getRun(runId).status).toBe('passed');
+    });
+
+    it('Container-Betrieb, getMappedHostPort liefert null (Container nicht gefunden) -> best-effort Fallback auf den statischen Port', async () => {
+      const getMappedHostPort = jest.fn(async () => null);
+      const probeReachability = jest.fn(async () => true);
+      const runner = newRegressionRunner({
+        runPlaywright: jest.fn(async () => ({ exitCode: 0 })),
+        readFile: readFileWithPortAndImage(),
+        probeReachability,
+        isContainerDeployment: () => true,
+        dockerControl: { getMappedHostPort },
+      });
+
+      const { runId } = runner.start('/ws/proj', 'proj', { typ: 'gesamt' });
+      await flush();
+
+      expect(probeReachability).toHaveBeenCalledWith('host.docker.internal:8080');
+      expect(runner.getRun(runId).status).toBe('passed');
+    });
+
+    it('nicht erreichbar im Container-Betrieb -> precondition-error mit der Container-Adresse geprüft (AC6+E3)', async () => {
+      const probeReachability = jest.fn(async () => false);
+      const runner = newRegressionRunner({
+        runPlaywright: jest.fn(),
+        readFile: readFileWithPortAndImage(),
+        probeReachability,
+        isContainerDeployment: () => true,
+      });
+
+      const { runId } = runner.start('/ws/proj', 'proj', { typ: 'gesamt' });
+      await flush();
+
+      const run = runner.getRun(runId);
+      expect(run.status).toBe('precondition-error');
+      expect(run.reason).toBe('Applikation lokal nicht gestartet');
+      expect(probeReachability).toHaveBeenCalledWith('host.docker.internal:8080');
+    });
+
+    it('Selbsttest (projekt === dev-gui) bleibt IMMER bei 127.0.0.1:<port> — auch im Container-Betrieb (AC6 letzter Satz, regression-run AC8 unberührt)', async () => {
+      const probeReachability = jest.fn(async () => true);
+      const runPlaywright = jest.fn(async ({ baseUrl }) => {
+        expect(baseUrl).toBe('http://127.0.0.1:8080');
+        return { exitCode: 0 };
+      });
+      const runner = newRegressionRunner({
+        runPlaywright,
+        readFile: readFileWithPortAndImage(),
+        probeReachability,
+        isContainerDeployment: () => true,
+      });
+
+      const { runId } = runner.start('/ws/dev-gui', SELF_PROJECT_SLUG, { typ: 'gesamt' });
+      await flush();
+
+      expect(probeReachability).toHaveBeenCalledWith('127.0.0.1:8080');
+      expect(runner.getRun(runId).status).toBe('passed');
+    });
+  });
+
   // ── AC8: Selbsttest-Sonderfall (dev-gui) ───────────────────────────────────
   describe('AC8 — Selbsttest-Sonderfall: Frisch-Ausrollen server-seitig hart übersprungen', () => {
     it('projekt === "dev-gui" + freshRollout:true -> pullAndRecreate() wird NIE aufgerufen', async () => {
@@ -913,7 +1153,7 @@ describe('RegressionRunner — regression-run.md', () => {
         return { exitCode: 0 };
       });
       const readFile = jest.fn(async (p) => {
-        if (String(p).endsWith('.claude/profile.md')) throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+        if (String(p).endsWith('.claude/profile.md')) return 'preview_port: 8080\n';
         if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
         if (String(p).endsWith(CTRF_RESULT_PATH)) {
           return JSON.stringify({ results: { summary: { tests: 2, passed: 2, failed: 0 } } });
@@ -970,7 +1210,7 @@ describe('RegressionRunner — regression-run.md', () => {
       const record = jest.fn(async (input) => input);
       const runPlaywright = jest.fn(async () => ({ exitCode: 1 }));
       const readFile = jest.fn(async (p) => {
-        if (String(p).endsWith('.claude/profile.md')) throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+        if (String(p).endsWith('.claude/profile.md')) return 'preview_port: 8080\n';
         if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
         if (String(p).endsWith(CTRF_RESULT_PATH)) {
           return JSON.stringify({ results: { summary: { tests: 3, passed: 2, failed: 1 } } });
@@ -1005,7 +1245,7 @@ describe('RegressionRunner — regression-run.md', () => {
     it('kein CTRF-Ergebnis nach dem Lauf -> error, kein Crash', async () => {
       const runPlaywright = jest.fn(async () => ({ exitCode: 0 }));
       const readFile = jest.fn(async (p) => {
-        if (String(p).endsWith('.claude/profile.md')) throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+        if (String(p).endsWith('.claude/profile.md')) return 'preview_port: 8080\n';
         if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
         throw Object.assign(new Error('enoent'), { code: 'ENOENT' }); // kein CTRF
       });
@@ -1021,7 +1261,7 @@ describe('RegressionRunner — regression-run.md', () => {
 
     it('npx nicht verfügbar (ENOENT) -> error, sanfter Fehlertext', async () => {
       const readFile = jest.fn(async (p) => {
-        if (String(p).endsWith('.claude/profile.md')) throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+        if (String(p).endsWith('.claude/profile.md')) return 'preview_port: 8080\n';
         if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
         throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
       });
@@ -1052,7 +1292,7 @@ describe('RegressionRunner — regression-run.md', () => {
     function makeRunner({ notifier, exitCode = 1, summary = { tests: 3, passed: 2, failed: 1 }, resultStore } = {}) {
       const runPlaywright = jest.fn(async () => ({ exitCode }));
       const readFile = jest.fn(async (p) => {
-        if (String(p).endsWith('.claude/profile.md')) throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+        if (String(p).endsWith('.claude/profile.md')) return 'preview_port: 8080\n';
         if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
         if (String(p).endsWith(CTRF_RESULT_PATH)) {
           return JSON.stringify({ results: { summary } });
@@ -1187,6 +1427,7 @@ describe('RegressionRunner — regression-run.md', () => {
       const readSuites = jest.fn(async () => ({ suites: [] }));
       const runPlaywright = jest.fn(async () => ({ exitCode: 0 }));
       const readFile = jest.fn(async (p) => {
+        if (String(p).endsWith('.claude/profile.md')) return 'preview_port: 8080\n';
         if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
         if (String(p).endsWith(CTRF_RESULT_PATH)) return JSON.stringify({ results: { summary: { tests: 1, passed: 1, failed: 0 } } });
         throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
@@ -1207,6 +1448,7 @@ describe('RegressionRunner — regression-run.md', () => {
       }));
       const runPlaywright = jest.fn(async () => ({ exitCode: 0 }));
       const readFile = jest.fn(async (p) => {
+        if (String(p).endsWith('.claude/profile.md')) return 'preview_port: 8080\n';
         if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
         if (String(p).endsWith(CTRF_RESULT_PATH)) return JSON.stringify({ results: { summary: { tests: 1, passed: 1, failed: 0 } } });
         throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
@@ -1259,6 +1501,7 @@ describe('RegressionRunner — regression-run.md', () => {
       const readSuites = jest.fn(async () => ({ suites: [] }));
       const runPlaywright = jest.fn(async () => ({ exitCode: 0 }));
       const readFile = jest.fn(async (p) => {
+        if (String(p).endsWith('.claude/profile.md')) return 'preview_port: 8080\n';
         if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
         if (String(p).endsWith(CTRF_RESULT_PATH)) return JSON.stringify({ results: { summary: { tests: 1, passed: 1, failed: 0 } } });
         throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
@@ -1276,6 +1519,7 @@ describe('RegressionRunner — regression-run.md', () => {
       const readSuites = jest.fn(async () => { throw new Error('fs kaputt'); });
       const runPlaywright = jest.fn(async () => ({ exitCode: 0 }));
       const readFile = jest.fn(async (p) => {
+        if (String(p).endsWith('.claude/profile.md')) return 'preview_port: 8080\n';
         if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
         if (String(p).endsWith(CTRF_RESULT_PATH)) return JSON.stringify({ results: { summary: { tests: 1, passed: 1, failed: 0 } } });
         throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
@@ -1765,7 +2009,7 @@ describe('RegressionRunner — regression-run.md', () => {
       const record = jest.fn(async (i) => i);
       const runPlaywright = jest.fn(async () => ({ exitCode: 0 }));
       const readFile = jest.fn(async (p) => {
-        if (String(p).endsWith('.claude/profile.md')) throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+        if (String(p).endsWith('.claude/profile.md')) return 'preview_port: 8080\n';
         if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
         throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
       });

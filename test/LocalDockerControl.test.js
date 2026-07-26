@@ -1,6 +1,7 @@
 /**
  * @file LocalDockerControl.test.js — unit tests for `pullAndRecreate()`
- * (docs/specs/regression-run.md AC7).
+ * (docs/specs/regression-run.md AC7) und `getMappedHostPort()`
+ * (docs/specs/regression-local-execution.md AC6/A4).
  *
  * Covers (regression-run): AC7
  *
@@ -12,6 +13,20 @@
  *         fester Sleep-Zeit. Pull-/Start-Fehler werfen einen klassierten
  *         Error (`errorClass`); Readiness-Timeout → `{ ready: false }` (kein
  *         Crash, Aufrufer mappt auf `precondition-error`).
+ *
+ * Covers (regression-local-execution): AC6
+ *
+ *   AC6 — `getMappedHostPort(containerName, containerPort)`: liest das
+ *         TATSÄCHLICHE Docker-Port-Mapping eines bereits laufenden, FREMDEN
+ *         Containers via `docker inspect --format '{{json
+ *         .NetworkSettings.Ports}}' <containerName>` (kanonische Docker-
+ *         Ausgabeform `{"<port>/tcp":[{"HostIp":...,"HostPort":"<host>"}]}`)
+ *         — liefert den geparsten Host-Port als Zahl. Jeder Fehlerfall
+ *         (Container nicht gefunden/`docker inspect` schlägt fehl, kein
+ *         Mapping für den angefragten Port, `Ports`-Objekt leer/`null`,
+ *         unparsbare Ausgabe) liefert `null` statt zu werfen — der Aufrufer
+ *         (`RegressionRunner#resolveTargetAddress`) degradiert dann
+ *         best-effort auf den statisch konfigurierten Port (kein Crash).
  *
  * Pattern: injizierter `execFn`/`fetchFn` (Muster `runProbe`-Tests via
  * localImageTest.test.js) — kein echtes Docker/Netzwerk nötig.
@@ -137,5 +152,70 @@ describe('LocalDockerControl#pullAndRecreate — regression-run.md AC7', () => {
 
     expect(result.ready).toBe(false);
     jest.useRealTimers();
+  });
+});
+
+describe('LocalDockerControl#getMappedHostPort — regression-local-execution.md AC6/A4', () => {
+  it('liest den Host-Port aus kanonischer docker-inspect-NetworkSettings.Ports-Ausgabe', async () => {
+    const execFn = jest.fn(async (cmd, args) => {
+      expect(cmd).toBe('docker');
+      expect(args).toEqual(['inspect', '--format', '{{json .NetworkSettings.Ports}}', 'app-slug']);
+      // Kanonisches docker-inspect-Ausgabeformat (Befund 3, 8080->8081).
+      return '{"8080/tcp":[{"HostIp":"0.0.0.0","HostPort":"8081"}]}\n';
+    });
+    const control = new LocalDockerControl({ execFn });
+
+    const hostPort = await control.getMappedHostPort('app-slug', 8080);
+
+    expect(hostPort).toBe(8081);
+  });
+
+  it('mehrere HostIp-Einträge (z.B. 0.0.0.0 + ::) -> nimmt den ERSTEN Eintrag', async () => {
+    const execFn = jest.fn(async () => JSON.stringify({
+      '8080/tcp': [
+        { HostIp: '0.0.0.0', HostPort: '8081' },
+        { HostIp: '::', HostPort: '8081' },
+      ],
+    }));
+    const control = new LocalDockerControl({ execFn });
+
+    expect(await control.getMappedHostPort('app-slug', 8080)).toBe(8081);
+  });
+
+  it('Container nicht gefunden (docker inspect schlägt fehl/wirft) -> null, kein Crash', async () => {
+    const execFn = jest.fn(async () => {
+      throw new Error('Error: No such object: app-slug');
+    });
+    const control = new LocalDockerControl({ execFn });
+
+    expect(await control.getMappedHostPort('app-slug', 8080)).toBeNull();
+  });
+
+  it('kein Mapping für den angefragten containerPort (anderer Port exponiert) -> null', async () => {
+    const execFn = jest.fn(async () => JSON.stringify({ '3000/tcp': [{ HostIp: '0.0.0.0', HostPort: '3000' }] }));
+    const control = new LocalDockerControl({ execFn });
+
+    expect(await control.getMappedHostPort('app-slug', 8080)).toBeNull();
+  });
+
+  it('exponierter, aber NICHT publizierter Port (docker inspect liefert null für den Key) -> null', async () => {
+    const execFn = jest.fn(async () => JSON.stringify({ '8080/tcp': null }));
+    const control = new LocalDockerControl({ execFn });
+
+    expect(await control.getMappedHostPort('app-slug', 8080)).toBeNull();
+  });
+
+  it('leeres Ports-Objekt ({}) -> null', async () => {
+    const execFn = jest.fn(async () => '{}');
+    const control = new LocalDockerControl({ execFn });
+
+    expect(await control.getMappedHostPort('app-slug', 8080)).toBeNull();
+  });
+
+  it('unparsbare/leere Ausgabe (Docker nicht erreichbar) -> null, kein Crash', async () => {
+    const execFn = jest.fn(async () => '');
+    const control = new LocalDockerControl({ execFn });
+
+    expect(await control.getMappedHostPort('app-slug', 8080)).toBeNull();
   });
 });

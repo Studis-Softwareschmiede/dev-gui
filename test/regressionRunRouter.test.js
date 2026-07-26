@@ -123,36 +123,50 @@ function buildApp(router, identity = { email: 'owner@example.com' }) {
   return app;
 }
 
-// regression-local-execution AC1/AC2: Diese Router-Tests interessieren sich
-// nicht für Test-Dependencies/Browser-Guard — beide Vorbedingungen werden per
-// Default als "bestehbar" gemockt (kein echter `npm ci`/Datei-Zugriff gegen
-// den fiktiven '/workspace/dev-gui'-Pfad dieser Fixtures).
+// regression-local-execution AC1/AC2/AC6: Diese Router-Tests interessieren
+// sich nicht für Test-Dependencies/Browser-Guard/Container-Adressierung —
+// alle drei Vorbedingungen werden per Default als "bestehbar"/hermetisch
+// gemockt (kein echter `npm ci`/Datei-Zugriff gegen den fiktiven
+// '/workspace/dev-gui'-Pfad dieser Fixtures; `isContainerDeployment:false`
+// verhindert, dass ein zufälliges `/.dockerenv` im CI-Laufkontext die
+// Adressierung auf `host.docker.internal` umschaltet, Review-Suggestion).
 const PASSING_PRECONDITIONS = {
   ensureTestDependencies: async () => ({ ok: true }),
   checkBrowserVersionGuard: async () => ({ ok: true }),
+  isContainerDeployment: () => false,
 };
 
 /** Ein RegressionRunner, der NIE terminiert (für Busy-/Lock-Tests). */
 function makeHangingRunner() {
   const readFile = jest.fn(async (p) => {
-    if (String(p).endsWith('.claude/profile.md')) throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+    if (String(p).endsWith('.claude/profile.md')) return 'preview_port: 8080\n';
     if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
     throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
   });
-  return new RegressionRunner({ runPlaywright: () => new Promise(() => {}), readFile, ...PASSING_PRECONDITIONS });
+  return new RegressionRunner({
+    runPlaywright: () => new Promise(() => {}),
+    readFile,
+    probeReachability: async () => true,
+    ...PASSING_PRECONDITIONS,
+  });
 }
 
 /** Ein RegressionRunner, der sofort grün terminiert. */
 function makeGreenRunner() {
   const readFile = jest.fn(async (p) => {
-    if (String(p).endsWith('.claude/profile.md')) throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+    if (String(p).endsWith('.claude/profile.md')) return 'preview_port: 8080\n';
     if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
     if (String(p).endsWith('test-results/ctrf-report.json')) {
       return JSON.stringify({ results: { summary: { tests: 1, passed: 1, failed: 0 } } });
     }
     throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
   });
-  return new RegressionRunner({ runPlaywright: async () => ({ exitCode: 0 }), readFile, ...PASSING_PRECONDITIONS });
+  return new RegressionRunner({
+    runPlaywright: async () => ({ exitCode: 0 }),
+    readFile,
+    probeReachability: async () => true,
+    ...PASSING_PRECONDITIONS,
+  });
 }
 
 describe('regressionRunRouter — regression-run.md', () => {
