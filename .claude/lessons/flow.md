@@ -2,6 +2,14 @@
 
 Newest-first. Regeln für die Orchestrator-Ebene (Landen/Konsolidieren/Recovery/Dispatch-Ökonomie).
 
+## flow/L08 — `BOARD_WRITER=flow` gilt für JEDEN Status-Set, auch den Claim — sonst gesplitteter Claim-Commit
+
+**Beobachtung (2026-07-26, S-391):** Beim Claim (§2) lief `board set S-391 status "In Progress"` **ohne** `BOARD_WRITER=flow` und wurde vom CLI-Guard abgelehnt (`FEHLER: set: nur /flow darf Story-Status setzen`); die drei Nicht-Status-Sets (`claimed_by`/`claimed_at`/`branch`) liefen durch. Der Claim-Commit wurde damit **ohne** Status gepusht — die Story stand remote geclaimt, aber weiterhin `To Do`, und brauchte einen zweiten Nachtrag-Commit.
+
+**Regel:** `BOARD_WRITER=flow` vor **jedem** `board set … status …` setzen — nicht nur beim Done-Flip (wie in flow/L02 Schritt 5 notiert), sondern bereits beim allerersten Claim-Set der Session. Am einfachsten: die Env-Variable pauschal jedem `board set`-Aufruf voranstellen. Ein halber Claim (claimed_by gesetzt, Status `To Do`) ist für parallele Sessions verwirrend: `board next` liefert die Story weiter als Kandidat, der Claim schützt nicht.
+
+*[seen-in: dev-gui S-391 2026-07-26; promoted: 2026-07-26]*
+
 ## flow/L07 — `board-ship.sh` Modus A kann aus einem Worktree **strukturell nie** landen (`checkout main` ist dort verboten)
 
 **Beobachtung (2026-07-16, S-358):** `board-ship.sh S-358 dev-gui` pusht den Story-Branch korrekt und stirbt dann sofort mit `fatal: a branch named 'main' already exists`. Kein CI-Fehler, kein Merge-Konflikt, nichts gelandet, Board bleibt auf `In Progress`.
