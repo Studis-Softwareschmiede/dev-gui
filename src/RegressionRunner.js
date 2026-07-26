@@ -219,6 +219,32 @@
  * bei `127.0.0.1:<port>` (Playwright-Kindprozess + getesteter dev-gui-Server
  * teilen dieselbe Netzwerk-Namespace, direkter Loopback ohne Host-Umweg).
  *
+ * App-Secret-Injektion (docs/specs/regression-local-execution.md AC7/AC8,
+ * `local`-Pfad exklusiv — `ephemeral-infra` unberührt, Spec-Scope): NACH
+ * erfolgreicher Erreichbarkeitsprüfung, VOR `npx playwright test`, löst
+ * `resolveLocalRegressionSecrets()` die App-Secrets des Testobjekts auf und
+ * injiziert sie AUSSCHLIESSLICH in die Kind-Env des Playwright-Prozesses
+ * (`defaultRunPlaywright`s `secretEnv`-Parameter). Deklarativ (AC8): die
+ * Menge der Secrets ist durch das PROJEKT-EIGENE, committete `.env.gpg`
+ * bestimmt (Secrets-Subsystem, `docs/architecture/secrets-subsystem.md` §3 —
+ * dieselbe Konvention wie die bestehende `run-regression.sh` „existiert
+ * `scripts/load-env.sh`, wird geladen") — NICHT aus Test-/Datendateien der
+ * Suite gelesen. Die per-App-GPG-Passphrase wird über die bestehende,
+ * INJIZIERTE `BitwardenDeployLoginService`-Boundary abgerufen (Item
+ * `env.gpg-passphrase-<projekt>`, `gpgItemNameFor()` — dieselbe Konvention
+ * wie [[deploy-bitwarden-gpg-injection]] AC15, kein zweiter Bitwarden-Pfad).
+ * Security-Floor (hart): die entschlüsselten Werte UND die Passphrase selbst
+ * werden NIE geloggt/auditiert/über WS gesendet/als argv übergeben und NIE
+ * auf Platte geschrieben — `.env.gpg` wird per `gpg -d` mit der Passphrase
+ * über stdin entschlüsselt, das Klartext-Ergebnis existiert nur transient im
+ * Prozess-Speicher (KEIN `.env`-Schreibzugriff, anders als `decrypt-env.sh`).
+ * Best-effort/degradierend (A2 — kontrollierter Suite-`test.skip`, KEIN
+ * Runner-Fehlzustand): ohne injizierten `deployLoginService`, ohne `.env.gpg`
+ * im Klon, bei nicht abrufbarer Passphrase oder fehlgeschlagener
+ * Entschlüsselung liefert die Funktion `{}` — der Playwright-Lauf startet
+ * trotzdem; betroffene Testfälle skippen kontrolliert über ihr eigenes
+ * `beforeAll` (Bestandsverhalten der Suite).
+ *
  * @module RegressionRunner
  */
 
@@ -230,6 +256,7 @@ import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { ProjectJobLock } from './ProjectJobLock.js';
 import { readRegressionSuites } from './RegressionSuiteReader.js';
+import { gpgItemNameFor } from './PerAppGpgProvisioningService.js';
 
 const _require = createRequire(import.meta.url);
 
@@ -276,6 +303,12 @@ const DOCKER_HOST_GATEWAY = 'host.docker.internal';
 
 /** Relativer Pfad des `@playwright/test`-`package.json` im Projekt-Klon (AC1/AC2). */
 const PLAYWRIGHT_TEST_PACKAGE_JSON = 'node_modules/@playwright/test/package.json';
+
+/** Verschlüsselte App-Secrets-Datei im Projekt-Klon (Secrets-Subsystem, AC7/AC8). */
+const ENV_GPG_FILENAME = '.env.gpg';
+
+/** `gpg -d`-Argv für die App-Secret-Entschlüsselung (AC7) — Passphrase NUR via stdin (`--passphrase-fd 0`), NIE argv. */
+const GPG_DECRYPT_ARGS = ['--batch', '--quiet', '--pinentry-mode', 'loopback', '--passphrase-fd', '0', '-d', ENV_GPG_FILENAME];
 
 /**
  * Bekannte, bereits im Testobjekt-Modell definierte, aber (noch) nicht
@@ -547,14 +580,17 @@ export function summarizeCtrf(ctrf) {
  * Array-argv (kein Shell-String, security/R03), `cwd` = Projekt-Pfad. KEIN
  * `claude`, KEIN API-Key, KEINE HeadlessRunnerCore-Env-Übernahme nötig — die
  * Kind-Env ist die volle Prozess-Env (Playwright/Node brauchen z.B. `PATH`,
- * `HOME`; Secrets für Testläufe werden — analog `run-regression.sh` AC9 — zur
- * Laufzeit aus der Umgebung übernommen, nie aus Test-/Datendateien gelesen;
- * dieser Runner persistiert nichts davon).
+ * `HOME`) plus die App-Secrets aus `secretEnv` (regression-local-execution
+ * AC7/AC8, `resolveLocalRegressionSecrets()` — deklarativ aus dem projekt-
+ * eigenen `.env.gpg`, nie aus Test-/Datendateien der Suite gelesen; dieser
+ * Runner persistiert nichts davon).
  *
  * @param {object} params
  * @param {string} params.projectPath
  * @param {string} params.testPath - relativer Pfad (Verzeichnis/Datei) an `npx playwright test`.
  * @param {string} [params.baseUrl] - REGRESSION_BASE_URL (nur bei `local`, Playwright-Config-Konvention).
+ * @param {Record<string,string>} [params.secretEnv] - App-Secrets (regression-local-execution AC7/AC8),
+ *   NUR in die Kind-Env gemischt — NIE geloggt/in argv (`resolveLocalRegressionSecrets()`, Default: `{}`).
  * @param {number} [params.timeoutMs]
  * @param {Function} [params.spawnFn] - injectable (default node:child_process spawn).
  * @returns {Promise<{ exitCode: number|null, spawnError?: boolean, timedOut?: boolean }>}
@@ -563,6 +599,7 @@ export function defaultRunPlaywright({
   projectPath,
   testPath,
   baseUrl,
+  secretEnv,
   timeoutMs = DEFAULT_REGRESSION_RUN_TIMEOUT_MS,
   spawnFn = nodeSpawn,
 }) {
@@ -580,7 +617,10 @@ export function defaultRunPlaywright({
       resolve(result);
     };
 
-    const env = { ...process.env };
+    // AC7: App-Secrets NUR in die Kind-Env gemischt — nie in argv, nie geloggt
+    // (stdout/stderr des Kindprozesses werden weiter unten nur gedraint, nie
+    // ausgewertet/geloggt — s. bestehende Kommentare).
+    const env = { ...process.env, ...(secretEnv || {}) };
     if (baseUrl) env.REGRESSION_BASE_URL = baseUrl;
 
     try {
@@ -803,9 +843,142 @@ export async function checkBrowserVersionGuard(
 }
 
 /**
+ * Entschlüsselt `.env.gpg` im Projekt-Klon per `gpg -d` (AC7) — die Passphrase
+ * geht AUSSCHLIESSLICH über stdin (`--passphrase-fd 0`, NIE argv/env-Var), das
+ * entschlüsselte Ergebnis wird NUR aus stdout gelesen (NIE auf Platte
+ * geschrieben — anders als das per-App `decrypt-env.sh`, das bewusst
+ * `.env`-freie Muster von `load-env.sh` wird hier 1:1 nachgebildet). stderr
+ * wird verworfen (könnte gpg-Diagnosetext enthalten, wird aber nie benötigt
+ * und NIE geloggt — Security-Floor).
+ *
+ * @param {string} projectPath - absoluter Projekt-Klon-Pfad (cwd für `gpg`, `.env.gpg` muss dort liegen).
+ * @param {string} passphrase - App-eigene GPG-Passphrase (Klartext, nur transient im Prozess).
+ * @param {{ spawnFn?: Function }} [deps] - injectable (default node:child_process spawn).
+ * @returns {Promise<{ ok: true, content: string } | { ok: false }>}
+ */
+export function defaultDecryptEnvGpg(projectPath, passphrase, { spawnFn = nodeSpawn } = {}) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawnFn('gpg', GPG_DECRYPT_ARGS, { cwd: projectPath, stdio: ['pipe', 'pipe', 'pipe'] });
+    } catch {
+      resolve({ ok: false });
+      return;
+    }
+
+    let stdout = '';
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+
+    child.stdout?.on('data', (d) => { stdout += d.toString('utf8'); });
+    child.stderr?.on('data', () => {}); // verworfen, nie geloggt (Security-Floor)
+
+    child.on('close', (code) => finish(code === 0 ? { ok: true, content: stdout } : { ok: false }));
+    child.on('error', () => finish({ ok: false }));
+
+    child.stdin?.write(passphrase);
+    child.stdin?.end();
+  });
+}
+
+/**
+ * Parst ein `.env`-formatiertes Klartext-Dokument (`KEY=VALUE`-Zeilen, optionales
+ * `export `-Präfix, `#`-Kommentare/Leerzeilen übersprungen, optionale umschließende
+ * Anführungszeichen entfernt) — dieselbe simple Konvention wie `.env.example`/
+ * `templates/_shared/secrets/.env.example` (AC7/AC8, keine Shell-`eval`-Auswertung,
+ * bewusst restriktiver als `load-env.sh` — kein Ausführungsrisiko für den
+ * entschlüsselten Inhalt).
+ *
+ * @param {string} content
+ * @returns {Record<string,string>}
+ */
+export function parseDotenvContent(content) {
+  const result = {};
+  for (const rawLine of String(content ?? '').split('\n')) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const match = line.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+    if (!match) continue;
+    let value = match[2];
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    result[match[1]] = value;
+  }
+  return result;
+}
+
+/**
+ * Löst die App-Secrets für die Playwright-Kind-Env auf (regression-local-execution
+ * AC7/AC8, `local`-Pfad exklusiv) — s. Modul-Doku für die vollständige Begründung.
+ * Deklarativ (AC8): die Menge der Secrets ist durch das PROJEKT-EIGENE `.env.gpg`
+ * bestimmt, NICHT aus Test-/Datendateien der Suite gelesen. Die per-App-
+ * GPG-Passphrase kommt über die injizierte `BitwardenDeployLoginService`-Boundary
+ * (Item `env.gpg-passphrase-<projekt>`, `gpgItemNameFor()` — AC15-Konvention).
+ *
+ * Best-effort/degradierend (A2 — kontrollierter Suite-`test.skip`, KEIN
+ * Runner-Fehlzustand): liefert `{}`, wenn (a) kein `deployLoginService`
+ * injiziert ist, (b) `.env.gpg` im Klon fehlt, (c) die Passphrase nicht
+ * abrufbar ist (Zugang unvollständig/Item nicht gefunden/bw unerreichbar)
+ * oder (d) die Entschlüsselung fehlschlägt — der Playwright-Lauf startet in
+ * JEDEM dieser Fälle trotzdem (kein `precondition-error`/`error`). Diagnose-
+ * Ausgaben (console.error) sind IMMER secret-frei (nur die Fehlerklasse, NIE
+ * die Passphrase/entschlüsselte Werte).
+ *
+ * @param {string} projectPath
+ * @param {string} projekt - Ziel-Slug (Bitwarden-Item-Namens-Konvention, AC15).
+ * @param {object} [deps]
+ * @param {import('./BitwardenDeployLoginService.js').BitwardenDeployLoginService|null} [deps.deployLoginService] - injectable (ohne → degradiert, kein Crash).
+ * @param {Function} [deps.readFile] - injectable (Existenz-Check `.env.gpg`, default node:fs/promises readFile).
+ * @param {Function} [deps.decryptEnvGpg] - injectable (default: defaultDecryptEnvGpg).
+ * @param {string|null} [deps.identity] - für den Bitwarden-Fetch-Audit (`fetchItemPassword`).
+ * @returns {Promise<Record<string,string>>}
+ */
+export async function resolveLocalRegressionSecrets(
+  projectPath,
+  projekt,
+  { deployLoginService = null, readFile: readFileFn = readFile, decryptEnvGpg = defaultDecryptEnvGpg, identity = null } = {},
+) {
+  if (!deployLoginService || typeof deployLoginService.fetchItemPassword !== 'function') {
+    return {}; // kein Zugang injiziert -> best-effort übersprungen (A2, kein Crash)
+  }
+
+  try {
+    await readFileFn(join(projectPath, ENV_GPG_FILENAME), 'utf8');
+  } catch {
+    return {}; // kein .env.gpg im Klon -> Projekt deklariert keine App-Secrets (A2)
+  }
+
+  let passphrase;
+  try {
+    passphrase = await deployLoginService.fetchItemPassword(gpgItemNameFor(projekt), { identity });
+  } catch (err) {
+    // A2: Abruf-Fehler (access-incomplete/item-not-found/bw-unreachable/…) ->
+    // kontrollierter Skip, KEIN Runner-Fehlzustand. Secret-freie Diagnose (nur
+    // die Fehlerklasse, nie Rohtext/Werte).
+    console.error(
+      '[RegressionRunner] App-Secrets: Bitwarden-Abruf fehlgeschlagen (best-effort, kontrollierter Skip):',
+      err?.deployErrorClass ?? 'error',
+    );
+    return {};
+  }
+
+  const outcome = await decryptEnvGpg(projectPath, passphrase, {});
+  if (!outcome?.ok) {
+    console.error('[RegressionRunner] App-Secrets: .env.gpg-Entschlüsselung fehlgeschlagen (best-effort, kontrollierter Skip)');
+    return {};
+  }
+  return parseDotenvContent(outcome.content);
+}
+
+/**
  * RegressionRunner — deterministischer `npx playwright test`-Runner + In-Memory
  * Job-Registry (docs/specs/regression-run.md AC1, AC2, AC3, AC5, AC9;
- * docs/specs/regression-local-execution.md AC1–AC6).
+ * docs/specs/regression-local-execution.md AC1–AC8).
  */
 export class RegressionRunner {
   /** @type {(params: object) => Promise<object>} */
@@ -842,6 +1015,10 @@ export class RegressionRunner {
   #checkBrowserVersionGuard;
   /** @type {() => boolean} injectable (regression-local-execution AC6, Default: isRunningInContainer — `/.dockerenv`-Indikator) */
   #isContainerDeployment;
+  /** @type {import('./BitwardenDeployLoginService.js').BitwardenDeployLoginService|null} injectable (regression-local-execution AC7/AC8, Default: keine Secret-Injektion möglich, degradiert) */
+  #deployLoginService;
+  /** @type {(projectPath: string, passphrase: string, deps?: object) => Promise<{ok:true,content:string}|{ok:false}>} injectable (regression-local-execution AC7, Default: defaultDecryptEnvGpg) */
+  #decryptEnvGpg;
   /**
    * @type {Map<string, {
    *   status: 'running'|'passed'|'failed'|'precondition-error'|'error',
@@ -874,6 +1051,8 @@ export class RegressionRunner {
    * @param {Function} [params.ensureTestDependencies] - injectable (regression-local-execution AC1, default: ensureTestDependencies).
    * @param {Function} [params.checkBrowserVersionGuard] - injectable (regression-local-execution AC2, default: checkBrowserVersionGuard).
    * @param {Function} [params.isContainerDeployment] - injectable (regression-local-execution AC6, default: isRunningInContainer).
+   * @param {import('./BitwardenDeployLoginService.js').BitwardenDeployLoginService} [params.deployLoginService] - injectable (regression-local-execution AC7/AC8; ohne → keine Secret-Injektion, degradiert).
+   * @param {Function} [params.decryptEnvGpg] - injectable (regression-local-execution AC7, default: defaultDecryptEnvGpg).
    */
   constructor({
     runPlaywright,
@@ -894,6 +1073,8 @@ export class RegressionRunner {
     ensureTestDependencies: ensureTestDependenciesFn,
     checkBrowserVersionGuard: checkBrowserVersionGuardFn,
     isContainerDeployment,
+    deployLoginService,
+    decryptEnvGpg,
   } = {}) {
     this.#timeoutMs = timeoutMs ?? (Number(process.env.REGRESSION_RUN_TIMEOUT_MS) || DEFAULT_REGRESSION_RUN_TIMEOUT_MS);
     this.#readRolloutConfig = readRolloutConfig ?? readLocalRolloutConfig;
@@ -913,6 +1094,8 @@ export class RegressionRunner {
     this.#ensureTestDependencies = ensureTestDependenciesFn ?? ensureTestDependencies;
     this.#checkBrowserVersionGuard = checkBrowserVersionGuardFn ?? checkBrowserVersionGuard;
     this.#isContainerDeployment = isContainerDeployment ?? isRunningInContainer;
+    this.#deployLoginService = deployLoginService ?? null;
+    this.#decryptEnvGpg = decryptEnvGpg ?? defaultDecryptEnvGpg;
   }
 
   /**
@@ -1102,9 +1285,21 @@ export class RegressionRunner {
     }
     const baseUrl = `http://${address}`;
 
+    // regression-local-execution AC7/AC8: App-Secrets NUR für den `local`-Pfad,
+    // NACH erfolgreicher Erreichbarkeitsprüfung, AUSSCHLIESSLICH in die
+    // Playwright-Kind-Env (nie Log/Audit/WS/argv/Platte, s. Modul-Doku +
+    // resolveLocalRegressionSecrets()). Best-effort/degradierend (A2): liefert
+    // `{}` ohne Runner-Fehlzustand, wenn Zugang/Item/`.env.gpg` fehlen.
+    const secretEnv = await resolveLocalRegressionSecrets(job.projectPath, job.projekt, {
+      deployLoginService: this.#deployLoginService,
+      readFile: this.#readFile,
+      decryptEnvGpg: this.#decryptEnvGpg,
+      identity: job.identity,
+    });
+
     let res;
     try {
-      res = await this.#runPlaywright({ projectPath: job.projectPath, testPath, baseUrl });
+      res = await this.#runPlaywright({ projectPath: job.projectPath, testPath, baseUrl, secretEnv });
     } catch {
       this.#finish(runId, 'error', { reason: INTERNAL_FAILURE_MESSAGE, durationMs: Date.now() - start });
       return;

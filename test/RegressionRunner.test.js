@@ -5,7 +5,7 @@
  *
  * Covers (regression-run): AC1, AC2, AC5, AC7, AC8, AC9, AC10, AC11, AC12, AC13
  *
- * Covers (regression-local-execution): AC1, AC2, AC3, AC4, AC5, AC6
+ * Covers (regression-local-execution): AC1, AC2, AC3, AC4, AC5, AC6, AC7, AC8
  *   AC1 — Test-Dependencies herstellen: `isPlaywrightTestInstalled` erkennt
  *         in EINEM Check sowohl "node_modules fehlt" als auch "nur
  *         @playwright/test fehlt"; `ensureTestDependencies` ist idempotent
@@ -48,6 +48,22 @@
  *         local-Erreichbarkeitsprüfung UND `REGRESSION_BASE_URL` nutzen
  *         DIESELBE aufgelöste Adresse (EIN `probeReachability`-Aufruf mit
  *         der Adresse als Argument).
+ *   AC7 — Sichere Injektion: `resolveLocalRegressionSecrets()` holt die
+ *         per-App-GPG-Passphrase über den injizierten `deployLoginService`
+ *         (Item `env.gpg-passphrase-<projekt>`, `fetchItemPassword`),
+ *         entschlüsselt `.env.gpg` im Klon per `gpg -d` (Passphrase NUR via
+ *         stdin, NIE argv) und mischt das Ergebnis AUSSCHLIESSLICH in die
+ *         Playwright-Kind-Env (`defaultRunPlaywright`s `secretEnv`) — NIE in
+ *         Log/Audit/WS/argv/Platte (Grep-/Verhaltens-prüfbar unten). Läuft nur
+ *         im `local`-Pfad, NACH der Erreichbarkeitsprüfung; `ephemeral-infra`
+ *         ruft `deployLoginService` NIE auf (Scope-Exklusivität).
+ *   AC8 — Deklarativ + kontrollierter Skip (A2): fehlt `.env.gpg` im Klon,
+ *         ist kein `deployLoginService` injiziert, schlägt der Bitwarden-
+ *         Abruf fehl (z.B. `item-not-found`) oder die Entschlüsselung —
+ *         `resolveLocalRegressionSecrets()` liefert `{}`, KEIN Runner-
+ *         Fehlzustand (`precondition-error`/`error`); der Playwright-Lauf
+ *         startet trotzdem (kontrollierter Suite-`test.skip`-Ausgang bleibt
+ *         Sache der Suite, nicht des Runners).
  *
  *   AC1 — RegressionRunner is an own boundary with an OWN, isolated
  *         ProjectJobLock instance (never a `claude`/agent process — grep-
@@ -190,7 +206,11 @@ import {
   readImagePlaywrightVersion,
   checkBrowserVersionGuard,
   isRunningInContainer,
+  defaultDecryptEnvGpg,
+  parseDotenvContent,
+  resolveLocalRegressionSecrets,
 } from '../src/RegressionRunner.js';
+import { gpgItemNameFor } from '../src/PerAppGpgProvisioningService.js';
 import { ProjectJobLock } from '../src/ProjectJobLock.js';
 
 /** Resolve pending microtasks so a fire-and-forget #runLifecycle settles. */
@@ -1115,6 +1135,301 @@ describe('RegressionRunner — regression-run.md', () => {
 
       expect(probeReachability).toHaveBeenCalledWith('127.0.0.1:8080');
       expect(runner.getRun(runId).status).toBe('passed');
+    });
+  });
+
+  // ── regression-local-execution AC7/AC8: App-Secret-Injektion ───────────────
+  describe('parseDotenvContent (regression-local-execution AC7/AC8 — reine Parsing-Funktion)', () => {
+    it('parst KEY=VALUE-Zeilen, überspringt Kommentare/Leerzeilen, entfernt umschließende Anführungszeichen', () => {
+      const content = [
+        '# Kommentar',
+        '',
+        'ALCHEMY_API_KEY=abc123',
+        'export WALLET_PRIVATE_KEY_A=0xdead',
+        'WALLET_PRIVATE_KEY_B="quoted value"',
+        "SINGLE_QUOTED='single'",
+        'malformed line without equals',
+      ].join('\n');
+      expect(parseDotenvContent(content)).toEqual({
+        ALCHEMY_API_KEY: 'abc123',
+        WALLET_PRIVATE_KEY_A: '0xdead',
+        WALLET_PRIVATE_KEY_B: 'quoted value',
+        SINGLE_QUOTED: 'single',
+      });
+    });
+
+    it('liefert {} für leeren/undefined Inhalt', () => {
+      expect(parseDotenvContent('')).toEqual({});
+      expect(parseDotenvContent(undefined)).toEqual({});
+    });
+  });
+
+  describe('defaultDecryptEnvGpg (regression-local-execution AC7 — Passphrase NUR via stdin, nie argv)', () => {
+    function fakeGpgChild({ exitCode = 0, stdout = 'ALCHEMY_API_KEY=abc\n' } = {}) {
+      const handlers = {};
+      const written = [];
+      const child = {
+        stdout: { on: (evt, cb) => { if (evt === 'data') cb(Buffer.from(stdout)); } },
+        stderr: { on: () => {} },
+        stdin: { write: (d) => written.push(d), end: () => {} },
+        on: (evt, cb) => { handlers[evt] = cb; if (evt === 'close') setImmediate(() => cb(exitCode)); },
+      };
+      return { child, written };
+    }
+
+    it('spawnt gpg mit dem festen Decrypt-Argv, cwd=projectPath, Passphrase NUR via stdin', async () => {
+      const { child, written } = fakeGpgChild();
+      const spawnFn = jest.fn(() => child);
+
+      const result = await defaultDecryptEnvGpg('/ws/proj', 's3cr3t-phrase', { spawnFn });
+
+      expect(spawnFn).toHaveBeenCalledWith(
+        'gpg',
+        ['--batch', '--quiet', '--pinentry-mode', 'loopback', '--passphrase-fd', '0', '-d', '.env.gpg'],
+        { cwd: '/ws/proj', stdio: ['pipe', 'pipe', 'pipe'] },
+      );
+      // Passphrase geht NUR über stdin — NICHT im Argv-Aufruf oben enthalten.
+      expect(written).toEqual(['s3cr3t-phrase']);
+      expect(spawnFn.mock.calls[0][1]).not.toContain('s3cr3t-phrase');
+      expect(result).toEqual({ ok: true, content: 'ALCHEMY_API_KEY=abc\n' });
+    });
+
+    it('exitCode != 0 -> {ok:false} (kein Content-Leak)', async () => {
+      const { child } = fakeGpgChild({ exitCode: 1, stdout: '' });
+      const result = await defaultDecryptEnvGpg('/ws/proj', 'wrong-phrase', { spawnFn: () => child });
+      expect(result).toEqual({ ok: false });
+    });
+
+    it('spawnFn wirft synchron -> {ok:false}, kein Crash', async () => {
+      const spawnFn = jest.fn(() => { throw new Error('spawn failed'); });
+      const result = await defaultDecryptEnvGpg('/ws/proj', 'phrase', { spawnFn });
+      expect(result).toEqual({ ok: false });
+    });
+  });
+
+  describe('resolveLocalRegressionSecrets (regression-local-execution AC7/AC8)', () => {
+    it('AC8: ohne injizierten deployLoginService -> {} (best-effort, kein Crash)', async () => {
+      const readFileFn = jest.fn();
+      const result = await resolveLocalRegressionSecrets('/ws/proj', 'flashrescue', { deployLoginService: null, readFile: readFileFn });
+      expect(result).toEqual({});
+      expect(readFileFn).not.toHaveBeenCalled();
+    });
+
+    it('AC8: kein .env.gpg im Klon -> {}, fetchItemPassword wird NICHT aufgerufen (kein unnötiger Bitwarden-Zugriff)', async () => {
+      const fetchItemPassword = jest.fn();
+      const readFileFn = jest.fn(async () => { throw Object.assign(new Error('enoent'), { code: 'ENOENT' }); });
+      const result = await resolveLocalRegressionSecrets('/ws/proj', 'flashrescue', {
+        deployLoginService: { fetchItemPassword },
+        readFile: readFileFn,
+      });
+      expect(result).toEqual({});
+      expect(fetchItemPassword).not.toHaveBeenCalled();
+    });
+
+    it('AC7: Item-Name-Konvention env.gpg-passphrase-<projekt> (AC15-Konvention, gpgItemNameFor)', async () => {
+      const fetchItemPassword = jest.fn(async () => 'the-passphrase');
+      const readFileFn = jest.fn(async () => 'irrelevant-encrypted-bytes');
+      const decryptEnvGpg = jest.fn(async () => ({ ok: true, content: 'ALCHEMY_API_KEY=abc\n' }));
+      await resolveLocalRegressionSecrets('/ws/proj', 'flashrescue', {
+        deployLoginService: { fetchItemPassword },
+        readFile: readFileFn,
+        decryptEnvGpg,
+        identity: 'owner@example.com',
+      });
+      expect(fetchItemPassword).toHaveBeenCalledWith(gpgItemNameFor('flashrescue'), { identity: 'owner@example.com' });
+      expect(fetchItemPassword.mock.calls[0][0]).toBe('env.gpg-passphrase-flashrescue');
+      // Die Passphrase geht NUR an decryptEnvGpg — nicht zurück in die Rückgabe.
+      expect(decryptEnvGpg).toHaveBeenCalledWith('/ws/proj', 'the-passphrase', {});
+    });
+
+    it('AC8 (A2): fetchItemPassword schlägt fehl (z.B. item-not-found) -> {} (kontrollierter Skip, kein Crash/Throw)', async () => {
+      const err = new Error('bw-deploy: item-not-found');
+      err.deployErrorClass = 'item-not-found';
+      const fetchItemPassword = jest.fn(async () => { throw err; });
+      const decryptEnvGpg = jest.fn();
+      const readFileFn = jest.fn(async () => 'irrelevant-encrypted-bytes');
+      const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+      const result = await resolveLocalRegressionSecrets('/ws/proj', 'flashrescue', {
+        deployLoginService: { fetchItemPassword },
+        readFile: readFileFn,
+        decryptEnvGpg,
+      });
+      expect(result).toEqual({});
+      expect(decryptEnvGpg).not.toHaveBeenCalled();
+      // Secret-freie Diagnose: nur die Fehlerklasse, NIE ein Rohtext/Wert im Log.
+      expect(errorSpy).toHaveBeenCalledWith(expect.any(String), 'item-not-found');
+      errorSpy.mockRestore();
+    });
+
+    it('AC8: Entschlüsselung schlägt fehl (falsche Passphrase) -> {} (kontrollierter Skip)', async () => {
+      const fetchItemPassword = jest.fn(async () => 'wrong-passphrase');
+      const decryptEnvGpg = jest.fn(async () => ({ ok: false }));
+      const readFileFn = jest.fn(async () => 'irrelevant-encrypted-bytes');
+      const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+      const result = await resolveLocalRegressionSecrets('/ws/proj', 'flashrescue', {
+        deployLoginService: { fetchItemPassword },
+        readFile: readFileFn,
+        decryptEnvGpg,
+      });
+      expect(result).toEqual({});
+      errorSpy.mockRestore();
+    });
+
+    it('AC7: Happy Path — entschlüsselter Inhalt wird als Env-Var-Map zurückgegeben (Referenzfall ALCHEMY_API_KEY + 2 Wallet-Keys)', async () => {
+      const fetchItemPassword = jest.fn(async () => 'the-passphrase');
+      const decryptEnvGpg = jest.fn(async () => ({
+        ok: true,
+        content: 'ALCHEMY_API_KEY=abc123\nWALLET_PRIVATE_KEY_A=0xaaa\nWALLET_PRIVATE_KEY_B=0xbbb\n',
+      }));
+      const readFileFn = jest.fn(async () => 'irrelevant-encrypted-bytes');
+      const result = await resolveLocalRegressionSecrets('/ws/proj', 'flashrescue', {
+        deployLoginService: { fetchItemPassword },
+        readFile: readFileFn,
+        decryptEnvGpg,
+      });
+      expect(result).toEqual({
+        ALCHEMY_API_KEY: 'abc123',
+        WALLET_PRIVATE_KEY_A: '0xaaa',
+        WALLET_PRIVATE_KEY_B: '0xbbb',
+      });
+    });
+  });
+
+  describe('RegressionRunner#start — App-Secret-Injektion (regression-local-execution AC7/AC8)', () => {
+    function readFileWithPortAndEnvGpg({ previewPort = 8080, hasEnvGpg = true } = {}) {
+      return jest.fn(async (p) => {
+        if (String(p).endsWith('.claude/profile.md')) return `preview_port: ${previewPort}\n`;
+        if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
+        if (String(p).endsWith(CTRF_RESULT_PATH)) return JSON.stringify({ results: { summary: { tests: 1, passed: 1, failed: 0 } } });
+        if (String(p).endsWith('.env.gpg')) {
+          if (hasEnvGpg) return 'irrelevant-encrypted-bytes';
+          throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+        }
+        throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+      });
+    }
+
+    it('AC7: entschlüsselte Secrets landen AUSSCHLIESSLICH in der Playwright-Kind-Env (secretEnv-Parameter)', async () => {
+      const fetchItemPassword = jest.fn(async () => 'the-passphrase');
+      const decryptEnvGpg = jest.fn(async () => ({ ok: true, content: 'ALCHEMY_API_KEY=abc123\n' }));
+      const runPlaywright = jest.fn(async ({ secretEnv }) => {
+        expect(secretEnv).toEqual({ ALCHEMY_API_KEY: 'abc123' });
+        return { exitCode: 0 };
+      });
+      const runner = newRegressionRunner({
+        runPlaywright,
+        readFile: readFileWithPortAndEnvGpg(),
+        deployLoginService: { fetchItemPassword },
+        decryptEnvGpg,
+      });
+
+      const { runId } = runner.start('/ws/flashrescue', 'flashrescue', { typ: 'gesamt' });
+      await flush();
+
+      expect(fetchItemPassword).toHaveBeenCalledWith('env.gpg-passphrase-flashrescue', { identity: null });
+      expect(runner.getRun(runId).status).toBe('passed');
+    });
+
+    it('AC7 Security-Floor: secretEnv landet NIE im Job-Status (getRun) — keine Werte in der öffentlichen Sicht', async () => {
+      const fetchItemPassword = jest.fn(async () => 'the-passphrase');
+      const decryptEnvGpg = jest.fn(async () => ({ ok: true, content: 'ALCHEMY_API_KEY=abc123\n' }));
+      const runner = newRegressionRunner({
+        runPlaywright: jest.fn(async () => ({ exitCode: 0 })),
+        readFile: readFileWithPortAndEnvGpg(),
+        deployLoginService: { fetchItemPassword },
+        decryptEnvGpg,
+      });
+
+      const { runId } = runner.start('/ws/flashrescue', 'flashrescue', { typ: 'gesamt' });
+      await flush();
+
+      const run = runner.getRun(runId);
+      expect(JSON.stringify(run)).not.toContain('abc123');
+      expect(JSON.stringify(run)).not.toContain('the-passphrase');
+    });
+
+    it('AC7 Security-Floor: der Audit-Eintrag enthält NIE die Passphrase/den Secret-Wert', async () => {
+      const fetchItemPassword = jest.fn(async () => 'the-passphrase');
+      const decryptEnvGpg = jest.fn(async () => ({ ok: true, content: 'ALCHEMY_API_KEY=abc123\n' }));
+      const record = jest.fn();
+      const runner = newRegressionRunner({
+        runPlaywright: jest.fn(async () => ({ exitCode: 0 })),
+        readFile: readFileWithPortAndEnvGpg(),
+        deployLoginService: { fetchItemPassword },
+        decryptEnvGpg,
+        auditStore: { record },
+      });
+
+      runner.start('/ws/flashrescue', 'flashrescue', { typ: 'gesamt' });
+      await flush();
+
+      for (const call of record.mock.calls) {
+        expect(JSON.stringify(call[0])).not.toContain('abc123');
+        expect(JSON.stringify(call[0])).not.toContain('the-passphrase');
+      }
+    });
+
+    it('AC8 (A2): kein .env.gpg im Klon -> Lauf läuft normal weiter (passed), secretEnv={}, fetchItemPassword NIE aufgerufen', async () => {
+      const fetchItemPassword = jest.fn();
+      const runPlaywright = jest.fn(async ({ secretEnv }) => {
+        expect(secretEnv).toEqual({});
+        return { exitCode: 0 };
+      });
+      const runner = newRegressionRunner({
+        runPlaywright,
+        readFile: readFileWithPortAndEnvGpg({ hasEnvGpg: false }),
+        deployLoginService: { fetchItemPassword },
+      });
+
+      const { runId } = runner.start('/ws/flashrescue', 'flashrescue', { typ: 'gesamt' });
+      await flush();
+
+      expect(fetchItemPassword).not.toHaveBeenCalled();
+      expect(runner.getRun(runId).status).toBe('passed');
+    });
+
+    it('AC8 (A2): Bitwarden-Abruf schlägt fehl -> KEIN precondition-error/error, Lauf läuft normal weiter (kontrollierter Suite-Skip bleibt Sache der Suite)', async () => {
+      const err = new Error('bw-deploy: access-incomplete');
+      err.deployErrorClass = 'access-incomplete';
+      const fetchItemPassword = jest.fn(async () => { throw err; });
+      const runPlaywright = jest.fn(async ({ secretEnv }) => {
+        expect(secretEnv).toEqual({});
+        return { exitCode: 0 };
+      });
+      const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+      const runner = newRegressionRunner({
+        runPlaywright,
+        readFile: readFileWithPortAndEnvGpg(),
+        deployLoginService: { fetchItemPassword },
+      });
+
+      const { runId } = runner.start('/ws/flashrescue', 'flashrescue', { typ: 'gesamt' });
+      await flush();
+
+      expect(runner.getRun(runId).status).toBe('passed');
+      errorSpy.mockRestore();
+    });
+
+    it('AC7: ephemeral-infra ruft deployLoginService NIE auf (Scope-Exklusivität — lokal-exklusiv)', async () => {
+      const fetchItemPassword = jest.fn();
+      const readFile = jest.fn(async (p) => {
+        if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
+        if (String(p).endsWith('.claude/profile.md')) return 'preview_port: 8080\n';
+        if (String(p).endsWith(CTRF_RESULT_PATH)) return JSON.stringify({ results: { summary: { tests: 1, passed: 1, failed: 0 } } });
+        throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+      });
+      const readSuites = jest.fn(async () => ({ suites: [{ scope: { typ: 'bereich', id: 'vps' }, target: 'ephemeral-infra' }] }));
+      const runner = newRegressionRunner({
+        runPlaywright: jest.fn(async () => ({ exitCode: 0 })),
+        readFile,
+        readSuites,
+        deployLoginService: { fetchItemPassword },
+      });
+
+      runner.start('/ws/proj', 'proj', { typ: 'bereich', id: 'vps' });
+      await flush();
+
+      expect(fetchItemPassword).not.toHaveBeenCalled();
     });
   });
 
