@@ -2,7 +2,7 @@ id: S-416
 parent: F-096
 title: Port-Aufloesung robust gegen Inline-Kommentare + port-null als Vorbedingungsfehler
   + deployment-bewusste Ziel-Adressierung
-status: In Progress
+status: Done
 priority: P1
 spec: docs/specs/regression-local-execution.md
 implements:
@@ -13,8 +13,8 @@ depends: null
 labels: null
 size_est: M
 dispo_est: '4.0'
-dispo_act: null
-dispo_forecast: null
+dispo_act: '7'
+dispo_forecast: -.4285
 estimate_note: 'M (Score 7: 3 AC + zwei Regex-Fixes + deployment-bewusste Adressierung
   host.docker.internal/127.0.0.1 + Docker-Port-Mapping). baseline js|balanced|M.'
 confidence: medium
@@ -23,7 +23,8 @@ branch: feat/S-416-port-aufloesung
 pr: null
 blocked_reason: null
 created_at: '2026-07-22T19:10:22Z'
-updated_at: '2026-07-26T20:36:45Z'
-done_at: null
+updated_at: '2026-07-26T21:28:49Z'
+done_at: '2026-07-26T21:26:52Z'
 claimed_by: MacBook-Pro-von-Alexander.local-34301-1785098176-21858
 claimed_at: '2026-07-26T20:36:30Z'
+tok: '183252457'

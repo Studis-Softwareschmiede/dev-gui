@@ -3,28 +3,32 @@
 
 ## Aktueller Stand
 F-096 (target:local-Regressionslauf end-to-end lauffähig) ist in Arbeit im
-Feature-Batch: S-415 (Test-Deps + Browser-Versions-Guard) ist auf
-feature/F-096 gelandet — der Runner stellt jetzt vor dem Playwright-Start
-seine Vorbedingungen her statt blind zu starten. Als Nächstes: S-416
-(Port-Auflösung robust/Inline-Kommentare), S-417 (App-Secrets via
+Feature-Batch: S-415 (Test-Deps + Browser-Guard) und S-416 (Port-Auflösung
++ deployment-bewusste Ziel-Adressierung) sind auf feature/F-096 gelandet —
+der Runner stellt Vorbedingungen her und adressiert das Testobjekt jetzt
+container-/host-bewusst. Als Nächstes: S-417 (App-Secrets via
 Bitwarden/GPG in die Kind-Env), S-419 (Scope-Vertrag Reader↔Runner),
 danach S-418 (Integrationslauf, depends auf 415–417). Feature landet
 gebündelt am Ende in main (kein Rollout je Story).
 
 ## Letzte Arbeiten
-- S-415 / Test-Deps + Browser-Guard (AC1-AC3 regression-local-execution):
-  ensureTestDependencies (npm ci/Fallback install) + checkBrowserVersionGuard
-  (exakter Versions-Vergleich Klon vs. Image) in #runLifecycle, nur
-  target:local, VOR Port-Prüfung; feste secret-freie Diagnosen. Tests via
-  Factory newRegressionRunner() (Prechecks default bestehbar). EP 4/4.
-- S-409 / bw config konditional (AC17-AC21): #openSession ruft config nur
-  bei unauthenticated oder abweichender Server-URL; Fehlerklasse
-  config-failed. server_url wird NICHT auto-befüllt. EP 6.5/5.25.
+- S-416 / Port + Ziel-Adressierung (AC4-AC6 regression-local-execution):
+  portFieldRegex() toleriert Inline-Kommentare (beide Port-Leser);
+  port=null → precondition-error „lokaler Test-Port nicht bestimmbar";
+  #resolveTargetAddress() host.docker.internal:<hostPort> (Container,
+  echtes Mapping via LocalDockerControl#getMappedHostPort) vs.
+  127.0.0.1:<port> (Host) — eine Adresse für Probe + REGRESSION_BASE_URL.
+  docker-compose.yml: extra_hosts host-gateway. EP 4/7 (unterschätzt).
+- S-415 / Test-Deps + Browser-Guard (AC1-AC3): ensureTestDependencies +
+  checkBrowserVersionGuard in #runLifecycle, nur target:local, VOR
+  Port-Prüfung; feste secret-freie Diagnosen. Tests via Factory
+  newRegressionRunner(). EP 4/4.
+- S-409 / bw config konditional (AC17-AC21): config nur bei unauthenticated
+  oder abweichender Server-URL; Fehlerklasse config-failed. EP 6.5/5.25.
 - S-408 / Kachel-Rückbau (AC23): Red-Team-Kachel entfernt. EP 4/4.
 - S-404 / Verlauf-Aufklapper: RedTeamScanHistory.jsx. EP 4/4.
 - S-406 / Befundliste: Sammel-Button + Rückfrage. EP 7 vs. 4.
 - S-405 / Befunde→Board-Übertrag: idempotent. EP 4.0/4.0.
-- S-403 / Scan-Knopf + Panel: RedTeamScanPanel.jsx. EP 7/5.25.
 
 ## Offene Fäden
 - ADR-Eintrag zu A1 (Playwright-Browser fest im Image + zentrales
@@ -34,4 +38,5 @@ gebündelt am Ende in main (kein Rollout je Story).
   config-failed nicht (generischer Fallback-Text) — Folge-Ticket sinnvoll.
 - Landen aus Worktree weiter von Hand deterministisch (flow/L02/L07);
   Retro-Issue #371 (board-ship.sh worktree-tauglich) offen.
-- Testläufe im Worktree: npm run test:worktree (S-400).
+- Testläufe im Worktree: npm run test:worktree; positionale Jest-Argumente
+  filtern nicht — --testPathPatterns nutzen (S-416-Erkenntnis).
