@@ -2,6 +2,16 @@
 
 Newest-first. Regeln für die Orchestrator-Ebene (Landen/Konsolidieren/Recovery/Dispatch-Ökonomie).
 
+## flow/L09 — `board-ship.sh` **Modus B** (`--target-branch feature/<F-###>`) landet aus dem Feature-Worktree problemlos — flow/L07 gilt nur für Modus A
+
+**Beobachtung (2026-07-26, S-412):** `board-ship.sh S-412 dev-gui --target-branch feature/F-095` lief aus dem F-095-Worktree glatt durch (Merge, Board-Flip, Push, Exit 0) — kein `fatal: a branch named 'main' already exists`, kein Handbetrieb nötig.
+
+**Warum L07 hier nicht greift:** Der Abbruch in flow/L07 entsteht, weil Modus A `SHIP_BRANCH=main` auscheckt und der **Hauptordner** `main` hält (Git verbietet denselben Branch in zwei Worktrees). In Modus B ist `SHIP_BRANCH=feature/<F-###>` — und genau dieser Branch ist im eigenen Worktree ausgecheckt, in keinem anderen. Der `checkout` ist damit ein No-op statt einer Kollision.
+
+**Regel:** Im Feature-Batch (`--parent`) **zuerst das Skript versuchen**, nicht vorsorglich von Hand landen — der Handbetrieb aus L07 ist teurer, fehleranfälliger und hier unnötig. Vorbedingung wie im Skript-Kopf: eigener Story-Branch (`git checkout -b feat/<S-###>-<slug>` aus dem Feature-Branch heraus), Story-Commit darauf, dann Modus B. Danach den Worktree mit `git checkout feature/<F-###> && git reset --hard origin/feature/<F-###>` nachziehen — das Skript pusht den Board-Flip (`Done`) direkt in den Feature-Branch, der lokale Worktree sieht ihn sonst nicht und würde beim Dispo-Spiegel auf einem veralteten Story-YAML arbeiten.
+
+**Offen bleibt:** Modus A (Story direkt nach `main`, board-weiter Lauf ohne `--parent`) ist von L07 unverändert betroffen — dort weiter deterministisch von Hand. Retro-Issue #371 (board-ship.sh worktree-tauglich) bezieht sich auf genau diesen Rest.
+
 ## flow/L08 — Feature-Batch (`--parent`): Claim-Commit auf `feature/<F-###>` pushen, nicht auf `main`
 
 **Beobachtung (2026-07-26, S-410):** §2 des `/flow`-Vertrags sagt `git push origin HEAD:"$default_branch"` für den Claim. Im Feature-Batch steht der Worktree aber auf `feature/<F-###>`, das typischerweise hinter `origin/main` liegt (hier 3 Commits) — ein `HEAD:main`-Push ist damit **strukturell non-fast-forward** und würde nach 3 Retries als „Senke belegt" abbrechen, obwohl nichts kollidiert.
