@@ -2,7 +2,7 @@ id: S-412
 parent: F-095
 title: 'Frontend: In-App-Report — Pruefpunkt-Liste + per-Punkt-Ampel + Kein-Fund-sauber
   (Panel + Verlauf)'
-status: In Progress
+status: Done
 priority: P1
 spec: docs/specs/red-team-scan-per-container.md
 implements:
@@ -24,7 +24,7 @@ branch: feat/S-412-report-pruefpunkte
 pr: null
 blocked_reason: null
 created_at: '2026-07-22T09:42:04Z'
-updated_at: '2026-07-26T21:09:43Z'
-done_at: null
+updated_at: '2026-07-26T21:35:09Z'
+done_at: '2026-07-26T21:35:08Z'
 claimed_by: MacBook-Pro-von-Alexander.local-86139-1785100175-25720
 claimed_at: '2026-07-26T21:09:41Z'
