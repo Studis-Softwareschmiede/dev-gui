@@ -2,7 +2,7 @@ id: S-414
 parent: F-072
 title: 'Deploy-Zugang „Zugang prüfen"-Button: config-failed-Fehlerklasse erkennen
   und spezifischen Hinweis statt generischem Text zeigen (Folge zu S-409)'
-status: To Do
+status: In Progress
 priority: P2
 spec: docs/specs/deploy-bitwarden-gpg-injection.md
 implements:
@@ -20,9 +20,11 @@ estimate_note: 'S (Score 3: 1 AC, reine Fehlertext-Katalog-Ergaenzung im validat
   VALIDATE_ERROR_MESSAGES, kein Komponenten-/UI-Umbau). baseline js|balanced|S.'
 confidence: medium
 tok_est: '957605'
-branch: null
+branch: feat/S-414-validate-config-failed
 pr: null
 blocked_reason: null
 created_at: '2026-07-22T13:52:53Z'
-updated_at: '2026-07-22T13:54:14Z'
+updated_at: '2026-07-26T22:12:36Z'
 done_at: null
+claimed_by: MacBook-Pro-von-Alexander.local-14873-1785103905-16917
+claimed_at: '2026-07-26T22:12:11Z'
