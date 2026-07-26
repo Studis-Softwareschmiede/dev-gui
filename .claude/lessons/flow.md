@@ -2,6 +2,12 @@
 
 Newest-first. Regeln für die Orchestrator-Ebene (Landen/Konsolidieren/Recovery/Dispatch-Ökonomie).
 
+## flow/L08 — `board set <id> status …` verlangt `BOARD_WRITER=flow` — sonst halber Claim ohne „In Progress"
+
+**Beobachtung (2026-07-27, S-417):** Der §2-Claim-Block aus dem /flow-Skill setzt vier Felder in Folge. Der **Status**-Set schlug fehl (`FEHLER: set: nur /flow darf Story-Status setzen (BOARD_WRITER=flow fehlt)`), die drei übrigen Sets (`claimed_by`/`claimed_at`/`branch`) liefen durch — und der Claim-Commit wurde mit Status `To Do` gepusht. Ergebnis: ein halb-geclaimter Remote-Zustand, den `board next` weiterhin als Kandidat liefern würde.
+
+**Regel:** In diesem Repo bei **jedem** Status-Schreibvorgang (`status`, auch Done/Blocked) `BOARD_WRITER=flow` voranstellen: `BOARD_WRITER=flow "$BOARD" set <id> status …`. Nach dem Claim-Push die Story-YAML gegenlesen (`grep ^status`), bevor der coder dispatcht wird — der Fehler ist sonst still im Batch-Output verschluckt (die Nicht-Status-Sets melden Erfolg). *[seen-in: dev-gui S-417 2026-07-27]*
+
 ## flow/L07 — `board-ship.sh` Modus A kann aus einem Worktree **strukturell nie** landen (`checkout main` ist dort verboten)
 
 **Beobachtung (2026-07-16, S-358):** `board-ship.sh S-358 dev-gui` pusht den Story-Branch korrekt und stirbt dann sofort mit `fatal: a branch named 'main' already exists`. Kein CI-Fehler, kein Merge-Konflikt, nichts gelandet, Board bleibt auf `In Progress`.
