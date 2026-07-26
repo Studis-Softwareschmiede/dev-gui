@@ -3,7 +3,7 @@
  * Regressionstest-Runner + its pure helpers (docs/specs/regression-run.md,
  * docs/specs/regression-local-execution.md).
  *
- * Covers (regression-run): AC1, AC2, AC5, AC7, AC8, AC9, AC10, AC11, AC12
+ * Covers (regression-run): AC1, AC2, AC5, AC7, AC8, AC9, AC10, AC11, AC12, AC13
  *
  * Covers (regression-local-execution): AC1, AC2, AC3, AC4, AC5, AC6
  *   AC1 — Test-Dependencies herstellen: `isPlaywrightTestInstalled` erkennt
@@ -109,6 +109,12 @@
  *         wörtlich in der Meldung, sonst generisch), OHNE Playwright-Start/
  *         local-Prüfung; kein deklariertes `target` (Suite nicht gefunden/
  *         Lesefehler) → konservativ `local`.
+ *   AC13 (S-419) — `validateScope`: `verbund` verlangt KEIN `id` mehr —
+ *         `{ typ: 'verbund' }` ist gültig (kein `missing-id`); ein
+ *         mitgesendetes `id` bleibt tolerant/wirkungslos (`scopeToTestPath`
+ *         ignoriert es weiterhin — EIN gemeinsamer Ordner für alle
+ *         Verbund-Suiten). `bereich` verlangt weiterhin ein nicht-leeres
+ *         `id`; `gesamt` ignoriert `id` unverändert (Bestandsverhalten).
  *   AC12 (S-362) — `ephemeral-infra`-Ausführungspfad: der Lauf startet
  *         Playwright (KEINE local-Erreichbarkeitsprüfung, KEIN Frisch-
  *         Ausrollen — beides AC5/AC7-exklusiv für `local`), setzt aber
@@ -294,11 +300,27 @@ describe('RegressionRunner — regression-run.md', () => {
       expect(validateScope({ typ: 'gesamt' })).toEqual({ ok: true, scope: { typ: 'gesamt' } });
     });
 
-    it('lehnt fehlendes/leeres scope, unbekanntes typ, fehlende id bei bereich/verbund ab', () => {
+    it('lehnt fehlendes/leeres scope, unbekanntes typ, fehlende id bei bereich ab', () => {
       expect(validateScope(null)).toEqual({ ok: false, reason: 'invalid' });
       expect(validateScope({ typ: 'unknown' })).toEqual({ ok: false, reason: 'invalid-typ' });
       expect(validateScope({ typ: 'bereich', id: '' })).toEqual({ ok: false, reason: 'missing-id' });
       expect(validateScope({ typ: 'bereich' })).toEqual({ ok: false, reason: 'missing-id' });
+    });
+
+    it('AC13: akzeptiert verbund OHNE id als gültig (kein missing-id mehr)', () => {
+      expect(validateScope({ typ: 'verbund' })).toEqual({ ok: true, scope: { typ: 'verbund' } });
+      expect(validateScope({ typ: 'verbund', id: '' })).toEqual({ ok: true, scope: { typ: 'verbund' } });
+    });
+
+    it('AC13: verbund MIT id bleibt gültig, aber wirkungslos (scopeToTestPath ignoriert sie)', () => {
+      expect(validateScope({ typ: 'verbund', id: 'infra-kette' })).toEqual({
+        ok: true,
+        scope: { typ: 'verbund', id: 'infra-kette' },
+      });
+      expect(scopeToTestPath(validateScope({ typ: 'verbund', id: 'infra-kette' }).scope)).toBe(
+        `${REGRESSION_TESTS_ROOT}/verbund`
+      );
+      expect(scopeToTestPath(validateScope({ typ: 'verbund' }).scope)).toBe(`${REGRESSION_TESTS_ROOT}/verbund`);
     });
 
     it('scopeToTestPath: bereich -> tests/regression/<id>, verbund -> tests/regression/verbund, gesamt -> tests/regression', () => {

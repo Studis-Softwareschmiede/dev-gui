@@ -326,6 +326,12 @@ export function validateScope(scope) {
     return { ok: true, scope: { typ: 'gesamt' } };
   }
   const id = typeof scope.id === 'string' ? scope.id.trim() : '';
+  if (scope.typ === 'verbund') {
+    // AC13: `id` ist für `verbund` optional — scopeToTestPath/#resolveTarget
+    // ignorieren sie ohnehin. Ein mitgesendetes `id` ist tolerant, aber
+    // wirkungslos (kein eigener Unter-Namensordner je Verbund-Name).
+    return id === '' ? { ok: true, scope: { typ: 'verbund' } } : { ok: true, scope: { typ: 'verbund', id } };
+  }
   if (id === '') {
     return { ok: false, reason: 'missing-id' };
   }
