@@ -2,7 +2,7 @@ id: S-389
 parent: F-050
 title: 'Obsidian-Ingest-Overlay: ehrliche Warteanzeige — Spinner + live tickende Laufzeit
   ("läuft seit m:ss") + Erwartungstext; Backend liefert startedAt im Status-Endpunkt'
-status: In Progress
+status: Done
 priority: P1
 spec: docs/specs/obsidian-question-catalog.md
 implements:
@@ -13,8 +13,8 @@ labels:
 - ui
 size_est: M
 dispo_est: '4.0'
-dispo_act: null
-dispo_forecast: null
+dispo_act: '4'
+dispo_forecast: '0'
 estimate_note: 'Heuristik score 6 (2 AC + 3 Komponenten ObsidianIngestRunner.startedAt/obsidianIngestRouter-Status-Body/ObsidianIngestOverlay-Spinner+Ticker
   + ui-Label) -> M. estimator als Subagent nicht dispatchbar -> S/M-Baseline-Lookup
   js|balanced|M: ep=4.0 (n=50), tok_total=1659043 (exakter Schnitt); confidence medium.
@@ -25,8 +25,9 @@ branch: feat/S-389-warteanzeige
 pr: null
 blocked_reason: null
 created_at: '2026-07-19T20:53:48Z'
-updated_at: '2026-07-26T20:10:05Z'
-done_at: null
+updated_at: '2026-07-26T20:35:22Z'
+done_at: '2026-07-26T20:33:56Z'
 area: obsidian
 claimed_by: MacBook-Pro-von-Alexander.local-88809-1785096598-5933
 claimed_at: '2026-07-26T20:10:01Z'
+tok: '34846377'
