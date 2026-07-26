@@ -4,7 +4,7 @@ title: 'Drain-Stop (Nacht-Drain-Teilnahme): NightWatchScheduler registriert abor
   je Nacht-Drain in der geteilten DrainAbortRegistry und reicht das Abbruch-Signal
   durch; POST /drain/:drainId/stop stoppt Nacht-Drains identisch (best-effort, #activeDrains
   unveraendert)'
-status: To Do
+status: Done
 priority: P1
 spec: docs/specs/drain-stop-control.md
 implements:
@@ -25,4 +25,4 @@ pr: null
 blocked_reason: null
 created_at: '2026-07-26T15:45:16Z'
 updated_at: '2026-07-26T15:45:16Z'
-done_at: null
+done_at: '2026-07-26T16:30:00Z'

@@ -1984,7 +1984,12 @@ describe('ProjectDrain.drainProject — AC18: audit', () => {
     // erzeugt zusätzlich einen secret-/pfad-freien "taktgeber:snapshot"-Eintrag
     // (Snapshot-Quelle + Verifiziert-Status) — additiv zu drain-start/escalate,
     // kein Regress an deren Inhalt/Reihenfolge.
-    const nonSnapshotEntries = auditStore.entries.filter((e) => !e.command.startsWith('taktgeber:snapshot'));
+    // drain-clone-precondition-sync AC6: ebenso additiv GENAU EIN
+    // "taktgeber:clone-sync"-Eintrag je Drain-Session (Sync-Ausgang) —
+    // beide Telemetrie-Familien werden hier herausgefiltert.
+    const nonSnapshotEntries = auditStore.entries.filter(
+      (e) => !e.command.startsWith('taktgeber:snapshot') && !e.command.startsWith('taktgeber:clone-sync'),
+    );
     expect(nonSnapshotEntries).toHaveLength(2);
     expect(nonSnapshotEntries[0].identity).toBe('alex@example.com');
     expect(nonSnapshotEntries[0].command).toContain('drain-start');

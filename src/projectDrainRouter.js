@@ -103,6 +103,7 @@ import { validateProjectPath, ProjectPathError, resolveProjectSlug } from './wor
 import { isProjectBusy } from './ProjectJobLock.js';
 import { COST_MODES } from './CommandService.js';
 import { DrainJobRegistry } from './DrainJobRegistry.js';
+import { createAbortHandle } from './DrainAbortRegistry.js';
 
 /**
  * @param {object} deps
@@ -148,7 +149,7 @@ import { DrainJobRegistry } from './DrainJobRegistry.js';
  * @returns {import('express').Router}
  */
 export function projectDrainRouter(deps = {}, options = {}) {
-  const { projectDrain, commandService, sessionRegistry, costModeModelCheck, drainReportStore, autoRetroTrigger, drainNotifier } = deps;
+  const { projectDrain, commandService, sessionRegistry, costModeModelCheck, drainReportStore, autoRetroTrigger, drainNotifier, abortRegistry } = deps;
   const _pathValidator = options.pathValidator ?? validateProjectPath;
   const _slugResolver = options.slugResolver ?? resolveProjectSlug;
   const _lock = options.lock;
@@ -298,6 +299,14 @@ export function projectDrainRouter(deps = {}, options = {}) {
     // Enum, Cost-Mode-Flag, Zeitstempel) und werden für die Persistenz mitgegeben.
     _jobRegistry.register(drainId, { project: rawSlug, trigger: 'manual', args: drainArgs, startedAt });
 
+    // drain-stop-control AC1/AC2: Abort-Handle erzeugen + registrieren (ohne
+    // injizierte abortRegistry: kein Handle, bit-identisches Alt-Verhalten).
+    let abortHandle = null;
+    if (abortRegistry && typeof abortRegistry.register === 'function') {
+      abortHandle = createAbortHandle();
+      abortRegistry.register(drainId, abortHandle);
+    }
+
     // Fire-and-forget (Modul-Doku): der Drain läuft potenziell lange; die
     // HTTP-Antwort wartet nicht auf sein Ende. ProjectDrain.drainProject()
     // erwirbt/gibt das ProjectJobLock intern selbst frei (try/finally) — kein
@@ -311,8 +320,10 @@ export function projectDrainRouter(deps = {}, options = {}) {
     // — resolved mit den erledigten/blockierten Stories, rejected mit einem
     // secret-freien `reason:'drain-failed'` (KEIN Roh-Fehlertext). Ein
     // Store-/Schreibfehler ist non-fatal (best-effort, s. #writeManualReport).
-    projectDrain.drainProject(resolvedPath, { identity, args: drainArgs })
+    projectDrain.drainProject(resolvedPath, { identity, args: drainArgs, ...(abortHandle ? { abortSignal: abortHandle } : {}) })
       .then((result) => {
+        // drain-stop-control AC5: `reason:'aborted'` wird von markDone selbst
+        // auf den terminalen Status `aborted` gemappt (nie `done`).
         _jobRegistry.markDone(drainId, result ?? {});
         _writeManualReport(rawSlug, result ?? {}, startedAt);
         // retro-auto-trigger AC4/AC6: nach dem abgeschlossenen manuellen Drain den
@@ -323,9 +334,12 @@ export function projectDrainRouter(deps = {}, options = {}) {
         // (slug = form-validierter Route-Slug, kein Pfad). No-op ohne Notifier
         // / bei flowRuns<=0 / Gating (Gating lebt komplett im DrainNotifier selbst).
         _notifyDrainDone(rawSlug, result ?? {});
+        // drain-stop-control AC1: Abort-Eintrag bei jedem terminalen Ende entfernen.
+        if (abortRegistry && typeof abortRegistry.unregister === 'function') abortRegistry.unregister(drainId);
       })
       .catch((err) => {
         _jobRegistry.markFailed(drainId);
+        if (abortRegistry && typeof abortRegistry.unregister === 'function') abortRegistry.unregister(drainId);
         console.error(`[projectDrain] Drain fehlgeschlagen (drainId=${drainId}):`, err.message);
         _writeManualReport(rawSlug, { reason: 'drain-failed', flowRuns: 0, completed: [], blocked: [] }, startedAt);
         // Fehlgeschlagener Drain: flowRuns:0 → isRetroDue == false (kein Enqueue).
@@ -354,6 +368,50 @@ export function projectDrainRouter(deps = {}, options = {}) {
     }
 
     return res.status(202).json(body);
+  });
+
+  /**
+   * POST /api/projects/:slug/drain/:drainId/stop — kooperativer Drain-Stop
+   * (drain-stop-control AC3/AC4). Signalisiert dem laufenden Drain (manuell
+   * ODER Nacht — geteilte Abort-Registry) den Abbruch; der Drain-Loop beendet
+   * sich am nächsten Rundenanfang mit `reason:'aborted'` (KEIN hartes Killen
+   * eines laufenden Flow-Kindprozesses, Spec A1). Zusätzlich wird der
+   * `DrainJobRegistry`-Eintrag sofort terminal auf `aborted` gesetzt (AC4) —
+   * `BootDrainRecovery` läuft ihn nach einem Neustart NICHT wieder an (AC6).
+   *
+   * Responses:
+   *   202 { drainId, status: 'aborting' } — aktiver Drain getroffen
+   *   400 { error }  — ungültiger Slug/Pfad
+   *   404 { error }  — kein aktiver Drain unter dieser drainId
+   *   500 { error }  — Abort-Registry nicht verdrahtet (Composition-Root-Fehler)
+   */
+  router.post('/api/projects/:slug/drain/:drainId/stop', async (req, res) => {
+    try {
+      const slugPath = _slugResolver(req.params.slug);
+      if (slugPath === null) {
+        return res.status(400).json({ error: 'Invalid project slug' });
+      }
+      await _pathValidator(slugPath);
+    } catch (err) {
+      const reason = err instanceof ProjectPathError ? err.message : 'Invalid project path';
+      return res.status(400).json({ error: `Invalid slug: ${reason}` });
+    }
+
+    if (!abortRegistry || typeof abortRegistry.signal !== 'function') {
+      return res.status(500).json({ error: 'Drain-Stop nicht verfügbar' });
+    }
+
+    const drainId = req.params.drainId;
+    const hit = abortRegistry.signal(drainId);
+    if (!hit) {
+      return res.status(404).json({ error: 'Kein aktiver Drain unter dieser drainId' });
+    }
+
+    // AC4: sofort terminal `aborted` in der persistenten Job-Registry —
+    // idempotent; der reguläre Abschluss-Pfad überschreibt das nie (AC5).
+    _jobRegistry.markAborted(drainId);
+
+    return res.status(202).json({ drainId, status: 'aborting' });
   });
 
   /**

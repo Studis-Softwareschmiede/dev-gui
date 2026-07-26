@@ -28,7 +28,7 @@ export const order = 21;
  * }} deps
  * @returns {import('express').Router}
  */
-export function create({ projectDrain, commandService, sessionRegistry, manualDrainLock, costModeModelCheck, drainReportStore, autoRetroTrigger, drainNotifier, drainJobRegistry }) {
+export function create({ projectDrain, commandService, sessionRegistry, manualDrainLock, costModeModelCheck, drainReportStore, autoRetroTrigger, drainNotifier, drainJobRegistry, drainAbortRegistry }) {
   // headless-manual-drain AC2: die isProjectBusy-Prüfung MUSS gegen dieselbe
   // ProjectJobLock-Instanz laufen, die die dedizierte manuelle ProjectDrain-
   // Instanz als Session-Lock hält (via server.js injiziert) — sonst sieht der
@@ -59,8 +59,12 @@ export function create({ projectDrain, commandService, sessionRegistry, manualDr
   // — derselbe Datei-Store (`${CRED_STORE_DIR}/drain-jobs.json`) wie der
   // Nacht-Drain; der Boot-Orphan-Reconcile (`reconcileOrphans()`, server.js)
   // wirkt dadurch auch auf manuelle Drain-Einträge.
+  // drain-stop-control AC1/AC3 (S-421): `drainAbortRegistry` (GETEILTE
+  // In-Memory-Instanz mit dem NightWatchScheduler, in server.js verdrahtet)
+  // — POST …/drain/:drainId/stop signalisiert darüber den kooperativen
+  // Abbruch beider Drain-Arten (manuell + Nacht).
   return projectDrainRouter(
-    { projectDrain, commandService, sessionRegistry, costModeModelCheck, drainReportStore, autoRetroTrigger, drainNotifier },
+    { projectDrain, commandService, sessionRegistry, costModeModelCheck, drainReportStore, autoRetroTrigger, drainNotifier, abortRegistry: drainAbortRegistry },
     { lock: manualDrainLock, jobRegistry: drainJobRegistry },
   );
 }

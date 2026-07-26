@@ -170,6 +170,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { getZonedParts, zonedWallTimeToUtc, addCalendarDays } from './TokenLimitWatcher.js';
+import { createAbortHandle } from './DrainAbortRegistry.js';
 
 /** Default Poll-Intervall (Minuten) — mirrors TickerSettingsStore-Default, falls Settings nicht lesbar sind. */
 export const DEFAULT_INTERVAL_MINUTES = 15;
@@ -370,6 +371,7 @@ export class NightWatchScheduler {
   #autoRetroTrigger;
   #drainNotifier;
   #drainJobRegistry;
+  #abortRegistry;
   #identity;
   #now;
   #sleepFn;
@@ -404,6 +406,7 @@ export class NightWatchScheduler {
     autoRetroTrigger,
     drainNotifier,
     drainJobRegistry,
+    abortRegistry,
     identity = null,
     now,
     sleepFn,
@@ -422,6 +425,10 @@ export class NightWatchScheduler {
     this.#autoRetroTrigger = autoRetroTrigger ?? null;
     this.#drainNotifier = drainNotifier ?? null;
     this.#drainJobRegistry = drainJobRegistry ?? null;
+    // drain-stop-control AC8: geteilte Abort-Registry (mit dem manuellen
+    // Drain-Router) — optional/best-effort; ohne sie kein Stop-Hebel für
+    // Nacht-Drains, sonst unverändertes Verhalten.
+    this.#abortRegistry = abortRegistry ?? null;
     this.#identity = identity;
     this.#now = now ?? (() => Date.now());
     this.#sleepFn = sleepFn ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -654,8 +661,24 @@ export class NightWatchScheduler {
     // persistenten Registry führen (best-effort, additiv — #activeDrains bleibt
     // unverändert die maßgebliche Concurrency-Buchführung dieser Klasse).
     const drainId = this.#registerNightDrain(projectSlug, startedAt);
+    // drain-stop-control AC8: Abort-Handle unter der Nacht-drainId in der
+    // GETEILTEN Registry führen + als Signal an den Drain durchreichen —
+    // best-effort (kein Registry/keine drainId → kein Handle, kein Crash).
+    let abortHandle = null;
+    if (drainId && this.#abortRegistry && typeof this.#abortRegistry.register === 'function') {
+      try {
+        abortHandle = createAbortHandle();
+        this.#abortRegistry.register(drainId, abortHandle);
+      } catch {
+        abortHandle = null; // best-effort — der Scheduler crasht nie (AC8)
+      }
+    }
     const promise = this.#projectDrain
-      .drainProject(projectPath, { identity: this.#identity, windowEndMs })
+      .drainProject(projectPath, {
+        identity: this.#identity,
+        windowEndMs,
+        ...(abortHandle ? { abortSignal: abortHandle } : {}),
+      })
       // AC6: das (erfolgreiche wie fehlgeschlagene) Drain-Ergebnis wird ERFASST
       // statt — wie früher via `.catch(() => null)` — verworfen; danach best-
       // effort GENAU EIN Bericht (`trigger:'night'`). Ein Drain-Fehler darf den
@@ -689,7 +712,17 @@ export class NightWatchScheduler {
         },
       )
       .catch(() => null)
-      .finally(() => this.#activeDrains.delete(projectPath));
+      .finally(() => {
+        this.#activeDrains.delete(projectPath);
+        // drain-stop-control AC1: Abort-Eintrag bei jedem terminalen Ende entfernen.
+        if (drainId && this.#abortRegistry && typeof this.#abortRegistry.unregister === 'function') {
+          try {
+            this.#abortRegistry.unregister(drainId);
+          } catch {
+            // best-effort
+          }
+        }
+      });
     this.#activeDrains.set(projectPath, promise);
   }
 

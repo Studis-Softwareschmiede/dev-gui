@@ -168,6 +168,7 @@ import { HeadlessAdoptRunner } from './src/HeadlessAdoptRunner.js';
 import { RegressionResultStore } from './src/RegressionResultStore.js';
 import { ScanResultStore } from './src/ScanResultStore.js';
 import { DrainJobRegistry } from './src/DrainJobRegistry.js';
+import { DrainAbortRegistry } from './src/DrainAbortRegistry.js';
 import { FeatureDrainRegistry } from './src/FeatureDrainRegistry.js';
 import { FeatureDrainRunner } from './src/FeatureDrainRunner.js';
 import { BootDrainRecovery } from './src/BootDrainRecovery.js';
@@ -653,6 +654,14 @@ const regressionRunner = new RegressionRunner({
 // `BootDrainRecovery` (drain-restart-robustness AC5–AC8, S-283) übergeben.
 const drainJobRegistry = new DrainJobRegistry();
 
+// ── DrainAbortRegistry (drain-stop-control AC1, S-421) ──────────────────────
+// EINE geteilte In-Memory-Registry für die kooperativen Abbruch-Handles BEIDER
+// Drain-Arten (manueller Drain via projectDrainRouter + Nacht-Drain via
+// NightWatchScheduler) — `POST …/drain/:drainId/stop` signalisiert darüber.
+// BEWUSST nicht persistiert (Spec A1): ein Abbruch gilt nur für den lebenden
+// Prozess; die persistente Spur ist der `aborted`-Status in drainJobRegistry.
+const drainAbortRegistry = new DrainAbortRegistry();
+
 // ── Feature-Umsetzen-Button (feature-umsetzen-button, Owner-Auftrag 2026-07-06) ──
 // Eigene Registry — Dedup je Projekt+Feature über `featureDrainLock` (bereits
 // weiter oben konstruiert, s. Cross-Boundary-Lock-Kommentar bei
@@ -718,6 +727,7 @@ const nightWatchScheduler = new NightWatchScheduler({
   autoRetroTrigger, // retro-auto-trigger AC4/AC6: nach jedem Nacht-Drain isRetroDue → ggf. enqueue
   drainNotifier, // drain-done-notification AC4/AC6: je Nacht-Drain best-effort GENAU EIN Push
   drainJobRegistry, // drain-restart-robustness AC3: je Nacht-Drain in der geteilten Registry geführt (trigger:'night')
+  abortRegistry: drainAbortRegistry, // drain-stop-control AC8: geteilte Abort-Registry — Stop-Endpunkt stoppt auch Nacht-Drains
 });
 // Immer gestartet — tick() selbst prüft `enabled` (AC16: enabled=false → idle,
 // analog NotificationWatcher.start(), das ebenfalls unbedingt läuft).
@@ -1074,6 +1084,10 @@ const deps = {
   // router-internen Default-Instanz (kein zweiter Datei-Pfad; der Boot-Orphan-
   // Reconcile oben wirkt dadurch auf BEIDE Trigger).
   drainJobRegistry,
+  // drain-stop-control AC1/AC3 (S-421): GETEILTE Abort-Registry (dieselbe wie
+  // im NightWatchScheduler) — der Stop-Endpunkt des projectDrain.js-Routers
+  // signalisiert darüber den kooperativen Abbruch beider Drain-Arten.
+  drainAbortRegistry,
   sessionRegistry: ptyRegistry,
   // S-199 (ideen-inbox AC3/AC7/AC8): BoardWriter-Create-Pfad für den
   // Quick-Capture-Endpunkt (boardRouter POST .../ideas). Instanz existiert

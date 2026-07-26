@@ -594,8 +594,14 @@ function FactoryWorkspace({
   const [costMode, setCostMode] = useState('balanced');
   /** drainId der laufenden Headless-Drain-Session (aus der 202-Antwort) — AC6. */
   const [drainId, setDrainId] = useState(null);
-  /** null | 'running' | 'done' | 'failed' — gepollter Drain-Job-Status (AC6). */
+  /** null | 'running' | 'done' | 'failed' | 'aborted' — gepollter Drain-Job-Status (AC6; 'aborted' seit drain-stop-control AC7). */
   const [drainStatus, setDrainStatus] = useState(null);
+  /**
+   * drain-stop-control AC7: Stop-Knopf-Zustand — null (kein Stop angefragt) |
+   * 'confirm' (Bestätigungsdialog offen) | 'stopping' (202 erhalten, „wird
+   * gestoppt …" bis der Poll `aborted` liefert).
+   */
+  const [drainStopState, setDrainStopState] = useState(null);
   /**
    * drain-completion-report AC7a: `{ completed: [{id,title}], blocked: [{id,title}] }`,
    * gesetzt aus `result.completed`/`result.blocked` sobald der Poll `done`
@@ -753,6 +759,7 @@ function FactoryWorkspace({
     // lassen (der Poll-Effect ist auf `drainId` gekeyt und stoppt beim Wechsel).
     setDrainId(null);
     setDrainStatus(null);
+    setDrainStopState(null); // drain-stop-control AC7: alter Stop-Zustand fällt weg
     setDrainReport(null); // drain-completion-report AC7a: alter Bericht fällt weg
     setCostModeCheckId(null);
 
@@ -822,6 +829,41 @@ function FactoryWorkspace({
     setFlowError(`Fehler beim Starten (HTTP ${res.status}).`);
   }, [activeRepo, costMode]);
 
+  // ── Drain-Stop (drain-stop-control AC7) ───────────────────────────────────
+  // Stop-Knopf neben dem laufenden Inline-Status: Klick → Bestätigung →
+  // POST …/drain/:drainId/stop. 202 → „wird gestoppt …" (Knopf deaktiviert),
+  // der reguläre Poll liefert danach `aborted` → „gestoppt". 404 (Drain
+  // bereits fertig) → Stop-Zustand verwerfen, der Poll zeigt den Endzustand.
+  const handleDrainStopRequest = useCallback(() => {
+    setDrainStopState('confirm');
+  }, []);
+  const handleDrainStopCancel = useCallback(() => {
+    setDrainStopState(null);
+  }, []);
+  const handleDrainStopConfirm = useCallback(async () => {
+    const slug = activeRepo && typeof activeRepo === 'string' ? activeRepo.trim() : '';
+    if (!slug || !drainId) {
+      setDrainStopState(null);
+      return;
+    }
+    setDrainStopState('stopping');
+    let res;
+    try {
+      res = await fetchFnRef.current(
+        `/api/projects/${encodeURIComponent(slug)}/drain/${encodeURIComponent(drainId)}/stop`,
+        { method: 'POST' },
+      );
+    } catch {
+      setDrainStopState(null); // Netzwerkfehler — Stop bleibt erneut möglich
+      return;
+    }
+    if (res.status !== 202) {
+      // 404: Drain lief nicht mehr — der reguläre Poll zeigt den Endzustand.
+      setDrainStopState(null);
+    }
+    // 202: 'stopping' bleibt, bis der Poll `aborted` liefert (AC7).
+  }, [activeRepo, drainId]);
+
   // ── Drain-Job-Status-Poll (headless-manual-drain AC6) ─────────────────────
   // Nach 202 pollt das Panel GET …/drain/:drainId, bis der Job nicht mehr
   // `running` ist. `done` → Board-Re-Fetch (onBoardRefresh) + „fertig" inline;
@@ -869,6 +911,15 @@ function FactoryWorkspace({
       const status = data && typeof data.status === 'string' ? data.status : null;
       if (status === 'running') {
         timer = setTimeout(pollDrain, drainPollInterval);
+        return;
+      }
+      if (status === 'aborted') {
+        // drain-stop-control AC7: gestoppter Drain — textlicher Endzustand
+        // „gestoppt" (kein failed, kein done).
+        setDrainStatus('aborted');
+        setDrainStopState(null);
+        setSessionRunState('idle');
+        if (onBoardRefresh) onBoardRefresh();
         return;
       }
       if (status === 'done') {
@@ -1055,14 +1106,51 @@ function FactoryWorkspace({
                   ? styles.drainStatusDone
                   : drainStatus === 'failed'
                     ? styles.drainStatusFailed
-                    : styles.drainStatusRunning
+                    : drainStatus === 'aborted'
+                      ? styles.drainStatusNotRun
+                      : styles.drainStatusRunning
               }
               data-testid="drain-job-status"
               data-status={drainStatus}
             >
-              {drainStatus === 'running' && '⏳ Drain läuft… (headless, kein Terminal-Output)'}
+              {drainStatus === 'running' &&
+                (drainStopState === 'stopping'
+                  ? '⏹ Drain wird gestoppt … (laufende Runde wird noch zu Ende geführt)'
+                  : '⏳ Drain läuft… (headless, kein Terminal-Output)')}
               {drainStatus === 'done' && '✓ Drain fertig — Board aktualisiert.'}
               {drainStatus === 'failed' && '✗ Drain fehlgeschlagen — siehe Server-Log/Board.'}
+              {drainStatus === 'aborted' && '⏹ Drain gestoppt.'}
+            </div>
+          )}
+
+          {/* drain-stop-control AC7: Stop-Knopf bei laufendem Drain — mit
+              Bestätigung; während 'stopping' deaktiviert. Textliche Zustände
+              (nicht nur Farbe, WCAG 2.1 AA). */}
+          {drainStatus === 'running' && drainId && drainStopState !== 'confirm' && (
+            <button
+              type="button"
+              onClick={handleDrainStopRequest}
+              disabled={drainStopState === 'stopping'}
+              style={styles.btnCancel}
+              data-testid="drain-stop-button"
+            >
+              {drainStopState === 'stopping' ? 'Wird gestoppt …' : 'Drain stoppen'}
+            </button>
+          )}
+          {drainStatus === 'running' && drainStopState === 'confirm' && (
+            <div role="alertdialog" aria-label="Drain stoppen bestätigen" style={styles.confirmBox} data-testid="drain-stop-confirm">
+              <p style={styles.confirmText}>
+                Laufenden Drain wirklich stoppen? Die aktuelle Runde läuft noch zu Ende — gestoppt wird
+                zwischen den Runden.
+              </p>
+              <div style={styles.confirmBtns}>
+                <button type="button" onClick={handleDrainStopConfirm} style={styles.btnConfirm}>
+                  Ja, stoppen
+                </button>
+                <button type="button" onClick={handleDrainStopCancel} style={styles.btnCancel}>
+                  Abbrechen
+                </button>
+              </div>
             </div>
           )}
 

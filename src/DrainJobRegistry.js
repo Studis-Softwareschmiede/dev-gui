@@ -259,6 +259,13 @@ export class DrainJobRegistry {
   markDone(drainId, result = {}) {
     const existing = this.#jobs.get(drainId);
     if (!existing) return undefined;
+    // drain-stop-control AC5: ein bereits terminal `aborted` gesetzter Drain
+    // (Stop-Signal) wird NIE zurück auf `done` überschrieben — sonst würde
+    // BootDrainRecovery ihn nach einem Neustart falsch einordnen bzw. die
+    // GUI „fertig" statt „gestoppt" zeigen. Gleiches gilt, wenn der Drain-Loop
+    // selbst mit `reason:'aborted'` endet (kooperativer Abbruch).
+    if (existing.status === 'aborted') return undefined;
+    if (result && result.reason === 'aborted') return this.markAborted(drainId);
     this.#jobs.set(drainId, {
       ...existing,
       status: 'done',
@@ -284,11 +291,37 @@ export class DrainJobRegistry {
   markFailed(drainId, error = DRAIN_FAILURE_MESSAGE) {
     const existing = this.#jobs.get(drainId);
     if (!existing) return undefined;
+    // drain-stop-control AC5: `aborted` ist terminal — nie überschreiben.
+    if (existing.status === 'aborted') return undefined;
     this.#jobs.set(drainId, {
       ...existing,
       status: 'failed',
       finishedAt: new Date().toISOString(),
       error,
+    });
+    return this.#persist();
+  }
+
+  /**
+   * Markiert einen Drain terminal als `aborted` (drain-stop-control AC4/AC5)
+   * — gesetzt beim Stop-Signal (Router) und gehalten, wenn der Drain-Loop
+   * danach kooperativ mit `reason:'aborted'` endet. Idempotent (ein bereits
+   * `aborted`-Eintrag bleibt unverändert terminal); No-op bei unbekannter
+   * `drainId`. `BootDrainRecovery` läuft `aborted`-Einträge NIE wieder an
+   * (drain-restart-robustness AC4 — `reconcileOrphans()` fasst nur `running`
+   * an; drain-stop-control AC6).
+   *
+   * @param {string} drainId
+   * @returns {Promise<void>|undefined}
+   */
+  markAborted(drainId) {
+    const existing = this.#jobs.get(drainId);
+    if (!existing) return undefined;
+    if (existing.status === 'aborted') return undefined; // idempotent
+    this.#jobs.set(drainId, {
+      ...existing,
+      status: 'aborted',
+      finishedAt: new Date().toISOString(),
     });
     return this.#persist();
   }

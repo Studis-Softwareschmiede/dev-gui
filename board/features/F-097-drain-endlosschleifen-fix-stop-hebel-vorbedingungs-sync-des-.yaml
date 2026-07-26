@@ -5,7 +5,7 @@ goal: 'Behebt die verifizierte Taktgeber-Endlosschleife (Vorfall 2026-07-26, 1.5
   strukturell unmoeglich), ein Stop-Hebel bricht laufende manuelle+naechtliche Drains
   kooperativ zwischen Runden ab, und ein Vorbedingungs-Sync bringt den Ausfuehrungs-Klon
   vor der ersten Flow-Runde auf origin/main-Stand ohne Fremd-Datenverlust.'
-status: Backlog
+status: Done
 priority: P0
 spec: docs/specs/drain-escalation-effectiveness.md
 definition_of_done: null

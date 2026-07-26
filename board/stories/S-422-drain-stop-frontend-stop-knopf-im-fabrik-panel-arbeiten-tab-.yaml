@@ -2,7 +2,7 @@ id: S-422
 parent: F-097
 title: 'Drain-Stop (Frontend): Stop-Knopf im Fabrik-Panel Arbeiten-Tab neben dem laufenden
   Drain-Status (Bestaetigung, aborting/aborted textlich)'
-status: To Do
+status: Done
 priority: P1
 spec: docs/specs/drain-stop-control.md
 implements:
@@ -23,4 +23,4 @@ pr: null
 blocked_reason: null
 created_at: '2026-07-26T15:43:33Z'
 updated_at: '2026-07-26T15:43:33Z'
-done_at: null
+done_at: '2026-07-26T16:30:00Z'

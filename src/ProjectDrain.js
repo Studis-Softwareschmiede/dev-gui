@@ -242,6 +242,7 @@ import { basename } from 'node:path';
 import { projectJobLock, isProjectBusy } from './ProjectJobLock.js';
 import { InteractiveFlowRunner } from './FlowRunner.js';
 import { gitReadBoundary, createGitRefFsDeps } from './GitReadBoundary.js';
+import { gitSyncBoundary } from './GitSyncBoundary.js';
 
 /** Einziger /flow-Befehl, den der Drain anstößt (Nicht-Ziel: keine Modell-/Cost-Mode-Logik). */
 export const FLOW_COMMAND = '/agent-flow:flow';
@@ -626,14 +627,21 @@ export function snapshotsEqual(a, b) {
  * (kleinste `lastChangeRound`, AC4). Bei Gleichstand: deterministisch
  * kleinste `id` (Testbarkeit/Reproduzierbarkeit).
  *
+ * Per-Story-Eskalations-Cap (drain-escalation-effectiveness AC4/A3): bereits
+ * in dieser Drain-Session (versucht) eskalierte Story-IDs (`escalatedIds`)
+ * werden NIE erneut gewählt — verhindert das beliebig häufige Re-Eskalieren
+ * derselben Story im unwirksamen Fall (Vorfall 2026-07-26).
+ *
  * @param {import('./BoardAggregator.js').StoryEntry[]} targets
  * @param {Map<string, number>} lastChangeRound  storyId → Runde der letzten Zustandsänderung
+ * @param {Set<string>} [escalatedIds]  bereits (versucht) eskalierte Story-IDs dieser Session
  * @returns {import('./BoardAggregator.js').StoryEntry|null}
  */
-export function pickLongestUnmovedTarget(targets, lastChangeRound) {
+export function pickLongestUnmovedTarget(targets, lastChangeRound, escalatedIds = new Set()) {
   let best = null;
   let bestRound = Infinity;
   for (const t of targets) {
+    if (escalatedIds.has(t.id)) continue; // AC4: nie erneut eskalieren
     const r = lastChangeRound.has(t.id) ? lastChangeRound.get(t.id) : 0;
     if (best === null || r < bestRound || (r === bestRound && t.id < best.id)) {
       best = t;
@@ -641,6 +649,48 @@ export function pickLongestUnmovedTarget(targets, lastChangeRound) {
     }
   }
   return best;
+}
+
+/**
+ * Prüft, ob ein unstaged Datei-Diff EXAKT die Taktgeber-Blocked-Signatur
+ * trägt (drain-clone-precondition-sync A1/AC2): ausschließlich die Felder
+ * `status` (→ `Blocked`), `blocked_reason` (→ `Taktgeber: … kein Fortschritt`)
+ * und `updated_at` geändert — die maschinelle Signatur von
+ * `BoardWriter.setBlocked`. JEDE andere geänderte Zeile disqualifiziert die
+ * Datei (sie gilt dann als fremd und wird NIE angetastet).
+ *
+ * @param {string|null} diffText  Ausgabe von `git diff -- <datei>`.
+ * @returns {boolean}
+ */
+export function isTaktgeberBlockedArtifactDiff(diffText) {
+  if (typeof diffText !== 'string' || diffText.trim() === '') return false;
+  const changed = diffText
+    .split('\n')
+    .filter((l) => (l.startsWith('+') || l.startsWith('-')) && !l.startsWith('+++') && !l.startsWith('---'));
+  if (changed.length === 0) return false;
+  let sawBlockedStatus = false;
+  let sawTaktgeberReason = false;
+  for (const line of changed) {
+    const body = line.slice(1).trim();
+    if (/^status:/.test(body)) {
+      if (line.startsWith('+')) {
+        if (!/^status:\s*'?Blocked'?$/.test(body)) return false;
+        sawBlockedStatus = true;
+      }
+      continue;
+    }
+    if (/^blocked_reason:/.test(body)) {
+      if (line.startsWith('+')) {
+        if (!/^blocked_reason:\s*["']?Taktgeber: .*kein Fortschritt["']?$/.test(body)) return false;
+        sawTaktgeberReason = true;
+      }
+      continue;
+    }
+    if (/^updated_at:/.test(body)) continue;
+    // Jede andere geänderte Zeile → NICHT die enge Taktgeber-Signatur.
+    return false;
+  }
+  return sawBlockedStatus && sawTaktgeberReason;
 }
 
 /**
@@ -754,6 +804,7 @@ export class ProjectDrain {
   #auditStore;
   #budgetGuard;
   #gitReadBoundary;
+  #gitSyncBoundary;
   #staleInProgressHours;
   #escalationAttempts;
   #safetyMaxNoProgressRounds;
@@ -772,6 +823,7 @@ export class ProjectDrain {
     auditStore,
     budgetGuard,
     gitReadBoundary: injectedGitReadBoundary,
+    gitSyncBoundary: injectedGitSyncBoundary,
     staleInProgressHours = DEFAULT_STALE_IN_PROGRESS_HOURS,
     escalationAttempts = DEFAULT_ESCALATION_ATTEMPTS,
     pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
@@ -806,6 +858,11 @@ export class ProjectDrain {
     // (Singleton, analog anderen Boundaries), injizierbar für Tests (gemockte
     // fetch/merge-base/show/ls-tree, NFR Testbarkeit).
     this.#gitReadBoundary = injectedGitReadBoundary ?? gitReadBoundary;
+    // drain-clone-precondition-sync AC1: eng begrenzte Schreib-Boundary NUR
+    // für den einmaligen Vorbedingungs-Sync (status/diff/checkout --/ff-only)
+    // — bewusst getrennt von der read-only #gitReadBoundary (deren Doktrin
+    // bleibt unangetastet). Default echter `git`-Kindprozess, injizierbar.
+    this.#gitSyncBoundary = injectedGitSyncBoundary ?? gitSyncBoundary;
     this.#staleInProgressHours = staleInProgressHours > 0 ? staleInProgressHours : DEFAULT_STALE_IN_PROGRESS_HOURS;
     this.#escalationAttempts = escalationAttempts > 0 ? escalationAttempts : DEFAULT_ESCALATION_ATTEMPTS;
     this.#safetyMaxNoProgressRounds =
@@ -867,6 +924,10 @@ export class ProjectDrain {
     const args = Array.isArray(opts.args) ? opts.args : [];
     // night-budget-guard AC6/A2: null = kein Fenster (manueller Drain).
     const windowEndMs = typeof opts.windowEndMs === 'number' ? opts.windowEndMs : null;
+    // drain-stop-control AC2: injiziertes kooperatives Abbruch-Signal
+    // ({ isAborted(): boolean }) — ohne ihn bit-identisches Verhalten.
+    const abortSignal =
+      opts.abortSignal && typeof opts.abortSignal.isAborted === 'function' ? opts.abortSignal : null;
 
     // AC6/AC7: Busy-Check + eigenes Lock — KEIN await dazwischen (Node
     // Single-Thread-Event-Loop ⇒ atomar, kein Doppel-Trigger-Race).
@@ -901,7 +962,7 @@ export class ProjectDrain {
 
     try {
       this.#auditRecord(identity, `taktgeber:drain-start project=${projectPath}`);
-      return await this.#runLoop(projectPath, identity, args, windowEndMs);
+      return await this.#runLoop(projectPath, identity, args, windowEndMs, abortSignal);
     } finally {
       // Edge-Case "Projekt-Lock bei Crash": Lock wird IMMER freigegeben,
       // auch bei einem Fehler irgendwo in #runLoop (kein Dauer-Lock).
@@ -918,7 +979,7 @@ export class ProjectDrain {
    * @param {number|null} [windowEndMs]  Nacht-Fenster-Ende (night-budget-guard AC6, s. drainProject).
    * @returns {Promise<{
    *   stopped: true,
-   *   reason: 'no-drain-target'|'command-channel-busy'|'safety-stop-no-progress'|'scan-failed'|'budget-window-end'|'budget-stop',
+   *   reason: 'no-drain-target'|'command-channel-busy'|'safety-stop-no-progress'|'scan-failed'|'budget-window-end'|'budget-stop'|'aborted'|'escalation-ineffective'|'clone-dirty'|'clone-diverged',
    *   flowRuns: number,
    *   escalated: string[],
    *   completed: { id: string, title: string }[],
@@ -926,7 +987,22 @@ export class ProjectDrain {
    *   budgetPauses: { from: number, to: number|null, reason: 'reactive-limit'|'proactive-threshold' }[]
    * }>}
    */
-  async #runLoop(projectPath, identity, args = [], windowEndMs = null) {
+  async #runLoop(projectPath, identity, args = [], windowEndMs = null, abortSignal = null) {
+    // drain-clone-precondition-sync AC1: Vorbedingungs-Sync GENAU EINMAL pro
+    // Drain-Session, VOR der ersten Flow-Runde. `clone-dirty`/`clone-diverged`
+    // → sofortiger terminaler Stop (leere Bilanz — kein Flow lief).
+    const syncOutcome = await this.#syncCloneToOrigin(projectPath, identity);
+    if (syncOutcome === 'clone-dirty' || syncOutcome === 'clone-diverged') {
+      return {
+        stopped: true,
+        reason: syncOutcome,
+        flowRuns: 0,
+        escalated: [],
+        completed: [],
+        blocked: [],
+        budgetPauses: [],
+      };
+    }
     let flowRuns = 0;
     let consecutiveNoProgress = 0;
     // AC1/AC2 (drain-completion-report): Anfangs-Status-Snapshot (Status je
@@ -945,6 +1021,11 @@ export class ProjectDrain {
     const lastChangeRound = new Map();
     /** @type {string[]} */
     const escalated = [];
+    // drain-escalation-effectiveness AC4 (A3): je Drain-Session einmalige
+    // Menge der bereits (versucht) eskalierten Story-IDs — auch unwirksame
+    // Versuche (origin-ref-Skip, Schreibfehler) zählen (nie Re-Eskalation).
+    /** @type {Set<string>} */
+    const escalationAttempted = new Set();
     // night-budget-guard AC4/AC5/AC6: additiv auf JEDEM Rückgabepfad (leer,
     // wenn nie eine Budget-Pause auftrat — kein Regress an bestehenden Feldern).
     /** @type {{ from: number, to: number|null, reason: 'reactive-limit'|'proactive-threshold' }[]} */
@@ -957,6 +1038,31 @@ export class ProjectDrain {
       // verhindert, dass eine rein Microtask-getriebene Schleife den
       // Event-Loop verhungern lässt (live beobachtet: >2 Min. 100% CPU).
       await this.#yieldTick();
+
+      // drain-stop-control AC2: kooperative Abbruch-Prüfung am Anfang JEDER
+      // Runde (vor dem nächsten Scan/Flow-Anstoß). Eine bereits laufende
+      // Flow-Runde wurde zu Ende geführt (A1 — kein SIGTERM); hier endet die
+      // Schleife sauber mit `reason:'aborted'` samt bisheriger Bilanz.
+      if (abortSignal && abortSignal.isAborted()) {
+        const { project: projectAtAbort, scanFailed: abortScanFailed } = await this.#findProject(
+          projectPath,
+          identity,
+        );
+        const { completed, blocked } = computeCompletedBlocked(
+          initialStatuses ?? new Map(),
+          abortScanFailed ? null : projectAtAbort,
+        );
+        this.#auditRecord(identity, `taktgeber:drain-aborted project=${basename(projectPath)}`);
+        return {
+          stopped: true,
+          reason: 'aborted',
+          flowRuns,
+          escalated,
+          completed,
+          blocked,
+          budgetPauses,
+        };
+      }
 
       const { project, scanFailed } = await this.#findProject(projectPath, identity);
       const state = computeDrainState(project, this.#now(), this.#staleInProgressHours);
@@ -1159,7 +1265,11 @@ export class ProjectDrain {
         continue; // frischer Board-Scan am Schleifenanfang, nie fortschrittslos gezählt
       }
 
-      const { project: projectAfter, verified: verifiedAfter } = await this.#findProject(projectPath, identity);
+      const {
+        project: projectAfter,
+        verified: verifiedAfter,
+        source: sourceAfter,
+      } = await this.#findProject(projectPath, identity);
       const stateAfter = computeDrainState(projectAfter, this.#now(), this.#staleInProgressHours);
 
       // AC5: Fortschritt = jede Status-/Ready-Änderung zwischen zwei Scans
@@ -1188,29 +1298,55 @@ export class ProjectDrain {
 
         if (consecutiveNoProgress >= this.#escalationAttempts) {
           if (stateAfter.targets.length > 0 && projectAfter) {
-            const victim = pickLongestUnmovedTarget(stateAfter.targets, lastChangeRound);
+            const victim = pickLongestUnmovedTarget(stateAfter.targets, lastChangeRound, escalationAttempted);
             if (victim) {
-              const ok = await this.#escalate(projectAfter, victim, identity);
+              // drain-escalation-effectiveness AC4: auch ein UNWIRKSAMER
+              // Versuch (origin-ref-Skip, Schreibfehler) zählt — die Story
+              // wird in dieser Session nie erneut gewählt.
+              escalationAttempted.add(victim.id);
+              const ok = await this.#escalate(projectAfter, victim, identity, { source: sourceAfter });
               if (ok) {
                 escalated.push(victim.id);
                 lastChangeRound.delete(victim.id);
-                // Eskalation ändert selbst den Status einer Story (→ Blocked)
-                // — das IST ein Drain-Fortschritt im Sinne des
-                // Sicherheitsgürtels (siehe Modul-Doku), auch wenn er sich
-                // erst in der NÄCHSTEN Runde im state-Snapshot zeigt. Ohne
-                // diesen Reset würde ein Board mit vielen aufeinanderfolgend
-                // eskalierten Stories den Sicherheitsgürtel fälschlich
-                // auslösen, obwohl jede Eskalation echten Fortschritt macht.
-                totalNoProgressRounds = 0;
+                // drain-escalation-effectiveness AC1 (Kern-Fix, Vorfall
+                // 2026-07-26): der frühere UNBEDINGTE
+                // `totalNoProgressRounds = 0`-Reset an dieser Stelle entfällt.
+                // Eine Eskalation zählt nur dann als Fortschritt, wenn ihr
+                // Blocked-Übergang im Folge-Snapshot DERSELBEN Quelle sichtbar
+                // wird — im `working-tree`-Modus geschieht das natürlich in
+                // der nächsten Runde (`progressed`-Reset); im
+                // `origin-ref`-Modus nie (kein Reset → Sicherheitsgürtel
+                // bleibt ehrlich, gebundene Terminierung über AC5).
               }
+            } else {
+              // drain-escalation-effectiveness AC5: Eskalations-Zyklus
+              // ausgelöst, kein Fortschritt beobachtet UND alle aktuellen
+              // Drain-Ziele bereits (versucht) eskaliert → gebundene
+              // Terminierung mit eigenem terminalem Grund. Verhindert den
+              // Endlos-Loop strukturell (Rundenzahl O(#Ziele ×
+              // escalationAttempts)); `safety-stop-no-progress` bleibt als
+              // unabhängiger Backstop erhalten.
+              const { completed, blocked } = computeCompletedBlocked(initialStatuses, projectAfter);
+              this.#auditRecord(
+                identity,
+                `taktgeber:escalation-ineffective project=${basename(projectPath)} attempted=${escalationAttempted.size}`,
+              );
+              return {
+                stopped: true,
+                reason: 'escalation-ineffective',
+                flowRuns,
+                escalated,
+                completed,
+                blocked,
+                budgetPauses,
+              };
             }
           }
           // consecutiveNoProgress IMMER zurücksetzen — auch wenn aktuell kein
           // Drain-Ziel zum Eskalieren existiert (couldBecomeReady-only-Runde,
           // s. Modul-Doku) oder der Schreibversuch fehlschlug (kein
-          // Tight-Retry-Loop). totalNoProgressRounds NICHT zurücksetzen in
-          // diesen beiden Fehlerfällen — genau DAS ist der Pfad, gegen den
-          // der Sicherheitsgürtel schützen soll (z.B. fehlender boardWriter).
+          // Tight-Retry-Loop). totalNoProgressRounds wird hier NIE
+          // zurückgesetzt (AC1) — nur echter Snapshot-Fortschritt tut das.
           consecutiveNoProgress = 0;
         }
 
@@ -1277,8 +1413,21 @@ export class ProjectDrain {
    * @param {string|null} identity
    * @returns {Promise<boolean>} true bei Erfolg
    */
-  async #escalate(project, victim, identity) {
+  async #escalate(project, victim, identity, { source } = {}) {
     if (!this.#boardWriter) return false;
+    // drain-escalation-effectiveness AC3 (A2): ist die Snapshot-Quelle dieser
+    // Runde `origin-ref` (Klon hinter origin), wäre ein Working-Tree-
+    // `setBlocked` per Konstruktion unsichtbar UND eine Dirty-Leiche
+    // (Vorfall 2026-07-26) → Write vollständig unterlassen, Audit, Rückgabe
+    // „unwirksam". Im `working-tree`-Modus (der Working-Tree IST die Quelle)
+    // schreibt die Eskalation wie bisher — legitim und sichtbar.
+    if (source === 'origin-ref') {
+      this.#auditRecord(
+        identity,
+        `taktgeber:escalation-skipped story=${victim.id} project=${project.slug} reason=origin-ref-source`,
+      );
+      return false;
+    }
     const reason = `Taktgeber: ${this.#escalationAttempts}x kein Fortschritt`;
     try {
       await this.#boardWriter.setBlocked({
@@ -1293,6 +1442,114 @@ export class ProjectDrain {
     }
     this.#auditRecord(identity, `taktgeber:escalate story=${victim.id} project=${project.slug} reason="${reason}"`);
     return true;
+  }
+
+  /**
+   * Vorbedingungs-Sync des Ausführungs-Klons (drain-clone-precondition-sync
+   * AC1–AC6) — GENAU EINMAL pro Drain-Session, vor der ersten Flow-Runde:
+   *   1. `fetch origin` (non-fatal — Fehler → Sync übersprungen, Audit
+   *      `skipped-fetch-failed`, Drain läuft auf lokalem Stand).
+   *   2. Eigene Taktgeber-Artefakte (A1, eng-signierte
+   *      `board/stories/*.yaml`-Blocked-Leichen) per `checkout -- <datei>`
+   *      verwerfen — NIE etwas anderes.
+   *   3. Fremd-Dirty-Gate (A2): Tree danach weiterhin dirty → `clone-dirty`
+   *      (terminaler Stop, kein Flow, kein stilles Weiterarbeiten).
+   *   4. Fast-forward-only auf das Upstream-Ref (A3): nicht ff-baubar →
+   *      `clone-diverged`; `HEAD == origin` → `up-to-date` (No-Op).
+   * Kein `reset --hard`, kein `clean`, kein Rebase/Stash — die einzige
+   * verwerfende Operation ist das eng-signierte `checkout -- <datei>`.
+   *
+   * @param {string} projectPath
+   * @param {string|null} identity
+   * @returns {Promise<'synced-ff'|'up-to-date'|'skipped-fetch-failed'|'clone-dirty'|'clone-diverged'|'no-remote'>}
+   */
+  async #syncCloneToOrigin(projectPath, identity) {
+    const project = basename(projectPath);
+    const audit = (outcome, detail = '') =>
+      this.#auditRecord(identity, `taktgeber:clone-sync project=${project} outcome=${outcome}${detail}`);
+
+    let fetchResult;
+    try {
+      fetchResult = await this.#gitReadBoundary.fetchOrigin(projectPath);
+    } catch {
+      fetchResult = { ok: false };
+    }
+    if (!fetchResult || !fetchResult.ok) {
+      audit('skipped-fetch-failed');
+      return 'skipped-fetch-failed';
+    }
+    if (fetchResult.fetched === false) {
+      // Kein Remote (Spec AC5/Edge-Case) → Working-Tree ist die Wahrheit.
+      audit('no-remote');
+      return 'no-remote';
+    }
+
+    // A1: eigene Taktgeber-Artefakte bereinigen — NUR board/stories/*.yaml
+    // mit exakt der setBlocked-Signatur; alles andere bleibt unangetastet.
+    let status = await this.#gitSyncBoundary.statusPorcelain(projectPath);
+    if (status === null) {
+      // Status unbestimmbar → konservativ kein Sync (kein Risiko-Write).
+      audit('skipped-fetch-failed', ' detail=status-unavailable');
+      return 'skipped-fetch-failed';
+    }
+    let cleaned = 0;
+    for (const entry of status) {
+      const rel = entry.relPath;
+      const isTracked = !entry.code.includes('?');
+      if (!isTracked || !/^board\/stories\/[^/]+\.yaml$/.test(rel)) continue;
+      const diff = await this.#gitSyncBoundary.diffFile(projectPath, rel);
+      if (isTaktgeberBlockedArtifactDiff(diff)) {
+        const res = await this.#gitSyncBoundary.checkoutFile(projectPath, rel);
+        if (res && res.ok) cleaned += 1;
+      }
+    }
+    if (cleaned > 0) audit('cleaned-artifacts', ` count=${cleaned}`);
+
+    // A2: Fremd-Dirty-Gate — nach der Bereinigung erneut prüfen.
+    status = await this.#gitSyncBoundary.statusPorcelain(projectPath);
+    if (status === null) {
+      audit('skipped-fetch-failed', ' detail=status-unavailable');
+      return 'skipped-fetch-failed';
+    }
+    if (status.length > 0) {
+      // Repo-relative Pfade (NFR: keine Host-Absolutpfade), begrenzt auf 10.
+      const paths = status
+        .slice(0, 10)
+        .map((e) => e.relPath)
+        .join(',');
+      audit('clone-dirty', ` paths=${paths}`);
+      return 'clone-dirty';
+    }
+
+    // A3: fast-forward-only auf das Upstream-Ref. `merge --ff-only` wird
+    // IMMER versucht (nicht nur bei origin-strikt-voraus): bei
+    // `HEAD == origin` und bei lokal-voraus (`merge_policy: direct`) ist er
+    // ein No-Op (exit 0, "Already up to date" — kein Write); NUR bei echter
+    // Divergenz schlägt er fehl → `clone-diverged` (AC4).
+    const upstream = await this.#gitSyncBoundary.upstreamRef(projectPath);
+    if (!upstream) {
+      // Detached HEAD / kein Upstream → kein ff-Ziel auflösbar (Edge-Case).
+      audit('no-remote');
+      return 'no-remote';
+    }
+    let originAhead;
+    try {
+      const truthRef = await this.#gitReadBoundary.resolveTruthRef(projectPath);
+      originAhead = !!(truthRef && truthRef.ahead);
+    } catch {
+      originAhead = false;
+    }
+    const merge = await this.#gitSyncBoundary.mergeFfOnly(projectPath, upstream);
+    if (!merge || !merge.ok) {
+      audit('clone-diverged');
+      return 'clone-diverged';
+    }
+    if (originAhead) {
+      audit('synced-ff');
+      return 'synced-ff';
+    }
+    audit('up-to-date');
+    return 'up-to-date';
   }
 
   /**
