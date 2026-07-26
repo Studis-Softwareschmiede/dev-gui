@@ -55,6 +55,9 @@ const VALIDATE_ERROR_MESSAGES = {
   'auth-failed': 'Bitwarden-Login fehlgeschlagen (Client-ID/Secret falsch).',
   'unlock-failed': 'Entsperren fehlgeschlagen (Master-Passwort falsch).',
   'bw-unreachable': 'Bitwarden nicht erreichbar — Verbindung/Server-URL prüfen.',
+  // Folge-Bug zu S-386 (F-072/S-414, Spec §4.5 AC22): analog zur Deploy-Meldung
+  // 'bitwarden-config-failed' (deploymentsRouter, AC19) — kein bw-Rohtext (S1).
+  'config-failed': 'Bitwarden-Server-Konfiguration konnte nicht aktualisiert werden — Server-URL im Deploy-Zugang prüfen.',
   'error': 'Unbekannter Fehler bei der Zugangs-Prüfung.',
 };
 

@@ -2,6 +2,14 @@
 
 Newest-first. Regeln für die Orchestrator-Ebene (Landen/Konsolidieren/Recovery/Dispatch-Ökonomie).
 
+## flow/L10 — `board next` kann eine bereits gelandete Story liefern — vor jedem coder-Dispatch die Landung mechanisch ausschliessen
+
+**Beobachtung (2026-07-27, S-386):** `board next --parent F-072` lieferte S-386 (`To Do`, `implements: null`), obwohl der Fix seit 8 Tagen als PR #431 gemergt UND deployt war — die damalige Session hielt den Status bewusst offen („Live-Beweis folgt nach Deploy") und niemand trug ihn nach. Ein coder-Dispatch hätte einen leeren Diff produziert und Token verbrannt.
+
+**Regel:** Wenn die Story-YAML Indizien für erledigte Arbeit trägt (gesetztes `branch`-Feld, `estimate_note` mit „Code+Tests im Branch/grün", Spec-Text der die Story in Vergangenheitsform referenziert), VOR dem Dispatch mechanisch prüfen: `git log --all --grep="<S-###>"` → Commit gefunden → `git merge-base --is-ancestor <sha> origin/main` + `gh pr view <n> --json state,mergedAt` + Container-Label `org.opencontainers.image.revision` gegen den SHA. Alles bestätigt → Done-Flip als Nachtrag (mit PR-Link), KEIN Bau-Loop, sichtbarer Hinweis dass keine Metrik-Zeile entsteht (keine Dispatches dieser Session — erfundene Werte würden die Baseline vergiften).
+
+*[seen-in: dev-gui S-386 2026-07-27; promoted: 2026-07-27]*
+
 ## flow/L09 — `board-ship.sh` **Modus B** (`--target-branch feature/<F-###>`) landet aus dem Feature-Worktree problemlos — flow/L07 gilt nur für Modus A
 
 **Beobachtung (2026-07-26, S-412):** `board-ship.sh S-412 dev-gui --target-branch feature/F-095` lief aus dem F-095-Worktree glatt durch (Merge, Board-Flip, Push, Exit 0) — kein `fatal: a branch named 'main' already exists`, kein Handbetrieb nötig.
