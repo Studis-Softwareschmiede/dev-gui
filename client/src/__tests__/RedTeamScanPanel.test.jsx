@@ -31,6 +31,13 @@
  *   AC20 — `created`- und `skipped`-Antworten sperren die jeweilige Zeile ("→ aufs Board
  *          gelegt (ID)"); Befunde mit bereits beim Laden gesetzter `boardId` starten direkt
  *          in diesem Zustand.
+ *   AC29 — sobald `ampel`-Daten vorliegen, lädt das Panel zusätzlich `GET .../scans/:scanId`
+ *          (Detail-Endpunkt, `scanId` ≡ `jobId`) nach und zeigt je Prüfpunkt Titel, Testort
+ *          und eigene Ampel (Text-Badge, `AMPEL_STYLE`/`AMPEL_LABEL` wiederverwendet). Ein
+ *          Nachlade-Fehlschlag lässt die Prüfpunkt-Liste einfach leer (kein Crash).
+ *   AC30 — Kein-Fund-Fall (auswertbar, keine Funde): grüne Gesamt-Ampel PLUS vollständige,
+ *          durchweg grüne Prüfpunkt-Liste als Beleg, was getestet wurde — statt nur eines
+ *          knappen "Keine Befunde erkannt".
  */
 
 import { describe, it, expect, jest, afterEach } from '@jest/globals';
@@ -375,6 +382,42 @@ function makeFullFetchFn({
   return fn;
 }
 
+/**
+ * Wie `makeFullFetchFn`, unterscheidet zusätzlich den AC29-Nachlade-Request
+ * `GET .../scans/:scanId` (Detail-Endpunkt, KEIN `/containers/`-Segment — anders als der
+ * Status-Poll `GET .../containers/:containerId/scan/:jobId`) von den übrigen GET-Requests.
+ * `scanDetail` = `{ status, body }` für diesen Request; Default: `200 { scan: { checks: [] } }`.
+ */
+function makeFetchFnWithDetail({
+  startStatus = 202,
+  startBody = { jobId: 'job-1' },
+  pollResponses = [{ status: 200, body: { status: 'running', phase: 'direkt' } }],
+  scanDetail = { status: 200, body: { scan: { checks: [] } } },
+  boardStatus = 200,
+  boardBody = { created: [], skipped: [] },
+} = {}) {
+  let pollIdx = 0;
+  const calls = [];
+  const fn = jest.fn(async (url, opts) => {
+    calls.push({ url, opts });
+    if (opts?.method === 'POST' && url.includes('/board')) {
+      return { ok: boardStatus === 200, status: boardStatus, json: async () => boardBody };
+    }
+    if (opts?.method === 'POST') {
+      return { ok: startStatus === 202, status: startStatus, json: async () => startBody };
+    }
+    if (!url.includes('/containers/') && url.includes('/scans/')) {
+      return { ok: scanDetail.status === 200, status: scanDetail.status, json: async () => scanDetail.body };
+    }
+    const next = pollResponses[Math.min(pollIdx, pollResponses.length - 1)];
+    pollIdx += 1;
+    if (next.throw) throw new Error('network');
+    return { ok: next.status === 200, status: next.status, json: async () => next.body };
+  });
+  fn.calls = calls;
+  return fn;
+}
+
 const MULTI_FINDINGS = [
   { id: 'f1', severity: 'critical', kind: 'sqli', testort: 'direkt', titel: 'SQLi' },
   { id: 'f2', severity: 'low', kind: 'info', testort: 'öffentlich', titel: 'Info-Leak' },
@@ -587,5 +630,104 @@ describe('RedTeamScanPanel — AC20: Nach-Übertrag-Zustand', () => {
     expect(queryByTestId('redteam-finding-checkbox-f4')).toBeNull();
     // Sammel-Button zählt f4 (bereits übertragen) nicht mit.
     expect(getByTestId('redteam-board-transfer-btn').textContent).toMatch(/3 Befunde/);
+  });
+});
+
+// ── AC29 — Prüfpunkt-Liste (alle Prüfungen, nicht nur Funde) ────────────────────
+
+describe('RedTeamScanPanel — AC29: Prüfpunkt-Liste', () => {
+  it('lädt den Detail-Endpunkt nach und zeigt je Prüfpunkt Titel, Testort und eigene Ampel', async () => {
+    const fetchFn = makeFetchFnWithDetail({
+      pollResponses: [
+        { status: 200, body: { status: 'done', phase: 'fertig', ampel: 'rot', findings: MULTI_FINDINGS } },
+      ],
+      scanDetail: {
+        status: 200,
+        body: {
+          scan: {
+            checks: [
+              { id: 'c1', titel: 'SQL-Injection-Test', testort: 'direkt', ampel: 'rot' },
+              { id: 'c2', titel: 'Auth-Header-Test', testort: 'öffentlich', ampel: 'gruen' },
+            ],
+          },
+        },
+      },
+    });
+    const { getByTestId } = renderPanel(fetchFn);
+
+    await waitFor(() => {
+      expect(getByTestId('redteam-scan-checks')).toBeDefined();
+    });
+    expect(getByTestId('redteam-check-c1').textContent).toMatch(/SQL-Injection-Test/);
+    expect(getByTestId('redteam-check-c1').textContent).toMatch(/direkt/);
+    expect(getByTestId('redteam-check-c1').textContent).toMatch(/Rot/);
+    expect(getByTestId('redteam-check-c2').textContent).toMatch(/Auth-Header-Test/);
+    expect(getByTestId('redteam-check-c2').textContent).toMatch(/Grün/);
+
+    // Nachlade-Request geht an den bestehenden Detail-Endpunkt (scanId ≡ jobId), NICHT an
+    // eine neue Route.
+    const detailCalls = fetchFn.calls.filter(
+      (c) => !c.opts?.method && !c.url.includes('/containers/') && c.url.includes('/scans/'),
+    );
+    expect(detailCalls).toHaveLength(1);
+    expect(detailCalls[0].url).toBe('/api/vps/machines/hetzner/srv1/scans/job-1');
+  });
+
+  it('Nachlade-Fehlschlag (Nicht-200): Prüfpunkt-Liste bleibt leer, kein Crash', async () => {
+    const fetchFn = makeFetchFnWithDetail({
+      pollResponses: [
+        { status: 200, body: { status: 'done', phase: 'fertig', ampel: 'gruen', findings: [] } },
+      ],
+      scanDetail: { status: 500, body: {} },
+    });
+    const { getByTestId, queryByTestId } = renderPanel(fetchFn);
+
+    await waitFor(() => {
+      expect(getByTestId('redteam-scan-no-findings')).toBeDefined();
+    });
+    expect(queryByTestId('redteam-scan-checks')).toBeNull();
+  });
+
+  it('ohne ampel-Daten (nicht auswertbar) wird der Detail-Endpunkt nicht nachgeladen', async () => {
+    const fetchFn = makeFetchFnWithDetail({
+      pollResponses: [{ status: 200, body: { status: 'done', phase: 'fertig' } }],
+    });
+    const { getByTestId } = renderPanel(fetchFn);
+
+    await waitFor(() => {
+      expect(getByTestId('redteam-scan-no-ampel-data')).toBeDefined();
+    });
+    const detailCalls = fetchFn.calls.filter((c) => !c.opts?.method && c.url.includes('/scans/'));
+    expect(detailCalls).toHaveLength(0);
+  });
+});
+
+// ── AC30 — Kein-Fund-Fall sauber ─────────────────────────────────────────────────
+
+describe('RedTeamScanPanel — AC30: Kein-Fund-Fall sauber', () => {
+  it('auswertbarer Lauf ohne Funde: grüne Ampel + vollständige, durchweg grüne Prüfpunkt-Liste', async () => {
+    const fetchFn = makeFetchFnWithDetail({
+      pollResponses: [{ status: 200, body: { status: 'done', phase: 'fertig', ampel: 'gruen', findings: [] } }],
+      scanDetail: {
+        status: 200,
+        body: {
+          scan: {
+            checks: [
+              { id: 'c1', titel: 'SQL-Injection-Test', testort: 'direkt', ampel: 'gruen' },
+              { id: 'c2', titel: 'Auth-Header-Test', testort: 'öffentlich', ampel: 'gruen' },
+            ],
+          },
+        },
+      },
+    });
+    const { getByTestId } = renderPanel(fetchFn);
+
+    await waitFor(() => {
+      expect(getByTestId('redteam-scan-checks')).toBeDefined();
+    });
+    expect(getByTestId('redteam-scan-ampel').textContent).toMatch(/Grün/);
+    expect(getByTestId('redteam-scan-no-findings')).toBeDefined();
+    expect(getByTestId('redteam-check-c1').textContent).toMatch(/Grün/);
+    expect(getByTestId('redteam-check-c2').textContent).toMatch(/Grün/);
   });
 });

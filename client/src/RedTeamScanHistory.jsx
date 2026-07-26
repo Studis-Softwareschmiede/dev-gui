@@ -44,6 +44,19 @@
  *          nicht verfügbar" statt zu crashen (Robustheit-NFR der Spec). Board-Projekt-
  *          Fetches werden pro `repoSlug` einmalig gecacht (mehrere Scans desselben
  *          Containers teilen i. d. R. denselben `repoSlug`).
+ *   AC29 — Der Detailbericht (Klick auf eine Zeile, s. AC14) zeigt zusätzlich die
+ *          vollständige Prüfpunkt-Liste (`scan.checks`, bereits Teil des bestehenden
+ *          Detail-Endpunkts — kein neuer Fetch nötig) — je Prüfpunkt Titel, Testort und
+ *          eigene Ampel (`AMPEL_STYLE`/`AMPEL_LABEL`, wiederverwendet aus
+ *          `RedTeamScanPanel.jsx` — keine zweite, unabhängig driftende Zuordnung, keine
+ *          Invertierung). Ein älterer Verlaufseintrag ohne `checks` (additive Degradation,
+ *          `[]`-Default im Store) rendert diesen Block einfach nicht — kein Crash.
+ *   AC30 — Kein-Fund-Fall sauber: hat ein Lauf keine Funde, zeigt der Detailbericht
+ *          weiterhin die grüne Gesamt-Ampel (Zeilen-Badge, AC14) PLUS die vollständige,
+ *          durchweg grüne Prüfpunkt-Liste als Beleg, was getestet wurde — statt nur
+ *          "Keine Befunde erkannt". Der In-App-Bericht (Prüfpunkte+Funde) ist die
+ *          autoritative Bericht-Ansicht; ein evtl. vorhandener `reportRef`-Link (AC14)
+ *          bleibt unverändert als optionale Zusatz-Referenz bestehen.
  *
  * Security (Floor):
  *   - Kein `dangerouslySetInnerHTML` — alle Texte (Titel/Befunde/Status) werden als
@@ -328,6 +341,29 @@ export function RedTeamScanHistory({ provider, serverId, containerId, containerL
                             Kein Bericht verfügbar.
                           </span>
                         )}
+                        {/* AC29/AC30 — vollständige Prüfpunkt-Liste (alle durchgeführten
+                            Prüfungen, nicht nur Funde) als Beleg, was getestet wurde — auch
+                            im Kein-Fund-Fall (dann durchweg grün). Additive Degradation:
+                            fehlt `checks` (älterer Verlaufseintrag), entfällt der Block
+                            ersatzlos. */}
+                        {(detail.scan.checks ?? []).length > 0 && (
+                          <div data-testid={`redteam-history-checks-${entry.scanId}`}>
+                            <p style={styles.hint}>Geprüfte Punkte:</p>
+                            <ul style={styles.findingsList}>
+                              {(detail.scan.checks ?? []).map((c) => (
+                                <li key={c.id} style={styles.findingItem}>
+                                  <span
+                                    style={{ ...styles.ampelBadge, ...(AMPEL_STYLE[c.ampel] ?? AMPEL_STYLE.gruen) }}
+                                  >
+                                    {AMPEL_LABEL[c.ampel] ?? 'Unbekannter Status'}
+                                  </span>{' '}
+                                  {c.titel || '(ohne Titel)'} · {c.testort ?? '—'}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+
                         {(detail.scan.findings ?? []).length === 0 ? (
                           <p style={styles.hint}>Keine Befunde erkannt.</p>
                         ) : (
