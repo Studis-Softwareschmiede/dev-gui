@@ -137,10 +137,13 @@ function findProximateResetMatch(clean) {
  * bevor die Erkennungs-Regex läuft — reale PTY-Ausgabe interaktiver CLIs
  * enthält praktisch immer solche Sequenzen und würde sie sonst mitten in die
  * Meldung schneiden.
+ * Exportiert (S-410, red-team-scan-per-container AC24): Wiederverwendung durch
+ * `redTeamOutputParser.js` statt einer zweiten, unabhängig driftenden ANSI-Strip-Regex.
+ *
  * @param {string} str
  * @returns {string}
  */
-function stripAnsi(str) {
+export function stripAnsi(str) {
   // eslint-disable-next-line no-control-regex
   return str.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
 }

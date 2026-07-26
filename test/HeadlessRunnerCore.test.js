@@ -34,6 +34,14 @@
  *         (Defense in Depth — stripped again AFTER merging); omitting `env`
  *         stays byte-identical to the pre-ADR-021 behaviour (no regression).
  *
+ * Covers (red-team-scan-per-container.md): AC25
+ *   AC25 — opt-in `captureOutput` constructor param: default `false` leaves the
+ *         job object byte-identical (no extra key) for every existing/default
+ *         caller (no regression for `HeadlessFlowRunner`/`HeadlessReconcileRunner`/
+ *         etc.); `captureOutput: true` adds an `output` field (the same
+ *         already-captured stdout+stderr `combined` string) to the terminal job
+ *         state across the `done`/`failed`/`auth-expired` close-derived paths.
+ *
  * Pattern: injectable `spawnFn` returning a fake EventEmitter-based child
  * process (stdout/stderr sub-emitters + kill() spy) — no real `claude` spawn,
  * consistent with `HeadlessFlowRunner.test.js`/`HeadlessReconcileRunner.test.js`.
@@ -50,6 +58,11 @@ function makeFakeChild() {
   child.stderr = new EventEmitter();
   child.kill = jest.fn();
   return child;
+}
+
+/** Waits one microtask tick — lets the runner's internal close-handling settle. */
+function tick() {
+  return new Promise((r) => setImmediate(r));
 }
 
 describe('HeadlessRunnerCore — AC1/AC2: non-empty args are joined into ONE -p argv element (regression gate for the argument-loss bug)', () => {
@@ -241,5 +254,88 @@ describe('HeadlessRunnerCore — ADR-021 (S-336): per-run env override (start(pr
     expect(opts.env.GPG_PASS_FILE).toBe('/tmp/gpg-pass-xyz/gpg-pass');
     expect('ANTHROPIC_API_KEY' in opts.env).toBe(false);
     expect('OPENAI_API_KEY' in opts.env).toBe(false);
+  });
+});
+
+describe('HeadlessRunnerCore — AC25 (red-team-scan-per-container): opt-in `captureOutput` output exposition', () => {
+  it('captureOutput default (omitted) → job object stays byte-identical, no "output" key, on a clean done exit', async () => {
+    const child = makeFakeChild();
+    const spawnFn = jest.fn(() => child);
+    const core = new HeadlessRunnerCore({
+      spawnFn,
+      timeoutMs: 10_000,
+      defaultCommand: '/agent-flow:reconcile',
+      defaultArgs: [],
+    });
+
+    const { jobId } = core.start('/workspace/proj-no-capture');
+    child.stdout.emit('data', 'hello stdout\n');
+    child.emit('close', 0);
+    await tick();
+
+    const job = core.getJob(jobId);
+    expect('output' in job).toBe(false);
+    expect(job).toEqual({ status: 'done', result: 'Headless-Lauf abgeschlossen', error: undefined, prHint: undefined });
+  });
+
+  it('captureOutput:false explicit → same byte-identical behaviour as the default', async () => {
+    const child = makeFakeChild();
+    const spawnFn = jest.fn(() => child);
+    const core = new HeadlessRunnerCore({
+      spawnFn,
+      timeoutMs: 10_000,
+      defaultCommand: '/agent-flow:reconcile',
+      defaultArgs: [],
+      captureOutput: false,
+    });
+
+    const { jobId } = core.start('/workspace/proj-no-capture-explicit');
+    child.emit('close', 0);
+    await tick();
+
+    expect('output' in core.getJob(jobId)).toBe(false);
+  });
+
+  it('captureOutput:true → job.output carries the captured stdout+stderr combination on a clean done exit', async () => {
+    const child = makeFakeChild();
+    const spawnFn = jest.fn(() => child);
+    const core = new HeadlessRunnerCore({
+      spawnFn,
+      timeoutMs: 10_000,
+      defaultCommand: '/agent-flow:red-team',
+      defaultArgs: [],
+      captureOutput: true,
+    });
+
+    const { jobId } = core.start('/workspace/proj-capture');
+    child.stdout.emit('data', '{"status":"done","findings_count":0}');
+    child.stderr.emit('data', 'some stderr noise');
+    child.emit('close', 0);
+    await tick();
+
+    const job = core.getJob(jobId);
+    expect(job.status).toBe('done');
+    expect(job.output).toBe('{"status":"done","findings_count":0}\nsome stderr noise');
+  });
+
+  it('captureOutput:true also exposes output on a failed (non-zero exit) close', async () => {
+    const child = makeFakeChild();
+    const spawnFn = jest.fn(() => child);
+    const core = new HeadlessRunnerCore({
+      spawnFn,
+      timeoutMs: 10_000,
+      defaultCommand: '/agent-flow:red-team',
+      defaultArgs: [],
+      captureOutput: true,
+    });
+
+    const { jobId } = core.start('/workspace/proj-capture-failed');
+    child.stderr.emit('data', 'boom');
+    child.emit('close', 1);
+    await tick();
+
+    const job = core.getJob(jobId);
+    expect(job.status).toBe('failed');
+    expect(job.output).toBe('\nboom');
   });
 });

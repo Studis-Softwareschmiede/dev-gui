@@ -49,6 +49,21 @@
  *     eine Meldung ohne robust parsebare Reset-Zeit fällt auf das bisherige
  *     Verhalten zurück (kein Fehlalarm, kein Crash) — rein additiv, kein neuer
  *     IO-/PTY-Pfad (die Ausgabe wird ohnehin schon für die 401-Erkennung erfasst).
+ *   - Opt-in Ausgabe-Exposition (docs/specs/red-team-scan-per-container.md AC25):
+ *     der Konstruktor-Parameter `captureOutput` (Default `false`) steuert, ob die
+ *     bereits erfasste `combined`-Ausgabe (stdout+stderr) zusätzlich als `output`
+ *     im terminalen Job-Patch abgelegt wird. Default `false` → das Job-Objekt
+ *     bleibt für ALLE bestehenden Core-Nutzer (`HeadlessReconcileRunner`,
+ *     `HeadlessFlowRunner`, `HeadlessRetroRunner`, `ObsidianIngestRunner`, …)
+ *     byte-identisch (kein zusätzlicher Key) — nur ein Aufrufer, der
+ *     `captureOutput: true` explizit setzt (`HeadlessRedTeamRunner`, für den
+ *     fail-safe Funde-/Prüfpunkt-Parser `src/redTeamOutputParser.js`, AC24),
+ *     bekommt das Feld. Die Security-Floor-Invarianten (AC22) bleiben
+ *     unangetastet: `output` ist dieselbe bereits für die 401-/Budget-Erkennung
+ *     erfasste Ausgabe (kein neuer IO-Pfad, kein zusätzliches Secret-Risiko) —
+ *     ob/wie ein Aufrufer daraus persistierte/exponierte Daten ableitet, bleibt
+ *     dessen Verantwortung (der Parser liefert nur vetted Kurz-Metadaten, nie
+ *     die Roh-Ausgabe an nachgelagerte Konsumenten weiter).
  *
  * Job-Registry: In-Memory (Map jobId → JobState), geht bei Server-Neustart
  * verloren (Nicht-Ziel: keine persistente Job-Historie).
@@ -190,6 +205,8 @@ export class HeadlessRunnerCore {
   #defaultArgs;
   /** @type {{genericFailure:string, timeoutFailure:string, internalFailure:string, doneResult:string}} */
   #messages;
+  /** @type {boolean} opt-in Ausgabe-Exposition (AC25) — Default false (byte-identisch für alle übrigen Nutzer). */
+  #captureOutput;
 
   /**
    * @param {object} params
@@ -203,6 +220,11 @@ export class HeadlessRunnerCore {
    * @param {string} [params.messages.timeoutFailure]
    * @param {string} [params.messages.internalFailure]
    * @param {string} [params.messages.doneResult]
+   * @param {boolean} [params.captureOutput] - opt-in (docs/specs/red-team-scan-per-container.md
+   *   AC25): legt die erfasste `combined`-Ausgabe (stdout+stderr) zusätzlich als `output` im
+   *   terminalen Job-Zustand ab. Default `false` — nur explizit opt-in Aufrufer (aktuell
+   *   `HeadlessRedTeamRunner`) sehen das zusätzliche Feld; alle übrigen Core-Nutzer bleiben
+   *   unverändert (kein zusätzlicher Job-Key).
    */
   constructor({
     spawnFn = nodeSpawn,
@@ -211,12 +233,14 @@ export class HeadlessRunnerCore {
     defaultCommand,
     defaultArgs = [],
     messages = {},
+    captureOutput = false,
   }) {
     this.#spawnFn = spawnFn;
     this.#timeoutMs = timeoutMs;
     this.#lock = lock;
     this.#defaultCommand = defaultCommand;
     this.#defaultArgs = defaultArgs;
+    this.#captureOutput = captureOutput;
     this.#messages = {
       genericFailure: messages.genericFailure ?? 'Headless-Lauf fehlgeschlagen',
       timeoutFailure: messages.timeoutFailure ?? 'Headless-Lauf abgebrochen (Timeout)',
@@ -265,7 +289,7 @@ export class HeadlessRunnerCore {
    * Liest den aktuellen Status eines Jobs.
    *
    * @param {string} jobId
-   * @returns {{ status: string, result?: string, error?: string, prHint?: string, resetAt?: number, rawMatch?: string } | undefined}
+   * @returns {{ status: string, result?: string, error?: string, prHint?: string, resetAt?: number, rawMatch?: string, output?: string } | undefined}
    */
   getJob(jobId) {
     return this.#jobs.get(jobId);
@@ -295,7 +319,19 @@ export class HeadlessRunnerCore {
           if (settled) return;
           settled = true;
           clearTimeout(timeoutHandle);
-          this.#jobs.set(jobId, { status, result: undefined, error: undefined, prHint: undefined, ...patch });
+          // Opt-in Ausgabe-Exposition (AC25): nur wenn `captureOutput` gesetzt ist, wird die
+          // bereits erfasste `combined`-Ausgabe (stdout+stderr, dieselbe wie für die 401-/
+          // Budget-Erkennung) zusätzlich als `output` abgelegt — Default `false` lässt das
+          // Job-Objekt für alle übrigen Core-Nutzer byte-identisch (kein zusätzlicher Key).
+          const outputPatch = this.#captureOutput ? { output: `${stdout}\n${stderr}` } : {};
+          this.#jobs.set(jobId, {
+            status,
+            result: undefined,
+            error: undefined,
+            prHint: undefined,
+            ...outputPatch,
+            ...patch,
+          });
           resolve();
         };
 
