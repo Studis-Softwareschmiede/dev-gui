@@ -2,7 +2,7 @@ id: S-415
 parent: F-096
 title: Test-Dependencies + Playwright-Browser im Klon herstellen vor dem Regressionslauf
   (kein blinder Start)
-status: To Do
+status: In Progress
 priority: P1
 spec: docs/specs/regression-local-execution.md
 implements:
@@ -17,14 +17,16 @@ dispo_act: null
 dispo_forecast: null
 estimate_note: 'M (Score 6: 3 AC + npm ci/playwright install im Klon-Root + Basis-Image/Install-Schritt-Infra).
   baseline js|balanced|M. Update 2026-07-26: A1 entschieden (Browser bereits fest
-  im Image, /ms-playwright + PLAYWRIGHT_BROWSERS_PATH vorhanden) — AC2 reduziert
-  sich auf den Versions-Guard, kein Install-Schritt/Image-Umbau mehr noetig;
-  effektiver Umfang eher S-M.'
+  im Image, /ms-playwright + PLAYWRIGHT_BROWSERS_PATH vorhanden) — AC2 reduziert sich
+  auf den Versions-Guard, kein Install-Schritt/Image-Umbau mehr noetig; effektiver
+  Umfang eher S-M.'
 confidence: medium
 tok_est: '1659043'
-branch: null
+branch: feat/S-415-test-deps-browser-guard
 pr: null
 blocked_reason: null
 created_at: '2026-07-22T19:10:20Z'
-updated_at: '2026-07-22T19:11:24Z'
+updated_at: '2026-07-26T20:09:00Z'
 done_at: null
+claimed_by: MacBook-Pro-von-Alexander.local-86850-1785096521-1864
+claimed_at: '2026-07-26T20:08:50Z'

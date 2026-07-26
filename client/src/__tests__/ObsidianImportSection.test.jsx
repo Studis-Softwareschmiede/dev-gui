@@ -52,6 +52,20 @@
  *         keinen State-Update-Leck (kein Poll-Call/kein `console.error` nach
  *         Unmount).
  *
+ * Covers (obsidian-question-catalog, v4 S-390 — Hintergrund-Status-Badge):
+ *   AC18 — Solange das Overlay geschlossen ist und ein gemerkter Job zur
+ *         aktuellen Auswahl passt (`ingestJobMatchesSelection`), pollt die
+ *         Section `GET .../obsidian-ingest/:jobId` (KEIN neuer Endpunkt) bis
+ *         `needs-answers`/`done`/`failed`/`auth-expired` und zeigt dann einen
+ *         text-beschrifteten, je-Zustand unterscheidbaren Badge. Kein Poll
+ *         ohne gemerkten Job; Polling stoppt bei terminalem/Interrupt-
+ *         Zustand. `404`/Netzwerkfehler beim Poll → Badge entfällt still,
+ *         Merkung verworfen, kein Crash.
+ *   AC19 — Klick auf den Badge öffnet das Overlay erneut mit `initialJobId`
+ *         (Wiedereinstieg, kein neuer `start()`); die bestehende Verwerf-
+ *         Regel bei Auswahlwechsel (Notiz-Ordner ODER Ziel-Projekt) lässt den
+ *         Badge verschwinden (`ingestJobMatchesSelection` wird `false`).
+ *
  * NFR A11y:
  *   - "Auslösen"-Button: Touch-Target ≥ 44 px (minHeight).
  *   - Disabled-Zustände: disabled-Attribut UND Text-Label (nie nur Farbe).
@@ -105,6 +119,7 @@ const FROM_NOTES_ACCEPTED = { commandId: 'cmd-1', status: 'accepted' };
  *   ensureTargetPost?: { status: number, data: object } | 'reject',
  *   ensureTargetStatusSequence?: Array<{ status: number, data: object }>,
  *   ingestStart?: { status: number, data: object },
+ *   ingestStatusSequence?: Array<{ status: number, data: object } | 'reject'>,
  * }} opts
  * @returns {{ fetchFn: jest.Mock, calls: Array<{url:string, method:string, body:*}> }}
  */
@@ -121,9 +136,16 @@ function makeFetchFn({
   // Mount keinen "unmatched fetch"-Fehler auslöst; der Katalog-Zyklus selbst
   // ist NICHT Gegenstand dieser Testdatei (s. ObsidianIngestOverlay.test.jsx).
   ingestStart    = { status: 202, data: { jobId: 'ingest-job-1', status: 'running' } },
+  // obsidian-question-catalog v4 AC18 (S-390): GET .../obsidian-ingest/:jobId
+  // — sowohl vom Overlay selbst (solange offen) ALS AUCH vom Hintergrund-
+  // Badge-Poll (sobald geschlossen) konsumiert, EIN gemeinsamer Index (beide
+  // pollen denselben Endpunkt). Default: bleibt dauerhaft 'running' (bisheriges
+  // Verhalten, rückwärtskompatibel zu allen bestehenden Tests dieser Datei).
+  ingestStatusSequence = [{ status: 200, data: { status: 'running' } }],
 } = {}) {
   const calls = [];
   let ensureStatusIdx = 0;
+  let ingestStatusIdx = 0;
 
   const fetchFn = jest.fn(async (url, opts = {}) => {
     const method = opts.method ?? 'GET';
@@ -172,9 +194,12 @@ function makeFetchFn({
       return { ok: ingestStart.status < 300, status: ingestStart.status, json: async () => ingestStart.data };
     }
     if (/^\/api\/obsidian-ingest\/[^/]+$/.test(url) && method === 'GET') {
-      // Poll des Overlays nach dem Start — bleibt bewusst 'running' (kein
-      // terminaler Zustand, s.o.).
-      return { ok: true, status: 200, json: async () => ({ status: 'running' }) };
+      // Poll — geteilter Index für Overlay-internen Poll UND Hintergrund-
+      // Badge-Poll (AC18/AC19, S-390); clamped auf den letzten Eintrag.
+      const entry = ingestStatusSequence[Math.min(ingestStatusIdx, ingestStatusSequence.length - 1)];
+      ingestStatusIdx += 1;
+      if (entry === 'reject') throw new Error('network error');
+      return { ok: entry.status === 200, status: entry.status, json: async () => entry.data };
     }
     throw new Error(`Unerwarteter fetch-Aufruf: ${method} ${url}`);
   });
@@ -653,6 +678,231 @@ describe('obsidian-question-catalog v3 AC15 — Anlage-/Existenz-Statusanzeige v
   // Happy-Path unverändert: bereits durch die o.g. Tests ("bestehendes Ziel
   // …", "sofort 200 'ready'…", "202 'creating' … bis 'ready'…") abgedeckt —
   // kein Auswahlwechsel während der Vorbereitung → unverändertes Verhalten.
+});
+
+// ── obsidian-question-catalog v4 AC18/AC19 (S-390): Hintergrund-Status-Badge ──
+
+describe('obsidian-question-catalog v4 AC18/AC19 — Hintergrund-Status-Badge + Wiedereinstieg', () => {
+  const STATUS_GET_RE = /^\/api\/obsidian-ingest\/[^/]+$/;
+  const NEEDS_ANSWERS_CATALOG = [
+    { stage: 'Notiz', id: 'q1', frage: 'Titel des Projekts?', quelle: 'notiz.md', pflicht: true },
+  ];
+
+  /** Wählt Projekt + bestehendes Ziel, startet "Strukturiert starten", schließt das Overlay wieder (Job läuft detached weiter). */
+  async function startAndCloseOverlay(getByRole, getByLabelText) {
+    await selectProject(getByLabelText, '/vault/Projekte/mein-projekt');
+    await selectTargetProject(getByLabelText, 'ziel-repo-a');
+    const startBtn = await waitFor(() => {
+      const btn = getByRole('button', { name: /strukturiert starten/i });
+      expect(btn.disabled).toBe(false);
+      return btn;
+    });
+    await act(async () => { fireEvent.click(startBtn); });
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="obsidian-ingest-overlay"]')).toBeTruthy();
+    });
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="obsidian-ingest-close-btn"]'));
+    });
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="obsidian-ingest-overlay"]')).toBeNull();
+    });
+  }
+
+  it('kein Badge und kein Poll ohne gemerkten Job (frisch geöffnete Section)', async () => {
+    const { fetchFn, calls } = makeFetchFn();
+    const { queryByTestId, getByLabelText } = renderSection(fetchFn);
+    await waitFor(() => getByLabelText(/^projekt-ordner$/i));
+    expect(queryByTestId('obsidian-ingest-background-badge')).toBeNull();
+    expect(calls.some((c) => STATUS_GET_RE.test(c.url) && c.method === 'GET')).toBe(false);
+  });
+
+  it('AC18: Job erreicht needs-answers im Hintergrund → Badge erscheint text-beschriftet je Zustand; Poll stoppt danach', async () => {
+    jest.useFakeTimers();
+    try {
+      const { fetchFn, calls } = makeFetchFn({
+        ingestStatusSequence: [
+          { status: 200, data: { status: 'running' } },
+          { status: 200, data: { status: 'needs-answers', catalog: NEEDS_ANSWERS_CATALOG } },
+        ],
+      });
+      const { getByRole, getByLabelText, getByTestId } = renderSection(fetchFn);
+
+      await startAndCloseOverlay(getByRole, getByLabelText);
+
+      const badge = await waitFor(() => getByTestId('obsidian-ingest-background-badge'));
+      expect(badge.textContent).toMatch(/fragenkatalog wartet/i);
+      expect(badge.getAttribute('data-badge-status')).toBe('needs-answers');
+
+      const statusCallsAfterBadge = calls.filter((c) => STATUS_GET_RE.test(c.url) && c.method === 'GET').length;
+
+      // Poll gestoppt: über mehrere weitere Intervalle hinweg keine neuen Calls.
+      await act(async () => { await jest.advanceTimersByTimeAsync(20_000); });
+      const statusCallsAfterWait = calls.filter((c) => STATUS_GET_RE.test(c.url) && c.method === 'GET').length;
+      expect(statusCallsAfterWait).toBe(statusCallsAfterBadge);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('AC18: Job wird done im Hintergrund → Badge "Ingest abgeschlossen"', async () => {
+    jest.useFakeTimers();
+    try {
+      const { fetchFn } = makeFetchFn({
+        ingestStatusSequence: [
+          { status: 200, data: { status: 'running' } },
+          { status: 200, data: { status: 'done' } },
+        ],
+      });
+      const { getByRole, getByLabelText, getByTestId } = renderSection(fetchFn);
+      await startAndCloseOverlay(getByRole, getByLabelText);
+      const badge = await waitFor(() => getByTestId('obsidian-ingest-background-badge'));
+      expect(badge.textContent).toMatch(/ingest abgeschlossen/i);
+      expect(badge.getAttribute('data-badge-status')).toBe('done');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('AC18: Job wird failed im Hintergrund → Badge "Ingest fehlgeschlagen"', async () => {
+    jest.useFakeTimers();
+    try {
+      const { fetchFn } = makeFetchFn({
+        ingestStatusSequence: [
+          { status: 200, data: { status: 'running' } },
+          { status: 200, data: { status: 'failed', error: 'Ingest-Lauf fehlgeschlagen' } },
+        ],
+      });
+      const { getByRole, getByLabelText, getByTestId } = renderSection(fetchFn);
+      await startAndCloseOverlay(getByRole, getByLabelText);
+      const badge = await waitFor(() => getByTestId('obsidian-ingest-background-badge'));
+      expect(badge.textContent).toMatch(/ingest fehlgeschlagen/i);
+      expect(badge.getAttribute('data-badge-status')).toBe('failed');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('AC19: Klick auf den Badge öffnet das Overlay erneut mit initialJobId (kein neuer POST .../start), landet im Fragenkatalog', async () => {
+    jest.useFakeTimers();
+    try {
+      const { fetchFn, calls } = makeFetchFn({
+        ingestStatusSequence: [
+          { status: 200, data: { status: 'running' } },
+          { status: 200, data: { status: 'needs-answers', catalog: NEEDS_ANSWERS_CATALOG } },
+        ],
+      });
+      const { getByRole, getByLabelText, getByTestId } = renderSection(fetchFn);
+
+      await startAndCloseOverlay(getByRole, getByLabelText);
+      const badge = await waitFor(() => getByTestId('obsidian-ingest-background-badge'));
+
+      const startCallsBeforeClick = calls.filter((c) => c.url === '/api/obsidian-ingest/start').length;
+
+      await act(async () => { fireEvent.click(badge); });
+
+      await waitFor(() => {
+        expect(document.querySelector('[data-testid="obsidian-ingest-overlay"]')).toBeTruthy();
+      });
+      // Wiedereinstieg (initialJobId) — KEIN zweiter POST .../start.
+      const startCallsAfterClick = calls.filter((c) => c.url === '/api/obsidian-ingest/start').length;
+      expect(startCallsAfterClick).toBe(startCallsBeforeClick);
+
+      // Landet direkt im Fragenkatalog (needs-answers), nicht im starting/running-Zustand.
+      await waitFor(() => {
+        expect(getByTestId('obsidian-ingest-catalog')).toBeTruthy();
+      });
+      // Badge selbst ist verschwunden, solange das Overlay wieder offen ist.
+      expect(document.querySelector('[data-testid="obsidian-ingest-background-badge"]')).toBeNull();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('AC18 Edge-Case "Badge-Poll-Fehler": 404 beim Hintergrund-Poll → Badge entfällt still, Merkung verworfen, kein Crash', async () => {
+    jest.useFakeTimers();
+    try {
+      const { fetchFn } = makeFetchFn({
+        ingestStatusSequence: [
+          { status: 200, data: { status: 'running' } },
+          { status: 404, data: {} },
+        ],
+      });
+      const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+      const { getByRole, getByLabelText, queryByTestId } = renderSection(fetchFn);
+
+      await startAndCloseOverlay(getByRole, getByLabelText);
+
+      // Kein Badge, kein Crash.
+      await act(async () => { await jest.advanceTimersByTimeAsync(10_000); });
+      expect(queryByTestId('obsidian-ingest-background-badge')).toBeNull();
+      expect(consoleError).not.toHaveBeenCalled();
+
+      // Merkung verworfen: der Haupt-Button zeigt wieder "Strukturiert starten", nicht "Fortsetzen".
+      const ingestBtn = document.querySelector('[data-testid="obsidian-ingest-open-btn"]');
+      expect(ingestBtn.textContent).toBe('Strukturiert starten');
+
+      consoleError.mockRestore();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('AC18 Edge-Case "Badge-Poll-Fehler": Netzwerkfehler beim Hintergrund-Poll → Badge entfällt still, Merkung verworfen, kein Crash', async () => {
+    jest.useFakeTimers();
+    try {
+      const { fetchFn } = makeFetchFn({
+        ingestStatusSequence: [
+          { status: 200, data: { status: 'running' } },
+          'reject',
+        ],
+      });
+      const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+      const { getByRole, getByLabelText, queryByTestId } = renderSection(fetchFn);
+
+      await startAndCloseOverlay(getByRole, getByLabelText);
+
+      await act(async () => { await jest.advanceTimersByTimeAsync(10_000); });
+      expect(queryByTestId('obsidian-ingest-background-badge')).toBeNull();
+      expect(consoleError).not.toHaveBeenCalled();
+
+      const ingestBtn = document.querySelector('[data-testid="obsidian-ingest-open-btn"]');
+      expect(ingestBtn.textContent).toBe('Strukturiert starten');
+
+      consoleError.mockRestore();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('AC19 unveränderte Verwerf-Regel: Notiz-Ordner-Wechsel WÄHREND ein Hintergrund-Job läuft lässt den Badge verschwinden, kein Poll mehr', async () => {
+    jest.useFakeTimers();
+    try {
+      const { fetchFn, calls } = makeFetchFn({
+        ingestStatusSequence: [
+          { status: 200, data: { status: 'running' } },
+          { status: 200, data: { status: 'needs-answers', catalog: NEEDS_ANSWERS_CATALOG } },
+        ],
+      });
+      const { getByRole, getByLabelText, getByTestId, queryByTestId } = renderSection(fetchFn);
+
+      await startAndCloseOverlay(getByRole, getByLabelText);
+      await waitFor(() => getByTestId('obsidian-ingest-background-badge'));
+
+      const statusCallsBeforeChange = calls.filter((c) => STATUS_GET_RE.test(c.url) && c.method === 'GET').length;
+
+      // Notiz-Ordner-Wechsel — Verwerf-Regel (unverändert, AC19).
+      fireEvent.change(getByLabelText(/^projekt-ordner$/i), { target: { value: '/vault/Projekte/anderes-projekt' } });
+
+      expect(queryByTestId('obsidian-ingest-background-badge')).toBeNull();
+
+      await act(async () => { await jest.advanceTimersByTimeAsync(20_000); });
+      const statusCallsAfterChange = calls.filter((c) => STATUS_GET_RE.test(c.url) && c.method === 'GET').length;
+      expect(statusCallsAfterChange).toBe(statusCallsBeforeChange);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 });
 
 // ── AC3: Auslösen — genau ein POST ────────────────────────────────────────────

@@ -21,6 +21,12 @@ namespaces:
       status: active
       reserved_at: '2026-07-26T20:06:38Z'
       high_water: null
+    - feature_id: F-095
+      range_start: 31
+      range_end: 40
+      status: active
+      reserved_at: '2026-07-26T20:06:55Z'
+      high_water: null
   ADR:
     block_size: 10
     reservations:
@@ -42,6 +48,12 @@ namespaces:
       status: active
       reserved_at: '2026-07-26T20:06:40Z'
       high_water: null
+    - feature_id: F-095
+      range_start: 31
+      range_end: 40
+      status: active
+      reserved_at: '2026-07-26T20:06:57Z'
+      high_water: null
   C:
     block_size: 10
     reservations:
@@ -62,4 +74,10 @@ namespaces:
       range_end: 30
       status: active
       reserved_at: '2026-07-26T20:06:43Z'
+      high_water: null
+    - feature_id: F-095
+      range_start: 31
+      range_end: 40
+      status: active
+      reserved_at: '2026-07-26T20:07:00Z'
       high_water: null

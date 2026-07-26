@@ -26,6 +26,11 @@
  *          reagieren IMMER (auch während `starting`/`submitting`); Schließen
  *          bricht den Lauf NICHT ab (kein Abbruch-Request; Wiedereinstieg via
  *          `initialJobId` überspringt den erneuten `POST .../start`).
+ *   AC17 — (v4, S-389) Solange `starting`/`running`: animierter Spinner +
+ *          live tickende Laufzeitanzeige „läuft seit m:ss" (aus `startedAt`,
+ *          AC16) + Erwartungstext; `role="status"`/`aria-live="polite"`.
+ *          Fehlt `startedAt` noch → kein `NaN`, Anzeige tickt sobald es
+ *          eintrifft. Timer wird beim Verlassen der Phase aufgeräumt.
  *
  * @jest-environment jsdom
  */
@@ -118,6 +123,7 @@ function renderOverlay({
   triggerRef,
   projectFolderPath = '/vault/Projekte/mein-projekt',
   targetProjectSlug = 'mein-repo',
+  livenessTickMs = 5,
 } = {}) {
   const fn = fetchFn ?? makeFetch().fetchFn;
   const close = onClose ?? jest.fn();
@@ -138,6 +144,7 @@ function renderOverlay({
       triggerRef: trigger,
       pollMs: 5,
       successLingerMs: 5,
+      livenessTickMs,
     }),
   );
   return {
@@ -448,5 +455,74 @@ describe('obsidian-question-catalog AC7 — Fehler inline + Retry, Esc/Backdrop/
     renderOverlay({ fetchFn: resumeFetch, initialJobId: 'job-1' });
     await waitFor(() => expect(document.body.textContent).toMatch(/Welche AC fehlt\?/));
     expect(resumeCalls.some((c) => START_RE.test(c.url))).toBe(false);
+  });
+});
+
+// ── AC17: Ehrliche Warteanzeige (Spinner + live Laufzeit + Erwartungstext) ──
+
+describe('obsidian-question-catalog v4 AC17 — Spinner + live Laufzeit + Erwartungstext', () => {
+  it('zeigt während "starting" einen Spinner + Erwartungstext, Laufzeit ohne NaN (kein startedAt bekannt)', async () => {
+    const fetchFn = jest.fn(() => new Promise(() => {})); // hängt in "starting" (kein startedAt bekannt)
+    renderOverlay({ fetchFn });
+
+    await waitFor(() => expect(q('obsidian-ingest-starting')).toBeTruthy());
+    expect(q('obsidian-ingest-liveness-spinner')).toBeTruthy();
+    expect(q('obsidian-ingest-elapsed').textContent).not.toMatch(/NaN/);
+    expect(q('obsidian-ingest-elapsed').textContent).toMatch(/^läuft seit \d+:\d{2}$/);
+    expect(q('obsidian-ingest-expectation-hint').textContent).toMatch(/mehrere Minuten dauern/);
+    // role=status/aria-live=polite (A11y).
+    expect(q('obsidian-ingest-starting').getAttribute('role')).toBe('status');
+    expect(q('obsidian-ingest-starting').getAttribute('aria-live')).toBe('polite');
+  });
+
+  it('zeigt während "running" Spinner + Erwartungstext + tickende Laufzeit aus startedAt (AC16)', async () => {
+    const startedAt = new Date(Date.now() - 5000).toISOString();
+    const { fetchFn } = makeFetch({ statusSequence: [{ status: 'running', startedAt }] });
+    renderOverlay({ fetchFn, livenessTickMs: 5 });
+
+    await waitFor(() => expect(q('obsidian-ingest-running')).toBeTruthy());
+    expect(q('obsidian-ingest-liveness-spinner')).toBeTruthy();
+    expect(q('obsidian-ingest-elapsed').textContent).toMatch(/^läuft seit \d+:\d{2}$/);
+    expect(q('obsidian-ingest-elapsed').textContent).not.toMatch(/NaN/);
+    expect(q('obsidian-ingest-expectation-hint').textContent).toMatch(/mehrere Minuten dauern/);
+    expect(q('obsidian-ingest-running').getAttribute('role')).toBe('status');
+    expect(q('obsidian-ingest-running').getAttribute('aria-live')).toBe('polite');
+
+    // Live-Ticker: die Laufzeit wächst über die Zeit (clientseitig, nicht nur je Poll).
+    const first = q('obsidian-ingest-elapsed').textContent;
+    await waitFor(() => {
+      expect(q('obsidian-ingest-elapsed').textContent).not.toBe(first);
+    });
+  });
+
+  it('fehlt startedAt (Wiedereinstieg vor erstem Poll) → kein NaN, tickt sobald startedAt eintrifft', async () => {
+    const fetchFn = jest.fn(async (url) => {
+      // Jede Statusabfrage liefert zunächst KEIN startedAt, dann eines nach.
+      if (STATUS_RE.test(url)) {
+        return { status: 200, json: async () => ({ status: 'running' }) };
+      }
+      return { status: 404, json: async () => ({}) };
+    });
+    renderOverlay({ fetchFn, initialJobId: 'job-resume', livenessTickMs: 5 });
+
+    await waitFor(() => expect(q('obsidian-ingest-running')).toBeTruthy());
+    expect(q('obsidian-ingest-elapsed').textContent).toBe('läuft seit 0:00');
+    expect(q('obsidian-ingest-elapsed').textContent).not.toMatch(/NaN/);
+  });
+
+  it('Timer wird beim Verlassen der running-Phase aufgeräumt (kein Leak, Spinner verschwindet)', async () => {
+    const { fetchFn } = makeFetch({
+      statusSequence: [
+        { status: 'running', startedAt: new Date().toISOString() },
+        { status: 'needs-answers', catalog: CATALOG_1 },
+      ],
+    });
+    renderOverlay({ fetchFn, livenessTickMs: 5 });
+
+    await waitFor(() => expect(q('obsidian-ingest-running')).toBeTruthy());
+    await waitFor(() => expect(q('obsidian-ingest-catalog')).toBeTruthy());
+    // Spinner/Elapsed sind nach dem Phasenwechsel weg (kein hängender Timer-Rest im DOM).
+    expect(q('obsidian-ingest-liveness-spinner')).toBeFalsy();
+    expect(q('obsidian-ingest-elapsed')).toBeFalsy();
   });
 });
