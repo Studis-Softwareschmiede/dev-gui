@@ -1,0 +1,24 @@
+id: F-097
+title: Drain-Endlosschleifen-Fix, Stop-Hebel & Vorbedingungs-Sync des Ausfuehrungs-Klons
+goal: 'Behebt die verifizierte Taktgeber-Endlosschleife (Vorfall 2026-07-26, 1.5h
+  Kreislauf/149 Sessions): Eskalation wird wirksam + Sicherheitsguertel ehrlich (Loop
+  strukturell unmoeglich), ein Stop-Hebel bricht laufende manuelle+naechtliche Drains
+  kooperativ zwischen Runden ab, und ein Vorbedingungs-Sync bringt den Ausfuehrungs-Klon
+  vor der ersten Flow-Runde auf origin/main-Stand ohne Fremd-Datenverlust.'
+status: Backlog
+priority: P0
+spec: docs/specs/drain-escalation-effectiveness.md
+definition_of_done: null
+labels: null
+depends: null
+owner: null
+stories:
+- S-420
+- S-421
+- S-422
+- S-423
+- S-424
+progress: 0/5 done
+created_at: '2026-07-26T15:42:57Z'
+updated_at: '2026-07-26T15:49:12Z'
+area: fabrik-arbeiten
