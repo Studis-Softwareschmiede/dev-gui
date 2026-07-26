@@ -1,0 +1,17 @@
+id: F-099
+title: Nachtwaechter-Leerlauf-Vermeidung + Waiting-Warte-Status
+goal: Der Nachtwaechter draint Projekte ohne abarbeitbares Ziel gar nicht erst (Vorab-Skip
+  via computeDrainState) und extern gewartete Storys bekommen den ruhigen dev-gui-Warte-Status
+  Waiting (nie Drain-Ziel, eigene Board-Kategorie) statt Blocked-Missbrauch.
+status: Backlog
+priority: P2
+spec: docs/specs/nightwatch-idle-skip.md
+definition_of_done: null
+labels: null
+depends: null
+owner: null
+stories: null
+progress: null
+created_at: '2026-07-26T19:39:12Z'
+updated_at: '2026-07-26T19:39:20Z'
+area: nachtwaechter

@@ -1,0 +1,28 @@
+id: S-427
+parent: F-099
+title: 'Nachtwaechter-Vorab-Skip: Projekte ohne Drain-Ziel gar nicht erst drainen
+  (computeDrainState-Gate, gedrosselter Vermerk)'
+status: To Do
+priority: P2
+spec: docs/specs/nightwatch-idle-skip.md
+implements:
+- AC1
+- AC2
+- AC3
+- AC4
+depends: null
+labels: null
+size_est: M
+dispo_est: '4.0'
+dispo_act: null
+dispo_forecast: null
+estimate_note: 'M (Score 6: 4 AC, 2 Komponenten NightWatchScheduler+computeDrainState-reuse,
+  kein Label). baseline js|balanced|M; tok_est aus baseline js|balanced|M.'
+confidence: medium
+tok_est: '1659043'
+branch: null
+pr: null
+blocked_reason: null
+created_at: '2026-07-26T19:39:32Z'
+updated_at: '2026-07-26T19:41:31Z'
+done_at: null

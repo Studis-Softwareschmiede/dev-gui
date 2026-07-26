@@ -1,0 +1,18 @@
+id: F-098
+title: 'Nacht-Laeufe-Berichts-Hygiene: Leerlauf-Berichte aggregieren statt fluten'
+goal: 'Leere Nacht-Drain-Berichte (flowRuns:0, no-drain-target) verstopfen die Nacht-Laeufe-Ansicht
+  nicht mehr: aufeinanderfolgende Leerlauf-Berichte je Projekt werden beim Persistieren
+  zu einem Serien-Eintrag (firstAt/lastAt/count) verschmolzen, Alt-Bestand einmalig
+  kompaktiert; GET /api/drain-reports bleibt abwaertskompatibel.'
+status: Backlog
+priority: P2
+spec: docs/specs/drain-completion-report.md
+definition_of_done: null
+labels: null
+depends: null
+owner: null
+stories: null
+progress: null
+created_at: '2026-07-26T19:39:12Z'
+updated_at: '2026-07-26T19:39:17Z'
+area: fabrik-arbeiten
