@@ -28,6 +28,15 @@
  *   ist die reale Zeitzonen-Formatierung (`toLocaleString`, jsdom-Umgebungs-
  *   abhängig) — verifiziert über feste Textteile statt exaktem Format.
  *
+ * drain-completion-report AC10 (v2, Leerlauf-Serien-Zeile):
+ *   Ein Bericht mit `flowRuns===0 && reason==='no-drain-target'` UND
+ *   `count > 1` (vom Store verschmolzen, AC8/AC9) erscheint als EINE
+ *   kompakte Zeile „<count> leere Nachtläufe, <firstAt>–<lastAt>" (Datum
+ *   ohne Uhrzeit) statt als Einzeleintrag — kein Detail-Aufklapper (keine
+ *   Story-Liste bei Leerlauf). Ein einzelner (noch nicht verschmolzener)
+ *   Leerlauf-Bericht (`count` fehlt oder `1`) bleibt ein normaler Einzel-
+ *   eintrag wie bisher; nicht-leere Berichte sind davon unberührt.
+ *
  * Graceful degradation: bei Netzwerkfehler oder unerwarteter Antwortform
  * bleibt die Sektion unsichtbar (kein Crash, kein irreführender Platzhalter) —
  * analog `NightWatchStatusBadge.jsx`.
@@ -60,6 +69,33 @@ function formatWhen(iso) {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return '—';
   return d.toLocaleString();
+}
+
+/**
+ * drain-completion-report AC10: Datum ohne Uhrzeit, für die Zeitspanne einer
+ * verschmolzenen Leerlauf-Serie („12.07.–26.07."). NICHT unit-testbar ist das
+ * exakte lokale Format (jsdom-Umgebungsabhängig) — verifiziert über feste
+ * Textteile (Zähler + Trennzeichen) statt exaktem Datum.
+ *
+ * @param {string|null|undefined} iso
+ * @returns {string}
+ */
+function formatDateShort(iso) {
+  if (typeof iso !== 'string' || !iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleDateString();
+}
+
+/**
+ * drain-completion-report AC8/AC9: ein Leerlauf-Bericht ist `flowRuns===0 &&
+ * reason==='no-drain-target'`.
+ *
+ * @param {{flowRuns?: number, reason?: string}|null|undefined} report
+ * @returns {boolean}
+ */
+function _isIdleReport(report) {
+  return !!report && report.flowRuns === 0 && report.reason === 'no-drain-target';
 }
 
 /**
@@ -123,9 +159,16 @@ export function NightRunsSection({ fetchFn }) {
         </p>
       ) : (
         <ul style={styles.list} role="list" aria-label="Letzte Nacht-Läufe" data-testid="night-runs-list">
-          {reports.map((r) => (
-            <NightRunItem key={r.reportId ?? `${r.project}-${r.finishedAt}`} report={r} />
-          ))}
+          {reports.map((r) => {
+            const key = r.reportId ?? `${r.project}-${r.finishedAt}`;
+            const count = typeof r?.count === 'number' ? r.count : 1;
+            // AC10: eine verschmolzene Leerlauf-Serie (count > 1) erscheint als
+            // EINE kompakte Zeile statt als Einzeleintrag.
+            if (_isIdleReport(r) && count > 1) {
+              return <IdleSeriesItem key={key} report={r} />;
+            }
+            return <NightRunItem key={key} report={r} />;
+          })}
         </ul>
       )}
     </section>
@@ -184,6 +227,32 @@ function NightRunItem({ report }) {
           </ul>
         </div>
       )}
+    </li>
+  );
+}
+
+/**
+ * drain-completion-report AC10: kompakte Zeile für eine vom Store
+ * verschmolzene Leerlauf-Serie — „<count> leere Nachtläufe, <von>–<bis>"
+ * statt N Einzeleinträge. Keine aufklappbare Story-Liste (Leerlauf hat
+ * per Definition keine erledigten/blockierten Stories).
+ *
+ * @param {{ report: { project?: string, count?: number, firstAt?: string, lastAt?: string } }} props
+ */
+function IdleSeriesItem({ report }) {
+  const project = typeof report?.project === 'string' && report.project ? report.project : '—';
+  const count = typeof report?.count === 'number' ? report.count : 1;
+  const from = formatDateShort(report?.firstAt);
+  const to = formatDateShort(report?.lastAt);
+
+  return (
+    <li style={styles.item} data-testid="night-run-idle-series">
+      <div style={styles.itemHeader}>
+        <span style={styles.itemProject}>{project}</span>
+        <span style={styles.itemSummary}>
+          {count} leere Nachtläufe, {from}–{to}
+        </span>
+      </div>
     </li>
   );
 }

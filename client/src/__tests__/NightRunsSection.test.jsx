@@ -18,6 +18,16 @@
  *          Grund als Klartext); ein leeres/fehlendes Array (Alt-Bericht vor
  *          S-275) → kein Budget-Pausen-Block gerendert (dezent).
  *
+ * Covers (drain-completion-report, v2):
+ *   AC10 — ein verschmolzener Leerlauf-Bericht (`flowRuns:0`,
+ *          `reason:'no-drain-target'`, `count > 1`) erscheint als EINE
+ *          kompakte Zeile mit `count` + Zeitspanne (`firstAt`–`lastAt`)
+ *          statt als Einzeleintrag; ein einzelner (noch nicht verschmolzener)
+ *          Leerlauf-Bericht (`count` fehlt/`1`) bleibt ein normaler
+ *          Einzeleintrag; nicht-leere Berichte sind unberührt. NICHT
+ *          unit-testbar ist das exakte lokale Datumsformat (jsdom-
+ *          umgebungsabhängig) — verifiziert über feste Textteile.
+ *
  * @jest-environment jsdom
  */
 
@@ -159,6 +169,114 @@ describe('drain-completion-report AC7b — Nacht-Läufe-Sektion', () => {
       expect(fetchFn).toHaveBeenCalled();
     });
     expect(container.querySelector('section')).toBeFalsy();
+  });
+});
+
+describe('drain-completion-report AC10 — verschmolzene Leerlauf-Serie als eine Zeile', () => {
+  it('ein verschmolzener Leerlauf-Bericht (count > 1) erscheint als eine Zeile mit count + Zeitspanne', async () => {
+    const fetchFn = makeFetch({
+      reports: [
+        {
+          reportId: 'r-idle', project: 'dev-gui', trigger: 'night',
+          reason: 'no-drain-target', flowRuns: 0,
+          startedAt: '2026-07-12T22:00:00.000Z', finishedAt: '2026-07-26T22:00:00.000Z',
+          firstAt: '2026-07-12T22:00:00.000Z', lastAt: '2026-07-26T22:00:00.000Z',
+          count: 32, completed: [], blocked: [],
+        },
+      ],
+    });
+    render(React.createElement(NightRunsSection, { fetchFn }));
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="night-run-idle-series"]')).toBeTruthy();
+    });
+    const el = document.querySelector('[data-testid="night-run-idle-series"]');
+    expect(el.textContent).toMatch(/dev-gui/);
+    expect(el.textContent).toMatch(/32 leere Nachtläufe/);
+    expect(el.textContent).toMatch(/–/); // Zeitspannen-Trennzeichen
+    // Kein Einzeleintrag/keine "X erledigt/Y blockiert"-Zeile für diesen Bericht.
+    expect(document.querySelector('[data-testid="night-run-item"]')).toBeFalsy();
+  });
+
+  it('ein einzelner (noch nicht verschmolzener) Leerlauf-Bericht (count fehlt) bleibt ein normaler Einzeleintrag', async () => {
+    const fetchFn = makeFetch({
+      reports: [
+        {
+          reportId: 'r-idle-1', project: 'dev-gui', trigger: 'night',
+          reason: 'no-drain-target', flowRuns: 0,
+          finishedAt: '2026-07-26T22:00:00.000Z', completed: [], blocked: [],
+          // KEIN count-Feld — noch nicht verschmolzen.
+        },
+      ],
+    });
+    render(React.createElement(NightRunsSection, { fetchFn }));
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="night-run-item"]')).toBeTruthy();
+    });
+    expect(document.querySelector('[data-testid="night-run-idle-series"]')).toBeFalsy();
+    expect(document.querySelector('[data-testid="night-run-item"]').textContent).toMatch(
+      /0 erledigt \/ 0 blockiert/,
+    );
+  });
+
+  it('ein einzelner Leerlauf-Bericht mit explizitem count:1 bleibt ebenfalls ein normaler Einzeleintrag', async () => {
+    const fetchFn = makeFetch({
+      reports: [
+        {
+          reportId: 'r-idle-1', project: 'dev-gui', trigger: 'night',
+          reason: 'no-drain-target', flowRuns: 0, count: 1,
+          finishedAt: '2026-07-26T22:00:00.000Z', completed: [], blocked: [],
+        },
+      ],
+    });
+    render(React.createElement(NightRunsSection, { fetchFn }));
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="night-run-item"]')).toBeTruthy();
+    });
+    expect(document.querySelector('[data-testid="night-run-idle-series"]')).toBeFalsy();
+  });
+
+  it('nicht-leere Berichte bleiben Einzelzeilen, auch mit count > 1 (nur Leerlauf wird verschmolzen)', async () => {
+    const fetchFn = makeFetch({
+      reports: [
+        {
+          reportId: 'r-nonempty', project: 'dev-gui', trigger: 'night',
+          reason: 'converged', flowRuns: 3, count: 5, // count>1 aber NICHT idle
+          finishedAt: '2026-07-26T22:00:00.000Z',
+          completed: [{ id: 'S-1', title: 'Eins' }], blocked: [],
+        },
+      ],
+    });
+    render(React.createElement(NightRunsSection, { fetchFn }));
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="night-run-item"]')).toBeTruthy();
+    });
+    expect(document.querySelector('[data-testid="night-run-idle-series"]')).toBeFalsy();
+    expect(document.querySelector('[data-testid="night-run-item"]').textContent).toMatch(
+      /1 erledigt \/ 0 blockiert/,
+    );
+  });
+
+  it('mischt verschmolzene Leerlauf-Serie und Einzel-Berichte korrekt in derselben Liste', async () => {
+    const fetchFn = makeFetch({
+      reports: [
+        {
+          reportId: 'r-nonempty', project: 'dev-gui', trigger: 'night',
+          reason: 'converged', flowRuns: 1, finishedAt: '2026-07-27T02:00:00.000Z',
+          completed: [{ id: 'S-1', title: 'Eins' }], blocked: [],
+        },
+        {
+          reportId: 'r-idle', project: 'other-repo', trigger: 'night',
+          reason: 'no-drain-target', flowRuns: 0,
+          firstAt: '2026-07-01T22:00:00.000Z', lastAt: '2026-07-26T22:00:00.000Z',
+          count: 10, finishedAt: '2026-07-26T22:00:00.000Z', completed: [], blocked: [],
+        },
+      ],
+    });
+    render(React.createElement(NightRunsSection, { fetchFn }));
+    await waitFor(() => {
+      expect(document.querySelectorAll('[data-testid="night-run-item"]').length).toBe(1);
+    });
+    expect(document.querySelectorAll('[data-testid="night-run-idle-series"]').length).toBe(1);
   });
 });
 
