@@ -18,6 +18,11 @@
  *   AC12 — `budgetPauses` (vom Store geliefert) erscheint unverändert in der
  *          Response (der Router serialisiert nur, ohne Feld-Filterung).
  *
+ * Covers (drain-completion-report, v2):
+ *   AC10 — die additiven Store-Felder `firstAt`/`lastAt`/`count` (verschmolzene
+ *          Leerlauf-Serien) erscheinen unverändert in der Response (der Router
+ *          filtert keine Felder).
+ *
  * Strategy: echter Express-App + echter HTTP-Server (Muster tickerSettings.test.js)
  * mit einem Fake-drainReportStore (jest.fn) — kein echtes fs/CRED_STORE_DIR nötig.
  */
@@ -116,6 +121,27 @@ describe('GET /api/drain-reports (AC4)', () => {
       expect(res.status).toBe(500);
       expect(res.body.error).toBeDefined();
       expect(JSON.stringify(res.body)).not.toContain('/secret/');
+    });
+  });
+
+  it('drain-completion-report AC10 — firstAt/lastAt/count aus dem Store erscheinen unverändert in der Response', async () => {
+    const idleSeries = {
+      ...SAMPLE[0],
+      reason: 'no-drain-target',
+      flowRuns: 0,
+      firstAt: '2026-07-12T22:00:00.000Z',
+      lastAt: '2026-07-26T22:00:00.000Z',
+      count: 32,
+    };
+    const drainReportStore = { list: jest.fn(async () => [idleSeries]) };
+    await withServer({ drainReportStore }, async (port) => {
+      const res = await httpGet(port, '/api/drain-reports');
+      expect(res.status).toBe(200);
+      expect(res.body.reports[0]).toMatchObject({
+        firstAt: '2026-07-12T22:00:00.000Z',
+        lastAt: '2026-07-26T22:00:00.000Z',
+        count: 32,
+      });
     });
   });
 

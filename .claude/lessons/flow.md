@@ -2,6 +2,12 @@
 
 Newest-first. Regeln für die Orchestrator-Ebene (Landen/Konsolidieren/Recovery/Dispatch-Ökonomie).
 
+## flow/L11 — Feature-Drain-Reset („liegengebliebene Story auf To Do") heißt NICHT „Arbeit fehlt" — der Reset prüft den Feature-Branch nicht
+
+**Beobachtung (2026-07-27, S-426):** `board-feature-drain.sh` setzte S-426 zweimal als „liegengeblieben" auf `To Do` zurück, obwohl der vollständige Story-Commit (`2d0ec75`, Code + 415 Test-Zeilen) bereits auf `origin/feature/F-098` gepusht war — nur der Board-Flip fehlte (Session brach zwischen Push und Done ab). Der Reset-Mechanismus schaut nur auf Status+Alter des Claims, nie in die Git-Historie. Ein blinder coder-Dispatch hätte einen leeren Diff produziert.
+
+**Regel:** Der flow/L10-Check (`git log --all --grep="<S-###>"` + `merge-base --is-ancestor` gegen die Ziel-Senke) gilt im Feature-Batch **gegen `origin/feature/<F-###>`**, nicht nur gegen `main` — die Feature-Senke IST die Landung im `--parent`-Lauf (Rollout entfällt dort ohnehin). Bestätigt → Tests gegen den Branch-Stand fahren (Worktree: `npm run test:worktree` bzw. temporäre Config, s. Memory), dann Done-Nachtrag ohne Bau-Loop, keine Metrik-Zeile (keine Dispatches — erfundene Werte vergiften die Baseline). *[seen-in: dev-gui S-426 2026-07-27]*
+
 ## flow/L08 — `board set <id> status …` verlangt `BOARD_WRITER=flow` — sonst halber Claim ohne „In Progress"
 
 **Beobachtung (2026-07-27, S-417):** Der §2-Claim-Block aus dem /flow-Skill setzt vier Felder in Folge. Der **Status**-Set schlug fehl (`FEHLER: set: nur /flow darf Story-Status setzen (BOARD_WRITER=flow fehlt)`), die drei übrigen Sets (`claimed_by`/`claimed_at`/`branch`) liefen durch — und der Claim-Commit wurde mit Status `To Do` gepusht. Ergebnis: ein halb-geclaimter Remote-Zustand, den `board next` weiterhin als Kandidat liefern würde.
