@@ -2,7 +2,7 @@ id: S-428
 parent: F-099
 title: 'Warte-Status Waiting (dev-gui-Anteil): Drain-Toleranz + ruhige Board-Kategorie
   statt Blocked-Missbrauch'
-status: To Do
+status: In Progress
 priority: P2
 spec: docs/specs/waiting-status-devgui.md
 implements:
@@ -23,9 +23,11 @@ estimate_note: 'L (Score 9: 5 AC, 3 Komponenten ProjectDrain+BoardAggregator+Boa
   low; tok_est aus baseline js|balanced|L.'
 confidence: low
 tok_est: '2591205'
-branch: null
+branch: feat/S-428-waiting-status
 pr: null
 blocked_reason: null
 created_at: '2026-07-26T19:39:35Z'
-updated_at: '2026-07-26T19:42:49Z'
+updated_at: '2026-07-27T07:13:08Z'
 done_at: null
+claimed_by: MacBook-Pro-von-Alexander.local-67932-1785136342-12840
+claimed_at: '2026-07-27T07:12:45Z'
