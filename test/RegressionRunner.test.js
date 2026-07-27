@@ -5,7 +5,7 @@
  *
  * Covers (regression-run): AC1, AC2, AC5, AC7, AC8, AC9, AC10, AC11, AC12, AC13
  *
- * Covers (regression-local-execution): AC1, AC2, AC3, AC4, AC5, AC6, AC7, AC8
+ * Covers (regression-local-execution): AC1, AC2, AC3, AC4, AC5, AC6, AC7, AC8, AC9, AC10
  *   AC1 — Test-Dependencies herstellen: `isPlaywrightTestInstalled` erkennt
  *         in EINEM Check sowohl "node_modules fehlt" als auch "nur
  *         @playwright/test fehlt"; `ensureTestDependencies` ist idempotent
@@ -64,6 +64,20 @@
  *         Fehlzustand (`precondition-error`/`error`); der Playwright-Lauf
  *         startet trotzdem (kontrollierter Suite-`test.skip`-Ausgang bleibt
  *         Sache der Suite, nicht des Runners).
+ *   AC9 — Test-Config provisioniert (A3, Mechanik projekt-/deployment-
+ *         spezifisch, KEIN eigenes Runner-Schema): `defaultRunPlaywright`
+ *         gibt weiterhin JEDE beliebige `process.env`-Variable ungefiltert an
+ *         den Kindprozess durch (der Leitkanal für suite-eigene
+ *         Provisionierung wie flashrescue `FLASHRESCUE_CONFIG_DIR`) — nur die
+ *         AC10-REAL_SEND-Gate-Var(s) werden hart entfernt. Nicht unit-testbar
+ *         darüber hinaus (die eigentliche Provisionierung lebt im
+ *         Ziel-Projekt/dessen Suite, ausserhalb dieses Moduls) — AC11 verifiziert
+ *         das beobachtbare Ergebnis end-to-end (tester/Owner).
+ *   AC10 — REAL_SEND-Gate NIE automatisch scharf: `defaultRunPlaywright`
+ *         entfernt jede bekannte REAL_SEND-Gate-Env-Var
+ *         (`FLASHRESCUE_REGRESSION_ALLOW_REAL_SEND`) HART aus der Kind-Env —
+ *         sowohl wenn sie im geerbten `process.env` (Operator-Shell) als auch
+ *         wenn sie in `secretEnv` (versehentlich im `.env.gpg`) steht.
  *
  *   AC1 — RegressionRunner is an own boundary with an OWN, isolated
  *         ProjectJobLock instance (never a `claude`/agent process — grep-
@@ -2409,6 +2423,78 @@ describe('RegressionRunner — regression-run.md', () => {
 
       const env = spawnFn.mock.calls[0][2].env;
       expect(env.REGRESSION_BASE_URL).toBeUndefined();
+    });
+
+    it('AC9 — beliebige geerbte process.env-Variable (z.B. FLASHRESCUE_CONFIG_DIR) wird ungefiltert an den Kindprozess durchgereicht (Leitkanal für suite-eigene Test-Config-Provisionierung)', async () => {
+      const emit = {};
+      const fakeChild = {
+        stdout: { on: () => {} },
+        stderr: { on: () => {} },
+        on: (event, cb) => { emit[event] = cb; },
+        kill: jest.fn(),
+      };
+      const spawnFn = jest.fn(() => fakeChild);
+      const originalValue = process.env.FLASHRESCUE_CONFIG_DIR;
+      process.env.FLASHRESCUE_CONFIG_DIR = '/tmp/flashrescue-config-dir';
+      try {
+        const promise = defaultRunPlaywright({ projectPath: '/ws/proj', testPath: 'tests/regression', spawnFn });
+        emit.close(0);
+        await promise;
+
+        const env = spawnFn.mock.calls[0][2].env;
+        expect(env.FLASHRESCUE_CONFIG_DIR).toBe('/tmp/flashrescue-config-dir');
+      } finally {
+        if (originalValue === undefined) delete process.env.FLASHRESCUE_CONFIG_DIR;
+        else process.env.FLASHRESCUE_CONFIG_DIR = originalValue;
+      }
+    });
+
+    it('AC10 — FLASHRESCUE_REGRESSION_ALLOW_REAL_SEND aus geerbtem process.env (Operator-Shell) wird HART entfernt, nie an den Kindprozess durchgereicht', async () => {
+      const emit = {};
+      const fakeChild = {
+        stdout: { on: () => {} },
+        stderr: { on: () => {} },
+        on: (event, cb) => { emit[event] = cb; },
+        kill: jest.fn(),
+      };
+      const spawnFn = jest.fn(() => fakeChild);
+      const originalValue = process.env.FLASHRESCUE_REGRESSION_ALLOW_REAL_SEND;
+      process.env.FLASHRESCUE_REGRESSION_ALLOW_REAL_SEND = '1';
+      try {
+        const promise = defaultRunPlaywright({ projectPath: '/ws/proj', testPath: 'tests/regression', spawnFn });
+        emit.close(0);
+        await promise;
+
+        const env = spawnFn.mock.calls[0][2].env;
+        expect(env.FLASHRESCUE_REGRESSION_ALLOW_REAL_SEND).toBeUndefined();
+      } finally {
+        if (originalValue === undefined) delete process.env.FLASHRESCUE_REGRESSION_ALLOW_REAL_SEND;
+        else process.env.FLASHRESCUE_REGRESSION_ALLOW_REAL_SEND = originalValue;
+      }
+    });
+
+    it('AC10 — FLASHRESCUE_REGRESSION_ALLOW_REAL_SEND aus secretEnv (versehentlich im .env.gpg) wird HART entfernt, nie an den Kindprozess durchgereicht', async () => {
+      const emit = {};
+      const fakeChild = {
+        stdout: { on: () => {} },
+        stderr: { on: () => {} },
+        on: (event, cb) => { emit[event] = cb; },
+        kill: jest.fn(),
+      };
+      const spawnFn = jest.fn(() => fakeChild);
+
+      const promise = defaultRunPlaywright({
+        projectPath: '/ws/proj',
+        testPath: 'tests/regression',
+        secretEnv: { ALCHEMY_API_KEY: 'k1', FLASHRESCUE_REGRESSION_ALLOW_REAL_SEND: '1' },
+        spawnFn,
+      });
+      emit.close(0);
+      await promise;
+
+      const env = spawnFn.mock.calls[0][2].env;
+      expect(env.ALCHEMY_API_KEY).toBe('k1');
+      expect(env.FLASHRESCUE_REGRESSION_ALLOW_REAL_SEND).toBeUndefined();
     });
 
     it('Timeout killt den Kindprozess und liefert timedOut:true', async () => {
