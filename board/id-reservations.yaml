@@ -108,6 +108,12 @@ namespaces:
       status: active
       reserved_at: '2026-07-27T07:10:01Z'
       high_water: null
+    - feature_id: F-069
+      range_start: 81
+      range_end: 90
+      status: active
+      reserved_at: '2026-07-27T07:29:29Z'
+      high_water: null
   C:
     block_size: 10
     reservations:
