@@ -7,6 +7,36 @@ Newest-first. Regeln für die Orchestrator-Ebene (Landen/Konsolidieren/Recovery/
 **Beobachtung (2026-07-27, S-417):** Der §2-Claim-Block aus dem /flow-Skill setzt vier Felder in Folge. Der **Status**-Set schlug fehl (`FEHLER: set: nur /flow darf Story-Status setzen (BOARD_WRITER=flow fehlt)`), die drei übrigen Sets (`claimed_by`/`claimed_at`/`branch`) liefen durch — und der Claim-Commit wurde mit Status `To Do` gepusht. Ergebnis: ein halb-geclaimter Remote-Zustand, den `board next` weiterhin als Kandidat liefern würde.
 
 **Regel:** In diesem Repo bei **jedem** Status-Schreibvorgang (`status`, auch Done/Blocked) `BOARD_WRITER=flow` voranstellen: `BOARD_WRITER=flow "$BOARD" set <id> status …`. Nach dem Claim-Push die Story-YAML gegenlesen (`grep ^status`), bevor der coder dispatcht wird — der Fehler ist sonst still im Batch-Output verschluckt (die Nicht-Status-Sets melden Erfolg). *[seen-in: dev-gui S-417 2026-07-27]*
+## flow/L10 — `board next` kann eine bereits gelandete Story liefern — vor jedem coder-Dispatch die Landung mechanisch ausschliessen
+
+**Beobachtung (2026-07-27, S-386):** `board next --parent F-072` lieferte S-386 (`To Do`, `implements: null`), obwohl der Fix seit 8 Tagen als PR #431 gemergt UND deployt war — die damalige Session hielt den Status bewusst offen („Live-Beweis folgt nach Deploy") und niemand trug ihn nach. Ein coder-Dispatch hätte einen leeren Diff produziert und Token verbrannt.
+
+**Regel:** Wenn die Story-YAML Indizien für erledigte Arbeit trägt (gesetztes `branch`-Feld, `estimate_note` mit „Code+Tests im Branch/grün", Spec-Text der die Story in Vergangenheitsform referenziert), VOR dem Dispatch mechanisch prüfen: `git log --all --grep="<S-###>"` → Commit gefunden → `git merge-base --is-ancestor <sha> origin/main` + `gh pr view <n> --json state,mergedAt` + Container-Label `org.opencontainers.image.revision` gegen den SHA. Alles bestätigt → Done-Flip als Nachtrag (mit PR-Link), KEIN Bau-Loop, sichtbarer Hinweis dass keine Metrik-Zeile entsteht (keine Dispatches dieser Session — erfundene Werte würden die Baseline vergiften).
+
+*[seen-in: dev-gui S-386 2026-07-27; promoted: 2026-07-27]*
+
+## flow/L09 — `board-ship.sh` **Modus B** (`--target-branch feature/<F-###>`) landet aus dem Feature-Worktree problemlos — flow/L07 gilt nur für Modus A
+
+**Beobachtung (2026-07-26, S-412):** `board-ship.sh S-412 dev-gui --target-branch feature/F-095` lief aus dem F-095-Worktree glatt durch (Merge, Board-Flip, Push, Exit 0) — kein `fatal: a branch named 'main' already exists`, kein Handbetrieb nötig.
+
+**Warum L07 hier nicht greift:** Der Abbruch in flow/L07 entsteht, weil Modus A `SHIP_BRANCH=main` auscheckt und der **Hauptordner** `main` hält (Git verbietet denselben Branch in zwei Worktrees). In Modus B ist `SHIP_BRANCH=feature/<F-###>` — und genau dieser Branch ist im eigenen Worktree ausgecheckt, in keinem anderen. Der `checkout` ist damit ein No-op statt einer Kollision.
+
+**Regel:** Im Feature-Batch (`--parent`) **zuerst das Skript versuchen**, nicht vorsorglich von Hand landen — der Handbetrieb aus L07 ist teurer, fehleranfälliger und hier unnötig. Vorbedingung wie im Skript-Kopf: eigener Story-Branch (`git checkout -b feat/<S-###>-<slug>` aus dem Feature-Branch heraus), Story-Commit darauf, dann Modus B. Danach den Worktree mit `git checkout feature/<F-###> && git reset --hard origin/feature/<F-###>` nachziehen — das Skript pusht den Board-Flip (`Done`) direkt in den Feature-Branch, der lokale Worktree sieht ihn sonst nicht und würde beim Dispo-Spiegel auf einem veralteten Story-YAML arbeiten.
+
+**Offen bleibt:** Modus A (Story direkt nach `main`, board-weiter Lauf ohne `--parent`) ist von L07 unverändert betroffen — dort weiter deterministisch von Hand. Retro-Issue #371 (board-ship.sh worktree-tauglich) bezieht sich auf genau diesen Rest.
+
+## flow/L08 — Feature-Batch (`--parent`): Claim-Commit auf `feature/<F-###>` pushen, nicht auf `main`
+
+**Beobachtung (2026-07-26, S-410):** §2 des `/flow`-Vertrags sagt `git push origin HEAD:"$default_branch"` für den Claim. Im Feature-Batch steht der Worktree aber auf `feature/<F-###>`, das typischerweise hinter `origin/main` liegt (hier 3 Commits) — ein `HEAD:main`-Push ist damit **strukturell non-fast-forward** und würde nach 3 Retries als „Senke belegt" abbrechen, obwohl nichts kollidiert.
+
+**Regel:** Bei aktivem `--parent <F-###>` gehen Claim-Commit, Story-Merge UND Board-Meta-Commit (Done/Dispo/Memory) alle auf `origin/feature/<F-###>` — dieselbe Senke, in der auch der Code landet; `main` bekommt alles gebündelt beim finalen `--merge-feature`. Der Drain (`board-feature-drain.sh`) ist seriell je Feature, das Claim-Sichtbarkeits-Argument (parallele Sessions fetchen main) trägt hier nicht. Konsistent mit flow/L02 Schritt 5 (F-080-Praxis).
+## flow/L08 — `BOARD_WRITER=flow` gilt für JEDEN Status-Set, auch den Claim — sonst gesplitteter Claim-Commit
+
+**Beobachtung (2026-07-26, S-391):** Beim Claim (§2) lief `board set S-391 status "In Progress"` **ohne** `BOARD_WRITER=flow` und wurde vom CLI-Guard abgelehnt (`FEHLER: set: nur /flow darf Story-Status setzen`); die drei Nicht-Status-Sets (`claimed_by`/`claimed_at`/`branch`) liefen durch. Der Claim-Commit wurde damit **ohne** Status gepusht — die Story stand remote geclaimt, aber weiterhin `To Do`, und brauchte einen zweiten Nachtrag-Commit.
+
+**Regel:** `BOARD_WRITER=flow` vor **jedem** `board set … status …` setzen — nicht nur beim Done-Flip (wie in flow/L02 Schritt 5 notiert), sondern bereits beim allerersten Claim-Set der Session. Am einfachsten: die Env-Variable pauschal jedem `board set`-Aufruf voranstellen. Ein halber Claim (claimed_by gesetzt, Status `To Do`) ist für parallele Sessions verwirrend: `board next` liefert die Story weiter als Kandidat, der Claim schützt nicht.
+
+*[seen-in: dev-gui S-391 2026-07-26; promoted: 2026-07-26]*
 
 ## flow/L07 — `board-ship.sh` Modus A kann aus einem Worktree **strukturell nie** landen (`checkout main` ist dort verboten)
 

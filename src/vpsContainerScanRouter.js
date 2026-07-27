@@ -2,7 +2,7 @@
  * vpsContainerScanRouter — Pro-Container Red-Team-Scan-Endpunkt.
  *
  * Implements: docs/specs/red-team-scan-per-container.md AC1, AC2, AC3, AC4, AC5, AC6, AC7,
- * AC8, AC9, AC16, AC17, AC22.
+ * AC8, AC9, AC16, AC17, AC22, AC26, AC27, AC28.
  *
  * Routes (hinter AccessGuard, s. server.js):
  *   POST /api/vps/machines/:provider/*splat/containers/:containerId/scan
@@ -12,6 +12,9 @@
  *     → 400 { error }                             — ungültige Route (provider/serverId/containerId)
  *   GET  /api/vps/machines/:provider/*splat/containers/:containerId/scan/:jobId
  *     → 200 { status, phase, ampel?, findings?, reportRef? }
+ *       (bei `status:'done'` wird — best-effort, GENAU EINMAL je jobId — vorab
+ *       `scanResultStore.record()` aufgerufen, s. AC26/AC27 unten; `reportRef` liefert NUR
+ *       eine tatsächlich gespeicherte Referenz, NIE mehr einen `job.prHint`-Fallback — AC28)
  *     → 404 { error }                             — unbekannte jobId (auch: jobId gehört zu einem
  *                                                    ANDEREN Container — kein Cross-Container-Leak)
  *   GET  /api/vps/machines/:provider/*splat/containers/:containerId/scans   (AC8, S-402)
@@ -91,22 +94,24 @@
  * Store oder liefert er einen Fehler, antworten auch diese Endpunkte best-effort (leere
  * Liste bzw. 404) statt zu crashen (Robustheit-NFR).
  *
- * **Offene Folge-Naht (S-403 Review-Fund, Iteration 2 — bewusst NICHT in diesem Router
- * geschlossen):** der ursprüngliche Plan war, `scanResultStore.record()` am Status-Poll
- * bei `status:'done'` mit `findings: []` aufzurufen. Das wurde verworfen: der wieder-
- * verwendete `HeadlessRedTeamRunner`/`HeadlessRunnerCore` legt die erfasste stdout/stderr-
- * Ausgabe NICHT im Job-Objekt ab (nur `status`/`result`/`error`/`prHint`) — ein Findings-
- * Parser aus dem Runner-Output ist mit dem heutigen Core-Vertrag NICHT baubar. Ein
- * `record()` mit hartkodiert leeren `findings` hätte für JEDEN abgeschlossenen Lauf
- * dauerhaft `ampel:'gruen'` ("keine Befunde") persistiert — für ein Sicherheitswerkzeug
- * eine aktiv irreführende "alles sicher"-Aussage, unabhängig vom tatsächlichen Lauf-
- * Ergebnis, und macht den gesamten Verlauf (S-402/S-404) wertlos. Der Status-Endpunkt
- * liefert deshalb weiterhin NUR `status`/`phase`/`reportRef?` ohne Ampel-/Findings-
- * Behauptung, bis eine echte Findings-Extraktion existiert (Core müsste die erfasste
- * Ausgabe im Job-Objekt exponieren + ein Parser-Vertrag für `/agent-flow:red-team`-Output
- * definiert werden — Folge-Story). `reportRef` bleibt trotzdem ohne Store nutzbar: fällt
- * mangels Store-Treffer auf den vom Runner bereits extrahierten `job.prHint` zurück (s.
- * unten, AC12-Bericht-Link funktioniert unabhängig von der offenen Findings-Naht).
+ * **Naht geschlossen (S-411, AC26/AC27/AC28, F-095):** die vormals bewusst offen gelassene
+ * `record()`-Naht (S-403 Review-Fund Iteration 2 — s. Git-Historie dieser Datei) ist jetzt
+ * geschlossen. Der Status-Poll (GET .../scan/:jobId) ruft bei `status:'done'` GENAU EINMAL
+ * (In-Memory-Guard `recordedJobs`, analog `activeJobs`/`jobContainer` — überlebt keinen
+ * Server-Neustart, s. Spec-Edge-Case) `scanResultStore.record()` mit den über
+ * `parseRedTeamOutput(job.output)` (S-410, AC24/AC25) extrahierten `findings`+`checks` auf,
+ * plus `app`/`repoSlug`/`startedAt` aus der beim Job-Start hinterlegten `jobMeta` und
+ * `finishedAt = jetzt`. **Ehrliche Degradation (AC27):** `record()` wird NUR aufgerufen,
+ * wenn `parsed.auswertbar === true` — ist die Ausgabe nicht auswertbar (heutiger Realfall,
+ * s. `redTeamOutputParser.js`-Moduldoku), unterbleibt der Aufruf vollständig; es entsteht
+ * KEIN irreführender "gruen"-Eintrag, der Verlauf bleibt für diesen Scan schlicht leer
+ * (ehrlicher "Befund-Erfassung nicht verfügbar"-Zustand, Frontend-seitig ab S-412/S-413).
+ * Store-/Schreibfehler sind best-effort/non-fatal (try/catch, Robustheit-NFR).
+ * **`reportRef` (AC28):** der vormalige Fallback auf `job.prHint` (ein im Realtest
+ * ins 404 laufender, unverifizierter PR-Link) ist ENTFERNT — `reportRef` liefert nur noch
+ * einen tatsächlich nutzbaren, aus dem Store stammenden Wert (oder bleibt abwesend). Der
+ * In-App-Report (`scan.checks`+`scan.findings` über `GET .../scans/:scanId`, AC29/AC30,
+ * Frontend-Folgestorys) ist die autoritative Bericht-Ansicht.
  *
  * Security (Floor, AC22): keine Secrets/Tokens/absolute Host-Pfade in Response/Log; `jobId`
  * ist eine reine Korrelations-ID (`randomUUID()` im Runner); argv bleibt Array (kein Shell-
@@ -125,6 +130,7 @@ import {
 } from './vpsContainerRouter.js';
 import { validateProjectPath, resolveProjectSlug } from './workspacePath.js';
 import { BoardWriterError, IDEA_TITLE_MAX_LENGTH } from './BoardWriter.js';
+import { parseRedTeamOutput } from './redTeamOutputParser.js';
 
 /**
  * Baut den zusammengesetzten Container-Schlüssel. containerId allein ist über mehrere
@@ -272,6 +278,20 @@ export function vpsContainerScanRouter(runner, deps = {}, options = {}) {
   const activeJobs = new Map();
   /** jobId → containerKey (Rückbindung für den Status-Poll, AC3). */
   const jobContainer = new Map();
+  /**
+   * jobId → { app, repoSlug, startedAt } — beim Job-Start hinterlegte Metadaten,
+   * die der Status-Poll (AC27) für den `record()`-Aufruf braucht (der Runner selbst
+   * kennt weder App-Hostname noch Repo-Slug). Geht bei Server-Neustart verloren
+   * (kein Ziel: persistente Job-Historie, s. Spec-Edge-Case).
+   */
+  const jobMeta = new Map();
+  /**
+   * Set bereits (versucht) persistierter jobIds (AC27 — Idempotenz): verhindert,
+   * dass ein wiederholter Status-Poll nach `done` mehrfach `scanResultStore.record()`
+   * aufruft. Wird gesetzt, BEVOR der eigentliche (asynchrone) record()-Aufruf beginnt
+   * (kein Read-Check-Write-Race zwischen zwei Polls, analog `activeJobs`).
+   */
+  const recordedJobs = new Set();
 
   // ── POST .../containers/:containerId/scan ───────────────────────────────────
 
@@ -377,6 +397,13 @@ export function vpsContainerScanRouter(runner, deps = {}, options = {}) {
 
     activeJobs.set(key, result.jobId);
     jobContainer.set(result.jobId, key);
+    // AC27 — Metadaten für den späteren record()-Aufruf am Status-Poll (der Runner
+    // selbst kennt weder App-Hostname noch Repo-Slug, nur ziel/modus/url/urlEdge).
+    jobMeta.set(result.jobId, {
+      app: container.hostname,
+      repoSlug,
+      startedAt: new Date().toISOString(),
+    });
 
     return res.status(202).json({ jobId: result.jobId, status: 'running' });
   });
@@ -410,12 +437,40 @@ export function vpsContainerScanRouter(runner, deps = {}, options = {}) {
     const phase = status === 'running' ? 'direkt' : 'fertig';
     const body = { status, phase };
 
+    // AC27 — record()-Naht: bei sauberem Abschluss GENAU EINMAL persistieren (Guard
+    // `recordedJobs`, synchron VOR dem asynchronen record()-Aufruf gesetzt — kein
+    // Doppel-Schreiben bei zwei überlappenden Status-Polls). Ehrliche Degradation: kein
+    // record()-Aufruf, wenn die Runner-Ausgabe nicht auswertbar ist (kein irreführendes
+    // "gruen" ohne echte Befund-/Prüfpunkt-Erfassung, s. Moduldoku oben).
+    if (status === 'done' && scanResultStore && typeof scanResultStore.record === 'function' && !recordedJobs.has(jobId)) {
+      recordedJobs.add(jobId);
+      const meta = jobMeta.get(jobId);
+      if (meta) {
+        const parsed = parseRedTeamOutput(job.output);
+        if (parsed.auswertbar) {
+          try {
+            await scanResultStore.record({
+              scanId: jobId,
+              app: meta.app,
+              repoSlug: meta.repoSlug,
+              startedAt: meta.startedAt,
+              finishedAt: new Date().toISOString(),
+              findings: parsed.findings,
+              checks: parsed.checks,
+            });
+          } catch {
+            // best-effort/non-fatal (NFR Robustheit) — ein Schreibfehler darf den
+            // Status-Poll nicht crashen; der Verlaufseintrag entsteht dann schlicht nicht.
+          }
+        }
+      }
+    }
+
     // scanResultStore (S-402, defensiv/best-effort, AC6): ampel/findings/reportRef nur wenn
     // ein echter Store existiert UND einen Eintrag zu dieser jobId liefert. Ein Store-Fehler
-    // darf den Status-Poll nie crashen lassen (NFR Robustheit). Kein record()-Aufruf hier
-    // (Review-Fund S-403 Iteration 2, s. Moduldoku oben) — solange keine echte Findings-
-    // Extraktion existiert, bleiben ampel/findings ohne Store-Treffer bewusst abwesend
-    // (kein irreführendes "gruen").
+    // darf den Status-Poll nie crashen lassen (NFR Robustheit). `reportRef` liefert NUR eine
+    // tatsächlich gespeicherte Referenz — KEIN `job.prHint`-Fallback mehr (AC28: der vormalige
+    // Fallback lief im Realtest ins 404, s. Moduldoku oben).
     if (scanResultStore && typeof scanResultStore.getByJobId === 'function') {
       try {
         const stored = await scanResultStore.getByJobId(jobId);
@@ -427,17 +482,6 @@ export function vpsContainerScanRouter(runner, deps = {}, options = {}) {
       } catch {
         // best-effort — kein Crash, Felder bleiben abwesend (optional laut AC3-Contract).
       }
-    }
-
-    // AC12-Bericht-Link bleibt auch OHNE Store/Findings-Naht nutzbar: fällt bei sauberem
-    // Abschluss (status:'done') mangels Store-Treffer auf den vom Runner bereits
-    // extrahierten PR-/Protokoll-Hinweis zurück (Review-Fund S-403 Iteration 2 — der
-    // Bericht-Link darf nicht an der offenen Findings-Naht hängen). Auf `done` begrenzt
-    // — konsistent mit ampel/findings, die ebenfalls nur bei sauberem Abschluss eine
-    // Aussage treffen (der Core setzt `prHint` ohnehin nur im `done`-Pfad, s.
-    // `HeadlessRunnerCore`, dies ist Defense in Depth für die Response-Form).
-    if (status === 'done' && body.reportRef === undefined && typeof job.prHint === 'string' && job.prHint) {
-      body.reportRef = job.prHint;
     }
 
     return res.status(200).json(body);

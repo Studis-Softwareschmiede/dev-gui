@@ -21,6 +21,13 @@
  *          Detail-Endpunkt, `scan.repoSlug`). Fehlt `repoSlug` oder schlägt der
  *          Board-Projekt-Fetch fehl → "Status derzeit nicht verfügbar" statt Crash
  *          (Robustheit-NFR). Ein Eintrag ohne `boardItemIds` zeigt gar keine Zeile.
+ *   AC29 — Der Detailbericht zeigt zusätzlich die vollständige Prüfpunkt-Liste
+ *          (`scan.checks`, bereits Teil des bestehenden Detail-Endpunkts) — je Prüfpunkt
+ *          Titel, Testort und eigene Ampel (Text-Badge, wiederverwendetes
+ *          `AMPEL_STYLE`/`AMPEL_LABEL`). Ein Eintrag ohne `checks` (additive Degradation)
+ *          rendert den Block einfach nicht — kein Crash.
+ *   AC30 — Kein-Fund-Fall sauber: ein auswertbarer Lauf ohne Funde zeigt weiterhin die
+ *          vollständige, durchweg grüne Prüfpunkt-Liste als Beleg, was getestet wurde.
  */
 
 import { describe, it, expect, jest } from '@jest/globals';
@@ -133,6 +140,90 @@ describe('RedTeamScanHistory — AC14: Verlaufsliste', () => {
     await waitFor(() => expect(getByTestId('redteam-history-row-scan-1')).toBeDefined());
     await act(async () => { fireEvent.click(getByTestId('redteam-history-row-scan-1')); });
     await waitFor(() => expect(getByTestId('redteam-history-no-report-scan-1')).toBeDefined());
+  });
+});
+
+// ── AC29/AC30 — Prüfpunkt-Liste + Kein-Fund-Fall sauber ─────────────────────────
+
+describe('RedTeamScanHistory — AC29: Prüfpunkt-Liste im Detailbericht', () => {
+  it('zeigt je Prüfpunkt Titel, Testort und eigene Ampel', async () => {
+    const fetchFn = makeFetchFn({
+      scans: [{ scanId: 'scan-1', startedAt: '2026-07-20T10:00:00.000Z', ampel: 'rot', findingCount: 1, boardItemIds: [] }],
+      detailByScanId: {
+        'scan-1': {
+          scanId: 'scan-1',
+          app: 'app.example.com',
+          repoSlug: null,
+          findings: [{ id: 'f1', severity: 'high', kind: 'xss', testort: 'direkt', titel: 'XSS gefunden' }],
+          checks: [
+            { id: 'c1', titel: 'SQL-Injection-Test', testort: 'direkt', ampel: 'rot' },
+            { id: 'c2', titel: 'Auth-Header-Test', testort: 'öffentlich', ampel: 'gruen' },
+          ],
+          reportRef: null,
+          boardItemIds: [],
+        },
+      },
+    });
+    const { getByTestId } = renderHistory(fetchFn);
+    await waitFor(() => expect(getByTestId('redteam-history-row-scan-1')).toBeDefined());
+    await act(async () => { fireEvent.click(getByTestId('redteam-history-row-scan-1')); });
+
+    await waitFor(() => expect(getByTestId('redteam-history-checks-scan-1')).toBeDefined());
+    expect(getByTestId('redteam-history-checks-scan-1').textContent).toMatch(/SQL-Injection-Test/);
+    expect(getByTestId('redteam-history-checks-scan-1').textContent).toMatch(/Auth-Header-Test/);
+    expect(getByTestId('redteam-history-checks-scan-1').textContent).toMatch(/Rot/);
+    expect(getByTestId('redteam-history-checks-scan-1').textContent).toMatch(/Grün/);
+  });
+
+  it('älterer Verlaufseintrag ohne checks: kein Crash, Prüfpunkt-Liste bleibt weg', async () => {
+    const fetchFn = makeFetchFn({
+      scans: [{ scanId: 'scan-1', startedAt: '2026-07-20T10:00:00.000Z', ampel: 'gelb', findingCount: 1, boardItemIds: [] }],
+      detailByScanId: {
+        'scan-1': {
+          scanId: 'scan-1',
+          app: 'app.example.com',
+          repoSlug: null,
+          findings: [{ id: 'f1', severity: 'medium', kind: 'xss', testort: 'direkt', titel: 'XSS gefunden' }],
+          reportRef: null,
+          boardItemIds: [],
+        },
+      },
+    });
+    const { getByTestId, queryByTestId } = renderHistory(fetchFn);
+    await waitFor(() => expect(getByTestId('redteam-history-row-scan-1')).toBeDefined());
+    await act(async () => { fireEvent.click(getByTestId('redteam-history-row-scan-1')); });
+
+    await waitFor(() => expect(getByTestId('redteam-history-detail-scan-1').textContent).toMatch(/XSS gefunden/));
+    expect(queryByTestId('redteam-history-checks-scan-1')).toBeNull();
+  });
+});
+
+describe('RedTeamScanHistory — AC30: Kein-Fund-Fall sauber', () => {
+  it('Lauf ohne Funde zeigt weiterhin die vollständige, durchweg grüne Prüfpunkt-Liste', async () => {
+    const fetchFn = makeFetchFn({
+      scans: [{ scanId: 'scan-1', startedAt: '2026-07-20T10:00:00.000Z', ampel: 'gruen', findingCount: 0, boardItemIds: [] }],
+      detailByScanId: {
+        'scan-1': {
+          scanId: 'scan-1',
+          app: 'app.example.com',
+          repoSlug: null,
+          findings: [],
+          checks: [
+            { id: 'c1', titel: 'SQL-Injection-Test', testort: 'direkt', ampel: 'gruen' },
+            { id: 'c2', titel: 'Auth-Header-Test', testort: 'öffentlich', ampel: 'gruen' },
+          ],
+          reportRef: null,
+          boardItemIds: [],
+        },
+      },
+    });
+    const { getByTestId } = renderHistory(fetchFn);
+    await waitFor(() => expect(getByTestId('redteam-history-row-scan-1')).toBeDefined());
+    await act(async () => { fireEvent.click(getByTestId('redteam-history-row-scan-1')); });
+
+    await waitFor(() => expect(getByTestId('redteam-history-checks-scan-1')).toBeDefined());
+    expect(getByTestId('redteam-history-detail-scan-1').textContent).toMatch(/Keine Befunde erkannt/);
+    expect(getByTestId('redteam-history-checks-scan-1').textContent).toMatch(/SQL-Injection-Test/);
   });
 });
 

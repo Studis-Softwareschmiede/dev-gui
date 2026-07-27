@@ -31,6 +31,18 @@
  * Injectable (Test-Entkopplung): `spawnFn` (Default `node:child_process` `spawn`),
  * kein Test benötigt einen echten `claude`-Lauf.
  *
+ * Ausgabe-Exposition (AC25, docs/specs/red-team-scan-per-container.md — additiv, kein
+ * Regress der Geschwister-Runner): dieser Runner aktiviert `captureOutput: true` am
+ * `HeadlessRunnerCore`, den EINZIGEN opt-in Core-Nutzer bisher — `getJob()` liefert damit
+ * zusätzlich ein `output`-Feld (die bereits erfasste stdout+stderr-Kombination, dieselbe
+ * Ausgabe wie für die bestehende 401-/Budget-Erkennung im Core) im terminalen Job-Zustand.
+ * Die übrigen Core-Nutzer (`HeadlessReconcileRunner`, `HeadlessFlowRunner`,
+ * `HeadlessRetroRunner`, `ObsidianIngestRunner`, …) setzen `captureOutput` nicht und bleiben
+ * dadurch byte-identisch (Core-Default `false`, kein zusätzlicher Job-Key). `output` ist
+ * für den fail-safe Funde-/Prüfpunkt-Parser gedacht (`src/redTeamOutputParser.js`, AC24) —
+ * WER `parseRedTeamOutput(job.output)` nach Abschluss aufruft und daraus persistiert
+ * (`ScanResultStore.record()`), ist eine offene Folge-Naht (S-411+, nicht Teil dieser Story).
+ *
  * @module HeadlessRedTeamRunner
  */
 
@@ -90,6 +102,9 @@ export class HeadlessRedTeamRunner {
         internalFailure: INTERNAL_FAILURE_MESSAGE,
         doneResult: DONE_RESULT_MESSAGE,
       },
+      // AC25: opt-in Ausgabe-Exposition — NUR dieser Runner setzt captureOutput, die
+      // Geschwister-Runner bleiben unverändert (Core-Default false).
+      captureOutput: true,
     });
   }
 
@@ -154,8 +169,12 @@ export class HeadlessRedTeamRunner {
   /**
    * Liest den aktuellen Status eines Jobs.
    *
+   * `output` (AC25): die erfasste stdout+stderr-Kombination des Laufs — nur bei diesem
+   * Runner vorhanden (`captureOutput: true`, s. Moduldoku), gedacht als Eingabe für
+   * `parseRedTeamOutput()` (`src/redTeamOutputParser.js`, AC24).
+   *
    * @param {string} jobId
-   * @returns {{ status: string, result?: string, error?: string, prHint?: string } | undefined}
+   * @returns {{ status: string, result?: string, error?: string, prHint?: string, output?: string } | undefined}
    */
   getJob(jobId) {
     return this.#core.getJob(jobId);

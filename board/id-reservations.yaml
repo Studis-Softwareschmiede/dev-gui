@@ -27,6 +27,24 @@ namespaces:
       status: active
       reserved_at: '2026-07-26T20:06:55Z'
       high_water: null
+    - feature_id: F-072
+      range_start: 41
+      range_end: 50
+      status: active
+      reserved_at: '2026-07-26T22:03:56Z'
+      high_water: null
+    - feature_id: F-052
+      range_start: 51
+      range_end: 60
+      status: active
+      reserved_at: '2026-07-27T06:42:38Z'
+      high_water: null
+    - feature_id: F-099
+      range_start: 61
+      range_end: 70
+      status: active
+      reserved_at: '2026-07-27T06:42:47Z'
+      high_water: null
   ADR:
     block_size: 10
     reservations:
@@ -54,6 +72,24 @@ namespaces:
       status: active
       reserved_at: '2026-07-26T20:06:57Z'
       high_water: null
+    - feature_id: F-072
+      range_start: 41
+      range_end: 50
+      status: active
+      reserved_at: '2026-07-26T22:03:59Z'
+      high_water: null
+    - feature_id: F-052
+      range_start: 51
+      range_end: 60
+      status: active
+      reserved_at: '2026-07-27T06:42:40Z'
+      high_water: null
+    - feature_id: F-099
+      range_start: 61
+      range_end: 70
+      status: active
+      reserved_at: '2026-07-27T06:42:49Z'
+      high_water: null
   C:
     block_size: 10
     reservations:
@@ -80,4 +116,22 @@ namespaces:
       range_end: 40
       status: active
       reserved_at: '2026-07-26T20:07:00Z'
+      high_water: null
+    - feature_id: F-072
+      range_start: 41
+      range_end: 50
+      status: active
+      reserved_at: '2026-07-26T22:04:01Z'
+      high_water: null
+    - feature_id: F-052
+      range_start: 51
+      range_end: 60
+      status: active
+      reserved_at: '2026-07-27T06:42:42Z'
+      high_water: null
+    - feature_id: F-099
+      range_start: 61
+      range_end: 70
+      status: active
+      reserved_at: '2026-07-27T06:42:52Z'
       high_water: null

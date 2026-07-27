@@ -30,6 +30,16 @@
  *         dedupliziert um die neu entstandenen IDs, schreibt atomar, und liefert `null`
  *         bei unbekannter `scanId` (kein Wurf). Unbekannte `findingId`s in `transfers`
  *         werden still ignoriert.
+ *   AC26 (S-411) — `deriveCheckAmpel(check, findings)`: dieselbe Semantik wie
+ *         `deriveAmpel()`, aber nur auf die dem Prüfpunkt zugeordneten Findings
+ *         angewandt (Zuordnung über `checkId`, Fallback über `testort` bei Findings
+ *         ohne `checkId`) — keine Invertierung. `record()` akzeptiert optional
+ *         `checks: [{id,titel,testort,ampel,detail?}]` (additiv, `[]`-Default,
+ *         bestehende Einträge ohne `checks` bleiben gültig); die `ampel` je Prüfpunkt
+ *         wird IMMER aus `findings` neu abgeleitet — ein mitgegebenes `checks[].ampel`
+ *         wird ignoriert (single source of truth, analog zur Gesamt-Ampel). Findings
+ *         akzeptieren zusätzlich optional `detail`/`checkId` (kein Durchreichen
+ *         beliebiger Zusatzfelder).
  *
  * Strategy: echtes fs gegen ein frisches tmp-CRED_STORE_DIR je Test (Muster
  * `DrainReportStore.test.js`); je Test eine frische ScanResultStore-Instanz (der
@@ -45,6 +55,7 @@ import {
   ScanResultStore,
   resolveScanResultsFilePath,
   deriveAmpel,
+  deriveCheckAmpel,
   MAX_SCANS_PER_APP,
 } from '../src/ScanResultStore.js';
 
@@ -92,6 +103,44 @@ describe('deriveAmpel() (AC9)', () => {
 
   it('rot bei mindestens einem critical-Befund', () => {
     expect(deriveAmpel([{ severity: 'critical' }])).toBe('rot');
+  });
+});
+
+// ── AC26 — deriveCheckAmpel() ──────────────────────────────────────────────────
+
+describe('deriveCheckAmpel() (AC26)', () => {
+  it('gruen, wenn kein Finding via checkId auf den Prüfpunkt verweist', () => {
+    const check = { id: 'c1', testort: 'direkt' };
+    expect(deriveCheckAmpel(check, [{ severity: 'high', checkId: 'c2' }])).toBe('gruen');
+  });
+
+  it('rot bei mindestens einem high/critical-Finding via checkId', () => {
+    const check = { id: 'c1', testort: 'direkt' };
+    expect(deriveCheckAmpel(check, [{ severity: 'low', checkId: 'c1' }, { severity: 'high', checkId: 'c1' }])).toBe('rot');
+  });
+
+  it('gelb bei ausschliesslich low/medium-Findings via checkId', () => {
+    const check = { id: 'c1', testort: 'direkt' };
+    expect(deriveCheckAmpel(check, [{ severity: 'medium', checkId: 'c1' }])).toBe('gelb');
+  });
+
+  it('Fallback über testort, wenn Findings KEINEN checkId tragen', () => {
+    const check = { id: 'c1', testort: 'öffentlich' };
+    expect(
+      deriveCheckAmpel(check, [
+        { severity: 'critical', testort: 'öffentlich' },
+        { severity: 'low', testort: 'direkt' },
+      ]),
+    ).toBe('rot');
+  });
+
+  it('ein Finding mit checkId zu einem ANDEREN Prüfpunkt fliesst nicht in den Fallback eines anderen Prüfpunkts ein', () => {
+    const check = { id: 'c1', testort: 'direkt' };
+    // f1 ist per checkId an c2 gebunden — obwohl testort übereinstimmt, darf es NICHT
+    // in den Fallback von c1 einfliessen (keine Doppel-Zuordnung).
+    expect(
+      deriveCheckAmpel(check, [{ id: 'f1', severity: 'critical', testort: 'direkt', checkId: 'c2' }]),
+    ).toBe('gruen');
   });
 });
 
@@ -164,6 +213,86 @@ describe('ScanResultStore.record() (AC7)', () => {
     await expect(store.record(base({ app: '' }))).rejects.toThrow();
     await expect(store.record(base({ app: undefined }))).rejects.toThrow();
     expect(await store.list('dev-gui.example.com')).toEqual([]);
+  });
+});
+
+// ── AC26 (S-411) — checks + per-Prüfpunkt-Ampel ─────────────────────────────────
+
+describe('ScanResultStore.record() — checks (AC26)', () => {
+  it('ohne checks → [] (additiv, bestehende Einträge ohne checks bleiben gültig)', async () => {
+    const store = new ScanResultStore();
+    const written = await store.record(base());
+    expect(written.checks).toEqual([]);
+  });
+
+  it('normalisiert checks + leitet ampel je Prüfpunkt aus findings ab (checkId-Zuordnung)', async () => {
+    const store = new ScanResultStore();
+    const written = await store.record(
+      base({
+        findings: [{ id: 'f1', severity: 'high', kind: 'xss', testort: 'direkt', titel: 'XSS', checkId: 'c1' }],
+        checks: [{ id: 'c1', titel: 'XSS-Test', testort: 'direkt' }],
+      }),
+    );
+    expect(written.checks).toEqual([{ id: 'c1', titel: 'XSS-Test', testort: 'direkt', ampel: 'rot' }]);
+  });
+
+  it('ignoriert ein mitgegebenes checks[].ampel — leitet IMMER selbst ab (single source of truth)', async () => {
+    const store = new ScanResultStore();
+    const written = await store.record(
+      base({
+        findings: [],
+        checks: [{ id: 'c1', titel: 'Leerer Prüfpunkt', testort: 'direkt', ampel: 'rot' }],
+      }),
+    );
+    expect(written.checks[0].ampel).toBe('gruen');
+  });
+
+  it('Prüfpunkt ohne Fund → gruen', async () => {
+    const store = new ScanResultStore();
+    const written = await store.record(
+      base({
+        findings: [{ id: 'f1', severity: 'critical', kind: 'xss', testort: 'direkt', titel: 'XSS', checkId: 'c-other' }],
+        checks: [{ id: 'c1', titel: 'Sauberer Punkt', testort: 'direkt' }],
+      }),
+    );
+    expect(written.checks[0].ampel).toBe('gruen');
+  });
+
+  it('übernimmt optionales detail je Prüfpunkt', async () => {
+    const store = new ScanResultStore();
+    const written = await store.record(
+      base({ checks: [{ id: 'c1', titel: 'X', testort: 'direkt', detail: 'Kurzinfo' }] }),
+    );
+    expect(written.checks[0].detail).toBe('Kurzinfo');
+  });
+
+  it('Findings übernehmen optional detail/checkId (kein Durchreichen weiterer Extra-Felder)', async () => {
+    const store = new ScanResultStore();
+    const written = await store.record(
+      base({
+        findings: [
+          { id: 'f1', severity: 'high', kind: 'xss', testort: 'direkt', titel: 'XSS', detail: 'Details hier', checkId: 'c1', secretDump: 'nope' },
+        ],
+      }),
+    );
+    expect(written.findings[0]).toEqual({
+      id: 'f1', severity: 'high', kind: 'xss', testort: 'direkt', titel: 'XSS', boardId: null,
+      detail: 'Details hier', checkId: 'c1',
+    });
+  });
+
+  it('persistiert checks — zweite Instanz liest denselben Stand (Neustart-Fall)', async () => {
+    const store1 = new ScanResultStore();
+    await store1.record(
+      base({
+        scanId: 'scan-checks-1',
+        findings: [{ id: 'f1', severity: 'medium', kind: 'info', testort: 'direkt', titel: 'Info', checkId: 'c1' }],
+        checks: [{ id: 'c1', titel: 'Info-Test', testort: 'direkt' }],
+      }),
+    );
+    const store2 = new ScanResultStore();
+    const reloaded = await store2.getByScanId('scan-checks-1');
+    expect(reloaded.checks).toEqual([{ id: 'c1', titel: 'Info-Test', testort: 'direkt', ampel: 'gelb' }]);
   });
 });
 

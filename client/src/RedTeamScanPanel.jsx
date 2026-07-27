@@ -71,6 +71,33 @@
  *          sichtbar, betroffene IDs werden aus der Auswahl entfernt) — gilt identisch für
  *          Befunde, die der Server als bereits übertragen (`skipped`) meldet, und für
  *          Befunde, die schon beim initialen Laden eine `boardId` trugen.
+ *   AC29 — Prüfpunkt-Liste (alle durchgeführten Prüfungen, nicht nur Funde): sobald echte
+ *          `ampel`-Daten vorliegen (`hasAmpelData`), lädt das Panel zusätzlich EINMAL den
+ *          bereits bestehenden Detail-Endpunkt (`GET .../scans/:scanId`, AC8 — `scanId` ≡
+ *          die `jobId` dieses Panel-Laufs) nach, um `scan.checks` zu erhalten (der
+ *          Status-Poll-Endpunkt selbst liefert laut AC3-Vertrag kein `checks`-Feld —
+ *          Simplicity-Leiter Stufe 2, coder/R09: Wiederverwendung des bereits für
+ *          `RedTeamScanHistory.jsx` bestehenden Detail-Endpunkts statt eines neuen
+ *          Backend-Felds). Je Prüfpunkt Titel, Testort und eigene Ampel
+ *          (`AMPEL_STYLE`/`AMPEL_LABEL`, wiederverwendet — keine zweite Zuordnung, keine
+ *          Invertierung). Best-effort: schlägt der Nachlade-Fetch fehl, bleibt die Liste
+ *          leer (additive Degradation, kein Crash — identisch zum Verhalten eines älteren
+ *          Verlaufseintrags ohne `checks`).
+ *   AC30 — Kein-Fund-Fall sauber: hat ein auswertbarer Lauf keine Funde, zeigt das Panel
+ *          weiterhin die grüne Gesamt-Ampel PLUS die vollständige (durchweg grüne)
+ *          Prüfpunkt-Liste als Beleg, was getestet wurde — statt nur eines knappen
+ *          "Keine Befunde erkannt". Der In-App-Bericht (Prüfpunkte+Funde) ist damit die
+ *          autoritative Bericht-Ansicht; ein evtl. vorhandener `reportRef`-Link (AC12)
+ *          bleibt unverändert als optionale Zusatz-Referenz bestehen (Backend garantiert
+ *          seit AC28, dass dieser Wert nie mehr ein toter PR-Link ist).
+ *   AC31 — Hintergrund-Lauf-Hinweis: solange der Lauf noch nicht beendet ist (`starting`/
+ *          `running`), zeigt das Panel einen reinen React-Text (kein
+ *          `dangerouslySetInnerHTML`), der erklärt, dass (a) das Panel gefahrlos
+ *          geschlossen werden kann und der Scan im Hintergrund weiterläuft, (b) ein Lauf
+ *          ca. 15 Minuten dauert, und (c) das Ergebnis später im Verlauf/"Reports"
+ *          (AC14-Aufklapper) pro Container abrufbar ist. Reiner Hinweistext — kein neuer
+ *          Zustand/State, keine neue Logik (Simplicity-Leiter Stufe 1: AC31 verlangt
+ *          ausschliesslich Text, s. coder/R09).
  *
  * Security (Floor):
  *   - Kein `dangerouslySetInnerHTML` — Fehler-/Befundtexte werden als reiner React-Text
@@ -156,6 +183,10 @@ export function RedTeamScanPanel({
   const [phase, setPhase] = useState('starting');
   const [errorMsg, setErrorMsg] = useState('');
   const [result, setResult] = useState(null); // { ampel, findings, reportRef }
+
+  // AC29 — Prüfpunkt-Liste (nachgeladen über den bestehenden Detail-Endpunkt, s. Moduldoku
+  // "Covers" oben). Additive Degradation: bleibt `[]`, wenn kein Nachladen möglich ist.
+  const [checks, setChecks] = useState([]);
 
   // AC18/AC19/AC20 — Befunde-Auswahl + Board-Übertrag (nur für die gezeigten,
   // MAX_FINDINGS_SHOWN-begrenzten Befunde, s. Moduldoku "Covers" oben).
@@ -364,6 +395,36 @@ export function RedTeamScanPanel({
   // "keine Befunde"-Aussage vortäuschen (aktiv irreführend für ein Sicherheitswerkzeug).
   const hasAmpelData = phase === 'done' && result != null && result.ampel !== undefined && result.ampel !== null;
 
+  // ── AC29 — Prüfpunkt-Liste nachladen, sobald echte ampel-Daten vorliegen. Der Status-
+  // Poll-Endpunkt selbst liefert kein `checks`-Feld (AC3-Vertrag) — der bestehende
+  // Detail-Endpunkt (`GET .../scans/:scanId`, AC8) wird genau EINMAL nachgeladen
+  // (`scanId` ≡ die `jobId` dieses Panels). Best-effort: ein Fehlschlag lässt `checks`
+  // einfach leer (additive Degradation, kein Crash — keine Fehlermeldung nötig, da die
+  // übrigen Panel-Inhalte davon unberührt bleiben).
+  useEffect(() => {
+    if (!hasAmpelData) return undefined;
+    let cancelled = false;
+
+    async function loadChecks() {
+      const url = `/api/vps/machines/${encodeURIComponent(provider)}/${serverId}/scans/${encodeURIComponent(jobIdRef.current)}`;
+      let res;
+      try {
+        res = await fetch_(url);
+      } catch {
+        return; // best-effort — checks bleibt leer, kein Crash.
+      }
+      if (cancelled || !mountedRef.current || res.status !== 200) return;
+      let data = {};
+      try { data = await res.json(); } catch { /* ignore */ }
+      if (cancelled || !mountedRef.current) return;
+      setChecks(Array.isArray(data?.scan?.checks) ? data.scan.checks : []);
+    }
+
+    loadChecks();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasAmpelData]);
+
   // ── AC18/AC20 — Auswahl + Transfer-Zustand initialisieren, sobald echte Befund-Daten
   // vorliegen. Läuft genau einmal (bei Übergang zu hasAmpelData:true) — alle Befunde ohne
   // `boardId` starten vorgehakt (AC18); Befunde mit bereits gesetzter `boardId` (schon beim
@@ -504,6 +565,14 @@ export function RedTeamScanPanel({
                 ))}
               </ol>
             )}
+
+            {/* AC31 — Hintergrund-Lauf-Hinweis: gefahrlos schliessbar, Dauer, später
+                abrufbar (reiner React-Text, kein dangerouslySetInnerHTML). */}
+            <p style={styles.hint} data-testid="redteam-scan-background-hint">
+              Sie können dieses Fenster jetzt gefahrlos schließen — der Scan läuft im
+              Hintergrund weiter. Ein Lauf dauert ca. 15 Minuten. Das Ergebnis finden Sie
+              später im Verlauf ("Reports") bei diesem Container.
+            </p>
           </>
         )}
 
@@ -530,6 +599,28 @@ export function RedTeamScanPanel({
                 >
                   {AMPEL_LABEL[result.ampel] ?? 'Unbekannter Status'}
                 </span>
+
+                {/* AC29/AC30 — vollständige Prüfpunkt-Liste (alle durchgeführten Prüfungen,
+                    nicht nur Funde) als Beleg, was getestet wurde — auch im Kein-Fund-Fall
+                    (dann durchweg grün). Additive Degradation: ohne `checks` (Nachlade-Fehler
+                    oder älterer Verlaufseintrag) entfällt dieser Block ersatzlos. */}
+                {checks.length > 0 && (
+                  <div data-testid="redteam-scan-checks">
+                    <p style={styles.hint}>Geprüfte Punkte:</p>
+                    <ul style={styles.findingsList}>
+                      {checks.map((c) => (
+                        <li key={c.id} style={styles.findingItem} data-testid={`redteam-check-${c.id}`}>
+                          <span
+                            style={{ ...styles.ampelBadge, ...(AMPEL_STYLE[c.ampel] ?? AMPEL_STYLE.gruen) }}
+                          >
+                            {AMPEL_LABEL[c.ampel] ?? 'Unbekannter Status'}
+                          </span>{' '}
+                          {c.titel || '(ohne Titel)'} · {c.testort ?? '—'}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
 
                 {findings.length === 0 && (
                   <p style={styles.hint} data-testid="redteam-scan-no-findings">Keine Befunde erkannt.</p>

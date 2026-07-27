@@ -4,6 +4,8 @@
  * Covers (docs/specs/deploy-bitwarden-gpg-injection.md):
  *   AC2 — GET liefert write-only Status (set/updatedAt + ready), KEIN Klartext.
  *   AC3 — PUT/DELETE mutieren genau ein Feld; Validierung (unknown/empty/too-long).
+ *   AC22 — validateAccess mit errorClass 'config-failed' → spezifische Meldung
+ *          (nicht der generische Fallback), kein Rohtext-Leak.
  *   S1  — Response enthält nie den gesetzten Wert.
  *   S4  — Audit-First: Audit vor Mutation; Audit-Fail → 500, KEINE Mutation.
  *   S5  — CRED_ADMIN_EMAILS-Gate: fremde Identität → 403.
@@ -180,6 +182,19 @@ describe('bitwardenDeployAccessRouter — validate (S-332, AC7/AC10)', () => {
     expect(r.body.ok).toBe(false);
     expect(r.body.errorClass).toBe('unlock-failed');
     expect(typeof r.body.error).toBe('string');
+  });
+
+  it('AC22: ok=false mit errorClass config-failed → spezifische Meldung, kein generischer Fallback, kein Rohtext-Leak', async () => {
+    const loginService = { validateAccess: jest.fn(async () => ({ ok: false, errorClass: 'config-failed' })) };
+    ctx = await buildApp({ audit: { record: jest.fn() }, identity: { email: 'a@b.ch' }, loginService });
+    const r = await httpReq(ctx.port, 'POST', '/api/settings/deploy-access/validate');
+    expect(r.status).toBe(200);
+    expect(r.body.ok).toBe(false);
+    expect(r.body.errorClass).toBe('config-failed');
+    expect(r.body.error).toMatch(/Server-Konfiguration/);
+    expect(r.body.error).not.toBe('Unbekannter Fehler bei der Zugangs-Prüfung.');
+    // kein bw-Rohtext (z.B. "Logout required before server config update")
+    expect(r.raw).not.toContain('Logout required');
   });
 
   it('503 wenn Login-Dienst nicht verdrahtet', async () => {
