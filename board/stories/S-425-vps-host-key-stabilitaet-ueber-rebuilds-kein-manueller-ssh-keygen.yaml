@@ -2,7 +2,7 @@ id: S-425
 parent: F-052
 title: 'VPS-Host-Key über Rebuilds stabil halten: SSH-Terminal verbindet nach legitimem
   Rebuild ohne manuellen ssh-keygen -R, MITM-Schutz für unerwartete Wechsel bleibt'
-status: To Do
+status: In Progress
 priority: P2
 spec: docs/specs/vps-host-key-stabilitaet.md
 implements:
@@ -23,9 +23,11 @@ estimate_note: 'M-Heuristik: Host-Key-Persistenz im VPS-Bootstrap (Variante a) O
   (SSH-Host-Key/MITM). Kein estimator gelaufen (manuell angelegt, Owner-Auftrag 2026-07-22).'
 confidence: low
 tok_est: null
-branch: null
+branch: feat/S-425-vps-host-key-stabilitaet
 pr: null
 blocked_reason: null
 created_at: '2026-07-22T20:21:40Z'
-updated_at: '2026-07-22T20:21:40Z'
+updated_at: '2026-07-27T06:44:39Z'
 done_at: null
+claimed_by: MacBook-Pro-von-Alexander.local-40804-1785134641-8495
+claimed_at: '2026-07-27T06:44:20Z'
