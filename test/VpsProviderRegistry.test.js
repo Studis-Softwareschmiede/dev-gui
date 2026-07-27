@@ -33,6 +33,21 @@
  *   AC17 — Graceful: listDatacenters-Fehler → availability weggelassen, Rest vollständig;
  *           Token erscheint nicht in availability/Response
  *
+ * Covers (vps-host-key-stabilitaet, S-425):
+ *   AC1  — create() erzeugt bei erstem Aufruf einen SSH-Host-Key + übergibt ihn an
+ *           CloudInitBuilder.build() ({ sshHostKey }); wird im CredentialStore persistiert.
+ *           Fallback-Pfade von #provisionHostKeyForTarget() (Review-Suggestion 2, Iteration 1):
+ *           ungültiges JSON im gespeicherten Datensatz, Datensatz ohne publicKey/privateKey-
+ *           Felder und ein werfendes getPlaintext() (Store-Fehler) — alle drei fallen defensiv
+ *           auf eine frische Keygenerierung zurück statt zu crashen.
+ *   AC3  — ein zweiter Create() für denselben Ziel-Namen (Rebuild = Delete+Create) generiert
+ *           KEINEN neuen Host-Key, sondern liest den persistierten wieder (kein manueller
+ *           known_hosts-Eingriff nötig, da der Fingerprint identisch bleibt)
+ *   (AC2 — MITM-Schutz bleibt: dieser Mechanismus rührt an SshPtyManagers
+ *    StrictHostKeyChecking=accept-new nicht an; unverändert in SshPtyManager.test.js
+ *    abgedeckt. AC4 — delete() räumt den Host-Key-Datensatz NICHT auf: siehe
+ *    vpsRegistryDelete.test.js.)
+ *
  * Strategy:
  *   - CredentialStore wird als Stub injiziert
  *   - Adapter werden als Stubs injiziert (kein echter Fetch)
@@ -986,6 +1001,225 @@ describe('VpsProviderRegistry — S-152 Tunnel-Provisionierung beim Create', () 
     expect(deletedTunnels).toContain(MOCK_TUNNEL_ID);
     const tokenKey = `credentials/cloudflare/tunnel_token/${MOCK_TUNNEL_ID}`;
     expect(store._storedEntries[tokenKey]).toBeUndefined();
+  });
+});
+
+// ── vps-host-key-stabilitaet (S-425): persistierter SSH-Host-Key beim Create ──────
+
+/**
+ * Fake-Keygen-Funktion (ssh2-Signatur: (type, options, cb) => cb(err, {public, private})).
+ * Zählt Aufrufe, damit AC3 (Wiederverwendung statt Neugenerierung) nachweisbar ist.
+ * Dummy-PEM-Marker per String-Konkatenation zusammengesetzt — ein literaler BEGIN-Marker
+ * im Quelltext triggert sonst den gitleaks-Secret-Scan (Rule private-key) als False Positive.
+ */
+function makeCountingHostKeygenFn() {
+  let calls = 0;
+  const fn = (type, options, cb) => {
+    calls += 1;
+    const n = calls;
+    const pub = `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeHostKeyN${n}NotReal ${options?.comment ?? ''}`;
+    const priv = ['-----BEGIN OPENSSH', 'PRIVATE KEY-----'].join(' ')
+      + `\nb3BlbnNzaC1rZXktdjEAAAAAbm9uZQAAAAAAAAFAKEHOSTN${n}=\n`
+      + ['-----END OPENSSH', 'PRIVATE KEY-----'].join(' ');
+    cb(null, { public: pub, private: priv });
+  };
+  return { fn, getCalls: () => calls };
+}
+
+describe('VpsProviderRegistry — vps-host-key-stabilitaet AC1: SSH-Host-Key beim Create', () => {
+  it('AC1 — erzeugt bei erstem Create einen Host-Key und übergibt ihn an CloudInitBuilder.build()', async () => {
+    const store = makeCredentialStore(
+      { hetzner: MOCK_TOKEN },
+      { root: ROOT_PUB_KEY, alex: ALEX_PUB_KEY },
+    );
+    const { fn: keygenFn, getCalls } = makeCountingHostKeygenFn();
+    const { stub: builderStub, getCapture } = makeBuildCapture();
+
+    const registry = new VpsProviderRegistry({
+      credentialStore: store,
+      hostKeygenFn: keygenFn,
+      cloudInitBuilder: builderStub,
+      adapters: { hetzner: makeAdapter(), ionos: makeAdapter(), hostinger: makeAdapter() },
+    });
+
+    await registry.create('hetzner', {
+      name: 'my-vps',
+      region: 'nbg1',
+      serverType: 'cx11',
+      sshKeyAssignment: { root: 'root', alex: 'alex' },
+    });
+
+    expect(getCalls()).toBe(1);
+    const buildArgs = getCapture();
+    expect(buildArgs.sshHostKey).toBeDefined();
+    expect(buildArgs.sshHostKey.publicKey).toContain('FakeHostKeyN1');
+    expect(buildArgs.sshHostKey.privateKey).toContain('FAKEHOSTN1');
+  });
+
+  it('AC1/AC8 — persistiert den Host-Key im CredentialStore (credentials/misc/vps-<name>-host-key)', async () => {
+    const store = makeCredentialStore(
+      { hetzner: MOCK_TOKEN },
+      { root: ROOT_PUB_KEY, alex: ALEX_PUB_KEY },
+    );
+    const { fn: keygenFn } = makeCountingHostKeygenFn();
+    const { stub: builderStub } = makeBuildCapture();
+
+    const registry = new VpsProviderRegistry({
+      credentialStore: store,
+      hostKeygenFn: keygenFn,
+      cloudInitBuilder: builderStub,
+      adapters: { hetzner: makeAdapter(), ionos: makeAdapter(), hostinger: makeAdapter() },
+    });
+
+    await registry.create('hetzner', {
+      name: 'my-vps',
+      region: 'nbg1',
+      serverType: 'cx11',
+      sshKeyAssignment: { root: 'root', alex: 'alex' },
+    });
+
+    const stored = store._storedEntries['credentials/misc/vps-my-vps-host-key'];
+    expect(stored).toBeDefined();
+    const parsed = JSON.parse(stored);
+    expect(parsed.publicKey).toContain('FakeHostKeyN1');
+    expect(parsed.privateKey).toContain('FAKEHOSTN1');
+  });
+
+  it('Review-Suggestion 2 (Iteration 1) — ungültiges JSON im gespeicherten Datensatz → Neugenerierung statt Crash', async () => {
+    const store = makeCredentialStore(
+      { hetzner: MOCK_TOKEN },
+      { root: ROOT_PUB_KEY, alex: ALEX_PUB_KEY },
+    );
+    // Kaputter/unparsbarer Datensatz vorbelegen (defensiver Fallback in #provisionHostKeyForTarget)
+    store._storedEntries['credentials/misc/vps-my-vps-host-key'] = 'not-valid-json{{{';
+    const { fn: keygenFn, getCalls } = makeCountingHostKeygenFn();
+    const { stub: builderStub, getCapture } = makeBuildCapture();
+
+    const registry = new VpsProviderRegistry({
+      credentialStore: store,
+      hostKeygenFn: keygenFn,
+      cloudInitBuilder: builderStub,
+      adapters: { hetzner: makeAdapter(), ionos: makeAdapter(), hostinger: makeAdapter() },
+    });
+
+    await registry.create('hetzner', {
+      name: 'my-vps',
+      region: 'nbg1',
+      serverType: 'cx11',
+      sshKeyAssignment: { root: 'root', alex: 'alex' },
+    });
+
+    // Kein Crash — kaputter Datensatz wird verworfen, ein frischer Host-Key wird erzeugt
+    expect(getCalls()).toBe(1);
+    const buildArgs = getCapture();
+    expect(buildArgs.sshHostKey.publicKey).toContain('FakeHostKeyN1');
+    // Der neu erzeugte Key wurde persistiert (überschreibt den kaputten Datensatz)
+    const stored = JSON.parse(store._storedEntries['credentials/misc/vps-my-vps-host-key']);
+    expect(stored.publicKey).toContain('FakeHostKeyN1');
+  });
+
+  it('Review-Suggestion 2 (Iteration 1) — gespeicherter Datensatz mit fehlenden Feldern (kein publicKey/privateKey) → Neugenerierung', async () => {
+    const store = makeCredentialStore(
+      { hetzner: MOCK_TOKEN },
+      { root: ROOT_PUB_KEY, alex: ALEX_PUB_KEY },
+    );
+    // Gültiges JSON, aber ohne die erwarteten Pflichtfelder
+    store._storedEntries['credentials/misc/vps-my-vps-host-key'] = JSON.stringify({ foo: 'bar' });
+    const { fn: keygenFn, getCalls } = makeCountingHostKeygenFn();
+    const { stub: builderStub, getCapture } = makeBuildCapture();
+
+    const registry = new VpsProviderRegistry({
+      credentialStore: store,
+      hostKeygenFn: keygenFn,
+      cloudInitBuilder: builderStub,
+      adapters: { hetzner: makeAdapter(), ionos: makeAdapter(), hostinger: makeAdapter() },
+    });
+
+    await registry.create('hetzner', {
+      name: 'my-vps',
+      region: 'nbg1',
+      serverType: 'cx11',
+      sshKeyAssignment: { root: 'root', alex: 'alex' },
+    });
+
+    expect(getCalls()).toBe(1);
+    expect(getCapture().sshHostKey.publicKey).toContain('FakeHostKeyN1');
+  });
+
+  it('Review-Suggestion 2 (Iteration 1) — getPlaintext() wirft (Store-Fehler) → Fallback-Pfad erzeugt trotzdem einen Host-Key', async () => {
+    const store = makeCredentialStore(
+      { hetzner: MOCK_TOKEN },
+      { root: ROOT_PUB_KEY, alex: ALEX_PUB_KEY },
+    );
+    const origGetPlaintext = store.getPlaintext.bind(store);
+    store.getPlaintext = async (key) => {
+      if (key === 'credentials/misc/vps-my-vps-host-key') {
+        throw new Error('Store-Lesefehler (simuliert)');
+      }
+      return origGetPlaintext(key);
+    };
+    const { fn: keygenFn, getCalls } = makeCountingHostKeygenFn();
+    const { stub: builderStub, getCapture } = makeBuildCapture();
+
+    const registry = new VpsProviderRegistry({
+      credentialStore: store,
+      hostKeygenFn: keygenFn,
+      cloudInitBuilder: builderStub,
+      adapters: { hetzner: makeAdapter(), ionos: makeAdapter(), hostinger: makeAdapter() },
+    });
+
+    // Kein Crash trotz Store-Lesefehler beim Host-Key-Lookup — Create läuft mit frischem Key durch.
+    await registry.create('hetzner', {
+      name: 'my-vps',
+      region: 'nbg1',
+      serverType: 'cx11',
+      sshKeyAssignment: { root: 'root', alex: 'alex' },
+    });
+
+    expect(getCalls()).toBe(1);
+    expect(getCapture().sshHostKey.publicKey).toContain('FakeHostKeyN1');
+  });
+});
+
+describe('VpsProviderRegistry — vps-host-key-stabilitaet AC1/AC3: Rebuild (Delete+Create) reused stable Host-Key', () => {
+  it('zweiter Create() für denselben Namen (Rebuild) generiert KEINEN neuen Host-Key, sondern liest den persistierten', async () => {
+    const store = makeCredentialStore(
+      { hetzner: MOCK_TOKEN },
+      { root: ROOT_PUB_KEY, alex: ALEX_PUB_KEY },
+    );
+    const { fn: keygenFn, getCalls } = makeCountingHostKeygenFn();
+    const { stub: builderStub, getCapture } = makeBuildCapture();
+
+    const registry = new VpsProviderRegistry({
+      credentialStore: store,
+      hostKeygenFn: keygenFn,
+      cloudInitBuilder: builderStub,
+      adapters: { hetzner: makeAdapter(), ionos: makeAdapter(), hostinger: makeAdapter() },
+    });
+
+    const createParams = {
+      name: 'my-vps',
+      region: 'nbg1',
+      serverType: 'cx11',
+      sshKeyAssignment: { root: 'root', alex: 'alex' },
+    };
+
+    // Erster Create (ursprünglicher Server)
+    await registry.create('hetzner', createParams);
+    const firstHostKey = getCapture().sshHostKey;
+    expect(getCalls()).toBe(1);
+
+    // Simuliert einen dev-gui-Rebuild: delete() + erneutes create() für denselben Namen.
+    // delete() räumt Tunnel-Referenzen auf, lässt den Host-Key-Datensatz aber unangetastet
+    // (vps-host-key-stabilitaet AC4 — separat in vpsRegistryDelete.test.js abgedeckt).
+    await registry.delete('hetzner', 'srv-1', 'my-vps');
+
+    // Zweiter Create (Rebuild) — MUSS denselben Host-Key wiederverwenden (AC1/AC3)
+    await registry.create('hetzner', createParams);
+    const secondHostKey = getCapture().sshHostKey;
+
+    expect(getCalls()).toBe(1); // kein zweiter Keygen-Aufruf
+    expect(secondHostKey).toEqual(firstHostKey); // identisches Schlüsselpaar → stabiler Fingerprint
   });
 });
 

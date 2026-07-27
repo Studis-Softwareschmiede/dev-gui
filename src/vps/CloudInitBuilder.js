@@ -27,12 +27,20 @@
  *                     Ohne --network host ist localhost im Container der Container selbst (nicht der Host)
  *                     → Tunnel-Route http://localhost:<hostPort> unerreichbar (live verifiziert, S-170).
  *                     Token-Floor (AC13) bleibt unverändert: Token nur via --env-file, nie in Argv/Log.
+ *   v6 (2026-07-27) — optionaler persistierter Ed25519-SSH-Host-Key via cloud-init-natives
+ *                     `ssh_keys:` (docs/specs/vps-host-key-stabilitaet.md AC1/AC4, Variante a,
+ *                     S-425). `VpsProviderRegistry` erzeugt/liest den Host-Key je Ziel-Name
+ *                     einmalig und übergibt ihn hier weiter — er bleibt damit über einen
+ *                     Delete+Create-Rebuild desselben Ziels stabil (kein neuer Host-Key, kein
+ *                     Fingerprint-Wechsel, kein `ssh-keygen -R` nötig). Ohne sshHostKey (nicht
+ *                     übergeben) → kein `ssh_keys:`-Block, cloud-init generiert wie bisher
+ *                     eigene Host-Keys beim ersten Boot (rückwärtskompatibel mit v5).
  *
  * @module CloudInitBuilder
  */
 
 /** Aktuelle Vorlage-Version — erhöhen bei jeder strukturellen Änderung. */
-export const TEMPLATE_VERSION = 5;
+export const TEMPLATE_VERSION = 6;
 
 // ── CloudInitBuilder ──────────────────────────────────────────────────────────
 
@@ -53,12 +61,19 @@ export class CloudInitBuilder {
    *       Token wird via write_files in /etc/cloudflared/env (0600) abgelegt;
    *       cloudflared liest Token via --env-file (TUNNEL_TOKEN) — NIEMALS Token in Argv/runcmd-Echo
    *       (vps-tunnel-provisioning AC6 / vps-cloud-init-setup AC12/AC13).
+   *   (g) Persistierter Ed25519-SSH-Host-Key (optional, nur wenn sshHostKey übergeben):
+   *       cloud-init-natives `ssh_keys:` (kein write_files/runcmd-Sink) — der Server bootet
+   *       mit GENAU diesem Host-Key statt einen neuen zu generieren (docs/specs/
+   *       vps-host-key-stabilitaet.md AC1/AC4, Variante a).
    *
    * Security-Floor (AC6 / vps-cloud-init-setup AC13 / NFR):
    *   - Nur Public-Keys werden in users:→ssh_authorized_keys eingebettet.
    *   - Das Tunnel-Token (wenn übergeben) landet NUR im write_files-YAML-Wert
    *     mit restriktiven Permissions (0600, root:root) — NICHT in runcmd-Argv.
    *   - Docker nutzt das Token ausschließlich via --env-file (TUNNEL_TOKEN) — kein Token in Argv.
+   *   - Der SSH-Host-Private-Key (wenn übergeben) landet NUR im `ssh_keys:`-YAML-Wert —
+   *     kein write_files/runcmd-Sink, kein Argv, gleiche Vertraulichkeits-Klasse wie der
+   *     Tunnel-Token (docs/specs/vps-host-key-stabilitaet.md AC4).
    *   - Das erzeugte cloud-init-Dokument fließt NUR an die Provider-Create-API
    *     (server-privat). Es erscheint nicht im Frontend-Bundle oder in Logs.
    *
@@ -74,10 +89,16 @@ export class CloudInitBuilder {
    *     Security: Token erscheint NICHT in runcmd-Argv — nur als YAML-Wert im
    *     write_files-Block (`/etc/cloudflared/env` als Docker env-file, 0600 Permissions;
    *     cloudflared liest TUNNEL_TOKEN aus Docker-Env ohne argv-Exposition; AC6).
+   * @param {{ publicKey: string, privateKey: string }} [params.sshHostKey]
+   *   - Persistierter Ed25519-SSH-Host-Key (docs/specs/vps-host-key-stabilitaet.md AC1/AC4).
+   *     Wenn übergeben, bootet der Server mit diesem Host-Key (via `ssh_keys:`) statt einen
+   *     neuen zu generieren — der Fingerprint bleibt über Rebuilds desselben Ziels stabil.
+   *     Wenn nicht übergeben → kein `ssh_keys:`-Block (rückwärtskompatibel mit v5: cloud-init
+   *     generiert den Host-Key wie bisher selbst beim ersten Boot).
    * @returns {string} Wohlgeformtes #cloud-config-YAML-Dokument (user-data).
    * @throws {CloudInitError} wenn ein Public-Key für root oder alex fehlt (AC7).
    */
-  build({ name, sshPublicKeys, tunnelToken } = {}) {
+  build({ name, sshPublicKeys, tunnelToken, sshHostKey } = {}) {
     const { root: rootKey, alex: alexKey } = sshPublicKeys ?? {};
 
     // AC7 — fehlende Public-Keys → 422-fähiger Fehler vor jedem Provider-Call
@@ -135,10 +156,31 @@ export class CloudInitBuilder {
 `
       : '';
 
+    // ssh_keys-Block: nur wenn sshHostKey übergeben (docs/specs/vps-host-key-stabilitaet.md
+    // AC1/AC4, Variante a). cloud-init-natives Feature (cc_ssh) — kein Eigenbau: generiert für
+    // einen Key-Typ NUR dann einen neuen Host-Key, wenn `ssh_keys.<typ>_private` NICHT gesetzt
+    // ist; mit gesetztem ed25519_private/ed25519_public bootet der Server mit GENAU diesem
+    // Schlüsselpaar statt einem neu generierten → Fingerprint bleibt über einen Rebuild
+    // (Delete+Create desselben Ziels durch VpsProviderRegistry) stabil, kein Host-Key-Mismatch.
+    // Security-Floor: Private-Key landet NUR im `ssh_keys:`-YAML-Wert (kein write_files/runcmd-
+    // Sink, kein Argv) — gleiche Vertraulichkeits-Klasse wie der Tunnel-Token (AC13-Analogie).
+    const hasHostKey = sshHostKey
+      && typeof sshHostKey.privateKey === 'string' && sshHostKey.privateKey.trim() !== ''
+      && typeof sshHostKey.publicKey === 'string' && sshHostKey.publicKey.trim() !== '';
+    const sshKeysBlock = hasHostKey
+      ? `ssh_keys:
+  # Persistierter Ed25519-Host-Key (vps-host-key-stabilitaet AC1/AC4, Variante a) — bleibt über
+  # Rebuilds (Delete+Create desselben Ziels) stabil, kein Host-Key-Mismatch im SSH-Terminal.
+  ed25519_private: |
+${indentBlock(sshHostKey.privateKey.trim(), 4)}
+  ed25519_public: ${sshHostKey.publicKey.trim()}
+`
+      : '';
+
     // Template-Version als Kommentar im Dokument (AC8)
     const doc = `#cloud-config
 # cloud-init Default-Setup-Vorlage v${TEMPLATE_VERSION} (CloudInitBuilder, ADR-009)
-${hostnameBlock}${writeFilesBlock}package_update: true
+${hostnameBlock}${sshKeysBlock}${writeFilesBlock}package_update: true
 package_upgrade: true
 disable_root: false
 users:
@@ -206,4 +248,22 @@ function sanitizeHostname(name) {
     .replace(/[^a-z0-9-]/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 63) || 'server';
+}
+
+/**
+ * Rückt jede Zeile eines mehrzeiligen Textes um `spaces` Leerzeichen ein — für die
+ * Einbettung als YAML-Block-Skalar (`|`), z.B. `ssh_keys.ed25519_private` (AC1/AC4).
+ * Leere Zeilen bleiben leer (kein trailing Whitespace).
+ *
+ * @param {string} text
+ * @param {number} spaces
+ * @returns {string}
+ */
+function indentBlock(text, spaces) {
+  const pad = ' '.repeat(spaces);
+  return String(text)
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map((line) => (line.length ? pad + line : line))
+    .join('\n');
 }

@@ -39,11 +39,14 @@ const { utils: { generateKeyPair: _ssh2GenerateKeyPair } } = _require('ssh2');
  * Gibt { publicKey, privateKey } zurück (beide Strings).
  * Injizierbar für Tests via sshKeygenFn-Parameter.
  *
+ * Exportiert (auch von `VpsProviderRegistry` genutzt, docs/specs/vps-host-key-stabilitaet.md
+ * AC1/AC4 — persistierter VPS-Host-Key: dieselbe ed25519-Erzeugung, kein zweiter Keygen-Pfad).
+ *
  * @param {string} comment  - Kommentar-Feld im Public-Key (z.B. "dev-gui/root")
  * @param {Function} [keygenFn]  - Optionale Überschreibung (für Tests)
  * @returns {Promise<{ publicKey: string, privateKey: string }>}
  */
-function generateEd25519Keypair(comment, keygenFn) {
+export function generateEd25519Keypair(comment, keygenFn) {
   const fn = keygenFn ?? _ssh2GenerateKeyPair;
   return new Promise((resolve, reject) => {
     fn('ed25519', { comment: comment ?? '' }, (err, keys) => {

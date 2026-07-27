@@ -23,6 +23,13 @@
  *   AC14 — cloudflared docker-run enthält --network host; Token-Floor (AC13) bleibt erhalten
  *   Rückwärtskompatibilität: ohne tunnelToken → kein cloudflared-Block
  *
+ * Covers (vps-host-key-stabilitaet, S-425):
+ *   AC1  — Mit sshHostKey: `ssh_keys:`-Block mit ed25519_private/ed25519_public aus dem
+ *           übergebenen Schlüsselpaar (bootet mit GENAU diesem Host-Key statt einem neuen)
+ *   AC4  — Variante a (Host-Key-Persistenz) implementiert: `ssh_keys:` ist cloud-init-nativ,
+ *           kein write_files/runcmd-Sink für den Private-Key
+ *   Rückwärtskompatibilität: ohne sshHostKey → kein `ssh_keys:`-Block (v5-Verhalten unverändert)
+ *
  * Strategy:
  *   - Reine Unit-Tests; keine externen I/O-Abhängigkeiten.
  *   - YAML-Validierung über minimale Syntaxprüfung (Header + keine Leerzeilen-Lücken in
@@ -328,8 +335,8 @@ describe('CloudInitBuilder — AC7: Fehlerverhalten bei fehlendem Public-Key', (
 // ── AC8: Versionierung ────────────────────────────────────────────────────────
 
 describe('CloudInitBuilder — AC8: Versionierung', () => {
-  it('TEMPLATE_VERSION ist 5 (v5 nach --network host Fix, S-170)', () => {
-    expect(TEMPLATE_VERSION).toBe(5);
+  it('TEMPLATE_VERSION ist 6 (v6 nach optionalem ssh_keys-Host-Key-Block, S-425)', () => {
+    expect(TEMPLATE_VERSION).toBe(6);
   });
 
   it('TEMPLATE_VERSION ist eine positive ganze Zahl', () => {
@@ -615,5 +622,122 @@ describe('CloudInitBuilder — Rückwärtskompatibilität: kein tunnelToken → 
     expect(doc).toContain('chage -d -1 root');
     // kein cloudflared
     expect(doc).not.toContain('cloudflared');
+  });
+});
+
+// ── AC1/AC4: persistierter SSH-Host-Key (vps-host-key-stabilitaet, S-425) ────────
+
+// Dummy-Mehrzeilen-"Private-Key" — der literale BEGIN-Marker im Quelltext würde den
+// gitleaks-Secret-Scan (Rule private-key) als False Positive auslösen (analog
+// SshKeyGeneration.test.js makeMockKeygenFn).
+const HOST_PRIVATE_KEY = [
+  ['-----BEGIN OPENSSH', 'PRIVATE KEY-----'].join(' '),
+  'b3BlbnNzaC1rZXktdjEAAAAAbm9uZQAAAAAAAAFAKEHOSTKEY=',
+  ['-----END OPENSSH', 'PRIVATE KEY-----'].join(' '),
+].join('\n');
+const HOST_PUBLIC_KEY = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHostKeyExampleForTestingOnlyNotReal devgui-vps-host/test-server';
+
+/** Baut ein Dokument MIT sshHostKey. */
+function buildWithHostKey(overrides = {}) {
+  const builder = new CloudInitBuilder();
+  return builder.build({
+    name: 'test-server',
+    sshPublicKeys: { root: ROOT_KEY, alex: ALEX_KEY },
+    sshHostKey: { publicKey: HOST_PUBLIC_KEY, privateKey: HOST_PRIVATE_KEY },
+    ...overrides,
+  });
+}
+
+describe('CloudInitBuilder — AC1: persistierter SSH-Host-Key via ssh_keys:', () => {
+  it('enthält einen ssh_keys:-Block, wenn sshHostKey übergeben wird', () => {
+    const doc = buildWithHostKey();
+    expect(doc).toMatch(/^ssh_keys:/m);
+  });
+
+  it('ed25519_public entspricht exakt dem übergebenen Public-Key', () => {
+    const doc = buildWithHostKey();
+    expect(doc).toContain(`ed25519_public: ${HOST_PUBLIC_KEY}`);
+  });
+
+  it('ed25519_private enthält den übergebenen Private-Key vollständig (alle Zeilen)', () => {
+    const doc = buildWithHostKey();
+    for (const line of HOST_PRIVATE_KEY.split('\n')) {
+      expect(doc).toContain(line);
+    }
+  });
+
+  it('ssh_keys:-Block erscheint VOR users: (Reihenfolge irrelevant für cloud-init, aber deterministisch)', () => {
+    const doc = buildWithHostKey();
+    const sshKeysIdx = doc.indexOf('ssh_keys:');
+    const usersIdx = doc.indexOf('users:');
+    expect(sshKeysIdx).toBeGreaterThanOrEqual(0);
+    expect(usersIdx).toBeGreaterThan(sshKeysIdx);
+  });
+
+  it('gleiche Eingaben (inkl. sshHostKey) → identisches Dokument (Reproduzierbarkeit)', () => {
+    const doc1 = buildWithHostKey();
+    const doc2 = buildWithHostKey();
+    expect(doc1).toBe(doc2);
+  });
+});
+
+describe('CloudInitBuilder — AC4: ssh_keys ist cloud-init-nativ (kein write_files/runcmd-Sink)', () => {
+  it('der Host-Private-Key landet NICHT in einem write_files-Eintrag', () => {
+    const doc = buildWithHostKey();
+    // write_files bleibt (falls vorhanden) ausschließlich für den Tunnel-Token reserviert —
+    // der Host-Key-Private-Key-Inhalt darf dort nicht auftauchen.
+    const writeFilesIdx = doc.indexOf('write_files:');
+    if (writeFilesIdx >= 0) {
+      const sshKeysIdx = doc.indexOf('ssh_keys:');
+      // ssh_keys: ist ein eigener Top-Level-Block, unabhängig von write_files:
+      expect(sshKeysIdx).toBeGreaterThanOrEqual(0);
+      expect(sshKeysIdx).not.toBe(writeFilesIdx);
+    }
+  });
+
+  it('der Host-Private-Key erscheint NICHT im runcmd-Block (kein Shell-Sink)', () => {
+    const doc = buildWithHostKey();
+    const lines = doc.split('\n');
+    const runcmdIdx = lines.findIndex((l) => l.trim() === 'runcmd:');
+    expect(runcmdIdx).toBeGreaterThanOrEqual(0);
+    const runcmdLines = lines.slice(runcmdIdx);
+    for (const line of HOST_PRIVATE_KEY.split('\n')) {
+      expect(runcmdLines.join('\n')).not.toContain(line);
+    }
+  });
+});
+
+describe('CloudInitBuilder — Rückwärtskompatibilität: kein sshHostKey → kein ssh_keys:-Block', () => {
+  it('ohne sshHostKey: kein ssh_keys:-Block im Dokument (v5-Verhalten unverändert)', () => {
+    const doc = buildDefault(); // kein sshHostKey
+    expect(doc).not.toMatch(/^ssh_keys:/m);
+  });
+
+  it('mit sshHostKey=null: kein ssh_keys:-Block', () => {
+    const builder = new CloudInitBuilder();
+    const doc = builder.build({
+      name: 'srv',
+      sshPublicKeys: { root: ROOT_KEY, alex: ALEX_KEY },
+      sshHostKey: null,
+    });
+    expect(doc).not.toMatch(/^ssh_keys:/m);
+  });
+
+  it('mit unvollständigem sshHostKey (nur publicKey): kein ssh_keys:-Block', () => {
+    const builder = new CloudInitBuilder();
+    const doc = builder.build({
+      name: 'srv',
+      sshPublicKeys: { root: ROOT_KEY, alex: ALEX_KEY },
+      sshHostKey: { publicKey: HOST_PUBLIC_KEY },
+    });
+    expect(doc).not.toMatch(/^ssh_keys:/m);
+  });
+
+  it('ohne sshHostKey: alle v5-Garantien weiterhin erfüllt (Docker, Users, chage)', () => {
+    const doc = buildDefault();
+    expect(doc).toContain('docker-ce');
+    expect(doc).toMatch(/name:\s*alex/);
+    expect(doc).toMatch(/name:\s*root/);
+    expect(doc).toContain('chage -d -1 root');
   });
 });

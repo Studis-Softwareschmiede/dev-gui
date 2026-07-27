@@ -7,6 +7,10 @@
  *      (credentials/vps/<provider>_api_token) — transient, nie gecacht.
  *   3. Read-Aggregation über alle konfigurierten Provider live + degradierend (AC3/AC4).
  *   4. Mutierende Aktionen (start/stop/create) für einen adressierten Provider ausführen.
+ *   5. create(): persistiert/liest einen SSH-Host-Key je Ziel-Name und gibt ihn an
+ *      CloudInitBuilder weiter (docs/specs/vps-host-key-stabilitaet.md AC1/AC4, S-425) — der
+ *      Host-Key bleibt damit über einen Delete+Create-Rebuild desselben Ziels stabil (kein
+ *      Host-Key-Mismatch, kein manuelles `ssh-keygen -R` mehr nötig).
  *
  * Token-Injektion (ADR-009):
  *   - Token wird pro Aufruf aus dem CredentialStore gelesen.
@@ -54,6 +58,7 @@ import { IonosAdapter } from './providers/ionos.js';
 import { HostingerAdapter } from './providers/hostinger.js';
 import { CloudInitBuilder } from './CloudInitBuilder.js';
 import { sanitizeTunnelName } from './tunnelName.js';
+import { generateEd25519Keypair } from '../sshKeysRouter.js';
 
 /** Alle bekannten Provider-IDs. */
 const KNOWN_PROVIDERS = ['hetzner', 'ionos', 'hostinger'];
@@ -79,6 +84,17 @@ const TUNNEL_ID_KEY = (sanitizedName) => `credentials/misc/vps-${sanitizedName}-
  */
 const TARGET_RECORD_KEY = (sanitizedName) => `credentials/misc/vps-${sanitizedName}-target`;
 
+/**
+ * CredentialStore-Schlüssel für den persistierten SSH-Host-Key je Ziel-Name
+ * (docs/specs/vps-host-key-stabilitaet.md AC1/AC4, Variante a, S-425).
+ * Schema: JSON { publicKey: string, privateKey: string } (Ed25519, OpenSSH-Format).
+ * Verschlüsselt at rest (CredentialStore.set/getPlaintext) wie der Ziel-Datensatz.
+ * Bewusst NICHT in delete()/#cleanupTunnel entfernt — der Host-Key MUSS über einen
+ * Delete+Create-Rebuild desselben Ziels hinweg erhalten bleiben (das ist der ganze Zweck
+ * dieses Mechanismus: derselbe Host-Key → derselbe Fingerprint → kein Mismatch, AC1/AC3).
+ */
+const HOST_KEY_RECORD_KEY = (sanitizedName) => `credentials/misc/vps-${sanitizedName}-host-key`;
+
 export class VpsProviderRegistry {
   /** @type {import('../CredentialStore.js').CredentialStore} */
   #credentialStore;
@@ -98,6 +114,15 @@ export class VpsProviderRegistry {
   #cloudflareApi;
 
   /**
+   * Keygen-Funktion für den persistierten SSH-Host-Key (vps-host-key-stabilitaet AC1/AC4).
+   * Default: dieselbe ed25519-Erzeugung wie bei SSH-User-Keys (kein zweiter Keygen-Pfad).
+   * Injizierbar für Tests (deterministisches Fake-Keypair statt echtem ssh2-Keygen).
+   *
+   * @type {Function}
+   */
+  #hostKeygenFn;
+
+  /**
    * @param {object} options
    * @param {import('../CredentialStore.js').CredentialStore} options.credentialStore
    * @param {object} [options.adapters] - Injectable adapters for tests: { hetzner, ionos, hostinger }
@@ -105,8 +130,11 @@ export class VpsProviderRegistry {
    * @param {import('../cloudflare/CloudflareApi.js').CloudflareApi|null} [options.cloudflareApi]
    *   Cloudflare-API-Instanz für Tunnel-Provisionierung beim Create (S-152, AC5–AC10).
    *   Wenn null/undefined → Create läuft ohne Tunnel-Provisionierung (AC9-Variante: kein Crash).
+   * @param {Function} [options.hostKeygenFn]
+   *   Injizierbare ssh2-Keygen-Funktion für den persistierten SSH-Host-Key (vps-host-key-
+   *   stabilitaet AC1/AC4) — für Tests (deterministisches Fake-Keypair, kein echter Keygen-Call).
    */
-  constructor({ credentialStore, adapters, cloudInitBuilder, cloudflareApi } = {}) {
+  constructor({ credentialStore, adapters, cloudInitBuilder, cloudflareApi, hostKeygenFn } = {}) {
     this.#credentialStore = credentialStore;
 
     // Adapter-Instanzen aufbauen (injectable für Tests)
@@ -116,6 +144,8 @@ export class VpsProviderRegistry {
       ['ionos',     inj.ionos     ?? new IonosAdapter()],
       ['hostinger', inj.hostinger ?? new HostingerAdapter()],
     ]);
+
+    this.#hostKeygenFn = hostKeygenFn;
 
     // CloudInitBuilder: server-intern, nie client-controlled (ADR-009)
     this.#cloudInitBuilder = cloudInitBuilder ?? new CloudInitBuilder();
@@ -569,14 +599,21 @@ export class VpsProviderRegistry {
     const tunnelResult = await this.#provisionTunnel(params.name);
     // tunnelResult: { tunnelId, tunnelToken } | null (null = kein Tunnel, kein Fehler)
 
+    // vps-host-key-stabilitaet AC1/AC4 (Variante a, S-425): SSH-Host-Key je Ziel-Name lesen/
+    // erzeugen — bleibt über einen Delete+Create-Rebuild desselben Ziels stabil (der Server
+    // bootet dann mit GENAU diesem Host-Key statt einem neu generierten, siehe CloudInitBuilder).
+    const hostKey = await this.#provisionHostKeyForTarget(params.name);
+
     // ADR-009: cloud-init server-intern erzeugen — NIE vom Client übernehmen.
     // CloudInitBuilder.build() wirft CloudInitError(missing-ssh-key, 422) wenn
     // ein Public-Key fehlt — vor jedem Provider-Call (AC5/AC7).
     // Wenn tunnelToken vorhanden → cloudflared-Block wird eingebaut (vps-cloud-init-setup AC12).
+    // Wenn hostKey vorhanden → ssh_keys-Block wird eingebaut (vps-host-key-stabilitaet AC1/AC4).
     const userData = this.#cloudInitBuilder.build({
       name: params.name,
       sshPublicKeys,
       tunnelToken: tunnelResult?.tunnelToken, // undefined wenn kein Tunnel (rückwärtskompatibel)
+      sshHostKey: hostKey, // null wenn kein CredentialStore (Tests) — cloud-init generiert dann selbst
     });
 
     // S-152 AC8/AC10: Token im CredentialStore ablegen NACH Build (aber VOR Provider-Call).
@@ -742,6 +779,75 @@ export class VpsProviderRegistry {
       // Security: err.message enthält kein Token (CloudflareApi-Floor)
       throw err;
     }
+  }
+
+  // ── SSH-Host-Key-Persistenz (vps-host-key-stabilitaet AC1/AC4, Variante a, S-425) ──────
+
+  /**
+   * Liest den für dieses Ziel bereits persistierten SSH-Host-Key — oder erzeugt und
+   * persistiert bei erstem Aufruf einen neuen (Ed25519, OpenSSH-Format, dieselbe Erzeugung
+   * wie SSH-User-Keys, kein zweiter Keygen-Pfad).
+   *
+   * Zweck (AC1/AC3): der Host-Key bleibt über einen Delete()+Create()-Rebuild desselben
+   * Ziel-Namens hinweg identisch — CloudInitBuilder bootet den Server damit erneut mit
+   * GENAU diesem Schlüsselpaar statt einem neu generierten. Der bereits im dev-gui-Container
+   * gepinnte `known_hosts`-Eintrag (SshPtyManager) passt danach weiterhin → kein Mismatch,
+   * kein manuelles `ssh-keygen -R` nötig.
+   *
+   * AC2 (MITM-Schutz bleibt erhalten): dieser Mechanismus ändert NICHTS an der
+   * `StrictHostKeyChecking=accept-new`-Policy im SSH-Terminal — ein Host, der NICHT mit
+   * diesem persistierten Schlüssel gebootet wurde (manuelle Fremd-Rebuilds außerhalb von
+   * dev-gui, echter MITM), liefert weiterhin einen abweichenden Live-Host-Key → SSH lehnt
+   * die Verbindung wie bisher ab.
+   *
+   * Kein CredentialStore injiziert (nur in Tests ohne Store-Stub) → gibt null zurück;
+   * CloudInitBuilder baut dann ohne `ssh_keys:`-Block (cloud-init generiert wie bisher selbst).
+   *
+   * Nebenläufigkeits-Annahme (Review-Suggestion Iteration 1, S-425): zwei PARALLELE create()-
+   * Aufrufe für denselben Ziel-Namen würden beide "kein Key vorhanden" lesen und je einen
+   * eigenen Host-Key erzeugen + persistieren (Last-Write-Wins, kein Lock). Bewusst kein Lock
+   * eingeführt — ein Rebuild (delete()+create() desselben Ziels) ist im dev-gui-Bedienmodell
+   * ein manueller, sequenzieller Nutzer-Vorgang über die VPS-Verwaltung (kein automatisierter
+   * Parallel-Trigger für denselben Ziel-Namen); träte der Race dennoch auf, wäre die Folge
+   * lediglich ein weiterer (dann gewinnender) Host-Key-Wechsel — kein Sicherheitsproblem,
+   * da AC2 (MITM-Schutz) unabhängig davon über den Live-Host-Key-Abgleich greift.
+   *
+   * @param {string} vpsName - VPS-Name (roh, wird sanitisiert)
+   * @returns {Promise<{ publicKey: string, privateKey: string }|null>}
+   */
+  async #provisionHostKeyForTarget(vpsName) {
+    if (!this.#credentialStore) {
+      console.log('[VpsProviderRegistry] SSH-Host-Key nicht persistiert: kein CredentialStore');
+      return null;
+    }
+
+    const sanitized = sanitizeTunnelName(vpsName);
+    const key = HOST_KEY_RECORD_KEY(sanitized);
+
+    let existingRaw;
+    try {
+      existingRaw = await this.#credentialStore.getPlaintext(key);
+    } catch {
+      existingRaw = null;
+    }
+    if (existingRaw) {
+      try {
+        const parsed = JSON.parse(existingRaw);
+        if (parsed?.publicKey && parsed?.privateKey) {
+          return parsed;
+        }
+      } catch {
+        // Kein gültiges JSON → fällt durch zu Neugenerierung (defensiv, kein Crash)
+      }
+    }
+
+    // Kein bestehender Host-Key für dieses Ziel → einmalig erzeugen + persistieren.
+    // Security-Floor: der Private-Key verlässt diese Methode nur Richtung CredentialStore
+    // (verschlüsselt at rest) und CloudInitBuilder (server-intern, nie Client/Log/Response).
+    const generated = await generateEd25519Keypair(`devgui-vps-host/${sanitized}`, this.#hostKeygenFn);
+    await this.#credentialStore.set(key, JSON.stringify(generated));
+    console.log(`[VpsProviderRegistry] SSH-Host-Key für Ziel '${sanitized}' erzeugt + persistiert`);
+    return generated;
   }
 
   /**

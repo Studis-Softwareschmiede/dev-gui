@@ -8,6 +8,11 @@
  *   AC4  — CloudflareApi.deleteTunnel-Fehler → result:ok + cleanupError (best-effort)
  *   AC5  — Keine Tunnel-ID im Store → Cleanup übersprungen, result:ok
  *   AC6  — Kein cloudflareApi → Cleanup übersprungen, Store-Refs trotzdem entfernt
+ *
+ * Covers (vps-host-key-stabilitaet, S-425):
+ *   AC4  — delete() räumt den persistierten SSH-Host-Key-Datensatz NICHT auf (bewusst —
+ *           er muss über einen nachfolgenden Create() desselben Ziel-Namens hinweg stabil
+ *           bleiben, sonst würde ein Rebuild wieder einen neuen Host-Key erzeugen, AC1/AC3)
  */
 
 import { describe, it, expect } from '@jest/globals';
@@ -382,5 +387,26 @@ describe('VpsProviderRegistry — AC2: capabilities().delete', () => {
     const adapter = new HostingerAdapter();
     const result = await adapter.deleteServer('vm-1', 'some-token');
     expect(result.result).toBe('unsupported');
+  });
+});
+
+// ── AC4 (vps-host-key-stabilitaet): Host-Key-Datensatz überlebt delete() ──────
+
+describe('VpsProviderRegistry.delete — vps-host-key-stabilitaet AC4: Host-Key bleibt erhalten', () => {
+  it('delete() entfernt den persistierten Host-Key-Datensatz NICHT aus dem Store', async () => {
+    const store = makeCredentialStore({ tunnelId: 'tun-123', tunnelToken: 'tok-abc' });
+    // Host-Key-Datensatz für dasselbe Ziel vorbelegen (wie von create() persistiert)
+    store._storedEntries['credentials/misc/vps-my-server-host-key'] =
+      JSON.stringify({ publicKey: 'ssh-ed25519 AAAAHOST devgui-vps-host/my-server', privateKey: 'fake-private-key-material' });
+
+    const registry = makeRegistry({ credentialStore: store });
+    const result = await registry.delete('hetzner', 'srv-1', 'my-server');
+
+    expect(result.result).toBe('ok');
+    // Tunnel-Referenzen werden aufgeräumt (bestehendes Verhalten) ...
+    expect(store._storedEntries['credentials/misc/vps-my-server-tunnel-id']).toBeUndefined();
+    // ... der Host-Key-Datensatz bleibt UNANGETASTET (AC4 — sonst würde ein Rebuild wieder
+    // einen neuen Host-Key erzeugen und AC1/AC3 wären wieder verletzt).
+    expect(store._storedEntries['credentials/misc/vps-my-server-host-key']).toBeDefined();
   });
 });
