@@ -2,7 +2,7 @@ id: S-426
 parent: F-098
 title: 'Leerlauf-Nacht-Drain-Berichte aggregieren: Merge-on-persist + einmalige Kompaktion
   + Serien-Zeile in der Nacht-Laeufe-Ansicht'
-status: In Progress
+status: To Do
 priority: P2
 spec: docs/specs/drain-completion-report.md
 implements:
@@ -24,7 +24,7 @@ branch: feat/S-426-idle-report-aggregation
 pr: null
 blocked_reason: null
 created_at: '2026-07-26T19:39:30Z'
-updated_at: '2026-07-27T07:12:07Z'
+updated_at: '2026-07-27T07:30:52Z'
 done_at: null
 claimed_by: MacBook-Pro-von-Alexander.local-62443-1785136290-2810
 claimed_at: '2026-07-27T07:11:50Z'
