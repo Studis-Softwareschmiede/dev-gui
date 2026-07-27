@@ -152,6 +152,12 @@
  *         wird von dieser Datei nicht berührt — kein Regressionstest hier nötig
  *         (separate Datei/Codepfad, keine gemeinsame Vorab-Check-Funktion).
  *
+ * Covers (waiting-status-devgui, S-428):
+ *   AC4 — Regressions-Beleg: ein Projekt mit ausschließlich `Waiting`-Storys
+ *         hat KEIN Drain-Ziel (dieselbe `computeDrainState`-Logik wie AC1
+ *         oben, kein zweiter Regel-Satz) — wird wie Blocked/Done/nicht-ready
+ *         To Do vom Vorab-Skip übersprungen.
+ *
  * Strategy:
  *   - Pure Helper (`parseHHMM`, `isWithinWindow`, `computeWindowEndMs`,
  *     `clampMaxParallel`, `selectCandidateProjects`) direkt mit
@@ -641,6 +647,24 @@ describe('NightWatchScheduler — Vorab-Ziel-Check vor jedem Drain-Start (nightw
               { id: 'S-1', status: 'Done', ready: false },
               { id: 'S-2', status: 'Blocked', ready: false },
               { id: 'S-3', status: 'To Do', ready: false }, // nicht ready → kein Ziel
+            ],
+          },
+        ],
+      }),
+    ];
+    const { scheduler, projectDrain } = makeScheduler({ index });
+    const result = await scheduler.tick();
+    expect(result.started).toEqual([]);
+    expect(projectDrain.drainProject).not.toHaveBeenCalled();
+  });
+
+  it('AC4 (waiting-status-devgui, S-428) — Projekt mit ausschließlich Waiting-Storys hat kein Ziel → Skip', async () => {
+    const index = [
+      makeProject('proj-a', '/workspace/proj-a', {
+        features: [
+          {
+            stories: [
+              { id: 'S-1', status: 'Waiting', ready: false, wait_reason: 'wartet auf realen /adopt-Fall' },
             ],
           },
         ],

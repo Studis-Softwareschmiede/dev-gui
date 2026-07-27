@@ -149,17 +149,18 @@
  *          (Opazität/Fokusring in Quelle — jsdom hat keine Layout-Engine.)
  *
  * Covers (board-status-verworfen, S-242):
- *   AC1 — „Verworfen" rendert als 7. (letzte) Kanban-Spalte rechts neben „Done"
+ *   AC1 — „Verworfen" rendert als letzte Kanban-Spalte rechts neben „Done"
  *          (DOM-Reihenfolge Idee → … → Done → Verworfen); die Spalte ist auch
  *          bei 0 Verworfen-Stories im Feature vorhanden (Grid folgt
- *          STATUS_LIFECYCLE.length = 7).
+ *          STATUS_LIFECYCLE.length — seit waiting-status-devgui AC3 (S-428)
+ *          8 statt 7, siehe unten).
  *   AC2 — `StatusBadge` für „Verworfen" trägt einen eigenen, gedämpft-
  *          neutralen Grauton (background/color), der sich vom grünen
  *          „Done"-Ton unterscheidet; Bedeutung steht als sichtbarer Text
  *          „Verworfen" im Badge (nicht nur Farbe).
- *   AC3 — „Verworfen" ist die 7. Filter-Checkbox, beim Öffnen des Popovers
- *          vorausgewählt (Default alle 7 an); Button-Zähler „Status (7/7) ▾"
- *          bzw. „(n/7)" nach Deselektion; Deselektieren blendet die
+ *   AC3 — „Verworfen" ist eine Filter-Checkbox, beim Öffnen des Popovers
+ *          vorausgewählt (Default alle an); Button-Zähler „Status (N/N) ▾"
+ *          bzw. „(n/N)" nach Deselektion; Deselektieren blendet die
  *          Verworfen-Karten aus, erneutes Selektieren zeigt sie wieder — ohne
  *          Status-spezifische Sonderlogik (rein über STATUS_LIFECYCLE).
  *   AC4 — Eine Story mit status:'Verworfen' landet in der Verworfen-Spalte,
@@ -167,6 +168,15 @@
  *          unbekannte Status unverändert.
  *   AC5 — Regressions-Invariante (kein Frontend-Code-Delta, kein Test in
  *          dieser Datei): siehe test/ProjectDrain.test.js + test/boardReadyStatus.test.js.
+ *
+ * Covers (waiting-status-devgui, S-428):
+ *   AC3 — „Waiting" ist ein zusätzliches STATUS_LIFECYCLE-Element (8 Status
+ *          insgesamt statt 7 — die bestehenden n/7-Zähler-Assertions oben
+ *          wurden auf n/8 nachgezogen); rendert unter dem Anzeige-Label
+ *          „Wartet (extern)" (StatusBadge-Text + Filter-Checkbox-Text), NICHT
+ *          unter dem rohen Status „Waiting"; `wait_reason` erscheint als
+ *          Hinweiszeile (analog blocked_reason), fehlt es → Default-Text
+ *          „wartet extern".
  *
  * Covers (board-filter-feature-status-consistency, S-241):
  *   AC1 — Feature [To Do, Blocked], Filter „nur To Do" → Badge „To Do" statt
@@ -1152,7 +1162,7 @@ describe('studis-kanban-board-ux — AC5: Backend endpoint URLs', () => {
 // ── AC2 (studis-kanban-board-ux) — Status-Filter Default alle gewählt ─────────
 
 describe('studis-kanban-board-ux — AC2: Status-Filter Default alle ausgewählt', () => {
-  it('all 7 status checkboxes are checked by default (cockpit; ideen-inbox AC1 „Idee" + board-status-verworfen AC3 „Verworfen" hinzu)', async () => {
+  it('all 8 status checkboxes are checked by default (cockpit; ideen-inbox AC1 „Idee" + board-status-verworfen AC3 „Verworfen" + waiting-status-devgui AC3 „Waiting" hinzu)', async () => {
     globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
     const { container } = renderCockpit('project-alpha');
 
@@ -1167,7 +1177,7 @@ describe('studis-kanban-board-ux — AC2: Status-Filter Default alle ausgewählt
 
     await waitFor(() => {
       const checkboxes = container.querySelectorAll('#board-filter-status-group input[type="checkbox"]');
-      expect(checkboxes).toHaveLength(7);
+      expect(checkboxes).toHaveLength(8);
       for (const cb of checkboxes) {
         expect(cb.checked).toBe(true);
       }
@@ -1211,7 +1221,7 @@ describe('studis-kanban-board-ux — AC2: Status-Filter Default alle ausgewählt
     });
   });
 
-  it('status button label shows "Status (7/7) ▾" by default (cockpit; ideen-inbox AC1 + board-status-verworfen AC3, 7 statuses)', async () => {
+  it('status button label shows "Status (8/8) ▾" by default (cockpit; ideen-inbox AC1 + board-status-verworfen AC3 + waiting-status-devgui AC3, 8 statuses)', async () => {
     globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
     const { container } = renderCockpit('project-alpha');
 
@@ -1221,10 +1231,10 @@ describe('studis-kanban-board-ux — AC2: Status-Filter Default alle ausgewählt
 
     const btn = container.querySelector('[data-testid="status-filter-btn"]');
     expect(btn).toBeTruthy();
-    expect(btn.textContent).toMatch(/Status \(7\/7\)/);
+    expect(btn.textContent).toMatch(/Status \(8\/8\)/);
   });
 
-  it('status button label shows "Status (n/7) ▾" after deselect', async () => {
+  it('status button label shows "Status (n/8) ▾" after deselect', async () => {
     globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
     const { container } = renderCockpit('project-alpha');
 
@@ -1242,7 +1252,7 @@ describe('studis-kanban-board-ux — AC2: Status-Filter Default alle ausgewählt
     });
 
     const btn = container.querySelector('[data-testid="status-filter-btn"]');
-    expect(btn.textContent).toMatch(/Status \(6\/7\)/);
+    expect(btn.textContent).toMatch(/Status \(7\/8\)/);
   });
 
   it('ideen-inbox AC1: Status-Filter führt „Idee"-Checkbox, Default angehakt', async () => {
@@ -1262,7 +1272,7 @@ describe('studis-kanban-board-ux — AC2: Status-Filter Default alle ausgewählt
     expect(ideeCheckbox.checked).toBe(true);
   });
 
-  it('board-status-verworfen AC3: Status-Filter führt „Verworfen"-Checkbox als 7. Checkbox, Default angehakt', async () => {
+  it('board-status-verworfen AC3: Status-Filter führt „Verworfen"-Checkbox als letzte Checkbox, Default angehakt', async () => {
     globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
     const { container } = renderCockpit('project-alpha');
 
@@ -1334,8 +1344,8 @@ describe('studis-kanban-board-ux — AC3: Alle Status deselektiert → Hinweis',
       fireEvent.click(container.querySelector('[data-testid="status-filter-btn"]'));
     });
 
-    // Uncheck all 7
-    const statuses = ['idee', 'to-do', 'in-progress', 'blocked', 'in-review', 'done', 'verworfen'];
+    // Uncheck all 8
+    const statuses = ['idee', 'to-do', 'in-progress', 'blocked', 'waiting', 'in-review', 'done', 'verworfen'];
     for (const s of statuses) {
       await act(async () => {
         const cb = container.querySelector(`#board-filter-status-${s}`);
@@ -1468,12 +1478,12 @@ describe('studis-kanban-board-ux — AC7: „Alle/Keine"-Toggle', () => {
 
     await waitFor(() => {
       const checkboxes = container.querySelectorAll('#board-filter-status-group input[type="checkbox"]');
-      expect(checkboxes).toHaveLength(7);
+      expect(checkboxes).toHaveLength(8);
       for (const cb of checkboxes) {
         expect(cb.checked).toBe(true);
       }
     });
-    expect(container.querySelector('[data-testid="status-filter-btn"]').textContent).toMatch(/Status \(7\/7\)/);
+    expect(container.querySelector('[data-testid="status-filter-btn"]').textContent).toMatch(/Status \(8\/8\)/);
   });
 });
 
@@ -1510,7 +1520,7 @@ describe('studis-kanban-board-ux — AC4: Status-Filter als Popover', () => {
     expect(container.querySelector('[data-testid="status-popover"]')).toBeTruthy();
 
     const checkboxes = container.querySelectorAll('#board-filter-status-group input[type="checkbox"]');
-    expect(checkboxes).toHaveLength(7);
+    expect(checkboxes).toHaveLength(8);
   });
 
   it('second click closes popover (aria-expanded=false)', async () => {
@@ -1675,7 +1685,7 @@ describe('dev-gui-board-aggregator — AC4: Mount loads project in cockpit', () 
     });
   });
 
-  it('renders all seven status columns for a feature (AC4 status columns, cockpit; ideen-inbox AC1; board-status-verworfen AC1)', async () => {
+  it('renders all eight status columns for a feature (AC4 status columns, cockpit; ideen-inbox AC1; board-status-verworfen AC1; waiting-status-devgui AC3)', async () => {
     globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
     const { container } = renderCockpit('project-alpha');
 
@@ -1685,15 +1695,18 @@ describe('dev-gui-board-aggregator — AC4: Mount loads project in cockpit', () 
       expect(feature.querySelector('[data-status="To Do"]')).toBeTruthy();
       expect(feature.querySelector('[data-status="In Progress"]')).toBeTruthy();
       expect(feature.querySelector('[data-status="Blocked"]')).toBeTruthy();
+      // waiting-status-devgui AC3: Spalte rendert auch ohne eine einzige
+      // Waiting-Story im Feature (leere Spalte, kein Crash).
+      expect(feature.querySelector('[data-status="Waiting"]')).toBeTruthy();
       expect(feature.querySelector('[data-status="In Review"]')).toBeTruthy();
       expect(feature.querySelector('[data-status="Done"]')).toBeTruthy();
-      // board-status-verworfen AC1: 7. Spalte rendert auch ohne eine einzige
-      // Verworfen-Story im Feature (leere Spalte, kein Crash).
+      // board-status-verworfen AC1: letzte Spalte rendert auch ohne eine
+      // einzige Verworfen-Story im Feature (leere Spalte, kein Crash).
       expect(feature.querySelector('[data-status="Verworfen"]')).toBeTruthy();
     });
   });
 
-  it('ideen-inbox AC1 + board-status-verworfen AC1: „Idee"-Spalte rendert als erste, „Verworfen" als letzte (7.) Spalte rechts von „Done"', async () => {
+  it('ideen-inbox AC1 + board-status-verworfen AC1 + waiting-status-devgui AC3: „Idee"-Spalte rendert als erste, „Verworfen" als letzte Spalte rechts von „Done", „Waiting" direkt nach „Blocked"', async () => {
     globalThis.fetch = makeBoardFetch({ fullProjects: [PROJECT_A] });
     const { container } = renderCockpit('project-alpha');
 
@@ -1704,7 +1717,7 @@ describe('dev-gui-board-aggregator — AC4: Mount loads project in cockpit', () 
       expect(columnsList).toBeTruthy();
       const columns = Array.from(columnsList.querySelectorAll('[data-status]'));
       expect(columns.map((c) => c.getAttribute('data-status'))).toEqual([
-        'Idee', 'To Do', 'In Progress', 'Blocked', 'In Review', 'Done', 'Verworfen',
+        'Idee', 'To Do', 'In Progress', 'Blocked', 'Waiting', 'In Review', 'Done', 'Verworfen',
       ]);
     });
   });
@@ -4517,7 +4530,7 @@ describe('board-filter-feature-status-consistency (S-241)', () => {
       expect(container.querySelector('[data-story="S-100"]')).toBeTruthy();
     });
 
-    // Kein Filter angerührt → Default (alle 7 Status an, kein Label).
+    // Kein Filter angerührt → Default (alle 8 Status an, kein Label).
     expect(
       container.querySelector('[data-feature="F-100"] > div > [aria-label^="Status:"]').textContent,
     ).toBe('Blocked');
