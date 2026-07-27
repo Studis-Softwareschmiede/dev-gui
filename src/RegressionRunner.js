@@ -245,6 +245,22 @@
  * trotzdem; betroffene Testfälle skippen kontrolliert über ihr eigenes
  * `beforeAll` (Bestandsverhalten der Suite).
  *
+ * Test-Config-Provisionierung + REAL_SEND-Gate (docs/specs/regression-local-
+ * execution.md AC9/AC10, `local`-Pfad exklusiv): AC9 fordert nur das
+ * beobachtbare Ergebnis "Suite kann gruen werden" - die konkrete Provisionierungs-
+ * Mechanik ist projekt-/deployment-spezifisch (A3) und wird HIER NICHT
+ * erfunden. Der Runner-Beitrag ist der volle, ungefilterte Env-Durchgriff in
+ * `defaultRunPlaywright` (`{ ...process.env, ...secretEnv }`) - der Leitkanal,
+ * über den eine bereits im Referenzprojekt vorhandene suite-eigene
+ * Provisionierung (flashrescue: `setFeeViaSettings()`, gesteuert über
+ * `FLASHRESCUE_CONFIG_DIR`) greifen kann, ohne dass dev-gui App-Config-Schema-
+ * oder Mount-Wissen besitzen muss. AC10 (REAL_SEND-Gate NIE automatisch
+ * scharf): `REAL_SEND_GATE_ENV_VARS` wird IMMER aus der Kind-Env entfernt -
+ * selbst wenn geerbt (Operator-Shell-`process.env`) oder versehentlich im
+ * projekt-eigenen `.env.gpg` vorhanden; die dahinter liegenden Suite-Schritte
+ * skippen dadurch kontrolliert (Bestandsverhalten der Suite), der Rest der
+ * Suite bleibt unberührt.
+ *
  * @module RegressionRunner
  */
 
@@ -294,6 +310,19 @@ const ROLLOUT_NOT_READY_MESSAGE = 'Applikation lokal nicht gestartet';
 const DEPENDENCY_INSTALL_FAILURE_MESSAGE = 'Test-Dependencies konnten nicht installiert werden';
 const BROWSER_VERSION_MISMATCH_MESSAGE = 'Playwright-Version des Projekts passt nicht zum Image-Browser';
 const PORT_NOT_RESOLVABLE_MESSAGE = 'lokaler Test-Port nicht bestimmbar';
+
+/**
+ * Bekannte REAL_SEND-Gate-Env-Var(s) (regression-local-execution AC10):
+ * hart hinter dieser Variable liegende Suite-Schritte lösen echtes Mainnet-
+ * Gas aus. Der Runner MUSS sie in JEDEM Fall aus der Playwright-Kind-Env
+ * entfernen — unabhängig davon, ob sie zufällig im geerbten `process.env`
+ * des Runner-Prozesses (Operator-Shell) ODER im projekt-eigenen `.env.gpg`
+ * (`resolveLocalRegressionSecrets()`) vorkommt — der Runner selbst setzt sie
+ * NIE (`defaultRunPlaywright`, AC10). Aktuell der einzige bekannte Referenzfall
+ * (flashrescue); ein Set statt einer einzelnen Konstante hält die Stelle
+ * erweiterbar, ohne eine generische Muster-Erkennung zu erfinden.
+ */
+const REAL_SEND_GATE_ENV_VARS = new Set(['FLASHRESCUE_REGRESSION_ALLOW_REAL_SEND']);
 
 /** Standard-Indikator, den Docker in JEDEM Container automatisch anlegt (AC6) — kein neuer Env-/Config-Vertrag. */
 const DOCKERENV_PATH = '/.dockerenv';
@@ -576,14 +605,30 @@ export function summarizeCtrf(ctrf) {
 }
 
 /**
- * Default `npx playwright test`-Adapter (AC1/AC9): startet den Kindprozess als
- * Array-argv (kein Shell-String, security/R03), `cwd` = Projekt-Pfad. KEIN
+ * Default `npx playwright test`-Adapter (AC1/AC9/AC10): startet den Kindprozess
+ * als Array-argv (kein Shell-String, security/R03), `cwd` = Projekt-Pfad. KEIN
  * `claude`, KEIN API-Key, KEINE HeadlessRunnerCore-Env-Übernahme nötig — die
  * Kind-Env ist die volle Prozess-Env (Playwright/Node brauchen z.B. `PATH`,
  * `HOME`) plus die App-Secrets aus `secretEnv` (regression-local-execution
  * AC7/AC8, `resolveLocalRegressionSecrets()` — deklarativ aus dem projekt-
  * eigenen `.env.gpg`, nie aus Test-/Datendateien der Suite gelesen; dieser
  * Runner persistiert nichts davon).
+ *
+ * AC9 (Test-Config, A3 — Mechanik projekt-/deployment-spezifisch): der Runner
+ * erfindet KEIN eigenes Provisionierungs-Schema. Sein Beitrag ist genau dieser
+ * volle, ungefilterte Env-Durchgriff (`{ ...process.env, ...secretEnv }`) —
+ * er ist der Leitkanal, über den die bereits im Referenzprojekt vorhandene
+ * suite-eigene Provisionierung (flashrescue: `setFeeViaSettings()` schreibt
+ * `settings.json` in das durch `FLASHRESCUE_CONFIG_DIR` bestimmte, lokal
+ * gemountete Config-Verzeichnis) greifen KANN, ohne dass dev-gui Schema-/
+ * Mount-Wissen der Ziel-App besitzen muss. Ist die Provisionierung dennoch
+ * nicht herstellbar, scheitert die Suite als normaler CTRF-`failed`-Testfall
+ * (kein Runner-Fehlzustand, s. Spec „Edge-Cases").
+ *
+ * AC10 (REAL_SEND-Gate NIE automatisch scharf): `REAL_SEND_GATE_ENV_VARS`
+ * wird IMMER aus der Kind-Env entfernt — selbst wenn sie im geerbten
+ * `process.env` (Operator-Shell) oder versehentlich in `secretEnv`
+ * (`.env.gpg`) steht. Der Runner selbst setzt sie nie.
  *
  * @param {object} params
  * @param {string} params.projectPath
@@ -622,6 +667,12 @@ export function defaultRunPlaywright({
     // ausgewertet/geloggt — s. bestehende Kommentare).
     const env = { ...process.env, ...(secretEnv || {}) };
     if (baseUrl) env.REGRESSION_BASE_URL = baseUrl;
+
+    // AC10: REAL_SEND-Gate NIE scharf — hart entfernt, selbst wenn geerbt
+    // (Operator-Shell-`process.env`) oder versehentlich im projekt-eigenen
+    // `.env.gpg` (`secretEnv`) vorhanden. Die dahinter liegenden Suite-Schritte
+    // skippen dadurch kontrolliert; der Rest der Suite bleibt unberührt.
+    for (const gateVar of REAL_SEND_GATE_ENV_VARS) delete env[gateVar];
 
     try {
       child = spawnFn('npx', argv, {
