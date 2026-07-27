@@ -630,12 +630,17 @@ const regressionResultStore = new RegressionResultStore();
 // `vpsRegistry` = GETEILTE `VpsProviderRegistry`-Instanz (s.o.) — AC12:
 // best-effort Sicherheitsnetz-Sweep von `rtest-*`-Ressourcen nach jedem
 // `ephemeral-infra`-Lauf (kein zweiter VPS-Boundary-Pfad).
+// `deployLoginService` = GETEILTE `BitwardenDeployLoginService`-Instanz (s.o.) —
+// regression-local-execution AC7/AC8: App-Secrets für den `local`-Pfad werden
+// über DIESELBE Bitwarden-Boundary abgerufen wie die Deploy-Passphrasen-
+// Injektion (Item `env.gpg-passphrase-<projekt>`), kein zweiter bw-Login-Pfad.
 const regressionRunner = new RegressionRunner({
   auditStore,
   resultStore: regressionResultStore,
   dockerControl: localDockerControl,
   notifier: drainNotifier,
   vpsRegistry,
+  deployLoginService: bitwardenDeployLoginService,
 });
 
 // ── DrainJobRegistry (drain-restart-robustness AC1–AC4, S-281/S-282) ────────

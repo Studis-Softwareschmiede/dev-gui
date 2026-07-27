@@ -2,7 +2,7 @@
  * @file regressionRunRouter.test.js — HTTP-level tests for the deterministic
  * Regressionstest-Ausführen endpoints (docs/specs/regression-run.md).
  *
- * Covers (regression-run): AC1, AC2, AC3, AC5, AC7, AC8, AC9
+ * Covers (regression-run): AC1, AC2, AC3, AC5, AC7, AC8, AC9, AC13
  *
  *   AC1 — POST /api/projects/:slug/regression-run { scope } → 202 { runId,
  *         status:"running" } startet den REALEN RegressionRunner (eigenes
@@ -24,7 +24,11 @@
  *         (RegressionRunner.test.js AC7/AC8-Blöcke decken die Logik ab) —
  *         hier nur der HTTP-Vertrags-Durchreiche-Beweis (`runner.start`-Spy).
  *   AC9 — Ungültiger `scope` (fehlendes/unbekanntes typ, fehlende id bei
- *         bereich/verbund) → 400, KEIN Runner-Start.
+ *         bereich) → 400, KEIN Runner-Start.
+ *   AC13 — `{ typ: "verbund" }` OHNE `id` → 202 (kein 400 "invalid"/
+ *         missing-id mehr); `{ typ: "verbund", id: "..." }` bleibt ebenfalls
+ *         202 (tolerant/wirkungslos); `bereich` OHNE `id` bleibt weiterhin
+ *         400 (unverändert, Regressionsschutz gegen S-419-Über-Lockerung).
  *
  * Pattern: express + node:http auf Port 0 (Muster regressionDefineRouter.test.js/
  * projectDrainRouter.test.js). Slug→Pfad-Auflösung über injizierte
@@ -123,27 +127,50 @@ function buildApp(router, identity = { email: 'owner@example.com' }) {
   return app;
 }
 
+// regression-local-execution AC1/AC2/AC6: Diese Router-Tests interessieren
+// sich nicht für Test-Dependencies/Browser-Guard/Container-Adressierung —
+// alle drei Vorbedingungen werden per Default als "bestehbar"/hermetisch
+// gemockt (kein echter `npm ci`/Datei-Zugriff gegen den fiktiven
+// '/workspace/dev-gui'-Pfad dieser Fixtures; `isContainerDeployment:false`
+// verhindert, dass ein zufälliges `/.dockerenv` im CI-Laufkontext die
+// Adressierung auf `host.docker.internal` umschaltet, Review-Suggestion).
+const PASSING_PRECONDITIONS = {
+  ensureTestDependencies: async () => ({ ok: true }),
+  checkBrowserVersionGuard: async () => ({ ok: true }),
+  isContainerDeployment: () => false,
+};
+
 /** Ein RegressionRunner, der NIE terminiert (für Busy-/Lock-Tests). */
 function makeHangingRunner() {
   const readFile = jest.fn(async (p) => {
-    if (String(p).endsWith('.claude/profile.md')) throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+    if (String(p).endsWith('.claude/profile.md')) return 'preview_port: 8080\n';
     if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
     throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
   });
-  return new RegressionRunner({ runPlaywright: () => new Promise(() => {}), readFile });
+  return new RegressionRunner({
+    runPlaywright: () => new Promise(() => {}),
+    readFile,
+    probeReachability: async () => true,
+    ...PASSING_PRECONDITIONS,
+  });
 }
 
 /** Ein RegressionRunner, der sofort grün terminiert. */
 function makeGreenRunner() {
   const readFile = jest.fn(async (p) => {
-    if (String(p).endsWith('.claude/profile.md')) throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+    if (String(p).endsWith('.claude/profile.md')) return 'preview_port: 8080\n';
     if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
     if (String(p).endsWith('test-results/ctrf-report.json')) {
       return JSON.stringify({ results: { summary: { tests: 1, passed: 1, failed: 0 } } });
     }
     throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
   });
-  return new RegressionRunner({ runPlaywright: async () => ({ exitCode: 0 }), readFile });
+  return new RegressionRunner({
+    runPlaywright: async () => ({ exitCode: 0 }),
+    readFile,
+    probeReachability: async () => true,
+    ...PASSING_PRECONDITIONS,
+  });
 }
 
 describe('regressionRunRouter — regression-run.md', () => {
@@ -215,7 +242,7 @@ describe('regressionRunRouter — regression-run.md', () => {
       }
     });
 
-    it('400 bei fehlender id für bereich/verbund', async () => {
+    it('400 bei fehlender id für bereich', async () => {
       const runner = makeGreenRunner();
       const router = regressionRunRouter(runner, {
         slugResolver: makeSlugResolver(),
@@ -225,6 +252,39 @@ describe('regressionRunRouter — regression-run.md', () => {
       try {
         const res = await httpPost(server, '/api/projects/dev-gui/regression-run', { scope: { typ: 'bereich' } });
         expect(res.status).toBe(400);
+      } finally {
+        await closeServer(server);
+      }
+    });
+
+    it('AC13: 202 bei verbund OHNE id (kein 400 "invalid"/missing-id mehr)', async () => {
+      const runner = makeGreenRunner();
+      const router = regressionRunRouter(runner, {
+        slugResolver: makeSlugResolver(),
+        pathValidator: identityPathValidator(),
+      });
+      const server = await startServer(buildApp(router));
+      try {
+        const res = await httpPost(server, '/api/projects/dev-gui/regression-run', { scope: { typ: 'verbund' } });
+        expect(res.status).toBe(202);
+        expect(res.body.status).toBe('running');
+      } finally {
+        await closeServer(server);
+      }
+    });
+
+    it('AC13: 202 bei verbund MIT id (tolerant, wirkungslos)', async () => {
+      const runner = makeGreenRunner();
+      const router = regressionRunRouter(runner, {
+        slugResolver: makeSlugResolver(),
+        pathValidator: identityPathValidator(),
+      });
+      const server = await startServer(buildApp(router));
+      try {
+        const res = await httpPost(server, '/api/projects/dev-gui/regression-run', {
+          scope: { typ: 'verbund', id: 'irrelevant' },
+        });
+        expect(res.status).toBe(202);
       } finally {
         await closeServer(server);
       }

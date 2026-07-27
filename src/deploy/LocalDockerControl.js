@@ -28,6 +28,12 @@
  *   <image>:latest`), **niemals** `docker restart`. Wartet anschließend per
  *   Readiness-Polling (HTTP-Reachability) statt einer festen Sleep-Zeit.
  *
+ * Host-Port-Mapping eines FREMDEN, bereits laufenden Containers
+ * (`getMappedHostPort`, docs/specs/regression-local-execution.md AC6/A4):
+ *   liest `NetworkSettings.Ports` per `docker inspect` — für die deployment-
+ *   bewusste Ziel-Adressierung des `RegressionRunner` (Container-Betrieb),
+ *   NICHT nur für selbst gestartete Probe-/Preview-Container.
+ *
  * @module LocalDockerControl
  */
 
@@ -307,6 +313,39 @@ export class LocalDockerControl {
       if (reachable) return true;
       if (Date.now() >= deadline) return false;
       await sleep(READINESS_POLL_INTERVAL_MS);
+    }
+  }
+
+  /**
+   * Ermittelt den tatsächlich auf den Host gemappten Port eines LAUFENDEN
+   * Containers, der NICHT von dieser Klasse selbst gestartet wurde
+   * (docs/specs/regression-local-execution.md AC6/A4) — via `docker inspect`
+   * `NetworkSettings.Ports`, DASSELBE Feld, das `parseInspectData` für selbst
+   * gestartete Probe-Container bereits ausliest (kein zweiter Docker-Read-
+   * Pfad, nur ein zweiter Aufrufkontext). Liefert `null` bei JEDEM Fehler
+   * (Container nicht gefunden, kein Mapping für den angefragten Port, Docker
+   * nicht erreichbar) — der Aufrufer degradiert dann best-effort auf den
+   * statisch konfigurierten Port (kein Crash).
+   *
+   * @param {string} containerName
+   * @param {number} containerPort - Container-interner Port, dessen Host-Mapping gesucht wird.
+   * @returns {Promise<number|null>}
+   */
+  async getMappedHostPort(containerName, containerPort) {
+    try {
+      const out = await this.#exec(
+        'docker',
+        ['inspect', '--format', '{{json .NetworkSettings.Ports}}', containerName],
+        EXEC_TIMEOUT_MS,
+      );
+      const portsMap = JSON.parse(out.trim());
+      const mapping = portsMap?.[`${containerPort}/tcp`];
+      const hostPort = Array.isArray(mapping) && mapping.length > 0
+        ? parseInt(mapping[0].HostPort, 10)
+        : null;
+      return Number.isFinite(hostPort) ? hostPort : null;
+    } catch {
+      return null;
     }
   }
 

@@ -1,8 +1,83 @@
 /**
  * @file RegressionRunner.test.js — unit tests for the deterministic
- * Regressionstest-Runner + its pure helpers (docs/specs/regression-run.md).
+ * Regressionstest-Runner + its pure helpers (docs/specs/regression-run.md,
+ * docs/specs/regression-local-execution.md).
  *
- * Covers (regression-run): AC1, AC2, AC5, AC7, AC8, AC9, AC10, AC11, AC12
+ * Covers (regression-run): AC1, AC2, AC5, AC7, AC8, AC9, AC10, AC11, AC12, AC13
+ *
+ * Covers (regression-local-execution): AC1, AC2, AC3, AC4, AC5, AC6, AC7, AC8, AC9, AC10
+ *   AC1 — Test-Dependencies herstellen: `isPlaywrightTestInstalled` erkennt
+ *         in EINEM Check sowohl "node_modules fehlt" als auch "nur
+ *         @playwright/test fehlt"; `ensureTestDependencies` ist idempotent
+ *         (bereits installiert -> KEIN npm-Aufruf), führt sonst `npm ci`
+ *         (Fallback `npm install`) im Klon-Root aus (`defaultRunNpmCommand`,
+ *         Array-argv, kein Shell-String, security/R03, eigener Timeout);
+ *         schlagen beide fehl (oder ist @playwright/test danach immer noch
+ *         nicht auffindbar) -> `{ok:false, reason}` mit festem, secret-freiem
+ *         Grund (kein roher Prozess-Output). Am RegressionRunner selbst:
+ *         `ok:false` -> `status:'error'`, KEIN Playwright-Start.
+ *   AC2 — Browser-Versions-Guard: `checkBrowserVersionGuard` vergleicht die im
+ *         Klon installierte `@playwright/test`-Version
+ *         (`readInstalledPlaywrightVersion`) EXAKT gegen die Referenz-Version
+ *         des dev-gui-Image (`readImagePlaywrightVersion`, injectable
+ *         `resolvePackageJson`); Mismatch ODER nicht auflösbare Referenz ->
+ *         `{ok:false, reason:"Playwright-Version des Projekts passt nicht
+ *         zum Image-Browser"}" (konservativ, kein blinder Start). Am
+ *         RegressionRunner: `ok:false` -> `status:'precondition-error'`, KEIN
+ *         Playwright-Start.
+ *   AC3 — Reihenfolge-Garantie: Deps-Herstellung -> Browser-Guard -> lokale
+ *         Erreichbarkeitsprüfung -> `npx playwright test` (Call-Order-Test);
+ *         beide Prüfungen sind lokal-exklusiv (Spec-Scope dieser Story) —
+ *         der `ephemeral-infra`-Pfad ruft sie NICHT auf.
+ *   AC4 — Port-Leser tolerieren Whitespace+Inline-Kommentar nach der Zahl
+ *         (`readLocalPreviewPort`/`readLocalRolloutConfig`, dasselbe Muster,
+ *         Befund 2a) — z.B. `container_port: 8080    # EXPOSE aus dem
+ *         Dockerfile`.
+ *   AC5 — port=null degradiert NICHT mehr still: findet der Runner bei
+ *         `target: local` keinen Port, endet der Lauf SOFORT als
+ *         `precondition-error` "lokaler Test-Port nicht bestimmbar" — STATT
+ *         Erreichbarkeitsprüfung/Frisch-Ausrollen/REGRESSION_BASE_URL still
+ *         zu überspringen (Befund 2b). `runPlaywright` wird NICHT aufgerufen.
+ *   AC6 — Deployment-bewusste Ziel-Adressierung (`#resolveTargetAddress`):
+ *         Host-Betrieb -> `127.0.0.1:<port>` (Bestandsverhalten). Container-
+ *         Betrieb (`isContainerDeployment` liefert `true`) -> `host.docker.
+ *         internal:<hostPort>`, wobei `<hostPort>` bei auffindbarem `image` +
+ *         injizierter `dockerControl.getMappedHostPort()` aus dem
+ *         TATSÄCHLICHEN Docker-Port-Mapping stammt (Befund 3, `8080->8081`),
+ *         sonst best-effort auf den statisch gelesenen Port degradiert. Die
+ *         local-Erreichbarkeitsprüfung UND `REGRESSION_BASE_URL` nutzen
+ *         DIESELBE aufgelöste Adresse (EIN `probeReachability`-Aufruf mit
+ *         der Adresse als Argument).
+ *   AC7 — Sichere Injektion: `resolveLocalRegressionSecrets()` holt die
+ *         per-App-GPG-Passphrase über den injizierten `deployLoginService`
+ *         (Item `env.gpg-passphrase-<projekt>`, `fetchItemPassword`),
+ *         entschlüsselt `.env.gpg` im Klon per `gpg -d` (Passphrase NUR via
+ *         stdin, NIE argv) und mischt das Ergebnis AUSSCHLIESSLICH in die
+ *         Playwright-Kind-Env (`defaultRunPlaywright`s `secretEnv`) — NIE in
+ *         Log/Audit/WS/argv/Platte (Grep-/Verhaltens-prüfbar unten). Läuft nur
+ *         im `local`-Pfad, NACH der Erreichbarkeitsprüfung; `ephemeral-infra`
+ *         ruft `deployLoginService` NIE auf (Scope-Exklusivität).
+ *   AC8 — Deklarativ + kontrollierter Skip (A2): fehlt `.env.gpg` im Klon,
+ *         ist kein `deployLoginService` injiziert, schlägt der Bitwarden-
+ *         Abruf fehl (z.B. `item-not-found`) oder die Entschlüsselung —
+ *         `resolveLocalRegressionSecrets()` liefert `{}`, KEIN Runner-
+ *         Fehlzustand (`precondition-error`/`error`); der Playwright-Lauf
+ *         startet trotzdem (kontrollierter Suite-`test.skip`-Ausgang bleibt
+ *         Sache der Suite, nicht des Runners).
+ *   AC9 — Test-Config provisioniert (A3, Mechanik projekt-/deployment-
+ *         spezifisch, KEIN eigenes Runner-Schema): `defaultRunPlaywright`
+ *         gibt weiterhin JEDE beliebige `process.env`-Variable ungefiltert an
+ *         den Kindprozess durch (der Leitkanal für suite-eigene
+ *         Provisionierung wie flashrescue `FLASHRESCUE_CONFIG_DIR`) — nur die
+ *         AC10-REAL_SEND-Gate-Var(s) werden hart entfernt. Nicht unit-testbar
+ *         darüber hinaus (die eigentliche Provisionierung lebt im
+ *         Ziel-Projekt/dessen Suite, ausserhalb dieses Moduls) — AC11 verifiziert
+ *         das beobachtbare Ergebnis end-to-end (tester/Owner).
+ *   AC10 — REAL_SEND-Gate NIE automatisch scharf: `defaultRunPlaywright`
+ *         entfernt jede bekannte REAL_SEND-Gate-Env-Var
+ *         (`FLASHRESCUE_REGRESSION_ALLOW_REAL_SEND`) HART aus der Kind-Env —
+ *         sowohl wenn sie im geerbten `process.env` (Operator-Shell) als auch
+ *         wenn sie in `secretEnv` (versehentlich im `.env.gpg`) steht.
  *
  *   AC1 — RegressionRunner is an own boundary with an OWN, isolated
  *         ProjectJobLock instance (never a `claude`/agent process — grep-
@@ -64,6 +139,12 @@
  *         wörtlich in der Meldung, sonst generisch), OHNE Playwright-Start/
  *         local-Prüfung; kein deklariertes `target` (Suite nicht gefunden/
  *         Lesefehler) → konservativ `local`.
+ *   AC13 (S-419) — `validateScope`: `verbund` verlangt KEIN `id` mehr —
+ *         `{ typ: 'verbund' }` ist gültig (kein `missing-id`); ein
+ *         mitgesendetes `id` bleibt tolerant/wirkungslos (`scopeToTestPath`
+ *         ignoriert es weiterhin — EIN gemeinsamer Ordner für alle
+ *         Verbund-Suiten). `bereich` verlangt weiterhin ein nicht-leeres
+ *         `id`; `gesamt` ignoriert `id` unverändert (Bestandsverhalten).
  *   AC12 (S-362) — `ephemeral-infra`-Ausführungspfad: der Lauf startet
  *         Playwright (KEINE local-Erreichbarkeitsprüfung, KEIN Frisch-
  *         Ausrollen — beides AC5/AC7-exklusiv für `local`), setzt aber
@@ -132,12 +213,48 @@ import {
   buildUnsupportedTargetMessage,
   REGRESSION_TESTS_ROOT,
   CTRF_RESULT_PATH,
+  isPlaywrightTestInstalled,
+  ensureTestDependencies,
+  defaultRunNpmCommand,
+  readInstalledPlaywrightVersion,
+  readImagePlaywrightVersion,
+  checkBrowserVersionGuard,
+  isRunningInContainer,
+  defaultDecryptEnvGpg,
+  parseDotenvContent,
+  resolveLocalRegressionSecrets,
 } from '../src/RegressionRunner.js';
+import { gpgItemNameFor } from '../src/PerAppGpgProvisioningService.js';
 import { ProjectJobLock } from '../src/ProjectJobLock.js';
 
 /** Resolve pending microtasks so a fire-and-forget #runLifecycle settles. */
 function flush() {
   return new Promise((r) => setImmediate(r)).then(() => new Promise((r) => setImmediate(r)));
+}
+
+/**
+ * Test-Factory (regression-local-execution AC1/AC2/AC5/AC6): alle
+ * bestehenden (regression-run.md-)Tests interessieren sich NICHT für
+ * Test-Dependencies/Browser-Guard/Erreichbarkeit — per Default werden alle
+ * drei Vorbedingungen als "bestehbar" gemockt (kein echter `npm ci`/Datei-
+ * Zugriff auf `node_modules`, kein echter Netzwerk-`fetch` gegen
+ * `127.0.0.1:<port>`), damit die bestehenden `readFile`-Mocks (die diese
+ * neuen Pfade nicht kennen) nicht für jeden Testfall einzeln erweitert werden
+ * müssen. Tests, die AC1/AC2/AC5 SELBST prüfen, überschreiben diese Defaults
+ * explizit (letzter Spread gewinnt). `isContainerDeployment` defaultet
+ * hermetisch auf `false` (Host-Betrieb, Bestandsverhalten `127.0.0.1:<port>`)
+ * — unabhängig davon, ob der Test-Laufkontext selbst zufällig `/.dockerenv`
+ * sieht; Tests, die AC6 (Container-Betrieb) SELBST prüfen, überschreiben das
+ * explizit.
+ */
+function newRegressionRunner(overrides = {}) {
+  return new RegressionRunner({
+    ensureTestDependencies: async () => ({ ok: true }),
+    checkBrowserVersionGuard: async () => ({ ok: true }),
+    isContainerDeployment: () => false,
+    probeReachability: async () => true,
+    ...overrides,
+  });
 }
 
 describe('RegressionRunner — regression-run.md', () => {
@@ -155,8 +272,8 @@ describe('RegressionRunner — regression-run.md', () => {
     });
 
     it('hat eine EIGENE ProjectJobLock-Instanz per Default (getrennt vom Singleton)', () => {
-      const runnerA = new RegressionRunner({ runPlaywright: jest.fn() });
-      const runnerB = new RegressionRunner({ runPlaywright: jest.fn() });
+      const runnerA = newRegressionRunner({ runPlaywright: jest.fn() });
+      const runnerB = newRegressionRunner({ runPlaywright: jest.fn() });
       // Start auf runnerA blockiert runnerB NICHT (unterschiedliche Lock-Instanzen).
       const resA = runnerA.start('/ws/proj', 'proj', { typ: 'gesamt' });
       expect(resA.ok).toBe(true);
@@ -170,10 +287,11 @@ describe('RegressionRunner — regression-run.md', () => {
       const resolvers = new Map();
       const runPlaywright = jest.fn(({ projectPath }) => new Promise((r) => { resolvers.set(projectPath, r); }));
       const readFile = jest.fn(async (p) => {
+        if (String(p).endsWith('.claude/profile.md')) return 'preview_port: 8080\n';
         if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
-        throw Object.assign(new Error('enoent'), { code: 'ENOENT' }); // kein profile.md → kein local-Check
+        throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
       });
-      const runner = new RegressionRunner({ runPlaywright, readFile });
+      const runner = newRegressionRunner({ runPlaywright, readFile });
 
       const res1 = runner.start('/ws/proj', 'proj', { typ: 'gesamt' });
       expect(res1.ok).toBe(true);
@@ -216,11 +334,27 @@ describe('RegressionRunner — regression-run.md', () => {
       expect(validateScope({ typ: 'gesamt' })).toEqual({ ok: true, scope: { typ: 'gesamt' } });
     });
 
-    it('lehnt fehlendes/leeres scope, unbekanntes typ, fehlende id bei bereich/verbund ab', () => {
+    it('lehnt fehlendes/leeres scope, unbekanntes typ, fehlende id bei bereich ab', () => {
       expect(validateScope(null)).toEqual({ ok: false, reason: 'invalid' });
       expect(validateScope({ typ: 'unknown' })).toEqual({ ok: false, reason: 'invalid-typ' });
       expect(validateScope({ typ: 'bereich', id: '' })).toEqual({ ok: false, reason: 'missing-id' });
       expect(validateScope({ typ: 'bereich' })).toEqual({ ok: false, reason: 'missing-id' });
+    });
+
+    it('AC13: akzeptiert verbund OHNE id als gültig (kein missing-id mehr)', () => {
+      expect(validateScope({ typ: 'verbund' })).toEqual({ ok: true, scope: { typ: 'verbund' } });
+      expect(validateScope({ typ: 'verbund', id: '' })).toEqual({ ok: true, scope: { typ: 'verbund' } });
+    });
+
+    it('AC13: verbund MIT id bleibt gültig, aber wirkungslos (scopeToTestPath ignoriert sie)', () => {
+      expect(validateScope({ typ: 'verbund', id: 'infra-kette' })).toEqual({
+        ok: true,
+        scope: { typ: 'verbund', id: 'infra-kette' },
+      });
+      expect(scopeToTestPath(validateScope({ typ: 'verbund', id: 'infra-kette' }).scope)).toBe(
+        `${REGRESSION_TESTS_ROOT}/verbund`
+      );
+      expect(scopeToTestPath(validateScope({ typ: 'verbund' }).scope)).toBe(`${REGRESSION_TESTS_ROOT}/verbund`);
     });
 
     it('scopeToTestPath: bereich -> tests/regression/<id>, verbund -> tests/regression/verbund, gesamt -> tests/regression', () => {
@@ -255,15 +389,21 @@ describe('RegressionRunner — regression-run.md', () => {
 
   // ── probeLocalReachability (pure, injizierter fetchFn) ─────────────────────
   describe('probeLocalReachability', () => {
-    it('true bei jedem erfolgreichen fetch (jeder Statuscode zählt)', async () => {
+    it('true bei jedem erfolgreichen fetch (jeder Statuscode zählt) — nimmt eine bereits aufgelöste host:port-Adresse (AC6)', async () => {
       const fetchFn = jest.fn(async () => true);
-      expect(await probeLocalReachability(8080, { fetchFn })).toBe(true);
+      expect(await probeLocalReachability('127.0.0.1:8080', { fetchFn })).toBe(true);
       expect(fetchFn).toHaveBeenCalledWith('http://127.0.0.1:8080/', expect.any(Number));
     });
 
     it('false bei Timeout/Refused (fetch wirft)', async () => {
       const fetchFn = jest.fn(async () => { throw new Error('ECONNREFUSED'); });
-      expect(await probeLocalReachability(8080, { fetchFn })).toBe(false);
+      expect(await probeLocalReachability('127.0.0.1:8080', { fetchFn })).toBe(false);
+    });
+
+    it('AC6: Container-Adresse (host.docker.internal) wird unverändert an fetch durchgereicht', async () => {
+      const fetchFn = jest.fn(async () => true);
+      expect(await probeLocalReachability('host.docker.internal:8081', { fetchFn })).toBe(true);
+      expect(fetchFn).toHaveBeenCalledWith('http://host.docker.internal:8081/', expect.any(Number));
     });
   });
 
@@ -302,6 +442,255 @@ describe('RegressionRunner — regression-run.md', () => {
     });
   });
 
+  // ── regression-local-execution AC1: Test-Dependencies herstellen ──────────
+  describe('isPlaywrightTestInstalled + ensureTestDependencies + defaultRunNpmCommand (regression-local-execution AC1)', () => {
+    it('isPlaywrightTestInstalled: true wenn node_modules/@playwright/test/package.json lesbar ist, sonst false', async () => {
+      const readFileOk = jest.fn(async () => '{"version":"1.61.1"}');
+      expect(await isPlaywrightTestInstalled('/ws/proj', { readFile: readFileOk })).toBe(true);
+      expect(readFileOk).toHaveBeenCalledWith(expect.stringContaining('node_modules/@playwright/test/package.json'), 'utf8');
+
+      const readFileMissing = jest.fn(async () => { throw Object.assign(new Error('enoent'), { code: 'ENOENT' }); });
+      expect(await isPlaywrightTestInstalled('/ws/proj', { readFile: readFileMissing })).toBe(false);
+    });
+
+    it('ensureTestDependencies: bereits installiert -> KEIN npm-Aufruf (Idempotenz-NFR)', async () => {
+      const readFile = jest.fn(async () => '{"version":"1.61.1"}');
+      const runNpmCommand = jest.fn();
+      const outcome = await ensureTestDependencies('/ws/proj', { readFile, runNpmCommand });
+      expect(outcome).toEqual({ ok: true });
+      expect(runNpmCommand).not.toHaveBeenCalled();
+    });
+
+    it('fehlt node_modules/@playwright/test -> npm ci wird im Klon-Root ausgeführt, danach als installiert erkannt', async () => {
+      let installed = false;
+      const readFile = jest.fn(async () => {
+        if (!installed) throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+        return '{"version":"1.61.1"}';
+      });
+      const runNpmCommand = jest.fn(async ({ projectPath, args }) => {
+        expect(projectPath).toBe('/ws/proj');
+        expect(args).toEqual(['ci']);
+        installed = true;
+        return { exitCode: 0 };
+      });
+      const outcome = await ensureTestDependencies('/ws/proj', { readFile, runNpmCommand });
+      expect(outcome).toEqual({ ok: true });
+      expect(runNpmCommand).toHaveBeenCalledTimes(1);
+    });
+
+    it('npm ci schlägt fehl -> Fallback npm install; erfolgreich -> ok:true', async () => {
+      let installed = false;
+      const readFile = jest.fn(async () => {
+        if (!installed) throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+        return '{"version":"1.61.1"}';
+      });
+      const calls = [];
+      const runNpmCommand = jest.fn(async ({ args }) => {
+        calls.push(args);
+        if (args[0] === 'ci') return { exitCode: 1 };
+        installed = true;
+        return { exitCode: 0 };
+      });
+      const outcome = await ensureTestDependencies('/ws/proj', { readFile, runNpmCommand });
+      expect(outcome).toEqual({ ok: true });
+      expect(calls).toEqual([['ci'], ['install']]);
+    });
+
+    it('npm ci UND npm install schlagen fehl -> ok:false mit secret-freiem, festem Grund', async () => {
+      const readFile = jest.fn(async () => { throw Object.assign(new Error('enoent'), { code: 'ENOENT' }); });
+      const runNpmCommand = jest.fn(async () => ({ exitCode: 1 }));
+      const outcome = await ensureTestDependencies('/ws/proj', { readFile, runNpmCommand });
+      expect(outcome).toEqual({ ok: false, reason: 'Test-Dependencies konnten nicht installiert werden' });
+      // Secret-Floor: kein roher Prozess-Output in der Diagnose.
+      expect(outcome.reason).not.toMatch(/npm ERR|stack|Error:/);
+    });
+
+    it('npm install "gelingt" laut Exit-Code, @playwright/test danach TROTZDEM nicht auffindbar -> ok:false', async () => {
+      const readFile = jest.fn(async () => { throw Object.assign(new Error('enoent'), { code: 'ENOENT' }); });
+      const runNpmCommand = jest.fn(async () => ({ exitCode: 0 }));
+      const outcome = await ensureTestDependencies('/ws/proj', { readFile, runNpmCommand });
+      expect(outcome).toEqual({ ok: false, reason: 'Test-Dependencies konnten nicht installiert werden' });
+    });
+
+    it('defaultRunNpmCommand: spawnt npm als Array-argv (kein Shell-String, security/R03), cwd=projectPath', async () => {
+      const emit = {};
+      const fakeChild = {
+        stdout: { on: () => {} },
+        stderr: { on: () => {} },
+        on: (event, cb) => { emit[event] = cb; },
+        kill: jest.fn(),
+      };
+      const spawnFn = jest.fn(() => fakeChild);
+      const promise = defaultRunNpmCommand({ projectPath: '/ws/proj', args: ['ci'], spawnFn });
+      emit.close(0);
+      const result = await promise;
+      expect(result).toEqual({ exitCode: 0 });
+      expect(spawnFn).toHaveBeenCalledWith('npm', ['ci'], expect.objectContaining({ cwd: '/ws/proj' }));
+    });
+
+    it('defaultRunNpmCommand: Timeout killt den Kindprozess und liefert timedOut:true', async () => {
+      jest.useFakeTimers();
+      const fakeChild = { stdout: { on: () => {} }, stderr: { on: () => {} }, on: () => {}, kill: jest.fn() };
+      const spawnFn = jest.fn(() => fakeChild);
+      const promise = defaultRunNpmCommand({ projectPath: '/ws/proj', args: ['ci'], timeoutMs: 100, spawnFn });
+      jest.advanceTimersByTime(101);
+      const result = await promise;
+      expect(fakeChild.kill).toHaveBeenCalledWith('SIGTERM');
+      expect(result).toEqual({ exitCode: null, timedOut: true });
+      jest.useRealTimers();
+    });
+  });
+
+  // ── regression-local-execution AC2: Browser-Versions-Guard ────────────────
+  describe('readInstalledPlaywrightVersion + readImagePlaywrightVersion + checkBrowserVersionGuard (regression-local-execution AC2)', () => {
+    it('readInstalledPlaywrightVersion: liest die Version aus dem Klon-package.json', async () => {
+      const readFile = jest.fn(async () => '{"version":"1.61.1"}');
+      expect(await readInstalledPlaywrightVersion('/ws/proj', { readFile })).toBe('1.61.1');
+    });
+
+    it('readInstalledPlaywrightVersion: null bei fehlender Datei/kein version-Feld (kein Crash)', async () => {
+      const readFileMissing = jest.fn(async () => { throw Object.assign(new Error('enoent'), { code: 'ENOENT' }); });
+      expect(await readInstalledPlaywrightVersion('/ws/proj', { readFile: readFileMissing })).toBeNull();
+
+      const readFileNoVersion = jest.fn(async () => '{}');
+      expect(await readInstalledPlaywrightVersion('/ws/proj', { readFile: readFileNoVersion })).toBeNull();
+    });
+
+    it('readImagePlaywrightVersion: liest die Referenz-Version über die injizierte resolvePackageJson-Funktion', async () => {
+      const resolvePackageJson = jest.fn(() => '/app/node_modules/@playwright/test/package.json');
+      const readFile = jest.fn(async () => '{"version":"1.61.1"}');
+      const version = await readImagePlaywrightVersion({ resolvePackageJson, readFile });
+      expect(version).toBe('1.61.1');
+      expect(readFile).toHaveBeenCalledWith('/app/node_modules/@playwright/test/package.json', 'utf8');
+    });
+
+    it('readImagePlaywrightVersion: null bei nicht auflösbarem Pfad (kein Crash)', async () => {
+      const resolvePackageJson = jest.fn(() => { throw new Error('MODULE_NOT_FOUND'); });
+      expect(await readImagePlaywrightVersion({ resolvePackageJson })).toBeNull();
+    });
+
+    it('checkBrowserVersionGuard: Klon-Version === Referenz-Version -> ok:true', async () => {
+      const readFile = jest.fn(async () => '{"version":"1.61.1"}');
+      const readImageVersion = jest.fn(async () => '1.61.1');
+      const outcome = await checkBrowserVersionGuard('/ws/proj', { readFile, readImageVersion });
+      expect(outcome).toEqual({ ok: true });
+    });
+
+    it('checkBrowserVersionGuard: Klon-Version !== Referenz-Version -> precondition-error-Grund, secret-frei', async () => {
+      const readFile = jest.fn(async () => '{"version":"1.40.0"}');
+      const readImageVersion = jest.fn(async () => '1.61.1');
+      const outcome = await checkBrowserVersionGuard('/ws/proj', { readFile, readImageVersion });
+      expect(outcome).toEqual({ ok: false, reason: 'Playwright-Version des Projekts passt nicht zum Image-Browser' });
+    });
+
+    it('checkBrowserVersionGuard: Referenz-Version nicht auflösbar -> konservativ Mismatch (kein blinder Start)', async () => {
+      const readFile = jest.fn(async () => '{"version":"1.61.1"}');
+      const readImageVersion = jest.fn(async () => null);
+      const outcome = await checkBrowserVersionGuard('/ws/proj', { readFile, readImageVersion });
+      expect(outcome.ok).toBe(false);
+    });
+  });
+
+  // ── regression-local-execution AC1/AC2/AC3: in #runLifecycle verdrahtet ───
+  describe('RegressionRunner#start — Vorbedingungen VOR npx playwright test (regression-local-execution AC1/AC2/AC3)', () => {
+    function readFileScaffoldAndPort() {
+      return jest.fn(async (p) => {
+        if (String(p).endsWith('.claude/profile.md')) return 'preview_port: 8080\n';
+        if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
+        throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+      });
+    }
+
+    it('AC1: ensureTestDependencies liefert ok:false -> status:error, secret-freier Grund, KEIN Playwright-Start', async () => {
+      const runPlaywright = jest.fn();
+      const ensureTestDependenciesMock = jest.fn(async () => ({ ok: false, reason: 'Test-Dependencies konnten nicht installiert werden' }));
+      const runner = newRegressionRunner({
+        runPlaywright,
+        readFile: readFileScaffoldAndPort(),
+        ensureTestDependencies: ensureTestDependenciesMock,
+      });
+
+      const { runId } = runner.start('/ws/proj', 'proj', { typ: 'gesamt' });
+      await flush();
+
+      const run = runner.getRun(runId);
+      expect(run.status).toBe('error');
+      expect(run.reason).toBe('Test-Dependencies konnten nicht installiert werden');
+      expect(runPlaywright).not.toHaveBeenCalled();
+      expect(runner.isRunning('/ws/proj')).toBe(false);
+    });
+
+    it('AC2: checkBrowserVersionGuard liefert ok:false -> status:precondition-error, secret-freier Grund, KEIN Playwright-Start', async () => {
+      const runPlaywright = jest.fn();
+      const checkBrowserVersionGuardMock = jest.fn(async () => ({ ok: false, reason: 'Playwright-Version des Projekts passt nicht zum Image-Browser' }));
+      const runner = newRegressionRunner({
+        runPlaywright,
+        readFile: readFileScaffoldAndPort(),
+        checkBrowserVersionGuard: checkBrowserVersionGuardMock,
+      });
+
+      const { runId } = runner.start('/ws/proj', 'proj', { typ: 'gesamt' });
+      await flush();
+
+      const run = runner.getRun(runId);
+      expect(run.status).toBe('precondition-error');
+      expect(run.reason).toBe('Playwright-Version des Projekts passt nicht zum Image-Browser');
+      expect(runPlaywright).not.toHaveBeenCalled();
+      expect(runner.isRunning('/ws/proj')).toBe(false);
+    });
+
+    it('AC3: Reihenfolge — Deps-Herstellung, dann Browser-Guard, dann erst die lokale Erreichbarkeitsprüfung/Playwright-Start', async () => {
+      const callOrder = [];
+      const ensureTestDependenciesMock = jest.fn(async () => { callOrder.push('deps'); return { ok: true }; });
+      const checkBrowserVersionGuardMock = jest.fn(async () => { callOrder.push('browser'); return { ok: true }; });
+      const probeReachability = jest.fn(async () => { callOrder.push('reachability'); return true; });
+      const runPlaywright = jest.fn(async () => { callOrder.push('playwright'); return { exitCode: 0 }; });
+      const readFile = jest.fn(async (p) => {
+        if (String(p).endsWith('.claude/profile.md')) return 'preview_port: 8080\n';
+        if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
+        if (String(p).endsWith(CTRF_RESULT_PATH)) return JSON.stringify({ results: { summary: { tests: 1, passed: 1, failed: 0 } } });
+        throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+      });
+      const runner = newRegressionRunner({
+        runPlaywright,
+        readFile,
+        probeReachability,
+        ensureTestDependencies: ensureTestDependenciesMock,
+        checkBrowserVersionGuard: checkBrowserVersionGuardMock,
+      });
+
+      const { runId } = runner.start('/ws/proj', 'proj', { typ: 'gesamt' });
+      await flush();
+
+      expect(callOrder).toEqual(['deps', 'browser', 'reachability', 'playwright']);
+      expect(runner.getRun(runId).status).toBe('passed');
+    });
+
+    it('AC3: nicht-lokales Testobjekt (ephemeral-infra) ruft weder ensureTestDependencies noch checkBrowserVersionGuard auf (Spec-Scope: lokal-exklusiv)', async () => {
+      const ensureTestDependenciesMock = jest.fn(async () => ({ ok: true }));
+      const checkBrowserVersionGuardMock = jest.fn(async () => ({ ok: true }));
+      const readFile = jest.fn(async (p) => {
+        if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
+        throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+      });
+      const readSuites = jest.fn(async () => ({ suites: [{ scope: { typ: 'bereich', id: 'vps' }, target: 'ephemeral-infra' }] }));
+      const runPlaywright = jest.fn(async () => ({ exitCode: 0 }));
+      const runner = newRegressionRunner({
+        runPlaywright,
+        readFile,
+        readSuites,
+        ensureTestDependencies: ensureTestDependenciesMock,
+        checkBrowserVersionGuard: checkBrowserVersionGuardMock,
+      });
+
+      runner.start('/ws/proj', 'proj', { typ: 'bereich', id: 'vps' });
+      await flush();
+
+      expect(ensureTestDependenciesMock).not.toHaveBeenCalled();
+      expect(checkBrowserVersionGuardMock).not.toHaveBeenCalled();
+    });
+  });
+
   // ── AC5: local-Erreichbarkeitsprüfung VOR dem Lauf ─────────────────────────
   describe('AC5 — local-Erreichbarkeitsprüfung (Vorbedingungs-Fehler statt roter Tests)', () => {
     it('nicht erreichbar -> precondition-error, KEIN Playwright-Start', async () => {
@@ -312,7 +701,7 @@ describe('RegressionRunner — regression-run.md', () => {
         throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
       });
       const probeReachability = jest.fn(async () => false);
-      const runner = new RegressionRunner({ runPlaywright, readFile, probeReachability });
+      const runner = newRegressionRunner({ runPlaywright, readFile, probeReachability });
 
       const { runId } = runner.start('/ws/proj', 'proj', { typ: 'gesamt' });
       await flush();
@@ -320,26 +709,76 @@ describe('RegressionRunner — regression-run.md', () => {
       const run = runner.getRun(runId);
       expect(run.status).toBe('precondition-error');
       expect(run.reason).toBe('Applikation lokal nicht gestartet');
+      // AC6: Host-Betrieb (Default-Factory: isContainerDeployment -> false) —
+      // die Erreichbarkeitsprüfung bekommt dieselbe Adresse wie REGRESSION_BASE_URL.
+      expect(probeReachability).toHaveBeenCalledWith('127.0.0.1:8080');
       expect(runPlaywright).not.toHaveBeenCalled();
       expect(runner.isRunning('/ws/proj')).toBe(false); // Lock freigegeben
     });
 
-    it('kein Port auffindbar (kein profile.md) -> kein local-Check, Lauf läuft trotzdem weiter', async () => {
-      const runPlaywright = jest.fn(async () => ({ exitCode: 0 }));
+    it('kein Port auffindbar (kein profile.md) -> SOFORTIGER precondition-error "lokaler Test-Port nicht bestimmbar", KEIN Playwright-Start (Befund 2b)', async () => {
+      const runPlaywright = jest.fn();
+      const probeReachability = jest.fn(); // darf NIE aufgerufen werden
       const readFile = jest.fn(async (p) => {
         if (String(p).endsWith('.claude/profile.md')) throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
         if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
-        if (String(p).endsWith(CTRF_RESULT_PATH)) return JSON.stringify({ results: { summary: { tests: 1, passed: 1, failed: 0 } } });
         throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
       });
-      const runner = new RegressionRunner({ runPlaywright, readFile });
+      const runner = newRegressionRunner({ runPlaywright, readFile, probeReachability });
 
       const { runId } = runner.start('/ws/proj', 'proj', { typ: 'gesamt' });
       await flush();
 
-      expect(runPlaywright).toHaveBeenCalledTimes(1);
       const run = runner.getRun(runId);
-      expect(run.status).toBe('passed');
+      expect(run.status).toBe('precondition-error');
+      expect(run.reason).toBe('lokaler Test-Port nicht bestimmbar');
+      expect(probeReachability).not.toHaveBeenCalled();
+      expect(runPlaywright).not.toHaveBeenCalled();
+      expect(runner.isRunning('/ws/proj')).toBe(false); // Lock freigegeben
+    });
+
+    it('kein Port auffindbar -> resultStore.record() mit status:"precondition-error" + secret-freiem reason (AC10-Diagnose-Pflicht bleibt gewahrt)', async () => {
+      const record = jest.fn(async (i) => i);
+      const readFile = jest.fn(async (p) => {
+        if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
+        throw Object.assign(new Error('enoent'), { code: 'ENOENT' }); // kein profile.md
+      });
+      const runner = newRegressionRunner({ runPlaywright: jest.fn(), readFile, resultStore: { record } });
+
+      const { runId } = runner.start('/ws/proj', 'proj', { typ: 'gesamt' });
+      await flush();
+
+      expect(runner.getRun(runId).status).toBe('precondition-error');
+      expect(record.mock.calls[0][0]).toMatchObject({
+        status: 'precondition-error',
+        ctrf: null,
+        counts: { passed: 0, failed: 0, total: 0 },
+        reason: 'lokaler Test-Port nicht bestimmbar',
+      });
+    });
+  });
+
+  // ── AC4: Port-Leser robust gegen Inline-Kommentare (Befund 2a) ─────────────
+  describe('AC4 — readLocalPreviewPort/readLocalRolloutConfig tolerieren Inline-Kommentare', () => {
+    it('readLocalPreviewPort: preview_port mit Whitespace+Inline-Kommentar wird korrekt gelesen', async () => {
+      const readFile = jest.fn(async () => 'preview_port: 8080    # Host-Port des Preview-Containers\n');
+      expect(await readLocalPreviewPort('/ws/proj', { readFile })).toBe(8080);
+    });
+
+    it('readLocalPreviewPort: container_port-Fallback mit Inline-Kommentar wird korrekt gelesen', async () => {
+      const readFile = jest.fn(async () => 'container_port: 8080    # EXPOSE aus dem Dockerfile\n');
+      expect(await readLocalPreviewPort('/ws/proj', { readFile })).toBe(8080);
+    });
+
+    it('readLocalRolloutConfig: container_port mit Inline-Kommentar wird korrekt gelesen', async () => {
+      const readFile = jest.fn(async () => 'image: ghcr.io/org/app\ncontainer_port: 8080    # EXPOSE aus dem Dockerfile\n');
+      const cfg = await readLocalRolloutConfig('/ws/proj', { readFile });
+      expect(cfg).toEqual({ image: 'ghcr.io/org/app', containerPort: 8080 });
+    });
+
+    it('ein Inline-Kommentar OHNE führenden Whitespace-Sprung (Tab statt Space) wird ebenfalls toleriert', async () => {
+      const readFile = jest.fn(async () => 'preview_port: 8080\t# Tab statt Space\n');
+      expect(await readLocalPreviewPort('/ws/proj', { readFile })).toBe(8080);
     });
   });
 
@@ -422,7 +861,7 @@ describe('RegressionRunner — regression-run.md', () => {
         return true;
       });
       const runPlaywright = jest.fn(async () => ({ exitCode: 0 }));
-      const runner = new RegressionRunner({
+      const runner = newRegressionRunner({
         runPlaywright,
         readFile: readFileWithProfile(),
         probeReachability,
@@ -451,7 +890,7 @@ describe('RegressionRunner — regression-run.md', () => {
         return { ready: true, durationMs: 10 };
       });
       const readFile = readFileWithProfile({ image: 'ghcr.io/studis-softwareschmiede/Sandbox-2' });
-      const runner = new RegressionRunner({
+      const runner = newRegressionRunner({
         runPlaywright: jest.fn(async () => ({ exitCode: 0 })),
         readFile,
         probeReachability: jest.fn(async () => true),
@@ -469,7 +908,7 @@ describe('RegressionRunner — regression-run.md', () => {
 
     it('freshRollout:false (Default) -> pullAndRecreate() wird NICHT aufgerufen', async () => {
       const pullAndRecreate = jest.fn(async () => ({ ready: true, durationMs: 1 }));
-      const runner = new RegressionRunner({
+      const runner = newRegressionRunner({
         runPlaywright: jest.fn(async () => ({ exitCode: 0 })),
         readFile: readFileWithProfile(),
         probeReachability: jest.fn(async () => true),
@@ -490,7 +929,7 @@ describe('RegressionRunner — regression-run.md', () => {
         if (String(p).endsWith(CTRF_RESULT_PATH)) return JSON.stringify({ results: { summary: { tests: 1, passed: 1, failed: 0 } } });
         throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
       });
-      const runner = new RegressionRunner({
+      const runner = newRegressionRunner({
         runPlaywright: jest.fn(async () => ({ exitCode: 0 })),
         readFile,
         probeReachability: jest.fn(async () => true),
@@ -505,7 +944,7 @@ describe('RegressionRunner — regression-run.md', () => {
     });
 
     it('ohne injizierte dockerControl -> Frisch-Ausrollen übersprungen, kein Crash', async () => {
-      const runner = new RegressionRunner({
+      const runner = newRegressionRunner({
         runPlaywright: jest.fn(async () => ({ exitCode: 0 })),
         readFile: readFileWithProfile(),
         probeReachability: jest.fn(async () => true),
@@ -525,7 +964,7 @@ describe('RegressionRunner — regression-run.md', () => {
         throw err;
       });
       const runPlaywright = jest.fn();
-      const runner = new RegressionRunner({
+      const runner = newRegressionRunner({
         runPlaywright,
         readFile: readFileWithProfile(),
         dockerControl: { pullAndRecreate },
@@ -543,7 +982,7 @@ describe('RegressionRunner — regression-run.md', () => {
     it('pullAndRecreate() liefert ready:false (Readiness-Timeout) -> precondition-error, KEIN Playwright-Start (Edge-Case)', async () => {
       const pullAndRecreate = jest.fn(async () => ({ ready: false, durationMs: 60000 }));
       const runPlaywright = jest.fn();
-      const runner = new RegressionRunner({
+      const runner = newRegressionRunner({
         runPlaywright,
         readFile: readFileWithProfile(),
         dockerControl: { pullAndRecreate },
@@ -558,6 +997,456 @@ describe('RegressionRunner — regression-run.md', () => {
     });
   });
 
+  // ── isRunningInContainer (pure) ─────────────────────────────────────────────
+  describe('isRunningInContainer — /.dockerenv-Indikator (AC6)', () => {
+    it('true, wenn /.dockerenv existiert', () => {
+      const existsSync = jest.fn(() => true);
+      expect(isRunningInContainer({ existsSync })).toBe(true);
+      expect(existsSync).toHaveBeenCalledWith('/.dockerenv');
+    });
+
+    it('false, wenn /.dockerenv fehlt', () => {
+      expect(isRunningInContainer({ existsSync: () => false })).toBe(false);
+    });
+
+    it('ein werfender existsSync zählt konservativ als "nicht im Container" (kein Crash)', () => {
+      expect(isRunningInContainer({ existsSync: () => { throw new Error('boom'); } })).toBe(false);
+    });
+  });
+
+  // ── AC6: Deployment-bewusste Ziel-Adressierung ─────────────────────────────
+  describe('AC6 — Deployment-bewusste Ziel-Adressierung (host.docker.internal vs. 127.0.0.1)', () => {
+    function readFileWithPortAndImage({ previewPort = 8080, image = 'ghcr.io/org/app', containerPort = 8080 } = {}) {
+      return jest.fn(async (p) => {
+        if (String(p).endsWith('.claude/profile.md')) {
+          return `image: ${image}\ncontainer_port: ${containerPort}\npreview_port: ${previewPort}\n`;
+        }
+        if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
+        if (String(p).endsWith(CTRF_RESULT_PATH)) return JSON.stringify({ results: { summary: { tests: 1, passed: 1, failed: 0 } } });
+        throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+      });
+    }
+
+    it('Host-Betrieb (isContainerDeployment:false) -> 127.0.0.1:<port> für Erreichbarkeitsprüfung UND REGRESSION_BASE_URL', async () => {
+      const probeReachability = jest.fn(async () => true);
+      const runPlaywright = jest.fn(async ({ baseUrl }) => {
+        expect(baseUrl).toBe('http://127.0.0.1:8080');
+        return { exitCode: 0 };
+      });
+      const runner = newRegressionRunner({
+        runPlaywright,
+        readFile: readFileWithPortAndImage(),
+        probeReachability,
+        isContainerDeployment: () => false,
+      });
+
+      const { runId } = runner.start('/ws/proj', 'proj', { typ: 'gesamt' });
+      await flush();
+
+      expect(probeReachability).toHaveBeenCalledWith('127.0.0.1:8080');
+      expect(runner.getRun(runId).status).toBe('passed');
+    });
+
+    it('Container-Betrieb OHNE auffindbares Docker-Port-Mapping -> host.docker.internal:<statischer Port> (best-effort degradiert)', async () => {
+      const probeReachability = jest.fn(async () => true);
+      const runPlaywright = jest.fn(async ({ baseUrl }) => {
+        expect(baseUrl).toBe('http://host.docker.internal:8080');
+        return { exitCode: 0 };
+      });
+      const runner = newRegressionRunner({
+        runPlaywright,
+        readFile: readFileWithPortAndImage(),
+        probeReachability,
+        isContainerDeployment: () => true,
+        // kein dockerControl injiziert -> kein getMappedHostPort verfügbar
+      });
+
+      const { runId } = runner.start('/ws/proj', 'proj', { typ: 'gesamt' });
+      await flush();
+
+      expect(probeReachability).toHaveBeenCalledWith('host.docker.internal:8080');
+      expect(runner.getRun(runId).status).toBe('passed');
+    });
+
+    it('Container-Betrieb MIT dockerControl.getMappedHostPort -> host.docker.internal:<tatsächlich gemappter Port> (Befund 3, 8080->8081)', async () => {
+      const getMappedHostPort = jest.fn(async (containerName, containerPort) => {
+        expect(containerName).toBe('app');
+        expect(containerPort).toBe(8080);
+        return 8081; // tatsächliches Docker-Port-Mapping weicht vom statischen Profil-Port ab
+      });
+      const probeReachability = jest.fn(async () => true);
+      const runPlaywright = jest.fn(async ({ baseUrl }) => {
+        expect(baseUrl).toBe('http://host.docker.internal:8081');
+        return { exitCode: 0 };
+      });
+      const runner = newRegressionRunner({
+        runPlaywright,
+        readFile: readFileWithPortAndImage(),
+        probeReachability,
+        isContainerDeployment: () => true,
+        dockerControl: { getMappedHostPort },
+      });
+
+      const { runId } = runner.start('/ws/proj', 'proj', { typ: 'gesamt' });
+      await flush();
+
+      expect(getMappedHostPort).toHaveBeenCalledTimes(1);
+      expect(probeReachability).toHaveBeenCalledWith('host.docker.internal:8081');
+      expect(runner.getRun(runId).status).toBe('passed');
+    });
+
+    it('Container-Betrieb, getMappedHostPort liefert null (Container nicht gefunden) -> best-effort Fallback auf den statischen Port', async () => {
+      const getMappedHostPort = jest.fn(async () => null);
+      const probeReachability = jest.fn(async () => true);
+      const runner = newRegressionRunner({
+        runPlaywright: jest.fn(async () => ({ exitCode: 0 })),
+        readFile: readFileWithPortAndImage(),
+        probeReachability,
+        isContainerDeployment: () => true,
+        dockerControl: { getMappedHostPort },
+      });
+
+      const { runId } = runner.start('/ws/proj', 'proj', { typ: 'gesamt' });
+      await flush();
+
+      expect(probeReachability).toHaveBeenCalledWith('host.docker.internal:8080');
+      expect(runner.getRun(runId).status).toBe('passed');
+    });
+
+    it('nicht erreichbar im Container-Betrieb -> precondition-error mit der Container-Adresse geprüft (AC6+E3)', async () => {
+      const probeReachability = jest.fn(async () => false);
+      const runner = newRegressionRunner({
+        runPlaywright: jest.fn(),
+        readFile: readFileWithPortAndImage(),
+        probeReachability,
+        isContainerDeployment: () => true,
+      });
+
+      const { runId } = runner.start('/ws/proj', 'proj', { typ: 'gesamt' });
+      await flush();
+
+      const run = runner.getRun(runId);
+      expect(run.status).toBe('precondition-error');
+      expect(run.reason).toBe('Applikation lokal nicht gestartet');
+      expect(probeReachability).toHaveBeenCalledWith('host.docker.internal:8080');
+    });
+
+    it('Selbsttest (projekt === dev-gui) bleibt IMMER bei 127.0.0.1:<port> — auch im Container-Betrieb (AC6 letzter Satz, regression-run AC8 unberührt)', async () => {
+      const probeReachability = jest.fn(async () => true);
+      const runPlaywright = jest.fn(async ({ baseUrl }) => {
+        expect(baseUrl).toBe('http://127.0.0.1:8080');
+        return { exitCode: 0 };
+      });
+      const runner = newRegressionRunner({
+        runPlaywright,
+        readFile: readFileWithPortAndImage(),
+        probeReachability,
+        isContainerDeployment: () => true,
+      });
+
+      const { runId } = runner.start('/ws/dev-gui', SELF_PROJECT_SLUG, { typ: 'gesamt' });
+      await flush();
+
+      expect(probeReachability).toHaveBeenCalledWith('127.0.0.1:8080');
+      expect(runner.getRun(runId).status).toBe('passed');
+    });
+  });
+
+  // ── regression-local-execution AC7/AC8: App-Secret-Injektion ───────────────
+  describe('parseDotenvContent (regression-local-execution AC7/AC8 — reine Parsing-Funktion)', () => {
+    it('parst KEY=VALUE-Zeilen, überspringt Kommentare/Leerzeilen, entfernt umschließende Anführungszeichen', () => {
+      const content = [
+        '# Kommentar',
+        '',
+        'ALCHEMY_API_KEY=abc123',
+        'export WALLET_PRIVATE_KEY_A=0xdead',
+        'WALLET_PRIVATE_KEY_B="quoted value"',
+        "SINGLE_QUOTED='single'",
+        'malformed line without equals',
+      ].join('\n');
+      expect(parseDotenvContent(content)).toEqual({
+        ALCHEMY_API_KEY: 'abc123',
+        WALLET_PRIVATE_KEY_A: '0xdead',
+        WALLET_PRIVATE_KEY_B: 'quoted value',
+        SINGLE_QUOTED: 'single',
+      });
+    });
+
+    it('liefert {} für leeren/undefined Inhalt', () => {
+      expect(parseDotenvContent('')).toEqual({});
+      expect(parseDotenvContent(undefined)).toEqual({});
+    });
+  });
+
+  describe('defaultDecryptEnvGpg (regression-local-execution AC7 — Passphrase NUR via stdin, nie argv)', () => {
+    function fakeGpgChild({ exitCode = 0, stdout = 'ALCHEMY_API_KEY=abc\n' } = {}) {
+      const handlers = {};
+      const written = [];
+      const child = {
+        stdout: { on: (evt, cb) => { if (evt === 'data') cb(Buffer.from(stdout)); } },
+        stderr: { on: () => {} },
+        stdin: { write: (d) => written.push(d), end: () => {} },
+        on: (evt, cb) => { handlers[evt] = cb; if (evt === 'close') setImmediate(() => cb(exitCode)); },
+      };
+      return { child, written };
+    }
+
+    it('spawnt gpg mit dem festen Decrypt-Argv, cwd=projectPath, Passphrase NUR via stdin', async () => {
+      const { child, written } = fakeGpgChild();
+      const spawnFn = jest.fn(() => child);
+
+      const result = await defaultDecryptEnvGpg('/ws/proj', 's3cr3t-phrase', { spawnFn });
+
+      expect(spawnFn).toHaveBeenCalledWith(
+        'gpg',
+        ['--batch', '--quiet', '--pinentry-mode', 'loopback', '--passphrase-fd', '0', '-d', '.env.gpg'],
+        { cwd: '/ws/proj', stdio: ['pipe', 'pipe', 'pipe'] },
+      );
+      // Passphrase geht NUR über stdin — NICHT im Argv-Aufruf oben enthalten.
+      expect(written).toEqual(['s3cr3t-phrase']);
+      expect(spawnFn.mock.calls[0][1]).not.toContain('s3cr3t-phrase');
+      expect(result).toEqual({ ok: true, content: 'ALCHEMY_API_KEY=abc\n' });
+    });
+
+    it('exitCode != 0 -> {ok:false} (kein Content-Leak)', async () => {
+      const { child } = fakeGpgChild({ exitCode: 1, stdout: '' });
+      const result = await defaultDecryptEnvGpg('/ws/proj', 'wrong-phrase', { spawnFn: () => child });
+      expect(result).toEqual({ ok: false });
+    });
+
+    it('spawnFn wirft synchron -> {ok:false}, kein Crash', async () => {
+      const spawnFn = jest.fn(() => { throw new Error('spawn failed'); });
+      const result = await defaultDecryptEnvGpg('/ws/proj', 'phrase', { spawnFn });
+      expect(result).toEqual({ ok: false });
+    });
+  });
+
+  describe('resolveLocalRegressionSecrets (regression-local-execution AC7/AC8)', () => {
+    it('AC8: ohne injizierten deployLoginService -> {} (best-effort, kein Crash)', async () => {
+      const readFileFn = jest.fn();
+      const result = await resolveLocalRegressionSecrets('/ws/proj', 'flashrescue', { deployLoginService: null, readFile: readFileFn });
+      expect(result).toEqual({});
+      expect(readFileFn).not.toHaveBeenCalled();
+    });
+
+    it('AC8: kein .env.gpg im Klon -> {}, fetchItemPassword wird NICHT aufgerufen (kein unnötiger Bitwarden-Zugriff)', async () => {
+      const fetchItemPassword = jest.fn();
+      const readFileFn = jest.fn(async () => { throw Object.assign(new Error('enoent'), { code: 'ENOENT' }); });
+      const result = await resolveLocalRegressionSecrets('/ws/proj', 'flashrescue', {
+        deployLoginService: { fetchItemPassword },
+        readFile: readFileFn,
+      });
+      expect(result).toEqual({});
+      expect(fetchItemPassword).not.toHaveBeenCalled();
+    });
+
+    it('AC7: Item-Name-Konvention env.gpg-passphrase-<projekt> (AC15-Konvention, gpgItemNameFor)', async () => {
+      const fetchItemPassword = jest.fn(async () => 'the-passphrase');
+      const readFileFn = jest.fn(async () => 'irrelevant-encrypted-bytes');
+      const decryptEnvGpg = jest.fn(async () => ({ ok: true, content: 'ALCHEMY_API_KEY=abc\n' }));
+      await resolveLocalRegressionSecrets('/ws/proj', 'flashrescue', {
+        deployLoginService: { fetchItemPassword },
+        readFile: readFileFn,
+        decryptEnvGpg,
+        identity: 'owner@example.com',
+      });
+      expect(fetchItemPassword).toHaveBeenCalledWith(gpgItemNameFor('flashrescue'), { identity: 'owner@example.com' });
+      expect(fetchItemPassword.mock.calls[0][0]).toBe('env.gpg-passphrase-flashrescue');
+      // Die Passphrase geht NUR an decryptEnvGpg — nicht zurück in die Rückgabe.
+      expect(decryptEnvGpg).toHaveBeenCalledWith('/ws/proj', 'the-passphrase', {});
+    });
+
+    it('AC8 (A2): fetchItemPassword schlägt fehl (z.B. item-not-found) -> {} (kontrollierter Skip, kein Crash/Throw)', async () => {
+      const err = new Error('bw-deploy: item-not-found');
+      err.deployErrorClass = 'item-not-found';
+      const fetchItemPassword = jest.fn(async () => { throw err; });
+      const decryptEnvGpg = jest.fn();
+      const readFileFn = jest.fn(async () => 'irrelevant-encrypted-bytes');
+      const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+      const result = await resolveLocalRegressionSecrets('/ws/proj', 'flashrescue', {
+        deployLoginService: { fetchItemPassword },
+        readFile: readFileFn,
+        decryptEnvGpg,
+      });
+      expect(result).toEqual({});
+      expect(decryptEnvGpg).not.toHaveBeenCalled();
+      // Secret-freie Diagnose: nur die Fehlerklasse, NIE ein Rohtext/Wert im Log.
+      expect(errorSpy).toHaveBeenCalledWith(expect.any(String), 'item-not-found');
+      errorSpy.mockRestore();
+    });
+
+    it('AC8: Entschlüsselung schlägt fehl (falsche Passphrase) -> {} (kontrollierter Skip)', async () => {
+      const fetchItemPassword = jest.fn(async () => 'wrong-passphrase');
+      const decryptEnvGpg = jest.fn(async () => ({ ok: false }));
+      const readFileFn = jest.fn(async () => 'irrelevant-encrypted-bytes');
+      const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+      const result = await resolveLocalRegressionSecrets('/ws/proj', 'flashrescue', {
+        deployLoginService: { fetchItemPassword },
+        readFile: readFileFn,
+        decryptEnvGpg,
+      });
+      expect(result).toEqual({});
+      errorSpy.mockRestore();
+    });
+
+    it('AC7: Happy Path — entschlüsselter Inhalt wird als Env-Var-Map zurückgegeben (Referenzfall ALCHEMY_API_KEY + 2 Wallet-Keys)', async () => {
+      const fetchItemPassword = jest.fn(async () => 'the-passphrase');
+      const decryptEnvGpg = jest.fn(async () => ({
+        ok: true,
+        content: 'ALCHEMY_API_KEY=abc123\nWALLET_PRIVATE_KEY_A=0xaaa\nWALLET_PRIVATE_KEY_B=0xbbb\n',
+      }));
+      const readFileFn = jest.fn(async () => 'irrelevant-encrypted-bytes');
+      const result = await resolveLocalRegressionSecrets('/ws/proj', 'flashrescue', {
+        deployLoginService: { fetchItemPassword },
+        readFile: readFileFn,
+        decryptEnvGpg,
+      });
+      expect(result).toEqual({
+        ALCHEMY_API_KEY: 'abc123',
+        WALLET_PRIVATE_KEY_A: '0xaaa',
+        WALLET_PRIVATE_KEY_B: '0xbbb',
+      });
+    });
+  });
+
+  describe('RegressionRunner#start — App-Secret-Injektion (regression-local-execution AC7/AC8)', () => {
+    function readFileWithPortAndEnvGpg({ previewPort = 8080, hasEnvGpg = true } = {}) {
+      return jest.fn(async (p) => {
+        if (String(p).endsWith('.claude/profile.md')) return `preview_port: ${previewPort}\n`;
+        if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
+        if (String(p).endsWith(CTRF_RESULT_PATH)) return JSON.stringify({ results: { summary: { tests: 1, passed: 1, failed: 0 } } });
+        if (String(p).endsWith('.env.gpg')) {
+          if (hasEnvGpg) return 'irrelevant-encrypted-bytes';
+          throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+        }
+        throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+      });
+    }
+
+    it('AC7: entschlüsselte Secrets landen AUSSCHLIESSLICH in der Playwright-Kind-Env (secretEnv-Parameter)', async () => {
+      const fetchItemPassword = jest.fn(async () => 'the-passphrase');
+      const decryptEnvGpg = jest.fn(async () => ({ ok: true, content: 'ALCHEMY_API_KEY=abc123\n' }));
+      const runPlaywright = jest.fn(async ({ secretEnv }) => {
+        expect(secretEnv).toEqual({ ALCHEMY_API_KEY: 'abc123' });
+        return { exitCode: 0 };
+      });
+      const runner = newRegressionRunner({
+        runPlaywright,
+        readFile: readFileWithPortAndEnvGpg(),
+        deployLoginService: { fetchItemPassword },
+        decryptEnvGpg,
+      });
+
+      const { runId } = runner.start('/ws/flashrescue', 'flashrescue', { typ: 'gesamt' });
+      await flush();
+
+      expect(fetchItemPassword).toHaveBeenCalledWith('env.gpg-passphrase-flashrescue', { identity: null });
+      expect(runner.getRun(runId).status).toBe('passed');
+    });
+
+    it('AC7 Security-Floor: secretEnv landet NIE im Job-Status (getRun) — keine Werte in der öffentlichen Sicht', async () => {
+      const fetchItemPassword = jest.fn(async () => 'the-passphrase');
+      const decryptEnvGpg = jest.fn(async () => ({ ok: true, content: 'ALCHEMY_API_KEY=abc123\n' }));
+      const runner = newRegressionRunner({
+        runPlaywright: jest.fn(async () => ({ exitCode: 0 })),
+        readFile: readFileWithPortAndEnvGpg(),
+        deployLoginService: { fetchItemPassword },
+        decryptEnvGpg,
+      });
+
+      const { runId } = runner.start('/ws/flashrescue', 'flashrescue', { typ: 'gesamt' });
+      await flush();
+
+      const run = runner.getRun(runId);
+      expect(JSON.stringify(run)).not.toContain('abc123');
+      expect(JSON.stringify(run)).not.toContain('the-passphrase');
+    });
+
+    it('AC7 Security-Floor: der Audit-Eintrag enthält NIE die Passphrase/den Secret-Wert', async () => {
+      const fetchItemPassword = jest.fn(async () => 'the-passphrase');
+      const decryptEnvGpg = jest.fn(async () => ({ ok: true, content: 'ALCHEMY_API_KEY=abc123\n' }));
+      const record = jest.fn();
+      const runner = newRegressionRunner({
+        runPlaywright: jest.fn(async () => ({ exitCode: 0 })),
+        readFile: readFileWithPortAndEnvGpg(),
+        deployLoginService: { fetchItemPassword },
+        decryptEnvGpg,
+        auditStore: { record },
+      });
+
+      runner.start('/ws/flashrescue', 'flashrescue', { typ: 'gesamt' });
+      await flush();
+
+      for (const call of record.mock.calls) {
+        expect(JSON.stringify(call[0])).not.toContain('abc123');
+        expect(JSON.stringify(call[0])).not.toContain('the-passphrase');
+      }
+    });
+
+    it('AC8 (A2): kein .env.gpg im Klon -> Lauf läuft normal weiter (passed), secretEnv={}, fetchItemPassword NIE aufgerufen', async () => {
+      const fetchItemPassword = jest.fn();
+      const runPlaywright = jest.fn(async ({ secretEnv }) => {
+        expect(secretEnv).toEqual({});
+        return { exitCode: 0 };
+      });
+      const runner = newRegressionRunner({
+        runPlaywright,
+        readFile: readFileWithPortAndEnvGpg({ hasEnvGpg: false }),
+        deployLoginService: { fetchItemPassword },
+      });
+
+      const { runId } = runner.start('/ws/flashrescue', 'flashrescue', { typ: 'gesamt' });
+      await flush();
+
+      expect(fetchItemPassword).not.toHaveBeenCalled();
+      expect(runner.getRun(runId).status).toBe('passed');
+    });
+
+    it('AC8 (A2): Bitwarden-Abruf schlägt fehl -> KEIN precondition-error/error, Lauf läuft normal weiter (kontrollierter Suite-Skip bleibt Sache der Suite)', async () => {
+      const err = new Error('bw-deploy: access-incomplete');
+      err.deployErrorClass = 'access-incomplete';
+      const fetchItemPassword = jest.fn(async () => { throw err; });
+      const runPlaywright = jest.fn(async ({ secretEnv }) => {
+        expect(secretEnv).toEqual({});
+        return { exitCode: 0 };
+      });
+      const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+      const runner = newRegressionRunner({
+        runPlaywright,
+        readFile: readFileWithPortAndEnvGpg(),
+        deployLoginService: { fetchItemPassword },
+      });
+
+      const { runId } = runner.start('/ws/flashrescue', 'flashrescue', { typ: 'gesamt' });
+      await flush();
+
+      expect(runner.getRun(runId).status).toBe('passed');
+      errorSpy.mockRestore();
+    });
+
+    it('AC7: ephemeral-infra ruft deployLoginService NIE auf (Scope-Exklusivität — lokal-exklusiv)', async () => {
+      const fetchItemPassword = jest.fn();
+      const readFile = jest.fn(async (p) => {
+        if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
+        if (String(p).endsWith('.claude/profile.md')) return 'preview_port: 8080\n';
+        if (String(p).endsWith(CTRF_RESULT_PATH)) return JSON.stringify({ results: { summary: { tests: 1, passed: 1, failed: 0 } } });
+        throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+      });
+      const readSuites = jest.fn(async () => ({ suites: [{ scope: { typ: 'bereich', id: 'vps' }, target: 'ephemeral-infra' }] }));
+      const runner = newRegressionRunner({
+        runPlaywright: jest.fn(async () => ({ exitCode: 0 })),
+        readFile,
+        readSuites,
+        deployLoginService: { fetchItemPassword },
+      });
+
+      runner.start('/ws/proj', 'proj', { typ: 'bereich', id: 'vps' });
+      await flush();
+
+      expect(fetchItemPassword).not.toHaveBeenCalled();
+    });
+  });
+
   // ── AC8: Selbsttest-Sonderfall (dev-gui) ───────────────────────────────────
   describe('AC8 — Selbsttest-Sonderfall: Frisch-Ausrollen server-seitig hart übersprungen', () => {
     it('projekt === "dev-gui" + freshRollout:true -> pullAndRecreate() wird NIE aufgerufen', async () => {
@@ -568,7 +1457,7 @@ describe('RegressionRunner — regression-run.md', () => {
         if (String(p).endsWith(CTRF_RESULT_PATH)) return JSON.stringify({ results: { summary: { tests: 1, passed: 1, failed: 0 } } });
         throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
       });
-      const runner = new RegressionRunner({
+      const runner = newRegressionRunner({
         runPlaywright: jest.fn(async () => ({ exitCode: 0 })),
         readFile,
         probeReachability: jest.fn(async () => true),
@@ -593,7 +1482,7 @@ describe('RegressionRunner — regression-run.md', () => {
         if (String(p).endsWith(CTRF_RESULT_PATH)) return JSON.stringify({ results: { summary: { tests: 1, passed: 1, failed: 0 } } });
         throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
       });
-      const runner = new RegressionRunner({
+      const runner = newRegressionRunner({
         runPlaywright: jest.fn(async () => ({ exitCode: 0 })),
         readFile,
         probeReachability: jest.fn(async () => true),
@@ -615,7 +1504,7 @@ describe('RegressionRunner — regression-run.md', () => {
         return { exitCode: 0 };
       });
       const readFile = jest.fn(async (p) => {
-        if (String(p).endsWith('.claude/profile.md')) throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+        if (String(p).endsWith('.claude/profile.md')) return 'preview_port: 8080\n';
         if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
         if (String(p).endsWith(CTRF_RESULT_PATH)) {
           return JSON.stringify({ results: { summary: { tests: 2, passed: 2, failed: 0 } } });
@@ -627,7 +1516,7 @@ describe('RegressionRunner — regression-run.md', () => {
       // echtes Datei-IO über die default readRegressionSuites (s. Datei-Header
       // Test-Fallstrick-Hinweis).
       const readSuites = jest.fn(async () => ({ suites: [] }));
-      return new RegressionRunner({ runPlaywright, readFile, resultStore, readSuites });
+      return newRegressionRunner({ runPlaywright, readFile, resultStore, readSuites });
     }
 
     it('führt npx playwright test für den gewählten Scope aus und übergibt EINEN Datensatz an den resultStore', async () => {
@@ -672,14 +1561,14 @@ describe('RegressionRunner — regression-run.md', () => {
       const record = jest.fn(async (input) => input);
       const runPlaywright = jest.fn(async () => ({ exitCode: 1 }));
       const readFile = jest.fn(async (p) => {
-        if (String(p).endsWith('.claude/profile.md')) throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+        if (String(p).endsWith('.claude/profile.md')) return 'preview_port: 8080\n';
         if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
         if (String(p).endsWith(CTRF_RESULT_PATH)) {
           return JSON.stringify({ results: { summary: { tests: 3, passed: 2, failed: 1 } } });
         }
         throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
       });
-      const runner = new RegressionRunner({ runPlaywright, readFile, resultStore: { record } });
+      const runner = newRegressionRunner({ runPlaywright, readFile, resultStore: { record } });
 
       const { runId } = runner.start('/ws/dev-gui', 'dev-gui', { typ: 'gesamt' });
       await flush();
@@ -693,7 +1582,7 @@ describe('RegressionRunner — regression-run.md', () => {
     it('kein Projekt-Grundgerüst (tests/regression fehlt) -> error "kein Regressions-Grundgerüst", kein Playwright-Start', async () => {
       const runPlaywright = jest.fn();
       const readFile = jest.fn(async () => { throw Object.assign(new Error('enoent'), { code: 'ENOENT' }); });
-      const runner = new RegressionRunner({ runPlaywright, readFile });
+      const runner = newRegressionRunner({ runPlaywright, readFile });
 
       const { runId } = runner.start('/ws/proj', 'proj', { typ: 'gesamt' });
       await flush();
@@ -707,11 +1596,11 @@ describe('RegressionRunner — regression-run.md', () => {
     it('kein CTRF-Ergebnis nach dem Lauf -> error, kein Crash', async () => {
       const runPlaywright = jest.fn(async () => ({ exitCode: 0 }));
       const readFile = jest.fn(async (p) => {
-        if (String(p).endsWith('.claude/profile.md')) throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+        if (String(p).endsWith('.claude/profile.md')) return 'preview_port: 8080\n';
         if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
         throw Object.assign(new Error('enoent'), { code: 'ENOENT' }); // kein CTRF
       });
-      const runner = new RegressionRunner({ runPlaywright, readFile });
+      const runner = newRegressionRunner({ runPlaywright, readFile });
 
       const { runId } = runner.start('/ws/proj', 'proj', { typ: 'gesamt' });
       await flush();
@@ -723,12 +1612,12 @@ describe('RegressionRunner — regression-run.md', () => {
 
     it('npx nicht verfügbar (ENOENT) -> error, sanfter Fehlertext', async () => {
       const readFile = jest.fn(async (p) => {
-        if (String(p).endsWith('.claude/profile.md')) throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+        if (String(p).endsWith('.claude/profile.md')) return 'preview_port: 8080\n';
         if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
         throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
       });
       const runPlaywright = jest.fn(async () => ({ exitCode: -1, spawnError: true, notFound: true }));
-      const runner = new RegressionRunner({ runPlaywright, readFile });
+      const runner = newRegressionRunner({ runPlaywright, readFile });
 
       const { runId } = runner.start('/ws/proj', 'proj', { typ: 'gesamt' });
       await flush();
@@ -754,7 +1643,7 @@ describe('RegressionRunner — regression-run.md', () => {
     function makeRunner({ notifier, exitCode = 1, summary = { tests: 3, passed: 2, failed: 1 }, resultStore } = {}) {
       const runPlaywright = jest.fn(async () => ({ exitCode }));
       const readFile = jest.fn(async (p) => {
-        if (String(p).endsWith('.claude/profile.md')) throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+        if (String(p).endsWith('.claude/profile.md')) return 'preview_port: 8080\n';
         if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
         if (String(p).endsWith(CTRF_RESULT_PATH)) {
           return JSON.stringify({ results: { summary } });
@@ -763,7 +1652,7 @@ describe('RegressionRunner — regression-run.md', () => {
       });
       // AC11-Weiche: hermetisch gemockte Suite-Lese-Boundary (s. makeGreenSetup oben).
       const readSuites = jest.fn(async () => ({ suites: [] }));
-      return new RegressionRunner({
+      return newRegressionRunner({
         runPlaywright,
         readFile,
         notifier,
@@ -811,7 +1700,7 @@ describe('RegressionRunner — regression-run.md', () => {
       });
       const runPlaywright = jest.fn();
       const probeReachability = jest.fn(async () => false);
-      const runner = new RegressionRunner({
+      const runner = newRegressionRunner({
         runPlaywright,
         readFile,
         probeReachability,
@@ -829,7 +1718,7 @@ describe('RegressionRunner — regression-run.md', () => {
     it('error (kein Projekt-Grundgerüst) ruft notifyRegressionFailed NIE auf', async () => {
       const notifyRegressionFailed = jest.fn(async () => {});
       const readFile = jest.fn(async () => { throw Object.assign(new Error('enoent'), { code: 'ENOENT' }); });
-      const runner = new RegressionRunner({ runPlaywright: jest.fn(), readFile, notifier: { notifyRegressionFailed } });
+      const runner = newRegressionRunner({ runPlaywright: jest.fn(), readFile, notifier: { notifyRegressionFailed } });
 
       const { runId } = runner.start('/ws/proj', 'proj', { typ: 'gesamt' });
       await flush();
@@ -889,11 +1778,12 @@ describe('RegressionRunner — regression-run.md', () => {
       const readSuites = jest.fn(async () => ({ suites: [] }));
       const runPlaywright = jest.fn(async () => ({ exitCode: 0 }));
       const readFile = jest.fn(async (p) => {
+        if (String(p).endsWith('.claude/profile.md')) return 'preview_port: 8080\n';
         if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
         if (String(p).endsWith(CTRF_RESULT_PATH)) return JSON.stringify({ results: { summary: { tests: 1, passed: 1, failed: 0 } } });
         throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
       });
-      const runner = new RegressionRunner({ runPlaywright, readFile, readSuites });
+      const runner = newRegressionRunner({ runPlaywright, readFile, readSuites });
 
       const { runId } = runner.start('/ws/proj', 'proj', { typ: 'gesamt' });
       await flush();
@@ -909,11 +1799,12 @@ describe('RegressionRunner — regression-run.md', () => {
       }));
       const runPlaywright = jest.fn(async () => ({ exitCode: 0 }));
       const readFile = jest.fn(async (p) => {
+        if (String(p).endsWith('.claude/profile.md')) return 'preview_port: 8080\n';
         if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
         if (String(p).endsWith(CTRF_RESULT_PATH)) return JSON.stringify({ results: { summary: { tests: 1, passed: 1, failed: 0 } } });
         throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
       });
-      const runner = new RegressionRunner({ runPlaywright, readFile, readSuites });
+      const runner = newRegressionRunner({ runPlaywright, readFile, readSuites });
 
       const { runId } = runner.start('/ws/proj', 'proj', { typ: 'bereich', id: 'fabrik-arbeiten' });
       await flush();
@@ -928,7 +1819,7 @@ describe('RegressionRunner — regression-run.md', () => {
         suites: [{ scope: { typ: 'verbund' }, label: 'Verbund', target: 'url' }],
       }));
       const runPlaywright = jest.fn();
-      const runner = new RegressionRunner({ runPlaywright, readFile: readFileScaffoldOnly(), readSuites });
+      const runner = newRegressionRunner({ runPlaywright, readFile: readFileScaffoldOnly(), readSuites });
 
       const { runId } = runner.start('/ws/proj', 'proj', { typ: 'verbund', id: 'irrelevant' });
       await flush();
@@ -944,7 +1835,7 @@ describe('RegressionRunner — regression-run.md', () => {
         suites: [{ scope: { typ: 'bereich', id: 'fabrik-arbeiten' }, label: 'fabrik-arbeiten', target: 'irgendwas-kaputtes' }],
       }));
       const runPlaywright = jest.fn();
-      const runner = new RegressionRunner({ runPlaywright, readFile: readFileScaffoldOnly(), readSuites });
+      const runner = newRegressionRunner({ runPlaywright, readFile: readFileScaffoldOnly(), readSuites });
 
       const { runId } = runner.start('/ws/proj', 'proj', { typ: 'bereich', id: 'fabrik-arbeiten' });
       await flush();
@@ -961,11 +1852,12 @@ describe('RegressionRunner — regression-run.md', () => {
       const readSuites = jest.fn(async () => ({ suites: [] }));
       const runPlaywright = jest.fn(async () => ({ exitCode: 0 }));
       const readFile = jest.fn(async (p) => {
+        if (String(p).endsWith('.claude/profile.md')) return 'preview_port: 8080\n';
         if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
         if (String(p).endsWith(CTRF_RESULT_PATH)) return JSON.stringify({ results: { summary: { tests: 1, passed: 1, failed: 0 } } });
         throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
       });
-      const runner = new RegressionRunner({ runPlaywright, readFile, readSuites });
+      const runner = newRegressionRunner({ runPlaywright, readFile, readSuites });
 
       const { runId } = runner.start('/ws/proj', 'proj', { typ: 'bereich', id: 'unbekannter-bereich' });
       await flush();
@@ -978,11 +1870,12 @@ describe('RegressionRunner — regression-run.md', () => {
       const readSuites = jest.fn(async () => { throw new Error('fs kaputt'); });
       const runPlaywright = jest.fn(async () => ({ exitCode: 0 }));
       const readFile = jest.fn(async (p) => {
+        if (String(p).endsWith('.claude/profile.md')) return 'preview_port: 8080\n';
         if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
         if (String(p).endsWith(CTRF_RESULT_PATH)) return JSON.stringify({ results: { summary: { tests: 1, passed: 1, failed: 0 } } });
         throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
       });
-      const runner = new RegressionRunner({ runPlaywright, readFile, readSuites });
+      const runner = newRegressionRunner({ runPlaywright, readFile, readSuites });
 
       const { runId } = runner.start('/ws/proj', 'proj', { typ: 'bereich', id: 'x' });
       await flush();
@@ -996,7 +1889,7 @@ describe('RegressionRunner — regression-run.md', () => {
         suites: [{ scope: { typ: 'bereich', id: 'vps' }, label: 'vps', target: 'url' }],
       }));
       const notifyRegressionFailed = jest.fn(async () => {});
-      const runner = new RegressionRunner({
+      const runner = newRegressionRunner({
         runPlaywright: jest.fn(),
         readFile: readFileScaffoldOnly(),
         readSuites,
@@ -1033,7 +1926,7 @@ describe('RegressionRunner — regression-run.md', () => {
       });
       const probeReachability = jest.fn(); // AC5: darf NIE aufgerufen werden
       const pullAndRecreate = jest.fn(); // AC7: darf NIE aufgerufen werden (lokal-exklusiv)
-      const runner = new RegressionRunner({
+      const runner = newRegressionRunner({
         runPlaywright,
         readFile: readFileScaffoldAndPort(),
         readSuites,
@@ -1066,7 +1959,7 @@ describe('RegressionRunner — regression-run.md', () => {
         if (String(p).endsWith(CTRF_RESULT_PATH)) return JSON.stringify({ results: { summary: { tests: 1, passed: 1, failed: 0 } } });
         throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
       });
-      const runner = new RegressionRunner({ runPlaywright, readFile, readSuites });
+      const runner = newRegressionRunner({ runPlaywright, readFile, readSuites });
 
       const { runId } = runner.start('/ws/proj', 'proj', { typ: 'bereich', id: 'vps' });
       await flush();
@@ -1089,7 +1982,7 @@ describe('RegressionRunner — regression-run.md', () => {
         })),
         delete: del,
       };
-      const runner = new RegressionRunner({
+      const runner = newRegressionRunner({
         runPlaywright: jest.fn(async () => ({ exitCode: 0 })),
         readFile: readFileScaffoldAndPort(),
         readSuites,
@@ -1123,7 +2016,7 @@ describe('RegressionRunner — regression-run.md', () => {
         if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
         throw Object.assign(new Error('enoent'), { code: 'ENOENT' }); // kein CTRF -> deckt auch den "kein CTRF"-Fall
       });
-      const runner = new RegressionRunner({
+      const runner = newRegressionRunner({
         runPlaywright: jest.fn(runPlaywrightImpl),
         readFile,
         readSuites,
@@ -1154,7 +2047,7 @@ describe('RegressionRunner — regression-run.md', () => {
         if (String(p).endsWith(CTRF_RESULT_PATH)) return JSON.stringify({ results: { summary: { tests: 2, passed: 1, failed: 1 } } });
         throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
       });
-      const runner = new RegressionRunner({
+      const runner = newRegressionRunner({
         runPlaywright: jest.fn(async () => ({ exitCode: 1 })),
         readFile,
         readSuites,
@@ -1173,7 +2066,7 @@ describe('RegressionRunner — regression-run.md', () => {
       const readSuites = jest.fn(async () => ({
         suites: [{ scope: { typ: 'bereich', id: 'vps' }, label: 'vps', target: 'ephemeral-infra' }],
       }));
-      const runner = new RegressionRunner({
+      const runner = newRegressionRunner({
         runPlaywright: jest.fn(async () => ({ exitCode: 0 })),
         readFile: readFileScaffoldAndPort(),
         readSuites,
@@ -1191,7 +2084,7 @@ describe('RegressionRunner — regression-run.md', () => {
         suites: [{ scope: { typ: 'bereich', id: 'vps' }, label: 'vps', target: 'ephemeral-infra' }],
       }));
       const vpsRegistry = { listAllMachines: jest.fn(async () => { throw new Error('API kaputt'); }), delete: jest.fn() };
-      const runner = new RegressionRunner({
+      const runner = newRegressionRunner({
         runPlaywright: jest.fn(async () => ({ exitCode: 0 })),
         readFile: readFileScaffoldAndPort(),
         readSuites,
@@ -1222,7 +2115,7 @@ describe('RegressionRunner — regression-run.md', () => {
         })),
         delete: del,
       };
-      const runner = new RegressionRunner({
+      const runner = newRegressionRunner({
         runPlaywright: jest.fn(async () => ({ exitCode: 0 })),
         readFile: readFileScaffoldAndPort(),
         readSuites,
@@ -1241,7 +2134,7 @@ describe('RegressionRunner — regression-run.md', () => {
         suites: [{ scope: { typ: 'bereich', id: 'vps' }, label: 'vps', target: 'ephemeral-infra' }],
       }));
       const record = jest.fn(async (i) => i);
-      const runner = new RegressionRunner({
+      const runner = newRegressionRunner({
         runPlaywright: jest.fn(async () => ({ exitCode: 0 })),
         readFile: readFileScaffoldAndPort(),
         readSuites,
@@ -1269,7 +2162,7 @@ describe('RegressionRunner — regression-run.md', () => {
           listAllMachines: jest.fn(() => new Promise((r) => { resolveList = r; })),
           delete: jest.fn(async () => ({ result: 'ok' })),
         };
-        const runner = new RegressionRunner({
+        const runner = newRegressionRunner({
           runPlaywright: jest.fn(async () => ({ exitCode: 0 })),
           readFile: readFileScaffoldAndPort(),
           readSuites,
@@ -1311,7 +2204,7 @@ describe('RegressionRunner — regression-run.md', () => {
           if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
           throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
         });
-        const runner = new RegressionRunner({
+        const runner = newRegressionRunner({
           runPlaywright: jest.fn(async () => ({ exitCode: -1, spawnError: true })),
           readFile,
           readSuites,
@@ -1348,7 +2241,7 @@ describe('RegressionRunner — regression-run.md', () => {
           if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
           throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
         });
-        const runner = new RegressionRunner({
+        const runner = newRegressionRunner({
           runPlaywright: jest.fn(async () => { throw new Error('boom'); }),
           readFile,
           readSuites,
@@ -1379,7 +2272,7 @@ describe('RegressionRunner — regression-run.md', () => {
           listAllMachines: jest.fn(() => new Promise((r) => { resolveList = r; })),
           delete: jest.fn(async () => ({ result: 'ok' })),
         };
-        const runner = new RegressionRunner({
+        const runner = newRegressionRunner({
           runPlaywright: jest.fn(async () => ({ exitCode: 0 })),
           readFile: readFileScaffoldAndPort(),
           readSuites,
@@ -1411,7 +2304,7 @@ describe('RegressionRunner — regression-run.md', () => {
     it('kein Grundgerüst -> resultStore.record() mit status:"error", ctrf:null, counts 0/0/0, reason gesetzt', async () => {
       const record = jest.fn(async (i) => i);
       const readFile = jest.fn(async () => { throw Object.assign(new Error('enoent'), { code: 'ENOENT' }); });
-      const runner = new RegressionRunner({ runPlaywright: jest.fn(), readFile, resultStore: { record } });
+      const runner = newRegressionRunner({ runPlaywright: jest.fn(), readFile, resultStore: { record } });
 
       const { runId } = runner.start('/ws/proj', 'proj', { typ: 'gesamt' });
       await flush();
@@ -1435,7 +2328,7 @@ describe('RegressionRunner — regression-run.md', () => {
         throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
       });
       const probeReachability = jest.fn(async () => false);
-      const runner = new RegressionRunner({ runPlaywright: jest.fn(), readFile, probeReachability, resultStore: { record } });
+      const runner = newRegressionRunner({ runPlaywright: jest.fn(), readFile, probeReachability, resultStore: { record } });
 
       const { runId } = runner.start('/ws/proj', 'proj', { typ: 'gesamt' });
       await flush();
@@ -1453,7 +2346,7 @@ describe('RegressionRunner — regression-run.md', () => {
     it('Lock wird VOR dem Store-Schreibzugriff freigegeben — ein NIE auflösendes record() hält das Lock nicht', async () => {
       const neverResolves = jest.fn(() => new Promise(() => {})); // hängt für immer
       const readFile = jest.fn(async () => { throw Object.assign(new Error('enoent'), { code: 'ENOENT' }); });
-      const runner = new RegressionRunner({ runPlaywright: jest.fn(), readFile, resultStore: { record: neverResolves } });
+      const runner = newRegressionRunner({ runPlaywright: jest.fn(), readFile, resultStore: { record: neverResolves } });
 
       runner.start('/ws/proj', 'proj', { typ: 'gesamt' });
       await flush();
@@ -1467,11 +2360,11 @@ describe('RegressionRunner — regression-run.md', () => {
       const record = jest.fn(async (i) => i);
       const runPlaywright = jest.fn(async () => ({ exitCode: 0 }));
       const readFile = jest.fn(async (p) => {
-        if (String(p).endsWith('.claude/profile.md')) throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+        if (String(p).endsWith('.claude/profile.md')) return 'preview_port: 8080\n';
         if (String(p).endsWith('tests/regression')) throw Object.assign(new Error('is a dir'), { code: 'EISDIR' });
         throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
       });
-      const runner = new RegressionRunner({ runPlaywright, readFile, resultStore: { record } });
+      const runner = newRegressionRunner({ runPlaywright, readFile, resultStore: { record } });
 
       const { runId } = runner.start('/ws/proj', 'proj', { typ: 'gesamt' });
       await flush();
@@ -1532,6 +2425,78 @@ describe('RegressionRunner — regression-run.md', () => {
       expect(env.REGRESSION_BASE_URL).toBeUndefined();
     });
 
+    it('AC9 — beliebige geerbte process.env-Variable (z.B. FLASHRESCUE_CONFIG_DIR) wird ungefiltert an den Kindprozess durchgereicht (Leitkanal für suite-eigene Test-Config-Provisionierung)', async () => {
+      const emit = {};
+      const fakeChild = {
+        stdout: { on: () => {} },
+        stderr: { on: () => {} },
+        on: (event, cb) => { emit[event] = cb; },
+        kill: jest.fn(),
+      };
+      const spawnFn = jest.fn(() => fakeChild);
+      const originalValue = process.env.FLASHRESCUE_CONFIG_DIR;
+      process.env.FLASHRESCUE_CONFIG_DIR = '/tmp/flashrescue-config-dir';
+      try {
+        const promise = defaultRunPlaywright({ projectPath: '/ws/proj', testPath: 'tests/regression', spawnFn });
+        emit.close(0);
+        await promise;
+
+        const env = spawnFn.mock.calls[0][2].env;
+        expect(env.FLASHRESCUE_CONFIG_DIR).toBe('/tmp/flashrescue-config-dir');
+      } finally {
+        if (originalValue === undefined) delete process.env.FLASHRESCUE_CONFIG_DIR;
+        else process.env.FLASHRESCUE_CONFIG_DIR = originalValue;
+      }
+    });
+
+    it('AC10 — FLASHRESCUE_REGRESSION_ALLOW_REAL_SEND aus geerbtem process.env (Operator-Shell) wird HART entfernt, nie an den Kindprozess durchgereicht', async () => {
+      const emit = {};
+      const fakeChild = {
+        stdout: { on: () => {} },
+        stderr: { on: () => {} },
+        on: (event, cb) => { emit[event] = cb; },
+        kill: jest.fn(),
+      };
+      const spawnFn = jest.fn(() => fakeChild);
+      const originalValue = process.env.FLASHRESCUE_REGRESSION_ALLOW_REAL_SEND;
+      process.env.FLASHRESCUE_REGRESSION_ALLOW_REAL_SEND = '1';
+      try {
+        const promise = defaultRunPlaywright({ projectPath: '/ws/proj', testPath: 'tests/regression', spawnFn });
+        emit.close(0);
+        await promise;
+
+        const env = spawnFn.mock.calls[0][2].env;
+        expect(env.FLASHRESCUE_REGRESSION_ALLOW_REAL_SEND).toBeUndefined();
+      } finally {
+        if (originalValue === undefined) delete process.env.FLASHRESCUE_REGRESSION_ALLOW_REAL_SEND;
+        else process.env.FLASHRESCUE_REGRESSION_ALLOW_REAL_SEND = originalValue;
+      }
+    });
+
+    it('AC10 — FLASHRESCUE_REGRESSION_ALLOW_REAL_SEND aus secretEnv (versehentlich im .env.gpg) wird HART entfernt, nie an den Kindprozess durchgereicht', async () => {
+      const emit = {};
+      const fakeChild = {
+        stdout: { on: () => {} },
+        stderr: { on: () => {} },
+        on: (event, cb) => { emit[event] = cb; },
+        kill: jest.fn(),
+      };
+      const spawnFn = jest.fn(() => fakeChild);
+
+      const promise = defaultRunPlaywright({
+        projectPath: '/ws/proj',
+        testPath: 'tests/regression',
+        secretEnv: { ALCHEMY_API_KEY: 'k1', FLASHRESCUE_REGRESSION_ALLOW_REAL_SEND: '1' },
+        spawnFn,
+      });
+      emit.close(0);
+      await promise;
+
+      const env = spawnFn.mock.calls[0][2].env;
+      expect(env.ALCHEMY_API_KEY).toBe('k1');
+      expect(env.FLASHRESCUE_REGRESSION_ALLOW_REAL_SEND).toBeUndefined();
+    });
+
     it('Timeout killt den Kindprozess und liefert timedOut:true', async () => {
       jest.useFakeTimers();
       const fakeChild = {
@@ -1554,7 +2519,7 @@ describe('RegressionRunner — regression-run.md', () => {
 
   // ── ProjectJobLock isolation sanity (cross-check against the module singleton) ──
   it('das RegressionRunner-Lock ist NICHT der ProjectJobLock-Modul-Singleton', () => {
-    const runner = new RegressionRunner({ runPlaywright: jest.fn() });
+    const runner = newRegressionRunner({ runPlaywright: jest.fn() });
     const res = runner.start('/ws/isolation-check', 'proj', { typ: 'gesamt' });
     expect(res.ok).toBe(true);
     // Ein frischer, unabhängiger ProjectJobLock sieht das Projekt als frei —
