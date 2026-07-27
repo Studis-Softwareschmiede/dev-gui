@@ -31,6 +31,16 @@
  *          (computeStoryReadyStatus liefert ready=false/ready_reason=null,
  *          Rule (1), status ≠ To Do) — kein neuer Code, nur Regressions-Beleg
  *          gegen den neuen kanonischen Statuswert.
+ *
+ * Covers (waiting-status-devgui):
+ *   AC1 — Regressions-Invariante: eine Waiting-Story ist nie ready
+ *          (computeStoryReadyStatus liefert ready=false/ready_reason=null,
+ *          Rule (1), status ≠ To Do) — kein neuer Code, nur Regressions-Beleg
+ *          gegen den neuen, extern definierten Statuswert (rein additiv,
+ *          tolerant falls wait_reason fehlt).
+ *   AC2 — Eine depends-Referenz auf eine Waiting-Story gilt als nicht
+ *          erfüllter Vorgänger (Rule (4), status ≠ Done) — macht die
+ *          abhängige Story nicht ready.
  */
 
 import { describe, it, expect } from '@jest/globals';
@@ -185,6 +195,18 @@ describe('computeStoryReadyStatus — rule (1): status must be To Do', () => {
     expect(result.ready).toBe(false);
     expect(result.ready_reason).toBeNull();
   });
+
+  it('waiting-status-devgui AC1: returns ready=false, ready_reason=null for Waiting stories (rule 1 — status ≠ To Do)', async () => {
+    // Regressions-Invariante (S-428): eine Waiting-Story wird wie Blocked/
+    // Idee/Verworfen/Done von Rule (1) abgefangen — kein neuer Code, nur
+    // Beleg dass die Invariante für den neuen (extern definierten) Statuswert
+    // gilt. Tolerant auch ohne wait_reason (Feld wird hier nicht gebraucht).
+    const story = readyStory({ status: 'Waiting' });
+    const fsDeps = makeFsDeps({ specContent: VALID_SPEC });
+    const result = await computeStoryReadyStatus(story, fsDeps, REPO_PATH, makeStoriesMap());
+    expect(result.ready).toBe(false);
+    expect(result.ready_reason).toBeNull();
+  });
 });
 
 describe('computeStoryReadyStatus — rule (5): no blocked_reason', () => {
@@ -285,6 +307,15 @@ describe('computeStoryReadyStatus — rule (4): depends must be fulfilled', () =
     const result = await computeStoryReadyStatus(story, fsDeps, REPO_PATH, allStoriesMap);
     expect(result.ready).toBe(false);
     expect(result.ready_reason).toContain('S-010');
+  });
+
+  it('waiting-status-devgui AC2: returns ready=false when a depends story is Waiting (not Done)', async () => {
+    const story = readyStory({ depends: ['S-011'] });
+    const fsDeps = makeFsDeps({ specContent: VALID_SPEC });
+    const allStoriesMap = makeStoriesMap([{ id: 'S-011', status: 'Waiting' }]);
+    const result = await computeStoryReadyStatus(story, fsDeps, REPO_PATH, allStoriesMap);
+    expect(result.ready).toBe(false);
+    expect(result.ready_reason).toContain('S-011');
   });
 
   it('returns ready=true when depends is empty', async () => {

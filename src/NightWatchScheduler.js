@@ -127,6 +127,33 @@
  * zum bestehenden `token-limit-stop`-Dedupe unten). `'unknown'`/`'ok'`
  * blockieren nicht (kein Fehlalarm-Stop, AC9).
  *
+ * Vorab-Ziel-Check (docs/specs/nightwatch-idle-skip.md AC1–AC4, S-427):
+ *   Bevor `#runTick` für ein Kandidaten-Projekt `#startDrain` ruft, prüft es
+ *   anhand des BEREITS vorhandenen `BoardAggregator`-Scans (kein zusätzlicher
+ *   Scan) via `computeDrainState(project, nowMs, staleInProgressHours)`
+ *   (`ProjectDrain.js`, unverändert wiederverwendet — kein zweiter
+ *   Regel-Satz), ob überhaupt ein Drain-Ziel existiert ODER entstehen kann
+ *   (`targets.length > 0 || couldBecomeReady === true`). Trifft keines zu →
+ *   `#startDrain` wird für dieses Projekt GAR NICHT gerufen (kein
+ *   `/agent-flow:flow`-Anstoß, kein `DrainReportStore`-Bericht, AC1) — der
+ *   Slot bleibt frei für das nächste Kandidaten-Projekt in diesem Tick. Ein
+ *   Fehler im Vorab-Check (z.B. eine defekte `computeDrainState`-Eingabe)
+ *   wird konservativ wie "kein Ziel" behandelt (Skip statt Crash, AC2/Edge-
+ *   Case) — der Tick läuft für die übrigen Kandidaten normal weiter. Die
+ *   `staleInProgressHours`-Einstellung kommt aus denselben, bereits gelesenen
+ *   `settings` (`TickerSettingsStore`, defaultet dort bereits selbst) — kein
+ *   neuer Settings-Pfad. Übersprungene Projekte erzeugen einen leisen,
+ *   GEDROSSELTEN Audit-Vermerk (`#auditSkip`, höchstens EINMAL je Projekt je
+ *   zusammenhängendem Nachtfenster — der Drossel-Zustand `#skipAuditedProjects`
+ *   wird bei jedem Fenster-EINTRITT geleert, AC2); secret-/pfad-frei (nur
+ *   Slug + Grund). Kein erzwungener Extra-Scan (AC3, Frische-Toleranz): ein
+ *   fälschlich übersprungenes Projekt heilt sich im nächsten Tick selbst,
+ *   sobald der (ohnehin periodisch neue) Aggregator-Scan das Ziel zeigt. Der
+ *   manuelle „Board abarbeiten"-Drain (`POST /api/projects/:slug/drain`,
+ *   `projectDrainRouter`) nutzt eine komplett separate `ProjectDrain`-
+ *   Instanz/Codepfad und bleibt von diesem Vorab-Check unberührt — er startet
+ *   weiterhin bedingungslos (AC4).
+ *
  * Nicht in dieser Story (bewusst NICHT gebaut):
  *   - „Board abarbeiten"-Knopf-Umbau (S-196) / Settings-API (S-194, fertig)
  *     / UI (S-197).
@@ -171,6 +198,7 @@
 import { randomUUID } from 'node:crypto';
 import { getZonedParts, zonedWallTimeToUtc, addCalendarDays } from './TokenLimitWatcher.js';
 import { createAbortHandle } from './DrainAbortRegistry.js';
+import { computeDrainState, DEFAULT_STALE_IN_PROGRESS_HOURS } from './ProjectDrain.js';
 
 /** Default Poll-Intervall (Minuten) — mirrors TickerSettingsStore-Default, falls Settings nicht lesbar sind. */
 export const DEFAULT_INTERVAL_MINUTES = 15;
@@ -392,6 +420,16 @@ export class NightWatchScheduler {
   #lastAuditedStopResetAt = null;
   /** Dedupe: verhindert wiederholten "auth-expired-skip"-Audit-Spam über mehrere Ticks hinweg (AC9). */
   #lastAuditedAuthExpired = false;
+  /**
+   * nightwatch-idle-skip AC2: Projekt-Repo-Pfade, für die in DIESEM
+   * zusammenhängenden Nachtfenster bereits ein gedrosselter "kein
+   * Drain-Ziel"-Vermerk erzeugt wurde (höchstens einmal je Projekt je
+   * Fenster) — wird bei jedem Fenster-EINTRITT geleert (`#wasWithinWindow`).
+   * @type {Set<string>}
+   */
+  #skipAuditedProjects = new Set();
+  /** nightwatch-idle-skip AC2: war der VORHERIGE Tick innerhalb des Nachtfensters? (Fenster-Eintritts-Erkennung). */
+  #wasWithinWindow = false;
 
   constructor({
     readSettings,
@@ -518,8 +556,16 @@ export class NightWatchScheduler {
       // AC11 Sanftes Ende / außerhalb des Fensters: KEINE neuen Drains;
       // bereits laufende (#activeDrains) werden hier schlicht nicht
       // angefasst — sie laufen über ihre eigene Promise-Kette zu Ende.
+      this.#wasWithinWindow = false;
       return { skipped: true, reason: 'outside-window', activeDrains: this.#activeDrains.size };
     }
+    if (!this.#wasWithinWindow) {
+      // nightwatch-idle-skip AC2: neues Nachtfenster betreten → Drossel-
+      // Zustand für den gedrosselten "kein Drain-Ziel"-Vermerk zurücksetzen
+      // (höchstens einmal je Projekt je Nachtfenster).
+      this.#skipAuditedProjects.clear();
+    }
+    this.#wasWithinWindow = true;
 
     // AC9 Auth-Vorabprüfung: bei abgelaufener Container-Anmeldung KEINE neuen
     // Drains in diesem Tick (spart Fehl-Läufe). Bereits laufende Drains
@@ -557,15 +603,42 @@ export class NightWatchScheduler {
     // JEDEN in diesem Tick gestarteten Nacht-Drain gereicht, damit dessen
     // Budget-Pausen das sanfte Fensterende ehren können (A2, AC6).
     const windowEndMs = computeWindowEndMs(nowMs, window);
+    // nightwatch-idle-skip AC1: dieselbe, bereits gelesene Einstellung wie
+    // `ProjectDrain` selbst (defaultet dort bereits auf DEFAULT_STALE_IN_PROGRESS_HOURS,
+    // hier defensiv zusätzlich abgesichert für Test-/Fremd-Settings-Quellen).
+    const staleInProgressHours =
+      Number.isInteger(settings.staleInProgressHours) && settings.staleInProgressHours >= 1
+        ? settings.staleInProgressHours
+        : DEFAULT_STALE_IN_PROGRESS_HOURS;
 
     const started = [];
     for (const project of candidates) {
       if (started.length >= freeSlots) break;
+      const projectSlug = project.project_slug ?? project.slug ?? null;
+
+      // nightwatch-idle-skip AC1/AC3: Vorab-Check aus dem BEREITS vorhandenen
+      // Board-Scan (kein zusätzlicher Scan) — maßgebliche Ziel-Logik ist
+      // `computeDrainState` (ProjectDrain.js), unverändert wiederverwendet.
+      let hasDrainTarget;
+      try {
+        const state = computeDrainState(project, nowMs, staleInProgressHours);
+        hasDrainTarget = state.targets.length > 0 || state.couldBecomeReady === true;
+      } catch {
+        // AC2 Edge-Case: ein Fehler im Vorab-Check kippt den Tick nicht —
+        // konservativ wie ein leeres Board behandeln (Skip, kein Crash).
+        hasDrainTarget = false;
+      }
+
+      if (!hasDrainTarget) {
+        this.#auditSkip(project.repo_path, projectSlug);
+        continue; // AC1: kein Drain-Start, kein /agent-flow:flow-Anstoß, kein Bericht
+      }
+
       // drain-completion-report AC6: der Projekt-Slug (kein Pfad) wird an
       // #startDrain gereicht, damit der Abschlussbericht ihn als `project`
       // führt. Fällt der Slug im Index (defensiv) weg → null, der Bericht wird
       // dann übersprungen (best-effort), ohne den Drain zu beeinträchtigen.
-      this.#startDrain(project.repo_path, project.project_slug ?? project.slug ?? null, windowEndMs);
+      this.#startDrain(project.repo_path, projectSlug, windowEndMs);
       started.push(project.repo_path);
     }
 
@@ -946,6 +1019,28 @@ export class NightWatchScheduler {
     if (this.#attachedPtys.get(projectPath) === pty) return; // bereits an genau diese Instanz gehängt
     this.#tokenLimitWatcher.attach(pty);
     this.#attachedPtys.set(projectPath, pty);
+  }
+
+  /**
+   * Gedrosselter "kein Drain-Ziel"-Vermerk (docs/specs/nightwatch-idle-skip.md
+   * AC2): höchstens EINMAL je Projekt je zusammenhängendem Nachtfenster — der
+   * Drossel-Zustand (`#skipAuditedProjects`) wird bei jedem Fenster-Eintritt
+   * geleert (siehe `#runTick`). Secret-/pfad-frei: nur der Slug (kein
+   * `repo_path`) landet im Audit-Text; `projectPath` dient ausschließlich als
+   * interner Dedupe-Schlüssel und wird NIE geloggt. Ohne gültigen Slug wird
+   * NICHT auditiert (kein leerer/undefinierter Wert im Vermerk, analog
+   * `#recordNightReport`s Slug-Guard) — der Dedupe-Zustand wird trotzdem
+   * gesetzt, damit nicht jeder Tick erneut versucht. Ein Audit-Fehler crasht
+   * den Tick nie (best-effort, `#audit` selbst ist bereits defensiv).
+   *
+   * @param {string} projectPath  interner Dedupe-Schlüssel (nicht geloggt).
+   * @param {string|null} projectSlug
+   */
+  #auditSkip(projectPath, projectSlug) {
+    if (this.#skipAuditedProjects.has(projectPath)) return;
+    this.#skipAuditedProjects.add(projectPath);
+    if (typeof projectSlug !== 'string' || projectSlug === '') return;
+    this.#audit(`taktgeber:no-drain-target-skip project=${projectSlug}`);
   }
 
   /**

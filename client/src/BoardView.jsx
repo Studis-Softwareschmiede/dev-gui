@@ -193,6 +193,20 @@
  *           Verworfen-Stories nicht auf — Test lebt in test/ProjectDrain.test.js
  *           + test/boardReadyStatus.test.js, nicht in dieser Datei.
  *
+ * waiting-status-devgui (S-428):
+ *   AC3  — „Waiting" ist ein zusätzliches, eigenständiges STATUS_LIFECYCLE-
+ *           Element (eigene Kanban-Spalte, rein additiv — bestehende Spalten
+ *           unverändert), rendert aber NICHT unter seinem rohen Statuswert,
+ *           sondern unter dem sprechenden Anzeige-Label „Wartet (extern)"
+ *           (`statusDisplayLabel()`) — sowohl im Spalten-Badge als auch in der
+ *           Status-Filter-Checkbox-Liste. Eigener, ruhig-gedämpfter Blauton in
+ *           STATUS_BADGE_STYLES['Waiting'], bewusst klar vom aggressiven
+ *           Blocked-Rot abgesetzt (Kontrast AA). `StoryCard` zeigt zusätzlich
+ *           `wait_reason` als Hinweiszeile unter dem Titel (analog zu
+ *           `blocked_reason` bei Blocked) — Bedeutung textlich, nicht nur
+ *           farblich; fehlt `wait_reason`, greift ein dezenter Default-Text
+ *           („wartet extern"), kein Crash.
+ *
  * board-filter-feature-status-consistency (S-241):
  *   AC1  — Bei aktivem einschränkendem Filter (hasRestrictingFilter) wird der
  *           angezeigte Feature-Status-Badge aus der GEFILTERTEN Story-Menge
@@ -224,8 +238,9 @@
  *           studis-kanban-board-ux) unverändert.
  *
  * Story-Status-Lebenszyklus (board-subsystem §9.3, erweitert um ideen-inbox AC1
- * + board-status-verworfen AC1):
- *   Idee | To Do | In Progress | Blocked | In Review | Done | Verworfen
+ * + board-status-verworfen AC1 + waiting-status-devgui AC3):
+ *   Idee | To Do | In Progress | Blocked | Waiting | In Review | Done | Verworfen
+ *   („Waiting" zeigt sich als „Wartet (extern)", siehe statusDisplayLabel())
  *
  * A11y (WCAG 2.1 AA):
  *   - <main> mit aria-label „Studis-Kanban-Board".
@@ -269,7 +284,24 @@ import { computeFeatureStatus }   from '../../src/featureStatus.js';
 // Element — rechts neben „Done" als eigene Spalte + Filter-Checkbox; speist
 // automatisch Spalten (gridTemplateColumns), Spalten-Gruppierung (byStatus)
 // und Filter-Checkbox-Liste (statusOptions) — eine Änderung, drei Wirkungen.
-const STATUS_LIFECYCLE = ['Idee', 'To Do', 'In Progress', 'Blocked', 'In Review', 'Done', 'Verworfen'];
+// waiting-status-devgui AC3 (S-428): „Waiting" ist NEU direkt nach „Blocked"
+// einsortiert — eigene, ruhige Spalte/Filter-Checkbox, getrennt von der
+// Blocked-Dauer-Blocker-Optik (eigener Badge-Ton, siehe STATUS_BADGE_STYLES).
+// Rein additiv: bestehende Werte/Reihenfolge unverändert.
+const STATUS_LIFECYCLE = ['Idee', 'To Do', 'In Progress', 'Blocked', 'Waiting', 'In Review', 'Done', 'Verworfen'];
+
+/**
+ * Sprechendes Anzeige-Label je Statuswert (waiting-status-devgui AC3, S-428).
+ * Nur „Waiting" hat ein abweichendes Anzeige-Label („Wartet (extern)") — alle
+ * übrigen Status rendern unverändert unter ihrem rohen Statuswert (kein
+ * Verhaltensunterschied für Bestandsstatus).
+ *
+ * @param {string} status
+ * @returns {string}
+ */
+function statusDisplayLabel(status) {
+  return status === 'Waiting' ? 'Wartet (extern)' : status;
+}
 
 /**
  * "Done" story-statuses for rollup calculation (AC5).
@@ -1700,6 +1732,9 @@ function FilterBar({
                 {statusOptions.map((s) => {
                   const checked = filterStatus.has(s);
                   const inputId = `board-filter-status-${s.replace(/\s+/g, '-').toLowerCase()}`;
+                  // waiting-status-devgui AC3 (S-428): Checkbox-Text nutzt das
+                  // sprechende Anzeige-Label (nur „Waiting" weicht ab).
+                  const displayLabel = statusDisplayLabel(s);
                   return (
                     <label key={s} style={styles.statusCheckboxLabel} htmlFor={inputId}>
                       <input
@@ -1708,9 +1743,9 @@ function FilterBar({
                         style={styles.statusCheckbox}
                         checked={checked}
                         onChange={() => handleStatusToggle(s)}
-                        aria-label={`Status ${s} ${checked ? 'aktiv' : 'inaktiv'}`}
+                        aria-label={`Status ${displayLabel} ${checked ? 'aktiv' : 'inaktiv'}`}
                       />
-                      {s}
+                      {displayLabel}
                     </label>
                   );
                 })}
@@ -2437,7 +2472,7 @@ function StatusColumn({ status, stories, onOpenSpec, onStoryClick, onSpecifyIdea
     <div
       role="listitem"
       style={styles.statusColumn}
-      aria-label={`Status: ${status}`}
+      aria-label={`Status: ${statusDisplayLabel(status)}`}
       data-status={status}
     >
       <div style={styles.columnHeader}>
@@ -2472,6 +2507,9 @@ function StatusColumn({ status, stories, onOpenSpec, onStoryClick, onSpecifyIdea
  * AC3 (story-detail-ansicht) — Karte als Button klickbar wenn onStoryClick vorhanden.
  * AC4 (autonome-board-abarbeitung) — Ready-Badge für To-Do-Stories; blocked_reason als
  *        Hinweiszeile unter dem Titel für Blocked-Stories.
+ * AC3 (waiting-status-devgui, S-428) — wait_reason als Hinweiszeile unter dem
+ *        Titel für Waiting-Stories (analog zu blocked_reason); dezenter
+ *        Default-Text, wenn wait_reason fehlt.
  *
  * idea-specify-chat AC1/AC2 (S-218) — für `status === 'Idee'` UND `onSpecifyIdea`
  * vorhanden zusätzlich ein kleiner „Spezifizieren"-Trigger NEBEN der (weiterhin
@@ -2589,6 +2627,20 @@ function StoryCard({ story, onOpenSpec, onStoryClick, onSpecifyIdea, specifyJob 
           data-testid={`blocked-reason-${story.id}`}
         >
           {story.blocked_reason}
+        </p>
+      )}
+
+      {/* waiting-status-devgui AC3 (S-428): wait_reason hint for Waiting
+          stories — Bedeutung textlich, nicht nur farblich; fehlt wait_reason
+          (Toleranz, AC5), greift ein dezenter Default-Text. */}
+      {story.status === 'Waiting' && (
+        <p
+          style={styles.waitReason}
+          aria-label={`Grund: ${story.wait_reason || 'wartet extern'}`}
+          title={story.wait_reason || 'wartet extern'}
+          data-testid={`wait-reason-${story.id}`}
+        >
+          {story.wait_reason || 'wartet extern'}
         </p>
       )}
 
@@ -3024,18 +3076,23 @@ function devColor(pct) {
 /**
  * Badge with text label for a status value.
  * Meaning conveyed via text, not only colour (WCAG 2.1 AA, AC4/A11y).
+ * waiting-status-devgui AC3 (S-428): der ANGEZEIGTE Text nutzt das sprechende
+ * Label (statusDisplayLabel — nur „Waiting" weicht ab, „Wartet (extern)");
+ * Farb-Lookup + aria-label bleiben am rohen Statuswert, damit STATUS_BADGE_STYLES
+ * unverändert per Statuswert indiziert wird.
  *
  * @param {{ status: string }} props
  */
 function StatusBadge({ status }) {
-  const label = status || '—';
-  const badgeStyle = STATUS_BADGE_STYLES[label] ?? STATUS_BADGE_STYLES._default;
+  const rawLabel = status || '—';
+  const displayLabel = statusDisplayLabel(rawLabel);
+  const badgeStyle = STATUS_BADGE_STYLES[rawLabel] ?? STATUS_BADGE_STYLES._default;
   return (
     <span
       style={{ ...styles.statusBadge, ...badgeStyle }}
-      aria-label={`Status: ${label}`}
+      aria-label={`Status: ${displayLabel}`}
     >
-      {label}
+      {displayLabel}
     </span>
   );
 }
@@ -3046,6 +3103,10 @@ const STATUS_BADGE_STYLES = {
   'To Do':       { background: '#1e293b', color: '#93c5fd', borderColor: '#334155' },
   'In Progress': { background: '#2a1a1a', color: '#fde68a', borderColor: '#78350f' },
   'Blocked':     { background: '#2a1a1a', color: '#f87171', borderColor: '#7f1d1d' },
+  // waiting-status-devgui AC3 (S-428): ruhig-gedämpfter Blauton, bewusst klar
+  // vom aggressiven Blocked-Rot abgesetzt (extern gewartet ≠ blockiert).
+  // Contrast: #94a3b8 on #1e2532 ≈ 6.0:1 — WCAG AA.
+  'Waiting':     { background: '#1e2532', color: '#94a3b8', borderColor: '#334155' },
   'In Review':   { background: '#2a1a2a', color: '#d8b4fe', borderColor: '#581c87' },
   'Done':        { background: '#1a2a1a', color: '#86efac', borderColor: '#14532d' },
   // board-status-verworfen AC2 (S-242): gedämpft-neutraler Grauton, klar vom
@@ -3831,6 +3892,20 @@ const styles = {
     overflow: 'hidden',
     textOverflow: 'ellipsis',
     // Allow wrapping for accessibility — do not force single line for long reasons
+    whiteSpace: 'normal',
+    wordBreak: 'break-word',
+  },
+
+  // waiting-status-devgui AC3 (S-428): wait_reason display for Waiting stories —
+  // ruhiger Ton (kein Alarm-Gelb/-Rot wie blocked_reason), passend zur
+  // „ruhige Kategorie"-Vorgabe. #94a3b8 on #1a1a1a: contrast ≈ 6.8:1 — WCAG AA.
+  waitReason: {
+    margin: '2px 0 4px',
+    fontSize: 11,
+    color: '#94a3b8',
+    lineHeight: 1.4,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
     whiteSpace: 'normal',
     wordBreak: 'break-word',
   },

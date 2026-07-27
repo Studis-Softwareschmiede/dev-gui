@@ -96,6 +96,21 @@
  *          nur die bereits bestehende `status !== 'To Do' && status !== 'In
  *          Progress'`-Invariante bleibt für den neuen Statuswert gültig.
  *
+ * Covers (waiting-status-devgui):
+ *   AC1 — Regressions-Invariante: eine Story mit status 'Waiting' ist nie ein
+ *          Drain-Ziel (computeDrainState) — wird wie Blocked/Idee/Verworfen
+ *          übersprungen. Kein Code-Delta in src/ProjectDrain.js; der Test
+ *          belegt nur, dass die bestehende Ziel-Invariante für den neuen
+ *          Statuswert gültig bleibt (rein additiv).
+ *   AC2 — 'Waiting' ist nie "lebendig" (computeAliveStoryIds); eine
+ *          depends-Referenz auf eine Waiting-Story gilt als nicht erfüllter
+ *          Vorgänger und macht die abhängige Story NICHT couldBecomeReady
+ *          (couldBecomeReadyViaDepends) — kein Crash, kein fälschliches
+ *          ready.
+ *   AC4 — Der Nachtwächter-Vorab-Skip (nightwatch-idle-skip AC1) zählt eine
+ *          Waiting-Story nicht als Ziel — über dieselbe computeDrainState-
+ *          Logik wie AC1 hier; siehe zusätzlich test/NightWatchScheduler.test.js.
+ *
  * Covers (drain-completion-report):
  *   AC1 — drainProject() liefert zusätzlich `completed: [{id,title}]` (Stories,
  *          die während des Drains von To Do/In Progress nach Done übergingen)
@@ -624,6 +639,20 @@ describe('couldBecomeReadyViaDepends (AC2 Konvergenz-Regel)', () => {
     expect(couldBecomeReadyViaDepends(story, byId(dep, story))).toBe(false);
   });
 
+  // waiting-status-devgui AC2 (S-428): 'Waiting' (extern gewartet) ist wie
+  // Blocked/Idee/Verworfen ein dauerhafter Sackgassen-Status — kein neuer
+  // Code, nur Regressions-Beleg.
+  it('is false when the unmet depend is Waiting (dead end, waiting-status-devgui AC2)', () => {
+    const dep = makeStory({ id: 'S-1', status: 'Waiting' });
+    const story = makeStory({
+      id: 'S-2',
+      status: 'To Do',
+      ready_reason: 'abhängige Story nicht Done: S-1',
+      depends: ['S-1'],
+    });
+    expect(couldBecomeReadyViaDepends(story, byId(dep, story))).toBe(false);
+  });
+
   it('is false when the unmet depend does not exist (dead end)', () => {
     const story = makeStory({
       id: 'S-2',
@@ -765,6 +794,14 @@ describe('computeAliveStoryIds / couldBecomeReadyViaDepends — transitive Sackg
     expect(couldBecomeReadyViaDepends(s1, storiesById)).toBe(false);
   });
 
+  // waiting-status-devgui AC2 (S-428): eine 'Waiting'-Story ist nie lebendig
+  // (wie Blocked/Idee) — Regressions-Beleg, kein neuer Code.
+  it('a Waiting story is never alive (computeAliveStoryIds), same as Blocked/Idee', () => {
+    const waiting = makeStory({ id: 'S-1', status: 'Waiting' });
+    const alive = computeAliveStoryIds([waiting], byId(waiting));
+    expect(alive.has('S-1')).toBe(false);
+  });
+
   it('positive control: diamond with a Done root (A=Done; B,C depend on A; D depends on B+C) — all alive, D could become ready', () => {
     const a = makeStory({ id: 'S-A', status: 'Done' });
     const b = makeStory({
@@ -852,6 +889,21 @@ describe('computeDrainState (AC1/AC2/AC3)', () => {
     const { targets } = computeDrainState(project, NOW_MS, 4);
 
     expect(targets.map((s) => s.id)).toEqual(['S-1']);
+  });
+
+  // waiting-status-devgui AC1/AC4 (S-428): Regressions-Invariante — eine
+  // 'Waiting'-Story ist nie ein Drain-Ziel, genau wie Blocked/Idee/Verworfen/
+  // Done. Dieselbe computeDrainState-Logik trägt AC4 (nightwatch-idle-skip-
+  // Kohärenz), kein zweiter Regel-Satz.
+  it('AC1 (waiting-status-devgui): excludes a Waiting story from targets, same as Blocked/Idee/Verworfen/Done', () => {
+    const waiting = makeStory({ id: 'S-9', status: 'Waiting' });
+    const readyTodo = makeStory({ id: 'S-1', status: 'To Do', ready: true });
+    const project = makeProject('p', '/p', [waiting, readyTodo]);
+
+    const { targets, couldBecomeReady } = computeDrainState(project, NOW_MS, 4);
+
+    expect(targets.map((s) => s.id)).toEqual(['S-1']);
+    expect(couldBecomeReady).toBe(false);
   });
 });
 

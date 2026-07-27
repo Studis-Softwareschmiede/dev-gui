@@ -130,6 +130,34 @@
  *         in test/DrainNotifier.test.js unit-getestet (kein zweiter Codepfad —
  *         dieselbe Instanz wie der manuelle Drain, server.js-Verdrahtung).
  *
+ * Covers (nightwatch-idle-skip, S-427):
+ *   AC1 — `computeDrainState` (ProjectDrain.js, wiederverwendet) entscheidet je
+ *         Kandidat VOR `#startDrain`, ob `targets.length>0 || couldBecomeReady`
+ *         gilt; trifft keines zu → `projectDrain.drainProject()` wird für dieses
+ *         Projekt GAR NICHT gerufen (kein Bericht/kein Registry-Eintrag), das
+ *         Projekt fehlt in `started`. Ein Projekt mit `couldBecomeReady:true`
+ *         aber leeren `targets` startet TROTZDEM (Konvergenz-Fall, Edge-Case Spec).
+ *   AC2 — übersprungene Projekte erzeugen GENAU EINEN gedrosselten Audit-Vermerk
+ *         je Projekt je zusammenhängendem Nachtfenster (nicht je Tick); ein
+ *         werfender Vorab-Check (`computeDrainState`) wird wie "kein Ziel"
+ *         behandelt (Skip, Tick läuft für übrige Kandidaten normal weiter, kein
+ *         Crash).
+ *   AC3 — der Vorab-Check nutzt ausschließlich den bereits vorhandenen
+ *         `boardAggregator.getIndex()`-Scan dieses Ticks (kein zweiter
+ *         `getIndex()`-Aufruf pro Tick); ein zuvor übersprungenes Projekt wird
+ *         im nächsten Tick automatisch gedraint, sobald der (neue) Scan ein
+ *         Ziel zeigt (Selbstheilung, kein synchroner Extra-Scan nötig).
+ *   AC4 — der Vorab-Skip lebt ausschließlich in `NightWatchScheduler`; der
+ *         manuelle Drain-Router (`projectDrainRouter`/`ProjectDrain` direkt)
+ *         wird von dieser Datei nicht berührt — kein Regressionstest hier nötig
+ *         (separate Datei/Codepfad, keine gemeinsame Vorab-Check-Funktion).
+ *
+ * Covers (waiting-status-devgui, S-428):
+ *   AC4 — Regressions-Beleg: ein Projekt mit ausschließlich `Waiting`-Storys
+ *         hat KEIN Drain-Ziel (dieselbe `computeDrainState`-Logik wie AC1
+ *         oben, kein zweiter Regel-Satz) — wird wie Blocked/Done/nicht-ready
+ *         To Do vom Vorab-Skip übersprungen.
+ *
  * Strategy:
  *   - Pure Helper (`parseHHMM`, `isWithinWindow`, `computeWindowEndMs`,
  *     `clampMaxParallel`, `selectCandidateProjects`) direkt mit
@@ -170,8 +198,21 @@ function makeSettings(overrides = {}) {
   };
 }
 
+/**
+ * nightwatch-idle-skip AC1: `computeDrainState` liest `project.features[].stories`
+ * (`ProjectDrain.flattenProjectStories`) — der Default-Fixture liefert daher EINE
+ * ready `To Do`-Story, damit bestehende "ein Drain wird gestartet"-Tests unverändert
+ * grün bleiben. Tests für den neuen Vorab-Skip überschreiben `features` explizit
+ * (leer → kein Ziel, `couldBecomeReady`-Story → Konvergenz-Fall).
+ */
 function makeProject(slug, repoPath, overrides = {}) {
-  return { project_slug: slug, repo_path: repoPath, error: undefined, ...overrides };
+  return {
+    project_slug: slug,
+    repo_path: repoPath,
+    error: undefined,
+    features: [{ stories: [{ id: `${slug}-S-1`, status: 'To Do', ready: true }] }],
+    ...overrides,
+  };
 }
 
 /** Deferred-Promise-Helfer — steuerbare drainProject()-Auflösung ohne echtes Warten. */
@@ -579,6 +620,183 @@ describe('NightWatchScheduler.tick() — enabled/window Gates (AC9/AC10/AC11)', 
     custom.start();
     custom.stop();
     expect(clearTimeoutFn).toHaveBeenCalledWith(handle);
+  });
+});
+
+// ── Vorab-Ziel-Check (nightwatch-idle-skip AC1–AC4, S-427) ────────────────────
+
+describe('NightWatchScheduler — Vorab-Ziel-Check vor jedem Drain-Start (nightwatch-idle-skip AC1/AC2/AC3)', () => {
+  it('AC1 — Projekt ohne Drain-Ziel (leere features) wird übersprungen: kein drainProject-Aufruf, kein Eintrag in started', async () => {
+    const index = [
+      makeProject('proj-a', '/workspace/proj-a', { features: [] }), // kein Ziel
+      makeProject('proj-b', '/workspace/proj-b'), // Default-Fixture: ready To-Do → Ziel
+    ];
+    const { scheduler, projectDrain } = makeScheduler({ index });
+    const result = await scheduler.tick();
+    expect(result.started).toEqual(['/workspace/proj-b']);
+    expect(projectDrain.drainProject).toHaveBeenCalledTimes(1);
+    expect(projectDrain.drainProject).toHaveBeenCalledWith('/workspace/proj-b', expect.any(Object));
+  });
+
+  it('AC1 — Projekt mit ausschließlich Blocked/Done/nicht-ready To-Do-Stories hat kein Ziel → Skip', async () => {
+    const index = [
+      makeProject('proj-a', '/workspace/proj-a', {
+        features: [
+          {
+            stories: [
+              { id: 'S-1', status: 'Done', ready: false },
+              { id: 'S-2', status: 'Blocked', ready: false },
+              { id: 'S-3', status: 'To Do', ready: false }, // nicht ready → kein Ziel
+            ],
+          },
+        ],
+      }),
+    ];
+    const { scheduler, projectDrain } = makeScheduler({ index });
+    const result = await scheduler.tick();
+    expect(result.started).toEqual([]);
+    expect(projectDrain.drainProject).not.toHaveBeenCalled();
+  });
+
+  it('AC4 (waiting-status-devgui, S-428) — Projekt mit ausschließlich Waiting-Storys hat kein Ziel → Skip', async () => {
+    const index = [
+      makeProject('proj-a', '/workspace/proj-a', {
+        features: [
+          {
+            stories: [
+              { id: 'S-1', status: 'Waiting', ready: false, wait_reason: 'wartet auf realen /adopt-Fall' },
+            ],
+          },
+        ],
+      }),
+    ];
+    const { scheduler, projectDrain } = makeScheduler({ index });
+    const result = await scheduler.tick();
+    expect(result.started).toEqual([]);
+    expect(projectDrain.drainProject).not.toHaveBeenCalled();
+  });
+
+  it('AC1 Edge-Case — couldBecomeReady:true bei leeren targets startet TROTZDEM den Drain', async () => {
+    const index = [
+      makeProject('proj-a', '/workspace/proj-a', {
+        features: [
+          {
+            stories: [
+              // S-2 (To Do, nicht ready) kann ready werden, sobald S-1 (noch nicht Done) fertig ist.
+              { id: 'S-1', status: 'In Progress', ready: false },
+              {
+                id: 'S-2',
+                status: 'To Do',
+                ready: false,
+                depends: ['S-1'],
+                ready_reason: 'abhängige Story nicht Done: S-1',
+              },
+            ],
+          },
+        ],
+      }),
+    ];
+    const { scheduler, projectDrain } = makeScheduler({ index });
+    const result = await scheduler.tick();
+    expect(result.started).toEqual(['/workspace/proj-a']);
+    expect(projectDrain.drainProject).toHaveBeenCalledTimes(1);
+  });
+
+  it('AC1 — kein DrainReportStore-Bericht für übersprungene Projekte', async () => {
+    const drainReportStore = { record: jest.fn(async () => ({})) };
+    const index = [makeProject('proj-a', '/workspace/proj-a', { features: [] })];
+    const { scheduler } = makeScheduler({ index, drainReportStore });
+    await scheduler.tick();
+    await flush();
+    expect(drainReportStore.record).not.toHaveBeenCalled();
+  });
+
+  it('AC2 — übersprungenes Projekt erzeugt genau EINEN gedrosselten Audit-Vermerk, nicht je Tick', async () => {
+    const index = [makeProject('proj-a', '/workspace/proj-a', { features: [] })];
+    const { scheduler, auditStore } = makeScheduler({ index });
+
+    await scheduler.tick();
+    await scheduler.tick();
+    await scheduler.tick();
+
+    const skipCalls = auditStore.record.mock.calls.filter(([r]) => r.command.includes('no-drain-target-skip'));
+    expect(skipCalls).toHaveLength(1);
+    expect(skipCalls[0][0].command).toBe('taktgeber:no-drain-target-skip project=proj-a');
+    // secret-/pfad-frei: kein repo_path im Vermerk.
+    expect(skipCalls[0][0].command).not.toContain('/workspace');
+  });
+
+  it('AC2 — ein werfender Vorab-Check degradiert (Skip statt Crash), Tick läuft für übrige Kandidaten weiter', async () => {
+    const index = [
+      // `features` ist absichtlich kein Array (bricht `flattenProjectStories`
+      // NICHT — die Funktion selbst ist defensiv), stattdessen simulieren wir
+      // einen werfenden Vorab-Check über eine Getter-Falle:
+      Object.defineProperty(makeProject('proj-a', '/workspace/proj-a', {}), 'features', {
+        get() {
+          throw new Error('boom');
+        },
+      }),
+      makeProject('proj-b', '/workspace/proj-b'),
+    ];
+    const { scheduler, projectDrain } = makeScheduler({ index });
+    const result = await scheduler.tick();
+    expect(result.started).toEqual(['/workspace/proj-b']);
+    expect(projectDrain.drainProject).toHaveBeenCalledTimes(1);
+  });
+
+  it('AC3 — kein zusätzlicher Board-Scan für den Vorab-Check (getIndex genau einmal je Tick)', async () => {
+    const index = [makeProject('proj-a', '/workspace/proj-a', { features: [] }), makeProject('proj-b', '/workspace/proj-b')];
+    const { scheduler, boardAggregator } = makeScheduler({ index });
+    await scheduler.tick();
+    expect(boardAggregator.getIndex).toHaveBeenCalledTimes(1);
+  });
+
+  it('AC3 — Selbstheilung: fälschlich übersprungenes Projekt wird im nächsten Tick gedraint, sobald der Scan ein Ziel zeigt', async () => {
+    let index = [makeProject('proj-a', '/workspace/proj-a', { features: [] })];
+    const boardAggregator = { getIndex: jest.fn(async () => index) };
+    const { scheduler, projectDrain } = makeScheduler({ boardAggregator });
+
+    const first = await scheduler.tick();
+    expect(first.started).toEqual([]);
+    expect(projectDrain.drainProject).not.toHaveBeenCalled();
+
+    // Der Board-Scan zeigt jetzt ein Ziel (z.B. eine neue ready To-Do-Story).
+    index = [makeProject('proj-a', '/workspace/proj-a')];
+    const second = await scheduler.tick();
+    expect(second.started).toEqual(['/workspace/proj-a']);
+    expect(projectDrain.drainProject).toHaveBeenCalledTimes(1);
+  });
+
+  it('AC2 — Fenster-Übergang (raus/rein) setzt den Drossel-Zustand pro Projekt zurück (neue Nacht → neuer Vermerk erlaubt)', async () => {
+    const insideWindowMs = Date.UTC(2026, 0, 15, 23, 30);
+    const outsideWindowMs = Date.UTC(2026, 0, 15, 11, 0);
+    let currentNow = insideWindowMs;
+    const index = [makeProject('proj-a', '/workspace/proj-a', { features: [] })];
+    // makeScheduler() friert `now` auf einen festen Wert ein — für einen
+    // Fenster-Übergang bauen wir hier direkt eine Instanz mit veränderlicher Uhr.
+    const settings = makeSettings();
+    const boardAggregator = { getIndex: jest.fn(async () => index) };
+    const projectDrain = { drainProject: jest.fn() };
+    const manualAuditStore = { record: jest.fn() };
+    const custom = new NightWatchScheduler({
+      readSettings: async () => settings,
+      boardAggregator,
+      projectDrain,
+      auditStore: manualAuditStore,
+      now: () => currentNow,
+    });
+
+    await custom.tick(); // Nacht 1, Tick 1 — Vermerk 1
+    await custom.tick(); // Nacht 1, Tick 2 — gedrosselt (kein weiterer Vermerk)
+
+    currentNow = outsideWindowMs;
+    await custom.tick(); // außerhalb des Fensters — kein Vorab-Check
+
+    currentNow = insideWindowMs + 24 * 60 * 60 * 1000; // Nacht 2, gleiche Uhrzeit, nächster Tag
+    await custom.tick(); // Nacht 2, Tick 1 — neuer Vermerk erlaubt
+
+    const skipCalls = manualAuditStore.record.mock.calls.filter(([r]) => r.command.includes('no-drain-target-skip'));
+    expect(skipCalls).toHaveLength(2);
   });
 });
 
@@ -1443,8 +1661,16 @@ describe('NightWatchScheduler — Registrierung in der geteilten DrainJobRegistr
   it('ohne Projekt-Slug wird NICHT registriert (kein leerer/ungültiger Slug in der Persistenz)', async () => {
     const drainJobRegistry = makeJobRegistry();
     const projectDrain = makeControllableProjectDrain();
-    // Fixture-Projekt ohne project_slug/slug (defensiv — s. #startDrain-Aufrufer).
-    const index = [{ repo_path: '/workspace/no-slug-proj', error: undefined }];
+    // Fixture-Projekt ohne project_slug/slug (defensiv — s. #startDrain-Aufrufer);
+    // eine ready To-Do-Story sorgt dafür, dass der Vorab-Ziel-Check (nightwatch-idle-skip
+    // AC1) den Drain trotzdem startet.
+    const index = [
+      {
+        repo_path: '/workspace/no-slug-proj',
+        error: undefined,
+        features: [{ stories: [{ id: 'S-1', status: 'To Do', ready: true }] }],
+      },
+    ];
     const { scheduler } = makeScheduler({
       projectDrain,
       drainJobRegistry,

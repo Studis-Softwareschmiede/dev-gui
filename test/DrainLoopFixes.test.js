@@ -499,7 +499,17 @@ describe('NightWatchScheduler — Abort-Handle-Registrierung (drain-stop-control
         projects: 'all',
       }),
       boardAggregator: {
-        getIndex: async () => [{ project_slug: 'proj-a', repo_path: '/workspace/proj-a', error: undefined }],
+        // nightwatch-idle-skip AC1: der Vorab-Check (computeDrainState) braucht
+        // ein Drain-Ziel, sonst startet #startDrain für dieses Projekt gar
+        // nicht erst — eine ready To-Do-Story reicht dafür aus.
+        getIndex: async () => [
+          {
+            project_slug: 'proj-a',
+            repo_path: '/workspace/proj-a',
+            error: undefined,
+            features: [{ stories: [{ id: 'S-1', status: 'To Do', ready: true }] }],
+          },
+        ],
       },
       projectDrain: {
         drainProject: async (path, opts) => {
