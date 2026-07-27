@@ -8,7 +8,7 @@ Newest-first. Regeln für die Orchestrator-Ebene (Landen/Konsolidieren/Recovery/
 
 **Regel (Anwendung von flow/P3 auf Modus B):** Nach jedem Ship-Abbruch/-Timeout ZUERST `git fetch` + `git log origin/feature/<F-###>` prüfen. Story-SHA bereits drauf ⇒ gelandet — nur die Restschritte mechanisch nachziehen: (1) `git checkout feature/<F-###> && git reset --hard origin/feature/<F-###>`, (2) `BOARD_WRITER=flow board set <S-###> status Done` + Commit + `git push origin HEAD:feature/<F-###>`, (3) Remote-Story-Branch löschen (das Skript pusht ihn vor dem Merge). Kein Re-Run des Skripts (träfe denselben Hänger bzw. würde den Merge doppelt versuchen). Vorher `ps aux | grep board-ship` — verwaiste Kindprozesse ausschliessen.
 
-*[seen-in: dev-gui S-427 2026-07-27; promoted: 2026-07-27]*
+*[seen-in: dev-gui S-427 2026-07-27 + S-428 2026-07-27 (reproduziert — Hänger ist der Normalfall in Modus B aus dem Worktree, nicht ein Einzelfall); promoted: 2026-07-27]*
 
 ## flow/L10 — `board next` kann eine bereits gelandete Story liefern — vor jedem coder-Dispatch die Landung mechanisch ausschliessen
 

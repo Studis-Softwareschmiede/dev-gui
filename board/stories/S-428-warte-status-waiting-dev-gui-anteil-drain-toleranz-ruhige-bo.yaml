@@ -16,8 +16,8 @@ labels:
 - ui
 size_est: L
 dispo_est: '5.25'
-dispo_act: null
-dispo_forecast: null
+dispo_act: '4'
+dispo_forecast: '.3125'
 estimate_note: 'L (Score 9: 5 AC, 3 Komponenten ProjectDrain+BoardAggregator+Board-Ansicht,
   +1 ui). estimator als Subagent nicht dispatchbar -> baseline js|balanced|L, confidence
   low; tok_est aus baseline js|balanced|L.'
@@ -27,7 +27,8 @@ branch: feat/S-428-waiting-status
 pr: null
 blocked_reason: null
 created_at: '2026-07-26T19:39:35Z'
-updated_at: '2026-07-27T08:05:36Z'
+updated_at: '2026-07-27T08:07:41Z'
 done_at: '2026-07-27T08:05:36Z'
 claimed_by: MacBook-Pro-von-Alexander.local-82928-1785137569-17275
 claimed_at: '2026-07-27T07:33:13Z'
+tok: '77068319'
