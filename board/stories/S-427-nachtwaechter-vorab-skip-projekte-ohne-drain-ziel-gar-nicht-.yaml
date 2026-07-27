@@ -2,7 +2,7 @@ id: S-427
 parent: F-099
 title: 'Nachtwaechter-Vorab-Skip: Projekte ohne Drain-Ziel gar nicht erst drainen
   (computeDrainState-Gate, gedrosselter Vermerk)'
-status: To Do
+status: In Progress
 priority: P2
 spec: docs/specs/nightwatch-idle-skip.md
 implements:
@@ -20,9 +20,11 @@ estimate_note: 'M (Score 6: 4 AC, 2 Komponenten NightWatchScheduler+computeDrain
   kein Label). baseline js|balanced|M; tok_est aus baseline js|balanced|M.'
 confidence: medium
 tok_est: '1659043'
-branch: null
+branch: feat/S-427-nightwatch-idle-skip
 pr: null
 blocked_reason: null
 created_at: '2026-07-26T19:39:32Z'
-updated_at: '2026-07-26T19:41:31Z'
+updated_at: '2026-07-27T06:44:35Z'
 done_at: null
+claimed_by: MacBook-Pro-von-Alexander.local-41834-1785134654-32720
+claimed_at: '2026-07-27T06:44:24Z'
