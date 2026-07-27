@@ -129,3 +129,9 @@ namespaces:
       status: active
       reserved_at: '2026-07-27T06:42:42Z'
       high_water: null
+    - feature_id: F-099
+      range_start: 61
+      range_end: 70
+      status: active
+      reserved_at: '2026-07-27T06:42:52Z'
+      high_water: null
