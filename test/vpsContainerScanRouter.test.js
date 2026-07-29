@@ -55,6 +55,16 @@
  *         bei `status:'done'` OHNE Store-Treffer abwesend, AUCH wenn `job.prHint` gesetzt
  *         ist — nur ein tatsächlicher Store-Treffer liefert `reportRef`.
  *
+ * Covers (red-team-scan-access-token.md, S-407): AC2, AC3, AC4, AC5
+ *   AC2 — `hinterWall:true` im POST-Body + vollständiges Token im `credentialStore` →
+ *         `runner.start()` bekommt `accessToken:{clientId,clientSecret}`.
+ *   AC3 — Confinement bleibt: `hinterWall` ändert weder `url` noch `urlEdge` — die Header
+ *         hängen sich an die bereits server-seitig abgeleitete `urlEdge`.
+ *   AC4 — graceful Fallback (weiterhin 202, KEIN `accessToken`) wenn: kein Token hinterlegt,
+ *         nur teilweise hinterlegt, `hinterWall` fehlt/false trotz hinterlegtem Token, kein
+ *         `credentialStore` verdrahtet, oder `getPlaintext()` wirft (best-effort/non-fatal).
+ *   AC5 — Security-Floor: die Token-Werte erscheinen NICHT in der 202-Response.
+ *
  * Muster: express + node:http createServer auf Port 0 (127.0.0.1), kein supertest
  * (wie redTeamRouter.test.js / reconcileRouter.test.js). Injizierte Stubs für runner +
  * vpsDockerControl/vpsRegistry/vpsTargets/workspaceScanner + pathValidator/slugResolver.
@@ -180,14 +190,14 @@ function makeDeps({ containers, listClones } = {}) {
   };
 }
 
-function makeApp({ runner, deps, pathValidator, slugResolver, scanResultStore, boardWriter } = {}) {
+function makeApp({ runner, deps, pathValidator, slugResolver, scanResultStore, boardWriter, credentialStore } = {}) {
   const app = express();
   app.use(express.json());
   const _runner = runner ?? makeRunner();
   app.use(
     vpsContainerScanRouter(
       _runner,
-      { ...(deps ?? makeDeps()), scanResultStore, boardWriter },
+      { ...(deps ?? makeDeps()), scanResultStore, boardWriter, credentialStore },
       {
         pathValidator: pathValidator ?? defaultPathValidator,
         slugResolver: slugResolver ?? defaultSlugResolver,
@@ -195,6 +205,11 @@ function makeApp({ runner, deps, pathValidator, slugResolver, scanResultStore, b
     ),
   );
   return { app, runner: _runner };
+}
+
+/** credentialStore-Stub (red-team-scan-access-token AC1/AC2): fester Rückgabewert je storeKey. */
+function makeCredentialStore(values) {
+  return { getPlaintext: async (storeKey) => values[storeKey] ?? null };
 }
 
 const SCAN_PATH = '/api/vps/machines/hetzner/srv1/containers/c1/scan';
@@ -421,6 +436,117 @@ describe('Runner-Args + Ziel-Confinement — AC1/AC4', () => {
       await httpPost(srv, `${SCAN_PATH}?url=http://evil.example.com`, {});
       const { opts } = runner.startCalls[0];
       expect(opts.url).toBe('http://1.1.1.1:8080');
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+});
+
+// ── red-team-scan-access-token AC2/AC3/AC4/AC5 — "hinter der Wall" (S-407) ────────────
+
+describe('POST .../containers/:containerId/scan — red-team-scan-access-token AC2/AC3/AC4/AC5', () => {
+  it('AC2: hinterWall:true + vollständiges Token hinterlegt → runner.start() bekommt accessToken:{clientId,clientSecret}', async () => {
+    const credentialStore = makeCredentialStore({
+      'credentials/cloudflare-access-service-token/client_id': 'id-1',
+      'credentials/cloudflare-access-service-token/client_secret': 'secret-1',
+    });
+    const { app, runner } = makeApp({ credentialStore });
+    const srv = await startServer(app);
+    try {
+      const { status } = await httpPost(srv, SCAN_PATH, { hinterWall: true });
+      expect(status).toBe(202);
+      const { opts } = runner.startCalls[0];
+      expect(opts.accessToken).toEqual({ clientId: 'id-1', clientSecret: 'secret-1' });
+      // AC3 — Confinement bleibt: die Header hängen sich an die bereits abgeleitete publicUrl,
+      // hinterWall ändert weder url noch urlEdge.
+      expect(opts.url).toBe('http://1.1.1.1:8080');
+      expect(opts.urlEdge).toBe('https://dev-gui.example.com');
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('AC4: hinterWall:true OHNE hinterlegtes Token → graceful Fallback, KEIN accessToken, weiterhin 202 (Ausbaustufe-1-Verhalten)', async () => {
+    const credentialStore = makeCredentialStore({});
+    const { app, runner } = makeApp({ credentialStore });
+    const srv = await startServer(app);
+    try {
+      const { status } = await httpPost(srv, SCAN_PATH, { hinterWall: true });
+      expect(status).toBe(202);
+      const { opts } = runner.startCalls[0];
+      expect(opts.accessToken).toBeUndefined();
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('AC4: hinterWall:true, Token nur teilweise hinterlegt (client_secret fehlt) → graceful Fallback, KEIN accessToken', async () => {
+    const credentialStore = makeCredentialStore({
+      'credentials/cloudflare-access-service-token/client_id': 'id-1',
+    });
+    const { app, runner } = makeApp({ credentialStore });
+    const srv = await startServer(app);
+    try {
+      const { status } = await httpPost(srv, SCAN_PATH, { hinterWall: true });
+      expect(status).toBe(202);
+      expect(runner.startCalls[0].opts.accessToken).toBeUndefined();
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('AC4: hinterWall fehlt/false, Token IST hinterlegt → weiterhin KEIN accessToken (Betreiber-Wunsch ist Vorbedingung)', async () => {
+    const credentialStore = makeCredentialStore({
+      'credentials/cloudflare-access-service-token/client_id': 'id-1',
+      'credentials/cloudflare-access-service-token/client_secret': 'secret-1',
+    });
+    const { app, runner } = makeApp({ credentialStore });
+    const srv = await startServer(app);
+    try {
+      await httpPost(srv, SCAN_PATH, {});
+      expect(runner.startCalls[0].opts.accessToken).toBeUndefined();
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('AC4: ohne credentialStore verdrahtet (kein Dep) → graceful Fallback, kein Crash', async () => {
+    const { app, runner } = makeApp(); // kein credentialStore in deps
+    const srv = await startServer(app);
+    try {
+      const { status } = await httpPost(srv, SCAN_PATH, { hinterWall: true });
+      expect(status).toBe(202);
+      expect(runner.startCalls[0].opts.accessToken).toBeUndefined();
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('AC4: ein credentialStore.getPlaintext()-Fehler crasht den Scan-Start nicht (best-effort)', async () => {
+    const credentialStore = { getPlaintext: async () => { throw new Error('store down'); } };
+    const { app, runner } = makeApp({ credentialStore });
+    const srv = await startServer(app);
+    try {
+      const { status } = await httpPost(srv, SCAN_PATH, { hinterWall: true });
+      expect(status).toBe(202);
+      expect(runner.startCalls[0].opts.accessToken).toBeUndefined();
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  it('AC5: Security-Floor — die Token-Werte erscheinen NICHT in der 202-Response', async () => {
+    const credentialStore = makeCredentialStore({
+      'credentials/cloudflare-access-service-token/client_id': 'super-secret-id',
+      'credentials/cloudflare-access-service-token/client_secret': 'super-secret-value',
+    });
+    const { app } = makeApp({ credentialStore });
+    const srv = await startServer(app);
+    try {
+      const { body } = await httpPost(srv, SCAN_PATH, { hinterWall: true });
+      expect(JSON.stringify(body)).not.toContain('super-secret-id');
+      expect(JSON.stringify(body)).not.toContain('super-secret-value');
+      expect(Object.keys(body).sort()).toEqual(['jobId', 'status']);
     } finally {
       await new Promise((r) => srv.close(r));
     }

@@ -43,6 +43,13 @@
  * WER `parseRedTeamOutput(job.output)` nach Abschluss aufruft und daraus persistiert
  * (`ScanResultStore.record()`), ist eine offene Folge-Naht (S-411+, nicht Teil dieser Story).
  *
+ * Cloudflare-Access-Service-Token (AC2/AC5, docs/specs/red-team-scan-access-token.md,
+ * Ausbaustufe 2 — S-407): optionaler `start()`-Parameter `accessToken` (`{ clientId,
+ * clientSecret }`). Simplicity-Leiter Stufe 2 (coder/R09): wiederverwendet den bereits
+ * bestehenden Pro-Lauf-Env-Override (ADR-021, `overrides.env` am Core) statt einen neuen
+ * Durchreich-Mechanismus zu bauen — argv/Env-diszipliniert: nur ein nicht-geheimer Marker
+ * geht ins argv, die Werte selbst NUR über die additive Child-Env (nie geloggt).
+ *
  * @module HeadlessRedTeamRunner
  */
 
@@ -133,17 +140,30 @@ export class HeadlessRedTeamRunner {
    * `ziel`, statt still zu ignorieren: ein kaputter URL-Wert soll sichtbar
    * scheitern, nicht unbemerkt weggelassen werden).
    *
+   * `accessToken` (red-team-scan-access-token AC2/AC5, Ausbaustufe 2 — Scan hinter der
+   * Access-Wall): OPTIONAL, `{ clientId, clientSecret }`. Die beiden Werte gehen **nie**
+   * ins argv (Security-Floor) — nur ein nicht-geheimer argv-Marker (`access_header=cf-access`)
+   * signalisiert dem Agenten, dass er die Header aus der Umgebung lesen soll; die
+   * eigentlichen Werte reicht der Core additiv über den bestehenden Pro-Lauf-Env-Override
+   * (ADR-021, `overrides.env`) als `CF_ACCESS_CLIENT_ID`/`CF_ACCESS_CLIENT_SECRET` durch
+   * (nie geloggt, s. `HeadlessRunnerCore#buildChildEnv`). Fehlt `clientId`/`clientSecret`
+   * bzw. sind sie kein nicht-leerer String → `TypeError` (defensive Basis, analog `ziel`).
+   *
    * @param {string} projectPath - aufgelöster, validierter absoluter Projekt-Pfad (WORKSPACE_DIR/<slug>).
    * @param {object} [params]
    * @param {string} params.ziel - validierter Ziel-Slug (Pflicht).
    * @param {string} [params.modus] - optionaler Red-Team-Modus.
    * @param {string} [params.url] - optionale Ziel-URL (scharfer Betrieb); String ohne Leerzeichen.
    * @param {string} [params.urlEdge] - optionale Edge-/Public-URL (scharfer Betrieb); String ohne Leerzeichen.
+   * @param {{ clientId: string, clientSecret: string }} [params.accessToken] - optionales
+   *   Cloudflare-Access-Service-Token (red-team-scan-access-token AC2) — nie im argv, nur
+   *   als Pro-Lauf-Env-Override.
    * @returns {{ ok: true, jobId: string } | { ok: false, reason: 'locked' }}
-   * @throws {TypeError} wenn `ziel` fehlt/leer ist oder wenn `url`/`urlEdge`
-   *   gesetzt, aber kein String bzw. mit Leerzeichen sind.
+   * @throws {TypeError} wenn `ziel` fehlt/leer ist, wenn `url`/`urlEdge` gesetzt, aber kein
+   *   String bzw. mit Leerzeichen sind, oder wenn `accessToken` gesetzt, aber
+   *   `clientId`/`clientSecret` kein nicht-leerer String sind.
    */
-  start(projectPath, { ziel, modus, url, urlEdge } = {}) {
+  start(projectPath, { ziel, modus, url, urlEdge, accessToken } = {}) {
     if (!ziel) {
       throw new TypeError('HeadlessRedTeamRunner.start: "ziel" ist erforderlich (validierter Slug)');
     }
@@ -163,7 +183,23 @@ export class HeadlessRedTeamRunner {
       }
       args.push('url_edge=' + urlEdge);
     }
-    return this.#core.start(projectPath, { args });
+    let env;
+    if (accessToken) {
+      const { clientId, clientSecret } = accessToken;
+      if (
+        typeof clientId !== 'string' || !clientId.trim()
+        || typeof clientSecret !== 'string' || !clientSecret.trim()
+      ) {
+        throw new TypeError(
+          'HeadlessRedTeamRunner.start: "accessToken" braucht "clientId"+"clientSecret" als nicht-leere Strings',
+        );
+      }
+      // AC2/AC5 (red-team-scan-access-token): nur ein nicht-geheimer argv-Marker — die
+      // Werte selbst gehen über den Pro-Lauf-Env-Override (s. Moduldoku oben).
+      args.push('access_header=cf-access');
+      env = { CF_ACCESS_CLIENT_ID: clientId, CF_ACCESS_CLIENT_SECRET: clientSecret };
+    }
+    return this.#core.start(projectPath, { args, env });
   }
 
   /**

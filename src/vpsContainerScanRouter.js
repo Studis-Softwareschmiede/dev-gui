@@ -3,9 +3,20 @@
  *
  * Implements: docs/specs/red-team-scan-per-container.md AC1, AC2, AC3, AC4, AC5, AC6, AC7,
  * AC8, AC9, AC16, AC17, AC22, AC26, AC27, AC28.
+ * Implements: docs/specs/red-team-scan-access-token.md AC2, AC3, AC4, AC5 (Ausbaustufe 2 —
+ * Scan hinter der Access-Wall via Cloudflare-Access-Service-Token; AC1/AC6 s. CredentialStore.js
+ * bzw. docs/architecture.md ADR-024).
  *
  * Routes (hinter AccessGuard, s. server.js):
  *   POST /api/vps/machines/:provider/*splat/containers/:containerId/scan
+ *     Body (optional): { hinterWall?: boolean }  — red-team-scan-access-token AC2/AC4: NUR
+ *       wenn `true` UND ein Cloudflare-Access-Service-Token im CredentialStore hinterlegt ist,
+ *       reicht der Runner CF-Access-Client-Id/-Secret als Header zur öffentlichen URL durch
+ *       (Testort "öffentlich" prüft dann HINTER Access statt der Wand davor). Fehlt das Token
+ *       (kein `credentialStore` verdrahtet, kein/unvollständiger Eintrag) → graceful Fallback
+ *       auf das Ausbaustufe-1-Verhalten (Flag wird stillschweigend ignoriert, AC4) — KEIN
+ *       Fehlercode. Kein URL-/Freitext-Feld — Confinement bleibt (AC3): die Header hängen sich
+ *       ausschliesslich an die bereits server-seitig abgeleitete `publicUrl`.
  *     → 202 { jobId, status:'running' }
  *     → 409 { errorClass:'scan-in-progress' }   — bereits ein laufender Scan für DIESEN Container
  *     → 422 { errorClass:'not-scannable' }       — nicht managed, nicht laufend, Ziel/Repo nicht auflösbar
@@ -118,6 +129,16 @@
  * Interpolation, s. Runner); Confinement server-seitig (s.o.); `ANTHROPIC_API_KEY`/
  * `OPENAI_API_KEY`-Block kommt aus `HeadlessRunnerCore` (unverändert).
  *
+ * **Cloudflare-Access-Service-Token (red-team-scan-access-token AC2/AC3/AC4/AC5, S-407):**
+ * `credentialStore` ist optional/best-effort verdrahtet (analog `scanResultStore`/`boardWriter`).
+ * `resolveAccessToken()` (unten) liest `client_id`/`client_secret` NUR intern über
+ * `credentialStore.getPlaintext()` — der Klartext verlässt diese Funktion ausschliesslich als
+ * `{ clientId, clientSecret }`-Objekt, das direkt in `runner.start({ accessToken })` einfliesst
+ * (dort NUR als Pro-Lauf-Env-Override, NIE argv — s. `HeadlessRedTeamRunner.js`). Er erscheint
+ * NIE in Response/Log/Audit (Security-Floor, AC5). Ohne `credentialStore` ODER ohne
+ * vollständigen Eintrag ODER ohne `hinterWall:true` im Body bleibt `accessToken` `undefined`
+ * → identisches Verhalten zu Ausbaustufe 1 (AC4, graceful).
+ *
  * @module vpsContainerScanRouter
  */
 
@@ -131,6 +152,7 @@ import {
 import { validateProjectPath, resolveProjectSlug } from './workspacePath.js';
 import { BoardWriterError, IDEA_TITLE_MAX_LENGTH } from './BoardWriter.js';
 import { parseRedTeamOutput } from './redTeamOutputParser.js';
+import { catalogKey } from './CredentialStore.js';
 
 /**
  * Baut den zusammengesetzten Container-Schlüssel. containerId allein ist über mehrere
@@ -215,6 +237,31 @@ async function resolveRepoSlug(container, workspaceScanner) {
 }
 
 /**
+ * Löst das global hinterlegte Cloudflare-Access-Service-Token auf (red-team-scan-access-token
+ * AC1/AC2). Best-effort: ohne `credentialStore` ODER ohne vollständiges Paar
+ * (`client_id`+`client_secret`) ODER bei einem Store-Fehler → `null` (AC4, graceful — NIE ein
+ * Fehlercode am Scan-Start allein deswegen). Der Klartext verlässt diese Funktion
+ * ausschliesslich als Rückgabewert — kein Log, kein Response-Feld (AC5).
+ *
+ * @param {{ getPlaintext?: (storeKey: string) => Promise<string|null> }} [credentialStore]
+ * @returns {Promise<{ clientId: string, clientSecret: string } | null>}
+ */
+async function resolveAccessToken(credentialStore) {
+  if (!credentialStore || typeof credentialStore.getPlaintext !== 'function') return null;
+  try {
+    const [clientId, clientSecret] = await Promise.all([
+      credentialStore.getPlaintext(catalogKey('cloudflare-access-service-token', 'client_id')),
+      credentialStore.getPlaintext(catalogKey('cloudflare-access-service-token', 'client_secret')),
+    ]);
+    if (!clientId || !clientSecret) return null;
+    return { clientId, clientSecret };
+  } catch {
+    // AC4 — best-effort: ein Store-Fehler fällt auf Ausbaustufe-1-Verhalten zurück.
+    return null;
+  }
+}
+
+/**
  * Baut den Board-Item-Titel für einen übertragenen Befund (AC16) — gekappt auf
  * `IDEA_TITLE_MAX_LENGTH` (defensiv, `BoardWriter.createIdea()` würde einen zu
  * langen Titel sonst mit `invalid-title` ablehnen).
@@ -260,6 +307,9 @@ function _findingBoardBody(finding, scan) {
  *     recordBoardTransfer?: (input: { scanId:string, transfers: Array<{findingId:string,boardId:string}> }) => Promise<object|null>,
  *   },
  *   boardWriter?: import('./BoardWriter.js').BoardWriter,
+ *   credentialStore?: {
+ *     getPlaintext?: (storeKey: string) => Promise<string|null>,
+ *   },
  * }} [deps]
  * @param {object} [options]
  * @param {(path: string) => Promise<{ resolvedPath: string }>} [options.pathValidator]
@@ -269,7 +319,7 @@ function _findingBoardBody(finding, scan) {
  * @returns {import('express').Router}
  */
 export function vpsContainerScanRouter(runner, deps = {}, options = {}) {
-  const { vpsDockerControl, vpsRegistry, vpsTargets, workspaceScanner, scanResultStore, boardWriter } = deps;
+  const { vpsDockerControl, vpsRegistry, vpsTargets, workspaceScanner, scanResultStore, boardWriter, credentialStore } = deps;
   const _pathValidator = options.pathValidator ?? validateProjectPath;
   const _slugResolver = options.slugResolver ?? resolveProjectSlug;
   const router = Router();
@@ -355,8 +405,12 @@ export function vpsContainerScanRouter(runner, deps = {}, options = {}) {
     }
 
     // AC4 — Ziele AUSSCHLIESSLICH server-seitig aus VPS-Target + ContainerEntry ableiten.
-    // Kein req.body/req.query-Zugriff für die Ziel-Bildung an dieser oder jeder anderen
+    // Kein req.body/req.query-Zugriff für die ZIEL-Bildung an dieser oder jeder anderen
     // Stelle dieses Handlers — ein mitgesendeter URL-Wert wird konstruktiv nie gelesen.
+    // (red-team-scan-access-token AC3: `hinterWall` unten ist ein reiner Boolean-Schalter,
+    // KEIN URL-Wert — er ändert nie, WELCHE URL angesprochen wird, nur OB ein bereits
+    // hinterlegtes Token als Header an die ohnehin server-seitig abgeleitete `publicUrl`
+    // gehängt wird.)
     const hostOk = typeof vpsTarget.host === 'string' && vpsTarget.host.trim() !== '' && !/\s/.test(vpsTarget.host);
     if (!hostOk || container.hostPort == null) {
       return res.status(422).json({ errorClass: 'not-scannable' });
@@ -381,14 +435,25 @@ export function vpsContainerScanRouter(runner, deps = {}, options = {}) {
       return res.status(422).json({ errorClass: 'not-scannable' });
     }
 
+    // red-team-scan-access-token AC2/AC4: `hinterWall` ist ein reiner Boolean-Wunsch des
+    // Betreibers — ob er tatsächlich wirkt, hängt AUSSCHLIESSLICH davon ab, ob server-seitig
+    // ein vollständiges Token hinterlegt ist (resolveAccessToken(), best-effort). Fehlt es,
+    // wird das Flag stillschweigend ignoriert (graceful Fallback auf Ausbaustufe 1, AC4) —
+    // KEIN Fehlercode allein deswegen.
+    const hinterWall = req.body?.hinterWall === true;
+    const accessToken = hinterWall ? await resolveAccessToken(credentialStore) : null;
+
     // AC1/AC5 — Runner starten: ziel/modus/url/url_edge server-seitig gesetzt, argv-Array
     // im Runner (kein Shell-String, security/R03). modus ist immer 'beide' (zwei Testorte,
-    // ein Lauf — kein Client-Override, AC5).
+    // ein Lauf — kein Client-Override, AC5). `accessToken` (red-team-scan-access-token AC2):
+    // nur gesetzt, wenn BEIDES zutrifft — Betreiber-Wunsch UND hinterlegtes Token; der Runner
+    // reicht die Werte NIE ins argv (s. HeadlessRedTeamRunner.js).
     const result = runner.start(resolvedPath, {
       ziel: repoSlug,
       modus: 'beide',
       url: directUrl,
       urlEdge: publicUrl,
+      ...(accessToken ? { accessToken } : {}),
     });
     if (!result.ok) {
       // Aktuell einzige Ablehnungs-Ursache: 'locked' (Runner-eigener Repo-Level-Lock).

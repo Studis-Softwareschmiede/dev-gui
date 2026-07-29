@@ -19,6 +19,14 @@
  *         opt-in Nutzer) — `getJob(jobId).output` trägt nach Lauf-Ende die
  *         erfasste stdout+stderr-Kombination (Eingabe für
  *         `parseRedTeamOutput()`, AC24).
+ *
+ * Covers (red-team-scan-access-token.md): AC2, AC5
+ *   AC2 — optionaler `accessToken`-Parameter (`{clientId, clientSecret}`) fügt einen
+ *         nicht-geheimen argv-Marker (`access_header=cf-access`) hinzu.
+ *   AC5 — die Secret-Werte selbst erscheinen NIE im argv, sondern NUR additiv in der
+ *         Child-Env (`CF_ACCESS_CLIENT_ID`/`CF_ACCESS_CLIENT_SECRET`, ADR-021
+ *         `overrides.env`); ohne `accessToken` bleibt das Verhalten byte-identisch zu
+ *         Ausbaustufe 1 (kein Marker, keine CF_ACCESS_*-Keys).
  */
 
 import { describe, it, expect, jest, afterEach } from '@jest/globals';
@@ -149,6 +157,81 @@ describe('HeadlessRedTeamRunner — AC12: per-run url / url_edge pass-through (s
 
     expect(() =>
       runner.start('/workspace/my-project', { ziel: 'app', urlEdge: 'https://public x' }),
+    ).toThrow(TypeError);
+    expect(spawnFn).not.toHaveBeenCalled();
+  });
+});
+
+// ── red-team-scan-access-token AC2/AC5 (S-407): accessToken pass-through ──────────────
+describe('HeadlessRedTeamRunner — red-team-scan-access-token AC2/AC5: accessToken pass-through', () => {
+  it('(a) accessToken set → non-secret argv marker "access_header=cf-access", NO client_id/client_secret in argv', () => {
+    const child = makeFakeChild();
+    const spawnFn = jest.fn(() => child);
+    const runner = new HeadlessRedTeamRunner({ spawnFn, timeoutMs: 10_000 });
+
+    const result = runner.start('/workspace/my-project', {
+      ziel: 'app',
+      modus: 'beide',
+      urlEdge: 'https://public',
+      accessToken: { clientId: 'super-secret-id', clientSecret: 'super-secret-value' },
+    });
+
+    expect(result.ok).toBe(true);
+    const [, args] = spawnFn.mock.calls[0];
+    expect(args).toEqual([
+      '-p',
+      '/agent-flow:red-team ziel=app modus=beide url_edge=https://public access_header=cf-access',
+      '--dangerously-skip-permissions',
+    ]);
+    // AC5 — Security-Floor: die Secret-Werte erscheinen NIRGENDS im argv.
+    expect(args.join(' ')).not.toContain('super-secret-id');
+    expect(args.join(' ')).not.toContain('super-secret-value');
+  });
+
+  it('(b) accessToken set → CF_ACCESS_CLIENT_ID/CF_ACCESS_CLIENT_SECRET landen additiv in der Child-Env (ADR-021 overrides.env)', () => {
+    const child = makeFakeChild();
+    const spawnFn = jest.fn(() => child);
+    const runner = new HeadlessRedTeamRunner({ spawnFn, timeoutMs: 10_000 });
+
+    runner.start('/workspace/my-project', {
+      ziel: 'app',
+      accessToken: { clientId: 'id-1', clientSecret: 'secret-1' },
+    });
+
+    const [, , opts] = spawnFn.mock.calls[0];
+    expect(opts.env.CF_ACCESS_CLIENT_ID).toBe('id-1');
+    expect(opts.env.CF_ACCESS_CLIENT_SECRET).toBe('secret-1');
+  });
+
+  it('(c) ohne accessToken → keine CF_ACCESS_* Env-Keys, kein argv-Marker (Regress-Schutz für Ausbaustufe 1)', () => {
+    const child = makeFakeChild();
+    const spawnFn = jest.fn(() => child);
+    const runner = new HeadlessRedTeamRunner({ spawnFn, timeoutMs: 10_000 });
+
+    runner.start('/workspace/my-project', { ziel: 'app', modus: 'beide', urlEdge: 'https://public' });
+
+    const [, args, opts] = spawnFn.mock.calls[0];
+    expect(args[1]).not.toMatch(/access_header=/);
+    expect(opts.env.CF_ACCESS_CLIENT_ID).toBeUndefined();
+    expect(opts.env.CF_ACCESS_CLIENT_SECRET).toBeUndefined();
+  });
+
+  it('(d) accessToken.clientSecret leer → TypeError, no spawn', () => {
+    const spawnFn = jest.fn(() => makeFakeChild());
+    const runner = new HeadlessRedTeamRunner({ spawnFn, timeoutMs: 10_000 });
+
+    expect(() =>
+      runner.start('/workspace/my-project', { ziel: 'app', accessToken: { clientId: 'id-1', clientSecret: '' } }),
+    ).toThrow(TypeError);
+    expect(spawnFn).not.toHaveBeenCalled();
+  });
+
+  it('(e) accessToken.clientId fehlt → TypeError, no spawn', () => {
+    const spawnFn = jest.fn(() => makeFakeChild());
+    const runner = new HeadlessRedTeamRunner({ spawnFn, timeoutMs: 10_000 });
+
+    expect(() =>
+      runner.start('/workspace/my-project', { ziel: 'app', accessToken: { clientSecret: 'secret-1' } }),
     ).toThrow(TypeError);
     expect(spawnFn).not.toHaveBeenCalled();
   });

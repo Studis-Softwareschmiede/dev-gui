@@ -99,6 +99,12 @@
  *          Zustand/State, keine neue Logik (Simplicity-Leiter Stufe 1: AC31 verlangt
  *          ausschliesslich Text, s. coder/R09).
  *
+ * Covers (red-team-scan-access-token):
+ *   AC2 — `hinterWall`-Prop (vom Aufrufer `ContainerRow` gesetzt, s. dortige Checkbox) wird
+ *          1:1 im Start-`POST`-Body als `{ hinterWall }` mitgeschickt — keine eigene Logik in
+ *          diesem Panel, das Backend entscheidet best-effort, ob ein Token hinterlegt ist
+ *          (AC4). Reine Durchreichung (Simplicity-Leiter Stufe 1, coder/R09).
+ *
  * Security (Floor):
  *   - Kein `dangerouslySetInnerHTML` — Fehler-/Befundtexte werden als reiner React-Text
  *     gerendert.
@@ -117,6 +123,7 @@
  *   onEnded?: () => void,
  *   fetchFn?: Function,
  *   pollMs?: number,
+ *   hinterWall?: boolean,
  * }} props
  *   provider/serverId/containerId — identifizieren den Ziel-Container (URL-Bausteine,
  *     identisch zur Konvention der übrigen Container-Aktionen in `VpsView.jsx`).
@@ -128,6 +135,10 @@
  *     Knopf-Spinner zu stoppen (Panel bleibt bis zum expliziten Schließen sichtbar).
  *   fetchFn — injectable `fetch` für Tests (default: `globalThis.fetch`).
  *   pollMs — Poll-Intervall (default 3000; in Tests überschreibbar).
+ *   hinterWall — red-team-scan-access-token AC2 (S-407): vom Aufrufer (`ContainerRow`)
+ *     gewählte Option „hinter der Wall testen" — wird 1:1 im Start-`POST`-Body als
+ *     `{ hinterWall }` mitgeschickt; das Backend wendet es nur an, wenn zusätzlich ein
+ *     Token hinterlegt ist (graceful, AC4). Default `false` (Ausbaustufe-1-Verhalten).
  */
 
 import { useState, useRef, useEffect, useCallback } from 'react';
@@ -176,6 +187,7 @@ export function RedTeamScanPanel({
   onEnded,
   fetchFn,
   pollMs = SCAN_POLL_MS,
+  hinterWall = false,
 }) {
   const fetch_ = fetchFn ?? globalThis.fetch.bind(globalThis);
 
@@ -246,7 +258,13 @@ export function RedTeamScanPanel({
       const url = `/api/vps/machines/${encodeURIComponent(provider)}/${serverId}/containers/${encodeURIComponent(containerId)}/scan`;
       let res;
       try {
-        res = await fetch_(url, { method: 'POST' });
+        // red-team-scan-access-token AC2 (S-407): `hinterWall` 1:1 durchgereicht — das
+        // Backend entscheidet best-effort, ob es wirkt (Token hinterlegt, AC4).
+        res = await fetch_(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ hinterWall: !!hinterWall }),
+        });
       } catch {
         if (cancelled || !mountedRef.current) return;
         setPhase('start-error');

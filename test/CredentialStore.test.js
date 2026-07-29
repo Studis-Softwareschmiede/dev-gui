@@ -20,6 +20,11 @@
  *   AC8 — kein Token-Klartext in Response/Audit (HTTP-Ebene)
  *   AC9 — at-rest verschlüsselt: kein anthropic-oauth-Klartext in der Store-Datei
  *
+ * Covers (red-team-scan-access-token, S-407):
+ *   AC1 — CATALOG['cloudflare-access-service-token'] (client_id/client_secret); resolveKey;
+ *         set/getMeta/delete write-only; at-rest-Verschlüsselung; HTTP PUT/GET/DELETE
+ *   AC5 — kein Token-Klartext in Response/Audit (HTTP-Ebene)
+ *
  * Covers (credential-runtime-unlock):
  *   AC1  — Start ohne Master-Key und ohne verschlüsselte Einträge → locked, kein Abbruch
  *   AC2  — Fail-Fast-Regression: Store mit verschlüsselten Einträgen + kein Key → assertCredentialConfig wirft
@@ -2708,5 +2713,129 @@ describe('credentialsRouter — AC6 (S-140): backup-Feld im HTTP-Response', () =
     expect(res.body).not.toContain('localPath');
     // Auch nicht in anderem Schreibformat
     expect(res.body).not.toMatch(/"localPath"/);
+  });
+});
+
+// ── red-team-scan-access-token AC1 (S-407): Cloudflare-Access-Service-Token-Katalog ────
+
+describe('CredentialStore — AC1 (red-team-scan-access-token): Katalog + at-rest', () => {
+  let dir, store;
+
+  beforeEach(async () => {
+    ({ store, dir } = await makeTmpStore());
+    process.env.DEV_NO_ACCESS = '1';
+  });
+
+  afterEach(async () => {
+    delete process.env.DEV_NO_ACCESS;
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('AC1 — CREDENTIAL_CATALOG["cloudflare-access-service-token"] enthält client_id und client_secret', () => {
+    expect(CREDENTIAL_CATALOG['cloudflare-access-service-token']).toContain('client_id');
+    expect(CREDENTIAL_CATALOG['cloudflare-access-service-token']).toContain('client_secret');
+    expect(CREDENTIAL_CATALOG['cloudflare-access-service-token'].length).toBe(2);
+  });
+
+  it('AC1 — resolveKey akzeptiert client_id/client_secret', () => {
+    expect(resolveKey('cloudflare-access-service-token', 'client_id')).toEqual({
+      ok: true,
+      storeKey: 'credentials/cloudflare-access-service-token/client_id',
+    });
+    expect(resolveKey('cloudflare-access-service-token', 'client_secret')).toEqual({
+      ok: true,
+      storeKey: 'credentials/cloudflare-access-service-token/client_secret',
+    });
+  });
+
+  it('AC1 — list() zeigt beide Felder unset bei leerem Store', async () => {
+    const items = await store.list();
+    const items_ = items.filter((i) => i.integration === 'cloudflare-access-service-token');
+    expect(items_.length).toBe(2);
+    for (const item of items_) expect(item.status).toBe('unset');
+  });
+
+  it('AC1 — set/getMeta/delete für client_id: write-only-Verhalten', async () => {
+    const meta = await store.set('credentials/cloudflare-access-service-token/client_id', 'cf-access-client-id-secret');
+    expect(meta.status).toBe('set');
+    expect(JSON.stringify(meta)).not.toContain('cf-access-client-id-secret');
+
+    const getMeta = await store.getMeta('credentials/cloudflare-access-service-token/client_id');
+    expect(getMeta.status).toBe('set');
+    expect(getMeta.masked).toBe('•••• gesetzt');
+
+    await store.delete('credentials/cloudflare-access-service-token/client_id');
+    expect((await store.getMeta('credentials/cloudflare-access-service-token/client_id')).status).toBe('unset');
+  });
+
+  it('AC1 — at-rest verschlüsselt: kein Token-Klartext in der Store-Datei', async () => {
+    await store.set('credentials/cloudflare-access-service-token/client_id', 'id-cleartext-marker');
+    await store.set('credentials/cloudflare-access-service-token/client_secret', 'secret-cleartext-marker');
+    const raw = await fsReadFile(join(dir, 'secrets.enc.json'), 'utf8');
+    expect(raw).not.toContain('id-cleartext-marker');
+    expect(raw).not.toContain('secret-cleartext-marker');
+  });
+
+  it('AC1/AC5 — getPlaintext() liest client_id/client_secret intern zurück (Konsument: vpsContainerScanRouter.js)', async () => {
+    await store.set('credentials/cloudflare-access-service-token/client_id', 'read-back-id');
+    await store.set('credentials/cloudflare-access-service-token/client_secret', 'read-back-secret');
+    expect(await store.getPlaintext('credentials/cloudflare-access-service-token/client_id')).toBe('read-back-id');
+    expect(await store.getPlaintext('credentials/cloudflare-access-service-token/client_secret')).toBe('read-back-secret');
+  });
+});
+
+describe('credentialsRouter — AC1 (red-team-scan-access-token): cloudflare-access-service-token über HTTP', () => {
+  let dir, store, testServer;
+
+  beforeEach(async () => {
+    process.env.DEV_NO_ACCESS = '1';
+    ({ store, dir } = await makeTmpStore());
+    testServer = await makeTestServer(store);
+  });
+
+  afterEach(async () => {
+    delete process.env.DEV_NO_ACCESS;
+    await testServer.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('AC1 — PUT client_id → 200, Response kein Klartext', async () => {
+    const res = await testServer.req('PUT', '/api/settings/credentials/cloudflare-access-service-token/client_id', { value: 'cf-access-http-secret' });
+    expect(res.status).toBe(200);
+    const data = JSON.parse(res.body);
+    expect(data.status).toBe('set');
+    expect(res.body).not.toContain('cf-access-http-secret');
+  });
+
+  it('AC1 — GET nach PUT zeigt status:set für client_id, unset für client_secret', async () => {
+    await testServer.req('PUT', '/api/settings/credentials/cloudflare-access-service-token/client_id', { value: 'id-only' });
+    const res = await testServer.req('GET', '/api/settings/credentials');
+    const data = JSON.parse(res.body);
+    const id = data.find((i) => i.integration === 'cloudflare-access-service-token' && i.name === 'client_id');
+    const secret = data.find((i) => i.integration === 'cloudflare-access-service-token' && i.name === 'client_secret');
+    expect(id.status).toBe('set');
+    expect(secret.status).toBe('unset');
+    expect(res.body).not.toContain('id-only');
+  });
+
+  it('AC1 — DELETE client_id → 200, status:unset (idempotent)', async () => {
+    await store.set('credentials/cloudflare-access-service-token/client_id', 'to-delete');
+    const res = await testServer.req('DELETE', '/api/settings/credentials/cloudflare-access-service-token/client_id');
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body).status).toBe('unset');
+    const again = await testServer.req('DELETE', '/api/settings/credentials/cloudflare-access-service-token/client_id');
+    expect(again.status).toBe(200);
+  });
+
+  it('AC5 — Audit-Eintrag für PUT client_secret ohne Klartext', async () => {
+    await testServer.req('PUT', '/api/settings/credentials/cloudflare-access-service-token/client_secret', { value: 'audited-cf-access-secret' });
+    const entry = testServer.audit.getAll().at(-1);
+    expect(entry.command).toMatch(/credential:set:credentials\/cloudflare-access-service-token\/client_secret/);
+    expect(JSON.stringify(entry)).not.toContain('audited-cf-access-secret');
+  });
+
+  it('AC1 — PUT unbekanntes Feld unter cloudflare-access-service-token → 404', async () => {
+    const res = await testServer.req('PUT', '/api/settings/credentials/cloudflare-access-service-token/scope', { value: 'irrelevant' });
+    expect(res.status).toBe(404);
   });
 });

@@ -111,6 +111,17 @@
  *          den bestehenden `GET /api/board/projects/:slug`, keine eigene DB) — Details s.
  *          `RedTeamScanHistory.jsx` Moduldoku.
  *
+ * Implements: red-team-scan-access-token AC2, AC4 (S-407 — Ausbaustufe 2, Scan hinter der
+ *   Access-Wall; Token-Ablage AC1/Security-Floor AC5/ADR AC6 s. `CredentialStore.js` bzw.
+ *   `docs/architecture.md` ADR-024)
+ *   AC2 — „Hinter der Wall"-Checkbox neben dem Scan-Knopf (nur für scannbare Container,
+ *          `canScan`); Auswahl wird als `hinterWall`-Prop an `RedTeamScanPanel` gereicht, das
+ *          sie 1:1 im Start-Body mitschickt (Backend entscheidet, ob ein Token vorliegt).
+ *   AC4 — Checkbox ist sichtbar deaktiviert (disabled + `title`-Begründung) solange kein
+ *          vollständiges Token hinterlegt ist (`hasAccessToken`, einmalig von
+ *          `ContainerOverview` über `GET /api/settings/credentials` geladen, best-effort
+ *          `false` bei Fehler — Ausbaustufe-1-Verhalten bleibt unverändert erreichbar).
+ *
  * Security (Floor):
  *   - Nur Label-Referenzen werden an das Backend gesendet (sshKeyAssignment),
  *     niemals rohe Key-Material-Strings vom Client.
@@ -118,6 +129,9 @@
  *   - 403-Antworten werden als „keine Berechtigung" dargestellt; kein Token-Leak.
  *   - SSH-Private-Key, Cloudflare-Token und Hetzner-Token erscheinen NICHT im Frontend-Bundle.
  *   - Provider-Options-Endpunkt liefert nur abgeleitete Listen/Preise (kein Token an Client).
+ *   - Cloudflare-Access-Service-Token (red-team-scan-access-token AC5): nur ein Boolean
+ *     (`hasAccessToken`) verlässt den Server — der Token-Wert selbst erscheint NIE im
+ *     Frontend-Bundle/Response (Status-Endpunkt liefert nur Metadaten, s. `CredentialStore.js`).
  *
  * A11y: WCAG 2.1 AA — Beschriftete select/input-Elemente, aria-required,
  *   aria-describedby für Fehlermeldungen, role=alert/status, Touch-Target ≥ 44 px,
@@ -241,6 +255,30 @@ async function fetchContainers({ provider, serverId }) {
     throw new Error(data.reason ?? data.error ?? `Listing fehlgeschlagen (${res.status})`);
   }
   return data;
+}
+
+/**
+ * Prüft best-effort, ob ein vollständiges Cloudflare-Access-Service-Token hinterlegt ist
+ * (red-team-scan-access-token AC1/AC4) — wiederverwendet den bestehenden generischen
+ * Credential-Status-Endpunkt (`GET /api/settings/credentials`, Simplicity-Leiter Stufe 2,
+ * `coder/R09`); kein neuer Backend-Endpunkt nötig. Netzwerk-/Server-Fehler degradieren
+ * graceful auf `false` (Ausbaustufe-1-Verhalten, AC4) — kein Crash der Container-Übersicht.
+ *
+ * @returns {Promise<boolean>}
+ */
+async function fetchCloudflareAccessTokenAvailable() {
+  try {
+    const res = await fetch('/api/settings/credentials');
+    if (!res.ok) return false;
+    const items = await res.json();
+    if (!Array.isArray(items)) return false;
+    const hasField = (name) => items.some(
+      (i) => i?.integration === 'cloudflare-access-service-token' && i?.name === name && i?.status === 'set',
+    );
+    return hasField('client_id') && hasField('client_secret');
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -497,9 +535,13 @@ function ContainerRemoveConfirm({ container, onConfirm, onCancel, pending }) {
  *   onAction: (provider: string, serverId: string, containerId: string, action: string) => Promise<void>,
  *   onLogs: (container: object) => void,
  *   onRemove: (container: object) => void,
+ *   hasAccessToken?: boolean,
  * }} props
+ *   hasAccessToken — red-team-scan-access-token AC1/AC4 (S-407): ob ein vollständiges
+ *     Cloudflare-Access-Service-Token hinterlegt ist (von `ContainerOverview` einmalig
+ *     geladen). Steuert, ob die „Hinter der Wall"-Checkbox aktivierbar ist.
  */
-function ContainerRow({ container: c, provider, serverId, onAction, onLogs, onRemove }) {
+function ContainerRow({ container: c, provider, serverId, onAction, onLogs, onRemove, hasAccessToken = false }) {
   const [actionState, setActionState] = useState(null); // null | 'pending' | 'ok' | 'error' | 'forbidden'
   const [actionMsg, setActionMsg] = useState(null);
 
@@ -523,6 +565,13 @@ function ContainerRow({ container: c, provider, serverId, onAction, onLogs, onRe
 
   // AC10: nur für managed, laufende Container.
   const canScan = c.managed && isRunning;
+
+  // ── „Hinter der Wall" (red-team-scan-access-token AC2/AC4, S-407) ──────────────
+  // Betreiber-Wunsch, den öffentlichen Testort HINTER der Access-Wall zu prüfen (statt nur
+  // der Wand davor) — nur aktivierbar, wenn ein Token hinterlegt ist (`hasAccessToken`,
+  // s. `ContainerOverview`). Reiner Client-Zustand, keine eigene Validierung — das Backend
+  // entscheidet best-effort, ob das Flag tatsächlich wirkt (AC4, graceful ohne Token).
+  const [hinterWallSelected, setHinterWallSelected] = useState(false);
 
   const handleScanClick = useCallback(() => {
     if (scanOpen) return; // Client-Sperre — Doppelklick wirkungslos (AC10).
@@ -691,6 +740,24 @@ function ContainerRow({ container: c, provider, serverId, onAction, onLogs, onRe
         >
           {scanActive ? `Scan läuft… ${formatElapsed(scanElapsedSec)}` : 'Red-Team-Scan'}
         </button>
+        {/* red-team-scan-access-token AC2/AC4 (S-407): „hinter der Wall" nur wählbar, wenn
+            scannbar UND ein Token hinterlegt ist (sonst sichtbar deaktiviert mit Begründung
+            im title, AC4). */}
+        {canScan && (
+          <label
+            style={containerStyles.hinterWallLabel}
+            title={!hasAccessToken ? 'Kein Cloudflare-Access-Service-Token hinterlegt (Einstellungen → Zugänge)' : undefined}
+          >
+            <input
+              type="checkbox"
+              checked={hinterWallSelected}
+              disabled={!hasAccessToken || scanOpen}
+              onChange={(e) => setHinterWallSelected(e.target.checked)}
+              aria-label={`Red-Team-Scan für Container ${c.name} hinter der Access-Wall ausführen`}
+            />
+            Hinter der Wall
+          </label>
+        )}
         {/* AC14 (red-team-scan-per-container): Verlauf-Aufklapper — nur für managed
             Container (Verlauf ist an container.hostname gebunden). */}
         {canShowHistory && (
@@ -755,7 +822,10 @@ function ContainerRow({ container: c, provider, serverId, onAction, onLogs, onRe
         <span style={containerStyles.feedbackOk} role="status">OK</span>
       )}
 
-      {/* AC11–AC13 (red-team-scan-per-container): Live-Fortschritts-/Ergebnis-Panel. */}
+      {/* AC11–AC13 (red-team-scan-per-container): Live-Fortschritts-/Ergebnis-Panel.
+          hinterWall (red-team-scan-access-token AC2, S-407): nur true, wenn BEIDES zutrifft
+          — Checkbox angehakt UND Token hinterlegt (Checkbox ist ohne Token ohnehin disabled,
+          diese zweite Bedingung ist Defense-in-Depth gegen einen stale Auswahl-Zustand). */}
       {scanOpen && (
         <RedTeamScanPanel
           provider={provider}
@@ -764,6 +834,7 @@ function ContainerRow({ container: c, provider, serverId, onAction, onLogs, onRe
           containerLabel={c.hostname ?? c.name}
           onClose={handleScanClose}
           onEnded={handleScanEnded}
+          hinterWall={hinterWallSelected && hasAccessToken}
         />
       )}
 
@@ -821,6 +892,18 @@ function ContainerOverview({ provider, serverId, machineName, onClose }) {
   const [removeContainer, setRemoveContainer] = useState(null); // Container im Remove-Dialog
   const [removePending, setRemovePending] = useState(false);
   const [removeError, setRemoveError] = useState(null);
+
+  // red-team-scan-access-token AC1/AC4 (S-407): einmalig geladen, an jede ContainerRow
+  // durchgereicht (steuert, ob die „Hinter der Wall"-Checkbox aktivierbar ist). Best-effort
+  // `false` bei Fehler/fehlendem Token — kein Crash der Container-Übersicht.
+  const [hasAccessToken, setHasAccessToken] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    fetchCloudflareAccessTokenAvailable().then((available) => {
+      if (!cancelled) setHasAccessToken(available);
+    });
+    return () => { cancelled = true; };
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -959,6 +1042,7 @@ function ContainerOverview({ provider, serverId, machineName, onClose }) {
               onAction={handleAction}
               onLogs={handleLogs}
               onRemove={handleRemoveRequest}
+              hasAccessToken={hasAccessToken}
             />
           ))}
         </ul>
@@ -2942,6 +3026,18 @@ const containerStyles = {
     fontSize: 11,
     color: '#e3b341',
     marginTop: 2,
+  },
+  // red-team-scan-access-token AC2/AC4 (S-407): „Hinter der Wall"-Checkbox neben dem
+  // Scan-Knopf — kompakt, min. 44px Touch-Target über das <label> (Klickfläche für
+  // Checkbox+Text zusammen).
+  hinterWallLabel: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 4,
+    minHeight: 44,
+    fontSize: 12,
+    color: '#c9d1d9',
+    cursor: 'pointer',
   },
   feedbackOk: {
     fontSize: 11,

@@ -14,6 +14,13 @@
  *          das Panel offen ist (kein zweiter POST).
  *   AC21 — kein zusätzlicher Rollen-Check am Knopf (Knopf ist für jeden mit Zugriff auf
  *          die Ansicht aktiv, sofern managed+laufend — keine feinere Gate-Prüfung nötig).
+ *
+ * Covers (red-team-scan-access-token, S-407):
+ *   AC2 — „Hinter der Wall"-Checkbox neben dem Scan-Knopf; angehakt → POST-Body enthält
+ *         `{ hinterWall: true }`; Default (nicht angehakt) → `{ hinterWall: false }`.
+ *   AC4 — Checkbox ist disabled (mit `title`-Begründung) solange kein vollständiges
+ *         Cloudflare-Access-Service-Token hinterlegt ist (`GET /api/settings/credentials`,
+ *         wiederverwendeter generischer Endpunkt); mit Token aktivierbar.
  */
 
 import { describe, it, expect, jest, afterEach } from '@jest/globals';
@@ -41,11 +48,33 @@ const MANAGED_RUNNING = {
 const MANAGED_STOPPED = { ...MANAGED_RUNNING, containerId: 'stopped1', name: 'stopped1', state: 'exited', status: 'Exited (0) 1h ago' };
 const UNMANAGED_RUNNING = { ...MANAGED_RUNNING, containerId: 'unmanaged1', name: 'unmanaged1', hostname: null, managed: false };
 
-function makeFetch({ containers = [MANAGED_RUNNING], scanStartStatus = 202, scanStartBody = { jobId: 'scan-job-1' }, scanPollBody = { status: 'running', phase: 'direkt' } } = {}) {
+function makeFetch({
+  containers = [MANAGED_RUNNING],
+  scanStartStatus = 202,
+  scanStartBody = { jobId: 'scan-job-1' },
+  scanPollBody = { status: 'running', phase: 'direkt' },
+  hasAccessToken = false,
+} = {}) {
   const scanPostCalls = [];
   const fn = jest.fn(async (url, opts = {}) => {
     if (url === '/api/settings/ssh-keys') return { ok: true, json: async () => SSH_LABELS };
     if (url === '/api/vps/providers') return { ok: true, json: async () => PROVIDERS };
+    // red-team-scan-access-token AC1/AC4 (S-407): generischer Credential-Status-Endpunkt,
+    // wiederverwendet von `ContainerOverview` zur Bestimmung von `hasAccessToken`.
+    if (url === '/api/settings/credentials') {
+      return {
+        ok: true,
+        json: async () => (hasAccessToken
+          ? [
+            { integration: 'cloudflare-access-service-token', name: 'client_id', status: 'set' },
+            { integration: 'cloudflare-access-service-token', name: 'client_secret', status: 'set' },
+          ]
+          : [
+            { integration: 'cloudflare-access-service-token', name: 'client_id', status: 'unset' },
+            { integration: 'cloudflare-access-service-token', name: 'client_secret', status: 'unset' },
+          ]),
+      };
+    }
     if (url === '/api/vps/machines' && (!opts.method || opts.method === 'GET')) {
       return { ok: true, json: async () => ({ machines: [MACHINE] }) };
     }
@@ -53,7 +82,9 @@ function makeFetch({ containers = [MANAGED_RUNNING], scanStartStatus = 202, scan
       return { ok: true, json: async () => ({ result: 'ok', containers }) };
     }
     if (opts?.method === 'POST' && url.endsWith('/scan')) {
-      scanPostCalls.push(url);
+      let body = {};
+      try { body = JSON.parse(opts.body ?? '{}'); } catch { /* ignore */ }
+      scanPostCalls.push({ url, body });
       return { ok: scanStartStatus === 202, status: scanStartStatus, json: async () => scanStartBody };
     }
     if ((!opts?.method || opts.method === 'GET') && url.includes('/scan/')) {
@@ -143,7 +174,7 @@ describe('VpsContainerScanButton — AC10: Klick öffnet Panel + sperrt Knopf', 
     expect(scanBtn.textContent).toMatch(/Scan läuft/);
 
     await waitFor(() => {
-      expect(fetchMock.scanPostCalls).toEqual(['/api/vps/machines/hetzner/1/containers/abc123def456/scan']);
+      expect(fetchMock.scanPostCalls.map((c) => c.url)).toEqual(['/api/vps/machines/hetzner/1/containers/abc123def456/scan']);
     });
   });
 
@@ -190,5 +221,69 @@ describe('VpsContainerScanButton — AC10: Klick öffnet Panel + sperrt Knopf', 
 
     expect(scanBtn.disabled).toBe(false);
     expect(scanBtn.textContent).toBe('Red-Team-Scan');
+  });
+});
+
+// ── red-team-scan-access-token AC2/AC4 — "Hinter der Wall"-Checkbox (S-407) ────────────
+
+describe('VpsContainerScanButton — red-team-scan-access-token AC2/AC4: "Hinter der Wall"-Checkbox', () => {
+  it('AC4: ohne hinterlegtes Token ist die Checkbox disabled mit Begründung im title', async () => {
+    const fetchMock = makeFetch({ containers: [MANAGED_RUNNING], hasAccessToken: false });
+    const { getByRole } = await renderVpsView(fetchMock);
+    await openContainerOverview(getByRole);
+
+    const checkbox = await waitFor(() => getByRole('checkbox', {
+      name: /red-team-scan für container abc123def456 hinter der access-wall ausführen/i,
+    }));
+    expect(checkbox.disabled).toBe(true);
+    expect(checkbox.closest('label').title).toBeTruthy();
+  });
+
+  it('AC4: mit hinterlegtem Token ist die Checkbox aktivierbar', async () => {
+    const fetchMock = makeFetch({ containers: [MANAGED_RUNNING], hasAccessToken: true });
+    const { getByRole } = await renderVpsView(fetchMock);
+    await openContainerOverview(getByRole);
+
+    const checkbox = await waitFor(() => getByRole('checkbox', {
+      name: /red-team-scan für container abc123def456 hinter der access-wall ausführen/i,
+    }));
+    expect(checkbox.disabled).toBe(false);
+  });
+
+  it('AC2: Checkbox angehakt + Scan gestartet → POST-Body enthält { hinterWall: true }', async () => {
+    const fetchMock = makeFetch({ containers: [MANAGED_RUNNING], hasAccessToken: true });
+    const { getByRole } = await renderVpsView(fetchMock);
+    await openContainerOverview(getByRole);
+
+    const checkbox = await waitFor(() => getByRole('checkbox', {
+      name: /red-team-scan für container abc123def456 hinter der access-wall ausführen/i,
+    }));
+    await act(async () => { fireEvent.click(checkbox); });
+    expect(checkbox.checked).toBe(true);
+
+    const scanBtn = getByRole('button', { name: /red-team-scan für container abc123def456/i });
+    await act(async () => { fireEvent.click(scanBtn); });
+
+    await waitFor(() => {
+      expect(fetchMock.scanPostCalls).toHaveLength(1);
+      expect(fetchMock.scanPostCalls[0].body).toEqual({ hinterWall: true });
+    });
+  });
+
+  it('AC4: Checkbox NICHT angehakt (Default) → POST-Body enthält { hinterWall: false }', async () => {
+    const fetchMock = makeFetch({ containers: [MANAGED_RUNNING], hasAccessToken: true });
+    const { getByRole } = await renderVpsView(fetchMock);
+    await openContainerOverview(getByRole);
+
+    await waitFor(() => {
+      expect(getByRole('button', { name: /red-team-scan für container abc123def456/i })).toBeDefined();
+    });
+    const scanBtn = getByRole('button', { name: /red-team-scan für container abc123def456/i });
+    await act(async () => { fireEvent.click(scanBtn); });
+
+    await waitFor(() => {
+      expect(fetchMock.scanPostCalls).toHaveLength(1);
+      expect(fetchMock.scanPostCalls[0].body).toEqual({ hinterWall: false });
+    });
   });
 });

@@ -9,7 +9,8 @@
  * github-app-key-format-tolerant S-168 AC5,
  * push-notifications S-183 AC3/AC10 — Benachrichtigungs-Sektion,
  * obsidian-vault-config S-247 AC1 (UI-Anteil) — Obsidian-Vault-Pfad-Sektion,
- * anthropic-oauth-vault S-368 AC10/AC11 (UI-Anteil) — Claude-Abo-Sektion).
+ * anthropic-oauth-vault S-368 AC10/AC11 (UI-Anteil) — Claude-Abo-Sektion,
+ * red-team-scan-access-token S-407 AC1 (UI-Anteil) — Cloudflare-Access-Service-Token-Sektion).
  *
  * Covers (github-app-key-format-tolerant S-168) — Frontend-ACs:
  *   AC5 — Textarea für github/private_key; Newlines erhalten; andere Felder password-input; nach Speichern kein Klartext im DOM.
@@ -4050,6 +4051,58 @@ describe('SettingsView — AC10: Claude-Abo-Sektion (Settings-GUI)', () => {
 
     const main = document.querySelector('[aria-label="Einstellungen-Ansicht"]');
     expect(main.textContent).not.toContain('sk-ant-ort01-secret-value');
+  });
+});
+
+// ── red-team-scan-access-token AC1 (S-407) — Cloudflare-Access-Service-Token-Sektion ──
+
+describe('SettingsView — red-team-scan-access-token AC1: Cloudflare-Access-Service-Token-Sektion (Settings-GUI)', () => {
+  beforeEach(() => { testCategory = 'zugaenge'; });
+  afterEach(() => {
+    delete globalThis.fetch;
+  });
+
+  it('AC1 — rendert Sektion mit write-only-Feldern für client_id + client_secret', async () => {
+    const { getByRole } = renderView(makeFetch({ getResponse: EMPTY_CREDS }));
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      expect(main.textContent).toMatch(/cloudflare access — service-token/i);
+      expect(main.textContent).toMatch(/cf-access-client-id/i);
+      expect(main.textContent).toMatch(/cf-access-client-secret/i);
+    });
+  });
+
+  it('AC1 — beide Felder zeigen "nicht gesetzt" bei leerem Store', async () => {
+    renderView(makeFetch({ getResponse: EMPTY_CREDS }));
+    await waitFor(() => {
+      const section = document.querySelector('[aria-labelledby="settings-section-cloudflare-access-token"]');
+      expect(section).toBeTruthy();
+      const groups = section.querySelectorAll('[role="group"]');
+      expect(groups.length).toBe(2);
+      for (const g of groups) {
+        expect(g.textContent).toMatch(/nicht gesetzt/i);
+      }
+    });
+  });
+
+  it('AC1 — gesetzter client_id zeigt maskierten Status, kein Klartext', async () => {
+    const credsWithToken = [
+      ...EMPTY_CREDS,
+      {
+        integration: 'cloudflare-access-service-token',
+        name: 'client_id',
+        status: 'set',
+        masked: '•••• gesetzt',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      },
+    ];
+    const { getByRole } = renderView(makeFetch({ getResponse: credsWithToken }));
+    await waitFor(() => {
+      const main = getByRole('main', { name: /einstellungen-ansicht/i });
+      expect(main.textContent).toMatch(/gesetzt/i);
+    });
+    const main = document.querySelector('[aria-label="Einstellungen-Ansicht"]');
+    expect(main.textContent).not.toContain('super-secret-client-id-value');
   });
 });
 

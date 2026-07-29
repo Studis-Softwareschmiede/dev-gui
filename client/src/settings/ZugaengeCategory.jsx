@@ -10,12 +10,16 @@
  * Neu (anthropic-oauth-vault AC10/AC11, S-368):
  *   - Claude-Abo-Credential-Felder (access_token, refresh_token) + Ablauf-Anzeige
  *
+ * Neu (red-team-scan-access-token AC1, S-407):
+ *   - Cloudflare-Access-Service-Token-Felder (client_id, client_secret) — global, für den
+ *     Red-Team-Scan hinter der Access-Wall (Ausbaustufe 2 von red-team-scan-per-container).
+ *
  * AC16: Bestehende id/aria-labelledby-Werte bleiben unverändert:
  *   - settings-section-github
  *   - settings-section-cloudflare
  *   - settings-section-vps
  *   - settings-section-ssh-keys
- * Neu: settings-section-anthropic-oauth (S-368)
+ * Neu: settings-section-anthropic-oauth (S-368), settings-section-cloudflare-access-token (S-407)
  *
  * Props:
  *   - credentials: array of credential objects
@@ -177,6 +181,29 @@ export function ZugaengeCategory({
         <p style={styles.expiresAtHint}>
           Ablauf Access-Token: {formatAnthropicOAuthExpiresAt(getMeta('anthropic-oauth', 'access_token')?.expiresAt)}
         </p>
+      </section>
+
+      {/* Cloudflare-Access-Service-Token (Red-Team-Scan hinter der Wall) — red-team-scan-access-token AC1, S-407 */}
+      <section aria-labelledby="settings-section-cloudflare-access-token" style={styles.section}>
+        <h2 id="settings-section-cloudflare-access-token" style={styles.sectionHeading}>
+          Cloudflare Access — Service-Token (Red-Team-Scan)
+        </h2>
+        <p style={styles.sectionDesc}>
+          Optionales Service-Token, mit dem der Red-Team-Scan die Access-Wall legitim passieren
+          und die App dahinter testen darf. Ohne hinterlegtes Token bleibt es beim Scan der Wand
+          davor (Ausbaustufe 1). Die Werte liegen verschlüsselt im Tresor und werden nie im
+          Klartext angezeigt.
+        </p>
+        {KNOWN_FIELDS['cloudflare-access-service-token'].map(({ name, label }) => (
+          <CredentialField
+            key={name}
+            integration="cloudflare-access-service-token"
+            name={name}
+            label={label}
+            meta={getMeta('cloudflare-access-service-token', name)}
+            onSaved={onLoad}
+          />
+        ))}
       </section>
     </>
   );

@@ -12,6 +12,9 @@
  *   POST /api/vps/machines/:provider/*splat/scans/:scanId/board
  * (docs/specs/red-team-scan-per-container.md AC1, AC2, AC3, AC4, AC5, AC6, AC7, AC8,
  * AC9, AC16, AC17, AC22)
+ * (docs/specs/red-team-scan-access-token.md AC2, AC3, AC4, AC5 — Ausbaustufe 2, S-407:
+ * `credentialStore` wird zusätzlich durchgereicht, damit der Router ein optional
+ * hinterlegtes Cloudflare-Access-Service-Token auflösen kann.)
  *
  * order 119 — vor vps.js (order 120), analog vpsContainers.js: der greedy
  * `DELETE /api/vps/machines/:provider/*splat`-Fallback in vps.js darf diese
@@ -30,10 +33,11 @@ export const order = 119;
  *   workspaceScanner: import('../WorkspaceScanner.js').WorkspaceScanner,
  *   scanResultStore?: object,
  *   boardWriter?: import('../BoardWriter.js').BoardWriter,
+ *   credentialStore?: import('../CredentialStore.js').CredentialStore,
  * }} deps
  * @returns {import('express').Router}
  */
-export function create({ redTeamRunner, vpsDockerControl, vpsRegistry, vpsTargets, workspaceScanner, scanResultStore, boardWriter }) {
+export function create({ redTeamRunner, vpsDockerControl, vpsRegistry, vpsTargets, workspaceScanner, scanResultStore, boardWriter, credentialStore }) {
   return vpsContainerScanRouter(redTeamRunner, {
     vpsDockerControl,
     vpsRegistry,
@@ -41,5 +45,6 @@ export function create({ redTeamRunner, vpsDockerControl, vpsRegistry, vpsTarget
     workspaceScanner,
     scanResultStore,
     boardWriter,
+    credentialStore,
   });
 }

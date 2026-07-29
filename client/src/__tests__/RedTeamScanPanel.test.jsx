@@ -41,6 +41,10 @@
  *   AC31 — solange der Lauf läuft (`starting`/`running`) zeigt das Panel einen Hinweistext:
  *          gefahrlos schließbar/Hintergrund-Lauf, ca. 15 Minuten Dauer, Ergebnis später im
  *          Verlauf/"Reports" abrufbar. Der Hinweis verschwindet bei `done`/Fehlerzuständen.
+ *
+ * Covers (red-team-scan-access-token, S-407):
+ *   AC2 — `hinterWall`-Prop wird 1:1 im Start-`POST`-Body als `{ hinterWall }` mitgeschickt
+ *         (`true` wenn gesetzt, sonst `false` als Default — keine eigene Logik im Panel).
  */
 
 import { describe, it, expect, jest, afterEach } from '@jest/globals';
@@ -776,5 +780,31 @@ describe('RedTeamScanPanel — AC30: Kein-Fund-Fall sauber', () => {
     expect(getByTestId('redteam-scan-no-findings')).toBeDefined();
     expect(getByTestId('redteam-check-c1').textContent).toMatch(/Grün/);
     expect(getByTestId('redteam-check-c2').textContent).toMatch(/Grün/);
+  });
+});
+
+// ── red-team-scan-access-token AC2 — hinterWall-Prop wird 1:1 durchgereicht (S-407) ────
+
+describe('RedTeamScanPanel — red-team-scan-access-token AC2: hinterWall-Prop', () => {
+  it('hinterWall:true → Start-POST-Body enthält { hinterWall: true }', async () => {
+    const fetchFn = makeFetchFn();
+    renderPanel(fetchFn, { hinterWall: true });
+
+    await waitFor(() => {
+      const postCalls = fetchFn.calls.filter((c) => c.opts?.method === 'POST');
+      expect(postCalls).toHaveLength(1);
+      expect(JSON.parse(postCalls[0].opts.body)).toEqual({ hinterWall: true });
+    });
+  });
+
+  it('ohne hinterWall-Prop (Default) → Start-POST-Body enthält { hinterWall: false }', async () => {
+    const fetchFn = makeFetchFn();
+    renderPanel(fetchFn);
+
+    await waitFor(() => {
+      const postCalls = fetchFn.calls.filter((c) => c.opts?.method === 'POST');
+      expect(postCalls).toHaveLength(1);
+      expect(JSON.parse(postCalls[0].opts.body)).toEqual({ hinterWall: false });
+    });
   });
 });

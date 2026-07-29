@@ -78,6 +78,13 @@ export const CREDENTIAL_CATALOG = {
   // Ablaufzeitpunkt (expires_at) lebt NICHT hier, sondern im meta-Block (siehe
   // ANTHROPIC_OAUTH_EXPIRES_AT_META_KEY unten, Resolution R2).
   'anthropic-oauth': ['access_token', 'refresh_token'],
+  // S-407 (red-team-scan-access-token AC1): Cloudflare-Access-Service-Token für den
+  // Red-Team-Scan hinter der Access-Wall (Ausbaustufe 2 von red-team-scan-per-container).
+  // Global (nicht pro App — s. Spec "Detail-Ablage-Schema"), verschlüsselt/write-only.
+  // Konsument: vpsContainerScanRouter.js (liest client_id/client_secret nur intern über
+  // getPlaintext(), reicht sie NIE über HTTP/Log/Audit weiter — nur als ausgehender
+  // CF-Access-Client-Id/-Secret Request-Header, s. HeadlessRedTeamRunner.js).
+  'cloudflare-access-service-token': ['client_id', 'client_secret'],
 };
 
 /** Maximale Länge eines Credential-Werts (Bytes). */

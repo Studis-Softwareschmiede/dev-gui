@@ -37,6 +37,13 @@ export const KNOWN_FIELDS = {
     { name: 'access_token', label: 'Access-Token' },
     { name: 'refresh_token', label: 'Refresh-Token' },
   ],
+  // red-team-scan-access-token AC1 (S-407): Cloudflare-Access-Service-Token für den
+  // Red-Team-Scan hinter der Access-Wall (Ausbaustufe 2) — write-only, gleiches
+  // CredentialField-Muster.
+  'cloudflare-access-service-token': [
+    { name: 'client_id', label: 'CF-Access-Client-Id' },
+    { name: 'client_secret', label: 'CF-Access-Client-Secret' },
+  ],
 };
 
 /**

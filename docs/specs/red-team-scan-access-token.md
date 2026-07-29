@@ -45,6 +45,13 @@ Cloudflare-Access-Service-Token darf der KI-Red-Team-Agent die Access-Wall **leg
 - **AC1 — Token-Ablage.** Ein Cloudflare-Access-Service-Token (`CF-Access-Client-Id` /
   `CF-Access-Client-Secret`) kann pro App (bzw. global) über den verschlüsselten `CredentialStore`
   hinterlegt/rotiert werden (ADR-007-Linie); **nie** im Klartext persistiert/geloggt.
+  **Präzisierung (S-407 — Ablage-Schema entschieden: global).** Ein einziges, **global**
+  hinterlegtes Token (neue `CredentialStore`-Katalog-Integration
+  `cloudflare-access-service-token`, Felder `client_id`/`client_secret`) — keine Zuordnung pro
+  einzelner App/Container. Das Verhalten der Spec (EIN Ein-/Aus-Schalter „hinter der Wall
+  testen" je Scan, AC2/AC4) ist damit vollständig erfüllt, ohne eine zusätzliche
+  Per-App-Zuordnungs-UI/-Schema einzuführen (Simplicity-Leiter, `coder/R09`); eine spätere
+  Story kann bei Bedarf auf pro-App-Token erweitern. Detail: `docs/architecture.md` ADR-024.
 - **AC2 — Scan hinter der Wall.** Ist ein Token hinterlegt, prüft der öffentliche Testort die App
   **hinter** Access: der Runner reicht die beiden Header an den KI-Red-Team-Auftrag durch (server-seitig,
   argv/Env-diszipliniert), sodass Cloudflare Access den Scan **legitim** passieren lässt.
