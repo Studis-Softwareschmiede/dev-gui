@@ -3,7 +3,7 @@ parent: F-094
 title: 'Ausbaustufe 2: Scan hinter der Access-Wall via Cloudflare-Access-Service-Token
   (CredentialStore-Ablage, Header-Durchreichung, Confinement bleibt, graceful ohne
   Token, ADR-Anteil)'
-status: Blocked
+status: To Do
 priority: P3
 spec: docs/specs/red-team-scan-access-token.md
 implements:
@@ -29,15 +29,9 @@ confidence: low
 tok_est: '2591205'
 branch: feat/S-407-red-team-access-token
 pr: null
-blocked_reason: 'Cross-Repo-Lücke: AC2 (Header-Durchreichung) landet dev-gui-seitig
-  korrekt bis zum HeadlessRedTeamRunner, aber agent-flow/skills/red-team/SKILL.md
-  + agents/red-team.md kennen das neue CF-Access-Header-Protokoll (argv-Marker + CF_ACCESS_CLIENT_ID/SECRET)
-  nicht — der Scan bleibt real vor der Access-Wall stecken. Fix braucht entweder eine
-  begleitende agent-flow-Änderung (anderes Repo, eigener Board-Prozess) oder eine
-  Owner-Entscheidung, AC2 auf ''dev-gui bereitet vor, Konsum folgt in Folge-Story''
-  zu reduzieren. Reviewer-Detail: siehe Review-Handoff S-407 Iteration 1.'
+blocked_reason: null
 created_at: '2026-07-21T19:54:58Z'
-updated_at: '2026-07-29T05:57:10Z'
+updated_at: '2026-08-04T06:54:14Z'
 done_at: null
 claimed_by: MacBook-Pro-von-Alexander.local-96162-1785304221-9001
 claimed_at: '2026-07-29T05:50:41Z'
