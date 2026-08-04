@@ -4,9 +4,13 @@
  * GET /api/drain-reports[?project=<slug>]
  *   → 200 { reports: [ { reportId, project, trigger, startedAt, finishedAt,
  *          reason, flowRuns, completed:[{id,title}], blocked:[{id,title}],
- *          budgetPauses:[{from,to,reason}] } ] }
+ *          budgetPauses:[{from,to,reason}], firstAt, lastAt, count } ] }
  *   `budgetPauses` additiv seit docs/specs/night-budget-guard.md AC12 — fehlt
  *   das Feld bei Alt-Berichten, liefert der Store `[]` (rückwärtskompatibel).
+ *   `firstAt`/`lastAt`/`count` additiv seit v2 (drain-completion-report AC8-
+ *   AC10) — bei einer verschmolzenen Leerlauf-Serie die Serien-Grenzen +
+ *   Anzahl, sonst `count:1`/`firstAt=startedAt`/`lastAt=finishedAt`;
+ *   abwärtskompatibel (der Router serialisiert nur, ohne Feld-Filterung).
  *   absteigend nach `finishedAt` (jüngster zuerst); optional per `?project=<slug>`
  *   gefiltert. Read-only, hinter dem globalen AccessGuard auf `/api/*` (server.js).
  *

@@ -24,6 +24,21 @@
  *          Ein Eintrag mit ungültigem `reason` wird verworfen (Security-/
  *          Daten-Hygiene, kein Durchreichen beliebiger Felder).
  *
+ * Covers (drain-completion-report, v2):
+ *   AC8 — `record()` eines Leerlauf-Berichts (`flowRuns:0`,
+ *          `reason:'no-drain-target'`) verschmilzt mit dem unmittelbar
+ *          vorhergehenden Bericht DESSELBEN Projekts, sofern dieser ebenfalls
+ *          ein Leerlauf-Bericht ist (`lastAt` aktualisiert, `count` erhöht,
+ *          `firstAt` unverändert, `reportId` bleibt); ein nicht-leerer
+ *          Vorgänger (oder keiner) → neuer Eintrag mit `count:1`. Ein
+ *          nicht-leerer Bericht beendet die Serie — der nächste Leerlauf-
+ *          Bericht startet eine neue Serie. Der 30er-Rückschnitt (AC3) greift
+ *          nach dem Merge (eine Serie belegt nur einen Slot).
+ *   AC9 — beim Laden werden bestehende zusammenhängende Leerlauf-Serien je
+ *          Projekt einmalig zu je einem Eintrag verschmolzen (`firstAt`/
+ *          `lastAt`/`count:N`); idempotent (zweiter Lauf ändert nichts);
+ *          nicht-leere Berichte bleiben unangetastet, kein Datenverlust.
+ *
  * Strategy: echtes fs gegen ein frisches tmp-CRED_STORE_DIR je Test; je Test
  * eine frische DrainReportStore-Instanz (der In-Memory-Cache ist instanz-lokal,
  * ein Neustart wird durch eine zweite Instanz simuliert).
@@ -307,5 +322,261 @@ describe('DrainReportStore — budgetPauses (night-budget-guard AC12)', () => {
       completed: [{ id: 'S-1', title: 'Eins' }],
       blocked: [],
     });
+  });
+});
+
+function idle(overrides = {}) {
+  return base({
+    trigger: 'night',
+    reason: 'no-drain-target',
+    flowRuns: 0,
+    completed: [],
+    blocked: [],
+    ...overrides,
+  });
+}
+
+function nonEmpty(overrides = {}) {
+  return base({
+    trigger: 'night',
+    reason: 'converged',
+    flowRuns: 1,
+    completed: [{ id: 'S-1', title: 'Eins' }],
+    blocked: [],
+    ...overrides,
+  });
+}
+
+describe('DrainReportStore — Leerlauf-Merge beim Schreiben (v2, AC8)', () => {
+  it('zwei aufeinanderfolgende Leerlauf-Berichte desselben Projekts verschmelzen zu einem Eintrag', async () => {
+    const store = new DrainReportStore();
+    const first = await store.record(
+      idle({ startedAt: '2026-07-12T22:00:00.000Z', finishedAt: '2026-07-12T22:01:00.000Z' }),
+    );
+    const second = await store.record(
+      idle({ startedAt: '2026-07-13T22:00:00.000Z', finishedAt: '2026-07-13T22:01:00.000Z' }),
+    );
+
+    expect(second.reportId).toBe(first.reportId);
+    expect(second.count).toBe(2);
+    expect(second.firstAt).toBe('2026-07-12T22:00:00.000Z');
+    expect(second.lastAt).toBe('2026-07-13T22:01:00.000Z');
+
+    const reports = await store.list({ project: 'proj-a' });
+    expect(reports).toHaveLength(1);
+    expect(reports[0].count).toBe(2);
+  });
+
+  it('drei aufeinanderfolgende Leerlauf-Berichte → count wächst schrittweise auf 3, firstAt bleibt fix', async () => {
+    const store = new DrainReportStore();
+    await store.record(idle({ startedAt: '2026-07-01T22:00:00.000Z', finishedAt: '2026-07-01T22:01:00.000Z' }));
+    await store.record(idle({ finishedAt: '2026-07-02T22:01:00.000Z' }));
+    const third = await store.record(idle({ finishedAt: '2026-07-03T22:01:00.000Z' }));
+
+    expect(third.count).toBe(3);
+    expect(third.firstAt).toBe('2026-07-01T22:00:00.000Z');
+    expect(third.lastAt).toBe('2026-07-03T22:01:00.000Z');
+    expect(await store.list({ project: 'proj-a' })).toHaveLength(1);
+  });
+
+  it('kein leerer Vorgänger → neuer Eintrag mit count:1, firstAt=startedAt, lastAt=finishedAt', async () => {
+    const store = new DrainReportStore();
+    const written = await store.record(
+      idle({ startedAt: '2026-07-12T22:00:00.000Z', finishedAt: '2026-07-12T22:01:00.000Z' }),
+    );
+    expect(written.count).toBe(1);
+    expect(written.firstAt).toBe('2026-07-12T22:00:00.000Z');
+    expect(written.lastAt).toBe('2026-07-12T22:01:00.000Z');
+  });
+
+  it('ein nicht-leerer Bericht zwischen zwei Leerläufen beendet die Serie — neue Serie startet danach', async () => {
+    const store = new DrainReportStore();
+    await store.record(idle({ finishedAt: '2026-07-12T22:01:00.000Z' }));
+    await store.record(idle({ finishedAt: '2026-07-13T22:01:00.000Z' })); // count 2
+    await store.record(nonEmpty({ finishedAt: '2026-07-14T22:01:00.000Z' })); // beendet Serie
+    const third = await store.record(idle({ finishedAt: '2026-07-15T22:01:00.000Z' })); // neue Serie
+
+    expect(third.count).toBe(1);
+    expect(third.firstAt).toBe(third.startedAt);
+
+    const reports = await store.list({ project: 'proj-a' });
+    // 3 Einträge: die verschmolzene erste Serie (count:2), der nicht-leere
+    // Bericht, und die neue Serie (count:1).
+    expect(reports).toHaveLength(3);
+    const counts = reports.map((r) => r.count).sort();
+    expect(counts).toEqual([1, 1, 2]);
+  });
+
+  it('ein nicht-leerer Vorgänger (kein Leerlauf davor) → neuer Eintrag statt Merge', async () => {
+    const store = new DrainReportStore();
+    await store.record(nonEmpty());
+    const written = await store.record(idle({ finishedAt: '2026-07-13T22:01:00.000Z' }));
+
+    expect(written.count).toBe(1);
+    expect(await store.list({ project: 'proj-a' })).toHaveLength(2);
+  });
+
+  it('die Merge-Serie belegt nur EINEN Slot der 30er-Pro-Projekt-Grenze', async () => {
+    const store = new DrainReportStore();
+    for (let i = 0; i < MAX_REPORTS_PER_PROJECT + 5; i++) {
+      await store.record(idle({ finishedAt: `2026-07-${String(1 + (i % 28)).padStart(2, '0')}T22:0${i % 6}:00.000Z` }));
+    }
+    const reports = await store.list({ project: 'proj-a' });
+    expect(reports).toHaveLength(1);
+    expect(reports[0].count).toBe(MAX_REPORTS_PER_PROJECT + 5);
+  });
+
+  it('bestehende Felder (project, trigger, reason, flowRuns) bleiben bei Merge unverändert', async () => {
+    const store = new DrainReportStore();
+    await store.record(idle());
+    const merged = await store.record(idle());
+    expect(merged.project).toBe('proj-a');
+    expect(merged.trigger).toBe('night');
+    expect(merged.reason).toBe('no-drain-target');
+    expect(merged.flowRuns).toBe(0);
+  });
+
+  it('die Merge-Serie ist PRO Projekt — ein Leerlauf-Bericht eines anderen Projekts merged nicht mit', async () => {
+    const store = new DrainReportStore();
+    await store.record(idle({ project: 'proj-a' }));
+    await store.record(idle({ project: 'proj-b' }));
+
+    expect(await store.list({ project: 'proj-a' })).toHaveLength(1);
+    expect(await store.list({ project: 'proj-b' })).toHaveLength(1);
+  });
+});
+
+describe('DrainReportStore — einmalige Kompaktion beim Laden (v2, AC9)', () => {
+  async function writeRawFile(reports) {
+    const filePath = resolveReportFilePath();
+    await writeFile(filePath, JSON.stringify({ reports }), 'utf8');
+  }
+
+  function rawIdle(overrides = {}) {
+    return {
+      reportId: 'legacy-' + Math.random().toString(36).slice(2),
+      project: 'proj-a',
+      trigger: 'night',
+      startedAt: '2026-07-01T22:00:00.000Z',
+      finishedAt: '2026-07-01T22:01:00.000Z',
+      reason: 'no-drain-target',
+      flowRuns: 0,
+      completed: [],
+      blocked: [],
+      ...overrides,
+    };
+  }
+
+  it('N zusammenhängende Alt-Leerlauf-Berichte → 1 Eintrag mit firstAt/lastAt/count:N', async () => {
+    const raw = [];
+    for (let i = 0; i < 30; i++) {
+      raw.push(
+        rawIdle({
+          reportId: `legacy-${i}`,
+          startedAt: `2026-07-${String(1 + i).padStart(2, '0')}T22:00:00.000Z`,
+          finishedAt: `2026-07-${String(1 + i).padStart(2, '0')}T22:01:00.000Z`,
+        }),
+      );
+    }
+    await writeRawFile(raw);
+
+    const store = new DrainReportStore();
+    const reports = await store.list({ project: 'proj-a' });
+    expect(reports).toHaveLength(1);
+    expect(reports[0].count).toBe(30);
+    expect(reports[0].firstAt).toBe('2026-07-01T22:00:00.000Z');
+    expect(reports[0].lastAt).toBe('2026-07-30T22:01:00.000Z');
+  });
+
+  it('nicht-leere Berichte bleiben unangetastet (kein Datenverlust)', async () => {
+    const raw = [
+      { ...rawIdle({ reportId: 'legacy-1', finishedAt: '2026-07-01T22:01:00.000Z' }) },
+      {
+        reportId: 'legacy-nonempty',
+        project: 'proj-a',
+        trigger: 'night',
+        startedAt: '2026-07-02T22:00:00.000Z',
+        finishedAt: '2026-07-02T22:05:00.000Z',
+        reason: 'converged',
+        flowRuns: 3,
+        completed: [{ id: 'S-1', title: 'Eins' }],
+        blocked: [{ id: 'S-2', title: 'Zwei' }],
+      },
+    ];
+    await writeRawFile(raw);
+
+    const store = new DrainReportStore();
+    const reports = await store.list({ project: 'proj-a' });
+    expect(reports).toHaveLength(2);
+    const nonEmptyReport = reports.find((r) => r.reportId === 'legacy-nonempty');
+    expect(nonEmptyReport).toMatchObject({
+      reason: 'converged',
+      flowRuns: 3,
+      completed: [{ id: 'S-1', title: 'Eins' }],
+      blocked: [{ id: 'S-2', title: 'Zwei' }],
+    });
+  });
+
+  it('zwei getrennte Leerlauf-Serien (unterbrochen von einem nicht-leeren Bericht) bleiben getrennt', async () => {
+    const raw = [
+      rawIdle({ reportId: 'a1', finishedAt: '2026-07-01T22:01:00.000Z' }),
+      rawIdle({ reportId: 'a2', finishedAt: '2026-07-02T22:01:00.000Z' }),
+      {
+        reportId: 'mid',
+        project: 'proj-a',
+        trigger: 'night',
+        startedAt: '2026-07-03T22:00:00.000Z',
+        finishedAt: '2026-07-03T22:05:00.000Z',
+        reason: 'converged',
+        flowRuns: 1,
+        completed: [],
+        blocked: [],
+      },
+      rawIdle({ reportId: 'b1', finishedAt: '2026-07-04T22:01:00.000Z' }),
+      rawIdle({ reportId: 'b2', finishedAt: '2026-07-05T22:01:00.000Z' }),
+    ];
+    await writeRawFile(raw);
+
+    const store = new DrainReportStore();
+    const reports = await store.list({ project: 'proj-a' });
+    expect(reports).toHaveLength(3); // Serie A (count:2), mid, Serie B (count:2)
+    const counts = reports.map((r) => r.count).sort();
+    expect(counts).toEqual([1, 2, 2]);
+  });
+
+  it('idempotent: ein zweiter Ladevorgang (neue Instanz) ändert nichts weiter', async () => {
+    const raw = [];
+    for (let i = 0; i < 5; i++) {
+      raw.push(rawIdle({ reportId: `legacy-${i}`, finishedAt: `2026-07-0${1 + i}T22:01:00.000Z` }));
+    }
+    await writeRawFile(raw);
+
+    const store1 = new DrainReportStore();
+    const first = await store1.list({ project: 'proj-a' });
+    expect(first).toHaveLength(1);
+    expect(first[0].count).toBe(5);
+
+    // Zweite, frische Instanz liest dieselbe (noch nicht neu geschriebene)
+    // Rohdatei erneut — die Kompaktion beim Laden ist idempotent.
+    const store2 = new DrainReportStore();
+    const second = await store2.list({ project: 'proj-a' });
+    expect(second).toHaveLength(1);
+    expect(second[0].count).toBe(5);
+  });
+
+  it('ein weiterer Leerlauf-Bericht nach der Kompaktion merged in die geladene Serie', async () => {
+    const raw = [];
+    for (let i = 0; i < 3; i++) {
+      raw.push(rawIdle({ reportId: `legacy-${i}`, finishedAt: `2026-07-0${1 + i}T22:01:00.000Z` }));
+    }
+    await writeRawFile(raw);
+
+    const store = new DrainReportStore();
+    await store.record(idle({ finishedAt: '2026-07-10T22:01:00.000Z' }));
+
+    const reports = await store.list({ project: 'proj-a' });
+    expect(reports).toHaveLength(1);
+    expect(reports[0].count).toBe(4);
+    expect(reports[0].lastAt).toBe('2026-07-10T22:01:00.000Z');
   });
 });

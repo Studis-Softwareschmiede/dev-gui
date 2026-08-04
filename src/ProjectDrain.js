@@ -18,7 +18,9 @@
  *       `staleInProgressHours` zurück (kein `updated_at`/unparsbar → defensiv
  *       NICHT als Ziel behandelt, AC3 "Nicht-Drain-Ziele ... nie als Ziel
  *       gewählt").
- *   `Done`, `Blocked`, `Idee` und nicht-ready `To Do` sind NIE Drain-Ziele
+ *   `Done`, `Blocked`, `Idee`, `Waiting` (docs/specs/waiting-status-devgui.md
+ *   AC1 — extern gewartete Storys, rein additiv/tolerant falls der Status
+ *   noch nirgends vorkommt) und nicht-ready `To Do` sind NIE Drain-Ziele
  *   (AC3) und werden außer durch die Eskalation (AC4) nie verändert.
  *
  * Abbruch-/Konvergenz-Regel (AC2, zustandsbasiert):
@@ -47,7 +49,8 @@
  *   `Done` ist oder keine unerfüllten `depends` hat; ein `To Do`/
  *   `In Progress`-Knoten wird lebendig, sobald ALLE seine unerfüllten
  *   `depends` selbst (bereits bewiesen) lebendig sind. `Blocked`/`Idee`/
- *   fehlende Knoten werden NIE lebendig. Die Iteration fügt nur hinzu, was
+ *   `Waiting` (waiting-status-devgui AC2)/fehlende Knoten werden NIE lebendig.
+ *   Die Iteration fügt nur hinzu, was
  *   beweisbar ist — Knoten, die nur in einem Zyklus aufeinander verweisen
  *   (A↔B), werden NIE lebendig (keiner kann je beweisbar werden, ohne dass
  *   der jeweils andere es zuerst ist) — Zyklen werden so korrekt als
@@ -478,7 +481,9 @@ export function isStaleInProgress(story, nowMs, staleInProgressHours) {
  *
  * Regeln:
  *   - `Done` → sofort lebendig (Basisfall).
- *   - `Blocked`/`Idee`/sonstiger Status → NIE lebendig (dauerhafte Sackgasse).
+ *   - `Blocked`/`Idee`/`Waiting`/sonstiger Status → NIE lebendig (dauerhafte
+ *     Sackgasse; `Waiting` — waiting-status-devgui AC2 — extern gewartete
+ *     Storys sind nie „lebendig", genau wie Blocked/Idee).
  *   - `To Do`/`In Progress` ohne unerfüllte `depends` (alle Done oder leer)
  *     → sofort lebendig.
  *   - `To Do`/`In Progress` MIT unerfüllten `depends` → lebendig, sobald
@@ -510,7 +515,7 @@ export function computeAliveStoryIds(stories, storiesById) {
         changed = true;
         continue;
       }
-      if (story.status !== 'To Do' && story.status !== 'In Progress') continue; // Blocked/Idee/sonstiges: nie lebendig
+      if (story.status !== 'To Do' && story.status !== 'In Progress') continue; // Blocked/Idee/Waiting/sonstiges: nie lebendig
       const depends = Array.isArray(story.depends) ? story.depends.filter(Boolean) : [];
       const unmet = depends.filter((depId) => {
         const dep = storiesById.get(String(depId));

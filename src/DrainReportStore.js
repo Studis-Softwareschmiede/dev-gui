@@ -14,10 +14,11 @@
  * Schreiben: atomar (tmp + rename)
  *
  * Bericht-Schema (AC3/AC4, verbindlich; `budgetPauses` additiv seit
- * docs/specs/night-budget-guard.md AC12):
+ * docs/specs/night-budget-guard.md AC12; `firstAt`/`lastAt`/`count` additiv
+ * seit v2, AC8-AC10):
  *   { reportId, project, trigger, startedAt, finishedAt, reason, flowRuns,
  *     completed:[{id,title}], blocked:[{id,title}],
- *     budgetPauses:[{from,to,reason}] }
+ *     budgetPauses:[{from,to,reason}], firstAt, lastAt, count }
  *   - trigger ∈ { 'night', 'manual' }
  *   - project = Projekt-Slug (KEIN absoluter Pfad)
  *   - completed/blocked = { id, title } je Story (kein Pfad/Secret)
@@ -25,6 +26,20 @@
  *     (night-budget-guard AC12); `reason` ∈ 'reactive-limit'|'proactive-threshold';
  *     `to = null` bei sanftem Drain-Ende. Fehlt das Feld (Alt-Berichte vor
  *     S-275) → `[]` (rückwärtskompatibel, kein Crash).
+ *   - firstAt/lastAt/count (v2, AC8-AC10): bei einer verschmolzenen
+ *     Leerlauf-Serie die Serien-Grenzen (`firstAt`=`startedAt` des ersten
+ *     Laufs, `lastAt`=`finishedAt` des jüngsten Laufs) + Anzahl; bei
+ *     nicht-aggregierten Berichten `count:1`, `firstAt=startedAt`,
+ *     `lastAt=finishedAt`.
+ *
+ * Leerlauf-Bericht-Aggregation (v2, AC8-AC10, docs/specs/drain-completion-report.md):
+ *   Ein Leerlauf-Bericht (`flowRuns===0 && reason==='no-drain-target'`) wird
+ *   beim `record()` mit dem unmittelbar vorhergehenden Bericht DESSELBEN
+ *   Projekts verschmolzen, sofern dieser ebenfalls ein Leerlauf-Bericht ist
+ *   (AC8, Merge-on-persist) — statt N Einzeleinträgen entsteht EIN Eintrag mit
+ *   `count`. Beim Laden bestehender Alt-Daten werden zusammenhängende
+ *   Leerlauf-Serien je Projekt einmalig kompaktiert (AC9, idempotent). Ein
+ *   nicht-leerer Bericht beendet eine Serie.
  *
  * Pro-Projekt-Grenze: je Projekt-Slug werden höchstens
  * `MAX_REPORTS_PER_PROJECT` (30) Berichte gehalten — beim `record()` fallen die
@@ -88,7 +103,110 @@ export const PROJECT_SLUG_RE = /^[A-Za-z0-9_-]+$/;
  * @property {DrainStory[]} blocked
  * @property {BudgetPause[]} budgetPauses  night-budget-guard AC12; `[]` bei
  *   Alt-Berichten ohne das Feld (rückwärtskompatibel).
+ * @property {string} firstAt   v2/AC8-AC10: Serien-Beginn (= startedAt bei
+ *   nicht-aggregierten Berichten).
+ * @property {string} lastAt    v2/AC8-AC10: Serien-Ende (= finishedAt bei
+ *   nicht-aggregierten Berichten).
+ * @property {number} count     v2/AC8-AC10: Anzahl verschmolzener Leerlauf-
+ *   Berichte in dieser Serie (1 bei nicht-aggregierten Berichten).
  */
+
+/**
+ * Prüft, ob ein Bericht ein „Leerlauf-Bericht" ist (AC8): kein Board-Scan-
+ * Ergebnis, `flowRuns===0` UND `reason==='no-drain-target'`. Nur diese Klasse
+ * wird aggregiert — jeder andere Bericht bleibt ein Einzeleintrag.
+ *
+ * @param {{flowRuns?: number, reason?: string}|null|undefined} report
+ * @returns {boolean}
+ */
+function _isIdleReport(report) {
+  return !!report && report.flowRuns === 0 && report.reason === 'no-drain-target';
+}
+
+/**
+ * Findet den Index des zeitlich jüngsten Berichts eines Projekts (nach
+ * `lastAt`/`finishedAt`) — der „unmittelbar vorhergehende Bericht" für den
+ * Merge-on-persist-Vergleich (AC8).
+ *
+ * @param {DrainReport[]} reports
+ * @param {string} project
+ * @returns {number} Index oder -1, wenn das Projekt noch keinen Bericht hat.
+ */
+function _findMostRecentIndexForProject(reports, project) {
+  let bestIdx = -1;
+  let bestTime = null;
+  for (let i = 0; i < reports.length; i++) {
+    const r = reports[i];
+    if (r.project !== project) continue;
+    const t = r.lastAt || r.finishedAt || '';
+    if (bestTime === null || t > bestTime) {
+      bestTime = t;
+      bestIdx = i;
+    }
+  }
+  return bestIdx;
+}
+
+/**
+ * Kompaktiert zusammenhängende Leerlauf-Serien je Projekt zu je einem
+ * Eintrag (AC9, einmalige Migration beim Laden). Idempotent: bereits
+ * kompaktierte Serien (1 Eintrag mit `count`) bleiben unverändert; nicht-
+ * leere Berichte werden nicht angefasst. Die Reihenfolge nach `finishedAt`
+ * bestimmt den Serien-Zusammenhang (je Projekt separat betrachtet).
+ *
+ * @param {DrainReport[]} reports
+ * @returns {DrainReport[]}
+ */
+function _compactIdleSeries(reports) {
+  const byProject = new Map();
+  for (const r of reports) {
+    if (!byProject.has(r.project)) byProject.set(r.project, []);
+    byProject.get(r.project).push(r);
+  }
+
+  const result = [];
+  for (const list of byProject.values()) {
+    const sorted = [...list].sort((a, b) =>
+      a.finishedAt < b.finishedAt ? -1 : a.finishedAt > b.finishedAt ? 1 : 0,
+    );
+
+    let run = [];
+    const flushRun = () => {
+      if (run.length === 0) return;
+      const first = run[0];
+      const last = run[run.length - 1];
+      const totalCount = run.reduce(
+        (sum, r) => sum + (typeof r.count === 'number' && r.count > 0 ? r.count : 1),
+        0,
+      );
+      result.push({
+        ...first,
+        firstAt: first.firstAt || first.startedAt || '',
+        lastAt: last.lastAt || last.finishedAt || '',
+        finishedAt: last.finishedAt || first.finishedAt,
+        count: totalCount,
+      });
+      run = [];
+    };
+
+    for (const r of sorted) {
+      if (_isIdleReport(r)) {
+        run.push(r);
+      } else {
+        flushRun();
+        result.push({
+          ...r,
+          firstAt: r.firstAt || r.startedAt || '',
+          lastAt: r.lastAt || r.finishedAt || '',
+          count: typeof r.count === 'number' && r.count > 0 ? r.count : 1,
+        });
+      }
+    }
+    flushRun();
+  }
+
+  return result;
+}
 
 /**
  * Liest den Pfad zur Bericht-Datei aus der Umgebung.
@@ -173,20 +291,30 @@ export class DrainReportStore {
       const raw = await readFile(filePath, 'utf8');
       const parsed = JSON.parse(raw);
       const list = Array.isArray(parsed?.reports) ? parsed.reports : [];
-      this.#reports = list
+      const normalized = list
         .filter((r) => r && typeof r === 'object' && typeof r.project === 'string')
-        .map((r) => ({
-          reportId: typeof r.reportId === 'string' ? r.reportId : randomUUID(),
-          project: r.project,
-          trigger: TRIGGERS.includes(r.trigger) ? r.trigger : 'manual',
-          startedAt: typeof r.startedAt === 'string' ? r.startedAt : '',
-          finishedAt: typeof r.finishedAt === 'string' ? r.finishedAt : '',
-          reason: typeof r.reason === 'string' ? r.reason : '',
-          flowRuns: Number.isFinite(r.flowRuns) ? r.flowRuns : 0,
-          completed: _normalizeStories(r.completed),
-          blocked: _normalizeStories(r.blocked),
-          budgetPauses: _normalizeBudgetPauses(r.budgetPauses),
-        }));
+        .map((r) => {
+          const startedAt = typeof r.startedAt === 'string' ? r.startedAt : '';
+          const finishedAt = typeof r.finishedAt === 'string' ? r.finishedAt : '';
+          return {
+            reportId: typeof r.reportId === 'string' ? r.reportId : randomUUID(),
+            project: r.project,
+            trigger: TRIGGERS.includes(r.trigger) ? r.trigger : 'manual',
+            startedAt,
+            finishedAt,
+            reason: typeof r.reason === 'string' ? r.reason : '',
+            flowRuns: Number.isFinite(r.flowRuns) ? r.flowRuns : 0,
+            completed: _normalizeStories(r.completed),
+            blocked: _normalizeStories(r.blocked),
+            budgetPauses: _normalizeBudgetPauses(r.budgetPauses),
+            firstAt: typeof r.firstAt === 'string' ? r.firstAt : startedAt,
+            lastAt: typeof r.lastAt === 'string' ? r.lastAt : finishedAt,
+            count: Number.isFinite(r.count) && r.count > 0 ? r.count : 1,
+          };
+        });
+      // AC9: einmalige Kompaktion zusammenhängender Leerlauf-Serien je Projekt
+      // beim Laden — idempotent, nicht-leere Berichte bleiben unangetastet.
+      this.#reports = _compactIdleSeries(normalized);
     } catch (err) {
       if (err.code !== 'ENOENT') {
         console.error('[DrainReportStore] Lesen fehlgeschlagen:', err.message);
@@ -199,6 +327,13 @@ export class DrainReportStore {
    * Legt einen Abschlussbericht an (AC3): generiert `reportId`, hängt ihn an,
    * schneidet je Projekt-Slug auf die letzten `MAX_REPORTS_PER_PROJECT` zurück
    * und schreibt die Datei atomar. Serialisiert über eine In-Process-Kette.
+   *
+   * AC8 (v2): ist der neue Bericht ein Leerlauf-Bericht (`flowRuns===0 &&
+   * reason==='no-drain-target'`) UND der unmittelbar vorhergehende Bericht
+   * desselben Projekts ebenfalls ein Leerlauf-Bericht → beide werden
+   * verschmolzen (statt eines neuen Eintrags), `count` erhöht sich, `firstAt`
+   * bleibt, `lastAt`/`finishedAt` folgen dem neuen Lauf. Der 30er-Rückschnitt
+   * greift danach unverändert.
    *
    * @param {object} input
    * @param {string} input.project    Projekt-Slug (kein Pfad) — Pflicht.
@@ -237,18 +372,48 @@ export class DrainReportStore {
 
     await this.#ensureLoaded();
 
+    const startedAt = typeof input.startedAt === 'string' ? input.startedAt : '';
+    const finishedAt = typeof input.finishedAt === 'string' ? input.finishedAt : '';
+    const reason = typeof input.reason === 'string' ? input.reason : '';
+    const flowRuns = Number.isFinite(input.flowRuns) ? input.flowRuns : 0;
+    const isIdle = flowRuns === 0 && reason === 'no-drain-target';
+
+    // AC8: Merge-on-persist — ein Leerlauf-Bericht verschmilzt mit dem
+    // unmittelbar vorhergehenden Bericht DESSELBEN Projekts, sofern dieser
+    // ebenfalls ein Leerlauf-Bericht ist, statt einen neuen Eintrag anzulegen.
+    if (isIdle) {
+      const prevIdx = _findMostRecentIndexForProject(this.#reports, project);
+      const prev = prevIdx !== -1 ? this.#reports[prevIdx] : null;
+      if (_isIdleReport(prev)) {
+        /** @type {DrainReport} */
+        const merged = {
+          ...prev,
+          finishedAt,
+          lastAt: finishedAt,
+          firstAt: prev.firstAt || prev.startedAt || startedAt,
+          count: (typeof prev.count === 'number' && prev.count > 0 ? prev.count : 1) + 1,
+        };
+        this.#reports[prevIdx] = merged;
+        await this.#persist();
+        return merged;
+      }
+    }
+
     /** @type {DrainReport} */
     const report = {
       reportId: randomUUID(),
       project,
       trigger,
-      startedAt: typeof input.startedAt === 'string' ? input.startedAt : '',
-      finishedAt: typeof input.finishedAt === 'string' ? input.finishedAt : '',
-      reason: typeof input.reason === 'string' ? input.reason : '',
-      flowRuns: Number.isFinite(input.flowRuns) ? input.flowRuns : 0,
+      startedAt,
+      finishedAt,
+      reason,
+      flowRuns,
       completed: _normalizeStories(input.completed),
       blocked: _normalizeStories(input.blocked),
       budgetPauses: _normalizeBudgetPauses(input.budgetPauses),
+      firstAt: startedAt,
+      lastAt: finishedAt,
+      count: 1,
     };
 
     this.#reports.push(report);
