@@ -3,7 +3,7 @@ parent: F-094
 title: 'Ausbaustufe 2: Scan hinter der Access-Wall via Cloudflare-Access-Service-Token
   (CredentialStore-Ablage, Header-Durchreichung, Confinement bleibt, graceful ohne
   Token, ADR-Anteil)'
-status: To Do
+status: In Progress
 priority: P3
 spec: docs/specs/red-team-scan-access-token.md
 implements:
@@ -31,7 +31,7 @@ branch: feat/S-407-red-team-access-token
 pr: null
 blocked_reason: null
 created_at: '2026-07-21T19:54:58Z'
-updated_at: '2026-08-04T07:38:01Z'
+updated_at: '2026-08-04T07:51:03Z'
 done_at: null
-claimed_by: MacBook-Pro-von-Alexander.local-88048-1785828275-11439
-claimed_at: '2026-08-04T07:24:50Z'
+claimed_by: MacBook-Pro-von-Alexander.local-30743-1785829832-6401
+claimed_at: '2026-08-04T07:50:48Z'
